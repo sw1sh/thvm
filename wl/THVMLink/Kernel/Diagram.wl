@@ -32,8 +32,7 @@
    non-dual port and arrows never flip.  ERA's single port is
    dynamic for the same reason. *)
 
-BeginPackage["THVMLink`Diagram`", {
-    "THVMLink`",
+BeginPackage["THVMLink`", {
     "Wolfram`DiagrammaticComputation`",
     "Wolfram`DiagrammaticComputation`Diagram`"
 }];
@@ -111,46 +110,11 @@ principalCellOf[agentBase_Integer, agentTag_Integer,
    that outgoing interaction).  All other slots are INPUTs (the
    agent reads/consumes the value stored there). *)
 
+(* IC arities only.  UOP arity, opcode names, output-shape inference,
+   bit decoding, and shape arithmetic come from sibling Uop.wl /
+   Shape.wl which share THVMLink`Private` -- no qualification needed. *)
 agentArity[$TagLAM] = 1; agentArity[$TagDUP] = 1;
 agentArity[$TagAPP] = 2; agentArity[$TagSUP] = 2;
-
-(* UOP compute arity by opcode -- only the *tensor* sources are
-   walked as ports.  NUM cells (axis indices, dtype tags, etc) sit
-   beyond compute arity and are surfaced via the label, not as
-   wires.  Mirror of uopComputeArity in Visualization.wl. *)
-uopArity[$UopMaterialize] = 1;
-uopArity[$UopKernel]      = 2;
-uopArity[$UopConst]       = 0;
-uopArity[$UopAdd]         = 2;
-uopArity[$UopMul]         = 2;
-uopArity[$UopCmplt]       = 2;
-uopArity[$UopNeg]         = 1;
-uopArity[$UopRecip]       = 1;
-uopArity[$UopExp2]        = 1;
-uopArity[$UopLog2]        = 1;
-uopArity[$UopSqrt]        = 1;
-uopArity[$UopReshape]     = 1;
-uopArity[$UopPermute]     = 1;
-uopArity[$UopExpand]      = 1;
-uopArity[$UopPad]         = 1;
-uopArity[$UopShrink]      = 1;
-uopArity[$UopFlip]        = 1;
-uopArity[$UopReduce]      = 1;
-uopArity[$UopGrad]        = 3;
-uopArity[_]               = 0;
-
-(* opcode name lookup -- mirror of $uopNames in THVMLink.wl. *)
-uopName[$UopMaterialize] = "MATERIALIZE"; uopName[$UopKernel] = "KERNEL";
-uopName[$UopConst]       = "CONST";       uopName[$UopReshape] = "RESHAPE";
-uopName[$UopPermute]     = "PERMUTE";     uopName[$UopExpand]  = "EXPAND";
-uopName[$UopPad]         = "PAD";         uopName[$UopShrink]  = "SHRINK";
-uopName[$UopFlip]        = "FLIP";        uopName[$UopAdd]     = "ADD";
-uopName[$UopMul]         = "MUL";         uopName[$UopNeg]     = "NEG";
-uopName[$UopRecip]       = "RECIP";       uopName[$UopExp2]    = "EXP2";
-uopName[$UopLog2]        = "LOG2";        uopName[$UopSqrt]    = "SQRT";
-uopName[$UopCmplt]       = "CMPLT";       uopName[$UopReduce]  = "REDUCE";
-uopName[$UopGrad]        = "GRAD";
-uopName[op_]             := "UOP?" <> ToString[op];
 
 (* slotSide: which DC list the agent's slot lives in (top = inputs,
    bottom = outputs).  slotIsDualed: whether that slot's port is
@@ -238,21 +202,22 @@ agentLabelText[base_Integer, tag_Integer] := With[{arity = agentArity[tag]},
     ]
 ]
 
-(* UOP label: opcode name + base loc. *)
-uopLabelText[base_Integer, opcode_Integer] := Column[
-    {uopName[opcode], "@" <> ToString[base]}, Center, Spacings -> 0
+(* UOP label: opcode name + base loc + inferred output shape.
+   Shape inference (uopShapeOf) is shared with Visualization.wl;
+   it comes from Uop.wl. *)
+uopLabelText[base_Integer, opcode_Integer] := With[{shape = uopShapeOf[base]},
+    Column[
+        Join[
+            {uopName[opcode], "@" <> ToString[base]},
+            If[ListQ[shape], {shapeText[shape]}, {}]
+        ],
+        Center, Spacings -> 0
+    ]
 ]
 
 (* TEN leaf label: handle id + shape from the descriptor table.
    Falls back to "TEN\n#<id>" if shape lookup fails (e.g. id out of
-   range after a TFree). *)
-tenShapeOf[id_Integer] := Quiet @ Check[
-    THVMLink`Private`$tensorShapeFn[id], Missing[]]
-
-shapeText[shape_List] :=
-    "{" <> StringRiffle[ToString /@ shape, ","] <> "}"
-shapeText[_]          := ""
-
+   range after a TFree).  tenShapeOf / shapeText come from Shape.wl. *)
 tenLabelText[id_Integer] := With[{shape = tenShapeOf[id]},
     Column[
         Join[
@@ -482,46 +447,17 @@ tenLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
 
 (* CONST leaf: a TAG_UOP cell at `loc` whose opcode is CONST.  Each
    reference renders its own triangle (no shared CONST agent), so
-   multi-referenced constants don't need a DUP to fan out.  The
-   underlying CONST@base is still a real heap UOP (with a NUM payload
-   at base+0); the leaf's label decodes that NUM bit-pattern back to
-   the scalar value when the dtype is recognised. *)
-(* Manual IEEE 754 single-precision decode -- WL's BinaryReadList
-   wants a Stream (not a ByteArray) and writing through a temp file
-   inside a render path is far too heavy. *)
-bitsToReal32[bits_Integer] := Block[{sign, exp, mant},
-    sign = If[BitAnd[BitShiftRight[bits, 31], 1] === 1, -1, 1];
-    exp  = BitAnd[BitShiftRight[bits, 23], 16^^FF];
-    mant = BitAnd[bits, 16^^7FFFFF];
-    Which[
-        exp === 16^^FF && mant === 0,    sign * Infinity,
-        exp === 16^^FF,                  Indeterminate,
-        exp === 0 && mant === 0,         0.0 * sign,
-        exp === 0,                       sign * (mant / 2.^23) * 2.^-126,
-        True,                            sign * (1 + mant / 2.^23) * 2.^(exp - 127)
-    ]
-]
-
-bitsToInt32[bits_Integer] := If[bits >= 2^31, bits - 2^32, bits]
-
-scalarTextFromCell[cellTerm_] := With[{
-    tag = TTermTag[cellTerm], ext = TTermExt[cellTerm], val = TTermVal[cellTerm]
-},
-    If[ tag === $TagNUM,
-        Switch[ext,
-            $DTF32, ToString[bitsToReal32[val]],
-            $DTI32, ToString[bitsToInt32[val]],
-            _,      ""
-        ],
-        ""
-    ]
-]
-
+   multi-referenced constants don't need a DUP to fan out.  Label
+   surfaces the heap base + decoded scalar value (via Shape.wl's
+   scalarTextFromCell). *)
 constLabelText[base_Integer] := With[{
     text = scalarTextFromCell[THeapRead[base]]
 },
     Column[
-        Join[{"CONST"}, If[text =!= "", {text}, {"@" <> ToString[base]}]],
+        Join[
+            {"CONST", "@" <> ToString[base]},
+            If[text =!= "", {text}, {}]
+        ],
         Center, Spacings -> 0
     ]
 ]
@@ -641,10 +577,16 @@ reachableConstCells[reachOps_Association] := reachableSlotCells[reachOps,
     TTermTag[#] === $TagUOP && TTermExt[#] === $UopConst &]
 
 THeapDiagram[t_] := Block[{
-    fullAgents, reachOps, agents, opcodes, eras, tens, consts, ds
+    fullAgents, reachOps, agents, opcodes, eras, tens, consts, ds,
+    $uopOpcodeContext
 },
     fullAgents = discoverAgentsHere[{t}];
     reachOps   = reachableUopsHere[{t}];
+    (* Stash full UOP opcode table (CONSTs included even though they
+       aren't in reachOps) so uopShapeOf in Uop.wl can resolve every
+       base without re-scanning the heap.  Block above scopes the
+       rebind to this render. *)
+    $uopOpcodeContext = discoverUopOpcodesHere[{t}];
     (* Keep IC agents from full discovery; replace UOP entries with
        only the reachable ones so old pre-rewrite UOPs (plus their
        transitively-reached TENs) drop out of the diagram. *)

@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Changed: WL kernel split into per-concern files; shape inference centralised
+
+`wl/THVMLink/Kernel/` now uses one BeginPackage["THVMLink`"] +
+Begin["`Private`"] block per file, all sharing the same private
+context.  Cross-file references resolve directly without
+THVMLink`Private`-qualified calls.
+
+Two new files separate concerns that used to be inlined in the
+renderers:
+- `Shape.wl` -- shape arithmetic (`broadcastShape`, `dropAxis`,
+  `shapeText`), tensor-id shape lookup (`tenShapeOf`), and the
+  manual IEEE 754 single-precision decoder (`bitsToReal32`,
+  `bitsToInt32`, `scalarTextFromCell`).
+- `Uop.wl` -- per-opcode metadata in one place: `uopArity`,
+  `uopName`, plus an inferred-output-shape walker (`uopShapeOf`,
+  `cellShape`, `uopSrcShape`) that mirrors the rules in
+  `src/schedule/materialize.c`.
+
+`Visualization.wl` and `Diagram.wl` now read these helpers
+directly, dropping their duplicated tables.  UOP labels gained the
+inferred output shape (e.g. "MUL\n@8\n{3}") and CONST keeps both
+its heap base and its scalar value.
+
+`THVMLink.wl` no longer hard-codes the load order -- after its
+own EndPackage it Get's every other `*.wl` in the Kernel directory
+in alphabetical order.  Adding a new sibling file means dropping
+it in; no edits to the loader.
+
 ### Changed: shape-aware grad_rec drops the MUL(target, CONST(0)) wrapper
 
 `interact_grad` no longer post-wraps the chain-rule output in

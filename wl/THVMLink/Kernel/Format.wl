@@ -12,6 +12,10 @@
    then add a MakeBoxes UpValue here.
 *)
 
+BeginPackage["THVMLink`"];
+
+Begin["`Private`"];
+
 (* === structural validity tests === *)
 
 tHeapPayloadQ[a_Association] :=
@@ -200,3 +204,7 @@ TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] := With[{
         "Interpretable" -> Automatic
     ]
 ]
+
+End[];
+
+EndPackage[];

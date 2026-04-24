@@ -17,6 +17,10 @@
         tensor terms build UOp graphs automatically.
 *)
 
+BeginPackage["THVMLink`"];
+
+Begin["`Private`"];
+
 (* === predicates ===
    tensorTermQ[t]: true iff t is a TTerm whose tag makes it a
    tensor-shaped value (TAG_TEN or TAG_UOP).  Used to guard the
@@ -278,3 +282,7 @@ TTerm /: Power[t_TTerm ? tensorTermQ, -1]             := TUOpRecip[t]
 
 TTerm /: Less[a_TTerm ? tensorTermQ, b_] := TUOpCmplt[a, liftNumeric[b, inheritDType[a]]]
 TTerm /: Less[a_, b_TTerm ? tensorTermQ] := TUOpCmplt[liftNumeric[a, inheritDType[b]], b]
+
+End[];
+
+EndPackage[];

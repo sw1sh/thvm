@@ -1,7 +1,7 @@
 (* ::Package:: *)
 (* Visualization.wl - heap-graph rendering for THVMLink.
 
-   Loaded from THVMLink.wl after the public symbols are declared.
+   Lives in THVMLink`Private` (BeginPackage["THVMLink`"] + Begin["`Private`"]).
    Defines THeapGraph (public) plus all the per-tag styling helpers
    used to turn the heap state into a Wolfram Graph.
 
@@ -21,6 +21,10 @@
    fields (opcode for TAG_UOP, base/loc for IC, etc).
 *)
 
+BeginPackage["THVMLink`"];
+
+Begin["`Private`"];
+
 (* === per-tag ports + identifiers === *)
 
 (* Vertex-id constructors -- each tag has its own prefix so vertices
@@ -36,28 +40,8 @@ icPorts[$TagAPP] := {{0, "f"}, {1, "x"}}
 icPorts[$TagSUP] := {{0, "L"}, {1, "R"}}
 icPorts[$TagDUP] := {{0, "body"}}
 
-(* UOP arity by opcode -- only the *compute* sources are walked as
-   edges; argument cells (NUMs after the sources) stay implicit. *)
-uopComputeArity[$UopMaterialize] = 1;
-uopComputeArity[$UopKernel]      = 2;   (* output_buf, NUM(kid) -- kid skipped *)
-uopComputeArity[$UopConst]       = 0;
-uopComputeArity[$UopAdd]         = 2;
-uopComputeArity[$UopMul]         = 2;
-uopComputeArity[$UopCmplt]       = 2;
-uopComputeArity[$UopNeg]         = 1;
-uopComputeArity[$UopRecip]       = 1;
-uopComputeArity[$UopExp2]        = 1;
-uopComputeArity[$UopLog2]        = 1;
-uopComputeArity[$UopSqrt]        = 1;
-uopComputeArity[$UopReshape]     = 1;
-uopComputeArity[$UopPermute]     = 1;
-uopComputeArity[$UopExpand]      = 1;
-uopComputeArity[$UopPad]         = 1;
-uopComputeArity[$UopShrink]      = 1;
-uopComputeArity[$UopFlip]        = 1;
-uopComputeArity[$UopReduce]      = 1;
-uopComputeArity[$UopGrad]        = 3;
-uopComputeArity[_]               = 0;
+(* UOP compute-input arity comes from Uop.wl's `uopArity[op]`. *)
+uopComputeArity[op_] := uopArity[op]
 
 (* === discovery ===
 
@@ -261,11 +245,8 @@ icLabel[base_Integer, tag_Integer] := With[{arity = Length[icPorts[tag]]},
 ]
 
 (* For UOP, label = opcode name + "@<loc>". *)
-uopLabel[loc_Integer, opcode_Integer] := With[{
-    name = Lookup[$uopNames, opcode, "UOP?" <> ToString[opcode]]
-},
-    Column[{name, "@" <> ToString[loc]}, Center, Spacings -> 0]
-]
+uopLabel[loc_Integer, opcode_Integer] :=
+    Column[{uopName[opcode], "@" <> ToString[loc]}, Center, Spacings -> 0]
 
 (* TEN label: dtype + tensor id. *)
 tenLabel[id_Integer, dtype_Integer] := Column[{
@@ -374,3 +355,7 @@ buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Blo
         ]
     ]
 ]
+
+End[];
+
+EndPackage[];

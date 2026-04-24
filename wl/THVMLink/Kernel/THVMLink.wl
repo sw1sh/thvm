@@ -392,17 +392,22 @@ THeap /: Keys[THeap[a_Association]]           := Keys[a]
 THeap /: Values[THeap[a_Association]]         := Values[a]
 THeap /: Normal[THeap[a_Association]]         := a
 
-(* === sibling files === *)
-With[{dir = DirectoryName[$InputFileName]},
-    Get[FileNameJoin[{dir, "Tensor.wl"}]];
-    Get[FileNameJoin[{dir, "Visualization.wl"}]];
-    Get[FileNameJoin[{dir, "Format.wl"}]]
-]
-
 End[];
 EndPackage[];
 
-(* Diagram.wl lives in its own subpackage (THVMLink`Diagram`) so it can
-   import Wolfram`DiagrammaticComputation` without context-shadowing
-   the rest of THVMLink`. *)
-Get[FileNameJoin[{DirectoryName[$InputFileName], "Diagram.wl"}]]
+(* === sibling files ===
+   Each sibling has its own BeginPackage["THVMLink`"] + Begin[`Private`]
+   block, so they all land in the shared THVMLink`Private` context and
+   can call each other's helpers without qualification.  Definition
+   order doesn't matter (every cross-file reference uses SetDelayed),
+   so we Get them in alphabetical order via FileNames -- adding a new
+   sibling means dropping it in this directory; no edits here. *)
+With[{here = $InputFileName},
+    Scan[
+        Get,
+        Sort @ Select[
+            FileNames["*.wl", DirectoryName[here]],
+            FileBaseName[#] =!= "THVMLink" &
+        ]
+    ]
+]
