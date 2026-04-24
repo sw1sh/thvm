@@ -6,6 +6,96 @@ dated section.
 
 ## Unreleased
 
+### Added: PLAN.md step 12 -- TTensor + TUOp + materialize + dispatch
+
+End-to-end tensor pipeline.  WL-built UOp graphs reduce naturally
+through schedule + kernelize + linearize + interpreter dispatch to
+concrete `TAG_TEN` results, all under one `TWnf` call.  See
+`docs/tensors.md` and `docs/glossary.md`.
+
+Six commits across the step:
+
+- **tensor foundation** (139af93)
+  - Three new term tags: `TAG_TEN` (8) atom for tensor handles,
+    `TAG_UOP` (9) heap-backed for graph nodes, `TAG_NUM` (10) atom
+    for inline scalars.
+  - `TenDesc` side table (`TENS[]`) with refcount, View
+    (shape/strides/offset), buffer id, and Backend pointer.
+  - CPU `Backend` vtable: alloc/free/incref/decref + buf_read/write,
+    parallel `CPU_BUFS[]` table with its own refcount for view
+    aliasing.
+  - View aliasing (`tensor_view_of`) bumps the buffer refcount so
+    reshape/permute can share storage zero-copy in step 14.
+
+- **UOp vocabulary + WL surface** (719ac4a)
+  - 18 opcodes covering CONST, six movement ops
+    (RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP), eight elementwise ops
+    (ADD/MUL/NEG/RECIP/EXP2/LOG2/SQRT/CMPLT), REDUCE, plus the
+    rewrite triggers MATERIALIZE and KERNEL.
+  - One `src/uop/<op>.c` per opcode emitting the documented heap
+    layout.
+  - WL surface in the new `Tensor.wl` sibling: `TTensor`,
+    `TUOpAdd/Mul/.../Reduce`, `TUOpMaterialize`, plus inspection
+    helpers.
+
+- **TRealize + TTensorCreate + zero-copy NumericArray I/O** (862887e)
+  - `TRealize[expr] := TWnf[TUOpMaterialize[expr]]`.
+  - `TTensorCreate[data]` shares a `NumericArray`'s buffer on the
+    CPU backend (Shared passing mode + per-buffer cleanup
+    callback).  PackedArrays / nested Lists lift to NumericArray
+    first.
+  - `TTensorData` returns a `NumericArray` whose type matches the
+    dtype (single memcpy in the f32 fast path; no f32 -> f64
+    conversion).
+  - CpuBuf gains `owns_data` + `on_release` callback so the same
+    slot can hold either malloc'd or borrowed bytes.
+
+- **materialize pipeline** (8ffd333)
+  - New `KERNELS[]` side table with linearized `KProgOp` programs;
+    the same SSA-over-indices shape tinygrad's PYTHON device
+    consumes.
+  - `src/schedule/materialize.c` rewrites a UOp graph into a tree
+    of `UOP_KERNEL[output_buf, NUM(kid)]` terms; recursively
+    materializes children, dedups identical inputs.
+  - `TMaterialize` WL helper for inspecting the scheduled DAG
+    *before* kernel firing; `TKernelInfo[kid]` returns the
+    linearized program as an Association.
+
+- **CPU interpreter + interact_kernel** (3e071bd)
+  - Per-op CPU files under `src/backend/cpu/op/` (one per opcode,
+    matching the project's file = function name convention).
+  - `cpu_interpret` walks `KernelEntry.program[]`, allocates one
+    scratch per intermediate, dispatches via switch on opcode.
+  - `interact_kernel` recursively fires producer kernels first
+    (via the new `TenDesc.producer_kid` field), then invokes
+    `Backend.dispatch_kernel` for the current kernel.  Increments
+    `ITRS` once per firing, the same way HVM4 counts an OP2-NUM-NUM
+    collapse.
+  - `wnf` extension: `TAG_UOP/UOP_MATERIALIZE` -> direct rewrite,
+    `TAG_UOP/UOP_KERNEL` -> fire, anything else -> WNF.
+
+- **PLAN.md** (9b5a4db)
+  - Step 12 marked done.
+
+Numerical UpValues on `TTerm` (Plus / Times / Minus / Power[1/2] /
+Less) rewrite ordinary WL arithmetic against tensor-shaped TTerms
+into UOp graphs.  Scalars lift to UOP_CONST with the seed tensor's
+dtype.
+
+Removed: the `Function[t_TTerm]` UpValue that converted `f[t]` to
+`TApp[TLam[f], t]`.  It was dumb, surprised the Plus/Times rewrite
+that maps over tensors, and the matching `TLam[$inTLamBinder] guard`
+went with it.
+
+End-to-end:
+```mathematica
+a   = TTensor[{4}, {1.0, 2.0, 3.0, 4.0}];
+b   = TTensor[{4}, {10.0, 20.0, 30.0, 40.0}];
+out = TRealize[2.0 * (a + b) + 1.0];
+Normal @ TTensorData[out]
+(* {23.0, 45.0, 67.0, 89.0} *)
+```
+
 ### Added: THeapDiagram (Wolfram`DiagrammaticComputation` backend)
 
 - New `wl/THVMLink/Kernel/Diagram.wl` subpackage at context
