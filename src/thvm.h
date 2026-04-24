@@ -82,6 +82,34 @@ typedef u64 Term;
 #define DT_I32   1
 #define DT_COUNT 2
 
+// === UOp opcodes (TAG_UOP ext field) ===
+// See docs/tensors.md for per-opcode heap layouts.
+
+#define UOP_MATERIALIZE  0   // heap = [expr]
+#define UOP_KERNEL       1   // heap = [output_buf, ast_root]; ext bits: see uop_kernel.c
+#define UOP_CONST        2   // heap = [NUM(bits)]; ext = dtype
+#define UOP_RESHAPE      3   // heap = [src, NUM(d0), ..., NUM(d_{n-1})]; ext = ndim
+#define UOP_PERMUTE      4   // heap = [src, NUM(p0), ...]; ext = ndim
+#define UOP_EXPAND       5   // heap = [src, NUM(d0), ...]; ext = ndim
+#define UOP_PAD          6   // heap = [src, NUM(b0), NUM(e0), ...]; ext = ndim
+#define UOP_SHRINK       7   // heap = [src, NUM(b0), NUM(e0), ...]; ext = ndim
+#define UOP_FLIP         8   // heap = [src, NUM(axes_bitmask)]
+#define UOP_ADD          9   // heap = [a, b]
+#define UOP_MUL         10   // heap = [a, b]
+#define UOP_NEG         11   // heap = [src]
+#define UOP_RECIP       12   // heap = [src]
+#define UOP_EXP2        13   // heap = [src]
+#define UOP_LOG2        14   // heap = [src]
+#define UOP_SQRT        15   // heap = [src]
+#define UOP_CMPLT       16   // heap = [a, b]
+#define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(axis)]
+
+#define UOP_COUNT       18
+
+// REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
+#define REDUCE_SUM   0
+#define REDUCE_MAX   1
+
 // === Capacities ===
 #define HEAP_CAP (1ULL << 24)   // 16M cells * 8B = 128 MiB. Plenty for tests.
 #define WNF_CAP  (1ULL << 16)   // 64K stack slots.
@@ -178,6 +206,28 @@ fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).
 fn View view_create(Shape shape);
+
+// === uop/ ===
+// Constructors for raw UOp graph nodes.  Each helper allocates the
+// heap cells laid out in docs/tensors.md and returns a TAG_UOP term.
+// They do NOT reduce or fire kernels -- they just build graph
+// structure.  Materialization (commit 3) consumes a graph built
+// from these.
+fn Term uop_const  (u32 dtype, u32 bits);
+fn Term uop_unary  (u32 opcode, Term src);                       // NEG/RECIP/EXP2/LOG2/SQRT
+fn Term uop_binary (u32 opcode, Term a, Term b);                 // ADD/MUL/CMPLT
+fn Term uop_reduce (u32 kind, u32 axis, Term src);
+fn Term uop_reshape(Term src, u32 ndim, const u32 *dims);
+fn Term uop_permute(Term src, u32 ndim, const u32 *perm);
+fn Term uop_expand (Term src, u32 ndim, const u32 *dims);
+fn Term uop_pad    (Term src, u32 ndim, const u32 *begin_end);   // begin_end[2*ndim]
+fn Term uop_shrink (Term src, u32 ndim, const u32 *begin_end);
+fn Term uop_flip   (Term src, u32 axes_bitmask);
+
+// Wrap any term in a UOP_MATERIALIZE.  Subsequent TWnf will fire the
+// materialize rule (rewriting it into the scheduled DAG) and then
+// fire any KERNELs that become ready.
+fn Term uop_materialize(Term expr);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.

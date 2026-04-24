@@ -68,6 +68,21 @@ Backend *CURRENT_BACKEND = NULL;
 #include "tensor/release.c"
 #include "tensor/view_of.c"
 
+// === uop/ ===
+// Constructors for raw UOp graph nodes.  Each helper allocates the
+// heap cells for one opcode and returns a TAG_UOP term; nothing reduces.
+#include "uop/const.c"
+#include "uop/unary.c"
+#include "uop/binary.c"
+#include "uop/reduce.c"
+#include "uop/reshape.c"
+#include "uop/permute.c"
+#include "uop/expand.c"
+#include "uop/pad.c"
+#include "uop/shrink.c"
+#include "uop/flip.c"
+#include "uop/materialize.c"
+
 // === runtime lifecycle ===
 void thvm_init(void) {
   HEAP      = (Term *)calloc(HEAP_CAP, sizeof(Term));
