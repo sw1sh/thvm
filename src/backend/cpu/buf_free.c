@@ -5,8 +5,16 @@
 
 fn void cpu_buf_free(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
-  free(CPU_BUFS[buf_id].data);
-  CPU_BUFS[buf_id].data     = NULL;
-  CPU_BUFS[buf_id].nbytes   = 0;
-  CPU_BUFS[buf_id].refcount = 0;
+  CpuBuf *b = &CPU_BUFS[buf_id];
+  if (b->owns_data) {
+    free(b->data);
+  } else if (b->on_release) {
+    b->on_release(b->handle);
+  }
+  b->data       = NULL;
+  b->nbytes     = 0;
+  b->refcount   = 0;
+  b->handle     = NULL;
+  b->on_release = NULL;
+  b->owns_data  = 0;
 }

@@ -83,10 +83,11 @@ TTensorDType[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]
 TTensorRefcount[t_ ? tensorIdQ] := $tensorRcFn[TTermVal[t]]
 TTensorRefcount[t_TTerm]        := Missing["NotATensor", TTagName[TTermTag[t]]]
 
-TTensorData[t_ ? tensorIdQ] := With[{id = TTermVal[t], dt = TTermExt[t]},
-    If[ dt === $DTF32, $tensorReadFn[id], $tensorReadIFn[id]]
-]
-TTensorData[t_TTerm] := Missing["NotATensor", TTagName[TTermTag[t]]]
+(* TTensorData returns a NumericArray whose type matches the
+   tensor's dtype (Real32 for DT_F32, Integer32 for DT_I32).  Callers
+   that want a plain List can wrap in `Normal`. *)
+TTensorData[t_ ? tensorIdQ] := $tensorReadFn[TTermVal[t]]
+TTensorData[t_TTerm]        := Missing["NotATensor", TTagName[TTermTag[t]]]
 
 (* === UOp graph constructors === *)
 
@@ -122,6 +123,61 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
 ]
 
 TUOpMaterialize[expr_] := (ensureInit[]; TTerm[$uopMatFn[ttermRaw[expr]]])
+
+(* TRealize = TWnf[TUOpMaterialize[expr]].  Primary convenience for
+   running a lazy UOp graph to completion.  After commit 4 this
+   returns a TAG_TEN with the computed result; until then, it returns
+   the materialized-but-not-fired scheduled DAG. *)
+TRealize[expr_] := TWnf[TUOpMaterialize[expr]]
+
+(* === TTensorCreate: implicit shape from data ===
+
+   - If `data` is a NumericArray of supported dtype, share its buffer
+     via the Shared-NumericArray passing mode (zero copy on CPU).
+   - If `data` is a PackedArray or nested list of reals, we can't
+     share directly (Mathematica's PackedArray isn't exposed via the
+     NumericArray ABI); lift it to a NumericArray first.  The
+     conversion is one internal copy; once in NumericArray form the
+     subsequent C-side wrap is zero copy.
+   - Shape and dtype are inferred from `data`; callers who want to
+     override either should use the explicit `TTensor[shape, data,
+     dtype]` form. *)
+
+(* Detect the NumericArray subtype we can consume directly. *)
+$sharedNATypes = {"Real32", "Integer32"};
+
+sharedDTypeOf["Real32"]   := "f32"
+sharedDTypeOf["Integer32"]:= "i32"
+sharedDTypeOf[_]          := Missing["UnsupportedNAType"]
+
+asSharableNA[na_NumericArray] /; MemberQ[$sharedNATypes, NumericArrayType[na]] := na
+asSharableNA[na_NumericArray]           := NumericArray[Normal[na], "Real32"]
+
+(* A plain list (possibly nested): let NumericArray pick a storage
+   type based on element heads.  Preserve the shape; no Flatten. *)
+asSharableNA[data_List] := With[{type =
+    If[ AllTrue[Flatten[{data}], IntegerQ], "Integer32", "Real32"]
+},
+    NumericArray[data, type]
+]
+
+(* PackedArray: dispatch on element type. *)
+asSharableNA[data_?Developer`PackedArrayQ] :=
+    With[{t = Developer`PackedArrayType[data]},
+        NumericArray[data,
+            Switch[t, Integer, "Integer32", Real, "Real32", _, "Real32"]]
+    ]
+
+TTensorCreate[data_] := (
+    ensureInit[];
+    Module[{na = asSharableNA[data]},
+        (* Infer target dtype from NumericArray type.  Reshape comes
+           from the Dimensions of the data itself. *)
+        With[{t = TTerm[$tensorFromNAFn[na]]},
+            t
+        ]
+    ]
+)
 
 TUOpKind[u_] := Lookup[$uopNames, TTermExt[u], "UOP?" <> ToString[TTermExt[u]]]
 

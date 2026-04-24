@@ -15,9 +15,38 @@ VerificationTest[
 VerificationTest[
     TInit[];
     t = TTensor[{2, 3}, {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}];
-    TTensorData[t],
-    {1.0, 2.0, 3.0, 4.0, 5.0, 6.0},
-    TestID -> "TTensor/initial-data-roundtrip"
+    {Head[TTensorData[t]], Normal @ TTensorData[t]},
+    {NumericArray, {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}},
+    TestID -> "TTensor/initial-data-roundtrip-as-NumericArray"
+]
+
+VerificationTest[
+    TInit[];
+    data = NumericArray[{{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    t    = TTensorCreate[data];
+    (* Shape + dtype inferred from NumericArray; bytes shared on CPU. *)
+    {TTensorShape[t], TTensorDType[t], Normal @ TTensorData[t]},
+    {{2, 3}, "f32", {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}},
+    TestID -> "TTensorCreate/shares-NumericArray"
+]
+
+VerificationTest[
+    TInit[];
+    (* Integer32 NumericArray -> TAG_TEN i32 *)
+    data = NumericArray[{10, 20, 30}, "Integer32"];
+    t    = TTensorCreate[data];
+    {TTensorShape[t], TTensorDType[t], Normal @ TTensorData[t]},
+    {{3}, "i32", {10, 20, 30}},
+    TestID -> "TTensorCreate/integer32"
+]
+
+VerificationTest[
+    TInit[];
+    (* Nested list falls through to NumericArray conversion. *)
+    t = TTensorCreate[{{1.0, 2.0}, {3.0, 4.0}}];
+    {TTensorShape[t], Normal @ TTensorData[t]},
+    {{2, 2}, {{1.0, 2.0}, {3.0, 4.0}}},
+    TestID -> "TTensorCreate/list-is-lifted-to-NA"
 ]
 
 VerificationTest[

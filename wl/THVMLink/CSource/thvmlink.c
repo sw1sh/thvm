@@ -7,14 +7,28 @@
 // primitives - keeps the C surface tiny.
 
 #include "WolframLibrary.h"
+#include "WolframNumericArrayLibrary.h"
 #include "../../../src/thvm.c"
+
+// Cached libData so callbacks (e.g. NumericArray disown) can reach
+// WolframLibrary functions without the original call context.  Set
+// once by WolframLibrary_initialize; stable for the rest of the
+// session.
+static WolframLibraryData CACHED_LIB_DATA = NULL;
+
+// Callback used when a tensor backed by a Shared NumericArray is
+// released: disown the handle so WL can reclaim its memory.
+static void release_numeric_array(void *handle) {
+  if (!CACHED_LIB_DATA || !handle) return;
+  CACHED_LIB_DATA->numericarrayLibraryFunctions->MNumericArray_disown((MNumericArray)handle);
+}
 
 EXTERN_C DLLEXPORT mint WolframLibrary_getVersion(void) {
   return WolframLibraryVersion;
 }
 
 EXTERN_C DLLEXPORT int WolframLibrary_initialize(WolframLibraryData libData) {
-  (void)libData;
+  CACHED_LIB_DATA = libData;
   return LIBRARY_NO_ERROR;
 }
 
@@ -206,29 +220,80 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_write(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// tensor_read returns a NumericArray of the tensor's dtype + full
+// multi-dimensional shape.  NumericArray maps directly onto the
+// C-side buffer layout (no f32 -> f64 conversion), so a Real32
+// tensor round-trips back to a Real32 NumericArray with no loss
+// or copy beyond the single memcpy into NumericArray-owned storage.
 EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
-  (void)libData; (void)argc;
+  (void)argc;
   mint     id = MArgument_getInteger(args[0]);
   TenDesc *d  = &TENS[id];
-  mint n      = (mint)d->view.numel;
-  MTensor out;
-  if (d->dtype == DT_F32) {
-    libData->MTensor_new(MType_Real, 1, &n, &out);
-    double *dst = libData->MTensor_getRealData(out);
-    f32 *tmp = (f32 *)malloc((size_t)n * sizeof(f32));
-    d->backend->buf_read(d->buf_id, tmp, (u64)n * sizeof(f32));
-    for (mint i = 0; i < n; i++) dst[i] = (double)tmp[i];
-    free(tmp);
-  } else {
-    libData->MTensor_new(MType_Integer, 1, &n, &out);
-    mint *dst = libData->MTensor_getIntegerData(out);
-    i32 *tmp = (i32 *)malloc((size_t)n * sizeof(i32));
-    d->backend->buf_read(d->buf_id, tmp, (u64)n * sizeof(i32));
-    for (mint i = 0; i < n; i++) dst[i] = (mint)tmp[i];
-    free(tmp);
+
+  mint dims[MAX_DIM];
+  mint rank = (mint)d->view.shape.ndim;
+  for (mint i = 0; i < rank; i++) dims[i] = (mint)d->view.shape.dims[i];
+
+  numericarray_data_t t = (d->dtype == DT_F32) ? MNumericArray_Type_Real32
+                                               : MNumericArray_Type_Bit32;
+
+  MNumericArray out;
+  libData->numericarrayLibraryFunctions->MNumericArray_new(t, rank, dims, &out);
+  void *dst = libData->numericarrayLibraryFunctions->MNumericArray_getData(out);
+  u64   nbytes = (u64)d->view.numel * 4;   // both DT_F32 and DT_I32 are 4B
+  d->backend->buf_read(d->buf_id, dst, nbytes);
+
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// Build a tensor by *sharing* the bytes of a NumericArray passed in
+// with "Shared" passing mode.  The tensor holds the NumericArray alive
+// (via MNumericArray_disown on release) and reads its buffer pointer
+// directly -- zero copy on the CPU backend.
+EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint argc,
+                                              MArgument *args, MArgument res) {
+  (void)argc;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+      = libData->numericarrayLibraryFunctions;
+
+  numericarray_data_t t       = naf->MNumericArray_getType(na);
+  mint                 rank    = naf->MNumericArray_getRank(na);
+  mint const          *naDims  = naf->MNumericArray_getDimensions(na);
+  mint                 numel   = naf->MNumericArray_getFlattenedLength(na);
+  void                *naData  = naf->MNumericArray_getData(na);
+
+  u32 dtype;
+  if      (t == MNumericArray_Type_Real32) dtype = DT_F32;
+  else if (t == MNumericArray_Type_Bit32)  dtype = DT_I32;
+  else {
+    fprintf(stderr, "tensor_from_na: unsupported NumericArray type %d\n", (int)t);
+    return LIBRARY_FUNCTION_ERROR;
   }
-  MArgument_setMTensor(res, out);
+
+  // Build the TenDesc manually so we can point its buf_id at an
+  // external CPU buffer instead of a freshly malloc'd one.
+  if (TENS_NEXT >= TENS_CAP) {
+    fprintf(stderr, "tensor_from_na: out of descriptor slots\n");
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 id = TENS_NEXT++;
+  TenDesc *d = &TENS[id];
+  Shape shape;
+  shape.ndim = (u32)rank;
+  for (mint i = 0; i < rank && i < MAX_DIM; i++) shape.dims[i] = (u32)naDims[i];
+  for (mint i = rank; i < MAX_DIM; i++)          shape.dims[i] = 0;
+  d->dtype    = dtype;
+  d->refcount = 1;
+  d->view     = view_create(shape);
+  d->backend  = &CPU_BACKEND;
+  d->buf_id   = cpu_buf_alloc_external(
+      naData, (u64)numel * 4, release_numeric_array, (void *)na);
+
+  Term term = term_new(0, TAG_TEN, dtype, id);
+  MArgument_setInteger(res, (mint)term);
   return LIBRARY_NO_ERROR;
 }
 

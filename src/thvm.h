@@ -234,6 +234,12 @@ fn Term uop_materialize(Term expr);
 // Metal lands in step 14 behind the same Backend struct.
 extern Backend CPU_BACKEND;
 
+// Allocate a borrowed buffer: we don't own `data`, and on release we
+// call `on_release(handle)` instead of free().  Used by the WL bridge
+// to share a Shared NumericArray's bytes without copying.
+fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
+                              void (*on_release)(void *), void *handle);
+
 // === wnf/ ===
 // Stack-machine reducer to weak normal form.  See src/wnf/_.c for the
 // enter/apply protocol.

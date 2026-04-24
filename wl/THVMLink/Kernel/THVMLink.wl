@@ -71,10 +71,12 @@ $ReduceSum::usage = $ReduceMax::usage =
 
 (* === tensors === *)
 TTensor::usage         = "TTensor[shape, dtype] allocates a tensor and returns a TTerm wrapping a TAG_TEN handle.  TTensor[shape, data_List] also writes initial values.  dtype defaults to \"f32\".";
+TTensorCreate::usage   = "TTensorCreate[data] builds a tensor whose shape and dtype are inferred from `data`.  On the CPU backend the buffer is shared with the input NumericArray (zero copy).  PackedArrays and nested lists are first lifted to a NumericArray (one copy) then shared.";
 TTensorShape::usage    = "TTensorShape[t] returns the tensor's shape as a list of integers.";
 TTensorDType::usage    = "TTensorDType[t] returns the dtype as a string (\"f32\" / \"i32\").";
-TTensorData::usage     = "TTensorData[t] reads the tensor's buffer back into a flat WL list.";
+TTensorData::usage     = "TTensorData[t] reads the tensor's buffer as a NumericArray whose type matches the dtype (Real32 for f32, Integer32 for i32).  Wrap in `Normal` to get a plain list.";
 TTensorRefcount::usage = "TTensorRefcount[t] returns the descriptor refcount (TENS[id].refcount).";
+TRealize::usage        = "TRealize[expr] = TWnf[TUOpMaterialize[expr]].  Fires the whole pipeline: schedule + kernelize + compile, then kernel dispatch.  Until commit 4 lands interact_kernel, TRealize stops at the scheduled DAG.";
 
 (* === UOp graph constructors === *)
 TUOpConst::usage     = "TUOpConst[value, dtype] builds a UOP_CONST node carrying a scalar.";
@@ -180,10 +182,14 @@ $itrsFn      := $itrsFn      = load["thvm_wl_itrs",       {},                   
 $tensorAllocFn   := $tensorAllocFn   = load["thvm_wl_tensor_alloc",   {Integer, {Integer, 1}}, Integer];
 $tensorWriteFn   := $tensorWriteFn   = load["thvm_wl_tensor_write",   {Integer, {Real, 1}},    Integer];
 $tensorWriteIFn  := $tensorWriteIFn  = load["thvm_wl_tensor_write",   {Integer, {Integer, 1}}, Integer];
-$tensorReadFn    := $tensorReadFn    = load["thvm_wl_tensor_read",    {Integer},               {Real, 1}];
-$tensorReadIFn   := $tensorReadIFn   = load["thvm_wl_tensor_read",    {Integer},               {Integer, 1}];
+$tensorReadFn    := $tensorReadFn    = load["thvm_wl_tensor_read",    {Integer},               "NumericArray"];
 $tensorShapeFn   := $tensorShapeFn   = load["thvm_wl_tensor_shape",   {Integer},               {Integer, 1}];
 $tensorRcFn      := $tensorRcFn      = load["thvm_wl_tensor_refcount",{Integer},               Integer];
+
+(* Zero-copy tensor-from-NumericArray.  The "Shared" passing mode
+   tells WL to give the C side a shared reference; C bridge stores
+   the handle and disowns on release.  *)
+$tensorFromNAFn  := $tensorFromNAFn  = load["thvm_wl_tensor_from_na", {{"NumericArray", "Shared"}}, Integer];
 
 (* uop graph *)
 $uopConstFn    := $uopConstFn    = load["thvm_wl_uop_const",    {Integer, Real},                     Integer];
