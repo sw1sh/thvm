@@ -9,6 +9,8 @@ bin/
 # Compiled WL paclet library (rebuilt by `make wl`).
 wl/THVMLink/LibraryResources/
 
+wl/Notebooks
+
 # Local-only reference symlink to the research prototype. Create with:
 #   ln -s ../TinyHVM TinyHVM
 TinyHVM

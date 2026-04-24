@@ -3,10 +3,11 @@
 An interaction-net runtime fused with a tinygrad-style tensor IR. Built
 from scratch alongside the [TinyHVM](TinyHVM/) research prototype.
 
-The roadmap lives in [PLAN.md](PLAN.md). Working notes for contributors
-(human or LLM) live in [AGENTS.md](AGENTS.md). Every meaningful change
-is recorded in [CHANGELOG.md](CHANGELOG.md). WL-side style rules live
-in [wl/GUIDE.md](wl/GUIDE.md).
+- Roadmap: [PLAN.md](PLAN.md)
+- Architecture, one piece per page: [docs/README.md](docs/README.md)
+- Working notes for contributors: [AGENTS.md](AGENTS.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- WL-side style rules: [wl/GUIDE.md](wl/GUIDE.md)
 
 ## Status
 
@@ -68,12 +69,19 @@ src/
   thvm.h            public types, term layout, function decls
   thvm.c            single-TU hub
   term/             term packing/unpacking (one fn per file)
-  heap/             flat allocator + read/set/take + subst_var
+  heap/             flat allocator + read/set/take + subst_*
   interact/         one interaction rule per file
   wnf/              WNF stack-machine reducer
 tests/
   test.h            tiny CHECK / PENDING harness
   test_*.c          one program per test, self-contained
+docs/
+  README.md         index
+  term.md           bit layout + tag table
+  heap.md           allocator + substitution model
+  wnf.md            enter/apply state machine
+  interact/         one page per active-pair rule
+  wl.md             paclet design + usage
 wl/
   GUIDE.md          WL style rules
   THVMLink/         the Wolfram paclet
@@ -100,11 +108,14 @@ PacletDirectoryLoad["wl/THVMLink"];
 Needs["THVMLink`"];
 
 TInit[];
-id  = TLam[var |-> var];        (* identity lambda *)
+id  = TLam[var |-> var];         (* identity lambda *)
 app = TApp[id, TEra[]];          (* (id ERA) *)
 TTermInfo[app]
 (* <| "sub"->0, "tag"->0, "tagName"->"APP", "ext"->0, "val"->2, "raw"->...|> *)
 THeap[]
 (* snapshot: nextLoc + per-cell decoded info *)
-TWnf[app]                        (* stub today, real reducer in step 6 *)
+TTagName[TTermTag[TWnf[app]]]    (* "ERA" -- one APP-LAM interaction *)
+TItrs[]                          (* 1 *)
 ```
+
+For a deeper tour read [docs/wl.md](docs/wl.md).

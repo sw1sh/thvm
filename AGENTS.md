@@ -14,7 +14,9 @@ It is being built from the ground up alongside a reference research project
 located at `./TinyHVM` (symlink). That repo is sloppy by design - it was the
 prototype. We mine it for ideas and snippets but do not depend on it.
 
-The roadmap is in [PLAN.md](PLAN.md). Read it before making structural changes.
+- Roadmap: [PLAN.md](PLAN.md). Read before making structural changes.
+- Architecture, one piece per page: [docs/README.md](docs/README.md).
+- WL-side style rules: [wl/GUIDE.md](wl/GUIDE.md).
 
 ## Reference repos (read-only siblings)
 
@@ -99,9 +101,12 @@ box-drawing in source, `VerificationTest` for tests), read
 3. **Commit often, small commits.** Update `CHANGELOG.md` in the same commit
    with a human-readable line under `## Unreleased`. Commit messages are
    short imperative summaries.
-4. **Update docs alongside code.** `docs/interact/<name>.md` and the matching
-   C file's header comment must agree.
+4. **Update docs alongside code.** `docs/interact/<name>.md` and the
+   matching C file's header comment must agree. The doc is the source
+   of truth; if they disagree, fix the comment.
 5. **Keep README.md synchronized with the current shippable state.**
+   When you add a new piece, link it from [docs/README.md](docs/README.md)
+   and add a row to the README's status table if applicable.
 
 ## Code map (current)
 

@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: architecture docs (PLAN.md steps 8-9)
+
+- `docs/` with a self-contained markdown per piece, indexed by
+  `docs/README.md`:
+  - `docs/term.md`: bit layout + tag table + worked examples.
+  - `docs/heap.md`: bump allocator + the substitution model
+    (`heap_subst_var`, `heap_subst_cop`).
+  - `docs/wnf.md`: enter/apply state machine, frame protocol, and
+    the dispatch table for current interactions.
+  - `docs/interact/_.md`: index of active-pair rules + tracking of
+    which active pairs are stuck (deferred).
+  - `docs/interact/{app_lam,app_era,dup_sup,dup_era}.md`: one page
+    per interaction with the sequent rule, the C, a worked example,
+    and a cost summary.
+  - `docs/wl.md`: WL paclet design (scalar bridge + WL-side
+    constructors) and usage.
+- `README.md`: top of the file points at `docs/README.md` and the
+  layout block now includes `docs/`.
+- `AGENTS.md`: workflow step 4 clarifies that the `docs/interact/`
+  page is the source of truth when it disagrees with the C file's
+  header comment.
+
 ### Added: minimal reducer + interactions (PLAN.md steps 5-6)
 
 - `src/wnf/_.c`: real two-phase stack-machine reducer (enter/apply)
