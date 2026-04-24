@@ -6,6 +6,23 @@ dated section.
 
 ## Unreleased
 
+### Added: THeapDiagram (Wolfram`DiagrammaticComputation` backend)
+
+- New `wl/THVMLink/Kernel/Diagram.wl` subpackage at context
+  `THVMLink`Diagram` exporting `THeapDiagram[term]`, which builds a
+  `DiagramNetwork` from the current heap using the
+  `Wolfram/DiagrammaticComputation` paclet (assumed installed).
+- The subpackage lives in its own context so its `BeginPackage`
+  imports can pull in `Wolfram`DiagrammaticComputation` and its
+  `Diagram` subcontext without shadowing names in the main
+  `THVMLink` context.
+- Wire-name strings are unique per heap location: `w<loc>` for
+  cells, with `VAR` cells collapsed to their binder's wire and
+  `DP0`/`DP1` cells expanded to `dup<base>_dp{0,1}_lab<ext>`.
+- `wl/Examples/run.wls` now writes `diagram.png` next to `term.png`
+  for each example's input `term.wl` (skipped for reference
+  variants like `term-reduced.wl`).
+
 ### Added: TTermExpr / TTermTree, TReduce, .hvm refs, restructured examples
 
 - `wl/Examples/` folders no longer carry numeric prefixes; the

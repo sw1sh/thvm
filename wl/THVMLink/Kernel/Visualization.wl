@@ -162,6 +162,12 @@ agentLabel[base_Integer, tag_Integer] := With[{arity = Length[agentPorts[tag]]},
     ]
 ]
 
+(* === DiagramNetwork export ===
+   Implementation lives in Diagram.wl (own subcontext THVMLink`Diagram`)
+   so it can `BeginPackage[..., {"Wolfram`DiagrammaticComputation`"}]`
+   and use the Diagram / DiagramNetwork heads without context-shadow
+   warnings. *)
+
 (* === main entry point ===
    THeapGraph accepts trailing Graph options that override the
    built-in defaults.  Per the WL guide we use OptionsPattern[]:

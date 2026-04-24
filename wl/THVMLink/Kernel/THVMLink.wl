@@ -30,6 +30,7 @@ THeapRead::usage  = "THeapRead[loc] returns the Term at heap[loc].";
 THeapSet::usage   = "THeapSet[loc, term] writes `term` to heap[loc].";
 THeap::usage      = "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/heap_graph.md.";
 THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram Graph.  THeapGraph[term] also seeds discovery with `term` so heapless compounds held only by the WL caller appear.  THeapGraph[{t1, t2, ...}] seeds with several.  See docs/heap_graph.md.";
+THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.  Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc.";
 
 (* === reduce / stats === *)
 TWnf::usage       = "TWnf[term] reduces `term` to weak normal form.";
@@ -295,3 +296,8 @@ With[{dir = DirectoryName[$InputFileName]},
 
 End[];
 EndPackage[];
+
+(* Diagram.wl lives in its own subpackage (THVMLink`Diagram`) so it can
+   import Wolfram`DiagrammaticComputation` without context-shadowing
+   the rest of THVMLink`. *)
+Get[FileNameJoin[{DirectoryName[$InputFileName], "Diagram.wl"}]]

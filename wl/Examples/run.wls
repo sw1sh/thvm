@@ -27,6 +27,9 @@
    canvas so LightDarkSwitched-aware styling picks the dark arm.
 *)
 
+(* Wolfram`DiagrammaticComputation` is assumed to be installed
+   (PacletInstall["Wolfram/DiagrammaticComputation"]).  THVMLink's
+   Diagram subpackage Needs it on load. *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
 
@@ -51,9 +54,12 @@ termFiles[dir_String] := Select[
     FileBaseName[#] === "term" &
 ]
 
-renderFile[wlFile_String] := Block[{pngFile, base, term, graph},
-    base    = FileBaseName[wlFile];
-    pngFile = FileNameJoin[{DirectoryName[wlFile], base <> ".png"}];
+renderFile[wlFile_String] := Block[{
+    base, pngFile, diagFile, term, graph, diagram
+},
+    base     = FileBaseName[wlFile];
+    pngFile  = FileNameJoin[{DirectoryName[wlFile], base <> ".png"}];
+    diagFile = FileNameJoin[{DirectoryName[wlFile], "diagram.png"}];
     TInit[];
     term = Get[wlFile];
     If[ $evalOnly,
@@ -69,6 +75,22 @@ renderFile[wlFile_String] := Block[{pngFile, base, term, graph},
         ImageResolution -> 144
     ];
     debugPrint["[ok] ", wlFile, " -> ", pngFile];
+    (* Only write diagram.png from the input term.wl (not the
+       reference term-reduced.wl etc.).  Diagram rendering uses the
+       Wolfram`DiagrammaticComputation`DiagramNetwork backend. *)
+    If[ base === "term",
+        diagram = THeapDiagram[term];
+        Export[
+            diagFile,
+            Style[
+                diagram["Arrange"]["Grid", "PortLabels" -> False],
+                Background -> GrayLevel[0.12]
+            ],
+            "PNG",
+            ImageResolution -> 144
+        ];
+        debugPrint["[ok] ", wlFile, " -> ", diagFile]
+    ];
     TFree[];
 ]
 
