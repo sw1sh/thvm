@@ -93,8 +93,10 @@ defines `wnf()`.
 
 ## Using the WL paclet
 
+From the repo root:
+
 ```wolfram
-PacletDirectoryLoad["/Users/you/src/thvm/wl/THVMLink"];
+PacletDirectoryLoad["wl/THVMLink"];
 Needs["THVMLink`"];
 
 TInit[];
