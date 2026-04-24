@@ -254,3 +254,30 @@ VerificationTest[
     "ERA",
     TestID -> "TWnf on dp0 of same-label DUP-SUP picks the left branch"
 ]
+
+VerificationTest[
+    (* DUP-LAM: cloning the identity lambda then applying one copy to
+       ERA should produce ERA. *)
+    (TReset[];
+     TDup[TLam[var |-> var],
+        {f0, f1} |-> TTagName[TTermTag[TWnf[TApp[f0, TEra[]]]]]]),
+    "ERA",
+    TestID -> "DUP-LAM clones a lambda end-to-end"
+]
+
+VerificationTest[
+    (* Church 2 applied to identity and ERA: church2 f x = f (f x).
+       Exercises APP-LAM + DUP-LAM together. *)
+    (TReset[]; Block[{
+        church2 = TLam[s |->
+            TDup[s, {s0, s1} |->
+                TLam[z |-> TApp[s0, TApp[s1, z]]]]],
+        f       = TLam[var |-> var],
+        x       = TEra[],
+        out
+     },
+        out = TWnf[TApp[TApp[church2, f], x]];
+        TTagName[TTermTag[out]]]),
+    "ERA",
+    TestID -> "Church 2 applied to id and ERA reduces to ERA"
+]

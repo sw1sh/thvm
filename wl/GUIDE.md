@@ -90,6 +90,22 @@ the start.
 
   Single-line `If[cond, then, else]` does not need the leading space.
 
+### Optional arguments
+
+For functions that take Wolfram-style options, use
+`opts : OptionsPattern[]`, not `opts___ ? OptionQ`.  The former
+integrates with `Options[fn]` declarations and `OptionValue[fn, key]`,
+which is the canonical Wolfram pattern.
+
+```wolfram
+Options[myFn] = {GraphLayout -> "LayeredDigraphEmbedding"};
+
+myFn[args___, opts : OptionsPattern[]] :=
+    With[{layout = OptionValue[GraphLayout]},
+        ...
+    ]
+```
+
 ## Definitions
 
 Prefer `Block` for local workspaces unless `Module`'s unique-symbol

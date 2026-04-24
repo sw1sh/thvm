@@ -106,6 +106,10 @@ apply:
             whnf = interact_dup_era(side, loc, whnf);
             continue;
           }
+          case TAG_LAM: {
+            next = interact_dup_lam(lab, loc, side, whnf);
+            goto enter;
+          }
           default: {
             heap_set(loc, whnf);
             whnf = frame;

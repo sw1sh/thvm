@@ -39,6 +39,10 @@ just want to see what the WL evaluator returns.
 | [07-dup-sup-annihilate-pre](07-dup-sup-annihilate-pre/) | DUP / SUP sharing label `7`, both projections held | no       |
 | [08-dup-sup-annihilate-post](08-dup-sup-annihilate-post/) | same, after `TWnf[dp0]`; DUP-SUP has fired       | yes      |
 | [09-nested-apps](09-nested-apps/)      | `(((id) ERA) (id))` -- nested APP / LAM tree                    | no       |
+| [10-k-combinator](10-k-combinator/)    | `K = lam x. lam y. x` -- two nested LAMs, no DUP                | no       |
+| [11-church-1](11-church-1/)            | Church 1 = `lam s. lam z. s z` -- single use of `s`             | no       |
+| [12-church-2](12-church-2/)            | Church 2 = `lam s. lam z. s (s z)` -- DUPs `s` first            | no       |
+| [13-church-2-applied](13-church-2-applied/) | Church 2 applied to id and ERA, after `TWnf`; DUP-LAM fires | yes      |
 
 Examples with `-reduced` / `-post` suffixes are paired with their
 unreduced counterpart so you can see the heap before and after the

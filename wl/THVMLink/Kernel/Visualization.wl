@@ -91,14 +91,18 @@ agentFill[$TagAPP] := LightDarkSwitched[Lighter[StandardBlue,   0.55], Darker[St
 agentFill[$TagSUP] := LightDarkSwitched[Lighter[StandardOrange, 0.55], Darker[StandardOrange, 0.45]]
 agentFill[$TagDUP] := LightDarkSwitched[Lighter[StandardPurple, 0.55], Darker[StandardPurple, 0.45]]
 
+(* `size` from a VertexShapeFunction is `{halfWidth, halfHeight}` --
+   honor it so VertexSize -> Tiny / Small / Large / Scaled[...] all
+   work, plus the per-vertex overrides set in buildHeapGraph. *)
+
 (* LAM, DUP: triangle with apex at the bottom (binder hangs down). *)
-downTriShape[pos_, size_] := Triangle[{
-    pos + {-0.40, 0.30}, pos + {0.40, 0.30}, pos + {0, -0.40}
+downTriShape[pos_, {hw_, hh_}] := Triangle[{
+    pos + {-hw, hh}, pos + {hw, hh}, pos + {0, -hh}
 }]
 
 (* APP, SUP: triangle with apex at the top (principal port at top). *)
-upTriShape[pos_, size_] := Triangle[{
-    pos + {-0.40, -0.30}, pos + {0.40, -0.30}, pos + {0, 0.40}
+upTriShape[pos_, {hw_, hh_}] := Triangle[{
+    pos + {-hw, -hh}, pos + {hw, -hh}, pos + {0, hh}
 }]
 
 agentEdgeForm[isSub_] := EdgeForm[
@@ -116,9 +120,11 @@ agentShapeFn[tag_, isSub_] := With[{
 ]
 
 (* Circle is a stroked primitive: stroke colour is set with a plain
-   colour directive, not via EdgeForm. *)
+   colour directive, not via EdgeForm.  Use the smaller of the two
+   half-extents as the radius so the circle stays round under any
+   VertexSize. *)
 eraShapeFn := Function[{pos, v, size},
-    {fgColor, AbsoluteThickness[1.2], Circle[pos, 0.16]}]
+    {fgColor, AbsoluteThickness[1.2], Circle[pos, Min[size]]}]
 
 (* Multi-line "TAG\n@<base>" or "TAG\n@<base>..<base+arity-1>" label. *)
 agentLabel[base_Integer, tag_Integer] := With[{arity = Length[agentPorts[tag]]},

@@ -6,6 +6,74 @@ dated section.
 
 ## Unreleased
 
+### Added: DUP-LAM + church-numeral examples
+
+- `src/interact/dup_lam.c`: real DUP-LAM rule.  Allocates one
+  five-cell block holding the new pair of bound vars (as a SUP
+  inside the original binder) and the new pair of body projections
+  (as a fresh DUP over the original body).  No body cloning happens
+  eagerly -- only when a future projection inspects part of the
+  body does it descend lazily.  This is the rule that gives Church
+  numerals (and similarly Lamping / optimal-reduction style
+  workloads) their non-exponential cloning behaviour.
+- `tests/test_dup_lam.c`: two C tests; clone an identity lambda and
+  confirm DUP-LAM fires once, then end-to-end apply one of the
+  cloned copies to ERA.
+- `wl/Examples/10-k-combinator/`, `11-church-1/`, `12-church-2/`,
+  `13-church-2-applied/`: four new runnable examples.  The Church 2
+  family exercises the DUP machinery; the applied form reduces
+  end-to-end and the resulting graph (in `13-...-applied/graph.png`)
+  shows the post-firing heap including the cloned lambdas and the
+  substituted DUP cell.
+- Two new VerificationTests in `wl/THVMLink/Tests/core.wlt`: a
+  direct DUP-LAM clone, and Church-2-applied reducing to the
+  identity-applied result.
+- `docs/interact/dup_lam.md` documents the rule, the C, the cost,
+  and why the lazy-cloning shape matters.
+
+### Added: visualization renderer split + theme-aware colors
+
+- `wl/THVMLink/Kernel/Visualization.wl`: extracts the heap-graph
+  renderer into a dedicated kernel sibling.  THVMLink.wl now `Get`s
+  it after declaring public symbols.
+- Theme-aware colors throughout: `LightDarkSwitched[Black, White]`
+  for foreground; `Lighter[StandardX, 0.55]` / `Darker[StandardX,
+  0.45]` per-tag agent fills (green LAM, blue APP, orange SUP,
+  purple DUP); ERA stays as a plain foreground-stroked Circle.
+- Vertex labels now render in column form: `TAG\n@<base>` for
+  arity-1 agents, `TAG\n@<base>..<base+1>` for arity-2.
+- Triangles are real triangles via `Triangle[]` (not trapezoids)
+  with apex orientation matching IC convention: LAM/DUP point down,
+  APP/SUP point up.
+- VertexShapeFunction now respects the size argument so
+  `VertexSize -> Tiny | Small | Large | Scaled[...]` actually take
+  effect.
+- Single-vertex self-loop is drawn explicitly via
+  EdgeShapeFunction; the identity lambda's loop is now visible.
+- Pink "background" mystery solved: `Dashing[{Small, Small}]` was
+  invalid (Small is not a numeric Dashing arg) which silently put
+  Wolfram into an error-overlay state.  Replaced with the proper
+  `Dashed` directive.
+- Context-shadowing fix: switched `wl/Examples/run.wls` and
+  `wl/THVMLink/Tests/run.wls` from `Needs["THVMLink`"]` to
+  `Get["THVMLink`"]` so user code resolves to package symbols
+  rather than auto-created `Global`*` placeholders.
+- `wl/GUIDE.md` gains a Dark-mode + Standard colors section and an
+  OptionsPattern[] section.
+
+### Added: TTerm atomic wrapper + ensureInit
+
+- TTerm[id_Integer] is the canonical wrapper around a packed Term;
+  TLam / TApp / TSup / TDup / TEra / TVarFor return TTerm-wrapped
+  values; TTermTag/Ext/Val/Sub accept either a TTerm or a raw
+  Integer.  Old TTermInfo is gone (folded into TTerm[id]["info"]);
+  TTermNew is no longer in the public API (private packTerm helper).
+- TTerm[id]["tag" | "ext" | "val" | "sub" | "tagName" | "raw" |
+  "info"] forwards to the bridge.  Format.wl gives TTerm a summary
+  box keyed off the structural pattern (QuantumFramework style).
+- ensureInit[]: heap-touching ops auto-call TInit if the runtime is
+  not initialised yet.  TFree clears the flag.
+
 ### Added: wl/Examples/ runnable example database
 
 - New `wl/Examples/` directory: one folder per example term, each

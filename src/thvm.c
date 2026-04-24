@@ -36,6 +36,7 @@ u64   ITRS      = 0;
 #include "interact/app_era.c"
 #include "interact/dup_sup.c"
 #include "interact/dup_era.c"
+#include "interact/dup_lam.c"
 
 // === wnf/ ===
 #include "wnf/_.c"

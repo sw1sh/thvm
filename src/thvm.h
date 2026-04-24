@@ -107,6 +107,7 @@ fn Term interact_app_lam(Term lam, Term arg);
 fn Term interact_app_era(void);
 fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup);
 fn Term interact_dup_era(u8 side, u64 loc, Term era);
+fn Term interact_dup_lam(u32 lab, u64 loc, u8 side, Term lam);
 
 // === wnf/ ===
 // Stack-machine reducer to weak normal form.  See src/wnf/_.c for the

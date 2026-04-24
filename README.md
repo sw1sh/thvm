@@ -26,7 +26,7 @@ architecture docs, and the IC-style heap graph renderer.
 | `interact_dup_sup` (same label)  | implemented + tested            |
 | `interact_dup_sup` (commute)     | stuck (deferred)                |
 | `interact_dup_era`               | implemented + tested            |
-| `interact_dup_lam` (clone)       | not yet implemented             |
+| `interact_dup_lam` (clone)       | implemented + tested            |
 | WL paclet `wl/THVMLink/`         | implemented + tested            |
 | `THeapGraph[]` heap renderer     | implemented + tested            |
 | Tensor / TUOp                    | step 12                         |
