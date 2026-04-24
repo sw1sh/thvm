@@ -110,14 +110,20 @@ C runtime:
 - `src/thvm.h`: public types, term bit layout, tag constants, function decls
 - `src/thvm.c`: single-TU hub
 - `src/term/{new,tag,ext,val}.c` + `src/term/sub/{get,set}.c`: term packing
-- `src/heap/{alloc,read,set,take,subst_var}.c`: flat heap primitives
-- `src/wnf/_.c`: WNF stack machine (**stub**: returns input unchanged)
-- `src/interact/app_lam.c`: APP-LAM beta (**stub**)
+- `src/heap/{alloc,read,set,take,subst_var,subst_cop}.c`: flat heap
+  primitives + the pair-substitution helper used by DUP rules
+- `src/wnf/_.c`: stack-machine reducer (enter pushes APP/DP frames and
+  walks to a WHNF, apply pops frames and dispatches active-pair
+  interactions; stuck frames rebuild the original node)
+- `src/interact/app_lam.c`: APP-LAM (beta)
+- `src/interact/app_era.c`: APP-ERA
+- `src/interact/dup_sup.c`: DUP-SUP same-label annihilation
+  (different-label commute is left stuck for now)
+- `src/interact/dup_era.c`: DUP-ERA
 - `tests/test_term.c`, `tests/test_heap.c`: passing checks of the above
 - `tests/test_app_lam.c`, `tests/test_era.c`, `tests/test_dup_sup.c`:
-  spec assertions for the interactions; gated by `PENDING(...)` until
-  step 6 lands `wnf` and the interaction rules. They report `pend` and
-  exit 0; remove the `PENDING(...)` line once `wnf` is real.
+  end-to-end spec tests that drive `wnf` and assert both the result
+  shape and the ITRS counter delta (one interaction per fired rule).
 
 WL paclet (`wl/THVMLink/`):
 

@@ -106,10 +106,42 @@ VerificationTest[
     TestID -> "THeap snapshot has expected keys"
 ]
 
-(* === TWnf stub passthrough (becomes a real test in step 6) === *)
+(* === TWnf === *)
 
 VerificationTest[
     (TReset[]; Module[{e = TEra[]}, TWnf[e] === e]),
     True,
-    TestID -> "TWnf stub returns its input unchanged"
+    TestID -> "TWnf on a WHNF (ERA) returns the same term"
+]
+
+VerificationTest[
+    (* (lam x.x) ERA  ->  ERA, taking exactly one APP-LAM interaction. *)
+    (TReset[]; Block[{id = TLam[var |-> var], era = TEra[], app, out, before},
+        app    = TApp[id, era];
+        before = TItrs[];
+        out    = TWnf[app];
+        {TTagName[TTermTag[out]], TItrs[] - before}
+    ]),
+    {"ERA", 1},
+    TestID -> "TWnf on (id ERA) fires APP-LAM and returns ERA"
+]
+
+VerificationTest[
+    (* APP-ERA: applying the eraser to anything yields the eraser. *)
+    (TReset[]; Block[{era = TEra[], lam = TLam[var |-> var], app, out},
+        app = TApp[era, lam];
+        out = TWnf[app];
+        TTagName[TTermTag[out]]
+    ]),
+    "ERA",
+    TestID -> "TWnf on (ERA lam) fires APP-ERA"
+]
+
+VerificationTest[
+    (* DUP-SUP same label: !&7{x0,x1} = &7{ERA,LAM}; dp0 -> ERA. *)
+    (TReset[]; TDup[7, TSup[7, TEra[], TLam[var |-> var]],
+        Function[{dp0, dp1}, TTagName[TTermTag[TWnf[dp0]]]]
+    ]),
+    "ERA",
+    TestID -> "TWnf on dp0 of same-label DUP-SUP picks the left branch"
 ]

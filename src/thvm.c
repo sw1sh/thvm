@@ -29,9 +29,13 @@ u64   ITRS      = 0;
 #include "heap/set.c"
 #include "heap/take.c"
 #include "heap/subst_var.c"
+#include "heap/subst_cop.c"
 
 // === interact/ ===
 #include "interact/app_lam.c"
+#include "interact/app_era.c"
+#include "interact/dup_sup.c"
+#include "interact/dup_era.c"
 
 // === wnf/ ===
 #include "wnf/_.c"

@@ -10,17 +10,21 @@ in [wl/GUIDE.md](wl/GUIDE.md).
 
 ## Status
 
-Steps **0-4** of the plan are landed: scaffolding, spec tests, and the
-Wolfram Language paclet. The runtime itself is still mostly stubs.
+Steps **0-6** of the plan are landed: scaffolding, the Wolfram
+Language paclet, and a minimal but working reducer + interactions.
 
 | Component                        | Status                          |
 | -------------------------------- | ------------------------------- |
 | Term bit layout + packing        | implemented + tested            |
 | Flat heap (alloc/read/set/take)  | implemented + tested            |
 | Variable substitution helper     | implemented                     |
-| WNF stack-machine reducer        | **stub**, lands in step 6       |
-| `interact_app_lam` (beta)        | **stub**, lands in step 6       |
-| `interact_dup_sup`               | not yet declared                |
+| WNF stack-machine reducer        | implemented + tested            |
+| `interact_app_lam` (beta)        | implemented + tested            |
+| `interact_app_era`               | implemented + tested            |
+| `interact_dup_sup` (same label)  | implemented + tested            |
+| `interact_dup_sup` (commute)     | stuck (deferred)                |
+| `interact_dup_era`               | implemented + tested            |
+| `interact_dup_lam` (clone)       | not yet implemented             |
 | WL paclet `wl/THVMLink/`         | implemented + tested            |
 | Tensor / TUOp                    | step 12                         |
 | Autograd via interactions        | step 13                         |
@@ -49,17 +53,13 @@ Today's output:
 $ make test
 > bin/test_term       ok    73/73
 > bin/test_heap       ok    9/9
-> bin/test_app_lam    pend  APP-LAM ... land in step 6
-> bin/test_era        pend  ERA propagation ... step 6
-> bin/test_dup_sup    pend  DUP-SUP ... step 6
+> bin/test_app_lam    ok    4/4
+> bin/test_era        ok    3/3
+> bin/test_dup_sup    ok    3/3
 
 $ make wl-test
-wl tests: 11 passed, 0 failed
+wl tests: 14 passed, 0 failed
 ```
-
-`pend` C tests carry the spec assertions; they fire unchanged once the
-implementation lands and the `PENDING(...)` line at the top of each
-test file is removed.
 
 ## Layout
 

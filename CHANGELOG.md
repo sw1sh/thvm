@@ -6,6 +6,36 @@ dated section.
 
 ## Unreleased
 
+### Added: minimal reducer + interactions (PLAN.md steps 5-6)
+
+- `src/wnf/_.c`: real two-phase stack-machine reducer (enter/apply)
+  modeled on HVM4's clang/wnf/_.c.  Pushes APP / DP0 / DP1 frames at
+  enter, dispatches active-pair interactions at apply, rebuilds stuck
+  nodes by writing the reduced head back into the heap cell.
+- `src/interact/app_lam.c`: real APP-LAM beta (`(lam x.body) arg`
+  substitutes `arg` at the binder loc and continues into `body`).
+- `src/interact/app_era.c`: APP-ERA (erased function yields ERA).
+- `src/interact/dup_sup.c`: DUP-SUP same-label annihilation.  The
+  commuting (different-label) case is left stuck for now; a test will
+  drive the implementation when needed.
+- `src/interact/dup_era.c`: DUP-ERA (both projections receive ERA via
+  `heap_subst_cop`).
+- `src/heap/subst_cop.c`: pair-substitution helper used by both
+  DUP-style interactions; substitutes one side and returns the other.
+- `src/thvm.h`: declares the new `interact_*` and `heap_subst_cop`
+  signatures.
+- `tests/test_app_lam.c`, `tests/test_era.c`, `tests/test_dup_sup.c`:
+  removed the `PENDING(...)` gates and added ITRS-counter assertions
+  so each test verifies the specific interaction fires (and only
+  fires once).
+- `wl/THVMLink/Tests/core.wlt`: three new VerificationTests covering
+  APP-LAM, APP-ERA, and same-label DUP-SUP through the LibraryLink
+  bridge.
+- `Makefile`: moved `SRC :=` definition above the `$(WL_LIB)` rule so
+  `make wl` correctly retriggers when any C runtime file changes.
+
+`make test` -> 91 C checks pass.  `make wl-test` -> 14 WL tests pass.
+
 ### Added: WL paclet (PLAN.md step 4)
 
 - `wl/THVMLink/` paclet that exposes the C runtime to Wolfram

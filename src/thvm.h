@@ -97,18 +97,20 @@ fn Term term_sub_set(Term t, u8 sub);
 fn u64  heap_alloc(u64 size);
 fn Term heap_read(u64 loc);
 fn void heap_set(u64 loc, Term t);
-fn Term heap_take(u64 loc);          // read + zero
+fn Term heap_take(u64 loc);                                 // read + zero
 fn void heap_subst_var(u64 loc, Term value);
+fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1); // pair subst
 
 // === interact/ ===
-// One file per active pair. Stubbed in step 2/3; filled in step 6.
-
+// One file per active pair.  Each rule increments ITRS when it fires.
 fn Term interact_app_lam(Term lam, Term arg);
+fn Term interact_app_era(void);
+fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup);
+fn Term interact_dup_era(u8 side, u64 loc, Term era);
 
 // === wnf/ ===
-// Stack-machine reducer to weak normal form. Stub returns input unchanged
-// until step 6 replaces it.
-
+// Stack-machine reducer to weak normal form.  See src/wnf/_.c for the
+// enter/apply protocol.
 fn Term wnf(Term t);
 
 // === runtime lifecycle ===

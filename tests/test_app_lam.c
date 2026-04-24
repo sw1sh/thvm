@@ -1,10 +1,7 @@
 // test_app_lam.c - APP-LAM beta reduction.
 //
-// (λx.x) y          → y
-// (λx.x) (λy.y)     → (λy.y)
-//
-// Spec test. Implementation lands in step 6 (wnf stack machine + the
-// real interact_app_lam). Until then, the body is gated by PENDING().
+// (lam x.x) y          -> y
+// (lam x.x) (lam y.y)  -> (lam y.y)
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -28,23 +25,23 @@ static Term build_app(Term f, Term x) {
 int main(void) {
   thvm_init();
 
-  PENDING("APP-LAM - wnf stack machine + interact_app_lam land in step 6");
-
-  // The body below is the spec. It runs once PENDING is removed.
-
   TEST_BEGIN("app-lam/identity-applied-to-era");
-  Term era = term_new(0, TAG_ERA, 0, 0);
-  Term id1 = build_id_lam();
-  Term app = build_app(id1, era);
-  Term out = wnf(app);
-  CHECK_EQ(term_tag(out), TAG_ERA);
+  Term era  = term_new(0, TAG_ERA, 0, 0);
+  Term id1  = build_id_lam();
+  Term app1 = build_app(id1, era);
+  u64  itrs_before = ITRS;
+  Term out1 = wnf(app1);
+  CHECK_EQ(term_tag(out1), TAG_ERA);
+  CHECK_EQ(ITRS - itrs_before, 1);  // exactly one APP-LAM fired
 
   TEST_BEGIN("app-lam/identity-applied-to-identity");
-  Term id2 = build_id_lam();
-  Term id3 = build_id_lam();
+  Term id2  = build_id_lam();
+  Term id3  = build_id_lam();
   Term app2 = build_app(id2, id3);
   Term out2 = wnf(app2);
   CHECK_EQ(term_tag(out2), TAG_LAM);
+  // The substituted lambda survives -- its binder loc is id3's loc.
+  CHECK_EQ(term_val(out2), term_val(id3));
 
   thvm_free();
   TEST_REPORT();

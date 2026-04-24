@@ -8,7 +8,7 @@
    THeap, TTagName).
 *)
 
-BeginPackage["THVMLink`"];
+BeginPackage["THVMLink`", {"GeneralUtilities`"}];
 
 (* === lifecycle === *)
 TInit::usage      = "TInit[] initializes the runtime.  Returns True.";
@@ -142,7 +142,7 @@ TItrs[]          := $itrsFn[]
 (* heapWith[v1, v2, ...]   alloc Length[{vs}] cells, write the values into
                            them in order, return the base loc. *)
 heapWith[fields__] := With[{loc = THeapAlloc[Length[{fields}]]},
-    MapIndexed[THeapSet[loc + First[#2] - 1, #1] &, {fields}];
+    ScanIndexed[THeapSet[loc + First[#2] - 1, #1] &, {fields}];
     loc
 ]
 

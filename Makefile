@@ -14,6 +14,11 @@ TESTS := \
   $(BIN)/test_era \
   $(BIN)/test_dup_sup
 
+# Every C and header file under src/, plus the test harness header.
+# Used as a prerequisite by both the C tests and the WL bridge so any
+# runtime change retriggers a rebuild.
+SRC := $(shell find src -name '*.c' -o -name '*.h') tests/test.h
+
 .PHONY: all test clean wl wl-test
 all: $(TESTS)
 
@@ -70,9 +75,6 @@ wl-test: $(WL_LIB)
 
 $(BIN):
 	@mkdir -p $@
-
-# Each test depends on every src/*.c (single-TU build) and the harness header.
-SRC := $(shell find src -name '*.c' -o -name '*.h') tests/test.h
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) -o $@ $<
