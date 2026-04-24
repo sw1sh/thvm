@@ -68,11 +68,62 @@ typedef u64 Term;
 #define TAG_SUP  6   // {a, b}.            Heap[loc..loc+1] = [a, b]; ext = label
 #define TAG_DUP  7   // ! &L{x0,x1} = e; … val = dup loc; Heap[loc] = e
 
-#define TAG_COUNT 8
+// === Tensor tags (PLAN.md step 12) ===
+// See docs/tensors.md for the full design.
+
+#define TAG_TEN  8   // tensor handle.    atom; val = tensor id, ext = dtype
+#define TAG_UOP  9   // uop graph node.   val = heap loc, ext = opcode
+#define TAG_NUM  10  // 32-bit scalar.    atom; val = raw u32 / f32 bits, ext = dtype
+
+#define TAG_COUNT 11
+
+// === Dtypes ===
+#define DT_F32   0
+#define DT_I32   1
+#define DT_COUNT 2
 
 // === Capacities ===
 #define HEAP_CAP (1ULL << 24)   // 16M cells * 8B = 128 MiB. Plenty for tests.
 #define WNF_CAP  (1ULL << 16)   // 64K stack slots.
+#define TENS_CAP (1ULL << 16)   // 64K tensor descriptor slots.
+#define MAX_DIM  8              // max tensor rank
+
+// === Tensor descriptor + backend ===
+
+typedef struct {
+  u32 ndim;
+  u32 dims[MAX_DIM];
+} Shape;
+
+typedef struct {
+  Shape shape;
+  i32   strides[MAX_DIM];       // 0 = broadcast, negative = flip
+  i32   offset;                 // element offset into buffer
+  u32   numel;                  // product of shape
+  u8    contiguous;             // 1 if row-major from offset 0
+} View;
+
+typedef struct Backend Backend;
+
+typedef struct {
+  u32      dtype;               // DT_F32 / DT_I32 / ...
+  u32      refcount;            // shared by DUP; decremented by ERA
+  View     view;                // single view for step 12; ShapeTracker in step 14
+  u32      buf_id;              // backend buffer handle (0 = no buffer yet)
+  Backend *backend;             // vtable
+} TenDesc;
+
+struct Backend {
+  u32   id;
+  int   (*init)(void);
+  void  (*shutdown)(void);
+  u32   (*buf_alloc)(u64 nbytes);
+  void  (*buf_free) (u32 buf_id);
+  void  (*buf_incref)(u32 buf_id);
+  void  (*buf_decref)(u32 buf_id);
+  int   (*buf_read) (u32 buf_id, void *dst, u64 nbytes);
+  int   (*buf_write)(u32 buf_id, const void *src, u64 nbytes);
+};
 
 // === Globals ===
 // Single-threaded for now. Extern in the header, defined in src/thvm.c.
@@ -84,6 +135,11 @@ extern Term *WNF_STACK;
 extern u32   WNF_S_POS;
 
 extern u64   ITRS;   // interaction counter (for tests + tracing)
+
+extern TenDesc *TENS;       // tensor descriptor side table
+extern u32      TENS_NEXT;  // bump allocator cursor
+
+extern Backend *CURRENT_BACKEND;  // installed by thvm_init
 
 // === term/ ===
 fn Term term_new(u8 sub, u8 tag, u32 ext, u64 val);
@@ -108,6 +164,25 @@ fn Term interact_app_era(void);
 fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup);
 fn Term interact_dup_era(u8 side, u64 loc, Term era);
 fn Term interact_dup_lam(u32 lab, u64 loc, u8 side, Term lam);
+
+// === tensor/ ===
+// Tensor descriptor lifecycle.  Step 12: bump-only allocation in TENS[];
+// refcount + backend-level buffer refcount govern the buffer lifetime.
+fn u32  tensor_alloc  (Backend *b, Shape shape, u32 dtype);
+fn void tensor_incref (u32 id);
+fn void tensor_decref (u32 id);
+fn void tensor_release(u32 id);   // decref + buf_decref; free at 0
+fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
+
+// === view/ ===
+// Build a contiguous View from a Shape.  Step 14 adds the movement ops
+// (reshape / permute / expand / pad / shrink / flip).
+fn View view_create(Shape shape);
+
+// === backend/ ===
+// CPU backend -- only backend for step 12.  Installed by thvm_init.
+// Metal lands in step 14 behind the same Backend struct.
+extern Backend CPU_BACKEND;
 
 // === wnf/ ===
 // Stack-machine reducer to weak normal form.  See src/wnf/_.c for the

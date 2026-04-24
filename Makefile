@@ -13,7 +13,8 @@ TESTS := \
   $(BIN)/test_app_lam \
   $(BIN)/test_era \
   $(BIN)/test_dup_sup \
-  $(BIN)/test_dup_lam
+  $(BIN)/test_dup_lam \
+  $(BIN)/test_tensor
 
 # Every C and header file under src/, plus the test harness header.
 # Used as a prerequisite by both the C tests and the WL bridge so any
