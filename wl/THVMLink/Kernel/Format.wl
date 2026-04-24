@@ -21,12 +21,8 @@ tHeapPayloadQ[___] := False
 tHeapQ[THeap[a_Association]] := tHeapPayloadQ[a]
 tHeapQ[___] := False
 
-tTermInfoPayloadQ[a_Association] :=
-    KeyExistsQ[a, "tag"] && KeyExistsQ[a, "tagName"] && KeyExistsQ[a, "raw"]
-tTermInfoPayloadQ[___] := False
-
-tTermInfoQ[TTermInfo[a_Association]] := tTermInfoPayloadQ[a]
-tTermInfoQ[___] := False
+tTermQ[TTerm[id_Integer]] := True
+tTermQ[___] := False
 
 (* === icons (small thumbnails for the summary box) === *)
 
@@ -73,24 +69,25 @@ THeap /: MakeBoxes[s_THeap /; tHeapQ[Unevaluated[s]], fmt_] := With[{
     ]
 ]
 
-TTermInfo /: MakeBoxes[ti_TTermInfo /; tTermInfoQ[Unevaluated[ti]], fmt_] := With[{
-    a = First[ti],
+TTerm /: MakeBoxes[t_TTerm /; tTermQ[Unevaluated[t]], fmt_] := With[{
+    id   = First[t],
     icon = termSummaryIcon[]
 },
     BoxForm`ArrangeSummaryBox[
-        "TTermInfo",
-        ti,
+        "TTerm",
+        t,
         icon,
         {
             {
-                BoxForm`SummaryItem[{"tag: ", Row[{a["tagName"], "@", a["val"]}]}],
-                BoxForm`SummaryItem[{"ext: ", a["ext"]}]
+                BoxForm`SummaryItem[{"tag: ",
+                    Row[{TTagName[$termTagFn[id]], "@", $termValFn[id]}]}],
+                BoxForm`SummaryItem[{"ext: ", $termExtFn[id]}]
             }
         },
         {
             {
-                BoxForm`SummaryItem[{"sub: ", a["sub"]}],
-                BoxForm`SummaryItem[{"raw: ", a["raw"]}]
+                BoxForm`SummaryItem[{"sub: ", $termSubFn[id]}],
+                BoxForm`SummaryItem[{"raw: ", id}]
             }
         },
         fmt,

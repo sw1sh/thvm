@@ -15,14 +15,13 @@ TInit::usage      = "TInit[] initializes the runtime.  Returns True.";
 TFree::usage      = "TFree[] tears the runtime down.";
 TReset::usage     = "TReset[] zeroes the heap, the WNF stack, and the interaction counter.";
 
-(* === term primitives (raw, scalar) === *)
-TTermNew::usage   = "TTermNew[sub, tag, ext, val] packs a 64-bit Term.";
-TTermTag::usage   = "TTermTag[term] returns the tag (Integer).";
+(* === atomic term object === *)
+TTerm::usage      = "TTerm[id_Integer] wraps a packed 64-bit Term value.  Construct via TLam / TApp / TSup / TDup / TEra / TVarFor; or directly TTerm[<rawInteger>].  Indexing is supported: TTerm[id][\"tag\"|\"ext\"|\"val\"|\"sub\"|\"tagName\"|\"raw\"].";
+TTermTag::usage   = "TTermTag[term] returns the tag (Integer).  Accepts either a TTerm or a raw Integer.";
 TTermExt::usage   = "TTermExt[term] returns the EXT field.";
 TTermVal::usage   = "TTermVal[term] returns the VAL field (heap loc, etc.).";
 TTermSub::usage   = "TTermSub[term] returns the SUB flag (0 or 1).";
 TTagName::usage   = "TTagName[tag] returns a string for a tag id.";
-TTermInfo::usage  = "TTermInfo[term] returns an Association decoding sub/tag/ext/val.";
 
 (* === heap === *)
 THeapPos::usage   = "THeapPos[] returns the next free heap location.";
@@ -104,49 +103,65 @@ $labelCounter = 1;
 TFreshLabel[] := Block[{n = $labelCounter}, $labelCounter += 1; n]
 
 (* === public API === *)
-TInit[]      := ($labelCounter = 1; $initFn[] === 1)
-TFree[]      := $freeFn[]
-TReset[]     := ($labelCounter = 1; $resetFn[])
+$initialized = False
 
-TTermNew[sub_Integer, tag_Integer, ext_Integer, val_Integer] :=
-    $termNewFn[sub, tag, ext, val]
+(* Any op that touches the heap calls ensureInit[] first.  TInit /
+   TReset / TFree all flip $initialized themselves so a manual
+   teardown still does the right thing. *)
+ensureInit[] := If[ ! $initialized, TInit[]]
 
-TTermTag[t_Integer] := $termTagFn[t]
-TTermExt[t_Integer] := $termExtFn[t]
-TTermVal[t_Integer] := $termValFn[t]
-TTermSub[t_Integer] := $termSubFn[t]
+TInit[]      := ($labelCounter = 1; $initialized = True; $initFn[] === 1)
+TFree[]      := ($initialized = False; $freeFn[])
+TReset[]     := ($labelCounter = 1; ensureInit[]; $resetFn[])
 
-(* === atomic-object plumbing for THeap and TTermInfo ===
-   QuantumFramework-style: a constructor (TTermInfo[t_Integer], THeap[])
-   builds an atomic form (TTermInfo[<|...|>], THeap[<|...|>]) with a
-   custom MakeBoxes UpValue defined in Format.wl.  Indexing forwards
-   to the underlying Association so callers see the same access shape
-   as before (snap["Graph"], info["tag"], etc.). *)
+(* === TTerm atomic object ===
+   `TTerm[id_Integer]` is the canonical wrapper around a packed 64-bit
+   `Term` value.  All constructors (TLam, TApp, TSup, TDup, TEra,
+   TVarFor) return TTerm-wrapped values; all inspectors and the heap
+   API accept either a TTerm or a raw `Integer` so internal helpers
+   (heapWith, etc.) can stay scalar-friendly.  The MakeBoxes summary
+   box for TTerm lives in Format.wl. *)
 
-TTermInfo[t_Integer] := TTermInfo[<|
-    "sub"     -> TTermSub[t],
-    "tag"     -> TTermTag[t],
-    "tagName" -> TTagName[TTermTag[t]],
-    "ext"     -> TTermExt[t],
-    "val"     -> TTermVal[t],
-    "raw"     -> t
-|>]
+(* Internal: pull the raw Integer out of a TTerm or pass through. *)
+ttermRaw[TTerm[id_Integer]] := id
+ttermRaw[id_Integer]        := id
 
-TTermInfo[a_Association][k_] := a[k]
-TTermInfo /: KeyExistsQ[TTermInfo[a_Association], k_] := KeyExistsQ[a, k]
-TTermInfo /: Keys[TTermInfo[a_Association]]          := Keys[a]
-TTermInfo /: Values[TTermInfo[a_Association]]        := Values[a]
-TTermInfo /: Normal[TTermInfo[a_Association]]        := a
+(* Pack a fresh TTerm from raw fields.  Private; callers use the
+   high-level constructors. *)
+packTerm[sub_Integer, tag_Integer, ext_Integer, val_Integer] :=
+    TTerm[$termNewFn[sub, tag, ext, val]]
 
-THeapPos[]                       := $heapPosFn[]
-THeapAlloc[size_Integer]         := $heapAllocFn[size]
-THeapRead[loc_Integer]           := $heapReadFn[loc]
-THeapSet[loc_Integer, t_Integer] := $heapSetFn[loc, t]
+(* Inspectors accept either TTerm or Integer. *)
+TTermTag[t_]                    := $termTagFn[ttermRaw[t]]
+TTermExt[t_]                    := $termExtFn[ttermRaw[t]]
+TTermVal[t_]                    := $termValFn[ttermRaw[t]]
+TTermSub[t_]                    := $termSubFn[ttermRaw[t]]
 
-TWnf[t_Integer]  := $wnfFn[t]
-TItrs[]          := $itrsFn[]
+(* TTerm methods: TTerm[id]["tag"], etc. *)
+TTerm[id_Integer]["raw"]        := id
+TTerm[id_Integer]["tag"]        := $termTagFn[id]
+TTerm[id_Integer]["ext"]        := $termExtFn[id]
+TTerm[id_Integer]["val"]        := $termValFn[id]
+TTerm[id_Integer]["sub"]        := $termSubFn[id]
+TTerm[id_Integer]["tagName"]    := TTagName[$termTagFn[id]]
+TTerm[id_Integer]["info"]       := <|
+    "sub"     -> $termSubFn[id],
+    "tag"     -> $termTagFn[id],
+    "tagName" -> TTagName[$termTagFn[id]],
+    "ext"     -> $termExtFn[id],
+    "val"     -> $termValFn[id],
+    "raw"     -> id
+|>
 
-(* === high-level constructors === *)
+THeapPos[]                       := (ensureInit[]; $heapPosFn[])
+THeapAlloc[size_Integer]         := (ensureInit[]; $heapAllocFn[size])
+THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
+THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
+
+TWnf[t_]         := (ensureInit[]; TTerm[$wnfFn[ttermRaw[t]]])
+TItrs[]          := (ensureInit[]; $itrsFn[])
+
+(* === high-level constructors (all return TTerm) === *)
 
 heapWith[fields__] := With[{loc = THeapAlloc[Length[{fields}]]},
     ScanIndexed[THeapSet[loc + First[#2] - 1, #1] &, {fields}];
@@ -154,25 +169,25 @@ heapWith[fields__] := With[{loc = THeapAlloc[Length[{fields}]]},
 ]
 
 heapTerm[tag_Integer, ext_Integer, fields__] :=
-    TTermNew[0, tag, ext, heapWith[fields]]
+    packTerm[0, tag, ext, heapWith[fields]]
 
-TEra[]                  := TTermNew[0, $TagERA, 0, 0]
-TVarFor[lamLoc_Integer] := TTermNew[0, $TagVAR, 0, lamLoc]
+TEra[]                  := packTerm[0, $TagERA, 0, 0]
+TVarFor[lamLoc_Integer] := packTerm[0, $TagVAR, 0, lamLoc]
 
-TApp[fun_Integer, arg_Integer]            := heapTerm[$TagAPP, 0,     fun, arg]
+TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg]
 
-TSup[a_Integer, b_Integer]                := TSup[TFreshLabel[], a, b]
-TSup[label_Integer, a_Integer, b_Integer] := heapTerm[$TagSUP, label, a, b]
+TSup[a_, b_]                          := TSup[TFreshLabel[], a, b]
+TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]
 
 TLam[builder_] := With[{loc = THeapAlloc[1]},
     THeapSet[loc, builder[TVarFor[loc]]];
-    TTermNew[0, $TagLAM, 0, loc]
+    packTerm[0, $TagLAM, 0, loc]
 ]
 
-TDup[body_Integer, k_]                        := TDup[TFreshLabel[], body, k]
-TDup[label_Integer, body_Integer, k_] := With[{loc = heapWith[body]},
-    k[TTermNew[0, $TagDP0, label, loc],
-      TTermNew[0, $TagDP1, label, loc]]
+TDup[body_, k_]                       := TDup[TFreshLabel[], body, k]
+TDup[label_Integer, body_, k_] := With[{loc = heapWith[body]},
+    k[packTerm[0, $TagDP0, label, loc],
+      packTerm[0, $TagDP1, label, loc]]
 ]
 
 (* === heap graph rendering ===
@@ -183,7 +198,7 @@ THeap[] := Block[{n = THeapPos[]},
     THeap[<|
         "nextLoc" -> n,
         "cells"   -> Association @ Table[
-            i -> TTermInfo[THeapRead[i]],
+            i -> THeapRead[i],
             {i, 0, n - 1}
         ],
         "Graph"   -> THeapGraph[]

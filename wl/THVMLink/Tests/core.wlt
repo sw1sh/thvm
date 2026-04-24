@@ -26,14 +26,37 @@ VerificationTest[
     TestID -> "THeapPos starts at 0"
 ]
 
-(* === term packing === *)
+VerificationTest[
+    (* TFree leaves the runtime uninitialized; the next heap op should
+       silently re-init via ensureInit[]. *)
+    (TFree[]; THeapPos[]),
+    0,
+    TestID -> "ensureInit auto-runs TInit on first heap op"
+]
+
+(* === TTerm atomic wrapper === *)
 
 VerificationTest[
-    Module[{t = TTermNew[1, $TagDUP, 12345, 999]},
-        {TTermSub[t], TTermTag[t], TTermExt[t], TTermVal[t], TTagName[TTermTag[t]]}
-    ],
-    {1, $TagDUP, 12345, 999, "DUP"},
-    TestID -> "term packing roundtrip"
+    (TReset[]; Module[{t = TEra[]},
+        {Head[t], t["tagName"], t["sub"], IntegerQ[t["raw"]]}]),
+    {TTerm, "ERA", 0, True},
+    TestID -> "TEra returns a TTerm with ERA tag"
+]
+
+VerificationTest[
+    (* Inspectors accept either the wrapper or the raw integer. *)
+    (TReset[]; Module[{t = TEra[]},
+        {TTermTag[t], TTermTag[t["raw"]]}]),
+    {$TagERA, $TagERA},
+    TestID -> "TTermTag accepts TTerm or raw Integer"
+]
+
+VerificationTest[
+    (* TTerm[id] indexing covers all the per-field accessors. *)
+    (TReset[]; Module[{t = TLam[var |-> var]},
+        {t["tag"], t["tagName"], t["val"], t["sub"]}]),
+    {$TagLAM, "LAM", 0, 0},
+    TestID -> "TTerm[id][\"tag/tagName/val/sub\"] forwards to bridge"
 ]
 
 (* === heap === *)

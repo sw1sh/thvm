@@ -21,7 +21,8 @@ eraVertexId[loc_Integer]    := "e" <> ToString[loc]
 
 (* === agent / ERA discovery === *)
 
-agentFromTerm[term_Integer] := Switch[TTermTag[term],
+(* Accepts either a TTerm or a raw Integer; TTermTag / TTermVal handle both. *)
+agentFromTerm[term_] := Switch[TTermTag[term],
     $TagLAM | $TagAPP | $TagSUP | $TagDUP, TTermVal[term] -> TTermTag[term],
     $TagVAR,                               TTermVal[term] -> $TagLAM,
     $TagDP0 | $TagDP1,                     TTermVal[term] -> $TagDUP,
@@ -136,9 +137,9 @@ agentLabel[base_Integer, tag_Integer] := With[{arity = Length[agentPorts[tag]]},
 
 (* === main entry point === *)
 
-THeapGraph[]              := buildHeapGraph[discoverAgents[{}]]
-THeapGraph[term_Integer]  := buildHeapGraph[discoverAgents[{term}]]
-THeapGraph[ts_List]       := buildHeapGraph[discoverAgents[ts]]
+THeapGraph[]                := buildHeapGraph[discoverAgents[{}]]
+THeapGraph[ts_List]         := buildHeapGraph[discoverAgents[ts]]
+THeapGraph[term_]           := buildHeapGraph[discoverAgents[{term}]]
 
 buildHeapGraph[agents_Association] := Block[{
     eras = discoverEras[],
