@@ -138,3 +138,130 @@ VerificationTest[
     {{100.0}, {20.0, 20.0, 20.0}},
     TestID -> "nn/grad-through-square-of-dot"
 ]
+
+(* === multi-input loss: (sum(w*x) + sum(v*x))^2 ===
+   d/dx = 2*(w.x + v.x)*(w + v).  Two dot-product "heads" combined
+   into a single loss; checks that the chain rule sums correctly
+   across multiple paths to the same target. *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    w = TTensorCreate @ NumericArray[{1.0, 0.0, 0.0}, "Real32"];
+    v = TTensorCreate @ NumericArray[{0.0, 1.0, 0.0}, "Real32"];
+    loss = TSquare[TUOpAdd[TDot[w, x], TDot[v, x]]];
+    (* w.x = 1, v.x = 2, sum = 3, square = 9.  d/dx = 2*3*(w+v) = 6*{1,1,0} *)
+    {Normal @ TTensorData[TRealize[loss]],
+     Normal @ TTensorData[TRealize[TGrad[loss, x]]]},
+    {{9.0}, {6.0, 6.0, 0.0}},
+    TestID -> "nn/two-head-square-loss"
+]
+
+(* === MSE through a dot product ===
+   pred = w.x; loss = (pred - t)^2.  d/dw = 2*(pred-t)*x; d/dx = 2*(pred-t)*w. *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{2.0, 3.0, 4.0}, "Real32"];
+    w = TTensorCreate @ NumericArray[{1.0, 1.0, 1.0}, "Real32"];
+    t = TTensorCreate @ NumericArray[{5.0},           "Real32"];
+    pred = TDot[w, x];                       (* 2+3+4 = 9 *)
+    loss = TMSELoss[pred, t];                (* (9-5)^2 = 16 *)
+    {Normal @ TTensorData[TRealize[loss]],
+     Normal @ TTensorData[TRealize[TGrad[loss, w]]],
+     Normal @ TTensorData[TRealize[TGrad[loss, x]]]},
+    {{16.0}, {16.0, 24.0, 32.0}, {8.0, 8.0, 8.0}},
+    (* d/dw = 2*4*x = {16, 24, 32};  d/dx = 2*4*w = {8, 8, 8} *)
+    TestID -> "nn/mse-grad-wrt-w-and-x"
+]
+
+(* === SGD step: take one gradient step, verify loss decreased ===
+   For loss = (w.x - t)^2, stepping w by -lr * d(loss)/dw must
+   strictly reduce the loss for small lr.  Pure numeric end-to-end
+   sanity check that the gradient direction is correct. *)
+
+VerificationTest[
+    TInit[];
+    xData = NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    wData = NumericArray[{0.5, 0.5, 0.5}, "Real32"];
+    tData = NumericArray[{10.0},          "Real32"];
+
+    x = TTensorCreate @ xData;
+    w = TTensorCreate @ wData;
+    t = TTensorCreate @ tData;
+
+    pred0     = TDot[w, x];                          (* 0.5*1 + 0.5*2 + 0.5*3 = 3 *)
+    loss0     = TMSELoss[pred0, t];                   (* (3-10)^2 = 49 *)
+    loss0Num  = First @ Normal @ TTensorData @ TRealize[loss0];
+    g         = TRealize @ TGrad[loss0, w];           (* 2*(-7)*x = {-14,-28,-42} *)
+    gNorm     = Normal @ TTensorData[g];
+
+    (* Manual SGD step on host arrays, then re-evaluate loss with the
+       new weights.  Re-init so the new graph starts on a fresh heap. *)
+    lr     = 0.01;
+    wNext  = MapThread[Subtract,
+        {Normal @ wData, lr * gNorm}];
+    TInit[];
+    xN = TTensorCreate @ xData;
+    wN = TTensorCreate @ NumericArray[wNext, "Real32"];
+    tN = TTensorCreate @ tData;
+    loss1 = First @ Normal @ TTensorData @
+        TRealize @ TMSELoss[TDot[wN, xN], tN];
+
+    {gNorm, loss0Num, loss1 < loss0Num},
+    {{-14.0, -28.0, -42.0}, 49.0, True},
+    TestID -> "nn/sgd-step-reduces-loss"
+]
+
+(* === multi-step gradient descent: loss should monotonically drop ===
+   Three SGD steps on (w.x - t)^2; just check loss[i] > loss[i+1]. *)
+
+VerificationTest[
+    TInit[];
+    xData = NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    tData = NumericArray[{10.0},          "Real32"];
+    wHost = {0.5, 0.5, 0.5};
+    lr    = 0.005;
+    losses = Reap[
+        Do[
+            TInit[];
+            x  = TTensorCreate @ xData;
+            wT = TTensorCreate @ NumericArray[wHost, "Real32"];
+            t  = TTensorCreate @ tData;
+            loss = TMSELoss[TDot[wT, x], t];
+            Sow[First @ Normal @ TTensorData @ TRealize[loss]];
+            g = Normal @ TTensorData @ TRealize @ TGrad[loss, wT];
+            wHost = MapThread[Subtract, {wHost, lr * g}],
+            {3}
+        ]
+    ][[2, 1]];
+    {losses[[1]] > losses[[2]], losses[[2]] > losses[[3]]},
+    {True, True},
+    TestID -> "nn/gd-loss-monotonically-decreases"
+]
+
+(* === polynomial regression-ish: fit y = a*x^2 + b*x against a
+   sample, take one SGD step on (a, b), verify direction. ===
+
+   loss = ((a*x^2 + b*x) - target)^2.  Pick a=1, b=1, x=2, target=10.
+       pred  = 1*4 + 1*2 = 6
+       err   = pred - target = -4
+       loss  = 16
+       d/da  = 2 * err * x^2 = 2 * -4 * 4 = -32
+       d/db  = 2 * err * x   = 2 * -4 * 2 = -16
+*)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+    x = TTensorCreate @ NumericArray[{2.0}, "Real32"];
+    t = TTensorCreate @ NumericArray[{10.0}, "Real32"];
+    pred = TUOpAdd[TUOpMul[a, TSquare[x]], TUOpMul[b, x]];
+    loss = TMSELoss[pred, t];
+    {Normal @ TTensorData @ TRealize[loss],
+     Normal @ TTensorData @ TRealize[TGrad[loss, a]],
+     Normal @ TTensorData @ TRealize[TGrad[loss, b]]},
+    {{16.0}, {-32.0}, {-16.0}},
+    TestID -> "nn/poly-regression-gradients"
+]

@@ -6,6 +6,27 @@ dated section.
 
 ## Unreleased
 
+### Added: NN training-step numerics + per-render TimeConstrained budget
+
+`nn.wlt` grew five training-flavoured cases on top of the layer
+helpers:
+- two-head square loss `(w.x + v.x)^2`, gradient sums across both
+  paths to the same target;
+- MSE through a dot product checked w.r.t. both `w` and `x`;
+- one SGD step on `(w.x - t)^2` confirms the gradient direction
+  reduces the loss;
+- three-step gradient descent verifies loss is monotonically
+  non-increasing;
+- polynomial-regression-ish `(a x^2 + b x - t)^2` checks both
+  partials.
+
+`wl/Examples/run.wls` wraps each render in `TimeConstrained` (30 s
+budget per heap-graph / IC-diagram render).  Dense tensor graphs
+(NN-style compositions) sometimes blow the IC layout up by 100x and
+hung the whole batch; now the over-budget render is skipped and
+logged with `[skip] ... (over 30s)` so the rest of the examples
+keep going.
+
 ### Added: NN.wl -- Wolfram NeuralNetworks layer -> TUOp graph converter
 
 `wl/THVMLink/Kernel/NN.wl` lets users build the UOp graph by feeding

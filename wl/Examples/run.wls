@@ -70,6 +70,23 @@ renderHeap[term_, file_] :=
 renderDiagram[term_, file_] :=
     exportPng[file, THeapDiagram[term]["Arrange"]["Grid", "PortLabels" -> False]]
 
+(* Per-render time budget (seconds).  Dense tensor graphs (e.g. the
+   gradient of MSE through a dot product) blow the IC string-diagram
+   layout up by 100x; rather than hang the whole batch we let
+   TimeConstrained abort that one render and keep going. *)
+$renderBudget = 30;
+
+renderWithBudget[label_String, file_String, body_] := With[{
+    result = TimeConstrained[body; True, $renderBudget, $TimedOut]
+},
+    Switch[result,
+        True,      debugPrint["[ok] ",   label, " -> ", file],
+        $TimedOut, debugPrint["[skip] ", label, " -> ", file,
+                              " (over ", $renderBudget, "s)"],
+        _,         debugPrint["[err] ",  label, " -> ", file]
+    ]
+]
+
 renderFile[wlFile_String] := Block[{
     base, pngFile, diagFile, wnfPng, wnfDiagFile, term, reduced,
     isWnfExample
@@ -90,13 +107,11 @@ renderFile[wlFile_String] := Block[{
     ];
 
     (* Pre-reduce heap graph (always). *)
-    renderHeap[term, pngFile];
-    debugPrint["[ok] ", wlFile, " -> ", pngFile];
+    renderWithBudget[wlFile, pngFile, renderHeap[term, pngFile]];
 
     (* Pre-reduce IC diagram for the canonical term.wl. *)
     If[ base === "term",
-        renderDiagram[term, diagFile];
-        debugPrint["[ok] ", wlFile, " -> ", diagFile]
+        renderWithBudget[wlFile, diagFile, renderDiagram[term, diagFile]]
     ];
 
     (* Post-reduce graphs for grad- prefixed examples: TWnf returns
@@ -104,10 +119,8 @@ renderFile[wlFile_String] := Block[{
        seed so the new ADD/MUL/CONST sub-graph is reachable. *)
     If[ isWnfExample && base === "term",
         reduced = TWnf[term];
-        renderHeap[reduced, wnfPng];
-        debugPrint["[ok] ", wlFile, " -> ", wnfPng];
-        renderDiagram[reduced, wnfDiagFile];
-        debugPrint["[ok] ", wlFile, " -> ", wnfDiagFile]
+        renderWithBudget[wlFile, wnfPng,      renderHeap[reduced, wnfPng]];
+        renderWithBudget[wlFile, wnfDiagFile, renderDiagram[reduced, wnfDiagFile]]
     ];
 
     TFree[];
