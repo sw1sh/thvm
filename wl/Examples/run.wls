@@ -54,12 +54,33 @@ termFiles[dir_String] := Select[
     FileBaseName[#] === "term" &
 ]
 
+(* exportPng[file, expr] -- shared PNG exporter used for both heap
+   graphs and IC string diagrams.  Background is the dark canvas
+   that LightDarkSwitched-aware styling targets. *)
+exportPng[file_String, expr_] := Export[
+    file,
+    Style[expr, Background -> GrayLevel[0.12]],
+    "PNG",
+    ImageResolution -> 144
+]
+
+renderHeap[term_, file_] :=
+    exportPng[file, Style[THeapGraph[term, Background -> GrayLevel[0.12]], "DarkScheme"]]
+
+renderDiagram[term_, file_] :=
+    exportPng[file, THeapDiagram[term]["Arrange"]["Grid", "PortLabels" -> False]]
+
 renderFile[wlFile_String] := Block[{
-    base, pngFile, diagFile, term, graph, diagram
+    base, pngFile, diagFile, wnfPng, wnfDiagFile, term, reduced,
+    isWnfExample
 },
-    base     = FileBaseName[wlFile];
-    pngFile  = FileNameJoin[{DirectoryName[wlFile], base <> ".png"}];
-    diagFile = FileNameJoin[{DirectoryName[wlFile], "diagram.png"}];
+    base         = FileBaseName[wlFile];
+    pngFile      = FileNameJoin[{DirectoryName[wlFile], base <> ".png"}];
+    diagFile     = FileNameJoin[{DirectoryName[wlFile], "diagram.png"}];
+    wnfPng       = FileNameJoin[{DirectoryName[wlFile], base <> "-wnf.png"}];
+    wnfDiagFile  = FileNameJoin[{DirectoryName[wlFile], "diagram-wnf.png"}];
+    isWnfExample = StringStartsQ[FileNameTake[DirectoryName[wlFile]], "grad-"];
+
     TInit[];
     term = Get[wlFile];
     If[ $evalOnly,
@@ -67,30 +88,29 @@ renderFile[wlFile_String] := Block[{
         TFree[];
         Return[]
     ];
-    graph = THeapGraph[term, Background -> GrayLevel[0.12]];
-    Export[
-        pngFile,
-        Style[graph, "DarkScheme", Background -> GrayLevel[0.12]],
-        "PNG",
-        ImageResolution -> 144
-    ];
+
+    (* Pre-reduce heap graph (always). *)
+    renderHeap[term, pngFile];
     debugPrint["[ok] ", wlFile, " -> ", pngFile];
-    (* Only write diagram.png from the input term.wl (not the
-       reference term-reduced.wl etc.).  Diagram rendering uses the
-       Wolfram`DiagrammaticComputation`DiagramNetwork backend. *)
-    If[ base === "term",
-        diagram = THeapDiagram[term];
-        Export[
-            diagFile,
-            Style[
-                diagram["Arrange"]["Grid", "PortLabels" -> False],
-                Background -> GrayLevel[0.12]
-            ],
-            "PNG",
-            ImageResolution -> 144
-        ];
+
+    (* Pre-reduce IC diagram, only for the canonical term.wl in
+       IC-shaped examples.  Tensor graphs (grad- prefixed) aren't
+       IC nets so Diagram.wl produces an empty network for them;
+       render the heap-graph form only. *)
+    If[ base === "term" && ! isWnfExample,
+        renderDiagram[term, diagFile];
         debugPrint["[ok] ", wlFile, " -> ", diagFile]
     ];
+
+    (* Post-reduce heap graph for grad- prefixed examples: TWnf
+       returns the rewritten outermost term, which we use as the
+       discovery seed so the new ADD/MUL/CONST sub-graph is reachable. *)
+    If[ isWnfExample && base === "term",
+        reduced = TWnf[term];
+        renderHeap[reduced, wnfPng];
+        debugPrint["[ok] ", wlFile, " -> ", wnfPng]
+    ];
+
     TFree[];
 ]
 

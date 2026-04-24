@@ -5,36 +5,93 @@
    Defines THeapGraph (public) plus all the per-tag styling helpers
    used to turn the heap state into a Wolfram Graph.
 
+   Vertex identifier convention:  "<prefix><id>"
+       a<base>    IC compound (LAM/APP/SUP/DUP)  at args base <base>
+       e<loc>     ERA cell at heap loc <loc>
+       u<loc>     TAG_UOP at heap loc <loc>
+       t<id>      TAG_TEN at tensor id <id>
+
    Style follows wl/GUIDE.md: theme-aware Standard colors,
    LightDarkSwitched for fg/bg, real triangles for IC agents,
    labels drawn inside the vertex via Inset[Pane[...,
    ImageSizeAction -> "ShrinkToFit"]] so text auto-shrinks to fit.
+
+   The agents Association is keyed by full vertex id strings; each
+   value carries a small Association with at least "tag" + tag-specific
+   fields (opcode for TAG_UOP, base/loc for IC, etc).
 *)
 
 (* === per-tag ports + identifiers === *)
 
-agentPorts[$TagLAM] := {{0, "body"}}
-agentPorts[$TagAPP] := {{0, "f"}, {1, "x"}}
-agentPorts[$TagSUP] := {{0, "L"}, {1, "R"}}
-agentPorts[$TagDUP] := {{0, "body"}}
+(* Vertex-id constructors -- each tag has its own prefix so vertices
+   never collide across tags. *)
+icVertexId [base_Integer]    := "a" <> ToString[base]
+eraVertexId[loc_Integer]     := "e" <> ToString[loc]
+uopVertexId[loc_Integer]     := "u" <> ToString[loc]
+tenVertexId[id_Integer]      := "t" <> ToString[id]
 
-agentVertexId[base_Integer] := "a" <> ToString[base]
-eraVertexId[loc_Integer]    := "e" <> ToString[loc]
+(* IC agents have static port specs by tag.  Format: {offset, label}. *)
+icPorts[$TagLAM] := {{0, "body"}}
+icPorts[$TagAPP] := {{0, "f"}, {1, "x"}}
+icPorts[$TagSUP] := {{0, "L"}, {1, "R"}}
+icPorts[$TagDUP] := {{0, "body"}}
 
-(* === agent / ERA discovery === *)
+(* UOP arity by opcode -- only the *compute* sources are walked as
+   edges; argument cells (NUMs after the sources) stay implicit. *)
+uopComputeArity[$UopMaterialize] = 1;
+uopComputeArity[$UopKernel]      = 2;   (* output_buf, NUM(kid) -- kid skipped *)
+uopComputeArity[$UopConst]       = 0;
+uopComputeArity[$UopAdd]         = 2;
+uopComputeArity[$UopMul]         = 2;
+uopComputeArity[$UopCmplt]       = 2;
+uopComputeArity[$UopNeg]         = 1;
+uopComputeArity[$UopRecip]       = 1;
+uopComputeArity[$UopExp2]        = 1;
+uopComputeArity[$UopLog2]        = 1;
+uopComputeArity[$UopSqrt]        = 1;
+uopComputeArity[$UopReshape]     = 1;
+uopComputeArity[$UopPermute]     = 1;
+uopComputeArity[$UopExpand]      = 1;
+uopComputeArity[$UopPad]         = 1;
+uopComputeArity[$UopShrink]      = 1;
+uopComputeArity[$UopFlip]        = 1;
+uopComputeArity[$UopReduce]      = 1;
+uopComputeArity[$UopGrad]        = 3;
+uopComputeArity[_]               = 0;
 
-(* Accepts either a TTerm or a raw Integer; TTermTag / TTermVal handle both. *)
-agentFromTerm[term_] := Switch[TTermTag[term],
-    $TagLAM | $TagAPP | $TagSUP | $TagDUP, TTermVal[term] -> TTermTag[term],
-    $TagVAR,                               TTermVal[term] -> $TagLAM,
-    $TagDP0 | $TagDP1,                     TTermVal[term] -> $TagDUP,
-    _,                                     Nothing
+(* === discovery ===
+
+   discoverAll[seedTerms] walks every heap cell + every seed term,
+   produces an Association keyed by vertex-id string with values
+   <|"tag" -> tag, ...info...|>.  Three categories:
+
+     IC  : key = icVertexId[base];   info = {"tag" -> tag}
+     UOP : key = uopVertexId[loc];   info = {"tag" -> $TagUOP, "opcode" -> ext}
+     TEN : key = tenVertexId[id];    info = {"tag" -> $TagTEN, "dtype" -> ext}
+
+   ERAs are tracked separately because they live at the *cell* level,
+   not as a referenced agent. *)
+
+agentFromTerm[term_] := With[{tag = TTermTag[term]},
+    Switch[tag,
+        $TagLAM | $TagAPP | $TagSUP | $TagDUP,
+            icVertexId[TTermVal[term]] -> <|"tag" -> tag|>,
+        $TagVAR,
+            icVertexId[TTermVal[term]] -> <|"tag" -> $TagLAM|>,
+        $TagDP0 | $TagDP1,
+            icVertexId[TTermVal[term]] -> <|"tag" -> $TagDUP|>,
+        $TagUOP,
+            uopVertexId[TTermVal[term]] -> <|"tag" -> $TagUOP, "opcode" -> TTermExt[term]|>,
+        $TagTEN,
+            tenVertexId[TTermVal[term]] -> <|"tag" -> $TagTEN, "dtype" -> TTermExt[term]|>,
+        _,
+            Nothing
+    ]
 ]
 
-discoverAgents[seedTerms_List : {}] := Block[{n = THeapPos[], terms, rules},
+discoverAgents[seedTerms_List : {}] := Block[{n = THeapPos[], terms},
     terms = Join[seedTerms, Table[THeapRead[loc], {loc, 0, n - 1}]];
-    rules = agentFromTerm /@ terms;
-    Association[rules]
+    Association[agentFromTerm /@ terms]
 ]
 
 discoverEras[] := Block[{n = THeapPos[]},
@@ -43,70 +100,105 @@ discoverEras[] := Block[{n = THeapPos[]},
 
 (* === edge records === *)
 
-portRecord[base_Integer, offset_Integer, port_String] :=
+(* Walk one IC agent's compute slots, emit edge records of the
+   form {srcVertex, dstVertex, edgeLabel}. *)
+icPortRecord[base_Integer, offset_Integer, port_String] :=
     Block[{loc = base + offset, t, tag, val},
         t   = THeapRead[loc];
         tag = TTermTag[t];
         val = TTermVal[t];
         Switch[tag,
             $TagLAM | $TagAPP | $TagSUP | $TagDUP,
-                {agentVertexId[base], agentVertexId[val], port},
+                {icVertexId[base], icVertexId[val], port},
             $TagVAR,
-                {agentVertexId[base], agentVertexId[val], port <> " var"},
+                {icVertexId[base], icVertexId[val], port <> " var"},
             $TagDP0,
-                {agentVertexId[base], agentVertexId[val], port <> " dp0"},
+                {icVertexId[base], icVertexId[val], port <> " dp0"},
             $TagDP1,
-                {agentVertexId[base], agentVertexId[val], port <> " dp1"},
+                {icVertexId[base], icVertexId[val], port <> " dp1"},
             $TagERA,
-                {agentVertexId[base], eraVertexId[loc], port},
+                {icVertexId[base], eraVertexId[loc], port},
             _, Nothing
         ]
     ]
 
-agentEdgeRecords[base_Integer, tag_Integer] :=
-    portRecord[base, #[[1]], #[[2]]] & /@ agentPorts[tag]
+icEdgeRecords[base_Integer, tag_Integer] :=
+    icPortRecord[base, #[[1]], #[[2]]] & /@ icPorts[tag]
 
-subVerticesForAgent[base_Integer, tag_Integer] :=
+(* Walk one UOP's compute slots.  Arguments after the sources
+   (NUMs etc) stay implicit and are surfaced via the vertex label. *)
+uopEdgeRecord[loc_Integer, offset_Integer] :=
+    Block[{cellLoc = loc + offset, t, tag, val, ext},
+        t = THeapRead[cellLoc];
+        tag = TTermTag[t];
+        val = TTermVal[t];
+        ext = TTermExt[t];
+        Switch[tag,
+            $TagUOP,
+                {uopVertexId[loc], uopVertexId[val], "src" <> ToString[offset]},
+            $TagTEN,
+                {uopVertexId[loc], tenVertexId[val], "src" <> ToString[offset]},
+            $TagNUM,
+                Nothing,    (* arguments are inlined into the label *)
+            $TagLAM | $TagAPP | $TagSUP | $TagDUP,
+                {uopVertexId[loc], icVertexId[val], "src" <> ToString[offset]},
+            $TagERA,
+                {uopVertexId[loc], eraVertexId[cellLoc], "src" <> ToString[offset]},
+            _, Nothing
+        ]
+    ]
+
+uopEdgeRecords[loc_Integer, opcode_Integer] :=
+    Table[uopEdgeRecord[loc, off], {off, 0, uopComputeArity[opcode] - 1}]
+
+(* dispatch for one agent entry *)
+agentEdgeRecords[vid_String, info_Association] := Switch[info["tag"],
+    $TagLAM | $TagAPP | $TagSUP | $TagDUP,
+        icEdgeRecords[ToExpression[StringDrop[vid, 1]], info["tag"]],
+    $TagUOP,
+        uopEdgeRecords[ToExpression[StringDrop[vid, 1]], info["opcode"]],
+    _, {}
+]
+
+(* === SUB-decoration (dashed outline if any port cell is SUB) === *)
+
+icSubVertices[base_Integer, tag_Integer] :=
     Module[{result = {}},
         Do[
             With[{loc = base + p[[1]]},
                 If[ TTermSub[THeapRead[loc]] == 1,
-                    AppendTo[result, agentVertexId[base]]]],
-            {p, agentPorts[tag]}
+                    AppendTo[result, icVertexId[base]]]],
+            {p, icPorts[tag]}
         ];
         result
     ]
 
+subVerticesForAgent[vid_String, info_Association] := Switch[info["tag"],
+    $TagLAM | $TagAPP | $TagSUP | $TagDUP,
+        icSubVertices[ToExpression[StringDrop[vid, 1]], info["tag"]],
+    _, {}
+]
+
 (* === colours and shapes === *)
 
-(* Foreground (outlines, label text, ERA stroke) contrasts with the
-   background.  Edge colour is the StandardBlue brand colour so it
-   stands out against a tinted vertex. *)
 fgColor   := LightDarkSwitched[Black, White]
 edgeColor := StandardBlue
 
-(* Per-tag fill colour.  Light-mode uses the Standard* tints directly;
-   dark-mode keeps the same hue family but darkens to stay readable
-   under the white label text. *)
 agentFill[$TagLAM] := LightDarkSwitched[Lighter[StandardGreen,  0.55], Darker[StandardGreen,  0.45]]
 agentFill[$TagAPP] := LightDarkSwitched[Lighter[StandardBlue,   0.55], Darker[StandardBlue,   0.45]]
 agentFill[$TagSUP] := LightDarkSwitched[Lighter[StandardOrange, 0.55], Darker[StandardOrange, 0.45]]
 agentFill[$TagDUP] := LightDarkSwitched[Lighter[StandardPurple, 0.55], Darker[StandardPurple, 0.45]]
+agentFill[$TagUOP] := LightDarkSwitched[Lighter[StandardBlue,   0.55], Darker[StandardBlue,   0.45]]
+agentFill[$TagTEN] := LightDarkSwitched[Lighter[StandardCyan,   0.55], Darker[StandardCyan,   0.45]]
 
-(* `size` from a VertexShapeFunction is `{halfWidth, halfHeight}` in
-   graph coordinates -- honor it everywhere so VertexSize -> Tiny /
-   Small / Large / Scaled[...] all work, plus the per-vertex overrides
-   set in buildHeapGraph. *)
-
-(* LAM, DUP: triangle with apex at the bottom (binder hangs down). *)
+(* triangle / rectangle / disk shape primitives *)
 downTriShape[pos_, {hw_, hh_}] := Triangle[{
     pos + {-hw, hh}, pos + {hw, hh}, pos + {0, -hh}
 }]
-
-(* APP, SUP: triangle with apex at the top (principal port at top). *)
 upTriShape[pos_, {hw_, hh_}] := Triangle[{
     pos + {-hw, -hh}, pos + {hw, -hh}, pos + {0, hh}
 }]
+boxShape[pos_, {hw_, hh_}] := Rectangle[pos - {hw, hh}, pos + {hw, hh}]
 
 agentEdgeForm[isSub_] := EdgeForm[
     If[ isSub,
@@ -115,11 +207,6 @@ agentEdgeForm[isSub_] := EdgeForm[
     ]
 ]
 
-(* The vertex's Pane is sized in image-pixel coords from the graph
-   coords via a heuristic factor.  ImageSizeAction -> "ShrinkToFit"
-   makes the contained Style auto-shrink so the label always fits
-   inside the triangle.  Using {2 hw, 2 hh} for the Inset's size in
-   graph coordinates makes the Pane track the shape extent exactly. *)
 labelInside[label_, pos_, {hw_, hh_}] := Inset[
     Pane[
         Style[label, FontFamily -> "Helvetica", FontColor -> fgColor, Bold],
@@ -132,7 +219,7 @@ labelInside[label_, pos_, {hw_, hh_}] := Inset[
     {2 hw, 2 hh}
 ]
 
-agentShapeFn[tag_, isSub_, label_] := With[{
+icShapeFn[tag_, isSub_, label_] := With[{
     ef = agentEdgeForm[isSub], fc = FaceForm[agentFill[tag]],
     shape = If[ MemberQ[{$TagLAM, $TagDUP}, tag], downTriShape, upTriShape]
 },
@@ -140,15 +227,26 @@ agentShapeFn[tag_, isSub_, label_] := With[{
         {ef, fc, shape[pos, size], labelInside[label, pos, size]}]
 ]
 
-(* Circle is a stroked primitive: stroke colour is set with a plain
-   colour directive, not via EdgeForm.  Use the smaller of the two
-   half-extents as the radius so the circle stays round under any
-   VertexSize. *)
+uopShapeFn[label_] := With[{
+    ef = agentEdgeForm[False], fc = FaceForm[agentFill[$TagUOP]]
+},
+    Function[{pos, v, size},
+        {ef, fc, boxShape[pos, size], labelInside[label, pos, size]}]
+]
+
+tenShapeFn[label_] := With[{
+    ef = agentEdgeForm[False], fc = FaceForm[agentFill[$TagTEN]]
+},
+    Function[{pos, v, size},
+        {ef, fc, boxShape[pos, size], labelInside[label, pos, size]}]
+]
+
 eraShapeFn := Function[{pos, v, size},
     {fgColor, AbsoluteThickness[1.2], Circle[pos, Min[size]]}]
 
-(* Multi-line "TAG\n@<base>" or "TAG\n@<base>..<base+arity-1>" label. *)
-agentLabel[base_Integer, tag_Integer] := With[{arity = Length[agentPorts[tag]]},
+(* === labels === *)
+
+icLabel[base_Integer, tag_Integer] := With[{arity = Length[icPorts[tag]]},
     Column[
         {
             TTagName[tag],
@@ -162,19 +260,44 @@ agentLabel[base_Integer, tag_Integer] := With[{arity = Length[agentPorts[tag]]},
     ]
 ]
 
-(* === DiagramNetwork export ===
-   Implementation lives in Diagram.wl (own subcontext THVMLink`Diagram`)
-   so it can `BeginPackage[..., {"Wolfram`DiagrammaticComputation`"}]`
-   and use the Diagram / DiagramNetwork heads without context-shadow
-   warnings. *)
+(* For UOP, label = opcode name + "@<loc>". *)
+uopLabel[loc_Integer, opcode_Integer] := With[{
+    name = Lookup[$uopNames, opcode, "UOP?" <> ToString[opcode]]
+},
+    Column[{name, "@" <> ToString[loc]}, Center, Spacings -> 0]
+]
 
-(* === main entry point ===
-   THeapGraph accepts trailing Graph options that override the
-   built-in defaults.  Per the WL guide we use OptionsPattern[]:
-       THeapGraph[GraphLayout -> "RadialDrawing"]
-       THeapGraph[term, ImageSize -> 600]
-       THeapGraph[{t1, t2}, EdgeStyle -> Red]
-*)
+(* TEN label: dtype + tensor id. *)
+tenLabel[id_Integer, dtype_Integer] := Column[{
+    "TEN",
+    "#" <> ToString[id]
+}, Center, Spacings -> 0]
+
+(* dispatch *)
+agentLabelFor[vid_String, info_Association] := Switch[info["tag"],
+    $TagLAM | $TagAPP | $TagSUP | $TagDUP,
+        icLabel[ToExpression[StringDrop[vid, 1]], info["tag"]],
+    $TagUOP,
+        uopLabel[ToExpression[StringDrop[vid, 1]], info["opcode"]],
+    $TagTEN,
+        tenLabel[ToExpression[StringDrop[vid, 1]], info["dtype"]],
+    _, ""
+]
+
+agentShapeFor[vid_String, info_Association, isSub_, label_] := Switch[info["tag"],
+    $TagLAM | $TagAPP | $TagSUP | $TagDUP,
+        icShapeFn[info["tag"], isSub, label],
+    $TagUOP,
+        uopShapeFn[label],
+    $TagTEN,
+        tenShapeFn[label],
+    _, eraShapeFn
+]
+
+(* === DiagramNetwork export ===
+   Implementation lives in Diagram.wl (own subcontext THVMLink`Diagram`). *)
+
+(* === main entry point === *)
 
 Options[THeapGraph] = {
     GraphLayout      -> Automatic,
@@ -202,17 +325,20 @@ buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Blo
     edgeLabels  = MapThread[Rule, {edges, Last /@ edgeRecords}];
 
     vertices = DeleteDuplicates @ Join[
-        agentVertexId /@ Keys[agents],
-        eraVertexId   /@ eras
+        Keys[agents],
+        eraVertexId /@ eras
     ];
 
     subVertices = Flatten[KeyValueMap[subVerticesForAgent, agents]];
 
     vshapes = Join[
         KeyValueMap[
-            agentVertexId[#1] -> agentShapeFn[#2,
-                MemberQ[subVertices, agentVertexId[#1]],
-                agentLabel[#1, #2]] &,
+            Function[{vid, info},
+                vid -> agentShapeFor[vid, info,
+                    MemberQ[subVertices, vid],
+                    agentLabelFor[vid, info]
+                ]
+            ],
             agents
         ],
         ((eraVertexId[#] -> eraShapeFn) &) /@ eras
@@ -220,23 +346,17 @@ buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Blo
 
     layout = Replace[OptionValue[GraphLayout], Automatic -> "LayeredDigraphEmbedding"];
 
-    (* For single-vertex graphs the auto-fit plot range squeezes the
-       vertex to fill the frame, leaving Wolfram's default self-loop
-       renderer no room.  Compensate by shrinking the vertex AND
-       widening the plot range. *)
     With[{
         defaultVSize = If[ Length[vertices] === 1,
-            Map[# -> If[ StringStartsQ[#, "e"], 0.06, 0.18] &, vertices],
+            Map[# -> If[ StringStartsQ[#, "e"], 0.18, 0.45] &, vertices],
             Map[# -> If[ StringStartsQ[#, "e"], 0.10, 0.30] &, vertices]
         ],
         defaultPlotRange = If[ Length[vertices] === 1,
-            {{-1.5, 1.5}, {-1.5, 1.5}},
+            {{-1, 1}, {-1, 1}},
             All
         ]
     },
         Graph[vertices, edges,
-            (* User-supplied options first so ours below act as defaults
-               that can be overridden via standard Graph[...] options. *)
             Sequence @@ FilterRules[{userOpts},
                 Except[GraphLayout | VertexSize | PlotRange]],
             VertexShapeFunction -> vshapes,

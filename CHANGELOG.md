@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: tensor-aware heap graph + grad- visualization examples
+
+`Visualization.wl` got a major extension to render tensor compute
+graphs (it previously only knew about IC tags LAM/APP/SUP/DUP/ERA,
+so any `TAG_UOP` / `TAG_TEN` term came out blank).
+
+New vertex-id convention prefixes the kind:
+- `a<base>` -- IC compound at args base `<base>`
+- `e<loc>`  -- ERA cell at heap loc
+- `u<loc>`  -- TAG_UOP at heap loc
+- `t<id>`   -- TAG_TEN at tensor id
+
+Per-tag rendering:
+- `TAG_TEN` -- cyan square labeled `TEN\n#<id>`
+- `TAG_UOP` -- blue rectangle labeled `<OPCODE>\n@<loc>`
+- Edge labels follow `src<N>` using a per-opcode `uopComputeArity`
+  table (NUM-only cells stay implicit).
+
+Single-vertex default size bumped (0.18 -> 0.45) so identity-only
+terms don't render as a pinhead.
+
+Three new `wl/Examples/grad-*` folders, each with `term.wl` plus
+pre-reduce (`term.png`) and post-`TWnf` (`term-wnf.png`) heap
+renderings:
+- `grad-add` -- gradient of `a + b` w.r.t. `a` -> ones_like(a)
+- `grad-mul` -- product rule `d(ab)/da` -> b
+- `grad-x-times-x` -- `d(a*a)/da` -> 2a
+
+`run.wls` detects `grad-`-prefixed folders, skips the IC string
+diagram (tensor graphs aren't IC nets), and renders both the
+pre-reduce graph and the post-`TWnf` rewritten graph using the
+`TWnf` result as the discovery seed.
+
 ### Added: PLAN.md step 13 (partial) -- UOP_GRAD reverse-mode autograd
 
 `UOP_GRAD` is the 18th UOp opcode and a pure rewrite rule (not a
