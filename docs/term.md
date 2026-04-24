@@ -1,10 +1,43 @@
 # Term layout
 
-Every node in the runtime is a single 64-bit word called a `Term`.
-Headers, pointers, labels, and leaves all share this representation.
+Every value in the runtime is a single 64-bit word called a **term**.
 Defined in [src/thvm.h](../src/thvm.h), packed by
 [src/term/new.c](../src/term/new.c), unpacked by the four accessors
 under [src/term/](../src/term/).
+
+For the visual / IC interpretation of these terms (agents, ports,
+wires, eraser dots, substitution holders), see
+[heap_graph.md](heap_graph.md).
+
+## Terminology
+
+These words show up in the rest of the docs. They are easy to
+conflate; the rest of this section pins each one down.
+
+| Word         | Meaning                                                                              |
+| ------------ | ------------------------------------------------------------------------------------ |
+| **term**     | A 64-bit value of type `Term`. The atom of the runtime; everything is one of these.  |
+| **tag**      | The 7-bit `TAG` field of a term, e.g. `TAG_APP`, `TAG_LAM`. Picks the term's type.   |
+| **cell**     | One element of the heap array `HEAP[loc]`. A `u64` slot that holds exactly one term. |
+| **loc**      | A heap location. An unsigned integer in `[0, HEAP_NEXT)`. Indexes into `HEAP`.       |
+| **slot**     | Synonym for `cell` when emphasising that it belongs to some compound term's payload. |
+| **agent**    | A compound term (LAM, APP, SUP, DUP) viewed as an IC interaction-net node. An agent  |
+|              | is identified by its **args base** (the `val` field of the term value).              |
+| **args base**| The first `loc` of an agent's payload. `LAM(val=B)` means body at `HEAP[B]`,         |
+|              | `APP(val=B)` means fun at `HEAP[B]`, arg at `HEAP[B+1]`, etc.                        |
+| **port**     | One of an agent's named slots (e.g. APP's `f` and `x`, LAM's `body`). Each port      |
+|              | is realised as a cell at the corresponding offset from the agent's args base.        |
+| **node**     | A vertex in the rendered heap graph (see [heap_graph.md](heap_graph.md)). Either an  |
+|              | agent triangle or a small ERA circle. Not every cell is a node: VAR cells render     |
+|              | as wires, not nodes.                                                                 |
+| **wire**     | An edge in the rendered heap graph. May correspond to one cell (a `VAR` cell) or to  |
+|              | a port-to-port connection inferred from a compound term value.                       |
+
+The short version: a *term* lives in a *cell* at a *loc*. A
+compound term defines an *agent* whose *ports* are the cells starting
+at its *args base*. When you draw the heap, agents become *nodes* and
+the relationships between them become *wires*; some terms (`VAR`)
+disappear into wires rather than becoming nodes of their own.
 
 ## Bit layout
 
@@ -68,45 +101,65 @@ heap if needed.
 
 ## Worked examples
 
+Each example shows the heap state after construction, plus how the
+terms relate to agents / ports. For the corresponding diagrams see
+[heap_graph.md](heap_graph.md).
+
 Identity lambda `(lam x. x)`:
 
 ```
-heap[lam_loc] = VAR(loc=lam_loc)
-result        = LAM(val=lam_loc)
+HEAP[lam_loc] = VAR(val=lam_loc)
+result term   = LAM(val=lam_loc)
 ```
 
-The body `x` is a `VAR` whose `val` field points at the binder loc.
-The same loc is the cell that holds the body and the slot that
-substitution writes to when an argument is bound. This lets APP-LAM
-work with one heap write (see
+The cell at `lam_loc` plays two roles for the LAM agent at args
+base `lam_loc`:
+
+- It is the agent's `body` port (the body term lives here).
+- It is the agent's `binder` slot (the cell that APP-LAM writes the
+  bound argument to, with SUB set).
+
+The body term is `VAR(val=lam_loc)` -- a wire from the body port
+back to the binder, which is the IC string-diagram form of the
+identity lambda. APP-LAM works with one heap write (see
 [interact/app_lam.md](interact/app_lam.md)).
 
 Application `(f x)`:
 
 ```
-heap[app_loc + 0] = f
-heap[app_loc + 1] = x
-result            = APP(val=app_loc)
+HEAP[app_loc + 0] = f
+HEAP[app_loc + 1] = x
+result term       = APP(val=app_loc)
 ```
+
+The APP agent at args base `app_loc` has two ports:
+`f` at `HEAP[app_loc + 0]`, `x` at `HEAP[app_loc + 1]`. The result
+term is the principal-port handle pointing to the agent.
 
 Superposition `&7{a, b}`:
 
 ```
-heap[sup_loc + 0] = a
-heap[sup_loc + 1] = b
-result            = SUP(ext=7, val=sup_loc)
+HEAP[sup_loc + 0] = a
+HEAP[sup_loc + 1] = b
+result term       = SUP(ext=7, val=sup_loc)
 ```
+
+Two ports `L`, `R`. The label `7` lives in the term's `EXT` field,
+not in any cell.
 
 Duplication `! &7{x0, x1} = e`:
 
 ```
-heap[dup_loc] = e
-x0            = DP0(ext=7, val=dup_loc)
-x1            = DP1(ext=7, val=dup_loc)
+HEAP[dup_loc] = e
+x0 term       = DP0(ext=7, val=dup_loc)
+x1 term       = DP1(ext=7, val=dup_loc)
 ```
 
-Both projections share the same `dup_loc`. The first projection to
-enter takes the cell, descends into `e`, and on apply fires whichever
-DUP-* interaction matches the WHNF of `e`. The interaction substitutes
-the other side's value at `dup_loc` (with SUB=1) so the second
-projection picks it up when it eventually enters.
+The DUP agent at args base `dup_loc` has one input port (`body`,
+holding the term being duplicated) and two implicit output projections
+returned to the caller as `DP0` / `DP1` term values. The first
+projection that gets reduced takes the cell, descends into `e`, and
+on apply fires whichever DUP-* interaction matches the WHNF of `e`.
+The interaction substitutes the other side's value at `dup_loc`
+(with SUB=1) so the second projection picks it up when it eventually
+enters.

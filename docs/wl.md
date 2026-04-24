@@ -15,12 +15,16 @@ before touching anything under `wl/`.
 ```
 wl/THVMLink/
   PacletInfo.wl                   paclet manifest
-  Kernel/THVMLink.wl              package source (context: THVMLink`)
+  Kernel/THVMLink.wl              public API + LibraryFunctionLoad bindings
+  Kernel/Format.wl                summary boxes for THeap, TTermInfo, ...
   CSource/thvmlink.c              LibraryLink bridge, single-TU
   Tests/core.wlt                  VerificationTest specs
   Tests/run.wls                   test runner script
   LibraryResources/<platform>/    compiled dylib (gitignored)
 ```
+
+`Kernel/THVMLink.wl` `Get`s `Format.wl` after the public symbols are
+declared so the formatter can attach `MakeBoxes` rules to them.
 
 ## C bridge (scalar-in, scalar-out)
 
@@ -96,17 +100,37 @@ TDup[label_, body_, k_] := With[{loc = heapWith[body]},
 
 ## Inspection helpers
 
-| Symbol          | Returns                                                        |
-| --------------- | -------------------------------------------------------------- |
-| `TTagName[t]`   | Human name (e.g. `"APP"`) for a tag id                         |
-| `TTermInfo[t]`  | `<\| "sub", "tag", "tagName", "ext", "val", "raw" \|>`         |
-| `THeap[]`       | `<\| "nextLoc" -> n, "cells" -> <\| loc -> info, ... \|> \|>`  |
-| `TItrs[]`       | Cumulative interaction counter                                 |
+| Symbol          | Returns                                                                          |
+| --------------- | -------------------------------------------------------------------------------- |
+| `TTagName[t]`   | Human name (e.g. `"APP"`) for a tag id                                           |
+| `TTermInfo[t]`  | `<\| "sub", "tag", "tagName", "ext", "val", "raw" \|>`                           |
+| `THeap[]`       | `<\| "nextLoc" -> n, "cells" -> <\| loc -> info, ... \|>, "Graph" -> g \|>`      |
+| `THeapGraph[]`  | A Wolfram `Graph[]` of the heap; same object as `THeap[]["Graph"]`               |
+| `TItrs[]`       | Cumulative interaction counter                                                   |
 
 `THeap[]` is the primary tool for eyeballing what the runtime did:
-you get every live cell pre-decoded. Step 10 extends this with graph
-primitives so `THeap[]` can render as a visual snapshot in a
-notebook.
+you get every live cell pre-decoded plus the IC-style graph snapshot
+at `["Graph"]`. The graph model and worked examples live in
+[heap_graph.md](heap_graph.md).
+
+## Summary boxes (Format.wl)
+
+`Kernel/Format.wl` defines `MakeBoxes` rules so heavy return values
+render compactly in a notebook instead of dumping their raw shape.
+
+| Object                               | Summary box                                  |
+| ------------------------------------ | -------------------------------------------- |
+| `THeap[<\| ... \|>]` snapshot result | One-line: `nextLoc`, cell count, mini graph  |
+| `TTermInfo[<\| ... \|>]` result      | One-line: `tag`, `ext`, `val`, SUB indicator |
+| `THeapGraph` `Graph[]` result        | Inherits Wolfram's Graph display + a label   |
+
+Each formatter is a single `MakeBoxes[...] := ...` rule keyed off the
+Association shape (or wrapper head) of the value. Adding a new object
+means: declare it in `THVMLink.wl`, then add one rule in `Format.wl`.
+
+The split keeps `THVMLink.wl` focused on API and bridge bindings; the
+formatter file is the single place to look for "how does this thing
+render".
 
 ## Build
 

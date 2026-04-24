@@ -11,8 +11,9 @@ from scratch alongside the [TinyHVM](TinyHVM/) research prototype.
 
 ## Status
 
-Steps **0-6** of the plan are landed: scaffolding, the Wolfram
-Language paclet, and a minimal but working reducer + interactions.
+Steps **0-10** of the plan are landed: scaffolding, the Wolfram
+Language paclet, a minimal but working reducer + interactions, the
+architecture docs, and the IC-style heap graph renderer.
 
 | Component                        | Status                          |
 | -------------------------------- | ------------------------------- |
@@ -27,6 +28,7 @@ Language paclet, and a minimal but working reducer + interactions.
 | `interact_dup_era`               | implemented + tested            |
 | `interact_dup_lam` (clone)       | not yet implemented             |
 | WL paclet `wl/THVMLink/`         | implemented + tested            |
+| `THeapGraph[]` heap renderer     | implemented + tested            |
 | Tensor / TUOp                    | step 12                         |
 | Autograd via interactions        | step 13                         |
 | Kernel fusion / codegen / Metal  | step 14                         |

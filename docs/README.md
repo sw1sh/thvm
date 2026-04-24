@@ -16,12 +16,21 @@ If you are new to the project, read these in order:
    one page per rule.
 5. [wl.md](wl.md): the Wolfram LibraryLink bridge and the high-level
    constructors that sit on top of it.
+6. [heap_graph.md](heap_graph.md): the `THeapGraph[]` snapshot model,
+   port conventions, and worked-example diagrams.
 
 ## What's not here yet
 
 Tracked in [PLAN.md](../PLAN.md). Anything labelled "step N" in the
 status table at [README.md](../README.md) is intentionally absent
 until that step lands.
+
+## Plans and references
+
+- [plans/hvm4_cross_reference.md](plans/hvm4_cross_reference.md):
+  side-by-side of every piece of our runtime vs the corresponding
+  HVM4 source. Refresh when a new interaction lands or HVM4 itself
+  moves.
 
 ## Conventions
 

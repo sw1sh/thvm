@@ -73,24 +73,57 @@ VerificationTest[
     TestID -> "TApp lays f and x at consecutive heap cells"
 ]
 
-(* === TSup / TDup === *)
+(* === TSup / TDup explicit-label === *)
 
 VerificationTest[
     (TReset[]; Module[{sup = TSup[7, TEra[], TEra[]]},
         {TTermTag[sup], TTermExt[sup]}
     ]),
     {$TagSUP, 7},
-    TestID -> "TSup tag + label preserved"
+    TestID -> "TSup tag + explicit label preserved"
 ]
 
 VerificationTest[
-    (TReset[]; Module[{pair = TDup[5, TEra[], Function[{a, b}, {a, b}]]},
+    (TReset[]; Module[{pair = TDup[5, TEra[], {a, b} |-> {a, b}]},
         {TTermTag[pair[[1]]], TTermTag[pair[[2]]],
          TTermExt[pair[[1]]],
          TTermVal[pair[[1]]] === TTermVal[pair[[2]]]}
     ]),
     {$TagDP0, $TagDP1, 5, True},
-    TestID -> "TDup yields DP0/DP1 sharing label and heap loc"
+    TestID -> "TDup yields DP0/DP1 sharing explicit label and heap loc"
+]
+
+(* === TFreshLabel + auto-label overloads === *)
+
+VerificationTest[
+    (TReset[]; {TFreshLabel[], TFreshLabel[], TFreshLabel[]}),
+    {1, 2, 3},
+    TestID -> "TFreshLabel returns a monotonic counter starting at 1"
+]
+
+VerificationTest[
+    (TReset[]; TFreshLabel[]; TFreshLabel[];
+     TReset[]; TFreshLabel[]),
+    1,
+    TestID -> "TReset rewinds the fresh-label counter"
+]
+
+VerificationTest[
+    (TReset[];
+     Block[{s1 = TSup[TEra[], TEra[]], s2 = TSup[TEra[], TEra[]]},
+        {TTermExt[s1], TTermExt[s2], TTermExt[s1] =!= TTermExt[s2]}]),
+    {1, 2, True},
+    TestID -> "TSup[a,b] auto-labels with fresh distinct integers"
+]
+
+VerificationTest[
+    (TReset[];
+     Block[{p1 = TDup[TEra[], {a, b} |-> {a, b}],
+            p2 = TDup[TEra[], {a, b} |-> {a, b}]},
+        {TTermExt[p1[[1]]], TTermExt[p2[[1]]],
+         TTermExt[p1[[1]]] =!= TTermExt[p2[[1]]]}]),
+    {1, 2, True},
+    TestID -> "TDup[body,k] auto-labels with fresh distinct integers"
 ]
 
 (* === THeap snapshot === *)
@@ -100,10 +133,63 @@ VerificationTest[
      Module[{snap = THeap[]},
         {KeyExistsQ[snap, "nextLoc"],
          KeyExistsQ[snap, "cells"],
+         KeyExistsQ[snap, "Graph"],
          snap["nextLoc"] === THeapPos[]}
      ]),
-    {True, True, True},
-    TestID -> "THeap snapshot has expected keys"
+    {True, True, True, True},
+    TestID -> "THeap snapshot has nextLoc / cells / Graph"
+]
+
+VerificationTest[
+    (TReset[]; TLam[var |-> var];
+     GraphQ[THeap[]["Graph"]]),
+    True,
+    TestID -> "THeap[][\"Graph\"] is a Graph"
+]
+
+(* === THeapGraph examples === *)
+
+VerificationTest[
+    (* Identity lambda: 1 LAM agent (inferred from VAR back-ref),
+       1 self-loop "body var" edge.  No seed needed since the
+       VAR back-reference is enough. *)
+    (TReset[]; TLam[var |-> var];
+     Module[{g = THeapGraph[]},
+        {VertexCount[g], EdgeCount[g]}]),
+    {1, 1},
+    TestID -> "THeapGraph on identity lambda has 1 agent + 1 self-loop"
+]
+
+VerificationTest[
+    (* TApp[id, ERA]: heap holds VAR(0), LAM(0), ERA.  THeapGraph[]
+       sees the LAM (via VAR back-ref) and the orphan ERA at cell 2,
+       but not the heapless APP.  Pass the APP explicitly to
+       THeapGraph[term] so the APP triangle joins the picture. *)
+    (TReset[]; Block[{app = TApp[TLam[var |-> var], TEra[]]},
+        Module[{g = THeapGraph[app]},
+            {VertexCount[g], EdgeCount[g]}]]),
+    {3, 3},
+    TestID -> "THeapGraph on (id ERA) seeded with APP has 3 vertices + 3 edges"
+]
+
+VerificationTest[
+    (* TDup[TSup[ERA, ERA], k]: heap holds ERA, ERA, SUP(val=0).
+       Seed with one of DP0/DP1 so the DUP agent is discovered too. *)
+    (TReset[]; TDup[TSup[TEra[], TEra[]],
+        {dp0, dp1} |-> Module[{g = THeapGraph[dp0]},
+            {VertexCount[g], EdgeCount[g]}]]),
+    {4, 3},
+    TestID -> "THeapGraph seeded with DP0 sees DUP + SUP + 2 ERAs"
+]
+
+VerificationTest[
+    (* No seed: THeapGraph[] only sees the SUP and the two ERAs;
+       the DUP is invisible because no heap cell references it. *)
+    (TReset[]; TDup[TSup[TEra[], TEra[]], {a, b} |-> {a, b}];
+     Module[{g = THeapGraph[]},
+        {VertexCount[g], EdgeCount[g]}]),
+    {3, 2},
+    TestID -> "THeapGraph without seed misses the heapless DUP"
 ]
 
 (* === TWnf === *)
@@ -140,7 +226,7 @@ VerificationTest[
 VerificationTest[
     (* DUP-SUP same label: !&7{x0,x1} = &7{ERA,LAM}; dp0 -> ERA. *)
     (TReset[]; TDup[7, TSup[7, TEra[], TLam[var |-> var]],
-        Function[{dp0, dp1}, TTagName[TTermTag[TWnf[dp0]]]]
+        {dp0, dp1} |-> TTagName[TTermTag[TWnf[dp0]]]
     ]),
     "ERA",
     TestID -> "TWnf on dp0 of same-label DUP-SUP picks the left branch"
