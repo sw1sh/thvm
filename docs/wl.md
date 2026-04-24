@@ -98,6 +98,23 @@ TDup[label_, body_, k_] := With[{loc = heapWith[body]},
 ]
 ```
 
+## Sugar
+
+Two convenience rules let you write IC terms close to lambda-calculus
+syntax:
+
+| Sugar                        | Means                                  |
+| ---------------------------- | -------------------------------------- |
+| `t[arg]` for `t : TTerm`     | `TApp[t, arg]`                         |
+| `(var \|-> body)[t]`         | `TApp[TLam[var \|-> body], t]`         |
+
+So `(var |-> var)[TEra[]]` is a literal beta-redex; `id[TEra[]]`
+applies the identity lambda to the eraser; `church2[f, x]` would
+chain into `church2[f][x]` (left-associative application).
+
+The `Function` UpValue is guarded by an internal flag so `TLam`'s own
+binder call (`builder[TVarFor[loc]]`) does not trigger it.
+
 ## Inspection helpers
 
 | Symbol          | Returns                                                                          |

@@ -6,7 +6,9 @@
    used to turn the heap state into a Wolfram Graph.
 
    Style follows wl/GUIDE.md: theme-aware Standard colors,
-   LightDarkSwitched for fg/bg, real triangles for IC agents.
+   LightDarkSwitched for fg/bg, real triangles for IC agents,
+   labels drawn inside the vertex via Inset[Pane[...,
+   ImageSizeAction -> "ShrinkToFit"]] so text auto-shrinks to fit.
 *)
 
 (* === per-tag ports + identifiers === *)
@@ -91,9 +93,10 @@ agentFill[$TagAPP] := LightDarkSwitched[Lighter[StandardBlue,   0.55], Darker[St
 agentFill[$TagSUP] := LightDarkSwitched[Lighter[StandardOrange, 0.55], Darker[StandardOrange, 0.45]]
 agentFill[$TagDUP] := LightDarkSwitched[Lighter[StandardPurple, 0.55], Darker[StandardPurple, 0.45]]
 
-(* `size` from a VertexShapeFunction is `{halfWidth, halfHeight}` --
-   honor it so VertexSize -> Tiny / Small / Large / Scaled[...] all
-   work, plus the per-vertex overrides set in buildHeapGraph. *)
+(* `size` from a VertexShapeFunction is `{halfWidth, halfHeight}` in
+   graph coordinates -- honor it everywhere so VertexSize -> Tiny /
+   Small / Large / Scaled[...] all work, plus the per-vertex overrides
+   set in buildHeapGraph. *)
 
 (* LAM, DUP: triangle with apex at the bottom (binder hangs down). *)
 downTriShape[pos_, {hw_, hh_}] := Triangle[{
@@ -112,11 +115,29 @@ agentEdgeForm[isSub_] := EdgeForm[
     ]
 ]
 
-agentShapeFn[tag_, isSub_] := With[{
+(* The vertex's Pane is sized in image-pixel coords from the graph
+   coords via a heuristic factor.  ImageSizeAction -> "ShrinkToFit"
+   makes the contained Style auto-shrink so the label always fits
+   inside the triangle.  Using {2 hw, 2 hh} for the Inset's size in
+   graph coordinates makes the Pane track the shape extent exactly. *)
+labelInside[label_, pos_, {hw_, hh_}] := Inset[
+    Pane[
+        Style[label, FontFamily -> "Helvetica", FontColor -> fgColor, Bold],
+        {Round[160 hw], Round[140 hh]},
+        ImageSizeAction -> "ShrinkToFit",
+        Alignment -> Center
+    ],
+    pos,
+    Center,
+    {2 hw, 2 hh}
+]
+
+agentShapeFn[tag_, isSub_, label_] := With[{
     ef = agentEdgeForm[isSub], fc = FaceForm[agentFill[tag]],
     shape = If[ MemberQ[{$TagLAM, $TagDUP}, tag], downTriShape, upTriShape]
 },
-    Function[{pos, v, size}, {ef, fc, shape[pos, size]}]
+    Function[{pos, v, size},
+        {ef, fc, shape[pos, size], labelInside[label, pos, size]}]
 ]
 
 (* Circle is a stroked primitive: stroke colour is set with a plain
@@ -141,15 +162,34 @@ agentLabel[base_Integer, tag_Integer] := With[{arity = Length[agentPorts[tag]]},
     ]
 ]
 
-(* === main entry point === *)
+(* === main entry point ===
+   THeapGraph accepts trailing Graph options that override the
+   built-in defaults.  Per the WL guide we use OptionsPattern[]:
+       THeapGraph[GraphLayout -> "RadialDrawing"]
+       THeapGraph[term, ImageSize -> 600]
+       THeapGraph[{t1, t2}, EdgeStyle -> Red]
+*)
 
-THeapGraph[]                := buildHeapGraph[discoverAgents[{}]]
-THeapGraph[ts_List]         := buildHeapGraph[discoverAgents[ts]]
-THeapGraph[term_]           := buildHeapGraph[discoverAgents[{term}]]
+Options[THeapGraph] = {
+    GraphLayout      -> Automatic,
+    ImageSize        -> Automatic,
+    VertexSize       -> Automatic,
+    PlotRange        -> Automatic,
+    PlotRangePadding -> Scaled[0.15],
+    Background       -> Automatic
+}
 
-buildHeapGraph[agents_Association] := Block[{
+THeapGraph[opts : OptionsPattern[]] :=
+    buildHeapGraph[discoverAgents[{}], opts]
+THeapGraph[ts_List, opts : OptionsPattern[]] :=
+    buildHeapGraph[discoverAgents[ts], opts]
+THeapGraph[term_, opts : OptionsPattern[]] :=
+    buildHeapGraph[discoverAgents[{term}], opts]
+
+buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Block[{
     eras = discoverEras[],
-    edgeRecords, edges, edgeLabels, vertices, vlabels, subVertices, vshapes
+    edgeRecords, edges, edgeLabels, vertices, vshapes, subVertices,
+    layout
 },
     edgeRecords = Flatten[KeyValueMap[agentEdgeRecords, agents], 1];
     edges       = (DirectedEdge @@ Take[#, 2]) & /@ edgeRecords;
@@ -160,57 +200,51 @@ buildHeapGraph[agents_Association] := Block[{
         eraVertexId   /@ eras
     ];
 
-    vlabels = Join[
-        KeyValueMap[agentVertexId[#1] -> agentLabel[#1, #2] &, agents],
-        ((eraVertexId[#] -> "") &) /@ eras
-    ];
-
     subVertices = Flatten[KeyValueMap[subVerticesForAgent, agents]];
 
     vshapes = Join[
         KeyValueMap[
             agentVertexId[#1] -> agentShapeFn[#2,
-                MemberQ[subVertices, agentVertexId[#1]]] &,
+                MemberQ[subVertices, agentVertexId[#1]],
+                agentLabel[#1, #2]] &,
             agents
         ],
         ((eraVertexId[#] -> eraShapeFn) &) /@ eras
     ];
 
-    Graph[vertices, edges,
-        VertexLabels        -> Map[#[[1]] -> Placed[#[[2]], Center] &, vlabels],
-        VertexLabelStyle    -> Directive[FontFamily -> "Helvetica", FontSize -> 9, fgColor],
-        VertexSize          -> Map[# -> If[ StringStartsQ[#, "e"], 0.10, 0.30] &, vertices],
-        VertexShapeFunction -> vshapes,
-        EdgeLabels          -> Map[#[[1]] -> Placed[#[[2]], 0.5] &, edgeLabels],
-        EdgeLabelStyle      -> Directive[FontFamily -> "Helvetica", FontSize -> 8, fgColor],
-        EdgeStyle           -> Directive[edgeColor, AbsoluteThickness[1.5]],
-        EdgeShapeFunction   -> singleVertexLoopFn[vertices, edges, edgeColor],
-        DirectedEdges       -> True,
-        GraphLayout         -> If[ Length[vertices] <= 1,
-                                   "SpringEmbedding",
-                                   "LayeredDigraphEmbedding"],
-        VertexCoordinates   -> If[ Length[vertices] <= 1, {{0, 0}}, Automatic],
-        PlotRangePadding    -> Scaled[0.15],
-        PerformanceGoal     -> "Quality",
-        ImagePadding        -> 25
-    ]
-]
+    layout = Replace[OptionValue[GraphLayout], Automatic -> "LayeredDigraphEmbedding"];
 
-(* For a graph with a single vertex carrying a self-loop, Wolfram's
-   default self-loop renderer collapses to nothing.  Draw the loop
-   manually as a circular arc above the vertex. *)
-singleVertexLoopFn[vertices_, edges_, color_] := If[
-    Length[vertices] === 1 && Length[edges] >= 1,
-    Function[{coords, edge},
-        With[{p = coords[[1]]},
-            {color, AbsoluteThickness[1.5],
-             Circle[p + {0, 0.55}, 0.35],
-             Arrow[BSplineCurve[{
-                 p + {0, 0.55} + {0.30, -0.10},
-                 p + {0.10, 0.40},
-                 p + {0, 0.30}
-             }]]}
+    (* For single-vertex graphs the auto-fit plot range squeezes the
+       vertex to fill the frame, leaving Wolfram's default self-loop
+       renderer no room.  Compensate by shrinking the vertex AND
+       widening the plot range. *)
+    With[{
+        defaultVSize = If[ Length[vertices] === 1,
+            Map[# -> If[ StringStartsQ[#, "e"], 0.06, 0.18] &, vertices],
+            Map[# -> If[ StringStartsQ[#, "e"], 0.10, 0.30] &, vertices]
+        ],
+        defaultPlotRange = If[ Length[vertices] === 1,
+            {{-1.5, 1.5}, {-1.5, 1.5}},
+            All
         ]
-    ],
-    Automatic
+    },
+        Graph[vertices, edges,
+            (* User-supplied options first so ours below act as defaults
+               that can be overridden via standard Graph[...] options. *)
+            Sequence @@ FilterRules[{userOpts},
+                Except[GraphLayout | VertexSize | PlotRange]],
+            VertexShapeFunction -> vshapes,
+            VertexSize          -> Replace[
+                OptionValue[VertexSize], Automatic -> defaultVSize],
+            EdgeLabels          -> Map[#[[1]] -> Placed[#[[2]], 0.5] &, edgeLabels],
+            EdgeLabelStyle      -> Directive[FontFamily -> "Helvetica", FontSize -> 9, fgColor],
+            EdgeStyle           -> Directive[edgeColor, AbsoluteThickness[1.5]],
+            DirectedEdges       -> True,
+            GraphLayout         -> layout,
+            PlotRange           -> Replace[
+                OptionValue[PlotRange], Automatic -> defaultPlotRange],
+            PerformanceGoal     -> "Quality",
+            ImagePadding        -> 25
+        ]
+    ]
 ]

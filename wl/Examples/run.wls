@@ -49,16 +49,14 @@ renderOne[dir_String] := Block[{wlFile, pngFile, term, graph},
         TFree[];
         Return[]
     ];
-    graph = THeapGraph[term];
-    (* Transparent background: PNGs read well on both light and dark
-       README backgrounds without the WL Graph theme's tint bleeding
-       through. *)
+    graph = THeapGraph[term, Background -> GrayLevel[0.12]];
+    (* Force the dark Wolfram theme so LightDarkSwitched picks the
+       dark-mode arm (white labels, darker fills, white outlines). *)
     Export[
         pngFile,
-        Show[graph, Background -> None],
+        Style[graph, "DarkScheme", Background -> GrayLevel[0.12]],
         "PNG",
-        ImageResolution -> 144,
-        Background -> None
+        ImageResolution -> 144
     ];
     debugPrint["[ok] ", FileNameTake[dir], " -> ", pngFile];
     TFree[];

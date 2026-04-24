@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: dark export + auto-fit labels + sugar
+
+- WL `THeapGraph` accepts trailing `Graph` options via
+  `OptionsPattern[]` (per the GUIDE) so callers can override
+  `GraphLayout`, `VertexSize`, `PlotRange`, `Background`, etc.
+- Vertex labels now render INSIDE each shape via `Inset[Pane[label,
+  {pixelW, pixelH}, ImageSizeAction -> "ShrinkToFit"]]`.  Labels
+  auto-shrink so the same `LAM @0` text fits cleanly in any vertex
+  size.
+- `VertexShapeFunction` honours the `size` argument throughout,
+  including the ERA stroked Circle, so `VertexSize -> Tiny | Small |
+  Large | Scaled[...]` all behave.  Removed the manual
+  `singleVertexLoopFn` hack -- the default Wolfram self-loop renderer
+  works once the shape sizes are scaled correctly and the plot range
+  has room for the loop (single-vertex case explicitly widens
+  `PlotRange` and shrinks the vertex).
+- Examples export onto a dark `GrayLevel[0.12]` background with
+  `Style[..., "DarkScheme"]` so `LightDarkSwitched` picks the
+  dark-mode arm (white labels, darker fills, white outlines).
+  Generated PNGs now read cleanly on dark READMEs and notebooks.
+
+### Added: TTerm sugar (call as function, lambda literal)
+
+- `TTerm[id_Integer][arg_]` desugars to `TApp[TTerm[id], arg]` so
+  users can write `id[era]` instead of `TApp[id, era]`.
+- `(var |-> body)[t_TTerm]` desugars to `TApp[TLam[var |-> body], t]`
+  via a tagged UpValue on `TTerm`.  Lets you write a literal
+  beta-redex without spelling out `TLam` / `TApp`.
+- The `Function` UpValue is guarded by `$inTLamBinder` so `TLam`'s
+  own internal call `builder[TVarFor[loc]]` does not trigger it
+  (which would recurse infinitely).
+- Two new VerificationTests cover both forms.
+
 ### Added: DUP-LAM + church-numeral examples
 
 - `src/interact/dup_lam.c`: real DUP-LAM rule.  Allocates one

@@ -266,6 +266,27 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Sugar: TTerm[id][arg] is shorthand for TApp[TTerm[id], arg]. *)
+    (TReset[]; Module[{id = TLam[var |-> var], app},
+        app = id[TEra[]];
+        {Head[app], TTagName[TTermTag[app]]}]),
+    {TTerm, "APP"},
+    TestID -> "TTerm[id][arg] sugar -> TApp"
+]
+
+VerificationTest[
+    (* Sugar: (var |-> body)[arg] is shorthand for
+       TApp[TLam[var |-> body], arg].  Lets users write
+       beta-redex literals without spelling out TLam / TApp. *)
+    (TReset[]; Module[{redex},
+        redex = (var |-> var)[TEra[]];
+        {Head[redex], TTagName[TTermTag[redex]],
+         TTagName[TTermTag[TWnf[redex]]]}]),
+    {TTerm, "APP", "ERA"},
+    TestID -> "(var |-> body)[term] sugar -> TApp[TLam[...], term]"
+]
+
+VerificationTest[
     (* Church 2 applied to identity and ERA: church2 f x = f (f x).
        Exercises APP-LAM + DUP-LAM together. *)
     (TReset[]; Block[{

@@ -179,10 +179,27 @@ TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg]
 TSup[a_, b_]                          := TSup[TFreshLabel[], a, b]
 TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]
 
-TLam[builder_] := With[{loc = THeapAlloc[1]},
+TLam[builder_] := Block[{$inTLamBinder = True}, With[{loc = THeapAlloc[1]},
     THeapSet[loc, builder[TVarFor[loc]]];
     packTerm[0, $TagLAM, 0, loc]
-]
+]]
+
+(* Sugar:
+       TTerm[id][arg]                   ==  TApp[TTerm[id], arg]
+       (var |-> body)[TTerm[id]]        ==  TApp[TLam[var |-> body], TTerm[id]]
+   The first lets the user write `id[era]` instead of `TApp[id, era]`.
+   The second lets `(var |-> body)[arg]` work as a beta-redex literal
+   without writing `TLam` or `TApp` explicitly.  The Function UpValue
+   is guarded by `$inTLamBinder` so TLam's own internal call
+   `builder[TVarFor[loc]]` does not trigger it (which would recurse
+   infinitely back into TLam). *)
+TTerm[id_Integer][y_TTerm]   := TApp[TTerm[id], y]
+TTerm[id_Integer][y_Integer] := TApp[TTerm[id], y]
+
+$inTLamBinder = False
+
+TTerm /: HoldPattern[(f_Function)[t_TTerm]] /; ! $inTLamBinder :=
+    TApp[TLam[f], t]
 
 TDup[body_, k_]                       := TDup[TFreshLabel[], body, k]
 TDup[label_Integer, body_, k_] := With[{loc = heapWith[body]},
