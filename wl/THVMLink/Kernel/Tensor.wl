@@ -124,6 +124,15 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
 
 TUOpMaterialize[expr_] := (ensureInit[]; TTerm[$uopMatFn[ttermRaw[expr]]])
 
+TUOpGrad[y_, gy_, target_] := (
+    ensureInit[];
+    TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]]
+)
+
+(* Top-level VJP shortcut: gradient of `y` w.r.t. `target` with
+   cotangent seed 1. *)
+TGrad[y_, target_] := TUOpGrad[y, TUOpConst[1.0, "f32"], target]
+
 (* TRealize = TWnf[TUOpMaterialize[expr]].  Primary convenience for
    running a lazy UOp graph to completion.  After commit 4 this
    returns a TAG_TEN with the computed result; until then, it returns

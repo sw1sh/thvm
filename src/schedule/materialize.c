@@ -115,6 +115,11 @@ fn Term materialize_expr(Term expr) {
   // Already a KERNEL: pass through unchanged.
   if (op == UOP_KERNEL) return expr;
 
+  // GRAD: reduce the chain rule first (the rewrite rule is pure;
+  // it produces a UOp graph with no GRAD nodes), then materialize
+  // the resulting graph.
+  if (op == UOP_GRAD) return materialize_expr(interact_grad(expr));
+
   u64 expr_loc = term_val(expr);
   u8  arity    = uop_arity(op);
 

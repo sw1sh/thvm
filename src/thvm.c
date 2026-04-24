@@ -90,6 +90,7 @@ Backend     *CURRENT_BACKEND = NULL;
 #include "uop/shrink.c"
 #include "uop/flip.c"
 #include "uop/materialize.c"
+#include "uop/grad.c"
 
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.
@@ -106,6 +107,7 @@ Backend     *CURRENT_BACKEND = NULL;
 #include "interact/dup_sup.c"
 #include "interact/dup_era.c"
 #include "interact/dup_lam.c"
+#include "interact/uop_grad.c"
 #include "interact/uop_kernel.c"
 
 // === wnf/ ===

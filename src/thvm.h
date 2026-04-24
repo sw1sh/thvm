@@ -103,8 +103,9 @@ typedef u64 Term;
 #define UOP_SQRT        15   // heap = [src]
 #define UOP_CMPLT       16   // heap = [a, b]
 #define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(axis)]
+#define UOP_GRAD        18   // heap = [y, gy_seed, target]; rewrite rule
 
-#define UOP_COUNT       18
+#define UOP_COUNT       19
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -281,12 +282,23 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // fire any KERNELs that become ready.
 fn Term uop_materialize(Term expr);
 
+// Build a UOP_GRAD node.  y is the function output, gy is the
+// cotangent seed (typically a CONST(1) for top-level VJP), target is
+// the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
+// the chain-rule rewrite rule defined in interact/uop_grad.c.
+fn Term uop_grad(Term y, Term gy, Term target);
+
 // === schedule/ ===
 // Top-level materialize driver: walks a UOp graph, allocates fresh
 // KernelEntrys + output TenDescs, emits UOP_KERNEL terms.  Called
 // directly from the WL bridge (TMaterialize) and from the
-// UOP_MATERIALIZE interaction rule (commit 4).
+// UOP_MATERIALIZE interaction rule.
 fn Term thvm_materialize(Term term);
+
+// === interact/uop_grad ===
+// Forward-declared so materialize_expr can reduce UOP_GRAD nodes
+// inline before kernelizing.  Defined later in src/interact/uop_grad.c.
+fn Term interact_grad(Term grad_term);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.

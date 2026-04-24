@@ -74,6 +74,12 @@ enter:
         whnf = interact_kernel(next);
         goto apply;
       }
+      if (op == UOP_GRAD) {
+        // Pure rewrite: chain rule produces a fresh UOp graph that
+        // may itself contain GRAD nodes (which fire on re-entry).
+        next = interact_grad(next);
+        goto enter;
+      }
       // BUFFER / CONST / VIEW / movement / elementwise / REDUCE / ...
       // are WNF by themselves; they become active only inside a KERNEL AST
       // the interpreter walks after firing.

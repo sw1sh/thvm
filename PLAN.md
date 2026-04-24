@@ -25,7 +25,11 @@ Here is the first draft of the plan
       End-to-end e2e tests run `TRealize[a + b]` through schedule
       + kernelize + linearize + interpreter dispatch to
       concrete `TAG_TEN` results.  See docs/tensors.md.)
-- [ ] 13. start adding minimal set of tinygrad UOPs with UOP_GRAD and UOP_KERNEL
+- [x] 13. start adding minimal set of tinygrad UOPs with UOP_GRAD and UOP_KERNEL
+      (UOP_KERNEL fires under TWnf via interact_kernel; UOP_GRAD is a
+      pure chain-rule rewrite covering ADD/MUL/NEG/REDUCE_SUM + leaf
+      cases.  RECIP/SQRT/EXP2/LOG2 grads + REDUCE_MAX one-hot land in
+      step 14 alongside fusion + codegen.  See docs/tensors.md.)
 - [ ] 14. add minimal global passes for kernelization, memory planning, optimizations, codegen and rendering the kernels
 - [ ] 15. make your first end-to-end test to compute a linear layer output and its gradient on both backends, with trace capability to observe heap and its graph visualization after each interaction and global pass
 

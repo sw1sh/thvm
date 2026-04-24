@@ -64,6 +64,7 @@ $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =
   $UopAdd::usage        = $UopMul::usage = $UopNeg::usage =
   $UopRecip::usage      = $UopExp2::usage = $UopLog2::usage =
   $UopSqrt::usage       = $UopCmplt::usage = $UopReduce::usage =
+  $UopGrad::usage       =
     "UOp opcode id; mirrors UOP_* in src/thvm.h.";
 
 $ReduceSum::usage = $ReduceMax::usage =
@@ -99,6 +100,8 @@ TUOpSqrt::usage      = "TUOpSqrt[a] builds a UOP_SQRT node.";
 TUOpCmplt::usage     = "TUOpCmplt[a, b] builds a UOP_CMPLT node.";
 TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; kind = \"SUM\" or \"MAX\".";
 TUOpMaterialize::usage = "TUOpMaterialize[expr] wraps a raw UOp graph; reducing it via TWnf fires the materialize rule (or use TMaterialize for inspection).";
+TUOpGrad::usage      = "TUOpGrad[y, gy, target] builds a UOP_GRAD node.  Reducing under TWnf applies the chain rule recursively until no UOP_GRAD nodes remain; the result is a UOp graph that can be fed to TRealize / TMaterialize like any other.";
+TGrad::usage         = "TGrad[y, target] = TUOpGrad[y, TUOpConst[1], target].  Top-level VJP -- d(y)/d(target) with cotangent seed 1.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
 TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term, in heap order.";
 
@@ -144,6 +147,7 @@ $UopPad = 6;          $UopShrink = 7;  $UopFlip = 8;
 $UopAdd = 9;          $UopMul = 10;    $UopNeg = 11;
 $UopRecip = 12;       $UopExp2 = 13;   $UopLog2 = 14;
 $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
+$UopGrad = 18;
 
 $uopNames = <|
     0  -> "MATERIALIZE", 1  -> "KERNEL", 2  -> "CONST",
@@ -151,7 +155,8 @@ $uopNames = <|
     6  -> "PAD",         7  -> "SHRINK", 8  -> "FLIP",
     9  -> "ADD",         10 -> "MUL",    11 -> "NEG",
     12 -> "RECIP",       13 -> "EXP2",   14 -> "LOG2",
-    15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE"
+    15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE",
+    18 -> "GRAD"
 |>;
 
 (* Reduce-kind constants *)
@@ -206,6 +211,7 @@ $uopPadFn      := $uopPadFn      = load["thvm_wl_uop_pad",      {Integer, {Integ
 $uopShrinkFn   := $uopShrinkFn   = load["thvm_wl_uop_shrink",   {Integer, {Integer, 1}},             Integer];
 $uopFlipFn     := $uopFlipFn     = load["thvm_wl_uop_flip",     {Integer, Integer},                  Integer];
 $uopMatFn      := $uopMatFn      = load["thvm_wl_uop_materialize", {Integer},                        Integer];
+$uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Integer, Integer},      Integer];
 
 (* direct materialize (no wnf) + kernel-entry introspection *)
 $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},                        Integer];

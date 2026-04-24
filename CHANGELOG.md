@@ -6,6 +6,45 @@ dated section.
 
 ## Unreleased
 
+### Added: PLAN.md step 13 (partial) -- UOP_GRAD reverse-mode autograd
+
+`UOP_GRAD` is the 18th UOp opcode and a pure rewrite rule (not a
+graph node that survives reduction).  Reducing
+`UOP_GRAD[y, gy_seed, target]` under `TWnf` recursively applies the
+chain rule until no `UOP_GRAD` nodes remain, then wraps the result
+in a `target * 0` summand so the broadcast machinery in materialize
+projects it onto target's shape.
+
+Step-13 chain-rule coverage: leaf cases (target match, other tensor,
+NUM, CONST), `UOP_ADD`, `UOP_MUL` (product rule), `UOP_NEG`, and
+`UOP_REDUCE` (SUM only -- MAX needs an indicator one-hot, deferred
+to step 14).  Anything else returns `CONST(0)` and warns.
+
+WL surface:
+- `TUOpGrad[y, gy, target]` -- explicit cotangent.
+- `TGrad[y, target]` -- top-level VJP shortcut with `gy = CONST(1)`.
+
+`materialize_expr` recognises `UOP_GRAD` and reduces it inline before
+kernelizing, so `TMaterialize[TGrad[...]]` works without a separate
+TWnf pass.
+
+Tests:
+- `tests/test_grad.c` (16 checks): structural pin-downs of the
+  rewrite output for each handled opcode.
+- `wl/THVMLink/Tests/grad.wlt` (9 checks): end-to-end f32 numerics
+  including identity, independent leaf, ADD, MUL product rule,
+  NEG, REDUCE_SUM broadcast-back, `x*x = 2x`, and `2x + 3 = 2`.
+
+### Removed: `Function[t_TTerm]` UpValue
+
+The `(f_Function)[t_TTerm] -> TApp[TLam[f], t]` IC sugar was a
+footgun -- it silently rewrote any pure-function map over TTerms
+into a beta-redex (which surfaced as a crash when our numeric
+Plus/Times UpValues used `& /@`).  Removed alongside the
+`$inTLamBinder` guard that only existed to break the resulting
+recursion.  `TTerm[id_Integer][arg]` sugar (forming
+TApp[TTerm[id], arg]) stays.
+
 ### Added: PLAN.md step 12 -- TTensor + TUOp + materialize + dispatch
 
 End-to-end tensor pipeline.  WL-built UOp graphs reduce naturally

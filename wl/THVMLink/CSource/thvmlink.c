@@ -445,6 +445,16 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_materialize(WolframLibraryData libData, mint 
   return LIBRARY_NO_ERROR;
 }
 
+EXTERN_C DLLEXPORT int thvm_wl_uop_grad(WolframLibraryData libData, mint argc,
+                                        MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term y      = (Term)MArgument_getInteger(args[0]);
+  Term gy     = (Term)MArgument_getInteger(args[1]);
+  Term target = (Term)MArgument_getInteger(args[2]);
+  MArgument_setInteger(res, (mint)uop_grad(y, gy, target));
+  return LIBRARY_NO_ERROR;
+}
+
 // Direct materialize: runs the schedule + kernelize + linearize pass
 // immediately and returns the scheduled DAG term.  Fires no kernels
 // (that happens in TWnf via the interact_kernel rule in commit 4).
