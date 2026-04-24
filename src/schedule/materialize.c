@@ -92,6 +92,22 @@ fn Shape op_output_shape(u8 op, u32 const *in_tids, u8 n_in, u32 reduce_axis) {
   return s;
 }
 
+// EXPAND output shape: same rank as source (tinygrad EXPAND
+// semantics -- it only changes axis sizes, not ranks; rank changes
+// require a RESHAPE first), dim sizes from the heap NUM cells.
+// We can't reliably count those NUMs by walking past the slot range
+// (subsequent heap allocations may put NUM cells right after), so
+// the source's ndim acts as the authoritative count.
+fn Shape expand_output_shape(u64 expr_loc, u32 ndim) {
+  Shape s = {0};
+  s.ndim = ndim;
+  for (u32 i = 0; i < ndim; i++) {
+    Term n = heap_read(expr_loc + 1 + i);
+    s.dims[i] = (u32)term_val(n);
+  }
+  return s;
+}
+
 fn u32 op_output_dtype(u8 op, u32 const *in_tids, u8 n_in, u32 const_dtype) {
   (void)op;
   if (n_in == 0) return const_dtype;           // CONST carries its own dtype
@@ -178,9 +194,20 @@ fn Term materialize_expr(Term expr) {
   }
 
   // Output shape + dtype + TenDesc.  For REDUCE the axis is in the
-  // low 16 bits of the packed op_arg we filled above.
+  // low 16 bits of the packed op_arg we filled above.  EXPAND reads
+  // its target shape straight from the heap NUM cells; the default
+  // op_output_shape would inherit the source view's shape and miss
+  // the broadcast.
   u32   reduce_axis = (op == UOP_REDUCE) ? (op_arg & 0xFFFF) : 0;
-  Shape out_shape   = op_output_shape(op, child_tids, arity, reduce_axis);
+  Shape out_shape;
+  if (op == UOP_EXPAND) {
+    // ndim comes from the source -- EXPAND can't change rank, only
+    // axis sizes (mirrors tinygrad's MovementOps.EXPAND).
+    u32 ndim = (child_tids[0] != 0) ? TENS[child_tids[0]].view.shape.ndim : 1;
+    out_shape = expand_output_shape(expr_loc, ndim);
+  } else {
+    out_shape = op_output_shape(op, child_tids, arity, reduce_axis);
+  }
   u32   out_dtype   = op_output_dtype(op, child_tids, arity, const_dtype);
   ke->output_shape = out_shape;
   ke->output_dtype = out_dtype;

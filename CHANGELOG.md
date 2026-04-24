@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Changed: shape-aware grad_rec drops the MUL(target, CONST(0)) wrapper
+
+`interact_grad` no longer post-wraps the chain-rule output in
+`ADD[raw, MUL(target, CONST(0))]` to coax materialize into producing
+target-shaped gradients.  Instead, every leaf-level emission inside
+`grad_rec` is wrapped in `EXPAND(_, target.shape)`:
+
+- leaf match (`y === target`)        -> `EXPAND(gy, target.shape)`
+- independent leaf / NUM             -> `EXPAND(CONST(0), target.shape)`
+- `UOP_CONST`                        -> `EXPAND(CONST(0), target.shape)`
+- `default`                          -> `EXPAND(CONST(0), target.shape)`
+
+This required minimal materialize + interpret support for `UOP_EXPAND`
+(previously a step-14 placeholder): `op_output_shape` now reads the
+heap NUM cells for EXPAND's target dims (using the source view's rank
+to know how many cells to read -- tinygrad EXPAND preserves rank), and
+a new `cpu_op_expand` fans the source buffer out to the larger numel.
+Sufficient for the autograd path (scalar -> 1-D); per-axis broadcast
+in higher ranks lands with view tracking in step 14.
+
+`tests/test_grad.c` was rewritten to expect the EXPAND wrapping
+(replacing the old `unwrap` helper that stripped the dead `MUL` wrapper).
+WL `grad.wlt` end-to-end numerics still pass (9/9).
+
+### Added: shape on TEN labels, scalar value on CONST labels
+
+`THeapDiagram`'s leaf labels now carry the data the user actually wants
+to see:
+- `TEN#<id>` -> reads `TENS[id].view.shape` and shows e.g. `{3}` on a
+  third line.
+- `CONST` -> decodes the NUM cell's bits via manual IEEE 754 (so a
+  CONST(1.0) renders as `CONST\n1.` instead of a mystery `CONST\n@2`).
+
 ### Added: tensor-aware THeapDiagram (IC string-diagram path)
 
 Diagram.wl now renders TAG_UOP / TAG_TEN terms via Wolfram`Diagrammatic`-

@@ -66,6 +66,7 @@ Backend     *CURRENT_BACKEND = NULL;
 #include "backend/cpu/op/log2.c"
 #include "backend/cpu/op/cmplt.c"
 #include "backend/cpu/op/reduce.c"
+#include "backend/cpu/op/expand.c"
 #include "backend/cpu/interpret.c"
 #include "backend/cpu/_.c"
 

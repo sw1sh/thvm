@@ -6,41 +6,52 @@
 // chain rule until no UOP_GRAD nodes remain in the output graph.
 //
 // VJP semantics: GRAD[y, gy, target] = ∂y/∂target · gy.
-//   - leaf:  y === target           -> gy
-//            y is TAG_TEN otherwise  -> CONST(0, "f32")  (broadcast at materialize)
-//            y is TAG_NUM            -> CONST(0, "f32")
-//   - UOP_CONST                      -> CONST(0)
+//   - leaf:  y === target           -> EXPAND(gy, target.shape)
+//            y is TAG_TEN otherwise  -> EXPAND(CONST(0), target.shape)
+//            y is TAG_NUM            -> EXPAND(CONST(0), target.shape)
+//   - UOP_CONST                      -> EXPAND(CONST(0), target.shape)
 //   - UOP_ADD[a, b]                  -> ADD[ grad(a, gy, target), grad(b, gy, target) ]
 //   - UOP_MUL[a, b]                  -> ADD[ grad(a, MUL[b, gy], target),
 //                                             grad(b, MUL[a, gy], target) ]
 //   - UOP_NEG[a]                     -> grad(a, NEG[gy], target)
 //   - UOP_REDUCE_SUM[a, axis]        -> grad(a, gy, target)  (gy broadcasts via materialize)
-// Anything else returns CONST(0) and prints a warning.
+// Anything else returns EXPAND(CONST(0), target.shape) and prints a warning.
 
-fn Term grad_zero(void) {
-  // 0.0f bits = 0.  Shape {1}; broadcast at materialize when
-  // combined with the actual gradient flow.
-  return uop_const(DT_F32, 0);
+// EXPAND a scalar / shape-{1} producer to target's shape.  Returns
+// `src` unchanged if target isn't a TAG_TEN (no shape to look up)
+// or if its descriptor has rank 0.
+fn Term expand_to_target(Term src, Term target) {
+  if (term_tag(target) != TAG_TEN) return src;
+  u32 tid = term_val(target);
+  TenDesc *desc = &TENS[tid];
+  if (desc->view.shape.ndim == 0) return src;
+  return uop_expand(src, desc->view.shape.ndim, desc->view.shape.dims);
+}
+
+fn Term grad_zero(Term target) {
+  return expand_to_target(uop_const(DT_F32, 0), target);
 }
 
 // Recursive driver: applies the chain rule fully to (y, gy, target),
 // returning a UOp graph that contains no UOP_GRAD nodes.
 fn Term grad_rec(Term y, Term gy, Term target) {
-  // Leaf: this y is exactly the target tensor.  Return gy.
-  if (y == target) return gy;
+  // Leaf: this y is exactly the target tensor.  Lift the cotangent
+  // to target's shape so the gradient is target-shaped without an
+  // outer broadcast wrapper.
+  if (y == target) return expand_to_target(gy, target);
 
   // Other concrete leaves: zero gradient (no dependency).
   u8 y_tag = term_tag(y);
-  if (y_tag == TAG_TEN || y_tag == TAG_NUM) return grad_zero();
+  if (y_tag == TAG_TEN || y_tag == TAG_NUM) return grad_zero(target);
 
-  if (y_tag != TAG_UOP) return grad_zero();
+  if (y_tag != TAG_UOP) return grad_zero(target);
 
   u8  y_op  = term_ext(y);
   u64 y_loc = term_val(y);
 
   switch (y_op) {
     case UOP_CONST:
-      return grad_zero();
+      return grad_zero(target);
 
     case UOP_ADD: {
       Term a = heap_read(y_loc + 0);
@@ -78,7 +89,7 @@ fn Term grad_rec(Term y, Term gy, Term target) {
 
     default:
       fprintf(stderr, "interact_grad: unhandled UOp opcode %u\n", y_op);
-      return grad_zero();
+      return grad_zero(target);
   }
 }
 
@@ -87,15 +98,5 @@ fn Term interact_grad(Term grad_term) {
   Term y      = heap_read(loc + 0);
   Term gy     = heap_read(loc + 1);
   Term target = heap_read(loc + 2);
-  Term raw    = grad_rec(y, gy, target);
-
-  // Broadcast the raw gradient to target's shape.  Materialize's
-  // elementwise broadcasting picks the larger side, so combining
-  // raw (often shape {1} when the chain rule collapsed to constants
-  // or to gy alone) with target * 0 forces the output to target's
-  // shape without changing the numeric value: raw + (target * 0)
-  // = raw, broadcast.
-  Term zero       = uop_const(DT_F32, 0);
-  Term target_zero = uop_binary(UOP_MUL, target, zero);
-  return uop_binary(UOP_ADD, raw, target_zero);
+  return grad_rec(y, gy, target);
 }

@@ -243,9 +243,24 @@ uopLabelText[base_Integer, opcode_Integer] := Column[
     {uopName[opcode], "@" <> ToString[base]}, Center, Spacings -> 0
 ]
 
-(* TEN leaf label: tensor handle id. *)
-tenLabelText[id_Integer] := Column[
-    {"TEN", "#" <> ToString[id]}, Center, Spacings -> 0
+(* TEN leaf label: handle id + shape from the descriptor table.
+   Falls back to "TEN\n#<id>" if shape lookup fails (e.g. id out of
+   range after a TFree). *)
+tenShapeOf[id_Integer] := Quiet @ Check[
+    THVMLink`Private`$tensorShapeFn[id], Missing[]]
+
+shapeText[shape_List] :=
+    "{" <> StringRiffle[ToString /@ shape, ","] <> "}"
+shapeText[_]          := ""
+
+tenLabelText[id_Integer] := With[{shape = tenShapeOf[id]},
+    Column[
+        Join[
+            {"TEN", "#" <> ToString[id]},
+            If[ ListQ[shape], {shapeText[shape]}, {}]
+        ],
+        Center, Spacings -> 0
+    ]
 ]
 
 (* === per-agent diagrams ===
@@ -469,9 +484,46 @@ tenLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
    reference renders its own triangle (no shared CONST agent), so
    multi-referenced constants don't need a DUP to fan out.  The
    underlying CONST@base is still a real heap UOP (with a NUM payload
-   at base+0); the leaf's label surfaces that base. *)
-constLabelText[base_Integer] := Column[
-    {"CONST", "@" <> ToString[base]}, Center, Spacings -> 0
+   at base+0); the leaf's label decodes that NUM bit-pattern back to
+   the scalar value when the dtype is recognised. *)
+(* Manual IEEE 754 single-precision decode -- WL's BinaryReadList
+   wants a Stream (not a ByteArray) and writing through a temp file
+   inside a render path is far too heavy. *)
+bitsToReal32[bits_Integer] := Block[{sign, exp, mant},
+    sign = If[BitAnd[BitShiftRight[bits, 31], 1] === 1, -1, 1];
+    exp  = BitAnd[BitShiftRight[bits, 23], 16^^FF];
+    mant = BitAnd[bits, 16^^7FFFFF];
+    Which[
+        exp === 16^^FF && mant === 0,    sign * Infinity,
+        exp === 16^^FF,                  Indeterminate,
+        exp === 0 && mant === 0,         0.0 * sign,
+        exp === 0,                       sign * (mant / 2.^23) * 2.^-126,
+        True,                            sign * (1 + mant / 2.^23) * 2.^(exp - 127)
+    ]
+]
+
+bitsToInt32[bits_Integer] := If[bits >= 2^31, bits - 2^32, bits]
+
+scalarTextFromCell[cellTerm_] := With[{
+    tag = TTermTag[cellTerm], ext = TTermExt[cellTerm], val = TTermVal[cellTerm]
+},
+    If[ tag === $TagNUM,
+        Switch[ext,
+            $DTF32, ToString[bitsToReal32[val]],
+            $DTI32, ToString[bitsToInt32[val]],
+            _,      ""
+        ],
+        ""
+    ]
+]
+
+constLabelText[base_Integer] := With[{
+    text = scalarTextFromCell[THeapRead[base]]
+},
+    Column[
+        Join[{"CONST"}, If[text =!= "", {text}, {"@" <> ToString[base]}]],
+        Center, Spacings -> 0
+    ]
 ]
 
 constLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
