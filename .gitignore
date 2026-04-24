@@ -1,0 +1,11 @@
+bin/
+*.o
+*.a
+*.dylib
+*.so
+.DS_Store
+.claude/
+
+# Local-only reference symlink to the research prototype. Create with:
+#   ln -s ../TinyHVM TinyHVM
+TinyHVM
