@@ -142,6 +142,7 @@ typedef struct {
   u32      refcount;            // shared by DUP; decremented by ERA
   View     view;                // single view for step 12; ShapeTracker in step 14
   u32      buf_id;              // backend buffer handle (0 = no buffer yet)
+  u32      producer_kid;        // kernel id that produces this tensor, 0 = external
   Backend *backend;             // vtable
 } TenDesc;
 
@@ -197,6 +198,7 @@ typedef struct KernelEntry {
   u32       n_ops;
   KProgOp   program[KPROG_MAX_OPS];
 
+  u8        fired;                 // 1 once the kernel has run
   void     *compiled;              // backend-specific; NULL for interpreter
 } KernelEntry;
 

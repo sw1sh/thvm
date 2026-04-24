@@ -5,13 +5,14 @@
 // thvm_init.
 
 Backend CPU_BACKEND = {
-  .id         = 1,
-  .init       = cpu_init,
-  .shutdown   = cpu_shutdown,
-  .buf_alloc  = cpu_buf_alloc,
-  .buf_free   = cpu_buf_free,
-  .buf_incref = cpu_buf_incref,
-  .buf_decref = cpu_buf_decref,
-  .buf_read   = cpu_buf_read,
-  .buf_write  = cpu_buf_write,
+  .id              = 1,
+  .init            = cpu_init,
+  .shutdown        = cpu_shutdown,
+  .buf_alloc       = cpu_buf_alloc,
+  .buf_free        = cpu_buf_free,
+  .buf_incref      = cpu_buf_incref,
+  .buf_decref      = cpu_buf_decref,
+  .buf_read        = cpu_buf_read,
+  .buf_write       = cpu_buf_write,
+  .dispatch_kernel = cpu_dispatch_kernel,
 };

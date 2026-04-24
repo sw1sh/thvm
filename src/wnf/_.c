@@ -60,6 +60,26 @@ enter:
       next = body;
       goto enter;
     }
+    case TAG_UOP: {
+      u32 op = term_ext(next);
+      if (op == UOP_MATERIALIZE) {
+        // Direct rewrite: schedule + kernelize + linearize, no firing.
+        // Continue reduction on the scheduled DAG so any nested
+        // UOP_KERNEL inside it fires on this same pass.
+        next = thvm_materialize(next);
+        goto enter;
+      }
+      if (op == UOP_KERNEL) {
+        // Fire all upstream kernels then this one; return the output TAG_TEN.
+        whnf = interact_kernel(next);
+        goto apply;
+      }
+      // BUFFER / CONST / VIEW / movement / elementwise / REDUCE / ...
+      // are WNF by themselves; they become active only inside a KERNEL AST
+      // the interpreter walks after firing.
+      whnf = next;
+      goto apply;
+    }
     case TAG_LAM:
     case TAG_ERA:
     case TAG_SUP:

@@ -250,22 +250,25 @@ TUOpSrcs[u_] := With[{loc = TTermVal[u], op = TTermExt[u]},
 
 pairFold[op_, args_List] := Fold[op, First[args], Rest[args]]
 
-TTerm /: Plus[t_TTerm ? tensorTermQ, rest__] := With[{
-    lifted = liftNumeric[#, broadcastDType[t, #]] & /@ {rest}
-},
-    pairFold[TUOpAdd, Prepend[lifted, t]]
+(* Lift every element of a variadic arg list against the "seed"
+   TTerm's dtype.  Written with MapThread / loops instead of an
+   anonymous `& /@` so we don't accidentally trigger the
+   `Function[TTerm]` UpValue that wraps TTerms in TApp[TLam, t]
+   as IC sugar. *)
+liftAll[seed_TTerm, items_List] := Module[{dt = inheritDType[seed]},
+    Table[liftNumeric[items[[i]], dt], {i, Length[items]}]
 ]
 
-TTerm /: Times[t_TTerm ? tensorTermQ, rest__] := With[{
-    lifted = liftNumeric[#, broadcastDType[t, #]] & /@ {rest}
-},
-    pairFold[TUOpMul, Prepend[lifted, t]]
-]
+TTerm /: Plus[t_TTerm ? tensorTermQ, rest__] :=
+    pairFold[TUOpAdd, Prepend[liftAll[t, {rest}], t]]
+
+TTerm /: Times[t_TTerm ? tensorTermQ, rest__] :=
+    pairFold[TUOpMul, Prepend[liftAll[t, {rest}], t]]
 
 TTerm /: Minus[t_TTerm ? tensorTermQ] := TUOpNeg[t]
 
 TTerm /: Power[t_TTerm ? tensorTermQ, Rational[1, 2]] := TUOpSqrt[t]
 TTerm /: Power[t_TTerm ? tensorTermQ, -1]             := TUOpRecip[t]
 
-TTerm /: Less[a_TTerm ? tensorTermQ, b_] := TUOpCmplt[a, liftNumeric[b, broadcastDType[a, b]]]
-TTerm /: Less[a_, b_TTerm ? tensorTermQ] := TUOpCmplt[liftNumeric[a, broadcastDType[a, b]], b]
+TTerm /: Less[a_TTerm ? tensorTermQ, b_] := TUOpCmplt[a, liftNumeric[b, inheritDType[a]]]
+TTerm /: Less[a_, b_TTerm ? tensorTermQ] := TUOpCmplt[liftNumeric[a, inheritDType[b]], b]

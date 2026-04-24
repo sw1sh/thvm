@@ -1,21 +1,15 @@
-(* pending_tensor_numeric.wlt -- numerical tests that exercise
-   build -> materialize -> dispatch end-to-end.
-
-   Files in this directory named pending_*.wlt are run by run.wls
-   as INFORMATIONAL: a failure here does not break the build.  They
-   document what commit 4's TWnf + interact_kernel must make green.
+(* tensor_numeric.wlt -- end-to-end numerical tests that exercise
+   the full build -> materialize -> kernelize -> dispatch pipeline.
 
    Style notes:
-     - Use the WL numeric UpValues (+, *, -, ^(1/2)) instead of
-       explicit TUOpAdd/TUOpMul/etc.  The UpValues in Tensor.wl
-       rewrite Plus/Times/Minus/Power to UOp graphs automatically.
+     - Where possible, use the WL numeric UpValues (+, *, -, ^(1/2))
+       instead of explicit TUOpAdd/TUOpMul/etc.  The UpValues in
+       Tensor.wl rewrite Plus/Times/Minus/Power into UOp graphs
+       automatically.
      - TRealize[expr] == TWnf[TUOpMaterialize[expr]] -- the
        one-liner end of the pipeline.
-     - TTensorData returns a NumericArray; wrap in Normal to
+     - TTensorData returns a NumericArray; wrap in `Normal` to
        compare against plain lists.
-
-   Once commit 4 lands and these pass, rename the file to drop the
-   `pending_` prefix.
 *)
 
 (* === elementwise via UpValues === *)

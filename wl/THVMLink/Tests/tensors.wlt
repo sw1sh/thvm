@@ -125,9 +125,11 @@ VerificationTest[
     a   = TTensor[{4}, {1.0, 2.0, 3.0, 4.0}];
     b   = TTensor[{4}, {5.0, 6.0, 7.0, 8.0}];
     k   = TMaterialize[a + b];
-    (* single-op kernel: one ADD over two 4-element inputs. *)
+    (* single-op kernel: one ADD over two 4-element inputs.
+       TKernelCount includes the reserved slot 0, so the first real
+       kernel brings it to 2. *)
     {TUOpKind[k], TKernelCount[]},
-    {"KERNEL", 1},
+    {"KERNEL", 2},
     TestID -> "TMaterialize/emits-one-kernel"
 ]
 
@@ -139,7 +141,7 @@ VerificationTest[
     k   = TMaterialize[(a + b) * c];
     (* two kernels (ADD then MUL), no fusion in step-12 v1. *)
     {TUOpKind[k], TKernelCount[]},
-    {"KERNEL", 2},
+    {"KERNEL", 3},
     TestID -> "TMaterialize/compound-two-kernels"
 ]
 

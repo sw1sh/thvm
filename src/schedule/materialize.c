@@ -183,6 +183,7 @@ fn Term materialize_expr(Term expr) {
   for (u32 i = 0; i < out_shape.ndim; i++) out_numel *= out_shape.dims[i];
   ke->output_numel = out_numel;
   ke->output_tid   = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
+  TENS[ke->output_tid].producer_kid = kid;
 
   // 3. Linearize: for v1 every kernel has exactly one program op.
   //    Source slot 0 and slot 1 (if any) reference inputs by index.

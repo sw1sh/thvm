@@ -2,7 +2,10 @@
 //
 // Each .c included below contributes one function (or a tiny family
 // of helpers). The order matters: term packing first, then heap, then
-// interactions, then the WNF stack machine that drives them.
+// view + backend + tensor lifecycle, then UOp constructors + the
+// schedule pipeline, then interactions (which depend on the schedule
+// pipeline through uop_kernel), and finally the WNF stack machine
+// that drives them.
 
 #include "thvm.h"
 
@@ -19,7 +22,7 @@ TenDesc     *TENS         = NULL;
 u32          TENS_NEXT    = 1;   // 0 reserved for "no tensor"
 
 KernelEntry *KERNELS      = NULL;
-u32          KERNELS_NEXT = 0;
+u32          KERNELS_NEXT = 1;   // 0 reserved for "no kernel"
 
 Backend     *CURRENT_BACKEND = NULL;
 
@@ -39,22 +42,13 @@ Backend     *CURRENT_BACKEND = NULL;
 #include "heap/subst_var.c"
 #include "heap/subst_cop.c"
 
-// === interact/ ===
-#include "interact/app_lam.c"
-#include "interact/app_era.c"
-#include "interact/dup_sup.c"
-#include "interact/dup_era.c"
-#include "interact/dup_lam.c"
-
-// === wnf/ ===
-#include "wnf/_.c"
-
 // === view/ ===
 #include "view/create.c"
 
 // === backend/cpu/ ===
 // Order: init defines CPU_BUFS + CPU_BUFS_NEXT first, then the buf_*
-// helpers reference them, then _.c assembles the Backend vtable.
+// helpers reference them, then per-op files, the interpreter, and
+// finally _.c assembles the Backend vtable.
 #include "backend/cpu/init.c"
 #include "backend/cpu/buf_alloc.c"
 #include "backend/cpu/buf_free.c"
@@ -62,6 +56,17 @@ Backend     *CURRENT_BACKEND = NULL;
 #include "backend/cpu/buf_decref.c"
 #include "backend/cpu/buf_read.c"
 #include "backend/cpu/buf_write.c"
+#include "backend/cpu/op/const.c"
+#include "backend/cpu/op/add.c"
+#include "backend/cpu/op/mul.c"
+#include "backend/cpu/op/neg.c"
+#include "backend/cpu/op/recip.c"
+#include "backend/cpu/op/sqrt.c"
+#include "backend/cpu/op/exp2.c"
+#include "backend/cpu/op/log2.c"
+#include "backend/cpu/op/cmplt.c"
+#include "backend/cpu/op/reduce.c"
+#include "backend/cpu/interpret.c"
 #include "backend/cpu/_.c"
 
 // === tensor/ ===
@@ -88,10 +93,25 @@ Backend     *CURRENT_BACKEND = NULL;
 
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.
-// Produces the scheduled DAG of UOP_KERNEL terms that commit 4's
-// interact_kernel will fire bottom-up.
+// Produces the scheduled DAG of UOP_KERNEL terms that
+// interact_kernel fires bottom-up.
 #include "schedule/kernel_alloc.c"
 #include "schedule/materialize.c"
+
+// === interact/ ===
+// Interaction rules.  uop_kernel.c needs the schedule pipeline above
+// (KERNELS table, CPU dispatch vtable), so it's loaded last.
+#include "interact/app_lam.c"
+#include "interact/app_era.c"
+#include "interact/dup_sup.c"
+#include "interact/dup_era.c"
+#include "interact/dup_lam.c"
+#include "interact/uop_kernel.c"
+
+// === wnf/ ===
+// The reducer dispatches to the interactions and to materialize,
+// so every file it calls must be defined above.
+#include "wnf/_.c"
 
 // === runtime lifecycle ===
 void thvm_init(void) {
@@ -103,7 +123,7 @@ void thvm_init(void) {
   WNF_S_POS = 0;
   ITRS      = 0;
   TENS_NEXT = 1;
-  KERNELS_NEXT = 0;
+  KERNELS_NEXT = 1;
   CURRENT_BACKEND = &CPU_BACKEND;
   CPU_BACKEND.init();
 }
@@ -121,6 +141,6 @@ void thvm_free(void) {
   HEAP_NEXT = 0;
   WNF_S_POS = 0;
   TENS_NEXT = 1;
-  KERNELS_NEXT = 0;
+  KERNELS_NEXT = 1;
   CURRENT_BACKEND = NULL;
 }
