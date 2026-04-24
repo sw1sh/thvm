@@ -67,10 +67,34 @@ binderWire[base_Integer] := "var" <> ToString[base]
 (* Find the cell whose value carries a given agent's term.  None if
    the agent is heapless (held only as a WL return value, e.g. the
    root term).  DUP is not stored as a term in any slot - DP0/DP1
-   reference it instead - so principalCellOf for DUP is always None. *)
-principalCellOf[agentBase_Integer, agentTag_Integer] := Block[{n = THeapPos[]},
+   reference it instead - so principalCellOf for DUP is always None.
+
+   The cell must live inside a *reachable* agent's slot range -
+   pre-rewrite cells that survive a TWnf would otherwise grab the
+   principal wire and route the diagram through dead heap. *)
+agentSlotsOf[agents_Association, opcodes_Association] := Catenate[
+    KeyValueMap[
+        Function[{base, tag},
+            With[{
+                n = If[ tag === $TagUOP,
+                        walkArity[Lookup[opcodes, base, 0]],
+                        agentArity[tag]
+                    ]
+            },
+                Range[base, base + n - 1]
+            ]
+        ],
+        agents
+    ]
+]
+
+principalCellOf[agentBase_Integer, agentTag_Integer,
+                agents_Association, opcodes_Association] := Block[{
+    n = THeapPos[], inSlot
+},
+    inSlot = agentSlotsOf[agents, opcodes];
     SelectFirst[
-        Range[0, n - 1],
+        inSlot,
         With[{t = THeapRead[#]},
             TTermVal[t] === agentBase && TTermTag[t] === agentTag] &,
         None
@@ -90,10 +114,48 @@ principalCellOf[agentBase_Integer, agentTag_Integer] := Block[{n = THeapPos[]},
 agentArity[$TagLAM] = 1; agentArity[$TagDUP] = 1;
 agentArity[$TagAPP] = 2; agentArity[$TagSUP] = 2;
 
+(* UOP compute arity by opcode -- only the *tensor* sources are
+   walked as ports.  NUM cells (axis indices, dtype tags, etc) sit
+   beyond compute arity and are surfaced via the label, not as
+   wires.  Mirror of uopComputeArity in Visualization.wl. *)
+uopArity[$UopMaterialize] = 1;
+uopArity[$UopKernel]      = 2;
+uopArity[$UopConst]       = 0;
+uopArity[$UopAdd]         = 2;
+uopArity[$UopMul]         = 2;
+uopArity[$UopCmplt]       = 2;
+uopArity[$UopNeg]         = 1;
+uopArity[$UopRecip]       = 1;
+uopArity[$UopExp2]        = 1;
+uopArity[$UopLog2]        = 1;
+uopArity[$UopSqrt]        = 1;
+uopArity[$UopReshape]     = 1;
+uopArity[$UopPermute]     = 1;
+uopArity[$UopExpand]      = 1;
+uopArity[$UopPad]         = 1;
+uopArity[$UopShrink]      = 1;
+uopArity[$UopFlip]        = 1;
+uopArity[$UopReduce]      = 1;
+uopArity[$UopGrad]        = 3;
+uopArity[_]               = 0;
+
+(* opcode name lookup -- mirror of $uopNames in THVMLink.wl. *)
+uopName[$UopMaterialize] = "MATERIALIZE"; uopName[$UopKernel] = "KERNEL";
+uopName[$UopConst]       = "CONST";       uopName[$UopReshape] = "RESHAPE";
+uopName[$UopPermute]     = "PERMUTE";     uopName[$UopExpand]  = "EXPAND";
+uopName[$UopPad]         = "PAD";         uopName[$UopShrink]  = "SHRINK";
+uopName[$UopFlip]        = "FLIP";        uopName[$UopAdd]     = "ADD";
+uopName[$UopMul]         = "MUL";         uopName[$UopNeg]     = "NEG";
+uopName[$UopRecip]       = "RECIP";       uopName[$UopExp2]    = "EXP2";
+uopName[$UopLog2]        = "LOG2";        uopName[$UopSqrt]    = "SQRT";
+uopName[$UopCmplt]       = "CMPLT";       uopName[$UopReduce]  = "REDUCE";
+uopName[$UopGrad]        = "GRAD";
+uopName[op_]             := "UOP?" <> ToString[op];
+
 (* slotSide: which DC list the agent's slot lives in (top = inputs,
    bottom = outputs).  slotIsDualed: whether that slot's port is
    wrapped in SuperStar.  Used to decide the opposite side and
-   polarity for an ERA sitting in this slot. *)
+   polarity for an ERA / TEN leaf sitting in this slot. *)
 slotSide[$TagLAM, 0]    = "Top";        (* body at input list, plain *)
 slotIsDualed[$TagLAM, 0] = False;
 
@@ -111,13 +173,22 @@ slotIsDualed[$TagSUP, 1] = False;
 slotSide[$TagDUP, 0]    = "Top";        (* body = principal incoming, plain *)
 slotIsDualed[$TagDUP, 0] = False;
 
+(* UOP slots are all top+plain (sources flow IN from above into the
+   apex-down compute triangle; result flows out the bottom apex). *)
+slotSide[$TagUOP, _]    := "Top";
+slotIsDualed[$TagUOP, _] := False;
+
 (* Find which (base, tag, offset) owns cell at loc, given the
    discovered agents association.  Returns None if loc is not in
-   any compound agent's slot range. *)
-locOwner[loc_Integer, agents_Association] := Catch[
+   any compound agent's slot range.  UOP arity comes from the
+   opcodes Association. *)
+locOwner[loc_Integer, agents_Association, opcodes_Association] := Catch[
     KeyValueMap[
         Function[{base, tag},
-            With[{n = agentArity[tag]},
+            With[{n = If[ tag === $TagUOP,
+                          uopArity[Lookup[opcodes, base, 0]],
+                          agentArity[tag]
+                      ]},
                 If[ NumberQ[n] && base <= loc < base + n,
                     Throw[{base, tag, loc - base}]
                 ]
@@ -134,6 +205,11 @@ agentStyle[$TagLAM] := Directive[EdgeForm[White], FaceForm[Darker[StandardGreen,
 agentStyle[$TagAPP] := Directive[EdgeForm[White], FaceForm[Darker[StandardBlue,   0.45]]]
 agentStyle[$TagSUP] := Directive[EdgeForm[White], FaceForm[Darker[StandardOrange, 0.45]]]
 agentStyle[$TagDUP] := Directive[EdgeForm[White], FaceForm[Darker[StandardPurple, 0.45]]]
+agentStyle[$TagTEN] := Directive[EdgeForm[White], FaceForm[Darker[StandardCyan,   0.45]]]
+(* UOP fill: orange for GRAD (it's the "rewrite" UOP, distinct from
+   compute), blue for everything else. *)
+uopStyle[$UopGrad] := Directive[EdgeForm[White], FaceForm[Darker[StandardOrange, 0.35]]]
+uopStyle[_]        := Directive[EdgeForm[White], FaceForm[Darker[StandardBlue,   0.45]]]
 
 (* Apex of the triangle = the principal port.
    Triangle (apex up)            -> principal is an INPUT at the top
@@ -143,6 +219,8 @@ agentShape[$TagLAM] := "RoundedUpsideDownTriangle"  (* principal output *)
 agentShape[$TagDUP] := "RoundedTriangle"            (* principal input  *)
 agentShape[$TagAPP] := "RoundedTriangle"            (* principal input  *)
 agentShape[$TagSUP] := "RoundedUpsideDownTriangle"  (* principal output *)
+agentShape[$TagUOP] := "RoundedUpsideDownTriangle"  (* principal output *)
+agentShape[$TagTEN] := "RoundedUpsideDownTriangle"  (* leaf output      *)
 
 (* Multi-line "TAG\n@<base>" or "TAG\n@<base>..<base+arity-1>" label
    matching the heap graph's vertex labels. *)
@@ -160,6 +238,16 @@ agentLabelText[base_Integer, tag_Integer] := With[{arity = agentArity[tag]},
     ]
 ]
 
+(* UOP label: opcode name + base loc. *)
+uopLabelText[base_Integer, opcode_Integer] := Column[
+    {uopName[opcode], "@" <> ToString[base]}, Center, Spacings -> 0
+]
+
+(* TEN leaf label: tensor handle id. *)
+tenLabelText[id_Integer] := Column[
+    {"TEN", "#" <> ToString[id]}, Center, Spacings -> 0
+]
+
 (* === per-agent diagrams ===
    Diagram[expr, inputs, outputs] holds its args unevaluated; wrap
    the label, port lists, Shape, and Style in With so they evaluate
@@ -175,7 +263,7 @@ agentLabelText[base_Integer, tag_Integer] := With[{arity = agentArity[tag]},
 
    When LAM sits in an APP's arg (x) slot, DiagramFlip it so the
    flipped shape/ports match the surrounding context. *)
-agentDiagram[base_Integer, $TagLAM, principal_, agents_Association] := Block[{
+agentDiagram[base_Integer, $TagLAM, principal_, agents_Association, opcodes_Association] := Block[{
     pWire, owner, d
 },
     pWire = If[ principal === None,
@@ -189,7 +277,7 @@ agentDiagram[base_Integer, $TagLAM, principal_, agents_Association] := Block[{
     },
         Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
     ];
-    owner = If[principal === None, None, locOwner[principal, agents]];
+    owner = If[principal === None, None, locOwner[principal, agents, opcodes]];
     If[ MatchQ[owner, {_, $TagAPP, 1}], DiagramFlip[d], d]
 ]
 
@@ -197,7 +285,7 @@ agentDiagram[base_Integer, $TagLAM, principal_, agents_Association] := Block[{
    incoming principal input (plain) at the top apex.  Aux ports
    at the bottom are {x, out*} with x plain outgoing and out
    dualed (SuperStar = arrow reversed). *)
-agentDiagram[base_Integer, $TagAPP, principal_, _Association] := With[{
+agentDiagram[base_Integer, $TagAPP, principal_, _Association, _Association] := With[{
     outWire = If[ principal === None,
                   "p" <> ToString[base],
                   wireFor[principal]]
@@ -214,7 +302,7 @@ agentDiagram[base_Integer, $TagAPP, principal_, _Association] := With[{
 
 (* SUP: L and R are plain incoming inputs at the flat top;
    result is the outgoing output at the bottom apex. *)
-agentDiagram[base_Integer, $TagSUP, principal_, _Association] := With[{
+agentDiagram[base_Integer, $TagSUP, principal_, _Association, _Association] := With[{
     rWire = If[ principal === None,
                 "p" <> ToString[base],
                 wireFor[principal]]
@@ -226,6 +314,67 @@ agentDiagram[base_Integer, $TagSUP, principal_, _Association] := With[{
         shape   = agentShape[$TagSUP], style = agentStyle[$TagSUP]
     },
         Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
+    ]
+]
+
+(* UOP: apex-down shape (principal output at bottom).  Compute
+   sources at top (one wire per slot 0..n-1 where n =
+   uopArity[opcode]); NUM slots beyond compute arity are
+   surfaced via the label, not as wires.  Style is opcode-driven
+   (orange for GRAD, blue otherwise).
+
+   GRAD is special-cased: it follows the DUP shape (apex-up, one
+   principal input at top, two aux outputs at bottom = forward
+   value + backward gradient).  Cell layout in heap is
+   [y, gy, target]; we route y as the principal input, surface
+   target's tensor id as "#<tid>" in the label, and let gy stay
+   as an unconnected sub-graph.  The "bwd" output is the wire
+   downstream code consumes (= principal cell wire); "fwd" is a
+   dangling synthetic wire so the diagram makes the fwd/bwd
+   branch explicit. *)
+agentDiagram[base_Integer, $TagUOP, principal_, _Association, opcodes_Association] := Block[{
+    opcode = Lookup[opcodes, base, 0]
+},
+    If[ opcode === $UopGrad,
+        gradDiagram[base, principal],
+        plainUopDiagram[base, principal, opcode]
+    ]
+]
+
+plainUopDiagram[base_Integer, principal_, opcode_Integer] := Block[{
+    n = uopArity[opcode], pWire
+},
+    pWire = If[ principal === None, "p" <> ToString[base], wireFor[principal]];
+    With[{
+        label   = uopLabelText[base, opcode],
+        inputs  = Table[wireFor[base + i], {i, 0, n - 1}],
+        outputs = {pWire},
+        shape   = agentShape[$TagUOP], style = uopStyle[opcode]
+    },
+        Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
+    ]
+]
+
+gradDiagram[base_Integer, principal_] := Block[{
+    targetCell, tid, label, yWire, fwdWire, bwdWire
+},
+    targetCell = THeapRead[base + 2];
+    tid        = If[ TTermTag[targetCell] === $TagTEN,
+                     TTermVal[targetCell],
+                     -1 ];
+    label = Column[
+        {"GRAD", "#" <> ToString[tid]},
+        Center, Spacings -> 0
+    ];
+    yWire   = wireFor[base];
+    bwdWire = If[ principal === None, "p" <> ToString[base], wireFor[principal]];
+    fwdWire = "fwd" <> ToString[base];
+    With[{
+        ins  = {yWire},
+        outs = {fwdWire, bwdWire},
+        shape = "RoundedTriangle", style = uopStyle[$UopGrad]
+    },
+        Diagram[label, ins, outs, "Shape" -> shape, "Style" -> style]
     ]
 ]
 
@@ -245,7 +394,7 @@ dupLabelFor[base_Integer] := Block[{n = THeapPos[], cell},
 (* DUP: principal is incoming plain input at the top apex (body to
    duplicate comes IN via cell[base]); dp0, dp1 are outgoing
    outputs at the flat bottom. *)
-agentDiagram[base_Integer, $TagDUP, _, _Association] := With[{lab = dupLabelFor[base]},
+agentDiagram[base_Integer, $TagDUP, _, _Association, _Association] := With[{lab = dupLabelFor[base]},
     With[{
         label   = agentLabelText[base, $TagDUP],
         inputs  = {wireFor[base]},
@@ -263,10 +412,10 @@ agentDiagram[base_Integer, $TagDUP, _, _Association] := With[{lab = dupLabelFor[
    slot (so the wire flows naturally without arrow-flips) and
    whose polarity matches the slot's polarity (so both ends of
    the wire have the same DualQ; DC joins them without a spider). *)
-eraDiagram[loc_Integer, agents_Association] := Block[{
+eraDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
     owner, side, dualedQ, name = wireFor[loc], port
 },
-    owner = locOwner[loc, agents];
+    owner = locOwner[loc, agents, opcodes];
     If[ owner === None,
         side = "Bottom"; dualedQ = False
     ,
@@ -286,11 +435,77 @@ eraDiagram[loc_Integer, agents_Association] := Block[{
     ]
 ]
 
+(* TEN leaf: a TAG_TEN cell at `loc` is an inline tensor handle
+   sitting in some slot.  Render as a cyan apex-down triangle
+   with one port whose side+polarity is chosen the same way as
+   ERA (opposite side from the slot, matching polarity) so the
+   slot wire has exactly one dual + one non-dual port. *)
+tenLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
+    t, id, owner, side, dualedQ, name = wireFor[loc], port
+},
+    t  = THeapRead[loc];
+    id = TTermVal[t];
+    owner = locOwner[loc, agents, opcodes];
+    If[ owner === None,
+        side = "Bottom"; dualedQ = False
+    ,
+        side = If[ slotSide[owner[[2]], owner[[3]]] === "Top",
+                   "Bottom", "Top" ];
+        dualedQ = slotIsDualed[owner[[2]], owner[[3]]]
+    ];
+    port = If[dualedQ, SuperStar[name], name];
+    With[{
+        ins   = If[side === "Top",    {port}, {}],
+        outs  = If[side === "Bottom", {port}, {}],
+        label = tenLabelText[id]
+    },
+        Diagram[label, ins, outs,
+            "Shape" -> agentShape[$TagTEN], "Style" -> agentStyle[$TagTEN]
+        ]
+    ]
+]
+
+(* CONST leaf: a TAG_UOP cell at `loc` whose opcode is CONST.  Each
+   reference renders its own triangle (no shared CONST agent), so
+   multi-referenced constants don't need a DUP to fan out.  The
+   underlying CONST@base is still a real heap UOP (with a NUM payload
+   at base+0); the leaf's label surfaces that base. *)
+constLabelText[base_Integer] := Column[
+    {"CONST", "@" <> ToString[base]}, Center, Spacings -> 0
+]
+
+constLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
+    t, base, owner, side, dualedQ, name = wireFor[loc], port
+},
+    t    = THeapRead[loc];
+    base = TTermVal[t];
+    owner = locOwner[loc, agents, opcodes];
+    If[ owner === None,
+        side = "Bottom"; dualedQ = False
+    ,
+        side = If[ slotSide[owner[[2]], owner[[3]]] === "Top",
+                   "Bottom", "Top" ];
+        dualedQ = slotIsDualed[owner[[2]], owner[[3]]]
+    ];
+    port = If[dualedQ, SuperStar[name], name];
+    With[{
+        ins   = If[side === "Top",    {port}, {}],
+        outs  = If[side === "Bottom", {port}, {}],
+        label = constLabelText[base]
+    },
+        Diagram[label, ins, outs,
+            "Shape" -> "RoundedUpsideDownTriangle",
+            "Style" -> uopStyle[$UopConst]
+        ]
+    ]
+]
+
 (* === discovery === *)
 
 agentRule[t_] := With[{tag = TTermTag[t], val = TTermVal[t]},
     Which[
-        tag === $TagLAM || tag === $TagAPP || tag === $TagSUP || tag === $TagDUP,
+        tag === $TagLAM || tag === $TagAPP || tag === $TagSUP ||
+        tag === $TagDUP || tag === $TagUOP,
             val -> tag,
         tag === $TagVAR,
             val -> $TagLAM,
@@ -301,26 +516,103 @@ agentRule[t_] := With[{tag = TTermTag[t], val = TTermVal[t]},
     ]
 ]
 
+uopOpcodeRule[t_] := If[
+    TTermTag[t] === $TagUOP,
+    TTermVal[t] -> TTermExt[t],
+    Nothing
+]
+
 discoverAgentsHere[seedTerms_List] := Block[{n = THeapPos[], terms},
     terms = Join[seedTerms, Table[THeapRead[loc], {loc, 0, n - 1}]];
     Association[agentRule /@ terms]
+]
+
+discoverUopOpcodesHere[seedTerms_List] := Block[{n = THeapPos[], terms},
+    terms = Join[seedTerms, Table[THeapRead[loc], {loc, 0, n - 1}]];
+    Association[uopOpcodeRule /@ terms]
 ]
 
 discoverErasHere[] := Block[{n = THeapPos[]},
     Select[Range[0, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
 ]
 
+(* Reachability for tensor (UOP/TEN) world only -- IC agents stay
+   on the full-heap-walk path because they're orthogonal.
+
+   The heap is append-only: pre-WNF cells survive a TWnf rewrite,
+   so a fresh discovery from the post-WNF root would otherwise
+   surface dangling old subgraphs.  Walking forward from the seed
+   keeps only what the rendered term actually references.
+
+   Walk arity for GRAD is 1 (only follow the y branch -- gy and
+   target are intentionally hidden), uopArity[op] for everything
+   else. *)
+walkArity[op_] := If[op === $UopGrad, 1, uopArity[op]]
+
+(* CONST UOPs are constants -- 0 compute inputs, just a NUM payload.
+   We render them as PER-REFERENCE leaves (similar to TEN handles)
+   instead of one shared agent, so a CONST referenced from N slots
+   draws N triangles without needing DUPs to share the value.  Skip
+   them during the BFS so they don't end up in reachOps. *)
+reachableUopsHere[seedTerms_List] := Block[{seen = <||>, queue, t, base, op, n},
+    queue = seedTerms;
+    While[ Length[queue] > 0,
+        t = First[queue]; queue = Rest[queue];
+        If[ TTermTag[t] === $TagUOP,
+            base = TTermVal[t]; op = TTermExt[t];
+            If[ op =!= $UopConst && ! KeyExistsQ[seen, base],
+                seen[base] = op;
+                n = walkArity[op];
+                queue = Join[queue, Table[THeapRead[base + i], {i, 0, n - 1}]]
+            ]
+        ]
+    ];
+    seen
+]
+
+(* Cells inside reachable UOP slots that hold inline atoms we'll
+   render as leaves.  TAG_TEN cells -> tenLeafDiagram, TAG_UOP
+   cells with opcode CONST -> constLeafDiagram. *)
+reachableSlotCells[reachOps_Association, pred_] := Catenate[
+    KeyValueMap[
+        Function[{base, op}, With[{n = walkArity[op]},
+            Select[Range[base, base + n - 1], pred[THeapRead[#]] &]
+        ]],
+        reachOps
+    ]
+]
+
+reachableTenCells[reachOps_Association] :=
+    reachableSlotCells[reachOps, TTermTag[#] === $TagTEN &]
+
+reachableConstCells[reachOps_Association] := reachableSlotCells[reachOps,
+    TTermTag[#] === $TagUOP && TTermExt[#] === $UopConst &]
+
 THeapDiagram[t_] := Block[{
-    agents = discoverAgentsHere[{t}],
-    eras   = discoverErasHere[],
-    ds
+    fullAgents, reachOps, agents, opcodes, eras, tens, consts, ds
 },
+    fullAgents = discoverAgentsHere[{t}];
+    reachOps   = reachableUopsHere[{t}];
+    (* Keep IC agents from full discovery; replace UOP entries with
+       only the reachable ones so old pre-rewrite UOPs (plus their
+       transitively-reached TENs) drop out of the diagram. *)
+    agents = Join[
+        KeySelect[fullAgents, fullAgents[#] =!= $TagUOP &],
+        Association[(# -> $TagUOP) & /@ Keys[reachOps]]
+    ];
+    opcodes = reachOps;
+    eras    = discoverErasHere[];
+    tens    = reachableTenCells[reachOps];
+    consts  = reachableConstCells[reachOps];
     ds = Join[
         KeyValueMap[
-            agentDiagram[#1, #2, principalCellOf[#1, #2], agents] &,
+            agentDiagram[#1, #2, principalCellOf[#1, #2, agents, opcodes],
+                         agents, opcodes] &,
             agents
         ],
-        eraDiagram[#, agents] & /@ eras
+        eraDiagram[#, agents, opcodes]      & /@ eras,
+        tenLeafDiagram[#, agents, opcodes]   & /@ tens,
+        constLeafDiagram[#, agents, opcodes] & /@ consts
     ];
     DiagramNetwork @@ ds
 ]

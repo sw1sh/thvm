@@ -93,22 +93,21 @@ renderFile[wlFile_String] := Block[{
     renderHeap[term, pngFile];
     debugPrint["[ok] ", wlFile, " -> ", pngFile];
 
-    (* Pre-reduce IC diagram, only for the canonical term.wl in
-       IC-shaped examples.  Tensor graphs (grad- prefixed) aren't
-       IC nets so Diagram.wl produces an empty network for them;
-       render the heap-graph form only. *)
-    If[ base === "term" && ! isWnfExample,
+    (* Pre-reduce IC diagram for the canonical term.wl. *)
+    If[ base === "term",
         renderDiagram[term, diagFile];
         debugPrint["[ok] ", wlFile, " -> ", diagFile]
     ];
 
-    (* Post-reduce heap graph for grad- prefixed examples: TWnf
-       returns the rewritten outermost term, which we use as the
-       discovery seed so the new ADD/MUL/CONST sub-graph is reachable. *)
+    (* Post-reduce graphs for grad- prefixed examples: TWnf returns
+       the rewritten outermost term, which we use as the discovery
+       seed so the new ADD/MUL/CONST sub-graph is reachable. *)
     If[ isWnfExample && base === "term",
         reduced = TWnf[term];
         renderHeap[reduced, wnfPng];
-        debugPrint["[ok] ", wlFile, " -> ", wnfPng]
+        debugPrint["[ok] ", wlFile, " -> ", wnfPng];
+        renderDiagram[reduced, wnfDiagFile];
+        debugPrint["[ok] ", wlFile, " -> ", wnfDiagFile]
     ];
 
     TFree[];

@@ -6,6 +6,50 @@ dated section.
 
 ## Unreleased
 
+### Added: tensor-aware THeapDiagram (IC string-diagram path)
+
+Diagram.wl now renders TAG_UOP / TAG_TEN terms via Wolfram`Diagrammatic`-
+`Computation`, so `THeapDiagram[term]` produces a proper IC string
+diagram for tensor compute graphs (it previously returned an empty
+network for anything that wasn't pure IC).
+
+UOP rendering uses an opcode-driven shape/style:
+- Plain compute UOPs (ADD/MUL/...) -- apex-down blue triangle, N
+  inputs at top (one per `uopArity[opcode]`), 1 output at bottom.
+- GRAD -- DUP-shaped (apex-up orange triangle), 1 input at top
+  apex (the y branch), 2 outputs at the flat bottom (forward
+  passthrough + backward gradient).  `gy` and `target` cells are
+  hidden; the target tensor id is surfaced as `#<tid>` in the
+  GRAD label.
+
+TEN handles render as cyan apex-down triangles, one leaf per
+referencing slot (no DUP needed for multi-reference -- each ref
+gets its own `TEN#<id>` triangle).
+
+CONST UOPs (zero-arity) are rendered the same way: per-reference
+leaves labeled `CONST@<base>`, so a constant referenced from N
+slots draws N triangles instead of forcing a shared agent (which
+would require DUPs to fan out).
+
+Reachability filter walks UOPs/TENs forward from the seed term
+so post-`TWnf` heaps don't surface their pre-rewrite cells.
+`principalCellOf` was tightened to consider only cells inside
+reachable agents' slot ranges, so dead heap can't grab a UOP's
+output wire.
+
+`run.wls` no longer skips IC diagrams for `grad-` examples; both
+pre-reduce (`diagram.png`) and post-WNF (`diagram-wnf.png`) IC
+diagrams are now rendered alongside the heap graphs.
+
+New plain-UOP examples (no grad rewrite):
+- `wl/Examples/uop-add` -- `TUOpAdd[a, b]`
+- `wl/Examples/uop-mul` -- `TUOpMul[a, b]`
+- `wl/Examples/uop-mul-add` -- `(a*b)+c`
+
+Existing grad-`*` examples now use lazy `TTensor[{3}]` allocations
+instead of `TTensorCreate @ NumericArray[...]`; the visualization
+doesn't need real numerics and the lazy form is shorter.
+
 ### Added: tensor-aware heap graph + grad- visualization examples
 
 `Visualization.wl` got a major extension to render tensor compute
