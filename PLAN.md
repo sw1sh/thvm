@@ -18,7 +18,13 @@ Here is the first draft of the plan
 - [x] 11. use wl produced graphs in your documentation
       (also added IC string diagrams via `THeapDiagram`, documented in
       [docs/diagrams.md](docs/diagrams.md) with 9 rendered examples)
-- [ ] 12. add TTensor and TUOp for constructing computational graphs supporting cpu and metal backends and whatever is needed in underlying C source code
+- [x] 12. add TTensor and TUOp for constructing computational graphs supporting cpu and metal backends and whatever is needed in underlying C source code
+      (CPU backend landed; Metal deferred to step 14 alongside codegen.
+      Four commits: tensor foundation, UOp vocabulary + WL surface,
+      materialize pipeline, CPU interpreter + interact_kernel.
+      End-to-end e2e tests run `TRealize[a + b]` through schedule
+      + kernelize + linearize + interpreter dispatch to
+      concrete `TAG_TEN` results.  See docs/tensors.md.)
 - [ ] 13. start adding minimal set of tinygrad UOPs with UOP_GRAD and UOP_KERNEL
 - [ ] 14. add minimal global passes for kernelization, memory planning, optimizations, codegen and rendering the kernels
 - [ ] 15. make your first end-to-end test to compute a linear layer output and its gradient on both backends, with trace capability to observe heap and its graph visualization after each interaction and global pass
