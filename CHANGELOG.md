@@ -6,6 +6,60 @@ dated section.
 
 ## Unreleased
 
+### Added: NN.wl -- Wolfram NeuralNetworks layer -> TUOp graph converter
+
+`wl/THVMLink/Kernel/NN.wl` lets users build the UOp graph by feeding
+in built-in layers (`LinearLayer`, `ElementwiseLayer`, `NetChain`,
+...) instead of inventing parallel layer constructors.  Tinygrad's
+"Tensor + thin layer wrappers" model: a layer is a snapshot of
+weights, the converter lifts them to TTensors and emits the same
+TUOp* combinators users would write by hand.
+
+Public surface (all in the THVMLink` context):
+- `TFromNet[net, x]` / `TFromLayer[layer, x]` -- entry points,
+  dispatch on `Head[layer]`.
+- `TLayerWeights[layer]` / `TLayerToTensors[layer]` -- read a
+  layer's NumericArrays / wrap them as TTensors.
+- Tensor-method helpers: `TSum`, `TSquare`, `TDot`, `TMatVec`,
+  `TL2Loss`, `TMSELoss`.
+
+Currently supported layers:
+- `LinearLayer[out, "Input" -> in]` -- forward via TMatVec
+  (W @ x + b through EXPAND-broadcast + REDUCE_SUM).  Backward
+  through W is a TODO until interact_grad gains an EXPAND rule.
+- `ElementwiseLayer[#*# &]` -- maps to TSquare.  Adding more
+  functions is a one-line entry in `$elementwiseDispatch`.
+- `NetChain[{...}]` -- folds layers in declaration order.
+
+Stubbed / out-of-scope:
+- `ConvolutionLayer` -- raises a Message; needs movement-op
+  support in materialize/interpret + the matching grad rules
+  (step 14).
+
+`wl/THVMLink/Tests/nn.wlt` covers the helpers (12 cases): forward
+of LinearLayer / ElementwiseLayer / NetChain, plus end-to-end
+gradient chains (TDot, TL2Loss, TMSELoss, polynomial, square of
+dot product) -- all 12 pass.
+
+### Fixed: shared-wire spiders for non-CONST UOP multi-reference
+
+`wireFor` used to give every cell its own `w<loc>` wire name, so
+when a non-CONST UOP fed N consumer slots only the principal cell
+matched up; the other N-1 consumers dangled (visible in
+`MUL[x, x]` where x is itself a UOP -- the second src wire had a
+fresh name and stayed unconnected).
+
+Fix: TAG_UOP cells (excluding CONST, which we render per-reference
+as leaves) now key the wire on the producer's base
+(`uop<val>` instead of `w<loc>`), so all consumer slots and the
+producer's output share one wire.  DC then draws a spider where
+the producer fans out to all the consumers -- same idiom we
+already use for VAR / DP0 / DP1.
+
+`plainUopDiagram` and `gradDiagram` updated their synthetic-fallback
+pWire (used when the seed is heapless) to match the new naming
+(`uop<base>` instead of `p<base>`).
+
 ### Fixed: grad chain rule allocates fresh EXPAND per branch + single-line node headers
 
 `grad_rec` previously lifted `gy` to target.shape ONCE in

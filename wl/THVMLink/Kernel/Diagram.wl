@@ -57,6 +57,17 @@ wireFor[loc_Integer] := Block[{t, tag, val, ext},
         $TagVAR,           "var" <> ToString[val],
         $TagDP0,           "dup" <> ToString[val] <> "_dp0_lab" <> ToString[ext],
         $TagDP1,           "dup" <> ToString[val] <> "_dp1_lab" <> ToString[ext],
+        (* Non-CONST UOPs key on the producer's base instead of the
+           cell loc, so multi-reference (a single UOP feeding N
+           consumer slots) collapses to one shared wire -- DC then
+           draws a spider where the producer fans out to all the
+           consumers.  CONST stays per-loc because we render a
+           CONST leaf per consumer cell. *)
+        $TagUOP,
+            If[ext === $UopConst,
+                "w"   <> ToString[loc],
+                "uop" <> ToString[val]
+            ],
         _,                 "w" <> ToString[loc]
     ]
 ]
@@ -350,7 +361,11 @@ agentDiagram[base_Integer, $TagUOP, principal_, _Association, opcodes_Associatio
 plainUopDiagram[base_Integer, principal_, opcode_Integer] := Block[{
     n = uopArity[opcode], pWire
 },
-    pWire = If[ principal === None, "p" <> ToString[base], wireFor[principal]];
+    (* "uop<base>" matches the wire name any consumer cell holding
+       TAG_UOP(base) would resolve via wireFor -- see the TAG_UOP
+       branch there.  Even for a heapless seed (no consumer) the
+       convention keeps producer + consumer naming aligned. *)
+    pWire = If[ principal === None, "uop" <> ToString[base], wireFor[principal]];
     With[{
         label   = uopLabelText[base, opcode],
         inputs  = Table[wireFor[base + i], {i, 0, n - 1}],
@@ -366,7 +381,7 @@ gradDiagram[base_Integer, principal_] := Block[{
 },
     label   = uopHeader[base, $UopGrad];     (* "GRAD@<base>#<tid>" *)
     yWire   = wireFor[base];
-    bwdWire = If[ principal === None, "p" <> ToString[base], wireFor[principal]];
+    bwdWire = If[ principal === None, "uop" <> ToString[base], wireFor[principal]];
     fwdWire = "fwd" <> ToString[base];
     With[{
         ins  = {yWire},
