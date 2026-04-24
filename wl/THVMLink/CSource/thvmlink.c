@@ -508,3 +508,23 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_info(WolframLibraryData libData, mint argc
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
 }
+
+// === REF / ALO surface ===
+
+EXTERN_C DLLEXPORT int thvm_wl_def_register(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32  name = (u32) MArgument_getInteger(args[0]);
+  Term body = (Term)MArgument_getInteger(args[1]);
+  thvm_def_register(name, body);
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_term_new_ref(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 name = (u32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)term_new_ref(name));
+  return LIBRARY_NO_ERROR;
+}

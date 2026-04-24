@@ -75,7 +75,11 @@ typedef u64 Term;
 #define TAG_UOP  9   // uop graph node.   val = heap loc, ext = opcode
 #define TAG_NUM  10  // 32-bit scalar.    atom; val = raw u32 / f32 bits, ext = dtype
 
-#define TAG_COUNT 11
+// === Lazy named definitions + allocator (HVM4 / TinyHVM style) ===
+#define TAG_REF  11  // book reference.   val = name id (index into DEFS)
+#define TAG_ALO  12  // lazy alloc.       val = dyn heap loc holding [book_term, NUM(state_id)]
+
+#define TAG_COUNT 13
 
 // === Dtypes ===
 #define DT_F32   0
@@ -116,6 +120,9 @@ typedef u64 Term;
 #define WNF_CAP      (1ULL << 16)   // 64K stack slots.
 #define TENS_CAP     (1ULL << 16)   // 64K tensor descriptor slots.
 #define KERNELS_CAP  (1ULL << 12)   // 4K compiled kernels.
+#define BOOK_CAP     (1ULL << 18)   // 256K cells of static def template heap.
+#define DEFS_CAP     256            // max named definitions for TAG_REF.
+#define ALO_STATE_CAP (1ULL << 16)  // ALO substitution-chain entries.
 #define MAX_DIM      8              // max tensor rank
 #define KPROG_MAX_OPS    64         // max ops per kernel program
 #define KERNEL_MAX_INPUT 8          // max input tensors per kernel
@@ -222,6 +229,28 @@ extern u32      TENS_NEXT;  // bump allocator cursor
 
 extern Backend *CURRENT_BACKEND;  // installed by thvm_init
 
+// === book heap (static def templates, REF/ALO infrastructure) ===
+//
+// Definitions registered via thvm_def_register live as immutable
+// templates in BOOK_HEAP[].  TAG_REF carries an index into DEFS[];
+// TAG_ALO is the lazy allocator that walks one layer of a template
+// into the dynamic HEAP[] per fire, threading an AloState chain to
+// rebind binders through fresh dyn locs.
+extern Term *BOOK_HEAP;
+extern u64   BOOK_NEXT;
+extern Term  DEFS[DEFS_CAP];   // root book term per name (0 = unset)
+
+// AloState chain entries -- each one binds an old book loc to a fresh
+// dynamic loc (used by ALO-VAR / ALO-LAM to retarget VARs into the
+// realised heap).  state_id 0 = empty chain.
+typedef struct {
+    u32 parent;     // upstream state id (0 if root)
+    u64 old_loc;    // book-heap loc of the binder
+    u64 new_loc;    // freshly allocated dyn-heap loc that replaces it
+} AloState;
+extern AloState *ALO_STATES;
+extern u32       ALO_STATES_NEXT;
+
 // === term/ ===
 fn Term term_new(u8 sub, u8 tag, u32 ext, u64 val);
 fn u8   term_tag(Term t);
@@ -237,6 +266,37 @@ fn void heap_set(u64 loc, Term t);
 fn Term heap_take(u64 loc);                                 // read + zero
 fn void heap_subst_var(u64 loc, Term value);
 fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1); // pair subst
+
+// === book heap (static templates) ===
+fn u64  book_alloc(u64 size);
+fn Term book_read (u64 loc);
+fn void book_set  (u64 loc, Term t);
+
+// Snapshot a dynamic term tree into the book heap.  Returns a
+// book-domain term whose val refers to BOOK_HEAP rather than HEAP.
+Term thvm_book_from_dynamic(Term body);
+
+// Register `body` as the definition for `name`.  Snapshots the
+// body into the book heap (so subsequent mutations to the dynamic
+// graph don't affect the def) and stores the root book term in
+// DEFS[name].  TRef[name] then unfolds via ALO on demand.
+void thvm_def_register(u32 name, Term body);
+
+// === ALO ===
+//
+// `state_id` references an AloState chain mapping book locs to
+// freshly allocated dynamic locs.  `alo_realize` walks one layer of
+// the static `book_term` into dynamic cells, returning a dynamic
+// term; child slots are themselves wrapped in fresh ALOs (lazy).
+// `alo_force` does the same starting from a TAG_ALO term.
+u32  alo_state_push  (u32 parent, u64 old_loc, u64 new_loc);
+int  alo_state_lookup(u32 state_id, u64 old_loc, u64 *out_new_loc);
+Term alo_realize     (Term book_term, u32 state_id);
+Term alo_force       (Term alo_term);
+
+// === ref ===
+fn Term term_new_ref (u32 name);
+fn Term term_new_alo (Term book_term, u32 state_id);
 
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.

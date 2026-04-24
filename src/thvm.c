@@ -26,6 +26,13 @@ u32          KERNELS_NEXT = 1;   // 0 reserved for "no kernel"
 
 Backend     *CURRENT_BACKEND = NULL;
 
+Term *BOOK_HEAP = NULL;
+u64   BOOK_NEXT = 1;   // 0 reserved as "no template"
+Term  DEFS[DEFS_CAP] = {0};
+
+AloState *ALO_STATES      = NULL;
+u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
+
 // === term/ ===
 #include "term/new.c"
 #include "term/tag.c"
@@ -33,6 +40,8 @@ Backend     *CURRENT_BACKEND = NULL;
 #include "term/val.c"
 #include "term/sub/get.c"
 #include "term/sub/set.c"
+#include "term/new_ref.c"
+#include "term/new_alo.c"
 
 // === heap/ ===
 #include "heap/alloc.c"
@@ -41,6 +50,20 @@ Backend     *CURRENT_BACKEND = NULL;
 #include "heap/take.c"
 #include "heap/subst_var.c"
 #include "heap/subst_cop.c"
+
+// === book/ ===
+// from_dynamic depends on heap/, book/alloc, book/set; included after them.
+#include "book/alloc.c"
+#include "book/read.c"
+#include "book/set.c"
+#include "book/from_dynamic.c"
+
+// === alo/ ===
+// realize uses heap_alloc + book_read + state_push/lookup + term_new_alo;
+// force calls alo_realize (regular fn, prototype in thvm.h).
+#include "alo/state.c"
+#include "alo/realize.c"
+#include "alo/force.c"
 
 // === view/ ===
 #include "view/create.c"
@@ -118,15 +141,20 @@ Backend     *CURRENT_BACKEND = NULL;
 
 // === runtime lifecycle ===
 void thvm_init(void) {
-  HEAP      = (Term *)calloc(HEAP_CAP,     sizeof(Term));
-  WNF_STACK = (Term *)calloc(WNF_CAP,      sizeof(Term));
-  TENS      = (TenDesc *)calloc(TENS_CAP,  sizeof(TenDesc));
-  KERNELS   = (KernelEntry *)calloc(KERNELS_CAP, sizeof(KernelEntry));
-  HEAP_NEXT = 0;
-  WNF_S_POS = 0;
-  ITRS      = 0;
-  TENS_NEXT = 1;
+  HEAP       = (Term *)calloc(HEAP_CAP,     sizeof(Term));
+  WNF_STACK  = (Term *)calloc(WNF_CAP,      sizeof(Term));
+  TENS       = (TenDesc *)calloc(TENS_CAP,  sizeof(TenDesc));
+  KERNELS    = (KernelEntry *)calloc(KERNELS_CAP, sizeof(KernelEntry));
+  BOOK_HEAP  = (Term *)calloc(BOOK_CAP,     sizeof(Term));
+  ALO_STATES = (AloState *)calloc(ALO_STATE_CAP, sizeof(AloState));
+  HEAP_NEXT  = 0;
+  WNF_S_POS  = 0;
+  ITRS       = 0;
+  TENS_NEXT  = 1;
   KERNELS_NEXT = 1;
+  BOOK_NEXT  = 1;
+  ALO_STATES_NEXT = 1;
+  for (u32 i = 0; i < DEFS_CAP; i++) DEFS[i] = 0;
   CURRENT_BACKEND = &CPU_BACKEND;
   CPU_BACKEND.init();
 }
@@ -137,13 +165,20 @@ void thvm_free(void) {
   free(WNF_STACK);
   free(TENS);
   free(KERNELS);
-  HEAP      = NULL;
-  WNF_STACK = NULL;
-  TENS      = NULL;
-  KERNELS   = NULL;
-  HEAP_NEXT = 0;
-  WNF_S_POS = 0;
-  TENS_NEXT = 1;
+  free(BOOK_HEAP);
+  free(ALO_STATES);
+  HEAP       = NULL;
+  WNF_STACK  = NULL;
+  TENS       = NULL;
+  KERNELS    = NULL;
+  BOOK_HEAP  = NULL;
+  ALO_STATES = NULL;
+  HEAP_NEXT  = 0;
+  WNF_S_POS  = 0;
+  TENS_NEXT  = 1;
   KERNELS_NEXT = 1;
+  BOOK_NEXT  = 1;
+  ALO_STATES_NEXT = 1;
+  for (u32 i = 0; i < DEFS_CAP; i++) DEFS[i] = 0;
   CURRENT_BACKEND = NULL;
 }

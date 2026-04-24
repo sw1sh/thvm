@@ -14,7 +14,9 @@ int main(void) {
   CHECK(TAG_TEN  == 8);
   CHECK(TAG_UOP  == 9);
   CHECK(TAG_NUM  == 10);
-  CHECK(TAG_COUNT == 11);
+  CHECK(TAG_REF  == 11);
+  CHECK(TAG_ALO  == 12);
+  CHECK(TAG_COUNT == 13);
 
   TEST_BEGIN("term/TAG_TEN-roundtrip");
   Term t = term_new(0, TAG_TEN, DT_F32, 42);

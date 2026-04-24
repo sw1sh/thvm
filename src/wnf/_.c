@@ -60,6 +60,27 @@ enter:
       next = body;
       goto enter;
     }
+    case TAG_REF: {
+      // Look up the static template and wrap it in an empty-state ALO.
+      // ALO-VAR / ALO-LAM / ALO-NOD then walk one layer per fire as
+      // wnf re-enters this term (lazy unfolding -- no eager expansion
+      // even for self-referential defs).
+      u32  name = term_ext(next);
+      Term book = (name < DEFS_CAP) ? DEFS[name] : 0;
+      if (book == 0) {
+        // Undefined ref -- treat as WHNF atom; won't reduce further.
+        whnf = next;
+        goto apply;
+      }
+      ITRS++;
+      next = alo_realize(book, 0);
+      goto enter;
+    }
+    case TAG_ALO: {
+      ITRS++;
+      next = alo_force(next);
+      goto enter;
+    }
     case TAG_UOP: {
       u32 op = term_ext(next);
       if (op == UOP_MATERIALIZE) {

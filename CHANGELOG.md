@@ -6,6 +6,58 @@ dated section.
 
 ## Unreleased
 
+### Added: phase 1 of REF / ALO -- lazy named definitions
+
+Two new term tags layered on top of the IC + UOP graph so users can
+register named definitions and unfold them lazily during reduction
+(precondition for the recursive SGD-as-lambda optimizer described in
+PLAN.md):
+
+- `TAG_REF` (val = name slot) -- a one-cell pointer into a fresh
+  `DEFS[]` table holding the registered definition's *static
+  template*.  Reducing a REF wraps the template in an empty-state
+  ALO and re-enters; the body itself isn't expanded.
+- `TAG_ALO` (val = dyn loc -> [book_term, NUM(state_id)]) -- the
+  HVM4-style allocator.  Each fire walks one layer of the static
+  template into a fresh dynamic heap region, threading an
+  `AloState` chain that rebinds binders (LAM -> VAR) through the
+  new dyn locs so multiple unfoldings of the same def don't alias
+  each other's bound variables.
+
+New runtime infrastructure:
+- `BOOK_HEAP[]` (256K cells, parallel to `HEAP`) -- immutable
+  per-def template cells.
+- `DEFS[256]` -- root book term per registered name.
+- `ALO_STATES[]` -- linked substitution chain for ALO descents.
+- `book/{alloc,read,set,from_dynamic}.c` -- allocator + the
+  recursive snapshot that lifts a dynamic term tree into the book
+  heap (handles LAM / APP / VAR / fixed-arity UOP families; SUP /
+  DUP / variable-arity movement ops are a follow-up).
+- `alo/{state,realize,force}.c` -- the substitution chain plus
+  `alo_realize` (one book-layer -> dyn) and `alo_force` (force a
+  TAG_ALO term into its dyn shape).
+- `term/{new_ref,new_alo}.c` -- term constructors.
+
+`wnf/_.c` gained `case TAG_REF` / `case TAG_ALO` cases that fire
+the unfolding; both bump `ITRS`.
+
+WL surface in `wl/THVMLink/Kernel/Ref.wl`:
+- `TDef[name, body]` -- snapshots `body` into the book heap and
+  registers it under an integer slot (`name` may be a string -- it
+  gets interned to a stable slot via `$defNames`).
+- `TRef[name]` -- returns a TTerm wrapping a TAG_REF cell.
+- `TDefName[name]` -- expose the slot mapping for tests.
+
+Tests: `tests/test_ref.c` (5 cases) covers identity-via-REF + fresh
+allocation per call + lazy self-reference; `wl/THVMLink/Tests/ref.wlt`
+(4 cases) covers the WL surface end-to-end.  All 322 C cases + 30+
+WL cases still pass.
+
+Known scope: REF unfolds forever for self-referential defs without a
+termination construct.  Phase 2 adds `MAT` (pattern match / numeric
+switch) + `OP2` (SUB on NUMs for counter decrement) so a recursive
+`train_step` lambda can hit a base case at iteration 0.
+
 ### Added: NN training-step numerics + per-render TimeConstrained budget
 
 `nn.wlt` grew five training-flavoured cases on top of the layer
