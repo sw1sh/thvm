@@ -19,7 +19,7 @@ TESTS := \
 # runtime change retriggers a rebuild.
 SRC := $(shell find src -name '*.c' -o -name '*.h') tests/test.h
 
-.PHONY: all test clean wl wl-test
+.PHONY: all test clean wl wl-test wl-examples
 all: $(TESTS)
 
 # === Wolfram Language paclet (LibraryLink bridge) ===
@@ -71,6 +71,11 @@ wl: $(WL_LIB)
 
 wl-test: $(WL_LIB)
 	wolframscript -f $(WL_PACLET)/Tests/run.wls
+
+# Run + render every wl/Examples/<id>/term.wl, writing graph.png next
+# to each.  Append EXAMPLE=<id> to render just one.
+wl-examples: $(WL_LIB)
+	wolframscript -f wl/Examples/run.wls $(EXAMPLE)
 
 
 $(BIN):

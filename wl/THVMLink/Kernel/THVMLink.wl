@@ -62,7 +62,7 @@ $lib = FileNameJoin[{$libDir, "THVMLink" <> Switch[$OperatingSystem,
 
 debugPrint[args___] := WriteString[$Output, StringJoin @@ Map[ToString, {args}], "\n"]
 
-If[!FileExistsQ[$lib],
+If[ ! FileExistsQ[$lib],
     debugPrint["[THVMLink] Library not built.  Run `make wl` from the repo root."];
     debugPrint["[THVMLink] Expected at: ", $lib]
 ];
@@ -242,7 +242,7 @@ subVerticesForAgent[base_Integer, tag_Integer] :=
     Module[{result = {}},
         Do[
             With[{loc = base + p[[1]]},
-                If[TTermSub[THeapRead[loc]] == 1,
+                If[ TTermSub[THeapRead[loc]] == 1,
                     AppendTo[result, agentVertexId[base]]]],
             {p, agentPorts[tag]}
         ];

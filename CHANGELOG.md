@@ -6,6 +6,33 @@ dated section.
 
 ## Unreleased
 
+### Added: wl/Examples/ runnable example database
+
+- New `wl/Examples/` directory: one folder per example term, each
+  holding a minimal `term.wl` (no `Needs`, no `TInit`, just the
+  expression to construct the term) plus the rendered
+  `graph.png` produced by the runner.
+- 9 examples covering every interaction we currently fire: identity
+  lambda, (id ERA) before / after `TWnf`, (ERA lam) before / after
+  `TWnf`, bare `TSup[ERA, ERA]`, DUP-SUP same-label annihilation
+  before / after, and nested APPs.
+- `wl/Examples/run.wls`: single CLI for both bulk and per-example
+  runs.  Loads the paclet, calls `TInit` per example, evaluates the
+  `term.wl`, exports the resulting `THeapGraph[term]` as a PNG
+  alongside the source.  Supports a positional example id and a
+  `--eval` flag to skip the PNG export.
+- `wl/Examples/README.md` catalogues every example and documents how
+  to add new ones.
+- `make wl-examples` (regenerate every PNG) and
+  `make wl-examples EXAMPLE=<id>` (just one).
+- `docs/heap_graph.md` now embeds two of those PNGs directly from
+  `wl/Examples/<id>/graph.png` so the doc and the runnable example
+  stay in sync.  The previous one-off `docs/images/` directory is
+  removed.
+- `wl/GUIDE.md` gains a rule for multi-line `If`: leading space after
+  the bracket so the test argument lines up with the branches
+  (`If[ cond, then, else]`).
+
 ### Added: heap graph rendering (PLAN.md step 10)
 
 - `THeapGraph[]` and `THeapGraph[term]` (or `THeapGraph[{t1, t2,

@@ -1,0 +1,1 @@
+TLam[var |-> var]

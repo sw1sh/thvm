@@ -59,6 +59,17 @@ fine when relevant).
 - Prefer structural indentation over column alignment.
 - One semantic unit per line in long forms (`Which`, `Switch`,
   `Association`, `Table`, option lists).
+- For multi-line `If`, put a space after the opening bracket so the
+  test argument lines up with the branches:
+
+  ```wolfram
+  If[ Length[dirs] === 0,
+      debugPrint["no examples to run"];
+      Exit[1]
+  ]
+  ```
+
+  Single-line `If[cond, then, else]` does not need the leading space.
 
 ## Definitions
 
