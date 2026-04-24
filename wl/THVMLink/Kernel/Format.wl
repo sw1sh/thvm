@@ -24,6 +24,16 @@ tHeapQ[___] := False
 tTermQ[TTerm[id_Integer]] := True
 tTermQ[___] := False
 
+(* More specific tests that match on a TTerm AND its tag.  Used to
+   dispatch the MakeBoxes UpValue by tag so the summary box for a
+   tensor differs from the one for an IC combinator. *)
+tTermTagQ[TTerm[id_Integer], tag_Integer] := $termTagFn[id] === tag
+tTermTagQ[___, ___] := False
+
+tTenQ[t_] := tTermTagQ[t, $TagTEN]
+tUopQ[t_] := tTermTagQ[t, $TagUOP]
+tNumQ[t_] := tTermTagQ[t, $TagNUM]
+
 (* === icons (small thumbnails for the summary box) === *)
 
 heapSummaryIcon[] := Graphics[
@@ -37,6 +47,25 @@ heapSummaryIcon[] := Graphics[
 
 termSummaryIcon[] := Graphics[
     {EdgeForm[Black], FaceForm[White], Disk[{0, 0}, 0.5]},
+    ImageSize -> Dynamic[{Automatic, 3.0 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
+(* Colored-square icon for TTensor: cyan fill matches the heap-graph
+   TAG_TEN styling (docs/tensors.md). *)
+tenSummaryIcon[] := Graphics[
+    {EdgeForm[LightDarkSwitched[Black, White]],
+     FaceForm[LightDarkSwitched[Lighter[StandardCyan, 0.55], Darker[StandardCyan, 0.45]]],
+     Rectangle[{-0.45, -0.45}, {0.45, 0.45}]},
+    ImageSize -> Dynamic[{Automatic, 3.0 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
+(* Colored-rectangle icon for TUOp. *)
+uopSummaryIcon[] := Graphics[
+    {EdgeForm[LightDarkSwitched[Black, White]],
+     FaceForm[LightDarkSwitched[Lighter[StandardBlue, 0.55], Darker[StandardBlue, 0.45]]],
+     Rectangle[{-0.6, -0.3}, {0.6, 0.3}]},
     ImageSize -> Dynamic[{Automatic, 3.0 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
     PlotRangePadding -> Scaled[0.05]
 ]
@@ -69,7 +98,7 @@ THeap /: MakeBoxes[s_THeap /; tHeapQ[Unevaluated[s]], fmt_] := With[{
     ]
 ]
 
-TTerm /: MakeBoxes[t_TTerm /; tTermQ[Unevaluated[t]], fmt_] := With[{
+TTerm /: MakeBoxes[t_TTerm /; tTermQ[Unevaluated[t]] && ! tTenQ[t] && ! tUopQ[t] && ! tNumQ[t], fmt_] := With[{
     id   = First[t],
     icon = termSummaryIcon[]
 },
@@ -89,6 +118,83 @@ TTerm /: MakeBoxes[t_TTerm /; tTermQ[Unevaluated[t]], fmt_] := With[{
                 BoxForm`SummaryItem[{"sub: ", $termSubFn[id]}],
                 BoxForm`SummaryItem[{"raw: ", id}]
             }
+        },
+        fmt,
+        "Interpretable" -> Automatic
+    ]
+]
+
+(* Tag-specialized summary boxes: TAG_TEN / TAG_UOP / TAG_NUM each
+   render with their own icon + domain-specific fields. *)
+
+TTerm /: MakeBoxes[t_TTerm /; tTenQ[t], fmt_] := With[{
+    id    = First[t],
+    icon  = tenSummaryIcon[],
+    shape = TTensorShape[t],
+    rc    = TTensorRefcount[t]
+},
+    BoxForm`ArrangeSummaryBox[
+        "TTensor",
+        t,
+        icon,
+        {
+            {
+                BoxForm`SummaryItem[{"shape: ", Row[shape, Times]}],
+                BoxForm`SummaryItem[{"dtype: ", TTensorDType[t]}]
+            }
+        },
+        {
+            {
+                BoxForm`SummaryItem[{"refcount: ", rc}],
+                BoxForm`SummaryItem[{"tensor id: ", $termValFn[id]}]
+            }
+        },
+        fmt,
+        "Interpretable" -> Automatic
+    ]
+]
+
+TTerm /: MakeBoxes[t_TTerm /; tUopQ[t], fmt_] := With[{
+    id    = First[t],
+    icon  = uopSummaryIcon[],
+    kind  = TUOpKind[t]
+},
+    BoxForm`ArrangeSummaryBox[
+        "TUOp",
+        t,
+        icon,
+        {
+            {
+                BoxForm`SummaryItem[{"kind: ", kind}],
+                BoxForm`SummaryItem[{"loc: ",  $termValFn[id]}]
+            }
+        },
+        {
+            {
+                BoxForm`SummaryItem[{"srcs: ", Length[TUOpSrcs[t]]}]
+            }
+        },
+        fmt,
+        "Interpretable" -> Automatic
+    ]
+]
+
+TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] := With[{
+    id   = First[t],
+    icon = termSummaryIcon[]
+},
+    BoxForm`ArrangeSummaryBox[
+        "TNum",
+        t,
+        icon,
+        {
+            {
+                BoxForm`SummaryItem[{"dtype: ", dtypeName[$termExtFn[id]]}],
+                BoxForm`SummaryItem[{"bits: ",  $termValFn[id]}]
+            }
+        },
+        {
+            {BoxForm`SummaryItem[{"raw: ", id}]}
         },
         fmt,
         "Interpretable" -> Automatic

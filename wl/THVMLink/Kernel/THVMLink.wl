@@ -363,100 +363,6 @@ TDup[label_Integer, body_, k_] := With[{loc = heapWith[body]},
       packTerm[0, $TagDP1, label, loc]]
 ]
 
-(* === tensor constructors === *)
-
-TTensor[shape_List]                       := TTensor[shape, "f32"]
-TTensor[shape_List, dtype_String]         := (
-    ensureInit[];
-    TTerm[$tensorAllocFn[dtypeCode[dtype], shape]]
-)
-TTensor[shape_List, data_List]            := TTensor[shape, data, "f32"]
-TTensor[shape_List, data_List, dtype_String] := With[{
-    t = TTensor[shape, dtype]
-},
-    If[ dtype === "f32",
-        $tensorWriteFn [TTermVal[t], N @ Flatten[data]],
-        $tensorWriteIFn[TTermVal[t], Round @ Flatten[data]]
-    ];
-    t
-]
-
-TTensorShape[t_]    := $tensorShapeFn[TTermVal[t]]
-TTensorDType[t_]    := dtypeName[TTermExt[t]]
-TTensorRefcount[t_] := $tensorRcFn[TTermVal[t]]
-
-TTensorData[t_] := With[{id = TTermVal[t], dt = TTermExt[t]},
-    If[ dt === $DTF32, $tensorReadFn[id], $tensorReadIFn[id]]
-]
-
-(* === UOp graph constructors === *)
-
-(* All wrap the raw uop_* C calls into TTerms.  Sources are passed
-   through ttermRaw so callers can mix TTerm and Integer freely. *)
-
-TUOpConst[value_, dtype_String : "f32"] := (
-    ensureInit[];
-    TTerm[$uopConstFn[dtypeCode[dtype], N[value]]]
-)
-
-TUOpAdd[a_, b_]   := (ensureInit[]; TTerm[$uopBinaryFn[$UopAdd,   ttermRaw[a], ttermRaw[b]]])
-TUOpMul[a_, b_]   := (ensureInit[]; TTerm[$uopBinaryFn[$UopMul,   ttermRaw[a], ttermRaw[b]]])
-TUOpCmplt[a_, b_] := (ensureInit[]; TTerm[$uopBinaryFn[$UopCmplt, ttermRaw[a], ttermRaw[b]]])
-
-TUOpNeg[a_]   := (ensureInit[]; TTerm[$uopUnaryFn[$UopNeg,   ttermRaw[a]]])
-TUOpRecip[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopRecip, ttermRaw[a]]])
-TUOpExp2[a_]  := (ensureInit[]; TTerm[$uopUnaryFn[$UopExp2,  ttermRaw[a]]])
-TUOpLog2[a_]  := (ensureInit[]; TTerm[$uopUnaryFn[$UopLog2,  ttermRaw[a]]])
-TUOpSqrt[a_]  := (ensureInit[]; TTerm[$uopUnaryFn[$UopSqrt,  ttermRaw[a]]])
-
-TUOpReduce[src_, axis_Integer, kind_String] := (
-    ensureInit[];
-    TTerm[$uopReduceFn[reduceKindCode[kind], axis, ttermRaw[src]]]
-)
-
-TUOpReshape[src_, shape_List] := (ensureInit[]; TTerm[$uopReshapeFn[ttermRaw[src], shape]])
-TUOpPermute[src_, axes_List]  := (ensureInit[]; TTerm[$uopPermuteFn[ttermRaw[src], axes]])
-TUOpExpand [src_, shape_List] := (ensureInit[]; TTerm[$uopExpandFn [ttermRaw[src], shape]])
-
-(* PAD/SHRINK ranges arrive as {{b0,e0},{b1,e1},...}; flatten to
-   the C-side begin/end pair stream. *)
-TUOpPad   [src_, ranges_List] := (ensureInit[]; TTerm[$uopPadFn   [ttermRaw[src], Flatten[ranges]]])
-TUOpShrink[src_, ranges_List] := (ensureInit[]; TTerm[$uopShrinkFn[ttermRaw[src], Flatten[ranges]]])
-
-(* FLIP axes arrive as a list of axis indices; pack to a bitmask. *)
-TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
-    ensureInit[];
-    TTerm[$uopFlipFn[ttermRaw[src], mask]]
-]
-
-TUOpMaterialize[expr_] := (ensureInit[]; TTerm[$uopMatFn[ttermRaw[expr]]])
-
-(* Inspection helpers for UOp terms. *)
-TUOpKind[u_] := Lookup[$uopNames, TTermExt[u], "UOP?" <> ToString[TTermExt[u]]]
-
-(* TUOpSrcs returns the heap cells that are the immediate sources of
-   the UOp.  Per docs/tensors.md per-opcode heap layouts, each
-   opcode has a fixed number of source cells (variable-arity
-   movement ops are returned as just `[src]` for step 12; the
-   trailing dimension cells stay implicit -- they're inspected via
-   raw THeapRead by the materialize pass). *)
-TUOpSrcs[u_] := With[{loc = TTermVal[u], op = TTermExt[u]},
-    Module[{n},
-        n = Which[
-            op === $UopMaterialize,                                                            1,
-            op === $UopKernel,                                                                  2,
-            op === $UopConst,                                                                   1,
-            MemberQ[{$UopReshape, $UopPermute, $UopExpand,
-                     $UopPad, $UopShrink, $UopFlip}, op],                                      1,
-            MemberQ[{$UopAdd, $UopMul, $UopCmplt}, op],                                        2,
-            MemberQ[{$UopNeg, $UopRecip, $UopExp2, $UopLog2, $UopSqrt}, op],                   1,
-            op === $UopReduce,                                                                  1,
-            True,                                                                               1
-        ];
-        Table[THeapRead[loc + i], {i, 0, n - 1}]
-    ]
-]
-
 (* === heap graph rendering ===
    Defined in Visualization.wl (loaded below).  Public symbol
    THeapGraph; per-tag shapes / colours are private. *)
@@ -480,6 +386,7 @@ THeap /: Normal[THeap[a_Association]]         := a
 
 (* === sibling files === *)
 With[{dir = DirectoryName[$InputFileName]},
+    Get[FileNameJoin[{dir, "Tensor.wl"}]];
     Get[FileNameJoin[{dir, "Visualization.wl"}]];
     Get[FileNameJoin[{dir, "Format.wl"}]]
 ]
