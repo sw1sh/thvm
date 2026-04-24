@@ -51,6 +51,25 @@ Same spirit as the rules above: ASCII-only in source files unless the
 character carries meaning (mathematical typesetting in a comment is
 fine when relevant).
 
+### Dark mode + Standard colors
+
+Always design WL output for both light and dark Wolfram themes from
+the start.
+
+- Use **Standard color names** (`StandardBlue`, `StandardRed`,
+  `StandardGreen`, `StandardOrange`, `StandardYellow`,
+  `StandardPurple`, `StandardGray`) instead of `RGBColor[...]` or
+  `Darker[Blue, 0.4]`. They read correctly on light and dark
+  backgrounds.
+- Use `LightDarkSwitched[lightValue, darkValue]` when a value
+  (color, opacity, thickness) genuinely needs to differ between
+  modes. Avoid hard-coded `White`/`Black` for `Background`,
+  `FaceForm`, etc.; either let the theme drive it, or wrap in
+  `LightDarkSwitched`.
+- Don't unconditionally pin `Background -> White` on a Graph or
+  Graphics. If a static PNG export needs an explicit background,
+  set it on the Export call, not on the Graph.
+
 ## Indentation and spacing
 
 - 4-space indentation. Never 2.

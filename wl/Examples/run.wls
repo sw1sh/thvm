@@ -22,7 +22,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Needs["THVMLink`"];
+Get["THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
 
 debugPrint[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
 
@@ -50,7 +50,16 @@ renderOne[dir_String] := Block[{wlFile, pngFile, term, graph},
         Return[]
     ];
     graph = THeapGraph[term];
-    Export[pngFile, graph, "PNG", ImageSize -> $size, Background -> White];
+    (* Transparent background: PNGs read well on both light and dark
+       README backgrounds without the WL Graph theme's tint bleeding
+       through. *)
+    Export[
+        pngFile,
+        Show[graph, Background -> None],
+        "PNG",
+        ImageResolution -> 144,
+        Background -> None
+    ];
     debugPrint["[ok] ", FileNameTake[dir], " -> ", pngFile];
     TFree[];
 ]

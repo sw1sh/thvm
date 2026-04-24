@@ -175,136 +175,9 @@ TDup[label_Integer, body_Integer, k_] := With[{loc = heapWith[body]},
       TTermNew[0, $TagDP1, label, loc]]
 ]
 
-(* === heap graph (IC string diagram) === *)
-(* Per-tag port info: list of {offset, portName} for an agent with the
-   given tag.  `cellEdges`'s single source of truth.  Adding a tag means
-   adding one branch here. *)
-agentPorts[$TagLAM] := {{0, "body"}}
-agentPorts[$TagAPP] := {{0, "f"}, {1, "x"}}
-agentPorts[$TagSUP] := {{0, "L"}, {1, "R"}}
-agentPorts[$TagDUP] := {{0, "body"}}
-
-agentVertexId[base_Integer] := "a" <> ToString[base]
-eraVertexId[loc_Integer]    := "e" <> ToString[loc]
-
-(* Inferred agent for one term value: returns a key->tag rule, or
-   Nothing if the term doesn't imply an agent.  VAR cells imply a LAM
-   at the binder loc; DP0/DP1 cells imply a DUP at the body loc. *)
-agentFromTerm[term_Integer] := Switch[TTermTag[term],
-    $TagLAM | $TagAPP | $TagSUP | $TagDUP, TTermVal[term] -> TTermTag[term],
-    $TagVAR,                               TTermVal[term] -> $TagLAM,
-    $TagDP0 | $TagDP1,                     TTermVal[term] -> $TagDUP,
-    _,                                     Nothing
-]
-
-(* Walk every populated heap cell plus any seed terms.  Compound terms
-   contribute their args base as an agent of that tag.  Compound term
-   cells take precedence over inferred-from-VAR/DP entries thanks to
-   Association merge (last write wins; we put compounds last). *)
-discoverAgents[seedTerms_List : {}] := Block[{n = THeapPos[], terms, rules},
-    terms = Join[seedTerms, Table[THeapRead[loc], {loc, 0, n - 1}]];
-    rules = agentFromTerm /@ terms;
-    Association[rules]
-]
-
-(* ERA cells: every loc whose stored term has tag ERA. *)
-discoverEras[] := Block[{n = THeapPos[]},
-    Select[Range[0, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
-]
-
-(* For one port-slot of an agent at args base `base`, produce a triple
-   {srcId, dstId, portLabel} based on what's stored in that slot. *)
-portRecord[base_Integer, offset_Integer, port_String] :=
-    Block[{loc = base + offset, t, tag, val},
-        t   = THeapRead[loc];
-        tag = TTermTag[t];
-        val = TTermVal[t];
-        Switch[tag,
-            $TagLAM | $TagAPP | $TagSUP | $TagDUP,
-                {agentVertexId[base], agentVertexId[val], port},
-            $TagVAR,
-                {agentVertexId[base], agentVertexId[val], port <> " var"},
-            $TagDP0,
-                {agentVertexId[base], agentVertexId[val], port <> " dp0"},
-            $TagDP1,
-                {agentVertexId[base], agentVertexId[val], port <> " dp1"},
-            $TagERA,
-                {agentVertexId[base], eraVertexId[loc], port},
-            _, Nothing
-        ]
-    ]
-
-agentEdgeRecords[base_Integer, tag_Integer] :=
-    portRecord[base, #[[1]], #[[2]]] & /@ agentPorts[tag]
-
-(* SUB-tagged cells get dashed outline; we mark the corresponding vertex. *)
-subVerticesForAgent[base_Integer, tag_Integer] :=
-    Module[{result = {}},
-        Do[
-            With[{loc = base + p[[1]]},
-                If[ TTermSub[THeapRead[loc]] == 1,
-                    AppendTo[result, agentVertexId[base]]]],
-            {p, agentPorts[tag]}
-        ];
-        result
-    ]
-
-THeapGraph[]              := buildHeapGraph[discoverAgents[{}]]
-THeapGraph[term_Integer]  := buildHeapGraph[discoverAgents[{term}]]
-THeapGraph[ts_List]       := buildHeapGraph[discoverAgents[ts]]
-
-buildHeapGraph[agents_Association] := Block[{
-    eras = discoverEras[],
-    edgeRecords, edges, edgeLabels, vertices, vlabels, subVertices, vstyles
-},
-    edgeRecords = Flatten[
-        KeyValueMap[agentEdgeRecords, agents],
-        1
-    ];
-    edges      = (DirectedEdge @@ Take[#, 2]) & /@ edgeRecords;
-    edgeLabels = MapThread[Rule, {edges, Last /@ edgeRecords}];
-
-    vertices = DeleteDuplicates @ Join[
-        agentVertexId /@ Keys[agents],
-        eraVertexId   /@ eras
-    ];
-
-    vlabels = Join[
-        KeyValueMap[
-            agentVertexId[#1] -> (TTagName[#2] <> "@" <> ToString[#1]) &,
-            agents
-        ],
-        ((eraVertexId[#] -> "") &) /@ eras
-    ];
-
-    subVertices = Flatten[KeyValueMap[subVerticesForAgent, agents]];
-    vstyles = Map[
-        # -> If[MemberQ[subVertices, #],
-            Directive[EdgeForm[Dashed], FaceForm[White]],
-            Automatic] &,
-        vertices
-    ];
-
-    Graph[vertices, edges,
-        VertexLabels       -> Map[#[[1]] -> Placed[#[[2]], Center] &, vlabels],
-        VertexLabelStyle   -> Directive[FontFamily -> "Helvetica", FontSize -> 10, Black],
-        VertexSize         -> Map[# -> If[StringStartsQ[#, "e"], 0.08, 0.45] &, vertices],
-        VertexShapeFunction -> Map[
-            # -> If[StringStartsQ[#, "e"],
-                Function[{pos, v, size}, {EdgeForm[], FaceForm[Black], Disk[pos, size / 2]}],
-                Function[{pos, v, size}, {EdgeForm[Black], FaceForm[White], Disk[pos, size]}]
-            ] &,
-            vertices
-        ],
-        EdgeLabels         -> Map[#[[1]] -> Placed[#[[2]], 0.5] &, edgeLabels],
-        EdgeLabelStyle     -> Directive[FontFamily -> "Helvetica", FontSize -> 9, Gray],
-        VertexStyle        -> vstyles,
-        DirectedEdges      -> True,
-        GraphLayout        -> "LayeredDigraphEmbedding",
-        PerformanceGoal    -> "Quality",
-        ImagePadding       -> 30
-    ]
-]
+(* === heap graph rendering ===
+   Defined in Visualization.wl (loaded below).  Public symbol
+   THeapGraph; per-tag shapes / colours are private. *)
 
 THeap[] := Block[{n = THeapPos[]},
     THeap[<|
@@ -323,8 +196,11 @@ THeap /: Keys[THeap[a_Association]]           := Keys[a]
 THeap /: Values[THeap[a_Association]]         := Values[a]
 THeap /: Normal[THeap[a_Association]]         := a
 
-(* === formatting (summary boxes) === *)
-Get[FileNameJoin[{DirectoryName[$InputFileName], "Format.wl"}]]
+(* === sibling files === *)
+With[{dir = DirectoryName[$InputFileName]},
+    Get[FileNameJoin[{dir, "Visualization.wl"}]];
+    Get[FileNameJoin[{dir, "Format.wl"}]]
+]
 
 End[];
 EndPackage[];

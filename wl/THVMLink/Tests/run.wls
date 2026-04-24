@@ -7,7 +7,7 @@
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
-Needs["THVMLink`"];
+Get["THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
 
 report  = TestReport[FileNames["*.wlt", "wl/THVMLink/Tests"]];
 nPass   = report["TestsSucceededCount"];
