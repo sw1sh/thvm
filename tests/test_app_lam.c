@@ -1,4 +1,4 @@
-// test_app_lam.c — APP-LAM beta reduction.
+// test_app_lam.c - APP-LAM beta reduction.
 //
 // (λx.x) y          → y
 // (λx.x) (λy.y)     → (λy.y)
@@ -9,7 +9,7 @@
 #include "../src/thvm.c"
 #include "test.h"
 
-// Build (λx.x) — heap[lam_loc] = VAR(lam_loc). Returns the LAM term.
+// Build (λx.x) - heap[lam_loc] = VAR(lam_loc). Returns the LAM term.
 static Term build_id_lam(void) {
   u64  lam_loc = heap_alloc(1);
   Term var     = term_new(0, TAG_VAR, 0, lam_loc);
@@ -17,7 +17,7 @@ static Term build_id_lam(void) {
   return term_new(0, TAG_LAM, 0, lam_loc);
 }
 
-// Build APP(f, x) — allocates 2 cells.
+// Build APP(f, x) - allocates 2 cells.
 static Term build_app(Term f, Term x) {
   u64 loc = heap_alloc(2);
   heap_set(loc + 0, f);
@@ -28,7 +28,7 @@ static Term build_app(Term f, Term x) {
 int main(void) {
   thvm_init();
 
-  PENDING("APP-LAM — wnf stack machine + interact_app_lam land in step 6");
+  PENDING("APP-LAM - wnf stack machine + interact_app_lam land in step 6");
 
   // The body below is the spec. It runs once PENDING is removed.
 

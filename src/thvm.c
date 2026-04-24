@@ -1,4 +1,4 @@
-// thvm.c — single-translation-unit hub.
+// thvm.c - single-translation-unit hub.
 //
 // Each .c included below contributes one function (or a tiny family
 // of helpers). The order matters: term packing first, then heap, then
@@ -6,8 +6,7 @@
 
 #include "thvm.h"
 
-// ─── Globals ────────────────────────────────────────────────────────────────
-
+// === Globals ===
 Term *HEAP      = NULL;
 u64   HEAP_NEXT = 0;
 
@@ -16,7 +15,7 @@ u32   WNF_S_POS = 0;
 
 u64   ITRS      = 0;
 
-// ─── term/ ──────────────────────────────────────────────────────────────────
+// === term/ ===
 #include "term/new.c"
 #include "term/tag.c"
 #include "term/ext.c"
@@ -24,21 +23,20 @@ u64   ITRS      = 0;
 #include "term/sub/get.c"
 #include "term/sub/set.c"
 
-// ─── heap/ ──────────────────────────────────────────────────────────────────
+// === heap/ ===
 #include "heap/alloc.c"
 #include "heap/read.c"
 #include "heap/set.c"
 #include "heap/take.c"
 #include "heap/subst_var.c"
 
-// ─── interact/ ──────────────────────────────────────────────────────────────
+// === interact/ ===
 #include "interact/app_lam.c"
 
-// ─── wnf/ ───────────────────────────────────────────────────────────────────
+// === wnf/ ===
 #include "wnf/_.c"
 
-// ─── runtime lifecycle ──────────────────────────────────────────────────────
-
+// === runtime lifecycle ===
 void thvm_init(void) {
   HEAP      = (Term *)calloc(HEAP_CAP, sizeof(Term));
   WNF_STACK = (Term *)calloc(WNF_CAP,  sizeof(Term));

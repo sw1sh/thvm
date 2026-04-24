@@ -1,4 +1,4 @@
-// thvm.h — public surface of the thvm runtime
+// thvm.h - public surface of the thvm runtime
 //
 // Single-TU build: every .c file under src/ is #included by src/thvm.c
 // in dependency order. Tests #include "../src/thvm.c" directly.
@@ -18,8 +18,7 @@
 #include <string.h>
 #include <assert.h>
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
+// === Types ===
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -31,12 +30,12 @@ typedef u64 Term;
 
 #define fn static inline
 
-// ─── Term bit layout ────────────────────────────────────────────────────────
+// === Term bit layout ===
 //
 //   bit  63        62..56     55..38         37..0
 //        [SUB:1]   [TAG:7]    [EXT:18]       [VAL:38]
 //
-//   SUB = substitution flag — when 1, the heap cell is the *value* a
+//   SUB = substitution flag - when 1, the heap cell is the *value* a
 //         variable was substituted to (read by VAR/DP0/DP1 enter rules).
 //   TAG = term type (128 max).
 //   EXT = label / opcode / arity. Per-tag meaning.
@@ -57,7 +56,7 @@ typedef u64 Term;
 #define EXT_MASK  0x3FFFFULL
 #define VAL_MASK  0x3FFFFFFFFFULL
 
-// ─── Tags (minimal initial set) ─────────────────────────────────────────────
+// === Tags (minimal initial set) ===
 // Order chosen so the hot interaction tags sit in the low byte.
 
 #define TAG_APP  0   // (f x).             Heap[loc..loc+1] = [f, x]
@@ -71,12 +70,11 @@ typedef u64 Term;
 
 #define TAG_COUNT 8
 
-// ─── Capacities ─────────────────────────────────────────────────────────────
-
+// === Capacities ===
 #define HEAP_CAP (1ULL << 24)   // 16M cells * 8B = 128 MiB. Plenty for tests.
 #define WNF_CAP  (1ULL << 16)   // 64K stack slots.
 
-// ─── Globals ────────────────────────────────────────────────────────────────
+// === Globals ===
 // Single-threaded for now. Extern in the header, defined in src/thvm.c.
 
 extern Term *HEAP;
@@ -87,8 +85,7 @@ extern u32   WNF_S_POS;
 
 extern u64   ITRS;   // interaction counter (for tests + tracing)
 
-// ─── term/ ──────────────────────────────────────────────────────────────────
-
+// === term/ ===
 fn Term term_new(u8 sub, u8 tag, u32 ext, u64 val);
 fn u8   term_tag(Term t);
 fn u32  term_ext(Term t);
@@ -96,27 +93,25 @@ fn u64  term_val(Term t);
 fn u8   term_sub_get(Term t);
 fn Term term_sub_set(Term t, u8 sub);
 
-// ─── heap/ ──────────────────────────────────────────────────────────────────
-
+// === heap/ ===
 fn u64  heap_alloc(u64 size);
 fn Term heap_read(u64 loc);
 fn void heap_set(u64 loc, Term t);
 fn Term heap_take(u64 loc);          // read + zero
 fn void heap_subst_var(u64 loc, Term value);
 
-// ─── interact/ ──────────────────────────────────────────────────────────────
+// === interact/ ===
 // One file per active pair. Stubbed in step 2/3; filled in step 6.
 
 fn Term interact_app_lam(Term lam, Term arg);
 
-// ─── wnf/ ───────────────────────────────────────────────────────────────────
+// === wnf/ ===
 // Stack-machine reducer to weak normal form. Stub returns input unchanged
 // until step 6 replaces it.
 
 fn Term wnf(Term t);
 
-// ─── runtime lifecycle ──────────────────────────────────────────────────────
-
+// === runtime lifecycle ===
 void thvm_init(void);
 void thvm_free(void);
 

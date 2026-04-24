@@ -1,4 +1,4 @@
-// test_term.c — round-trip pack/unpack of the 64-bit Term encoding.
+// test_term.c - round-trip pack/unpack of the 64-bit Term encoding.
 
 #include "../src/thvm.c"
 #include "test.h"

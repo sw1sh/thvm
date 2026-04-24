@@ -1,4 +1,4 @@
-// test_heap.c — flat heap allocator, read/set, take, subst_var.
+// test_heap.c - flat heap allocator, read/set, take, subst_var.
 
 #include "../src/thvm.c"
 #include "test.h"

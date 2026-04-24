@@ -1,4 +1,4 @@
-// test_dup_sup.c — duplication interacting with superposition.
+// test_dup_sup.c - duplication interacting with superposition.
 //
 // Same label (annihilate):
 //   ! &L{x0, x1} = &L{a, b}    →   x0 ← a,  x1 ← b
@@ -17,7 +17,7 @@
 int main(void) {
   thvm_init();
 
-  PENDING("DUP-SUP — needs wnf + interact_dup_sup (step 6)");
+  PENDING("DUP-SUP - needs wnf + interact_dup_sup (step 6)");
 
   // Same-label case: build !&7{x0,x1} = &7{ERA, LAM}; <body uses x0>
   // and check x0 reduces to ERA.

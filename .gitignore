@@ -6,6 +6,9 @@ bin/
 .DS_Store
 .claude/
 
+# Compiled WL paclet library (rebuilt by `make wl`).
+wl/THVMLink/LibraryResources/
+
 # Local-only reference symlink to the research prototype. Create with:
 #   ln -s ../TinyHVM TinyHVM
 TinyHVM

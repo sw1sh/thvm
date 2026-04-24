@@ -1,4 +1,4 @@
-// test_era.c — eraser propagation.
+// test_era.c - eraser propagation.
 //
 // (* a)         → *           (APP-ERA)
 // !&L{x,y} = *  → x ← *, y ← * (DUP-ERA)
@@ -11,7 +11,7 @@
 int main(void) {
   thvm_init();
 
-  PENDING("ERA propagation — needs wnf + interact_app_era / interact_dup_era (step 6)");
+  PENDING("ERA propagation - needs wnf + interact_app_era / interact_dup_era (step 6)");
 
   TEST_BEGIN("era/app-era-yields-era");
   Term era = term_new(0, TAG_ERA, 0, 0);

@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Working notes for agents (LLM or human) contributing to **thvm**. Keep this
-file *current* — when you change conventions, update here in the same commit.
+file *current* - when you change conventions, update here in the same commit.
 
 ## What this project is
 
@@ -11,20 +11,20 @@ computation (forward, autograd, kernel fusion, codegen, dispatch) as a single
 interaction-net rewrite system over a flat heap.
 
 It is being built from the ground up alongside a reference research project
-located at `./TinyHVM` (symlink). That repo is sloppy by design — it was the
+located at `./TinyHVM` (symlink). That repo is sloppy by design - it was the
 prototype. We mine it for ideas and snippets but do not depend on it.
 
 The roadmap is in [PLAN.md](PLAN.md). Read it before making structural changes.
 
 ## Reference repos (read-only siblings)
 
-- [`TinyHVM/`](TinyHVM/) — research prototype. Whole pipeline exists here in
+- [`TinyHVM/`](TinyHVM/) - research prototype. Whole pipeline exists here in
   rough form: heap, interactions, tensor ops, autograd via interactions,
   Metal codegen, Wolfram paclet.
-- [`TinyHVM/HVM4/clang/`](TinyHVM/HVM4/clang/) — canonical HVM4 C runtime.
+- [`TinyHVM/HVM4/clang/`](TinyHVM/HVM4/clang/) - canonical HVM4 C runtime.
   Term layout, WNF stack machine, and per-interaction file split are all
   copied/adapted from here.
-- [`TinyHVM/tinygrad/`](TinyHVM/tinygrad/) — tinygrad source for the UOp /
+- [`TinyHVM/tinygrad/`](TinyHVM/tinygrad/) - tinygrad source for the UOp /
   pattern-rewrite / kernelization machinery we will mirror in C.
 
 ## Conventions
@@ -54,7 +54,7 @@ mirrors the sequent-calculus rule from the doc.
 
 ### Single translation unit
 
-`src/thvm.c` is the umbrella — it `#include`s every `.c` file in build
+`src/thvm.c` is the umbrella - it `#include`s every `.c` file in build
 order. We compile one TU. This matches HVM4 and gives the optimizer maximum
 inlining freedom. It also keeps the build trivial (one `clang` invocation).
 
@@ -62,7 +62,7 @@ inlining freedom. It also keeps the build trivial (one `clang` invocation).
 
 - C11. `static inline` on small functions (`fn` macro = `static inline`).
 - Switch (not if-chains) for tag dispatch.
-- No single-line `if`/`while`/function bodies — always braces.
+- No single-line `if`/`while`/function bodies - always braces.
 - Align declaration columns when adjacent.
 - Trust internal invariants; validate only at boundaries.
 
@@ -74,14 +74,22 @@ a careful reader. Do **not** restate what the code already says.
 ## Build and test
 
 ```bash
-make           # build src/thvm.c + tests/* → bin/
+make           # build src/thvm.c + tests/* into bin/
 make test      # build then run every bin/test_*
+make wl        # build the Wolfram LibraryLink dylib
+make wl-test   # build the dylib and run the WL VerificationTest suite
 make clean
 ```
 
-The Makefile is the source of truth. Each test is an independent C program
-that `#include`s `src/thvm.c` (single-TU, recompiled per test — fast at this
-size).
+The Makefile is the source of truth. Each C test is an independent
+program that `#include`s `src/thvm.c` (single-TU, recompiled per test;
+fast at this size). The WL paclet shares `src/thvm.c` via a single
+`#include` from `wl/THVMLink/CSource/thvmlink.c`, so the C runtime has
+exactly one compiled-from copy per build target.
+
+For Wolfram-side conventions (no `Print`, no em dashes, no Unicode
+box-drawing in source, `VerificationTest` for tests), read
+[wl/GUIDE.md](wl/GUIDE.md).
 
 ## Workflow
 
@@ -97,29 +105,42 @@ size).
 
 ## Code map (current)
 
-Skeleton landed in the initial commit:
+C runtime:
 
-- `src/thvm.h` — public types, term bit layout, tag constants, function decls
-- `src/thvm.c` — single-TU hub
-- `src/term/{new,tag,ext,val}.c` + `src/term/sub/{get,set}.c` — term packing
-- `src/heap/{alloc,read,set,take,subst_var}.c` — flat heap primitives
-- `src/wnf/_.c` — WNF stack machine (**stub**: returns input unchanged)
-- `src/interact/app_lam.c` — APP-LAM beta (**stub**)
-- `tests/test_term.c` — term packing roundtrip (passes)
-- `tests/test_heap.c` — heap alloc/read/set (passes)
-- `tests/test_app_lam.c` — APP-LAM beta spec (**fails** until WNF lands)
-- `tests/test_era.c` — ERA propagation (**fails** until WNF lands)
-- `tests/test_dup_sup.c` — DUP-SUP same/different label (**fails** until WNF)
+- `src/thvm.h`: public types, term bit layout, tag constants, function decls
+- `src/thvm.c`: single-TU hub
+- `src/term/{new,tag,ext,val}.c` + `src/term/sub/{get,set}.c`: term packing
+- `src/heap/{alloc,read,set,take,subst_var}.c`: flat heap primitives
+- `src/wnf/_.c`: WNF stack machine (**stub**: returns input unchanged)
+- `src/interact/app_lam.c`: APP-LAM beta (**stub**)
+- `tests/test_term.c`, `tests/test_heap.c`: passing checks of the above
+- `tests/test_app_lam.c`, `tests/test_era.c`, `tests/test_dup_sup.c`:
+  spec assertions for the interactions; gated by `PENDING(...)` until
+  step 6 lands `wnf` and the interaction rules. They report `pend` and
+  exit 0; remove the `PENDING(...)` line once `wnf` is real.
+
+WL paclet (`wl/THVMLink/`):
+
+- `wl/THVMLink/CSource/thvmlink.c`: 14 scalar `EXTERN_C DLLEXPORT`
+  functions (lifecycle, term packing, heap, wnf, itrs). Single-TU
+  build that `#include`s `../../../src/thvm.c`.
+- `wl/THVMLink/Kernel/THVMLink.wl`: `THVMLink`` package wrapping the
+  scalar primitives and synthesizing `TLam` / `TApp` / `TSup` / `TDup`
+  via shared `heapWith` / `heapTerm` helpers.
+- `wl/THVMLink/Tests/core.wlt`: `VerificationTest` specs.
+- `wl/THVMLink/Tests/run.wls`: runner script (invoked by
+  `make wl-test`); calls `TestReport`, prints summary, exits non-zero
+  on any failure.
+- `wl/GUIDE.md`: WL style rules. Read this before touching `wl/`.
 
 ## What's deliberately not here yet
 
 Tracked in PLAN.md. Do not pre-build for them.
 
-- WL paclet (`wl/`) — step 4
-- Tensor ops (`src/tensor/`, `src/ops/`) — step 12+
-- Autograd interactions (`src/grad/`) — step 13
-- Kernel fusion / codegen / Metal backend — step 14
-- Multi-threading — not in the initial roadmap; runtime is single-threaded
+- Tensor ops (`src/tensor/`, `src/ops/`): step 12+
+- Autograd interactions (`src/grad/`): step 13
+- Kernel fusion / codegen / Metal backend: step 14
+- Multi-threading: not in the initial roadmap; runtime is single-threaded
 
 ## When in doubt
 

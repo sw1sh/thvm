@@ -1,4 +1,4 @@
-// test.h — minimal test harness used by every tests/test_*.c
+// test.h - minimal test harness used by every tests/test_*.c
 //
 // Each test is an independent C program. It #includes the single-TU
 // build of the runtime (../src/thvm.c) and uses these macros to assert
@@ -48,7 +48,7 @@ static const char *test_name = "<unnamed>";
   }                                                                          \
 } while (0)
 
-// PENDING — used at the top of a test whose implementation arrives in a
+// PENDING - used at the top of a test whose implementation arrives in a
 // later PLAN.md step. Prints a notice and exits 0 so the suite stays green.
 // Delete the call when the implementation lands and the body should run.
 #define PENDING(reason) do {                                                 \
