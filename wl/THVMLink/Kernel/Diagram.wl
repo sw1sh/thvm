@@ -202,26 +202,52 @@ agentLabelText[base_Integer, tag_Integer] := With[{arity = agentArity[tag]},
     ]
 ]
 
-(* UOP label: opcode name + base loc + inferred output shape.
-   Shape inference (uopShapeOf) is shared with Visualization.wl;
-   it comes from Uop.wl. *)
+(* Label format: header line "OPCODE@<heap-loc>#<id>" (id only when
+   the opcode carries an extra handle -- KERNEL points at a kernel
+   id, GRAD at the target tensor id), optional shape on a second
+   line, optional scalar value (CONST) on a third.  Single-line
+   header keeps the "where in the heap is this" reading at a glance.
+
+   Most UOPs only have heap base, so "MUL@8" / "ADD@12".  *)
 uopLabelText[base_Integer, opcode_Integer] := With[{shape = uopShapeOf[base]},
     Column[
         Join[
-            {uopName[opcode], "@" <> ToString[base]},
+            {uopHeader[base, opcode]},
             If[ListQ[shape], {shapeText[shape]}, {}]
         ],
         Center, Spacings -> 0
     ]
 ]
 
-(* TEN leaf label: handle id + shape from the descriptor table.
-   Falls back to "TEN\n#<id>" if shape lookup fails (e.g. id out of
-   range after a TFree).  tenShapeOf / shapeText come from Shape.wl. *)
-tenLabelText[id_Integer] := With[{shape = tenShapeOf[id]},
+uopHeader[base_Integer, $UopKernel] := With[{
+    kid = TTermVal[THeapRead[base + 1]]
+},
+    "KERNEL@" <> ToString[base] <> "#" <> ToString[kid]
+]
+
+uopHeader[base_Integer, $UopGrad] := With[{
+    targetCell = THeapRead[base + 2]
+},
+    "GRAD@" <> ToString[base] <>
+        If[TTermTag[targetCell] === $TagTEN,
+            "#" <> ToString[TTermVal[targetCell]],
+            ""
+        ]
+]
+
+uopHeader[base_Integer, opcode_Integer] :=
+    uopName[opcode] <> "@" <> ToString[base]
+
+(* TEN leaf label: just the tensor handle id + optional shape.
+   No "@<cell-loc>" -- the cell holding the TAG_TEN reference is
+   *owned by the parent UOP* (it's a slot of that UOP's heap
+   block), so showing the loc would conflict with the parent's
+   "@<base>" label.  The diagram structure already makes the
+   parent slot visually clear. *)
+tenLabelText[loc_Integer, id_Integer] := With[{shape = tenShapeOf[id]},
     Column[
         Join[
-            {"TEN", "#" <> ToString[id]},
+            {"TEN#" <> ToString[id]},
             If[ ListQ[shape], {shapeText[shape]}, {}]
         ],
         Center, Spacings -> 0
@@ -336,16 +362,9 @@ plainUopDiagram[base_Integer, principal_, opcode_Integer] := Block[{
 ]
 
 gradDiagram[base_Integer, principal_] := Block[{
-    targetCell, tid, label, yWire, fwdWire, bwdWire
+    label, yWire, fwdWire, bwdWire
 },
-    targetCell = THeapRead[base + 2];
-    tid        = If[ TTermTag[targetCell] === $TagTEN,
-                     TTermVal[targetCell],
-                     -1 ];
-    label = Column[
-        {"GRAD", "#" <> ToString[tid]},
-        Center, Spacings -> 0
-    ];
+    label   = uopHeader[base, $UopGrad];     (* "GRAD@<base>#<tid>" *)
     yWire   = wireFor[base];
     bwdWire = If[ principal === None, "p" <> ToString[base], wireFor[principal]];
     fwdWire = "fwd" <> ToString[base];
@@ -437,7 +456,7 @@ tenLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
     With[{
         ins   = If[side === "Top",    {port}, {}],
         outs  = If[side === "Bottom", {port}, {}],
-        label = tenLabelText[id]
+        label = tenLabelText[loc, id]
     },
         Diagram[label, ins, outs,
             "Shape" -> agentShape[$TagTEN], "Style" -> agentStyle[$TagTEN]

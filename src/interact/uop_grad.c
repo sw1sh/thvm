@@ -7,22 +7,26 @@
 //
 // VJP semantics: GRAD[y, gy, target] = ∂y/∂target · gy.
 //
-// `interact_grad` lifts `gy` to target's shape ONCE upfront so the
-// chain rule operates entirely on target-shaped tensors -- no
-// implicit broadcast in the intermediate MUL/ADD/NEG ops, no
-// per-leaf EXPAND wrapping.
+// Each chain-rule node that branches (ADD's two summands, MUL's two
+// product-rule terms) lifts gy to target's shape *independently* per
+// branch instead of sharing one upfront EXPAND.  Without per-branch
+// allocation the graph would have a single EXPAND with N consumers,
+// and visualisations that don't have DUPs for tensors lose all but
+// one of those consumer wires.  `gy_lifted` tracks whether the
+// caller has already wrapped gy in an EXPAND (so the leaf path
+// doesn't add a redundant outer wrapping).
 //
-//   - leaf:  y === target           -> gy            (already lifted)
-//            y is TAG_TEN otherwise  -> CONST(0) lifted to target.shape
-//            y is TAG_NUM            -> CONST(0) lifted to target.shape
-//   - UOP_CONST                      -> CONST(0) lifted to target.shape
-//   - UOP_ADD[a, b]                  -> ADD[ grad(a, gy, target),
-//                                             grad(b, gy, target) ]
-//   - UOP_MUL[a, b]                  -> ADD[ grad(a, MUL[b, gy], target),
-//                                             grad(b, MUL[a, gy], target) ]
-//   - UOP_NEG[a]                     -> grad(a, NEG[gy], target)
-//   - UOP_REDUCE_SUM[a, axis]        -> grad(a, gy, target)
-// Anything else returns CONST(0) lifted to target and prints a warning.
+//   - leaf:  y === target           -> gy            (lift if not lifted)
+//            y is TAG_TEN otherwise  -> EXPAND(CONST(0), target)
+//            y is TAG_NUM            -> EXPAND(CONST(0), target)
+//   - UOP_CONST                      -> EXPAND(CONST(0), target)
+//   - UOP_ADD[a, b]                  -> ADD[ grad(a, gy, target, lifted),
+//                                             grad(b, gy, target, lifted) ]
+//   - UOP_MUL[a, b]                  -> ADD[ grad(a, MUL[b, EXPAND_a(gy)], target, 1),
+//                                             grad(b, MUL[a, EXPAND_b(gy)], target, 1) ]
+//   - UOP_NEG[a]                     -> grad(a, NEG[EXPAND(gy)], target, 1)
+//   - UOP_REDUCE_SUM[a, axis]        -> grad(a, EXPAND(gy), target, 1)
+// Anything else returns EXPAND(CONST(0), target) and prints a warning.
 
 // EXPAND a scalar / shape-{1} producer to target's shape.  Returns
 // `src` unchanged if target isn't a TAG_TEN (no shape to look up)
@@ -39,14 +43,11 @@ fn Term grad_zero(Term target) {
   return expand_to_target(uop_const(DT_F32, 0), target);
 }
 
-// Recursive driver: applies the chain rule fully to (y, gy, target),
-// returning a UOp graph that contains no UOP_GRAD nodes.  `gy` is
-// always assumed to be in target's shape on entry (interact_grad
-// guarantees this for the top-level call; recursive callers
-// preserve the invariant since MUL/NEG of target-shaped values are
-// target-shaped).
-fn Term grad_rec(Term y, Term gy, Term target) {
-  if (y == target) return gy;
+// `gy_lifted` is non-zero when the caller has already wrapped gy in
+// an EXPAND to target.shape.  Used to skip redundant outer wrappings
+// at deep leaf positions.
+fn Term grad_rec(Term y, Term gy, Term target, int gy_lifted) {
+  if (y == target) return gy_lifted ? gy : expand_to_target(gy, target);
 
   u8 y_tag = term_tag(y);
   if (y_tag == TAG_TEN || y_tag == TAG_NUM) return grad_zero(target);
@@ -60,38 +61,46 @@ fn Term grad_rec(Term y, Term gy, Term target) {
       return grad_zero(target);
 
     case UOP_ADD: {
+      // Pass gy through unchanged; each branch independently decides
+      // whether to lift (at its leaf match) or push it deeper.
       Term a = heap_read(y_loc + 0);
       Term b = heap_read(y_loc + 1);
-      Term ga = grad_rec(a, gy, target);
-      Term gb = grad_rec(b, gy, target);
+      Term ga = grad_rec(a, gy, target, gy_lifted);
+      Term gb = grad_rec(b, gy, target, gy_lifted);
       return uop_binary(UOP_ADD, ga, gb);
     }
 
     case UOP_MUL: {
-      // d(a*b)/dt = (da/dt)*b + a*(db/dt); push the product into gy.
-      // Both `a` and `b` are target-shaped (the source graph operates
-      // at one shape) so MUL with the target-shaped gy keeps the
-      // invariant intact.
+      // d(a*b)/dt = (da/dt)*b + a*(db/dt).  Allocate a *fresh*
+      // EXPAND of gy per branch so the two MULs don't share a
+      // common-ancestor EXPAND node (which would dangle in any
+      // diagram that doesn't fan-out via DUP).
       Term a = heap_read(y_loc + 0);
       Term b = heap_read(y_loc + 1);
-      Term gy_a = uop_binary(UOP_MUL, b, gy);
-      Term gy_b = uop_binary(UOP_MUL, a, gy);
-      Term ga   = grad_rec(a, gy_a, target);
-      Term gb   = grad_rec(b, gy_b, target);
+      Term gy_a_lift = gy_lifted ? gy : expand_to_target(gy, target);
+      Term gy_b_lift = gy_lifted ? gy : expand_to_target(gy, target);
+      Term gy_a = uop_binary(UOP_MUL, b, gy_a_lift);
+      Term gy_b = uop_binary(UOP_MUL, a, gy_b_lift);
+      // The new gy_for_* are MUL outputs of target-shaped operands,
+      // so they're target-shaped already -- mark lifted=1.
+      Term ga = grad_rec(a, gy_a, target, 1);
+      Term gb = grad_rec(b, gy_b, target, 1);
       return uop_binary(UOP_ADD, ga, gb);
     }
 
     case UOP_NEG: {
-      Term a    = heap_read(y_loc + 0);
-      Term n_gy = uop_unary(UOP_NEG, gy);
-      return grad_rec(a, n_gy, target);
+      Term a      = heap_read(y_loc + 0);
+      Term lifted = gy_lifted ? gy : expand_to_target(gy, target);
+      Term n_gy   = uop_unary(UOP_NEG, lifted);
+      return grad_rec(a, n_gy, target, 1);
     }
 
     case UOP_REDUCE: {
       // SUM only: gradient broadcasts the cotangent back to the
       // input shape.  REDUCE_MAX needs a one-hot indicator; step 14.
-      Term a = heap_read(y_loc + 0);
-      return grad_rec(a, gy, target);
+      Term a      = heap_read(y_loc + 0);
+      Term lifted = gy_lifted ? gy : expand_to_target(gy, target);
+      return grad_rec(a, lifted, target, 1);
     }
 
     default:
@@ -105,10 +114,7 @@ fn Term interact_grad(Term grad_term) {
   Term y      = heap_read(loc + 0);
   Term gy     = heap_read(loc + 1);
   Term target = heap_read(loc + 2);
-  // Lift gy to target's shape ONCE so the chain rule below sees a
-  // target-shaped cotangent at every step.  Removes the need to
-  // either implicit-broadcast inside MUL or wrap each leaf with a
-  // post-hoc EXPAND.
-  Term gy_lifted = expand_to_target(gy, target);
-  return grad_rec(y, gy_lifted, target);
+  // gy starts unlifted (typically a scalar UOP_CONST); each chain
+  // rule node will lift it as needed.
+  return grad_rec(y, gy, target, 0);
 }

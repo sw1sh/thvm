@@ -244,15 +244,16 @@ icLabel[base_Integer, tag_Integer] := With[{arity = Length[icPorts[tag]]},
     ]
 ]
 
-(* For UOP, label = opcode name + "@<loc>". *)
-uopLabel[loc_Integer, opcode_Integer] :=
-    Column[{uopName[opcode], "@" <> ToString[loc]}, Center, Spacings -> 0]
+(* For UOP, single-line "OPCODE@<loc>" header (KERNEL / GRAD also
+   carry an extra id from their heap layout via uopHeader, defined
+   in Diagram.wl).  Heap-graph vertices for UOPs don't show shape
+   below -- the shape lives on the result-edge to a downstream
+   consumer; the heap-graph view is purely about heap-cell topology. *)
+uopLabel[loc_Integer, opcode_Integer] := uopHeader[loc, opcode]
 
-(* TEN label: dtype + tensor id. *)
-tenLabel[id_Integer, dtype_Integer] := Column[{
-    "TEN",
-    "#" <> ToString[id]
-}, Center, Spacings -> 0]
+(* TEN vertex label: tensor id only (the heap-graph dedupes TENs by
+   id, so there's no single "cell loc" for the vertex). *)
+tenLabel[id_Integer, dtype_Integer] := "TEN#" <> ToString[id]
 
 (* dispatch *)
 agentLabelFor[vid_String, info_Association] := Switch[info["tag"],

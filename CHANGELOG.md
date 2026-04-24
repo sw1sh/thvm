@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Fixed: grad chain rule allocates fresh EXPAND per branch + single-line node headers
+
+`grad_rec` previously lifted `gy` to target.shape ONCE in
+`interact_grad`, which was correct numerically but produced a heap
+where multiple chain-rule consumers all referenced the same EXPAND
+node.  In any visualisation that doesn't fan out via DUP, all but
+one of those consumer wires dangled (visible in `grad-x-times-x`:
+the second branch's MUL had a missing CONST input).
+
+Fix: each branching chain-rule node (`UOP_MUL`, `UOP_ADD`,
+`UOP_NEG`, `UOP_REDUCE`) now allocates a *fresh* EXPAND of `gy`
+per branch.  A new `gy_lifted` flag threaded through `grad_rec`
+prevents redundant outer EXPANDs at deeper leaf positions when
+the cotangent is already target-shaped.  Test structure update
+in `tests/test_grad.c`; numerics unchanged (9/9 WL grad cases
+still pass).
+
+### Changed: single-line node headers carry heap loc + handle id
+
+Diagram + heap-graph labels now use `OPCODE@<heap-loc>(#<id>)` on
+one line instead of stacking opcode and base across two lines.
+The `#<id>` suffix only appears when the opcode carries an extra
+handle: `KERNEL@10#2` (kernel id from the `NUM(kid)` cell),
+`GRAD@3#1` (target tensor id from cell base+2), `TEN@10#1` (cell
+loc + tensor id).  Plain compute UOPs stay terse: `MUL@8`,
+`ADD@14`.  Shape (when known) and CONST scalar value remain on
+follow-up lines.
+
 ### Changed: WL kernel split into per-concern files; shape inference centralised
 
 `wl/THVMLink/Kernel/` now uses one BeginPackage["THVMLink`"] +
