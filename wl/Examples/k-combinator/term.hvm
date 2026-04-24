@@ -1,0 +1,5 @@
+// K = λx.λy.x  --  classic combinator that discards its second arg.
+// Reducing (K a b)  fires APP-LAM twice; the unused y leaks the
+// argument b unless an explicit eraser is paired with it.
+@main = λx.λy.x
+//λx.λy.x

@@ -1,0 +1,6 @@
+// Church 2 = λs.λz.s(s(z)).  `s` is used twice so we duplicate it
+// explicitly: !&L{s0,s1} = s; λz. s0(s1(z)).
+//
+// In HVM4 surface syntax, the `λ&s.` shorthand auto-inserts the dup.
+@main = λ&s.λz.s(s(z))
+//λ&s.λz.s(s(z))

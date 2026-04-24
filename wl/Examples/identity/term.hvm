@@ -1,0 +1,3 @@
+// Identity lambda.  No reductions possible from a bare lambda.
+@main = λx.x
+//λx.x

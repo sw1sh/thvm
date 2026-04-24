@@ -1,24 +1,30 @@
 #!/usr/bin/env wolframscript
-(* run.wls -- run and render every wl/Examples/<id>/term.wl
-   (or just one of them).
+(* run.wls -- run and render every wl/Examples/<id>/term*.wl
+   (or just one example folder).
 
    Run from the repo root:
 
        wolframscript -f wl/Examples/run.wls
            run + render every example
 
-       wolframscript -f wl/Examples/run.wls 02-id-app-era
-           run + render just one
+       wolframscript -f wl/Examples/run.wls id-app-era
+           run + render just one folder (all its term*.wl)
 
-       wolframscript -f wl/Examples/run.wls 02-id-app-era --eval
-           run only, do not (re)write graph.png
+       wolframscript -f wl/Examples/run.wls id-app-era --eval
+           run only, do not (re)write any PNGs
 
-   The runner is the only place that loads the paclet, calls TInit /
-   TReset, captures the resulting term, and exports the graph as
-   `graph.png` next to the corresponding `term.wl`.  The example
-   files themselves carry no boilerplate -- a `term.wl` is a single
-   expression (or a CompoundExpression) whose final value is the term
-   to render, exactly what THeapGraph[term] expects as a seed.
+   Each example folder holds:
+     term.wl           unreduced construction (required)
+     term-reduced.wl   optional post-TWnf variant
+     term.hvm          optional HVM4 surface-syntax reference
+
+   The runner scans for every `term*.wl` in the folder and writes a
+   matching `<basename>.png` next to each.  A `term.wl` produces
+   `term.png`; `term-reduced.wl` produces `term-reduced.png`.
+
+   The runner loads the paclet, calls TInit / TReset per file, and
+   exports the resulting `THeapGraph[term]` onto a dark GrayLevel[.12]
+   canvas so LightDarkSwitched-aware styling picks the dark arm.
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
@@ -27,9 +33,7 @@ Get["THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
 debugPrint[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
 
 $root = "wl/Examples";
-$size = {360, 240};
 
-(* Parse args: optional first positional = example id, optional --eval flag. *)
 $args     = Drop[$ScriptCommandLine, 1];
 $evalOnly = MemberQ[$args, "--eval"];
 $picked   = First[Select[$args, ! StringStartsQ[#, "--"] &], None];
@@ -39,26 +43,32 @@ allExampleDirs[] := Sort @ Select[
     DirectoryQ[#] && FileExistsQ[FileNameJoin[{#, "term.wl"}]] &
 ]
 
-renderOne[dir_String] := Block[{wlFile, pngFile, term, graph},
-    wlFile  = FileNameJoin[{dir, "term.wl"}];
-    pngFile = FileNameJoin[{dir, "graph.png"}];
+(* Render only the input term.  `term-reduced.wl` (and other
+   `term-*.wl` siblings) are reference values used by the test suite
+   to compare TTermTree[TWnf[...]] against; they are not rendered. *)
+termFiles[dir_String] := Select[
+    FileNames["term*.wl", dir],
+    FileBaseName[#] === "term" &
+]
+
+renderFile[wlFile_String] := Block[{pngFile, base, term, graph},
+    base    = FileBaseName[wlFile];
+    pngFile = FileNameJoin[{DirectoryName[wlFile], base <> ".png"}];
     TInit[];
     term = Get[wlFile];
     If[ $evalOnly,
-        debugPrint["[eval] ", FileNameTake[dir], " -> ", ToString[term, InputForm]];
+        debugPrint["[eval] ", wlFile, " -> ", ToString[term, InputForm]];
         TFree[];
         Return[]
     ];
     graph = THeapGraph[term, Background -> GrayLevel[0.12]];
-    (* Force the dark Wolfram theme so LightDarkSwitched picks the
-       dark-mode arm (white labels, darker fills, white outlines). *)
     Export[
         pngFile,
         Style[graph, "DarkScheme", Background -> GrayLevel[0.12]],
         "PNG",
         ImageResolution -> 144
     ];
-    debugPrint["[ok] ", FileNameTake[dir], " -> ", pngFile];
+    debugPrint["[ok] ", wlFile, " -> ", pngFile];
     TFree[];
 ]
 
@@ -77,6 +87,6 @@ Do[
         debugPrint["[skip] ", FileNameTake[d], " (no term.wl)"];
         Continue[]
     ];
-    renderOne[d],
+    Do[renderFile[wl], {wl, termFiles[d]}],
     {d, dirs}
 ];

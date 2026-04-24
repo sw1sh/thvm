@@ -1,0 +1,6 @@
+// Church 2 applied to identity and ERA: church2 f x = f (f x).
+// With f = lambda x.x and x = *, the result reduces to *.
+@c2  = lam &s.lam z.s(s(z))
+@id  = lam x.x
+@main = @c2(@id, *)
+//*

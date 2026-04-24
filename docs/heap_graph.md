@@ -112,10 +112,10 @@ flowchart LR
 ```
 
 Live `THeapGraph[app]` (regenerated from
-[wl/Examples/02-id-app-era/](../wl/Examples/02-id-app-era/) by
+[wl/Examples/id-app-era/](../wl/Examples/id-app-era/) by
 `make wl-examples`):
 
-![identity applied to ERA](../wl/Examples/02-id-app-era/graph.png)
+![identity applied to ERA](../wl/Examples/id-app-era/term.png)
 
 The APP feeds the LAM into its `f` port and the ERA dot into its `x`
 port. The LAM still has its identity self-loop because nothing has
@@ -185,11 +185,11 @@ flowchart LR
     SUP -- R --> ERA1
 ```
 
-Live `THeapGraph[{dp0, dp1}]` (regenerated from
-[wl/Examples/07-dup-sup-annihilate-pre/](../wl/Examples/07-dup-sup-annihilate-pre/)
+Live `THeapGraph[dp0]` (regenerated from
+[wl/Examples/dup-sup-annihilate/](../wl/Examples/dup-sup-annihilate/)
 by `make wl-examples`):
 
-![dup of sup setup](../wl/Examples/07-dup-sup-annihilate-pre/graph.png)
+![dup of sup setup](../wl/Examples/dup-sup-annihilate/term.png)
 
 Two agents joined through the SUP value at cell `2`. `DP0` and `DP1`
 are the WL return values; they only appear once they are stored

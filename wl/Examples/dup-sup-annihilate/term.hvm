@@ -1,0 +1,5 @@
+// !&7 X = &7{*, λa.a}; X0   reduces to *  via DUP-SUP same-label.
+// (X0 = first projection; the symmetric X1 picks up the LAM via
+//  the substitution slot.)
+@main = ! &7 X = &7{*, λa.a}; X0
+//*

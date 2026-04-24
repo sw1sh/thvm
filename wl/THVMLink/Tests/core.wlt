@@ -265,6 +265,29 @@ VerificationTest[
     TestID -> "DUP-LAM clones a lambda end-to-end"
 ]
 
+(* === TReduce + TTermExpr (snapshotting before / after) === *)
+
+VerificationTest[
+    (* TTermExpr returns a nested expression with tag-name string
+       heads.  Walking the original APP term seed before vs after
+       TWnf shows the substituted body cell. *)
+    (TReset[]; Block[{app, before, after},
+        app    = TApp[TLam[var |-> var], TEra[]];
+        before = TTermExpr[app];
+        TWnf[app];
+        after  = TTermExpr[app];
+        {before, after}]),
+    {"APP"["LAM"["VAR"[0]], "ERA"], "APP"["LAM"["ERA"], "ERA"]},
+    TestID -> "TTermExpr before vs after TWnf shows substituted body"
+]
+
+VerificationTest[
+    (* TWnf returns the WHNF; TTermExpr of that is just "ERA". *)
+    (TReset[]; TTermExpr[TWnf[TApp[TLam[var |-> var], TEra[]]]]),
+    "ERA",
+    TestID -> "TTermExpr of TWnf-result is the WHNF tree"
+]
+
 VerificationTest[
     (* Sugar: TTerm[id][arg] is shorthand for TApp[TTerm[id], arg]. *)
     (TReset[]; Module[{id = TLam[var |-> var], app},

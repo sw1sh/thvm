@@ -1,0 +1,5 @@
+// Bare superposition: two erasers under fresh label 1.  No redex on
+// its own (a SUP only fires when paired with a DUP / APP at the
+// principal port).
+@main = &1{*, *}
+//&1{*, *}

@@ -73,10 +73,15 @@ wl: $(WL_LIB)
 wl-test: $(WL_LIB)
 	wolframscript -f $(WL_PACLET)/Tests/run.wls
 
-# Run + render every wl/Examples/<id>/term.wl, writing graph.png next
+# Run + render every wl/Examples/<id>/term.wl, writing term.png next
 # to each.  Append EXAMPLE=<id> to render just one.
 wl-examples: $(WL_LIB)
 	wolframscript -f wl/Examples/run.wls $(EXAMPLE)
+
+# For each wl/Examples/<id>/ that ships both term.wl and
+# term-reduced.wl, verify TTermTree[TWnf[term.wl]] === TTermTree[term-reduced.wl].
+wl-examples-test: $(WL_LIB)
+	wolframscript -f wl/Examples/test_reductions.wls
 
 
 $(BIN):

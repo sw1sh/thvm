@@ -1,0 +1,3 @@
+// (λx.x) *   --   identity applied to the eraser.  APP-LAM redex.
+@main = (λx.x)(*)
+//*

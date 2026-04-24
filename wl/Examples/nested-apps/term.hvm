@@ -1,0 +1,5 @@
+// ((λx.x) *) (λy.y)
+// Inner APP-LAM:  (λx.x) *      ->  *
+// Outer APP-ERA:  *  (λy.y)     ->  *
+@main = ((λx.x)(*))(λy.y)
+//*

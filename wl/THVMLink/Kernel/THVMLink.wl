@@ -33,7 +33,10 @@ THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram
 
 (* === reduce / stats === *)
 TWnf::usage       = "TWnf[term] reduces `term` to weak normal form.";
+TReduce::usage    = "TReduce[term] reduces `term` to WNF in-place and returns `term` (the original root, useful as a seed for THeapGraph after reduction).";
 TItrs::usage      = "TItrs[] returns the cumulative interaction count.";
+TTermExpr::usage  = "TTermExpr[term] walks the heap from `term` and returns a nested expression whose heads are tag-name strings (\"LAM\", \"APP\", \"SUP\", \"DUP\", \"DP0\", \"DP1\", \"VAR\", \"ERA\").  Useful for snapshotting / diffing pre and post TWnf states by direct equality (===).";
+TTermTree::usage  = "TTermTree[term] = ExpressionTree[TTermExpr[term]] -- the same structure rendered as a Wolfram Tree object for visual inspection.";
 
 (* === high-level constructors === *)
 TFreshLabel::usage = "TFreshLabel[] returns the next integer from a monotonic SUP/DUP label counter, then bumps it.  Reset by TReset[].";
@@ -159,7 +162,63 @@ THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
 
 TWnf[t_]         := (ensureInit[]; TTerm[$wnfFn[ttermRaw[t]]])
+
+(* TReduce reduces `t` to WNF in-place and returns the original root.
+   Pairs with THeapGraph[t] / TTermTree[t] when you want the
+   post-reduction state seeded from the term you constructed. *)
+TReduce[t_] := (TWnf[t]; t)
+
 TItrs[]          := (ensureInit[]; $itrsFn[])
+
+(* === heap walker: term -> nested string-headed expression ===
+   Walks from `t` through the heap and returns the structural shape
+   with heads "LAM" / "APP" / "SUP" / "DUP" / "DP0" / "DP1" / "VAR" /
+   "ERA".  Compound args bases are tracked in a `seen` association so
+   cycles produce a `"Cycle"[loc]` leaf instead of looping.
+
+   `TTermExpr` returns the raw nested expression (cheap structural
+   equality via `===`).  `TTermTree` wraps it in `ExpressionTree[...]`
+   so it renders as a Wolfram `Tree` object for visual inspection. *)
+
+TTermExpr[t_] := tTreeWalk[t, <||>]
+TTermTree[t_] := ExpressionTree[TTermExpr[t]]
+
+tTreeWalk[t_, seen_] := Block[{
+    raw = ttermRaw[t], tag, val, ext, seen2
+},
+    tag = $termTagFn[raw];
+    val = $termValFn[raw];
+    ext = $termExtFn[raw];
+    Switch[tag,
+        $TagERA, "ERA",
+        $TagVAR, "VAR"[val],
+        (* DP0 / DP1 recurse into the dup body so each projection's
+           subtree is visible.  Trees can't share, so the same body
+           appears once under each projection. *)
+        $TagDP0, "DP0"[ext, tTreeWalk[$heapReadFn[val], seen]],
+        $TagDP1, "DP1"[ext, tTreeWalk[$heapReadFn[val], seen]],
+        $TagLAM,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                "LAM"[tTreeWalk[$heapReadFn[val], seen2]]],
+        $TagAPP,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                "APP"[tTreeWalk[$heapReadFn[val], seen2],
+                      tTreeWalk[$heapReadFn[val + 1], seen2]]],
+        $TagSUP,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                "SUP"[ext,
+                    tTreeWalk[$heapReadFn[val], seen2],
+                    tTreeWalk[$heapReadFn[val + 1], seen2]]],
+        $TagDUP,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                "DUP"[ext, tTreeWalk[$heapReadFn[val], seen2]]],
+        _, "Unknown"[tag]
+    ]
+]
 
 (* === high-level constructors (all return TTerm) === *)
 

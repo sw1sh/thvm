@@ -1,0 +1,3 @@
+// (* λx.x)   --   eraser applied to a lambda.  APP-ERA redex.
+@main = (*)(λx.x)
+//*

@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: TTermExpr / TTermTree, TReduce, .hvm refs, restructured examples
+
+- `wl/Examples/` folders no longer carry numeric prefixes; the
+  reduced variants merge into their parent (`02-id-app-era` +
+  `03-id-app-era-reduced` -> `id-app-era/` with both `term.wl` and
+  `term-reduced.wl`).  `13-church-2-applied` becomes its own
+  top-level `church-2-applied/` (the lambda lives in `church-2/`).
+- `term.wl` is the input term construction.
+- `term-reduced.wl` (optional) constructs the *expected* WHNF
+  directly -- no `TWnf` / `TReduce` inside it.  The reduction test
+  runner compares `TTermExpr[TWnf[term.wl]]` against
+  `TTermExpr[term-reduced.wl]`.
+- `term.hvm` (optional) carries the HVM4 surface-syntax reference
+  with the expected output as a `//` comment line.  Documentation
+  only; we have no parser yet.
+- `wl/Examples/run.wls` now scans `term*.wl` per folder but only
+  renders the input `term.wl` (skips `term-reduced.wl`, which is
+  reference data).
+- `wl/Examples/test_reductions.wls` is the reduction-comparison test
+  driver, wired up as `make wl-examples-test`.
+- New WL helpers in the paclet:
+  - `TReduce[t]` = `(TWnf[t]; t)` -- reduces in place and returns the
+    original root.  Useful as a `THeapGraph` seed when you want to
+    visualise the post-reduction state.
+  - `TTermExpr[t]` walks the heap from `t` and returns a nested
+    expression with tag-name string heads (`"LAM"`, `"APP"`, `"SUP"`,
+    `"DUP"`, `"DP0"`, `"DP1"`, `"VAR"`, `"ERA"`).  Cycles produce
+    `"Cycle"[loc]` leaves.
+  - `TTermTree[t]` = `ExpressionTree[TTermExpr[t]]` for visual
+    rendering as a Wolfram `Tree`.
+- README catalogue rewritten with the new folder names + an
+  "Expected WHNF" column pointing at `term-reduced.wl`.
+
 ### Added: dark export + auto-fit labels + sugar
 
 - WL `THeapGraph` accepts trailing `Graph` options via

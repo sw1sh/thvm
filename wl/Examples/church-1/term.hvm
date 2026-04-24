@@ -1,0 +1,3 @@
+// Church 1 = λs.λz.(s z).  Single use of `s`, so no DUP needed.
+@main = λs.λz.s(z)
+//λs.λz.s(z)
