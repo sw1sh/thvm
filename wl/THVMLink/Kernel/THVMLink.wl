@@ -77,6 +77,9 @@ TTensorDType::usage    = "TTensorDType[t] returns the dtype as a string (\"f32\"
 TTensorData::usage     = "TTensorData[t] reads the tensor's buffer as a NumericArray whose type matches the dtype (Real32 for f32, Integer32 for i32).  Wrap in `Normal` to get a plain list.";
 TTensorRefcount::usage = "TTensorRefcount[t] returns the descriptor refcount (TENS[id].refcount).";
 TRealize::usage        = "TRealize[expr] = TWnf[TUOpMaterialize[expr]].  Fires the whole pipeline: schedule + kernelize + compile, then kernel dispatch.  Until commit 4 lands interact_kernel, TRealize stops at the scheduled DAG.";
+TMaterialize::usage    = "TMaterialize[expr] runs the schedule + kernelize + linearize rewrite directly (no wnf) and returns the scheduled DAG term.  Fires no kernels.  Use to visualize the graph after scheduling but before dispatch.";
+TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
+TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].";
 
 (* === UOp graph constructors === *)
 TUOpConst::usage     = "TUOpConst[value, dtype] builds a UOP_CONST node carrying a scalar.";
@@ -203,6 +206,11 @@ $uopPadFn      := $uopPadFn      = load["thvm_wl_uop_pad",      {Integer, {Integ
 $uopShrinkFn   := $uopShrinkFn   = load["thvm_wl_uop_shrink",   {Integer, {Integer, 1}},             Integer];
 $uopFlipFn     := $uopFlipFn     = load["thvm_wl_uop_flip",     {Integer, Integer},                  Integer];
 $uopMatFn      := $uopMatFn      = load["thvm_wl_uop_materialize", {Integer},                        Integer];
+
+(* direct materialize (no wnf) + kernel-entry introspection *)
+$materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},                        Integer];
+$kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},                               Integer];
+$kernelInfoFn  := $kernelInfoFn  = load["thvm_wl_kernel_info",     {Integer},                        {Integer, 1}];
 
 (* === fresh-label counter (WL-side; reset by TReset) === *)
 $labelCounter = 1;

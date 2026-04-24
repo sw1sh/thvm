@@ -111,10 +111,14 @@ typedef u64 Term;
 #define REDUCE_MAX   1
 
 // === Capacities ===
-#define HEAP_CAP (1ULL << 24)   // 16M cells * 8B = 128 MiB. Plenty for tests.
-#define WNF_CAP  (1ULL << 16)   // 64K stack slots.
-#define TENS_CAP (1ULL << 16)   // 64K tensor descriptor slots.
-#define MAX_DIM  8              // max tensor rank
+#define HEAP_CAP     (1ULL << 24)   // 16M cells * 8B = 128 MiB. Plenty for tests.
+#define WNF_CAP      (1ULL << 16)   // 64K stack slots.
+#define TENS_CAP     (1ULL << 16)   // 64K tensor descriptor slots.
+#define KERNELS_CAP  (1ULL << 12)   // 4K compiled kernels.
+#define MAX_DIM      8              // max tensor rank
+#define KPROG_MAX_OPS    64         // max ops per kernel program
+#define KERNEL_MAX_INPUT 8          // max input tensors per kernel
+#define MAX_UOP_SRC  2              // max source slots per KProgOp
 
 // === Tensor descriptor + backend ===
 
@@ -141,6 +145,9 @@ typedef struct {
   Backend *backend;             // vtable
 } TenDesc;
 
+// Forward declaration for the dispatch callback.
+struct KernelEntry;
+
 struct Backend {
   u32   id;
   int   (*init)(void);
@@ -151,7 +158,50 @@ struct Backend {
   void  (*buf_decref)(u32 buf_id);
   int   (*buf_read) (u32 buf_id, void *dst, u64 nbytes);
   int   (*buf_write)(u32 buf_id, const void *src, u64 nbytes);
+  int   (*dispatch_kernel)(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 };
+
+// === KernelEntry ===
+// A linearized compute program produced by materialize; consumed by
+// the backend's dispatch_kernel (cpu_interpret for the CPU backend).
+// Each program slot is an SSA-style op whose sources reference
+// either an earlier slot (by index) or a kernel input tensor
+// (high bit set).  Matches tinygrad's pickled UOp list that
+// `tinygrad/runtime/ops_python.py` interprets.
+
+#define KSRC_INPUT_FLAG  0x80000000u
+#define KSRC_AS_INPUT(n) (KSRC_INPUT_FLAG | (u32)(n))
+#define KSRC_IS_INPUT(s) (((s) & KSRC_INPUT_FLAG) != 0)
+#define KSRC_INDEX(s)    ((s) & 0x7FFFFFFFu)
+
+typedef struct {
+  u8    opcode;                    // UOP_* opcode
+  u8    dtype;                     // DT_*
+  u8    n_src;                     // 0..MAX_UOP_SRC
+  u32   src[MAX_UOP_SRC];          // KSRC_AS_INPUT(n) or program index
+  u32   arg;                       // CONST bits, REDUCE kind+axis, ...
+  u32   numel;                     // output numel (for broadcast detection)
+} KProgOp;
+
+typedef struct KernelEntry {
+  u32       n_inputs;
+  u32       input_tids   [KERNEL_MAX_INPUT];  // TenDesc ids we read from
+  u32       input_dtypes [KERNEL_MAX_INPUT];
+  u32       input_numels [KERNEL_MAX_INPUT];
+
+  u32       output_tid;            // TenDesc id we write to
+  u32       output_dtype;
+  Shape     output_shape;
+  u32       output_numel;
+
+  u32       n_ops;
+  KProgOp   program[KPROG_MAX_OPS];
+
+  void     *compiled;              // backend-specific; NULL for interpreter
+} KernelEntry;
+
+extern KernelEntry *KERNELS;
+extern u32          KERNELS_NEXT;
 
 // === Globals ===
 // Single-threaded for now. Extern in the header, defined in src/thvm.c.
@@ -228,6 +278,13 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // materialize rule (rewriting it into the scheduled DAG) and then
 // fire any KERNELs that become ready.
 fn Term uop_materialize(Term expr);
+
+// === schedule/ ===
+// Top-level materialize driver: walks a UOp graph, allocates fresh
+// KernelEntrys + output TenDescs, emits UOP_KERNEL terms.  Called
+// directly from the WL bridge (TMaterialize) and from the
+// UOP_MATERIALIZE interaction rule (commit 4).
+fn Term thvm_materialize(Term term);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.

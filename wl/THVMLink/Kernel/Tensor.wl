@@ -130,6 +130,44 @@ TUOpMaterialize[expr_] := (ensureInit[]; TTerm[$uopMatFn[ttermRaw[expr]]])
    the materialized-but-not-fired scheduled DAG. *)
 TRealize[expr_] := TWnf[TUOpMaterialize[expr]]
 
+(* TMaterialize = direct schedule + kernelize + linearize rewrite,
+   no firing.  Useful for inspection (visualize the scheduled DAG
+   before dispatch).  The return value is a UOP_KERNEL term whose
+   first heap cell is the pre-allocated output TAG_TEN (empty) and
+   second cell is a TAG_NUM carrying the KernelEntry id.  Subsequent
+   TWnf fires the kernels bottom-up (once commit 4 lands). *)
+TMaterialize[expr_] := (ensureInit[]; TTerm[$materializeFn[ttermRaw[expr]]])
+
+(* === kernel-entry introspection === *)
+
+TKernelCount[]    := (ensureInit[]; $kernelCountFn[])
+
+(* TKernelInfo[kid] returns an Association with the kernel's
+   linearized program + shape metadata, useful for tests and
+   THeapDiagram visualization overlays. *)
+TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid], n, nOps},
+    n    = raw[[1]];
+    nOps = raw[[2]];
+    <|
+      "n_inputs"    -> n,
+      "n_ops"       -> nOps,
+      "output_numel"-> raw[[3]],
+      "output_dtype"-> dtypeName[raw[[4]]],
+      "program"     -> Table[
+          With[{base = 4 + (i - 1) * 6},
+            <|
+              "opcode" -> Lookup[$uopNames, raw[[base + 1]], "?"],
+              "n_src"  -> raw[[base + 2]],
+              "src"    -> { raw[[base + 3]], raw[[base + 4]] },
+              "arg"    -> raw[[base + 5]],
+              "numel"  -> raw[[base + 6]]
+            |>
+          ],
+          {i, nOps}
+      ]
+    |>
+]
+
 (* === TTensorCreate: implicit shape from data ===
 
    - If `data` is a NumericArray of supported dtype, share its buffer

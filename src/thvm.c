@@ -15,10 +15,13 @@ u32   WNF_S_POS = 0;
 
 u64   ITRS      = 0;
 
-TenDesc *TENS         = NULL;
-u32      TENS_NEXT    = 1;            // 0 reserved for "no tensor"
+TenDesc     *TENS         = NULL;
+u32          TENS_NEXT    = 1;   // 0 reserved for "no tensor"
 
-Backend *CURRENT_BACKEND = NULL;
+KernelEntry *KERNELS      = NULL;
+u32          KERNELS_NEXT = 0;
+
+Backend     *CURRENT_BACKEND = NULL;
 
 // === term/ ===
 #include "term/new.c"
@@ -83,15 +86,24 @@ Backend *CURRENT_BACKEND = NULL;
 #include "uop/flip.c"
 #include "uop/materialize.c"
 
+// === schedule/ ===
+// Materialize pipeline: schedule + kernelize + linearize + splice.
+// Produces the scheduled DAG of UOP_KERNEL terms that commit 4's
+// interact_kernel will fire bottom-up.
+#include "schedule/kernel_alloc.c"
+#include "schedule/materialize.c"
+
 // === runtime lifecycle ===
 void thvm_init(void) {
-  HEAP      = (Term *)calloc(HEAP_CAP, sizeof(Term));
-  WNF_STACK = (Term *)calloc(WNF_CAP,  sizeof(Term));
-  TENS      = (TenDesc *)calloc(TENS_CAP, sizeof(TenDesc));
+  HEAP      = (Term *)calloc(HEAP_CAP,     sizeof(Term));
+  WNF_STACK = (Term *)calloc(WNF_CAP,      sizeof(Term));
+  TENS      = (TenDesc *)calloc(TENS_CAP,  sizeof(TenDesc));
+  KERNELS   = (KernelEntry *)calloc(KERNELS_CAP, sizeof(KernelEntry));
   HEAP_NEXT = 0;
   WNF_S_POS = 0;
   ITRS      = 0;
   TENS_NEXT = 1;
+  KERNELS_NEXT = 0;
   CURRENT_BACKEND = &CPU_BACKEND;
   CPU_BACKEND.init();
 }
@@ -101,11 +113,14 @@ void thvm_free(void) {
   free(HEAP);
   free(WNF_STACK);
   free(TENS);
+  free(KERNELS);
   HEAP      = NULL;
   WNF_STACK = NULL;
   TENS      = NULL;
+  KERNELS   = NULL;
   HEAP_NEXT = 0;
   WNF_S_POS = 0;
   TENS_NEXT = 1;
+  KERNELS_NEXT = 0;
   CURRENT_BACKEND = NULL;
 }

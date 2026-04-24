@@ -117,3 +117,54 @@ VerificationTest[
     "MATERIALIZE",
     TestID -> "TUOpMaterialize/wraps-expr"
 ]
+
+(* === TMaterialize: run the rewrite, inspect the scheduled DAG === *)
+
+VerificationTest[
+    TInit[];
+    a   = TTensor[{4}, {1.0, 2.0, 3.0, 4.0}];
+    b   = TTensor[{4}, {5.0, 6.0, 7.0, 8.0}];
+    k   = TMaterialize[a + b];
+    (* single-op kernel: one ADD over two 4-element inputs. *)
+    {TUOpKind[k], TKernelCount[]},
+    {"KERNEL", 1},
+    TestID -> "TMaterialize/emits-one-kernel"
+]
+
+VerificationTest[
+    TInit[];
+    a   = TTensor[{4}, {1.0, 2.0, 3.0, 4.0}];
+    b   = TTensor[{4}, {5.0, 6.0, 7.0, 8.0}];
+    c   = TTensor[{4}, {9.0, 10.0, 11.0, 12.0}];
+    k   = TMaterialize[(a + b) * c];
+    (* two kernels (ADD then MUL), no fusion in step-12 v1. *)
+    {TUOpKind[k], TKernelCount[]},
+    {"KERNEL", 2},
+    TestID -> "TMaterialize/compound-two-kernels"
+]
+
+VerificationTest[
+    TInit[];
+    a    = TTensor[{3}, {1.0, 2.0, 3.0}];
+    (* Go through TUOpAdd directly -- `a + a` would be simplified to
+       `2*a` by WL's Orderless Plus before our UpValue fires. *)
+    k    = TMaterialize[TUOpAdd[a, a]];
+    kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
+    info = TKernelInfo[kid];
+    {info["n_inputs"],
+     info["program"][[1, "src", 1]] === info["program"][[1, "src", 2]]},
+    {1, True},
+    TestID -> "TMaterialize/dedups-duplicate-inputs"
+]
+
+VerificationTest[
+    TInit[];
+    a    = TTensor[{3}, {1.0, 2.0, 3.0}];
+    k    = TMaterialize[TUOpReduce[a, 0, "SUM"]];
+    (* Kernel id sits in the second heap cell of the UOP_KERNEL. *)
+    kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
+    info = TKernelInfo[kid];
+    {info["program"][[1, "opcode"]], info["output_numel"]},
+    {"REDUCE", 1},
+    TestID -> "TMaterialize/reduce-output-shape"
+]

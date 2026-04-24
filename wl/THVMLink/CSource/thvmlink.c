@@ -444,3 +444,57 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_materialize(WolframLibraryData libData, mint 
   MArgument_setInteger(res, (mint)uop_materialize(expr));
   return LIBRARY_NO_ERROR;
 }
+
+// Direct materialize: runs the schedule + kernelize + linearize pass
+// immediately and returns the scheduled DAG term.  Fires no kernels
+// (that happens in TWnf via the interact_kernel rule in commit 4).
+EXTERN_C DLLEXPORT int thvm_wl_materialize(WolframLibraryData libData, mint argc,
+                                           MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)thvm_materialize(t));
+  return LIBRARY_NO_ERROR;
+}
+
+// Expose kernel-entry introspection for tests.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)KERNELS_NEXT);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_kernel_info(WolframLibraryData libData, mint argc,
+                                           MArgument *args, MArgument res) {
+  (void)argc;
+  mint kid = MArgument_getInteger(args[0]);
+  if (kid < 0 || (u32)kid >= KERNELS_NEXT) {
+    MArgument_setMTensor(res, NULL);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  KernelEntry *ke = &KERNELS[kid];
+  // Return a flat MTensor: [n_inputs, n_ops, output_numel, output_dtype,
+  //                         op0_opcode, op0_n_src, op0_src0, op0_src1, op0_arg, op0_numel,
+  //                         ... repeat for each op ...]
+  mint nFields = 4 + (mint)ke->n_ops * 6;
+  mint dims[1] = {nFields};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  mint idx = 0;
+  dst[idx++] = (mint)ke->n_inputs;
+  dst[idx++] = (mint)ke->n_ops;
+  dst[idx++] = (mint)ke->output_numel;
+  dst[idx++] = (mint)ke->output_dtype;
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    KProgOp *p = &ke->program[i];
+    dst[idx++] = (mint)p->opcode;
+    dst[idx++] = (mint)p->n_src;
+    dst[idx++] = (mint)p->src[0];
+    dst[idx++] = (mint)(p->n_src >= 2 ? p->src[1] : 0);
+    dst[idx++] = (mint)p->arg;
+    dst[idx++] = (mint)p->numel;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
