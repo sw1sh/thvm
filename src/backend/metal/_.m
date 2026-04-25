@@ -1,42 +1,21 @@
-// backend/metal/_.m -- Metal backend stub, Objective-C edition.
+// backend/metal/_.m -- Metal backend, Objective-C edition.
 //
-// Same semantics as src/backend/metal/_.c but compiled separately
-// from the single-TU runtime.  Linked into binaries that build with
-// -DTHVM_HAS_METAL (where src/thvm.c skips including the .c stub).
+// Compiled separately from the single-TU C runtime; the umbrella
+// src/thvm.c includes thvm.h which forward-declares METAL_BACKEND
+// (extern Backend), and links this .o under -DTHVM_HAS_METAL.
 //
-// Real Metal init (MTLDevice, MTLCommandQueue, metallib loading)
-// lands in the next two task items.  This file just establishes
-// the dual-TU build shape so the Makefile changes can be tested
-// independently from the Objective-C runtime calls.
+// Includes the runtime header for type definitions (Backend,
+// KernelEntry, KProgOp, UOP_* enums).  thvm.h is C-only but
+// compiles cleanly under Objective-C / ARC.
 
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-// Minimal local copies of the runtime types we touch.  Keeping them
-// inline avoids a chain of #includes through src/thvm.c (which is
-// the umbrella include for the C runtime and would clash with the
-// Objective-C compilation context).
-typedef uint8_t  u8;
-typedef uint32_t u32;
-typedef uint64_t u64;
-
-struct KernelEntry;
-
-typedef struct Backend {
-  u32   id;
-  int   (*init)(void);
-  void  (*shutdown)(void);
-  u32   (*buf_alloc)(u64 nbytes);
-  void  (*buf_free) (u32 buf_id);
-  void  (*buf_incref)(u32 buf_id);
-  void  (*buf_decref)(u32 buf_id);
-  int   (*buf_read) (u32 buf_id, void *dst, u64 nbytes);
-  int   (*buf_write)(u32 buf_id, const void *src, u64 nbytes);
-  int   (*dispatch_kernel)(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
-} Backend;
+#include "../../thvm.h"
 
 // Lazy file-scope handles to the system default Metal device, a
 // command queue, and the loaded metallib.  ARC owns all three;
@@ -176,10 +155,76 @@ static void metal_shutdown(void) {
   METAL_DEVICE = nil;
 }
 
-static int  metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  (void)ke; (void)in_buf_ids; (void)out_buf_id;
-  fprintf(stderr, "thvm: metal backend (.m stub) -- dispatch_kernel not implemented\n");
-  return -1;
+static id<MTLComputePipelineState> METAL_PIPELINES[UOP_COUNT] = { nil };
+
+static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
+  if (opcode >= UOP_COUNT) return nil;
+  if (METAL_PIPELINES[opcode] != nil) return METAL_PIPELINES[opcode];
+  if (METAL_LIB == nil)               return nil;
+  NSString *fnName = nil;
+  switch (opcode) {
+    case UOP_CONST: fnName = @"thvm_const"; break;
+    default:        return nil;
+  }
+  // `fn` is taken by thvm.h as a `static inline` macro; use `mtlFn`.
+  id<MTLFunction> mtlFn = [METAL_LIB newFunctionWithName:fnName];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm: metal -- function %s not in metallib\n",
+            [fnName UTF8String]);
+    return nil;
+  }
+  NSError *err = nil;
+  id<MTLComputePipelineState> pso =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (pso == nil) {
+    fprintf(stderr, "thvm: metal -- pipeline-state for %s failed: %s\n",
+            [fnName UTF8String],
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  METAL_PIPELINES[opcode] = pso;
+  return pso;
+}
+
+// Buffer-binding convention:
+//     buffer(0)             : output
+//     buffer(1)             : per-op constant arg (KProgOp.arg)
+//     buffer(2..2+n_in-1)   : input tensor buffers (n_in = ke->n_inputs)
+// Threads = ke->program[0].numel; threadgroup size capped at the
+// pipeline's maxTotalThreadsPerThreadgroup.
+static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
+  if (ke->n_ops == 0) return -1;
+  KProgOp *p = &ke->program[0];
+
+  id<MTLComputePipelineState> pso = metal_pipeline_for(p->opcode);
+  if (pso == nil) {
+    fprintf(stderr, "thvm: metal dispatch -- no pipeline for opcode %u\n", p->opcode);
+    return -1;
+  }
+  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
+  id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
+  if (outBuf == nil) return -1;
+
+  id<MTLCommandBuffer>         cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:outBuf offset:0 atIndex:0];
+  [enc setBytes:&p->arg length:sizeof(p->arg) atIndex:1];
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 ib = in_buf_ids[i];
+    if (ib == 0 || ib >= METAL_BUFS_NEXT) { [enc endEncoding]; return -1; }
+    [enc setBuffer:METAL_BUFS[ib].buf offset:0 atIndex:(2 + i)];
+  }
+  NSUInteger n = (NSUInteger)p->numel;
+  if (n == 0) n = 1;
+  NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+  return 0;
 }
 
 Backend METAL_BACKEND = {

@@ -72,6 +72,32 @@ int main(void) {
   CHECK_EQ(CURRENT_BACKEND->buf_read(bid2, tmp, sizeof(tmp)), -1);
   thvm_free();
 
+  TEST_BEGIN("metal-real/const-kernel-parity-with-cpu");
+  // Run UOP_CONST(3.14f) through the CPU backend, capture output.
+  union { f32 f; u32 u; } cu; cu.f = 3.14f;
+  unsetenv("THVM_BACKEND");
+  thvm_init();
+  Term cpu_kern = thvm_materialize(uop_const(DT_F32, cu.u));
+  Term cpu_done = wnf(cpu_kern);
+  CHECK_EQ(term_tag(cpu_done), TAG_TEN);
+  u32 cpu_tid = (u32)term_val(cpu_done);
+  f32 cpu_out;
+  CHECK_EQ(CPU_BACKEND.buf_read(TENS[cpu_tid].buf_id, &cpu_out, sizeof(f32)), 0);
+  thvm_free();
+
+  // Same graph under Metal; output should match bit-for-bit.
+  setenv("THVM_BACKEND", "metal", 1);
+  thvm_init();
+  Term gpu_kern = thvm_materialize(uop_const(DT_F32, cu.u));
+  Term gpu_done = wnf(gpu_kern);
+  CHECK_EQ(term_tag(gpu_done), TAG_TEN);
+  u32 gpu_tid = (u32)term_val(gpu_done);
+  f32 gpu_out;
+  CHECK_EQ(METAL_BACKEND.buf_read(TENS[gpu_tid].buf_id, &gpu_out, sizeof(f32)), 0);
+  CHECK(cpu_out == gpu_out);
+  CHECK(gpu_out == 3.14f);
+  thvm_free();
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }

@@ -374,11 +374,21 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       checks: round-trip parity, refcount semantics, valid
       buf_id post-free returns -1. -->
 
-- [ ] **CONST kernel + dispatch entry point**.  First real Metal
+- [x] **CONST kernel + dispatch entry point**.  First real Metal
       kernel; establishes the `metal_dispatch_kernel` routing
       table (op -> pipeline state).  `const.metal` shader fills
       the output buffer with a constant.  Parity test: same
       output as CPU's `cpu_op_const`.
+      <!-- Pipeline-state cache keyed by opcode (lazy-built on
+      first dispatch via [device newComputePipelineState
+      WithFunction:]).  Buffer-binding convention: out at
+      buffer(0), per-op arg via setBytes at buffer(1), inputs at
+      buffer(2..n+1).  Threadgroup size = MIN(numel, pso
+      maxTotalThreadsPerThreadgroup); single dispatchThreads call
+      with synchronous waitUntilCompleted.  Parity test runs
+      UOP_CONST(3.14) under both backends and asserts bit-exact
+      output match. -->
+
 - [ ] **Elementwise Metal kernels** (ADD, MUL, NEG, RECIP, SQRT,
       EXP2, LOG2, CMPLT).  All share a uniform "one thread per
       output element" template; one MSL file per op (or templated
