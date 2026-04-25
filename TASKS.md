@@ -3155,6 +3155,87 @@ training step and 4 Adam steps still exhaust `KERNELS_CAP = 4096`.
 
 GOAL ACHIEVED 2026-04-25: TOptim["Adam"] training NetModel["LeNet"] on MNIST runs end-to-end on Metal (loss 2.61 -> 0.025 in 4 steps, prob[true] 0.074 -> 0.997, pred 0 -> 4 correct).  Memory regression resolved: 23297 -> 15922 KiB on the LeNet probe.  All Metal-training arc items + reuse-pass arc items complete.
 
+## TMemoryPlan visualization arc (queued 2026-04-25)
+
+User directive: "develop the WL MemoryPlan visualization for
+scheduled kernels, mapping buffer lifecycles over the schedule."
+Plan reviewed + approved at /Users/swish/.claude/plans/magical-
+wondering-biscuit.md (key design: topological depth, NOT firing
+order, on the x-axis -- pure static analysis of the producer_kid /
+input_tids DAG, no C runtime change; backend-aware buf table so
+the GOAL workflow on Metal renders too).
+
+- [ ] **mp1: C -> WL bridge for kernel/tens/buf snapshot tables**.
+      In wl/THVMLink/CSource/thvmlink.c, add 5 new exported
+      functions returning flat MTensors of mints, sized to the
+      current table:
+        - thvm_wl_kernel_table -> rows = KERNELS_NEXT - 1, cols =
+          [n_inputs, output_tid, fired, spliced, consumer_count,
+           output_numel, output_dtype]
+        - thvm_wl_kernel_inputs(kid) -> input_tids[0..n_inputs)
+        - thvm_wl_tens_table -> rows = TENS_NEXT - 1, cols =
+          [producer_kid, buf_id, dtype, view_numel,
+           view_contiguous, refcount, backend_id]
+        - thvm_wl_cpu_buf_table -> rows = CPU_BUFS_NEXT - 1, cols =
+          [nbytes, refcount, preserved, freeable, owns_data]
+        - thvm_wl_metal_buf_table (#ifdef THVM_HAS_METAL) -> rows =
+          METAL_BUFS_NEXT - 1, cols = [nbytes, refcount]; returns
+          empty 0x2 tensor when built without Metal
+      Wire each into LibraryFunctionLoad in
+      wl/THVMLink/Kernel/THVMLink.wl as TKernelTable / TKernelInputs
+      / TTensTable / TCpuBufTable / TMetalBufTable so the next
+      sub-item can call them.  Add a tiny WL test
+      (wl/THVMLink/Tests/memory_plan_bridge.wlt) that calls each
+      and asserts row/col shapes after a small TUOpAdd materialize.
+      ~110 LOC.
+
+- [ ] **mp2: MemoryPlan.wl data layer (TMemoryPlan + topo depth +
+      TMemoryPlanReport)**.  New file
+      wl/THVMLink/Kernel/MemoryPlan.wl.  TMemoryPlan[] snapshots
+      the 5 bridge tables (mp1) and returns
+      TMemoryPlan[<|"Kernels", "Tens", "Bufs"|>].  Compute
+      per-kernel topological depth via memoized recursion on
+      input_tids -> producer_kid edges (external tids contribute
+      0).  Per-buf derivation: alloc_depth = depth of producer
+      kernel, last_use_depth = max depth across kernels whose
+      input_tids point at any TenDesc sharing this buf_id;
+      alive_span = last_use - alloc + 1; status drawn from
+      preserved/freeable flags + producer-kid presence.  Aliasing-
+      aware: tids with the same buf_id collapse into one Bufs
+      entry with alias_tids = the union of contributing tids.
+      TMemoryPlanReport[plan] returns a text Column with top-N
+      largest bufs / longest-lived / status counts / total live
+      bytes.  ~80 LOC.
+
+- [ ] **mp3: TMemoryPlanGantt renderer + tests**.  Add the
+      Graphics-based Gantt to wl/THVMLink/Kernel/MemoryPlan.wl:
+      x-axis = topological depth, y-axis = buf_id sorted by
+      alloc_depth then nbytes desc, one Rectangle per buf
+      colored by status via LightDarkSwitched (Preserved =
+      blue, Freeable = green, Live = gray, External = orange,
+      Dead = red).  Tooltip per bar shows
+      {bid, nbytes, dtype, status, alloc_depth, last_use_depth,
+      alias_tids}.  Bar height toggle "BarHeight" -> "Log" |
+      "Uniform" (default Log scaled by Log2[nbytes]).  Title
+      indicates active backend ("CPU" / "Metal").  Plus
+      MakeBoxes UpValue for TMemoryPlan[a_] using
+      BoxForm`ArrangeSummaryBox + the heapNewSummaryIcon-style
+      stack icon from Format.wl.  Tests in
+      wl/THVMLink/Tests/memory_plan.wlt: synthetic 3-kernel
+      diamond (depth 0, 1, 1), buf collapse with reshape alias,
+      Gantt smoke-check (returns Graphics-head).  ~80 LOC + ~50
+      LOC test.
+
+- [ ] **mp4: probe integration**.  Append a
+      TMemoryPlanReport[TMemoryPlan[]] call at the bottom of
+      wl/Examples/lenet-mnist/memory-probe.wls so the per-phase
+      printout is followed by a top-5-largest / top-5-longest
+      summary.  Verify that on the THVM_BACKEND=metal run the
+      title flips to "Metal" and the report still prints
+      sensible bufs (preserved/freeable will be all 0 since
+      Metal doesn't track those).  ~10 LOC + the verify
+      observation goes into docs/memory.md.
+
 
 
 
