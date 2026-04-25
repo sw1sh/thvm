@@ -3422,7 +3422,7 @@ sub-items once these land.
       visualization already proves a 48-54% slot-reuse headroom
       on LeNet.  Decomposed into 4 sub-items below.
 
-  - [ ] **bm4a: CPU free-list infrastructure**.  Add a per-
+  - [x] **bm4a: CPU free-list infrastructure**.  Add a per-
         size-class slot list to src/backend/cpu/.  Two
         primitives:
           - `cpu_buf_pool_push(buf_id)` -- returns the buf's
@@ -3438,6 +3438,41 @@ sub-items once these land.
         ~50 LOC + ~30 LOC test in tests/test_cpu_free_list.c
         verifying alloc-free-realloc returns the same buf_id +
         zeroed data.  No callers wired yet; bm4b does that.
+        <!-- Landed.  Renamed cpu_buf_pool_push ->
+        cpu_buf_freelist_push (and try_pop) to disambiguate
+        from the existing watermark-pool primitives in
+        buf_pool.c (cpu_buf_pool_begin / rollback) which are
+        unrelated.
+
+        src/backend/cpu/init.c: added a CPU_FREELIST[4096]
+        slot table + length, reset in cpu_init/cpu_shutdown.
+
+        src/backend/cpu/buf_freelist.c (new):
+          cpu_buf_freelist_push(buf_id) appends a recyclable
+            buf_id; saturated push silently drops (leaks
+            until cpu_shutdown but never crashes).
+          cpu_buf_freelist_try_pop(nbytes) linear-scans for a
+            matching slot, swap-removes + resets refcount /
+            preserved / freeable + zeroes data, returns the
+            recycled buf_id.  Skips externals (non-owning
+            bufs whose data we can't memset) and stale
+            entries (slot index out of range).
+
+        src/backend/cpu/buf_alloc.c: cpu_buf_alloc tries
+        cpu_buf_freelist_try_pop first; falls through to the
+        existing calloc path on miss.
+
+        tests/test_cpu_free_list.c (16 sub-checks):
+        alloc-push-realloc returns same bid with zeroed data
+        + cleared flags, size-mismatch misses, exact-size
+        after mismatch still pops, externals are skipped,
+        saturated-push doesn't crash, stale entries are
+        bypassed.  268 C + 270 WL tests green.
+
+        bm4b wires kernel_fire_by_id's decref hook to actually
+        push bufs to the freelist when consumer_count hits
+        zero. -->
+
 
   - [ ] **bm4b: wire the freeable signal to the free-list**.
         In `kernel_fire_by_id`'s decref hook (sub-item b of

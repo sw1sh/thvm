@@ -84,6 +84,7 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 // helpers reference them, then per-op files, the interpreter, and
 // finally _.c assembles the Backend vtable.
 #include "backend/cpu/init.c"
+#include "backend/cpu/buf_freelist.c"   // needed by buf_alloc.c
 #include "backend/cpu/buf_alloc.c"
 #include "backend/cpu/buf_free.c"
 #include "backend/cpu/buf_incref.c"

@@ -34,9 +34,21 @@ typedef struct {
 static CpuBuf *CPU_BUFS      = NULL;
 static u64     CPU_BUFS_NEXT = 1;   // start at 1; 0 reserved for "no buffer"
 
+// Free-list of recyclable buf_ids (bm4a of the bench arc).
+// cpu_buf_freelist_push appends a buf_id whose storage is no
+// longer needed; cpu_buf_alloc(nbytes) tries to reuse a slot
+// whose nbytes matches before calling calloc.  Memory survives
+// the push -- only the refcount/preserved/freeable bookkeeping
+// resets.  Linear scan -- fine for the modest free-list sizes
+// (~hundreds at most) that LeNet / beautiful_mnist generate.
+#define CPU_FREELIST_CAP 4096
+static u32 CPU_FREELIST    [CPU_FREELIST_CAP];
+static u32 CPU_FREELIST_LEN = 0;
+
 fn int cpu_init(void) {
   CPU_BUFS = (CpuBuf *)calloc(CPU_BUFS_CAP, sizeof(CpuBuf));
   CPU_BUFS_NEXT = 1;
+  CPU_FREELIST_LEN = 0;
   return CPU_BUFS == NULL ? -1 : 0;
 }
 
@@ -54,4 +66,5 @@ fn void cpu_shutdown(void) {
   free(CPU_BUFS);
   CPU_BUFS      = NULL;
   CPU_BUFS_NEXT = 1;
+  CPU_FREELIST_LEN = 0;
 }

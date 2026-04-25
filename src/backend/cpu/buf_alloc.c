@@ -6,6 +6,13 @@
 // same buffer can be shared across multiple TenDesc aliases.
 
 fn u32 cpu_buf_alloc(u64 nbytes) {
+  // bm4a: free-list lookup first.  Recycles a slot whose nbytes
+  // matches; reset to a clean state by cpu_buf_freelist_try_pop.
+  // No-op when the list is empty or no size match -- falls
+  // through to the fresh-calloc path below.
+  u32 recycled = cpu_buf_freelist_try_pop(nbytes);
+  if (recycled != 0) return recycled;
+
   if (CPU_BUFS_NEXT >= CPU_BUFS_CAP) {
     fprintf(stderr, "cpu_buf_alloc: out of slots (cap=%llu)\n", (unsigned long long)CPU_BUFS_CAP);
     exit(1);
