@@ -145,6 +145,42 @@ VerificationTest[
     TestID -> "grad/shrink-inside-mul-chain"
 ]
 
+(* === SHRINK + PERMUTE + PAD + FLIP composition smoke ===
+   Sub-item (e) of the SHRINK/PAD/PERMUTE/FLIP grad arc:
+   verifies the four rules compose under the chain rule so the
+   forthcoming TUOpConv2D lowering (which fans through these
+   movement ops) backprops to a finite, source-shaped gradient. *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[
+        {{1.0, 2.0, 3.0, 4.0}, {5.0, 6.0, 7.0, 8.0}}, "Real32"];
+    (* Chain: a {2, 4} -> SHRINK to {2, 2} on axis 1
+                       -> PERMUTE to {2, 2} (transpose)
+                       -> PAD by 1 on axis 0 -> {4, 2}
+                       -> FLIP axis 0
+       Sum to scalar; backprop to a.  Each link exercises one of
+       the new grad rules; we just need the outcome to be a valid
+       a-shaped {2, 4} grad with finite numerics. *)
+    expr = TUOpReduce[
+        TUOpReduce[
+            TUOpFlip[
+                TUOpPad[
+                    TUOpPermute[
+                        TUOpShrink[a, {{0, 2}, {1, 3}}],
+                        {1, 0}],
+                    {{1, 1}, {0, 0}}],
+                {0}],
+            0, "SUM"],
+        0, "SUM"];
+    g = TRealize @ TGrad[expr, a];
+    {TTensorShape[g],
+     AllTrue[Flatten @ Normal @ TTensorData[g], NumericQ],
+     AllTrue[Flatten @ Normal @ TTensorData[g], (Abs[#] < 1.0*^6)&]},
+    {{2, 4}, True, True},
+    TestID -> "grad/shrink-permute-pad-flip-composition"
+]
+
 (* === FLIP: grad mirrors the cotangent on the same axes === *)
 
 VerificationTest[

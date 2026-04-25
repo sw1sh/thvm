@@ -1677,12 +1677,20 @@ Realistic close-out for the overnight cron loop:
         flip-emits-flip-on-cotangent C structural test). -->
 
 
-  - [ ] **e. End-to-end smoke for the lowered conv2d arc.**  After
+  - [x] **e. End-to-end smoke for the lowered conv2d arc.**  After
         (a)-(d) land, draft a small wlt that builds a SHRINK +
         PERMUTE + PAD chain manually + asserts the gradient
         wrt input is finite and correctly shaped.  Documents
         that the SHRINK/PAD/PERMUTE/FLIP rules compose under
         the chain rule.  ~25 LOC of test only.
+        <!-- Landed.  Single grad/shrink-permute-pad-flip-
+        composition test fans a {2,4} input through SHRINK ->
+        PERMUTE -> PAD -> FLIP -> 2x REDUCE_SUM and asserts
+        the back-propagated gradient has shape {2,4}, all
+        finite numeric, all |g| < 1e6.  Unblocks the TUOpConv2D
+        lowering: the four movement ops now compose under the
+        chain rule.  211 WL + 146 C tests green. -->
+
 
 - [ ] **Lower TUOpConv2D to a primitive chain**.  Replace the
       direct `uop_conv2d` call inside the WL helper TUOpConv2D
