@@ -44,6 +44,118 @@ fn u8 uop_is_binary_elementwise(u8 op) {
   return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ;
 }
 
+// ---- Splice support (sub-item f1a of the kernel-fusion arc).
+//      A KernelEntry is "inlineable" when its program is exactly
+//      n_inputs LOAD ops (the prefix from sub-item c) followed by
+//      a single elementwise op.  Such kernels can be merged into a
+//      consumer's program[] via materialize_splice_into.
+// ----
+
+fn u8 is_kernel_inlineable(KernelEntry *ke) {
+  if (ke->spliced) return 0;
+  if (ke->n_ops != ke->n_inputs + 1) return 0;
+  KProgOp *p = &ke->program[ke->n_inputs];
+  return uop_is_unary_elementwise(p->opcode)
+      || uop_is_binary_elementwise(p->opcode);
+}
+
+// Splice `child` into `parent`.  Appends child's non-prefix-LOAD
+// program ops to parent->program[], merges child input slots into
+// parent's (with dedup), and remaps each appended op's src refs:
+//
+//   - KSRC_AS_INPUT(N) on a child input  -> KSRC_AS_INPUT(remap[N])
+//     in parent's input table.
+//   - Inter-op program-index references inside child get offset by
+//     the parent's n_ops at splice start (so they stay self-
+//     consistent).
+//
+// Marks `child->spliced = 1` so kernel_fire_by_id skips it (the
+// parent now produces the same value into its output buffer).
+//
+// Returns the parent program-slot index where child's LAST op
+// landed -- the caller can reference it via that program-index in
+// any subsequent op's src[].  Returns 0xFFFFFFFF on cap-exceeded.
+fn u32 materialize_splice_into(u32 parent_kid, u32 child_kid) {
+  if (parent_kid == 0 || parent_kid >= KERNELS_NEXT) return 0xFFFFFFFF;
+  if (child_kid  == 0 || child_kid  >= KERNELS_NEXT) return 0xFFFFFFFF;
+  KernelEntry *parent = &KERNELS[parent_kid];
+  KernelEntry *child  = &KERNELS[child_kid];
+  if (child->spliced) return 0xFFFFFFFF;
+
+  // Map each child input slot to a parent input slot (creating new
+  // ones for non-duplicates).
+  u32 input_remap[KERNEL_MAX_INPUT];
+  for (u32 i = 0; i < child->n_inputs; i++) {
+    int found = -1;
+    for (u32 j = 0; j < parent->n_inputs; j++) {
+      if (parent->input_tids [j] == child->input_tids [i]
+       && parent->input_terms[j] == child->input_terms[i]) {
+        found = (int)j;
+        break;
+      }
+    }
+    if (found >= 0) {
+      input_remap[i] = (u32)found;
+    } else {
+      if (parent->n_inputs >= KERNEL_MAX_INPUT) return 0xFFFFFFFF;
+      u32 slot = parent->n_inputs++;
+      parent->input_tids  [slot] = child->input_tids  [i];
+      parent->input_dtypes[slot] = child->input_dtypes[i];
+      parent->input_numels[slot] = child->input_numels[i];
+      parent->input_terms [slot] = child->input_terms [i];
+      input_remap[i] = slot;
+    }
+  }
+
+  // Append child's program ops, skipping the prefix LOAD that
+  // mirrors child's now-merged inputs (they would just be
+  // redundant; parent will emit its own LOAD prefix later).
+  // Map old child program-indices to new parent program-indices
+  // so inter-op refs stay correct after the offset.
+  u32 prog_remap[KPROG_MAX_OPS];
+  u32 last_appended = 0xFFFFFFFF;
+  for (u32 i = 0; i < child->n_ops; i++) {
+    KProgOp *cp = &child->program[i];
+    // Skip the per-input prefix LOAD (the input is already bound
+    // in parent's input table; downstream child ops referencing
+    // this LOAD's program-index get retargeted via prog_remap to
+    // the parent's KSRC_AS_INPUT(remap[N]) form below).
+    if (cp->opcode == UOP_LOAD && i + 1 < child->n_ops
+        && cp->n_src == 1 && KSRC_IS_INPUT(cp->src[0])) {
+      // Mark the slot as "absorbed into input N"; downstream
+      // refs to it will rewrite to KSRC_AS_INPUT(remap[N]).
+      prog_remap[i] = KSRC_AS_INPUT(input_remap[KSRC_INDEX(cp->src[0])]);
+      continue;
+    }
+    if (parent->n_ops >= KPROG_MAX_OPS) return 0xFFFFFFFF;
+    KProgOp *pp = &parent->program[parent->n_ops];
+    *pp = *cp;
+    for (u8 s = 0; s < pp->n_src; s++) {
+      u32 raw = pp->src[s];
+      if (KSRC_IS_INPUT(raw)) {
+        u32 idx = KSRC_INDEX(raw);
+        pp->src[s] = KSRC_AS_INPUT(input_remap[idx]);
+      } else {
+        // child program-index -- look it up.  If absorbed, use the
+        // KSRC_AS_INPUT remap; else re-offset to parent space.
+        u32 idx = KSRC_INDEX(raw);
+        u32 mapped = prog_remap[idx];
+        if ((mapped & KSRC_INPUT_FLAG) != 0) {
+          pp->src[s] = mapped;          // already KSRC_AS_INPUT-encoded
+        } else {
+          pp->src[s] = mapped;          // bare program-index in parent
+        }
+      }
+    }
+    prog_remap[i] = parent->n_ops;
+    last_appended = parent->n_ops;
+    parent->n_ops++;
+  }
+
+  child->spliced = 1;
+  return last_appended;
+}
+
 // ---- Compute output shape / dtype for a single op given its input
 //      TenDesc ids.  Step 12:
 //        elementwise      = broadcast pick non-scalar side,

@@ -2200,7 +2200,7 @@ Realistic close-out for the overnight cron loop:
         rewrite or a child-kernel-splice infrastructure.
         Decomposed into 3 sub-items below. -->
 
-    - [ ] **f1a. Inlineable-kernel flag + splice helper**.
+    - [x] **f1a. Inlineable-kernel flag + splice helper**.
           Add a KernelEntry boolean (or program-op count
           check) marking single-op elementwise kernels as
           inlineable.  Add a `materialize_splice_into(parent,
@@ -2218,6 +2218,23 @@ Realistic close-out for the overnight cron loop:
           ~60 LOC; standalone helper + unit test that
           structurally verifies a hand-built splice produces
           the right program layout.
+          <!-- Landed.  KernelEntry gained a `spliced` u8.
+          `is_kernel_inlineable(ke)` predicate checks for
+          n_ops == n_inputs+1 + main op elementwise + not
+          already spliced.  `materialize_splice_into(parent_kid,
+          child_kid)` does the four jobs (appends with src
+          remap, dedup-merges inputs, marks spliced, returns
+          last appended slot).  Subtle: child's PREFIX LOAD
+          ops are absorbed (not copied) -- their downstream
+          refs get rewritten to KSRC_AS_INPUT(remap[N])
+          directly, since the parent will emit its own LOAD
+          prefix later.  kernel_fire_by_id short-circuits
+          when ke->spliced is set.  New tests/test_splice.c
+          covers 17 sub-checks (inlineable predicate, op
+          append, input merge, spliced flag, fire short-
+          circuit, double-splice rejection).  146 C +
+          219 WL tests green. -->
+
 
     - [ ] **f1b. Wire materialize_in_env to splice
           elementwise children**.  When emitting a kernel in

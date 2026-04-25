@@ -24,7 +24,8 @@ TESTS := \
   $(BIN)/test_wnf_n \
   $(BIN)/test_redex \
   $(BIN)/test_metal_stub \
-  $(BIN)/test_expand_axis
+  $(BIN)/test_expand_axis \
+  $(BIN)/test_splice
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.

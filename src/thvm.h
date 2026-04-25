@@ -264,6 +264,11 @@ typedef struct KernelEntry {
   Term      source_uop;
 
   u8        fired;                 // 1 once the kernel has run
+  u8        spliced;               // 1 if the kernel's program was inlined
+                                   // into a parent via
+                                   // materialize_splice_into; kernel_fire_by_id
+                                   // skips dispatch (the parent now produces
+                                   // this kernel's output buffer too).
   void     *compiled;              // backend-specific; NULL for interpreter
 } KernelEntry;
 
