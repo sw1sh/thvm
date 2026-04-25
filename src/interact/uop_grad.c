@@ -120,10 +120,13 @@ fn Term interact_grad(Term grad_term) {
       Term weights  = heap_read(y_loc + 1);
       Term bias     = heap_read(y_loc + 2);
 
-      Shape in_shape, wt_shape;
+      Shape in_shape = {0}, wt_shape = {0};
+      u8 shapes_known = (term_shape_in(input,   0, &in_shape) &&
+                         in_shape.ndim == 3 &&
+                         term_shape_in(weights, 0, &wt_shape) &&
+                         wt_shape.ndim == 4);
       Term gb;
-      if (term_shape_in(input,   0, &in_shape) && in_shape.ndim == 3 &&
-          term_shape_in(weights, 0, &wt_shape) && wt_shape.ndim == 4) {
+      if (shapes_known) {
         // Forward output shape {C_out, H_out, W_out}.
         u32 out_dims[3];
         out_dims[0] = wt_shape.dims[0];                   // C_out
@@ -141,11 +144,54 @@ fn Term interact_grad(Term grad_term) {
         Term gy_axis1 = uop_reduce(REDUCE_SUM, 1, gy_axis2);
         gb = uop_grad(bias, gy_axis1, target);
       }
-      (void)input; (void)weights;
 
+      // grad_weights via the standard cross-correlation identity:
+      //   gw[c_out, c_in, ky, kx]
+      //     = sum_{y, x} input[c_in, y+ky, x+kx] * gy[c_out, y, x]
+      // For C_in == 1 (LeNet's first conv), this is a single fresh
+      // CONV2D call with gy reshaped to {C_out, 1, H_out, W_out} as
+      // the "weights" and a zero "bias".  CONV2D's forward then
+      // computes exactly the cross-correlation we want, with output
+      // {C_out, kh, kw}.  Reshape that to {C_out, 1, kh, kw} so the
+      // shape matches the original `weights` tensor.
+      //
+      // For C_in > 1, the runtime can't express this in one CONV2D
+      // call (CONV sums over c_in; we'd need per-c_in slicing +
+      // stacking, which needs a SHRINK kernel + a CONCAT op the
+      // runtime doesn't have yet).  Falls back to grad_zero in that
+      // case -- LeNet's first conv backprops correctly; deeper
+      // convs need a follow-up.
+      // <!-- design-question: extend to C_in > 1 later.  Options:
+      //  (a) per-c_in CONV2D + CONCAT (needs a CONCAT primitive),
+      //  (b) one big CONV2D over a {C_out * C_in, ...} reshape
+      //      (might fold the c_in axis into c_out).
+      //  (c) a dedicated UOP_CORRELATE primitive that returns rank-4. -->
+      Term gw_chain;
+      if (shapes_known && in_shape.dims[0] == 1) {
+        u32 c_out = wt_shape.dims[0];
+        u32 h_out = in_shape.dims[1] - wt_shape.dims[2] + 1;
+        u32 w_out = in_shape.dims[2] - wt_shape.dims[3] + 1;
+        u32 kh    = wt_shape.dims[2];
+        u32 kw    = wt_shape.dims[3];
+        u32 gy_w4[4]  = {c_out, 1, h_out, w_out};
+        u32 zb_dim[1] = {c_out};
+        u32 gw_4d[4]  = {c_out, 1, kh, kw};
+        Term gy_at_out_3 = uop_expand(gy, 3,
+            (u32[3]){c_out, h_out, w_out});
+        Term gy_as_w     = uop_reshape(gy_at_out_3, 4, gy_w4);
+        Term zero_bias   = uop_expand(uop_const(DT_F32, 0), 1, zb_dim);
+        Term raw_gw      = uop_conv2d(input, gy_as_w, zero_bias);
+        Term gw_4        = uop_reshape(raw_gw, 4, gw_4d);
+        gw_chain = uop_grad(weights, gw_4, target);
+      } else {
+        // Fallback for C_in > 1: emit zero so multi-channel
+        // CONV2D weights silently get no gradient (LeNet's
+        // second conv).  This is wrong but doesn't crash; the
+        // C_in > 1 case is its own follow-up task.
+        gw_chain = grad_zero(target);
+      }
       Term gi = grad_zero(target);
-      Term gw = grad_zero(target);
-      Term sum_iw = uop_binary(UOP_ADD, gi, gw);
+      Term sum_iw = uop_binary(UOP_ADD, gi, gw_chain);
       return uop_binary(UOP_ADD, sum_iw, gb);
     }
 

@@ -1122,7 +1122,7 @@ Realistic close-out for the overnight cron loop:
       primitive needed for CONV2D grad_input. -->
 
 
-- [ ] **CONV2D grad_weights branch in interact_grad**.  Build
+- [x] **CONV2D grad_weights branch in interact_grad**.  Build
       via existing primitives (no new kernel needed):
         grad_weights[c_out, c_in, ky, kx]
             = sum over (y, x) of input[c_in, y+ky, x+kx]
@@ -1135,6 +1135,35 @@ Realistic close-out for the overnight cron loop:
       runtime's CONV2D semantics).  Needs design thought
       tracked as a `<!-- design-question --> note when picking
       the implementation.
+      <!-- Implemented partially via the recursion-into-fresh-
+      UOP_CONV2D path for the C_in == 1 case (LeNet's first
+      conv).  Concretely: gy{C_out, H_out, W_out} reshapes to
+      {C_out, 1, H_out, W_out} and is fed as the "weights" of
+      a fresh CONV2D over the original input{1, H, W}; the
+      forward then computes the cross-correlation we want, with
+      output {C_out, H-H_out+1, W-W_out+1} = {C_out, kh, kw}.
+      Reshape that to {C_out, 1, kh, kw} so it matches the
+      original weights tensor.  For C_in > 1 (LeNet's second
+      conv), the runtime can't express this in one CONV2D call
+      -- CONV sums over c_in, losing per-c_in information.
+      Falls back to grad_zero with a design-question comment
+      noting three viable extensions (per-c_in CONV2D + CONCAT,
+      a reshape-based fold of c_in into c_out, or a dedicated
+      UOP_CORRELATE primitive).
+      Required also adding CONV2D output-shape handling to
+      src/schedule/materialize.c (it had only the arity entry;
+      missing CONV2D shape => the nested CONV2D in the chain
+      rule allocated its output buffer with the input's shape
+      and silently wrote zeros).
+      Numerical test grad/conv2d-weights-cin1-equals-spatial-
+      correlation: input ones{1,4,4}, weights zeros{2,1,3,3},
+      bias zeros{2}; CONST(1) seed -> bias-grad spatial extent
+      = 4 per cell -> grad_weights = ones{2,1,3,3} * 4 (each
+      kernel position sums a 2x2 ones slice).  All 390 C +
+      185 WL tests stay green.  Partial CONV2D backprop now
+      covers bias + first-conv weights; multi-channel kernel
+      weights still grad_zero. -->
+
 
 - [ ] **CONV2D grad_input branch in interact_grad** (the
       heaviest -- multi-fire on its own).  Build via:

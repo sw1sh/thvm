@@ -232,6 +232,24 @@ fn Term materialize_expr(Term expr) {
       u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
       out_shape.dims[i] = s0.dims[i] + b + e;
     }
+  } else if (op == UOP_CONV2D && child_tids[0] != 0 && child_tids[1] != 0) {
+    // CONV2D: input {C_in, H, W}, weights {C_out, C_in, kh, kw} ->
+    // output {C_out, H - kh + 1, W - kw + 1} (stride 1, no pad).
+    // Pack info the cpu kernel needs into op_arg as well.
+    Shape inS = TENS[child_tids[0]].view.shape;
+    Shape wtS = TENS[child_tids[1]].view.shape;
+    u32 c_out = wtS.dims[0];
+    u32 kh    = wtS.dims[2];
+    u32 kw    = wtS.dims[3];
+    u32 h     = inS.dims[1];
+    u32 w     = inS.dims[2];
+    u32 w_out = w - kw + 1;
+    out_shape.ndim    = 3;
+    out_shape.dims[0] = c_out;
+    out_shape.dims[1] = h - kh + 1;
+    out_shape.dims[2] = w_out;
+    for (u32 i = 3; i < MAX_DIM; i++) out_shape.dims[i] = 0;
+    op_arg = ((kh & 0xFF) << 24) | ((kw & 0xFF) << 16) | (w_out & 0xFFFF);
   } else {
     out_shape = op_output_shape(op, child_tids, arity, reduce_axis);
   }

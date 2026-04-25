@@ -343,6 +343,28 @@ VerificationTest[
     TestID -> "grad/conv2d-bias-equals-spatial-sum-of-gy"
 ]
 
+(* === CONV2D grad_weights (C_in=1 case) ===
+   Cross-correlation identity: gw[c_out, 0, ky, kx]
+     = sum_{y, x} input[0, y+ky, x+kx] * gy[c_out, y, x].
+   With input = ones{1, 4, 4}, weights = zeros{2, 1, 3, 3},
+   bias = zeros{2}; CONST(1) seed -> gy lifted = ones{2, 2, 2};
+   gw[c, 0, ky, kx] = sum of a 2x2 ones slice = 4 for all
+   (c, ky, kx).  Expected: ones{2, 1, 3, 3} * 4. *)
+
+VerificationTest[
+    TInit[];
+    input   = TTensorCreate @ NumericArray[
+        ConstantArray[1.0, {1, 4, 4}], "Real32"];
+    weights = TTensorCreate @ NumericArray[
+        ConstantArray[0.0, {2, 1, 3, 3}], "Real32"];
+    bias    = TTensorCreate @ NumericArray[{0.0, 0.0}, "Real32"];
+    g = TRealize @ TGrad[TUOpConv2D[input, weights, bias], weights];
+    Normal @ TTensorData[g],
+    ConstantArray[4.0, {2, 1, 3, 3}],
+    SameTest -> (Max[Abs[Flatten[#1] - Flatten[#2]]] < 1.0*^-5 &),
+    TestID -> "grad/conv2d-weights-cin1-equals-spatial-correlation"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[
