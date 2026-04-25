@@ -64,12 +64,6 @@ int main(void) {
     CHECK_EQ(term_val(heap_read(term_val(p) + 1 + i)), be[i]);
   }
 
-  TEST_BEGIN("uop/materialize-wraps-single-cell");
-  Term mat = uop_materialize(sum);
-  CHECK_EQ(term_tag(mat), TAG_UOP);
-  CHECK_EQ(term_ext(mat), UOP_MATERIALIZE);
-  CHECK_EQ(heap_read(term_val(mat)), sum);
-
   TEST_BEGIN("uop/graph-can-nest-deeply");
   // Build sum(a, neg(b)) and check each layer is walkable.
   Term inner = uop_unary (UOP_NEG, b);

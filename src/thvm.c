@@ -122,7 +122,6 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "uop/pad.c"
 #include "uop/shrink.c"
 #include "uop/flip.c"
-#include "uop/materialize.c"
 #include "uop/grad.c"
 
 // === schedule/ ===
@@ -130,7 +129,10 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 // Produces the scheduled DAG of UOP_KERNEL terms that
 // interact_kernel fires bottom-up.
 #include "schedule/kernel_alloc.c"
+#include "schedule/shape_env.c"
 #include "schedule/materialize.c"
+#include "schedule/materialize_in_env.c"
+#include "schedule/walk.c"
 
 // === interact/ ===
 // Interaction rules.  uop_kernel.c needs the schedule pipeline above

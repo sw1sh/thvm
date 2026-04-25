@@ -11,8 +11,7 @@
      1. TTensor constructors + inspection  (TTensor, TTensorShape,
         TTensorDType, TTensorData, TTensorRefcount).
      2. TUOp graph builders                 (TUOpConst, TUOpAdd,
-        TUOpMul, ..., TUOpReduce, TUOpMaterialize, TUOpKind,
-        TUOpSrcs).
+        TUOpMul, ..., TUOpReduce, TUOpKind, TUOpSrcs).
      3. UpValues on TTerm that make Plus / Times / Minus over
         tensor terms build UOp graphs automatically.
 *)
@@ -126,8 +125,6 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
     TTerm[$uopFlipFn[ttermRaw[src], mask]]
 ]
 
-TUOpMaterialize[expr_] := (ensureInit[]; TTerm[$uopMatFn[ttermRaw[expr]]])
-
 TUOpGrad[y_, gy_, target_] := (
     ensureInit[];
     TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]]
@@ -137,11 +134,10 @@ TUOpGrad[y_, gy_, target_] := (
    cotangent seed 1. *)
 TGrad[y_, target_] := TUOpGrad[y, TUOpConst[1.0, "f32"], target]
 
-(* TRealize = TWnf[TUOpMaterialize[expr]].  Primary convenience for
-   running a lazy UOp graph to completion.  After commit 4 this
-   returns a TAG_TEN with the computed result; until then, it returns
-   the materialized-but-not-fired scheduled DAG. *)
-TRealize[expr_] := TWnf[TUOpMaterialize[expr]]
+(* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)
+   then TWnf to beta-reduce and fire the kernels.  No UOP_MATERIALIZE
+   wrapper -- thvm_materialize is invoked directly. *)
+TRealize[expr_] := TWnf[TMaterialize[expr]]
 
 (* TMaterialize = direct schedule + kernelize + linearize rewrite,
    no firing.  Useful for inspection (visualize the scheduled DAG

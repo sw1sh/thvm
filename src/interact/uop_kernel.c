@@ -14,11 +14,33 @@
 fn void kernel_fire_by_id(u32 kid) {
   if (kid == 0 || kid >= KERNELS_NEXT) return;
   KernelEntry *ke = &KERNELS[kid];
-  if (ke->fired) return;
+
+  // Resolve any symbolic input slots first (input_tids[i] == 0 +
+  // input_terms[i] != 0).  These come from materialize_uop_in_env
+  // when a child was a free TAG_VAR; by fire time, APP-LAM beta
+  // should have substituted the binder and term_resolve walks the
+  // SUB-bit chain to reach a TAG_TEN.  If we still don't see a
+  // concrete TEN, the kernel can't fire -- bail.
+  u32 resolved_tids[KERNEL_MAX_INPUT];
+  int has_symbolic = 0;
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 tid = ke->input_tids[i];
+    if (tid == 0 && ke->input_terms[i] != 0) {
+      Term r = term_resolve(ke->input_terms[i]);
+      if (term_tag(r) != TAG_TEN) return;
+      tid = (u32)term_val(r);
+      has_symbolic = 1;
+    }
+    resolved_tids[i] = tid;
+  }
+
+  // Concrete-only kernels fire once; symbolic-input kernels can be
+  // re-fired with different bindings each time.
+  if (!has_symbolic && ke->fired) return;
 
   // Depth-first: fire every input's producing kernel first.
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 tid = ke->input_tids[i];
+    u32 tid = resolved_tids[i];
     if (tid < TENS_NEXT && TENS[tid].producer_kid != 0) {
       kernel_fire_by_id(TENS[tid].producer_kid);
     }
@@ -27,7 +49,7 @@ fn void kernel_fire_by_id(u32 kid) {
   // Resolve concrete buffer ids now that all upstream outputs are filled.
   u32 in_buf_ids[KERNEL_MAX_INPUT];
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    in_buf_ids[i] = TENS[ke->input_tids[i]].buf_id;
+    in_buf_ids[i] = TENS[resolved_tids[i]].buf_id;
   }
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
 

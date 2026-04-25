@@ -100,7 +100,8 @@ typedef u64 Term;
 // === UOp opcodes (TAG_UOP ext field) ===
 // See docs/tensors.md for per-opcode heap layouts.
 
-#define UOP_MATERIALIZE  0   // heap = [expr]
+// (slot 0 is reserved/unused -- previously UOP_MATERIALIZE, now dropped
+// in favour of calling thvm_materialize directly.)
 #define UOP_KERNEL       1   // heap = [output_buf, ast_root]; ext bits: see uop_kernel.c
 #define UOP_CONST        2   // heap = [NUM(bits)]; ext = dtype
 #define UOP_RESHAPE      3   // heap = [src, NUM(d0), ..., NUM(d_{n-1})]; ext = ndim
@@ -205,9 +206,15 @@ typedef struct {
 
 typedef struct KernelEntry {
   u32       n_inputs;
-  u32       input_tids   [KERNEL_MAX_INPUT];  // TenDesc ids we read from
+  u32       input_tids   [KERNEL_MAX_INPUT];  // TenDesc id, or 0 if symbolic
   u32       input_dtypes [KERNEL_MAX_INPUT];
   u32       input_numels [KERNEL_MAX_INPUT];
+
+  // For inputs that aren't statically a TenDesc (e.g., a free TAG_VAR
+  // that gets bound to a TEN at fire time via APP-LAM beta), we
+  // store the symbolic Term value here.  kernel_fire_by_id resolves
+  // each non-zero entry through term_resolve before reading buffers.
+  Term      input_terms  [KERNEL_MAX_INPUT];
 
   u32       output_tid;            // TenDesc id we write to
   u32       output_dtype;
@@ -216,6 +223,16 @@ typedef struct KernelEntry {
 
   u32       n_ops;
   KProgOp   program[KPROG_MAX_OPS];
+
+  // Original root UOP term that this kernel was built from.  The
+  // walker rewrites parent cells to UOP_KERNEL but leaves the
+  // source UOP cells in the heap (now "orphaned" -- no live
+  // references reach them through the rewritten parents).  Grad
+  // chain-rule walks this term directly: heap_read on its child
+  // slots gives whatever they point at now (often other kernels,
+  // each of which carries its own source_uop), so the walk
+  // recurses into the original UOp graph naturally.
+  Term      source_uop;
 
   u8        fired;                 // 1 once the kernel has run
   void     *compiled;              // backend-specific; NULL for interpreter
@@ -321,6 +338,12 @@ fn Term term_new_mat (u32 match_val, Term handler, Term fallback);
 // kernel / materialize / grad firing.
 fn Term term_resolve(Term t);
 
+// === heap-walk materialize ===
+// Visits cells reachable from `root`, propagates shapes through
+// APP[LAM, arg], and rewrites UOPs into UOP_KERNELs in place.  See
+// src/schedule/walk.c.
+Term materialize_walk(Term root);
+
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.
 fn Term interact_app_lam(Term lam, Term arg);
@@ -360,11 +383,6 @@ fn Term uop_pad    (Term src, u32 ndim, const u32 *begin_end);   // begin_end[2*
 fn Term uop_shrink (Term src, u32 ndim, const u32 *begin_end);
 fn Term uop_flip   (Term src, u32 axes_bitmask);
 
-// Wrap any term in a UOP_MATERIALIZE.  Subsequent TWnf will fire the
-// materialize rule (rewriting it into the scheduled DAG) and then
-// fire any KERNELs that become ready.
-fn Term uop_materialize(Term expr);
-
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is
 // the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
@@ -372,10 +390,10 @@ fn Term uop_materialize(Term expr);
 fn Term uop_grad(Term y, Term gy, Term target);
 
 // === schedule/ ===
-// Top-level materialize driver: walks a UOp graph, allocates fresh
-// KernelEntrys + output TenDescs, emits UOP_KERNEL terms.  Called
-// directly from the WL bridge (TMaterialize) and from the
-// UOP_MATERIALIZE interaction rule.
+// Top-level materialize driver: heap-walk pass that in-place rewrites
+// UOP cells reachable from `term` into UOP_KERNEL cells, propagating
+// shapes through APP-LAM bindings.  Called directly from the WL bridge
+// (TMaterialize / TRealize).
 fn Term thvm_materialize(Term term);
 
 // === interact/uop_grad ===

@@ -73,6 +73,21 @@ fn Term interact_grad(Term grad_term) {
   u64 y_loc = term_val(y);
 
   switch (y_op) {
+    case UOP_KERNEL: {
+      // Pass GRAD through a kernelised subtree by walking its
+      // *original* UOP term -- the walker mutates parent cells
+      // to UOP_KERNEL but leaves the source UOP intact in the
+      // heap (orphaned).  KernelEntry.source_uop holds that root.
+      // The chain rule then proceeds on the original UOp graph;
+      // child cells that themselves got rewritten to kernels are
+      // recursed into via this same case.
+      u32  kid = (u32)term_val(heap_read(y_loc + 1));
+      if (kid == 0 || kid >= KERNELS_NEXT) return grad_zero(target);
+      Term src = KERNELS[kid].source_uop;
+      if (src == 0) return grad_zero(target);
+      return uop_grad(src, gy, target);
+    }
+
     case UOP_CONST:
       return grad_zero(target);
 

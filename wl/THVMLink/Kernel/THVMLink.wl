@@ -77,7 +77,7 @@ TTensorShape::usage    = "TTensorShape[t] returns the tensor's shape as a list o
 TTensorDType::usage    = "TTensorDType[t] returns the dtype as a string (\"f32\" / \"i32\").";
 TTensorData::usage     = "TTensorData[t] reads the tensor's buffer as a NumericArray whose type matches the dtype (Real32 for f32, Integer32 for i32).  Wrap in `Normal` to get a plain list.";
 TTensorRefcount::usage = "TTensorRefcount[t] returns the descriptor refcount (TENS[id].refcount).";
-TRealize::usage        = "TRealize[expr] = TWnf[TUOpMaterialize[expr]].  Fires the whole pipeline: schedule + kernelize + compile, then kernel dispatch.  Until commit 4 lands interact_kernel, TRealize stops at the scheduled DAG.";
+TRealize::usage        = "TRealize[expr] = TWnf[TMaterialize[expr]].  Fires the whole pipeline: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs) then beta-reduce + dispatch kernels.";
 TMaterialize::usage    = "TMaterialize[expr] runs the schedule + kernelize + linearize rewrite directly (no wnf) and returns the scheduled DAG term.  Fires no kernels.  Use to visualize the graph after scheduling but before dispatch.";
 TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
 TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].";
@@ -99,7 +99,6 @@ TUOpLog2::usage      = "TUOpLog2[a] builds a UOP_LOG2 node.";
 TUOpSqrt::usage      = "TUOpSqrt[a] builds a UOP_SQRT node.";
 TUOpCmplt::usage     = "TUOpCmplt[a, b] builds a UOP_CMPLT node.";
 TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; kind = \"SUM\" or \"MAX\".";
-TUOpMaterialize::usage = "TUOpMaterialize[expr] wraps a raw UOp graph; reducing it via TWnf fires the materialize rule (or use TMaterialize for inspection).";
 TUOpGrad::usage      = "TUOpGrad[y, gy, target] builds a UOP_GRAD node.  Reducing under TWnf applies the chain rule recursively until no UOP_GRAD nodes remain; the result is a UOp graph that can be fed to TRealize / TMaterialize like any other.";
 TGrad::usage         = "TGrad[y, target] = TUOpGrad[y, TUOpConst[1], target].  Top-level VJP -- d(y)/d(target) with cotangent seed 1.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
@@ -210,7 +209,6 @@ $uopExpandFn   := $uopExpandFn   = load["thvm_wl_uop_expand",   {Integer, {Integ
 $uopPadFn      := $uopPadFn      = load["thvm_wl_uop_pad",      {Integer, {Integer, 1}},             Integer];
 $uopShrinkFn   := $uopShrinkFn   = load["thvm_wl_uop_shrink",   {Integer, {Integer, 1}},             Integer];
 $uopFlipFn     := $uopFlipFn     = load["thvm_wl_uop_flip",     {Integer, Integer},                  Integer];
-$uopMatFn      := $uopMatFn      = load["thvm_wl_uop_materialize", {Integer},                        Integer];
 $uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Integer, Integer},      Integer];
 
 (* direct materialize (no wnf) + kernel-entry introspection *)

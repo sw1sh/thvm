@@ -437,14 +437,6 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_flip(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
-EXTERN_C DLLEXPORT int thvm_wl_uop_materialize(WolframLibraryData libData, mint argc,
-                                               MArgument *args, MArgument res) {
-  (void)libData; (void)argc;
-  Term expr = (Term)MArgument_getInteger(args[0]);
-  MArgument_setInteger(res, (mint)uop_materialize(expr));
-  return LIBRARY_NO_ERROR;
-}
-
 EXTERN_C DLLEXPORT int thvm_wl_uop_grad(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc;

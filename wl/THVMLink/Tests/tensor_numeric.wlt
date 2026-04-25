@@ -6,7 +6,7 @@
        instead of explicit TUOpAdd/TUOpMul/etc.  The UpValues in
        Tensor.wl rewrite Plus/Times/Minus/Power into UOp graphs
        automatically.
-     - TRealize[expr] == TWnf[TUOpMaterialize[expr]] -- the
+     - TRealize[expr] == TWnf[TMaterialize[expr]] -- the
        one-liner end of the pipeline.
      - TTensorData returns a NumericArray; wrap in `Normal` to
        compare against plain lists.

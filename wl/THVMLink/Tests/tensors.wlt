@@ -109,15 +109,6 @@ VerificationTest[
     TestID -> "TUOpReduce/kind-and-axis-as-NUM"
 ]
 
-VerificationTest[
-    TInit[];
-    a   = TTensor[{2}, {1.0, 2.0}];
-    mat = TUOpMaterialize[TUOpAdd[a, a]];
-    TUOpKind[mat],
-    "MATERIALIZE",
-    TestID -> "TUOpMaterialize/wraps-expr"
-]
-
 (* === TMaterialize: run the rewrite, inspect the scheduled DAG === *)
 
 VerificationTest[

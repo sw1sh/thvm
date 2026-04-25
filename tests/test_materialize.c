@@ -87,12 +87,6 @@ int main(void) {
   CHECK_EQ(cke->program[0].opcode, UOP_CONST);
   CHECK_EQ(cke->program[0].arg,    bits);
 
-  TEST_BEGIN("materialize/unwraps-UOP_MATERIALIZE");
-  Term wrapped = uop_materialize(uop_binary(UOP_ADD, a, b));
-  Term result  = thvm_materialize(wrapped);
-  CHECK_EQ(term_tag(result), TAG_UOP);
-  CHECK_EQ(term_ext(result), UOP_KERNEL);
-
   TEST_BEGIN("materialize/tag_ten-passes-through");
   CHECK_EQ(thvm_materialize(a), a);
 

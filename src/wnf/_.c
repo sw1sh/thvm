@@ -83,13 +83,6 @@ enter:
     }
     case TAG_UOP: {
       u32 op = term_ext(next);
-      if (op == UOP_MATERIALIZE) {
-        // Direct rewrite: schedule + kernelize + linearize, no firing.
-        // Continue reduction on the scheduled DAG so any nested
-        // UOP_KERNEL inside it fires on this same pass.
-        next = thvm_materialize(next);
-        goto enter;
-      }
       if (op == UOP_KERNEL) {
         // Fire all upstream kernels then this one; return the output TAG_TEN.
         whnf = interact_kernel(next);

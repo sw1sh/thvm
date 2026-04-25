@@ -10,8 +10,8 @@
 //
 // Children that are themselves UOps are materialized first; their
 // kernel's output TenDesc becomes an input to the parent kernel.
-// So reducing a UOP_MATERIALIZE on the user's root produces a DAG
-// of UOP_KERNELs wiring output->input, bottom-up.
+// So calling thvm_materialize on the user's root produces a DAG of
+// UOP_KERNELs wiring output->input, bottom-up.
 //
 // The heap layout of an emitted UOP_KERNEL term is:
 //   Heap[loc + 0] = output_buf (TAG_TEN, allocated but not filled)
@@ -134,12 +134,6 @@ fn Term materialize_expr(Term expr) {
 
   u8 op = term_ext(expr);
 
-  // Nested UOP_MATERIALIZE: recurse through.
-  if (op == UOP_MATERIALIZE) {
-    Term inner = heap_read(term_val(expr));
-    return materialize_expr(inner);
-  }
-
   // Already a KERNEL: pass through unchanged.
   if (op == UOP_KERNEL) return expr;
 
@@ -252,31 +246,25 @@ fn Term materialize_expr(Term expr) {
   heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, ke->output_tid));
   heap_set(kloc + 1, term_new(0, TAG_NUM, DT_I32,   kid));
 
-  ke->compiled = NULL;                    // interpreter fallback
+  ke->compiled   = NULL;                  // interpreter fallback
+  ke->source_uop = expr;                  // for grad walks via the original UOp
   return term_new(0, TAG_UOP, UOP_KERNEL, kloc);
 }
 
+// Forward declarations -- defined in walk.c after this file.
+Term materialize_walk(Term root);
+
 fn Term thvm_materialize(Term term) {
-  // UOP_MATERIALIZE wrapper: cache the realised result back into the
-  // wrapper's heap cell so subsequent fires return the SAME TAG_TEN
-  // id.  Without caching, multi-use of one wrapper -- e.g. when a
-  // recursive SGD body references `w` in both the loss and the
-  // weight update -- would produce a fresh kernel per use.  The
-  // resulting fresh-per-use TAG_TEN ids then break interact_grad's
-  // y == target pointer-equality leaf check (each `w` reference
-  // hashes to a different Term value), and grad collapses to zero.
-  if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_MATERIALIZE) {
-    u64  loc   = term_val(term);
-    Term inner = heap_read(loc);
-    // Cached: heap[loc] is already a TAG_TEN that previous fires
-    // memoised here.  (TAG_TEN is never the natural inner content
-    // of a freshly-built MATERIALIZE wrapper -- the constructor
-    // always stores a UOP graph -- so this is unambiguous.)
-    if (term_tag(inner) == TAG_TEN) return inner;
-    if (term_tag(inner) == TAG_UOP && term_ext(inner) == UOP_KERNEL) return inner;
-    Term result = materialize_expr(inner);
-    heap_set(loc, result);
-    return result;
-  }
-  return materialize_expr(term);
+  // Heap-walk materializer: scans reachable cells (through LAM / APP /
+  // REF / ALO / UOP etc.), propagates shapes through APP-LAM, and in-
+  // place rewrites UOP cells to UOP_KERNEL cells.  For UOPs that
+  // couldn't be kernelized (e.g. VAR child with no shape binding yet),
+  // the walker leaves them alone and materialize_expr picks up the
+  // slack on whatever's still reachable at the root afterwards.
+  if (term_tag(term) == TAG_TEN) return term;
+  if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_KERNEL) return term;
+  Term walked = materialize_walk(term);
+  if (term_tag(walked) == TAG_TEN) return walked;
+  if (term_tag(walked) == TAG_UOP && term_ext(walked) == UOP_KERNEL) return walked;
+  return materialize_expr(walked);
 }
