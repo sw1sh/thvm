@@ -70,11 +70,16 @@ concern that interact_grad currently doesn't cover for any of these):
       (e.g. via `MUL[x, max(0, sign(x))]` if no UOP_MAX0; otherwise
       a CMPLT-based mask).  Wire into `$elementwiseDispatch`.  Test
       against `NetApply[ElementwiseLayer[Ramp]]` on a small input.
-- [ ] `ElementwiseLayer[Tanh]`.  Either build via existing UOPs
+- [x] `ElementwiseLayer[Tanh]`.  Either build via existing UOPs
       (`tanh(x) = (e^2x - 1)/(e^2x + 1)` using EXP2 = exp2 with the
       `log2(e)` rescale) or add a `UOP_TANH` primitive.  Pick one and
       document the choice as a `<!-- design-question -->` HTML
       comment under this item.
+      <!-- Chosen: build via existing EXP2/MUL/ADD/RECIP UOPs.  No
+      C-side primitive needed; loses precision for |x| > ~10 due to
+      exp overflow but that's accepted (hidden activations rarely sit
+      there). -->
+
 - [ ] `ReshapeLayer` forward.  Maps to `TUOpReshape`.  Test against
       `NetApply[ReshapeLayer[shape]]`.
 - [ ] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or

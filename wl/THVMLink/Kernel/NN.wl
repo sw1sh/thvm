@@ -31,6 +31,7 @@
      TL2Loss[x]                  -- sum(x*x)
      TMSELoss[pred, target]      -- sum((pred - target)^2)
      TReLU[x]                    -- elementwise max(x, 0)
+     TTanh[x]                    -- elementwise tanh, via EXP2
 *)
 
 BeginPackage["THVMLink`"];
@@ -46,6 +47,7 @@ TMatVec::usage          = "TMatVec[W, x] computes W @ x where W has shape {out, 
 TL2Loss::usage          = "TL2Loss[x] = TSum[TSquare[x]].";
 TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
 TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
+TTanh::usage            = "TTanh[x] = elementwise tanh, implemented as (u - 1)/(u + 1) where u = exp(2x) = EXP2(x * 2 * log2 e).  Uses only existing UOPs (no UOP_TANH primitive).  Loses precision for |x| > ~10 due to exp overflow; that's accepted for now since hidden activations rarely sit there.";
 
 Begin["`Private`"];
 
@@ -57,6 +59,21 @@ TDot[a_TTerm, b_TTerm]          := TSum[TUOpMul[a, b]]
 TL2Loss[x_TTerm]                := TSum[TSquare[x]]
 TMSELoss[pred_TTerm, tgt_TTerm] := TL2Loss[TUOpAdd[pred, TUOpNeg[tgt]]]
 TReLU[x_TTerm]                  := TUOpMul[x, TUOpCmplt[TUOpConst[0.0, "f32"], x]]
+
+(* tanh(x) = (e^(2x) - 1) / (e^(2x) + 1).
+   We have EXP2 (= 2^x) but not exp (= e^x).
+   exp(y) = 2^(y * log2 e), so e^(2x) = EXP2(x * 2 * log2 e). *)
+TTanh[x_TTerm] := With[{
+    twoLog2E = TUOpConst[N[2 * Log2[E]], "f32"],
+    one      = TUOpConst[1.0, "f32"]
+},
+    With[{u = TUOpExp2[TUOpMul[x, twoLog2E]]},
+        TUOpMul[
+            TUOpAdd[u, TUOpNeg[one]],
+            TUOpRecip[TUOpAdd[u, one]]
+        ]
+    ]
+]
 
 TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
     Module[{out, in, xb},
@@ -111,7 +128,8 @@ $elementwiseDispatch = <|
     Identity       -> TIdentity,
     (#1 #1 &)      -> TSquare,
     (-#1 &)        -> TUOpNeg,
-    Ramp           -> TReLU
+    Ramp           -> TReLU,
+    Tanh           -> TTanh
 |>;
 
 fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op},

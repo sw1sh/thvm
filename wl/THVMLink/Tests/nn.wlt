@@ -283,3 +283,29 @@ VerificationTest[
     {0.0, 0.0, 0.0, 1.5, 3.0},
     TestID -> "nn/relu-via-ElementwiseLayer-Ramp"
 ]
+
+(* === Tanh forward (TTanh helper + ElementwiseLayer[Tanh] dispatch) ===
+   Reference values from Mathematica:
+     tanh(-2) = -0.9640275801
+     tanh(-1) = -0.7615941560
+     tanh(0)  =  0.0
+     tanh(1)  =  0.7615941560
+     tanh(2)  =  0.9640275801
+   The exp-via-EXP2 chain loses some f32 precision; tolerate ~1e-4. *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{-2.0, -1.0, 0.0, 1.0, 2.0}, "Real32"];
+    Round[Normal @ TTensorData @ TRealize @ TTanh[x], 0.0001],
+    Round[{-0.9640275801, -0.7615941560, 0.0, 0.7615941560, 0.9640275801}, 0.0001],
+    TestID -> "nn/tanh-forward-helper"
+]
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{-1.0, 0.0, 1.0}, "Real32"];
+    Round[Normal @ TTensorData @ TRealize @
+        TFromNet[ElementwiseLayer[Tanh], x], 0.0001],
+    Round[{-0.7615941560, 0.0, 0.7615941560}, 0.0001],
+    TestID -> "nn/tanh-via-ElementwiseLayer-Tanh"
+]
