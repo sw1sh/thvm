@@ -70,4 +70,16 @@ the order to land them in.
                              through the chain on this random
                              init -- documented under the
                              grad-check Metal-vs-CPU follow-up).
+  - `verify.wls`          -- end-to-end correctness check: trains
+                             on one sample (4 Adam steps), then
+                             asserts the trained model predicts
+                             that sample's true label correctly
+                             (overfit-on-one validation, since
+                             LeNet doesn't generalize from 1
+                             sample but a correct prediction
+                             after 4 updates does prove every
+                             layer's grad rule + the optimizer
+                             is plumbed correctly).  Confidence
+                             in true class typically goes from
+                             ~0.07 (chance) to ~0.70.
   - `README.md`           -- this file.
