@@ -55,8 +55,42 @@ Each layer is its own `[ ]` item. Each must come with a numeric test in
 `nn.wlt` checked against a hand-computed reference (or against
 `NetTrain` for a single forward pass).
 
-- [ ] audit existing NN.wl; list missing layers in this section as
-      `[ ]` sub-items.
+Audit summary (HEAD: 62a1b3f).  NN.wl has:
+  - `LinearLayer` forward (works; no grad through the EXPAND).
+  - `ElementwiseLayer` dispatch on `Identity`, `(#1 #1 &)` (square),
+    `(-#1 &)` (neg) only.
+  - `ConvolutionLayer` is a stub that emits `$Failed`.
+  - `NetChain` Fold-fold; no `NetGraph` support.
+  - `TSum / TSquare / TDot / TMatVec / TL2Loss / TMSELoss` helpers.
+
+Missing for LeNet (forward-only; backprop grad rules are a Phase-2.5
+concern that interact_grad currently doesn't cover for any of these):
+
+- [ ] `ElementwiseLayer[Ramp]` -> ReLU.  Add a `TReLU[x]` helper
+      (e.g. via `MUL[x, max(0, sign(x))]` if no UOP_MAX0; otherwise
+      a CMPLT-based mask).  Wire into `$elementwiseDispatch`.  Test
+      against `NetApply[ElementwiseLayer[Ramp]]` on a small input.
+- [ ] `ElementwiseLayer[Tanh]`.  Either build via existing UOPs
+      (`tanh(x) = (e^2x - 1)/(e^2x + 1)` using EXP2 = exp2 with the
+      `log2(e)` rescale) or add a `UOP_TANH` primitive.  Pick one and
+      document the choice as a `<!-- design-question -->` HTML
+      comment under this item.
+- [ ] `ReshapeLayer` forward.  Maps to `TUOpReshape`.  Test against
+      `NetApply[ReshapeLayer[shape]]`.
+- [ ] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or
+      rank-2 with explicit batch axis).
+- [ ] `PoolingLayer[..., "Function" -> Max]` 2-D forward.  Needs
+      `UOP_REDUCE` with `kind = MAX`; check whether REDUCE_MAX is
+      already supported by the C interpreter (look at
+      `src/schedule/materialize.c` op_arg packing).  Plus the 2-D
+      windowing pattern (im2col-ish via movement ops).
+- [ ] `SoftmaxLayer` forward.  `softmax(x)_i = exp(x_i) / sum(exp(x))`.
+      EXP via `2^(log2(e) * x)` = TUOpExp2 chain.  Test against
+      `NetApply[SoftmaxLayer[]]` on a small vector.
+- [ ] `CrossEntropyLossLayer` forward.  Needs LOG (we have LOG2,
+      same trick as EXP).  Test forward only (no grad path yet).
+- [ ] `ConvolutionLayer` 2-D forward.  Replace the current stub.
+      Likely big -- decompose when picked up.
 
 ## Phase 3 — NetModel → TTerm converter
 
