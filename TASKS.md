@@ -2915,7 +2915,7 @@ Realistic close-out for the overnight cron loop:
           regressions. -->
 
 
-    - [ ] **f3e: PERMUTE view-only**.  Same approach: in
+    - [x] **f3e: PERMUTE view-only**.  Same approach: in
           materialize_in_env.c, allocate a view-aliased
           TenDesc with strides reordered per the perm
           argument; shape inherits the permuted shape from
@@ -2923,6 +2923,27 @@ Realistic close-out for the overnight cron loop:
           (already non-contig + a permute that would require
           re-layout) fall through to the kernel-emission
           path.  Re-run all tests.  ~50 LOC + ~30 LOC test.
+          <!-- Landed.  src/schedule/materialize_in_env.c
+          new "2e. View-only PERMUTE" block (placed above
+          2d SHRINK): aliases via tensor_view_of with
+          dims[i] = src.dims[perm[i]] and
+          strides[i] = src.strides[perm[i]], offset
+          unchanged.  Validates perm is a complete
+          permutation (no duplicates, all in range).
+          Marks contiguous=1 only when perm is identity
+          (rare); otherwise non-contig so consumers route
+          through cpu_interpret's pre-materialize.
+
+          tests/test_view_permute.c (32 sub-checks): 2x3
+          source transposed via {1,0}; verifies shape,
+          strides, offset, contig=0 for non-identity,
+          contig=1 for identity perm, producer_kid
+          inheritance, root-aliased contig copy gives
+          correct transpose [1,4,2,5,3,6], strided ADD
+          consumer.
+
+          202 C + 246 WL tests green. -->
+
 
     - [ ] **f3f: PAD view-only**.  PAD is trickier than
           SHRINK because added bytes need a fill value (zero

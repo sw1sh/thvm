@@ -157,6 +157,44 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
       }
     }
 
+    // 2e. View-only PERMUTE (sub-item f3e of the kernel-fusion arc).
+    //     Permuted axis i of the alias maps to source axis perm[i],
+    //     so dims[i] = src.dims[perm[i]] and strides[i] =
+    //     src.strides[perm[i]].  Offset is unchanged.  contiguous=1
+    //     only when perm is identity (rare; most permutes scramble
+    //     strides and break row-major ordering).
+    if (op == UOP_PERMUTE
+        && arity == 1 && child_tids[0] != 0
+        && TENS[child_tids[0]].view.contiguous) {
+      TenDesc *src = &TENS[child_tids[0]];
+      Shape src_shape = src->view.shape;
+      Shape t_shape = {0};
+      t_shape.ndim = src_shape.ndim;
+      View nv = {0};
+      nv.numel  = src->view.numel;
+      nv.offset = src->view.offset;
+      u8 identity = 1;
+      u8 ok = 1;
+      u8 used[MAX_DIM] = {0};
+      for (u32 i = 0; i < src_shape.ndim; i++) {
+        u32 p = (u32)term_val(heap_read(expr_loc + 1 + i));
+        if (p >= src_shape.ndim || used[p]) { ok = 0; break; }
+        used[p] = 1;
+        t_shape.dims[i] = src_shape.dims[p];
+        nv.strides[i]   = src->view.strides[p];
+        if (p != i) identity = 0;
+      }
+      if (ok) {
+        nv.shape = t_shape;
+        for (u32 i = src_shape.ndim; i < MAX_DIM; i++) nv.strides[i] = 0;
+        nv.contiguous = identity ? src->view.contiguous : 0;
+        u32 alias_tid = tensor_view_of(child_tids[0], nv);
+        if (alias_tid != 0) {
+          return term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+        }
+      }
+    }
+
     // 2d. View-only SHRINK (sub-item f3d of the kernel-fusion arc).
     //     Build an aliased TenDesc with shape = (e_i - b_i) per axis,
     //     offset += sum(b_i * src_strides[i]), and strides inherited
