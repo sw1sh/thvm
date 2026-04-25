@@ -124,6 +124,21 @@ fn Term interact_grad(Term grad_term) {
       return uop_grad(a, n_gy, target);
     }
 
+    case UOP_RECIP: {
+      // d(1/a)/dx = -1/a^2 * da/dx, so:
+      //   GRAD[RECIP(a), gy, t] = GRAD[a, gy * -(1/a)^2, t]
+      // Allocate independent RECIP nodes so the diagram has no
+      // shared references.
+      Term a      = heap_read(y_loc + 0);
+      Term ra1    = uop_unary(UOP_RECIP, a);
+      Term ra2    = uop_unary(UOP_RECIP, a);
+      Term sq     = uop_binary(UOP_MUL, ra1, ra2);
+      Term nsq    = uop_unary(UOP_NEG, sq);
+      Term lifted = expand_to_target(gy, target);
+      Term gy_a   = uop_binary(UOP_MUL, lifted, nsq);
+      return uop_grad(a, gy_a, target);
+    }
+
     case UOP_REDUCE: {
       // SUM only: gradient broadcasts the cotangent back to the
       // input shape.  REDUCE_MAX needs a one-hot indicator; step 14.

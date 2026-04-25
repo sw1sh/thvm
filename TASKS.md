@@ -559,13 +559,20 @@ Realistic close-out for the overnight cron loop:
       scalar-tensor to {3} with ones cotangent yields {3.0};
       EXPAND-of-CONST yields zero). -->
 
-- [ ] **Grad rule: UOP_RECIP** in `interact_grad` per
+- [x] **Grad rule: UOP_RECIP** in `interact_grad` per
       `docs/grad-roadmap.md` step 5.  `d(1/x)/dx = -1/x^2`, so
       rule is `GRAD[RECIP(a), gy, t] = GRAD[a, MUL[gy,
       NEG[MUL[RECIP(a), RECIP(a)]]], t]`.  ~15 LOC + one
       structural test in `tests/test_grad.c` and one numerical
       test in `wl/THVMLink/Tests/grad.wlt` (e.g. `1/x` at
       x={2,4} should yield grad = -1/x^2 = {-0.25, -0.0625}).
+      <!-- Allocates two independent RECIP(a) nodes for the
+      x*x term so the diagram has no shared references (mirrors
+      the per-branch lift convention used by the MUL rule).
+      Tests: structural (recip cascades to leaf-EXPAND wrapping
+      MUL); numerical for 1/{2,4,5} = {-0.25, -0.0625, -0.04}
+      with 1e-5 tolerance. -->
+
 
 - [ ] **Grad rule: UOP_EXP2** in `interact_grad` per
       `docs/grad-roadmap.md` step 4.  `d(2^x)/dx = 2^x * ln(2)`,

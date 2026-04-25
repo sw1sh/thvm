@@ -168,6 +168,19 @@ VerificationTest[
     TestID -> "grad/expand-of-const-short-circuits"
 ]
 
+(* === RECIP: d(1/x)/dx = -1/x^2 === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0, 4.0, 5.0}, "Real32"];
+    (* d(1/a)/da = -1/a^2 = {-0.25, -0.0625, -0.04} *)
+    g = TRealize @ TGrad[TUOpRecip[a], a];
+    Normal @ TTensorData[g],
+    {-0.25, -0.0625, -0.04},
+    SameTest -> (Max[Abs[#1 - #2]] < 1.0*^-5 &),
+    TestID -> "grad/recip-derivative"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

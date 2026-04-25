@@ -123,6 +123,16 @@ int main(void) {
   CHECK_EQ(term_ext(g_r), UOP_EXPAND);
   CHECK_EQ(unexpand(g_r), gy);
 
+  TEST_BEGIN("grad/recip-emits-mul-neg-recip-squared");
+  // GRAD[RECIP(a), gy, a] -> GRAD[a, gy * -(1/a)*(1/a), a].
+  // After one fire, the chain rule produces a MUL[gy, NEG[MUL[RECIP,RECIP]]]
+  // wrapped in the GRAD on a; that GRAD then cascades to leaf-EXPAND.
+  Term ra     = uop_unary(UOP_RECIP, a);
+  Term g_rec  = wnf(uop_grad(ra, gy, a));
+  // After the recip rule + leaf cascade: EXPAND wrapping a MUL chain.
+  CHECK_EQ(term_ext(g_rec), UOP_EXPAND);
+  CHECK_EQ(term_ext(unexpand(g_rec)), UOP_MUL);
+
   TEST_BEGIN("grad/expand-of-const-is-zero");
   // EXPAND of a CONST short-circuits: constants have no gradient
   // wrt anything.  Output is target-shaped grad_zero.
