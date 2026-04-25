@@ -21,6 +21,7 @@ TTermTag::usage   = "TTermTag[term] returns the tag (Integer).  Accepts either a
 TTermExt::usage   = "TTermExt[term] returns the EXT field.";
 TTermVal::usage   = "TTermVal[term] returns the VAL field (heap loc, etc.).";
 TTermSub::usage   = "TTermSub[term] returns the SUB flag (0 or 1).";
+TTermUnpin::usage = "TTermUnpin[term] drops `term` from the WL-pinned-Terms GC root set.  Call when a TTerm wrapper is no longer reachable on the WL side so the pin table doesn't grow unboundedly.";
 TTagName::usage   = "TTagName[tag] returns a string for a tag id.";
 
 (* === heap === *)
@@ -201,6 +202,7 @@ $termTagFn   := $termTagFn   = load["thvm_wl_term_tag",   {Integer},            
 $termExtFn   := $termExtFn   = load["thvm_wl_term_ext",   {Integer},                Integer];
 $termValFn   := $termValFn   = load["thvm_wl_term_val",   {Integer},                Integer];
 $termSubFn   := $termSubFn   = load["thvm_wl_term_sub",   {Integer},                Integer];
+$termUnpinFn := $termUnpinFn = load["thvm_wl_term_unpin", {Integer},                Integer];
 
 $heapPosFn   := $heapPosFn   = load["thvm_wl_heap_pos",   {},                       Integer];
 $heapAllocFn := $heapAllocFn = load["thvm_wl_heap_alloc", {Integer},                Integer];
@@ -307,6 +309,7 @@ TTermTag[t_]                    := $termTagFn[ttermRaw[t]]
 TTermExt[t_]                    := $termExtFn[ttermRaw[t]]
 TTermVal[t_]                    := $termValFn[ttermRaw[t]]
 TTermSub[t_]                    := $termSubFn[ttermRaw[t]]
+TTermUnpin[t_]                  := (ensureInit[]; $termUnpinFn[ttermRaw[t]])
 
 (* TTerm methods: TTerm[id]["tag"], etc. *)
 TTerm[id_Integer]["raw"]        := id

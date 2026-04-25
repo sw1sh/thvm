@@ -84,7 +84,21 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new(WolframLibraryData libData, mint argc,
   u8  tag = (u8) MArgument_getInteger(args[1]);
   u32 ext = (u32)MArgument_getInteger(args[2]);
   u64 val = (u64)MArgument_getInteger(args[3]);
-  MArgument_setInteger(res, (mint)term_new(sub, tag, ext, val));
+  Term t = term_new(sub, tag, ext, val);
+  wl_pin_term(t);   // wpt2: track WL ownership for the GC root set
+  MArgument_setInteger(res, (mint)t);
+  return LIBRARY_NO_ERROR;
+}
+
+// wpt2: drop a Term's pin from the WL_PINNED_TERMS table.  Called by
+// the WL side when a TTerm wrapper is garbage-collected so the pin
+// table doesn't grow unboundedly.
+EXTERN_C DLLEXPORT int thvm_wl_term_unpin(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  wl_unpin_term(t);
+  MArgument_setInteger(res, 1);
   return LIBRARY_NO_ERROR;
 }
 
@@ -159,7 +173,9 @@ EXTERN_C DLLEXPORT int thvm_wl_wnf(WolframLibraryData libData, mint argc,
                                    MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   Term t = (Term)MArgument_getInteger(args[0]);
-  MArgument_setInteger(res, (mint)wnf(t));
+  Term r = wnf(t);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -169,7 +185,9 @@ EXTERN_C DLLEXPORT int thvm_wl_wnf_n(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   Term t          = (Term)MArgument_getInteger(args[0]);
   u64  max_steps  = (u64) MArgument_getInteger(args[1]);
-  MArgument_setInteger(res, (mint)wnf_n(t, max_steps));
+  Term r = wnf_n(t, max_steps);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -238,6 +256,7 @@ EXTERN_C DLLEXPORT int thvm_wl_interact(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   Term redex = (Term)MArgument_getInteger(args[0]);
   Term r = redex_fire(redex);
+  wl_pin_term(r);
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
@@ -263,6 +282,7 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_alloc(WolframLibraryData libData, mint arg
   // Return the full TAG_TEN term (packed), so WL-side TTerm wrappers
   // can inspect tag/ext/val uniformly with other terms.
   Term t = term_new(0, TAG_TEN, (u32)dtype, id);
+  wl_pin_term(t);
   MArgument_setInteger(res, (mint)t);
   return LIBRARY_NO_ERROR;
 }
@@ -377,6 +397,7 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
   }
 
   Term term = term_new(0, TAG_TEN, dtype, id);
+  wl_pin_term(term);
   MArgument_setInteger(res, (mint)term);
   return LIBRARY_NO_ERROR;
 }
@@ -419,7 +440,9 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_const(WolframLibraryData libData, mint argc,
   } else {
     bits = (u32)(i32)value;
   }
-  MArgument_setInteger(res, (mint)uop_const((u32)dtype, bits));
+  Term r = uop_const((u32)dtype, bits);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -428,7 +451,9 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_unary(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   mint op  = MArgument_getInteger(args[0]);
   Term src = (Term)MArgument_getInteger(args[1]);
-  MArgument_setInteger(res, (mint)uop_unary((u32)op, src));
+  Term r = uop_unary((u32)op, src);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -436,7 +461,9 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_load(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   Term src = (Term)MArgument_getInteger(args[0]);
-  MArgument_setInteger(res, (mint)uop_load(src));
+  Term r = uop_load(src);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -446,7 +473,9 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_binary(WolframLibraryData libData, mint argc,
   mint op = MArgument_getInteger(args[0]);
   Term a  = (Term)MArgument_getInteger(args[1]);
   Term b  = (Term)MArgument_getInteger(args[2]);
-  MArgument_setInteger(res, (mint)uop_binary((u32)op, a, b));
+  Term r = uop_binary((u32)op, a, b);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -456,7 +485,9 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_reduce(WolframLibraryData libData, mint argc,
   mint kind = MArgument_getInteger(args[0]);
   mint axis = MArgument_getInteger(args[1]);
   Term src  = (Term)MArgument_getInteger(args[2]);
-  MArgument_setInteger(res, (mint)uop_reduce((u32)kind, (u32)axis, src));
+  Term r = uop_reduce((u32)kind, (u32)axis, src);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -473,7 +504,9 @@ static int movement_op_shared(WolframLibraryData libData, MArgument *args,
   mint    *raw  = libData->MTensor_getIntegerData(dims);
   u32      buf[2 * MAX_DIM];
   for (mint i = 0; i < n && i < (mint)(2 * MAX_DIM); i++) buf[i] = (u32)raw[i];
-  MArgument_setInteger(res, (mint)ctor(src, (u32)n, buf));
+  Term r = ctor(src, (u32)n, buf);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -504,7 +537,9 @@ static int pad_shrink_shared(WolframLibraryData libData, MArgument *args,
   mint    *raw = libData->MTensor_getIntegerData(be);
   u32      buf[2 * MAX_DIM];
   for (mint i = 0; i < n && i < (mint)(2 * MAX_DIM); i++) buf[i] = (u32)raw[i];
-  MArgument_setInteger(res, (mint)ctor(src, (u32)(n / 2), buf));
+  Term r = ctor(src, (u32)(n / 2), buf);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -525,7 +560,9 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_flip(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   Term src  = (Term)MArgument_getInteger(args[0]);
   mint mask = MArgument_getInteger(args[1]);
-  MArgument_setInteger(res, (mint)uop_flip(src, (u32)mask));
+  Term r = uop_flip(src, (u32)mask);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -535,7 +572,9 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_grad(WolframLibraryData libData, mint argc,
   Term y      = (Term)MArgument_getInteger(args[0]);
   Term gy     = (Term)MArgument_getInteger(args[1]);
   Term target = (Term)MArgument_getInteger(args[2]);
-  MArgument_setInteger(res, (mint)uop_grad(y, gy, target));
+  Term r = uop_grad(y, gy, target);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -546,7 +585,9 @@ EXTERN_C DLLEXPORT int thvm_wl_materialize(WolframLibraryData libData, mint argc
                                            MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   Term t = (Term)MArgument_getInteger(args[0]);
-  MArgument_setInteger(res, (mint)thvm_materialize(t));
+  Term r = thvm_materialize(t);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -554,7 +595,9 @@ EXTERN_C DLLEXPORT int thvm_wl_realize(WolframLibraryData libData, mint argc,
                                        MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   Term t = (Term)MArgument_getInteger(args[0]);
-  MArgument_setInteger(res, (mint)thvm_realize(t));
+  Term r = thvm_realize(t);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -769,7 +812,9 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ref(WolframLibraryData libData, mint arg
                                             MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   u32 name = (u32)MArgument_getInteger(args[0]);
-  MArgument_setInteger(res, (mint)term_new_ref(name));
+  Term r = term_new_ref(name);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -779,7 +824,9 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_op2(WolframLibraryData libData, mint arg
   u32  op = (u32) MArgument_getInteger(args[0]);
   Term x  = (Term)MArgument_getInteger(args[1]);
   Term y  = (Term)MArgument_getInteger(args[2]);
-  MArgument_setInteger(res, (mint)term_new_op2(op, x, y));
+  Term r = term_new_op2(op, x, y);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 
@@ -789,7 +836,9 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_mat(WolframLibraryData libData, mint arg
   u32  m = (u32) MArgument_getInteger(args[0]);
   Term h = (Term)MArgument_getInteger(args[1]);
   Term f = (Term)MArgument_getInteger(args[2]);
-  MArgument_setInteger(res, (mint)term_new_mat(m, h, f));
+  Term r = term_new_mat(m, h, f);
+  wl_pin_term(r);
+  MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
 

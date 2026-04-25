@@ -4137,7 +4137,7 @@ sub-items once these land.
         wired).  wpt2 wires the WL bridge sites. -->
 
 
-  - [ ] **wpt2: WL bridge wiring**.  Modify
+  - [x] **wpt2: WL bridge wiring**.  Modify
         wl/THVMLink/CSource/thvmlink.c to call
         wl_pin_term on every Term that crosses into WL via
         thvm_wl_term_new / thvm_wl_realize / thvm_wl_wnf /
@@ -4150,6 +4150,16 @@ sub-items once these land.
         everything ever exported and rely on TFree / TInit
         to clear (matches the current memory-probe lifecycle).
         ~50 LOC + WL surface for TTermUnpin.
+        <!-- DONE: wired wl_pin_term into 19 Term-producing
+             bridge sites (thvm_wl_term_new, _wnf, _wnf_n,
+             _interact, _materialize, _realize, _term_new_ref,
+             _term_new_op2, _term_new_mat, _tensor_alloc,
+             _tensor_from_na, _uop_const, _uop_unary, _uop_load,
+             _uop_binary, _uop_reduce, movement_op_shared,
+             pad_shrink_shared, _uop_flip, _uop_grad).  Added
+             thvm_wl_term_unpin EXTERN_C + TTermUnpin WL surface.
+             Tests: 166 C + 270 WL green. -->
+
 
   - [ ] **wpt3: integrate into gc_collect_roots + flip the
         heap-rooted overlay off**.  In src/schedule/gc_roots.c,
