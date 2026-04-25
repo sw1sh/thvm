@@ -602,3 +602,31 @@ Realistic close-out for the overnight cron loop:
       end-to-end.  Next milestones per the roadmap: REDUCE_MAX
       and CONV2D. -->
 
+- [ ] **MLP-on-MNIST training validation milestone**: build a
+      tiny 2-layer fully-connected MNIST classifier (Linear ->
+      ReLU -> Linear -> Softmax + CrossEntropyLoss), apply
+      `TOptim["Adam"]` for a handful of steps, verify the loss
+      actually decreases.  Lives at `wl/Examples/mlp-mnist/
+      train.wls`.  Validates that the 6 grad rules just landed
+      (RESHAPE/EXPAND/CMPLT/EXP2/RECIP/LOG2 + the pre-existing
+      ADD/MUL/NEG/REDUCE_SUM) chain correctly end-to-end on a
+      real network -- the natural sanity check before tackling
+      the heavier REDUCE_MAX + CONV2D rules.
+
+- [ ] **Land grad rule 7: UOP_REDUCE with kind=MAX** in
+      `interact_grad`, per `docs/grad-roadmap.md` step 7.  Needs
+      a new `UOP_CMPEQ` primitive (mirror of `UOP_CMPLT`) for
+      the one-hot argmax mask: `MASK[i] = (a[i] == max)`.
+      Rule: `GRAD[REDUCE_MAX(a, axis), gy, t] = GRAD[a,
+      MUL[gy_lifted, MASK], t]`.  Likely 60-100 LOC across
+      CMPEQ kernel (CPU + Metal) + REDUCE_MAX grad branch +
+      tests; will decompose into per-piece sub-items on next
+      fire.
+
+- [ ] **Land grad rule 8: UOP_CONV2D** in `interact_grad`, per
+      `docs/grad-roadmap.md` step 8.  Three sub-gradients
+      (grad_input via transposed conv, grad_weights via
+      cross-correlation, grad_bias via REDUCE_SUM).  Needs
+      `UOP_FLIP` + `UOP_PAD` kernels (currently opcode-only).
+      Multi-fire arc; will decompose into FLIP kernel, PAD
+      kernel, and the three grad branches.
