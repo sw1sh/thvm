@@ -38,12 +38,17 @@ typedef struct Backend {
   int   (*dispatch_kernel)(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 } Backend;
 
-// Lazy file-scope handles to the system default Metal device and a
-// command queue.  ARC owns the references; metal_shutdown releases
-// by nilling them.  Both stay nil between init/shutdown cycles so
-// repeated thvm_init calls reset cleanly.
+// Lazy file-scope handles to the system default Metal device, a
+// command queue, and the loaded metallib.  ARC owns all three;
+// metal_shutdown releases by nilling them.  All stay nil between
+// init/shutdown cycles so repeated thvm_init calls reset cleanly.
 static id<MTLDevice>       METAL_DEVICE = nil;
 static id<MTLCommandQueue> METAL_QUEUE  = nil;
+static id<MTLLibrary>      METAL_LIB    = nil;
+
+#ifndef THVM_METAL_METALLIB
+#define THVM_METAL_METALLIB "build/default.metallib"
+#endif
 
 static int metal_init(void) {
   METAL_DEVICE = MTLCreateSystemDefaultDevice();
@@ -58,12 +63,28 @@ static int metal_init(void) {
     METAL_DEVICE = nil;
     return -1;
   }
-  fprintf(stderr, "thvm: metal_init -- device: %s\n",
-          [[METAL_DEVICE name] UTF8String]);
+  NSError *err = nil;
+  NSURL    *libURL = [NSURL fileURLWithPath:
+      [NSString stringWithUTF8String:THVM_METAL_METALLIB]];
+  METAL_LIB = [METAL_DEVICE newLibraryWithURL:libURL error:&err];
+  if (METAL_LIB == nil) {
+    fprintf(stderr, "thvm: metal_init -- failed to load metallib at %s: %s\n",
+            THVM_METAL_METALLIB,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    METAL_QUEUE  = nil;
+    METAL_DEVICE = nil;
+    return -1;
+  }
+  fprintf(stderr, "thvm: metal_init -- device: %s; metallib: %s (%lu function%s)\n",
+          [[METAL_DEVICE name] UTF8String],
+          THVM_METAL_METALLIB,
+          (unsigned long)[[METAL_LIB functionNames] count],
+          [[METAL_LIB functionNames] count] == 1 ? "" : "s");
   return 0;
 }
 
 static void metal_shutdown(void) {
+  METAL_LIB    = nil;
   METAL_QUEUE  = nil;
   METAL_DEVICE = nil;
 }

@@ -30,12 +30,19 @@ TESTS := \
 # Tests / dylib that #define THVM_HAS_METAL link this object + the
 # Metal frameworks; src/thvm.c then skips the C-side stub.
 ifeq ($(shell uname -s),Darwin)
-  METAL_OBJ     := $(BUILD)/backend_metal.o
-  METAL_LDFLAGS := -framework Metal -framework Foundation
-  TESTS         += $(BIN)/test_metal_real
+  METAL_OBJ      := $(BUILD)/backend_metal.o
+  METAL_LDFLAGS  := -framework Metal -framework Foundation
+  METAL_LIBPATH  := $(BUILD)/default.metallib
+  METAL_SHADERS  := $(wildcard src/backend/metal/shaders/*.metal)
+  METAL_AIRS     := $(METAL_SHADERS:src/backend/metal/shaders/%.metal=$(BUILD)/%.air)
+  METAL_DEFINES  := -DTHVM_METAL_METALLIB='"$(METAL_LIBPATH)"'
+  TESTS          += $(BIN)/test_metal_real
 else
-  METAL_OBJ     :=
-  METAL_LDFLAGS :=
+  METAL_OBJ      :=
+  METAL_LDFLAGS  :=
+  METAL_LIBPATH  :=
+  METAL_AIRS     :=
+  METAL_DEFINES  :=
 endif
 
 # Every C and header file under src/, plus the test harness header.
@@ -116,11 +123,20 @@ $(BUILD):
 # Metal backend object: compiled from .m with ARC, links Metal +
 # Foundation frameworks at the per-binary link step.
 $(BUILD)/backend_metal.o: src/backend/metal/_.m | $(BUILD)
-	clang -fobjc-arc -O2 -c -o $@ $<
+	clang -fobjc-arc -O2 -c $(METAL_DEFINES) -o $@ $<
+
+# Per-shader compile: .metal -> .air.
+$(BUILD)/%.air: src/backend/metal/shaders/%.metal | $(BUILD)
+	xcrun -sdk macosx metal -c $< -o $@
+
+# Link all .air files into a single default.metallib.
+$(METAL_LIBPATH): $(METAL_AIRS) | $(BUILD)
+	xcrun -sdk macosx metallib $(METAL_AIRS) -o $@
 
 # test_metal_real opts into the dual-TU build: -DTHVM_HAS_METAL
 # tells src/thvm.c to skip the C stub and instead link the .o.
-$(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) | $(BIN)
+# Depends on the metallib so metal_init can find it at runtime.
+$(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)

@@ -340,7 +340,7 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       file-scope handles, nilled in metal_shutdown.  Test cycles
       init/shutdown twice to verify clean re-open. -->
 
-- [ ] **MSL shader compilation pipeline**.  Makefile rule that
+- [x] **MSL shader compilation pipeline**.  Makefile rule that
       runs `xcrun -sdk macosx metal -c src/backend/metal/shaders/
       *.metal -o build/shaders.air` then `xcrun -sdk macosx
       metallib build/shaders.air -o build/default.metallib`.
@@ -350,6 +350,14 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       `[device newLibraryWithFile:...]`.  This unblocks the per-
       kernel items below by giving them a place to drop shader
       sources.
+      <!-- Per-shader .metal->.air via xcrun, all .air linked
+      into build/default.metallib.  Path threaded into _.m via
+      -DTHVM_METAL_METALLIB= at compile time so callers can
+      override.  metal_init now reports loaded function count
+      to stderr ("1 function" with the placeholder).  Switched
+      to newLibraryWithURL:error: per the macOS 13+
+      deprecation. -->
+
 - [ ] **Metal buffer ops**.  `metal_buf_alloc` returns an
       `id<MTLBuffer>` (cast through u32 buf_id); `metal_buf_free`
       releases it.  `metal_buf_write` / `metal_buf_read` blit
