@@ -415,11 +415,21 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       exp2/log2 fast-math path differs from libm in the last
       few ulps). -->
 
-- [ ] **Reduction + movement Metal kernels** (REDUCE_SUM,
-      REDUCE_MAX, EXPAND, RESHAPE) plus the **MUL+REDUCE matmul
-      shape** that LinearLayer hits hot.  Parity tests vs CPU.
-      Once this lands the LeNet forward + Adam training loop
-      runs end-to-end on Metal.
+- [ ] **Reduction Metal kernel** (REDUCE_SUM + REDUCE_MAX).
+      Mirror the recent CPU stride fix: KProgOp.arg packs
+      (kind << 24) | inner; the shader loops over axis_size =
+      in_numel / out_numel, indexing as
+      `outer * (axis_size * inner) + k * inner + inner_idx`.
+      Two parity tests (one per kind) on rank-2 inputs with
+      axis=0 (non-innermost) to exercise the stride path.
+- [ ] **Movement Metal kernels** (EXPAND, RESHAPE).  Both are
+      basically memcpy shapes; EXPAND handles the scalar->N
+      broadcast and the cycle case (`out[tid] = in[tid %
+      in_numel]`); RESHAPE is `out[tid] = in[tid]` with bounds.
+      Per-op parity test.  After this lands the MUL+REDUCE
+      matmul shape that LinearLayer hits hot is automatically
+      covered by the existing MUL + REDUCE kernels chained --
+      no separate matmul kernel needed.
 
 ## Phase 6 — end-to-end
 
