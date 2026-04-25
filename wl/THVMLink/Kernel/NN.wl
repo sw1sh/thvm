@@ -94,6 +94,7 @@ $layerParams[ConvolutionLayer] = {"Weights", "Biases"}
 $layerParams[ElementwiseLayer] = {}
 $layerParams[ReshapeLayer]     = {}
 $layerParams[FlattenLayer]     = {}
+$layerParams[PoolingLayer]     = {}
 $layerParams[_]                = {}
 
 TLayerWeights[layer_] :=
@@ -151,6 +152,46 @@ fromLayer[FlattenLayer, _, x_TTerm] :=
     With[{shape = TTensorShape[x]},
         TUOpReshape[x, {Times @@ shape}]
     ]
+
+(* PoolingLayer non-overlapping (Stride == KernelSize), 2-D Max only.
+   Channels-first input shape {C, H, W} ->
+       reshape {C, H, W} -> {C, H/kh, kh, W/kw, kw}
+       REDUCE axis 2 (kh) -> {C, H/kh, W/kw, kw}
+       REDUCE axis 3 (kw, now innermost) -> {C, H/kh, W/kw}
+   Refuses overlapping pooling, non-Max functions, or non-rank-3
+   inputs with a Failure -- those need PERMUTE / multi-axis grad
+   support not yet present. *)
+fromLayer[PoolingLayer, layer_, x_TTerm] := Module[{
+    kSize, stride, fn, shape, c, h, w, kh, kw
+},
+    fn     = NetExtract[layer, "Function"];
+    kSize  = NetExtract[layer, "KernelSize"];
+    stride = NetExtract[layer, "Stride"];
+    If[ fn =!= Max,
+        Return @ Failure["NotImplemented",
+            <|"Message" -> "PoolingLayer Function != Max not yet supported",
+              "fn" -> fn|>]];
+    If[ kSize =!= stride,
+        Return @ Failure["NotImplemented",
+            <|"Message" -> "PoolingLayer overlapping (Stride != KernelSize) not yet supported",
+              "KernelSize" -> kSize, "Stride" -> stride|>]];
+    shape = TTensorShape[x];
+    If[ Length[shape] =!= 3,
+        Return @ Failure["NotImplemented",
+            <|"Message" -> "PoolingLayer expects rank-3 channels-first input {C, H, W}",
+              "InputShape" -> shape|>]];
+    {c, h, w} = shape;
+    {kh, kw}  = kSize;
+    If[ Mod[h, kh] =!= 0 || Mod[w, kw] =!= 0,
+        Return @ Failure["NotImplemented",
+            <|"Message" -> "PoolingLayer non-overlap requires H, W divisible by kernel",
+              "InputShape" -> shape, "KernelSize" -> kSize|>]];
+    TUOpReduce[
+        TUOpReduce[
+            TUOpReshape[x, {c, h/kh, kh, w/kw, kw}],
+            2, "MAX"],
+        3, "MAX"]
+]
 
 fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op},
     f  = NetExtract[layer, "Function"];

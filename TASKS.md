@@ -122,7 +122,7 @@ concern that interact_grad currently doesn't cover for any of these):
       Regression in wl/THVMLink/Tests/reduce.wlt covers axis=0
       sum/max on rank-2 + axis=1 sum on rank-3 (the case that
       bit pooling). -->
-- [ ] `PoolingLayer[k, k, "Function" -> Max]` 2-D forward, NON-
+- [x] `PoolingLayer[k, k, "Function" -> Max]` 2-D forward, NON-
       overlapping case only (Stride = KernelSize).  DEPENDS ON the
       REDUCE-axis fix above.  Channels-first input shape {C, H, W}
       -> reshape to {C, H/k, k, W/k, k} -> two REDUCE_MAX (axis 2

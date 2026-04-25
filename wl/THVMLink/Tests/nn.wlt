@@ -349,3 +349,41 @@ VerificationTest[
     {{4}, {1.0, 2.0, 3.0, 4.0}},
     TestID -> "nn/flatten-layer-1d-passthrough"
 ]
+
+(* === PoolingLayer Max non-overlap (Stride == KernelSize) === *)
+
+VerificationTest[
+    TInit[];
+    data = ArrayReshape[Range[16] * 1.0, {1, 4, 4}];
+    x = TTensorCreate @ NumericArray[data, "Real32"];
+    r = TRealize @ TFromNet[
+        PoolingLayer[{2, 2}, "Stride" -> {2, 2}, "Function" -> Max], x];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{1, 2, 2}, {{{6.0, 8.0}, {14.0, 16.0}}}},
+    TestID -> "nn/pool-max-2x2-non-overlap-1ch"
+]
+
+VerificationTest[
+    TInit[];
+    (* 2 channels, 2x4 input.  2x2 pool with 2x2 stride -> 1x2 output. *)
+    data = {{{1.0, 2.0, 3.0, 4.0}, {5.0, 6.0, 7.0, 8.0}},
+            {{9.0, 10.0, 11.0, 12.0}, {13.0, 14.0, 15.0, 16.0}}};
+    x = TTensorCreate @ NumericArray[data, "Real32"];
+    r = TRealize @ TFromNet[
+        PoolingLayer[{2, 2}, "Stride" -> {2, 2}, "Function" -> Max], x];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    (* ch0: max{1,2,5,6}=6, max{3,4,7,8}=8 -> {{6, 8}}
+       ch1: max{9,10,13,14}=14, max{11,12,15,16}=16 -> {{14, 16}} *)
+    {{2, 1, 2}, {{{6.0, 8.0}}, {{14.0, 16.0}}}},
+    TestID -> "nn/pool-max-2x2-non-overlap-multichannel"
+]
+
+(* Refusal cases -- documented surface so callers see the gap clearly. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{{{1.0, 2.0}, {3.0, 4.0}}}, "Real32"];
+    Head @ TFromNet[
+        PoolingLayer[{2, 2}, "Stride" -> {1, 1}, "Function" -> Max], x],
+    Failure,
+    TestID -> "nn/pool-overlapping-returns-Failure"
+]
