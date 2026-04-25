@@ -626,6 +626,47 @@ Realistic close-out for the overnight cron loop:
       that `TRealize` produces finite, correctly-shaped
       gradients (no NaN, no shape mismatch).  Pure structural
       sanity; no parameter updates.
+      <!-- attempt 1: blocked on rank-changing EXPAND.
+      grad chain materializes for rank-1 targets (b1, b2 grad
+      shapes match) but rank-2 targets (W1, W2) silently
+      collapse to a wrong shape (e.g. W2={10,32} -> grad
+      shape={10}) and W1 grad crashes with SIGBUS.  Root cause:
+      interact_grad's expand_to_target calls uop_expand to lift
+      gy to target's rank, but the materializer's
+      expand_output_shape reads ndim from the source tensor
+      (which has lower rank), losing the extra axes.  Fix
+      requires either (a) storing EXPAND's ndim explicitly in
+      the heap rather than inferring from source, or
+      (b) prepending a RESHAPE in expand_to_target when source
+      rank < target rank to add size-1 leading axes -- but (b)
+      needs a C-side shape walker for arbitrary UOP gy chains
+      (term_shape_in only handles TEN/UOP_KERNEL).  Both fixes
+      are bounded but exceed one fire's LOC budget.  Queueing
+      the fix as the next item below. -->
+
+- [ ] **Fix rank-changing EXPAND in expand_to_target**: when
+      `expand_to_target(src, target)` is called and src's rank
+      is less than target's, the resulting `uop_expand` is
+      interpreted at materialize time using src's rank (per
+      `expand_output_shape` in `src/schedule/materialize.c`),
+      losing target's extra axes and silently producing a
+      wrong-shape grad.  Two viable fixes:
+        (a) Store EXPAND's ndim explicitly: change the
+            `uop_expand` constructor to write an extra NUM
+            cell at slot 0 with ndim, update materializer to
+            read from it.  Touches every UOP_EXPAND call
+            site; biggest blast radius but cleanest semantics.
+        (b) Make expand_to_target rank-aware: if src is a
+            CONST/NUM/TAG_TEN (cases where we can determine
+            its shape), prepend a `uop_reshape` to insert
+            leading size-1 axes so src and target match rank
+            before the expand fires.  Smaller diff; doesn't
+            help arbitrary UOP gy chains, but ChainSums
+            through MUL/ADD propagate the lifted shape so it
+            covers the dominant case.
+      Recommended (b) first -- it's ~30 LOC + tests and
+      unblocks rank-2 grad-check; (a) is the longer-term
+      structural fix for arbitrary-rank EXPAND.
 
 - [ ] **MLP-on-MNIST training loop**: with forward + grads
       validated, do K manual SGD steps in pure WL (compute
