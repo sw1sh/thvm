@@ -82,5 +82,6 @@ the order to land them in.
                              layer's grad rule + the optimizer
                              is plumbed correctly).  Confidence
                              in true class typically goes from
-                             ~0.07 (chance) to ~0.70.
+                             ~0.07 (chance) to ~1.0 (lr 0.05;
+                             see verify.wls comment).
   - `README.md`           -- this file.

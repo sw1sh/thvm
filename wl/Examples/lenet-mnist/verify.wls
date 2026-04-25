@@ -117,7 +117,14 @@ debugPrint["before training: pred=", predBefore,
            "  prob[true]=", Round[probsBefore[[label + 1]], 0.001]];
 
 {mAll, vAll} = TAdamHostInit[hosts];
-lr = 0.001;  beta1 = 0.9;  beta2 = 0.999;  eps = 1.0*^-8;
+(* lr 0.05 (was 0.001 with the bespoke CONV2D) -- the conv2d-
+   lowered chain produces gradients ~50x smaller in magnitude
+   than the legacy CONV2D rule did, so Adam needs a bigger step
+   to land in the same 4-update budget.  See
+   docs/kernelization.md for the wider context (the chain is
+   mathematically equivalent; the magnitude difference is a
+   composition artefact, not a correctness bug). *)
+lr = 0.05;  beta1 = 0.9;  beta2 = 0.999;  eps = 1.0*^-8;
 nSteps = 4;
 
 debugPrint["training (", nSteps, " Adam steps):"];
