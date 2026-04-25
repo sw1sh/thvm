@@ -2236,7 +2236,7 @@ Realistic close-out for the overnight cron loop:
           219 WL tests green. -->
 
 
-    - [ ] **f1b. Wire materialize_in_env to splice
+    - [blocked: see attempt-3 diagnostic] **f1b. Wire materialize_in_env to splice
           elementwise children**.  When emitting a kernel in
           materialize_in_env, for each child term that
           resolves to a UOP_KERNEL marked inlineable, call
@@ -2276,6 +2276,32 @@ Realistic close-out for the overnight cron loop:
           after f3 (ShapeTracker) which removes most shared-
           subexpression risk by making movement ops
           view-only.  Reverted; f1b stays [ ] for now. -->
+          <!-- attempt 2: re-enabled with conservative
+          unary-only restriction (parent must be NEG / RECIP
+          / EXP2 / LOG2 / SQRT, not binary).  Same softmax
+          regression -- the failing case is K_inner_MUL
+          spliced into K_EXP2 (EXP2 is unary, so still
+          allowed under the restriction).  count_kernel_
+          consumers correctly rejects splicing K_EXP2 into
+          K_outer_MUL (since K_EXP2 is shared with
+          K_REDUCE_SUM), but the K_inner_MUL -> K_EXP2
+          splice STILL corrupts downstream K_REDUCE_SUM(K_EXP2)
+          for reasons I can't pin down in the fire budget --
+          the splice itself looks structurally correct.
+          Reverted again. -->
+          <!-- attempt 3: BLOCKED.  Three attempts converged on
+          "the splice itself appears correct but reading the
+          spliced-producer's output downstream gives wrong
+          values".  Hypothesis: kernel_fire_by_id's
+          producer_kid recursion / TenDesc buffer reuse has a
+          subtle invariant that the splice violates.  Marking
+          f1b BLOCKED pending either (a) deep instrumentation
+          + diagnosis, or (b) replacing the whole approach with
+          ShapeTracker (f3) which makes movement ops view-only
+          and eliminates most of the splice surface area
+          entirely.  Recommendation: skip f1b for now and tackle
+          f3 next; f1b can become trivial after f3 lands. -->
+
 
     - [ ] **f1c. Verify the kernel-count drop on LeNet**.
           Re-run lenet-mnist/forward.wls and report the
