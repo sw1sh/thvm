@@ -104,11 +104,19 @@ concern that interact_grad currently doesn't cover for any of these):
       `NetApply[ReshapeLayer[shape]]`.
 - [x] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or
       rank-2 with explicit batch axis).
-- [ ] `PoolingLayer[..., "Function" -> Max]` 2-D forward.  Needs
-      `UOP_REDUCE` with `kind = MAX`; check whether REDUCE_MAX is
-      already supported by the C interpreter (look at
-      `src/schedule/materialize.c` op_arg packing).  Plus the 2-D
-      windowing pattern (im2col-ish via movement ops).
+- [ ] `PoolingLayer[k, k, "Function" -> Max]` 2-D forward, NON-
+      overlapping case only (Stride = KernelSize).  Channels-first
+      input shape {C, H, W} -> reshape to {C, H/k, k, W/k, k} -> two
+      REDUCE_MAX (axis 2 then 3) -> {C, H/k, W/k}.  REDUCE_MAX is
+      already supported by the C interpreter (cpu/op/reduce.c).
+      Refuse the overlapping case in this fire by returning a
+      Failure["NotImplemented"] when Stride != KernelSize.  Test
+      against NetApply on a small input.
+- [ ] `PoolingLayer` overlapping case (Stride < KernelSize, e.g.
+      the default Stride = {1,1}).  Needs UOP_PERMUTE runtime
+      support (currently no shape derivation in materialize_in_env.c
+      -- same gap RESHAPE had).  Likely big; decompose when picked
+      up.
 - [ ] `SoftmaxLayer` forward.  `softmax(x)_i = exp(x_i) / sum(exp(x))`.
       EXP via `2^(log2(e) * x)` = TUOpExp2 chain.  Test against
       `NetApply[SoftmaxLayer[]]` on a small vector.
