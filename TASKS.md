@@ -1559,6 +1559,103 @@ Realistic close-out for the overnight cron loop:
       Unblocks the TUOpConv2D lowering. -->
 
 
+- [ ] **Drop TLeNet[] library helper; TFromNet[NetModel["LeNet"]]
+      should work directly**.  Currently
+      `wl/THVMLink/Kernel/NN.wl` defines `TLeNet[]` as a
+      NetInitialize'd local fallback because the local
+      Mathematica's `NetModel["LeNet"]` returns weights as
+      `Automatic` (paclet version mismatch).  User directive:
+      this library wrapper shouldn't exist; `TFromNet[NetModel
+      ["LeNet"]]` should just work.  Investigate options:
+        (a) Force NetModel["LeNet"] to return concrete weights
+            via NetInitialize OR via an explicit weights-load
+            path.
+        (b) Make TFromNet handle Automatic-weight layers by
+            initialising them on the fly.
+        (c) Document the version requirement and skip if not
+            met.
+      Then update wl/Examples/lenet-mnist/{forward,grad-check,
+      train,verify}.wls to use TFromNet[NetModel["LeNet"]]
+      directly rather than the local TLeNet[].
+
+- [ ] **Move Mnist.wl from wl/THVMLink/Kernel/ to
+      wl/Examples/**.  User directive: MNIST loading isn't
+      core runtime; it's example-data plumbing.  Move
+      `wl/THVMLink/Kernel/Mnist.wl` (TMnistLoad / TMnistBatch)
+      into `wl/Examples/lenet-mnist/Mnist.wl` (or a shared
+      `wl/Examples/_lib/Mnist.wl`) and adjust the
+      auto-loader in THVMLink.wl to skip it.  Update every
+      consumer (forward.wls / grad-check.wls / train.wls /
+      verify.wls) to Get the helper directly from its new
+      location.
+
+- [ ] **Add UOP_LOAD primitive**.  User directive: the
+      runtime should have an explicit LOAD uop (mirroring
+      tinygrad's UOps.LOAD) that produces tensor data from
+      an external buffer / address rather than going through
+      a TAG_TEN wrapper.  Today TAG_TEN encapsulates both
+      "this is a tensor" and "load it from this buffer";
+      LOAD splits the latter out as its own UOP so kernel
+      programs explicitly read inputs.  Touches: opcode
+      definition in src/thvm.h, constructor in src/uop/load.c,
+      both materializers, both backends, WL bindings, tests.
+      Multi-fire arc; will decompose.
+
+- [ ] **Audit kernelization boundaries vs tinygrad**.  User
+      directive: "make sure materialization properly
+      kernelize between boundaries, compare to tinygrad".
+      Currently every UOP becomes its own UOP_KERNEL with
+      one program op (per the materializer comment in
+      src/schedule/materialize_in_env.c and materialize.c:
+      "for v1 every kernel has exactly one program op").
+      Tinygrad fuses chains of elementwise / reduction ops
+      into single kernels at memory boundaries (rough rule:
+      everything between two REDUCE/movement boundaries gets
+      fused).  This task: read tinygrad's
+      `tinygrad/codegen/kernel.py` + `tinygrad/engine/
+      schedule.py` to understand the boundary rules; write
+      a `docs/kernelization.md` design note comparing our
+      v1 (one-op-per-kernel) to tinygrad's; identify the
+      specific fusion opportunities our LeNet path leaves
+      on the table; queue follow-up work.
+
+- [ ] **Memory footprint analysis during training**.  User
+      directive: "what the status of memory planning?
+      what's the footprint during training?".  Today
+      tensor_alloc is called per-op during materialize and
+      buffers are not freed until thvm_free (full reset).
+      For a LeNet training step: every forward intermediate
+      + every backward chain UOP allocates an output buffer.
+      Estimate: per-step buffer count + total bytes; compare
+      to "what tinygrad would do" with proper buffer
+      reuse / lifetime tracking.  Land as a
+      `docs/memory.md` design note + a probe script in
+      wl/Examples/lenet-mnist/ that reports the buffer
+      count + bytes after one training step.  Queue
+      concrete reuse-pass work as follow-ups.
+
+- [ ] **interact_grad rules for SHRINK / PAD / PERMUTE / FLIP**.
+      Currently autograd through any movement op other than
+      RESHAPE / EXPAND falls into the unhandled-default branch
+      and emits grad_zero -- meaning a tinygrad-style CONV2D
+      lowering (which uses SHRINK + PAD + PERMUTE) silently
+      loses gradients.  Prerequisite for the TUOpConv2D
+      lowering below.
+      Per-rule sketches:
+        - SHRINK[a, ranges].  Forward extracts a sub-region.
+          Gradient: PAD the cotangent with zeros on the same
+          axes / widths complementary to what SHRINK kept.
+        - PAD[a, widths].  Forward zero-pads.  Gradient:
+          SHRINK the cotangent back to the unpadded extent.
+        - PERMUTE[a, perm].  Forward reorders axes.  Gradient:
+          PERMUTE the cotangent by the inverse permutation.
+        - FLIP[a, mask].  Forward mirrors selected axes.
+          Gradient: FLIP the cotangent on the same axes (FLIP
+          is its own inverse).
+      Each is ~10-15 LOC + a structural test in
+      tests/test_grad.c + a numerical test in grad.wlt.  Will
+      decompose into per-op sub-items on the next fire.
+
 - [ ] **Lower TUOpConv2D to a primitive chain**.  Replace the
       direct `uop_conv2d` call inside the WL helper TUOpConv2D
       (or build a new helper alongside it) with a chain of
@@ -1579,6 +1676,17 @@ Realistic close-out for the overnight cron loop:
       will autograd through the primitives for free; the
       bespoke CONV2D grad rule can be dropped in the next
       sub-item.
+      <!-- attempt 1: drafted as a kh*kw-unrolled chain in
+      Tensor.wl (each kernel position is a SHRINK + EXPAND +
+      MUL + REDUCE_SUM contributing a {C_out, H_out, W_out}
+      partial; sum + bias).  Forward is presumably correct
+      (didn't verify standalone) but ALL three pre-existing
+      CONV2D grad tests immediately failed with all-zero
+      gradients -- because interact_grad has no rules for
+      SHRINK / PAD / PERMUTE / FLIP, so autograd through the
+      lowered chain falls into the unhandled-default branch
+      (grad_zero).  Reverted; the prerequisite task above
+      must land first. -->
 
 - [ ] **Drop the bespoke CONV2D grad rule** from
       `src/interact/uop_grad.c` (the case branch with
