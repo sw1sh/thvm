@@ -22,7 +22,12 @@ Get["THVMLink`"];
 debugPrint[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
 
 TInit[];
-net = TLeNet[];
+(* NetModel["LeNet"] returns the canonical LeCun architecture
+   with un-initialized weights (the local Mathematica paclet
+   version mismatch surfaces them as `Automatic` symbol-shapes).
+   NetInitialize fills them with random NumericArrays so
+   TFromNet has concrete tensors to wrap. *)
+net = NetInitialize @ NetModel["LeNet"];
 debugPrint["LeNet built (random init): ", Length[net], " layers"];
 
 batch = TMnistBatch[5];

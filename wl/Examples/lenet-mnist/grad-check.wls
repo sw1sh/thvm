@@ -25,7 +25,7 @@ debugPrint[args___] := WriteString["stdout",
 
 TInit[];
 
-net = TLeNet[];
+net = NetInitialize @ NetModel["LeNet"];
 debugPrint["LeNet built (random init): ", Length[net], " layers"];
 
 batch  = TMnistBatch[1];

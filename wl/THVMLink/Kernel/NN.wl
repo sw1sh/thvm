@@ -36,7 +36,6 @@
      TLog[x]                     -- elementwise natural log via LOG2
      TCrossEntropyLoss[pred, target]
                                  -- -sum(target * log(pred))
-     TLeNet[]                    -- NetInitialize'd LeNet architecture
 *)
 
 BeginPackage["THVMLink`"];
@@ -56,7 +55,6 @@ TTanh::usage            = "TTanh[x] = elementwise tanh, implemented as (u - 1)/(
 TSoftmax::usage         = "TSoftmax[x] = exp(x) / sum(exp(x)) over the last axis.  exp via the EXP2 + log2(e) chain.  Numerically naive (no max-subtract stabilisation) -- input magnitudes >~80 will overflow exp.  Forward only.";
 TLog::usage             = "TLog[x] = elementwise natural log, implemented as LOG2(x) * ln(2) since the runtime has UOP_LOG2 but no UOP_LOG.";
 TCrossEntropyLoss::usage = "TCrossEntropyLoss[pred, target] = -sum(target * log(pred)).  Probability-form categorical cross-entropy.  Both inputs are TTerms with the same shape; target is typically a one-hot vector.  Forward only -- LOG2 has no grad rule yet.";
-TLeNet::usage           = "TLeNet[] returns a NetInitialize'd NetChain of the canonical LeNet-5 architecture (Conv 6@5x5 -> ReLU -> MaxPool 2x2 -> Conv 16@5x5 -> ReLU -> MaxPool 2x2 -> Flatten -> Linear 120 -> ReLU -> Linear 10 -> Softmax) with random weights.  Used as a fallback for NetModel[\"LeNet\"], whose weights come back as `Automatic` under the local Mathematica paclet version mismatch.";
 
 Begin["`Private`"];
 
@@ -277,27 +275,6 @@ fromLayer[ConvolutionLayer, layer_, x_TTerm] := Module[{
 ]
 
 TIdentity[x_] := x
-
-(* Canonical LeNet-5 architecture (input 1x28x28 grayscale, 10
-   output classes), NetInitialize'd so weights are concrete
-   NumericArrays.  NetModel["LeNet"] would normally provide the
-   trained weights, but those load as `Automatic` under the local
-   paclet version mismatch -- so we re-initialise from the
-   architecture instead.  Training from scratch is the goal anyway
-   (TOptim["Adam"] on MNIST). *)
-TLeNet[] := NetInitialize @ NetChain[{
-    ConvolutionLayer[6, {5, 5}, "Stride" -> {1, 1}],
-    ElementwiseLayer[Ramp],
-    PoolingLayer[{2, 2}, "Stride" -> {2, 2}, "Function" -> Max],
-    ConvolutionLayer[16, {5, 5}, "Stride" -> {1, 1}],
-    ElementwiseLayer[Ramp],
-    PoolingLayer[{2, 2}, "Stride" -> {2, 2}, "Function" -> Max],
-    FlattenLayer[],
-    LinearLayer[120],
-    ElementwiseLayer[Ramp],
-    LinearLayer[10],
-    SoftmaxLayer[]
-}, "Input" -> {1, 28, 28}]
 
 (* === entry points ====================================== *)
 

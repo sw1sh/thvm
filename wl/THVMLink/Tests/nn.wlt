@@ -499,11 +499,13 @@ VerificationTest[
     TestID -> "nn/conv2d-non-1-stride-returns-Failure"
 ]
 
-(* === TLeNet[] -- canonical LeNet architecture, fresh weights === *)
+(* === NetModel["LeNet"] -- canonical LeNet architecture from
+       Mathematica's network model registry, NetInitialize'd
+       to give it concrete weights. === *)
 
 VerificationTest[
     TInit[];
-    net = TLeNet[];
+    net = NetInitialize @ Quiet[NetModel["LeNet"], Import::nnincmpb];
     {Length[net], Head /@ Table[net[[i]], {i, Length[net]}]},
     {11, {ConvolutionLayer, ElementwiseLayer, PoolingLayer,
           ConvolutionLayer, ElementwiseLayer, PoolingLayer,
@@ -514,17 +516,17 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    net = TLeNet[];
+    net = NetInitialize @ Quiet[NetModel["LeNet"], Import::nnincmpb];
     Head @ NetExtract[net, {1, "Weights"}],
     NumericArray,
     TestID -> "nn/lenet-conv1-weights-concrete"
 ]
 
-(* === TLeNet end-to-end forward === *)
+(* === LeNet end-to-end forward === *)
 
 VerificationTest[
     TInit[];
-    net = TLeNet[];
+    net = NetInitialize @ Quiet[NetModel["LeNet"], Import::nnincmpb];
     x = TTensorCreate @ NumericArray[ConstantArray[0.5, {1, 28, 28}], "Real32"];
     res = TRealize @ TFromNet[net, x];
     {TTensorShape[res], Round[Total @ Normal @ TTensorData[res], 0.0001]},

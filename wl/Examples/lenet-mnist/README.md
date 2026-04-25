@@ -18,10 +18,11 @@ current working directory, so run from the repo root.
 
 ## What it shows
 
-`TLeNet[]` builds the canonical LeNet-5 architecture (Conv 6@5x5
--> ReLU -> MaxPool 2x2 -> Conv 16@5x5 -> ReLU -> MaxPool 2x2 ->
-Flatten -> Linear 120 -> ReLU -> Linear 10 -> Softmax) with
-NetInitialize random weights, then forwards 5 random MNIST
+`NetInitialize @ NetModel["LeNet"]` returns the canonical LeCun
+LeNet architecture from Mathematica's network model registry
+(Conv 20@5x5 -> ReLU -> MaxPool 2x2 -> Conv 50@5x5 -> ReLU ->
+MaxPool 2x2 -> Flatten -> Linear 500 -> ReLU -> Linear 10 ->
+Softmax) with random weights, then forwards 5 random MNIST
 training samples through `TFromNet[net, x]` and reports the
 predicted digit + softmax confidence per sample.
 
