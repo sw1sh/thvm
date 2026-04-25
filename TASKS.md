@@ -2041,7 +2041,7 @@ Realistic close-out for the overnight cron loop:
         (3 tests).  202 WL + 146 C tests green. -->
 
 
-  - [ ] **b. TUOpLoad[tensor] constructor + identity
+  - [x] **b. TUOpLoad[tensor] constructor + identity
         materializer**.  Add a constructor that wraps a
         TAG_TEN handle in a `LOAD(tensor)` UOP node, plus
         a materializer rule that resolves LOAD by reading
@@ -2050,6 +2050,21 @@ Realistic close-out for the overnight cron loop:
         the underlying tensor element-for-element.  ~50 LOC
         between src/uop/load.c (constructor), the
         materializer rule in materialize.c, and a wlt test.
+        <!-- Landed.  src/uop/load.c (1-cell heap node ctor) +
+        src/backend/cpu/op/load.c (memcpy kernel mirroring
+        cpu_op_reshape) + UOP_LOAD case in interpret.c
+        dispatch + UOP_LOAD shape rule in shape_env.c +
+        UOP_LOAD arity-1 entry in materialize.c +
+        thvm_wl_uop_load LibraryFunction wrapper +
+        $uopLoadFn loader + TUOpLoad WL constructor +
+        TUOpLoad::usage.  No special case in materialize_in_env
+        or op_output_shape -- LOAD's output-shape default
+        ("inherit source") is correct.  Three wlt tests:
+        identity-on-ones (2x3 broadcast), identity-preserves-
+        shape-and-values (2x3 mixed), composes-under-add
+        (LOAD inside ADD chain).  215 WL + 146 C tests
+        green.  Sub-items (c)-(e) follow. -->
+
 
   - [ ] **c. Linearizer emits explicit LOAD for input
         boundaries**.  Today kernel programs that consume

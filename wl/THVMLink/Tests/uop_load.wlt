@@ -34,3 +34,36 @@ VerificationTest[
     "LOAD",
     TestID -> "uop-load/named-load"
 ]
+
+(* === sub-item (b): TUOpLoad constructor + identity materializer ===
+   TUOpLoad[t] |> TRealize must produce a tensor element-equal to t. *)
+
+VerificationTest[
+    TInit[];
+    src = TTensorCreate @ NumericArray[
+        ConstantArray[1.0, {2, 3}], "Real32"];
+    out = TRealize @ TUOpLoad[src];
+    Normal @ TTensorData[out],
+    {{1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}},
+    TestID -> "uop-load/identity-on-ones"
+]
+
+VerificationTest[
+    TInit[];
+    src = TTensorCreate @ NumericArray[
+        {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    out = TRealize @ TUOpLoad[src];
+    {TTensorShape[out], Normal @ TTensorData[out]},
+    {{2, 3}, {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}},
+    TestID -> "uop-load/identity-preserves-shape-and-values"
+]
+
+(* Composition: TUOpLoad inside an ADD chain should be transparent. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+    Normal @ TTensorData @ TRealize @ TUOpAdd[TUOpLoad[a], TUOpLoad[b]],
+    {5.0, 7.0, 9.0},
+    TestID -> "uop-load/composes-under-add"
+]

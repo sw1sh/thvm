@@ -27,7 +27,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_LOG2: case UOP_SQRT:
     case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
-    case UOP_REDUCE:
+    case UOP_REDUCE:  case UOP_LOAD:
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
       return 2;

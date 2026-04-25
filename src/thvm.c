@@ -102,6 +102,7 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "backend/cpu/op/reduce.c"
 #include "backend/cpu/op/expand.c"
 #include "backend/cpu/op/reshape.c"
+#include "backend/cpu/op/load.c"
 #include "backend/cpu/op/flip.c"
 #include "backend/cpu/op/pad.c"
 #include "backend/cpu/op/shrink.c"
@@ -141,6 +142,7 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "uop/shrink.c"
 #include "uop/flip.c"
 #include "uop/grad.c"
+#include "uop/load.c"
 
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.

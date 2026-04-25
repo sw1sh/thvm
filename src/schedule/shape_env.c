@@ -91,6 +91,11 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
         return term_shape_in(heap_read(loc), env_id, out);
     }
 
+    // LOAD: structural marker; output shape = source shape.
+    if (op == UOP_LOAD) {
+        return term_shape_in(heap_read(loc), env_id, out);
+    }
+
     // Binary elementwise: broadcast to the larger-numel child's
     // shape (mirrors op_output_shape's pick-the-bigger-side rule).
     if (op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT

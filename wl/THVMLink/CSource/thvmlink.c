@@ -432,6 +432,14 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_unary(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+EXTERN_C DLLEXPORT int thvm_wl_uop_load(WolframLibraryData libData, mint argc,
+                                        MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term src = (Term)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)uop_load(src));
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_uop_binary(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
   (void)libData; (void)argc;

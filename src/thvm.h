@@ -419,6 +419,11 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // the chain-rule rewrite rule defined in interact/uop_grad.c.
 fn Term uop_grad(Term y, Term gy, Term target);
 
+// Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
+// tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in
+// the cpu kernel).  Output shape == src shape; arity 1.
+fn Term uop_load(Term src);
+
 // === schedule/ ===
 // Top-level materialize driver: heap-walk pass that in-place rewrites
 // UOP cells reachable from `term` into UOP_KERNEL cells, propagating

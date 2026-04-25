@@ -131,6 +131,8 @@ TUOpGrad[y_, gy_, target_] := (
     TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]]
 )
 
+TUOpLoad[src_] := (ensureInit[]; TTerm[$uopLoadFn[ttermRaw[src]]])
+
 (* TUOpConv2DLowered[input, weights, bias] -- builds 2-D
    convolution forward from primitive UOPs only.  Public
    entry point TUOpConv2D below dispatches to this.
