@@ -31,6 +31,8 @@ fn u8 uop_arity(u8 op) {
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT:
       return 2;
+    case UOP_CONV2D:
+      return 3;
     default:
       return 0;
   }

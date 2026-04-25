@@ -164,6 +164,22 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
                 out_shape.dims[i] = (u32)term_val(n);
             }
         }
+        if (op == UOP_CONV2D) {
+            // input  child_shapes[0] = {C_in, H, W}
+            // weight child_shapes[1] = {C_out, C_in, kh, kw}
+            // bias   child_shapes[2] = {C_out}     (unused for shape calc)
+            // Output {C_out, H - kh + 1, W - kw + 1} (valid conv, stride 1).
+            u32 c_out = child_shapes[1].dims[0];
+            u32 kh    = child_shapes[1].dims[2];
+            u32 kw    = child_shapes[1].dims[3];
+            u32 h     = child_shapes[0].dims[1];
+            u32 w     = child_shapes[0].dims[2];
+            out_shape.ndim    = 3;
+            out_shape.dims[0] = c_out;
+            out_shape.dims[1] = h - kh + 1;
+            out_shape.dims[2] = w - kw + 1;
+            for (u32 i = 3; i < MAX_DIM; i++) out_shape.dims[i] = 0;
+        }
         if (op == UOP_RESHAPE) {
             // Layout: heap[expr_loc] = src; heap[expr_loc + 1 + i] =
             // NUM(d_i).  Recover ndim by reading dim cells until the

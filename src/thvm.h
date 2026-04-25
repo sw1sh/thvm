@@ -141,7 +141,7 @@ typedef u64 Term;
 #define MAX_DIM      8              // max tensor rank
 #define KPROG_MAX_OPS    64         // max ops per kernel program
 #define KERNEL_MAX_INPUT 8          // max input tensors per kernel
-#define MAX_UOP_SRC  2              // max source slots per KProgOp
+#define MAX_UOP_SRC  3              // max source slots per KProgOp (CONV2D needs 3: input/weights/bias)
 
 // === Tensor descriptor + backend ===
 

@@ -34,6 +34,7 @@ static u32 alo_node_arity(u8 tag, u32 ext) {
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         case UOP_REDUCE:                                   return 3;
         case UOP_GRAD:                                     return 3;
+        case UOP_CONV2D:                                   return 3;
         case UOP_KERNEL:                                   return 2;
         default:                                           return 0;
       }

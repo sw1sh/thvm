@@ -154,7 +154,7 @@ $UopPad = 6;          $UopShrink = 7;  $UopFlip = 8;
 $UopAdd = 9;          $UopMul = 10;    $UopNeg = 11;
 $UopRecip = 12;       $UopExp2 = 13;   $UopLog2 = 14;
 $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
-$UopGrad = 18;
+$UopGrad = 18;        $UopConv2D = 19;
 
 $uopNames = <|
     0  -> "MATERIALIZE", 1  -> "KERNEL", 2  -> "CONST",
@@ -163,7 +163,7 @@ $uopNames = <|
     9  -> "ADD",         10 -> "MUL",    11 -> "NEG",
     12 -> "RECIP",       13 -> "EXP2",   14 -> "LOG2",
     15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE",
-    18 -> "GRAD"
+    18 -> "GRAD",        19 -> "CONV2D"
 |>;
 
 (* Reduce-kind constants *)
@@ -379,6 +379,7 @@ uopCellCount[op_] := Switch[op,
     $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt,           1,
     $UopReduce,                                                     3,
     $UopGrad,                                                       3,
+    $UopConv2D,                                                     3,
     $UopKernel,                                                     2,
     (* RESHAPE: report 1 (the src) so TTermExpr renders UOP[RESHAPE,
        <src-subtree>].  The trailing NUM(d_i) cells are integer

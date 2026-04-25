@@ -156,10 +156,17 @@ concern that interact_grad currently doesn't cover for any of these):
       weights.shape at materialize time.  Construction stays
       shape-agnostic. -->
 
-- [ ] plumb UOP_CONV2D through `materialize_in_env.c` (output
+- [x] plumb UOP_CONV2D through `materialize_in_env.c` (output
       shape calc: {C_out, H_out, W_out} for valid conv2d) and
       `wl/THVMLink/Kernel/THVMLink.wl` `uopCellCount`.  Plus the
       `$Uop*` constant and `$uopNames` entry.
+      <!-- Bumped MAX_UOP_SRC 2 -> 3 (CONV2D needs input/weights/
+      bias).  Added uop_arity (3), alo_node_arity (3), dyn_arity
+      (3) cases.  Output shape derived from weights.shape (C_out
+      = dim 0, kh = dim 2, kw = dim 3) -- the constructor stays
+      shape-agnostic, materialize discovers everything from the
+      input shapes. -->
+
 - [ ] `cpu_op_conv2d` kernel in `src/backend/cpu/op/conv2d.c`:
       stride-1, no-padding, channels-first {C_in, H, W} input;
       weights {C_out, C_in, kh, kw}; bias {C_out}.  Output
