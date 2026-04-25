@@ -399,6 +399,43 @@ int main(void) {
   CHECK(cpu_fl[0] == 6.0f && cpu_fl[1] == 5.0f && cpu_fl[2] == 4.0f);
   CHECK(cpu_fl[3] == 3.0f && cpu_fl[4] == 2.0f && cpu_fl[5] == 1.0f);
 
+  // === PAD axis-aware parity: 2D zero ring around a 2x2 ===
+  // Pad {1,1} on each axis -> 4x4 with the source in the middle
+  // and zeros around.  Per-axis (begin, end) widths interleaved.
+  TEST_BEGIN("metal-real/pad-2d-symmetric-ring-parity");
+  Shape s_pad = {0}; s_pad.ndim = 2; s_pad.dims[0] = 2; s_pad.dims[1] = 2;
+  f32 src_pad[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  f32 cpu_pad[16], gpu_pad[16];
+  u32 be[4] = {1, 1, 1, 1};   // axis 0: (1,1); axis 1: (1,1)
+
+  unsetenv("THVM_BACKEND"); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_pad, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pad, sizeof(src_pad));
+    Term done = wnf(thvm_materialize(uop_pad(
+        term_new(0, TAG_TEN, DT_F32, t), 2, be)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              cpu_pad, sizeof(cpu_pad));
+  }
+  thvm_free();
+
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_pad, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pad, sizeof(src_pad));
+    Term done = wnf(thvm_materialize(uop_pad(
+        term_new(0, TAG_TEN, DT_F32, t), 2, be)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              gpu_pad, sizeof(gpu_pad));
+  }
+  thvm_free();
+
+  for (int i = 0; i < 16; i++) CHECK(cpu_pad[i] == gpu_pad[i]);
+  // Center should be the original 2x2; ring should be zero.
+  CHECK(cpu_pad[5] == 1.0f && cpu_pad[6] == 2.0f);   // row 1, cols 1-2
+  CHECK(cpu_pad[9] == 3.0f && cpu_pad[10] == 4.0f);  // row 2, cols 1-2
+  CHECK(cpu_pad[0] == 0.0f && cpu_pad[15] == 0.0f);  // corners
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }

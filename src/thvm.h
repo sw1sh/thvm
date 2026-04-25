@@ -219,6 +219,10 @@ typedef struct {
                                    // generalise to RESHAPE/PERMUTE later)
   u32   out_dims [MAX_DIM];        // per-axis dims of this op's output;
                                    //   only meaningful when out_ndim > 0
+  u8    pad_widths[2 * MAX_DIM];   // PAD only: interleaved per-axis
+                                   //   {b0, e0, b1, e1, ...} pad widths
+                                   //   (u8 caps each width at 255 -- plenty
+                                   //   for transposed-conv kh/kw - 1)
 } KProgOp;
 
 typedef struct KernelEntry {

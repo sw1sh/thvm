@@ -128,3 +128,43 @@ kernel void thvm_flip(device         float *out      [[buffer(0)]],
     }
     out[tid] = in[src_idx];
 }
+
+// PAD: zero-pad selected axes by per-axis (begin, end) widths.
+// buffer(4): src0 = [ndim, dims...]
+// buffer(5): outd = [ndim, dims...]
+// buffer(6): pad_widths -- u32 array of length 2 * MAX_DIM,
+//            interleaved {b0, e0, b1, e1, ...}.
+// In-bounds: out[oi] = in[src_idx]; out-of-bounds (in pad
+// region on any axis): out[oi] = 0.
+kernel void thvm_pad(device         float *out      [[buffer(0)]],
+                     constant       uint  &arg      [[buffer(1)]],
+                     device   const float *in       [[buffer(2)]],
+                     constant       uint  &in_numel [[buffer(3)]],
+                     constant       uint  *src0     [[buffer(4)]],
+                     constant       uint  *outd     [[buffer(5)]],
+                     constant       uint  *padw     [[buffer(6)]],
+                     uint                  tid      [[thread_position_in_grid]])
+{
+    (void)arg; (void)in_numel;
+    uint ndim = src0[0];
+    if (ndim == 0u) {
+        out[tid] = in[tid];
+        return;
+    }
+
+    uint tmp = tid;
+    uint src_idx = 0u;
+    uint stride  = 1u;
+    bool in_pad  = false;
+    for (int axis = (int)ndim - 1; axis >= 0; axis--) {
+        uint od = outd[1 + axis];
+        uint sd = src0[1 + axis];
+        uint b  = padw[2 * (uint)axis];
+        uint c  = tmp % od;
+        tmp    /= od;
+        if (c < b || c >= b + sd) { in_pad = true; break; }
+        src_idx += (c - b) * stride;
+        stride  *= sd;
+    }
+    out[tid] = in_pad ? 0.0f : in[src_idx];
+}

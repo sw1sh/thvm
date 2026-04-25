@@ -99,6 +99,9 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     } else if (op == UOP_FLIP) {
         op_arg = (u32)term_val(heap_read(expr_loc + 1));
     }
+    // (UOP_PAD widths are extracted later, after we know the source
+    //  shape -- the heap stores them but ndim isn't explicit, so we
+    //  walk 2 * src0_ndim cells.)
 
     // 3. Allocate KernelEntry and fill input slots, deduping equal
     //    inputs (same tid, or same symbolic term).
@@ -166,6 +169,17 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
             for (u32 i = 0; i < ndim; i++) {
                 Term n = heap_read(expr_loc + 2 + i);
                 out_shape.dims[i] = (u32)term_val(n);
+            }
+        }
+        if (op == UOP_PAD) {
+            // PAD: out.dim[i] = src.dim[i] + b_i + e_i.  Heap layout
+            // [src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]; ndim
+            // implicit in the source.
+            out_shape = child_shapes[0];
+            for (u32 i = 0; i < child_shapes[0].ndim; i++) {
+                u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
+                u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+                out_shape.dims[i] = child_shapes[0].dims[i] + b + e;
             }
         }
         if (op == UOP_CONV2D) {
@@ -249,7 +263,8 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     // distinguish leading- from trailing-axis broadcasts (EXPAND)
     // or mirror axes (FLIP).  out_numel + in_numel alone aren't
     // enough.
-    if ((op == UOP_EXPAND || op == UOP_FLIP) && arity > 0) {
+    if ((op == UOP_EXPAND || op == UOP_FLIP || op == UOP_PAD)
+     && arity > 0) {
       Shape s0 = child_shapes[0];
       p->src0_ndim = (u8)(s0.ndim & 0xFF);
       for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
@@ -258,6 +273,15 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
       p->out_ndim = (u8)(out_shape.ndim & 0xFF);
       for (u32 i = 0; i < out_shape.ndim && i < MAX_DIM; i++) {
         p->out_dims[i] = out_shape.dims[i];
+      }
+    }
+    // PAD pad widths (begin/end interleaved) -- u8 caps each at 255.
+    if (op == UOP_PAD && arity > 0) {
+      for (u32 i = 0; i < child_shapes[0].ndim && i < MAX_DIM; i++) {
+        u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
+        u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+        p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
+        p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
       }
     }
 

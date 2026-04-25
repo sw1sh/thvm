@@ -1094,13 +1094,33 @@ Realistic close-out for the overnight cron loop:
       390 C + 179 WL tests stay green. -->
 
 
-- [ ] **UOP_PAD CPU + Metal kernels**.  Constructor exists in
+- [x] **UOP_PAD CPU + Metal kernels**.  Constructor exists in
       src/uop/pad.c; opcode `UOP_PAD = 6`; arity 1; heap
       `[src, NUM(b0), NUM(e0), ..., NUM(b_{n-1}), NUM(e_{n-1})]`
       (per-axis begin/end pad widths interleaved).  Needed for
       CONV2D grad_input's transposed-conv padding.  Implement
       CPU + Metal kernels with axis-aware indexing, plus parity
       tests covering 1D and 2D cases (asymmetric pad widths).
+      <!-- Implemented.  Extended KProgOp with `u8 pad_widths[
+      2*MAX_DIM]` (16 bytes; u8 caps each width at 255 -- plenty
+      for kh-1 in any sane conv).  Both materializers compute
+      out_dims[i] = src_dim[i] + b + e for UOP_PAD, populate
+      src0_dims/out_dims (alongside EXPAND/FLIP), and pack
+      pad_widths from heap NUM cells.  CPU kernel
+      src/backend/cpu/op/pad.c memsets the output to 0, then
+      walks per-axis coords and copies in-bounds source
+      elements (skips when any axis is in its begin/end pad
+      region).  Metal shader thvm_pad takes a third extra
+      buffer (slot 6) for the u32-widened pad_widths and
+      mirrors the same logic.  Tests: 5 numerical PAD tests
+      in pad.wlt (1d asymmetric, 2d ring, 2d asymmetric, no-op,
+      conv2d-grad-style {2,2,2,2}); test_metal_real.c metal-
+      real/pad-2d-symmetric-ring-parity for CPU vs Metal byte-
+      for-byte identity.  Metal metallib now exports 16
+      functions.  All 390 C + 184 WL tests stay green.
+      Together with UOP_FLIP, the runtime now has every
+      primitive needed for CONV2D grad_input. -->
+
 
 - [ ] **CONV2D grad_weights branch in interact_grad**.  Build
       via existing primitives (no new kernel needed):

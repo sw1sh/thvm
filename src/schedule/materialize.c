@@ -221,6 +221,17 @@ fn Term materialize_expr(Term expr) {
       out_shape.dims[i] = (u32)term_val(heap_read(expr_loc + 2 + i));
     }
     for (u32 i = ndim; i < MAX_DIM; i++) out_shape.dims[i] = 0;
+  } else if (op == UOP_PAD && child_tids[0] != 0) {
+    // PAD: out.dim[i] = src.dim[i] + b_i + e_i.  Heap layout
+    // [src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]; ndim
+    // implicit in the source.
+    Shape s0 = TENS[child_tids[0]].view.shape;
+    out_shape = s0;
+    for (u32 i = 0; i < s0.ndim; i++) {
+      u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
+      u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+      out_shape.dims[i] = s0.dims[i] + b + e;
+    }
   } else {
     out_shape = op_output_shape(op, child_tids, arity, reduce_axis);
   }
@@ -270,7 +281,8 @@ fn Term materialize_expr(Term expr) {
   // can resolve broadcast indexing (EXPAND) or per-axis mirroring
   // (FLIP) without having to re-derive it from in_numel / out_numel
   // alone.
-  if ((op == UOP_EXPAND || op == UOP_FLIP) && arity > 0 && child_tids[0] != 0) {
+  if ((op == UOP_EXPAND || op == UOP_FLIP || op == UOP_PAD)
+   && arity > 0 && child_tids[0] != 0) {
     Shape s0 = TENS[child_tids[0]].view.shape;
     p->src0_ndim = (u8)(s0.ndim & 0xFF);
     for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
@@ -279,6 +291,15 @@ fn Term materialize_expr(Term expr) {
     p->out_ndim = (u8)(out_shape.ndim & 0xFF);
     for (u32 i = 0; i < out_shape.ndim && i < MAX_DIM; i++) {
       p->out_dims[i] = out_shape.dims[i];
+    }
+  }
+  if (op == UOP_PAD && arity > 0 && child_tids[0] != 0) {
+    Shape s0 = TENS[child_tids[0]].view.shape;
+    for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
+      u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
+      u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+      p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
+      p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
     }
   }
 
