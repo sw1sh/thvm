@@ -123,8 +123,9 @@ typedef u64 Term;
 #define UOP_CONV2D      19   // heap = [input, weights, bias]; kernel size
                              //   recovered from weights.shape at materialize
                              //   time (weights = {C_out, C_in, kh, kw})
+#define UOP_CMPEQ       20   // heap = [a, b]; mask of (a == b), 0/1 floats
 
-#define UOP_COUNT       20
+#define UOP_COUNT       21
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0

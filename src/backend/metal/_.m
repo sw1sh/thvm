@@ -167,6 +167,7 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
     case UOP_ADD:   fnName = @"thvm_add";   break;
     case UOP_MUL:   fnName = @"thvm_mul";   break;
     case UOP_CMPLT: fnName = @"thvm_cmplt"; break;
+    case UOP_CMPEQ: fnName = @"thvm_cmpeq"; break;
     case UOP_NEG:   fnName = @"thvm_neg";   break;
     case UOP_RECIP: fnName = @"thvm_recip"; break;
     case UOP_SQRT:  fnName = @"thvm_sqrt";  break;

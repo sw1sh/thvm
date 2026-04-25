@@ -29,7 +29,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
     case UOP_REDUCE:
       return 1;
-    case UOP_ADD: case UOP_MUL: case UOP_CMPLT:
+    case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
       return 2;
     case UOP_CONV2D:
       return 3;
@@ -43,7 +43,7 @@ fn u8 uop_is_unary_elementwise(u8 op) {
       || op == UOP_LOG2 || op == UOP_SQRT;
 }
 fn u8 uop_is_binary_elementwise(u8 op) {
-  return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT;
+  return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ;
 }
 
 // ---- Compute output shape / dtype for a single op given its input

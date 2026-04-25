@@ -93,7 +93,8 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
 
     // Binary elementwise: broadcast to the larger-numel child's
     // shape (mirrors op_output_shape's pick-the-bigger-side rule).
-    if (op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT) {
+    if (op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT
+     || op == UOP_CMPEQ) {
         Shape la, lb;
         int la_ok = term_shape_in(heap_read(loc + 0), env_id, &la);
         int lb_ok = term_shape_in(heap_read(loc + 1), env_id, &lb);

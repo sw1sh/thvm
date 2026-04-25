@@ -93,7 +93,7 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                     tUopShape[TTerm[$heapReadFn[val]]],
                 $UopConst,
                     {1},
-                $UopAdd | $UopMul | $UopCmplt,
+                $UopAdd | $UopMul | $UopCmplt | $UopCmpeq,
                     broadcastShape[
                         tUopShape[TTerm[$heapReadFn[val]]],
                         tUopShape[TTerm[$heapReadFn[val + 1]]]

@@ -102,6 +102,7 @@ TUOpConst[value_, dtype_String : "f32"] := (
 TUOpAdd[a_, b_]   := (ensureInit[]; TTerm[$uopBinaryFn[$UopAdd,   ttermRaw[a], ttermRaw[b]]])
 TUOpMul[a_, b_]   := (ensureInit[]; TTerm[$uopBinaryFn[$UopMul,   ttermRaw[a], ttermRaw[b]]])
 TUOpCmplt[a_, b_] := (ensureInit[]; TTerm[$uopBinaryFn[$UopCmplt, ttermRaw[a], ttermRaw[b]]])
+TUOpCmpeq[a_, b_] := (ensureInit[]; TTerm[$uopBinaryFn[$UopCmpeq, ttermRaw[a], ttermRaw[b]]])
 
 TUOpNeg[a_]   := (ensureInit[]; TTerm[$uopUnaryFn[$UopNeg,   ttermRaw[a]]])
 TUOpRecip[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopRecip, ttermRaw[a]]])
@@ -244,7 +245,7 @@ TUOpSrcs[u_] := With[{loc = TTermVal[u], op = TTermExt[u]},
             op === $UopConst,                                                                   1,
             MemberQ[{$UopReshape, $UopPermute, $UopExpand,
                      $UopPad, $UopShrink, $UopFlip}, op],                                      1,
-            MemberQ[{$UopAdd, $UopMul, $UopCmplt}, op],                                        2,
+            MemberQ[{$UopAdd, $UopMul, $UopCmplt, $UopCmpeq}, op],                             2,
             MemberQ[{$UopNeg, $UopRecip, $UopExp2, $UopLog2, $UopSqrt}, op],                   1,
             op === $UopReduce,                                                                  1,
             True,                                                                               1

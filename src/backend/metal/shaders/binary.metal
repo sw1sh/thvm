@@ -33,8 +33,10 @@ kernel void name(device         float *out  [[buffer(0)]],                 \
 
 inline float thvm_op_add  (float x, float y) { return x + y; }
 inline float thvm_op_mul  (float x, float y) { return x * y; }
-inline float thvm_op_cmplt(float x, float y) { return (x < y) ? 1.0f : 0.0f; }
+inline float thvm_op_cmplt(float x, float y) { return (x <  y) ? 1.0f : 0.0f; }
+inline float thvm_op_cmpeq(float x, float y) { return (x == y) ? 1.0f : 0.0f; }
 
 BIN_ELEMENTWISE(thvm_add,   thvm_op_add)
 BIN_ELEMENTWISE(thvm_mul,   thvm_op_mul)
 BIN_ELEMENTWISE(thvm_cmplt, thvm_op_cmplt)
+BIN_ELEMENTWISE(thvm_cmpeq, thvm_op_cmpeq)

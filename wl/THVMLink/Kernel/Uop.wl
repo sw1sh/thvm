@@ -25,6 +25,7 @@ uopArity[$UopConst]       = 0;
 uopArity[$UopAdd]         = 2;
 uopArity[$UopMul]         = 2;
 uopArity[$UopCmplt]       = 2;
+uopArity[$UopCmpeq]       = 2;
 uopArity[$UopNeg]         = 1;
 uopArity[$UopRecip]       = 1;
 uopArity[$UopExp2]        = 1;
@@ -53,7 +54,7 @@ uopName[$UopMul]         = "MUL";         uopName[$UopNeg]     = "NEG";
 uopName[$UopRecip]       = "RECIP";       uopName[$UopExp2]    = "EXP2";
 uopName[$UopLog2]        = "LOG2";        uopName[$UopSqrt]    = "SQRT";
 uopName[$UopCmplt]       = "CMPLT";       uopName[$UopReduce]  = "REDUCE";
-uopName[$UopGrad]        = "GRAD";
+uopName[$UopGrad]        = "GRAD";        uopName[$UopCmpeq]   = "CMPEQ";
 uopName[op_]             := "UOP?" <> ToString[op]
 
 (* === heap fallback ===================================================
@@ -98,7 +99,7 @@ uopSrcShape[base_Integer, off_Integer] := cellShape[THeapRead[base + off]]
 
 uopShapeOfFor[$UopConst, _] := {1}
 
-uopShapeOfFor[op_, base_] /; MemberQ[{$UopAdd, $UopMul, $UopCmplt}, op] :=
+uopShapeOfFor[op_, base_] /; MemberQ[{$UopAdd, $UopMul, $UopCmplt, $UopCmpeq}, op] :=
     broadcastShape[uopSrcShape[base, 0], uopSrcShape[base, 1]]
 
 uopShapeOfFor[op_, base_] /;

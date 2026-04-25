@@ -102,17 +102,19 @@ int main(void) {
   CHECK(gpu_out == 3.14f);
   thvm_free();
 
-  // === Binary elementwise parity (ADD, MUL, CMPLT) ===
+  // === Binary elementwise parity (ADD, MUL, CMPLT, CMPEQ) ===
   // Build [1,2,3,4] + [10,20,30,40] (etc.) under both backends,
   // verify identical output buffers.
 
-  TEST_BEGIN("metal-real/add-mul-cmplt-parity-with-cpu");
+  TEST_BEGIN("metal-real/add-mul-cmplt-cmpeq-parity-with-cpu");
   Shape s = {0}; s.ndim = 1; s.dims[0] = 4;
   f32 src_a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   f32 src_b[4] = {10.0f, 20.0f, 30.0f, 40.0f};
 
-  for (int op_idx = 0; op_idx < 3; op_idx++) {
-    u32 op = (op_idx == 0) ? UOP_ADD : (op_idx == 1) ? UOP_MUL : UOP_CMPLT;
+  for (int op_idx = 0; op_idx < 4; op_idx++) {
+    u32 op = (op_idx == 0) ? UOP_ADD :
+             (op_idx == 1) ? UOP_MUL :
+             (op_idx == 2) ? UOP_CMPLT : UOP_CMPEQ;
     f32 cpu_buf[4], gpu_buf[4];
 
     unsetenv("THVM_BACKEND"); thvm_init();

@@ -68,7 +68,7 @@ $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =
   $UopAdd::usage        = $UopMul::usage = $UopNeg::usage =
   $UopRecip::usage      = $UopExp2::usage = $UopLog2::usage =
   $UopSqrt::usage       = $UopCmplt::usage = $UopReduce::usage =
-  $UopGrad::usage       =
+  $UopGrad::usage       = $UopConv2D::usage = $UopCmpeq::usage =
     "UOp opcode id; mirrors UOP_* in src/thvm.h.";
 
 $ReduceSum::usage = $ReduceMax::usage =
@@ -102,6 +102,7 @@ TUOpExp2::usage      = "TUOpExp2[a] builds a UOP_EXP2 node.";
 TUOpLog2::usage      = "TUOpLog2[a] builds a UOP_LOG2 node.";
 TUOpSqrt::usage      = "TUOpSqrt[a] builds a UOP_SQRT node.";
 TUOpCmplt::usage     = "TUOpCmplt[a, b] builds a UOP_CMPLT node.";
+TUOpCmpeq::usage     = "TUOpCmpeq[a, b] builds a UOP_CMPEQ node (elementwise a == b mask).";
 TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; kind = \"SUM\" or \"MAX\".";
 TUOpGrad::usage      = "TUOpGrad[y, gy, target] builds a UOP_GRAD node.  Reducing under TWnf applies the chain rule recursively until no UOP_GRAD nodes remain; the result is a UOp graph that can be fed to TRealize / TMaterialize like any other.";
 TUOpConv2D::usage    = "TUOpConv2D[input, weights, bias] builds a UOP_CONV2D node for a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  Kernel size is recovered from weights.shape at materialize time.";
@@ -155,7 +156,7 @@ $UopPad = 6;          $UopShrink = 7;  $UopFlip = 8;
 $UopAdd = 9;          $UopMul = 10;    $UopNeg = 11;
 $UopRecip = 12;       $UopExp2 = 13;   $UopLog2 = 14;
 $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
-$UopGrad = 18;        $UopConv2D = 19;
+$UopGrad = 18;        $UopConv2D = 19; $UopCmpeq = 20;
 
 $uopNames = <|
     0  -> "MATERIALIZE", 1  -> "KERNEL", 2  -> "CONST",
@@ -164,7 +165,7 @@ $uopNames = <|
     9  -> "ADD",         10 -> "MUL",    11 -> "NEG",
     12 -> "RECIP",       13 -> "EXP2",   14 -> "LOG2",
     15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE",
-    18 -> "GRAD",        19 -> "CONV2D"
+    18 -> "GRAD",        19 -> "CONV2D", 20 -> "CMPEQ"
 |>;
 
 (* Reduce-kind constants *)
@@ -377,7 +378,7 @@ TTermTree[t_] := ExpressionTree[TTermExpr[t]]
    compute operands -- e.g. CONST has arity 0 but stores 1 cell). *)
 uopCellCount[op_] := Switch[op,
     $UopConst,                                                      1,
-    $UopAdd | $UopMul | $UopCmplt,                                  2,
+    $UopAdd | $UopMul | $UopCmplt | $UopCmpeq,                      2,
     $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt,           1,
     $UopReduce,                                                     3,
     $UopGrad,                                                       3,

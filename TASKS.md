@@ -838,7 +838,7 @@ Realistic close-out for the overnight cron loop:
       the explicit-EXPAND TSoftmax fix all chain together. -->
 
 
-- [ ] **Add UOP_CMPEQ primitive (CPU + Metal kernel)**.
+- [x] **Add UOP_CMPEQ primitive (CPU + Metal kernel)**.
       Mirror of UOP_CMPLT but with `==` instead of `<`.  Needed
       by the REDUCE_MAX grad rule for the one-hot argmax mask
       `MASK[i] = (a[i] == max)`.  Touches:
@@ -860,6 +860,17 @@ Realistic close-out for the overnight cron loop:
         - Parity test in tests/test_uop.c + a Metal parity
           probe in tests/test_metal_real.c.
       Pure new primitive; no semantic change to existing ops.
+      <!-- Implemented across all 8 listed touch points + extended
+      term_shape_in's binary-elementwise case to recognize CMPEQ
+      (otherwise the EXPAND grad rule passthrough would still fire
+      on chains containing CMPEQ).  Metal parity test extended
+      from 3 to 4 ops.  New cmpeq.wlt with three numerical tests:
+      elementwise mask, scalar-vs-vector broadcast, and the
+      argmax-one-hot pattern (a == REDUCE_MAX(a)) that the
+      pending REDUCE_MAX grad rule will use.  All 347 C + 171
+      WL tests green.  Metal metallib now exports 14 functions
+      (was 13). -->
+
 
 - [ ] **Add REDUCE_MAX grad branch in interact_grad**.  Once
       UOP_CMPEQ exists, extend the existing UOP_REDUCE case
