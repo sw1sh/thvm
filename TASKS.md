@@ -403,10 +403,18 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       parity tests in test_metal_real (each runs the same
       uop_binary on CPU + Metal, bit-compares output buffers). -->
 
-- [ ] **Unary elementwise Metal kernels** (NEG, RECIP, SQRT,
+- [x] **Unary elementwise Metal kernels** (NEG, RECIP, SQRT,
       EXP2, LOG2).  Single input, broadcast same way.  Mirrors
       the binary item with one fewer input slot.  Per-op parity
       test vs CPU.
+      <!-- shaders/unary.metal: UNARY_ELEMENTWISE macro
+      instantiates the five kernels.  Buffer convention same as
+      binary, just one input slot (buffer 2) + one numel slot
+      (buffer 3).  Parity test loops over the 5 ops; uses 1e-5
+      absolute tolerance for transcendentals (Metal's SIMD
+      exp2/log2 fast-math path differs from libm in the last
+      few ulps). -->
+
 - [ ] **Reduction + movement Metal kernels** (REDUCE_SUM,
       REDUCE_MAX, EXPAND, RESHAPE) plus the **MUL+REDUCE matmul
       shape** that LinearLayer hits hot.  Parity tests vs CPU.

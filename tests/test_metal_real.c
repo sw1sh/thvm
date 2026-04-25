@@ -146,6 +146,48 @@ int main(void) {
     for (int i = 0; i < 4; i++) CHECK(cpu_buf[i] == gpu_buf[i]);
   }
 
+  // === Unary elementwise parity (NEG, RECIP, SQRT, EXP2, LOG2) ===
+  TEST_BEGIN("metal-real/unary-parity-with-cpu");
+  Shape su = {0}; su.ndim = 1; su.dims[0] = 4;
+  f32 src_u[4] = {1.0f, 2.0f, 4.0f, 8.0f};
+
+  u32 unary_ops[5] = {UOP_NEG, UOP_RECIP, UOP_SQRT, UOP_EXP2, UOP_LOG2};
+  for (int i = 0; i < 5; i++) {
+    u32 op = unary_ops[i];
+    f32 cpu_buf[4], gpu_buf[4];
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    {
+      u32 tid = tensor_alloc(CURRENT_BACKEND, su, DT_F32);
+      CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_u, sizeof(src_u));
+      Term done = wnf(thvm_materialize(uop_unary(op,
+          term_new(0, TAG_TEN, DT_F32, tid))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                cpu_buf, sizeof(cpu_buf));
+    }
+    thvm_free();
+
+    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    {
+      u32 tid = tensor_alloc(CURRENT_BACKEND, su, DT_F32);
+      CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_u, sizeof(src_u));
+      Term done = wnf(thvm_materialize(uop_unary(op,
+          term_new(0, TAG_TEN, DT_F32, tid))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                gpu_buf, sizeof(gpu_buf));
+    }
+    thvm_free();
+
+    // Use a small relative tolerance for transcendental ops
+    // (exp2/log2 cores differ slightly between CPU libm and the
+    // Metal SIMD fast-math path).  abs diff < 1e-5 is plenty.
+    for (int k = 0; k < 4; k++) {
+      f32 d = cpu_buf[k] - gpu_buf[k];
+      if (d < 0) d = -d;
+      CHECK(d < 1e-5f);
+    }
+  }
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }
