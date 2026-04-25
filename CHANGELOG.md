@@ -6,6 +6,77 @@ dated section.
 
 ## Unreleased
 
+### Added: phase 3 -- SGD optimizer as a recursive lambda term
+
+Tying phases 1 + 2 together to demonstrate the original use case
+the user laid out: a lambda term that takes a "net with loss at
+root" plus a parameter and adds GRAD nodes inside a recursive
+training loop expressed as `TDef`/`TRef`.
+
+Three runtime fixes were needed to make `materialize(step(w))`
+compose multiple times without breaking grad's leaf check:
+
+1. **Lazy GRAD chain rule.**  `interact_grad` used to recursively
+   compute the entire chain rule expansion in one fire (eager).
+   Now each fire does a single structural step on `y`'s outermost
+   UOp, deferring sub-positions as fresh `UOP_GRAD` nodes that
+   wnf re-enters on demand.  `wnf` is called ONCE on `y` and
+   `target` to expose the outermost layer (so a `GRAD[APP(loss_fn,
+   w), w]` body can beta-reduce before pattern-matching).  Existing
+   numerics preserved (9/9 grad + 17/17 nn end-to-end tests still
+   pass); test_grad.c structural assertions updated to expect the
+   one-layer form.
+
+2. **Materialize follows VAR substitutions.**  After APP-LAM beta,
+   a UOP body's cells hold VARs pointing at the binder's
+   substituted heap slot.  `materialize_expr` now wnfs each input
+   first so VAR (and ALO and the active-path UOPs the wnf reducer
+   knows about) resolve to a concrete TEN/UOP_KERNEL.
+
+3. **Materialize result memoization.**  The same `MATERIALIZE`
+   wrapper inside a single graph is often referenced from N
+   slots (e.g. a recursive `step(w)` body uses `w` in both the
+   loss and the weight update).  Each fire used to allocate a
+   fresh kernel + TenDesc, so the resulting TAG_TEN ids differed
+   per use; `interact_grad`'s `y == target` pointer-equality
+   leaf check then failed and the gradient collapsed to zero.
+   `thvm_materialize` now caches the realised result back into the
+   wrapper's heap cell so subsequent fires return the SAME
+   TAG_TEN id.
+
+4. **ALO_force memoization.**  The companion fix for #3.  Each
+   ALO fire used to re-realize from the book template, allocating
+   fresh dyn cells.  In a recursive REF body that references the
+   bound `w` multiple times, the multiple references then mapped
+   to distinct fresh wrappers and #3 didn't help.  `alo_force`
+   now writes the realised term back into the ALO cell and marks
+   the second slot non-NUM as a "cached" sentinel.  Subsequent
+   fires hit the cache.
+
+WL example, in `wl/THVMLink/Tests/sgd.wlt`:
+
+```
+sgd_loop = TLam[w |->
+  TLam[n |->
+    TIfZero[n, w,
+      TApp[
+        TApp[TRef["sgd_loop"],
+             TUOpMaterialize[
+                w + (-lr) * grad(L2(w - target), w)]],
+        TOp2["-", n, TNum[1]]
+      ]
+    ]
+  ]
+]
+TDef["sgd_loop", sgd_loop]
+TWnf @ TApp[TApp[TRef["sgd_loop"], w0], TNum[2]]
+  -> {0.36, 0.72, 1.08}    (* w_2 = 0.8 w_1 + 0.2 target *)
+```
+
+4/4 SGD cases pass (one-step lambda + 0/1/2 recursive iters).
+Compute scales steeply (kernels ~3-4x per iteration without DUP
+sharing for tensors); training-scale runs need that next.
+
 ### Added: phase 2 -- MAT (numeric switch) + OP2 (binary ops on NUMs)
 
 Two more term tags so a recursive REF body can hit a base case and

@@ -117,6 +117,15 @@ fn u32 op_output_dtype(u8 op, u32 const *in_tids, u8 n_in, u32 const_dtype) {
 // ---- core: materialize a single UOp into a fresh UOP_KERNEL term.
 //      Children that are UOps are recursively materialized (bottom-up). ----
 fn Term materialize_expr(Term expr) {
+  // First force the outermost layer.  When `expr` came out of a
+  // beta-reduction or an ALO unfold, it might be a TAG_VAR whose
+  // referent is the substituted value, or a TAG_ALO that hasn't
+  // realised yet, or even a TAG_APP that needs another beta step
+  // before its real shape is visible.  wnf walks all of those to
+  // a WHNF root; for TAG_TEN / TAG_NUM / non-special TAG_UOP it's
+  // already-WHNF and the call is a no-op.
+  expr = wnf(expr);
+
   // TAG_TEN leaves: already concrete, nothing to do.
   if (term_tag(expr) != TAG_UOP) return expr;
 
@@ -245,10 +254,26 @@ fn Term materialize_expr(Term expr) {
 }
 
 fn Term thvm_materialize(Term term) {
-  // If it's a UOP_MATERIALIZE wrapper, unwrap and materialize its payload.
-  // Otherwise materialize the term directly (useful for programmatic use).
+  // UOP_MATERIALIZE wrapper: cache the realised result back into the
+  // wrapper's heap cell so subsequent fires return the SAME TAG_TEN
+  // id.  Without caching, multi-use of one wrapper -- e.g. when a
+  // recursive SGD body references `w` in both the loss and the
+  // weight update -- would produce a fresh kernel per use.  The
+  // resulting fresh-per-use TAG_TEN ids then break interact_grad's
+  // y == target pointer-equality leaf check (each `w` reference
+  // hashes to a different Term value), and grad collapses to zero.
   if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_MATERIALIZE) {
-    return materialize_expr(heap_read(term_val(term)));
+    u64  loc   = term_val(term);
+    Term inner = heap_read(loc);
+    // Cached: heap[loc] is already a TAG_TEN that previous fires
+    // memoised here.  (TAG_TEN is never the natural inner content
+    // of a freshly-built MATERIALIZE wrapper -- the constructor
+    // always stores a UOP graph -- so this is unambiguous.)
+    if (term_tag(inner) == TAG_TEN) return inner;
+    if (term_tag(inner) == TAG_UOP && term_ext(inner) == UOP_KERNEL) return inner;
+    Term result = materialize_expr(inner);
+    heap_set(loc, result);
+    return result;
   }
   return materialize_expr(term);
 }
