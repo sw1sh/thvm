@@ -365,6 +365,38 @@ VerificationTest[
     TestID -> "grad/conv2d-weights-cin1-equals-spatial-correlation"
 ]
 
+(* === CONV2D grad_input via transposed conv ===
+   d(loss)/d(input)[c_in, y, x]
+     = sum_{c_out, ky, kx, with valid bounds}
+         gy[c_out, y - ky, x - kx] * weights[c_out, c_in, ky, kx]
+   Concrete probe: input zeros{1, 4, 4}, weights = ones{1, 1, 3, 3},
+   bias = zeros{1}; CONST(1) seed -> gy lifted = ones{1, 2, 2}.
+   d/dinput at corners is small (only 1 weight position contributes),
+   d/dinput at center is 4 (all 4 weight-position windows hit it).
+   Expected output is the "valid-conv coverage map" of a 2x2 ones
+   gy with 3x3 ones weights:
+     {{1,2,2,1},
+      {2,4,4,2},
+      {2,4,4,2},
+      {1,2,2,1}}.  *)
+
+VerificationTest[
+    TInit[];
+    input   = TTensorCreate @ NumericArray[
+        ConstantArray[0.0, {1, 4, 4}], "Real32"];
+    weights = TTensorCreate @ NumericArray[
+        ConstantArray[1.0, {1, 1, 3, 3}], "Real32"];
+    bias    = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    g = TRealize @ TGrad[TUOpConv2D[input, weights, bias], input];
+    Normal @ TTensorData[g],
+    {{{1.0, 2.0, 2.0, 1.0},
+      {2.0, 4.0, 4.0, 2.0},
+      {2.0, 4.0, 4.0, 2.0},
+      {1.0, 2.0, 2.0, 1.0}}},
+    SameTest -> (Max[Abs[Flatten[#1] - Flatten[#2]]] < 1.0*^-5 &),
+    TestID -> "grad/conv2d-input-equals-coverage-map"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

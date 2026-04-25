@@ -190,8 +190,42 @@ fn Term interact_grad(Term grad_term) {
         // C_in > 1 case is its own follow-up task.
         gw_chain = grad_zero(target);
       }
-      Term gi = grad_zero(target);
-      Term sum_iw = uop_binary(UOP_ADD, gi, gw_chain);
+      // grad_input via the standard transposed-conv identity:
+      //   gi = full_conv(PAD(gy, kh-1, kw-1), PERMUTE(FLIP(weights, {2,3}),
+      //                                                {1, 0, 2, 3}))
+      // Concretely:
+      //   gy_padded = PAD(gy_at_out, axes spatial, b=e=kh-1 / kw-1)
+      //              shape {C_out, H_in + kh - 1, W_in + kw - 1}
+      //   wt_flip   = FLIP(weights, axes={2, 3})  shape {C_out, C_in, kh, kw}
+      //   wt_t      = PERMUTE(wt_flip, {1, 0, 2, 3})  shape {C_in, C_out, kh, kw}
+      //   raw_gi    = CONV2D(gy_padded, wt_t, zero_bias{C_in})
+      //              shape {C_in, H_in, W_in} = input shape ✓
+      Term gi_chain;
+      if (shapes_known) {
+        u32 c_out = wt_shape.dims[0];
+        u32 c_in  = wt_shape.dims[1];
+        u32 kh    = wt_shape.dims[2];
+        u32 kw    = wt_shape.dims[3];
+        u32 h_out = in_shape.dims[1] - kh + 1;
+        u32 w_out = in_shape.dims[2] - kw + 1;
+        u32 gy_at_out_dims[3]    = {c_out, h_out, w_out};
+        u32 pad_be[6]            = {0, 0,
+                                    kh - 1, kh - 1,
+                                    kw - 1, kw - 1};
+        u32 perm_swap_co_ci[4]   = {1, 0, 2, 3};
+        u32 zb_in_dim[1]         = {c_in};
+        Term gy_at_out_for_input = uop_expand(gy, 3, gy_at_out_dims);
+        Term gy_padded           = uop_pad(gy_at_out_for_input, 3, pad_be);
+        Term wt_flip             = uop_flip(weights, 0xC);   // axes 2 + 3
+        Term wt_t                = uop_permute(wt_flip, 4, perm_swap_co_ci);
+        Term zero_bias_in        = uop_expand(uop_const(DT_F32, 0), 1, zb_in_dim);
+        Term raw_gi              = uop_conv2d(gy_padded, wt_t, zero_bias_in);
+        gi_chain = uop_grad(input, raw_gi, target);
+      } else {
+        gi_chain = grad_zero(target);
+      }
+
+      Term sum_iw = uop_binary(UOP_ADD, gi_chain, gw_chain);
       return uop_binary(UOP_ADD, sum_iw, gb);
     }
 

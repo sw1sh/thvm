@@ -1199,7 +1199,7 @@ Realistic close-out for the overnight cron loop:
       primitive needed for CONV2D grad_input. -->
 
 
-- [ ] **CONV2D grad_input branch in interact_grad** (the
+- [x] **CONV2D grad_input branch in interact_grad** (the
       heaviest -- multi-fire on its own).  Build via:
         grad_input = full-conv(gy_padded, PERMUTE(FLIP(weights),
                                                   swap C_out and C_in))
@@ -1211,6 +1211,24 @@ Realistic close-out for the overnight cron loop:
       all present, the rule itself is a fresh UOP_CONV2D over
       the prepared input/weights pair.  Output shape will be
       {C_in, H, W} -- matching the input.
+      <!-- Implemented.  Replaces the grad_zero stub in the
+      input branch with the standard transposed-conv chain:
+      EXPAND gy to forward output shape, PAD spatial axes by
+      kh-1/kw-1 each side, FLIP weights spatial axes (bitmask
+      0xC = bits 2+3), PERMUTE to swap C_out/C_in (perm
+      {1,0,2,3}), then a fresh CONV2D against a zero bias of
+      shape {C_in}.  The fresh CONV2D's output naturally has
+      shape {C_in, H_in, W_in} = the original input shape.
+      Numerical test grad/conv2d-input-equals-coverage-map:
+      input zeros{1,4,4}, weights ones{1,1,3,3}, bias zeros{1};
+      CONST(1) seed -> grad_input is the "valid-conv coverage
+      map" {{1,2,2,1},{2,4,4,2},{2,4,4,2},{1,2,2,1}}: corners
+      hit by 1 weight, edges by 2, center by 4.  All 399 C +
+      190 WL tests stay green.  Full CONV2D backprop is now
+      wired (modulo the C_in > 1 grad_weights gap noted under
+      its own item) -- LeNet's first conv backprops correctly
+      end-to-end. -->
+
 
 - [ ] **End-to-end: TOptim["Adam"] training NetModel["LeNet"]
       on MNIST on Metal**.  The original goal.  Needs:
