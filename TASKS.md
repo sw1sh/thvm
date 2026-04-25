@@ -167,12 +167,21 @@ concern that interact_grad currently doesn't cover for any of these):
       shape-agnostic, materialize discovers everything from the
       input shapes. -->
 
-- [ ] `cpu_op_conv2d` kernel in `src/backend/cpu/op/conv2d.c`:
+- [x] `cpu_op_conv2d` kernel in `src/backend/cpu/op/conv2d.c`:
       stride-1, no-padding, channels-first {C_in, H, W} input;
       weights {C_out, C_in, kh, kw}; bias {C_out}.  Output
       {C_out, H-kh+1, W-kw+1}.  Standard 6-loop nested impl.
       Wire into `interpret.c` dispatch.  Add a smoke test in
       tests/test_uop.c (or a new test_conv2d.c).
+      <!-- arg packing: bits 24..31 = kh, 16..23 = kw, 0..15 = W_out;
+      kernel reverse-derives C_in / H_out / H from src_numels.
+      Materialize-shape regression in test_materialize.c covers
+      output {2,3,3} for {1,5,5} input + {2,1,3,3} weights.  End-
+      to-end numeric test lands with the WL constructor in the
+      next item -- writing input data + reading output buffer
+      from C is end-to-end-y enough that going through TRealize
+      is shorter. -->
+
 - [ ] WL `TUOpConv2D[input, weights, bias, kSize]` constructor +
       `fromLayer[ConvolutionLayer, ...]` dispatch + nn.wlt test
       against `NetApply` on a small initialised conv layer.
