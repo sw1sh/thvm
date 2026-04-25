@@ -483,13 +483,23 @@ fn Term materialize_root_alias(Term t) {
   // Allocate a fresh contig tensor of the same shape + dtype.
   u32 dst_tid = tensor_alloc(d->backend, d->view.shape, d->dtype);
   if (dst_tid == 0) return t;
-  // Underlying buffer numel = product of dims along non-broadcast
-  // axes (axes with stride != 0).  Backend-agnostic vs reading
-  // CPU_BUFS directly.
-  u32 src_numel = 1;
+  // Bytes to read from the source = max element index reachable
+  // from view_strided_index, plus 1.  Computed as offset + sum of
+  // (dim[i] - 1) * strides[i] over axes with positive strides
+  // (broadcast axes have stride 0 and contribute nothing; FLIP's
+  // negative strides start the offset at the high end and walk
+  // downward, so they're already covered by offset).  Backend-
+  // agnostic; works for EXPAND (zeros on broadcast axes coincide
+  // with source numel = product of non-broadcast dims, matching
+  // the prior formula) and SHRINK (positive strides + non-zero
+  // offset extend the read range beyond the alias's own numel).
+  i32 max_idx = d->view.offset;
   for (u32 i = 0; i < d->view.shape.ndim; i++) {
-    if (d->view.strides[i] != 0) src_numel *= d->view.shape.dims[i];
+    if (d->view.shape.dims[i] > 1 && d->view.strides[i] > 0) {
+      max_idx += (i32)(d->view.shape.dims[i] - 1) * d->view.strides[i];
+    }
   }
+  u32 src_numel = (u32)(max_idx + 1);
   size_t src_bytes = (size_t)src_numel * 4;
   void  *raw = malloc(src_bytes);
   d->backend->buf_read(d->buf_id, raw, src_bytes);

@@ -157,6 +157,49 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
       }
     }
 
+    // 2d. View-only SHRINK (sub-item f3d of the kernel-fusion arc).
+    //     Build an aliased TenDesc with shape = (e_i - b_i) per axis,
+    //     offset += sum(b_i * src_strides[i]), and strides inherited
+    //     from the (contiguous) source.  Marks contiguous=0 unless
+    //     the slice covers the entire source (degenerate case where
+    //     SHRINK is a no-op).  Consumers that need a flat contig
+    //     read fall through to view_strided_index via the
+    //     materialize_root_alias post-pass at the realize root.
+    if (op == UOP_SHRINK
+        && arity == 1 && child_tids[0] != 0
+        && TENS[child_tids[0]].view.contiguous) {
+      TenDesc *src = &TENS[child_tids[0]];
+      Shape src_shape = src->view.shape;
+      Shape t_shape = {0};
+      t_shape.ndim = src_shape.ndim;
+      i32 add_off = 0;
+      u32 t_numel = 1;
+      u8  ok = 1;
+      for (u32 i = 0; i < src_shape.ndim; i++) {
+        u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
+        u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+        if (e <= b || e > src_shape.dims[i]) { ok = 0; break; }
+        t_shape.dims[i] = e - b;
+        t_numel *= (e - b);
+        add_off += (i32)b * src->view.strides[i];
+      }
+      if (ok) {
+        View nv = {0};
+        nv.shape   = t_shape;
+        nv.numel   = t_numel;
+        nv.offset  = src->view.offset + add_off;
+        for (u32 i = 0; i < src_shape.ndim; i++) {
+          nv.strides[i] = src->view.strides[i];
+        }
+        for (u32 i = src_shape.ndim; i < MAX_DIM; i++) nv.strides[i] = 0;
+        nv.contiguous = (t_numel == src->view.numel) ? 1 : 0;
+        u32 alias_tid = tensor_view_of(child_tids[0], nv);
+        if (alias_tid != 0) {
+          return term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+        }
+      }
+    }
+
     // 2b. View-only RESHAPE (sub-item f3b of the kernel-fusion arc).
     //     For a contiguous source whose numel matches the target,
     //     RESHAPE doesn't need a memcpy kernel -- alias the source's

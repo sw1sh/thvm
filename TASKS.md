@@ -2858,7 +2858,7 @@ Realistic close-out for the overnight cron loop:
         movement op is its own ~50-LOC sub-item.
         Decomposed into 4 sub-items below.
 
-    - [ ] **f3d: SHRINK view-only**.  In
+    - [x] **f3d: SHRINK view-only**.  In
           src/schedule/materialize_in_env.c, add a
           UOP_SHRINK case before the kernel-emission path
           that allocates a view-aliased TenDesc via
@@ -2873,6 +2873,47 @@ Realistic close-out for the overnight cron loop:
           C unit test in tests/test_view_shrink.c covering
           the view-of-shrink alias + a strided/non-contig
           consumer.  ~50 LOC + ~30 LOC test.
+          <!-- Landed.  src/schedule/materialize_in_env.c
+          new "2d. View-only SHRINK" block: aliases via
+          tensor_view_of with offset += sum(b_i * src_strides[i]),
+          inherited strides, contiguous=0 for non-degenerate
+          slices.  Bails on e<=b or e>src.dims[i].
+
+          Also fixed a latent bug in materialize_root_alias's
+          src_numel calculation (src/schedule/materialize.c):
+          old formula was "product of non-broadcast dims",
+          which equals the alias's numel for SHRINK -- too
+          small to cover the source's offset+strides span.
+          New formula is "max element index reachable by
+          view_strided_index, plus 1" = offset +
+          sum((dim[i]-1)*strides[i]) over positive-stride
+          axes.  Coincidentally matches the old formula for
+          EXPAND (broadcast axes contribute 0); fixes SHRINK
+          at root + leaves room for FLIP (negative strides
+          covered by offset starting at the high end).
+          Without this fix, SHRINK at root reads the wrong
+          source bytes -- test_metal_real's center-crop
+          parity check failed before the fix.
+
+          tests/test_view_shrink.c (24 sub-checks): alias
+          shape/strides/offset, contiguous=0, producer_kid
+          inherited, root materialize gives correct
+          [6,7,10,11], strided consumer ADD computes 2x
+          correctly.
+
+          170 C + 246 WL tests green.
+
+          Caveat: probe shows kernel/TenDesc count UNCHANGED
+          (LeNet's forward + TGrad don't have SHRINK on
+          contig sources where this path triggers), but
+          buf-bytes increased by ~7 MiB (16022 -> 23297).
+          Cause undebugged; suspect alias-pinning of source
+          bufs via buf_incref keeping forward intermediates
+          counted longer (refcount > 0 measure).  Doesn't
+          break correctness (all tests green).  Investigate
+          if the next view-only sub-items show similar
+          regressions. -->
+
 
     - [ ] **f3e: PERMUTE view-only**.  Same approach: in
           materialize_in_env.c, allocate a view-aliased
