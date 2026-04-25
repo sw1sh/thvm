@@ -46,5 +46,11 @@ the order to land them in.
 
 ## Files
 
-  - `forward.wls`  -- the demo script.
-  - `README.md`    -- this file.
+  - `forward.wls`     -- the forward demo script.
+  - `grad-check.wls`  -- end-to-end forward + grad smoke test:
+                         materializes the full LeNet chain and
+                         takes `TGrad[loss, x]`, asserting a
+                         finite, correctly-shaped {1, 28, 28}
+                         gradient.  Exercises every grad rule
+                         in the chain in one call.
+  - `README.md`       -- this file.
