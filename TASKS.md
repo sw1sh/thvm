@@ -3858,8 +3858,8 @@ sub-items once these land.
         queued as a new "Tracing GC" follow-up arc below the
         heap-rooted-preserve arc parent. -->
 
-- [ ] **Tracing GC for the dyn heap** (follow-up to bm4 + hrp).
-      The bm4 freelist + rollback wiring + hrp1/hrp2's
+- [ ] **Tracing GC for the dyn heap (arc)** (follow-up to bm4 +
+      hrp).  The bm4 freelist + rollback wiring + hrp1/hrp2's
       heap-rooted preserve walk all landed cleanly, but the
       bm4 acceptance criterion (>=30% peak KiB drop on
       lenet-mnist) STILL isn't met because every kernel's
@@ -3875,12 +3875,72 @@ sub-items once these land.
       new src/schedule/gc.c that replaces both
       mark_preserved_chain and mark_heap_rooted_preserve.
 
-      Sized at ~150-200 LOC; will sub-decompose when picked up.
-      Once it ships, the freelist wiring already in place
-      (bm4abc) delivers the savings without further code
-      change -- this arc is the LAST blocker between the
-      lenet-mnist 1.6 MiB peak and the 53.9% slot-reuse
-      headroom TMemoryPlan measured.
+      Decomposed into 4 sub-items.  Once it ships, the
+      freelist wiring already in place (bm4abc) delivers the
+      savings without further code change -- this arc is the
+      LAST blocker between the lenet-mnist 1.6 MiB peak and
+      the 53.9% slot-reuse headroom TMemoryPlan measured.
+
+  - [ ] **gc1: root collection**.  New
+        src/schedule/gc_roots.c with `gc_collect_roots(Term
+        result, Term *out_roots, u32 *out_n)` that walks the
+        runtime's external reference points and returns the
+        Term root set:
+          - `result`: the wnf result returned by thvm_realize.
+          - WNF_LAST_STACK[0..WNF_LAST_STACK_LEN): pending
+            eliminator frames if wnf bailed early.
+          - DEFS[name] for each registered named def (TRef
+            roots).
+          - ALO_STATES (the substitution-chain table) entries
+            holding live Terms.
+        Output bound: cap at ~256 roots (single-step bench
+        cases run with at most a few dozen).  Standalone
+        helper; no integration with thvm_realize.  ~60 LOC +
+        ~30 LOC test in tests/test_gc_roots.c verifying the
+        result + WNF_LAST_STACK paths populate `out_roots`.
+
+  - [ ] **gc2: recursive mark from a root term**.  New
+        function `gc_mark_term(Term t, u8 *heap_visited)`
+        that traverses `t`'s heap children based on its tag:
+          - TAG_TEN: mark TENS[tid].buf_id preserved.  No
+            children.
+          - TAG_UOP: mark heap[loc + 0..arity-1] visited;
+            recurse into each child after term_resolve.
+          - TAG_LAM: heap[loc] is the body; recurse.
+          - TAG_APP / TAG_SUP / TAG_DUP / TAG_OP2 / TAG_MAT:
+            mark heap[loc..loc+arity-1] visited; recurse.
+          - TAG_REF / TAG_ALO: follow into BOOK_HEAP +
+            ALO_STATES; recurse one level.
+        `heap_visited` is a u8[HEAP_CAP] mark bitmap so cycles
+        terminate.  ~80 LOC + ~30 LOC test in
+        tests/test_gc_mark_term.c verifying mark correctness
+        on a small synthetic graph (TUOpAdd[tA, tB] with tA,
+        tB held as TAG_TEN; both bufs marked preserved, an
+        unrelated tC's buf NOT marked).
+
+  - [ ] **gc3: integrate into thvm_realize**.  New
+        `mark_gc_preserve(Term result)` in
+        src/schedule/gc.c (or extend
+        heap_rooted_preserve.c) that:
+          - calloc's a u8[HEAP_CAP] visited bitmap.
+          - Calls gc_collect_roots(result, ...) to get roots.
+          - For each root, calls gc_mark_term + frees bitmap.
+        Replace the call to mark_heap_rooted_preserve in
+        thvm_realize with mark_gc_preserve.  Keep the older
+        helpers static for fallback.  Acceptance: 268 C + 270
+        WL tests stay green; verify.wls Metal Adam-LeNet
+        converges loss 2.61 -> 0.025.  3-attempt rule
+        applies; document any heap-walk gap that surfaces.
+        ~40 LOC.
+
+  - [ ] **gc4: bench delta + docs**.  Re-run
+        wl/Examples/_bench/baseline.wls on both backends.
+        Acceptance: peak KiB drops at least 30% on lenet-mnist.
+        Update docs/bench-results.md with a fourth column
+        (post-gc) + delta vs post-hrp.  If the savings still
+        don't materialize, document the residual blocker
+        (likely an unanticipated heap-cell preservation path
+        like ALO state or BOOK heap aliasing).  ~20 LOC + doc.
 
 
 
