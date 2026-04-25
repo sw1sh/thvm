@@ -4469,6 +4469,51 @@ implemented + tested (f1a) but never invoked by the pipeline.
         toggle ON by default; linear-train probe shows
         kernel count drop without explicit toggle flip.
         ~10 LOC.
+        <!-- attempt 1 failed: flipping the default surfaced
+             3 distinct breakages, most are bigger than the
+             10-LOC scope:
+
+             1. View-only alias creation: when an UN-realized
+                EXPAND/SHRINK/PERMUTE/PAD/FLIP cell is hit,
+                the toggle-on path returned the original UOP
+                unchanged so view-only handling never ran.
+                Tests test_view_shrink/permute/pad/flip
+                regressed (expected TAG_TEN alias, got raw
+                UOP).  Fix: the hook should fall through to
+                legacy when the un-realized child is a
+                MOVEMENT op (only return-unchanged for
+                inlinable elementwise/CONST).  Add an
+                inline_is_inlinable check before the
+                return-unchanged branch.  ~5 LOC.
+
+             2. test_materialize / test_splice / test_use_realize
+                inspect the legacy per-UOp kernel structure
+                (n_ops, program[i].opcode etc.).  Need to set
+                MATERIALIZE_USE_REALIZE_INFO = 0 at the top of
+                main().  ~3 LOC each.
+
+             3. test_metal_real parity broke: with toggle on,
+                the inlined helper emits programs WITHOUT a
+                LOAD prefix.  CPU's interpreter handles this
+                (LOADs at non-final positions are skipped),
+                but Metal's dispatch_kernel apparently relies
+                on the prefix or on output_shape/output_numel
+                being set the same way as legacy.  Real
+                correctness gap; the inlined kernel structure
+                isn't yet Metal-compatible.
+
+             Re-decompose:
+               f1d-d1: hook fall-through for un-realized
+                       movement ops (~5 LOC); land FIRST
+               f1d-d2: opt out the structural unit tests
+                       from toggle ON (~10 LOC across 3 tests)
+               f1d-d3: investigate + fix Metal parity for
+                       inlined kernels (output_shape,
+                       output_numel, src0_dims, LOAD prefix);
+                       likely ~50-100 LOC + tests
+               f1d-d4: actually flip default to 1 + verify
+                       lenet-mnist verify.wls + bench probe -->
+
 
   - [ ] **f1e: bench delta + docs update**.  Re-run
         `wl/Examples/_bench/baseline.wls` on both backends.
