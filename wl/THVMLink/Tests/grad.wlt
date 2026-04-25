@@ -168,6 +168,19 @@ VerificationTest[
     TestID -> "grad/expand-of-const-short-circuits"
 ]
 
+(* === LOG2: d(log2 x)/dx = 1 / (x * ln 2) === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 4.0}, "Real32"];
+    (* d(log2 a)/da = 1 / (a * ln 2) *)
+    g = TRealize @ TGrad[TUOpLog2[a], a];
+    Normal @ TTensorData[g],
+    1.0 / (Log[2] * {1.0, 2.0, 4.0}),
+    SameTest -> (Max[Abs[#1 - #2]] < 1.0*^-5 &),
+    TestID -> "grad/log2-derivative"
+]
+
 (* === EXP2: d(2^x)/dx = 2^x * ln(2) === *)
 
 VerificationTest[

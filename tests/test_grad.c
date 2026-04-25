@@ -123,6 +123,14 @@ int main(void) {
   CHECK_EQ(term_ext(g_r), UOP_EXPAND);
   CHECK_EQ(unexpand(g_r), gy);
 
+  TEST_BEGIN("grad/log2-emits-mul-with-recip-and-inv-ln2");
+  // GRAD[LOG2(a), gy, a] -> GRAD[a, gy * RECIP(a) * CONST(1/ln2), a]
+  // -> cascade to leaf-EXPAND wrapping a MUL.
+  Term la     = uop_unary(UOP_LOG2, a);
+  Term g_lg   = wnf(uop_grad(la, gy, a));
+  CHECK_EQ(term_ext(g_lg), UOP_EXPAND);
+  CHECK_EQ(term_ext(unexpand(g_lg)), UOP_MUL);
+
   TEST_BEGIN("grad/exp2-emits-mul-with-exp2-and-ln2");
   // GRAD[EXP2(a), gy, a] -> GRAD[a, gy * EXP2(a) * CONST(ln2), a]
   // -> cascade to leaf-EXPAND wrapping a MUL.

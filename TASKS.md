@@ -586,10 +586,19 @@ Realistic close-out for the overnight cron loop:
       ln(2) * {2,4,8} within 1e-5. -->
 
 
-- [ ] **Grad rule: UOP_LOG2** in `interact_grad` per
+- [x] **Grad rule: UOP_LOG2** in `interact_grad` per
       `docs/grad-roadmap.md` step 6.  `d(log2 x)/dx = 1/(x ln 2)`,
       so rule is `GRAD[LOG2(a), gy, t] = GRAD[a, MUL[gy,
       MUL[RECIP(a), CONST(1/ln 2)]], t]`.  ~15 LOC + structural
       test + numerical test (e.g. `log2(x)` at x={1,2,4} yields
       grad = 1/(x ln 2)).  This is the last piece needed for
       cross-entropy loss (TLog) to backprop end-to-end.
+      <!-- 1/ln(2) embedded as a CONST via memcpy of f32 bits.
+      Tests: structural (cascades to leaf-EXPAND wrapping MUL);
+      numerical d(log2{1,2,4})/dx = 1/(x*ln 2) within 1e-5.
+      With this, all 6 unary/movement grad rules (RESHAPE,
+      EXPAND, CMPLT, EXP2, RECIP, LOG2) are in -- a Conv-free
+      MLP with softmax + cross-entropy can now backprop
+      end-to-end.  Next milestones per the roadmap: REDUCE_MAX
+      and CONV2D. -->
+

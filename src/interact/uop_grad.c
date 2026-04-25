@@ -124,6 +124,21 @@ fn Term interact_grad(Term grad_term) {
       return uop_grad(a, n_gy, target);
     }
 
+    case UOP_LOG2: {
+      // d(log2 a)/dx = 1/(a * ln 2) * da/dx, so:
+      //   GRAD[LOG2(a), gy, t] = GRAD[a, gy * RECIP(a) * CONST(1/ln 2), t]
+      Term a       = heap_read(y_loc + 0);
+      f32 inv_ln2  = 1.4426950408889634f;   // 1 / ln(2)
+      u32 inv_bits;
+      memcpy(&inv_bits, &inv_ln2, sizeof inv_bits);
+      Term k       = uop_const(DT_F32, inv_bits);
+      Term ra      = uop_unary(UOP_RECIP, a);
+      Term ra_k    = uop_binary(UOP_MUL, ra, k);
+      Term lifted  = expand_to_target(gy, target);
+      Term gy_a    = uop_binary(UOP_MUL, lifted, ra_k);
+      return uop_grad(a, gy_a, target);
+    }
+
     case UOP_EXP2: {
       // d(2^a)/dx = 2^a * ln(2) * da/dx, so:
       //   GRAD[EXP2(a), gy, t] = GRAD[a, gy * EXP2(a) * CONST(ln 2), t]
