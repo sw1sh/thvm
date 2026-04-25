@@ -300,31 +300,39 @@ fn Term interact_grad(Term grad_term) {
     }
 
     case UOP_MUL: {
-      // d(a*b)/dt = (da/dt)*b + a*(db/dt).  Allocate a *fresh* gy
-      // EXPAND per branch so the diagram has independent lifts (no
-      // multi-reference of one shared EXPAND).  Then defer the
-      // per-child GRADs.
+      // d(a*b)/dt = (da/dt)*b + a*(db/dt).  Cotangent for each
+      // branch is gy * (other input); MUL broadcasts via the
+      // kernel's numel-cycling, so no explicit lift needed.
+      // (Earlier this lifted gy to target shape via
+      // expand_to_target -- wrong when target rank doesn't match
+      // MUL's output rank, e.g. CONV2D-bias-grad downstream of a
+      // softmax+CE chain.)
       Term a = heap_read(y_loc + 0);
       Term b = heap_read(y_loc + 1);
-      Term gy_a_lift = expand_to_target(gy, target);
-      Term gy_b_lift = expand_to_target(gy, target);
-      Term gy_a = uop_binary(UOP_MUL, b, gy_a_lift);
-      Term gy_b = uop_binary(UOP_MUL, a, gy_b_lift);
+      Term gy_a = uop_binary(UOP_MUL, b, gy);
+      Term gy_b = uop_binary(UOP_MUL, a, gy);
       Term ga = uop_grad(a, gy_a, target);
       Term gb = uop_grad(b, gy_b, target);
       return uop_binary(UOP_ADD, ga, gb);
     }
 
     case UOP_NEG: {
-      Term a      = heap_read(y_loc + 0);
-      Term lifted = expand_to_target(gy, target);
-      Term n_gy   = uop_unary(UOP_NEG, lifted);
+      // NEG output shape == input shape, so gy already has the
+      // right shape; no lift needed.  (Earlier this called
+      // expand_to_target(gy, target) which mis-shapes gy when the
+      // grad's target is at a different rank than the current
+      // y -- e.g. NEG sitting downstream of a REDUCE_SUM whose
+      // input is a multi-element tensor.)
+      Term a    = heap_read(y_loc + 0);
+      Term n_gy = uop_unary(UOP_NEG, gy);
       return uop_grad(a, n_gy, target);
     }
 
     case UOP_LOG2: {
       // d(log2 a)/dx = 1/(a * ln 2) * da/dx, so:
       //   GRAD[LOG2(a), gy, t] = GRAD[a, gy * RECIP(a) * CONST(1/ln 2), t]
+      // gy already has LOG2's output shape (== input a's shape);
+      // no lift needed.
       Term a       = heap_read(y_loc + 0);
       f32 inv_ln2  = 1.4426950408889634f;   // 1 / ln(2)
       u32 inv_bits;
@@ -332,14 +340,14 @@ fn Term interact_grad(Term grad_term) {
       Term k       = uop_const(DT_F32, inv_bits);
       Term ra      = uop_unary(UOP_RECIP, a);
       Term ra_k    = uop_binary(UOP_MUL, ra, k);
-      Term lifted  = expand_to_target(gy, target);
-      Term gy_a    = uop_binary(UOP_MUL, lifted, ra_k);
+      Term gy_a    = uop_binary(UOP_MUL, gy, ra_k);
       return uop_grad(a, gy_a, target);
     }
 
     case UOP_EXP2: {
       // d(2^a)/dx = 2^a * ln(2) * da/dx, so:
       //   GRAD[EXP2(a), gy, t] = GRAD[a, gy * EXP2(a) * CONST(ln 2), t]
+      // gy already has EXP2's output shape (== input a's shape).
       Term a       = heap_read(y_loc + 0);
       f32 ln2_f    = 0.6931471805599453f;
       u32 ln2_bits;
@@ -347,8 +355,7 @@ fn Term interact_grad(Term grad_term) {
       Term ln2     = uop_const(DT_F32, ln2_bits);
       Term ea      = uop_unary(UOP_EXP2, a);
       Term ea_ln2  = uop_binary(UOP_MUL, ea, ln2);
-      Term lifted  = expand_to_target(gy, target);
-      Term gy_a    = uop_binary(UOP_MUL, lifted, ea_ln2);
+      Term gy_a    = uop_binary(UOP_MUL, gy, ea_ln2);
       return uop_grad(a, gy_a, target);
     }
 
@@ -356,14 +363,14 @@ fn Term interact_grad(Term grad_term) {
       // d(1/a)/dx = -1/a^2 * da/dx, so:
       //   GRAD[RECIP(a), gy, t] = GRAD[a, gy * -(1/a)^2, t]
       // Allocate independent RECIP nodes so the diagram has no
-      // shared references.
+      // shared references.  gy has RECIP's output shape == input
+      // a's shape.
       Term a      = heap_read(y_loc + 0);
       Term ra1    = uop_unary(UOP_RECIP, a);
       Term ra2    = uop_unary(UOP_RECIP, a);
       Term sq     = uop_binary(UOP_MUL, ra1, ra2);
       Term nsq    = uop_unary(UOP_NEG, sq);
-      Term lifted = expand_to_target(gy, target);
-      Term gy_a   = uop_binary(UOP_MUL, lifted, nsq);
+      Term gy_a   = uop_binary(UOP_MUL, gy, nsq);
       return uop_grad(a, gy_a, target);
     }
 

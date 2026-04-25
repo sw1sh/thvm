@@ -1411,7 +1411,7 @@ Realistic close-out for the overnight cron loop:
       queued as a separate follow-up.  All 399 C + 195 WL
       tests stay green. -->
 
-- [ ] **LeNet b1/b2 grad NaN (post-cascade-fix)**.  After
+- [x] **LeNet b1/b2 grad NaN (post-cascade-fix)**.  After
       the term_shape_in cascade fix, W1/W2/W3/W4 + b3/b4
       grads are all finite, but b1 and b2 still hit
       `LibraryFunction::fpexc` ("Numeric data containing a
@@ -1428,6 +1428,30 @@ Realistic close-out for the overnight cron loop:
       a new probe) to print intermediate cotangent
       magnitudes at each grad chain step for b1, identifying
       where NaN first appears.
+      <!-- ROOT CAUSE: NEG / RECIP / EXP2 / LOG2 / MUL grad
+      rules called expand_to_target(gy, target) which lifts
+      gy to the GRAD's TARGET shape rather than the current
+      op's INPUT shape.  When a chain like CONV2D-bias-grad
+      sits downstream of a softmax+CE (or any chain where
+      target rank != op rank), the cotangent's shape gets
+      reshaped to target shape and downstream `expand` /
+      `reduce` mis-broadcasts -- in simple cases producing
+      0; in deeper chains compounding to NaN/Inf.
+      Fix: removed expand_to_target from NEG / RECIP / EXP2 /
+      LOG2 / MUL.  Their output shapes equal their input
+      shapes (or, for MUL, the broadcast of inputs which the
+      kernel handles via numel-cycling), so gy is already
+      the right shape and no lift is needed.  Leaf rule and
+      REDUCE_SUM rule retain their explicit shape lifting
+      (they're rank-changing).
+      Probe G result post-fix: shape={3} min=-0.657 max=0.337
+      matching the expected per-channel sum of probs-target.
+      LeNet per-weight diagnostic post-fix: all 8 weights
+      finite with normal magnitudes (W1: +/-0.97, b1:
+      +/-0.58, W2: +/-0.58, b2: +/-0.52, W3: +/-0.66, b3:
+      +/-0.29, W4: +/-2.45, b4: +/-0.93).  All 399 C + 195
+      WL tests stay green.  train.wls is now unblocked. -->
+
       <!-- Localized to a much simpler chain than LeNet:
       CONV2D{1,4,4} -> flat -> softmax -> CE -> TGrad wrt b1
       returns ALL ZEROS.  Same chain without softmax (just
