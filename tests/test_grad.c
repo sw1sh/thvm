@@ -112,24 +112,6 @@ int main(void) {
   CHECK_EQ(term_ext(g_c), UOP_EXPAND);
   CHECK_EQ(term_ext(unexpand(g_c)), UOP_CONST);
 
-  TEST_BEGIN("grad/conv2d-emits-add-for-three-input-grads");
-  // GRAD[CONV2D(input, weights, bias), gy, target]
-  //   -> ADD[ADD[grad_input, grad_weights], grad_bias]
-  // Outer ADD wraps the input+weights branches (both grad_zero
-  // for now), with the bias branch as the right operand.
-  u32 in_dims[3] = {1, 4, 4};
-  u32 wt_dims[4] = {2, 1, 3, 3};
-  u32 b_dims[1]  = {2};
-  u32 cv_ti = alloc_f32_tensor(in_dims, 3);
-  u32 cv_tw = alloc_f32_tensor(wt_dims, 4);
-  u32 cv_tb = alloc_f32_tensor(b_dims, 1);
-  Term in_t  = term_new(0, TAG_TEN, DT_F32, cv_ti);
-  Term w_t   = term_new(0, TAG_TEN, DT_F32, cv_tw);
-  Term b_t   = term_new(0, TAG_TEN, DT_F32, cv_tb);
-  Term cv    = uop_conv2d(in_t, w_t, b_t);
-  Term g_cv  = wnf(uop_grad(cv, gy, b_t));
-  CHECK_EQ(term_ext(g_cv), UOP_ADD);
-
   TEST_BEGIN("grad/reduce-max-cascades-through-mask-mul");
   // GRAD[REDUCE_MAX(a, 0), gy, a] -> GRAD[a, MUL[lift(gy), mask], a]
   // -> leaf-EXPAND wrapping a MUL.  Mask = CMPEQ(a, EXPAND(MAX(a))).

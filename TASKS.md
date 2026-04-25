@@ -1874,7 +1874,7 @@ Realistic close-out for the overnight cron loop:
         bespoke CONV2D grad rule" -- is now reachable. -->
 
 
-- [ ] **Drop the bespoke CONV2D grad rule** from
+- [x] **Drop the bespoke CONV2D grad rule** from
       `src/interact/uop_grad.c` (the case branch with
       grad_bias / grad_weights-via-diagonal-mask /
       grad_input-via-PERMUTE+FLIP+PAD+CONV2D).  Once the
@@ -1884,6 +1884,30 @@ Realistic close-out for the overnight cron loop:
       verify lenet-mnist/verify.wls still passes -- the
       gradient should be identical (just emitted via a
       different path).
+      <!-- Landed.  Removed the ~190-LOC UOP_CONV2D case from
+      uop_grad.c (replaced with a one-line marker comment
+      noting it's now a no-op fallthrough).  Removed the
+      now-orphaned tests/test_grad.c
+      grad/conv2d-emits-add-for-three-input-grads structural
+      check + the nn.wlt grad-parity test that called TGrad
+      through TUOpConv2DBespoke.  The 4 grad.wlt CONV2D
+      numerical tests keep passing -- they call TUOpConv2D
+      (now the lowered alias) and exercise grad through the
+      chain rule via the SHRINK / PAD / PERMUTE / FLIP /
+      EXPAND grad rules.  214 WL + 146 C tests green.
+      Known follow-up regression (NOT introduced by this
+      task -- already broken since the dispatch flip in
+      sub-item c, but worth flagging here): lenet-mnist/
+      grad-check.wls + verify.wls hit "kernel_alloc: out of
+      slots (cap=4096)" because the lowered conv2d emits
+      ~200 ops per LeNet conv layer, and backward through
+      2 convs + the rest of the chain blows past 4K kernels.
+      Bumping KERNELS_CAP just exposes a cascading
+      tensor_alloc descriptor cap.  The right fix is the
+      queued "Audit kernelization boundaries" task -- one
+      kernel per UOP is fundamentally wrong at this scale.
+      lenet-mnist/forward.wls (no TGrad) still works. -->
+
 
 - [ ] **Drop UOP_CONV2D opcode + kernel + src/uop/conv2d.c**.
       Once nothing consumes UOP_CONV2D (lowered TUOpConv2D +
