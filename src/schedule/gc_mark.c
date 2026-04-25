@@ -104,19 +104,13 @@ fn void gc_mark_term(Term t, u8 *heap_visited) {
 // thvm_realize calls.  Allocates a throwaway u8[HEAP_CAP]
 // bitmap; walks each root with gc_mark_term.
 //
-// Attempt 2 (this version) ALSO calls
-// mark_heap_rooted_preserve to defensively cover pending UOP
-// cells that aren't reachable from any GC root but DO appear
-// as TAG_TEN cells in the heap (e.g., forward intermediate
-// kernel outputs at heap[uop_kernel_loc + 0] that the next
-// TGrad realize will need).  Net coverage = gc reachable
-// set UNION heap-rooted set; safe across cross-realize TGrad
-// patterns.  Same effective coverage as hrp2 (zero bench
-// delta) -- the tracing infrastructure lands cleanly, and
-// the actual savings unblock once a WL-pinned-Terms side
-// table or chain-aware mark lands (queued as a separate
-// follow-up arc beyond this gc arc).
-#define GC_ROOTS_CAP 256
+// wpt3: with WL_PINNED_TERMS now folded into gc_collect_roots,
+// the cross-realize TGrad pattern is covered by the pin set
+// directly -- no more defensive heap-rooted overlay.  This is
+// what bm4 / hrp / gc were missing: the WL caller's TTerm
+// handles are now live roots, so the trace reaches forward
+// intermediate kernel outputs without touching every heap cell.
+#define GC_ROOTS_CAP 4096
 fn void mark_gc_preserve(Term result) {
   Term roots[GC_ROOTS_CAP];
   u32  n_roots = 0;
@@ -128,7 +122,4 @@ fn void mark_gc_preserve(Term result) {
     }
     free(visited);
   }
-  // Defensive heap-rooted overlay -- catches cross-realize
-  // pending UOP cells that gc_mark_term's root set misses.
-  mark_heap_rooted_preserve();
 }

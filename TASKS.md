@@ -4161,7 +4161,7 @@ sub-items once these land.
              Tests: 166 C + 270 WL green. -->
 
 
-  - [ ] **wpt3: integrate into gc_collect_roots + flip the
+  - [x] **wpt3: integrate into gc_collect_roots + flip the
         heap-rooted overlay off**.  In src/schedule/gc_roots.c,
         extend gc_collect_roots to walk WL_PINNED_TERMS via
         wl_pinned_for_each.  In src/schedule/gc_mark.c,
@@ -4173,6 +4173,15 @@ sub-items once these land.
         rule applies; if anything breaks, the most likely
         cause is a Term path not pin-wired in wpt2 (fix +
         re-test).  ~10 LOC.
+        <!-- DONE: gc_collect_roots scans WL_PINNED_TERMS as
+             root source #4; mark_gc_preserve dropped the
+             defensive mark_heap_rooted_preserve overlay.
+             GC_ROOTS_CAP bumped to 4096 to absorb the pin
+             table (cap 2048) on top of DEFS + WNF stack +
+             result.  Tests: 166 C + 270 WL green; verify.wls
+             converges loss 2.61 -> 0.025 (pred 0 -> 4
+             correct, prob[true] 0.074 -> 0.997). -->
+
 
   - [ ] **wpt4: bench delta + docs**.  Re-run
         wl/Examples/_bench/baseline.wls on both backends.

@@ -12,6 +12,12 @@
 //   3. DEFS[name] for each name with a non-zero entry.  These
 //      are TRef roots; gc_mark_term will follow them into
 //      BOOK_HEAP via the TAG_REF / TAG_ALO recursion.
+//   4. WL_PINNED_TERMS[0..WL_PINNED_TERMS_LEN) -- every Term WL
+//      is currently holding via a TTerm[id] handle.  Lets us
+//      preserve forward-intermediate kernel outputs that sit in
+//      HEAP[] as TAG_TEN cells but aren't reachable from any
+//      other root (the cross-realize TGrad pattern that hrp /
+//      gc had to cover with a defensive heap-rooted overlay).
 //
 // ALO_STATES (the substitution-chain table) is NOT a Term
 // source: its entries map book locs to fresh dyn locs; the
@@ -36,6 +42,9 @@ fn void gc_collect_roots(Term result, Term *out, u32 cap, u32 *out_n) {
   }
   for (u32 i = 0; i < DEFS_CAP && n < cap; i++) {
     if (DEFS[i] != 0) out[n++] = DEFS[i];
+  }
+  for (u32 i = 0; i < WL_PINNED_TERMS_LEN && n < cap; i++) {
+    if (WL_PINNED_TERMS[i] != 0) out[n++] = WL_PINNED_TERMS[i];
   }
   *out_n = n;
 }
