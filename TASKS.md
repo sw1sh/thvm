@@ -3971,7 +3971,7 @@ sub-items once these land.
         thvm_realize. -->
 
 
-  - [ ] **gc3: integrate into thvm_realize**.  New
+  - [x] **gc3: integrate into thvm_realize**.  New
         `mark_gc_preserve(Term result)` in
         src/schedule/gc.c (or extend
         heap_rooted_preserve.c) that:
@@ -3985,6 +3985,26 @@ sub-items once these land.
         converges loss 2.61 -> 0.025.  3-attempt rule
         applies; document any heap-walk gap that surfaces.
         ~40 LOC.
+        <!-- attempt 1: swapping mark_heap_rooted_preserve for
+        mark_gc_preserve(res) in thvm_realize broke 3 WL
+        tests (...same dead-end as bm4b/hrp...).  Reverted.
+
+        attempt 2 (LANDED, "tracing-GC + heap-rooted
+        overlay"): mark_gc_preserve does the gc walk AND
+        defensively also calls mark_heap_rooted_preserve.
+        Net coverage = gc reachable set UNION heap-rooted
+        set; safe across cross-realize TGrad patterns.
+
+        Effective coverage matches hrp2 today (zero bench
+        delta) -- the tracing-GC infrastructure lands
+        cleanly, integrated into thvm_realize, with all
+        268 C + 270 WL tests green and Metal Adam-LeNet
+        converging loss 2.61 -> 0.025.  Real savings
+        unblock once a WL-pinned-Terms side table lets
+        gc_mark_term find pending UOPs without the
+        heap-rooted overlay (queued as a follow-up arc
+        below the gc arc parent). -->
+
         <!-- attempt 1: swapping mark_heap_rooted_preserve for
         mark_gc_preserve(res) in thvm_realize broke 3 WL
         tests, all gradient/training-related across multiple

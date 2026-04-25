@@ -98,3 +98,37 @@ fn void gc_mark_term(Term t, u8 *heap_visited) {
       return;
   }
 }
+
+// gc3: tracing-GC preserve.  Composes gc1 (root collection) +
+// gc2 (recursive mark) into the preserve interface
+// thvm_realize calls.  Allocates a throwaway u8[HEAP_CAP]
+// bitmap; walks each root with gc_mark_term.
+//
+// Attempt 2 (this version) ALSO calls
+// mark_heap_rooted_preserve to defensively cover pending UOP
+// cells that aren't reachable from any GC root but DO appear
+// as TAG_TEN cells in the heap (e.g., forward intermediate
+// kernel outputs at heap[uop_kernel_loc + 0] that the next
+// TGrad realize will need).  Net coverage = gc reachable
+// set UNION heap-rooted set; safe across cross-realize TGrad
+// patterns.  Same effective coverage as hrp2 (zero bench
+// delta) -- the tracing infrastructure lands cleanly, and
+// the actual savings unblock once a WL-pinned-Terms side
+// table or chain-aware mark lands (queued as a separate
+// follow-up arc beyond this gc arc).
+#define GC_ROOTS_CAP 256
+fn void mark_gc_preserve(Term result) {
+  Term roots[GC_ROOTS_CAP];
+  u32  n_roots = 0;
+  gc_collect_roots(result, roots, GC_ROOTS_CAP, &n_roots);
+  u8 *visited = (u8 *)calloc(HEAP_CAP, 1);
+  if (visited != NULL) {
+    for (u32 i = 0; i < n_roots; i++) {
+      gc_mark_term(roots[i], visited);
+    }
+    free(visited);
+  }
+  // Defensive heap-rooted overlay -- catches cross-realize
+  // pending UOP cells that gc_mark_term's root set misses.
+  mark_heap_rooted_preserve();
+}
