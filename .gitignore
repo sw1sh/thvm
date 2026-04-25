@@ -14,3 +14,5 @@ wl/Notebooks
 # Local-only reference symlink to the research prototype. Create with:
 #   ln -s ../TinyHVM TinyHVM
 TinyHVM
+
+build/
