@@ -517,6 +517,12 @@ fn u32  realize_consumer_count(Term uop_term);
 // Default 0; flipped on once f1d-b/c land.
 extern u8 MATERIALIZE_USE_REALIZE_INFO;
 
+// f1d-b1: emit ONE kernel for a realized UOp that inlines its
+// un-realized elementwise upstream compute.  Returns 0 if the
+// chain contains a non-elementwise un-realized UOp (caller
+// falls back to legacy per-UOp kernel emission).
+fn Term materialize_kernel_inlined(Term realized_uop_term);
+
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.
 fn Term interact_app_lam(Term lam, Term arg);

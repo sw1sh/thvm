@@ -4390,7 +4390,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
              production (no caller wires it). -->
 
 
-  - [ ] **f1d-b2: hook materialize_kernel_inlined into walk**.
+  - [x] **f1d-b2: hook materialize_kernel_inlined into walk**.
         Modify `materialize_uop_in_env` so that when the
         toggle is on:
           - if realize_is_realized(uop): call
@@ -4405,6 +4405,22 @@ implemented + tested (f1a) but never invoked by the pipeline.
         drops from 17 to <= 5, (b) 166 C + 289 WL green,
         (c) nn/poly-regression-gradients still gives
         {-32, -16}.  ~50 LOC.
+        <!-- DONE: hook landed at top of materialize_uop_in_env
+             (after the UOP_KERNEL/UOP_GRAD short-circuit, before
+             the legacy classify+emit path).  Helper bail
+             returns 0 -> falls through to legacy emit so
+             non-elementwise upstream stays correct.  Forward
+             decl for materialize_kernel_inlined added to thvm.h.
+             Test tests/test_use_realize.c (11 sub-checks):
+             default-off keeps per-UOp kernels (chain -> 2
+             kernels), toggle-on collapses to 1 kernel with
+             [ADD, MUL] program, REDUCE root falls back to
+             legacy.  166 C + 289 WL green with default OFF.
+             (a) linear-train measurement and (c) poly-regression
+             grad correctness require flipping toggle on -- WL
+             verification deferred to f1d-c (which exposes a WL
+             toggle and runs the grad suite). -->
+
 
   - [ ] **f1d-c: source_uop chain handling under toggle**.
         With the toggle on, interact_uop_grad's source_uop
