@@ -1701,37 +1701,55 @@ Realistic close-out for the overnight cron loop:
         chain rule.  211 WL + 146 C tests green. -->
 
 
-- [ ] **Lower TUOpConv2D to a primitive chain**.  Replace the
-      direct `uop_conv2d` call inside the WL helper TUOpConv2D
-      (or build a new helper alongside it) with a chain of
-      primitive UOPs that computes the same convolution via
-      _pool-style sliding-window extraction:
-        - input x{C_in, H, W} -> sliding-window unfold to
-          {C_in, H_out, W_out, kh, kw} via a combination of
-          EXPAND (with stride-0 broadcast on a new kernel
-          axis), PAD on the spatial axis, RESHAPE, SHRINK,
-          and PERMUTE.  Standard tinygrad recipe; see
-          `tensor.py::_pool` for reference.
-        - weights{C_out, C_in, kh, kw} broadcast against the
-          unfolded input; MUL and REDUCE_SUM over the
-          (C_in, kh, kw) axes.
-        - + bias broadcast.
-      Output {C_out, H_out, W_out} matches the existing
-      forward semantics.  After this lands, the chain rule
-      will autograd through the primitives for free; the
-      bespoke CONV2D grad rule can be dropped in the next
-      sub-item.
+- [ ] **Lower TUOpConv2D to a primitive chain (arc)**.  Replace
+      the direct `uop_conv2d` call inside the WL helper TUOpConv2D
+      with a chain of primitive UOPs that computes the same
+      convolution.  After this lands, the chain rule will
+      autograd through the primitives for free; the bespoke
+      CONV2D grad rule + opcode can be dropped in the next two
+      arc items.
       <!-- attempt 1: drafted as a kh*kw-unrolled chain in
-      Tensor.wl (each kernel position is a SHRINK + EXPAND +
-      MUL + REDUCE_SUM contributing a {C_out, H_out, W_out}
-      partial; sum + bias).  Forward is presumably correct
-      (didn't verify standalone) but ALL three pre-existing
-      CONV2D grad tests immediately failed with all-zero
-      gradients -- because interact_grad has no rules for
-      SHRINK / PAD / PERMUTE / FLIP, so autograd through the
-      lowered chain falls into the unhandled-default branch
-      (grad_zero).  Reverted; the prerequisite task above
-      must land first. -->
+      Tensor.wl.  Forward presumably correct but ALL three
+      pre-existing CONV2D grad tests immediately failed with
+      all-zero gradients because interact_grad lacked rules for
+      SHRINK / PAD / PERMUTE / FLIP.  Those rules now landed (5
+      sub-items above), so the lowering is unblocked. -->
+
+  - [ ] **a. TUOpConv2DLowered[input, weights, bias]**: a new WL
+        helper that builds the convolution as a kh*kw-unrolled
+        chain of primitives.  For each kernel position
+        (ki, kj) in [0, kh) x [0, kw):
+          - SHRINK input on H axis to [ki, ki + H_out) and on W
+            axis to [kj, kj + W_out) -> {C_in, H_out, W_out}.
+          - SHRINK weights to [:, :, ki:ki+1, kj:kj+1] then
+            RESHAPE to {C_out, C_in} -> {C_out, C_in}.
+          - Broadcast: EXPAND input to {C_out, C_in, H_out, W_out},
+            EXPAND weights to {C_out, C_in, H_out, W_out}.
+          - MUL + REDUCE_SUM over C_in axis -> {C_out, H_out, W_out}.
+        Sum the kh*kw partials, then add bias broadcast.  No
+        new primitive ops; pure WL composition over existing
+        constructors.  Smoke test in nn.wlt: forward parity
+        with TUOpConv2D for a tiny case (C_in=1, C_out=1,
+        H=W=4, kh=kw=2).  ~60 LOC of WL + ~25 LOC of test.
+
+  - [ ] **b. Forward + grad parity at LeNet-realistic shapes**.
+        Add wlt cases that compare TUOpConv2D and
+        TUOpConv2DLowered at C_in=3, C_out=2, H=W=8, kh=kw=3
+        (closer to the inner LeNet conv).  Assert forward
+        outputs are bit-equal (or within float rounding) and
+        grad-wrt-input + grad-wrt-weights are too.  Validates
+        the lowering preserves both semantics.  ~30 LOC of test.
+
+  - [ ] **c. Switch TUOpConv2D internals to the lowered chain**.
+        Make the public TUOpConv2D dispatch to
+        TUOpConv2DLowered (so existing call sites pick up the
+        primitive chain transparently), keeping the underlying
+        `uop_conv2d` C constructor reachable only via a back-door
+        helper.  Re-run nn.wlt + lenet-mnist/forward.wls to
+        confirm the LeNet forward is bit-identical (within
+        float tolerance) before and after.  ~10 LOC + WL/CLI
+        smoke.  After this lands, the next arc items (drop
+        bespoke grad rule, drop opcode) become reachable.
 
 - [ ] **Drop the bespoke CONV2D grad rule** from
       `src/interact/uop_grad.c` (the case branch with
