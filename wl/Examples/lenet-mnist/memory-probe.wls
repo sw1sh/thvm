@@ -120,7 +120,8 @@ debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];
 Module[{plan = TMemoryPlan[], backend, path},
     backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
     path    = "wl/Examples/lenet-mnist/memory-plan-" <> backend <> ".png";
-    Export[path, TMemoryPlanGantt[plan], ImageResolution -> 144];
+    Export[path, TMemoryPlanGantt[plan],
+        ImageResolution -> 144, Background -> White];
     debugPrint[""];
     debugPrint["TMemoryPlanGantt -> ", path]
 ]

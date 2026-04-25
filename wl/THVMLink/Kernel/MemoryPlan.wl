@@ -359,35 +359,83 @@ statusEdge[status_String] := Switch[status,
     _,           LightDarkSwitched[StandardGray,   Lighter[StandardGray,   0.2]]
 ]
 
-barHeightFn["Log"][nbytes_]     := Log2[1 + nbytes]
-barHeightFn["Uniform"][nbytes_] := 1
-barHeightFn[_][nbytes_]         := Log2[1 + nbytes]
-
 backendsActive[bufs_] := DeleteDuplicates[#["backend"] & /@ bufs] /. {
     {} -> "(none)", {1} -> "CPU", {2} -> "Metal", {1, 2} | {2, 1} -> "CPU + Metal"
 }
 
-Options[TMemoryPlanGantt] = {
-    "BarHeight" -> "Uniform",
-    "TopN"      -> 40
-};
+(* Linear-scan slot allocator: assigns each buf a vertical y-range
+   such that height = nbytes and two bufs whose alive intervals
+   don't overlap may share the same y-range (memory slot reuse).
+   The total y-extent at any x = peakConcurrentLive's peak_bytes;
+   the visualization makes slot reuse visible -- a tall bar with
+   multiple short cards stacked along its lifetime is one slot
+   serving several bufs in turn.
+
+   Greedy first-fit: sort by alloc_depth, then for each buf find
+   the first existing slot whose freeAfterDepth < alloc_depth AND
+   capacity >= nbytes; if none, open a new slot at the top.
+   Returns the input bufs with an additional "y_range" -> {y0, y1}
+   key.  Not optimal (true bin-packing is NP-hard) but matches
+   what tinygrad's runtime allocator does in practice. *)
+linearScanPack[bufs_] := Block[{
+    sorted,
+    slots = {},
+    yMax = 0,
+    out = {}
+},
+    sorted = SortBy[bufs, {#["alloc_depth"] &, -#["nbytes"] &}];
+    Do[
+        Block[{
+            b = sorted[[i]],
+            n,
+            fitIdx,
+            slot,
+            y0,
+            y1
+        },
+            n = b["nbytes"];
+            fitIdx = SelectFirst[
+                Range[Length[slots]],
+                Function[k,
+                    slots[[k, 3]] < b["alloc_depth"]
+                    && (slots[[k, 2]] - slots[[k, 1]]) >= n
+                ],
+                Missing[]
+            ];
+            If[ MissingQ[fitIdx],
+                y0 = yMax;
+                y1 = y0 + n;
+                yMax = y1;
+                AppendTo[slots, {y0, y1, b["last_use_depth"]}];
+                ,
+                slot = slots[[fitIdx]];
+                y0 = slot[[1]];
+                y1 = y0 + n;
+                slots[[fitIdx, 3]] = b["last_use_depth"];
+            ];
+            AppendTo[out, Append[b, "y_range" -> {y0, y1}]]
+        ],
+        {i, Length[sorted]}
+    ];
+    {out, yMax}
+]
+
+Options[TMemoryPlanGantt] = {"TopN" -> 40};
 TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
     Block[{
         allBufs = a["Bufs"],
         bufs,
-        heightFn,
         topN,
-        sorted,
+        packed,
         maxDepth,
-        rows,
         totalBytes,
         peak,
         savingsPct,
         totalHeight,
-        omittedCount
+        omittedCount,
+        legendStatuses
     },
-        heightFn = barHeightFn[OptionValue["BarHeight"]];
-        topN     = OptionValue["TopN"];
+        topN = OptionValue["TopN"];
         If[ allBufs === {}, Return[Graphics[{}, ImageSize -> 320]]];
         (* Show only the top-N largest bufs (by nbytes) so each card
            remains visible.  TopN -> Infinity / All renders every
@@ -398,7 +446,6 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
             allBufs
         ];
         omittedCount = Length[allBufs] - Length[bufs];
-        sorted = SortBy[bufs, {#["alloc_depth"] &, -#["nbytes"] &}];
         maxDepth = Max[#["last_use_depth"] & /@ allBufs];
         totalBytes = Total[#["nbytes"] & /@ allBufs];
         peak = peakConcurrentLive[allBufs];
@@ -406,33 +453,32 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
             Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1],
             0
         ];
-        (* Walk sorted bufs, stacking each by its (cumulative) bar
-           height.  Each row is {y0, y1, buf}; rendered as a
-           Tooltip-wrapped Rectangle with the status fill. *)
-        rows = Block[{y = 0}, Map[
-            Function[b, Block[{h = heightFn[b["nbytes"]], y0 = y},
-                y += h;
-                {y0, y0 + h, b}
-            ]],
-            sorted
-        ]];
-        totalHeight = If[ rows === {}, 1, rows[[-1, 2]]];
+        (* Linear-scan packing: each buf gets {y0, y1} with
+           y1 - y0 = nbytes; non-overlapping bufs share a y-band.
+           The y-axis becomes "memory bytes" with a meaningful
+           scale, and slot reuse is visible as multiple cards
+           stacked along the same vertical strip. *)
+        {packed, totalHeight} = linearScanPack[bufs];
+        If[ totalHeight === 0, totalHeight = 1];
+        (* Status legend: only show entries that actually appear in
+           the rendered set so the legend doesn't list categories
+           the user can't see. *)
+        legendStatuses = DeleteDuplicates[#["status"] & /@ packed];
         Graphics[
             {
                 (* Per-buf rounded card: pastel fill, saturated
-                   border, ~10% vertical inset so adjacent stacked
+                   border, small vertical inset so adjacent stacked
                    bars don't merge into a solid color blob. *)
-                Function[row, Block[{
-                    y0     = row[[1]],
-                    y1     = row[[2]],
-                    b      = row[[3]],
+                Function[b, Block[{
+                    y0     = b["y_range"][[1]],
+                    y1     = b["y_range"][[2]],
                     h, inset, x0, x1, radius
                 },
                     h      = y1 - y0;
-                    inset  = 0.12 h;
+                    inset  = Min[0.04 totalHeight, 0.1 h];
                     x0     = b["alloc_depth"];
                     x1     = b["last_use_depth"] + 1;
-                    radius = Min[0.35, 0.4 (h - 2 inset), 0.4 (x1 - x0)];
+                    radius = Min[0.04 totalHeight, 0.4 (x1 - x0)];
                     {
                         FaceForm[statusFill[b["status"]]],
                         EdgeForm[Directive[
@@ -459,12 +505,24 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                             }]
                         ]
                     }
-                ]] /@ rows
+                ]] /@ packed
             },
             Frame -> True,
-            FrameStyle -> LightDarkSwitched[Black, White],
-            FrameTicks -> {Automatic, None},
-            FrameLabel -> {"topological depth (kernel DAG)", None},
+            FrameTicks -> {
+                Automatic,
+                (* Y-axis ticks in KiB so the memory scale is
+                   readable.  Pick ~6 round values across the
+                   total height. *)
+                Block[{step},
+                    step = Quotient[totalHeight, 6];
+                    If[ step <= 0, step = 1];
+                    Table[{y, Round[y/1024., 0.1]}, {y, 0, totalHeight, step}]
+                ]
+            },
+            FrameLabel -> {
+                "topological depth (kernel DAG)",
+                "memory (KiB) -- linear-scan slot allocator"
+            },
             (* Peak-concurrency marker as Epilog (after bars,
                before frame).  Avoid Opacity directive -- it
                leaks into FrameStyle (Mathematica quirk; tested
@@ -494,7 +552,18 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
             ImageSize -> Large,
             AspectRatio -> 1/2,
             PlotRangePadding -> Scaled[0.02]
-        ]
+        ] // Legended[#,
+            SwatchLegend[
+                statusFill /@ legendStatuses,
+                legendStatuses,
+                LegendMarkers -> Graphics[{
+                    EdgeForm[Directive[Black, Thickness[0.02]]],
+                    Rectangle[{0, 0}, {1, 1}, RoundingRadius -> 0.18]
+                }],
+                LegendLabel -> "buffer status",
+                LabelStyle -> {FontSize -> 11}
+            ]
+        ] &
     ]
 
 (* === MakeBoxes summary box ===

@@ -78,28 +78,28 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* TMemoryPlanGantt returns a Graphics expression. *)
+    (* TMemoryPlanGantt returns a Legended-wrapped Graphics. *)
     TInit[];
     TReset[];
     a   = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
     b   = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
     res = TRealize @ TUOpAdd[a, b];
     Head @ TMemoryPlanGantt[TMemoryPlan[]],
-    Graphics,
-    TestID -> "memory-plan/gantt-head-is-graphics"
+    Legended,
+    TestID -> "memory-plan/gantt-head-is-legended"
 ]
 
 VerificationTest[
-    (* TMemoryPlanGantt with "BarHeight" -> "Uniform" still
-       returns Graphics; smoke-test the option pass-through. *)
+    (* TMemoryPlanGantt with "TopN" -> 5 still returns Legended;
+       smoke-test the option pass-through. *)
     TInit[];
     TReset[];
     a   = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
     b   = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
     res = TRealize @ TUOpAdd[a, b];
-    Head @ TMemoryPlanGantt[TMemoryPlan[], "BarHeight" -> "Uniform"],
-    Graphics,
-    TestID -> "memory-plan/gantt-uniform-bar-height-option"
+    Head @ TMemoryPlanGantt[TMemoryPlan[], "TopN" -> 5],
+    Legended,
+    TestID -> "memory-plan/gantt-topn-option"
 ]
 
 VerificationTest[
