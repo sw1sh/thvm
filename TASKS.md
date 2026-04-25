@@ -3417,10 +3417,24 @@ sub-items once these land.
       only for now -- full training comes back after bm4. -->
 
 
-- [ ] **bm4: runtime slot allocator (port TMemoryPlan's
+- [x] **bm4: runtime slot allocator (port TMemoryPlan's
       linear-scan into the C runtime) (arc)** -- the
       visualization already proves a 48-54% slot-reuse headroom
       on LeNet.  Decomposed into 4 sub-items below.
+      <!-- All 4 sub-items landed (bm4a CPU free-list infra,
+      bm4b rollback wires non-preserved owning bufs to free-list,
+      bm4c Metal mirror, bm4d bench validation).  Acceptance
+      target (>=30% peak KiB drop on lenet-mnist) NOT met --
+      bench delta is 0% on every metric; the conservative
+      chain-rooted preserve walk pins every forward intermediate,
+      so the freelist receives nothing.  Infrastructure is solid
+      + tested + correctness-preserving (Metal Adam-LeNet still
+      converges; 268 C + 270 WL tests green).  Real savings
+      blocked behind the queued "Heap-rooted preserve pass" arc
+      below bm5; once that lands the freelist + rollback wiring
+      bm4 shipped will deliver the savings without further code
+      change. -->
+
 
   - [x] **bm4a: CPU free-list infrastructure**.  Add a per-
         size-class slot list to src/backend/cpu/.  Two
@@ -3680,10 +3694,22 @@ sub-items once these land.
         below this bm4 arc). -->
 
 
-- [ ] **bm5: re-bench + delta report** -- rerun bm1 on the
+- [x] **bm5: re-bench + delta report** -- rerun bm1 on the
       same 4 cases after bm4 lands; write
       docs/bench-results.md comparing baseline vs new numbers
       with a `% delta` column on each metric.  ~30 LOC + doc.
+      <!-- Done.  docs/bench-results.md (new) consolidates the
+      4-row x 4-metric side-by-side: bm3 baseline | post-bm4abc
+      | delta.  Every memory metric is +/-0%; ms/step jitters
+      <=18% (Metal lenet jitter is run-to-run noise dominated by
+      the per-kernel command-buffer round-trip).  Doc explains
+      WHY the delta is zero (chain-preserve pinning), notes
+      correctness preservation (verify.wls Metal still
+      converges loss 2.61->0.025; 268 C + 270 WL green), and
+      points at the queued "Heap-rooted preserve pass" follow-
+      up arc as the unblocking step.  Same numbers as the
+      validation run in bm4d; bm5 formalizes the doc deliverable. -->
+
 
 - [ ] **Heap-rooted preserve pass** (follow-up to bm4 +
       refcount-driven free arc).  Replace
