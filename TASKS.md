@@ -602,7 +602,7 @@ Realistic close-out for the overnight cron loop:
       end-to-end.  Next milestones per the roadmap: REDUCE_MAX
       and CONV2D. -->
 
-- [ ] **MLP-on-MNIST forward smoke test**: at
+- [x] **MLP-on-MNIST forward smoke test**: at
       `wl/Examples/mlp-mnist/forward.wls`, build a 2-layer FC net
       (Flatten -> Linear -> ReLU -> Linear -> Softmax) on input
       {1,28,28}, run `TFromNet` on a single MNIST sample, verify
@@ -611,6 +611,14 @@ Realistic close-out for the overnight cron loop:
       finite scalar loss.  Pure forward, no training.  Plus a
       minimal README.  Catches any forward-path issues before
       backprop is layered on.
+      <!-- forward.wls: 5-layer MLP (Flatten/Linear[32]/Ramp/
+      Linear[10]/Softmax), runs on a TMnistBatch[1] sample,
+      asserts softmax sum ~ 1.0, all probs numeric, and a
+      finite positive cross-entropy loss.  Loss returns as a
+      length-1 list (REDUCE drops the axis but the materializer
+      reports {} as length-1 buffer); unwrap with First.  Both
+      CPU and Metal backends pass. -->
+
 
 - [ ] **MLP-on-MNIST single-step gradient check**: extend the
       forward smoke test by computing `TGrad[loss, W]` for each
