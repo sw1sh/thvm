@@ -559,16 +559,25 @@ Realistic close-out for the overnight cron loop:
       scalar-tensor to {3} with ones cotangent yields {3.0};
       EXPAND-of-CONST yields zero). -->
 
-- [ ] **Land grad rules 4-6 (EXP2 / RECIP / LOG2)** in
-      `interact_grad`, per `docs/grad-roadmap.md`.  Each is
-      ~15 LOC + one parity test (numerical-vs-analytic via
-      `wl/THVMLink/Tests/grad.wlt`).  Formulas:
-        - `d(2^x)/dx = 2^x * ln(2)`
-          → grad = MUL[gy, MUL[EXP2(x), CONST(ln 2)]]
-        - `d(1/x)/dx = -1/x^2`
-          → grad = MUL[gy, NEG[MUL[RECIP(x), RECIP(x)]]]
-        - `d(log2 x)/dx = 1 / (x * ln 2)`
-          → grad = MUL[gy, MUL[RECIP(x), CONST(1/ln 2)]]
-      Independent commits.  Together they unblock softmax +
-      cross-entropy backprop on a Conv-free MLP (the natural
-      milestone before tackling REDUCE_MAX and CONV2D).
+- [ ] **Grad rule: UOP_RECIP** in `interact_grad` per
+      `docs/grad-roadmap.md` step 5.  `d(1/x)/dx = -1/x^2`, so
+      rule is `GRAD[RECIP(a), gy, t] = GRAD[a, MUL[gy,
+      NEG[MUL[RECIP(a), RECIP(a)]]], t]`.  ~15 LOC + one
+      structural test in `tests/test_grad.c` and one numerical
+      test in `wl/THVMLink/Tests/grad.wlt` (e.g. `1/x` at
+      x={2,4} should yield grad = -1/x^2 = {-0.25, -0.0625}).
+
+- [ ] **Grad rule: UOP_EXP2** in `interact_grad` per
+      `docs/grad-roadmap.md` step 4.  `d(2^x)/dx = 2^x * ln(2)`,
+      so rule is `GRAD[EXP2(a), gy, t] = GRAD[a, MUL[gy,
+      MUL[EXP2(a), CONST(ln 2)]], t]`.  ~15 LOC + structural
+      test + numerical test (e.g. `2^x` at x={1,2,3} yields
+      grad = ln(2) * {2, 4, 8}).
+
+- [ ] **Grad rule: UOP_LOG2** in `interact_grad` per
+      `docs/grad-roadmap.md` step 6.  `d(log2 x)/dx = 1/(x ln 2)`,
+      so rule is `GRAD[LOG2(a), gy, t] = GRAD[a, MUL[gy,
+      MUL[RECIP(a), CONST(1/ln 2)]], t]`.  ~15 LOC + structural
+      test + numerical test (e.g. `log2(x)` at x={1,2,4} yields
+      grad = 1/(x ln 2)).  This is the last piece needed for
+      cross-entropy loss (TLog) to backprop end-to-end.
