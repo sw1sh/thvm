@@ -119,6 +119,30 @@ VerificationTest[
     TestID -> "grad/reshape-inside-mul-chain"
 ]
 
+(* === CMPLT / ReLU: mask is non-differentiable === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{-1.0, 2.0, -3.0, 4.0}, "Real32"];
+    (* d(ReLU(a))/d(a) = mask = {0, 1, 0, 1}.  Exercises the CMPLT-zero
+       rule via the surrounding MUL product rule. *)
+    g = TRealize @ TGrad[TReLU[a], a];
+    Normal @ TTensorData[g],
+    {0.0, 1.0, 0.0, 1.0},
+    TestID -> "grad/relu-mask"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{-2.0, 0.5, 1.0, -0.1}, "Real32"];
+    b = TTensorCreate @ NumericArray[{1.0, 1.0, 1.0, 1.0}, "Real32"];
+    (* d(CMPLT(a, b))/d(a) = 0 directly (no MUL wrapper). *)
+    g = TRealize @ TGrad[TUOpCmplt[a, b], a];
+    Normal @ TTensorData[g],
+    {0.0, 0.0, 0.0, 0.0},
+    TestID -> "grad/cmplt-direct-zero"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

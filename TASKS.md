@@ -523,13 +523,20 @@ Realistic close-out for the overnight cron loop:
       MUL+RESHAPE+REDUCE chain that hits 2a). -->
 
 
-- [ ] **Grad rule: UOP_CMPLT** in `interact_grad` per
+- [x] **Grad rule: UOP_CMPLT** in `interact_grad` per
       `docs/grad-roadmap.md` step 3.  Rule is
       `GRAD[CMPLT(a, b), gy, t] = grad_zero(t)` -- comparison
       is non-differentiable; the surrounding MUL rule already
       passes the mask through correctly.  ~5 LOC + one parity
       test that verifies a ReLU pattern `MUL[x, CMPLT(0, x)]`
       backprops correctly (gradient = mask).
+      <!-- Implemented: 4-line case branch in interact_grad
+      returns grad_zero(target).  Tests: structural in
+      tests/test_grad.c (CMPLT-direct + ReLU pattern unfolds
+      to ADD via MUL rule); numerical in
+      wl/THVMLink/Tests/grad.wlt -- TReLU on {-1,2,-3,4}
+      yields {0,1,0,1}, plus a direct TUOpCmplt grad = zeros.
+      ReLU backprop now works end-to-end.  -->
 
 - [ ] **Grad rule: UOP_EXPAND** in `interact_grad` per
       `docs/grad-roadmap.md` step 2.  Rule is

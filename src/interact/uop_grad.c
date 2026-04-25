@@ -132,6 +132,15 @@ fn Term interact_grad(Term grad_term) {
       return uop_grad(a, lifted, target);
     }
 
+    case UOP_CMPLT:
+      // Comparison emits a 0/1 mask; non-differentiable wrt either
+      // input.  The ReLU pattern MUL[x, CMPLT(0, x)] still backprops
+      // correctly because the surrounding MUL rule yields
+      //   ADD[ GRAD(x, mask*gy, target),
+      //        GRAD(CMPLT(...), x*gy, target) ]
+      // and this case zeroes the second branch.  d(ReLU)/dx = mask.
+      return grad_zero(target);
+
     case UOP_RESHAPE: {
       // Reshape is identity-on-data (memcpy in the CPU/Metal kernel)
       // and view-only at the descriptor level, so the gradient is

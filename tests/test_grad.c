@@ -123,6 +123,23 @@ int main(void) {
   CHECK_EQ(term_ext(g_r), UOP_EXPAND);
   CHECK_EQ(unexpand(g_r), gy);
 
+  TEST_BEGIN("grad/cmplt-is-non-differentiable-zero");
+  // CMPLT mask is treated as a constant: GRAD[CMPLT(a,b), gy, t] -> 0.
+  Term cmp     = uop_binary(UOP_CMPLT, a, b);
+  Term g_cmp   = wnf(uop_grad(cmp, gy, a));
+  CHECK_EQ(term_ext(g_cmp), UOP_EXPAND);
+  CHECK_EQ(term_ext(unexpand(g_cmp)), UOP_CONST);
+
+  TEST_BEGIN("grad/relu-pattern-grad-equals-mask");
+  // ReLU = MUL[x, CMPLT(0, x)].  d(ReLU)/dx = mask, structurally:
+  // MUL rule splits to ADD[GRAD(x, mask*gy, x), GRAD(mask, x*gy, x)].
+  // The second branch hits the CMPLT-zero rule above.
+  Term zero    = uop_const(DT_F32, 0);
+  Term mask    = uop_binary(UOP_CMPLT, zero, a);
+  Term relu    = uop_binary(UOP_MUL, a, mask);
+  Term g_relu  = wnf(uop_grad(relu, gy, a));
+  CHECK_EQ(term_ext(g_relu), UOP_ADD);
+
   TEST_BEGIN("grad/upfront-expand-carries-target-shape");
   // The leaf-target rule lifts gy to target.shape (via EXPAND with
   // dims read from TENS).
