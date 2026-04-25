@@ -244,13 +244,19 @@ There's already a `Wolfram layer -> TUOp converter` per the git log
       {1,6,6} input now runs through TFromNet end-to-end,
       producing the expected {8} output. -->
 
-- [ ] **NetModel["LeNet"] weight extraction**.  Probe shows the
+- [x] **NetModel["LeNet"] weight extraction**.  Probe shows the
       NetModel-loaded layer's "Weights" comes back as
       `Automatic` (paclet version 15.0.2 vs runtime 15.0.3
       mismatch warning was printed at load).  Either re-train /
       re-save in the local version, fall back to NetInitialize
       with the published architecture, or load weights from a
       separate file.  Pick the lowest-friction option.
+      <!-- Picked option (b): NetInitialize the canonical LeNet
+      architecture in `TLeNet[]`.  Random weights are correct
+      for the goal anyway -- TOptim["Adam"] training starts from
+      scratch.  TLeNet[] returns NetChain with 11 layers, all
+      weights as concrete NumericArray. -->
+
 - [ ] end-to-end TFromNet on LeNet: build it from the official
       architecture (with proper weights from the prior item),
       feed a synthetic 1x28x28 input, verify TRealize produces a

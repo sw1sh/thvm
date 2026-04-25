@@ -498,3 +498,24 @@ VerificationTest[
     Failure,
     TestID -> "nn/conv2d-non-1-stride-returns-Failure"
 ]
+
+(* === TLeNet[] -- canonical LeNet architecture, fresh weights === *)
+
+VerificationTest[
+    TInit[];
+    net = TLeNet[];
+    {Length[net], Head /@ Table[net[[i]], {i, Length[net]}]},
+    {11, {ConvolutionLayer, ElementwiseLayer, PoolingLayer,
+          ConvolutionLayer, ElementwiseLayer, PoolingLayer,
+          FlattenLayer, LinearLayer, ElementwiseLayer,
+          LinearLayer, SoftmaxLayer}},
+    TestID -> "nn/lenet-architecture-11-layers"
+]
+
+VerificationTest[
+    TInit[];
+    net = TLeNet[];
+    Head @ NetExtract[net, {1, "Weights"}],
+    NumericArray,
+    TestID -> "nn/lenet-conv1-weights-concrete"
+]
