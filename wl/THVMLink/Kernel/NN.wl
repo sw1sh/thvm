@@ -33,6 +33,9 @@
      TReLU[x]                    -- elementwise max(x, 0)
      TTanh[x]                    -- elementwise tanh, via EXP2
      TSoftmax[x]                 -- softmax over the last axis
+     TLog[x]                     -- elementwise natural log via LOG2
+     TCrossEntropyLoss[pred, target]
+                                 -- -sum(target * log(pred))
 *)
 
 BeginPackage["THVMLink`"];
@@ -50,6 +53,8 @@ TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
 TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
 TTanh::usage            = "TTanh[x] = elementwise tanh, implemented as (u - 1)/(u + 1) where u = exp(2x) = EXP2(x * 2 * log2 e).  Uses only existing UOPs (no UOP_TANH primitive).  Loses precision for |x| > ~10 due to exp overflow; that's accepted for now since hidden activations rarely sit there.";
 TSoftmax::usage         = "TSoftmax[x] = exp(x) / sum(exp(x)) over the last axis.  exp via the EXP2 + log2(e) chain.  Numerically naive (no max-subtract stabilisation) -- input magnitudes >~80 will overflow exp.  Forward only.";
+TLog::usage             = "TLog[x] = elementwise natural log, implemented as LOG2(x) * ln(2) since the runtime has UOP_LOG2 but no UOP_LOG.";
+TCrossEntropyLoss::usage = "TCrossEntropyLoss[pred, target] = -sum(target * log(pred)).  Probability-form categorical cross-entropy.  Both inputs are TTerms with the same shape; target is typically a one-hot vector.  Forward only -- LOG2 has no grad rule yet.";
 
 Begin["`Private`"];
 
@@ -88,6 +93,16 @@ tExp[x_TTerm] := TUOpExp2[TUOpMul[x, TUOpConst[N[Log2[E]], "f32"]]]
 TSoftmax[x_TTerm] := With[{e = tExp[x]},
     TUOpMul[e, TUOpRecip[TUOpReduce[e, 0, "SUM"]]]
 ]
+
+(* log(x) = log2(x) * ln(2).  Runtime has UOP_LOG2 but no UOP_LOG. *)
+TLog[x_TTerm] := TUOpMul[TUOpLog2[x], TUOpConst[N[Log[2]], "f32"]]
+
+(* CrossEntropy "probabilities" form: target is a probability
+   distribution (typically one-hot), pred is the model's predicted
+   distribution.  Loss = -sum_i target_i * log(pred_i).  Returns a
+   scalar TTerm (rank-{1}). *)
+TCrossEntropyLoss[pred_TTerm, target_TTerm] :=
+    TUOpNeg[TUOpReduce[TUOpMul[target, TLog[pred]], 0, "SUM"]]
 
 TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
     Module[{out, in, xb},

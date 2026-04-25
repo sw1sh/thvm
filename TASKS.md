@@ -139,8 +139,15 @@ concern that interact_grad currently doesn't cover for any of these):
 - [x] `SoftmaxLayer` forward.  `softmax(x)_i = exp(x_i) / sum(exp(x))`.
       EXP via `2^(log2(e) * x)` = TUOpExp2 chain.  Test against
       `NetApply[SoftmaxLayer[]]` on a small vector.
-- [ ] `CrossEntropyLossLayer` forward.  Needs LOG (we have LOG2,
+- [x] `CrossEntropyLossLayer` forward.  Needs LOG (we have LOG2,
       same trick as EXP).  Test forward only (no grad path yet).
+      <!-- Implemented as a host-side helper TCrossEntropyLoss[pred,
+      target] (probabilities form), not via TFromNet dispatch:
+      CrossEntropyLossLayer takes TWO inputs (Input + Target),
+      which the single-tensor TFromNet[layer, x] signature can't
+      represent.  The training loop calls it manually, same way
+      sgd.wlt does TL2Loss. -->
+
 - [ ] `ConvolutionLayer` 2-D forward.  Replace the current stub.
       Likely big -- decompose when picked up.
 
