@@ -620,29 +620,44 @@ Realistic close-out for the overnight cron loop:
       CPU and Metal backends pass. -->
 
 
-- [ ] **Fix rank-changing EXPAND in expand_to_target**: when
-      `expand_to_target(src, target)` is called and src's rank
-      is less than target's, the resulting `uop_expand` is
-      interpreted at materialize time using src's rank (per
-      `expand_output_shape` in `src/schedule/materialize.c`),
-      losing target's extra axes and silently producing a
-      wrong-shape grad.  Two viable fixes:
-        (a) Store EXPAND's ndim explicitly: change the
-            `uop_expand` constructor to write an extra NUM
-            cell at slot 0 with ndim, update materializer to
-            read from it.  Touches every UOP_EXPAND call
-            site; biggest blast radius but cleanest semantics.
-        (b) Make expand_to_target rank-aware: if src is a
-            CONST/NUM/TAG_TEN (cases where we can determine
-            its shape), prepend a `uop_reshape` to insert
-            leading size-1 axes so src and target match rank
-            before the expand fires.  Smaller diff; doesn't
-            help arbitrary UOP gy chains, but ChainSums
-            through MUL/ADD propagate the lifted shape so it
-            covers the dominant case.
-      Recommended (b) first -- it's ~30 LOC + tests and
-      unblocks rank-2 grad-check; (a) is the longer-term
-      structural fix for arbitrary-rank EXPAND.
+- [ ] **EXPAND heap layout: store ndim explicitly**.  Current
+      layout is `[src, NUM(d0), ..., NUM(d_{ndim-1})]` and the
+      materializer recovers `ndim` from the SOURCE tensor's
+      shape (`expand_output_shape` in
+      `src/schedule/materialize.c` and the inline EXPAND case
+      in `src/schedule/materialize_in_env.c`).  That works for
+      same-rank expansion (the original tinygrad
+      MovementOps.EXPAND contract) but is wrong when EXPAND is
+      used to add rank -- as `expand_to_target` does in
+      `src/interact/uop_grad.c`.  Change layout to
+      `[NUM(ndim), src, NUM(d0), ..., NUM(d_{ndim-1})]` so
+      ndim is authoritative.  Touches: `src/uop/expand.c`
+      (constructor), the two materializers, the EXPAND case
+      in `src/interact/uop_grad.c` (heap reads shift by 1),
+      `wl/THVMLink/Kernel/Shape.wl` (`tUopShape` walker), and
+      every test that touches `uop_expand`'s heap directly
+      (currently only `tests/test_grad.c`).  Pure layout
+      change; no semantic change for same-rank uses.
+
+- [ ] **Make expand_to_target rank-aware**.  Once EXPAND
+      stores ndim explicitly, update
+      `src/interact/uop_grad.c::expand_to_target` to call
+      `uop_expand` with `target.shape.ndim` regardless of
+      source rank -- the materializer will trust the stored
+      ndim and produce a correctly-shaped output.  Add a
+      regression parity test: a rank-2 leaf-target (e.g.
+      `TGrad[t, t]` where `t` has shape {2,3}) should yield
+      a {2,3} ones tensor end-to-end through `TRealize`.
+
+- [ ] **RESHAPE heap layout: store ndim explicitly** (same
+      rationale, but for RESHAPE).  Current materializer
+      recovers ndim by walking dim cells until the running
+      product equals input numel -- breaks early when any
+      prefix product hits numel (e.g. RESHAPE to a shape
+      containing leading 1s).  Same layout change as EXPAND;
+      ~50-80 LOC.  Lower priority than the EXPAND fix but
+      needed before RESHAPE-prepending becomes a viable
+      strategy for cross-rank cotangents.
 
 - [ ] **MLP-on-MNIST single-step gradient check**: extend the
       forward smoke test by computing `TGrad[loss, W]` for each
