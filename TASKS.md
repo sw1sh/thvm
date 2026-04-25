@@ -4304,7 +4304,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
              materializer. -->
 
 
-  - [ ] **f1d-a: wire realize_classify into thvm_materialize**.
+  - [x] **f1d-a: wire realize_classify into thvm_materialize**.
         Call `realize_classify(term)` at the top of
         `thvm_materialize`, before `materialize_walk` runs.
         The output table is populated but no production code
@@ -4316,6 +4316,17 @@ implemented + tested (f1a) but never invoked by the pipeline.
         any TRealize (verifiable by tests/test_realize_classify
         re-running after a TRealize invocation, but no behavior
         changes).  ~30 LOC + tiny test stub.
+        <!-- DONE: realize_classify is now called at the top
+             of thvm_materialize.  Toggle
+             MATERIALIZE_USE_REALIZE_INFO defaults to 0.  Test
+             stub appended to test_realize_classify.c verifies
+             the table is populated after thvm_materialize
+             runs on a chain (root realized; intermediate
+             consumer_count==1).  Per-call cost optimized by
+             sizing the visited bitmap to HEAP_NEXT instead of
+             HEAP_CAP.  166 C + 289 WL green; no behavior
+             change. -->
+
 
   - [ ] **f1d-b: selective materialize_expr**.  When the
         toggle is on AND the UOp being processed is NOT in

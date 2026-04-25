@@ -524,6 +524,12 @@ fn Term thvm_materialize(Term term) {
   // couldn't be kernelized (e.g. VAR child with no shape binding yet),
   // the walker leaves them alone and materialize_expr picks up the
   // slack on whatever's still reachable at the root afterwards.
+  //
+  // f1d-a: populate the realize-classifier table before the walk
+  // so f1d-b/c can consult it.  Output is read-only here; the
+  // toggle MATERIALIZE_USE_REALIZE_INFO gates whether downstream
+  // code paths actually use it.
+  realize_classify(term);
   if (term_tag(term) == TAG_TEN) return materialize_root_alias(term);
   if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_KERNEL) return term;
   Term walked = materialize_walk(term);

@@ -502,6 +502,21 @@ fn Term term_resolve(Term t);
 // src/schedule/walk.c.
 Term materialize_walk(Term root);
 
+// f1c: classify which UOPs in the DAG rooted at `root` must
+// realize into a backing buffer; populates a private table
+// consulted via realize_is_realized / realize_consumer_count.
+// f1d's selective materializer reads this; f1c on its own is
+// read-only.  See src/schedule/realize_classify.c.
+fn void realize_classify(Term root);
+fn u8   realize_is_realized(Term uop_term);
+fn u32  realize_consumer_count(Term uop_term);
+
+// f1d toggle: 0 = legacy behavior (per-UOp kernels, no
+// fusion); 1 = consult realize_is_realized to inline
+// un-realized upstream compute into the consumer's program.
+// Default 0; flipped on once f1d-b/c land.
+extern u8 MATERIALIZE_USE_REALIZE_INFO;
+
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.
 fn Term interact_app_lam(Term lam, Term arg);

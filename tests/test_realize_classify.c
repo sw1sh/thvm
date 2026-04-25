@@ -100,6 +100,26 @@ int main(void) {
   CHECK_EQ(realize_is_realized(a), 0);
   CHECK_EQ(realize_is_realized(b), 0);
 
+  TEST_BEGIN("realize-classify/thvm-materialize-populates-table");
+  // f1d-a: thvm_materialize should call realize_classify before
+  // its walk so f1d-b/c can read the table.  Verify by clearing
+  // the table (via a fresh thvm_init), running thvm_materialize
+  // on a chain, and asserting the root is flagged realized.
+  thvm_free();
+  thvm_init();
+  u32 ta2 = alloc_f32_tensor(3);
+  u32 tb2 = alloc_f32_tensor(3);
+  u32 tc2 = alloc_f32_tensor(3);
+  Term aa = term_new(0, TAG_TEN, DT_F32, ta2);
+  Term bb = term_new(0, TAG_TEN, DT_F32, tb2);
+  Term cc = term_new(0, TAG_TEN, DT_F32, tc2);
+  Term aa_plus_bb = uop_binary(UOP_ADD, aa, bb);
+  Term times_cc   = uop_binary(UOP_MUL, aa_plus_bb, cc);
+  thvm_materialize(times_cc);
+  // Root is realized; the chain intermediate is single-consumer.
+  CHECK_EQ(realize_is_realized(times_cc), 1);
+  CHECK_EQ(realize_consumer_count(aa_plus_bb), 1);
+
   thvm_free();
   TEST_REPORT();
 }

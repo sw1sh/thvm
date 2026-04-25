@@ -32,6 +32,11 @@ typedef struct {
 static UOpInfo REALIZE_INFO    [REALIZE_INFO_CAP];
 static u32     REALIZE_INFO_LEN = 0;
 
+// f1d toggle.  When 0 (default), the materializer ignores
+// realize_is_realized and behaves as before (per-UOp kernels).
+// f1d-b/c flip it on once their selective code paths land.
+u8 MATERIALIZE_USE_REALIZE_INFO = 0;
+
 fn void realize_info_clear(void) {
   REALIZE_INFO_LEN = 0;
 }
@@ -60,7 +65,7 @@ static void realize_walk_rec(Term t, u8 *visited) {
   u8 op = term_ext(t);
   if (op == UOP_KERNEL) return;     // already kernelized, opaque
   u64 loc = term_val(t);
-  if (loc >= HEAP_CAP) return;
+  if (loc >= HEAP_NEXT) return;
   if (visited[loc]) return;
   visited[loc] = 1;
 
@@ -92,7 +97,11 @@ fn void realize_classify(Term root) {
   if (term_tag(root) != TAG_UOP) return;
   if (term_ext(root) == UOP_KERNEL) return;
 
-  u8 *visited = (u8 *)calloc(HEAP_CAP, 1);
+  // Bitmap sized to HEAP_NEXT (current high-water of the dyn
+  // heap) instead of HEAP_CAP -- per-call cost stays
+  // proportional to live work, not the 16 MiB max.
+  u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  u8 *visited = (u8 *)calloc(cap, 1);
   if (visited == NULL) return;
   realize_walk_rec(root, visited);
   free(visited);
