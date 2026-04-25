@@ -2247,6 +2247,35 @@ Realistic close-out for the overnight cron loop:
           chain like `MUL(ADD(a, b), c)` produces a single
           kernel with `program = [..LOADs, ADD, MUL]` (rather
           than two separate kernels).
+          <!-- attempt 1: implemented + reverted.  Wired the
+          auto-splice in materialize_in_env's step 3b (after
+          input slots populated, before LOAD prefix + main op
+          emission).  Added count_kernel_consumers(tid) helper
+          that scans non-spliced KERNELS for tid in input_tids;
+          guard refuses splice when count > 1 (i.e., child
+          output is shared).  C tests passed (test_splice +
+          test_materialize updated for the new program
+          layout).  WL tests FAILED on TSoftmax: the
+          consumer-count guard caught the obvious shared
+          subexpression (`e` referenced by both MUL-left and
+          REDUCE_SUM), but downstream the resulting graph
+          STILL produced wrong outputs (softmax sums to 10x
+          expected; output = exp(a) * 1/numel instead of
+          exp(a) / sum(exp(a))).  Hypothesis: even with the
+          obvious-share splice rejected, the transitive
+          downstream of `e` (RECIP, EXPAND) somehow gets
+          mis-wired -- possibly because materialize_walk
+          processes the inner branch first and creates
+          implicit dependencies my count check doesn't see.
+          The bug is real and needs deeper investigation:
+          either (a) more thorough sharing analysis (full
+          transitive reference walk before splice), (b)
+          turn auto-splice off for any kernel whose UOP-
+          source still has live references in the heap (not
+          just kernel input_tids), or (c) postpone f1b until
+          after f3 (ShapeTracker) which removes most shared-
+          subexpression risk by making movement ops
+          view-only.  Reverted; f1b stays [ ] for now. -->
 
     - [ ] **f1c. Verify the kernel-count drop on LeNet**.
           Re-run lenet-mnist/forward.wls and report the
