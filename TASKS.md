@@ -558,3 +558,17 @@ Realistic close-out for the overnight cron loop:
       numerical in wl/THVMLink/Tests/grad.wlt (broadcast
       scalar-tensor to {3} with ones cotangent yields {3.0};
       EXPAND-of-CONST yields zero). -->
+
+- [ ] **Land grad rules 4-6 (EXP2 / RECIP / LOG2)** in
+      `interact_grad`, per `docs/grad-roadmap.md`.  Each is
+      ~15 LOC + one parity test (numerical-vs-analytic via
+      `wl/THVMLink/Tests/grad.wlt`).  Formulas:
+        - `d(2^x)/dx = 2^x * ln(2)`
+          → grad = MUL[gy, MUL[EXP2(x), CONST(ln 2)]]
+        - `d(1/x)/dx = -1/x^2`
+          → grad = MUL[gy, NEG[MUL[RECIP(x), RECIP(x)]]]
+        - `d(log2 x)/dx = 1 / (x * ln 2)`
+          → grad = MUL[gy, MUL[RECIP(x), CONST(1/ln 2)]]
+      Independent commits.  Together they unblock softmax +
+      cross-entropy backprop on a Conv-free MLP (the natural
+      milestone before tackling REDUCE_MAX and CONV2D).
