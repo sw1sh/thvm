@@ -468,6 +468,45 @@ fn Term materialize_expr(Term expr) {
   return term_new(0, TAG_UOP, UOP_KERNEL, kloc);
 }
 
+// Post-materialize: if the result is a TAG_TEN whose View is
+// non-contiguous (e.g., a sub-item-f3c view-only EXPAND alias at
+// the ROOT of a TRealize), allocate a fresh contig target-numel
+// buffer and populate via view_strided_index.  Returns a TAG_TEN
+// wrapping the contig tid so flat-buffer readers (TTensorData /
+// test_metal_real / etc.) see the materialized layout.
+fn Term materialize_root_alias(Term t) {
+  if (term_tag(t) != TAG_TEN) return t;
+  u32 tid = (u32)term_val(t);
+  if (tid == 0 || tid >= TENS_NEXT) return t;
+  TenDesc *d = &TENS[tid];
+  if (d->view.contiguous) return t;
+  // Allocate a fresh contig tensor of the same shape + dtype.
+  u32 dst_tid = tensor_alloc(d->backend, d->view.shape, d->dtype);
+  if (dst_tid == 0) return t;
+  // Underlying buffer numel = product of dims along non-broadcast
+  // axes (axes with stride != 0).  Backend-agnostic vs reading
+  // CPU_BUFS directly.
+  u32 src_numel = 1;
+  for (u32 i = 0; i < d->view.shape.ndim; i++) {
+    if (d->view.strides[i] != 0) src_numel *= d->view.shape.dims[i];
+  }
+  size_t src_bytes = (size_t)src_numel * 4;
+  void  *raw = malloc(src_bytes);
+  d->backend->buf_read(d->buf_id, raw, src_bytes);
+  void *dst_host = malloc((size_t)d->view.numel * 4);
+  if (d->dtype == DT_F32) {
+    f32 *o = (f32 *)dst_host; f32 *s = (f32 *)raw;
+    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
+  } else {
+    i32 *o = (i32 *)dst_host; i32 *s = (i32 *)raw;
+    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
+  }
+  d->backend->buf_write(TENS[dst_tid].buf_id, dst_host, (size_t)d->view.numel * 4);
+  free(raw);
+  free(dst_host);
+  return term_new(0, TAG_TEN, d->dtype, dst_tid);
+}
+
 fn Term thvm_materialize(Term term) {
   // Heap-walk materializer: scans reachable cells (through LAM / APP /
   // REF / ALO / UOP etc.), propagates shapes through APP-LAM, and in-
@@ -475,10 +514,10 @@ fn Term thvm_materialize(Term term) {
   // couldn't be kernelized (e.g. VAR child with no shape binding yet),
   // the walker leaves them alone and materialize_expr picks up the
   // slack on whatever's still reachable at the root afterwards.
-  if (term_tag(term) == TAG_TEN) return term;
+  if (term_tag(term) == TAG_TEN) return materialize_root_alias(term);
   if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_KERNEL) return term;
   Term walked = materialize_walk(term);
-  if (term_tag(walked) == TAG_TEN) return walked;
+  if (term_tag(walked) == TAG_TEN) return materialize_root_alias(walked);
   if (term_tag(walked) == TAG_UOP && term_ext(walked) == UOP_KERNEL) return walked;
   return materialize_expr(walked);
 }

@@ -2397,7 +2397,7 @@ Realistic close-out for the overnight cron loop:
           146 C + 220 WL tests green. -->
 
 
-    - [ ] **f3c. EXPAND as view-only via stride=0**.  Movement
+    - [x] **f3c. EXPAND as view-only via stride=0**.  Movement
           ops can express broadcast as stride[axis] = 0 on the
           expanded axes -- a single buffer element gets read
           for every output position on that axis.  In
@@ -2433,6 +2433,22 @@ Realistic close-out for the overnight cron loop:
           be enough to unblock most LeNet kernel pressure).
           Reverted to f3b-only baseline.  146 C + 220 WL
           tests green. -->
+          <!-- attempt 2: SUCCESS with the option-(ii)-variant.
+          materialize_in_env emits view-only EXPAND alias with
+          stride=0 broadcast.  cpu_interpret pre-materializes
+          non-contig inputs into temp contig bufs via
+          view_strided_index (per-op kernels stay flat).  KEY
+          NEW PIECE: thvm_materialize POST-MATERIALIZES the
+          ROOT term if it's a non-contig alias, allocating a
+          fresh contig buf + populating via view_strided_index.
+          That preserves the flat-buffer-read invariant for
+          test_metal_real (24 buf_read sites + lots of
+          tensor_read flat-layout assumptions).  All 146 C +
+          220 WL tests green.
+          Measured impact: lenet-mnist forward dropped from
+          466 -> 304 kernels = 35% reduction, vs the 12% drop
+          from f3b alone.  Combined f3a+f3b+f3c = 35%.  -->
+
 
 
     - [ ] **f3d. CPU op runners read inputs through the View**.

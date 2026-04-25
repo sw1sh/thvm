@@ -13,9 +13,30 @@
 
 fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Resolve each input buffer's raw pointer once up front.
+  // Non-contiguous inputs (sub-item f3c: view-only EXPAND aliases
+  // with stride=0 broadcast) get pre-materialized into temp
+  // contiguous buffers via view_strided_index so per-op kernels
+  // can stay flat-buffer-simple.
   void *in_ptrs  [KERNEL_MAX_INPUT];
+  void *temp_bufs[KERNEL_MAX_INPUT] = {0};
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
+    u32 tid = ke->input_tids[i];
+    if (tid != 0 && tid < TENS_NEXT && !TENS[tid].view.contiguous) {
+      View const *v = &TENS[tid].view;
+      void *src = CPU_BUFS[in_buf_ids[i]].data;
+      void *tmp = malloc((size_t)v->numel * 4);
+      if (TENS[tid].dtype == DT_F32) {
+        f32 *d = (f32 *)tmp; f32 *s = (f32 *)src;
+        for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
+      } else {
+        i32 *d = (i32 *)tmp; i32 *s = (i32 *)src;
+        for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
+      }
+      in_ptrs  [i] = tmp;
+      temp_bufs[i] = tmp;
+    } else {
+      in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
+    }
   }
 
   // Allocate one scratch slot per program op.  The last op writes
@@ -94,6 +115,7 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 
 cleanup:
   for (u32 i = 0; i < ke->n_ops; i++) if (regs[i]) free(regs[i]);
+  for (u32 i = 0; i < ke->n_inputs; i++) if (temp_bufs[i]) free(temp_bufs[i]);
   return rc;
 }
 

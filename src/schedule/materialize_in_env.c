@@ -103,6 +103,60 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     //  shape -- the heap stores them but ndim isn't explicit, so we
     //  walk 2 * src0_ndim cells.)
 
+    // 2c. View-only EXPAND (sub-item f3c of the kernel-fusion arc).
+    //     Build an aliased TenDesc with shape = target and
+    //     strides[axis] = 0 where source.dim == 1 < target.dim
+    //     (broadcast).  Other axes keep source's row-major strides.
+    //     Returns a TAG_TEN that the walker rewrites the EXPAND
+    //     heap cell to.  Consumers of this alias must read through
+    //     view_strided_index (cpu_interpret pre-materializes).
+    //     If the root of thvm_materialize lands on a non-contig
+    //     alias, thvm_materialize post-materializes to a contig buf
+    //     so the WL/tests that read the underlying buf flat keep
+    //     working.
+    if (op == UOP_EXPAND
+        && arity == 1 && child_tids[0] != 0
+        && TENS[child_tids[0]].view.contiguous) {
+      Shape src_shape = TENS[child_tids[0]].view.shape;
+      u32 t_ndim = (u32)term_val(heap_read(expr_loc + 1));
+      if (src_shape.ndim == t_ndim) {
+        Shape t_shape = {0};
+        t_shape.ndim = t_ndim;
+        u32 t_numel = 1;
+        u8  ok = 1;
+        for (u32 i = 0; i < t_ndim; i++) {
+          u32 td = (u32)term_val(heap_read(expr_loc + 2 + i));
+          t_shape.dims[i] = td;
+          t_numel *= td;
+          if (src_shape.dims[i] != td && src_shape.dims[i] != 1) {
+            ok = 0;
+            break;
+          }
+        }
+        if (ok) {
+          View nv = {0};
+          nv.shape      = t_shape;
+          nv.numel      = t_numel;
+          nv.offset     = TENS[child_tids[0]].view.offset;
+          nv.contiguous = (t_numel == TENS[child_tids[0]].view.numel) ? 1 : 0;
+          i32 src_stride = 1;
+          for (i32 i = (i32)src_shape.ndim - 1; i >= 0; i--) {
+            if (src_shape.dims[i] == t_shape.dims[i]) {
+              nv.strides[i] = src_stride;
+            } else {
+              nv.strides[i] = 0;
+            }
+            src_stride *= (i32)src_shape.dims[i];
+          }
+          for (u32 i = t_ndim; i < MAX_DIM; i++) nv.strides[i] = 0;
+          u32 alias_tid = tensor_view_of(child_tids[0], nv);
+          if (alias_tid != 0) {
+            return term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+          }
+        }
+      }
+    }
+
     // 2b. View-only RESHAPE (sub-item f3b of the kernel-fusion arc).
     //     For a contiguous source whose numel matches the target,
     //     RESHAPE doesn't need a memcpy kernel -- alias the source's
