@@ -72,6 +72,10 @@ int main(void) {
   CHECK_EQ(CURRENT_BACKEND->buf_read(bid2, tmp, sizeof(tmp)), -1);
   thvm_free();
 
+  // === Helper: build f32 TEN, write data, return its tid. =====
+  // Used by the binary-elementwise parity tests below to seed
+  // inputs in the current backend.
+
   TEST_BEGIN("metal-real/const-kernel-parity-with-cpu");
   // Run UOP_CONST(3.14f) through the CPU backend, capture output.
   union { f32 f; u32 u; } cu; cu.f = 3.14f;
@@ -97,6 +101,50 @@ int main(void) {
   CHECK(cpu_out == gpu_out);
   CHECK(gpu_out == 3.14f);
   thvm_free();
+
+  // === Binary elementwise parity (ADD, MUL, CMPLT) ===
+  // Build [1,2,3,4] + [10,20,30,40] (etc.) under both backends,
+  // verify identical output buffers.
+
+  TEST_BEGIN("metal-real/add-mul-cmplt-parity-with-cpu");
+  Shape s = {0}; s.ndim = 1; s.dims[0] = 4;
+  f32 src_a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  f32 src_b[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+
+  for (int op_idx = 0; op_idx < 3; op_idx++) {
+    u32 op = (op_idx == 0) ? UOP_ADD : (op_idx == 1) ? UOP_MUL : UOP_CMPLT;
+    f32 cpu_buf[4], gpu_buf[4];
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    {
+      u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+      u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+      CURRENT_BACKEND->buf_write(TENS[ta].buf_id, src_a, sizeof(src_a));
+      CURRENT_BACKEND->buf_write(TENS[tb].buf_id, src_b, sizeof(src_b));
+      Term done = wnf(thvm_materialize(uop_binary(op,
+          term_new(0, TAG_TEN, DT_F32, ta),
+          term_new(0, TAG_TEN, DT_F32, tb))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                cpu_buf, sizeof(cpu_buf));
+    }
+    thvm_free();
+
+    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    {
+      u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+      u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+      CURRENT_BACKEND->buf_write(TENS[ta].buf_id, src_a, sizeof(src_a));
+      CURRENT_BACKEND->buf_write(TENS[tb].buf_id, src_b, sizeof(src_b));
+      Term done = wnf(thvm_materialize(uop_binary(op,
+          term_new(0, TAG_TEN, DT_F32, ta),
+          term_new(0, TAG_TEN, DT_F32, tb))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                gpu_buf, sizeof(gpu_buf));
+    }
+    thvm_free();
+
+    for (int i = 0; i < 4; i++) CHECK(cpu_buf[i] == gpu_buf[i]);
+  }
 
   unsetenv("THVM_BACKEND");
   TEST_REPORT();

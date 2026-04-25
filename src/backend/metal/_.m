@@ -164,6 +164,9 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
   NSString *fnName = nil;
   switch (opcode) {
     case UOP_CONST: fnName = @"thvm_const"; break;
+    case UOP_ADD:   fnName = @"thvm_add";   break;
+    case UOP_MUL:   fnName = @"thvm_mul";   break;
+    case UOP_CMPLT: fnName = @"thvm_cmplt"; break;
     default:        return nil;
   }
   // `fn` is taken by thvm.h as a `static inline` macro; use `mtlFn`.
@@ -187,9 +190,11 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
 }
 
 // Buffer-binding convention:
-//     buffer(0)             : output
-//     buffer(1)             : per-op constant arg (KProgOp.arg)
-//     buffer(2..2+n_in-1)   : input tensor buffers (n_in = ke->n_inputs)
+//     buffer(0)                       : output
+//     buffer(1)                       : per-op constant arg (KProgOp.arg)
+//     buffer(2..2+n_in-1)             : input tensor buffers
+//     buffer(2+n_in..2+2*n_in-1)      : per-input numel (uint;
+//                                       1 = broadcast in shader)
 // Threads = ke->program[0].numel; threadgroup size capped at the
 // pipeline's maxTotalThreadsPerThreadgroup.
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
@@ -215,6 +220,10 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     u32 ib = in_buf_ids[i];
     if (ib == 0 || ib >= METAL_BUFS_NEXT) { [enc endEncoding]; return -1; }
     [enc setBuffer:METAL_BUFS[ib].buf offset:0 atIndex:(2 + i)];
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 nm = ke->input_numels[i];
+    [enc setBytes:&nm length:sizeof(nm) atIndex:(2 + ke->n_inputs + i)];
   }
   NSUInteger n = (NSUInteger)p->numel;
   if (n == 0) n = 1;

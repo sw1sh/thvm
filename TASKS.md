@@ -389,12 +389,20 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       UOP_CONST(3.14) under both backends and asserts bit-exact
       output match. -->
 
-- [ ] **Binary elementwise Metal kernels** (ADD, MUL, CMPLT).
+- [x] **Binary elementwise Metal kernels** (ADD, MUL, CMPLT).
       All three share the broadcast-aware template (each input
       either repeated from index 0 if numel=1, or indexed by tid).
       One MSL file per op or one templated file.  Per-op parity
       test vs CPU.  Establishes the binary dispatch shape that
       the next item reuses.
+      <!-- shaders/binary.metal: single file with a BIN_ELEMENT
+      WISE macro instantiating thvm_add / thvm_mul / thvm_cmplt.
+      Buffer convention extended: per-input src_numels[] go into
+      buffer(2 + n_in + i) via setBytes (one uint each); shader
+      uses (na == 1u) ? 0u : tid for the broadcast index.  Three
+      parity tests in test_metal_real (each runs the same
+      uop_binary on CPU + Metal, bit-compares output buffers). -->
+
 - [ ] **Unary elementwise Metal kernels** (NEG, RECIP, SQRT,
       EXP2, LOG2).  Single input, broadcast same way.  Mirrors
       the binary item with one fewer input slot.  Per-op parity
