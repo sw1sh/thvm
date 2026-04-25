@@ -1748,6 +1748,34 @@ Realistic close-out for the overnight cron loop:
         outputs are bit-equal (or within float rounding) and
         grad-wrt-input + grad-wrt-weights are too.  Validates
         the lowering preserves both semantics.  ~30 LOC of test.
+        <!-- attempt 1: forward parity passes; grad-wrt-input
+        parity passes; grad-wrt-weights parity FAILS at large
+        scale.  Concrete numbers (C_in=3, C_out=2, H=W=8,
+        kh=kw=3, deterministic Sin-based seed):
+            max |gWB|       = 2.188
+            max |gWL|       = 0.491
+            max |gWB - gWL| = 1.801
+            ratio           = 0.823
+            gWB[1,1,1,1]    = 1.966
+            gWL[1,1,1,1]    = 0.217
+        Not a float-rounding gap -- the two paths produce
+        structurally different gradients w.r.t. weights at
+        C_in > 1.  Most likely culprit: the bespoke CONV2D
+        grad rule's "diagonal-mask trick" branch (in
+        src/interact/uop_grad.c near line 187) was only
+        explicitly hand-verified at C_in=2 (per the existing
+        grad/conv2d-weights-cin2-diagonal-mask-trick test);
+        the trick may have an axis / layout bug at C_in>=3,
+        OR the lowered kh*kw partial-sum chain may be
+        miscomposing one of the SHRINK->RESHAPE->EXPAND legs
+        at rank 4.
+        Next-fire plan: run a finite-difference numerical
+        cross-check (perturb weights[c_out, ci, ky, kx] by
+        small h, recompute forward, compare to the analytic
+        gradient at that index) to determine which side is
+        wrong.  Only then can sub-item (c) safely flip
+        TUOpConv2D to dispatch via the lowered chain. -->
+
 
   - [ ] **c. Switch TUOpConv2D internals to the lowered chain**.
         Make the public TUOpConv2D dispatch to
