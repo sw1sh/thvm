@@ -417,6 +417,7 @@ fn Term interact_grad(Term grad_term);
 // CPU backend -- only backend for step 12.  Installed by thvm_init.
 // Metal lands in step 14 behind the same Backend struct.
 extern Backend CPU_BACKEND;
+extern Backend METAL_BACKEND;
 
 // Allocate a borrowed buffer: we don't own `data`, and on release we
 // call `on_release(handle)` instead of free().  Used by the WL bridge

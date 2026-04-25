@@ -105,6 +105,11 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "backend/cpu/interpret.c"
 #include "backend/cpu/_.c"
 
+// === backend/metal/ ===
+// Stub today (returns errors for everything); the real Objective-C
+// implementation lands kernel-by-kernel per docs/metal.md.
+#include "backend/metal/_.c"
+
 // === tensor/ ===
 #include "tensor/alloc.c"
 #include "tensor/incref.c"
@@ -171,8 +176,16 @@ void thvm_init(void) {
   BOOK_NEXT  = 1;
   ALO_STATES_NEXT = 1;
   for (u32 i = 0; i < DEFS_CAP; i++) DEFS[i] = 0;
-  CURRENT_BACKEND = &CPU_BACKEND;
-  CPU_BACKEND.init();
+  // Backend selection: THVM_BACKEND=metal switches to the Metal
+  // backend (currently a stub -- compute calls error out).  Anything
+  // else, including unset, defaults to CPU.
+  const char *want = getenv("THVM_BACKEND");
+  if (want && strcmp(want, "metal") == 0) {
+    CURRENT_BACKEND = &METAL_BACKEND;
+  } else {
+    CURRENT_BACKEND = &CPU_BACKEND;
+  }
+  CURRENT_BACKEND->init();
 }
 
 void thvm_free(void) {

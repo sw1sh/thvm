@@ -302,9 +302,17 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       Backend selection via THVM_BACKEND=metal env var.  Full
       design in docs/metal.md. -->
 
-- [ ] stub `backend/metal.c` exposing the same `Backend` vtable as
+- [x] stub `backend/metal.c` exposing the same `Backend` vtable as
       `backend/cpu.c`, all functions returning errors for now. Wire
       it into `thvm_init` behind a `THVM_BACKEND=metal` env switch.
+      <!-- Lives at src/backend/metal/_.c (plain C until the .m
+      glue lands).  init/shutdown succeed (no resources yet);
+      buf_alloc returns 0 (no-buffer sentinel); buf_read/write/
+      dispatch_kernel return -1 with a stderr note on dispatch.
+      thvm_init reads THVM_BACKEND env var; "metal" picks the
+      stub, anything else (including unset) defaults to CPU.
+      tests/test_metal_stub.c covers the swap. -->
+
 - [ ] one Metal kernel at a time, in this order: CONST, ADD, MUL,
       NEG, REDUCE_SUM, EXPAND, RESHAPE, MUL+REDUCE (matmul shape).
       Each is its own `[ ]`; each ships with a numeric test against
