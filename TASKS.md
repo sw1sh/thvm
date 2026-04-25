@@ -276,7 +276,15 @@ images to `TTensor` (shape {1, 28, 28} per sample, batched as
 
 - [x] add `TMnistLoad[]` returning a tagged dataset (training images
       + labels as TTensors).
-- [ ] add a minibatch sampler that produces fresh batches per iter.
+- [x] add a minibatch sampler that produces fresh batches per iter.
+      <!-- TMnistBatch[n] / TMnistBatch[n, "test"]: returns
+      <|"images" -> TTerm{n,1,28,28}, "labels" -> TTerm{n}|>.
+      Calls ResourceData internally each time -- ResourceData
+      caches the underlying download/decode, so per-call cost
+      is dominated by the n random samples + tensor allocation.
+      4 mnist.wlt tests cover both splits, randomness across
+      consecutive draws, and Failure on bad split arg. -->
+
 
 ## Phase 5 — Metal backend
 

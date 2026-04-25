@@ -15,11 +15,14 @@
    load the first time but cached by ResourceData.
 
    Public surface
-     TMnistLoad[n_:All]      -- returns Association of TTensors. *)
+     TMnistLoad[n_:All]       -- whole-dataset Association of TTensors.
+     TMnistBatch[n, split]    -- random minibatch as TTerm pair. *)
 
 BeginPackage["THVMLink`"];
 
 TMnistLoad::usage = "TMnistLoad[n] returns an Association with keys \"trainImages\", \"trainLabels\", \"testImages\", \"testLabels\" -- each a TTensor.  Images are f32 of shape {n, 1, 28, 28} (channels-first); labels are i32 of shape {n}.  TMnistLoad[] = TMnistLoad[All] loads the full 60K/10K splits.";
+
+TMnistBatch::usage = "TMnistBatch[n] returns a random training-split minibatch as <|\"images\" -> TTerm{n, 1, 28, 28}, \"labels\" -> TTerm{n}|>.  TMnistBatch[n, \"test\"] samples from the test split instead.  Underlying ResourceData is cached, so repeated calls are fast after the first.";
 
 Begin["`Private`"];
 
@@ -52,6 +55,33 @@ TMnistLoad[n_:All] := Module[{train, test, take, trainImg, trainLab, testImg, te
         "testLabels"  -> mnistLabelBatch[testLab]
     |>
 ]
+
+(* Sample n random items from "TrainingData" or "TestData" and
+   pack them as fresh TTensors.  ResourceData caches across calls,
+   so repeated invocations are fast after the first. *)
+TMnistBatch[n_Integer]                := TMnistBatch[n, "train"]
+TMnistBatch[n_Integer, split_String] := Module[{
+    resKey, src, total, idx, samples
+},
+    resKey = Switch[split,
+        "train", "TrainingData",
+        "test",  "TestData",
+        _,        None];
+    If[ resKey === None,
+        Message[TMnistBatch::badsplit, split];
+        Return @ $Failed
+    ];
+    src = ResourceData["MNIST", resKey];
+    total = Length[src];
+    idx = RandomSample[Range[total], UpTo[n]];
+    samples = src[[idx]];
+    <|
+        "images" -> mnistImageBatch @ Keys[samples],
+        "labels" -> mnistLabelBatch @ Values[samples]
+    |>
+]
+
+TMnistBatch::badsplit = "TMnistBatch split must be \"train\" or \"test\", not `1`.";
 
 End[];
 

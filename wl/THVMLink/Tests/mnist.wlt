@@ -36,3 +36,42 @@ VerificationTest[
     True,
     TestID -> "mnist/labels-valid-digit-class"
 ]
+
+(* === TMnistBatch -- random minibatch sampler === *)
+
+VerificationTest[
+    TInit[];
+    batch = TMnistBatch[8];
+    {Sort @ Keys[batch],
+     TTensorShape[batch["images"]],
+     TTensorShape[batch["labels"]]},
+    {{"images", "labels"}, {8, 1, 28, 28}, {8}},
+    TestID -> "mnist/batch-train-shapes"
+]
+
+VerificationTest[
+    TInit[];
+    batch = TMnistBatch[5, "test"];
+    TTensorShape[batch["images"]],
+    {5, 1, 28, 28},
+    TestID -> "mnist/batch-test-shape"
+]
+
+(* Two batches drawn back-to-back should differ (random sampling).
+   Use seed-free comparison: any difference in labels suffices. *)
+VerificationTest[
+    TInit[];
+    SeedRandom[]; b1 = TMnistBatch[16];
+    SeedRandom[]; b2 = TMnistBatch[16];
+    Normal @ TTensorData @ b1["labels"] =!= Normal @ TTensorData @ b2["labels"],
+    True,
+    TestID -> "mnist/batch-randomness-different-draws"
+]
+
+VerificationTest[
+    TInit[];
+    TMnistBatch[3, "bogus"],
+    $Failed,
+    {TMnistBatch::badsplit},
+    TestID -> "mnist/batch-bad-split-fails"
+]
