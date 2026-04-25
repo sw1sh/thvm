@@ -838,15 +838,51 @@ Realistic close-out for the overnight cron loop:
       the explicit-EXPAND TSoftmax fix all chain together. -->
 
 
-- [ ] **Land grad rule 7: UOP_REDUCE with kind=MAX** in
-      `interact_grad`, per `docs/grad-roadmap.md` step 7.  Needs
-      a new `UOP_CMPEQ` primitive (mirror of `UOP_CMPLT`) for
-      the one-hot argmax mask: `MASK[i] = (a[i] == max)`.
-      Rule: `GRAD[REDUCE_MAX(a, axis), gy, t] = GRAD[a,
-      MUL[gy_lifted, MASK], t]`.  Likely 60-100 LOC across
-      CMPEQ kernel (CPU + Metal) + REDUCE_MAX grad branch +
-      tests; will decompose into per-piece sub-items on next
-      fire.
+- [ ] **Add UOP_CMPEQ primitive (CPU + Metal kernel)**.
+      Mirror of UOP_CMPLT but with `==` instead of `<`.  Needed
+      by the REDUCE_MAX grad rule for the one-hot argmax mask
+      `MASK[i] = (a[i] == max)`.  Touches:
+        - src/thvm.h opcode (next free slot, e.g. UOP_CMPEQ = 20;
+          bump UOP_COUNT to 21; bump MAX_UOP_SRC stays).
+        - src/uop/binary.c (no change; binary constructor
+          already takes opcode).
+        - src/backend/cpu/op/cmplt.c -> add a sibling
+          cmpeq.c (or share via a macro), plus dispatch in
+          src/backend/cpu/interpret.c.
+        - src/backend/metal/shaders/binary.metal (add
+          thvm_op_cmpeq + BIN_ELEMENTWISE expansion).
+        - src/backend/metal/_.m (route UOP_CMPEQ to
+          @"thvm_cmpeq").
+        - src/schedule/materialize.c uop_arity (binary).
+        - src/book/from_dynamic.c arity table.
+        - WL: TUOpCmpeq + $UopCmpeq in Tensor.wl /
+          THVMLink.wl, plus a `uopArity` entry in Uop.wl.
+        - Parity test in tests/test_uop.c + a Metal parity
+          probe in tests/test_metal_real.c.
+      Pure new primitive; no semantic change to existing ops.
+
+- [ ] **Add REDUCE_MAX grad branch in interact_grad**.  Once
+      UOP_CMPEQ exists, extend the existing UOP_REDUCE case
+      in `src/interact/uop_grad.c` to dispatch on the kind
+      bits.  For SUM (current behaviour): broadcast cotangent
+      back via expand_to_target.  For MAX: emit
+        GRAD[REDUCE_MAX(a, axis), gy, t]
+          = GRAD[a, MUL[expand_to_target(gy, t),
+                        CMPEQ(a, EXPAND(REDUCE_MAX(a), a.shape))],
+                 t]
+      The MASK term reuses the original `a` and a fresh
+      REDUCE_MAX over it (a recomputation of the max), then
+      EXPAND'd back to a's shape so the elementwise CMPEQ has
+      matching shapes.  ~25 LOC + a structural test in
+      tests/test_grad.c (cascade form).
+
+- [ ] **REDUCE_MAX grad numerical parity test**: a small
+      one-shot test in `wl/THVMLink/Tests/grad.wlt` that
+      verifies `TGrad[TUOpReduce[a, 0, "MAX"], a]` produces a
+      one-hot at the argmax position (e.g. `a={1,5,3,2}` ->
+      `{0,1,0,0}`).  Plus a 2x2-pool-style probe (RESHAPE +
+      REDUCE_MAX combo to mimic PoolingLayer's lowering).
+      Unblocks max-pool backprop in LeNet.
 
 - [ ] **Land grad rule 8: UOP_CONV2D** in `interact_grad`, per
       `docs/grad-roadmap.md` step 8.  Three sub-gradients
