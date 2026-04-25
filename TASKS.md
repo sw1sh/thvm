@@ -4219,11 +4219,68 @@ sub-items once these land.
 
 ---
 
-ALL TASKS COMPLETE as of 2026-04-25.  GOAL achieved (Metal
-Adam-LeNet end-to-end converges loss 2.61 -> 0.025) and the
-last queued arc (WL-pinned-Terms) landed cleanly with documented
-residual blocker.  Next work needs human direction; see
-docs/bench-results.md "wpt4" for follow-up candidates.
+WL-pinned-Terms arc closed 2026-04-25.  Switched to managed-
+expression auto-unpin (745b7ba) so WL's standard GC drops pins
+when TTerm wrappers go out of scope.  Next blocker surfaced:
+**no kernel fusion**.  Linear-train probe shows 17 forward
+kernels for a graph that should fuse to ~1-3 (one REDUCE
+boundary in CrossEntropyLoss).  materialize_splice_into is
+implemented + tested (f1a) but never invoked by the pipeline.
+
+- [ ] **Kernel fusion arc (f1)** -- wire the existing
+      splice helper into a real fusion pass.  THE BLOCKER:
+      every UOp becomes its own 1-op kernel today; the
+      splice helper exists but no pass calls it; both
+      kernel count AND peak-concurrent-buf footprint should
+      drop substantially when fusion lands.  Decomposed into
+      3 sub-items.  Acceptance for the arc: linear-train
+      forward drops from 17 kernels to <= 5; LeNet forward
+      drops from 304 kernels to <= 100; verify.wls Metal
+      Adam-LeNet still converges.
+
+  - [ ] **f1c: greedy single-consumer elementwise fusion**.
+        Add a post-materialize pass that walks every kernel
+        in topological order and, for each kernel K with
+        `is_kernel_inlineable(K) == 1` AND a single consumer
+        C, calls `materialize_splice_into(C, K)`.  Single-
+        consumer is read from `consumer_count` (already
+        populated by the existing schedule pass).  Land in
+        `src/schedule/` as e.g. `splice_pass.c`; wire it
+        from `thvm_materialize` after the kernel DAG is
+        built.  Add a test in `tests/test_splice_pass.c`
+        that builds a small chain (CONST + ADD + MUL,
+        single-consumer at each step), materializes,
+        asserts post-pass kernel-count drops to 1.
+        Acceptance: 166 C + 289 WL still green; linear-train
+        forward kernel-count drops noticeably (target <= 5
+        forward kernels, was 17).  ~60 LOC + ~40 LOC test.
+
+  - [ ] **f1d: fuse across REDUCE boundaries +
+        fixed-point iterate**.  REDUCE itself isn't
+        elementwise so the f1c rule skips it, but a REDUCE
+        kernel CAN absorb its single elementwise producer
+        into its prefix (matvec pattern: EXPAND + MUL
+        feeding REDUCE_SUM).  Extend the splice helper or
+        add a sibling `splice_into_reduce` that handles
+        the REDUCE case.  Then iterate the f1c+f1d pass
+        to a fixed point (each successful splice may unlock
+        another).  Acceptance: linear-train forward drops
+        to <= 3 kernels (matvec-fused, softmax body,
+        CE+final-reduce); LeNet forward drops to <= 50;
+        all tests stay green.  ~80 LOC + tests.
+
+  - [ ] **f1e: bench delta + docs update**.  Re-run
+        `wl/Examples/_bench/baseline.wls` on both backends.
+        Acceptance: peak_concurrent_kib drops at least 30%
+        on lenet-mnist relative to the post-wpt baseline.
+        Update `docs/bench-results.md` with a sixth column
+        (post-f1) + delta vs post-wpt.  Update
+        `docs/kernelization.md` measured-progress table
+        with the new kernel counts and the now-closed f1
+        status.  Re-render
+        `wl/Examples/linear-train/memory-plan-{cpu,metal}.png`
+        and the LeNet equivalents so the after pictures
+        replace the before.  ~30 LOC + doc.
 
 
 
