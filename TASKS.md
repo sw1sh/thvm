@@ -1559,24 +1559,25 @@ Realistic close-out for the overnight cron loop:
       Unblocks the TUOpConv2D lowering. -->
 
 
-- [ ] **Drop TLeNet[] library helper; TFromNet[NetModel["LeNet"]]
+- [x] **Drop TLeNet[] library helper; TFromNet[NetModel["LeNet"]]
       should work directly**.  Currently
       `wl/THVMLink/Kernel/NN.wl` defines `TLeNet[]` as a
       NetInitialize'd local fallback because the local
       Mathematica's `NetModel["LeNet"]` returns weights as
       `Automatic` (paclet version mismatch).  User directive:
       this library wrapper shouldn't exist; `TFromNet[NetModel
-      ["LeNet"]]` should just work.  Investigate options:
-        (a) Force NetModel["LeNet"] to return concrete weights
-            via NetInitialize OR via an explicit weights-load
-            path.
-        (b) Make TFromNet handle Automatic-weight layers by
-            initialising them on the fly.
-        (c) Document the version requirement and skip if not
-            met.
-      Then update wl/Examples/lenet-mnist/{forward,grad-check,
-      train,verify}.wls to use TFromNet[NetModel["LeNet"]]
-      directly rather than the local TLeNet[].
+      ["LeNet"]]` should just work.
+      <!-- Solved with option (a) + Quiet wrap.  TLeNet[]
+      definition + ::usage + docstring removed from NN.wl.
+      forward.wls / grad-check.wls / nn.wlt all use
+      `NetInitialize @ Quiet[NetModel["LeNet"], Import::nnincmpb]`
+      now -- Quiet suppresses the once-per-session paclet-version
+      warning so nn.wlt's later VerificationTests don't see a
+      stale message leak.  train.wls / verify.wls / grad-perweight.wls
+      hardcode an inline-forward small-LeNet (Conv 6/16) and never
+      called TLeNet[] in the first place, so they're untouched.
+      199 WL + 405 C tests green. -->
+
 
 - [ ] **Move Mnist.wl from wl/THVMLink/Kernel/ to
       wl/Examples/**.  User directive: MNIST loading isn't
