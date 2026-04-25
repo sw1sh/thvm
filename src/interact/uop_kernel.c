@@ -78,10 +78,18 @@ fn void kernel_fire_by_id(u32 kid) {
       u32 producer = TENS[tid].producer_kid;
       if (producer == 0 || producer >= KERNELS_NEXT) continue;
       KernelEntry *pe = &KERNELS[producer];
-      if (pe->consumer_count > 0) pe->consumer_count--;
-      if (pe->consumer_count == 0) {
-        u32 prod_buf = TENS[pe->output_tid].buf_id;
-        cpu_buf_mark_freeable(prod_buf);
+      // Only act on a real 1->0 transition.  A producer whose count
+      // never reached non-zero (e.g., because the caller skipped
+      // kernel_compute_consumer_counts) wouldn't have been counted
+      // by anyone, so freeing on a 0->0 "decref" would be
+      // unjustified -- and worse, would leave a stale freeable bit
+      // across realize boundaries.
+      if (pe->consumer_count > 0) {
+        pe->consumer_count--;
+        if (pe->consumer_count == 0) {
+          u32 prod_buf = TENS[pe->output_tid].buf_id;
+          cpu_buf_mark_freeable(prod_buf);
+        }
       }
     }
   }

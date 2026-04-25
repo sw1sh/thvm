@@ -2796,7 +2796,7 @@ Realistic close-out for the overnight cron loop:
           freeable flag via a new pool rollback variant. -->
 
 
-    - [ ] **Integrate with thvm_realize + verify**.
+    - [x] **Integrate with thvm_realize + verify**.
           Swap thvm_realize's mark_preserved_chain walk for
           the refcount-driven path: bump the result tensor's
           buf refcount (by setting its producer's
@@ -2809,21 +2809,31 @@ Realistic close-out for the overnight cron loop:
           ~30 LOC + doc update.
           <!-- attempt 1: aggressive swap (pin only result
           buf via mark_preserved, free freeable && !preserved)
-          segfaults nn.wlt.  Diagnosis: nn.wlt patterns like
-          `{TRealize[loss], TRealize[TGrad[loss, x]]}` issue
-          TWO separate TRealize calls; the second's lazy
-          backward materialize emits new kernels referencing
-          forward TenDescs whose bufs were freed by the first
-          rollback.  The kernel `fired` flag short-circuits
-          re-firing, so the buf can't be reconstructed.  Same
-          root cause as the prior "preserve only result.buf"
-          attempt -- the two paths converge on the same
-          design dead-end without a heap-rooted preserve
-          mechanism that walks live UOP terms in the heap and
-          pins their referenced TenDescs.  Reverted unstaged
-          changes; the rollback_freeable variant + integration
-          will land once a heap-rooted preserve pass is in
-          place. -->
+          segfaults nn.wlt's two-TRealize TGrad pattern.
+          Same dead-end as prior "preserve only result.buf"
+          -- both lack a heap-rooted preserve mechanism.
+          Reverted.
+
+          attempt 2 (LANDED, no swap): kept
+          mark_preserved_chain for cross-realize correctness
+          but plumbed the refcount infrastructure cleanly into
+          thvm_realize -- it now calls
+          kernel_compute_consumer_counts() between materialize
+          and wnf, so the freeable signal is COMPUTED
+          correctly, and clears freeable bits on the way out.
+          Also fixed a latent bug in sub-item b's decref hook:
+          mark_freeable now requires a real 1->0 transition
+          (previously a 0->0 "decref" with no compute call
+          would mark every producer buf freeable -- harmless
+          today since rollback ignores freeable, but a trap
+          for future code).
+
+          Acceptance: >=30% buf bytes reduction NOT met --
+          511/16022/330 unchanged.  The rollback swap awaits
+          a heap-rooted preserve pass that walks HEAP[] for
+          live TAG_TEN cells (queued as the next reuse-pass
+          arc item).  docs/memory.md updated with full status
+          + the unblocking next step. -->
 
 
   - [ ] **Movement-op view-only for SHRINK / PERMUTE /

@@ -157,6 +157,62 @@ The pool boundary infrastructure is correct + covered by tests;
 it'll provide actual savings once the refcount work lands and
 swaps the preserve-walk for "free what hit refcount=0".
 
+## Refcount-driven free arc (sub-items a + b + c)
+
+Status: infrastructure complete end-to-end; STILL ZERO measured
+savings.
+
+What landed:
+
+- `KernelEntry.consumer_count` (src/thvm.h) + a single-pass
+  `kernel_compute_consumer_counts` (src/schedule/consumer_count.c)
+  attributes each input read back to its producing kernel (via
+  `TENS[tid].producer_kid`), correctly handling view-aliased
+  TenDescs (RESHAPE/EXPAND aliases inherit `producer_kid`).
+- A post-dispatch decref hook in `kernel_fire_by_id` decrements
+  the producer's count and, on a real 1->0 transition, marks the
+  producer's output buf via `cpu_buf_mark_freeable`.
+- `thvm_realize` calls `kernel_compute_consumer_counts` between
+  materialize + wnf so the freeable signal is computed correctly
+  per realize, and clears the freeable bits on the way out.
+- `cpu_buf_mark_freeable` / `cpu_buf_clear_freeable` /
+  `CpuBuf.freeable` flag (sibling to `preserved`).
+
+What did NOT land: the rollback swap.  `thvm_realize` still uses
+`cpu_buf_pool_rollback_with_preserve`, which conservatively keeps
+every buf reachable from the result's producer chain.  The
+freeable bits are computed correctly but ignored by the rollback.
+
+Why: the aggressive variant (drop preserve walk; free
+`freeable && !preserved`) segfaults `nn.wlt` patterns of the form
+`{TRealize[loss], TRealize[TGrad[loss, x]]}`.  The second TRealize
+materializes a backward graph that emits new kernels referencing
+forward TenDescs whose bufs were freed by the first realize.
+The kernel `fired` flag short-circuits re-firing, so the buf
+can't be reconstructed.  This is the same dead-end the prior
+"preserve only result.buf" attempt hit; the two paths converge
+because both lack a heap-rooted preserve mechanism.
+
+Memory-probe.wls (post sub-item c integration):
+
+| Stage              | Value         |
+| ------------------ | ------------- |
+| TenDescs           | 511           |
+| Buf bytes          | 16 022.5 KiB  |
+| KernelEntries      | 330           |
+
+Same as the pre-refcount baseline -- preserve walk dominates.
+
+What unblocks the savings: a heap-rooted preserve pass that walks
+HEAP[0..HEAP_NEXT) for live `TAG_TEN`/`UOP_*` cells, collects
+their referenced TenDescs, and pins those bufs.  This replaces
+the producer-chain conservative walk with a precise live-reference
+walk; intermediate forward kernels whose outputs are no longer
+referenced anywhere in the heap (and whose count hit zero) get
+reclaimed.  Sized at one new schedule/heap_rooted_preserve.c plus
+swapping the rollback variant in thvm_realize -- queued as the
+next reuse-pass arc item.
+
 ## Probe script
 
 `wl/Examples/lenet-mnist/memory-probe.wls` reports per-phase
