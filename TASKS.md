@@ -2945,7 +2945,7 @@ Realistic close-out for the overnight cron loop:
           202 C + 246 WL tests green. -->
 
 
-    - [ ] **f3f: PAD view-only**.  PAD is trickier than
+    - [x] **f3f: PAD view-only**.  PAD is trickier than
           SHRINK because added bytes need a fill value (zero
           for our use).  Two options: (a) if pad_value == 0
           AND the source buffer was zero-initialized
@@ -2960,6 +2960,21 @@ Realistic close-out for the overnight cron loop:
           wins still land via the other 3 sub-items.  ~10 LOC
           (the no-op + comment) + 1 explanatory test that
           documents the design choice.
+          <!-- Landed (option b -- intentional no-op).
+          src/schedule/materialize_in_env.c got a "2f. PAD
+          INTENTIONALLY NOT IMPLEMENTED" comment block
+          documenting why (negative-offset alias would read
+          out-of-bounds memory before the source buffer's
+          start; even calloc'd storage is OOB outside the
+          buffer's allocated extent).  PAD still falls
+          through to cpu_op_pad (memcpy + zero-fill).
+          tests/test_view_pad.c (15 sub-checks) verifies:
+          PAD's materialize_uop_in_env returns a UOP_KERNEL
+          (not a TAG_TEN alias), allocates a fresh
+          KernelEntry + TenDesc, and after firing yields the
+          correct zero-bordered output.  217 C + 246 WL
+          tests green. -->
+
 
     - [ ] **f3g: FLIP view-only**.  Negate strides on the
           flipped axes; offset shifts to (shape[i]-1)*stride[i]

@@ -31,7 +31,8 @@ TESTS := \
   $(BIN)/test_consumer_count \
   $(BIN)/test_decref_hook \
   $(BIN)/test_view_shrink \
-  $(BIN)/test_view_permute
+  $(BIN)/test_view_permute \
+  $(BIN)/test_view_pad
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.

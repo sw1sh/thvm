@@ -157,6 +157,23 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
       }
     }
 
+    // 2f. View-only PAD (sub-item f3f of the kernel-fusion arc):
+    //     INTENTIONALLY NOT IMPLEMENTED.  PAD adds bytes around the
+    //     source that must read as the pad_value (zero for our use);
+    //     the only way to do that without copying would be to alias
+    //     with offset = -starts[i] * strides[i] and trust the
+    //     allocator's pre-source memory to be zero.  cpu_buf_alloc
+    //     uses calloc, but the bytes BEFORE the buffer's start are
+    //     out-of-bounds -- reading them is UB even when the
+    //     allocator gave us calloc'd storage at the buffer's
+    //     official start.  PAD therefore falls through to the
+    //     kernel path (cpu_op_pad memcpy + zero-fill), which is
+    //     correct + safe.  See tests/test_view_pad.c for the
+    //     documenting test.
+    //     Per-conv kernel-count gain: 0 (this sub-item is a no-op
+    //     by design); the SHRINK / PERMUTE / FLIP wins land via
+    //     f3d / f3e / f3g.
+
     // 2e. View-only PERMUTE (sub-item f3e of the kernel-fusion arc).
     //     Permuted axis i of the alias maps to source axis perm[i],
     //     so dims[i] = src.dims[perm[i]] and strides[i] =
