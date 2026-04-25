@@ -4276,7 +4276,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
        just works: every realized intermediate has a buffer,
        every grad reference still points at a real buffer. -->
 
-  - [ ] **f1c (redesigned): UOP realization classifier**.
+  - [x] **f1c (redesigned): UOP realization classifier**.
         New pass `src/schedule/realize_classify.c` that, given
         a UOp DAG, returns a bitmap of "realized" UOPs.
         A UOp is realized when ANY of: (a) it's the root the
@@ -4291,6 +4291,18 @@ implemented + tested (f1a) but never invoked by the pipeline.
         (shared subexpression realized).  No materializer
         change yet; this just produces the realization
         info that f1d will consume.  ~70 LOC + ~50 LOC test.
+        <!-- DONE: realize_classify (Term root) populates a
+             small per-loc table with consumer_count + op +
+             realized flag.  Rules a/b/c implemented; rule d
+             (movement-op view-only) deferred to f1d.  Dedup
+             of repeated child refs (MUL[x, x] = 1 consumer
+             of x) handled.  20-sub-check test covers chain,
+             fan-out, dup-child, REDUCE-always-realizes, and
+             non-UOp leaves.  166 C + 289 WL green.  No
+             behavior change in production -- the table is
+             only read by tests.  f1d consumes it from the
+             materializer. -->
+
 
   - [ ] **f1d: selective materializer**.  Modify
         `materialize_walk` and `materialize_expr` so they

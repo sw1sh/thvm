@@ -163,6 +163,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "schedule/materialize_in_env.c"
 #include "schedule/walk.c"
 #include "schedule/consumer_count.c"
+#include "schedule/realize_classify.c"
 
 // === interact/ ===
 // Interaction rules.  uop_kernel.c needs the schedule pipeline above
