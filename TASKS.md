@@ -3985,6 +3985,39 @@ sub-items once these land.
         converges loss 2.61 -> 0.025.  3-attempt rule
         applies; document any heap-walk gap that surfaces.
         ~40 LOC.
+        <!-- attempt 1: swapping mark_heap_rooted_preserve for
+        mark_gc_preserve(res) in thvm_realize broke 3 WL
+        tests, all gradient/training-related across multiple
+        TRealize calls:
+          nn/gd-loss-monotonically-decreases (False, False)
+          nn/poly-regression-gradients ({{16},{2},{4}} vs
+            expected {{16},{-32},{-16}} -- wrong grad values)
+          uop-load/training-step-decreases-loss-with-load-prefix
+            (False)
+
+        Same dead-end as prior aggressive-preserve attempts
+        (refcount-arc sub-item c, bm4b attempt 1, hrp2
+        almost-but-not-quite).  Pending TGrad UOP cells in
+        HEAP[] aren't reachable from gc_collect_roots's set
+        (result + WNF_LAST_STACK + DEFS), so their
+        TAG_TEN children -- pointing at forward intermediates
+        -- get freed at the end of the loss realize, then
+        the next realize's backward materialize tries to
+        read them and gets recycled/zeroed slots.
+
+        gc_mark_term DOES walk pending UOP children when
+        reached from a root.  But the UOP cells themselves
+        sit in HEAP without being a root or reachable from
+        one.  Need cross-realize tracking: maintain a side
+        table of "WL-held" Terms (anything thvm_wl_term_new
+        returns) and add them as roots.  That's a new arc
+        beyond gc3's scope (touches the WL bridge surface).
+
+        Reverted unstaged changes; bm4 / hrp / gc arcs all
+        share the same root-set blocker.  Marking gc3
+        attempt-1; attempt-2 needs the WL-pinned-Terms side
+        table OR a different unblocking strategy. -->
+
 
   - [ ] **gc4: bench delta + docs**.  Re-run
         wl/Examples/_bench/baseline.wls on both backends.
