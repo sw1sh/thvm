@@ -2737,10 +2737,26 @@ Realistic close-out for the overnight cron loop:
           documented. -->
 
 
-  - [ ] **Refcount-driven free (arc)**.  Decref + free
+  - [x] **Refcount-driven free (arc)**.  Decref + free
         buffers when the last consumer kernel finishes
         reading.  Drops conv-partial memory by ~5x.
         Decomposed into 3 sub-items below.
+        <!-- Infra DONE; SAVINGS PENDING heap-rooted preserve.
+        sub-items a (consumer-count pass), b (decref hook +
+        freeable mark), c (integration into thvm_realize) all
+        landed.  Memory probe still shows zero delta because
+        thvm_realize's rollback continues to use the
+        conservative preserve_chain walk -- the freeable
+        signal is computed correctly but ignored by the
+        rollback.  An aggressive swap (free freeable &&
+        !preserved) segfaults nn.wlt's two-step
+        {TRealize[loss], TRealize[TGrad[loss,x]]} pattern
+        because the second realize re-reads forward bufs
+        freed by the first.  The unblocking next step is a
+        heap-rooted preserve pass that walks HEAP[] for live
+        TAG_TEN cells -- see docs/memory.md "Refcount-driven
+        free arc" section. -->
+
 
     - [x] **Per-kernel consumer-count pass**.  Add a
           single-pass walk over KERNELS[] (after materialize
@@ -2837,9 +2853,57 @@ Realistic close-out for the overnight cron loop:
 
 
   - [ ] **Movement-op view-only for SHRINK / PERMUTE /
-        PAD / FLIP** (mirroring f3b/f3c).  Per-conv
+        PAD / FLIP (arc)** (mirroring f3b/f3c).  Per-conv
         kernel-count drops a further 50-70.  Each
         movement op is its own ~50-LOC sub-item.
+        Decomposed into 4 sub-items below.
+
+    - [ ] **f3d: SHRINK view-only**.  In
+          src/schedule/materialize_in_env.c, add a
+          UOP_SHRINK case before the kernel-emission path
+          that allocates a view-aliased TenDesc via
+          tensor_view_of (offset += sum(starts[i] * src_strides[i])
+          per axis, shape -> shrink_dims, strides inherited).
+          Mark contiguous=0 if the resulting strides aren't
+          row-major from offset 0.  Ensure
+          shape_env.c:term_shape_in already handles UOP_SHRINK
+          (it does -- landed during the f3b SHRINK-grad fix).
+          Re-run the conv-shape WL tests + nn.wlt to verify
+          backward still works (SHRINK grad = PAD).  Add a
+          C unit test in tests/test_view_shrink.c covering
+          the view-of-shrink alias + a strided/non-contig
+          consumer.  ~50 LOC + ~30 LOC test.
+
+    - [ ] **f3e: PERMUTE view-only**.  Same approach: in
+          materialize_in_env.c, allocate a view-aliased
+          TenDesc with strides reordered per the perm
+          argument; shape inherits the permuted shape from
+          shape_env.  Inputs whose source isn't view-able
+          (already non-contig + a permute that would require
+          re-layout) fall through to the kernel-emission
+          path.  Re-run all tests.  ~50 LOC + ~30 LOC test.
+
+    - [ ] **f3f: PAD view-only**.  PAD is trickier than
+          SHRINK because added bytes need a fill value (zero
+          for our use).  Two options: (a) if pad_value == 0
+          AND the source buffer was zero-initialized
+          (cpu_buf_alloc uses calloc -- always true today),
+          we can alias with offset = -starts[i]*strides[i]
+          (negative-offset region reads zeroed memory the
+          allocator never returned).  This is unsafe -- the
+          allocator returns minimal-size bufs.  (b) Skip the
+          view-only optimization for PAD; emit a kernel.
+          Default to (b) for safety, document why.  Acceptance:
+          PAD doesn't regress; the SHRINK / PERMUTE / FLIP
+          wins still land via the other 3 sub-items.  ~10 LOC
+          (the no-op + comment) + 1 explanatory test that
+          documents the design choice.
+
+    - [ ] **f3g: FLIP view-only**.  Negate strides on the
+          flipped axes; offset shifts to (shape[i]-1)*stride[i]
+          on each.  Same view-of-source path as SHRINK /
+          PERMUTE.  Mark contiguous=0.  Re-run tests +
+          add tests/test_view_flip.c.  ~50 LOC + ~30 LOC test.
 
   - [ ] **Adam-state arena**.  Keep TAdamHostStep's m/v
         arrays alive across steps in a session-scoped
