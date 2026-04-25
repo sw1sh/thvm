@@ -180,6 +180,11 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 // wires it into thvm_realize.
 #include "schedule/heap_rooted_preserve.c"
 
+// wpt1: WL-pinned-Terms side table.  Tracks every Term WL is
+// holding so gc_collect_roots can include them; bridge wiring
+// lands in wpt2.
+#include "schedule/wl_pin.c"
+
 // gc1: collect the dyn-heap GC root set.  Standalone helper;
 // gc2/gc3 build the recursive mark + integrate.
 #include "schedule/gc_roots.c"
@@ -209,6 +214,7 @@ void thvm_init(void) {
   BOOK_NEXT  = 1;
   ALO_STATES_NEXT = 1;
   for (u32 i = 0; i < DEFS_CAP; i++) DEFS[i] = 0;
+  wl_pin_clear();   // wpt1: drop any leftover pins from a prior session
   // Backend selection: THVM_BACKEND=metal switches to the Metal
   // backend (currently a stub -- compute calls error out).  Anything
   // else, including unset, defaults to CPU.
@@ -242,5 +248,6 @@ void thvm_free(void) {
   BOOK_NEXT  = 1;
   ALO_STATES_NEXT = 1;
   for (u32 i = 0; i < DEFS_CAP; i++) DEFS[i] = 0;
+  wl_pin_clear();
   CURRENT_BACKEND = NULL;
 }

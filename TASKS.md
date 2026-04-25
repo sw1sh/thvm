@@ -4098,7 +4098,7 @@ sub-items once these land.
       conservatively preserves them all.  Decomposed into 4
       sub-items.
 
-  - [ ] **wpt1: C-side pin table infra**.  New
+  - [x] **wpt1: C-side pin table infra**.  New
         src/runtime/wl_pin.c with:
           - `WL_PINNED_TERMS[2048]` + length, reset in
             thvm_init / thvm_free.
@@ -4111,6 +4111,31 @@ sub-items once these land.
         Standalone; no callers wired yet.  ~50 LOC + ~30 LOC
         test in tests/test_wl_pin.c (pin/unpin/iter/saturated/
         unpin-missing).
+        <!-- Landed.  Placed in src/schedule/wl_pin.c (close
+        to gc_collect_roots which consumes it) instead of
+        src/runtime/ -- no src/runtime/ folder exists; the
+        schedule/ neighborhood owns the GC + scheduling
+        primitives.
+
+        API surface:
+          wl_pin_term(t)        -- append; saturated push silently drops.
+          wl_unpin_term(t)      -- swap-remove first matching entry; missing is no-op.
+          wl_pin_clear()        -- empty the table; called from thvm_init/free.
+          wl_pinned_for_each(cb)-- iterate non-zero entries; NULL cb is no-op.
+
+        thvm.c: wl_pin_clear() called from both thvm_init and
+        thvm_free so a fresh session starts with no pins.
+
+        tests/test_wl_pin.c (9 sub-checks):
+          empty-iter / pin-and-iter / unpin-removes /
+          unpin-missing-noop / pin-zero-noop /
+          iter-with-null-cb-noop / clear-empties /
+          saturated-push-drops / thvm-init-clears.
+
+        268 C + 270 WL tests green (now 269 C with the new
+        test added; bench unchanged because no callers
+        wired).  wpt2 wires the WL bridge sites. -->
+
 
   - [ ] **wpt2: WL bridge wiring**.  Modify
         wl/THVMLink/CSource/thvmlink.c to call
