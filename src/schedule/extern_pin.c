@@ -43,3 +43,31 @@ fn void extern_pinned_for_each(void (*cb)(Term)) {
     if (EXTERN_PINNED_TERMS[i] != 0) cb(EXTERN_PINNED_TERMS[i]);
   }
 }
+
+// Handle table: maps a host-assigned handle id (e.g. a Wolfram
+// ManagedLibraryExpression id) to the Term it pins.  The host
+// creates a handle, calls extern_pin_handle_set(handle_id, term)
+// to associate, and the host's GC eventually calls
+// extern_pin_handle_drop(handle_id) which releases the pin.
+
+#define EXTERN_PIN_HANDLE_CAP 8192
+
+static Term EXTERN_PIN_HANDLES[EXTERN_PIN_HANDLE_CAP];
+
+fn void extern_pin_handle_set(u64 id, Term t) {
+  if (id >= EXTERN_PIN_HANDLE_CAP) return;
+  EXTERN_PIN_HANDLES[id] = t;
+  extern_pin_term(t);
+}
+
+fn void extern_pin_handle_drop(u64 id) {
+  if (id >= EXTERN_PIN_HANDLE_CAP) return;
+  Term t = EXTERN_PIN_HANDLES[id];
+  if (t == 0) return;
+  extern_unpin_term(t);
+  EXTERN_PIN_HANDLES[id] = 0;
+}
+
+fn void extern_pin_handle_clear(void) {
+  memset(EXTERN_PIN_HANDLES, 0, sizeof(EXTERN_PIN_HANDLES));
+}

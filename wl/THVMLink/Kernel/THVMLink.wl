@@ -21,7 +21,8 @@ TTermTag::usage   = "TTermTag[term] returns the tag (Integer).  Accepts either a
 TTermExt::usage   = "TTermExt[term] returns the EXT field.";
 TTermVal::usage   = "TTermVal[term] returns the VAL field (heap loc, etc.).";
 TTermSub::usage   = "TTermSub[term] returns the SUB flag (0 or 1).";
-TTermUnpin::usage = "TTermUnpin[term] drops `term` from the WL-pinned-Terms GC root set.  Call when a TTerm wrapper is no longer reachable on the WL side so the pin table doesn't grow unboundedly.";
+TTermUnpin::usage = "TTermUnpin[term] drops `term` from the extern-pinned-Terms GC root set.  Mostly superseded by the managed-handle auto-unpin attached to TTerm itself; kept for callers that want to release a pin without dropping the WL wrapper.";
+TExternPinCount::usage = "TExternPinCount[] returns the current number of entries in the external-caller pin table.  Useful for observing that WL's standard GC has dropped TTerm wrappers between evaluations.";
 TTagName::usage   = "TTagName[tag] returns a string for a tag id.";
 
 (* === heap === *)
@@ -203,6 +204,10 @@ $termExtFn   := $termExtFn   = load["thvm_wl_term_ext",   {Integer},            
 $termValFn   := $termValFn   = load["thvm_wl_term_val",   {Integer},                Integer];
 $termSubFn   := $termSubFn   = load["thvm_wl_term_sub",   {Integer},                Integer];
 $termUnpinFn := $termUnpinFn = load["thvm_wl_term_unpin", {Integer},                Integer];
+$externPinAssociateFn := $externPinAssociateFn =
+    load["thvm_wl_extern_pin_associate", {Integer, Integer}, Integer];
+$externPinCountFn := $externPinCountFn =
+    load["thvm_wl_extern_pin_count", {}, Integer];
 
 $heapPosFn   := $heapPosFn   = load["thvm_wl_heap_pos",   {},                       Integer];
 $heapAllocFn := $heapAllocFn = load["thvm_wl_heap_alloc", {Integer},                Integer];
@@ -326,19 +331,48 @@ TReset[ctx_TContext] := TInContext[ctx, TReset[]]
    (heapWith, etc.) can stay scalar-friendly.  The MakeBoxes summary
    box for TTerm lives in Format.wl. *)
 
-(* TTerm canonical form is `TTerm[ctxSlot_Integer, raw_Integer]`.
-   Bare 1-arg `TTerm[raw]` (e.g. from legacy code or a fresh C-bridge
-   wrap) auto-normalizes to the tagged 2-arg form using the current
-   C-side context slot.  This downvalue fires on construction so
-   pattern-matchers downstream only ever see 2-arg. *)
+(* TTerm canonical form is `TTerm[ctxSlot_Integer, raw_Integer,
+   handle_]` where `handle` is a `ManagedLibraryExpression`-backed
+   pin that anchors the underlying C-side Term as a GC root for
+   as long as the WL value is reachable.  When WL collects the
+   TTerm value, the handle's manager fires on the C side and the
+   pin is dropped automatically.
+
+   Bare 1-arg `TTerm[raw]` and 2-arg `TTerm[ctx, raw]` (from
+   legacy code or fresh bridge results) auto-normalize to the
+   tagged 3-arg form so pattern-matchers downstream only ever
+   see 3-arg. *)
 TTerm[id_Integer] := TTerm[$contextCurrentFn[], id]
+TTerm[c_Integer, id_Integer] := TTerm[c, id, makePinHandle[id]]
 
 (* Internal extractors. *)
-ttermRaw[TTerm[_Integer, id_Integer]] := id
-ttermRaw[id_Integer]                  := id
+ttermRaw[TTerm[_Integer, id_Integer, _]] := id
+ttermRaw[id_Integer]                     := id
 
-ttermCtx[TTerm[c_Integer, _Integer]]  := c
-ttermCtx[_Integer]                    := 0
+ttermCtx[TTerm[c_Integer, _Integer, _]]  := c
+ttermCtx[_Integer]                       := 0
+
+(* Build a fresh ManagedLibraryExpression["ExternPin"] handle and
+   wire it to `raw` on the C side.  The returned handle becomes
+   part of the TTerm value; when WL collects the TTerm (and thus
+   the handle), the registered manager calls extern_unpin_term
+   for us.  Construct uniquely each time so independent TTerm
+   wrappers don't share lifetime -- duplicate pins on the same
+   Term are fine (the table holds duplicates and unpin removes
+   one matching entry per call). *)
+makePinHandle[raw_Integer] := With[
+    {h = CreateManagedLibraryExpression["ExternPin", ExternPin]},
+    $externPinAssociateFn[ManagedLibraryExpressionID[h], raw];
+    h
+]
+
+(* Two TTerm wrappers are SameQ when they reference the same
+   (ctx, raw); the managed handle is part of the GC story, not
+   the identity story.  Without this override, fresh handles
+   for the same underlying Term would compare unequal and break
+   every `===` against a TTerm result. *)
+TTerm /: SameQ[TTerm[c1_Integer, r1_Integer, _], TTerm[c2_Integer, r2_Integer, _]] :=
+    c1 === c2 && r1 === r2
 
 (* Pack a fresh TTerm from raw fields.  Private; callers use the
    high-level constructors.  The 1-arg `TTerm[raw]` immediately
@@ -359,17 +393,19 @@ TTermExt[t_]                    := $termExtFn[ttermRaw[t]]
 TTermVal[t_]                    := $termValFn[ttermRaw[t]]
 TTermSub[t_]                    := $termSubFn[ttermRaw[t]]
 TTermUnpin[t_]                  := (ensureInit[]; $termUnpinFn[ttermRaw[t]])
+TExternPinCount[]               := (ensureInit[]; $externPinCountFn[])
 
-(* TTerm methods: only the canonical 2-arg form is reachable; bare
-   `TTerm[id]` auto-normalizes before any rule fires. *)
-TTerm[c_Integer, id_Integer]["raw"]     := id
-TTerm[c_Integer, id_Integer]["tag"]     := $termTagFn[id]
-TTerm[c_Integer, id_Integer]["ext"]     := $termExtFn[id]
-TTerm[c_Integer, id_Integer]["val"]     := $termValFn[id]
-TTerm[c_Integer, id_Integer]["sub"]     := $termSubFn[id]
-TTerm[c_Integer, id_Integer]["tagName"] := TTagName[$termTagFn[id]]
-TTerm[c_Integer, _Integer]["ctx"]       := c
-TTerm[c_Integer, id_Integer]["info"]    := <|
+(* TTerm methods: only the canonical 3-arg form is reachable; bare
+   `TTerm[id]` and `TTerm[ctx, id]` auto-normalize before any
+   rule fires. *)
+TTerm[c_Integer, id_Integer, _]["raw"]     := id
+TTerm[c_Integer, id_Integer, _]["tag"]     := $termTagFn[id]
+TTerm[c_Integer, id_Integer, _]["ext"]     := $termExtFn[id]
+TTerm[c_Integer, id_Integer, _]["val"]     := $termValFn[id]
+TTerm[c_Integer, id_Integer, _]["sub"]     := $termSubFn[id]
+TTerm[c_Integer, id_Integer, _]["tagName"] := TTagName[$termTagFn[id]]
+TTerm[c_Integer, _Integer, _]["ctx"]       := c
+TTerm[c_Integer, id_Integer, _]["info"]    := <|
     "sub"     -> $termSubFn[id],
     "tag"     -> $termTagFn[id],
     "tagName" -> TTagName[$termTagFn[id]],
@@ -575,8 +611,8 @@ TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
 
 (* Sugar: TTerm[ctx, id][arg] == TApp[TTerm[ctx, id], arg] lets the
    user write `id[era]` instead of `TApp[id, era]`. *)
-TTerm[c_Integer, id_Integer][y_TTerm]   := TApp[TTerm[c, id], y]
-TTerm[c_Integer, id_Integer][y_Integer] := TApp[TTerm[c, id], y]
+TTerm[c_Integer, id_Integer, _][y_TTerm]   := TApp[TTerm[c, id], y]
+TTerm[c_Integer, id_Integer, _][y_Integer] := TApp[TTerm[c, id], y]
 
 TDup[body_, k_]                       := TDup[TFreshLabel[], body, k]
 TDup[label_Integer, body_, k_] := With[{loc = heapWith[body]},

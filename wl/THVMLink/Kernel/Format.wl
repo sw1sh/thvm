@@ -25,7 +25,7 @@ tHeapPayloadQ[___] := False
 tHeapQ[THeap[a_Association]] := tHeapPayloadQ[a]
 tHeapQ[___] := False
 
-tTermQ[TTerm[_Integer, _Integer]] := True
+tTermQ[TTerm[_Integer, _Integer, _]] := True
 tTermQ[___]                       := False
 
 (* More specific tests that match on a TTerm AND its tag.  Used to

@@ -131,7 +131,8 @@ VerificationTest[
         TContextDestroy[ctx];
         slots
     ],
-    {2, 2, 0, 1},
+    (* TTerm now has 3 elements: {ctxSlot, raw, externPinHandle}. *)
+    {3, 3, 0, 1},
     TestID -> "context/term-tagged-with-slot"
 ]
 
