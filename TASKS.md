@@ -1033,10 +1033,71 @@ Realistic close-out for the overnight cron loop:
       All 381 C + 173 WL tests stay green. -->
 
 
-- [ ] **Land grad rule 8: UOP_CONV2D** in `interact_grad`, per
-      `docs/grad-roadmap.md` step 8.  Three sub-gradients
-      (grad_input via transposed conv, grad_weights via
-      cross-correlation, grad_bias via REDUCE_SUM).  Needs
-      `UOP_FLIP` + `UOP_PAD` kernels (currently opcode-only).
-      Multi-fire arc; will decompose into FLIP kernel, PAD
-      kernel, and the three grad branches.
+- [ ] **CONV2D grad_bias branch in interact_grad**.  Easiest of
+      the three CONV2D sub-gradients: bias gradient is just
+      `REDUCE_SUM(gy, axis=batch)` summed over output spatial
+      axes too -- shape contract: gy is {C_out, H_out, W_out};
+      grad_bias is {C_out} (sum over H_out, W_out).  Lands
+      first because it doesn't need any new primitive.  After
+      this, partial CONV2D backprop (bias only) works while
+      grad_input and grad_weights still emit grad_zero.
+
+- [ ] **UOP_FLIP CPU + Metal kernels**.  Constructor exists in
+      src/uop/flip.c; opcode `UOP_FLIP = 8`; arity 1; heap
+      `[src, NUM(axes_bitmask)]`.  Needed for CONV2D grad_input
+      (the standard transposed-conv trick is full-conv with
+      flipped weights).  Implement:
+        - src/backend/cpu/op/flip.c: walk the source in a
+          per-axis-aware way, mirroring axes whose bit is set
+          in axes_bitmask.  Needs the source's per-axis shape;
+          extend the KProgOp src0_dims plumbing to populate
+          for UOP_FLIP too.
+        - src/backend/metal/shaders/movement.metal +
+          metal/_.m: mirror.
+        - Parity tests in tests/test_uop.c (or test_expand_axis-
+          style: axis=0 only, axis=1 only, both axes) + a
+          Metal-vs-CPU parity check in test_metal_real.c.
+
+- [ ] **UOP_PAD CPU + Metal kernels**.  Constructor exists in
+      src/uop/pad.c; opcode `UOP_PAD = 6`; arity 1; heap
+      `[src, NUM(b0), NUM(e0), ..., NUM(b_{n-1}), NUM(e_{n-1})]`
+      (per-axis begin/end pad widths interleaved).  Needed for
+      CONV2D grad_input's transposed-conv padding.  Implement
+      CPU + Metal kernels with axis-aware indexing, plus parity
+      tests covering 1D and 2D cases (asymmetric pad widths).
+
+- [ ] **CONV2D grad_weights branch in interact_grad**.  Build
+      via existing primitives (no new kernel needed):
+        grad_weights[c_out, c_in, ky, kx]
+            = sum over (y, x) of input[c_in, y+ky, x+kx]
+                              * gy[c_out, y, x]
+      = cross-correlation of input with gy (over the spatial
+      output positions), per (c_out, c_in) pair.  Express as a
+      composition of REDUCE + MUL + EXPAND if a clever shape
+      shuffle works, OR as a recursion into a fresh UOP_CONV2D
+      with input/gy swapped (if that's well-defined for the
+      runtime's CONV2D semantics).  Needs design thought
+      tracked as a `<!-- design-question --> note when picking
+      the implementation.
+
+- [ ] **CONV2D grad_input branch in interact_grad** (the
+      heaviest -- multi-fire on its own).  Build via:
+        grad_input = full-conv(gy_padded, FLIP(weights, {ky, kx}))
+      where `gy_padded` = PAD(gy, kh-1, kw-1) on the spatial
+      axes.  Once UOP_FLIP and UOP_PAD kernels land, the rule
+      itself is a fresh UOP_CONV2D over the prepared input/
+      weights pair, so the CONV2D forward kernel does the
+      heavy lifting.
+
+- [ ] **End-to-end: TOptim["Adam"] training NetModel["LeNet"]
+      on MNIST on Metal**.  The original goal.  Needs:
+      - Multi-tensor Adam (Adam currently threads state
+        through a single weight; LeNet has many).  Either
+        per-tensor Adam loops in WL, or a multi-weight Adam
+        variant in Optim.wl.
+      - All the CONV2D grad branches above.
+      - A wl/Examples/lenet-mnist/train.wls similar to
+        mlp-mnist/train.wls but using TLeNet[] and Adam.
+      - Verification: the loss curve trends down and the
+        final classifier beats random (>10% accuracy) on a
+        held-out batch.
