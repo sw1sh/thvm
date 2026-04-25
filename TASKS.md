@@ -1230,15 +1230,63 @@ Realistic close-out for the overnight cron loop:
       end-to-end. -->
 
 
-- [ ] **End-to-end: TOptim["Adam"] training NetModel["LeNet"]
-      on MNIST on Metal**.  The original goal.  Needs:
-      - Multi-tensor Adam (Adam currently threads state
-        through a single weight; LeNet has many).  Either
-        per-tensor Adam loops in WL, or a multi-weight Adam
-        variant in Optim.wl.
-      - All the CONV2D grad branches above.
-      - A wl/Examples/lenet-mnist/train.wls similar to
-        mlp-mnist/train.wls but using TLeNet[] and Adam.
-      - Verification: the loss curve trends down and the
-        final classifier beats random (>10% accuracy) on a
-        held-out batch.
+- [ ] **LeNet end-to-end forward+grad smoke test**.  Before
+      attempting training, verify the full LeNet chain
+      (Conv -> ReLU -> MaxPool -> Conv -> ReLU -> MaxPool ->
+      Flatten -> Linear -> ReLU -> Linear -> Softmax +
+      CrossEntropyLoss) materializes correctly forward AND
+      that `TGrad[loss, W]` for at least the first conv's
+      weights and the final linear's bias produces a finite,
+      correctly-shaped gradient.  Lives at
+      `wl/Examples/lenet-mnist/grad-check.wls`, mirroring the
+      mlp-mnist version.  Likely surfaces integration bugs
+      between the CONV2D + Pool + Linear + Softmax chain rules
+      that none of the unit tests cover.
+
+- [ ] **CONV2D grad_weights for C_in > 1**.  Current rule
+      emits grad_zero when C_in > 1 (LeNet's second conv).
+      To make multi-channel CONV2D backprop correct, pick one
+      of the three options noted in the existing
+      grad_weights design-question:
+        (a) per-c_in CONV2D + CONCAT (needs a CONCAT primitive),
+        (b) a fold of c_in into c_out via reshape + a fresh
+            CONV2D + reshape-back,
+        (c) a dedicated UOP_CORRELATE primitive that returns
+            rank-4.
+      Likely (b) is the smallest -- worth probing: input
+      reshape{C_in*1, H, W} (no-op) + weights as gy.reshape(
+      {C_out * C_in, 1, H_out, W_out}) -- but this folds c_in
+      into c_out which loses the per-c_in correlation.
+      Probably needs (a) with a small SHRINK + CONCAT pair or
+      (c) outright.
+
+- [ ] **Multi-tensor optimizer surface (per-tensor SGD or
+      Adam)**.  TOptim["Adam"] threads state through a SINGLE
+      weight; LeNet has 8 weight tensors (4 conv W+b pairs,
+      well actually 2 conv W+b + 2 linear W+b = 8).  Two
+      options:
+        (a) Pure WL: per-tensor Adam-update inline (no
+            recursion through TLam at all; just compute the
+            update tensors and TTensorCreate the new weight
+            states).  Mirrors mlp-mnist/train.wls's manual
+            SGD pattern.  Simplest.
+        (b) Optim.wl: extend TOptim["Adam"] to take a list
+            of weight tensors and thread per-weight m/v
+            state through ONE recursion.  Requires a
+            multi-binder TLam or a tuple-of-tensors as the
+            single state argument.  More work; better
+            future-proofing.
+      Pick (a) first; (b) is a follow-up.
+
+- [ ] **wl/Examples/lenet-mnist/train.wls**: K manual SGD or
+      per-tensor Adam steps on a fixed MNIST batch through
+      TLeNet[]; assert the loss curve trends down.  Mirrors
+      mlp-mnist/train.wls with LeNet substituted.  Will
+      probably need a smaller batch / fewer steps because
+      the materialize cost is much higher.
+
+- [ ] **LeNet accuracy verification**: run the trained
+      LeNet from train.wls on a held-out batch (e.g. another
+      TMnistBatch[10]) and assert prediction accuracy >10%
+      (random-guess baseline for 10 classes).  Closes out
+      the original goal.
