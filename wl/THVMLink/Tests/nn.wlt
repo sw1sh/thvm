@@ -506,6 +506,60 @@ VerificationTest[
     TestID -> "nn/conv2d-lowered-tiny-case-parity"
 ]
 
+(* === LeNet-realistic-shape forward + grad parity ===
+   Sub-item (b) of the conv2d-lowering arc.  C_in=3, C_out=2,
+   H=W=8, kh=kw=3 -- between LeNet-5's 1->20 / 5x5 first conv
+   and 20->50 / 5x5 inner conv.  Asserts forward AND grad-wrt-input
+   AND grad-wrt-weights match the bespoke under a tight tolerance. *)
+
+VerificationTest[
+    TInit[];
+    Module[{seed, input, weights, bias, fwdB, fwdL},
+        seed[k_, dims_] := NumericArray[
+            ArrayReshape[
+                Table[Sin[3.14 * i / k] * 0.5, {i, Times @@ dims}],
+                dims],
+            "Real32"];
+        input   = TTensorCreate @ seed[7,  {3, 8, 8}];
+        weights = TTensorCreate @ seed[11, {2, 3, 3, 3}];
+        bias    = TTensorCreate @ seed[3,  {2}];
+        fwdB = Normal @ TTensorData @ TRealize @ TUOpConv2D       [input, weights, bias];
+        fwdL = Normal @ TTensorData @ TRealize @ TUOpConv2DLowered[input, weights, bias];
+        Max @ Abs @ Flatten[fwdB - fwdL] < 0.001
+    ],
+    True,
+    TestID -> "nn/conv2d-lowered-lenet-shape-forward-parity"
+]
+
+VerificationTest[
+    TInit[];
+    Module[{seed, input, weights, bias, lossB, lossL,
+            gInBespoke, gInLowered, gWBespoke, gWLowered, near},
+        seed[k_, dims_] := NumericArray[
+            ArrayReshape[
+                Table[Sin[3.14 * i / k] * 0.5, {i, Times @@ dims}],
+                dims],
+            "Real32"];
+        input   = TTensorCreate @ seed[7,  {3, 8, 8}];
+        weights = TTensorCreate @ seed[11, {2, 3, 3, 3}];
+        bias    = TTensorCreate @ seed[3,  {2}];
+        lossB   = TUOpReduce[TUOpReduce[TUOpReduce[
+                    TUOpConv2D[input, weights, bias],
+                    0, "SUM"], 0, "SUM"], 0, "SUM"];
+        lossL   = TUOpReduce[TUOpReduce[TUOpReduce[
+                    TUOpConv2DLowered[input, weights, bias],
+                    0, "SUM"], 0, "SUM"], 0, "SUM"];
+        gInBespoke = Normal @ TTensorData @ TRealize @ TGrad[lossB, input];
+        gInLowered = Normal @ TTensorData @ TRealize @ TGrad[lossL, input];
+        gWBespoke  = Normal @ TTensorData @ TRealize @ TGrad[lossB, weights];
+        gWLowered  = Normal @ TTensorData @ TRealize @ TGrad[lossL, weights];
+        near[a_, b_] := Max @ Abs @ Flatten[a - b] < 0.001;
+        {near[gInBespoke, gInLowered], near[gWBespoke, gWLowered]}
+    ],
+    {True, True},
+    TestID -> "nn/conv2d-lowered-lenet-shape-grad-parity"
+]
+
 (* fromLayer dispatch path -- TFromNet[ConvolutionLayer[...], x] uses
    the same TUOpConv2D with weights/bias pulled from the layer. *)
 VerificationTest[

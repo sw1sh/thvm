@@ -148,6 +148,26 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
         return 1;
     }
 
+    // SHRINK: per-axis dim shrinks to e_i - b_i.  Same heap layout
+    // as PAD; ndim implicit in the source.  (Without this case,
+    // EXPAND grad on EXPAND(SHRINK(...), ...) couldn't determine the
+    // SHRINK's output shape, fell into no-reduction passthrough, and
+    // misrouted {1,1,H,W} cotangents into a {1,1,1,1} EXPAND that
+    // truncated to src[0] -- the conv2d-lowered weight-grad bug from
+    // the SHRINK/PAD/PERMUTE/FLIP arc's sub-item (b).)
+    if (op == UOP_SHRINK) {
+        Shape cs;
+        if (!term_shape_in(heap_read(loc), env_id, &cs)) return 0;
+        out->ndim = cs.ndim;
+        for (u32 i = 0; i < cs.ndim; i++) {
+            u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
+            u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+            out->dims[i] = (e > b) ? (e - b) : 0;
+        }
+        for (u32 i = cs.ndim; i < MAX_DIM; i++) out->dims[i] = 0;
+        return 1;
+    }
+
     // PERMUTE: out.dim[i] = src.dim[perm[i]].
     if (op == UOP_PERMUTE) {
         Shape cs;

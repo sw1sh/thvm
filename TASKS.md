@@ -1741,7 +1741,7 @@ Realistic close-out for the overnight cron loop:
         213 WL + 146 C tests green. -->
 
 
-  - [ ] **b. Forward + grad parity at LeNet-realistic shapes**.
+  - [x] **b. Forward + grad parity at LeNet-realistic shapes**.
         Add wlt cases that compare TUOpConv2D and
         TUOpConv2DLowered at C_in=3, C_out=2, H=W=8, kh=kw=3
         (closer to the inner LeNet conv).  Assert forward
@@ -1809,6 +1809,25 @@ Realistic close-out for the overnight cron loop:
         SHRINK rule's EXPAND from rank-2 to rank-4 producing
         the wrong layout under a sequence of nested REDUCE
         cotangents. -->
+        <!-- attempt 3: ROOT CAUSE FOUND + FIXED.
+        `term_shape_in` in src/schedule/shape_env.c had cases
+        for FLIP / PAD / PERMUTE / RESHAPE / EXPAND / REDUCE
+        / CONV2D but NOT UOP_SHRINK.  When the autograd-emitted
+        chain reached EXPAND grad on `wB = EXPAND(wS = SHRINK(...),
+        {1,1,H,W})`, the shape lookup on wS failed, EXPAND grad
+        fell into its no-reduction passthrough branch, and the
+        {1,1,H,W} cotangent flowed unreduced into SHRINK grad.
+        SHRINK grad then EXPANDed it down to wS's output shape
+        {1,1,1,1} -- numel-mismatched, so cpu_op_expand fell
+        into `dst[i] = s[i % in_numel]` which truncates a
+        rank-4 tensor to its src[0] element.  Hence the
+        observed "single input element instead of spatial sum"
+        symptom.
+        Fix: 14-line UOP_SHRINK case in shape_env.c (mirrors
+        UOP_PAD's structure: dim = e_i - b_i).  All 3 LeNet-
+        shape parity tests now pass (forward, grad-wrt-input,
+        grad-wrt-weights).  215 WL + 146 C tests green. -->
+
 
 
 
