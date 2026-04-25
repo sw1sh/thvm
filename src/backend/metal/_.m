@@ -178,6 +178,7 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
     case UOP_RESHAPE:fnName = @"thvm_reshape"; break;
     case UOP_FLIP:   fnName = @"thvm_flip";    break;
     case UOP_PAD:    fnName = @"thvm_pad";     break;
+    case UOP_PERMUTE:fnName = @"thvm_permute"; break;
     default:         return nil;
   }
   // `fn` is taken by thvm.h as a `static inline` macro; use `mtlFn`.
@@ -242,7 +243,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // deriving shape from numels.  Slot indices live just past the
   // input + numels block.
   if (p->opcode == UOP_EXPAND || p->opcode == UOP_FLIP
-      || p->opcode == UOP_PAD) {
+      || p->opcode == UOP_PAD || p->opcode == UOP_PERMUTE) {
     u32 src0[1 + MAX_DIM] = {0};
     u32 outd[1 + MAX_DIM] = {0};
     src0[0] = p->src0_ndim;
@@ -260,6 +261,13 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     u32 padw[2 * MAX_DIM] = {0};
     for (u32 i = 0; i < 2 * MAX_DIM; i++) padw[i] = p->pad_widths[i];
     [enc setBytes:padw length:sizeof(padw)
+          atIndex:(2 + 2 * ke->n_inputs + 2)];
+  }
+  // PERMUTE: per-axis source-axis mapping (u32-widened axis_perm).
+  if (p->opcode == UOP_PERMUTE) {
+    u32 perm[MAX_DIM] = {0};
+    for (u32 i = 0; i < MAX_DIM; i++) perm[i] = p->axis_perm[i];
+    [enc setBytes:perm length:sizeof(perm)
           atIndex:(2 + 2 * ke->n_inputs + 2)];
   }
   NSUInteger n = (NSUInteger)p->numel;

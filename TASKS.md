@@ -1165,7 +1165,7 @@ Realistic close-out for the overnight cron loop:
       weights still grad_zero. -->
 
 
-- [ ] **UOP_PERMUTE CPU + Metal kernels**.  Constructor exists
+- [x] **UOP_PERMUTE CPU + Metal kernels**.  Constructor exists
       in src/uop/permute.c; opcode `UOP_PERMUTE = 4`; arity 1;
       heap `[src, NUM(p0), NUM(p1), ..., NUM(p_{ndim-1})]`
       where p[i] is the source axis index that becomes output
@@ -1180,6 +1180,24 @@ Realistic close-out for the overnight cron loop:
       out_dims already encodes the post-permute shape).
       Add WL parity tests + Metal-vs-CPU parity test mirroring
       the FLIP/PAD ones.
+      <!-- Implemented.  KProgOp gains `u8 axis_perm[MAX_DIM]`
+      (8 bytes; u8 fits since MAX_DIM=8).  Both materializers
+      compute output shape (out.dim[i] = src.dim[perm[i]])
+      and populate axis_perm.  CPU kernel
+      src/backend/cpu/op/permute.c precomputes source strides
+      then per output index decomposes coords and accumulates
+      via the permuted-axis stride.  Metal shader thvm_permute
+      mirrors the same logic; takes a third extra buffer
+      (slot 6) for the u32-widened perm so the shader can use
+      uint indexing.  Tests: 4 numerical PERMUTE tests in
+      permute.wlt (2d transpose, 2d identity, 3d rotate-axes,
+      conv2d-grad-style swap-C_out-C_in); test_metal_real.c
+      metal-real/permute-2d-transpose-parity for CPU vs Metal
+      byte-for-byte identity.  Metal metallib now exports 17
+      functions.  All 399 C + 189 WL tests stay green.
+      Together with FLIP and PAD, the runtime now has every
+      primitive needed for CONV2D grad_input. -->
+
 
 - [ ] **CONV2D grad_input branch in interact_grad** (the
       heaviest -- multi-fire on its own).  Build via:

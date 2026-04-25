@@ -168,3 +168,43 @@ kernel void thvm_pad(device         float *out      [[buffer(0)]],
     }
     out[tid] = in_pad ? 0.0f : in[src_idx];
 }
+
+// PERMUTE: reorder axes.  out[oi] = in[src_idx] where src_idx
+// is built by mapping each output axis i to source axis perm[i].
+// buffer(4): src0 = [ndim, dims...]
+// buffer(5): outd = [ndim, dims...]
+// buffer(6): perm[] -- u32 array of length MAX_DIM, perm[i] is
+//            the source axis that becomes output axis i.
+kernel void thvm_permute(device         float *out      [[buffer(0)]],
+                         constant       uint  &arg      [[buffer(1)]],
+                         device   const float *in       [[buffer(2)]],
+                         constant       uint  &in_numel [[buffer(3)]],
+                         constant       uint  *src0     [[buffer(4)]],
+                         constant       uint  *outd     [[buffer(5)]],
+                         constant       uint  *perm     [[buffer(6)]],
+                         uint                  tid      [[thread_position_in_grid]])
+{
+    (void)arg; (void)in_numel;
+    uint ndim = src0[0];
+    if (ndim == 0u) {
+        out[tid] = in[tid];
+        return;
+    }
+
+    // Source strides (row-major over src0_dims).
+    uint src_stride[METAL_MAX_DIM];
+    src_stride[ndim - 1u] = 1u;
+    for (int axis = (int)ndim - 2; axis >= 0; axis--) {
+        src_stride[axis] = src_stride[axis + 1] * src0[1 + axis + 1];
+    }
+
+    uint tmp = tid;
+    uint src_idx = 0u;
+    for (int axis = (int)ndim - 1; axis >= 0; axis--) {
+        uint od = outd[1 + axis];
+        uint c  = tmp % od;
+        tmp    /= od;
+        src_idx += c * src_stride[perm[axis]];
+    }
+    out[tid] = in[src_idx];
+}

@@ -436,6 +436,43 @@ int main(void) {
   CHECK(cpu_pad[9] == 3.0f && cpu_pad[10] == 4.0f);  // row 2, cols 1-2
   CHECK(cpu_pad[0] == 0.0f && cpu_pad[15] == 0.0f);  // corners
 
+  // === PERMUTE axis-aware parity: 2D transpose ===
+  // {{1,2,3},{4,5,6}} permuted with axes {1,0} -> 3x2 transpose
+  // {{1,4},{2,5},{3,6}}.
+  TEST_BEGIN("metal-real/permute-2d-transpose-parity");
+  Shape s_pe = {0}; s_pe.ndim = 2; s_pe.dims[0] = 2; s_pe.dims[1] = 3;
+  f32 src_pe[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  f32 cpu_pe[6], gpu_pe[6];
+  u32 perm[2] = {1, 0};
+
+  unsetenv("THVM_BACKEND"); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_pe, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pe, sizeof(src_pe));
+    Term done = wnf(thvm_materialize(uop_permute(
+        term_new(0, TAG_TEN, DT_F32, t), 2, perm)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              cpu_pe, sizeof(cpu_pe));
+  }
+  thvm_free();
+
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_pe, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pe, sizeof(src_pe));
+    Term done = wnf(thvm_materialize(uop_permute(
+        term_new(0, TAG_TEN, DT_F32, t), 2, perm)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              gpu_pe, sizeof(gpu_pe));
+  }
+  thvm_free();
+
+  for (int i = 0; i < 6; i++) CHECK(cpu_pe[i] == gpu_pe[i]);
+  // Row-major after transpose: {1, 4, 2, 5, 3, 6}.
+  CHECK(cpu_pe[0] == 1.0f && cpu_pe[1] == 4.0f);
+  CHECK(cpu_pe[2] == 2.0f && cpu_pe[3] == 5.0f);
+  CHECK(cpu_pe[4] == 3.0f && cpu_pe[5] == 6.0f);
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }

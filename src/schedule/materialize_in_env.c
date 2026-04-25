@@ -182,6 +182,16 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
                 out_shape.dims[i] = child_shapes[0].dims[i] + b + e;
             }
         }
+        if (op == UOP_PERMUTE) {
+            // PERMUTE: out.dim[i] = src.dim[perm[i]].  Heap layout
+            // [src, NUM(p0), NUM(p1), ..., NUM(p_{ndim-1})];
+            // ndim implicit in the source.
+            out_shape = child_shapes[0];
+            for (u32 i = 0; i < child_shapes[0].ndim; i++) {
+                u32 p = (u32)term_val(heap_read(expr_loc + 1 + i));
+                out_shape.dims[i] = child_shapes[0].dims[p];
+            }
+        }
         if (op == UOP_CONV2D) {
             // input  child_shapes[0] = {C_in, H, W}
             // weight child_shapes[1] = {C_out, C_in, kh, kw}
@@ -263,8 +273,8 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     // distinguish leading- from trailing-axis broadcasts (EXPAND)
     // or mirror axes (FLIP).  out_numel + in_numel alone aren't
     // enough.
-    if ((op == UOP_EXPAND || op == UOP_FLIP || op == UOP_PAD)
-     && arity > 0) {
+    if ((op == UOP_EXPAND || op == UOP_FLIP || op == UOP_PAD
+      || op == UOP_PERMUTE) && arity > 0) {
       Shape s0 = child_shapes[0];
       p->src0_ndim = (u8)(s0.ndim & 0xFF);
       for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
@@ -282,6 +292,13 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
         u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
         p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
         p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
+      }
+    }
+    // PERMUTE per-axis source-axis mapping.
+    if (op == UOP_PERMUTE && arity > 0) {
+      for (u32 i = 0; i < child_shapes[0].ndim && i < MAX_DIM; i++) {
+        u32 pi = (u32)term_val(heap_read(expr_loc + 1 + i));
+        p->axis_perm[i] = (u8)(pi & 0xFF);
       }
     }
 

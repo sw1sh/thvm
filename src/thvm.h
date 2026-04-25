@@ -223,6 +223,9 @@ typedef struct {
                                    //   {b0, e0, b1, e1, ...} pad widths
                                    //   (u8 caps each width at 255 -- plenty
                                    //   for transposed-conv kh/kw - 1)
+  u8    axis_perm [MAX_DIM];       // PERMUTE only: out_axis i comes from
+                                   //   src axis axis_perm[i].  u8 fits
+                                   //   since MAX_DIM=8.
 } KProgOp;
 
 typedef struct KernelEntry {
