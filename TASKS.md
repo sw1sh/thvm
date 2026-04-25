@@ -1909,23 +1909,52 @@ Realistic close-out for the overnight cron loop:
       lenet-mnist/forward.wls (no TGrad) still works. -->
 
 
-- [ ] **Drop UOP_CONV2D opcode + kernel + src/uop/conv2d.c**.
-      Once nothing consumes UOP_CONV2D (lowered TUOpConv2D +
-      grad rule removed), drop:
-        - UOP_CONV2D opcode in src/thvm.h, decrement
-          UOP_COUNT (or leave the slot unused -- it's a
-          define).
-        - src/uop/conv2d.c constructor.  *** User explicitly
-          asked for this file to be removed (2026-04-25). ***
-        - src/backend/cpu/op/conv2d.c kernel + the
-          interpret.c dispatch case.
-        - src/backend/metal/_.m pipeline routing case.
-        - src/schedule/materialize.c + materialize_in_env.c
-          CONV2D output-shape special cases.
-        - WL: $UopConv2D = 19 in THVMLink.wl, TUOpConv2D's
-          uopArity entry, the uopShape walker for it, etc.
-        - test_metal_real.c references and any direct
-          uop_conv2d() unit tests.
+- [ ] **Drop UOP_CONV2D opcode + kernel + src/uop/conv2d.c (arc)**.
+      The opcode + bespoke kernel are now unused by the public API
+      (TUOpConv2D dispatches to TUOpConv2DLowered, the bespoke grad
+      rule is gone).  Sweep them out across C runtime, WL bindings,
+      and tests.  Decomposed because the change touches ~25 files
+      and >200 LOC of deletions.
+
+  - [ ] **a. Remove C-side UOP_CONV2D infrastructure**.
+        Delete `src/uop/conv2d.c`, `src/backend/cpu/op/conv2d.c`;
+        drop UOP_CONV2D opcode from `src/thvm.h` (decrement
+        UOP_COUNT); remove the dispatch case in
+        `src/backend/cpu/interpret.c`; remove the metal pipeline
+        routing in `src/backend/metal/_.m`; remove CONV2D output-
+        shape branches in `src/schedule/{shape_env,materialize,
+        materialize_in_env}.c`; remove the arity-3 entry in
+        `src/book/from_dynamic.c` and `src/alo/realize.c`; remove
+        the `uop_conv2d` declaration + comment in `src/thvm.h`;
+        update `src/thvm.c` umbrella include if needed; remove
+        any direct `uop_conv2d()` calls in `tests/test_uop.c` /
+        `tests/test_materialize.c`.  ~100-150 LOC of deletions.
+        Verify: `make test` stays green.
+
+  - [ ] **b. Remove WL-side UOP_CONV2D bindings**.
+        Delete from `wl/THVMLink/CSource/thvmlink.c` the
+        `thvm_wl_uop_conv2d` C function (LibraryFunction
+        wrapper); delete `$uopConv2DFn` loader, `$UopConv2D`
+        constant, `$UopConv2D::usage`, the `$uopNames`-table
+        entry, the `uopCellCount` `$UopConv2D` branch from
+        `wl/THVMLink/Kernel/THVMLink.wl`; delete
+        TUOpConv2DBespoke from `wl/THVMLink/Kernel/Tensor.wl`
+        (and `TUOpConv2DBespoke::usage`); delete the
+        `$UopConv2D` case from `wl/THVMLink/Kernel/Shape.wl`'s
+        `tUopShape`.  Verify: `make wl-test` stays green and
+        `lenet-mnist/forward.wls` still runs (uses the public
+        TUOpConv2D alias which goes through the lowered chain).
+        ~50-80 LOC of deletions.
+
+  - [ ] **c. Sweep WL test references**.
+        `wl/THVMLink/Tests/{nn,grad,shape,permute,pad,uop_load}.wlt`
+        each have a few comment / test-name mentions of
+        TUOpConv2D / UOP_CONV2D.  After (a)+(b), some will be
+        unreachable (e.g., the `nn.wlt` parity tests against
+        TUOpConv2DBespoke).  Inventory + remove those + update
+        any docstring mentions.  Verify: `make wl-test` stays
+        green; the conv2d-lowered tests for the public alias
+        still pass.  ~30 LOC of test-file deletions.
 
 - [ ] **Re-run all CONV2D tests + lenet-mnist verify** to
       confirm the lowered path is regression-free.  The
