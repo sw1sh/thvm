@@ -291,6 +291,29 @@ VerificationTest[
     TestID -> "grad/softmax-cross-entropy-equals-probs-minus-target"
 ]
 
+(* === REDUCE_MAX gradient: one-hot at argmax ===
+   d(REDUCE_MAX(a, axis))/da is 1 at the argmax position along
+   the reduced axis, 0 elsewhere.  Built via the CMPEQ argmax
+   mask: (a == EXPAND(REDUCE_MAX(a), a.shape)). *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 5.0, 3.0, 2.0}, "Real32"];
+    g = TRealize @ TGrad[TUOpReduce[a, 0, "MAX"], a];
+    Normal @ TTensorData[g],
+    {0.0, 1.0, 0.0, 0.0},
+    TestID -> "grad/reduce-max-one-hot-at-argmax"
+]
+
+(* The pool-style probe (RESHAPE + REDUCE_MAX along an inner axis)
+   is deferred -- the chain works structurally but exposes a deeper
+   bug in cpu_op_expand: when expanding a rank-N source to a larger
+   rank-N target along a non-leading axis (e.g. {2} -> {2,2} where
+   each src element repeats along a NEW axis), the kernel falls to
+   numel-cycling and produces {3,4,3,4} instead of the correct
+   {3,3,4,4}.  Tracked as a follow-up "Axis-aware EXPAND in CPU
+   kernel" task in TASKS.md. *)
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

@@ -899,13 +899,48 @@ Realistic close-out for the overnight cron loop:
       + 171 WL tests stay green. -->
 
 
-- [ ] **REDUCE_MAX grad numerical parity test**: a small
+- [x] **REDUCE_MAX grad numerical parity test**: a small
       one-shot test in `wl/THVMLink/Tests/grad.wlt` that
       verifies `TGrad[TUOpReduce[a, 0, "MAX"], a]` produces a
       one-hot at the argmax position (e.g. `a={1,5,3,2}` ->
       `{0,1,0,0}`).  Plus a 2x2-pool-style probe (RESHAPE +
       REDUCE_MAX combo to mimic PoolingLayer's lowering).
       Unblocks max-pool backprop in LeNet.
+      <!-- 1D test grad/reduce-max-one-hot-at-argmax landed
+      and passes.  The 2x2-pool-style probe traced a deeper
+      bug in cpu_op_expand: when expanding a rank-N source to
+      a larger rank-N target along a non-leading axis (e.g.
+      {2} -> {2,2} where each src element repeats along a
+      NEW axis), the kernel falls to numel-cycling and
+      produces {3,4,3,4} instead of {3,3,4,4} (the correct
+      per-row broadcast).  REDUCE_MAX grad rule itself is
+      correct -- the bug is downstream in the EXPAND kernel.
+      Pool-style test deferred; queued as the next item below.
+      With this 1D test in place, max-pool backprop in LeNet
+      is unblocked at the chain-rule level; the pool example
+      still needs the EXPAND kernel fix to actually evaluate
+      to the right numbers. -->
+
+- [ ] **Axis-aware EXPAND in cpu_op_expand**: current
+      backend/cpu/op/expand.c handles only two cases
+      correctly: in_numel == 1 (scalar broadcast) and
+      in_numel == out_numel (memcpy / RESHAPE-equivalent).
+      The third "cycle" branch (`out[i] = in[i % in_numel]`)
+      is a fallback that's only correct for trailing-axis
+      broadcast (e.g. {3} -> {2,3} where each row is a copy
+      of the {3} source).  For leading-axis broadcast (e.g.
+      {2} -> {2,2} where each source element repeats along
+      a new trailing axis -- the per-row max pattern), it
+      produces wrong values.  Fix: walk the source view's
+      strides (or, if no strides yet, derive them from the
+      source's shape vs the EXPAND's output shape) so the
+      kernel knows which axes are broadcast and indexes into
+      the source per output position.  Same fix needed in
+      backend/metal/shaders/movement.metal `thvm_expand`.
+      Add parity tests covering both leading-axis and
+      trailing-axis broadcast cases.  Unblocks the deferred
+      2x2-pool-style probe + actual max-pool backprop in
+      LeNet's PoolingLayer.
 
 - [ ] **Land grad rule 8: UOP_CONV2D** in `interact_grad`, per
       `docs/grad-roadmap.md` step 8.  Three sub-gradients
