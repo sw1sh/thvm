@@ -113,3 +113,14 @@ debugPrint["  Kernels  : ", TKernelCount[]];
    exposed by mp1's bridge tables. *)
 debugPrint[""];
 debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];
+
+(* Render the Gantt to a sibling PNG so the visualization is
+   browsable outside a notebook session.  Filename encodes the
+   active backend so CPU + Metal runs land at distinct paths. *)
+Module[{plan = TMemoryPlan[], backend, path},
+    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
+    path    = "wl/Examples/lenet-mnist/memory-plan-" <> backend <> ".png";
+    Export[path, TMemoryPlanGantt[plan], ImageResolution -> 144];
+    debugPrint[""];
+    debugPrint["TMemoryPlanGantt -> ", path]
+]

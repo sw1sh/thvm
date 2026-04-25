@@ -85,7 +85,7 @@ computeKernelDepths[kernels_, tens_] := Module[
    nbytes/refcount/preserved/freeable; backend_id == 2 reads the
    Metal table (no preserved/freeable, defaulted to 0). *)
 collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Module[
-    {byBuf, allKids, consumersOf},
+    {byBuf, consumersOf},
     (* Pre-compute consumer kernels per tid: for each kernel kid,
        look up its input_tids and accumulate (tid -> {kids...}). *)
     consumersOf = <||>;
@@ -301,7 +301,8 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts:OptionsPattern[]] :=
         ]];
         Graphics[
             {
-                EdgeForm[LightDarkSwitched[Black, White]],
+                EdgeForm[None],   (* bars stack densely; an edge per
+                                     bar drowns out the fill colors *)
                 Function[row, Module[{y0 = row[[1]], y1 = row[[2]], b = row[[3]]},
                     {
                         FaceForm[statusColor[b["status"]]],
@@ -330,7 +331,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts:OptionsPattern[]] :=
             FrameTicks -> {Automatic, None},
             FrameLabel -> {"topological depth (kernel DAG)", None},
             PlotLabel -> Row[{
-                "TMemoryPlan / ", backendsActive[bufs], " — ",
+                "TMemoryPlan / ", backendsActive[bufs], " -- ",
                 Length[bufs], " bufs / ", Length[a["Kernels"]], " kernels / ",
                 Round[totalBytes/1024., 0.1], " KiB total / depth ",
                 If[ rows === {}, 0, maxDepth + 1]
