@@ -4422,7 +4422,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
              toggle and runs the grad suite). -->
 
 
-  - [ ] **f1d-c: source_uop chain handling under toggle**.
+  - [x] **f1d-c: source_uop chain handling under toggle**.
         With the toggle on, interact_uop_grad's source_uop
         walk encounters source_uop's children that are
         either UOP_KERNEL terms (realized boundaries) or
@@ -4435,6 +4435,31 @@ implemented + tested (f1a) but never invoked by the pipeline.
         toggle on, verify.wls Metal LeNet still converges
         loss 2.61 -> 0.025; full nn.wlt grad suite green.
         ~30 LOC.
+        <!-- DONE: existing chain-rule rules already handle
+             raw UOP children correctly (interact_uop_grad
+             reads heap[loc + i] and recurses on whatever
+             Term it finds -- raw UOP triggers UOP_ADD/MUL/etc
+             cases naturally).  No grad code change needed.
+             Added thvm_wl_set_use_realize_info bridge +
+             TSetUseRealizeInfo[True|False] WL surface so
+             tests can flip the toggle.  New
+             wl/THVMLink/Tests/use_realize.wlt verifies:
+               - poly-regression-gradients gives {-32, -16}
+                 with toggle ON
+               - elementwise chain forward computes correctly
+                 with toggle ON
+               - toggle-OFF baseline stays correct
+             166 C + 292 WL green (was 289, +3).
+             FOLLOW-UP NOTE for f1d-d: lenet-mnist verify.wls
+             with toggle ON hits kernel_alloc cap (4096) --
+             materialize_expr's direct allocations aren't
+             gated by the toggle, so the inlined helper
+             succeeds on outer ops but un-gated grad-chain
+             materialize_expr still emits per-UOp kernels
+             and the total exceeds cap.  Either bump
+             KERNELS_CAP or gate materialize_expr too;
+             addressed in f1d-d. -->
+
 
   - [ ] **f1d-d: flip MATERIALIZE_USE_REALIZE_INFO on by
         default**.  After f1d-b1+b2+c land cleanly, set the

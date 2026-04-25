@@ -23,6 +23,7 @@ TTermVal::usage   = "TTermVal[term] returns the VAL field (heap loc, etc.).";
 TTermSub::usage   = "TTermSub[term] returns the SUB flag (0 or 1).";
 TTermUnpin::usage = "TTermUnpin[term] drops `term` from the extern-pinned-Terms GC root set.  Mostly superseded by the managed-handle auto-unpin attached to TTerm itself; kept for callers that want to release a pin without dropping the WL wrapper.";
 TExternPinCount::usage = "TExternPinCount[] returns the current number of entries in the external-caller pin table.  Useful for observing that WL's standard GC has dropped TTerm wrappers between evaluations.";
+TSetUseRealizeInfo::usage = "TSetUseRealizeInfo[True|False] enables or disables the f1d realize-classifier-driven kernel-fusion path in materialize.  Returns the previous setting (True/False).  Default off; tests / probes flip it on to exercise the fused path.";
 TTagName::usage   = "TTagName[tag] returns a string for a tag id.";
 
 (* === heap === *)
@@ -208,6 +209,8 @@ $externPinAssociateFn := $externPinAssociateFn =
     load["thvm_wl_extern_pin_associate", {Integer, Integer}, Integer];
 $externPinCountFn := $externPinCountFn =
     load["thvm_wl_extern_pin_count", {}, Integer];
+$setUseRealizeInfoFn := $setUseRealizeInfoFn =
+    load["thvm_wl_set_use_realize_info", {Integer}, Integer];
 
 $heapPosFn   := $heapPosFn   = load["thvm_wl_heap_pos",   {},                       Integer];
 $heapAllocFn := $heapAllocFn = load["thvm_wl_heap_alloc", {Integer},                Integer];
@@ -394,6 +397,8 @@ TTermVal[t_]                    := $termValFn[ttermRaw[t]]
 TTermSub[t_]                    := $termSubFn[ttermRaw[t]]
 TTermUnpin[t_]                  := (ensureInit[]; $termUnpinFn[ttermRaw[t]])
 TExternPinCount[]               := (ensureInit[]; $externPinCountFn[])
+TSetUseRealizeInfo[on_]         := (ensureInit[];
+    $setUseRealizeInfoFn[If[TrueQ[on], 1, 0]] === 1)
 
 (* TTerm methods: only the canonical 3-arg form is reachable; bare
    `TTerm[id]` and `TTerm[ctx, id]` auto-normalize before any

@@ -136,6 +136,19 @@ EXTERN_C DLLEXPORT int thvm_wl_extern_pin_count(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Flip the f1d toggle from WL.  Returns the previous value
+// (1 if was on, 0 if was off).  Used by wl tests / probes
+// that want to exercise the inlined-kernel path.
+EXTERN_C DLLEXPORT int thvm_wl_set_use_realize_info(WolframLibraryData libData,
+                                                    mint argc, MArgument *args,
+                                                    MArgument res) {
+  (void)libData; (void)argc;
+  u8 prev = MATERIALIZE_USE_REALIZE_INFO;
+  MATERIALIZE_USE_REALIZE_INFO = (u8)(MArgument_getInteger(args[0]) ? 1 : 0);
+  MArgument_setInteger(res, (mint)prev);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_term_tag(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc;

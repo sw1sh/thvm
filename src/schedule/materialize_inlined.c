@@ -149,7 +149,7 @@ fn Term materialize_kernel_inlined(Term realized_uop_term) {
   for (u8 i = 0; i < arity; i++) {
     Term child = heap_read(term_val(r) + i);
     u32 src_enc = inline_emit(&ctx, child);
-    if (src_enc == 0xFFFFFFFFu) { ke->spliced = 1; return 0; }
+    if (src_enc == 0xFFFFFFFFu) { kernel_dealloc_last(kid); return 0; }
     child_srcs[i] = src_enc;
     if (KSRC_IS_INPUT(src_enc)) {
       child_numels[i] = ctx.ke->input_numels[KSRC_INDEX(src_enc)];
@@ -157,7 +157,7 @@ fn Term materialize_kernel_inlined(Term realized_uop_term) {
       child_numels[i] = ctx.ke->program[src_enc].numel;
     }
   }
-  if (ke->n_ops >= KPROG_MAX_OPS) { ke->spliced = 1; return 0; }
+  if (ke->n_ops >= KPROG_MAX_OPS) { kernel_dealloc_last(kid); return 0; }
   u32 last = ke->n_ops++;
   KProgOp *root_p = &ke->program[last];
   memset(root_p, 0, sizeof(*root_p));
