@@ -85,6 +85,8 @@ TTensorRefcount::usage = "TTensorRefcount[t] returns the descriptor refcount (TE
 TRealize::usage        = "TRealize[expr] = TWnf[TMaterialize[expr]].  Fires the whole pipeline: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs) then beta-reduce + dispatch kernels.";
 TMaterialize::usage    = "TMaterialize[expr] runs the schedule + kernelize + linearize rewrite directly (no wnf) and returns the scheduled DAG term.  Fires no kernels.  Use to visualize the graph after scheduling but before dispatch.";
 TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
+TTensCount::usage     = "TTensCount[] returns the number of allocated TenDescs (excluding the reserved slot 0).";
+TTotalBufBytes::usage = "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount > 0).";
 TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].";
 
 (* === UOp graph constructors === *)
@@ -239,6 +241,11 @@ $uopLoadFn     := $uopLoadFn     = load["thvm_wl_uop_load",        {Integer},   
 $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},                        Integer];
 $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},                               Integer];
 $kernelInfoFn  := $kernelInfoFn  = load["thvm_wl_kernel_info",     {Integer},                        {Integer, 1}];
+$tensCountFn   := $tensCountFn   = load["thvm_wl_tens_count",      {},                               Integer];
+$totalBufBytesFn := $totalBufBytesFn = load["thvm_wl_total_buf_bytes", {},                            Integer];
+
+TTensCount[]    := $tensCountFn[]
+TTotalBufBytes[] := $totalBufBytesFn[]
 
 (* === fresh-label counter (WL-side; reset by TReset) === *)
 $labelCounter = 1;

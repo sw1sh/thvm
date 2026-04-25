@@ -558,6 +558,29 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// === memory introspection (used by lenet-mnist/memory-probe.wls) ===
+EXTERN_C DLLEXPORT int thvm_wl_tens_count(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  // Count tensors actually allocated (slot 0 is reserved sentinel).
+  MArgument_setInteger(res, (mint)(TENS_NEXT > 0 ? TENS_NEXT - 1 : 0));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_total_buf_bytes(WolframLibraryData libData, mint argc,
+                                               MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  // Sum live CPU buffer bytes (refcount > 0).  Walks the CPU_BUFS
+  // table directly; not backend-agnostic, but the CPU backend is
+  // the only one we currently train on.
+  u64 total = 0;
+  for (u64 i = 1; i < CPU_BUFS_NEXT; i++) {
+    if (CPU_BUFS[i].refcount > 0) total += CPU_BUFS[i].nbytes;
+  }
+  MArgument_setInteger(res, (mint)total);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_kernel_info(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
   (void)argc;

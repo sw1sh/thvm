@@ -2589,7 +2589,7 @@ Realistic close-out for the overnight cron loop:
         against these numbers. -->
 
 
-- [ ] **Memory footprint analysis during training**.  User
+- [x] **Memory footprint analysis during training**.  User
       directive: "what the status of memory planning?
       what's the footprint during training?".  Today
       tensor_alloc is called per-op during materialize and
@@ -2603,4 +2603,48 @@ Realistic close-out for the overnight cron loop:
       wl/Examples/lenet-mnist/ that reports the buffer
       count + bytes after one training step.  Queue
       concrete reuse-pass work as follow-ups.
+      <!-- Done.
+        - C surface: thvm_wl_tens_count + thvm_wl_total_buf_bytes
+          (sum of live CPU_BUFS bytes).
+        - WL surface: TTensCount[] / TTotalBufBytes[].
+        - Probe: wl/Examples/lenet-mnist/memory-probe.wls
+          reports per-phase TenDescs / buf bytes / KernelEntries.
+        - Findings (one LeNet forward + 1 backward, fresh init):
+            511 TenDescs, 15.65 MiB live buffers, 330 kernels.
+          Forward dominates (480 TenDescs / 14.3 MiB); backward
+          only adds 20 / 40 KiB because TGrad lazily emits
+          fresh compute graphs.
+        - docs/memory.md identifies four queued reuse-pass
+          opportunities (per-step pool, refcount-driven free,
+          remaining movement-op view-onlys, Adam-state arena);
+          biggest absolute consumer is conv2's 25 partial
+          buffers (~600 KiB/step). -->
+
+- [ ] **Reuse-pass implementations** (queued from the
+      memory-footprint audit; see docs/memory.md).
+      Each is a follow-up to the analysis above; each
+      should be opened as its own decomposable arc when
+      it becomes the topmost task.
+
+  - [ ] **Per-step buffer pool**.  Add a high-water-mark
+        allocator that frees per-materialize bufs at wnf
+        completion; ~50% memory reduction per step.
+        ~150 LOC.
+
+  - [ ] **Refcount-driven free**.  Decref + free buffers
+        when the last consumer kernel finishes reading.
+        Requires a consumer-count pass during materialize
+        (similar to f1b's count_kernel_consumers).  Drops
+        conv-partial memory by ~5x.  ~80 LOC plus
+        consumer-count infrastructure.
+
+  - [ ] **Movement-op view-only for SHRINK / PERMUTE /
+        PAD / FLIP** (mirroring f3b/f3c).  Per-conv
+        kernel-count drops a further 50-70.  Each
+        movement op is its own ~50-LOC sub-item.
+
+  - [ ] **Adam-state arena**.  Keep TAdamHostStep's m/v
+        arrays alive across steps in a session-scoped
+        store.  ~40 LOC; small bytes-per-step gain but
+        reduces host-side pressure.
 
