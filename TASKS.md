@@ -4254,6 +4254,39 @@ implemented + tested (f1a) but never invoked by the pipeline.
         Acceptance: 166 C + 289 WL still green; linear-train
         forward kernel-count drops noticeably (target <= 5
         forward kernels, was 17).  ~60 LOC + ~40 LOC test.
+        <!-- attempt 1: built materialize_splice_inline +
+             materialize_splice_pass with a SPLICE_PASS_ENABLED
+             toggle; wired into thvm_materialize.  Three pre-
+             fusion unit tests (test_materialize, test_splice,
+             test_consumer_count) updated to disable the pass.
+             166 C tests pass.  But 3 WL tests regress:
+             nn/poly-regression-gradients gives {0, 0} instead
+             of {-32, -16}; nn/gd-loss-monotonically-decreases
+             and uop-load/training-step-decreases-loss fail
+             likewise.  Loss values are still correct -- it's
+             specifically gradients that go to zero in some
+             arms.  Forward computes right; TGrad somehow ends
+             up with zero contributions.  Hypothesis: the
+             splice rewrite for parent's main op refs is
+             sound, but interact_uop_grad's UOP_KERNEL handler
+             walks KernelEntry.source_uop, and when a child
+             kernel is spliced its source_uop is intact -- so
+             walking via source_uop is fine.  More likely:
+             materialize_splice_into mutates parent.input_tids
+             by appending child's inputs, but the
+             grad-computation re-walks the SAME source_uop on
+             a SECOND TGrad call (after the first realize),
+             at which point the inputs the grad expression
+             references may have shifted slot positions -- or
+             a subsequent TGrad call re-materializes and the
+             pass fires again on already-mutated kernels.
+             Next attempt: investigate whether
+             SPLICE_PASS_ENABLED needs to apply per-call
+             (e.g., skip when the materialize is being
+             invoked under a TGrad recursion), or whether
+             splice should only fire on the OUTERMOST
+             materialize (not on the per-grad sub-realizes). -->
+
 
   - [ ] **f1d: fuse across REDUCE boundaries +
         fixed-point iterate**.  REDUCE itself isn't
