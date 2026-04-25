@@ -14,6 +14,10 @@
 #include "../src/thvm.c"
 #include "test.h"
 
+// bm4c: forward-declared in src/backend/metal/_.m, lives in
+// the linked backend_metal.o.
+extern void thvm_metal_buf_freelist_push(u32 buf_id);
+
 int main(void) {
   TEST_BEGIN("metal-real/dual-tu-build-links");
   unsetenv("THVM_BACKEND");
@@ -507,6 +511,38 @@ int main(void) {
   CHECK(cpu_pe[0] == 1.0f && cpu_pe[1] == 4.0f);
   CHECK(cpu_pe[2] == 2.0f && cpu_pe[3] == 5.0f);
   CHECK(cpu_pe[4] == 3.0f && cpu_pe[5] == 6.0f);
+
+  // === bm4c: Metal freelist primitives -- alloc, push, realloc
+  // recycles same buf_id (mirrors test_cpu_free_list patterns). ===
+  TEST_BEGIN("metal-real/freelist-push-then-alloc-recycles-slot");
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 a = METAL_BACKEND.buf_alloc(64);
+    CHECK(a > 0);
+    f32 sentinel[16];
+    for (int i = 0; i < 16; i++) sentinel[i] = (f32)(i + 1);
+    METAL_BACKEND.buf_write(a, sentinel, sizeof(sentinel));
+    thvm_metal_buf_freelist_push(a);
+    // Next 64-byte alloc must reuse `a`; data zeroed by pop.
+    u32 b = METAL_BACKEND.buf_alloc(64);
+    CHECK_EQ(b, a);
+    f32 readback[16];
+    METAL_BACKEND.buf_read(b, readback, sizeof(readback));
+    for (int i = 0; i < 16; i++) CHECK(readback[i] == 0.0f);
+  }
+  thvm_free();
+
+  TEST_BEGIN("metal-real/freelist-size-mismatch-misses");
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 a = METAL_BACKEND.buf_alloc(64);
+    CHECK(a > 0);
+    thvm_metal_buf_freelist_push(a);
+    // 32-byte request can't reuse a 64-byte slot.
+    u32 b = METAL_BACKEND.buf_alloc(32);
+    CHECK(b != a);
+  }
+  thvm_free();
 
   unsetenv("THVM_BACKEND");
   TEST_REPORT();

@@ -29,6 +29,13 @@ static id<MTLLibrary>      METAL_LIB    = nil;
 #define THVM_METAL_METALLIB "build/default.metallib"
 #endif
 
+// Forward-declared here so metal_init can reset the length on
+// repeated lifecycle cycles; the actual table + length live
+// alongside METAL_BUFS below.
+#define METAL_FREELIST_CAP 4096
+static u32 METAL_FREELIST    [METAL_FREELIST_CAP];
+static u32 METAL_FREELIST_LEN = 0;
+
 static int metal_init(void) {
   METAL_DEVICE = MTLCreateSystemDefaultDevice();
   if (METAL_DEVICE == nil) {
@@ -59,6 +66,7 @@ static int metal_init(void) {
           THVM_METAL_METALLIB,
           (unsigned long)[[METAL_LIB functionNames] count],
           [[METAL_LIB functionNames] count] == 1 ? "" : "s");
+  METAL_FREELIST_LEN = 0;
   return 0;
 }
 
@@ -87,8 +95,53 @@ typedef struct {
 static MetalBuf METAL_BUFS[METAL_BUFS_CAP];
 static u32      METAL_BUFS_NEXT = 1;
 
+// bm4c: Metal mirror of CPU's free-list (cpu_buf_freelist_push /
+// cpu_buf_freelist_try_pop).  Recycles MTLBuffer slots by exact
+// nbytes match; the underlying MTLBuffer object survives in the
+// METAL_BUFS slot until the slot is popped or metal_shutdown
+// clears it.  Drops refcount to 0 on push so the recycled-but-
+// unallocated slot doesn't keep counting toward
+// thvm_wl_metal_buf_table reports.
+//
+// No caller wired yet: thvm_realize's rollback only walks the
+// CPU pool.  A backend-aware preserve+rollback (queued as a
+// follow-up) will push from there.  Standalone the primitives
+// + alloc-side recycling are still useful when a future
+// metal_buf_decref hits zero -- the buf could go to the
+// freelist instead of an outright nil-out.
+
+static void metal_buf_freelist_push(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  if (METAL_FREELIST_LEN >= METAL_FREELIST_CAP) return;   // saturated
+  if (METAL_BUFS[buf_id].buf == nil) return;              // already freed
+  METAL_FREELIST[METAL_FREELIST_LEN++] = buf_id;
+  METAL_BUFS[buf_id].refcount = 0;   // stop counting in live bytes
+}
+
+static u32 metal_buf_freelist_try_pop(u64 nbytes) {
+  for (u32 i = 0; i < METAL_FREELIST_LEN; i++) {
+    u32 bid = METAL_FREELIST[i];
+    if (bid == 0 || bid >= METAL_BUFS_NEXT) continue;
+    if (METAL_BUFS[bid].buf == nil) continue;             // stale entry
+    if (METAL_BUFS[bid].nbytes != nbytes) continue;
+    // Pop: swap with last + shrink.
+    METAL_FREELIST[i] = METAL_FREELIST[METAL_FREELIST_LEN - 1];
+    METAL_FREELIST_LEN--;
+    // Zero shared-mode contents so the recycled slot looks fresh.
+    memset([METAL_BUFS[bid].buf contents], 0, (size_t)nbytes);
+    METAL_BUFS[bid].refcount = 1;
+    return bid;
+  }
+  return 0;   // miss
+}
+
 static u32 metal_buf_alloc(u64 nbytes) {
   if (METAL_DEVICE == nil) return 0;
+  // bm4c: free-list lookup first.  Recycles a matching-size
+  // MTLBuffer slot if available; falls through to fresh
+  // newBufferWithLength on miss.
+  u32 recycled = metal_buf_freelist_try_pop(nbytes);
+  if (recycled != 0) return recycled;
   if (METAL_BUFS_NEXT >= METAL_BUFS_CAP) {
     fprintf(stderr, "thvm: metal_buf_alloc -- buffer table full\n");
     return 0;
@@ -105,6 +158,12 @@ static u32 metal_buf_alloc(u64 nbytes) {
     return 0;
   }
   return id;
+}
+
+// Non-static accessor for cross-TU push (used by thvmlink.c +
+// future Metal-side rollback wiring).
+void thvm_metal_buf_freelist_push(u32 buf_id) {
+  metal_buf_freelist_push(buf_id);
 }
 
 static void metal_buf_free(u32 buf_id) {
@@ -159,6 +218,7 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
 }
 
 static void metal_shutdown(void) {
+  METAL_FREELIST_LEN = 0;
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     METAL_BUFS[i].buf      = nil;
     METAL_BUFS[i].nbytes   = 0;

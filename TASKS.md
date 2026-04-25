@@ -3586,13 +3586,53 @@ sub-items once these land.
         whose TenDescs are reachable from the result chain). -->
 
 
-  - [ ] **bm4c: Metal mirror**.  Same primitives in
+  - [x] **bm4c: Metal mirror**.  Same primitives in
         src/backend/metal/_.m: a per-size-class free-list
         keyed by `nbytes`, `thvm_metal_buf_pool_push` +
         `metal_buf_alloc` consults it.  Wire from the same
         `kernel_fire_by_id` decref-hook site (it already
         runs on Metal; the hook just needs a Metal-aware
         push entry-point).  ~40 LOC.
+        <!-- Landed (primitives only; rollback wiring deferred
+        per bm4b's lessons).  src/backend/metal/_.m gained:
+          - METAL_FREELIST[4096] table + length, reset in
+            metal_init / metal_shutdown.
+          - metal_buf_freelist_push(buf_id): drops refcount
+            to 0 (so the slot stops counting in
+            thvm_wl_metal_buf_table), appends to the list.
+            Saturated push is a silent no-op.
+          - metal_buf_freelist_try_pop(nbytes): linear scan
+            for matching size, swap-removes, zeroes the
+            shared-mode `contents`, resets refcount = 1.
+            Skips stale entries (slot index out of range or
+            buf already nil'd).
+          - metal_buf_alloc consults try_pop first, falls
+            through to newBufferWithLength on miss.
+          - thvm_metal_buf_freelist_push(buf_id): non-static
+            cross-TU export; thvmlink.c + a future Metal-
+            aware rollback can call it.
+
+        tests/test_metal_real.c grew 2 cases:
+          - metal-real/freelist-push-then-alloc-recycles-slot:
+            alloc 64-byte, write sentinel, push, alloc 64
+            again -> same buf_id with zeroed contents.
+          - metal-real/freelist-size-mismatch-misses: pushed
+            64-byte slot does NOT recycle for a 32-byte
+            request.
+
+        Wiring deferred: bm4b moved the CPU push out of the
+        decref hook (broke 7 nn.wlt TGrad tests) into the
+        rollback walk.  thvm_realize's rollback today is
+        CPU-only -- a Metal-aware rollback needs MetalBuf.
+        preserved + a backend-aware preserve walk (currently
+        the chain walk only marks via cpu_buf_mark_preserved).
+        That's a separate refactor; queued as a follow-up.
+
+        268 C + 270 WL tests green (166/166 metal-real).
+        bench delta on Metal: zero, same as bm4b's CPU delta
+        and for the same reason (no caller wiring + no
+        Metal-side preserve to bypass). -->
+
 
   - [ ] **bm4d: bench validation + correctness check**.
         Re-run wl/Examples/_bench/baseline.wls on both
