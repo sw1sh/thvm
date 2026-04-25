@@ -44,8 +44,13 @@ Begin["`Private`"];
    External tids (producer_kid == 0) contribute 0.  Memoized via a
    local Association so the cost stays linear in the DAG size even
    when multiple consumers share a producer. *)
-computeKernelDepths[kernels_, tens_] := Module[
-    {nKernels = Length[kernels], depthCache, depth, kernelInputs, producerOf},
+computeKernelDepths[kernels_, tens_] := Block[{
+    nKernels = Length[kernels],
+    depthCache,
+    depth,
+    kernelInputs,
+    producerOf
+},
     depthCache = <||>;
     (* tens is keyed by tid (1..N).  Look up producer_kid lazily;
        columns are {producer_kid, buf_id, dtype, ...}. *)
@@ -59,8 +64,7 @@ computeKernelDepths[kernels_, tens_] := Module[
     depth[kid_Integer] /; KeyExistsQ[depthCache, kid] := depthCache[kid];
     depth[kid_Integer] := depthCache[kid] = If[
         kid <= 0 || kid > nKernels, 0,
-        Module[{producerKids},
-            producerKids = DeleteCases[producerOf /@ kernelInputs[kid], 0];
+        Block[{producerKids = DeleteCases[producerOf /@ kernelInputs[kid], 0]},
             If[ producerKids === {}, 0,
                 1 + Max[depth /@ DeleteDuplicates[producerKids]]]
         ]
@@ -84,13 +88,15 @@ computeKernelDepths[kernels_, tens_] := Module[
    Backend dispatch: backend_id == 1 reads the CPU buf table for
    nbytes/refcount/preserved/freeable; backend_id == 2 reads the
    Metal table (no preserved/freeable, defaulted to 0). *)
-collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Module[
-    {byBuf, consumersOf},
+collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
+    byBuf,
+    consumersOf
+},
     (* Pre-compute consumer kernels per tid: for each kernel kid,
        look up its input_tids and accumulate (tid -> {kids...}). *)
     consumersOf = <||>;
     Do[
-        Module[{inps = TKernelInputs[kid]},
+        Block[{inps = TKernelInputs[kid]},
             Do[
                 consumersOf[tid] = Append[Lookup[consumersOf, tid, {}], kid],
                 {tid, DeleteCases[inps, 0]}
@@ -106,10 +112,21 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Module[
     ];
     KeyDropFrom[byBuf, Cases[Keys[byBuf], {_, 0}]];
     Map[
-        Function[tids, Module[
-            {firstTid = First[tids], backendId, bufId,
-             bufRow, nbytes, refcount, preserved, freeable,
-             producerKid, allConsumerKids, allocDepth, lastUseDepth, status},
+        Function[tids, Block[{
+            firstTid = First[tids],
+            backendId,
+            bufId,
+            bufRow,
+            nbytes,
+            refcount,
+            preserved,
+            freeable,
+            producerKid,
+            allConsumerKids,
+            allocDepth,
+            lastUseDepth,
+            status
+        },
             backendId = tens[[firstTid, 7]];
             bufId     = tens[[firstTid, 2]];
             (* Look up backend-specific buf row.  Defensive bounds
@@ -169,8 +186,16 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Module[
 (* === TMemoryPlan[] entry ===
    Snapshots the 5 mp1 bridge tables and stitches them into a
    TMemoryPlan[<|"Kernels", "Tens", "Bufs"|>] object. *)
-TMemoryPlan[] := Module[
-    {kernels, tens, cpuBufs, metalBufs, kernelDepths, kernelRecords, tensRecords, bufRecords},
+TMemoryPlan[] := Block[{
+    kernels,
+    tens,
+    cpuBufs,
+    metalBufs,
+    kernelDepths,
+    kernelRecords,
+    tensRecords,
+    bufRecords
+},
     kernels   = TKernelTable[];
     tens      = TTensTable[];
     cpuBufs   = TCpuBufTable[];
@@ -222,14 +247,60 @@ backendName[_] = "?";
 
 formatBytes[n_] := Round[n / 1024.0, 0.1];
 
-TMemoryPlanReport[TMemoryPlan[a_Association]] := Module[
-    {bufs = a["Bufs"], kernels = a["Kernels"], byStatus, byBackend,
-     totalBytes, topByBytes, topBySpan},
+(* Peak concurrent live bytes: at each topological depth t, sum
+   nbytes of every buf whose alive interval covers t.  The max
+   over t is the LOWER BOUND on bytes a perfect slot-reusing
+   memory planner would need -- two bufs whose intervals don't
+   overlap can share a single physical slot.  The gap between
+   peak and total is the slot-reuse headroom (= bytes the
+   current "no-reuse" allocator burns unnecessarily).  Returns
+   <|"peak_bytes", "peak_depth", "total_bytes"|>. *)
+peakConcurrentLive[bufs_] := If[
+    bufs === {},
+    <|"peak_bytes" -> 0, "peak_depth" -> 0, "total_bytes" -> 0|>,
+    Block[{maxDepth, perDepth, totalBytes, peakBytes, peakDepth},
+        maxDepth = Max[#["last_use_depth"] & /@ bufs];
+        perDepth = Table[
+            Total @ Cases[bufs,
+                b_ /; b["alloc_depth"] <= t <= b["last_use_depth"]
+                    :> b["nbytes"]
+            ],
+            {t, 0, maxDepth}
+        ];
+        peakBytes = Max[perDepth];
+        peakDepth = First @ FirstPosition[perDepth, peakBytes] - 1;
+        totalBytes = Total[#["nbytes"] & /@ bufs];
+        <|
+            "peak_bytes"  -> peakBytes,
+            "peak_depth"  -> peakDepth,
+            "total_bytes" -> totalBytes
+        |>
+    ]
+]
+
+TMemoryPlanReport[TMemoryPlan[a_Association]] := Block[{
+    bufs = a["Bufs"],
+    kernels = a["Kernels"],
+    byStatus,
+    byBackend,
+    totalBytes,
+    topByBytes,
+    topBySpan,
+    peak,
+    savingsKib,
+    savingsPct
+},
     byStatus  = KeySort @ Counts[#["status"] & /@ bufs];
     byBackend = KeySort @ Counts[backendName[#["backend"]] & /@ bufs];
     totalBytes = Total[#["nbytes"] & /@ bufs];
     topByBytes = TakeLargestBy[bufs, #["nbytes"] &, UpTo[5]];
     topBySpan  = TakeLargestBy[bufs, #["alive_span"] &, UpTo[5]];
+    peak       = peakConcurrentLive[bufs];
+    savingsKib = formatBytes[peak["total_bytes"] - peak["peak_bytes"]];
+    savingsPct = If[ peak["total_bytes"] > 0,
+        Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1],
+        0
+    ];
     Column[{
         Row[{"TMemoryPlan: ",
              Length[kernels], " kernels, ",
@@ -237,6 +308,10 @@ TMemoryPlanReport[TMemoryPlan[a_Association]] := Module[
              formatBytes[totalBytes], " KiB live"}],
         Row[{"  by status:  ", byStatus}],
         Row[{"  by backend: ", byBackend}],
+        Row[{"  peak concurrent live: ",
+             formatBytes[peak["peak_bytes"]], " KiB at depth ", peak["peak_depth"],
+             "  (slot-reuse headroom: ", savingsKib, " KiB = ",
+             savingsPct, "% of total)"}],
         Row[{"  top-5 by bytes:"}],
         Column[Function[b, Row[{"    buf ", b["id"], " (",
             backendName[b["backend"]], "): ",
@@ -259,17 +334,29 @@ TMemoryPlanReport[TMemoryPlan[a_Association]] := Module[
    contiguous.  Each bar is a Tooltip-wrapped Rectangle whose
    width spans [alloc_depth, last_use_depth + 1] and whose height
    defaults to Log2[1 + nbytes] (toggle via "BarHeight" option). *)
-statusColor[status_String] := Switch[status,
+(* Each status carries a {fill, edge} pair so every buffer reads
+   as a delimited rounded card (pastel fill + saturated border)
+   even when stacked densely.  Mirrors the tinygrad memory-plan
+   diagram: weights = blue, activations = warm hues. *)
+statusFill[status_String] := Switch[status,
     "Preserved",
-        LightDarkSwitched[Lighter[StandardBlue,   0.55], Darker[StandardBlue,   0.4]],
+        LightDarkSwitched[Lighter[StandardBlue,   0.7], Darker[StandardBlue,   0.45]],
     "Freeable",
-        LightDarkSwitched[Lighter[StandardGreen,  0.55], Darker[StandardGreen,  0.4]],
+        LightDarkSwitched[Lighter[StandardGreen,  0.7], Darker[StandardGreen,  0.45]],
     "External",
-        LightDarkSwitched[Lighter[StandardOrange, 0.55], Darker[StandardOrange, 0.4]],
+        LightDarkSwitched[Lighter[StandardOrange, 0.7], Darker[StandardOrange, 0.45]],
     "Dead",
-        LightDarkSwitched[Lighter[StandardRed,    0.55], Darker[StandardRed,    0.4]],
+        LightDarkSwitched[Lighter[StandardRed,    0.7], Darker[StandardRed,    0.45]],
     _,   (* "Live" or unknown *)
-        LightDarkSwitched[Lighter[StandardGray,   0.55], Darker[StandardGray,   0.4]]
+        LightDarkSwitched[Lighter[StandardGray,   0.7], Darker[StandardGray,   0.45]]
+]
+
+statusEdge[status_String] := Switch[status,
+    "Preserved", LightDarkSwitched[StandardBlue,   Lighter[StandardBlue,   0.2]],
+    "Freeable",  LightDarkSwitched[StandardGreen,  Lighter[StandardGreen,  0.2]],
+    "External",  LightDarkSwitched[StandardOrange, Lighter[StandardOrange, 0.2]],
+    "Dead",      LightDarkSwitched[StandardRed,    Lighter[StandardRed,    0.2]],
+    _,           LightDarkSwitched[StandardGray,   Lighter[StandardGray,   0.2]]
 ]
 
 barHeightFn["Log"][nbytes_]     := Log2[1 + nbytes]
@@ -280,36 +367,83 @@ backendsActive[bufs_] := DeleteDuplicates[#["backend"] & /@ bufs] /. {
     {} -> "(none)", {1} -> "CPU", {2} -> "Metal", {1, 2} | {2, 1} -> "CPU + Metal"
 }
 
-Options[TMemoryPlanGantt] = {"BarHeight" -> "Log"};
-TMemoryPlanGantt[TMemoryPlan[a_Association], opts:OptionsPattern[]] :=
-    Module[
-        {bufs = a["Bufs"], heightFn, sorted, maxDepth, rows, totalBytes},
+Options[TMemoryPlanGantt] = {
+    "BarHeight" -> "Uniform",
+    "TopN"      -> 40
+};
+TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
+    Block[{
+        allBufs = a["Bufs"],
+        bufs,
+        heightFn,
+        topN,
+        sorted,
+        maxDepth,
+        rows,
+        totalBytes,
+        peak,
+        savingsPct,
+        totalHeight,
+        omittedCount
+    },
         heightFn = barHeightFn[OptionValue["BarHeight"]];
-        If[ bufs === {}, Return[Graphics[{}, ImageSize -> 320]]];
+        topN     = OptionValue["TopN"];
+        If[ allBufs === {}, Return[Graphics[{}, ImageSize -> 320]]];
+        (* Show only the top-N largest bufs (by nbytes) so each card
+           remains visible.  TopN -> Infinity / All renders every
+           buf.  The metric panel still uses the FULL set so peak
+           concurrent + total bytes stay accurate. *)
+        bufs = If[ MatchQ[topN, _Integer] && topN > 0 && Length[allBufs] > topN,
+            TakeLargestBy[allBufs, #["nbytes"] &, topN],
+            allBufs
+        ];
+        omittedCount = Length[allBufs] - Length[bufs];
         sorted = SortBy[bufs, {#["alloc_depth"] &, -#["nbytes"] &}];
-        maxDepth = Max[#["last_use_depth"] & /@ sorted];
-        totalBytes = Total[#["nbytes"] & /@ sorted];
+        maxDepth = Max[#["last_use_depth"] & /@ allBufs];
+        totalBytes = Total[#["nbytes"] & /@ allBufs];
+        peak = peakConcurrentLive[allBufs];
+        savingsPct = If[ peak["total_bytes"] > 0,
+            Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1],
+            0
+        ];
         (* Walk sorted bufs, stacking each by its (cumulative) bar
            height.  Each row is {y0, y1, buf}; rendered as a
            Tooltip-wrapped Rectangle with the status fill. *)
-        rows = Module[{y = 0}, Map[
-            Function[b, Module[{h = heightFn[b["nbytes"]], y0 = y},
+        rows = Block[{y = 0}, Map[
+            Function[b, Block[{h = heightFn[b["nbytes"]], y0 = y},
                 y += h;
                 {y0, y0 + h, b}
             ]],
             sorted
         ]];
+        totalHeight = If[ rows === {}, 1, rows[[-1, 2]]];
         Graphics[
             {
-                EdgeForm[None],   (* bars stack densely; an edge per
-                                     bar drowns out the fill colors *)
-                Function[row, Module[{y0 = row[[1]], y1 = row[[2]], b = row[[3]]},
+                (* Per-buf rounded card: pastel fill, saturated
+                   border, ~10% vertical inset so adjacent stacked
+                   bars don't merge into a solid color blob. *)
+                Function[row, Block[{
+                    y0     = row[[1]],
+                    y1     = row[[2]],
+                    b      = row[[3]],
+                    h, inset, x0, x1, radius
+                },
+                    h      = y1 - y0;
+                    inset  = 0.12 h;
+                    x0     = b["alloc_depth"];
+                    x1     = b["last_use_depth"] + 1;
+                    radius = Min[0.35, 0.4 (h - 2 inset), 0.4 (x1 - x0)];
                     {
-                        FaceForm[statusColor[b["status"]]],
+                        FaceForm[statusFill[b["status"]]],
+                        EdgeForm[Directive[
+                            statusEdge[b["status"]],
+                            Thickness[0.0015]
+                        ]],
                         Tooltip[
                             Rectangle[
-                                {b["alloc_depth"],     y0},
-                                {b["last_use_depth"] + 1, y1}
+                                {x0, y0 + inset},
+                                {x1, y1 - inset},
+                                RoundingRadius -> radius
                             ],
                             Column[{
                                 Row[{"buf ", b["id"], " (",
@@ -328,14 +462,35 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts:OptionsPattern[]] :=
                 ]] /@ rows
             },
             Frame -> True,
+            FrameStyle -> LightDarkSwitched[Black, White],
             FrameTicks -> {Automatic, None},
             FrameLabel -> {"topological depth (kernel DAG)", None},
-            PlotLabel -> Row[{
-                "TMemoryPlan / ", backendsActive[bufs], " -- ",
-                Length[bufs], " bufs / ", Length[a["Kernels"]], " kernels / ",
-                Round[totalBytes/1024., 0.1], " KiB total / depth ",
-                If[ rows === {}, 0, maxDepth + 1]
-            }],
+            (* Peak-concurrency marker as Epilog (after bars,
+               before frame).  Avoid Opacity directive -- it
+               leaks into FrameStyle (Mathematica quirk; tested
+               via bisect).  A dashed solid red line carries the
+               same "this is the peak depth" signal without the
+               global-state pollution. *)
+            Epilog -> {Dashed, Thick, StandardRed,
+                Line[{{peak["peak_depth"] + 0.5, 0},
+                      {peak["peak_depth"] + 0.5, totalHeight}}]
+            },
+            PlotLabel -> Column[{
+                Row[{"TMemoryPlan / ", backendsActive[allBufs], " -- ",
+                     Length[allBufs], " bufs / ",
+                     Length[a["Kernels"]], " kernels / ",
+                     Round[totalBytes/1024., 0.1], " KiB total / depth ",
+                     If[ allBufs === {}, 0, maxDepth + 1]}],
+                Row[{"peak concurrent: ",
+                     Round[peak["peak_bytes"]/1024., 0.1],
+                     " KiB at depth ", peak["peak_depth"],
+                     " (slot-reuse headroom ", savingsPct, "%)",
+                     If[ omittedCount > 0,
+                         Row[{"  -- showing top ", Length[bufs],
+                              " of ", Length[allBufs], " bufs"}],
+                         ""
+                     ]}]
+            }, Alignment -> Center],
             ImageSize -> Large,
             AspectRatio -> 1/2,
             PlotRangePadding -> Scaled[0.02]
