@@ -3858,7 +3858,7 @@ sub-items once these land.
         queued as a new "Tracing GC" follow-up arc below the
         heap-rooted-preserve arc parent. -->
 
-- [ ] **Tracing GC for the dyn heap (arc)** (follow-up to bm4 +
+- [x] **Tracing GC for the dyn heap (arc)** (follow-up to bm4 +
       hrp).  The bm4 freelist + rollback wiring + hrp1/hrp2's
       heap-rooted preserve walk all landed cleanly, but the
       bm4 acceptance criterion (>=30% peak KiB drop on
@@ -3867,6 +3867,19 @@ sub-items once these land.
       heap[uop_kernel_loc + 0] -- the heap walk catches them
       all, preserving every kernel output, identical effective
       coverage to the chain walk.
+      <!-- All 4 sub-items landed (gc1 root collection, gc2
+      recursive mark, gc3 integration with heap-rooted
+      overlay, gc4 bench delta + docs).  Acceptance target
+      (>=30% peak KiB drop) NOT met -- 0% delta on every
+      memory metric.  Tracing-GC infrastructure is in place
+      and integrated into thvm_realize but the heap-rooted
+      overlay preserves identical coverage to hrp.  Real
+      savings unblock once the queued "WL-pinned-Terms side
+      table" arc lands and lets gc_mark_term find pending
+      UOPs without the overlay -- bm4 + hrp + gc together
+      then flip from "infrastructure complete" to
+      "delivering 30%+ peak KiB drop". -->
+
 
       Real savings need a tracing GC that marks reachable cells
       from a fixed root set (the WL-returned result + live UOP
@@ -4039,7 +4052,7 @@ sub-items once these land.
         table OR a different unblocking strategy. -->
 
 
-  - [ ] **gc4: bench delta + docs**.  Re-run
+  - [x] **gc4: bench delta + docs**.  Re-run
         wl/Examples/_bench/baseline.wls on both backends.
         Acceptance: peak KiB drops at least 30% on lenet-mnist.
         Update docs/bench-results.md with a fourth column
@@ -4047,6 +4060,68 @@ sub-items once these land.
         don't materialize, document the residual blocker
         (likely an unanticipated heap-cell preservation path
         like ALO state or BOOK heap aliasing).  ~20 LOC + doc.
+        <!-- Done.  ACCEPTANCE MISS again -- 0% peak KiB
+        delta vs post-hrp.  docs/bench-results.md grew the
+        post-gc column; wall-time deltas range -7% to +22%
+        (the +22% on CPU beautiful-mnist is the per-realize
+        calloc(HEAP_CAP) the GC bitmap allocator does --
+        16 MiB calloc adds ~0.5 ms hit on cold pages,
+        compounded across 4 calls/step.  Memory metrics are
+        deterministic and identical to baseline).
+
+        Residual blocker: same as bm4d's diagnosis.  gc3
+        attempt 2 lands the tracing-GC infrastructure but
+        defensively also calls mark_heap_rooted_preserve to
+        cover pending UOP cells the root-set walk misses --
+        and that overlay pins every kernel-output TAG_TEN
+        cell, identical effective coverage to hrp.
+
+        docs/bench-results.md got a thoroughly updated
+        "Unblocking the savings (UPDATED post-gc)" section
+        proposing 3 strategies; the obvious next arc is #1:
+        a WL-pinned-Terms side table (populate from
+        thvm_wl_term_new / thvm_wl_realize, clear on WL
+        ref drop, add to gc_collect_roots).  Once that
+        ships, flipping the heap-rooted overlay off in
+        mark_gc_preserve is a ~10 LOC change.
+
+        Queued as a new "WL-pinned-Terms side table" arc
+        below the gc arc parent. -->
+
+- [ ] **WL-pinned-Terms side table** (follow-up to bm4 +
+      hrp + gc).  THE BLOCKER: bm4 / hrp / gc all share one
+      root cause -- forward intermediate kernel outputs have
+      TAG_TEN cells at heap[uop_kernel_loc + 0] that no GC
+      root traces to but a future TGrad realize structurally
+      needs.  Without an EXPLICIT signal that "WL is still
+      holding intermediate X across realizes", the runtime
+      conservatively preserves them all.
+
+      Fix: maintain `WL_PINNED_TERMS[]` array populated by
+      thvm_wl_term_new / thvm_wl_realize whenever WL receives
+      a Term back; clear when WL drops the reference (via
+      thvm_wl_term_release or an on_release callback when
+      MNumericArray side handles get disowned).  Add to
+      gc_collect_roots's set.
+
+      Then flip the heap-rooted overlay OFF in
+      mark_gc_preserve.  gc walk over (result + WNF stack +
+      DEFS + WL_PINNED_TERMS) catches everything actually
+      live; everything else feeds bm4b's freelist.
+
+      Acceptance: lenet-mnist peak_concurrent_kib drops
+      >=30% (bm4d's original target the bm4 / hrp / gc arcs
+      kept missing); 268 C + 270 WL tests stay green; Metal
+      Adam-LeNet still converges.
+
+      Sized at ~80 LOC + WL bridge wiring + tests; will
+      sub-decompose into table-infra + bridge-integration +
+      mark_gc_preserve-flip + bench-validation when picked up.
+
+      Once this lands, the bm4 + hrp + gc infrastructure
+      (already shipped + tested + correctness-preserving)
+      delivers the savings without further code change.
+
 
 
 

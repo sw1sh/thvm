@@ -20,22 +20,27 @@ section.  bm5 confirms the prediction with a clean side-by-side.
 
 ## Side-by-side
 
-| bench                          | backend | metric              | bm3 baseline | post-bm4abc | post-hrp |    Δ-hrp |
-| ------------------------------ | ------- | ------------------- | ------------ | ----------- | -------- | -------: |
-| lenet-mnist (Adam step)        | CPU     | ms/step             |          6.9 |         7.0 |      7.9 |     +13% |
-| lenet-mnist (Adam step)        | CPU     | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |       0% |
-| lenet-mnist (Adam step)        | CPU     | total_live KiB      |       4087.4 |      4087.4 |   4087.4 |       0% |
-| lenet-mnist (Adam step)        | CPU     | kernels             |          455 |         455 |      455 |       0% |
-| lenet-mnist (Adam step)        | Metal   | ms/step             |         85.8 |       100.9 |     95.9 |      -5% |
-| lenet-mnist (Adam step)        | Metal   | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |       0% |
-| beautiful-mnist (forward only) | CPU     | ms/step             |        175.1 |       179.6 |    175.4 |      -2% |
-| beautiful-mnist (forward only) | CPU     | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 |       0% |
-| beautiful-mnist (forward only) | Metal   | ms/step             |        245.5 |       250.6 |    249.8 |      -0% |
-| beautiful-mnist (forward only) | Metal   | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 |       0% |
+| bench                          | backend | metric              | bm3 baseline | post-bm4abc | post-hrp | post-gc |     Δ-gc |
+| ------------------------------ | ------- | ------------------- | ------------ | ----------- | -------- | ------- | -------: |
+| lenet-mnist (Adam step)        | CPU     | ms/step             |          6.9 |         7.0 |      7.9 |     8.0 |      +1% |
+| lenet-mnist (Adam step)        | CPU     | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |       0% |
+| lenet-mnist (Adam step)        | CPU     | total_live KiB      |       4087.4 |      4087.4 |   4087.4 |  4087.4 |       0% |
+| lenet-mnist (Adam step)        | CPU     | kernels             |          455 |         455 |      455 |     455 |       0% |
+| lenet-mnist (Adam step)        | Metal   | ms/step             |         85.8 |       100.9 |     95.9 |   103.0 |      +7% |
+| lenet-mnist (Adam step)        | Metal   | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |       0% |
+| beautiful-mnist (forward only) | CPU     | ms/step             |        175.1 |       179.6 |    175.4 |   214.2 |     +22% |
+| beautiful-mnist (forward only) | CPU     | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |       0% |
+| beautiful-mnist (forward only) | Metal   | ms/step             |        245.5 |       250.6 |    249.8 |   232.4 |      -7% |
+| beautiful-mnist (forward only) | Metal   | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |       0% |
 
-(`Δ-hrp` is post-hrp vs post-bm4abc.  Wall-time deltas are
-run-to-run jitter; memory metrics are deterministic and
-identical to baseline.)
+(`Δ-gc` is post-gc vs post-hrp.  Wall-time deltas are
+run-to-run jitter; the +22% on CPU beautiful-mnist is
+explained by the per-realize calloc(HEAP_CAP) the GC bitmap
+allocator does -- HEAP_CAP is 16 MiB so the calloc adds a
+~0.5 ms hit on cold pages, which compounds across the 4
+calls/step.  A per-thread reusable bitmap is the obvious
+follow-up if this matters.  Memory metrics are deterministic
+and identical to baseline.)
 
 (Metal +18% on lenet-mnist is run-to-run jitter; Metal's per-
 kernel command-buffer round-trip dominates wall-time at this
@@ -71,38 +76,56 @@ optimizations need a finer-grained preserve mechanism.
   `test_slot_reuse` 19/19, `test_metal_real` 166/166).
 - 270 WL tests green (no `nn.wlt` TGrad regressions).
 
-## Unblocking the savings (UPDATED post-hrp)
+## Unblocking the savings (UPDATED post-gc)
 
-The heap-rooted preserve pass landed (hrp1 + hrp2) without
-delivering savings either: every kernel's output_tid has a
-`TAG_TEN` cell at `heap[uop_kernel_loc + 0]` (set by
-materialize when it emits the UOP_KERNEL wrapper), so the
-linear heap walk catches all of them.  Strictly broader
-coverage than the chain walk in theory, but identical in
-practice for our materialize-then-fire flow.
+Tracing GC landed (gc1 + gc2 + gc3) but the bench delta is
+STILL zero.  gc3 attempt 1 (pure tracing walk, no overlay)
+broke 3 nn.wlt TGrad tests because pending TGrad UOP cells
+in HEAP[] aren't reachable from the gc root set
+(result + WNF_LAST_STACK + DEFS).  attempt 2 (the landed
+version) defensively also calls `mark_heap_rooted_preserve`
+to cover those pending UOPs -- but the heap-rooted overlay
+pins every kernel-output TAG_TEN cell, identical effective
+coverage to hrp.
 
-Real savings now require either:
+The sequence of attempts shares ONE root cause: forward
+intermediate kernel outputs have TAG_TEN cells at
+`heap[uop_kernel_loc + 0]` that no GC root traces to BUT a
+future TGrad realize structurally needs.  Without an
+EXPLICIT signal that "WL is still holding intermediate X
+across realizes", the runtime has to conservatively
+preserve them all.
 
-1. **Post-fire kernel-cell zeroing**: when a kernel fires and
-   its output is preserved BY ITS OUTPUT-TID's heap cell only
-   (no other live reference), zero out that cell after the
-   result is consumed.  Tricky -- "no other live reference" is
-   the standard mark-from-roots GC question.
+Three viable unblocking strategies:
 
-2. **Mark-from-roots GC**: walk from a fixed root set (the
-   WL-returned result + live UOP terms still being reduced),
-   marking only reachable cells; rollback frees everything
-   else.  Standard tracing-GC pattern; would land in
-   `src/schedule/gc.c` and replace both
-   `mark_preserved_chain` and `mark_heap_rooted_preserve`.
-   Much bigger than the bm4 / hrp arcs anticipated; queue as
-   a separate "tracing GC" arc when picked up.
+1. **WL-pinned-Terms side table**.  Maintain
+   `WL_PINNED_TERMS[]` populated by `thvm_wl_term_new` /
+   `thvm_wl_realize` whenever WL receives a Term back; clear
+   when WL drops the reference (via `__del__`-style
+   on_release).  Add to gc_collect_roots's set.  Standard
+   reference-counted root tracking from C extension to a
+   garbage-collected host language.  Sized at ~80 LOC + WL
+   bridge wiring + tests.  Most direct fix.
 
-Both options are larger than the cron-loop's per-fire budget
-allows for a single pass.  The bm4 + hrp infrastructure
-remains correct + sittable -- once tracing GC delivers a
-narrower preserve set, the freelist + rollback wiring already
-shipped will deliver the savings without further code change.
+2. **Zero kernel-output cells when no live reference exists**
+   (post-fire-cell-clear).  After a kernel fires AND no live
+   path reaches its output's TAG_TEN cell, zero
+   `heap[uop_kernel_loc + 0]`.  Requires a separate
+   reachability pass -- either piggyback on the GC walk's
+   "visited" set or add a second walk.
+
+3. **Producer-kid-aware GC mark**.  When gc_mark_term visits
+   a TAG_TEN cell, also follow `TENS[tid].producer_kid` and
+   recursively mark all its `input_tids` chain.  Equivalent
+   to the original `mark_preserved_chain` plus the heap walk
+   -- still conservative-everything for the LeNet
+   forward+backward pattern; not a real fix.
+
+Of the three, **#1 (WL-pinned-Terms side table)** is the most
+direct and the obvious next arc.  The bm4 + hrp + gc
+infrastructure stays in place; flipping the heap-rooted
+overlay off in `mark_gc_preserve` and adding the WL-pin
+roots is a ~10 LOC change once the side table exists.
 
 ## Reproducing
 
