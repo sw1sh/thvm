@@ -3205,7 +3205,7 @@ the GOAL workflow on Metal renders too).
       green run only). -->
 
 
-- [ ] **mp2: MemoryPlan.wl data layer (TMemoryPlan + topo depth +
+- [x] **mp2: MemoryPlan.wl data layer (TMemoryPlan + topo depth +
       TMemoryPlanReport)**.  New file
       wl/THVMLink/Kernel/MemoryPlan.wl.  TMemoryPlan[] snapshots
       the 5 bridge tables (mp1) and returns
@@ -3222,6 +3222,23 @@ the GOAL workflow on Metal renders too).
       TMemoryPlanReport[plan] returns a text Column with top-N
       largest bufs / longest-lived / status counts / total live
       bytes.  ~80 LOC.
+      <!-- Landed.  wl/THVMLink/Kernel/MemoryPlan.wl (new):
+      TMemoryPlan[] reads the 5 mp1 bridge tables, computes
+      memoized topo depths, collates tids into Bufs entries
+      grouped by (backend_id, buf_id), and returns
+      TMemoryPlan[<|"Kernels", "Tens", "Bufs"|>].  Aliasing-
+      aware: tens with the same buf_id collapse, alias_tids
+      lists every contributing tid.  Status: Preserved /
+      Freeable / External / Live (Dead is reserved for a future
+      pool-rollback variant -- not produced by today's runtime).
+      TMemoryPlanReport[] prints a Column with totals + top-5
+      bufs by bytes + top-5 by alive span + status histogram.
+      tests/memory_plan.wlt (5 cases): head, payload keys,
+      diamond depth distribution, reshape alias collapses into
+      one Bufs entry, report returns Column.  252 C + 235 WL
+      tests green.  mp3 will add the Gantt renderer; mp4 wires
+      TMemoryPlanReport into memory-probe.wls. -->
+
 
 - [ ] **mp3: TMemoryPlanGantt renderer + tests**.  Add the
       Graphics-based Gantt to wl/THVMLink/Kernel/MemoryPlan.wl:
