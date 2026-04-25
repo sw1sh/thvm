@@ -2340,7 +2340,7 @@ Realistic close-out for the overnight cron loop:
         existing View struct (shape + strides) is the
         starting point, missing offset + mask.
 
-    - [ ] **f3a. View extensions: offset + contiguous flag**.
+    - [x] **f3a. View extensions: offset + contiguous flag**.
           Add `i64 offset` and `u8 contiguous` fields to View
           (already has shape + strides).  Add a helper
           `view_strided_index(View *v, u32 flat_idx) -> u32`
@@ -2352,6 +2352,19 @@ Realistic close-out for the overnight cron loop:
           C tests verify the helper round-trips for both
           contiguous and a hand-built strided View.  ~80 LOC
           + ~30 LOC of test.
+          <!-- Landed.  View struct ALREADY had offset (i32),
+          contiguous (u8), and numel from prior work; only
+          the helper was missing.  Added view_strided_index
+          in src/view/strided_index.c -- contiguous fast path
+          (flat_idx + offset, no per-axis walk) + strided
+          path (back-to-front coord decomposition + sum of
+          c[axis]*strides[axis]).  Handles broadcast (stride=0,
+          wraparound) and flip (negative strides + non-zero
+          offset).  21-check test in tests/test_view_strided.c
+          covers contiguous-shortcircuit, broadcast,
+          permute-2d-transpose, flip-negative-stride.
+          146 C + 219 WL tests green. -->
+
 
     - [ ] **f3b. RESHAPE as view-only when source is
           contiguous**.  In materialize_in_env, when a

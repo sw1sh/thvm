@@ -77,6 +77,7 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 // === view/ ===
 #include "view/shape_numel.c"
 #include "view/create.c"
+#include "view/strided_index.c"
 
 // === backend/cpu/ ===
 // Order: init defines CPU_BUFS + CPU_BUFS_NEXT first, then the buf_*

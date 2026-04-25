@@ -396,6 +396,11 @@ fn void tensor_release(u32 id);   // decref + buf_decref; free at 0
 fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
 
 // === view/ ===
+// Map an output flat index to the underlying buffer index through
+// a (possibly non-contiguous) View.  Contiguous views short-circuit
+// to flat_idx + offset; strided views walk per-axis strides.
+fn u32 view_strided_index(View const *v, u32 flat_idx);
+
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).
 fn View view_create(Shape shape);
