@@ -9,29 +9,35 @@
 
 #include "thvm.h"
 
-// === Globals ===
-Term *HEAP      = NULL;
-u64   HEAP_NEXT = 0;
+// === Multi-context storage ===
+//
+// Slot 0 holds the default singleton runtime so legacy code (which
+// doesn't mention TContext at all) keeps using a stable home.  The
+// static storage is BSS so its ~few KB inline arrays cost nothing
+// until first write (zero-fill on demand).  CURRENT_CTX always
+// points at one of the slots; macros from thvm.h (HEAP, BOOK_HEAP,
+// DEFS, ...) dereference through it.
 
-Term *WNF_STACK = NULL;
-u32   WNF_S_POS = 0;
+static TContext DEFAULT_CTX_STORAGE;
+TContext *CONTEXTS[CONTEXTS_CAP] = {&DEFAULT_CTX_STORAGE};
+TContext *CURRENT_CTX            = &DEFAULT_CTX_STORAGE;
 
-u64   ITRS      = 0;
-
-TenDesc     *TENS         = NULL;
-u32          TENS_NEXT    = 1;   // 0 reserved for "no tensor"
-
-KernelEntry *KERNELS      = NULL;
-u32          KERNELS_NEXT = 1;   // 0 reserved for "no kernel"
-
-Backend     *CURRENT_BACKEND = NULL;
-
-Term *BOOK_HEAP = NULL;
-u64   BOOK_NEXT = 1;   // 0 reserved as "no template"
-Term  DEFS[DEFS_CAP] = {0};
-
-AloState *ALO_STATES      = NULL;
-u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
+// One-time scalar init for slot 0.  thvm_init runs the rest (calloc
+// of the heap-allocated arrays + backend setup).  Called via
+// init_default_ctx_scalars from thvm_init.
+static void init_default_ctx_scalars(TContext *ctx) {
+    ctx->heap_next        = 0;
+    ctx->wnf_s_pos        = 0;
+    ctx->wnf_last_stack_len = 0;
+    ctx->itrs             = 0;
+    ctx->tens_next        = 1;   // 0 reserved
+    ctx->kernels_next     = 1;   // 0 reserved
+    ctx->book_next        = 1;   // 0 reserved
+    ctx->alo_states_next  = 1;   // 0 reserved
+    ctx->shape_env_next   = 1;   // 0 reserved
+    ctx->cpu_bufs_next    = 1;   // 0 reserved
+    ctx->cpu_freelist_len = 0;
+}
 
 // === term/ ===
 #include "term/new.c"
@@ -199,55 +205,136 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "schedule/realize.c"
 
 // === runtime lifecycle ===
+//
+// thvm_init / thvm_free / thvm_context_* all operate on whichever
+// context CURRENT_CTX points at.  Macros from thvm.h dereference
+// transparently so the per-field assignments below look identical
+// to the pre-context version.
+
+// init_ctx_arrays + init_ctx_backends are the per-slot worker for
+// thvm_init AND thvm_context_create.  Picks default_device by name
+// ("cpu" / "metal" / NULL).
+static void init_ctx_arrays(TContext *ctx) {
+    ctx->heap           = (Term *)calloc(HEAP_CAP,     sizeof(Term));
+    ctx->wnf_stack      = (Term *)calloc(WNF_CAP,      sizeof(Term));
+    ctx->wnf_last_stack = (Term *)calloc(WNF_CAP,      sizeof(Term));
+    ctx->tens           = (TenDesc *)calloc(TENS_CAP,  sizeof(TenDesc));
+    ctx->kernels        = (KernelEntry *)calloc(KERNELS_CAP, sizeof(KernelEntry));
+    ctx->book_heap      = (Term *)calloc(BOOK_CAP,     sizeof(Term));
+    ctx->alo_states     = (AloState *)calloc(ALO_STATE_CAP, sizeof(AloState));
+    ctx->shape_env      = (ShapeBinding *)calloc(SHAPE_ENV_CAP, sizeof(ShapeBinding));
+    ctx->cpu_bufs       = (CpuBuf *)calloc(CPU_BUFS_CAP, sizeof(CpuBuf));
+    init_default_ctx_scalars(ctx);
+    memset(ctx->defs,             0, sizeof(ctx->defs));
+    memset(ctx->book_ref_visited, 0, sizeof(ctx->book_ref_visited));
+}
+
+static void install_ctx_backends(TContext *ctx, const char *want) {
+    for (u32 i = 0; i < THVM_MAX_BACKENDS; i++) ctx->backends[i] = NULL;
+    ctx->backends[THVM_DEV_CPU] = &CPU_BACKEND;
+    ctx->n_backends             = 1;
+    ctx->default_device         = THVM_DEV_CPU;
+    if (want && strcmp(want, "metal") == 0) {
+        ctx->backends[THVM_DEV_METAL] = &METAL_BACKEND;
+        ctx->n_backends               = 2;
+        ctx->default_device           = THVM_DEV_METAL;
+    }
+}
+
 void thvm_init(void) {
-  HEAP       = (Term *)calloc(HEAP_CAP,     sizeof(Term));
-  WNF_STACK  = (Term *)calloc(WNF_CAP,      sizeof(Term));
-  TENS       = (TenDesc *)calloc(TENS_CAP,  sizeof(TenDesc));
-  KERNELS    = (KernelEntry *)calloc(KERNELS_CAP, sizeof(KernelEntry));
-  BOOK_HEAP  = (Term *)calloc(BOOK_CAP,     sizeof(Term));
-  ALO_STATES = (AloState *)calloc(ALO_STATE_CAP, sizeof(AloState));
-  HEAP_NEXT  = 0;
-  WNF_S_POS  = 0;
-  ITRS       = 0;
-  TENS_NEXT  = 1;
-  KERNELS_NEXT = 1;
-  BOOK_NEXT  = 1;
-  ALO_STATES_NEXT = 1;
-  for (u32 i = 0; i < DEFS_CAP; i++) DEFS[i] = 0;
+  init_ctx_arrays(CURRENT_CTX);
   wl_pin_clear();   // wpt1: drop any leftover pins from a prior session
-  // Backend selection: THVM_BACKEND=metal switches to the Metal
-  // backend (currently a stub -- compute calls error out).  Anything
-  // else, including unset, defaults to CPU.
-  const char *want = getenv("THVM_BACKEND");
-  if (want && strcmp(want, "metal") == 0) {
-    CURRENT_BACKEND = &METAL_BACKEND;
-  } else {
-    CURRENT_BACKEND = &CPU_BACKEND;
-  }
-  CURRENT_BACKEND->init();
+  // Backend selection: THVM_BACKEND=metal picks Metal as the default
+  // device for newly allocated tensors.  Per-tensor backends are still
+  // stored on TenDesc.backend, so tensors created in a future session
+  // could in principle live on a different backend than the default.
+  install_ctx_backends(CURRENT_CTX, getenv("THVM_BACKEND"));
+  DEFAULT_BACKEND->init();
 }
 
 void thvm_free(void) {
-  if (CURRENT_BACKEND) CURRENT_BACKEND->shutdown();
-  free(HEAP);
-  free(WNF_STACK);
-  free(TENS);
-  free(KERNELS);
-  free(BOOK_HEAP);
-  free(ALO_STATES);
-  HEAP       = NULL;
-  WNF_STACK  = NULL;
-  TENS       = NULL;
-  KERNELS    = NULL;
-  BOOK_HEAP  = NULL;
-  ALO_STATES = NULL;
-  HEAP_NEXT  = 0;
-  WNF_S_POS  = 0;
-  TENS_NEXT  = 1;
-  KERNELS_NEXT = 1;
-  BOOK_NEXT  = 1;
+  if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
+  free(HEAP);            HEAP            = NULL;
+  free(WNF_STACK);       WNF_STACK       = NULL;
+  free(WNF_LAST_STACK);  WNF_LAST_STACK  = NULL;
+  free(TENS);            TENS            = NULL;
+  free(KERNELS);         KERNELS         = NULL;
+  free(BOOK_HEAP);       BOOK_HEAP       = NULL;
+  free(ALO_STATES);      ALO_STATES      = NULL;
+  free(SHAPE_ENV);       SHAPE_ENV       = NULL;
+  free(CPU_BUFS);        CPU_BUFS        = NULL;
+  HEAP_NEXT       = 0;
+  WNF_S_POS       = 0;
+  WNF_LAST_STACK_LEN = 0;
+  ITRS            = 0;
+  TENS_NEXT       = 1;
+  KERNELS_NEXT    = 1;
+  BOOK_NEXT       = 1;
   ALO_STATES_NEXT = 1;
-  for (u32 i = 0; i < DEFS_CAP; i++) DEFS[i] = 0;
+  SHAPE_ENV_NEXT  = 1;
+  CPU_BUFS_NEXT   = 1;
+  CPU_FREELIST_LEN = 0;
+  memset(DEFS,             0, sizeof(((TContext *)0)->defs));
+  memset(BOOK_REF_VISITED, 0, sizeof(((TContext *)0)->book_ref_visited));
   wl_pin_clear();
-  CURRENT_BACKEND = NULL;
+  for (u32 i = 0; i < THVM_MAX_BACKENDS; i++) CURRENT_CTX->backends[i] = NULL;
+  CURRENT_CTX->n_backends     = 0;
+  CURRENT_CTX->default_device = 0;
+}
+
+// === Multi-context API ===
+
+u32 thvm_context_create(const char *default_device) {
+    for (u32 slot = 1; slot < CONTEXTS_CAP; slot++) {
+        if (CONTEXTS[slot] != NULL) continue;
+        TContext *ctx = (TContext *)calloc(1, sizeof(TContext));
+        if (!ctx) return 0;
+        CONTEXTS[slot] = ctx;
+        TContext *prev = CURRENT_CTX;
+        CURRENT_CTX = ctx;
+        init_ctx_arrays(ctx);
+        install_ctx_backends(ctx, default_device);
+        DEFAULT_BACKEND->init();
+        CURRENT_CTX = prev;
+        return slot;
+    }
+    return 0;
+}
+
+u32 thvm_context_select(u32 slot) {
+    u32 prev = thvm_context_current();
+    if (slot < CONTEXTS_CAP && CONTEXTS[slot] != NULL) {
+        CURRENT_CTX = CONTEXTS[slot];
+    }
+    return prev;
+}
+
+u32 thvm_context_current(void) {
+    for (u32 slot = 0; slot < CONTEXTS_CAP; slot++) {
+        if (CONTEXTS[slot] == CURRENT_CTX) return slot;
+    }
+    return 0;
+}
+
+void thvm_context_destroy(u32 slot) {
+    if (slot == 0)              return;       // default slot owns DEFAULT_CTX_STORAGE
+    if (slot >= CONTEXTS_CAP)   return;
+    if (CONTEXTS[slot] == NULL) return;
+    TContext *ctx = CONTEXTS[slot];
+    TContext *prev = CURRENT_CTX;
+    CURRENT_CTX = ctx;
+    if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
+    free(ctx->heap);
+    free(ctx->wnf_stack);
+    free(ctx->wnf_last_stack);
+    free(ctx->tens);
+    free(ctx->kernels);
+    free(ctx->book_heap);
+    free(ctx->alo_states);
+    free(ctx->shape_env);
+    free(ctx->cpu_bufs);
+    CURRENT_CTX = prev;
+    if (CURRENT_CTX == ctx) CURRENT_CTX = CONTEXTS[0];
+    free(ctx);
+    CONTEXTS[slot] = NULL;
 }

@@ -10,45 +10,18 @@
 // on_release callback).  External buffers let the WL bridge construct
 // a tensor over a NumericArray's bytes without copying, holding the
 // NumericArray alive for the tensor's lifetime.
-
-#define CPU_BUFS_CAP (1ULL << 16)
-
-typedef struct {
-  void *data;
-  u64   nbytes;
-  u32   refcount;
-  u8    owns_data;                  // 1 = free(data) on release; 0 = call on_release
-  u8    preserved;                  // 1 = pool_rollback_with_preserve skips
-                                    // (set by mark_preserved_buf during the
-                                    // result-chain walk; cleared by
-                                    // pool_clear_preserved after rollback)
-  u8    freeable;                   // 1 = refcount-driven free has detected
-                                    // that this buf's last consumer has read
-                                    // it; pool_rollback_freeable will free.
-                                    // Set by cpu_buf_mark_freeable from the
-                                    // decref hook in kernel_fire_by_id.
-  void *handle;                     // opaque, passed to on_release
-  void (*on_release)(void *handle); // cleanup for !owns_data buffers
-} CpuBuf;
-
-static CpuBuf *CPU_BUFS      = NULL;
-static u64     CPU_BUFS_NEXT = 1;   // start at 1; 0 reserved for "no buffer"
-
-// Free-list of recyclable buf_ids (bm4a of the bench arc).
-// cpu_buf_freelist_push appends a buf_id whose storage is no
-// longer needed; cpu_buf_alloc(nbytes) tries to reuse a slot
-// whose nbytes matches before calling calloc.  Memory survives
-// the push -- only the refcount/preserved/freeable bookkeeping
-// resets.  Linear scan -- fine for the modest free-list sizes
-// (~hundreds at most) that LeNet / beautiful_mnist generate.
-#define CPU_FREELIST_CAP 4096
-static u32 CPU_FREELIST    [CPU_FREELIST_CAP];
-static u32 CPU_FREELIST_LEN = 0;
+//
+// CpuBuf typedef + the CPU_BUFS / CPU_BUFS_NEXT / CPU_FREELIST /
+// CPU_FREELIST_LEN identifiers now live inside TContext (see thvm.h);
+// the macros there resolve them through CURRENT_CTX so the rest of
+// the CPU backend keeps compiling unchanged.  Allocation is done by
+// cpu_init below (called from thvm_init / thvm_context_create after
+// the ctx arrays are wired up).
 
 fn int cpu_init(void) {
-  CPU_BUFS = (CpuBuf *)calloc(CPU_BUFS_CAP, sizeof(CpuBuf));
-  CPU_BUFS_NEXT = 1;
-  CPU_FREELIST_LEN = 0;
+  // thvm_init / thvm_context_create allocate CPU_BUFS up-front (so
+  // cpu_buf_freelist's NULL guards stay accurate even before the
+  // first cpu_buf_alloc call).  Just sanity-check it's there.
   return CPU_BUFS == NULL ? -1 : 0;
 }
 
@@ -63,8 +36,6 @@ fn void cpu_shutdown(void) {
       b->on_release(b->handle);
     }
   }
-  free(CPU_BUFS);
-  CPU_BUFS      = NULL;
-  CPU_BUFS_NEXT = 1;
-  CPU_FREELIST_LEN = 0;
+  // CPU_BUFS itself is freed by thvm_free / thvm_context_destroy --
+  // we just walk the live entries here to release their payloads.
 }

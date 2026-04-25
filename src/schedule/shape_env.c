@@ -12,17 +12,10 @@
 // Linked-list discipline: a child node points at its parent so
 // pushing a new binding doesn't disturb existing ones.  ID 0
 // represents the empty environment.
-
-typedef struct {
-    u32   parent;
-    u64   var_loc;     // LAM binder heap loc (= where APP-LAM substitutes)
-    Shape shape;
-} ShapeBinding;
-
-#define SHAPE_ENV_CAP (1ULL << 14)
-
-static ShapeBinding SHAPE_ENV[SHAPE_ENV_CAP];
-static u32          SHAPE_ENV_NEXT = 1;
+//
+// ShapeBinding typedef + SHAPE_ENV_CAP + SHAPE_ENV / SHAPE_ENV_NEXT
+// now live in TContext (see thvm.h); the macros below resolve to
+// ctx fields.
 
 fn u32 shape_env_push(u32 parent, u64 var_loc, Shape shape) {
     if (SHAPE_ENV_NEXT >= SHAPE_ENV_CAP) {

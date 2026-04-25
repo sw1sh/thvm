@@ -288,35 +288,8 @@ typedef struct KernelEntry {
   void     *compiled;              // backend-specific; NULL for interpreter
 } KernelEntry;
 
-extern KernelEntry *KERNELS;
-extern u32          KERNELS_NEXT;
-
-// === Globals ===
-// Single-threaded for now. Extern in the header, defined in src/thvm.c.
-
-extern Term *HEAP;
-extern u64   HEAP_NEXT;
-
-extern Term *WNF_STACK;
-extern u32   WNF_S_POS;
-
-extern u64   ITRS;   // interaction counter (for tests + tracing)
-
-extern TenDesc *TENS;       // tensor descriptor side table
-extern u32      TENS_NEXT;  // bump allocator cursor
-
-extern Backend *CURRENT_BACKEND;  // installed by thvm_init
-
-// === book heap (static def templates, REF/ALO infrastructure) ===
-//
-// Definitions registered via thvm_def_register live as immutable
-// templates in BOOK_HEAP[].  TAG_REF carries an index into DEFS[];
-// TAG_ALO is the lazy allocator that walks one layer of a template
-// into the dynamic HEAP[] per fire, threading an AloState chain to
-// rebind binders through fresh dyn locs.
-extern Term *BOOK_HEAP;
-extern u64   BOOK_NEXT;
-extern Term  DEFS[DEFS_CAP];   // root book term per name (0 = unset)
+// KERNELS / KERNELS_NEXT now live in TContext (see below); the
+// macros at the bottom of this file resolve them through CURRENT_CTX.
 
 // AloState chain entries -- each one binds an old book loc to a fresh
 // dynamic loc (used by ALO-VAR / ALO-LAM to retarget VARs into the
@@ -326,8 +299,143 @@ typedef struct {
     u64 old_loc;    // book-heap loc of the binder
     u64 new_loc;    // freshly allocated dyn-heap loc that replaces it
 } AloState;
-extern AloState *ALO_STATES;
-extern u32       ALO_STATES_NEXT;
+
+// === ShapeBinding (used by schedule/shape_env.c) ===
+// Threaded through the materialize walk so a deeper VAR(binder_loc)
+// can be kernelised with a known output shape.  Linked-list parent
+// chain; ID 0 = empty environment.  Embedded inline in TContext so
+// each context has its own non-overlapping environment.
+#define SHAPE_ENV_CAP (1ULL << 14)
+typedef struct {
+    u32   parent;
+    u64   var_loc;
+    Shape shape;
+} ShapeBinding;
+
+// === CpuBuf (used by backend/cpu/) ===
+// Parallel table to TENS[]: each TenDesc.buf_id indexes into ctx->cpu_bufs.
+// Multiple TenDescs can share a buf_id (view aliasing); refcount controls
+// storage lifetime separately from TenDesc.refcount.
+typedef struct {
+  void *data;
+  u64   nbytes;
+  u32   refcount;
+  u8    owns_data;
+  u8    preserved;
+  u8    freeable;
+  void *handle;
+  void (*on_release)(void *handle);
+} CpuBuf;
+
+#define CPU_BUFS_CAP     (1ULL << 16)
+#define CPU_FREELIST_CAP 4096
+
+// === TContext ===
+// Bundles every piece of mutable runtime state into one struct so users
+// can hold multiple coexisting heaps via TContextNew[] / TInContext[].
+// The legacy single-runtime API (TInit / TWnf / ...) operates on slot
+// 0 by default; explicit TContext args switch CURRENT_CTX for the
+// duration of the call.  Reference design: TinyHVM/src/tinyhvm.h:1102.
+//
+// All existing globals (HEAP, BOOK_HEAP, DEFS, ALO_STATES, TENS,
+// KERNELS, CURRENT_BACKEND, plus the file-scope statics for the WNF
+// last-stack snapshot, the shape-env arena, the book-ref-visited
+// bitmap, and the CPU buf/freelist pools) become fields of this
+// struct.  Macros below redirect each old global identifier through
+// CURRENT_CTX so the rest of the runtime keeps compiling unchanged.
+typedef struct TContext {
+    /* Heap-allocated arrays (calloc on context_create). */
+    Term       *heap;
+    Term       *wnf_stack;
+    Term       *wnf_last_stack;          // snapshot on wnf_n bail
+    TenDesc    *tens;
+    KernelEntry*kernels;
+    Term       *book_heap;
+    AloState   *alo_states;
+    ShapeBinding *shape_env;             // materialize-pass arena
+    CpuBuf     *cpu_bufs;                // CPU backend buf table
+
+    /* Inline small arrays (per-context, zero-init in BSS). */
+    Term        defs[DEFS_CAP];
+    u8          book_ref_visited[DEFS_CAP];
+    u32         cpu_freelist[CPU_FREELIST_CAP];
+
+    /* Backend registry: per-tensor backends are stored on TenDesc;
+       this array is the registry of available backends + the index
+       used for newly allocated tensors. */
+    Backend    *backends[4];             // THVM_DEV_CPU=0, THVM_DEV_METAL=1
+    u32         n_backends;
+    u32         default_device;
+
+    /* Scalars / counters. */
+    u64 heap_next;
+    u32 wnf_s_pos;
+    u32 wnf_last_stack_len;
+    u64 itrs;
+    u32 tens_next;
+    u32 kernels_next;
+    u64 book_next;
+    u32 alo_states_next;
+    u32 shape_env_next;
+    u64 cpu_bufs_next;
+    u32 cpu_freelist_len;
+} TContext;
+
+#define THVM_MAX_BACKENDS 4
+#define THVM_DEV_CPU      0
+#define THVM_DEV_METAL    1
+
+#define CONTEXTS_CAP 16
+extern TContext *CURRENT_CTX;
+extern TContext *CONTEXTS[CONTEXTS_CAP];
+
+// Macro layer -- existing global names redirect through CURRENT_CTX
+// so all the C code under src/heap, src/term, src/wnf, src/schedule,
+// src/alo, src/uop, src/book, src/backend keeps compiling without
+// per-call ctx threading.  Single-threaded today; multi-thread would
+// need a thread-local CURRENT_CTX.
+#define HEAP                (CURRENT_CTX->heap)
+#define HEAP_NEXT           (CURRENT_CTX->heap_next)
+#define WNF_STACK           (CURRENT_CTX->wnf_stack)
+#define WNF_S_POS           (CURRENT_CTX->wnf_s_pos)
+#define WNF_LAST_STACK      (CURRENT_CTX->wnf_last_stack)
+#define WNF_LAST_STACK_LEN  (CURRENT_CTX->wnf_last_stack_len)
+#define ITRS                (CURRENT_CTX->itrs)
+#define TENS                (CURRENT_CTX->tens)
+#define TENS_NEXT           (CURRENT_CTX->tens_next)
+#define KERNELS             (CURRENT_CTX->kernels)
+#define KERNELS_NEXT        (CURRENT_CTX->kernels_next)
+#define BOOK_HEAP           (CURRENT_CTX->book_heap)
+#define BOOK_NEXT           (CURRENT_CTX->book_next)
+#define DEFS                (CURRENT_CTX->defs)
+#define ALO_STATES          (CURRENT_CTX->alo_states)
+#define ALO_STATES_NEXT     (CURRENT_CTX->alo_states_next)
+#define BOOK_REF_VISITED    (CURRENT_CTX->book_ref_visited)
+#define SHAPE_ENV           (CURRENT_CTX->shape_env)
+#define SHAPE_ENV_NEXT      (CURRENT_CTX->shape_env_next)
+#define CPU_BUFS            (CURRENT_CTX->cpu_bufs)
+#define CPU_BUFS_NEXT       (CURRENT_CTX->cpu_bufs_next)
+#define CPU_FREELIST        (CURRENT_CTX->cpu_freelist)
+#define CPU_FREELIST_LEN    (CURRENT_CTX->cpu_freelist_len)
+
+// Replaces the old CURRENT_BACKEND global -- "default backend for
+// newly allocated tensors only".  Per-tensor ops use ten->backend.
+#define DEFAULT_BACKEND     (CURRENT_CTX->backends[CURRENT_CTX->default_device])
+// Compatibility alias for code that still says CURRENT_BACKEND.
+#define CURRENT_BACKEND     DEFAULT_BACKEND
+
+// === Context lifecycle API ===
+// Create a fresh context; returns its slot id (1..CONTEXTS_CAP-1) or
+// 0 on failure.  default_device picks which backend new tensors use.
+u32 thvm_context_create(const char *default_device);
+// Set CURRENT_CTX to the given slot; returns the previous slot id.
+u32 thvm_context_select(u32 slot);
+// Returns the current slot id (0 = default).
+u32 thvm_context_current(void);
+// Free everything in the given slot.  Slot 0 (default) is a no-op
+// (same as thvm_free) since it cannot be re-created without leaking
+// the static DEFAULT_CTX_STORAGE.
+void thvm_context_destroy(u32 slot);
 
 // === term/ ===
 fn Term term_new(u8 sub, u8 tag, u32 ext, u64 val);
@@ -485,8 +593,8 @@ fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
 // innermost-first) for inspection.  max_steps == 0 == unbounded.
 fn Term wnf(Term t);
 fn Term wnf_n(Term t, u64 max_steps);
-extern Term WNF_LAST_STACK[];
-extern u32  WNF_LAST_STACK_LEN;
+// WNF_LAST_STACK / WNF_LAST_STACK_LEN live in TContext now -- macros
+// at the bottom of this file resolve them.
 
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction

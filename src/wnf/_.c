@@ -29,9 +29,10 @@
 // resumes the reduction.
 //
 // `wnf(t)` is the unbounded form (max_steps = 0).
-
-Term WNF_LAST_STACK[WNF_CAP];
-u32  WNF_LAST_STACK_LEN = 0;
+//
+// WNF_LAST_STACK / WNF_LAST_STACK_LEN now live in TContext (see
+// thvm.h); the macros in this file resolve to ctx fields.  Storage
+// is heap-allocated in thvm_init / thvm_context_create.
 
 fn Term wnf_n(Term term, u64 max_steps) {
   Term *stack = WNF_STACK;

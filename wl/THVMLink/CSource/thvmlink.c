@@ -85,12 +85,12 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new(WolframLibraryData libData, mint argc,
   u32 ext = (u32)MArgument_getInteger(args[2]);
   u64 val = (u64)MArgument_getInteger(args[3]);
   Term t = term_new(sub, tag, ext, val);
-  wl_pin_term(t);   // wpt2: track WL ownership for the GC root set
+  wl_pin_term(t);
   MArgument_setInteger(res, (mint)t);
   return LIBRARY_NO_ERROR;
 }
 
-// wpt2: drop a Term's pin from the WL_PINNED_TERMS table.  Called by
+// Drops a Term's pin from the WL_PINNED_TERMS table.  Called by
 // the WL side when a TTerm wrapper is garbage-collected so the pin
 // table doesn't grow unboundedly.
 EXTERN_C DLLEXPORT int thvm_wl_term_unpin(WolframLibraryData libData, mint argc,
@@ -979,5 +979,59 @@ EXTERN_C DLLEXPORT int thvm_wl_book_reset(WolframLibraryData libData, mint argc,
   BOOK_NEXT       = 1;
   ALO_STATES_NEXT = 1;
   MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+// === multi-context API ===
+//
+// Used by WL Context.wl to allocate / select / inspect / destroy
+// contexts.  All scalar-in / scalar-out (slot ids are u32).
+
+EXTERN_C DLLEXPORT int thvm_wl_context_create(WolframLibraryData libData, mint argc,
+                                              MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  // arg 0 = device name as Integer code (0=cpu, 1=metal); WL bridge
+  // passes through dtypeCode-style enums so the C side avoids any
+  // string handling.  -1 = "default" (NULL).
+  mint dev = MArgument_getInteger(args[0]);
+  const char *name = NULL;
+  if      (dev == THVM_DEV_CPU)   name = "cpu";
+  else if (dev == THVM_DEV_METAL) name = "metal";
+  u32 slot = thvm_context_create(name);
+  MArgument_setInteger(res, (mint)slot);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_context_select(WolframLibraryData libData, mint argc,
+                                              MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  u32 prev = thvm_context_select(slot);
+  MArgument_setInteger(res, (mint)prev);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_context_current(WolframLibraryData libData, mint argc,
+                                               MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)thvm_context_current());
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_context_destroy(WolframLibraryData libData, mint argc,
+                                               MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  thvm_context_destroy(slot);
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_context_count(WolframLibraryData libData, mint argc,
+                                             MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  u32 n = 0;
+  for (u32 i = 0; i < CONTEXTS_CAP; i++) if (CONTEXTS[i]) n++;
+  MArgument_setInteger(res, (mint)n);
   return LIBRARY_NO_ERROR;
 }

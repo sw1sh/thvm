@@ -25,13 +25,13 @@ tHeapPayloadQ[___] := False
 tHeapQ[THeap[a_Association]] := tHeapPayloadQ[a]
 tHeapQ[___] := False
 
-tTermQ[TTerm[id_Integer]] := True
-tTermQ[___] := False
+tTermQ[TTerm[_Integer, _Integer]] := True
+tTermQ[___]                       := False
 
 (* More specific tests that match on a TTerm AND its tag.  Used to
    dispatch the MakeBoxes UpValue by tag so the summary box for a
    tensor differs from the one for an IC combinator. *)
-tTermTagQ[TTerm[id_Integer], tag_Integer] := $termTagFn[id] === tag
+tTermTagQ[t_TTerm, tag_Integer] := $termTagFn[ttermRaw[t]] === tag
 tTermTagQ[___, ___] := False
 
 tTenQ[t_] := tTermTagQ[t, $TagTEN]
@@ -74,6 +74,17 @@ uopSummaryIcon[] := Graphics[
     PlotRangePadding -> Scaled[0.05]
 ]
 
+(* Three-circle icon for TContext: chain-of-runtime-state metaphor. *)
+contextSummaryIcon[] := Graphics[
+    {
+        EdgeForm[LightDarkSwitched[Black, White]],
+        FaceForm[LightDarkSwitched[Lighter[StandardOrange, 0.55], Darker[StandardOrange, 0.45]]],
+        Disk[{-0.5, 0}, 0.25], Disk[{0, 0}, 0.25], Disk[{0.5, 0}, 0.25]
+    },
+    ImageSize -> Dynamic[{Automatic, 3.0 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
 (* === MakeBoxes UpValues === *)
 
 THeap /: MakeBoxes[s_THeap /; tHeapQ[Unevaluated[s]], fmt_] := With[{
@@ -103,7 +114,7 @@ THeap /: MakeBoxes[s_THeap /; tHeapQ[Unevaluated[s]], fmt_] := With[{
 ]
 
 TTerm /: MakeBoxes[t_TTerm /; tTermQ[Unevaluated[t]] && ! tTenQ[t] && ! tUopQ[t] && ! tNumQ[t], fmt_] := With[{
-    id   = First[t],
+    id   = ttermRaw[t],
     icon = termSummaryIcon[]
 },
     BoxForm`ArrangeSummaryBox[
@@ -132,7 +143,7 @@ TTerm /: MakeBoxes[t_TTerm /; tTermQ[Unevaluated[t]] && ! tTenQ[t] && ! tUopQ[t]
    render with their own icon + domain-specific fields. *)
 
 TTerm /: MakeBoxes[t_TTerm /; tTenQ[t], fmt_] := With[{
-    id    = First[t],
+    id    = ttermRaw[t],
     icon  = tenSummaryIcon[],
     shape = TTensorShape[t],
     rc    = TTensorRefcount[t]
@@ -159,7 +170,7 @@ TTerm /: MakeBoxes[t_TTerm /; tTenQ[t], fmt_] := With[{
 ]
 
 TTerm /: MakeBoxes[t_TTerm /; tUopQ[t], fmt_] := With[{
-    id    = First[t],
+    id    = ttermRaw[t],
     icon  = uopSummaryIcon[],
     kind  = TUOpKind[t]
 },
@@ -184,7 +195,7 @@ TTerm /: MakeBoxes[t_TTerm /; tUopQ[t], fmt_] := With[{
 ]
 
 TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] := With[{
-    id   = First[t],
+    id   = ttermRaw[t],
     icon = termSummaryIcon[]
 },
     BoxForm`ArrangeSummaryBox[
@@ -202,6 +213,47 @@ TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] := With[{
         },
         fmt,
         "Interpretable" -> Automatic
+    ]
+]
+
+(* === TContext (multi-heap handle from Context.wl) === *)
+
+tContextQ[TContext[_Integer]] := True
+tContextQ[___]                := False
+
+TContext /: MakeBoxes[c_TContext /; tContextQ[Unevaluated[c]], fmt_] := With[{
+    slot = First[c]
+},
+    (* Probe the slot's runtime state by temporarily switching to it. *)
+    Module[{prev = $contextCurrentFn[], heapPos, tens, kernels, isCurrent},
+        $contextSelectFn[slot];
+        heapPos   = $heapPosFn[];
+        tens      = If[ $tensCountFn   === $tensCountFn,   $tensCountFn[],   "?"];
+        kernels   = If[ $kernelCountFn === $kernelCountFn, $kernelCountFn[], "?"];
+        $contextSelectFn[prev];
+        isCurrent = (slot === prev);
+        BoxForm`ArrangeSummaryBox[
+            "TContext",
+            c,
+            contextSummaryIcon[],
+            {
+                {
+                    BoxForm`SummaryItem[{"slot: ",   slot}],
+                    BoxForm`SummaryItem[{"current: ", If[isCurrent, "yes", "no"]}]
+                }
+            },
+            {
+                {
+                    BoxForm`SummaryItem[{"heap: ",    heapPos}],
+                    BoxForm`SummaryItem[{"tensors: ", tens}]
+                },
+                {
+                    BoxForm`SummaryItem[{"kernels: ", kernels}]
+                }
+            },
+            fmt,
+            "Interpretable" -> Automatic
+        ]
     ]
 ]
 

@@ -271,21 +271,52 @@ TMetalBufTable[]  := Partition[Normal @ $metalBufTableFn[], 2]
 TTensCount[]    := $tensCountFn[]
 TTotalBufBytes[] := $totalBufBytesFn[]
 
-(* === fresh-label counter (WL-side; reset by TReset) === *)
-$labelCounter = 1;
-TFreshLabel[] := Block[{n = $labelCounter}, $labelCounter += 1; n]
+(* === fresh-label counter (WL-side; per-context, reset by TReset).
+       Keyed by ctx slot id from $contextCurrentFn[]. *)
+$labelCounters = <|0 -> 1|>
+TFreshLabel[] := With[{slot = $contextCurrentFn[]},
+    With[{n = Lookup[$labelCounters, slot, 1]},
+        $labelCounters[slot] = n + 1;
+        n
+    ]
+]
+
+(* Backward-compat read-only view: callers that mutated $labelCounter
+   directly (e.g. Heap.wl HeapInitialize) get a per-context value
+   instead of a single global. *)
+$labelCounter /: Set[$labelCounter, n_Integer] :=
+    ($labelCounters[$contextCurrentFn[]] = n; n)
+$labelCounter := Lookup[$labelCounters, $contextCurrentFn[], 1]
 
 (* === public API === *)
-$initialized = False
+$initializedContexts = <||>
+$initialized /: Set[$initialized, v_] :=
+    ($initializedContexts[$contextCurrentFn[]] = TrueQ[v]; v)
+$initialized := TrueQ @ Lookup[$initializedContexts, $contextCurrentFn[], False]
 
 (* Any op that touches the heap calls ensureInit[] first.  TInit /
    TReset / TFree all flip $initialized themselves so a manual
-   teardown still does the right thing. *)
+   teardown still does the right thing.  $initialized is per-context
+   so a TInit[] in slot 1 doesn't fool a slot-0 caller. *)
 ensureInit[] := If[ ! $initialized, TInit[]]
 
-TInit[]      := ($labelCounter = 1; $initialized = True; $initFn[] === 1)
-TFree[]      := ($initialized = False; $freeFn[])
-TReset[]     := ($labelCounter = 1; ensureInit[]; $resetFn[])
+TInit[]      := ($labelCounters[$contextCurrentFn[]] = 1;
+                 $initializedContexts[$contextCurrentFn[]] = True;
+                 $initFn[] === 1)
+TFree[]      := ($initializedContexts[$contextCurrentFn[]] = False;
+                 $freeFn[])
+TReset[]     := ($labelCounters[$contextCurrentFn[]] = 1;
+                 ensureInit[];
+                 $resetFn[])
+
+(* Explicit-context lifecycle overloads.  TInit[ctx]/TReset[ctx] run
+   the corresponding C-side function in the given context's slot
+   (auto-restores on exit).  Useful when you've allocated a context
+   via TContextNew[] and want to set it up without entering a
+   TInContext[...] block. *)
+TInit[ctx_TContext]  := TInContext[ctx, TInit[]]
+TFree[ctx_TContext]  := TInContext[ctx, TFree[]]
+TReset[ctx_TContext] := TInContext[ctx, TReset[]]
 
 (* === TTerm atomic object ===
    `TTerm[id_Integer]` is the canonical wrapper around a packed 64-bit
@@ -295,14 +326,32 @@ TReset[]     := ($labelCounter = 1; ensureInit[]; $resetFn[])
    (heapWith, etc.) can stay scalar-friendly.  The MakeBoxes summary
    box for TTerm lives in Format.wl. *)
 
-(* Internal: pull the raw Integer out of a TTerm or pass through. *)
-ttermRaw[TTerm[id_Integer]] := id
-ttermRaw[id_Integer]        := id
+(* TTerm canonical form is `TTerm[ctxSlot_Integer, raw_Integer]`.
+   Bare 1-arg `TTerm[raw]` (e.g. from legacy code or a fresh C-bridge
+   wrap) auto-normalizes to the tagged 2-arg form using the current
+   C-side context slot.  This downvalue fires on construction so
+   pattern-matchers downstream only ever see 2-arg. *)
+TTerm[id_Integer] := TTerm[$contextCurrentFn[], id]
+
+(* Internal extractors. *)
+ttermRaw[TTerm[_Integer, id_Integer]] := id
+ttermRaw[id_Integer]                  := id
+
+ttermCtx[TTerm[c_Integer, _Integer]]  := c
+ttermCtx[_Integer]                    := 0
 
 (* Pack a fresh TTerm from raw fields.  Private; callers use the
-   high-level constructors. *)
+   high-level constructors.  The 1-arg `TTerm[raw]` immediately
+   auto-normalizes to `TTerm[slot, raw]`. *)
 packTerm[sub_Integer, tag_Integer, ext_Integer, val_Integer] :=
     TTerm[$termNewFn[sub, tag, ext, val]]
+
+(* Auto-switch helper `withTermCtx` is defined in Context.wl (after
+   `TContext` is registered in the public `THVMLink`` namespace).
+   THVMLink.wl is parsed first, so a forward reference here would
+   resolve `TContext` to `THVMLink`Private`TContext` and silently
+   break the auto-switch -- a wrong-shadow that the catch-all
+   `withCtx[_, expr_] := expr` then absorbs. *)
 
 (* Inspectors accept either TTerm or Integer. *)
 TTermTag[t_]                    := $termTagFn[ttermRaw[t]]
@@ -311,20 +360,23 @@ TTermVal[t_]                    := $termValFn[ttermRaw[t]]
 TTermSub[t_]                    := $termSubFn[ttermRaw[t]]
 TTermUnpin[t_]                  := (ensureInit[]; $termUnpinFn[ttermRaw[t]])
 
-(* TTerm methods: TTerm[id]["tag"], etc. *)
-TTerm[id_Integer]["raw"]        := id
-TTerm[id_Integer]["tag"]        := $termTagFn[id]
-TTerm[id_Integer]["ext"]        := $termExtFn[id]
-TTerm[id_Integer]["val"]        := $termValFn[id]
-TTerm[id_Integer]["sub"]        := $termSubFn[id]
-TTerm[id_Integer]["tagName"]    := TTagName[$termTagFn[id]]
-TTerm[id_Integer]["info"]       := <|
+(* TTerm methods: only the canonical 2-arg form is reachable; bare
+   `TTerm[id]` auto-normalizes before any rule fires. *)
+TTerm[c_Integer, id_Integer]["raw"]     := id
+TTerm[c_Integer, id_Integer]["tag"]     := $termTagFn[id]
+TTerm[c_Integer, id_Integer]["ext"]     := $termExtFn[id]
+TTerm[c_Integer, id_Integer]["val"]     := $termValFn[id]
+TTerm[c_Integer, id_Integer]["sub"]     := $termSubFn[id]
+TTerm[c_Integer, id_Integer]["tagName"] := TTagName[$termTagFn[id]]
+TTerm[c_Integer, _Integer]["ctx"]       := c
+TTerm[c_Integer, id_Integer]["info"]    := <|
     "sub"     -> $termSubFn[id],
     "tag"     -> $termTagFn[id],
     "tagName" -> TTagName[$termTagFn[id]],
     "ext"     -> $termExtFn[id],
     "val"     -> $termValFn[id],
-    "raw"     -> id
+    "raw"     -> id,
+    "ctx"     -> c
 |>
 
 THeapPos[]                       := (ensureInit[]; $heapPosFn[])
@@ -332,8 +384,8 @@ THeapAlloc[size_Integer]         := (ensureInit[]; $heapAllocFn[size])
 THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
 
-TWnf[t_]                  := (ensureInit[]; TTerm[$wnfFn[ttermRaw[t]]])
-TWnf[t_, n_Integer /; n >= 0] := (ensureInit[]; TTerm[$wnfNFn[ttermRaw[t], n]])
+TWnf[t_]                       := (ensureInit[]; withTermCtx[t, TTerm[$wnfFn[ttermRaw[t]]]])
+TWnf[t_, n_Integer /; n >= 0]  := (ensureInit[]; withTermCtx[t, TTerm[$wnfNFn[ttermRaw[t], n]]])
 
 (* TStep[t] = TWnf[t, 1] -- fire exactly one interaction, then return
    the partially reduced term.  The pending eliminator stack at the
@@ -374,7 +426,7 @@ TRedexes[roots___] := (ensureInit[];
    reducible right now.  Pass `root` (the caller's outer term) so
    the "fresh" diff sees status flips on cells reachable from root
    but not stored anywhere in the heap. *)
-TInteract[redex_TTerm, roots___] := Module[{
+TInteract[redex_TTerm, roots___] := withTermCtx[redex, Module[{
     redexRaw, rootRaws, pre, result, post, fresh
 },
     ensureInit[];
@@ -390,7 +442,7 @@ TInteract[redex_TTerm, roots___] := Module[{
     post  = snapshotRedexes[Join[{result}, rootRaws]];
     fresh = TTerm /@ Complement[post, pre];
     <| "result" -> TTerm[result], "fresh" -> fresh |>
-]
+]]
 
 (* TReduce reduces `t` to WNF in-place and returns the original root.
    Pairs with THeapGraph[t] / TTermTree[t] when you want the
@@ -521,10 +573,10 @@ TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     packTerm[0, $TagLAM, 0, loc]
 ]
 
-(* Sugar: TTerm[id][arg] == TApp[TTerm[id], arg] lets the user write
-   `id[era]` instead of `TApp[id, era]`. *)
-TTerm[id_Integer][y_TTerm]   := TApp[TTerm[id], y]
-TTerm[id_Integer][y_Integer] := TApp[TTerm[id], y]
+(* Sugar: TTerm[ctx, id][arg] == TApp[TTerm[ctx, id], arg] lets the
+   user write `id[era]` instead of `TApp[id, era]`. *)
+TTerm[c_Integer, id_Integer][y_TTerm]   := TApp[TTerm[c, id], y]
+TTerm[c_Integer, id_Integer][y_Integer] := TApp[TTerm[c, id], y]
 
 TDup[body_, k_]                       := TDup[TFreshLabel[], body, k]
 TDup[label_Integer, body_, k_] := With[{loc = heapWith[body]},

@@ -20,7 +20,9 @@
 //                 cell at the parent gets rewritten to UOP_KERNEL.
 //   - others    : leaves; return unchanged.
 
-static u8 BOOK_REF_VISITED[DEFS_CAP];
+// BOOK_REF_VISITED now lives inline in TContext (see thvm.h); the
+// macro resolves to CURRENT_CTX->book_ref_visited.  Cleared on every
+// thvm_init / thvm_free / thvm_context_create.
 
 static Term materialize_walk_rec(Term t, u32 env_id, u8 in_book);
 
