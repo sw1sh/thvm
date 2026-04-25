@@ -293,6 +293,12 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
 
 Backend METAL_BACKEND = {
   .id              = 2,
+  .view_aware      = 0,   // metal_dispatch_kernel reads bufs flat;
+                          // f3 view-only aliases must be skipped so
+                          // Metal sees a fresh contig kernel-output
+                          // buffer instead of a non-contig alias
+                          // whose underlying source bytes are wider
+                          // than the consumer's expected numel.
   .init            = metal_init,
   .shutdown        = metal_shutdown,
   .buf_alloc       = metal_buf_alloc,

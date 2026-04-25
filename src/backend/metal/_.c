@@ -33,6 +33,7 @@ static int  metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 o
 
 Backend METAL_BACKEND = {
   .id              = 2,
+  .view_aware      = 0,   // stub: no Metal view-strided dispatch yet
   .init            = metal_init,
   .shutdown        = metal_shutdown,
   .buf_alloc       = metal_buf_alloc,

@@ -6,6 +6,7 @@
 
 Backend CPU_BACKEND = {
   .id              = 1,
+  .view_aware      = 1,   // cpu_interpret pre-materializes non-contig inputs
   .init            = cpu_init,
   .shutdown        = cpu_shutdown,
   .buf_alloc       = cpu_buf_alloc,

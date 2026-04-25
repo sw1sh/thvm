@@ -3052,5 +3052,55 @@ Realistic close-out for the overnight cron loop:
 
 All TASKS.md items complete on 2026-04-25 (cron-loop fire that closed the reuse-pass arc parent).
 
+## Reopened: Metal training arc (2026-04-25)
+
+Trying the GOAL (`THVM_BACKEND=metal verify.wls`) revealed the full
+chain doesn't actually train on Metal yet -- it crashed with
+`LibraryFunction::fpexc: Numeric data containing a floating point
+exception (NaN or Inf)`.  Root cause: the f3 view-only paths
+(SHRINK / PERMUTE / EXPAND / FLIP / RESHAPE) produce non-contiguous
+TenDescs whose downstream consumers must read via view_strided_index;
+`cpu_interpret` pre-materializes those into temp contig bufs,
+`metal_dispatch_kernel` does NOT -- Metal shaders read bufs flat,
+which on a SHRINK alias means reading the entire SOURCE buffer's
+bytes (wider than the consumer's expected numel) -> garbage ->
+NaN/Inf in Adam's `sqrt(v) + eps` denominator.
+
+Hot-fix landed (this fire): added `Backend.view_aware` flag.  CPU
+sets it; Metal does not; `materialize_uop_in_env`'s 5 f3 view-only
+branches gate on it.  Metal forward now produces real predictions
+(confidences 0.24-0.32 on random init vs the prior uniform 0.10
+from broken kernels) and Adam no longer crashes with NaN.  But
+without the f3 wins, Metal accumulates more KernelEntries per
+training step and 4 Adam steps still exhaust `KERNELS_CAP = 4096`.
+
+- [ ] **Metal view-aware dispatch**.  Mirror `cpu_interpret`'s
+      pre-materialize loop in `metal_dispatch_kernel`: for each
+      input where `!TENS[tid].view.contiguous`, allocate a temp
+      Metal buffer of `view.numel * 4` bytes, populate via host-
+      side strided copy through `view_strided_index`, bind the
+      temp buffer at `index = 2 + i` instead of the source buffer,
+      and free the temp after `waitUntilCompleted`.  Set
+      `METAL_BACKEND.view_aware = 1` once the loop is in.  Then
+      remove the `view_aware` gates in
+      `src/schedule/materialize_in_env.c` (keep them only for
+      backward compat with backends that haven't been ported).
+      Acceptance: `THVM_BACKEND=metal verify.wls` runs all 4 Adam
+      steps without `kernel_alloc: out of slots` and the loss
+      decreases monotonically (parity with CPU).  ~80 LOC; ~30
+      LOC test (`test_metal_real`-style alias-input parity check).
+
+- [ ] **Investigate the +7 MiB byte regression from f3d**.  The
+      memory probe jumped from 16022 to 23297 KiB on LeNet's
+      forward+TGrad after f3d landed -- without changing the
+      TenDesc or kernel count.  Suspect alias-pinning (each
+      view-of-source bumps the source buf's refcount via
+      `buf_incref`, keeping forward intermediates counted in
+      TTotalBufBytes longer).  Concrete debug: instrument
+      `tensor_view_of` + `cpu_buf_incref` to log new alias bumps
+      during a memory-probe run, sum the deltas, see if they
+      account for the 7 MiB.  ~30 LOC of probe + a doc update
+      in `docs/memory.md`.
+
 
 

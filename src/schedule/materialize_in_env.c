@@ -115,6 +115,7 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     //     so the WL/tests that read the underlying buf flat keep
     //     working.
     if (op == UOP_EXPAND
+        && CURRENT_BACKEND && CURRENT_BACKEND->view_aware
         && arity == 1 && child_tids[0] != 0
         && TENS[child_tids[0]].view.contiguous) {
       Shape src_shape = TENS[child_tids[0]].view.shape;
@@ -169,6 +170,7 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     //     ignores negative-stride contributions because the offset
     //     already covers the high end of the read range.
     if (op == UOP_FLIP
+        && CURRENT_BACKEND && CURRENT_BACKEND->view_aware
         && arity == 1 && child_tids[0] != 0
         && TENS[child_tids[0]].view.contiguous) {
       TenDesc *src = &TENS[child_tids[0]];
@@ -220,6 +222,7 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     //     only when perm is identity (rare; most permutes scramble
     //     strides and break row-major ordering).
     if (op == UOP_PERMUTE
+        && CURRENT_BACKEND && CURRENT_BACKEND->view_aware
         && arity == 1 && child_tids[0] != 0
         && TENS[child_tids[0]].view.contiguous) {
       TenDesc *src = &TENS[child_tids[0]];
@@ -260,6 +263,7 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     //     read fall through to view_strided_index via the
     //     materialize_root_alias post-pass at the realize root.
     if (op == UOP_SHRINK
+        && CURRENT_BACKEND && CURRENT_BACKEND->view_aware
         && arity == 1 && child_tids[0] != 0
         && TENS[child_tids[0]].view.contiguous) {
       TenDesc *src = &TENS[child_tids[0]];
@@ -305,6 +309,7 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     //     or the numels don't match (rare; usually a user-error
     //     condition).
     if (op == UOP_RESHAPE
+        && CURRENT_BACKEND && CURRENT_BACKEND->view_aware
         && arity == 1 && child_tids[0] != 0
         && TENS[child_tids[0]].view.contiguous) {
       // Target shape lives at [src, NUM(ndim), NUM(d0), NUM(d1), ...].

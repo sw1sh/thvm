@@ -180,6 +180,15 @@ struct KernelEntry;
 
 struct Backend {
   u32   id;
+  // view_aware = 1 if dispatch_kernel pre-materializes non-contig
+  // input TenDescs (sub-item f3b/c/d/e/g view-only aliases) via
+  // view_strided_index before reading buffer bytes.  CPU sets this
+  // (cpu_interpret has the pre-materialize loop); Metal does NOT
+  // (its shaders read bufs flat).  materialize_uop_in_env's f3
+  // view-only branches gate on this flag and fall through to
+  // kernel emission when the active backend can't consume aliases
+  // -- the reflected wins land for view-aware backends only.
+  u8    view_aware;
   int   (*init)(void);
   void  (*shutdown)(void);
   u32   (*buf_alloc)(u64 nbytes);
