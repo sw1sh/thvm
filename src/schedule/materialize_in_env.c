@@ -229,12 +229,26 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
         op_arg = ((kind & 0xFF) << 24) | (inner & 0x00FFFFFF);
     }
     KProgOp *p = &ke->program[ke->n_ops++];
-    p->opcode = op;
-    p->dtype  = (u8)out_dtype;
-    p->n_src  = arity;
-    p->numel  = out_numel;
-    p->arg    = op_arg;
+    p->opcode    = op;
+    p->dtype     = (u8)out_dtype;
+    p->n_src     = arity;
+    p->numel     = out_numel;
+    p->arg       = op_arg;
+    p->src0_ndim = 0;
+    for (u32 i = 0; i < MAX_DIM; i++) p->src0_dims[i] = 0;
     for (u8 i = 0; i < arity; i++) p->src[i] = KSRC_AS_INPUT(src_slot[i]);
+
+    // Movement ops (currently EXPAND -- RESHAPE/PERMUTE could
+    // reuse this in future) need source slot 0's per-axis shape so
+    // the kernel can distinguish leading- from trailing-axis
+    // broadcasts.  out_numel + in_numel alone aren't enough.
+    if (op == UOP_EXPAND && arity > 0) {
+      Shape s0 = child_shapes[0];
+      p->src0_ndim = (u8)(s0.ndim & 0xFF);
+      for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
+        p->src0_dims[i] = s0.dims[i];
+      }
+    }
 
     ke->compiled   = NULL;
     ke->source_uop = uop;     // remember the original UOP for grad walks

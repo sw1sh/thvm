@@ -203,9 +203,18 @@ typedef struct {
   u8    opcode;                    // UOP_* opcode
   u8    dtype;                     // DT_*
   u8    n_src;                     // 0..MAX_UOP_SRC
+  u8    src0_ndim;                 // ndim of source slot 0; 0 = unknown
+                                   // (movement ops: EXPAND uses this to
+                                   // distinguish leading-axis vs
+                                   // trailing-axis broadcasts; other
+                                   // ops ignore the src_dims block)
   u32   src[MAX_UOP_SRC];          // KSRC_AS_INPUT(n) or program index
   u32   arg;                       // CONST bits, REDUCE kind+axis, ...
   u32   numel;                     // output numel (for broadcast detection)
+  u32   src0_dims[MAX_DIM];        // per-axis dims of source slot 0
+                                   // (only meaningful when src0_ndim > 0;
+                                   // used by axis-aware EXPAND in v1, can
+                                   // generalise to RESHAPE/PERMUTE later)
 } KProgOp;
 
 typedef struct KernelEntry {

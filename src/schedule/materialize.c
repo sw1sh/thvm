@@ -233,11 +233,13 @@ fn Term materialize_expr(Term expr) {
     op_arg = ((kind & 0xFF) << 24) | (inner & 0x00FFFFFF);
   }
   KProgOp *p = &ke->program[ke->n_ops++];
-  p->opcode = op;
-  p->dtype  = (u8)out_dtype;
-  p->n_src  = arity;
-  p->numel  = out_numel;
-  p->arg    = op_arg;                     // CONST bits, REDUCE kind/inner, etc.
+  p->opcode    = op;
+  p->dtype     = (u8)out_dtype;
+  p->n_src     = arity;
+  p->numel     = out_numel;
+  p->arg       = op_arg;                  // CONST bits, REDUCE kind/inner, etc.
+  p->src0_ndim = 0;
+  for (u32 i = 0; i < MAX_DIM; i++) p->src0_dims[i] = 0;
   for (u8 i = 0; i < arity; i++) {
     // Find which input slot this child ended up in (after dedup).
     for (u32 j = 0; j < ke->n_inputs; j++) {
@@ -245,6 +247,17 @@ fn Term materialize_expr(Term expr) {
         p->src[i] = KSRC_AS_INPUT(j);
         break;
       }
+    }
+  }
+
+  // Movement ops (currently EXPAND) need source slot 0's per-axis
+  // shape so the kernel can resolve broadcast indexing without
+  // having to re-derive it from in_numel/out_numel alone.
+  if (op == UOP_EXPAND && arity > 0 && child_tids[0] != 0) {
+    Shape s0 = TENS[child_tids[0]].view.shape;
+    p->src0_ndim = (u8)(s0.ndim & 0xFF);
+    for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
+      p->src0_dims[i] = s0.dims[i];
     }
   }
 

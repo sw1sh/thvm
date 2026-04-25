@@ -921,7 +921,7 @@ Realistic close-out for the overnight cron loop:
       still needs the EXPAND kernel fix to actually evaluate
       to the right numbers. -->
 
-- [ ] **Plumb EXPAND's source shape to the kernel via KProgOp**.
+- [x] **Plumb EXPAND's source shape to the kernel via KProgOp**.
       Current `KProgOp` (`src/thvm.h`) carries only
       `numel` per output and a single `u32 arg` for op-specific
       info -- no per-axis shape.  `cpu_op_expand` therefore
@@ -939,6 +939,17 @@ Realistic close-out for the overnight cron loop:
       No semantic change yet -- this is pure plumbing to
       give the kernel the info it needs.  Backends still use
       the legacy code path; the next task swaps EXPAND over.
+      <!-- Implemented as KProgOp extension (src0_ndim u8 +
+      src0_dims u32[MAX_DIM]).  Adds 33 bytes per op; cleaner
+      than threading via KernelEntry which wouldn't reach the
+      per-op level.  Fields default to ndim=0 / dims=0 for ops
+      that don't use them.  Both materializers (materialize.c
+      and materialize_in_env.c) populate src0_dims from the
+      child shape only when op == UOP_EXPAND, so other ops
+      pay the bytes but no compute cost.  All 351 C + 172 WL
+      tests stay green -- pure plumbing; the kernel still
+      ignores the new fields. -->
+
 
 - [ ] **Use the source shape in cpu_op_expand**.  With the
       new per-op shape info available, replace the cycle
