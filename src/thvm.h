@@ -315,6 +315,12 @@ fn Term term_new_alo (Term book_term, u32 state_id);
 fn Term term_new_op2 (u32 opcode, Term x, Term y);
 fn Term term_new_mat (u32 match_val, Term handler, Term fallback);
 
+// === lazy outermost-layer resolver ===
+// Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);
+// returns everything else unchanged.  Cheaper than wnf -- no
+// kernel / materialize / grad firing.
+fn Term term_resolve(Term t);
+
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.
 fn Term interact_app_lam(Term lam, Term arg);

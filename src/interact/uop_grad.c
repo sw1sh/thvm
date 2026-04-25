@@ -50,27 +50,23 @@ fn Term interact_grad(Term grad_term) {
   Term gy     = heap_read(loc + 1);
   Term target = heap_read(loc + 2);
 
-  // Force y and target's outermost layer so we can pattern-match.
-  // wnf stops at the first WHNF root (LAM/APP-stuck/UOP/TEN/NUM)
-  // -- it does NOT eagerly descend into UOP children, so this
-  // remains a single-step.  Children stay as whatever they were
-  // (potentially ALO / nested UOP); the lazy chain rule below
-  // re-wraps them in fresh UOP_GRADs that fire on demand.
-  y      = wnf(y);
-  target = wnf(target);
+  // Lazy outermost-layer resolution -- follows VAR-SUB chains and
+  // ALO unfoldings but does NOT fire materialize / kernel / grad.
+  // Anything we can't structurally pattern-match below leaves the
+  // GRAD unchanged so wnf surfaces it as WHNF for a later re-entry.
+  y      = term_resolve(y);
+  target = term_resolve(target);
 
   // Leaf: this y is exactly the target tensor.  Lift gy to
-  // target.shape if it isn't already (the only "lift" hint is the
-  // ext bit in MUL/NEG/REDUCE branches we emit below; outer entry
-  // assumes unlifted).
+  // target.shape so the gradient is target-shaped end-to-end.
   if (y == target) return expand_to_target(gy, target);
 
   u8 y_tag = term_tag(y);
   if (y_tag == TAG_TEN || y_tag == TAG_NUM) return grad_zero(target);
 
   // Not a UOP -- can't pattern-match further.  Leave the GRAD term
-  // unchanged so a downstream wnf can re-fire it once y has more
-  // structure (e.g., after another beta-reduction / ALO unfold).
+  // unchanged so wnf treats it as WHNF and the consumer can re-fire
+  // once y becomes a UOP.
   if (y_tag != TAG_UOP) return grad_term;
 
   u8  y_op  = term_ext(y);

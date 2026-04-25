@@ -6,6 +6,38 @@ dated section.
 
 ## Unreleased
 
+### Changed: lazy GRAD + lazy materialize via shared term_resolve
+
+`interact_grad` and `materialize_expr` no longer call `wnf` to
+expose their inputs.  Both now route through a new shared
+`term_resolve` (in `src/term/resolve.c`) that does the minimum
+work needed to surface the outermost layer:
+
+- TAG_VAR: take the SUB-bit cell (single-step deref); chase the
+  chain if it cascades.
+- TAG_ALO: force one realisation layer via `alo_force` (which is
+  itself memoised, so repeated walks are cheap).
+- everything else: return unchanged.
+
+That's the entire resolver -- it does NOT fire materialize, kernel,
+or grad reductions.  Anything `interact_grad` can't structurally
+pattern-match (e.g., a free VAR that hasn't been bound yet) is
+returned unchanged; `wnf`'s UOP_GRAD case got a fixed-point check
+so the term sits as WHNF rather than re-fires.  `materialize_expr`
+follows the same pattern, with a single `wnf` step retained for
+the LAM/APP/REF case (where actual beta / unfolding is required
+before any UOp shape is visible).
+
+The SGD demo in `wl/THVMLink/Tests/sgd.wlt` was rewritten to drop
+the per-iteration `TUOpMaterialize` wrapper from the loop body.
+The recursive call now passes the symbolic `step(w)` UOp graph as
+the new w; `TRealize` at the end fires one materialize over the
+deeply-nested expression.  That's both cleaner and side-steps the
+"shared TUOpMaterialize wrapper produces distinct fresh TENs per
+fire so grad's leaf check breaks" issue we papered over with the
+materialize cache: now every reference to `w` in the body is the
+same UOp Term value, and the leaf check just works.
+
 ### Added: phase 3 -- SGD optimizer as a recursive lambda term
 
 Tying phases 1 + 2 together to demonstrate the original use case

@@ -96,9 +96,18 @@ enter:
         goto apply;
       }
       if (op == UOP_GRAD) {
-        // Pure rewrite: chain rule produces a fresh UOp graph that
-        // may itself contain GRAD nodes (which fire on re-entry).
-        next = interact_grad(next);
+        // Lazy chain-rule rewrite: each fire does ONE structural
+        // step on y's outermost UOp, deferring sub-positions as
+        // fresh UOP_GRAD nodes.  If interact_grad returns the
+        // term unchanged it means y wasn't structurally pattern-
+        // matchable yet (e.g., a free VAR / un-realised ALO),
+        // so leave the GRAD as WHNF for a later re-entry.
+        Term g_out = interact_grad(next);
+        if (g_out == next) {
+          whnf = next;
+          goto apply;
+        }
+        next = g_out;
         goto enter;
       }
       // BUFFER / CONST / VIEW / movement / elementwise / REDUCE / ...

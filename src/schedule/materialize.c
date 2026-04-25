@@ -117,14 +117,17 @@ fn u32 op_output_dtype(u8 op, u32 const *in_tids, u8 n_in, u32 const_dtype) {
 // ---- core: materialize a single UOp into a fresh UOP_KERNEL term.
 //      Children that are UOps are recursively materialized (bottom-up). ----
 fn Term materialize_expr(Term expr) {
-  // First force the outermost layer.  When `expr` came out of a
-  // beta-reduction or an ALO unfold, it might be a TAG_VAR whose
-  // referent is the substituted value, or a TAG_ALO that hasn't
-  // realised yet, or even a TAG_APP that needs another beta step
-  // before its real shape is visible.  wnf walks all of those to
-  // a WHNF root; for TAG_TEN / TAG_NUM / non-special TAG_UOP it's
-  // already-WHNF and the call is a no-op.
-  expr = wnf(expr);
+  // Lazy outermost-layer resolution (VAR-SUB / ALO chains) first,
+  // then a single wnf step ONLY if the result still isn't
+  // structurally a UOP / TEN / NUM -- which catches LAM / APP /
+  // REF terms that need beta or unfolding before we can see
+  // their UOp shape.  wnf is naturally lazy (stops at the first
+  // WHNF root), so the call doesn't drag in the rest of the graph.
+  expr = term_resolve(expr);
+  u8 tag = term_tag(expr);
+  if (tag != TAG_UOP && tag != TAG_TEN && tag != TAG_NUM) {
+    expr = wnf(expr);
+  }
 
   // TAG_TEN leaves: already concrete, nothing to do.
   if (term_tag(expr) != TAG_UOP) return expr;

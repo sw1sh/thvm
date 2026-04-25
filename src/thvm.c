@@ -67,6 +67,13 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "alo/realize.c"
 #include "alo/force.c"
 
+// === term/resolve.c ===
+// Lazy outermost-layer walker (VAR-SUB chain + ALO force).  Comes
+// after alo/ since it calls alo_force.  Used by interact_grad and
+// materialize_expr to surface the outermost structure without
+// firing materialize / kernel / grad.
+#include "term/resolve.c"
+
 // === view/ ===
 #include "view/create.c"
 
