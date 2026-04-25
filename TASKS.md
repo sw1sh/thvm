@@ -698,15 +698,39 @@ Realistic close-out for the overnight cron loop:
       All 343 C tests + 166 WL tests stay green. -->
 
 
-- [ ] **MLP-on-MNIST single-step gradient check**: extend the
+- [x] **MLP-on-MNIST single-step gradient check**: extend the
       forward smoke test by computing `TGrad[loss, W]` for each
       of the 4 weight tensors (W1, b1, W2, b2) and asserting
       that `TRealize` produces finite, correctly-shaped
       gradients (no NaN, no shape mismatch).  Pure structural
-      sanity; no parameter updates.  **Blocked on the
-      rank-changing EXPAND fix above** -- attempt 1 here showed
-      rank-2 grads collapse silently / SIGBUS.  Reattempt only
-      after that lands.
+      sanity; no parameter updates.
+      <!-- Implemented at wl/Examples/mlp-mnist/grad-check.wls.
+      Builds the forward pass inline holding tensor handles for
+      W1/b1/W2/b2, computes TGrad for each, asserts shape +
+      finiteness.  CPU pass: all 4 grads have correct shape and
+      non-zero values.  Metal pass: shapes correct + finite
+      everywhere, BUT W1/b1/W2 grads collapse to all-zero on
+      Metal while b2 (the only one not behind a Metal kernel
+      boundary in the chain) is non-zero.  Structural assertions
+      satisfy the task; Metal-vs-CPU grad parity is queued as
+      a separate follow-up below.  Both runs pass the
+      grad-check.wls assertions on either backend. -->
+
+- [ ] **Investigate Metal-vs-CPU gradient parity in MLP**:
+      `wl/Examples/mlp-mnist/grad-check.wls` shows all four
+      weight grads are non-zero and correctly-shaped on the CPU
+      backend, but on Metal only `b2` (the most-shallow grad,
+      directly off the softmax) is non-zero -- W1, b1, W2 all
+      collapse to all-zero.  Likely culprits: REDUCE_SUM along
+      a non-zero axis (TMatVec uses axis=1) on Metal, or the
+      ReLU mask propagation through the CMPLT/MUL chain on
+      Metal kernels, or the per-kernel input buffer routing for
+      the deeper grad chain (which crosses several kernel
+      boundaries via UOP_KERNEL transparency in interact_grad).
+      Suggested approach: add per-op CPU-vs-Metal parity tests
+      mirroring those already in test_metal_real.c but for the
+      specific REDUCE/CMPLT/MUL combinations that the chain
+      rule emits.
       <!-- attempt 1: blocked on rank-changing EXPAND.
       grad chain materializes for rank-1 targets (b1, b2 grad
       shapes match) but rank-2 targets (W1, W2) silently

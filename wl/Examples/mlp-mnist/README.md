@@ -3,11 +3,14 @@
 Tiny 2-layer fully-connected MNIST classifier exercised through the
 thvm runtime.  Built up incrementally:
 
-  - `forward.wls` -- forward pass + cross-entropy loss on a single
-    sample.  Smoke test for the materialize chain.
-  - `train.wls`   -- (next task) K manual SGD steps on a fixed batch,
-    asserts the loss curve trends down.  Validates the full backprop
-    chain end-to-end.
+  - `forward.wls`    -- forward pass + cross-entropy loss on a
+    single sample.  Smoke test for the materialize chain.
+  - `grad-check.wls` -- per-weight `TGrad[loss, W]` materialization;
+    asserts each gradient is finite and correctly-shaped.  Pure
+    structural sanity, no parameter updates.
+  - `train.wls`      -- (next task) K manual SGD steps on a fixed
+    batch, asserts the loss curve trends down.  Validates the full
+    backprop chain end-to-end.
 
 ## Usage
 
