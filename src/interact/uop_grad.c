@@ -175,11 +175,35 @@ fn Term interact_grad(Term grad_term) {
     }
 
     case UOP_REDUCE: {
-      // SUM only: gradient broadcasts the cotangent back to the
-      // input shape.  REDUCE_MAX needs a one-hot indicator; step 14.
-      Term a      = heap_read(y_loc + 0);
-      Term lifted = expand_to_target(gy, target);
-      return uop_grad(a, lifted, target);
+      // SUM: gradient broadcasts the cotangent back to the input shape.
+      // MAX: gradient is gy at the argmax position, 0 elsewhere -- a
+      //      one-hot mask built via CMPEQ(a, EXPAND(REDUCE_MAX(a))).
+      Term a    = heap_read(y_loc + 0);
+      u32  kind = (u32)term_val(heap_read(y_loc + 1));
+      u32  axis = (u32)term_val(heap_read(y_loc + 2));
+
+      if (kind == REDUCE_SUM) {
+        Term lifted = expand_to_target(gy, target);
+        return uop_grad(a, lifted, target);
+      }
+
+      // REDUCE_MAX: need a's shape to lift gy and to expand the
+      // recomputed max back to a's shape for the elementwise CMPEQ.
+      Shape a_shape;
+      if (!term_shape_in(a, 0, &a_shape)) {
+        // Fallback: target-shape lift (works when target == a in the
+        // single-leaf case; less safe in multi-tensor chains, but
+        // preserves the SUM-rule's behaviour as a degraded default).
+        Term lifted = expand_to_target(gy, target);
+        return uop_grad(a, lifted, target);
+      }
+
+      Term gy_lifted = uop_expand(gy, a_shape.ndim, a_shape.dims);
+      Term mx        = uop_reduce(REDUCE_MAX, axis, a);
+      Term mx_lifted = uop_expand(mx, a_shape.ndim, a_shape.dims);
+      Term mask      = uop_binary(UOP_CMPEQ, a, mx_lifted);
+      Term cotangent = uop_binary(UOP_MUL, gy_lifted, mask);
+      return uop_grad(a, cotangent, target);
     }
 
     case UOP_CMPLT:

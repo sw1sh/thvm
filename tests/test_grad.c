@@ -112,6 +112,14 @@ int main(void) {
   CHECK_EQ(term_ext(g_c), UOP_EXPAND);
   CHECK_EQ(term_ext(unexpand(g_c)), UOP_CONST);
 
+  TEST_BEGIN("grad/reduce-max-cascades-through-mask-mul");
+  // GRAD[REDUCE_MAX(a, 0), gy, a] -> GRAD[a, MUL[lift(gy), mask], a]
+  // -> leaf-EXPAND wrapping a MUL.  Mask = CMPEQ(a, EXPAND(MAX(a))).
+  Term mxr  = uop_reduce(REDUCE_MAX, 0, a);
+  Term g_mx = wnf(uop_grad(mxr, gy, a));
+  CHECK_EQ(term_ext(g_mx), UOP_EXPAND);
+  CHECK_EQ(term_ext(unexpand(g_mx)), UOP_MUL);
+
   TEST_BEGIN("grad/reshape-passthrough-cascades-to-leaf");
   // RESHAPE is identity-on-data so the rule is a pure passthrough:
   // GRAD[RESHAPE(a, ...), gy, a] -> GRAD[a, gy, a].  That nested GRAD

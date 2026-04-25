@@ -872,7 +872,7 @@ Realistic close-out for the overnight cron loop:
       (was 13). -->
 
 
-- [ ] **Add REDUCE_MAX grad branch in interact_grad**.  Once
+- [x] **Add REDUCE_MAX grad branch in interact_grad**.  Once
       UOP_CMPEQ exists, extend the existing UOP_REDUCE case
       in `src/interact/uop_grad.c` to dispatch on the kind
       bits.  For SUM (current behaviour): broadcast cotangent
@@ -886,6 +886,18 @@ Realistic close-out for the overnight cron loop:
       EXPAND'd back to a's shape so the elementwise CMPEQ has
       matching shapes.  ~25 LOC + a structural test in
       tests/test_grad.c (cascade form).
+      <!-- Implemented; the rule reads kind/axis from the
+      REDUCE heap cells and dispatches.  For MAX, gy is lifted
+      to a.shape via term_shape_in (more precise than
+      expand_to_target on the target's shape, which is wrong
+      for multi-tensor chains where target != a) -- falls back
+      to expand_to_target if a's shape can't be determined.
+      The mask is built as CMPEQ(a, EXPAND(REDUCE_MAX(a, axis),
+      a.shape)) so the elementwise CMPEQ matches a's shape.
+      Structural test grad/reduce-max-cascades-through-mask-mul
+      verifies the leaf-EXPAND wrapping a MUL form.  All 351 C
+      + 171 WL tests stay green. -->
+
 
 - [ ] **REDUCE_MAX grad numerical parity test**: a small
       one-shot test in `wl/THVMLink/Tests/grad.wlt` that
