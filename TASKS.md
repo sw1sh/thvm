@@ -205,11 +205,38 @@ concern that interact_grad currently doesn't cover for any of these):
 There's already a `Wolfram layer -> TUOp converter` per the git log
 (commit 54e716e). Extend it to handle LeNet end-to-end.
 
-- [ ] inspect `NetModel["LeNet"]["Layers"]` and list each layer type
+- [x] inspect `NetModel["LeNet"]["Layers"]` and list each layer type
       that needs converter support.
-- [ ] for each missing layer type, add a converter clause + a test
-      that round-trips the layer through the converter and checks
-      forward-pass numerics against `NetApply`.
+      <!-- Audit result: every LeNet layer (ConvolutionLayer,
+      ElementwiseLayer Ramp, PoolingLayer Max non-overlap,
+      FlattenLayer, LinearLayer, SoftmaxLayer) has a converter
+      clause from Phase 2.  Tried TFromNet on the full chain on
+      synthetic input -- two real integration gaps surfaced (see
+      sub-items below). -->
+- [ ] **WL-side shape inference for UOP graphs** so layer dispatch
+      can size operations without hitting TAG_TEN.  The current
+      `PoolingLayer` / `FlattenLayer` reads of `TTensorShape[x]`
+      fail when `x` is an intermediate UOP (e.g. the post-ReLU
+      output of a conv).  Options:
+      (a) thread shape info host-side through the NetChain Fold
+          (each fromLayer takes `(layer, x_TTerm, in_shape)` and
+          returns `{out_term, out_shape}`); or
+      (b) add a `TUOpShape[x_TTerm]` walker that traces the UOP
+          graph in WL and returns the result shape statically; or
+      (c) materialize at every step (slow; rebuilds kernels too
+          eagerly).
+      Pick one and document.
+- [ ] **NetModel["LeNet"] weight extraction**.  Probe shows the
+      NetModel-loaded layer's "Weights" comes back as
+      `Automatic` (paclet version 15.0.2 vs runtime 15.0.3
+      mismatch warning was printed at load).  Either re-train /
+      re-save in the local version, fall back to NetInitialize
+      with the published architecture, or load weights from a
+      separate file.  Pick the lowest-friction option.
+- [ ] end-to-end TFromNet on LeNet: build it from the official
+      architecture (with proper weights from the prior item),
+      feed a synthetic 1x28x28 input, verify TRealize produces a
+      length-10 probability vector that sums to 1.
 
 ## Phase 4 — MNIST loader
 
