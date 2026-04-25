@@ -87,6 +87,12 @@ TMaterialize::usage    = "TMaterialize[expr] runs the schedule + kernelize + lin
 TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
 TTensCount::usage     = "TTensCount[] returns the number of allocated TenDescs (excluding the reserved slot 0).";
 TTotalBufBytes::usage = "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount > 0).";
+
+TKernelTable::usage   = "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per kernel (kid 1 .. KERNELS_NEXT - 1).  Used by TMemoryPlan to derive per-buf alloc/last_use depths.";
+TKernelInputs::usage  = "TKernelInputs[kid] returns the input_tids of kernel `kid` (length n_inputs).";
+TTensTable::usage     = "TTensTable[] returns a list of {producer_kid, buf_id, dtype, view_numel, view_contiguous, refcount, backend_id} per TenDesc (tid 1 .. TENS_NEXT - 1).  backend_id is 1 for CPU, 2 for Metal, 0 for unbound.";
+TCpuBufTable::usage   = "TCpuBufTable[] returns a list of {nbytes, refcount, preserved, freeable, owns_data} per CPU buffer (buf_id 1 .. CPU_BUFS_NEXT - 1).";
+TMetalBufTable::usage = "TMetalBufTable[] returns a list of {nbytes, refcount} per Metal buffer.  Empty when the dylib was built without Metal support.";
 TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].";
 
 (* === UOp graph constructors === *)
@@ -244,6 +250,21 @@ $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},          
 $kernelInfoFn  := $kernelInfoFn  = load["thvm_wl_kernel_info",     {Integer},                        {Integer, 1}];
 $tensCountFn   := $tensCountFn   = load["thvm_wl_tens_count",      {},                               Integer];
 $totalBufBytesFn := $totalBufBytesFn = load["thvm_wl_total_buf_bytes", {},                            Integer];
+
+(* === TMemoryPlan snapshot tables (mp1) ===
+   Each returns a flat Integer-1 MTensor; MemoryPlan.wl reshapes
+   them into Association lists keyed by the per-row schema. *)
+$kernelTableFn   := $kernelTableFn   = load["thvm_wl_kernel_table",    {},        {Integer, 1}];
+$kernelInputsFn  := $kernelInputsFn  = load["thvm_wl_kernel_inputs",   {Integer}, {Integer, 1}];
+$tensTableFn     := $tensTableFn     = load["thvm_wl_tens_table",      {},        {Integer, 1}];
+$cpuBufTableFn   := $cpuBufTableFn   = load["thvm_wl_cpu_buf_table",   {},        {Integer, 1}];
+$metalBufTableFn := $metalBufTableFn = load["thvm_wl_metal_buf_table", {},        {Integer, 1}];
+
+TKernelTable[]    := Partition[Normal @ $kernelTableFn[],   7]
+TKernelInputs[k_Integer] := Normal @ $kernelInputsFn[k]
+TTensTable[]      := Partition[Normal @ $tensTableFn[],     7]
+TCpuBufTable[]    := Partition[Normal @ $cpuBufTableFn[],   5]
+TMetalBufTable[]  := Partition[Normal @ $metalBufTableFn[], 2]
 
 TTensCount[]    := $tensCountFn[]
 TTotalBufBytes[] := $totalBufBytesFn[]

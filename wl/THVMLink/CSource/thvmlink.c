@@ -589,6 +589,135 @@ EXTERN_C DLLEXPORT int thvm_wl_total_buf_bytes(WolframLibraryData libData, mint 
   return LIBRARY_NO_ERROR;
 }
 
+// === TMemoryPlan snapshot tables (mp1 of the visualization arc) ===
+// Each function returns a flat MTensor of mints sized to the
+// current table.  The WL side (MemoryPlan.wl) reshapes them into
+// Association lists.
+
+EXTERN_C DLLEXPORT int thvm_wl_kernel_table(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  // Cols per kernel: [n_inputs, output_tid, fired, spliced,
+  //                   consumer_count, output_numel, output_dtype].
+  mint nRows = (mint)(KERNELS_NEXT > 0 ? KERNELS_NEXT - 1 : 0);
+  mint nCols = 7;
+  mint dims[1] = {nRows * nCols};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (mint k = 0; k < nRows; k++) {
+    KernelEntry *ke = &KERNELS[k + 1];
+    dst[k * nCols + 0] = (mint)ke->n_inputs;
+    dst[k * nCols + 1] = (mint)ke->output_tid;
+    dst[k * nCols + 2] = (mint)ke->fired;
+    dst[k * nCols + 3] = (mint)ke->spliced;
+    dst[k * nCols + 4] = (mint)ke->consumer_count;
+    dst[k * nCols + 5] = (mint)ke->output_numel;
+    dst[k * nCols + 6] = (mint)ke->output_dtype;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_kernel_inputs(WolframLibraryData libData, mint argc,
+                                             MArgument *args, MArgument res) {
+  (void)argc;
+  mint kid = MArgument_getInteger(args[0]);
+  if (kid <= 0 || (u32)kid >= KERNELS_NEXT) {
+    MArgument_setMTensor(res, NULL);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  KernelEntry *ke = &KERNELS[kid];
+  mint dims[1] = {(mint)ke->n_inputs};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u32 i = 0; i < ke->n_inputs; i++) dst[i] = (mint)ke->input_tids[i];
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_tens_table(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  // Cols per tid: [producer_kid, buf_id, dtype, view_numel,
+  //                view_contiguous, refcount, backend_id].
+  mint nRows = (mint)(TENS_NEXT > 0 ? TENS_NEXT - 1 : 0);
+  mint nCols = 7;
+  mint dims[1] = {nRows * nCols};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (mint t = 0; t < nRows; t++) {
+    TenDesc *d = &TENS[t + 1];
+    dst[t * nCols + 0] = (mint)d->producer_kid;
+    dst[t * nCols + 1] = (mint)d->buf_id;
+    dst[t * nCols + 2] = (mint)d->dtype;
+    dst[t * nCols + 3] = (mint)d->view.numel;
+    dst[t * nCols + 4] = (mint)d->view.contiguous;
+    dst[t * nCols + 5] = (mint)d->refcount;
+    dst[t * nCols + 6] = (mint)(d->backend ? d->backend->id : 0);
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_cpu_buf_table(WolframLibraryData libData, mint argc,
+                                             MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  // Cols per buf: [nbytes, refcount, preserved, freeable, owns_data].
+  mint nRows = (mint)(CPU_BUFS_NEXT > 0 ? CPU_BUFS_NEXT - 1 : 0);
+  mint nCols = 5;
+  mint dims[1] = {nRows * nCols};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (mint b = 0; b < nRows; b++) {
+    CpuBuf *cb = &CPU_BUFS[b + 1];
+    dst[b * nCols + 0] = (mint)cb->nbytes;
+    dst[b * nCols + 1] = (mint)cb->refcount;
+    dst[b * nCols + 2] = (mint)cb->preserved;
+    dst[b * nCols + 3] = (mint)cb->freeable;
+    dst[b * nCols + 4] = (mint)cb->owns_data;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+#ifdef THVM_HAS_METAL
+extern u32  thvm_metal_buf_count(void);
+extern void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
+#endif
+
+EXTERN_C DLLEXPORT int thvm_wl_metal_buf_table(WolframLibraryData libData, mint argc,
+                                               MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  // Cols per buf: [nbytes, refcount].  Metal has no preserved /
+  // freeable bookkeeping, so the schema is narrower than CPU.
+  // When the dylib was built without Metal, return an empty 0x2
+  // tensor so the WL side can treat the result uniformly.
+  mint nRows = 0;
+#ifdef THVM_HAS_METAL
+  u32 c = thvm_metal_buf_count();
+  if (c > 1) nRows = (mint)(c - 1);
+#endif
+  mint nCols = 2;
+  mint dims[1] = {nRows * nCols};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+#ifdef THVM_HAS_METAL
+  for (mint b = 0; b < nRows; b++) {
+    u64 nbytes = 0; u32 refcount = 0;
+    thvm_metal_buf_get((u32)(b + 1), &nbytes, &refcount);
+    dst[b * nCols + 0] = (mint)nbytes;
+    dst[b * nCols + 1] = (mint)refcount;
+  }
+#endif
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_kernel_info(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
   (void)argc;

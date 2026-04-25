@@ -143,6 +143,21 @@ static int metal_buf_write(u32 buf_id, const void *src, u64 nbytes) {
   return 0;
 }
 
+// Accessors for the WL bridge's TMetalBufTable export (mp1 of the
+// TMemoryPlan visualization arc).  Non-static so thvmlink.c can
+// reach them after the Metal .o is linked in; METAL_BUFS itself
+// stays file-static.
+u32 thvm_metal_buf_count(void) { return METAL_BUFS_NEXT; }
+void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
+  if (i == 0 || i >= METAL_BUFS_NEXT) {
+    if (nbytes_out)   *nbytes_out   = 0;
+    if (refcount_out) *refcount_out = 0;
+    return;
+  }
+  if (nbytes_out)   *nbytes_out   = METAL_BUFS[i].nbytes;
+  if (refcount_out) *refcount_out = METAL_BUFS[i].refcount;
+}
+
 static void metal_shutdown(void) {
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     METAL_BUFS[i].buf      = nil;

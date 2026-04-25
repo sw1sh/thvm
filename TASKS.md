@@ -3165,7 +3165,7 @@ order, on the x-axis -- pure static analysis of the producer_kid /
 input_tids DAG, no C runtime change; backend-aware buf table so
 the GOAL workflow on Metal renders too).
 
-- [ ] **mp1: C -> WL bridge for kernel/tens/buf snapshot tables**.
+- [x] **mp1: C -> WL bridge for kernel/tens/buf snapshot tables**.
       In wl/THVMLink/CSource/thvmlink.c, add 5 new exported
       functions returning flat MTensors of mints, sized to the
       current table:
@@ -3188,6 +3188,22 @@ the GOAL workflow on Metal renders too).
       (wl/THVMLink/Tests/memory_plan_bridge.wlt) that calls each
       and asserts row/col shapes after a small TUOpAdd materialize.
       ~110 LOC.
+      <!-- Landed.  src/backend/metal/_.m: added non-static
+      thvm_metal_buf_count + thvm_metal_buf_get accessors so
+      thvmlink.c can reach METAL_BUFS without un-static'ing it.
+      thvmlink.c: 5 new EXTERN_C DLLEXPORT functions in the
+      "TMemoryPlan snapshot tables" section, all return
+      flat Integer-1 MTensors via libData->MTensor_new.
+      THVMLink.wl: 5 new $...Fn LibraryFunctionLoad bindings
+      + Partition-based public surfaces TKernelTable / TKernelInputs
+      / TTensTable / TCpuBufTable / TMetalBufTable.  Plus the
+      matching ::usage strings.
+      tests/memory_plan_bridge.wlt (5 cases): each table's
+      schema width + content sanity after a TRealize @ TUOpAdd.
+      252 C + 230 WL tests green (heap_snapshot.wlt unchanged --
+      pre-existing untracked Heap.wl crash, parked during the
+      green run only). -->
+
 
 - [ ] **mp2: MemoryPlan.wl data layer (TMemoryPlan + topo depth +
       TMemoryPlanReport)**.  New file
