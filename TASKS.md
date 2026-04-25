@@ -3120,7 +3120,7 @@ training step and 4 Adam steps still exhaust `KERNELS_CAP = 4096`.
       verify.wls Adam loop. -->
 
 
-- [ ] **Investigate the +7 MiB byte regression from f3d**.  The
+- [x] **Investigate the +7 MiB byte regression from f3d**.  The
       memory probe jumped from 16022 to 23297 KiB on LeNet's
       forward+TGrad after f3d landed -- without changing the
       TenDesc or kernel count.  Suspect alias-pinning (each
@@ -3131,6 +3131,27 @@ training step and 4 Adam steps still exhaust `KERNELS_CAP = 4096`.
       during a memory-probe run, sum the deltas, see if they
       account for the 7 MiB.  ~30 LOC of probe + a doc update
       in `docs/memory.md`.
+      <!-- Done.  Root cause was NOT alias-pinning; per-alloc
+      trace pinpointed LeNet's bias-add chain.  Pre-f3d:
+      Conv1.bias (80 bytes) -> EXPAND (alias) -> ADD; EXPAND's
+      block 2c required `view.contiguous` on its source.
+      Post-f3d/e/g: when SHRINK/PERMUTE/FLIP emitted non-contig
+      aliases that fed EXPAND, the contig check failed and
+      EXPAND fell through to the kernel-emit path, allocating
+      at the FULL target shape (e.g., 46080 bytes for Conv1's
+      bias chain on every kh*kw partial-sum slot).
+      Fix: dropped the contig precondition on block 2c; EXPAND
+      now aliases on any source by inheriting source strides
+      on non-broadcast axes and setting stride 0 on broadcast
+      axes.  Inherited strides are authoritative for non-contig
+      sources (SHRINK keeps row-major, PERMUTE permutes, FLIP
+      negates) so view_strided_index walks them correctly.
+      Measured: 23297 -> 15922 KiB (-7375), kernels 330 -> 280
+      (-50), TenDescs unchanged at 511.  Now ~100 KiB BELOW
+      the pre-f3d baseline -- the f3d/e/g wins finally cascade.
+      Metal verify still PASSES (loss 2.61 -> 0.025).
+      docs/memory.md updated with the bisect + measurements. -->
+
 
 
 

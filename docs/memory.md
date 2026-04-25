@@ -213,6 +213,50 @@ reclaimed.  Sized at one new schedule/heap_rooted_preserve.c plus
 swapping the rollback variant in thvm_realize -- queued as the
 next reuse-pass arc item.
 
+## EXPAND view-only on non-contig sources (post-f3d/e/g fix)
+
+After f3d (SHRINK) + f3e (PERMUTE) + f3g (FLIP) view-only paths
+landed, LeNet's memory probe rose from 16022 KiB (pre-f3d) to
+23297 KiB (+7 MiB) without changing the TenDesc count -- a
+surprise since each view-only alias is supposed to ELIMINATE a
+kernel-output buf.
+
+Bisect via per-alloc trace pointed at LeNet's bias-add chain:
+
+  Conv1.bias (shape {20}, 80 bytes)
+    -> EXPAND to {20, 24, 24} (11520 elements)
+    -> ADD with the conv output
+
+Pre-f3d, the EXPAND fast path (`materialize_in_env.c` block 2c)
+required `TENS[child].view.contiguous`.  The bias was a contig
+input, so EXPAND aliased -- no kernel, 0 new bytes.
+
+Post-f3d/e/g, when the SHRINK / PERMUTE / FLIP that fed an EXPAND
+emitted a non-contig alias, the contig check failed and EXPAND
+fell through to the kernel-emit path -- allocating a fresh buf
+of the FULL target shape (e.g., 46080 bytes for the conv1 chain
+above, on every position in the lowered conv kh*kw partial-sum).
+
+Fix: dropped the `view.contiguous` precondition on block 2c.
+EXPAND now aliases on any source by inheriting the source's
+per-axis strides (whatever they are) on non-broadcast axes and
+setting stride 0 on broadcast axes.  The inherited strides are
+already authoritative for non-contig sources (SHRINK alias keeps
+source row-major; PERMUTE permutes them; FLIP negates them) so
+view_strided_index walks them correctly.
+
+Measured impact on LeNet's memory probe:
+
+| Stage              | Pre-fix | Post-fix | Delta |
+| ------------------ | ------- | -------- | ----- |
+| TenDescs           | 511     | 511      | 0     |
+| Buf bytes (KiB)    | 23 297  | 15 922   | -7 375 |
+| KernelEntries      | 330     | 280      | -50   |
+
+Now ~100 KiB BELOW the pre-f3d baseline of 16 022 KiB and 50
+kernels lighter -- the f3d/e/g wins finally cascade through
+EXPAND as intended.
+
 ## Probe script
 
 `wl/Examples/lenet-mnist/memory-probe.wls` reports per-phase

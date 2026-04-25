@@ -116,9 +116,19 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     //     working.
     if (op == UOP_EXPAND
         && CURRENT_BACKEND && CURRENT_BACKEND->view_aware
-        && arity == 1 && child_tids[0] != 0
-        && TENS[child_tids[0]].view.contiguous) {
-      Shape src_shape = TENS[child_tids[0]].view.shape;
+        && arity == 1 && child_tids[0] != 0) {
+      // Source need not be contiguous (e.g., the source is itself a
+      // SHRINK/PERMUTE/FLIP alias).  We inherit the source's strides
+      // on non-broadcast axes and set 0 on broadcast axes; the
+      // resulting alias is non-contig unless target.numel ==
+      // source.numel (degenerate no-op EXPAND).  Without this
+      // non-contig fall-through the chain SHRINK -> EXPAND would
+      // hit the kernel-emit path on EXPAND and allocate at the
+      // FULL target size; LeNet's bias-add chain (Conv1 bias 20 ->
+      // expanded to 20*24*24=11520) burned ~7 MiB this way after
+      // f3d/e/g landed.
+      TenDesc *src = &TENS[child_tids[0]];
+      Shape src_shape = src->view.shape;
       u32 t_ndim = (u32)term_val(heap_read(expr_loc + 1));
       if (src_shape.ndim == t_ndim) {
         Shape t_shape = {0};
@@ -138,16 +148,15 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
           View nv = {0};
           nv.shape      = t_shape;
           nv.numel      = t_numel;
-          nv.offset     = TENS[child_tids[0]].view.offset;
-          nv.contiguous = (t_numel == TENS[child_tids[0]].view.numel) ? 1 : 0;
-          i32 src_stride = 1;
-          for (i32 i = (i32)src_shape.ndim - 1; i >= 0; i--) {
-            if (src_shape.dims[i] == t_shape.dims[i]) {
-              nv.strides[i] = src_stride;
-            } else {
-              nv.strides[i] = 0;
-            }
-            src_stride *= (i32)src_shape.dims[i];
+          nv.offset     = src->view.offset;
+          nv.contiguous = (t_numel == src->view.numel) ? src->view.contiguous : 0;
+          // Inherit per-axis strides from source; broadcast axes
+          // (src.dim==1 < target.dim) get stride 0.  Works for both
+          // contig and non-contig source views since src->view.strides
+          // is already authoritative.
+          for (u32 i = 0; i < t_ndim; i++) {
+            nv.strides[i] = (src_shape.dims[i] == t_shape.dims[i])
+                          ? src->view.strides[i] : 0;
           }
           for (u32 i = t_ndim; i < MAX_DIM; i++) nv.strides[i] = 0;
           u32 alias_tid = tensor_view_of(child_tids[0], nv);
