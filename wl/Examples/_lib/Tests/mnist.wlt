@@ -1,6 +1,12 @@
-(* mnist.wlt -- TMnistLoad smoke tests.  Loads a small slice (10
-   samples) so the test runs in <2s even on a cold ResourceData
-   cache. *)
+(* mnist.wlt -- TMnistLoad / TMnistBatch smoke tests.  Loads a
+   small slice (10 samples) so the test runs in <2s even on a
+   cold ResourceData cache.
+
+   The helper lives at wl/Examples/_lib/Mnist.wl (it's example-data
+   plumbing, not core runtime).  Pull it in here so the test is
+   self-contained when run from the library test runner. *)
+
+Get["wl/Examples/_lib/Mnist.wl"];
 
 VerificationTest[
     TInit[];

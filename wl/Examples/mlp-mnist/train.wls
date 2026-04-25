@@ -18,6 +18,7 @@
 
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];
+Get["wl/Examples/_lib/Mnist.wl"];
 
 debugPrint[args___] := WriteString["stdout",
     StringJoin @@ Map[ToString, {args}], "\n"]

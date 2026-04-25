@@ -1,9 +1,15 @@
 (* ::Package:: *)
 (* Mnist.wl - load MNIST as TTensor handles for training / eval.
 
+   This file lives under wl/Examples/_lib/ rather than the THVMLink
+   library proper -- MNIST loading is example-data plumbing, not core
+   runtime.  Consumers Get this file directly, e.g.
+       Get @ FileNameJoin[{Directory[], "wl/Examples/_lib/Mnist.wl"}]
+   from the repo root before calling TMnistBatch / TMnistLoad.
+
    Wraps `ResourceData["MNIST", "TrainingData" / "TestData"]`.  Each
    resource entry is `Image[28x28] -> Integer label`; we batch them
-   into channels-first tensors matching what TLeNet expects:
+   into channels-first tensors of shape {N, 1, 28, 28}:
 
      trainImages : f32 {N_train, 1, 28, 28}
      trainLabels : i32 {N_train}

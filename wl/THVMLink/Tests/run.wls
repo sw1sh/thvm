@@ -14,7 +14,14 @@
 PacletDirectoryLoad["wl/THVMLink"];
 Get["THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
 
-allFiles     = FileNames["*.wlt", "wl/THVMLink/Tests"];
+(* Library tests live under wl/THVMLink/Tests; example-helper
+   tests (wl/Examples/_lib/Tests) ride along the same runner so
+   they're exercised by `make wl-test`.  Each example test Get's
+   its own helper at the top of the file. *)
+allFiles     = Join[
+    FileNames["*.wlt", "wl/THVMLink/Tests"],
+    FileNames["*.wlt", "wl/Examples/_lib/Tests"]
+];
 pendingFiles = Select[allFiles, StringStartsQ[FileBaseName[#], "pending_"] &];
 regularFiles = Complement[allFiles, pendingFiles];
 
