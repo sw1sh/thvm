@@ -113,6 +113,50 @@ In rough order of impact:
 The cron-loop should pick up these as queued sub-items in
 TASKS.md when it gets to the memory work.
 
+## Per-step pool boundary lands (sub-items a + b)
+
+Status: infrastructure complete, ZERO measured savings yet.
+
+- `cpu_buf_pool_begin() -> wm` + `cpu_buf_pool_rollback_with_preserve(wm)`
+  in src/backend/cpu/buf_pool.c (sub-item a).
+- `thvm_realize` (src/schedule/realize.c) wraps materialize +
+  wnf with the pool boundary; `mark_preserved_chain` walks the
+  result tensor's producer_kid -> input_tids tree marking every
+  reachable buf as preserved (sub-item b).
+- WL TRealize calls the new `thvm_wl_realize` bridge as one C
+  round-trip.
+
+Memory-probe.wls before/after:
+
+| Stage              | Before | After  | Delta |
+| ------------------ | ------ | ------ | ----- |
+| TenDescs           | 511    | 511    | 0     |
+| Buf bytes (KiB)    | 16 022 | 16 022 | 0     |
+| KernelEntries      | 330    | 330    | 0     |
+
+The conservative whole-producer-chain preserve is the source of
+the zero delta: every forward intermediate is reachable from the
+loss tensor (transitively, via the chain of producer_kids), so
+EVERY intermediate gets marked preserved and rollback frees
+nothing.
+
+We tried the aggressive "preserve only the result.buf_id"
+variant.  It broke nn.wlt (5 failures) and segfaulted; some
+downstream paths (TGrad chain rule, view-only alias chains)
+read intermediate bufs after wnf returns, before the next
+TRealize starts.
+
+The right next step is **refcount-driven free** (the next item
+in the reuse-pass arc): track per-buf consumer count during
+materialize, decref when each consumer kernel fires, free at
+refcount = 0.  That cleanly separates "result bufs to keep" from
+"intermediate bufs that have been READ by all their consumers"
+without the producer-chain-preservation paradox.
+
+The pool boundary infrastructure is correct + covered by tests;
+it'll provide actual savings once the refcount work lands and
+swaps the preserve-walk for "free what hit refcount=0".
+
 ## Probe script
 
 `wl/Examples/lenet-mnist/memory-probe.wls` reports per-phase

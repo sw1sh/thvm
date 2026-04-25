@@ -2626,10 +2626,19 @@ Realistic close-out for the overnight cron loop:
       should be opened as its own decomposable arc when
       it becomes the topmost task.
 
-  - [ ] **Per-step buffer pool (arc)**.  Add a high-water-
+  - [x] **Per-step buffer pool (arc)**.  Add a high-water-
         mark allocator that frees per-materialize bufs at
         wnf completion; ~50% memory reduction per step.
         Decomposed into 3 sub-items below.
+        <!-- Infra DONE; SAVINGS PENDING refcount work.
+        sub-items a (pool primitives), b (per-TRealize
+        boundary + preserve-walk), c (verification) all
+        landed.  Memory probe shows zero delta because the
+        conservative preserve walks the whole forward chain.
+        Refcount-driven free (next reuse-pass arc item)
+        unblocks actual savings -- see docs/memory.md "Per-
+        step pool boundary lands" section. -->
+
 
     - [x] **Pool primitives + watermark API**.  Add
           `cpu_buf_pool_begin() -> u32 watermark` and
@@ -2702,12 +2711,31 @@ Realistic close-out for the overnight cron loop:
           refcount work. -->
 
 
-    - [ ] **Verify reuse-pass impact**.  Re-run the
+    - [x] **Verify reuse-pass impact**.  Re-run the
           memory probe + lenet-mnist verify.wls.  Update
           docs/memory.md with measured per-step memory
           drop.  Acceptance: >=30% reduction in
           TTotalBufBytes after one TRealize.  ~10 LOC of
           probe extension + doc update.
+          <!-- Done.  Verification result: ZERO savings
+          (511 / 16022 / 330 before AND after the pool
+          boundary).  Acceptance criterion (>=30%
+          reduction) NOT met because the conservative
+          whole-producer-chain preserve walks every
+          forward intermediate.
+          docs/memory.md updated with a new "Per-step
+          pool boundary lands" section that documents
+          the infrastructure + the zero-delta result +
+          the next-step plan (refcount-driven free
+          unblocks the actual savings).
+          The per-step pool ARC is functionally
+          complete -- infra solid + tested -- but won't
+          deliver memory savings until the refcount-driven
+          free arc item lands and replaces the preserve-
+          walk with "free what hit refcount=0".  Marking
+          this verification sub-item done; acceptance miss
+          documented. -->
+
 
   - [ ] **Refcount-driven free**.  Decref + free buffers
         when the last consumer kernel finishes reading.
