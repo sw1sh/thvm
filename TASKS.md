@@ -765,7 +765,7 @@ Realistic close-out for the overnight cron loop:
       are bounded but exceed one fire's LOC budget.  Queued
       the fix as the prerequisite item above. -->
 
-- [ ] **Fix TSoftmax to use explicit EXPAND for the broadcast**.
+- [x] **Fix TSoftmax to use explicit EXPAND for the broadcast**.
       Current implementation in `wl/THVMLink/Kernel/NN.wl`:
       `TSoftmax[x] := TUOpMul[e, TUOpRecip[TUOpReduce[e, 0, "SUM"]]]`
       relies on the kernel-level numel-cycle broadcast in
@@ -793,6 +793,27 @@ Realistic close-out for the overnight cron loop:
       `wl/THVMLink/Tests/grad.wlt`: softmax + cross-entropy
       against one-hot target should yield `probs - target` for
       d(loss)/dz.  Unblocks the training-loop sub-item below.
+      <!-- Implemented in two pieces:
+      (1) NN.wl TSoftmax now wraps the RECIP factor in
+      TUOpExpand[..., tUopShape[x]] -- the explicit EXPAND
+      lets the EXPAND grad rule see and reduce the
+      cross-coupling cotangent.
+      (2) src/schedule/shape_env.c term_shape_in extended to
+      cover unary elementwise (NEG/RECIP/EXP2/LOG2/SQRT),
+      binary elementwise (ADD/MUL/CMPLT, broadcast = pick the
+      larger-numel side, mirroring the materializer), CONST
+      ({1}), REDUCE (drop axis), and RESHAPE/EXPAND (read
+      ndim+dims from heap).  Without this, the EXPAND grad
+      rule's term_shape_in lookup on RECIP(SUM(MUL(e_chain)))
+      failed once it hit a UOP not in the original 3-case
+      walker (only TEN/VAR/UOP_KERNEL), and the rule fell
+      back to passthrough -- which is exactly the same bug.
+      Parity test grad/softmax-cross-entropy-equals-probs-
+      minus-target now passes; verified d(CE(softmax({1,2,3}),
+      one_hot_at_1))/dz = {0.090, -0.755, 0.665} = probs -
+      target within 1e-4.  All 168 WL + 343 C tests green.
+      Unblocks the training loop. -->
+
 
 - [ ] **MLP-on-MNIST training loop**: with forward + grads
       validated, do K manual SGD steps in pure WL (compute

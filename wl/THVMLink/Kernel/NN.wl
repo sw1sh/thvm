@@ -89,11 +89,21 @@ tExp[x_TTerm] := TUOpExp2[TUOpMul[x, TUOpConst[N[Log2[E]], "f32"]]]
 
 (* softmax(x)_i = exp(x_i) / sum(exp(x)).  Sum reduces over axis 0
    (rank-1 inputs only for v1 -- the LeNet path produces a rank-1
-   class-score vector at the SoftmaxLayer position).  RECIP of the
-   scalar sum broadcasts back across the input shape via the
-   binary-elementwise UOP_MUL rule. *)
-TSoftmax[x_TTerm] := With[{e = tExp[x]},
-    TUOpMul[e, TUOpRecip[TUOpReduce[e, 0, "SUM"]]]
+   class-score vector at the SoftmaxLayer position).  The RECIP of
+   the scalar sum is EXPLICITLY broadcast to e's shape via
+   TUOpExpand rather than relying on the kernel-level numel-cycle
+   broadcast in MUL.  Without the explicit EXPAND the chain rule
+   for MUL has no notion of the implicit broadcast and propagates
+   the cotangent for the RECIP-branch as `e * lifted_gy` (shape
+   {N}) instead of `sum(e * lifted_gy)` (shape {1}), losing the
+   probs-i cross-coupling term that makes
+       d(CE)/dz = probs - target
+   come out correctly with one-hot targets. *)
+TSoftmax[x_TTerm] := With[{e = tExp[x], shape = tUopShape[x]},
+    TUOpMul[e,
+        TUOpExpand[
+            TUOpRecip[TUOpReduce[e, 0, "SUM"]],
+            shape]]
 ]
 
 (* log(x) = log2(x) * ln(2).  Runtime has UOP_LOG2 but no UOP_LOG. *)

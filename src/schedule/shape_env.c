@@ -51,8 +51,10 @@ fn void shape_env_reset(void) {
 }
 
 // Best-effort shape lookup for a Term given env.  Handles TEN
-// (lookup TENS), VAR (lookup env), and UOP_KERNEL (read its
-// output_tid).  Returns 1 on success.
+// (lookup TENS), VAR (lookup env), UOP_KERNEL (read its
+// output_tid), and a handful of structural UOPs that the chain
+// rule traverses (unary elementwise, REDUCE, RESHAPE, EXPAND).
+// Returns 1 on success.
 fn int term_shape_in(Term t, u32 env_id, Shape *out) {
     u8 tag = term_tag(t);
     if (tag == TAG_TEN) {
@@ -66,8 +68,13 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
     if (tag == TAG_VAR) {
         return shape_env_lookup(env_id, term_val(t), out);
     }
-    if (tag == TAG_UOP && term_ext(t) == UOP_KERNEL) {
-        Term outbuf = heap_read(term_val(t));
+    if (tag != TAG_UOP) return 0;
+
+    u8  op  = term_ext(t);
+    u64 loc = term_val(t);
+
+    if (op == UOP_KERNEL) {
+        Term outbuf = heap_read(loc);
         if (term_tag(outbuf) == TAG_TEN) {
             u32 tid = (u32)term_val(outbuf);
             if (tid != 0 && tid < TENS_NEXT) {
@@ -77,6 +84,70 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
         }
         return 0;
     }
+
+    // Unary elementwise: same shape as child[0].
+    if (op == UOP_NEG || op == UOP_RECIP || op == UOP_EXP2
+     || op == UOP_LOG2 || op == UOP_SQRT) {
+        return term_shape_in(heap_read(loc), env_id, out);
+    }
+
+    // Binary elementwise: broadcast to the larger-numel child's
+    // shape (mirrors op_output_shape's pick-the-bigger-side rule).
+    if (op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT) {
+        Shape la, lb;
+        int la_ok = term_shape_in(heap_read(loc + 0), env_id, &la);
+        int lb_ok = term_shape_in(heap_read(loc + 1), env_id, &lb);
+        if (!la_ok && !lb_ok) return 0;
+        if (!la_ok) { *out = lb; return 1; }
+        if (!lb_ok) { *out = la; return 1; }
+        u32 na = 1, nb = 1;
+        for (u32 i = 0; i < la.ndim; i++) na *= la.dims[i];
+        for (u32 i = 0; i < lb.ndim; i++) nb *= lb.dims[i];
+        *out = (na >= nb) ? la : lb;
+        return 1;
+    }
+
+    // CONST: shape {1} (scalar producer; broadcast at materialize).
+    if (op == UOP_CONST) {
+        out->ndim = 1;
+        out->dims[0] = 1;
+        for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0;
+        return 1;
+    }
+
+    // RESHAPE / EXPAND: heap layout [src, NUM(ndim), NUM(d0), ...].
+    if (op == UOP_RESHAPE || op == UOP_EXPAND) {
+        u32 ndim = (u32)term_val(heap_read(loc + 1));
+        out->ndim = ndim;
+        for (u32 i = 0; i < ndim && i < MAX_DIM; i++) {
+            out->dims[i] = (u32)term_val(heap_read(loc + 2 + i));
+        }
+        for (u32 i = ndim; i < MAX_DIM; i++) out->dims[i] = 0;
+        return 1;
+    }
+
+    // REDUCE: child[0] shape with the reduced axis dropped (or
+    // collapsed to {1} if rank <= 1, mirroring the materializer).
+    if (op == UOP_REDUCE) {
+        Shape cs;
+        if (!term_shape_in(heap_read(loc), env_id, &cs)) return 0;
+        u32 axis = (u32)term_val(heap_read(loc + 2));
+        if (cs.ndim <= 1) {
+            out->ndim = 1;
+            out->dims[0] = 1;
+            for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0;
+            return 1;
+        }
+        u32 dst = 0;
+        for (u32 i = 0; i < cs.ndim; i++) {
+            if (i == axis) continue;
+            out->dims[dst++] = cs.dims[i];
+        }
+        out->ndim = dst;
+        for (u32 i = dst; i < MAX_DIM; i++) out->dims[i] = 0;
+        return 1;
+    }
+
     return 0;
 }
 

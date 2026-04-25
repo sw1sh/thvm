@@ -268,6 +268,29 @@ VerificationTest[
     TestID -> "grad/matvec-style-backward"
 ]
 
+(* === Softmax + cross-entropy: d/dz = probs - target ===
+   Regression for the TSoftmax cross-coupling fix.  Pre-fix,
+   TSoftmax used implicit numel-cycle broadcast in
+   MUL[e, RECIP(SUM(e))] and the MUL chain rule missed the
+   implicit broadcast, dropping the +probs_i cross-coupling
+   term on every non-target index.  The explicit TUOpExpand in
+   TSoftmax + the EXPAND grad rule's REDUCE-along-broadcast-axes
+   together restore the textbook gradient. *)
+
+VerificationTest[
+    TInit[];
+    z      = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    target = TTensorCreate @ NumericArray[{0.0, 1.0, 0.0}, "Real32"];
+    loss   = TCrossEntropyLoss[TSoftmax[z], target];
+    g      = TRealize @ TGrad[loss, z];
+    Normal @ TTensorData[g],
+    (* probs ~ {0.0900306, 0.244728, 0.665241}; target = {0,1,0};
+       expected grad = probs - target. *)
+    {0.0900306, 0.244728 - 1.0, 0.665241},
+    SameTest -> (Max[Abs[#1 - #2]] < 1.0*^-4 &),
+    TestID -> "grad/softmax-cross-entropy-equals-probs-minus-target"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[
