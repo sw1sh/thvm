@@ -1909,14 +1909,31 @@ Realistic close-out for the overnight cron loop:
       lenet-mnist/forward.wls (no TGrad) still works. -->
 
 
-- [ ] **Drop UOP_CONV2D opcode + kernel + src/uop/conv2d.c (arc)**.
+- [x] **Drop UOP_CONV2D opcode + kernel + src/uop/conv2d.c (arc)**.
       The opcode + bespoke kernel are now unused by the public API
       (TUOpConv2D dispatches to TUOpConv2DLowered, the bespoke grad
       rule is gone).  Sweep them out across C runtime, WL bindings,
-      and tests.  Decomposed because the change touches ~25 files
-      and >200 LOC of deletions.
+      and tests.
+      <!-- Done in a single fire (a/b/c sub-items merged because
+      they're tightly coupled -- removing the C constructor
+      breaks the WL binding which breaks the WL tests; can't
+      compile-test in between).  Net deletion across the C
+      runtime (uop/conv2d.c, backend/cpu/op/conv2d.c, opcode +
+      uop_conv2d declaration in thvm.h, dispatch in interpret.c,
+      shape rule in shape_env.c, materialize special cases in
+      materialize.c + materialize_in_env.c, arity in book +
+      alo, conv2d-using cases in tests/test_uop.c +
+      tests/test_materialize.c, comment in interact/uop_grad.c)
+      and WL surface (thvm_wl_uop_conv2d wrapper in thvmlink.c,
+      $UopConv2D constant + ::usage + $uopConv2DFn loader +
+      $uopNames + uopCellCount entries in THVMLink.wl,
+      TUOpConv2DBespoke + ::usage in Tensor.wl, $UopConv2D case
+      in Shape.wl tUopShape) and tests (nn.wlt parity tests
+      against TUOpConv2DBespoke, $UopConv2D in uop_load.wlt's
+      distinctness check).  Public TUOpConv2D stays as an alias
+      for TUOpConv2DLowered.  146 C + 212 WL tests green. -->
 
-  - [ ] **a. Remove C-side UOP_CONV2D infrastructure**.
+  - [x] **a. Remove C-side UOP_CONV2D infrastructure**.
         Delete `src/uop/conv2d.c`, `src/backend/cpu/op/conv2d.c`;
         drop UOP_CONV2D opcode from `src/thvm.h` (decrement
         UOP_COUNT); remove the dispatch case in
@@ -1931,7 +1948,7 @@ Realistic close-out for the overnight cron loop:
         `tests/test_materialize.c`.  ~100-150 LOC of deletions.
         Verify: `make test` stays green.
 
-  - [ ] **b. Remove WL-side UOP_CONV2D bindings**.
+  - [x] **b. Remove WL-side UOP_CONV2D bindings**.
         Delete from `wl/THVMLink/CSource/thvmlink.c` the
         `thvm_wl_uop_conv2d` C function (LibraryFunction
         wrapper); delete `$uopConv2DFn` loader, `$UopConv2D`
@@ -1946,7 +1963,7 @@ Realistic close-out for the overnight cron loop:
         TUOpConv2D alias which goes through the lowered chain).
         ~50-80 LOC of deletions.
 
-  - [ ] **c. Sweep WL test references**.
+  - [x] **c. Sweep WL test references**.
         `wl/THVMLink/Tests/{nn,grad,shape,permute,pad,uop_load}.wlt`
         each have a few comment / test-name mentions of
         TUOpConv2D / UOP_CONV2D.  After (a)+(b), some will be

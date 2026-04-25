@@ -124,14 +124,6 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                         Table[$termValFn[$heapReadFn[val + 2 + i]],
                               {i, 0, ndim - 1}]
                     ],
-                $UopConv2D,
-                    Module[{
-                        in = tUopShape[TTerm[$heapReadFn[val + 0]]],
-                        wt = tUopShape[TTerm[$heapReadFn[val + 1]]]
-                    },
-                        (* in {C_in, H, W}; wt {C_out, C_in, kh, kw}. *)
-                        {wt[[1]], in[[2]] - wt[[3]] + 1, in[[3]] - wt[[4]] + 1}
-                    ],
                 (* SHRINK / PAD heap: [src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...].
                    ndim implicit in the source's rank.  SHRINK shrinks
                    each axis to e_i - b_i; PAD grows by b_i + e_i. *)

@@ -19,7 +19,7 @@ VerificationTest[
                   $UopAdd,        $UopMul,     $UopNeg,
                   $UopRecip,      $UopExp2,    $UopLog2,
                   $UopSqrt,       $UopCmplt,   $UopReduce,
-                  $UopGrad,       $UopConv2D,  $UopCmpeq}
+                  $UopGrad,       $UopCmpeq}
     },
         FreeQ[others, $UopLoad]
     ],

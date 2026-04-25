@@ -181,21 +181,6 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
         return 1;
     }
 
-    // CONV2D: input{C_in, H, W} + weights{C_out, C_in, kh, kw} ->
-    // {C_out, H - kh + 1, W - kw + 1} (stride 1, no pad).
-    if (op == UOP_CONV2D) {
-        Shape inS, wtS;
-        if (!term_shape_in(heap_read(loc + 0), env_id, &inS)) return 0;
-        if (!term_shape_in(heap_read(loc + 1), env_id, &wtS)) return 0;
-        if (inS.ndim != 3 || wtS.ndim != 4) return 0;
-        out->ndim = 3;
-        out->dims[0] = wtS.dims[0];
-        out->dims[1] = inS.dims[1] - wtS.dims[2] + 1;
-        out->dims[2] = inS.dims[2] - wtS.dims[3] + 1;
-        for (u32 i = 3; i < MAX_DIM; i++) out->dims[i] = 0;
-        return 1;
-    }
-
     // REDUCE: child[0] shape with the reduced axis dropped (or
     // collapsed to {1} if rank <= 1, mirroring the materializer).
     if (op == UOP_REDUCE) {

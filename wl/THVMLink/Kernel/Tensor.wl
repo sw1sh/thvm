@@ -131,21 +131,9 @@ TUOpGrad[y_, gy_, target_] := (
     TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]]
 )
 
-(* TUOpConv2DBespoke[input, weights, bias] -- legacy back-door to
-   the bespoke UOP_CONV2D opcode.  Kept reachable so the parity
-   tests in nn.wlt can still cross-check the lowered chain against
-   the kernelised reference; will be removed when UOP_CONV2D is
-   dropped (next two arc items).  Stride 1, no padding; kernel
-   size recovered from weights.shape ({C_out, C_in, kh, kw}) at
-   materialize time. *)
-TUOpConv2DBespoke[input_, weights_, bias_] := (
-    ensureInit[];
-    TTerm[$uopConv2DFn[ttermRaw[input], ttermRaw[weights], ttermRaw[bias]]]
-)
-
-(* TUOpConv2DLowered[input, weights, bias] -- same forward semantics
-   as TUOpConv2D but built from primitive UOPs only (no UOP_CONV2D
-   opcode).  Sub-item (a) of the conv2d-lowering arc.
+(* TUOpConv2DLowered[input, weights, bias] -- builds 2-D
+   convolution forward from primitive UOPs only.  Public
+   entry point TUOpConv2D below dispatches to this.
 
    Per-kernel-position partial-sum strategy:
        For each (ki, kj) in [0, kh) x [0, kw):

@@ -68,7 +68,7 @@ $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =
   $UopAdd::usage        = $UopMul::usage = $UopNeg::usage =
   $UopRecip::usage      = $UopExp2::usage = $UopLog2::usage =
   $UopSqrt::usage       = $UopCmplt::usage = $UopReduce::usage =
-  $UopGrad::usage       = $UopConv2D::usage = $UopCmpeq::usage =
+  $UopGrad::usage       = $UopCmpeq::usage =
   $UopLoad::usage       =
     "UOp opcode id; mirrors UOP_* in src/thvm.h.";
 
@@ -109,8 +109,6 @@ TUOpGrad::usage      = "TUOpGrad[y, gy, target] builds a UOP_GRAD node.  Reducin
 TUOpConv2D::usage    = "TUOpConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  Dispatches to TUOpConv2DLowered so autograd flows through primitives via the chain rule.";
 
 TUOpConv2DLowered::usage = "TUOpConv2DLowered[input, weights, bias] builds the same valid 2-D convolution as TUOpConv2D but as a kh*kw-unrolled chain of primitive UOPs (SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD).  No new opcodes; pure WL composition.";
-
-TUOpConv2DBespoke::usage = "TUOpConv2DBespoke[input, weights, bias] is the legacy back-door to the bespoke UOP_CONV2D opcode + grad rule.  Reachable only from parity tests until UOP_CONV2D is dropped entirely (next two arc items).";
 TGrad::usage         = "TGrad[y, target] = TUOpGrad[y, TUOpConst[1], target].  Top-level VJP -- d(y)/d(target) with cotangent seed 1.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
 TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term, in heap order.";
@@ -161,8 +159,9 @@ $UopPad = 6;          $UopShrink = 7;  $UopFlip = 8;
 $UopAdd = 9;          $UopMul = 10;    $UopNeg = 11;
 $UopRecip = 12;       $UopExp2 = 13;   $UopLog2 = 14;
 $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
-$UopGrad = 18;        $UopConv2D = 19; $UopCmpeq = 20;
+$UopGrad = 18;        $UopCmpeq = 20;
 $UopLoad = 21;
+(* slot 19 was $UopConv2D -- removed; lowering is in WL via TUOpConv2DLowered *)
 
 $uopNames = <|
     0  -> "MATERIALIZE", 1  -> "KERNEL", 2  -> "CONST",
@@ -171,8 +170,7 @@ $uopNames = <|
     9  -> "ADD",         10 -> "MUL",    11 -> "NEG",
     12 -> "RECIP",       13 -> "EXP2",   14 -> "LOG2",
     15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE",
-    18 -> "GRAD",        19 -> "CONV2D", 20 -> "CMPEQ",
-    21 -> "LOAD"
+    18 -> "GRAD",        20 -> "CMPEQ", 21 -> "LOAD"
 |>;
 
 (* Reduce-kind constants *)
@@ -233,7 +231,6 @@ $uopPadFn      := $uopPadFn      = load["thvm_wl_uop_pad",      {Integer, {Integ
 $uopShrinkFn   := $uopShrinkFn   = load["thvm_wl_uop_shrink",   {Integer, {Integer, 1}},             Integer];
 $uopFlipFn     := $uopFlipFn     = load["thvm_wl_uop_flip",     {Integer, Integer},                  Integer];
 $uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Integer, Integer},      Integer];
-$uopConv2DFn   := $uopConv2DFn   = load["thvm_wl_uop_conv2d",      {Integer, Integer, Integer},      Integer];
 
 (* direct materialize (no wnf) + kernel-entry introspection *)
 $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},                        Integer];
@@ -389,7 +386,6 @@ uopCellCount[op_] := Switch[op,
     $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt,           1,
     $UopReduce,                                                     3,
     $UopGrad,                                                       3,
-    $UopConv2D,                                                     3,
     $UopKernel,                                                     2,
     (* RESHAPE: report 1 (the src) so TTermExpr renders UOP[RESHAPE,
        <src-subtree>].  The trailing NUM(d_i) cells are integer

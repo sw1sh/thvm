@@ -96,15 +96,6 @@ fn Term interact_grad(Term grad_term) {
     case UOP_CONST:
       return grad_zero(target);
 
-    // UOP_CONV2D: no longer a public path -- the public TUOpConv2D
-    // dispatches to TUOpConv2DLowered (kh*kw partial-sum chain of
-    // SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD), so the
-    // chain rule handles backward through the primitives.  The
-    // bespoke UOP_CONV2D opcode is still reachable from the legacy
-    // TUOpConv2DBespoke back-door but TGrad through it now falls
-    // into the unhandled-default branch (returns grad_zero).  Both
-    // the opcode and the back-door are removed in the next arc item.
-
     case UOP_ADD: {
       // grad(a+b)/dt = grad(a) + grad(b).  Emit per-child GRADs;
       // they fire on demand.

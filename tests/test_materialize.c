@@ -87,35 +87,6 @@ int main(void) {
   CHECK_EQ(cke->program[0].opcode, UOP_CONST);
   CHECK_EQ(cke->program[0].arg,    bits);
 
-  TEST_BEGIN("materialize/conv2d-output-shape");
-  // input  {1, 5, 5}; weights {2, 1, 3, 3}; bias {2}.  Valid conv,
-  // stride 1 -> output {2, 3, 3}.
-  u32 dim_in[3]  = {1, 5, 5};
-  u32 dim_wt[4]  = {2, 1, 3, 3};
-  u32 dim_bs[1]  = {2};
-  u32 t_in = alloc_f32_tensor(dim_in, 3);
-  u32 t_wt = alloc_f32_tensor(dim_wt, 4);
-  u32 t_bs = alloc_f32_tensor(dim_bs, 1);
-  Term cv = uop_conv2d(
-      term_new(0, TAG_TEN, DT_F32, t_in),
-      term_new(0, TAG_TEN, DT_F32, t_wt),
-      term_new(0, TAG_TEN, DT_F32, t_bs));
-  Term cvk = thvm_materialize(cv);
-  CHECK_EQ(term_tag(cvk), TAG_UOP);
-  CHECK_EQ(term_ext(cvk), UOP_KERNEL);
-  u32 cv_kid = (u32)term_val(heap_read(term_val(cvk) + 1));
-  KernelEntry *cve = &KERNELS[cv_kid];
-  CHECK_EQ(cve->n_inputs, 3);
-  CHECK_EQ(cve->program[0].opcode, UOP_CONV2D);
-  CHECK_EQ(cve->output_shape.ndim,    3);
-  CHECK_EQ(cve->output_shape.dims[0], 2);
-  CHECK_EQ(cve->output_shape.dims[1], 3);
-  CHECK_EQ(cve->output_shape.dims[2], 3);
-  // arg packing: kh=3, kw=3, w_out=3.
-  CHECK_EQ((cve->program[0].arg >> 24) & 0xFF, 3);
-  CHECK_EQ((cve->program[0].arg >> 16) & 0xFF, 3);
-  CHECK_EQ( cve->program[0].arg        & 0xFFFF, 3);
-
   TEST_BEGIN("materialize/tag_ten-passes-through");
   CHECK_EQ(thvm_materialize(a), a);
 

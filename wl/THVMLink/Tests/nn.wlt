@@ -488,49 +488,6 @@ VerificationTest[
     TestID -> "nn/conv2d-lowered-1ch-2outch-2x2-parity"
 ]
 
-(* Element-wise byte parity vs. the bespoke kernel for a tiny case
-   (C_in=1, C_out=1, H=W=4, kh=kw=2): the lowered chain should
-   produce numerically identical output. *)
-VerificationTest[
-    TInit[];
-    input = TTensorCreate @ NumericArray[
-        {{{1.0, 2.0, 3.0, 4.0},
-          {5.0, 6.0, 7.0, 8.0},
-          {9.0, 10., 11., 12.},
-          {13., 14., 15., 16.}}}, "Real32"];
-    weights = TTensorCreate @ NumericArray[
-        {{{{0.5, 1.5}, {2.5, 3.5}}}}, "Real32"];
-    bias = TTensorCreate @ NumericArray[{0.25}, "Real32"];
-    Normal @ TTensorData @ TRealize @ TUOpConv2DLowered[input, weights, bias],
-    Normal @ TTensorData @ TRealize @ TUOpConv2DBespoke[input, weights, bias],
-    TestID -> "nn/conv2d-lowered-tiny-case-parity"
-]
-
-(* === LeNet-realistic-shape forward + grad parity ===
-   Sub-item (b) of the conv2d-lowering arc.  C_in=3, C_out=2,
-   H=W=8, kh=kw=3 -- between LeNet-5's 1->20 / 5x5 first conv
-   and 20->50 / 5x5 inner conv.  Asserts forward AND grad-wrt-input
-   AND grad-wrt-weights match the bespoke under a tight tolerance. *)
-
-VerificationTest[
-    TInit[];
-    Module[{seed, input, weights, bias, fwdB, fwdL},
-        seed[k_, dims_] := NumericArray[
-            ArrayReshape[
-                Table[Sin[3.14 * i / k] * 0.5, {i, Times @@ dims}],
-                dims],
-            "Real32"];
-        input   = TTensorCreate @ seed[7,  {3, 8, 8}];
-        weights = TTensorCreate @ seed[11, {2, 3, 3, 3}];
-        bias    = TTensorCreate @ seed[3,  {2}];
-        fwdB = Normal @ TTensorData @ TRealize @ TUOpConv2DBespoke[input, weights, bias];
-        fwdL = Normal @ TTensorData @ TRealize @ TUOpConv2DLowered[input, weights, bias];
-        Max @ Abs @ Flatten[fwdB - fwdL] < 0.001
-    ],
-    True,
-    TestID -> "nn/conv2d-lowered-lenet-shape-forward-parity"
-]
-
 (* fromLayer dispatch path -- TFromNet[ConvolutionLayer[...], x] uses
    the same TUOpConv2D with weights/bias pulled from the layer. *)
 VerificationTest[

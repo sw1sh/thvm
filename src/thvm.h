@@ -120,9 +120,10 @@ typedef u64 Term;
 #define UOP_CMPLT       16   // heap = [a, b]
 #define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(axis)]
 #define UOP_GRAD        18   // heap = [y, gy_seed, target]; rewrite rule
-#define UOP_CONV2D      19   // heap = [input, weights, bias]; kernel size
-                             //   recovered from weights.shape at materialize
-                             //   time (weights = {C_out, C_in, kh, kw})
+                             // (slot 19 was UOP_CONV2D -- removed; lowering
+                             // happens entirely in WL via TUOpConv2DLowered.
+                             // Slot left unused so existing opcode integers
+                             // for CMPEQ/LOAD don't shift.)
 #define UOP_CMPEQ       20   // heap = [a, b]; mask of (a == b), 0/1 floats
 #define UOP_LOAD        21   // heap = [src]; explicit "read this tensor" boundary
                              //   marker (mirrors tinygrad's UOps.LOAD).  Slot
@@ -417,14 +418,6 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
 // the chain-rule rewrite rule defined in interact/uop_grad.c.
 fn Term uop_grad(Term y, Term gy, Term target);
-
-// Build a UOP_CONV2D node for 2-D convolution forward.
-//   input   : {C_in, H, W} (channels-first)
-//   weights : {C_out, C_in, kh, kw}
-//   bias    : {C_out}
-// Stride 1, no padding, no dilation in v1 (mirrors NetModel["LeNet"]).
-// Kernel size is recovered from weights.shape at materialize time.
-fn Term uop_conv2d(Term input, Term weights, Term bias);
 
 // === schedule/ ===
 // Top-level materialize driver: heap-walk pass that in-place rewrites

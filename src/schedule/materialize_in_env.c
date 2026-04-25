@@ -203,31 +203,6 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
                 out_shape.dims[i] = child_shapes[0].dims[p];
             }
         }
-        if (op == UOP_CONV2D) {
-            // input  child_shapes[0] = {C_in, H, W}
-            // weight child_shapes[1] = {C_out, C_in, kh, kw}
-            // bias   child_shapes[2] = {C_out}     (unused for shape calc)
-            // Output {C_out, H - kh + 1, W - kw + 1} (valid conv, stride 1).
-            u32 c_out = child_shapes[1].dims[0];
-            u32 kh    = child_shapes[1].dims[2];
-            u32 kw    = child_shapes[1].dims[3];
-            u32 h     = child_shapes[0].dims[1];
-            u32 w     = child_shapes[0].dims[2];
-            u32 w_out = w - kw + 1;
-            out_shape.ndim    = 3;
-            out_shape.dims[0] = c_out;
-            out_shape.dims[1] = h - kh + 1;
-            out_shape.dims[2] = w_out;
-            for (u32 i = 3; i < MAX_DIM; i++) out_shape.dims[i] = 0;
-            // Pack info the cpu kernel needs to index into the input
-            // and weight buffers (which it sees as flat memory):
-            //     bits 24..31 : kh   (<= 255)
-            //     bits 16..23 : kw   (<= 255)
-            //     bits  0..15 : W_out (<= 65535)
-            // C_out = bias_numel; C_in = weights_numel / (C_out*kh*kw);
-            // H_out = (out_numel/C_out) / W_out.
-            op_arg = ((kh & 0xFF) << 24) | ((kw & 0xFF) << 16) | (w_out & 0xFFFF);
-        }
         if (op == UOP_RESHAPE) {
             // Layout: heap[expr_loc] = src; heap[expr_loc + 1] =
             // NUM(ndim); heap[expr_loc + 2 + i] = NUM(d_i).  ndim is

@@ -73,7 +73,6 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       case UOP_REDUCE:cpu_op_reduce(dst, srcs, src_numels, p, n_elem); break;
       case UOP_EXPAND:cpu_op_expand(dst, srcs, src_numels, p, n_elem); break;
       case UOP_RESHAPE:cpu_op_reshape(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_CONV2D:cpu_op_conv2d(dst, srcs, src_numels, p, n_elem); break;
       case UOP_FLIP:  cpu_op_flip  (dst, srcs, src_numels, p, n_elem); break;
       case UOP_PAD:   cpu_op_pad   (dst, srcs, src_numels, p, n_elem); break;
       case UOP_SHRINK:cpu_op_shrink(dst, srcs, src_numels, p, n_elem); break;
