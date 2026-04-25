@@ -129,12 +129,16 @@ If[ ! FileExistsQ[$lib],
 $TagAPP = 0; $TagLAM = 1; $TagVAR = 2; $TagERA = 3;
 $TagDP0 = 4; $TagDP1 = 5; $TagSUP = 6; $TagDUP = 7;
 $TagTEN = 8; $TagUOP = 9; $TagNUM = 10;
+$TagREF = 11; $TagALO = 12; $TagOP2 = 13; $TagMAT = 14;
 
 $tagNames = <|
-    0 -> "APP", 1 -> "LAM", 2 -> "VAR",  3 -> "ERA",
-    4 -> "DP0", 5 -> "DP1", 6 -> "SUP",  7 -> "DUP",
-    8 -> "TEN", 9 -> "UOP", 10 -> "NUM"
+    0  -> "APP", 1  -> "LAM", 2  -> "VAR",  3  -> "ERA",
+    4  -> "DP0", 5  -> "DP1", 6  -> "SUP",  7  -> "DUP",
+    8  -> "TEN", 9  -> "UOP", 10 -> "NUM",
+    11 -> "REF", 12 -> "ALO", 13 -> "OP2",  14 -> "MAT"
 |>;
+
+$op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<" |>;
 
 (* Dtype constants - keep in sync with src/thvm.h *)
 $DTF32 = 0; $DTI32 = 1;
@@ -366,8 +370,21 @@ TItrs[]          := (ensureInit[]; $itrsFn[])
 TTermExpr[t_] := tTreeWalk[t, <||>]
 TTermTree[t_] := ExpressionTree[TTermExpr[t]]
 
+(* How many heap cells does a UOP store?  Mirrors the data-arity
+   used in src/book/from_dynamic.c (NOT uop_arity, which counts
+   compute operands -- e.g. CONST has arity 0 but stores 1 cell). *)
+uopCellCount[op_] := Switch[op,
+    $UopConst,                                                      1,
+    $UopAdd | $UopMul | $UopCmplt,                                  2,
+    $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt,           1,
+    $UopReduce,                                                     3,
+    $UopGrad,                                                       3,
+    $UopKernel,                                                     2,
+    _,                                                              0
+]
+
 tTreeWalk[t_, seen_] := Block[{
-    raw = ttermRaw[t], tag, val, ext, seen2
+    raw = ttermRaw[t], tag, val, ext, seen2, n
 },
     tag = $termTagFn[raw];
     val = $termValFn[raw];
@@ -375,6 +392,9 @@ tTreeWalk[t_, seen_] := Block[{
     Switch[tag,
         $TagERA, "ERA",
         $TagVAR, "VAR"[val],
+        $TagNUM, "NUM"[ext, val],
+        $TagTEN, "TEN"[val],
+        $TagREF, "REF"[ext],
         (* DP0 / DP1 recurse into the dup body so each projection's
            subtree is visible.  Trees can't share, so the same body
            appears once under each projection. *)
@@ -399,6 +419,33 @@ tTreeWalk[t_, seen_] := Block[{
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
                 "DUP"[ext, tTreeWalk[$heapReadFn[val], seen2]]],
+        $TagALO,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                (* heap[val]   = wrapped term
+                   heap[val+1] = state id (atomic, just record it) *)
+                "ALO"[$termValFn[$heapReadFn[val + 1]],
+                      tTreeWalk[$heapReadFn[val], seen2]]],
+        $TagOP2,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                "OP2"[Lookup[$op2Names, ext, "?" <> ToString[ext]],
+                      tTreeWalk[$heapReadFn[val + 0], seen2],
+                      tTreeWalk[$heapReadFn[val + 1], seen2]]],
+        $TagMAT,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                "MAT"[ext,
+                      tTreeWalk[$heapReadFn[val + 0], seen2],
+                      tTreeWalk[$heapReadFn[val + 1], seen2]]],
+        $TagUOP,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                n = uopCellCount[ext];
+                "UOP" @@ Prepend[
+                    Table[tTreeWalk[$heapReadFn[val + i], seen2], {i, 0, n - 1}],
+                    Lookup[$uopNames, ext, "UOP?" <> ToString[ext]]
+                ]],
         _, "Unknown"[tag]
     ]
 ]
