@@ -2852,11 +2852,24 @@ Realistic close-out for the overnight cron loop:
           + the unblocking next step. -->
 
 
-  - [ ] **Movement-op view-only for SHRINK / PERMUTE /
+  - [x] **Movement-op view-only for SHRINK / PERMUTE /
         PAD / FLIP (arc)** (mirroring f3b/f3c).  Per-conv
         kernel-count drops a further 50-70.  Each
         movement op is its own ~50-LOC sub-item.
         Decomposed into 4 sub-items below.
+        <!-- All 4 sub-items landed: f3d (SHRINK) +
+        f3e (PERMUTE) + f3f (PAD opt-out, intentional) +
+        f3g (FLIP).  Each lands a view-only alias path in
+        materialize_uop_in_env that bypasses kernel emission
+        when the source is contiguous, plus a dedicated C
+        test (test_view_shrink: 24, test_view_permute: 32,
+        test_view_pad: 15 documenting opt-out, test_view_flip:
+        35).  LeNet's per-step kernel count and TenDesc
+        count are unchanged because forward+TGrad don't
+        invoke these movement ops on contig sources where
+        the precondition triggers; the gain shows up for
+        users that compose movement ops directly. -->
+
 
     - [x] **f3d: SHRINK view-only**.  In
           src/schedule/materialize_in_env.c, add a
@@ -3005,8 +3018,23 @@ Realistic close-out for the overnight cron loop:
           landed).  Parent will be marked [x] next fire. -->
 
 
-  - [ ] **Adam-state arena**.  Keep TAdamHostStep's m/v
+  - [x] **Adam-state arena**.  Keep TAdamHostStep's m/v
         arrays alive across steps in a session-scoped
         store.  ~40 LOC; small bytes-per-step gain but
         reduces host-side pressure.
+        <!-- Landed.  wl/THVMLink/Kernel/Optim.wl gained
+        TAdamSessionInit / TAdamSessionStep /
+        TAdamSessionDrop, backed by a private
+        $adamSessions Association keyed by the caller's
+        choice of key (Symbol or string).  TAdamSessionStep
+        replaces the caller-threaded m/v plumbing of
+        TAdamHostStep, returning just the new weights and
+        updating m/v in place in the session store.
+        wl/THVMLink/Tests/adam_session.wlt (5 cases):
+        single-step parity with TAdamHostStep,
+        two-step loss-decrease parity with the host loop,
+        independent keys do not interfere, drop-then-step
+        returns $Failed, multi-tensor parity.
+        252 C + 251 WL tests green. -->
+
 

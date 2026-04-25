@@ -24,6 +24,12 @@ TAdamHostInit::usage = "TAdamHostInit[weightsHosts] returns {mHosts, vHosts} -- 
 
 TAdamHostStep::usage = "TAdamHostStep[weightsHosts, gradsHosts, mHosts, vHosts, lr, beta1, beta2, eps, t] applies one Adam update step to a LIST of weight NumericArrays in pure WL host code.  No TTerm involvement -- intended for multi-tensor networks where TOptim[\"Adam\"]'s single-weight recursion isn't enough.  Returns {newWeights, newM, newV} as lists of NumericArrays.";
 
+TAdamSessionInit::usage = "TAdamSessionInit[key, weightsHosts] seeds a session-scoped m/v store for the given key with zero-like NumericArrays matching weightsHosts.  Use TAdamSessionStep to apply per-step Adam updates without re-threading m/v through the caller.  Replaces any prior session under the same key.";
+
+TAdamSessionStep::usage = "TAdamSessionStep[key, weightsHosts, gradsHosts, lr, beta1, beta2, eps, t] applies one Adam update using the session-stored m/v for the given key (initialized via TAdamSessionInit).  Returns just the new weights as a list of NumericArrays; the m/v running buffers are updated in-place in the session store, eliminating the per-step alloc churn of caller-threaded TAdamHostStep.";
+
+TAdamSessionDrop::usage = "TAdamSessionDrop[key] frees the session m/v entries for the given key.  TAdamSessionDrop[] (no args) clears every session.";
+
 (* Forward-declare symbols owned by later-loading siblings (Ref.wl,
    Switch.wl).  Without this, bare references to TDef / TIfZero /
    TRef / TOp2 / TNum below would resolve to phantom symbols in
@@ -178,6 +184,48 @@ TAdamHostStep[
             "Real32"], {i, n}];
     {wNew, mNew, vNew}
 ]
+
+(* === Session-scoped Adam state arena ===
+
+   $adamSessions :: Association[ key -> <| "m" -> {NumericArrays...},
+                                            "v" -> {NumericArrays...} |> ]
+
+   Eliminates the per-step alloc churn of caller-threaded TAdamHostStep
+   by keeping the m/v running buffers in a private store.  The caller
+   passes a key (any expression usable as an Association key -- a
+   Symbol or string is typical) and the session manages the moments
+   for that key across step calls.  The new-weights list is the only
+   value returned per step. *)
+
+$adamSessions = <||>;
+
+TAdamSessionInit[key_, weightsHosts_List] := Module[{m, v},
+    {m, v} = TAdamHostInit[weightsHosts];
+    $adamSessions[key] = <| "m" -> m, "v" -> v |>;
+    key
+]
+
+TAdamSessionStep[
+    key_, weightsHosts_List, gradsHosts_List,
+    lr_, beta1_, beta2_, eps_, t_Integer
+] := Module[{state, mHosts, vHosts, wNew, mNew, vNew},
+    state = $adamSessions[key];
+    If[ MissingQ[state],
+        Message[TAdamSessionStep::nostate, key];
+        Return[$Failed]
+    ];
+    mHosts = state["m"];
+    vHosts = state["v"];
+    {wNew, mNew, vNew} = TAdamHostStep[weightsHosts, gradsHosts,
+        mHosts, vHosts, lr, beta1, beta2, eps, t];
+    $adamSessions[key] = <| "m" -> mNew, "v" -> vNew |>;
+    wNew
+]
+
+TAdamSessionStep::nostate = "No Adam session initialized for key `1`; call TAdamSessionInit first.";
+
+TAdamSessionDrop[key_] := ($adamSessions = KeyDrop[$adamSessions, key]; Null)
+TAdamSessionDrop[]     := ($adamSessions = <||>; Null)
 
 End[];
 EndPackage[];
