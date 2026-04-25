@@ -203,7 +203,12 @@ TGrad[y_, target_] := TUOpGrad[y, TUOpConst[1.0, "f32"], target]
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)
    then TWnf to beta-reduce and fire the kernels.  No UOP_MATERIALIZE
    wrapper -- thvm_materialize is invoked directly. *)
-TRealize[expr_] := TWnf[TMaterialize[expr]]
+(* TRealize: one-shot materialize + wnf wrapped in a per-step
+   buffer-pool boundary (sub-item b of the per-step buffer pool
+   arc).  Equivalent to TWnf[TMaterialize[expr]] except every CPU
+   buffer alloc'd during materialize+wnf that ISN'T reachable from
+   the result tensor's producer chain gets freed at exit. *)
+TRealize[expr_] := (ensureInit[]; TTerm[$realizeFn[ttermRaw[expr]]])
 
 (* TMaterialize = direct schedule + kernelize + linearize rewrite,
    no firing.  Useful for inspection (visualize the scheduled DAG

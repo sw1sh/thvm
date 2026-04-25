@@ -29,3 +29,32 @@ fn void cpu_buf_pool_rollback(u32 wm) {
   }
   CPU_BUFS_NEXT = wm;
 }
+
+// Variant that respects the per-CpuBuf `preserved` flag: bufs
+// marked preserved (typically by walking the result-tensor's
+// producer chain before rollback) are left alone; everything
+// else in [wm, CPU_BUFS_NEXT) is freed.  CPU_BUFS_NEXT does NOT
+// reset to wm because preserved bufs may sit at high indices;
+// the table accumulates sparse "long-term" slots over many
+// TRealize calls (CPU_BUFS_CAP = 1<<20 has plenty of headroom).
+fn void cpu_buf_pool_rollback_with_preserve(u32 wm) {
+  if (wm < 1) wm = 1;
+  if (wm > CPU_BUFS_NEXT) return;
+  for (u64 i = wm; i < CPU_BUFS_NEXT; i++) {
+    if (CPU_BUFS[i].preserved) continue;
+    if (CPU_BUFS[i].data || CPU_BUFS[i].handle) {
+      cpu_buf_free((u32)i);
+    }
+  }
+  // No CPU_BUFS_NEXT reset; preserved bufs would block it anyway.
+}
+
+fn void cpu_buf_mark_preserved(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
+  CPU_BUFS[buf_id].preserved = 1;
+}
+
+fn void cpu_buf_clear_preserved(u32 wm) {
+  if (wm < 1) wm = 1;
+  for (u64 i = wm; i < CPU_BUFS_NEXT; i++) CPU_BUFS[i].preserved = 0;
+}

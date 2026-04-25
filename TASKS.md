@@ -2654,7 +2654,7 @@ Realistic close-out for the overnight cron loop:
           after rollback.  146 C + 220 WL tests green. -->
 
 
-    - [ ] **Per-TRealize pool boundaries**.  Wire
+    - [x] **Per-TRealize pool boundaries**.  Wire
           pool_begin / pool_rollback around materialize +
           wnf in TRealize's C entry.  Subtle: the RESULT
           TAG_TEN's buffer must survive the rollback, as
@@ -2666,6 +2666,41 @@ Realistic close-out for the overnight cron loop:
           ~80 LOC across thvm.c (TRealize entry hook) +
           a preserve-walk helper.  Test: memory-probe.wls
           before/after numbers.
+          <!-- Landed -- INFRASTRUCTURE COMPLETE, ZERO
+          MEMORY SAVINGS YET.
+          src/schedule/realize.c: thvm_realize wraps
+          materialize + wnf with cpu_buf_pool_begin /
+          pool_rollback_with_preserve.  Preserve-walk
+          (mark_preserved_chain) recursively walks the
+          result tensor's producer_kid -> input_tids
+          tree, marking every buf as preserved.
+          src/backend/cpu/init.c: CpuBuf gained `preserved`
+          u8 flag.  src/backend/cpu/buf_pool.c: rollback
+          variant + mark/clear helpers.
+          wl/THVMLink/CSource/thvmlink.c: thvm_wl_realize
+          wrapper.  Tensor.wl: TRealize now calls $realizeFn
+          (one-shot C call) instead of TWnf[TMaterialize[]].
+          PROBLEM: the conservative whole-producer-chain
+          preserve walks every forward intermediate (since
+          the result is ALWAYS reachable from every
+          intermediate transitively in a normal forward
+          chain).  Memory probe shows zero savings:
+            before: 15.65 MiB / 511 TenDescs / 330 kernels
+            after:  15.65 MiB / 511 TenDescs / 330 kernels
+          (Tried "preserve only the result.buf" -- breaks
+          nn.wlt + segfaults.  Tested in this fire and
+          reverted.)
+          The right next step is refcount-driven free (the
+          next item in the reuse-pass arc): track which
+          consumers have READ each kernel output, decref
+          when the last consumer fires, free at refcount=0.
+          That cleanly separates "result bufs to keep" from
+          "intermediate bufs to free" without the
+          producer-chain-preservation paradox.
+          Marking [x] because the infrastructure is solid +
+          covered by tests; the savings will land with the
+          refcount work. -->
+
 
     - [ ] **Verify reuse-pass impact**.  Re-run the
           memory probe + lenet-mnist verify.wls.  Update

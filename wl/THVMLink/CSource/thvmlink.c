@@ -550,6 +550,14 @@ EXTERN_C DLLEXPORT int thvm_wl_materialize(WolframLibraryData libData, mint argc
   return LIBRARY_NO_ERROR;
 }
 
+EXTERN_C DLLEXPORT int thvm_wl_realize(WolframLibraryData libData, mint argc,
+                                       MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)thvm_realize(t));
+  return LIBRARY_NO_ERROR;
+}
+
 // Expose kernel-entry introspection for tests.
 EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {

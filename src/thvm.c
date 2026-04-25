@@ -173,6 +173,11 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "wnf/_.c"
 #include "wnf/redex.c"
 
+// thvm_realize: materialize + wnf + per-step buffer pool boundary
+// (sub-item b of the per-step buffer pool arc).  Lives here
+// because it depends on wnf + thvm_materialize + cpu pool helpers.
+#include "schedule/realize.c"
+
 // === runtime lifecycle ===
 void thvm_init(void) {
   HEAP       = (Term *)calloc(HEAP_CAP,     sizeof(Term));

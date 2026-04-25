@@ -18,6 +18,10 @@ typedef struct {
   u64   nbytes;
   u32   refcount;
   u8    owns_data;                  // 1 = free(data) on release; 0 = call on_release
+  u8    preserved;                  // 1 = pool_rollback_with_preserve skips
+                                    // (set by mark_preserved_buf during the
+                                    // result-chain walk; cleared by
+                                    // pool_clear_preserved after rollback)
   void *handle;                     // opaque, passed to on_release
   void (*on_release)(void *handle); // cleanup for !owns_data buffers
 } CpuBuf;
