@@ -112,6 +112,17 @@ int main(void) {
   CHECK_EQ(term_ext(g_c), UOP_EXPAND);
   CHECK_EQ(term_ext(unexpand(g_c)), UOP_CONST);
 
+  TEST_BEGIN("grad/reshape-passthrough-cascades-to-leaf");
+  // RESHAPE is identity-on-data so the rule is a pure passthrough:
+  // GRAD[RESHAPE(a, ...), gy, a] -> GRAD[a, gy, a].  That nested GRAD
+  // immediately cascades through the leaf rule (a === target) on the
+  // same wnf pass, so the user-visible form is the leaf-EXPAND.
+  u32 new_shape[2] = {3, 1};
+  Term r     = uop_reshape(a, 2, new_shape);
+  Term g_r   = wnf(uop_grad(r, gy, a));
+  CHECK_EQ(term_ext(g_r), UOP_EXPAND);
+  CHECK_EQ(unexpand(g_r), gy);
+
   TEST_BEGIN("grad/upfront-expand-carries-target-shape");
   // The leaf-target rule lifts gy to target.shape (via EXPAND with
   // dims read from TENS).

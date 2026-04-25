@@ -132,6 +132,18 @@ fn Term interact_grad(Term grad_term) {
       return uop_grad(a, lifted, target);
     }
 
+    case UOP_RESHAPE: {
+      // Reshape is identity-on-data (memcpy in the CPU/Metal kernel)
+      // and view-only at the descriptor level, so the gradient is
+      // structurally a passthrough: cotangent flows into the source
+      // unchanged.  Numel is preserved by definition, so any later
+      // expand_to_target on this gy hits the in_numel == out_numel
+      // memcpy branch of cpu_op_expand -- shape is reconciled at the
+      // leaf without an explicit cotangent reshape here.
+      Term a = heap_read(y_loc + 0);
+      return uop_grad(a, gy, target);
+    }
+
     default:
       fprintf(stderr, "interact_grad: unhandled UOp opcode %u\n", y_op);
       return grad_zero(target);

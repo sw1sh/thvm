@@ -94,6 +94,31 @@ VerificationTest[
     TestID -> "grad/x-times-x-equals-2x"
 ]
 
+(* === RESHAPE: identity-on-data, identity-on-grad === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    (* d(reshape(a, {2,2}))/d(a) = 1, returned in a's shape {4} *)
+    g = TRealize @ TGrad[TUOpReshape[a, {2, 2}], a];
+    Normal @ TTensorData[g],
+    {1.0, 1.0, 1.0, 1.0},
+    TestID -> "grad/reshape-identity-cotangent"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    (* d(sum(reshape(a*a, {2,2})))/d(a) = 2a -- chain through MUL
+       inside a RESHAPE.  Reduce collapses to a scalar cotangent
+       that broadcasts back. *)
+    expr = TUOpReduce[TUOpReshape[TUOpMul[a, a], {2, 2}], 0, "SUM"];
+    g = TRealize @ TGrad[expr, a];
+    Normal @ TTensorData[g],
+    {2.0, 4.0, 6.0, 8.0},
+    TestID -> "grad/reshape-inside-mul-chain"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

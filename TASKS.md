@@ -505,12 +505,23 @@ Realistic close-out for the overnight cron loop:
       primitive) and finally CONV2D (multi-fire arc, needs FLIP
       and PAD kernels too). -->
 
-- [ ] **Grad rule: UOP_RESHAPE** in `interact_grad` per
+- [x] **Grad rule: UOP_RESHAPE** in `interact_grad` per
       `docs/grad-roadmap.md` step 1.  Rule is `GRAD[RESHAPE(a,
       shape), gy, t] = GRAD[a, RESHAPE(gy, a.shape), t]`.  ~15
       LOC + one parity test in `tests/test_grad.c` (analytic
       via interact_grad vs finite-difference, ε=1e-3,
       tolerance 1e-3).
+      <!-- Implemented as PASSTHROUGH (uop_grad(a, gy, target))
+      not an explicit RESHAPE on the cotangent.  Rationale:
+      RESHAPE preserves numel and is identity on data in the
+      CPU/Metal kernel, so the leaf rule's expand_to_target
+      hits the in_numel == out_numel memcpy branch of
+      cpu_op_expand and reconciles shape correctly without an
+      explicit cotangent reshape.  Tests: structural in
+      tests/test_grad.c (cascades to leaf-EXPAND), numerical
+      in wl/THVMLink/Tests/grad.wlt (identity 1d->2d, plus a
+      MUL+RESHAPE+REDUCE chain that hits 2a). -->
+
 
 - [ ] **Grad rule: UOP_CMPLT** in `interact_grad` per
       `docs/grad-roadmap.md` step 3.  Rule is
