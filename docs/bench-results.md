@@ -20,18 +20,22 @@ section.  bm5 confirms the prediction with a clean side-by-side.
 
 ## Side-by-side
 
-| bench                          | backend | metric              | bm3 baseline | post-bm4abc |    Δ |
-| ------------------------------ | ------- | ------------------- | ------------ | ----------- | ---: |
-| lenet-mnist (Adam step)        | CPU     | ms/step             |          6.9 |         7.0 |  +1% |
-| lenet-mnist (Adam step)        | CPU     | peak_concurrent KiB |       1882.3 |      1882.3 |   0% |
-| lenet-mnist (Adam step)        | CPU     | total_live KiB      |       4087.4 |      4087.4 |   0% |
-| lenet-mnist (Adam step)        | CPU     | kernels             |          455 |         455 |   0% |
-| lenet-mnist (Adam step)        | Metal   | ms/step             |         85.8 |       100.9 | +18% |
-| lenet-mnist (Adam step)        | Metal   | peak_concurrent KiB |       1882.3 |      1882.3 |   0% |
-| beautiful-mnist (forward only) | CPU     | ms/step             |        175.1 |       179.6 |  +3% |
-| beautiful-mnist (forward only) | CPU     | peak_concurrent KiB |      82750.3 |     82750.3 |   0% |
-| beautiful-mnist (forward only) | Metal   | ms/step             |        245.5 |       250.6 |  +2% |
-| beautiful-mnist (forward only) | Metal   | peak_concurrent KiB |      82750.3 |     82750.3 |   0% |
+| bench                          | backend | metric              | bm3 baseline | post-bm4abc | post-hrp |    Δ-hrp |
+| ------------------------------ | ------- | ------------------- | ------------ | ----------- | -------- | -------: |
+| lenet-mnist (Adam step)        | CPU     | ms/step             |          6.9 |         7.0 |      7.9 |     +13% |
+| lenet-mnist (Adam step)        | CPU     | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |       0% |
+| lenet-mnist (Adam step)        | CPU     | total_live KiB      |       4087.4 |      4087.4 |   4087.4 |       0% |
+| lenet-mnist (Adam step)        | CPU     | kernels             |          455 |         455 |      455 |       0% |
+| lenet-mnist (Adam step)        | Metal   | ms/step             |         85.8 |       100.9 |     95.9 |      -5% |
+| lenet-mnist (Adam step)        | Metal   | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |       0% |
+| beautiful-mnist (forward only) | CPU     | ms/step             |        175.1 |       179.6 |    175.4 |      -2% |
+| beautiful-mnist (forward only) | CPU     | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 |       0% |
+| beautiful-mnist (forward only) | Metal   | ms/step             |        245.5 |       250.6 |    249.8 |      -0% |
+| beautiful-mnist (forward only) | Metal   | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 |       0% |
+
+(`Δ-hrp` is post-hrp vs post-bm4abc.  Wall-time deltas are
+run-to-run jitter; memory metrics are deterministic and
+identical to baseline.)
 
 (Metal +18% on lenet-mnist is run-to-run jitter; Metal's per-
 kernel command-buffer round-trip dominates wall-time at this
@@ -67,24 +71,38 @@ optimizations need a finer-grained preserve mechanism.
   `test_slot_reuse` 19/19, `test_metal_real` 166/166).
 - 270 WL tests green (no `nn.wlt` TGrad regressions).
 
-## Unblocking the savings
+## Unblocking the savings (UPDATED post-hrp)
 
-Queued in TASKS.md: **Heap-rooted preserve pass**.  Replaces
-`mark_preserved_chain` with a walk over live `HEAP[0..HEAP_NEXT)`
-cells, collecting every TenDesc reachable from a `TAG_TEN` cell
-or from any pending `TAG_UOP` term that references one.  Only
-those bufs stay preserved; everything else feeds bm4b's
-rollback path.
+The heap-rooted preserve pass landed (hrp1 + hrp2) without
+delivering savings either: every kernel's output_tid has a
+`TAG_TEN` cell at `heap[uop_kernel_loc + 0]` (set by
+materialize when it emits the UOP_KERNEL wrapper), so the
+linear heap walk catches all of them.  Strictly broader
+coverage than the chain walk in theory, but identical in
+practice for our materialize-then-fire flow.
 
-That single pass unblocks both:
+Real savings now require either:
 
-1. **bm4 measurable savings** (target ≥30% peak KiB drop on
-   lenet-mnist; 53.9% headroom is sittable per TMemoryPlan).
-2. **Refcount-driven free arc sub-item c** rollback swap
-   (currently blocked behind the same conservative chain walk).
+1. **Post-fire kernel-cell zeroing**: when a kernel fires and
+   its output is preserved BY ITS OUTPUT-TID's heap cell only
+   (no other live reference), zero out that cell after the
+   result is consumed.  Tricky -- "no other live reference" is
+   the standard mark-from-roots GC question.
 
-Sized at ~140 LOC total; will sub-decompose into `walk` +
-`integration` + `tests` when picked up.
+2. **Mark-from-roots GC**: walk from a fixed root set (the
+   WL-returned result + live UOP terms still being reduced),
+   marking only reachable cells; rollback frees everything
+   else.  Standard tracing-GC pattern; would land in
+   `src/schedule/gc.c` and replace both
+   `mark_preserved_chain` and `mark_heap_rooted_preserve`.
+   Much bigger than the bm4 / hrp arcs anticipated; queue as
+   a separate "tracing GC" arc when picked up.
+
+Both options are larger than the cron-loop's per-fire budget
+allows for a single pass.  The bm4 + hrp infrastructure
+remains correct + sittable -- once tracing GC delivers a
+narrower preserve set, the freelist + rollback wiring already
+shipped will deliver the savings without further code change.
 
 ## Reproducing
 

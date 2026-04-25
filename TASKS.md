@@ -3711,10 +3711,23 @@ sub-items once these land.
       validation run in bm4d; bm5 formalizes the doc deliverable. -->
 
 
-- [ ] **Heap-rooted preserve pass (arc)** (follow-up to bm4 +
+- [x] **Heap-rooted preserve pass (arc)** (follow-up to bm4 +
       refcount-driven free arc).  Replace mark_preserved_chain
       in src/schedule/realize.c with a walk over the live
       HEAP[0..HEAP_NEXT) cells.  Decomposed into 3 sub-items.
+      <!-- All 3 sub-items landed (hrp1 helper + tests, hrp2
+      integration, hrp3 bench delta + docs).  Acceptance
+      target (>=30% peak KiB drop) NOT met -- 0% delta on
+      every memory metric.  Discovered post-integration that
+      every kernel-output TenDesc has a TAG_TEN cell at
+      heap[uop_kernel_loc + 0] (set by materialize when it
+      emits the UOP_KERNEL wrapper); the linear heap walk
+      catches all of them, identical effective coverage to the
+      chain walk.  Infrastructure correct + tested + zero
+      regressions.  Real savings now need either post-fire
+      kernel-cell zeroing OR mark-from-roots tracing GC.
+      Queued as a "Tracing GC" follow-up arc below. -->
+
 
   - [x] **hrp1: heap-walk helper + unit tests**.  New
         src/schedule/heap_rooted_preserve.c with a single
@@ -3815,7 +3828,7 @@ sub-items once these land.
         new follow-up arc proposal. -->
 
 
-  - [ ] **hrp3: bench delta + docs**.  Re-run
+  - [x] **hrp3: bench delta + docs**.  Re-run
         wl/Examples/_bench/baseline.wls on both backends.
         Acceptance: peak KiB drops at least 30% on lenet-mnist
         (the bm4 / bm5 acceptance criterion that bm4d
@@ -3825,6 +3838,50 @@ sub-items once these land.
         savings DON'T materialize, document the residual
         blocker (e.g., aliasing pinning extra TenDescs).
         ~20 LOC + doc update.
+        <!-- Done.  ACCEPTANCE MISS again -- 0% peak KiB
+        delta vs post-bm4abc.  docs/bench-results.md grew a
+        post-hrp column; wall-time deltas are run-to-run
+        jitter (-5% to +13%) but every memory metric is
+        deterministic 0%.
+
+        Residual blocker documented in the "Unblocking the
+        savings (UPDATED post-hrp)" section: every kernel's
+        output_tid has a TAG_TEN cell at
+        heap[uop_kernel_loc + 0] (set by materialize when it
+        emits the UOP_KERNEL wrapper), so the heap walk's
+        coverage is identical to the chain walk's for our
+        materialize-then-fire flow.
+
+        Real savings need either (a) post-fire kernel-cell
+        zeroing or (b) proper mark-from-roots tracing GC.
+        Both bigger than the bm4 + hrp arcs anticipated;
+        queued as a new "Tracing GC" follow-up arc below the
+        heap-rooted-preserve arc parent. -->
+
+- [ ] **Tracing GC for the dyn heap** (follow-up to bm4 + hrp).
+      The bm4 freelist + rollback wiring + hrp1/hrp2's
+      heap-rooted preserve walk all landed cleanly, but the
+      bm4 acceptance criterion (>=30% peak KiB drop on
+      lenet-mnist) STILL isn't met because every kernel's
+      output TenDesc has a TAG_TEN cell at
+      heap[uop_kernel_loc + 0] -- the heap walk catches them
+      all, preserving every kernel output, identical effective
+      coverage to the chain walk.
+
+      Real savings need a tracing GC that marks reachable cells
+      from a fixed root set (the WL-returned result + live UOP
+      terms still being reduced) instead of scanning every
+      heap cell.  Standard mark-from-roots pattern; lands as a
+      new src/schedule/gc.c that replaces both
+      mark_preserved_chain and mark_heap_rooted_preserve.
+
+      Sized at ~150-200 LOC; will sub-decompose when picked up.
+      Once it ships, the freelist wiring already in place
+      (bm4abc) delivers the savings without further code
+      change -- this arc is the LAST blocker between the
+      lenet-mnist 1.6 MiB peak and the 53.9% slot-reuse
+      headroom TMemoryPlan measured.
+
 
 
 
