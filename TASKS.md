@@ -389,11 +389,16 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       UOP_CONST(3.14) under both backends and asserts bit-exact
       output match. -->
 
-- [ ] **Elementwise Metal kernels** (ADD, MUL, NEG, RECIP, SQRT,
-      EXP2, LOG2, CMPLT).  All share a uniform "one thread per
-      output element" template; one MSL file per op (or templated
-      in a single file).  Parity tests vs CPU on each.  Likely
-      sub-decompose at execution time.
+- [ ] **Binary elementwise Metal kernels** (ADD, MUL, CMPLT).
+      All three share the broadcast-aware template (each input
+      either repeated from index 0 if numel=1, or indexed by tid).
+      One MSL file per op or one templated file.  Per-op parity
+      test vs CPU.  Establishes the binary dispatch shape that
+      the next item reuses.
+- [ ] **Unary elementwise Metal kernels** (NEG, RECIP, SQRT,
+      EXP2, LOG2).  Single input, broadcast same way.  Mirrors
+      the binary item with one fewer input slot.  Per-op parity
+      test vs CPU.
 - [ ] **Reduction + movement Metal kernels** (REDUCE_SUM,
       REDUCE_MAX, EXPAND, RESHAPE) plus the **MUL+REDUCE matmul
       shape** that LinearLayer hits hot.  Parity tests vs CPU.
