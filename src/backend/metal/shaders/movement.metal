@@ -90,3 +90,41 @@ kernel void thvm_reshape(device         float *out      [[buffer(0)]],
     (void)arg;
     (void)in_numel;
 }
+
+// FLIP mirrors the per-axis stride walk used by axis-aware EXPAND
+// but applies a coord mirror (d - 1 - c) on axes whose bit is set
+// in arg (axes_bitmask).  Buffer slots 4 (src0[0]=ndim, src0[1..]
+// =dims) and 5 (outd, unused for FLIP since out shape == src shape)
+// follow the EXPAND convention so metal_dispatch_kernel can reuse
+// the same packing path.
+kernel void thvm_flip(device         float *out      [[buffer(0)]],
+                      constant       uint  &arg      [[buffer(1)]],
+                      device   const float *in       [[buffer(2)]],
+                      constant       uint  &in_numel [[buffer(3)]],
+                      constant       uint  *src0     [[buffer(4)]],
+                      constant       uint  *outd     [[buffer(5)]],
+                      uint                  tid      [[thread_position_in_grid]])
+{
+    (void)outd; (void)in_numel;
+    uint axes_mask = arg;
+    uint ndim      = src0[0];
+
+    // No flip / shape unknown: passthrough.
+    if (axes_mask == 0u || ndim == 0u) {
+        out[tid] = in[tid];
+        return;
+    }
+
+    uint tmp = tid;
+    uint src_idx = 0u;
+    uint stride  = 1u;
+    for (int axis = (int)ndim - 1; axis >= 0; axis--) {
+        uint d = src0[1 + axis];
+        uint c = tmp % d;
+        tmp   /= d;
+        if (axes_mask & (1u << (uint)axis)) c = d - 1u - c;
+        src_idx += c * stride;
+        stride  *= d;
+    }
+    out[tid] = in[src_idx];
+}

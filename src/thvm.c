@@ -103,6 +103,7 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "backend/cpu/op/expand.c"
 #include "backend/cpu/op/reshape.c"
 #include "backend/cpu/op/conv2d.c"
+#include "backend/cpu/op/flip.c"
 #include "backend/cpu/interpret.c"
 #include "backend/cpu/_.c"
 

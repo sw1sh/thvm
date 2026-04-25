@@ -365,6 +365,40 @@ int main(void) {
   CHECK(cpu_ta[0] == 1.0f && cpu_ta[1] == 2.0f && cpu_ta[2] == 3.0f);
   CHECK(cpu_ta[3] == 1.0f && cpu_ta[4] == 2.0f && cpu_ta[5] == 3.0f);
 
+  // === FLIP axis-aware parity: 2D both axes ===
+  // {{1,2,3},{4,5,6}} flipped on axes 0+1 -> {{6,5,4},{3,2,1}}.
+  TEST_BEGIN("metal-real/flip-2d-both-axes-parity");
+  Shape s_fl = {0}; s_fl.ndim = 2; s_fl.dims[0] = 2; s_fl.dims[1] = 3;
+  f32 src_fl[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  f32 cpu_fl[6], gpu_fl[6];
+
+  unsetenv("THVM_BACKEND"); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_fl, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_fl, sizeof(src_fl));
+    Term done = wnf(thvm_materialize(uop_flip(
+        term_new(0, TAG_TEN, DT_F32, t), 0x3)));   // flip both axes
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              cpu_fl, sizeof(cpu_fl));
+  }
+  thvm_free();
+
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_fl, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_fl, sizeof(src_fl));
+    Term done = wnf(thvm_materialize(uop_flip(
+        term_new(0, TAG_TEN, DT_F32, t), 0x3)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              gpu_fl, sizeof(gpu_fl));
+  }
+  thvm_free();
+
+  for (int i = 0; i < 6; i++) CHECK(cpu_fl[i] == gpu_fl[i]);
+  // Row-major: original {1,2,3,4,5,6} -> {6,5,4,3,2,1}.
+  CHECK(cpu_fl[0] == 6.0f && cpu_fl[1] == 5.0f && cpu_fl[2] == 4.0f);
+  CHECK(cpu_fl[3] == 3.0f && cpu_fl[4] == 2.0f && cpu_fl[5] == 1.0f);
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }

@@ -176,6 +176,7 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
     case UOP_REDUCE: fnName = @"thvm_reduce";  break;
     case UOP_EXPAND: fnName = @"thvm_expand";  break;
     case UOP_RESHAPE:fnName = @"thvm_reshape"; break;
+    case UOP_FLIP:   fnName = @"thvm_flip";    break;
     default:         return nil;
   }
   // `fn` is taken by thvm.h as a `static inline` macro; use `mtlFn`.
@@ -239,7 +240,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // length 1+MAX_DIM so the shader can walk axes without re-
   // deriving shape from numels.  Slot indices live just past the
   // input + numels block.
-  if (p->opcode == UOP_EXPAND) {
+  if (p->opcode == UOP_EXPAND || p->opcode == UOP_FLIP) {
     u32 src0[1 + MAX_DIM] = {0};
     u32 outd[1 + MAX_DIM] = {0};
     src0[0] = p->src0_ndim;

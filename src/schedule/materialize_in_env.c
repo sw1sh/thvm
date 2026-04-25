@@ -84,7 +84,8 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
         child_kinds[i] = (u8)k;
     }
 
-    // 2. Per-op argument extraction (CONST bits / REDUCE kind+axis).
+    // 2. Per-op argument extraction (CONST bits / REDUCE kind+axis /
+    //    FLIP axes_bitmask).
     u32 const_dtype = DT_F32;
     u32 op_arg      = 0;
     if (op == UOP_CONST) {
@@ -95,6 +96,8 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
         u32 kind = (u32)term_val(heap_read(expr_loc + 1));
         u32 axis = (u32)term_val(heap_read(expr_loc + 2));
         op_arg   = (kind << 16) | (axis & 0xFFFF);
+    } else if (op == UOP_FLIP) {
+        op_arg = (u32)term_val(heap_read(expr_loc + 1));
     }
 
     // 3. Allocate KernelEntry and fill input slots, deduping equal
@@ -240,12 +243,13 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     for (u32 i = 0; i < MAX_DIM; i++) p->out_dims [i] = 0;
     for (u8 i = 0; i < arity; i++) p->src[i] = KSRC_AS_INPUT(src_slot[i]);
 
-    // Movement ops (currently EXPAND -- RESHAPE/PERMUTE could
-    // reuse this in future) need source slot 0's per-axis shape AND
-    // the output's per-axis shape so the kernel can distinguish
-    // leading- from trailing-axis broadcasts.  out_numel + in_numel
-    // alone aren't enough (e.g. {1,2} -> {3,2} vs {2,1} -> {2,3}).
-    if (op == UOP_EXPAND && arity > 0) {
+    // Movement ops (currently EXPAND, FLIP -- RESHAPE/PERMUTE
+    // could reuse this in future) need source slot 0's per-axis
+    // shape AND the output's per-axis shape so the kernel can
+    // distinguish leading- from trailing-axis broadcasts (EXPAND)
+    // or mirror axes (FLIP).  out_numel + in_numel alone aren't
+    // enough.
+    if ((op == UOP_EXPAND || op == UOP_FLIP) && arity > 0) {
       Shape s0 = child_shapes[0];
       p->src0_ndim = (u8)(s0.ndim & 0xFF);
       for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {

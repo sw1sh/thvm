@@ -174,6 +174,8 @@ fn Term materialize_expr(Term expr) {
     u32 kind = (u32)term_val(heap_read(expr_loc + 1));
     u32 axis = (u32)term_val(heap_read(expr_loc + 2));
     op_arg   = (kind << 16) | (axis & 0xFFFF);
+  } else if (op == UOP_FLIP) {
+    op_arg = (u32)term_val(heap_read(expr_loc + 1));
   }
 
   // 2. Build a KernelEntry describing this op.
@@ -263,11 +265,12 @@ fn Term materialize_expr(Term expr) {
     }
   }
 
-  // Movement ops (currently EXPAND) need source slot 0's per-axis
-  // shape AND the output's per-axis shape so the kernel can resolve
-  // broadcast indexing without having to re-derive it from
-  // in_numel/out_numel alone.
-  if (op == UOP_EXPAND && arity > 0 && child_tids[0] != 0) {
+  // Movement ops (currently EXPAND, FLIP) need source slot 0's
+  // per-axis shape AND the output's per-axis shape so the kernel
+  // can resolve broadcast indexing (EXPAND) or per-axis mirroring
+  // (FLIP) without having to re-derive it from in_numel / out_numel
+  // alone.
+  if ((op == UOP_EXPAND || op == UOP_FLIP) && arity > 0 && child_tids[0] != 0) {
     Shape s0 = TENS[child_tids[0]].view.shape;
     p->src0_ndim = (u8)(s0.ndim & 0xFF);
     for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {

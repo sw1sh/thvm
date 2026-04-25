@@ -1061,7 +1061,7 @@ Realistic close-out for the overnight cron loop:
       land in subsequent sub-items. -->
 
 
-- [ ] **UOP_FLIP CPU + Metal kernels**.  Constructor exists in
+- [x] **UOP_FLIP CPU + Metal kernels**.  Constructor exists in
       src/uop/flip.c; opcode `UOP_FLIP = 8`; arity 1; heap
       `[src, NUM(axes_bitmask)]`.  Needed for CONV2D grad_input
       (the standard transposed-conv trick is full-conv with
@@ -1076,6 +1076,23 @@ Realistic close-out for the overnight cron loop:
         - Parity tests in tests/test_uop.c (or test_expand_axis-
           style: axis=0 only, axis=1 only, both axes) + a
           Metal-vs-CPU parity check in test_metal_real.c.
+      <!-- Implemented.  CPU kernel src/backend/cpu/op/flip.c
+      walks per-axis coords (decomposing oi over src0_dims,
+      mirroring c -> d-1-c on axes whose bit is set in arg
+      bitmask, reassembling source flat index).  Metal shader
+      thvm_flip mirrors the same logic via buffer(4) src0[]
+      packing -- reuses the EXPAND dispatch helper since both
+      ops need the same per-axis shape info.  Both materializers
+      extract axes_bitmask from heap[expr_loc + 1] into op_arg
+      and populate src0_dims for op == UOP_FLIP (alongside the
+      existing UOP_EXPAND case).  Tests:
+        - flip.wlt: 5 numerical tests (1d reverse, 2d axis-0
+          only, 2d axis-1 only, 2d both, no-op empty axes).
+        - test_metal_real.c: metal-real/flip-2d-both-axes-parity
+          (CPU vs Metal byte-for-byte identical).
+      Metal metallib now exports 15 functions (was 14).  All
+      390 C + 179 WL tests stay green. -->
+
 
 - [ ] **UOP_PAD CPU + Metal kernels**.  Constructor exists in
       src/uop/pad.c; opcode `UOP_PAD = 6`; arity 1; heap
