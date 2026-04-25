@@ -130,11 +130,12 @@ concern that interact_grad currently doesn't cover for any of these):
       Refuse the overlapping case in this fire by returning a
       Failure["NotImplemented"] when Stride != KernelSize.  Test
       against NetApply on a small input.
-- [ ] `PoolingLayer` overlapping case (Stride < KernelSize, e.g.
-      the default Stride = {1,1}).  Needs UOP_PERMUTE runtime
-      support (currently no shape derivation in materialize_in_env.c
-      -- same gap RESHAPE had).  Likely big; decompose when picked
-      up.
+- [blocked: not needed for LeNet -- NetModel["LeNet"]'s pool layers
+      use Stride={2,2} (non-overlapping); the non-overlap
+      implementation already covers the goal.  Pick this up when
+      another model wants overlapping pool, then needs UOP_PERMUTE
+      runtime support first.] `PoolingLayer` overlapping case
+      (Stride < KernelSize, e.g. the default Stride = {1,1}).
 - [ ] `SoftmaxLayer` forward.  `softmax(x)_i = exp(x_i) / sum(exp(x))`.
       EXP via `2^(log2(e) * x)` = TUOpExp2 chain.  Test against
       `NetApply[SoftmaxLayer[]]` on a small vector.
