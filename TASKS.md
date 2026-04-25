@@ -2737,12 +2737,47 @@ Realistic close-out for the overnight cron loop:
           documented. -->
 
 
-  - [ ] **Refcount-driven free**.  Decref + free buffers
-        when the last consumer kernel finishes reading.
-        Requires a consumer-count pass during materialize
-        (similar to f1b's count_kernel_consumers).  Drops
-        conv-partial memory by ~5x.  ~80 LOC plus
-        consumer-count infrastructure.
+  - [ ] **Refcount-driven free (arc)**.  Decref + free
+        buffers when the last consumer kernel finishes
+        reading.  Drops conv-partial memory by ~5x.
+        Decomposed into 3 sub-items below.
+
+    - [ ] **Per-kernel consumer-count pass**.  Add a
+          single-pass walk over KERNELS[] (after materialize
+          but before kernel firing) that computes, for each
+          kernel `k`, the number of OTHER kernels that list
+          `k`'s output buf among their input_tids' bufs.
+          Store in a new `u32 consumer_count` field on
+          KernelEntry (or a parallel `u32 *KERNEL_CONSUMER_COUNT`
+          array if KernelEntry layout is sensitive).  Add a
+          C unit test in tests/test_consumer_count.c with a
+          synthetic 3-kernel chain (k1->k2, k1->k3) verifying
+          k1.consumer_count = 2, k2.consumer_count = 0,
+          k3.consumer_count = 0.  ~40 LOC + ~30 LOC test.
+
+    - [ ] **Decref hook in kernel firing**.  In
+          src/backend/cpu/kernel_fire_by_id.c (or wherever
+          a kernel actually fires), AFTER the kernel reads
+          its inputs, walk input_tids[] and for each input
+          buf `b` that came from a kernel-output (not an
+          input/leaf), decrement that producer kernel's
+          consumer_count.  When count hits 0, mark the buf
+          as "ready to free" (don't free yet -- the pool
+          rollback in thvm_realize handles the actual free
+          via a new "free what hit zero" rollback variant).
+          ~50 LOC.
+
+    - [ ] **Integrate with thvm_realize + verify**.
+          Swap thvm_realize's mark_preserved_chain walk for
+          the refcount-driven path: bump the result tensor's
+          buf refcount (by setting its producer's
+          consumer_count += 1 before firing) so the result
+          survives the post-fire decref pass; then rollback
+          frees only bufs whose refcount went to zero.
+          Re-run wl/Examples/lenet-mnist/memory-probe.wls;
+          update docs/memory.md with the measured per-step
+          drop (target: >=30% buf bytes reduction).
+          ~30 LOC + doc update.
 
   - [ ] **Movement-op view-only for SHRINK / PERMUTE /
         PAD / FLIP** (mirroring f3b/f3c).  Per-conv
