@@ -58,3 +58,21 @@ fn void cpu_buf_clear_preserved(u32 wm) {
   if (wm < 1) wm = 1;
   for (u64 i = wm; i < CPU_BUFS_NEXT; i++) CPU_BUFS[i].preserved = 0;
 }
+
+// Refcount-driven-free hooks (sub-item b of the refcount-driven
+// free arc).  cpu_buf_mark_freeable is called from kernel_fire_by_id
+// once a producer kernel's consumer_count hits zero -- i.e., every
+// consumer that needed to read the producer's output buf has done
+// so.  cpu_buf_clear_freeable resets the flag (companion to
+// cpu_buf_clear_preserved).  The "free what hit zero" rollback
+// variant lives in sub-item c (the thvm_realize integration).
+fn void cpu_buf_mark_freeable(u32 buf_id) {
+  if (CPU_BUFS == NULL) return;  // Metal-active: no CPU bufs to mark.
+  if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
+  CPU_BUFS[buf_id].freeable = 1;
+}
+
+fn void cpu_buf_clear_freeable(u32 wm) {
+  if (wm < 1) wm = 1;
+  for (u64 i = wm; i < CPU_BUFS_NEXT; i++) CPU_BUFS[i].freeable = 0;
+}

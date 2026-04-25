@@ -62,6 +62,30 @@ fn void kernel_fire_by_id(u32 kid) {
   if (b && b->dispatch_kernel) {
     b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   }
+
+  // Decref hook (sub-item b of the refcount-driven free arc).
+  // Inputs have been read; tell each producer kernel "one more
+  // consumer is done with you."  When a producer's count hits zero,
+  // its output buf is no longer needed -- mark it freeable so the
+  // next pool rollback can reclaim it.  Skipped for symbolic
+  // kernels because they may re-fire with different bindings, where
+  // the static consumer_count from kernel_compute_consumer_counts
+  // doesn't correspond 1:1 to actual reads.
+  if (!has_symbolic) {
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      u32 tid = ke->input_tids[i];
+      if (tid == 0 || tid >= TENS_NEXT) continue;
+      u32 producer = TENS[tid].producer_kid;
+      if (producer == 0 || producer >= KERNELS_NEXT) continue;
+      KernelEntry *pe = &KERNELS[producer];
+      if (pe->consumer_count > 0) pe->consumer_count--;
+      if (pe->consumer_count == 0) {
+        u32 prod_buf = TENS[pe->output_tid].buf_id;
+        cpu_buf_mark_freeable(prod_buf);
+      }
+    }
+  }
+
   ke->fired = 1;
   ITRS++;
 }

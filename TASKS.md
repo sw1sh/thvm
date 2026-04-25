@@ -2766,7 +2766,7 @@ Realistic close-out for the overnight cron loop:
           WL tests green. -->
 
 
-    - [ ] **Decref hook in kernel firing**.  In
+    - [x] **Decref hook in kernel firing**.  In
           src/backend/cpu/kernel_fire_by_id.c (or wherever
           a kernel actually fires), AFTER the kernel reads
           its inputs, walk input_tids[] and for each input
@@ -2777,6 +2777,24 @@ Realistic close-out for the overnight cron loop:
           rollback in thvm_realize handles the actual free
           via a new "free what hit zero" rollback variant).
           ~50 LOC.
+          <!-- Landed.  src/interact/uop_kernel.c:
+          kernel_fire_by_id grew a post-dispatch decref pass
+          (skipped for symbolic-input kernels to avoid
+          underflow on re-fire).  src/backend/cpu/init.c:
+          CpuBuf gained a `freeable` u8 sibling to
+          `preserved`.  src/backend/cpu/buf_pool.c:
+          cpu_buf_mark_freeable + cpu_buf_clear_freeable
+          helpers (Metal-safe via CPU_BUFS == NULL guard).
+          src/backend/cpu/buf_free.c: also resets
+          preserved / freeable bits to prevent slot-reuse
+          staleness.  tests/test_decref_hook.c (16 sub-
+          checks): diamond k1->{k2,k3}, fires k2 (count 2->1,
+          buf NOT freeable), fires k3 (count 1->0, buf
+          freeable), leaf bufs untouched, double-fire is a
+          no-op.  179 C + 237 WL tests green.  Sub-item c
+          (integration with thvm_realize) consumes the
+          freeable flag via a new pool rollback variant. -->
+
 
     - [ ] **Integrate with thvm_realize + verify**.
           Swap thvm_realize's mark_preserved_chain walk for

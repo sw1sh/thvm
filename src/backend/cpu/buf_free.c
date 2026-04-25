@@ -17,4 +17,6 @@ fn void cpu_buf_free(u32 buf_id) {
   b->handle     = NULL;
   b->on_release = NULL;
   b->owns_data  = 0;
+  b->preserved  = 0;
+  b->freeable   = 0;
 }

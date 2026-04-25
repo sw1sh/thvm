@@ -22,6 +22,11 @@ typedef struct {
                                     // (set by mark_preserved_buf during the
                                     // result-chain walk; cleared by
                                     // pool_clear_preserved after rollback)
+  u8    freeable;                   // 1 = refcount-driven free has detected
+                                    // that this buf's last consumer has read
+                                    // it; pool_rollback_freeable will free.
+                                    // Set by cpu_buf_mark_freeable from the
+                                    // decref hook in kernel_fire_by_id.
   void *handle;                     // opaque, passed to on_release
   void (*on_release)(void *handle); // cleanup for !owns_data buffers
 } CpuBuf;
