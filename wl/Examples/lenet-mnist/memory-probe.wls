@@ -104,3 +104,12 @@ debugPrint["  Buf bytes: ",
            Round[TTotalBufBytes[] / 1024.0, 0.1], " KiB ",
            "(", Round[TTotalBufBytes[] / 1024.0 / 1024.0, 0.01], " MiB)"];
 debugPrint["  Kernels  : ", TKernelCount[]];
+
+(* === TMemoryPlan summary (mp4 of the visualization arc) ===
+   Top-5-largest / top-5-longest-lived bufs + status histogram +
+   active-backend label, derived from the live KERNELS / TENS /
+   {CPU,Metal}_BUFS state via static topological-depth analysis.
+   No new runtime probes -- this is a snapshot of state already
+   exposed by mp1's bridge tables. *)
+debugPrint[""];
+debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];

@@ -3277,7 +3277,7 @@ the GOAL workflow on Metal renders too).
       TMemoryPlanReport into memory-probe.wls. -->
 
 
-- [ ] **mp4: probe integration**.  Append a
+- [x] **mp4: probe integration**.  Append a
       TMemoryPlanReport[TMemoryPlan[]] call at the bottom of
       wl/Examples/lenet-mnist/memory-probe.wls so the per-phase
       printout is followed by a top-5-largest / top-5-longest
@@ -3286,6 +3286,20 @@ the GOAL workflow on Metal renders too).
       sensible bufs (preserved/freeable will be all 0 since
       Metal doesn't track those).  ~10 LOC + the verify
       observation goes into docs/memory.md.
+      <!-- Landed.  memory-probe.wls now ends with a
+      TMemoryPlanReport block.  CPU run: backend=CPU,
+      External=10 / Live=279 / Preserved=10 (top-5 dominated
+      by the 1.5 MiB FC weights + 250 KiB conv2 partials).
+      Metal run: backend=Metal, External=20 / Live=279
+      (no preserved tracking; Metal upload path creates
+      separate per-tensor bufs without the CPU preserved
+      mark).  docs/memory.md got a new "TMemoryPlan
+      visualization (mp4-integrated)" section with sample
+      output + a note on the per-backend status drift.
+      252 C + 264 WL tests green.  TMemoryPlan visualization
+      arc complete (mp1 bridge + mp2 data + mp3 Gantt + mp4
+      probe). -->
+
 
 
 

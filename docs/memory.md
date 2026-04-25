@@ -257,6 +257,43 @@ Now ~100 KiB BELOW the pre-f3d baseline of 16 022 KiB and 50
 kernels lighter -- the f3d/e/g wins finally cascade through
 EXPAND as intended.
 
+## TMemoryPlan visualization (mp4-integrated)
+
+`memory-probe.wls` now ends with a `TMemoryPlanReport[TMemoryPlan[]]`
+block — a top-5-largest / top-5-longest-lived view of the live
+buffers, derived from static topological-depth analysis on the
+`producer_kid` / `input_tids` edges (no firing-order pinning;
+two valid topo linearizations of the same DAG produce identical
+depths).
+
+Sample output on the LeNet probe (CPU run):
+
+```
+TMemoryPlan: 279 kernels, 299 bufs, 15922.9 KiB live
+  by status:  <|External -> 10, Live -> 279, Preserved -> 10|>
+  by backend: <|CPU -> 299|>
+  top-5 by bytes:
+    buf 8   (CPU): 1562.5 KiB, depth [0..0],   External   <- input  500x800 weight
+    buf 17  (CPU): 1562.5 KiB, depth [0..64],  Preserved  <- FC1 weight (long-lived)
+    buf 257 (CPU): 1562.5 KiB, depth [64..65], Live       <- FC backward grad
+    buf 128 (CPU): 250.  KiB, depth [33..34], Live       <- conv2 partial
+    buf 132 (CPU): 250.  KiB, depth [33..34], Live
+  top-5 by alive span:
+    buf 12  (CPU): span 80, 0. KiB, Preserved
+    buf 275 (CPU): span 79, 0. KiB, Live
+    buf 267 (CPU): span 73, 0. KiB, Live
+```
+
+`THVM_BACKEND=metal wolframscript -f memory-probe.wls` produces
+the same shape with `by backend: <|Metal -> 299|>` and the
+preserved/freeable columns all 0 (Metal doesn't track those
+flags); status counts shift to `External -> 20, Live -> 279`
+because Metal's upload path creates separate per-tensor bufs
+without inheriting the CPU `preserved` mark.
+
+`TMemoryPlanGantt[TMemoryPlan[]]` renders the same data as a
+Graphics-headed Gantt chart for interactive exploration.
+
 ## Probe script
 
 `wl/Examples/lenet-mnist/memory-probe.wls` reports per-phase
