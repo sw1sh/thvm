@@ -140,12 +140,16 @@ VerificationTest[
     TInit[];
     a    = TTensor[{3}, {1.0, 2.0, 3.0}];
     (* Go through TUOpAdd directly -- `a + a` would be simplified to
-       `2*a` by WL's Orderless Plus before our UpValue fires. *)
+       `2*a` by WL's Orderless Plus before our UpValue fires.
+       Program layout (sub-item c of UOP_LOAD arc): one LOAD per
+       input + the main op.  For dedup'd 1-input ADD: [LOAD, ADD].
+       The ADD lives at index n_inputs+1 (1-based). *)
     k    = TMaterialize[TUOpAdd[a, a]];
     kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
     info = TKernelInfo[kid];
     {info["n_inputs"],
-     info["program"][[1, "src", 1]] === info["program"][[1, "src", 2]]},
+     info["program"][[info["n_inputs"] + 1, "src", 1]] ===
+     info["program"][[info["n_inputs"] + 1, "src", 2]]},
     {1, True},
     TestID -> "TMaterialize/dedups-duplicate-inputs"
 ]
@@ -154,10 +158,12 @@ VerificationTest[
     TInit[];
     a    = TTensor[{3}, {1.0, 2.0, 3.0}];
     k    = TMaterialize[TUOpReduce[a, 0, "SUM"]];
-    (* Kernel id sits in the second heap cell of the UOP_KERNEL. *)
+    (* Kernel id sits in the second heap cell of the UOP_KERNEL.
+       REDUCE lives at index n_inputs+1 (1-based) after the LOAD prefix. *)
     kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
     info = TKernelInfo[kid];
-    {info["program"][[1, "opcode"]], info["output_numel"]},
+    {info["program"][[info["n_inputs"] + 1, "opcode"]],
+     info["output_numel"]},
     {"REDUCE", 1},
     TestID -> "TMaterialize/reduce-output-shape"
 ]

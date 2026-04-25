@@ -272,6 +272,24 @@ fn Term materialize_expr(Term expr) {
     for (u32 i = reduce_axis + 1; i < sh.ndim; i++) inner *= sh.dims[i];
     op_arg = ((kind & 0xFF) << 24) | (inner & 0x00FFFFFF);
   }
+  // Prepend one LOAD instruction per input slot.  Structural marker
+   // (sub-item c of the UOP_LOAD arc); the main op below still
+   // references KSRC_AS_INPUT(N) directly, so backends can either
+   // run cpu_op_load (memcpy to a scratch buffer; current behavior)
+   // or treat LOAD as a no-op (sub-item d).
+   for (u32 i = 0; i < ke->n_inputs; i++) {
+     KProgOp *l = &ke->program[ke->n_ops++];
+     l->opcode    = UOP_LOAD;
+     l->dtype     = (u8)ke->input_dtypes[i];
+     l->n_src     = 1;
+     l->numel     = ke->input_numels[i];
+     l->arg       = 0;
+     l->src0_ndim = 0;
+     l->out_ndim  = 0;
+     for (u32 j = 0; j < MAX_DIM; j++) l->src0_dims[j] = 0;
+     for (u32 j = 0; j < MAX_DIM; j++) l->out_dims [j] = 0;
+     l->src[0]    = KSRC_AS_INPUT(i);
+   }
   KProgOp *p = &ke->program[ke->n_ops++];
   p->opcode    = op;
   p->dtype     = (u8)out_dtype;

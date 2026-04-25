@@ -241,6 +241,23 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
         }
         op_arg = ((kind & 0xFF) << 24) | (inner & 0x00FFFFFF);
     }
+    // Prepend a LOAD per input slot (sub-item c of the UOP_LOAD arc) --
+    // structural marker; backends can run cpu_op_load (memcpy) or
+    // treat LOAD as no-op (sub-item d).  Main op below still
+    // references KSRC_AS_INPUT(N).
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      KProgOp *l = &ke->program[ke->n_ops++];
+      l->opcode    = UOP_LOAD;
+      l->dtype     = (u8)ke->input_dtypes[i];
+      l->n_src     = 1;
+      l->numel     = ke->input_numels[i];
+      l->arg       = 0;
+      l->src0_ndim = 0;
+      l->out_ndim  = 0;
+      for (u32 j = 0; j < MAX_DIM; j++) l->src0_dims[j] = 0;
+      for (u32 j = 0; j < MAX_DIM; j++) l->out_dims [j] = 0;
+      l->src[0]    = KSRC_AS_INPUT(i);
+    }
     KProgOp *p = &ke->program[ke->n_ops++];
     p->opcode    = op;
     p->dtype     = (u8)out_dtype;

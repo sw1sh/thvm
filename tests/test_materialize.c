@@ -34,12 +34,15 @@ int main(void) {
   CHECK_EQ(term_tag(kid_num), TAG_NUM);
   u32 kid = (u32)term_val(kid_num);
   KernelEntry *ke = &KERNELS[kid];
+  // n_ops = n_inputs LOADs + 1 main op (sub-item c of UOP_LOAD arc).
   CHECK_EQ(ke->n_inputs, 2);
-  CHECK_EQ(ke->n_ops,    1);
-  CHECK_EQ(ke->program[0].opcode, UOP_ADD);
-  CHECK_EQ(ke->program[0].n_src,  2);
-  CHECK(KSRC_IS_INPUT(ke->program[0].src[0]));
-  CHECK(KSRC_IS_INPUT(ke->program[0].src[1]));
+  CHECK_EQ(ke->n_ops,    3);
+  CHECK_EQ(ke->program[0].opcode, UOP_LOAD);
+  CHECK_EQ(ke->program[1].opcode, UOP_LOAD);
+  CHECK_EQ(ke->program[2].opcode, UOP_ADD);
+  CHECK_EQ(ke->program[2].n_src,  2);
+  CHECK(KSRC_IS_INPUT(ke->program[2].src[0]));
+  CHECK(KSRC_IS_INPUT(ke->program[2].src[1]));
   CHECK_EQ(ke->output_numel, 4);
 
   TEST_BEGIN("materialize/compound-recurses-bottom-up");
@@ -53,19 +56,22 @@ int main(void) {
   CHECK_EQ(term_ext(topk), UOP_KERNEL);
   CHECK_EQ(KERNELS_NEXT - prev_kernels, 2);  // ADD + MUL (a/b/c already TENs)
   // The top kernel's inputs: one is the ADD kernel's output, other is c.
+  // Main MUL sits at slot n_inputs (after the LOAD prefix).
   u32 top_kid = (u32)term_val(heap_read(term_val(topk) + 1));
   KernelEntry *topke = &KERNELS[top_kid];
-  CHECK_EQ(topke->program[0].opcode, UOP_MUL);
   CHECK_EQ(topke->n_inputs, 2);
+  CHECK_EQ(topke->program[topke->n_inputs].opcode, UOP_MUL);
 
   TEST_BEGIN("materialize/duplicate-input-deduplicated");
   // a + a -- one input, two src entries referencing the same slot.
+  // Program is [LOAD, ADD]; the ADD lives at program[n_inputs].
   Term dup = uop_binary(UOP_ADD, a, a);
   Term dupk = thvm_materialize(dup);
   u32 dup_kid = (u32)term_val(heap_read(term_val(dupk) + 1));
   KernelEntry *dupke = &KERNELS[dup_kid];
   CHECK_EQ(dupke->n_inputs, 1);
-  CHECK_EQ(dupke->program[0].src[0], dupke->program[0].src[1]);
+  CHECK_EQ(dupke->program[dupke->n_inputs].src[0],
+           dupke->program[dupke->n_inputs].src[1]);
 
   TEST_BEGIN("materialize/unary-single-source");
   Term neg = uop_unary(UOP_NEG, a);
@@ -73,11 +79,13 @@ int main(void) {
   u32 neg_kid = (u32)term_val(heap_read(term_val(negk) + 1));
   KernelEntry *negke = &KERNELS[neg_kid];
   CHECK_EQ(negke->n_inputs, 1);
-  CHECK_EQ(negke->n_ops,    1);
-  CHECK_EQ(negke->program[0].opcode, UOP_NEG);
-  CHECK_EQ(negke->program[0].n_src,  1);
+  CHECK_EQ(negke->n_ops,    2);   // LOAD + NEG
+  CHECK_EQ(negke->program[0].opcode, UOP_LOAD);
+  CHECK_EQ(negke->program[1].opcode, UOP_NEG);
+  CHECK_EQ(negke->program[1].n_src,  1);
 
   TEST_BEGIN("materialize/const-zero-inputs");
+  // 0 inputs -> no LOAD prefix; CONST sits at program[0].
   f32 two_f = 2.0f;
   u32 bits; memcpy(&bits, &two_f, sizeof(bits));
   Term ck = thvm_materialize(uop_const(DT_F32, bits));

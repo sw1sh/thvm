@@ -2066,7 +2066,7 @@ Realistic close-out for the overnight cron loop:
         green.  Sub-items (c)-(e) follow. -->
 
 
-  - [ ] **c. Linearizer emits explicit LOAD for input
+  - [x] **c. Linearizer emits explicit LOAD for input
         boundaries**.  Today kernel programs that consume
         a TAG_TEN at an input boundary implicitly bind it
         to a slot.  Change the linearizer to emit a
@@ -2078,6 +2078,35 @@ Realistic close-out for the overnight cron loop:
         a new wlt asserts a kernel program of 2-input
         ADD now contains 2 LOAD entries before the ADD
         entry.  ~80 LOC; if it grows, split (c) further.
+        <!-- Landed.  Both linearizers (materialize.c +
+        materialize_in_env.c) now prepend `n_inputs` LOAD
+        program ops before the main op (each LOAD has
+        src[0] = KSRC_AS_INPUT(N)).  Backends:
+          - CPU interpret: cpu_op_load (the memcpy from
+            sub-item b) runs per LOAD slot, allocating one
+            scratch buffer per input -- wasted work but
+            functionally correct.  Sub-item (d) makes it
+            a no-op.
+          - Metal dispatch: switched to `program[n_inputs]`
+            (the main op) since metal_dispatch_kernel only
+            handles a single op per call.  LOAD prefix is
+            skipped entirely -- already the no-op behavior
+            sub-item (d) wants.
+        Test updates:
+          - tests/test_materialize.c: 5 assertions adjusted
+            to address the main op via `program[n_inputs]`
+            (it was at program[0] before the LOAD prefix).
+            Added explicit LOAD-presence checks in the
+            single-elementwise + unary-single-source tests.
+          - wl/THVMLink/Tests/tensors.wlt: 2 tests
+            (dedups-duplicate-inputs, reduce-output-shape)
+            adjusted to address the main op via
+            `program[[n_inputs + 1]]`.
+          - New uop-load/linearizer-prepends-load-per-input
+            wlt asserts a 2-input ADD kernel produces
+            program = [LOAD, LOAD, ADD].
+        216 WL + 146 C tests green. -->
+
 
   - [ ] **d. Both backends honor LOAD as input-slot read**.
         CPU + Metal kernel runners need a no-op handler for

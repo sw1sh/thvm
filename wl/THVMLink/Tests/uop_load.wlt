@@ -67,3 +67,21 @@ VerificationTest[
     {5.0, 7.0, 9.0},
     TestID -> "uop-load/composes-under-add"
 ]
+
+(* === sub-item (c): linearizer prepends LOAD per input slot ===
+   A 2-input ADD kernel program now contains [LOAD, LOAD, ADD]. *)
+
+VerificationTest[
+    TInit[];
+    a = TTensor[{3}, {1.0, 2.0, 3.0}];
+    b = TTensor[{3}, {4.0, 5.0, 6.0}];
+    k    = TMaterialize[TUOpAdd[a, b]];
+    kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
+    info = TKernelInfo[kid];
+    {info["n_inputs"], info["n_ops"],
+     info["program"][[1, "opcode"]],
+     info["program"][[2, "opcode"]],
+     info["program"][[3, "opcode"]]},
+    {2, 3, "LOAD", "LOAD", "ADD"},
+    TestID -> "uop-load/linearizer-prepends-load-per-input"
+]
