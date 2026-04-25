@@ -313,10 +313,34 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       stub, anything else (including unset) defaults to CPU.
       tests/test_metal_stub.c covers the swap. -->
 
-- [ ] one Metal kernel at a time, in this order: CONST, ADD, MUL,
-      NEG, REDUCE_SUM, EXPAND, RESHAPE, MUL+REDUCE (matmul shape).
-      Each is its own `[ ]`; each ships with a numeric test against
-      the CPU backend.
+- [ ] **Metal build + init infrastructure**.  Makefile rules for
+      `.m` (compile with `clang -fobjc-arc`) and `.metal` (compile
+      with `xcrun -sdk macosx metal`), Darwin-gated.  Replace
+      stub `src/backend/metal/_.c` with `_.m` glue that opens an
+      `MTLDevice`, loads the per-shader metallib, and exposes a
+      smoke `metal_init` that succeeds.  Deliverable: build
+      passes on macOS, `THVM_BACKEND=metal` thvm_init returns
+      without error.  Likely sub-decompose at execution time.
+- [ ] **Metal buffer ops**.  `metal_buf_alloc` returns an
+      `id<MTLBuffer>` (cast through u32 buf_id); `metal_buf_free`
+      releases it.  `metal_buf_write` / `metal_buf_read` blit
+      between host bytes and the buffer.  Test: parity with the
+      CPU backend on a write-then-read round-trip.
+- [ ] **CONST kernel + dispatch entry point**.  First real Metal
+      kernel; establishes the `metal_dispatch_kernel` routing
+      table (op -> pipeline state).  `const.metal` shader fills
+      the output buffer with a constant.  Parity test: same
+      output as CPU's `cpu_op_const`.
+- [ ] **Elementwise Metal kernels** (ADD, MUL, NEG, RECIP, SQRT,
+      EXP2, LOG2, CMPLT).  All share a uniform "one thread per
+      output element" template; one MSL file per op (or templated
+      in a single file).  Parity tests vs CPU on each.  Likely
+      sub-decompose at execution time.
+- [ ] **Reduction + movement Metal kernels** (REDUCE_SUM,
+      REDUCE_MAX, EXPAND, RESHAPE) plus the **MUL+REDUCE matmul
+      shape** that LinearLayer hits hot.  Parity tests vs CPU.
+      Once this lands the LeNet forward + Adam training loop
+      runs end-to-end on Metal.
 
 ## Phase 6 — end-to-end
 
