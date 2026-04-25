@@ -121,9 +121,7 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
             ke->input_tids  [slot] = child_tids[i];
             ke->input_terms [slot] = child_terms[i];
             ke->input_dtypes[slot] = child_dtypes[i];
-            u32 numel = 1;
-            for (u32 d = 0; d < child_shapes[i].ndim; d++) numel *= child_shapes[i].dims[d];
-            ke->input_numels[slot] = numel;
+            ke->input_numels[slot] = shape_numel(child_shapes[i]);
         }
         src_slot[i] = (u8)slot;
     }
@@ -139,10 +137,8 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     } else {
         out_shape = child_shapes[0];
         if (uop_is_binary_elementwise(op) && arity >= 2) {
-            u32 n0 = 1;
-            for (u32 d = 0; d < child_shapes[0].ndim; d++) n0 *= child_shapes[0].dims[d];
-            u32 n1 = 1;
-            for (u32 d = 0; d < child_shapes[1].ndim; d++) n1 *= child_shapes[1].dims[d];
+            u32 n0 = shape_numel(child_shapes[0]);
+            u32 n1 = shape_numel(child_shapes[1]);
             if (n0 == 1 && n1 > 1) out_shape = child_shapes[1];
         }
         if (op == UOP_REDUCE) {
@@ -172,8 +168,7 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     u32 out_dtype = (arity == 0) ? const_dtype : child_dtypes[0];
     ke->output_shape = out_shape;
     ke->output_dtype = out_dtype;
-    u32 out_numel = 1;
-    for (u32 i = 0; i < out_shape.ndim; i++) out_numel *= out_shape.dims[i];
+    u32 out_numel = shape_numel(out_shape);
     ke->output_numel = out_numel;
     ke->output_tid   = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
     TENS[ke->output_tid].producer_kid = kid;

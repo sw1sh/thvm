@@ -75,6 +75,7 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "term/resolve.c"
 
 // === view/ ===
+#include "view/shape_numel.c"
 #include "view/create.c"
 
 // === backend/cpu/ ===

@@ -365,6 +365,7 @@ fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).
 fn View view_create(Shape shape);
+fn u32  shape_numel(Shape s);
 
 // === uop/ ===
 // Constructors for raw UOp graph nodes.  Each helper allocates the

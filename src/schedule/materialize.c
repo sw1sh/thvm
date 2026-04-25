@@ -19,10 +19,6 @@
 
 // --- helpers ---
 
-fn u8 uop_is_leaf(u8 op) {
-  return op == UOP_CONST;
-}
-
 fn u8 uop_arity(u8 op) {
   switch (op) {
     case UOP_CONST:
@@ -217,8 +213,7 @@ fn Term materialize_expr(Term expr) {
   u32   out_dtype   = op_output_dtype(op, child_tids, arity, const_dtype);
   ke->output_shape = out_shape;
   ke->output_dtype = out_dtype;
-  u32 out_numel = 1;
-  for (u32 i = 0; i < out_shape.ndim; i++) out_numel *= out_shape.dims[i];
+  u32 out_numel = shape_numel(out_shape);
   ke->output_numel = out_numel;
   ke->output_tid   = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
   TENS[ke->output_tid].producer_kid = kid;
@@ -250,9 +245,6 @@ fn Term materialize_expr(Term expr) {
   ke->source_uop = expr;                  // for grad walks via the original UOp
   return term_new(0, TAG_UOP, UOP_KERNEL, kloc);
 }
-
-// Forward declarations -- defined in walk.c after this file.
-Term materialize_walk(Term root);
 
 fn Term thvm_materialize(Term term) {
   // Heap-walk materializer: scans reachable cells (through LAM / APP /

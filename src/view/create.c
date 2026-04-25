@@ -8,9 +8,7 @@ fn View view_create(Shape shape) {
   v.shape      = shape;
   v.offset     = 0;
   v.contiguous = 1;
-  u32 numel = 1;
-  for (u32 i = 0; i < shape.ndim; i++) numel *= shape.dims[i];
-  v.numel = numel;
+  v.numel = shape_numel(shape);
   i32 stride = 1;
   for (i32 i = (i32)shape.ndim - 1; i >= 0; i--) {
     v.strides[i] = stride;
