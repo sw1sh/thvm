@@ -85,3 +85,30 @@ VerificationTest[
     {2, 3, "LOAD", "LOAD", "ADD"},
     TestID -> "uop-load/linearizer-prepends-load-per-input"
 ]
+
+(* === sub-item (d): backends honor LOAD as a no-op ===
+   The CPU interpret loop now skips prefix-LOAD program ops; Metal
+   already addresses program[n_inputs] directly so it never sees them.
+   Verify a 2-input ADD still produces the right elementwise sum
+   despite the LOAD prefix. *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+    Normal @ TTensorData @ TRealize @ TUOpAdd[a, b],
+    {5.0, 7.0, 9.0},
+    TestID -> "uop-load/2-input-add-correct-with-load-prefix"
+]
+
+(* TUOpLoad as the user-intended op (the FINAL program op) still
+   runs the cpu_op_load memcpy and writes its output -- only
+   prefix-LOADs are skipped. *)
+VerificationTest[
+    TInit[];
+    a   = TTensorCreate @ NumericArray[{7.0, 8.0, 9.0}, "Real32"];
+    out = TRealize @ TUOpLoad[a];
+    Normal @ TTensorData[out],
+    {7.0, 8.0, 9.0},
+    TestID -> "uop-load/final-op-load-still-writes-output"
+]

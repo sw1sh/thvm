@@ -2108,7 +2108,7 @@ Realistic close-out for the overnight cron loop:
         216 WL + 146 C tests green. -->
 
 
-  - [ ] **d. Both backends honor LOAD as input-slot read**.
+  - [x] **d. Both backends honor LOAD as input-slot read**.
         CPU + Metal kernel runners need a no-op handler for
         LOAD entries: they already bind input buffers to
         slots, so LOAD just confirms "this slot has been
@@ -2116,6 +2116,19 @@ Realistic close-out for the overnight cron loop:
         same output before and after introducing LOAD
         entries.  Metal-real parity test mirrors it.
         ~40 LOC across both backends.
+        <!-- Landed.  CPU interpret skips prefix-LOAD ops
+        (`if (p->opcode == UOP_LOAD && step + 1 < ke->n_ops)
+        continue;`) -- no scratch allocation, no memcpy.  The
+        FINAL LOAD (when LOAD is the user-intended op via
+        TUOpLoad) still runs cpu_op_load to write the output
+        buffer.  Metal already skips the prefix entirely
+        because metal_dispatch_kernel addresses
+        `program[n_inputs]` directly (handled in sub-item c).
+        Two new wlt assertions: 2-input-add-correct-with-
+        load-prefix and final-op-load-still-writes-output.
+        218 WL + 146 C tests green; lenet-mnist forward.wls
+        still works end-to-end. -->
+
 
   - [ ] **e. End-to-end LOAD smoke through training**.
         Re-run the lenet-mnist verify.wls + nn.wlt with
