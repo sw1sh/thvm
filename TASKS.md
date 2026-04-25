@@ -104,11 +104,26 @@ concern that interact_grad currently doesn't cover for any of these):
       `NetApply[ReshapeLayer[shape]]`.
 - [x] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or
       rank-2 with explicit batch axis).
+- [ ] **REDUCE axis bug**: `cpu_op_reduce` ignores its `axis` arg
+      and reduces consecutive groups (effectively the innermost
+      axis only).  Discovered while implementing PoolingLayer
+      non-overlap: `RESHAPE {1,4,4} -> {1,2,2,2,2}` then
+      `REDUCE axis=2 (kh)` returns the wrong groups -- a 4x4
+      max-pool returns `{{4,8},{12,16}}` instead of `{{6,8},
+      {14,16}}`.  Fix needs to compute strides from the input
+      shape + axis index; the `oi*group + j` loop only works when
+      axis is the last one.  Plus a regression test in
+      `tests/test_grad.c` (or a new `tests/test_reduce.c`)
+      covering axis=0 and axis=middle on a rank-3 input.
+      <!-- Existing tests pass because they only reduce rank-1
+      tensors (axis=0 == innermost trivially) or use REDUCE_SUM
+      where the bug is masked when all reduced groups happen to
+      be contiguous in memory anyway. -->
 - [ ] `PoolingLayer[k, k, "Function" -> Max]` 2-D forward, NON-
-      overlapping case only (Stride = KernelSize).  Channels-first
-      input shape {C, H, W} -> reshape to {C, H/k, k, W/k, k} -> two
-      REDUCE_MAX (axis 2 then 3) -> {C, H/k, W/k}.  REDUCE_MAX is
-      already supported by the C interpreter (cpu/op/reduce.c).
+      overlapping case only (Stride = KernelSize).  DEPENDS ON the
+      REDUCE-axis fix above.  Channels-first input shape {C, H, W}
+      -> reshape to {C, H/k, k, W/k, k} -> two REDUCE_MAX (axis 2
+      then 3 in the reshape's new index space) -> {C, H/k, W/k}.
       Refuse the overlapping case in this fire by returning a
       Failure["NotImplemented"] when Stride != KernelSize.  Test
       against NetApply on a small input.
