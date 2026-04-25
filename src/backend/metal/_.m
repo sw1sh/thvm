@@ -234,6 +234,23 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     u32 nm = ke->input_numels[i];
     [enc setBytes:&nm length:sizeof(nm) atIndex:(2 + ke->n_inputs + i)];
   }
+  // Movement-op shape info (currently EXPAND only): pack
+  // src0_ndim/src0_dims and out_ndim/out_dims as uint arrays of
+  // length 1+MAX_DIM so the shader can walk axes without re-
+  // deriving shape from numels.  Slot indices live just past the
+  // input + numels block.
+  if (p->opcode == UOP_EXPAND) {
+    u32 src0[1 + MAX_DIM] = {0};
+    u32 outd[1 + MAX_DIM] = {0};
+    src0[0] = p->src0_ndim;
+    outd[0] = p->out_ndim;
+    for (u32 i = 0; i < MAX_DIM; i++) src0[1 + i] = p->src0_dims[i];
+    for (u32 i = 0; i < MAX_DIM; i++) outd[1 + i] = p->out_dims [i];
+    [enc setBytes:src0 length:sizeof(src0)
+          atIndex:(2 + 2 * ke->n_inputs)];
+    [enc setBytes:outd length:sizeof(outd)
+          atIndex:(2 + 2 * ke->n_inputs + 1)];
+  }
   NSUInteger n = (NSUInteger)p->numel;
   if (n == 0) n = 1;
   NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);

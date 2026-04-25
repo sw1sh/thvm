@@ -982,13 +982,26 @@ Realistic close-out for the overnight cron loop:
       Metal .o cleanly.  All 365 C + 172 WL tests stay green. -->
 
 
-- [ ] **Mirror axis-aware EXPAND in the Metal shader**.
+- [x] **Mirror axis-aware EXPAND in the Metal shader**.
       `src/backend/metal/shaders/movement.metal`
       `thvm_expand` currently just memcpys (it only handles
       the in_numel == out_numel case correctly).  Apply the
       same stride logic as the CPU op and add a Metal-vs-CPU
       parity test in `tests/test_metal_real.c` covering the
       same broadcast patterns.
+      <!-- Implemented.  metal_dispatch_kernel packs src0_ndim+
+      src0_dims and out_ndim+out_dims into two new buffers
+      (slots 2+2*n_inputs and 2+2*n_inputs+1) for opcode ==
+      UOP_EXPAND only -- non-EXPAND shaders are untouched.
+      thvm_expand shader walks the same per-axis stride logic
+      as cpu_op_expand: scalar / identity fast paths first,
+      then axis-aware path when ranks match, then legacy cycle
+      fallback.  Two new Metal-vs-CPU parity tests in
+      test_metal_real.c: leading-axis ({2,1}->{2,3}) and
+      trailing-axis ({1,3}->{2,3}).  Both backends now produce
+      identical broadcast results.  Test count: test_metal_real
+      grew from 88 to 104.  All 381 C + 172 WL tests stay green. -->
+
 
 - [ ] **Re-enable the 2x2-pool-style REDUCE_MAX grad probe**
       in `wl/THVMLink/Tests/grad.wlt` once the EXPAND fix

@@ -295,6 +295,76 @@ int main(void) {
 
   for (int i = 0; i < 6; i++) CHECK(cpu_m[i] == gpu_m[i]);
 
+  // === EXPAND axis-aware parity: leading- vs trailing-axis ===
+  // Leading-axis broadcast {2,1} -> {2,3} should yield {a,a,a,b,b,b}
+  // on both backends.  Pre-fix the Metal shader cycled in_numel,
+  // producing {a,b,a,b,a,b}.
+  TEST_BEGIN("metal-real/expand-leading-axis-parity");
+  Shape s_la = {0}; s_la.ndim = 2; s_la.dims[0] = 2; s_la.dims[1] = 1;
+  f32 src_la[2] = {3.0f, 7.0f};
+  f32 cpu_la[6], gpu_la[6];
+  u32 to_la[2] = {2, 3};
+
+  unsetenv("THVM_BACKEND"); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_la, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_la, sizeof(src_la));
+    Term done = wnf(thvm_materialize(uop_expand(
+        term_new(0, TAG_TEN, DT_F32, t), 2, to_la)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              cpu_la, sizeof(cpu_la));
+  }
+  thvm_free();
+
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_la, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_la, sizeof(src_la));
+    Term done = wnf(thvm_materialize(uop_expand(
+        term_new(0, TAG_TEN, DT_F32, t), 2, to_la)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              gpu_la, sizeof(gpu_la));
+  }
+  thvm_free();
+
+  // Both backends should now produce {3,3,3,7,7,7}.
+  for (int i = 0; i < 6; i++) CHECK(cpu_la[i] == gpu_la[i]);
+  CHECK(cpu_la[0] == 3.0f && cpu_la[2] == 3.0f);
+  CHECK(cpu_la[3] == 7.0f && cpu_la[5] == 7.0f);
+
+  // Trailing-axis broadcast {1,3} -> {2,3} -- each row is the source.
+  TEST_BEGIN("metal-real/expand-trailing-axis-parity");
+  Shape s_ta = {0}; s_ta.ndim = 2; s_ta.dims[0] = 1; s_ta.dims[1] = 3;
+  f32 src_ta[3] = {1.0f, 2.0f, 3.0f};
+  f32 cpu_ta[6], gpu_ta[6];
+  u32 to_ta[2] = {2, 3};
+
+  unsetenv("THVM_BACKEND"); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_ta, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_ta, sizeof(src_ta));
+    Term done = wnf(thvm_materialize(uop_expand(
+        term_new(0, TAG_TEN, DT_F32, t), 2, to_ta)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              cpu_ta, sizeof(cpu_ta));
+  }
+  thvm_free();
+
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_ta, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_ta, sizeof(src_ta));
+    Term done = wnf(thvm_materialize(uop_expand(
+        term_new(0, TAG_TEN, DT_F32, t), 2, to_ta)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              gpu_ta, sizeof(gpu_ta));
+  }
+  thvm_free();
+
+  for (int i = 0; i < 6; i++) CHECK(cpu_ta[i] == gpu_ta[i]);
+  CHECK(cpu_ta[0] == 1.0f && cpu_ta[1] == 2.0f && cpu_ta[2] == 3.0f);
+  CHECK(cpu_ta[3] == 1.0f && cpu_ta[4] == 2.0f && cpu_ta[5] == 3.0f);
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }
