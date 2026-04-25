@@ -20,18 +20,18 @@ section.  bm5 confirms the prediction with a clean side-by-side.
 
 ## Side-by-side
 
-| bench                          | backend | metric              | bm3 baseline | post-bm4abc | post-hrp | post-gc |     Δ-gc |
-| ------------------------------ | ------- | ------------------- | ------------ | ----------- | -------- | ------- | -------: |
-| lenet-mnist (Adam step)        | CPU     | ms/step             |          6.9 |         7.0 |      7.9 |     8.0 |      +1% |
-| lenet-mnist (Adam step)        | CPU     | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |       0% |
-| lenet-mnist (Adam step)        | CPU     | total_live KiB      |       4087.4 |      4087.4 |   4087.4 |  4087.4 |       0% |
-| lenet-mnist (Adam step)        | CPU     | kernels             |          455 |         455 |      455 |     455 |       0% |
-| lenet-mnist (Adam step)        | Metal   | ms/step             |         85.8 |       100.9 |     95.9 |   103.0 |      +7% |
-| lenet-mnist (Adam step)        | Metal   | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |       0% |
-| beautiful-mnist (forward only) | CPU     | ms/step             |        175.1 |       179.6 |    175.4 |   214.2 |     +22% |
-| beautiful-mnist (forward only) | CPU     | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |       0% |
-| beautiful-mnist (forward only) | Metal   | ms/step             |        245.5 |       250.6 |    249.8 |   232.4 |      -7% |
-| beautiful-mnist (forward only) | Metal   | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |       0% |
+| bench                          | backend | metric              | bm3 baseline | post-bm4abc | post-hrp | post-gc | post-wpt |    Δ-wpt |
+| ------------------------------ | ------- | ------------------- | ------------ | ----------- | -------- | ------- | -------- | -------: |
+| lenet-mnist (Adam step)        | CPU     | ms/step             |          6.9 |         7.0 |      7.9 |     8.0 |      9.5 |     +19% |
+| lenet-mnist (Adam step)        | CPU     | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |   1882.3 |       0% |
+| lenet-mnist (Adam step)        | CPU     | total_live KiB      |       4087.4 |      4087.4 |   4087.4 |  4087.4 |   4086.7 |       0% |
+| lenet-mnist (Adam step)        | CPU     | kernels             |          455 |         455 |      455 |     455 |      455 |       0% |
+| lenet-mnist (Adam step)        | Metal   | ms/step             |         85.8 |       100.9 |     95.9 |   103.0 |     92.6 |     -10% |
+| lenet-mnist (Adam step)        | Metal   | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |   1882.3 |       0% |
+| beautiful-mnist (forward only) | CPU     | ms/step             |        175.1 |       179.6 |    175.4 |   214.2 |    176.5 |     -18% |
+| beautiful-mnist (forward only) | CPU     | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |  82750.3 |       0% |
+| beautiful-mnist (forward only) | Metal   | ms/step             |        245.5 |       250.6 |    249.8 |   232.4 |    245.3 |      +6% |
+| beautiful-mnist (forward only) | Metal   | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |  82750.3 |       0% |
 
 (`Δ-gc` is post-gc vs post-hrp.  Wall-time deltas are
 run-to-run jitter; the +22% on CPU beautiful-mnist is
@@ -126,6 +126,67 @@ direct and the obvious next arc.  The bm4 + hrp + gc
 infrastructure stays in place; flipping the heap-rooted
 overlay off in `mark_gc_preserve` and adding the WL-pin
 roots is a ~10 LOC change once the side table exists.
+
+## wpt4: post-WL-pinned-Terms delta (UPDATED)
+
+wpt1-wpt3 landed the WL-pinned-Terms side table end-to-end:
+the pin table populated by every Term-producing bridge site,
+folded into `gc_collect_roots` as a fourth root source, and the
+defensive heap-rooted overlay dropped from `mark_gc_preserve`.
+The bench delta vs post-gc is **STILL zero** on every memory
+metric.  Wall-time deltas are run-to-run jitter (Metal lenet
+-10%, CPU beautiful -18%, etc.); memory deltas are deterministic
+and identical to baseline.
+
+Why the savings still didn't materialize: every TTerm wrapper
+the WL training loop creates within one step gets pinned (h1,
+r1, p1, h2, r2, p2, flat, h3, r3, h4, probs, target, loss, plus
+each of the 8 weight gradient roots) and stays pinned until the
+next `TInit[]; TReset[]` clears the table.  The pin set is
+effectively "every TTerm WL ever touched this step" -- which is
+the same conservative coverage the heap-rooted overlay gave us.
+The trace from these roots reaches every forward intermediate's
+`buf_id`, so `pool_rollback_with_preserve` still flags every
+non-final buf as preserved, the freelist still receives 0
+entries, the slot allocator still has nothing to recycle.
+
+Correctness preserved:
+
+- `verify.wls` on Metal: loss 2.61 → 0.025 in 4 Adam steps;
+  pred 0 → 4; prob[true] 0.074 → 0.997.
+- 166 C tests + 270 WL tests green.
+
+The wpt2 export `TTermUnpin[t]` opens the door: if the WL
+training loop calls `TTermUnpin` on each forward intermediate
+the moment it's no longer needed (e.g., after the corresponding
+backward gradient is computed), the pin set shrinks to just the
+final loss + the 8 grads, which would let the rollback push
+intermediates to the freelist.  But that's a WL-side
+restructuring, not a runtime change -- the runtime infrastructure
+is now complete and ready for that callsite to land.
+
+Three plausible next directions if the savings are still wanted:
+
+1. **Eager TTermUnpin in the WL training loops**.  Restructure
+   `verify.wls` / `train.wls` / `lenet-mnist` examples to call
+   `TTermUnpin` on intermediates as soon as their backward pass
+   completes.  Probably ~30 LOC + measure.  The infrastructure
+   for this is in place; this is purely a WL-side caller change.
+
+2. **Auto-unpin on WL TTerm garbage-collection**.  Wire a
+   `__del__`-style callback so when WL drops a TTerm wrapper
+   reference, the pin gets released automatically.  Wolfram has
+   `Internal`Bag` / `OwnValues` patterns that approximate this
+   but no clean GC hook.  Likely 50-100 LOC of WL-bridge
+   trickery.
+
+3. **Lifetime-aware schedule**.  Instead of relying on the
+   preserve walk to free anything, make the schedule itself
+   compute per-buf last-use and emit explicit "free buf X here"
+   ops.  Effectively what TMemoryPlan computes in WL post-hoc;
+   moving it into the runtime would let the slot allocator
+   recycle without depending on conservative root sets.  Largest
+   change but the most direct fix.
 
 ## Reproducing
 

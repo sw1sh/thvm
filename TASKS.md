@@ -4183,7 +4183,7 @@ sub-items once these land.
              correct, prob[true] 0.074 -> 0.997). -->
 
 
-  - [ ] **wpt4: bench delta + docs**.  Re-run
+  - [x] **wpt4: bench delta + docs**.  Re-run
         wl/Examples/_bench/baseline.wls on both backends.
         Acceptance: peak_concurrent_kib drops at least 30%
         on lenet-mnist (the bm4 / bm5 / hrp3 / gc4
@@ -4192,6 +4192,21 @@ sub-items once these land.
         with a fifth column (post-wpt) + delta vs post-gc.
         If savings finally land, document the win.  If they
         don't, document the residual blocker.  ~20 LOC + doc.
+        <!-- DONE: peak_concurrent_kib STILL 1882.3 (lenet) /
+             82750.3 (beautiful) -- zero memory delta.  Root
+             cause: every TTerm WL creates within a step
+             (h1..h4, r1..r3, p1, p2, flat, probs, loss, all 8
+             grads) is pinned and stays pinned until the next
+             TInit/TReset, so the pin set is effectively "all
+             intermediates" -- equivalent to the heap-rooted
+             overlay it replaced.  TTermUnpin export from wpt2
+             is the unblock: WL-side restructuring to drop pins
+             eagerly would let the freelist actually receive
+             intermediate slots.  bench-results.md updated
+             with post-wpt column + 3 directions for the
+             real fix.  Verification: 166 C + 270 WL green;
+             verify.wls Metal LeNet still converges. -->
+
 
 
 
