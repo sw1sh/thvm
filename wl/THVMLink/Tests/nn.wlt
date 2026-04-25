@@ -309,3 +309,23 @@ VerificationTest[
     Round[{-0.7615941560, 0.0, 0.7615941560}, 0.0001],
     TestID -> "nn/tanh-via-ElementwiseLayer-Tanh"
 ]
+
+(* === ReshapeLayer forward via TFromNet === *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, "Real32"];
+    r = TRealize @ TFromNet[ReshapeLayer[{2, 3}], x];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{2, 3}, {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}},
+    TestID -> "nn/reshape-layer-1d-to-2d"
+]
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{{1.0, 2.0}, {3.0, 4.0}, {5.0, 6.0}}, "Real32"];
+    r = TRealize @ TFromNet[ReshapeLayer[{6}], x];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{6}, {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}},
+    TestID -> "nn/reshape-layer-2d-to-1d-flatten"
+]

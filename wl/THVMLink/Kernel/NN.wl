@@ -92,6 +92,7 @@ TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
 $layerParams[LinearLayer]      = {"Weights", "Biases"}
 $layerParams[ConvolutionLayer] = {"Weights", "Biases"}
 $layerParams[ElementwiseLayer] = {}
+$layerParams[ReshapeLayer]     = {}
 $layerParams[_]                = {}
 
 TLayerWeights[layer_] :=
@@ -131,6 +132,15 @@ $elementwiseDispatch = <|
     Ramp           -> TReLU,
     Tanh           -> TTanh
 |>;
+
+(* ReshapeLayer[shape]: target shape via `NetExtract[layer, "Output"]`.
+   Note that for a rank-1 target (e.g. ReshapeLayer[{6}]) NetExtract
+   returns a bare Integer; wrap into {n} so TUOpReshape always sees
+   a dim list.  Forward only; no grad rule for RESHAPE yet. *)
+fromLayer[ReshapeLayer, layer_, x_TTerm] :=
+    With[{out = NetExtract[layer, "Output"]},
+        TUOpReshape[x, If[ListQ[out], out, {out}]]
+    ]
 
 fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op},
     f  = NetExtract[layer, "Function"];

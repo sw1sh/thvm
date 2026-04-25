@@ -99,7 +99,7 @@ concern that interact_grad currently doesn't cover for any of these):
       product against input numel rather than encoding ndim in
       ext (kept the all-UOPs ext-is-opcode invariant). -->
 
-- [ ] `ReshapeLayer` forward.  Once the runtime supports RESHAPE,
+- [x] `ReshapeLayer` forward.  Once the runtime supports RESHAPE,
       add the dispatch in NN.wl and a nn.wlt test against
       `NetApply[ReshapeLayer[shape]]`.
 - [ ] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or
