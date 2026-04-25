@@ -75,6 +75,17 @@ int main(void) {
   CHECK_EQ(term_ext(rhs), UOP_NEG);
   CHECK_EQ(heap_read(term_val(rhs)), b);
 
+  TEST_BEGIN("uop/conv2d-heap-layout-three-cells");
+  Term inp = term_new(0, TAG_TEN, DT_F32, 3);
+  Term wt  = term_new(0, TAG_TEN, DT_F32, 4);
+  Term bs  = term_new(0, TAG_TEN, DT_F32, 5);
+  Term cv  = uop_conv2d(inp, wt, bs);
+  CHECK_EQ(term_tag(cv), TAG_UOP);
+  CHECK_EQ(term_ext(cv), UOP_CONV2D);
+  CHECK_EQ(heap_read(term_val(cv) + 0), inp);
+  CHECK_EQ(heap_read(term_val(cv) + 1), wt);
+  CHECK_EQ(heap_read(term_val(cv) + 2), bs);
+
   thvm_free();
   TEST_REPORT();
 }

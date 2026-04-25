@@ -148,10 +148,14 @@ concern that interact_grad currently doesn't cover for any of these):
       represent.  The training loop calls it manually, same way
       sgd.wlt does TL2Loss. -->
 
-- [ ] add `UOP_CONV2D` opcode + `uop_conv2d` constructor in
+- [x] add `UOP_CONV2D` opcode + `uop_conv2d` constructor in
       `src/uop/conv2d.c` -- heap layout `[input, weights, bias]`
       with stride / kernel size encoded in `arg`.  Plus thvm.h
       opcode constant.  Mirrors how existing UOPs are wired.
+      <!-- Skipped the `arg` encoding -- recover kernel size from
+      weights.shape at materialize time.  Construction stays
+      shape-agnostic. -->
+
 - [ ] plumb UOP_CONV2D through `materialize_in_env.c` (output
       shape calc: {C_out, H_out, W_out} for valid conv2d) and
       `wl/THVMLink/Kernel/THVMLink.wl` `uopCellCount`.  Plus the
