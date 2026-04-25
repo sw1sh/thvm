@@ -1775,6 +1775,41 @@ Realistic close-out for the overnight cron loop:
         gradient at that index) to determine which side is
         wrong.  Only then can sub-item (c) safely flip
         TUOpConv2D to dispatch via the lowered chain. -->
+        <!-- attempt 2: finite-diff (h=0.001, central diff)
+        cross-check confirmed bespoke is correct, lowered is
+        wrong.  Pinned the lowered-chain failure mode:
+        gW[c_out, ci, ki, kj] = input[ci, ki, kj] (a single
+        input element at the kernel-position anchor) instead
+        of the expected sum_{h,w} input[ci, h+ki, w+kj].  In
+        symbol terms, the spatial reduce is being lost
+        somewhere in the autograd-emitted chain.
+            Bisected to a single partial: TGrad on
+        REDUCE3(REDUCE3(REDUCE3(REDUCE_SUM(MUL(xB, wB),
+        axis=1), 0), 0), 0) wrt weights returns
+        gW[ci, ki, kj] = input[ci, ki, kj] (single element).
+        BUT manually constructing the structurally-identical
+        chain by hand and TRealize-ing it gives the CORRECT
+        answer (sum = 12 for the standard 3x3-input/2x2-kernel
+        case).  So TGrad must be emitting a different graph
+        than the structural autograd I traced on paper.  Also
+        observed: a prefix `TRealize @ subexpr` call before
+        TGrad sometimes gives the right answer (presumably
+        because the materializer mutates the original UOPs to
+        UOP_KERNELs in place, and the GRAD walker takes the
+        UOP_KERNEL branch which differs from the per-op
+        rules); state-pollution like that is consistent with
+        the symptoms.
+            Investigation exceeded fire budget.  Next-fire
+        plan: dump the actual TGrad-emitted term tree (via
+        TTermTree on the result before TRealize) and compare
+        node-by-node with the manual replication to find the
+        divergent node.  Likely culprits: REDUCE_SUM grad's
+        EXPAND-RESHAPE-EXPAND lift idiom interacting with
+        EXPAND grad's REDUCE_SUM-along-axes idiom, or the
+        SHRINK rule's EXPAND from rank-2 to rank-4 producing
+        the wrong layout under a sequence of nested REDUCE
+        cotangents. -->
+
 
 
   - [ ] **c. Switch TUOpConv2D internals to the lowered chain**.
