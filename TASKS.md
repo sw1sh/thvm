@@ -2620,11 +2620,23 @@ Realistic close-out for the overnight cron loop:
           biggest absolute consumer is conv2's 25 partial
           buffers (~600 KiB/step). -->
 
-- [ ] **Reuse-pass implementations** (queued from the
+- [x] **Reuse-pass implementations** (queued from the
       memory-footprint audit; see docs/memory.md).
       Each is a follow-up to the analysis above; each
       should be opened as its own decomposable arc when
       it becomes the topmost task.
+      <!-- All 4 sub-arcs landed across multiple cron fires:
+      Per-step buffer pool (a/b/c) -- infra solid, zero savings
+      pending heap-rooted preserve.
+      Refcount-driven free (a/b/c) -- consumer-count pass,
+      decref hook + freeable mark, integration into
+      thvm_realize; rollback swap awaits heap-rooted preserve.
+      Movement-op view-only (f3d/e/f/g) -- SHRINK + PERMUTE +
+      FLIP alias paths, PAD intentional opt-out.
+      Adam-state arena -- TAdamSession{Init,Step,Drop} session
+      store eliminates caller-threaded m/v alloc churn.
+      252 C + 251 WL tests green at arc close. -->
+
 
   - [x] **Per-step buffer pool (arc)**.  Add a high-water-
         mark allocator that frees per-materialize bufs at
@@ -3036,5 +3048,9 @@ Realistic close-out for the overnight cron loop:
         independent keys do not interfere, drop-then-step
         returns $Failed, multi-tensor parity.
         252 C + 251 WL tests green. -->
+
+
+All TASKS.md items complete on 2026-04-25 (cron-loop fire that closed the reuse-pass arc parent).
+
 
 
