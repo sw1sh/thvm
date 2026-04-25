@@ -1600,27 +1600,55 @@ Realistic close-out for the overnight cron loop:
       smoke-tested end-to-end. -->
 
 
-- [ ] **interact_grad rules for SHRINK / PAD / PERMUTE / FLIP**.
+- [ ] **interact_grad rules for SHRINK / PAD / PERMUTE / FLIP (arc)**.
       Currently autograd through any movement op other than
       RESHAPE / EXPAND falls into the unhandled-default branch
       and emits grad_zero -- meaning a tinygrad-style CONV2D
       lowering (which uses SHRINK + PAD + PERMUTE) silently
       loses gradients.  Prerequisite for the TUOpConv2D
       lowering below.
-      Per-rule sketches:
-        - SHRINK[a, ranges].  Forward extracts a sub-region.
-          Gradient: PAD the cotangent with zeros on the same
-          axes / widths complementary to what SHRINK kept.
-        - PAD[a, widths].  Forward zero-pads.  Gradient:
-          SHRINK the cotangent back to the unpadded extent.
-        - PERMUTE[a, perm].  Forward reorders axes.  Gradient:
-          PERMUTE the cotangent by the inverse permutation.
-        - FLIP[a, mask].  Forward mirrors selected axes.
-          Gradient: FLIP the cotangent on the same axes (FLIP
-          is its own inverse).
-      Each is ~10-15 LOC + a structural test in
-      tests/test_grad.c + a numerical test in grad.wlt.  Will
-      decompose into per-op sub-items on the next fire.
+
+  - [ ] **a. SHRINK grad rule.**  Forward
+        `SHRINK(a, ranges)` extracts a sub-region.  Gradient:
+        `PAD(cotangent, complementary_widths)` zero-fills back
+        to the original extent (left-pad = range[0], right-pad
+        = full_dim - range[1]).  Land in src/interact/uop_grad.c
+        next to the existing RESHAPE/EXPAND case branches.  Tests:
+          (i) tests/test_grad.c: structural -- TGrad[SHRINK(x),
+              x] reduces to a PAD UOP applied to the seed.
+          (ii) wl/THVMLink/Tests/grad.wlt: numerical -- a 1-D
+               SHRINK[x, {{1,4}}] over a length-5 tensor
+               produces grad = [0, 1, 1, 1, 0] (when seed = 1
+               on the 3-element output).
+        ~25 LOC of C + ~20 LOC of tests.
+
+  - [ ] **b. PAD grad rule.**  Forward `PAD(a, widths)`
+        zero-pads.  Gradient: `SHRINK(cotangent, ranges)` where
+        each axis range is `{widths[2k], widths[2k] + orig_dim}`.
+        Tests mirror sub-item (a): structural assertion + a
+        wlt numerical check that a 1-D PAD of x:{2} with widths
+        {1,1} backprops a length-2 grad equal to the inner
+        slice of the seed.  ~25 LOC + ~20 LOC of tests.
+
+  - [ ] **c. PERMUTE grad rule.**  Forward `PERMUTE(a, perm)`
+        reorders axes.  Gradient: `PERMUTE(cotangent, inv_perm)`
+        where inv_perm[perm[i]] = i.  Tests: structural +
+        a 2-D wlt check using {2, 3} -> permute(1, 0) -> {3, 2}
+        verifies the gradient is a permute(1, 0) of the seed.
+        ~20 LOC + ~15 LOC of tests.
+
+  - [ ] **d. FLIP grad rule.**  Forward `FLIP(a, mask)` mirrors
+        selected axes.  Gradient: `FLIP(cotangent, mask)` (FLIP
+        is its own inverse, so mask is preserved).  Tests:
+        structural + 1-D wlt with mask = 1 confirms grad equals
+        FLIP(seed).  ~15 LOC + ~15 LOC of tests.
+
+  - [ ] **e. End-to-end smoke for the lowered conv2d arc.**  After
+        (a)-(d) land, draft a small wlt that builds a SHRINK +
+        PERMUTE + PAD chain manually + asserts the gradient
+        wrt input is finite and correctly shaped.  Documents
+        that the SHRINK/PAD/PERMUTE/FLIP rules compose under
+        the chain rule.  ~25 LOC of test only.
 
 - [ ] **Lower TUOpConv2D to a primitive chain**.  Replace the
       direct `uop_conv2d` call inside the WL helper TUOpConv2D
