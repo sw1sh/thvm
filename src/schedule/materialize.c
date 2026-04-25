@@ -220,12 +220,23 @@ fn Term materialize_expr(Term expr) {
 
   // 3. Linearize: for v1 every kernel has exactly one program op.
   //    Source slot 0 and slot 1 (if any) reference inputs by index.
+  //    Repack REDUCE's op_arg from (kind << 16 | axis) to
+  //    (kind << 24 | inner) -- see backend/cpu/op/reduce.c for the
+  //    runtime encoding.  inner = product of input dims AFTER the
+  //    reduced axis.
+  if (op == UOP_REDUCE && arity > 0 && child_tids[0] != 0) {
+    u32 kind = (op_arg >> 16) & 0xFFFF;
+    Shape sh = TENS[child_tids[0]].view.shape;
+    u32 inner = 1;
+    for (u32 i = reduce_axis + 1; i < sh.ndim; i++) inner *= sh.dims[i];
+    op_arg = ((kind & 0xFF) << 24) | (inner & 0x00FFFFFF);
+  }
   KProgOp *p = &ke->program[ke->n_ops++];
   p->opcode = op;
   p->dtype  = (u8)out_dtype;
   p->n_src  = arity;
   p->numel  = out_numel;
-  p->arg    = op_arg;                     // CONST bits, REDUCE kind/axis, etc.
+  p->arg    = op_arg;                     // CONST bits, REDUCE kind/inner, etc.
   for (u8 i = 0; i < arity; i++) {
     // Find which input slot this child ended up in (after dedup).
     for (u32 j = 0; j < ke->n_inputs; j++) {

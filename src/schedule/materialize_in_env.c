@@ -194,7 +194,21 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     ke->output_tid   = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
     TENS[ke->output_tid].producer_kid = kid;
 
-    // 5. Linearize program (single op).
+    // 5. Linearize program (single op).  For REDUCE, repack op_arg
+    //    from (kind << 16 | axis) -- which the shape calc above
+    //    needed -- to (kind << 24 | inner) where inner = product
+    //    of input dims AFTER the reduced axis.  cpu_op_reduce
+    //    needs `inner` (not `axis`) to stride correctly over a
+    //    non-innermost axis.
+    if (op == UOP_REDUCE && arity > 0) {
+        u32 kind = (op_arg >> 16) & 0xFFFF;
+        u32 axis =  op_arg        & 0xFFFF;
+        u32 inner = 1;
+        for (u32 i = axis + 1; i < child_shapes[0].ndim; i++) {
+            inner *= child_shapes[0].dims[i];
+        }
+        op_arg = ((kind & 0xFF) << 24) | (inner & 0x00FFFFFF);
+    }
     KProgOp *p = &ke->program[ke->n_ops++];
     p->opcode = op;
     p->dtype  = (u8)out_dtype;

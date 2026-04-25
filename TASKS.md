@@ -104,7 +104,7 @@ concern that interact_grad currently doesn't cover for any of these):
       `NetApply[ReshapeLayer[shape]]`.
 - [x] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or
       rank-2 with explicit batch axis).
-- [ ] **REDUCE axis bug**: `cpu_op_reduce` ignores its `axis` arg
+- [x] **REDUCE axis bug**: `cpu_op_reduce` ignores its `axis` arg
       and reduces consecutive groups (effectively the innermost
       axis only).  Discovered while implementing PoolingLayer
       non-overlap: `RESHAPE {1,4,4} -> {1,2,2,2,2}` then
@@ -115,10 +115,13 @@ concern that interact_grad currently doesn't cover for any of these):
       axis is the last one.  Plus a regression test in
       `tests/test_grad.c` (or a new `tests/test_reduce.c`)
       covering axis=0 and axis=middle on a rank-3 input.
-      <!-- Existing tests pass because they only reduce rank-1
-      tensors (axis=0 == innermost trivially) or use REDUCE_SUM
-      where the bug is masked when all reduced groups happen to
-      be contiguous in memory anyway. -->
+      <!-- Fixed: repacked op_arg at materialize time as
+      (kind << 24 | inner) where inner = product of dims after
+      the reduced axis; cpu_op_reduce strides as
+      `outer_idx * (axis_size * inner) + k * inner + inner_idx`.
+      Regression in wl/THVMLink/Tests/reduce.wlt covers axis=0
+      sum/max on rank-2 + axis=1 sum on rank-3 (the case that
+      bit pooling). -->
 - [ ] `PoolingLayer[k, k, "Function" -> Max]` 2-D forward, NON-
       overlapping case only (Stride = KernelSize).  DEPENDS ON the
       REDUCE-axis fix above.  Channels-first input shape {C, H, W}

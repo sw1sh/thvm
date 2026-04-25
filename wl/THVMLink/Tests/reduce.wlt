@@ -1,0 +1,55 @@
+(* reduce.wlt -- UOP_REDUCE with non-innermost axes.
+   Regression for the cpu_op_reduce bug where the kernel ignored
+   its axis arg and always reduced over consecutive memory groups
+   (effectively axis = ndim-1).  Materialize now repacks the op
+   as (kind << 24 | inner) where inner = product of dims after
+   the reduced axis, and the kernel strides correctly. *)
+
+(* axis=0 of a rank-2 tensor -- reduce ROWS (sum along axis 0).
+   Input:                        Sum axis 0:
+   {{1, 2, 3},   {{1+4, 2+5, 3+6},
+    {4, 5, 6}}    = {{5, 7, 9}}
+   Hand-check: rows summed elementwise. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    r = TRealize @ TUOpReduce[x, 0, "SUM"];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{3}, {5.0, 7.0, 9.0}},
+    TestID -> "reduce/axis0-rank2-sum"
+]
+
+(* axis=1 of a rank-2 tensor -- reduce COLUMNS (sum along axis 1).
+   This was always working pre-fix (axis=1 is innermost). *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    r = TRealize @ TUOpReduce[x, 1, "SUM"];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{2}, {6.0, 15.0}},
+    TestID -> "reduce/axis1-rank2-sum-innermost"
+]
+
+(* axis=1 of a rank-3 {C=2, H=3, W=4} -- reduce H (the middle axis). *)
+VerificationTest[
+    TInit[];
+    data = ArrayReshape[Range[24] * 1.0, {2, 3, 4}];
+    x = TTensorCreate @ NumericArray[data, "Real32"];
+    r = TRealize @ TUOpReduce[x, 1, "SUM"];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    (* Per-channel column sums:
+       ch 0 (rows 1..3, 5..7, 9..11): cols 1+5+9, 2+6+10, 3+7+11, 4+8+12
+       ch 1 (13..16, 17..20, 21..24): 13+17+21, 14+18+22, 15+19+23, 16+20+24 *)
+    {{2, 4}, {{15.0, 18.0, 21.0, 24.0}, {51.0, 54.0, 57.0, 60.0}}},
+    TestID -> "reduce/axis1-rank3-sum-middle"
+]
+
+(* MAX reduction with non-innermost axis. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{{1.0, 5.0, 2.0}, {4.0, 3.0, 6.0}}, "Real32"];
+    r = TRealize @ TUOpReduce[x, 0, "MAX"];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{3}, {4.0, 5.0, 6.0}},
+    TestID -> "reduce/axis0-rank2-max"
+]
