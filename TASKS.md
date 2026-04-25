@@ -3301,6 +3301,9 @@ the GOAL workflow on Metal renders too).
       probe). -->
 
 
+All TASKS.md items complete on 2026-04-25 (TMemoryPlan visualization arc closed; 252 C + 264 WL tests green; Metal Adam-LeNet still converges loss 2.61 -> 0.025).
+
+
 
 
 
