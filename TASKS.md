@@ -1165,14 +1165,34 @@ Realistic close-out for the overnight cron loop:
       weights still grad_zero. -->
 
 
+- [ ] **UOP_PERMUTE CPU + Metal kernels**.  Constructor exists
+      in src/uop/permute.c; opcode `UOP_PERMUTE = 4`; arity 1;
+      heap `[src, NUM(p0), NUM(p1), ..., NUM(p_{ndim-1})]`
+      where p[i] is the source axis index that becomes output
+      axis i.  Needed by CONV2D grad_input to swap C_out and
+      C_in axes of weights before the transposed-conv chain.
+      Implement with axis-aware indexing using the same
+      KProgOp src0_dims/out_dims plumbing that EXPAND/FLIP/PAD
+      use; output shape is the source shape with axes permuted
+      (`out_dims[i] = src0_dims[perm[i]]`).  Pack the perm
+      itself either into a new u8 array on KProgOp (similar
+      to pad_widths) or reuse src0_dims for it (since
+      out_dims already encodes the post-permute shape).
+      Add WL parity tests + Metal-vs-CPU parity test mirroring
+      the FLIP/PAD ones.
+
 - [ ] **CONV2D grad_input branch in interact_grad** (the
       heaviest -- multi-fire on its own).  Build via:
-        grad_input = full-conv(gy_padded, FLIP(weights, {ky, kx}))
+        grad_input = full-conv(gy_padded, PERMUTE(FLIP(weights),
+                                                  swap C_out and C_in))
       where `gy_padded` = PAD(gy, kh-1, kw-1) on the spatial
-      axes.  Once UOP_FLIP and UOP_PAD kernels land, the rule
-      itself is a fresh UOP_CONV2D over the prepared input/
-      weights pair, so the CONV2D forward kernel does the
-      heavy lifting.
+      axes, and `FLIP(weights, axes={2,3})` mirrors the kernel
+      spatial axes.  The PERMUTE swaps weights' C_out and C_in
+      so that the fresh CONV2D's "input C_in" matches gy_padded's
+      C_out.  Once UOP_PERMUTE + UOP_FLIP + UOP_PAD kernels are
+      all present, the rule itself is a fresh UOP_CONV2D over
+      the prepared input/weights pair.  Output shape will be
+      {C_in, H, W} -- matching the input.
 
 - [ ] **End-to-end: TOptim["Adam"] training NetModel["LeNet"]
       on MNIST on Metal**.  The original goal.  Needs:
