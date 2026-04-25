@@ -327,7 +327,7 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       the WL surface yet.  Wire when the first real Metal kernel
       lands.  test_metal_real covers the dual-TU shape. -->
 
-- [ ] **Real metal_init in _.m**.  Convert the stub in
+- [x] **Real metal_init in _.m**.  Convert the stub in
       `src/backend/metal/_.m` (currently created by the prior
       item) into one that opens `MTLCreateSystemDefaultDevice()`
       + a `MTLCommandQueue`, stores both in file-scope statics,
@@ -335,6 +335,11 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       stubbed (they ship in the next two items).  Test:
       `THVM_BACKEND=metal` thvm_init returns 0 with the device
       name printable to stderr (confirms the framework wiring).
+      <!-- Apple M3 Max device opens and prints to stderr;
+      MTLCommandQueue created on top.  ARC owns both via static
+      file-scope handles, nilled in metal_shutdown.  Test cycles
+      init/shutdown twice to verify clean re-open. -->
+
 - [ ] **MSL shader compilation pipeline**.  Makefile rule that
       runs `xcrun -sdk macosx metal -c src/backend/metal/shaders/
       *.metal -o build/shaders.air` then `xcrun -sdk macosx

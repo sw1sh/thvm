@@ -38,8 +38,35 @@ typedef struct Backend {
   int   (*dispatch_kernel)(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 } Backend;
 
-static int  metal_init(void)                                    { return 0; }
-static void metal_shutdown(void)                                { /* nop */ }
+// Lazy file-scope handles to the system default Metal device and a
+// command queue.  ARC owns the references; metal_shutdown releases
+// by nilling them.  Both stay nil between init/shutdown cycles so
+// repeated thvm_init calls reset cleanly.
+static id<MTLDevice>       METAL_DEVICE = nil;
+static id<MTLCommandQueue> METAL_QUEUE  = nil;
+
+static int metal_init(void) {
+  METAL_DEVICE = MTLCreateSystemDefaultDevice();
+  if (METAL_DEVICE == nil) {
+    fprintf(stderr, "thvm: metal_init -- no Metal device available\n");
+    return -1;
+  }
+  METAL_QUEUE = [METAL_DEVICE newCommandQueue];
+  if (METAL_QUEUE == nil) {
+    fprintf(stderr, "thvm: metal_init -- failed to create command queue on %s\n",
+            [[METAL_DEVICE name] UTF8String]);
+    METAL_DEVICE = nil;
+    return -1;
+  }
+  fprintf(stderr, "thvm: metal_init -- device: %s\n",
+          [[METAL_DEVICE name] UTF8String]);
+  return 0;
+}
+
+static void metal_shutdown(void) {
+  METAL_QUEUE  = nil;
+  METAL_DEVICE = nil;
+}
 
 static u32  metal_buf_alloc(u64 nbytes)                         { (void)nbytes;     return 0; }
 static void metal_buf_free (u32 buf_id)                         { (void)buf_id;     /* nop */ }

@@ -29,6 +29,16 @@ int main(void) {
   CHECK_EQ(CURRENT_BACKEND->buf_alloc(64), 0);  // .m stub still returns 0
   thvm_free();
 
+  TEST_BEGIN("metal-real/init-shutdown-cycle-survives");
+  // metal_init opens MTLDevice + MTLCommandQueue; metal_shutdown
+  // nils the references.  Verify a second cycle re-opens cleanly.
+  setenv("THVM_BACKEND", "metal", 1);
+  thvm_init();
+  thvm_free();
+  thvm_init();
+  CHECK(CURRENT_BACKEND == &METAL_BACKEND);
+  thvm_free();
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }
