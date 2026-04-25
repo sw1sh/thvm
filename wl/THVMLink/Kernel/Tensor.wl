@@ -130,6 +130,14 @@ TUOpGrad[y_, gy_, target_] := (
     TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]]
 )
 
+(* TUOpConv2D[input, weights, bias] -- valid 2-D convolution
+   forward, stride 1, no padding.  Kernel size is recovered from
+   weights.shape ({C_out, C_in, kh, kw}) at materialize time. *)
+TUOpConv2D[input_, weights_, bias_] := (
+    ensureInit[];
+    TTerm[$uopConv2DFn[ttermRaw[input], ttermRaw[weights], ttermRaw[bias]]]
+)
+
 (* Top-level VJP shortcut: gradient of `y` w.r.t. `target` with
    cotangent seed 1. *)
 TGrad[y_, target_] := TUOpGrad[y, TUOpConst[1.0, "f32"], target]

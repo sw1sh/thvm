@@ -104,6 +104,7 @@ TUOpSqrt::usage      = "TUOpSqrt[a] builds a UOP_SQRT node.";
 TUOpCmplt::usage     = "TUOpCmplt[a, b] builds a UOP_CMPLT node.";
 TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; kind = \"SUM\" or \"MAX\".";
 TUOpGrad::usage      = "TUOpGrad[y, gy, target] builds a UOP_GRAD node.  Reducing under TWnf applies the chain rule recursively until no UOP_GRAD nodes remain; the result is a UOp graph that can be fed to TRealize / TMaterialize like any other.";
+TUOpConv2D::usage    = "TUOpConv2D[input, weights, bias] builds a UOP_CONV2D node for a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  Kernel size is recovered from weights.shape at materialize time.";
 TGrad::usage         = "TGrad[y, target] = TUOpGrad[y, TUOpConst[1], target].  Top-level VJP -- d(y)/d(target) with cotangent seed 1.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
 TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term, in heap order.";
@@ -224,6 +225,7 @@ $uopPadFn      := $uopPadFn      = load["thvm_wl_uop_pad",      {Integer, {Integ
 $uopShrinkFn   := $uopShrinkFn   = load["thvm_wl_uop_shrink",   {Integer, {Integer, 1}},             Integer];
 $uopFlipFn     := $uopFlipFn     = load["thvm_wl_uop_flip",     {Integer, Integer},                  Integer];
 $uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Integer, Integer},      Integer];
+$uopConv2DFn   := $uopConv2DFn   = load["thvm_wl_uop_conv2d",      {Integer, Integer, Integer},      Integer];
 
 (* direct materialize (no wnf) + kernel-entry introspection *)
 $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},                        Integer];

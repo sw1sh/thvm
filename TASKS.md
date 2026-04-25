@@ -182,9 +182,17 @@ concern that interact_grad currently doesn't cover for any of these):
       from C is end-to-end-y enough that going through TRealize
       is shorter. -->
 
-- [ ] WL `TUOpConv2D[input, weights, bias, kSize]` constructor +
+- [x] WL `TUOpConv2D[input, weights, bias, kSize]` constructor +
       `fromLayer[ConvolutionLayer, ...]` dispatch + nn.wlt test
       against `NetApply` on a small initialised conv layer.
+      <!-- TUOpConv2D drops the kSize arg (recovered from
+      weights.shape at materialize time, same as the C
+      constructor).  Cross-check via NetApply hit
+      NetChain::badbackend in the local Mathematica runtime, so
+      the numeric reference is a hand-derived 1-ch 2-outch 2x2
+      kernel example instead.  Dispatch test verifies output
+      shape end-to-end. -->
+
 <!-- design-question: chose UOP_CONV2D primitive over the
      im2col-via-PERMUTE route because PERMUTE / SHRINK don't
      have runtime support yet and would require ~5 file edits

@@ -451,3 +451,50 @@ VerificationTest[
     {Round[-(Log[0.5] + Log[0.25] + Log[0.25])/3, 0.0001]},
     TestID -> "nn/ce-loss-uniform-target"
 ]
+
+(* === ConvolutionLayer 2-D forward via TUOpConv2D + dispatch ===
+   Hand-verified on a 1-channel 3x3 input, 2 output channels, 2x2
+   kernel (sum + diagonal masks).  NetApply cross-checks would be
+   nice but the local Wolfram NeuralNetworks runtime errors with
+   NetChain::badbackend, so the numeric reference here is a
+   hand-derived expected matrix instead. *)
+
+VerificationTest[
+    TInit[];
+    input = TTensorCreate @ NumericArray[
+        {{{1.0,2.0,3.0},{4.0,5.0,6.0},{7.0,8.0,9.0}}}, "Real32"];
+    weights = TTensorCreate @ NumericArray[
+        {{{{1.,1.},{1.,1.}}}, {{{1.,0.},{0.,1.}}}}, "Real32"];
+    bias = TTensorCreate @ NumericArray[{0.5, -0.5}, "Real32"];
+    Round[Normal @ TTensorData @ TRealize @ TUOpConv2D[input, weights, bias], 0.001],
+    {{{12.5, 16.5}, {24.5, 28.5}}, {{5.5, 7.5}, {11.5, 13.5}}},
+    TestID -> "nn/conv2d-helper-1ch-2outch-2x2-kernel"
+]
+
+(* fromLayer dispatch path -- TFromNet[ConvolutionLayer[...], x] uses
+   the same TUOpConv2D with weights/bias pulled from the layer. *)
+VerificationTest[
+    TInit[];
+    Module[{net, conv, x},
+        net = NetInitialize @ NetChain[
+            {ConvolutionLayer[2, {2, 2}, "Stride" -> {1, 1}]},
+            "Input" -> {1, 3, 3}];
+        conv = net[[1]];
+        x = TTensorCreate @ NumericArray[
+            {{{1.0,2.0,3.0},{4.0,5.0,6.0},{7.0,8.0,9.0}}}, "Real32"];
+        TTensorShape @ TRealize @ TFromNet[conv, x]
+    ],
+    {2, 2, 2},
+    TestID -> "nn/conv2d-dispatch-shape-correct"
+]
+
+(* Refusal cases. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[
+        {{{1.0,2.0},{3.0,4.0}}}, "Real32"];
+    Head @ TFromNet[
+        ConvolutionLayer[1, {2, 2}, "Stride" -> {2, 2}], x],
+    Failure,
+    TestID -> "nn/conv2d-non-1-stride-returns-Failure"
+]

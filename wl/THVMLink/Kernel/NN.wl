@@ -235,26 +235,33 @@ fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op},
     ]
 ]
 
-(* ConvolutionLayer: 1-D, stride 1, no padding/dilation.  Forward
-   only -- backward needs movement-op grad rules.
+(* ConvolutionLayer 2-D, stride 1, no padding/dilation.  Forward
+   only -- interact_grad has no rule for UOP_CONV2D yet.  Inputs
+   are channels-first {C_in, H, W}; weights {C_out, C_in, kh, kw};
+   bias {C_out}; output {C_out, H-kh+1, W-kw+1}.
 
-   For a length-N input with K-length kernel + C output channels,
-   we lay it out as a sliding-window matmul:
-     y[c, i] = b[c] + sum_k W[c, 0, k] * x[i + k]
-   Implemented for the 1-channel-input case only. *)
+   Refuses (with Failure) configurations the kernel doesn't yet
+   support: non-1 stride, any padding, non-1 dilation. *)
 fromLayer[ConvolutionLayer, layer_, x_TTerm] := Module[{
-    w, b, kdims, kSize, outCh, inCh, info
+    w, b, stride, pad, dil
 },
+    stride = NetExtract[layer, "Stride"];
+    pad    = NetExtract[layer, "PaddingSize"];
+    dil    = NetExtract[layer, "Dilation"];
+    If[ stride =!= {1, 1},
+        Return @ Failure["NotImplemented",
+            <|"Message" -> "ConvolutionLayer Stride != {1,1} not yet supported",
+              "Stride" -> stride|>]];
+    If[ pad =!= {{0,0},{0,0}} && pad =!= 0,
+        Return @ Failure["NotImplemented",
+            <|"Message" -> "ConvolutionLayer PaddingSize != 0 not yet supported",
+              "PaddingSize" -> pad|>]];
+    If[ dil =!= {1, 1},
+        Return @ Failure["NotImplemented",
+            <|"Message" -> "ConvolutionLayer Dilation != {1,1} not yet supported",
+              "Dilation" -> dil|>]];
     {w, b} = TLayerToTensors[layer];
-    kdims  = Dimensions[Normal @ NetExtract[layer, "Weights"]];
-    outCh  = kdims[[1]];
-    inCh   = kdims[[2]];
-    kSize  = kdims[[3]];
-    info   = "Conv1d[outCh=" <> ToString[outCh] <>
-             ", inCh="  <> ToString[inCh]  <>
-             ", k="     <> ToString[kSize] <> "]";
-    Message[TFromNet::convtbd, info];
-    $Failed
+    TUOpConv2D[x, w, b]
 ]
 
 TIdentity[x_] := x
