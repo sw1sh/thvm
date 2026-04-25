@@ -80,7 +80,19 @@ concern that interact_grad currently doesn't cover for any of these):
       exp overflow but that's accepted (hidden activations rarely sit
       there). -->
 
-- [ ] `ReshapeLayer` forward.  Maps to `TUOpReshape`.  Test against
+- [ ] runtime support for `UOP_RESHAPE` end-to-end (currently
+      missing -- a TUOpReshape today gets zero output and no
+      children show up in TTermExpr).  Touches:
+      `src/alo/realize.c` + `src/book/from_dynamic.c` arity tables
+      (1 + ndim cells), `src/schedule/materialize_in_env.c` output-
+      shape branch reading dim NUM cells (mirrors EXPAND),
+      `src/backend/cpu/interpret.c` + a new `cpu_op_reshape`
+      (contiguous tensors -- just memcpy of numel*dtype-size bytes),
+      `wl/THVMLink/Kernel/THVMLink.wl` `uopCellCount` for
+      TTermExpr.  Plus a tiny end-to-end smoke test that builds
+      TUOpReshape and verifies shape + data round-trip.
+- [ ] `ReshapeLayer` forward.  Once the runtime supports RESHAPE,
+      add the dispatch in NN.wl and a nn.wlt test against
       `NetApply[ReshapeLayer[shape]]`.
 - [ ] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or
       rank-2 with explicit batch axis).
