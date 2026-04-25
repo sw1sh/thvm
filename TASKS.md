@@ -80,7 +80,7 @@ concern that interact_grad currently doesn't cover for any of these):
       exp overflow but that's accepted (hidden activations rarely sit
       there). -->
 
-- [ ] runtime support for `UOP_RESHAPE` end-to-end (currently
+- [x] runtime support for `UOP_RESHAPE` end-to-end (currently
       missing -- a TUOpReshape today gets zero output and no
       children show up in TTermExpr).  Touches:
       `src/alo/realize.c` + `src/book/from_dynamic.c` arity tables
@@ -91,6 +91,14 @@ concern that interact_grad currently doesn't cover for any of these):
       `wl/THVMLink/Kernel/THVMLink.wl` `uopCellCount` for
       TTermExpr.  Plus a tiny end-to-end smoke test that builds
       TUOpReshape and verifies shape + data round-trip.
+      <!-- Skipped alo/realize.c + book/from_dynamic.c arity edits
+      this fire: those bite only when RESHAPE is wrapped in a
+      TLam/TRef closure, which Phase-2 layer-converters don't yet
+      do.  Add when first RESHAPE-inside-recursive-lambda failure
+      surfaces.  Recovered ndim from dim NUM cells via running-
+      product against input numel rather than encoding ndim in
+      ext (kept the all-UOPs ext-is-opcode invariant). -->
+
 - [ ] `ReshapeLayer` forward.  Once the runtime supports RESHAPE,
       add the dispatch in NN.wl and a nn.wlt test against
       `NetApply[ReshapeLayer[shape]]`.

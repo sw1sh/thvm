@@ -380,6 +380,10 @@ uopCellCount[op_] := Switch[op,
     $UopReduce,                                                     3,
     $UopGrad,                                                       3,
     $UopKernel,                                                     2,
+    (* RESHAPE: report 1 (the src) so TTermExpr renders UOP[RESHAPE,
+       <src-subtree>].  The trailing NUM(d_i) cells are integer
+       parameters, not children of structural interest. *)
+    $UopReshape,                                                    1,
     _,                                                              0
 ]
 

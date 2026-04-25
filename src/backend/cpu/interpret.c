@@ -71,6 +71,7 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       case UOP_CMPLT: cpu_op_cmplt(dst, srcs, src_numels, p, n_elem); break;
       case UOP_REDUCE:cpu_op_reduce(dst, srcs, src_numels, p, n_elem); break;
       case UOP_EXPAND:cpu_op_expand(dst, srcs, src_numels, p, n_elem); break;
+      case UOP_RESHAPE:cpu_op_reshape(dst, srcs, src_numels, p, n_elem); break;
       default:
         rc = -1;
         goto cleanup;
