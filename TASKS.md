@@ -32,8 +32,17 @@ Adam keeps two extra per-parameter buffers (m, v) plus a step counter.
 
 - [x] write `wl/THVMLink/Kernel/Optim.wl` with `TOptim["SGD", lr]` (just
       delegating to the existing sgd lambda) so the API surface exists.
-- [ ] add `TOptim["Adam", lr, β1, β2, ε]` returning the recursive lambda
-      term that takes (w, m, v, t, n_steps_remaining) -> w_final.
+- [ ] Adam helpers in Optim.wl: a `tZerosLike[wTen]` returning a
+      fresh TTerm zero-tensor with the same shape as a TAG_TEN, plus
+      any other small scalar constructors (e.g. `tF32[x]` shorthand
+      for `TUOpConst[x, "f32"]`).  Add tiny optim.wlt tests for the
+      helpers in isolation.
+- [ ] Adam recursive lambda: replace the `TOptim["Adam", ...]` stub
+      in Optim.wl with the real body using the helpers above.  The
+      lambda threads (w, m, v, b1pow, b2pow, k) through `TIfZero`
+      and `TRef`; β1^t / β2^t are kept as state so no POW UOP is
+      needed.  No new tests in this commit -- they land in the next
+      item.
 - [ ] add `wl/THVMLink/Tests/optim.wlt` covering one-step + two-step
       Adam against a hand-computed expected value on a tiny quadratic
       loss.
