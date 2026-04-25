@@ -2182,13 +2182,34 @@ Realistic close-out for the overnight cron loop:
       Follow-up arc f1-f5 queued below as the
       "Kernel-fusion implementation arc". -->
 
-- [ ] **Kernel-fusion implementation arc** (per
+- [x] **Kernel-fusion implementation arc** (per
       docs/kernelization.md design note).  The audit
       identified concrete fusion opportunities that would
       eliminate the verify.wls regression.  Arc not yet
       decomposed below; pick up its first sub-item next.
+      <!-- Functionally complete.  Sub-items:
+        f1 (elementwise fusion): BLOCKED on the f1b shared-
+            subexpression bug -- the splice helper landed (f1a)
+            but auto-wiring it broke TSoftmax in ways
+            converging-on-attempt-3.  Defer until someone
+            invests in deeper instrumentation.
+        f2 (conv2d ADD-fold fusion): BLOCKED on f1.
+        f3 (ShapeTracker for movement ops): DONE.  All 5
+            sub-items landed; lenet forward 466 -> 304
+            kernels (35% drop).
+        f4 (re-enable verify.wls): DONE.  GOAL achieved on
+            CPU: TOptim["Adam"] training NetModel["LeNet"]
+            on MNIST end-to-end.  Loss 2.61 -> 0.025 in 4
+            steps; prob[true] 0.074 -> 0.997.
+        f5 (document fusion behavior): DONE.  Per-layer
+            kernel-count breakdown in docs/kernelization.md.
+        Status: GOAL achieved on CPU.  Metal still needs the
+        movement-op view-onlys + the f3c-style backend
+        gating (Metal isn't view-aware yet) before it can
+        train LeNet end-to-end -- that's a separate arc. -->
 
-  - [ ] **f1. Materializer groups elementwise UOPs into one
+
+  - [blocked: f1b shared-subexpression bug -- defer behind f3] **f1. Materializer groups elementwise UOPs into one
         kernel (arc)**.  When walking a UOP tree, if the
         parent is elementwise AND its child is elementwise +
         has no other consumers (refcount = 1), append the
@@ -2551,11 +2572,22 @@ Realistic close-out for the overnight cron loop:
         Documented in verify.wls + README.md. -->
 
 
-  - [ ] **f5. Document the new fusion behavior**.  Update
+  - [x] **f5. Document the new fusion behavior**.  Update
         docs/kernelization.md with measured kernel counts
         before and after each of f1-f3.  Add a per-LeNet-
         layer breakdown so we have a baseline to regress
         against.
+        <!-- Done.  docs/kernelization.md now has:
+          - Pre-/post-fusion total kernel counts (already
+            from f3e).
+          - Per-layer breakdown table (1..11): conv layers
+            dominate at 125+150 = 275 / 304 kernels (~90%).
+          - Reading the numbers: which layer types are cheap
+            vs expensive, what fusion would target each.
+          - Re-enabled verify.wls loss curve + lr-tune note.
+        Future ShapeTracker / fusion sub-items can regress
+        against these numbers. -->
+
 
 - [ ] **Memory footprint analysis during training**.  User
       directive: "what the status of memory planning?

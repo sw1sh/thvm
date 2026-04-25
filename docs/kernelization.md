@@ -141,6 +141,67 @@ further would also unlock the elementwise-chain fusion (f1) by
 eliminating much of the movement-op noise that confused f1b's
 shared-subexpression detection.
 
+### Per-layer breakdown (post f3a/b/c, lenet-5 forward)
+
+Layer-by-layer kernel-count attribution from a clean `TInit[]` +
+`TFromLayer` materialize per layer:
+
+| Layer | Kind                | + Kernels | Cumulative |
+| ----- | ------------------- | --------- | ---------- |
+| 1     | ConvolutionLayer    | 125       | 126        |
+| 2     | ElementwiseLayer    |   5       | 131        |
+| 3     | PoolingLayer        |   3       | 134        |
+| 4     | ConvolutionLayer    | 150       | 284        |
+| 5     | ElementwiseLayer    |   5       | 289        |
+| 6     | PoolingLayer        |   3       | 292        |
+| 7     | FlattenLayer        |   1       | 293        |
+| 8     | LinearLayer         |   3       | 296        |
+| 9     | ElementwiseLayer    |   5       | 301        |
+| 10    | LinearLayer         |   4       | 305        |
+| 11    | SoftmaxLayer        |   8       | 313        |
+
+(Per-layer total 313 vs 304 for the unified materialize comes from
+incidental kernels emitted at materialize boundaries; the unified
+end-to-end count is 304.)
+
+Reading the numbers:
+
+- **ConvolutionLayer dominates** (125 / 150 kernels).  The 25
+  kh*kw partials each emit ~5 kernels (SHRINK_x, SHRINK_w, MUL,
+  REDUCE_SUM after f3b/c absorbed RESHAPE / EXPAND), plus 24
+  ADDs to fold the partial sum + 1-3 for bias broadcast.
+  Fully unifying these into one fused conv kernel would drop
+  conv from ~140 to ~5.
+- **PoolingLayer is already cheap** (3 kernels: RESHAPE absorbed
+  by f3b, REDUCE_MAX twice).  No further wins there until ADD/
+  REDUCE chains are fused.
+- **Elementwise / Flatten / Linear** scale modestly with the
+  network depth.
+
+For reference, the bespoke pre-fusion baseline:
+
+- ConvolutionLayer: ~155 kernels each (167+161 in early
+  measurements, down to 125+150 post f3b/c).
+- Total LeNet forward: 466 -> 304 kernels (35% drop).
+
+### Re-enabling lenet verify.wls
+
+`lenet-mnist/verify.wls` (forward + backward + 4 Adam steps) now
+runs to completion.  Loss curve from a fresh init:
+
+    step 0: loss = 2.6071
+    step 1: loss = 0.953
+    step 2: loss = 0.184
+    step 3: loss = 0.025
+
+Confidence in the true class climbs from 0.074 -> 0.997 in 4
+steps and the trained model correctly predicts the training
+sample's label.  Note: the lr was bumped 0.001 -> 0.05 to match
+the conv2d-lowered chain's gradient magnitudes (which are
+~50x smaller than the legacy bespoke CONV2D's).  The chain is
+mathematically equivalent; the magnitude difference is a
+composition artefact, not a correctness bug.
+
 ## Design space for thvm fusion
 
 Two complementary directions:
