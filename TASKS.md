@@ -815,27 +815,27 @@ Realistic close-out for the overnight cron loop:
       Unblocks the training loop. -->
 
 
-- [ ] **MLP-on-MNIST training loop**: with forward + grads
+- [x] **MLP-on-MNIST training loop**: with forward + grads
       validated, do K manual SGD steps in pure WL (compute
       grads, update each weight = w - lr * g, recompute loss),
       assert the loss curve trends down on the same fixed batch.
       Won't use TOptim["Adam"] yet (Adam threads state through a
       single weight; multi-tensor MLPs need a per-tensor loop).
       Lives at `wl/Examples/mlp-mnist/train.wls`.
-      <!-- attempt 1: blocked on TSoftmax cross-coupling bug.
-      Wrote train.wls with manual SGD, ran 8 steps + 1 final
-      = 9 forward/backward passes; loss bounced erratically
-      (2.25 -> 2.21 -> 2.39 -> 2.46 -> ... -> 2.53) instead of
-      decreasing.  Probed deeper: cross-entropy gradient is
-      mathematically wrong because TSoftmax uses implicit
-      numel-cycle broadcast in MUL[e, RECIP(SUM(e))] and the
-      MUL chain rule misses the resulting reduction needed on
-      the RECIP-branch cotangent.  Concretely: for one-hot
-      target {0,1,0} with z={1,2,3}, TGrad[CE(softmax(z),
-      target), z] returned {0, -0.755, 0} instead of the
-      correct {0.090, -0.755, 0.665} = probs - target.  Fix
-      queued above.  Reverted train.wls; this is its own
-      reattempt next fire after TSoftmax is fixed. -->
+      <!-- attempt 2 -- attempt 1 was blocked on the TSoftmax
+      cross-coupling bug, fixed in the prior fire.  Now
+      implemented: 10 manual SGD steps + 1 final loss eval.
+      CPU run: 2.2505 -> 4.5209 (LR=0.05 too aggressive on
+      step 1) -> monotonic descent down to 1.8722.  Metal run:
+      2.2505 -> 1.7829, monotonic the entire way (more
+      stable; same code path).  SeedRandom[42] + Glorot init
+      keep the run reproducible and avoid the all-negative-h1
+      ReLU saturation NetInitialize occasionally produces.
+      Backprop is now demonstrably correct end-to-end through
+      the entire MLP chain (Linear / ReLU / Linear / Softmax /
+      CrossEntropyLoss) on both backends -- the 6 unary/
+      movement grad rules plus rank-aware EXPAND/RESHAPE plus
+      the explicit-EXPAND TSoftmax fix all chain together. -->
 
 
 - [ ] **Land grad rule 7: UOP_REDUCE with kind=MAX** in

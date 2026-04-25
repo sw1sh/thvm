@@ -8,9 +8,11 @@ thvm runtime.  Built up incrementally:
   - `grad-check.wls` -- per-weight `TGrad[loss, W]` materialization;
     asserts each gradient is finite and correctly-shaped.  Pure
     structural sanity, no parameter updates.
-  - `train.wls`      -- (next task) K manual SGD steps on a fixed
-    batch, asserts the loss curve trends down.  Validates the full
-    backprop chain end-to-end.
+  - `train.wls`      -- 10 manual SGD steps on a fixed sample;
+    asserts the loss curve trends down.  End-to-end backprop
+    convergence check.  Reproducible (SeedRandom[42] +
+    Glorot init); both CPU and Metal monotonically reach
+    loss ~ 1.8 from a starting point of ~ 2.25.
 
 ## Usage
 
