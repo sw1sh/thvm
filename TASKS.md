@@ -3711,25 +3711,58 @@ sub-items once these land.
       validation run in bm4d; bm5 formalizes the doc deliverable. -->
 
 
-- [ ] **Heap-rooted preserve pass** (follow-up to bm4 +
-      refcount-driven free arc).  Replace
-      mark_preserved_chain in src/schedule/realize.c with a
-      walk over the live HEAP[0..HEAP_NEXT) cells, collecting
-      every TenDesc reachable from a TAG_TEN cell or from any
-      pending UOP term (TAG_UOP whose children include TAG_TEN
-      slots).  Mark only those bufs preserved; everything
-      else in [wm, NEXT) goes to the freelist via bm4b's
-      rollback path.  Unblocks both:
-        - bm4's measurable savings (target 30% peak KiB drop
-          on lenet-mnist; 48-54% headroom is sittable per
-          TMemoryPlan).
-        - The refcount-driven-free arc's sub-item c rollback
-          swap (currently blocked behind the same conservative
-          chain walk).
-      Sized: a new src/schedule/heap_rooted_preserve.c
-      (~80 LOC) + integration in thvm_realize (~10 LOC) +
-      unit tests in tests/test_heap_rooted_preserve.c
-      (~50 LOC).  Likely sub-decomposes when picked up.
+- [ ] **Heap-rooted preserve pass (arc)** (follow-up to bm4 +
+      refcount-driven free arc).  Replace mark_preserved_chain
+      in src/schedule/realize.c with a walk over the live
+      HEAP[0..HEAP_NEXT) cells.  Decomposed into 3 sub-items.
+
+  - [ ] **hrp1: heap-walk helper + unit tests**.  New
+        src/schedule/heap_rooted_preserve.c with a single
+        function `mark_heap_rooted_preserve(u32 wm)` that:
+          - Walks HEAP[0..HEAP_NEXT).  For each TAG_TEN cell,
+            marks its TenDesc's buf_id preserved (via
+            cpu_buf_mark_preserved).
+          - For each TAG_UOP cell, walks its children
+            (heap_read at expr_loc + 0..arity-1).  Any child
+            cell that resolves (via term_resolve) to TAG_TEN
+            also gets its buf marked.  This catches pending
+            TGrad backward chains that reference forward
+            TenDescs.
+          - For each TAG_REF / TAG_ALO cell, follows the
+            indirection (book_term + state_id) and recurses
+            once -- enough to catch held lambda closures
+            without an unbounded book-heap walk.
+        Standalone helper -- no integration with thvm_realize
+        yet.  ~80 LOC.  Unit test in
+        tests/test_heap_rooted_preserve.c (~50 LOC):
+        synthetic heap with 3 tids, only some referenced by
+        TAG_TEN cells; assert preserved flag is set on the
+        referenced bufs and clear on the rest.
+
+  - [ ] **hrp2: integrate into thvm_realize + correctness
+        check**.  In src/schedule/realize.c, replace the call
+        to mark_preserved_chain with a call to
+        mark_heap_rooted_preserve.  Keep the chain helper as
+        a static fallback for now (commented).  Acceptance:
+          - 268 C + 270 WL tests stay green (no nn.wlt TGrad
+            regressions; verify.wls Metal Adam-LeNet still
+            converges loss 2.61 -> 0.025).
+          - If anything breaks, the most likely cause is a
+            heap-walk gap (e.g., book-heap recursion missing
+            a TAG_REF target).  3-attempt rule applies; fall
+            back to chain walk + document the gap.
+        ~10 LOC integration + bisect headroom for fixes.
+
+  - [ ] **hrp3: bench delta + docs**.  Re-run
+        wl/Examples/_bench/baseline.wls on both backends.
+        Acceptance: peak KiB drops at least 30% on lenet-mnist
+        (the bm4 / bm5 acceptance criterion that bm4d
+        documented as missed).  Update docs/bench-results.md
+        with a third column showing post-heap-rooted-preserve
+        numbers + delta vs the post-bm4abc baseline.  If the
+        savings DON'T materialize, document the residual
+        blocker (e.g., aliasing pinning extra TenDescs).
+        ~20 LOC + doc update.
 
 
 
