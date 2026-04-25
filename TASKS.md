@@ -2155,7 +2155,7 @@ Realistic close-out for the overnight cron loop:
         queued kernelization-fusion task. -->
 
 
-- [ ] **Audit kernelization boundaries vs tinygrad**.  User
+- [x] **Audit kernelization boundaries vs tinygrad**.  User
       directive: "make sure materialization properly
       kernelize between boundaries, compare to tinygrad".
       Currently every UOP becomes its own UOP_KERNEL with
@@ -2172,6 +2172,61 @@ Realistic close-out for the overnight cron loop:
       v1 (one-op-per-kernel) to tinygrad's; identify the
       specific fusion opportunities our LeNet path leaves
       on the table; queue follow-up work.
+      <!-- Done.  docs/kernelization.md compares thvm's
+      one-op-per-kernel to tinygrad's ShapeTracker +
+      elementwise-fusion approach.  Pinpoints the LeNet
+      bottleneck: ~200 kernels per conv layer (kh*kw partials
+      + ADD-fold + bias broadcast), drops to ~3-5 with
+      tinygrad-style fusion -- 40-60x reduction that
+      eliminates the verify.wls KERNELS_CAP regression.
+      Follow-up arc f1-f5 queued below as the
+      "Kernel-fusion implementation arc". -->
+
+- [ ] **Kernel-fusion implementation arc** (per
+      docs/kernelization.md design note).  The audit
+      identified concrete fusion opportunities that would
+      eliminate the verify.wls regression.  Arc not yet
+      decomposed below; pick up its first sub-item next.
+
+  - [ ] **f1. Materializer groups elementwise UOPs into one
+        kernel**.  When walking a UOP tree, if the parent is
+        elementwise AND its child is elementwise + has no
+        other consumers (refcount = 1), append the child's
+        op to the parent's program[] array instead of emitting
+        a separate kernel.  ~80 LOC of materializer changes +
+        tests asserting the grouped program structure.
+        Should drop ~30-50% of LeNet's kernel count.
+
+  - [ ] **f2. Fuse the conv2d-lowered ADD-fold into one
+        kernel**.  Detect the Fold[TUOpAdd, partials, ...]
+        pattern in TUOpConv2DLowered and emit a single kernel
+        with n ADDs in its program (rather than n-1 separate
+        ADD kernels).  Either a special-case in
+        TUOpConv2DLowered (stage-2 helper `TUOpAddFold`) or a
+        general elementwise-chain pass on top of f1.  Should
+        drop ~25 kernel slots per LeNet conv.
+
+  - [ ] **f3. ShapeTracker for movement ops**.  Replace
+        RESHAPE / EXPAND / PERMUTE / SHRINK / PAD / FLIP
+        runtime kernels with view-mutation on a
+        (shape, strides, offset, mask) tuple attached to
+        TenDesc.  Producer kernels read inputs via the
+        tracker.  Big change (~300+ LOC across tracker,
+        materialize, cpu/metal indexing) -- decompose further
+        when it's the topmost task.  Unlocks the 80%
+        kernel-count reduction.
+
+  - [ ] **f4. Re-enable lenet-mnist/verify.wls**.  After
+        f1-f3 land, verify.wls should fit within KERNELS_CAP.
+        Re-run the 4-Adam-step training and confirm
+        confidence climbs from ~0.07 to >~0.7.  ~10 LOC
+        of test re-enablement; the real work is in f1-f3.
+
+  - [ ] **f5. Document the new fusion behavior**.  Update
+        docs/kernelization.md with measured kernel counts
+        before and after each of f1-f3.  Add a per-LeNet-
+        layer breakdown so we have a baseline to regress
+        against.
 
 - [ ] **Memory footprint analysis during training**.  User
       directive: "what the status of memory planning?
