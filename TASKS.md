@@ -1475,24 +1475,32 @@ Realistic close-out for the overnight cron loop:
       /tmp/conv2d-softmax-probe.wls, /tmp/probe-g-deeper.wls
       for re-execution.  Decomposing this task next fire. -->
 
-- [ ] **wl/Examples/lenet-mnist/train.wls**: K manual SGD or
+- [x] **wl/Examples/lenet-mnist/train.wls**: K manual SGD or
       per-tensor Adam steps on a fixed MNIST batch through
       TLeNet[]; assert the loss curve trends down.  Mirrors
       mlp-mnist/train.wls with LeNet substituted.  Will
       probably need a smaller batch / fewer steps because
       the materialize cost is much higher.
-      <!-- attempt 1: forward materializes correctly (step 0
-      loss = 2.6071, the expected ~ln(10) on a random init).
-      But TGrad on at least one of the 8 weight tensors
-      returns $Failed (or an absurdly large value like
-      ~1e31 -- visible as NumericArray wrapping $Failed in
-      the Adam update).  Adam step then propagates the bad
-      grad into corrupted weights.  Needs an isolated
-      per-weight TGrad probe to identify which weight
-      produces the bad chain (suspect: W2 / Conv2 weights,
-      since that path uses the diagonal-mask trick which
-      hasn't been validated through a deep upstream chain).
-      Reverted train.wls; needs a diagnostic sub-task above. -->
+      <!-- attempt 1: blocked on the b1/b2 grad NaN bug
+      (now fixed in the prior fire by removing
+      expand_to_target from NEG/RECIP/EXP2/LOG2/MUL).
+      attempt 2: SUCCESS.  4 Adam steps on a fixed MNIST
+      sample:
+        CPU: loss 2.6071 -> 1.8054 -> 1.1324 -> 0.6546 -> 0.3559
+             (strict monotonic descent over 5 evaluations;
+             reaches near-classification confidence in 4 steps)
+        Metal: 2.3026 -> 2.3008 -> ... -> 2.2954 (passes the
+             monotonic-decrease assertion but trains very
+             slowly -- stuck near ln(10) = uniform softmax,
+             same Metal saturation pattern documented under
+             the existing MLP grad-check follow-up).
+      End-to-end backprop is demonstrably correct on CPU
+      through the FULL LeNet stack: Conv -> ReLU -> MaxPool ->
+      Conv -> ReLU -> MaxPool -> Flatten -> Linear -> ReLU ->
+      Linear -> Softmax + CrossEntropyLoss, with all 8 weight
+      tensors getting Adam updates per step.  The original
+      cron-loop GOAL ("TOptim['Adam'] training NetModel
+      ['LeNet'] on MNIST end-to-end") is achieved on CPU. -->
 
 - [ ] **LeNet accuracy verification**: run the trained
       LeNet from train.wls on a held-out batch (e.g. another

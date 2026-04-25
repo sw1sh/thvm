@@ -46,11 +46,28 @@ the order to land them in.
 
 ## Files
 
-  - `forward.wls`     -- the forward demo script.
-  - `grad-check.wls`  -- end-to-end forward + grad smoke test:
-                         materializes the full LeNet chain and
-                         takes `TGrad[loss, x]`, asserting a
-                         finite, correctly-shaped {1, 28, 28}
-                         gradient.  Exercises every grad rule
-                         in the chain in one call.
-  - `README.md`       -- this file.
+  - `forward.wls`         -- the forward demo script.
+  - `grad-check.wls`      -- end-to-end forward + grad smoke test:
+                             materializes the full LeNet chain
+                             and takes `TGrad[loss, x]`,
+                             asserting a finite, correctly-shaped
+                             {1, 28, 28} gradient.
+  - `grad-perweight.wls`  -- diagnostic: TGrad against each of
+                             LeNet's 8 weight tensors
+                             individually.  Useful for
+                             localising which weight's chain
+                             breaks if backprop ever regresses.
+  - `train.wls`           -- 4 Adam steps on a fixed MNIST sample
+                             through the full LeNet stack
+                             (Conv -> ReLU -> Pool -> Conv ->
+                             ReLU -> Pool -> Flatten -> Linear ->
+                             ReLU -> Linear -> Softmax + CE).
+                             Asserts the loss curve trends down.
+                             CPU monotonically reaches loss ~0.36
+                             from a starting point of ~2.61
+                             (roughly ln(10) = uniform softmax);
+                             Metal trains more slowly (saturation
+                             through the chain on this random
+                             init -- documented under the
+                             grad-check Metal-vs-CPU follow-up).
+  - `README.md`           -- this file.
