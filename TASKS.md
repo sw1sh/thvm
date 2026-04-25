@@ -3924,7 +3924,7 @@ sub-items once these land.
         recursive mark over these roots. -->
 
 
-  - [ ] **gc2: recursive mark from a root term**.  New
+  - [x] **gc2: recursive mark from a root term**.  New
         function `gc_mark_term(Term t, u8 *heap_visited)`
         that traverses `t`'s heap children based on its tag:
           - TAG_TEN: mark TENS[tid].buf_id preserved.  No
@@ -3942,6 +3942,34 @@ sub-items once these land.
         on a small synthetic graph (TUOpAdd[tA, tB] with tA,
         tB held as TAG_TEN; both bufs marked preserved, an
         unrelated tC's buf NOT marked).
+        <!-- Landed.  src/schedule/gc_mark.c implements the
+        full tag dispatch:
+          - TAG_TEN: leaf, marks buf preserved.
+          - TAG_UOP: arity from uop_arity(ext); UOP_KERNEL
+            treated as arity 2 (output_buf + kid_num cells).
+          - TAG_LAM / TAG_DUP: 1 child at heap[loc].
+          - TAG_APP / TAG_SUP / TAG_OP2 / TAG_MAT: 2 children
+            at heap[loc..loc+1].
+          - TAG_REF: follow DEFS[name].
+          - TAG_ALO: 1 child at heap[loc] (the book_term cell).
+          - TAG_ERA / TAG_VAR / TAG_NUM: leaves, no recurse.
+        term_resolve unwraps SUB-tagged variables before
+        dispatch.  heap_visited[HEAP_CAP] bitmap terminates
+        cycles (DUP/SUP self-loops, re-entrant lambdas).
+
+        tests/test_gc_mark_term.c (7 sub-checks):
+          - leaf TAG_TEN marks its buf.
+          - TUOpAdd[a, b] marks both children's bufs; orphan
+            c stays unmarked.
+          - zero Term is a no-op.
+          - non-TEN leaves (NUM/VAR/ERA) don't mark anything.
+          - synthetic cycle App[era, app(self)] terminates.
+          - TAG_REF into DEFS reaches the buf.
+
+        268 C + 270 WL tests green.  gc3 composes gc1 + gc2
+        into mark_gc_preserve(result) and swaps it into
+        thvm_realize. -->
+
 
   - [ ] **gc3: integrate into thvm_realize**.  New
         `mark_gc_preserve(Term result)` in

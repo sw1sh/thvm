@@ -184,6 +184,10 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 // gc2/gc3 build the recursive mark + integrate.
 #include "schedule/gc_roots.c"
 
+// gc2: recursive mark-from-root.  Standalone helper; gc3
+// composes gc1 + gc2 into the thvm_realize integration.
+#include "schedule/gc_mark.c"
+
 // thvm_realize: materialize + wnf + per-step buffer pool boundary
 // (sub-item b of the per-step buffer pool arc).  Lives here
 // because it depends on wnf + thvm_materialize + cpu pool helpers.

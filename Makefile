@@ -37,7 +37,8 @@ TESTS := \
   $(BIN)/test_cpu_free_list \
   $(BIN)/test_slot_reuse \
   $(BIN)/test_heap_rooted_preserve \
-  $(BIN)/test_gc_roots
+  $(BIN)/test_gc_roots \
+  $(BIN)/test_gc_mark_term
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
