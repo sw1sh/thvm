@@ -23,7 +23,8 @@ TESTS := \
   $(BIN)/test_mat_op2 \
   $(BIN)/test_wnf_n \
   $(BIN)/test_redex \
-  $(BIN)/test_metal_stub
+  $(BIN)/test_metal_stub \
+  $(BIN)/test_expand_axis
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -123,7 +124,7 @@ $(BUILD):
 
 # Metal backend object: compiled from .m with ARC, links Metal +
 # Foundation frameworks at the per-binary link step.
-$(BUILD)/backend_metal.o: src/backend/metal/_.m | $(BUILD)
+$(BUILD)/backend_metal.o: src/backend/metal/_.m src/thvm.h | $(BUILD)
 	clang -fobjc-arc -O2 -c $(METAL_DEFINES) -o $@ $<
 
 # Per-shader compile: .metal -> .air.

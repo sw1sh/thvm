@@ -951,7 +951,7 @@ Realistic close-out for the overnight cron loop:
       ignores the new fields. -->
 
 
-- [ ] **Use the source shape in cpu_op_expand**.  With the
+- [x] **Use the source shape in cpu_op_expand**.  With the
       new per-op shape info available, replace the cycle
       fallback in `src/backend/cpu/op/expand.c` with proper
       axis-aware indexing: walk the source's strides
@@ -964,6 +964,23 @@ Realistic close-out for the overnight cron loop:
       ({2} -> {2,2} as {a,a,b,b}), trailing-axis
       ({2} -> {2,2} as {a,b,a,b} via shape {1,2}->{2,2}),
       mixed ({1,3} -> {2,3}), scalar ({1}->{2,2}).
+      <!-- Implemented per-axis stride walk in expand_index_walker.
+      Required also adding `out_ndim` + `out_dims[MAX_DIM]` to
+      KProgOp (the prior fire only added src0 dims; the kernel
+      needs both shapes to walk strides).  Both materializers
+      populate the new fields for UOP_EXPAND.  cpu_op_expand
+      uses the axis-aware path when `out_ndim > 0 && src0_ndim
+      == out_ndim` (the common-rank case); falls back to
+      legacy cycle when shapes are unknown or rank-mismatched
+      (rank-up case, which still hits the in_numel==1 scalar
+      fast path in the autograd codepath).  Tests in new
+      tests/test_expand_axis.c (added to Makefile TESTS) cover
+      scalar->2D, identity memcpy, trailing-axis, leading-axis
+      (the regression case), and rank-up.  Also fixed a
+      Makefile dep gap: build/backend_metal.o now depends on
+      src/thvm.h so KProgOp struct changes propagate to the
+      Metal .o cleanly.  All 365 C + 172 WL tests stay green. -->
+
 
 - [ ] **Mirror axis-aware EXPAND in the Metal shader**.
       `src/backend/metal/shaders/movement.metal`

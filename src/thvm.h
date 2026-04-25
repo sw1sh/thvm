@@ -208,6 +208,8 @@ typedef struct {
                                    // distinguish leading-axis vs
                                    // trailing-axis broadcasts; other
                                    // ops ignore the src_dims block)
+  u8    out_ndim;                  // ndim of this op's output;
+                                   //   0 = unknown / unused
   u32   src[MAX_UOP_SRC];          // KSRC_AS_INPUT(n) or program index
   u32   arg;                       // CONST bits, REDUCE kind+axis, ...
   u32   numel;                     // output numel (for broadcast detection)
@@ -215,6 +217,8 @@ typedef struct {
                                    // (only meaningful when src0_ndim > 0;
                                    // used by axis-aware EXPAND in v1, can
                                    // generalise to RESHAPE/PERMUTE later)
+  u32   out_dims [MAX_DIM];        // per-axis dims of this op's output;
+                                   //   only meaningful when out_ndim > 0
 } KProgOp;
 
 typedef struct KernelEntry {

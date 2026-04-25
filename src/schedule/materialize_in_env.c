@@ -235,18 +235,25 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     p->numel     = out_numel;
     p->arg       = op_arg;
     p->src0_ndim = 0;
+    p->out_ndim  = 0;
     for (u32 i = 0; i < MAX_DIM; i++) p->src0_dims[i] = 0;
+    for (u32 i = 0; i < MAX_DIM; i++) p->out_dims [i] = 0;
     for (u8 i = 0; i < arity; i++) p->src[i] = KSRC_AS_INPUT(src_slot[i]);
 
     // Movement ops (currently EXPAND -- RESHAPE/PERMUTE could
-    // reuse this in future) need source slot 0's per-axis shape so
-    // the kernel can distinguish leading- from trailing-axis
-    // broadcasts.  out_numel + in_numel alone aren't enough.
+    // reuse this in future) need source slot 0's per-axis shape AND
+    // the output's per-axis shape so the kernel can distinguish
+    // leading- from trailing-axis broadcasts.  out_numel + in_numel
+    // alone aren't enough (e.g. {1,2} -> {3,2} vs {2,1} -> {2,3}).
     if (op == UOP_EXPAND && arity > 0) {
       Shape s0 = child_shapes[0];
       p->src0_ndim = (u8)(s0.ndim & 0xFF);
       for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
         p->src0_dims[i] = s0.dims[i];
+      }
+      p->out_ndim = (u8)(out_shape.ndim & 0xFF);
+      for (u32 i = 0; i < out_shape.ndim && i < MAX_DIM; i++) {
+        p->out_dims[i] = out_shape.dims[i];
       }
     }
 
