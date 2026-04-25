@@ -1600,17 +1600,65 @@ Realistic close-out for the overnight cron loop:
       smoke-tested end-to-end. -->
 
 
-- [ ] **Add UOP_LOAD primitive**.  User directive: the
+- [ ] **Add UOP_LOAD primitive (arc)**.  User directive: the
       runtime should have an explicit LOAD uop (mirroring
       tinygrad's UOps.LOAD) that produces tensor data from
       an external buffer / address rather than going through
       a TAG_TEN wrapper.  Today TAG_TEN encapsulates both
       "this is a tensor" and "load it from this buffer";
       LOAD splits the latter out as its own UOP so kernel
-      programs explicitly read inputs.  Touches: opcode
-      definition in src/thvm.h, constructor in src/uop/load.c,
-      both materializers, both backends, WL bindings, tests.
-      Multi-fire arc; will decompose.
+      programs explicitly read inputs.
+
+  - [ ] **a. Reserve UOP_LOAD opcode + WL constant**.
+        Add `UOP_LOAD` to the opcode enum in src/thvm.h
+        (next after the highest current opcode number),
+        bump uopCellCount in WL to count its 1 source cell,
+        export `$UopLoad` from THVMLink.wl with a usage
+        string.  No constructor yet, no materializer yet --
+        just reserves the slot so subsequent fires can
+        layer on without renumbering.  Smoke test: assert
+        `$UopLoad` is defined and is a distinct integer
+        from every other `$Uop*`.  ~30 LOC.
+
+  - [ ] **b. TUOpLoad[tensor] constructor + identity
+        materializer**.  Add a constructor that wraps a
+        TAG_TEN handle in a `LOAD(tensor)` UOP node, plus
+        a materializer rule that resolves LOAD by reading
+        the wrapped tensor's buffer (semantically identity).
+        WL test: TUOpLoad[ones_tensor] |> TRealize matches
+        the underlying tensor element-for-element.  ~50 LOC
+        between src/uop/load.c (constructor), the
+        materializer rule in materialize.c, and a wlt test.
+
+  - [ ] **c. Linearizer emits explicit LOAD for input
+        boundaries**.  Today kernel programs that consume
+        a TAG_TEN at an input boundary implicitly bind it
+        to a slot.  Change the linearizer to emit a
+        first-class LOAD instruction (one per input tensor)
+        so the program explicitly reads each input.  Don't
+        alter kernel emission yet -- LOAD becomes an alias
+        for "read input slot N" the kernel runner already
+        understands.  Test: existing kernels still pass +
+        a new wlt asserts a kernel program of 2-input
+        ADD now contains 2 LOAD entries before the ADD
+        entry.  ~80 LOC; if it grows, split (c) further.
+
+  - [ ] **d. Both backends honor LOAD as input-slot read**.
+        CPU + Metal kernel runners need a no-op handler for
+        LOAD entries: they already bind input buffers to
+        slots, so LOAD just confirms "this slot has been
+        read".  C test: a 2-input ADD kernel produces the
+        same output before and after introducing LOAD
+        entries.  Metal-real parity test mirrors it.
+        ~40 LOC across both backends.
+
+  - [ ] **e. End-to-end LOAD smoke through training**.
+        Re-run the lenet-mnist verify.wls + nn.wlt with
+        explicit LOADs in every kernel program; assert
+        loss curve is byte-identical (or within 1 ULP) to
+        the pre-LOAD baseline.  Documents the fact that
+        LOAD is a structural change, not a numerical one.
+        ~20 LOC of test additions.
 
 - [ ] **Audit kernelization boundaries vs tinygrad**.  User
       directive: "make sure materialization properly
