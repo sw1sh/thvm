@@ -2189,13 +2189,54 @@ Realistic close-out for the overnight cron loop:
       decomposed below; pick up its first sub-item next.
 
   - [ ] **f1. Materializer groups elementwise UOPs into one
-        kernel**.  When walking a UOP tree, if the parent is
-        elementwise AND its child is elementwise + has no
-        other consumers (refcount = 1), append the child's
-        op to the parent's program[] array instead of emitting
-        a separate kernel.  ~80 LOC of materializer changes +
-        tests asserting the grouped program structure.
-        Should drop ~30-50% of LeNet's kernel count.
+        kernel (arc)**.  When walking a UOP tree, if the
+        parent is elementwise AND its child is elementwise +
+        has no other consumers (refcount = 1), append the
+        child's op to the parent's program[] array instead
+        of emitting a separate kernel.  Should drop ~30-50%
+        of LeNet's kernel count.
+        <!-- Initial estimate of ~80 LOC was too low; the
+        change requires either a top-down materialization
+        rewrite or a child-kernel-splice infrastructure.
+        Decomposed into 3 sub-items below. -->
+
+    - [ ] **f1a. Inlineable-kernel flag + splice helper**.
+          Add a KernelEntry boolean (or program-op count
+          check) marking single-op elementwise kernels as
+          inlineable.  Add a `materialize_splice_into(parent,
+          child)` helper that:
+            (i)   appends the child kernel's program ops to
+                  parent->program[].
+            (ii)  merges the child's input_tids into parent's
+                  input_tids (with dedup against existing
+                  parent slots).
+            (iii) returns the parent program-slot index where
+                  the child's last op landed (so the caller's
+                  src[] can reference it).
+            (iv)  marks the child kernel as "spliced" so
+                  kernel_fire_by_id skips it.
+          ~60 LOC; standalone helper + unit test that
+          structurally verifies a hand-built splice produces
+          the right program layout.
+
+    - [ ] **f1b. Wire materialize_in_env to splice
+          elementwise children**.  When emitting a kernel in
+          materialize_in_env, for each child term that
+          resolves to a UOP_KERNEL marked inlineable, call
+          materialize_splice_into instead of treating it as
+          an input.  The parent's main-op src[i] then
+          references the spliced program slot rather than
+          KSRC_AS_INPUT.  ~40 LOC + a wlt test asserting a
+          chain like `MUL(ADD(a, b), c)` produces a single
+          kernel with `program = [..LOADs, ADD, MUL]` (rather
+          than two separate kernels).
+
+    - [ ] **f1c. Verify the kernel-count drop on LeNet**.
+          Re-run lenet-mnist/forward.wls and report the
+          KernelEntry count before vs. after the fusion.
+          Append numbers to docs/kernelization.md.  Acceptance:
+          drop of >30% on the LeNet forward pass.  ~15 LOC
+          of probe + doc update.
 
   - [ ] **f2. Fuse the conv2d-lowered ADD-fold into one
         kernel**.  Detect the Fold[TUOpAdd, partials, ...]
