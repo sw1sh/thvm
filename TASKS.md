@@ -2626,10 +2626,42 @@ Realistic close-out for the overnight cron loop:
       should be opened as its own decomposable arc when
       it becomes the topmost task.
 
-  - [ ] **Per-step buffer pool**.  Add a high-water-mark
-        allocator that frees per-materialize bufs at wnf
-        completion; ~50% memory reduction per step.
-        ~150 LOC.
+  - [ ] **Per-step buffer pool (arc)**.  Add a high-water-
+        mark allocator that frees per-materialize bufs at
+        wnf completion; ~50% memory reduction per step.
+        Decomposed into 3 sub-items below.
+
+    - [ ] **Pool primitives + watermark API**.  Add
+          `cpu_buf_pool_begin() -> u32 watermark` and
+          `cpu_buf_pool_rollback(u32 wm)` to
+          src/backend/cpu/buf_alloc.c.  begin captures
+          CPU_BUFS_NEXT; rollback walks new bufs since the
+          watermark and frees them (calling buf_free
+          directly, bypassing refcount -- the caller is
+          responsible for ensuring nothing else holds the
+          bufs alive).  Standalone helper + a small C unit
+          test in tests/test_buf_pool.c covering basic
+          alloc-then-rollback.  ~40 LOC + ~30 LOC test.
+
+    - [ ] **Per-TRealize pool boundaries**.  Wire
+          pool_begin / pool_rollback around materialize +
+          wnf in TRealize's C entry.  Subtle: the RESULT
+          TAG_TEN's buffer must survive the rollback, as
+          must any tensor in the heap that references it.
+          Approach: just before rollback, walk the result
+          from its TenDesc's producer_kid back through
+          producer chains, marking each visited buf as
+          "preserved"; rollback only frees unmarked bufs.
+          ~80 LOC across thvm.c (TRealize entry hook) +
+          a preserve-walk helper.  Test: memory-probe.wls
+          before/after numbers.
+
+    - [ ] **Verify reuse-pass impact**.  Re-run the
+          memory probe + lenet-mnist verify.wls.  Update
+          docs/memory.md with measured per-step memory
+          drop.  Acceptance: >=30% reduction in
+          TTotalBufBytes after one TRealize.  ~10 LOC of
+          probe extension + doc update.
 
   - [ ] **Refcount-driven free**.  Decref + free buffers
         when the last consumer kernel finishes reading.
