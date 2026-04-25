@@ -235,6 +235,19 @@ int main(void) {
   CHECK_EQ(term_val(b_cell), 1);
   CHECK_EQ(term_val(e_cell), 1);
 
+  TEST_BEGIN("grad/flip-emits-flip-on-cotangent");
+  // FLIP is its own inverse, so GRAD[FLIP(a, mask), gy, a] emits
+  // GRAD[a, FLIP(gy, mask), a] -> cascade to leaf:
+  //   EXPAND(FLIP(gy, mask), a.shape).
+  // Use mask = 1 (flip axis 0); inner FLIP heap holds NUM(1).
+  Term fl     = uop_flip(a, 1u);
+  Term g_fl   = wnf(uop_grad(fl, gy, a));
+  CHECK_EQ(term_ext(g_fl), UOP_EXPAND);
+  Term inner_fl = unexpand(g_fl);
+  CHECK_EQ(term_ext(inner_fl), UOP_FLIP);
+  Term mask_cell = heap_read(term_val(inner_fl) + 1);
+  CHECK_EQ(term_val(mask_cell), 1);
+
   TEST_BEGIN("grad/permute-emits-inverse-permute-on-cotangent");
   // 2-D source {2, 3} -> PERMUTE(perm = {1, 0}) -> {3, 2}.  The
   // inverse permutation is also {1, 0} (involution at rank 2), so

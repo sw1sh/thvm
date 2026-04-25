@@ -1665,11 +1665,17 @@ Realistic close-out for the overnight cron loop:
         structural test). -->
 
 
-  - [ ] **d. FLIP grad rule.**  Forward `FLIP(a, mask)` mirrors
+  - [x] **d. FLIP grad rule.**  Forward `FLIP(a, mask)` mirrors
         selected axes.  Gradient: `FLIP(cotangent, mask)` (FLIP
         is its own inverse, so mask is preserved).  Tests:
         structural + 1-D wlt with mask = 1 confirms grad equals
         FLIP(seed).  ~15 LOC + ~15 LOC of tests.
+        <!-- Landed.  Same gy-lift-via-EXPAND pattern; output
+        shape = source shape since FLIP doesn't change shape.
+        210 WL + 146 C tests green (added grad/flip-identity-
+        cotangent + grad/flip-inside-mul-chain wlt + grad/
+        flip-emits-flip-on-cotangent C structural test). -->
+
 
   - [ ] **e. End-to-end smoke for the lowered conv2d arc.**  After
         (a)-(d) land, draft a small wlt that builds a SHRINK +

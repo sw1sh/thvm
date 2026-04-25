@@ -534,6 +534,28 @@ fn Term interact_grad(Term grad_term) {
       return uop_grad(a, g, target);
     }
 
+    case UOP_FLIP: {
+      // FLIP mirrors selected axes (axes_bitmask).  FLIP is its own
+      // inverse, so the gradient flips the cotangent on the same
+      // axes:
+      //   GRAD[FLIP(a, mask), gy, t] =
+      //     GRAD[a, FLIP(EXPAND(gy, src_shape), mask), t]
+      // Heap: [src, NUM(axes_bitmask)].  Output shape = source shape.
+      Term a = term_resolve(heap_read(y_loc + 0));
+      if (term_tag(a) == TAG_NUM) return grad_zero(target);
+      if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_CONST) return grad_zero(target);
+
+      Shape src_shape;
+      if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
+        return uop_grad(a, gy, target);
+      }
+
+      u32 mask       = (u32)term_val(heap_read(y_loc + 1));
+      Term gy_shaped = uop_expand(gy, src_shape.ndim, src_shape.dims);
+      Term g         = uop_flip(gy_shaped, mask);
+      return uop_grad(a, g, target);
+    }
+
     case UOP_PERMUTE: {
       // PERMUTE reorders axes: out.dim[i] = src.dim[perm[i]].  The
       // gradient permutes the cotangent by the INVERSE permutation

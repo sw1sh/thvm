@@ -145,6 +145,35 @@ VerificationTest[
     TestID -> "grad/shrink-inside-mul-chain"
 ]
 
+(* === FLIP: grad mirrors the cotangent on the same axes === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    (* d(sum(FLIP(a*a, {0})))/d(a) = 2a -- chain through MUL inside
+       FLIP.  FLIP is its own inverse, so the cotangent flipped back
+       to a's layout is the same constant; element-wise this gives
+       2*a in a's natural order. *)
+    expr = TUOpReduce[TUOpFlip[TUOpMul[a, a], {0}], 0, "SUM"];
+    g = TRealize @ TGrad[expr, a];
+    Normal @ TTensorData[g],
+    {2.0, 4.0, 6.0, 8.0},
+    TestID -> "grad/flip-inside-mul-chain"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    (* d(FLIP(a, {0}))/d(a) = 1 broadcast to a's shape (FLIP just
+       moves elements; sum collapses the axis so order doesn't show
+       up in the gradient). *)
+    expr = TUOpReduce[TUOpFlip[a, {0}], 0, "SUM"];
+    g = TRealize @ TGrad[expr, a];
+    Normal @ TTensorData[g],
+    {1.0, 1.0, 1.0, 1.0},
+    TestID -> "grad/flip-identity-cotangent"
+]
+
 (* === PERMUTE: grad applies the inverse permutation === *)
 
 VerificationTest[
