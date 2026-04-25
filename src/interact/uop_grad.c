@@ -183,11 +183,71 @@ fn Term interact_grad(Term grad_term) {
         Term raw_gw      = uop_conv2d(input, gy_as_w, zero_bias);
         Term gw_4        = uop_reshape(raw_gw, 4, gw_4d);
         gw_chain = uop_grad(weights, gw_4, target);
+      } else if (shapes_known) {
+        // C_in > 1: diagonal-mask trick.  Build a "weights" tensor
+        // of shape {C_out * C_in, C_in, H_out, W_out} where
+        //   weights[c_aug, ci, *, *] = gy[c_aug // C_in, *, *]
+        //                              if ci == c_aug % C_in, else 0.
+        // CONV2D against this gives output[c_aug, ky, kx]
+        //   = sum_{ci, y, x} input[ci, y+ky, x+kx] * weights[c_aug, ci, ky, kx]
+        //   = sum_{y, x} input[c_aug%C_in, y+ky, x+kx] * gy[c_aug//C_in, y, x]
+        //   = gw[c_aug // C_in, c_aug % C_in, ky, kx].
+        // Reshape c_aug back to (C_out, C_in) -> gw{C_out, C_in, kh, kw}.
+        //
+        // Diagonal mask = expand( (c_in x c_in) identity built as a
+        // raw f32 TEN at chain-rule fire ).  Allocates one tensor
+        // per CONV2D backward fire; small (c_in*c_in floats) and
+        // bounded since LeNet's max c_in is 16.
+        u32 c_in  = in_shape.dims[0];
+        u32 c_out = wt_shape.dims[0];
+        u32 kh    = wt_shape.dims[2];
+        u32 kw    = wt_shape.dims[3];
+        u32 h_out = in_shape.dims[1] - kh + 1;
+        u32 w_out = in_shape.dims[2] - kw + 1;
+        u32 c_aug = c_out * c_in;
+
+        // 1. Identity matrix {c_in, c_in} as a TAG_TEN.
+        Shape iden_shape = {0};
+        iden_shape.ndim = 2;
+        iden_shape.dims[0] = c_in;
+        iden_shape.dims[1] = c_in;
+        u32 iden_tid = tensor_alloc(CURRENT_BACKEND, iden_shape, DT_F32);
+        size_t iden_n = (size_t)c_in * c_in;
+        f32 *iden_buf = (f32 *)malloc(iden_n * sizeof(f32));
+        for (size_t i = 0; i < iden_n; i++) iden_buf[i] = 0.0f;
+        for (u32 i = 0; i < c_in; i++) iden_buf[i * c_in + i] = 1.0f;
+        CURRENT_BACKEND->buf_write(TENS[iden_tid].buf_id,
+                                   iden_buf, iden_n * sizeof(f32));
+        free(iden_buf);
+        Term iden_term = term_new(0, TAG_TEN, DT_F32, iden_tid);
+
+        // 2. gy 5D: reshape to {C_out, 1, 1, H_out, W_out}, expand
+        //    to {C_out, C_in, C_in, H_out, W_out}.
+        u32 gy_at3[3]  = {c_out, h_out, w_out};
+        u32 gy_5d_r[5] = {c_out, 1, 1, h_out, w_out};
+        u32 expand5[5] = {c_out, c_in, c_in, h_out, w_out};
+        Term gy_at_out = uop_expand(gy, 3, gy_at3);
+        Term gy_5d_re  = uop_reshape(gy_at_out, 5, gy_5d_r);
+        Term gy_5d     = uop_expand(gy_5d_re, 5, expand5);
+
+        // 3. iden 5D: reshape to {1, C_in, C_in, 1, 1}, expand to {...}.
+        u32 iden_5d_r[5] = {1, c_in, c_in, 1, 1};
+        Term iden_5d_re  = uop_reshape(iden_term, 5, iden_5d_r);
+        Term iden_5d     = uop_expand(iden_5d_re, 5, expand5);
+
+        // 4. Diagonal weight 5D, then reshape to {C_aug, C_in, H_out, W_out}.
+        Term weight_5d   = uop_binary(UOP_MUL, gy_5d, iden_5d);
+        u32 weight_4d[4] = {c_aug, c_in, h_out, w_out};
+        Term weight_t    = uop_reshape(weight_5d, 4, weight_4d);
+
+        // 5. Fresh CONV2D + reshape back to {C_out, C_in, kh, kw}.
+        Term zero_bias   = uop_expand(uop_const(DT_F32, 0), 1, &c_aug);
+        Term raw_gw_3    = uop_conv2d(input, weight_t, zero_bias);
+        u32 gw_4d_dims[4] = {c_out, c_in, kh, kw};
+        Term gw_4        = uop_reshape(raw_gw_3, 4, gw_4d_dims);
+        gw_chain = uop_grad(weights, gw_4, target);
       } else {
-        // Fallback for C_in > 1: emit zero so multi-channel
-        // CONV2D weights silently get no gradient (LeNet's
-        // second conv).  This is wrong but doesn't crash; the
-        // C_in > 1 case is its own follow-up task.
+        // Shape unknown -- defensive fallback.
         gw_chain = grad_zero(target);
       }
       // grad_input via the standard transposed-conv identity:

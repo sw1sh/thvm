@@ -397,6 +397,32 @@ VerificationTest[
     TestID -> "grad/conv2d-input-equals-coverage-map"
 ]
 
+(* === CONV2D grad_weights for C_in > 1 (diagonal-mask trick) ===
+   C_in = 2 case.  input{2, 4, 4} with channel 0 = ones, channel
+   1 = twos.  weights = zeros{1, 2, 3, 3}; bias = zeros{1};
+   CONST(1) seed -> gy lifted = ones{1, 2, 2}.
+   gw[0, 0, ky, kx] = sum over (y,x) of input[0, y+ky, x+kx] * 1
+                    = sum of 2x2 ones slice = 4.
+   gw[0, 1, ky, kx] = sum of 2x2 twos slice = 8.
+   So expected: {{4-grid filled with 4}, {3-grid filled with 8}}. *)
+
+VerificationTest[
+    TInit[];
+    inputData = Join[
+        ConstantArray[1.0, {1, 4, 4}],   (* channel 0 = 1s *)
+        ConstantArray[2.0, {1, 4, 4}]];  (* channel 1 = 2s *)
+    input   = TTensorCreate @ NumericArray[inputData, "Real32"];
+    weights = TTensorCreate @ NumericArray[
+        ConstantArray[0.0, {1, 2, 3, 3}], "Real32"];
+    bias    = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    g = TRealize @ TGrad[TUOpConv2D[input, weights, bias], weights];
+    Normal @ TTensorData[g],
+    {{ConstantArray[4.0, {3, 3}],
+      ConstantArray[8.0, {3, 3}]}},
+    SameTest -> (Max[Abs[Flatten[#1] - Flatten[#2]]] < 1.0*^-5 &),
+    TestID -> "grad/conv2d-weights-cin2-diagonal-mask-trick"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

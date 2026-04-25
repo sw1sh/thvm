@@ -1264,7 +1264,7 @@ Realistic close-out for the overnight cron loop:
       investigation.  All 399 C + 190 WL tests stay green. -->
 
 
-- [ ] **CONV2D grad_weights for C_in > 1**.  Current rule
+- [x] **CONV2D grad_weights for C_in > 1**.  Current rule
       emits grad_zero when C_in > 1 (LeNet's second conv).
       To make multi-channel CONV2D backprop correct, pick one
       of the three options noted in the existing
@@ -1280,6 +1280,30 @@ Realistic close-out for the overnight cron loop:
       into c_out which loses the per-c_in correlation.
       Probably needs (a) with a small SHRINK + CONCAT pair or
       (c) outright.
+      <!-- Implemented via a NEW path: diagonal-mask trick.
+      Build a "weights" tensor of shape {C_out * C_in, C_in,
+      H_out, W_out} where weights[c_aug, ci, *, *] equals
+      gy[c_aug // C_in, *, *] when ci == c_aug % C_in, else 0.
+      CONV2D against this gives output[c_aug, ky, kx]
+        = sum_{ci, y, x} input[ci, y+ky, x+kx] * weights[c_aug,
+                                                          ci, ky, kx]
+        = gw[c_aug // C_in, c_aug % C_in, ky, kx]
+      after the diagonal collapses the inner sum to a single
+      term per c_aug.  Reshape c_aug back to (C_out, C_in)
+      yields gw{C_out, C_in, kh, kw}.  Identity matrix is
+      built as a raw f32 TAG_TEN at chain-rule fire time
+      (allocates one tensor of c_in*c_in floats per backward
+      fire; bounded since LeNet's max c_in is 16, so 256 f32 =
+      1 KiB).  All construction uses existing UOPs (RESHAPE +
+      EXPAND + MUL + CONV2D + RESHAPE).
+      Numerical test grad/conv2d-weights-cin2-diagonal-mask-
+      trick: input{2,4,4} with channel 0 = ones, channel 1 =
+      twos; weights zeros{1,2,3,3}; bias zeros{1}; CONST(1)
+      seed -> grad_weights = {{ones-3x3 * 4, ones-3x3 * 8}}
+      (channel 0's 2x2 sum = 4; channel 1's = 8).
+      All 399 C + 191 WL tests stay green.  LeNet's second
+      conv now backprops correctly. -->
+
 
 - [ ] **Multi-tensor optimizer surface (per-tensor SGD or
       Adam)**.  TOptim["Adam"] threads state through a SINGLE
