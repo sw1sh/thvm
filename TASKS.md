@@ -2631,7 +2631,7 @@ Realistic close-out for the overnight cron loop:
         wnf completion; ~50% memory reduction per step.
         Decomposed into 3 sub-items below.
 
-    - [ ] **Pool primitives + watermark API**.  Add
+    - [x] **Pool primitives + watermark API**.  Add
           `cpu_buf_pool_begin() -> u32 watermark` and
           `cpu_buf_pool_rollback(u32 wm)` to
           src/backend/cpu/buf_alloc.c.  begin captures
@@ -2642,6 +2642,17 @@ Realistic close-out for the overnight cron loop:
           bufs alive).  Standalone helper + a small C unit
           test in tests/test_buf_pool.c covering basic
           alloc-then-rollback.  ~40 LOC + ~30 LOC test.
+          <!-- Landed.  src/backend/cpu/buf_pool.c (new):
+          cpu_buf_pool_begin() returns CPU_BUFS_NEXT;
+          cpu_buf_pool_rollback(wm) walks bufs since wm,
+          calls cpu_buf_free on each, restores
+          CPU_BUFS_NEXT = wm.  Bypasses refcount (escape
+          hatch for the per-step pool boundary work in
+          sub-item b).  tests/test_buf_pool.c (18 sub-checks)
+          covers alloc-then-rollback + pre-watermark
+          survival + empty rollback no-op + slot reuse
+          after rollback.  146 C + 220 WL tests green. -->
+
 
     - [ ] **Per-TRealize pool boundaries**.  Wire
           pool_begin / pool_rollback around materialize +
