@@ -4304,24 +4304,57 @@ implemented + tested (f1a) but never invoked by the pipeline.
              materializer. -->
 
 
-  - [ ] **f1d: selective materializer**.  Modify
-        `materialize_walk` and `materialize_expr` so they
-        only emit a UOP_KERNEL for realized UOPs.  Un-realized
-        UOPs stay as raw UOP cells in the heap.  When emitting
-        a kernel for a realized UOp, recursively pull its
-        un-realized upstream UOPs into the kernel's program
-        directly (instead of allocating sub-kernels and
-        splicing).  REDUCE always realizes -> always a
-        kernel boundary.  Fall back to the pre-redesign
-        per-UOp-kernel behavior when the realize bitmap
-        flags a UOP as realized that doesn't strictly need
-        to be (safety net during the transition).
-        Acceptance: 166 C + 289 WL green;
-        nn/poly-regression-gradients still gives
-        {-32, -16} (the cross-realize TGrad pattern that
-        attempt 1 broke); linear-train forward kernel-count
-        drops from 17 to <= 5.  ~150 LOC + tests --
-        DECOMPOSE FURTHER on first fire.
+  - [ ] **f1d-a: wire realize_classify into thvm_materialize**.
+        Call `realize_classify(term)` at the top of
+        `thvm_materialize`, before `materialize_walk` runs.
+        The output table is populated but no production code
+        consumes it yet (f1d-b/c hook into it).  Add a
+        global toggle `MATERIALIZE_USE_REALIZE_INFO`
+        defaulting to 0 so f1d-b/c can flip it on
+        independently as they land.  Acceptance: 166 C +
+        289 WL green; classifier table is populated after
+        any TRealize (verifiable by tests/test_realize_classify
+        re-running after a TRealize invocation, but no behavior
+        changes).  ~30 LOC + tiny test stub.
+
+  - [ ] **f1d-b: selective materialize_expr**.  When the
+        toggle is on AND the UOp being processed is NOT in
+        the realized set, materialize_expr should NOT
+        allocate a new KernelEntry for it.  Instead, the
+        CALLER (the realized parent's materialize_expr call)
+        should recursively pull the un-realized child's
+        compute into ITS OWN program by descending into the
+        child's source heap cells.  Concretely: extend
+        materialize_expr to take an optional "build into
+        parent_kid" argument; when set, append to parent's
+        program instead of creating a new kernel.  REDUCE
+        always realizes (guaranteed by the classifier).
+        Acceptance: with toggle on, linear-train forward
+        kernel-count drops from 17 to <= 5; 166 C + 289
+        WL green; nn/poly-regression-gradients still gives
+        {-32, -16}.  ~80 LOC + grad-correctness regression
+        test that flips the toggle on.
+
+  - [ ] **f1d-c: selective materialize_walk**.  When the
+        toggle is on, materialize_walk should leave
+        un-realized UOP cells alone (no rewrite to
+        UOP_KERNEL).  This keeps source_uop walks in
+        interact_uop_grad's chain rule seeing raw UOP
+        children for un-realized intermediates -- those
+        children get re-materialized into the grad's own
+        kernel chain (where they may again be classified
+        as un-realized and inlined into grad's parent
+        kernels).  Acceptance: same as f1d-b plus full
+        verify.wls Metal LeNet still converges
+        loss 2.61 -> 0.025.  ~40 LOC.
+
+  - [ ] **f1d-d: flip toggle on by default**.  Once
+        f1d-b + f1d-c land cleanly with all tests green,
+        flip MATERIALIZE_USE_REALIZE_INFO default to 1 in
+        thvm_init / its declaration site, and remove the
+        toggle from any test that no longer needs it.
+        Acceptance: 166 C + 289 WL green with toggle ON
+        by default.  ~10 LOC.
 
   - [ ] **f1e: bench delta + docs update**.  Re-run
         `wl/Examples/_bench/baseline.wls` on both backends.
