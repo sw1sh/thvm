@@ -602,16 +602,30 @@ Realistic close-out for the overnight cron loop:
       end-to-end.  Next milestones per the roadmap: REDUCE_MAX
       and CONV2D. -->
 
-- [ ] **MLP-on-MNIST training validation milestone**: build a
-      tiny 2-layer fully-connected MNIST classifier (Linear ->
-      ReLU -> Linear -> Softmax + CrossEntropyLoss), apply
-      `TOptim["Adam"]` for a handful of steps, verify the loss
-      actually decreases.  Lives at `wl/Examples/mlp-mnist/
-      train.wls`.  Validates that the 6 grad rules just landed
-      (RESHAPE/EXPAND/CMPLT/EXP2/RECIP/LOG2 + the pre-existing
-      ADD/MUL/NEG/REDUCE_SUM) chain correctly end-to-end on a
-      real network -- the natural sanity check before tackling
-      the heavier REDUCE_MAX + CONV2D rules.
+- [ ] **MLP-on-MNIST forward smoke test**: at
+      `wl/Examples/mlp-mnist/forward.wls`, build a 2-layer FC net
+      (Flatten -> Linear -> ReLU -> Linear -> Softmax) on input
+      {1,28,28}, run `TFromNet` on a single MNIST sample, verify
+      the output is a 10-vector that sums to ~1.0 and that
+      `TCrossEntropyLoss` against a one-hot target produces a
+      finite scalar loss.  Pure forward, no training.  Plus a
+      minimal README.  Catches any forward-path issues before
+      backprop is layered on.
+
+- [ ] **MLP-on-MNIST single-step gradient check**: extend the
+      forward smoke test by computing `TGrad[loss, W]` for each
+      of the 4 weight tensors (W1, b1, W2, b2) and asserting
+      that `TRealize` produces finite, correctly-shaped
+      gradients (no NaN, no shape mismatch).  Pure structural
+      sanity; no parameter updates.
+
+- [ ] **MLP-on-MNIST training loop**: with forward + grads
+      validated, do K manual SGD steps in pure WL (compute
+      grads, update each weight = w - lr * g, recompute loss),
+      assert the loss curve trends down on the same fixed batch.
+      Won't use TOptim["Adam"] yet (Adam threads state through a
+      single weight; multi-tensor MLPs need a per-tensor loop).
+      Lives at `wl/Examples/mlp-mnist/train.wls`.
 
 - [ ] **Land grad rule 7: UOP_REDUCE with kind=MAX** in
       `interact_grad`, per `docs/grad-roadmap.md` step 7.  Needs
