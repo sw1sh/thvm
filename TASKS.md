@@ -921,26 +921,53 @@ Realistic close-out for the overnight cron loop:
       still needs the EXPAND kernel fix to actually evaluate
       to the right numbers. -->
 
-- [ ] **Axis-aware EXPAND in cpu_op_expand**: current
-      backend/cpu/op/expand.c handles only two cases
-      correctly: in_numel == 1 (scalar broadcast) and
-      in_numel == out_numel (memcpy / RESHAPE-equivalent).
-      The third "cycle" branch (`out[i] = in[i % in_numel]`)
-      is a fallback that's only correct for trailing-axis
-      broadcast (e.g. {3} -> {2,3} where each row is a copy
-      of the {3} source).  For leading-axis broadcast (e.g.
-      {2} -> {2,2} where each source element repeats along
-      a new trailing axis -- the per-row max pattern), it
-      produces wrong values.  Fix: walk the source view's
-      strides (or, if no strides yet, derive them from the
-      source's shape vs the EXPAND's output shape) so the
-      kernel knows which axes are broadcast and indexes into
-      the source per output position.  Same fix needed in
-      backend/metal/shaders/movement.metal `thvm_expand`.
-      Add parity tests covering both leading-axis and
-      trailing-axis broadcast cases.  Unblocks the deferred
-      2x2-pool-style probe + actual max-pool backprop in
-      LeNet's PoolingLayer.
+- [ ] **Plumb EXPAND's source shape to the kernel via KProgOp**.
+      Current `KProgOp` (`src/thvm.h`) carries only
+      `numel` per output and a single `u32 arg` for op-specific
+      info -- no per-axis shape.  `cpu_op_expand` therefore
+      only knows in_numel/out_numel and can't decide between
+      leading-axis broadcast ({2} -> {2,2} as
+      {a,a,b,b}) and trailing-axis broadcast ({2} -> {2,2}
+      as {a,b,a,b}).  Add a per-program-op shape carrier
+      (e.g. extend `KProgOp` with a small fixed-size
+      `u8 src_dims[MAX_DIM]` plus `u8 src_ndim` for the
+      first source slot, OR thread shape via a new field
+      on `KernelEntry`).  Choose the smaller-bloat option
+      and document it.  Materializer
+      (src/schedule/materialize_in_env.c, EXPAND case)
+      populates the new field from `child_shapes[0]`.
+      No semantic change yet -- this is pure plumbing to
+      give the kernel the info it needs.  Backends still use
+      the legacy code path; the next task swaps EXPAND over.
+
+- [ ] **Use the source shape in cpu_op_expand**.  With the
+      new per-op shape info available, replace the cycle
+      fallback in `src/backend/cpu/op/expand.c` with proper
+      axis-aware indexing: walk the source's strides
+      (computed from src_shape vs out_shape: stride[i] = 0
+      for broadcast axes, normal stride otherwise), then
+      compute each output element's source index by
+      decomposing `out_idx` into per-axis indices.  Add
+      parity tests in `tests/test_uop.c` (or a new
+      `tests/test_expand_axis.c`) covering: leading-axis
+      ({2} -> {2,2} as {a,a,b,b}), trailing-axis
+      ({2} -> {2,2} as {a,b,a,b} via shape {1,2}->{2,2}),
+      mixed ({1,3} -> {2,3}), scalar ({1}->{2,2}).
+
+- [ ] **Mirror axis-aware EXPAND in the Metal shader**.
+      `src/backend/metal/shaders/movement.metal`
+      `thvm_expand` currently just memcpys (it only handles
+      the in_numel == out_numel case correctly).  Apply the
+      same stride logic as the CPU op and add a Metal-vs-CPU
+      parity test in `tests/test_metal_real.c` covering the
+      same broadcast patterns.
+
+- [ ] **Re-enable the 2x2-pool-style REDUCE_MAX grad probe**
+      in `wl/THVMLink/Tests/grad.wlt` once the EXPAND fix
+      lands.  Test:
+        a = {1, 3, 2, 4}; reshape to {2,2}; REDUCE_MAX axis=1;
+        sum the per-row maxes; TGrad wrt a.
+      Expected: {0, 1, 0, 1} (one-hot per row at the argmax).
 
 - [ ] **Land grad rule 8: UOP_CONV2D** in `interact_grad`, per
       `docs/grad-roadmap.md` step 8.  Three sub-gradients
