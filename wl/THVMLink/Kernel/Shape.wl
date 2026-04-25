@@ -122,12 +122,12 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                         dims
                     ],
                 $UopExpand,
-                    Module[{
-                        srcShape = tUopShape[TTerm[$heapReadFn[val]]],
-                        ndim
-                    },
-                        ndim = Length[srcShape];
-                        Table[$termValFn[$heapReadFn[val + 1 + i]],
+                    (* EXPAND heap layout: [src, NUM(ndim), NUM(d0), ...];
+                       dims live at val+2..val+1+ndim.  ndim is stored
+                       explicitly so EXPAND can change rank. *)
+                    Module[{ndim},
+                        ndim = $termValFn[$heapReadFn[val + 1]];
+                        Table[$termValFn[$heapReadFn[val + 2 + i]],
                               {i, 0, ndim - 1}]
                     ],
                 $UopConv2D,

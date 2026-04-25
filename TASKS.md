@@ -620,7 +620,7 @@ Realistic close-out for the overnight cron loop:
       CPU and Metal backends pass. -->
 
 
-- [ ] **EXPAND heap layout: store ndim explicitly**.  Current
+- [x] **EXPAND heap layout: store ndim explicitly**.  Current
       layout is `[src, NUM(d0), ..., NUM(d_{ndim-1})]` and the
       materializer recovers `ndim` from the SOURCE tensor's
       shape (`expand_output_shape` in
@@ -638,6 +638,20 @@ Realistic close-out for the overnight cron loop:
       every test that touches `uop_expand`'s heap directly
       (currently only `tests/test_grad.c`).  Pure layout
       change; no semantic change for same-rank uses.
+      <!-- Implemented with the variant layout
+      `[src, NUM(ndim), NUM(d0), ...]` -- src stays at slot 0
+      so the materializer's "child at slot i" loop in
+      schedule/materialize.c needed no change.  ndim sits at
+      slot 1 and dim cells start at slot 2.  expand_output_shape
+      now reads ndim from the heap directly (signature lost the
+      ndim parameter).  Updated: src/uop/expand.c constructor
+      (heap_alloc(2 + ndim)); both materializers; the UOP_EXPAND
+      grad rule's dim-cell offset; the WL tUopShape walker for
+      $UopExpand; and the upfront-expand structural test in
+      test_grad.c.  All 341 C tests + 161 WL tests stay green;
+      the MLP-on-MNIST forward smoke still passes.  Next:
+      use the new ndim freedom in expand_to_target. -->
+
 
 - [ ] **Make expand_to_target rank-aware**.  Once EXPAND
       stores ndim explicitly, update

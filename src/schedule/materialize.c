@@ -90,17 +90,17 @@ fn Shape op_output_shape(u8 op, u32 const *in_tids, u8 n_in, u32 reduce_axis) {
   return s;
 }
 
-// EXPAND output shape: same rank as source (tinygrad EXPAND
-// semantics -- it only changes axis sizes, not ranks; rank changes
-// require a RESHAPE first), dim sizes from the heap NUM cells.
-// We can't reliably count those NUMs by walking past the slot range
-// (subsequent heap allocations may put NUM cells right after), so
-// the source's ndim acts as the authoritative count.
-fn Shape expand_output_shape(u64 expr_loc, u32 ndim) {
+// EXPAND output shape: ndim is stored explicitly at expr_loc+1
+// (see src/uop/expand.c for the heap layout), so EXPAND can
+// change rank -- e.g. broadcasting a scalar/lower-rank cotangent
+// to a target's higher-rank shape during backprop.  Dim sizes
+// follow at expr_loc+2..expr_loc+1+ndim.
+fn Shape expand_output_shape(u64 expr_loc) {
   Shape s = {0};
+  u32 ndim = (u32)term_val(heap_read(expr_loc + 1));
   s.ndim = ndim;
   for (u32 i = 0; i < ndim; i++) {
-    Term n = heap_read(expr_loc + 1 + i);
+    Term n = heap_read(expr_loc + 2 + i);
     s.dims[i] = (u32)term_val(n);
   }
   return s;
@@ -205,10 +205,9 @@ fn Term materialize_expr(Term expr) {
   u32   reduce_axis = (op == UOP_REDUCE) ? (op_arg & 0xFFFF) : 0;
   Shape out_shape;
   if (op == UOP_EXPAND) {
-    // ndim comes from the source -- EXPAND can't change rank, only
-    // axis sizes (mirrors tinygrad's MovementOps.EXPAND).
-    u32 ndim = (child_tids[0] != 0) ? TENS[child_tids[0]].view.shape.ndim : 1;
-    out_shape = expand_output_shape(expr_loc, ndim);
+    // ndim is stored explicitly in the EXPAND heap (see
+    // src/uop/expand.c); EXPAND can legitimately change rank.
+    out_shape = expand_output_shape(expr_loc);
   } else {
     out_shape = op_output_shape(op, child_tids, arity, reduce_axis);
   }

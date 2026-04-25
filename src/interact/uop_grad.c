@@ -205,9 +205,11 @@ fn Term interact_grad(Term grad_term) {
         return uop_grad(a, gy, target);
       }
 
+      // EXPAND heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})];
+      // dim cells live at y_loc+2..y_loc+1+ndim.
       Term g = gy;
       for (i32 axis = (i32)src_shape.ndim - 1; axis >= 0; axis--) {
-        u32 out_dim = (u32)term_val(heap_read(y_loc + 1 + axis));
+        u32 out_dim = (u32)term_val(heap_read(y_loc + 2 + axis));
         if (src_shape.dims[axis] == 1 && out_dim > 1) {
           g = uop_reduce(REDUCE_SUM, (u32)axis, g);
         }

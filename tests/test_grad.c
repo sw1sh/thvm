@@ -191,10 +191,14 @@ int main(void) {
 
   TEST_BEGIN("grad/upfront-expand-carries-target-shape");
   // The leaf-target rule lifts gy to target.shape (via EXPAND with
-  // dims read from TENS).
+  // dims read from TENS).  Heap layout is [src, NUM(ndim), NUM(d0), ...]
+  // so the first dim cell sits at offset +2.
   Term g_lift = wnf(uop_grad(a, gy, a));
   CHECK_EQ(term_ext(g_lift), UOP_EXPAND);
-  Term dim0 = heap_read(term_val(g_lift) + 1);
+  Term ndimN  = heap_read(term_val(g_lift) + 1);
+  CHECK_EQ(term_tag(ndimN), TAG_NUM);
+  CHECK_EQ(term_val(ndimN), 1);
+  Term dim0   = heap_read(term_val(g_lift) + 2);
   CHECK_EQ(term_tag(dim0), TAG_NUM);
   CHECK_EQ(term_val(dim0), 3);
 

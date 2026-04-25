@@ -157,10 +157,11 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
             }
         }
         if (op == UOP_EXPAND) {
-            u32 ndim = child_shapes[0].ndim;
+            // ndim is stored explicitly at expr_loc+1; dims at +2..
+            u32 ndim = (u32)term_val(heap_read(expr_loc + 1));
             out_shape.ndim = ndim;
             for (u32 i = 0; i < ndim; i++) {
-                Term n = heap_read(expr_loc + 1 + i);
+                Term n = heap_read(expr_loc + 2 + i);
                 out_shape.dims[i] = (u32)term_val(n);
             }
         }
