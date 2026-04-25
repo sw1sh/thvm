@@ -40,7 +40,8 @@ TESTS := \
   $(BIN)/test_gc_roots \
   $(BIN)/test_gc_mark_term \
   $(BIN)/test_extern_pin \
-  $(BIN)/test_realize_classify
+  $(BIN)/test_realize_classify \
+  $(BIN)/test_materialize_inlined
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.

@@ -4353,7 +4353,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
                  source_uop walks still find what they need.
          f1d-d:  flip toggle on. -->
 
-  - [ ] **f1d-b1: materialize_kernel_inlined standalone helper**.
+  - [x] **f1d-b1: materialize_kernel_inlined standalone helper**.
         New file `src/schedule/materialize_inlined.c` defining
         `Term materialize_kernel_inlined(Term realized_uop_term)`.
         Walks the UOp DAG rooted at `realized_uop_term`,
@@ -4370,6 +4370,25 @@ implemented + tested (f1a) but never invoked by the pipeline.
         test that builds chain (a + b) * c with MUL realized
         + ADD un-realized, asserts a single 5-op kernel
         (LOAD a/b/c, ADD, MUL).
+        <!-- DONE: helper landed at
+             src/schedule/materialize_inlined.c.  MVP scope:
+             only elementwise (UOP_ADD/MUL/NEG/RECIP/EXP2/
+             LOG2/SQRT/CMPLT/CMPEQ) + UOP_CONST get inlined;
+             non-elementwise un-realized child or root causes
+             the helper to bail (returns 0) so f1d-b2 can
+             fall back to legacy emit.  No LOAD prefix
+             (interpreter doesn't require it -- LOAD ops at
+             non-final positions are skipped).  Root's
+             children processed via inline_emit (which honors
+             the realized check); root's main op emitted
+             explicitly so the realized-root doesn't trip the
+             "realized -> bail" guard against itself.  Test
+             at tests/test_materialize_inlined.c (31 sub-
+             checks: chain, dedup-shared-leaf,
+             dedup-shared-uop-subexpr, non-elementwise-bails).
+             166 C + 289 WL green; no behavior change in
+             production (no caller wires it). -->
+
 
   - [ ] **f1d-b2: hook materialize_kernel_inlined into walk**.
         Modify `materialize_uop_in_env` so that when the
