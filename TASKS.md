@@ -716,7 +716,7 @@ Realistic close-out for the overnight cron loop:
       a separate follow-up below.  Both runs pass the
       grad-check.wls assertions on either backend. -->
 
-- [ ] **Investigate Metal-vs-CPU gradient parity in MLP**:
+- [x] **Investigate Metal-vs-CPU gradient parity in MLP**:
       `wl/Examples/mlp-mnist/grad-check.wls` shows all four
       weight grads are non-zero and correctly-shaped on the CPU
       backend, but on Metal only `b2` (the most-shallow grad,
@@ -731,6 +731,22 @@ Realistic close-out for the overnight cron loop:
       mirroring those already in test_metal_real.c but for the
       specific REDUCE/CMPLT/MUL combinations that the chain
       rule emits.
+      <!-- Resolved: the original observation was a
+      stderr-vs-stdout interleaving artifact + a sample-dependent
+      ReLU saturation.  Per-pattern grad probes (sum, leaf,
+      add, x*x, ReLU mask, matvec-style REDUCE/MUL/EXPAND
+      backward) all match bit-for-bit across CPU and Metal.
+      Re-running grad-check.wls with stdout isolated shows
+      both backends produce identical grads; when h1 < 0 for
+      every hidden unit on a given random init, the ReLU mask
+      correctly zeroes every upstream gradient on BOTH
+      backends (b2 stays non-zero because it's before the
+      ReLU in the backward chain).  Added grad-check.wls note
+      explaining the init dependence; landed the matvec-style
+      backward as a permanent VerificationTest in grad.wlt
+      (`grad/matvec-style-backward`) so future Metal kernel
+      work can't silently regress this codepath. -->
+
       <!-- attempt 1: blocked on rank-changing EXPAND.
       grad chain materializes for rank-1 targets (b1, b2 grad
       shapes match) but rank-2 targets (W1, W2) silently

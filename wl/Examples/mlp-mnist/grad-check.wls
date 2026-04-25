@@ -96,3 +96,10 @@ KeyValueMap[Function[{name, pair},
 ];
 
 debugPrint["grad-check PASSED."];
+debugPrint["NOTE: random NetInitialize occasionally produces"];
+debugPrint["      h1 < 0 for every hidden unit; ReLU then masks"];
+debugPrint["      every upstream gradient to zero (mathematically"];
+debugPrint["      correct -- d(ReLU)/dh = mask = 0).  b2's grad"];
+debugPrint["      stays non-zero because it sits before the"];
+debugPrint["      ReLU in the backward chain.  Re-run to draw"];
+debugPrint["      a different init for non-zero W1/b1/W2 grads."];

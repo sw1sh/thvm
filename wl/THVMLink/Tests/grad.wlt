@@ -247,6 +247,27 @@ VerificationTest[
     TestID -> "grad/rank-2-x-times-x-equals-2x"
 ]
 
+(* === MatVec-style backward (REDUCE_SUM axis=1 of MUL[w, x_expanded]).
+   Mirrors the inner backbone of TLinear's gradient.  Asserts that
+   d/dw of REDUCE_SUM(MUL(w, expand(x, w.shape))) over the inner
+   axis equals expand(x, w.shape) -- i.e. the gradient is x
+   broadcast back to w's shape.  Acts as a CPU-vs-Metal parity
+   regression: the per-pattern probes used during the
+   "Investigate Metal-vs-CPU gradient parity in MLP" task all
+   matched between backends, but having this in the test sweep
+   means future Metal kernel work can't silently regress it. *)
+VerificationTest[
+    TInit[];
+    w  = TTensorCreate @ NumericArray[{{1.0, 2.0}, {3.0, 4.0}}, "Real32"];
+    xb = TUOpExpand[
+            TTensorCreate @ NumericArray[{{0.5, 1.5}}, "Real32"],
+            {2, 2}];
+    g  = TRealize @ TGrad[TUOpReduce[TUOpMul[w, xb], 1, "SUM"], w];
+    Normal @ TTensorData[g],
+    {{0.5, 1.5}, {0.5, 1.5}},
+    TestID -> "grad/matvec-style-backward"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[
