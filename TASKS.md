@@ -1530,7 +1530,7 @@ Realistic close-out for the overnight cron loop:
      known follow-up under the existing MLP grad-check
      parity item; tracked separately. -->
 
-- [ ] **UOP_SHRINK CPU + Metal kernels**.  Constructor exists
+- [x] **UOP_SHRINK CPU + Metal kernels**.  Constructor exists
       in `src/uop/shrink.c`; opcode `UOP_SHRINK = 7`; arity 1;
       heap `[src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]`
       (per-axis begin/end keep widths interleaved -- output
@@ -1543,6 +1543,21 @@ Realistic close-out for the overnight cron loop:
       Add CPU kernel + Metal shader + WL parity tests +
       Metal-vs-CPU parity probe.  Output shape:
       `out_dim[i] = end_i - begin_i`.
+      <!-- Implemented; reuses KProgOp.pad_widths storage
+      since PAD/SHRINK never co-occur on the same op.  Both
+      materializers compute output shape (e_i - b_i) and
+      pack widths.  CPU kernel mirrors cpu_op_pad's per-axis
+      stride walk but adds (c + b_i) instead of checking
+      pad regions.  Metal shader thvm_shrink takes the same
+      buffer slot 6 (widths) used by PAD; metal_dispatch_kernel
+      packs it for SHRINK alongside PAD.  Tests: 4 numerical
+      shrink.wlt cases (1d middle, 2d center 2x2, 2d
+      asymmetric, no-op full extent); test_metal_real.c
+      metal-real/shrink-2d-center-crop-parity for CPU vs Metal
+      byte-for-byte identity.  Metal metallib now exports 18
+      functions (was 17).  All 405 C + 199 WL tests stay green.
+      Unblocks the TUOpConv2D lowering. -->
+
 
 - [ ] **Lower TUOpConv2D to a primitive chain**.  Replace the
       direct `uop_conv2d` call inside the WL helper TUOpConv2D

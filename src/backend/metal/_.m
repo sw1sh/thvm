@@ -178,6 +178,7 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
     case UOP_RESHAPE:fnName = @"thvm_reshape"; break;
     case UOP_FLIP:   fnName = @"thvm_flip";    break;
     case UOP_PAD:    fnName = @"thvm_pad";     break;
+    case UOP_SHRINK: fnName = @"thvm_shrink";  break;
     case UOP_PERMUTE:fnName = @"thvm_permute"; break;
     default:         return nil;
   }
@@ -243,7 +244,8 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // deriving shape from numels.  Slot indices live just past the
   // input + numels block.
   if (p->opcode == UOP_EXPAND || p->opcode == UOP_FLIP
-      || p->opcode == UOP_PAD || p->opcode == UOP_PERMUTE) {
+      || p->opcode == UOP_PAD || p->opcode == UOP_PERMUTE
+      || p->opcode == UOP_SHRINK) {
     u32 src0[1 + MAX_DIM] = {0};
     u32 outd[1 + MAX_DIM] = {0};
     src0[0] = p->src0_ndim;
@@ -255,9 +257,12 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     [enc setBytes:outd length:sizeof(outd)
           atIndex:(2 + 2 * ke->n_inputs + 1)];
   }
-  // PAD additionally needs the per-axis pad widths (u32 widening
-  // of the u8 KProgOp field so the shader can use uint indexing).
-  if (p->opcode == UOP_PAD) {
+  // PAD/SHRINK both need the per-axis widths (u32 widening of
+  // the u8 KProgOp field so the shader can use uint indexing).
+  // Same buffer slot; same layout; semantics differ at the
+  // shader level (PAD reads both b/e to detect pad regions;
+  // SHRINK reads only b_i since e_i = b_i + out_dim_i).
+  if (p->opcode == UOP_PAD || p->opcode == UOP_SHRINK) {
     u32 padw[2 * MAX_DIM] = {0};
     for (u32 i = 0; i < 2 * MAX_DIM; i++) padw[i] = p->pad_widths[i];
     [enc setBytes:padw length:sizeof(padw)

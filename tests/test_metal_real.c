@@ -436,6 +436,41 @@ int main(void) {
   CHECK(cpu_pad[9] == 3.0f && cpu_pad[10] == 4.0f);  // row 2, cols 1-2
   CHECK(cpu_pad[0] == 0.0f && cpu_pad[15] == 0.0f);  // corners
 
+  // === SHRINK axis-aware parity: 2D center-crop ===
+  // {{1,2,3,4},{5,6,7,8},{9,10,11,12},{13,14,15,16}} kept on
+  // [{1,3},{1,3}) -> 2x2 center {{6,7},{10,11}}.
+  TEST_BEGIN("metal-real/shrink-2d-center-crop-parity");
+  Shape s_sh = {0}; s_sh.ndim = 2; s_sh.dims[0] = 4; s_sh.dims[1] = 4;
+  f32 src_sh[16] = {1,2,3,4, 5,6,7,8, 9,10,11,12, 13,14,15,16};
+  f32 cpu_sh[4], gpu_sh[4];
+  u32 sh_be[4] = {1, 3, 1, 3};
+
+  unsetenv("THVM_BACKEND"); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_sh, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_sh, sizeof(src_sh));
+    Term done = wnf(thvm_materialize(uop_shrink(
+        term_new(0, TAG_TEN, DT_F32, t), 2, sh_be)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              cpu_sh, sizeof(cpu_sh));
+  }
+  thvm_free();
+
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_sh, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_sh, sizeof(src_sh));
+    Term done = wnf(thvm_materialize(uop_shrink(
+        term_new(0, TAG_TEN, DT_F32, t), 2, sh_be)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              gpu_sh, sizeof(gpu_sh));
+  }
+  thvm_free();
+
+  for (int i = 0; i < 4; i++) CHECK(cpu_sh[i] == gpu_sh[i]);
+  CHECK(cpu_sh[0] == 6.0f && cpu_sh[1] == 7.0f);
+  CHECK(cpu_sh[2] == 10.0f && cpu_sh[3] == 11.0f);
+
   // === PERMUTE axis-aware parity: 2D transpose ===
   // {{1,2,3},{4,5,6}} permuted with axes {1,0} -> 3x2 transpose
   // {{1,4},{2,5},{3,6}}.

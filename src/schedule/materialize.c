@@ -241,6 +241,15 @@ fn Term materialize_expr(Term expr) {
       u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
       out_shape.dims[i] = s0.dims[i] + b + e;
     }
+  } else if (op == UOP_SHRINK && child_tids[0] != 0) {
+    // SHRINK: out.dim[i] = e_i - b_i.
+    Shape s0 = TENS[child_tids[0]].view.shape;
+    out_shape = s0;
+    for (u32 i = 0; i < s0.ndim; i++) {
+      u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
+      u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+      out_shape.dims[i] = (e > b) ? (e - b) : 0;
+    }
   } else if (op == UOP_CONV2D && child_tids[0] != 0 && child_tids[1] != 0) {
     // CONV2D: input {C_in, H, W}, weights {C_out, C_in, kh, kw} ->
     // output {C_out, H - kh + 1, W - kw + 1} (stride 1, no pad).
@@ -309,7 +318,7 @@ fn Term materialize_expr(Term expr) {
   // (FLIP) without having to re-derive it from in_numel / out_numel
   // alone.
   if ((op == UOP_EXPAND || op == UOP_FLIP || op == UOP_PAD
-    || op == UOP_PERMUTE)
+    || op == UOP_PERMUTE || op == UOP_SHRINK)
    && arity > 0 && child_tids[0] != 0) {
     Shape s0 = TENS[child_tids[0]].view.shape;
     p->src0_ndim = (u8)(s0.ndim & 0xFF);
@@ -321,7 +330,8 @@ fn Term materialize_expr(Term expr) {
       p->out_dims[i] = out_shape.dims[i];
     }
   }
-  if (op == UOP_PAD && arity > 0 && child_tids[0] != 0) {
+  if ((op == UOP_PAD || op == UOP_SHRINK) && arity > 0
+   && child_tids[0] != 0) {
     Shape s0 = TENS[child_tids[0]].view.shape;
     for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
       u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
