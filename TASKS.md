@@ -30,7 +30,7 @@ Adam keeps two extra per-parameter buffers (m, v) plus a step counter.
   m_hat = m_t / (1 - β1^t)
   v_hat = v_t / (1 - β2^t)
 
-- [ ] write `wl/THVMLink/Kernel/Optim.wl` with `TOptim["SGD", lr]` (just
+- [x] write `wl/THVMLink/Kernel/Optim.wl` with `TOptim["SGD", lr]` (just
       delegating to the existing sgd lambda) so the API surface exists.
 - [ ] add `TOptim["Adam", lr, β1, β2, ε]` returning the recursive lambda
       term that takes (w, m, v, t, n_steps_remaining) -> w_final.
