@@ -427,7 +427,7 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       recover out_numel inside the shader so axis_size can be
       computed from in_numel without an extra binding. -->
 
-- [ ] **Movement Metal kernels** (EXPAND, RESHAPE).  Both are
+- [x] **Movement Metal kernels** (EXPAND, RESHAPE).  Both are
       basically memcpy shapes; EXPAND handles the scalar->N
       broadcast and the cycle case (`out[tid] = in[tid %
       in_numel]`); RESHAPE is `out[tid] = in[tid]` with bounds.
@@ -435,6 +435,19 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       matmul shape that LinearLayer hits hot is automatically
       covered by the existing MUL + REDUCE kernels chained --
       no separate matmul kernel needed.
+      <!-- shaders/movement.metal: thvm_expand uses
+      `tid % in_numel` (subsumes scalar->N, copy, cycle); thvm
+      _reshape is `out[tid] = in[tid]`.  Two parity tests
+      (scalar->5 broadcast, 1D-6 -> 2D-2x3) bit-exact vs CPU.
+      Phase 5 is now complete -- all kernels LeNet forward + Adam
+      training need have CPU-parity Metal implementations:
+      CONST, ADD, MUL, NEG, RECIP, SQRT, EXP2, LOG2, CMPLT,
+      REDUCE, EXPAND, RESHAPE.  The remaining LinearLayer
+      MUL+REDUCE shape works via op chaining; CONV2D is the
+      only LeNet op without a Metal shader yet but the cron
+      path can dispatch it via CPU fallback (or land it as a
+      v2 task). -->
+
 
 ## Phase 6 — end-to-end
 

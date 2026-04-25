@@ -229,6 +229,70 @@ int main(void) {
     for (int k = 0; k < 4; k++) CHECK(cpu_buf[k] == gpu_buf[k]);
   }
 
+  // === EXPAND parity (scalar -> tensor broadcast) ===
+  TEST_BEGIN("metal-real/expand-scalar-to-tensor-parity");
+  Shape sx = {0}; sx.ndim = 1; sx.dims[0] = 1;
+  f32 src_x[1] = {7.5f};
+  f32 cpu_e[5], gpu_e[5];
+
+  unsetenv("THVM_BACKEND"); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, sx, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_x, sizeof(src_x));
+    u32 dims[1] = {5};
+    Term done = wnf(thvm_materialize(uop_expand(
+        term_new(0, TAG_TEN, DT_F32, t), 1, dims)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              cpu_e, sizeof(cpu_e));
+  }
+  thvm_free();
+
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, sx, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_x, sizeof(src_x));
+    u32 dims[1] = {5};
+    Term done = wnf(thvm_materialize(uop_expand(
+        term_new(0, TAG_TEN, DT_F32, t), 1, dims)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              gpu_e, sizeof(gpu_e));
+  }
+  thvm_free();
+
+  for (int i = 0; i < 5; i++) CHECK(cpu_e[i] == gpu_e[i]);
+
+  // === RESHAPE parity (1D 6 -> 2D 2x3) ===
+  TEST_BEGIN("metal-real/reshape-1d-to-2d-parity");
+  Shape sm = {0}; sm.ndim = 1; sm.dims[0] = 6;
+  f32 src_m[6] = {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f};
+  f32 cpu_m[6], gpu_m[6];
+
+  unsetenv("THVM_BACKEND"); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, sm, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_m, sizeof(src_m));
+    u32 dims[2] = {2, 3};
+    Term done = wnf(thvm_materialize(uop_reshape(
+        term_new(0, TAG_TEN, DT_F32, t), 2, dims)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              cpu_m, sizeof(cpu_m));
+  }
+  thvm_free();
+
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 t = tensor_alloc(CURRENT_BACKEND, sm, DT_F32);
+    CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_m, sizeof(src_m));
+    u32 dims[2] = {2, 3};
+    Term done = wnf(thvm_materialize(uop_reshape(
+        term_new(0, TAG_TEN, DT_F32, t), 2, dims)));
+    CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                              gpu_m, sizeof(gpu_m));
+  }
+  thvm_free();
+
+  for (int i = 0; i < 6; i++) CHECK(cpu_m[i] == gpu_m[i]);
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }
