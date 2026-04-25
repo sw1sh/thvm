@@ -1369,7 +1369,7 @@ Realistic close-out for the overnight cron loop:
       steps.  Documented for the next sub-item to address. -->
 
 
-- [ ] **Investigate / fix CONV2D-cascade grad NaN through deep
+- [x] **Investigate / fix CONV2D-cascade grad NaN through deep
       LeNet chain**.  Per the diagnostic above, W1/b1's grad
       hits NaN/Inf and b2 reaches ~1e34 magnitudes through the
       LeNet backward chain.  Suspects:
@@ -1392,6 +1392,42 @@ Realistic close-out for the overnight cron loop:
       (probably a missing reduction in some MUL chain);
       possibly add an explicit cotangent normalization step.
       Once fixed, train.wls should converge.
+      <!-- Root cause (a) -- partial: term_shape_in didn't
+      handle UOP_CONV2D / UOP_FLIP / UOP_PAD / UOP_PERMUTE.
+      When those appeared as children in a chain (e.g.
+      Conv2's input is Conv1's output = a UOP_CONV2D), the
+      CONV2D grad rule's shapes_known check failed and
+      gw_chain silently became grad_zero.  Cascade probe
+      [2-CONV2D + grad wrt W2] returned all zeros pre-fix;
+      now returns plausible {3,2,3,3} grad.
+      Extended term_shape_in to cover UOP_FLIP (passthrough),
+      UOP_PAD (b/e per-axis from heap), UOP_PERMUTE (perm
+      from heap), and UOP_CONV2D (output {C_out, H-kh+1,
+      W-kw+1}).  Re-running the LeNet per-weight probe
+      shows: W1 went from FAILED to finite (~+/-100,
+      magnitudes large but no NaN); W2 unchanged plausible;
+      b1, b2 still hit fpexc -> $Failed.  b1/b2 NaN is a
+      DIFFERENT root cause (not the cascade-shape issue);
+      queued as a separate follow-up.  All 399 C + 195 WL
+      tests stay green. -->
+
+- [ ] **LeNet b1/b2 grad NaN (post-cascade-fix)**.  After
+      the term_shape_in cascade fix, W1/W2/W3/W4 + b3/b4
+      grads are all finite, but b1 and b2 still hit
+      `LibraryFunction::fpexc` ("Numeric data containing a
+      floating point exception (NaN or Inf) encountered")
+      and TTensorData returns $Failed.  Both are CONV2D
+      bias paths (REDUCE_SUM gy over spatial axes).  Suspect
+      one of: (i) Pool's grad rule emits a chain with
+      undefined buffer reads when stacked, (ii) the
+      REDUCE_SUM gy lift through the deep chain (with my
+      RESHAPE keep-dim + EXPAND idiom) misbehaves at some
+      shape combo specific to LeNet, (iii) RECIP-of-zero in
+      the softmax chain when combined with the deep upstream
+      cotangent.  Diagnostic: extend grad-perweight.wls (or
+      a new probe) to print intermediate cotangent
+      magnitudes at each grad chain step for b1, identifying
+      where NaN first appears.
 
 - [ ] **wl/Examples/lenet-mnist/train.wls**: K manual SGD or
       per-tensor Adam steps on a fixed MNIST batch through

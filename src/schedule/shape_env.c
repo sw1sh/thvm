@@ -127,6 +127,55 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
         return 1;
     }
 
+    // FLIP: same shape as source.
+    if (op == UOP_FLIP) {
+        return term_shape_in(heap_read(loc), env_id, out);
+    }
+
+    // PAD: per-axis dim grows by begin + end.  Heap layout
+    // [src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]; ndim
+    // implicit in the source.
+    if (op == UOP_PAD) {
+        Shape cs;
+        if (!term_shape_in(heap_read(loc), env_id, &cs)) return 0;
+        out->ndim = cs.ndim;
+        for (u32 i = 0; i < cs.ndim; i++) {
+            u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
+            u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+            out->dims[i] = cs.dims[i] + b + e;
+        }
+        for (u32 i = cs.ndim; i < MAX_DIM; i++) out->dims[i] = 0;
+        return 1;
+    }
+
+    // PERMUTE: out.dim[i] = src.dim[perm[i]].
+    if (op == UOP_PERMUTE) {
+        Shape cs;
+        if (!term_shape_in(heap_read(loc), env_id, &cs)) return 0;
+        out->ndim = cs.ndim;
+        for (u32 i = 0; i < cs.ndim; i++) {
+            u32 pi = (u32)term_val(heap_read(loc + 1 + i));
+            out->dims[i] = cs.dims[pi];
+        }
+        for (u32 i = cs.ndim; i < MAX_DIM; i++) out->dims[i] = 0;
+        return 1;
+    }
+
+    // CONV2D: input{C_in, H, W} + weights{C_out, C_in, kh, kw} ->
+    // {C_out, H - kh + 1, W - kw + 1} (stride 1, no pad).
+    if (op == UOP_CONV2D) {
+        Shape inS, wtS;
+        if (!term_shape_in(heap_read(loc + 0), env_id, &inS)) return 0;
+        if (!term_shape_in(heap_read(loc + 1), env_id, &wtS)) return 0;
+        if (inS.ndim != 3 || wtS.ndim != 4) return 0;
+        out->ndim = 3;
+        out->dims[0] = wtS.dims[0];
+        out->dims[1] = inS.dims[1] - wtS.dims[2] + 1;
+        out->dims[2] = inS.dims[2] - wtS.dims[3] + 1;
+        for (u32 i = 3; i < MAX_DIM; i++) out->dims[i] = 0;
+        return 1;
+    }
+
     // REDUCE: child[0] shape with the reduced axis dropped (or
     // collapsed to {1} if rank <= 1, mirroring the materializer).
     if (op == UOP_REDUCE) {
