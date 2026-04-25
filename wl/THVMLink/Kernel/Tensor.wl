@@ -139,6 +139,60 @@ TUOpConv2D[input_, weights_, bias_] := (
     TTerm[$uopConv2DFn[ttermRaw[input], ttermRaw[weights], ttermRaw[bias]]]
 )
 
+(* TUOpConv2DLowered[input, weights, bias] -- same forward semantics
+   as TUOpConv2D but built from primitive UOPs only (no UOP_CONV2D
+   opcode).  Sub-item (a) of the conv2d-lowering arc.
+
+   Per-kernel-position partial-sum strategy:
+       For each (ki, kj) in [0, kh) x [0, kw):
+         x_slice = SHRINK(input, all C_in, [ki, ki+H_out), [kj, kj+W_out))
+                                                              {C_in, H_out, W_out}
+         w_slice = SHRINK(weights, all C_out, all C_in, [ki, ki+1), [kj, kj+1))
+                                                       {C_out, C_in, 1, 1}
+         x_b     = EXPAND(RESHAPE(x_slice, {1, C_in, H_out, W_out}),
+                          {C_out, C_in, H_out, W_out})
+         w_b     = EXPAND(w_slice, {C_out, C_in, H_out, W_out})
+         partial = REDUCE_SUM(MUL(x_b, w_b), axis = 1)
+                                                  {C_out, H_out, W_out}
+       sum all kh*kw partials, then add bias broadcast {C_out, 1, 1}
+       expanded to {C_out, H_out, W_out}.
+
+   Why kh*kw partial sums (rather than the tinygrad _pool unfold):
+   the unfolded tensor would have shape {C_in, H_out, W_out, kh, kw}
+   which for LeNet's 28x28 -> 24x24 with kh=kw=5 is 24*24*25 = 14400
+   elements per channel; the partial-sum form only allocates a few
+   {C_out, C_in, H_out, W_out} intermediates per kernel position,
+   which fits the per-op-allocates-a-buffer materializer better. *)
+TUOpConv2DLowered[input_, weights_, bias_] := Module[{
+    inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
+    partials, xSlice, wSlice, xB, wB, summed, biasBroadcast
+},
+    ensureInit[];
+    inShape = TTensorShape[input];
+    wShape  = TTensorShape[weights];
+    {cIn, h, wd}        = inShape;
+    {cOut, cIn, kh, kw} = wShape;
+    hOut = h  - kh + 1;
+    wOut = wd - kw + 1;
+    partials = Flatten @ Table[
+        xSlice = TUOpShrink[input,
+            {{0, cIn}, {ki, ki + hOut}, {kj, kj + wOut}}];
+        wSlice = TUOpShrink[weights,
+            {{0, cOut}, {0, cIn}, {ki, ki + 1}, {kj, kj + 1}}];
+        xB = TUOpExpand[
+            TUOpReshape[xSlice, {1, cIn, hOut, wOut}],
+            {cOut, cIn, hOut, wOut}];
+        wB = TUOpExpand[wSlice, {cOut, cIn, hOut, wOut}];
+        TUOpReduce[TUOpMul[xB, wB], 1, "SUM"],
+        {ki, 0, kh - 1}, {kj, 0, kw - 1}
+    ];
+    summed = Fold[TUOpAdd, First @ partials, Rest @ partials];
+    biasBroadcast = TUOpExpand[
+        TUOpReshape[bias, {cOut, 1, 1}],
+        {cOut, hOut, wOut}];
+    TUOpAdd[summed, biasBroadcast]
+]
+
 (* Top-level VJP shortcut: gradient of `y` w.r.t. `target` with
    cotangent seed 1. *)
 TGrad[y_, target_] := TUOpGrad[y, TUOpConst[1.0, "f32"], target]

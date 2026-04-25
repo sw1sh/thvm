@@ -1715,7 +1715,7 @@ Realistic close-out for the overnight cron loop:
       SHRINK / PAD / PERMUTE / FLIP.  Those rules now landed (5
       sub-items above), so the lowering is unblocked. -->
 
-  - [ ] **a. TUOpConv2DLowered[input, weights, bias]**: a new WL
+  - [x] **a. TUOpConv2DLowered[input, weights, bias]**: a new WL
         helper that builds the convolution as a kh*kw-unrolled
         chain of primitives.  For each kernel position
         (ki, kj) in [0, kh) x [0, kw):
@@ -1731,6 +1731,15 @@ Realistic close-out for the overnight cron loop:
         constructors.  Smoke test in nn.wlt: forward parity
         with TUOpConv2D for a tiny case (C_in=1, C_out=1,
         H=W=4, kh=kw=2).  ~60 LOC of WL + ~25 LOC of test.
+        <!-- Landed as TUOpConv2DLowered in Tensor.wl (~50
+        LOC).  The w_slice from SHRINK already has shape
+        {C_out, C_in, 1, 1} so no extra RESHAPE is needed
+        before broadcasting.  Element-wise byte parity vs.
+        bespoke TUOpConv2D for the tiny C_in=1 / C_out=1 /
+        4x4 input / 2x2 kernel case + the existing 1ch/2outch/
+        3x3-input/2x2-kernel hand-derived case both pass.
+        213 WL + 146 C tests green. -->
+
 
   - [ ] **b. Forward + grad parity at LeNet-realistic shapes**.
         Add wlt cases that compare TUOpConv2D and

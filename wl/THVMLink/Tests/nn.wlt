@@ -471,6 +471,41 @@ VerificationTest[
     TestID -> "nn/conv2d-helper-1ch-2outch-2x2-kernel"
 ]
 
+(* === TUOpConv2DLowered: kh*kw-unrolled chain of primitives === *)
+(* Sub-item (a) of the conv2d-lowering arc: forward parity with the
+   bespoke TUOpConv2D for the same hand-verified case above. *)
+
+VerificationTest[
+    TInit[];
+    input = TTensorCreate @ NumericArray[
+        {{{1.0,2.0,3.0},{4.0,5.0,6.0},{7.0,8.0,9.0}}}, "Real32"];
+    weights = TTensorCreate @ NumericArray[
+        {{{{1.,1.},{1.,1.}}}, {{{1.,0.},{0.,1.}}}}, "Real32"];
+    bias = TTensorCreate @ NumericArray[{0.5, -0.5}, "Real32"];
+    Round[Normal @ TTensorData @ TRealize @ TUOpConv2DLowered[input, weights, bias],
+          0.001],
+    {{{12.5, 16.5}, {24.5, 28.5}}, {{5.5, 7.5}, {11.5, 13.5}}},
+    TestID -> "nn/conv2d-lowered-1ch-2outch-2x2-parity"
+]
+
+(* Element-wise byte parity vs. the bespoke kernel for a tiny case
+   (C_in=1, C_out=1, H=W=4, kh=kw=2): the lowered chain should
+   produce numerically identical output. *)
+VerificationTest[
+    TInit[];
+    input = TTensorCreate @ NumericArray[
+        {{{1.0, 2.0, 3.0, 4.0},
+          {5.0, 6.0, 7.0, 8.0},
+          {9.0, 10., 11., 12.},
+          {13., 14., 15., 16.}}}, "Real32"];
+    weights = TTensorCreate @ NumericArray[
+        {{{{0.5, 1.5}, {2.5, 3.5}}}}, "Real32"];
+    bias = TTensorCreate @ NumericArray[{0.25}, "Real32"];
+    Normal @ TTensorData @ TRealize @ TUOpConv2DLowered[input, weights, bias],
+    Normal @ TTensorData @ TRealize @ TUOpConv2D       [input, weights, bias],
+    TestID -> "nn/conv2d-lowered-tiny-case-parity"
+]
+
 (* fromLayer dispatch path -- TFromNet[ConvolutionLayer[...], x] uses
    the same TUOpConv2D with weights/bias pulled from the layer. *)
 VerificationTest[
