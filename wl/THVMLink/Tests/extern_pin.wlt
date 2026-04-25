@@ -33,7 +33,7 @@ VerificationTest[
         e1 = TEra[];
         e2 = TEra[];
         after = TExternPinCount[];
-        {e1 === e2, after - before}
+        {e1 == e2, after - before}
     ],
     {True, 2},
     TestID -> "extern-pin/duplicate-wrappers-each-pin"
@@ -47,8 +47,9 @@ VerificationTest[
     TReset[];
     Module[{before, mid},
         before = TExternPinCount[];
-        Module[{e = TEra[], f = TEra[], g = TEra[]},
-            mid = TExternPinCount[]
+        Module[{terms = {TEra[], TEra[], TEra[]}},
+            mid = TExternPinCount[];
+            Length[terms]
         ];
         ClearSystemCache[];
         Share[];

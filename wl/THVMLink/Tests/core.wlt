@@ -64,7 +64,7 @@ VerificationTest[
 VerificationTest[
     (TReset[]; Module[{a = THeapAlloc[2], era = TEra[]},
         THeapSet[a, era];
-        {a, THeapPos[], THeapRead[a] === era}
+        {a, THeapPos[], THeapRead[a] == era}
     ]),
     {0, 2, True},
     TestID -> "heap alloc + set + read"
@@ -90,7 +90,7 @@ VerificationTest[
         x   = TEra[];
         app = TApp[f, x];
         loc = TTermVal[app];
-        {TTermTag[app], THeapRead[loc] === f, THeapRead[loc + 1] === x}
+        {TTermTag[app], THeapRead[loc] == f, THeapRead[loc + 1] == x}
     ]),
     {$TagAPP, True, True},
     TestID -> "TApp lays f and x at consecutive heap cells"
@@ -218,7 +218,7 @@ VerificationTest[
 (* === TWnf === *)
 
 VerificationTest[
-    (TReset[]; Module[{e = TEra[]}, TWnf[e] === e]),
+    (TReset[]; Module[{e = TEra[]}, TWnf[e] == e]),
     True,
     TestID -> "TWnf on a WHNF (ERA) returns the same term"
 ]

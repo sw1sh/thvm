@@ -366,12 +366,12 @@ makePinHandle[raw_Integer] := With[
     h
 ]
 
-(* Two TTerm wrappers are SameQ when they reference the same
-   (ctx, raw); the managed handle is part of the GC story, not
-   the identity story.  Without this override, fresh handles
-   for the same underlying Term would compare unequal and break
-   every `===` against a TTerm result. *)
-TTerm /: SameQ[TTerm[c1_Integer, r1_Integer, _], TTerm[c2_Integer, r2_Integer, _]] :=
+(* Two TTerm wrappers are Equal (==) when they reference the
+   same (ctx, raw).  The managed handle is part of the GC
+   story, not the identity story; SameQ (===) is FullForm
+   identity and correctly distinguishes wrappers with distinct
+   handles, so use == for "same underlying Term" comparisons. *)
+TTerm /: Equal[TTerm[c1_Integer, r1_Integer, _], TTerm[c2_Integer, r2_Integer, _]] :=
     c1 === c2 && r1 === r2
 
 (* Pack a fresh TTerm from raw fields.  Private; callers use the
