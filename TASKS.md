@@ -1579,7 +1579,7 @@ Realistic close-out for the overnight cron loop:
       199 WL + 405 C tests green. -->
 
 
-- [ ] **Move Mnist.wl from wl/THVMLink/Kernel/ to
+- [x] **Move Mnist.wl from wl/THVMLink/Kernel/ to
       wl/Examples/**.  User directive: MNIST loading isn't
       core runtime; it's example-data plumbing.  Move
       `wl/THVMLink/Kernel/Mnist.wl` (TMnistLoad / TMnistBatch)
@@ -1589,6 +1589,16 @@ Realistic close-out for the overnight cron loop:
       consumer (forward.wls / grad-check.wls / train.wls /
       verify.wls) to Get the helper directly from its new
       location.
+      <!-- Landed at wl/Examples/_lib/Mnist.wl + tests at
+      wl/Examples/_lib/Tests/mnist.wlt.  No auto-loader edit
+      needed -- the loader scans Kernel/*.wl, so removing the
+      file is enough.  All 8 consumers (lenet-mnist x5 +
+      mlp-mnist x3) now Get["wl/Examples/_lib/Mnist.wl"] after
+      loading the paclet.  run.wls extended to discover
+      example-helper tests so `make wl-test` still runs them.
+      199 WL + 146 C tests green; both forward.wls scripts
+      smoke-tested end-to-end. -->
+
 
 - [ ] **Add UOP_LOAD primitive**.  User directive: the
       runtime should have an explicit LOAD uop (mirroring
