@@ -70,3 +70,41 @@ THVM_BACKEND=metal wolframscript -f wl/Examples/_bench/baseline.wls
 
 Each run prints a TBench Association per scenario and writes a
 `baseline-{backend}-{net}.png` Gantt next to itself.
+
+## Post-bm4abc validation (bm4d, 2026-04-25)
+
+Re-ran the same 4 scenarios after bm4a (CPU free-list infra),
+bm4b (rollback wires non-preserved owning bufs to free-list),
+bm4c (Metal mirror) all landed.
+
+Numbers (all identical to baseline within ms-jitter):
+
+| bench                            | backend | ms/step | peak KiB |
+| -------------------------------- | ------- | ------- | -------- |
+| lenet-mnist (Adam step)          | CPU     |     7.0 |   1882.3 |
+| lenet-mnist (Adam step)          | Metal   |   100.9 |   1882.3 |
+| beautiful-mnist (forward only)   | CPU     |   179.6 |  82750.3 |
+| beautiful-mnist (forward only)   | Metal   |   250.6 |  82750.3 |
+
+**Acceptance miss**: peak KiB drop on lenet-mnist is 0%, not the
+target ≥30%.  The freelist wiring is correct (test_cpu_free_list
++ test_slot_reuse + test_metal_real freelist cases all green;
+nn.wlt's TGrad scenarios still pass; Metal Adam-LeNet still
+converges loss 2.61 → 0.025) but the slot allocator never
+receives anything to recycle: `cpu_buf_pool_rollback_with_preserve`
+walks `[wm, NEXT)` and skips every buf the chain-rooted preserve
+walk has marked, and that walk pins every forward intermediate
+reachable from the result tensor's `producer_kid` chain.  In a
+LeNet Adam step that's the whole forward pass.
+
+Same blocker as the refcount-driven free arc's sub-item c
+(documented in docs/memory.md "Refcount-driven free arc"):
+real savings need a HEAP-ROOTED preserve pass that walks
+HEAP[] for live `TAG_TEN` cells (and pending UOP terms that
+reference TenDescs cross-realize) instead of the conservative
+producer_kid edge walk.  Queued as a separate arc once the
+bm5 delta report closes.
+
+Metal training STILL CONVERGES end-to-end and Metal forward +
+backward correctness are unaffected; the bm4 arc lands the
+foundation cleanly with zero regressions.

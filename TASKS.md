@@ -3634,7 +3634,7 @@ sub-items once these land.
         Metal-side preserve to bypass). -->
 
 
-  - [ ] **bm4d: bench validation + correctness check**.
+  - [x] **bm4d: bench validation + correctness check**.
         Re-run wl/Examples/_bench/baseline.wls on both
         backends; confirm peak KiB drops by at least 30% on
         lenet-mnist (target derived from the 53.9% headroom
@@ -3648,11 +3648,62 @@ sub-items once these land.
         Metal training is now unblocked for beautiful_mnist
         (then bm5 captures the new numbers properly).  ~10
         LOC.
+        <!-- Done -- ACCEPTANCE MISS but no regressions.
+        Re-ran baseline.wls on both backends; numbers
+        identical to bm3 (within ms-jitter):
+          lenet-mnist     CPU   7.0 ms/step  1882.3 KiB peak
+          lenet-mnist     Metal 100.9        1882.3
+          beautiful-mnist CPU   179.6        82750.3
+          beautiful-mnist Metal 250.6        82750.3
+        Peak KiB drop: 0% (target was >=30%).  Reason:
+        cpu_buf_pool_rollback_with_preserve walks [wm, NEXT)
+        and skips every buf the chain-rooted preserve walk
+        marked, and that walk pins every forward intermediate
+        reachable from the result tensor's producer_kid chain
+        -- in a LeNet Adam step that's the whole forward pass,
+        so the freelist receives nothing.
+
+        Correctness preserved:
+          - Metal Adam-LeNet verify.wls converges loss 2.61
+            -> 0.025 in 4 steps; pred 0 -> 4 (correct);
+            prob[true] 0.074 -> 0.997.
+          - 268 C tests green (test_cpu_free_list 16/16 +
+            test_slot_reuse 19/19 + test_metal_real 166/166
+            with the 2 new freelist cases).
+          - 270 WL tests green (no nn.wlt TGrad
+            regressions).
+
+        docs/bench-baseline.md got a "Post-bm4abc validation"
+        section with the numbers + the diagnosis.  Real
+        savings need a heap-rooted preserve pass; queued as
+        a follow-up arc (see new "Heap-rooted preserve" item
+        below this bm4 arc). -->
+
 
 - [ ] **bm5: re-bench + delta report** -- rerun bm1 on the
       same 4 cases after bm4 lands; write
       docs/bench-results.md comparing baseline vs new numbers
       with a `% delta` column on each metric.  ~30 LOC + doc.
+
+- [ ] **Heap-rooted preserve pass** (follow-up to bm4 +
+      refcount-driven free arc).  Replace
+      mark_preserved_chain in src/schedule/realize.c with a
+      walk over the live HEAP[0..HEAP_NEXT) cells, collecting
+      every TenDesc reachable from a TAG_TEN cell or from any
+      pending UOP term (TAG_UOP whose children include TAG_TEN
+      slots).  Mark only those bufs preserved; everything
+      else in [wm, NEXT) goes to the freelist via bm4b's
+      rollback path.  Unblocks both:
+        - bm4's measurable savings (target 30% peak KiB drop
+          on lenet-mnist; 48-54% headroom is sittable per
+          TMemoryPlan).
+        - The refcount-driven-free arc's sub-item c rollback
+          swap (currently blocked behind the same conservative
+          chain walk).
+      Sized: a new src/schedule/heap_rooted_preserve.c
+      (~80 LOC) + integration in thvm_realize (~10 LOC) +
+      unit tests in tests/test_heap_rooted_preserve.c
+      (~50 LOC).  Likely sub-decomposes when picked up.
 
 
 
