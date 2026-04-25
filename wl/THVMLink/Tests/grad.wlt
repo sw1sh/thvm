@@ -322,6 +322,27 @@ VerificationTest[
     TestID -> "grad/pool-style-reshape-reduce-max-then-sum"
 ]
 
+(* === CONV2D grad_bias: REDUCE_SUM gy over spatial axes ===
+   Bias is broadcast across every output spatial position, so
+   d(loss)/d(bias[c_out]) = sum over (y, x) of gy[c_out, y, x].
+   With CONST(1) seed and a 4x4 input, 3x3 weights, 2-channel
+   output: gy lifts to {2, 2, 2} (C_out=2, H_out=W_out=2),
+   sum over spatial = 2*2 = 4 per channel.  Expected
+   bias-grad = {4, 4}. *)
+
+VerificationTest[
+    TInit[];
+    input   = TTensorCreate @ NumericArray[
+        ConstantArray[1.0, {1, 4, 4}], "Real32"];
+    weights = TTensorCreate @ NumericArray[
+        ConstantArray[0.0, {2, 1, 3, 3}], "Real32"];
+    bias    = TTensorCreate @ NumericArray[{0.0, 0.0}, "Real32"];
+    g = TRealize @ TGrad[TUOpConv2D[input, weights, bias], bias];
+    Normal @ TTensorData[g],
+    {4.0, 4.0},
+    TestID -> "grad/conv2d-bias-equals-spatial-sum-of-gy"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

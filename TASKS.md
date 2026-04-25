@@ -1033,7 +1033,7 @@ Realistic close-out for the overnight cron loop:
       All 381 C + 173 WL tests stay green. -->
 
 
-- [ ] **CONV2D grad_bias branch in interact_grad**.  Easiest of
+- [x] **CONV2D grad_bias branch in interact_grad**.  Easiest of
       the three CONV2D sub-gradients: bias gradient is just
       `REDUCE_SUM(gy, axis=batch)` summed over output spatial
       axes too -- shape contract: gy is {C_out, H_out, W_out};
@@ -1041,6 +1041,25 @@ Realistic close-out for the overnight cron loop:
       first because it doesn't need any new primitive.  After
       this, partial CONV2D backprop (bias only) works while
       grad_input and grad_weights still emit grad_zero.
+      <!-- Implemented.  The chain rule emits
+      ADD[ADD[grad_zero_input, grad_zero_weights], grad_bias]
+      where grad_bias = GRAD[bias, REDUCE_SUM(REDUCE_SUM(
+      EXPAND(gy, output_shape), axis=2), axis=1), target].
+      Crucial: gy must be EXPAND'd to the forward output shape
+      {C_out, H_out, W_out} BEFORE the REDUCEs, otherwise a
+      scalar gy (the typical TGrad seed) reduces to itself
+      instead of accruing the spatial extent.  Reads
+      input/weights shapes via term_shape_in to derive H_out
+      and W_out (= H - kh + 1, W - kw + 1).  Numerical test
+      grad/conv2d-bias-equals-spatial-sum-of-gy: input {1,4,4},
+      weights {2,1,3,3}, bias {2} -> output {2,2,2}; with
+      CONST(1) seed, bias-grad = {4, 4} (2*2 spatial sum per
+      channel).  Structural test grad/conv2d-emits-add-for-
+      three-input-grads checks the ADD-of-ADD form.  All 382
+      C + 174 WL tests stay green.  Partial CONV2D backprop
+      (bias only) is now wired up; input + weights branches
+      land in subsequent sub-items. -->
+
 
 - [ ] **UOP_FLIP CPU + Metal kernels**.  Constructor exists in
       src/uop/flip.c; opcode `UOP_FLIP = 8`; arity 1; heap

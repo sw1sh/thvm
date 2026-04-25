@@ -96,6 +96,59 @@ fn Term interact_grad(Term grad_term) {
     case UOP_CONST:
       return grad_zero(target);
 
+    case UOP_CONV2D: {
+      // CONV2D forward: output[c_out, y, x]
+      //   = sum_{c_in, ky, kx} input[c_in, y+ky, x+kx]
+      //                         * weights[c_out, c_in, ky, kx]
+      //     + bias[c_out]
+      // bias is broadcast across every output spatial position, so:
+      //   grad_bias[c_out] = sum_{y, x} gy[c_out, y, x]
+      // i.e. REDUCE_SUM gy over the spatial axes (1, 2 in the
+      // {C_out, H_out, W_out} output).  We must first EXPAND gy to
+      // the forward output shape -- otherwise a scalar gy (the
+      // typical TGrad seed) reduces to itself instead of accruing
+      // the spatial extent.
+      //
+      // grad_input and grad_weights need transposed-conv +
+      // cross-correlation respectively (and UOP_FLIP / UOP_PAD
+      // kernels) -- those land as separate sub-items.  For now
+      // they emit grad_zero, which is correct when target is
+      // bias and a controlled WRONG when target is input or
+      // weights (LeNet won't accidentally take grads wrt those
+      // through CONV2D yet).
+      Term input    = heap_read(y_loc + 0);
+      Term weights  = heap_read(y_loc + 1);
+      Term bias     = heap_read(y_loc + 2);
+
+      Shape in_shape, wt_shape;
+      Term gb;
+      if (term_shape_in(input,   0, &in_shape) && in_shape.ndim == 3 &&
+          term_shape_in(weights, 0, &wt_shape) && wt_shape.ndim == 4) {
+        // Forward output shape {C_out, H_out, W_out}.
+        u32 out_dims[3];
+        out_dims[0] = wt_shape.dims[0];                   // C_out
+        out_dims[1] = in_shape.dims[1] - wt_shape.dims[2] + 1;  // H_out
+        out_dims[2] = in_shape.dims[2] - wt_shape.dims[3] + 1;  // W_out
+        Term gy_at_out = uop_expand(gy, 3, out_dims);
+        Term gy_axis2  = uop_reduce(REDUCE_SUM, 2, gy_at_out);
+        Term gy_axis1  = uop_reduce(REDUCE_SUM, 1, gy_axis2);
+        gb = uop_grad(bias, gy_axis1, target);
+      } else {
+        // Shape lookup failed (rare at this point); fall back to
+        // letting the REDUCE_SUM rule lift gy via expand_to_target
+        // -- correct when target == bias is a leaf TAG_TEN.
+        Term gy_axis2 = uop_reduce(REDUCE_SUM, 2, gy);
+        Term gy_axis1 = uop_reduce(REDUCE_SUM, 1, gy_axis2);
+        gb = uop_grad(bias, gy_axis1, target);
+      }
+      (void)input; (void)weights;
+
+      Term gi = grad_zero(target);
+      Term gw = grad_zero(target);
+      Term sum_iw = uop_binary(UOP_ADD, gi, gw);
+      return uop_binary(UOP_ADD, sum_iw, gb);
+    }
+
     case UOP_ADD: {
       // grad(a+b)/dt = grad(a) + grad(b).  Emit per-child GRADs;
       // they fire on demand.
