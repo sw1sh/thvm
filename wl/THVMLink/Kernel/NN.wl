@@ -30,6 +30,7 @@
      TMatVec[W, x]               -- W:{out,in} @ x:{1,in} -> {out}
      TL2Loss[x]                  -- sum(x*x)
      TMSELoss[pred, target]      -- sum((pred - target)^2)
+     TReLU[x]                    -- elementwise max(x, 0)
 *)
 
 BeginPackage["THVMLink`"];
@@ -44,6 +45,7 @@ TDot::usage             = "TDot[a, b] = TSum[TUOpMul[a, b]].";
 TMatVec::usage          = "TMatVec[W, x] computes W @ x where W has shape {out, in} and x has shape {1, in}.  Result has shape {out}.  EXPAND-broadcast then REDUCE_SUM along the inner axis.";
 TL2Loss::usage          = "TL2Loss[x] = TSum[TSquare[x]].";
 TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
+TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
 
 Begin["`Private`"];
 
@@ -54,6 +56,7 @@ TSquare[x_TTerm]                := TUOpMul[x, x]
 TDot[a_TTerm, b_TTerm]          := TSum[TUOpMul[a, b]]
 TL2Loss[x_TTerm]                := TSum[TSquare[x]]
 TMSELoss[pred_TTerm, tgt_TTerm] := TL2Loss[TUOpAdd[pred, TUOpNeg[tgt]]]
+TReLU[x_TTerm]                  := TUOpMul[x, TUOpCmplt[TUOpConst[0.0, "f32"], x]]
 
 TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
     Module[{out, in, xb},
@@ -107,7 +110,8 @@ fromLayer[LinearLayer, layer_, x_TTerm] := Module[{w, b, x2},
 $elementwiseDispatch = <|
     Identity       -> TIdentity,
     (#1 #1 &)      -> TSquare,
-    (-#1 &)        -> TUOpNeg
+    (-#1 &)        -> TUOpNeg,
+    Ramp           -> TReLU
 |>;
 
 fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op},

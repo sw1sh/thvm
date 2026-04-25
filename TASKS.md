@@ -66,7 +66,7 @@ Audit summary (HEAD: 62a1b3f).  NN.wl has:
 Missing for LeNet (forward-only; backprop grad rules are a Phase-2.5
 concern that interact_grad currently doesn't cover for any of these):
 
-- [ ] `ElementwiseLayer[Ramp]` -> ReLU.  Add a `TReLU[x]` helper
+- [x] `ElementwiseLayer[Ramp]` -> ReLU.  Add a `TReLU[x]` helper
       (e.g. via `MUL[x, max(0, sign(x))]` if no UOP_MAX0; otherwise
       a CMPLT-based mask).  Wire into `$elementwiseDispatch`.  Test
       against `NetApply[ElementwiseLayer[Ramp]]` on a small input.

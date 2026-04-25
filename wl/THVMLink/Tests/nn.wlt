@@ -265,3 +265,21 @@ VerificationTest[
     {{16.0}, {-32.0}, {-16.0}},
     TestID -> "nn/poly-regression-gradients"
 ]
+
+(* === ReLU forward (TReLU helper + ElementwiseLayer[Ramp] dispatch) === *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{-2.0, -0.5, 0.0, 1.5, 3.0}, "Real32"];
+    Normal @ TTensorData @ TRealize[TReLU[x]],
+    {0.0, 0.0, 0.0, 1.5, 3.0},
+    TestID -> "nn/relu-forward-helper"
+]
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{-2.0, -0.5, 0.0, 1.5, 3.0}, "Real32"];
+    Normal @ TTensorData @ TRealize @ TFromNet[ElementwiseLayer[Ramp], x],
+    {0.0, 0.0, 0.0, 1.5, 3.0},
+    TestID -> "nn/relu-via-ElementwiseLayer-Ramp"
+]
