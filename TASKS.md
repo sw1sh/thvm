@@ -653,7 +653,7 @@ Realistic close-out for the overnight cron loop:
       use the new ndim freedom in expand_to_target. -->
 
 
-- [ ] **Make expand_to_target rank-aware**.  Once EXPAND
+- [x] **Make expand_to_target rank-aware**.  Once EXPAND
       stores ndim explicitly, update
       `src/interact/uop_grad.c::expand_to_target` to call
       `uop_expand` with `target.shape.ndim` regardless of
@@ -662,6 +662,18 @@ Realistic close-out for the overnight cron loop:
       regression parity test: a rank-2 leaf-target (e.g.
       `TGrad[t, t]` where `t` has shape {2,3}) should yield
       a {2,3} ones tensor end-to-end through `TRealize`.
+      <!-- expand_to_target was already passing target.ndim
+      to uop_expand correctly -- the bug was entirely in the
+      materializer (now fixed by the prior EXPAND-layout
+      change).  This sub-item shrinks to a comment refresh in
+      expand_to_target documenting the new invariant + three
+      regression VerificationTests in grad.wlt:
+        - rank-2 leaf identity (TGrad[t, t] = ones{2,3})
+        - rank-2 ADD product wrt a (= ones{2,2})
+        - rank-2 x*x at {2,2} = 2a (full {{4,6},{8,10}})
+      All 164 WL tests + 341 C tests stay green.  The MLP
+      grad-check task is now unblocked. -->
+
 
 - [ ] **RESHAPE heap layout: store ndim explicitly** (same
       rationale, but for RESHAPE).  Current materializer

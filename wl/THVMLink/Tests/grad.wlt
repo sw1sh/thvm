@@ -207,6 +207,46 @@ VerificationTest[
     TestID -> "grad/recip-derivative"
 ]
 
+(* === Rank-up EXPAND in expand_to_target ===
+   Regression for the rank-changing EXPAND fix.  Pre-fix, the
+   leaf rule's expand_to_target collapsed rank-2 targets to
+   rank-1 because the materializer inferred EXPAND's ndim from
+   the source's rank.  Now ndim is stored explicitly. *)
+
+VerificationTest[
+    TInit[];
+    t = TTensorCreate @ NumericArray[
+        {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    g = TRealize @ TGrad[t, t];   (* identity leaf, rank-2 *)
+    Normal @ TTensorData[g],
+    {{1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}},
+    TestID -> "grad/rank-2-leaf-identity"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[
+        {{1.0, 2.0}, {3.0, 4.0}}, "Real32"];
+    b = TTensorCreate @ NumericArray[
+        {{10.0, 20.0}, {30.0, 40.0}}, "Real32"];
+    (* d(a + b)/da = 1 in a's full {2,2} shape. *)
+    g = TRealize @ TGrad[TUOpAdd[a, b], a];
+    Normal @ TTensorData[g],
+    {{1.0, 1.0}, {1.0, 1.0}},
+    TestID -> "grad/rank-2-add-w-r-t-a"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[
+        {{2.0, 3.0}, {4.0, 5.0}}, "Real32"];
+    (* d(a*a)/da = 2a in a's {2,2} shape. *)
+    g = TRealize @ TGrad[TUOpMul[a, a], a];
+    Normal @ TTensorData[g],
+    {{4.0, 6.0}, {8.0, 10.0}},
+    TestID -> "grad/rank-2-x-times-x-equals-2x"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

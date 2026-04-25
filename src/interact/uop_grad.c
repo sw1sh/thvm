@@ -29,9 +29,14 @@
 // Multiple GRAD fires unfold the rule layer by layer until the
 // graph is fully concrete.
 
-// EXPAND a scalar / shape-{1} producer to target's shape.  Returns
-// `src` unchanged if target isn't a TAG_TEN (no shape to look up)
-// or if its descriptor has rank 0.
+// EXPAND a scalar / shape-{1} / lower-rank producer to target's
+// shape.  Always passes target's full ndim + dims to uop_expand --
+// safe because UOP_EXPAND now stores ndim explicitly in the heap
+// (see src/uop/expand.c), so the materializer no longer infers
+// ndim from the source's rank and the rank-up case (e.g. lifting
+// a scalar gy to a {2,3} target during backprop) works correctly.
+// Returns `src` unchanged if target isn't a TAG_TEN (no shape to
+// look up) or if its descriptor has rank 0.
 fn Term expand_to_target(Term src, Term target) {
   if (term_tag(target) != TAG_TEN) return src;
   u32 tid = term_val(target);
