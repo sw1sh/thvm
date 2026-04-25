@@ -235,6 +235,27 @@ int main(void) {
   CHECK_EQ(term_val(b_cell), 1);
   CHECK_EQ(term_val(e_cell), 1);
 
+  TEST_BEGIN("grad/permute-emits-inverse-permute-on-cotangent");
+  // 2-D source {2, 3} -> PERMUTE(perm = {1, 0}) -> {3, 2}.  The
+  // inverse permutation is also {1, 0} (involution at rank 2), so
+  // GRAD emits PERMUTE(gy_lifted, {1, 0}) and the leaf rule wraps
+  // it in EXPAND back to a's shape.
+  u32 d2x3[2] = {2, 3};
+  u32 t2x3    = alloc_f32_tensor(d2x3, 2);
+  Term a23    = term_new(0, TAG_TEN, DT_F32, t2x3);
+  u32 perm10[2] = {1, 0};
+  Term pm     = uop_permute(a23, 2, perm10);
+  Term g_pm   = wnf(uop_grad(pm, gy, a23));
+  CHECK_EQ(term_ext(g_pm), UOP_EXPAND);
+  Term inner_pm = unexpand(g_pm);
+  CHECK_EQ(term_ext(inner_pm), UOP_PERMUTE);
+  // PERMUTE heap: [src, NUM(0)=inv_perm[0], NUM(1)=inv_perm[1]] =
+  // [src, NUM(1), NUM(0)] for perm = {1, 0}.
+  Term ip0 = heap_read(term_val(inner_pm) + 1);
+  Term ip1 = heap_read(term_val(inner_pm) + 2);
+  CHECK_EQ(term_val(ip0), 1);
+  CHECK_EQ(term_val(ip1), 0);
+
   TEST_BEGIN("grad/pad-emits-shrink-on-cotangent");
   // GRAD[PAD(a, [{1,1}]), gy, a] -> GRAD[a, SHRINK(gy, [{1, 1+3})), a]
   // -> cascade to leaf: EXPAND(SHRINK(gy, [1, 4)), [3]).  Source is

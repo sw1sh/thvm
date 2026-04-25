@@ -145,6 +145,41 @@ VerificationTest[
     TestID -> "grad/shrink-inside-mul-chain"
 ]
 
+(* === PERMUTE: grad applies the inverse permutation === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[
+        {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    (* PERMUTE swaps axes (rank-2 transpose).  d/d(a) of the sum of
+       transpose(a*a) is 2a -- chain through MUL inside PERMUTE
+       exercises that the inverse permute reorders the cotangent
+       back to a's axis order. *)
+    expr = TUOpReduce[
+        TUOpReduce[TUOpPermute[TUOpMul[a, a], {1, 0}], 0, "SUM"],
+        0, "SUM"];
+    g = TRealize @ TGrad[expr, a];
+    Normal @ TTensorData[g],
+    {{2.0, 4.0, 6.0}, {8.0, 10.0, 12.0}},
+    TestID -> "grad/permute-inside-mul-chain"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[
+        {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    (* d(PERMUTE(a, {1,0}))/d(a) is the indicator: every position
+       contributes 1 to its transposed counterpart.  Reduced sum
+       collapses both axes; gradient is constant 1 in a's shape. *)
+    expr = TUOpReduce[
+        TUOpReduce[TUOpPermute[a, {1, 0}], 0, "SUM"],
+        0, "SUM"];
+    g = TRealize @ TGrad[expr, a];
+    Normal @ TTensorData[g],
+    {{1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}},
+    TestID -> "grad/permute-identity-cotangent"
+]
+
 (* === PAD: grad SHRINKs cotangent back to inner extent === *)
 
 VerificationTest[

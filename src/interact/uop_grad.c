@@ -534,6 +534,36 @@ fn Term interact_grad(Term grad_term) {
       return uop_grad(a, g, target);
     }
 
+    case UOP_PERMUTE: {
+      // PERMUTE reorders axes: out.dim[i] = src.dim[perm[i]].  The
+      // gradient permutes the cotangent by the INVERSE permutation
+      // so axes line up with the source again:
+      //   GRAD[PERMUTE(a, perm), gy, t] =
+      //     GRAD[a, PERMUTE(EXPAND(gy, out_shape), inv_perm), t]
+      // where inv_perm[perm[i]] = i.
+      // Heap: [src, NUM(p0), NUM(p1), ...]; ndim cached in ext.
+      Term a = term_resolve(heap_read(y_loc + 0));
+      if (term_tag(a) == TAG_NUM) return grad_zero(target);
+      if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_CONST) return grad_zero(target);
+
+      Shape src_shape;
+      if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
+        return uop_grad(a, gy, target);
+      }
+
+      u32 ndim = src_shape.ndim;
+      u32 perm[MAX_DIM], inv_perm[MAX_DIM], out_dims[MAX_DIM];
+      for (u32 i = 0; i < ndim; i++) {
+        perm[i] = (u32)term_val(heap_read(y_loc + 1 + i));
+        out_dims[i] = src_shape.dims[perm[i]];
+      }
+      for (u32 i = 0; i < ndim; i++) inv_perm[perm[i]] = i;
+
+      Term gy_shaped = uop_expand(gy, ndim, out_dims);
+      Term g         = uop_permute(gy_shaped, ndim, inv_perm);
+      return uop_grad(a, g, target);
+    }
+
     case UOP_PAD: {
       // PAD zero-fills [b_i, e_i] on each axis.  The gradient
       // SHRINKs the cotangent back to the unpadded extent:

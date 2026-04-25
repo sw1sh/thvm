@@ -1650,12 +1650,20 @@ Realistic close-out for the overnight cron loop:
         pad-emits-shrink-on-cotangent C structural test). -->
 
 
-  - [ ] **c. PERMUTE grad rule.**  Forward `PERMUTE(a, perm)`
+  - [x] **c. PERMUTE grad rule.**  Forward `PERMUTE(a, perm)`
         reorders axes.  Gradient: `PERMUTE(cotangent, inv_perm)`
         where inv_perm[perm[i]] = i.  Tests: structural +
         a 2-D wlt check using {2, 3} -> permute(1, 0) -> {3, 2}
         verifies the gradient is a permute(1, 0) of the seed.
         ~20 LOC + ~15 LOC of tests.
+        <!-- Landed.  Same gy-lift-via-EXPAND pattern as (a)/(b)
+        but the lifted shape comes from src_shape.dims[perm[i]]
+        (PERMUTE's output shape rule).  208 WL + 146 C tests
+        green (added grad/permute-identity-cotangent +
+        grad/permute-inside-mul-chain wlt + grad/
+        permute-emits-inverse-permute-on-cotangent C
+        structural test). -->
+
 
   - [ ] **d. FLIP grad rule.**  Forward `FLIP(a, mask)` mirrors
         selected axes.  Gradient: `FLIP(cotangent, mask)` (FLIP
