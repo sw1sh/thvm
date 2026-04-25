@@ -33,14 +33,16 @@ VerificationTest[
     TestID -> "optim/sgd-zero-iters-returns-w0"
 ]
 
-(* Adam stub for now -- the next task item replaces this with real
-   numerics.  Currently returns a Failure so callers see the gap. *)
+(* Adam construction smoke test -- builds the recursive lambda
+   without firing it.  Numeric correctness lands in the next task
+   item (one-step + two-step against hand-computed references). *)
 VerificationTest[
     TInit[];
+    w0 = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
     Head @ TOptim["Adam", TUOpConst[0.001, "f32"], 0.9, 0.999, 1.*^-8][
-        Function[w, w], Null, 0],
-    Failure,
-    TestID -> "optim/adam-stub-returns-Failure"
+        Function[w, w], w0, 0],
+    TTerm,
+    TestID -> "optim/adam-construct-returns-TTerm"
 ]
 
 (* === Adam helpers (private; accessed via context-qualified name) === *)

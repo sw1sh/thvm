@@ -37,7 +37,7 @@ Adam keeps two extra per-parameter buffers (m, v) plus a step counter.
       any other small scalar constructors (e.g. `tF32[x]` shorthand
       for `TUOpConst[x, "f32"]`).  Add tiny optim.wlt tests for the
       helpers in isolation.
-- [ ] Adam recursive lambda: replace the `TOptim["Adam", ...]` stub
+- [x] Adam recursive lambda: replace the `TOptim["Adam", ...]` stub
       in Optim.wl with the real body using the helpers above.  The
       lambda threads (w, m, v, b1pow, b2pow, k) through `TIfZero`
       and `TRef`; β1^t / β2^t are kept as state so no POW UOP is

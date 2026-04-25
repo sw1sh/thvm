@@ -66,19 +66,68 @@ sgdRecursiveTerm[gradFn_, lr_, w0_, n_] :=
         TApp[TApp[TRef[defName], w0], TNum[n]]
     ]
 
+(* === Adam ===
+
+   Threads (w, m, v, b1pow, b2pow, k) through the recursion.  By
+   carrying b1pow = beta1^t and b2pow = beta2^t as state, bias
+   correction (1 - beta^t) needs no POW UOP -- each iter just
+   multiplies by the corresponding beta.
+
+   On entry: w = w0; m, v = zerosLike(w0); b1pow0 = beta1, b2pow0 =
+   beta2 (so the FIRST step uses (1 - beta^1) = (1 - beta) for bias
+   correction, matching the textbook Adam definition). *)
+adamRecursiveTerm[gradFn_, lr_, beta1_, beta2_, eps_, w0_, n_] :=
+    Module[{
+        defName = freshOptimDefName["adam"],
+        w, m, v, b1pow, b2pow, k,
+        b1c, b2c, omb1, omb2, epsC, oneC, m0, v0
+    },
+        b1c  = tF32[beta1];        b2c  = tF32[beta2];
+        omb1 = tF32[1.0 - beta1];  omb2 = tF32[1.0 - beta2];
+        epsC = tF32[eps];          oneC = tF32[1.0];
+        m0   = tZerosLike[w0];     v0   = tZerosLike[w0];
+
+        TDef[defName,
+            TLam[w, TLam[m, TLam[v, TLam[b1pow, TLam[b2pow, TLam[k,
+                TIfZero[k, w,
+                    With[{g = gradFn[w]},
+                    With[{
+                        mNew = TUOpAdd[TUOpMul[b1c, m], TUOpMul[omb1, g]],
+                        vNew = TUOpAdd[TUOpMul[b2c, v], TUOpMul[omb2, TUOpMul[g, g]]]
+                    },
+                    With[{
+                        mHat = TUOpMul[mNew, TUOpRecip[TUOpAdd[oneC, TUOpNeg[b1pow]]]],
+                        vHat = TUOpMul[vNew, TUOpRecip[TUOpAdd[oneC, TUOpNeg[b2pow]]]]
+                    },
+                    With[{
+                        update = TUOpMul[lr,
+                                    TUOpMul[mHat,
+                                        TUOpRecip[TUOpAdd[TUOpSqrt[vHat], epsC]]]]
+                    },
+                        TApp[TApp[TApp[TApp[TApp[TApp[TRef[defName],
+                            TUOpAdd[w, TUOpNeg[update]]],
+                            mNew], vNew],
+                            TUOpMul[b1pow, b1c]],
+                            TUOpMul[b2pow, b2c]],
+                            TOp2["-", k, TNum[1]]]
+                    ]]]]
+                ]
+            ]]]]]]];
+
+        TApp[TApp[TApp[TApp[TApp[TApp[TRef[defName],
+            w0], m0], v0],
+            b1c], b2c],
+            TNum[n]]
+    ]
+
 (* === Public dispatch.  Pattern: TOptim[name, hyperparams] returns a
    Function that the user invokes with (gradFn, w0, n). === *)
 
 TOptim["SGD", lr_TTerm] :=
     Function[{gradFn, w0, n}, sgdRecursiveTerm[gradFn, lr, w0, n]]
 
-(* Adam stub -- next task item replaces this with real numerics. *)
 TOptim["Adam", lr_TTerm, beta1_, beta2_, eps_] :=
-    Function[{gradFn, w0, n},
-        Failure["NotImplemented",
-            <| "Message" -> "TOptim[\"Adam\", ...] not yet implemented",
-               "lr" -> lr, "beta1" -> beta1, "beta2" -> beta2, "eps" -> eps |>]
-    ]
+    Function[{gradFn, w0, n}, adamRecursiveTerm[gradFn, lr, beta1, beta2, eps, w0, n]]
 
 End[];
 EndPackage[];
