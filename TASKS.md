@@ -3418,21 +3418,63 @@ sub-items once these land.
 
 
 - [ ] **bm4: runtime slot allocator (port TMemoryPlan's
-      linear-scan into the C runtime)** -- the visualization
-      already proves a 48% slot-reuse headroom is sittable.
-      Implement the actual slot reuse inside cpu_buf_alloc /
-      metal_buf_alloc paths: track free slots per dtype + size
-      class; when a buffer reaches refcount 0 (already
-      detectable via the consumer_count + decref hook from
-      sub-items a/b of the refcount-driven-free arc), return
-      its bytes to a free-list keyed by size; tensor_alloc
-      first checks the free-list before falling back to the
-      backend's raw buf_alloc.  Acceptance: peak KiB on the
-      LeNet bench drops at least 30%; correctness preserved
-      (252 C + 264 WL tests green; Metal Adam-LeNet still
-      converges).  ~120 LOC; likely gets sub-decomposed when
-      picked up (per-backend free-list infra + integration +
-      bench re-run).
+      linear-scan into the C runtime) (arc)** -- the
+      visualization already proves a 48-54% slot-reuse headroom
+      on LeNet.  Decomposed into 4 sub-items below.
+
+  - [ ] **bm4a: CPU free-list infrastructure**.  Add a per-
+        size-class slot list to src/backend/cpu/.  Two
+        primitives:
+          - `cpu_buf_pool_push(buf_id)` -- returns the buf's
+            storage to the free-list keyed by `nbytes`.
+            Doesn't free the underlying memory; the data
+            pointer survives in the slot.
+          - `cpu_buf_alloc(nbytes)` (modify existing) -- first
+            tries to pop from the free-list bucket for
+            `nbytes`; if hit, returns the recycled buf_id
+            (refcount reset to 1, preserved/freeable cleared,
+            data zeroed).  If miss, falls back to the existing
+            raw `calloc` path.
+        ~50 LOC + ~30 LOC test in tests/test_cpu_free_list.c
+        verifying alloc-free-realloc returns the same buf_id +
+        zeroed data.  No callers wired yet; bm4b does that.
+
+  - [ ] **bm4b: wire the freeable signal to the free-list**.
+        In `kernel_fire_by_id`'s decref hook (sub-item b of
+        the refcount-driven-free arc), when a producer's
+        `consumer_count` transitions 1->0, instead of just
+        flipping the `freeable` flag, also call
+        `cpu_buf_pool_push(prod_buf)`.  Add a guard so we
+        don't double-free a preserved buf (preserve walk
+        runs in thvm_realize before the rollback today; with
+        the free-list path the preserve set must be re-checked).
+        Acceptance: a single thvm_realize on a SHRINK + ADD
+        chain reuses a slot detectable via CPU_BUFS_NEXT
+        not growing past N for N consumer kernels.  ~40 LOC +
+        a focused test in tests/test_slot_reuse.c.
+
+  - [ ] **bm4c: Metal mirror**.  Same primitives in
+        src/backend/metal/_.m: a per-size-class free-list
+        keyed by `nbytes`, `thvm_metal_buf_pool_push` +
+        `metal_buf_alloc` consults it.  Wire from the same
+        `kernel_fire_by_id` decref-hook site (it already
+        runs on Metal; the hook just needs a Metal-aware
+        push entry-point).  ~40 LOC.
+
+  - [ ] **bm4d: bench validation + correctness check**.
+        Re-run wl/Examples/_bench/baseline.wls on both
+        backends; confirm peak KiB drops by at least 30% on
+        lenet-mnist (target derived from the 53.9% headroom
+        bm3 measured; not all of it is theoretically
+        recoverable so 30% is the conservative bar).  Run
+        wl/Examples/lenet-mnist/verify.wls to confirm Metal
+        Adam-LeNet still converges loss 2.61 -> 0.025.  Run
+        the full make test + make wl-test (252 C + 270 WL
+        targets must stay green).  No code change beyond
+        possibly a line in docs/bench-baseline.md if the
+        Metal training is now unblocked for beautiful_mnist
+        (then bm5 captures the new numbers properly).  ~10
+        LOC.
 
 - [ ] **bm5: re-bench + delta report** -- rerun bm1 on the
       same 4 cases after bm4 lands; write
