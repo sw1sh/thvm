@@ -1343,6 +1343,28 @@ Realistic close-out for the overnight cron loop:
       mlp-mnist/train.wls with LeNet substituted.  Will
       probably need a smaller batch / fewer steps because
       the materialize cost is much higher.
+      <!-- attempt 1: forward materializes correctly (step 0
+      loss = 2.6071, the expected ~ln(10) on a random init).
+      But TGrad on at least one of the 8 weight tensors
+      returns $Failed (or an absurdly large value like
+      ~1e31 -- visible as NumericArray wrapping $Failed in
+      the Adam update).  Adam step then propagates the bad
+      grad into corrupted weights.  Needs an isolated
+      per-weight TGrad probe to identify which weight
+      produces the bad chain (suspect: W2 / Conv2 weights,
+      since that path uses the diagonal-mask trick which
+      hasn't been validated through a deep upstream chain).
+      Reverted train.wls; needs a diagnostic sub-task. -->
+
+- [ ] **LeNet per-weight grad diagnostic probe**: run TGrad
+      against EACH of LeNet's 8 weight tensors INDIVIDUALLY
+      (not bundled in a per-step loop) at
+      `wl/Examples/lenet-mnist/grad-perweight.wls`, print
+      the shape, min, max for each.  Identifies which
+      weight's chain explodes / fails through the LeNet
+      stack.  No training, just diagnostic.  Needs the same
+      inline forward construction the train.wls draft used;
+      test mostly serves to localise the failing chain.
 
 - [ ] **LeNet accuracy verification**: run the trained
       LeNet from train.wls on a held-out batch (e.g. another
