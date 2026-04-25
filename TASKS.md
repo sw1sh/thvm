@@ -1530,40 +1530,74 @@ Realistic close-out for the overnight cron loop:
      known follow-up under the existing MLP grad-check
      parity item; tracked separately. -->
 
-- [ ] **Remove UOP_CONV2D primitive; lower to tinygrad-style
-      composition of movement ops + MUL + REDUCE_SUM**.
-      UOP_CONV2D doesn't exist in tinygrad -- conv2d is built
-      entirely from primitive movement ops (PAD / SHRINK /
-      RESHAPE / PERMUTE / EXPAND with stride-0 broadcast) plus
-      elementwise MUL and REDUCE_SUM.  Our runtime should match.
-      Currently UOP_CONV2D is a primitive opcode with its own
-      CPU + Metal kernel + a bespoke grad rule (bias/weights/
-      input branches plus the diagonal-mask trick for C_in>1).
-      All of that should be replaced by the autograd over a
-      lowered primitive chain.
-      Multi-fire arc; sub-tasks (will decompose on the next
-      fire):
-        1. UOP_SHRINK CPU + Metal kernels (constructor exists
-           in src/uop/shrink.c; opcode = 7).  Mirror the
-           FLIP/PAD/PERMUTE pattern.
-        2. Lower TUOpConv2D to a primitive chain via _pool-style
-           window extraction (the standard tinygrad approach):
-             - input x{C_in, H, W} -> _pool to extract sliding
-               windows into {C_in, H_out, W_out, kh, kw} using
-               PAD + SHRINK + RESHAPE + PERMUTE + EXPAND.
-             - weights{C_out, C_in, kh, kw} broadcast against
-               unfolded x; MUL + REDUCE_SUM over (C_in, kh, kw).
-             - + bias.
-           Choose location: WL helper (TUOpConv2D in Tensor.wl)
-           OR a C-side `uop_conv2d_lowered` constructor that
-           emits the chain.  WL is simpler; C-side keeps the
-           same call signature.
-        3. Drop the bespoke CONV2D grad rule from
-           src/interact/uop_grad.c (autograd over the primitive
-           chain handles it for free).
-        4. Drop UOP_CONV2D opcode + uop_conv2d constructor +
-           CPU kernel + Metal shader + materializer special
-           cases.  Reduce UOP_COUNT, free up the slot.
-        5. Re-run all CONV2D tests + lenet-mnist verify to
-           confirm no regression.
+- [ ] **UOP_SHRINK CPU + Metal kernels**.  Constructor exists
+      in `src/uop/shrink.c`; opcode `UOP_SHRINK = 7`; arity 1;
+      heap `[src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]`
+      (per-axis begin/end keep widths interleaved -- output
+      slice keeps `begin..end` exclusive on each axis).  Same
+      shape as PAD's heap but interpreted as "extract sub-region"
+      rather than "zero-pad outside".  Mirror PAD's
+      implementation: KProgOp `pad_widths` field can be
+      reused as `shrink_widths` (or add a parallel
+      `shrink_widths` field if naming clarity is preferred).
+      Add CPU kernel + Metal shader + WL parity tests +
+      Metal-vs-CPU parity probe.  Output shape:
+      `out_dim[i] = end_i - begin_i`.
+
+- [ ] **Lower TUOpConv2D to a primitive chain**.  Replace the
+      direct `uop_conv2d` call inside the WL helper TUOpConv2D
+      (or build a new helper alongside it) with a chain of
+      primitive UOPs that computes the same convolution via
+      _pool-style sliding-window extraction:
+        - input x{C_in, H, W} -> sliding-window unfold to
+          {C_in, H_out, W_out, kh, kw} via a combination of
+          EXPAND (with stride-0 broadcast on a new kernel
+          axis), PAD on the spatial axis, RESHAPE, SHRINK,
+          and PERMUTE.  Standard tinygrad recipe; see
+          `tensor.py::_pool` for reference.
+        - weights{C_out, C_in, kh, kw} broadcast against the
+          unfolded input; MUL and REDUCE_SUM over the
+          (C_in, kh, kw) axes.
+        - + bias broadcast.
+      Output {C_out, H_out, W_out} matches the existing
+      forward semantics.  After this lands, the chain rule
+      will autograd through the primitives for free; the
+      bespoke CONV2D grad rule can be dropped in the next
+      sub-item.
+
+- [ ] **Drop the bespoke CONV2D grad rule** from
+      `src/interact/uop_grad.c` (the case branch with
+      grad_bias / grad_weights-via-diagonal-mask /
+      grad_input-via-PERMUTE+FLIP+PAD+CONV2D).  Once the
+      forward TUOpConv2D is a chain of primitives, the
+      autograd handles those primitives individually and
+      no special CONV2D case is needed.  After this lands,
+      verify lenet-mnist/verify.wls still passes -- the
+      gradient should be identical (just emitted via a
+      different path).
+
+- [ ] **Drop UOP_CONV2D opcode + kernel**.  Once nothing
+      consumes UOP_CONV2D (lowered TUOpConv2D + grad rule
+      removed), drop:
+        - UOP_CONV2D opcode in src/thvm.h, decrement
+          UOP_COUNT (or leave the slot unused -- it's a
+          define).
+        - src/uop/conv2d.c constructor.
+        - src/backend/cpu/op/conv2d.c kernel + the
+          interpret.c dispatch case.
+        - src/backend/metal/_.m pipeline routing case.
+        - src/schedule/materialize.c + materialize_in_env.c
+          CONV2D output-shape special cases.
+        - WL: $UopConv2D = 19 in THVMLink.wl, TUOpConv2D's
+          uopArity entry, the uopShape walker for it, etc.
+        - test_metal_real.c references and any direct
+          uop_conv2d() unit tests.
+
+- [ ] **Re-run all CONV2D tests + lenet-mnist verify** to
+      confirm the lowered path is regression-free.  The
+      grad/conv2d-* tests should still pass; lenet-mnist/
+      verify.wls should still drive the trained model from
+      ~0.07 confidence on the true class to >~0.7 after 4
+      Adam steps (same numerical behaviour, just different
+      UOP graph).
 
