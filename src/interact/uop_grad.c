@@ -141,6 +141,35 @@ fn Term interact_grad(Term grad_term) {
       // and this case zeroes the second branch.  d(ReLU)/dx = mask.
       return grad_zero(target);
 
+    case UOP_EXPAND: {
+      // Gradient broadcasts the cotangent back along expanded axes:
+      //   GRAD[EXPAND(a, new), gy, t] = GRAD[a, sum_{expanded} gy, t]
+      // where "expanded" axes are those where src.dim == 1 < new.dim.
+      // CONST/NUM source short-circuits to zero -- constants have no
+      // gradient.
+      Term a = term_resolve(heap_read(y_loc + 0));
+      if (term_tag(a) == TAG_NUM) return grad_zero(target);
+      if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_CONST) return grad_zero(target);
+
+      Shape src_shape;
+      if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
+        // Source shape unavailable or rank-0 scalar.  We can't enumerate
+        // which axes were expanded statically, so passthrough -- the
+        // leaf's expand_to_target reconciles shape via numel-cycling at
+        // materialize time.
+        return uop_grad(a, gy, target);
+      }
+
+      Term g = gy;
+      for (i32 axis = (i32)src_shape.ndim - 1; axis >= 0; axis--) {
+        u32 out_dim = (u32)term_val(heap_read(y_loc + 1 + axis));
+        if (src_shape.dims[axis] == 1 && out_dim > 1) {
+          g = uop_reduce(REDUCE_SUM, (u32)axis, g);
+        }
+      }
+      return uop_grad(a, g, target);
+    }
+
     case UOP_RESHAPE: {
       // Reshape is identity-on-data (memcpy in the CPU/Metal kernel)
       // and view-only at the descriptor level, so the gradient is

@@ -538,9 +538,23 @@ Realistic close-out for the overnight cron loop:
       yields {0,1,0,1}, plus a direct TUOpCmplt grad = zeros.
       ReLU backprop now works end-to-end.  -->
 
-- [ ] **Grad rule: UOP_EXPAND** in `interact_grad` per
+- [x] **Grad rule: UOP_EXPAND** in `interact_grad` per
       `docs/grad-roadmap.md` step 2.  Rule is
       `GRAD[EXPAND(a, new_shape), gy, t] = GRAD[a,
       REDUCE_SUM along expanded axes (gy), t]`.  ~25 LOC + one
       parity test (e.g. broadcast a scalar to {3,4} then sum;
       grad wrt scalar should equal numel of expanded shape).
+      <!-- Implemented with three branches: (1) CONST/NUM source
+      short-circuits to grad_zero (constants have no gradient).
+      (2) Source shape known and rank > 0: emit REDUCE_SUM along
+      each axis where src.dim == 1 < new.dim, in reverse axis
+      order so indices stay valid as REDUCE drops axes.  Uses
+      term_shape_in (already in src/schedule/shape_env.c) for
+      source shape lookup -- handles TAG_TEN and UOP_KERNEL out
+      of the box.  (3) Source rank-0 or shape-unknown:
+      passthrough; cpu_op_expand's numel-cycling reconciles at
+      the leaf.  Tests: structural in tests/test_grad.c
+      (CONST short-circuit + shape-{1}->shape-{3} reduce);
+      numerical in wl/THVMLink/Tests/grad.wlt (broadcast
+      scalar-tensor to {3} with ones cotangent yields {3.0};
+      EXPAND-of-CONST yields zero). -->

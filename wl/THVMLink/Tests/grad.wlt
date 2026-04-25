@@ -143,6 +143,31 @@ VerificationTest[
     TestID -> "grad/cmplt-direct-zero"
 ]
 
+(* === EXPAND: cotangent collapses along expanded axes === *)
+
+VerificationTest[
+    TInit[];
+    a    = TTensorCreate @ NumericArray[{2.5}, "Real32"];        (* shape {1} *)
+    seed = TTensorCreate @ NumericArray[{1.0, 1.0, 1.0}, "Real32"]; (* shape {3} *)
+    (* y = EXPAND(a, {3}) is {2.5, 2.5, 2.5}; cotangent ones{3}.
+       d/da = sum(gy) = 3, returned in a's shape {1}. *)
+    g = TRealize @ TUOpGrad[TUOpExpand[a, {3}], seed, a];
+    Normal @ TTensorData[g],
+    {3.0},
+    TestID -> "grad/expand-shape1-to-shape3"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    (* d(EXPAND(CONST(5), shape) wrt a) = 0 -- CONST has no
+       gradient.  EXPAND-of-CONST short-circuit. *)
+    g = TRealize @ TGrad[TUOpExpand[TUOpConst[5.0, "f32"], {4}], a];
+    Normal @ TTensorData[g],
+    {0.0},
+    TestID -> "grad/expand-of-const-short-circuits"
+]
+
 (* === simple linear: 2x + 3 === *)
 
 VerificationTest[

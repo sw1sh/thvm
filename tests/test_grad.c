@@ -123,6 +123,29 @@ int main(void) {
   CHECK_EQ(term_ext(g_r), UOP_EXPAND);
   CHECK_EQ(unexpand(g_r), gy);
 
+  TEST_BEGIN("grad/expand-of-const-is-zero");
+  // EXPAND of a CONST short-circuits: constants have no gradient
+  // wrt anything.  Output is target-shaped grad_zero.
+  u32 dim3[1]  = {3};
+  Term cst_e   = uop_const(DT_F32, 0x3f800000u);
+  Term ex_c    = uop_expand(cst_e, 1, dim3);
+  Term g_ec    = wnf(uop_grad(ex_c, gy, a));
+  CHECK_EQ(term_ext(g_ec), UOP_EXPAND);
+  CHECK_EQ(term_ext(unexpand(g_ec)), UOP_CONST);
+
+  TEST_BEGIN("grad/expand-from-shape-1-reduces-along-axis");
+  // EXPAND of a TEN with shape {1} to shape {3} should emit a
+  // REDUCE_SUM along axis 0 in the cotangent path.
+  u32 d1[1]   = {1};
+  u32 to3_[1] = {3};
+  u32 t1      = alloc_f32_tensor(d1, 1);
+  Term a1     = term_new(0, TAG_TEN, DT_F32, t1);
+  Term ex1    = uop_expand(a1, 1, to3_);
+  Term g_e    = wnf(uop_grad(ex1, gy, a1));
+  // Cascades to leaf-EXPAND wrapping the reduced cotangent (a REDUCE).
+  CHECK_EQ(term_ext(g_e), UOP_EXPAND);
+  CHECK_EQ(term_ext(unexpand(g_e)), UOP_REDUCE);
+
   TEST_BEGIN("grad/cmplt-is-non-differentiable-zero");
   // CMPLT mask is treated as a constant: GRAD[CMPLT(a,b), gy, t] -> 0.
   Term cmp     = uop_binary(UOP_CMPLT, a, b);
