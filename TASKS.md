@@ -3320,7 +3320,7 @@ Initial 5-item decomposition; more tinygrad ports (kernel cache,
 ShapeTracker compaction, beam search, etc.) get queued as separate
 sub-items once these land.
 
-- [ ] **bm1: bench harness** -- new wl/Examples/_bench/bench.wls
+- [x] **bm1: bench harness** -- new wl/Examples/_bench/bench.wls
       that takes a network + dataset + step count, runs N Adam
       training steps under TInit + THVM_BACKEND, and reports
       `{wall_time_ms, ms_per_step, peak_concurrent_kib,
@@ -3331,6 +3331,26 @@ sub-items once these land.
       ~80 LOC + a smoke test in wl/THVMLink/Tests/bench.wlt that
       runs 1 step on a tiny ADD-only network and checks the
       Association keys.
+      <!-- Landed.  wl/THVMLink/Kernel/Bench.wl (new):
+      TBench[<|"Name", "InitFn", "StepFn", "NumSteps"|>] runs
+      the step fn N times, snapshots TMemoryPlan, returns an
+      Association with name, backend, n_steps, wall_time_ms,
+      ms_per_step, kernel_count, ten_count, total_live_kib,
+      peak_concurrent_kib, slot_reuse_headroom_pct.  Auto-
+      detects backend by reading the most-common backend_id
+      across snapshot Bufs.
+      MemoryPlan.wl: TMemoryPlan now also exposes a "Peak" key
+      pre-computed from peakConcurrentLive[bufRecords] so
+      external consumers don't have to re-walk Bufs.
+      TBenchReport[bench] -> Column for stdout.
+      TBenchExport[bench, file] -> writes the same Column to a
+      file so CI can diff across runs.
+      tests/bench.wlt (4 cases): smoke ADD bench produces the
+      expected key set, sane numeric values, Column-headed
+      report, file-export round-trip.  252 C + 268 WL tests
+      green.  bm2/bm3 use this harness for the actual
+      benchmarks. -->
+
 
 - [ ] **bm2: beautiful_mnist architecture in WL** -- new
       wl/Examples/beautiful-mnist/ folder.  Build the tinygrad

@@ -233,7 +233,12 @@ TMemoryPlan[] := Block[{
     TMemoryPlan[<|
         "Kernels" -> kernelRecords,
         "Tens"    -> tensRecords,
-        "Bufs"    -> bufRecords
+        "Bufs"    -> bufRecords,
+        (* "Peak" is the {peak_bytes, peak_depth, total_bytes}
+           summary -- pre-computed so external consumers (TBench,
+           dashboards) don't have to re-walk Bufs.  Cheap: linear
+           in the number of distinct depths. *)
+        "Peak"    -> peakConcurrentLive[bufRecords]
     |>]
 ]
 
