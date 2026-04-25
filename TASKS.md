@@ -274,7 +274,7 @@ Use `ResourceData["MNIST", "TrainingData"]` and `ResourceData["MNIST",
 images to `TTensor` (shape {1, 28, 28} per sample, batched as
 {N, 1, 28, 28}) and labels to int32 `TTensor`s.
 
-- [ ] add `TMnistLoad[]` returning a tagged dataset (training images
+- [x] add `TMnistLoad[]` returning a tagged dataset (training images
       + labels as TTensors).
 - [ ] add a minibatch sampler that produces fresh batches per iter.
 
