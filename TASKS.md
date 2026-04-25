@@ -1701,19 +1701,29 @@ Realistic close-out for the overnight cron loop:
         chain rule.  211 WL + 146 C tests green. -->
 
 
-- [ ] **Lower TUOpConv2D to a primitive chain (arc)**.  Replace
+- [x] **Lower TUOpConv2D to a primitive chain (arc)**.  Replace
       the direct `uop_conv2d` call inside the WL helper TUOpConv2D
       with a chain of primitive UOPs that computes the same
       convolution.  After this lands, the chain rule will
       autograd through the primitives for free; the bespoke
       CONV2D grad rule + opcode can be dropped in the next two
       arc items.
-      <!-- attempt 1: drafted as a kh*kw-unrolled chain in
-      Tensor.wl.  Forward presumably correct but ALL three
-      pre-existing CONV2D grad tests immediately failed with
-      all-zero gradients because interact_grad lacked rules for
-      SHRINK / PAD / PERMUTE / FLIP.  Those rules now landed (5
-      sub-items above), so the lowering is unblocked. -->
+      <!-- All 3 sub-items (a-c) landed across separate fires.
+      Net effect: TUOpConv2DLowered builds a kh*kw-unrolled
+      chain of SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM +
+      ADD; public TUOpConv2D dispatches to it; bespoke
+      TUOpConv2DBespoke kept reachable from parity tests until
+      the next two arc items drop UOP_CONV2D entirely.
+      Side-effects landed along the way: term_shape_in
+      gained a UOP_SHRINK case (shape_env.c), tUopShape
+      gained SHRINK / PAD / PERMUTE / FLIP cases (Shape.wl),
+      EXPAND grad rule lifts gy to its output shape before
+      the per-axis REDUCE_SUMs (uop_grad.c), and
+      TUOpConv2DLowered uses tUopShape (handles UOP chains)
+      instead of TTensorShape (TAG_TEN only).
+      215 WL + 146 C tests green; lenet-mnist forward.wls
+      runs end-to-end via the lowered chain.  Next item --
+      drop the bespoke CONV2D grad rule -- becomes reachable. -->
 
   - [x] **a. TUOpConv2DLowered[input, weights, bias]**: a new WL
         helper that builds the convolution as a kh*kw-unrolled
