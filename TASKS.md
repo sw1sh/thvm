@@ -3487,6 +3487,38 @@ sub-items once these land.
         chain reuses a slot detectable via CPU_BUFS_NEXT
         not growing past N for N consumer kernels.  ~40 LOC +
         a focused test in tests/test_slot_reuse.c.
+        <!-- attempt 1: pushing to freelist from the
+        post-dispatch decref hook (with !preserved + owns_data
+        guard) breaks 7 nn.wlt tests -- all gradient-related:
+        nn/grad-through-square-of-dot expects {20,20,20} grad,
+        gets {1,1,1}; sgd-step / gd-loss-monotonically /
+        poly-regression-gradients / mse-grad / two-head-square /
+        uop-load training-step all fail similarly.
+
+        Root cause: same dead-end as the prior aggressive
+        refcount-driven free attempt (sub-item c of the refcount
+        arc).  TGrad's pattern realizes forward + backward in
+        SEPARATE TRealize calls; the backward's lazy materialize
+        emits new kernels referencing forward intermediate
+        TenDescs whose bufs are pushed to the freelist by the
+        first realize's decref hook, get reused by an
+        intermediate buf alloc in the second realize, and the
+        backward reads corrupted data.
+
+        The preserve check (!CPU_BUFS[prod_buf].preserved)
+        doesn't help because preserved isn't set yet at decref
+        time -- the preserve walk runs AFTER wnf returns.
+
+        Reverted unstaged change.  bm4b needs a different
+        integration point: push from the rollback walk
+        instead of the decref hook, so the preserve set is
+        already known.  That changes rollback_with_preserve
+        from "free non-preserved" to "freelist-push owning
+        non-preserved + free non-owning"; safer because the
+        preserve set explicitly captures the buf bufs the
+        next realize might still need (forward intermediates
+        whose TenDescs are reachable from the result chain). -->
+
 
   - [ ] **bm4c: Metal mirror**.  Same primitives in
         src/backend/metal/_.m: a per-size-class free-list
