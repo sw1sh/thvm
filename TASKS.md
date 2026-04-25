@@ -4088,7 +4088,7 @@ sub-items once these land.
         Queued as a new "WL-pinned-Terms side table" arc
         below the gc arc parent. -->
 
-- [ ] **WL-pinned-Terms side table (arc)** (follow-up to bm4 +
+- [x] **WL-pinned-Terms side table (arc)** (follow-up to bm4 +
       hrp + gc).  THE BLOCKER: bm4 / hrp / gc all share one
       root cause -- forward intermediate kernel outputs have
       TAG_TEN cells at heap[uop_kernel_loc + 0] that no GC
@@ -4097,6 +4097,16 @@ sub-items once these land.
       holding intermediate X across realizes", the runtime
       conservatively preserves them all.  Decomposed into 4
       sub-items.
+      <!-- ARC LANDED: wpt1+2+3+4 all green.  Pin table +
+           bridge wiring + GC integration + bench measurement
+           shipped.  Net memory delta: 0% -- the WL training
+           loop holds every TTerm intermediate live across the
+           step, so the pin set is equivalent to the heap-
+           rooted overlay it replaced.  Real unblock now lives
+           in WL-callsite restructuring (eager TTermUnpin); see
+           docs/bench-results.md "wpt4" section for the three
+           plausible next directions. -->
+
 
   - [x] **wpt1: C-side pin table infra**.  New
         src/runtime/wl_pin.c with:
@@ -4206,6 +4216,14 @@ sub-items once these land.
              with post-wpt column + 3 directions for the
              real fix.  Verification: 166 C + 270 WL green;
              verify.wls Metal LeNet still converges. -->
+
+---
+
+ALL TASKS COMPLETE as of 2026-04-25.  GOAL achieved (Metal
+Adam-LeNet end-to-end converges loss 2.61 -> 0.025) and the
+last queued arc (WL-pinned-Terms) landed cleanly with documented
+residual blocker.  Next work needs human direction; see
+docs/bench-results.md "wpt4" for follow-up candidates.
 
 
 
