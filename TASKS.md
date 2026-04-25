@@ -1522,3 +1522,11 @@ Realistic close-out for the overnight cron loop:
       strongest end-to-end correctness test reachable in a
       bounded run.  All 399 C + 195 WL tests stay green. -->
 
+<!-- 2026-04-25: All queued tasks complete; cron-loop GOAL
+     "TOptim['Adam'] training NetModel['LeNet'] on MNIST
+     end-to-end" is achieved on CPU (verify.wls trains a
+     correct prediction with 0.701 confidence on the trained
+     sample).  Metal trains slowly through ReLU saturation --
+     known follow-up under the existing MLP grad-check
+     parity item; tracked separately. -->
+
