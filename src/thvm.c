@@ -175,6 +175,11 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "wnf/_.c"
 #include "wnf/redex.c"
 
+// hrp1: heap-rooted preserve walk -- alternative to
+// realize.c's mark_preserved_chain.  Standalone helper; hrp2
+// wires it into thvm_realize.
+#include "schedule/heap_rooted_preserve.c"
+
 // thvm_realize: materialize + wnf + per-step buffer pool boundary
 // (sub-item b of the per-step buffer pool arc).  Lives here
 // because it depends on wnf + thvm_materialize + cpu pool helpers.

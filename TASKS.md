@@ -3716,7 +3716,7 @@ sub-items once these land.
       in src/schedule/realize.c with a walk over the live
       HEAP[0..HEAP_NEXT) cells.  Decomposed into 3 sub-items.
 
-  - [ ] **hrp1: heap-walk helper + unit tests**.  New
+  - [x] **hrp1: heap-walk helper + unit tests**.  New
         src/schedule/heap_rooted_preserve.c with a single
         function `mark_heap_rooted_preserve(u32 wm)` that:
           - Walks HEAP[0..HEAP_NEXT).  For each TAG_TEN cell,
@@ -3738,6 +3738,35 @@ sub-items once these land.
         synthetic heap with 3 tids, only some referenced by
         TAG_TEN cells; assert preserved flag is set on the
         referenced bufs and clear on the rest.
+        <!-- Landed.  Implementation collapsed to ~15 LOC
+        (the TAG_UOP-children walk turned out to be redundant
+        with the linear scan over [0, HEAP_NEXT) -- UOP child
+        cells live IN the heap at expr_loc + i, so the same
+        pass visits them).  TAG_REF / TAG_ALO indirections
+        skipped for now: book-heap holds graph TEMPLATES, not
+        concrete TAG_TEN tids; can extend later if hrp2
+        surfaces a gap.
+
+        src/schedule/heap_rooted_preserve.c (new):
+          mark_heap_rooted_preserve(): walks every dyn-heap
+          cell, term_resolves SUB chains, marks bufs of TAG_TEN
+          cells preserved.
+
+        tests/test_heap_rooted_preserve.c (15 sub-checks):
+          - walk-marks-cells-it-finds: 2 referenced TenDescs
+            get preserved; orphan does not.
+          - idempotent: second call leaves bits unchanged.
+          - clear-preserved-zeros-flags: cpu_buf_clear_preserved
+            inversion works.
+          - finds-tag-ten-via-uop-children: TUOpAdd[a, b] with
+            TAG_TEN children at expr_loc + 0/1 are caught by
+            the linear scan.
+          - skips-non-ten-tags: TAG_NUM / TAG_VAR / TAG_ERA
+            cells don't crash and don't flip random bits.
+
+        268 C + 270 WL tests green.  hrp2 wires this into
+        thvm_realize. -->
+
 
   - [ ] **hrp2: integrate into thvm_realize + correctness
         check**.  In src/schedule/realize.c, replace the call

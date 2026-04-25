@@ -35,7 +35,8 @@ TESTS := \
   $(BIN)/test_view_pad \
   $(BIN)/test_view_flip \
   $(BIN)/test_cpu_free_list \
-  $(BIN)/test_slot_reuse
+  $(BIN)/test_slot_reuse \
+  $(BIN)/test_heap_rooted_preserve
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
