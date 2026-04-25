@@ -62,6 +62,11 @@ There's already a `Wolfram layer -> TUOp converter` per the git log
 
 ## Phase 4 — MNIST loader
 
+Use `ResourceData["MNIST", "TrainingData"]` and `ResourceData["MNIST",
+"TestData"]` -- both return a list of `image -> label` rules.  Convert
+images to `TTensor` (shape {1, 28, 28} per sample, batched as
+{N, 1, 28, 28}) and labels to int32 `TTensor`s.
+
 - [ ] add `TMnistLoad[]` returning a tagged dataset (training images
       + labels as TTensors).
 - [ ] add a minibatch sampler that produces fresh batches per iter.
