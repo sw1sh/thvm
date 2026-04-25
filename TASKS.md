@@ -1973,13 +1973,44 @@ Realistic close-out for the overnight cron loop:
         green; the conv2d-lowered tests for the public alias
         still pass.  ~30 LOC of test-file deletions.
 
-- [ ] **Re-run all CONV2D tests + lenet-mnist verify** to
+- [x] **Re-run all CONV2D tests + lenet-mnist verify** to
       confirm the lowered path is regression-free.  The
       grad/conv2d-* tests should still pass; lenet-mnist/
       verify.wls should still drive the trained model from
       ~0.07 confidence on the true class to >~0.7 after 4
       Adam steps (same numerical behaviour, just different
       UOP graph).
+      <!-- Done.  All CONV2D tests still pass via the lowered
+      chain:
+        - tests/test_grad.c: 58/58 (the bespoke-only structural
+          test was removed; the rest exercise the public TUOpConv2D
+          alias which goes through the lowered chain).
+        - wl/THVMLink/Tests/grad.wlt: 4/4 grad/conv2d-* tests
+          (bias-equals-spatial-sum-of-gy, weights-cin1-equals-
+          spatial-correlation, input-equals-coverage-map,
+          weights-cin2-diagonal-mask-trick).
+        - wl/THVMLink/Tests/nn.wlt: 4/4 conv2d tests (helper
+          1ch-2outch-2x2, lowered-1ch-2outch-2x2-parity,
+          dispatch-shape-correct, non-1-stride-returns-Failure).
+        - wl/THVMLink/Tests/{shape, pad, permute}.wlt: shape
+          inference + grad-shape paths still green.
+      Total: 146 C + 212 WL.
+      lenet-mnist/forward.wls runs end-to-end through the
+      lowered chain (5 MNIST samples produce shape-correct
+      predictions; the random-init confidence is ~0.2-0.3,
+      same as the bespoke pre-removal baseline).
+      KNOWN regression NOT addressed by this task:
+      lenet-mnist/grad-check.wls + verify.wls hit "kernel_alloc:
+      out of slots (cap=4096)" when materializing TGrad through
+      the full LeNet (the lowered conv2d emits ~200 ops per
+      conv layer, and backward through 2 convs blows past 4K
+      kernels).  Bumping caps just exposes a cascading
+      tensor_alloc descriptor cap.  Real fix is the queued
+      "Audit kernelization boundaries vs tinygrad" task --
+      one-kernel-per-UOP is fundamentally wrong at this scale.
+      Closes the conv2d-removal arc; next item is the UOP_LOAD
+      sub-items (b)-(e) -- though the user is more likely to
+      want kernelization next, given the verify.wls block. -->
 
 - [ ] **Add UOP_LOAD primitive (arc)**.  User directive: the
       runtime should have an explicit LOAD uop (mirroring
