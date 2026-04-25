@@ -4088,39 +4088,66 @@ sub-items once these land.
         Queued as a new "WL-pinned-Terms side table" arc
         below the gc arc parent. -->
 
-- [ ] **WL-pinned-Terms side table** (follow-up to bm4 +
+- [ ] **WL-pinned-Terms side table (arc)** (follow-up to bm4 +
       hrp + gc).  THE BLOCKER: bm4 / hrp / gc all share one
       root cause -- forward intermediate kernel outputs have
       TAG_TEN cells at heap[uop_kernel_loc + 0] that no GC
       root traces to but a future TGrad realize structurally
       needs.  Without an EXPLICIT signal that "WL is still
       holding intermediate X across realizes", the runtime
-      conservatively preserves them all.
+      conservatively preserves them all.  Decomposed into 4
+      sub-items.
 
-      Fix: maintain `WL_PINNED_TERMS[]` array populated by
-      thvm_wl_term_new / thvm_wl_realize whenever WL receives
-      a Term back; clear when WL drops the reference (via
-      thvm_wl_term_release or an on_release callback when
-      MNumericArray side handles get disowned).  Add to
-      gc_collect_roots's set.
+  - [ ] **wpt1: C-side pin table infra**.  New
+        src/runtime/wl_pin.c with:
+          - `WL_PINNED_TERMS[2048]` + length, reset in
+            thvm_init / thvm_free.
+          - `wl_pin_term(Term t)` -- append; silently drops
+            on saturation.
+          - `wl_unpin_term(Term t)` -- linear scan + swap-
+            remove the matching entry (NO-OP if absent).
+          - `wl_pinned_for_each(callback)` -- iterate non-zero
+            entries.  Used by gc_collect_roots in wpt3.
+        Standalone; no callers wired yet.  ~50 LOC + ~30 LOC
+        test in tests/test_wl_pin.c (pin/unpin/iter/saturated/
+        unpin-missing).
 
-      Then flip the heap-rooted overlay OFF in
-      mark_gc_preserve.  gc walk over (result + WNF stack +
-      DEFS + WL_PINNED_TERMS) catches everything actually
-      live; everything else feeds bm4b's freelist.
+  - [ ] **wpt2: WL bridge wiring**.  Modify
+        wl/THVMLink/CSource/thvmlink.c to call
+        wl_pin_term on every Term that crosses into WL via
+        thvm_wl_term_new / thvm_wl_realize / thvm_wl_wnf /
+        thvm_wl_term_new_op2 / etc. (every EXTERN_C function
+        that returns a Term as Integer).  Plus add
+        thvm_wl_term_unpin export so WL can explicitly drop
+        a TTerm's pin.  Optional follow-up: wire an
+        auto-cleanup TTerm OwnValue on the WL side so manual
+        unpin isn't needed -- but for the first cut, pin
+        everything ever exported and rely on TFree / TInit
+        to clear (matches the current memory-probe lifecycle).
+        ~50 LOC + WL surface for TTermUnpin.
 
-      Acceptance: lenet-mnist peak_concurrent_kib drops
-      >=30% (bm4d's original target the bm4 / hrp / gc arcs
-      kept missing); 268 C + 270 WL tests stay green; Metal
-      Adam-LeNet still converges.
+  - [ ] **wpt3: integrate into gc_collect_roots + flip the
+        heap-rooted overlay off**.  In src/schedule/gc_roots.c,
+        extend gc_collect_roots to walk WL_PINNED_TERMS via
+        wl_pinned_for_each.  In src/schedule/gc_mark.c,
+        remove the mark_heap_rooted_preserve call from
+        mark_gc_preserve (the WL pin set should now cover
+        the cross-realize TGrad pattern).  Acceptance: 268
+        C + 270 WL tests stay green; verify.wls Metal
+        Adam-LeNet converges loss 2.61 -> 0.025.  3-attempt
+        rule applies; if anything breaks, the most likely
+        cause is a Term path not pin-wired in wpt2 (fix +
+        re-test).  ~10 LOC.
 
-      Sized at ~80 LOC + WL bridge wiring + tests; will
-      sub-decompose into table-infra + bridge-integration +
-      mark_gc_preserve-flip + bench-validation when picked up.
-
-      Once this lands, the bm4 + hrp + gc infrastructure
-      (already shipped + tested + correctness-preserving)
-      delivers the savings without further code change.
+  - [ ] **wpt4: bench delta + docs**.  Re-run
+        wl/Examples/_bench/baseline.wls on both backends.
+        Acceptance: peak_concurrent_kib drops at least 30%
+        on lenet-mnist (the bm4 / bm5 / hrp3 / gc4
+        acceptance criterion that's been missed across 4
+        previous attempts).  Update docs/bench-results.md
+        with a fifth column (post-wpt) + delta vs post-gc.
+        If savings finally land, document the win.  If they
+        don't, document the residual blocker.  ~20 LOC + doc.
 
 
 
