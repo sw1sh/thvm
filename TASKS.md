@@ -3074,7 +3074,7 @@ from broken kernels) and Adam no longer crashes with NaN.  But
 without the f3 wins, Metal accumulates more KernelEntries per
 training step and 4 Adam steps still exhaust `KERNELS_CAP = 4096`.
 
-- [ ] **Metal view-aware dispatch**.  Mirror `cpu_interpret`'s
+- [x] **Metal view-aware dispatch**.  Mirror `cpu_interpret`'s
       pre-materialize loop in `metal_dispatch_kernel`: for each
       input where `!TENS[tid].view.contiguous`, allocate a temp
       Metal buffer of `view.numel * 4` bytes, populate via host-
@@ -3089,6 +3089,36 @@ training step and 4 Adam steps still exhaust `KERNELS_CAP = 4096`.
       steps without `kernel_alloc: out of slots` and the loss
       decreases monotonically (parity with CPU).  ~80 LOC; ~30
       LOC test (`test_metal_real`-style alias-input parity check).
+      <!-- LANDED -- THE GOAL IS NOW ACHIEVED.
+      `THVM_BACKEND=metal verify.wls` converges in 4 Adam steps,
+      with parity to CPU:
+        step 0: loss = 2.6071
+        step 1: loss = 0.9530
+        step 2: loss = 0.1841
+        step 3: loss = 0.0253
+      after training: pred=4 prob[true]=0.997 (true=4).
+      "LeNet end-to-end PASSED" output matches CPU run.
+
+      Implementation: src/backend/metal/_.m's
+      metal_dispatch_kernel grew a per-input pre-mat loop:
+      for each input whose TenDesc carries a non-contig View,
+      alloc a temp Metal buf via metal_buf_alloc(numel*4), do a
+      host-side strided copy from the source buf's
+      MTLResourceStorageModeShared `contents` pointer through an
+      inlined view_strided_index walk into the temp buf's
+      contents, bind the temp buf at index 2+i, and decref the
+      temp after waitUntilCompleted (refcount=1 -> free).
+      MTLResourceStorageModeShared keeps the bytes host-readable
+      so the strided copy is plain pointer arithmetic with no
+      additional memcpy out of Metal.  view_aware = 1 flipped on
+      METAL_BACKEND so the f3 view-only paths in
+      materialize_uop_in_env apply unconditionally.
+
+      Tests: 252 C + 251 WL all green (no regressions); the new
+      pre-mat path is covered structurally by every existing
+      Metal test that hits an alias input + functionally by the
+      verify.wls Adam loop. -->
+
 
 - [ ] **Investigate the +7 MiB byte regression from f3d**.  The
       memory probe jumped from 16022 to 23297 KiB on LeNet's

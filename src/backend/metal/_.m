@@ -229,14 +229,63 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
   if (outBuf == nil) return -1;
 
+  // View-aware pre-materialize (the Metal counterpart to
+  // cpu_interpret's strided pre-mat loop).  For each input whose
+  // TenDesc carries a non-contiguous View (an f3 view-only alias
+  // from materialize_uop_in_env), allocate a temp Metal buffer of
+  // exactly view.numel*4 bytes, populate it via host-side strided
+  // index walk through view.shape / view.strides / view.offset,
+  // and bind the temp buffer instead of the alias-source buffer
+  // at slot (2 + i).  Frees the temp bufs after waitUntilCompleted.
+  // MTLResourceStorageModeShared keeps the bytes host-readable so
+  // the strided copy can do plain pointer arithmetic with no
+  // additional memcpy out of Metal.
+  u32 effective_buf_ids[KERNEL_MAX_INPUT];
+  u32 temp_buf_ids     [KERNEL_MAX_INPUT] = {0};
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 ib = in_buf_ids[i];
+    if (ib == 0 || ib >= METAL_BUFS_NEXT) { return -1; }
+    u32 tid = ke->input_tids[i];
+    int needs_premat = (tid != 0 && tid < TENS_NEXT
+                        && !TENS[tid].view.contiguous);
+    if (needs_premat) {
+      View const *v = &TENS[tid].view;
+      u32 numel = v->numel;
+      u32 tmp_id = metal_buf_alloc((u64)numel * 4);
+      if (tmp_id == 0) {
+        for (u32 k = 0; k < i; k++)
+          if (temp_buf_ids[k]) metal_buf_decref(temp_buf_ids[k]);
+        return -1;
+      }
+      f32 *src = (f32 *)[METAL_BUFS[ib].buf contents];
+      f32 *dst = (f32 *)[METAL_BUFS[tmp_id].buf contents];
+      for (u32 k = 0; k < numel; k++) {
+        // Inlined view_strided_index (header-free in this .m TU).
+        int64_t acc = v->offset;
+        u32 rem = k;
+        for (i32 axis = (i32)v->shape.ndim - 1; axis >= 0; axis--) {
+          u32 dim = v->shape.dims[axis];
+          if (dim == 0) continue;
+          u32 c = rem % dim;
+          rem /= dim;
+          acc += (int64_t)c * (int64_t)v->strides[axis];
+        }
+        dst[k] = src[(u32)acc];
+      }
+      effective_buf_ids[i] = tmp_id;
+      temp_buf_ids     [i] = tmp_id;
+    } else {
+      effective_buf_ids[i] = ib;
+    }
+  }
+
   id<MTLCommandBuffer>         cmd = [METAL_QUEUE commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
   [enc setComputePipelineState:pso];
   [enc setBuffer:outBuf offset:0 atIndex:0];
   [enc setBytes:&p->arg length:sizeof(p->arg) atIndex:1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 ib = in_buf_ids[i];
-    if (ib == 0 || ib >= METAL_BUFS_NEXT) { [enc endEncoding]; return -1; }
+    u32 ib = effective_buf_ids[i];
     [enc setBuffer:METAL_BUFS[ib].buf offset:0 atIndex:(2 + i)];
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
@@ -288,17 +337,23 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   [enc endEncoding];
   [cmd commit];
   [cmd waitUntilCompleted];
+
+  // Release the per-dispatch pre-mat temp buffers (refcount=1 from
+  // metal_buf_alloc; decref drops to 0 and frees).  Originals (the
+  // alias-source bufs) are untouched.
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
+  }
   return 0;
 }
 
 Backend METAL_BACKEND = {
   .id              = 2,
-  .view_aware      = 0,   // metal_dispatch_kernel reads bufs flat;
-                          // f3 view-only aliases must be skipped so
-                          // Metal sees a fresh contig kernel-output
-                          // buffer instead of a non-contig alias
-                          // whose underlying source bytes are wider
-                          // than the consumer's expected numel.
+  .view_aware      = 1,   // metal_dispatch_kernel pre-materializes
+                          // non-contig inputs into temp Metal bufs
+                          // (host-side strided copy via inlined
+                          // view_strided_index), so f3 view-only
+                          // aliases now flow through Metal correctly.
   .init            = metal_init,
   .shutdown        = metal_shutdown,
   .buf_alloc       = metal_buf_alloc,
