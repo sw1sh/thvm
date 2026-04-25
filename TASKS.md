@@ -1337,6 +1337,62 @@ Realistic close-out for the overnight cron loop:
       for the immediate train.wls task. -->
 
 
+- [x] **LeNet per-weight grad diagnostic probe**: run TGrad
+      against EACH of LeNet's 8 weight tensors INDIVIDUALLY
+      (not bundled in a per-step loop) at
+      `wl/Examples/lenet-mnist/grad-perweight.wls`, print
+      the shape, min, max for each.  Identifies which
+      weight's chain explodes / fails through the LeNet
+      stack.  No training, just diagnostic.  Needs the same
+      inline forward construction the train.wls draft used;
+      test mostly serves to localise the failing chain.
+      <!-- Implemented at wl/Examples/lenet-mnist/
+      grad-perweight.wls.  Runs TGrad against each of
+      W1/b1/.../W4/b4 individually.  Findings (SeedRandom[42]):
+        - W1, b1 (Conv1):    FAILED -- LibraryFunction::fpexc
+                              "Numeric data containing a floating
+                              point exception (NaN or Inf)
+                              encountered" -> $Failed
+        - W2 (Conv2 weights): shape ok, min/max ~ +/-0.13 (the
+                              diagonal-mask trick works through
+                              the upstream chain).
+        - b2 (Conv2 bias):    max = 4.6e34 (huge; overflow but
+                              not NaN/Inf -- distinct failure mode)
+        - W3, b3, W4, b4:     all plausible.
+      Pattern: the deeper a weight is in the LeNet chain, the
+      worse its grad behaves.  W2/b2 already overflow; W1/b1
+      saturate to NaN.  Likely cause: every MUL/EXPAND/PAD/CONV2D
+      step in the gy chain compounds magnitudes.  CONV2D
+      grad_input emits PAD(gy) -> CONV2D(...) which
+      multiplicatively grows numel, and the chain through TWO
+      conv layers + two pools gives many cascaded such growth
+      steps.  Documented for the next sub-item to address. -->
+
+
+- [ ] **Investigate / fix CONV2D-cascade grad NaN through deep
+      LeNet chain**.  Per the diagnostic above, W1/b1's grad
+      hits NaN/Inf and b2 reaches ~1e34 magnitudes through the
+      LeNet backward chain.  Suspects:
+        (a) The CONV2D grad_input chain (PAD + FLIP + PERMUTE +
+            fresh CONV2D) might be applied with the wrong
+            dimensional contract through a deep gy.  The
+            existing unit test only validates a single CONV2D
+            (4x4 input, 3x3 weights) -- not a stack-of-CONV2Ds.
+        (b) The diagonal-mask grad_weights for C_in>1 emits a
+            rank-5 EXPAND + MUL chain.  When this is itself
+            inside a deeper gy (i.e. backpropagating through
+            it), the expansions can compound.  Worth a focused
+            probe: a 2-CONV2D forward (input -> Conv1 -> Conv2 ->
+            sum-loss), TGrad wrt Conv1's weights only, see if
+            the backward chain through Conv2's grad_input
+            already overflows.
+        (c) Pool's grad rule (REDUCE_MAX with diagonal-mask via
+            CMPEQ + EXPAND) might be emitting an unstable chain.
+      Likely fix path: identify which step compounds magnitudes
+      (probably a missing reduction in some MUL chain);
+      possibly add an explicit cotangent normalization step.
+      Once fixed, train.wls should converge.
+
 - [ ] **wl/Examples/lenet-mnist/train.wls**: K manual SGD or
       per-tensor Adam steps on a fixed MNIST batch through
       TLeNet[]; assert the loss curve trends down.  Mirrors
@@ -1354,17 +1410,7 @@ Realistic close-out for the overnight cron loop:
       produces the bad chain (suspect: W2 / Conv2 weights,
       since that path uses the diagonal-mask trick which
       hasn't been validated through a deep upstream chain).
-      Reverted train.wls; needs a diagnostic sub-task. -->
-
-- [ ] **LeNet per-weight grad diagnostic probe**: run TGrad
-      against EACH of LeNet's 8 weight tensors INDIVIDUALLY
-      (not bundled in a per-step loop) at
-      `wl/Examples/lenet-mnist/grad-perweight.wls`, print
-      the shape, min, max for each.  Identifies which
-      weight's chain explodes / fails through the LeNet
-      stack.  No training, just diagnostic.  Needs the same
-      inline forward construction the train.wls draft used;
-      test mostly serves to localise the failing chain.
+      Reverted train.wls; needs a diagnostic sub-task above. -->
 
 - [ ] **LeNet accuracy verification**: run the trained
       LeNet from train.wls on a held-out batch (e.g. another
