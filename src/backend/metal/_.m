@@ -83,18 +83,98 @@ static int metal_init(void) {
   return 0;
 }
 
+// Forward decls: metal_shutdown defined after the buffer table so
+// it can iterate METAL_BUFS to release outstanding buffers.
+static void metal_shutdown(void);
+
+// Buffer table: parallel to TenDesc.buf_id.  buf_id 0 is reserved
+// ("no buffer").  ARC owns each MTLBuffer via the strong reference
+// in METAL_BUFS[].  Refcounts are tracked separately so that
+// multiple TenDescs can share the same underlying buffer (view
+// aliasing) -- mirrors the CPU backend's CpuBuf table.
+//
+// Apple Silicon's MTLResourceStorageModeShared lets the CPU access
+// buffer contents directly (no blit required) -- buf_read/write
+// just memcpy through `buffer.contents`.
+
+#define METAL_BUFS_CAP (1ULL << 16)
+
+typedef struct {
+  id<MTLBuffer> buf;
+  u64           nbytes;
+  u32           refcount;
+} MetalBuf;
+
+static MetalBuf METAL_BUFS[METAL_BUFS_CAP];
+static u32      METAL_BUFS_NEXT = 1;
+
+static u32 metal_buf_alloc(u64 nbytes) {
+  if (METAL_DEVICE == nil) return 0;
+  if (METAL_BUFS_NEXT >= METAL_BUFS_CAP) {
+    fprintf(stderr, "thvm: metal_buf_alloc -- buffer table full\n");
+    return 0;
+  }
+  u32 id = METAL_BUFS_NEXT++;
+  METAL_BUFS[id].buf      = [METAL_DEVICE newBufferWithLength:nbytes
+                                                      options:MTLResourceStorageModeShared];
+  METAL_BUFS[id].nbytes   = nbytes;
+  METAL_BUFS[id].refcount = 1;
+  if (METAL_BUFS[id].buf == nil) {
+    fprintf(stderr, "thvm: metal_buf_alloc -- failed to allocate %llu bytes\n",
+            (unsigned long long)nbytes);
+    METAL_BUFS[id].refcount = 0;
+    return 0;
+  }
+  return id;
+}
+
+static void metal_buf_free(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  METAL_BUFS[buf_id].buf      = nil;
+  METAL_BUFS[buf_id].nbytes   = 0;
+  METAL_BUFS[buf_id].refcount = 0;
+}
+
+static void metal_buf_incref(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  METAL_BUFS[buf_id].refcount++;
+}
+
+static void metal_buf_decref(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  if (METAL_BUFS[buf_id].refcount == 0) return;
+  if (--METAL_BUFS[buf_id].refcount == 0) metal_buf_free(buf_id);
+}
+
+static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
+  if (METAL_BUFS[buf_id].buf == nil)            return -1;
+  u64 cap = METAL_BUFS[buf_id].nbytes;
+  if (nbytes > cap) nbytes = cap;
+  memcpy(dst, [METAL_BUFS[buf_id].buf contents], (size_t)nbytes);
+  return 0;
+}
+
+static int metal_buf_write(u32 buf_id, const void *src, u64 nbytes) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
+  if (METAL_BUFS[buf_id].buf == nil)            return -1;
+  u64 cap = METAL_BUFS[buf_id].nbytes;
+  if (nbytes > cap) nbytes = cap;
+  memcpy([METAL_BUFS[buf_id].buf contents], src, (size_t)nbytes);
+  return 0;
+}
+
 static void metal_shutdown(void) {
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    METAL_BUFS[i].buf      = nil;
+    METAL_BUFS[i].nbytes   = 0;
+    METAL_BUFS[i].refcount = 0;
+  }
+  METAL_BUFS_NEXT = 1;
   METAL_LIB    = nil;
   METAL_QUEUE  = nil;
   METAL_DEVICE = nil;
 }
-
-static u32  metal_buf_alloc(u64 nbytes)                         { (void)nbytes;     return 0; }
-static void metal_buf_free (u32 buf_id)                         { (void)buf_id;     /* nop */ }
-static void metal_buf_incref(u32 buf_id)                        { (void)buf_id;     /* nop */ }
-static void metal_buf_decref(u32 buf_id)                        { (void)buf_id;     /* nop */ }
-static int  metal_buf_read (u32 buf_id, void *dst, u64 nbytes)  { (void)buf_id; (void)dst; (void)nbytes; return -1; }
-static int  metal_buf_write(u32 buf_id, const void *src, u64 nbytes) { (void)buf_id; (void)src; (void)nbytes; return -1; }
 
 static int  metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   (void)ke; (void)in_buf_ids; (void)out_buf_id;

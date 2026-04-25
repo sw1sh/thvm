@@ -21,12 +21,15 @@ int main(void) {
   CHECK(CURRENT_BACKEND == &CPU_BACKEND);
   thvm_free();
 
-  TEST_BEGIN("metal-real/THVM_BACKEND-metal-selects-m-stub");
+  TEST_BEGIN("metal-real/THVM_BACKEND-metal-selects-m-backend");
   setenv("THVM_BACKEND", "metal", 1);
   thvm_init();
   CHECK(CURRENT_BACKEND == &METAL_BACKEND);
   CHECK_EQ(CURRENT_BACKEND->id, 2);
-  CHECK_EQ(CURRENT_BACKEND->buf_alloc(64), 0);  // .m stub still returns 0
+  // Now-real metal_buf_alloc returns a non-zero buf_id.
+  u32 b = CURRENT_BACKEND->buf_alloc(64);
+  CHECK(b != 0);
+  CURRENT_BACKEND->buf_free(b);
   thvm_free();
 
   TEST_BEGIN("metal-real/init-shutdown-cycle-survives");
@@ -37,6 +40,36 @@ int main(void) {
   thvm_free();
   thvm_init();
   CHECK(CURRENT_BACKEND == &METAL_BACKEND);
+  thvm_free();
+
+  TEST_BEGIN("metal-real/buf-write-read-roundtrip");
+  setenv("THVM_BACKEND", "metal", 1);
+  thvm_init();
+  // Allocate a 16-element f32 buffer on Metal, write a known
+  // sequence via shared-storage memcpy, read it back, compare.
+  float src[16], dst[16];
+  for (int i = 0; i < 16; i++) src[i] = (float)i * 1.5f;
+  u32 bid = CURRENT_BACKEND->buf_alloc(sizeof(src));
+  CHECK(bid != 0);
+  CHECK_EQ(CURRENT_BACKEND->buf_write(bid, src, sizeof(src)), 0);
+  CHECK_EQ(CURRENT_BACKEND->buf_read (bid, dst, sizeof(dst)), 0);
+  for (int i = 0; i < 16; i++) CHECK(src[i] == dst[i]);
+  CURRENT_BACKEND->buf_free(bid);
+  thvm_free();
+
+  TEST_BEGIN("metal-real/buf-refcount-shared-storage");
+  setenv("THVM_BACKEND", "metal", 1);
+  thvm_init();
+  u32 bid2 = CURRENT_BACKEND->buf_alloc(64);
+  CHECK(bid2 != 0);
+  CURRENT_BACKEND->buf_incref(bid2);
+  CURRENT_BACKEND->buf_decref(bid2);
+  // Refcount still 1, buffer should still be readable.
+  char tmp[8];
+  CHECK_EQ(CURRENT_BACKEND->buf_read(bid2, tmp, sizeof(tmp)), 0);
+  CURRENT_BACKEND->buf_decref(bid2);  // drops to 0; frees.
+  // Now invalid; read should fail.
+  CHECK_EQ(CURRENT_BACKEND->buf_read(bid2, tmp, sizeof(tmp)), -1);
   thvm_free();
 
   unsetenv("THVM_BACKEND");

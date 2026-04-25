@@ -358,11 +358,22 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       to newLibraryWithURL:error: per the macOS 13+
       deprecation. -->
 
-- [ ] **Metal buffer ops**.  `metal_buf_alloc` returns an
+- [x] **Metal buffer ops**.  `metal_buf_alloc` returns an
       `id<MTLBuffer>` (cast through u32 buf_id); `metal_buf_free`
       releases it.  `metal_buf_write` / `metal_buf_read` blit
       between host bytes and the buffer.  Test: parity with the
       CPU backend on a write-then-read round-trip.
+      <!-- Implemented as a parallel METAL_BUFS table indexed by
+      u32 buf_id (mirrors CpuBuf table in cpu/init.c).  Each
+      slot holds an id<MTLBuffer> + capacity + refcount.  ARC
+      owns the MTLBuffer reference.  buf_alloc uses
+      MTLResourceStorageModeShared so buf_read/write are direct
+      memcpy through `[buffer contents]` -- no blit encoder
+      needed on Apple Silicon.  metal_shutdown nils every
+      outstanding buffer.  test_metal_real grew from 5 to 27
+      checks: round-trip parity, refcount semantics, valid
+      buf_id post-free returns -1. -->
+
 - [ ] **CONST kernel + dispatch entry point**.  First real Metal
       kernel; establishes the `metal_dispatch_kernel` routing
       table (op -> pipeline state).  `const.metal` shader fills
