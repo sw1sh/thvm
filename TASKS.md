@@ -451,6 +451,29 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
 
 ## Phase 6 — end-to-end
 
-- [ ] wire `TOptim["Adam"]` + LeNet + MNIST + Metal into
-      `wl/Examples/lenet-mnist/` with a `train.wls` script.
-- [ ] run a single iteration to verify; commit; declare victory.
+The original two items assumed the goal "TOptim[\"Adam\"] training
+LeNet on MNIST" is reachable from here.  It is not, yet:
+`interact_grad` ships rules for ADD / MUL / NEG / REDUCE_SUM /
+KERNEL only.  Training LeNet end-to-end needs grad rules for at
+least CONV2D, RESHAPE, REDUCE_MAX, EXP2 (used by softmax), RECIP
+(used in Adam's denom + softmax), and the chain through ReLU /
+Pool.  That's a Phase 7+ concern.
+
+Realistic close-out for the overnight cron loop:
+
+- [ ] **WL dylib links the Metal backend**.  Today the dylib is
+      CPU-only -- `THVM_BACKEND=metal` from WL would pick the C
+      stub.  Add the dylib build rule to `-DTHVM_HAS_METAL` +
+      link `build/backend_metal.o` and the Metal frameworks on
+      Darwin.  Verify a WL forward pass runs with the env var
+      set (look for the "metal_init -- device:" line on stderr).
+- [ ] **Forward-only LeNet demo**: `wl/Examples/lenet-mnist/
+      forward.wls` that loads a few MNIST samples via
+      `TMnistBatch[]`, runs `TFromNet[TLeNet[], img]` per sample,
+      reports softmax probabilities + which digit class wins.
+      Skip training (backprop blocker).  Document the gap in a
+      README so future iteration knows what's missing.
+- [ ] **Document the backprop gap**: list every UOP that needs a
+      grad rule in `interact_grad` for Adam-on-LeNet to actually
+      train, plus the order to land them.  Goes in
+      `docs/grad-roadmap.md`.
