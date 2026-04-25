@@ -491,7 +491,22 @@ Realistic close-out for the overnight cron loop:
       uniform softmax.  Graceful degradation rather than a
       crash. -->
 
-- [ ] **Document the backprop gap**: list every UOP that needs a
+- [x] **Document the backprop gap**: list every UOP that needs a
       grad rule in `interact_grad` for Adam-on-LeNet to actually
       train, plus the order to land them.  Goes in
       `docs/grad-roadmap.md`.
+      <!-- docs/grad-roadmap.md: enumerates the 8 currently-handled
+      rules + the 8 missing ones (RESHAPE, EXPAND, CMPLT, EXP2,
+      RECIP, LOG2, REDUCE_MAX, CONV2D), each with the chain-rule
+      formula, an LOC estimate, and what it unblocks.  Lands in
+      that order so the small unaries + softmax/cross-entropy
+      stack get parity-tested on a fully-connected MLP before
+      attacking max-pool (REDUCE_MAX needs a new UOP_CMPEQ
+      primitive) and finally CONV2D (multi-fire arc, needs FLIP
+      and PAD kernels too). -->
+
+- [ ] **Land grad rules 1-3 (RESHAPE / EXPAND / CMPLT)** in
+      `interact_grad`, per `docs/grad-roadmap.md`.  ~10-25 LOC
+      each, one parity test apiece in `tests/test_grad.c`
+      (numerical-vs-analytic, ε=1e-3, tolerance 1e-3).
+      Independent commits.
