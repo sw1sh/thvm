@@ -1,26 +1,14 @@
-// schedule/wl_pin.c - wpt1 of the WL-pinned-Terms arc.
+// schedule/wl_pin.c - WL-pinned-Terms side table.
 //
-// `WL_PINNED_TERMS[]` is the side table that tracks every Term
-// the WL caller is currently holding.  Populated by the WL
-// bridge functions (wpt2 will wire thvm_wl_term_new /
-// thvm_wl_realize / etc. to call wl_pin_term on every Term they
-// hand out); consumed by gc_collect_roots (wpt3) so the
-// tracing-GC walk treats WL-held Terms as live roots.
+// Tracks every Term the WL caller is currently holding via a
+// TTerm[id] handle, so gc_collect_roots can treat them as live
+// roots.  WL-held Terms can reach forward intermediate kernel
+// outputs (TAG_TEN cells in HEAP[]) that no other root traces
+// to but a future TGrad realize structurally needs.
 //
-// The pin table is the missing signal that bm4 / hrp / gc all
-// stumbled on: forward intermediate kernel outputs sit in HEAP[]
-// as TAG_TEN cells but no GC root traces to them; the WL caller
-// holds them via TTerm[id] handles only WL knows about.  Once
-// wpt2 wires the bridge, the heap-rooted overlay in
-// mark_gc_preserve can finally come off (wpt3) and the
-// freelist in bm4b actually receives intermediate slots
-// (wpt4 measures).
-//
-// Linear scan for unpin: WL_PINNED_TERMS_CAP=2048 is generous
-// for our scale (a single TRealize hands back at most a few
-// dozen Terms) and a hash table would be premature complexity.
-// Saturated push is a silent no-op -- correctness preserved
-// (we just over-preserve until cleared).
+// Capacity is generous and saturated push silently drops:
+// over-preserving until the next thvm_init / thvm_free is safe;
+// dropping a real pin is not.  A hash table would be premature.
 
 #define WL_PINNED_TERMS_CAP 2048
 
@@ -42,18 +30,12 @@ fn void wl_unpin_term(Term t) {
       return;
     }
   }
-  // Term not in the table: no-op.  Common case is double-free
-  // / WL-side cleanup races; treat as benign.
 }
 
 fn void wl_pin_clear(void) {
   WL_PINNED_TERMS_LEN = 0;
 }
 
-// Iterator helper.  Used by gc_collect_roots; passes each
-// non-zero pinned Term to the callback.  Order is insertion
-// order (with swaps from unpin); callers that depend on a
-// stable ordering should sort.
 fn void wl_pinned_for_each(void (*cb)(Term)) {
   if (cb == NULL) return;
   for (u32 i = 0; i < WL_PINNED_TERMS_LEN; i++) {

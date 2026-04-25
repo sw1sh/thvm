@@ -1,29 +1,22 @@
-// schedule/gc_roots.c - gc1 of the tracing-GC arc.
+// schedule/gc_roots.c - tracing-GC root collection.
 //
-// `gc_collect_roots(result, out, cap, &n)` populates `out[0..n)`
-// with the live Term roots from which the gc-mark walk needs to
-// trace.  Sources, in order:
+// gc_collect_roots populates `out[0..n)` with the live Term
+// roots from which the gc-mark walk needs to trace.  Sources:
 //
 //   1. The wnf result the caller is about to return to WL.
-//   2. WNF_LAST_STACK[0..WNF_LAST_STACK_LEN) -- pending
-//      eliminator frames captured when wnf_n bailed early.
-//      Each frame's Term may still hold references the next
+//   2. WNF_LAST_STACK -- eliminator frames captured when wnf_n
+//      bailed early; each may still hold refs the next
 //      reduction step needs.
-//   3. DEFS[name] for each name with a non-zero entry.  These
-//      are TRef roots; gc_mark_term will follow them into
-//      BOOK_HEAP via the TAG_REF / TAG_ALO recursion.
-//   4. WL_PINNED_TERMS[0..WL_PINNED_TERMS_LEN) -- every Term WL
-//      is currently holding via a TTerm[id] handle.  Lets us
-//      preserve forward-intermediate kernel outputs that sit in
-//      HEAP[] as TAG_TEN cells but aren't reachable from any
-//      other root (the cross-realize TGrad pattern that hrp /
-//      gc had to cover with a defensive heap-rooted overlay).
+//   3. DEFS[name] for each name with a non-zero entry; TRef
+//      roots that gc_mark_term follows into BOOK_HEAP via
+//      TAG_REF / TAG_ALO recursion.
+//   4. WL_PINNED_TERMS -- every Term WL holds via a TTerm[id]
+//      handle; covers forward-intermediate kernel outputs
+//      reachable only from the WL caller's wrappers.
 //
-// ALO_STATES (the substitution-chain table) is NOT a Term
-// source: its entries map book locs to fresh dyn locs; the
-// actual Term content lives at HEAP[new_loc], which gets
-// discovered by gc_mark_term recursing through TAG_ALO cells
-// that reference it.
+// ALO_STATES is NOT a Term source: it maps book locs to fresh
+// dyn locs; the actual Term content lives at HEAP[new_loc] and
+// gets discovered through the TAG_ALO cells referencing it.
 //
 // `cap` bounds the output to a fixed buffer the caller owns
 // (typical: 256).  Excess roots are silently dropped -- the

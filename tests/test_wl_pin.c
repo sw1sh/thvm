@@ -1,4 +1,4 @@
-// test_wl_pin.c - wpt1 of the WL-pinned-Terms arc.
+// test_wl_pin.c - WL-pinned-Terms side table API.
 
 #include "../src/thvm.c"
 #include "test.h"
