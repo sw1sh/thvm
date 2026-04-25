@@ -416,7 +416,16 @@ fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
 // === wnf/ ===
 // Stack-machine reducer to weak normal form.  See src/wnf/_.c for the
 // enter/apply protocol.
+//
+// `wnf` runs to WHNF (unbounded interactions).  `wnf_n(t, max_steps)`
+// bails after `max_steps` ITRS bumps and unwinds the eliminator
+// stack via the standard "stuck term" path -- pre-unwind frames are
+// snapshotted into WNF_LAST_STACK (length WNF_LAST_STACK_LEN,
+// innermost-first) for inspection.  max_steps == 0 == unbounded.
 fn Term wnf(Term t);
+fn Term wnf_n(Term t, u64 max_steps);
+extern Term WNF_LAST_STACK[];
+extern u32  WNF_LAST_STACK_LEN;
 
 // === runtime lifecycle ===
 void thvm_init(void);

@@ -163,6 +163,32 @@ EXTERN_C DLLEXPORT int thvm_wl_wnf(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Step-bounded reduce.  max_steps == 0 == unbounded (same as wnf).
+EXTERN_C DLLEXPORT int thvm_wl_wnf_n(WolframLibraryData libData, mint argc,
+                                     MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t          = (Term)MArgument_getInteger(args[0]);
+  u64  max_steps  = (u64) MArgument_getInteger(args[1]);
+  MArgument_setInteger(res, (mint)wnf_n(t, max_steps));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_stack_size(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)WNF_LAST_STACK_LEN);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_stack_get(WolframLibraryData libData, mint argc,
+                                         MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 i = (u32)MArgument_getInteger(args[0]);
+  Term t = (i < WNF_LAST_STACK_LEN) ? WNF_LAST_STACK[i] : 0;
+  MArgument_setInteger(res, (mint)t);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_itrs(WolframLibraryData libData, mint argc,
                                     MArgument *args, MArgument res) {
   (void)libData; (void)argc; (void)args;

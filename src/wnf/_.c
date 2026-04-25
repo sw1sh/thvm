@@ -16,12 +16,33 @@
 // nested wnf() invocation would still terminate at its own base
 // (the runtime is single-threaded today, so nesting is moot, but the
 // pattern matches HVM4 and costs nothing).
-fn Term wnf(Term term) {
+//
+// `wnf_n(t, max_steps)` is the step-bounded form: the budget is
+// checked just *before* each interaction-firing site (every place
+// the reducer would bump ITRS).  Free reductions -- VAR-SUB / DUP
+// follows, APP/DP frame pushes -- always run, so a single step
+// resolves to a meaningful WHNF rather than stopping mid-deref.
+// On bail we snapshot the still-pending eliminator frames into
+// `WNF_LAST_STACK` (innermost-first) and unwind via the same
+// "stuck term" path the apply loop uses for non-redex pairs --
+// heap mutations stick, so calling wnf again on the returned root
+// resumes the reduction.
+//
+// `wnf(t)` is the unbounded form (max_steps = 0).
+
+Term WNF_LAST_STACK[WNF_CAP];
+u32  WNF_LAST_STACK_LEN = 0;
+
+fn Term wnf_n(Term term, u64 max_steps) {
   Term *stack = WNF_STACK;
   u32   s_pos = WNF_S_POS;
   u32   base  = s_pos;
   Term  next  = term;
   Term  whnf;
+  u64   itrs0 = ITRS;
+
+#define BUDGET_HIT (max_steps && (ITRS - itrs0) >= max_steps)
+#define BAIL_AT(t) do { whnf = (t); goto bail; } while (0)
 
 enter:
   switch (term_tag(next)) {
@@ -72,11 +93,13 @@ enter:
         whnf = next;
         goto apply;
       }
+      if (BUDGET_HIT) BAIL_AT(next);
       ITRS++;
       next = alo_realize(book, 0);
       goto enter;
     }
     case TAG_ALO: {
+      if (BUDGET_HIT) BAIL_AT(next);
       ITRS++;
       next = alo_force(next);
       goto enter;
@@ -85,6 +108,7 @@ enter:
       u32 op = term_ext(next);
       if (op == UOP_KERNEL) {
         // Fire all upstream kernels then this one; return the output TAG_TEN.
+        if (BUDGET_HIT) BAIL_AT(next);
         whnf = interact_kernel(next);
         goto apply;
       }
@@ -95,11 +119,13 @@ enter:
         // term unchanged it means y wasn't structurally pattern-
         // matchable yet (e.g., a free VAR / un-realised ALO),
         // so leave the GRAD as WHNF for a later re-entry.
+        if (BUDGET_HIT) BAIL_AT(next);
         Term g_out = interact_grad(next);
         if (g_out == next) {
           whnf = next;
           goto apply;
         }
+        ITRS++;
         next = g_out;
         goto enter;
       }
@@ -120,6 +146,7 @@ enter:
       Term x   = wnf(heap_read(loc + 0));
       Term y   = wnf(heap_read(loc + 1));
       if (term_tag(x) == TAG_NUM && term_tag(y) == TAG_NUM) {
+        if (BUDGET_HIT) BAIL_AT(next);
         u32 xv = (u32)term_val(x);
         u32 yv = (u32)term_val(y);
         u32 r;
@@ -159,10 +186,12 @@ apply:
         Term arg     = heap_read(app_loc + 1);
         switch (term_tag(whnf)) {
           case TAG_LAM: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             next = interact_app_lam(whnf, arg);
             goto enter;
           }
           case TAG_ERA: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             whnf = interact_app_era();
             continue;
           }
@@ -170,6 +199,7 @@ apply:
             // APP-MAT-NUM: force the arg, dispatch on its NUM value.
             // Heap[mat_loc+0] = handler (used on match).
             // Heap[mat_loc+1] = fallback (applied to arg on miss).
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             u64  mat_loc = term_val(whnf);
             u32  match   = term_ext(whnf);
             Term arg_w   = wnf(arg);
@@ -201,14 +231,17 @@ apply:
         u32 lab  = term_ext(frame);
         switch (term_tag(whnf)) {
           case TAG_SUP: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             next = interact_dup_sup(lab, loc, side, whnf);
             goto enter;
           }
           case TAG_ERA: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             whnf = interact_dup_era(side, loc, whnf);
             continue;
           }
           case TAG_LAM: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             next = interact_dup_lam(lab, loc, side, whnf);
             goto enter;
           }
@@ -225,6 +258,34 @@ apply:
     }
   }
 
+  WNF_LAST_STACK_LEN = 0;
   WNF_S_POS = s_pos;
   return whnf;
+
+bail:
+  // Step budget exhausted just before an interaction.  Snapshot the
+  // pending frames (innermost-first), then unwind by writing whnf
+  // back through each frame's primary slot -- the same logic the
+  // apply loop uses for stuck terms.  Heap mutations from already-
+  // fired interactions stick; calling wnf again on the returned
+  // root resumes from there.
+  WNF_LAST_STACK_LEN = s_pos - base;
+  for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) {
+    WNF_LAST_STACK[i] = stack[base + WNF_LAST_STACK_LEN - 1 - i];
+  }
+  while (s_pos > base) {
+    Term frame = stack[--s_pos];
+    u8 ftag = term_tag(frame);
+    if (ftag == TAG_APP || ftag == TAG_DP0 || ftag == TAG_DP1) {
+      heap_set(term_val(frame), whnf);
+      whnf = frame;
+    }
+  }
+  WNF_S_POS = s_pos;
+  return whnf;
+
+#undef BUDGET_HIT
+#undef BAIL_AT
 }
+
+fn Term wnf(Term term) { return wnf_n(term, 0); }

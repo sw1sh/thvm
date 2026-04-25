@@ -33,7 +33,9 @@ THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram
 THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.  Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc.";
 
 (* === reduce / stats === *)
-TWnf::usage       = "TWnf[term] reduces `term` to weak normal form.";
+TWnf::usage       = "TWnf[term] reduces `term` to weak normal form.  TWnf[term, n] bails after at most `n` interactions and returns the partially reduced term; pending eliminator frames are exposed via TStack[].  n = 0 means unbounded (same as TWnf[term]).";
+TStep::usage      = "TStep[term] = TWnf[term, 1].  Fires exactly one interaction.  Inspect TStack[] for the pending frames.";
+TStack::usage     = "TStack[] returns the eliminator frames pending at the most recent bail point of TStep / TWnf[_, n].  Each frame is a TTerm tagged APP / DP0 / DP1.  Empty list when no bail occurred.";
 TReduce::usage    = "TReduce[term] reduces `term` to WNF in-place and returns `term` (the original root, useful as a seed for THeapGraph after reduction).";
 TItrs::usage      = "TItrs[] returns the cumulative interaction count.";
 TTermExpr::usage  = "TTermExpr[term] walks the heap from `term` and returns a nested expression whose heads are tag-name strings (\"LAM\", \"APP\", \"SUP\", \"DUP\", \"DP0\", \"DP1\", \"VAR\", \"ERA\").  Useful for snapshotting / diffing pre and post TWnf states by direct equality (===).";
@@ -183,6 +185,9 @@ $heapReadFn  := $heapReadFn  = load["thvm_wl_heap_read",  {Integer},            
 $heapSetFn   := $heapSetFn   = load["thvm_wl_heap_set",   {Integer, Integer},       Integer];
 
 $wnfFn       := $wnfFn       = load["thvm_wl_wnf",        {Integer},                Integer];
+$wnfNFn      := $wnfNFn      = load["thvm_wl_wnf_n",      {Integer, Integer},       Integer];
+$stackSizeFn := $stackSizeFn = load["thvm_wl_stack_size", {},                       Integer];
+$stackGetFn  := $stackGetFn  = load["thvm_wl_stack_get",  {Integer},                Integer];
 $itrsFn      := $itrsFn      = load["thvm_wl_itrs",       {},                       Integer];
 
 (* tensor *)
@@ -276,7 +281,24 @@ THeapAlloc[size_Integer]         := (ensureInit[]; $heapAllocFn[size])
 THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
 
-TWnf[t_]         := (ensureInit[]; TTerm[$wnfFn[ttermRaw[t]]])
+TWnf[t_]                  := (ensureInit[]; TTerm[$wnfFn[ttermRaw[t]]])
+TWnf[t_, n_Integer /; n >= 0] := (ensureInit[]; TTerm[$wnfNFn[ttermRaw[t], n]])
+
+(* TStep[t] = TWnf[t, 1] -- fire exactly one interaction, then return
+   the partially reduced term.  The pending eliminator stack at the
+   bail point is captured in TStack[]. *)
+TStep[t_] := TWnf[t, 1]
+
+(* TStack[] returns the eliminator frames that were still pending
+   when the most recent TStep / TWnf[t, n] bailed.  Each frame is a
+   TTerm tagged APP / DP0 / DP1; the `val` field points to the heap
+   loc of the original cell.  Returns {} for unbounded TWnf or when
+   the bounded run completed before hitting the budget. *)
+TStack[] := (ensureInit[];
+    With[{n = $stackSizeFn[]},
+        Table[TTerm[$stackGetFn[i]], {i, 0, n - 1}]
+    ]
+)
 
 (* TReduce reduces `t` to WNF in-place and returns the original root.
    Pairs with THeapGraph[t] / TTermTree[t] when you want the
