@@ -2408,6 +2408,32 @@ Realistic close-out for the overnight cron loop:
           alias must use view_strided_index instead of flat
           indexing.  ~80 LOC + a wlt test that TUOpExpand
           doesn't allocate a new buffer.
+          <!-- attempt 1: implemented EXPAND view-only +
+          cpu_interpret pre-materialize-non-contig +
+          tensor_read view-aware materialize.  CPU path
+          worked.  Then test_metal_real broke: 24 buf_read
+          call sites compare CPU vs GPU buffer layouts
+          flat, but the CPU side now produces a non-contig
+          alias whose underlying buf has source numel
+          (smaller than target).  Gating on
+          backend->view_aware (added a flag to Backend;
+          CPU=1, Metal=0) didn't help test_metal_real
+          either, because the same test process switches
+          backend mid-run.
+          Re-design needed: f3c either has to (i) update
+          all the test buf_read call sites to use a
+          view-aware tensor_read_into helper -- a one-time
+          but large infra change, OR (ii) materialize the
+          alias to a fresh contig target-numel buf at the
+          materialize step (no kernel emitted, but still
+          allocates a buf) -- gives back KernelEntry slots
+          without the buf-layout-divergence headache.
+          Option (ii) is the smaller change; defer until
+          someone needs it (the f3b RESHAPE win alone may
+          be enough to unblock most LeNet kernel pressure).
+          Reverted to f3b-only baseline.  146 C + 220 WL
+          tests green. -->
+
 
     - [ ] **f3d. CPU op runners read inputs through the View**.
           Update cpu_op_add / cpu_op_mul / cpu_op_neg / etc. to
