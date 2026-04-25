@@ -157,6 +157,45 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
       }
     }
 
+    // 2g. View-only FLIP (sub-item f3g of the kernel-fusion arc).
+    //     Flips a set of axes (passed as a bitmask in expr_loc+1)
+    //     by negating strides on flipped axes and shifting offset
+    //     to the high end: offset += (dims[i] - 1) * strides[i]
+    //     per flipped axis.  Shape is unchanged.  contiguous=0
+    //     unless no axes are actually flipped (degenerate).
+    //     view_strided_index handles negative strides correctly
+    //     (offset starts high; (k * neg_stride) walks downward).
+    //     materialize_root_alias's max-reachable-index calculation
+    //     ignores negative-stride contributions because the offset
+    //     already covers the high end of the read range.
+    if (op == UOP_FLIP
+        && arity == 1 && child_tids[0] != 0
+        && TENS[child_tids[0]].view.contiguous) {
+      TenDesc *src = &TENS[child_tids[0]];
+      Shape src_shape = src->view.shape;
+      u32 mask = (u32)term_val(heap_read(expr_loc + 1));
+      View nv = {0};
+      nv.shape  = src_shape;
+      nv.numel  = src->view.numel;
+      nv.offset = src->view.offset;
+      u8 any_flip = 0;
+      for (u32 i = 0; i < src_shape.ndim; i++) {
+        if (mask & (1u << i)) {
+          nv.strides[i] = -src->view.strides[i];
+          nv.offset += (i32)(src_shape.dims[i] - 1) * src->view.strides[i];
+          any_flip = 1;
+        } else {
+          nv.strides[i] = src->view.strides[i];
+        }
+      }
+      for (u32 i = src_shape.ndim; i < MAX_DIM; i++) nv.strides[i] = 0;
+      nv.contiguous = any_flip ? 0 : src->view.contiguous;
+      u32 alias_tid = tensor_view_of(child_tids[0], nv);
+      if (alias_tid != 0) {
+        return term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+      }
+    }
+
     // 2f. View-only PAD (sub-item f3f of the kernel-fusion arc):
     //     INTENTIONALLY NOT IMPLEMENTED.  PAD adds bytes around the
     //     source that must read as the pad_value (zero for our use);

@@ -2976,11 +2976,34 @@ Realistic close-out for the overnight cron loop:
           tests green. -->
 
 
-    - [ ] **f3g: FLIP view-only**.  Negate strides on the
+    - [x] **f3g: FLIP view-only**.  Negate strides on the
           flipped axes; offset shifts to (shape[i]-1)*stride[i]
           on each.  Same view-of-source path as SHRINK /
           PERMUTE.  Mark contiguous=0.  Re-run tests +
           add tests/test_view_flip.c.  ~50 LOC + ~30 LOC test.
+          <!-- Landed.  src/schedule/materialize_in_env.c
+          new "2g. View-only FLIP" block: aliases via
+          tensor_view_of with negated strides on axes set in
+          the bitmask + offset shift to the high end
+          (offset += (dim[i]-1)*stride[i] per flipped axis).
+          contiguous=0 unless mask=0 (degenerate no-op).
+          view_strided_index already handles negative strides
+          via i64 math; materialize_root_alias's
+          max-reachable-index formula skips negative-stride
+          contributions (the offset already covers the
+          high end).
+
+          tests/test_view_flip.c (35 sub-checks): 1D reverse
+          [1,2,3,4]->[4,3,2,1]; empty mask preserves contig;
+          2D dual-axis flip [{1,2,3},{4,5,6}]->[{6,5,4},{3,2,1}]
+          with strides {-3,-1} and offset 5; root materialize
+          gives correct contig copy; strided ADD consumer.
+
+          252 C + 246 WL tests green.
+
+          Movement-op view-only ARC complete (f3d/e/f/g all
+          landed).  Parent will be marked [x] next fire. -->
+
 
   - [ ] **Adam-state arena**.  Keep TAdamHostStep's m/v
         arrays alive across steps in a session-scoped
