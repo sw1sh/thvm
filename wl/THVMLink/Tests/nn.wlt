@@ -387,3 +387,33 @@ VerificationTest[
     Failure,
     TestID -> "nn/pool-overlapping-returns-Failure"
 ]
+
+(* === SoftmaxLayer forward (TSoftmax helper + dispatch) ===
+   softmax({1,2,3}) ≈ {0.0900306, 0.244728, 0.665241}.  Tolerance
+   to 0.0001 swallows the EXP2/RECIP precision wobble. *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    Round[Normal @ TTensorData @ TRealize @ TSoftmax[x], 0.0001],
+    Round[{0.0900306, 0.244728, 0.665241}, 0.0001],
+    TestID -> "nn/softmax-helper-3-elements"
+]
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    Round[Normal @ TTensorData @ TRealize @
+        TFromNet[SoftmaxLayer[], x], 0.0001],
+    Round[{0.0900306, 0.244728, 0.665241}, 0.0001],
+    TestID -> "nn/softmax-via-SoftmaxLayer"
+]
+
+(* Sanity: outputs sum to 1. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{0.5, -1.0, 2.0, 0.0}, "Real32"];
+    Round[Total @ Normal @ TTensorData @ TRealize @ TSoftmax[x], 0.0001],
+    1.0,
+    TestID -> "nn/softmax-sums-to-one"
+]

@@ -136,7 +136,7 @@ concern that interact_grad currently doesn't cover for any of these):
       another model wants overlapping pool, then needs UOP_PERMUTE
       runtime support first.] `PoolingLayer` overlapping case
       (Stride < KernelSize, e.g. the default Stride = {1,1}).
-- [ ] `SoftmaxLayer` forward.  `softmax(x)_i = exp(x_i) / sum(exp(x))`.
+- [x] `SoftmaxLayer` forward.  `softmax(x)_i = exp(x_i) / sum(exp(x))`.
       EXP via `2^(log2(e) * x)` = TUOpExp2 chain.  Test against
       `NetApply[SoftmaxLayer[]]` on a small vector.
 - [ ] `CrossEntropyLossLayer` forward.  Needs LOG (we have LOG2,

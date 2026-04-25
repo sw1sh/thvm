@@ -32,6 +32,7 @@
      TMSELoss[pred, target]      -- sum((pred - target)^2)
      TReLU[x]                    -- elementwise max(x, 0)
      TTanh[x]                    -- elementwise tanh, via EXP2
+     TSoftmax[x]                 -- softmax over the last axis
 *)
 
 BeginPackage["THVMLink`"];
@@ -48,6 +49,7 @@ TL2Loss::usage          = "TL2Loss[x] = TSum[TSquare[x]].";
 TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
 TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
 TTanh::usage            = "TTanh[x] = elementwise tanh, implemented as (u - 1)/(u + 1) where u = exp(2x) = EXP2(x * 2 * log2 e).  Uses only existing UOPs (no UOP_TANH primitive).  Loses precision for |x| > ~10 due to exp overflow; that's accepted for now since hidden activations rarely sit there.";
+TSoftmax::usage         = "TSoftmax[x] = exp(x) / sum(exp(x)) over the last axis.  exp via the EXP2 + log2(e) chain.  Numerically naive (no max-subtract stabilisation) -- input magnitudes >~80 will overflow exp.  Forward only.";
 
 Begin["`Private`"];
 
@@ -75,6 +77,18 @@ TTanh[x_TTerm] := With[{
     ]
 ]
 
+(* exp(x) via EXP2: exp(x) = 2^(x * log2 e). *)
+tExp[x_TTerm] := TUOpExp2[TUOpMul[x, TUOpConst[N[Log2[E]], "f32"]]]
+
+(* softmax(x)_i = exp(x_i) / sum(exp(x)).  Sum reduces over axis 0
+   (rank-1 inputs only for v1 -- the LeNet path produces a rank-1
+   class-score vector at the SoftmaxLayer position).  RECIP of the
+   scalar sum broadcasts back across the input shape via the
+   binary-elementwise UOP_MUL rule. *)
+TSoftmax[x_TTerm] := With[{e = tExp[x]},
+    TUOpMul[e, TUOpRecip[TUOpReduce[e, 0, "SUM"]]]
+]
+
 TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
     Module[{out, in, xb},
         out = shapeW[[1]];
@@ -95,6 +109,7 @@ $layerParams[ElementwiseLayer] = {}
 $layerParams[ReshapeLayer]     = {}
 $layerParams[FlattenLayer]     = {}
 $layerParams[PoolingLayer]     = {}
+$layerParams[SoftmaxLayer]     = {}
 $layerParams[_]                = {}
 
 TLayerWeights[layer_] :=
@@ -152,6 +167,9 @@ fromLayer[FlattenLayer, _, x_TTerm] :=
     With[{shape = TTensorShape[x]},
         TUOpReshape[x, {Times @@ shape}]
     ]
+
+(* SoftmaxLayer: forward only, last-axis softmax via TSoftmax helper. *)
+fromLayer[SoftmaxLayer, _, x_TTerm] := TSoftmax[x]
 
 (* PoolingLayer non-overlapping (Stride == KernelSize), 2-D Max only.
    Channels-first input shape {C, H, W} ->
