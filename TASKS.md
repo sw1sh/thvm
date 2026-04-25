@@ -291,10 +291,17 @@ images to `TTensor` (shape {1, 28, 28} per sample, batched as
 Big one. The runtime today is CPU-only (`backend/cpu.c`). Mirror that
 file as `backend/metal.c` (or `.m` if Objective-C is needed).
 
-- [ ] decide on the embedding strategy: pure-C via Metal C bindings,
+- [x] decide on the embedding strategy: pure-C via Metal C bindings,
       or Objective-C++ helpers. Document the choice in
       `docs/metal.md`. This is the only research-y task; if it stalls
       3 fires, mark `[blocked]` and proceed to Phase 6.
+      <!-- Decision: Objective-C `.m` files exposing a C API,
+      mirroring `backend/cpu/`.  Metal-cpp drags in C++ runtime;
+      direct objc_msgSend is fragile.  MSL shaders compile via
+      `xcrun metal` to a default.metallib loaded at backend init.
+      Backend selection via THVM_BACKEND=metal env var.  Full
+      design in docs/metal.md. -->
+
 - [ ] stub `backend/metal.c` exposing the same `Backend` vtable as
       `backend/cpu.c`, all functions returning errors for now. Wire
       it into `thvm_init` behind a `THVM_BACKEND=metal` env switch.
