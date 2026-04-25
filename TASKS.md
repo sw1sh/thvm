@@ -505,8 +505,24 @@ Realistic close-out for the overnight cron loop:
       primitive) and finally CONV2D (multi-fire arc, needs FLIP
       and PAD kernels too). -->
 
-- [ ] **Land grad rules 1-3 (RESHAPE / EXPAND / CMPLT)** in
-      `interact_grad`, per `docs/grad-roadmap.md`.  ~10-25 LOC
-      each, one parity test apiece in `tests/test_grad.c`
-      (numerical-vs-analytic, ε=1e-3, tolerance 1e-3).
-      Independent commits.
+- [ ] **Grad rule: UOP_RESHAPE** in `interact_grad` per
+      `docs/grad-roadmap.md` step 1.  Rule is `GRAD[RESHAPE(a,
+      shape), gy, t] = GRAD[a, RESHAPE(gy, a.shape), t]`.  ~15
+      LOC + one parity test in `tests/test_grad.c` (analytic
+      via interact_grad vs finite-difference, ε=1e-3,
+      tolerance 1e-3).
+
+- [ ] **Grad rule: UOP_CMPLT** in `interact_grad` per
+      `docs/grad-roadmap.md` step 3.  Rule is
+      `GRAD[CMPLT(a, b), gy, t] = grad_zero(t)` -- comparison
+      is non-differentiable; the surrounding MUL rule already
+      passes the mask through correctly.  ~5 LOC + one parity
+      test that verifies a ReLU pattern `MUL[x, CMPLT(0, x)]`
+      backprops correctly (gradient = mask).
+
+- [ ] **Grad rule: UOP_EXPAND** in `interact_grad` per
+      `docs/grad-roadmap.md` step 2.  Rule is
+      `GRAD[EXPAND(a, new_shape), gy, t] = GRAD[a,
+      REDUCE_SUM along expanded axes (gy), t]`.  ~25 LOC + one
+      parity test (e.g. broadcast a scalar to {3,4} then sum;
+      grad wrt scalar should equal numel of expanded shape).
