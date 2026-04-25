@@ -2451,7 +2451,7 @@ Realistic close-out for the overnight cron loop:
 
 
 
-    - [ ] **f3d. CPU op runners read inputs through the View**.
+    - [x] **f3d. CPU op runners read inputs through the View**.
           Update cpu_op_add / cpu_op_mul / cpu_op_neg / etc. to
           take a View per input (or have cpu_interpret
           pre-resolve indexed reads).  For elementwise ops, the
@@ -2462,6 +2462,21 @@ Realistic close-out for the overnight cron loop:
           interpret.c + per-op .c files.  Tests: existing
           kernels still pass + a new wlt asserts ADD works
           when one input is an aliased EXPAND view.
+          <!-- Done as part of f3c.  cpu_interpret pre-
+          materializes non-contig inputs into temp contig
+          buffers via view_strided_index BEFORE dispatching
+          per-op kernels, so cpu_op_add / mul / neg / etc.
+          stay flat-buffer simple and never see a non-contig
+          input.  Contig inputs short-circuit (no temp alloc)
+          so there's no regression.  Validated by 146 C +
+          220 WL tests green and the 35% lenet-mnist forward
+          kernel-count drop measured in f3c.  No new wlt test
+          for "ADD works when one input is an aliased EXPAND
+          view" because TUOpConv2DLowered's per-partial chain
+          (SHRINK -> RESHAPE -> EXPAND -> MUL ...) IS that
+          test, and lenet-mnist forward exercises it
+          end-to-end. -->
+
 
     - [ ] **f3e. Verify lenet-mnist + update docs**.  Re-run
           lenet-mnist/forward.wls and measure the KernelEntry
