@@ -4461,59 +4461,62 @@ implemented + tested (f1a) but never invoked by the pipeline.
              addressed in f1d-d. -->
 
 
-  - [ ] **f1d-d: flip MATERIALIZE_USE_REALIZE_INFO on by
-        default**.  After f1d-b1+b2+c land cleanly, set the
-        default to 1 at the declaration site.  Remove
-        toggle-flip lines from any test that no longer
-        needs them.  Acceptance: 166 C + 289 WL green with
-        toggle ON by default; linear-train probe shows
-        kernel count drop without explicit toggle flip.
-        ~10 LOC.
-        <!-- attempt 1 failed: flipping the default surfaced
-             3 distinct breakages, most are bigger than the
-             10-LOC scope:
+  <!-- 2026-04-26 re-decompose: f1d-d attempt 1 surfaced 3
+       breakages that exceed the original 10-LOC scope.  See
+       commit 010031c for the diagnosis.  Splitting into 4
+       sub-items so each lands in one fire. -->
 
-             1. View-only alias creation: when an UN-realized
-                EXPAND/SHRINK/PERMUTE/PAD/FLIP cell is hit,
-                the toggle-on path returned the original UOP
-                unchanged so view-only handling never ran.
-                Tests test_view_shrink/permute/pad/flip
-                regressed (expected TAG_TEN alias, got raw
-                UOP).  Fix: the hook should fall through to
-                legacy when the un-realized child is a
-                MOVEMENT op (only return-unchanged for
-                inlinable elementwise/CONST).  Add an
-                inline_is_inlinable check before the
-                return-unchanged branch.  ~5 LOC.
+  - [ ] **f1d-d1: hook fall-through for movement ops**.  In
+        materialize_uop_in_env's f1d hook, the un-realized
+        branch currently `return uop;` for any non-realized
+        UOp.  That breaks view-only alias creation for
+        EXPAND/SHRINK/PERMUTE/PAD/FLIP -- those should fall
+        through to the legacy view-only / kernel emit path.
+        Add an `inline_is_inlinable(op)` check so we only
+        return-unchanged for inlinable elementwise/CONST;
+        movement ops fall through.  Acceptance: 166 C +
+        292 WL green with default OFF; flipping the toggle
+        on no longer regresses test_view_shrink /
+        test_view_permute / test_view_pad / test_view_flip.
+        ~5 LOC.
 
-             2. test_materialize / test_splice / test_use_realize
-                inspect the legacy per-UOp kernel structure
-                (n_ops, program[i].opcode etc.).  Need to set
-                MATERIALIZE_USE_REALIZE_INFO = 0 at the top of
-                main().  ~3 LOC each.
+  - [ ] **f1d-d2: opt structural unit tests out of toggle ON**.
+        Add `MATERIALIZE_USE_REALIZE_INFO = 0;` at the top
+        of main() in tests/test_materialize.c,
+        tests/test_splice.c, and tests/test_use_realize.c
+        (the last test's `CHECK_EQ(MATERIALIZE_USE_REALIZE_INFO, 0)`
+        also needs to update its assertion text since the
+        default semantic flips in f1d-d4).  These tests
+        inspect specific pre-fusion kernel layouts; they
+        intentionally exercise the legacy code path.
+        Acceptance: 166 C + 292 WL green; the three tests
+        pass regardless of what default the toggle has.
+        ~10 LOC across 3 files.
 
-             3. test_metal_real parity broke: with toggle on,
-                the inlined helper emits programs WITHOUT a
-                LOAD prefix.  CPU's interpreter handles this
-                (LOADs at non-final positions are skipped),
-                but Metal's dispatch_kernel apparently relies
-                on the prefix or on output_shape/output_numel
-                being set the same way as legacy.  Real
-                correctness gap; the inlined kernel structure
-                isn't yet Metal-compatible.
+  - [ ] **f1d-d3: Metal parity for inlined kernels**.
+        With the toggle on, test_metal_real fails the
+        cpu/gpu parity check.  Investigate: the inlined
+        helper (materialize_kernel_inlined) builds programs
+        WITHOUT a LOAD prefix, and may not populate
+        output_shape / output_numel / src0_dims the way the
+        legacy emit does.  Metal's dispatch_kernel reads
+        those.  Bring the helper's KernelEntry layout in
+        line with what the Metal backend expects: emit a
+        LOAD-per-input prefix; populate output_shape from
+        the dominant input; mirror the existing PAD/PERMUTE/
+        EXPAND-shape metadata code.  Acceptance: with toggle
+        on, test_metal_real cpu/gpu parity passes; full
+        nn.wlt grad suite still green; verify.wls Metal
+        LeNet still converges loss 2.61 -> 0.025.  ~80 LOC
+        + likely a small Metal-specific test.
 
-             Re-decompose:
-               f1d-d1: hook fall-through for un-realized
-                       movement ops (~5 LOC); land FIRST
-               f1d-d2: opt out the structural unit tests
-                       from toggle ON (~10 LOC across 3 tests)
-               f1d-d3: investigate + fix Metal parity for
-                       inlined kernels (output_shape,
-                       output_numel, src0_dims, LOAD prefix);
-                       likely ~50-100 LOC + tests
-               f1d-d4: actually flip default to 1 + verify
-                       lenet-mnist verify.wls + bench probe -->
-
+  - [ ] **f1d-d4: flip default + verify**.  After d1+d2+d3
+        land, set the toggle default to 1 at its declaration
+        site.  Run full sweep: 166 C + 292 WL must stay
+        green; lenet-mnist verify.wls Metal must converge;
+        linear-train memory-probe.wls should show the
+        kernel-count drop in its TMemoryPlanReport output.
+        ~5 LOC.
 
   - [ ] **f1e: bench delta + docs update**.  Re-run
         `wl/Examples/_bench/baseline.wls` on both backends.
