@@ -313,14 +313,33 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       stub, anything else (including unset) defaults to CPU.
       tests/test_metal_stub.c covers the swap. -->
 
-- [ ] **Metal build + init infrastructure**.  Makefile rules for
-      `.m` (compile with `clang -fobjc-arc`) and `.metal` (compile
-      with `xcrun -sdk macosx metal`), Darwin-gated.  Replace
-      stub `src/backend/metal/_.c` with `_.m` glue that opens an
-      `MTLDevice`, loads the per-shader metallib, and exposes a
-      smoke `metal_init` that succeeds.  Deliverable: build
-      passes on macOS, `THVM_BACKEND=metal` thvm_init returns
-      without error.  Likely sub-decompose at execution time.
+- [ ] **Metal build pipeline**.  Makefile rules to compile
+      `src/backend/metal/_.m` with `clang -fobjc-arc` into
+      `build/backend_metal.o`, Darwin-gated.  Link `-framework
+      Metal -framework Foundation` into every test binary and
+      the WL dylib.  Use `THVM_HAS_METAL` define so `src/thvm.c`
+      stops `#include`-ing the C stub when the .m is linked in.
+      Deliverable: `make` and `make test` still green, plus a
+      new `bin/test_metal_real` that #defines THVM_HAS_METAL +
+      links the .o to confirm the dual-TU build works.
+- [ ] **Real metal_init in _.m**.  Convert the stub in
+      `src/backend/metal/_.m` (currently created by the prior
+      item) into one that opens `MTLCreateSystemDefaultDevice()`
+      + a `MTLCommandQueue`, stores both in file-scope statics,
+      and `metal_shutdown` releases.  Buffer / dispatch ops stay
+      stubbed (they ship in the next two items).  Test:
+      `THVM_BACKEND=metal` thvm_init returns 0 with the device
+      name printable to stderr (confirms the framework wiring).
+- [ ] **MSL shader compilation pipeline**.  Makefile rule that
+      runs `xcrun -sdk macosx metal -c src/backend/metal/shaders/
+      *.metal -o build/shaders.air` then `xcrun -sdk macosx
+      metallib build/shaders.air -o build/default.metallib`.
+      Empty shaders directory ships with a single trivial
+      shader (e.g. a no-op kernel) so the rule has something to
+      compile.  metal_init loads the metallib via
+      `[device newLibraryWithFile:...]`.  This unblocks the per-
+      kernel items below by giving them a place to drop shader
+      sources.
 - [ ] **Metal buffer ops**.  `metal_buf_alloc` returns an
       `id<MTLBuffer>` (cast through u32 buf_id); `metal_buf_free`
       releases it.  `metal_buf_write` / `metal_buf_read` blit
