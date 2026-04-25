@@ -1530,3 +1530,40 @@ Realistic close-out for the overnight cron loop:
      known follow-up under the existing MLP grad-check
      parity item; tracked separately. -->
 
+- [ ] **Remove UOP_CONV2D primitive; lower to tinygrad-style
+      composition of movement ops + MUL + REDUCE_SUM**.
+      UOP_CONV2D doesn't exist in tinygrad -- conv2d is built
+      entirely from primitive movement ops (PAD / SHRINK /
+      RESHAPE / PERMUTE / EXPAND with stride-0 broadcast) plus
+      elementwise MUL and REDUCE_SUM.  Our runtime should match.
+      Currently UOP_CONV2D is a primitive opcode with its own
+      CPU + Metal kernel + a bespoke grad rule (bias/weights/
+      input branches plus the diagonal-mask trick for C_in>1).
+      All of that should be replaced by the autograd over a
+      lowered primitive chain.
+      Multi-fire arc; sub-tasks (will decompose on the next
+      fire):
+        1. UOP_SHRINK CPU + Metal kernels (constructor exists
+           in src/uop/shrink.c; opcode = 7).  Mirror the
+           FLIP/PAD/PERMUTE pattern.
+        2. Lower TUOpConv2D to a primitive chain via _pool-style
+           window extraction (the standard tinygrad approach):
+             - input x{C_in, H, W} -> _pool to extract sliding
+               windows into {C_in, H_out, W_out, kh, kw} using
+               PAD + SHRINK + RESHAPE + PERMUTE + EXPAND.
+             - weights{C_out, C_in, kh, kw} broadcast against
+               unfolded x; MUL + REDUCE_SUM over (C_in, kh, kw).
+             - + bias.
+           Choose location: WL helper (TUOpConv2D in Tensor.wl)
+           OR a C-side `uop_conv2d_lowered` constructor that
+           emits the chain.  WL is simpler; C-side keeps the
+           same call signature.
+        3. Drop the bespoke CONV2D grad rule from
+           src/interact/uop_grad.c (autograd over the primitive
+           chain handles it for free).
+        4. Drop UOP_CONV2D opcode + uop_conv2d constructor +
+           CPU kernel + Metal shader + materializer special
+           cases.  Reduce UOP_COUNT, free up the slot.
+        5. Re-run all CONV2D tests + lenet-mnist verify to
+           confirm no regression.
+
