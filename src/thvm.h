@@ -269,6 +269,13 @@ typedef struct KernelEntry {
                                    // materialize_splice_into; kernel_fire_by_id
                                    // skips dispatch (the parent now produces
                                    // this kernel's output buffer too).
+  u32       consumer_count;        // # of OTHER kernels whose input_tids
+                                   // trace back (via TENS[tid].producer_kid)
+                                   // to this kernel.  Populated by
+                                   // kernel_compute_consumer_counts.  Used
+                                   // by the refcount-driven free pass to
+                                   // decide when this kernel's output buf
+                                   // is no longer needed.
   void     *compiled;              // backend-specific; NULL for interpreter
 } KernelEntry;
 

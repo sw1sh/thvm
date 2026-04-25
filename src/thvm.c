@@ -155,6 +155,7 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "schedule/materialize.c"
 #include "schedule/materialize_in_env.c"
 #include "schedule/walk.c"
+#include "schedule/consumer_count.c"
 
 // === interact/ ===
 // Interaction rules.  uop_kernel.c needs the schedule pipeline above

@@ -2742,7 +2742,7 @@ Realistic close-out for the overnight cron loop:
         reading.  Drops conv-partial memory by ~5x.
         Decomposed into 3 sub-items below.
 
-    - [ ] **Per-kernel consumer-count pass**.  Add a
+    - [x] **Per-kernel consumer-count pass**.  Add a
           single-pass walk over KERNELS[] (after materialize
           but before kernel firing) that computes, for each
           kernel `k`, the number of OTHER kernels that list
@@ -2754,6 +2754,17 @@ Realistic close-out for the overnight cron loop:
           synthetic 3-kernel chain (k1->k2, k1->k3) verifying
           k1.consumer_count = 2, k2.consumer_count = 0,
           k3.consumer_count = 0.  ~40 LOC + ~30 LOC test.
+          <!-- Landed.  Added u32 consumer_count to KernelEntry
+          (src/thvm.h).  src/schedule/consumer_count.c (new):
+          kernel_compute_consumer_counts() walks KERNELS, for
+          each input_tid traces back via TENS[tid].producer_kid
+          and increments that producer's count.  View-aliasing
+          handled correctly because tensor_view_of inherits
+          producer_kid.  tests/test_consumer_count.c (17 sub-
+          checks): diamond k1->{k2,k3} verifies counts (2/0/0),
+          idempotent re-run, leaf-skip semantics.  163 C + 237
+          WL tests green. -->
+
 
     - [ ] **Decref hook in kernel firing**.  In
           src/backend/cpu/kernel_fire_by_id.c (or wherever
