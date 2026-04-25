@@ -4238,69 +4238,78 @@ implemented + tested (f1a) but never invoked by the pipeline.
       drops from 304 kernels to <= 100; verify.wls Metal
       Adam-LeNet still converges.
 
-  - [ ] **f1c: greedy single-consumer elementwise fusion**.
-        Add a post-materialize pass that walks every kernel
-        in topological order and, for each kernel K with
-        `is_kernel_inlineable(K) == 1` AND a single consumer
-        C, calls `materialize_splice_into(C, K)`.  Single-
-        consumer is read from `consumer_count` (already
-        populated by the existing schedule pass).  Land in
-        `src/schedule/` as e.g. `splice_pass.c`; wire it
-        from `thvm_materialize` after the kernel DAG is
-        built.  Add a test in `tests/test_splice_pass.c`
-        that builds a small chain (CONST + ADD + MUL,
-        single-consumer at each step), materializes,
-        asserts post-pass kernel-count drops to 1.
-        Acceptance: 166 C + 289 WL still green; linear-train
-        forward kernel-count drops noticeably (target <= 5
-        forward kernels, was 17).  ~60 LOC + ~40 LOC test.
-        <!-- attempt 1: built materialize_splice_inline +
-             materialize_splice_pass with a SPLICE_PASS_ENABLED
-             toggle; wired into thvm_materialize.  Three pre-
-             fusion unit tests (test_materialize, test_splice,
-             test_consumer_count) updated to disable the pass.
-             166 C tests pass.  But 3 WL tests regress:
-             nn/poly-regression-gradients gives {0, 0} instead
-             of {-32, -16}; nn/gd-loss-monotonically-decreases
-             and uop-load/training-step-decreases-loss fail
-             likewise.  Loss values are still correct -- it's
-             specifically gradients that go to zero in some
-             arms.  Forward computes right; TGrad somehow ends
-             up with zero contributions.  Hypothesis: the
-             splice rewrite for parent's main op refs is
-             sound, but interact_uop_grad's UOP_KERNEL handler
-             walks KernelEntry.source_uop, and when a child
-             kernel is spliced its source_uop is intact -- so
-             walking via source_uop is fine.  More likely:
-             materialize_splice_into mutates parent.input_tids
-             by appending child's inputs, but the
-             grad-computation re-walks the SAME source_uop on
-             a SECOND TGrad call (after the first realize),
-             at which point the inputs the grad expression
-             references may have shifted slot positions -- or
-             a subsequent TGrad call re-materializes and the
-             pass fires again on already-mutated kernels.
-             Next attempt: investigate whether
-             SPLICE_PASS_ENABLED needs to apply per-call
-             (e.g., skip when the materialize is being
-             invoked under a TGrad recursion), or whether
-             splice should only fire on the OUTERMOST
-             materialize (not on the per-grad sub-realizes). -->
+  <!-- 2026-04-26 redesign: f1c attempts 1+2 chased a wrong
+       model (build per-UOp kernels, then mutate to merge).
+       Symptom was gradients going to {0, 0}: the spliced
+       child's output_tid buffer is never written, but
+       interact_uop_grad's chain rule emits new UOP_MULs that
+       reference that buffer, and the next TRealize[TGrad[...]]
+       reads zeros.  The splice helper is sound for in-kernel
+       compute; the design that wraps it is wrong.
 
+       Tinygrad's actual approach
+       (TinyHVM/tinygrad/tinygrad/schedule/{kernelize,grouper}.py):
 
-  - [ ] **f1d: fuse across REDUCE boundaries +
-        fixed-point iterate**.  REDUCE itself isn't
-        elementwise so the f1c rule skips it, but a REDUCE
-        kernel CAN absorb its single elementwise producer
-        into its prefix (matvec pattern: EXPAND + MUL
-        feeding REDUCE_SUM).  Extend the splice helper or
-        add a sibling `splice_into_reduce` that handles
-        the REDUCE case.  Then iterate the f1c+f1d pass
-        to a fixed point (each successful splice may unlock
-        another).  Acceptance: linear-train forward drops
-        to <= 3 kernels (matvec-fused, softmax body,
-        CE+final-reduce); LeNet forward drops to <= 50;
-        all tests stay green.  ~80 LOC + tests.
+       1. **Group analysis pass** decides which UOPs are
+          "realized" (escape into a backing buffer).  Sources
+          of realization: explicit ASSIGN/CONTIGUOUS markers,
+          REDUCE outputs, multi-consumer UOPs.
+       2. **Each realized UOP gets a fresh buffer + KERNEL
+          wrapper** (tinygrad's ASSIGN node binds them).
+       3. **Greedy fusion within a kernel boundary** pulls
+          upstream un-realized UOPs INTO the kernel's AST
+          via a pattern-match rewrite (DONT_PLACE_IN_KERNEL
+          set excludes ASSIGN/BUFFER/KERNEL).  No kernel
+          mutation after the fact -- the kernel is BUILT
+          containing the inlined compute from the start.
+       4. **REDUCE is always a hard fusion stop** (one reduce
+          per kernel; FUSE_CONV_BW is the only exception).
+
+       Net effect for thvm: the materializer should become
+       SELECTIVE about which UOPs become KERNELs.  Today
+       walk.c rewrites every UOp to UOP_KERNEL.  After the
+       redesign, only realized UOPs get rewritten; un-realized
+       UOPs stay as raw UOP cells and the realized parent's
+       kernel-build step recursively pulls their compute into
+       its program by walking source_uop instead of by reading
+       a previously-emitted KernelEntry.  Cross-realize TGrad
+       just works: every realized intermediate has a buffer,
+       every grad reference still points at a real buffer. -->
+
+  - [ ] **f1c (redesigned): UOP realization classifier**.
+        New pass `src/schedule/realize_classify.c` that, given
+        a UOp DAG, returns a bitmap of "realized" UOPs.
+        A UOp is realized when ANY of: (a) it's the root the
+        caller asked for, (b) it has 2+ distinct consumers
+        across the DAG, (c) it's a REDUCE (REDUCE outputs
+        always escape into a buffer), (d) it's a movement op
+        whose source can't be aliased view-only.  Walk the
+        DAG once counting consumers per UOp Term, then a
+        second pass to set the bitmap.  Add
+        `tests/test_realize_classify.c` with a CONST + ADD +
+        MUL chain (only root realized) and a fan-out case
+        (shared subexpression realized).  No materializer
+        change yet; this just produces the realization
+        info that f1d will consume.  ~70 LOC + ~50 LOC test.
+
+  - [ ] **f1d: selective materializer**.  Modify
+        `materialize_walk` and `materialize_expr` so they
+        only emit a UOP_KERNEL for realized UOPs.  Un-realized
+        UOPs stay as raw UOP cells in the heap.  When emitting
+        a kernel for a realized UOp, recursively pull its
+        un-realized upstream UOPs into the kernel's program
+        directly (instead of allocating sub-kernels and
+        splicing).  REDUCE always realizes -> always a
+        kernel boundary.  Fall back to the pre-redesign
+        per-UOp-kernel behavior when the realize bitmap
+        flags a UOP as realized that doesn't strictly need
+        to be (safety net during the transition).
+        Acceptance: 166 C + 289 WL green;
+        nn/poly-regression-gradients still gives
+        {-32, -16} (the cross-realize TGrad pattern that
+        attempt 1 broke); linear-train forward kernel-count
+        drops from 17 to <= 5.  ~150 LOC + tests --
+        DECOMPOSE FURTHER on first fire.
 
   - [ ] **f1e: bench delta + docs update**.  Re-run
         `wl/Examples/_bench/baseline.wls` on both backends.
