@@ -31,3 +31,28 @@ VerificationTest[
     {3, 2, 2},
     TestID -> "reshape/1d-to-3d-shape"
 ]
+
+(* Regression for the leading-1s shape-recovery bug.  Previously the
+   materializer recovered ndim by walking dim cells until the
+   running product hit input numel; for a numel-4 source reshaped
+   to {1, 4}, prod=1 already after the first cell so the loop
+   broke early and produced shape {1} instead of {1, 4}.  Now ndim
+   is stored explicitly. *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    r = TRealize @ TUOpReshape[x, {1, 4}];
+    TTensorShape[r],
+    {1, 4},
+    TestID -> "reshape/leading-one-rank-preserved"
+]
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, "Real32"];
+    r = TRealize @ TUOpReshape[x, {1, 1, 6}];
+    TTensorShape[r],
+    {1, 1, 6},
+    TestID -> "reshape/multiple-leading-ones-rank-preserved"
+]

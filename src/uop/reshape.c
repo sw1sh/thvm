@@ -1,16 +1,23 @@
 // uop/reshape.c - construct a UOP_RESHAPE node.
 //
-// Heap layout: [src, NUM(d0), NUM(d1), ..., NUM(d_{ndim-1})].
-// ext field is just UOP_RESHAPE (matches every other UOP's
-// convention).  The reader recovers ndim by reading dim NUM cells
-// and stopping when the running product equals the input numel
-// (which RESHAPE preserves by definition).
+// Heap layout: [src, NUM(ndim), NUM(d0), NUM(d1), ..., NUM(d_{ndim-1})]
+// with ndim stored explicitly at slot 1.  src stays at slot 0 to
+// match the per-op "child at slot i" convention used by the
+// schedule/materialize child loop.
+//
+// Storing ndim explicitly removes the previous shape-recovery hack
+// that walked dim cells until the running product equalled the
+// input numel -- correct for shapes whose only intermediate prefix
+// product reaching numel was the full one, but BROKEN for shapes
+// containing leading 1s (e.g. {1, 4} on a numel-4 source would stop
+// after the first cell, losing the trailing dim).
 
 fn Term uop_reshape(Term src, u32 ndim, const u32 *dims) {
-  u64 loc = heap_alloc(1 + ndim);
-  heap_set(loc, src);
+  u64 loc = heap_alloc(2 + ndim);
+  heap_set(loc + 0, src);
+  heap_set(loc + 1, term_new(0, TAG_NUM, DT_I32, ndim));
   for (u32 i = 0; i < ndim; i++) {
-    heap_set(loc + 1 + i, term_new(0, TAG_NUM, DT_I32, dims[i]));
+    heap_set(loc + 2 + i, term_new(0, TAG_NUM, DT_I32, dims[i]));
   }
   return term_new(0, TAG_UOP, UOP_RESHAPE, loc);
 }

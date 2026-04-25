@@ -675,7 +675,7 @@ Realistic close-out for the overnight cron loop:
       grad-check task is now unblocked. -->
 
 
-- [ ] **RESHAPE heap layout: store ndim explicitly** (same
+- [x] **RESHAPE heap layout: store ndim explicitly** (same
       rationale, but for RESHAPE).  Current materializer
       recovers ndim by walking dim cells until the running
       product equals input numel -- breaks early when any
@@ -684,6 +684,19 @@ Realistic close-out for the overnight cron loop:
       ~50-80 LOC.  Lower priority than the EXPAND fix but
       needed before RESHAPE-prepending becomes a viable
       strategy for cross-rank cotangents.
+      <!-- Mirror of the EXPAND layout fix: src stays at
+      slot 0; NUM(ndim) at slot 1; dims at slot 2+.  Updated:
+      src/uop/reshape.c constructor; the inline RESHAPE case
+      in src/schedule/materialize_in_env.c (drops the prod==
+      numel hack); the WL tUopShape walker for $UopReshape;
+      the structural test in test_uop.c (uop/reshape-stores-
+      dims now also asserts the ndim cell); src/thvm.h opcode
+      header comment.  Two regression VerificationTests added
+      in wl/THVMLink/Tests/reshape.wlt:
+        - reshape/leading-one-rank-preserved
+        - reshape/multiple-leading-ones-rank-preserved
+      All 343 C tests + 166 WL tests stay green. -->
+
 
 - [ ] **MLP-on-MNIST single-step gradient check**: extend the
       forward smoke test by computing `TGrad[loss, W]` for each

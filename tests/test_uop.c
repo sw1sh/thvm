@@ -46,12 +46,16 @@ int main(void) {
   CHECK_EQ(term_val(axis_cell), 0);
 
   TEST_BEGIN("uop/reshape-stores-dims");
+  // Heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})].
   u32 dims[3] = {2, 3, 4};
   Term rs = uop_reshape(a, 3, dims);
   CHECK_EQ(term_tag(rs), TAG_UOP);
   CHECK_EQ(term_ext(rs), UOP_RESHAPE);
+  Term ndim_n = heap_read(term_val(rs) + 1);
+  CHECK_EQ(term_tag(ndim_n), TAG_NUM);
+  CHECK_EQ(term_val(ndim_n), 3);
   for (u32 i = 0; i < 3; i++) {
-    Term d = heap_read(term_val(rs) + 1 + i);
+    Term d = heap_read(term_val(rs) + 2 + i);
     CHECK_EQ(term_tag(d), TAG_NUM);
     CHECK_EQ(term_val(d), dims[i]);
   }

@@ -191,24 +191,17 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
             op_arg = ((kh & 0xFF) << 24) | ((kw & 0xFF) << 16) | (w_out & 0xFFFF);
         }
         if (op == UOP_RESHAPE) {
-            // Layout: heap[expr_loc] = src; heap[expr_loc + 1 + i] =
-            // NUM(d_i).  Recover ndim by reading dim cells until the
-            // running product equals the input numel -- RESHAPE
-            // preserves total element count, so this terminates
-            // exactly at the last real dim.  MAX_DIM caps the loop
-            // so a misshapen reshape can't run off the heap.
-            u32 in_numel = shape_numel(child_shapes[0]);
-            u32 ndim = 0;
-            u32 prod = 1;
-            for (u32 i = 0; i < MAX_DIM; i++) {
-                Term n = heap_read(expr_loc + 1 + i);
-                if (term_tag(n) != TAG_NUM) break;
-                u32 d = (u32)term_val(n);
-                out_shape.dims[ndim++] = d;
-                prod *= d;
-                if (prod == in_numel) break;
-            }
+            // Layout: heap[expr_loc] = src; heap[expr_loc + 1] =
+            // NUM(ndim); heap[expr_loc + 2 + i] = NUM(d_i).  ndim is
+            // authoritative -- the previous numel-based termination
+            // hack broke on shapes whose prefix products hit numel
+            // early (e.g. {1, 4} on a numel-4 source).
+            u32 ndim = (u32)term_val(heap_read(expr_loc + 1));
             out_shape.ndim = ndim;
+            for (u32 i = 0; i < ndim; i++) {
+                Term n = heap_read(expr_loc + 2 + i);
+                out_shape.dims[i] = (u32)term_val(n);
+            }
             for (u32 i = ndim; i < MAX_DIM; i++) out_shape.dims[i] = 0;
         }
     }

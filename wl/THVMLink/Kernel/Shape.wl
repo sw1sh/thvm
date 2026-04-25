@@ -106,20 +106,14 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                         $termValFn[$heapReadFn[val + 2]]
                     ],
                 $UopReshape,
-                    Module[{
-                        srcShape = tUopShape[TTerm[$heapReadFn[val]]],
-                        dims = {}, i = 0, prod = 1, n, target
-                    },
-                        target = Times @@ srcShape;
-                        While[ i < 8,
-                            n = $heapReadFn[val + 1 + i];
-                            If[$termTagFn[n] =!= $TagNUM, Break[]];
-                            AppendTo[dims, $termValFn[n]];
-                            prod *= Last[dims];
-                            If[prod === target, Break[]];
-                            i++
-                        ];
-                        dims
+                    (* RESHAPE heap layout: [src, NUM(ndim), NUM(d0), ...];
+                       dims live at val+2..val+1+ndim.  ndim is stored
+                       explicitly; the previous numel-based termination
+                       hack broke on shapes containing leading 1s. *)
+                    Module[{ndim},
+                        ndim = $termValFn[$heapReadFn[val + 1]];
+                        Table[$termValFn[$heapReadFn[val + 2 + i]],
+                              {i, 0, ndim - 1}]
                     ],
                 $UopExpand,
                     (* EXPAND heap layout: [src, NUM(ndim), NUM(d0), ...];
