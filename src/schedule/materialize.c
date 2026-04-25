@@ -208,6 +208,17 @@ fn Term materialize_expr(Term expr) {
     // ndim is stored explicitly in the EXPAND heap (see
     // src/uop/expand.c); EXPAND can legitimately change rank.
     out_shape = expand_output_shape(expr_loc);
+  } else if (op == UOP_RESHAPE) {
+    // RESHAPE's heap layout (post the ndim-explicit fix) is
+    // [src, NUM(ndim), NUM(d0), ...].  ndim is authoritative;
+    // op_output_shape's default of "inherit source" is wrong
+    // for any rank change.
+    u32 ndim = (u32)term_val(heap_read(expr_loc + 1));
+    out_shape.ndim = ndim;
+    for (u32 i = 0; i < ndim && i < MAX_DIM; i++) {
+      out_shape.dims[i] = (u32)term_val(heap_read(expr_loc + 2 + i));
+    }
+    for (u32 i = ndim; i < MAX_DIM; i++) out_shape.dims[i] = 0;
   } else {
     out_shape = op_output_shape(op, child_tids, arity, reduce_axis);
   }

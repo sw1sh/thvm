@@ -305,14 +305,22 @@ VerificationTest[
     TestID -> "grad/reduce-max-one-hot-at-argmax"
 ]
 
-(* The pool-style probe (RESHAPE + REDUCE_MAX along an inner axis)
-   is deferred -- the chain works structurally but exposes a deeper
-   bug in cpu_op_expand: when expanding a rank-N source to a larger
-   rank-N target along a non-leading axis (e.g. {2} -> {2,2} where
-   each src element repeats along a NEW axis), the kernel falls to
-   numel-cycling and produces {3,4,3,4} instead of the correct
-   {3,3,4,4}.  Tracked as a follow-up "Axis-aware EXPAND in CPU
-   kernel" task in TASKS.md. *)
+VerificationTest[
+    TInit[];
+    (* 2x2-pool-style probe: reshape {4} to {2,2}, REDUCE_MAX
+       along the inner axis, sum the per-row maxes.  d/da should
+       mark the argmax of each row.  Inputs: row 0 = {1, 3} -> max
+       at index 1; row 1 = {2, 4} -> max at index 1.  So flat
+       grad = {0, 1, 0, 1}.  Pre-fix this depended on axis-aware
+       EXPAND landing on both backends -- now it does. *)
+    a = TTensorCreate @ NumericArray[{1.0, 3.0, 2.0, 4.0}, "Real32"];
+    pooled = TUOpReduce[TUOpReshape[a, {2, 2}], 1, "MAX"];
+    summed = TUOpReduce[pooled, 0, "SUM"];
+    g = TRealize @ TGrad[summed, a];
+    Normal @ TTensorData[g],
+    {0.0, 1.0, 0.0, 1.0},
+    TestID -> "grad/pool-style-reshape-reduce-max-then-sum"
+]
 
 (* === simple linear: 2x + 3 === *)
 

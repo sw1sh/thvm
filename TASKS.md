@@ -1003,12 +1003,35 @@ Realistic close-out for the overnight cron loop:
       grew from 88 to 104.  All 381 C + 172 WL tests stay green. -->
 
 
-- [ ] **Re-enable the 2x2-pool-style REDUCE_MAX grad probe**
+- [x] **Re-enable the 2x2-pool-style REDUCE_MAX grad probe**
       in `wl/THVMLink/Tests/grad.wlt` once the EXPAND fix
       lands.  Test:
         a = {1, 3, 2, 4}; reshape to {2,2}; REDUCE_MAX axis=1;
         sum the per-row maxes; TGrad wrt a.
       Expected: {0, 1, 0, 1} (one-hot per row at the argmax).
+      <!-- Required three coordinated fixes:
+      (1) interact_grad's REDUCE_MAX rule rebuilt to first
+      EXPAND gy to the REDUCE's natural output shape (a's-with-
+      axis-dropped), then RESHAPE keep-dim, then EXPAND to a.
+      Same EXPAND-then-RESHAPE-then-EXPAND idiom mirrored in
+      the REDUCE_SUM branch (which also lifted to the wrong
+      target shape on multi-stage chains).
+      (2) Same pattern for mx_lifted (recompute REDUCE_MAX +
+      RESHAPE keep-dim + EXPAND back to a's shape) so the
+      mask CMPEQ has matching shapes.
+      (3) src/schedule/materialize.c (the OLD materializer
+      used by TMaterialize, distinct from materialize_in_env.c
+      used by walk.c) was missing a UOP_RESHAPE case in its
+      output-shape switch -- it fell through to op_output_shape
+      which inherits the source's shape, defeating any
+      rank-changing RESHAPE.  Added the same explicit-ndim+dims
+      read used by materialize_in_env.c.  Without this fix the
+      grad chain materialized with wrong shapes silently and
+      pool grad came out {0,0,0,1} instead of {0,1,0,1}.
+      Pool-style probe now lands in grad.wlt and passes;
+      max-pool backprop in LeNet's PoolingLayer is unblocked.
+      All 381 C + 173 WL tests stay green. -->
+
 
 - [ ] **Land grad rule 8: UOP_CONV2D** in `interact_grad`, per
       `docs/grad-roadmap.md` step 8.  Three sub-gradients

@@ -183,6 +183,29 @@ fn Term interact_grad(Term grad_term) {
       u32  axis = (u32)term_val(heap_read(y_loc + 2));
 
       if (kind == REDUCE_SUM) {
+        // Lift gy to a's shape (the REDUCE's INPUT shape, not the
+        // grad's target shape -- the two coincide for single-leaf
+        // chains but diverge in multi-stage reductions).
+        // Idiom: EXPAND gy to the REDUCE's natural output shape
+        // (a_shape with axis dropped), then RESHAPE keep-dim
+        // (size-1 at axis), then EXPAND to a_shape.  The first
+        // EXPAND handles the scalar-gy case (numel 1 -> numel
+        // out_shape) so the subsequent RESHAPE doesn't truncate.
+        Shape a_shape;
+        if (term_shape_in(a, 0, &a_shape) && a_shape.ndim > 0) {
+          u32 out_shape[MAX_DIM] = {0};
+          u32 keep_shape[MAX_DIM] = {0};
+          u32 out_ndim = 0;
+          for (u32 i = 0; i < a_shape.ndim; i++) {
+            keep_shape[i] = (i == axis) ? 1u : a_shape.dims[i];
+            if (i != axis) out_shape[out_ndim++] = a_shape.dims[i];
+          }
+          if (out_ndim == 0) { out_shape[0] = 1; out_ndim = 1; }
+          Term gy_at_out = uop_expand(gy, out_ndim, out_shape);
+          Term gy_keep   = uop_reshape(gy_at_out, a_shape.ndim, keep_shape);
+          Term lifted    = uop_expand(gy_keep, a_shape.ndim, a_shape.dims);
+          return uop_grad(a, lifted, target);
+        }
         Term lifted = expand_to_target(gy, target);
         return uop_grad(a, lifted, target);
       }
@@ -198,9 +221,29 @@ fn Term interact_grad(Term grad_term) {
         return uop_grad(a, lifted, target);
       }
 
-      Term gy_lifted = uop_expand(gy, a_shape.ndim, a_shape.dims);
+      // mx naturally has a's shape with `axis` dropped; gy has the
+      // same shape if it propagated through correctly, but might be
+      // a scalar if it came in directly from TGrad's seed.  Same
+      // EXPAND-then-RESHAPE-then-EXPAND idiom as the SUM branch
+      // above so the scalar-gy case doesn't get truncated by the
+      // numel-mismatched RESHAPE.
+      u32 out_shape[MAX_DIM] = {0};
+      u32 keep_dim_shape[MAX_DIM] = {0};
+      u32 out_ndim = 0;
+      for (u32 i = 0; i < a_shape.ndim; i++) {
+        keep_dim_shape[i] = (i == axis) ? 1u : a_shape.dims[i];
+        if (i != axis) out_shape[out_ndim++] = a_shape.dims[i];
+      }
+      if (out_ndim == 0) { out_shape[0] = 1; out_ndim = 1; }
+
       Term mx        = uop_reduce(REDUCE_MAX, axis, a);
-      Term mx_lifted = uop_expand(mx, a_shape.ndim, a_shape.dims);
+      Term mx_keep   = uop_reshape(mx, a_shape.ndim, keep_dim_shape);
+      Term mx_lifted = uop_expand(mx_keep, a_shape.ndim, a_shape.dims);
+
+      Term gy_at_out = uop_expand(gy, out_ndim, out_shape);
+      Term gy_keep   = uop_reshape(gy_at_out, a_shape.ndim, keep_dim_shape);
+      Term gy_lifted = uop_expand(gy_keep, a_shape.ndim, a_shape.dims);
+
       Term mask      = uop_binary(UOP_CMPEQ, a, mx_lifted);
       Term cotangent = uop_binary(UOP_MUL, gy_lifted, mask);
       return uop_grad(a, cotangent, target);
