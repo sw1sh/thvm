@@ -3,7 +3,7 @@
 VerificationTest[
     TInit[];
     (* @id := lambda x. x *)
-    TDef["id", TLam[Function[x, x]]];
+    TDef["id", TLam[x, x]];
     out = TWnf @ TApp[TRef["id"], TEra[]];
     TTagName[TTermTag[out]],
     "ERA",
@@ -14,7 +14,7 @@ VerificationTest[
     TInit[];
     (* Two distinct calls to the same def must allocate fresh dyn cells
        per fire (no aliasing of the static template). *)
-    TDef["id", TLam[Function[x, x]]];
+    TDef["id", TLam[x, x]];
     before = THeapPos[];
     TWnf @ TApp[TRef["id"], TEra[]];
     mid    = THeapPos[];
@@ -30,7 +30,7 @@ VerificationTest[
     (* @loop := lambda x. @loop  -- self-referential.  Reducing once
        returns the body lambda; lazy unfolding means we never blow up
        at construction time. *)
-    TDef["loop", TLam[Function[x, TRef["loop"]]]];
+    TDef["loop", TLam[x, TRef["loop"]]];
     out = TWnf @ TApp[TRef["loop"], TEra[]];
     TTagName[TTermTag[out]],
     "LAM",
@@ -39,8 +39,8 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    TDef["foo", TLam[Function[x, x]]];
-    TDef["bar", TLam[Function[x, TEra[]]]];
+    TDef["foo", TLam[x, x]];
+    TDef["bar", TLam[x, TEra[]]];
     fooSlot = TDefName["foo"];
     barSlot = TDefName["bar"];
     (* Slots are distinct + each repeated lookup is stable. *)

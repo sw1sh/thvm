@@ -174,7 +174,7 @@ scalar out**. Every exported `EXTERN_C DLLEXPORT int <name>(...)`
 function takes only `Integer` arguments and returns a single `Integer`
 via `MArgument_setInteger(res, ...)`.
 
-Higher-level constructors that would naturally return tuples
-(`TLam` returning `{lam, var}`, `TDup` returning `{dp0, dp1}`) are
-synthesized on the WL side from these scalar primitives. This keeps
-the C surface tiny and the bridge testable from C alone.
+Higher-level constructors that bind names (`TLam[x, body]` with
+HoldAll, `TDup[body, {dp0, dp1} |-> ...]` returning a continuation
+result) are synthesized on the WL side from these scalar primitives.
+This keeps the C surface tiny and the bridge testable from C alone.

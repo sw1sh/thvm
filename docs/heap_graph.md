@@ -73,7 +73,7 @@ for the full catalogue.
 ### 1. Identity lambda
 
 ```wolfram
-TLam[var |-> var]
+TLam[var, var]
 ```
 
 | Cell | Term         |
@@ -92,7 +92,7 @@ back to its own binder, the canonical identity-lambda IC diagram.
 ### 2. Identity applied to ERA, before reduction
 
 ```wolfram
-TApp[TLam[var |-> var], TEra[]]
+TApp[TLam[var, var], TEra[]]
 ```
 
 | Cell | Term         | Notes              |
@@ -124,7 +124,7 @@ fired yet.
 ### 3. After `TWnf` of the same APP
 
 ```wolfram
-app = TApp[TLam[var |-> var], TEra[]]; TWnf[app]
+app = TApp[TLam[var, var], TEra[]]; TWnf[app]
 ```
 
 APP-LAM fires once. `heap_subst_var(0, ERA)` writes ERA at loc `0`
@@ -199,7 +199,7 @@ somewhere, get reduced, or are explicitly seeded into `THeapGraph[]`
 ### 5. Same-label annihilation
 
 ```wolfram
-TDup[7, TSup[7, TEra[], TLam[id |-> id]],
+TDup[7, TSup[7, TEra[], TLam[id, id]],
     {dp0, dp1} |-> TWnf[dp0]]
 ```
 
@@ -237,8 +237,8 @@ orphan -- faded, no incoming edge, no outgoing edges (ERA has none).
 
 ```wolfram
 TApp[
-    TApp[TLam[var |-> var], TEra[]],
-    TLam[var |-> var]
+    TApp[TLam[var, var], TEra[]],
+    TLam[var, var]
 ]
 ```
 
@@ -339,7 +339,7 @@ notes; neither is needed yet.
 PacletDirectoryLoad["wl/THVMLink"];
 Needs["THVMLink`"];
 
-out = TWnf[TApp[TLam[var |-> var], TEra[]]];
+out = TWnf[TApp[TLam[var, var], TEra[]]];
 THeapGraph[]
 ```
 

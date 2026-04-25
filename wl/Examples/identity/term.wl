@@ -1,1 +1,1 @@
-TLam[var |-> var]
+TLam[var, var]

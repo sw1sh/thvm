@@ -51,9 +51,10 @@ arguments and returns a single `Integer`:
 | reduce     | `thvm_wl_wnf`        | `wnf`                     |
 | stats      | `thvm_wl_itrs`       | read `ITRS`               |
 
-Tuple-returning constructors (`TLam` returning `{lam, var}`, `TDup`
-returning `{dp0, dp1}`) are synthesized on the WL side from these
-scalars. This keeps the C surface tiny and testable from C alone.
+Higher-level constructors that bind names (`TLam[x, body]` with
+HoldAll, `TDup` returning `{dp0, dp1}` via a continuation) are
+synthesized on the WL side from these scalars. This keeps the C
+surface tiny and testable from C alone.
 
 ## WL package
 
@@ -76,13 +77,16 @@ heapTerm[tag_Integer, ext_Integer, fields__] :=
 Then `TApp[f, x]` is `heapTerm[$TagAPP, 0, f, x]`, `TSup[label, a, b]`
 is `heapTerm[$TagSUP, label, a, b]`, and so on.
 
-`TLam[builder]` needs the binder loc *before* it can compute the
-body (the body references `TVarFor[loc]`), so it doesn't share
-`heapWith`:
+`TLam[x, body]` needs the binder loc *before* it can compute the
+body (the body references the binder), so it doesn't share
+`heapWith`.  It uses `HoldAll` so the body stays unevaluated until
+`Function[x, body]` substitutes the freshly-allocated `TVarFor[loc]`
+for `x`:
 
 ```wolfram
-TLam[builder_] := With[{loc = THeapAlloc[1]},
-    THeapSet[loc, builder[TVarFor[loc]]];
+SetAttributes[TLam, HoldAll]
+TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
+    THeapSet[loc, Function[x, body][TVarFor[loc]]];
     TTermNew[0, $TagLAM, 0, loc]
 ]
 ```
@@ -106,14 +110,14 @@ syntax:
 | Sugar                        | Means                                  |
 | ---------------------------- | -------------------------------------- |
 | `t[arg]` for `t : TTerm`     | `TApp[t, arg]`                         |
-| `(var \|-> body)[t]`         | `TApp[TLam[var \|-> body], t]`         |
+| `(var \|-> body)[t]`         | `TApp[TLam[var, body], t]`             |
 
 So `(var |-> var)[TEra[]]` is a literal beta-redex; `id[TEra[]]`
 applies the identity lambda to the eraser; `church2[f, x]` would
 chain into `church2[f][x]` (left-associative application).
 
 The `Function` UpValue is guarded by an internal flag so `TLam`'s own
-binder call (`builder[TVarFor[loc]]`) does not trigger it.
+binder call (`Function[x, body][TVarFor[loc]]`) does not trigger it.
 
 ## Inspection helpers
 

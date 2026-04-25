@@ -53,7 +53,7 @@ VerificationTest[
 
 VerificationTest[
     (* TTerm[id] indexing covers all the per-field accessors. *)
-    (TReset[]; Module[{t = TLam[var |-> var]},
+    (TReset[]; Module[{t = TLam[var, var]},
         {t["tag"], t["tagName"], t["val"], t["sub"]}]),
     {$TagLAM, "LAM", 0, 0},
     TestID -> "TTerm[id][\"tag/tagName/val/sub\"] forwards to bridge"
@@ -73,7 +73,7 @@ VerificationTest[
 (* === TLam / TVarFor === *)
 
 VerificationTest[
-    (TReset[]; Module[{id = TLam[var |-> var], loc, cell},
+    (TReset[]; Module[{id = TLam[var, var], loc, cell},
         loc  = TTermVal[id];
         cell = THeapRead[loc];
         {TTermTag[id], TTermTag[cell], TTermVal[cell] === loc}
@@ -86,7 +86,7 @@ VerificationTest[
 
 VerificationTest[
     (TReset[]; Block[{f, x, app, loc},
-        f   = TLam[var |-> var];
+        f   = TLam[var, var];
         x   = TEra[];
         app = TApp[f, x];
         loc = TTermVal[app];
@@ -152,7 +152,7 @@ VerificationTest[
 (* === THeap snapshot === *)
 
 VerificationTest[
-    (TReset[]; TLam[var |-> TApp[var, TEra[]]];
+    (TReset[]; TLam[var, TApp[var, TEra[]]];
      Module[{snap = THeap[]},
         {KeyExistsQ[snap, "nextLoc"],
          KeyExistsQ[snap, "cells"],
@@ -164,7 +164,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (TReset[]; TLam[var |-> var];
+    (TReset[]; TLam[var, var];
      GraphQ[THeap[]["Graph"]]),
     True,
     TestID -> "THeap[][\"Graph\"] is a Graph"
@@ -176,7 +176,7 @@ VerificationTest[
     (* Identity lambda: 1 LAM agent (inferred from VAR back-ref),
        1 self-loop "body var" edge.  No seed needed since the
        VAR back-reference is enough. *)
-    (TReset[]; TLam[var |-> var];
+    (TReset[]; TLam[var, var];
      Module[{g = THeapGraph[]},
         {VertexCount[g], EdgeCount[g]}]),
     {1, 1},
@@ -188,7 +188,7 @@ VerificationTest[
        sees the LAM (via VAR back-ref) and the orphan ERA at cell 2,
        but not the heapless APP.  Pass the APP explicitly to
        THeapGraph[term] so the APP triangle joins the picture. *)
-    (TReset[]; Block[{app = TApp[TLam[var |-> var], TEra[]]},
+    (TReset[]; Block[{app = TApp[TLam[var, var], TEra[]]},
         Module[{g = THeapGraph[app]},
             {VertexCount[g], EdgeCount[g]}]]),
     {3, 3},
@@ -225,7 +225,7 @@ VerificationTest[
 
 VerificationTest[
     (* (lam x.x) ERA  ->  ERA, taking exactly one APP-LAM interaction. *)
-    (TReset[]; Block[{id = TLam[var |-> var], era = TEra[], app, out, before},
+    (TReset[]; Block[{id = TLam[var, var], era = TEra[], app, out, before},
         app    = TApp[id, era];
         before = TItrs[];
         out    = TWnf[app];
@@ -237,7 +237,7 @@ VerificationTest[
 
 VerificationTest[
     (* APP-ERA: applying the eraser to anything yields the eraser. *)
-    (TReset[]; Block[{era = TEra[], lam = TLam[var |-> var], app, out},
+    (TReset[]; Block[{era = TEra[], lam = TLam[var, var], app, out},
         app = TApp[era, lam];
         out = TWnf[app];
         TTagName[TTermTag[out]]
@@ -248,7 +248,7 @@ VerificationTest[
 
 VerificationTest[
     (* DUP-SUP same label: !&7{x0,x1} = &7{ERA,LAM}; dp0 -> ERA. *)
-    (TReset[]; TDup[7, TSup[7, TEra[], TLam[var |-> var]],
+    (TReset[]; TDup[7, TSup[7, TEra[], TLam[var, var]],
         {dp0, dp1} |-> TTagName[TTermTag[TWnf[dp0]]]
     ]),
     "ERA",
@@ -259,7 +259,7 @@ VerificationTest[
     (* DUP-LAM: cloning the identity lambda then applying one copy to
        ERA should produce ERA. *)
     (TReset[];
-     TDup[TLam[var |-> var],
+     TDup[TLam[var, var],
         {f0, f1} |-> TTagName[TTermTag[TWnf[TApp[f0, TEra[]]]]]]),
     "ERA",
     TestID -> "DUP-LAM clones a lambda end-to-end"
@@ -272,7 +272,7 @@ VerificationTest[
        heads.  Walking the original APP term seed before vs after
        TWnf shows the substituted body cell. *)
     (TReset[]; Block[{app, before, after},
-        app    = TApp[TLam[var |-> var], TEra[]];
+        app    = TApp[TLam[var, var], TEra[]];
         before = TTermExpr[app];
         TWnf[app];
         after  = TTermExpr[app];
@@ -283,14 +283,14 @@ VerificationTest[
 
 VerificationTest[
     (* TWnf returns the WHNF; TTermExpr of that is just "ERA". *)
-    (TReset[]; TTermExpr[TWnf[TApp[TLam[var |-> var], TEra[]]]]),
+    (TReset[]; TTermExpr[TWnf[TApp[TLam[var, var], TEra[]]]]),
     "ERA",
     TestID -> "TTermExpr of TWnf-result is the WHNF tree"
 ]
 
 VerificationTest[
     (* Sugar: TTerm[id][arg] is shorthand for TApp[TTerm[id], arg]. *)
-    (TReset[]; Module[{id = TLam[var |-> var], app},
+    (TReset[]; Module[{id = TLam[var, var], app},
         app = id[TEra[]];
         {Head[app], TTagName[TTermTag[app]]}]),
     {TTerm, "APP"},
@@ -301,10 +301,10 @@ VerificationTest[
     (* Church 2 applied to identity and ERA: church2 f x = f (f x).
        Exercises APP-LAM + DUP-LAM together. *)
     (TReset[]; Block[{
-        church2 = TLam[s |->
+        church2 = TLam[s,
             TDup[s, {s0, s1} |->
-                TLam[z |-> TApp[s0, TApp[s1, z]]]]],
-        f       = TLam[var |-> var],
+                TLam[z, TApp[s0, TApp[s1, z]]]]],
+        f       = TLam[var, var],
         x       = TEra[],
         out
      },

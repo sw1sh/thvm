@@ -18,7 +18,7 @@ VerificationTest[
     TInit[];
     target = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
     lr     = TUOpConst[0.1, "f32"];
-    sgd1   = TLam[Function[w,
+    sgd1   = TLam[w,
         TUOpAdd[w,
             TUOpNeg[TUOpMul[lr,
                 TGrad[
@@ -27,7 +27,7 @@ VerificationTest[
                 ]
             ]]
         ]
-    ]];
+    ];
     w0 = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
     Round[Normal @ TTensorData @ TRealize @ TApp[sgd1, w0], 0.001],
     {0.2, 0.4, 0.6},
@@ -41,8 +41,8 @@ VerificationTest[
    The body returns a symbolic UOp graph; TRealize materialises. *)
 
 defineSgd[targetTen_, lrConst_] := TDef["sgd_loop",
-    TLam[Function[w,
-        TLam[Function[n,
+    TLam[w,
+        TLam[n,
             TIfZero[n,
                 w,
                 TApp[
@@ -59,8 +59,8 @@ defineSgd[targetTen_, lrConst_] := TDef["sgd_loop",
                     TOp2["-", n, TNum[1]]
                 ]
             ]
-        ]]
-    ]]
+        ]
+    ]
 ]
 
 VerificationTest[

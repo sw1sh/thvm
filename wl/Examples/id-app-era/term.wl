@@ -1,1 +1,1 @@
-TApp[TLam[var |-> var], TEra[]]
+TApp[TLam[var, var], TEra[]]

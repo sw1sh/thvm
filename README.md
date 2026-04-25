@@ -110,7 +110,7 @@ PacletDirectoryLoad["wl/THVMLink"];
 Needs["THVMLink`"];
 
 TInit[];
-id  = TLam[var |-> var];         (* identity lambda *)
+id  = TLam[var, var];            (* identity lambda *)
 app = TApp[id, TEra[]];          (* (id ERA) *)
 TTermInfo[app]
 (* <| "sub"->0, "tag"->0, "tagName"->"APP", "ext"->0, "val"->2, "raw"->...|> *)

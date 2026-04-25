@@ -28,7 +28,7 @@ VerificationTest[
 VerificationTest[
     TInit[];
     (* MAT[0]{handler=TNum[99], fallback=lam _. TNum[11]} applied to 0 *)
-    mat = TMatNum[0, TNum[99], TLam[Function[n, TNum[11]]]];
+    mat = TMatNum[0, TNum[99], TLam[n, TNum[11]]];
     TTermVal[TWnf[TApp[mat, TNum[0]]]],
     99,
     TestID -> "switch/mat-zero-match"
@@ -36,7 +36,7 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    mat = TMatNum[0, TNum[99], TLam[Function[n, TNum[11]]]];
+    mat = TMatNum[0, TNum[99], TLam[n, TNum[11]]];
     TTermVal[TWnf[TApp[mat, TNum[7]]]],
     11,
     TestID -> "switch/mat-non-zero-fallback"
@@ -64,16 +64,16 @@ VerificationTest[
 VerificationTest[
     TInit[];
     TDef["count",
-        TLam[Function[acc,
-            TLam[Function[n,
+        TLam[acc,
+            TLam[n,
                 TIfZero[n,
                     acc,
                     TApp[TApp[TRef["count"],
                               TOp2["+", acc, TNum[1]]],
                          TOp2["-", n,   TNum[1]]]
                 ]
-            ]]
-        ]]
+            ]
+        ]
     ];
     out = TWnf @ TApp[TApp[TRef["count"], TNum[0]], TNum[5]];
     {TTagName[TTermTag[out]], TTermVal[out]},
@@ -87,16 +87,16 @@ VerificationTest[
 VerificationTest[
     TInit[];
     TDef["sumto",
-        TLam[Function[acc,
-            TLam[Function[n,
+        TLam[acc,
+            TLam[n,
                 TIfZero[n,
                     acc,
                     TApp[TApp[TRef["sumto"],
                               TOp2["+", acc, n]],
                          TOp2["-", n, TNum[1]]]
                 ]
-            ]]
-        ]]
+            ]
+        ]
     ];
     TTermVal[TWnf @ TApp[TApp[TRef["sumto"], TNum[0]], TNum[5]]],
     15,

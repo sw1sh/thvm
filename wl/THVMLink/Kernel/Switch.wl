@@ -57,7 +57,7 @@ TMatNum[matchVal_Integer, handler_, fallback_] := (
    counter; we wrap it in a discarding lambda (the bound name is
    never referenced) so MAT-MIS lands correctly. *)
 TIfZero[counter_, thenTerm_, elseTerm_] :=
-    TApp[TMatNum[0, thenTerm, TLam[Function[ignored, elseTerm]]], counter]
+    TApp[TMatNum[0, thenTerm, TLam[ignored, elseTerm]], counter]
 
 End[];
 

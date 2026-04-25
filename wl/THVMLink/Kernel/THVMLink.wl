@@ -43,7 +43,7 @@ TTermTree::usage  = "TTermTree[term] = ExpressionTree[TTermExpr[term]] -- the sa
 TFreshLabel::usage = "TFreshLabel[] returns the next integer from a monotonic SUP/DUP label counter, then bumps it.  Reset by TReset[].";
 TEra::usage       = "TEra[] constructs an eraser term.";
 TVarFor::usage    = "TVarFor[lamLoc] constructs a VAR pointing at a binder loc.";
-TLam::usage       = "TLam[builder] constructs a lambda; `builder` receives the bound var and returns the body.";
+TLam::usage       = "TLam[x, body] constructs a lambda; HoldAll, so `x` is the binder symbol and `body` is the lambda body referring to it (e.g. TLam[w, TUOpAdd[w, w]]).";
 TApp::usage       = "TApp[fun, arg] constructs an application.";
 TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
 TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
@@ -353,8 +353,9 @@ TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg]
 TSup[a_, b_]                          := TSup[TFreshLabel[], a, b]
 TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]
 
-TLam[builder_] := With[{loc = THeapAlloc[1]},
-    THeapSet[loc, builder[TVarFor[loc]]];
+SetAttributes[TLam, HoldAll]
+TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
+    THeapSet[loc, Function[x, body][TVarFor[loc]]];
     packTerm[0, $TagLAM, 0, loc]
 ]
 
