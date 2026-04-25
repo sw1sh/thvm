@@ -620,30 +620,6 @@ Realistic close-out for the overnight cron loop:
       CPU and Metal backends pass. -->
 
 
-- [ ] **MLP-on-MNIST single-step gradient check**: extend the
-      forward smoke test by computing `TGrad[loss, W]` for each
-      of the 4 weight tensors (W1, b1, W2, b2) and asserting
-      that `TRealize` produces finite, correctly-shaped
-      gradients (no NaN, no shape mismatch).  Pure structural
-      sanity; no parameter updates.
-      <!-- attempt 1: blocked on rank-changing EXPAND.
-      grad chain materializes for rank-1 targets (b1, b2 grad
-      shapes match) but rank-2 targets (W1, W2) silently
-      collapse to a wrong shape (e.g. W2={10,32} -> grad
-      shape={10}) and W1 grad crashes with SIGBUS.  Root cause:
-      interact_grad's expand_to_target calls uop_expand to lift
-      gy to target's rank, but the materializer's
-      expand_output_shape reads ndim from the source tensor
-      (which has lower rank), losing the extra axes.  Fix
-      requires either (a) storing EXPAND's ndim explicitly in
-      the heap rather than inferring from source, or
-      (b) prepending a RESHAPE in expand_to_target when source
-      rank < target rank to add size-1 leading axes -- but (b)
-      needs a C-side shape walker for arbitrary UOP gy chains
-      (term_shape_in only handles TEN/UOP_KERNEL).  Both fixes
-      are bounded but exceed one fire's LOC budget.  Queueing
-      the fix as the next item below. -->
-
 - [ ] **Fix rank-changing EXPAND in expand_to_target**: when
       `expand_to_target(src, target)` is called and src's rank
       is less than target's, the resulting `uop_expand` is
@@ -667,6 +643,33 @@ Realistic close-out for the overnight cron loop:
       Recommended (b) first -- it's ~30 LOC + tests and
       unblocks rank-2 grad-check; (a) is the longer-term
       structural fix for arbitrary-rank EXPAND.
+
+- [ ] **MLP-on-MNIST single-step gradient check**: extend the
+      forward smoke test by computing `TGrad[loss, W]` for each
+      of the 4 weight tensors (W1, b1, W2, b2) and asserting
+      that `TRealize` produces finite, correctly-shaped
+      gradients (no NaN, no shape mismatch).  Pure structural
+      sanity; no parameter updates.  **Blocked on the
+      rank-changing EXPAND fix above** -- attempt 1 here showed
+      rank-2 grads collapse silently / SIGBUS.  Reattempt only
+      after that lands.
+      <!-- attempt 1: blocked on rank-changing EXPAND.
+      grad chain materializes for rank-1 targets (b1, b2 grad
+      shapes match) but rank-2 targets (W1, W2) silently
+      collapse to a wrong shape (e.g. W2={10,32} -> grad
+      shape={10}) and W1 grad crashes with SIGBUS.  Root cause:
+      interact_grad's expand_to_target calls uop_expand to lift
+      gy to target's rank, but the materializer's
+      expand_output_shape reads ndim from the source tensor
+      (which has lower rank), losing the extra axes.  Fix
+      requires either (a) storing EXPAND's ndim explicitly in
+      the heap rather than inferring from source, or
+      (b) prepending a RESHAPE in expand_to_target when source
+      rank < target rank to add size-1 leading axes -- but (b)
+      needs a C-side shape walker for arbitrary UOP gy chains
+      (term_shape_in only handles TEN/UOP_KERNEL).  Both fixes
+      are bounded but exceed one fire's LOC budget.  Queued
+      the fix as the prerequisite item above. -->
 
 - [ ] **MLP-on-MNIST training loop**: with forward + grads
       validated, do K manual SGD steps in pure WL (compute
