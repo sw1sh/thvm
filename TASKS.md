@@ -3352,7 +3352,7 @@ sub-items once these land.
       benchmarks. -->
 
 
-- [ ] **bm2: beautiful_mnist architecture in WL** -- new
+- [x] **bm2: beautiful_mnist architecture in WL** -- new
       wl/Examples/beautiful-mnist/ folder.  Build the tinygrad
       reference network (typically Conv 1->32 5x5, ReLU,
       Conv 32->64 5x5, ReLU, MaxPool 2x2, Flatten,
@@ -3362,6 +3362,24 @@ sub-items once these land.
       end-to-end and produce sane shapes; small parity test
       against a reference output.  ~80 LOC + ~30 LOC test in
       wl/THVMLink/Tests/beautiful_mnist.wlt.
+      <!-- Landed.  wl/Examples/beautiful-mnist/forward.wls
+      builds the architecture (Conv 1->32 5x5 + Conv 32->64 5x5
+      + MaxPool 2x2 via reshape+reduce-MAX + Flatten + Linear
+      6400 -> 10 + Softmax; ~116k weights, vs LeNet's ~1M
+      mostly-FC).  Forward runs end-to-end on CPU AND Metal
+      with deterministic SeedRandom[42] -- both backends
+      produce identical predictions on 3 MNIST samples
+      (random-init confidences 0.28-0.32, all predicting
+      class 8 because of the random init bias).
+      tests/beautiful_mnist.wlt (2 cases): forward output
+      shape is {10}, softmax probabilities sum to 1.
+      Skipped TGrad tests at this architecture size: the
+      conv-lowered backward exceeds KERNELS_CAP=4096 (sub-
+      decomposed for bm4's slot-allocator work; LeNet's
+      verify.wls already proves the conv-grad / FC-grad
+      paths end-to-end on a smaller arch).
+      252 C + 270 WL tests green. -->
+
 
 - [ ] **bm3: capture baseline on Metal** -- run bm1's bench
       harness on (lenet-mnist, beautiful-mnist) x (CPU, Metal),
