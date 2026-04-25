@@ -43,7 +43,7 @@ Adam keeps two extra per-parameter buffers (m, v) plus a step counter.
       and `TRef`; β1^t / β2^t are kept as state so no POW UOP is
       needed.  No new tests in this commit -- they land in the next
       item.
-- [ ] add `wl/THVMLink/Tests/optim.wlt` covering one-step + two-step
+- [x] add `wl/THVMLink/Tests/optim.wlt` covering one-step + two-step
       Adam against a hand-computed expected value on a tiny quadratic
       loss.
 

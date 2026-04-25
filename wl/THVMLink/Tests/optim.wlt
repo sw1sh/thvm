@@ -45,6 +45,63 @@ VerificationTest[
     TestID -> "optim/adam-construct-returns-TTerm"
 ]
 
+(* === Adam numerics ===
+
+   Hand-computed against the textbook Adam update for a tiny
+   quadratic loss L(w) = ||w - target||^2 with target = {1, 2, 3}.
+
+   Step 1 (w = 0, m = v = 0, b1pow = beta1 = 0.9, b2pow = beta2 = 0.999):
+       g       = 2(w - target) = {-2, -4, -6}
+       m'      = 0.1 * g                      = {-0.2, -0.4, -0.6}
+       v'      = 0.001 * g^2                  = {0.004, 0.016, 0.036}
+       m_hat   = m' / (1 - 0.9)   = m' / 0.1  = {-2, -4, -6}
+       v_hat   = v' / (1 - 0.999) = v' / 0.001= {4, 16, 36}
+       update  = lr * m_hat / sqrt(v_hat)     = 0.1 * {-1, -1, -1}
+       w_1     = w - update                   = {0.1, 0.1, 0.1}
+   Bias correction makes step magnitude exactly `lr` per coord on
+   the first step regardless of g's scale -- that's Adam's whole
+   point.
+
+   Step 2 carries the same "step magnitude == lr" property to a
+   precision of 0.001 (eps is negligible at this scale), so the
+   two-step result is roughly 2*lr per coord = {0.2, 0.2, 0.2}. *)
+
+VerificationTest[
+    TInit[];
+    target = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    lr     = TUOpConst[0.1, "f32"];
+    gradFn = Function[w, TGrad[TL2Loss[TUOpAdd[w, TUOpNeg[target]]], w]];
+    w0     = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
+    out    = TOptim["Adam", lr, 0.9, 0.999, 1.*^-8][gradFn, w0, 1];
+    Round[Normal @ TTensorData @ TRealize @ out, 0.001],
+    {0.1, 0.1, 0.1},
+    TestID -> "optim/adam-one-step-bias-corrected-magnitude-lr"
+]
+
+VerificationTest[
+    TInit[];
+    target = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    lr     = TUOpConst[0.1, "f32"];
+    gradFn = Function[w, TGrad[TL2Loss[TUOpAdd[w, TUOpNeg[target]]], w]];
+    w0     = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
+    out    = TOptim["Adam", lr, 0.9, 0.999, 1.*^-8][gradFn, w0, 2];
+    Round[Normal @ TTensorData @ TRealize @ out, 0.001],
+    {0.2, 0.2, 0.2},
+    TestID -> "optim/adam-two-step-bias-corrected-cumulative"
+]
+
+VerificationTest[
+    TInit[];
+    target = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    lr     = TUOpConst[0.1, "f32"];
+    gradFn = Function[w, TGrad[TL2Loss[TUOpAdd[w, TUOpNeg[target]]], w]];
+    w0     = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
+    out    = TOptim["Adam", lr, 0.9, 0.999, 1.*^-8][gradFn, w0, 0];
+    Normal @ TTensorData @ TRealize @ out,
+    {0.0, 0.0, 0.0},
+    TestID -> "optim/adam-zero-iters-returns-w0"
+]
+
 (* === Adam helpers (private; accessed via context-qualified name) === *)
 
 VerificationTest[
