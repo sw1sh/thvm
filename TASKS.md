@@ -765,6 +765,35 @@ Realistic close-out for the overnight cron loop:
       are bounded but exceed one fire's LOC budget.  Queued
       the fix as the prerequisite item above. -->
 
+- [ ] **Fix TSoftmax to use explicit EXPAND for the broadcast**.
+      Current implementation in `wl/THVMLink/Kernel/NN.wl`:
+      `TSoftmax[x] := TUOpMul[e, TUOpRecip[TUOpReduce[e, 0, "SUM"]]]`
+      relies on the kernel-level numel-cycle broadcast in
+      cpu_op_mul / metal MUL to broadcast the shape-{1} RECIP
+      output against the shape-{N} `e`.  Forward is correct,
+      but the MUL chain rule doesn't know about the implicit
+      broadcast and propagates the cotangent for the
+      RECIP-branch as `e * lifted_gy` (shape {N}) instead of
+      `sum(e * lifted_gy)` (shape {1}).  Result: softmax's
+      cross-coupling term (the `probs_j` part of `probs - target`)
+      is lost on every non-target index, so cross-entropy
+      gradient comes out as `{0, ..., -gy/probs_target, ..., 0}`
+      instead of `probs - target`.  Verified via the masked-
+      softmax probe (sum-of-softmax grad = nonzero instead of 0;
+      one-hot-loss grad has the cross-coupling indices = 0).
+      Fix: change TSoftmax to use an EXPLICIT `TUOpExpand` for
+      the RECIP factor:
+        TSoftmax[x] := With[{e = tExp[x], shape = ...},
+            TUOpMul[e, TUOpExpand[
+                TUOpRecip[TUOpReduce[e, 0, "SUM"]], shape]]]
+      Then the EXPAND grad rule's REDUCE_SUM-along-broadcast-
+      axes (already implemented) correctly fans the cotangent
+      back to a scalar before the SUM grad spreads it across
+      all input positions.  Add a parity test in
+      `wl/THVMLink/Tests/grad.wlt`: softmax + cross-entropy
+      against one-hot target should yield `probs - target` for
+      d(loss)/dz.  Unblocks the training-loop sub-item below.
+
 - [ ] **MLP-on-MNIST training loop**: with forward + grads
       validated, do K manual SGD steps in pure WL (compute
       grads, update each weight = w - lr * g, recompute loss),
@@ -772,6 +801,21 @@ Realistic close-out for the overnight cron loop:
       Won't use TOptim["Adam"] yet (Adam threads state through a
       single weight; multi-tensor MLPs need a per-tensor loop).
       Lives at `wl/Examples/mlp-mnist/train.wls`.
+      <!-- attempt 1: blocked on TSoftmax cross-coupling bug.
+      Wrote train.wls with manual SGD, ran 8 steps + 1 final
+      = 9 forward/backward passes; loss bounced erratically
+      (2.25 -> 2.21 -> 2.39 -> 2.46 -> ... -> 2.53) instead of
+      decreasing.  Probed deeper: cross-entropy gradient is
+      mathematically wrong because TSoftmax uses implicit
+      numel-cycle broadcast in MUL[e, RECIP(SUM(e))] and the
+      MUL chain rule misses the resulting reduction needed on
+      the RECIP-branch cotangent.  Concretely: for one-hot
+      target {0,1,0} with z={1,2,3}, TGrad[CE(softmax(z),
+      target), z] returned {0, -0.755, 0} instead of the
+      correct {0.090, -0.755, 0.665} = probs - target.  Fix
+      queued above.  Reverted train.wls; this is its own
+      reattempt next fire after TSoftmax is fixed. -->
+
 
 - [ ] **Land grad rule 7: UOP_REDUCE with kind=MAX** in
       `interact_grad`, per `docs/grad-roadmap.md` step 7.  Needs
