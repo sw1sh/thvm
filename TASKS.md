@@ -2807,6 +2807,24 @@ Realistic close-out for the overnight cron loop:
           update docs/memory.md with the measured per-step
           drop (target: >=30% buf bytes reduction).
           ~30 LOC + doc update.
+          <!-- attempt 1: aggressive swap (pin only result
+          buf via mark_preserved, free freeable && !preserved)
+          segfaults nn.wlt.  Diagnosis: nn.wlt patterns like
+          `{TRealize[loss], TRealize[TGrad[loss, x]]}` issue
+          TWO separate TRealize calls; the second's lazy
+          backward materialize emits new kernels referencing
+          forward TenDescs whose bufs were freed by the first
+          rollback.  The kernel `fired` flag short-circuits
+          re-firing, so the buf can't be reconstructed.  Same
+          root cause as the prior "preserve only result.buf"
+          attempt -- the two paths converge on the same
+          design dead-end without a heap-rooted preserve
+          mechanism that walks live UOP terms in the heap and
+          pins their referenced TenDescs.  Reverted unstaged
+          changes; the rollback_freeable variant + integration
+          will land once a heap-rooted preserve pass is in
+          place. -->
+
 
   - [ ] **Movement-op view-only for SHRINK / PERMUTE /
         PAD / FLIP** (mirroring f3b/f3c).  Per-conv
