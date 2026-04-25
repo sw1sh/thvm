@@ -172,6 +172,7 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
     case UOP_SQRT:  fnName = @"thvm_sqrt";  break;
     case UOP_EXP2:  fnName = @"thvm_exp2";  break;
     case UOP_LOG2:  fnName = @"thvm_log2";  break;
+    case UOP_REDUCE:fnName = @"thvm_reduce";break;
     default:        return nil;
   }
   // `fn` is taken by thvm.h as a `static inline` macro; use `mtlFn`.

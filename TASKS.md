@@ -415,13 +415,18 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       exp2/log2 fast-math path differs from libm in the last
       few ulps). -->
 
-- [ ] **Reduction Metal kernel** (REDUCE_SUM + REDUCE_MAX).
+- [x] **Reduction Metal kernel** (REDUCE_SUM + REDUCE_MAX).
       Mirror the recent CPU stride fix: KProgOp.arg packs
       (kind << 24) | inner; the shader loops over axis_size =
       in_numel / out_numel, indexing as
       `outer * (axis_size * inner) + k * inner + inner_idx`.
       Two parity tests (one per kind) on rank-2 inputs with
       axis=0 (non-innermost) to exercise the stride path.
+      <!-- Single thvm_reduce shader handles both kinds via the
+      arg-packed kind bit.  Uses [[threads_per_grid]] to
+      recover out_numel inside the shader so axis_size can be
+      computed from in_numel without an extra binding. -->
+
 - [ ] **Movement Metal kernels** (EXPAND, RESHAPE).  Both are
       basically memcpy shapes; EXPAND handles the scalar->N
       broadcast and the cycle case (`out[tid] = in[tid %

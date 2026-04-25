@@ -188,6 +188,47 @@ int main(void) {
     }
   }
 
+  // === Reduction parity (REDUCE_SUM, REDUCE_MAX) on a non-
+  //     innermost axis to exercise the inner-stride packing.
+  // Input: rank-2 {3, 4} = 12 elements; reduce axis=0 -> shape {4}.
+  TEST_BEGIN("metal-real/reduce-axis0-sum-max-parity");
+  Shape sr = {0}; sr.ndim = 2; sr.dims[0] = 3; sr.dims[1] = 4;
+  f32 src_r[12] = {
+    1.0f, 2.0f, 3.0f, 4.0f,
+    5.0f, 6.0f, 7.0f, 8.0f,
+    9.0f, 10.0f, 11.0f, 12.0f
+  };
+
+  u32 reduce_kinds[2] = {REDUCE_SUM, REDUCE_MAX};
+  for (int i = 0; i < 2; i++) {
+    u32 kind = reduce_kinds[i];
+    f32 cpu_buf[4], gpu_buf[4];
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    {
+      u32 tid = tensor_alloc(CURRENT_BACKEND, sr, DT_F32);
+      CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_r, sizeof(src_r));
+      Term done = wnf(thvm_materialize(uop_reduce(kind, 0,
+          term_new(0, TAG_TEN, DT_F32, tid))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                cpu_buf, sizeof(cpu_buf));
+    }
+    thvm_free();
+
+    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    {
+      u32 tid = tensor_alloc(CURRENT_BACKEND, sr, DT_F32);
+      CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_r, sizeof(src_r));
+      Term done = wnf(thvm_materialize(uop_reduce(kind, 0,
+          term_new(0, TAG_TEN, DT_F32, tid))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                gpu_buf, sizeof(gpu_buf));
+    }
+    thvm_free();
+
+    for (int k = 0; k < 4; k++) CHECK(cpu_buf[k] == gpu_buf[k]);
+  }
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }
