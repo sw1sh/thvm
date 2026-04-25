@@ -145,6 +145,33 @@ VerificationTest[
     TestID -> "grad/shrink-inside-mul-chain"
 ]
 
+(* === PAD: grad SHRINKs cotangent back to inner extent === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0}, "Real32"];
+    (* PAD widens length-2 to length-4 with 1 zero on each side.
+       d/d(a) maps a length-4 cotangent back to a length-2 grad =
+       the inner slice; with seed=1 broadcast, that's {1, 1}. *)
+    g = TRealize @ TGrad[TUOpPad[a, {{1, 1}}], a];
+    Normal @ TTensorData[g],
+    {1.0, 1.0},
+    TestID -> "grad/pad-shrinks-cotangent-to-inner"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    (* d(sum(PAD(a*a, {{1,2}})))/d(a) = 2a -- the sum collapses to
+       a scalar cotangent broadcast back to the padded extent;
+       SHRINK back to a's length recovers 2a element-wise. *)
+    expr = TUOpReduce[TUOpPad[TUOpMul[a, a], {{1, 2}}], 0, "SUM"];
+    g = TRealize @ TGrad[expr, a];
+    Normal @ TTensorData[g],
+    {2.0, 4.0, 6.0},
+    TestID -> "grad/pad-inside-mul-chain"
+]
+
 (* === CMPLT / ReLU: mask is non-differentiable === *)
 
 VerificationTest[

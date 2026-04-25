@@ -235,6 +235,24 @@ int main(void) {
   CHECK_EQ(term_val(b_cell), 1);
   CHECK_EQ(term_val(e_cell), 1);
 
+  TEST_BEGIN("grad/pad-emits-shrink-on-cotangent");
+  // GRAD[PAD(a, [{1,1}]), gy, a] -> GRAD[a, SHRINK(gy, [{1, 1+3})), a]
+  // -> cascade to leaf: EXPAND(SHRINK(gy, [1, 4)), [3]).  Source is
+  // length 3; PAD widens to length 5; the grad SHRINKs the cotangent
+  // back to [1, 4) -- the inner source slice.
+  u32 pd_be[2] = {1, 1};
+  Term pd     = uop_pad(a, 1, pd_be);
+  Term g_pd   = wnf(uop_grad(pd, gy, a));
+  CHECK_EQ(term_ext(g_pd), UOP_EXPAND);
+  Term inner_pd = unexpand(g_pd);
+  CHECK_EQ(term_ext(inner_pd), UOP_SHRINK);
+  // SHRINK heap: [src, NUM(b0)=1, NUM(e0)=4].  Begin = pad-begin,
+  // end = pad-begin + src_dim = 1 + 3 = 4.
+  Term sb = heap_read(term_val(inner_pd) + 1);
+  Term se = heap_read(term_val(inner_pd) + 2);
+  CHECK_EQ(term_val(sb), 1);
+  CHECK_EQ(term_val(se), 4);
+
   TEST_BEGIN("grad/upfront-expand-carries-target-shape");
   // The leaf-target rule lifts gy to target.shape (via EXPAND with
   // dims read from TENS).  Heap layout is [src, NUM(ndim), NUM(d0), ...]

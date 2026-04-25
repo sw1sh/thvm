@@ -1634,13 +1634,21 @@ Realistic close-out for the overnight cron loop:
         cotangent C structural test). -->
 
 
-  - [ ] **b. PAD grad rule.**  Forward `PAD(a, widths)`
+  - [x] **b. PAD grad rule.**  Forward `PAD(a, widths)`
         zero-pads.  Gradient: `SHRINK(cotangent, ranges)` where
         each axis range is `{widths[2k], widths[2k] + orig_dim}`.
         Tests mirror sub-item (a): structural assertion + a
         wlt numerical check that a 1-D PAD of x:{2} with widths
         {1,1} backprops a length-2 grad equal to the inner
         slice of the seed.  ~25 LOC + ~20 LOC of tests.
+        <!-- Landed.  Mirror of (a): out_dim = src_dim + b + e;
+        SHRINK ranges = [b, b + src_dim).  Same gy lift via
+        EXPAND-to-PAD-output-shape so SHRINK has well-formed
+        per-axis source dims.  206 WL + 146 C tests green
+        (added grad/pad-shrinks-cotangent-to-inner +
+        grad/pad-inside-mul-chain wlt + grad/
+        pad-emits-shrink-on-cotangent C structural test). -->
+
 
   - [ ] **c. PERMUTE grad rule.**  Forward `PERMUTE(a, perm)`
         reorders axes.  Gradient: `PERMUTE(cotangent, inv_perm)`

@@ -534,6 +534,39 @@ fn Term interact_grad(Term grad_term) {
       return uop_grad(a, g, target);
     }
 
+    case UOP_PAD: {
+      // PAD zero-fills [b_i, e_i] on each axis.  The gradient
+      // SHRINKs the cotangent back to the unpadded extent:
+      //   GRAD[PAD(a, [b,e]), gy, t] =
+      //     GRAD[a, SHRINK(EXPAND(gy, out_shape),
+      //                    [b_i, b_i + src_dim_i)), t]
+      // Heap layout: [src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]
+      // (ndim implicit in src).  gy lifted to PAD's output shape
+      // first so SHRINK has a well-formed per-axis source extent
+      // (mirrors the SHRINK rule's reasoning above).
+      Term a = term_resolve(heap_read(y_loc + 0));
+      if (term_tag(a) == TAG_NUM) return grad_zero(target);
+      if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_CONST) return grad_zero(target);
+
+      Shape src_shape;
+      if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
+        return uop_grad(a, gy, target);
+      }
+
+      u32 out_dims[MAX_DIM];
+      u32 ranges[2 * MAX_DIM];
+      for (u32 i = 0; i < src_shape.ndim; i++) {
+        u32 b = (u32)term_val(heap_read(y_loc + 1 + 2 * i));
+        u32 e = (u32)term_val(heap_read(y_loc + 2 + 2 * i));
+        out_dims[i]        = src_shape.dims[i] + b + e;
+        ranges[2 * i + 0]  = b;
+        ranges[2 * i + 1]  = b + src_shape.dims[i];
+      }
+      Term gy_shaped = uop_expand(gy, src_shape.ndim, out_dims);
+      Term g         = uop_shrink(gy_shaped, src_shape.ndim, ranges);
+      return uop_grad(a, g, target);
+    }
+
     default:
       fprintf(stderr, "interact_grad: unhandled UOp opcode %u\n", y_op);
       return grad_zero(target);
