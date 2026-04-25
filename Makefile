@@ -39,7 +39,7 @@ TESTS := \
   $(BIN)/test_heap_rooted_preserve \
   $(BIN)/test_gc_roots \
   $(BIN)/test_gc_mark_term \
-  $(BIN)/test_wl_pin
+  $(BIN)/test_extern_pin
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.

@@ -10,9 +10,9 @@
 //   3. DEFS[name] for each name with a non-zero entry; TRef
 //      roots that gc_mark_term follows into BOOK_HEAP via
 //      TAG_REF / TAG_ALO recursion.
-//   4. WL_PINNED_TERMS -- every Term WL holds via a TTerm[id]
-//      handle; covers forward-intermediate kernel outputs
-//      reachable only from the WL caller's wrappers.
+//   4. EXTERN_PINNED_TERMS -- every Term a foreign caller is
+//      holding; covers forward-intermediate kernel outputs
+//      reachable only from the caller's wrappers.
 //
 // ALO_STATES is NOT a Term source: it maps book locs to fresh
 // dyn locs; the actual Term content lives at HEAP[new_loc] and
@@ -36,8 +36,8 @@ fn void gc_collect_roots(Term result, Term *out, u32 cap, u32 *out_n) {
   for (u32 i = 0; i < DEFS_CAP && n < cap; i++) {
     if (DEFS[i] != 0) out[n++] = DEFS[i];
   }
-  for (u32 i = 0; i < WL_PINNED_TERMS_LEN && n < cap; i++) {
-    if (WL_PINNED_TERMS[i] != 0) out[n++] = WL_PINNED_TERMS[i];
+  for (u32 i = 0; i < EXTERN_PINNED_TERMS_LEN && n < cap; i++) {
+    if (EXTERN_PINNED_TERMS[i] != 0) out[n++] = EXTERN_PINNED_TERMS[i];
   }
   *out_n = n;
 }

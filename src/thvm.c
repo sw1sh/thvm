@@ -186,10 +186,9 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // wires it into thvm_realize.
 #include "schedule/heap_rooted_preserve.c"
 
-// wpt1: WL-pinned-Terms side table.  Tracks every Term WL is
-// holding so gc_collect_roots can include them; bridge wiring
-// lands in wpt2.
-#include "schedule/wl_pin.c"
+// External-caller pin table.  Tracks every Term that a foreign
+// caller is holding so gc_collect_roots can keep them live.
+#include "schedule/extern_pin.c"
 
 // gc1: collect the dyn-heap GC root set.  Standalone helper;
 // gc2/gc3 build the recursive mark + integrate.
@@ -243,7 +242,7 @@ static void install_ctx_backends(TContext *ctx, const char *want) {
 
 void thvm_init(void) {
   init_ctx_arrays(CURRENT_CTX);
-  wl_pin_clear();   // wpt1: drop any leftover pins from a prior session
+  extern_pin_clear();   // drop any leftover pins from a prior session
   // Backend selection: THVM_BACKEND=metal picks Metal as the default
   // device for newly allocated tensors.  Per-tensor backends are still
   // stored on TenDesc.backend, so tensors created in a future session
@@ -276,7 +275,7 @@ void thvm_free(void) {
   CPU_FREELIST_LEN = 0;
   memset(DEFS,             0, sizeof(((TContext *)0)->defs));
   memset(BOOK_REF_VISITED, 0, sizeof(((TContext *)0)->book_ref_visited));
-  wl_pin_clear();
+  extern_pin_clear();
   for (u32 i = 0; i < THVM_MAX_BACKENDS; i++) CURRENT_CTX->backends[i] = NULL;
   CURRENT_CTX->n_backends     = 0;
   CURRENT_CTX->default_device = 0;
