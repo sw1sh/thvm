@@ -3381,7 +3381,7 @@ sub-items once these land.
       252 C + 270 WL tests green. -->
 
 
-- [ ] **bm3: capture baseline on Metal** -- run bm1's bench
+- [x] **bm3: capture baseline on Metal** -- run bm1's bench
       harness on (lenet-mnist, beautiful-mnist) x (CPU, Metal),
       4 cases total, save numbers to a new
       docs/bench-baseline.md.  Sample format:
@@ -3394,6 +3394,28 @@ sub-items once these land.
 
       Plus PNG snapshots of the TMemoryPlan Gantt for each.
       ~30 LOC + doc + 4 PNGs.
+      <!-- Landed.  wl/Examples/_bench/baseline.wls runs both
+      benches on the active backend (CPU default; THVM_BACKEND=
+      metal for Metal); ran twice for the 4-row table.
+      Headline numbers (M3 Max, 4-step average):
+        - lenet-mnist (Adam):       CPU 6.9 ms/step / Metal 85.8
+        - beautiful-mnist (forward): CPU 175.1     / Metal 245.5
+      Two big findings:
+        1. Metal is ~12x SLOWER than CPU for lenet at this size
+           because metal_dispatch_kernel does one
+           commandBuffer/commit/waitUntilCompleted PER kernel
+           call (455 round-trips for one Adam step).  Tinygrad
+           batches the entire schedule into one command buffer.
+           Queued as a follow-up: "kernel batching on Metal".
+        2. lenet has 53.9% slot-reuse headroom (1 MiB on the
+           table for bm4 to recover); beautiful-mnist only
+           12.6% because the FC weight + activation dominates.
+      docs/bench-baseline.md captures the full 4x4 table + the
+      analysis + 4 Gantt PNGs (baseline-{cpu|metal}-{lenet-mnist
+      |beautiful-mnist}.png).  beautiful-mnist's Adam-step
+      backward exceeds KERNELS_CAP=4096; bench shows forward-
+      only for now -- full training comes back after bm4. -->
+
 
 - [ ] **bm4: runtime slot allocator (port TMemoryPlan's
       linear-scan into the C runtime)** -- the visualization
