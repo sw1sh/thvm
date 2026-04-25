@@ -1305,7 +1305,7 @@ Realistic close-out for the overnight cron loop:
       conv now backprops correctly. -->
 
 
-- [ ] **Multi-tensor optimizer surface (per-tensor SGD or
+- [x] **Multi-tensor optimizer surface (per-tensor SGD or
       Adam)**.  TOptim["Adam"] threads state through a SINGLE
       weight; LeNet has 8 weight tensors (4 conv W+b pairs,
       well actually 2 conv W+b + 2 linear W+b = 8).  Two
@@ -1322,6 +1322,20 @@ Realistic close-out for the overnight cron loop:
             single state argument.  More work; better
             future-proofing.
       Pick (a) first; (b) is a follow-up.
+      <!-- Implemented option (a) as TAdamHostInit +
+      TAdamHostStep in wl/THVMLink/Kernel/Optim.wl.  Pure
+      host-side WL numeric: takes lists of NumericArray
+      weights / grads / m / v, returns updated triples.
+      Bias-correction uses 1 - beta^t with explicit step t
+      (the recursive form threads beta^t through the loop;
+      this version computes it directly per call).  4 unit
+      tests in adam_host.wlt: init zeros-like, single-step
+      math, two-step state carryover, multi-tensor
+      independent updates.  All 195 WL + 399 C tests stay
+      green.  Option (b) (a TLam-recursion version that
+      threads a list of weights) deferred -- (a) is enough
+      for the immediate train.wls task. -->
+
 
 - [ ] **wl/Examples/lenet-mnist/train.wls**: K manual SGD or
       per-tensor Adam steps on a fixed MNIST batch through

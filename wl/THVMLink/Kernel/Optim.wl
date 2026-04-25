@@ -20,6 +20,10 @@ BeginPackage["THVMLink`"];
 
 TOptim::usage = "TOptim[\"SGD\", lr] returns a function {gradFn, w0, n} -> TTerm that, when realised, performs n SGD steps from w0 with learning rate `lr`.  TOptim[\"Adam\", lr, beta1, beta2, eps] likewise for Adam.  gradFn is a host-side function w_TTerm -> TTerm carrying the gradient w.r.t. w.";
 
+TAdamHostInit::usage = "TAdamHostInit[weightsHosts] returns {mHosts, vHosts} -- per-tensor zero-like NumericArrays matching the shapes of the input weight NumericArrays.  Used to seed the m and v running buffers for TAdamHostStep.";
+
+TAdamHostStep::usage = "TAdamHostStep[weightsHosts, gradsHosts, mHosts, vHosts, lr, beta1, beta2, eps, t] applies one Adam update step to a LIST of weight NumericArrays in pure WL host code.  No TTerm involvement -- intended for multi-tensor networks where TOptim[\"Adam\"]'s single-weight recursion isn't enough.  Returns {newWeights, newM, newV} as lists of NumericArrays.";
+
 (* Forward-declare symbols owned by later-loading siblings (Ref.wl,
    Switch.wl).  Without this, bare references to TDef / TIfZero /
    TRef / TOp2 / TNum below would resolve to phantom symbols in
@@ -128,6 +132,52 @@ TOptim["SGD", lr_TTerm] :=
 
 TOptim["Adam", lr_TTerm, beta1_, beta2_, eps_] :=
     Function[{gradFn, w0, n}, adamRecursiveTerm[gradFn, lr, beta1, beta2, eps, w0, n]]
+
+(* === Multi-tensor Adam (host-side) ============================
+   Pure WL host computation: no TTerm involvement.  Mirrors the
+   per-weight Adam math from adamRecursiveTerm above but applied
+   to a LIST of NumericArray weights so multi-tensor networks
+   (LeNet has 8 weight tensors) can step all parameters in one
+   call.  Bias-correction uses 1 - beta^t with the explicit step
+   index t (the recursive form threads beta^t through the
+   recursion; this version computes it directly per call). === *)
+
+TAdamHostInit[weightsHosts_List] :=
+    Module[{zerosLike},
+        zerosLike[w_] := NumericArray[
+            ConstantArray[0., Dimensions @ Normal @ w], "Real32"];
+        {Map[zerosLike, weightsHosts], Map[zerosLike, weightsHosts]}
+    ]
+
+TAdamHostStep[
+    weightsHosts_List, gradsHosts_List,
+    mHosts_List, vHosts_List,
+    lr_, beta1_, beta2_, eps_, t_Integer
+] := Module[{
+    n = Length[weightsHosts],
+    mNew, vNew, mHat, vHat, wNew,
+    b1corr = 1.0 - beta1^t,
+    b2corr = 1.0 - beta2^t
+},
+    mNew = Table[
+        NumericArray[
+            beta1 * Normal[mHosts[[i]]] +
+            (1.0 - beta1) * Normal[gradsHosts[[i]]],
+            "Real32"], {i, n}];
+    vNew = Table[
+        NumericArray[
+            beta2 * Normal[vHosts[[i]]] +
+            (1.0 - beta2) * Normal[gradsHosts[[i]]]^2,
+            "Real32"], {i, n}];
+    mHat = Table[Normal[mNew[[i]]] / b1corr, {i, n}];
+    vHat = Table[Normal[vNew[[i]]] / b2corr, {i, n}];
+    wNew = Table[
+        NumericArray[
+            Normal[weightsHosts[[i]]] -
+            lr * mHat[[i]] / (Sqrt[vHat[[i]]] + eps),
+            "Real32"], {i, n}];
+    {wNew, mNew, vNew}
+]
 
 End[];
 EndPackage[];
