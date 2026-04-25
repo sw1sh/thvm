@@ -792,3 +792,143 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_mat(WolframLibraryData libData, mint arg
   MArgument_setInteger(res, (mint)term_new_mat(m, h, f));
   return LIBRARY_NO_ERROR;
 }
+
+// === book heap / defs / ALO state I/O ===
+//
+// Used by Heap.wl HeapSnapshot / HeapInitialize to bundle DEFS,
+// BOOK_HEAP, and ALO_STATES into a portable snapshot so a heap can
+// survive a fresh kernel (TFree + TInit).  thvm_wl_reset clears only
+// the dynamic heap; cross-restart roundtrip needs explicit access to
+// the book/defs/alo state tables.
+
+EXTERN_C DLLEXPORT int thvm_wl_book_pos(WolframLibraryData libData, mint argc,
+                                        MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)BOOK_NEXT);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_book_read(WolframLibraryData libData, mint argc,
+                                         MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u64 loc = (u64)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)book_read(loc));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_book_alloc(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u64 size = (u64)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)book_alloc(size));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_book_set(WolframLibraryData libData, mint argc,
+                                        MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u64  loc = (u64) MArgument_getInteger(args[0]);
+  Term t   = (Term)MArgument_getInteger(args[1]);
+  book_set(loc, t);
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_def_get(WolframLibraryData libData, mint argc,
+                                       MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  Term t = (slot < DEFS_CAP) ? DEFS[slot] : 0;
+  MArgument_setInteger(res, (mint)t);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_def_set(WolframLibraryData libData, mint argc,
+                                       MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32  slot = (u32) MArgument_getInteger(args[0]);
+  Term t    = (Term)MArgument_getInteger(args[1]);
+  if (slot < DEFS_CAP) DEFS[slot] = t;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_alo_states_next(WolframLibraryData libData, mint argc,
+                                               MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)ALO_STATES_NEXT);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_alo_state_parent(WolframLibraryData libData, mint argc,
+                                                MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 id = (u32)MArgument_getInteger(args[0]);
+  u32 v  = (id < ALO_STATE_CAP && ALO_STATES) ? ALO_STATES[id].parent : 0;
+  MArgument_setInteger(res, (mint)v);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_alo_state_old_loc(WolframLibraryData libData, mint argc,
+                                                 MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 id = (u32)MArgument_getInteger(args[0]);
+  u64 v  = (id < ALO_STATE_CAP && ALO_STATES) ? ALO_STATES[id].old_loc : 0;
+  MArgument_setInteger(res, (mint)v);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_alo_state_new_loc(WolframLibraryData libData, mint argc,
+                                                 MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 id = (u32)MArgument_getInteger(args[0]);
+  u64 v  = (id < ALO_STATE_CAP && ALO_STATES) ? ALO_STATES[id].new_loc : 0;
+  MArgument_setInteger(res, (mint)v);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_alo_state_set(WolframLibraryData libData, mint argc,
+                                             MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 id      = (u32)MArgument_getInteger(args[0]);
+  u32 parent  = (u32)MArgument_getInteger(args[1]);
+  u64 old_loc = (u64)MArgument_getInteger(args[2]);
+  u64 new_loc = (u64)MArgument_getInteger(args[3]);
+  if (id < ALO_STATE_CAP && ALO_STATES) {
+    ALO_STATES[id].parent  = parent;
+    ALO_STATES[id].old_loc = old_loc;
+    ALO_STATES[id].new_loc = new_loc;
+  }
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_alo_states_set_next(WolframLibraryData libData, mint argc,
+                                                   MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 n = (u32)MArgument_getInteger(args[0]);
+  ALO_STATES_NEXT = n;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_book_set_next(WolframLibraryData libData, mint argc,
+                                             MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u64 n = (u64)MArgument_getInteger(args[0]);
+  BOOK_NEXT = n;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_book_reset(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  if (BOOK_HEAP)  memset(BOOK_HEAP,  0, BOOK_CAP * sizeof(Term));
+  if (ALO_STATES) memset(ALO_STATES, 0, ALO_STATE_CAP * sizeof(AloState));
+  for (u32 i = 0; i < DEFS_CAP; i++) DEFS[i] = 0;
+  BOOK_NEXT       = 1;
+  ALO_STATES_NEXT = 1;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
