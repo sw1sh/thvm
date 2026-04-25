@@ -3881,7 +3881,7 @@ sub-items once these land.
       LAST blocker between the lenet-mnist 1.6 MiB peak and
       the 53.9% slot-reuse headroom TMemoryPlan measured.
 
-  - [ ] **gc1: root collection**.  New
+  - [x] **gc1: root collection**.  New
         src/schedule/gc_roots.c with `gc_collect_roots(Term
         result, Term *out_roots, u32 *out_n)` that walks the
         runtime's external reference points and returns the
@@ -3898,6 +3898,31 @@ sub-items once these land.
         helper; no integration with thvm_realize.  ~60 LOC +
         ~30 LOC test in tests/test_gc_roots.c verifying the
         result + WNF_LAST_STACK paths populate `out_roots`.
+        <!-- Landed.  src/schedule/gc_roots.c:
+        gc_collect_roots(result, out, cap, *out_n) walks
+          - result Term (skipped if 0)
+          - WNF_LAST_STACK[0..WNF_LAST_STACK_LEN)
+          - DEFS[0..DEFS_CAP) (non-zero entries only)
+        ALO_STATES SKIPPED -- AloState entries map book locs
+        to dyn locs but don't directly hold Terms; the actual
+        Term content lives at HEAP[new_loc] which the gc2
+        recursive mark will discover via the TAG_ALO chase.
+        Cap-truncation: silent drop of excess roots; for our
+        scale (a few dozen roots typical) 256 is generous.
+        Defensive: NULL out / out_n / cap=0 all return safely.
+
+        tests/test_gc_roots.c (16 sub-checks):
+          - result-only with empty wnf stack + empty DEFS.
+          - skips-zero-result (result == 0).
+          - picks-up-wnf-stack-frames (2 frames in
+            WNF_LAST_STACK).
+          - picks-up-defs (2 non-zero DEFS entries).
+          - cap-truncates with cap=2 vs 4 candidates.
+          - null-args-safe (NULL out / out_n / cap=0).
+
+        268 C + 270 WL tests green.  gc2 builds the
+        recursive mark over these roots. -->
+
 
   - [ ] **gc2: recursive mark from a root term**.  New
         function `gc_mark_term(Term t, u8 *heap_visited)`
