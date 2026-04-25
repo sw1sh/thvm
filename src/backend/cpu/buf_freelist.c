@@ -34,6 +34,14 @@ fn void cpu_buf_freelist_push(u32 buf_id) {
     return;
   }
   CPU_FREELIST[CPU_FREELIST_LEN++] = buf_id;
+  // Drop refcount to 0 so the recycled-but-unallocated buf
+  // doesn't keep counting toward TTotalBufBytes / the
+  // memory-probe sums.  cpu_buf_freelist_try_pop resets
+  // refcount = 1 on the next allocation.
+  CpuBuf *b = &CPU_BUFS[buf_id];
+  b->refcount  = 0;
+  b->preserved = 0;
+  b->freeable  = 0;
 }
 
 fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {

@@ -33,16 +33,33 @@ fn void cpu_buf_pool_rollback(u32 wm) {
 // Variant that respects the per-CpuBuf `preserved` flag: bufs
 // marked preserved (typically by walking the result-tensor's
 // producer chain before rollback) are left alone; everything
-// else in [wm, CPU_BUFS_NEXT) is freed.  CPU_BUFS_NEXT does NOT
-// reset to wm because preserved bufs may sit at high indices;
-// the table accumulates sparse "long-term" slots over many
-// TRealize calls (CPU_BUFS_CAP = 1<<20 has plenty of headroom).
+// else in [wm, CPU_BUFS_NEXT) is reclaimed.  CPU_BUFS_NEXT does
+// NOT reset to wm because preserved bufs may sit at high
+// indices; the table accumulates sparse "long-term" slots over
+// many TRealize calls (CPU_BUFS_CAP = 1<<20 has plenty of
+// headroom).
+//
+// bm4b: rollback now distinguishes owning vs external bufs.
+//   - owning (calloc'd by us): push to the freelist so the
+//     storage gets recycled by the next cpu_buf_alloc with
+//     matching nbytes.
+//   - external (cpu_buf_alloc_external; e.g. WL-uploaded
+//     NumericArray slices): cpu_buf_free, which invokes the
+//     on_release callback so the WL side can disown the handle.
+// The preserve set captures every TenDesc reachable from the
+// result chain, so any forward intermediate the next TRealize
+// might still need (lazy TGrad backward, view-only alias chains)
+// stays alive; only bufs that nothing reaches go to the
+// freelist.
 fn void cpu_buf_pool_rollback_with_preserve(u32 wm) {
   if (wm < 1) wm = 1;
   if (wm > CPU_BUFS_NEXT) return;
   for (u64 i = wm; i < CPU_BUFS_NEXT; i++) {
     if (CPU_BUFS[i].preserved) continue;
-    if (CPU_BUFS[i].data || CPU_BUFS[i].handle) {
+    if (CPU_BUFS[i].data == NULL && CPU_BUFS[i].handle == NULL) continue;
+    if (CPU_BUFS[i].owns_data) {
+      cpu_buf_freelist_push((u32)i);
+    } else {
       cpu_buf_free((u32)i);
     }
   }

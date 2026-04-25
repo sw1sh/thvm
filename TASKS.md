@@ -3474,7 +3474,7 @@ sub-items once these land.
         zero. -->
 
 
-  - [ ] **bm4b: wire the freeable signal to the free-list**.
+  - [x] **bm4b: wire the freeable signal to the free-list**.
         In `kernel_fire_by_id`'s decref hook (sub-item b of
         the refcount-driven-free arc), when a producer's
         `consumer_count` transitions 1->0, instead of just
@@ -3487,6 +3487,72 @@ sub-items once these land.
         chain reuses a slot detectable via CPU_BUFS_NEXT
         not growing past N for N consumer kernels.  ~40 LOC +
         a focused test in tests/test_slot_reuse.c.
+        <!-- attempt 1: pushing to freelist from the
+        post-dispatch decref hook (with !preserved + owns_data
+        guard) breaks 7 nn.wlt tests -- all gradient-related:
+        nn/grad-through-square-of-dot expects {20,20,20} grad,
+        gets {1,1,1}; sgd-step / gd-loss-monotonically /
+        poly-regression-gradients / mse-grad / two-head-square /
+        uop-load training-step all fail similarly.
+
+        Root cause: same dead-end as the prior aggressive
+        refcount-driven free attempt (sub-item c of the refcount
+        arc).  TGrad's pattern realizes forward + backward in
+        SEPARATE TRealize calls; the backward's lazy materialize
+        emits new kernels referencing forward intermediate
+        TenDescs whose bufs are pushed to the freelist by the
+        first realize's decref hook, get reused by an
+        intermediate buf alloc in the second realize, and the
+        backward reads corrupted data.
+
+        The preserve check (!CPU_BUFS[prod_buf].preserved)
+        doesn't help because preserved isn't set yet at decref
+        time -- the preserve walk runs AFTER wnf returns.
+
+        Reverted unstaged change.  bm4b needs a different
+        integration point: push from the rollback walk
+        instead of the decref hook, so the preserve set is
+        already known.  That changes rollback_with_preserve
+        from "free non-preserved" to "freelist-push owning
+        non-preserved + free non-owning"; safer because the
+        preserve set explicitly captures the buf bufs the
+        next realize might still need (forward intermediates
+        whose TenDescs are reachable from the result chain).
+
+        attempt 2 (LANDED): per attempt-1's diagnosis, moved
+        the freelist push out of the decref hook and into
+        cpu_buf_pool_rollback_with_preserve.  When a
+        non-preserved owning buf lands in [wm, NEXT) at
+        rollback time, push to freelist (refcount drops to 0
+        so the slot stops counting in TTotalBufBytes); next
+        cpu_buf_alloc with matching nbytes recycles it.
+        Non-owning bufs still cpu_buf_free (we don't own the
+        storage; on_release callback fires).
+        cpu_buf_freelist_push now also resets refcount/
+        preserved/freeable to make the slot "stale-pop safe".
+
+        tests/test_slot_reuse.c (19 sub-checks): direct unit
+        on push (refcount drops to 0), realloc-after-push
+        recycles same slot, rollback-pushes non-preserved
+        owning bufs, rollback-skips preserved bufs (kept
+        intact), rollback-frees non-owning external bufs
+        (cpu_buf_free path).
+
+        268 C + 270 WL tests green (no nn.wlt regressions
+        since the preserve set captures TGrad's needed
+        forward intermediates).
+
+        bench DELTA: zero on lenet-mnist + beautiful-mnist
+        because the conservative whole-producer-chain
+        preserve walk pins every forward intermediate that
+        the result is reachable from.  The freelist
+        infrastructure is correct + tested but only fires
+        for bufs OUTSIDE the preserve set, which is empty
+        at LeNet's chain shape.  Real bench savings need a
+        heap-rooted preserve that walks live HEAP[] UOP
+        terms instead of every producer-kid edge -- queued
+        as a follow-up arc once bm4c/d/5 close. -->
+
         <!-- attempt 1: pushing to freelist from the
         post-dispatch decref hook (with !preserved + owns_data
         guard) breaks 7 nn.wlt tests -- all gradient-related:
