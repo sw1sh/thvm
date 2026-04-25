@@ -2331,15 +2331,76 @@ Realistic close-out for the overnight cron loop:
         defeats the purpose).  Defer until f3 (ShapeTracker)
         unblocks f1b. -->
 
-  - [ ] **f3. ShapeTracker for movement ops**.  Replace
+  - [ ] **f3. ShapeTracker for movement ops (arc)**.  Replace
         RESHAPE / EXPAND / PERMUTE / SHRINK / PAD / FLIP
         runtime kernels with view-mutation on a
         (shape, strides, offset, mask) tuple attached to
         TenDesc.  Producer kernels read inputs via the
-        tracker.  Big change (~300+ LOC across tracker,
-        materialize, cpu/metal indexing) -- decompose further
-        when it's the topmost task.  Unlocks the 80%
-        kernel-count reduction.
+        tracker.  Decomposed into 5 sub-items below; the
+        existing View struct (shape + strides) is the
+        starting point, missing offset + mask.
+
+    - [ ] **f3a. View extensions: offset + contiguous flag**.
+          Add `i64 offset` and `u8 contiguous` fields to View
+          (already has shape + strides).  Add a helper
+          `view_strided_index(View *v, u32 flat_idx) -> u32`
+          that walks the per-axis strides + offset to compute
+          the underlying buffer index for an output position.
+          For contiguous views the helper is identity (no
+          per-axis walk).  Update tensor_alloc to set
+          contiguous = 1, offset = 0, strides = row-major.
+          C tests verify the helper round-trips for both
+          contiguous and a hand-built strided View.  ~80 LOC
+          + ~30 LOC of test.
+
+    - [ ] **f3b. RESHAPE as view-only when source is
+          contiguous**.  In materialize_in_env, when a
+          UOP_RESHAPE has a contiguous source and the
+          source/target numels match, RETURN the source's
+          TenDesc unchanged (no kernel) -- the shape on
+          TenDesc is already right.  Wait, that mutates the
+          shared source.  Better: allocate a fresh TenDesc
+          that ALIASES the source's buf_id (no copy) but with
+          the new shape.  The fresh TenDesc has its own
+          producer_kid = 0 (it's a view, not produced by a
+          kernel).  WL surface: TUOpReshape returns this
+          aliased TenDesc.  ~50 LOC + a wlt test that
+          TUOpReshape doesn't allocate a new buffer.
+
+    - [ ] **f3c. EXPAND as view-only via stride=0**.  Movement
+          ops can express broadcast as stride[axis] = 0 on the
+          expanded axes -- a single buffer element gets read
+          for every output position on that axis.  In
+          materialize_in_env, EXPAND becomes a fresh aliased
+          TenDesc with the source's buf_id but shape =
+          target.shape and strides[axis] = 0 where source.dim
+          == 1 < target.dim.  Producer kernels reading this
+          alias must use view_strided_index instead of flat
+          indexing.  ~80 LOC + a wlt test that TUOpExpand
+          doesn't allocate a new buffer.
+
+    - [ ] **f3d. CPU op runners read inputs through the View**.
+          Update cpu_op_add / cpu_op_mul / cpu_op_neg / etc. to
+          take a View per input (or have cpu_interpret
+          pre-resolve indexed reads).  For elementwise ops, the
+          existing `srcs[i] + (oi % src_numels[i])` indexing
+          would be replaced by view-aware reads.  Falls back to
+          flat for contiguous views (the common case) so no
+          regression on existing tests.  ~80-120 LOC across
+          interpret.c + per-op .c files.  Tests: existing
+          kernels still pass + a new wlt asserts ADD works
+          when one input is an aliased EXPAND view.
+
+    - [ ] **f3e. Verify lenet-mnist + update docs**.  Re-run
+          lenet-mnist/forward.wls and measure the KernelEntry
+          count drop (target: >50% reduction since EXPAND +
+          RESHAPE collectively account for ~80% of LeNet's
+          movement-op kernels).  Append before/after numbers
+          to docs/kernelization.md.  Then unblock f1b (the
+          remaining sharing-related splice issues should be
+          much easier to diagnose without the movement-op
+          noise).  ~30 LOC of probe + doc + checking off
+          f1b/f1c/f2 as no-longer-blocked.
 
   - [ ] **f4. Re-enable lenet-mnist/verify.wls**.  After
         f1-f3 land, verify.wls should fit within KERNELS_CAP.
