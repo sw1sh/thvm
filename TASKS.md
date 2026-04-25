@@ -3303,6 +3303,82 @@ the GOAL workflow on Metal renders too).
 
 All TASKS.md items complete on 2026-04-25 (TMemoryPlan visualization arc closed; 252 C + 264 WL tests green; Metal Adam-LeNet still converges loss 2.61 -> 0.025).
 
+## Tinygrad-style optimizations + beautiful_mnist benchmark arc (queued 2026-04-25)
+
+User directive: "keep working on lenet, bringing all tinygrad
+optimizations one-by-one.  try their beautiful_mnist architecture
+and benchmark against, speed and memory in use on metal."
+
+The TMemoryPlan Gantt revealed 48.8% slot-reuse headroom on the
+LeNet probe (8.1 MiB peak concurrent vs 15.9 MiB total live), so
+the next concrete optimization is a real runtime slot allocator
+that consumes the consumer_count + freeable signals already in
+place.  The benchmark harness comes first so we can measure
+before/after deltas honestly.
+
+Initial 5-item decomposition; more tinygrad ports (kernel cache,
+ShapeTracker compaction, beam search, etc.) get queued as separate
+sub-items once these land.
+
+- [ ] **bm1: bench harness** -- new wl/Examples/_bench/bench.wls
+      that takes a network + dataset + step count, runs N Adam
+      training steps under TInit + THVM_BACKEND, and reports
+      `{wall_time_ms, ms_per_step, peak_concurrent_kib,
+        total_live_kib, kernel_count, ten_count, slot_reuse_headroom}`.
+      Pure WL; reuses TMemoryPlan + TAdamSession + the TFromNet
+      chain.  Output in a stable format suitable for diffing
+      across commits (Association + ToString + write-to-file).
+      ~80 LOC + a smoke test in wl/THVMLink/Tests/bench.wlt that
+      runs 1 step on a tiny ADD-only network and checks the
+      Association keys.
+
+- [ ] **bm2: beautiful_mnist architecture in WL** -- new
+      wl/Examples/beautiful-mnist/ folder.  Build the tinygrad
+      reference network (typically Conv 1->32 5x5, ReLU,
+      Conv 32->64 5x5, ReLU, MaxPool 2x2, Flatten,
+      Linear -> 10, Softmax) as a TFromNet-style WL chain via
+      explicit TUOpConv2DLowered + TUOpReLU + TUOpReshape +
+      TDot calls.  Verify forward + backward run on CPU + Metal
+      end-to-end and produce sane shapes; small parity test
+      against a reference output.  ~80 LOC + ~30 LOC test in
+      wl/THVMLink/Tests/beautiful_mnist.wlt.
+
+- [ ] **bm3: capture baseline on Metal** -- run bm1's bench
+      harness on (lenet-mnist, beautiful-mnist) x (CPU, Metal),
+      4 cases total, save numbers to a new
+      docs/bench-baseline.md.  Sample format:
+
+        | bench           | backend | ms/step | peak KiB | kernels |
+        | lenet-mnist     | CPU     | ...     | ...      | ...     |
+        | lenet-mnist     | Metal   | ...     | ...      | ...     |
+        | beautiful-mnist | CPU     | ...     | ...      | ...     |
+        | beautiful-mnist | Metal   | ...     | ...      | ...     |
+
+      Plus PNG snapshots of the TMemoryPlan Gantt for each.
+      ~30 LOC + doc + 4 PNGs.
+
+- [ ] **bm4: runtime slot allocator (port TMemoryPlan's
+      linear-scan into the C runtime)** -- the visualization
+      already proves a 48% slot-reuse headroom is sittable.
+      Implement the actual slot reuse inside cpu_buf_alloc /
+      metal_buf_alloc paths: track free slots per dtype + size
+      class; when a buffer reaches refcount 0 (already
+      detectable via the consumer_count + decref hook from
+      sub-items a/b of the refcount-driven-free arc), return
+      its bytes to a free-list keyed by size; tensor_alloc
+      first checks the free-list before falling back to the
+      backend's raw buf_alloc.  Acceptance: peak KiB on the
+      LeNet bench drops at least 30%; correctness preserved
+      (252 C + 264 WL tests green; Metal Adam-LeNet still
+      converges).  ~120 LOC; likely gets sub-decomposed when
+      picked up (per-backend free-list infra + integration +
+      bench re-run).
+
+- [ ] **bm5: re-bench + delta report** -- rerun bm1 on the
+      same 4 cases after bm4 lands; write
+      docs/bench-results.md comparing baseline vs new numbers
+      with a `% delta` column on each metric.  ~30 LOC + doc.
+
 
 
 
