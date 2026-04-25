@@ -519,3 +519,15 @@ VerificationTest[
     NumericArray,
     TestID -> "nn/lenet-conv1-weights-concrete"
 ]
+
+(* === TLeNet end-to-end forward === *)
+
+VerificationTest[
+    TInit[];
+    net = TLeNet[];
+    x = TTensorCreate @ NumericArray[ConstantArray[0.5, {1, 28, 28}], "Real32"];
+    res = TRealize @ TFromNet[net, x];
+    {TTensorShape[res], Round[Total @ Normal @ TTensorData[res], 0.0001]},
+    {{10}, 1.0},
+    TestID -> "nn/lenet-end-to-end-forward-shape-and-softmax-sum"
+]

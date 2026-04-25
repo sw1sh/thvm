@@ -257,10 +257,15 @@ There's already a `Wolfram layer -> TUOp converter` per the git log
       scratch.  TLeNet[] returns NetChain with 11 layers, all
       weights as concrete NumericArray. -->
 
-- [ ] end-to-end TFromNet on LeNet: build it from the official
+- [x] end-to-end TFromNet on LeNet: build it from the official
       architecture (with proper weights from the prior item),
       feed a synthetic 1x28x28 input, verify TRealize produces a
       length-10 probability vector that sums to 1.
+      <!-- TLeNet[] + TFromNet runs the full chain (Conv->ReLU->
+      MaxPool->Conv->ReLU->MaxPool->Flatten->Linear->ReLU->
+      Linear->Softmax) on synthetic {1,28,28} input, returns
+      shape {10} that sums to exactly 1.0.  Phase 3 closes. -->
+
 
 ## Phase 4 — MNIST loader
 
