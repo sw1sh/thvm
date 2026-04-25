@@ -1831,7 +1831,7 @@ Realistic close-out for the overnight cron loop:
 
 
 
-  - [ ] **c. Switch TUOpConv2D internals to the lowered chain**.
+  - [x] **c. Switch TUOpConv2D internals to the lowered chain**.
         Make the public TUOpConv2D dispatch to
         TUOpConv2DLowered (so existing call sites pick up the
         primitive chain transparently), keeping the underlying
@@ -1841,6 +1841,28 @@ Realistic close-out for the overnight cron loop:
         float tolerance) before and after.  ~10 LOC + WL/CLI
         smoke.  After this lands, the next arc items (drop
         bespoke grad rule, drop opcode) become reachable.
+        <!-- Landed.  Renamed legacy TUOpConv2D body to
+        TUOpConv2DBespoke (kept reachable from parity tests
+        until UOP_CONV2D is dropped); aliased TUOpConv2D to
+        TUOpConv2DLowered.  Three follow-on bugs fell out of
+        the dispatch flip + got fixed in the same commit:
+        (1) EXPAND grad rule didn't lift gy to the EXPAND
+        output shape before REDUCE_SUMming -- a scalar gy
+        leaked through unsummed (bias-grad regression).
+        (2) tUopShape (the WL static shape walker) lacked
+        cases for SHRINK / PAD / PERMUTE / FLIP, so
+        PoolingLayer downstream of the lowered conv2d couldn't
+        infer its input shape.
+        (3) TUOpConv2DLowered itself was using TTensorShape
+        (TAG_TEN-only) on its input; LeNet's second conv takes
+        a UOP_REDUCE chain, so the outer Module's symbolic
+        h / wd locals leaked into the SHRINK ranges and
+        crashed the C bindings.  Switched to tUopShape.
+        215 WL + 146 C tests green; lenet-mnist forward.wls
+        runs end-to-end via the lowered chain.  Closes the
+        TUOpConv2D-lowering arc; next item -- "Drop the
+        bespoke CONV2D grad rule" -- is now reachable. -->
+
 
 - [ ] **Drop the bespoke CONV2D grad rule** from
       `src/interact/uop_grad.c` (the case branch with

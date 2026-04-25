@@ -479,10 +479,20 @@ fn Term interact_grad(Term grad_term) {
 
       // EXPAND heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})];
       // dim cells live at y_loc+2..y_loc+1+ndim.
-      Term g = gy;
+      // Lift gy to EXPAND's OUTPUT shape first so the REDUCE_SUMs
+      // below have a well-defined per-axis source extent.  Without
+      // the lift, a scalar gy from the seed (or any same-numel-but-
+      // wrong-rank cotangent) lets REDUCE_SUM degrade to a no-op
+      // and the cotangent leaks out unsummed -- the bias-grad bug
+      // from the conv2d-lowered switchover.
+      u32 out_ndim = (u32)term_val(heap_read(y_loc + 1));
+      u32 out_dims[MAX_DIM];
+      for (u32 i = 0; i < out_ndim; i++) {
+        out_dims[i] = (u32)term_val(heap_read(y_loc + 2 + i));
+      }
+      Term g = uop_expand(gy, out_ndim, out_dims);
       for (i32 axis = (i32)src_shape.ndim - 1; axis >= 0; axis--) {
-        u32 out_dim = (u32)term_val(heap_read(y_loc + 2 + axis));
-        if (src_shape.dims[axis] == 1 && out_dim > 1) {
+        if (src_shape.dims[axis] == 1 && out_dims[axis] > 1) {
           g = uop_reduce(REDUCE_SUM, (u32)axis, g);
         }
       }

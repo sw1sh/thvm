@@ -132,6 +132,44 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                         (* in {C_in, H, W}; wt {C_out, C_in, kh, kw}. *)
                         {wt[[1]], in[[2]] - wt[[3]] + 1, in[[3]] - wt[[4]] + 1}
                     ],
+                (* SHRINK / PAD heap: [src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...].
+                   ndim implicit in the source's rank.  SHRINK shrinks
+                   each axis to e_i - b_i; PAD grows by b_i + e_i. *)
+                $UopShrink,
+                    Module[{cs, n},
+                        cs = tUopShape[TTerm[$heapReadFn[val]]];
+                        If[ cs === $Failed, Return[$Failed, Module]];
+                        n = Length[cs];
+                        Table[
+                            $termValFn[$heapReadFn[val + 2 + 2 * (i - 1)]] -
+                            $termValFn[$heapReadFn[val + 1 + 2 * (i - 1)]],
+                            {i, 1, n}]
+                    ],
+                $UopPad,
+                    Module[{cs, n},
+                        cs = tUopShape[TTerm[$heapReadFn[val]]];
+                        If[ cs === $Failed, Return[$Failed, Module]];
+                        n = Length[cs];
+                        Table[
+                            cs[[i]] +
+                            $termValFn[$heapReadFn[val + 1 + 2 * (i - 1)]] +
+                            $termValFn[$heapReadFn[val + 2 + 2 * (i - 1)]],
+                            {i, 1, n}]
+                    ],
+                (* PERMUTE heap: [src, NUM(p0), NUM(p1), ...].
+                   out.dim[i] = src.dim[perm[i]]. *)
+                $UopPermute,
+                    Module[{cs, n},
+                        cs = tUopShape[TTerm[$heapReadFn[val]]];
+                        If[ cs === $Failed, Return[$Failed, Module]];
+                        n = Length[cs];
+                        Table[
+                            cs[[1 + $termValFn[$heapReadFn[val + i]]]],
+                            {i, 1, n}]
+                    ],
+                (* FLIP doesn't change shape. *)
+                $UopFlip,
+                    tUopShape[TTerm[$heapReadFn[val]]],
                 _, $Failed
             ],
         _, $Failed

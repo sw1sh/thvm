@@ -131,10 +131,14 @@ TUOpGrad[y_, gy_, target_] := (
     TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]]
 )
 
-(* TUOpConv2D[input, weights, bias] -- valid 2-D convolution
-   forward, stride 1, no padding.  Kernel size is recovered from
-   weights.shape ({C_out, C_in, kh, kw}) at materialize time. *)
-TUOpConv2D[input_, weights_, bias_] := (
+(* TUOpConv2DBespoke[input, weights, bias] -- legacy back-door to
+   the bespoke UOP_CONV2D opcode.  Kept reachable so the parity
+   tests in nn.wlt can still cross-check the lowered chain against
+   the kernelised reference; will be removed when UOP_CONV2D is
+   dropped (next two arc items).  Stride 1, no padding; kernel
+   size recovered from weights.shape ({C_out, C_in, kh, kw}) at
+   materialize time. *)
+TUOpConv2DBespoke[input_, weights_, bias_] := (
     ensureInit[];
     TTerm[$uopConv2DFn[ttermRaw[input], ttermRaw[weights], ttermRaw[bias]]]
 )
@@ -168,8 +172,11 @@ TUOpConv2DLowered[input_, weights_, bias_] := Module[{
     partials, xSlice, wSlice, xB, wB, summed, biasBroadcast
 },
     ensureInit[];
-    inShape = TTensorShape[input];
-    wShape  = TTensorShape[weights];
+    (* Use tUopShape (handles UOP chains) rather than TTensorShape
+       (TAG_TEN only) -- LeNet's second conv takes the Pool output,
+       which is a UOP_REDUCE chain, not a materialised tensor. *)
+    inShape = tUopShape[input];
+    wShape  = tUopShape[weights];
     {cIn, h, wd}        = inShape;
     {cOut, cIn, kh, kw} = wShape;
     hOut = h  - kh + 1;
@@ -192,6 +199,12 @@ TUOpConv2DLowered[input_, weights_, bias_] := Module[{
         {cOut, hOut, wOut}];
     TUOpAdd[summed, biasBroadcast]
 ]
+
+(* TUOpConv2D[input, weights, bias] -- public conv2d entry point.
+   Dispatches to the lowered primitive chain so autograd flows
+   through the chain rule (no bespoke CONV2D grad branch).  All
+   existing call sites pick up the lowering transparently. *)
+TUOpConv2D[input_, weights_, bias_] := TUOpConv2DLowered[input, weights, bias]
 
 (* Top-level VJP shortcut: gradient of `y` w.r.t. `target` with
    cotangent seed 1. *)

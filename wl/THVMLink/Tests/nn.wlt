@@ -502,7 +502,7 @@ VerificationTest[
         {{{{0.5, 1.5}, {2.5, 3.5}}}}, "Real32"];
     bias = TTensorCreate @ NumericArray[{0.25}, "Real32"];
     Normal @ TTensorData @ TRealize @ TUOpConv2DLowered[input, weights, bias],
-    Normal @ TTensorData @ TRealize @ TUOpConv2D       [input, weights, bias],
+    Normal @ TTensorData @ TRealize @ TUOpConv2DBespoke[input, weights, bias],
     TestID -> "nn/conv2d-lowered-tiny-case-parity"
 ]
 
@@ -523,7 +523,7 @@ VerificationTest[
         input   = TTensorCreate @ seed[7,  {3, 8, 8}];
         weights = TTensorCreate @ seed[11, {2, 3, 3, 3}];
         bias    = TTensorCreate @ seed[3,  {2}];
-        fwdB = Normal @ TTensorData @ TRealize @ TUOpConv2D       [input, weights, bias];
+        fwdB = Normal @ TTensorData @ TRealize @ TUOpConv2DBespoke[input, weights, bias];
         fwdL = Normal @ TTensorData @ TRealize @ TUOpConv2DLowered[input, weights, bias];
         Max @ Abs @ Flatten[fwdB - fwdL] < 0.001
     ],
@@ -544,7 +544,7 @@ VerificationTest[
         weights = TTensorCreate @ seed[11, {2, 3, 3, 3}];
         bias    = TTensorCreate @ seed[3,  {2}];
         lossB   = TUOpReduce[TUOpReduce[TUOpReduce[
-                    TUOpConv2D[input, weights, bias],
+                    TUOpConv2DBespoke[input, weights, bias],
                     0, "SUM"], 0, "SUM"], 0, "SUM"];
         lossL   = TUOpReduce[TUOpReduce[TUOpReduce[
                     TUOpConv2DLowered[input, weights, bias],
