@@ -329,3 +329,23 @@ VerificationTest[
     {{6}, {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}},
     TestID -> "nn/reshape-layer-2d-to-1d-flatten"
 ]
+
+(* === FlattenLayer forward via TFromNet === *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    r = TRealize @ TFromNet[FlattenLayer[], x];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{6}, {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}},
+    TestID -> "nn/flatten-layer-2d-to-1d"
+]
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    r = TRealize @ TFromNet[FlattenLayer[], x];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{4}, {1.0, 2.0, 3.0, 4.0}},
+    TestID -> "nn/flatten-layer-1d-passthrough"
+]

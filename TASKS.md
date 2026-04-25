@@ -102,7 +102,7 @@ concern that interact_grad currently doesn't cover for any of these):
 - [x] `ReshapeLayer` forward.  Once the runtime supports RESHAPE,
       add the dispatch in NN.wl and a nn.wlt test against
       `NetApply[ReshapeLayer[shape]]`.
-- [ ] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or
+- [x] `FlattenLayer` forward.  Composes `ReshapeLayer` to 1-D (or
       rank-2 with explicit batch axis).
 - [ ] `PoolingLayer[..., "Function" -> Max]` 2-D forward.  Needs
       `UOP_REDUCE` with `kind = MAX`; check whether REDUCE_MAX is

@@ -93,6 +93,7 @@ $layerParams[LinearLayer]      = {"Weights", "Biases"}
 $layerParams[ConvolutionLayer] = {"Weights", "Biases"}
 $layerParams[ElementwiseLayer] = {}
 $layerParams[ReshapeLayer]     = {}
+$layerParams[FlattenLayer]     = {}
 $layerParams[_]                = {}
 
 TLayerWeights[layer_] :=
@@ -140,6 +141,15 @@ $elementwiseDispatch = <|
 fromLayer[ReshapeLayer, layer_, x_TTerm] :=
     With[{out = NetExtract[layer, "Output"]},
         TUOpReshape[x, If[ListQ[out], out, {out}]]
+    ]
+
+(* FlattenLayer[]: collapse the entire input to rank-1.  We size the
+   output by reading x's runtime shape rather than asking the layer
+   (an uninitialised FlattenLayer reports {Automatic}).  Forward
+   only. *)
+fromLayer[FlattenLayer, _, x_TTerm] :=
+    With[{shape = TTensorShape[x]},
+        TUOpReshape[x, {Times @@ shape}]
     ]
 
 fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op},
