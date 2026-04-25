@@ -234,9 +234,16 @@ There's already a `Wolfram layer -> TUOp converter` per the git log
       shape.wlt.  Layer dispatchers will be migrated in a
       follow-up item below if the LeNet smoke test reveals they
       still need it. -->
-- [ ] migrate `PoolingLayer` / `FlattenLayer` dispatchers in
+- [x] migrate `PoolingLayer` / `FlattenLayer` dispatchers in
       NN.wl to use `tUopShape` instead of `TTensorShape` so they
       work on intermediate UOP terms in a chain.
+      <!-- Also fixed `asRowVec` (LinearLayer's rank-1 promoter):
+      switched it to `tUopShape` + `TUOpReshape` so it stops
+      doing a TTensorData copy that only worked on TAG_TEN.
+      Smoke probe: a small Conv->ReLU->MaxPool->Flatten chain on
+      {1,6,6} input now runs through TFromNet end-to-end,
+      producing the expected {8} output. -->
+
 - [ ] **NetModel["LeNet"] weight extraction**.  Probe shows the
       NetModel-loaded layer's "Weights" comes back as
       `Automatic` (paclet version 15.0.2 vs runtime 15.0.3

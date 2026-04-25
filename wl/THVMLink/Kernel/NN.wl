@@ -135,14 +135,14 @@ TLayerToTensors[layer_] :=
 
 (* === forward dispatch =================================== *)
 
-(* Promote a rank-1 input {in} to {1, in} via a fresh allocation
-   so TMatVec's EXPAND has the rank it needs.  Returns x unchanged
-   if it's already at least rank 2.  Backward through this
-   reallocation is broken, but EXPAND already has no grad rule, so
-   LinearLayer is forward-only either way. *)
-asRowVec[x_TTerm] := With[{shape = TTensorShape[x]},
+(* Promote a rank-1 input {in} to {1, in} so TMatVec's EXPAND has
+   the rank it needs.  Returns x unchanged if it's already at least
+   rank 2.  Uses tUopShape so it works on intermediate UOP terms
+   (post-Flatten in a chain), and TUOpReshape for the rank bump --
+   no TTensorData copy required. *)
+asRowVec[x_TTerm] := With[{shape = tUopShape[x]},
     If[ Length[shape] === 1,
-        TTensor[{1, shape[[1]]}, Normal @ TTensorData[x], TTensorDType[x]],
+        TUOpReshape[x, {1, shape[[1]]}],
         x
     ]
 ]
@@ -174,12 +174,12 @@ fromLayer[ReshapeLayer, layer_, x_TTerm] :=
         TUOpReshape[x, If[ListQ[out], out, {out}]]
     ]
 
-(* FlattenLayer[]: collapse the entire input to rank-1.  We size the
-   output by reading x's runtime shape rather than asking the layer
-   (an uninitialised FlattenLayer reports {Automatic}).  Forward
-   only. *)
+(* FlattenLayer[]: collapse the entire input to rank-1.  Sizes the
+   output via tUopShape so it works on intermediate UOP terms in a
+   chain (an uninitialised FlattenLayer reports {Automatic}, useless
+   for sizing).  Forward only. *)
 fromLayer[FlattenLayer, _, x_TTerm] :=
-    With[{shape = TTensorShape[x]},
+    With[{shape = tUopShape[x]},
         TUOpReshape[x, {Times @@ shape}]
     ]
 
@@ -208,7 +208,7 @@ fromLayer[PoolingLayer, layer_, x_TTerm] := Module[{
         Return @ Failure["NotImplemented",
             <|"Message" -> "PoolingLayer overlapping (Stride != KernelSize) not yet supported",
               "KernelSize" -> kSize, "Stride" -> stride|>]];
-    shape = TTensorShape[x];
+    shape = tUopShape[x];
     If[ Length[shape] =!= 3,
         Return @ Failure["NotImplemented",
             <|"Message" -> "PoolingLayer expects rank-3 channels-first input {C, H, W}",
