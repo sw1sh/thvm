@@ -72,6 +72,79 @@ dropAxis[_, _] := {1}
    Returns Missing[] on out-of-range. *)
 tenShapeOf[id_Integer] := Quiet @ Check[$tensorShapeFn[id], Missing[]]
 
+(* tUopShape[t] -- recover the result shape of any TTerm by static
+   walk of its UOP graph.  Mirrors materialize_in_env.c's output-
+   shape branch but on the WL side, so layer dispatch can size
+   intermediate tensors without going through TTensorShape (which
+   only handles TAG_TEN).
+
+   Returns a List of Integer dims, or $Failed for unsupported tags. *)
+tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
+    raw = ttermRaw[t];
+    tag = $termTagFn[raw];
+    val = $termValFn[raw];
+    ext = $termExtFn[raw];
+    Switch[tag,
+        $TagTEN, tenShapeOf[val],
+        $TagUOP,
+            Switch[ext,
+                $UopKernel,
+                    (* Output buffer is heap[val] = TAG_TEN. *)
+                    tUopShape[TTerm[$heapReadFn[val]]],
+                $UopConst,
+                    {1},
+                $UopAdd | $UopMul | $UopCmplt,
+                    broadcastShape[
+                        tUopShape[TTerm[$heapReadFn[val]]],
+                        tUopShape[TTerm[$heapReadFn[val + 1]]]
+                    ],
+                $UopNeg | $UopRecip | $UopExp2 | $UopLog2 | $UopSqrt,
+                    tUopShape[TTerm[$heapReadFn[val]]],
+                $UopReduce,
+                    dropAxis[
+                        tUopShape[TTerm[$heapReadFn[val]]],
+                        $termValFn[$heapReadFn[val + 2]]
+                    ],
+                $UopReshape,
+                    Module[{
+                        srcShape = tUopShape[TTerm[$heapReadFn[val]]],
+                        dims = {}, i = 0, prod = 1, n, target
+                    },
+                        target = Times @@ srcShape;
+                        While[ i < 8,
+                            n = $heapReadFn[val + 1 + i];
+                            If[$termTagFn[n] =!= $TagNUM, Break[]];
+                            AppendTo[dims, $termValFn[n]];
+                            prod *= Last[dims];
+                            If[prod === target, Break[]];
+                            i++
+                        ];
+                        dims
+                    ],
+                $UopExpand,
+                    Module[{
+                        srcShape = tUopShape[TTerm[$heapReadFn[val]]],
+                        ndim
+                    },
+                        ndim = Length[srcShape];
+                        Table[$termValFn[$heapReadFn[val + 1 + i]],
+                              {i, 0, ndim - 1}]
+                    ],
+                $UopConv2D,
+                    Module[{
+                        in = tUopShape[TTerm[$heapReadFn[val + 0]]],
+                        wt = tUopShape[TTerm[$heapReadFn[val + 1]]]
+                    },
+                        (* in {C_in, H, W}; wt {C_out, C_in, kh, kw}. *)
+                        {wt[[1]], in[[2]] - wt[[3]] + 1, in[[3]] - wt[[4]] + 1}
+                    ],
+                _, $Failed
+            ],
+        _, $Failed
+    ]
+]
+tUopShape[_] := $Failed
+
 End[];
 
 EndPackage[];

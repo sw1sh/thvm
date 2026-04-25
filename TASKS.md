@@ -213,7 +213,7 @@ There's already a `Wolfram layer -> TUOp converter` per the git log
       clause from Phase 2.  Tried TFromNet on the full chain on
       synthetic input -- two real integration gaps surfaced (see
       sub-items below). -->
-- [ ] **WL-side shape inference for UOP graphs** so layer dispatch
+- [x] **WL-side shape inference for UOP graphs** so layer dispatch
       can size operations without hitting TAG_TEN.  The current
       `PoolingLayer` / `FlattenLayer` reads of `TTensorShape[x]`
       fail when `x` is an intermediate UOP (e.g. the post-ReLU
@@ -226,6 +226,17 @@ There's already a `Wolfram layer -> TUOp converter` per the git log
       (c) materialize at every step (slow; rebuilds kernels too
           eagerly).
       Pick one and document.
+      <!-- Picked option (b): added `tUopShape` in Shape.wl --
+      a static walk over heap cells mirroring
+      materialize_in_env's output-shape branch.  Covers TEN,
+      KERNEL, CONST, ADD/MUL/CMPLT, NEG/RECIP/EXP2/LOG2/SQRT,
+      REDUCE, RESHAPE, EXPAND, CONV2D.  7 isolated tests in
+      shape.wlt.  Layer dispatchers will be migrated in a
+      follow-up item below if the LeNet smoke test reveals they
+      still need it. -->
+- [ ] migrate `PoolingLayer` / `FlattenLayer` dispatchers in
+      NN.wl to use `tUopShape` instead of `TTensorShape` so they
+      work on intermediate UOP terms in a chain.
 - [ ] **NetModel["LeNet"] weight extraction**.  Probe shows the
       NetModel-loaded layer's "Weights" comes back as
       `Automatic` (paclet version 15.0.2 vs runtime 15.0.3
