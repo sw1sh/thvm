@@ -60,14 +60,25 @@ fn Term thvm_realize(Term expr) {
 
   Term res = wnf(mat);
 
-  if (term_tag(res) == TAG_TEN) {
-    u32 tid = (u32)term_val(res);
-    u8 *visited = (u8 *)calloc(KERNELS_NEXT + 1, 1);
-    if (visited) {
-      mark_preserved_chain(tid, visited);
-      free(visited);
-    }
-  }
+  // hrp2: replaced the chain-rooted preserve walk with a
+  // heap-rooted scan.  mark_heap_rooted_preserve walks every
+  // dyn-heap cell and preserves bufs of TAG_TEN cells, which is
+  // strictly broader than chain reachability:
+  //   - Pending UOP terms (TGrad backward chains) sit in HEAP
+  //     with TAG_TEN children pointing at forward intermediates;
+  //     the linear scan catches them.
+  //   - WL-held intermediate TenDescs that the chain walk
+  //     would miss also get preserved.
+  //   - Bufs that were chain-reachable but no longer
+  //     heap-referenced (consumed kernel intermediates) DON'T
+  //     get preserved -- those go to the freelist via bm4b's
+  //     rollback path, finally enabling the slot reuse the bm4
+  //     arc plumbed.
+  // mark_preserved_chain is preserved as a static fallback in
+  // case hrp3's bench surfaces correctness gaps; remove once
+  // the new path has soaked.
+  (void)res;
+  mark_heap_rooted_preserve();
 
   cpu_buf_pool_rollback_with_preserve(wm);
   cpu_buf_clear_preserved(wm);

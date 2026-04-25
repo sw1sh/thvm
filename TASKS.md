@@ -3768,7 +3768,7 @@ sub-items once these land.
         thvm_realize. -->
 
 
-  - [ ] **hrp2: integrate into thvm_realize + correctness
+  - [x] **hrp2: integrate into thvm_realize + correctness
         check**.  In src/schedule/realize.c, replace the call
         to mark_preserved_chain with a call to
         mark_heap_rooted_preserve.  Keep the chain helper as
@@ -3781,6 +3781,39 @@ sub-items once these land.
             a TAG_REF target).  3-attempt rule applies; fall
             back to chain walk + document the gap.
         ~10 LOC integration + bisect headroom for fixes.
+        <!-- Landed.  src/schedule/realize.c calls
+        mark_heap_rooted_preserve() in place of the
+        mark_preserved_chain walk.  mark_preserved_chain
+        kept as static fallback (compiles but unused).
+
+        Correctness preserved:
+          - 268 C + 270 WL tests green.
+          - Metal Adam-LeNet verify.wls converges loss
+            2.61 -> 0.025 in 4 steps; pred 0 -> 4 (correct);
+            prob[true] 0.074 -> 0.997.
+
+        Bench DELTA on the smoke-peek (CPU lenet, beautiful):
+        STILL ZERO -- 4087 / 1882 / 94732 / 82750 KiB
+        identical to bm4d.  Reason discovered post-integration:
+        every kernel-output TenDesc has a TAG_TEN cell at
+        heap[uop_kernel_loc + 0] (set by materialize when it
+        emits the UOP_KERNEL wrapper).  The linear heap walk
+        catches ALL of those, preserving every kernel output --
+        same conservative coverage as the chain walk, just
+        derived a different way.
+
+        Real savings need either:
+          (a) zero out the heap[uop_kernel_loc + 0] TAG_TEN
+              cells once the kernel has fired AND its output
+              has no other live references; OR
+          (b) actual GC -- mark from a fixed set of roots
+              (the WL-returned result + live UOP terms not
+              yet reduced) and only preserve the reachable
+              set.
+        Both larger than the bm4 / hrp arc; queued for
+        hrp3 to formally document with measured numbers + a
+        new follow-up arc proposal. -->
+
 
   - [ ] **hrp3: bench delta + docs**.  Re-run
         wl/Examples/_bench/baseline.wls on both backends.
