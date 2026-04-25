@@ -4328,44 +4328,87 @@ implemented + tested (f1a) but never invoked by the pipeline.
              change. -->
 
 
-  - [ ] **f1d-b: selective materialize_expr**.  When the
-        toggle is on AND the UOp being processed is NOT in
-        the realized set, materialize_expr should NOT
-        allocate a new KernelEntry for it.  Instead, the
-        CALLER (the realized parent's materialize_expr call)
-        should recursively pull the un-realized child's
-        compute into ITS OWN program by descending into the
-        child's source heap cells.  Concretely: extend
-        materialize_expr to take an optional "build into
-        parent_kid" argument; when set, append to parent's
-        program instead of creating a new kernel.  REDUCE
-        always realizes (guaranteed by the classifier).
-        Acceptance: with toggle on, linear-train forward
-        kernel-count drops from 17 to <= 5; 166 C + 289
-        WL green; nn/poly-regression-gradients still gives
-        {-32, -16}.  ~80 LOC + grad-correctness regression
-        test that flips the toggle on.
+  <!-- 2026-04-26 re-decompose f1d-b after reading
+       materialize_in_env.c more carefully.  The original
+       f1d-b spec assumed materialize_expr could be made
+       selective in isolation, but the existing
+       classify_child returns CHILD_UNKNOWN when it sees
+       a raw UOP that isn't UOP_KERNEL -- materialize is
+       hard-wired bottom-up "kernelize children, then
+       parent reads their output_tids".  Inlining requires
+       a different traversal: walk DOWN from each REALIZED
+       UOp, collect un-realized upstream ops in topo order,
+       emit ONE kernel containing the full chain.
 
-  - [ ] **f1d-c: selective materialize_walk**.  When the
-        toggle is on, materialize_walk should leave
-        un-realized UOP cells alone (no rewrite to
-        UOP_KERNEL).  This keeps source_uop walks in
-        interact_uop_grad's chain rule seeing raw UOP
-        children for un-realized intermediates -- those
-        children get re-materialized into the grad's own
-        kernel chain (where they may again be classified
-        as un-realized and inlined into grad's parent
-        kernels).  Acceptance: same as f1d-b plus full
-        verify.wls Metal LeNet still converges
-        loss 2.61 -> 0.025.  ~40 LOC.
+       The right shape:
+         f1d-b1: build materialize_kernel_inlined helper
+                 standalone (collects un-realized upstream
+                 + emits 1 kernel + tests).  No call site.
+         f1d-b2: hook helper into materialize_uop_in_env
+                 when toggle on AND this UOp realizes;
+                 short-circuit (return original UOp) when
+                 toggle on AND this UOp does NOT realize so
+                 walk_cell skips the rewrite.
+         f1d-c:  handle materialize_expr's GRAD path so
+                 source_uop walks still find what they need.
+         f1d-d:  flip toggle on. -->
 
-  - [ ] **f1d-d: flip toggle on by default**.  Once
-        f1d-b + f1d-c land cleanly with all tests green,
-        flip MATERIALIZE_USE_REALIZE_INFO default to 1 in
-        thvm_init / its declaration site, and remove the
-        toggle from any test that no longer needs it.
-        Acceptance: 166 C + 289 WL green with toggle ON
-        by default.  ~10 LOC.
+  - [ ] **f1d-b1: materialize_kernel_inlined standalone helper**.
+        New file `src/schedule/materialize_inlined.c` defining
+        `Term materialize_kernel_inlined(Term realized_uop_term)`.
+        Walks the UOp DAG rooted at `realized_uop_term`,
+        topologically orders the upstream un-realized UOPs
+        (consult realize_is_realized -- realized children
+        contribute their output_tid as an input slot;
+        un-realized children get their compute inlined as
+        program ops).  Allocates ONE KernelEntry, fills its
+        input_tids/dtypes/numels from the leaves + realized
+        boundaries, and emits its program as
+        [LOAD-prefix, ...inlined upstream ops..., main op].
+        Returns the wrapping UOP_KERNEL Term.  No call
+        site yet (f1d-b2 wires it).  ~100 LOC + ~80 LOC
+        test that builds chain (a + b) * c with MUL realized
+        + ADD un-realized, asserts a single 5-op kernel
+        (LOAD a/b/c, ADD, MUL).
+
+  - [ ] **f1d-b2: hook materialize_kernel_inlined into walk**.
+        Modify `materialize_uop_in_env` so that when the
+        toggle is on:
+          - if realize_is_realized(uop): call
+            materialize_kernel_inlined and return its result
+            (the new helper handles the whole inlined chain).
+          - if NOT realized: return the original `uop` Term
+            unchanged so walk_cell skips the rewrite (the
+            heap retains the raw UOP cell; a downstream
+            realized parent will absorb it via the helper).
+        Add a regression test that flips the toggle on and
+        verifies (a) linear-train forward kernel-count
+        drops from 17 to <= 5, (b) 166 C + 289 WL green,
+        (c) nn/poly-regression-gradients still gives
+        {-32, -16}.  ~50 LOC.
+
+  - [ ] **f1d-c: source_uop chain handling under toggle**.
+        With the toggle on, interact_uop_grad's source_uop
+        walk encounters source_uop's children that are
+        either UOP_KERNEL terms (realized boundaries) or
+        raw UOP terms (un-realized intermediates that got
+        inlined).  Verify the existing chain-rule rules
+        already handle raw UOP children correctly (they
+        recurse into uop_grad on the child Term, which
+        reduces via the standard UOP_ADD/MUL/etc cases);
+        if not, add the missing case.  Acceptance: with
+        toggle on, verify.wls Metal LeNet still converges
+        loss 2.61 -> 0.025; full nn.wlt grad suite green.
+        ~30 LOC.
+
+  - [ ] **f1d-d: flip MATERIALIZE_USE_REALIZE_INFO on by
+        default**.  After f1d-b1+b2+c land cleanly, set the
+        default to 1 at the declaration site.  Remove
+        toggle-flip lines from any test that no longer
+        needs them.  Acceptance: 166 C + 289 WL green with
+        toggle ON by default; linear-train probe shows
+        kernel count drop without explicit toggle flip.
+        ~10 LOC.
 
   - [ ] **f1e: bench delta + docs update**.  Re-run
         `wl/Examples/_bench/baseline.wls` on both backends.
