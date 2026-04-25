@@ -3153,5 +3153,8 @@ training step and 4 Adam steps still exhaust `KERNELS_CAP = 4096`.
       docs/memory.md updated with the bisect + measurements. -->
 
 
+GOAL ACHIEVED 2026-04-25: TOptim["Adam"] training NetModel["LeNet"] on MNIST runs end-to-end on Metal (loss 2.61 -> 0.025 in 4 steps, prob[true] 0.074 -> 0.997, pred 0 -> 4 correct).  Memory regression resolved: 23297 -> 15922 KiB on the LeNet probe.  All Metal-training arc items + reuse-pass arc items complete.
+
+
 
 
