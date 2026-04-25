@@ -32,7 +32,7 @@ Adam keeps two extra per-parameter buffers (m, v) plus a step counter.
 
 - [x] write `wl/THVMLink/Kernel/Optim.wl` with `TOptim["SGD", lr]` (just
       delegating to the existing sgd lambda) so the API surface exists.
-- [ ] Adam helpers in Optim.wl: a `tZerosLike[wTen]` returning a
+- [x] Adam helpers in Optim.wl: a `tZerosLike[wTen]` returning a
       fresh TTerm zero-tensor with the same shape as a TAG_TEN, plus
       any other small scalar constructors (e.g. `tF32[x]` shorthand
       for `TUOpConst[x, "f32"]`).  Add tiny optim.wlt tests for the

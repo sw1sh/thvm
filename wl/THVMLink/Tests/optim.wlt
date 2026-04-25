@@ -42,3 +42,22 @@ VerificationTest[
     Failure,
     TestID -> "optim/adam-stub-returns-Failure"
 ]
+
+(* === Adam helpers (private; accessed via context-qualified name) === *)
+
+VerificationTest[
+    TInit[];
+    w = TTensorCreate @ NumericArray[{{1.0, 2.0}, {3.0, 4.0}}, "Real32"];
+    z = THVMLink`Private`tZerosLike[w];
+    {Normal @ TTensorData @ z, TTensorShape[z]},
+    {{{0.0, 0.0}, {0.0, 0.0}}, {2, 2}},
+    TestID -> "optim/tZerosLike-shape-matches-and-values-zero"
+]
+
+VerificationTest[
+    TInit[];
+    c = THVMLink`Private`tF32[0.1];
+    {TUOpKind[c], TTagName[TTermTag[c]]},
+    {"CONST", "UOP"},
+    TestID -> "optim/tF32-builds-UOP_CONST"
+]

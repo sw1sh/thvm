@@ -37,6 +37,22 @@ freshOptimDefName[algo_String] := (
     algo <> "_loop_" <> ToString[$optimDefCounter]
 )
 
+(* === Adam helpers ===
+
+   tZerosLike[wTen]  -- given a TTerm wrapping TAG_TEN, returns a
+                        fresh f32 zero TTensor with the same shape.
+                        Used to seed Adam's m and v running buffers.
+   tF32[x]           -- shorthand for TUOpConst[x, "f32"].  Adam's
+                        body needs many scalar-CONST operands
+                        (1-beta1, eps, etc.) and the wrapper keeps
+                        them readable. *)
+
+tZerosLike[wTen_TTerm] := With[{shape = TTensorShape[wTen]},
+    TTensorCreate @ NumericArray[ConstantArray[0., shape], "Real32"]
+]
+
+tF32[x_] := TUOpConst[N[x], "f32"]
+
 (* SGD body: build the recursive lambda + invocation as one TTerm. *)
 sgdRecursiveTerm[gradFn_, lr_, w0_, n_] :=
     Module[{defName = freshOptimDefName["sgd"], w, k},
