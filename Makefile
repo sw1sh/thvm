@@ -6,6 +6,7 @@
 CC      ?= clang
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-unused-function
 BIN     := bin
+BUILD   := build
 
 TESTS := \
   $(BIN)/test_term \
@@ -23,6 +24,19 @@ TESTS := \
   $(BIN)/test_wnf_n \
   $(BIN)/test_redex \
   $(BIN)/test_metal_stub
+
+# === Metal backend (Darwin only) =====================================
+# src/backend/metal/_.m compiles separately into build/backend_metal.o.
+# Tests / dylib that #define THVM_HAS_METAL link this object + the
+# Metal frameworks; src/thvm.c then skips the C-side stub.
+ifeq ($(shell uname -s),Darwin)
+  METAL_OBJ     := $(BUILD)/backend_metal.o
+  METAL_LDFLAGS := -framework Metal -framework Foundation
+  TESTS         += $(BIN)/test_metal_real
+else
+  METAL_OBJ     :=
+  METAL_LDFLAGS :=
+endif
 
 # Every C and header file under src/, plus the test harness header.
 # Used as a prerequisite by both the C tests and the WL bridge so any
@@ -95,6 +109,19 @@ wl-examples-test: $(WL_LIB)
 
 $(BIN):
 	@mkdir -p $@
+
+$(BUILD):
+	@mkdir -p $@
+
+# Metal backend object: compiled from .m with ARC, links Metal +
+# Foundation frameworks at the per-binary link step.
+$(BUILD)/backend_metal.o: src/backend/metal/_.m | $(BUILD)
+	clang -fobjc-arc -O2 -c -o $@ $<
+
+# test_metal_real opts into the dual-TU build: -DTHVM_HAS_METAL
+# tells src/thvm.c to skip the C stub and instead link the .o.
+$(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) | $(BIN)
+	$(CC) $(CFLAGS) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) -o $@ $<

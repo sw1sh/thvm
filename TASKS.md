@@ -313,7 +313,7 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       stub, anything else (including unset) defaults to CPU.
       tests/test_metal_stub.c covers the swap. -->
 
-- [ ] **Metal build pipeline**.  Makefile rules to compile
+- [x] **Metal build pipeline**.  Makefile rules to compile
       `src/backend/metal/_.m` with `clang -fobjc-arc` into
       `build/backend_metal.o`, Darwin-gated.  Link `-framework
       Metal -framework Foundation` into every test binary and
@@ -322,6 +322,11 @@ file as `backend/metal.c` (or `.m` if Objective-C is needed).
       Deliverable: `make` and `make test` still green, plus a
       new `bin/test_metal_real` that #defines THVM_HAS_METAL +
       links the .o to confirm the dual-TU build works.
+      <!-- WL dylib link with the .o is deferred -- it's CPU-
+      only today and the Metal init+kernels aren't reachable from
+      the WL surface yet.  Wire when the first real Metal kernel
+      lands.  test_metal_real covers the dual-TU shape. -->
+
 - [ ] **Real metal_init in _.m**.  Convert the stub in
       `src/backend/metal/_.m` (currently created by the prior
       item) into one that opens `MTLCreateSystemDefaultDevice()`

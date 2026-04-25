@@ -106,9 +106,15 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "backend/cpu/_.c"
 
 // === backend/metal/ ===
-// Stub today (returns errors for everything); the real Objective-C
-// implementation lands kernel-by-kernel per docs/metal.md.
+// On non-Apple builds (and Apple builds that DON'T compile the .m
+// glue separately), include the C stub so METAL_BACKEND still
+// resolves -- THVM_BACKEND=metal selects it but every compute call
+// returns an error.  Apple builds that link build/backend_metal.o
+// (the dual-TU Metal path) define THVM_HAS_METAL to skip this
+// include and use the .m-defined symbols instead.
+#ifndef THVM_HAS_METAL
 #include "backend/metal/_.c"
+#endif
 
 // === tensor/ ===
 #include "tensor/alloc.c"
