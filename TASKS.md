@@ -1428,6 +1428,28 @@ Realistic close-out for the overnight cron loop:
       a new probe) to print intermediate cotangent
       magnitudes at each grad chain step for b1, identifying
       where NaN first appears.
+      <!-- Localized to a much simpler chain than LeNet:
+      CONV2D{1,4,4} -> flat -> softmax -> CE -> TGrad wrt b1
+      returns ALL ZEROS.  Same chain without softmax (just
+      CONV2D + reduce-sum-loss) gives correct ~+/-5 bias
+      grad.  Same chain with MatVec replacing CONV2D works
+      correctly.  Combination of softmax+CE upstream + CONV2D
+      bias_grad downstream produces zero.
+      Diagnostic chain through TGrad[loss, conv_output] gives
+      correct probs - target ~ {0.083, ..., -0.917, ..., 0.083}.
+      Per-channel sum should be ~ {0.33, -0.67, 0.33}.  Got
+      {0, 0, 0}.  So the chain rule's CONV2D bias path
+      somehow cancels the cotangent contributions from the
+      softmax's two MUL branches (numerator e * RECIP(SUM(e))).
+      This is the REAL underlying bug -- probably a missing
+      reduction in the EXPAND grad rule for the
+      RECIP(SUM(e))-via-EXPAND path when the gy comes from a
+      multi-element distribution.  In LeNet the same failure
+      mode amplifies (deeper chain) into NaN/Inf rather than
+      a clean zero.  Probes saved at /tmp/conv2d-bias-cascade-
+      probe.wls, /tmp/conv2d-pool-bias-probe.wls,
+      /tmp/conv2d-softmax-probe.wls, /tmp/probe-g-deeper.wls
+      for re-execution.  Decomposing this task next fire. -->
 
 - [ ] **wl/Examples/lenet-mnist/train.wls**: K manual SGD or
       per-tensor Adam steps on a fixed MNIST batch through
