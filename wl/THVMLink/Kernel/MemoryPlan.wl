@@ -30,6 +30,8 @@ TMemoryPlan::usage = "TMemoryPlan[] returns a TMemoryPlan[<|...|>] snapshot of t
 
 TMemoryPlanReport::usage = "TMemoryPlanReport[plan] returns a Column with top-5 largest bufs by nbytes, top-5 longest-lived by alive_span, count by status, and total live bytes for the active backend.  Pass a TMemoryPlan[<|...|>] object (typically TMemoryPlan[]).";
 
+TMemoryPlanGantt::usage = "TMemoryPlanGantt[plan] returns a Graphics-headed Gantt-style chart of buffer lifecycles.  X-axis is topological depth on the kernel DAG; Y-axis is one row per buffer (sorted by alloc_depth, then nbytes desc).  Each bar spans [alloc_depth, last_use_depth] and is colored by status: blue=Preserved, green=Freeable, gray=Live, orange=External, red=Dead.  Hover tooltips expose buf id, nbytes, dtype, status, depths, alias_tids.  Options: \"BarHeight\" -> \"Log\" (default; height proportional to Log2[1 + nbytes]) or \"Uniform\" (all bars 1 unit tall).";
+
 (* Forward-declare bridge symbols owned by THVMLink.wl (loaded
    first via the autoload Sort + Get pattern in THVMLink.wl). *)
 {TKernelTable, TKernelInputs, TTensTable, TCpuBufTable,
@@ -249,6 +251,145 @@ TMemoryPlanReport[TMemoryPlan[a_Association]] := Module[
             b["status"]}]] /@ topBySpan]
     }]
 ]
+
+(* === TMemoryPlanGantt -- Graphics-based renderer ===
+   X-axis: topological depth on the kernel DAG (Min..Max + 1).
+   Y-axis: one row per buf, ordered by (alloc_depth ascending,
+   nbytes descending) so producer-cluster groupings stay visually
+   contiguous.  Each bar is a Tooltip-wrapped Rectangle whose
+   width spans [alloc_depth, last_use_depth + 1] and whose height
+   defaults to Log2[1 + nbytes] (toggle via "BarHeight" option). *)
+statusColor[status_String] := Switch[status,
+    "Preserved",
+        LightDarkSwitched[Lighter[StandardBlue,   0.55], Darker[StandardBlue,   0.4]],
+    "Freeable",
+        LightDarkSwitched[Lighter[StandardGreen,  0.55], Darker[StandardGreen,  0.4]],
+    "External",
+        LightDarkSwitched[Lighter[StandardOrange, 0.55], Darker[StandardOrange, 0.4]],
+    "Dead",
+        LightDarkSwitched[Lighter[StandardRed,    0.55], Darker[StandardRed,    0.4]],
+    _,   (* "Live" or unknown *)
+        LightDarkSwitched[Lighter[StandardGray,   0.55], Darker[StandardGray,   0.4]]
+]
+
+barHeightFn["Log"][nbytes_]     := Log2[1 + nbytes]
+barHeightFn["Uniform"][nbytes_] := 1
+barHeightFn[_][nbytes_]         := Log2[1 + nbytes]
+
+backendsActive[bufs_] := DeleteDuplicates[#["backend"] & /@ bufs] /. {
+    {} -> "(none)", {1} -> "CPU", {2} -> "Metal", {1, 2} | {2, 1} -> "CPU + Metal"
+}
+
+Options[TMemoryPlanGantt] = {"BarHeight" -> "Log"};
+TMemoryPlanGantt[TMemoryPlan[a_Association], opts:OptionsPattern[]] :=
+    Module[
+        {bufs = a["Bufs"], heightFn, sorted, maxDepth, rows, totalBytes},
+        heightFn = barHeightFn[OptionValue["BarHeight"]];
+        If[ bufs === {}, Return[Graphics[{}, ImageSize -> 320]]];
+        sorted = SortBy[bufs, {#["alloc_depth"] &, -#["nbytes"] &}];
+        maxDepth = Max[#["last_use_depth"] & /@ sorted];
+        totalBytes = Total[#["nbytes"] & /@ sorted];
+        (* Walk sorted bufs, stacking each by its (cumulative) bar
+           height.  Each row is {y0, y1, buf}; rendered as a
+           Tooltip-wrapped Rectangle with the status fill. *)
+        rows = Module[{y = 0}, Map[
+            Function[b, Module[{h = heightFn[b["nbytes"]], y0 = y},
+                y += h;
+                {y0, y0 + h, b}
+            ]],
+            sorted
+        ]];
+        Graphics[
+            {
+                EdgeForm[LightDarkSwitched[Black, White]],
+                Function[row, Module[{y0 = row[[1]], y1 = row[[2]], b = row[[3]]},
+                    {
+                        FaceForm[statusColor[b["status"]]],
+                        Tooltip[
+                            Rectangle[
+                                {b["alloc_depth"],     y0},
+                                {b["last_use_depth"] + 1, y1}
+                            ],
+                            Column[{
+                                Row[{"buf ", b["id"], " (",
+                                     If[b["backend"] === 1, "CPU",
+                                        If[b["backend"] === 2, "Metal", "?"]],
+                                     ")"}],
+                                Row[{"nbytes: ", Round[b["nbytes"]/1024., 0.01], " KiB"}],
+                                Row[{"dtype: ",  b["dtype"]}],
+                                Row[{"status: ", b["status"]}],
+                                Row[{"depth: ",  b["alloc_depth"], " .. ",
+                                                  b["last_use_depth"]}],
+                                Row[{"alias_tids: ", b["alias_tids"]}]
+                            }]
+                        ]
+                    }
+                ]] /@ rows
+            },
+            Frame -> True,
+            FrameTicks -> {Automatic, None},
+            FrameLabel -> {"topological depth (kernel DAG)", None},
+            PlotLabel -> Row[{
+                "TMemoryPlan / ", backendsActive[bufs], " — ",
+                Length[bufs], " bufs / ", Length[a["Kernels"]], " kernels / ",
+                Round[totalBytes/1024., 0.1], " KiB total / depth ",
+                If[ rows === {}, 0, maxDepth + 1]
+            }],
+            ImageSize -> Large,
+            AspectRatio -> 1/2,
+            PlotRangePadding -> Scaled[0.02]
+        ]
+    ]
+
+(* === MakeBoxes summary box ===
+   Mini stack-of-rectangles icon + counts + total bytes + active
+   backend(s).  Pattern mirrors Format.wl's TTensor / THeap boxes. *)
+memoryPlanSummaryIcon[] := Graphics[
+    {
+        EdgeForm[LightDarkSwitched[Black, White]],
+        FaceForm[LightDarkSwitched[Lighter[StandardBlue,  0.55], Darker[StandardBlue,  0.4]]],
+        Rectangle[{-0.7, -0.55}, { 0.3, -0.20}],
+        FaceForm[LightDarkSwitched[Lighter[StandardGreen, 0.55], Darker[StandardGreen, 0.4]]],
+        Rectangle[{-0.5, -0.15}, { 0.7,  0.20}],
+        FaceForm[LightDarkSwitched[Lighter[StandardGray,  0.55], Darker[StandardGray,  0.4]]],
+        Rectangle[{-0.7,  0.25}, { 0.5,  0.60}]
+    },
+    ImageSize -> Dynamic[{Automatic, 3.5 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
+memoryPlanQ[TMemoryPlan[a_Association]] :=
+    KeyExistsQ[a, "Kernels"] && KeyExistsQ[a, "Tens"] && KeyExistsQ[a, "Bufs"]
+memoryPlanQ[___] := False
+
+TMemoryPlan /: MakeBoxes[p_TMemoryPlan /; memoryPlanQ[Unevaluated[p]], fmt_] :=
+    With[{
+        a    = First[p],
+        icon = memoryPlanSummaryIcon[]
+    }, Module[{
+        bufs = a["Bufs"], totalBytes
+    },
+        totalBytes = Total[#["nbytes"] & /@ bufs];
+        BoxForm`ArrangeSummaryBox[
+            "TMemoryPlan",
+            p,
+            icon,
+            {
+                {
+                    BoxForm`SummaryItem[{"kernels: ", Length[a["Kernels"]]}],
+                    BoxForm`SummaryItem[{"bufs: ",    Length[bufs]}]
+                }
+            },
+            {
+                {
+                    BoxForm`SummaryItem[{"live: ",    Round[totalBytes/1024., 0.1], " KiB"}],
+                    BoxForm`SummaryItem[{"backend: ", backendsActive[bufs]}]
+                }
+            },
+            fmt,
+            "Interpretable" -> Automatic
+        ]
+    ]]
 
 End[];
 EndPackage[];

@@ -3240,7 +3240,7 @@ the GOAL workflow on Metal renders too).
       TMemoryPlanReport into memory-probe.wls. -->
 
 
-- [ ] **mp3: TMemoryPlanGantt renderer + tests**.  Add the
+- [x] **mp3: TMemoryPlanGantt renderer + tests**.  Add the
       Graphics-based Gantt to wl/THVMLink/Kernel/MemoryPlan.wl:
       x-axis = topological depth, y-axis = buf_id sorted by
       alloc_depth then nbytes desc, one Rectangle per buf
@@ -3258,6 +3258,24 @@ the GOAL workflow on Metal renders too).
       diamond (depth 0, 1, 1), buf collapse with reshape alias,
       Gantt smoke-check (returns Graphics-head).  ~80 LOC + ~50
       LOC test.
+      <!-- Landed.  TMemoryPlanGantt[plan, opts:OptionsPattern[]]
+      renders bufs sorted by (alloc_depth ascending, nbytes
+      descending), each as a Tooltip-wrapped Rectangle spanning
+      [alloc_depth, last_use_depth + 1] with status-colored fill
+      via LightDarkSwitched + Lighter/Darker.  Bar height
+      defaults to Log2[1 + nbytes]; "BarHeight" -> "Uniform"
+      switches to 1 unit each.  Title says
+      "TMemoryPlan / CPU / N bufs / N kernels / X KiB total /
+      depth N".  memoryPlanSummaryIcon[] is a 3-rectangle stack
+      (blue/green/gray) mirroring the status palette;
+      MakeBoxes UpValue uses BoxForm`ArrangeSummaryBox per
+      Format.wl's THeap pattern, exposing kernels/bufs counts
+      + total live KiB + active backend in the summary box.
+      tests/memory_plan.wlt grew 3 cases: gantt-head-is-graphics,
+      gantt-uniform-bar-height-option, makeboxes-renders-summary.
+      252 C + 238 WL tests green.  mp4 wires
+      TMemoryPlanReport into memory-probe.wls. -->
+
 
 - [ ] **mp4: probe integration**.  Append a
       TMemoryPlanReport[TMemoryPlan[]] call at the bottom of

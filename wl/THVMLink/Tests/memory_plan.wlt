@@ -76,3 +76,43 @@ VerificationTest[
     Column,
     TestID -> "memory-plan/report-head-is-column"
 ]
+
+VerificationTest[
+    (* TMemoryPlanGantt returns a Graphics expression. *)
+    TInit[];
+    TReset[];
+    a   = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b   = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+    res = TRealize @ TUOpAdd[a, b];
+    Head @ TMemoryPlanGantt[TMemoryPlan[]],
+    Graphics,
+    TestID -> "memory-plan/gantt-head-is-graphics"
+]
+
+VerificationTest[
+    (* TMemoryPlanGantt with "BarHeight" -> "Uniform" still
+       returns Graphics; smoke-test the option pass-through. *)
+    TInit[];
+    TReset[];
+    a   = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b   = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+    res = TRealize @ TUOpAdd[a, b];
+    Head @ TMemoryPlanGantt[TMemoryPlan[], "BarHeight" -> "Uniform"],
+    Graphics,
+    TestID -> "memory-plan/gantt-uniform-bar-height-option"
+]
+
+VerificationTest[
+    (* MakeBoxes summary: rendering TMemoryPlan via ToBoxes
+       should NOT throw and should produce an InterpretationBox-
+       containing structure (the BoxForm`ArrangeSummaryBox
+       wrapper). *)
+    TInit[];
+    TReset[];
+    a   = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b   = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+    res = TRealize @ TUOpAdd[a, b];
+    !FreeQ[ToBoxes[TMemoryPlan[]], InterpretationBox],
+    True,
+    TestID -> "memory-plan/makeboxes-renders-summary"
+]
