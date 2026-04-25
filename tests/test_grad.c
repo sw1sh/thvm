@@ -215,6 +215,26 @@ int main(void) {
   Term g_relu  = wnf(uop_grad(relu, gy, a));
   CHECK_EQ(term_ext(g_relu), UOP_ADD);
 
+  TEST_BEGIN("grad/shrink-emits-pad-on-cotangent");
+  // GRAD[SHRINK(a, [{1,4}]), gy, a] -> GRAD[a, PAD(gy, [1,1]), a]
+  // -> cascade to leaf: EXPAND(PAD(gy, [1,1]), [5]).  Source is
+  // length 5; SHRINK keeps indices [1,4) -> length 3; the grad
+  // PADs gy with 1 zero on each side.
+  u32 d5[1] = {5};
+  u32 t5    = alloc_f32_tensor(d5, 1);
+  Term a5   = term_new(0, TAG_TEN, DT_F32, t5);
+  u32 sh_be[2] = {1, 4};
+  Term sk   = uop_shrink(a5, 1, sh_be);
+  Term g_sk = wnf(uop_grad(sk, gy, a5));
+  CHECK_EQ(term_ext(g_sk), UOP_EXPAND);
+  Term inside = unexpand(g_sk);
+  CHECK_EQ(term_ext(inside), UOP_PAD);
+  // PAD heap: [src, NUM(b0)=1, NUM(e0)=1].
+  Term b_cell = heap_read(term_val(inside) + 1);
+  Term e_cell = heap_read(term_val(inside) + 2);
+  CHECK_EQ(term_val(b_cell), 1);
+  CHECK_EQ(term_val(e_cell), 1);
+
   TEST_BEGIN("grad/upfront-expand-carries-target-shape");
   // The leaf-target rule lifts gy to target.shape (via EXPAND with
   // dims read from TENS).  Heap layout is [src, NUM(ndim), NUM(d0), ...]

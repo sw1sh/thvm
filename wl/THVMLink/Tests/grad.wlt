@@ -119,6 +119,32 @@ VerificationTest[
     TestID -> "grad/reshape-inside-mul-chain"
 ]
 
+(* === SHRINK: grad PADs cotangent back to source extent === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0, 5.0}, "Real32"];
+    (* SHRINK keeps indices [1, 4) -- a length-3 slice from a length-5
+       tensor.  d/d(a) of that selection w.r.t. a is the {0,1,1,1,0}
+       indicator: gy=1 inside the kept window, 0 outside. *)
+    g = TRealize @ TGrad[TUOpShrink[a, {{1, 4}}], a];
+    Normal @ TTensorData[g],
+    {0.0, 1.0, 1.0, 1.0, 0.0},
+    TestID -> "grad/shrink-pads-cotangent-with-zeros"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0, 5.0}, "Real32"];
+    (* d(sum(SHRINK(a*a, [1,4])))/d(a) = 2a inside the kept window,
+       0 outside.  Exercises the chain rule through MUL inside SHRINK. *)
+    expr = TUOpReduce[TUOpShrink[TUOpMul[a, a], {{1, 4}}], 0, "SUM"];
+    g = TRealize @ TGrad[expr, a];
+    Normal @ TTensorData[g],
+    {0.0, 4.0, 6.0, 8.0, 0.0},
+    TestID -> "grad/shrink-inside-mul-chain"
+]
+
 (* === CMPLT / ReLU: mask is non-differentiable === *)
 
 VerificationTest[

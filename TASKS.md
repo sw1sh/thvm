@@ -1608,7 +1608,7 @@ Realistic close-out for the overnight cron loop:
       loses gradients.  Prerequisite for the TUOpConv2D
       lowering below.
 
-  - [ ] **a. SHRINK grad rule.**  Forward
+  - [x] **a. SHRINK grad rule.**  Forward
         `SHRINK(a, ranges)` extracts a sub-region.  Gradient:
         `PAD(cotangent, complementary_widths)` zero-fills back
         to the original extent (left-pad = range[0], right-pad
@@ -1621,6 +1621,18 @@ Realistic close-out for the overnight cron loop:
                produces grad = [0, 1, 1, 1, 0] (when seed = 1
                on the 3-element output).
         ~25 LOC of C + ~20 LOC of tests.
+        <!-- Landed.  Subtle: the cotangent gy reaches the SHRINK
+        rule as the scalar 1.0 seed.  PAD applied to a scalar
+        implicitly rank-ups to {1} (per cpu_op_pad's
+        src0_dims=[1] derivation), producing a length-3 output
+        [0, 1, 0] that the leaf-EXPAND then numel-cycles to
+        [0, 1, 0, 0, 1].  Fix: explicitly EXPAND gy to SHRINK's
+        output shape before PADding, so PAD has a well-formed
+        per-axis source extent.  204 WL + 146 C tests green
+        (added grad/shrink-pads-cotangent-with-zeros + grad/
+        shrink-inside-mul-chain wlt + grad/shrink-emits-pad-on-
+        cotangent C structural test). -->
+
 
   - [ ] **b. PAD grad rule.**  Forward `PAD(a, widths)`
         zero-pads.  Gradient: `SHRINK(cotangent, ranges)` where
