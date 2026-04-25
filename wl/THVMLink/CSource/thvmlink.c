@@ -528,3 +528,23 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ref(WolframLibraryData libData, mint arg
   MArgument_setInteger(res, (mint)term_new_ref(name));
   return LIBRARY_NO_ERROR;
 }
+
+EXTERN_C DLLEXPORT int thvm_wl_term_new_op2(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32  op = (u32) MArgument_getInteger(args[0]);
+  Term x  = (Term)MArgument_getInteger(args[1]);
+  Term y  = (Term)MArgument_getInteger(args[2]);
+  MArgument_setInteger(res, (mint)term_new_op2(op, x, y));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_term_new_mat(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32  m = (u32) MArgument_getInteger(args[0]);
+  Term h = (Term)MArgument_getInteger(args[1]);
+  Term f = (Term)MArgument_getInteger(args[2]);
+  MArgument_setInteger(res, (mint)term_new_mat(m, h, f));
+  return LIBRARY_NO_ERROR;
+}

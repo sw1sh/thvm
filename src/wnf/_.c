@@ -107,9 +107,41 @@ enter:
       whnf = next;
       goto apply;
     }
+    case TAG_OP2: {
+      // Strict on x then y; both must reduce to TAG_NUM for the op
+      // to fire.  Inline the inner reductions via a recursive wnf()
+      // call (single-threaded; the saved base keeps the stack
+      // clean).  If either operand stays non-NUM the OP2 is stuck
+      // and we return it as WHNF.
+      u64  loc = term_val(next);
+      u32  op  = term_ext(next);
+      Term x   = wnf(heap_read(loc + 0));
+      Term y   = wnf(heap_read(loc + 1));
+      if (term_tag(x) == TAG_NUM && term_tag(y) == TAG_NUM) {
+        u32 xv = (u32)term_val(x);
+        u32 yv = (u32)term_val(y);
+        u32 r;
+        switch (op) {
+          case OP_ADD: r = xv + yv; break;
+          case OP_SUB: r = xv - yv; break;
+          case OP_MUL: r = xv * yv; break;
+          case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
+          case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
+          default:     r = 0; break;
+        }
+        ITRS++;
+        whnf = term_new(0, TAG_NUM, term_ext(x), r);
+        goto apply;
+      }
+      heap_set(loc + 0, x);
+      heap_set(loc + 1, y);
+      whnf = next;
+      goto apply;
+    }
     case TAG_LAM:
     case TAG_ERA:
     case TAG_SUP:
+    case TAG_MAT:
     default: {
       whnf = next;
       goto apply;
@@ -131,6 +163,27 @@ apply:
           case TAG_ERA: {
             whnf = interact_app_era();
             continue;
+          }
+          case TAG_MAT: {
+            // APP-MAT-NUM: force the arg, dispatch on its NUM value.
+            // Heap[mat_loc+0] = handler (used on match).
+            // Heap[mat_loc+1] = fallback (applied to arg on miss).
+            u64  mat_loc = term_val(whnf);
+            u32  match   = term_ext(whnf);
+            Term arg_w   = wnf(arg);
+            ITRS++;
+            if (term_tag(arg_w) == TAG_NUM &&
+                (u32)term_val(arg_w) == match) {
+              next = heap_read(mat_loc + 0);
+              goto enter;
+            }
+            // Miss: build APP(fallback, arg_w) and continue.
+            Term fallback = heap_read(mat_loc + 1);
+            u64  app2     = heap_alloc(2);
+            heap_set(app2 + 0, fallback);
+            heap_set(app2 + 1, arg_w);
+            next = term_new(0, TAG_APP, 0, app2);
+            goto enter;
           }
           default: {
             heap_set(app_loc + 0, whnf);

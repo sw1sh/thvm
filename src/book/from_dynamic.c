@@ -44,6 +44,8 @@ static u32 dyn_arity(u8 tag, u32 ext) {
     case TAG_APP: return 2;
     case TAG_SUP: return 2;
     case TAG_DUP: return 1;
+    case TAG_OP2: return 2;
+    case TAG_MAT: return 2;
     case TAG_UOP: {
       switch (ext) {
         case UOP_CONST:                                    return 1;

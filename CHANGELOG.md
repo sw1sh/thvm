@@ -6,6 +6,44 @@ dated section.
 
 ## Unreleased
 
+### Added: phase 2 -- MAT (numeric switch) + OP2 (binary ops on NUMs)
+
+Two more term tags so a recursive REF body can hit a base case and
+manipulate its iteration counter (precondition for the SGD-as-lambda
+optimizer in phase 3):
+
+- `TAG_OP2` (val = heap loc -> [x, y], ext = OP_*) -- strict on x
+  then y; both must reduce to TAG_NUM for the op to fire.  Opcodes
+  `OP_ADD` / `OP_SUB` / `OP_MUL` / `OP_EQ` / `OP_LT`.  Stuck if
+  either operand stays non-NUM.
+- `TAG_MAT` (val = heap loc -> [handler, fallback], ext = match)
+  -- numeric-switch atom.  In wnf's `apply` phase, when an APP frame
+  pops with a MAT head, the arg is forced via a recursive `wnf()`
+  call: NUM matching `ext` reduces to `handler`, otherwise the
+  result is `APP(fallback, arg)`.  Mirrors HVM4's APP-MAT-NUM.
+
+`book/from_dynamic.c` and `alo/realize.c` learned the two new
+fixed-arity-2 nodes so REF unfolding handles them.  `wnf/_.c` got
+`case TAG_OP2` in enter and a `case TAG_MAT` branch inside the APP
+apply switch.
+
+WL surface in `wl/THVMLink/Kernel/Switch.wl`:
+- `TNum[i]` / `TNum[i, dtype]` -- a TAG_NUM atom (defaults to i32).
+- `TOp2["+"|"-"|"*"|"=="|"<", x, y]` -- a TAG_OP2 term.
+- `TMatNum[matchVal, handler, fallback]` -- a TAG_MAT atom.
+- `TIfZero[counter, then, else]` -- sugar that wraps the else branch
+  in a discarding lambda so MAT's miss-path looks like a plain
+  conditional.
+
+Tests:
+- `tests/test_mat_op2.c` (9 cases) -- OP2 arithmetic + MAT match /
+  miss + an end-to-end **recursive countdown** built from
+  REF + ALO + LAM/APP + MAT + OP2 (`@count 0 5 -> NUM(5)`).
+- `wl/THVMLink/Tests/switch.wlt` (9 cases) -- the WL surface plus
+  recursive countdown + sumto via `TDef`/`TRef`.  All pass.
+
+All 331 C cases + 39 WL cases pass.
+
 ### Added: phase 1 of REF / ALO -- lazy named definitions
 
 Two new term tags layered on top of the IC + UOP graph so users can

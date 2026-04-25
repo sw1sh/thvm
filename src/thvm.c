@@ -42,6 +42,8 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 #include "term/sub/set.c"
 #include "term/new_ref.c"
 #include "term/new_alo.c"
+#include "term/new_op2.c"
+#include "term/new_mat.c"
 
 // === heap/ ===
 #include "heap/alloc.c"

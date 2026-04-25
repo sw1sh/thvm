@@ -79,7 +79,18 @@ typedef u64 Term;
 #define TAG_REF  11  // book reference.   val = name id (index into DEFS)
 #define TAG_ALO  12  // lazy alloc.       val = dyn heap loc holding [book_term, NUM(state_id)]
 
-#define TAG_COUNT 13
+// === Numeric switch + binary op (Phase-2 termination + counter) ===
+#define TAG_OP2  13  // binary op.        val = heap loc -> [x, y], ext = opcode (OP_*)
+#define TAG_MAT  14  // numeric switch.   val = heap loc -> [handler, fallback], ext = match value
+
+#define TAG_COUNT 15
+
+// === OP2 opcodes (TAG_OP2 ext field) ===
+#define OP_ADD  0
+#define OP_SUB  1
+#define OP_MUL  2
+#define OP_EQ   3   // returns NUM(1) for equal, NUM(0) otherwise
+#define OP_LT   4   // less-than: NUM(1) if x<y else NUM(0)
 
 // === Dtypes ===
 #define DT_F32   0
@@ -297,6 +308,12 @@ Term alo_force       (Term alo_term);
 // === ref ===
 fn Term term_new_ref (u32 name);
 fn Term term_new_alo (Term book_term, u32 state_id);
+
+// === op2 + mat ===
+// Both allocate a 2-cell dyn heap block.  OP2's cells are [x, y];
+// MAT's cells are [handler, fallback].  See wnf for the firing rules.
+fn Term term_new_op2 (u32 opcode, Term x, Term y);
+fn Term term_new_mat (u32 match_val, Term handler, Term fallback);
 
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.
