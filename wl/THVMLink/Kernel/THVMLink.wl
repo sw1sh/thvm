@@ -36,6 +36,8 @@ THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputati
 TWnf::usage       = "TWnf[term] reduces `term` to weak normal form.  TWnf[term, n] bails after at most `n` interactions and returns the partially reduced term; pending eliminator frames are exposed via TStack[].  n = 0 means unbounded (same as TWnf[term]).";
 TStep::usage      = "TStep[term] = TWnf[term, 1].  Fires exactly one interaction.  Inspect TStack[] for the pending frames.";
 TStack::usage     = "TStack[] returns the eliminator frames pending at the most recent bail point of TStep / TWnf[_, n].  Each frame is a TTerm tagged APP / DP0 / DP1.  Empty list when no bail occurred.";
+TRedexes::usage   = "TRedexes[] lists every redex in the live heap.  TRedexes[t] additionally DFS-walks `t` so a root the caller is holding directly is included.  Each entry is a TTerm uniquely identifying the redex by its packed Term value.";
+TInteract::usage  = "TInteract[redex] fires exactly one interaction at `redex`.  Returns <| \"result\" -> TTerm, \"fresh\" -> {TTerm...} |> on success, or Failure[\"NotARedex\", ...] if `redex` is no longer reducible.  \"fresh\" lists the redex-status flips caused by this fire (locally produced + back-ref propagation into shared subgraphs).";
 TReduce::usage    = "TReduce[term] reduces `term` to WNF in-place and returns `term` (the original root, useful as a seed for THeapGraph after reduction).";
 TItrs::usage      = "TItrs[] returns the cumulative interaction count.";
 TTermExpr::usage  = "TTermExpr[term] walks the heap from `term` and returns a nested expression whose heads are tag-name strings (\"LAM\", \"APP\", \"SUP\", \"DUP\", \"DP0\", \"DP1\", \"VAR\", \"ERA\").  Useful for snapshotting / diffing pre and post TWnf states by direct equality (===).";
@@ -184,11 +186,14 @@ $heapAllocFn := $heapAllocFn = load["thvm_wl_heap_alloc", {Integer},            
 $heapReadFn  := $heapReadFn  = load["thvm_wl_heap_read",  {Integer},                Integer];
 $heapSetFn   := $heapSetFn   = load["thvm_wl_heap_set",   {Integer, Integer},       Integer];
 
-$wnfFn       := $wnfFn       = load["thvm_wl_wnf",        {Integer},                Integer];
-$wnfNFn      := $wnfNFn      = load["thvm_wl_wnf_n",      {Integer, Integer},       Integer];
-$stackSizeFn := $stackSizeFn = load["thvm_wl_stack_size", {},                       Integer];
-$stackGetFn  := $stackGetFn  = load["thvm_wl_stack_get",  {Integer},                Integer];
-$itrsFn      := $itrsFn      = load["thvm_wl_itrs",       {},                       Integer];
+$wnfFn          := $wnfFn          = load["thvm_wl_wnf",            {Integer},          Integer];
+$wnfNFn         := $wnfNFn         = load["thvm_wl_wnf_n",          {Integer, Integer}, Integer];
+$stackSizeFn    := $stackSizeFn    = load["thvm_wl_stack_size",     {},                 Integer];
+$stackGetFn     := $stackGetFn     = load["thvm_wl_stack_get",      {Integer},          Integer];
+$redexSnapFn    := $redexSnapFn    = load["thvm_wl_redex_snapshot", {{Integer, 1}},     Integer];
+$redexGetFn     := $redexGetFn     = load["thvm_wl_redex_get",      {Integer},          Integer];
+$interactFn     := $interactFn     = load["thvm_wl_interact",       {Integer},          Integer];
+$itrsFn         := $itrsFn         = load["thvm_wl_itrs",           {},                 Integer];
 
 (* tensor *)
 $tensorAllocFn   := $tensorAllocFn   = load["thvm_wl_tensor_alloc",   {Integer, {Integer, 1}}, Integer];
@@ -299,6 +304,47 @@ TStack[] := (ensureInit[];
         Table[TTerm[$stackGetFn[i]], {i, 0, n - 1}]
     ]
 )
+
+(* TRedexes[] -- list every redex in the live heap (no root walk).
+   TRedexes[roots___] -- additionally DFS-walks each root so Terms
+   the caller is holding directly (which may not be stored in any
+   heap cell) are included.  Returns a list of TTerm cells deduped
+   by packed Term value. *)
+snapshotRedexes[rootRaws_List] := Module[{n},
+    n = $redexSnapFn[rootRaws];
+    Table[$redexGetFn[i], {i, 0, n - 1}]
+]
+
+TRedexes[roots___] := (ensureInit[];
+    TTerm /@ snapshotRedexes[ttermRaw /@ {roots}]
+)
+
+(* TInteract[redex] / TInteract[redex, root | {roots...}] -- fire
+   ONE interaction at `redex`.  Returns
+       <| "result" -> TTerm,     -- replaces the redex
+          "fresh"  -> {TTerm...} -- redex-status flips caused by this fire
+       |>
+   on success, or Failure["NotARedex", ...] if `redex` isn't
+   reducible right now.  Pass `root` (the caller's outer term) so
+   the "fresh" diff sees status flips on cells reachable from root
+   but not stored anywhere in the heap. *)
+TInteract[redex_TTerm, roots___] := Module[{
+    redexRaw, rootRaws, pre, result, post, fresh
+},
+    ensureInit[];
+    redexRaw = ttermRaw[redex];
+    rootRaws = ttermRaw /@ Flatten[{roots}];
+    pre = snapshotRedexes[Join[{redexRaw}, rootRaws]];
+    result = $interactFn[redexRaw];
+    If[ result === 0,
+        Return @ Failure["NotARedex",
+            <| "Message" -> "TInteract: cell is not a redex right now",
+               "redex"   -> redex |>]
+    ];
+    post  = snapshotRedexes[Join[{result}, rootRaws]];
+    fresh = TTerm /@ Complement[post, pre];
+    <| "result" -> TTerm[result], "fresh" -> fresh |>
+]
 
 (* TReduce reduces `t` to WNF in-place and returns the original root.
    Pairs with THeapGraph[t] / TTermTree[t] when you want the

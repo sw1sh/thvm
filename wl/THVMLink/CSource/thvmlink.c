@@ -196,6 +196,52 @@ EXTERN_C DLLEXPORT int thvm_wl_itrs(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// === redex enumeration / single-redex firing ===
+// Pattern matches TStack: snapshot into a static buffer, then expose
+// length + indexed get.  thvm_wl_redex_snapshot takes a single root
+// (0 = "no root, heap scan only") and returns the redex count.
+//
+// thvm_wl_interact takes a redex Term and returns the rewrite result
+// (0 if the input wasn't actually a redex -- WL converts to Failure).
+
+#define REDEX_BUF_CAP 4096
+static Term REDEX_BUF[REDEX_BUF_CAP];
+static u32  REDEX_BUF_N = 0;
+
+EXTERN_C DLLEXPORT int thvm_wl_redex_snapshot(WolframLibraryData libData, mint argc,
+                                              MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  // args[0] is a rank-1 Integer MTensor of root Terms (may be empty
+  // for pure heap-scan).
+  MTensor t = MArgument_getMTensor(args[0]);
+  mint n    = libData->MTensor_getFlattenedLength(t);
+  mint *src = libData->MTensor_getIntegerData(t);
+  Term roots[64];
+  u32  n_roots = (n > 64) ? 64 : (u32)n;
+  for (u32 i = 0; i < n_roots; i++) roots[i] = (Term)src[i];
+  REDEX_BUF_N = redex_enumerate(roots, n_roots, REDEX_BUF, REDEX_BUF_CAP);
+  MArgument_setInteger(res, (mint)REDEX_BUF_N);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_redex_get(WolframLibraryData libData, mint argc,
+                                         MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 i = (u32)MArgument_getInteger(args[0]);
+  Term t = (i < REDEX_BUF_N) ? REDEX_BUF[i] : 0;
+  MArgument_setInteger(res, (mint)t);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_interact(WolframLibraryData libData, mint argc,
+                                        MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term redex = (Term)MArgument_getInteger(args[0]);
+  Term r = redex_fire(redex);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 // === tensors ===
 // TTensor constructors, inspection, refcount hooks.  Shapes and data
 // arrive as Integer / Real arrays; we pack into Shape / dtype bits

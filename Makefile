@@ -20,7 +20,8 @@ TESTS := \
   $(BIN)/test_grad \
   $(BIN)/test_ref \
   $(BIN)/test_mat_op2 \
-  $(BIN)/test_wnf_n
+  $(BIN)/test_wnf_n \
+  $(BIN)/test_redex
 
 # Every C and header file under src/, plus the test harness header.
 # Used as a prerequisite by both the C tests and the WL bridge so any

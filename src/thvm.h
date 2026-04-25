@@ -427,6 +427,17 @@ fn Term wnf_n(Term t, u64 max_steps);
 extern Term WNF_LAST_STACK[];
 extern u32  WNF_LAST_STACK_LEN;
 
+// Redex inspection / single-redex firing for the debugger interface.
+// is_redex predicate; redex_fire dispatches the matching interaction
+// and returns the result Term (0 if validation fails -- the input
+// wasn't a redex any more).  redex_fire ALSO patches every heap cell
+// still holding the old redex Term to point at the result, so
+// nested redexes get their parent slots updated automatically.
+// redex_enumerate scans the live heap for distinct redex Terms.
+fn u8   is_redex(Term t);
+fn Term redex_fire(Term redex);
+fn u32  redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap);
+
 // === runtime lifecycle ===
 void thvm_init(void);
 void thvm_free(void);

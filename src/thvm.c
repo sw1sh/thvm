@@ -150,6 +150,7 @@ u32       ALO_STATES_NEXT = 1;   // 0 reserved as "empty chain"
 // The reducer dispatches to the interactions and to materialize,
 // so every file it calls must be defined above.
 #include "wnf/_.c"
+#include "wnf/redex.c"
 
 // === runtime lifecycle ===
 void thvm_init(void) {
