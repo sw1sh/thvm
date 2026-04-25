@@ -69,6 +69,7 @@ $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =
   $UopRecip::usage      = $UopExp2::usage = $UopLog2::usage =
   $UopSqrt::usage       = $UopCmplt::usage = $UopReduce::usage =
   $UopGrad::usage       = $UopConv2D::usage = $UopCmpeq::usage =
+  $UopLoad::usage       =
     "UOp opcode id; mirrors UOP_* in src/thvm.h.";
 
 $ReduceSum::usage = $ReduceMax::usage =
@@ -157,6 +158,7 @@ $UopAdd = 9;          $UopMul = 10;    $UopNeg = 11;
 $UopRecip = 12;       $UopExp2 = 13;   $UopLog2 = 14;
 $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
 $UopGrad = 18;        $UopConv2D = 19; $UopCmpeq = 20;
+$UopLoad = 21;
 
 $uopNames = <|
     0  -> "MATERIALIZE", 1  -> "KERNEL", 2  -> "CONST",
@@ -165,7 +167,8 @@ $uopNames = <|
     9  -> "ADD",         10 -> "MUL",    11 -> "NEG",
     12 -> "RECIP",       13 -> "EXP2",   14 -> "LOG2",
     15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE",
-    18 -> "GRAD",        19 -> "CONV2D", 20 -> "CMPEQ"
+    18 -> "GRAD",        19 -> "CONV2D", 20 -> "CMPEQ",
+    21 -> "LOAD"
 |>;
 
 (* Reduce-kind constants *)
@@ -388,6 +391,7 @@ uopCellCount[op_] := Switch[op,
        <src-subtree>].  The trailing NUM(d_i) cells are integer
        parameters, not children of structural interest. *)
     $UopReshape,                                                    1,
+    $UopLoad,                                                       1,
     _,                                                              0
 ]
 

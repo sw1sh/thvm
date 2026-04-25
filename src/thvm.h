@@ -124,8 +124,12 @@ typedef u64 Term;
                              //   recovered from weights.shape at materialize
                              //   time (weights = {C_out, C_in, kh, kw})
 #define UOP_CMPEQ       20   // heap = [a, b]; mask of (a == b), 0/1 floats
+#define UOP_LOAD        21   // heap = [src]; explicit "read this tensor" boundary
+                             //   marker (mirrors tinygrad's UOps.LOAD).  Slot
+                             //   reserved -- constructor + materializer land in
+                             //   sub-item (b); see TASKS.md UOP_LOAD arc.
 
-#define UOP_COUNT       21
+#define UOP_COUNT       22
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0

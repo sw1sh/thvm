@@ -1609,7 +1609,7 @@ Realistic close-out for the overnight cron loop:
       LOAD splits the latter out as its own UOP so kernel
       programs explicitly read inputs.
 
-  - [ ] **a. Reserve UOP_LOAD opcode + WL constant**.
+  - [x] **a. Reserve UOP_LOAD opcode + WL constant**.
         Add `UOP_LOAD` to the opcode enum in src/thvm.h
         (next after the highest current opcode number),
         bump uopCellCount in WL to count its 1 source cell,
@@ -1619,6 +1619,15 @@ Realistic close-out for the overnight cron loop:
         layer on without renumbering.  Smoke test: assert
         `$UopLoad` is defined and is a distinct integer
         from every other `$Uop*`.  ~30 LOC.
+        <!-- UOP_LOAD = 21 in src/thvm.h, with arity-1 entries
+        added to dyn_arity in src/book/from_dynamic.c and
+        alo_node_arity in src/alo/realize.c so book snapshot
+        + ALO realize agree.  $UopLoad / $UopLoad::usage
+        exported from THVMLink.wl, $uopNames table extended,
+        uopCellCount returns 1.  New wl/THVMLink/Tests/uop_load.wlt
+        smoke-tests integer-ness + distinctness + name lookup
+        (3 tests).  202 WL + 146 C tests green. -->
+
 
   - [ ] **b. TUOpLoad[tensor] constructor + identity
         materializer**.  Add a constructor that wraps a
