@@ -86,14 +86,15 @@ WL_SRC      := $(WL_PACLET)/CSource/thvmlink.c
 $(WL_LIB_DIR):
 	@mkdir -p $@
 
-$(WL_LIB): $(WL_SRC) $(SRC) | $(WL_LIB_DIR)
+$(WL_LIB): $(WL_SRC) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(WL_LIB_DIR)
 	@if [ -z "$(WOLFRAM_APP)" ] || [ ! -d "$(WL_INCLUDE)" ]; then \
 	  echo "ERROR: Wolfram install not found.  Set WOLFRAM_APP=/Applications/Wolfram*.app"; \
 	  exit 1; \
 	fi
 	$(CC) $(CFLAGS) -fPIC $(WL_DYLIB_FLAGS) \
 	  -I"$(WL_INCLUDE)" \
-	  -o $@ $(WL_SRC)
+	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
+	  -o $@ $(WL_SRC) $(METAL_OBJ) $(METAL_LDFLAGS)
 ifeq ($(UNAME_S),Darwin)
 	codesign --force --sign - $@
 endif

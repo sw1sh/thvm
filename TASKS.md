@@ -461,12 +461,21 @@ Pool.  That's a Phase 7+ concern.
 
 Realistic close-out for the overnight cron loop:
 
-- [ ] **WL dylib links the Metal backend**.  Today the dylib is
+- [x] **WL dylib links the Metal backend**.  Today the dylib is
       CPU-only -- `THVM_BACKEND=metal` from WL would pick the C
       stub.  Add the dylib build rule to `-DTHVM_HAS_METAL` +
       link `build/backend_metal.o` and the Metal frameworks on
       Darwin.  Verify a WL forward pass runs with the env var
       set (look for the "metal_init -- device:" line on stderr).
+      <!-- Plus a real bug surfaced + fixed: thvm_wl_tensor_from_
+      na hardcoded &CPU_BACKEND, so even with THVM_BACKEND=metal
+      every WL-created tensor lived in CPU memory while
+      dispatch hit Metal -- a buf_id collision crashed the
+      kernel.  Switched it to CURRENT_BACKEND, with a memcpy +
+      MNumericArray_disown for non-CPU backends (zero-copy
+      external buffer remains the CPU fast path).  ADD now
+      returns {11, 22, 33, 44} via Metal end-to-end. -->
+
 - [ ] **Forward-only LeNet demo**: `wl/Examples/lenet-mnist/
       forward.wls` that loads a few MNIST samples via
       `TMnistBatch[]`, runs `TFromNet[TLeNet[], img]` per sample,

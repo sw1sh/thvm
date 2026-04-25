@@ -360,9 +360,21 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
   d->dtype    = dtype;
   d->refcount = 1;
   d->view     = view_create(shape);
-  d->backend  = &CPU_BACKEND;
-  d->buf_id   = cpu_buf_alloc_external(
-      naData, (u64)numel * 4, release_numeric_array, (void *)na);
+  d->backend  = CURRENT_BACKEND;
+  if (CURRENT_BACKEND == &CPU_BACKEND) {
+    // CPU fast path: zero-copy reference into the NumericArray's
+    // bytes; release_numeric_array drops the WL handle when the
+    // underlying buffer hits refcount 0.
+    d->buf_id = cpu_buf_alloc_external(
+        naData, (u64)numel * 4, release_numeric_array, (void *)na);
+  } else {
+    // Other backends (Metal): allocate + memcpy.  The
+    // NumericArray reference is released right after the copy --
+    // the data lives in backend-owned storage.
+    d->buf_id = CURRENT_BACKEND->buf_alloc((u64)numel * 4);
+    CURRENT_BACKEND->buf_write(d->buf_id, naData, (u64)numel * 4);
+    libData->numericarrayLibraryFunctions->MNumericArray_disown(na);
+  }
 
   Term term = term_new(0, TAG_TEN, dtype, id);
   MArgument_setInteger(res, (mint)term);
