@@ -1600,13 +1600,22 @@ Realistic close-out for the overnight cron loop:
       smoke-tested end-to-end. -->
 
 
-- [ ] **interact_grad rules for SHRINK / PAD / PERMUTE / FLIP (arc)**.
+- [x] **interact_grad rules for SHRINK / PAD / PERMUTE / FLIP (arc)**.
       Currently autograd through any movement op other than
       RESHAPE / EXPAND falls into the unhandled-default branch
       and emits grad_zero -- meaning a tinygrad-style CONV2D
       lowering (which uses SHRINK + PAD + PERMUTE) silently
       loses gradients.  Prerequisite for the TUOpConv2D
       lowering below.
+      <!-- All 5 sub-items (a-e) landed across separate fires.
+      Net effect: src/interact/uop_grad.c gained UOP_SHRINK,
+      UOP_PAD, UOP_PERMUTE, UOP_FLIP cases (each with the same
+      gy-lift-via-EXPAND pattern so the inner movement op gets
+      well-formed per-axis source dims).  211 WL + 146 C tests
+      green; SHRINK+PERMUTE+PAD+FLIP composition smoke test
+      proves the four rules chain-rule together.  Unblocks the
+      TUOpConv2D lowering (next item). -->
+
 
   - [x] **a. SHRINK grad rule.**  Forward
         `SHRINK(a, ranges)` extracts a sub-region.  Gradient:
