@@ -2303,14 +2303,17 @@ Realistic close-out for the overnight cron loop:
           f3 next; f1b can become trivial after f3 lands. -->
 
 
-    - [ ] **f1c. Verify the kernel-count drop on LeNet**.
+    - [blocked: depends on f1b] **f1c. Verify the kernel-count drop on LeNet**.
           Re-run lenet-mnist/forward.wls and report the
           KernelEntry count before vs. after the fusion.
           Append numbers to docs/kernelization.md.  Acceptance:
           drop of >30% on the LeNet forward pass.  ~15 LOC
           of probe + doc update.
+          <!-- Blocked by f1b: there's no fusion to measure
+          until f1b lands.  Re-attempt after f3 (ShapeTracker)
+          when f1b becomes feasible. -->
 
-  - [ ] **f2. Fuse the conv2d-lowered ADD-fold into one
+  - [blocked: depends on f1 OR a new variable-arity ADD opcode] **f2. Fuse the conv2d-lowered ADD-fold into one
         kernel**.  Detect the Fold[TUOpAdd, partials, ...]
         pattern in TUOpConv2DLowered and emit a single kernel
         with n ADDs in its program (rather than n-1 separate
@@ -2318,6 +2321,15 @@ Realistic close-out for the overnight cron loop:
         TUOpConv2DLowered (stage-2 helper `TUOpAddFold`) or a
         general elementwise-chain pass on top of f1.  Should
         drop ~25 kernel slots per LeNet conv.
+        <!-- Blocked.  The "general elementwise-chain pass on
+        top of f1" path is unavailable while f1 (= f1b) is
+        blocked.  The special-case "TUOpAddFold helper" path
+        requires either a new variable-arity ADD opcode +
+        kernel + WL binding (~150 LOC of new infrastructure)
+        OR an interim solution that allocates ALL N partial
+        outputs and explicitly chains them (no fusion --
+        defeats the purpose).  Defer until f3 (ShapeTracker)
+        unblocks f1b. -->
 
   - [ ] **f3. ShapeTracker for movement ops**.  Replace
         RESHAPE / EXPAND / PERMUTE / SHRINK / PAD / FLIP
