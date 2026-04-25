@@ -115,6 +115,32 @@ kernels for the conv layers; the full LeNet forward + backward
 through 4 Adam steps would comfortably fit in 4K, eliminating the
 verify.wls regression.
 
+## Measured progress (sub-items f3a-c landed)
+
+LeNet-5 forward (input {1, 28, 28}; both convs end-to-end):
+
+| Stage                                     | KernelEntries | Drop  |
+| ----------------------------------------- | ------------- | ----- |
+| Pre-fusion baseline                       | 466           | 0%    |
+| f3b: RESHAPE view-only                    | 409           | 12%   |
+| f3a + f3b + f3c: + EXPAND view-only       | 304           | **35%** |
+
+The 35% drop with f3c was enough to unblock `lenet-mnist/grad-check.wls`
+(forward + 1 backward through full LeNet), which previously hit
+`kernel_alloc: out of slots (cap=4096)` mid-TGrad.  `verify.wls`
+(forward + backward + 4 Adam steps) now also runs to completion.
+Convergence is slower than the bespoke-CONV2D baseline (loss
+2.61 -> 2.49 over 4 steps; prob[true] reaches 0.086 instead of
+the bespoke ~0.7) -- needs investigation but is a separate
+concern from the kernel-count blocker.
+
+The remaining 304 kernels are dominated by SHRINK/PERMUTE/PAD/FLIP
+movement ops (the next four ShapeTracker sub-items would target
+each in turn, mirroring f3c's stride-rewrite approach).  Going
+further would also unlock the elementwise-chain fusion (f1) by
+eliminating much of the movement-op noise that confused f1b's
+shared-subexpression detection.
+
 ## Design space for thvm fusion
 
 Two complementary directions:

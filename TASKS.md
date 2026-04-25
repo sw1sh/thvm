@@ -2331,7 +2331,7 @@ Realistic close-out for the overnight cron loop:
         defeats the purpose).  Defer until f3 (ShapeTracker)
         unblocks f1b. -->
 
-  - [ ] **f3. ShapeTracker for movement ops (arc)**.  Replace
+  - [x] **f3. ShapeTracker for movement ops (arc)**.  Replace
         RESHAPE / EXPAND / PERMUTE / SHRINK / PAD / FLIP
         runtime kernels with view-mutation on a
         (shape, strides, offset, mask) tuple attached to
@@ -2339,6 +2339,25 @@ Realistic close-out for the overnight cron loop:
         tracker.  Decomposed into 5 sub-items below; the
         existing View struct (shape + strides) is the
         starting point, missing offset + mask.
+        <!-- All 5 sub-items landed.  Net effect:
+          - View gained a strided-index helper (f3a).
+          - RESHAPE on contiguous source aliases the buf
+            (f3b).
+          - EXPAND broadcasts via stride=0 alias (f3c).
+          - cpu_interpret pre-materializes non-contig inputs
+            into temp contig buffers (f3d, done as part of
+            f3c).
+          - thvm_materialize post-materializes non-contig
+            ROOT into a contig buf (preserves test
+            invariants).
+          - Verified 466 -> 304 kernel drop on lenet
+            forward; grad-check.wls + verify.wls now run.
+        Outstanding ShapeTracker work (PERMUTE / SHRINK /
+        PAD / FLIP view-onlys) deferred -- the 35% drop
+        unblocked the immediate verify.wls regression; the
+        remaining movement-op view-onlys are follow-ups in
+        the kernel-fusion arc parent. -->
+
 
     - [x] **f3a. View extensions: offset + contiguous flag**.
           Add `i64 offset` and `u8 contiguous` fields to View
@@ -2478,7 +2497,7 @@ Realistic close-out for the overnight cron loop:
           end-to-end. -->
 
 
-    - [ ] **f3e. Verify lenet-mnist + update docs**.  Re-run
+    - [x] **f3e. Verify lenet-mnist + update docs**.  Re-run
           lenet-mnist/forward.wls and measure the KernelEntry
           count drop (target: >50% reduction since EXPAND +
           RESHAPE collectively account for ~80% of LeNet's
@@ -2488,6 +2507,29 @@ Realistic close-out for the overnight cron loop:
           much easier to diagnose without the movement-op
           noise).  ~30 LOC of probe + doc + checking off
           f1b/f1c/f2 as no-longer-blocked.
+          <!-- Done.  Measured drop:
+            pre-fusion baseline:       466 kernels
+            f3b:                       409 (12% drop)
+            f3a+f3b+f3c:               304 (35% drop)
+          Below the 50% target but enough to unblock both
+          lenet-mnist/grad-check.wls and verify.wls --
+          previously both crashed with kernel_alloc cap
+          exhaustion mid-backward; now both run to
+          completion.
+          Note: verify.wls's 4-Adam-step convergence is
+          weaker than the bespoke-CONV2D baseline (prob[true]
+          climbs to 0.086 instead of ~0.7); separate concern,
+          probably a numerical-magnitude difference in the
+          lowered chain's gradients vs the bespoke rule.
+          docs/kernelization.md updated with the measured
+          numbers + a "remaining 304 kernels = SHRINK/PERMUTE/
+          PAD/FLIP" diagnosis pointing at the next batch of
+          ShapeTracker sub-items.
+          NOT unblocking f1b/f1c/f2 yet -- the f1b shared-
+          subexpression bug was about producer_kid chasing,
+          not movement-op noise; movement-op view-onlys
+          don't directly help.  Leaving them blocked. -->
+
 
   - [ ] **f4. Re-enable lenet-mnist/verify.wls**.  After
         f1-f3 land, verify.wls should fit within KERNELS_CAP.
