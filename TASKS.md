@@ -574,12 +574,17 @@ Realistic close-out for the overnight cron loop:
       with 1e-5 tolerance. -->
 
 
-- [ ] **Grad rule: UOP_EXP2** in `interact_grad` per
+- [x] **Grad rule: UOP_EXP2** in `interact_grad` per
       `docs/grad-roadmap.md` step 4.  `d(2^x)/dx = 2^x * ln(2)`,
       so rule is `GRAD[EXP2(a), gy, t] = GRAD[a, MUL[gy,
       MUL[EXP2(a), CONST(ln 2)]], t]`.  ~15 LOC + structural
       test + numerical test (e.g. `2^x` at x={1,2,3} yields
       grad = ln(2) * {2, 4, 8}).
+      <!-- ln(2) bits embedded as a CONST via memcpy (no
+      runtime float-cast).  Tests: structural (cascades to
+      leaf-EXPAND wrapping MUL); numerical d(2^{1,2,3})/dx =
+      ln(2) * {2,4,8} within 1e-5. -->
+
 
 - [ ] **Grad rule: UOP_LOG2** in `interact_grad` per
       `docs/grad-roadmap.md` step 6.  `d(log2 x)/dx = 1/(x ln 2)`,
