@@ -148,8 +148,29 @@ concern that interact_grad currently doesn't cover for any of these):
       represent.  The training loop calls it manually, same way
       sgd.wlt does TL2Loss. -->
 
-- [ ] `ConvolutionLayer` 2-D forward.  Replace the current stub.
-      Likely big -- decompose when picked up.
+- [ ] add `UOP_CONV2D` opcode + `uop_conv2d` constructor in
+      `src/uop/conv2d.c` -- heap layout `[input, weights, bias]`
+      with stride / kernel size encoded in `arg`.  Plus thvm.h
+      opcode constant.  Mirrors how existing UOPs are wired.
+- [ ] plumb UOP_CONV2D through `materialize_in_env.c` (output
+      shape calc: {C_out, H_out, W_out} for valid conv2d) and
+      `wl/THVMLink/Kernel/THVMLink.wl` `uopCellCount`.  Plus the
+      `$Uop*` constant and `$uopNames` entry.
+- [ ] `cpu_op_conv2d` kernel in `src/backend/cpu/op/conv2d.c`:
+      stride-1, no-padding, channels-first {C_in, H, W} input;
+      weights {C_out, C_in, kh, kw}; bias {C_out}.  Output
+      {C_out, H-kh+1, W-kw+1}.  Standard 6-loop nested impl.
+      Wire into `interpret.c` dispatch.  Add a smoke test in
+      tests/test_uop.c (or a new test_conv2d.c).
+- [ ] WL `TUOpConv2D[input, weights, bias, kSize]` constructor +
+      `fromLayer[ConvolutionLayer, ...]` dispatch + nn.wlt test
+      against `NetApply` on a small initialised conv layer.
+<!-- design-question: chose UOP_CONV2D primitive over the
+     im2col-via-PERMUTE route because PERMUTE / SHRINK don't
+     have runtime support yet and would require ~5 file edits
+     each before im2col could even be assembled.  A primitive
+     ships sooner and matches what production runtimes do for
+     conv anyway (e.g. tinygrad's CONV2D is a primitive UOp). -->
 
 ## Phase 3 — NetModel → TTerm converter
 
