@@ -16,7 +16,7 @@ state.
 
 ## Phase 0 — sanity
 
-- [ ] confirm baseline: `make test` and the full WL suite both green at
+- [x] confirm baseline: `make test` and the full WL suite both green at
       current HEAD; if not, that's the first thing to fix.
 
 ## Phase 1 — Adam optimizer
