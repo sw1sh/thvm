@@ -103,6 +103,38 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     //  shape -- the heap stores them but ndim isn't explicit, so we
     //  walk 2 * src0_ndim cells.)
 
+    // 2b. View-only RESHAPE (sub-item f3b of the kernel-fusion arc).
+    //     For a contiguous source whose numel matches the target,
+    //     RESHAPE doesn't need a memcpy kernel -- alias the source's
+    //     buffer with a fresh TenDesc carrying the new shape and
+    //     return a TAG_TEN directly.  The walker rewrites the
+    //     RESHAPE heap cell to that TAG_TEN; subsequent parents
+    //     classify it as CHILD_CONCRETE_TEN.  Falls back to the
+    //     cpu_op_reshape memcpy path if the source isn't contiguous
+    //     or the numels don't match (rare; usually a user-error
+    //     condition).
+    if (op == UOP_RESHAPE
+        && arity == 1 && child_tids[0] != 0
+        && TENS[child_tids[0]].view.contiguous) {
+      // Target shape lives at [src, NUM(ndim), NUM(d0), NUM(d1), ...].
+      u32 t_ndim = (u32)term_val(heap_read(expr_loc + 1));
+      Shape t_shape = {0};
+      t_shape.ndim = t_ndim;
+      u32 t_numel = 1;
+      for (u32 i = 0; i < t_ndim; i++) {
+        u32 d = (u32)term_val(heap_read(expr_loc + 2 + i));
+        t_shape.dims[i] = d;
+        t_numel *= d;
+      }
+      if (t_numel == TENS[child_tids[0]].view.numel) {
+        View nv = view_create(t_shape);
+        u32 alias_tid = tensor_view_of(child_tids[0], nv);
+        if (alias_tid != 0) {
+          return term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+        }
+      }
+    }
+
     // 3. Allocate KernelEntry and fill input slots, deduping equal
     //    inputs (same tid, or same symbolic term).
     u32 kid = kernel_alloc();

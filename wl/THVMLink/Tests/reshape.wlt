@@ -56,3 +56,22 @@ VerificationTest[
     {1, 1, 6},
     TestID -> "reshape/multiple-leading-ones-rank-preserved"
 ]
+
+(* === sub-item f3b: RESHAPE on a contiguous source is view-only ===
+   The materializer aliases the source's TenDesc with a fresh
+   TenDesc carrying the new shape and DOES NOT emit a kernel.
+   Verify by asserting the kernel count doesn't change across a
+   pure-reshape materialize. *)
+
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, "Real32"];
+    Module[{kBefore, kAfter, r},
+        kBefore = TKernelCount[];
+        r = TMaterialize @ TUOpReshape[x, {2, 3}];
+        kAfter = TKernelCount[];
+        {kAfter - kBefore, TTensorShape[r], Normal @ TTensorData @ TRealize[r]}
+    ],
+    {0, {2, 3}, {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}},
+    TestID -> "reshape/view-only-no-kernel-emitted"
+]

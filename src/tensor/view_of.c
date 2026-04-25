@@ -13,11 +13,15 @@ fn u32 tensor_view_of(u32 src_id, View new_view) {
   TenDesc *src = &TENS[src_id];
   u32 id = TENS_NEXT++;
   TenDesc *d = &TENS[id];
-  d->dtype    = src->dtype;
-  d->refcount = 1;
-  d->view     = new_view;
-  d->buf_id   = src->buf_id;
-  d->backend  = src->backend;
+  d->dtype        = src->dtype;
+  d->refcount     = 1;
+  d->view         = new_view;
+  d->buf_id       = src->buf_id;
+  d->backend      = src->backend;
+  // Inherit producer_kid so kernel_fire_by_id can chase the
+  // upstream kernel that fills the shared buffer.  Without this
+  // the alias acts like an external (uninitialized) tensor.
+  d->producer_kid = src->producer_kid;
   if (d->backend && d->backend->buf_incref) d->backend->buf_incref(d->buf_id);
   return id;
 }

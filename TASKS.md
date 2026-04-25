@@ -2366,7 +2366,7 @@ Realistic close-out for the overnight cron loop:
           146 C + 219 WL tests green. -->
 
 
-    - [ ] **f3b. RESHAPE as view-only when source is
+    - [x] **f3b. RESHAPE as view-only when source is
           contiguous**.  In materialize_in_env, when a
           UOP_RESHAPE has a contiguous source and the
           source/target numels match, RETURN the source's
@@ -2379,6 +2379,23 @@ Realistic close-out for the overnight cron loop:
           kernel).  WL surface: TUOpReshape returns this
           aliased TenDesc.  ~50 LOC + a wlt test that
           TUOpReshape doesn't allocate a new buffer.
+          <!-- Landed.  materialize_in_env special-cases
+          UOP_RESHAPE before the KernelEntry allocation:
+          when source is contiguous AND target numel matches
+          source numel, builds a fresh View via view_create
+          on the target shape and aliases the source's buf_id
+          via tensor_view_of (which now propagates
+          producer_kid -- the original draft missed this and
+          downstream consumers read uninitialized memory).
+          Returns a TAG_TEN term wrapping the alias tid;
+          the walker rewrites the RESHAPE heap cell to that
+          TAG_TEN, and parents classify it as
+          CHILD_CONCRETE_TEN.  Falls back to the cpu_op_reshape
+          memcpy path if source isn't contiguous or numels
+          mismatch.  reshape/view-only-no-kernel-emitted wlt
+          asserts kernel count unchanged + correct values.
+          146 C + 220 WL tests green. -->
+
 
     - [ ] **f3c. EXPAND as view-only via stride=0**.  Movement
           ops can express broadcast as stride[axis] = 0 on the
