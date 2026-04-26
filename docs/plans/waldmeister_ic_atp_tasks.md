@@ -276,6 +276,31 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 6.4 end-to-end: parse the group-axiom `.pr` file, run
       saturation, emit a PCL trace; cross-check structurally
       against Waldmeister's own output
+  - [ ] 6.4a `wald_parse_file(path, spec) -> WaldErr` -- thin
+        wrapper that opens the file, slurps it, calls
+        `wald_parse` on the bytes.  New error code
+        `WALD_ERR_FILE` for open/read failure.  Test: parses
+        `waldmeister/documents/example.pr` from disk; if the
+        symlink is missing the test silently passes (research
+        fixture, not a regression).
+  - [ ] 6.4b end-to-end PCL emission test: load example.pr
+        from disk, build KboConfig from parsed precedences,
+        push axioms, set goal, run saturation, call
+        `thvm_atp_trace_serialize`.  Validate the trace
+        text-structurally: n_trace >= n_eqns; the first
+        n_eqns lines all start with "<idx> (axiom):"; later
+        lines contain "orient" or "cp" entries; the very
+        last entry's lhs/rhs match the parsed conclusion
+        (when ATP_PROVED).
+  - [ ] 6.4c structural cross-check vs Waldmeister's PCL:
+        compare our axiom ordering, orient/cp parent-pointer
+        shape, and final-step rhs against what Waldmeister
+        would emit on the same input (Waldmeister's PCL has
+        `id : type ( parents ) lhs = rhs` -- our format is
+        the same shape modulo whitespace).  Document
+        mismatches in CHANGELOG; if structural shape diverges
+        materially, file a follow-up task rather than
+        forcing convergence here.
 
 ## Stage 7 -- Twee-class redundancy criteria (optional)
 
