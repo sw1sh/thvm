@@ -1166,6 +1166,107 @@ int main(void) {
     wald_free(spec);
   }
 
+  TEST_BEGIN("wald/sort-check/homogeneous-mode-passes-everything");
+  {
+    // n_sorts == 0 means homogeneous mode; all terms pass.
+    WaldSpec *spec = wald_init();
+    Term t = term_new_ctr(7u, NULL, 0);
+    CHECK_EQ((int)wald_term_sort(spec, t), 0);
+    CHECK_EQ((int)wald_sort_check(spec, t), 1);
+    // FVR also passes.
+    Term v = term_new_fvr(0u);
+    CHECK_EQ((int)wald_term_sort(spec, v), 0);
+    CHECK_EQ((int)wald_sort_check(spec, v), 1);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/sort-check/well-sorted-multi-sort");
+  {
+    // nat / list signature; build cons(zero, nil) and verify it
+    // returns sort `list` (id 1).
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           nat list\n"
+      "SIGNATURE       zero: -> nat\n"
+      "                nil: -> list\n"
+      "                cons: nat list -> list\n"
+      "VARIABLES       n : nat\n"
+      "EQUATIONS       cons(zero, nil) = cons(zero, nil)\n"
+      "CONCLUSION      zero = zero\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+
+    // Reconstruct cons(zero, nil) directly via labels.
+    u32 lab_zero = spec->symbols[0].label;
+    u32 lab_nil  = spec->symbols[1].label;
+    u32 lab_cons = spec->symbols[2].label;
+    Term zero = term_new_ctr(lab_zero, NULL, 0);
+    Term nil  = term_new_ctr(lab_nil,  NULL, 0);
+    Term cons_zero_nil =
+      term_new_ctr(lab_cons, (Term[]){zero, nil}, 2);
+
+    CHECK_EQ((int)wald_term_sort(spec, zero),           0); // nat
+    CHECK_EQ((int)wald_term_sort(spec, nil),            1); // list
+    CHECK_EQ((int)wald_term_sort(spec, cons_zero_nil),  1); // list
+    CHECK_EQ((int)wald_sort_check(spec, cons_zero_nil), 1);
+
+    // FVR n has var_id 0 and sort nat (id 0).
+    Term v_n = term_new_fvr(0u);
+    CHECK_EQ((int)wald_term_sort(spec, v_n), 0);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/sort-check/sort-mismatch-detected");
+  {
+    // Same nat/list signature; build cons(nil, zero) -- arg 0
+    // expects nat but gets list.  Must report sort mismatch.
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           nat list\n"
+      "SIGNATURE       zero: -> nat\n"
+      "                nil: -> list\n"
+      "                cons: nat list -> list\n"
+      "VARIABLES       n : nat\n"
+      "EQUATIONS       zero = zero\n"
+      "CONCLUSION      zero = zero\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+
+    u32 lab_zero = spec->symbols[0].label;
+    u32 lab_nil  = spec->symbols[1].label;
+    u32 lab_cons = spec->symbols[2].label;
+    Term zero = term_new_ctr(lab_zero, NULL, 0);
+    Term nil  = term_new_ctr(lab_nil,  NULL, 0);
+    // cons(nil, zero): args are swapped from the signature.
+    Term ill = term_new_ctr(lab_cons, (Term[]){nil, zero}, 2);
+
+    CHECK_EQ((int)wald_term_sort(spec, ill), (int)WALD_MAX_SORTS);
+    CHECK_EQ((int)wald_sort_check(spec, ill), 0);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/sort-check/unknown-symbol-fails");
+  {
+    // CTR with a label that isn't in the symbol table.
+    WaldSpec *spec = wald_init();
+    wald_sort_id_or_register(spec, "any", 3);  // n_sorts > 0
+    Term t = term_new_ctr(99u, NULL, 0);   // label 99: not registered
+    CHECK_EQ((int)wald_sort_check(spec, t), 0);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/sort-check/unknown-fvr-fails");
+  {
+    // FVR with a var_id that isn't in the var table.
+    WaldSpec *spec = wald_init();
+    wald_sort_id_or_register(spec, "any", 3);  // n_sorts > 0
+    Term v = term_new_fvr(99u);            // var_id 99: not registered
+    CHECK_EQ((int)wald_sort_check(spec, v), 0);
+    wald_free(spec);
+  }
+
   TEST_BEGIN("wald/sorts/multi-sort-pr-fixture");
   {
     // A small sorted-list fragment: nat / list sorts.

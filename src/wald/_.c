@@ -666,6 +666,60 @@ fn WaldSection wald_parse_variables(WaldSpec *spec, WaldLex *lex) {
   }
 }
 
+// 8.4c: top-down sort inference.  Returns the sort id of t if
+// well-sorted, or WALD_MAX_SORTS on mismatch / unknown identifier.
+//
+// FVR: looked up by var_id in spec->vars[]; returns the var's
+//   sort (0 in homogeneous mode), or WALD_MAX_SORTS if the var_id
+//   isn't registered.
+// CTR: looked up by label in spec->symbols[]; arity must match;
+//   each child's sort (recursively inferred) must equal the
+//   symbol's arg_sorts[i]; returns the symbol's result_sort.
+// Other tags: returns WALD_MAX_SORTS (not part of the FOL term
+//   layer; the saturation engine doesn't construct these).
+//
+// Homogeneous-mode shortcut: spec == NULL or n_sorts == 0 returns
+// 0 unconditionally so single-sort fixtures (which never populate
+// the sort table beyond an auto-registered "ANY") continue to
+// pass without sort policing.
+fn u32 wald_term_sort(const WaldSpec *spec, Term t) {
+  if (spec == NULL || spec->n_sorts == 0) return 0;
+
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      for (u32 i = 0; i < spec->n_vars; i++) {
+        if (spec->vars[i].var_id == id) return spec->vars[i].sort;
+      }
+      return WALD_MAX_SORTS;
+    }
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      u32 n   = term_ctr_n(t);
+      const WaldSym *sym = NULL;
+      for (u32 i = 0; i < spec->n_symbols; i++) {
+        if (spec->symbols[i].label == lab) {
+          sym = &spec->symbols[i];
+          break;
+        }
+      }
+      if (sym == NULL)         return WALD_MAX_SORTS;
+      if (sym->arity != n)     return WALD_MAX_SORTS;
+      for (u32 i = 0; i < n; i++) {
+        u32 child_sort = wald_term_sort(spec, term_ctr_at(t, i));
+        if (child_sort != sym->arg_sorts[i]) return WALD_MAX_SORTS;
+      }
+      return sym->result_sort;
+    }
+    default:
+      return WALD_MAX_SORTS;
+  }
+}
+
+fn u8 wald_sort_check(const WaldSpec *spec, Term t) {
+  return wald_term_sort(spec, t) != WALD_MAX_SORTS;
+}
+
 // 8.4b: look up sort by name, or register if new.  Returns
 // WALD_MAX_SORTS (sentinel) on overflow.
 fn u32 wald_sort_id_or_register(WaldSpec *spec,

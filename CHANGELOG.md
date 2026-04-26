@@ -6,6 +6,37 @@ dated section.
 
 ## Unreleased
 
+### Added: wald_term_sort / wald_sort_check (stage 8.4c)
+
+Two new helpers in `src/wald/_.c`:
+
+- `wald_term_sort(spec, t)`: top-down sort inference; returns the
+  sort id of `t` if well-sorted, or `WALD_MAX_SORTS` (sentinel)
+  on mismatch.  FVR looked up by var_id in `spec->vars[]`; CTR
+  looked up by label in `spec->symbols[]`, arity must match,
+  each child's inferred sort must equal the symbol's
+  `arg_sorts[i]`.
+- `wald_sort_check(spec, t)`: convenience predicate -- returns
+  1 if well-sorted, 0 otherwise.
+
+Homogeneous-mode shortcut: `spec == NULL` or `spec->n_sorts == 0`
+returns sort 0 unconditionally so the existing single-sort
+fixtures (which auto-register an "ANY" sort or have no SORTS
+section) keep passing without sort policing.
+
+`tests/test_wald.c` adds 5 cases (5507 sub-checks, was 5492):
+- `homogeneous-mode-passes-everything`: n_sorts==0 returns 0
+- `well-sorted-multi-sort`: nat/list signature; verifies
+  `cons(zero, nil)` infers sort `list`; FVR `n` infers `nat`
+- `sort-mismatch-detected`: `cons(nil, zero)` (args swapped)
+  is rejected
+- `unknown-symbol-fails`: CTR with unregistered label
+- `unknown-fvr-fails`: FVR with unregistered var_id
+
+8.4d will wire this into the saturation loop's add_equation
+and set_goal entry points; CPs aren't pre-checked since
+well-sortedness inherits from the source rules.
+
 ### Added: sort metadata on WaldSpec (stage 8.4b)
 
 `src/thvm.h` extends WaldSpec with a sort table per

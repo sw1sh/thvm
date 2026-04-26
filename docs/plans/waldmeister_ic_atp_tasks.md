@@ -574,7 +574,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         (`SORTS` / `SIGNATURE` / `VARIABLES` sections) to
         populate it.  Tests: parse a multi-sort `.pr` fixture
         and verify the metadata.
-  - [ ] 8.4c implement `wald_sort_check(spec, term)` that
+  - [x] 8.4c implement `wald_sort_check(spec, term)` that
         verifies a term is well-sorted against the spec.  Used
         by 8.4d / 8.4e as a precheck rather than threading
         sort logic through `thvm_match`.

@@ -1115,6 +1115,18 @@ fn WaldSection wald_skip_to_section   (WaldLex *lex);
 fn u32         wald_sort_id_or_register(WaldSpec *spec,
                                         const char *name, u32 len);
 
+// 8.4c: top-down sort inference / verification.  Returns the
+// sort id of `t` if well-sorted under `spec`, or WALD_MAX_SORTS
+// (sentinel) on any sort mismatch / unknown symbol or variable.
+//
+// When `spec == NULL` or `spec->n_sorts == 0` (homogeneous mode),
+// returns 0 unconditionally so existing single-sort fixtures
+// continue to pass.
+fn u32         wald_term_sort  (const WaldSpec *spec, Term t);
+
+// 8.4c: convenience predicate -- 1 if well-sorted, 0 otherwise.
+fn u8          wald_sort_check (const WaldSpec *spec, Term t);
+
 fn WaldSection wald_parse_name     (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_mode     (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_sorts    (WaldSpec *spec, WaldLex *lex);
