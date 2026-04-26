@@ -106,23 +106,14 @@ Real kernel-count + memory wins need either:
 
 ### Kernelization
 
-- [ ] **k0a: UOP_TUPLE term type for multi-output results**.
-      Add a new UOP opcode `UOP_TUPLE` with heap layout
-      `[n, t_1, ..., t_n]` -- a passive aggregate that
-      materialize / walk / classify treat as opaque.  Provides
-      the result-shape needed for k0b's multi-target
-      interact_grad.  Includes:
-        - new `UOP_TUPLE` define in src/thvm.h
-        - constructor `uop_tuple(Term *children, u32 n)` in
-          new file src/uop/tuple.c
-        - accessor `uop_tuple_at(Term, u32)` returning the
-          i-th child Term (or 0 on out-of-range)
-        - `uop_arity(UOP_TUPLE)` returns 0 (variable tail
-          handled by the consumers that know the layout)
-        - new tests/test_uop_tuple.c covers construct +
-          read-back + materialize-pass-through.
-      Out of scope: any GRAD changes; UOP_TUPLE just needs
-      to land standalone first.  ~50 LOC + ~30 LOC tests.
+- [x] **k0a: TAG_CTR labelled constructor (HVM4 CTR)**.
+      TAG_CTR=20 in src/thvm.h with heap layout
+      [NUM(arity), c_0, ..., c_{n-1}]; ext = label.
+      Constructor `term_new_ctr(label, children, n)` +
+      accessors `term_ctr_n(t)` / `term_ctr_at(t, i)` in
+      src/term/new_ctr.c.  tests/test_ctr.c (22 checks).
+      No DUP-CTR / ERA-CTR yet; land when an IC consumer
+      needs them.  166 C + 292 WL tests green.
 
 - [ ] **k0b: multi-target uop_grad constructor + heap layout**.
       Extend `uop_grad` (src/uop/grad.c) to accept a list of
@@ -141,7 +132,7 @@ Real kernel-count + memory wins need either:
       detect n>1 in the new UOP_GRAD heap layout and walk
       the forward DAG ONCE with a shared cotangent map (it
       already builds one internally; the change is reading
-      out N targets instead of 1).  Result: a UOP_TUPLE
+      out N targets instead of 1).  Result: a TAG_CTR
       from k0a holding one cotangent Term per target.
       Single-target case (n=1) returns the scalar Term
       directly for backward compat.  Acceptance: a 3-
@@ -150,7 +141,7 @@ Real kernel-count + memory wins need either:
       multiple TUPLE outputs), so materialize's memo
       dedups them in d4b2a-style.  ~80 LOC + tests.
       <!-- design-question: result representation.  Going
-           with UOP_TUPLE (k0a) over reusing TAG_INC or
+           with TAG_CTR (k0a) over reusing TAG_INC or
            TAG_SUP because TUPLE is a passive aggregate
            with clean materialize/walk semantics; SUP has
            HVM4 superposition semantics that would clash. -->
@@ -159,8 +150,8 @@ Real kernel-count + memory wins need either:
       `TGradMany[y, {x_1, ..., x_n}]` in
       wl/THVMLink/Kernel/Tensor.wl that builds a single
       UOP_GRAD_MULTI Term, then unpacks the resulting
-      UOP_TUPLE (post k0c materialize) into n TTerm
-      wrappers via uop_tuple_at.  Bridge fns added to
+      TAG_CTR (post k0c materialize) into n TTerm
+      wrappers via term_ctr_at.  Bridge fns added to
       wl/THVMLink/CSource/thvmlink.c.  Tests in
       wl/THVMLink/Tests/grad.wlt assert that
       `TGradMany[loss, {a, b}]` and
