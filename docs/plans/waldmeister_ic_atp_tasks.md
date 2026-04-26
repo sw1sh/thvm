@@ -592,7 +592,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
       -- LPO is `Lexikografische-Pfad-Ordnung`, "lexicographic
       path ordering")
-  - [ ] 8.5a design memo `docs/plans/lpo_design.md`: survey
+  - [x] 8.5a design memo `docs/plans/lpo_design.md`: survey
         the LPO algorithm (Dershowitz, "Orderings for term-
         rewriting systems", 1982); pick a `LpoConfig` shape
         (likely just a precedence table -- LPO has no weights)

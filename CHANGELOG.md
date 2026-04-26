@@ -6,6 +6,41 @@ dated section.
 
 ## Unreleased
 
+### Added: LPO ordering design memo (stage 8.5a)
+
+`docs/plans/lpo_design.md` (~150 lines) lays out the design for
+porting LPO (Dershowitz, "Orderings for term-rewriting systems",
+1982) alongside KBO.
+
+**Algorithm summary**: recursive comparator with three GT cases
+on `f(s_1...s_m) >_lpo g(t_1...t_n)`: subterm domination,
+precedence-based with arg verification, and lex-on-equal-heads.
+Variable cases handled via subterm-occurrence check.
+
+**LpoConfig**: separate struct (`precedence` + `n_labels`); no
+weights or `var_weight` -- LPO is precedence-only.
+
+**Selector pattern** (KBO vs LPO on AtpState): surveyed three
+options:
+1. Sum type / discriminated union: type-safe, lots of churn
+2. Two parallel inits: clean signatures, AtpState gets two
+   parallel fields
+3. **Add LPO field alongside KBO; selector by non-NULL**
+   (chosen): minimal churn, mirrors `use_ic_cp_gen` /
+   `use_ic_rewrite` direct-poke pattern; existing KBO callers
+   untouched
+
+**Migration plan**:
+- 8.5b: `thvm_lpo` in `src/lpo/_.c` mirroring `src/kbo/_.c`
+- 8.5c: extend AtpState with `const LpoConfig *lpo`; dispatch
+  from `thvm_atp_orient_and_add`
+- 8.5d: at least one bench fixture wired to use LPO directly
+  (today most `.pr` files declare `ORDERING LPO` but the
+  saturator silently maps to KBO -- the gap has been
+  outstanding through stages 5-7)
+
+Verification + stop conditions documented in the memo.
+
 ### Added: ICC sort dispatch resolution memo (stage 8.3d)
 
 `docs/plans/icc_sort_dispatch.md` (~110 lines) closes 8.3d with
