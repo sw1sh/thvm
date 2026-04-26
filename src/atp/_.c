@@ -241,6 +241,100 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   return ATP_RUNNING;
 }
 
+// === stage 6.2: PCL-shaped trace serializer ===========================
+//
+// Walks the trace[] array and emits human-readable text in the shape
+// of Waldmeister's PCL ("Proof Construction Language") output.  Each
+// line:
+//
+//   <idx> (<reason> [from <p_a>[, <p_b>]]): <lhs> = <rhs>
+//
+// Term printer handles TAG_CTR (as "C<lab>(args...)"), TAG_FVR (as
+// "x_<id>"), TAG_NUM (as "#<val>"), TAG_ERA (as "ERA"), with a
+// "?T<tag>" fallback for any other tag.  Truncates silently on
+// buffer overflow.
+
+static u32 atp_pretty_term(Term t, char *buf, u32 cap);
+
+static u32 atp_pretty_ctr(Term t, char *buf, u32 cap) {
+  if (cap <= 1) return 0;
+  u32 lab = term_ext(t);
+  u32 n   = term_ctr_n(t);
+  int n_w = snprintf(buf, cap, "C%u", lab);
+  if (n_w < 0) return 0;
+  u32 w = (u32)n_w;
+  if (w >= cap) return cap - 1;
+  if (n == 0) return w;
+  if (w + 1 >= cap) return w;
+  w += (u32)snprintf(buf + w, cap - w, "(");
+  for (u32 i = 0; i < n; i++) {
+    if (w + 2 >= cap) break;
+    if (i > 0) w += (u32)snprintf(buf + w, cap - w, ", ");
+    if (w >= cap) return cap - 1;
+    w += atp_pretty_term(term_ctr_at(t, i), buf + w, cap - w);
+    if (w >= cap) return cap - 1;
+  }
+  if (w + 1 < cap) w += (u32)snprintf(buf + w, cap - w, ")");
+  return w;
+}
+
+static u32 atp_pretty_term(Term t, char *buf, u32 cap) {
+  if (cap == 0) return 0;
+  switch (term_tag(t)) {
+    case TAG_FVR: return (u32)snprintf(buf, cap, "x_%u", term_ext(t));
+    case TAG_NUM: return (u32)snprintf(buf, cap, "#%u", (u32)term_val(t));
+    case TAG_ERA: return (u32)snprintf(buf, cap, "ERA");
+    case TAG_CTR: return atp_pretty_ctr(t, buf, cap);
+    default:      return (u32)snprintf(buf, cap, "?T%u", term_tag(t));
+  }
+}
+
+fn u32 thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap) {
+  if (s == NULL || buf == NULL || cap == 0) return 0;
+  buf[0] = '\0';
+  u32 w = 0;
+  for (u32 i = 0; i < s->n_trace; i++) {
+    if (w + 1 >= cap) break;
+    Term entry  = s->trace[i];
+    u32  reason = term_ext(entry);
+    u32  p_a    = (u32)term_val(term_ctr_at(entry, 0));
+    u32  p_b    = (u32)term_val(term_ctr_at(entry, 1));
+    Term lhs    = term_ctr_at(entry, 2);
+    Term rhs    = term_ctr_at(entry, 3);
+
+    const char *type_str = "?";
+    switch (reason) {
+      case TRACE_AXIOM:  type_str = "axiom";  break;
+      case TRACE_ORIENT: type_str = "orient"; break;
+      case TRACE_CP:     type_str = "cp";     break;
+    }
+
+    int n;
+    if (p_a == ATP_TRACE_NONE) {
+      n = snprintf(buf + w, cap - w, "%u (%s): ", i, type_str);
+    } else if (p_b == ATP_TRACE_NONE) {
+      n = snprintf(buf + w, cap - w, "%u (%s from %u): ", i, type_str, p_a);
+    } else {
+      n = snprintf(buf + w, cap - w, "%u (%s from %u, %u): ", i, type_str,
+                   p_a, p_b);
+    }
+    if (n < 0) break;
+    w += (u32)n;
+    if (w + 1 >= cap) break;
+
+    w += atp_pretty_term(lhs, buf + w, cap - w);
+    if (w + 4 >= cap) break;
+    w += (u32)snprintf(buf + w, cap - w, " = ");
+
+    w += atp_pretty_term(rhs, buf + w, cap - w);
+    if (w + 1 >= cap) break;
+    w += (u32)snprintf(buf + w, cap - w, "\n");
+  }
+  if (w >= cap) w = cap - 1;
+  buf[w] = '\0';
+  return w;
+}
+
 // Drive thvm_atp_step until it returns a non-RUNNING status.
 fn AtpStatus thvm_atp_run(AtpState *s) {
   AtpStatus st;

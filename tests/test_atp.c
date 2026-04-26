@@ -633,6 +633,71 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/trace-serialize-empty-trace");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    char buf[256] = {0};
+    u32 n = thvm_atp_trace_serialize(s, buf, sizeof(buf));
+    CHECK_EQ(n, 0u);
+    CHECK_EQ((int)buf[0], 0);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-serialize-single-axiom");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s, mk_e(), mk_a());
+    char buf[256] = {0};
+    u32 n = thvm_atp_trace_serialize(s, buf, sizeof(buf));
+    CHECK(n > 0u);
+    CHECK(strstr(buf, "0 (axiom): ") != NULL);
+    CHECK(strstr(buf, "C1") != NULL);   // LAB_e = 1
+    CHECK(strstr(buf, "C4") != NULL);   // LAB_a = 4
+    CHECK(strstr(buf, " = ") != NULL);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-serialize-renders-fvr-and-ctr-args");
+  {
+    // f(x_0, e) = x_0 -- exercises the TAG_CTR with two children
+    // and TAG_FVR rendering.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    char buf[256] = {0};
+    thvm_atp_trace_serialize(s, buf, sizeof(buf));
+    CHECK(strstr(buf, "C3(x_0, C1)") != NULL);
+    CHECK(strstr(buf, "= x_0")        != NULL);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-serialize-orient-with-parent");
+  {
+    // Push axiom + step.  Trace includes axiom, orient (parent=0),
+    // and a TRACE_CP entry from generate_cps.  Verify the orient
+    // line carries "from 0".
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_step(s);
+    char buf[1024] = {0};
+    thvm_atp_trace_serialize(s, buf, sizeof(buf));
+    CHECK(strstr(buf, "0 (axiom): ")        != NULL);
+    CHECK(strstr(buf, "1 (orient from 0): ") != NULL);
+    CHECK(strstr(buf, "(cp from 1, 1): ")    != NULL);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-serialize-truncates-on-small-buffer");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_a(), mk_e());
+    char buf[16] = {0};
+    u32 n = thvm_atp_trace_serialize(s, buf, sizeof(buf));
+    CHECK(n <= sizeof(buf) - 1);
+    CHECK_EQ((int)buf[sizeof(buf) - 1], 0);   // null-terminated
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/headline-trace-shape-and-walk-to-axiom");
   {
     // Stage 6.1d: same headline demo, but verify the trace makes

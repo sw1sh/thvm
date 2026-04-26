@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: PCL-shaped trace serializer (stage 6.2)
+
+`thvm_atp_trace_serialize(s, buf, cap)` walks `s->trace[]` and
+emits Waldmeister-PCL-style text into `buf`.  Each entry becomes
+one line:
+
+  <idx> (<reason> [from <p_a>[, <p_b>]]): <lhs> = <rhs>
+
+Internal `atp_pretty_term` recursively prints CTR / FVR / NUM /
+ERA terms with a "?T<tag>" fallback for the rest.  Truncates
+silently on buffer overflow; the returned byte count gives the
+caller a way to detect truncation against `cap - 1`.
+
+Mirrors the role of Waldmeister's `pcl.c`
+(*Proof Construction Language*) output -- a flat per-step record
+that downstream tools can re-render into LaTeX / ASCII / Prolog
+proofs.
+
+Tests in `tests/test_atp.c` (8342 sub-checks) cover:
+- empty trace yields zero bytes + null-terminated buf
+- single axiom prints `0 (axiom): C... = C...`
+- f(x, e) renders as `C3(x_0, C1)`; rhs as `x_0`
+- post-step trace contains `1 (orient from 0):` and
+  `... (cp from 1, 1): ...` lines
+- 16-byte buffer truncation stays null-terminated
+
 ### Added: trace-walk verification on the headline demo (stage 6.1d)
 
 `atp/headline-trace-shape-and-walk-to-axiom` in

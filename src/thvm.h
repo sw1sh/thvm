@@ -848,6 +848,14 @@ fn void      thvm_atp_free        (AtpState *s);
 fn u8        thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs);
 fn void      thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
 
+// Serialize the trace[] array as Waldmeister-PCL-shaped text into
+// `buf` (cap = capacity).  Each line: "<idx> (<reason> [from
+// <p_a>[, <p_b>]]): <lhs> = <rhs>".  Term pretty-printer handles
+// TAG_CTR / FVR / NUM / ERA; other tags render as "?T<tag>".
+// Truncates silently on buffer overflow; caller can compare the
+// returned byte count against `cap - 1` to detect that case.
+fn u32       thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
+
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.

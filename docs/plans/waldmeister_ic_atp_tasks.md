@@ -150,7 +150,16 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       `parent_a` from the latest TRACE_ORIENT back through the
       trace until it hits a TRACE_AXIOM.  Hops are capped at 100
       to defend against parent-pointer corruption.
-- [ ] 6.2 PCL-shaped trace serializer to text
+- [x] 6.2 `thvm_atp_trace_serialize(s, buf, cap)` walks `trace[]`
+      and emits PCL-shaped lines:
+      `<idx> (<reason> [from <p_a>[, <p_b>]]): <lhs> = <rhs>`.
+      Internal `atp_pretty_term` renders TAG_CTR as
+      `C<lab>(args...)`, TAG_FVR as `x_<id>`, TAG_NUM as `#<v>`,
+      TAG_ERA as `ERA`, fallback `?T<tag>`.  Truncates silently
+      on buffer overflow.  Tests cover empty trace, single axiom
+      (label rendering), CTR-with-args + FVR rendering, post-step
+      trace with `from N` parent annotations, and small-buffer
+      truncation null-termination.
 - [ ] 6.3 parser for `waldmeister/documents/example.pr`-style spec
       files (NAME / SORTS / SIGNATURE / ORDERING / VARIABLES /
       EQUATIONS / CONCLUSION)
