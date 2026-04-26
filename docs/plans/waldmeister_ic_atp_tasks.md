@@ -558,6 +558,34 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           `docs/bench-atp.md` with the latency comparison;
           decide on default.
 - [ ] 8.4 multi-sort signatures (stages 1-4 assume one sort)
+  - [ ] 8.4a design memo `docs/plans/multi_sort.md`: survey
+        the representation choices.  Where do sorts live --
+        on `WaldSym` / `WaldVar` / a global sort table on
+        `WaldSpec`?  Where does sort-checking fire -- inside
+        `thvm_match` / `thvm_unify`, or as a precheck before
+        them?  What's the impact on KBO (Waldmeister supports
+        sort-aware KBO; can we get away without it for v0)?
+        What's the impact on CP enumeration (only overlap
+        pairs whose top symbols match in sort)?  Picks the
+        minimum viable increment.  Scope: ~150-line memo.
+  - [ ] 8.4b extend `WaldSpec` with sort metadata: sort table
+        (id -> name), per-symbol arg sorts + result sort,
+        per-variable sort.  Update the `.pr` parser
+        (`SORTS` / `SIGNATURE` / `VARIABLES` sections) to
+        populate it.  Tests: parse a multi-sort `.pr` fixture
+        and verify the metadata.
+  - [ ] 8.4c implement `wald_sort_check(spec, term)` that
+        verifies a term is well-sorted against the spec.  Used
+        by 8.4d / 8.4e as a precheck rather than threading
+        sort logic through `thvm_match`.
+  - [ ] 8.4d wire sort-check into the saturation loop: reject
+        equations / CPs / orient-and-add inputs that fail
+        `wald_sort_check`.  Update tests to confirm the gate
+        fires on a hand-constructed sort-mismatched equation.
+  - [ ] 8.4e add a multi-sort `.pr` fixture under
+        `tests/data/atp/` (e.g. a small sorted-list fragment:
+        nat, list, with cons taking a nat and a list).  Bench
+        harness picks it up automatically.
 - [ ] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
       -- LPO is `Lexikografische-Pfad-Ordnung`, "lexicographic
       path ordering")
