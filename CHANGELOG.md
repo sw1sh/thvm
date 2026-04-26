@@ -6,6 +6,35 @@ dated section.
 
 ## Unreleased
 
+### Added: SUP-of-rules dispatch demo (stage 8.3c)
+
+`tests/test_sup_rewrite.c` (23 sub-checks, 4 cases) demonstrates
+that a SUP of `prim_rewrite_step` calls reduces to the same
+rewrite outcomes as direct C-side `thvm_match` +
+`thvm_subst_apply` calls would produce per rule.
+
+Cases:
+- `sup-rewrite/two-rules-one-applies`: rules `f(x, e) -> x`
+  and `g(x) -> a`; target `f(b, e)`.  Rule 0 matches yielding
+  `b`; rule 1 yields ERA.  SUP children's wnf outputs match
+  direct C-side reference per rule.
+- `sup-rewrite/two-rules-both-apply`: bare-FVR rules
+  `x -> a` and `x -> b`.  Both match anything; outcomes are
+  the rules' RHS unchanged.
+- `sup-rewrite/three-rules-mixed`: nested SUP `&L_outer{r0,
+  &L_inner{r1, r2}}` covers >2 rules.  Ref-checked per
+  branch.
+- `sup-rewrite/app-sup-fan-out-with-num-args`: exercises
+  APP-SUP commutation directly with NUM args (DUP-friendly)
+  to confirm the fan-out machinery operates with PRI children.
+
+CP-shaped tests use the "fully-applied PRI inside the SUP"
+encoding (`&L{APP(APP(APP(PRI(REWRITE), lhs_i), rhs_i),
+target), ...}`) because APP-SUP cannot fan out CTR-shaped
+args today (DUP-CTR not yet implemented).  The NUM test
+confirms APP-SUP itself works on DUP-friendly args.  Caveat
+documented in the test header; mirrors 8.1d-ii's pattern.
+
 ### Added: prim_rewrite_step IC dispatch primitive (stage 8.3b)
 
 `prim_rewrite_step` (arity 3) registered at

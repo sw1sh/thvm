@@ -514,7 +514,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         (Originally specified as a LAM-binder encoding; the
         design memo reinterpreted this as "rule as a callable
         IC entity" via PRI dispatch.)
-  - [ ] 8.3c SUP of rules + APP-SUP fan-out demo: pre-encode
+  - [x] 8.3c SUP of rules + APP-SUP fan-out demo: pre-encode
         a small rule set as `&L{rule_0_lam, rule_1_lam, ...}`,
         APP it to a target term, observe APP-SUP commutation
         producing a SUP of (rewritten or ERA) results, and
