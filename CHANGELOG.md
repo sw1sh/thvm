@@ -6,6 +6,30 @@ dated section.
 
 ## Unreleased
 
+### Added: trace wired into add_equation + atp_step orient (stage 6.1b)
+
+`thvm_atp_add_equation` now pushes a TRACE_AXIOM entry (parents =
+ATP_TRACE_NONE) and stashes its index in
+`AtpState.cp_trace[i]` alongside the lhs/rhs slot.
+
+`thvm_atp_select_cp` shifts the new `cp_trace[]` array in lockstep
+with the lhs/rhs queue and writes the popped CP's trace index
+into a transient `s->last_popped_trace` field for the saturation
+step to consume.
+
+`thvm_atp_step` reads `last_popped_trace` after `select_cp` and,
+following a successful `orient_and_add`, pushes one TRACE_ORIENT
+entry per added rule (the unfailing 2-way fallback gets two
+entries, both linking back to the same source CP).
+
+Tests in `tests/test_atp.c` verify:
+- `add_equation` populates the trace with a TRACE_AXIOM whose
+  parents are NONE; `cp_trace[0]` points back at it.
+- After `thvm_atp_step` orients an axiom, the new trace entry is
+  TRACE_ORIENT with `parent_a` pointing at the original axiom.
+
+CP-generation traces (TRACE_CP) still pending in 6.1c.
+
 ### Added: trace storage + push helper for AtpState (stage 6.1a)
 
 `src/thvm.h` gains `TRACE_AXIOM/ORIENT/CP` reason labels,

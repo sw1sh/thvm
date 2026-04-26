@@ -45,12 +45,17 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
 
 // Push an axiom / pending equation onto the CP queue.  The
 // saturation loop's orient + generate machinery processes it
-// uniformly with later-derived CPs.  Returns 1 on success, 0 if the
-// queue is full.
+// uniformly with later-derived CPs.  Also records a TRACE_AXIOM
+// entry so the proof trace (stage 6.1) can identify this CP's
+// origin downstream.  Returns 1 on success, 0 if the queue is full.
 fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL || s->n_cps >= ATP_MAX_CPS) return 0;
-  s->cp_lhs[s->n_cps] = lhs;
-  s->cp_rhs[s->n_cps] = rhs;
+  u32 trace_idx = atp_trace_push(s, TRACE_AXIOM,
+                                 ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                 lhs, rhs);
+  s->cp_lhs[s->n_cps]   = lhs;
+  s->cp_rhs[s->n_cps]   = rhs;
+  s->cp_trace[s->n_cps] = trace_idx;
   s->n_cps++;
   return 1;
 }
@@ -100,6 +105,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s->n_cps == 1) {
     *lhs_out = s->cp_lhs[0];
     *rhs_out = s->cp_rhs[0];
+    s->last_popped_trace = s->cp_trace[0];
     s->n_cps = 0;
     return 1;
   }
@@ -138,9 +144,11 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 
   *lhs_out = s->cp_lhs[idx];
   *rhs_out = s->cp_rhs[idx];
+  s->last_popped_trace = s->cp_trace[idx];
   for (u32 j = idx + 1; j < s->n_cps; j++) {
-    s->cp_lhs[j - 1] = s->cp_lhs[j];
-    s->cp_rhs[j - 1] = s->cp_rhs[j];
+    s->cp_lhs[j - 1]   = s->cp_lhs[j];
+    s->cp_rhs[j - 1]   = s->cp_rhs[j];
+    s->cp_trace[j - 1] = s->cp_trace[j];
   }
   s->n_cps--;
   return 1;
@@ -194,11 +202,21 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     return ATP_RUNNING;
   }
 
+  u32 src_trace = s->last_popped_trace;
   AtpAddedRange added = thvm_atp_orient_and_add(s, l, r);
   if (added.count == 0) {
     // R full, or some other refusal.  Count the work and continue.
     s->step++;
     return ATP_RUNNING;
+  }
+
+  // Trace each newly-added rule with its source CP as parent_a.
+  // For unfailing 2-way fallback both directions get separate
+  // entries so PCL output can identify each rule individually.
+  for (u32 k = 0; k < added.count; k++) {
+    Term rl = s->lhs[added.first + k];
+    Term rr = s->rhs[added.first + k];
+    atp_trace_push(s, TRACE_ORIENT, src_trace, ATP_TRACE_NONE, rl, rr);
   }
 
   // Interreduce shifts new-rule indices down by `dropped`.

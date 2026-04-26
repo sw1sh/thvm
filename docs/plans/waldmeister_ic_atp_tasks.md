@@ -124,12 +124,16 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       overflow).  Tests in `tests/test_atp.c` decode an
       AXIOM-shape entry, an ORIENT-with-parent entry, and verify
       the overflow-returns-NONE behavior.
-- [ ] 6.1b wire `atp_trace_push` into `thvm_atp_add_equation`
-      (TRACE_AXIOM, parents = NONE) and
-      `thvm_atp_orient_and_add` (TRACE_ORIENT, parent_a = the
-      source CP's trace index).  Requires plumbing the source
-      trace index through `thvm_atp_step` so orient knows which
-      CP it's orienting.
+- [x] 6.1b `thvm_atp_add_equation` now records TRACE_AXIOM and
+      stashes the index in `cp_trace[]`.  `thvm_atp_select_cp`
+      shifts `cp_trace[]` in lockstep with `cp_lhs/rhs` and
+      stashes the popped trace index in `s->last_popped_trace`.
+      `thvm_atp_step` reads `last_popped_trace` after select and,
+      after a successful orient_and_add, pushes one TRACE_ORIENT
+      entry per added rule (handles unfailing 2-way) with
+      `parent_a` = source CP's trace.  Tests verify axiom is
+      recorded on add_equation and orient parent threading on a
+      single step.
 - [ ] 6.1c wire `atp_trace_push` into `thvm_atp_generate_cps`
       (TRACE_CP, parents = the two source rule trace indices).
       Each new CP pushed onto the queue gets a corresponding

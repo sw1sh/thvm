@@ -534,6 +534,45 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/trace-add-equation-records-axiom");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    thvm_atp_add_equation(s, lhs, rhs);
+    CHECK_EQ(s->n_trace, 1u);
+    Term entry = s->trace[0];
+    CHECK_EQ(term_ext(entry), TRACE_AXIOM);
+    CHECK_EQ(term_val(term_ctr_at(entry, 0)), ATP_TRACE_NONE);   // p_a
+    CHECK_EQ(term_val(term_ctr_at(entry, 1)), ATP_TRACE_NONE);   // p_b
+    // cp_trace[0] points back to the axiom we just pushed.
+    CHECK_EQ(s->cp_trace[0], 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-orient-records-source-cp-as-parent");
+  {
+    // After one step, the orient entry should carry the source CP's
+    // trace index as parent_a.  With one axiom on the queue, the
+    // step pops it, orients, pushes a TRACE_ORIENT whose parent_a
+    // == 0 (the original axiom's trace index).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    thvm_atp_add_equation(s, lhs, rhs);
+    CHECK_EQ(s->n_trace, 1u);    // axiom recorded
+    AtpStatus st = thvm_atp_step(s);
+    CHECK_EQ((int)st, (int)ATP_RUNNING);
+    CHECK_EQ(s->n_rules, 1u);
+    // n_trace bumped by exactly one TRACE_ORIENT entry.
+    CHECK_EQ(s->n_trace, 2u);
+    Term orient = s->trace[1];
+    CHECK_EQ(term_ext(orient), TRACE_ORIENT);
+    CHECK_EQ(term_val(term_ctr_at(orient, 0)), 0u);   // parent_a = axiom
+    CHECK_EQ(term_val(term_ctr_at(orient, 1)), ATP_TRACE_NONE);   // parent_b
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/headline-prove-f-a-ia-equals-e-from-group-axioms");
   {
     // Stage 5.5 demo from docs/plans/waldmeister_ic_atp.md sec.5:

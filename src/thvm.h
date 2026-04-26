@@ -804,10 +804,20 @@ typedef struct {
   u32  n_rules;
 
   // CP queue (open-form: not INC-wrapped here; the priority encoding
-  // happens at selection time in thvm_atp_select).
+  // happens at selection time in thvm_atp_select).  cp_trace[i]
+  // holds the trace-entry index that birthed cp[i] (TRACE_AXIOM
+  // for queued axioms, TRACE_CP for generated CPs in 6.1c, or
+  // ATP_TRACE_NONE if tracing is disabled / unavailable).
   Term cp_lhs[ATP_MAX_CPS];
   Term cp_rhs[ATP_MAX_CPS];
+  u32  cp_trace[ATP_MAX_CPS];
   u32  n_cps;
+
+  // Transient: set by thvm_atp_select_cp to the trace-entry index
+  // of the popped CP; consumed by thvm_atp_step right after the
+  // pop so orient_and_add's TRACE_ORIENT entry can record the
+  // source CP as its parent.
+  u32  last_popped_trace;
 
   // Goal: a single conjecture goal_lhs == goal_rhs.  goal_lhs == 0
   // means "no goal set; run as completion".
