@@ -795,7 +795,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         any) and where the 32-step budget bites.  Scope: ~100-
         line memo + updated `build/bench-atp.csv` /
         `build/bench-twee.csv` snapshots.
-- [ ] 10 Wolfram-axiom Boolean corpus: add two `.pr` fixtures
+- [x] 10 Wolfram-axiom Boolean corpus: add two `.pr` fixtures
       based on Wolfram's 2000 single-equation axiomatisation of
       Boolean algebra in NAND form, proven equivalent to
       standard Boolean algebra by McCune via EQP:
@@ -825,7 +825,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         in the memo (same protocol as 9.4b).  Update CHANGELOG
         under `## Unreleased` with the prediction/observation
         table.  Scope: 2 small fixtures, ~30-40 lines each.
-  - [ ] 10c bench comparison + findings update: re-run
+  - [x] 10c bench comparison + findings update: re-run
         `tools/bench_twee` on the now 14-fixture corpus; append
         a new section to `docs/plans/corpus_expansion_findings.md`
         with the Wolfram-axiom rows + IC-vs-Twee deltas + any

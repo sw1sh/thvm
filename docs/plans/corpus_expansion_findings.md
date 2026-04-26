@@ -185,3 +185,60 @@ captured snapshots; they are gitignored so re-running
 `make test` and `make bench-twee` regenerates them but the
 numbers above are the headline figures captured at 9.4c
 landing time.
+
+## Stage 10c update: Wolfram-axiom Boolean fixture
+
+Stage 10 added the Wolfram-axiom Boolean-algebra corner to
+the bench.  10b shipped only the conservative literal
+fixture (the Sheffer-commutativity stress test was dropped
+mid-firing -- see `wolfram_axiom_design.md` for the analysis).
+After 10b: 13 fixtures total (12 from stage 9 + 1 Wolfram).
+
+### New row
+
+| Fixture | thvm | Twee | Gap |
+|---|---|---|---|
+| `wolfram_axiom_literal` | PROVED 0.012 ms | PROVED 19.740 ms | thvm wins |
+
+All 4 (cp-gen x rewrite) modes agree on PROVED @ step 0; the
+goal-rewrite path matches the axiom rule directly with
+`x=p, y=q, z=r` before any saturation step fires.  Twee pays
+its ~20 ms saturation startup as on every other PROVED row.
+
+**Updated score: 10/13 thvm-wins, 3/13 thvm-fails** (still
+the `comm_monoid_swap` QUEUE_EMPTY + the two group TIMEOUTs).
+Wolfram-axiom shape did not introduce new failures.
+
+### IC-rewrite scaling finding (deferred)
+
+The dropped `wolfram_sheffer_commutativity` fixture exposed a
+real prover-scaling issue not previously flagged: the
+IC-routed rewrite path on the Wolfram axiom's depth-4 NAND
+nesting allocates ~50-100 cells per rewrite step via
+`atp_ic_rewrite_step`'s recursive `term_new_ctr`.  Worst-case
+budget per `(file, mode)` run with `step_cap=32` and
+NORM_CAP=64: `32 * 64 * 2 * 100 = 410K cells per step,
+amplified by ~32 saturation steps = 13M cells`.  HEAP_CAP is
+16M.  The bench harness aborts on the second mode (`ci`)
+when the heap exhausts.
+
+The cc-mode run (C-direct cp-gen + C-direct rewrite)
+completes cleanly: TIMEOUT @ 32 in 47 ms, 32 rules, 1133
+trace entries.  So the saturation behaviour itself is sane
+on the Sheffer-commutativity goal -- the issue is purely the
+IC-rewrite cell-allocation pattern.
+
+This is the natural follow-on motivation for either:
+
+1. Bumping HEAP_CAP past 16M (1<<24) -- needs a per-mode
+   profile pass first to know the actual ceiling.
+2. Widening 9.3's heap checkpoint/reset beyond the joined-CP
+   branch -- e.g., reset after orient/interreduce when the
+   newly-installed rule's cells fit below a fresh checkpoint.
+3. A copy-into-old-cells compaction in `atp_ic_rewrite_step`
+   so each recursive rewrite reclaims the failed branches it
+   allocated.  Most invasive but most general.
+
+Out of scope for stage 10.  Closes the 10c finding window;
+the Sheffer-commutativity TIMEOUT row will only land once
+this scaling issue is addressed.

@@ -6,6 +6,31 @@ dated section.
 
 ## Unreleased
 
+### Added: Wolfram-axiom bench-twee comparison (stage 10c)
+
+`docs/plans/corpus_expansion_findings.md` gains a "Stage 10c
+update" section with the new `wolfram_axiom_literal` row:
+
+| Fixture | thvm | Twee | Gap |
+|---|---|---|---|
+| `wolfram_axiom_literal` | PROVED 0.012 ms | PROVED 19.740 ms | thvm wins |
+
+Updated score: 10/13 thvm-wins, 3/13 thvm-fails (still
+`comm_monoid_swap` QUEUE_EMPTY + the two group TIMEOUTs;
+Wolfram-axiom shape did not introduce new failures).
+
+The memo also documents the IC-rewrite scaling finding
+discovered while attempting the Sheffer-commutativity stress
+fixture: the IC-routed rewrite path on depth-4 NAND nesting
+exhausts HEAP_CAP at ~13M cells worst-case under
+`step_cap=32`. Lists three follow-on options (HEAP_CAP bump,
+widened 9.3 heap reset, in-place rewrite compaction) any of
+which would unblock the stress-fixture row.
+
+Closes 10 (parent + 10a/b/c all `[x]`). Documentation +
+bench-twee snapshot regenerated; tests stay green
+(166/166 C, 323 WL).
+
 ### Added: Wolfram-axiom literal fixture (stage 10b)
 
 `tests/data/atp/wolfram_axiom_literal.pr` (+ `.expect`):
