@@ -373,6 +373,24 @@ fn void thvm_atp_set_spec(AtpState *s, const struct WaldSpec *spec) {
   s->spec = spec;
 }
 
+// 8.5c: attach an LpoConfig.  When non-NULL, orient_and_add
+// dispatches to thvm_lpo instead of thvm_kbo.
+fn void thvm_atp_set_lpo(AtpState *s, const LpoConfig *lpo) {
+  if (s == NULL) return;
+  s->lpo = lpo;
+}
+
+// 8.5c: order-aware compare.  Picks LPO (if attached) or KBO,
+// returning a unified KboCmp-shaped result.  The two enums share
+// numeric values (EQ=0, GT=1, LT=-1, UN=2), so the cast is safe.
+static KboCmp atp_compare(AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL) return KBO_UN;
+  if (s->lpo != NULL) {
+    return (KboCmp)thvm_lpo(lhs, rhs, s->lpo);
+  }
+  return thvm_kbo(lhs, rhs, s->kbo);
+}
+
 // Total symbol count: TAG_FVR / atoms count as 1; TAG_CTR counts
 // itself + the symbols of its children.  This is the "size" used
 // by Waldmeister's `--add` heuristic in `ClasHeuristics.c`
@@ -1088,7 +1106,9 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
   AtpAddedRange r = {0, 0};
   if (s == NULL) return r;
 
-  KboCmp c = thvm_kbo(lhs, rhs, s->kbo);
+  // 8.5c: dispatch between KBO and LPO based on which config is
+  // attached.  See `atp_compare`.
+  KboCmp c = atp_compare(s, lhs, rhs);
   switch (c) {
     case KBO_GT: {
       u32 idx = s->n_rules;

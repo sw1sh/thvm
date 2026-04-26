@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: LPO wired into saturation (stage 8.5c)
+
+`AtpState` gains a `const LpoConfig *lpo` field alongside the
+existing `kbo`.  Per `docs/plans/lpo_design.md`'s Choice C: when
+non-NULL, takes precedence over KBO; when both are NULL, every
+comparison is incomparable (KBO_UN) and saturation falls into
+unfailing fallback.
+
+New API:
+- `void thvm_atp_set_lpo(AtpState *s, const LpoConfig *lpo);`
+  -- attach an LpoConfig (or NULL to clear).
+
+New static helper `atp_compare(s, lhs, rhs)` picks LPO (if
+attached) or KBO and returns a unified `KboCmp`-shaped result
+(both enums share numeric values: EQ=0, GT=1, LT=-1, UN=2;
+direct cast is safe).
+
+`thvm_atp_orient_and_add` now calls `atp_compare` instead of
+`thvm_kbo` directly.  All other AtpState callsites (joinability
+filter, connectedness counter, rule subsumption check) still
+use the rewriter rather than the comparator, so they're
+unaffected.
+
+`tests/test_atp.c` adds 3 cases (8392 sub-checks, was 8386):
+- `atp/lpo-default-off`: fresh AtpState has `lpo == NULL`
+- `atp/lpo-orient-prefers-lpo-when-attached`: orienting
+  `f(x, e) -> x` succeeds via LPO subterm-dominance with a
+  precedence-only LpoConfig
+- `atp/lpo-set-clear-roundtrip`: setter accepts and clears
+  cleanly
+
+Stage 8.5d adds an `.pr` fixture wired to actually use LPO.
+
 ### Added: thvm_lpo Lexicographic Path Ordering (stage 8.5b)
 
 `src/lpo/_.c` (~150 lines) implements the LPO comparator

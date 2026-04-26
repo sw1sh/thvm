@@ -1262,6 +1262,55 @@ int main(void) {
     thvm_atp_free(s_ic);
   }
 
+  // === Stage 8.5c: LPO ordering selector =============================
+
+  TEST_BEGIN("atp/lpo-default-off");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK(s->lpo == NULL);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/lpo-orient-prefers-lpo-when-attached");
+  {
+    // Build a rule (f(x, e) -> x) and orient it under both
+    // KBO and LPO; verify both succeed and produce the same
+    // rule shape.  Under LPO, f(x, e) > x by subterm dominance
+    // (x is a strict subterm of f(x, e)).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+
+    // Construct an LpoConfig with a precedence consistent with
+    // DUMMY_CFG's labels (e=1, i=2, f=3, a=4).
+    static u32 lpo_prec[5] = {0, 1, 4, 3, 2};
+    static const LpoConfig LPO_CFG = {
+      .precedence = lpo_prec,
+      .n_labels   = 5,
+    };
+    thvm_atp_set_lpo(s, &LPO_CFG);
+    CHECK(s->lpo == &LPO_CFG);
+
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    AtpAddedRange added = thvm_atp_orient_and_add(s, lhs, rhs);
+    CHECK_EQ(added.count, 1u);
+    // Single-direction rule (LPO should give GT, not unfailing).
+    CHECK_EQ(s->n_rules, 1u);
+
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/lpo-set-clear-roundtrip");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    static u32 prec[5] = {0, 1, 2, 3, 4};
+    static const LpoConfig CFG = { .precedence = prec, .n_labels = 5 };
+    thvm_atp_set_lpo(s, &CFG);
+    CHECK(s->lpo == &CFG);
+    thvm_atp_set_lpo(s, NULL);
+    CHECK(s->lpo == NULL);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

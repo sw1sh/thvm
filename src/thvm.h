@@ -916,8 +916,14 @@ typedef struct {
   Term goal_lhs;
   Term goal_rhs;
 
-  // Reduction ordering (caller-owned).
+  // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
+  // it takes precedence over `kbo` per Choice C of
+  // `docs/plans/lpo_design.md`: orient_and_add dispatches to
+  // `thvm_lpo`.  When both are NULL, every comparison is
+  // incomparable (KBO_UN) -- saturation falls into unfailing
+  // fallback.
   const KboConfig *kbo;
+  const LpoConfig *lpo;
 
   // Bounds.
   u32 step;
@@ -1000,6 +1006,11 @@ fn u8        thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
 // NULL to clear (homogeneous-mode default).
 fn void      thvm_atp_set_spec    (AtpState *s,
                                    const struct WaldSpec *spec);
+
+// 8.5c: attach an LpoConfig.  When set, `thvm_atp_orient_and_add`
+// uses LPO instead of KBO.  Pass NULL to revert to KBO (the
+// default).
+fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 
 // Serialize the trace[] array as Waldmeister-PCL-shaped text into
 // `buf` (cap = capacity).  Each line: "<idx> (<reason> [from

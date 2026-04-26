@@ -608,7 +608,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `tests/test_lpo.c` cover GT / LT / EQ / UN outcomes
         on hand-constructed term pairs.  Scope: ~120 LOC + ~50
         LOC tests.
-  - [ ] 8.5c wire LPO into the saturation engine: extend
+  - [x] 8.5c wire LPO into the saturation engine: extend
         AtpState with the chosen ordering selector from 8.5a;
         update `thvm_atp_orient_and_add` to dispatch between
         KBO and LPO.  Tests verify orient outcomes match
