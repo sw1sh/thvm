@@ -133,6 +133,57 @@ int main(void) {
     CHECK_EQ(term_ext(r), LAB_e);
   }
 
+  TEST_BEGIN("rewrite-step/recursive-descent-fires-at-subterm");
+  {
+    // 5.4 demo: rule f(x, e) -> x.  Term i(f(a, e)) -- the top
+    // is `i`, not `f`, so a top-only rewriter would miss.  With
+    // recursive descent, the inner f(a, e) reduces to a, and the
+    // step returns i(a).
+    Term lhs[1] = { mk_f(mk_v(VAR_x), mk_e()) };
+    Term rhs[1] = { mk_v(VAR_x) };
+    Term t = mk_i(mk_f(mk_a(), mk_e()));
+    Term r = thvm_rewrite_step(t, lhs, rhs, 1);
+    CHECK_EQ(term_tag(r), TAG_CTR);
+    CHECK_EQ(term_ext(r), LAB_i);
+    Term inner = term_ctr_at(r, 0);
+    CHECK_EQ(term_tag(inner), TAG_CTR);
+    CHECK_EQ(term_ext(inner), LAB_a);
+  }
+
+  TEST_BEGIN("rewrite-normalize/recursive-multi-level");
+  {
+    // Two levels: i(i(f(a, e))) under f(x, e) -> x reduces to
+    // i(i(a)) in one fixpoint pass.
+    Term lhs[1] = { mk_f(mk_v(VAR_x), mk_e()) };
+    Term rhs[1] = { mk_v(VAR_x) };
+    Term t = mk_i(mk_i(mk_f(mk_a(), mk_e())));
+    Term r = thvm_rewrite_normalize(t, lhs, rhs, 1, 16);
+    CHECK_EQ(term_ext(r), LAB_i);
+    CHECK_EQ(term_ext(term_ctr_at(r, 0)), LAB_i);
+    CHECK_EQ(term_ext(term_ctr_at(term_ctr_at(r, 0), 0)), LAB_a);
+  }
+
+  TEST_BEGIN("rewrite-step/top-tried-before-children");
+  {
+    // Rule l1: i(x) -> e (consumes a single i wrapper).
+    // Rule l2: f(x, e) -> x.
+    // Term: i(f(a, e)).  Top tried first: l1 matches i(_) at top,
+    // returns e.  (Without descent precedence, descent might fire
+    // l2 first on the inner f(a, e) -> a, yielding i(a).  Top-first
+    // semantics gives e.)
+    Term lhs[2] = {
+      mk_i(mk_v(VAR_x)),
+      mk_f(mk_v(VAR_x), mk_e()),
+    };
+    Term rhs[2] = {
+      mk_e(),
+      mk_v(VAR_x),
+    };
+    Term t = mk_i(mk_f(mk_a(), mk_e()));
+    Term r = thvm_rewrite_step(t, lhs, rhs, 2);
+    CHECK_EQ(term_ext(r), LAB_e);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

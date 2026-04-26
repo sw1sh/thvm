@@ -97,8 +97,15 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       plumbing.  FIFO test in `tests/test_atp.c` upgraded to
       `select-cp-priority-order` confirming l2/r2 (k=2) -> l3/r3
       (k=2) -> l1/r1 (k=4) order.
-- [ ] 5.4 recursive-descent rewriter: extend `thvm_rewrite_step` to
-      try every position in the term, not just top
+- [x] 5.4 `thvm_rewrite_step` now does outermost-leftmost recursive
+      descent: try the top first; on no top-match, descend into
+      TAG_CTR children left-to-right, recurse, return on the first
+      sub-rewrite.  One step still fires exactly one redex.
+      `thvm_rewrite_normalize` now reaches sub-positions through
+      successive calls; 5.2c interreduce + 5.2e goal_check + 5.2f
+      step driver inherit the wider coverage automatically.  Tests:
+      `tests/test_rewrite.c` adds 3 new cases (subterm fires,
+      multi-level descent, top-tried-before-children precedence).
 - [ ] 5.5 demo: prove `f(a, i(a)) = e` from the standard group
       axioms (assoc + right-id + right-inv) via saturation; record
       step count

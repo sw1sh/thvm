@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Changed: thvm_rewrite_step now recursive-descent (stage 5.4)
+
+`thvm_rewrite_step` upgrades from top-only to outermost-leftmost
+descent: it tries the top first; on no top-match, it walks the
+TAG_CTR children left-to-right, recursing into the first child
+that yields a rewrite, and returns the rebuilt term.  One step
+still fires exactly one redex; `thvm_rewrite_normalize`'s
+fixpoint loop drives multi-level reductions.
+
+Effect on the saturation pipeline (stage 5):
+
+  thvm_atp_interreduce   (5.2c) -- now drops rules whose LHS has
+                                   a reducible sub-position, not
+                                   just rules whose top reduces
+  thvm_atp_goal_check    (5.2e) -- compound goals normalize fully
+  thvm_atp_step          (5.2f) -- the per-step normalize covers
+                                   all positions in the picked CP
+
+No external API changes; the saturation pipeline inherits the
+wider coverage automatically.  All existing top-only test cases
+still pass (top is tried first, so top-position rewrites don't
+get pre-empted by deeper ones).
+
+Three new cases in `tests/test_rewrite.c` exercise sub-position
+firing (`i(f(a, e))` -> `i(a)` under `f(x, e) -> x`),
+multi-level (`i(i(f(a, e)))` -> `i(i(a))`), and top-tried-before-
+children precedence.
+
 ### Changed: thvm_atp_select_cp now priority-aware via INC + collapse_ordered (stage 5.3)
 
 Replaces the FIFO pop with the SupGen-style priority encoding from

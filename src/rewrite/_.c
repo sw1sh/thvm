@@ -74,15 +74,52 @@ fn Term thvm_subst_apply(Term t, const RewriteSubst *subst) {
   }
 }
 
-// Try each rule in order.  First successful match wins; rhs is
-// returned with substitution applied.  No match: return t unchanged.
-fn Term thvm_rewrite_step(Term t, const Term *lhs, const Term *rhs, u32 n_rules) {
+// Try each rule at the top position only.  Returns the rewritten
+// term and sets *fired = 1 on a hit; *fired = 0 if no rule matches
+// here.  Internal helper used by `thvm_rewrite_step`.
+static Term rewrite_try_top(Term t, const Term *lhs, const Term *rhs,
+                            u32 n_rules, u8 *fired) {
   for (u32 i = 0; i < n_rules; i++) {
     RewriteSubst subst = {{0}};
     if (thvm_match(lhs[i], t, &subst)) {
+      *fired = 1;
       return thvm_subst_apply(rhs[i], &subst);
     }
   }
+  *fired = 0;
+  return t;
+}
+
+// One outermost-leftmost rewrite anywhere in `t`.  Tries the top
+// first; if no rule matches, descends into TAG_CTR children
+// left-to-right, recursing.  Stops after the first successful
+// rewrite (one step = one redex fired).  Returns t unchanged if
+// nothing reducible was found.
+//
+// Stage 5.4 of docs/plans/waldmeister_ic_atp_tasks.md: extends
+// the original top-only rewriter so saturation's interreduce,
+// goal_check, and normalize work on compound terms.
+fn Term thvm_rewrite_step(Term t, const Term *lhs, const Term *rhs, u32 n_rules) {
+  u8 fired = 0;
+  Term r = rewrite_try_top(t, lhs, rhs, n_rules, &fired);
+  if (fired) return r;
+
+  // Descend into CTR children, left-to-right; first sub-rewrite wins.
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) return t;
+    Term children[REWRITE_MAX_ARITY];
+    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      Term original = children[i];
+      Term rewritten = thvm_rewrite_step(original, lhs, rhs, n_rules);
+      if (!kbo_eq(rewritten, original)) {
+        children[i] = rewritten;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+
   return t;
 }
 
