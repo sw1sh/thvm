@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_atp_peek_top_k CP lookahead (stage 8.10b)
+
+New API in `src/atp/_.c`:
+
+```c
+u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
+                        Term *out_lhs, Term *out_rhs);
+```
+
+Reuses the same INC-priority + SUP-tree + collapse_ordered
+pipeline as `thvm_atp_select_cp` but does NOT pop -- the queue
+stays unchanged.  Writes the top `k` cheapest CPs (or `n_cps`
+if fewer) into the caller's buffers in priority order; returns
+the actual count peeked.
+
+Same priority logic as `select_cp` (8.5c's KBO/LPO dispatch +
+8.8's `--mix` heuristic if enabled), so peek and pop agree on
+what comes first.
+
+`tests/test_atp.c` adds 6 cases (8444 sub-checks, was 8426):
+- `peek/empty-queue-returns-zero`
+- `peek/k-zero-returns-zero` (queue unchanged)
+- `peek/singleton`: 1-CP fast path
+- `peek/orders-by-priority`: 3 mixed-size CPs returned
+  cheapest-first
+- `peek/k-greater-than-n-clamps`
+- `peek/then-pop-stays-consistent`: select_cp pops what
+  peek[0] showed
+
+Designed for future research: branchless lookahead, multi-CP
+batch heuristics, debugging the priority ordering.  Stage
+8.10c writes the IC-native ATP arc closing memo.
+
 ### Added: SupGen-style search design memo (stage 8.10a)
 
 `docs/plans/supgen_search_design.md` (~120 lines) closes the

@@ -1042,6 +1042,18 @@ fn void      thvm_atp_set_spec    (AtpState *s,
 // default).
 fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 
+// 8.10b: top-K peek into the CP queue.  Reuses the existing
+// INC-priority + collapse_ordered pipeline from
+// `thvm_atp_select_cp` but does NOT pop -- the queue is left
+// unchanged.  Writes the top `k` cheapest CPs (or `n_cps` if
+// fewer) into `out_lhs[]` / `out_rhs[]` in priority order
+// (cheapest first).  Returns the actual count peeked.
+//
+// Useful for branchless lookahead heuristics, multi-CP batch
+// processing, and debugging the priority ordering.
+fn u32       thvm_atp_peek_top_k  (AtpState *s, u32 k,
+                                   Term *out_lhs, Term *out_rhs);
+
 // 8.9b: narrowing primitives.  `thvm_atp_narrow_step` walks every
 // non-variable position of `lhs` and `rhs` (in that order),
 // trying to unify each subterm with each rule's LHS.  On first

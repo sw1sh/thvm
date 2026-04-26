@@ -703,7 +703,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         children).  Pick ONE concrete extension for 8.10b that
         adds non-overlapping value beyond what's already in
         place.
-  - [ ] 8.10b implement the chosen extension + bench it
+  - [x] 8.10b implement the chosen extension + bench it
         against the explicit-queue / single-choice baseline
         from stages 5-9.  Goal: demonstrate that SupGen-style
         superposition either (a) saves work via lazy

@@ -1264,6 +1264,111 @@ int main(void) {
 
   // === Stage 8.5c: LPO ordering selector =============================
 
+  // === Stage 8.10b: top-K CP peek ====================================
+
+  TEST_BEGIN("atp/peek/empty-queue-returns-zero");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term o_lhs[4], o_rhs[4];
+    CHECK_EQ(thvm_atp_peek_top_k(s, 4u, o_lhs, o_rhs), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/peek/k-zero-returns-zero");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->cp_lhs[0] = mk_a();
+    s->cp_rhs[0] = mk_e();
+    s->n_cps = 1;
+    Term o_lhs[1], o_rhs[1];
+    CHECK_EQ(thvm_atp_peek_top_k(s, 0u, o_lhs, o_rhs), 0u);
+    // Queue unchanged.
+    CHECK_EQ(s->n_cps, 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/peek/singleton");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->cp_lhs[0] = mk_a();
+    s->cp_rhs[0] = mk_e();
+    s->n_cps = 1;
+    Term o_lhs[2] = {0, 0}, o_rhs[2] = {0, 0};
+    u32 n = thvm_atp_peek_top_k(s, 2u, o_lhs, o_rhs);
+    CHECK_EQ(n, 1u);
+    CHECK_EQ(term_tag(o_lhs[0]), TAG_CTR);
+    CHECK_EQ(term_ext(o_lhs[0]), 4u);   // LAB_a
+    CHECK_EQ(s->n_cps, 1u);   // queue unchanged
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/peek/orders-by-priority");
+  {
+    // Queue 3 CPs of differing sizes; verify peek returns them
+    // in priority (size) order without mutating the queue.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    // CP_BIG = (f(f(x, e), e), x), size 5+1=6
+    // CP_MID = (f(x, e), x),         size 3+1=4
+    // CP_SML = (a, e),               size 1+1=2
+    s->cp_lhs[0] = mk_f(mk_f(mk_v(VAR_x), mk_e()), mk_e());
+    s->cp_rhs[0] = mk_v(VAR_x);
+    s->cp_lhs[1] = mk_f(mk_v(VAR_x), mk_e());
+    s->cp_rhs[1] = mk_v(VAR_x);
+    s->cp_lhs[2] = mk_a();
+    s->cp_rhs[2] = mk_e();
+    s->n_cps = 3;
+
+    Term o_lhs[3] = {0, 0, 0}, o_rhs[3] = {0, 0, 0};
+    u32 n = thvm_atp_peek_top_k(s, 3u, o_lhs, o_rhs);
+    CHECK_EQ(n, 3u);
+    // First peek = CP_SML.
+    CHECK_EQ(term_ext(o_lhs[0]), 4u);   // a
+    CHECK_EQ(term_ext(o_rhs[0]), 1u);   // e
+    // Last peek = CP_BIG (top is f).
+    CHECK_EQ(term_ext(o_lhs[2]), 3u);   // f
+    CHECK_EQ(term_ctr_n(o_lhs[2]), 2u);
+    // Queue unchanged.
+    CHECK_EQ(s->n_cps, 3u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/peek/k-greater-than-n-clamps");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->cp_lhs[0] = mk_a(); s->cp_rhs[0] = mk_e();
+    s->cp_lhs[1] = mk_e(); s->cp_rhs[1] = mk_a();
+    s->n_cps = 2;
+    Term o_lhs[10], o_rhs[10];
+    u32 n = thvm_atp_peek_top_k(s, 10u, o_lhs, o_rhs);
+    CHECK_EQ(n, 2u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/peek/then-pop-stays-consistent");
+  {
+    // Peek shows cheapest first; subsequent select_cp should pop
+    // the same CP that peek's [0] revealed.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->cp_rhs[0] = mk_v(VAR_x);
+    s->cp_lhs[1] = mk_a();
+    s->cp_rhs[1] = mk_e();
+    s->n_cps = 2;
+    s->cp_trace[0] = 100;
+    s->cp_trace[1] = 200;
+
+    Term peek_lhs[2], peek_rhs[2];
+    u32 n = thvm_atp_peek_top_k(s, 2u, peek_lhs, peek_rhs);
+    CHECK_EQ(n, 2u);
+
+    Term pop_lhs = 0, pop_rhs = 0;
+    CHECK_EQ((int)thvm_atp_select_cp(s, &pop_lhs, &pop_rhs), 1);
+    // Popped CP should match peek[0].
+    CHECK_EQ((int)kbo_eq(pop_lhs, peek_lhs[0]), 1);
+    CHECK_EQ((int)kbo_eq(pop_rhs, peek_rhs[0]), 1);
+    thvm_atp_free(s);
+  }
+
   // === Stage 8.9b: narrowing primitives ==============================
 
   TEST_BEGIN("atp/narrow/no-rules-returns-zero");

@@ -1217,6 +1217,64 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
   }
 }
 
+// === 8.10b: top-K CP peek ==========================================
+//
+// Builds the same INC-priority SUP tree that `thvm_atp_select_cp`
+// uses, calls `thvm_collapse_ordered` to get the cheapest-first
+// ordering, copies the top K leaves' (lhs, rhs) into the
+// caller's buffers WITHOUT modifying `s->cp_lhs/rhs/trace/n_cps`.
+//
+// Caller-side use case: see top-K candidates before deciding
+// which (if any) to commit; useful for branching CP selectors,
+// multi-CP batch heuristics, lookahead.
+fn u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
+                           Term *out_lhs, Term *out_rhs) {
+  if (s == NULL || s->n_cps == 0) return 0;
+  if (k > s->n_cps) k = s->n_cps;
+  if (k == 0) return 0;
+
+  // Singleton fast path: just one CP, no collapse needed.
+  if (s->n_cps == 1) {
+    out_lhs[0] = s->cp_lhs[0];
+    out_rhs[0] = s->cp_rhs[0];
+    return 1;
+  }
+
+  // Build wrapped[i] = INC^priority_i(CTR_label=i([lhs_i, rhs_i]))
+  // exactly as select_cp does.
+  Term wrapped[ATP_MAX_CPS];
+  for (u32 i = 0; i < s->n_cps; i++) {
+    u32 prio = atp_cp_priority(s, s->cp_lhs[i], s->cp_rhs[i]);
+    Term children[2] = { s->cp_lhs[i], s->cp_rhs[i] };
+    Term w = term_new_ctr(i, children, 2);
+    for (u32 j = 0; j < prio; j++) w = term_new_inc(w);
+    wrapped[i] = w;
+  }
+  Term sup = wrapped[s->n_cps - 1];
+  for (u32 i = s->n_cps - 1; i > 0; ) {
+    i--;
+    u64 loc = heap_alloc(2);
+    heap_set(loc + 0, wrapped[i]);
+    heap_set(loc + 1, sup);
+    sup = term_new(0, TAG_SUP, 0, loc);
+  }
+  Term collapsed[ATP_MAX_CPS];
+  u64 n_out = thvm_collapse_ordered(sup, collapsed, (u64)s->n_cps);
+  if (n_out == 0) return 0;
+  if ((u32)n_out < k) k = (u32)n_out;
+
+  // Decode each leaf's CTR label back to a queue index.
+  for (u32 i = 0; i < k; i++) {
+    Term leaf = collapsed[i];
+    if (term_tag(leaf) != TAG_CTR) return i;   // partial result
+    u32 idx = term_ext(leaf);
+    if (idx >= s->n_cps) return i;
+    out_lhs[i] = s->cp_lhs[idx];
+    out_rhs[i] = s->cp_rhs[idx];
+  }
+  return k;
+}
+
 // === 8.9b: narrowing primitives ====================================
 
 // One-shot narrow visitor: tries each rule at the current position,
