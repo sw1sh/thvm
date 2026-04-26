@@ -160,9 +160,47 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       (label rendering), CTR-with-args + FVR rendering, post-step
       trace with `from N` parent annotations, and small-buffer
       truncation null-termination.
-- [ ] 6.3 parser for `waldmeister/documents/example.pr`-style spec
-      files (NAME / SORTS / SIGNATURE / ORDERING / VARIABLES /
-      EQUATIONS / CONCLUSION)
+- [ ] 6.3a parser data model: `WaldSpec` struct holding parsed
+      signature (name -> { label, arity }), variable table
+      (name -> FVR id), equations[] (parallel lhs/rhs), and
+      goal_lhs/goal_rhs.  Add fixed caps `WALD_MAX_SYMBOLS`,
+      `WALD_MAX_VARS`, `WALD_MAX_EQNS`, `WALD_NAME_LEN`.  Init
+      / free helpers; no parsing logic yet.
+- [ ] 6.3b lexer: tokenize a NUL-terminated source buffer.  Skip
+      whitespace + `%`-to-end-of-line comments.  Tokens: ident
+      (alpha / digit / `_`), `:`, `->`, `=`, `(`, `)`, `,`, `>`,
+      end-of-input.  Section keywords (NAME, MODE, SORTS,
+      SIGNATURE, ORDERING, VARIABLES, EQUATIONS, CONCLUSION,
+      LPO, KBO) are just ident tokens; the section parser
+      (6.3c) recognizes them.  Public API: `WaldLex` cursor +
+      `wald_lex_next(lex) -> WaldTok`.
+- [ ] 6.3c section drivers for NAME / MODE / SORTS / SIGNATURE
+      / VARIABLES / ORDERING.  SIGNATURE entries register
+      `name: arg_sort_list -> result_sort` and assign each
+      symbol a fresh CTR label.  VARIABLES registers the
+      comma-separated list with sequential FVR ids.  ORDERING
+      is parsed as KBO (`weight-clist precedence`) or LPO
+      (`precedence`).  No EQUATIONS / CONCLUSION yet.
+- [ ] 6.3d term parser: `wald_parse_term(spec, lex) -> Term`.
+      Parses `ident` (lookup in var table -> FVR; else
+      lookup in signature -> CTR with arity 0) and
+      `ident(t1, t2, ...)` (CTR with the args; arity must
+      match the signature).  Recursive-descent; no operator
+      precedence (FOL terms are flat).
+- [ ] 6.3e EQUATIONS / CONCLUSION parsers: each section is a
+      sequence of `term = term` pairs.  Push parsed pairs into
+      `spec->eqn_lhs/rhs[]` (axioms) or `spec->goal_lhs/rhs`
+      (single conclusion for proof mode).  Reject multiple
+      conclusions for now (8.x can revisit).
+- [ ] 6.3f top-level driver `wald_parse(src, spec) -> 0/err`
+      that orchestrates the sections in fixed order, returns
+      a structured error code on syntax failure (not crashing).
+      Error codes enum'd in `WaldErr`.
+- [ ] 6.3g unit tests: parse the group example from
+      `waldmeister/documents/example.pr` (or a hand-written
+      copy), verify n_eqns == 3, goal lhs/rhs structure, and
+      that the parsed terms can be passed straight to the
+      saturation engine + KBO comparator.
 - [ ] 6.4 end-to-end: parse the group-axiom `.pr` file, run
       saturation, emit a PCL trace; cross-check structurally
       against Waldmeister's own output
