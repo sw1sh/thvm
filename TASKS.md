@@ -4706,67 +4706,44 @@ implemented + tested (f1a) but never invoked by the pipeline.
              helper's program shape matches legacy). -->
 
 
-  - [ ] **f1d-d4b1b: opt remaining structural tests out of
-        toggle ON**.  After d4b1a fixes the LOAD-prefix
-        cohort, audit whatever WL tests still fail under
-        toggle ON for legacy-kernel-shape assertions.  For
-        each test that's structurally tied to legacy emit,
-        wrap the relevant block in TSetUseRealizeInfo[False]
-        ... TSetUseRealizeInfo[prev] (mirroring f1d-d2's
-        C-side pattern).  Don't change the test SEMANTICS,
-        just isolate from the toggle.  Acceptance: with
-        toggle ON, the only remaining failures (if any) are
-        functional/numeric, not structural; 166 C + 292 WL
-        green.  ~20 LOC across the affected wlt files.
-        <!-- attempt 1 audit: with toggle flipped to ON
-             post-d4b1a, the failing tests are NOT structural
-             -- they are CORRECTNESS failures (gradients
-             coming out wrong).  Per-test audit:
+  <!-- 2026-04-26 d4b1b audit (commit 163e4b9) found that
+       toggle-ON failures are correctness, not structural.
+       Per-test gradient outputs come out as
+       broadcast-of-first-element instead of per-element --
+       suggests the helper's input_numel / src_numel handling
+       is wrong when an inlinable upstream UOP has a TEN
+       child alongside a CONST.  d4b1b's "test opt-out"
+       mechanism is the wrong fix; replaced with: -->
 
-             - cmpeq.wlt 2/1: needs investigation.
-             - grad.wlt 32/6 failures, all computational:
-                 grad/mul-product-rule:
-                   got {4,4,4} expected {4,5,6}
-                 grad/mul-w-r-t-b:
-                   got {1,1,1} expected {1,2,3}
-                 grad/x-times-x-equals-2x:
-                   got {4,4,4} expected {4,6,10}
-                 grad/relu-mask:
-                   got {0,0,0,0} expected {0,1,0,1}
-                 grad/rank-2-x-times-x-equals-2x:
-                   got {{4,4},{4,4}} expected {{4,6},{8,10}}
-                 grad/softmax-cross-entropy-equals-probs-minus-target:
-                   got {0.09,-0.28,0.09} expected
-                   {0.09,-0.76,0.67}
-             - tensor_numeric.wlt 7/3, tensors.wlt 14/1
-               (similar pattern).
-             - beautiful_mnist.wlt + nn.wlt still cap-exhaust.
+  - [ ] **f1d-d4b1b1: investigate + fix the broadcast bug
+        in helper-built MUL kernels**.  With toggle ON +
+        d4b1a, gradient tests fail with patterns like
+        `grad/mul-product-rule got {4,4,4} expected {4,5,6}`
+        -- per-element MUL becoming broadcast-of-first
+        because cpu_op_mul sees src_numels[i] == 1 for what
+        should be a rank-N input.  Likely cause: when the
+        helper inlines a CONST upstream of a MUL, the CONST
+        op writes to scratch with numel=1 (correct), but the
+        MUL's OTHER input (the TEN) is being recorded with
+        wrong input_numels somewhere.  Add a probe (count
+        kernels + inspect program / numels of the failing
+        kernel) and pinpoint the slot whose numel is wrong;
+        fix in materialize_inlined.c (probably in
+        inline_emit's input-slot population or in the
+        broadcast-numel computation around lines 117-122).
+        Acceptance: with toggle ON, all 6 failing grad.wlt
+        tests pass with correct values; tensor_numeric.wlt
+        + tensors.wlt failures also resolved (probably the
+        same root cause); 166 C + 292 WL green.  ~50-100
+        LOC + targeted regression test.
 
-             Pattern: gradients with vector-shaped inputs are
-             returning broadcast-of-first-element instead of
-             per-element values.  Suggests the helper's
-             input_numel or program's per-input numel is wrong
-             when an inlinable upstream UOP has a TEN child
-             alongside a CONST (broadcast detection in
-             cpu_op_mul fires when src_numels[1] == 1).
-
-             d4b1b is the WRONG mechanism for this -- this
-             needs a fix to the helper, not test opt-outs.
-
-             Re-decompose:
-               f1d-d4b1b1: investigate + fix the broadcast
-                           detection in helper-built MUL
-                           kernels.  Likely the issue is
-                           that an inlined CONST scratch
-                           reports numel=1 to cpu_op_mul,
-                           and the OTHER input ALSO reports
-                           numel via input_numels which is
-                           somehow getting overwritten/wrong.
-                           ~50-100 LOC + grad tests.
-               f1d-d4b1b2: opt out remaining structural
-                           tests once correctness is fixed
-                           (probably empty if d4b1a + d4b1b1
-                           cover everything). -->
+  - [ ] **f1d-d4b1b2: remaining structural opt-outs**.
+        After d4b1b1 fixes correctness, re-audit which
+        toggle-ON tests still fail.  Probably none if
+        d4b1a + d4b1b1 covered everything.  If any do
+        fail for legacy-shape reasons, apply
+        TSetUseRealizeInfo[False] guards as originally
+        planned.  ~10-20 LOC if needed.
 
 
   - [ ] **f1d-d4b1c: bump KERNELS_CAP + flip default**.
