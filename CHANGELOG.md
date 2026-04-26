@@ -6,6 +6,24 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_atp_orient_and_add (stage 5.2b)
+
+KBO-orient an equation and push the resulting rule(s) onto `R`.
+Returns `AtpAddedRange { first, count }` so the next saturation
+phase (5.2d generate-CPs) can target only the new rules.
+
+- `KBO_GT`: push `lhs -> rhs`                                 (count = 1)
+- `KBO_LT`: push the swap `rhs -> lhs`                         (count = 1)
+- `KBO_UN`: unfailing fallback -- push both orientations,
+  atomic on capacity (skip both if there's room for only one)   (count = 2)
+- `KBO_EQ` or `R` full: no-op                                  (count = 0)
+
+The unfailing variant of Knuth-Bendix completion (Bachmair-
+Dershowitz-Plaisted) keeps unorientable equations as 2-way rules
+so rewriting can try either direction.  Mirrors Waldmeister's
+behavior; see `waldmeister/sources/INF/Hauptkomponenten.c`
+(*Hauptkomponenten* = "main components").
+
 ### Added: thvm_atp_select_cp FIFO pop (stage 5.2a)
 
 `thvm_atp_select_cp(s, &lhs_out, &rhs_out)` lands in

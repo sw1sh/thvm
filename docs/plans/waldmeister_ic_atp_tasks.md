@@ -52,12 +52,12 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       1 on success with out-params populated.  Tests in
       `tests/test_atp.c` cover empty pop, three-element FIFO order,
       and post-pop densification.  5.3 upgrades to INC-priority.
-- [ ] 5.2b `thvm_atp_orient_and_add`: given `(lhs', rhs')` reduced
-      to NF, run `thvm_kbo`.  GT -> push `lhs' -> rhs'` onto R.
-      LT -> push the swap.  EQ -> caller already trivialized.
-      UN -> unfailing fallback: push BOTH orientations as separate
-      rules.  Returns the index range that was just added so 5.2d
-      can target only the new rules.
+- [x] 5.2b `thvm_atp_orient_and_add`: KBO + atomic push to R via
+      `AtpAddedRange { first, count }`.  GT/LT -> count=1 (LT
+      swaps); UN -> count=2 (unfailing fallback, atomic on
+      capacity); EQ or full -> count=0.  Tests in
+      `tests/test_atp.c` cover all four branches with the standard
+      group-axiom KBO config.
 - [ ] 5.2d `thvm_atp_generate_cps`: call `thvm_critical_pairs`
       restricted to (new_rules x R) and push the survivors onto
       the queue.  Drop overflow silently.

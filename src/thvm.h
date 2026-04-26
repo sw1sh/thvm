@@ -813,6 +813,25 @@ fn void      thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
 // (out-params populated), 0 if the queue is empty.
 fn u8        thvm_atp_select_cp   (AtpState *s, Term *lhs_out, Term *rhs_out);
 
+// Index range of rules just added by orient_and_add.
+//   {first: 0, count: 0}     -> nothing added (KBO_EQ, or R full)
+//   {first: i, count: 1}     -> one rule at s->lhs[i] / s->rhs[i]
+//   {first: i, count: 2}     -> two rules at i, i+1 (unfailing fallback)
+typedef struct {
+  u32 first;
+  u32 count;
+} AtpAddedRange;
+
+// Orient `lhs == rhs` (assumed already reduced to NF and not
+// trivially equal) and push the resulting rule(s) onto R.
+//   KBO_GT -> add `lhs -> rhs`               (count = 1)
+//   KBO_LT -> add `rhs -> lhs` (swap)         (count = 1)
+//   KBO_EQ -> caller bug; returns count = 0  (caller should have
+//             trivialized via kbo_eq first)
+//   KBO_UN -> unfailing fallback: add both orientations (count = 2)
+// Returns count = 0 if R doesn't have room for the rule(s).
+fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input

@@ -56,3 +56,47 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   s->n_cps--;
   return 1;
 }
+
+// Push one rule onto R; returns 1 on success, 0 if R is full.
+static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
+  if (s->n_rules >= ATP_MAX_RULES) return 0;
+  s->lhs[s->n_rules] = lhs;
+  s->rhs[s->n_rules] = rhs;
+  s->n_rules++;
+  return 1;
+}
+
+// Orient via KBO and push the rule(s).  See header comment for the
+// dispatch table.  Atomic: if the unfailing fallback can't fit both
+// orientations, neither is added.
+fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
+  AtpAddedRange r = {0, 0};
+  if (s == NULL) return r;
+
+  KboCmp c = thvm_kbo(lhs, rhs, s->kbo);
+  switch (c) {
+    case KBO_GT: {
+      u32 idx = s->n_rules;
+      if (atp_push_rule(s, lhs, rhs)) { r.first = idx; r.count = 1; }
+      return r;
+    }
+    case KBO_LT: {
+      u32 idx = s->n_rules;
+      if (atp_push_rule(s, rhs, lhs)) { r.first = idx; r.count = 1; }
+      return r;
+    }
+    case KBO_UN: {
+      // Unfailing fallback: need 2 slots for atomicity.
+      if (s->n_rules + 2 > ATP_MAX_RULES) return r;
+      u32 idx = s->n_rules;
+      atp_push_rule(s, lhs, rhs);
+      atp_push_rule(s, rhs, lhs);
+      r.first = idx;
+      r.count = 2;
+      return r;
+    }
+    case KBO_EQ:
+    default:
+      return r;
+  }
+}

@@ -152,6 +152,65 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/orient-and-add-kbo-gt");
+  {
+    // f(x, e) > x  -> push f(x, e) -> x as a single rule.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    AtpAddedRange r = thvm_atp_orient_and_add(s, lhs, rhs);
+    CHECK_EQ(r.first, 0u);
+    CHECK_EQ(r.count, 1u);
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(s->lhs[0], lhs);
+    CHECK_EQ(s->rhs[0], rhs);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/orient-and-add-kbo-lt-swaps");
+  {
+    // x < f(x, e)  -> KBO_LT, push f(x, e) -> x (swapped).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_v(VAR_x);
+    Term rhs = mk_f(mk_v(VAR_x), mk_e());
+    AtpAddedRange r = thvm_atp_orient_and_add(s, lhs, rhs);
+    CHECK_EQ(r.count, 1u);
+    CHECK_EQ(s->n_rules, 1u);
+    // Stored as rhs -> lhs (the swap).
+    CHECK_EQ(s->lhs[0], rhs);
+    CHECK_EQ(s->rhs[0], lhs);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/orient-and-add-kbo-un-pushes-both");
+  {
+    // Two distinct FVRs: x and y.  Neither dominates the other on
+    // var counts, so KBO returns UN -- unfailing fallback adds both.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_v(VAR_x);
+    Term rhs = mk_v(1u);   // VAR_y
+    AtpAddedRange r = thvm_atp_orient_and_add(s, lhs, rhs);
+    CHECK_EQ(r.first, 0u);
+    CHECK_EQ(r.count, 2u);
+    CHECK_EQ(s->n_rules, 2u);
+    CHECK_EQ(s->lhs[0], lhs);
+    CHECK_EQ(s->rhs[0], rhs);
+    CHECK_EQ(s->lhs[1], rhs);
+    CHECK_EQ(s->rhs[1], lhs);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/orient-and-add-kbo-eq-no-op");
+  {
+    // Caller bug case: lhs and rhs structurally identical (KBO_EQ).
+    // orient_and_add returns count = 0, R unchanged.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    AtpAddedRange r = thvm_atp_orient_and_add(s, mk_e(), mk_e());
+    CHECK_EQ(r.count, 0u);
+    CHECK_EQ(s->n_rules, 0u);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
