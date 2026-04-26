@@ -114,9 +114,33 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 
 ## Stage 6 -- proof trace + Waldmeister parser
 
-- [ ] 6.1 per-step trace tuple `(reason_tag, parent_ids, subst)`
-      packed into a TAG_CTR; threaded through `thvm_rewrite_step`
-      and the saturation step
+- [ ] 6.1a TraceEntry shape + AtpState storage:
+      each entry as a TAG_CTR with label = reason enum
+      (`TRACE_AXIOM`, `TRACE_ORIENT`, `TRACE_CP`) and children
+      `[NUM(parent_a), NUM(parent_b), lhs, rhs]`.  Parent index
+      sentinel `ATP_TRACE_NONE = 0xFFFFFFFFu` for missing parents.
+      Add `Term trace[ATP_MAX_TRACE]; u32 n_trace;` to `AtpState`.
+      `ATP_MAX_TRACE` cap (e.g., 4096).  Internal helper
+      `atp_trace_push(s, reason, p_a, p_b, lhs, rhs) -> u32`
+      returning the entry index.
+- [ ] 6.1b wire `atp_trace_push` into `thvm_atp_add_equation`
+      (TRACE_AXIOM, parents = NONE) and
+      `thvm_atp_orient_and_add` (TRACE_ORIENT, parent_a = the
+      source CP's trace index).  Requires plumbing the source
+      trace index through `thvm_atp_step` so orient knows which
+      CP it's orienting.
+- [ ] 6.1c wire `atp_trace_push` into `thvm_atp_generate_cps`
+      (TRACE_CP, parents = the two source rule trace indices).
+      Each new CP pushed onto the queue gets a corresponding
+      trace entry; the queue stores the trace index alongside
+      the CP so step 6.1b's orient can recover it.
+- [ ] 6.1d test that the headline demo
+      (`atp/headline-prove-f-a-ia-equals-e-from-group-axioms`)
+      produces a trace with the expected shape: 3+ TRACE_AXIOM
+      entries (one per axiom), 1+ TRACE_ORIENT entries (one per
+      rule added to R), and TRACE_CP entries from generate_cps.
+      Then walk parent links from the proving rule back to the
+      original axioms.
 - [ ] 6.2 PCL-shaped trace serializer to text
 - [ ] 6.3 parser for `waldmeister/documents/example.pr`-style spec
       files (NAME / SORTS / SIGNATURE / ORDERING / VARIABLES /
