@@ -425,13 +425,19 @@ Expected ceilings:
       regardless of layout.  test_metal_real recovered from 80/166
       to 158/166 (only PAD parity still red, exactly g2c2's scope).
 
-- [ ] **g2c2: PAD as kernel emit** (NOT a view-only alias --
+- [x] **g2c2: PAD as kernel emit** (NOT a view-only alias --
       reading bytes outside an alloc is UB even when calloc'd).
-      Extend `visit()` to support PAD as a regular kernel opcode:
-      populate `src0_ndim`, `src0_dims`, `out_ndim`, `out_dims`,
-      `pad_widths` on the KProgOp.  `materialize_uop_in_env(PAD)`
-      returns a UOP_KERNEL Term (kernel emit path), not a view
-      alias.  Test targeted green: test_view_pad (15).  ~80 LOC.
+      Extended `visit()` to dispatch UOP_PAD: recurse into source,
+      compute output shape (`out.dim[i] = src.dim[i] + b_i + e_i`),
+      populate `src0_ndim`/`src0_dims`/`out_ndim`/`out_dims`/
+      `pad_widths` on the KProgOp so `cpu_op_pad` and the Metal
+      pad shader can index correctly.  `materialize_uop_in_env(PAD)`
+      now returns a UOP_KERNEL Term (kernel emit path) -- since
+      PAD isn't in `op_is_view_movement`, the surface falls
+      through to `thvm_materialize` which emits the kernel.
+      `make test` 166/166 green.  `wl-test` still red but those
+      are pre-g2 failures (WL bridge expectations from rounds 1-2
+      that g3 will fix).
 
 - [ ] **g2d: GRAD integration + thvm_realize wire-up**.  Re-add the
       `unroll_grads` walk (call `interact_grad` on each UOP_GRAD

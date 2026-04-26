@@ -6,6 +6,22 @@ dated section.
 
 ## Unreleased
 
+### Added: PAD as kernel emit (g2c2)
+
+`visit()` now dispatches UOP_PAD instead of bailing.  Recurses into
+the source, computes output shape (`out.dim[i] = src.dim[i] + b_i +
+e_i`), and populates `src0_ndim`, `src0_dims`, `out_ndim`,
+`out_dims`, `pad_widths` on the KProgOp so `cpu_op_pad` and the
+Metal pad shader can index correctly.  `materialize_uop_in_env(PAD)`
+falls through to `thvm_materialize` (PAD isn't in
+`op_is_view_movement`), which emits the kernel via the standard
+boundary loop.
+
+`make test` is 166/166 green.  `wl-test` remains red (60+ failures
+across nn / shape / heap_snapshot / extern_pin / core), but those
+are pre-g2 expectations from the round-1/2 WL bridge -- g3 fixes
+them as part of the WL surface clean-up.
+
 ### Added: view-only path for movement ops (g2c1)
 
 `thvm_materialize` now correctly handles RESHAPE/EXPAND/PERMUTE/

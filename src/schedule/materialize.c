@@ -406,6 +406,46 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     }
   }
 
+  // PAD as a kernel emit (g2c2): allocate a fresh buf, run
+  // cpu_op_pad / metal pad shader.  Unlike SHRINK/PERMUTE/etc, PAD
+  // can't be a view-only alias because reading bytes outside the
+  // alloc is UB even when calloc'd.
+  if (op == UOP_PAD) {
+    u32 src_idx = visit(heap_read(loc), ke, root_loc);
+    if (src_idx == VISIT_BAIL) return VISIT_BAIL;
+    if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
+    // Source shape: from the PAD's source term (TenDesc lookup).
+    Shape src_shape = {0};
+    if (!term_shape_in(heap_read(loc), 0, &src_shape)) return VISIT_BAIL;
+    // Output shape: src.dim[i] + b_i + e_i per axis.
+    Shape out_shape = src_shape;
+    u32   out_numel = 1;
+    for (u32 i = 0; i < src_shape.ndim; i++) {
+      u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
+      u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+      out_shape.dims[i] = src_shape.dims[i] + b + e;
+      out_numel        *= out_shape.dims[i];
+    }
+    KProgOp *p = &ke->program[ke->n_ops++];
+    memset(p, 0, sizeof(*p));
+    p->opcode    = UOP_PAD;
+    p->dtype     = src_dtype(ke, src_idx);
+    p->numel     = out_numel;
+    p->n_src     = 1;
+    p->src[0]    = src_idx;
+    p->src0_ndim = (u8)(src_shape.ndim & 0xFF);
+    p->out_ndim  = (u8)(out_shape.ndim & 0xFF);
+    for (u32 i = 0; i < src_shape.ndim; i++) {
+      p->src0_dims[i] = src_shape.dims[i];
+      p->out_dims [i] = out_shape.dims[i];
+      u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
+      u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+      p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
+      p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
+    }
+    return ke->n_ops - 1;
+  }
+
   // REDUCE only allowed when it IS the root (tail-fuse).  Movement
   // ops + non-tail REDUCE bail (deferred to g2c / g2d).
   if (op == UOP_REDUCE && loc == root_loc) {
