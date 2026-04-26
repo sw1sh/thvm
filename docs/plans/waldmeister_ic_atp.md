@@ -22,6 +22,17 @@ procedure could be expressed as **IC graph rewrites** in thvm,
 particularly leveraging the SupGen / NeoGen idea (superpose all candidate
 inferences and let optimal sharing collapse the search tree).
 
+**Terminology warning.** "Superposition" means *two completely
+different things* on the two sides of this project: HVM-SUP (a
+runtime data primitive, the IC node `&L{a, b}`) versus
+ATP-superposition (a logical inference rule, refined paramodulation).
+The plan below uses the former to encode the search-space of the
+latter, but they live at different layers.  See the *Equational
+reasoning and the IC-as-ATP layer* section of
+[../glossary.md](../glossary.md) for a complete table including
+related terms (paramodulation, critical pair, bisubstitution / cosubstitution
+in Wolfram's sense, unification, joinability, saturation, ...).
+
 German-name conventions are translated inline on first use. Module
 abbreviations: `INF` = *Inferenz* "inference"; `NF` = *Normalform*
 "normal form"; `ORD` = *Ordnungen* "orderings"; `CLAS` = *Klassifikation*

@@ -31,6 +31,14 @@ until that step lands.
   side-by-side of every piece of our runtime vs the corresponding
   HVM4 source. Refresh when a new interaction lands or HVM4 itself
   moves.
+- [plans/waldmeister_ic_atp.md](plans/waldmeister_ic_atp.md):
+  IC-native ATP design memo.  Summary of Waldmeister's unfailing
+  Knuth-Bendix completion, prior art on interaction-net + ATP
+  (Twee, Vampire, egg, HVM4 SupGen), and a SupGen/NeoGen-style
+  build trajectory.  Read alongside the
+  *Equational reasoning and the IC-as-ATP layer* section of
+  [glossary.md](glossary.md) -- "superposition" means two different
+  things on the two sides.
 
 ## Conventions
 

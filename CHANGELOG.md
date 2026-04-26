@@ -6,6 +6,22 @@ dated section.
 
 ## Unreleased
 
+### Added: glossary section on equational reasoning and the IC-as-ATP layer
+
+[docs/glossary.md](docs/glossary.md) gains an *Equational reasoning
+and the IC-as-ATP layer* table, explicitly distinguishing **HVM-SUP**
+(the runtime data primitive `&L{a, b}`) from **ATP-superposition**
+(the logical inference rule, refined paramodulation), plus
+companion entries: collapse, label, substitution, **cosubstitution
+and bisubstitution** (Wolfram's framing -- bisubstitution = paramodulation),
+unification, matching, paramodulation, critical pair, Knuth-Bendix
+completion, unfailing completion, reduction ordering, joinability,
+saturation, subsumption, PCL.  The plan memo
+[docs/plans/waldmeister_ic_atp.md](docs/plans/waldmeister_ic_atp.md)
+gets a terminology warning at the top cross-referencing the new
+section, and [docs/README.md](docs/README.md) lists the plan in its
+plans-and-references index.
+
 ### Added: thvm_collapse -- shallow SUP-tree enumeration
 
 `src/collapse/_.c` exposes `thvm_collapse(t, out, cap)` which walks
