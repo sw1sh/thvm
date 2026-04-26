@@ -592,6 +592,34 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
       -- LPO is `Lexikografische-Pfad-Ordnung`, "lexicographic
       path ordering")
+  - [ ] 8.5a design memo `docs/plans/lpo_design.md`: survey
+        the LPO algorithm (Dershowitz, "Orderings for term-
+        rewriting systems", 1982); pick a `LpoConfig` shape
+        (likely just a precedence table -- LPO has no weights)
+        and decide where it lives relative to `KboConfig`.
+        Document how the existing saturation pipeline picks
+        between KBO and LPO -- a config field on AtpState, an
+        OrderConfig sum type, or two parallel
+        thvm_atp_init variants.  Scope: ~150-line memo.
+  - [ ] 8.5b implement `thvm_lpo(s, t, cfg)` in `src/lpo/_.c`
+        mirroring `src/kbo/_.c`'s structure: kbo_eq -> lpo_eq
+        (or reuse), variable-domination, top-symbol comparison
+        by precedence, lexicographic recursion.  Tests in
+        `tests/test_lpo.c` cover GT / LT / EQ / UN outcomes
+        on hand-constructed term pairs.  Scope: ~120 LOC + ~50
+        LOC tests.
+  - [ ] 8.5c wire LPO into the saturation engine: extend
+        AtpState with the chosen ordering selector from 8.5a;
+        update `thvm_atp_orient_and_add` to dispatch between
+        KBO and LPO.  Tests verify orient outcomes match
+        between KBO and LPO on a fixture where both succeed,
+        and differ where LPO is more discriminating.
+  - [ ] 8.5d add an LPO test fixture or update existing ones:
+        the existing group / monoid fixtures use `ORDERING LPO`
+        in their `.pr` files but the saturator currently maps
+        them to KBO; switch one fixture to actually use LPO
+        and verify the proof outcome (or note it as a
+        regression/improvement).
 - [ ] 8.6 unordered SUP/DUP for O(1) rule-set sharing (port from
       HVM4 when upstream lands them)
 - [ ] 8.7 WL bridge: `TATP[axioms, conjecture] -> proof tree` so
