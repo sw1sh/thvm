@@ -6,6 +6,18 @@ dated section.
 
 ## Unreleased
 
+### Added: AtpState struct + init/free helpers (stage 5.1)
+
+`src/atp/_.c` lands the saturation-loop state container plus
+`thvm_atp_init` (heap-allocates, stores cfg + step_cap),
+`thvm_atp_free` (NULL-safe), `thvm_atp_add_equation` (push CP),
+`thvm_atp_set_goal`.  Public types in `src/thvm.h`: AtpStatus
+enum, ATP_MAX_RULES (256), ATP_MAX_CPS (4096), AtpState struct
+(rules R, CP queue, goal, KboConfig, step counter).  Tests in
+`tests/test_atp.c` cover init/free symmetry, NULL-free safety,
+queue-full rejection, goal set/clear.  Step + run drivers are
+5.2.
+
 ### Changed: f1d helper accepts REDUCE-as-tail-op (CPU)
 
 `materialize_kernel_inlined` (CPU-only via the existing backend
