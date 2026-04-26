@@ -452,17 +452,58 @@ Expected ceilings:
       GRAD+CTR sinks instead of relying on wnf alone).  WL tests
       still red, awaiting g3.
 
-- [ ] **g3a: triage WL failures + isolate segfault**.  Plan
-      estimated g3 at ~80 LOC; reality is 60 fail in nn.wlt + 71
-      in shape.wlt + 64 in permute.wlt + 42 in heap_snapshot.wlt +
-      4 in extern_pin/core + a segfault that kills the WL kernel
-      after permute.wlt.  Run each .wlt file individually to find
-      (a) which assertion crashes the kernel, (b) categorize
-      failures: kernel-count regression / Term-shape mismatch /
-      materialize bridge issue / pre-existing test bug.  Output:
-      a triage memo (in TASKS.md as a comment under g3b/c) listing
-      each failing test with category + suspected fix.  No code
-      changes this fire.
+- [x] **g3a: triage WL failures + isolate segfault**.  Cumulative
+      `make wl-test` hides the truth -- per-file run has only 73
+      failures + 1 segfault, not the 250+ implied by the running
+      progress totals.  Memo follows.
+
+<!-- g3a triage memo (2026-04-26)
+
+Per-file pass/fail when each .wlt is run alone:
+| file                | pass | fail | category |
+|---------------------|------|------|----------|
+| grad                |    1 |   40 | A        |
+| nn                  |   22 |   19 | A        |
+| sgd                 |    1 |    4 | A        |
+| optim               |    5 |    3 | A        |
+| beautiful_mnist     |    0 |    2 | A        |
+| reduce              |    1 |    3 | B        |
+| tensors             |   13 |    2 | C        |
+| uop_load            |    - |    - | D (SEGFAULT) |
+| (24 other files)    |  205 |    0 | -        |
+
+CATEGORY A (~68 fails): "Missing[NotATensor, UOP]" residue from
+GRAD chain.  Root: thvm_materialize on UOP_GRAD that bottoms out
+at expand_to_target(uop_const(0/1), target) = UOP_EXPAND wrapping
+a UOP_CONST.  view_resolve fails (CONST isn't a TenDesc).
+visit() bails on EXPAND with non-resolvable source.  Fix
+candidates: (a) extend view_resolve to materialize CONST sources
+to a 1-element TenDesc, or (b) extend visit() to emit movement
+ops as kernels (like PAD) when view_resolve returns 0.  Option (a)
+is preferred -- one-element tensors are cheap and the rest of
+movement-op codegen stays unchanged.
+
+CATEGORY B (3 fails): REDUCE axis miscomputation.  Test
+reduce/axis0-rank2-sum expected [5,7,9] (sum across rows), got
+[3,7,11] (looks like axis 1 + offset).  Likely visit()'s
+REDUCE-as-tail arg packing or cpu_op_reduce's axis decoding.
+Investigate KProgOp.arg layout vs cpu_op_reduce reads.
+
+CATEGORY C (2 fails): tensors.wlt expects round-1/2 kernel
+structure (TMaterialize/dedups-duplicate-inputs +
+reduce-output-shape).  These need test-side updates to match the
+new no-LOAD-prefix layout.
+
+CATEGORY D (segfault): uop_load.wlt's first 4 tests pass alone;
+something later (likely the training-step test at line 147+ or a
+multi-kernel test) crashes the WL kernel.  Need bisection to
+identify the trigger before fixing.
+
+g3b should fix Category A first (one fix, ~68 tests recovered),
+then Category C (test-side assertions).  g3c handles Categories
+B + D (real bugs needing investigation).
+-->
+
 
 - [ ] **g3b: fix simple WL surface mismatches**.  Address the
       small categories from g3a's triage: extern_pin (2),
