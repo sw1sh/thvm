@@ -457,7 +457,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           off or invest in further optimization.
 - [ ] 8.2 KBO as a pure IC program (deferred 2.4 -- compile from
       the C version once it's stable)
-  - [ ] 8.2a design memo `docs/plans/kbo_ic_design.md`:
+  - [x] 8.2a design memo `docs/plans/kbo_ic_design.md`:
         survey the encoding choices for porting KBO to IC --
         (1) `TAG_PRI` wrapper around `thvm_kbo` (callable from
         IC code via APP-PRI; analogous to 8.1c's

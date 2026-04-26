@@ -6,6 +6,42 @@ dated section.
 
 ## Unreleased
 
+### Added: KBO-as-IC encoding design memo (stage 8.2a)
+
+`docs/plans/kbo_ic_design.md` (~150 lines) lands the design
+sketch for stage 8.2.  Surveys three encoding options:
+
+1. **TAG_PRI wrapper** (~50 LOC): registers `thvm_kbo` as a
+   primitive callable from IC; mirrors 8.1c's
+   `prim_unify_apply`.  Unblocks 8.10 to invoke KBO from inside
+   a SUP-encoded search.  Minimum useful increment.
+2. **Hybrid IC structural recursion + C arithmetic primitives**
+   (~200 LOC): structural recursion in IC, weights and counts in
+   C as TAG_PRI callbacks.  Lets 8.10 superpose alternative
+   ordering structures without porting arithmetic to IC.
+3. **Full pure IC** (~500-1000 LOC): everything in IC, including
+   Church-numeral or TAG_NUM weights and IC-encoded variable
+   counts.  Research target; lets 8.10 superpose KboConfigs
+   themselves.
+
+Decision:
+- 8.2b implements (1) immediately -- bounded scope, ports cleanly
+  from `prim_unify_apply`.
+- 8.2c implements a sliver of (2): pure-IC `kbo_eq` (the
+  structural-equality sub-routine) as a proof point that IC-
+  driven recursion is viable in our codebase.
+- 8.2d (full pure IC) deferred until SupGen-style search (8.10)
+  materializes and creates a concrete use case that pays for
+  the engineering cost.
+
+The memo also documents:
+- The KboConfig registry pattern: `KBO_CFG_TABLE[16]` keyed by
+  a u32 id, since `KboConfig*` doesn't fit cleanly in a Term's
+  `val` field.
+- An `prim_kbo` sketch (arity 3: `(s, t, cfg_id_NUM)` -> NUM
+  encoding of `KboCmp`).
+- Parity-test verification plans for each subtask.
+
 ### Added: IC vs C path bench comparison (stage 8.1e-iii)
 
 `tests/test_bench_atp.c` now runs each `.pr` fixture under both
