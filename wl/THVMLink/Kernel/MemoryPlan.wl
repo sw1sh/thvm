@@ -409,8 +409,17 @@ linearScanPack[bufs_, barHeightMode_:"Log"] := Block[{
     sorted,
     slots = {},
     yMax = 0,
-    out = {}
+    out = {},
+    foreverDepth
 },
+    (* Preserved bufs (weights, optimizer state) live across the
+       realize call boundary -- their last_use_depth in this snapshot
+       is just the latest depth at which a kernel READ them, not the
+       depth at which they're free.  A future training step's
+       backward pass will read them again.  Treat their slot as
+       permanently occupied by setting the slot's last-use to a
+       sentinel beyond any depth in the chart. *)
+    foreverDepth = Max[Append[#["last_use_depth"] & /@ bufs, 0]] + 10000;
     sorted = SortBy[bufs, {#["alloc_depth"] &, -#["nbytes"] &}];
     Do[
         Block[{
@@ -419,9 +428,14 @@ linearScanPack[bufs_, barHeightMode_:"Log"] := Block[{
             fitIdx,
             slot,
             y0,
-            y1
+            y1,
+            slotEnd
         },
             h = barHeightFor[b["nbytes"], barHeightMode];
+            (* Slot's last_use is foreverDepth for Preserved bufs --
+               makes the slot ineligible for reuse downstream. *)
+            slotEnd = If[ b["status"] === "Preserved",
+                          foreverDepth, b["last_use_depth"]];
             fitIdx = SelectFirst[
                 Range[Length[slots]],
                 Function[k,
@@ -434,12 +448,12 @@ linearScanPack[bufs_, barHeightMode_:"Log"] := Block[{
                 y0 = yMax;
                 y1 = y0 + h;
                 yMax = y1;
-                AppendTo[slots, {y0, y1, b["last_use_depth"]}];
+                AppendTo[slots, {y0, y1, slotEnd}];
                 ,
                 slot = slots[[fitIdx]];
                 y0 = slot[[1]];
                 y1 = y0 + h;
-                slots[[fitIdx, 3]] = b["last_use_depth"];
+                slots[[fitIdx, 3]] = slotEnd;
             ];
             AppendTo[out, Append[b, "y_range" -> {y0, y1}]]
         ],
@@ -507,7 +521,13 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                     h      = y1 - y0;
                     inset  = 0.05 h;
                     x0     = b["alloc_depth"];
-                    x1     = b["last_use_depth"] + 1;
+                    (* Preserved bufs (weights / optimizer state) live
+                       across realize -- extend the bar to the chart's
+                       right edge so the "lives forever" semantics is
+                       visible.  Other statuses use last_use_depth + 1. *)
+                    x1     = If[ b["status"] === "Preserved",
+                                 maxDepth + 1,
+                                 b["last_use_depth"] + 1];
                     {
                         FaceForm[statusFill[b["status"]]],
                         EdgeForm[Directive[
@@ -601,22 +621,25 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                same "this is the peak depth" signal without the
                global-state pollution. *)
             (* Peak-concurrency marker: dashed red vertical line
-               at the depth where total live bytes peaks, with an
-               in-chart label so a static SVG reader can read what
-               the line means without going to the doc. *)
+               at the LEFT EDGE of the depth where total live bytes
+               peaks, with a label saying "peak X KiB @ depth N".
+               Drawn at peak_depth (column boundary), not
+               peak_depth+0.5 (mid-column) -- the offset made the
+               line look like it sat at a non-integer depth. *)
             Epilog -> {
                 {Dashed, Thick, StandardRed,
-                    Line[{{peak["peak_depth"] + 0.5, 0},
-                          {peak["peak_depth"] + 0.5, totalHeight}}]},
+                    Line[{{peak["peak_depth"], 0},
+                          {peak["peak_depth"], totalHeight}}]},
                 Text[
                     Style[
-                        Row[{"peak ", Round[peak["peak_bytes"]/1024., 0.01], " KiB"}],
+                        Row[{"peak ", Round[peak["peak_bytes"]/1024., 0.01],
+                             " KiB @ depth ", peak["peak_depth"]}],
                         FontSize -> Scaled[0.014],
                         FontFamily -> "Source Code Pro",
                         StandardRed
                     ],
-                    {peak["peak_depth"] + 0.5, totalHeight},
-                    {0, -1}
+                    {peak["peak_depth"], totalHeight},
+                    {-1, -1}
                 ]
             },
             PlotLabel -> Column[{

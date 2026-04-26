@@ -96,18 +96,14 @@ debugPrint["stage 2 (after grad+nf): heap=", THeapPos[],
            " kernels=", TKernelCount[] - 1];
 renderHeapDiagram[gradReduced, "2-with-backward"];
 
-(* === Stage 3: kernels emitted.  TRealize (the wnf+nf+materialize
-   fixed-point loop) compiles every reachable lazy-compute UOp into
-   UOP_KERNEL terms and fires them.  TMaterialize alone wouldn't
-   work here: thvm_materialize is all-or-nothing per call (a single
-   bailing boundary rewinds the whole emission) and the post-grad
-   chain has UOp patterns visit() can't compile in one pass; the
-   loop in TRealize retries until convergence. *)
-gradRealized = TRealize[gradReduced];
+(* === Stage 3: kernels emitted.  TMaterialize compiles the lazy
+   compute into UOP_KERNEL terms; nothing fired yet (no TWnf), so
+   the buffer state is still pre-firing. *)
+gradMaterialized = TMaterialize[gradReduced];
 
-debugPrint["stage 3 (after realize): heap=", THeapPos[],
+debugPrint["stage 3 (after materialize): heap=", THeapPos[],
            " kernels=", TKernelCount[] - 1];
-renderHeapDiagram[gradRealized, "3-with-kernels"];
+renderHeapDiagram[gradMaterialized, "3-with-kernels"];
 
 (* === TMemoryPlan summary + Gantt export.  Only meaningful at
    stage 3 since stages 1-2 emit no KernelEntrys. *)
