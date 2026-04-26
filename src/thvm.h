@@ -677,6 +677,12 @@ fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
 // innermost-first) for inspection.  max_steps == 0 == unbounded.
 fn Term wnf(Term t);
 fn Term wnf_n(Term t, u64 max_steps);
+// nf: explicit normal-form reducer.  WHNF (wnf) only surfaces the
+// outermost head; nf sweeps the heap, fires every redex via
+// redex_fire (covers GRAD, KERNEL, APP-LAM, OP2, etc. uniformly),
+// loops until no progress.  Used by thvm_realize so chain-rule-
+// produced UOps deep inside a graph reduce naturally.
+fn Term nf(Term root);
 // WNF_LAST_STACK / WNF_LAST_STACK_LEN live in TContext now -- macros
 // at the bottom of this file resolve them.
 
@@ -720,7 +726,7 @@ fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg);
 // driven purely by a precedence relation on function symbols
 // -- no per-symbol weights.  More discriminating than KBO on
 // some rewrite systems; the standard pick for many TPTP-UEQ
-// problems.  Stage 8.5b of `docs/plans/lpo_design.md`.
+// problems.  Stage 8.5b of `docs/plans/waldmeister_ic_atp.md` section 7.8.
 typedef enum {
   LPO_EQ =  0,
   LPO_GT =  1,
@@ -789,7 +795,7 @@ fn u32 thvm_critical_pairs_range(const Term *lhs, const Term *rhs, u32 n_rules,
 
 // === atp/ ===
 // Saturation loop state (stage 5).  See
-// docs/plans/saturation_loop.md for the design.  AtpState is heap-
+// docs/plans/waldmeister_ic_atp.md section 7.1 for the design.  AtpState is heap-
 // allocated by thvm_atp_init; thvm_atp_free reclaims.  Struct
 // fields are public; tests / step / run helpers all read directly.
 typedef enum {
@@ -844,7 +850,7 @@ typedef enum {
 //     and returns either `thvm_subst_apply(rhs, &σ)` on
 //     successful match (where σ = match(lhs, target)) or `ERA`
 //     on failure.  Dispatch entry-point for IC-native rule
-//     application per `docs/plans/ic_rule_dispatch.md`'s
+//     application per `docs/plans/waldmeister_ic_atp.md` section 7.5's
 //     Strategy B; combined with APP-SUP fan-out (8.3c) it lets
 //     a SUP of partial-PRI rules run in parallel.
 #define ATP_PRIM_KBO          2u
@@ -893,7 +899,7 @@ typedef struct {
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
   // it takes precedence over `kbo` per Choice C of
-  // `docs/plans/lpo_design.md`: orient_and_add dispatches to
+  // `docs/plans/waldmeister_ic_atp.md` section 7.8: orient_and_add dispatches to
   // `thvm_lpo`.  When both are NULL, every comparison is
   // incomparable (KBO_UN) -- saturation falls into unfailing
   // fallback.
@@ -921,7 +927,7 @@ typedef struct {
   // Stage 7.2b: count of CPs that are source-rule-disjoint
   // connected (joinable under R \ {rule_a, rule_b}, the two rules
   // that birthed the CP).  Per the domination lemma in
-  // `docs/plans/connectedness_design.md`, this is bounded above
+  // `docs/plans/waldmeister_ic_atp.md` section 7.2, this is bounded above
   // by `n_cps_dropped_joinable`; it ticks unconditionally for
   // measurement, even if 7.1's filter would also fire.  Useful
   // infrastructure for stage 7.4+ when AC theories may break

@@ -38,7 +38,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 `TAG_INC`-priority + step cap.
 
 - [x] 5.0 sketch the saturation state machine in
-      [`docs/plans/saturation_loop.md`](saturation_loop.md): full
+      `docs/plans/waldmeister_ic_atp.md` section 7.1: full
       step algorithm, AtpState struct, fairness story, termination
       conditions, mapping from C-side primitives, open questions.
 - [x] 5.1 `AtpState` struct: rules `R`, CP queue, goal, KboConfig,
@@ -308,7 +308,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       / `Grundzusammenfuehrung.c` -- "ground union" criterion that
       drops trivially-joinable CPs)
 - [x] 7.2 connectedness redundancy (Bachmair-Dershowitz-Plaisted)
-  - [x] 7.2a design memo `docs/plans/connectedness_design.md`:
+  - [x] 7.2a design memo `docs/plans/waldmeister_ic_atp.md` section 7.2:
         survey BDP's "connected below c" criterion vs the
         trivial-joinability filter from 7.1.  Pick a concrete
         sub-criterion to implement that adds *non-overlapping*
@@ -329,7 +329,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         there is `(l, r) ∈ R` and substitution σ such that
         `(lhs, rhs) = (σl, σr)` (modulo symmetry).  Per the
         same domination argument as 7.2b
-        (`docs/plans/connectedness_design.md`): rule-
+        (`docs/plans/waldmeister_ic_atp.md` section 7.2): rule-
         subsumption fires only when the rule rewrites lhs
         directly to rhs in one step, which is also caught by
         7.1's full-R normalize.  Add `n_cps_dropped_rule_subsumed`
@@ -386,7 +386,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 
 - [x] 8.1 SUP-encoded CP enumeration via `TAG_PRI` unify (deferred
       4.5 -- moves CP gen from C-side to native IC reduction)
-  - [x] 8.1a design memo `docs/plans/sup_encoded_cps.md`:
+  - [x] 8.1a design memo `docs/plans/waldmeister_ic_atp.md` section 7.3:
         survey TinyHVM / HVM4 for `TAG_PRI` ("primitive function
         call") patterns, sketch the SUP-cross-product encoding
         for `overlap-position x rule-pair`, and analyze
@@ -461,7 +461,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       memo; revisit when SupGen-style search (8.10) creates a
       use case.  8.2a-c lands the actionable increment (PRI
       wrapper + pure-IC kbo_eq sliver).
-  - [x] 8.2a design memo `docs/plans/kbo_ic_design.md`:
+  - [x] 8.2a design memo `docs/plans/waldmeister_ic_atp.md` section 7.4:
         survey the encoding choices for porting KBO to IC --
         (1) `TAG_PRI` wrapper around `thvm_kbo` (callable from
         IC code via APP-PRI; analogous to 8.1c's
@@ -484,7 +484,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         arithmetic.  Encode as a `TAG_PRI` primitive that's
         itself implemented via IC structural recursion on the
         term pair, returning `NUM(0)` or `NUM(1)`.
-  - [blocked: deferred per docs/plans/kbo_ic_design.md until SupGen-style search (8.10) creates a use case] 8.2d full pure-IC port of `thvm_kbo` (deferred until
+  - [blocked: deferred per docs/plans/waldmeister_ic_atp.md section 7.4 until SupGen-style search (8.10) creates a use case] 8.2d full pure-IC port of `thvm_kbo` (deferred until
         8.2a's design picks the encoding; likely
         research-grade and multi-firing on its own).
 - [x] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
@@ -494,7 +494,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       pending 8.4 sorts.  8.3a-c-e (design + PRI dispatch + SUP
       fan-out demo + flag swap + bench analysis) lands the
       actionable increment.
-  - [x] 8.3a design memo `docs/plans/ic_rule_dispatch.md`:
+  - [x] 8.3a design memo `docs/plans/waldmeister_ic_atp.md` section 7.5:
         survey the encoding choices for "rule as LAM-binder".
         Key open question: our pattern variables are TAG_FVR
         (free-variable atoms with explicit ids), but LAM uses
@@ -561,7 +561,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       Note: 8.4 closes; this also unblocks 8.3d (ICC TAG_BRI /
       TAG_ANN integration) per its design memo.  Future perf
       work: sort-aware KBO, early CP-pair sort precheck.
-  - [x] 8.4a design memo `docs/plans/multi_sort.md`: survey
+  - [x] 8.4a design memo `docs/plans/waldmeister_ic_atp.md` section 7.7: survey
         the representation choices.  Where do sorts live --
         on `WaldSym` / `WaldVar` / a global sort table on
         `WaldSpec`?  Where does sort-checking fire -- inside
@@ -592,7 +592,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [x] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
       -- LPO is `Lexikografische-Pfad-Ordnung`, "lexicographic
       path ordering")
-  - [x] 8.5a design memo `docs/plans/lpo_design.md`: survey
+  - [x] 8.5a design memo `docs/plans/waldmeister_ic_atp.md` section 7.8: survey
         the LPO algorithm (Dershowitz, "Orderings for term-
         rewriting systems", 1982); pick a `LpoConfig` shape
         (likely just a precedence table -- LPO has no weights)
@@ -620,7 +620,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         them to KBO; switch one fixture to actually use LPO
         and verify the proof outcome (or note it as a
         regression/improvement).
-- [blocked: waiting on HVM4 upstream to land unordered SUP/DUP first; tracked in docs/plans/sup_encoded_cps.md] 8.6 unordered SUP/DUP for O(1) rule-set sharing (port from
+- [blocked: waiting on HVM4 upstream to land unordered SUP/DUP first; tracked in docs/plans/waldmeister_ic_atp.md section 7.3] 8.6 unordered SUP/DUP for O(1) rule-set sharing (port from
       HVM4 when upstream lands them)
 - [x] 8.7 WL bridge: `TATP[axioms, conjecture] -> proof tree` so
       the prover is reachable from notebooks
@@ -691,7 +691,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [x] 8.10 SupGen-style search inside saturation: superpose the
       "which CP to pick next" choice, collapse with priority,
       compare against the explicit-queue baseline
-  - [x] 8.10a design memo `docs/plans/supgen_search_design.md`:
+  - [x] 8.10a design memo `docs/plans/waldmeister_ic_atp.md` section 7.11:
         observe that `thvm_atp_select_cp` already implements
         SupGen-style search for CP selection (each CP wrapped
         in INC^k, folded into a SUP tree, popped via

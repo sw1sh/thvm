@@ -448,9 +448,236 @@ example end-to-end and compare wall-clock vs. Twee."
 The stage queue lives in `waldmeister_ic_atp_tasks.md`; per-firing
 commit messages and `CHANGELOG.md` carry the full diff context.
 This section preserves the load-bearing per-stage decisions that
-were originally written as standalone memos but are now folded in.
+were originally written as standalone memos but are now folded in,
+in chronological stage order.
 
-## 7.1 Stage 8.7a -- WL bridge (`TATP[]`)
+## 7.1 Stage 5 -- Saturation loop
+
+Standard unfailing Knuth-Bendix completion as a proof procedure.
+`thvm_atp_step` does one cycle of the 6-step Waldmeister
+`Hauptkomponenten` ("main components") loop; `thvm_atp_run` is the
+`while (status == ATP_RUNNING)` driver.
+
+**Per-step pipeline** (in `src/atp/_.c::thvm_atp_step`):
+
+1. **Select** the cheapest CP via INC-wrap + `thvm_collapse_ordered`.
+2. **Normalize** both sides under R via `thvm_rewrite_normalize`.
+3. **Trivialize**: skip if `kbo_eq(lhs', rhs')`.
+4. **Orient** with KBO/LPO; `KBO_UN` -> add as 2-way pair (unfailing
+   fallback).
+5. **Interreduce** R against the new rule -- drop rules whose LHS
+   reduces under the new rule and requeue (the
+   `Interreduktion` step).
+6. **Generate** new CPs from `(new_rule, R)` only (no
+   re-derivation from existing R x R pairs).
+7. **Goal-test** at start AND end of step: normalize goal sides,
+   PROVED on `kbo_eq`.
+
+**State** (`AtpState`): parallel `lhs[ATP_MAX_RULES] / rhs[]` rule
+arrays; `cp_lhs[ATP_MAX_CPS] / cp_rhs[]` queue; `goal_lhs / rhs`;
+`const KboConfig *kbo`; `step / step_cap`.  Status enum:
+`ATP_RUNNING / PROVED / REFUTED / TIMEOUT / QUEUE_EMPTY`.
+
+**Fairness:** `step_cap` hard ceiling; round-robin escape valve as
+v0 mitigation, replaced by `--mix` heuristic in 8.8.
+
+## 7.2 Stage 7.2a -- Connectedness redundancy (domination lemma)
+
+Stage 7.2 considers Bachmair-Dershowitz-Plaisted "connectedness"
+redundancy.  Three candidate criteria all use rule subsets `R' subset R`:
+subsumption-connected, source-rule-disjoint, and BDP-below-c.
+
+**Domination lemma:** if `(s, t)` is joinable under `R' subset R`,
+it is joinable under R.  Therefore every CP that any of the three
+criteria drops is also dropped by 7.1's full-R trivial-joinability
+filter.  None adds new pruning power on top of 7.1.
+
+**Decision:** ship criterion (2) (source-rule-disjoint) as 7.2b
+**purely as an empirical demonstration** -- a counter
+`n_cps_dropped_connected` bounded above by
+`n_cps_dropped_joinable`.  Useful when AC theories or fancier
+joinability checks are introduced later.  Same domination logic
+shipped 7.3a's rule-subsumption counter.
+
+## 7.3 Stage 8.1a -- SUP-encoded CP enumeration
+
+Stage 8.1 reifies the `(rule_a, rule_b, position)` cross product as
+nested labelled SUPs and lets DUP-SUP commutation drive enumeration.
+Each leaf invokes `prim_unify_apply` (a `TAG_PRI` callback) which
+performs unification.
+
+**TAG_PRI port** (8.1b): `TAG_PRI = 25`, registry of
+`(PrimFn, arity)`, APP-PRI accumulates args until `arity` is
+reached then fires the C function.
+
+**Cross-product encoding:**
+
+    APP(APP(APP(PRI cp_at_pos, ROLE_OUTER), ROLE_INNER), ROLE_POS)
+
+with `ROLE_OUTER = &L_outer{lhs[0], ...}`,
+`ROLE_INNER = &L_inner{lhs[0], ...}`,
+`ROLE_POS   = &L_pos{pos_0, ...}`.  APP-SUP commutation
+distributes; each `(i, j, p)` triple becomes one APP-PRI redex; the
+callback returns the produced CP-CTR or ERA on unify failure.
+
+**Migration partition.**
+
+Stays in C (as TAG_PRI callbacks): `thvm_unify`, `thvm_match`,
+`thvm_subst_apply`, `kbo_eq`, position enumeration.
+
+Moves to IC: `thvm_critical_pairs_range` -> SUP cross-product;
+`atp_push_cps_traced`'s loop -> DUP/collapse over the SUP.
+
+Labelled SUPs suffice (each axis gets a distinct label `L_outer /
+L_inner / L_pos`); 8.6's unordered SUPs are not required.
+
+8.1e shipped a `use_ic_cp_gen` feature flag; cross-product bench
+(`cc/ci/ic/ii` modes) showed byte-identical counters.
+
+## 7.4 Stage 8.2a -- KBO as a pure IC program
+
+Three encoding choices for porting `thvm_kbo` (140 LOC C) to IC:
+
+| Option | Where work lives | Cost (LOC) | Use for |
+|---|---|---|---|
+| **(1) TAG_PRI wrapper** | C-internal; IC calls in via APP-PRI | ~50 | Lets IC code invoke the existing comparator |
+| **(2) Hybrid IC + C** | Structural recursion in IC; arithmetic in C primitives | ~200 | Demonstrates IC-native control flow |
+| **(3) Full pure IC** | Everything in IC (Church-numeral / TAG_NUM weights) | ~500-1000 | Lets SupGen superpose KboConfigs themselves |
+
+**Decision:** ship (1) as 8.2b (`prim_kbo` at `ATP_PRIM_KBO=2`,
+arity-3 callback `(s, t, cfg_id)` returning `NUM(KboCmp)`).  Ship
+(2) partially as 8.2c (`prim_kbo_eq_ic` -- structural-equality via
+AND-chain self-recursion).  Defer (3) as 8.2d **blocked** awaiting
+SupGen use case.
+
+KboConfig registry pattern mirrors the primitive registry:
+`KBO_CFG_TABLE[KBO_CFG_TABLE_CAP=16]` keyed by `cfg_id`.
+
+## 7.5 Stage 8.3a -- IC-native rule dispatch
+
+Stage 8.3 puts rule application in the IC reducer's evaluation
+model -- prerequisite for SupGen-style search over alternative
+orientations.
+
+**FVR-vs-VAR translation problem.**  Our codebase has TAG_FVR
+(first-order variable, `id`-tagged atom) and TAG_VAR (binder slot,
+points at a heap cell).  Three strategies:
+
+- **A. Explicit alpha-conversion** -- walk rule, allocate one
+  binder per FVR id, replace each FVR with the corresponding VAR,
+  wrap in LAM chain.  Hard for nested patterns: rule no longer
+  carries explicit pattern info, IC reducer doesn't naturally peel
+  outer CTR before feeding inner args.
+- **B. Keep FVR; APP-CTR rule** -- new primitive
+  `prim_rewrite_step(lhs, rhs, target)` analogous to
+  `prim_unify_apply`.  Reuses existing matching code via TAG_PRI.
+- **C. Hybrid** -- LAM only at the outermost layer; FVR + matching
+  primitive for nested.  Encoding logic gets fiddly.
+
+**Decision: B.**  Rule stays as CTR with FVR leaves;
+`prim_rewrite_step` (`ATP_PRIM_REWRITE_STEP = 4`) tries
+`thvm_match` then `thvm_subst_apply` on success / returns ERA on
+failure.  Reinterprets 8.3's "rule as LAM-binder" title as **"rule
+as a callable IC entity"** -- the LAM-vs-PRI choice is means to an
+end.
+
+8.3c lays SUP fan-out: pre-build saturated PRI calls for each
+rule, store as `&L{rewrite_pri_0, rewrite_pri_1, ...}`,
+`APP(SUP, target)` distributes via APP-SUP.  Mitigations for the
+DUP-CTR fan-out problem carry over from 8.1d-ii.
+
+8.3e: `use_ic_rewrite` flag on AtpState.  Cross-product bench:
+byte-identical counters; ci/ii modes ~2x slower than cc/ic
+(within target).
+
+## 7.6 Stage 8.3d -- ICC sort dispatch resolution
+
+8.3a deferred 8.3d (TAG_BRI / TAG_ANN integration for sort
+dispatch) until 8.4 landed multi-sort signatures.  After 8.4:
+
+**Where 8.4 actually closed the gap.**  Sort-check happens at
+saturation entry points (`thvm_atp_add_equation`,
+`thvm_atp_set_goal`).  Once inputs are well-sorted, all derived
+terms (CPs, normalized forms, oriented rules) inherit
+well-sortedness through matching / unification / rewriting.
+
+**ICC TAG_BRI / TAG_ANN type-flow rules** are about ICC
+**dependent types**, not first-order **sorts** -- adapting them to
+FOL sort dispatch is a non-trivial encoding step (FOL sort -> ICC
+type term, ANN-wrap rule RHSs, BRI-wrap rule LHSs).
+
+**Where ICC sort dispatch would buy something.** Only with:
+
+- **Operator overloading**: same name `+` for both `nat` and `rat`
+  signatures.  Not in our `.pr` corpus.
+- **Open-world dispatch**: rules added at runtime with no
+  precheck.  Our `add_equation` enforces closed-world.
+- **SupGen-style sort superposition**: superpose alternative sort
+  assignments per rule; rolls under 8.10's domain.
+
+**Decision:** 8.3d closes with no IC code changes.  Entry-point
+gating + closed-world inheritance + head-symbol dispatch in
+`prim_rewrite_step` already cover the intent.  Resolution memo
+documents the analysis.
+
+## 7.7 Stage 8.4a -- Multi-sort signatures
+
+Three sort-placement choices (parallel arrays on WaldSpec, embed
+fields in WaldSym/WaldVar, hybrid name-table + indices); decision
+**C** (sort *names* on Spec, sort *indices* in metadata structs --
+mirrors how labels and var ids already work).
+
+```c
+typedef struct {
+  char     sorts[WALD_MAX_SORTS][WALD_NAME_LEN];
+  u32      n_sorts;
+  // WaldSym embeds: arg_sorts[arity], result_sort
+  // WaldVar embeds: sort
+} WaldSpec;
+```
+
+**Where sort-checking fires.** Two options: precheck via
+`wald_sort_check(spec, term)` walking top-down before
+matching/unification (decision **I**) vs threading sort logic
+through the matcher (Option II, significant API churn).  Option I
+keeps the saturation core unchanged and pays for one walk per
+entry-point input -- CPs inherit well-sortedness from
+well-sorted source rules.
+
+**Sort-aware KBO** deferred: homogeneous KBO is sound (never
+orients pairs sort-aware would disorient), just less complete.
+
+`spec->n_sorts == 0` is a backwards-compat sentinel for
+"homogeneous mode, no checking" so existing single-sort fixtures
+keep working.  8.4e: `nat_list.pr` multi-sort fixture (nat, list;
+zero, succ, nil, cons, len).
+
+## 7.8 Stage 8.5a -- LPO ordering
+
+LPO (Lexikografische-Pfad-Ordnung, "lexicographic path ordering",
+Dershowitz 1982) needs only a precedence -- no weights.
+
+```c
+typedef enum { LPO_EQ = 0, LPO_GT = 1, LPO_LT = -1, LPO_UN = 2 } LpoCmp;
+typedef struct { const u32 *precedence; u32 n_labels; } LpoConfig;
+fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg);
+```
+
+Three placement options for KBO-vs-LPO selection (sum type, parallel
+inits, parallel field on AtpState); decision **C** -- add
+`const LpoConfig *lpo` field alongside `kbo`.  When `lpo != NULL`,
+`thvm_atp_orient_and_add` calls `thvm_lpo`.  Mirrors the
+`use_ic_cp_gen` / `use_ic_rewrite` "direct field poke" pattern;
+zero churn for KBO callers.
+
+**Empirical finding (8.5d):** KBO and LPO agree on every fixture in
+the v0 corpus.  Aligned precedences + simple weight functions ->
+both orderings produce the same orientation.  9.4c re-confirmed
+this on the enlarged corpus; the honest test of "KBO vs LPO
+disagree" needs a deliberately constructed case where KBO's weight
+flips an orientation LPO would pick differently.
+
+## 7.9 Stage 8.7a -- WL bridge (`TATP[]`)
 
 **Surface:** `TATP[axioms_List, conjecture_, opts___]` returns an
 `Association[Status, Steps, Rules, QueueSize, Trace]`.  Variables
@@ -473,7 +700,7 @@ are `Pattern[name, Blank[]]` (the `x_` syntax).  Two layers:
 Out of scope for v0: typed patterns (`_h`), sequence blanks, TPTP
 parsing.  TPTP file parsing landed in 9.2 as `TATP[File["..."]]`.
 
-## 7.2 Stage 8.9a -- Narrowing for existential goals
+## 7.10 Stage 8.9a -- Narrowing for existential goals
 
 **Distinction:** rewriting treats goal FVRs as opaque atoms;
 narrowing treats them as existentially quantified and binds via
@@ -504,7 +731,46 @@ fn Term thvm_atp_get_witness(const AtpState *s, u32 var_id);
 WL: `TATP[..., Witness -> {x_}]` returns
 `<|"Witness" -> <|x -> term|>|>`.
 
-## 7.3 Stage 8.10c -- IC-native ATP arc closing summary
+## 7.11 Stage 8.10a -- SupGen-style search inside saturation
+
+The IC-native ATP arc landed several SupGen-style mechanisms along
+the way:
+
+1. **CP-priority queue** (5.3): each queued CP wraps as
+   `INC^k(CTR_label=i([lhs, rhs]))` with `k = symbol_count(lhs) +
+   symbol_count(rhs)`; all n_cps wraps fold into a binary SUP
+   tree; `thvm_collapse_ordered` emits leaves by ascending depth
+   -- first emitted leaf is the cheapest CP.
+2. **SUP-encoded CP enumeration** (8.1): per-pair unification
+   work flows through APP-PRI evaluation so alternative CP
+   candidates can be superposed and collapsed together.
+3. **--mix heuristic** (8.8): priority weight gets a penalty for
+   unorientable CPs, biasing collapse toward cleaner candidates.
+
+Four candidate extensions evaluated for "what *new* superposition
+adds non-overlapping value":
+
+- **A. Superpose unfailing-orient direction.**  Picking just one
+  direction breaks completeness; unfailing's whole point is that
+  we can't decide which to keep.  **Verdict: not useful.**
+- **B. Superpose ordering choice (KBO vs LPO).**  Empirically
+  redundant on our corpus (8.5d / 9.4c finding).  Defer to
+  divergent TPTP-UEQ subdivision.
+- **C. Superpose heuristic mode (--add vs --mix).**
+  `--mix priority = --add priority + penalty`, so
+  `min(add, mix) = add` always.  Trivially redundant.
+- **D. Superpose at the trace level.**  Genuine SupGen vision
+  (search tree of saturation traces); requires backtracking +
+  state snapshotting.  Multi-firing research undertaking; defer.
+
+**Decision:** 8.10b ships a small demonstrative extension --
+`thvm_atp_peek_top_k(s, k, out_lhs, out_rhs)` -- that uses the
+existing INC-priority collapse infrastructure without popping.
+Exercises the SupGen mechanism in a standalone testable way and
+hands a hook to future research (branching CP selectors, multi-CP
+look-ahead heuristics).  8.10c is the arc-closing summary memo.
+
+## 7.12 Stage 8.10c -- IC-native ATP arc closing summary
 
 **What shipped (stages 1-8.10):** core saturation engine in C
 following Waldmeister's `Hauptkomponenten` ("main components")
@@ -536,7 +802,7 @@ loop.
    our limited heuristic sophistication and lack of AC matching,
    not unification or CP gen.
 
-## 7.4 Stage 9.1a -- Multi-witness narrowing enumeration
+## 7.13 Stage 9.1a -- Multi-witness narrowing enumeration
 
 **Algorithm:** bounded DFS over the choice tree where each node is
 `(lhs, rhs, accumulated_sigma, depth)`.  Children come from every
@@ -569,7 +835,7 @@ array.  v0 returns DFS-order raw witnesses without alpha-eq dedup.
 `AllWitnesses -> False` keeps the singular `Witness` key for
 backwards compatibility.
 
-## 7.5 Stage 9.4a/b/c -- Corpus expansion (GRP/RNG/LCL/LAT)
+## 7.14 Stage 9.4a/b/c -- Corpus expansion (GRP/RNG/LCL/LAT)
 
 **Picks** (hand-encoded since cron firings have no network):
 
@@ -617,7 +883,7 @@ budget (the two group fixtures).  All 4 (cp-gen x rewrite) modes
 report byte-identical counters per fixture; the 8.5d "KBO and
 LPO agree" claim survives the expansion.
 
-## 7.6 Stage 10a -- Wolfram-axiom Boolean corpus
+## 7.15 Stage 10a -- Wolfram-axiom Boolean corpus
 
 **Source:** Stephen Wolfram's 2000 single-equation axiomatisation
 of Boolean algebra in NAND form, proven equivalent to standard
