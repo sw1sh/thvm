@@ -4510,22 +4510,50 @@ implemented + tested (f1a) but never invoked by the pipeline.
              toggle assignment.  166 C + 292 WL green. -->
 
 
-  - [ ] **f1d-d3: Metal parity for inlined kernels**.
-        With the toggle on, test_metal_real fails the
-        cpu/gpu parity check.  Investigate: the inlined
-        helper (materialize_kernel_inlined) builds programs
-        WITHOUT a LOAD prefix, and may not populate
-        output_shape / output_numel / src0_dims the way the
-        legacy emit does.  Metal's dispatch_kernel reads
-        those.  Bring the helper's KernelEntry layout in
-        line with what the Metal backend expects: emit a
-        LOAD-per-input prefix; populate output_shape from
-        the dominant input; mirror the existing PAD/PERMUTE/
-        EXPAND-shape metadata code.  Acceptance: with toggle
-        on, test_metal_real cpu/gpu parity passes; full
-        nn.wlt grad suite still green; verify.wls Metal
-        LeNet still converges loss 2.61 -> 0.025.  ~80 LOC
-        + likely a small Metal-specific test.
+  <!-- 2026-04-26 re-decompose f1d-d3.  Reading
+       src/backend/metal/_.m metal_dispatch_kernel: Metal
+       reads program[n_inputs] AS the main op and fires
+       exactly one shader pipeline.  It does NOT iterate
+       program[] like cpu_interpret does.  The inlined
+       helper's "N inlined elementwise ops + final main op"
+       layout is fundamentally incompatible with Metal's
+       one-shader-per-kernel model -- adding a LOAD prefix +
+       output_shape metadata wouldn't help; the inlined
+       elementwise ops just wouldn't run.
+
+       Two real fixes (each MUCH more than 80 LOC):
+         A. Write a Metal "interpreter" that iterates
+            program[] and dispatches one shader per op
+            (cheap but slow -- per-op command-buffer
+            overhead on Metal is high).
+         B. Generate a fused Metal shader on the fly via
+            MTLLibrary newLibraryWithSource for each unique
+            inlined kernel signature.
+
+       Both are out of scope for f1d.  Pragmatic
+       sidestep for now: gate the inlined helper on the
+       backend so it only fires for CPU, leaving Metal on
+       the legacy per-UOp emit path.  Toggle ON gets the
+       fusion win on CPU without breaking Metal. -->
+
+  - [ ] **f1d-d3a: backend-gate the inlined helper to CPU**.
+        At the top of `materialize_kernel_inlined` add
+        `if (CURRENT_BACKEND != &CPU_BACKEND) return 0;`
+        so the helper only fires for CPU.  Metal hits the
+        bail path -> legacy emit -> single-shader kernels
+        (its existing model).  Update the helper's docstring
+        to call out the gate.  Acceptance: 166 C + 292 WL
+        green with toggle ON for CPU paths; test_metal_real
+        cpu/gpu parity passes (Metal kernels unchanged from
+        legacy).  ~10 LOC.
+
+  - [ ] **f1d-d3b: deferred Metal fusion (real fix)**.
+        Either a Metal-side interpreter (option A) or
+        shader codegen (option B) -- see f1d-d3 history
+        comment for trade-offs.  Out of scope for f1
+        arc; revisit after f1e bench measurements show
+        the CPU fusion win and we have a baseline to
+        compare Metal against.
 
   - [ ] **f1d-d4: flip default + verify**.  After d1+d2+d3
         land, set the toggle default to 1 at its declaration
