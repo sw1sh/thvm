@@ -181,32 +181,20 @@ Real kernel-count + memory wins need either:
   via the existing binary UOP_ADD primitive.  Replaced by k2'
   below.] **k2a1/k2a2/k2b/k2c: UOP_ADDN approach**.
 
-- [ ] **k2': revisit f1d helper for the conv2d-lowered ADD
-      chain**.  Rather than a new UOp, lean on the existing
-      MATERIALIZE_USE_REALIZE_INFO helper (src/schedule/
-      materialize_inlined.c) which already fuses elementwise
-      chains into one multi-op kernel.  The toggle-ON path
-      mostly regressed in d4b2d because of grad chains; the
-      forward Conv2D-lowered ADD chain is exactly the
-      elementwise pattern the helper was designed for.
-      Plan:
-        - Probe with toggle ON, single TUOpConv2D forward
-          only (no grad).  Does the 25-partial chain collapse
-          to <=3 kernels?  Capture per-realize counts via
-          TMatStatsLabel.
-        - If yes: the helper works for forward but not
-          backward.  Find a way to enable it ONLY for the
-          forward-pass realize (TGradMany realize stays on
-          legacy).  Maybe a `TRealizeFused[expr]` WL surface
-          that flips the toggle around the call, or a
-          per-call setting.
-        - If no: investigate why and either fix the helper
-          or drop k2'.
-      Acceptance: lenet forward kernel_count drops by >=30
-      (covers most of the 48 partial-sum ADDs); verify.wls
-      still converges.  ~30-50 LOC of investigation +
-      WL-side gating; decompose further once the probe
-      result is in.
+- [blocked: probe negative -- single TUOpConv2D forward shows
+  toggle OFF=100, toggle ON=101 (regression).  helper_bail=52
+  on this graph: inline_emit fails on most children even after
+  d4b2b1's "recurse via materialize_expr" fix.  The conv2d-
+  lowered chain has REDUCE_SUM partials wrapped in EXPAND/
+  RESHAPE/SHRINK; the helper recurses into those, materialize_expr
+  returns something inline_emit can't slot into a single kernel,
+  and the kernel_dealloc_last/legacy fall-through allocates 1
+  extra kernel per bail.  Real fix needs the helper to gracefully
+  accept partial-fusion (build kernel for what it CAN fuse + leave
+  the rest as separate kernels), or a different fusion mechanism
+  entirely.  Both are bigger arcs than the forward-only k2' was
+  scoped for.] **k2': revisit f1d helper for conv2d-lowered ADD
+  chain**.
 
 ### Cleanup
 
