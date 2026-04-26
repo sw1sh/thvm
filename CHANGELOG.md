@@ -6,6 +6,42 @@ dated section.
 
 ## Unreleased
 
+### Added: sort-check gating in saturation entry points (stage 8.4d)
+
+`AtpState` gains a `const struct WaldSpec *spec` field (default
+NULL) plus setter `thvm_atp_set_spec(s, spec)`.  When attached,
+sort-check fires on the two saturation entry points:
+
+- `thvm_atp_add_equation(s, lhs, rhs)`: rejects if either side
+  is ill-sorted or `sort(lhs) != sort(rhs)`.  Returns 0 without
+  mutating state.
+- `thvm_atp_set_goal(s, lhs, rhs)`: same gate.  Special case:
+  `lhs == 0` clears the goal and is always accepted (completion-
+  mode idiom).  Return type changed from `void` to `u8` (1 =
+  set, 0 = rejected).  Existing callers that ignore the return
+  continue to work.
+
+CPs are NOT prechecked per the design memo: well-sortedness
+inherits from the source rules' LHSs through unification.
+
+The gate is a no-op when no spec is attached (NULL) or when the
+spec has `n_sorts == 0` (homogeneous mode), preserving the
+previous behavior for tests that don't use sorts.
+
+`tests/test_wald.c` adds 3 cases (5522 sub-checks, was 5507):
+- `add-equation-rejects-mismatch`: nat-vs-list equation
+  rejected; well-sorted nat-vs-nat accepted; n_cps unchanged
+  on rejection
+- `set-goal-rejects-mismatch`: nat-vs-list goal rejected; clear
+  (lhs == 0) always accepted; previous goal preserved on
+  rejection
+- `no-spec-attached-passes-everything`: gate is a no-op when
+  spec is NULL even on terms with unregistered labels / var ids
+
+Header change: `WaldSpec` typedef now uses a tagged struct name
+(`typedef struct WaldSpec { ... } WaldSpec`) so AtpState can
+forward-reference it.
+
 ### Added: wald_term_sort / wald_sort_check (stage 8.4c)
 
 Two new helpers in `src/wald/_.c`:

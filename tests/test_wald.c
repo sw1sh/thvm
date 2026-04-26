@@ -1267,6 +1267,115 @@ int main(void) {
     wald_free(spec);
   }
 
+  // === Stage 8.4d: sort-check gating in saturation entry points ======
+
+  TEST_BEGIN("wald/sort-gate/add-equation-rejects-mismatch");
+  {
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           nat list\n"
+      "SIGNATURE       zero: -> nat\n"
+      "                nil: -> list\n"
+      "                cons: nat list -> list\n"
+      "VARIABLES       n : nat\n"
+      "EQUATIONS       zero = zero\n"
+      "CONCLUSION      zero = zero\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+
+    static const KboConfig CFG = {
+      .weights = NULL, .precedence = NULL,
+      .n_labels = 0, .var_weight = 1,
+    };
+    AtpState *atp = thvm_atp_init(&CFG, 32);
+    thvm_atp_set_spec(atp, spec);
+
+    // Well-sorted equation: zero = zero -- both sides are nat.
+    u32 lab_zero = spec->symbols[0].label;
+    Term zero1 = term_new_ctr(lab_zero, NULL, 0);
+    Term zero2 = term_new_ctr(lab_zero, NULL, 0);
+    CHECK_EQ((int)thvm_atp_add_equation(atp, zero1, zero2), 1);
+
+    // Ill-sorted equation: zero = nil -- nat vs list.
+    u32 lab_nil = spec->symbols[1].label;
+    Term nil = term_new_ctr(lab_nil, NULL, 0);
+    Term zero3 = term_new_ctr(lab_zero, NULL, 0);
+    u32 cps_before = atp->n_cps;
+    CHECK_EQ((int)thvm_atp_add_equation(atp, zero3, nil), 0);
+    CHECK_EQ(atp->n_cps, cps_before);   // state unchanged
+
+    thvm_atp_free(atp);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/sort-gate/set-goal-rejects-mismatch");
+  {
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           nat list\n"
+      "SIGNATURE       zero: -> nat\n"
+      "                nil: -> list\n"
+      "                cons: nat list -> list\n"
+      "EQUATIONS       zero = zero\n"
+      "CONCLUSION      zero = zero\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+
+    static const KboConfig CFG = {
+      .weights = NULL, .precedence = NULL,
+      .n_labels = 0, .var_weight = 1,
+    };
+    AtpState *atp = thvm_atp_init(&CFG, 32);
+    thvm_atp_set_spec(atp, spec);
+
+    u32 lab_zero = spec->symbols[0].label;
+    u32 lab_nil  = spec->symbols[1].label;
+
+    // Well-sorted goal accepted.
+    Term z1 = term_new_ctr(lab_zero, NULL, 0);
+    Term z2 = term_new_ctr(lab_zero, NULL, 0);
+    CHECK_EQ((int)thvm_atp_set_goal(atp, z1, z2), 1);
+    CHECK(atp->goal_lhs != 0u);
+
+    // Ill-sorted goal rejected; previous goal preserved.
+    Term zero  = term_new_ctr(lab_zero, NULL, 0);
+    Term nil   = term_new_ctr(lab_nil,  NULL, 0);
+    Term prev_lhs = atp->goal_lhs;
+    Term prev_rhs = atp->goal_rhs;
+    CHECK_EQ((int)thvm_atp_set_goal(atp, zero, nil), 0);
+    CHECK_EQ(atp->goal_lhs, prev_lhs);
+    CHECK_EQ(atp->goal_rhs, prev_rhs);
+
+    // Clearing the goal (lhs == 0) is always accepted.
+    CHECK_EQ((int)thvm_atp_set_goal(atp, 0, 0), 1);
+    CHECK_EQ(atp->goal_lhs, 0u);
+
+    thvm_atp_free(atp);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/sort-gate/no-spec-attached-passes-everything");
+  {
+    // Without a spec attached, the gate is a no-op even on
+    // ill-shaped terms.  Confirms backward compatibility for
+    // tests that use thvm_atp_init without a WaldSpec.
+    static const KboConfig CFG = {
+      .weights = NULL, .precedence = NULL,
+      .n_labels = 0, .var_weight = 1,
+    };
+    AtpState *atp = thvm_atp_init(&CFG, 32);
+    CHECK(atp->spec == NULL);
+
+    Term lhs = term_new_ctr(99u, NULL, 0);   // unregistered label
+    Term rhs = term_new_fvr(99u);            // unregistered var_id
+    CHECK_EQ((int)thvm_atp_add_equation(atp, lhs, rhs), 1);
+    CHECK_EQ((int)thvm_atp_set_goal(atp, lhs, rhs), 1);
+
+    thvm_atp_free(atp);
+  }
+
   TEST_BEGIN("wald/sorts/multi-sort-pr-fixture");
   {
     // A small sorted-list fragment: nat / list sorts.

@@ -959,12 +959,25 @@ typedef struct {
   // to delegate to C; 8.3e-ii replaces the body with PRI routing
   // via `prim_rewrite_step`.
   u8   use_ic_rewrite;
+
+  // 8.4d: optional WaldSpec for sort-check gating in
+  // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
+  // (default), no sort checking happens (homogeneous-mode
+  // behavior preserved).  Set via `thvm_atp_set_spec`.
+  const struct WaldSpec *spec;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
 fn void      thvm_atp_free        (AtpState *s);
 fn u8        thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs);
-fn void      thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
+fn u8        thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
+
+// 8.4d: attach a WaldSpec for sort-check gating.  When set,
+// `thvm_atp_add_equation` and `thvm_atp_set_goal` reject
+// ill-sorted inputs (return 0) without modifying state.  Pass
+// NULL to clear (homogeneous-mode default).
+fn void      thvm_atp_set_spec    (AtpState *s,
+                                   const struct WaldSpec *spec);
 
 // Serialize the trace[] array as Waldmeister-PCL-shaped text into
 // `buf` (cap = capacity).  Each line: "<idx> (<reason> [from
@@ -1007,7 +1020,7 @@ typedef struct {
   u32  sort;      // 8.4b: sort id (index into spec->sorts[])
 } WaldVar;
 
-typedef struct {
+typedef struct WaldSpec {
   // Spec identity.  `mode_proof = 1` for "MODE PROOF", 0 for
   // "MODE COMPLETION" (defaults to 1 when unspecified).
   char    name[WALD_NAME_LEN];

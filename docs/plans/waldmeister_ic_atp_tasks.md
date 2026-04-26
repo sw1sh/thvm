@@ -578,7 +578,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         verifies a term is well-sorted against the spec.  Used
         by 8.4d / 8.4e as a precheck rather than threading
         sort logic through `thvm_match`.
-  - [ ] 8.4d wire sort-check into the saturation loop: reject
+  - [x] 8.4d wire sort-check into the saturation loop: reject
         equations / CPs / orient-and-add inputs that fail
         `wald_sort_check`.  Update tests to confirm the gate
         fires on a hand-constructed sort-mismatched equation.

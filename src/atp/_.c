@@ -318,6 +318,19 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
 // origin downstream.  Returns 1 on success, 0 if the queue is full.
 fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
   if (s == NULL || s->n_cps >= ATP_MAX_CPS) return 0;
+  // 8.4d: when a WaldSpec is attached, reject ill-sorted inputs
+  // before mutating state.  Each side must be well-sorted AND
+  // both sides must share the same sort (an equation l = r in
+  // a sorted signature requires `sort(l) == sort(r)`).
+  // Homogeneous-mode (NULL spec or n_sorts == 0) returns sort 0
+  // from wald_term_sort unconditionally so the gate is a no-op.
+  if (s->spec != NULL) {
+    u32 sl = wald_term_sort(s->spec, lhs);
+    u32 sr = wald_term_sort(s->spec, rhs);
+    if (sl == WALD_MAX_SORTS || sr == WALD_MAX_SORTS || sl != sr) {
+      return 0;
+    }
+  }
   u32 trace_idx = atp_trace_push(s, TRACE_AXIOM,
                                  ATP_TRACE_NONE, ATP_TRACE_NONE,
                                  lhs, rhs);
@@ -330,10 +343,34 @@ fn u8 thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs) {
 
 // Set the conjecture (single equation goal_lhs == goal_rhs).
 // Calling with goal_lhs == 0 clears the goal (completion mode).
-fn void thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
-  if (s == NULL) return;
+// Returns 1 on success, 0 if 8.4d's sort-check rejected the goal.
+fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL) return 0;
+  // Clearing the goal: lhs == 0 means "completion mode", always
+  // accepted regardless of sort-check.
+  if (lhs == 0) {
+    s->goal_lhs = 0;
+    s->goal_rhs = 0;
+    return 1;
+  }
+  // 8.4d: gate on sort-check when a spec is attached -- both
+  // sides must be well-sorted AND share the same sort.
+  if (s->spec != NULL) {
+    u32 sl = wald_term_sort(s->spec, lhs);
+    u32 sr = wald_term_sort(s->spec, rhs);
+    if (sl == WALD_MAX_SORTS || sr == WALD_MAX_SORTS || sl != sr) {
+      return 0;
+    }
+  }
   s->goal_lhs = lhs;
   s->goal_rhs = rhs;
+  return 1;
+}
+
+// 8.4d: attach a WaldSpec for sort-check gating.
+fn void thvm_atp_set_spec(AtpState *s, const struct WaldSpec *spec) {
+  if (s == NULL) return;
+  s->spec = spec;
 }
 
 // Total symbol count: TAG_FVR / atoms count as 1; TAG_CTR counts
