@@ -761,6 +761,53 @@ typedef struct {
 fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
                            CriticalPair *out, u32 cap);
 
+// === atp/ ===
+// Saturation loop state (stage 5).  See
+// docs/plans/saturation_loop.md for the design.  AtpState is heap-
+// allocated by thvm_atp_init; thvm_atp_free reclaims.  Struct
+// fields are public; tests / step / run helpers all read directly.
+typedef enum {
+  ATP_RUNNING     = 0,
+  ATP_PROVED      = 1,
+  ATP_REFUTED     = 2,
+  ATP_TIMEOUT     = 3,
+  ATP_QUEUE_EMPTY = 4,
+} AtpStatus;
+
+#define ATP_MAX_RULES 256
+#define ATP_MAX_CPS   4096
+
+typedef struct {
+  // Rule set R: parallel arrays sized for thvm_rewrite_normalize /
+  // thvm_critical_pairs to consume directly.
+  Term lhs[ATP_MAX_RULES];
+  Term rhs[ATP_MAX_RULES];
+  u32  n_rules;
+
+  // CP queue (open-form: not INC-wrapped here; the priority encoding
+  // happens at selection time in thvm_atp_select).
+  Term cp_lhs[ATP_MAX_CPS];
+  Term cp_rhs[ATP_MAX_CPS];
+  u32  n_cps;
+
+  // Goal: a single conjecture goal_lhs == goal_rhs.  goal_lhs == 0
+  // means "no goal set; run as completion".
+  Term goal_lhs;
+  Term goal_rhs;
+
+  // Reduction ordering (caller-owned).
+  const KboConfig *kbo;
+
+  // Bounds.
+  u32 step;
+  u32 step_cap;
+} AtpState;
+
+fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
+fn void      thvm_atp_free        (AtpState *s);
+fn u8        thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs);
+fn void      thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input

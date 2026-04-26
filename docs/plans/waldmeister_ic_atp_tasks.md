@@ -41,8 +41,12 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       [`docs/plans/saturation_loop.md`](saturation_loop.md): full
       step algorithm, AtpState struct, fairness story, termination
       conditions, mapping from C-side primitives, open questions.
-- [ ] 5.1 `AtpState` struct: rules `R`, CP queue, goal, KboConfig,
-      step counter; init / free helpers
+- [x] 5.1 `AtpState` struct: rules `R`, CP queue, goal, KboConfig,
+      step counter; `thvm_atp_init` / `_free` / `_add_equation` /
+      `_set_goal` helpers in `src/atp/_.c`.  AtpStatus enum +
+      ATP_MAX_RULES (256) + ATP_MAX_CPS (4096) public in
+      `src/thvm.h`.  Tests in `tests/test_atp.c` cover init/free,
+      queue overflow, goal set/clear.
 - [ ] 5.2 saturation step:
       - select CP from queue (priority collapse over INC-wrapped CPs)
       - normalize both sides under R (top-position + recursive descent)

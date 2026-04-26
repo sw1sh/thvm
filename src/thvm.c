@@ -226,6 +226,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // thvm_rename_vars; included last in the IC-as-ATP block.
 #include "cp/_.c"
 
+// === atp/ ===
+// Saturation-loop state: AtpState struct + init / free /
+// add_equation / set_goal.  Step + run drivers land in 5.2.
+#include "atp/_.c"
+
 // hrp1: heap-rooted preserve walk -- alternative to
 // realize.c's mark_preserved_chain.  Standalone helper; hrp2
 // wires it into thvm_realize.

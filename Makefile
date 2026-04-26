@@ -55,7 +55,8 @@ TESTS := \
   $(BIN)/test_rewrite \
   $(BIN)/test_unify \
   $(BIN)/test_cp \
-  $(BIN)/test_icc
+  $(BIN)/test_icc \
+  $(BIN)/test_atp
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
