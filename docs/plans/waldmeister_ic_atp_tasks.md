@@ -283,7 +283,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `waldmeister/documents/example.pr` from disk; if the
         symlink is missing the test silently passes (research
         fixture, not a regression).
-  - [ ] 6.4b end-to-end PCL emission test: load example.pr
+  - [x] 6.4b end-to-end PCL emission test: load example.pr
         from disk, build KboConfig from parsed precedences,
         push axioms, set goal, run saturation, call
         `thvm_atp_trace_serialize`.  Validate the trace

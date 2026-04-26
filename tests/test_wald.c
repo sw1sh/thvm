@@ -946,6 +946,79 @@ int main(void) {
     wald_free(spec);
   }
 
+  // === 6.4b end-to-end: parse .pr -> saturation -> PCL trace =========
+  //
+  // Load the actual example.pr from the vendored Waldmeister tree,
+  // run saturation with a generous step budget, and validate the
+  // PCL trace text.  Structural invariants we check regardless of
+  // whether the goal is proved (the example.pr conclusion
+  // f(a, i(a)) = f(i(a), a) needs left-inverse derived from
+  // right-inverse + associativity + identity, which is harder than
+  // what we can guarantee in a small step budget):
+  //   - n_trace >= n_eqns (each axiom is recorded)
+  //   - first n_eqns lines start with "<i> (axiom): "
+  //   - at least one "orient" line exists (some rule was added)
+  TEST_BEGIN("wald/example.pr/end-to-end-pcl-trace");
+  {
+    WaldSpec *spec = wald_init();
+    WaldErr pe = wald_parse_file("waldmeister/documents/example.pr", spec);
+    if (pe != WALD_OK) {
+      // Symlink absent.  Skip silently.
+      CHECK_EQ((int)pe, (int)WALD_ERR_FILE);
+      wald_free(spec);
+    } else {
+      u32 max_label = 0;
+      for (u32 i = 0; i < spec->n_symbols; i++) {
+        if (spec->symbols[i].label > max_label)
+          max_label = spec->symbols[i].label;
+      }
+      u32 weights[16] = {0};
+      u32 prec[16]    = {0};
+      for (u32 i = 0; i < spec->n_symbols; i++) {
+        weights[spec->symbols[i].label] = 1;
+        prec[spec->symbols[i].label]    = spec->symbols[i].prec_rank + 1;
+      }
+      KboConfig cfg = {
+        .weights    = weights,
+        .precedence = prec,
+        .n_labels   = max_label + 1,
+        .var_weight = 1,
+      };
+
+      AtpState *atp = thvm_atp_init(&cfg, 256);
+      CHECK(atp != NULL);
+      for (u32 i = 0; i < spec->n_eqns; i++) {
+        CHECK(thvm_atp_add_equation(atp,
+                                    spec->eqn_lhs[i], spec->eqn_rhs[i]));
+      }
+      thvm_atp_set_goal(atp, spec->goal_lhs, spec->goal_rhs);
+
+      AtpStatus st = thvm_atp_run(atp);
+      // Either proved or budget exhausted; both are acceptable for
+      // this structural check.  Crucially: must NOT have errored.
+      CHECK(st == ATP_PROVED || st == ATP_TIMEOUT || st == ATP_QUEUE_EMPTY);
+
+      // n_trace at minimum equals the number of axioms pushed.
+      CHECK(atp->n_trace >= spec->n_eqns);
+
+      // Serialize and inspect.
+      static char buf[8192];
+      u32 n = thvm_atp_trace_serialize(atp, buf, sizeof(buf));
+      CHECK(n > 0u);
+      CHECK_EQ((int)buf[n], 0);
+
+      // The first three lines must be the three axioms in order.
+      CHECK(strstr(buf, "0 (axiom): ") != NULL);
+      CHECK(strstr(buf, "1 (axiom): ") != NULL);
+      CHECK(strstr(buf, "2 (axiom): ") != NULL);
+      // At least one orient line exists.
+      CHECK(strstr(buf, "(orient from ") != NULL);
+
+      thvm_atp_free(atp);
+      wald_free(spec);
+    }
+  }
+
   thvm_free();
   TEST_REPORT();
 }

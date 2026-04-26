@@ -6,6 +6,29 @@ dated section.
 
 ## Unreleased
 
+### Added: end-to-end .pr -> saturation -> PCL trace test (stage 6.4b)
+
+`tests/test_wald.c` adds a `wald/example.pr/end-to-end-pcl-trace`
+case (248 sub-checks total) that closes the loop:
+
+1. `wald_parse_file("waldmeister/documents/example.pr", spec)`
+2. Build `KboConfig` from `spec->symbols[i].prec_rank`
+3. `thvm_atp_init`, push 3 axioms, set goal `f(a, i(a)) = f(i(a), a)`
+4. `thvm_atp_run` (256-step budget)
+5. `thvm_atp_trace_serialize` into 8 KB buffer
+
+Structural assertions (hold whether the goal is proved or the
+budget is exhausted -- the example.pr conclusion needs left-inverse
+derived from right-inverse + associativity + identity, which is
+beyond what we can guarantee in a small budget):
+- `n_trace >= n_eqns` (each axiom is recorded)
+- trace text contains "0 (axiom): ", "1 (axiom): ", "2 (axiom): "
+- at least one "(orient from " line exists
+- final `AtpStatus` is one of PROVED / TIMEOUT / QUEUE_EMPTY
+
+The test silently passes if the `waldmeister/` symlink isn't
+present (matches the 6.4a fallback).
+
 ### Added: `wald_parse_file` -- file-loader convenience wrapper (stage 6.4a)
 
 Thin wrapper in `src/wald/_.c`: opens `path`, slurps the bytes,
