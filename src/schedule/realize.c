@@ -39,19 +39,32 @@ static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
 fn Term thvm_realize(Term expr) {
   u32 wm = cpu_buf_pool_begin();
 
-  // nf-first loop: nf is full normal-form reduction (sweeps the
-  // heap, fires every redex via redex_fire including GRAD, KERNEL,
-  // APP-LAM, OP2 uniformly).  After nf, lazy compute still sits
-  // around as plain UOPs; materialize compiles those to kernels;
-  // nf fires them.  Loop until materialize emits no fresh kernel.
-  // GRAD is just one of many lazy combinators -- no special path.
-  Term res = nf(expr);
-  for (int iter = 0; iter < 16; iter++) {
-    u32 kn0 = KERNELS_NEXT;
+  // wnf+nf loop:
+  //   - wnf handles head-position redexes lazily, including
+  //     TAG_REF / TAG_ALO unfolding (which nf excludes from
+  //     eager firing -- see src/wnf/nf.c -- so recursive named
+  //     definitions don't blow the alo state stack).
+  //   - nf then sweeps every remaining redex for deep cases the
+  //     WHNF discipline doesn't reach (e.g. GRADs nested inside
+  //     ADD(GRAD, GRAD) from interact_grad's chain rule).
+  //   - materialize compiles whatever lazy compute survived.
+  // Fixed point: a pass where materialize emits no fresh kernel
+  // AND wnf+nf fire no interactions.  Either alone isn't enough --
+  // wnf can fire kernels without growing KERNELS_NEXT, and
+  // materialize can emit a kernel without producing any new
+  // redexes (the kernel fires next iteration via wnf).
+  // Safety cap (THVM_REALIZE_MAX_ITERS) bounds runaway loops; in
+  // practice the loop converges in 2-3 iterations.
+#define THVM_REALIZE_MAX_ITERS 64
+  Term res = expr;
+  for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
+    u32 kn0   = KERNELS_NEXT;
+    u64 itrs0 = ITRS;
+    res = nf(wnf(res));
     Term mat = thvm_materialize(res);
-    if (KERNELS_NEXT == kn0) { res = mat; break; }
+    if (KERNELS_NEXT == kn0 && ITRS == itrs0) { res = mat; break; }
     kernel_compute_consumer_counts();
-    res = nf(mat);
+    res = mat;
   }
 
   // gc3: tracing-GC preserve.  Composes gc1 + gc2 into

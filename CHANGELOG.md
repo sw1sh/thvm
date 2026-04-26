@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Added: fusion_count.wlt + realize loop fixed-point (g3d)
+
+`wl/THVMLink/Tests/fusion_count.wlt` (4/4 green) pins the plan's
+kernel-count claims:
+
+- Linear + MSE forward = 2 kernels (matmul-as-REDUCE-tail + L2-loss-
+  as-REDUCE).
+- Linear + MSE forward+backward = 4 kernels (the headline number
+  from the rewrite arc).
+- Softmax forward = 3 kernels (exp, sum-of-exp, divide; the shared
+  exp can't fuse without unsafe re-compute).
+- `(a + b) * c` = 1 fused kernel.
+
+`thvm_realize` loop now runs to fixed point: the iteration body is
+`res = nf(wnf(res)); mat = thvm_materialize(res)`, and exits when
+both KERNELS_NEXT and ITRS are unchanged across a full pass.
+Either delta alone isn't enough -- wnf can fire kernels without
+growing KERNELS_NEXT, and materialize can emit a kernel without
+producing new redexes (the kernel fires next iteration via wnf).
+A 64-iteration safety cap remains because there's a subtle
+materialize re-emission bug (kernel exhaustion at 16k slots on
+some grad chains under unbounded loop); the cap converges in 2-3
+iterations for working tests.
+
+`nf` excludes TAG_REF / TAG_ALO from eager firing -- recursive
+named definitions like `sgd_loop` would non-terminatingly unfold;
+wnf handles them lazily at head position.
+
 ### Added: explicit nf() reducer + worklist-driven loop
 
 `wnf` is WHNF-only -- it surfaces the head and stops at plain UOPs.

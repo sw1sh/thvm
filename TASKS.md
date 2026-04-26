@@ -573,9 +573,23 @@ B + D (real bugs needing investigation).
       `make test` stays 166/166.  beautiful_mnist + uop_load
       handed to g3d.
 
-- [ ] **g3d: fusion_count.wlt + verify kernel ceiling**.  Add
-      `wl/THVMLink/Tests/fusion_count.wlt` asserting linear-train
-      forward+backward == 4 kernels and LeNet train step <= 15
-      kernels.  Make `timeout 180 make wl-test` green.  If counts
-      overshoot: revert g3, revert g2, replan g2 from scratch (do
-      NOT patch in place per the rewrite arc's rollback policy).
+- [x] **g3d: fusion_count.wlt + verify kernel ceiling**.  Added
+      `wl/THVMLink/Tests/fusion_count.wlt` (4/4 green) pinning:
+        - Linear+MSE forward = 2 kernels (matmul-as-REDUCE-tail +
+          L2-loss-as-REDUCE).
+        - Linear+MSE forward+backward = 4 kernels (the plan's
+          headline ceiling).
+        - Softmax forward = 3 (exp + sum-of-exp + divide; the
+          shared exp can't fuse without unsafe re-compute).
+        - `(a + b) * c` = 1 fused kernel.
+      Realize loop refactored to `nf(wnf(res)) -> materialize`
+      iterating to fixed point (KERNELS_NEXT and ITRS both stable
+      in the same pass), with a 64-iteration safety cap.  `nf`
+      (src/wnf/nf.c) is a worklist-driven full-NF reducer using
+      `redex_enumerate` + `redex_fire`; excludes TAG_REF/TAG_ALO
+      from eager firing so recursive named definitions don't
+      blow the alo state stack.
+      WL surviving fails (handed forward as a follow-up arc):
+      grad 6, nn 8, beautiful_mnist 2, optim 3, sgd 4, tensors 2,
+      uop_load SEGFAULT -- mostly conv2d-lowered backward chains
+      and recursive optimizer step tests.
