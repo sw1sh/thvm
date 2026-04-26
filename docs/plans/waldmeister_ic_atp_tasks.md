@@ -176,13 +176,34 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       only, `%` comment skipping, ident with digits + underscore,
       `->` vs bare `-`, full punctuation set, an `f(x, e) = x`
       stream, long-ident truncation, and the error path.
-- [ ] 6.3c section drivers for NAME / MODE / SORTS / SIGNATURE
-      / VARIABLES / ORDERING.  SIGNATURE entries register
-      `name: arg_sort_list -> result_sort` and assign each
-      symbol a fresh CTR label.  VARIABLES registers the
-      comma-separated list with sequential FVR ids.  ORDERING
-      is parsed as KBO (`weight-clist precedence`) or LPO
-      (`precedence`).  No EQUATIONS / CONCLUSION yet.
+- [ ] 6.3c1 section-detect infrastructure: `WaldSection` enum
+      (WSEC_NONE / NAME / MODE / SORTS / SIGNATURE / VARIABLES
+      / ORDERING / EQUATIONS / CONCLUSION); helper
+      `wald_section_from_ident(name) -> WaldSection`; lexer
+      gains a 1-token peek (`have_peek` + `peeked_kind` +
+      `peeked_text`); shared `wald_skip_to_section(lex)` that
+      eats tokens until the next section keyword (or EOF).
+- [ ] 6.3c2 NAME / MODE / SORTS section parsers: each reads
+      its single-line content (one ident for NAME, "PROOF"
+      vs "COMPLETION" for MODE, ident list for SORTS) and
+      returns the next section keyword via the shared
+      `wald_skip_to_section` helper.  Tests drive each
+      parser with a fixture string that ends in a known
+      section keyword.
+- [ ] 6.3c3 SIGNATURE section parser: per entry
+      `name : arg_sorts -> result_sort` register the symbol
+      in `spec->symbols[]` with a fresh CTR label and arity =
+      number of arg sorts.  Stops at the next section keyword.
+- [ ] 6.3c4 VARIABLES section parser:
+      `name1, name2, ... : sort` registers each name with a
+      sequential FVR id.  Stops at the next section keyword.
+- [ ] 6.3c5 ORDERING section parser: detects KBO vs LPO from
+      the first ident; KBO reads the comma-separated
+      `name=weight` list followed by a precedence chain
+      `f1 > f2 > ...`; LPO reads the precedence chain only.
+      Records the precedence rank (lower index = lower in
+      the order) on each symbol.  Stops at the next section
+      keyword.
 - [ ] 6.3d term parser: `wald_parse_term(spec, lex) -> Term`.
       Parses `ident` (lookup in var table -> FVR; else
       lookup in signature -> CTR with arity 0) and
