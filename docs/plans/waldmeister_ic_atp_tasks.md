@@ -773,3 +773,25 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       enlarged corpus; document IC-vs-Twee gaps where they
       emerge.  This is where the 8.5d "KBO and LPO agree on
       our corpus" finding gets stress-tested.
+  - [ ] 9.4a design memo `docs/plans/corpus_expansion_design.md`:
+        pick 3-5 textbook UEQ candidates from
+        GRP / RNG / LCL / LAT (we don't have network access in
+        a cron firing, so hand-encode from textbook axioms).
+        For each: signature, axioms, conjecture, predicted
+        status under our 32-step budget, KBO vs LPO orientation
+        notes.  Aim for at least one PROVED and at least one
+        TIMEOUT to exercise both ends of the bench.  Scope:
+        ~150-line memo.
+  - [ ] 9.4b implement the fixtures: write each `.pr` + `.expect`
+        file from 9.4a, verify each parses (run through
+        `test_bench_atp` and confirm status matches the
+        prediction OR update the prediction if reality differs).
+        Update CHANGELOG with status of each.  Scope: 3-5 small
+        fixtures, ~30-50 lines each.
+  - [ ] 9.4c bench comparison + findings memo
+        `docs/plans/corpus_expansion_findings.md`: re-run
+        `tools/bench_twee` on the enlarged corpus; capture the
+        IC-vs-Twee deltas; document KBO-vs-LPO disagreements (if
+        any) and where the 32-step budget bites.  Scope: ~100-
+        line memo + updated `build/bench-atp.csv` /
+        `build/bench-twee.csv` snapshots.
