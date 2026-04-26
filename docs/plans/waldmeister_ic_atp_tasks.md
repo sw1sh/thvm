@@ -222,13 +222,18 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       three-name single decl, empty section, multi-decl, and
       truncated-mid-list EOF (keeps the names registered up to
       the EOF, returns WSEC_NONE).
-- [ ] 6.3c5 ORDERING section parser: detects KBO vs LPO from
-      the first ident; KBO reads the comma-separated
-      `name=weight` list followed by a precedence chain
-      `f1 > f2 > ...`; LPO reads the precedence chain only.
-      Records the precedence rank (lower index = lower in
-      the order) on each symbol.  Stops at the next section
-      keyword.
+- [x] 6.3c5 `wald_parse_ordering` lands in `src/wald/_.c` plus a
+      `prec_rank` field on `WaldSym`.  Reads everything as a
+      token stream tracking the most recently seen ident; on
+      `>` the previous ident becomes the next chain entry.
+      KBO weight-lists are consumed and discarded (`=` resets
+      the pending tracker); the saturation engine's KboConfig
+      stays caller-supplied.  After the chain, ranks are
+      assigned `pchain_n - 1 - i` so chain[0] is greatest.
+      Tests cover LPO chain, KBO weights+chain (same ranks as
+      LPO since weights are dropped), empty section, and the
+      "lone ident no chain" path (no `>` -> no chain entry,
+      ranks stay 0).
 - [ ] 6.3d term parser: `wald_parse_term(spec, lex) -> Term`.
       Parses `ident` (lookup in var table -> FVR; else
       lookup in signature -> CTR with arity 0) and

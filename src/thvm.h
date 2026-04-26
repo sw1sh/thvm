@@ -868,8 +868,11 @@ fn u32       thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
 
 typedef struct {
   char name[WALD_NAME_LEN];
-  u32  label;     // CTR label assigned at parse time
+  u32  label;       // CTR label assigned at parse time
   u32  arity;
+  u32  prec_rank;   // 6.3c5: precedence position (0 = smallest;
+                    //   higher index = greater).  All symbols start
+                    //   at 0; ORDERING parser fills the chain in.
 } WaldSym;
 
 typedef struct {
@@ -974,6 +977,7 @@ fn WaldSection wald_parse_mode     (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_sorts    (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_signature(WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_variables(WaldSpec *spec, WaldLex *lex);
+fn WaldSection wald_parse_ordering (WaldSpec *spec, WaldLex *lex);
 
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success

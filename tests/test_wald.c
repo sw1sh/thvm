@@ -398,6 +398,86 @@ int main(void) {
     wald_free(s);
   }
 
+  // === 6.3c5 ORDERING parser =========================================
+
+  // Helper: pre-populate a WaldSpec with the standard {e, i, f, a}
+  // group signature.  Tests that exercise ORDERING use this so
+  // the parser has symbols to look up.
+  // (Inline rather than a static helper so the harness stays simple.)
+  TEST_BEGIN("wald/parse-ordering-lpo-chain-assigns-ranks");
+  {
+    WaldSpec *s = wald_init();
+    // Pre-populate signature: e (label 1), i (2), f (3), a (4).
+    s->n_symbols = 4;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+    strncpy(s->symbols[1].name, "i", WALD_NAME_LEN - 1);
+    strncpy(s->symbols[2].name, "f", WALD_NAME_LEN - 1);
+    strncpy(s->symbols[3].name, "a", WALD_NAME_LEN - 1);
+    s->next_label = 5;
+
+    WaldLex lex;
+    wald_lex_init(&lex, "LPO i > f > e > a EQUATIONS foo");
+    CHECK_EQ((int)wald_parse_ordering(s, &lex), (int)WSEC_EQUATIONS);
+    // Chain "i > f > e > a" -> ranks i=3, f=2, e=1, a=0.
+    CHECK_EQ(s->symbols[1].prec_rank, 3u);   // i
+    CHECK_EQ(s->symbols[2].prec_rank, 2u);   // f
+    CHECK_EQ(s->symbols[0].prec_rank, 1u);   // e
+    CHECK_EQ(s->symbols[3].prec_rank, 0u);   // a
+    // Lexer past EQUATIONS at "foo".
+    CHECK_EQ((int)wald_lex_next(&lex), (int)WT_IDENT);
+    CHECK_EQ((int)strcmp(lex.tok_text, "foo"), 0);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-ordering-kbo-skips-weights-then-chain");
+  {
+    WaldSpec *s = wald_init();
+    s->n_symbols = 4;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+    strncpy(s->symbols[1].name, "i", WALD_NAME_LEN - 1);
+    strncpy(s->symbols[2].name, "f", WALD_NAME_LEN - 1);
+    strncpy(s->symbols[3].name, "a", WALD_NAME_LEN - 1);
+
+    // KBO with weight list, then precedence chain.
+    WaldLex lex;
+    wald_lex_init(&lex, "KBO i=0, f=1, e=1, a=1 i > f > e > a EQUATIONS");
+    CHECK_EQ((int)wald_parse_ordering(s, &lex), (int)WSEC_EQUATIONS);
+    // Same ranks as the LPO case (weights are discarded).
+    CHECK_EQ(s->symbols[1].prec_rank, 3u);
+    CHECK_EQ(s->symbols[2].prec_rank, 2u);
+    CHECK_EQ(s->symbols[0].prec_rank, 1u);
+    CHECK_EQ(s->symbols[3].prec_rank, 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-ordering-empty-section-leaves-ranks-zero");
+  {
+    WaldSpec *s = wald_init();
+    s->n_symbols = 1;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+
+    WaldLex lex;
+    wald_lex_init(&lex, "EQUATIONS");
+    CHECK_EQ((int)wald_parse_ordering(s, &lex), (int)WSEC_EQUATIONS);
+    CHECK_EQ(s->symbols[0].prec_rank, 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-ordering-lone-ident-no-chain");
+  {
+    // "LPO foo EQUATIONS" -- "foo" is read but no ">" follows, so
+    // it's NOT part of the chain.  All ranks stay 0.
+    WaldSpec *s = wald_init();
+    s->n_symbols = 1;
+    strncpy(s->symbols[0].name, "foo", WALD_NAME_LEN - 1);
+
+    WaldLex lex;
+    wald_lex_init(&lex, "LPO foo EQUATIONS");
+    CHECK_EQ((int)wald_parse_ordering(s, &lex), (int)WSEC_EQUATIONS);
+    CHECK_EQ(s->symbols[0].prec_rank, 0u);
+    wald_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

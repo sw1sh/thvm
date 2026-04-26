@@ -6,6 +6,37 @@ dated section.
 
 ## Unreleased
 
+### Added: ORDERING section parser (stage 6.3c5)
+
+`wald_parse_ordering(spec, lex)` lands in `src/wald/_.c` with a
+new `prec_rank` field on `WaldSym`.  Grammar:
+
+  "KBO" weight_list precedence
+  "LPO" precedence
+
+Where `weight_list = name = number, name = number, ...` and
+`precedence = f1 > f2 > ... > fN` (left = greatest).
+
+The parser reads everything as a token stream, tracking the most
+recently seen ident; on `>` the previous ident becomes the next
+chain entry.  KBO weight lists are consumed and discarded (the
+saturation engine's `KboConfig` stays caller-supplied; the .pr
+file only contributes the precedence ordering).  After the
+chain is gathered, ranks are assigned so chain[0] gets
+`prec_rank = N - 1` (greatest) and chain[N-1] gets
+`prec_rank = 0` (smallest).
+
+Stage 6.3c (a/b/c1/c2/c3/c4/c5) now complete.  Next: 6.3d term
+parser, then 6.3e/f/g.
+
+Tests in `tests/test_wald.c` (147 sub-checks) cover:
+- LPO chain `i > f > e > a` -> ranks i=3, f=2, e=1, a=0
+- KBO weights `i=0, f=1, e=1, a=1` followed by the same chain
+  -> identical ranks (weights ignored)
+- empty ORDERING (immediate next-section keyword) -> ranks
+  stay at calloc'd 0
+- lone ident with no `>` -> not added to the chain, ranks 0
+
 ### Added: VARIABLES section parser (stage 6.3c4)
 
 `wald_parse_variables(spec, lex)` lands in `src/wald/_.c`.

@@ -285,6 +285,97 @@ fn WaldSection wald_parse_signature(WaldSpec *spec, WaldLex *lex) {
   }
 }
 
+// === 6.3c5: ORDERING section parser ================================
+//
+// Grammar:
+//   "KBO" weight_list precedence
+// |   "LPO" precedence
+//
+// where weight_list = `name = number, name = number, ...` and
+// precedence = `f1 > f2 > ... > fN` (left = greatest, right =
+// smallest).  We discard the weight list (the saturation engine's
+// KboConfig is supplied separately in stages 5-7) and record the
+// precedence chain via `prec_rank` on each symbol: chain index 0
+// (leftmost) gets rank N-1, chain index N-1 (rightmost) gets rank 0.
+//
+// Strategy: read everything as a token stream, tracking the most
+// recently seen ident.  When a `>` arrives, that ident becomes the
+// next precedence-chain entry.  Anything other than ident/`>`
+// resets the "pending ident" tracker.  Stops at the next section
+// keyword (or EOF).
+fn WaldSection wald_parse_ordering(WaldSpec *spec, WaldLex *lex) {
+  // KBO / LPO header (or empty section).
+  if (wald_lex_peek(lex) != WT_IDENT) return wald_skip_to_section(lex);
+  WaldSection sec = wald_section_from_ident(lex->peeked_text);
+  if (sec != WSEC_NONE) { wald_lex_next(lex); return sec; }
+  wald_lex_next(lex);   // consume KBO / LPO
+
+  // Most recently seen ident (candidate next chain entry).
+  u8   has_last = 0;
+  char last[WALD_NAME_LEN];
+
+  // Chain (left = greatest, right = smallest).
+  u32  pchain_idx[WALD_MAX_SYMBOLS];
+  u32  pchain_n = 0;
+
+  WaldSection terminator = WSEC_NONE;
+  for (;;) {
+    WaldTokKind k = wald_lex_peek(lex);
+    if (k == WT_END) break;
+    if (k == WT_IDENT) {
+      WaldSection ssec = wald_section_from_ident(lex->peeked_text);
+      if (ssec != WSEC_NONE) {
+        wald_lex_next(lex);
+        terminator = ssec;
+        break;
+      }
+      wald_lex_next(lex);
+      u32 nlen = lex->tok_len;
+      if (nlen >= WALD_NAME_LEN) nlen = WALD_NAME_LEN - 1;
+      for (u32 i = 0; i < nlen; i++) last[i] = lex->tok_text[i];
+      last[nlen] = '\0';
+      has_last = 1;
+      continue;
+    }
+    if (k == WT_GT) {
+      wald_lex_next(lex);
+      if (has_last && spec != NULL) {
+        for (u32 i = 0; i < spec->n_symbols; i++) {
+          if (strcmp(spec->symbols[i].name, last) == 0) {
+            if (pchain_n < WALD_MAX_SYMBOLS) pchain_idx[pchain_n++] = i;
+            break;
+          }
+        }
+      }
+      has_last = 0;
+      continue;
+    }
+    // Any other token (=, COMMA, etc.) -- consume and reset pending.
+    wald_lex_next(lex);
+    has_last = 0;
+  }
+
+  // After the loop: if we have a pending ident AND we've already
+  // started a chain, the pending one is the chain's terminal.
+  if (has_last && pchain_n > 0 && spec != NULL) {
+    for (u32 i = 0; i < spec->n_symbols; i++) {
+      if (strcmp(spec->symbols[i].name, last) == 0) {
+        if (pchain_n < WALD_MAX_SYMBOLS) pchain_idx[pchain_n++] = i;
+        break;
+      }
+    }
+  }
+
+  // Rank assignment: chain[0] is greatest, chain[n-1] is smallest.
+  if (spec != NULL) {
+    for (u32 i = 0; i < pchain_n; i++) {
+      spec->symbols[pchain_idx[i]].prec_rank = pchain_n - 1 - i;
+    }
+  }
+
+  return terminator;
+}
+
 // === 6.3c4: VARIABLES section parser ===============================
 //
 // Section grammar:  { ident { "," ident } ":" sort_ident }
