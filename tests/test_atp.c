@@ -633,6 +633,67 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/headline-trace-shape-and-walk-to-axiom");
+  {
+    // Stage 6.1d: same headline demo, but verify the trace makes
+    // sense.  After ATP_PROVED we should see:
+    //   - exactly 3 TRACE_AXIOM entries (the 3 axioms we pushed)
+    //   - at least 1 TRACE_ORIENT entry (the rule(s) added to R)
+    //   - some number of TRACE_CP entries from generate_cps
+    // Then walk parent_a from the latest TRACE_ORIENT back through
+    // the trace; the walk must terminate at a TRACE_AXIOM.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    thvm_atp_set_goal(s,
+                      mk_f(mk_a(), mk_i(mk_a())),
+                      mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),       mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+
+    AtpStatus st = thvm_atp_run(s);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+
+    u32 n_axiom = 0, n_orient = 0, n_cp = 0;
+    for (u32 i = 0; i < s->n_trace; i++) {
+      u32 r = term_ext(s->trace[i]);
+      if      (r == TRACE_AXIOM)  n_axiom++;
+      else if (r == TRACE_ORIENT) n_orient++;
+      else if (r == TRACE_CP)     n_cp++;
+    }
+    CHECK_EQ(n_axiom, 3u);     // exactly the 3 axioms pushed
+    CHECK(n_orient >= 1u);     // proof needed at least one rule
+    (void)n_cp;                // count varies; just confirm structure walks
+
+    // Find the latest TRACE_ORIENT entry (closest to the proof).
+    u32 walk_idx = ATP_TRACE_NONE;
+    for (u32 i = s->n_trace; i > 0; i--) {
+      if (term_ext(s->trace[i - 1]) == TRACE_ORIENT) {
+        walk_idx = i - 1;
+        break;
+      }
+    }
+    CHECK(walk_idx != ATP_TRACE_NONE);
+
+    // Walk parent_a until we hit a TRACE_AXIOM.  Cap hops so a
+    // corrupted pointer can't loop forever.
+    u32 hops = 0;
+    u32 final_reason = ATP_TRACE_NONE;
+    while (walk_idx != ATP_TRACE_NONE && hops < 100) {
+      Term entry = s->trace[walk_idx];
+      u32  reason = term_ext(entry);
+      if (reason == TRACE_AXIOM) {
+        final_reason = TRACE_AXIOM;
+        break;
+      }
+      walk_idx = (u32)term_val(term_ctr_at(entry, 0));   // parent_a
+      hops++;
+    }
+    CHECK_EQ(final_reason, TRACE_AXIOM);
+
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

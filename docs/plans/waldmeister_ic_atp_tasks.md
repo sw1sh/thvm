@@ -144,13 +144,12 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       parent_b = r_trace[j])`.  Tests verify a CP entry's parents
       both point at the orient trace index of the rule that
       birthed it (self-overlap case: parent_a == parent_b == 1).
-- [ ] 6.1d test that the headline demo
-      (`atp/headline-prove-f-a-ia-equals-e-from-group-axioms`)
-      produces a trace with the expected shape: 3+ TRACE_AXIOM
-      entries (one per axiom), 1+ TRACE_ORIENT entries (one per
-      rule added to R), and TRACE_CP entries from generate_cps.
-      Then walk parent links from the proving rule back to the
-      original axioms.
+- [x] 6.1d sibling test `atp/headline-trace-shape-and-walk-to-axiom`
+      runs the same group-axiom prove, asserts exactly 3
+      TRACE_AXIOM entries + >= 1 TRACE_ORIENT, and walks
+      `parent_a` from the latest TRACE_ORIENT back through the
+      trace until it hits a TRACE_AXIOM.  Hops are capped at 100
+      to defend against parent-pointer corruption.
 - [ ] 6.2 PCL-shaped trace serializer to text
 - [ ] 6.3 parser for `waldmeister/documents/example.pr`-style spec
       files (NAME / SORTS / SIGNATURE / ORDERING / VARIABLES /

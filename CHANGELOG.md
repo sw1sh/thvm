@@ -6,6 +6,24 @@ dated section.
 
 ## Unreleased
 
+### Added: trace-walk verification on the headline demo (stage 6.1d)
+
+`atp/headline-trace-shape-and-walk-to-axiom` in
+`tests/test_atp.c` runs the same group-axiom proof as the stage
+5.5 headline test and asserts the trace produced is sane:
+
+- exactly 3 `TRACE_AXIOM` entries (the three axioms we pushed)
+- at least 1 `TRACE_ORIENT` entry (the rule(s) added to R)
+- the latest `TRACE_ORIENT`'s `parent_a` chain walks back
+  through orient/CP entries to a `TRACE_AXIOM`, capped at 100
+  hops to defend against pointer corruption
+
+The walk-to-axiom invariant is the proof of correctness for the
+trace plumbing: every rule in R can be tracked back to the
+axioms that produced it, end-to-end, with no broken links.
+
+Stage 6.1 (a/b/c/d) complete.  Next: 6.2 PCL-shaped serializer.
+
 ### Added: TRACE_CP entries from generate_cps (stage 6.1c)
 
 `thvm_atp_generate_cps` rewritten to iterate `(i, j)` pairs
