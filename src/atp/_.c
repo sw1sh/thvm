@@ -66,6 +66,57 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   return 1;
 }
 
+// Generate fresh CPs from the freshly-added rules `added` against
+// the current rule set R, push survivors onto the CP queue.
+// Drops overflow silently (queue cap or temp-buffer cap).  Returns
+// the number of CPs successfully pushed.
+//
+// To avoid recomputing CPs already in the queue, the enumeration
+// is restricted to (new x all_R) + (old x new), where the old x
+// old slice is exactly the work we already did before the add.
+//
+// Temp buffer sized for one batch; large rule sets may produce
+// more CPs than fit and silently drop them (matches Waldmeister's
+// drop-on-overflow policy in `KPVerwaltung.c` -- *Kritische-Paare-
+// Verwaltung*, "critical-pair management").
+
+#define ATP_CP_BATCH 1024
+
+fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
+  if (s == NULL || added.count == 0) return 0;
+
+  u32 first = added.first;
+  u32 last  = added.first + added.count;
+  u32 n     = s->n_rules;
+  if (last > n) last = n;
+  if (first > last) return 0;
+
+  CriticalPair buf[ATP_CP_BATCH];
+  u32 nbuf = 0;
+
+  // (new x all_R): new rule on the outside.
+  nbuf = thvm_critical_pairs_range(s->lhs, s->rhs, n,
+                                   first, last, 0, n,
+                                   buf, ATP_CP_BATCH);
+  // (old x new): old rule on the outside, new rule fed as inner.
+  // Skip (new x new) -- already covered above.
+  if (first > 0 && nbuf < ATP_CP_BATCH) {
+    nbuf += thvm_critical_pairs_range(s->lhs, s->rhs, n,
+                                      0, first, first, last,
+                                      buf + nbuf, ATP_CP_BATCH - nbuf);
+  }
+
+  u32 pushed = 0;
+  for (u32 i = 0; i < nbuf; i++) {
+    if (s->n_cps >= ATP_MAX_CPS) break;
+    s->cp_lhs[s->n_cps] = buf[i].lhs;
+    s->cp_rhs[s->n_cps] = buf[i].rhs;
+    s->n_cps++;
+    pushed++;
+  }
+  return pushed;
+}
+
 // Orient via KBO and push the rule(s).  See header comment for the
 // dispatch table.  Atomic: if the unfailing fallback can't fit both
 // orientations, neither is added.

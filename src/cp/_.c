@@ -111,18 +111,24 @@ static u32 cp_visit(const u32 *p, u32 p_len, void *raw) {
   return ctx->count;
 }
 
-// Enumerate all CPs across the (i, j) cross-product of the rule set,
-// renaming j's variables apart with CP_RENAME_OFFSET.  Writes up to
-// `cap` pairs into `out`; returns count.
-fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
-                           CriticalPair *out, u32 cap) {
+// Enumerate CPs over the (i, j) sub-rectangle  [start_i, end_i)
+// x [start_j, end_j)  of the rule set, with j's variables renamed
+// apart by CP_RENAME_OFFSET.  Saturation uses this to compute only
+// the freshly-required CPs after a rule add: (new x all_R) and
+// (old x new), avoiding the redundant (old x old) work.
+fn u32 thvm_critical_pairs_range(const Term *lhs, const Term *rhs, u32 n_rules,
+                                 u32 start_i, u32 end_i,
+                                 u32 start_j, u32 end_j,
+                                 CriticalPair *out, u32 cap) {
+  if (end_i > n_rules) end_i = n_rules;
+  if (end_j > n_rules) end_j = n_rules;
   CpCtx ctx;
   ctx.out   = out;
   ctx.cap   = cap;
   ctx.count = 0;
   u32 path[CP_MAX_DEPTH];
-  for (u32 i = 0; i < n_rules; i++) {
-    for (u32 j = 0; j < n_rules; j++) {
+  for (u32 i = start_i; i < end_i; i++) {
+    for (u32 j = start_j; j < end_j; j++) {
       ctx.li = lhs[i];
       ctx.ri = rhs[i];
       ctx.lj = thvm_rename_vars(lhs[j], CP_RENAME_OFFSET);
@@ -132,4 +138,13 @@ fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
     }
   }
   return ctx.count;
+}
+
+// Enumerate all CPs across the (i, j) cross-product of the rule set.
+// Thin wrapper around the range version with the full extents.
+fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
+                           CriticalPair *out, u32 cap) {
+  return thvm_critical_pairs_range(lhs, rhs, n_rules,
+                                   0, n_rules, 0, n_rules,
+                                   out, cap);
 }

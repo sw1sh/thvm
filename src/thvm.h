@@ -761,6 +761,15 @@ typedef struct {
 fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
                            CriticalPair *out, u32 cap);
 
+// Range-restricted CP enumeration.  Generates CPs only for the
+// sub-rectangle [start_i, end_i) x [start_j, end_j) of the rule
+// set.  Saturation uses this to compute (new x all) + (old x new)
+// after a rule add, skipping the redundant (old x old).
+fn u32 thvm_critical_pairs_range(const Term *lhs, const Term *rhs, u32 n_rules,
+                                 u32 start_i, u32 end_i,
+                                 u32 start_j, u32 end_j,
+                                 CriticalPair *out, u32 cap);
+
 // === atp/ ===
 // Saturation loop state (stage 5).  See
 // docs/plans/saturation_loop.md for the design.  AtpState is heap-
@@ -831,6 +840,11 @@ typedef struct {
 //   KBO_UN -> unfailing fallback: add both orientations (count = 2)
 // Returns count = 0 if R doesn't have room for the rule(s).
 fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs);
+
+// Generate fresh CPs after an orient_and_add: enumerate (new x all_R)
+// + (old x new), push survivors onto the CP queue.  Returns count
+// pushed.  Drops overflow silently.
+fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added);
 
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction

@@ -6,6 +6,27 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_atp_generate_cps + thvm_critical_pairs_range (stage 5.2d)
+
+`src/cp/_.c` gains `thvm_critical_pairs_range(lhs, rhs, n,
+start_i, end_i, start_j, end_j, out, cap)` -- generates CPs
+restricted to a sub-rectangle of the rule index space.  The
+existing `thvm_critical_pairs` becomes a thin wrapper passing the
+full extents.
+
+`src/atp/_.c` gains `thvm_atp_generate_cps(s, added)` which uses
+the range version twice -- (new x all_R) then (old x new) --
+to compute exactly the freshly-required CPs after a rule add,
+skipping the (old x old) work that's already in the queue.
+Temp buffer `ATP_CP_BATCH = 1024` CPs; survivors pushed onto the
+queue, overflow dropped silently (matches Waldmeister's
+*Kritische-Paare-Verwaltung* "critical-pair management" in
+`KPVerwaltung.c`).
+
+Tests cover empty-added no-op, single-rule self-overlap producing
+at least one CP, an old-times-new sweep over (assoc + left-id),
+and equivalence between the full and range versions.
+
 ### Added: thvm_atp_orient_and_add (stage 5.2b)
 
 KBO-orient an equation and push the resulting rule(s) onto `R`.

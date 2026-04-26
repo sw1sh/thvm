@@ -211,6 +211,74 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/generate-cps-empty-added-no-op");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    AtpAddedRange empty = {0, 0};
+    u32 pushed = thvm_atp_generate_cps(s, empty);
+    CHECK_EQ(pushed, 0u);
+    CHECK_EQ(s->n_cps, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/generate-cps-single-rule-self-overlap");
+  {
+    // Add one rule via orient_and_add, then generate_cps.  Since R
+    // contains only the new rule, the only enumeration is the
+    // 1x1 self-overlap (which thvm_critical_pairs always produces
+    // at the top position via the fresh rename of j).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    AtpAddedRange added = thvm_atp_orient_and_add(s, lhs, rhs);
+    CHECK_EQ(added.count, 1u);
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK(pushed >= 1u);                   // at least the trivial top-overlap
+    CHECK_EQ(s->n_cps, pushed);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/generate-cps-old-times-new-direction");
+  {
+    // Pre-populate R with the assoc rule (manually, no orient).
+    // Then add the left-id rule via orient_and_add and run
+    // generate_cps.  The (new x all) sweep covers
+    // left-id-overlapped-into-assoc; the (old x new) sweep
+    // covers assoc-overlapping-leftid.  We don't check the exact
+    // count (depends on how many CPs survive each unification);
+    // we just check that at least one was emitted.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+
+    // R[0] = assoc: f(f(x,y), z) -> f(x, f(y, z))
+    s->lhs[0] = mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u));
+    s->rhs[0] = mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u)));
+    s->n_rules = 1;
+
+    // Add left-id: f(e, x) -> x.  Right side is var, left side is
+    // a CTR, so KBO_GT under our config.
+    Term lhs = mk_f(mk_e(), mk_v(VAR_x));
+    Term rhs = mk_v(VAR_x);
+    AtpAddedRange added = thvm_atp_orient_and_add(s, lhs, rhs);
+    CHECK_EQ(added.count, 1u);
+    CHECK_EQ(added.first, 1u);
+
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK(pushed >= 1u);
+    CHECK_EQ(s->n_cps, pushed);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-range-equals-full-when-bounds-cover-all");
+  {
+    // thvm_critical_pairs == thvm_critical_pairs_range over [0, n) x [0, n).
+    Term lhs[1] = { mk_f(mk_v(VAR_x), mk_e()) };
+    Term rhs[1] = { mk_v(VAR_x) };
+    CriticalPair a[16] = {{0, 0}}, b[16] = {{0, 0}};
+    u32 na = thvm_critical_pairs(lhs, rhs, 1, a, 16);
+    u32 nb = thvm_critical_pairs_range(lhs, rhs, 1, 0, 1, 0, 1, b, 16);
+    CHECK_EQ(na, nb);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

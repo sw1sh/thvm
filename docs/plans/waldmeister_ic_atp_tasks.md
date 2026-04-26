@@ -58,9 +58,12 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       capacity); EQ or full -> count=0.  Tests in
       `tests/test_atp.c` cover all four branches with the standard
       group-axiom KBO config.
-- [ ] 5.2d `thvm_atp_generate_cps`: call `thvm_critical_pairs`
-      restricted to (new_rules x R) and push the survivors onto
-      the queue.  Drop overflow silently.
+- [x] 5.2d `thvm_atp_generate_cps`: enumerate (new x all_R) +
+      (old x new) via new `thvm_critical_pairs_range` (added to
+      `src/cp/_.c`); push survivors onto the CP queue.  Temp
+      buffer ATP_CP_BATCH (1024 CPs); drops overflow silently.
+      Tests cover empty-added no-op, single-rule self-overlap, and
+      old-times-new with assoc + left-id.
 - [ ] 5.2c `thvm_atp_interreduce`: walk R; for any older rule whose
       LHS reduces under the new rule (using
       `thvm_rewrite_normalize` over a singleton ruleset), drop it
