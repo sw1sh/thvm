@@ -6,6 +6,22 @@ dated section.
 
 ## Unreleased
 
+### Added: EQL-SUP commutation + DUP-NUM annihilation
+
+The `EQL` reducer now commutes through `SUP` on either port:
+
+  EQL(&L{a0,a1}, b)  ->  &L{EQL(a0, B0), EQL(a1, B1)}, !&L{B0,B1}=b
+  EQL(a, &L{b0,b1})  ->  &L{EQL(A0, b0), EQL(A1, b1)}, !&L{A0,A1}=a
+
+The DUPed b (resp. a) propagates correctly because `DUP-NUM`
+annihilates atomically, copying the Term value into both
+projections.  New file `src/interact/dup_num.c`.
+
+End-to-end: `EQL(&L{NUM(2), NUM(3)}, NUM(3))` now reduces to
+`&L{NUM(0), NUM(1)}`, and `thvm_collapse` enumerates `[NUM(0),
+NUM(1)]` -- the SupGen-style search-as-superposition pattern is
+working for the first time on thvm.
+
 ### Added: TAG_EQL (structural equality) -- minimal cut
 
 `TAG_EQL = 15` lands as a strict equality node with heap layout

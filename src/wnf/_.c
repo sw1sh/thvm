@@ -169,10 +169,17 @@ enter:
       goto apply;
     }
     case TAG_EQL: {
-      // Strict on a then b.  EQL-ERA-{L,R}: ERA on either side wraps
-      // up as ERA (failed branches collapse out).  EQL-NUM-NUM: compare
-      // values, return NUM(1) for equal else NUM(0).  Otherwise stuck
-      // (the SUP-commutation rules land in stage 1.3b).
+      // Strict on a then b.  Rules:
+      //   EQL-ERA-{L,R}: ERA on either side -> ERA  (failed branches
+      //                  collapse out)
+      //   EQL-SUP-L:     EQL(&L{a0,a1}, b) -> &L{EQL(a0,B0), EQL(a1,B1)}
+      //                  with !&L{B0,B1}=b  (DUP duplicates b across
+      //                  the two new EQLs)
+      //   EQL-SUP-R:     EQL(a, &L{b0,b1}) -> &L{EQL(A0,b0), EQL(A1,b1)}
+      //                  with !&L{A0,A1}=a  (DUP duplicates a;
+      //                  DUP-NUM annihilates cleanly when a is atomic)
+      //   EQL-NUM-NUM:   compare values, NUM(1) if equal else NUM(0)
+      //   otherwise:     stuck
       u64  loc = term_val(next);
       Term a   = wnf(heap_read(loc + 0));
       if (term_tag(a) == TAG_ERA) {
@@ -181,12 +188,51 @@ enter:
         whnf = a;
         goto apply;
       }
+      if (term_tag(a) == TAG_SUP) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        u32  lab  = term_ext(a);
+        u64  sloc = term_val(a);
+        Term a0   = heap_read(sloc + 0);
+        Term a1   = heap_read(sloc + 1);
+        Term b    = heap_read(loc + 1);
+        u64  dup  = heap_alloc(1);
+        heap_set(dup, b);
+        Term b0   = term_new(0, TAG_DP0, lab, dup);
+        Term b1   = term_new(0, TAG_DP1, lab, dup);
+        Term e0   = term_new_eql(a0, b0);
+        Term e1   = term_new_eql(a1, b1);
+        u64  ns   = heap_alloc(2);
+        heap_set(ns + 0, e0);
+        heap_set(ns + 1, e1);
+        ITRS++;
+        next = term_new(0, TAG_SUP, lab, ns);
+        goto enter;
+      }
       Term b = wnf(heap_read(loc + 1));
       if (term_tag(b) == TAG_ERA) {
         if (BUDGET_HIT) BAIL_AT(next);
         ITRS++;
         whnf = b;
         goto apply;
+      }
+      if (term_tag(b) == TAG_SUP) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        u32  lab  = term_ext(b);
+        u64  sloc = term_val(b);
+        Term b0   = heap_read(sloc + 0);
+        Term b1   = heap_read(sloc + 1);
+        u64  dup  = heap_alloc(1);
+        heap_set(dup, a);
+        Term a0   = term_new(0, TAG_DP0, lab, dup);
+        Term a1   = term_new(0, TAG_DP1, lab, dup);
+        Term e0   = term_new_eql(a0, b0);
+        Term e1   = term_new_eql(a1, b1);
+        u64  ns   = heap_alloc(2);
+        heap_set(ns + 0, e0);
+        heap_set(ns + 1, e1);
+        ITRS++;
+        next = term_new(0, TAG_SUP, lab, ns);
+        goto enter;
       }
       if (term_tag(a) == TAG_NUM && term_tag(b) == TAG_NUM) {
         if (BUDGET_HIT) BAIL_AT(next);
@@ -277,6 +323,12 @@ apply:
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             next = interact_dup_lam(lab, loc, side, whnf);
             goto enter;
+          }
+          case TAG_NUM: {
+            // NUM is atomic: copy the Term value into both projections.
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            whnf = interact_dup_num(side, loc, whnf);
+            continue;
           }
           default: {
             heap_set(loc, whnf);

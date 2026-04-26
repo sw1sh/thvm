@@ -175,6 +175,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/dup_sup.c"
 #include "interact/dup_era.c"
 #include "interact/dup_lam.c"
+#include "interact/dup_num.c"
 #include "interact/uop_grad.c"
 #include "interact/uop_kernel.c"
 
