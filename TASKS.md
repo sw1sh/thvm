@@ -4935,18 +4935,46 @@ implemented + tested (f1a) but never invoked by the pipeline.
         166 C + 292 WL green with default OFF.  ~25 LOC
         in materialize_inlined.c.
 
-  - [ ] **f1d-d4b2b3: rerun the d4a fusion probe + verify
-        acceptance**.  After d4b2b1 + d4b2b2 land, run
-        wl/Examples/linear-train/memory-probe.wls and the
-        poly-regression scenario from use_realize.wlt.
-        Goal numbers: linear-train toggle ON kernel count
-        meets-or-beats toggle OFF (currently 168 vs 93);
-        poly-regression toggle ON <= 50 total (currently
-        105 vs OFF=91).  If targets met, mark f1d-d4b2
-        complete.  ~5 LOC + measurement.
+  - [x] **f1d-d4b2b3: rerun the d4a fusion probe + verify
+        acceptance**.  Verified after d4b2b1 + d4b2b2:
+            poly toggle OFF: 91 kernels
+            poly toggle ON : 105 kernels   (target <= 50: MISS)
+            lin  toggle OFF: 93 kernels
+            lin  toggle ON : 157 kernels   (target <= 93: MISS)
+        Acceptance NOT met.  Bail-cascade fixes alone don't
+        deliver fusion -- the toggle-ON path still allocates
+        a kernel per realized UOp (which ~= per UOp in these
+        small graphs), and now also pulls realized upstream
+        in as their own kernels via d4b2b1.  Net effect:
+        more kernels than legacy, not fewer.  Routing the
+        actual fusion gain needs a different mechanism --
+        see f1d-d4b2d below.
 
-<!-- f1d-d4b2c was rolled into f1d-d4b2b3 above as the
-     verification step of d4b2b. -->
+  - [ ] **f1d-d4b2d: investigate why toggle-ON allocates
+        more kernels than legacy**.  After d4b2b{1,2,3}, the
+        regression remains: lin ON=157 vs OFF=93, poly
+        ON=105 vs OFF=91.  Hypothesis: the legacy path emits
+        ONE kernel per unique UOp (deduped via the d4b2a
+        memo); the toggle-ON path emits one per REALIZED UOp
+        PLUS one per movement/REDUCE upstream that
+        materialize_expr's child loop force-materializes.
+        The "fusion gain" only materializes when there are
+        long elementwise chains feeding a single realized
+        op -- which doesn't occur in these graphs (most
+        chains have movement / REDUCE in the middle that
+        promote intermediate UOps to realized).
+        Action: instrument both paths, dump per-realize
+        counts of (n_unique_uops, n_realized, n_helper_ok,
+        n_helper_bail, n_legacy_emit) for poly + lin under
+        both toggles, and from those numbers decide whether
+        the right next move is (a) tighten realize_classify
+        rules so fewer UOps get marked realized, (b) make
+        the helper absorb realized children (not just
+        un-realized) so the realized-but-absorbable cohort
+        doesn't get its own kernel, or (c) abandon the
+        f1d toggle approach and instead implement a
+        post-walk fusion pass that merges adjacent same-
+        size kernels.  ~30-50 LOC of probe + decision.
 
 
   - [ ] **f1d-d4c: actually flip default + verify**.  After
