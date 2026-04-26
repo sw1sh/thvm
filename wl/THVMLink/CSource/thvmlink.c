@@ -1461,3 +1461,103 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_all_witnesses(
   MArgument_setMNumericArray(res, out);
   return LIBRARY_NO_ERROR;
 }
+
+// === 9.2: file-driven ATP runner ===================================
+//
+// Parses a Waldmeister .pr spec via wald_parse_file, builds the
+// KBO/LPO config from the parsed precedences, runs the saturator,
+// and returns [status, n_rules, n_trace, n_cps].
+//
+// EXISTS sections are honoured: the run uses set_goal_existential
+// so the narrow path engages.  v0 does not surface witness bindings
+// (witness names live in the spec's variable table; mapping back to
+// WL symbols would duplicate WL-side encoder state).  Callers that
+// need witnesses keep using the expression form of TATP[].
+//
+// Inputs:
+//   args[0] = path      (UTF8String).
+//   args[1] = max_steps (Integer).
+// Output: Int64 NumericArray of length 4 -- [status, n_rules,
+// n_trace, n_cps].  status == ATP_RUNNING (0) signals a parse
+// failure.
+EXTERN_C DLLEXPORT int thvm_wl_atp_run_file(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)argc;
+  char *path     = MArgument_getUTF8String(args[0]);
+  mint  max_step = MArgument_getInteger(args[1]);
+
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+
+  AtpStatus st_out  = ATP_RUNNING;
+  u32       n_rules = 0, n_trace = 0, n_cps = 0;
+
+  WaldSpec *spec = wald_init();
+  if (spec != NULL && path != NULL) {
+    WaldErr e = wald_parse_file(path, spec);
+    if (e == WALD_OK) {
+      static u32 weights_f[ATP_WL_CFG_MAX_LABELS];
+      static u32 prec_f[ATP_WL_CFG_MAX_LABELS];
+      for (u32 i = 0; i < ATP_WL_CFG_MAX_LABELS; i++) {
+        weights_f[i] = 0; prec_f[i] = 0;
+      }
+      u32 max_label = 0;
+      for (u32 i = 0; i < spec->n_symbols; i++) {
+        if (spec->symbols[i].label > max_label) {
+          max_label = spec->symbols[i].label;
+        }
+      }
+      if (max_label < ATP_WL_CFG_MAX_LABELS) {
+        for (u32 i = 0; i < spec->n_symbols; i++) {
+          weights_f[spec->symbols[i].label] = 1;
+          prec_f[spec->symbols[i].label]    =
+            spec->symbols[i].prec_rank + 1;
+        }
+        static KboConfig cfg_f;
+        cfg_f.weights    = weights_f;
+        cfg_f.precedence = prec_f;
+        cfg_f.n_labels   = max_label + 1;
+        cfg_f.var_weight = 1;
+
+        static LpoConfig lpo_cfg_f;
+        lpo_cfg_f.precedence = prec_f;
+        lpo_cfg_f.n_labels   = max_label + 1;
+
+        AtpState *atp = thvm_atp_init(&cfg_f, (u32)max_step);
+        if (atp != NULL) {
+          if (spec->ordering_kind == WALD_ORDER_LPO) {
+            thvm_atp_set_lpo(atp, &lpo_cfg_f);
+          }
+          for (u32 i = 0; i < spec->n_eqns; i++) {
+            thvm_atp_add_equation(atp, spec->eqn_lhs[i], spec->eqn_rhs[i]);
+          }
+          if (spec->n_existential > 0) {
+            thvm_atp_set_goal_existential(atp, spec->goal_lhs,
+                                               spec->goal_rhs);
+          } else {
+            thvm_atp_set_goal(atp, spec->goal_lhs, spec->goal_rhs);
+          }
+          st_out  = thvm_atp_run(atp);
+          n_rules = atp->n_rules;
+          n_trace = atp->n_trace;
+          n_cps   = atp->n_cps;
+          thvm_atp_free(atp);
+        }
+      }
+    }
+  }
+  if (spec != NULL) wald_free(spec);
+  if (path != NULL) libData->UTF8String_disown(path);
+
+  mint dims[1] = {4};
+  MNumericArray out;
+  naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out);
+  int64_t *odata = (int64_t *)naf->MNumericArray_getData(out);
+  odata[0] = (int64_t)st_out;
+  odata[1] = (int64_t)n_rules;
+  odata[2] = (int64_t)n_trace;
+  odata[3] = (int64_t)n_cps;
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}

@@ -6,6 +6,33 @@ dated section.
 
 ## Unreleased
 
+### Added: file-driven TATP runner (stage 9.2)
+
+`TATP[File["path.pr"]]` parses a Waldmeister .pr spec via
+`wald_parse_file` and runs the saturator directly, returning
+the same `<|"Status", "Steps", "Rules", "QueueSize"|>`
+Association as the expression form.
+
+- New LibraryLink entry `thvm_wl_atp_run_file` (UTF8String,
+  Integer) -> NumericArray[4]: parses, builds KBO/LPO config
+  from `spec->symbols[i].prec_rank`, honours EXISTS sections
+  (switches to `set_goal_existential`), runs `thvm_atp_run`,
+  packs `[status, n_rules, n_trace, n_cps]`. Parse failures
+  return ATP_RUNNING (0) as a sentinel.
+- New TATP downvalue `TATP[File[path_String], OptionsPattern[
+  {MaxSteps -> 64}]]` dispatched ahead of the expression form.
+  Witness bindings are not surfaced in v0 (witness-name to
+  WL-symbol mapping would duplicate the encoder state); callers
+  that need them keep using the expression form.
+
+Tests (4 new VerificationTests in `wl/THVMLink/Tests/atp.wlt`):
+- `monoid-right-id-proves` (universal-goal fixture)
+- `exists-inverse-proves` (EXISTS-section fixture)
+- `keys-shape-matches-expression-form`
+- `missing-path-yields-running-sentinel`
+
+166/166 C, 323 WL.
+
 ### Added: multi-witness `.pr` fixture (stage 9.1d)
 
 `tests/data/atp/exists_multi.pr` (+ `.expect`): existential

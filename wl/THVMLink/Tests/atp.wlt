@@ -299,3 +299,41 @@ VerificationTest[
     True,
     TestID -> "ATP/TATP/all-witnesses/default-stays-singular"
 ]
+
+(* === 9.2: TATP[File[path]] file-driven runner === *)
+
+VerificationTest[
+    (* File-form runs wald_parse_file + saturation directly.
+       monoid_right_id.pr is a basic universal-goal fixture
+       (status=PROVED per its .expect file). *)
+    TATP[File["tests/data/atp/monoid_right_id.pr"]]["Status"],
+    "PROVED",
+    TestID -> "ATP/TATP/file/monoid-right-id-proves"
+]
+
+VerificationTest[
+    (* exists_inverse.pr declares an EXISTS section; the C-side
+       runner picks that up via spec->n_existential and switches
+       to set_goal_existential.  Witness bindings are not surfaced
+       in v0; the file form returns just stats. *)
+    TATP[File["tests/data/atp/exists_inverse.pr"]]["Status"],
+    "PROVED",
+    TestID -> "ATP/TATP/file/exists-inverse-proves"
+]
+
+VerificationTest[
+    (* The result Association has the same shape as the expression
+       form (Status/Rules/Steps/QueueSize) but no Witness key. *)
+    Sort @ Keys @ TATP[File["tests/data/atp/monoid_right_id.pr"]],
+    Sort[{"Status", "Rules", "Steps", "QueueSize"}],
+    TestID -> "ATP/TATP/file/keys-shape-matches-expression-form"
+]
+
+VerificationTest[
+    (* A non-existent file path causes wald_parse_file to fail;
+       the C-side runner returns ATP_RUNNING (=0) as a parse-fail
+       sentinel, which decodes to "RUNNING". *)
+    TATP[File["tests/data/atp/_does_not_exist_.pr"]]["Status"],
+    "RUNNING",
+    TestID -> "ATP/TATP/file/missing-path-yields-running-sentinel"
+]

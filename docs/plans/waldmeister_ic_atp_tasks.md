@@ -728,7 +728,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 > per the closing memo's pattern of "discrete follow-on stages
 > with their own design memos."
 
-- [ ] 9.1 multi-witness narrowing enumeration: stage 8.9's
+- [x] 9.1 multi-witness narrowing enumeration: stage 8.9's
       narrowing returns the FIRST witness found.  9.1 extends
       `thvm_atp_narrow_step` (or adds a sibling) that
       enumerates ALL witnesses up to a bound.  WL surface:
@@ -756,7 +756,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         witnesses (e.g. `f(x, x) = a` with rules
         `f(b, b) = a` and `f(c, c) = a` -- two witnesses
         x=b and x=c).  Wire into bench harness.
-- [ ] 9.2 TPTP file parsing from WL: `TATP[File["foo.p"]]` --
+- [x] 9.2 TPTP file parsing from WL: `TATP[File["foo.p"]]` --
       thin wrapper around the existing `wald_parse_file`.
       Detects file path argument, reads via the C-side
       parser, runs the saturator, decodes the result.  Most of

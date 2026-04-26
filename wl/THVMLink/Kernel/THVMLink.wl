@@ -260,6 +260,11 @@ $atpRunExistFn   := $atpRunExistFn   = load["thvm_wl_atp_run_existential", {{"Nu
    Length = 5 + max_witnesses * n_witness. *)
 $atpRunAllFn     := $atpRunAllFn     = load["thvm_wl_atp_run_all_witnesses", {{"NumericArray", "Shared"}, Integer, Integer, {Integer, 1}, Integer, Integer}, "NumericArray"];
 
+(* 9.2: file-driven ATP runner.  Takes a Waldmeister .pr path,
+   parses it via wald_parse_file, runs the saturator, and returns
+   a 4-element [status, n_rules, n_trace, n_cps] NumericArray. *)
+$atpRunFileFn    := $atpRunFileFn    = load["thvm_wl_atp_run_file", {"UTF8String", Integer}, "NumericArray"];
+
 (* 8.7c: CTR-builder for the ATP expression encoder.  Takes a
    label and a NumericArray of child Term values; returns the
    packed Term value of the new TAG_CTR. *)
@@ -355,6 +360,32 @@ $atpStatusName = <|
    without forcing evaluation.  Internal helper TATPCore takes
    the held-list-of-equations and the held-conjecture. *)
 SetAttributes[TATP, HoldAll];
+
+(* 9.2: file-form dispatch.  When the first argument is a literal
+   File[path_String], parse the .pr file via wald_parse_file on the
+   C side and run the saturator.  The .pr file already contains
+   the axioms, EXISTS section, and conjecture, so no second
+   argument is needed.  Returns the same Status/Steps/Rules/
+   QueueSize Association as the expression form (witness bindings
+   are not surfaced in v0 -- callers that need them keep using the
+   expression form). *)
+TATP[File[path_String],
+     OptionsPattern[{MaxSteps -> 64}]] :=
+  Catch[
+    Module[{stats, statusCode},
+      ensureInit[];
+      stats = Normal @ $atpRunFileFn[path, OptionValue[MaxSteps]];
+      statusCode = stats[[1]];
+      <|
+        "Status"    -> Lookup[$atpStatusName, statusCode,
+                              "UNKNOWN(" <> ToString[statusCode] <> ")"],
+        "Steps"     -> stats[[3]],
+        "Rules"     -> stats[[2]],
+        "QueueSize" -> stats[[4]]
+      |>
+    ],
+    "TATPError"
+  ]
 
 TATP[axioms_, conjecture_,
      OptionsPattern[{MaxSteps -> 64, Witness -> {},
