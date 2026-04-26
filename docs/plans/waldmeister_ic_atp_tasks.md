@@ -634,7 +634,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         equation pair).  Document how to handle WL pattern
         constructs (`x_`, `Blank[]`, etc.) that don't have
         clean Term equivalents.  Scope: ~200-line memo.
-  - [ ] 8.7b LibraryLink helper that runs the ATP on
+  - [x] 8.7b LibraryLink helper that runs the ATP on
         pre-encoded Term inputs (skipping the WL encoder).
         New entry point `thvmlink_atp_run` in
         `wl/THVMLink/CSource/thvmlink.c`; takes axiom lhs/rhs

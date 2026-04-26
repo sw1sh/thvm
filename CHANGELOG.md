@@ -6,6 +6,43 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_wl_atp_run LibraryLink helper (stage 8.7b)
+
+New entry point in `wl/THVMLink/CSource/thvmlink.c`:
+
+```c
+EXTERN_C DLLEXPORT int thvm_wl_atp_run(...)
+```
+
+Inputs:
+- `args[0]`: shared `Int64` `MNumericArray` of packed Term values
+  `[n_axioms, lhs_0, rhs_0, ..., goal_lhs, goal_rhs]`.
+- `args[1]`: max_steps (mint).
+- `args[2]`: max_label (mint; sizes a v0 trivial precedence /
+  weights table).
+
+Output: `Int64` `MNumericArray` of `[status, n_rules, n_trace,
+n_cps]`.
+
+The trivial KboConfig (uniform weights = 1, precedence = label
++ 1) gives KBO_UN for most comparisons -- saturation falls into
+unfailing fallback.  Future stages can pass a real precedence
++ weights array.  Trace serialization deferred to 8.7d.
+
+WL-side loader added to `wl/THVMLink/Kernel/THVMLink.wl` as
+`$atpRunFn`.
+
+`wl/THVMLink/Tests/atp.wlt` (4 cases, 299 WL tests total -- was
+295):
+- `ATP/init`
+- `ATP/runner/trivial-self-equation-proves`: x = x with goal
+  x = x -> PROVED with n_trace=1 (axiom only)
+- `ATP/runner/no-axioms-distinct-goals-empties-queue`: x vs y
+  goal -> QUEUE_EMPTY
+- `ATP/runner/return-shape`: stats array has shape [4]
+
+8.7c-d add the WL-side encoder + `TATP[]` surface.
+
 ### Added: WL ATP bridge design memo (stage 8.7a)
 
 `docs/plans/wl_atp_bridge.md` (~190 lines) lays out the design

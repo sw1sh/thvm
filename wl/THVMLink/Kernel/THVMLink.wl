@@ -241,6 +241,12 @@ $tensorRcFn      := $tensorRcFn      = load["thvm_wl_tensor_refcount",{Integer},
    the handle and disowns on release.  *)
 $tensorFromNAFn  := $tensorFromNAFn  = load["thvm_wl_tensor_from_na", {{"NumericArray", "Shared"}}, Integer];
 
+(* 8.7b: ATP runner.  Takes a packed Int64 NumericArray of Term
+   values (`[n_axioms, lhs_0, rhs_0, ..., goal_lhs, goal_rhs]`),
+   max_steps, and max_label.  Returns a 4-element Int64
+   NumericArray `[status, n_rules, n_trace, n_cps]`. *)
+$atpRunFn        := $atpRunFn        = load["thvm_wl_atp_run", {{"NumericArray", "Shared"}, Integer, Integer}, "NumericArray"];
+
 (* uop graph *)
 $uopConstFn    := $uopConstFn    = load["thvm_wl_uop_const",    {Integer, Real},                     Integer];
 $uopUnaryFn    := $uopUnaryFn    = load["thvm_wl_uop_unary",    {Integer, Integer},                  Integer];
