@@ -6,6 +6,52 @@ dated section.
 
 ## Unreleased
 
+### Added: IC-native ATP arc closing memo (stage 8.10c)
+
+`docs/plans/atp_arc_summary.md` (~250 lines) closes the arc.
+Recaps stages 1-8.10 (79 `feat:` commits + a dozen `task:`
+commits across the arc), tracks deferred items with their
+preconditions, and frames the natural follow-on stages.
+
+**What shipped**:
+- Stages 1-4: foundations (KBO, rewrite, CP, unify)
+- Stage 5: saturation loop with priority-aware INC selection
+- Stage 6: `.pr` parser + PCL trace serializer
+- Stage 7: 5 redundancy criteria + Twee comparison harness
+- Stage 8: 10 sub-stages of full-fledged ATP iteration --
+  IC-routed paths via `TAG_PRI`, multi-sort sigs, LPO ordering,
+  WL bridge (`TATP[]`), `--mix` heuristic, narrowing for
+  existential goals, top-K CP peek
+
+**What's deferred** (forward-looking blocks, not failures):
+- 8.2d full pure-IC `thvm_kbo` -- awaiting SupGen use case
+- 8.6 unordered SUP/DUP -- awaiting HVM4 upstream
+
+**Empirical findings worth preserving**:
+- BDP connectedness is dominated by 7.1's trivial-joinability
+- Rule-subsumption similarly dominated
+- KBO and LPO orient identically on canonical group/monoid
+  axioms (consistent with classical KB literature)
+- IC-routed paths produce byte-identical counters to C paths
+- Twee proves cases we time out on (heuristic gap, not
+  unification gap)
+
+**Natural follow-on stages**: TPTP corpus expansion, AC
+matching, full pure-IC KBO, sort-aware KBO, AVATAR-style
+clause splitting, TPTP file parsing in WL, multi-witness
+narrowing, heap-resetting mechanism, trace-level SupGen.
+
+**Verification snapshot at arc close**: 58 C test files (~14k
+sub-checks), 314 WL verification tests, both suites green at
+every commit.
+
+The arc accomplished its primary goal: a working IC-native
+equational theorem prover reachable from Wolfram notebooks via
+`TATP[...]`.  Further development happens via discrete
+follow-on stages with their own design memos.
+
+Stage 8.10 closes; the IC-native ATP arc is complete.
+
 ### Added: thvm_atp_peek_top_k CP lookahead (stage 8.10b)
 
 New API in `src/atp/_.c`:

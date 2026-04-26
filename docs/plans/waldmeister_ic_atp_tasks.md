@@ -688,7 +688,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
   - [x] 8.9e WL bridge integration: `TATP[axioms, conjecture,
         Witness -> {x_, y_}]` returns `<|"Status" -> "PROVED",
         "Witness" -> <|x -> term, y -> term|>|>`.
-- [ ] 8.10 SupGen-style search inside saturation: superpose the
+- [x] 8.10 SupGen-style search inside saturation: superpose the
       "which CP to pick next" choice, collapse with priority,
       compare against the explicit-queue baseline
   - [x] 8.10a design memo `docs/plans/supgen_search_design.md`:
@@ -710,7 +710,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         evaluation, (b) explores a search space that the
         explicit version can't, or (c) reveals an architectural
         cleanup opportunity.
-  - [ ] 8.10c IC-native ATP arc closing memo
+  - [x] 8.10c IC-native ATP arc closing memo
         `docs/plans/atp_arc_summary.md`: recap what stages
         1-8.10 delivered, what remains research-grade and
         deferred (8.6 unordered SUP/DUP awaiting HVM4
