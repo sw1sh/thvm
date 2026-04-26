@@ -440,3 +440,217 @@ next step. Verification of *understanding* is:
 If we do execute sec.5, per-stage verification is the demo described
 in that stage; aggregate verification is "prove a small group axiom
 example end-to-end and compare wall-clock vs. Twee."
+
+---
+
+# 7. Stage log (consolidated per-stage notes)
+
+The stage queue lives in `waldmeister_ic_atp_tasks.md`; per-firing
+commit messages and `CHANGELOG.md` carry the full diff context.
+This section preserves the load-bearing per-stage decisions that
+were originally written as standalone memos but are now folded in.
+
+## 7.1 Stage 8.7a -- WL bridge (`TATP[]`)
+
+**Surface:** `TATP[axioms_List, conjecture_, opts___]` returns an
+`Association[Status, Steps, Rules, QueueSize, Trace]`.  Variables
+are `Pattern[name, Blank[]]` (the `x_` syntax).  Two layers:
+
+- **Layer 1** (`thvm_wl_atp_run`): pre-encoded Term entry point.
+  Takes NumericArrays of packed Term values.  Test-friendly.
+- **Layer 2** (`encodeAtpTerm` + `TATP[]`): WL-side encoder.
+  Symbol-table lifetime is per-call.
+
+**Encoding table** (kept as the load-bearing artefact):
+
+| WL form | Term |
+|---|---|
+| `Symbol[s]` (e.g. `e`, `nil`) | `term_new_ctr(label, NULL, 0)` |
+| `head[args...]` | `term_new_ctr(label, encoded_args, n)` |
+| `Pattern[var, Blank[]]` | `term_new_fvr(var_id)` |
+| `lhs == rhs` | `(encoded_lhs, encoded_rhs)` pair |
+
+Out of scope for v0: typed patterns (`_h`), sequence blanks, TPTP
+parsing.  TPTP file parsing landed in 9.2 as `TATP[File["..."]]`.
+
+## 7.2 Stage 8.9a -- Narrowing for existential goals
+
+**Distinction:** rewriting treats goal FVRs as opaque atoms;
+narrowing treats them as existentially quantified and binds via
+unification.  Termination is bounded by `step_cap` outside +
+`ATP_NARROW_BUDGET=8` per `goal_check`.
+
+**Saturation loop divergence:** narrowing changes only step 7
+(`goal_check`) when `s->goal_existential == 1`:
+
+- Walk every non-variable position of `goal_lhs` (then `goal_rhs`).
+- Try unifying that subterm with each rule's renamed LHS.
+- On first success: apply sigma to both sides, replace at the
+  position with the rule RHS, continue narrowing on the new pair;
+  return PROVED when both sides become `kbo_eq`.
+- On no-success across all (position, rule, side) triples: return
+  RUNNING and let the outer loop add more rules.
+
+**API surface (8.9b/c/e):**
+
+```c
+fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs);
+fn u8 thvm_atp_narrow_step(AtpState *s, Term lhs, Term rhs,
+                           Term *out_lhs, Term *out_rhs,
+                           RewriteSubst *witness);
+fn Term thvm_atp_get_witness(const AtpState *s, u32 var_id);
+```
+
+WL: `TATP[..., Witness -> {x_}]` returns
+`<|"Witness" -> <|x -> term|>|>`.
+
+## 7.3 Stage 8.10c -- IC-native ATP arc closing summary
+
+**What shipped (stages 1-8.10):** core saturation engine in C
+following Waldmeister's `Hauptkomponenten` ("main components")
+loop.
+
+- 1-4: tag inventory, KBO comparator, rewrite engine, CP generator.
+- 5: saturation loop with priority-aware INC selection.
+- 6: `.pr` parser + PCL trace serializer.
+- 7: 5 redundancy criteria + Twee comparison harness.
+- 8: 10 sub-stages of full-fledged iteration -- IC-routed paths
+  via `TAG_PRI`, multi-sort signatures, LPO ordering, WL bridge,
+  `--mix` heuristic, narrowing for existential goals, top-K CP peek.
+
+**Empirical findings worth preserving:**
+
+1. **BDP connectedness is dominated by 7.1.**  Any rule subset
+   `R' subset R` cannot find joins R can't, so all three
+   connectedness variants (subsumption, source-rule-disjoint,
+   BDP-below-c) are strictly weaker pruning than full-R
+   joinability.
+2. **Rule-subsumption is similarly dominated.**  Same argument;
+   rule subsumption fires only when an existing rule rewrites
+   lhs to rhs, which 7.1 also catches.
+3. **KBO and LPO agree on canonical group/monoid axioms** (8.5d).
+4. **IC-routed paths produce byte-identical counters to C paths**
+   across cp-gen (8.1e-iii), rewrite (8.3e-iii), KBO vs LPO
+   (8.5d), and peek-vs-pop (8.10b).
+5. **Twee proves cases we time out on** (7.4d): bottleneck is
+   our limited heuristic sophistication and lack of AC matching,
+   not unification or CP gen.
+
+## 7.4 Stage 9.1a -- Multi-witness narrowing enumeration
+
+**Algorithm:** bounded DFS over the choice tree where each node is
+`(lhs, rhs, accumulated_sigma, depth)`.  Children come from every
+`(position, rule)` pair on lhs then rhs; each successful unify
+recurses with the sigma-applied terms.  Leaf on `kbo_eq` ->
+emit witness; on no-applies -> reject; on `depth >= max_depth` ->
+truncate; on `len(witnesses) >= max_witnesses` -> stop.
+
+**Bounds:**
+
+| Bound | Default | Why |
+|---|---|---|
+| `max_depth`     | 8  | mirrors `ATP_NARROW_BUDGET` from 8.9c |
+| `max_witnesses` | 16 | conservative; users with more wanted bump |
+| `step_cap` (saturation under each branch) | 0 | v0: pure narrowing on existing R |
+
+**API (9.1b):**
+
+```c
+fn u32 thvm_atp_narrow_all(AtpState *s, Term lhs, Term rhs,
+                           u32 max_depth, u32 max_witnesses,
+                           RewriteSubst *witnesses);
+```
+
+Stateless w.r.t. `s->witness_subst` -- writes only the caller's
+array.  v0 returns DFS-order raw witnesses without alpha-eq dedup.
+
+**WL (9.1c):** `TATP[..., AllWitnesses -> True]` returns
+`<|"Witnesses" -> {<|x -> t1|>, <|x -> t2|>, ...}|>`.  Default
+`AllWitnesses -> False` keeps the singular `Witness` key for
+backwards compatibility.
+
+## 7.5 Stage 9.4a/b/c -- Corpus expansion (GRP/RNG/LCL/LAT)
+
+**Picks** (hand-encoded since cron firings have no network):
+
+| Fixture | Division | Predicted | Step bound | Observed (9.4b) |
+|---|---|---|---|---|
+| `comm_monoid_swap`         | GRP | PROVED  | 0-1    | QUEUE_EMPTY @ 2 |
+| `lattice_absorb_simple`    | LAT | PROVED  | 0      | PROVED @ 0      |
+| `ring_distrib_zero`        | RNG | PROVED  | 1-2    | PROVED @ 0      |
+| `comb_K`                   | LCL | PROVED  | 1      | PROVED @ 0      |
+| `group_left_id_from_assoc` | GRP | TIMEOUT | 32 cap | TIMEOUT @ 32    |
+
+**Surprise (9.4b):** `comm_monoid_swap` returned QUEUE_EMPTY, not
+PROVED.  Commutativity is unorientable; the unfailing 2-way
+fallback installs both `f(x, y) -> f(y, x)` and the reverse, and
+the goal-rewrite cycles between `f(a, b)` and `f(b, a)` without
+canonicalising.  Textbook AC-redundancy gap; clean motivation for
+future AC-aware joinability work.
+
+**IC-vs-Twee bench (9.4c, after 9.4 + 10):**
+
+| Fixture | thvm | Twee | Gap |
+|---|---|---|---|
+| `comb_K`                     | PROVED 0.001 ms | PROVED 58 ms  | thvm wins |
+| `comm_monoid_swap`           | **QUEUE_EMPTY** | PROVED 27 ms  | **thvm fails** |
+| `exists_inverse`             | PROVED <0.001ms | PROVED 23 ms  | thvm wins |
+| `exists_multi`               | PROVED <0.001ms | PROVED 28 ms  | thvm wins |
+| `group_commutative_inverse`  | **TIMEOUT @ 32**| PROVED 21 ms  | **thvm fails** |
+| `group_left_id_from_assoc`   | **TIMEOUT @ 32**| PROVED 21 ms  | **thvm fails** |
+| `group_right_inverse_to_e`   | PROVED 0.001 ms | PROVED 19 ms  | thvm wins |
+| `idempotent_nested`          | PROVED <0.001ms | PROVED 21 ms  | thvm wins |
+| `lattice_absorb_simple`      | PROVED 0.001 ms | PROVED 21 ms  | thvm wins |
+| `list_length`                | PROVED 0.002 ms | PROVED 20 ms  | thvm wins |
+| `monoid_right_id`            | PROVED 0.001 ms | PROVED 23 ms  | thvm wins |
+| `ring_distrib_zero`          | PROVED 0.001 ms | PROVED 20 ms  | thvm wins |
+| `wolfram_axiom_literal`      | PROVED 0.012 ms | PROVED 19.7 ms| thvm wins |
+
+Score after 10c: **10/13 thvm-wins, 3/13 thvm-fails.**
+
+The 9 wins are dominated by goal-rewrite shortcutting at step 0
+-- thvm's wall-clock advantage is real but biased toward
+"the answer is one rewrite away".  Twee always pays its ~20 ms
+saturation startup.  The 3 fails cluster on AC-aware joinability
+(`comm_monoid_swap`) and lemma discovery beyond the 32-step
+budget (the two group fixtures).  All 4 (cp-gen x rewrite) modes
+report byte-identical counters per fixture; the 8.5d "KBO and
+LPO agree" claim survives the expansion.
+
+## 7.6 Stage 10a -- Wolfram-axiom Boolean corpus
+
+**Source:** Stephen Wolfram's 2000 single-equation axiomatisation
+of Boolean algebra in NAND form, proven equivalent to standard
+Boolean algebra by McCune et al. (JAR 2002):
+
+    ((x NAND y) NAND z) NAND (x NAND ((x NAND z) NAND x)) = z
+
+**Picks:**
+
+- `wolfram_axiom_literal.pr` (CONSERVATIVE, predicted PROVED @ 0):
+  conjecture is the axiom with concrete `p, q, r`; goal-rewrite
+  applies the rule directly.  Sanity check on the depth-4 NAND
+  nesting through the parser + KBO/LPO config.  **Observed:**
+  PROVED @ 0 across all 4 modes.
+- `wolfram_sheffer_commutativity.pr` (STRESS, **DROPPED in 10b**):
+  conjecture `nand(a, b) = nand(b, a)`.  cc-mode runs cleanly:
+  TIMEOUT @ 32 in 47 ms with 32 rules and 1133 trace entries.
+  ci-mode (IC-rewrite) crashes the bench harness: depth-4 NAND
+  nesting at ~50-100 cells per `atp_ic_rewrite_step` call,
+  amplified across ~32 saturation steps and NORM_CAP=64
+  iterations, hits ~13 M cells -- right at the 16 M HEAP_CAP
+  boundary.  9.3's heap reset only fires on the joined-CP branch,
+  rare on this fixture.
+
+**Follow-on options** for unblocking the stress fixture:
+
+1. Bump HEAP_CAP past 16 M (1<<24); needs a per-mode profile
+   first.
+2. Widen 9.3's heap reset beyond the joined-CP branch.
+3. In-place compaction in `atp_ic_rewrite_step` so each recursive
+   rewrite reclaims its failed branches.
+
+The example `wl/Examples/atp_wolfram_to_sheffer.wls` exercises
+`AxiomaticTheory["WolframAxioms"]` and `["ShefferAxioms"]` from
+WL, attempts each Sheffer axiom under MaxSteps=64, and reports
+TIMEOUT for all three -- the same lemma-discovery gap.

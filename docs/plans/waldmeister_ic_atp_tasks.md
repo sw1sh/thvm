@@ -624,7 +624,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       HVM4 when upstream lands them)
 - [x] 8.7 WL bridge: `TATP[axioms, conjecture] -> proof tree` so
       the prover is reachable from notebooks
-  - [x] 8.7a design memo `docs/plans/wl_atp_bridge.md`: pick
+  - [x] 8.7a design memo `docs/plans/waldmeister_ic_atp.md` section 7.1: pick
         the WL surface form (`TATP[{axiom_1, axiom_2, ...},
         conjecture]` returning a `ProofTree[]` association?
         a list of rewrite steps? a `Failure[...]` on TIMEOUT?),
@@ -656,7 +656,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       pure-size `--add` in 5.3
 - [x] 8.9 narrowing for existential goals (Waldmeister's
       `NormaleZiele.c` / `Zielverwaltung.c`)
-  - [x] 8.9a design memo `docs/plans/narrowing_design.md`:
+  - [x] 8.9a design memo `docs/plans/waldmeister_ic_atp.md` section 7.2:
         survey the narrowing algorithm vs rewriting (rewrite
         applies an oriented rule via matching; narrow tries
         UNIFICATION at every position to find a witness
@@ -711,7 +711,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         explicit version can't, or (c) reveals an architectural
         cleanup opportunity.
   - [x] 8.10c IC-native ATP arc closing memo
-        `docs/plans/atp_arc_summary.md`: recap what stages
+        `docs/plans/waldmeister_ic_atp.md` section 7.3: recap what stages
         1-8.10 delivered, what remains research-grade and
         deferred (8.6 unordered SUP/DUP awaiting HVM4
         upstream; sort-aware KBO; multi-witness narrowing),
@@ -734,7 +734,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       enumerates ALL witnesses up to a bound.  WL surface:
       `TATP[..., AllWitnesses -> True]` returns a list of
       Association entries.
-  - [x] 9.1a design memo `docs/plans/multi_witness_design.md`:
+  - [x] 9.1a design memo `docs/plans/waldmeister_ic_atp.md` section 7.4:
         survey the search-tree structure (DFS over (position,
         rule) choices); pick bounds (max-depth + max-witnesses
         + step-cap); decide if witness-distinctness should be
@@ -773,7 +773,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       enlarged corpus; document IC-vs-Twee gaps where they
       emerge.  This is where the 8.5d "KBO and LPO agree on
       our corpus" finding gets stress-tested.
-  - [x] 9.4a design memo `docs/plans/corpus_expansion_design.md`:
+  - [x] 9.4a design memo `docs/plans/waldmeister_ic_atp.md` section 7.5:
         pick 3-5 textbook UEQ candidates from
         GRP / RNG / LCL / LAT (we don't have network access in
         a cron firing, so hand-encode from textbook axioms).
@@ -789,7 +789,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         Update CHANGELOG with status of each.  Scope: 3-5 small
         fixtures, ~30-50 lines each.
   - [x] 9.4c bench comparison + findings memo
-        `docs/plans/corpus_expansion_findings.md`: re-run
+        `docs/plans/waldmeister_ic_atp.md` section 7.5: re-run
         `tools/bench_twee` on the enlarged corpus; capture the
         IC-vs-Twee deltas; document KBO-vs-LPO disagreements (if
         any) and where the 32-step budget bites.  Scope: ~100-
@@ -804,10 +804,10 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       our 32-step budget) + one stress fixture (predicted
       TIMEOUT, useful for the next round of bench-Twee
       comparison).  Wire into the bench harness and update
-      `docs/plans/corpus_expansion_findings.md` with the new
+      `docs/plans/waldmeister_ic_atp.md` section 7.5 with the new
       rows.  Reference: McCune et al., "Short Single Axioms for
       Boolean Algebra", J. Automated Reasoning 2002.
-  - [x] 10a design memo `docs/plans/wolfram_axiom_design.md`:
+  - [x] 10a design memo `docs/plans/waldmeister_ic_atp.md` section 7.6:
         pick the two conjectures (one PROVED-fast, one TIMEOUT-
         stress) from the Wolfram axiom.  For each: signature
         (a single binary `nand` symbol + 1-3 constants),
@@ -827,7 +827,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         table.  Scope: 2 small fixtures, ~30-40 lines each.
   - [x] 10c bench comparison + findings update: re-run
         `tools/bench_twee` on the now 14-fixture corpus; append
-        a new section to `docs/plans/corpus_expansion_findings.md`
+        a new section to `docs/plans/waldmeister_ic_atp.md` section 7.5
         with the Wolfram-axiom rows + IC-vs-Twee deltas + any
         new lemma-discovery insights.  Scope: ~50-line append +
         regenerated bench CSVs.

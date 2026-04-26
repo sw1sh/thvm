@@ -1056,7 +1056,7 @@ fn Term      thvm_atp_get_witness (const AtpState *s, u32 var_id);
 // `witnesses[]` must hold at least `max_witnesses` `RewriteSubst`
 // slots.  v0 returns DFS-order raw witnesses without alpha-equivalent
 // dedup; callers post-filter if needed.  See
-// `docs/plans/multi_witness_design.md` for the algorithm sketch.
+// `docs/plans/waldmeister_ic_atp.md` section 7.4 for the algorithm sketch.
 fn u32       thvm_atp_narrow_all  (AtpState *s, Term lhs, Term rhs,
                                    u32 max_depth, u32 max_witnesses,
                                    RewriteSubst *witnesses);
