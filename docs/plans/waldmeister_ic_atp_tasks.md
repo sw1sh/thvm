@@ -324,7 +324,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `src/atp/_.c` with stat counter + tests.  Expected
         scope: ~50 LOC implementation + ~30 LOC tests.
 - [ ] 7.3 subsumption pruning on R and the CP queue
-  - [ ] 7.3a **rule subsumption counter**: helper
+  - [x] 7.3a **rule subsumption counter**: helper
         `atp_cp_subsumed_by_rules(s, lhs, rhs)` returns 1 if
         there is `(l, r) ∈ R` and substitution σ such that
         `(lhs, rhs) = (σl, σr)` (modulo symmetry).  Per the

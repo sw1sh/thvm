@@ -6,6 +6,31 @@ dated section.
 
 ## Unreleased
 
+### Added: rule-subsumption counter (stage 7.3a)
+
+`src/atp/_.c` gains `atp_cp_rule_subsumed(s, lhs, rhs)`: returns 1
+if there exist `(l, r) ∈ R` and substitution σ such that
+`(lhs, rhs) = (σl, σr)` (forward) or `(σr, σl)` (symmetric).
+Equational subsumption: σ is consistent across both sides
+(extended through both `thvm_match` calls on the same
+`RewriteSubst`).
+
+Per the same domination argument as 7.2b: rule-subsumption fires
+only when an existing rule rewrites lhs to rhs in one step under σ,
+which 7.1's full-R normalize also catches.  The counter
+`n_cps_dropped_rule_subsumed` ticks unconditionally for empirical
+measurement and is bounded above by `n_cps_dropped_joinable`.
+
+`tests/test_atp.c` adds 4 cases:
+- `cp-rule-subsumed-direct-instance`: forward direction fires
+- `cp-rule-subsumed-symmetric-instance`: symmetric direction fires
+- `cp-rule-subsumed-non-instance-no-fire`: non-instance does not fire
+- `cp-rule-subsumed-domination-on-saturation`: invariant holds on the
+  group example
+
+Stage 7.3b will add queue subsumption -- which IS orthogonal to
+7.1 and adds genuine new pruning.
+
 ### Added: source-rule-disjoint connectedness counter (stage 7.2b)
 
 `src/atp/_.c` gains `atp_cp_source_disjoint_connected(s, lhs, rhs,

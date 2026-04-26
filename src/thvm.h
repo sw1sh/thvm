@@ -858,6 +858,15 @@ typedef struct {
   // infrastructure for stage 7.4+ when AC theories may break
   // the domination.
   u32  n_cps_dropped_connected;
+
+  // Stage 7.3a: count of CPs that are rule-subsumed -- there
+  // exists `(l, r) ∈ R` and substitution σ such that
+  // `(lhs, rhs) = (σl, σr)` (or the symmetric case).  Same
+  // domination story as 7.2b: rule subsumption fires only when
+  // the rule rewrites lhs directly to rhs in one step, which
+  // 7.1 already catches via full normalization.  Counter ticks
+  // unconditionally for empirical measurement; not a filter.
+  u32  n_cps_dropped_rule_subsumed;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);

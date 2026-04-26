@@ -487,13 +487,53 @@ static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
   return kbo_eq(l, r);
 }
 
+// Stage 7.3a: rule subsumption check.  Returns 1 if there exist a
+// rule `(l_k, r_k) ∈ R` and a substitution σ such that
+// `(lhs, rhs) = (σ l_k, σ r_k)` (forward) or `(lhs, rhs) =
+// (σ r_k, σ l_k)` (symmetric).  Equational subsumption: the σ must
+// be CONSISTENT across both sides simultaneously, so we extend the
+// same `RewriteSubst` across the two `thvm_match` calls.
+//
+// Per the domination lemma in `docs/plans/connectedness_design.md`:
+// if (lhs, rhs) is rule-subsumed by (l_k, r_k), then rule
+// (l_k, r_k) rewrites lhs to rhs in one step under σ, so
+// `thvm_rewrite_normalize` collapses the pair too.  Hence
+// `n_cps_dropped_rule_subsumed <= n_cps_dropped_joinable` always.
+// We tick the counter for empirical measurement; the filtering
+// itself stays in 7.1.
+//
+// 7.3b will add queue subsumption -- which IS orthogonal to 7.1.
+static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
+  for (u32 k = 0; k < s->n_rules; k++) {
+    // Forward: σl_k = lhs AND σr_k = rhs (one σ extended through
+    // both matches).
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(s->lhs[k], lhs, &subst) &&
+          thvm_match(s->rhs[k], rhs, &subst)) {
+        return 1;
+      }
+    }
+    // Symmetric: σl_k = rhs AND σr_k = lhs.
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(s->lhs[k], rhs, &subst) &&
+          thvm_match(s->rhs[k], lhs, &subst)) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 // Helper: push a batch of CPs onto the queue with TRACE_CP entries
 // pointing at the two source rules' trace indices.  Drops overflow
-// silently.  Filters fire on each CP:
-//   - 7.1: trivially-joinable under R          -> drop, tick `n_cps_dropped_joinable`
+// silently.  Filters and counters fire on each CP:
+//   - 7.1:  trivially-joinable under R         -> drop, tick `n_cps_dropped_joinable`
 //   - 7.2b: source-rule-disjoint connected     -> tick `n_cps_dropped_connected`
-//                                                 (counter only; not a filter
-//                                                 since 7.1 already covers it)
+//                                                 (counter only)
+//   - 7.3a: rule-subsumed by some `(l, r) ∈ R` -> tick `n_cps_dropped_rule_subsumed`
+//                                                 (counter only)
 // `rule_a`/`rule_b` are the rule indices that birthed this CP batch
 // (passed through to the connectedness check); `parent_a`/`parent_b`
 // are their trace indices.  Returns count of CPs pushed.
@@ -503,10 +543,12 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
   u32 pushed = 0;
   for (u32 i = 0; i < ncps; i++) {
     if (s->n_cps >= ATP_MAX_CPS) break;
-    u8 joinable  = atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs);
-    u8 connected = atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
-                                                    rule_a, rule_b);
-    if (connected) s->n_cps_dropped_connected++;
+    u8 joinable    = atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs);
+    u8 connected   = atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
+                                                      rule_a, rule_b);
+    u8 rule_subsmd = atp_cp_rule_subsumed(s, cps[i].lhs, cps[i].rhs);
+    if (connected)   s->n_cps_dropped_connected++;
+    if (rule_subsmd) s->n_cps_dropped_rule_subsumed++;
     if (joinable) {
       s->n_cps_dropped_joinable++;
       continue;

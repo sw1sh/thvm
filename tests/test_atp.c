@@ -964,6 +964,74 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Stage 7.3a: rule-subsumption counter ==========================
+
+  TEST_BEGIN("atp/cp-rule-subsumed-direct-instance");
+  {
+    // Rule r0: f(x, e) -> x.  CP candidate (f(a, e), a) is a
+    // direct substitution instance under σ = {x -> a}; so
+    // rule-subsumed and (since the rule reduces lhs to rhs in
+    // one step) also trivially joinable.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+
+    Term lhs = mk_f(mk_a(), mk_e());
+    Term rhs = mk_a();
+    CHECK_EQ((int)atp_cp_rule_subsumed(s, lhs, rhs),       1);
+    CHECK_EQ((int)atp_cp_trivially_joinable(s, lhs, rhs), 1);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-rule-subsumed-symmetric-instance");
+  {
+    // Same rule r0: f(x, e) -> x.  CP candidate (a, f(a, e))
+    // is the symmetric direction (rhs = σ l_k, lhs = σ r_k).
+    // Should still register as rule-subsumed.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+
+    Term lhs = mk_a();
+    Term rhs = mk_f(mk_a(), mk_e());
+    CHECK_EQ((int)atp_cp_rule_subsumed(s, lhs, rhs), 1);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-rule-subsumed-non-instance-no-fire");
+  {
+    // Rule r0: f(x, e) -> x.  CP candidate (a, e) is not a
+    // substitution instance of either direction (the rule's
+    // lhs is f(_, _), can't match an atom).  Should NOT fire.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+
+    Term lhs = mk_a();
+    Term rhs = mk_e();
+    CHECK_EQ((int)atp_cp_rule_subsumed(s, lhs, rhs), 0);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-rule-subsumed-domination-on-saturation");
+  {
+    // Empirical: rule-subsumed count is bounded above by
+    // joinable count throughout the group-axiom saturation.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    thvm_atp_set_goal(s, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    (void)thvm_atp_run(s);
+    CHECK(s->n_cps_dropped_rule_subsumed <= s->n_cps_dropped_joinable);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
