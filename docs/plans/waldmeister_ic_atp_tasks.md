@@ -656,6 +656,38 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       pure-size `--add` in 5.3
 - [ ] 8.9 narrowing for existential goals (Waldmeister's
       `NormaleZiele.c` / `Zielverwaltung.c`)
+  - [ ] 8.9a design memo `docs/plans/narrowing_design.md`:
+        survey the narrowing algorithm vs rewriting (rewrite
+        applies an oriented rule via matching; narrow tries
+        UNIFICATION at every position to find a witness
+        substitution).  Pick an API shape: existential variables
+        on `WaldSpec` (sort of, sort_witness?), or carried on
+        the goal terms themselves via designated FVR ids.
+        Decide where the witness output lives (new
+        `AtpState.witness_subst[REWRITE_MAX_VAR]` field, exposed
+        via `thvm_atp_get_witness`).  Document the saturation-
+        loop divergence from rewriting (goal_check becomes
+        narrow_check).  Scope: ~150-line memo.
+  - [ ] 8.9b implement `thvm_atp_narrow_step(s, lhs, rhs, ...)`
+        helper: at every non-variable position of the goal,
+        unify with each rule's LHS; on first success, return
+        the witness substitution.  Companion
+        `thvm_atp_get_witness(s, var_id) -> Term` API for
+        retrieving bindings.  Tests: ~5 hand-built narrowing
+        cases on tiny rule sets.
+  - [ ] 8.9c integrate narrow_step into saturation: new flag
+        `s->goal_existential` + dispatch in `thvm_atp_goal_check`
+        between the existing rewrite-and-compare path and the
+        new narrow-and-extract path.  Witness substitution
+        recorded at proof-close time.
+  - [ ] 8.9d existential-goal `.pr` syntax / WL surface:
+        decide how users declare existential vars in input
+        files (extension to `CONCLUSION` syntax? sidecar
+        keyword?).  Add a fixture under `tests/data/atp/` and
+        wire the bench harness.
+  - [ ] 8.9e WL bridge integration: `TATP[axioms, conjecture,
+        Witness -> {x_, y_}]` returns `<|"Status" -> "PROVED",
+        "Witness" -> <|x -> term, y -> term|>|>`.
 - [ ] 8.10 SupGen-style search inside saturation: superpose the
       "which CP to pick next" choice, collapse with priority,
       compare against the explicit-queue baseline
