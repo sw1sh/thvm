@@ -4657,22 +4657,62 @@ implemented + tested (f1a) but never invoked by the pipeline.
        measurement).  Splitting into a stop-the-bleed step +
        the actual fusion-gain step. -->
 
-  - [ ] **f1d-d4b1: stop double-emit by extending the hook
-        into materialize_expr**.  Make materialize_expr's
-        recursive child kernelization also consult the
-        realize_classify table when the toggle is ON: if a
-        child is realized, emit a fresh kernel as today; if
-        un-realized, route through materialize_kernel_inlined
-        (or fall through to legacy emission).  Match what
-        materialize_walk's hook already does.  Net effect:
-        no double-emission across walk+expr; toggle ON
-        emits the SAME kernel count as legacy in the worst
-        case (no fusion gain yet, but no overhead either),
-        clearing the way for d4b2.  Acceptance: with toggle
-        ON, poly-regression total kernel count drops from
-        131 back to <= 100 (legacy parity); 166 C + 292
-        WL green; beautiful_mnist.wlt + nn.wlt no longer
-        exhaust the cap.  ~50-80 LOC.
+  <!-- 2026-04-26 d4b1 had 2 attempts, both partial:
+       attempt 1 wired the materialize_expr hook (kept --
+       no harm with default OFF, fixes poly-regression
+       overhead 131->99); attempt 2 found that LeNet cap
+       exhaustion is sizing not duplication, but raising
+       the cap surfaces structural test breakage from
+       helper-built kernels lacking the legacy LOAD prefix.
+       Re-decompose into 3 focused steps. -->
+
+  - [x] **f1d-d4b1: stop double-emit by extending the hook
+        into materialize_expr** -- DONE in commit f416020
+        (poly-regression 131->99) but attempt 2 surfaced
+        residual structural breakage on LeNet-scale tests
+        when the toggle is on.  Marking [x] for the
+        materialize_expr hook itself (which is safe and
+        committed); the residuals split into d4b1a/b/c.
+
+  - [ ] **f1d-d4b1a: emit LOAD prefix in helper-built kernels
+        for structural parity**.  The helper's
+        materialize_kernel_inlined skips the LOAD-per-input
+        prefix that the legacy emit path always generates.
+        Several wl tests (e.g.
+        uop-load/linearizer-prepends-load-per-input) probe
+        for that prefix.  Add a LOAD prefix at the start of
+        the helper's program -- one LOAD op per input slot,
+        opcode UOP_LOAD, src=KSRC_AS_INPUT(i), dtype/numel
+        from input_dtypes/input_numels.  Matches what
+        materialize_in_env.c lines 481-497 do for legacy
+        kernels.  Acceptance: 166 C + 292 WL still green
+        (default OFF baseline); flipping toggle ON no longer
+        regresses uop_load.wlt or memory_plan.wlt structural
+        tests.  ~30 LOC.
+
+  - [ ] **f1d-d4b1b: opt remaining structural tests out of
+        toggle ON**.  After d4b1a fixes the LOAD-prefix
+        cohort, audit whatever WL tests still fail under
+        toggle ON for legacy-kernel-shape assertions.  For
+        each test that's structurally tied to legacy emit,
+        wrap the relevant block in TSetUseRealizeInfo[False]
+        ... TSetUseRealizeInfo[prev] (mirroring f1d-d2's
+        C-side pattern).  Don't change the test SEMANTICS,
+        just isolate from the toggle.  Acceptance: with
+        toggle ON, the only remaining failures (if any) are
+        functional/numeric, not structural; 166 C + 292 WL
+        green.  ~20 LOC across the affected wlt files.
+
+  - [ ] **f1d-d4b1c: bump KERNELS_CAP + flip default**.
+        After d4b1a + d4b1b clear the structural breakage,
+        bump KERNELS_CAP from 1<<12 (4K) to 1<<14 (16K) to
+        absorb LeNet-scale graphs under toggle ON.  Then
+        flip MATERIALIZE_USE_REALIZE_INFO default to 1.
+        Acceptance: 166 C + 292 WL green with default ON;
+        lenet-mnist verify.wls Metal converges loss
+        2.61 -> 0.025; linear-train memory-probe.wls
+        TMemoryPlanReport shows the kernel-count drop.
+        ~10 LOC + measurement.
         <!-- attempt 1: partial -- meets the poly-regression
              criterion but not the LeNet cap criterion.
 
