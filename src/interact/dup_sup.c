@@ -3,26 +3,46 @@
 // if L == R:                     (annihilate)
 //   x0 <- a
 //   x1 <- b
-// else:                          (commute -- not yet implemented)
+// else:                          (commute)
 //   ! &L{A0, A1} = a
 //   ! &L{B0, B1} = b
 //   x0 <- &R{A0, B0}
 //   x1 <- &R{A1, B1}
 //
-// Only the same-label (annihilating) case is implemented today.  The
-// commuting case is deferred until a test exercises it -- when stuck
-// we put the SUP back into the dup cell so the result is a well-formed
-// (but unreduced) DP0/DP1 term.
+// Annihilation uses heap_subst_cop directly on the SUP's two cells.
+// Commutation allocates a 6-cell block:
+//
+//   c+0  shared dup body for `a`
+//   c+1  shared dup body for `b`
+//   c+2  DP0_L over c+0   (= A0; lives in x0[0])
+//   c+3  DP0_L over c+1   (= B0; lives in x0[1])
+//   c+4  DP1_L over c+0   (= A1; lives in x1[0])
+//   c+5  DP1_L over c+1   (= B1; lives in x1[1])
+//
+// x0 = &R at c+2, x1 = &R at c+4.  The active side is returned and the
+// inactive side is substituted into `loc` via heap_subst_cop.
 fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup) {
   u64 sup_loc = term_val(sup);
   u32 sup_lab = term_ext(sup);
+  ITRS++;
   if (lab == sup_lab) {
-    ITRS++;
     Term tm0 = heap_read(sup_loc + 0);
     Term tm1 = heap_read(sup_loc + 1);
     return heap_subst_cop(side, loc, tm0, tm1);
   }
-  // commute case: leave stuck (rebuild DP node holding the SUP)
-  heap_set(loc, sup);
-  return term_new(0, side == 0 ? TAG_DP0 : TAG_DP1, lab, loc);
+
+  Term a = heap_read(sup_loc + 0);
+  Term b = heap_read(sup_loc + 1);
+
+  u64 c = heap_alloc(6);
+  heap_set(c + 0, a);
+  heap_set(c + 1, b);
+  heap_set(c + 2, term_new(0, TAG_DP0, lab, c + 0));
+  heap_set(c + 3, term_new(0, TAG_DP0, lab, c + 1));
+  heap_set(c + 4, term_new(0, TAG_DP1, lab, c + 0));
+  heap_set(c + 5, term_new(0, TAG_DP1, lab, c + 1));
+
+  Term x0 = term_new(0, TAG_SUP, sup_lab, c + 2);
+  Term x1 = term_new(0, TAG_SUP, sup_lab, c + 4);
+  return heap_subst_cop(side, loc, x0, x1);
 }

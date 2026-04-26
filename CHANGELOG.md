@@ -6,6 +6,26 @@ dated section.
 
 ## Unreleased
 
+### Added: docs/plans/waldmeister_ic_atp.md -- IC-native ATP design memo
+
+Research-and-design memo summarizing Waldmeister's unfailing
+Knuth-Bendix completion algorithm, surveying prior art on
+interaction-net + ATP work (April 2026), and sketching how the same
+proof procedure could be expressed as IC graph rewrites in thvm
+using SupGen / NeoGen-style superposition over rule sets and
+overlap spaces.  Includes a 7-stage build trajectory.
+
+### Added: DUP-SUP cross-label commutation
+
+`interact_dup_sup` now handles the commuting case
+`!&L{x0,x1} = &R{a,b}` (L != R) by allocating a 6-cell block of
+two new dup bodies (for `a` and `b`) plus four DP0/DP1 leaves, and
+returning two fresh `&R`-labeled SUPs.  Previously the cross-label
+case was stuck.  This unblocks any future tag whose interactions
+need SUPs to flow through DUPs (EQL, AND/OR, MAT, INC, ...).
+Tests in `tests/test_dup_sup.c` exercise head shape, inner
+structure, and both-projection consistency.
+
 ### Changed: lazy GRAD + lazy materialize via shared term_resolve
 
 `interact_grad` and `materialize_expr` no longer call `wnf` to
