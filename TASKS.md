@@ -237,21 +237,41 @@ Root causes:
 
 ### New tasks
 
-- [ ] **r1: fuse forward chain into ONE kernel for linear-train**.
-      Concrete acceptance: `wl/Examples/linear-train/memory-probe.wls`
-      "After forward + loss materialize" shows `KernelEntries +1`
-      (was +16).  Mechanism: extend the f1d helper (or add a new
-      pass) to absorb a single REDUCE at the END of an elementwise
-      chain into the same kernel that produces its input -- the
-      "local reduction" pattern from tinygrad.  The helper today
-      bails on REDUCE-anywhere; the relaxation is "REDUCE allowed
-      iff it's the OUTERMOST op AND its input is a fully-inlined
-      elementwise chain".  Multi-stage program: elementwise ops
-      write to a temp register; final REDUCE op reads register +
-      writes to output buffer.  CPU's interpret.c already chains
-      registers across program ops; new code is mostly the
-      helper's accept-REDUCE-as-tail rule + Metal fallback.
-      Estimated 80-150 LOC; DECOMPOSE on next fire if it expands.
+- [ ] **r1a: probe linear-train forward UOp graph; decide what
+      "1 kernel" really means**.  Dump the materialize-time
+      structure of `loss = CrossEntropyLoss(Softmax(MatVec(w,x)+b),
+      target)` -- list every UOp opcode, count REDUCE nodes, see
+      how many `materialize_uop_in_env` callbacks fire and on
+      what.  Output: a 1-paragraph note in TASKS.md describing
+      the actual graph (which is likely 3 REDUCEs, not 1: MatVec's
+      reduce-axis, Softmax's normalization reduce, CE's final
+      reduce-sum) -- which means r1's original "1 forward kernel"
+      framing is too aggressive.  Pick a realistic target (e.g.,
+      "elementwise chains around each REDUCE collapse, total <=4
+      forward kernels").  ~20 LOC probe + 1 paragraph diagnosis.
+
+- [ ] **r1b: extend f1d helper to absorb an outermost-tail REDUCE**.
+      Lift the inline_emit "REDUCE bails" guard for the case where
+      REDUCE is the root being materialized AND its source is a
+      fully-inlinable elementwise chain.  inline_emit emits a
+      REDUCE program op after the inlined elementwise chain; CPU
+      interpret.c already chains program-op registers, so the
+      multi-op kernel reads N inputs, runs N-1 elementwise ops
+      into a temp register, REDUCEs into the output buffer in one
+      kernel.  Metal stays on the legacy multi-kernel chain (via
+      backend gate -- the inlined helper is already CPU-only).
+      Acceptance: `wl/THVMLink/Tests/use_realize.wlt` poly-
+      regression test still passes; new test covers
+      "REDUCE_SUM(MUL(a,b))" collapsing into ONE kernel under
+      toggle ON.  ~70 LOC + ~30 LOC tests.
+
+- [ ] **r1c: re-bench linear-train + verify acceptance**.  Run
+      memory-probe.wls; record the "After forward + loss
+      materialize" KernelEntries delta.  Acceptance: meets the
+      r1a-decided target (likely <=4 instead of 1).  Update
+      docs/bench-results.md with a "post-r1" row + commentary
+      on why "1 kernel" wasn't reachable (Metal backend gate +
+      multi-REDUCE structure).  ~10 LOC + measurement.
 
 - [ ] **r2: slot reuse mid-step for the 57.6% headroom**.
       The TMemoryPlan reports a 57.6% slot-reuse headroom on
