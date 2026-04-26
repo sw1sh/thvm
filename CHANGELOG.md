@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: VARIABLES section parser (stage 6.3c4)
+
+`wald_parse_variables(spec, lex)` lands in `src/wald/_.c`.
+Grammar:
+
+  { ident { "," ident } ":" sort_ident }
+
+Each ident gets registered into `spec->vars[]` with a sequential
+FVR id (`var_id = spec->n_vars` at registration time).  Sort
+names are consumed and discarded under the homogeneous-signature
+assumption.  Multiple `name : sort` decl groups in one section
+accumulate ids monotonically.
+
+Section ends at the next section keyword via the same peek +
+`wald_skip_to_section` recovery pattern as 6.3c2/c3.  EOF
+mid-list returns `WSEC_NONE`; whatever names were registered
+stay registered.
+
+Tests in `tests/test_wald.c` (131 sub-checks) cover:
+- `x,y,z : ANY EQUATIONS foo` -> 3 vars (ids 0/1/2), returns
+  EQUATIONS, lexer past `EQUATIONS` at `foo`.
+- empty VARIABLES (immediate `EQUATIONS`) -> 0 vars.
+- multi-decl `x,y : ANY  z,w : ANY1  EQUATIONS` -> 4 vars
+  (ids 0/1/2/3) flowing across both decl groups.
+- truncated `x,y` -> WSEC_NONE, 2 vars registered.
+
 ### Added: SIGNATURE section parser (stage 6.3c3)
 
 `wald_parse_signature(spec, lex)` lands in `src/wald/_.c`.  Per

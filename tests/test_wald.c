@@ -339,6 +339,65 @@ int main(void) {
     wald_free(s);
   }
 
+  // === 6.3c4 VARIABLES parser =========================================
+
+  TEST_BEGIN("wald/parse-variables-three-comma-separated");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "x,y,z : ANY EQUATIONS foo");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_variables(s, &lex), (int)WSEC_EQUATIONS);
+    CHECK_EQ(s->n_vars, 3u);
+    CHECK_EQ((int)strcmp(s->vars[0].name, "x"), 0);
+    CHECK_EQ(s->vars[0].var_id, 0u);
+    CHECK_EQ((int)strcmp(s->vars[1].name, "y"), 0);
+    CHECK_EQ(s->vars[1].var_id, 1u);
+    CHECK_EQ((int)strcmp(s->vars[2].name, "z"), 0);
+    CHECK_EQ(s->vars[2].var_id, 2u);
+    // Lexer past EQUATIONS at "foo".
+    CHECK_EQ((int)wald_lex_next(&lex), (int)WT_IDENT);
+    CHECK_EQ((int)strcmp(lex.tok_text, "foo"), 0);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-variables-empty-section");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "EQUATIONS bar");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_variables(s, &lex), (int)WSEC_EQUATIONS);
+    CHECK_EQ(s->n_vars, 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-variables-multi-decl");
+  {
+    // Two var-decl groups in one section.
+    WaldLex lex;
+    wald_lex_init(&lex, "x,y : ANY  z,w : ANY1  EQUATIONS");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_variables(s, &lex), (int)WSEC_EQUATIONS);
+    CHECK_EQ(s->n_vars, 4u);
+    CHECK_EQ((int)strcmp(s->vars[0].name, "x"), 0);
+    CHECK_EQ((int)strcmp(s->vars[1].name, "y"), 0);
+    CHECK_EQ((int)strcmp(s->vars[2].name, "z"), 0);
+    CHECK_EQ((int)strcmp(s->vars[3].name, "w"), 0);
+    CHECK_EQ(s->vars[0].var_id, 0u);
+    CHECK_EQ(s->vars[3].var_id, 3u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-variables-truncated-eof-keeps-registered");
+  {
+    // EOF mid-list: registers x and y, then EOF -> WSEC_NONE.
+    WaldLex lex;
+    wald_lex_init(&lex, "x,y");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_variables(s, &lex), (int)WSEC_NONE);
+    CHECK_EQ(s->n_vars, 2u);
+    wald_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

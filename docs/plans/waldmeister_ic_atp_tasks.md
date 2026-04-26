@@ -212,9 +212,16 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       three entries with monotonic labels (e=1, i=2, f=3), the
       empty-section path, and the truncated-mid-entry path
       (returns WSEC_NONE without committing the half-parsed entry).
-- [ ] 6.3c4 VARIABLES section parser:
-      `name1, name2, ... : sort` registers each name with a
-      sequential FVR id.  Stops at the next section keyword.
+- [x] 6.3c4 `wald_parse_variables` lands in `src/wald/_.c`.  Per
+      var-decl `name1 [, name2 ...] : sort_ident` registers each
+      name into `spec->vars[]` with a sequential FVR id; sort
+      names are consumed and discarded.  Multi-decl sections
+      (multiple `name : sort` groups) accumulate var ids
+      monotonically.  Stops at the next section keyword via the
+      same peek-then-`wald_skip_to_section` pattern.  Tests cover
+      three-name single decl, empty section, multi-decl, and
+      truncated-mid-list EOF (keeps the names registered up to
+      the EOF, returns WSEC_NONE).
 - [ ] 6.3c5 ORDERING section parser: detects KBO vs LPO from
       the first ident; KBO reads the comma-separated
       `name=weight` list followed by a precedence chain

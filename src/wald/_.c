@@ -285,6 +285,71 @@ fn WaldSection wald_parse_signature(WaldSpec *spec, WaldLex *lex) {
   }
 }
 
+// === 6.3c4: VARIABLES section parser ===============================
+//
+// Section grammar:  { ident { "," ident } ":" sort_ident }
+//
+// Each ident gets registered into spec->vars[] with a sequential
+// FVR id (= spec->n_vars at the time of registration).  Sort names
+// are consumed and discarded (homogeneous-signature assumption).
+//
+// Section ends at the next section keyword.  Truncated input
+// (EOF mid-list) returns WSEC_NONE; whatever vars were registered
+// up to that point stay.
+fn WaldSection wald_parse_variables(WaldSpec *spec, WaldLex *lex) {
+  for (;;) {
+    WaldTokKind k = wald_lex_peek(lex);
+    if (k == WT_END) return WSEC_NONE;
+    if (k != WT_IDENT) {
+      // Stray punctuation; skip.
+      wald_lex_next(lex);
+      continue;
+    }
+    // Section boundary?
+    WaldSection sec = wald_section_from_ident(lex->peeked_text);
+    if (sec != WSEC_NONE) {
+      wald_lex_next(lex);
+      return sec;
+    }
+
+    // Variable name; consume + register.
+    wald_lex_next(lex);
+    if (spec != NULL && spec->n_vars < WALD_MAX_VARS) {
+      WaldVar *v = &spec->vars[spec->n_vars];
+      u32 nlen = lex->tok_len;
+      if (nlen >= WALD_NAME_LEN) nlen = WALD_NAME_LEN - 1;
+      for (u32 i = 0; i < nlen; i++) v->name[i] = lex->tok_text[i];
+      v->name[nlen] = '\0';
+      v->var_id = spec->n_vars;
+      spec->n_vars++;
+    }
+
+    // What follows?
+    //   COMMA  -> consume + read another var name on the next iter
+    //   COLON  -> consume + skip sort ident (which itself might be
+    //             a section keyword for a degenerate empty-sort case)
+    //   else   -> let the outer loop re-peek (handles section keyword)
+    k = wald_lex_peek(lex);
+    if (k == WT_COMMA) {
+      wald_lex_next(lex);
+      continue;
+    }
+    if (k == WT_COLON) {
+      wald_lex_next(lex);
+      if (wald_lex_peek(lex) == WT_IDENT) {
+        WaldSection inner = wald_section_from_ident(lex->peeked_text);
+        if (inner != WSEC_NONE) {
+          wald_lex_next(lex);
+          return inner;
+        }
+        wald_lex_next(lex);   // consume sort name
+      }
+      continue;
+    }
+    // Anything else (END, ARROW, etc.): outer loop handles it.
+  }
+}
+
 // SORTS: list of sort names separated by whitespace.  We assume a
 // homogeneous signature for stages 5-7, so the sort names are
 // consumed but not stored.
