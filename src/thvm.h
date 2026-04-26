@@ -988,6 +988,16 @@ typedef struct {
   // via `prim_rewrite_step`.
   u8   use_ic_rewrite;
 
+  // Stage 8.8: CP-priority heuristic flag.  0 (default) uses the
+  // `--add` heuristic from 5.3 -- priority = symbol_count(lhs)
+  // + symbol_count(rhs), cheapest-first.  1 uses Waldmeister's
+  // `--mix` heuristic, which adds a penalty for CPs that fail
+  // to orient cleanly under the active KBO/LPO config (i.e.,
+  // would land in unfailing-fallback).  The penalty makes the
+  // saturator prefer CPs whose orientation is unambiguous --
+  // typically a small win on hard problems.
+  u8   use_mix_heuristic;
+
   // 8.4d: optional WaldSpec for sort-check gating in
   // `thvm_atp_add_equation` and `thvm_atp_set_goal`.  When NULL
   // (default), no sort checking happens (homogeneous-mode

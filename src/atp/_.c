@@ -410,6 +410,25 @@ static u32 atp_symbol_count(Term t) {
   }
 }
 
+// 8.8: priority weight for a CP.  Default `--add` heuristic is
+// the symbol-count sum.  When `s->use_mix_heuristic` is set, add
+// a penalty for CPs that fail to orient cleanly (KBO_UN or
+// KBO_EQ) -- mirrors Waldmeister's `--mix` heuristic in
+// `ClasHeuristics.c`.  The penalty (`MIX_UNORIENTED_PENALTY`)
+// is conservative; experiments may want to tune it.
+#define MIX_UNORIENTED_PENALTY 4u
+static u32 atp_cp_priority(AtpState *s, Term lhs, Term rhs) {
+  u32 base = atp_symbol_count(lhs) + atp_symbol_count(rhs);
+  if (s != NULL && s->use_mix_heuristic) {
+    KboCmp c = atp_compare(s, lhs, rhs);
+    if (c != KBO_GT && c != KBO_LT) {
+      // KBO_EQ / KBO_UN -- penalize.
+      base += MIX_UNORIENTED_PENALTY;
+    }
+  }
+  return base;
+}
+
 // Pop the cheapest CP from the queue, where "cheap" = lowest
 // total symbol count across (lhs + rhs) -- the `--add` heuristic.
 //
@@ -434,9 +453,11 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   }
 
   // Build wrapped[i] = INC^k_i(CTR_label=i([lhs_i, rhs_i])).
+  // 8.8: `atp_cp_priority` picks `--add` or `--mix` based on
+  // s->use_mix_heuristic.
   Term wrapped[ATP_MAX_CPS];
   for (u32 i = 0; i < s->n_cps; i++) {
-    u32 k = atp_symbol_count(s->cp_lhs[i]) + atp_symbol_count(s->cp_rhs[i]);
+    u32 k = atp_cp_priority(s, s->cp_lhs[i], s->cp_rhs[i]);
     Term children[2] = { s->cp_lhs[i], s->cp_rhs[i] };
     Term w = term_new_ctr(i, children, 2);
     for (u32 j = 0; j < k; j++) w = term_new_inc(w);

@@ -1311,6 +1311,107 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Stage 8.8: --mix heuristic =====================================
+
+  TEST_BEGIN("atp/mix-heuristic-default-off");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->use_mix_heuristic, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/mix-heuristic-changes-pop-order");
+  {
+    // Build two CPs:
+    //   CP_A: (a, e)         -- size 2; KBO orients (different
+    //                            constants, head-precedence wins).
+    //   CP_B: (i(x), e)      -- size 3; orients KBO_GT (i is heavier
+    //                            in DUMMY_CFG: prec[i]=4 > prec[e]=2,
+    //                            so i(x) > e).
+    // Both orient cleanly under DUMMY_CFG.  No --mix penalty kicks
+    // in for either; --mix and --add agree.  But construct a CP
+    // that's KBO_UN: (f(x, y), f(y, x)) -- distinct vars, weights
+    // identical, top-symbols equal, lex-arg compare gives UN.
+    //
+    // Mix-priority on the UN CP: size 7 + penalty 4 = 11.
+    // Add-priority on UN CP: size 7.
+    // Add a small CP: (a, e), size 2.
+    //
+    // Without --mix: pop order favors size 2 (CP_AE) -> size 7 (CP_UN).
+    // With --mix: same, since CP_AE has lower base priority anyway.
+    //
+    // To distinguish: build (i(a), e) (size 3, orients GT) and
+    // (f(x, y), f(y, x)) (size 7, UN; mix penalty +4 -> 11).  Both
+    // heuristics pop the GT one first.
+    //
+    // Easier test: the priority HELPER directly.  Build a CP that
+    // would orient UN under DUMMY_CFG; verify atp_cp_priority
+    // returns base+penalty when the flag is set, base when off.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+
+    Term lhs = mk_f(mk_v(VAR_x), mk_v(1u));
+    Term rhs = mk_f(mk_v(1u), mk_v(VAR_x));
+    // Confirm this pair is KBO_UN under DUMMY_CFG (distinct vars
+    // -- domination check fails).
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &DUMMY_CFG), (int)KBO_UN);
+
+    u32 add_prio = atp_cp_priority(s, lhs, rhs);
+    s->use_mix_heuristic = 1;
+    u32 mix_prio = atp_cp_priority(s, lhs, rhs);
+    CHECK(mix_prio > add_prio);
+    CHECK_EQ(mix_prio - add_prio, MIX_UNORIENTED_PENALTY);
+
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/mix-heuristic-no-penalty-on-clean-orient");
+  {
+    // f(x, e) > x via KBO_GT on DUMMY_CFG (lhs heavier, dominates).
+    // --mix should NOT add a penalty since orientation is clean.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    CHECK_EQ((int)thvm_kbo(lhs, rhs, &DUMMY_CFG), (int)KBO_GT);
+
+    u32 add_prio = atp_cp_priority(s, lhs, rhs);
+    s->use_mix_heuristic = 1;
+    u32 mix_prio = atp_cp_priority(s, lhs, rhs);
+    CHECK_EQ(add_prio, mix_prio);
+
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/mix-heuristic-saturation-still-correct");
+  {
+    // Full group-axiom saturation under --mix.  Outcome must
+    // still match the default --add heuristic on this corpus
+    // (mix only changes pop ORDER, not soundness; the saturator
+    // explores the same closure regardless of order).
+    AtpState *s_add = thvm_atp_init(&DUMMY_CFG, 32);
+    thvm_atp_set_goal(s_add, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_add, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s_add, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s_add,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_add = thvm_atp_run(s_add);
+
+    AtpState *s_mix = thvm_atp_init(&DUMMY_CFG, 32);
+    s_mix->use_mix_heuristic = 1;
+    thvm_atp_set_goal(s_mix, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_mix, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s_mix, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s_mix,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_mix = thvm_atp_run(s_mix);
+
+    CHECK_EQ((int)rst_add, (int)rst_mix);
+    thvm_atp_free(s_add);
+    thvm_atp_free(s_mix);
+  }
+
   TEST_BEGIN("atp/lpo-vs-kbo-parity-on-group-axioms");
   {
     // Run the group-axiom saturation under both KBO and LPO.

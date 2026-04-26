@@ -652,7 +652,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         notebook-friendly `Association[]`.  Tests use the
         group axioms via WL syntax; assert the result matches
         what test_bench_atp produces on the equivalent .pr.
-- [ ] 8.8 `--mix` heuristic (size + orientability) replacing the
+- [x] 8.8 `--mix` heuristic (size + orientability) replacing the
       pure-size `--add` in 5.3
 - [ ] 8.9 narrowing for existential goals (Waldmeister's
       `NormaleZiele.c` / `Zielverwaltung.c`)

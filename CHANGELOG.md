@@ -6,6 +6,37 @@ dated section.
 
 ## Unreleased
 
+### Added: --mix CP-priority heuristic (stage 8.8)
+
+`AtpState` gains `use_mix_heuristic` (default 0).  When set, the
+CP queue's priority weight in `thvm_atp_select_cp` adds a
+penalty of `MIX_UNORIENTED_PENALTY = 4` to CPs that fail to
+orient cleanly (KBO_UN or KBO_EQ under the active KBO/LPO
+config).  Mirrors Waldmeister's `--mix` heuristic in
+`ClasHeuristics.c` ("classification heuristics") -- biases
+toward CPs whose orientation is unambiguous, typically a small
+win on hard problems.
+
+Implementation:
+- New static helper `atp_cp_priority(s, lhs, rhs)` picks
+  `--add` (size-only) or `--mix` (size + penalty) based on the
+  flag.  Calls `atp_compare` (8.5c) so it respects KBO vs LPO.
+- `thvm_atp_select_cp` calls `atp_cp_priority` instead of the
+  inline `atp_symbol_count` sum.
+- Soundness preserved: priority changes pop ORDER, not the
+  closure of the saturation; the saturator explores the same
+  rule set under either heuristic.
+
+`tests/test_atp.c` adds 4 cases (8401 sub-checks, was 8394):
+- `atp/mix-heuristic-default-off`
+- `atp/mix-heuristic-changes-pop-order`: hand-built KBO_UN
+  pair shows `mix_prio - add_prio == MIX_UNORIENTED_PENALTY`
+- `atp/mix-heuristic-no-penalty-on-clean-orient`: KBO_GT pair
+  shows identical priorities under add and mix
+- `atp/mix-heuristic-saturation-still-correct`: full group-
+  axiom saturation under both heuristics produces the same
+  final status
+
 ### Added: TATP[] WL surface form (stage 8.7d)
 
 `TATP[{lhs == rhs, ...}, conjecture]` lands as a public WL
