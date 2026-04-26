@@ -267,13 +267,20 @@ Root causes:
       from 16 -> 8 kernels (REDUCE_SUM(MUL(...)) chains in
       Softmax-norm and CE-loss collapse).  ~80 LOC.
 
-- [ ] **r1c: re-bench linear-train + verify acceptance**.  Run
-      memory-probe.wls; record the "After forward + loss
-      materialize" KernelEntries delta.  Acceptance per r1a
-      diagnosis: forward kernel count drops from 16 to <=4
-      (one per REDUCE boundary).  Update docs/bench-results.md
-      with a "post-r1" row + 1-paragraph commentary on the
-      multi-REDUCE structure.  ~10 LOC + measurement.
+- [x] **r1c: re-bench linear-train + verify acceptance**.
+      Toggle ON / OFF per-phase numbers:
+        forward+loss : 16 -> 8   (-50%)
+        + grad w     : 40 -> 75  (+88%)
+        + grad b     : 36 -> 67  (+86%)
+        Adam step    : 92 -> 150 (+63%)
+      Forward halves (good!), backward regresses hard (same
+      pattern as d4b2d).  Acceptance ("<=4 forward kernels")
+      not met -- got 8.  Default toggle stays OFF because the
+      backward regression dominates per-Adam-step totals.
+      Detail recorded in docs/bench-results.md "r1" section;
+      follow-up note: a TRealizeFused[] WL surface (toggle
+      ON only for forward realizes) would let LeNet harvest
+      the forward win without the backward cost.
 
 - [ ] **r2: slot reuse mid-step for the 57.6% headroom**.
       The TMemoryPlan reports a 57.6% slot-reuse headroom on

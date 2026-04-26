@@ -188,6 +188,46 @@ Three plausible next directions if the savings are still wanted:
    recycle without depending on conservative root sets.  Largest
    change but the most direct fix.
 
+## r1: forward fusion via REDUCE-as-tail-op helper (2026-04-26)
+
+r1b extended `materialize_kernel_inlined` to accept `UOP_REDUCE` as
+the root op when the source is a fully-inlinable elementwise chain.
+Tinygrad's "local reduction" pattern: one kernel runs N-1
+elementwise ops into a register and the final REDUCE writes the
+output buffer.
+
+Linear-train per-realize breakdown
+(`wl/Examples/linear-train/memory-probe.wls`-shape):
+
+| phase             | toggle OFF | toggle ON | delta  |
+| ----------------- | ---------: | --------: | -----: |
+| forward + loss    |         16 |         8 |  -50%  |
+| + grad w          |         40 |        75 |  +88%  |
+| + grad b          |         36 |        67 |  +86%  |
+| **Adam step total** |       92 |       150 |  +63%  |
+
+**Forward halves; backward regresses hard.**  Same shape as
+d4b2d's finding -- the helper saves on elementwise chains that
+end in REDUCE (now including all 3 forward REDUCEs in linear-
+train: MatVec inner-axis, Softmax-norm, CE-final) but the
+backward chain rule emits per-target cotangent UOps with
+fresh heap locs that the helper can't dedup.  Per-grad cost
+roughly doubles because each REDUCE-tail kernel pulls in a
+freshly-materialized REDUCE input via inline_emit's
+recursive-materialize fallback (d4b2b1).
+
+Acceptance per r1a was "forward kernel count <=4 (one per
+REDUCE boundary)".  Actual: 8, not 4.  The remaining gap is
+from REDUCE inputs that aren't fully inlinable (e.g.,
+SoftMax's REDUCE_SUM(EXP(x)) shares its EXP output across
+both the numerator MUL and the divisor RECIP -- the helper
+can only inline one, the other gets a separate kernel).
+Closing r1 with the partial win.  Default toggle stays OFF
+because the backward regression dominates per-Adam-step
+totals; a TRealizeFused[] WL surface (toggle ON only for
+forward realizes) would let LeNet harvest the forward win
+without the backward cost -- queued for future work.
+
 ## k0e: TGradMany rewire delta (NEGATIVE RESULT, 2026-04-26)
 
 Switched `lenetStep` (baseline.wls) and `stepGrads` (verify.wls)
