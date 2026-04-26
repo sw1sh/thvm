@@ -358,6 +358,47 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/goal-check-no-goal-runs-on");
+  {
+    // goal_lhs == 0 -> completion mode -> never returns PROVED.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_RUNNING);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/goal-check-trivial-goal-proves-without-rules");
+  {
+    // Goal is e == e under empty R; both sides normalize to e
+    // (identity), kbo_eq holds, returns ATP_PROVED.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_goal(s, mk_e(), mk_e());
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_PROVED);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/goal-check-closes-under-rule");
+  {
+    // Goal: f(a, e) == a.  Add rule f(x, e) -> x.  Normalizing
+    // f(a, e) under R -> a; rhs already a; goal proves.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+    thvm_atp_set_goal(s, mk_f(mk_a(), mk_e()), mk_a());
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_PROVED);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/goal-check-doesnt-close-still-running");
+  {
+    // Goal: a == e.  No rule applies; both sides normalize to
+    // themselves; kbo_eq fails (different labels); RUNNING.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_goal(s, mk_a(), mk_e());
+    CHECK_EQ((int)thvm_atp_goal_check(s), (int)ATP_RUNNING);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

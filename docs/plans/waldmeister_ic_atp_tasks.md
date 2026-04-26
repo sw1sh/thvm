@@ -72,10 +72,12 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       descent will widen coverage automatically.  Tests cover the
       empty-added no-op, drop-on-specialization, keep-on-irreducible,
       and the no-old-rules edge case (added.first == 0 underflow guard).
-- [ ] 5.2e `thvm_atp_goal_check`: normalize both sides of the goal
-      under R; if they're now `kbo_eq`, return ATP_PROVED.  Skip
-      cleanly when goal_lhs == 0 (completion mode).  Depends on
-      5.4 for sub-position rewrites of compound goal terms.
+- [x] 5.2e `thvm_atp_goal_check`: normalizes both goal sides under
+      R via `thvm_rewrite_normalize` (NORM_CAP=64), returns
+      ATP_PROVED on kbo_eq hit / ATP_RUNNING otherwise.  Skips when
+      goal_lhs == 0 (completion mode).  Top-only today; 5.4
+      widens.  Tests cover no-goal, trivial e==e, close-under-one-
+      rule, and doesn't-close.
 - [ ] 5.2f `thvm_atp_step` driver: the main step that calls 5.2a
       -> normalize-via-`thvm_rewrite_normalize` -> trivialize ->
       5.2b -> 5.2c -> 5.2d -> 5.2e and returns AtpStatus.

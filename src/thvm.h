@@ -853,6 +853,11 @@ fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added);
 // the number of older rules dropped.
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added);
 
+// Goal check: normalize both sides of s->goal_{lhs,rhs} under R,
+// return ATP_PROVED if they collide; ATP_RUNNING otherwise (also
+// when goal_lhs == 0, i.e. completion mode).
+fn AtpStatus thvm_atp_goal_check(AtpState *s);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input

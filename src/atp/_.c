@@ -66,6 +66,28 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   return 1;
 }
 
+// Goal check: normalize both sides of the conjecture under the
+// current R; if they're now structurally equal, the goal is
+// proved.  Returns ATP_PROVED on a hit, ATP_RUNNING otherwise.
+// Skips cleanly (returns ATP_RUNNING) when no goal is set
+// (goal_lhs == 0) -- the completion-mode case.
+//
+// Top-only rewriting today via thvm_rewrite_normalize; stage 5.4's
+// recursive descent will widen coverage to sub-positions.
+//
+// Step cap NORM_CAP = 64 bounds the normalization (matches the
+// ballpark used in tests/test_rewrite.c's headline demo); tune
+// once we have benchmark data.
+fn AtpStatus thvm_atp_goal_check(AtpState *s) {
+  if (s == NULL || s->goal_lhs == 0) return ATP_RUNNING;
+  const u32 NORM_CAP = 64;
+  Term l = thvm_rewrite_normalize(s->goal_lhs, s->lhs, s->rhs,
+                                  s->n_rules, NORM_CAP);
+  Term r = thvm_rewrite_normalize(s->goal_rhs, s->lhs, s->rhs,
+                                  s->n_rules, NORM_CAP);
+  return kbo_eq(l, r) ? ATP_PROVED : ATP_RUNNING;
+}
+
 // Walk the older rules (indices [0, added.first)) and drop any
 // whose LHS reduces under the freshly-added rule(s).  Each dropped
 // rule's simplified equation goes back onto the CP queue so the

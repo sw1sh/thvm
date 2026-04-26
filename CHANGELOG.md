@@ -6,6 +6,22 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_atp_goal_check (stage 5.2e)
+
+`thvm_atp_goal_check(s)` normalizes both sides of `s->goal_{lhs,
+rhs}` under R via `thvm_rewrite_normalize` (NORM_CAP = 64) and
+returns ATP_PROVED on a `kbo_eq` hit, ATP_RUNNING otherwise.
+Skips cleanly (returns ATP_RUNNING) when `goal_lhs == 0` --
+the completion-mode case where there's no conjecture to prove.
+
+Top-only rewriting today; 5.4's recursive descent will widen
+coverage to compound goal terms automatically.
+
+Tests cover the no-goal pass-through, the trivial `e == e` case
+that proves under empty R, the close-under-one-rule case
+(`f(a, e) == a` under `f(x, e) -> x`), and the doesn't-close
+case (`a == e`, no applicable rule).
+
 ### Added: thvm_atp_interreduce (stage 5.2c)
 
 `thvm_atp_interreduce(s, added)` walks the older rules in `R`
