@@ -6,6 +6,29 @@ dated section.
 
 ## Unreleased
 
+### Added: Waldmeister .pr parser feeds saturation end-to-end (stage 6.3g)
+
+Two new test cases in `tests/test_wald.c` close the loop between the
+`.pr` parser (stages 6.3a-f) and the saturation engine + KBO comparator:
+
+- `wald/parsed-axioms-kbo-orient-correctly` -- parses the full group
+  spec, builds a `KboConfig` from `spec->symbols[i].prec_rank` (with a
+  +1 shift so `prec_rank == 0` still gets a positive precedence), and
+  asserts each of the 3 parsed axioms orients `KBO_GT` under that
+  config.
+- `wald/parsed-spec-feeds-saturation-and-proves` -- end-to-end pipeline:
+  parse `.pr` source, build `KboConfig` from parsed precedences,
+  `thvm_atp_init`, push parsed axioms via `thvm_atp_add_equation`,
+  `thvm_atp_set_goal` from parsed conclusion, `thvm_atp_run`, and
+  assert `ATP_PROVED` within a small step budget.
+
+This verifies that the parser output is structurally compatible with
+the saturation engine without an explicit conversion layer -- the
+`Term` values it produces (TAG_CTR / TAG_FVR with the right symbol IDs)
+flow straight into the engine.
+
+`tests/test_wald.c`: 226 sub-checks (was 214).
+
 ### Added: top-level Waldmeister .pr parser driver (stage 6.3f)
 
 `wald_parse(src, spec) -> WaldErr` lands in `src/wald/_.c`.

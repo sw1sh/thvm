@@ -792,6 +792,113 @@ int main(void) {
     wald_free(s);
   }
 
+  // === 6.3g end-to-end: parsed spec feeds KBO + saturation ============
+
+  // Helper: build a KboConfig from a parsed WaldSpec.  Weights default
+  // to 1 (the .pr parser discards them); precedence maps directly
+  // from spec->symbols[i].prec_rank with a +1 shift so rank 0 is
+  // distinguishable from "unset".  var_weight = 1.
+  TEST_BEGIN("wald/parsed-axioms-kbo-orient-correctly");
+  {
+    static const char *src =
+      "NAME            group\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       e: -> ANY\n"
+      "                i: ANY -> ANY\n"
+      "                f: ANY ANY -> ANY\n"
+      "                a: -> ANY\n"
+      "ORDERING        LPO\n"
+      "                i > f > e > a\n"
+      "VARIABLES       x,y,z : ANY\n"
+      "EQUATIONS       f(x, e) = x\n"
+      "                f(x, i(x)) = e\n"
+      "                f(f(x, y), z) = f(x, f(y, z))\n"
+      "CONCLUSION      f(a, i(a)) = e\n";
+
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+    CHECK_EQ(spec->n_eqns, 3u);
+
+    u32 max_label = 0;
+    for (u32 i = 0; i < spec->n_symbols; i++) {
+      if (spec->symbols[i].label > max_label) max_label = spec->symbols[i].label;
+    }
+    u32 weights[16] = {0};
+    u32 prec[16]    = {0};
+    for (u32 i = 0; i < spec->n_symbols; i++) {
+      weights[spec->symbols[i].label] = 1;
+      prec[spec->symbols[i].label]    = spec->symbols[i].prec_rank + 1;
+    }
+    KboConfig cfg = {
+      .weights    = weights,
+      .precedence = prec,
+      .n_labels   = max_label + 1,
+      .var_weight = 1,
+    };
+
+    // Each axiom should orient lhs > rhs under the LPO-derived KBO config.
+    CHECK_EQ((int)thvm_kbo(spec->eqn_lhs[0], spec->eqn_rhs[0], &cfg), (int)KBO_GT);
+    CHECK_EQ((int)thvm_kbo(spec->eqn_lhs[1], spec->eqn_rhs[1], &cfg), (int)KBO_GT);
+    CHECK_EQ((int)thvm_kbo(spec->eqn_lhs[2], spec->eqn_rhs[2], &cfg), (int)KBO_GT);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/parsed-spec-feeds-saturation-and-proves");
+  {
+    // Same .pr file, but pushed end-to-end through the saturation
+    // engine: parse -> build KboConfig -> push axioms -> set goal ->
+    // thvm_atp_run -> ATP_PROVED.
+    static const char *src =
+      "NAME            group\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       e: -> ANY\n"
+      "                i: ANY -> ANY\n"
+      "                f: ANY ANY -> ANY\n"
+      "                a: -> ANY\n"
+      "ORDERING        LPO\n"
+      "                i > f > e > a\n"
+      "VARIABLES       x,y,z : ANY\n"
+      "EQUATIONS       f(x, e) = x\n"
+      "                f(x, i(x)) = e\n"
+      "                f(f(x, y), z) = f(x, f(y, z))\n"
+      "CONCLUSION      f(a, i(a)) = e\n";
+
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+
+    u32 max_label = 0;
+    for (u32 i = 0; i < spec->n_symbols; i++) {
+      if (spec->symbols[i].label > max_label) max_label = spec->symbols[i].label;
+    }
+    u32 weights[16] = {0};
+    u32 prec[16]    = {0};
+    for (u32 i = 0; i < spec->n_symbols; i++) {
+      weights[spec->symbols[i].label] = 1;
+      prec[spec->symbols[i].label]    = spec->symbols[i].prec_rank + 1;
+    }
+    KboConfig cfg = {
+      .weights    = weights,
+      .precedence = prec,
+      .n_labels   = max_label + 1,
+      .var_weight = 1,
+    };
+
+    AtpState *atp = thvm_atp_init(&cfg, 64);
+    CHECK(atp != NULL);
+    for (u32 i = 0; i < spec->n_eqns; i++) {
+      CHECK(thvm_atp_add_equation(atp, spec->eqn_lhs[i], spec->eqn_rhs[i]));
+    }
+    thvm_atp_set_goal(atp, spec->goal_lhs, spec->goal_rhs);
+
+    AtpStatus st = thvm_atp_run(atp);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+    CHECK(atp->step <= 20u);
+    thvm_atp_free(atp);
+    wald_free(spec);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

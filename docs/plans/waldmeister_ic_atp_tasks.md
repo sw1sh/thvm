@@ -268,7 +268,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       cover NULL args, empty source, all-junk source, and the
       full group-axiom `.pr` file (spec identity + 4 symbols +
       precedence ranks + 3 vars + 3 axioms + goal lhs/rhs).
-- [ ] 6.3g unit tests: parse the group example from
+- [x] 6.3g unit tests: parse the group example from
       `waldmeister/documents/example.pr` (or a hand-written
       copy), verify n_eqns == 3, goal lhs/rhs structure, and
       that the parsed terms can be passed straight to the
