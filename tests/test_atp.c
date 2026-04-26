@@ -1168,6 +1168,39 @@ int main(void) {
     thvm_atp_free(s_ic);
   }
 
+  TEST_BEGIN("atp/rewrite-flag-default-off");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->use_ic_rewrite, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/rewrite-flag-toggle-preserves-output");
+  {
+    // 8.3e-i: flag is currently a no-op (IC path delegates to
+    // C).  Setting it to 1 must produce the same outputs as the
+    // default path.  Run a single saturation step on the same
+    // axiom under both flag values; n_cps, n_rules, and the
+    // joinability counter must agree.
+    AtpState *s_c = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s_c, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    AtpStatus st_c = thvm_atp_step(s_c);
+
+    AtpState *s_ic = thvm_atp_init(&DUMMY_CFG, 100);
+    s_ic->use_ic_rewrite = 1;
+    CHECK_EQ(s_ic->use_ic_rewrite, 1u);
+    thvm_atp_add_equation(s_ic, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    AtpStatus st_ic = thvm_atp_step(s_ic);
+
+    CHECK_EQ((int)st_c, (int)st_ic);
+    CHECK_EQ(s_c->n_cps,                  s_ic->n_cps);
+    CHECK_EQ(s_c->n_rules,                s_ic->n_rules);
+    CHECK_EQ(s_c->n_cps_dropped_joinable, s_ic->n_cps_dropped_joinable);
+
+    thvm_atp_free(s_c);
+    thvm_atp_free(s_ic);
+  }
+
   TEST_BEGIN("atp/cp-gen-ic-parity-on-group-axioms");
   {
     // Full group-axiom saturation under both paths.  Final

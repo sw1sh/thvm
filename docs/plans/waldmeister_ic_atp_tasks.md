@@ -530,7 +530,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         (analogous to 8.1e's `use_ic_cp_gen`): when set, the
         rewrite step uses the SUP-of-LAMs dispatch.  Re-run
         bench harness; expect within 2x of the C path.
-    - [ ] 8.3e-i `use_ic_rewrite` feature flag on `AtpState`
+    - [x] 8.3e-i `use_ic_rewrite` feature flag on `AtpState`
           (u8, default 0) plus a setter.  Plumb through the
           AtpState-internal callers of `thvm_rewrite_normalize`
           (atp_cp_trivially_joinable, thvm_atp_step,

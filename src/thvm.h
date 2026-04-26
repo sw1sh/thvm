@@ -950,6 +950,15 @@ typedef struct {
   // no-op wrapper (stage 8.1e-i) -- 8.1e-ii lands the actual
   // SUP+PRI routing.  Bench analysis in 8.1e-iii.
   u8   use_ic_cp_gen;
+
+  // Stage 8.3e-i: feature flag for IC-routed rewriting.  When 0
+  // (default), AtpState-internal callers use `thvm_rewrite_
+  // normalize` directly.  When 1, they go through
+  // `atp_rewrite_normalize` shim that dispatches to the IC path.
+  // 8.3e-i lands the flag + plumbing with the IC path stubbed
+  // to delegate to C; 8.3e-ii replaces the body with PRI routing
+  // via `prim_rewrite_step`.
+  u8   use_ic_rewrite;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);

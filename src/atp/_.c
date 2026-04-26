@@ -177,6 +177,30 @@ static void atp_register_primitives(void) {
   prim_register(ATP_PRIM_REWRITE_STEP, prim_rewrite_step, 3);
 }
 
+// 8.3e-i: IC-routed rewrite normalization.  Currently a stub
+// that delegates to the C path so the `use_ic_rewrite` flag is
+// observable but semantically inert.  Stage 8.3e-ii will replace
+// the body with PRI-routed rule dispatch via prim_rewrite_step.
+static Term atp_rewrite_normalize_ic(Term t,
+                                     const Term *lhs, const Term *rhs,
+                                     u32 n_rules, u32 step_cap) {
+  return thvm_rewrite_normalize(t, lhs, rhs, n_rules, step_cap);
+}
+
+// 8.3e-i: AtpState-aware shim.  Dispatches between the C-direct
+// and IC-routed normalize paths based on s->use_ic_rewrite.
+// Replaces direct `thvm_rewrite_normalize` calls in
+// AtpState-internal callers (saturation step, goal-check,
+// interreduce, joinability/connectedness filters).
+static Term atp_rewrite_normalize(AtpState *s, Term t,
+                                  const Term *lhs, const Term *rhs,
+                                  u32 n_rules, u32 step_cap) {
+  if (s != NULL && s->use_ic_rewrite) {
+    return atp_rewrite_normalize_ic(t, lhs, rhs, n_rules, step_cap);
+  }
+  return thvm_rewrite_normalize(t, lhs, rhs, n_rules, step_cap);
+}
+
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
@@ -368,8 +392,8 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   }
 
   const u32 NORM_CAP = 64;
-  Term l = thvm_rewrite_normalize(cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
-  Term r = thvm_rewrite_normalize(cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
 
   if (kbo_eq(l, r)) {
     s->step++;
@@ -529,10 +553,10 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   if (s == NULL || s->goal_lhs == 0) return ATP_RUNNING;
   const u32 NORM_CAP = 64;
-  Term l = thvm_rewrite_normalize(s->goal_lhs, s->lhs, s->rhs,
-                                  s->n_rules, NORM_CAP);
-  Term r = thvm_rewrite_normalize(s->goal_rhs, s->lhs, s->rhs,
-                                  s->n_rules, NORM_CAP);
+  Term l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
+                                 s->n_rules, NORM_CAP);
+  Term r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
+                                 s->n_rules, NORM_CAP);
   return kbo_eq(l, r) ? ATP_PROVED : ATP_RUNNING;
 }
 
@@ -566,7 +590,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   while (i < added.first - dropped) {
     Term old_lhs = s->lhs[i];
     Term old_rhs = s->rhs[i];
-    Term reduced = thvm_rewrite_normalize(old_lhs, new_lhs, new_rhs, n_new, 16);
+    Term reduced = atp_rewrite_normalize(s, old_lhs, new_lhs, new_rhs, n_new, 16);
     if (!kbo_eq(reduced, old_lhs)) {
       // The older rule's LHS simplified -- drop it and requeue
       // (reduced, old_rhs) for re-orientation.
@@ -617,8 +641,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 // generate ~hundreds of trivially-joinable overlaps per round).
 static u8 atp_cp_trivially_joinable(AtpState *s, Term lhs, Term rhs) {
   const u32 NORM_CAP = 64;
-  Term l = thvm_rewrite_normalize(lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
-  Term r = thvm_rewrite_normalize(rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term l = atp_rewrite_normalize(s, lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term r = atp_rewrite_normalize(s, rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
   return kbo_eq(l, r);
 }
 
@@ -652,8 +676,8 @@ static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
     filt_r[n_filt] = s->rhs[k];
     n_filt++;
   }
-  Term l = thvm_rewrite_normalize(lhs, filt_l, filt_r, n_filt, NORM_CAP);
-  Term r = thvm_rewrite_normalize(rhs, filt_l, filt_r, n_filt, NORM_CAP);
+  Term l = atp_rewrite_normalize(s, lhs, filt_l, filt_r, n_filt, NORM_CAP);
+  Term r = atp_rewrite_normalize(s, rhs, filt_l, filt_r, n_filt, NORM_CAP);
   return kbo_eq(l, r);
 }
 

@@ -6,6 +6,38 @@ dated section.
 
 ## Unreleased
 
+### Added: `use_ic_rewrite` feature flag (stage 8.3e-i)
+
+New `u8 use_ic_rewrite` field on `AtpState` (default 0) selects
+between the C-direct and IC-routed rewrite-normalize paths.
+A new shim `atp_rewrite_normalize(s, t, lhs, rhs, n, cap)`
+dispatches:
+
+- `use_ic_rewrite == 0`: `thvm_rewrite_normalize` (the existing
+  C path)
+- `use_ic_rewrite == 1`: `atp_rewrite_normalize_ic` (currently
+  a no-op wrapper that delegates to the C path; 8.3e-ii will
+  replace its body with PRI-routed dispatch via
+  `prim_rewrite_step`)
+
+All AtpState-internal direct callers of
+`thvm_rewrite_normalize` updated to use the shim:
+- `thvm_atp_step` (CP popping + normalize phase, 2 calls)
+- `thvm_atp_goal_check` (goal lhs/rhs normalize, 2 calls)
+- `thvm_atp_interreduce` (old-rule LHS reduction)
+- `atp_cp_trivially_joinable` (7.1 filter, 2 calls)
+- `atp_cp_source_disjoint_connected` (7.2b counter, 2 calls)
+
+Tests in `tests/test_atp.c` (8384 sub-checks, was 8378):
+- `atp/rewrite-flag-default-off`: fresh AtpState has flag 0
+- `atp/rewrite-flag-toggle-preserves-output`: enabling the flag
+  produces identical n_cps / n_rules / n_cps_dropped_joinable
+  to the default path on the same input (the IC path is
+  currently a delegate)
+
+Stage 8.3e-ii will replace the IC path's body with PRI-routed
+rewrite via `prim_rewrite_step`.
+
 ### Added: SUP-of-rules dispatch demo (stage 8.3c)
 
 `tests/test_sup_rewrite.c` (23 sub-checks, 4 cases) demonstrates
