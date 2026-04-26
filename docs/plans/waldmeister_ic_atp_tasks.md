@@ -246,11 +246,17 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       zero-arity constant, two-arg application, nested
       `f(i(x), e)`, unknown ident, arity mismatch (`i(x, y)`
       with arity-1 i), and constant-with-args (`e(x)`).
-- [ ] 6.3e EQUATIONS / CONCLUSION parsers: each section is a
-      sequence of `term = term` pairs.  Push parsed pairs into
-      `spec->eqn_lhs/rhs[]` (axioms) or `spec->goal_lhs/rhs`
-      (single conclusion for proof mode).  Reject multiple
-      conclusions for now (8.x can revisit).
+- [x] 6.3e `wald_parse_equations` / `wald_parse_conclusion` land
+      in `src/wald/_.c`.  Both share an internal
+      `wald_parse_equation_pair` helper that reads
+      `term "=" term` and returns the pair.  EQUATIONS appends
+      each pair to `spec->eqn_lhs/rhs[]` (capped by
+      `WALD_MAX_EQNS`).  CONCLUSION stores only the FIRST pair
+      in `goal_lhs/rhs`; subsequent pairs are parsed (so the
+      section terminates) but discarded.  Tests cover three-
+      axiom EQUATIONS with cross-check on the first pair's
+      structure, empty EQUATIONS, single CONCLUSION, and the
+      reject-multiple behavior.
 - [ ] 6.3f top-level driver `wald_parse(src, spec) -> 0/err`
       that orchestrates the sections in fixed order, returns
       a structured error code on syntax failure (not crashing).

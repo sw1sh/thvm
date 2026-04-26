@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: EQUATIONS + CONCLUSION parsers (stage 6.3e)
+
+`wald_parse_equations` and `wald_parse_conclusion` land in
+`src/wald/_.c`.  Both share a small `wald_parse_equation_pair`
+helper that reads `term "=" term`, returning 1 on success.
+
+EQUATIONS appends each pair to `spec->eqn_lhs/rhs[]` (capped at
+`WALD_MAX_EQNS`).  CONCLUSION writes only the FIRST pair into
+`goal_lhs/goal_rhs`; subsequent pairs in the same section are
+parsed (so the section terminates correctly) but discarded.
+This matches the proof-mode constraint of one conjecture per
+spec; multi-conclusion is a 8.x revisit.
+
+Both share the same recovery pattern as 6.3c2..c5: peek for
+end-of-section keyword, fall through to `wald_skip_to_section`
+on parse error so downstream parsers still get the next
+section's keyword.
+
+Tests in `tests/test_wald.c` (183 sub-checks) cover:
+- three-axiom EQUATIONS (`f(x, e) = x  f(x, i(x)) = e
+  f(f(x, y), z) = f(x, f(y, z))  CONCLUSION ...`) with cross-
+  check on the first pair's CTR/FVR structure
+- empty EQUATIONS section (immediate `CONCLUSION` keyword)
+- single CONCLUSION storing the goal
+- reject-multiple: `a = e  i(a) = a` keeps only `a = e`
+
 ### Added: Waldmeister .pr term parser (stage 6.3d)
 
 `wald_parse_term(spec, lex) -> Term` lands in `src/wald/_.c`.

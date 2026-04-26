@@ -983,6 +983,13 @@ fn WaldSection wald_parse_ordering (WaldSpec *spec, WaldLex *lex);
 // (unknown ident, missing close paren, arity mismatch, ...).
 fn Term        wald_parse_term     (WaldSpec *spec, WaldLex *lex);
 
+// 6.3e: parse a sequence of `term = term` pairs.  EQUATIONS pushes
+// onto spec->eqn_lhs/rhs[].  CONCLUSION stores in spec->goal_lhs/rhs;
+// only the FIRST conclusion lands (subsequent pairs parsed but
+// discarded -- matches the proof-mode constraint of one conjecture).
+fn WaldSection wald_parse_equations (WaldSpec *spec, WaldLex *lex);
+fn WaldSection wald_parse_conclusion(WaldSpec *spec, WaldLex *lex);
+
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.

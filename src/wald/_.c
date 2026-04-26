@@ -356,6 +356,73 @@ fn Term wald_parse_term(WaldSpec *spec, WaldLex *lex) {
   return term_new_ctr(sym->label, args, n_args);
 }
 
+// === 6.3e: EQUATIONS / CONCLUSION parsers ==========================
+//
+// Both sections are sequences of `term = term` pairs.  The parser
+// peeks for a section keyword first (handles end-of-section or
+// empty section), then reads lhs / "=" / rhs and stores the pair.
+// On parse error it falls through to wald_skip_to_section so
+// downstream parsers still get the next section keyword.
+//
+// EQUATIONS appends to spec->eqn_lhs/rhs[].  CONCLUSION writes to
+// spec->goal_lhs / goal_rhs; subsequent pairs are parsed (so the
+// section terminates correctly) but discarded -- proof mode
+// constrains the spec to a single conjecture.
+
+// Helper: parse one `term = term` pair.  Returns 1 on success
+// (out-params populated) or 0 on parse error.
+static u8 wald_parse_equation_pair(WaldSpec *spec, WaldLex *lex,
+                                   Term *lhs_out, Term *rhs_out) {
+  Term lhs = wald_parse_term(spec, lex);
+  if (lhs == 0) return 0;
+  if (wald_lex_next(lex) != WT_EQ) return 0;
+  Term rhs = wald_parse_term(spec, lex);
+  if (rhs == 0) return 0;
+  *lhs_out = lhs;
+  *rhs_out = rhs;
+  return 1;
+}
+
+fn WaldSection wald_parse_equations(WaldSpec *spec, WaldLex *lex) {
+  for (;;) {
+    WaldTokKind k = wald_lex_peek(lex);
+    if (k == WT_END) return WSEC_NONE;
+    if (k == WT_IDENT) {
+      WaldSection sec = wald_section_from_ident(lex->peeked_text);
+      if (sec != WSEC_NONE) { wald_lex_next(lex); return sec; }
+    }
+    Term lhs = 0, rhs = 0;
+    if (!wald_parse_equation_pair(spec, lex, &lhs, &rhs)) {
+      return wald_skip_to_section(lex);
+    }
+    if (spec != NULL && spec->n_eqns < WALD_MAX_EQNS) {
+      spec->eqn_lhs[spec->n_eqns] = lhs;
+      spec->eqn_rhs[spec->n_eqns] = rhs;
+      spec->n_eqns++;
+    }
+  }
+}
+
+fn WaldSection wald_parse_conclusion(WaldSpec *spec, WaldLex *lex) {
+  for (;;) {
+    WaldTokKind k = wald_lex_peek(lex);
+    if (k == WT_END) return WSEC_NONE;
+    if (k == WT_IDENT) {
+      WaldSection sec = wald_section_from_ident(lex->peeked_text);
+      if (sec != WSEC_NONE) { wald_lex_next(lex); return sec; }
+    }
+    Term lhs = 0, rhs = 0;
+    if (!wald_parse_equation_pair(spec, lex, &lhs, &rhs)) {
+      return wald_skip_to_section(lex);
+    }
+    // Store only the first conclusion; ignore subsequent pairs.
+    if (spec != NULL && spec->goal_lhs == 0) {
+      spec->goal_lhs = lhs;
+      spec->goal_rhs = rhs;
+    }
+  }
+}
+
 // === 6.3c5: ORDERING section parser ================================
 //
 // Grammar:

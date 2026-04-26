@@ -619,6 +619,95 @@ int main(void) {
     wald_free(s);
   }
 
+  // === 6.3e EQUATIONS / CONCLUSION parsers ===========================
+
+  // Helper to set up the standard group signature.
+  TEST_BEGIN("wald/parse-equations-three-axioms");
+  {
+    WaldSpec *s = wald_init();
+    s->n_symbols = 4;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+    s->symbols[0].label = 1; s->symbols[0].arity = 0;
+    strncpy(s->symbols[1].name, "i", WALD_NAME_LEN - 1);
+    s->symbols[1].label = 2; s->symbols[1].arity = 1;
+    strncpy(s->symbols[2].name, "f", WALD_NAME_LEN - 1);
+    s->symbols[2].label = 3; s->symbols[2].arity = 2;
+    strncpy(s->symbols[3].name, "a", WALD_NAME_LEN - 1);
+    s->symbols[3].label = 4; s->symbols[3].arity = 0;
+    s->n_vars = 3;
+    strncpy(s->vars[0].name, "x", WALD_NAME_LEN - 1); s->vars[0].var_id = 0;
+    strncpy(s->vars[1].name, "y", WALD_NAME_LEN - 1); s->vars[1].var_id = 1;
+    strncpy(s->vars[2].name, "z", WALD_NAME_LEN - 1); s->vars[2].var_id = 2;
+
+    WaldLex lex;
+    wald_lex_init(&lex,
+      "f(x, e) = x  "
+      "f(x, i(x)) = e  "
+      "f(f(x, y), z) = f(x, f(y, z))  "
+      "CONCLUSION foo");
+    CHECK_EQ((int)wald_parse_equations(s, &lex), (int)WSEC_CONCLUSION);
+    CHECK_EQ(s->n_eqns, 3u);
+
+    // Spot-check the first axiom: lhs is f(x, e), rhs is x.
+    Term lhs0 = s->eqn_lhs[0];
+    Term rhs0 = s->eqn_rhs[0];
+    CHECK_EQ(term_tag(lhs0), TAG_CTR);
+    CHECK_EQ(term_ext(lhs0), 3u);                // f
+    CHECK_EQ(term_ext(term_ctr_at(lhs0, 1)), 1u); // e
+    CHECK_EQ(term_tag(rhs0), TAG_FVR);
+    CHECK_EQ(term_ext(rhs0), 0u);                 // x
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-equations-empty-section");
+  {
+    WaldSpec *s = wald_init();
+    WaldLex lex;
+    wald_lex_init(&lex, "CONCLUSION foo");
+    CHECK_EQ((int)wald_parse_equations(s, &lex), (int)WSEC_CONCLUSION);
+    CHECK_EQ(s->n_eqns, 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-conclusion-stores-goal");
+  {
+    WaldSpec *s = wald_init();
+    s->n_symbols = 2;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+    s->symbols[0].label = 1; s->symbols[0].arity = 0;
+    strncpy(s->symbols[1].name, "a", WALD_NAME_LEN - 1);
+    s->symbols[1].label = 4; s->symbols[1].arity = 0;
+
+    WaldLex lex;
+    wald_lex_init(&lex, "a = e");
+    CHECK_EQ((int)wald_parse_conclusion(s, &lex), (int)WSEC_NONE);
+    CHECK_EQ(term_tag(s->goal_lhs), TAG_CTR);
+    CHECK_EQ(term_ext(s->goal_lhs), 4u);   // a
+    CHECK_EQ(term_tag(s->goal_rhs), TAG_CTR);
+    CHECK_EQ(term_ext(s->goal_rhs), 1u);   // e
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-conclusion-rejects-multiple");
+  {
+    WaldSpec *s = wald_init();
+    s->n_symbols = 3;
+    strncpy(s->symbols[0].name, "a", WALD_NAME_LEN - 1);
+    s->symbols[0].label = 4; s->symbols[0].arity = 0;
+    strncpy(s->symbols[1].name, "e", WALD_NAME_LEN - 1);
+    s->symbols[1].label = 1; s->symbols[1].arity = 0;
+    strncpy(s->symbols[2].name, "i", WALD_NAME_LEN - 1);
+    s->symbols[2].label = 2; s->symbols[2].arity = 1;
+
+    WaldLex lex;
+    wald_lex_init(&lex, "a = e   i(a) = a");
+    CHECK_EQ((int)wald_parse_conclusion(s, &lex), (int)WSEC_NONE);
+    // Only the first pair stored: a = e
+    CHECK_EQ(term_ext(s->goal_lhs), 4u);   // a (NOT i(a))
+    CHECK_EQ(term_ext(s->goal_rhs), 1u);   // e (NOT a)
+    wald_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
