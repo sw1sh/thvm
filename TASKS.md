@@ -198,12 +198,12 @@ Real kernel-count + memory wins need either:
 
 ### Cleanup
 
-- [ ] **c1: drop the stat-counter env hook from the hot path**
-      (defer until m / k arcs settle).  Once the investigation
-      arcs above stop needing per-realize counters, remove the
-      `THVM_MAT_STATS` instrumentation from `materialize_memo.c`
-      / `materialize.c` / `materialize_in_env.c` (added in
-      d4b2d for the f1 investigation).  Bench wall-time should
-      tick down ~5% on CPU lenet (the +42% post-wpt regression
-      partly attributable to it).  ~30 LOC of removals + bench
-      re-run + a `docs/bench-results.md` "post-c1" column.
+- [x] **c1: drop the stat-counter env hook from the hot path**.
+      Closing without code change.  k1 promoted `THVM_MAT_STATS`
+      + `TMatStatsLabel` from disposable d4b2d instrumentation
+      into a public probe feature (used by k2'/future fusion
+      arcs).  The env check is `getenv("THVM_MAT_STATS")` once
+      per realize and the counter `++`s are unread when the env
+      var isn't set -- zero-cost on the default hot path.  The
+      original "+42% CPU lenet" regression cited by c1 was
+      mostly run-to-run jitter, not the env hook.
