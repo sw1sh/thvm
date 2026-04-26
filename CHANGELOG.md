@@ -6,6 +6,43 @@ dated section.
 
 ## Unreleased
 
+### Added: SupGen-style search design memo (stage 8.10a)
+
+`docs/plans/supgen_search_design.md` (~120 lines) closes the
+question of "what additional superposition adds value" given
+the IC-native ATP arc's existing SupGen-flavored mechanisms:
+
+**Starting position recap**: CP-priority queue (5.3) +
+SUP-encoded CP enumeration (8.1) + --mix heuristic (8.8) all
+already use the SupGen pattern.  The CP queue specifically
+wraps each CP in `INC^k` and collapses via
+`thvm_collapse_ordered` -- this *is* SupGen-style search at
+the CP-selection level.
+
+**Surveyed extensions**:
+1. **A. Superpose unfailing-orient direction** -- breaks
+   completeness; rejected.
+2. **B. Superpose KBO vs LPO** -- empirically redundant on the
+   v0 corpus (8.5d showed identical orientations); defer to
+   TPTP-UEQ corpus expansion.
+3. **C. Superpose --add vs --mix** -- trivially redundant
+   (`min(add, mix) = add` always).
+4. **D. Trace-level superposition** (the genuine SupGen
+   vision) -- research-grade, multi-firing, requires
+   backtracking machinery.
+
+**Decision**: 8.10b ships a small demonstrative
+`thvm_atp_peek_top_k` API that exposes the existing INC-priority
+collapse pipeline as a non-popping peek; 8.10c writes the
+arc-closing memo as the substantive deliverable.
+
+**Honest mid-arc finding**: trace-level SupGen is more research
+than engineering for this codebase today.  The CP-priority
+queue is the SupGen mechanism that DID find a home; deeper
+integration is left for follow-on when a use case (e.g., a
+TPTP family that benefits from multi-trace exploration)
+emerges.
+
 ### Added: TATP[..., Witness -> {x_}] WL surface (stage 8.9e)
 
 `TATP[]` gains a `Witness -> {x_, y_, ...}` option (default

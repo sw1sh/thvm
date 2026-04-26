@@ -691,7 +691,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 8.10 SupGen-style search inside saturation: superpose the
       "which CP to pick next" choice, collapse with priority,
       compare against the explicit-queue baseline
-  - [ ] 8.10a design memo `docs/plans/supgen_search_design.md`:
+  - [x] 8.10a design memo `docs/plans/supgen_search_design.md`:
         observe that `thvm_atp_select_cp` already implements
         SupGen-style search for CP selection (each CP wrapped
         in INC^k, folded into a SUP tree, popped via
