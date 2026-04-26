@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Verified: ATP arc baseline green (stage 0 sanity)
+
+`make test` (48 C executables, 166 sub-checks) and `make wl-test`
+(295 WL VerificationTests) both green at HEAD `f49f267`.  First
+firing of cron `757c483c` driving
+[docs/plans/waldmeister_ic_atp_tasks.md](docs/plans/waldmeister_ic_atp_tasks.md)
+through stages 5-8+.
+
 ### Added: ICC type-flow primitives (TAG_BRI + TAG_ANN, real ICC rules)
 
 `TAG_BRI = 23` (Bridge / Val: θx.body) and `TAG_ANN = 24`

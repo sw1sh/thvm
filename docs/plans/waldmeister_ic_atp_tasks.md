@@ -27,9 +27,9 @@ memory/kernelization arc, owned by a different cron lineage.
 
 ## Stage 0 -- sanity
 
-- [ ] confirm baseline: `make test` (47 C executables) and `make
-      wl-test` (295 WL VerificationTests) both green at HEAD.  If
-      not, that's the first thing to fix.
+- [x] confirm baseline: `make test` (48 C executables, 166
+      sub-checks) and `make wl-test` (295 WL VerificationTests)
+      both green at HEAD `f49f267`.
 
 ## Stage 5 -- saturation loop driven by collapse
 
