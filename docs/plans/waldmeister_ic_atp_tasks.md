@@ -386,7 +386,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 
 - [ ] 8.1 SUP-encoded CP enumeration via `TAG_PRI` unify (deferred
       4.5 -- moves CP gen from C-side to native IC reduction)
-  - [ ] 8.1a design memo `docs/plans/sup_encoded_cps.md`:
+  - [x] 8.1a design memo `docs/plans/sup_encoded_cps.md`:
         survey TinyHVM / HVM4 for `TAG_PRI` ("primitive function
         call") patterns, sketch the SUP-cross-product encoding
         for `overlap-position x rule-pair`, and analyze

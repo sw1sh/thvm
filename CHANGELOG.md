@@ -6,6 +6,33 @@ dated section.
 
 ## Unreleased
 
+### Added: SUP-encoded CP enumeration design memo (stage 8.1a)
+
+`docs/plans/sup_encoded_cps.md` (~200 lines) lands the design
+sketch for stage 8.1.  Surveys HVM4's `TAG_PRI` reference
+implementation (registry table mapping `id -> (PrimFn, arity)`,
+APP-PRI partial-application interaction); spells out the
+SUP-cross-product encoding for the
+`outer_rule x inner_rule x overlap_position` triple via three
+labeled SUPs and APP-SUP commutation; analyzes feasibility
+and concludes labeled SUPs suffice (8.6 unordered SUPs are an
+optimization, not a prerequisite).
+
+Migration target documented: `thvm_unify`, `thvm_match`,
+`thvm_subst_apply`, `kbo_eq` stay in C as `TAG_PRI` callbacks;
+`thvm_critical_pairs_range` and `atp_push_cps_traced`'s loop
+move to IC.
+
+Decision: 8.1 unblocks 8.10 (SupGen-style search) -- 8.10
+needs CPs reified as SUP entries to superpose the
+"which next CP" choice.  Implementation order: 8.1 then 8.10.
+
+Stop conditions for the implementation subtasks: revert to
+8.4 / 8.5 if `TAG_PRI` integration runs into the existing
+stack-machine reducer; treat 8.1 as research infrastructure
+(not a perf win) if IC enumeration is structurally correct
+but asymptotically slower.
+
 ### Added: Twee comparison harness `tools/bench_twee.c` (stage 7.4d)
 
 `tools/bench_twee.c` parses each `.pr` in `tests/data/atp/` via
