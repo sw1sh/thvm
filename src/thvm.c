@@ -54,6 +54,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "term/new_and.c"
 #include "term/new_or.c"
 #include "term/new_any.c"
+#include "term/new_inc.c"
 
 // === heap/ ===
 #include "heap/alloc.c"
@@ -163,6 +164,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // interact_kernel fires bottom-up.
 #include "schedule/kernel_alloc.c"
 #include "schedule/shape_env.c"
+#include "schedule/materialize_memo.c"
 #include "schedule/materialize.c"
 #include "schedule/materialize_in_env.c"
 #include "schedule/walk.c"

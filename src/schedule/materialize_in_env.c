@@ -55,7 +55,7 @@ static ChildKind classify_child(Term child, u32 env_id, u32 *out_tid,
 
 // Build a kernel for a single UOP node.  Children must already be
 // shape-known (concrete or VAR-with-env-binding).
-fn Term materialize_uop_in_env(Term uop, u32 env_id) {
+static Term materialize_uop_in_env_inner(Term uop, u32 env_id) {
     if (term_tag(uop) != TAG_UOP) return uop;
     u32 op = term_ext(uop);
     // Meta ops the walker shouldn't kernelize:
@@ -572,4 +572,31 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, ke->output_tid));
     heap_set(kloc + 1, term_new(0, TAG_NUM, DT_I32, kid));
     return term_new(0, TAG_UOP, UOP_KERNEL, kloc);
+}
+
+// Memo-wrapped public entry.  Walk visits each parent's heap cell
+// independently; without dedup, a UOp shared by N parents emits N
+// kernels (each parent's cell gets rewritten to its own freshly
+// allocated KERNEL).  The memo collapses them to a single kernel
+// per UOp loc within one thvm_materialize call.
+//
+// Memo only fires when env_id == 0 (the common case for fully
+// concrete graphs from WL).  Non-zero env_id means the UOp is
+// inside an APP-LAM body whose VAR-binding shapes come from the
+// env -- two parents in different env scopes could legitimately
+// produce different kernels for the same UOp loc, so leave that
+// path un-memoed for correctness.
+fn Term materialize_uop_in_env(Term uop, u32 env_id) {
+    u64 memo_key = (env_id == 0
+                 && term_tag(uop) == TAG_UOP
+                 && term_ext(uop) != UOP_KERNEL
+                 && term_ext(uop) != UOP_GRAD)
+                 ? term_val(uop) : 0;
+    if (memo_key != 0) {
+        Term hit = materialize_memo_lookup(memo_key);
+        if (hit != 0) return hit;
+    }
+    Term out = materialize_uop_in_env_inner(uop, env_id);
+    if (memo_key != 0) materialize_memo_store(memo_key, out);
+    return out;
 }

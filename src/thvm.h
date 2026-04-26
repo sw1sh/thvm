@@ -542,6 +542,15 @@ fn Term materialize_kernel_inlined(Term realized_uop_term);
 // legacy view-only alias / kernel emit path.
 fn u8 inline_is_inlinable(u8 op);
 
+// f1d-d4b2: per-realize dedup memo for the materialize entry
+// points.  Without it, shared UOps in grad chains emit one
+// kernel per reaching path; with it, each UOp loc maps to a
+// single emitted Term (UOP_KERNEL or TAG_TEN) for the duration
+// of one thvm_materialize call.  See src/schedule/materialize_memo.c.
+fn void materialize_memo_clear (void);
+fn Term materialize_memo_lookup(u64 loc);
+fn void materialize_memo_store (u64 loc, Term t);
+
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.
 fn Term interact_app_lam(Term lam, Term arg);

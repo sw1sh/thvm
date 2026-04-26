@@ -4886,18 +4886,57 @@ implemented + tested (f1a) but never invoked by the pipeline.
                 f1d-d4b1c: cap bump + actually flip default. -->
 
 
-  - [ ] **f1d-d4b2: deliver the fusion gain**.  After
-        d4b1 stops overhead, attack fusion: the helper
-        should ACTUALLY reduce kernel count for elementwise
-        chains.  Probably means making materialize_expr's
-        per-UOp emit short-circuit when an upstream
-        elementwise chain has been absorbed.  Validated by
-        d4a's probe: toggle ON should drop poly-regression
-        to <= 50 kernels (was 100 legacy).  Acceptance:
-        same as d4b1 PLUS measured kernel-count drop on
-        linear-train memory-probe.wls.  ~50-100 LOC; can
-        be re-decomposed if the right mechanism turns out
-        to be a bigger refactor.
+  - [x] **f1d-d4b2a: dedup memo across recursive calls** (the
+        cap-blow-up part of d4b2).  Added a per-realize memo
+        table (loc -> emitted Term) wrapping both
+        materialize_expr and materialize_uop_in_env, plus a
+        re-classify of the unrolled GRAD chain so
+        realize_is_realized actually fires for backward UOps
+        (otherwise the helper hook stays silent for grad).
+        Memo cleared at the top of thvm_materialize.
+        Files:
+            src/schedule/materialize_memo.c (new, ~50 LOC)
+            src/schedule/materialize.c       (memo wrapper +
+                                              GRAD re-classify)
+            src/schedule/materialize_in_env.c (memo wrapper)
+            src/thvm.h                       (3 fn decls)
+            src/thvm.c                       (1 #include)
+        Acceptance: 166 C + 292 WL green with default OFF AND
+        with default ON (the d4b1c blocker -- KERNELS_CAP
+        exhaustion -- is gone; toggle ON now lands cleanly
+        across the full sweep).  ~80 LOC.
+
+  - [ ] **f1d-d4b2b: helper coverage of REDUCE / movement
+        upstream**.  d4b2a's memo + re-classify make toggle ON
+        run cleanly to completion, but the kernel-count drop
+        promised by the d4b2 acceptance ("toggle ON should
+        drop poly-regression to <= 50 kernels (was 100
+        legacy)") doesn't materialize: linear-train
+        memory-probe.wls is now 18 + 79 + 71 = 168 kernels
+        with toggle ON vs. 17 + 40 + 36 = 93 with toggle OFF
+        (regression of ~75).  Diagnosis: the helper only
+        succeeds when ALL upstream is elementwise +
+        UOP_CONST.  In LeNet/linear-train backward chains,
+        most realized UOps have movement (RESHAPE / EXPAND /
+        PERMUTE) or REDUCE upstream; helper bails (returns
+        0), and the legacy fall-through then allocates a
+        kernel for the realized parent AND for each upstream
+        movement / REDUCE node -- net effect is MORE
+        kernels than legacy, not fewer.  Needed: extend
+        materialize_kernel_inlined to (a) treat realized
+        upstream UOPs as input slots even when un-rewritten
+        on the heap (so the bail doesn't cascade), and/or
+        (b) emit a multi-stage program with intermediate
+        scratch slots.  ~100-200 LOC; re-decompose if the
+        right mechanism is a bigger refactor.
+
+  - [ ] **f1d-d4b2c: rerun the d4a fusion probe + lock in
+        the criterion**.  After d4b2b lands, re-run
+        wl/Examples/linear-train/memory-probe.wls and the
+        poly-regression scenario from use_realize.wlt.  Goal
+        numbers: linear-train toggle ON <= 50 kernels per
+        TRealize call (currently 18, 79, 71); poly-regression
+        toggle ON <= 50 total (currently 105 vs OFF=91).
 
   - [ ] **f1d-d4c: actually flip default + verify**.  After
         d4b lands, set MATERIALIZE_USE_REALIZE_INFO default

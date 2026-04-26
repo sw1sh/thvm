@@ -222,9 +222,14 @@ fn u32 op_output_dtype(u8 op, u32 const *in_tids, u8 n_in, u32 const_dtype) {
   return TENS[in_tids[0]].dtype;
 }
 
+// Forward decl: the recursive calls below (GRAD unrolling and the
+// child loop) go through the memo-wrapped public entry point so
+// shared subexpressions hit the dedup table.
+fn Term materialize_expr(Term expr);
+
 // ---- core: materialize a single UOp into a fresh UOP_KERNEL term.
 //      Children that are UOps are recursively materialized (bottom-up). ----
-fn Term materialize_expr(Term expr) {
+static Term materialize_expr_inner(Term expr) {
   // Lazy outermost-layer resolution (VAR-SUB / ALO chains) first,
   // then a single wnf step ONLY if the result still isn't
   // structurally a UOP / TEN / NUM -- which catches LAM / APP /
@@ -247,8 +252,15 @@ fn Term materialize_expr(Term expr) {
 
   // GRAD: reduce the chain rule first (the rewrite rule is pure;
   // it produces a UOp graph with no GRAD nodes), then materialize
-  // the resulting graph.
-  if (op == UOP_GRAD) return materialize_expr(interact_grad(expr));
+  // the resulting graph.  The unrolled UOps have fresh heap locs
+  // not in the pre-unroll realize-classifier table, so re-classify
+  // before the recursive materialize -- otherwise realize_is_realized
+  // returns 0 for every backward UOp and the f1d helper never fires.
+  if (op == UOP_GRAD) {
+    Term unrolled = interact_grad(expr);
+    if (MATERIALIZE_USE_REALIZE_INFO) realize_classify(unrolled);
+    return materialize_expr(unrolled);
+  }
 
   // f1d-d4b1: when the toggle is on, route every inlinable UOp
   // (realized OR not) through the inlined helper.  An inlinable
@@ -260,8 +272,16 @@ fn Term materialize_expr(Term expr) {
   // than legacy (per d4a's probe).  Helper bails on movement /
   // REDUCE / GRAD roots; in that case fall through to the
   // legacy per-UOp emit below.
-  if (MATERIALIZE_USE_REALIZE_INFO
-      && (realize_is_realized(expr) || inline_is_inlinable(op))) {
+  // Only fire helper for REALIZED.  Routing un-realized inlinable
+  // through helper would allocate one 1-op kernel per absorbable
+  // child, so the realized parent's helper invocation (which
+  // re-inlines from the original UOp on the heap) ends up
+  // double-emitting the compute -- exactly the duplication d4b1c
+  // hit.  materialize_expr_inner's child loop expects fully-
+  // materialized children, so we cannot "return UOp unchanged"
+  // here the way walk's hook does; instead, fall through to the
+  // legacy per-UOp emit below for un-realized cases.
+  if (MATERIALIZE_USE_REALIZE_INFO && realize_is_realized(expr)) {
     Term k = materialize_kernel_inlined(expr);
     if (k != 0) return k;
   }
@@ -484,6 +504,24 @@ fn Term materialize_expr(Term expr) {
   return term_new(0, TAG_UOP, UOP_KERNEL, kloc);
 }
 
+// Memo-wrapped public entry point.  Shared UOp instances reachable
+// through multiple parents (typical of grad chains) otherwise emit
+// one kernel per reaching path; the memo collapses them to a single
+// emit per thvm_materialize call.  See src/schedule/materialize_memo.c
+// for the table semantics + clear policy.
+fn Term materialize_expr(Term expr) {
+  u64 memo_key = (term_tag(expr) == TAG_UOP
+                  && term_ext(expr) != UOP_KERNEL)
+               ? term_val(expr) : 0;
+  if (memo_key != 0) {
+    Term hit = materialize_memo_lookup(memo_key);
+    if (hit != 0) return hit;
+  }
+  Term out = materialize_expr_inner(expr);
+  if (memo_key != 0) materialize_memo_store(memo_key, out);
+  return out;
+}
+
 // Post-materialize: if the result is a TAG_TEN whose View is
 // non-contiguous (e.g., a sub-item-f3c view-only EXPAND alias at
 // the ROOT of a TRealize), allocate a fresh contig target-numel
@@ -546,6 +584,11 @@ fn Term thvm_materialize(Term term) {
   // toggle MATERIALIZE_USE_REALIZE_INFO gates whether downstream
   // code paths actually use it.
   realize_classify(term);
+  // f1d-d4b2: reset the per-realize dedup memo.  Heap locs may be
+  // reused after a pool_rollback between realizes, so a stale
+  // memo entry from the previous realize would alias an unrelated
+  // UOp to the wrong cached kernel.
+  materialize_memo_clear();
   if (term_tag(term) == TAG_TEN) return materialize_root_alias(term);
   if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_KERNEL) return term;
   Term walked = materialize_walk(term);
