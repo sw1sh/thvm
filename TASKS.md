@@ -5002,13 +5002,15 @@ implemented + tested (f1a) but never invoked by the pipeline.
         when THVM_MAT_STATS unset).
 
 
-  - [ ] **f1d-d4c: actually flip default + verify**.  After
-        d4b lands, set MATERIALIZE_USE_REALIZE_INFO default
-        to 1.  Run full sweep: 166 C + 292 WL green;
-        lenet-mnist verify.wls Metal still converges
-        loss 2.61 -> 0.025; linear-train memory-probe.wls
-        TMemoryPlanReport shows the kernel-count drop.
-        ~5 LOC + measurement.
+  - [x] **f1d-d4c: actually flip default + verify**.
+        Superseded by d4b2d's option (c) decision: default
+        stays OFF.  d4b2d's probe data showed flipping to
+        ON would regress kernel counts (poly 91 -> 105,
+        lin 93 -> 157) without delivering the fusion gain
+        the criterion required.  Toggle stays opt-in via
+        TSetUseRealizeInfo[True] for use_realize.wlt and
+        future experiments.  166 C + 292 WL green on the
+        default (verified across d4b2a/b1/b2/b3/d).
 
   - [ ] **f1e: bench delta + docs update**.  Re-run
         `wl/Examples/_bench/baseline.wls` on both backends.
