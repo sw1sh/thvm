@@ -6,6 +6,37 @@ dated section.
 
 ## Unreleased
 
+### Added: multi-witness narrowing design memo (stage 9.1a)
+
+`docs/plans/multi_witness_design.md` (~150 lines) specifies
+the bounded DFS extension of stage 8.9's first-witness
+narrow into a multi-witness enumerator.
+
+- Algorithm: bounded DFS over `(position, rule)` choices on
+  the `(lhs, rhs)` state, accumulating substitutions, leaf
+  on `kbo_eq` / depth cap / witness cap.
+- API:
+  ```c
+  fn u32 thvm_atp_narrow_all(AtpState *s,
+                             Term lhs, Term rhs,
+                             u32 max_depth,
+                             u32 max_witnesses,
+                             RewriteSubst *witnesses);
+  ```
+  Stateless w.r.t. `s->witness_subst` (writes only the
+  caller's array, leaves `s` unchanged).
+- Bounds: `max_depth=8` (mirrors `ATP_NARROW_BUDGET`),
+  `max_witnesses=16`, `step_cap=0` (v0 keeps `R` fixed -- no
+  saturation interleaved with narrow).
+- Distinctness: v0 returns raw witnesses; caller post-filters.
+- WL surface plan: `TATP[..., AllWitnesses -> True]` returns
+  `<|"Witnesses" -> {<|x -> t1|>, ...}|>`; default
+  (`AllWitnesses -> False`) is backwards-compatible.
+- Note: multi-witness is the small-scale form of trace-level
+  SupGen (8.10 deferred research vector); 9.1 is the seed.
+
+Documentation-only. Tests stay green (166/166).
+
 ### Added: IC-native ATP arc closing memo (stage 8.10c)
 
 `docs/plans/atp_arc_summary.md` (~250 lines) closes the arc.

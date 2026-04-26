@@ -734,7 +734,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       enumerates ALL witnesses up to a bound.  WL surface:
       `TATP[..., AllWitnesses -> True]` returns a list of
       Association entries.
-  - [ ] 9.1a design memo `docs/plans/multi_witness_design.md`:
+  - [x] 9.1a design memo `docs/plans/multi_witness_design.md`:
         survey the search-tree structure (DFS over (position,
         rule) choices); pick bounds (max-depth + max-witnesses
         + step-cap); decide if witness-distinctness should be
