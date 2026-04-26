@@ -25,7 +25,7 @@ samples) and prints the loss curve.
 
 `memory-probe.wls` runs one forward + backward + Adam update,
 prints kernel / tensor / buffer deltas at each phase, then
-exports `memory-plan-{cpu,metal}.png` Gantt charts for the
+exports `memory-plan-{cpu,metal}.svg` Gantt charts for the
 captured `TMemoryPlan`.
 
 ## What you should see

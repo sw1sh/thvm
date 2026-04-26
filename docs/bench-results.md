@@ -246,7 +246,8 @@ What did NOT move (and why):
 - `wl/Examples/lenet-mnist/verify.wls` Metal: loss 2.61 ->
   0.025 in 4 Adam steps (unchanged from post-wpt).
 - TMemoryPlanGantt PNG snapshots re-rendered:
-  `wl/Examples/_bench/baseline-{cpu,metal}-{lenet,beautiful}-mnist.png`.
+  `wl/Examples/_bench/baseline-{cpu,metal}-{lenet,beautiful}-mnist.svg`
+  (vector; superseded the prior `.png` snapshots in m1).
 
 ## Reproducing
 
@@ -257,6 +258,6 @@ wolframscript -f wl/Examples/_bench/baseline.wls
 THVM_BACKEND=metal wolframscript -f wl/Examples/_bench/baseline.wls
 ```
 
-Compare PNG snapshots under `wl/Examples/_bench/baseline-*.png`;
+Compare SVG snapshots under `wl/Examples/_bench/baseline-*.svg`;
 they're byte-identical to the bm3 captures because the layout is
 deterministic.

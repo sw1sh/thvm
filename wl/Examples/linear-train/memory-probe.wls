@@ -97,9 +97,8 @@ debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];
 
 Module[{plan = TMemoryPlan[], backend, path},
     backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
-    path    = "wl/Examples/linear-train/memory-plan-" <> backend <> ".png";
-    Export[path, TMemoryPlanGantt[plan],
-        ImageResolution -> 144, Background -> White];
+    path    = "wl/Examples/linear-train/memory-plan-" <> backend <> ".svg";
+    Export[path, TMemoryPlanGantt[plan], Background -> White];
     debugPrint[""];
     debugPrint["TMemoryPlanGantt -> ", path]
 ]

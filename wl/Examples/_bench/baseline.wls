@@ -145,9 +145,9 @@ Do[
             ToLowerCase @ StringSplit[result["name"]][[1]],
             {"(" -> "", ")" -> "", "," -> ""}];
         ganttPath = "wl/Examples/_bench/baseline-" <>
-                    backendLabel <> "-" <> slug <> ".png";
+                    backendLabel <> "-" <> slug <> ".svg";
         Export[ganttPath, TMemoryPlanGantt[TMemoryPlan[]],
-            ImageResolution -> 144, Background -> White];
+            Background -> White];
         debugPrint["  TMemoryPlanGantt -> ", ganttPath]
     ],
     {spec, benches}

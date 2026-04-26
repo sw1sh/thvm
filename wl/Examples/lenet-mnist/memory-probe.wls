@@ -114,14 +114,15 @@ debugPrint["  Kernels  : ", TKernelCount[]];
 debugPrint[""];
 debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];
 
-(* Render the Gantt to a sibling PNG so the visualization is
-   browsable outside a notebook session.  Filename encodes the
-   active backend so CPU + Metal runs land at distinct paths. *)
+(* Render the Gantt to a sibling SVG so the visualization is
+   browsable outside a notebook session AND zoom-friendly (the
+   391-buf LeNet plot needs vector scaling to be legible).
+   Filename encodes the active backend so CPU + Metal runs land
+   at distinct paths. *)
 Module[{plan = TMemoryPlan[], backend, path},
     backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
-    path    = "wl/Examples/lenet-mnist/memory-plan-" <> backend <> ".png";
-    Export[path, TMemoryPlanGantt[plan],
-        ImageResolution -> 144, Background -> White];
+    path    = "wl/Examples/lenet-mnist/memory-plan-" <> backend <> ".svg";
+    Export[path, TMemoryPlanGantt[plan], Background -> White];
     debugPrint[""];
     debugPrint["TMemoryPlanGantt -> ", path]
 ]

@@ -88,6 +88,13 @@ computeKernelDepths[kernels_, tens_] := Block[{
    Backend dispatch: backend_id == 1 reads the CPU buf table for
    nbytes/refcount/preserved/freeable; backend_id == 2 reads the
    Metal table (no preserved/freeable, defaulted to 0). *)
+(* Map dtype enum -> human-readable string, mirroring DT_F32 / DT_I32
+   in src/thvm.h.  Keep the lookup local so a future DT_* doesn't
+   silently render as "Missing". *)
+dtypeName[0] = "f32";
+dtypeName[1] = "i32";
+dtypeName[n_] := "dt" <> ToString[n];
+
 collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
     byBuf,
     consumersOf
@@ -170,6 +177,11 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
                 "refcount"        -> refcount,
                 "preserved"       -> preserved,
                 "freeable"        -> freeable,
+                (* All aliased tids share the same dtype (tensor_view_of
+                   inherits it).  Take the first tid's dtype as
+                   authoritative.  Without this the renderer's
+                   tooltip showed `Missing[KeyAbsent, dtype]`. *)
+                "dtype"           -> dtypeName[tens[[firstTid, 3]]],
                 "alias_tids"      -> tids,
                 "producer_kid"    -> producerKid,
                 "consumer_kids"   -> allConsumerKids,
@@ -547,12 +559,24 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                 Row[{"peak concurrent: ",
                      Round[peak["peak_bytes"]/1024., 0.1],
                      " KiB at depth ", peak["peak_depth"],
-                     " (slot-reuse headroom ", savingsPct, "%)",
-                     If[ omittedCount > 0,
-                         Row[{"  -- showing top ", Length[bufs],
-                              " of ", Length[allBufs], " bufs"}],
-                         ""
-                     ]}]
+                     " (slot-reuse headroom ", savingsPct, "%)"}],
+                (* Surface the TopN cut as a separate prominent line
+                   so the rendering doesn't silently hide most of the
+                   buffers.  Bytes-shown ratio gives an at-a-glance
+                   sense of how representative the picture is. *)
+                If[ omittedCount > 0,
+                    With[{
+                      shownBytes = Total[#["nbytes"] & /@ bufs],
+                      shownPct = Round[100. Total[#["nbytes"] & /@ bufs] / totalBytes, 0.1]
+                    },
+                      Row[{Style["showing top " <> ToString[Length[bufs]]
+                                <> " of " <> ToString[Length[allBufs]]
+                                <> " bufs (= "
+                                <> ToString[shownPct] <> "% of bytes)",
+                                Italic, GrayLevel[0.4]]}]
+                    ],
+                    Sequence @@ {}
+                ]
             }, Alignment -> Center],
             ImageSize -> Large,
             AspectRatio -> 1/2,

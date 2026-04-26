@@ -67,16 +67,20 @@ Real kernel-count + memory wins need either:
 
 ### Memory
 
-- [ ] **m1: TMemoryPlanGantt readability fixes**.  The current
-      LeNet rendering (see `wl/Examples/_bench/baseline-cpu-lenet-
-      mnist.png`) is hard to interpret: 391 bufs collapsed to
-      top-40 with empty x-axis gaps, and tooltips show
-      `dtype: Missing[KeyAbsent, dtype]` because the C → WL
-      bridge isn't populating the field.  Acceptance: dtype shows
-      correctly in tooltips; rendered Gantt either includes all
-      bufs OR surfaces the drop count prominently in the title.
-      ~30 LOC across `wl/THVMLink/CSource/thvmlink.c` (dtype
-      field) + `wl/THVMLink/Kernel/MemoryPlan.wl` (rendering).
+- [x] **m1: TMemoryPlanGantt readability fixes**.  Three landed
+      changes: (a) `collateBufs` now propagates dtype from the
+      first aliased tid into each Bufs record, with a
+      `dtypeName[]` lookup that maps DT_F32/DT_I32 -> human
+      strings (was `Missing[KeyAbsent, dtype]` in tooltips);
+      (b) `TMemoryPlanGantt` title surfaces the TopN cut as a
+      prominent italic line "showing top 40 of 391 bufs (=
+      60.2% of bytes)" so the rendering doesn't silently hide
+      90%+ of the data; (c) all four bench + two memory-probe
+      Export targets switched from `.png` to `.svg` so the LeNet
+      Gantt is zoom-friendly + scalable.  Pre-existing PNG files
+      removed; docs/bench-results.md + linear-train/README.md
+      updated to point at the new SVG paths.  ~50 LOC across
+      MemoryPlan.wl + 3 Export sites.
 
 - [ ] **m2: per-realize unpin probe in lenet-mnist verify.wls**.
       Add `TTermUnpin` calls in `wl/Examples/lenet-mnist/verify.wls`
