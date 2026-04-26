@@ -403,15 +403,30 @@ Expected ceilings:
       3, test_view_permute 4, test_view_pad 7, test_view_flip 4,
       test_metal_real 34) -- exactly g2c's scope.
 
-- [ ] **g2c: movement-op view-rewrite path**.  RESHAPE/EXPAND/
-      PERMUTE/PAD/SHRINK/FLIP must NEVER allocate a kernel.  When
-      `build_kernel`'s visit hits a movement op, rewrite the
-      consumed TenDesc's View in place (or alloc a fresh aliasing
-      TenDesc that shares the buf_id) and continue traversing the
-      source.  Re-enable the surviving `tests/test_view_*.c`
-      tests; they should go green when `materialize_uop_in_env`
-      stops being a no-op and routes through the new view-rewrite
-      path.  ~50 LOC + test fixups.
+- [ ] **g2c1: view-only path for RESHAPE/EXPAND/PERMUTE/SHRINK/FLIP**.
+      Add `view_apply_{reshape,expand,permute,shrink,flip}` helpers
+      that compute a new View from an existing one (per-axis
+      strides, offset arithmetic).  Add a `view_resolve(t)`
+      dispatcher that recursively walks a movement-op chain rooted
+      at a TAG_TEN, allocating an alias TenDesc per layer via
+      `tensor_view_of`.  `materialize_uop_in_env(t, 0)`: call
+      `view_resolve` for these 5 ops and return TAG_TEN.  Hook
+      `view_resolve` into `build_kernel`'s `visit()` so movement-op
+      children become input slots referencing alias TenDescs.
+      Add `materialize_root_alias` (port from deleted code) so
+      `thvm_materialize` on a movement-op root flattens the
+      resulting non-contig alias into a contiguous copy.
+      Tests targeted green: test_view_shrink (24), test_view_permute
+      (32), test_view_flip (35), test_expand_axis (14).
+      ~200 LOC.
+
+- [ ] **g2c2: PAD as kernel emit** (NOT a view-only alias --
+      reading bytes outside an alloc is UB even when calloc'd).
+      Extend `visit()` to support PAD as a regular kernel opcode:
+      populate `src0_ndim`, `src0_dims`, `out_ndim`, `out_dims`,
+      `pad_widths` on the KProgOp.  `materialize_uop_in_env(PAD)`
+      returns a UOP_KERNEL Term (kernel emit path), not a view
+      alias.  Test targeted green: test_view_pad (15).  ~80 LOC.
 
 - [ ] **g2d: GRAD integration + thvm_realize wire-up**.  Re-add the
       `unroll_grads` walk (call `interact_grad` on each UOP_GRAD
