@@ -6,6 +6,37 @@ dated section.
 
 ## Unreleased
 
+### Added: IC-native rule dispatch design memo (stage 8.3a)
+
+`docs/plans/ic_rule_dispatch.md` (~150 lines) lays out the
+design for stage 8.3.  Identifies the **FVR-vs-VAR translation
+problem**: our pattern variables are `TAG_FVR` atoms with
+explicit ids, but `LAM` uses `TAG_VAR` binder slots that point
+at heap cells.  Surveys three encoding strategies:
+
+1. **Strategy A (literal LAM port)**: alpha-convert FVR to VAR
+   via per-id binder cells, wrap in LAM chain.  Fails for nested
+   patterns since the IC reducer doesn't naturally peel nested
+   CTR.
+2. **Strategy B (PRI dispatch)**: keep FVR, register a
+   `prim_rewrite_step` (arity 3) at `ATP_PRIM_REWRITE_STEP = 4`
+   that does `thvm_match` + `thvm_subst_apply`; SUP of partial
+   PRIs handles fan-out via APP-SUP.  Faithful, simple, parity
+   story is clear.
+3. **Strategy C (hybrid)**: LAM only on outermost args; defer
+   nested patterns to a primitive.  Fiddly, unclear win.
+
+**Decision**: Strategy B for 8.3b-c.  Reinterprets the literal
+"rule as LAM-binder" phrasing as "rule as a callable IC entity"
+-- the LAM-vs-PRI choice is a means (IC dispatch), not an end.
+
+8.3d (ICC TAG_BRI / TAG_ANN integration) deferred until 8.4
+lands multi-sort signatures.  Without sorts, every rule applies
+to any term and BRI/ANN wrapping is ceremony.
+
+8.3e mirrors 8.1e: feature flag `use_ic_rewrite` swap of
+`thvm_rewrite_step` under bench harness validation.
+
 ### Added: pure-IC kbo_eq via prim_kbo_eq_ic (stage 8.2c)
 
 `prim_kbo_eq_ic` (arity 2) registered at `ATP_PRIM_KBO_EQ_IC = 3`

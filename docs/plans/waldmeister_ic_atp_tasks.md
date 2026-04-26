@@ -490,7 +490,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
       APP-SUP fan-out across the rule set; uses ICC primitives
       (TAG_BRI / TAG_ANN) where dependent typing helps
-  - [ ] 8.3a design memo `docs/plans/ic_rule_dispatch.md`:
+  - [x] 8.3a design memo `docs/plans/ic_rule_dispatch.md`:
         survey the encoding choices for "rule as LAM-binder".
         Key open question: our pattern variables are TAG_FVR
         (free-variable atoms with explicit ids), but LAM uses
