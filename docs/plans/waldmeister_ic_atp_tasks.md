@@ -490,6 +490,42 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
       APP-SUP fan-out across the rule set; uses ICC primitives
       (TAG_BRI / TAG_ANN) where dependent typing helps
+  - [ ] 8.3a design memo `docs/plans/ic_rule_dispatch.md`:
+        survey the encoding choices for "rule as LAM-binder".
+        Key open question: our pattern variables are TAG_FVR
+        (free-variable atoms with explicit ids), but LAM uses
+        TAG_VAR (de-Bruijn-style binder slots).  Document the
+        translation, the dispatch path
+        (`APP(&L{r_0, r_1, ...}, t)` -> APP-SUP fan-out -> each
+        branch fires APP-LAM if its pattern matches, else ERA),
+        and where (if anywhere) ICC TAG_BRI / TAG_ANN actually
+        help (likely: for type-directed pattern matching when
+        sorts land in 8.4).  Pick the simplest viable
+        increment.  Scope: ~150-line memo.
+  - [ ] 8.3b encode a single rule as a LAM term: helper
+        `term_new_rule_lam(lhs_fvr_ids, rhs)` that wraps a rule
+        with ?-many LAM binders (one per variable id appearing
+        in the LHS, in some canonical order) and substitutes
+        the FVR atoms with VAR-binder references.  Tests verify
+        `APP(rule_lam, arg_term)` reduces to the rule's RHS
+        with the correct substitution applied.  ~50 LOC + 3-5
+        tests.
+  - [ ] 8.3c SUP of rules + APP-SUP fan-out demo: pre-encode
+        a small rule set as `&L{rule_0_lam, rule_1_lam, ...}`,
+        APP it to a target term, observe APP-SUP commutation
+        producing a SUP of (rewritten or ERA) results, and
+        compare against the C-side single-rule rewriting from
+        `src/rewrite/_.c`.  ~50 LOC + 3-4 tests.
+  - [ ] 8.3d ICC TAG_BRI / TAG_ANN integration (optional;
+        revisit after 8.3c lands).  If sort-checking proves
+        useful at dispatch time, wrap rules in BRI/ANN and
+        verify the type-flow rules let the wrong-sort branches
+        collapse to ERA before APP-LAM fires.  Scope TBD; may
+        roll up under 8.4 (multi-sort) instead.
+  - [ ] 8.3e replace `thvm_rewrite_step` under a feature flag
+        (analogous to 8.1e's `use_ic_cp_gen`): when set, the
+        rewrite step uses the SUP-of-LAMs dispatch.  Re-run
+        bench harness; expect within 2x of the C path.
 - [ ] 8.4 multi-sort signatures (stages 1-4 assume one sort)
 - [ ] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
       -- LPO is `Lexikografische-Pfad-Ordnung`, "lexicographic
