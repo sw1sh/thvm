@@ -6,6 +6,30 @@ dated section.
 
 ## Unreleased
 
+### Added: Wolfram-axiom literal fixture (stage 10b)
+
+`tests/data/atp/wolfram_axiom_literal.pr` (+ `.expect`):
+literal instance of the Wolfram axiom with concrete
+constants p, q, r as the conjecture.  Predicted PROVED @ 0;
+observed PROVED @ 0 across all 4 (cp-gen x rewrite) modes.
+Bench-atp jumps from 98/98 to 102/102 sub-checks.
+
+**Stress fixture dropped:** the planned
+`wolfram_sheffer_commutativity` (`nand(a, b) = nand(b, a)`)
+crashes the bench under IC-routed rewrite modes (ci, ii) --
+the IC-rewrite path on the axiom's depth-4 NAND nesting
+exhausts the 16M-cell HEAP_CAP before the 32-step budget is
+reached.  Under cc-mode the run completes as predicted
+TIMEOUT @ 32 in 47 ms (32 rules, 1133 trace entries).
+Per the design memo's stop condition, 10b ships with only
+the literal fixture; the full Sheffer-commutativity test
+is deferred pending a HEAP_CAP bump, widened heap reset
+beyond 9.3's joined-CP branch, or a less-extreme stress
+conjecture.  Memo's prediction table updated with the
+DROPPED row + cell-budget analysis.
+
+166/166 C, 323 WL.
+
 ### Added: Wolfram-axiom design memo (stage 10a)
 
 `docs/plans/wolfram_axiom_design.md` (~150 lines) picks two

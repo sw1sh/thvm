@@ -1,0 +1,8 @@
+% Stage 10b: literal Wolfram-axiom instance.  Predicted
+% PROVED @ 0 -- observed PROVED @ 0 across all 4 (cp-gen x
+% rewrite) modes.  The goal-rewrite path matches the axiom
+% rule directly with x=p, y=q, z=r before any saturation
+% step fires.
+status=PROVED
+max_step=0
+max_rules=1

@@ -1,0 +1,20 @@
+% Stage 10b: literal Wolfram-axiom instance (corpus expansion).
+% The conjecture is the axiom itself with x=p, y=q, z=r so the
+% goal-rewrite path applies the axiom rule once at the top and
+% reduces lhs to r.  Predicted PROVED @ 0; sanity check that
+% the parser + KBO/LPO config handle the axiom's depth-4 NAND
+% nesting.  See docs/plans/wolfram_axiom_design.md.
+NAME            wolfram_axiom_literal
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       p: -> ANY
+                q: -> ANY
+                r: -> ANY
+                nand: ANY ANY -> ANY
+ORDERING        LPO
+                nand > p > q > r
+VARIABLES       x,y,z : ANY
+EQUATIONS       nand(nand(nand(x, y), z),
+                     nand(x, nand(nand(x, z), x))) = z
+CONCLUSION      nand(nand(nand(p, q), r),
+                     nand(p, nand(nand(p, r), p))) = r

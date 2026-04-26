@@ -112,15 +112,45 @@ comparison two distinct hard problems.
 
 ## Aggregate prediction
 
-| Fixture | Predicted | Step bound | Notes |
-|---|---|---|---|
-| `wolfram_axiom_literal`         | PROVED  | 0      | Literal axiom instance |
-| `wolfram_sheffer_commutativity` | TIMEOUT | 32 cap | Lemma discovery |
+| Fixture | Predicted | Step bound | Notes | Observed (10b) |
+|---|---|---|---|---|
+| `wolfram_axiom_literal`         | PROVED  | 0      | Literal axiom instance | PROVED @ 0    |
+| `wolfram_sheffer_commutativity` | TIMEOUT | 32 cap | Lemma discovery        | DROPPED, see below |
 
-One PROVED + one TIMEOUT.  Brings corpus from 12 to 14
-fixtures.  10b will reconcile predictions against observed
-status and update both this memo's table and the `.expect`
-files (same protocol as 9.4b).
+**10b finding:** the Sheffer-commutativity stress fixture
+crashes the bench harness under IC-rewrite modes.  Under cc
+(C-direct cp-gen + C-direct rewrite) it ran TIMEOUT @ 32 in
+47 ms with 32 rules and 1133 trace entries -- the predicted
+behaviour.  Under ci (C-direct cp-gen + IC-routed rewrite)
+the IC-rewrite path on the depth-4 NAND axiom exhausts the
+16M-cell HEAP_CAP before the budget is reached.
+
+The cell-budget per IC-rewrite step on the Wolfram axiom is
+roughly 50-100 cells (depth-4 nesting reconstructed via
+`term_new_ctr` at every recursive `atp_ic_rewrite_step`
+call).  Saturation generates ~32 fresh rules x ~32 rewrite
+steps each, with each step doing two normalize calls (lhs,
+rhs) of NORM_CAP=64 iterations.  Worst case: 32 * 32 * 2 *
+64 * 100 = 13 M cells -- right at the HEAP_CAP boundary.
+9.3's heap checkpoint/reset only fires on the joined-CP
+branch, which is rare on this fixture (most CPs are real).
+
+Per this memo's stop condition ("If the Wolfram axiom's
+nested-nand structure overflows the parser's term-depth
+limits, document the bound and revisit"), 10b ships with
+**only the literal fixture**.  The observed-but-uncommitted
+data on the stress fixture (cc-mode TIMEOUT @ 32) is the
+useful artefact; full bench-Twee comparison on it is
+deferred until either:
+
+- HEAP_CAP is bumped past 16M (pre-step heap usage profile
+  needed first);
+- 9.3's heap reset is widened beyond the joined-CP branch;
+- a less-extreme stress conjecture (e.g., a partial Sheffer
+  result, or a derived self-NAND identity) replaces the
+  full commutativity goal.
+
+Brings corpus from 12 to 13 fixtures (1 added, not 2).
 
 ## KBO-vs-LPO note
 

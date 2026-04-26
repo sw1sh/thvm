@@ -819,7 +819,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         commutativity `nand(a, b) = nand(b, a)` or double-
         negation `nand(nand(a, a), nand(a, a)) = a`.  Scope:
         ~120-line memo.
-  - [ ] 10b implement the fixtures: write each `.pr` + `.expect`
+  - [x] 10b implement the fixtures: write each `.pr` + `.expect`
         from 10a.  Verify each parses and runs through
         `test_bench_atp`; reconcile prediction-vs-observation
         in the memo (same protocol as 9.4b).  Update CHANGELOG
