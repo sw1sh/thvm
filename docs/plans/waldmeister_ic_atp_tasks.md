@@ -455,8 +455,12 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           whether the latency is within 2x; if not, identify
           the bottleneck and decide whether to keep IC default
           off or invest in further optimization.
-- [ ] 8.2 KBO as a pure IC program (deferred 2.4 -- compile from
+- [x] 8.2 KBO as a pure IC program (deferred 2.4 -- compile from
       the C version once it's stable)
+      Note: 8.2d (full pure-IC port) is `[blocked]` per design
+      memo; revisit when SupGen-style search (8.10) creates a
+      use case.  8.2a-c lands the actionable increment (PRI
+      wrapper + pure-IC kbo_eq sliver).
   - [x] 8.2a design memo `docs/plans/kbo_ic_design.md`:
         survey the encoding choices for porting KBO to IC --
         (1) `TAG_PRI` wrapper around `thvm_kbo` (callable from
@@ -480,7 +484,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         arithmetic.  Encode as a `TAG_PRI` primitive that's
         itself implemented via IC structural recursion on the
         term pair, returning `NUM(0)` or `NUM(1)`.
-  - [ ] 8.2d full pure-IC port of `thvm_kbo` (deferred until
+  - [blocked: deferred per docs/plans/kbo_ic_design.md until SupGen-style search (8.10) creates a use case] 8.2d full pure-IC port of `thvm_kbo` (deferred until
         8.2a's design picks the encoding; likely
         research-grade and multi-firing on its own).
 - [ ] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
