@@ -4718,6 +4718,56 @@ implemented + tested (f1a) but never invoked by the pipeline.
         toggle ON, the only remaining failures (if any) are
         functional/numeric, not structural; 166 C + 292 WL
         green.  ~20 LOC across the affected wlt files.
+        <!-- attempt 1 audit: with toggle flipped to ON
+             post-d4b1a, the failing tests are NOT structural
+             -- they are CORRECTNESS failures (gradients
+             coming out wrong).  Per-test audit:
+
+             - cmpeq.wlt 2/1: needs investigation.
+             - grad.wlt 32/6 failures, all computational:
+                 grad/mul-product-rule:
+                   got {4,4,4} expected {4,5,6}
+                 grad/mul-w-r-t-b:
+                   got {1,1,1} expected {1,2,3}
+                 grad/x-times-x-equals-2x:
+                   got {4,4,4} expected {4,6,10}
+                 grad/relu-mask:
+                   got {0,0,0,0} expected {0,1,0,1}
+                 grad/rank-2-x-times-x-equals-2x:
+                   got {{4,4},{4,4}} expected {{4,6},{8,10}}
+                 grad/softmax-cross-entropy-equals-probs-minus-target:
+                   got {0.09,-0.28,0.09} expected
+                   {0.09,-0.76,0.67}
+             - tensor_numeric.wlt 7/3, tensors.wlt 14/1
+               (similar pattern).
+             - beautiful_mnist.wlt + nn.wlt still cap-exhaust.
+
+             Pattern: gradients with vector-shaped inputs are
+             returning broadcast-of-first-element instead of
+             per-element values.  Suggests the helper's
+             input_numel or program's per-input numel is wrong
+             when an inlinable upstream UOP has a TEN child
+             alongside a CONST (broadcast detection in
+             cpu_op_mul fires when src_numels[1] == 1).
+
+             d4b1b is the WRONG mechanism for this -- this
+             needs a fix to the helper, not test opt-outs.
+
+             Re-decompose:
+               f1d-d4b1b1: investigate + fix the broadcast
+                           detection in helper-built MUL
+                           kernels.  Likely the issue is
+                           that an inlined CONST scratch
+                           reports numel=1 to cpu_op_mul,
+                           and the OTHER input ALSO reports
+                           numel via input_numels which is
+                           somehow getting overwritten/wrong.
+                           ~50-100 LOC + grad tests.
+               f1d-d4b1b2: opt out remaining structural
+                           tests once correctness is fixed
+                           (probably empty if d4b1a + d4b1b1
+                           cover everything). -->
+
 
   - [ ] **f1d-d4b1c: bump KERNELS_CAP + flip default**.
         After d4b1a + d4b1b clear the structural breakage,
