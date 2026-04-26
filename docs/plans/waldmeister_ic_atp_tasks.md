@@ -395,7 +395,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         parts of `src/cp/_.c` and `src/atp/_.c` move to IC,
         which stay in C as `TAG_PRI` callbacks.  Decide whether
         8.1 unblocks 8.10 (SupGen-style search) or vice versa.
-  - [ ] 8.1b add `TAG_PRI` primitive: new tag in `src/thvm.h`,
+  - [x] 8.1b add `TAG_PRI` primitive: new tag in `src/thvm.h`,
         constructor `term_new_pri`, single APP-PRI interaction
         in `src/interact/app_pri.c`.  PRI carries a function
         pointer ID (lookup table) and is "called" by APP.

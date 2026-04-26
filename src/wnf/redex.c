@@ -87,6 +87,7 @@ fn Term redex_fire(Term redex) {
       switch (term_tag(fun)) {
         case TAG_LAM: result = interact_app_lam(fun, arg); break;
         case TAG_ERA: result = interact_app_era();         break;
+        case TAG_PRI: result = interact_app_pri(fun, arg); break;
         case TAG_MAT: {
           u64 mat_loc = term_val(fun);
           u32 match   = term_ext(fun);

@@ -6,6 +6,41 @@ dated section.
 
 ## Unreleased
 
+### Added: TAG_PRI primitive function call (stage 8.1b)
+
+New IC tag `TAG_PRI = 25` (HVM4 port) lands a "primitive function
+call" mechanism: a PRI carries a `prim_id` (u32, in EXT) into a
+process-global registry mapping id -> `(PrimFn, arity)`.  APP-PRI
+accumulates args into a heap cell `[NUM(count), arg_0, ...]` until
+`count == arity`, at which point the registered C function is
+called and its return Term replaces the redex.
+
+New API in `src/thvm.h`:
+- `typedef Term (*PrimFn)(Term *args);`
+- `Term term_new_pri(u32 prim_id);`
+- `u32 prim_register(u32 prim_id, PrimFn func, u32 arity);`
+- `PrimFn prim_fun(u32 prim_id);`
+- `u32 prim_arity(u32 prim_id);`
+- `#define PRIM_TABLE_CAP 64`
+
+`TAG_COUNT` bumped to 26.  `tests/test_tensor.c` updated.
+
+New files:
+- `src/term/new_pri.c` -- constructor + registry storage
+- `src/interact/app_pri.c` -- APP-PRI accumulation + saturation
+
+WNF dispatch wired in `src/wnf/_.c` and `src/wnf/redex.c`.
+
+`tests/test_pri.c` (18 sub-checks) covers:
+- Tag + ext layout on a fresh PRI
+- Registry roundtrip + out-of-range cleanup
+- Arity-1 immediate fire (identity)
+- Arity-2 partial-then-saturate (pair-CTR builder)
+- Arity-3 saturation across 3 APPs
+- Unregistered prim_id falls through to ERA defensively
+
+Stage 8.1c will register `thvm_unify` as the first real primitive.
+
 ### Added: SUP-encoded CP enumeration design memo (stage 8.1a)
 
 `docs/plans/sup_encoded_cps.md` (~200 lines) lands the design

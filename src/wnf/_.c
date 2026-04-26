@@ -450,6 +450,15 @@ apply:
             next = interact_app_bri(whnf, arg);
             goto enter;
           }
+          case TAG_PRI: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            // 8.1b: accumulate arg into PRI's buffer; saturated
+            // call returns the result Term, partial returns a
+            // larger PRI -- both go through `next` for further
+            // reduction.
+            next = interact_app_pri(whnf, arg);
+            goto enter;
+          }
           case TAG_ERA: {
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             whnf = interact_app_era();

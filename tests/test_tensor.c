@@ -28,7 +28,8 @@ int main(void) {
   CHECK(TAG_FVR  == 22);
   CHECK(TAG_BRI  == 23);
   CHECK(TAG_ANN  == 24);
-  CHECK(TAG_COUNT == 25);
+  CHECK(TAG_PRI  == 25);
+  CHECK(TAG_COUNT == 26);
 
   TEST_BEGIN("term/TAG_TEN-roundtrip");
   Term t = term_new(0, TAG_TEN, DT_F32, 42);

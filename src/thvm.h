@@ -112,8 +112,14 @@ typedef u64 Term;
                      //     ANN val (λx.body) = λx ANN(APP val $k) body[x <- θ$k.x]
                      //     ANN val (θx.body) = body[x <- val]   (type erasure)
                      //     ANN val var       = stuck
+#define TAG_PRI  25  // Primitive function call (HVM4-style).  ext = prim_id.
+                     //   val = 0 for a fresh (zero-arg) PRI, else heap_loc
+                     //   to an accumulator cell [NUM(count), arg_0, ...].
+                     //   APP-PRI accumulates args; once count == arity, the
+                     //   registered C function is called with the args and
+                     //   its return Term replaces the redex.  Stage 8.1b.
 
-#define TAG_COUNT 25
+#define TAG_COUNT 26
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -527,6 +533,20 @@ fn Term term_new_when(Term cond, Term body);
 fn Term term_new_fvr (u32 var_id);
 fn Term term_new_bri (Term body);
 fn Term term_new_ann (Term val, Term typ);
+
+// 8.1b: TAG_PRI ("primitive function call") -- a thin port of HVM4's
+// PRI tag.  Each primitive is registered in a process-global table
+// against an id (u32, fits in EXT).  A fresh PRI carries val=0;
+// APP-PRI accumulates args into a heap cell `[NUM(count), arg_0, ...]`
+// until `count == arity`, at which point the C function is called
+// and its return Term replaces the redex.  Used in 8.1c-d to build
+// SUP-encoded CP enumeration with unification as a primitive.
+typedef Term (*PrimFn)(Term *args);
+fn Term term_new_pri  (u32 prim_id);
+fn u32  prim_register (u32 prim_id, PrimFn func, u32 arity);
+fn PrimFn prim_fun    (u32 prim_id);
+fn u32  prim_arity    (u32 prim_id);
+#define PRIM_TABLE_CAP 64
 
 // k0a: build a TAG_CTR labelled constructor over `n` child Terms.
 // Heap layout: [NUM(arity=n), c_0, ..., c_{n-1}].  ext = label
