@@ -106,39 +106,76 @@ Real kernel-count + memory wins need either:
 
 ### Kernelization
 
-- [ ] **k0: multi-output TGrad / UOP_GRAD**.  Today every
-      `TGrad[loss, x_i]` is a separate UOP_GRAD that allocates
-      independent backward kernels even though the chain rule
-      shares almost all intermediate cotangents across the
-      `x_i`.  In LeNet's Adam step this means 8 independent
-      `TGrad` calls (w1, b1, w2, b2, w3, b3, w4, b4) each
-      walking the same forward graph from `loss` -- ~300
-      kernels of duplicated backward compute.
+- [ ] **k0a: UOP_TUPLE term type for multi-output results**.
+      Add a new UOP opcode `UOP_TUPLE` with heap layout
+      `[n, t_1, ..., t_n]` -- a passive aggregate that
+      materialize / walk / classify treat as opaque.  Provides
+      the result-shape needed for k0b's multi-target
+      interact_grad.  Includes:
+        - new `UOP_TUPLE` define in src/thvm.h
+        - constructor `uop_tuple(Term *children, u32 n)` in
+          new file src/uop/tuple.c
+        - accessor `uop_tuple_at(Term, u32)` returning the
+          i-th child Term (or 0 on out-of-range)
+        - `uop_arity(UOP_TUPLE)` returns 0 (variable tail
+          handled by the consumers that know the layout)
+        - new tests/test_uop_tuple.c covers construct +
+          read-back + materialize-pass-through.
+      Out of scope: any GRAD changes; UOP_TUPLE just needs
+      to land standalone first.  ~50 LOC + ~30 LOC tests.
 
-      Redesign: `TGrad[loss, {x_1, ..., x_n}]` materializes
-      ONE UOP_GRAD whose chain rule fires once and writes
-      one output buf per requires_grad ten (zero buffers for
-      anything else).  Sketch:
-        - new heap layout for UOP_GRAD: `[y, seed, n,
-          x_1, ..., x_n]` (was `[y, seed, x]`).
-        - `interact_grad` walks the forward DAG once, building
-          a cotangent map ten -> term; emits a multi-output
-          KERNEL whose program produces n outputs in one fire.
-        - `materialize` allocates n output bufs (one per x_i),
-          links them via a new `outputs[]` table on KernelEntry
-          (was `output_tid`).
-        - WL bridge: `TGrad[loss, list]` returns a TList of
-          TTerm wrappers; existing `TGrad[loss, x]` keeps
-          working as the unary case (auto-wraps in `{x}`).
+- [ ] **k0b: multi-target uop_grad constructor + heap layout**.
+      Extend `uop_grad` (src/uop/grad.c) to accept a list of
+      target Terms.  New heap layout: `[y, gy, n, x_1, ...,
+      x_n]`.  Single-target compat: existing `uop_grad(y, gy,
+      x)` becomes a wrapper around `uop_grad_multi(y, gy,
+      {x}, 1)`.  Walk / realize_classify must NOT walk the
+      variable tail (already gated on uop_arity returning 0
+      for UOP_GRAD; verify and test).  Tests add the new
+      layout to test_grad.c.  Out of scope: any
+      interact_grad change; bailing on n>1 is fine for now.
+      ~40 LOC + ~20 LOC tests.
 
-      Acceptance: lenet bench Adam step kernel count drops
-      from 427 to <=200 (the 8 grad realizes collapse to 1
-      multi-output backward); peak_concurrent_kib should also
-      drop because the shared cotangents only allocate once.
-      Big change -- expected ~200-300 LOC across uop/grad.c +
-      interact/uop_grad.c + schedule/materialize.c +
-      schedule/kernel_alloc.c (KernelEntry layout) + the WL
-      bridge.  DECOMPOSE on next fire before implementation.
+- [ ] **k0c: interact_grad multi-target chain rule**.
+      Extend interact_grad (src/interact/uop_grad.c) to
+      detect n>1 in the new UOP_GRAD heap layout and walk
+      the forward DAG ONCE with a shared cotangent map (it
+      already builds one internally; the change is reading
+      out N targets instead of 1).  Result: a UOP_TUPLE
+      from k0a holding one cotangent Term per target.
+      Single-target case (n=1) returns the scalar Term
+      directly for backward compat.  Acceptance: a 3-
+      target test asserts the cotangent graph has shared
+      sub-expressions (same UOp loc reachable from
+      multiple TUPLE outputs), so materialize's memo
+      dedups them in d4b2a-style.  ~80 LOC + tests.
+      <!-- design-question: result representation.  Going
+           with UOP_TUPLE (k0a) over reusing TAG_INC or
+           TAG_SUP because TUPLE is a passive aggregate
+           with clean materialize/walk semantics; SUP has
+           HVM4 superposition semantics that would clash. -->
+
+- [ ] **k0d: TGradMany WL bridge + accessor**.  Add
+      `TGradMany[y, {x_1, ..., x_n}]` in
+      wl/THVMLink/Kernel/Tensor.wl that builds a single
+      UOP_GRAD_MULTI Term, then unpacks the resulting
+      UOP_TUPLE (post k0c materialize) into n TTerm
+      wrappers via uop_tuple_at.  Bridge fns added to
+      wl/THVMLink/CSource/thvmlink.c.  Tests in
+      wl/THVMLink/Tests/grad.wlt assert that
+      `TGradMany[loss, {a, b}]` and
+      `{TGrad[loss, a], TGrad[loss, b]}` yield equal
+      gradient values.  ~50 LOC + tests.
+
+- [ ] **k0e: rewire bench + verify; measure delta**.  Switch
+      lenetStep (baseline.wls) and stepGrads (verify.wls)
+      to `TGradMany[loss, {w1, b1, ..., w4, b4}]`.
+      Acceptance: lenet kernel_count drops from 427 to
+      <=200 AND peak_concurrent_kib drops by at least 20%
+      (currently 1882.3, target <= 1500).  verify.wls
+      still converges loss 2.61 -> 0.025.  Update
+      docs/bench-results.md with a "post-k0" column.
+      ~20 LOC + measurement.
 
 - [ ] **k1: per-realize labeled stat dump**.  Currently we know
       "lenet Adam step = 427 kernels" but not which forward layer
