@@ -4674,7 +4674,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
         materialize_expr hook itself (which is safe and
         committed); the residuals split into d4b1a/b/c.
 
-  - [ ] **f1d-d4b1a: emit LOAD prefix in helper-built kernels
+  - [x] **f1d-d4b1a: emit LOAD prefix in helper-built kernels
         for structural parity**.  The helper's
         materialize_kernel_inlined skips the LOAD-per-input
         prefix that the legacy emit path always generates.
@@ -4689,6 +4689,22 @@ implemented + tested (f1a) but never invoked by the pipeline.
         (default OFF baseline); flipping toggle ON no longer
         regresses uop_load.wlt or memory_plan.wlt structural
         tests.  ~30 LOC.
+        <!-- DONE: helper now appends LOAD prefix at the END
+             of the build (after all inlined ops + root op).
+             Implementation: shift compute ops down by
+             n_inputs slots, prepend LOAD ops at slots
+             0..n_inputs-1, bump program-index refs in the
+             shifted ops by n_inputs.  Bounds-checked
+             against KPROG_MAX_OPS.  Updated tests
+             test_materialize_inlined.c (37/37 vs 31/31)
+             and test_use_realize.c to expect new program
+             shapes (3 inputs -> n_ops = 5; 1 input ->
+             n_ops = 2; etc.).  166 C + 292 WL green with
+             default OFF.  d4b1b can now audit which
+             toggle-ON tests still need opt-out (most
+             structural ones should now pass since the
+             helper's program shape matches legacy). -->
+
 
   - [ ] **f1d-d4b1b: opt remaining structural tests out of
         toggle ON**.  After d4b1a fixes the LOAD-prefix

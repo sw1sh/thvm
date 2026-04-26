@@ -62,13 +62,17 @@ int main(void) {
   CHECK_EQ(term_tag(k), TAG_UOP);
   CHECK_EQ(term_ext(k), UOP_KERNEL);
   CHECK_EQ(KERNELS_NEXT - prev_kid, 1);
-  // The lone kernel has 3 inputs (a, b, c) and 2 ops (ADD, MUL).
+  // The lone kernel has 3 inputs (a, b, c) and 5 ops:
+  //   3 LOAD prefix + ADD + MUL.
   u32 kid = (u32)term_val(heap_read(term_val(k) + 1));
   KernelEntry *ke = &KERNELS[kid];
   CHECK_EQ(ke->n_inputs, 3);
-  CHECK_EQ(ke->n_ops,    2);
-  CHECK_EQ(ke->program[0].opcode, UOP_ADD);
-  CHECK_EQ(ke->program[1].opcode, UOP_MUL);
+  CHECK_EQ(ke->n_ops,    5);
+  CHECK_EQ(ke->program[0].opcode, UOP_LOAD);
+  CHECK_EQ(ke->program[1].opcode, UOP_LOAD);
+  CHECK_EQ(ke->program[2].opcode, UOP_LOAD);
+  CHECK_EQ(ke->program[3].opcode, UOP_ADD);
+  CHECK_EQ(ke->program[4].opcode, UOP_MUL);
 
   TEST_BEGIN("use-realize/on-with-reduce-uses-legacy");
   // REDUCE always realizes -- the helper bails on non-elementwise

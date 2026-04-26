@@ -186,6 +186,38 @@ fn Term materialize_kernel_inlined(Term realized_uop_term) {
   root_p->numel = out_numel;
   ke->output_dtype = root_p->dtype;
   ke->output_numel = root_p->numel;
+
+  // f1d-d4b1a: prepend a LOAD-per-input prefix so the helper-built
+  // kernel matches legacy structure (materialize_in_env emits one
+  // LOAD per input slot at the start of program[]).  Several wl
+  // tests probe for this prefix; the cpu interpreter and Metal
+  // dispatch path both also expect it.  Shift the compute ops
+  // down by n_inputs slots and bump any program-index refs in
+  // them by the same offset so they keep pointing at the right
+  // op after the shift.
+  u32 n_inputs = ke->n_inputs;
+  u32 n_compute = ke->n_ops;
+  if (n_inputs > 0 && n_inputs + n_compute <= KPROG_MAX_OPS) {
+    for (i32 i = (i32)n_compute - 1; i >= 0; i--) {
+      ke->program[(u32)i + n_inputs] = ke->program[(u32)i];
+    }
+    for (u32 i = 0; i < n_inputs; i++) {
+      KProgOp *l = &ke->program[i];
+      memset(l, 0, sizeof(*l));
+      l->opcode = UOP_LOAD;
+      l->dtype  = (u8)ke->input_dtypes[i];
+      l->n_src  = 1;
+      l->numel  = ke->input_numels[i];
+      l->src[0] = KSRC_AS_INPUT(i);
+    }
+    for (u32 i = n_inputs; i < n_inputs + n_compute; i++) {
+      KProgOp *p = &ke->program[i];
+      for (u8 s = 0; s < p->n_src; s++) {
+        if (!KSRC_IS_INPUT(p->src[s])) p->src[s] += n_inputs;
+      }
+    }
+    ke->n_ops = n_inputs + n_compute;
+  }
   // Output shape: pick from the input matching the root numel.
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = root_p->numel;

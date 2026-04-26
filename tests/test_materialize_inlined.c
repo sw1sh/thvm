@@ -40,17 +40,21 @@ int main(void) {
   u32 kid = (u32)term_val(heap_read(term_val(k) + 1));
   KernelEntry *ke = &KERNELS[kid];
   CHECK_EQ(ke->n_inputs, 3);
-  CHECK_EQ(ke->n_ops,    2);
-  CHECK_EQ(ke->program[0].opcode, UOP_ADD);
-  CHECK_EQ(ke->program[1].opcode, UOP_MUL);
+  // 3 LOAD prefix + ADD + MUL = 5 ops total.
+  CHECK_EQ(ke->n_ops,    5);
+  CHECK_EQ(ke->program[0].opcode, UOP_LOAD);
+  CHECK_EQ(ke->program[1].opcode, UOP_LOAD);
+  CHECK_EQ(ke->program[2].opcode, UOP_LOAD);
+  CHECK_EQ(ke->program[3].opcode, UOP_ADD);
+  CHECK_EQ(ke->program[4].opcode, UOP_MUL);
   // ADD's srcs reference input slots 0 and 1.
-  CHECK(KSRC_IS_INPUT(ke->program[0].src[0]));
-  CHECK(KSRC_IS_INPUT(ke->program[0].src[1]));
-  // MUL's first src is the program-index of ADD (0); second
-  // src is input slot 2 (c).
-  CHECK_EQ(ke->program[1].src[0], 0u);
-  CHECK(KSRC_IS_INPUT(ke->program[1].src[1]));
-  CHECK_EQ(KSRC_INDEX(ke->program[1].src[1]), 2u);
+  CHECK(KSRC_IS_INPUT(ke->program[3].src[0]));
+  CHECK(KSRC_IS_INPUT(ke->program[3].src[1]));
+  // MUL's first src is the program-index of ADD (3 after the
+  // LOAD-prefix shift); second src is input slot 2 (c).
+  CHECK_EQ(ke->program[4].src[0], 3u);
+  CHECK(KSRC_IS_INPUT(ke->program[4].src[1]));
+  CHECK_EQ(KSRC_INDEX(ke->program[4].src[1]), 2u);
   // Output buffer was allocated.
   CHECK(ke->output_tid != 0);
   CHECK_EQ(TENS[ke->output_tid].producer_kid, kid);
@@ -67,10 +71,12 @@ int main(void) {
   u32 kid2 = (u32)term_val(heap_read(term_val(k2) + 1));
   KernelEntry *ke2 = &KERNELS[kid2];
   CHECK_EQ(ke2->n_inputs, 1);
-  CHECK_EQ(ke2->n_ops,    1);
-  CHECK_EQ(ke2->program[0].opcode, UOP_MUL);
-  CHECK_EQ(ke2->program[0].src[0], KSRC_AS_INPUT(0u));
-  CHECK_EQ(ke2->program[0].src[1], KSRC_AS_INPUT(0u));
+  // 1 LOAD prefix + MUL = 2 ops.
+  CHECK_EQ(ke2->n_ops,    2);
+  CHECK_EQ(ke2->program[0].opcode, UOP_LOAD);
+  CHECK_EQ(ke2->program[1].opcode, UOP_MUL);
+  CHECK_EQ(ke2->program[1].src[0], KSRC_AS_INPUT(0u));
+  CHECK_EQ(ke2->program[1].src[1], KSRC_AS_INPUT(0u));
 
   TEST_BEGIN("inlined/dedups-shared-uop-subexpr");
   // shared = a + b; sq = shared * shared (MUL of same UOp twice).
@@ -87,12 +93,16 @@ int main(void) {
   u32 kid3 = (u32)term_val(heap_read(term_val(k3) + 1));
   KernelEntry *ke3 = &KERNELS[kid3];
   CHECK_EQ(ke3->n_inputs, 2);   // a, b
-  CHECK_EQ(ke3->n_ops,    2);   // ADD, MUL
-  CHECK_EQ(ke3->program[0].opcode, UOP_ADD);
-  CHECK_EQ(ke3->program[1].opcode, UOP_MUL);
-  // MUL's two srcs both reference the ADD program slot.
-  CHECK_EQ(ke3->program[1].src[0], 0u);
-  CHECK_EQ(ke3->program[1].src[1], 0u);
+  // 2 LOAD prefix + ADD + MUL = 4 ops.
+  CHECK_EQ(ke3->n_ops,    4);
+  CHECK_EQ(ke3->program[0].opcode, UOP_LOAD);
+  CHECK_EQ(ke3->program[1].opcode, UOP_LOAD);
+  CHECK_EQ(ke3->program[2].opcode, UOP_ADD);
+  CHECK_EQ(ke3->program[3].opcode, UOP_MUL);
+  // MUL's two srcs both reference the ADD program slot
+  // (program-index 2 after the LOAD-prefix shift).
+  CHECK_EQ(ke3->program[3].src[0], 2u);
+  CHECK_EQ(ke3->program[3].src[1], 2u);
 
   TEST_BEGIN("inlined/non-elementwise-root-bails");
   // REDUCE root -- MVP doesn't inline non-elementwise; helper
