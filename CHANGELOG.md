@@ -6,6 +6,46 @@ dated section.
 
 ## Unreleased
 
+### Added: multi-sort signatures design memo (stage 8.4a)
+
+`docs/plans/multi_sort.md` (~150 lines) lays out the design for
+stage 8.4 (lifting the homogeneous-sort assumption that's held
+through stages 1-7).
+
+**Where do sorts live?**  Surveys three placements:
+1. Parallel arrays on `WaldSpec` -- minimal struct churn, awkward
+   to keep in sync
+2. Embedded sort fields in `WaldSym` / `WaldVar` -- self-contained
+   metadata, ~2 KB extra
+3. **Hybrid** (chosen): sort name table on `WaldSpec`; per-symbol
+   / per-variable sort *indices* embedded in metadata.  Mirrors
+   how labels / var ids work today.
+
+**Where does sort-checking fire?**  Surveys:
+1. **Precheck via `wald_sort_check(spec, term)`** (chosen): top-
+   down walk before equations / goals reach saturation.  Clean
+   separation; saturation engine sees only well-sorted terms.
+2. Threading sort logic through `thvm_match` / `thvm_unify`:
+   significant API change with implications for every caller.
+   Rejected.
+
+**KBO / CP impact**: deferred.  Single-sort KBO is sound (just
+less complete) on multi-sort signatures; CP enumeration's
+unifier fails-late on sort-mismatched pairs without an explicit
+precheck.  v0 accepts the conservative cost; sort-aware KBO is
+future work.
+
+**Migration plan**:
+- 8.4b: implement choice C on data structures + parser
+- 8.4c: `wald_sort_check` helper
+- 8.4d: gate `thvm_atp_add_equation` / `thvm_atp_set_goal`;
+  CPs not prechecked (well-sortedness inherits from source
+  rules' LHSs)
+- 8.4e: `nat_list.pr` fixture for the bench corpus
+
+**Unblocks**: 8.3d (ICC integration) per its design memo;
+sort-aware KBO / CP-precheck as follow-up perf items.
+
 ### Added: IC-rewrite vs C-rewrite bench cross-product (stage 8.3e-iii)
 
 `tests/test_bench_atp.c` extended to a 2x2 cross product over

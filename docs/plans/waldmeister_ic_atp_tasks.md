@@ -558,7 +558,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           `docs/bench-atp.md` with the latency comparison;
           decide on default.
 - [ ] 8.4 multi-sort signatures (stages 1-4 assume one sort)
-  - [ ] 8.4a design memo `docs/plans/multi_sort.md`: survey
+  - [x] 8.4a design memo `docs/plans/multi_sort.md`: survey
         the representation choices.  Where do sorts live --
         on `WaldSym` / `WaldVar` / a global sort table on
         `WaldSpec`?  Where does sort-checking fire -- inside
