@@ -49,7 +49,8 @@ TESTS := \
   $(BIN)/test_and_or \
   $(BIN)/test_any \
   $(BIN)/test_inc \
-  $(BIN)/test_uop_tuple
+  $(BIN)/test_ctr \
+  $(BIN)/test_when
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.

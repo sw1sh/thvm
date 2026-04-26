@@ -352,6 +352,53 @@ enter:
       whnf = next;
       goto apply;
     }
+    case TAG_WHEN: {
+      // Boolean filter, strict on cond:
+      //   WHEN(NUM(0), _)        -> ERA
+      //   WHEN(NUM(n != 0), b)   -> wnf(b)
+      //   WHEN(ERA, _)           -> ERA
+      //   WHEN(&L{c0,c1}, b)     -> &L{WHEN(c0,B0), WHEN(c1,B1)}, !&L{B0,B1}=b
+      //   otherwise              -> stuck
+      u64  loc  = term_val(next);
+      Term cond = wnf(heap_read(loc + 0));
+      if (term_tag(cond) == TAG_ERA) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        whnf = cond;
+        goto apply;
+      }
+      if (term_tag(cond) == TAG_NUM) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        if ((u32)term_val(cond) == 0) {
+          whnf = term_new(0, TAG_ERA, 0, 0);
+          goto apply;
+        }
+        next = heap_read(loc + 1);
+        goto enter;
+      }
+      if (term_tag(cond) == TAG_SUP) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        u32  lab  = term_ext(cond);
+        u64  sloc = term_val(cond);
+        Term c0   = heap_read(sloc + 0);
+        Term c1   = heap_read(sloc + 1);
+        Term body = heap_read(loc + 1);
+        u64  dup  = heap_alloc(1);
+        heap_set(dup, body);
+        Term w0   = term_new_when(c0, term_new(0, TAG_DP0, lab, dup));
+        Term w1   = term_new_when(c1, term_new(0, TAG_DP1, lab, dup));
+        u64  ns   = heap_alloc(2);
+        heap_set(ns + 0, w0);
+        heap_set(ns + 1, w1);
+        ITRS++;
+        next = term_new(0, TAG_SUP, lab, ns);
+        goto enter;
+      }
+      heap_set(loc + 0, cond);
+      whnf = next;
+      goto apply;
+    }
     case TAG_LAM:
     case TAG_ERA:
     case TAG_SUP:

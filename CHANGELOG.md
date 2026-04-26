@@ -6,6 +6,33 @@ dated section.
 
 ## Unreleased
 
+### Added: TAG_WHEN boolean filter -- closes the stage-1 e2e demo
+
+`TAG_WHEN = 21` is the IC-side primitive for "collapse to the
+matching one":
+
+  WHEN(NUM(0), _)        -> ERA               (failed branch erases)
+  WHEN(NUM(n != 0), b)   -> wnf(b)
+  WHEN(ERA, _)           -> ERA
+  WHEN(&L{c0,c1}, b)     -> &L{WHEN(c0, B0), WHEN(c1, B1)}, !&L{B0,B1}=b
+
+The end-to-end demo from `docs/plans/waldmeister_ic_atp.md` now
+runs in one IC reduction + one collapse:
+
+```
+cands = &L{NUM(2), NUM(3)}
+t     = WHEN(EQL(cands, NUM(3)), cands_dup)
+collapse(t) -> [NUM(3)]    -- only the matching candidate
+```
+
+Failed candidates collapse to ERA via WHEN-NUM-zero, and
+`thvm_collapse` drops ERA branches.  This is stage 1.7 revised:
+constructors+MAT deferred to stage 2 (term encoding) where they
+are motivated by encoding equations.
+
+Constructor: `term_new_when(cond, body)`.  Tests:
+`tests/test_when.c` covers all rules + the e2e demo.
+
 ### Added: TAG_INC priority wrapper + thvm_collapse_ordered
 
 `TAG_INC = 19` is a one-cell priority wrapper.  The reducer treats

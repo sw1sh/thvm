@@ -55,6 +55,8 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "term/new_or.c"
 #include "term/new_any.c"
 #include "term/new_inc.c"
+#include "term/new_ctr.c"
+#include "term/new_when.c"
 
 // === heap/ ===
 #include "heap/alloc.c"
@@ -157,7 +159,6 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "uop/flip.c"
 #include "uop/grad.c"
 #include "uop/load.c"
-#include "uop/tuple.c"
 
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.

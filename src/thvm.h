@@ -89,8 +89,16 @@ typedef u64 Term;
 #define TAG_OR   17  // short-circuit OR. val = heap loc -> [a, b]; strict on a, lazy on b
 #define TAG_ANY  18  // wildcard.         atom; matches anything under EQL, dups to itself
 #define TAG_INC  19  // priority wrapper. val = heap loc -> [body]; observed by collapse_ordered
+#define TAG_CTR  20  // labelled constructor (HVM4 CTR).
+                     //   val = heap loc -> [NUM(arity), c_0, ..., c_{n-1}],
+                     //   ext = constructor label (0 = anonymous tuple).
+                     //   Passive in the IC reducer (no DUP-CTR / ERA-CTR
+                     //   yet -- added when an IC consumer needs them); used
+                     //   today by k0c's multi-target interact_grad to
+                     //   bundle one cotangent Term per requires_grad target.
+#define TAG_WHEN 21  // boolean filter.   val = heap loc -> [cond, body]; truthy -> body, 0/ERA -> ERA
 
-#define TAG_COUNT 20
+#define TAG_COUNT 22
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -136,14 +144,7 @@ typedef u64 Term;
                              //   marker (mirrors tinygrad's UOps.LOAD).  Slot
                              //   reserved -- constructor + materializer land in
                              //   sub-item (b); see TASKS.md UOP_LOAD arc.
-#define UOP_TUPLE       22   // heap = [NUM(n), t_1, ..., t_n]; passive
-                             //   aggregate for multi-output results
-                             //   (k0a + k0c).  walk / classify / materialize
-                             //   treat it as opaque -- consumers that know
-                             //   the layout (e.g., the WL TGradMany bridge)
-                             //   read children via uop_tuple_at.
-
-#define UOP_COUNT       23
+#define UOP_COUNT       22
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -507,6 +508,17 @@ fn Term term_new_and (Term a, Term b);
 fn Term term_new_or  (Term a, Term b);
 fn Term term_new_any (void);
 fn Term term_new_inc (Term body);
+fn Term term_new_when(Term cond, Term body);
+
+// k0a: build a TAG_CTR labelled constructor over `n` child Terms.
+// Heap layout: [NUM(arity=n), c_0, ..., c_{n-1}].  ext = label
+// (0 = anonymous tuple).  Passive in the IC reducer.  Used by
+// k0c's multi-target interact_grad to bundle one cotangent per
+// requires_grad target into a single result.  Accessor
+// term_ctr_at returns 0 (invalid Term) on out-of-range.
+fn Term term_new_ctr (u32 label, const Term *children, u32 n);
+fn u32  term_ctr_n   (Term ctr_term);
+fn Term term_ctr_at  (Term ctr_term, u32 i);
 
 // === lazy outermost-layer resolver ===
 // Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);
@@ -613,14 +625,6 @@ fn Term uop_grad(Term y, Term gy, Term target);
 // the cpu kernel).  Output shape == src shape; arity 1.
 fn Term uop_load(Term src);
 
-// k0a: build a UOP_TUPLE aggregate over `n` child Terms.  Heap
-// layout: [NUM(n), t_0, ..., t_{n-1}].  Passive -- materialize /
-// walk / realize_classify treat the cell as opaque (uop_arity
-// returns 0); consumers read children via uop_tuple_at.  See
-// src/uop/tuple.c.
-fn Term uop_tuple   (const Term *children, u32 n);
-fn Term uop_tuple_at(Term tuple_term, u32 i);
-fn u32  uop_tuple_n (Term tuple_term);
 
 // === schedule/ ===
 // Top-level materialize driver: heap-walk pass that in-place rewrites
