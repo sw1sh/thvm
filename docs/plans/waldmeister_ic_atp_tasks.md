@@ -530,6 +530,29 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         (analogous to 8.1e's `use_ic_cp_gen`): when set, the
         rewrite step uses the SUP-of-LAMs dispatch.  Re-run
         bench harness; expect within 2x of the C path.
+    - [ ] 8.3e-i `use_ic_rewrite` feature flag on `AtpState`
+          (u8, default 0) plus a setter.  Plumb through the
+          AtpState-internal callers of `thvm_rewrite_normalize`
+          (atp_cp_trivially_joinable, thvm_atp_step,
+          thvm_atp_goal_check, thvm_atp_interreduce) via a new
+          shim `atp_rewrite_normalize(s, ...)` that dispatches.
+          Stub `atp_rewrite_normalize_ic` initially delegates
+          to the C path so the flag is observable but inert.
+          Tests verify the flag round-trips.  ~40 LOC.
+    - [ ] 8.3e-ii implement `thvm_rewrite_step_ic` using
+          `prim_rewrite_step` via APP-PRI evaluation per
+          the 8.3a memo Strategy B.  Walks rules in the same
+          order as the C path; for each, builds the saturated
+          PRI call and reduces via wnf.  Returns the rewritten
+          term on first success, or the original term if no
+          rule matches.  Tests: parity vs C path on the group
+          axioms.  ~70 LOC.
+    - [ ] 8.3e-iii bench analysis: extend `test_bench_atp.c`
+          to also toggle `use_ic_rewrite` (4 modes total: c+c,
+          c+ic, ic+c, ic+ic for cp-gen and rewrite).  Or pick
+          a smaller cross product (default + both-IC).  Update
+          `docs/bench-atp.md` with the latency comparison;
+          decide on default.
 - [ ] 8.4 multi-sort signatures (stages 1-4 assume one sort)
 - [ ] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
       -- LPO is `Lexikografische-Pfad-Ordnung`, "lexicographic
