@@ -67,11 +67,15 @@ Module[{plan = TMemoryPlan[], backend, path},
 ]
 
 (* === Heap diagram: DiagramNetwork view (one Diagram per agent),
-   not the per-cell Graph view -- much smaller vertex count for
-   the same heap state. *)
+   arranged on a Grid so the layout matches the IC string-diagram
+   renderings under docs/images/diagrams/.  PortLabels off because
+   the loss graph carries enough TenDescs that the per-port text
+   overwhelms the agent shapes. *)
 Module[{backend, path},
     backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
     path    = "wl/Examples/linear-train/heap-diagram-" <> backend <> ".svg";
-    Export[path, THeapDiagram[loss], Background -> White];
+    Export[path,
+        THeapDiagram[loss]["Arrange"]["Grid", "PortLabels" -> False],
+        Background -> White];
     debugPrint["THeapDiagram   -> ", path]
 ]
