@@ -104,13 +104,40 @@ int main(void) {
   CHECK_EQ(ke3->program[3].src[0], 2u);
   CHECK_EQ(ke3->program[3].src[1], 2u);
 
-  TEST_BEGIN("inlined/non-elementwise-root-bails");
-  // REDUCE root -- MVP doesn't inline non-elementwise; helper
-  // returns 0 so caller falls back to legacy emit.
+  TEST_BEGIN("inlined/reduce-as-tail-collapses");
+  // REDUCE root with elementwise source.  Helper builds ONE kernel
+  // that runs ADD into a register and REDUCEs into the output.
+  // Tinygrad's "local reduction" pattern.
   Term reduced = uop_reduce(REDUCE_SUM, 0, add_t);
   realize_classify(reduced);
   Term k4 = materialize_kernel_inlined(reduced);
-  CHECK_EQ(k4, 0u);
+  CHECK(k4 != 0);
+  CHECK_EQ(term_tag(k4), TAG_UOP);
+  CHECK_EQ(term_ext(k4), UOP_KERNEL);
+  u32 kid4 = (u32)term_val(heap_read(term_val(k4) + 1));
+  KernelEntry *ke4 = &KERNELS[kid4];
+  CHECK_EQ(ke4->n_inputs, 2);                     // a, b
+  // 2 LOAD prefix + ADD + REDUCE = 4 ops total.
+  CHECK_EQ(ke4->n_ops,            4);
+  CHECK_EQ(ke4->program[0].opcode, UOP_LOAD);
+  CHECK_EQ(ke4->program[1].opcode, UOP_LOAD);
+  CHECK_EQ(ke4->program[2].opcode, UOP_ADD);
+  CHECK_EQ(ke4->program[3].opcode, UOP_REDUCE);
+  // REDUCE reads ADD's result (program-index 2 after the LOAD shift).
+  CHECK_EQ(ke4->program[3].src[0], 2u);
+  // Output shape is the source shape with axis 0 dropped: input
+  // a is shape {4}, axis=0, so output is {1}.
+  CHECK(ke4->output_tid != 0);
+  CHECK_EQ(TENS[ke4->output_tid].view.numel, 1u);
+
+  TEST_BEGIN("inlined/non-elementwise-non-reduce-root-bails");
+  // Movement op as root -- still bails.  Helper only accepts
+  // elementwise + CONST + REDUCE-as-tail roots.
+  u32 perm[1] = {0};
+  Term reshaped = uop_reshape(add_t, 1, perm);   // shape {4} -> {4}
+  realize_classify(reshaped);
+  Term k5 = materialize_kernel_inlined(reshaped);
+  CHECK_EQ(k5, 0u);
 
   thvm_free();
   TEST_REPORT();

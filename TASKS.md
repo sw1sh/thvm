@@ -252,20 +252,20 @@ Root causes:
       "elementwise + outermost-tail-REDUCE collapse so each REDUCE
       absorbs its upstream chain".
 
-- [ ] **r1b: extend f1d helper to absorb an outermost-tail REDUCE**.
-      Lift the inline_emit "REDUCE bails" guard for the case where
-      REDUCE is the root being materialized AND its source is a
-      fully-inlinable elementwise chain.  inline_emit emits a
-      REDUCE program op after the inlined elementwise chain; CPU
-      interpret.c already chains program-op registers, so the
-      multi-op kernel reads N inputs, runs N-1 elementwise ops
-      into a temp register, REDUCEs into the output buffer in one
-      kernel.  Metal stays on the legacy multi-kernel chain (via
-      backend gate -- the inlined helper is already CPU-only).
-      Acceptance: `wl/THVMLink/Tests/use_realize.wlt` poly-
-      regression test still passes; new test covers
-      "REDUCE_SUM(MUL(a,b))" collapsing into ONE kernel under
-      toggle ON.  ~70 LOC + ~30 LOC tests.
+- [x] **r1b: extend f1d helper to absorb an outermost-tail REDUCE**.
+      `materialize_kernel_inlined` now accepts `root_op == UOP_REDUCE`
+      when the source is a fully-inlinable elementwise chain.  Built
+      kernel: N LOAD prefix + N-1 elementwise ops into a register +
+      one REDUCE op into the output buffer.  REDUCE arg packed to
+      (kind << 24 | inner) per cpu_op_reduce's runtime encoding;
+      output shape derived by dropping the reduce axis from the
+      first input slot's shape.  Metal still bails (helper is
+      CPU-only via the existing backend gate).  Tests:
+      tests/test_materialize_inlined.c gains "reduce-as-tail-
+      collapses" + a non-elementwise-non-reduce-bails check.
+      Linear-train probe with toggle ON: forward+loss drops
+      from 16 -> 8 kernels (REDUCE_SUM(MUL(...)) chains in
+      Softmax-norm and CE-loss collapse).  ~80 LOC.
 
 - [ ] **r1c: re-bench linear-train + verify acceptance**.  Run
       memory-probe.wls; record the "After forward + loss

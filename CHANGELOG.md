@@ -6,6 +6,19 @@ dated section.
 
 ## Unreleased
 
+### Changed: f1d helper accepts REDUCE-as-tail-op (CPU)
+
+`materialize_kernel_inlined` (CPU-only via the existing backend
+gate) now accepts `root_op == UOP_REDUCE` when the source is a
+fully-inlinable elementwise chain.  Tinygrad's "local reduction"
+pattern: one kernel runs N-1 elementwise ops into a register and
+the final REDUCE writes the output buffer.
+
+Linear-train forward+loss with toggle ON: 16 -> 8 kernels.  Both
+the Softmax-normalization REDUCE_SUM(EXP(x)) and the CE-loss
+REDUCE_SUM(MUL(target, LOG(p))) chains now collapse into one
+kernel each instead of one kernel per UOp.
+
 ### Added: saturation-loop design sketch (stage 5.0)
 
 [docs/plans/saturation_loop.md](docs/plans/saturation_loop.md)

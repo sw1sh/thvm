@@ -190,7 +190,12 @@ fn Term materialize_kernel_inlined(Term realized_uop_term) {
   if (term_tag(r) != TAG_UOP) return 0;
   u8 root_op = term_ext(r);
   if (root_op == UOP_KERNEL)        return r;
-  if (!inline_is_inlinable(root_op)) return 0;
+  // r1b: REDUCE accepted as root -- source still must be a fully-
+  // inlinable elementwise chain.  Multi-op program: N-1 elementwise
+  // ops into a temp register, REDUCE into the output buffer in one
+  // kernel.  Tinygrad's "local reduction" pattern.
+  u8 root_is_reduce = (root_op == UOP_REDUCE);
+  if (!inline_is_inlinable(root_op) && !root_is_reduce) return 0;
 
   u32 kid = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
@@ -200,8 +205,9 @@ fn Term materialize_kernel_inlined(Term realized_uop_term) {
   // Process root's children first via inline_emit (which honors
   // the realized check on each child), then emit the root's
   // main op explicitly so we don't trip the "realized -> bail"
-  // guard against the root itself.
-  u8  arity = uop_arity(root_op);
+  // guard against the root itself.  REDUCE has arity 1 (source);
+  // its kind/axis live at heap[loc+1]/[loc+2] and are read below.
+  u8  arity = root_is_reduce ? 1 : uop_arity(root_op);
   u32 child_srcs  [MAX_UOP_SRC] = {0};
   u32 child_numels[MAX_UOP_SRC] = {1, 1, 1};
   for (u8 i = 0; i < arity; i++) {
@@ -234,6 +240,24 @@ fn Term materialize_kernel_inlined(Term realized_uop_term) {
     if (child_numels[i] > out_numel) out_numel = child_numels[i];
   }
   root_p->numel = out_numel;
+  // r1b: REDUCE collapses one axis -- repack arg to (kind << 24 |
+  // inner) per cpu_op_reduce's runtime encoding, and shrink output
+  // numel by the reduced dim.  Source shape derived from the first
+  // input slot (the inlined chain is elementwise so all inputs
+  // share that shape).
+  if (root_is_reduce) {
+    u32 kind = (u32)term_val(heap_read(term_val(r) + 1));
+    u32 axis = (u32)term_val(heap_read(term_val(r) + 2));
+    Shape src_shape = (ke->n_inputs > 0)
+                    ? TENS[ke->input_tids[0]].view.shape
+                    : (Shape){.ndim = 1, .dims = {1}};
+    u32 inner = 1;
+    for (u32 i = axis + 1; i < src_shape.ndim; i++) inner *= src_shape.dims[i];
+    root_p->arg = ((kind & 0xFF) << 24) | (inner & 0x00FFFFFF);
+    u32 axis_dim = (axis < src_shape.ndim) ? src_shape.dims[axis] : 1;
+    if (axis_dim == 0) axis_dim = 1;
+    root_p->numel = out_numel / axis_dim;
+  }
   ke->output_dtype = root_p->dtype;
   ke->output_numel = root_p->numel;
 
@@ -277,12 +301,35 @@ fn Term materialize_kernel_inlined(Term realized_uop_term) {
   // the shift.
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = ke->output_numel;
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 tid = ke->input_tids[i];
-    if (tid != 0 && tid < TENS_NEXT
-        && TENS[tid].view.numel == ke->output_numel) {
-      ke->output_shape = TENS[tid].view.shape;
-      break;
+  if (root_is_reduce) {
+    // r1b: REDUCE-root output shape = source shape with the
+    // reduced axis dropped.  Source shape = first input's shape
+    // (the inlined chain is elementwise so all inputs share it).
+    Shape src_shape = (ke->n_inputs > 0)
+                    ? TENS[ke->input_tids[0]].view.shape
+                    : (Shape){.ndim = 1, .dims = {1}};
+    u32 axis = (u32)term_val(heap_read(term_val(r) + 2));
+    if (src_shape.ndim <= 1) {
+      ke->output_shape.ndim    = 1;
+      ke->output_shape.dims[0] = 1;
+    } else {
+      Shape o = {0};
+      u32 dst = 0;
+      for (u32 i = 0; i < src_shape.ndim; i++) {
+        if (i == axis) continue;
+        o.dims[dst++] = src_shape.dims[i];
+      }
+      o.ndim = dst;
+      ke->output_shape = o;
+    }
+  } else {
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      u32 tid = ke->input_tids[i];
+      if (tid != 0 && tid < TENS_NEXT
+          && TENS[tid].view.numel == ke->output_numel) {
+        ke->output_shape = TENS[tid].view.shape;
+        break;
+      }
     }
   }
   ke->output_tid = tensor_alloc(CURRENT_BACKEND,
