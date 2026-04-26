@@ -369,14 +369,47 @@ Expected ceilings:
       most surviving tests call `thvm_materialize`).  Net deletion:
       ~2050 LOC.
 
-- [ ] **g2: rewrite materialize.c with the tinygrad scheduler**.
-      ~250 LOC.  One pass: `unroll_grads` -> `realize_classify` ->
-      topo-sort boundaries -> `build_kernel` per boundary.  Movement
-      ops (RESHAPE/EXPAND/PERMUTE/PAD/SHRINK/FLIP) rewrite the View
-      and pass through; never become kernels.  Add
-      `tests/test_materialize_v2.c`: assert Linear=1 kernel,
-      softmax=2 kernels, Linear+softmax=3 kernels.  Make `make test`
-      green.  Do NOT yet run wl-test.
+- [ ] **g2a: scheduler skeleton + topo-sort over realize boundaries**.
+      Replace the `thvm_materialize` stub with: call
+      `realize_classify(sink)`, walk the heap to enumerate every
+      reachable boundary UOp, topo-sort them by producer-to-consumer
+      depth, and return a placeholder Term referencing them.  No
+      kernel emission yet.  ~70 LOC.  Test
+      `tests/test_materialize_v2.c` (new): assert that for a linear
+      chain `a + b + c + d` the topo-sorted boundary list has the
+      expected length and ordering (only the sink is a boundary;
+      intermediates are non-boundary).
+
+- [ ] **g2b: build_kernel for elementwise + REDUCE-as-tail roots**.
+      Implement the `visit(uop)` recursion that collects program
+      ops, dedups inputs by output_tid, allocates the output buf
+      via existing `kernel_alloc`, and registers the KernelEntry.
+      Wire it into the loop from g2a so each boundary becomes one
+      kernel.  ~100 LOC.  Tests: Linear layer = 1 kernel
+      (matmul-as-REDUCE-tail with elementwise prefix); softmax
+      sum-of-exp = 1 kernel (REDUCE-as-tail with EXP2 prefix);
+      `(a + b) * c` = 1 fused kernel (already pinned by
+      `tensors.wlt` after g1).  Make `make test` green for the
+      forward path only (movement ops + GRAD still no-ops).
+
+- [ ] **g2c: movement-op view-rewrite path**.  RESHAPE/EXPAND/
+      PERMUTE/PAD/SHRINK/FLIP must NEVER allocate a kernel.  When
+      `build_kernel`'s visit hits a movement op, rewrite the
+      consumed TenDesc's View in place (or alloc a fresh aliasing
+      TenDesc that shares the buf_id) and continue traversing the
+      source.  Re-enable the surviving `tests/test_view_*.c`
+      tests; they should go green when `materialize_uop_in_env`
+      stops being a no-op and routes through the new view-rewrite
+      path.  ~50 LOC + test fixups.
+
+- [ ] **g2d: GRAD integration + thvm_realize wire-up**.  Re-add the
+      `unroll_grads` walk (call `interact_grad` on each UOP_GRAD
+      reachable from sink, in-place) BEFORE `realize_classify`.
+      Confirm `tests/test_grad.c` and the SGD optimizer test go
+      green.  ~30 LOC.  After this, full `make test` should be
+      green (or document any remaining failure that's a
+      legitimate kernel-count regression vs the round-2 baseline,
+      to be assessed in g3).
 
 - [ ] **g3: WL surface fixes + fusion_count.wlt**.  Patch any WL
       bridge/surface that breaks (likely `TRealize` and
