@@ -4950,31 +4950,56 @@ implemented + tested (f1a) but never invoked by the pipeline.
         actual fusion gain needs a different mechanism --
         see f1d-d4b2d below.
 
-  - [ ] **f1d-d4b2d: investigate why toggle-ON allocates
-        more kernels than legacy**.  After d4b2b{1,2,3}, the
-        regression remains: lin ON=157 vs OFF=93, poly
-        ON=105 vs OFF=91.  Hypothesis: the legacy path emits
-        ONE kernel per unique UOp (deduped via the d4b2a
-        memo); the toggle-ON path emits one per REALIZED UOp
-        PLUS one per movement/REDUCE upstream that
-        materialize_expr's child loop force-materializes.
-        The "fusion gain" only materializes when there are
-        long elementwise chains feeding a single realized
-        op -- which doesn't occur in these graphs (most
-        chains have movement / REDUCE in the middle that
-        promote intermediate UOps to realized).
-        Action: instrument both paths, dump per-realize
-        counts of (n_unique_uops, n_realized, n_helper_ok,
-        n_helper_bail, n_legacy_emit) for poly + lin under
-        both toggles, and from those numbers decide whether
-        the right next move is (a) tighten realize_classify
-        rules so fewer UOps get marked realized, (b) make
-        the helper absorb realized children (not just
-        un-realized) so the realized-but-absorbable cohort
-        doesn't get its own kernel, or (c) abandon the
-        f1d toggle approach and instead implement a
-        post-walk fusion pass that merges adjacent same-
-        size kernels.  ~30-50 LOC of probe + decision.
+  - [x] **f1d-d4b2d: investigate why toggle-ON allocates
+        more kernels than legacy**.  Added env-gated stat
+        counters (THVM_MAT_STATS=<path> dumps a one-line
+        summary per realize) and ran poly + lin under both
+        toggles.  Numbers (grad_a / grad_w realize):
+            poly OFF: 41 kernels, helper_ok=0,
+                      helper_bail=0, legacy_expr=41
+            poly ON : 49 kernels, helper_ok=14,
+                      helper_bail=12, legacy_expr=35
+            lin  OFF: 40 kernels, helper_ok=0,
+                      helper_bail=0, legacy_expr=40
+            lin  ON : 75 kernels, helper_ok=10,
+                      helper_bail=12, legacy_expr=65
+        Diagnosis: each helper_ok call STILL allocates a
+        kernel (just one with inlined upstream); the d4b2b1
+        recursion into materialize_expr for realized
+        children means a chain of N realized UOps emits N
+        kernels via N nested helper invocations -- same as
+        legacy.  The savings only come from non-realized
+        inlinable children that helper inlines without
+        recursing.  In poly + lin, those are 0% of the
+        graph: every UOp is either realized (rule b: shared
+        in grad chain, rule c: REDUCE) or non-inlinable
+        (movement).  Helper_bail also leaks the abandoned
+        kernel slot (kernel_dealloc_last no-ops when
+        nested allocs ran in between).  Three options
+        considered:
+          (a) tighten realize_classify -- but rule c
+              (REDUCE always realized) is structural; rule b
+              (multi-consumer realized) needs sharing data
+              we don't have a cheap way to relax.
+          (b) extend helper to handle REDUCE / movement in
+              upstream -- requires multi-stage program with
+              intermediate buffer slots, ~200-300 LOC of
+              new infra in materialize_inlined.c.
+          (c) abandon f1d toggle for the GOAL: legacy path
+              is correct, fast enough, and well-tested.
+              Move energy to memory-side wins (slot reuse,
+              alias dedup, peak_concurrent_kib reduction --
+              which is what TMemoryPlan was built for).
+        Decision: option (c).  Per-kernel fusion isn't on
+        the LeNet-on-Metal critical path; the goal is
+        already met end-to-end (per repo README).  Leaving
+        the toggle in place for future experiments + the
+        existing use_realize.wlt tests, but redirecting
+        f1d-d4c, f1e to focus on memory-side wins instead
+        of the kernel-count target.  ~50 LOC of
+        instrumentation in materialize_memo.c +
+        materialize.c + materialize_in_env.c (zero cost
+        when THVM_MAT_STATS unset).
 
 
   - [ ] **f1d-d4c: actually flip default + verify**.  After

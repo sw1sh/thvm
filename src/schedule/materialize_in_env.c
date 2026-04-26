@@ -77,11 +77,13 @@ static Term materialize_uop_in_env_inner(Term uop, u32 env_id) {
     if (MATERIALIZE_USE_REALIZE_INFO) {
       if (realize_is_realized(uop)) {
         Term k = materialize_kernel_inlined(uop);
-        if (k != 0) return k;
+        if (k != 0) { MAT_STATS_HELPER_OK++; return k; }
+        MAT_STATS_HELPER_BAIL++;
       } else if (inline_is_inlinable((u8)op)) {
         return uop;
       }
     }
+    MAT_STATS_LEGACY_WALK++;
 
     u8 arity = uop_arity(op);
     u64 expr_loc = term_val(uop);

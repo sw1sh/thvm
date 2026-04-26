@@ -18,6 +18,17 @@
 #define MATERIALIZE_MEMO_CAP  (1u << 15)        // 32768 slots
 #define MATERIALIZE_MEMO_MASK (MATERIALIZE_MEMO_CAP - 1u)
 
+// f1d-d4b2d: per-realize counters for diagnosing where kernels
+// come from under toggle ON vs OFF.  Active only when THVM_MAT_STATS
+// env var is set; otherwise zero-cost (just integer increments
+// against unread counters).
+u64 MAT_STATS_HELPER_OK    = 0;
+u64 MAT_STATS_HELPER_BAIL  = 0;
+u64 MAT_STATS_LEGACY_EXPR  = 0;
+u64 MAT_STATS_LEGACY_WALK  = 0;
+u64 MAT_STATS_MEMO_HITS    = 0;
+u64 MAT_STATS_MEMO_STORES  = 0;
+
 typedef struct {
   u64  loc;       // 0 = empty slot
   Term cached;
@@ -42,7 +53,7 @@ fn Term materialize_memo_lookup(u64 loc) {
   for (u32 probe = 0; probe < MATERIALIZE_MEMO_CAP; probe++) {
     MaterializeMemoSlot *s = &MATERIALIZE_MEMO[i];
     if (s->loc == 0)   return 0;
-    if (s->loc == loc) return s->cached;
+    if (s->loc == loc) { MAT_STATS_MEMO_HITS++; return s->cached; }
     i = (i + 1u) & MATERIALIZE_MEMO_MASK;
   }
   return 0;
@@ -64,6 +75,7 @@ fn void materialize_memo_store(u64 loc, Term t) {
     if (s->loc == 0 || s->loc == loc) {
       s->loc    = loc;
       s->cached = t;
+      MAT_STATS_MEMO_STORES++;
       return;
     }
     i = (i + 1u) & MATERIALIZE_MEMO_MASK;

@@ -283,8 +283,10 @@ static Term materialize_expr_inner(Term expr) {
   // legacy per-UOp emit below for un-realized cases.
   if (MATERIALIZE_USE_REALIZE_INFO && realize_is_realized(expr)) {
     Term k = materialize_kernel_inlined(expr);
-    if (k != 0) return k;
+    if (k != 0) { MAT_STATS_HELPER_OK++; return k; }
+    MAT_STATS_HELPER_BAIL++;
   }
+  MAT_STATS_LEGACY_EXPR++;
 
   u64 expr_loc = term_val(expr);
   u8  arity    = uop_arity(op);
@@ -589,10 +591,41 @@ fn Term thvm_materialize(Term term) {
   // memo entry from the previous realize would alias an unrelated
   // UOp to the wrong cached kernel.
   materialize_memo_clear();
-  if (term_tag(term) == TAG_TEN) return materialize_root_alias(term);
-  if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_KERNEL) return term;
-  Term walked = materialize_walk(term);
-  if (term_tag(walked) == TAG_TEN) return materialize_root_alias(walked);
-  if (term_tag(walked) == TAG_UOP && term_ext(walked) == UOP_KERNEL) return walked;
-  return materialize_expr(walked);
+  // f1d-d4b2d: reset stat counters too.  When THVM_MAT_STATS is set
+  // we dump a one-line summary at the end of this realize; the
+  // probe script greps these lines from a logfile.
+  u32 kernels_at_start = KERNELS_NEXT;
+  MAT_STATS_HELPER_OK = MAT_STATS_HELPER_BAIL = 0;
+  MAT_STATS_LEGACY_EXPR = MAT_STATS_LEGACY_WALK = 0;
+  MAT_STATS_MEMO_HITS = MAT_STATS_MEMO_STORES = 0;
+
+  Term out;
+  if (term_tag(term) == TAG_TEN) out = materialize_root_alias(term);
+  else if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_KERNEL) out = term;
+  else {
+    Term walked = materialize_walk(term);
+    if (term_tag(walked) == TAG_TEN) out = materialize_root_alias(walked);
+    else if (term_tag(walked) == TAG_UOP && term_ext(walked) == UOP_KERNEL) out = walked;
+    else out = materialize_expr(walked);
+  }
+
+  const char *stats_path = getenv("THVM_MAT_STATS");
+  if (stats_path != NULL) {
+    FILE *f = fopen(stats_path, "a");
+    if (f != NULL) {
+      fprintf(f,
+        "[mat toggle=%u] kernels=%u helper_ok=%llu helper_bail=%llu "
+        "legacy_expr=%llu legacy_walk=%llu memo_hits=%llu memo_stores=%llu\n",
+        MATERIALIZE_USE_REALIZE_INFO,
+        KERNELS_NEXT - kernels_at_start,
+        (unsigned long long)MAT_STATS_HELPER_OK,
+        (unsigned long long)MAT_STATS_HELPER_BAIL,
+        (unsigned long long)MAT_STATS_LEGACY_EXPR,
+        (unsigned long long)MAT_STATS_LEGACY_WALK,
+        (unsigned long long)MAT_STATS_MEMO_HITS,
+        (unsigned long long)MAT_STATS_MEMO_STORES);
+      fclose(f);
+    }
+  }
+  return out;
 }
