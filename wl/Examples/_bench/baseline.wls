@@ -74,7 +74,7 @@ lenetForward[wH_, img_, label_] := Block[{
 ]
 
 lenetStep[hosts_, t_] := Block[{
-    weightsH, mAll, vAll, loss, weights, lossR, grads,
+    weightsH, mAll, vAll, loss, weights, lossR, gradTerms, grads,
     hostsNew, mNew, vNew
 },
     weightsH = Take[hosts, 8];
@@ -83,20 +83,21 @@ lenetStep[hosts_, t_] := Block[{
     TReset[];
     {loss, weights} = lenetForward[weightsH, img, label];
     lossR = First @ Normal @ TTensorData @ TRealize @ loss;
-    (* m2: explicitly TTermUnpin each grad's realized term once its
-       host data has been extracted, so the next realize's
-       pool_rollback_with_preserve can push its bufs to the
-       freelist.  Without this every grad's transient buffers stay
-       wpt-pinned across the loop. *)
+    (* TGradMany builds one UOP_GRAD covering all 8 weights; the
+       multi-target chain rule lowers to a TAG_CTR of unary grads
+       sharing the forward DAG via heap-loc identity, so the
+       per-realize memo emits ONE set of forward kernels for the
+       whole pack.  Each result still gets per-grad TTermUnpin
+       after host extract so transient backward bufs are freed. *)
+    gradTerms = TGradMany[loss, weights];
     grads = Map[
-        Module[{gradTerm, hostArr},
-            gradTerm = TRealize @ TGrad[loss, #];
-            hostArr  = NumericArray[Normal @ TTensorData @ gradTerm,
-                                    "Real32"];
-            TTermUnpin[gradTerm];
+        Module[{hostArr},
+            hostArr = NumericArray[Normal @ TTensorData @ TRealize @ #,
+                                   "Real32"];
+            TTermUnpin[#];
             hostArr
         ] &,
-        weights];
+        gradTerms];
     {hostsNew, mNew, vNew} = TAdamHostStep[weightsH, grads, mAll, vAll,
                                             0.05, 0.9, 0.999, 1.0*^-8, t + 1];
     Append[hostsNew, {mNew, vNew}]

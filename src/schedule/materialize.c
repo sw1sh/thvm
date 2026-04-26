@@ -238,8 +238,24 @@ static Term materialize_expr_inner(Term expr) {
   // WHNF root), so the call doesn't drag in the rest of the graph.
   expr = term_resolve(expr);
   u8 tag = term_tag(expr);
-  if (tag != TAG_UOP && tag != TAG_TEN && tag != TAG_NUM) {
+  if (tag != TAG_UOP && tag != TAG_TEN && tag != TAG_NUM && tag != TAG_CTR) {
     expr = wnf(expr);
+  }
+
+  // TAG_CTR: passive aggregate (e.g., the multi-target grad result).
+  // Materialize each child within the same realize so the per-realize
+  // memo dedups every kernel emitted from a forward UOp shared
+  // across the n children -- this is the whole point of TGradMany:
+  // one realize covering n targets emits ONE set of forward kernels.
+  if (term_tag(expr) == TAG_CTR) {
+    u32  n   = term_ctr_n(expr);
+    u32  lab = term_ext(expr);
+    Term mat_children[256];
+    if (n > 256) return expr;
+    for (u32 i = 0; i < n; i++) {
+      mat_children[i] = materialize_expr(term_ctr_at(expr, i));
+    }
+    return term_new_ctr(lab, mat_children, n);
   }
 
   // TAG_TEN leaves: already concrete, nothing to do.
@@ -607,6 +623,23 @@ fn Term thvm_materialize(Term term) {
     if (term_tag(walked) == TAG_TEN) out = materialize_root_alias(walked);
     else if (term_tag(walked) == TAG_UOP && term_ext(walked) == UOP_KERNEL) out = walked;
     else out = materialize_expr(walked);
+  }
+  // After materialize_expr returns, if the root is a TAG_CTR we need
+  // to also alias-materialize each child that landed as a non-contig
+  // TEN view (mirror the root_alias path above for the unary case).
+  if (term_tag(out) == TAG_CTR) {
+    u32 n = term_ctr_n(out);
+    Term aliased[256];
+    u8  changed = 0;
+    if (n <= 256) {
+      for (u32 i = 0; i < n; i++) {
+        Term c = term_ctr_at(out, i);
+        Term a = (term_tag(c) == TAG_TEN) ? materialize_root_alias(c) : c;
+        if (a != c) changed = 1;
+        aliased[i] = a;
+      }
+      if (changed) out = term_new_ctr(term_ext(out), aliased, n);
+    }
   }
 
   const char *stats_path = getenv("THVM_MAT_STATS");

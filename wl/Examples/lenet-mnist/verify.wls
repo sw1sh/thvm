@@ -82,7 +82,7 @@ buildForward[w1H_, b1H_, w2H_, b2H_, w3H_, b3H_, w4H_, b4H_,
     ]
 
 stepGrads[hosts_] :=
-    Module[{loss, probs, weights, lossR, grads},
+    Module[{loss, probs, weights, lossR, gradTerms, grads},
         TInit[];
         {loss, probs, weights} = buildForward[hosts[[1]], hosts[[2]],
                                                 hosts[[3]], hosts[[4]],
@@ -90,21 +90,20 @@ stepGrads[hosts_] :=
                                                 hosts[[7]], hosts[[8]],
                                                 img, label];
         lossR = First @ Normal @ TTensorData @ TRealize @ loss;
-        (* m2 probe: after each grad's data is materialized to a host
-           NumericArray the runtime tensor is dead -- explicitly unpin
-           it so the next realize's pool_rollback_with_preserve can
-           push its bufs to the freelist.  Without this the Adam
-           step's wpt set keeps every grad's transient buffers
-           pinned across the loop. *)
-        grads = Map[
-            Module[{gradTerm, hostArr},
-                gradTerm = TRealize @ TGrad[loss, #];
-                hostArr  = NumericArray[Normal @ TTensorData @ gradTerm,
-                                        "Real32"];
-                TTermUnpin[gradTerm];
+        (* TGradMany builds one UOP_GRAD covering all 8 weights;
+           the multi-target chain rule lowers to a TAG_CTR of unary
+           grads sharing the forward DAG via heap-loc identity, so
+           materialize's per-realize memo emits ONE set of forward
+           kernels for the whole pack. *)
+        gradTerms = TGradMany[loss, weights];
+        grads     = Map[
+            Module[{hostArr},
+                hostArr = NumericArray[Normal @ TTensorData @ TRealize @ #,
+                                       "Real32"];
+                TTermUnpin[#];
                 hostArr
             ] &,
-            weights];
+            gradTerms];
         {lossR, grads}
     ]
 

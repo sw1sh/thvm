@@ -188,6 +188,47 @@ Three plausible next directions if the savings are still wanted:
    recycle without depending on conservative root sets.  Largest
    change but the most direct fix.
 
+## k0e: TGradMany rewire delta (NEGATIVE RESULT, 2026-04-26)
+
+Switched `lenetStep` (baseline.wls) and `stepGrads` (verify.wls)
+to `TGradMany[loss, weights]`, plus made materialize descend into
+`TAG_CTR` children so the multi-target chain rule's result emits
+all n backward kernels in ONE realize.  Re-bench:
+
+| backend | kernels (was) | kernels (TGradMany) | peak (was) | peak (now) |
+| ------- | ------------: | ------------------: | ---------: | ---------: |
+| CPU     |           427 |                 426 |     1882.3 |     1882.3 |
+| Metal   |           427 |                 426 |     1882.3 |     1882.3 |
+
+**Acceptance NOT met** (target: 427 -> <=200 kernels, peak -20%).
+The consolidation works -- a small toy probe (loss = SUM(w1+w2),
+two grads) drops 19 -> 18 kernels, confirming the per-realize
+memo dedups the shared forward references -- but the savings
+don't scale:
+
+- Each per-target chain rule allocates FRESH UOp cells for its
+  cotangent compute (new ADD/MUL/EXPAND/etc. with new heap locs).
+  These freshly-constructed UOps are NOT shared across targets,
+  so the memo can't dedup them.
+- Only the FORWARD LEAVES (the y heap loc + its non-cotangent
+  references) are shared.  For LeNet that's a handful of
+  references; for the toy case it's 1 reference; the kernel
+  savings track the leaf-share count, not the chain length.
+
+To deliver the original acceptance (~50% kernel drop and 20% peak
+drop) we'd need to share BACKWARD compute across targets too --
+either by making the chain rule emit cotangent ops via a content-
+addressed cache (so structurally-equal cotangents canonicalize to
+the same heap loc), or by computing partial cotangents into
+explicit scratch slots and fanning out at the targets.  Both are
+new arcs.
+
+verify.wls still converges identically on both backends
+(loss 2.61 -> 0.025 in 4 Adam steps).  The TGradMany rewire is
+correctness-preserving and shifts the surface to a multi-target
+API that would benefit immediately from any future content-
+addressed dedup.
+
 ## m2: per-grad TTermUnpin probe (NEGATIVE RESULT, 2026-04-26)
 
 Modified `lenetStep` (in `wl/Examples/_bench/baseline.wls`) and

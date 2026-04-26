@@ -150,15 +150,19 @@ Real kernel-count + memory wins need either:
       wl/THVMLink/Kernel/{THVMLink,Tensor}.wl.  3 new tests
       in grad.wlt (295 WL total).  166 C + 295 WL green.
 
-- [ ] **k0e: rewire bench + verify; measure delta**.  Switch
-      lenetStep (baseline.wls) and stepGrads (verify.wls)
-      to `TGradMany[loss, {w1, b1, ..., w4, b4}]`.
-      Acceptance: lenet kernel_count drops from 427 to
-      <=200 AND peak_concurrent_kib drops by at least 20%
-      (currently 1882.3, target <= 1500).  verify.wls
-      still converges loss 2.61 -> 0.025.  Update
-      docs/bench-results.md with a "post-k0" column.
-      ~20 LOC + measurement.
+- [x] **k0e: rewire bench + verify; measure delta**.
+      lenetStep (baseline.wls) and stepGrads (verify.wls) now
+      use `TGradMany[loss, weights]`; materialize descends into
+      TAG_CTR children so all n backward kernels emit in ONE
+      realize.  Result NEGATIVE: 427 -> 426 kernels (-0.2%),
+      peak unchanged on both backends.  Cause: each per-target
+      chain rule allocates FRESH UOp cells for its cotangent
+      compute (new heap locs); only forward leaves are shared.
+      Memo dedups the leaf-references, not the chain ops.
+      To hit the original target needs content-addressed
+      cotangent dedup OR shared scratch -- both new arcs.
+      verify.wls still converges 2.61 -> 0.025 on both
+      backends.  Detail in docs/bench-results.md "k0e".
 
 - [ ] **k1: per-realize labeled stat dump**.  Currently we know
       "lenet Adam step = 427 kernels" but not which forward layer

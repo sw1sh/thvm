@@ -6,6 +6,20 @@ dated section.
 
 ## Unreleased
 
+### Changed: lenet bench + verify use TGradMany; materialize descends into TAG_CTR
+
+`lenetStep` (baseline.wls) and `stepGrads` (verify.wls) now build a
+single multi-target `UOP_GRAD` via `TGradMany[loss, weights]`.
+`materialize_expr` gained a `TAG_CTR` case that recursively
+materializes each child within the same realize, so all n backward
+kernels emit in ONE materialize pass with shared memo.
+
+Bench result is NEGATIVE for the kernel-count metric (427 -> 426
+on lenet) and 0% for peak.  Cause: each per-target chain rule
+allocates fresh cotangent UOp cells with new heap locs, so the
+memo can only dedup the forward leaf references.  Detail +
+follow-up options in `docs/bench-results.md` "k0e" section.
+
 ### Added: equational rewriter -- stage 3 (one-shot, top-position only)
 
 `src/rewrite/_.c` exports a small C-side equational rewriter for
