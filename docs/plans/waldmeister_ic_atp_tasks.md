@@ -412,6 +412,22 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         to the surviving CPs.  Compare against the C-side
         `thvm_critical_pairs_range` output for the same
         inputs.  Tests: 3-5 cases that demonstrate parity.
+    - [ ] 8.1d-i APP-SUP commutation: `src/interact/app_sup.c`
+          implementing `APP(&L{a, b}, x) -> &L{APP(a, x_dup_0),
+          APP(b, x_dup_1)}` with the right-side DUP pattern
+          for sharing the argument across the two children.
+          Wire into the WNF dispatch (next to APP-LAM,
+          APP-BRI).  Tests: `tests/test_app_sup.c` -- 4-6
+          cases covering single-SUP, nested-SUP, ERA arg.
+          (Foundational; not 8.1-specific but blocks 8.1d-ii.)
+    - [ ] 8.1d-ii SUP-encoded CP fan-out demo: hand-build
+          `&L{(s1, t1), (s2, t2), ...}` with `prim_unify_apply`
+          applied via APP-SUP fan-out + PRI saturation.
+          Compare the result of `wnf` on the encoded
+          expression against the manually-computed
+          `thvm_unify_apply` outputs for each pair.  3-5 test
+          cases that demonstrate parity at the two-position
+          and one-rule-pair scope.
   - [ ] 8.1e replace `thvm_atp_generate_cps` -- conditional
         on a feature flag -- with the SUP encoding.  Re-run
         the bench harness; expect comparable proof rates and
