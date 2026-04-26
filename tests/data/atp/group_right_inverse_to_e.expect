@@ -1,0 +1,9 @@
+% Expected outcome for tests/data/atp/group_right_inverse_to_e.pr.
+% Format: simple key=value pairs.
+%   status         -- one of PROVED / TIMEOUT / QUEUE_EMPTY
+%   max_step       -- upper bound on saturation steps (advisory; the
+%                     bench harness will report if exceeded)
+%   max_rules      -- upper bound on |R| at termination
+status=PROVED
+max_step=5
+max_rules=5

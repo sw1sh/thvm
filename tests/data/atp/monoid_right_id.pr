@@ -1,0 +1,16 @@
+% Monoid axioms (associativity + right-identity, no inverse).
+% Conjecture: applying the right-identity to a specific term
+% reduces it.  Proves trivially via a single rewrite of the
+% right-identity rule.
+NAME            monoid_right_id
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       e: -> ANY
+                f: ANY ANY -> ANY
+                a: -> ANY
+ORDERING        LPO
+                f > e > a
+VARIABLES       x,y,z : ANY
+EQUATIONS       f(x, e) = x
+                f(f(x, y), z) = f(x, f(y, z))
+CONCLUSION      f(a, e) = a

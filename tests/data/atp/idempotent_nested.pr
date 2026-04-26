@@ -1,0 +1,15 @@
+% Pure idempotent absorption: f(x, x) = x.  Conjecture
+% f(a, f(a, a)) = a should reduce in two rewrites under the
+% top-down recursive rewriter (inner f(a, a) -> a, then outer
+% f(a, a) -> a).  Tests the rewriter's recursion-into-children
+% path on a flat-but-non-trivial conjecture.
+NAME            idempotent_nested
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       f: ANY ANY -> ANY
+                a: -> ANY
+ORDERING        LPO
+                f > a
+VARIABLES       x : ANY
+EQUATIONS       f(x, x) = x
+CONCLUSION      f(a, f(a, a)) = a

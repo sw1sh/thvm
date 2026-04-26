@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: `.pr` test corpus for ATP bench (stage 7.4b)
+
+Four small group-flavored `.pr` fixtures land under
+`tests/data/atp/`, each paired with a `.expect` companion that
+records the empirically-observed outcome (status + advisory
+upper bounds on step / rule count):
+
+- `group_right_inverse_to_e.pr` -- group axioms, conclude
+  `f(a, i(a)) = e` (direct rewrite). Expected: PROVED in 1
+  step, 2 rules.
+- `group_commutative_inverse.pr` -- group axioms, conclude
+  `f(a, i(a)) = f(i(a), a)` (commutativity-of-inverse-on-
+  element; same as `waldmeister/documents/example.pr`).
+  Expected: TIMEOUT at 256 steps under the current KBO config.
+- `monoid_right_id.pr` -- monoid (assoc + right-id, no
+  inverse), conclude `f(a, e) = a`. Expected: PROVED in 0
+  steps (closes via direct goal-rewrite).
+- `idempotent_nested.pr` -- pure idempotent rule
+  `f(x, x) = x`, conclude `f(a, f(a, a)) = a`. Expected:
+  PROVED in 0 steps via the recursive rewriter.
+
+`.expect` format: simple `key=value` pairs with `%`-prefixed
+comments (matching the `.pr` lexer's syntax).  Recognized keys:
+`status`, `max_step`, `max_rules`. Stage 7.4c will add a bench
+harness that consumes these.
+
 ### Added: ATP benchmark log skeleton (stage 7.4a)
 
 `docs/bench-atp.md` lands the methodology + first results table

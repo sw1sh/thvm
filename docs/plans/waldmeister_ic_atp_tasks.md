@@ -356,7 +356,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         table populated with our ATP's wall-clock / step
         count / `n_cps_dropped_*` for the group example only.
         No Twee comparison yet -- 7.4d adds that.
-  - [ ] 7.4b small `.pr` test corpus under `tests/data/atp/`:
+  - [x] 7.4b small `.pr` test corpus under `tests/data/atp/`:
         hand-write `group_assoc_left_inverse.pr`,
         `monoid_left_id.pr`, `commutative_inverse.pr` (3-5
         small-but-non-trivial group-flavored conjectures).

@@ -1,0 +1,18 @@
+% Group axioms (assoc, right-identity, right-inverse) plus a
+% conjecture that follows in one rewrite step from the right-
+% inverse axiom.  Should be PROVED almost immediately under
+% any reasonable saturation budget.
+NAME            group_right_inverse_to_e
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       e: -> ANY
+                i: ANY -> ANY
+                f: ANY ANY -> ANY
+                a: -> ANY
+ORDERING        LPO
+                i > f > e > a
+VARIABLES       x,y,z : ANY
+EQUATIONS       f(x, e) = x
+                f(x, i(x)) = e
+                f(f(x, y), z) = f(x, f(y, z))
+CONCLUSION      f(a, i(a)) = e

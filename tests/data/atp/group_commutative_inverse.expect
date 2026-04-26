@@ -1,0 +1,7 @@
+% Expected outcome for tests/data/atp/group_commutative_inverse.pr.
+% Currently TIMEOUT under our 256-step budget; landing the LPO
+% comparator (stage 8.5) and AC-aware joinability is expected to
+% bring this within reach.
+status=TIMEOUT
+max_step=256
+max_rules=512

@@ -1,0 +1,21 @@
+% Full group axioms with the much harder conclusion that the
+% inverse commutes with its element on a specific term.  This
+% is `waldmeister/documents/example.pr`'s conclusion verbatim;
+% deriving left-inverse from right-inverse + associativity +
+% identity is well beyond what our 256-step KBO-with-mapped-LPO
+% setup can prove today.  Expected: TIMEOUT, with the saturation
+% accumulating many rules.
+NAME            group_commutative_inverse
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       e: -> ANY
+                i: ANY -> ANY
+                f: ANY ANY -> ANY
+                a: -> ANY
+ORDERING        LPO
+                i > f > e > a
+VARIABLES       x,y,z : ANY
+EQUATIONS       f(x, e) = x
+                f(x, i(x)) = e
+                f(f(x, y), z) = f(x, f(y, z))
+CONCLUSION      f(a, i(a)) = f(i(a), a)
