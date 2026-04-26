@@ -102,3 +102,14 @@ Module[{plan = TMemoryPlan[], backend, path},
     debugPrint[""];
     debugPrint["TMemoryPlanGantt -> ", path]
 ]
+
+(* === Heap diagram: IC string-diagram view of the post-realize
+   state.  Captures the kernel boundary structure (UOP_KERNEL nodes
+   + the TenDescs they wire up) so the reader can see the fused
+   shape next to the per-buf timeline. *)
+Module[{backend, path},
+    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
+    path    = "wl/Examples/linear-train/heap-graph-" <> backend <> ".svg";
+    Export[path, THeapGraph[], Background -> White];
+    debugPrint["THeapGraph     -> ", path]
+]
