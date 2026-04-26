@@ -1,0 +1,5 @@
+% Stage 9.1d: multi-witness existential.  The bench harness runs
+% the single-witness narrow path so it reports PROVED on the
+% first witness (x=b under LPO precedence f > b > c > a).  Full
+% enumeration via narrow_all (9.1b) gives both x=b and x=c.
+status=PROVED

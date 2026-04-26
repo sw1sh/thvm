@@ -6,6 +6,23 @@ dated section.
 
 ## Unreleased
 
+### Added: multi-witness `.pr` fixture (stage 9.1d)
+
+`tests/data/atp/exists_multi.pr` (+ `.expect`): existential
+goal `f(x, x) = a` with axioms `f(b, b) = a` and `f(c, c) = a`
+under LPO `f > b > c > a`.  Both rules unify with the goal at
+the top, binding x to a different constant; full enumeration
+via `narrow_all` recovers x=b and x=c.
+
+The bench harness still runs the single-witness narrow path
+(`thvm_atp_run` with `set_goal_existential`), so it reports
+PROVED on the first witness.  All 4 (cp-gen x rewrite) modes
+agree on status -- parity holds for the multi-witness setup.
+Multi-witness enumeration is exercised separately by 9.1b's C
+tests and 9.1c's WL `AllWitnesses -> True` tests.
+
+166/166 C, 319 WL.
+
 ### Added: WL multi-witness surface (stage 9.1c)
 
 `TATP[axioms, conjecture, Witness -> {x_, ...}, AllWitnesses

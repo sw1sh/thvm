@@ -1,0 +1,23 @@
+% Multi-witness existential goal (stage 9.1d): goal f(x, x) = a
+% with two distinct rules f(b, b) -> a and f(c, c) -> a.  Each
+% rule unifies with the goal at the top, binding x to a different
+% constant, so `thvm_atp_narrow_all` enumerates two witnesses
+% (x=b and x=c).  The bench harness still runs in single-witness
+% narrow mode and reports PROVED on the first hit.  Full
+% enumeration is exercised via:
+%   - 9.1b's `tests/test_atp.c` narrow_all unit cases
+%   - 9.1c's WL-side TATP[..., AllWitnesses -> True] tests
+NAME            exists_multi
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       a: -> ANY
+                b: -> ANY
+                c: -> ANY
+                f: ANY ANY -> ANY
+ORDERING        LPO
+                f > b > c > a
+VARIABLES       x : ANY
+EQUATIONS       f(b, b) = a
+                f(c, c) = a
+EXISTS          x
+CONCLUSION      f(x, x) = a

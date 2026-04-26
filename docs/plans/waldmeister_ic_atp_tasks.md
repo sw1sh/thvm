@@ -752,7 +752,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         returns `<|"Witnesses" -> {<|x -> term1|>,
         <|x -> term2|>, ...}|>` instead of `Witness ->
         <|...|>`.  Include the search budget options.
-  - [ ] 9.1d test fixture: a `.pr` file with multiple
+  - [x] 9.1d test fixture: a `.pr` file with multiple
         witnesses (e.g. `f(x, x) = a` with rules
         `f(b, b) = a` and `f(c, c) = a` -- two witnesses
         x=b and x=c).  Wire into bench harness.
