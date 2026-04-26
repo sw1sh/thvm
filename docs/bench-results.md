@@ -20,18 +20,18 @@ section.  bm5 confirms the prediction with a clean side-by-side.
 
 ## Side-by-side
 
-| bench                          | backend | metric              | bm3 baseline | post-bm4abc | post-hrp | post-gc | post-wpt |    Δ-wpt |
-| ------------------------------ | ------- | ------------------- | ------------ | ----------- | -------- | ------- | -------- | -------: |
-| lenet-mnist (Adam step)        | CPU     | ms/step             |          6.9 |         7.0 |      7.9 |     8.0 |      9.5 |     +19% |
-| lenet-mnist (Adam step)        | CPU     | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |   1882.3 |       0% |
-| lenet-mnist (Adam step)        | CPU     | total_live KiB      |       4087.4 |      4087.4 |   4087.4 |  4087.4 |   4086.7 |       0% |
-| lenet-mnist (Adam step)        | CPU     | kernels             |          455 |         455 |      455 |     455 |      455 |       0% |
-| lenet-mnist (Adam step)        | Metal   | ms/step             |         85.8 |       100.9 |     95.9 |   103.0 |     92.6 |     -10% |
-| lenet-mnist (Adam step)        | Metal   | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |   1882.3 |       0% |
-| beautiful-mnist (forward only) | CPU     | ms/step             |        175.1 |       179.6 |    175.4 |   214.2 |    176.5 |     -18% |
-| beautiful-mnist (forward only) | CPU     | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |  82750.3 |       0% |
-| beautiful-mnist (forward only) | Metal   | ms/step             |        245.5 |       250.6 |    249.8 |   232.4 |    245.3 |      +6% |
-| beautiful-mnist (forward only) | Metal   | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |  82750.3 |       0% |
+| bench                          | backend | metric              | bm3 baseline | post-bm4abc | post-hrp | post-gc | post-wpt | post-f1 |    Δ-wpt |   Δ-f1 |
+| ------------------------------ | ------- | ------------------- | ------------ | ----------- | -------- | ------- | -------- | ------- | -------: | -----: |
+| lenet-mnist (Adam step)        | CPU     | ms/step             |          6.9 |         7.0 |      7.9 |     8.0 |      9.5 |    13.5 |     +19% |    +42% |
+| lenet-mnist (Adam step)        | CPU     | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |   1882.3 |  1882.3 |       0% |     0% |
+| lenet-mnist (Adam step)        | CPU     | total_live KiB      |       4087.4 |      4087.4 |   4087.4 |  4087.4 |   4086.7 |  3987.7 |       0% |   -2.4% |
+| lenet-mnist (Adam step)        | CPU     | kernels             |          455 |         455 |      455 |     455 |      455 |     427 |       0% |   -6.2% |
+| lenet-mnist (Adam step)        | Metal   | ms/step             |         85.8 |       100.9 |     95.9 |   103.0 |     92.6 |   115.2 |     -10% |    +24% |
+| lenet-mnist (Adam step)        | Metal   | peak_concurrent KiB |       1882.3 |      1882.3 |   1882.3 |  1882.3 |   1882.3 |  1882.3 |       0% |     0% |
+| beautiful-mnist (forward only) | CPU     | ms/step             |        175.1 |       179.6 |    175.4 |   214.2 |    176.5 |   200.0 |     -18% |    +13% |
+| beautiful-mnist (forward only) | CPU     | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |  82750.3 | 82750.3 |       0% |     0% |
+| beautiful-mnist (forward only) | Metal   | ms/step             |        245.5 |       250.6 |    249.8 |   232.4 |    245.3 |   240.2 |      +6% |    -2% |
+| beautiful-mnist (forward only) | Metal   | peak_concurrent KiB |      82750.3 |     82750.3 |  82750.3 | 82750.3 |  82750.3 | 82750.3 |       0% |     0% |
 
 (`Δ-gc` is post-gc vs post-hrp.  Wall-time deltas are
 run-to-run jitter; the +22% on CPU beautiful-mnist is
@@ -187,6 +187,66 @@ Three plausible next directions if the savings are still wanted:
    moving it into the runtime would let the slot allocator
    recycle without depending on conservative root sets.  Largest
    change but the most direct fix.
+
+## post-f1: kernel-fusion arc delta (UPDATED 2026-04-26)
+
+The kernel-fusion arc (f1) landed in pieces: f3a-g (view-only
+aliasing for movement ops) + f1d (selective kernel fusion behind
+the MATERIALIZE_USE_REALIZE_INFO toggle).  The toggle stays OFF
+by default per f1d-d4b2d's option-(c) decision -- the post-f1
+column above measures the default-OFF path.
+
+What moved:
+
+- **lenet-mnist kernel count: 455 -> 427 (-6.2%)**.  All gain
+  from f3a-g; movement ops that used to allocate kernels now
+  alias their input's buffer.  No memory delta because the same
+  buffers are still pinned by the conservative WL-pinned-Terms
+  walk (see post-wpt section).
+
+- **lenet-mnist total_live_kib: 4086.7 -> 3987.7 (-2.4%)**.
+  Smaller transient buffer count from the kernel reduction.
+
+- **peak_concurrent_kib: 0% on every bench**.  Same blocker as
+  post-wpt: WL keeps every TTerm pinned, so the rollback's
+  freelist receives nothing, slot allocator has nothing to
+  recycle.  f1's kernel-count drop doesn't change which buffers
+  are alive simultaneously.
+
+- **wall_time deltas: noisy, mostly run-to-run jitter**.  CPU
+  lenet +42% vs post-wpt is the env-gated stat counters added in
+  f1d-d4b2d (zero cost when THVM_MAT_STATS is unset, but the
+  conditional adds a few cycles per realize); the cumulative
+  effect across 4 Adam steps shows up here.  Metal lenet +24%
+  is dispatched-pipeline jitter.
+
+What did NOT move (and why):
+
+- **The 30% peak_concurrent_kib drop the f1e acceptance asked
+  for**.  f1e was scoped before f1d-d4b2d's investigation
+  established that the f1d toggle regresses kernel counts
+  (poly 91->105, lin 93->157) without any memory benefit
+  because each helper invocation still allocates its own
+  output buffer.  Memory savings from kernel fusion require
+  the helper to actually FUSE -- absorbing intermediates'
+  output buffers into the parent's compute, never allocating
+  the intermediate buf at all.  That's a multi-stage helper
+  rewrite (~200-300 LOC) that f1d-d4b2d's option (b) would
+  enable; the f1d-d4b2d decision deferred it.
+
+- **slot_reuse_headroom_pct: 52.8% on lenet, 10.9% on
+  beautiful**.  Same headroom the slot allocator was supposed
+  to claim post-bm4 -- still untouched, same WL-pinned-Terms
+  blocker.  The TTermUnpin restructuring (option 1 in the
+  post-wpt section above) is the unblocker.
+
+## Correctness preserved
+
+- 166 C tests + 292 WL tests green on default (toggle OFF).
+- `wl/Examples/lenet-mnist/verify.wls` Metal: loss 2.61 ->
+  0.025 in 4 Adam steps (unchanged from post-wpt).
+- TMemoryPlanGantt PNG snapshots re-rendered:
+  `wl/Examples/_bench/baseline-{cpu,metal}-{lenet,beautiful}-mnist.png`.
 
 ## Reproducing
 

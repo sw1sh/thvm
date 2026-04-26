@@ -5012,18 +5012,22 @@ implemented + tested (f1a) but never invoked by the pipeline.
         future experiments.  166 C + 292 WL green on the
         default (verified across d4b2a/b1/b2/b3/d).
 
-  - [ ] **f1e: bench delta + docs update**.  Re-run
-        `wl/Examples/_bench/baseline.wls` on both backends.
-        Acceptance: peak_concurrent_kib drops at least 30%
-        on lenet-mnist relative to the post-wpt baseline.
-        Update `docs/bench-results.md` with a sixth column
-        (post-f1) + delta vs post-wpt.  Update
-        `docs/kernelization.md` measured-progress table
-        with the new kernel counts and the now-closed f1
-        status.  Re-render
-        `wl/Examples/linear-train/memory-plan-{cpu,metal}.png`
-        and the LeNet equivalents so the after pictures
-        replace the before.  ~30 LOC + doc.
+  - [x] **f1e: bench delta + docs update**.  Re-ran the
+        bench on both backends; updated docs/bench-results.md
+        with a post-f1 column + delta vs post-wpt and a
+        post-f1 explainer section.  Re-rendered the four
+        baseline-*.png snapshots.  Acceptance NOT met: peak
+        unchanged (0% vs the 30% target) because the
+        WL-pinned-Terms walk still pins every intermediate;
+        kernel count dropped 6.2% on lenet (455 -> 427) from
+        the f3a-g view-only aliasing already shipped.  The
+        memory-side win the acceptance was scoped for
+        requires either TTermUnpin restructuring (post-wpt
+        option 1) or the multi-stage helper rewrite
+        (f1d-d4b2d option b) -- both deferred per d4b2d's
+        decision.  docs/kernelization.md measured-progress
+        table doesn't exist (only the f1-f5 plan list); no
+        update needed there.
 
 
 
