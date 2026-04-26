@@ -121,11 +121,12 @@ WL_PACLET   := wl/THVMLink
 WL_LIB_DIR  := $(WL_PACLET)/LibraryResources/$(WL_PLATFORM)
 WL_LIB      := $(WL_LIB_DIR)/THVMLink$(WL_DYLIB_EXT)
 WL_SRC      := $(WL_PACLET)/CSource/thvmlink.c
+WL_SRC_ATP  := $(WL_PACLET)/CSource/thvmlink_atp.c
 
 $(WL_LIB_DIR):
 	@mkdir -p $@
 
-$(WL_LIB): $(WL_SRC) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(WL_LIB_DIR)
+$(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(WL_LIB_DIR)
 	@if [ -z "$(WOLFRAM_APP)" ] || [ ! -d "$(WL_INCLUDE)" ]; then \
 	  echo "ERROR: Wolfram install not found.  Set WOLFRAM_APP=/Applications/Wolfram*.app"; \
 	  exit 1; \
