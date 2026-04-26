@@ -969,9 +969,10 @@ fn WaldSection wald_skip_to_section   (WaldLex *lex);
 // reads the section content, and returns the next section's enum
 // (or WSEC_NONE on EOF).  Falls back through `wald_skip_to_section`
 // on unrecognized content.
-fn WaldSection wald_parse_name (WaldSpec *spec, WaldLex *lex);
-fn WaldSection wald_parse_mode (WaldSpec *spec, WaldLex *lex);
-fn WaldSection wald_parse_sorts(WaldSpec *spec, WaldLex *lex);
+fn WaldSection wald_parse_name     (WaldSpec *spec, WaldLex *lex);
+fn WaldSection wald_parse_mode     (WaldSpec *spec, WaldLex *lex);
+fn WaldSection wald_parse_sorts    (WaldSpec *spec, WaldLex *lex);
+fn WaldSection wald_parse_signature(WaldSpec *spec, WaldLex *lex);
 
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success

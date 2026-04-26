@@ -6,6 +6,29 @@ dated section.
 
 ## Unreleased
 
+### Added: SIGNATURE section parser (stage 6.3c3)
+
+`wald_parse_signature(spec, lex)` lands in `src/wald/_.c`.  Per
+entry parses `name : arg_sort1 ... argN -> result_sort` and
+registers a `WaldSym { name, label = next_label++, arity = N }`
+in `spec->symbols[]`.  The result sort is consumed and discarded
+under the homogeneous-signature assumption for stages 5-7.
+
+Section ends at the next section keyword via the same peek +
+`wald_skip_to_section` recovery pattern as 6.3c2.  Capacity
+overflow (`n_symbols >= WALD_MAX_SYMBOLS`) and parse errors fall
+through to `wald_skip_to_section` so downstream parsers still
+see the next section keyword.
+
+Tests in `tests/test_wald.c` (109 sub-checks) cover:
+- single zero-arity entry: `e: -> ANY ORDERING ...` -> e at
+  label 1, arity 0; lexer past `ORDERING`.
+- three entries with monotonic labels: e=1, i=2, f=3; arities
+  0, 1, 2.
+- empty SIGNATURE (immediate `ORDERING` keyword): no entries.
+- truncated mid-entry (`f: ANY ANY ->` without result sort):
+  returns WSEC_NONE, half-parsed entry not committed.
+
 ### Added: NAME / MODE / SORTS section parsers (stage 6.3c2)
 
 `src/wald/_.c` lands three parsers with the same shape:

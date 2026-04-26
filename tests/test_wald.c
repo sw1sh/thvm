@@ -279,6 +279,66 @@ int main(void) {
     wald_free(s);
   }
 
+  // === 6.3c3 SIGNATURE parser =========================================
+
+  TEST_BEGIN("wald/parse-signature-single-zero-arity");
+  {
+    // e: -> ANY  ORDERING ...
+    WaldLex lex;
+    wald_lex_init(&lex, "e: -> ANY ORDERING LPO");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_signature(s, &lex), (int)WSEC_ORDERING);
+    CHECK_EQ(s->n_symbols, 1u);
+    CHECK_EQ((int)strcmp(s->symbols[0].name, "e"), 0);
+    CHECK_EQ(s->symbols[0].arity, 0u);
+    CHECK_EQ(s->symbols[0].label, 1u);   // first label
+    CHECK_EQ(s->next_label, 2u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-signature-three-entries-monotonic-labels");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex,
+                  "e: -> ANY  i: ANY -> ANY  f: ANY ANY -> ANY  ORDERING LPO");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_signature(s, &lex), (int)WSEC_ORDERING);
+    CHECK_EQ(s->n_symbols, 3u);
+    CHECK_EQ((int)strcmp(s->symbols[0].name, "e"), 0);
+    CHECK_EQ(s->symbols[0].arity, 0u);
+    CHECK_EQ(s->symbols[0].label, 1u);
+    CHECK_EQ((int)strcmp(s->symbols[1].name, "i"), 0);
+    CHECK_EQ(s->symbols[1].arity, 1u);
+    CHECK_EQ(s->symbols[1].label, 2u);
+    CHECK_EQ((int)strcmp(s->symbols[2].name, "f"), 0);
+    CHECK_EQ(s->symbols[2].arity, 2u);
+    CHECK_EQ(s->symbols[2].label, 3u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-signature-empty-section");
+  {
+    // Section keyword right at the start: no signature entries.
+    WaldLex lex;
+    wald_lex_init(&lex, "ORDERING LPO");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_signature(s, &lex), (int)WSEC_ORDERING);
+    CHECK_EQ(s->n_symbols, 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-signature-eof-mid-entry");
+  {
+    // Truncated input: "f: ANY ANY ->" without a result sort.
+    WaldLex lex;
+    wald_lex_init(&lex, "f: ANY ANY ->");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_signature(s, &lex), (int)WSEC_NONE);
+    // The half-parsed entry didn't get committed.
+    CHECK_EQ(s->n_symbols, 0u);
+    wald_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

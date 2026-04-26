@@ -228,6 +228,63 @@ fn WaldSection wald_parse_mode(WaldSpec *spec, WaldLex *lex) {
   return wald_skip_to_section(lex);
 }
 
+// === 6.3c3: SIGNATURE section parser ===============================
+//
+// Each entry: `name : arg_sort1 arg_sort2 ... -> result_sort`.
+// Arity = number of arg sorts before the arrow.  Each symbol gets
+// a fresh CTR label via spec->next_label++.
+//
+// The result sort is ignored under the homogeneous-signature
+// assumption.  Section ends at the next section keyword.
+fn WaldSection wald_parse_signature(WaldSpec *spec, WaldLex *lex) {
+  for (;;) {
+    if (wald_lex_peek(lex) == WT_END) return WSEC_NONE;
+    if (wald_lex_peek(lex) != WT_IDENT) {
+      // Stray punctuation; skip.
+      wald_lex_next(lex);
+      continue;
+    }
+    // Is the next ident a section keyword?
+    WaldSection sec = wald_section_from_ident(lex->peeked_text);
+    if (sec != WSEC_NONE) {
+      wald_lex_next(lex);
+      return sec;
+    }
+
+    // Symbol name.
+    wald_lex_next(lex);
+    if (spec == NULL || spec->n_symbols >= WALD_MAX_SYMBOLS) {
+      return wald_skip_to_section(lex);
+    }
+    WaldSym *sym = &spec->symbols[spec->n_symbols];
+    u32 nlen = lex->tok_len;
+    if (nlen >= WALD_NAME_LEN) nlen = WALD_NAME_LEN - 1;
+    for (u32 i = 0; i < nlen; i++) sym->name[i] = lex->tok_text[i];
+    sym->name[nlen] = '\0';
+    sym->label = spec->next_label++;
+    sym->arity = 0;
+
+    // Expect ':' between name and arg sorts.
+    if (wald_lex_next(lex) != WT_COLON) return wald_skip_to_section(lex);
+
+    // 0+ ident arg sorts terminated by '->'.
+    u8 saw_arrow = 0;
+    for (;;) {
+      WaldTokKind t = wald_lex_next(lex);
+      if (t == WT_ARROW) { saw_arrow = 1; break; }
+      if (t == WT_END)   return WSEC_NONE;
+      if (t != WT_IDENT) return wald_skip_to_section(lex);
+      sym->arity++;
+    }
+    (void)saw_arrow;
+
+    // Result sort: one ident, consumed and discarded.
+    if (wald_lex_next(lex) != WT_IDENT) return wald_skip_to_section(lex);
+
+    spec->n_symbols++;
+  }
+}
+
 // SORTS: list of sort names separated by whitespace.  We assume a
 // homogeneous signature for stages 5-7, so the sort names are
 // consumed but not stored.

@@ -202,10 +202,16 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       Tests drive each parser with a fixture, verify the right
       next-section enum is returned, and that the lexer is
       positioned past the keyword for downstream parsers.
-- [ ] 6.3c3 SIGNATURE section parser: per entry
-      `name : arg_sorts -> result_sort` register the symbol
-      in `spec->symbols[]` with a fresh CTR label and arity =
-      number of arg sorts.  Stops at the next section keyword.
+- [x] 6.3c3 `wald_parse_signature` lands in `src/wald/_.c`.  Per
+      entry parses `name : arg_sort1 ... argN -> result_sort`,
+      registers `WaldSym{ name, label = next_label++, arity = N }`
+      into `spec->symbols[]`.  Result sort consumed and discarded
+      (homogeneous-signature assumption).  Stops at the next
+      section keyword via the same peek-then-`wald_skip_to_section`
+      pattern as 6.3c2.  Tests cover single zero-arity entry,
+      three entries with monotonic labels (e=1, i=2, f=3), the
+      empty-section path, and the truncated-mid-entry path
+      (returns WSEC_NONE without committing the half-parsed entry).
 - [ ] 6.3c4 VARIABLES section parser:
       `name1, name2, ... : sort` registers each name with a
       sequential FVR id.  Stops at the next section keyword.
