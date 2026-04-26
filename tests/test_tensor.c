@@ -21,7 +21,8 @@ int main(void) {
   CHECK(TAG_EQL  == 15);
   CHECK(TAG_AND  == 16);
   CHECK(TAG_OR   == 17);
-  CHECK(TAG_COUNT == 18);
+  CHECK(TAG_ANY  == 18);
+  CHECK(TAG_COUNT == 19);
 
   TEST_BEGIN("term/TAG_TEN-roundtrip");
   Term t = term_new(0, TAG_TEN, DT_F32, 42);

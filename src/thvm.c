@@ -53,6 +53,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "term/new_eql.c"
 #include "term/new_and.c"
 #include "term/new_or.c"
+#include "term/new_any.c"
 
 // === heap/ ===
 #include "heap/alloc.c"
@@ -178,6 +179,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/dup_era.c"
 #include "interact/dup_lam.c"
 #include "interact/dup_num.c"
+#include "interact/dup_any.c"
 #include "interact/uop_grad.c"
 #include "interact/uop_kernel.c"
 

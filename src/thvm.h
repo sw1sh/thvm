@@ -87,8 +87,9 @@ typedef u64 Term;
 #define TAG_EQL  15  // structural eq.    val = heap loc -> [a, b]; strict both sides
 #define TAG_AND  16  // short-circuit AND.val = heap loc -> [a, b]; strict on a, lazy on b
 #define TAG_OR   17  // short-circuit OR. val = heap loc -> [a, b]; strict on a, lazy on b
+#define TAG_ANY  18  // wildcard.         atom; matches anything under EQL, dups to itself
 
-#define TAG_COUNT 18
+#define TAG_COUNT 19
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -145,7 +146,7 @@ typedef u64 Term;
 #define HEAP_CAP     (1ULL << 24)   // 16M cells * 8B = 128 MiB. Plenty for tests.
 #define WNF_CAP      (1ULL << 16)   // 64K stack slots.
 #define TENS_CAP     (1ULL << 16)   // 64K tensor descriptor slots.
-#define KERNELS_CAP  (1ULL << 12)   // 4K compiled kernels.
+#define KERNELS_CAP  (1ULL << 14)   // 16K compiled kernels.
 #define BOOK_CAP     (1ULL << 18)   // 256K cells of static def template heap.
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
 #define ALO_STATE_CAP (1ULL << 16)  // ALO substitution-chain entries.
@@ -497,6 +498,7 @@ fn Term term_new_mat (u32 match_val, Term handler, Term fallback);
 fn Term term_new_eql (Term a, Term b);
 fn Term term_new_and (Term a, Term b);
 fn Term term_new_or  (Term a, Term b);
+fn Term term_new_any (void);
 
 // === lazy outermost-layer resolver ===
 // Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);

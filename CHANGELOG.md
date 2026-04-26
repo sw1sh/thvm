@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Added: TAG_ANY wildcard
+
+`TAG_ANY = 18` is an atomic wildcard.  Two interactions:
+
+  EQL(ANY, x) -> NUM(1)        (matches anything, on either port)
+  ! &L{x0,x1} = ANY  ->  x0 <- ANY, x1 <- ANY
+
+Constructor: `term_new_any()`.  Used as the IC encoding of
+existential / Skolem variables in the ATP plan.  Tests:
+[tests/test_any.c](tests/test_any.c).
+
 ### Added: TAG_AND, TAG_OR with short-circuit + SUP commutation
 
 `TAG_AND = 16` and `TAG_OR = 17` land as short-circuit boolean

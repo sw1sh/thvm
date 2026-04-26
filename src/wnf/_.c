@@ -188,6 +188,12 @@ enter:
         whnf = a;
         goto apply;
       }
+      if (term_tag(a) == TAG_ANY) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        whnf = term_new(0, TAG_NUM, 0, 1);
+        goto apply;
+      }
       if (term_tag(a) == TAG_SUP) {
         if (BUDGET_HIT) BAIL_AT(next);
         u32  lab  = term_ext(a);
@@ -213,6 +219,12 @@ enter:
         if (BUDGET_HIT) BAIL_AT(next);
         ITRS++;
         whnf = b;
+        goto apply;
+      }
+      if (term_tag(b) == TAG_ANY) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        whnf = term_new(0, TAG_NUM, 0, 1);
         goto apply;
       }
       if (term_tag(b) == TAG_SUP) {
@@ -422,6 +434,12 @@ apply:
             // NUM is atomic: copy the Term value into both projections.
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             whnf = interact_dup_num(side, loc, whnf);
+            continue;
+          }
+          case TAG_ANY: {
+            // ANY is atomic: copy into both projections.
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            whnf = interact_dup_any(side, loc, whnf);
             continue;
           }
           default: {
