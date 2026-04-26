@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Added: saturation-loop design sketch (stage 5.0)
+
+[docs/plans/saturation_loop.md](docs/plans/saturation_loop.md)
+designs the AtpState struct, the 10-step saturation algorithm,
+fairness mitigations (step_cap + round-robin escape), termination
+conditions, and the mapping from existing C-side primitives
+(`thvm_match`, `thvm_unify`, `thvm_critical_pairs`,
+`thvm_rewrite_normalize`, `thvm_kbo`, `thvm_collapse_ordered`)
+into the loop body.  The implementation lands in 5.1-5.4; demo
+(prove `f(a, i(a)) = e` from group axioms) is 5.5.
+
 ### Verified: ATP arc baseline green (stage 0 sanity)
 
 `make test` (48 C executables, 166 sub-checks) and `make wl-test`

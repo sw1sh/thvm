@@ -37,9 +37,10 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 `R` with one CP from priority collapse; repeat.  Fairness via
 `TAG_INC`-priority + step cap.
 
-- [ ] 5.0 sketch the saturation state machine in
-      `docs/plans/saturation_loop.md` (R, CP queue, goal, step cap,
-      termination conditions, fairness story)
+- [x] 5.0 sketch the saturation state machine in
+      [`docs/plans/saturation_loop.md`](saturation_loop.md): full
+      step algorithm, AtpState struct, fairness story, termination
+      conditions, mapping from C-side primitives, open questions.
 - [ ] 5.1 `AtpState` struct: rules `R`, CP queue, goal, KboConfig,
       step counter; init / free helpers
 - [ ] 5.2 saturation step:
