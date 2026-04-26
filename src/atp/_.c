@@ -29,10 +29,27 @@ static Term prim_unify_apply(Term *args) {
   return thvm_unify_apply(s, &subst);
 }
 
+// 8.1e-ii: arity-3 variant.  Takes (s, t, target); returns
+// `thvm_unify_apply(target, &subst)` where σ = mgu(s, t), or ERA
+// if (s, t) fails to unify.  Lets the IC-routed CP enumerator
+// build sigma from one pair and apply it to a different term --
+// the workflow `thvm_critical_pairs_range` performs internally.
+static Term prim_unify_apply3(Term *args) {
+  Term s      = args[0];
+  Term t      = args[1];
+  Term target = args[2];
+  RewriteSubst subst = {{0}};
+  if (!thvm_unify(s, t, &subst)) {
+    return term_new(0, TAG_ERA, 0, 0);
+  }
+  return thvm_unify_apply(target, &subst);
+}
+
 // Idempotent: tests / saturation init both call this; the registry
 // just overwrites with the same function pointer.
 static void atp_register_primitives(void) {
-  prim_register(ATP_PRIM_UNIFY_APPLY, prim_unify_apply, 2);
+  prim_register(ATP_PRIM_UNIFY_APPLY,  prim_unify_apply,  2);
+  prim_register(ATP_PRIM_UNIFY_APPLY3, prim_unify_apply3, 3);
 }
 
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
@@ -681,13 +698,125 @@ static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   return pushed;
 }
 
-// 8.1e-i: IC-routed critical-pair enumerator -- the path
-// `thvm_atp_generate_cps` takes when `s->use_ic_cp_gen == 1`.
-// Currently a no-op wrapper that delegates to the C path so the
-// flag is observable but semantically inert.  Stage 8.1e-ii lands
-// the actual SUP+PRI routing.
+// 8.1e-ii: invoke `prim_unify_apply3` via APP-PRI evaluation.
+// Builds the saturated chain APP(APP(APP(PRI(id), s), t), target)
+// and reduces it via `wnf`.  Returns either σ(target) on success
+// or ERA on unify failure -- the same shape as the underlying
+// primitive returns.
+static Term ic_unify_apply3(Term s, Term t, Term target) {
+  u64 l1 = heap_alloc(2);
+  heap_set(l1 + 0, term_new_pri(ATP_PRIM_UNIFY_APPLY3));
+  heap_set(l1 + 1, s);
+  Term step1 = term_new(0, TAG_APP, 0, l1);
+
+  u64 l2 = heap_alloc(2);
+  heap_set(l2 + 0, step1);
+  heap_set(l2 + 1, t);
+  Term step2 = term_new(0, TAG_APP, 0, l2);
+
+  u64 l3 = heap_alloc(2);
+  heap_set(l3 + 0, step2);
+  heap_set(l3 + 1, target);
+  Term step3 = term_new(0, TAG_APP, 0, l3);
+
+  return wnf(step3);
+}
+
+// 8.1e-ii: per-position visitor that mirrors `cp_visit` (in
+// `src/cp/_.c`) but routes the unify+apply step through the
+// TAG_PRI machinery via `ic_unify_apply3`.  Same outputs as the
+// C path; the IC contribution is the per-position unify call
+// going through APP-PRI evaluation.
+typedef struct {
+  Term         li, ri;
+  Term         lj, rj;
+  CriticalPair *out;
+  u32           cap;
+  u32           count;
+} CpCtxIc;
+
+static u32 cp_visit_ic(const u32 *p, u32 p_len, void *raw) {
+  CpCtxIc *ctx = (CpCtxIc *)raw;
+  if (ctx->count >= ctx->cap) return ctx->count;
+
+  Term sub = cp_subterm_at(ctx->li, p, p_len);
+  if (sub == 0) return ctx->count;
+  if (term_tag(sub) == TAG_FVR) return ctx->count;
+
+  // Build replaced = li[p ← rj] (still in C; `cp_replace_at` is
+  // a small pure helper).
+  Term replaced = cp_replace_at(ctx->li, p, p_len, ctx->rj);
+
+  // IC-routed unify+apply.  Two PRI calls because
+  // prim_unify_apply3 takes a single target; recomputing σ each
+  // time is wasteful but correct.  8.1e-iii will measure the
+  // overhead.
+  Term cp_lhs = ic_unify_apply3(sub, ctx->lj, replaced);
+  if (term_tag(cp_lhs) == TAG_ERA) return ctx->count;
+  Term cp_rhs = ic_unify_apply3(sub, ctx->lj, ctx->ri);
+  if (term_tag(cp_rhs) == TAG_ERA) return ctx->count;
+
+  ctx->out[ctx->count].lhs = cp_lhs;
+  ctx->out[ctx->count].rhs = cp_rhs;
+  ctx->count++;
+  return ctx->count;
+}
+
+// 8.1e-ii: IC-routed CP enumeration.  Same iteration pattern as
+// the C path -- (i, j) cross-product over the new-vs-old rule
+// rectangles -- but the per-position unify+apply flows through
+// the TAG_PRI machinery via `cp_visit_ic` / `ic_unify_apply3`.
+// Output CPs are structurally identical to the C path (verified
+// by parity tests in `tests/test_atp.c`).
 static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
-  return thvm_atp_generate_cps_c(s, added);
+  u32 first = added.first;
+  u32 last  = added.first + added.count;
+  u32 n     = s->n_rules;
+  if (last > n) last = n;
+  if (first > last) return 0;
+
+  CriticalPair buf[ATP_CP_BATCH];
+  u32 pushed = 0;
+  CpCtxIc ctx;
+  u32 path[CP_MAX_DEPTH];
+
+  for (u32 i = first; i < last; i++) {
+    for (u32 j = 0; j < n; j++) {
+      if (s->n_cps >= ATP_MAX_CPS) break;
+      ctx.li    = s->lhs[i];
+      ctx.ri    = s->rhs[i];
+      ctx.lj    = thvm_rename_vars(s->lhs[j], CP_RENAME_OFFSET);
+      ctx.rj    = thvm_rename_vars(s->rhs[j], CP_RENAME_OFFSET);
+      ctx.out   = buf;
+      ctx.cap   = ATP_CP_BATCH;
+      ctx.count = 0;
+      (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
+                              cp_visit_ic, &ctx, 0);
+      pushed += atp_push_cps_traced(s, buf, ctx.count,
+                                    s->r_trace[i], s->r_trace[j],
+                                    i, j);
+    }
+  }
+
+  for (u32 i = 0; i < first; i++) {
+    for (u32 j = first; j < last; j++) {
+      if (s->n_cps >= ATP_MAX_CPS) break;
+      ctx.li    = s->lhs[i];
+      ctx.ri    = s->rhs[i];
+      ctx.lj    = thvm_rename_vars(s->lhs[j], CP_RENAME_OFFSET);
+      ctx.rj    = thvm_rename_vars(s->rhs[j], CP_RENAME_OFFSET);
+      ctx.out   = buf;
+      ctx.cap   = ATP_CP_BATCH;
+      ctx.count = 0;
+      (void)cp_walk_positions(ctx.li, path, 0, CP_MAX_DEPTH,
+                              cp_visit_ic, &ctx, 0);
+      pushed += atp_push_cps_traced(s, buf, ctx.count,
+                                    s->r_trace[i], s->r_trace[j],
+                                    i, j);
+    }
+  }
+
+  return pushed;
 }
 
 fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {

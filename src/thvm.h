@@ -819,10 +819,16 @@ typedef enum {
 // 8.1c: ATP primitives registered into the TAG_PRI table by
 // thvm_atp_init.  Tests registers them once; the saturation loop
 // in 8.1d-e calls them via APP-PRI evaluation.
-//   ATP_PRIM_UNIFY_APPLY: arity 2; takes (s, t); returns
-//   `thvm_unify_apply(s, &subst)` on successful unification, or
-//   ERA on failure.
-#define ATP_PRIM_UNIFY_APPLY 0u
+//   ATP_PRIM_UNIFY_APPLY:  arity 2; takes (s, t); returns
+//     `thvm_unify_apply(s, &subst)` on successful unification, or
+//     ERA on failure.
+//   ATP_PRIM_UNIFY_APPLY3: arity 3; takes (s, t, target); returns
+//     `thvm_unify_apply(target, &subst)` where σ = mgu(s, t), or
+//     ERA on failure.  Used by 8.1e-ii's IC-routed CP enumerator
+//     to route the per-position unify+apply step through the
+//     TAG_PRI machinery.
+#define ATP_PRIM_UNIFY_APPLY  0u
+#define ATP_PRIM_UNIFY_APPLY3 1u
 
 typedef struct {
   // Rule set R: parallel arrays sized for thvm_rewrite_normalize /

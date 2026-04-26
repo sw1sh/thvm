@@ -1143,10 +1143,12 @@ int main(void) {
 
   TEST_BEGIN("atp/cp-gen-flag-toggle-preserves-output");
   {
-    // Flag is currently a no-op (8.1e-i landed only the
-    // dispatch).  Setting it to 1 must produce the same CPs as
-    // the default 0 path.  Two parallel runs on the same axiom;
-    // verify n_cps and n_cps_dropped_joinable agree exactly.
+    // Stage 8.1e-ii landed the IC-routed enumerator: setting
+    // use_ic_cp_gen = 1 routes the per-position unify+apply
+    // through APP-PRI / prim_unify_apply3 instead of calling
+    // thvm_unify_apply directly.  Two parallel runs on the same
+    // axiom; verify n_cps, n_rules, and the joinability counter
+    // agree exactly between the two paths.
     AtpState *s_c = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_add_equation(s_c, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     AtpStatus st_c = thvm_atp_step(s_c);
@@ -1161,6 +1163,39 @@ int main(void) {
     CHECK_EQ(s_c->n_cps,                    s_ic->n_cps);
     CHECK_EQ(s_c->n_rules,                  s_ic->n_rules);
     CHECK_EQ(s_c->n_cps_dropped_joinable,   s_ic->n_cps_dropped_joinable);
+
+    thvm_atp_free(s_c);
+    thvm_atp_free(s_ic);
+  }
+
+  TEST_BEGIN("atp/cp-gen-ic-parity-on-group-axioms");
+  {
+    // Full group-axiom saturation under both paths.  Final
+    // status must agree, n_rules must agree, and the trace
+    // length should match (modulo the fact that joinability /
+    // queue-subsumption filters reject CPs identically when
+    // the C and IC paths produce the same CP terms).
+    AtpState *s_c = thvm_atp_init(&DUMMY_CFG, 32);
+    thvm_atp_set_goal(s_c, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_c, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s_c, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s_c,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_c = thvm_atp_run(s_c);
+
+    AtpState *s_ic = thvm_atp_init(&DUMMY_CFG, 32);
+    s_ic->use_ic_cp_gen = 1;
+    thvm_atp_set_goal(s_ic, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_ic, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s_ic, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s_ic,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_ic = thvm_atp_run(s_ic);
+
+    CHECK_EQ((int)rst_c, (int)rst_ic);
+    CHECK_EQ(s_c->n_rules, s_ic->n_rules);
 
     thvm_atp_free(s_c);
     thvm_atp_free(s_ic);

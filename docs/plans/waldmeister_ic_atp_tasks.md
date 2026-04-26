@@ -440,7 +440,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           the C path so the flag is observably a no-op).  Adds
           a single test verifying the flag round-trips.
           Scope: ~30 LOC.
-    - [ ] 8.1e-ii implement `thvm_atp_generate_cps_ic` using
+    - [x] 8.1e-ii implement `thvm_atp_generate_cps_ic` using
           SUP+PRI for the unify step.  Keep the (i, j, position)
           enumeration in C for now -- the IC contribution is
           the per-position unify call goes through APP-PRI,

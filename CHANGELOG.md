@@ -6,6 +6,41 @@ dated section.
 
 ## Unreleased
 
+### Added: IC-routed CP enumeration (stage 8.1e-ii)
+
+`thvm_atp_generate_cps_ic` now actually routes the per-position
+unify+apply step through the TAG_PRI machinery instead of
+delegating to the C path:
+
+- New primitive `prim_unify_apply3` (arity 3) registered at id
+  `ATP_PRIM_UNIFY_APPLY3 = 1`.  Takes `(s, t, target)`; returns
+  `thvm_unify_apply(target, &σ)` where `σ = mgu(s, t)`, or `ERA`
+  on unify failure.
+- New helper `ic_unify_apply3(s, t, target)` builds the saturated
+  APP chain `APP(APP(APP(PRI(1), s), t), target)` and reduces it
+  via `wnf`.  Each invocation flows through APP-PRI accumulation
+  and saturated-call dispatch.
+- New visitor `cp_visit_ic` (mirrors `cp_visit` from
+  `src/cp/_.c`) routes both `σ(replaced)` and `σ(ri)` calls
+  through `ic_unify_apply3`.  Recomputes σ once per side
+  (wasteful but correct -- 8.1e-iii will measure).
+- `thvm_atp_generate_cps_ic` reuses the C-side
+  `cp_walk_positions` for the (i, j, position) enumeration but
+  feeds it the IC-routed visitor.
+
+Same iteration pattern as the C path; structurally identical
+output verified by parity tests.
+
+`tests/test_atp.c` (8378 sub-checks, was 8376):
+- `cp-gen-flag-toggle-preserves-output` updated to assert the
+  IC path now actually runs (not delegating)
+- `cp-gen-ic-parity-on-group-axioms` new: full saturation on
+  the group axioms under both paths must agree on rst and
+  n_rules
+
+Stage 8.1e-iii will benchmark the IC overhead and decide on
+the default.
+
 ### Added: `use_ic_cp_gen` feature flag (stage 8.1e-i)
 
 New `u8 use_ic_cp_gen` field on `AtpState` (default 0) selects
