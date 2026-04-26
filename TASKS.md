@@ -4536,7 +4536,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
        the legacy per-UOp emit path.  Toggle ON gets the
        fusion win on CPU without breaking Metal. -->
 
-  - [ ] **f1d-d3a: backend-gate the inlined helper to CPU**.
+  - [x] **f1d-d3a: backend-gate the inlined helper to CPU**.
         At the top of `materialize_kernel_inlined` add
         `if (CURRENT_BACKEND != &CPU_BACKEND) return 0;`
         so the helper only fires for CPU.  Metal hits the
@@ -4546,6 +4546,18 @@ implemented + tested (f1a) but never invoked by the pipeline.
         green with toggle ON for CPU paths; test_metal_real
         cpu/gpu parity passes (Metal kernels unchanged from
         legacy).  ~10 LOC.
+        <!-- DONE: backend gate added at the top of
+             materialize_kernel_inlined (5-line conditional
+             + comment).  Verified: with default OFF, 166 C +
+             292 WL green; with default flipped to ON
+             experimentally, 166 C green INCLUDING
+             test_metal_real (cpu/gpu parity) -- the gate
+             works.  WL kernel-cap exhaustion that surfaces
+             with toggle ON is a SEPARATE CPU-side issue
+             (grad-chain emits more kernels than legacy
+             for some patterns); deferred to f1d-d4 to
+             investigate before flipping default. -->
+
 
   - [ ] **f1d-d3b: deferred Metal fusion (real fix)**.
         Either a Metal-side interpreter (option A) or

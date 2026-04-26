@@ -128,6 +128,14 @@ static u32 inline_emit(InlineCtx *ctx, Term t) {
 }
 
 fn Term materialize_kernel_inlined(Term realized_uop_term) {
+  // f1d-d3a: gate to CPU.  Metal's metal_dispatch_kernel fires
+  // exactly one shader pipeline per kernel and reads
+  // program[n_inputs] as THE main op; it doesn't iterate the
+  // multi-op programs this helper produces.  Bail on non-CPU
+  // backends so the legacy single-shader emit path is used.
+  // f1d-d3b will revisit (Metal interpreter or shader codegen).
+  if (CURRENT_BACKEND != &CPU_BACKEND) return 0;
+
   Term r = term_resolve(realized_uop_term);
   if (term_tag(r) != TAG_UOP) return 0;
   u8 root_op = term_ext(r);
