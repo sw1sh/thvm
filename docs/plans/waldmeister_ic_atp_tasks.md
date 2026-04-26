@@ -406,7 +406,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         returns either ERA (no unifier) or a substitution
         application.  Tests: hand-encode 2-3 pairs and verify
         round-trip.
-  - [ ] 8.1d SUP-encoded CP enumeration on a tiny example
+  - [x] 8.1d SUP-encoded CP enumeration on a tiny example
         (single rule pair, two overlap positions): build the
         cross-product SUP, fire APP-SUP commutation, collapse
         to the surviving CPs.  Compare against the C-side
@@ -420,7 +420,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           APP-BRI).  Tests: `tests/test_app_sup.c` -- 4-6
           cases covering single-SUP, nested-SUP, ERA arg.
           (Foundational; not 8.1-specific but blocks 8.1d-ii.)
-    - [ ] 8.1d-ii SUP-encoded CP fan-out demo: hand-build
+    - [x] 8.1d-ii SUP-encoded CP fan-out demo: hand-build
           `&L{(s1, t1), (s2, t2), ...}` with `prim_unify_apply`
           applied via APP-SUP fan-out + PRI saturation.
           Compare the result of `wnf` on the encoded

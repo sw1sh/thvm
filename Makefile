@@ -60,7 +60,8 @@ TESTS := \
   $(BIN)/test_atp \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
-  $(BIN)/test_app_sup
+  $(BIN)/test_app_sup \
+  $(BIN)/test_sup_cps
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.

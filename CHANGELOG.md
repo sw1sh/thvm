@@ -6,6 +6,35 @@ dated section.
 
 ## Unreleased
 
+### Added: SUP-encoded CP fan-out demo (stage 8.1d-ii)
+
+`tests/test_sup_cps.c` (21 sub-checks, 4 cases) demonstrates that
+a SUP of `prim_unify_apply` calls reduces to the same terms as
+direct C-side `thvm_unify_apply` would produce for each pair --
+the structural parity check from `docs/plans/sup_encoded_cps.md`:
+
+- `sup-cps/two-positions-both-unify`: `&L{(f(x), f(a)),
+  (g(y), g(b))}` -- both branches unify; child wnfs match
+  reference `thvm_unify_apply` outputs term-by-term
+- `sup-cps/one-unifies-one-fails`: mixed -- one branch yields
+  CTR, the other ERA
+- `sup-cps/three-positions-mixed`: nested SUP `&L_outer{p1,
+  &L_inner{p2, p3}}` -- demonstrates the encoding scales beyond
+  binary
+- `sup-cps/app-sup-fan-out-with-num-args`: exercises APP-SUP
+  commutation directly with NUM args (DUP-NUM is implemented;
+  DUP-CTR isn't yet) -- a `&L{PRI(40), PRI(40)}` applied to
+  NUM(11) fans out and each branch's identity primitive
+  returns 11
+
+The CP-shaped tests use the "fully-applied PRI inside the SUP"
+encoding (`&L{APP(APP(PRI_unify, s_i), t_i), ...}`) because
+APP-SUP cannot fan out CTR-shaped args today (no DUP-CTR).
+The 4th test confirms APP-SUP itself works on DUP-friendly args.
+
+Stage 8.1d closes; the design memo's parity claim is now
+empirically verified at the 2-3 position scope.
+
 ### Added: APP-SUP commutation (stage 8.1d-i)
 
 `src/interact/app_sup.c` lands the standard HVM4 rule:
