@@ -835,7 +835,16 @@ typedef enum {
 //     `KBO_CFG_TABLE` (set up via `kbo_cfg_register`).
 //     Lets IC code (e.g., 8.10's SupGen-style search) invoke the
 //     KBO comparator from inside an APP-PRI evaluation chain.
+//   ATP_PRIM_KBO_EQ_IC: arity 2; takes `(s, t)` and returns
+//     `NUM(1)` if structurally equal, `NUM(0)` otherwise.
+//     Implemented via IC-native structural recursion: the C body
+//     handles the leaf cases (FVR equality, NUM comparison) and
+//     for CTR builds an AND chain of self-recursive APP-PRI calls
+//     -- the wnf reducer fires each child comparison in turn,
+//     AND short-circuits on the first NUM(0).  Stage 8.2c proof
+//     point that pure-IC structural recursion is viable.
 #define ATP_PRIM_KBO          2u
+#define ATP_PRIM_KBO_EQ_IC    3u
 
 // 8.2b: process-global registry mapping `cfg_id` (u32) to
 // `const KboConfig *`.  Needed because `KboConfig*` doesn't fit

@@ -86,12 +86,75 @@ static Term prim_kbo(Term *args) {
   return term_new(0, TAG_NUM, DT_I32, (u64)r);
 }
 
+// 8.2c: pure-IC structural-equality on terms.  The C body handles
+// the leaf cases (tag mismatch, FVR with same id, NUM with same
+// val); for CTR with arity n it BUILDS an AND chain of n
+// self-recursive APP-PRI calls and returns the unfired chain --
+// the wnf reducer then evaluates the AND, firing each child
+// comparison through APP-PRI saturation, short-circuiting on the
+// first NUM(0).  This is "IC-driven control flow with C base
+// cases" -- closer to the design memo's option (2) than option
+// (3), but a real proof point that recursive structural code
+// runs through our reducer end-to-end.
+//
+// Build a single recursive call: APP(APP(PRI(id), child_s), child_t).
+static Term kbo_eq_build_call(Term cs, Term ct) {
+  u64 l1 = heap_alloc(2);
+  heap_set(l1 + 0, term_new_pri(ATP_PRIM_KBO_EQ_IC));
+  heap_set(l1 + 1, cs);
+  Term step1 = term_new(0, TAG_APP, 0, l1);
+
+  u64 l2 = heap_alloc(2);
+  heap_set(l2 + 0, step1);
+  heap_set(l2 + 1, ct);
+  return term_new(0, TAG_APP, 0, l2);
+}
+
+static Term prim_kbo_eq_ic(Term *args) {
+  Term s = args[0];
+  Term t = args[1];
+
+  if (term_tag(s) != term_tag(t)) return term_new(0, TAG_NUM, DT_I32, 0);
+  if (term_ext(s) != term_ext(t)) return term_new(0, TAG_NUM, DT_I32, 0);
+
+  switch (term_tag(s)) {
+    case TAG_FVR:
+      // Same ext means same FVR id; equality follows.
+      return term_new(0, TAG_NUM, DT_I32, 1);
+
+    case TAG_CTR: {
+      u32 ns = term_ctr_n(s);
+      u32 nt = term_ctr_n(t);
+      if (ns != nt) return term_new(0, TAG_NUM, DT_I32, 0);
+      if (ns == 0) return term_new(0, TAG_NUM, DT_I32, 1);
+
+      // Build AND(c_0, AND(c_1, ..., c_{n-1})).  Right-fold so the
+      // last child is the innermost; AND is right-strict so this
+      // evaluates left-to-right from the reducer's perspective.
+      Term chain = kbo_eq_build_call(term_ctr_at(s, ns - 1),
+                                     term_ctr_at(t, ns - 1));
+      for (u32 j = ns - 1; j > 0; j--) {
+        u32 idx = j - 1;
+        Term call_idx = kbo_eq_build_call(term_ctr_at(s, idx),
+                                          term_ctr_at(t, idx));
+        chain = term_new_and(call_idx, chain);
+      }
+      return chain;
+    }
+
+    default:
+      return term_new(0, TAG_NUM, DT_I32,
+                      (term_val(s) == term_val(t)) ? 1 : 0);
+  }
+}
+
 // Idempotent: tests / saturation init both call this; the registry
 // just overwrites with the same function pointer.
 static void atp_register_primitives(void) {
   prim_register(ATP_PRIM_UNIFY_APPLY,  prim_unify_apply,  2);
   prim_register(ATP_PRIM_UNIFY_APPLY3, prim_unify_apply3, 3);
   prim_register(ATP_PRIM_KBO,          prim_kbo,          3);
+  prim_register(ATP_PRIM_KBO_EQ_IC,    prim_kbo_eq_ic,    2);
 }
 
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {

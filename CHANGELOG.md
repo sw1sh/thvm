@@ -6,6 +6,38 @@ dated section.
 
 ## Unreleased
 
+### Added: pure-IC kbo_eq via prim_kbo_eq_ic (stage 8.2c)
+
+`prim_kbo_eq_ic` (arity 2) registered at `ATP_PRIM_KBO_EQ_IC = 3`
+during `thvm_atp_init`.  Returns `NUM(0)` or `NUM(1)` depending
+on structural equality of the two argument terms.  Implementation
+splits on tag:
+
+- Tag mismatch / ext mismatch -> immediate `NUM(0)`
+- `TAG_FVR` with same ext -> `NUM(1)` (same variable id)
+- `TAG_CTR` with arity 0 -> `NUM(1)`
+- `TAG_CTR` with arity n > 0 -> **builds** an AND chain of n
+  self-recursive APP-PRI calls and returns the unfired chain.
+  The wnf reducer then evaluates the AND, firing each child
+  comparison through APP-PRI saturation, short-circuiting on
+  the first NUM(0).
+- Other tags -> compare `term_val` directly
+
+This is "IC-driven structural recursion with C base cases" --
+the design memo's option (2) at minimum scope, demonstrating
+that recursive structural code runs through our reducer
+end-to-end.
+
+`tests/test_kbo_pri.c` adds 9 cases (35 sub-checks total, was
+17): leaf FVR same-id / different-id / tag mismatch, nullary
+CTR same-label / different-label, binary CTR (equal, first
+child differs, second child differs), nested CTR 3-level
+recursion.
+
+Stage 8.2c closes; 8.2d (full pure-IC port of `thvm_kbo`)
+remains deferred until SupGen-style search (8.10) creates a
+concrete use case.
+
 ### Added: thvm_kbo as TAG_PRI primitive (stage 8.2b)
 
 `prim_kbo` (arity 3) registered at `ATP_PRIM_KBO = 2` during

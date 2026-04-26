@@ -475,7 +475,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `KBO_EQ / GT / LT / UN`.  Tests: `tests/test_kbo_pri.c`
         -- 4-6 cases covering each outcome and the
         APP-PRI-saturation roundtrip.
-  - [ ] 8.2c pure-IC port of `kbo_eq` (the structural-equality
+  - [x] 8.2c pure-IC port of `kbo_eq` (the structural-equality
         check) -- the simplest sub-routine that doesn't need
         arithmetic.  Encode as a `TAG_PRI` primitive that's
         itself implemented via IC structural recursion on the
