@@ -452,17 +452,62 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term lhs, Term rhs) {
   return kbo_eq(l, r);
 }
 
+// Stage 7.2b: source-rule-disjoint connectedness check.  Returns 1
+// if (lhs, rhs) is joinable under R \ {rule_a, rule_b} -- the two
+// rules that birthed this CP via overlap unification.  Bachmair-
+// Dershowitz-Plaisted-style redundancy: if the join can be done
+// without using either parent rule, the parent rules' interaction
+// was redundant.
+//
+// Per the domination lemma in `docs/plans/connectedness_design.md`,
+// this is strictly weaker pruning than 7.1's full-R joinability
+// (since reducing the rule set cannot uncover joins that the full
+// set misses).  We compute it for measurement: the resulting
+// counter `n_cps_dropped_connected` is bounded above by
+// `n_cps_dropped_joinable`, and the gap will become meaningful
+// when AC matching or extended joinability lands in 7.4+.
+//
+// `rule_a`/`rule_b` are indices into `s->lhs[] / s->rhs[]`.  Pass
+// any out-of-range value (e.g. ATP_MAX_RULES) to mean "no rule
+// excluded" -- equivalent to running 7.1.
+static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
+                                           u32 rule_a, u32 rule_b) {
+  const u32 NORM_CAP = 64;
+  Term filt_l[ATP_MAX_RULES];
+  Term filt_r[ATP_MAX_RULES];
+  u32 n_filt = 0;
+  for (u32 k = 0; k < s->n_rules; k++) {
+    if (k == rule_a || k == rule_b) continue;
+    filt_l[n_filt] = s->lhs[k];
+    filt_r[n_filt] = s->rhs[k];
+    n_filt++;
+  }
+  Term l = thvm_rewrite_normalize(lhs, filt_l, filt_r, n_filt, NORM_CAP);
+  Term r = thvm_rewrite_normalize(rhs, filt_l, filt_r, n_filt, NORM_CAP);
+  return kbo_eq(l, r);
+}
+
 // Helper: push a batch of CPs onto the queue with TRACE_CP entries
 // pointing at the two source rules' trace indices.  Drops overflow
-// silently.  CPs that are trivially joinable under current R are
-// dropped early (stage 7.1) and counted in `n_cps_dropped_joinable`.
-// Returns the count of CPs successfully pushed.
+// silently.  Filters fire on each CP:
+//   - 7.1: trivially-joinable under R          -> drop, tick `n_cps_dropped_joinable`
+//   - 7.2b: source-rule-disjoint connected     -> tick `n_cps_dropped_connected`
+//                                                 (counter only; not a filter
+//                                                 since 7.1 already covers it)
+// `rule_a`/`rule_b` are the rule indices that birthed this CP batch
+// (passed through to the connectedness check); `parent_a`/`parent_b`
+// are their trace indices.  Returns count of CPs pushed.
 static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
-                               u32 ncps, u32 parent_a, u32 parent_b) {
+                               u32 ncps, u32 parent_a, u32 parent_b,
+                               u32 rule_a, u32 rule_b) {
   u32 pushed = 0;
   for (u32 i = 0; i < ncps; i++) {
     if (s->n_cps >= ATP_MAX_CPS) break;
-    if (atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs)) {
+    u8 joinable  = atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs);
+    u8 connected = atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
+                                                    rule_a, rule_b);
+    if (connected) s->n_cps_dropped_connected++;
+    if (joinable) {
       s->n_cps_dropped_joinable++;
       continue;
     }
@@ -498,7 +543,8 @@ fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
                                            i, i + 1, j, j + 1,
                                            buf, ATP_CP_BATCH);
       pushed += atp_push_cps_traced(s, buf, nbuf,
-                                    s->r_trace[i], s->r_trace[j]);
+                                    s->r_trace[i], s->r_trace[j],
+                                    i, j);
     }
   }
 
@@ -510,7 +556,8 @@ fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
                                            i, i + 1, j, j + 1,
                                            buf, ATP_CP_BATCH);
       pushed += atp_push_cps_traced(s, buf, nbuf,
-                                    s->r_trace[i], s->r_trace[j]);
+                                    s->r_trace[i], s->r_trace[j],
+                                    i, j);
     }
   }
 

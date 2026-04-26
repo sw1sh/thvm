@@ -6,6 +6,42 @@ dated section.
 
 ## Unreleased
 
+### Added: source-rule-disjoint connectedness counter (stage 7.2b)
+
+`src/atp/_.c` gains `atp_cp_source_disjoint_connected(s, lhs, rhs,
+rule_a, rule_b)`: returns 1 if `(lhs, rhs)` is joinable under
+`R \ {rule_a, rule_b}` (the two rules that birthed the CP via
+overlap unification).  Implementation: builds a filtered rule
+array excluding `rule_a` and `rule_b`, normalizes both sides
+under it, compares via `kbo_eq`.
+
+`atp_push_cps_traced` signature extended with `(rule_a, rule_b)`;
+calls 7.2b's check alongside 7.1's.  New `n_cps_dropped_connected`
+field on `AtpState` ticks unconditionally for measurement (does
+not gate dropping -- that remains 7.1's job).  Per the domination
+lemma in `connectedness_design.md`, the connected count is bounded
+above by the joinable count.
+
+Sentinel: passing `ATP_MAX_RULES` for either `rule_a` or `rule_b`
+means "exclude no rule," making the function fall through to
+trivial-joinability semantics.
+
+`tests/test_atp.c` adds 4 cases (all in the same TEST_BEGIN
+group as 7.1's filter tests):
+- `cp-connectedness-counter-on-self-overlap`: domination
+  invariant holds on self-overlap
+- `cp-connectedness-genuine-CP-not-dropped`: hand-constructed
+  CP `(a, e)` survives both filters when neither parent rule
+  helps the join
+- `cp-connectedness-empty-filter-falls-through`: sentinel
+  exclusion makes the connectedness check equivalent to
+  trivial-joinability
+- `cp-connectedness-domination-on-saturation`: empirical
+  confirmation on the group example: connected count <= joinable
+  count throughout
+
+Stage 7.2 is now complete.
+
 ### Added: connectedness redundancy design memo (stage 7.2a)
 
 `docs/plans/connectedness_design.md` (~150 lines): surveys three

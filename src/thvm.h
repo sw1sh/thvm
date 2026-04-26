@@ -848,6 +848,16 @@ typedef struct {
   // "ground-merging" criterion).  Useful for benchmarking the
   // pruning power; not consulted by saturation logic.
   u32  n_cps_dropped_joinable;
+
+  // Stage 7.2b: count of CPs that are source-rule-disjoint
+  // connected (joinable under R \ {rule_a, rule_b}, the two rules
+  // that birthed the CP).  Per the domination lemma in
+  // `docs/plans/connectedness_design.md`, this is bounded above
+  // by `n_cps_dropped_joinable`; it ticks unconditionally for
+  // measurement, even if 7.1's filter would also fire.  Useful
+  // infrastructure for stage 7.4+ when AC theories may break
+  // the domination.
+  u32  n_cps_dropped_connected;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);

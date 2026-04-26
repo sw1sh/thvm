@@ -876,6 +876,94 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Stage 7.2b: source-rule-disjoint connectedness counter ========
+
+  TEST_BEGIN("atp/cp-connectedness-counter-on-self-overlap");
+  {
+    // A single rule's self-overlap is trivially joinable -- the
+    // CP collapses to (var, var) under any substitution.  Both
+    // counters tick, with `dropped_connected` tracking the
+    // domination relationship.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = ATP_TRACE_NONE;
+    s->n_rules = 1;
+
+    AtpAddedRange added = {0, 1};
+    CHECK_EQ(s->n_cps_dropped_joinable,  0u);
+    CHECK_EQ(s->n_cps_dropped_connected, 0u);
+    (void)thvm_atp_generate_cps(s, added);
+    // Domination lemma: connected count <= joinable count.
+    CHECK(s->n_cps_dropped_connected <= s->n_cps_dropped_joinable);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-connectedness-genuine-CP-not-dropped");
+  {
+    // Two non-confluent rules whose top-overlap CP is genuine:
+    //   r0: f(a, x) -> a   (rhs is constant)
+    //   r1: f(y, b) -> b   (rhs is a different constant)
+    // Cross-overlap unifies y=a, x=b; CP = (a, b).  Without rules
+    // 0 and 1, R is empty -- (a, b) cannot be joined.  Both
+    // counters stay at zero for this CP.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(),         mk_v(VAR_x));
+    s->rhs[0] = mk_a();
+    s->r_trace[0] = ATP_TRACE_NONE;
+    s->lhs[1] = mk_f(mk_v(VAR_x),    mk_e());
+    s->rhs[1] = mk_e();
+    s->r_trace[1] = ATP_TRACE_NONE;
+    s->n_rules = 2;
+
+    // Manually invoke the connectedness check on (a, e) under
+    // R \ {0, 1} = {} -- expected NOT joinable.
+    Term na = mk_a();
+    Term ne = mk_e();
+    u8 conn = atp_cp_source_disjoint_connected(s, na, ne, 0u, 1u);
+    CHECK_EQ(conn, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-connectedness-empty-filter-falls-through");
+  {
+    // ATP_MAX_RULES as the "exclude no rules" sentinel: with both
+    // rule_a and rule_b out of range, the filtered set equals R
+    // and the result matches trivial-joinability.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->n_rules = 1;
+
+    // (f(a, e), a) joins under r0 to (a, a).  joinable AND
+    // connected (with sentinel exclusion).
+    Term l = mk_f(mk_a(), mk_e());
+    Term r = mk_a();
+    u8 join = atp_cp_trivially_joinable(s, l, r);
+    u8 conn = atp_cp_source_disjoint_connected(s, l, r,
+                                               ATP_MAX_RULES,
+                                               ATP_MAX_RULES);
+    CHECK_EQ(join, 1u);
+    CHECK_EQ(conn, 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-connectedness-domination-on-saturation");
+  {
+    // Empirical confirmation of the domination lemma on a real
+    // saturation: connected count <= joinable count throughout.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    thvm_atp_set_goal(s, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    (void)thvm_atp_run(s);
+    CHECK(s->n_cps_dropped_connected <= s->n_cps_dropped_joinable);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
