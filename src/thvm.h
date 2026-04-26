@@ -88,8 +88,9 @@ typedef u64 Term;
 #define TAG_AND  16  // short-circuit AND.val = heap loc -> [a, b]; strict on a, lazy on b
 #define TAG_OR   17  // short-circuit OR. val = heap loc -> [a, b]; strict on a, lazy on b
 #define TAG_ANY  18  // wildcard.         atom; matches anything under EQL, dups to itself
+#define TAG_INC  19  // priority wrapper. val = heap loc -> [body]; observed by collapse_ordered
 
-#define TAG_COUNT 19
+#define TAG_COUNT 20
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -499,6 +500,7 @@ fn Term term_new_eql (Term a, Term b);
 fn Term term_new_and (Term a, Term b);
 fn Term term_new_or  (Term a, Term b);
 fn Term term_new_any (void);
+fn Term term_new_inc (Term body);
 
 // === lazy outermost-layer resolver ===
 // Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);
