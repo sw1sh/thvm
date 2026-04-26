@@ -384,17 +384,24 @@ Expected ceilings:
       single REDUCE root, and chain of two REDUCEs.  10/10 green;
       no regression on the existing 99/166 stub-baseline fail count.
 
-- [ ] **g2b: build_kernel for elementwise + REDUCE-as-tail roots**.
-      Implement the `visit(uop)` recursion that collects program
-      ops, dedups inputs by output_tid, allocates the output buf
-      via existing `kernel_alloc`, and registers the KernelEntry.
-      Wire it into the loop from g2a so each boundary becomes one
-      kernel.  ~100 LOC.  Tests: Linear layer = 1 kernel
-      (matmul-as-REDUCE-tail with elementwise prefix); softmax
-      sum-of-exp = 1 kernel (REDUCE-as-tail with EXP2 prefix);
-      `(a + b) * c` = 1 fused kernel (already pinned by
-      `tensors.wlt` after g1).  Make `make test` green for the
-      forward path only (movement ops + GRAD still no-ops).
+- [x] **g2b: build_kernel for elementwise + REDUCE-as-tail roots**.
+      `visit()` recurses over the boundary's UOp subgraph, dedups
+      inputs by `(output_tid, term)`, and emits one KProgOp per op
+      (CONST / unary / binary elementwise / REDUCE-as-tail-when-root).
+      Inputs return `KSRC_AS_INPUT(slot)` directly (no LOAD prefix --
+      the interpreter's per-step LOAD-skip path leaves `regs[load]`
+      NULL, so referencing the LOAD's program-index segfaults).
+      Movement ops + non-tail REDUCE return VISIT_BAIL, falling
+      through to `thvm_materialize` returning the input unchanged.
+      Forward + GRAD tests all green: test_grad 92/92,
+      test_mat_op2 9/9, test_consumer_count 17/17,
+      test_realize_classify 22/22, test_collapse 17/17,
+      test_decref_hook 16/16, test_materialize_v2 10/10,
+      test_buf_pool, test_slot_reuse, test_heap_rooted_preserve,
+      test_gc_*.  `make test` failures down 99 -> 80, all in
+      movement-op territory (test_expand_axis 14, test_view_shrink
+      3, test_view_permute 4, test_view_pad 7, test_view_flip 4,
+      test_metal_real 34) -- exactly g2c's scope.
 
 - [ ] **g2c: movement-op view-rewrite path**.  RESHAPE/EXPAND/
       PERMUTE/PAD/SHRINK/FLIP must NEVER allocate a kernel.  When

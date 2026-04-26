@@ -6,6 +6,36 @@ dated section.
 
 ## Unreleased
 
+### Added: build_kernel for elementwise + REDUCE-as-tail roots (g2b)
+
+`thvm_materialize` now actually emits kernels.  For each boundary in
+topo order, `emit_kernel_for_boundary`:
+
+1. Reconstructs the root UOp Term from `REALIZE_INFO` + boundary loc.
+2. Infers output shape/dtype via `term_shape_in` / `term_dtype_in`.
+3. Allocates an output TenDesc + buf via `tensor_alloc`, links
+   `producer_kid`.
+4. Calls `visit(root)`, a recursive walker that dedups inputs and
+   emits one KProgOp per op (CONST / unary / binary elementwise /
+   REDUCE-as-tail-when-root).  Inputs return `KSRC_AS_INPUT(slot)`
+   directly -- no LOAD prefix, since the interpreter's per-step
+   LOAD-skip path leaves `regs[load]` NULL and downstream refs would
+   segfault.
+5. Wraps the KernelEntry id in a UOP_KERNEL Term, records it in
+   `BOUNDARY_TERM[bi]` so downstream boundaries can wire it as input.
+
+Movement ops (RESHAPE/EXPAND/PERMUTE/PAD/SHRINK/FLIP) and non-tail
+REDUCE return VISIT_BAIL; on bail `thvm_materialize` returns the
+input term unchanged.  Movement-op support lands in g2c.
+
+`make test` failures: 99 -> 80.  All forward + GRAD tests green
+(test_grad 92/92, test_mat_op2 9/9, test_consumer_count 17/17,
+test_realize_classify 22/22, test_collapse 17/17, test_decref_hook
+16/16, test_materialize_v2 10/10).  Remaining 80 fails are
+movement-op-only: test_expand_axis (14), test_view_shrink (3),
+test_view_permute (4), test_view_pad (7), test_view_flip (4),
+test_metal_real (34).
+
 ### Added: scheduler skeleton + topo-sort over realize boundaries (g2a)
 
 `thvm_materialize` now runs the first half of the tinygrad-style
