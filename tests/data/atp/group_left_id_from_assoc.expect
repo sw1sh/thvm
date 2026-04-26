@@ -1,0 +1,9 @@
+% Stage 9.4b: derives left-identity from right-id + right-
+% inverse + associativity.  Predicted TIMEOUT @ 32; observed
+% TIMEOUT @ 32 across all 4 modes -- saturation accumulates
+% 20 rules and 116 trace entries before hitting the budget.
+% Expected to flip to PROVED if/when AC-aware joinability or
+% the lemma f(i(x), x) = e is discovered (out of scope here).
+status=TIMEOUT
+max_step=32
+max_rules=20

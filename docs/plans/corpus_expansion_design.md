@@ -162,16 +162,26 @@ constant or scales with conjecture depth.
 
 ## Aggregate prediction
 
-| Fixture | Division | Predicted | Step bound |
-|---|---|---|---|
-| `comm_monoid_swap`        | GRP | PROVED | 0-1 |
-| `lattice_absorb_simple`   | LAT | PROVED | 0   |
-| `ring_distrib_zero`       | RNG | PROVED | 1-2 |
-| `comb_K`                  | LCL | PROVED | 1   |
-| `group_left_id_from_assoc`| GRP | TIMEOUT | 32 cap |
+| Fixture | Division | Predicted | Step bound | Observed (9.4b) |
+|---|---|---|---|---|
+| `comm_monoid_swap`        | GRP | PROVED  | 0-1    | QUEUE_EMPTY @ 2 |
+| `lattice_absorb_simple`   | LAT | PROVED  | 0      | PROVED @ 0      |
+| `ring_distrib_zero`       | RNG | PROVED  | 1-2    | PROVED @ 0      |
+| `comb_K`                  | LCL | PROVED  | 1      | PROVED @ 0      |
+| `group_left_id_from_assoc`| GRP | TIMEOUT | 32 cap | TIMEOUT @ 32    |
 
 Four PROVED + one TIMEOUT.  Hits the >=1 PROVED + >=1 TIMEOUT
 target.  Total fixture count after 9.4 = 12 (existing 7 + these 5).
+
+**Surprise** (9.4b update): `comm_monoid_swap` returns
+QUEUE_EMPTY, not PROVED.  The commutativity axiom is unorientable
+and the unfailing 2-way fallback installs both `f(x, y) ->
+f(y, x)` and `f(y, x) -> f(x, y)` -- those rewrite cycle
+indefinitely under the goal-rewrite path, so neither side
+canonicalises.  Saturation completes (queue empties at step 2)
+without proving the goal.  This is the textbook AC-redundancy
+gap; cleanly motivates an AC-aware joinability criterion as
+future work.
 
 ## KBO-vs-LPO note
 

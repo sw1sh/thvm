@@ -1,0 +1,19 @@
+% Stage 9.4b: RNG fixture from corpus_expansion_design.md.
+% Right-distributive axiom + additive-zero identity.  The goal
+% reduces to mul(a, b) on both sides via one rewrite of
+% add(a, zero) -> a.  The distributive axiom is included to
+% give 9.4c's bench output a recognisable ring fragment shape.
+NAME            ring_distrib_zero
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       zero: -> ANY
+                a: -> ANY
+                b: -> ANY
+                add: ANY ANY -> ANY
+                mul: ANY ANY -> ANY
+ORDERING        LPO
+                mul > add > zero > a > b
+VARIABLES       x,y,z : ANY
+EQUATIONS       add(x, zero) = x
+                mul(add(x, y), z) = add(mul(x, z), mul(y, z))
+CONCLUSION      mul(add(a, zero), b) = mul(a, b)

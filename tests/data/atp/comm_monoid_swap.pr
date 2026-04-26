@@ -1,0 +1,20 @@
+% Stage 9.4b: GRP fixture from corpus_expansion_design.md.
+% Commutative-monoid axioms (right-id + commutativity); the
+% conjecture asks for swap-equivalence of two distinct
+% constants.  Commutativity is structurally symmetric so it
+% goes in via the unfailing 2-way fallback under both KBO and
+% LPO; once oriented both ways, the goal-rewrite path
+% normalizes to a canonical form.
+NAME            comm_monoid_swap
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       e: -> ANY
+                a: -> ANY
+                b: -> ANY
+                f: ANY ANY -> ANY
+ORDERING        LPO
+                f > e > a > b
+VARIABLES       x,y : ANY
+EQUATIONS       f(x, e) = x
+                f(x, y) = f(y, x)
+CONCLUSION      f(a, b) = f(b, a)

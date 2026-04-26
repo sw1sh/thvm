@@ -1,0 +1,7 @@
+% Stage 9.4b: predicted PROVED in 1-2 steps; observed PROVED
+% at step 0 (faster than expected -- the goal-rewrite path
+% picks up add(a, zero) -> a directly without needing to
+% saturate the distributive rule first).  All 4 modes agree.
+status=PROVED
+max_step=0
+max_rules=1

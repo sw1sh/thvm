@@ -1,0 +1,6 @@
+% Stage 9.4b: literal K-rule application; goal-rewrite reduces
+% app(app(K, a), b) -> a in one match.  Observed PROVED at
+% step 0 across all 4 (cp-gen x rewrite) modes.
+status=PROVED
+max_step=0
+max_rules=1

@@ -782,7 +782,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         notes.  Aim for at least one PROVED and at least one
         TIMEOUT to exercise both ends of the bench.  Scope:
         ~150-line memo.
-  - [ ] 9.4b implement the fixtures: write each `.pr` + `.expect`
+  - [x] 9.4b implement the fixtures: write each `.pr` + `.expect`
         file from 9.4a, verify each parses (run through
         `test_bench_atp` and confirm status matches the
         prediction OR update the prediction if reality differs).

@@ -1,0 +1,18 @@
+% Stage 9.4b: LAT fixture from corpus_expansion_design.md.
+% Lattice absorption laws (Burris & Sankappanavar ch. 1).  The
+% conjecture is a literal instance of A1 with x=a, y=b -- the
+% goal-rewrite path normalizes meet(a, join(a, b)) -> a in one
+% step.
+NAME            lattice_absorb_simple
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       a: -> ANY
+                b: -> ANY
+                join: ANY ANY -> ANY
+                meet: ANY ANY -> ANY
+ORDERING        LPO
+                meet > join > a > b
+VARIABLES       x,y : ANY
+EQUATIONS       meet(x, join(x, y)) = x
+                join(x, meet(x, y)) = x
+CONCLUSION      meet(a, join(a, b)) = a

@@ -1,0 +1,19 @@
+% Stage 9.4b: LCL fixture from corpus_expansion_design.md.
+% Combinatory logic K and S rules (Schoenfinkel-Curry).
+% Conjecture is a literal instance of the K rule with x=a, y=b;
+% goal-rewrite reduces app(app(K, a), b) -> a in one step.
+NAME            comb_K
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       K: -> ANY
+                S: -> ANY
+                a: -> ANY
+                b: -> ANY
+                c: -> ANY
+                app: ANY ANY -> ANY
+ORDERING        LPO
+                app > S > K > a > b > c
+VARIABLES       x,y,z : ANY
+EQUATIONS       app(app(K, x), y) = x
+                app(app(app(S, x), y), z) = app(app(x, z), app(y, z))
+CONCLUSION      app(app(K, a), b) = a

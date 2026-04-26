@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: corpus expansion fixtures (stage 9.4b)
+
+Five new bench fixtures (`.pr` + `.expect`) under
+`tests/data/atp/`:
+
+| Fixture | Division | Predicted | Observed |
+|---|---|---|---|
+| `comm_monoid_swap`         | GRP | PROVED  | QUEUE_EMPTY @ 2 |
+| `lattice_absorb_simple`    | LAT | PROVED  | PROVED @ 0      |
+| `ring_distrib_zero`        | RNG | PROVED  | PROVED @ 0      |
+| `comb_K`                   | LCL | PROVED  | PROVED @ 0      |
+| `group_left_id_from_assoc` | GRP | TIMEOUT | TIMEOUT @ 32    |
+
+Bench-atp jumps from 78/78 to 98/98 sub-checks (5 new files x
+4 modes); all 4 (cp-gen x rewrite) modes agree on status per
+fixture, preserving the parity property from 8.1e-ii / 8.3e-ii.
+
+**Surprise:** `comm_monoid_swap` returns QUEUE_EMPTY rather
+than PROVED.  The commutativity axiom is unorientable, so the
+unfailing 2-way fallback installs both `f(x, y) -> f(y, x)`
+and the reverse; the goal-rewrite path then cycles between
+`f(a, b)` and `f(b, a)` without canonicalising.  This is the
+textbook AC-redundancy gap; flagged in
+`docs/plans/corpus_expansion_design.md` as a clean motivation
+for future AC-aware joinability work.
+
+`ring_distrib_zero` and `comb_K` PROVED faster than predicted
+(step 0 vs predicted 1-2 / 1) -- the goal-rewrite check
+shortcuts before any saturation step fires.  Memo's prediction
+table updated with the observed column.
+
+166/166 C, 323 WL.
+
 ### Added: corpus expansion design memo (stage 9.4a)
 
 `docs/plans/corpus_expansion_design.md` (~200 lines) picks the

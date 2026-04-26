@@ -1,0 +1,20 @@
+% Stage 9.4b: GRP stress fixture from corpus_expansion_design.md.
+% Same axioms as group_commutative_inverse.pr (right-id, right-
+% inverse, associativity); conjecture is left-identity, derivable
+% in ~6-12 steps via the lemma f(i(x), x) = e but well past the
+% 32-step bench budget under unfailing KB without AC hints.
+% Predicted: TIMEOUT @ bench step cap.
+NAME            group_left_id_from_assoc
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       e: -> ANY
+                a: -> ANY
+                i: ANY -> ANY
+                f: ANY ANY -> ANY
+ORDERING        LPO
+                i > f > e > a
+VARIABLES       x,y,z : ANY
+EQUATIONS       f(x, e) = x
+                f(x, i(x)) = e
+                f(f(x, y), z) = f(x, f(y, z))
+CONCLUSION      f(e, a) = a

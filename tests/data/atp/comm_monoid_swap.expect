@@ -1,0 +1,9 @@
+% Stage 9.4b finding: predicted PROVED 0-1 but observed
+% QUEUE_EMPTY @ 2 steps under all 4 (cp-gen x rewrite) modes.
+% The commutativity axiom is unorientable; unfailing adds it
+% in both directions and the resulting rewrite cycles between
+% f(a, b) and f(b, a) without ever producing a canonical form.
+% This is a known limitation of unfailing KB without AC-aware
+% normalization -- a clean motivation for AC redundancy
+% criteria (out of scope for stage 9).
+status=QUEUE_EMPTY
