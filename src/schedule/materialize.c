@@ -636,10 +636,24 @@ fn Term thvm_materialize(Term term) {
     BOUNDARY_TID [i] = 0;
     BOUNDARY_TERM[i] = 0;
   }
+  // All-or-nothing emission: if any boundary fails to compile,
+  // rewind KERNELS_NEXT and TENS_NEXT to their pre-call values
+  // and return the input unchanged.  Without this rewind, partial
+  // emission accumulates orphan kernels per call -- thvm_realize's
+  // loop sees the same UOp graph each iteration and re-emits the
+  // same successful boundaries, growing KERNELS_NEXT linearly with
+  // iter count (the symptom that produced 1k+ kernels for a
+  // softmax+CE backward).
+  u32 kernels_at_start = KERNELS_NEXT;
+  u32 tens_at_start    = TENS_NEXT;
   Term sink_kernel = 0;
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     Term k = emit_kernel_for_boundary(i);
-    if (k == 0) return term;
+    if (k == 0) {
+      KERNELS_NEXT = kernels_at_start;
+      TENS_NEXT    = tens_at_start;
+      return term;
+    }
     if (BOUNDARY_ORDER[i] == term_val(term)) sink_kernel = k;
   }
   return sink_kernel != 0 ? sink_kernel : term;

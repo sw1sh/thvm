@@ -448,7 +448,7 @@ linearScanPack[bufs_, barHeightMode_:"Log"] := Block[{
     {out, yMax}
 ]
 
-Options[TMemoryPlanGantt] = {"TopN" -> 40, "BarHeight" -> "Log"};
+Options[TMemoryPlanGantt] = {"TopN" -> 40, "BarHeight" -> "Linear"};
 TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
     Block[{
         allBufs = a["Bufs"],
@@ -533,6 +533,23 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                                                   b["last_use_depth"]}],
                                 Row[{"alias_tids: ", b["alias_tids"]}]
                             }]
+                        ],
+                        (* Per-bar in-bar label so a static SVG
+                           reader can identify each buf without
+                           the interactive tooltip.  Format: "<id>
+                           <kib>KiB".  Font scales with available
+                           bar height; tiny bars omit the label. *)
+                        If[ (h - 2 inset) > 0.02 totalHeight,
+                            Text[
+                                Style[
+                                    Row[{b["id"], " ",
+                                         Round[b["nbytes"]/1024., 0.01], "KiB"}],
+                                    FontSize -> Scaled[0.012],
+                                    FontFamily -> "Source Code Pro"
+                                ],
+                                {(x0 + x1)/2, (y0 + y1)/2}
+                            ],
+                            Sequence @@ {}
                         ]
                     }
                 ]] /@ packed
@@ -545,11 +562,15 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                    Log2[1+nbytes], so the human-readable label is
                    `2^y - 1` bytes -> KiB.  Pick ~6 evenly spaced
                    y values for either mode. *)
-                Block[{step, yToKib},
-                    yToKib = If[ barHeightMode === "Log",
-                        Function[y, (2.0^y - 1.0) / 1024.0],
-                        Function[y, y / 1024.0]
-                    ];
+                Block[{step, yToKib, asKib},
+                    (* Linear: y units ARE bytes -> /1024 = KiB.
+                       Log:    y is a SUM of Log2[1+nbytes] across
+                       stacked bufs, so 2^y is meaningless.  Label
+                       y in raw log-units; tooltips give per-buf
+                       bytes for the actual reads. *)
+                    asKib = barHeightMode =!= "Log";
+                    yToKib = If[asKib, Function[y, y / 1024.0],
+                                       Function[y, y]];
                     step = totalHeight / 6.0;
                     If[ step <= 0, step = 1];
                     Table[{y, Round[yToKib[y], 0.01]}, {y, 0, totalHeight, step}]
@@ -557,7 +578,9 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
             },
             FrameLabel -> {
                 "topological depth (kernel DAG)",
-                "memory (KiB) -- linear-scan slot allocator"
+                If[ barHeightMode === "Log",
+                    "stacked Log2[1+nbytes] -- linear-scan slot allocator",
+                    "memory (KiB) -- linear-scan slot allocator"]
             },
             (* Peak-concurrency marker as Epilog (after bars,
                before frame).  Avoid Opacity directive -- it
