@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Added: prim_rewrite_step IC dispatch primitive (stage 8.3b)
+
+`prim_rewrite_step` (arity 3) registered at
+`ATP_PRIM_REWRITE_STEP = 4` during `thvm_atp_init`.  Per
+`docs/plans/ic_rule_dispatch.md`'s Strategy B: takes
+`(lhs, rhs, target)`; runs `thvm_match`; on success returns
+`thvm_subst_apply(rhs, &subst)`; on failure returns ERA.
+Equivalent to one step of `thvm_rewrite_step` at the top
+position, dispatched via APP-PRI evaluation.
+
+`tests/test_rewrite_pri.c` (16 sub-checks, 6 cases):
+- `rewrite-pri/direct-match`: `f(x, e) -> x` applied to
+  `f(a, e)` -> CTR `a`
+- `rewrite-pri/no-match-different-head`: target `g(a)` against
+  `f(_, _)` LHS -> ERA
+- `rewrite-pri/no-match-second-arg-mismatch`: target `f(a, b)`
+  against `f(_, e)` LHS -> ERA
+- `rewrite-pri/fvr-only-lhs-binds-anything`: bare `x` LHS
+  matches any term
+- `rewrite-pri/nested-ctr-binds-multiple-vars`:
+  `f(g(x), y) -> g(y)` on `f(g(a), b)` -> `g(b)`
+- `rewrite-pri/repeated-var-must-match-consistently`:
+  `f(x, x)` matches `f(a, a)` but not `f(a, b)`
+
+Combined with APP-SUP fan-out (8.3c) this lets a SUP of
+partial-PRI rules dispatch in parallel against a single target
+term.
+
 ### Added: IC-native rule dispatch design memo (stage 8.3a)
 
 `docs/plans/ic_rule_dispatch.md` (~150 lines) lays out the

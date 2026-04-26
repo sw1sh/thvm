@@ -843,8 +843,16 @@ typedef enum {
 //     -- the wnf reducer fires each child comparison in turn,
 //     AND short-circuits on the first NUM(0).  Stage 8.2c proof
 //     point that pure-IC structural recursion is viable.
+//   ATP_PRIM_REWRITE_STEP: arity 3; takes `(lhs, rhs, target)`
+//     and returns either `thvm_subst_apply(rhs, &σ)` on
+//     successful match (where σ = match(lhs, target)) or `ERA`
+//     on failure.  Dispatch entry-point for IC-native rule
+//     application per `docs/plans/ic_rule_dispatch.md`'s
+//     Strategy B; combined with APP-SUP fan-out (8.3c) it lets
+//     a SUP of partial-PRI rules run in parallel.
 #define ATP_PRIM_KBO          2u
 #define ATP_PRIM_KBO_EQ_IC    3u
+#define ATP_PRIM_REWRITE_STEP 4u
 
 // 8.2b: process-global registry mapping `cfg_id` (u32) to
 // `const KboConfig *`.  Needed because `KboConfig*` doesn't fit

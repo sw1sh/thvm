@@ -502,14 +502,18 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         help (likely: for type-directed pattern matching when
         sorts land in 8.4).  Pick the simplest viable
         increment.  Scope: ~150-line memo.
-  - [ ] 8.3b encode a single rule as a LAM term: helper
-        `term_new_rule_lam(lhs_fvr_ids, rhs)` that wraps a rule
-        with ?-many LAM binders (one per variable id appearing
-        in the LHS, in some canonical order) and substitutes
-        the FVR atoms with VAR-binder references.  Tests verify
-        `APP(rule_lam, arg_term)` reduces to the rule's RHS
-        with the correct substitution applied.  ~50 LOC + 3-5
-        tests.
+  - [x] 8.3b implement `prim_rewrite_step` (arity 3) at
+        `ATP_PRIM_REWRITE_STEP = 4` per the 8.3a design memo
+        Strategy B: takes `(lhs, rhs, target)`; runs
+        `thvm_match(lhs, target, &subst)`; on success returns
+        `thvm_subst_apply(rhs, &subst)`; on failure returns ERA.
+        Registered in `atp_register_primitives`.  Tests verify
+        the saturated APP-PRI chain produces the expected
+        rewrite outcome on direct match, no-match, FVR-only LHS,
+        and nested CTR cases.  ~50 LOC + 3-5 tests.
+        (Originally specified as a LAM-binder encoding; the
+        design memo reinterpreted this as "rule as a callable
+        IC entity" via PRI dispatch.)
   - [ ] 8.3c SUP of rules + APP-SUP fan-out demo: pre-encode
         a small rule set as `&L{rule_0_lam, rule_1_lam, ...}`,
         APP it to a target term, observe APP-SUP commutation

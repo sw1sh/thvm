@@ -148,6 +148,25 @@ static Term prim_kbo_eq_ic(Term *args) {
   }
 }
 
+// 8.3b: IC-native rule dispatch primitive.  Takes `(lhs, rhs,
+// target)`; runs `thvm_match` to bind LHS variables against the
+// target; on success returns `thvm_subst_apply(rhs, &subst)` --
+// the rewritten term -- on failure returns ERA.
+//
+// Equivalent to one step of the C-side `thvm_rewrite_step` at
+// the top position.  Combined with APP-SUP fan-out (8.3c) it
+// lets a SUP of partial-PRI rules dispatch in parallel.
+static Term prim_rewrite_step(Term *args) {
+  Term lhs    = args[0];
+  Term rhs    = args[1];
+  Term target = args[2];
+  RewriteSubst subst = {{0}};
+  if (!thvm_match(lhs, target, &subst)) {
+    return term_new(0, TAG_ERA, 0, 0);
+  }
+  return thvm_subst_apply(rhs, &subst);
+}
+
 // Idempotent: tests / saturation init both call this; the registry
 // just overwrites with the same function pointer.
 static void atp_register_primitives(void) {
@@ -155,6 +174,7 @@ static void atp_register_primitives(void) {
   prim_register(ATP_PRIM_UNIFY_APPLY3, prim_unify_apply3, 3);
   prim_register(ATP_PRIM_KBO,          prim_kbo,          3);
   prim_register(ATP_PRIM_KBO_EQ_IC,    prim_kbo_eq_ic,    2);
+  prim_register(ATP_PRIM_REWRITE_STEP, prim_rewrite_step, 3);
 }
 
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
