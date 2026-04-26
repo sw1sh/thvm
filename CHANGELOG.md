@@ -6,6 +6,29 @@ dated section.
 
 ## Unreleased
 
+### Added: connectedness redundancy design memo (stage 7.2a)
+
+`docs/plans/connectedness_design.md` (~150 lines): surveys three
+candidate Bachmair-Dershowitz-Plaisted (BDP) connectedness
+criteria -- subsumption-connected, source-rule-disjoint connected,
+"connected below c" -- and proves a *domination lemma*: any rule
+subset `R' ⊆ R` cannot find joins that `R` itself cannot find, so
+all three candidates are strictly dominated by 7.1's trivial-
+joinability filter (which uses full R).
+
+Decision: implement criterion (2), source-rule-disjoint
+connectedness, in 7.2b *as an empirical demonstration* of the
+domination relationship rather than as a new pruning mechanism.
+The resulting `n_cps_dropped_connected` counter is expected to be
+a strict lower bound on `n_cps_dropped_joinable`; this is useful
+infrastructure for stage 7.4+ when AC theories or extended
+joinability tests can break the domination.
+
+The memo also recommends prioritizing stage 7.3 (subsumption)
+since it is genuinely orthogonal to 7.1 -- subsumption can fire
+on CPs that are not joinable, e.g. instances of an existing rule
+that have not been reduced.
+
 ### Added: trivial-joinability CP filter (stage 7.1)
 
 Drops critical pairs that are joinable-by-current-R at generate time

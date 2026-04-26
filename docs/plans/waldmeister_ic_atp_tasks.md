@@ -308,7 +308,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       / `Grundzusammenfuehrung.c` -- "ground union" criterion that
       drops trivially-joinable CPs)
 - [ ] 7.2 connectedness redundancy (Bachmair-Dershowitz-Plaisted)
-  - [ ] 7.2a design memo `docs/plans/connectedness_design.md`:
+  - [x] 7.2a design memo `docs/plans/connectedness_design.md`:
         survey BDP's "connected below c" criterion vs the
         trivial-joinability filter from 7.1.  Pick a concrete
         sub-criterion to implement that adds *non-overlapping*
