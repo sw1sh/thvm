@@ -708,6 +708,90 @@ int main(void) {
     wald_free(s);
   }
 
+  // === 6.3f top-level wald_parse driver ==============================
+
+  TEST_BEGIN("wald/parse-null-args-yields-err");
+  {
+    CHECK_EQ((int)wald_parse(NULL, NULL), (int)WALD_ERR_NULL);
+  }
+
+  TEST_BEGIN("wald/parse-empty-source-yields-no-section");
+  {
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse("", s), (int)WALD_ERR_NO_SECTION);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-only-junk-yields-no-section");
+  {
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse("foo bar baz", s), (int)WALD_ERR_NO_SECTION);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-full-group-spec");
+  {
+    // The standard group axiomatization from the example.pr file.
+    const char *src =
+      "NAME            group\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       e: -> ANY\n"
+      "                i: ANY -> ANY\n"
+      "                f: ANY ANY -> ANY\n"
+      "                a: -> ANY\n"
+      "ORDERING        LPO\n"
+      "                i > f > e > a\n"
+      "VARIABLES       x,y,z : ANY\n"
+      "EQUATIONS       f(x, e) = x\n"
+      "                f(x, i(x)) = e\n"
+      "                f(f(x, y), z) = f(x, f(y, z))\n"
+      "CONCLUSION      f(a, i(a)) = e\n";
+
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse(src, s), (int)WALD_OK);
+
+    // Spec identity.
+    CHECK_EQ((int)strcmp(s->name, "group"), 0);
+    CHECK_EQ((int)s->mode_proof, 1);
+
+    // Signature: 4 symbols with monotonic labels.
+    CHECK_EQ(s->n_symbols, 4u);
+    CHECK_EQ((int)strcmp(s->symbols[0].name, "e"), 0);
+    CHECK_EQ(s->symbols[0].arity, 0u);
+    CHECK_EQ((int)strcmp(s->symbols[1].name, "i"), 0);
+    CHECK_EQ(s->symbols[1].arity, 1u);
+    CHECK_EQ((int)strcmp(s->symbols[2].name, "f"), 0);
+    CHECK_EQ(s->symbols[2].arity, 2u);
+    CHECK_EQ((int)strcmp(s->symbols[3].name, "a"), 0);
+    CHECK_EQ(s->symbols[3].arity, 0u);
+
+    // Ordering: i > f > e > a -> ranks 3, 2, 1, 0 respectively.
+    CHECK_EQ(s->symbols[1].prec_rank, 3u);   // i
+    CHECK_EQ(s->symbols[2].prec_rank, 2u);   // f
+    CHECK_EQ(s->symbols[0].prec_rank, 1u);   // e
+    CHECK_EQ(s->symbols[3].prec_rank, 0u);   // a
+
+    // Variables: x, y, z -> ids 0, 1, 2.
+    CHECK_EQ(s->n_vars, 3u);
+    CHECK_EQ((int)strcmp(s->vars[0].name, "x"), 0);
+    CHECK_EQ(s->vars[0].var_id, 0u);
+    CHECK_EQ((int)strcmp(s->vars[2].name, "z"), 0);
+    CHECK_EQ(s->vars[2].var_id, 2u);
+
+    // Three axioms.
+    CHECK_EQ(s->n_eqns, 3u);
+
+    // Goal: f(a, i(a)) = e
+    CHECK(s->goal_lhs != 0u);
+    CHECK(s->goal_rhs != 0u);
+    CHECK_EQ(term_tag(s->goal_lhs), TAG_CTR);
+    CHECK_EQ(term_ext(s->goal_lhs), s->symbols[2].label);   // f
+    CHECK_EQ(term_tag(s->goal_rhs), TAG_CTR);
+    CHECK_EQ(term_ext(s->goal_rhs), s->symbols[0].label);   // e
+    wald_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

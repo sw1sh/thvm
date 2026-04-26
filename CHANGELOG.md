@@ -6,6 +6,41 @@ dated section.
 
 ## Unreleased
 
+### Added: top-level Waldmeister .pr parser driver (stage 6.3f)
+
+`wald_parse(src, spec) -> WaldErr` lands in `src/wald/_.c`.
+Lexes the source, finds the first section keyword via
+`wald_skip_to_section`, then dispatches each section to its
+parser (NAME / MODE / SORTS / SIGNATURE / VARIABLES / ORDERING /
+EQUATIONS / CONCLUSION).  Each parser returns the next section's
+enum so the driver just chains.
+
+Sections are accepted in any order -- Waldmeister's grammar
+specifies a fixed order, but the parser is permissive (matching
+upstream behavior and easing test fixture writing).  Per-section
+parse errors don't bail the driver: the section parser falls
+through to `wald_skip_to_section` so we still consume the rest
+of the file and produce a partial-but-coherent spec.
+
+`WaldErr` enum: `WALD_OK`, `WALD_ERR_NULL`, `WALD_ERR_NO_SECTION`.
+
+Tests in `tests/test_wald.c` (214 sub-checks) include:
+- NULL args -> `WALD_ERR_NULL`
+- empty source -> `WALD_ERR_NO_SECTION`
+- "foo bar baz" with no recognized keyword -> `WALD_ERR_NO_SECTION`
+- the full group-axiom `.pr` file from
+  `waldmeister/documents/example.pr` parses end-to-end:
+  - `name == "group"`, `mode_proof == 1`
+  - 4 symbols (e/i/f/a) with arities 0/1/2/0 and the
+    monotonic CTR labels
+  - precedence ranks i=3, f=2, e=1, a=0 from the LPO section
+  - 3 variables (x/y/z) with sequential FVR ids
+  - 3 axioms in `eqn_lhs/rhs[]`
+  - goal_lhs is `f(...)` (label of f), goal_rhs is `e`
+
+This unblocks 6.3g (named end-to-end test) and 6.4 (run
+saturation on the parsed spec, emit a PCL trace).
+
 ### Added: EQUATIONS + CONCLUSION parsers (stage 6.3e)
 
 `wald_parse_equations` and `wald_parse_conclusion` land in

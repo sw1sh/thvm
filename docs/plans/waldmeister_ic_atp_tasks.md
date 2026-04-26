@@ -257,10 +257,17 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       axiom EQUATIONS with cross-check on the first pair's
       structure, empty EQUATIONS, single CONCLUSION, and the
       reject-multiple behavior.
-- [ ] 6.3f top-level driver `wald_parse(src, spec) -> 0/err`
-      that orchestrates the sections in fixed order, returns
-      a structured error code on syntax failure (not crashing).
-      Error codes enum'd in `WaldErr`.
+- [x] 6.3f `wald_parse(src, spec) -> WaldErr` lands in
+      `src/wald/_.c`.  Lexes the source, finds the first section
+      keyword via `wald_skip_to_section`, then dispatches each
+      section to its parser; each parser returns the next
+      section's enum so the loop just chains.  Sections are
+      accepted in any order (Waldmeister's parser is permissive
+      and our test fixtures appreciate that).  `WaldErr` enum:
+      `WALD_OK`, `WALD_ERR_NULL`, `WALD_ERR_NO_SECTION`.  Tests
+      cover NULL args, empty source, all-junk source, and the
+      full group-axiom `.pr` file (spec identity + 4 symbols +
+      precedence ranks + 3 vars + 3 axioms + goal lhs/rhs).
 - [ ] 6.3g unit tests: parse the group example from
       `waldmeister/documents/example.pr` (or a hand-written
       copy), verify n_eqns == 3, goal lhs/rhs structure, and

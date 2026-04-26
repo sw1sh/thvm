@@ -356,6 +356,39 @@ fn Term wald_parse_term(WaldSpec *spec, WaldLex *lex) {
   return term_new_ctr(sym->label, args, n_args);
 }
 
+// === 6.3f: top-level driver ========================================
+//
+// Lex the source, find the first section keyword, then dispatch to
+// each section's parser in turn -- each parser returns the NEXT
+// section's enum, so the loop just chains.  Sections can appear in
+// any order; the .pr grammar has a fixed order, but accepting any
+// order matches Waldmeister's permissive parser and lets test
+// fixtures focus on shape rather than placement.
+fn WaldErr wald_parse(const char *src, WaldSpec *spec) {
+  if (src == NULL || spec == NULL) return WALD_ERR_NULL;
+
+  WaldLex lex;
+  wald_lex_init(&lex, src);
+
+  WaldSection sec = wald_skip_to_section(&lex);
+  if (sec == WSEC_NONE) return WALD_ERR_NO_SECTION;
+
+  while (sec != WSEC_NONE) {
+    switch (sec) {
+      case WSEC_NAME:       sec = wald_parse_name      (spec, &lex); break;
+      case WSEC_MODE:       sec = wald_parse_mode      (spec, &lex); break;
+      case WSEC_SORTS:      sec = wald_parse_sorts     (spec, &lex); break;
+      case WSEC_SIGNATURE:  sec = wald_parse_signature (spec, &lex); break;
+      case WSEC_VARIABLES:  sec = wald_parse_variables (spec, &lex); break;
+      case WSEC_ORDERING:   sec = wald_parse_ordering  (spec, &lex); break;
+      case WSEC_EQUATIONS:  sec = wald_parse_equations (spec, &lex); break;
+      case WSEC_CONCLUSION: sec = wald_parse_conclusion(spec, &lex); break;
+      default:              sec = wald_skip_to_section(&lex); break;
+    }
+  }
+  return WALD_OK;
+}
+
 // === 6.3e: EQUATIONS / CONCLUSION parsers ==========================
 //
 // Both sections are sequences of `term = term` pairs.  The parser

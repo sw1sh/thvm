@@ -990,6 +990,19 @@ fn Term        wald_parse_term     (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_equations (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_conclusion(WaldSpec *spec, WaldLex *lex);
 
+// 6.3f: top-level driver.  Returns WALD_OK on success or one of the
+// WaldErr codes on structural failure.  Per-section parse errors
+// inside a section don't bail -- they fall through via
+// `wald_skip_to_section` so we still consume the rest of the file
+// and end up with a partial-but-coherent spec.
+typedef enum {
+  WALD_OK             = 0,
+  WALD_ERR_NULL       = 1,   // src or spec is NULL
+  WALD_ERR_NO_SECTION = 2,   // input contained no recognizable section keyword
+} WaldErr;
+
+fn WaldErr wald_parse(const char *src, WaldSpec *spec);
+
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.
