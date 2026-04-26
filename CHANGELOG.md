@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: ATP bench harness `test_bench_atp` (stage 7.4c)
+
+`tests/test_bench_atp.c` walks `tests/data/atp/*.pr`, runs our
+ATP on each with a fixed step budget (256), times via
+`clock_gettime(CLOCK_MONOTONIC)`, and writes per-file rows to
+`build/bench-atp.csv` with columns:
+`file,status,wall_ms,step,n_rules,n_trace,drop_joinable,
+drop_connected,drop_rule_subsumed,drop_queue_subsumed`.
+
+Soft regression: only the final ATP `status` is asserted against
+the matching `.expect` file (so PROVED <-> TIMEOUT swaps fail
+the test); step / rule / counter values are recorded but not
+gated -- the bench is a measurement, not a regression.
+
+Wired into the standard `TESTS` list so `make test` rebuilds and
+runs it; `make` exit code stays 0 on numeric drift.  CSV is
+regenerated on every run.
+
+`docs/bench-atp.md` now points at the harness for re-runs and
+records the full 4-row results table sourced from
+`build/bench-atp.csv`.
+
 ### Added: `.pr` test corpus for ATP bench (stage 7.4b)
 
 Four small group-flavored `.pr` fixtures land under

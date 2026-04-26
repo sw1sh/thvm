@@ -363,7 +363,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         Each file is the `.pr` we feed our ATP; pair each with
         a `.expect` describing the expected proof outcome
         (PROVED / TIMEOUT / specific n_rules range).
-  - [ ] 7.4c `tests/test_bench_atp.c` (or a `make bench-atp`
+  - [x] 7.4c `tests/test_bench_atp.c` (or a `make bench-atp`
         target): runs our ATP on every `tests/data/atp/*.pr`,
         records wall-clock (via `clock_gettime`) and the four
         `n_cps_dropped_*` counters into a CSV
