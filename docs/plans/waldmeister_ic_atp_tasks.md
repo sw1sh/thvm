@@ -114,15 +114,16 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 
 ## Stage 6 -- proof trace + Waldmeister parser
 
-- [ ] 6.1a TraceEntry shape + AtpState storage:
-      each entry as a TAG_CTR with label = reason enum
-      (`TRACE_AXIOM`, `TRACE_ORIENT`, `TRACE_CP`) and children
-      `[NUM(parent_a), NUM(parent_b), lhs, rhs]`.  Parent index
-      sentinel `ATP_TRACE_NONE = 0xFFFFFFFFu` for missing parents.
-      Add `Term trace[ATP_MAX_TRACE]; u32 n_trace;` to `AtpState`.
-      `ATP_MAX_TRACE` cap (e.g., 4096).  Internal helper
-      `atp_trace_push(s, reason, p_a, p_b, lhs, rhs) -> u32`
-      returning the entry index.
+- [x] 6.1a TraceEntry shape lives as TAG_CTR(label = reason,
+      children = [NUM(parent_a), NUM(parent_b), lhs, rhs]).  Public
+      constants `TRACE_AXIOM/ORIENT/CP`, `ATP_TRACE_NONE`,
+      `ATP_MAX_TRACE = 4096` in `src/thvm.h`.  AtpState gains
+      `Term trace[ATP_MAX_TRACE]` + `u32 n_trace` (zero-init via
+      calloc).  Internal `atp_trace_push(s, reason, p_a, p_b, lhs,
+      rhs) -> u32` (returns entry index or ATP_TRACE_NONE on
+      overflow).  Tests in `tests/test_atp.c` decode an
+      AXIOM-shape entry, an ORIENT-with-parent entry, and verify
+      the overflow-returns-NONE behavior.
 - [ ] 6.1b wire `atp_trace_push` into `thvm_atp_add_equation`
       (TRACE_AXIOM, parents = NONE) and
       `thvm_atp_orient_and_add` (TRACE_ORIENT, parent_a = the

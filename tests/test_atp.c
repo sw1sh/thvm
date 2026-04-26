@@ -41,6 +41,76 @@ int main(void) {
     CHECK_EQ(s->goal_lhs,       0u);
     CHECK_EQ(s->goal_rhs,       0u);
     CHECK_EQ(s->step,           0u);
+    CHECK_EQ(s->n_trace,        0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-push-axiom-decodes");
+  {
+    // atp_trace_push is static; #include of thvm.c brings it into
+    // scope for the test TU.  Decode the resulting TAG_CTR to
+    // verify the [NUM(p_a), NUM(p_b), lhs, rhs] layout + reason
+    // label.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    u32 idx = atp_trace_push(s, TRACE_AXIOM,
+                             ATP_TRACE_NONE, ATP_TRACE_NONE,
+                             lhs, rhs);
+    CHECK_EQ(idx,         0u);
+    CHECK_EQ(s->n_trace,  1u);
+    Term entry = s->trace[0];
+    CHECK_EQ(term_tag(entry),    TAG_CTR);
+    CHECK_EQ(term_ext(entry),    TRACE_AXIOM);
+    CHECK_EQ(term_ctr_n(entry),  4u);
+    Term p_a = term_ctr_at(entry, 0);
+    Term p_b = term_ctr_at(entry, 1);
+    CHECK_EQ(term_tag(p_a), TAG_NUM);
+    CHECK_EQ(term_val(p_a), ATP_TRACE_NONE);
+    CHECK_EQ(term_tag(p_b), TAG_NUM);
+    CHECK_EQ(term_val(p_b), ATP_TRACE_NONE);
+    CHECK_EQ(term_ctr_at(entry, 2), lhs);
+    CHECK_EQ(term_ctr_at(entry, 3), rhs);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-push-orient-with-parent");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_e();
+    Term rhs = mk_e();
+    u32 axiom_idx = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   lhs, rhs);
+    u32 orient_idx = atp_trace_push(s, TRACE_ORIENT,
+                                    axiom_idx, ATP_TRACE_NONE,
+                                    lhs, rhs);
+    CHECK_EQ(orient_idx, 1u);
+    CHECK_EQ(s->n_trace, 2u);
+    Term entry = s->trace[orient_idx];
+    CHECK_EQ(term_ext(entry), TRACE_ORIENT);
+    CHECK_EQ(term_val(term_ctr_at(entry, 0)), axiom_idx);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-push-rejects-when-full");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    // Fill up to ATP_MAX_TRACE entries.
+    Term lhs = mk_e(), rhs = mk_e();
+    for (u32 i = 0; i < ATP_MAX_TRACE; i++) {
+      u32 idx = atp_trace_push(s, TRACE_AXIOM,
+                               ATP_TRACE_NONE, ATP_TRACE_NONE,
+                               lhs, rhs);
+      CHECK_EQ(idx, i);
+    }
+    CHECK_EQ(s->n_trace, (u64)ATP_MAX_TRACE);
+    // One more should yield ATP_TRACE_NONE.
+    u32 ovf = atp_trace_push(s, TRACE_AXIOM,
+                             ATP_TRACE_NONE, ATP_TRACE_NONE,
+                             lhs, rhs);
+    CHECK_EQ(ovf, ATP_TRACE_NONE);
+    CHECK_EQ(s->n_trace, (u64)ATP_MAX_TRACE);
     thvm_atp_free(s);
   }
 

@@ -785,6 +785,16 @@ typedef enum {
 
 #define ATP_MAX_RULES 256
 #define ATP_MAX_CPS   4096
+#define ATP_MAX_TRACE 4096
+
+// Reason labels for trace entries (used as the CTR label).
+// Each TraceEntry is a TAG_CTR with label = reason and children =
+// [NUM(parent_a), NUM(parent_b), lhs, rhs].  Parent index sentinel
+// ATP_TRACE_NONE means "no parent" (e.g., for axioms).
+#define TRACE_AXIOM    1u   // initial equation pushed via add_equation
+#define TRACE_ORIENT   2u   // CP normalized + KBO-oriented into a rule
+#define TRACE_CP       3u   // critical pair generated from two rules
+#define ATP_TRACE_NONE 0xFFFFFFFFu
 
 typedef struct {
   // Rule set R: parallel arrays sized for thvm_rewrite_normalize /
@@ -810,6 +820,13 @@ typedef struct {
   // Bounds.
   u32 step;
   u32 step_cap;
+
+  // Proof trace.  Stage 6.1: each entry is a TAG_CTR (see the
+  // TRACE_* labels above).  6.1b/c wire this into add_equation,
+  // orient_and_add, and generate_cps; 6.2 walks it to emit a
+  // PCL-shaped serialization.
+  Term trace[ATP_MAX_TRACE];
+  u32  n_trace;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);

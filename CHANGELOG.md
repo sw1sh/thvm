@@ -6,6 +6,29 @@ dated section.
 
 ## Unreleased
 
+### Added: trace storage + push helper for AtpState (stage 6.1a)
+
+`src/thvm.h` gains `TRACE_AXIOM/ORIENT/CP` reason labels,
+`ATP_TRACE_NONE = 0xFFFFFFFFu` parent-index sentinel,
+`ATP_MAX_TRACE = 4096` cap, and a new `Term trace[]` + `u32
+n_trace` pair on `AtpState`.
+
+`src/atp/_.c` gains the internal `atp_trace_push(s, reason, p_a,
+p_b, lhs, rhs)` helper which packs a trace entry as
+`TAG_CTR(label = reason, children = [NUM(p_a), NUM(p_b), lhs,
+rhs])` -- IC-native shape so 6.2's PCL serializer can walk the
+trace as plain heap terms.  Returns the index of the new entry,
+or `ATP_TRACE_NONE` on overflow.
+
+The helper is not yet wired into `add_equation` /
+`orient_and_add` / `generate_cps` -- those land in 6.1b/c.
+Storage is zero-init via `thvm_atp_init`'s calloc.
+
+Tests in `tests/test_atp.c` cover entry decoding (AXIOM with both
+parents NONE), parent threading (ORIENT pointing back at an
+earlier AXIOM), and the overflow path (push #4097 yields
+ATP_TRACE_NONE).
+
 ### Added: stage-5 headline saturation demo green (stage 5.5)
 
 `atp/headline-prove-f-a-ia-equals-e-from-group-axioms` in

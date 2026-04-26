@@ -21,6 +21,28 @@ fn void thvm_atp_free(AtpState *s) {
   free(s);
 }
 
+// Push a trace entry as a TAG_CTR with label = reason and children
+// [NUM(parent_a), NUM(parent_b), lhs, rhs].  Returns the entry's
+// index in s->trace, or ATP_TRACE_NONE if the buffer is full.
+//
+// 6.1b/c will wire this into add_equation / orient_and_add /
+// generate_cps; for 6.1a the helper just exists, and the storage is
+// init'd to zero by thvm_atp_init's calloc.
+static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
+                          Term lhs, Term rhs) {
+  if (s == NULL || s->n_trace >= ATP_MAX_TRACE) return ATP_TRACE_NONE;
+  Term children[4] = {
+    term_new(0, TAG_NUM, 0, p_a),
+    term_new(0, TAG_NUM, 0, p_b),
+    lhs,
+    rhs,
+  };
+  s->trace[s->n_trace] = term_new_ctr(reason, children, 4);
+  u32 idx = s->n_trace;
+  s->n_trace++;
+  return idx;
+}
+
 // Push an axiom / pending equation onto the CP queue.  The
 // saturation loop's orient + generate machinery processes it
 // uniformly with later-derived CPs.  Returns 1 on success, 0 if the
