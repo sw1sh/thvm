@@ -176,41 +176,37 @@ Real kernel-count + memory wins need either:
       number).  Forward dominates -- Conv2D-lowered chain is the
       next fusion target.
 
-- [ ] **k2a1: UOP_ADDN opcode + constructor + arity plumbing**.
-      Add `UOP_ADDN` opcode (heap = `[NUM(n), x_1..x_n]`),
-      constructor `uop_addn(Term *xs, u32 n)`, accessors
-      `uop_addn_n` / `uop_addn_at`.  Variable arity like
-      UOP_GRAD: `uop_arity(UOP_ADDN)` returns 0; walk skips
-      it; alo_realize/from_dynamic read NUM(n) for clone arity.
-      Tests: round-trip + arity inspection.  ~40 LOC + tests.
-      Out of scope: any materialize / kernel-emission change.
+- [blocked: per-user "don't invent UOps that aren't in tinygrad"
+  -- ADD chain fusion must happen in the scheduler/kernelizer
+  via the existing binary UOP_ADD primitive.  Replaced by k2'
+  below.] **k2a1/k2a2/k2b/k2c: UOP_ADDN approach**.
 
-- [ ] **k2a2: materialize UOP_ADDN as one multi-op kernel**
-      (CPU first; Metal falls back to chain).  At materialize
-      time emit a single kernel with N inputs + N-1 cascading
-      ADD program ops + the LOAD prefix the existing inline-
-      helper uses.  CPU's interpret.c already loops program[]
-      with intermediate register chaining, so no backend code
-      change there.  Metal: detect UOP_ADDN at materialize
-      and lower to a chain of N-1 binary ADDs (same as Fold
-      today) so correctness is preserved on Metal even though
-      the kernel-count win is CPU-only for now.  Tests for
-      2/3/8-input correctness.  ~70 LOC + tests.
-
-- [ ] **k2b: switch TUOpConv2DLowered to TUOpAddN**.  In
-      `wl/THVMLink/Kernel/NN.wl`, the Conv2D-lowered helper
-      currently uses `Fold[TUOpAdd, partials[[1]],
-      partials[[2 ;;]]]` to sum the 25 partials.  Switch to
-      `TUOpAddN @@ partials`.  Existing nn.wlt Conv2D tests
-      cover correctness.  Acceptance: lenet kernel_count
-      drops by ~48 (covers 2 conv layers in forward).
-      ~10 LOC + bench rerun.
-
-- [ ] **k2c: measure delta + close k2**.  Re-run bench on
-      both backends; record post-k2 kernel count + peak in
-      `docs/bench-results.md`.  Acceptance: forward kernel
-      count drops by >40%; peak unchanged is OK (this is
-      compute-side fusion, not memory).  ~5 LOC + measurement.
+- [ ] **k2': revisit f1d helper for the conv2d-lowered ADD
+      chain**.  Rather than a new UOp, lean on the existing
+      MATERIALIZE_USE_REALIZE_INFO helper (src/schedule/
+      materialize_inlined.c) which already fuses elementwise
+      chains into one multi-op kernel.  The toggle-ON path
+      mostly regressed in d4b2d because of grad chains; the
+      forward Conv2D-lowered ADD chain is exactly the
+      elementwise pattern the helper was designed for.
+      Plan:
+        - Probe with toggle ON, single TUOpConv2D forward
+          only (no grad).  Does the 25-partial chain collapse
+          to <=3 kernels?  Capture per-realize counts via
+          TMatStatsLabel.
+        - If yes: the helper works for forward but not
+          backward.  Find a way to enable it ONLY for the
+          forward-pass realize (TGradMany realize stays on
+          legacy).  Maybe a `TRealizeFused[expr]` WL surface
+          that flips the toggle around the call, or a
+          per-call setting.
+        - If no: investigate why and either fix the helper
+          or drop k2'.
+      Acceptance: lenet forward kernel_count drops by >=30
+      (covers most of the 48 partial-sum ADDs); verify.wls
+      still converges.  ~30-50 LOC of investigation +
+      WL-side gating; decompose further once the probe
+      result is in.
 
 ### Cleanup
 
