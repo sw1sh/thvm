@@ -6,6 +6,24 @@ dated section.
 
 ## Unreleased
 
+### Added: GRAD unroll + TAG_CTR descent in thvm_materialize (g2d)
+
+`thvm_materialize` now handles UOP_GRAD sinks directly instead of
+deferring entirely to wnf.  Two new branches at the top:
+
+1. While the sink is UOP_GRAD, call `interact_grad` (one-step lazy
+   unroll) until either the sink is no longer UOP_GRAD or
+   `interact_grad` returns the input unchanged (chain stuck on a
+   free VAR).
+2. If the post-unroll sink is TAG_CTR (multi-target GRAD lowered to
+   a CTR of unary GRADs), materialize each child independently and
+   rebuild the CTR via `term_new_ctr`.
+
+Then the existing flow runs (movement-op root -> realize_classify +
+emit kernels per boundary).
+
+`make test` stays 166/166 green.
+
 ### Added: PAD as kernel emit (g2c2)
 
 `visit()` now dispatches UOP_PAD instead of bailing.  Recurses into

@@ -439,14 +439,18 @@ Expected ceilings:
       are pre-g2 failures (WL bridge expectations from rounds 1-2
       that g3 will fix).
 
-- [ ] **g2d: GRAD integration + thvm_realize wire-up**.  Re-add the
-      `unroll_grads` walk (call `interact_grad` on each UOP_GRAD
-      reachable from sink, in-place) BEFORE `realize_classify`.
-      Confirm `tests/test_grad.c` and the SGD optimizer test go
-      green.  ~30 LOC.  After this, full `make test` should be
-      green (or document any remaining failure that's a
-      legitimate kernel-count regression vs the round-2 baseline,
-      to be assessed in g3).
+- [x] **g2d: GRAD integration + thvm_realize wire-up**.
+      `thvm_materialize` now unrolls UOP_GRAD at the sink via a
+      while-loop over `interact_grad` (one-step lazy unroll until
+      no longer UOP_GRAD).  Multi-target GRAD lowers to TAG_CTR;
+      added a CTR descent that materializes each child
+      independently and rebuilds the CTR via `term_new_ctr`.
+      Order of checks in thvm_materialize: GRAD unroll -> CTR
+      descent -> view-movement root -> realize_classify + emit.
+      `make test` 166/166 green (test_grad 92/92 already was;
+      this just makes thvm_materialize the canonical entry for
+      GRAD+CTR sinks instead of relying on wnf alone).  WL tests
+      still red, awaiting g3.
 
 - [ ] **g3: WL surface fixes + fusion_count.wlt**.  Patch any WL
       bridge/surface that breaks (likely `TRealize` and

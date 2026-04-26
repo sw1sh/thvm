@@ -531,6 +531,31 @@ fn Term thvm_materialize(Term term) {
   if (term_tag(term) != TAG_UOP)        return term;
   if (term_ext(term) == UOP_KERNEL)     return term;
 
+  // g2d: unroll UOP_GRAD at sink first so realize_classify sees
+  // the post-unroll forward+backward chain instead of an opaque
+  // GRAD leaf.  interact_grad does ONE structural step per call;
+  // loop until the sink is no longer UOP_GRAD.  If it returns the
+  // input unchanged the chain is stuck (e.g., y is a free VAR);
+  // bail to wnf in that case.
+  while (term_tag(term) == TAG_UOP && term_ext(term) == UOP_GRAD) {
+    Term g = interact_grad(term);
+    if (g == term) break;
+    term = g;
+  }
+  // Multi-target GRAD lowers to TAG_CTR of unary GRADs.  Materialize
+  // each child independently and rebuild the CTR; downstream WL
+  // surface (TGradMany / term_ctr_at) reads each cell separately.
+  if (term_tag(term) == TAG_CTR) {
+    u32 n = term_ctr_n(term);
+    if (n > 256) return term;
+    Term children[256];
+    for (u32 i = 0; i < n; i++)
+      children[i] = thvm_materialize(term_ctr_at(term, i));
+    return term_new_ctr(term_ext(term), children, n);
+  }
+  if (term_tag(term) != TAG_UOP)        return term;
+  if (term_ext(term) == UOP_KERNEL)     return term;
+
   // Movement-op root: resolve the chain to an alias TenDesc, then
   // flatten to a contig copy so wnf-side flat reads work.
   if (op_is_view_movement(term_ext(term))) {
