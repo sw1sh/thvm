@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: Waldmeister .pr lexer (stage 6.3b)
+
+`src/wald/_.c` gains the lexer half of the parser: `WaldLex`
+cursor over a NUL-terminated source buffer plus
+`wald_lex_next(lex) -> WaldTokKind`.
+
+Token kinds: `WT_END`, `WT_IDENT` (ident text in
+`lex.tok_text[]`, truncated to `WALD_NAME_LEN - 1`), `WT_COLON`,
+`WT_ARROW` (`->`), `WT_EQ`, `WT_LPAREN`, `WT_RPAREN`,
+`WT_COMMA`, `WT_GT`, `WT_ERR`.  Skips whitespace and
+`%`-to-end-of-line comments; section keywords (NAME, MODE,
+SORTS, SIGNATURE, ORDERING, VARIABLES, EQUATIONS, CONCLUSION,
+LPO, KBO) come back as plain `WT_IDENT` -- the section drivers
+(6.3c) compare `tok_text`.
+
+Tests in `tests/test_wald.c` (49 sub-checks) cover empty input,
+whitespace-only input, `%` comment skipping, ident chars
+including digits + underscore, `->` vs bare `-` (errors), the
+full punctuation set, an `f(x, e) = x` token stream, long-ident
+truncation (`tok_len == NAME_LEN - 1`, NUL-terminated), and the
+unknown-char error path.
+
 ### Added: WaldSpec data model for the .pr parser (stage 6.3a)
 
 `src/wald/_.c` lands the Waldmeister-spec data container plus

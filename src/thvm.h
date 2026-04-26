@@ -909,6 +909,34 @@ typedef struct {
 fn WaldSpec *wald_init(void);
 fn void      wald_free(WaldSpec *s);
 
+// 6.3b lexer.  WT_END is the sentinel; WT_ERR signals an
+// unexpected character.  WT_IDENT carries text in lex->tok_text
+// (NUL-terminated; truncated to fit WALD_NAME_LEN-1).
+typedef enum {
+  WT_END    = 0,
+  WT_IDENT  = 1,
+  WT_COLON  = 2,
+  WT_ARROW  = 3,   // ->
+  WT_EQ     = 4,
+  WT_LPAREN = 5,
+  WT_RPAREN = 6,
+  WT_COMMA  = 7,
+  WT_GT     = 8,
+  WT_ERR    = 9,
+} WaldTokKind;
+
+typedef struct {
+  const char *src;
+  u32         pos;
+  u32         len;
+  // Last-read token text (only valid for WT_IDENT); NUL-terminated.
+  char        tok_text[WALD_NAME_LEN];
+  u32         tok_len;
+} WaldLex;
+
+fn void        wald_lex_init(WaldLex *lex, const char *src);
+fn WaldTokKind wald_lex_next(WaldLex *lex);
+
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.

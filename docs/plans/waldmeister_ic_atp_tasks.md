@@ -168,14 +168,14 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       a single `(goal_lhs, goal_rhs)` for proof-mode CONCLUSION.
       `mode_proof` defaults to 1.  Tests cover init defaults,
       NULL-safe free, and cap sanity.
-- [ ] 6.3b lexer: tokenize a NUL-terminated source buffer.  Skip
-      whitespace + `%`-to-end-of-line comments.  Tokens: ident
-      (alpha / digit / `_`), `:`, `->`, `=`, `(`, `)`, `,`, `>`,
-      end-of-input.  Section keywords (NAME, MODE, SORTS,
-      SIGNATURE, ORDERING, VARIABLES, EQUATIONS, CONCLUSION,
-      LPO, KBO) are just ident tokens; the section parser
-      (6.3c) recognizes them.  Public API: `WaldLex` cursor +
-      `wald_lex_next(lex) -> WaldTok`.
+- [x] 6.3b lexer: `WaldLex` cursor + `wald_lex_next(lex)`.
+      Skips whitespace and `%`-to-EOL comments; recognizes idents
+      (`[A-Za-z_][A-Za-z0-9_]*`, truncated to `NAME_LEN - 1`),
+      `:`, `->`, `=`, `(`, `)`, `,`, `>`.  Returns `WT_END` at
+      EOF, `WT_ERR` on unknown chars.  Tests cover empty / whitespace-
+      only, `%` comment skipping, ident with digits + underscore,
+      `->` vs bare `-`, full punctuation set, an `f(x, e) = x`
+      stream, long-ident truncation, and the error path.
 - [ ] 6.3c section drivers for NAME / MODE / SORTS / SIGNATURE
       / VARIABLES / ORDERING.  SIGNATURE entries register
       `name: arg_sort_list -> result_sort` and assign each
