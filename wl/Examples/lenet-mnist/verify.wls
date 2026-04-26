@@ -90,9 +90,20 @@ stepGrads[hosts_] :=
                                                 hosts[[7]], hosts[[8]],
                                                 img, label];
         lossR = First @ Normal @ TTensorData @ TRealize @ loss;
+        (* m2 probe: after each grad's data is materialized to a host
+           NumericArray the runtime tensor is dead -- explicitly unpin
+           it so the next realize's pool_rollback_with_preserve can
+           push its bufs to the freelist.  Without this the Adam
+           step's wpt set keeps every grad's transient buffers
+           pinned across the loop. *)
         grads = Map[
-            NumericArray[Normal @ TTensorData @ TRealize @ TGrad[loss, #],
-                         "Real32"] &,
+            Module[{gradTerm, hostArr},
+                gradTerm = TRealize @ TGrad[loss, #];
+                hostArr  = NumericArray[Normal @ TTensorData @ gradTerm,
+                                        "Real32"];
+                TTermUnpin[gradTerm];
+                hostArr
+            ] &,
             weights];
         {lossR, grads}
     ]

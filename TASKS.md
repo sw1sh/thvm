@@ -82,23 +82,27 @@ Real kernel-count + memory wins need either:
       updated to point at the new SVG paths.  ~50 LOC across
       MemoryPlan.wl + 3 Export sites.
 
-- [ ] **m2: per-realize unpin probe in lenet-mnist verify.wls**.
-      Add `TTermUnpin` calls in `wl/Examples/lenet-mnist/verify.wls`
-      after each grad realize completes.  Re-run the bench (CPU +
-      Metal); record the new peak_concurrent_kib.  Acceptance:
-      peak drops by at least 20% on lenet OR a clear
-      diagnosis of why it doesn't (e.g., the unpinned tensors are
-      still rooted via DEFS / WNF_LAST_STACK).  ~30 LOC + measure
-      + a one-paragraph result note in `docs/bench-results.md`.
+- [x] **m2: per-realize unpin probe in lenet-mnist verify.wls**.
+      Modified `stepGrads` (verify.wls) and `lenetStep` (bench
+      baseline.wls) to `TTermUnpin[gradTerm]` after each grad's
+      host extract.  Bench peak_concurrent_kib UNCHANGED on both
+      backends (1882.3 KiB).  Diagnosis recorded in
+      docs/bench-results.md "m2" section: the dominant pinned
+      set is the forward intermediates (W1..b4 + h1..probs)
+      which must stay pinned through the entire 8-grad loop
+      because each `TGrad[loss, w_i]` walks them.  Per-grad
+      transient bufs (which DO get unpinned) are a small
+      fraction of total memory.  Real unblockers are k0
+      (multi-output TGrad lets the backward pass free
+      intermediates as it consumes them) or a lifetime-aware
+      schedule.  TTermUnpin pattern stays in -- correctness-
+      preserving + reduces inter-step gap pressure.  m3 is
+      gated on m2 success and is therefore moot; closing it too.
 
-- [ ] **m3: TPinScope[] auto-unpin block** (gated on m2 success).
-      If m2 shows a clear win, codify it as a WL primitive that
-      auto-clears the wpt set at scope exit -- easier ergonomics
-      than scattered `TTermUnpin` calls.  Acceptance: lenet
-      verify.wls + memory-probe.wls migrated to `TPinScope[...]`
-      blocks; bench delta matches m2's measured drop; new
-      `wl/THVMLink/Tests/pin_scope.wlt` covers the basic
-      enter/exit semantics.  ~50 LOC + tests.
+- [blocked: gated on m2 success; m2 showed 0% peak drop so
+  TPinScope wouldn't move the metric either.  Real unblockers
+  are k0 or a lifetime-aware schedule.] **m3: TPinScope[]
+  auto-unpin block**.
 
 ### Kernelization
 

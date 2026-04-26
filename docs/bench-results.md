@@ -188,6 +188,42 @@ Three plausible next directions if the savings are still wanted:
    recycle without depending on conservative root sets.  Largest
    change but the most direct fix.
 
+## m2: per-grad TTermUnpin probe (NEGATIVE RESULT, 2026-04-26)
+
+Modified `lenetStep` (in `wl/Examples/_bench/baseline.wls`) and
+`stepGrads` (in `wl/Examples/lenet-mnist/verify.wls`) to call
+`TTermUnpin[gradTerm]` immediately after each grad's data is
+extracted to a host NumericArray.  Re-ran bench:
+
+| backend | kernels | peak_kib (before) | peak_kib (after) | delta |
+| ------- | ------: | ----------------: | ---------------: | ----: |
+| CPU     |     427 |            1882.3 |           1882.3 |  0.0% |
+| Metal   |     427 |            1882.3 |           1882.3 |  0.0% |
+
+**Acceptance NOT met** (target: -20% on lenet).  Per-grad unpin
+doesn't move peak because the dominant pinned set is the
+forward intermediates (W1..b4 + h1, r1, p1, ..., probs) -- those
+MUST stay pinned through the entire 8-grad loop because every
+`TGrad[loss, w_i]` walks them via `interact_grad`.  The per-grad
+transient bufs (which the unpin DOES release) are a small
+fraction of total memory.
+
+Two real unblockers for the lenet peak:
+
+1. **k0 (multi-output TGrad)**: one backward pass can free
+   each forward intermediate as soon as the cotangent for it
+   is consumed; sequential `TGrad[loss, w_i]` calls can't
+   because each walks the full forward graph again.
+
+2. **Lifetime-aware schedule** (post-wpt option 3): the
+   schedule itself emits explicit "free buf X here" ops, so
+   the slot allocator recycles independently of the wpt set.
+
+The TTermUnpin pattern itself is correctness-preserving and
+reduces the inter-step peak slightly (the per-grad transients
+get freed before the next step's TInit, instead of riding
+through the gap), so the change stays in.
+
 ## post-f1: kernel-fusion arc delta (UPDATED 2026-04-26)
 
 The kernel-fusion arc (f1) landed in pieces: f3a-g (view-only

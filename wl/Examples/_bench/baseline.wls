@@ -83,9 +83,19 @@ lenetStep[hosts_, t_] := Block[{
     TReset[];
     {loss, weights} = lenetForward[weightsH, img, label];
     lossR = First @ Normal @ TTensorData @ TRealize @ loss;
+    (* m2: explicitly TTermUnpin each grad's realized term once its
+       host data has been extracted, so the next realize's
+       pool_rollback_with_preserve can push its bufs to the
+       freelist.  Without this every grad's transient buffers stay
+       wpt-pinned across the loop. *)
     grads = Map[
-        NumericArray[Normal @ TTensorData @ TRealize @ TGrad[loss, #],
-                     "Real32"] &,
+        Module[{gradTerm, hostArr},
+            gradTerm = TRealize @ TGrad[loss, #];
+            hostArr  = NumericArray[Normal @ TTensorData @ gradTerm,
+                                    "Real32"];
+            TTermUnpin[gradTerm];
+            hostArr
+        ] &,
         weights];
     {hostsNew, mNew, vNew} = TAdamHostStep[weightsH, grads, mAll, vAll,
                                             0.05, 0.9, 0.999, 1.0*^-8, t + 1];
