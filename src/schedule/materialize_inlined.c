@@ -100,7 +100,32 @@ static u32 inline_emit(InlineCtx *ctx, Term t) {
     if (slot < 0) return 0xFFFFFFFFu;
     return KSRC_AS_INPUT((u32)slot);
   }
-  if (!inline_is_inlinable(op))   return 0xFFFFFFFFu;
+  // f1d-d4b2b2: same treatment for non-inlinable un-realized
+  // UOps -- typically movement ops (RESHAPE / EXPAND / SHRINK /
+  // PERMUTE / PAD / FLIP) on contig sources, which usually
+  // collapse to view-only TAG_TEN aliases via materialize_uop_in_env's
+  // f3* paths rather than spawning new kernels.  Recursive
+  // materialize_expr returns the TAG_TEN alias (or a kernel for
+  // the rare cases that don't alias); add as an input slot.  Same
+  // cascade-prevention rationale as d4b2b1.
+  if (!inline_is_inlinable(op)) {
+    Term mat = materialize_expr(r);
+    u32  tid = 0;
+    if (term_tag(mat) == TAG_UOP && term_ext(mat) == UOP_KERNEL) {
+      Term out_buf = heap_read(term_val(mat));
+      if (term_tag(out_buf) != TAG_TEN) return 0xFFFFFFFFu;
+      tid = (u32)term_val(out_buf);
+    } else if (term_tag(mat) == TAG_TEN) {
+      tid = (u32)term_val(mat);
+    } else {
+      return 0xFFFFFFFFu;
+    }
+    if (tid == 0 || tid >= TENS_NEXT) return 0xFFFFFFFFu;
+    i32 slot = inline_find_or_add_input(ctx->ke, tid,
+        TENS[tid].dtype, TENS[tid].view.numel);
+    if (slot < 0) return 0xFFFFFFFFu;
+    return KSRC_AS_INPUT((u32)slot);
+  }
 
   // Memo: same UOp instance may appear via shared subexpression.
   for (u32 i = 0; i < ctx->n_emitted; i++) {

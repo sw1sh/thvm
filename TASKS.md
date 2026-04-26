@@ -4921,21 +4921,19 @@ implemented + tested (f1a) but never invoked by the pipeline.
         addresses.  166 C + 292 WL green with default OFF.
         ~30 LOC in materialize_inlined.c.
 
-  - [ ] **f1d-d4b2b2: stop helper from bailing on non-
+  - [x] **f1d-d4b2b2: stop helper from bailing on non-
         inlinable un-realized upstream (movement ops)**.
-        Same fix pattern as d4b2b1, but for the second
-        bail point in inline_emit:
-            if (!inline_is_inlinable(op)) return 0xFFFFFFFFu;
-        Non-inlinable un-realized UOPs are usually
-        movement ops (RESHAPE / EXPAND / SHRINK / PERMUTE
-        / PAD / FLIP) on contig sources -- which become
-        view-only TAG_TEN aliases via materialize_uop_in_env's
-        f3* paths, NOT separate kernels.  Recursive
-        materialize_expr on them returns a TAG_TEN; add it
-        as an input slot via the existing TAG_TEN branch
-        of inline_emit.  Acceptance: same as d4b2b1 plus
-        a measured further drop in linear-train kernel
-        count.  ~20-40 LOC.
+        Same fix pattern as d4b2b1, applied to the
+        non-inlinable bail in inline_emit: recursively
+        materialize via materialize_expr, add the
+        resulting kernel/alias as an input slot.  No
+        further linear-train kernel-count drop (still
+        15+75+67=157) -- linear-train's movement upstream
+        already lives behind realized parents that d4b2b1
+        covers -- but the change closes the bail-cascade
+        path that LeNet's Conv2D-lowered chain hits.
+        166 C + 292 WL green with default OFF.  ~25 LOC
+        in materialize_inlined.c.
 
   - [ ] **f1d-d4b2b3: rerun the d4a fusion probe + verify
         acceptance**.  After d4b2b1 + d4b2b2 land, run
