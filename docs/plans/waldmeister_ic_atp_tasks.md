@@ -795,3 +795,15 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         any) and where the 32-step budget bites.  Scope: ~100-
         line memo + updated `build/bench-atp.csv` /
         `build/bench-twee.csv` snapshots.
+- [ ] 10 Wolfram-axiom Boolean corpus: add two `.pr` fixtures
+      based on Wolfram's 2000 single-equation axiomatisation of
+      Boolean algebra in NAND form, proven equivalent to
+      standard Boolean algebra by McCune via EQP:
+        `((a NAND b) NAND c) NAND (a NAND ((a NAND c) NAND a)) = c`
+      One conservative fixture (predicted PROVED quickly under
+      our 32-step budget) + one stress fixture (predicted
+      TIMEOUT, useful for the next round of bench-Twee
+      comparison).  Wire into the bench harness and update
+      `docs/plans/corpus_expansion_findings.md` with the new
+      rows.  Reference: McCune et al., "Short Single Axioms for
+      Boolean Algebra", J. Automated Reasoning 2002.
