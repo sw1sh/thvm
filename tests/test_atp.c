@@ -1132,6 +1132,40 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Stage 8.1e-i: use_ic_cp_gen flag round-trip ====================
+
+  TEST_BEGIN("atp/cp-gen-flag-default-off");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->use_ic_cp_gen, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-gen-flag-toggle-preserves-output");
+  {
+    // Flag is currently a no-op (8.1e-i landed only the
+    // dispatch).  Setting it to 1 must produce the same CPs as
+    // the default 0 path.  Two parallel runs on the same axiom;
+    // verify n_cps and n_cps_dropped_joinable agree exactly.
+    AtpState *s_c = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s_c, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    AtpStatus st_c = thvm_atp_step(s_c);
+
+    AtpState *s_ic = thvm_atp_init(&DUMMY_CFG, 100);
+    s_ic->use_ic_cp_gen = 1;
+    CHECK_EQ(s_ic->use_ic_cp_gen, 1u);
+    thvm_atp_add_equation(s_ic, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    AtpStatus st_ic = thvm_atp_step(s_ic);
+
+    CHECK_EQ((int)st_c, (int)st_ic);
+    CHECK_EQ(s_c->n_cps,                    s_ic->n_cps);
+    CHECK_EQ(s_c->n_rules,                  s_ic->n_rules);
+    CHECK_EQ(s_c->n_cps_dropped_joinable,   s_ic->n_cps_dropped_joinable);
+
+    thvm_atp_free(s_c);
+    thvm_atp_free(s_ic);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

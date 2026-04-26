@@ -432,7 +432,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         on a feature flag -- with the SUP encoding.  Re-run
         the bench harness; expect comparable proof rates and
         latency within 2x of the C-side baseline.
-    - [ ] 8.1e-i `use_ic_cp_gen` feature flag on `AtpState`
+    - [x] 8.1e-i `use_ic_cp_gen` feature flag on `AtpState`
           (u8, default 0) plus a setter.  Plumb through
           `thvm_atp_generate_cps`: when 0, current C path;
           when 1, dispatch to a stub `thvm_atp_generate_cps_ic`

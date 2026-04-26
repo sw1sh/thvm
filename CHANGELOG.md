@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: `use_ic_cp_gen` feature flag (stage 8.1e-i)
+
+New `u8 use_ic_cp_gen` field on `AtpState` (default 0) selects
+between the C-direct and IC-routed critical-pair enumerators.
+`thvm_atp_generate_cps` now dispatches:
+
+- `use_ic_cp_gen == 0`: `thvm_atp_generate_cps_c` (renamed body
+  of the previous implementation; the C-direct path)
+- `use_ic_cp_gen == 1`: `thvm_atp_generate_cps_ic` (currently a
+  no-op wrapper that delegates to the C path; 8.1e-ii will land
+  the actual SUP+PRI routing)
+
+Tests in `tests/test_atp.c`:
+- `atp/cp-gen-flag-default-off`: fresh AtpState has flag 0
+- `atp/cp-gen-flag-toggle-preserves-output`: enabling the flag
+  must produce identical n_cps / n_rules / n_cps_dropped_joinable
+  to the default path on the same input (since the IC path is
+  currently a delegate)
+
+`tests/test_atp.c`: 8376 sub-checks (was 8370).  Stage 8.1e-ii
+will replace the IC path's body with PRI-routed unification.
+
 ### Added: SUP-encoded CP fan-out demo (stage 8.1d-ii)
 
 `tests/test_sup_cps.c` (21 sub-checks, 4 cases) demonstrates that

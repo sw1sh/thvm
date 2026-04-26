@@ -903,6 +903,15 @@ typedef struct {
   // normalization), so this IS a filter -- the candidate is
   // discarded.
   u32  n_cps_dropped_queue_subsumed;
+
+  // Stage 8.1e-i: feature flag.  When 0 (default), `thvm_atp_
+  // generate_cps` runs the C-side critical-pair enumerator
+  // directly.  When 1, it dispatches to `thvm_atp_generate_cps_ic`,
+  // which routes the per-pair unification through the TAG_PRI /
+  // APP-PRI machinery (8.1c).  The IC path is currently a
+  // no-op wrapper (stage 8.1e-i) -- 8.1e-ii lands the actual
+  // SUP+PRI routing.  Bench analysis in 8.1e-iii.
+  u8   use_ic_cp_gen;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);

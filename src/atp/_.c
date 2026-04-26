@@ -636,9 +636,12 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
   return pushed;
 }
 
-fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
-  if (s == NULL || added.count == 0) return 0;
-
+// 8.1e-i: C-direct critical-pair enumerator -- the path
+// `thvm_atp_generate_cps` takes when `s->use_ic_cp_gen == 0`
+// (the default).  Bulk of the work happens in
+// `thvm_critical_pairs_range`; this function just plumbs the
+// (i, j) iteration and trace bookkeeping.
+static u32 thvm_atp_generate_cps_c(AtpState *s, AtpAddedRange added) {
   u32 first = added.first;
   u32 last  = added.first + added.count;
   u32 n     = s->n_rules;
@@ -676,6 +679,21 @@ fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
   }
 
   return pushed;
+}
+
+// 8.1e-i: IC-routed critical-pair enumerator -- the path
+// `thvm_atp_generate_cps` takes when `s->use_ic_cp_gen == 1`.
+// Currently a no-op wrapper that delegates to the C path so the
+// flag is observable but semantically inert.  Stage 8.1e-ii lands
+// the actual SUP+PRI routing.
+static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
+  return thvm_atp_generate_cps_c(s, added);
+}
+
+fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
+  if (s == NULL || added.count == 0) return 0;
+  if (s->use_ic_cp_gen) return thvm_atp_generate_cps_ic(s, added);
+  return thvm_atp_generate_cps_c(s, added);
 }
 
 // Orient via KBO and push the rule(s).  See header comment for the
