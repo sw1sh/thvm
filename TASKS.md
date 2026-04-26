@@ -4906,37 +4906,55 @@ implemented + tested (f1a) but never invoked by the pipeline.
         exhaustion -- is gone; toggle ON now lands cleanly
         across the full sweep).  ~80 LOC.
 
-  - [ ] **f1d-d4b2b: helper coverage of REDUCE / movement
-        upstream**.  d4b2a's memo + re-classify make toggle ON
-        run cleanly to completion, but the kernel-count drop
-        promised by the d4b2 acceptance ("toggle ON should
-        drop poly-regression to <= 50 kernels (was 100
-        legacy)") doesn't materialize: linear-train
-        memory-probe.wls is now 18 + 79 + 71 = 168 kernels
-        with toggle ON vs. 17 + 40 + 36 = 93 with toggle OFF
-        (regression of ~75).  Diagnosis: the helper only
-        succeeds when ALL upstream is elementwise +
-        UOP_CONST.  In LeNet/linear-train backward chains,
-        most realized UOps have movement (RESHAPE / EXPAND /
-        PERMUTE) or REDUCE upstream; helper bails (returns
-        0), and the legacy fall-through then allocates a
-        kernel for the realized parent AND for each upstream
-        movement / REDUCE node -- net effect is MORE
-        kernels than legacy, not fewer.  Needed: extend
-        materialize_kernel_inlined to (a) treat realized
-        upstream UOPs as input slots even when un-rewritten
-        on the heap (so the bail doesn't cascade), and/or
-        (b) emit a multi-stage program with intermediate
-        scratch slots.  ~100-200 LOC; re-decompose if the
-        right mechanism is a bigger refactor.
+  - [ ] **f1d-d4b2b1: stop helper from bailing on realized
+        upstream**.  In src/schedule/materialize_inlined.c,
+        `inline_emit` returns 0xFFFFFFFFu when it meets a
+        child UOp that's classified realized:
+            if (realize_is_realized(r)) return 0xFFFFFFFFu;
+        The bail cascades up to materialize_kernel_inlined,
+        which dealloc's the kernel and returns 0; the
+        caller then falls back to legacy emit.  Fix:
+        instead of bailing, recursively materialize the
+        realized child via `materialize_expr` (which goes
+        through the per-realize memo, so the child gets
+        ONE kernel even if reachable through many paths),
+        then add that kernel's output TenDesc as an input
+        slot to the current kernel.  This eliminates the
+        cascade without needing multi-stage programs.
+        Acceptance: 166 C + 292 WL green with default ON
+        AND OFF; linear-train memory-probe.wls toggle-ON
+        kernel count drops below the toggle-OFF baseline
+        (currently OFF=93, ON=168).  ~30-50 LOC.
 
-  - [ ] **f1d-d4b2c: rerun the d4a fusion probe + lock in
-        the criterion**.  After d4b2b lands, re-run
+  - [ ] **f1d-d4b2b2: stop helper from bailing on non-
+        inlinable un-realized upstream (movement ops)**.
+        Same fix pattern as d4b2b1, but for the second
+        bail point in inline_emit:
+            if (!inline_is_inlinable(op)) return 0xFFFFFFFFu;
+        Non-inlinable un-realized UOPs are usually
+        movement ops (RESHAPE / EXPAND / SHRINK / PERMUTE
+        / PAD / FLIP) on contig sources -- which become
+        view-only TAG_TEN aliases via materialize_uop_in_env's
+        f3* paths, NOT separate kernels.  Recursive
+        materialize_expr on them returns a TAG_TEN; add it
+        as an input slot via the existing TAG_TEN branch
+        of inline_emit.  Acceptance: same as d4b2b1 plus
+        a measured further drop in linear-train kernel
+        count.  ~20-40 LOC.
+
+  - [ ] **f1d-d4b2b3: rerun the d4a fusion probe + verify
+        acceptance**.  After d4b2b1 + d4b2b2 land, run
         wl/Examples/linear-train/memory-probe.wls and the
-        poly-regression scenario from use_realize.wlt.  Goal
-        numbers: linear-train toggle ON <= 50 kernels per
-        TRealize call (currently 18, 79, 71); poly-regression
-        toggle ON <= 50 total (currently 105 vs OFF=91).
+        poly-regression scenario from use_realize.wlt.
+        Goal numbers: linear-train toggle ON kernel count
+        meets-or-beats toggle OFF (currently 168 vs 93);
+        poly-regression toggle ON <= 50 total (currently
+        105 vs OFF=91).  If targets met, mark f1d-d4b2
+        complete.  ~5 LOC + measurement.
+
+<!-- f1d-d4b2c was rolled into f1d-d4b2b3 above as the
+     verification step of d4b2b. -->
+
 
   - [ ] **f1d-d4c: actually flip default + verify**.  After
         d4b lands, set MATERIALIZE_USE_REALIZE_INFO default
