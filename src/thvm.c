@@ -183,6 +183,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "wnf/_.c"
 #include "wnf/redex.c"
 
+// === collapse/ ===
+// Depends on wnf().  No dependants in the runtime itself; called by
+// the WL bridge and tests.
+#include "collapse/_.c"
+
 // hrp1: heap-rooted preserve walk -- alternative to
 // realize.c's mark_preserved_chain.  Standalone helper; hrp2
 // wires it into thvm_realize.

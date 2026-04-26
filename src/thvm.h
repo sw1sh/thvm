@@ -624,6 +624,16 @@ fn Term wnf_n(Term t, u64 max_steps);
 // WNF_LAST_STACK / WNF_LAST_STACK_LEN live in TContext now -- macros
 // at the bottom of this file resolve them.
 
+// === collapse/ ===
+// Enumerate the SUP-tree of a term.  Walks via WNF; on TAG_SUP at the
+// head, recurses into both branches; TAG_ERA branches are dropped.
+// Returns the number of leaves written into `out`, capped at `cap`.
+//
+// "Shallow" collapse: only follows SUPs the WNF has surfaced to the
+// head.  Deep enumeration through APP / OP2 / EQL / ... lands as those
+// SUP-commutation interactions are added.
+fn u64 thvm_collapse(Term t, Term *out, u64 cap);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input

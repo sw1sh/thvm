@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_collapse -- shallow SUP-tree enumeration
+
+`src/collapse/_.c` exposes `thvm_collapse(t, out, cap)` which walks
+the head of `t` via WNF and recurses on TAG_SUP, dropping TAG_ERA
+branches.  Caller-supplied buffer + cap; returns count.  This is
+the "shallow" version: deeper enumeration through APP / OP2 / EQL /
+... lands as those tags get SUP-commutation interactions.
+Tests in `tests/test_collapse.c` cover single-leaf, single-SUP,
+nested SUP, ERA-pruned branch, and cap-truncation.
+
 ### Added: docs/plans/waldmeister_ic_atp.md -- IC-native ATP design memo
 
 Research-and-design memo summarizing Waldmeister's unfailing
