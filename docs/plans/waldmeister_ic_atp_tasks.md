@@ -734,6 +734,28 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       enumerates ALL witnesses up to a bound.  WL surface:
       `TATP[..., AllWitnesses -> True]` returns a list of
       Association entries.
+  - [ ] 9.1a design memo `docs/plans/multi_witness_design.md`:
+        survey the search-tree structure (DFS over (position,
+        rule) choices); pick bounds (max-depth + max-witnesses
+        + step-cap); decide if witness-distinctness should be
+        enforced (drop alpha-equivalent duplicates) or left to
+        the caller.  Document the relationship to 8.10's
+        deferred trace-level SupGen (multi-witness IS a
+        small-scale trace search; this could be the seed for
+        the broader work).  Scope: ~150-line memo.
+  - [ ] 9.1b implement `thvm_atp_narrow_all` that runs a
+        bounded DFS over narrow choices, collecting up to N
+        witness substitutions.  Output: a stack-allocated
+        `RewriteSubst` array + count.  Tests: hand-built
+        problems with 0 / 1 / multiple witnesses.
+  - [ ] 9.1c WL surface: `TATP[..., AllWitnesses -> True]`
+        returns `<|"Witnesses" -> {<|x -> term1|>,
+        <|x -> term2|>, ...}|>` instead of `Witness ->
+        <|...|>`.  Include the search budget options.
+  - [ ] 9.1d test fixture: a `.pr` file with multiple
+        witnesses (e.g. `f(x, x) = a` with rules
+        `f(b, b) = a` and `f(c, c) = a` -- two witnesses
+        x=b and x=c).  Wire into bench harness.
 - [ ] 9.2 TPTP file parsing from WL: `TATP[File["foo.p"]]` --
       thin wrapper around the existing `wald_parse_file`.
       Detects file path argument, reads via the C-side
