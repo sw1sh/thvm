@@ -210,6 +210,79 @@ Real kernel-count + memory wins need either:
 
 ---
 
-All tasks resolved 2026-04-26: m1/m2/k0a-k0e/k1 done; m3/k2/k2'
-blocked with documented reasons; c1 closed (no code change).
-Add new tasks to drive further progress.
+## Round 2 (2026-04-26): the goal isn't actually met
+
+User feedback: "single forward kernel fusion for linear layer and
+minimal memory allocation with good gantt plot?" -- the answer is
+NO on all three.  Current linear-train state:
+
+  Forward + loss : 17 kernels   (target: 1)
+  Total Adam step: 93 kernels   (target: <=10)
+  Peak concurrent: 0.6 KiB      (slot-reuse headroom: 57.6%)
+  Gantt          : tiny bufs all stack at y=0; 1 preserved
+                   buffer (buf 22) dominates visually
+
+Root causes:
+  - **Forward not fused**: the MatVec -> Add -> Softmax -> CE Loss
+    chain has REDUCE_SUM at the end (CE = sum of -log(probs)).
+    The f1d helper was designed for elementwise chains but bails
+    on REDUCE-as-tail-op.  Tinygrad fuses elementwise + final
+    REDUCE into one kernel ("local reduction" pattern); we don't.
+  - **Memory not reused**: 57.6% headroom = bufs whose lifetimes
+    don't overlap could share the same slot.  The slot allocator
+    infrastructure is in place; the wpt-pin walk pins them all.
+  - **Gantt is tiny-buf-hostile**: linear-scan packing on a
+    nbytes-y-axis means the 0.5 KiB W3 weight and the 0.001 KiB
+    intermediates land at the same y stripe, indistinguishable.
+
+### New tasks
+
+- [ ] **r1: fuse forward chain into ONE kernel for linear-train**.
+      Concrete acceptance: `wl/Examples/linear-train/memory-probe.wls`
+      "After forward + loss materialize" shows `KernelEntries +1`
+      (was +16).  Mechanism: extend the f1d helper (or add a new
+      pass) to absorb a single REDUCE at the END of an elementwise
+      chain into the same kernel that produces its input -- the
+      "local reduction" pattern from tinygrad.  The helper today
+      bails on REDUCE-anywhere; the relaxation is "REDUCE allowed
+      iff it's the OUTERMOST op AND its input is a fully-inlined
+      elementwise chain".  Multi-stage program: elementwise ops
+      write to a temp register; final REDUCE op reads register +
+      writes to output buffer.  CPU's interpret.c already chains
+      registers across program ops; new code is mostly the
+      helper's accept-REDUCE-as-tail rule + Metal fallback.
+      Estimated 80-150 LOC; DECOMPOSE on next fire if it expands.
+
+- [ ] **r2: slot reuse mid-step for the 57.6% headroom**.
+      The TMemoryPlan reports a 57.6% slot-reuse headroom on
+      linear-train and 52.8% on lenet -- bytes the perfect slot-
+      reusing allocator would never need.  The slot allocator
+      already has freelist push/pop wired through CPU + Metal
+      (see docs/bench-results.md "post-bm4abc"); it gets 0
+      entries because the wpt-pin walk pins every TTerm WL ever
+      touched.  The post-wpt section in bench-results.md sketches
+      three unblockers.  Pick option 3 (lifetime-aware schedule):
+      compute per-buf last-use at materialize time, emit explicit
+      "free buf X" ops in the kernel program, and let
+      cpu_buf_free push to the freelist independently of the
+      conservative wpt walk.  Acceptance: linear-train
+      memory-probe.wls peak_concurrent <= 0.3 KiB (50% of
+      current); lenet bench peak_concurrent <= 1500 KiB
+      (-20% of current 1882.3); verify.wls still converges.
+      Big arc -- DECOMPOSE on first fire (probe + schedule fn +
+      freelist-push wiring + bench delta).
+
+- [ ] **r3: Gantt rendering that survives tiny-buf graphs**.
+      Linear-train's bufs are sub-1-KiB so linear-scan packing
+      with a nbytes-y-axis stacks them all at y=0 indistinguishably.
+      Fix: switch the y-axis to LOG2(1 + nbytes) (already an
+      option in TMemoryPlanGantt's "BarHeight" -> "Log" mode --
+      currently DEFAULT but per the m1 PNG seems not active OR
+      not wired into the linear-scan packer).  Verify the option
+      actually works; if "Log" is degenerate for tiny bufs,
+      fall back to UNIFORM bar height with bytes shown in the
+      tooltip.  Acceptance: linear-train memory-plan-cpu.svg
+      shows distinct y-stripes for each buf; the dominant
+      preserved buf is visually smaller (proportional to its
+      tiny footprint), not the whole-page band it is now.
+      ~30 LOC in MemoryPlan.wl + visual smoke test.
