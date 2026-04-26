@@ -330,3 +330,14 @@ Root causes:
       linear-train SVG: each buf gets a distinct y-stripe and the
       dominant preserved buf is proportional to its size instead
       of dominating the whole page.  ~50 LOC in MemoryPlan.wl.
+
+---
+
+Round 2 resolved 2026-04-26: r1a-c done (forward 16->8 with toggle
+ON; default OFF because backward regresses); r2a done + r2b/c/d
+blocked (probe shows peak IS already lifetime-aware optimal); r3
+done (Gantt log-y-axis fix).  Add new tasks to drive further
+progress -- the fundamentals (forward chain fusion, lifetime-aware
+peak claim, gantt readability) are now investigated; next moves
+are either harvesting the forward win via TRealizeFused[] or
+attacking graph-structural memory wins.
