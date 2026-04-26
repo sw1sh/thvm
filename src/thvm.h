@@ -136,8 +136,14 @@ typedef u64 Term;
                              //   marker (mirrors tinygrad's UOps.LOAD).  Slot
                              //   reserved -- constructor + materializer land in
                              //   sub-item (b); see TASKS.md UOP_LOAD arc.
+#define UOP_TUPLE       22   // heap = [NUM(n), t_1, ..., t_n]; passive
+                             //   aggregate for multi-output results
+                             //   (k0a + k0c).  walk / classify / materialize
+                             //   treat it as opaque -- consumers that know
+                             //   the layout (e.g., the WL TGradMany bridge)
+                             //   read children via uop_tuple_at.
 
-#define UOP_COUNT       22
+#define UOP_COUNT       23
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -606,6 +612,15 @@ fn Term uop_grad(Term y, Term gy, Term target);
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in
 // the cpu kernel).  Output shape == src shape; arity 1.
 fn Term uop_load(Term src);
+
+// k0a: build a UOP_TUPLE aggregate over `n` child Terms.  Heap
+// layout: [NUM(n), t_0, ..., t_{n-1}].  Passive -- materialize /
+// walk / realize_classify treat the cell as opaque (uop_arity
+// returns 0); consumers read children via uop_tuple_at.  See
+// src/uop/tuple.c.
+fn Term uop_tuple   (const Term *children, u32 n);
+fn Term uop_tuple_at(Term tuple_term, u32 i);
+fn u32  uop_tuple_n (Term tuple_term);
 
 // === schedule/ ===
 // Top-level materialize driver: heap-walk pass that in-place rewrites

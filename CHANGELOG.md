@@ -6,6 +6,25 @@ dated section.
 
 ## Unreleased
 
+### Added: TAG_INC priority wrapper + thvm_collapse_ordered
+
+`TAG_INC = 19` is a one-cell priority wrapper.  The reducer treats
+it as a WNF atom (default fall-through; no interactions), so the
+INC layer survives reduction and becomes visible to collapse.
+
+`thvm_collapse_ordered(t, out, cap)` performs the same shallow
+SUP-tree walk as `thvm_collapse`, but counts INC wrappers along
+the path to each leaf and emits the leaves sorted by INC-depth
+ascending (ties broken by DFS order).  Lower INC count = higher
+priority = enumerated first.  Implementation collects (Term, pri,
+idx) into a heap-allocated buffer, qsorts, writes Terms back.
+
+This is the IC encoding of Waldmeister's `--mix` CP-selection
+heuristic: wrap each candidate with INC^k where k is its weighted
+cost, and `thvm_collapse_ordered` enumerates cheapest first.
+
+Constructor: `term_new_inc(body)`.  Tests: `tests/test_inc.c`.
+
 ### Added: TAG_ANY wildcard
 
 `TAG_ANY = 18` is an atomic wildcard.  Two interactions:

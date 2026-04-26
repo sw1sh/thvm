@@ -157,6 +157,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "uop/flip.c"
 #include "uop/grad.c"
 #include "uop/load.c"
+#include "uop/tuple.c"
 
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.
@@ -195,6 +196,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // Depends on wnf().  No dependants in the runtime itself; called by
 // the WL bridge and tests.
 #include "collapse/_.c"
+#include "collapse/ordered.c"
 
 // hrp1: heap-rooted preserve walk -- alternative to
 // realize.c's mark_preserved_chain.  Standalone helper; hrp2
