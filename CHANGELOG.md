@@ -6,6 +6,27 @@ dated section.
 
 ## Unreleased
 
+### Changed: thvm_atp_select_cp now priority-aware via INC + collapse_ordered (stage 5.3)
+
+Replaces the FIFO pop with the SupGen-style priority encoding from
+the design memo: each queued CP becomes
+`INC^k(CTR_label=idx [lhs, rhs])` where
+`k = symbol_count(lhs) + symbol_count(rhs)` (the `--add`
+heuristic from Waldmeister's `ClasHeuristics.c`
+"classification heuristics").  All wrapped CPs are folded into a
+SUP tree and run through `thvm_collapse_ordered`; the cheapest
+leaf comes out first, its CTR label decodes back to the original
+queue index, and we pop that index.
+
+Singleton case skips the SUP/INC plumbing.  The pre-existing
+saturation pipeline (5.2a..5.2f) consumes the upgraded selector
+unchanged -- the `atp/run-one-step-prove` headline still passes.
+
+The existing FIFO test in `tests/test_atp.c` is upgraded to
+`select-cp-priority-order`: under k_1=4, k_2=k_3=2 the pop order
+is l2 (k=2, dfs=1) -> l3 (k=2, dfs=2) -> l1 (k=4) rather than
+the original l1 -> l2 -> l3 FIFO sequence.
+
 ### Fixed: TMemoryPlanGantt y-axis -- "BarHeight"->"Log" actually works
 
 The `"BarHeight"->"Log"` option was documented in

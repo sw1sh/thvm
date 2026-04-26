@@ -41,17 +41,84 @@ fn void thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
   s->goal_rhs = rhs;
 }
 
-// Pop the front CP (FIFO).  Shift the rest of the queue down by
-// one slot to keep the array dense.  Returns 1 on success, 0 if
-// the queue was empty.  Stage 5.3 will replace this with a
-// priority-collapse selection over INC-wrapped CPs.
+// Total symbol count: TAG_FVR / atoms count as 1; TAG_CTR counts
+// itself + the symbols of its children.  This is the "size" used
+// by Waldmeister's `--add` heuristic in `ClasHeuristics.c`
+// ("classification heuristics") -- the simplest CP-priority
+// function: cheapest-by-size wins.
+static u32 atp_symbol_count(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      u32 c = 1;
+      for (u32 i = 0; i < n; i++) {
+        c += atp_symbol_count(term_ctr_at(t, i));
+      }
+      return c;
+    }
+    default: return 1;   // FVR / atoms / NUM / etc.
+  }
+}
+
+// Pop the cheapest CP from the queue, where "cheap" = lowest
+// total symbol count across (lhs + rhs) -- the `--add` heuristic.
+//
+// IC-side encoding (per docs/plans/saturation_loop.md sec.3):
+//   each CP becomes  INC^k (CTR_label=idx [lhs, rhs])  where
+//   k = symbol_count(lhs) + symbol_count(rhs).  All wrappings are
+//   folded into a SUP tree and run through thvm_collapse_ordered;
+//   the cheapest leaf comes out first, its CTR label decodes back
+//   to the original queue index, and we pop that index.
+//
+// Singleton case skips the SUP/INC plumbing for speed.  Returns
+// 1 on success (out-params populated), 0 on empty queue or any
+// decoding failure (defensive).
 fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   if (s == NULL || s->n_cps == 0) return 0;
-  *lhs_out = s->cp_lhs[0];
-  *rhs_out = s->cp_rhs[0];
-  for (u32 i = 1; i < s->n_cps; i++) {
-    s->cp_lhs[i - 1] = s->cp_lhs[i];
-    s->cp_rhs[i - 1] = s->cp_rhs[i];
+  if (s->n_cps == 1) {
+    *lhs_out = s->cp_lhs[0];
+    *rhs_out = s->cp_rhs[0];
+    s->n_cps = 0;
+    return 1;
+  }
+
+  // Build wrapped[i] = INC^k_i(CTR_label=i([lhs_i, rhs_i])).
+  Term wrapped[ATP_MAX_CPS];
+  for (u32 i = 0; i < s->n_cps; i++) {
+    u32 k = atp_symbol_count(s->cp_lhs[i]) + atp_symbol_count(s->cp_rhs[i]);
+    Term children[2] = { s->cp_lhs[i], s->cp_rhs[i] };
+    Term w = term_new_ctr(i, children, 2);
+    for (u32 j = 0; j < k; j++) w = term_new_inc(w);
+    wrapped[i] = w;
+  }
+
+  // Fold into SUP-tree: SUP(w_0, SUP(w_1, ..., w_{n-1})).  The SUP
+  // labels don't matter for collapse_ordered (just structural
+  // recursion); use 0.
+  Term sup = wrapped[s->n_cps - 1];
+  for (u32 i = s->n_cps - 1; i > 0; ) {
+    i--;
+    u64 loc = heap_alloc(2);
+    heap_set(loc + 0, wrapped[i]);
+    heap_set(loc + 1, sup);
+    sup = term_new(0, TAG_SUP, 0, loc);
+  }
+
+  // Collapse, sorted by INC depth ascending.
+  Term out[ATP_MAX_CPS];
+  u64 n_out = thvm_collapse_ordered(sup, out, (u64)s->n_cps);
+  if (n_out == 0) return 0;
+
+  Term first = out[0];
+  if (term_tag(first) != TAG_CTR) return 0;
+  u32 idx = term_ext(first);
+  if (idx >= s->n_cps) return 0;
+
+  *lhs_out = s->cp_lhs[idx];
+  *rhs_out = s->cp_rhs[idx];
+  for (u32 j = idx + 1; j < s->n_cps; j++) {
+    s->cp_lhs[j - 1] = s->cp_lhs[j];
+    s->cp_rhs[j - 1] = s->cp_rhs[j];
   }
   s->n_cps--;
   return 1;

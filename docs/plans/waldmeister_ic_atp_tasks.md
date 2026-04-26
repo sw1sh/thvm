@@ -88,9 +88,15 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       timeout, the headline one-step prove via `thvm_atp_run`
       (`f(a, e) == a` under axiom `f(x, e) = x`), and completion-
       mode saturation that returns QUEUE_EMPTY.
-- [ ] 5.3 priority queue construction: each CP wrapped `INC^k`
-      where k = total symbol count (the `--add` heuristic; `--mix`
-      lands later), enumerate via `thvm_collapse_ordered`
+- [x] 5.3 `thvm_atp_select_cp` now wraps each CP as
+      `INC^k(CTR_label=idx [lhs, rhs])` with k = symbol_count(lhs)
+      + symbol_count(rhs) (the `--add` heuristic), folds them into
+      a SUP tree, and runs `thvm_collapse_ordered` to enumerate
+      cheapest-first.  The CTR label decodes back to the original
+      queue index for popping.  Singleton case skips the SUP/INC
+      plumbing.  FIFO test in `tests/test_atp.c` upgraded to
+      `select-cp-priority-order` confirming l2/r2 (k=2) -> l3/r3
+      (k=2) -> l1/r1 (k=4) order.
 - [ ] 5.4 recursive-descent rewriter: extend `thvm_rewrite_step` to
       try every position in the term, not just top
 - [ ] 5.5 demo: prove `f(a, i(a)) = e` from the standard group

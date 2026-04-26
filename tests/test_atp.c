@@ -104,8 +104,13 @@ int main(void) {
     thvm_atp_free(s);
   }
 
-  TEST_BEGIN("atp/select-cp-fifo-order");
+  TEST_BEGIN("atp/select-cp-priority-order");
   {
+    // Stage 5.3: cheapest CP wins.  Symbol counts:
+    //   l1 = f(x, e), r1 = x       -> k_1 = (1+1+1) + 1 = 4
+    //   l2 = a,        r2 = e       -> k_2 = 1 + 1     = 2
+    //   l3 = e,        r3 = a       -> k_3 = 1 + 1     = 2
+    // Pop order: l2/r2 (k=2, dfs=1), l3/r3 (k=2, dfs=2), l1/r1 (k=4).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term l1 = mk_f(mk_v(VAR_x), mk_e()),  r1 = mk_v(VAR_x);
     Term l2 = mk_a(),                      r2 = mk_e();
@@ -117,18 +122,18 @@ int main(void) {
 
     Term lo = 0, ro = 0;
     CHECK(thvm_atp_select_cp(s, &lo, &ro));
-    CHECK_EQ(lo, l1);
-    CHECK_EQ(ro, r1);
-    CHECK_EQ(s->n_cps, 2u);
-
-    CHECK(thvm_atp_select_cp(s, &lo, &ro));
     CHECK_EQ(lo, l2);
     CHECK_EQ(ro, r2);
-    CHECK_EQ(s->n_cps, 1u);
+    CHECK_EQ(s->n_cps, 2u);
 
     CHECK(thvm_atp_select_cp(s, &lo, &ro));
     CHECK_EQ(lo, l3);
     CHECK_EQ(ro, r3);
+    CHECK_EQ(s->n_cps, 1u);
+
+    CHECK(thvm_atp_select_cp(s, &lo, &ro));
+    CHECK_EQ(lo, l1);
+    CHECK_EQ(ro, r1);
     CHECK_EQ(s->n_cps, 0u);
 
     // Now empty.
