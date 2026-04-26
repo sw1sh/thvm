@@ -276,7 +276,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 6.4 end-to-end: parse the group-axiom `.pr` file, run
       saturation, emit a PCL trace; cross-check structurally
       against Waldmeister's own output
-  - [ ] 6.4a `wald_parse_file(path, spec) -> WaldErr` -- thin
+  - [x] 6.4a `wald_parse_file(path, spec) -> WaldErr` -- thin
         wrapper that opens the file, slurps it, calls
         `wald_parse` on the bytes.  New error code
         `WALD_ERR_FILE` for open/read failure.  Test: parses

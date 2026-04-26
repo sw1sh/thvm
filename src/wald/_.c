@@ -389,6 +389,38 @@ fn WaldErr wald_parse(const char *src, WaldSpec *spec) {
   return WALD_OK;
 }
 
+// === 6.4a: file loader ============================================
+//
+// Open `path`, slurp the entire file into a heap buffer, NUL-terminate
+// it, hand to `wald_parse`, then free the buffer.  Returns
+// WALD_ERR_NULL for bad args, WALD_ERR_FILE on any I/O / alloc failure,
+// or whatever `wald_parse` returns.  The expected file size for
+// Waldmeister `.pr` specs is at most a few KB, so a single slurp is
+// fine.
+fn WaldErr wald_parse_file(const char *path, WaldSpec *spec) {
+  if (path == NULL || spec == NULL) return WALD_ERR_NULL;
+
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) return WALD_ERR_FILE;
+
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return WALD_ERR_FILE; }
+  long n = ftell(f);
+  if (n < 0) { fclose(f); return WALD_ERR_FILE; }
+  if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return WALD_ERR_FILE; }
+
+  char *buf = (char *)malloc((size_t)n + 1);
+  if (buf == NULL) { fclose(f); return WALD_ERR_FILE; }
+
+  size_t got = fread(buf, 1, (size_t)n, f);
+  fclose(f);
+  if (got != (size_t)n) { free(buf); return WALD_ERR_FILE; }
+  buf[n] = '\0';
+
+  WaldErr e = wald_parse(buf, spec);
+  free(buf);
+  return e;
+}
+
 // === 6.3e: EQUATIONS / CONCLUSION parsers ==========================
 //
 // Both sections are sequences of `term = term` pairs.  The parser

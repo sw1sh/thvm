@@ -899,6 +899,53 @@ int main(void) {
     wald_free(spec);
   }
 
+  // === 6.4a wald_parse_file: bad args + load example.pr from disk =====
+  TEST_BEGIN("wald/parse-file/null-path");
+  {
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse_file(NULL, spec), (int)WALD_ERR_NULL);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/parse-file/null-spec");
+  {
+    CHECK_EQ((int)wald_parse_file("waldmeister/documents/example.pr", NULL),
+             (int)WALD_ERR_NULL);
+  }
+
+  TEST_BEGIN("wald/parse-file/missing-file");
+  {
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse_file("waldmeister/documents/__NO_SUCH_FILE__.pr",
+                                  spec),
+             (int)WALD_ERR_FILE);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/parse-file/example.pr-from-disk");
+  {
+    // Tries to load the actual example.pr from the waldmeister/
+    // symlink at the repo root.  If the symlink isn't present
+    // (CI checkout without the vendored tree) we silently skip
+    // the structural assertions -- this is a research fixture,
+    // not a regression test.
+    WaldSpec *spec = wald_init();
+    WaldErr e = wald_parse_file("waldmeister/documents/example.pr", spec);
+    if (e == WALD_OK) {
+      // group axioms: e, i, f, a + 3 vars + 3 axioms + 1 goal.
+      CHECK((int)strcmp(spec->name, "group") == 0);
+      CHECK_EQ(spec->mode_proof, 1u);
+      CHECK_EQ(spec->n_symbols, 4u);
+      CHECK_EQ(spec->n_vars, 3u);
+      CHECK_EQ(spec->n_eqns, 3u);
+      CHECK(spec->goal_lhs != 0u);
+      CHECK(spec->goal_rhs != 0u);
+    } else {
+      CHECK_EQ((int)e, (int)WALD_ERR_FILE);
+    }
+    wald_free(spec);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

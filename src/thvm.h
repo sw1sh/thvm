@@ -999,9 +999,18 @@ typedef enum {
   WALD_OK             = 0,
   WALD_ERR_NULL       = 1,   // src or spec is NULL
   WALD_ERR_NO_SECTION = 2,   // input contained no recognizable section keyword
+  WALD_ERR_FILE       = 3,   // 6.4a: open/read failure in wald_parse_file
 } WaldErr;
 
 fn WaldErr wald_parse(const char *src, WaldSpec *spec);
+
+// 6.4a: file-loader convenience wrapper.  Opens `path`, slurps the
+// whole file into a heap buffer, calls `wald_parse` on it, and frees
+// the buffer.  Returns WALD_ERR_NULL if path/spec is NULL,
+// WALD_ERR_FILE on open/read/alloc failure, or whatever `wald_parse`
+// returns otherwise.  Suitable for a file the size of a Waldmeister
+// `.pr` spec (KBs, not MBs); slurping the whole thing is fine.
+fn WaldErr wald_parse_file(const char *path, WaldSpec *spec);
 
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success

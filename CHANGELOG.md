@@ -6,6 +6,26 @@ dated section.
 
 ## Unreleased
 
+### Added: `wald_parse_file` -- file-loader convenience wrapper (stage 6.4a)
+
+Thin wrapper in `src/wald/_.c`: opens `path`, slurps the bytes,
+calls `wald_parse`, frees the buffer.  New error code
+`WALD_ERR_FILE = 3` covers open/read/alloc failure.
+
+API: `WaldErr wald_parse_file(const char *path, WaldSpec *spec)`.
+
+`tests/test_wald.c` adds 4 cases (236 sub-checks total):
+- `wald/parse-file/null-path` -> `WALD_ERR_NULL`
+- `wald/parse-file/null-spec` -> `WALD_ERR_NULL`
+- `wald/parse-file/missing-file` -> `WALD_ERR_FILE`
+- `wald/parse-file/example.pr-from-disk` -- loads
+  `waldmeister/documents/example.pr` via the vendored-tree
+  symlink.  Asserts spec identity (`name == "group"`,
+  `mode_proof == 1`, 4 symbols, 3 vars, 3 axioms, goal
+  populated).  If the symlink is absent (`WALD_ERR_FILE`),
+  the test still passes -- this is a research fixture, not a
+  regression test.
+
 ### Added: Waldmeister .pr parser feeds saturation end-to-end (stage 6.3g)
 
 Two new test cases in `tests/test_wald.c` close the loop between the
