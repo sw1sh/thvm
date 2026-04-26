@@ -1316,6 +1316,130 @@ int main(void) {
     wald_free(spec);
   }
 
+  // === Stage 8.9d: EXISTS section + narrow-mode bench dispatch =======
+
+  TEST_BEGIN("wald/exists/section-recognized");
+  {
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       a: -> ANY\n"
+      "                f: ANY ANY -> ANY\n"
+      "                e: -> ANY\n"
+      "ORDERING        LPO\n"
+      "                f > a > e\n"
+      "VARIABLES       x, y : ANY\n"
+      "EQUATIONS       f(a, e) = a\n"
+      "EXISTS          x\n"
+      "CONCLUSION      f(x, e) = a\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+    CHECK_EQ(spec->n_existential, 1u);
+    CHECK_EQ(spec->existential_var_ids[0], spec->vars[0].var_id);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/exists/missing-section-defaults-to-zero");
+  {
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       a: -> ANY\n"
+      "VARIABLES       x : ANY\n"
+      "EQUATIONS       a = a\n"
+      "CONCLUSION      a = a\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+    CHECK_EQ(spec->n_existential, 0u);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/exists/multiple-vars");
+  {
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       f: ANY ANY -> ANY\n"
+      "                a: -> ANY\n"
+      "VARIABLES       x, y, z : ANY\n"
+      "EQUATIONS       f(a, a) = a\n"
+      "EXISTS          x, y\n"
+      "CONCLUSION      f(x, y) = a\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+    CHECK_EQ(spec->n_existential, 2u);
+    CHECK_EQ(spec->existential_var_ids[0], 0u);   // x
+    CHECK_EQ(spec->existential_var_ids[1], 1u);   // y
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/exists/end-to-end-narrow-binds-witness");
+  {
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       e: -> ANY\n"
+      "                f: ANY ANY -> ANY\n"
+      "                a: -> ANY\n"
+      "ORDERING        LPO\n"
+      "                f > e > a\n"
+      "VARIABLES       x : ANY\n"
+      "EQUATIONS       f(a, e) = a\n"
+      "EXISTS          x\n"
+      "CONCLUSION      f(x, e) = a\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+    CHECK_EQ(spec->n_existential, 1u);
+
+    // Build a KboConfig from the parsed precedences and run the
+    // saturator in narrow mode.
+    static u32 weights[16];
+    static u32 prec[16];
+    for (u32 i = 0; i < 16; i++) { weights[i] = 0; prec[i] = 0; }
+    u32 max_label = 0;
+    for (u32 i = 0; i < spec->n_symbols; i++) {
+      if (spec->symbols[i].label > max_label) max_label = spec->symbols[i].label;
+      weights[spec->symbols[i].label] = 1;
+      prec[spec->symbols[i].label]    = spec->symbols[i].prec_rank + 1;
+    }
+    KboConfig cfg = {
+      .weights    = weights,
+      .precedence = prec,
+      .n_labels   = max_label + 1,
+      .var_weight = 1,
+    };
+
+    AtpState *atp = thvm_atp_init(&cfg, 32);
+    for (u32 i = 0; i < spec->n_eqns; i++) {
+      thvm_atp_add_equation(atp, spec->eqn_lhs[i], spec->eqn_rhs[i]);
+    }
+    thvm_atp_set_goal_existential(atp, spec->goal_lhs, spec->goal_rhs);
+
+    AtpStatus st = thvm_atp_run(atp);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+
+    // Witness x = a (LAB_a is whatever the parser assigned for "a").
+    u32 x_id = spec->existential_var_ids[0];
+    Term wx = thvm_atp_get_witness(atp, x_id);
+    CHECK_EQ(term_tag(wx), TAG_CTR);
+    // Find symbol named "a" and compare label.
+    u32 a_label = 0;
+    for (u32 i = 0; i < spec->n_symbols; i++) {
+      if ((int)strcmp(spec->symbols[i].name, "a") == 0) {
+        a_label = spec->symbols[i].label;
+        break;
+      }
+    }
+    CHECK_EQ(term_ext(wx), a_label);
+
+    thvm_atp_free(atp);
+    wald_free(spec);
+  }
+
   // === Stage 8.4d: sort-check gating in saturation entry points ======
 
   TEST_BEGIN("wald/sort-gate/add-equation-rejects-mismatch");

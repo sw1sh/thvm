@@ -114,7 +114,12 @@ static AtpStatus run_one(const char *pr_path,
   for (u32 i = 0; i < spec->n_eqns; i++) {
     thvm_atp_add_equation(atp, spec->eqn_lhs[i], spec->eqn_rhs[i]);
   }
-  thvm_atp_set_goal(atp, spec->goal_lhs, spec->goal_rhs);
+  if (spec->n_existential > 0) {
+    // 8.9d: spec declared an EXISTS section -- run in narrow mode.
+    thvm_atp_set_goal_existential(atp, spec->goal_lhs, spec->goal_rhs);
+  } else {
+    thvm_atp_set_goal(atp, spec->goal_lhs, spec->goal_rhs);
+  }
 
   struct timespec t0, t1;
   clock_gettime(CLOCK_MONOTONIC, &t0);

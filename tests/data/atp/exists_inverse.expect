@@ -1,0 +1,7 @@
+% Stage 8.9d: existential-goal fixture.  Narrowing closes the
+% goal at the very first goal_check, before any saturation step
+% fires.  Single rule, witness x=a (not exposed via the bench
+% harness CSV; verified in test_wald.c).
+status=PROVED
+max_step=1
+max_rules=2

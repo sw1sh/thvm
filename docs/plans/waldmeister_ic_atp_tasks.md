@@ -680,7 +680,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         between the existing rewrite-and-compare path and the
         new narrow-and-extract path.  Witness substitution
         recorded at proof-close time.
-  - [ ] 8.9d existential-goal `.pr` syntax / WL surface:
+  - [x] 8.9d existential-goal `.pr` syntax / WL surface:
         decide how users declare existential vars in input
         files (extension to `CONCLUSION` syntax? sidecar
         keyword?).  Add a fixture under `tests/data/atp/` and

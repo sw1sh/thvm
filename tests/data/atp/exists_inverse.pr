@@ -1,0 +1,17 @@
+% Existential goal (stage 8.9d): given a single rule
+%   f(a, e) -> a
+% find x such that f(x, e) = a.  Narrowing at the top of f(x, e)
+% unifies with f(a, e) directly, binding x=a; goal closes
+% immediately.
+NAME            exists_inverse
+MODE            PROOF
+SORTS           ANY
+SIGNATURE       e: -> ANY
+                f: ANY ANY -> ANY
+                a: -> ANY
+ORDERING        LPO
+                f > e > a
+VARIABLES       x : ANY
+EQUATIONS       f(a, e) = a
+EXISTS          x
+CONCLUSION      f(x, e) = a

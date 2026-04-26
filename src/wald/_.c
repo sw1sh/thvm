@@ -164,7 +164,45 @@ fn WaldSection wald_section_from_ident(const char *name) {
   if (strcmp(name, "ORDERING")   == 0) return WSEC_ORDERING;
   if (strcmp(name, "EQUATIONS")  == 0) return WSEC_EQUATIONS;
   if (strcmp(name, "CONCLUSION") == 0) return WSEC_CONCLUSION;
+  if (strcmp(name, "EXISTS")     == 0) return WSEC_EXISTS;
   return WSEC_NONE;
+}
+
+// 8.9d: parse the EXISTS section.  Each ident is a variable name
+// to flag as existential; commas allowed between names.  Names
+// are looked up against spec->vars[]; on hit, the FVR id is
+// stored in spec->existential_var_ids[].  Section ends at the
+// next section keyword (or EOF).  Permissive: unknown names are
+// skipped; doesn't error out.
+fn WaldSection wald_parse_exists(WaldSpec *spec, WaldLex *lex) {
+  for (;;) {
+    WaldTokKind k = wald_lex_peek(lex);
+    if (k == WT_END) return WSEC_NONE;
+    if (k == WT_COMMA) { wald_lex_next(lex); continue; }
+    if (k != WT_IDENT) { wald_lex_next(lex); continue; }
+
+    WaldSection sec = wald_section_from_ident(lex->peeked_text);
+    if (sec != WSEC_NONE) {
+      wald_lex_next(lex);
+      return sec;
+    }
+
+    wald_lex_next(lex);   // consume var name
+    if (spec == NULL) continue;
+    // Look up by name in spec->vars[].
+    for (u32 i = 0; i < spec->n_vars; i++) {
+      const char *vn = spec->vars[i].name;
+      u32 j = 0;
+      while (j < lex->tok_len && vn[j] == lex->tok_text[j]) j++;
+      if (j == lex->tok_len && vn[j] == '\0') {
+        if (spec->n_existential < REWRITE_MAX_VAR) {
+          spec->existential_var_ids[spec->n_existential++] =
+            spec->vars[i].var_id;
+        }
+        break;
+      }
+    }
+  }
 }
 
 // Eat tokens until the next section keyword (or EOF).  Returns the
@@ -392,6 +430,7 @@ fn WaldErr wald_parse(const char *src, WaldSpec *spec) {
       case WSEC_ORDERING:   sec = wald_parse_ordering  (spec, &lex); break;
       case WSEC_EQUATIONS:  sec = wald_parse_equations (spec, &lex); break;
       case WSEC_CONCLUSION: sec = wald_parse_conclusion(spec, &lex); break;
+      case WSEC_EXISTS:     sec = wald_parse_exists    (spec, &lex); break;
       default:              sec = wald_skip_to_section(&lex); break;
     }
   }

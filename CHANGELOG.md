@@ -6,6 +6,49 @@ dated section.
 
 ## Unreleased
 
+### Added: EXISTS .pr section + bench narrow dispatch (stage 8.9d)
+
+New `EXISTS` section in the `.pr` grammar lists existing
+variable names (declared earlier in `VARIABLES`) that should be
+treated as existentially quantified in the conjecture:
+
+```
+VARIABLES       x : ANY
+EQUATIONS       f(a, e) = a
+EXISTS          x
+CONCLUSION      f(x, e) = a
+```
+
+Implementation:
+- New `WSEC_EXISTS = 9` enum + recognized in
+  `wald_section_from_ident`.
+- New `wald_parse_exists(spec, lex)` walks idents, looks them up
+  against `spec->vars[]`, stores FVR ids in
+  `spec->existential_var_ids[]`.  Permissive: unknown names
+  silently skipped.
+- New `WaldSpec` fields `existential_var_ids[REWRITE_MAX_VAR]` +
+  `n_existential` (cap matches `RewriteSubst`).
+
+Bench harness `tests/test_bench_atp.c` now dispatches: when
+`spec->n_existential > 0`, calls `thvm_atp_set_goal_existential`
+instead of `thvm_atp_set_goal` -- saturator runs in narrow mode
+per 8.9c.
+
+New fixture `tests/data/atp/exists_inverse.pr`: rule
+`f(a, e) -> a`, EXISTS `x`, CONCLUSION `f(x, e) = a`.  All four
+bench modes prove in 0 saturation steps (narrow closes at the
+first `goal_check`).  Companion `.expect`.
+
+`tests/test_wald.c` adds 4 cases (5541 sub-checks, was 5527):
+- `wald/exists/section-recognized`
+- `wald/exists/missing-section-defaults-to-zero`
+- `wald/exists/multiple-vars`: `EXISTS x, y` populates both
+- `wald/exists/end-to-end-narrow-binds-witness`: full pipeline
+  parse -> KBO config -> set_goal_existential -> run -> PROVED
+  with witness `x = a`
+
+8.9e adds the WL `TATP[..., Witness -> {x_}]` surface.
+
 ### Added: existential-goal narrowing in goal_check (stage 8.9c)
 
 `AtpState` gains `u8 goal_existential` (default 0).  When set,

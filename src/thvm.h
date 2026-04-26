@@ -1152,6 +1152,15 @@ typedef struct WaldSpec {
   // goal was specified (completion mode or empty CONCLUSION).
   Term    goal_lhs;
   Term    goal_rhs;
+
+  // 8.9d: existential variables for narrowing.  Names in the
+  // EXISTS section are looked up against vars[] and their FVR
+  // ids are stored here.  When n_existential > 0, downstream
+  // (bench harness, WL bridge) should use
+  // `thvm_atp_set_goal_existential` instead of
+  // `thvm_atp_set_goal` to put the saturator in narrow mode.
+  u32     existential_var_ids[REWRITE_MAX_VAR];
+  u32     n_existential;
 } WaldSpec;
 
 fn WaldSpec *wald_init(void);
@@ -1206,6 +1215,7 @@ typedef enum {
   WSEC_ORDERING   = 6,
   WSEC_EQUATIONS  = 7,
   WSEC_CONCLUSION = 8,
+  WSEC_EXISTS     = 9,   // 8.9d: existential-variable declaration
 } WaldSection;
 
 fn WaldSection wald_section_from_ident(const char *name);
@@ -1253,6 +1263,13 @@ fn Term        wald_parse_term     (WaldSpec *spec, WaldLex *lex);
 // discarded -- matches the proof-mode constraint of one conjecture).
 fn WaldSection wald_parse_equations (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_conclusion(WaldSpec *spec, WaldLex *lex);
+
+// 8.9d: parse `EXISTS x, y, ...` -- list of variable names that
+// are to be treated existentially in the conjecture.  Each name
+// is looked up against `spec->vars[]` and its FVR id stored in
+// `spec->existential_var_ids[]`.  Names not in vars[] are
+// silently skipped (the parser is permissive throughout).
+fn WaldSection wald_parse_exists    (WaldSpec *spec, WaldLex *lex);
 
 // 6.3f: top-level driver.  Returns WALD_OK on success or one of the
 // WaldErr codes on structural failure.  Per-section parse errors
