@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: ICC type-flow primitives (TAG_BRI + TAG_ANN, real ICC rules)
+
+`TAG_BRI = 23` (Bridge / Val: θx.body) and `TAG_ANN = 24`
+(Annotation: {val : typ}) land with the actual ICC reduction rules
+from `TinyHVM/resources/gists/icc_spec.md`, not the LAM-alias that
+TinyHVM shipped with:
+
+  APP (θx.body) arg = θx (APP body[x ← λ$k.x]  (ANN $k arg))
+  ANN val (λx.body) = λx (ANN (APP val $k) body[x ← θ$k.x])
+  ANN val (θx.body) = body[x ← val]                          (type erasure)
+
+Plus DUP-BRI commutation (mirror of DUP-LAM) so bridges duplicate
+correctly under SUP search.
+
+Files: `src/term/new_bri.c`, `src/term/new_ann.c`,
+`src/interact/{app_bri,ann_lam,ann_bri,dup_bri}.c`.  TAG_ANN
+reduction is inline in `src/wnf/_.c` (mirrors TAG_OP2's strict-
+on-typ-then-dispatch pattern).
+
+Tests (`tests/test_icc.c`, 11 sub-checks):
+- ANN-BRI type erasure on θx.x consumes the bridge, leaves the val
+- ANN-BRI on a bridge whose body is its own bound y returns y[y ← val]
+- APP-BRI on θx.x with NUM(7) fires and the head is again BRI
+  (the inner structure changes; ICC is type-flow, not value-flow)
+- ANN-LAM fires and the head wraps in a new λ
+- DUP-BRI commutes !&7{F0,F1} = θx.x into two bridges
+- ANN with a non-LAM/BRI typ stays stuck
+
+These are the ICC primitives the IC-native ATP plan can fall back
+on for closed-form encodings of equations + dependent-type proofs.
+FVR-based open-form remains the active path for stages 2-4 of the
+plan; BRI/ANN are now ready when stages 5-7 motivate them.
+
 ### Added: stage 4 -- unification + critical-pair enumeration
 
 `src/unify/_.c` lands the Robinson MGU on TAG_CTR + TAG_FVR with

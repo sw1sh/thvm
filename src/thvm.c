@@ -58,6 +58,8 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "term/new_ctr.c"
 #include "term/new_when.c"
 #include "term/new_fvr.c"
+#include "term/new_bri.c"
+#include "term/new_ann.c"
 
 // === heap/ ===
 #include "heap/alloc.c"
@@ -185,6 +187,10 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/dup_lam.c"
 #include "interact/dup_num.c"
 #include "interact/dup_any.c"
+#include "interact/app_bri.c"
+#include "interact/ann_lam.c"
+#include "interact/ann_bri.c"
+#include "interact/dup_bri.c"
 #include "interact/uop_grad.c"
 #include "interact/uop_kernel.c"
 

@@ -103,8 +103,17 @@ typedef u64 Term;
                      //   existentially quantified variables of equational
                      //   logic: f(x, e) = x has FVR(x_id) at the leaves where
                      //   x appears.  Atomic: no heap cells.
+#define TAG_BRI  23  // Bridge (ICC Val: θx.body, dual of LAM).  Heap[loc] =
+                     //   body; bound x = VAR(loc) (same convention as LAM).
+                     //   Reduces under APP via the ICC type-backward rule:
+                     //     APP (θx.body) arg = θx (APP body[x <- λ$k.x] ANN($k, arg))
+#define TAG_ANN  24  // Annotation {val : typ}.  Heap[loc..loc+1] = [val, typ].
+                     //   Reduces by inspecting typ:
+                     //     ANN val (λx.body) = λx ANN(APP val $k) body[x <- θ$k.x]
+                     //     ANN val (θx.body) = body[x <- val]   (type erasure)
+                     //     ANN val var       = stuck
 
-#define TAG_COUNT 23
+#define TAG_COUNT 25
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -516,6 +525,8 @@ fn Term term_new_any (void);
 fn Term term_new_inc (Term body);
 fn Term term_new_when(Term cond, Term body);
 fn Term term_new_fvr (u32 var_id);
+fn Term term_new_bri (Term body);
+fn Term term_new_ann (Term val, Term typ);
 
 // k0a: build a TAG_CTR labelled constructor over `n` child Terms.
 // Heap layout: [NUM(arity=n), c_0, ..., c_{n-1}].  ext = label

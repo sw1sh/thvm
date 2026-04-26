@@ -399,10 +399,33 @@ enter:
       whnf = next;
       goto apply;
     }
+    case TAG_ANN: {
+      // ICC annotation {val : typ}.  Strict on typ; dispatch on its tag:
+      //   ANN val (λx.body) -> ann_lam (type-forward-flow)
+      //   ANN val (θx.body) -> ann_bri (type erasure)
+      //   ANN val var       -> stuck (rebuild with reduced typ)
+      u64  loc = term_val(next);
+      Term val = heap_read(loc + 0);
+      Term typ = wnf(heap_read(loc + 1));
+      if (term_tag(typ) == TAG_LAM) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        next = interact_ann_lam(val, typ);
+        goto enter;
+      }
+      if (term_tag(typ) == TAG_BRI) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        next = interact_ann_bri(val, typ);
+        goto enter;
+      }
+      heap_set(loc + 1, typ);
+      whnf = next;
+      goto apply;
+    }
     case TAG_LAM:
     case TAG_ERA:
     case TAG_SUP:
     case TAG_MAT:
+    case TAG_BRI:
     default: {
       whnf = next;
       goto apply;
@@ -420,6 +443,11 @@ apply:
           case TAG_LAM: {
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             next = interact_app_lam(whnf, arg);
+            goto enter;
+          }
+          case TAG_BRI: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_app_bri(whnf, arg);
             goto enter;
           }
           case TAG_ERA: {
@@ -475,6 +503,11 @@ apply:
           case TAG_LAM: {
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             next = interact_dup_lam(lab, loc, side, whnf);
+            goto enter;
+          }
+          case TAG_BRI: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_bri(lab, loc, side, whnf);
             goto enter;
           }
           case TAG_NUM: {
