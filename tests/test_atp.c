@@ -7,6 +7,7 @@
 #include "test.h"
 
 #define LAB_e 1u
+#define LAB_i 2u
 #define LAB_f 3u
 #define LAB_a 4u
 #define VAR_x 0u
@@ -14,6 +15,7 @@
 static Term mk_e(void) { return term_new_ctr(LAB_e, NULL, 0); }
 static Term mk_a(void) { return term_new_ctr(LAB_a, NULL, 0); }
 static Term mk_f(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_f, cs, 2); }
+static Term mk_i(Term x)         { Term cs[1] = {x};    return term_new_ctr(LAB_i, cs, 1); }
 static Term mk_v(u32 id) { return term_new_fvr(id); }
 
 static u32 dummy_weights   [5] = {0, 1, 0, 1, 1};
@@ -459,6 +461,41 @@ int main(void) {
     AtpStatus st = thvm_atp_run(s);
     CHECK_EQ((int)st, (int)ATP_QUEUE_EMPTY);
     CHECK(s->step >= 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/headline-prove-f-a-ia-equals-e-from-group-axioms");
+  {
+    // Stage 5.5 demo from docs/plans/waldmeister_ic_atp.md sec.5:
+    // prove f(a, i(a)) == e from the standard group axioms via
+    // saturation.  Under the same KBO config as test_kbo.c
+    // (weights i=0, f=1, e=1, a=1; precedence i > f > e > a; w0=1)
+    // the right-inverse axiom directly closes the goal once it
+    // lands in R.
+    //
+    //   right-id:    f(x, e)         = x        k = 4
+    //   right-inv:   f(x, i(x))      = e        k = 5
+    //   assoc:       f(f(x, y), z)   = f(x, f(y, z))   k = 10
+    //
+    // Cheapest-first selection pops trivial self-CPs early; the
+    // right-inv axiom typically fires within ~5 steps.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+
+    thvm_atp_set_goal(s,
+                      mk_f(mk_a(), mk_i(mk_a())),
+                      mk_e());
+
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),       mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+
+    AtpStatus st = thvm_atp_run(s);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+    // The proof is short: well under the step cap.
+    CHECK(s->step <= 20u);
+    // R picked up at least the right-inverse rule.
+    CHECK(s->n_rules >= 1u);
     thvm_atp_free(s);
   }
 

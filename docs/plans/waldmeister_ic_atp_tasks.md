@@ -106,9 +106,11 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       step driver inherit the wider coverage automatically.  Tests:
       `tests/test_rewrite.c` adds 3 new cases (subterm fires,
       multi-level descent, top-tried-before-children precedence).
-- [ ] 5.5 demo: prove `f(a, i(a)) = e` from the standard group
-      axioms (assoc + right-id + right-inv) via saturation; record
-      step count
+- [x] 5.5 demo lands in `tests/test_atp.c` as
+      `atp/headline-prove-f-a-ia-equals-e-from-group-axioms`:
+      under the standard group-axiom KBO config, `thvm_atp_run`
+      proves `f(a, i(a)) == e` from {right-id, right-inv, assoc}
+      in <= 20 saturation steps.  Stage 5 complete.
 
 ## Stage 6 -- proof trace + Waldmeister parser
 

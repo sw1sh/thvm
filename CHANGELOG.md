@@ -6,6 +6,26 @@ dated section.
 
 ## Unreleased
 
+### Added: stage-5 headline saturation demo green (stage 5.5)
+
+`atp/headline-prove-f-a-ia-equals-e-from-group-axioms` in
+`tests/test_atp.c`: under the standard group-axiom KBO config
+(weights `i=0, f=1, e=1, a=1`; precedence `i > f > e > a`;
+`w0 = 1`), `thvm_atp_run` proves the conjecture
+`f(a, i(a)) == e` from the three axioms
+
+  right-id:  f(x, e)        = x
+  right-inv: f(x, i(x))     = e
+  assoc:     f(f(x, y), z)  = f(x, f(y, z))
+
+in <= 20 saturation steps.  Stage 5 of
+`docs/plans/waldmeister_ic_atp.md` complete: the IC-native ATP
+saturation engine -- INC-priority CP selection (5.3),
+KBO orientation with unfailing fallback (5.2b), interreduction
+(5.2c), CP generation (5.2d), goal check (5.2e), and recursive-
+descent rewriting (5.4) -- proves a real group-theory lemma
+end-to-end.
+
 ### Changed: thvm_rewrite_step now recursive-descent (stage 5.4)
 
 `thvm_rewrite_step` upgrades from top-only to outermost-leftmost
