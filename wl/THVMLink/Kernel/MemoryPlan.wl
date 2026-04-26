@@ -502,13 +502,12 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                 Function[b, Block[{
                     y0     = b["y_range"][[1]],
                     y1     = b["y_range"][[2]],
-                    h, inset, x0, x1, radius
+                    h, inset, x0, x1
                 },
                     h      = y1 - y0;
-                    inset  = Min[0.04 totalHeight, 0.1 h];
+                    inset  = 0.05 h;
                     x0     = b["alloc_depth"];
                     x1     = b["last_use_depth"] + 1;
-                    radius = Min[0.04 totalHeight, 0.4 (x1 - x0)];
                     {
                         FaceForm[statusFill[b["status"]]],
                         EdgeForm[Directive[
@@ -519,7 +518,11 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                             Rectangle[
                                 {x0, y0 + inset},
                                 {x1, y1 - inset},
-                                RoundingRadius -> radius
+                                (* Fixed rounding radius in chart
+                                   coords -- not scaled by h or
+                                   totalHeight, so cards stay
+                                   visually consistent. *)
+                                RoundingRadius -> 0.06
                             ],
                             Column[{
                                 Row[{"buf ", b["id"], " (",
@@ -531,20 +534,29 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                                 Row[{"status: ", b["status"]}],
                                 Row[{"depth: ",  b["alloc_depth"], " .. ",
                                                   b["last_use_depth"]}],
-                                Row[{"alias_tids: ", b["alias_tids"]}]
+                                Row[{"producer kid: ", b["producer_kid"]}],
+                                Row[{"consumer kids: ", b["consumer_kids"]}],
+                                Row[{"alias tids: ", b["alias_tids"]}]
                             }]
                         ],
                         (* Per-bar in-bar label so a static SVG
                            reader can identify each buf without
-                           the interactive tooltip.  Format: "<id>
-                           <kib>KiB".  Font scales with available
-                           bar height; tiny bars omit the label. *)
-                        If[ (h - 2 inset) > 0.02 totalHeight,
+                           the interactive tooltip.  Two lines:
+                              line 1: "buf<id> kid<producer> KiB"
+                              line 2: "tid:<list>" (alias chain)
+                           Tiny bars (h < 5% of totalHeight) omit
+                           the label entirely. *)
+                        If[ h > 0.05 totalHeight,
                             Text[
                                 Style[
-                                    Row[{b["id"], " ",
-                                         Round[b["nbytes"]/1024., 0.01], "KiB"}],
-                                    FontSize -> Scaled[0.012],
+                                    Column[{
+                                        Row[{"buf", b["id"],
+                                             " kid", b["producer_kid"],
+                                             " ", Round[b["nbytes"]/1024., 0.01], "KiB"}],
+                                        Row[{"tid:",
+                                             StringRiffle[ToString /@ b["alias_tids"], ","]}]
+                                    }, ItemSize -> Automatic, Spacings -> 0],
+                                    FontSize -> Scaled[0.013],
                                     FontFamily -> "Source Code Pro"
                                 ],
                                 {(x0 + x1)/2, (y0 + y1)/2}
@@ -588,9 +600,24 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                via bisect).  A dashed solid red line carries the
                same "this is the peak depth" signal without the
                global-state pollution. *)
-            Epilog -> {Dashed, Thick, StandardRed,
-                Line[{{peak["peak_depth"] + 0.5, 0},
-                      {peak["peak_depth"] + 0.5, totalHeight}}]
+            (* Peak-concurrency marker: dashed red vertical line
+               at the depth where total live bytes peaks, with an
+               in-chart label so a static SVG reader can read what
+               the line means without going to the doc. *)
+            Epilog -> {
+                {Dashed, Thick, StandardRed,
+                    Line[{{peak["peak_depth"] + 0.5, 0},
+                          {peak["peak_depth"] + 0.5, totalHeight}}]},
+                Text[
+                    Style[
+                        Row[{"peak ", Round[peak["peak_bytes"]/1024., 0.01], " KiB"}],
+                        FontSize -> Scaled[0.014],
+                        FontFamily -> "Source Code Pro",
+                        StandardRed
+                    ],
+                    {peak["peak_depth"] + 0.5, totalHeight},
+                    {0, -1}
+                ]
             },
             PlotLabel -> Column[{
                 Row[{"TMemoryPlan / ", backendsActive[allBufs], " -- ",

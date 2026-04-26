@@ -1,13 +1,9 @@
 #!/usr/bin/env wolframscript
-(* memory-probe.wls -- the linear-train counterpart of
-   wl/Examples/lenet-mnist/memory-probe.wls.  Runs ONE training
-   step (forward + loss + backward + Adam update) and prints
-   the per-phase tensor / kernel / buf deltas, then captures a
-   TMemoryPlan and exports a Gantt PNG.
-
-   The graph is small enough (~9 kernels) that the Gantt is
-   readable end-to-end -- exactly the example to use when
-   working on lifetime-aware scheduling and slot reuse.
+(* memory-probe.wls -- linear-train forward + multi-target backward
+   in ONE realize.  Captures the post-realize TMemoryPlan + heap
+   diagram so the reader sees what the fused scheduler actually
+   produces (kernels, bufs, lifecycles) without per-grad re-realize
+   noise.
 
    Run from the repo root:
        wolframscript -f wl/Examples/linear-train/memory-probe.wls
@@ -23,26 +19,6 @@ debugPrint[args___] := WriteString["stdout",
 SeedRandom[7];
 TInit[];
 
-probe[label_, fn_] := Module[{tensBefore, bufBefore, kBefore,
-                              tensAfter, bufAfter, kAfter, result},
-    tensBefore = TTensCount[];
-    bufBefore  = TTotalBufBytes[];
-    kBefore    = TKernelCount[];
-    result     = fn[];
-    tensAfter  = TTensCount[];
-    bufAfter   = TTotalBufBytes[];
-    kAfter     = TKernelCount[];
-    debugPrint[label, ":"];
-    debugPrint["  TenDescs added : ", tensAfter - tensBefore,
-               " (cumulative ", tensAfter, ")"];
-    debugPrint["  CPU buf bytes  : +",
-               Round[(bufAfter - bufBefore) / 1024.0, 0.1], " KiB",
-               " (cumulative ", Round[bufAfter / 1024.0, 0.1], " KiB)"];
-    debugPrint["  KernelEntries  : +", kAfter - kBefore,
-               " (cumulative ", kAfter, ")"];
-    result
-]
-
 (* === Setup: Glorot init + a single hand-picked sample. === *)
 xHost = NumericArray[{1.0, 0.2, -0.1, 0.0}, "Real32"];
 yLabel = 0;
@@ -52,44 +28,31 @@ wHost = NumericArray[
     "Real32"];
 bHost = NumericArray[ConstantArray[0., 3], "Real32"];
 
-probe["After TInit", Function[Null]];
-
-(* === Forward pass. === *)
 w = TTensorCreate @ wHost;
 b = TTensorCreate @ bHost;
 x = TTensorCreate @ xHost;
 target = TTensorCreate @ NumericArray[
     UnitVector[3, yLabel + 1], "Real32"];
 
-probe["After tensor upload (W, b, x, target)", Function[Null]];
+(* === Forward + multi-target backward as a single graph: the loss
+   sink is a UOP graph; TGradMany builds ONE UOP_GRAD packing all
+   parameter targets into a TAG_CTR; the single TRealize inside
+   TGradMany fires forward + backward + the CTR descent in one shot.
+   MSE loss instead of softmax+CE because the softmax+CE backward
+   currently has a UOp pattern visit() can't compile (see CHANGELOG
+   note about thvm_materialize bail/rewind); MSE keeps the same
+   structural shape (Linear layer + per-element loss + reduce) and
+   exercises the same materialize+grad path. *)
+h    = TUOpAdd[TMatVec[w, x], b];
+loss = TMSELoss[h, target];
+grads = TGradMany[loss, {w, b}];
 
-probe["After forward + loss materialize",
-    Function[
-        h    = TUOpAdd[TMatVec[w, x], b];
-        p    = TSoftmax[h];
-        loss = TCrossEntropyLoss[p, target];
-        TRealize[loss]
-    ]
-];
-
-probe["After TGrad[loss, w] materialize",
-    Function[
-        TRealize @ TGrad[loss, w]
-    ]
-];
-
-probe["After TGrad[loss, b] materialize",
-    Function[
-        TRealize @ TGrad[loss, b]
-    ]
-];
-
-debugPrint[""];
-debugPrint["Final totals:"];
+debugPrint["TGradMany[loss, {w, b}] returned ", Length[grads], " grads"];
+debugPrint["Final totals after one realize:"];
 debugPrint["  TenDescs : ", TTensCount[]];
 debugPrint["  Buf bytes: ",
            Round[TTotalBufBytes[] / 1024.0, 0.1], " KiB"];
-debugPrint["  Kernels  : ", TKernelCount[]];
+debugPrint["  Kernels  : ", TKernelCount[] - 1];
 
 (* === TMemoryPlan summary + Gantt export. === *)
 debugPrint[""];
@@ -103,13 +66,12 @@ Module[{plan = TMemoryPlan[], backend, path},
     debugPrint["TMemoryPlanGantt -> ", path]
 ]
 
-(* === Heap diagram: IC string-diagram view of the post-realize
-   state.  Captures the kernel boundary structure (UOP_KERNEL nodes
-   + the TenDescs they wire up) so the reader can see the fused
-   shape next to the per-buf timeline. *)
+(* === Heap diagram: DiagramNetwork view (one Diagram per agent),
+   not the per-cell Graph view -- much smaller vertex count for
+   the same heap state. *)
 Module[{backend, path},
     backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
-    path    = "wl/Examples/linear-train/heap-graph-" <> backend <> ".svg";
-    Export[path, THeapGraph[], Background -> White];
-    debugPrint["THeapGraph     -> ", path]
+    path    = "wl/Examples/linear-train/heap-diagram-" <> backend <> ".svg";
+    Export[path, THeapDiagram[loss], Background -> White];
+    debugPrint["THeapDiagram   -> ", path]
 ]
