@@ -6,6 +6,30 @@ dated section.
 
 ## Unreleased
 
+### Added: Waldmeister .pr term parser (stage 6.3d)
+
+`wald_parse_term(spec, lex) -> Term` lands in `src/wald/_.c`.
+Grammar:
+
+  term ::= ident                            -- var (FVR) or
+                                               zero-arity sym
+        |  ident "(" term ("," term)* ")"   -- application
+
+Variable-vs-symbol dispatch: an ident is a variable iff it
+appears in `spec->vars[]` (returns `term_new_fvr(var_id)`);
+otherwise it's a signature symbol that becomes a TAG_CTR with
+the registered label.  Application arity must match the
+signature -- mismatched calls return 0.
+
+Recursive-descent; arg list capped at `REWRITE_MAX_ARITY`.
+Returns 0 on any parse error: unknown ident, missing close
+paren, arity mismatch, or argument list on a 0-arity constant.
+
+Tests in `tests/test_wald.c` (166 sub-checks) cover variable
+lookup, zero-arity constant, two-arg application, nested
+`f(i(x), e)`, unknown-ident, arity mismatch, and
+constant-with-args paths.
+
 ### Added: ORDERING section parser (stage 6.3c5)
 
 `wald_parse_ordering(spec, lex)` lands in `src/wald/_.c` with a

@@ -979,6 +979,10 @@ fn WaldSection wald_parse_signature(WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_variables(WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_ordering (WaldSpec *spec, WaldLex *lex);
 
+// 6.3d: parse one term.  Returns 0 (invalid Term) on parse error
+// (unknown ident, missing close paren, arity mismatch, ...).
+fn Term        wald_parse_term     (WaldSpec *spec, WaldLex *lex);
+
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.

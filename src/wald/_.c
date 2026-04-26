@@ -285,6 +285,77 @@ fn WaldSection wald_parse_signature(WaldSpec *spec, WaldLex *lex) {
   }
 }
 
+// === 6.3d: term parser =============================================
+//
+// Grammar:
+//
+//   term ::= ident                           -- var (FVR) or 0-arity sym
+//          | ident "(" term ("," term)* ")"   -- application
+//
+// Lookup rule: an ident is a variable iff it appears in the spec's
+// var table; otherwise it's a signature symbol.  Arity is enforced
+// against the signature: `f(x)` for an arity-2 `f` returns 0.
+//
+// Recursive-descent.  Returns 0 (invalid Term) on any syntax error
+// or unknown ident; the caller propagates the failure upward.
+fn Term wald_parse_term(WaldSpec *spec, WaldLex *lex) {
+  if (spec == NULL) return 0;
+  if (wald_lex_next(lex) != WT_IDENT) return 0;
+
+  // Snapshot the ident name -- subsequent lex_next calls clobber tok_text.
+  char name[WALD_NAME_LEN];
+  u32  nlen = lex->tok_len;
+  if (nlen >= WALD_NAME_LEN) nlen = WALD_NAME_LEN - 1;
+  for (u32 i = 0; i < nlen; i++) name[i] = lex->tok_text[i];
+  name[nlen] = '\0';
+
+  // Variable?
+  for (u32 i = 0; i < spec->n_vars; i++) {
+    if (strcmp(spec->vars[i].name, name) == 0) {
+      return term_new_fvr(spec->vars[i].var_id);
+    }
+  }
+
+  // Signature symbol?
+  const WaldSym *sym = NULL;
+  for (u32 i = 0; i < spec->n_symbols; i++) {
+    if (strcmp(spec->symbols[i].name, name) == 0) {
+      sym = &spec->symbols[i];
+      break;
+    }
+  }
+  if (sym == NULL) return 0;
+
+  // Constant: no parenthesized args.
+  if (wald_lex_peek(lex) != WT_LPAREN) {
+    if (sym->arity != 0) return 0;
+    return term_new_ctr(sym->label, NULL, 0);
+  }
+  wald_lex_next(lex);   // consume '('
+
+  // Empty arg list `name()` is permitted iff arity == 0.
+  if (wald_lex_peek(lex) == WT_RPAREN) {
+    wald_lex_next(lex);
+    if (sym->arity != 0) return 0;
+    return term_new_ctr(sym->label, NULL, 0);
+  }
+
+  Term args[REWRITE_MAX_ARITY];
+  u32  n_args = 0;
+  for (;;) {
+    Term arg = wald_parse_term(spec, lex);
+    if (arg == 0) return 0;
+    if (n_args >= REWRITE_MAX_ARITY) return 0;
+    args[n_args++] = arg;
+    WaldTokKind nk = wald_lex_next(lex);
+    if (nk == WT_COMMA)  continue;
+    if (nk == WT_RPAREN) break;
+    return 0;
+  }
+  if (n_args != sym->arity) return 0;
+  return term_new_ctr(sym->label, args, n_args);
+}
+
 // === 6.3c5: ORDERING section parser ================================
 //
 // Grammar:

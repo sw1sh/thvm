@@ -478,6 +478,147 @@ int main(void) {
     wald_free(s);
   }
 
+  // === 6.3d term parser ==============================================
+
+  TEST_BEGIN("wald/parse-term-variable-yields-fvr");
+  {
+    WaldSpec *s = wald_init();
+    s->n_vars = 1;
+    strncpy(s->vars[0].name, "x", WALD_NAME_LEN - 1);
+    s->vars[0].var_id = 0;
+
+    WaldLex lex;
+    wald_lex_init(&lex, "x");
+    Term t = wald_parse_term(s, &lex);
+    CHECK_EQ(term_tag(t), TAG_FVR);
+    CHECK_EQ(term_ext(t), 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-term-constant-yields-zero-arity-ctr");
+  {
+    WaldSpec *s = wald_init();
+    s->n_symbols = 1;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+    s->symbols[0].label = 1;
+    s->symbols[0].arity = 0;
+    s->next_label = 2;
+
+    WaldLex lex;
+    wald_lex_init(&lex, "e");
+    Term t = wald_parse_term(s, &lex);
+    CHECK_EQ(term_tag(t), TAG_CTR);
+    CHECK_EQ(term_ext(t), 1u);
+    CHECK_EQ(term_ctr_n(t), 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-term-application-with-args");
+  {
+    // f(x, e) where f is arity-2 (label 3), x is var, e is arity-0 (label 1).
+    WaldSpec *s = wald_init();
+    s->n_symbols = 2;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+    s->symbols[0].label = 1;
+    s->symbols[0].arity = 0;
+    strncpy(s->symbols[1].name, "f", WALD_NAME_LEN - 1);
+    s->symbols[1].label = 3;
+    s->symbols[1].arity = 2;
+    s->n_vars = 1;
+    strncpy(s->vars[0].name, "x", WALD_NAME_LEN - 1);
+    s->vars[0].var_id = 0;
+
+    WaldLex lex;
+    wald_lex_init(&lex, "f(x, e)");
+    Term t = wald_parse_term(s, &lex);
+    CHECK_EQ(term_tag(t), TAG_CTR);
+    CHECK_EQ(term_ext(t), 3u);
+    CHECK_EQ(term_ctr_n(t), 2u);
+    Term a0 = term_ctr_at(t, 0);
+    Term a1 = term_ctr_at(t, 1);
+    CHECK_EQ(term_tag(a0), TAG_FVR);
+    CHECK_EQ(term_ext(a0), 0u);
+    CHECK_EQ(term_tag(a1), TAG_CTR);
+    CHECK_EQ(term_ext(a1), 1u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-term-nested");
+  {
+    // f(i(x), e) -- nested unary i around var x, plus constant e.
+    WaldSpec *s = wald_init();
+    s->n_symbols = 3;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+    s->symbols[0].label = 1;
+    s->symbols[0].arity = 0;
+    strncpy(s->symbols[1].name, "i", WALD_NAME_LEN - 1);
+    s->symbols[1].label = 2;
+    s->symbols[1].arity = 1;
+    strncpy(s->symbols[2].name, "f", WALD_NAME_LEN - 1);
+    s->symbols[2].label = 3;
+    s->symbols[2].arity = 2;
+    s->n_vars = 1;
+    strncpy(s->vars[0].name, "x", WALD_NAME_LEN - 1);
+
+    WaldLex lex;
+    wald_lex_init(&lex, "f(i(x), e)");
+    Term t = wald_parse_term(s, &lex);
+    CHECK_EQ(term_ext(t), 3u);          // f
+    Term inner = term_ctr_at(t, 0);
+    CHECK_EQ(term_ext(inner), 2u);      // i
+    Term innermost = term_ctr_at(inner, 0);
+    CHECK_EQ(term_tag(innermost), TAG_FVR);   // x
+    CHECK_EQ(term_ext(term_ctr_at(t, 1)), 1u);  // e
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-term-unknown-ident-yields-zero");
+  {
+    WaldSpec *s = wald_init();
+    WaldLex lex;
+    wald_lex_init(&lex, "unknown");
+    CHECK_EQ(wald_parse_term(s, &lex), 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-term-arity-mismatch-yields-zero");
+  {
+    // i is arity 1; calling i(x, y) is invalid.
+    WaldSpec *s = wald_init();
+    s->n_symbols = 1;
+    strncpy(s->symbols[0].name, "i", WALD_NAME_LEN - 1);
+    s->symbols[0].label = 2;
+    s->symbols[0].arity = 1;
+    s->n_vars = 2;
+    strncpy(s->vars[0].name, "x", WALD_NAME_LEN - 1);
+    s->vars[0].var_id = 0;
+    strncpy(s->vars[1].name, "y", WALD_NAME_LEN - 1);
+    s->vars[1].var_id = 1;
+
+    WaldLex lex;
+    wald_lex_init(&lex, "i(x, y)");
+    CHECK_EQ(wald_parse_term(s, &lex), 0u);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-term-constant-cannot-take-args");
+  {
+    // e is arity 0; e(x) should fail.
+    WaldSpec *s = wald_init();
+    s->n_symbols = 1;
+    strncpy(s->symbols[0].name, "e", WALD_NAME_LEN - 1);
+    s->symbols[0].label = 1;
+    s->symbols[0].arity = 0;
+    s->n_vars = 1;
+    strncpy(s->vars[0].name, "x", WALD_NAME_LEN - 1);
+    s->vars[0].var_id = 0;
+
+    WaldLex lex;
+    wald_lex_init(&lex, "e(x)");
+    CHECK_EQ(wald_parse_term(s, &lex), 0u);
+    wald_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

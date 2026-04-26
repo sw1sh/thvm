@@ -234,12 +234,18 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       LPO since weights are dropped), empty section, and the
       "lone ident no chain" path (no `>` -> no chain entry,
       ranks stay 0).
-- [ ] 6.3d term parser: `wald_parse_term(spec, lex) -> Term`.
-      Parses `ident` (lookup in var table -> FVR; else
-      lookup in signature -> CTR with arity 0) and
-      `ident(t1, t2, ...)` (CTR with the args; arity must
-      match the signature).  Recursive-descent; no operator
-      precedence (FOL terms are flat).
+- [x] 6.3d `wald_parse_term(spec, lex) -> Term` lands in
+      `src/wald/_.c`.  Recursive-descent: ident is a variable
+      iff it's in `spec->vars[]` (returns
+      `term_new_fvr(var_id)`); otherwise it's a signature symbol
+      (zero-arity if no `(` follows; `arity` enforced against
+      the signature on application).  Args parsed via comma
+      separation; `REWRITE_MAX_ARITY` cap.  Returns 0 on any
+      error (unknown ident, missing `)`, arity mismatch,
+      constant-with-args).  Tests cover var lookup,
+      zero-arity constant, two-arg application, nested
+      `f(i(x), e)`, unknown ident, arity mismatch (`i(x, y)`
+      with arity-1 i), and constant-with-args (`e(x)`).
 - [ ] 6.3e EQUATIONS / CONCLUSION parsers: each section is a
       sequence of `term = term` pairs.  Push parsed pairs into
       `spec->eqn_lhs/rhs[]` (axioms) or `spec->goal_lhs/rhs`
