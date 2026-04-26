@@ -4646,23 +4646,46 @@ implemented + tested (f1a) but never invoked by the pipeline.
              realize overhead easily blows the cap. -->
 
 
-  - [ ] **f1d-d4b: fix the duplication pathology**.  Based
-        on d4a's diagnosis, fix the root cause.  Two leading
-        candidates:
-          (i)  Helper's success ALSO rewrites the absorbed
-               un-realized cells in the heap to point at the
-               emitted KERNEL term (or a sentinel) so a
-               subsequent TRealize re-walk sees them as
-               already-handled.
-          (ii) Memo across realizes: cache (root_loc -> kid)
-               so the same source_uop subtree returns the
-               same kernel id.  Cleared on TInit/TReset.
-        Pick whichever d4a's analysis points at.  Acceptance:
-        with toggle ON, the WL test sweep stays under the
-        4K kernel cap on the heaviest tests
-        (beautiful_mnist.wlt, nn.wlt); 166 C + 292 WL green.
-        ~80-150 LOC + tests; DECOMPOSE FURTHER on first fire
-        if the chosen path is bigger than ~100 LOC.
+  <!-- 2026-04-26 re-decompose d4b after d4a's probe.  The
+       pathology is architectural: walk's hook returns
+       un-realized UOPs unchanged so their heap cells stay
+       raw, but materialize_expr (the fallback path used when
+       walk doesn't fully kernelize the root) RECURSES through
+       those raw cells and emits per-UOp kernels for the
+       whole chain -- without dedup across visits.  Net: each
+       realize emits ~31% MORE kernels than legacy (per d4a's
+       measurement).  Splitting into a stop-the-bleed step +
+       the actual fusion-gain step. -->
+
+  - [ ] **f1d-d4b1: stop double-emit by extending the hook
+        into materialize_expr**.  Make materialize_expr's
+        recursive child kernelization also consult the
+        realize_classify table when the toggle is ON: if a
+        child is realized, emit a fresh kernel as today; if
+        un-realized, route through materialize_kernel_inlined
+        (or fall through to legacy emission).  Match what
+        materialize_walk's hook already does.  Net effect:
+        no double-emission across walk+expr; toggle ON
+        emits the SAME kernel count as legacy in the worst
+        case (no fusion gain yet, but no overhead either),
+        clearing the way for d4b2.  Acceptance: with toggle
+        ON, poly-regression total kernel count drops from
+        131 back to <= 100 (legacy parity); 166 C + 292
+        WL green; beautiful_mnist.wlt + nn.wlt no longer
+        exhaust the cap.  ~50-80 LOC.
+
+  - [ ] **f1d-d4b2: deliver the fusion gain**.  After
+        d4b1 stops overhead, attack fusion: the helper
+        should ACTUALLY reduce kernel count for elementwise
+        chains.  Probably means making materialize_expr's
+        per-UOp emit short-circuit when an upstream
+        elementwise chain has been absorbed.  Validated by
+        d4a's probe: toggle ON should drop poly-regression
+        to <= 50 kernels (was 100 legacy).  Acceptance:
+        same as d4b1 PLUS measured kernel-count drop on
+        linear-train memory-probe.wls.  ~50-100 LOC; can
+        be re-decomposed if the right mechanism turns out
+        to be a bigger refactor.
 
   - [ ] **f1d-d4c: actually flip default + verify**.  After
         d4b lands, set MATERIALIZE_USE_REALIZE_INFO default
