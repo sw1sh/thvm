@@ -858,6 +858,15 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added);
 // when goal_lhs == 0, i.e. completion mode).
 fn AtpStatus thvm_atp_goal_check(AtpState *s);
 
+// One saturation step: goal_check -> select -> normalize ->
+// trivialize -> orient+add -> interreduce -> generate_cps ->
+// goal_check.  Returns ATP_PROVED / ATP_TIMEOUT /
+// ATP_QUEUE_EMPTY / ATP_RUNNING (continue).
+fn AtpStatus thvm_atp_step(AtpState *s);
+
+// Drive thvm_atp_step until it returns non-RUNNING.
+fn AtpStatus thvm_atp_run (AtpState *s);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input

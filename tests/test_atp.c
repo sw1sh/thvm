@@ -399,6 +399,64 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/step-empty-queue-no-goal-yields-queue-empty");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ((int)thvm_atp_step(s), (int)ATP_QUEUE_EMPTY);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/step-trivial-goal-proves-without-work");
+  {
+    // Goal e == e is already trivially true; goal_check at top of
+    // step fires before anything else.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_goal(s, mk_e(), mk_e());
+    CHECK_EQ((int)thvm_atp_step(s), (int)ATP_PROVED);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/step-cap-zero-times-out-when-no-goal-trivial");
+  {
+    // step_cap = 0 with a non-trivial goal -- should TIMEOUT before
+    // doing any work.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 0);
+    thvm_atp_set_goal(s, mk_a(), mk_e());
+    CHECK_EQ((int)thvm_atp_step(s), (int)ATP_TIMEOUT);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/run-one-step-prove");
+  {
+    // Goal: f(a, e) == a.  Push axiom f(x, e) = x onto queue.
+    // First step: pops the axiom, normalizes (no R, both stay),
+    // not trivially equal, KBO_GT orients it as f(x, e) -> x,
+    // adds to R, no interreduce (no old rules), generates self-CPs,
+    // goal_check fires: f(a, e) reduces to a, equal -> ATP_PROVED.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_goal(s, mk_f(mk_a(), mk_e()), mk_a());
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+    AtpStatus st = thvm_atp_run(s);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+    CHECK(s->n_rules >= 1u);
+    CHECK(s->step <= 4u);   // converges in one or two real steps
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/run-saturates-empty-queue-completion-mode");
+  {
+    // No goal, push one trivially-self-equal equation.  Step pops
+    // it, normalizes (both sides identical), trivializes; queue
+    // empties; next step returns QUEUE_EMPTY.  thvm_atp_run loops
+    // through and returns QUEUE_EMPTY.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s, mk_e(), mk_e());
+    AtpStatus st = thvm_atp_run(s);
+    CHECK_EQ((int)st, (int)ATP_QUEUE_EMPTY);
+    CHECK(s->step >= 1u);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

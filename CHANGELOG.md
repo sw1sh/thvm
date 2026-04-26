@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_atp_step + thvm_atp_run -- saturation loop driver (stage 5.2f)
+
+`src/atp/_.c` glues 5.2a..5.2e into the full step.  Order from
+`docs/plans/saturation_loop.md` sec.2:
+
+  goal_check -> step_cap -> select_cp -> normalize ->
+  trivialize -> orient_and_add -> interreduce (with post-
+  interreduce range adjustment so generate_cps targets the
+  correct, possibly-shifted slots) -> generate_cps -> goal_check.
+
+`thvm_atp_step` returns one of ATP_PROVED / ATP_TIMEOUT /
+ATP_QUEUE_EMPTY / ATP_RUNNING.  `thvm_atp_run` is the trivial
+loop wrapper.
+
+The interreduce-shifts-new-rule-indices coordination matters: when
+`thvm_atp_interreduce` drops `dropped` older rules, the freshly-
+added rules' indices each move down by `dropped`, so
+`thvm_atp_generate_cps` is called with `post.first =
+added.first - dropped` to re-derive the right (new x R) and
+(old x new) sweeps.
+
+Tests cover empty queue (returns QUEUE_EMPTY), trivial `e == e`
+goal (PROVED at the top-of-step check, no work done),
+`step_cap == 0` with non-trivial goal (TIMEOUT), the headline
+one-step prove (`f(a, e) == a` from axiom `f(x, e) = x` runs to
+ATP_PROVED via `thvm_atp_run`), and completion-mode saturation
+that exhausts the queue and returns QUEUE_EMPTY.
+
 ### Added: thvm_atp_goal_check (stage 5.2e)
 
 `thvm_atp_goal_check(s)` normalizes both sides of `s->goal_{lhs,

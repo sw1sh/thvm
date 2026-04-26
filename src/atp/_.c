@@ -66,6 +66,75 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   return 1;
 }
 
+// One full saturation step.  See docs/plans/saturation_loop.md
+// sec.2 for the algorithm.  Order:
+//   1. goal_check   -- cheap; may close if a prior step proved
+//   2. step_cap     -- TIMEOUT if exceeded
+//   3. select_cp    -- QUEUE_EMPTY if exhausted
+//   4. normalize    -- both sides under current R (NORM_CAP = 64)
+//   5. trivialize   -- skip if sides become kbo_eq
+//   6. orient + add -- KBO + unfailing fallback
+//   7. interreduce  -- drop subsumed older rules
+//   8. generate_cps -- (new x R) + (old x new), adjusted for
+//                      dropped old rules
+//   9. goal_check   -- may close after new rule(s) integrated
+//  10. step++       -- only on a "real" step that didn't close
+//
+// Returns one of: ATP_RUNNING (continue), ATP_PROVED (goal hit),
+// ATP_TIMEOUT (step cap), ATP_QUEUE_EMPTY (saturation reached
+// without proving the goal).
+fn AtpStatus thvm_atp_step(AtpState *s) {
+  if (s == NULL) return ATP_QUEUE_EMPTY;
+
+  AtpStatus goal = thvm_atp_goal_check(s);
+  if (goal != ATP_RUNNING) return goal;
+
+  if (s->step >= s->step_cap) return ATP_TIMEOUT;
+
+  Term cp_lhs = 0, cp_rhs = 0;
+  if (!thvm_atp_select_cp(s, &cp_lhs, &cp_rhs)) {
+    return ATP_QUEUE_EMPTY;
+  }
+
+  const u32 NORM_CAP = 64;
+  Term l = thvm_rewrite_normalize(cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term r = thvm_rewrite_normalize(cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+
+  if (kbo_eq(l, r)) {
+    s->step++;
+    return ATP_RUNNING;
+  }
+
+  AtpAddedRange added = thvm_atp_orient_and_add(s, l, r);
+  if (added.count == 0) {
+    // R full, or some other refusal.  Count the work and continue.
+    s->step++;
+    return ATP_RUNNING;
+  }
+
+  // Interreduce shifts new-rule indices down by `dropped`.
+  u32 dropped = thvm_atp_interreduce(s, added);
+  AtpAddedRange post = added;
+  post.first = (dropped > post.first) ? 0 : (post.first - dropped);
+
+  thvm_atp_generate_cps(s, post);
+
+  goal = thvm_atp_goal_check(s);
+  if (goal != ATP_RUNNING) return goal;
+
+  s->step++;
+  return ATP_RUNNING;
+}
+
+// Drive thvm_atp_step until it returns a non-RUNNING status.
+fn AtpStatus thvm_atp_run(AtpState *s) {
+  AtpStatus st;
+  do {
+    st = thvm_atp_step(s);
+  } while (st == ATP_RUNNING);
+  return st;
+}
+
 // Goal check: normalize both sides of the conjecture under the
 // current R; if they're now structurally equal, the goal is
 // proved.  Returns ATP_PROVED on a hit, ATP_RUNNING otherwise.

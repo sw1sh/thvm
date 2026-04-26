@@ -78,10 +78,16 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       goal_lhs == 0 (completion mode).  Top-only today; 5.4
       widens.  Tests cover no-goal, trivial e==e, close-under-one-
       rule, and doesn't-close.
-- [ ] 5.2f `thvm_atp_step` driver: the main step that calls 5.2a
-      -> normalize-via-`thvm_rewrite_normalize` -> trivialize ->
-      5.2b -> 5.2c -> 5.2d -> 5.2e and returns AtpStatus.
-      `thvm_atp_run` is a thin wrapper looping while RUNNING.
+- [x] 5.2f `thvm_atp_step` + `thvm_atp_run` glue 5.2a..5.2e plus
+      normalize/trivialize into the full saturation step.  Order:
+      goal_check -> step_cap -> select_cp -> normalize ->
+      trivialize -> orient_and_add -> interreduce (with
+      post-interreduce range adjustment so 5.2d targets the
+      correct slots) -> generate_cps -> goal_check.  Tests cover
+      empty-queue queue-empty, trivial-goal-proves, step_cap=0
+      timeout, the headline one-step prove via `thvm_atp_run`
+      (`f(a, e) == a` under axiom `f(x, e) = x`), and completion-
+      mode saturation that returns QUEUE_EMPTY.
 - [ ] 5.3 priority queue construction: each CP wrapped `INC^k`
       where k = total symbol count (the `--add` heuristic; `--mix`
       lands later), enumerate via `thvm_collapse_ordered`
