@@ -140,17 +140,15 @@ Real kernel-count + memory wins need either:
       Backward compute sharing across targets is future-work
       (would need scratch cotangent slots).
 
-- [ ] **k0d: TGradMany WL bridge + accessor**.  Add
-      `TGradMany[y, {x_1, ..., x_n}]` in
-      wl/THVMLink/Kernel/Tensor.wl that builds a single
-      UOP_GRAD_MULTI Term, then unpacks the resulting
-      TAG_CTR (post k0c materialize) into n TTerm
-      wrappers via term_ctr_at.  Bridge fns added to
-      wl/THVMLink/CSource/thvmlink.c.  Tests in
-      wl/THVMLink/Tests/grad.wlt assert that
-      `TGradMany[loss, {a, b}]` and
-      `{TGrad[loss, a], TGrad[loss, b]}` yield equal
-      gradient values.  ~50 LOC + tests.
+- [x] **k0d: TGradMany WL bridge + accessor**.
+      `TGradMany[y, {x_1, ..., x_n}]` builds a single
+      UOP_GRAD via `thvm_wl_uop_grad_multi`, realizes once,
+      and unpacks the TAG_CTR result via
+      `thvm_wl_term_ctr_at` into a List of n TTerm wrappers.
+      Bridges + WL surface fn in
+      wl/THVMLink/CSource/thvmlink.c +
+      wl/THVMLink/Kernel/{THVMLink,Tensor}.wl.  3 new tests
+      in grad.wlt (295 WL total).  166 C + 295 WL green.
 
 - [ ] **k0e: rewire bench + verify; measure delta**.  Switch
       lenetStep (baseline.wls) and stepGrads (verify.wls)

@@ -123,6 +123,7 @@ TUOpConv2D::usage    = "TUOpConv2D[input, weights, bias] builds a stride-1, no-p
 
 TUOpConv2DLowered::usage = "TUOpConv2DLowered[input, weights, bias] builds the same valid 2-D convolution as TUOpConv2D but as a kh*kw-unrolled chain of primitive UOPs (SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD).  No new opcodes; pure WL composition.";
 TGrad::usage         = "TGrad[y, target] = TUOpGrad[y, TUOpConst[1], target].  Top-level VJP -- d(y)/d(target) with cotangent seed 1.";
+TGradMany::usage     = "TGradMany[y, {x_1, ..., x_n}] computes d(y)/d(x_i) for every target in one realize.  Returns a List of n TTerm wrappers.  Forward DAG is shared via heap-loc identity so the per-realize memo dedups every kernel emitted from those forward UOps across all n targets.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
 TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term, in heap order.";
 
@@ -251,6 +252,9 @@ $uopPadFn      := $uopPadFn      = load["thvm_wl_uop_pad",      {Integer, {Integ
 $uopShrinkFn   := $uopShrinkFn   = load["thvm_wl_uop_shrink",   {Integer, {Integer, 1}},             Integer];
 $uopFlipFn     := $uopFlipFn     = load["thvm_wl_uop_flip",     {Integer, Integer},                  Integer];
 $uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Integer, Integer},      Integer];
+$uopGradMultiFn:= $uopGradMultiFn= load["thvm_wl_uop_grad_multi",  {Integer, Integer, {Integer, 1}}, Integer];
+$termCtrNFn    := $termCtrNFn    = load["thvm_wl_term_ctr_n",      {Integer},                        Integer];
+$termCtrAtFn   := $termCtrAtFn   = load["thvm_wl_term_ctr_at",     {Integer, Integer},               Integer];
 $uopLoadFn     := $uopLoadFn     = load["thvm_wl_uop_load",        {Integer},                        Integer];
 
 (* direct materialize (no wnf) + kernel-entry introspection *)

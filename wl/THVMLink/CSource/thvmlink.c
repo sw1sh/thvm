@@ -611,6 +611,44 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_grad(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Multi-target grad: args = [y, gy, MTensor{Integer}({x_1, ..., x_n})].
+// Returns a single UOP_GRAD Term whose interact rule lowers to a
+// TAG_CTR of n unary grads.  WL unpacks via thvm_wl_term_ctr_at.
+EXTERN_C DLLEXPORT int thvm_wl_uop_grad_multi(WolframLibraryData libData, mint argc,
+                                              MArgument *args, MArgument res) {
+  (void)argc;
+  Term y       = (Term)MArgument_getInteger(args[0]);
+  Term gy      = (Term)MArgument_getInteger(args[1]);
+  MTensor xs   = MArgument_getMTensor(args[2]);
+  mint    n    = libData->MTensor_getFlattenedLength(xs);
+  mint   *src  = libData->MTensor_getIntegerData(xs);
+  Term targets[256];
+  if (n > 256) n = 256;
+  for (mint i = 0; i < n; i++) targets[i] = (Term)src[i];
+  Term r = uop_grad_multi(y, gy, targets, (u32)n);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+// TAG_CTR accessors: thvm_wl_term_ctr_n(t) -> arity, and
+// thvm_wl_term_ctr_at(t, i) -> i-th child Term (0 if out-of-range).
+EXTERN_C DLLEXPORT int thvm_wl_term_ctr_n(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)term_ctr_n(t));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_term_ctr_at(WolframLibraryData libData, mint argc,
+                                           MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  mint i = MArgument_getInteger(args[1]);
+  MArgument_setInteger(res, (mint)term_ctr_at(t, (u32)i));
+  return LIBRARY_NO_ERROR;
+}
+
 // Direct materialize: runs the schedule + kernelize + linearize pass
 // immediately and returns the scheduled DAG term.  Fires no kernels
 // (that happens in TWnf via the interact_kernel rule in commit 4).

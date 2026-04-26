@@ -200,6 +200,27 @@ TUOpConv2D[input_, weights_, bias_] := TUOpConv2DLowered[input, weights, bias]
    cotangent seed 1. *)
 TGrad[y_, target_] := TUOpGrad[y, TUOpConst[1.0, "f32"], target]
 
+(* Multi-target VJP: builds ONE UOP_GRAD whose interact rule lowers
+   to a TAG_CTR of n unary grads.  Returns a List of n TTerm
+   wrappers, ready to TRealize independently.  The forward DAG
+   lives at shared heap locs across all n targets so materialize's
+   per-realize memo dedups every kernel emitted from those forward
+   UOps -- the savings show up as one realize + one set of forward
+   kernels covering all targets, vs. n independent walks. *)
+TGradMany[y_, targets_List] := (
+    ensureInit[];
+    Module[{gy, gMulti, gradPacked, n, raws},
+      gy        = TUOpConst[1.0, "f32"];
+      gMulti    = TTerm[$uopGradMultiFn[
+                    ttermRaw[y], ttermRaw[gy],
+                    Developer`ToPackedArray[ttermRaw /@ targets, Integer]]];
+      gradPacked = TRealize[gMulti];
+      n         = $termCtrNFn[ttermRaw[gradPacked]];
+      raws      = Table[$termCtrAtFn[ttermRaw[gradPacked], i], {i, 0, n - 1}];
+      TTerm /@ raws
+    ]
+)
+
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)
    then TWnf to beta-reduce and fire the kernels.  No UOP_MATERIALIZE
    wrapper -- thvm_materialize is invoked directly. *)

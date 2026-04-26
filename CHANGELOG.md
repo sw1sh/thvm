@@ -6,6 +6,37 @@ dated section.
 
 ## Unreleased
 
+### Added: TAG_FVR + thvm_kbo -- stage 2 (term encoding + KBO ordering)
+
+`TAG_FVR = 22` is an atomic first-order variable: `EXT = var_id`,
+no heap cells.  Distinct from `TAG_VAR` (the IC's bound variable
+tied to a binder).  Used by the IC-as-ATP layer to encode the
+universally / existentially quantified variables of equational
+logic.
+
+`thvm_kbo(s, t, cfg)` (`src/kbo/_.c`) implements the Knuth-Bendix
+ordering on TAG_CTR + TAG_FVR terms.  KboConfig holds per-symbol
+weights, total precedence, and the scalar variable weight w0.
+Returns KBO_EQ / KBO_GT / KBO_LT / KBO_UN.  Algorithm: Baader-
+Nipkow (variable-domination check, weight comparison, top-symbol
+precedence tiebreak, lexicographic on args).
+
+The headline demo from `docs/plans/waldmeister_ic_atp.md` sec.5
+runs in `tests/test_kbo.c`: under Waldmeister's default group-
+axiom KBO (weights `i=0, f=1, e=1, a=1`; precedence `i > f > e > a`;
+`w0 = 1`), `f(x, e) > x` orients correctly.
+
+C-side only for now -- the IC-as-pure-program port (stage 2.4) is
+optional and deferred.
+
+### Added: TGradMany WL bridge
+
+`TGradMany[y, {x_1, ..., x_n}]` in `wl/THVMLink/Kernel/Tensor.wl`
+builds a single `UOP_GRAD` and realizes once; the resulting
+`TAG_CTR` of n cotangents is unpacked into a List of TTerm
+wrappers via `thvm_wl_term_ctr_at`.  3 new tests in `grad.wlt`
+assert equality with the per-target `TGrad` results.
+
 ### Added: multi-target chain rule for UOP_GRAD
 
 `interact_grad` now handles `n>1` by lowering to a `TAG_CTR` of `n`
