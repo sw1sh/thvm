@@ -4673,6 +4673,43 @@ implemented + tested (f1a) but never invoked by the pipeline.
         131 back to <= 100 (legacy parity); 166 C + 292
         WL green; beautiful_mnist.wlt + nn.wlt no longer
         exhaust the cap.  ~50-80 LOC.
+        <!-- attempt 1: partial -- meets the poly-regression
+             criterion but not the LeNet cap criterion.
+
+             Added a hook at the top of materialize_expr (right
+             after the UOP_GRAD short-circuit) that routes
+             through materialize_kernel_inlined when the toggle
+             is on AND the UOp is realized OR inlinable
+             elementwise.  Helper bails on REDUCE / movement /
+             non-elementwise upstream; falls through to legacy
+             emit.
+
+             Probe re-run on poly-regression (3 separate
+             TRealize calls):
+                 toggle OFF (legacy):  100 kernels total
+                 toggle ON  (d4b1):     99 kernels total
+             Duplication eliminated, slight reduction.
+
+             BUT: with default flipped to 1, beautiful_mnist.wlt
+             + nn.wlt STILL exhaust kernel_alloc cap even at 8K.
+             Some non-trivial overhead remains for the deeper
+             LeNet grad chains.  Hypothesis: each call to
+             materialize_kernel_inlined allocates a kernel via
+             kernel_alloc; for inlinable un-realized UOPs that
+             have NO upstream chain to absorb (single-op
+             leaves), the helper allocates 1 kernel where
+             legacy would have allocated 1 too -- but maybe
+             grad chains create patterns where the helper
+             allocates AND legacy ALSO allocates a separate
+             kernel for the same UOp via materialize_walk's
+             prior visit.  Need d4b1-bis or further probe to
+             pinpoint.
+
+             Hook commit is SAFE for default OFF (gated by
+             toggle) -- 166 C + 292 WL stay green.  Landing
+             the partial fix; d4b1-bis (next fire) targets
+             the remaining LeNet overhead. -->
+
 
   - [ ] **f1d-d4b2: deliver the fusion gain**.  After
         d4b1 stops overhead, attack fusion: the helper

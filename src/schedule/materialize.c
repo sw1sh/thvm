@@ -250,6 +250,22 @@ fn Term materialize_expr(Term expr) {
   // the resulting graph.
   if (op == UOP_GRAD) return materialize_expr(interact_grad(expr));
 
+  // f1d-d4b1: when the toggle is on, route every inlinable UOp
+  // (realized OR not) through the inlined helper.  An inlinable
+  // un-realized UOP collapses its upstream elementwise chain
+  // into a single kernel; without this hook, materialize_expr's
+  // legacy per-UOp recursive emit would allocate one kernel per
+  // chain element AND walk's hook would have left those cells
+  // raw, so each realize ended up emitting ~31% MORE kernels
+  // than legacy (per d4a's probe).  Helper bails on movement /
+  // REDUCE / GRAD roots; in that case fall through to the
+  // legacy per-UOp emit below.
+  if (MATERIALIZE_USE_REALIZE_INFO
+      && (realize_is_realized(expr) || inline_is_inlinable(op))) {
+    Term k = materialize_kernel_inlined(expr);
+    if (k != 0) return k;
+  }
+
   u64 expr_loc = term_val(expr);
   u8  arity    = uop_arity(op);
 
