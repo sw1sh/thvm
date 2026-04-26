@@ -107,6 +107,16 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
     for (u32 i = cs.ndim; i < MAX_DIM; i++) out->dims[i] = 0;
     return 1;
   }
+  if (op == UOP_GRAD) {
+    // grad output has the shape of the target (heap layout
+    // [y, gy, NUM(n), x_1...x_n]; for unary n=1, target=loc+3).
+    // Multi-target GRAD lowers to TAG_CTR before shape inference
+    // is queried; here we only need to handle the unary case.
+    Term ncell = heap_read(loc + 2);
+    u32  n     = (term_tag(ncell) == TAG_NUM) ? (u32)term_val(ncell) : 1;
+    if (n != 1) return 0;
+    return term_shape_in(heap_read(loc + 3), 0, out);
+  }
   if (op == UOP_REDUCE) {
     Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
     u32 axis = (u32)term_val(heap_read(loc + 2));

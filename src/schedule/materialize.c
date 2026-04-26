@@ -193,11 +193,26 @@ static int view_apply_flip(View const *src, u64 expr_loc, View *out) {
   return 1;
 }
 
+// Materialize a UOP_CONST to a 1-element TenDesc filled with the
+// const value.  Used by view_resolve when a movement-op chain
+// (typically EXPAND from interact_grad's expand_to_target leaf
+// rule) bottoms out at a CONST instead of a TenDesc.
+static u32 const_to_tendesc(u64 const_loc) {
+  Term num   = heap_read(const_loc);
+  u32  dtype = term_ext(num);
+  u32  bits  = (u32)term_val(num);
+  Shape s = {0}; s.ndim = 1; s.dims[0] = 1;
+  u32 tid = tensor_alloc(CURRENT_BACKEND, s, dtype);
+  CURRENT_BACKEND->buf_write(TENS[tid].buf_id, &bits, 4);
+  return tid;
+}
+
 // Dispatcher: walk a movement-op chain, allocating one alias
 // TenDesc per layer; return the final tid (0 on bail).  The
-// source must resolve to a TenDesc (TAG_TEN, UOP_KERNEL, or a
-// recursive view chain rooted at one).  Backend must be
-// view-aware -- otherwise returns 0 so caller falls through.
+// source must resolve to a TenDesc (TAG_TEN, UOP_KERNEL, UOP_CONST
+// materialized to a 1-element TenDesc, or a recursive view chain
+// rooted at one).  Backend must be view-aware -- otherwise returns
+// 0 so caller falls through.
 static u32 view_resolve(Term t) {
   if (CURRENT_BACKEND == NULL || !CURRENT_BACKEND->view_aware) return 0;
   u8 tag = term_tag(t);
@@ -213,7 +228,13 @@ static u32 view_resolve(Term t) {
     return (u32)term_val(outbuf);
   }
 
-  // Source recurses (could be another movement op chain).
+  // CONST source: materialize to a fresh 1-element TenDesc.
+  // interact_grad's expand_to_target leaf rule produces
+  // EXPAND(CONST(0|1)) -> target.shape; without this branch the
+  // grad chain stalls as a UOP that never fires.
+  if (op == UOP_CONST) return const_to_tendesc(loc);
+
+  // Source recurses (could be another movement op chain or CONST).
   u32 src_tid = view_resolve(heap_read(loc));
   if (src_tid == 0) return 0;
   View const *src_view = &TENS[src_tid].view;
@@ -391,11 +412,25 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     return ke->n_ops - 1;
   }
 
-  // Movement ops as a child of the kernel: resolve to a view-only
-  // alias TenDesc and become an input slot.  view_resolve recurses
-  // through nested movement ops; on bail (e.g., PAD, non-contig
-  // sources for the helpers that require contig) returns 0 and we
-  // fall through to VISIT_BAIL.
+  // GRAD anywhere in the tree: lazy-unroll one step then recurse.
+  // interact_grad is called repeatedly until the result is no
+  // longer UOP_GRAD or it returns the input unchanged.  Without
+  // this, GRAD leaves deep in the kernel subtree (e.g., ADD's
+  // grad chain producing GRAD(a)+GRAD(b)) cause visit() to bail.
+  if (op == UOP_GRAD) {
+    Term cur = t;
+    while (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_GRAD) {
+      Term g = interact_grad(cur);
+      if (g == cur) return VISIT_BAIL;       // stuck
+      cur = g;
+    }
+    return visit(cur, ke, root_loc);
+  }
+
+  // Movement ops as a child of the kernel: try view-only resolve
+  // first.  If the source isn't a contig TenDesc-resolvable chain
+  // (e.g., EXPAND wrapping a MUL from interact_grad), fall through
+  // to kernel-op emit with the appropriate metadata.
   if (op_is_view_movement(op)) {
     u32 alias_tid = view_resolve(t);
     if (alias_tid != 0) {
@@ -404,6 +439,43 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
       return KSRC_AS_INPUT(slot);
     }
+    // Fallback: emit as a kernel op.  Recurse into source, look up
+    // shapes, populate the metadata cpu_op_<op> + Metal shaders need.
+    u32 src_idx = visit(heap_read(loc), ke, root_loc);
+    if (src_idx == VISIT_BAIL) return VISIT_BAIL;
+    if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
+    Shape src_shape = {0};
+    if (!term_shape_in(heap_read(loc), 0, &src_shape)) return VISIT_BAIL;
+    Shape out_shape = {0};
+    if (!term_shape_in(t, 0, &out_shape)) return VISIT_BAIL;
+    u32 out_numel = 1;
+    for (u32 i = 0; i < out_shape.ndim; i++) out_numel *= out_shape.dims[i];
+    KProgOp *p = &ke->program[ke->n_ops++];
+    memset(p, 0, sizeof(*p));
+    p->opcode    = op;
+    p->dtype     = src_dtype(ke, src_idx);
+    p->numel     = out_numel;
+    p->n_src     = 1;
+    p->src[0]    = src_idx;
+    p->src0_ndim = (u8)(src_shape.ndim & 0xFF);
+    p->out_ndim  = (u8)(out_shape.ndim & 0xFF);
+    for (u32 i = 0; i < src_shape.ndim; i++) p->src0_dims[i] = src_shape.dims[i];
+    for (u32 i = 0; i < out_shape.ndim; i++) p->out_dims [i] = out_shape.dims[i];
+    if (op == UOP_PERMUTE) {
+      for (u32 i = 0; i < src_shape.ndim; i++) {
+        u32 pi = (u32)term_val(heap_read(loc + 1 + i));
+        p->axis_perm[i] = (u8)(pi & 0xFF);
+      }
+    }
+    if (op == UOP_SHRINK) {
+      for (u32 i = 0; i < src_shape.ndim; i++) {
+        u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
+        u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+        p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
+        p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
+      }
+    }
+    return ke->n_ops - 1;
   }
 
   // PAD as a kernel emit (g2c2): allocate a fresh buf, run

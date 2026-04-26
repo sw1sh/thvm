@@ -6,6 +6,38 @@ dated section.
 
 ## Unreleased
 
+### Added: WL grad chain coverage (g3b)
+
+Per g3a's triage memo, the bulk of WL test failures (60+) all
+shared one root cause: the grad chain bottoms out at
+`UOP_EXPAND(UOP_CONST(0|1), target.shape)` (interact_grad's
+expand_to_target leaf rule), and the new scheduler had no path
+through it.  Three fixes:
+
+1. New `const_to_tendesc(const_loc)` in materialize.c:
+   allocates a 1-element TenDesc, writes the const bits.
+   `view_resolve` calls it when the chain ends in `UOP_CONST`.
+2. `term_shape_in` (uop_meta.c) learns UOP_GRAD: the output
+   shape equals the target's shape (heap layout [y, gy, NUM(n=1),
+   target]; unary case only -- multi-target lowers to TAG_CTR
+   before shape inference is queried).
+3. `visit()` (build_kernel) handles UOP_GRAD anywhere in the
+   tree by lazy-unrolling: loop `interact_grad` until the term
+   is no longer UOP_GRAD, then recurse.
+4. `visit()`'s movement-op branch (RESHAPE/EXPAND/PERMUTE/
+   SHRINK/FLIP) falls through to a kernel-op emit when
+   `view_resolve` fails (e.g., EXPAND wrapping a MUL from
+   interact_grad's chain rule).  Populates the `src0_ndim/dims`
+   + `out_ndim/dims` + `axis_perm` / `pad_widths` metadata that
+   `cpu_op_*` and the Metal shaders need.
+
+WL test recovery (per-file pass count): grad 1 -> 35 (+34),
+nn 22 -> 31 (+9), tensors 13 -> 13 (unchanged but now matches
+g3a's expectation).  Still red and handed to g3c: sgd 1/5,
+optim 5/8, beautiful_mnist 0/2, reduce 1/4, uop_load segfault.
+
+`make test` stays 166/166 green.
+
 ### Added: GRAD unroll + TAG_CTR descent in thvm_materialize (g2d)
 
 `thvm_materialize` now handles UOP_GRAD sinks directly instead of

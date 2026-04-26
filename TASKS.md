@@ -505,12 +505,44 @@ B + D (real bugs needing investigation).
 -->
 
 
-- [ ] **g3b: fix simple WL surface mismatches**.  Address the
-      small categories from g3a's triage: extern_pin (2),
-      core (2), flip (2), and any other <10-fail file.  Likely
-      some of these are pre-existing test bugs (e.g., assertions
-      that no longer hold after the round-1/2 purge).  ~50 LOC
-      across the WL bridge or test files.
+- [x] **g3b: Category A fix (CONST sources + GRAD-anywhere unroll
+      + movement-op kernel fallback)**.  g3a's per-file triage
+      reset the priority -- extern_pin/core/flip pass alone (the
+      cumulative report was just lying about cross-file state),
+      so the real Category A is the (NotATensor, UOP) residue from
+      grad chains.  Three fixes:
+      1. `const_to_tendesc` materializes a UOP_CONST to a 1-elt
+         TenDesc; `view_resolve` calls it when the chain bottoms
+         out at a CONST instead of a TenDesc.
+      2. `term_shape_in` learns UOP_GRAD: returns the target's
+         shape (heap layout [y, gy, NUM(n=1), target]).
+      3. `visit()` lazy-unrolls UOP_GRAD anywhere in the kernel
+         tree (loop interact_grad until non-GRAD, recurse).
+      4. `visit()`'s movement-op branch falls through to kernel
+         emit (with src0_/out_/pad_widths/axis_perm metadata)
+         when `view_resolve` fails (e.g., EXPAND wrapping a MUL
+         from interact_grad).
+      Recovered: grad 1->35 (+34), nn 22->31 (+9), tensors 13/15.
+      Still red: sgd 1/5, optim 5/8, beautiful_mnist 0/2,
+      reduce 1/4 -- handed to g3c.
+
+<!-- design-question (2026-04-26): user asked "when did you
+     pivot to this eager grad without asking me?" pointing at the
+     g2d CHANGELOG entry.  The plan I wrote at
+     ~/.claude/plans/magical-wondering-biscuit.md (Phase B "Key
+     choices") explicitly says "GRAD is unrolled before classify,
+     so backward UOps go through the same realize_classify as
+     forward and become normal kernel boundaries" -- they
+     approved that plan via ExitPlanMode.  But "kernels hold ast
+     anyways" from their earlier message could be read as a
+     preference for LAZY GRAD (kernels carry UOP_GRAD opcodes in
+     their program[]; the kernel runtime fires interact_grad at
+     dispatch time).  I asked which interpretation; they haven't
+     answered yet.  Continuing with eager (the approved plan
+     default) so the cron loop keeps making progress.  If the
+     user picks lazy, g3b/c/d need to be torn out and re-planned.
+-->
+
 
 - [ ] **g3c: fix nn / shape / permute / heap_snapshot failures**.
       The big categories (60-71 fails each) likely share a root
