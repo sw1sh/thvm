@@ -1142,6 +1142,88 @@ int main(void) {
     }
   }
 
+  // === Stage 8.4b: multi-sort metadata ================================
+
+  TEST_BEGIN("wald/sorts/empty-spec-has-no-sorts");
+  {
+    WaldSpec *spec = wald_init();
+    CHECK_EQ(spec->n_sorts, 0u);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/sorts/register-and-lookup");
+  {
+    WaldSpec *spec = wald_init();
+    u32 nat_id  = wald_sort_id_or_register(spec, "nat",  3);
+    u32 list_id = wald_sort_id_or_register(spec, "list", 4);
+    u32 nat_again = wald_sort_id_or_register(spec, "nat", 3);
+    CHECK_EQ(nat_id, 0u);
+    CHECK_EQ(list_id, 1u);
+    CHECK_EQ(nat_again, 0u);                     // idempotent lookup
+    CHECK_EQ(spec->n_sorts, 2u);
+    CHECK_EQ((int)strcmp(spec->sorts[0], "nat"), 0);
+    CHECK_EQ((int)strcmp(spec->sorts[1], "list"), 0);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/sorts/multi-sort-pr-fixture");
+  {
+    // A small sorted-list fragment: nat / list sorts.
+    static const char *src =
+      "NAME            nat_list\n"
+      "MODE            PROOF\n"
+      "SORTS           nat list\n"
+      "SIGNATURE       zero: -> nat\n"
+      "                succ: nat -> nat\n"
+      "                nil: -> list\n"
+      "                cons: nat list -> list\n"
+      "VARIABLES       n,m : nat\n"
+      "                xs : list\n"
+      "EQUATIONS       cons(n, nil) = cons(n, nil)\n"
+      "CONCLUSION      cons(zero, nil) = cons(zero, nil)\n";
+
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+
+    // Sort table: nat (0), list (1).
+    CHECK_EQ(spec->n_sorts, 2u);
+    CHECK_EQ((int)strcmp(spec->sorts[0], "nat"), 0);
+    CHECK_EQ((int)strcmp(spec->sorts[1], "list"), 0);
+
+    // Symbol metadata: zero, succ, nil, cons.
+    CHECK_EQ(spec->n_symbols, 4u);
+    // zero: -> nat
+    CHECK_EQ((int)strcmp(spec->symbols[0].name, "zero"), 0);
+    CHECK_EQ(spec->symbols[0].arity, 0u);
+    CHECK_EQ(spec->symbols[0].result_sort, 0u);   // nat
+    // succ: nat -> nat
+    CHECK_EQ((int)strcmp(spec->symbols[1].name, "succ"), 0);
+    CHECK_EQ(spec->symbols[1].arity, 1u);
+    CHECK_EQ(spec->symbols[1].arg_sorts[0], 0u);  // nat
+    CHECK_EQ(spec->symbols[1].result_sort, 0u);   // nat
+    // nil: -> list
+    CHECK_EQ((int)strcmp(spec->symbols[2].name, "nil"), 0);
+    CHECK_EQ(spec->symbols[2].arity, 0u);
+    CHECK_EQ(spec->symbols[2].result_sort, 1u);   // list
+    // cons: nat list -> list
+    CHECK_EQ((int)strcmp(spec->symbols[3].name, "cons"), 0);
+    CHECK_EQ(spec->symbols[3].arity, 2u);
+    CHECK_EQ(spec->symbols[3].arg_sorts[0], 0u);  // nat
+    CHECK_EQ(spec->symbols[3].arg_sorts[1], 1u);  // list
+    CHECK_EQ(spec->symbols[3].result_sort, 1u);   // list
+
+    // Variable metadata: n, m, xs.
+    CHECK_EQ(spec->n_vars, 3u);
+    CHECK_EQ((int)strcmp(spec->vars[0].name, "n"),  0);
+    CHECK_EQ(spec->vars[0].sort, 0u);   // nat
+    CHECK_EQ((int)strcmp(spec->vars[1].name, "m"),  0);
+    CHECK_EQ(spec->vars[1].sort, 0u);   // nat (batch comma-share)
+    CHECK_EQ((int)strcmp(spec->vars[2].name, "xs"), 0);
+    CHECK_EQ(spec->vars[2].sort, 1u);   // list
+
+    wald_free(spec);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

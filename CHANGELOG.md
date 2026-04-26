@@ -6,6 +6,43 @@ dated section.
 
 ## Unreleased
 
+### Added: sort metadata on WaldSpec (stage 8.4b)
+
+`src/thvm.h` extends WaldSpec with a sort table per
+`docs/plans/multi_sort.md`'s Choice C:
+
+- `WaldSpec.sorts[WALD_MAX_SORTS][WALD_NAME_LEN]` (16 sorts max,
+  32 chars each) + `n_sorts` count.
+- `WaldSym.arg_sorts[WALD_MAX_ARITY]` + `WaldSym.result_sort` --
+  per-symbol sort indices, populated from SIGNATURE.
+- `WaldVar.sort` -- per-variable sort index, populated from
+  VARIABLES with comma-batch sharing (`x, y, z : nat` -> all
+  three get sort `nat`).
+
+New helper `wald_sort_id_or_register(spec, name, len)` looks up
+a sort by name or registers a new entry if one isn't present.
+Returns `WALD_MAX_SORTS` (sentinel) on overflow.  Used by
+SORTS / SIGNATURE / VARIABLES parsers; sort ids stay stable
+across sections.
+
+Parser updates in `src/wald/_.c`:
+- `wald_parse_sorts` now stores sort names (was discarding)
+- `wald_parse_signature` captures arg/result sort ids per symbol
+- `wald_parse_variables` tracks a comma-batch start so a single
+  `: <sort>` post-comma applies to all variables in the batch
+
+`tests/test_wald.c` adds 3 cases (5492 sub-checks, was 5458):
+- `wald/sorts/empty-spec-has-no-sorts`
+- `wald/sorts/register-and-lookup` (idempotent lookup)
+- `wald/sorts/multi-sort-pr-fixture`: full nat/list signature
+  with comma-batched variables; verifies all sort metadata
+
+Backwards-compat path: a `.pr` file without an explicit SORTS
+section still parses fine -- sorts get auto-registered lazily
+during SIGNATURE / VARIABLES parsing.  `n_sorts == 0` after
+parsing means "no sorts referenced anywhere," which 8.4d will
+treat as homogeneous mode (no sort checking).
+
 ### Added: multi-sort signatures design memo (stage 8.4a)
 
 `docs/plans/multi_sort.md` (~150 lines) lays out the design for

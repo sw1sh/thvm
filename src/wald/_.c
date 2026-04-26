@@ -267,19 +267,28 @@ fn WaldSection wald_parse_signature(WaldSpec *spec, WaldLex *lex) {
     // Expect ':' between name and arg sorts.
     if (wald_lex_next(lex) != WT_COLON) return wald_skip_to_section(lex);
 
-    // 0+ ident arg sorts terminated by '->'.
+    // 0+ ident arg sorts terminated by '->'.  Stage 8.4b: capture
+    // each arg-sort id into sym->arg_sorts[arity].
     u8 saw_arrow = 0;
     for (;;) {
       WaldTokKind t = wald_lex_next(lex);
       if (t == WT_ARROW) { saw_arrow = 1; break; }
       if (t == WT_END)   return WSEC_NONE;
       if (t != WT_IDENT) return wald_skip_to_section(lex);
+      if (sym->arity < WALD_MAX_ARITY) {
+        u32 sid = wald_sort_id_or_register(spec, lex->tok_text, lex->tok_len);
+        if (sid < WALD_MAX_SORTS) sym->arg_sorts[sym->arity] = sid;
+      }
       sym->arity++;
     }
     (void)saw_arrow;
 
-    // Result sort: one ident, consumed and discarded.
+    // Result sort: one ident; capture its id.
     if (wald_lex_next(lex) != WT_IDENT) return wald_skip_to_section(lex);
+    {
+      u32 sid = wald_sort_id_or_register(spec, lex->tok_text, lex->tok_len);
+      if (sid < WALD_MAX_SORTS) sym->result_sort = sid;
+    }
 
     spec->n_symbols++;
   }
@@ -591,6 +600,10 @@ fn WaldSection wald_parse_ordering(WaldSpec *spec, WaldLex *lex) {
 // (EOF mid-list) returns WSEC_NONE; whatever vars were registered
 // up to that point stay.
 fn WaldSection wald_parse_variables(WaldSpec *spec, WaldLex *lex) {
+  // 8.4b: track the start of the current comma-batch so we can
+  // propagate the post-colon sort to every variable in the batch
+  // (e.g. `x, y, z : nat` -> all three get sort `nat`).
+  u32 batch_start = (spec != NULL) ? spec->n_vars : 0;
   for (;;) {
     WaldTokKind k = wald_lex_peek(lex);
     if (k == WT_END) return WSEC_NONE;
@@ -637,6 +650,15 @@ fn WaldSection wald_parse_variables(WaldSpec *spec, WaldLex *lex) {
           return inner;
         }
         wald_lex_next(lex);   // consume sort name
+        // 8.4b: assign the sort to all variables in the current
+        // batch (`x, y, z : nat` -> all three get sort nat).
+        u32 sid = wald_sort_id_or_register(spec, lex->tok_text, lex->tok_len);
+        if (sid < WALD_MAX_SORTS && spec != NULL) {
+          for (u32 vi = batch_start; vi < spec->n_vars; vi++) {
+            spec->vars[vi].sort = sid;
+          }
+          batch_start = spec->n_vars;
+        }
       }
       continue;
     }
@@ -644,11 +666,32 @@ fn WaldSection wald_parse_variables(WaldSpec *spec, WaldLex *lex) {
   }
 }
 
-// SORTS: list of sort names separated by whitespace.  We assume a
-// homogeneous signature for stages 5-7, so the sort names are
-// consumed but not stored.
+// 8.4b: look up sort by name, or register if new.  Returns
+// WALD_MAX_SORTS (sentinel) on overflow.
+fn u32 wald_sort_id_or_register(WaldSpec *spec,
+                                const char *name, u32 len) {
+  if (spec == NULL) return WALD_MAX_SORTS;
+  if (len >= WALD_NAME_LEN) len = WALD_NAME_LEN - 1;
+  for (u32 i = 0; i < spec->n_sorts; i++) {
+    u32 j = 0;
+    while (j < len && spec->sorts[i][j] == name[j]) j++;
+    if (j == len && spec->sorts[i][len] == '\0') return i;
+  }
+  if (spec->n_sorts >= WALD_MAX_SORTS) return WALD_MAX_SORTS;
+  u32 id = spec->n_sorts++;
+  for (u32 i = 0; i < len; i++) spec->sorts[id][i] = name[i];
+  spec->sorts[id][len] = '\0';
+  return id;
+}
+
+// SORTS: list of sort names separated by whitespace.  Stage 8.4b:
+// each sort name is registered in spec->sorts[] via
+// wald_sort_id_or_register; SIGNATURE / VARIABLES reuse the same
+// helper so sort ids are stable across sections.  Specs without
+// a SORTS section are still parsed -- sorts get auto-registered
+// lazily during SIGNATURE / VARIABLES parsing (homogeneous-mode
+// fixtures continue to work).
 fn WaldSection wald_parse_sorts(WaldSpec *spec, WaldLex *lex) {
-  (void)spec;
   for (;;) {
     WaldTokKind k = wald_lex_peek(lex);
     if (k == WT_END) return WSEC_NONE;
@@ -658,8 +701,9 @@ fn WaldSection wald_parse_sorts(WaldSpec *spec, WaldLex *lex) {
         wald_lex_next(lex);
         return sec;
       }
-      // Sort name; consume + ignore.
+      // Sort name; consume + register.
       wald_lex_next(lex);
+      (void)wald_sort_id_or_register(spec, lex->tok_text, lex->tok_len);
       continue;
     }
     // Anything else: skip.

@@ -568,7 +568,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         What's the impact on CP enumeration (only overlap
         pairs whose top symbols match in sort)?  Picks the
         minimum viable increment.  Scope: ~150-line memo.
-  - [ ] 8.4b extend `WaldSpec` with sort metadata: sort table
+  - [x] 8.4b extend `WaldSpec` with sort metadata: sort table
         (id -> name), per-symbol arg sorts + result sort,
         per-variable sort.  Update the `.pr` parser
         (`SORTS` / `SIGNATURE` / `VARIABLES` sections) to

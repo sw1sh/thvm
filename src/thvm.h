@@ -983,6 +983,8 @@ fn u32       thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
 #define WALD_MAX_VARS    32
 #define WALD_MAX_EQNS    64
 #define WALD_NAME_LEN    32
+#define WALD_MAX_SORTS   16   // 8.4b: max distinct sorts in a spec
+#define WALD_MAX_ARITY   8    // 8.4b: max function-symbol arity
 
 typedef struct {
   char name[WALD_NAME_LEN];
@@ -991,11 +993,18 @@ typedef struct {
   u32  prec_rank;   // 6.3c5: precedence position (0 = smallest;
                     //   higher index = greater).  All symbols start
                     //   at 0; ORDERING parser fills the chain in.
+  // 8.4b: per-symbol sort metadata.  arg_sorts[0..arity) are sort
+  // ids (indices into spec->sorts[]).  result_sort is the sort
+  // produced by this symbol.  For `.pr` files without a SORTS
+  // section, sort ids are auto-registered on first reference.
+  u32  arg_sorts[WALD_MAX_ARITY];
+  u32  result_sort;
 } WaldSym;
 
 typedef struct {
   char name[WALD_NAME_LEN];
   u32  var_id;    // FVR id assigned at parse time
+  u32  sort;      // 8.4b: sort id (index into spec->sorts[])
 } WaldVar;
 
 typedef struct {
@@ -1010,6 +1019,15 @@ typedef struct {
   WaldSym symbols[WALD_MAX_SYMBOLS];
   u32     n_symbols;
   u32     next_label;
+
+  // 8.4b: sort name table.  Sort id 0..n_sorts-1 indexes into
+  // `sorts[]`.  Populated by `wald_parse_sorts` from the SORTS
+  // section, and lazily by `wald_sort_id_or_register` when
+  // SIGNATURE / VARIABLES references a sort name not yet in the
+  // table.  `n_sorts == 0` means "homogeneous mode": no sort
+  // checking happens; all symbols / variables default to sort 0.
+  char    sorts[WALD_MAX_SORTS][WALD_NAME_LEN];
+  u32     n_sorts;
 
   // Variables: each gets a sequential FVR id.
   WaldVar vars[WALD_MAX_VARS];
@@ -1090,6 +1108,13 @@ fn WaldSection wald_skip_to_section   (WaldLex *lex);
 // reads the section content, and returns the next section's enum
 // (or WSEC_NONE on EOF).  Falls back through `wald_skip_to_section`
 // on unrecognized content.
+// 8.4b: look up a sort name in spec->sorts[] and return its id;
+// register a new entry if the name isn't present and there's
+// room.  Returns WALD_MAX_SORTS on overflow (sentinel; caller
+// can treat this as "no sort" or fail).
+fn u32         wald_sort_id_or_register(WaldSpec *spec,
+                                        const char *name, u32 len);
+
 fn WaldSection wald_parse_name     (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_mode     (WaldSpec *spec, WaldLex *lex);
 fn WaldSection wald_parse_sorts    (WaldSpec *spec, WaldLex *lex);
