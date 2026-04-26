@@ -593,3 +593,13 @@ B + D (real bugs needing investigation).
       grad 6, nn 8, beautiful_mnist 2, optim 3, sgd 4, tensors 2,
       uop_load SEGFAULT -- mostly conv2d-lowered backward chains
       and recursive optimizer step tests.
+
+---
+
+Round 3 resolved 2026-04-26: g1-g3d done.  Tinygrad-style fusion
+arc closed -- materialize emits per-boundary kernels, nf+wnf+
+materialize fixed-point loop drives reduction, fusion_count.wlt
+4/4 green pinning the kernel-count claim (Linear+MSE = 4 fwd+bwd).
+24/30 wl files fully green; remaining ~25 fails are advanced
+conv2d backward + recursive sgd_loop + uop_load segfault for the
+next arc.  make test 166/166 throughout.
