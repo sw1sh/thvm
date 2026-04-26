@@ -96,6 +96,62 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/select-cp-empty-queue");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term l = 0, r = 0;
+    CHECK_EQ(thvm_atp_select_cp(s, &l, &r), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/select-cp-fifo-order");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term l1 = mk_f(mk_v(VAR_x), mk_e()),  r1 = mk_v(VAR_x);
+    Term l2 = mk_a(),                      r2 = mk_e();
+    Term l3 = mk_e(),                      r3 = mk_a();
+    thvm_atp_add_equation(s, l1, r1);
+    thvm_atp_add_equation(s, l2, r2);
+    thvm_atp_add_equation(s, l3, r3);
+    CHECK_EQ(s->n_cps, 3u);
+
+    Term lo = 0, ro = 0;
+    CHECK(thvm_atp_select_cp(s, &lo, &ro));
+    CHECK_EQ(lo, l1);
+    CHECK_EQ(ro, r1);
+    CHECK_EQ(s->n_cps, 2u);
+
+    CHECK(thvm_atp_select_cp(s, &lo, &ro));
+    CHECK_EQ(lo, l2);
+    CHECK_EQ(ro, r2);
+    CHECK_EQ(s->n_cps, 1u);
+
+    CHECK(thvm_atp_select_cp(s, &lo, &ro));
+    CHECK_EQ(lo, l3);
+    CHECK_EQ(ro, r3);
+    CHECK_EQ(s->n_cps, 0u);
+
+    // Now empty.
+    CHECK_EQ(thvm_atp_select_cp(s, &lo, &ro), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/select-cp-shifts-tail-densely");
+  {
+    // After one pop, the remaining items should occupy slots [0..n-1).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_add_equation(s, mk_e(), mk_e());
+    thvm_atp_add_equation(s, mk_a(), mk_a());
+
+    Term lo = 0, ro = 0;
+    thvm_atp_select_cp(s, &lo, &ro);
+    CHECK_EQ(s->n_cps, 1u);
+    // The remaining equation is now at slot 0.
+    CHECK(s->cp_lhs[0] != 0);
+    CHECK_EQ(term_ext(s->cp_lhs[0]), LAB_a);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

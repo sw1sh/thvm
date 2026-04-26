@@ -808,6 +808,11 @@ fn void      thvm_atp_free        (AtpState *s);
 fn u8        thvm_atp_add_equation(AtpState *s, Term lhs, Term rhs);
 fn void      thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
 
+// Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
+// priority-collapse over INC-wrapped CPs.  Returns 1 on success
+// (out-params populated), 0 if the queue is empty.
+fn u8        thvm_atp_select_cp   (AtpState *s, Term *lhs_out, Term *rhs_out);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input

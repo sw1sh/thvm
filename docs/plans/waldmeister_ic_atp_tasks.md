@@ -47,9 +47,11 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       ATP_MAX_RULES (256) + ATP_MAX_CPS (4096) public in
       `src/thvm.h`.  Tests in `tests/test_atp.c` cover init/free,
       queue overflow, goal set/clear.
-- [ ] 5.2a `thvm_atp_select_cp`: pop the next CP off the queue.
-      Initial impl: FIFO (front of array, shift the rest down).
-      5.3 upgrades this to priority-collapse over INC-wrapped CPs.
+- [x] 5.2a `thvm_atp_select_cp`: FIFO pop in `src/atp/_.c`; shifts
+      tail down to keep the array dense; returns 0 on empty queue,
+      1 on success with out-params populated.  Tests in
+      `tests/test_atp.c` cover empty pop, three-element FIFO order,
+      and post-pop densification.  5.3 upgrades to INC-priority.
 - [ ] 5.2b `thvm_atp_orient_and_add`: given `(lhs', rhs')` reduced
       to NF, run `thvm_kbo`.  GT -> push `lhs' -> rhs'` onto R.
       LT -> push the swap.  EQ -> caller already trivialized.

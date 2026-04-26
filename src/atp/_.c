@@ -40,3 +40,19 @@ fn void thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
   s->goal_lhs = lhs;
   s->goal_rhs = rhs;
 }
+
+// Pop the front CP (FIFO).  Shift the rest of the queue down by
+// one slot to keep the array dense.  Returns 1 on success, 0 if
+// the queue was empty.  Stage 5.3 will replace this with a
+// priority-collapse selection over INC-wrapped CPs.
+fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
+  if (s == NULL || s->n_cps == 0) return 0;
+  *lhs_out = s->cp_lhs[0];
+  *rhs_out = s->cp_rhs[0];
+  for (u32 i = 1; i < s->n_cps; i++) {
+    s->cp_lhs[i - 1] = s->cp_lhs[i];
+    s->cp_rhs[i - 1] = s->cp_rhs[i];
+  }
+  s->n_cps--;
+  return 1;
+}

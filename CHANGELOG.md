@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_atp_select_cp FIFO pop (stage 5.2a)
+
+`thvm_atp_select_cp(s, &lhs_out, &rhs_out)` lands in
+`src/atp/_.c` -- pops the front CP, shifts the tail down to
+keep the array dense.  Returns 1 on success / 0 on empty.
+Stage 5.3 will replace the FIFO with priority-collapse over
+INC-wrapped CPs (the `--add` heuristic from
+`waldmeister/sources/CLAS/ClasHeuristics.c`).  Tests cover
+empty queue, FIFO order across three pushes, and tail
+densification after a pop.
+
 ### Added: AtpState struct + init/free helpers (stage 5.1)
 
 `src/atp/_.c` lands the saturation-loop state container plus
