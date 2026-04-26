@@ -6,6 +6,40 @@ dated section.
 
 ## Unreleased
 
+### Added: existential-goal narrowing in goal_check (stage 8.9c)
+
+`AtpState` gains `u8 goal_existential` (default 0).  When set,
+`thvm_atp_goal_check` dispatches from the rewrite-and-compare
+path to a narrow-and-extract path:
+
+- Iterates `thvm_atp_narrow_step` up to `ATP_NARROW_BUDGET = 8`
+  per call (outer saturation calls `goal_check` again with a
+  larger R if budget exhausts).
+- After each narrow, structural-equality check: PROVED iff
+  `kbo_eq(lhs, rhs)`.
+- Witness substitution accumulates in `s->witness_subst`.
+- Goal slots are updated with the narrowed terms so successive
+  `goal_check` calls see the post-σ state.
+
+New API:
+- `u8 thvm_atp_set_goal_existential(s, lhs, rhs)` -- mirrors
+  `thvm_atp_set_goal` but flips `s->goal_existential = 1`.
+  Honors the 8.4d sort-check gate.  `lhs == 0` clears (sets
+  flag back to 0).
+
+`tests/test_atp.c` adds 5 cases (8426 sub-checks, was 8415):
+- `exist/default-off`
+- `exist/set-flips-flag` (with clear via `lhs == 0`)
+- `exist/narrow-proves-with-witness`: rule `f(a, e) -> a`,
+  goal `f(x, e) = a` -> PROVED, witness `x = a`
+- `exist/no-narrow-returns-running`: head-mismatched rule
+  doesn't apply
+- `exist/already-equal-proves-no-narrow`: structural identity
+  short-circuits
+
+8.9d adds `.pr` `EXISTS` syntax + bench fixture; 8.9e adds the
+WL `TATP[..., Witness -> {x_}]` surface.
+
 ### Added: thvm_atp_narrow_step + get_witness primitives (stage 8.9b)
 
 `AtpState` gains a `RewriteSubst witness_subst` field

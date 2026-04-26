@@ -696,14 +696,74 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 // Step cap NORM_CAP = 64 bounds the normalization (matches the
 // ballpark used in tests/test_rewrite.c's headline demo); tune
 // once we have benchmark data.
+// 8.9c: per-iteration narrow budget.  Each goal_check call tries
+// up to this many narrow_step iterations before giving up; the
+// outer saturation loop calls goal_check again next iteration
+// with the (potentially larger) rule set.
+#define ATP_NARROW_BUDGET 8
+
 fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   if (s == NULL || s->goal_lhs == 0) return ATP_RUNNING;
   const u32 NORM_CAP = 64;
+
+  // 8.9c: existential goals use narrowing; universal goals stay
+  // on the rewrite-and-compare path.
+  if (s->goal_existential) {
+    Term lhs = s->goal_lhs;
+    Term rhs = s->goal_rhs;
+    if (kbo_eq(lhs, rhs)) return ATP_PROVED;
+    for (u32 i = 0; i < ATP_NARROW_BUDGET; i++) {
+      Term new_lhs = 0, new_rhs = 0;
+      u8 ok = thvm_atp_narrow_step(s, lhs, rhs,
+                                   &new_lhs, &new_rhs,
+                                   &s->witness_subst);
+      if (!ok) return ATP_RUNNING;   // no more narrows; wait for new R
+      lhs = new_lhs;
+      rhs = new_rhs;
+      if (kbo_eq(lhs, rhs)) {
+        // Capture the converged terms back into the goal slots
+        // so successive goal_check calls (after full saturation)
+        // still report PROVED.
+        s->goal_lhs = lhs;
+        s->goal_rhs = rhs;
+        return ATP_PROVED;
+      }
+    }
+    // Budget exhausted; let the outer loop add more rules and retry.
+    s->goal_lhs = lhs;
+    s->goal_rhs = rhs;
+    return ATP_RUNNING;
+  }
+
   Term l = atp_rewrite_normalize(s, s->goal_lhs, s->lhs, s->rhs,
                                  s->n_rules, NORM_CAP);
   Term r = atp_rewrite_normalize(s, s->goal_rhs, s->lhs, s->rhs,
                                  s->n_rules, NORM_CAP);
   return kbo_eq(l, r) ? ATP_PROVED : ATP_RUNNING;
+}
+
+// 8.9c: set an existential conjecture.  Mirrors thvm_atp_set_goal
+// but flips s->goal_existential so the narrow path runs in
+// goal_check.
+fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL) return 0;
+  if (lhs == 0) {
+    s->goal_lhs = 0;
+    s->goal_rhs = 0;
+    s->goal_existential = 0;
+    return 1;
+  }
+  if (s->spec != NULL) {
+    u32 sl = wald_term_sort(s->spec, lhs);
+    u32 sr = wald_term_sort(s->spec, rhs);
+    if (sl == WALD_MAX_SORTS || sr == WALD_MAX_SORTS || sl != sr) {
+      return 0;
+    }
+  }
+  s->goal_lhs = lhs;
+  s->goal_rhs = rhs;
+  s->goal_existential = 1;
+  return 1;
 }
 
 // Walk the older rules (indices [0, added.first)) and drop any

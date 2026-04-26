@@ -1363,6 +1363,82 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Stage 8.9c: existential goal integration ======================
+
+  TEST_BEGIN("atp/exist/default-off");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ(s->goal_existential, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/exist/set-flips-flag");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_a();
+    CHECK_EQ((int)thvm_atp_set_goal_existential(s, lhs, rhs), 1);
+    CHECK_EQ(s->goal_existential, 1u);
+    CHECK_EQ(s->goal_lhs, lhs);
+    // Clear via lhs == 0 turns it back off.
+    CHECK_EQ((int)thvm_atp_set_goal_existential(s, 0, 0), 1);
+    CHECK_EQ(s->goal_existential, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/exist/narrow-proves-with-witness");
+  {
+    // Pre-install rule f(a, e) -> a.  Existential goal:
+    // f(x, e) = a -- find x.  Narrow at top: unify f(x, e) with
+    // renamed f(a, e) (renames x -> x'; we have `e` literally),
+    // bind x = a.  After narrow: lhs = a, rhs = a.  PROVED.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e());
+    s->rhs[0] = mk_a();
+    s->n_rules = 1;
+
+    thvm_atp_set_goal_existential(s,
+      mk_f(mk_v(VAR_x), mk_e()),
+      mk_a());
+
+    AtpStatus st = thvm_atp_goal_check(s);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+
+    Term wx = thvm_atp_get_witness(s, VAR_x);
+    CHECK_EQ(term_tag(wx), TAG_CTR);
+    CHECK_EQ(term_ext(wx), 4u);   // LAB_a
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/exist/no-narrow-returns-running");
+  {
+    // Rule f(a, e) -> a.  Existential goal: g(x_) = a -- no
+    // narrowing applies (head g != head f at top, no sub-positions
+    // unify with a CTR rule LHS).  Returns RUNNING.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e());
+    s->rhs[0] = mk_a();
+    s->n_rules = 1;
+
+    thvm_atp_set_goal_existential(s, mk_i(mk_v(VAR_x)), mk_a());
+    AtpStatus st = thvm_atp_goal_check(s);
+    CHECK_EQ((int)st, (int)ATP_RUNNING);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/exist/already-equal-proves-no-narrow");
+  {
+    // Existential goal where lhs == rhs structurally; the
+    // narrow path should short-circuit before any narrow_step.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term t = mk_a();
+    Term t2 = mk_a();
+    thvm_atp_set_goal_existential(s, t, t2);
+    AtpStatus st = thvm_atp_goal_check(s);
+    CHECK_EQ((int)st, (int)ATP_PROVED);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/lpo-default-off");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);

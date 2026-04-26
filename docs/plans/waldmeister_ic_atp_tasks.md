@@ -675,7 +675,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `thvm_atp_get_witness(s, var_id) -> Term` API for
         retrieving bindings.  Tests: ~5 hand-built narrowing
         cases on tiny rule sets.
-  - [ ] 8.9c integrate narrow_step into saturation: new flag
+  - [x] 8.9c integrate narrow_step into saturation: new flag
         `s->goal_existential` + dispatch in `thvm_atp_goal_check`
         between the existing rewrite-and-compare path and the
         new narrow-and-extract path.  Witness substitution

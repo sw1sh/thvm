@@ -1009,9 +1009,20 @@ typedef struct {
   // narrow; queried via `thvm_atp_get_witness(s, var_id)`.
   // Contents are meaningful only when `goal_existential` is
   // set (8.9c) and the saturator has run a narrowing-mode
-  // proof.  v0 stores raw bindings without filtering; 8.9c
-  // restricts retrieval to user-declared witness var ids.
+  // proof.  v0 stores raw bindings without filtering;
+  // user-declared witness var ids stay in
+  // `witness_var_ids[0..n_witness_vars)` for the WL surface
+  // to use as a filter when reading back.
   RewriteSubst witness_subst;
+
+  // 8.9c: goal-mode flag.  When 0 (default), `goal_check` uses
+  // the existing rewrite-and-compare path: PROVED iff both sides
+  // normalize to structurally equal terms.  When 1, `goal_check`
+  // uses a narrow-and-extract path: tries `thvm_atp_narrow_step`
+  // up to a small budget; PROVED iff both sides become
+  // structurally equal (after sigma-application accumulated in
+  // `witness_subst`).
+  u8   goal_existential;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
@@ -1039,12 +1050,23 @@ fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
 // and returns 1.  Returns 0 if no narrow step applies.
 //
 // `thvm_atp_get_witness(s, var_id)` reads
-// `s->witness_subst.bindings[var_id]` (or 0 if unbound).  v0
-// returns raw bindings; 8.9c will filter by declared witness ids.
+// `s->witness_subst.bindings[var_id]` (or 0 if unbound).
 fn u8        thvm_atp_narrow_step (AtpState *s, Term lhs, Term rhs,
                                    Term *out_lhs, Term *out_rhs,
                                    RewriteSubst *witness);
 fn Term      thvm_atp_get_witness (const AtpState *s, u32 var_id);
+
+// 8.9c: set an existential conjecture.  Sets goal_lhs / goal_rhs
+// AND flips `s->goal_existential = 1` so `thvm_atp_goal_check`
+// uses the narrowing path.  FVRs in lhs / rhs are interpreted
+// existentially -- σ is solved for their bindings.  Caller
+// queries the result via `thvm_atp_get_witness`.
+//
+// Returns 1 on success, 0 if the spec gate (8.4d) rejected the
+// goal.  Like `thvm_atp_set_goal`, lhs == 0 clears (sets the
+// flag back to 0).
+fn u8        thvm_atp_set_goal_existential(AtpState *s,
+                                           Term lhs, Term rhs);
 
 // Serialize the trace[] array as Waldmeister-PCL-shaped text into
 // `buf` (cap = capacity).  Each line: "<idx> (<reason> [from
