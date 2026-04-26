@@ -807,3 +807,27 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       `docs/plans/corpus_expansion_findings.md` with the new
       rows.  Reference: McCune et al., "Short Single Axioms for
       Boolean Algebra", J. Automated Reasoning 2002.
+  - [ ] 10a design memo `docs/plans/wolfram_axiom_design.md`:
+        pick the two conjectures (one PROVED-fast, one TIMEOUT-
+        stress) from the Wolfram axiom.  For each: signature
+        (a single binary `nand` symbol + 1-3 constants),
+        precedence chain, conjecture, predicted status, and
+        rationale for the choice (why it's tractable vs. why
+        it's hard).  The conservative pick should be a near-
+        literal application of the axiom; the stress pick
+        should be a derived identity such as Sheffer
+        commutativity `nand(a, b) = nand(b, a)` or double-
+        negation `nand(nand(a, a), nand(a, a)) = a`.  Scope:
+        ~120-line memo.
+  - [ ] 10b implement the fixtures: write each `.pr` + `.expect`
+        from 10a.  Verify each parses and runs through
+        `test_bench_atp`; reconcile prediction-vs-observation
+        in the memo (same protocol as 9.4b).  Update CHANGELOG
+        under `## Unreleased` with the prediction/observation
+        table.  Scope: 2 small fixtures, ~30-40 lines each.
+  - [ ] 10c bench comparison + findings update: re-run
+        `tools/bench_twee` on the now 14-fixture corpus; append
+        a new section to `docs/plans/corpus_expansion_findings.md`
+        with the Wolfram-axiom rows + IC-vs-Twee deltas + any
+        new lemma-discovery insights.  Scope: ~50-line append +
+        regenerated bench CSVs.
