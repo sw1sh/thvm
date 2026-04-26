@@ -6,6 +6,42 @@ dated section.
 
 ## Unreleased
 
+### Added: narrowing design memo (stage 8.9a)
+
+`docs/plans/narrowing_design.md` (~180 lines) lays out the
+design for stage 8.9 -- narrowing for existential goals
+(Waldmeister's *NormaleZiele.c* "normal goals" + *Zielverwaltung.c*
+"goal management").
+
+**Key distinction**: rewriting matches LHS against a subterm to
+substitute RHS; narrowing UNIFIES, accumulating a witness
+substitution σ.  FVRs in the goal are existentially quantified
+and σ binds them.
+
+**API decision**:
+- Explicit witness-var-id list: `thvm_atp_set_goal_existential
+  (s, lhs, rhs, witness_var_ids[], n_witness)`.  Sets
+  `s->goal_existential = 1`.  Other FVRs in the goal stay
+  treated as opaque.
+- Witness output via `thvm_atp_get_witness(s, var_id)` reading
+  from `s->witness_subst[REWRITE_MAX_VAR]`.
+
+**Saturation-loop divergence**: only step 7 (`goal_check`)
+changes -- narrow at every non-variable position; on σ-success
+substitute and continue narrowing.  Step 1-6 unchanged.
+
+**Termination**: bounded by step_cap (existing) + a narrow-budget
+parameter for per-iteration depth.
+
+**Migration plan**:
+- 8.9b: `thvm_atp_narrow_step` helper + tests
+- 8.9c: integrate via `goal_check` flag-dispatch
+- 8.9d: `.pr` `EXISTS` syntax + bench fixture
+- 8.9e: WL `TATP[..., Witness -> {x_}]` surface
+
+Out of scope: multi-witness enumeration, conditional narrowing,
+higher-order narrowing.
+
 ### Added: --mix CP-priority heuristic (stage 8.8)
 
 `AtpState` gains `use_mix_heuristic` (default 0).  When set, the

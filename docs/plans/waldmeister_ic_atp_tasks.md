@@ -656,7 +656,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       pure-size `--add` in 5.3
 - [ ] 8.9 narrowing for existential goals (Waldmeister's
       `NormaleZiele.c` / `Zielverwaltung.c`)
-  - [ ] 8.9a design memo `docs/plans/narrowing_design.md`:
+  - [x] 8.9a design memo `docs/plans/narrowing_design.md`:
         survey the narrowing algorithm vs rewriting (rewrite
         applies an oriented rule via matching; narrow tries
         UNIFICATION at every position to find a witness
