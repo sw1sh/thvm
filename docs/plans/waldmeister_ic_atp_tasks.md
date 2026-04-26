@@ -457,6 +457,32 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           off or invest in further optimization.
 - [ ] 8.2 KBO as a pure IC program (deferred 2.4 -- compile from
       the C version once it's stable)
+  - [ ] 8.2a design memo `docs/plans/kbo_ic_design.md`:
+        survey the encoding choices for porting KBO to IC --
+        (1) `TAG_PRI` wrapper around `thvm_kbo` (callable from
+        IC code via APP-PRI; analogous to 8.1c's
+        `prim_unify_apply`), (2) hybrid IC structural recursion
+        + C arithmetic primitives, (3) full pure-IC port with
+        Church-numeral or TAG_NUM weights.  Pick which steps
+        fit in subsequent firings.  Document why "pure IC"
+        matters: it lets 8.10 SupGen-style search superpose
+        alternative ordering choices.  Scope: ~150-line memo.
+  - [ ] 8.2b register `thvm_kbo` as a TAG_PRI primitive at
+        `ATP_PRIM_KBO = 2`; takes `(s, t, cfg_id)` -- where
+        `cfg_id` is an index into a small process-global table
+        of registered KboConfigs (since `KboConfig*` doesn't
+        fit in a Term).  Returns a NUM whose value encodes
+        `KBO_EQ / GT / LT / UN`.  Tests: `tests/test_kbo_pri.c`
+        -- 4-6 cases covering each outcome and the
+        APP-PRI-saturation roundtrip.
+  - [ ] 8.2c pure-IC port of `kbo_eq` (the structural-equality
+        check) -- the simplest sub-routine that doesn't need
+        arithmetic.  Encode as a `TAG_PRI` primitive that's
+        itself implemented via IC structural recursion on the
+        term pair, returning `NUM(0)` or `NUM(1)`.
+  - [ ] 8.2d full pure-IC port of `thvm_kbo` (deferred until
+        8.2a's design picks the encoding; likely
+        research-grade and multi-firing on its own).
 - [ ] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
       APP-SUP fan-out across the rule set; uses ICC primitives
       (TAG_BRI / TAG_ANN) where dependent typing helps
