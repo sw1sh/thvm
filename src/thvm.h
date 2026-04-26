@@ -1003,6 +1003,15 @@ typedef struct {
   // (default), no sort checking happens (homogeneous-mode
   // behavior preserved).  Set via `thvm_atp_set_spec`.
   const struct WaldSpec *spec;
+
+  // 8.9b: witness substitution accumulated during narrowing.
+  // Populated by `thvm_atp_narrow_step` on each successful
+  // narrow; queried via `thvm_atp_get_witness(s, var_id)`.
+  // Contents are meaningful only when `goal_existential` is
+  // set (8.9c) and the saturator has run a narrowing-mode
+  // proof.  v0 stores raw bindings without filtering; 8.9c
+  // restricts retrieval to user-declared witness var ids.
+  RewriteSubst witness_subst;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);
@@ -1021,6 +1030,21 @@ fn void      thvm_atp_set_spec    (AtpState *s,
 // uses LPO instead of KBO.  Pass NULL to revert to KBO (the
 // default).
 fn void      thvm_atp_set_lpo     (AtpState *s, const LpoConfig *lpo);
+
+// 8.9b: narrowing primitives.  `thvm_atp_narrow_step` walks every
+// non-variable position of `lhs` and `rhs` (in that order),
+// trying to unify each subterm with each rule's LHS.  On first
+// success, it writes the σ-applied lhs / rhs into `out_lhs` /
+// `out_rhs`, accumulates the binding into `witness->bindings[]`,
+// and returns 1.  Returns 0 if no narrow step applies.
+//
+// `thvm_atp_get_witness(s, var_id)` reads
+// `s->witness_subst.bindings[var_id]` (or 0 if unbound).  v0
+// returns raw bindings; 8.9c will filter by declared witness ids.
+fn u8        thvm_atp_narrow_step (AtpState *s, Term lhs, Term rhs,
+                                   Term *out_lhs, Term *out_rhs,
+                                   RewriteSubst *witness);
+fn Term      thvm_atp_get_witness (const AtpState *s, u32 var_id);
 
 // Serialize the trace[] array as Waldmeister-PCL-shaped text into
 // `buf` (cap = capacity).  Each line: "<idx> (<reason> [from

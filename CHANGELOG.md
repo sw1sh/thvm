@@ -6,6 +6,41 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_atp_narrow_step + get_witness primitives (stage 8.9b)
+
+`AtpState` gains a `RewriteSubst witness_subst` field
+populated during narrowing.  Two new public APIs in
+`src/atp/_.c`:
+
+- `u8 thvm_atp_narrow_step(s, lhs, rhs, *out_lhs, *out_rhs,
+  *witness)` -- one narrowing step.  Walks every non-variable
+  position of `lhs` then `rhs` (left-to-right), tries unifying
+  each subterm with each rule's LHS.  On first success: applies
+  σ to both sides, accumulates the binding into `witness->
+  bindings[]`, returns 1.  Returns 0 if no narrow step applies.
+- `Term thvm_atp_get_witness(s, var_id)` -- reads
+  `s->witness_subst.bindings[var_id]`; returns 0 if unbound or
+  out of range.
+
+Implementation: reuses `cp_walk_positions`, `cp_subterm_at`,
+`cp_replace_at` from `src/cp/_.c` (visible in the single-TU
+build).  No σ-composition step needed because each iteration's
+σ is applied to both sides before the next narrow attempt --
+new bindings already live in the post-σ universe.
+
+`tests/test_atp.c` adds 6 cases (8415 sub-checks, was 8401):
+- `narrow/no-rules-returns-zero`
+- `narrow/top-position-binds-witness`: rule `f(a, e) -> a`,
+  goal `f(x, e) = a` -> binds `x = a`, both sides become `a`
+- `narrow/no-unifier-returns-zero`: head-mismatched rule and
+  goal -> no narrow step applies
+- `narrow/get-witness-empty`
+- `narrow/get-witness-out-of-range`
+- `narrow/get-witness-roundtrip`
+
+Stage 8.9c integrates this into `thvm_atp_goal_check` via the
+`s->goal_existential` flag.
+
 ### Added: narrowing design memo (stage 8.9a)
 
 `docs/plans/narrowing_design.md` (~180 lines) lays out the

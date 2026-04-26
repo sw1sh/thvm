@@ -668,7 +668,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         via `thvm_atp_get_witness`).  Document the saturation-
         loop divergence from rewriting (goal_check becomes
         narrow_check).  Scope: ~150-line memo.
-  - [ ] 8.9b implement `thvm_atp_narrow_step(s, lhs, rhs, ...)`
+  - [x] 8.9b implement `thvm_atp_narrow_step(s, lhs, rhs, ...)`
         helper: at every non-variable position of the goal,
         unify with each rule's LHS; on first success, return
         the witness substitution.  Companion

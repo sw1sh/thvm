@@ -1156,3 +1156,87 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
       return r;
   }
 }
+
+// === 8.9b: narrowing primitives ====================================
+
+// One-shot narrow visitor: tries each rule at the current position,
+// commits the first successful unification.  `success` flag stops
+// the walk after a hit.
+typedef struct {
+  AtpState     *s;
+  Term          side;        // currently being narrowed
+  Term          other;       // the other side (sigma is applied here too)
+  Term         *out_side;
+  Term         *out_other;
+  RewriteSubst *witness;
+  u8            success;
+} NarrowCtx;
+
+static u32 narrow_visit(const u32 *p, u32 p_len, void *raw) {
+  NarrowCtx *ctx = (NarrowCtx *)raw;
+  if (ctx->success) return 0;
+
+  Term sub = cp_subterm_at(ctx->side, p, p_len);
+  if (sub == 0 || term_tag(sub) == TAG_FVR) return 0;
+
+  for (u32 k = 0; k < ctx->s->n_rules; k++) {
+    Term lj = thvm_rename_vars(ctx->s->lhs[k], CP_RENAME_OFFSET);
+    Term rj = thvm_rename_vars(ctx->s->rhs[k], CP_RENAME_OFFSET);
+    RewriteSubst subst = {{0}};
+    if (!thvm_unify(sub, lj, &subst)) continue;
+
+    // Narrow: replace the subterm at p with the rule's RHS,
+    // then sigma-apply across both sides.
+    Term replaced  = cp_replace_at(ctx->side, p, p_len, rj);
+    *ctx->out_side  = thvm_unify_apply(replaced, &subst);
+    *ctx->out_other = thvm_unify_apply(ctx->other, &subst);
+
+    // Accumulate sigma into witness.  No composition step
+    // needed: previous-step sigmas have already been applied
+    // to side/other before this call, so each new binding lives
+    // in the post-sigma universe.
+    for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
+      if (subst.bindings[i] != 0) {
+        ctx->witness->bindings[i] = subst.bindings[i];
+      }
+    }
+    ctx->success = 1;
+    return 0;
+  }
+  return 0;
+}
+
+fn u8 thvm_atp_narrow_step(AtpState *s, Term lhs, Term rhs,
+                           Term *out_lhs, Term *out_rhs,
+                           RewriteSubst *witness) {
+  if (s == NULL || s->n_rules == 0) return 0;
+  if (out_lhs == NULL || out_rhs == NULL || witness == NULL) return 0;
+
+  NarrowCtx ctx;
+  ctx.s        = s;
+  ctx.witness  = witness;
+  ctx.success  = 0;
+
+  u32 path[CP_MAX_DEPTH];
+
+  // Try narrowing on lhs first.
+  ctx.side       = lhs;
+  ctx.other      = rhs;
+  ctx.out_side   = out_lhs;
+  ctx.out_other  = out_rhs;
+  cp_walk_positions(lhs, path, 0, CP_MAX_DEPTH, narrow_visit, &ctx, 0);
+  if (ctx.success) return 1;
+
+  // Then rhs.
+  ctx.side       = rhs;
+  ctx.other      = lhs;
+  ctx.out_side   = out_rhs;
+  ctx.out_other  = out_lhs;
+  cp_walk_positions(rhs, path, 0, CP_MAX_DEPTH, narrow_visit, &ctx, 0);
+  return ctx.success;
+}
+
+fn Term thvm_atp_get_witness(const AtpState *s, u32 var_id) {
+  if (s == NULL || var_id >= REWRITE_MAX_VAR) return 0;
+  return s->witness_subst.bindings[var_id];
+}

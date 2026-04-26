@@ -1264,6 +1264,105 @@ int main(void) {
 
   // === Stage 8.5c: LPO ordering selector =============================
 
+  // === Stage 8.9b: narrowing primitives ==============================
+
+  TEST_BEGIN("atp/narrow/no-rules-returns-zero");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs_in = mk_a(), rhs_in = mk_a();
+    Term lhs_out = 0, rhs_out = 0;
+    RewriteSubst w = {{0}};
+    CHECK_EQ((int)thvm_atp_narrow_step(s, lhs_in, rhs_in,
+                                       &lhs_out, &rhs_out, &w), 0);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow/top-position-binds-witness");
+  {
+    // Rule: f(a) -> b (lhs=f(a), rhs=b).  Goal: f(x) = b with x
+    // existential.  Top of f(x) unifies with f(a) -> bind x=a;
+    // narrow rewrites lhs to b; rhs stays b.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e());   // not used, but we need
+    s->rhs[0] = mk_a();                  // some rule -- replace below
+    // Set rule 0 to f(a) = b.  Use mk_e as the "b" placeholder
+    // since we don't have a fresh constant; actually mk_a is `a`,
+    // mk_e is `e`.  Let's say rule: f(_, e) = a, goal: f(x_, e) = a.
+    s->lhs[0] = mk_f(mk_a(), mk_e());   // f(a, e)
+    s->rhs[0] = mk_a();                  // -> a
+    s->n_rules = 1;
+
+    Term goal_lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term goal_rhs = mk_a();
+
+    Term out_lhs = 0, out_rhs = 0;
+    RewriteSubst w = {{0}};
+    u8 ok = thvm_atp_narrow_step(s, goal_lhs, goal_rhs,
+                                 &out_lhs, &out_rhs, &w);
+    CHECK_EQ((int)ok, 1);
+
+    // After narrow at top: out_lhs = sigma(rule.rhs) = a;
+    //                      out_rhs = sigma(goal_rhs) = a.
+    CHECK_EQ(term_tag(out_lhs), TAG_CTR);
+    CHECK_EQ(term_ext(out_lhs), 4u);   // LAB_a
+    CHECK_EQ(term_tag(out_rhs), TAG_CTR);
+    CHECK_EQ(term_ext(out_rhs), 4u);
+
+    // Witness: x bound to a.
+    Term wx = w.bindings[VAR_x];
+    CHECK_EQ(term_tag(wx), TAG_CTR);
+    CHECK_EQ(term_ext(wx), 4u);   // LAB_a
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow/no-unifier-returns-zero");
+  {
+    // Rule: f(a, e) = a.  Goal: g(_) = a -- top doesn't unify
+    // (different head); no sub-positions either (g is unary).
+    // After 8.9b's recursive walk the inner FVR position is
+    // skipped (FVRs aren't tried), so no narrow step applies.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e());
+    s->rhs[0] = mk_a();
+    s->n_rules = 1;
+
+    Term goal_lhs = mk_i(mk_v(VAR_x));   // i is a CTR head, but
+                                          // doesn't match f
+    Term goal_rhs = mk_a();
+    Term out_lhs = 0, out_rhs = 0;
+    RewriteSubst w = {{0}};
+    CHECK_EQ((int)thvm_atp_narrow_step(s, goal_lhs, goal_rhs,
+                                       &out_lhs, &out_rhs, &w), 0);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow/get-witness-empty");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ((u64)thvm_atp_get_witness(s, VAR_x), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow/get-witness-out-of-range");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    CHECK_EQ((u64)thvm_atp_get_witness(s, REWRITE_MAX_VAR), 0u);
+    CHECK_EQ((u64)thvm_atp_get_witness(s, REWRITE_MAX_VAR + 7u), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow/get-witness-roundtrip");
+  {
+    // After a successful narrow, populate s->witness_subst
+    // explicitly and verify get_witness reads it back.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->witness_subst.bindings[VAR_x] = mk_a();
+    Term wx = thvm_atp_get_witness(s, VAR_x);
+    CHECK_EQ(term_tag(wx), TAG_CTR);
+    CHECK_EQ(term_ext(wx), 4u);
+    thvm_atp_free(s);
+  }
+
   TEST_BEGIN("atp/lpo-default-off");
   {
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
