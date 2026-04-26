@@ -4489,7 +4489,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
              a raw UOP. -->
 
 
-  - [ ] **f1d-d2: opt structural unit tests out of toggle ON**.
+  - [x] **f1d-d2: opt structural unit tests out of toggle ON**.
         Add `MATERIALIZE_USE_REALIZE_INFO = 0;` at the top
         of main() in tests/test_materialize.c,
         tests/test_splice.c, and tests/test_use_realize.c
@@ -4501,6 +4501,14 @@ implemented + tested (f1a) but never invoked by the pipeline.
         Acceptance: 166 C + 292 WL green; the three tests
         pass regardless of what default the toggle has.
         ~10 LOC across 3 files.
+        <!-- DONE: each of the three tests now sets
+             MATERIALIZE_USE_REALIZE_INFO = 0 at the top of
+             main(), independent of the global default.
+             test_use_realize's first test renamed to
+             "legacy-mode-emits-per-uop-kernels" and its
+             CHECK_EQ assertion replaced with an explicit
+             toggle assignment.  166 C + 292 WL green. -->
+
 
   - [ ] **f1d-d3: Metal parity for inlined kernels**.
         With the toggle on, test_metal_real fails the

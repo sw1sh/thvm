@@ -25,10 +25,11 @@ static u32 count_unspliced_kernels(u32 from) {
 int main(void) {
   thvm_init();
 
-  TEST_BEGIN("use-realize/off-by-default-emits-per-uop-kernels");
-  // Default toggle is OFF -- the chain (a + b) * c should
-  // materialize to TWO kernels (ADD, MUL).
-  CHECK_EQ(MATERIALIZE_USE_REALIZE_INFO, 0);
+  TEST_BEGIN("use-realize/legacy-mode-emits-per-uop-kernels");
+  // Toggle OFF (legacy mode) -- the chain (a + b) * c should
+  // materialize to TWO kernels (ADD, MUL).  Force off explicitly
+  // so the test passes regardless of the global default.
+  MATERIALIZE_USE_REALIZE_INFO = 0;
   u32 ta = alloc_f32_tensor(4);
   u32 tb = alloc_f32_tensor(4);
   u32 tc = alloc_f32_tensor(4);

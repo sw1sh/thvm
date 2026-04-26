@@ -17,6 +17,7 @@ static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
 
 int main(void) {
   thvm_init();
+  MATERIALIZE_USE_REALIZE_INFO = 0;   // tests inspect pre-fusion kernel DAG
 
   TEST_BEGIN("materialize/single-elementwise-emits-one-kernel");
   u32 one[1] = {4};
