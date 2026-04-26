@@ -452,10 +452,36 @@ Expected ceilings:
       GRAD+CTR sinks instead of relying on wnf alone).  WL tests
       still red, awaiting g3.
 
-- [ ] **g3: WL surface fixes + fusion_count.wlt**.  Patch any WL
-      bridge/surface that breaks (likely `TRealize` and
-      `TKernelCount`).  Add `wl/THVMLink/Tests/fusion_count.wlt`
-      asserting linear-train forward+backward == 4 kernels and
-      LeNet train step <= 15 kernels.  Make `timeout 180 make
-      wl-test` green.  If counts overshoot: revert g3, revert g2,
-      replan g2 from scratch (do NOT patch in place).
+- [ ] **g3a: triage WL failures + isolate segfault**.  Plan
+      estimated g3 at ~80 LOC; reality is 60 fail in nn.wlt + 71
+      in shape.wlt + 64 in permute.wlt + 42 in heap_snapshot.wlt +
+      4 in extern_pin/core + a segfault that kills the WL kernel
+      after permute.wlt.  Run each .wlt file individually to find
+      (a) which assertion crashes the kernel, (b) categorize
+      failures: kernel-count regression / Term-shape mismatch /
+      materialize bridge issue / pre-existing test bug.  Output:
+      a triage memo (in TASKS.md as a comment under g3b/c) listing
+      each failing test with category + suspected fix.  No code
+      changes this fire.
+
+- [ ] **g3b: fix simple WL surface mismatches**.  Address the
+      small categories from g3a's triage: extern_pin (2),
+      core (2), flip (2), and any other <10-fail file.  Likely
+      some of these are pre-existing test bugs (e.g., assertions
+      that no longer hold after the round-1/2 purge).  ~50 LOC
+      across the WL bridge or test files.
+
+- [ ] **g3c: fix nn / shape / permute / heap_snapshot failures**.
+      The big categories (60-71 fails each) likely share a root
+      cause: the new materialize emits kernels with a different
+      structure than the round-1/2 code, and the WL surface
+      (TRealize, TKernelCount, TTensorData, TShape) reads kernel
+      metadata that's now shaped differently.  Find the common
+      thread and fix it once.  ~100 LOC.
+
+- [ ] **g3d: fusion_count.wlt + verify kernel ceiling**.  Add
+      `wl/THVMLink/Tests/fusion_count.wlt` asserting linear-train
+      forward+backward == 4 kernels and LeNet train step <= 15
+      kernels.  Make `timeout 180 make wl-test` green.  If counts
+      overshoot: revert g3, revert g2, replan g2 from scratch (do
+      NOT patch in place per the rewrite arc's rollback policy).
