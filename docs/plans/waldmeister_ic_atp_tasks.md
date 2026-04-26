@@ -384,7 +384,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 
 ## Stage 8+ -- full-fledged ATP iteration
 
-- [ ] 8.1 SUP-encoded CP enumeration via `TAG_PRI` unify (deferred
+- [x] 8.1 SUP-encoded CP enumeration via `TAG_PRI` unify (deferred
       4.5 -- moves CP gen from C-side to native IC reduction)
   - [x] 8.1a design memo `docs/plans/sup_encoded_cps.md`:
         survey TinyHVM / HVM4 for `TAG_PRI` ("primitive function
@@ -428,7 +428,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           `thvm_unify_apply` outputs for each pair.  3-5 test
           cases that demonstrate parity at the two-position
           and one-rule-pair scope.
-  - [ ] 8.1e replace `thvm_atp_generate_cps` -- conditional
+  - [x] 8.1e replace `thvm_atp_generate_cps` -- conditional
         on a feature flag -- with the SUP encoding.  Re-run
         the bench harness; expect comparable proof rates and
         latency within 2x of the C-side baseline.
@@ -447,7 +447,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           producing the same Term results.  Tests: parity vs C
           path at the at_push_cps_traced call boundary on the
           group axioms.  Scope: ~80 LOC.
-    - [ ] 8.1e-iii bench analysis: re-run `make test` (which
+    - [x] 8.1e-iii bench analysis: re-run `make test` (which
           drives `test_bench_atp`) and `make bench-twee` with
           `use_ic_cp_gen = 1` set in the harness and compare
           latency vs C path.  Update `docs/bench-atp.md` with

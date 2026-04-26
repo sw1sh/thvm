@@ -54,7 +54,12 @@ static int read_expect_status(const char *path, char *status_out, u32 cap) {
 
 // Run the ATP on a single .pr file and return the metrics.  Caller
 // supplies the spec and ATP state; we just plumb the call.
-static AtpStatus run_one(const char *pr_path, AtpState **out_atp,
+//
+// `use_ic_cp_gen` toggles 8.1e-i's flag on the AtpState before
+// adding axioms / running -- selects between the C-direct and
+// IC-routed CP enumerators.
+static AtpStatus run_one(const char *pr_path, u8 use_ic_cp_gen,
+                        AtpState **out_atp,
                         WaldSpec **out_spec, double *out_wall_ms) {
   WaldSpec *spec = wald_init();
   WaldErr e = wald_parse_file(pr_path, spec);
@@ -85,6 +90,7 @@ static AtpStatus run_one(const char *pr_path, AtpState **out_atp,
   cfg.var_weight = 1;
 
   AtpState *atp = thvm_atp_init(&cfg, BENCH_STEP_BUDGET);
+  atp->use_ic_cp_gen = use_ic_cp_gen;
   for (u32 i = 0; i < spec->n_eqns; i++) {
     thvm_atp_add_equation(atp, spec->eqn_lhs[i], spec->eqn_rhs[i]);
   }
@@ -110,7 +116,7 @@ int main(void) {
   FILE *csv = fopen("build/bench-atp.csv", "w");
   CHECK(csv != NULL);
   if (csv == NULL) { thvm_free(); return 1; }
-  fprintf(csv, "file,status,wall_ms,step,n_rules,n_trace,"
+  fprintf(csv, "file,mode,status,wall_ms,step,n_rules,n_trace,"
                "drop_joinable,drop_connected,drop_rule_subsumed,"
                "drop_queue_subsumed\n");
 
@@ -143,40 +149,46 @@ int main(void) {
     }
   }
 
-  // Per-file: run, write CSV row, check against .expect.
+  // Per-file: run under each CP-gen mode (C path then IC path),
+  // emit one CSV row per (file, mode), soft-check status against
+  // `.expect`.  Both modes must produce the same status (parity
+  // confirmation from 8.1e-ii); their wall-clock numbers feed
+  // 8.1e-iii's bench analysis.
+  static const u8 modes[2]              = {0u, 1u};
+  static const char *const mode_names[] = {"c", "ic"};
   for (u32 i = 0; i < n_files; i++) {
     TEST_BEGIN(files[i]);
 
-    AtpState *atp;
-    WaldSpec *spec;
-    double wall_ms = 0.0;
-    AtpStatus st = run_one(files[i], &atp, &spec, &wall_ms);
-    CHECK(atp != NULL);
-    if (atp == NULL) continue;
-
-    const char *st_str = atp_status_str(st);
-    fprintf(csv, "%s,%s,%.3f,%u,%u,%u,%u,%u,%u,%u\n",
-            files[i], st_str, wall_ms,
-            atp->step, atp->n_rules, atp->n_trace,
-            atp->n_cps_dropped_joinable,
-            atp->n_cps_dropped_connected,
-            atp->n_cps_dropped_rule_subsumed,
-            atp->n_cps_dropped_queue_subsumed);
-
-    // Soft regression check: status only.  Step / rule counts
-    // are recorded but not gated (the bench is a measurement, not
-    // a regression).
     char expect_path[BENCH_PATH_LEN];
     snprintf(expect_path, BENCH_PATH_LEN, "%.*s.expect",
              (int)(strlen(files[i]) - 3), files[i]);
     char expected[64];
     int er = read_expect_status(expect_path, expected, sizeof expected);
-    if (er == 0 && expected[0] != 0) {
-      CHECK_EQ((int)strcmp(st_str, expected), 0);
-    }
 
-    thvm_atp_free(atp);
-    wald_free(spec);
+    for (u32 m = 0; m < 2; m++) {
+      AtpState *atp;
+      WaldSpec *spec;
+      double wall_ms = 0.0;
+      AtpStatus st = run_one(files[i], modes[m], &atp, &spec, &wall_ms);
+      CHECK(atp != NULL);
+      if (atp == NULL) continue;
+
+      const char *st_str = atp_status_str(st);
+      fprintf(csv, "%s,%s,%s,%.3f,%u,%u,%u,%u,%u,%u,%u\n",
+              files[i], mode_names[m], st_str, wall_ms,
+              atp->step, atp->n_rules, atp->n_trace,
+              atp->n_cps_dropped_joinable,
+              atp->n_cps_dropped_connected,
+              atp->n_cps_dropped_rule_subsumed,
+              atp->n_cps_dropped_queue_subsumed);
+
+      if (er == 0 && expected[0] != 0) {
+        CHECK_EQ((int)strcmp(st_str, expected), 0);
+      }
+
+      thvm_atp_free(atp);
+      wald_free(spec);
+    }
   }
 
   fclose(csv);

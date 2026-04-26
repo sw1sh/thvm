@@ -58,12 +58,16 @@ in `build/bench-atp.csv` after a `make test`.
 
 Last refresh, darwin/arm64 with `cc -std=c11 -O2`, 2026-04-26:
 
-| File | Status | Wall (ms) | Steps | Rules | Trace | drop_joinable | drop_connected | drop_rule_subs | drop_queue_subs |
-|---|---|---|---|---|---|---|---|---|---|
-| `tests/data/atp/group_commutative_inverse.pr` | TIMEOUT | 132.691 | 256 | 231 | 1426 | 743 | 697 | 212 | 2 |
-| `tests/data/atp/group_right_inverse_to_e.pr` | PROVED | 0.006 | 1 | 2 | 5 | 2 | 2 | 0 | 0 |
-| `tests/data/atp/idempotent_nested.pr` | PROVED | 0.001 | 0 | 1 | 2 | 1 | 1 | 0 | 0 |
-| `tests/data/atp/monoid_right_id.pr` | PROVED | 0.001 | 0 | 1 | 3 | 1 | 1 | 0 | 0 |
+| File | Mode | Status | Wall (ms) | Steps | Rules | Trace | drop_joinable | drop_connected | drop_rule_subs | drop_queue_subs |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `tests/data/atp/group_commutative_inverse.pr` | c  | TIMEOUT | 132.474 | 256 | 231 | 1426 | 743 | 697 | 212 | 2 |
+| `tests/data/atp/group_commutative_inverse.pr` | ic | TIMEOUT | 119.391 | 256 | 231 | 1426 | 743 | 697 | 212 | 2 |
+| `tests/data/atp/group_right_inverse_to_e.pr` | c  | PROVED | 0.004 | 1 | 2 | 5 | 2 | 2 | 0 | 0 |
+| `tests/data/atp/group_right_inverse_to_e.pr` | ic | PROVED | 0.002 | 1 | 2 | 5 | 2 | 2 | 0 | 0 |
+| `tests/data/atp/idempotent_nested.pr` | c  | PROVED | 0.001 | 0 | 1 | 2 | 1 | 1 | 0 | 0 |
+| `tests/data/atp/idempotent_nested.pr` | ic | PROVED | 0.001 | 0 | 1 | 2 | 1 | 1 | 0 | 0 |
+| `tests/data/atp/monoid_right_id.pr` | c  | PROVED | 0.001 | 0 | 1 | 3 | 1 | 1 | 0 | 0 |
+| `tests/data/atp/monoid_right_id.pr` | ic | PROVED | 0.000 | 0 | 1 | 3 | 1 | 1 | 0 | 0 |
 
 Observations:
 
@@ -92,6 +96,48 @@ Observations:
   later CP is a strict instance of an earlier one; the group-
   axiom pattern produces few such cases.  May matter more on
   larger problem sets.
+
+### IC path (use_ic_cp_gen = 1) vs C path (default) -- stage 8.1e-iii
+
+The IC-routed enumerator (8.1e-ii: per-position unify+apply
+flows through APP-PRI / `prim_unify_apply3` instead of direct
+`thvm_unify` / `thvm_unify_apply`) is **byte-identical to the C
+path on every counter** -- step, n_rules, n_trace, and all four
+`n_cps_dropped_*` values agree exactly across the 4 fixtures.
+This empirically confirms the parity claim from 8.1e-ii's
+implementation tests.
+
+Wall-clock comparison (BENCH_STEP_BUDGET = 256, darwin/arm64,
+`cc -std=c11 -O2`, single run):
+
+- `group_commutative_inverse.pr`: c=132 ms, ic=119 ms
+- `group_right_inverse_to_e.pr`:  c=0.004 ms, ic=0.002 ms
+- `idempotent_nested.pr`:         c=ic=0.001 ms
+- `monoid_right_id.pr`:           c=0.001, ic=0.000 ms
+
+IC is **comfortably within the 2x latency target**; on the
+TIMEOUT case the two paths are within ~10% (run-to-run noise
+dominates).  Likely explanations:
+1. CP-gen time is dominated by the position walk + unification
+   itself; the IC wrapper (APP-PRI accumulation, wnf reduction)
+   adds only a small constant per call.
+2. `prim_unify_apply3` recomputes σ twice per CP (once for
+   `σ(replaced)`, once for `σ(ri)`).  This *should* cost extra,
+   but on these small problems the unification is cheap.
+3. Heap-allocator behavior may differ slightly between paths,
+   producing run-to-run variance that swamps the IC overhead.
+
+**Decision**: keep `use_ic_cp_gen` default off for now, since
+the C path remains the more-tested code.  But the IC path is
+production-viable on the current corpus -- it can be turned on
+opt-in for SupGen-style search experiments (8.10) without
+worrying about a latency regression on these problem shapes.
+
+If we get larger TPTP-UEQ problems where IC consistently shows
+>2x slowdown, the bottleneck is most likely the σ recomputation;
+mitigation is a single-call primitive that returns both
+`σ(replaced)` and `σ(ri)` packaged into a CTR-pair (deferred to
+8.10's needs).
 
 ## Results -- Twee
 

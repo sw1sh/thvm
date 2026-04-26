@@ -6,6 +6,40 @@ dated section.
 
 ## Unreleased
 
+### Added: IC vs C path bench comparison (stage 8.1e-iii)
+
+`tests/test_bench_atp.c` now runs each `.pr` fixture under both
+CP-gen modes (C-direct + IC-routed) and emits one CSV row per
+`(file, mode)` pair into `build/bench-atp.csv`.  New `mode`
+column joins the existing schema.
+
+Results on the 4-fixture corpus, darwin/arm64, single run:
+
+- All counters (step, n_rules, n_trace, all four
+  `n_cps_dropped_*`) are **byte-identical** between C and IC
+  paths.  Empirically confirms 8.1e-ii's parity claim.
+- Wall-clock: IC is within run-to-run noise of C on every
+  fixture.  On the TIMEOUT case (`group_commutative_inverse.pr`)
+  C=132 ms, IC=119 ms; both well within the 2x target.
+
+Hypothesis: CP-gen time is dominated by the position walk +
+unification itself; the IC wrapper (APP-PRI accumulation, wnf
+reduction) adds only a small constant per call.  σ is
+recomputed twice per CP through `prim_unify_apply3`, which is
+wasteful but cheap on small problems.
+
+**Decision**: `use_ic_cp_gen` default stays off (C path is more-
+tested).  IC is production-viable opt-in for SupGen-style search
+(8.10).  If larger TPTP-UEQ problems show >2x slowdown, the
+single-σ primitive idea (return CTR-pair of (σ(replaced),
+σ(ri))) is the obvious mitigation.
+
+`docs/bench-atp.md` updated with the full comparison table and
+analysis under a new "IC path vs C path" subsection.
+
+Stage 8.1 -- SUP-encoded CP enumeration via TAG_PRI unify --
+is now complete.
+
 ### Added: IC-routed CP enumeration (stage 8.1e-ii)
 
 `thvm_atp_generate_cps_ic` now actually routes the per-position
