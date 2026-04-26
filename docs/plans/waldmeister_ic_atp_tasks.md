@@ -47,14 +47,31 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       ATP_MAX_RULES (256) + ATP_MAX_CPS (4096) public in
       `src/thvm.h`.  Tests in `tests/test_atp.c` cover init/free,
       queue overflow, goal set/clear.
-- [ ] 5.2 saturation step:
-      - select CP from queue (priority collapse over INC-wrapped CPs)
-      - normalize both sides under R (top-position + recursive descent)
-      - discard if syntactically equal
-      - orient by KBO; if unorientable, add as a 2-way rule pair
-      - interreduce R against the new rule (scan, drop subsumed)
-      - generate fresh CPs from new rule × R, push onto queue
-      - goal-test: rewrite both sides of goal under R, check syntactic eq
+- [ ] 5.2a `thvm_atp_select_cp`: pop the next CP off the queue.
+      Initial impl: FIFO (front of array, shift the rest down).
+      5.3 upgrades this to priority-collapse over INC-wrapped CPs.
+- [ ] 5.2b `thvm_atp_orient_and_add`: given `(lhs', rhs')` reduced
+      to NF, run `thvm_kbo`.  GT -> push `lhs' -> rhs'` onto R.
+      LT -> push the swap.  EQ -> caller already trivialized.
+      UN -> unfailing fallback: push BOTH orientations as separate
+      rules.  Returns the index range that was just added so 5.2d
+      can target only the new rules.
+- [ ] 5.2d `thvm_atp_generate_cps`: call `thvm_critical_pairs`
+      restricted to (new_rules x R) and push the survivors onto
+      the queue.  Drop overflow silently.
+- [ ] 5.2c `thvm_atp_interreduce`: walk R; for any older rule whose
+      LHS reduces under the new rule (using
+      `thvm_rewrite_normalize` over a singleton ruleset), drop it
+      and push its original equation back onto the CP queue.
+      Depends on 5.4's recursive descent for sub-position rewrites.
+- [ ] 5.2e `thvm_atp_goal_check`: normalize both sides of the goal
+      under R; if they're now `kbo_eq`, return ATP_PROVED.  Skip
+      cleanly when goal_lhs == 0 (completion mode).  Depends on
+      5.4 for sub-position rewrites of compound goal terms.
+- [ ] 5.2f `thvm_atp_step` driver: the main step that calls 5.2a
+      -> normalize-via-`thvm_rewrite_normalize` -> trivialize ->
+      5.2b -> 5.2c -> 5.2d -> 5.2e and returns AtpStatus.
+      `thvm_atp_run` is a thin wrapper looping while RUNNING.
 - [ ] 5.3 priority queue construction: each CP wrapped `INC^k`
       where k = total symbol count (the `--add` heuristic; `--mix`
       lands later), enumerate via `thvm_collapse_ordered`
