@@ -211,6 +211,15 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // after it.
 #include "rewrite/_.c"
 
+// === unify/ ===
+// Most-general-unifier (stage 4).  Reuses kbo_eq + RewriteSubst.
+#include "unify/_.c"
+
+// === cp/ ===
+// Critical-pair enumeration.  Depends on thvm_unify and
+// thvm_rename_vars; included last in the IC-as-ATP block.
+#include "cp/_.c"
+
 // hrp1: heap-rooted preserve walk -- alternative to
 // realize.c's mark_preserved_chain.  Standalone helper; hrp2
 // wires it into thvm_realize.

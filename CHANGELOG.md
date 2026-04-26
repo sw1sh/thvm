@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: stage 4 -- unification + critical-pair enumeration
+
+`src/unify/_.c` lands the Robinson MGU on TAG_CTR + TAG_FVR with
+the standard occurs check.  Result lives in the same RewriteSubst
+struct used by stage 3's matcher; `unify_walk` follows FVR -> FVR
+chains, and `thvm_unify_apply` realizes a chained substitution
+into a fully-instantiated term.  `thvm_rename_vars(t, offset)`
+shifts every FVR id by `offset` so two rules can be unified
+without variable-name collisions.
+
+`src/cp/_.c` enumerates critical pairs.  Walks every non-variable
+position of `rule_i.lhs`, tries unifying with `rule_j.lhs`
+(renamed apart by `REWRITE_MAX_VAR/2`), and emits
+`(σ(l_i[p ← r_j]), σ(r_i))` on success.
+
+Demo (`tests/test_cp.c`): rule set `{ f(e, x) = x ; f(f(x, y), z)
+= f(x, f(y, z)) }` produces the expected CP `(f(y, z), f(e, f(y,
+z)))` from the [0]-overlap of left-id into assoc.
+
+C-side only for now; SUP-encoded CP enumeration via a `TAG_PRI`
+unify primitive (stage 4.5) is optional and deferred.
+
 ### Added: TMatStatsLabel for per-realize THVM_MAT_STATS attribution
 
 `TMatStatsLabel["fwd_conv1"]` tags the next `thvm_realize` call's

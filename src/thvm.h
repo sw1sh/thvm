@@ -728,6 +728,28 @@ fn Term thvm_rewrite_step     (Term t, const Term *lhs, const Term *rhs,
 fn Term thvm_rewrite_normalize(Term t, const Term *lhs, const Term *rhs,
                                u32 n_rules, u32 step_cap);
 
+// === unify/ ===
+// Most-general-unifier on TAG_CTR + TAG_FVR terms (Robinson with
+// occurs check).  Stage 4 of docs/plans/waldmeister_ic_atp.md.
+// Reuses RewriteSubst for the result; caller zero-inits before the
+// first call.  Returns 1 on success, 0 if the mgu doesn't exist.
+fn u8   thvm_unify        (Term s, Term t, RewriteSubst *subst);
+fn Term thvm_rename_vars  (Term t, u32 offset);
+fn Term thvm_unify_apply  (Term t, const RewriteSubst *subst);
+
+// === cp/ ===
+// Critical-pair enumeration for an oriented rule set (stage 4).
+// CriticalPair holds the two terms produced by overlapping rules
+// at a non-variable position; both sides should be joinable for the
+// system to be locally confluent.
+typedef struct {
+  Term lhs;
+  Term rhs;
+} CriticalPair;
+
+fn u32 thvm_critical_pairs(const Term *lhs, const Term *rhs, u32 n_rules,
+                           CriticalPair *out, u32 cap);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input
