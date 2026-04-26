@@ -176,13 +176,21 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       only, `%` comment skipping, ident with digits + underscore,
       `->` vs bare `-`, full punctuation set, an `f(x, e) = x`
       stream, long-ident truncation, and the error path.
-- [ ] 6.3c1 section-detect infrastructure: `WaldSection` enum
-      (WSEC_NONE / NAME / MODE / SORTS / SIGNATURE / VARIABLES
-      / ORDERING / EQUATIONS / CONCLUSION); helper
-      `wald_section_from_ident(name) -> WaldSection`; lexer
-      gains a 1-token peek (`have_peek` + `peeked_kind` +
-      `peeked_text`); shared `wald_skip_to_section(lex)` that
-      eats tokens until the next section keyword (or EOF).
+- [x] 6.3c1 `WaldSection` enum (WSEC_NONE / NAME / MODE / SORTS
+      / SIGNATURE / VARIABLES / ORDERING / EQUATIONS /
+      CONCLUSION) lands in `src/thvm.h`; `wald_section_from_ident`
+      compares against the known keyword set (case-sensitive,
+      unknown -> WSEC_NONE).  Lexer gains a 1-token peek
+      (`have_peek` + `peeked_kind` + `peeked_text`) wired
+      through `wald_lex_next` so `wald_lex_peek` -> next returns
+      the same token.  Shared `wald_skip_to_section(lex)` eats
+      tokens until the next section keyword (or returns
+      WSEC_NONE on EOF).  Tests cover all eight keywords + the
+      unknown / case-sensitivity / empty-string cases for
+      section_from_ident, peek-then-next consistency, peek at
+      EOF survives multiple calls, skip_to_section finds the
+      keyword and leaves the lexer positioned past it, and the
+      EOF / empty-source paths.
 - [ ] 6.3c2 NAME / MODE / SORTS section parsers: each reads
       its single-line content (one ident for NAME, "PROOF"
       vs "COMPLETION" for MODE, ident list for SORTS) and

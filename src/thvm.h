@@ -932,10 +932,36 @@ typedef struct {
   // Last-read token text (only valid for WT_IDENT); NUL-terminated.
   char        tok_text[WALD_NAME_LEN];
   u32         tok_len;
+  // 1-token peek: lookahead saved by wald_lex_peek; consumed on
+  // the next wald_lex_next call.  When have_peek == 1, the next
+  // call returns peeked_* and clears have_peek.
+  u8           have_peek;
+  WaldTokKind  peeked_kind;
+  char         peeked_text[WALD_NAME_LEN];
+  u32          peeked_len;
 } WaldLex;
 
 fn void        wald_lex_init(WaldLex *lex, const char *src);
 fn WaldTokKind wald_lex_next(WaldLex *lex);
+fn WaldTokKind wald_lex_peek(WaldLex *lex);
+
+// 6.3c1: section-detect infrastructure.  WSEC_NONE means "no
+// section / EOF / unknown ident"; the rest map 1:1 to .pr file
+// sections.
+typedef enum {
+  WSEC_NONE       = 0,
+  WSEC_NAME       = 1,
+  WSEC_MODE       = 2,
+  WSEC_SORTS      = 3,
+  WSEC_SIGNATURE  = 4,
+  WSEC_VARIABLES  = 5,
+  WSEC_ORDERING   = 6,
+  WSEC_EQUATIONS  = 7,
+  WSEC_CONCLUSION = 8,
+} WaldSection;
+
+fn WaldSection wald_section_from_ident(const char *name);
+fn WaldSection wald_skip_to_section   (WaldLex *lex);
 
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success

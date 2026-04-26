@@ -140,6 +140,75 @@ int main(void) {
     CHECK_EQ((int)wald_lex_next(&lex), (int)WT_ERR);
   }
 
+  // === 6.3c1 section-detect infrastructure ===========================
+
+  TEST_BEGIN("wald/section-from-ident-known-keywords");
+  {
+    CHECK_EQ((int)wald_section_from_ident("NAME"),       (int)WSEC_NAME);
+    CHECK_EQ((int)wald_section_from_ident("MODE"),       (int)WSEC_MODE);
+    CHECK_EQ((int)wald_section_from_ident("SORTS"),      (int)WSEC_SORTS);
+    CHECK_EQ((int)wald_section_from_ident("SIGNATURE"),  (int)WSEC_SIGNATURE);
+    CHECK_EQ((int)wald_section_from_ident("VARIABLES"),  (int)WSEC_VARIABLES);
+    CHECK_EQ((int)wald_section_from_ident("ORDERING"),   (int)WSEC_ORDERING);
+    CHECK_EQ((int)wald_section_from_ident("EQUATIONS"),  (int)WSEC_EQUATIONS);
+    CHECK_EQ((int)wald_section_from_ident("CONCLUSION"), (int)WSEC_CONCLUSION);
+  }
+
+  TEST_BEGIN("wald/section-from-ident-unknown-yields-none");
+  {
+    CHECK_EQ((int)wald_section_from_ident("FOO"),    (int)WSEC_NONE);
+    CHECK_EQ((int)wald_section_from_ident("name"),   (int)WSEC_NONE);  // case-sensitive
+    CHECK_EQ((int)wald_section_from_ident(""),       (int)WSEC_NONE);
+  }
+
+  TEST_BEGIN("wald/lex-peek-then-next-returns-same-token");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "abc def");
+    CHECK_EQ((int)wald_lex_peek(&lex), (int)WT_IDENT);
+    CHECK_EQ((int)strcmp(lex.tok_text, "abc"), 0);
+    // Peek again -- still the same token (no consumption).
+    CHECK_EQ((int)wald_lex_peek(&lex), (int)WT_IDENT);
+    CHECK_EQ((int)wald_lex_next(&lex), (int)WT_IDENT);
+    CHECK_EQ((int)strcmp(lex.tok_text, "abc"), 0);
+    CHECK_EQ((int)wald_lex_next(&lex), (int)WT_IDENT);
+    CHECK_EQ((int)strcmp(lex.tok_text, "def"), 0);
+    CHECK_EQ((int)wald_lex_next(&lex), (int)WT_END);
+  }
+
+  TEST_BEGIN("wald/lex-peek-end-survives-multiple-calls");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "");
+    CHECK_EQ((int)wald_lex_peek(&lex), (int)WT_END);
+    CHECK_EQ((int)wald_lex_peek(&lex), (int)WT_END);
+    CHECK_EQ((int)wald_lex_next(&lex), (int)WT_END);
+  }
+
+  TEST_BEGIN("wald/skip-to-section-finds-keyword");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "blah blah blah ORDERING LPO");
+    CHECK_EQ((int)wald_skip_to_section(&lex), (int)WSEC_ORDERING);
+    // Lexer is positioned past ORDERING.
+    CHECK_EQ((int)wald_lex_next(&lex), (int)WT_IDENT);
+    CHECK_EQ((int)strcmp(lex.tok_text, "LPO"), 0);
+  }
+
+  TEST_BEGIN("wald/skip-to-section-eof-yields-none");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "blah blah no section here");
+    CHECK_EQ((int)wald_skip_to_section(&lex), (int)WSEC_NONE);
+  }
+
+  TEST_BEGIN("wald/skip-to-section-from-empty-yields-none");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "");
+    CHECK_EQ((int)wald_skip_to_section(&lex), (int)WSEC_NONE);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

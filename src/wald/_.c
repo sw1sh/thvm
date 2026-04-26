@@ -55,6 +55,10 @@ fn void wald_lex_init(WaldLex *lex, const char *src) {
   lex->len     = (u32)strlen(lex->src);
   lex->tok_len = 0;
   lex->tok_text[0] = '\0';
+  lex->have_peek    = 0;
+  lex->peeked_kind  = WT_END;
+  lex->peeked_len   = 0;
+  lex->peeked_text[0] = '\0';
 }
 
 // Skip whitespace and `%`-to-end-of-line comments in place.
@@ -73,6 +77,21 @@ static void wald_lex_skip_ws(WaldLex *lex) {
 
 fn WaldTokKind wald_lex_next(WaldLex *lex) {
   if (lex == NULL) return WT_ERR;
+  // Consume the peeked token if there is one.
+  if (lex->have_peek) {
+    lex->have_peek = 0;
+    if (lex->peeked_kind == WT_IDENT) {
+      u32 n = lex->peeked_len;
+      if (n >= WALD_NAME_LEN) n = WALD_NAME_LEN - 1;
+      for (u32 i = 0; i < n; i++) lex->tok_text[i] = lex->peeked_text[i];
+      lex->tok_text[n] = '\0';
+      lex->tok_len = n;
+    } else {
+      lex->tok_text[0] = '\0';
+      lex->tok_len     = 0;
+    }
+    return lex->peeked_kind;
+  }
   wald_lex_skip_ws(lex);
   lex->tok_len = 0;
   lex->tok_text[0] = '\0';
@@ -114,6 +133,53 @@ fn WaldTokKind wald_lex_next(WaldLex *lex) {
     default: {
       lex->pos++;
       return WT_ERR;
+    }
+  }
+}
+
+// === 6.3c1: section-detect infrastructure ===========================
+
+fn WaldTokKind wald_lex_peek(WaldLex *lex) {
+  if (lex == NULL) return WT_ERR;
+  if (lex->have_peek) return lex->peeked_kind;
+  // Read the next token into tok_text via the regular path, then
+  // copy it into the peek slot and arm have_peek.
+  WaldTokKind k = wald_lex_next(lex);
+  lex->peeked_kind = k;
+  lex->peeked_len  = lex->tok_len;
+  for (u32 i = 0; i < lex->tok_len + 1; i++) {
+    lex->peeked_text[i] = lex->tok_text[i];
+  }
+  lex->have_peek = 1;
+  return k;
+}
+
+fn WaldSection wald_section_from_ident(const char *name) {
+  if (name == NULL) return WSEC_NONE;
+  if (strcmp(name, "NAME")       == 0) return WSEC_NAME;
+  if (strcmp(name, "MODE")       == 0) return WSEC_MODE;
+  if (strcmp(name, "SORTS")      == 0) return WSEC_SORTS;
+  if (strcmp(name, "SIGNATURE")  == 0) return WSEC_SIGNATURE;
+  if (strcmp(name, "VARIABLES")  == 0) return WSEC_VARIABLES;
+  if (strcmp(name, "ORDERING")   == 0) return WSEC_ORDERING;
+  if (strcmp(name, "EQUATIONS")  == 0) return WSEC_EQUATIONS;
+  if (strcmp(name, "CONCLUSION") == 0) return WSEC_CONCLUSION;
+  return WSEC_NONE;
+}
+
+// Eat tokens until the next section keyword (or EOF).  Returns the
+// detected section enum; the lexer is positioned just past the
+// section keyword.  Used by 6.3c2..c5 to recover from unstructured
+// content within a section -- when each section parser hits
+// something it doesn't understand, it falls back to skipping until
+// it finds the next section.
+fn WaldSection wald_skip_to_section(WaldLex *lex) {
+  for (;;) {
+    WaldTokKind t = wald_lex_next(lex);
+    if (t == WT_END) return WSEC_NONE;
+    if (t == WT_IDENT) {
+      WaldSection sec = wald_section_from_ident(lex->tok_text);
+      if (sec != WSEC_NONE) return sec;
     }
   }
 }

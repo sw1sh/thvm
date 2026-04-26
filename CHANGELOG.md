@@ -6,6 +6,41 @@ dated section.
 
 ## Unreleased
 
+### Added: section-detect infrastructure for the .pr parser (stage 6.3c1)
+
+`src/thvm.h`:
+
+- `WaldSection` enum: `WSEC_NONE` plus `NAME / MODE / SORTS /
+  SIGNATURE / VARIABLES / ORDERING / EQUATIONS / CONCLUSION`.
+- `WaldLex` gains a 1-token peek (`have_peek` flag +
+  `peeked_kind` + `peeked_text` + `peeked_len`).
+- `wald_section_from_ident(name) -> WaldSection`,
+  `wald_lex_peek(lex)`, `wald_skip_to_section(lex)`.
+
+`src/wald/_.c`:
+
+- `wald_lex_init` clears the peek slot.
+- `wald_lex_next` consumes the peek if armed (copies
+  peeked_text into tok_text), otherwise scans normally.
+- `wald_lex_peek` populates the peek using the regular scan
+  path; idempotent until the next consume.
+- `wald_section_from_ident` is a flat strcmp dispatch,
+  case-sensitive (".pr" files use uppercase keywords).
+- `wald_skip_to_section` eats tokens until it sees a known
+  section keyword; returns the matching enum, or WSEC_NONE on
+  EOF.
+
+This is the shared dependency for 6.3c2..c5: each section parser
+falls back to `wald_skip_to_section` on unrecognized content and
+uses `wald_lex_peek` to detect end-of-section without consuming
+the next section's keyword.
+
+Tests in `tests/test_wald.c` (76 sub-checks) cover all eight
+section keywords, the unknown / case-sensitive / empty-string
+paths for `wald_section_from_ident`, peek-then-next consistency,
+peek-at-EOF idempotence, `wald_skip_to_section` landing past the
+keyword, and the EOF + empty-source paths.
+
 ### Added: Waldmeister .pr lexer (stage 6.3b)
 
 `src/wald/_.c` gains the lexer half of the parser: `WaldLex`
