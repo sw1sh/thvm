@@ -6,6 +6,36 @@ dated section.
 
 ## Unreleased
 
+### Added: WL multi-witness surface (stage 9.1c)
+
+`TATP[axioms, conjecture, Witness -> {x_, ...}, AllWitnesses
+-> True]` enumerates all witnesses found by `narrow_all`.
+
+- New LibraryLink entry `thvm_wl_atp_run_all_witnesses`
+  (in `wl/THVMLink/CSource/thvmlink.c`) takes the existential
+  args plus `max_depth`, `max_witnesses`. Saturates first with
+  no goal set so `thvm_atp_run` does not early-exit, then
+  calls `thvm_atp_narrow_all` on the original goal. Output:
+  `[status, n_rules, n_trace, n_cps, n_found,
+   w_0_id_0, ..., w_(max_witnesses-1)_id_(n_witness-1)]`,
+  zero-padded for unused witness rows.
+- New TATP options `AllWitnesses -> False` (default),
+  `MaxDepth -> 8`, `MaxWitnesses -> 16`. With
+  `AllWitnesses -> True` the result Association swaps the
+  singular `"Witness" -> <|...|>` for `"Witnesses" -> {<|x ->
+  t1|>, <|x -> t2|>, ...}`. Default behaviour is unchanged
+  (singular `Witness` key) so existing callers keep working.
+
+Tests (5 new VerificationTests in `wl/THVMLink/Tests/atp.wlt`):
+- `witnesses-key-present`, `witnesses-is-list`
+- `two-rules-yield-two-witnesses` (the multi-witness happy
+  path: axioms `f(a, e) == a` and `f(e, e) == a` both unify
+  with goal `f(x_, e) == a`)
+- `max-witnesses-caps-list` (cap honored)
+- `default-stays-singular` (backwards-compat regression)
+
+166/166 C, 319 WL.
+
 ### Added: bounded DFS multi-witness narrowing (stage 9.1b)
 
 `thvm_atp_narrow_all(s, lhs, rhs, max_depth, max_witnesses,

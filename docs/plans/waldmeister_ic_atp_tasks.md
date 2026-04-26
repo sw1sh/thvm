@@ -748,7 +748,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         witness substitutions.  Output: a stack-allocated
         `RewriteSubst` array + count.  Tests: hand-built
         problems with 0 / 1 / multiple witnesses.
-  - [ ] 9.1c WL surface: `TATP[..., AllWitnesses -> True]`
+  - [x] 9.1c WL surface: `TATP[..., AllWitnesses -> True]`
         returns `<|"Witnesses" -> {<|x -> term1|>,
         <|x -> term2|>, ...}|>` instead of `Witness ->
         <|...|>`.  Include the search budget options.

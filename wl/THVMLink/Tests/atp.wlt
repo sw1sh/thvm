@@ -232,3 +232,70 @@ VerificationTest[
     "PROVED",
     TestID -> "ATP/TATP/witness/empty-runs-universal-path"
 ]
+
+(* === 9.1c: TATP[..., AllWitnesses -> True] surface === *)
+
+VerificationTest[
+    (* AllWitnesses -> True returns "Witnesses" (plural) key, not
+       "Witness".  Single-witness setup so the list has length 1. *)
+    Module[{r},
+      r = TATP[{f[a, e] == a}, f[Pattern[x, Blank[]], e] == a,
+               Witness -> {Pattern[x, Blank[]]},
+               AllWitnesses -> True];
+      KeyExistsQ[r, "Witnesses"]
+    ],
+    True,
+    TestID -> "ATP/TATP/all-witnesses/witnesses-key-present"
+]
+
+VerificationTest[
+    (* AllWitnesses -> True returns a List of Associations. *)
+    Module[{r},
+      r = TATP[{f[a, e] == a}, f[Pattern[x, Blank[]], e] == a,
+               Witness -> {Pattern[x, Blank[]]},
+               AllWitnesses -> True];
+      Head[r["Witnesses"]]
+    ],
+    List,
+    TestID -> "ATP/TATP/all-witnesses/witnesses-is-list"
+]
+
+VerificationTest[
+    (* Two distinct axioms unifying with the goal at top yield two
+       witnesses.  f(a, e) -> a binds x=a; f(e, e) -> a binds x=e. *)
+    Module[{r},
+      r = TATP[{f[a, e] == a, f[e, e] == a},
+               f[Pattern[x, Blank[]], e] == a,
+               Witness -> {Pattern[x, Blank[]]},
+               AllWitnesses -> True];
+      Length[r["Witnesses"]] >= 2
+    ],
+    True,
+    TestID -> "ATP/TATP/all-witnesses/two-rules-yield-two-witnesses"
+]
+
+VerificationTest[
+    (* MaxWitnesses -> 1 caps the list at one entry. *)
+    Module[{r},
+      r = TATP[{f[a, e] == a, f[e, e] == a},
+               f[Pattern[x, Blank[]], e] == a,
+               Witness -> {Pattern[x, Blank[]]},
+               AllWitnesses -> True,
+               MaxWitnesses -> 1];
+      Length[r["Witnesses"]]
+    ],
+    1,
+    TestID -> "ATP/TATP/all-witnesses/max-witnesses-caps-list"
+]
+
+VerificationTest[
+    (* AllWitnesses -> False (default) keeps the singular "Witness"
+       Association key for backwards compatibility. *)
+    Module[{r},
+      r = TATP[{f[a, e] == a}, f[Pattern[x, Blank[]], e] == a,
+               Witness -> {Pattern[x, Blank[]]}];
+      KeyExistsQ[r, "Witness"] && ! KeyExistsQ[r, "Witnesses"]
+    ],
+    True,
+    TestID -> "ATP/TATP/all-witnesses/default-stays-singular"
+]

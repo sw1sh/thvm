@@ -253,6 +253,13 @@ $atpRunFn        := $atpRunFn        = load["thvm_wl_atp_run", {{"NumericArray",
    Term values. *)
 $atpRunExistFn   := $atpRunExistFn   = load["thvm_wl_atp_run_existential", {{"NumericArray", "Shared"}, Integer, Integer, {Integer, 1}}, "NumericArray"];
 
+(* 9.1c: multi-witness ATP runner.  Saturates first, then calls
+   thvm_atp_narrow_all on the original goal.  Output array layout:
+   [status, n_rules, n_trace, n_cps, n_found,
+    w_0_id_0, ..., w_(max_witnesses-1)_id_(n_witness-1)].
+   Length = 5 + max_witnesses * n_witness. *)
+$atpRunAllFn     := $atpRunAllFn     = load["thvm_wl_atp_run_all_witnesses", {{"NumericArray", "Shared"}, Integer, Integer, {Integer, 1}, Integer, Integer}, "NumericArray"];
+
 (* 8.7c: CTR-builder for the ATP expression encoder.  Takes a
    label and a NumericArray of child Term values; returns the
    packed Term value of the new TAG_CTR. *)
@@ -350,13 +357,17 @@ $atpStatusName = <|
 SetAttributes[TATP, HoldAll];
 
 TATP[axioms_, conjecture_,
-     OptionsPattern[{MaxSteps -> 64, Witness -> {}}]] :=
+     OptionsPattern[{MaxSteps -> 64, Witness -> {},
+                     AllWitnesses -> False, MaxDepth -> 8,
+                     MaxWitnesses -> 16}]] :=
   Catch[
     Module[
       {state, packed, axTerms, goalLhs, goalRhs, stats,
        maxLab, statusCode, ax, lhs, rhs, lhsRes, rhsRes, cj,
        witnessSpec, witnessIds, witnessNames, wn, wid,
-       witnessAssoc, baseResult, witnessVals},
+       witnessAssoc, baseResult, witnessVals,
+       allWitnesses, maxDepth, maxWitnesses, nFound,
+       witnessRows, witnessAssocs, k, ws},
       ensureInit[];
       state = encodeAtpTermInit[];
       axTerms = {};
@@ -405,7 +416,10 @@ TATP[axioms_, conjecture_,
          OptionValue[Witness] returns the list directly -- the
          Pattern[] structures are atomic in WL (don't auto-evaluate)
          so we can index into them without holding. *)
-      witnessSpec = OptionValue[Witness];
+      witnessSpec   = OptionValue[Witness];
+      allWitnesses  = OptionValue[AllWitnesses];
+      maxDepth      = OptionValue[MaxDepth];
+      maxWitnesses  = OptionValue[MaxWitnesses];
       If[ Length[witnessSpec] == 0,
         (* Universal goal -- existing path. *)
         stats = Normal @ $atpRunFn[packed, OptionValue[MaxSteps], maxLab];
@@ -417,7 +431,7 @@ TATP[axioms_, conjecture_,
           "Rules"  -> stats[[2]],
           "QueueSize" -> stats[[4]]
         |>,
-        (* Existential goal -- collect witness ids and run narrow path. *)
+        (* Existential goal -- resolve witness names to FVR ids. *)
         witnessNames = {};
         witnessIds   = {};
         Do[
@@ -442,21 +456,48 @@ TATP[axioms_, conjecture_,
           ],
           {i, Length[witnessSpec]}
         ];
-        stats = Normal @ $atpRunExistFn[packed, OptionValue[MaxSteps],
-                                        maxLab, witnessIds];
-        statusCode = stats[[1]];
-        witnessVals = stats[[5 ;; 4 + Length[witnessIds]]];
-        witnessAssoc = AssociationThread[
-          Symbol /@ witnessNames -> witnessVals
-        ];
-        <|
-          "Status"    -> Lookup[$atpStatusName, statusCode,
-                                "UNKNOWN(" <> ToString[statusCode] <> ")"],
-          "Steps"     -> stats[[3]],
-          "Rules"     -> stats[[2]],
-          "QueueSize" -> stats[[4]],
-          "Witness"   -> witnessAssoc
-        |>
+        If[ allWitnesses,
+          (* 9.1c: multi-witness path -- saturate then narrow_all. *)
+          stats = Normal @ $atpRunAllFn[packed, OptionValue[MaxSteps],
+                                        maxLab, witnessIds,
+                                        maxDepth, maxWitnesses];
+          statusCode = stats[[1]];
+          nFound = stats[[5]];
+          k = Length[witnessIds];
+          witnessRows =
+            If[ nFound > 0 && k > 0,
+              Partition[stats[[6 ;; 5 + nFound * k]], k],
+              {}
+            ];
+          witnessAssocs = Table[
+            AssociationThread[Symbol /@ witnessNames -> ws],
+            {ws, witnessRows}
+          ];
+          <|
+            "Status"    -> Lookup[$atpStatusName, statusCode,
+                                  "UNKNOWN(" <> ToString[statusCode] <> ")"],
+            "Steps"     -> stats[[3]],
+            "Rules"     -> stats[[2]],
+            "QueueSize" -> stats[[4]],
+            "Witnesses" -> witnessAssocs
+          |>,
+          (* Single-witness path (8.9e). *)
+          stats = Normal @ $atpRunExistFn[packed, OptionValue[MaxSteps],
+                                          maxLab, witnessIds];
+          statusCode = stats[[1]];
+          witnessVals = stats[[5 ;; 4 + Length[witnessIds]]];
+          witnessAssoc = AssociationThread[
+            Symbol /@ witnessNames -> witnessVals
+          ];
+          <|
+            "Status"    -> Lookup[$atpStatusName, statusCode,
+                                  "UNKNOWN(" <> ToString[statusCode] <> ")"],
+            "Steps"     -> stats[[3]],
+            "Rules"     -> stats[[2]],
+            "QueueSize" -> stats[[4]],
+            "Witness"   -> witnessAssoc
+          |>
+        ]
       ]
     ],
     "TATPError"
