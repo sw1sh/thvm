@@ -691,3 +691,30 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 8.10 SupGen-style search inside saturation: superpose the
       "which CP to pick next" choice, collapse with priority,
       compare against the explicit-queue baseline
+  - [ ] 8.10a design memo `docs/plans/supgen_search_design.md`:
+        observe that `thvm_atp_select_cp` already implements
+        SupGen-style search for CP selection (each CP wrapped
+        in INC^k, folded into a SUP tree, popped via
+        `thvm_collapse_ordered`).  Survey further superposition
+        opportunities: (1) unfailing-orient direction
+        (KBO_UN -> superpose both directions and pick by
+        priority), (2) ordering choice (KBO vs LPO superposed),
+        (3) heuristic mode (--add vs --mix as alternative SUP
+        children).  Pick ONE concrete extension for 8.10b that
+        adds non-overlapping value beyond what's already in
+        place.
+  - [ ] 8.10b implement the chosen extension + bench it
+        against the explicit-queue / single-choice baseline
+        from stages 5-9.  Goal: demonstrate that SupGen-style
+        superposition either (a) saves work via lazy
+        evaluation, (b) explores a search space that the
+        explicit version can't, or (c) reveals an architectural
+        cleanup opportunity.
+  - [ ] 8.10c IC-native ATP arc closing memo
+        `docs/plans/atp_arc_summary.md`: recap what stages
+        1-8.10 delivered, what remains research-grade and
+        deferred (8.6 unordered SUP/DUP awaiting HVM4
+        upstream; sort-aware KBO; multi-witness narrowing),
+        and what the natural follow-on stages would be (TPTP
+        file parsing in WL, AC matching, full pure-IC KBO
+        port).  Closing the arc.
