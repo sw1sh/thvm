@@ -176,14 +176,40 @@ Real kernel-count + memory wins need either:
       number).  Forward dominates -- Conv2D-lowered chain is the
       next fusion target.
 
-- [ ] **k2: pick the next fusion target from k1's data**.
-      Decompose once k1 is in.  Likely candidates per the
-      d4b2d analysis: `Fold[TUOpAdd, partials]` in
-      TUOpConv2DLowered (one kernel per partial vs. one kernel
-      total), softmax `exp / sum / div` chain, cross-entropy
-      `log / mul / sum` chain.  This is a NEW decomposition,
-      not "f2" from the archived list -- start fresh with k1's
-      breakdown.
+- [ ] **k2a: TUOpAddN multi-input ADD kernel**.  Per k1's
+      breakdown the forward pass is dominated by 24+24 = 48
+      partial-sum ADD kernels emitted from the
+      `Fold[TUOpAdd, partials]` chain inside
+      `TUOpConv2DLowered` (kh=kw=5 -> 25 partials per conv,
+      24 ADDs to fold).  Replace the chain with one kernel
+      whose program is N-1 cascading ADDs reading N input
+      tensors into one output buffer.  Includes:
+        - new UOP_ADDN opcode in src/thvm.h
+        - constructor `uop_addn(Term *xs, u32 n)` in
+          new file src/uop/addn.c (heap = [NUM(n), x_1..x_n])
+        - materialize support: build a multi-op program
+          (reuses the inline-helper LOAD-prefix + cascading
+          ADD plumbing -- see materialize_inlined.c)
+        - cpu/metal backend dispatch (n-1 ADDs over the same
+          output buffer)
+        - tests covering 2/3/8-input ADDN against the
+          equivalent Fold[TUOpAdd, ...] result.
+      ~80 LOC C + ~30 LOC tests.
+
+- [ ] **k2b: switch TUOpConv2DLowered to TUOpAddN**.  In
+      `wl/THVMLink/Kernel/NN.wl`, the Conv2D-lowered helper
+      currently uses `Fold[TUOpAdd, partials[[1]],
+      partials[[2 ;;]]]` to sum the 25 partials.  Switch to
+      `TUOpAddN @@ partials`.  Existing nn.wlt Conv2D tests
+      cover correctness.  Acceptance: lenet kernel_count
+      drops by ~48 (covers 2 conv layers in forward).
+      ~10 LOC + bench rerun.
+
+- [ ] **k2c: measure delta + close k2**.  Re-run bench on
+      both backends; record post-k2 kernel count + peak in
+      `docs/bench-results.md`.  Acceptance: forward kernel
+      count drops by >40%; peak unchanged is OK (this is
+      compute-side fusion, not memory).  ~5 LOC + measurement.
 
 ### Cleanup
 
