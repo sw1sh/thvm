@@ -624,6 +624,34 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       HVM4 when upstream lands them)
 - [ ] 8.7 WL bridge: `TATP[axioms, conjecture] -> proof tree` so
       the prover is reachable from notebooks
+  - [ ] 8.7a design memo `docs/plans/wl_atp_bridge.md`: pick
+        the WL surface form (`TATP[{axiom_1, axiom_2, ...},
+        conjecture]` returning a `ProofTree[]` association?
+        a list of rewrite steps? a `Failure[...]` on TIMEOUT?),
+        and the WL-expression-to-Term encoding (atoms ->
+        TAG_CTR with arity 0; symbols -> TAG_CTR with their
+        operands; uppercase identifiers -> TAG_FVR; `==` ->
+        equation pair).  Document how to handle WL pattern
+        constructs (`x_`, `Blank[]`, etc.) that don't have
+        clean Term equivalents.  Scope: ~200-line memo.
+  - [ ] 8.7b LibraryLink helper that runs the ATP on
+        pre-encoded Term inputs (skipping the WL encoder).
+        New entry point `thvmlink_atp_run` in
+        `wl/THVMLink/CSource/thvmlink.c`; takes axiom lhs/rhs
+        Term lists + goal Terms + an LpoConfig stub; returns
+        the trace serialized to a string.  Direct WL test
+        with manually-encoded Terms.
+  - [ ] 8.7c WL-expression-to-Term encoder: the bulk of 8.7,
+        walks an expression tree and produces a Term.  Handle
+        atoms, symbols, FVR (probably via `Pattern[x, _]`),
+        and `==` (eq-pair).  Tests with hand-built WL
+        expressions of various shapes.
+  - [ ] 8.7d `TATP[axioms, conjecture]` WL surface form +
+        return-shape pretty printer.  Wires 8.7c (encode) into
+        8.7b (run) and decodes the trace back into a
+        notebook-friendly `Association[]`.  Tests use the
+        group axioms via WL syntax; assert the result matches
+        what test_bench_atp produces on the equivalent .pr.
 - [ ] 8.8 `--mix` heuristic (size + orientability) replacing the
       pure-size `--add` in 5.3
 - [ ] 8.9 narrowing for existential goals (Waldmeister's
