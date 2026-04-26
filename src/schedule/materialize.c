@@ -412,20 +412,12 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     return ke->n_ops - 1;
   }
 
-  // GRAD anywhere in the tree: lazy-unroll one step then recurse.
-  // interact_grad is called repeatedly until the result is no
-  // longer UOP_GRAD or it returns the input unchanged.  Without
-  // this, GRAD leaves deep in the kernel subtree (e.g., ADD's
-  // grad chain producing GRAD(a)+GRAD(b)) cause visit() to bail.
-  if (op == UOP_GRAD) {
-    Term cur = t;
-    while (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_GRAD) {
-      Term g = interact_grad(cur);
-      if (g == cur) return VISIT_BAIL;       // stuck
-      cur = g;
-    }
-    return visit(cur, ke, root_loc);
-  }
+  // GRAD is a stop point in materialize -- the architecture is
+  // wnf-fires-grad + materialize-compiles-uops, with thvm_realize
+  // looping the pair until no fresh kernels are emitted.  Bailing
+  // here makes the enclosing kernel emission abort so the caller
+  // (thvm_realize) loops back through wnf to fire interact_grad.
+  if (op == UOP_GRAD) return VISIT_BAIL;
 
   // Movement ops as a child of the kernel: try view-only resolve
   // first.  If the source isn't a contig TenDesc-resolvable chain
@@ -610,23 +602,10 @@ fn Term materialize_uop_in_env(Term t, u32 env_id) {
 }
 
 fn Term thvm_materialize(Term term) {
-  if (term_tag(term) != TAG_UOP)        return term;
-  if (term_ext(term) == UOP_KERNEL)     return term;
-
-  // g2d: unroll UOP_GRAD at sink first so realize_classify sees
-  // the post-unroll forward+backward chain instead of an opaque
-  // GRAD leaf.  interact_grad does ONE structural step per call;
-  // loop until the sink is no longer UOP_GRAD.  If it returns the
-  // input unchanged the chain is stuck (e.g., y is a free VAR);
-  // bail to wnf in that case.
-  while (term_tag(term) == TAG_UOP && term_ext(term) == UOP_GRAD) {
-    Term g = interact_grad(term);
-    if (g == term) break;
-    term = g;
-  }
-  // Multi-target GRAD lowers to TAG_CTR of unary GRADs.  Materialize
-  // each child independently and rebuild the CTR; downstream WL
-  // surface (TGradMany / term_ctr_at) reads each cell separately.
+  // TAG_CTR (multi-target grad bundle): materialize each child
+  // independently and rebuild the CTR.  Pure structural recursion;
+  // the children themselves are normal UOp graphs (or already TAG_TEN
+  // for grad components that wnf already reduced).
   if (term_tag(term) == TAG_CTR) {
     u32 n = term_ctr_n(term);
     if (n > 256) return term;
@@ -637,6 +616,9 @@ fn Term thvm_materialize(Term term) {
   }
   if (term_tag(term) != TAG_UOP)        return term;
   if (term_ext(term) == UOP_KERNEL)     return term;
+  // GRAD is a stop point in materialize -- wnf fires interact_grad,
+  // then thvm_realize loops back here to compile the unrolled UOps.
+  if (term_ext(term) == UOP_GRAD)       return term;
 
   // Movement-op root: resolve the chain to an alias TenDesc, then
   // flatten to a contig copy so wnf-side flat reads work.

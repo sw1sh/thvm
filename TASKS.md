@@ -544,13 +544,34 @@ B + D (real bugs needing investigation).
 -->
 
 
-- [ ] **g3c: fix nn / shape / permute / heap_snapshot failures**.
-      The big categories (60-71 fails each) likely share a root
-      cause: the new materialize emits kernels with a different
-      structure than the round-1/2 code, and the WL surface
-      (TRealize, TKernelCount, TTensorData, TShape) reads kernel
-      metadata that's now shaped differently.  Find the common
-      thread and fix it once.  ~100 LOC.
+- [x] **g3c: REDUCE-arg fix + eager-to-lazy GRAD refactor**.
+      Per-fire pivot after user clarified eager-vs-lazy GRAD is a
+      user-facing choice, not a hardcoded model: thvm_realize
+      should be wnf-first and loop materialize+wnf, with
+      materialize itself never auto-unrolling GRAD.
+
+      Three changes:
+      1. `cpu_op_reduce` REDUCE arg encoding bug: was packing
+         `axis`, expected `inner = prod(dims[axis+1..])`.  Fixed
+         in visit()'s REDUCE-as-tail emit; reduce.wlt 1/4 -> 4/4.
+      2. Removed the eager GRAD code from the materialize path:
+         (a) the while-loop unroll at top of thvm_materialize,
+         (b) the GRAD branch in visit() that lazy-unrolled deep,
+         (c) the UOP_GRAD shape rule in term_shape_in.
+         GRAD now hits an explicit `return VISIT_BAIL` /
+         `return term` -- caller drives the unroll via wnf.
+      3. `thvm_realize` (src/schedule/realize.c) refactored to
+         wnf-first loop: `wnf(expr)`, then up to 16 iterations
+         of `materialize -> kernel_compute_consumer_counts -> wnf`,
+         exiting when materialize emits no fresh kernel
+         (KERNELS_NEXT unchanged).  TAG_CTR materializes each
+         child independently and rebuilds the CTR via
+         term_new_ctr.
+
+      Result: per-file WL run goes from 73 fails + 1 segfault
+      down to 2 fails (beautiful_mnist) + 1 segfault (uop_load).
+      `make test` stays 166/166.  beautiful_mnist + uop_load
+      handed to g3d.
 
 - [ ] **g3d: fusion_count.wlt + verify kernel ceiling**.  Add
       `wl/THVMLink/Tests/fusion_count.wlt` asserting linear-train

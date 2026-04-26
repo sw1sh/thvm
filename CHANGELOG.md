@@ -6,6 +6,35 @@ dated section.
 
 ## Unreleased
 
+### Refactored: eager-grad-in-materialize -> wnf-first loop (g3c)
+
+User clarified that eager-vs-lazy GRAD is a user-facing choice, not
+a hardcoded model.  The materialize path no longer auto-unrolls
+GRAD; thvm_realize now drives a wnf-first loop.
+
+Removed (eager-grad code from g2d/g3b):
+- The while-loop unroll at top of `thvm_materialize`.
+- The GRAD branch in `visit()` that recursively unrolled deep.
+- The UOP_GRAD shape rule in `term_shape_in`.
+
+GRAD now hits an explicit `return VISIT_BAIL` (in visit) or
+`return term` (at the materialize entry); the caller drives the
+unroll via wnf.
+
+Refactored `thvm_realize` (src/schedule/realize.c):
+- Old: one `materialize -> kernel_compute_consumer_counts -> wnf`.
+- New: `wnf(expr)`, then up to 16 iterations of
+  `materialize -> kernel_compute_consumer_counts -> wnf`, exiting
+  when materialize emits no fresh kernel (KERNELS_NEXT unchanged).
+
+Users wanting Order A (forward-first, lazy backward) call
+`TMaterialize` and `TWnf` themselves; `TRealize` provides the
+fully-converged Order B form via the loop.
+
+Recovery: per-file WL run goes from 73 fails + 1 segfault down to
+2 fails (beautiful_mnist) + 1 segfault (uop_load).  Both handed to
+g3d.  `make test` stays 166/166.
+
 ### Added: WL grad chain coverage (g3b)
 
 Per g3a's triage memo, the bulk of WL test failures (60+) all

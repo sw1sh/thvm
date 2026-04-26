@@ -38,27 +38,23 @@ static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
 
 fn Term thvm_realize(Term expr) {
   u32 wm = cpu_buf_pool_begin();
-  Term mat = thvm_materialize(expr);
 
-  // Sub-item c of the refcount-driven free arc: compute per-kernel
-  // consumer counts BEFORE wnf so the decref hook in
-  // kernel_fire_by_id (sub-item b) can mark intermediate bufs
-  // freeable as their last consumer fires.  The freeable signal is
-  // currently INFORMATIONAL only -- the rollback below still uses
-  // the conservative whole-producer-chain preserve walk for
-  // cross-realize correctness (heap-resident UOP terms like pending
-  // TGrad expressions read forward intermediates at the next
-  // realize, so we can't free them based on intra-realize kernel
-  // refcounts alone).  An aggressive variant that drops the
-  // preserve walk and frees on `freeable && !preserved` segfaults
-  // nn.wlt's two-step `{TRealize[loss], TRealize[TGrad[loss,x]]}`
-  // pattern; saving the savings until a heap-rooted preserve pass
-  // is wired (which would walk live UOP terms in HEAP[] and pin
-  // their referenced TenDescs precisely, replacing the
-  // producer-chain conservative walk).
-  kernel_compute_consumer_counts();
-
-  Term res = wnf(mat);
+  // wnf-first loop: wnf can fire kernels and unroll GRADs to plain
+  // UOPs.  After wnf, if any UOPs remain that would compile to
+  // kernels, materialize emits them; then wnf fires those.  Loop
+  // until materialize is a no-op (no fresh kernel emitted).  This
+  // separates the two phases per the architecture choice point:
+  // the user can call TWnf / TMaterialize directly to do Order A
+  // (forward-first lazy backward) themselves; thvm_realize wires
+  // the Order B / fully-converged form.
+  Term res = wnf(expr);
+  for (int iter = 0; iter < 16; iter++) {
+    u32 kn0 = KERNELS_NEXT;
+    Term mat = thvm_materialize(res);
+    if (KERNELS_NEXT == kn0) { res = mat; break; }
+    kernel_compute_consumer_counts();
+    res = wnf(mat);
+  }
 
   // gc3: tracing-GC preserve.  Composes gc1 + gc2 into
   // mark_gc_preserve(res), which walks the live root set
