@@ -67,16 +67,18 @@ fn Term materialize_uop_in_env(Term uop, u32 env_id) {
     // f1d-b2: when the toggle is on, route through the inlined
     // helper.  Realized UOPs (root, REDUCE outputs, multi-consumer)
     // get a single kernel that absorbs un-realized upstream
-    // elementwise compute.  Un-realized UOPs return unchanged so
-    // walk_cell skips the rewrite -- a downstream realized parent
-    // will inline them via materialize_kernel_inlined.  The helper
-    // returns 0 if the chain contains a non-elementwise un-realized
-    // upstream UOp; in that case fall through to the legacy path.
+    // elementwise compute.  Un-realized INLINABLE UOPs return
+    // unchanged so walk_cell skips the rewrite -- a downstream
+    // realized parent will absorb them via materialize_kernel_inlined.
+    // Un-realized non-inlinable UOPs (movement ops) fall through
+    // to the legacy path so view-only alias creation + kernel
+    // emission still happens.  Helper bail (non-elementwise
+    // upstream) also falls through.
     if (MATERIALIZE_USE_REALIZE_INFO) {
       if (realize_is_realized(uop)) {
         Term k = materialize_kernel_inlined(uop);
         if (k != 0) return k;
-      } else {
+      } else if (inline_is_inlinable((u8)op)) {
         return uop;
       }
     }

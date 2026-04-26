@@ -523,6 +523,13 @@ extern u8 MATERIALIZE_USE_REALIZE_INFO;
 // falls back to legacy per-UOp kernel emission).
 fn Term materialize_kernel_inlined(Term realized_uop_term);
 
+// True for elementwise + UOP_CONST (the ops the inlined helper
+// can absorb into a parent kernel's program).  Movement ops
+// (RESHAPE/EXPAND/SHRINK/PERMUTE/PAD/FLIP) return false so the
+// f1d hook in materialize_uop_in_env falls them through to the
+// legacy view-only alias / kernel emit path.
+fn u8 inline_is_inlinable(u8 op);
+
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.
 fn Term interact_app_lam(Term lam, Term arg);

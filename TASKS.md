@@ -4466,7 +4466,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
        commit 010031c for the diagnosis.  Splitting into 4
        sub-items so each lands in one fire. -->
 
-  - [ ] **f1d-d1: hook fall-through for movement ops**.  In
+  - [x] **f1d-d1: hook fall-through for movement ops**.  In
         materialize_uop_in_env's f1d hook, the un-realized
         branch currently `return uop;` for any non-realized
         UOp.  That breaks view-only alias creation for
@@ -4479,6 +4479,15 @@ implemented + tested (f1a) but never invoked by the pipeline.
         on no longer regresses test_view_shrink /
         test_view_permute / test_view_pad / test_view_flip.
         ~5 LOC.
+        <!-- DONE: hook now reads `else if (inline_is_inlinable
+             ((u8)op)) return uop;` so movement ops fall
+             through to legacy view-only handling.  Forward
+             decl for inline_is_inlinable added to thvm.h.
+             166 C + 292 WL green with default OFF; manually
+             verified that EXPAND with toggle ON now produces
+             a TAG_TEN view-only alias instead of returning
+             a raw UOP. -->
+
 
   - [ ] **f1d-d2: opt structural unit tests out of toggle ON**.
         Add `MATERIALIZE_USE_REALIZE_INFO = 0;` at the top
