@@ -4765,13 +4765,28 @@ implemented + tested (f1a) but never invoked by the pipeline.
              (no behavior change). -->
 
 
-  - [ ] **f1d-d4b1b2: remaining structural opt-outs**.
+  - [x] **f1d-d4b1b2: remaining structural opt-outs**.
         After d4b1b1 fixes correctness, re-audit which
         toggle-ON tests still fail.  Probably none if
         d4b1a + d4b1b1 covered everything.  If any do
         fail for legacy-shape reasons, apply
         TSetUseRealizeInfo[False] guards as originally
         planned.  ~10-20 LOC if needed.
+        <!-- DONE: only one structural failure remained
+             post-d4b1b1: tensors.wlt
+             "TMaterialize/compound-two-kernels", which pins
+             the legacy 2-kernel layout of (a + b) * c.
+             Wrapped the test body in
+             TSetUseRealizeInfo[False] ... TSetUseRealizeInfo[prev]
+             so it deterministically exercises the legacy
+             code path regardless of the global default.
+             Per-test verification under toggle ON:
+                 cmpeq.wlt:        3/0
+                 grad.wlt:        38/0
+                 tensor_numeric: 10/0
+                 tensors.wlt:    15/0  (was 14/1)
+             166 C + 292 WL green with default OFF. -->
+
 
 
   - [ ] **f1d-d4b1c: bump KERNELS_CAP + flip default**.
