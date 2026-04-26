@@ -301,17 +301,22 @@ int main(void) {
   TEST_BEGIN("atp/generate-cps-single-rule-self-overlap");
   {
     // Add one rule via orient_and_add, then generate_cps.  Since R
-    // contains only the new rule, the only enumeration is the
-    // 1x1 self-overlap (which thvm_critical_pairs always produces
-    // at the top position via the fresh rename of j).
+    // contains only the new rule, the only enumeration is the 1x1
+    // self-overlap (always produced at the top position via the
+    // fresh rename of j).
+    //
+    // Stage 7.1: that self-overlap CP is always trivially joinable
+    // (both sides reduce to the same renamed RHS), so the filter
+    // drops it -- pushed must be 0 and the dropped-counter ticks.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_f(mk_v(VAR_x), mk_e());
     Term rhs = mk_v(VAR_x);
     AtpAddedRange added = thvm_atp_orient_and_add(s, lhs, rhs);
     CHECK_EQ(added.count, 1u);
     u32 pushed = thvm_atp_generate_cps(s, added);
-    CHECK(pushed >= 1u);                   // at least the trivial top-overlap
-    CHECK_EQ(s->n_cps, pushed);
+    CHECK_EQ(pushed, 0u);
+    CHECK_EQ(s->n_cps, 0u);
+    CHECK(s->n_cps_dropped_joinable >= 1u);
     thvm_atp_free(s);
   }
 
@@ -321,9 +326,13 @@ int main(void) {
     // Then add the left-id rule via orient_and_add and run
     // generate_cps.  The (new x all) sweep covers
     // left-id-overlapped-into-assoc; the (old x new) sweep
-    // covers assoc-overlapping-leftid.  We don't check the exact
-    // count (depends on how many CPs survive each unification);
-    // we just check that at least one was emitted.
+    // covers assoc-overlapping-leftid.
+    //
+    // Stage 7.1: under {assoc, left-id}, every survivable overlap
+    // produces a CP that's already joinable by R (e.g. assoc x
+    // left-id at the inner f gives `(f(b,c), f(e, f(b,c)))`, which
+    // collapses to `f(b,c) = f(b,c)` after applying left-id).
+    // So the filter drops them all and the counter ticks.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
 
     // R[0] = assoc: f(f(x,y), z) -> f(x, f(y, z))
@@ -340,8 +349,8 @@ int main(void) {
     CHECK_EQ(added.first, 1u);
 
     u32 pushed = thvm_atp_generate_cps(s, added);
-    CHECK(pushed >= 1u);
-    CHECK_EQ(s->n_cps, pushed);
+    CHECK_EQ(pushed, 0u);
+    CHECK(s->n_cps_dropped_joinable >= 1u);
     thvm_atp_free(s);
   }
 
@@ -580,21 +589,69 @@ int main(void) {
 
   TEST_BEGIN("atp/trace-cp-records-source-rules-as-parents");
   {
-    // After one step (axiom + orient), generate_cps fires the
-    // self-overlap and produces TRACE_CP entries.  Each CP entry's
-    // parent_a and parent_b should both equal r_trace[0] (the
-    // orient entry index = 1).
+    // Stage 7.1 changed self-overlap behavior: a single rule's
+    // self-overlap is always trivially joinable, so the filter
+    // drops it.  To get a CP that SURVIVES the filter we need
+    // two non-confluent rules:
+    //   r0: f(e, x) -> x   (left-id; rhs is variable)
+    //   r1: f(x, e) -> a   (rhs is constant a)
+    // Cross-overlap at the top unifies f(e, x) with f(y, e),
+    // giving y=e, x=e; r0 says result = e, r1 says result = a;
+    // CP = (e, a), NOT joinable under R.
+    //
+    // We pre-install r0, then orient_and_add r1, then run
+    // generate_cps.  The (new x all) sweep produces TRACE_CP
+    // entries; the cross-overlap CP's parent_a/parent_b should
+    // be r_trace[1] / r_trace[0] (r1 is i=1, r0 is j=0).
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
-    Term lhs = mk_f(mk_v(VAR_x), mk_e());
-    Term rhs = mk_v(VAR_x);
-    thvm_atp_add_equation(s, lhs, rhs);
-    AtpStatus st = thvm_atp_step(s);
-    CHECK_EQ((int)st, (int)ATP_RUNNING);
-    CHECK(s->n_trace >= 3u);   // axiom + orient + >= 1 CP
-    Term cp_entry = s->trace[2];
-    CHECK_EQ(term_ext(cp_entry), TRACE_CP);
-    CHECK_EQ(term_val(term_ctr_at(cp_entry, 0)), 1u);   // parent_a = orient
-    CHECK_EQ(term_val(term_ctr_at(cp_entry, 1)), 1u);   // parent_b = same orient (self-overlap)
+
+    // Pre-install r0: f(e, x) -> x.  Manually plumbed; r_trace[0]
+    // gets a synthetic TRACE_AXIOM entry so the parent-pointer
+    // assertions below have something to check against.
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = atp_trace_push(s, TRACE_AXIOM,
+                                   ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                   s->lhs[0], s->rhs[0]);
+    s->n_rules = 1;
+
+    // Orient and add r1: f(x, e) -> a.  orient_and_add itself
+    // doesn't emit TRACE_ORIENT or set r_trace -- that's done by
+    // thvm_atp_step.  Since this test bypasses step, we plumb
+    // r_trace[1] manually so generate_cps can read it.
+    Term lhs1 = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs1 = mk_a();
+    AtpAddedRange added = thvm_atp_orient_and_add(s, lhs1, rhs1);
+    CHECK_EQ(added.count, 1u);
+    CHECK_EQ(added.first, 1u);
+    s->r_trace[1] = atp_trace_push(s, TRACE_ORIENT, s->r_trace[0],
+                                   ATP_TRACE_NONE,
+                                   s->lhs[1], s->rhs[1]);
+
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK(pushed >= 1u);
+    // The trace contains: [r0 axiom (0), r1 orient (1),
+    //                      then >= 1 CP entries from this point].
+    CHECK(s->n_trace >= 3u);
+
+    // Find the first TRACE_CP entry and check its parents.
+    u8 found_cp = 0;
+    for (u32 i = 2; i < s->n_trace; i++) {
+      Term entry = s->trace[i];
+      if (term_ext(entry) == TRACE_CP) {
+        u32 pa = (u32)term_val(term_ctr_at(entry, 0));
+        u32 pb = (u32)term_val(term_ctr_at(entry, 1));
+        // Parents come from r_trace[i] / r_trace[j].  Both must be
+        // valid trace indices (not ATP_TRACE_NONE) and < entry idx.
+        CHECK(pa != ATP_TRACE_NONE);
+        CHECK(pb != ATP_TRACE_NONE);
+        CHECK(pa < i);
+        CHECK(pb < i);
+        found_cp = 1;
+        break;
+      }
+    }
+    CHECK(found_cp == 1u);
     thvm_atp_free(s);
   }
 
@@ -672,9 +729,11 @@ int main(void) {
 
   TEST_BEGIN("atp/trace-serialize-orient-with-parent");
   {
-    // Push axiom + step.  Trace includes axiom, orient (parent=0),
-    // and a TRACE_CP entry from generate_cps.  Verify the orient
-    // line carries "from 0".
+    // Push axiom + step.  Trace includes axiom and orient
+    // (parent=0); after stage 7.1 the self-overlap CP is
+    // trivially joinable and gets filtered out, so no "(cp from
+    // ...): " line appears.  Verify the axiom and orient lines
+    // are still present and well-formed.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     thvm_atp_step(s);
@@ -682,7 +741,6 @@ int main(void) {
     thvm_atp_trace_serialize(s, buf, sizeof(buf));
     CHECK(strstr(buf, "0 (axiom): ")        != NULL);
     CHECK(strstr(buf, "1 (orient from 0): ") != NULL);
-    CHECK(strstr(buf, "(cp from 1, 1): ")    != NULL);
     thvm_atp_free(s);
   }
 
@@ -756,6 +814,65 @@ int main(void) {
     }
     CHECK_EQ(final_reason, TRACE_AXIOM);
 
+    thvm_atp_free(s);
+  }
+
+  // === Stage 7.1: trivial-joinability filter ==========================
+
+  TEST_BEGIN("atp/cp-joinability-filter-self-overlap-counter");
+  {
+    // A single rule's self-overlap is always trivially joinable;
+    // generate_cps should drop it and bump n_cps_dropped_joinable.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = ATP_TRACE_NONE;
+    s->n_rules = 1;
+
+    AtpAddedRange added = {0, 1};
+    CHECK_EQ(s->n_cps_dropped_joinable, 0u);
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK_EQ(pushed, 0u);
+    CHECK(s->n_cps_dropped_joinable >= 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-joinability-filter-survives-non-joinable");
+  {
+    // Two non-confluent rules: cross-overlap is NOT trivially
+    // joinable.  Verify the survivor reaches the queue.
+    //   r0: f(e, x) -> x   (left-id; rhs is variable)
+    //   r1: f(x, e) -> a   (rhs is constant a)
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+
+    s->lhs[0] = mk_f(mk_e(), mk_v(VAR_x));
+    s->rhs[0] = mk_v(VAR_x);
+    s->r_trace[0] = ATP_TRACE_NONE;
+    s->lhs[1] = mk_f(mk_v(VAR_x), mk_e());
+    s->rhs[1] = mk_a();
+    s->r_trace[1] = ATP_TRACE_NONE;
+    s->n_rules = 2;
+
+    AtpAddedRange added = {1, 1};
+    u32 pushed = thvm_atp_generate_cps(s, added);
+    CHECK(pushed >= 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-joinability-filter-counter-on-saturation");
+  {
+    // Full group-axiom saturation: many self-overlaps and
+    // assoc-driven CPs are trivially joinable.  After running to
+    // completion or timeout, the dropped counter must be > 0.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+    thvm_atp_set_goal(s, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    (void)thvm_atp_run(s);
+    CHECK(s->n_cps_dropped_joinable >= 1u);
     thvm_atp_free(s);
   }
 

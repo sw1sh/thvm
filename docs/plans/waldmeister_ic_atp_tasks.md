@@ -304,7 +304,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 
 ## Stage 7 -- Twee-class redundancy criteria (optional)
 
-- [ ] 7.1 ground joinability test (Waldmeister's `GZ_ACVerzichtbar`
+- [x] 7.1 ground joinability test (Waldmeister's `GZ_ACVerzichtbar`
       / `Grundzusammenfuehrung.c` -- "ground union" criterion that
       drops trivially-joinable CPs)
 - [ ] 7.2 connectedness redundancy (Bachmair-Dershowitz-Plaisted)

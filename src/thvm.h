@@ -841,6 +841,13 @@ typedef struct {
   // PCL-shaped serialization.
   Term trace[ATP_MAX_TRACE];
   u32  n_trace;
+
+  // Stage 7.1: count of CPs dropped at generate-time because both
+  // sides normalize to the same term under current R (trivial
+  // joinability -- Waldmeister's `Grundzusammenfuehrung`,
+  // "ground-merging" criterion).  Useful for benchmarking the
+  // pruning power; not consulted by saturation logic.
+  u32  n_cps_dropped_joinable;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);

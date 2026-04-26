@@ -6,6 +6,46 @@ dated section.
 
 ## Unreleased
 
+### Added: trivial-joinability CP filter (stage 7.1)
+
+Drops critical pairs that are joinable-by-current-R at generate time
+rather than letting them flow through the queue and orient pipeline.
+This is the simplest version of Waldmeister's `Grundzusammenfuehrung`
+("ground-merging") criterion -- equivalent to Twee's
+"joinable-by-current-R" pruning.
+
+Implementation:
+- `static u8 atp_cp_trivially_joinable(s, lhs, rhs)` in
+  `src/atp/_.c` -- normalizes both sides under R via
+  `thvm_rewrite_normalize` (NORM_CAP=64) and returns
+  `kbo_eq(l, r)`.
+- `atp_push_cps_traced` calls it before pushing; on hit, bumps
+  `n_cps_dropped_joinable` and skips both the trace push and the
+  queue push.
+- New `u32 n_cps_dropped_joinable` field in `AtpState` records
+  the count for benchmarking.
+
+Behavior change: a single rule's self-overlap CP is always
+trivially joinable, so `generate_cps` now returns 0 in that case
+(previously it pushed the CP to the queue, where step would drop
+it after popping).  Updated tests:
+- `atp/generate-cps-single-rule-self-overlap`: pushed == 0, counter
+  ticks
+- `atp/generate-cps-old-times-new-direction`: pushed == 0, counter
+  ticks (assoc + left-id overlaps are all joinable)
+- `atp/trace-cp-records-source-rules-as-parents`: rebuilt with two
+  non-confluent rules so a non-joinable CP survives
+- `atp/trace-serialize-orient-with-parent`: drops the now-absent
+  "(cp from N, M):" assertion
+
+New test cases:
+- `atp/cp-joinability-filter-self-overlap-counter`
+- `atp/cp-joinability-filter-survives-non-joinable`
+- `atp/cp-joinability-filter-counter-on-saturation`
+
+Stronger criteria (ground-joinability over a sample of
+substitutions, AC-aware joinability) are deferred to 7.2+.
+
 ### Added: PCL DAG well-formedness cross-check (stage 6.4c)
 
 `tests/test_wald.c` adds `wald/example.pr/pcl-dag-well-formed`,

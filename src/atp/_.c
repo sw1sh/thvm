@@ -432,14 +432,40 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 
 #define ATP_CP_BATCH 1024
 
+// Stage 7.1: trivial-joinability check.  Normalize both sides of a
+// candidate CP under the current rule set R and compare; if they
+// collapse to the same term, the CP is joinable-by-R and adds no
+// new equational consequences -- it can be discarded.
+//
+// This is the Waldmeister `Grundzusammenfuehrung` ("ground-merging")
+// criterion at its weakest, equivalent to Twee's "joinable-by-current-
+// R" pruning.  Stronger variants (ground-joinability over a sample
+// of substitutions, AC-aware joinability) are deferred to 7.2+.
+//
+// Cost: two `thvm_rewrite_normalize` calls per CP candidate.  Worth
+// it when the saturation produces many joinable CPs (group axioms
+// generate ~hundreds of trivially-joinable overlaps per round).
+static u8 atp_cp_trivially_joinable(AtpState *s, Term lhs, Term rhs) {
+  const u32 NORM_CAP = 64;
+  Term l = thvm_rewrite_normalize(lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  Term r = thvm_rewrite_normalize(rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
+  return kbo_eq(l, r);
+}
+
 // Helper: push a batch of CPs onto the queue with TRACE_CP entries
 // pointing at the two source rules' trace indices.  Drops overflow
-// silently.  Returns the count of CPs successfully pushed.
+// silently.  CPs that are trivially joinable under current R are
+// dropped early (stage 7.1) and counted in `n_cps_dropped_joinable`.
+// Returns the count of CPs successfully pushed.
 static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b) {
   u32 pushed = 0;
   for (u32 i = 0; i < ncps; i++) {
     if (s->n_cps >= ATP_MAX_CPS) break;
+    if (atp_cp_trivially_joinable(s, cps[i].lhs, cps[i].rhs)) {
+      s->n_cps_dropped_joinable++;
+      continue;
+    }
     u32 t = atp_trace_push(s, TRACE_CP, parent_a, parent_b,
                            cps[i].lhs, cps[i].rhs);
     s->cp_lhs[s->n_cps]   = cps[i].lhs;
