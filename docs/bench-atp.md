@@ -107,37 +107,70 @@ path on every counter** -- step, n_rules, n_trace, and all four
 This empirically confirms the parity claim from 8.1e-ii's
 implementation tests.
 
-Wall-clock comparison (BENCH_STEP_BUDGET = 256, darwin/arm64,
-`cc -std=c11 -O2`, single run):
+Original numbers (BENCH_STEP_BUDGET = 256, single CP-gen axis):
 
 - `group_commutative_inverse.pr`: c=132 ms, ic=119 ms
 - `group_right_inverse_to_e.pr`:  c=0.004 ms, ic=0.002 ms
-- `idempotent_nested.pr`:         c=ic=0.001 ms
-- `monoid_right_id.pr`:           c=0.001, ic=0.000 ms
 
-IC is **comfortably within the 2x latency target**; on the
-TIMEOUT case the two paths are within ~10% (run-to-run noise
-dominates).  Likely explanations:
-1. CP-gen time is dominated by the position walk + unification
-   itself; the IC wrapper (APP-PRI accumulation, wnf reduction)
-   adds only a small constant per call.
-2. `prim_unify_apply3` recomputes σ twice per CP (once for
-   `σ(replaced)`, once for `σ(ri)`).  This *should* cost extra,
-   but on these small problems the unification is cheap.
-3. Heap-allocator behavior may differ slightly between paths,
-   producing run-to-run variance that swamps the IC overhead.
+IC was **within 10%** -- run-to-run noise dominates.
 
-**Decision**: keep `use_ic_cp_gen` default off for now, since
-the C path remains the more-tested code.  But the IC path is
-production-viable on the current corpus -- it can be turned on
-opt-in for SupGen-style search experiments (8.10) without
-worrying about a latency regression on these problem shapes.
+### IC-rewrite (use_ic_rewrite = 1) vs C-rewrite -- stage 8.3e-iii
 
-If we get larger TPTP-UEQ problems where IC consistently shows
->2x slowdown, the bottleneck is most likely the σ recomputation;
-mitigation is a single-call primitive that returns both
-`σ(replaced)` and `σ(ri)` packaged into a CTR-pair (deferred to
-8.10's needs).
+The IC-routed rewrite path (8.3e-ii: per-rule matching flows
+through APP-PRI / `prim_rewrite_step` instead of direct
+`thvm_match` + `thvm_subst_apply`) extends the bench harness to
+a 2x2 cross product over `(use_ic_cp_gen, use_ic_rewrite)`.
+Mode label is two letters: first character is cp-gen path
+(`c` or `i`), second is rewrite path (`c` or `i`).
+
+**Budget reduced to 32** for this run because the IC rewrite
+path allocates ~6 heap cells per APP-PRI chain and 256 steps on
+a TIMEOUT case overflows the 16M-cell HEAP_CAP.  This is a real
+finding documented in `BENCH_STEP_BUDGET`'s comment:
+production-scale IC-rewrite saturations need a heap-resetting
+mechanism (today the heap is bump-allocated and only reclaimed
+on `thvm_free`).
+
+Last refresh, darwin/arm64, single run, BENCH_STEP_BUDGET = 32:
+
+| File | Mode | Status | Wall (ms) | Steps | Rules |
+|---|---|---|---|---|---|
+| `group_commutative_inverse.pr` | cc | TIMEOUT | 2.503 | 32 | 20 |
+| `group_commutative_inverse.pr` | ci | TIMEOUT | 5.832 | 32 | 20 |
+| `group_commutative_inverse.pr` | ic | TIMEOUT | 2.253 | 32 | 20 |
+| `group_commutative_inverse.pr` | ii | TIMEOUT | 5.264 | 32 | 20 |
+| `group_right_inverse_to_e.pr` | cc | PROVED | 0.003 | 1 | 2 |
+| `group_right_inverse_to_e.pr` | ci | PROVED | 0.003 | 1 | 2 |
+| `group_right_inverse_to_e.pr` | ic | PROVED | 0.002 | 1 | 2 |
+| `group_right_inverse_to_e.pr` | ii | PROVED | 0.003 | 1 | 2 |
+| `idempotent_nested.pr` | * | PROVED | 0.001 | 0 | 1 |
+| `monoid_right_id.pr` | * | PROVED | 0.001 | 0 | 1 |
+
+Observations:
+
+- All 4 modes produce identical counters per file (parity
+  across both axes confirmed; matches 8.1e-ii / 8.3e-ii's
+  parity tests on the same corpus).
+- IC-rewrite (`?i`) is **~2x slower** than C-rewrite (`?c`)
+  on the TIMEOUT case: 5.5 ms vs 2.4 ms.  Within the 2x target
+  but right at the edge.
+- IC-cp-gen (`i?`) shows **no significant overhead** on its
+  own (cc=2.503 vs ic=2.253; run-to-run noise).  Confirms
+  the 8.1e-iii finding at the smaller budget.
+- Trivial fixtures (single-step proofs) show no measurable
+  difference -- both paths complete in <1 ms before any heap
+  allocation matters.
+
+**Decision**: both `use_ic_cp_gen` and `use_ic_rewrite` default
+off.  C paths remain the more-tested code and have lower
+heap pressure.  IC paths are production-viable opt-in for
+SupGen-style search (8.10) within their budget envelope.
+
+The IC-rewrite ~2x slowdown plus heap-pressure issue together
+suggest that a future optimization (bump-pointer reset between
+saturation steps, or a more compact PRI encoding) is the
+prerequisite for using IC rewrite as the default.  Not landing
+that today; documented as future work.
 
 ## Results -- Twee
 

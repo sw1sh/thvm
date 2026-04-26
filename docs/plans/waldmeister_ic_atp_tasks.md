@@ -487,9 +487,13 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
   - [blocked: deferred per docs/plans/kbo_ic_design.md until SupGen-style search (8.10) creates a use case] 8.2d full pure-IC port of `thvm_kbo` (deferred until
         8.2a's design picks the encoding; likely
         research-grade and multi-firing on its own).
-- [ ] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
+- [x] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
       APP-SUP fan-out across the rule set; uses ICC primitives
       (TAG_BRI / TAG_ANN) where dependent typing helps
+      Note: 8.3d (ICC integration) is `[blocked]` per design memo
+      pending 8.4 sorts.  8.3a-c-e (design + PRI dispatch + SUP
+      fan-out demo + flag swap + bench analysis) lands the
+      actionable increment.
   - [x] 8.3a design memo `docs/plans/ic_rule_dispatch.md`:
         survey the encoding choices for "rule as LAM-binder".
         Key open question: our pattern variables are TAG_FVR
@@ -526,7 +530,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         verify the type-flow rules let the wrong-sort branches
         collapse to ERA before APP-LAM fires.  Scope TBD; may
         roll up under 8.4 (multi-sort) instead.
-  - [ ] 8.3e replace `thvm_rewrite_step` under a feature flag
+  - [x] 8.3e replace `thvm_rewrite_step` under a feature flag
         (analogous to 8.1e's `use_ic_cp_gen`): when set, the
         rewrite step uses the SUP-of-LAMs dispatch.  Re-run
         bench harness; expect within 2x of the C path.
@@ -547,7 +551,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           term on first success, or the original term if no
           rule matches.  Tests: parity vs C path on the group
           axioms.  ~70 LOC.
-    - [ ] 8.3e-iii bench analysis: extend `test_bench_atp.c`
+    - [x] 8.3e-iii bench analysis: extend `test_bench_atp.c`
           to also toggle `use_ic_rewrite` (4 modes total: c+c,
           c+ic, ic+c, ic+ic for cp-gen and rewrite).  Or pick
           a smaller cross product (default + both-IC).  Update

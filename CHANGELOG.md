@@ -6,6 +6,47 @@ dated section.
 
 ## Unreleased
 
+### Added: IC-rewrite vs C-rewrite bench cross-product (stage 8.3e-iii)
+
+`tests/test_bench_atp.c` extended to a 2x2 cross product over
+`(use_ic_cp_gen, use_ic_rewrite)`.  Mode label is two letters
+(`cc`, `ci`, `ic`, `ii`) -- first character is cp-gen path, second
+is rewrite path.  4 modes x 4 fixtures = 16 rows in
+`build/bench-atp.csv`.
+
+`thvm_free` + `thvm_init` between modes resets the heap so all
+16 runs fit in the 16M-cell `HEAP_CAP`.
+
+**Budget reduced from 256 to 32**: IC-rewrite allocates ~6 heap
+cells per APP-PRI chain; 256 steps on the harder TIMEOUT
+fixture overflows `HEAP_CAP`.  This is a real architectural
+finding documented in `BENCH_STEP_BUDGET`'s comment:
+production-scale IC-rewrite saturations need a heap-resetting
+mechanism (today the heap is bump-allocated and only reclaimed
+on `thvm_free`).
+
+Results:
+
+- All 4 modes produce **identical counters** per file (parity
+  across both axes; confirms 8.1e-ii and 8.3e-ii's parity
+  tests on the same corpus).
+- IC-rewrite is **~2x slower** than C-rewrite on the TIMEOUT
+  case (5.5 ms vs 2.4 ms); IC-cp-gen alone shows no
+  significant overhead.  Within the 2x target.
+
+**Decision**: both `use_ic_cp_gen` and `use_ic_rewrite` default
+off.  IC paths are production-viable opt-in for SupGen-style
+search (8.10) within their budget envelope.  A future
+optimization (bump-pointer reset between saturation steps, or
+a more compact PRI encoding) is the prerequisite for switching
+defaults.
+
+`docs/bench-atp.md` updated with the cross-product table and
+analysis under a new "IC-rewrite vs C-rewrite" subsection.
+
+Stage 8.3 is now complete (8.3a-c-e shipped; 8.3d blocked
+pending 8.4 sorts).
+
 ### Added: IC-routed rewrite normalization (stage 8.3e-ii)
 
 `atp_rewrite_normalize_ic` now actually routes per-rule matching

@@ -14,7 +14,13 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#define BENCH_STEP_BUDGET 256
+// 8.3e-iii: budget reduced from 256 to 32 because IC-routed
+// rewrite (use_ic_rewrite=1) allocates ~6 heap cells per APP-PRI
+// chain, and a 256-step saturation on the harder fixtures
+// (group_commutative_inverse.pr) blows past the 16M-cell HEAP_CAP.
+// 32 keeps all 4 modes within heap bounds and is enough to
+// observe the per-step latency.
+#define BENCH_STEP_BUDGET 32
 #define BENCH_MAX_FILES   64
 #define BENCH_PATH_LEN    256
 
@@ -57,8 +63,11 @@ static int read_expect_status(const char *path, char *status_out, u32 cap) {
 //
 // `use_ic_cp_gen` toggles 8.1e-i's flag on the AtpState before
 // adding axioms / running -- selects between the C-direct and
-// IC-routed CP enumerators.
-static AtpStatus run_one(const char *pr_path, u8 use_ic_cp_gen,
+// IC-routed CP enumerators.  `use_ic_rewrite` toggles 8.3e-i's
+// flag selecting between the C-direct and IC-routed rewrite
+// normalize paths.
+static AtpStatus run_one(const char *pr_path,
+                        u8 use_ic_cp_gen, u8 use_ic_rewrite,
                         AtpState **out_atp,
                         WaldSpec **out_spec, double *out_wall_ms) {
   WaldSpec *spec = wald_init();
@@ -90,7 +99,8 @@ static AtpStatus run_one(const char *pr_path, u8 use_ic_cp_gen,
   cfg.var_weight = 1;
 
   AtpState *atp = thvm_atp_init(&cfg, BENCH_STEP_BUDGET);
-  atp->use_ic_cp_gen = use_ic_cp_gen;
+  atp->use_ic_cp_gen  = use_ic_cp_gen;
+  atp->use_ic_rewrite = use_ic_rewrite;
   for (u32 i = 0; i < spec->n_eqns; i++) {
     thvm_atp_add_equation(atp, spec->eqn_lhs[i], spec->eqn_rhs[i]);
   }
@@ -149,13 +159,17 @@ int main(void) {
     }
   }
 
-  // Per-file: run under each CP-gen mode (C path then IC path),
-  // emit one CSV row per (file, mode), soft-check status against
-  // `.expect`.  Both modes must produce the same status (parity
-  // confirmation from 8.1e-ii); their wall-clock numbers feed
-  // 8.1e-iii's bench analysis.
-  static const u8 modes[2]              = {0u, 1u};
-  static const char *const mode_names[] = {"c", "ic"};
+  // Per-file: run under each (cp-gen, rewrite) mode in the
+  // 2x2 cross product.  Mode label is two letters: first
+  // character is cp-gen path ('c' or 'i'), second is rewrite
+  // path ('c' or 'i').  Emits one CSV row per (file, mode);
+  // soft-checks status against `.expect`.  All four modes must
+  // produce the same status (parity confirmation from 8.1e-ii
+  // and 8.3e-ii); their wall-clock numbers feed the bench
+  // analysis.
+  static const u8 cp_modes[2]              = {0u, 1u};
+  static const u8 rw_modes[2]              = {0u, 1u};
+  static const char *const path_names[]    = {"c", "i"};
   for (u32 i = 0; i < n_files; i++) {
     TEST_BEGIN(files[i]);
 
@@ -165,29 +179,45 @@ int main(void) {
     char expected[64];
     int er = read_expect_status(expect_path, expected, sizeof expected);
 
-    for (u32 m = 0; m < 2; m++) {
-      AtpState *atp;
-      WaldSpec *spec;
-      double wall_ms = 0.0;
-      AtpStatus st = run_one(files[i], modes[m], &atp, &spec, &wall_ms);
-      CHECK(atp != NULL);
-      if (atp == NULL) continue;
+    for (u32 mc = 0; mc < 2; mc++) {
+      for (u32 mr = 0; mr < 2; mr++) {
+        // Reset heap between runs.  Each IC-routed saturation
+        // allocates many APP/PRI cells per step, so 16 back-to-
+        // back runs (4 files * 4 modes) overflow HEAP_CAP without
+        // a reset.  thvm_free + thvm_init is the heaviest hammer
+        // but it cleanly clears HEAP_NEXT.
+        thvm_free();
+        thvm_init();
 
-      const char *st_str = atp_status_str(st);
-      fprintf(csv, "%s,%s,%s,%.3f,%u,%u,%u,%u,%u,%u,%u\n",
-              files[i], mode_names[m], st_str, wall_ms,
-              atp->step, atp->n_rules, atp->n_trace,
-              atp->n_cps_dropped_joinable,
-              atp->n_cps_dropped_connected,
-              atp->n_cps_dropped_rule_subsumed,
-              atp->n_cps_dropped_queue_subsumed);
+        AtpState *atp;
+        WaldSpec *spec;
+        double wall_ms = 0.0;
+        AtpStatus st = run_one(files[i],
+                               cp_modes[mc], rw_modes[mr],
+                               &atp, &spec, &wall_ms);
+        CHECK(atp != NULL);
+        if (atp == NULL) continue;
 
-      if (er == 0 && expected[0] != 0) {
-        CHECK_EQ((int)strcmp(st_str, expected), 0);
+        const char *st_str = atp_status_str(st);
+        char mode_label[4];
+        mode_label[0] = path_names[mc][0];
+        mode_label[1] = path_names[mr][0];
+        mode_label[2] = 0;
+        fprintf(csv, "%s,%s,%s,%.3f,%u,%u,%u,%u,%u,%u,%u\n",
+                files[i], mode_label, st_str, wall_ms,
+                atp->step, atp->n_rules, atp->n_trace,
+                atp->n_cps_dropped_joinable,
+                atp->n_cps_dropped_connected,
+                atp->n_cps_dropped_rule_subsumed,
+                atp->n_cps_dropped_queue_subsumed);
+
+        if (er == 0 && expected[0] != 0) {
+          CHECK_EQ((int)strcmp(st_str, expected), 0);
+        }
+
+        thvm_atp_free(atp);
+        wald_free(spec);
       }
-
-      thvm_atp_free(atp);
-      wald_free(spec);
     }
   }
 
