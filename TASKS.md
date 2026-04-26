@@ -237,18 +237,20 @@ Root causes:
 
 ### New tasks
 
-- [ ] **r1a: probe linear-train forward UOp graph; decide what
-      "1 kernel" really means**.  Dump the materialize-time
-      structure of `loss = CrossEntropyLoss(Softmax(MatVec(w,x)+b),
-      target)` -- list every UOp opcode, count REDUCE nodes, see
-      how many `materialize_uop_in_env` callbacks fire and on
-      what.  Output: a 1-paragraph note in TASKS.md describing
-      the actual graph (which is likely 3 REDUCEs, not 1: MatVec's
-      reduce-axis, Softmax's normalization reduce, CE's final
-      reduce-sum) -- which means r1's original "1 forward kernel"
-      framing is too aggressive.  Pick a realistic target (e.g.,
-      "elementwise chains around each REDUCE collapse, total <=4
-      forward kernels").  ~20 LOC probe + 1 paragraph diagnosis.
+- [x] **r1a: probe linear-train forward UOp graph; decide what
+      "1 kernel" really means**.  The forward graph
+      (`loss = CrossEntropyLoss(Softmax(MatVec(w,x)+b), target)`)
+      expands to 16 UOps with **THREE REDUCE_SUMs**:
+        - MatVec       = REDUCE_SUM(MUL(w, EXPAND(x)), axis=1)
+        - Softmax      = MUL(EXP, EXPAND(RECIP(REDUCE_SUM(EXP,0))))
+        - CE Loss      = NEG(REDUCE_SUM(MUL(target, LOG(p)), 0))
+      Currently 16 kernels (1 per UOp).  "1 forward kernel"
+      target is unreachable -- tinygrad emits 1 kernel per REDUCE
+      boundary too.  Realistic target updated to **<= 4 forward
+      kernels** (one per REDUCE + maybe one for tail elementwise).
+      Probe captured via TMatStatsLabel: r1b's job is now
+      "elementwise + outermost-tail-REDUCE collapse so each REDUCE
+      absorbs its upstream chain".
 
 - [ ] **r1b: extend f1d helper to absorb an outermost-tail REDUCE**.
       Lift the inline_emit "REDUCE bails" guard for the case where
@@ -267,11 +269,11 @@ Root causes:
 
 - [ ] **r1c: re-bench linear-train + verify acceptance**.  Run
       memory-probe.wls; record the "After forward + loss
-      materialize" KernelEntries delta.  Acceptance: meets the
-      r1a-decided target (likely <=4 instead of 1).  Update
-      docs/bench-results.md with a "post-r1" row + commentary
-      on why "1 kernel" wasn't reachable (Metal backend gate +
-      multi-REDUCE structure).  ~10 LOC + measurement.
+      materialize" KernelEntries delta.  Acceptance per r1a
+      diagnosis: forward kernel count drops from 16 to <=4
+      (one per REDUCE boundary).  Update docs/bench-results.md
+      with a "post-r1" row + 1-paragraph commentary on the
+      multi-REDUCE structure.  ~10 LOC + measurement.
 
 - [ ] **r2: slot reuse mid-step for the 57.6% headroom**.
       The TMemoryPlan reports a 57.6% slot-reuse headroom on
