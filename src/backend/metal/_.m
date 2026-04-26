@@ -288,12 +288,13 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
   if (ke->n_ops == 0) return -1;
-  // Sub-item (c) of UOP_LOAD arc: program[] is now prefixed with
-  // n_inputs LOAD ops.  The main op lives at program[n_inputs].
-  // LOAD itself is a no-op on Metal (input buffers are already
-  // bound at the per-slot index by the dispatch below) so we skip
-  // straight to the main op.
-  KProgOp *p = &ke->program[ke->n_inputs];
+  // The main op is the LAST op in the program (g2b convention:
+  // visit() emits the root op last and references inputs directly
+  // via KSRC_AS_INPUT instead of a LOAD prefix).  Metal currently
+  // dispatches single-op kernels only; for multi-op fused kernels
+  // (CPU-only path) Metal would still need a fused pipeline -- out
+  // of scope for g2c1.
+  KProgOp *p = &ke->program[ke->n_ops - 1];
 
   id<MTLComputePipelineState> pso = metal_pipeline_for(p->opcode);
   if (pso == nil) {

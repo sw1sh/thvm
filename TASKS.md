@@ -403,22 +403,27 @@ Expected ceilings:
       3, test_view_permute 4, test_view_pad 7, test_view_flip 4,
       test_metal_real 34) -- exactly g2c's scope.
 
-- [ ] **g2c1: view-only path for RESHAPE/EXPAND/PERMUTE/SHRINK/FLIP**.
-      Add `view_apply_{reshape,expand,permute,shrink,flip}` helpers
-      that compute a new View from an existing one (per-axis
-      strides, offset arithmetic).  Add a `view_resolve(t)`
-      dispatcher that recursively walks a movement-op chain rooted
-      at a TAG_TEN, allocating an alias TenDesc per layer via
-      `tensor_view_of`.  `materialize_uop_in_env(t, 0)`: call
-      `view_resolve` for these 5 ops and return TAG_TEN.  Hook
-      `view_resolve` into `build_kernel`'s `visit()` so movement-op
-      children become input slots referencing alias TenDescs.
-      Add `materialize_root_alias` (port from deleted code) so
-      `thvm_materialize` on a movement-op root flattens the
-      resulting non-contig alias into a contiguous copy.
-      Tests targeted green: test_view_shrink (24), test_view_permute
-      (32), test_view_flip (35), test_expand_axis (14).
-      ~200 LOC.
+- [x] **g2c1: view-only path for RESHAPE/EXPAND/PERMUTE/SHRINK/FLIP**.
+      Added `view_apply_{reshape,expand,permute,shrink,flip}` (per-
+      axis stride/offset arithmetic) + `view_resolve(t)` dispatcher
+      that recursively walks a movement-op chain to a TenDesc via
+      `tensor_view_of`.  Hooked into `visit()` so movement-op
+      children become input slots aliasing the source buf.
+      `materialize_uop_in_env(t, 0)` returns TAG_TEN for the 5
+      view-only ops; `thvm_materialize` at a movement-op root
+      flattens the non-contig alias to a contig copy via the new
+      `materialize_root_alias` port.  Bonus: extended
+      `view_apply_expand` to handle rank-up (src.ndim < t_ndim)
+      by treating new trailing axes as broadcast (stride 0).
+      Targeted tests green: test_view_shrink 24/24, test_view_permute
+      32/32, test_view_flip 35/35, test_expand_axis 14/14.
+      Bonus regression catch: Metal's dispatch_kernel was indexing
+      `program[ke->n_inputs]` (assuming the old LOAD-prefix layout);
+      with g2b's no-prefix design that points past the program to
+      uninitialized memory (opcode 0).  Switched to
+      `program[ke->n_ops - 1]` so the root op is dispatched
+      regardless of layout.  test_metal_real recovered from 80/166
+      to 158/166 (only PAD parity still red, exactly g2c2's scope).
 
 - [ ] **g2c2: PAD as kernel emit** (NOT a view-only alias --
       reading bytes outside an alloc is UB even when calloc'd).

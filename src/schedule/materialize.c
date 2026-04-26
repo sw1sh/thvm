@@ -79,6 +79,204 @@ static void topo_sort_boundaries(Term root) {
 fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
 fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN ? BOUNDARY_ORDER[i] : 0; }
 
+// === view-only path for movement ops (g2c1) ===
+//
+// RESHAPE / EXPAND / PERMUTE / SHRINK / FLIP rewrite a TenDesc's
+// View instead of allocating a kernel.  Each helper computes the
+// target View from the source View; view_resolve walks a movement-
+// op chain rooted at a TAG_TEN, allocating an alias TenDesc per
+// layer via tensor_view_of (which inherits buf_id, dtype, backend,
+// producer_kid).  PAD intentionally falls through (g2c2) -- a
+// view-only PAD would have to read bytes outside the alloc.
+
+static int view_apply_reshape(View const *src, u64 expr_loc, View *out) {
+  if (!src->contiguous) return 0;
+  u32 t_ndim  = (u32)term_val(heap_read(expr_loc + 1));
+  Shape ts = {0}; ts.ndim = t_ndim;
+  u32 t_numel = 1;
+  for (u32 i = 0; i < t_ndim; i++) {
+    u32 d = (u32)term_val(heap_read(expr_loc + 2 + i));
+    ts.dims[i] = d;
+    t_numel *= d;
+  }
+  if (t_numel != src->numel) return 0;
+  *out = view_create(ts);
+  return 1;
+}
+
+static int view_apply_expand(View const *src, u64 expr_loc, View *out) {
+  u32 t_ndim = (u32)term_val(heap_read(expr_loc + 1));
+  if (t_ndim < src->shape.ndim) return 0;       // can't drop axes via EXPAND
+  Shape ts = {0}; ts.ndim = t_ndim;
+  u32 t_numel = 1;
+  for (u32 i = 0; i < t_ndim; i++) {
+    u32 td = (u32)term_val(heap_read(expr_loc + 2 + i));
+    ts.dims[i] = td;
+    t_numel  *= td;
+    // Existing axis: must match exactly or be 1 (broadcast).
+    if (i < src->shape.ndim
+        && src->shape.dims[i] != td && src->shape.dims[i] != 1) return 0;
+  }
+  out->shape      = ts;
+  out->numel      = t_numel;
+  out->offset     = src->offset;
+  out->contiguous = (t_numel == src->numel) ? src->contiguous : 0;
+  for (u32 i = 0; i < t_ndim; i++) {
+    if (i >= src->shape.ndim) out->strides[i] = 0;     // new trailing broadcast axis
+    else out->strides[i] = (src->shape.dims[i] == ts.dims[i]) ? src->strides[i] : 0;
+  }
+  for (u32 i = t_ndim; i < MAX_DIM; i++) out->strides[i] = 0;
+  return 1;
+}
+
+static int view_apply_permute(View const *src, u64 expr_loc, View *out) {
+  if (!src->contiguous) return 0;       // simple-source-only for v1
+  Shape ts = {0}; ts.ndim = src->shape.ndim;
+  out->offset = src->offset;
+  u8 used[MAX_DIM] = {0};
+  u8 identity = 1;
+  for (u32 i = 0; i < src->shape.ndim; i++) {
+    u32 p = (u32)term_val(heap_read(expr_loc + 1 + i));
+    if (p >= src->shape.ndim || used[p]) return 0;
+    used[p] = 1;
+    ts.dims[i]      = src->shape.dims[p];
+    out->strides[i] = src->strides[p];
+    if (p != i) identity = 0;
+  }
+  for (u32 i = src->shape.ndim; i < MAX_DIM; i++) out->strides[i] = 0;
+  out->shape      = ts;
+  out->numel      = src->numel;
+  out->contiguous = identity ? src->contiguous : 0;
+  return 1;
+}
+
+static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
+  if (!src->contiguous) return 0;
+  Shape ts = {0}; ts.ndim = src->shape.ndim;
+  i32 add_off = 0;
+  u32 t_numel = 1;
+  for (u32 i = 0; i < src->shape.ndim; i++) {
+    u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
+    u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+    if (e <= b || e > src->shape.dims[i]) return 0;
+    ts.dims[i] = e - b;
+    t_numel  *= (e - b);
+    add_off  += (i32)b * src->strides[i];
+  }
+  out->shape  = ts;
+  out->numel  = t_numel;
+  out->offset = src->offset + add_off;
+  for (u32 i = 0; i < src->shape.ndim; i++) out->strides[i] = src->strides[i];
+  for (u32 i = src->shape.ndim; i < MAX_DIM; i++) out->strides[i] = 0;
+  out->contiguous = (t_numel == src->numel) ? 1 : 0;
+  return 1;
+}
+
+static int view_apply_flip(View const *src, u64 expr_loc, View *out) {
+  if (!src->contiguous) return 0;
+  u32 mask = (u32)term_val(heap_read(expr_loc + 1));
+  out->shape  = src->shape;
+  out->numel  = src->numel;
+  out->offset = src->offset;
+  u8 any = 0;
+  for (u32 i = 0; i < src->shape.ndim; i++) {
+    if (mask & (1u << i)) {
+      out->strides[i] = -src->strides[i];
+      out->offset += (i32)(src->shape.dims[i] - 1) * src->strides[i];
+      any = 1;
+    } else {
+      out->strides[i] = src->strides[i];
+    }
+  }
+  for (u32 i = src->shape.ndim; i < MAX_DIM; i++) out->strides[i] = 0;
+  out->contiguous = any ? 0 : src->contiguous;
+  return 1;
+}
+
+// Dispatcher: walk a movement-op chain, allocating one alias
+// TenDesc per layer; return the final tid (0 on bail).  The
+// source must resolve to a TenDesc (TAG_TEN, UOP_KERNEL, or a
+// recursive view chain rooted at one).  Backend must be
+// view-aware -- otherwise returns 0 so caller falls through.
+static u32 view_resolve(Term t) {
+  if (CURRENT_BACKEND == NULL || !CURRENT_BACKEND->view_aware) return 0;
+  u8 tag = term_tag(t);
+  if (tag == TAG_TEN) return (u32)term_val(t);
+  if (tag != TAG_UOP) return 0;
+
+  u8  op  = term_ext(t);
+  u64 loc = term_val(t);
+
+  if (op == UOP_KERNEL) {
+    Term outbuf = heap_read(loc);
+    if (term_tag(outbuf) != TAG_TEN) return 0;
+    return (u32)term_val(outbuf);
+  }
+
+  // Source recurses (could be another movement op chain).
+  u32 src_tid = view_resolve(heap_read(loc));
+  if (src_tid == 0) return 0;
+  View const *src_view = &TENS[src_tid].view;
+
+  View nv = {0};
+  int  ok = 0;
+  switch (op) {
+    case UOP_RESHAPE: ok = view_apply_reshape(src_view, loc, &nv); break;
+    case UOP_EXPAND:  ok = view_apply_expand (src_view, loc, &nv); break;
+    case UOP_PERMUTE: ok = view_apply_permute(src_view, loc, &nv); break;
+    case UOP_SHRINK:  ok = view_apply_shrink (src_view, loc, &nv); break;
+    case UOP_FLIP:    ok = view_apply_flip   (src_view, loc, &nv); break;
+    default: return 0;                      // PAD + non-movement ops bail
+  }
+  if (!ok) return 0;
+  return tensor_view_of(src_tid, nv);
+}
+
+// True when a UOp opcode is one of the 5 view-only-path movement ops.
+static u8 op_is_view_movement(u8 op) {
+  return op == UOP_RESHAPE || op == UOP_EXPAND || op == UOP_PERMUTE
+      || op == UOP_SHRINK  || op == UOP_FLIP;
+}
+
+// Flatten a non-contig TenDesc into a fresh contiguous copy via
+// view_strided_index.  Used by thvm_materialize when the root is a
+// movement-op chain that resolves to a view alias the caller will
+// read through (wnf expects flat-buffer reads).
+static Term materialize_root_alias(Term t) {
+  if (term_tag(t) != TAG_TEN) return t;
+  u32 tid = (u32)term_val(t);
+  if (tid == 0 || tid >= TENS_NEXT) return t;
+  TenDesc *d = &TENS[tid];
+  if (d->view.contiguous && d->view.offset == 0) return t;
+
+  u32 dst_tid = tensor_alloc(d->backend, d->view.shape, d->dtype);
+  if (dst_tid == 0) return t;
+
+  // Bytes to read = max element index reachable + 1.  Negative
+  // strides (FLIP) start the offset at the high end and walk
+  // downward, so they're already covered by `offset`.
+  i32 max_idx = d->view.offset;
+  for (u32 i = 0; i < d->view.shape.ndim; i++) {
+    if (d->view.shape.dims[i] > 1 && d->view.strides[i] > 0)
+      max_idx += (i32)(d->view.shape.dims[i] - 1) * d->view.strides[i];
+  }
+  size_t src_bytes = (size_t)(max_idx + 1) * 4;
+  void  *raw       = malloc(src_bytes);
+  d->backend->buf_read(d->buf_id, raw, src_bytes);
+  void *dst_host = malloc((size_t)d->view.numel * 4);
+  if (d->dtype == DT_F32) {
+    f32 *o = (f32 *)dst_host; f32 *s = (f32 *)raw;
+    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
+  } else {
+    i32 *o = (i32 *)dst_host; i32 *s = (i32 *)raw;
+    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
+  }
+  d->backend->buf_write(TENS[dst_tid].buf_id, dst_host, (size_t)d->view.numel * 4);
+  free(raw);
+  free(dst_host);
+  return term_new(0, TAG_TEN, d->dtype, dst_tid);
+}
+
 // === build_kernel: visit() recursion (g2b) ===
 
 static u32 boundary_index_for_loc(u64 loc) {
@@ -193,6 +391,21 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     return ke->n_ops - 1;
   }
 
+  // Movement ops as a child of the kernel: resolve to a view-only
+  // alias TenDesc and become an input slot.  view_resolve recurses
+  // through nested movement ops; on bail (e.g., PAD, non-contig
+  // sources for the helpers that require contig) returns 0 and we
+  // fall through to VISIT_BAIL.
+  if (op_is_view_movement(op)) {
+    u32 alias_tid = view_resolve(t);
+    if (alias_tid != 0) {
+      Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+      u32 slot = input_slot_dedup(ke, alias_tid, alias_term);
+      if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
+      return KSRC_AS_INPUT(slot);
+    }
+  }
+
   // REDUCE only allowed when it IS the root (tail-fuse).  Movement
   // ops + non-tail REDUCE bail (deferred to g2c / g2d).
   if (op == UOP_REDUCE && loc == root_loc) {
@@ -257,23 +470,43 @@ static Term emit_kernel_for_boundary(u32 bi) {
   return kernel_term;
 }
 
-// Stub: g2c will replace with the movement-op view-rewrite path.
-fn Term materialize_uop_in_env(Term t, u32 env_id) { (void)env_id; return t; }
+// Direct kernelize entry called by the surviving view tests:
+// for the 5 view-only movement ops, return the alias TenDesc as a
+// TAG_TEN; for everything else (PAD, elementwise, reduce, kernel)
+// fall through to the normal kernel-emit path.
+fn Term materialize_uop_in_env(Term t, u32 env_id) {
+  (void)env_id;
+  if (term_tag(t) == TAG_UOP) {
+    u8 op = term_ext(t);
+    if (op_is_view_movement(op)) {
+      u32 alias_tid = view_resolve(t);
+      if (alias_tid != 0)
+        return term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+    }
+  }
+  return thvm_materialize(t);
+}
 
 fn Term thvm_materialize(Term term) {
   if (term_tag(term) != TAG_UOP)        return term;
   if (term_ext(term) == UOP_KERNEL)     return term;
+
+  // Movement-op root: resolve the chain to an alias TenDesc, then
+  // flatten to a contig copy so wnf-side flat reads work.
+  if (op_is_view_movement(term_ext(term))) {
+    u32 alias_tid = view_resolve(term);
+    if (alias_tid != 0) {
+      Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+      return materialize_root_alias(alias_term);
+    }
+  }
+
   realize_classify(term);
   topo_sort_boundaries(term);
-  // Reset emit map for this realize.
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     BOUNDARY_TID [i] = 0;
     BOUNDARY_TERM[i] = 0;
   }
-  // Emit kernels in topo order.  The sink is the boundary whose loc
-  // matches the input root; if any emit bails, return the input
-  // unchanged so callers get a visible no-op rather than a partial
-  // kernel graph.
   Term sink_kernel = 0;
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     Term k = emit_kernel_for_boundary(i);

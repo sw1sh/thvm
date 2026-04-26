@@ -6,6 +6,43 @@ dated section.
 
 ## Unreleased
 
+### Added: view-only path for movement ops (g2c1)
+
+`thvm_materialize` now correctly handles RESHAPE/EXPAND/PERMUTE/
+SHRINK/FLIP without allocating kernels.  New helpers:
+
+- `view_apply_{reshape,expand,permute,shrink,flip}` compute a target
+  `View` (shape, strides, offset, contiguous flag) from a source
+  `View`, mirroring the round-1/2 view arithmetic but as standalone
+  pure functions.  `view_apply_expand` additionally handles rank-up
+  EXPAND (src.ndim < target ndim) by treating the new trailing
+  axes as broadcast (stride 0).
+- `view_resolve(t)` recursively walks a movement-op chain rooted at
+  a TAG_TEN (or UOP_KERNEL output), allocating an alias TenDesc per
+  layer via `tensor_view_of`.  Returns the final tid.
+- `materialize_root_alias(t)` flattens a non-contig TenDesc into a
+  contiguous copy via `view_strided_index`, used when
+  `thvm_materialize` is called with a movement-op root and the
+  caller (wnf) needs flat-buffer reads.
+
+`materialize_uop_in_env(t, 0)` returns a `TAG_TEN` aliasing the
+source for the 5 view-only ops; `visit()` (build_kernel) treats
+movement-op children the same way, so the kernel input slot
+aliases the upstream buf with the movement-rewritten View.
+
+Metal regression fixed: `metal_dispatch_kernel` was reading
+`program[ke->n_inputs]` (the old LOAD-prefix layout's "main op"
+slot).  With g2b's no-prefix design that points past the program
+end (opcode 0 -> "no pipeline").  Switched to
+`program[ke->n_ops - 1]`.  test_metal_real: 80/166 -> 158/166 pass.
+
+Test status:
+- test_view_shrink 24/24, test_view_permute 32/32, test_view_flip
+  35/35, test_expand_axis 14/14: all green.
+- test_view_pad 8/15 fail, test_metal_real PAD parity 8 fail:
+  exactly g2c2's scope (PAD intentionally takes the kernel-emit
+  path -- a view-only PAD would have to read out-of-bounds bytes).
+
 ### Added: build_kernel for elementwise + REDUCE-as-tail roots (g2b)
 
 `thvm_materialize` now actually emits kernels.  For each boundary in
