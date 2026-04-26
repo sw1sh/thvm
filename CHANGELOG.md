@@ -6,6 +6,51 @@ dated section.
 
 ## Unreleased
 
+### Added: TATP[..., Witness -> {x_}] WL surface (stage 8.9e)
+
+`TATP[]` gains a `Witness -> {x_, y_, ...}` option (default
+`{}`).  When non-empty:
+- Each entry must match `Verbatim[Pattern][_Symbol, Blank[]]`
+  (the `x_` syntax) -- enforced at runtime, otherwise
+  `Failure["TATPParseError"]`.
+- Names are looked up against the encoder's var-id state from
+  the axioms / conjecture pass; missing names yield Failure.
+- Calls a new `$atpRunExistFn` LibraryLink entry that runs the
+  saturator in narrow mode and returns witness Term values
+  trailing the stats array.
+
+```mathematica
+TATP[{f[a, e] == a}, f[Pattern[x, Blank[]], e] == a,
+     Witness -> {Pattern[x, Blank[]]}]
+(* -> <|"Status" -> "PROVED", "Steps" -> ..., "Rules" -> ...,
+        "QueueSize" -> ..., "Witness" -> <|x -> 36028...|>|> *)
+```
+
+The witness-Term values are returned as raw Int64 packed Term
+values for now -- the inverse encoder (decode Term back to a
+WL expression) is left for future work; users with the encoder
+state can decode manually.
+
+New LibraryLink entry `thvm_wl_atp_run_existential` in
+`wl/THVMLink/CSource/thvmlink.c`: same packed-NumericArray
+input as `thvm_wl_atp_run` plus a witness-id MTensor; output
+NumericArray gains `n_witness` trailing Term values.  WL-side
+loader `$atpRunExistFn`.
+
+`wl/THVMLink/Tests/atp.wlt` adds 5 cases (314 WL tests, was
+309):
+- `TATP/witness/proves-with-narrow`: narrowing closes
+- `TATP/witness/witness-key-present`: result has `"Witness"`
+- `TATP/witness/key-is-x`: `Witness` keyed by `x` symbol
+- `TATP/witness/missing-name-yields-failure`: var not in
+  axioms/conjecture
+- `TATP/witness/empty-runs-universal-path`: empty Witness
+  list takes the existing path
+
+Stage 8.9 is now complete (a-e shipped).  Existential equational
+queries are reachable from Wolfram notebooks via
+`TATP[..., Witness -> {x_}]`.
+
 ### Added: EXISTS .pr section + bench narrow dispatch (stage 8.9d)
 
 New `EXISTS` section in the `.pr` grammar lists existing

@@ -654,7 +654,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         what test_bench_atp produces on the equivalent .pr.
 - [x] 8.8 `--mix` heuristic (size + orientability) replacing the
       pure-size `--add` in 5.3
-- [ ] 8.9 narrowing for existential goals (Waldmeister's
+- [x] 8.9 narrowing for existential goals (Waldmeister's
       `NormaleZiele.c` / `Zielverwaltung.c`)
   - [x] 8.9a design memo `docs/plans/narrowing_design.md`:
         survey the narrowing algorithm vs rewriting (rewrite
@@ -685,7 +685,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         files (extension to `CONCLUSION` syntax? sidecar
         keyword?).  Add a fixture under `tests/data/atp/` and
         wire the bench harness.
-  - [ ] 8.9e WL bridge integration: `TATP[axioms, conjecture,
+  - [x] 8.9e WL bridge integration: `TATP[axioms, conjecture,
         Witness -> {x_, y_}]` returns `<|"Status" -> "PROVED",
         "Witness" -> <|x -> term, y -> term|>|>`.
 - [ ] 8.10 SupGen-style search inside saturation: superpose the

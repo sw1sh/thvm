@@ -1175,6 +1175,104 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ctr(WolframLibraryData libData,
 // (per the 8.7a memo's two-layer plan).  Stage 8.7c-d add the
 // WL-side encoder + TATP[] surface.
 #define ATP_WL_CFG_MAX_LABELS 64
+// === 8.9e: existential ATP runner ================================
+//
+// Mirrors thvm_wl_atp_run but takes an extra `witness_ids`
+// MTensor (1-D Integer): the user-declared FVR ids whose
+// bindings should be returned.  Output array grows by `n_witness`
+// trailing Term values (raw Int64 packed Term form).
+//
+// Inputs:
+//   args[0] = packed_terms NumericArray (Int64), same layout as
+//             thvm_wl_atp_run.
+//   args[1] = max_steps     (mint).
+//   args[2] = max_label     (mint).
+//   args[3] = witness_ids   MTensor (Integer rank-1).
+//
+// Output: Int64 NumericArray of length 4 + n_witness:
+//   [status, n_rules, n_trace, n_cps,
+//    witness_term_0, witness_term_1, ...].
+EXTERN_C DLLEXPORT int thvm_wl_atp_run_existential(
+    WolframLibraryData libData, mint argc,
+    MArgument *args, MArgument res) {
+  (void)argc;
+  MNumericArray na  = MArgument_getMNumericArray(args[0]);
+  mint max_steps    = MArgument_getInteger(args[1]);
+  mint max_label    = MArgument_getInteger(args[2]);
+  MTensor witness_t = MArgument_getMTensor(args[3]);
+
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+  if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  mint flat_len = naf->MNumericArray_getFlattenedLength(na);
+  if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
+  const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
+
+  int64_t n_ax_i = data[0];
+  if (n_ax_i < 0 || (int64_t)flat_len != 1 + 2 * n_ax_i + 2) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 n_ax = (u32)n_ax_i;
+
+  mint n_witness         = libData->MTensor_getFlattenedLength(witness_t);
+  const mint *witness_ids = libData->MTensor_getIntegerData(witness_t);
+
+  if ((u32)max_label >= ATP_WL_CFG_MAX_LABELS) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  static u32 wl_weights2[ATP_WL_CFG_MAX_LABELS];
+  static u32 wl_precedence2[ATP_WL_CFG_MAX_LABELS];
+  for (u32 i = 0; i < (u32)max_label + 1; i++) {
+    wl_weights2[i] = 1;
+    wl_precedence2[i] = i + 1;
+  }
+  static KboConfig wl_kbo2;
+  wl_kbo2.weights    = wl_weights2;
+  wl_kbo2.precedence = wl_precedence2;
+  wl_kbo2.n_labels   = (u32)max_label + 1;
+  wl_kbo2.var_weight = 1;
+
+  AtpState *atp = thvm_atp_init(&wl_kbo2, (u32)max_steps);
+  if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+
+  for (u32 i = 0; i < n_ax; i++) {
+    Term lhs = (Term)data[1 + 2 * i + 0];
+    Term rhs = (Term)data[1 + 2 * i + 1];
+    if (!thvm_atp_add_equation(atp, lhs, rhs)) {
+      thvm_atp_free(atp);
+      return LIBRARY_FUNCTION_ERROR;
+    }
+  }
+  Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
+  Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
+  if (!thvm_atp_set_goal_existential(atp, goal_lhs, goal_rhs)) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+
+  AtpStatus st = thvm_atp_run(atp);
+
+  // Pack stats + witness terms.
+  mint dims[1] = {4 + n_witness};
+  MNumericArray out;
+  naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out);
+  int64_t *odata = (int64_t *)naf->MNumericArray_getData(out);
+  odata[0] = (int64_t)st;
+  odata[1] = (int64_t)atp->n_rules;
+  odata[2] = (int64_t)atp->n_trace;
+  odata[3] = (int64_t)atp->n_cps;
+  for (mint i = 0; i < n_witness; i++) {
+    Term wt = thvm_atp_get_witness(atp, (u32)witness_ids[i]);
+    odata[4 + i] = (int64_t)wt;
+  }
+
+  thvm_atp_free(atp);
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
                                        MArgument *args, MArgument res) {
   (void)argc;

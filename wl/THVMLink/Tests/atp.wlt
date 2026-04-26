@@ -181,3 +181,54 @@ VerificationTest[
     Failure,
     TestID -> "ATP/TATP/bad-conjecture-yields-failure"
 ]
+
+(* === 8.9e: TATP[..., Witness -> {x_}] surface === *)
+
+VerificationTest[
+    (* Existential goal: rule f(a, e) == a; goal f(x_, e) == a;
+       witness x.  Should bind x = a. *)
+    Module[{r},
+      r = TATP[{f[a, e] == a}, f[Pattern[x, Blank[]], e] == a,
+               Witness -> {Pattern[x, Blank[]]}];
+      r["Status"]
+    ],
+    "PROVED",
+    TestID -> "ATP/TATP/witness/proves-with-narrow"
+]
+
+VerificationTest[
+    (* Same setup; verify the Witness key is present in the
+       result Association. *)
+    Module[{r},
+      r = TATP[{f[a, e] == a}, f[Pattern[x, Blank[]], e] == a,
+               Witness -> {Pattern[x, Blank[]]}];
+      KeyExistsQ[r, "Witness"]
+    ],
+    True,
+    TestID -> "ATP/TATP/witness/witness-key-present"
+]
+
+VerificationTest[
+    (* The Witness association should have one entry keyed by `x`. *)
+    Module[{r},
+      r = TATP[{f[a, e] == a}, f[Pattern[x, Blank[]], e] == a,
+               Witness -> {Pattern[x, Blank[]]}];
+      Keys[r["Witness"]]
+    ],
+    {x},
+    TestID -> "ATP/TATP/witness/key-is-x"
+]
+
+VerificationTest[
+    (* Witness with a name not in the conjecture -> Failure. *)
+    Head @ TATP[{a == a}, a == a, Witness -> {Pattern[z, Blank[]]}],
+    Failure,
+    TestID -> "ATP/TATP/witness/missing-name-yields-failure"
+]
+
+VerificationTest[
+    (* Empty Witness option behaves like the universal-goal path. *)
+    TATP[{a == a}, a == a, Witness -> {}]["Status"],
+    "PROVED",
+    TestID -> "ATP/TATP/witness/empty-runs-universal-path"
+]
