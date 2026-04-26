@@ -386,6 +386,36 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 
 - [ ] 8.1 SUP-encoded CP enumeration via `TAG_PRI` unify (deferred
       4.5 -- moves CP gen from C-side to native IC reduction)
+  - [ ] 8.1a design memo `docs/plans/sup_encoded_cps.md`:
+        survey TinyHVM / HVM4 for `TAG_PRI` ("primitive function
+        call") patterns, sketch the SUP-cross-product encoding
+        for `overlap-position x rule-pair`, and analyze
+        feasibility against the unordered-SUP requirement
+        (8.6).  Document an explicit migration target: which
+        parts of `src/cp/_.c` and `src/atp/_.c` move to IC,
+        which stay in C as `TAG_PRI` callbacks.  Decide whether
+        8.1 unblocks 8.10 (SupGen-style search) or vice versa.
+  - [ ] 8.1b add `TAG_PRI` primitive: new tag in `src/thvm.h`,
+        constructor `term_new_pri`, single APP-PRI interaction
+        in `src/interact/app_pri.c`.  PRI carries a function
+        pointer ID (lookup table) and is "called" by APP.
+        Tests: `tests/test_pri.c` -- 4-6 cases covering call
+        behavior on simple data.
+  - [ ] 8.1c encode unification as a `TAG_PRI` callback: a
+        single primitive that takes two superposed terms and
+        returns either ERA (no unifier) or a substitution
+        application.  Tests: hand-encode 2-3 pairs and verify
+        round-trip.
+  - [ ] 8.1d SUP-encoded CP enumeration on a tiny example
+        (single rule pair, two overlap positions): build the
+        cross-product SUP, fire APP-SUP commutation, collapse
+        to the surviving CPs.  Compare against the C-side
+        `thvm_critical_pairs_range` output for the same
+        inputs.  Tests: 3-5 cases that demonstrate parity.
+  - [ ] 8.1e replace `thvm_atp_generate_cps` -- conditional
+        on a feature flag -- with the SUP encoding.  Re-run
+        the bench harness; expect comparable proof rates and
+        latency within 2x of the C-side baseline.
 - [ ] 8.2 KBO as a pure IC program (deferred 2.4 -- compile from
       the C version once it's stable)
 - [ ] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
