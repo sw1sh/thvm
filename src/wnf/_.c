@@ -168,6 +168,38 @@ enter:
       whnf = next;
       goto apply;
     }
+    case TAG_EQL: {
+      // Strict on a then b.  EQL-ERA-{L,R}: ERA on either side wraps
+      // up as ERA (failed branches collapse out).  EQL-NUM-NUM: compare
+      // values, return NUM(1) for equal else NUM(0).  Otherwise stuck
+      // (the SUP-commutation rules land in stage 1.3b).
+      u64  loc = term_val(next);
+      Term a   = wnf(heap_read(loc + 0));
+      if (term_tag(a) == TAG_ERA) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        whnf = a;
+        goto apply;
+      }
+      Term b = wnf(heap_read(loc + 1));
+      if (term_tag(b) == TAG_ERA) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        whnf = b;
+        goto apply;
+      }
+      if (term_tag(a) == TAG_NUM && term_tag(b) == TAG_NUM) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        u32 r = ((u32)term_val(a) == (u32)term_val(b)) ? 1 : 0;
+        whnf = term_new(0, TAG_NUM, term_ext(a), r);
+        goto apply;
+      }
+      heap_set(loc + 0, a);
+      heap_set(loc + 1, b);
+      whnf = next;
+      goto apply;
+    }
     case TAG_LAM:
     case TAG_ERA:
     case TAG_SUP:

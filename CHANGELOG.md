@@ -6,6 +6,21 @@ dated section.
 
 ## Unreleased
 
+### Added: TAG_EQL (structural equality) -- minimal cut
+
+`TAG_EQL = 15` lands as a strict equality node with heap layout
+`[a, b]`.  The wnf reducer walks both ports to WNF and dispatches:
+
+- `EQL(NUM(x), NUM(y))` -> `NUM(1)` if x==y else `NUM(0)`
+- `EQL(ERA, _)` / `EQL(_, ERA)` -> `ERA` (failed branches collapse out)
+- otherwise stuck
+
+SUP commutation (the rule that pushes a SUP at either port up to
+the head) lands separately in stage 1.3b alongside DUP-NUM.
+
+Constructor: `term_new_eql(a, b)` ([src/term/new_eql.c](src/term/new_eql.c)).
+Tests: [tests/test_eql.c](tests/test_eql.c).
+
 ### Added: glossary section on equational reasoning and the IC-as-ATP layer
 
 [docs/glossary.md](docs/glossary.md) gains an *Equational reasoning

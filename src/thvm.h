@@ -83,7 +83,10 @@ typedef u64 Term;
 #define TAG_OP2  13  // binary op.        val = heap loc -> [x, y], ext = opcode (OP_*)
 #define TAG_MAT  14  // numeric switch.   val = heap loc -> [handler, fallback], ext = match value
 
-#define TAG_COUNT 15
+// === IC-as-ATP layer (PLAN: docs/plans/waldmeister_ic_atp.md) ===
+#define TAG_EQL  15  // structural eq.    val = heap loc -> [a, b]; strict both sides
+
+#define TAG_COUNT 16
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -489,6 +492,7 @@ fn Term term_new_alo (Term book_term, u32 state_id);
 // MAT's cells are [handler, fallback].  See wnf for the firing rules.
 fn Term term_new_op2 (u32 opcode, Term x, Term y);
 fn Term term_new_mat (u32 match_val, Term handler, Term fallback);
+fn Term term_new_eql (Term a, Term b);
 
 // === lazy outermost-layer resolver ===
 // Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);

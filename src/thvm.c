@@ -50,6 +50,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "term/new_alo.c"
 #include "term/new_op2.c"
 #include "term/new_mat.c"
+#include "term/new_eql.c"
 
 // === heap/ ===
 #include "heap/alloc.c"
