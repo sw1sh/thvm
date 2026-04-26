@@ -620,7 +620,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         them to KBO; switch one fixture to actually use LPO
         and verify the proof outcome (or note it as a
         regression/improvement).
-- [ ] 8.6 unordered SUP/DUP for O(1) rule-set sharing (port from
+- [blocked: waiting on HVM4 upstream to land unordered SUP/DUP first; tracked in docs/plans/sup_encoded_cps.md] 8.6 unordered SUP/DUP for O(1) rule-set sharing (port from
       HVM4 when upstream lands them)
 - [ ] 8.7 WL bridge: `TATP[axioms, conjecture] -> proof tree` so
       the prover is reachable from notebooks
