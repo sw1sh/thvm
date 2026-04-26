@@ -102,6 +102,40 @@ Real kernel-count + memory wins need either:
 
 ### Kernelization
 
+- [ ] **k0: multi-output TGrad / UOP_GRAD**.  Today every
+      `TGrad[loss, x_i]` is a separate UOP_GRAD that allocates
+      independent backward kernels even though the chain rule
+      shares almost all intermediate cotangents across the
+      `x_i`.  In LeNet's Adam step this means 8 independent
+      `TGrad` calls (w1, b1, w2, b2, w3, b3, w4, b4) each
+      walking the same forward graph from `loss` -- ~300
+      kernels of duplicated backward compute.
+
+      Redesign: `TGrad[loss, {x_1, ..., x_n}]` materializes
+      ONE UOP_GRAD whose chain rule fires once and writes
+      one output buf per requires_grad ten (zero buffers for
+      anything else).  Sketch:
+        - new heap layout for UOP_GRAD: `[y, seed, n,
+          x_1, ..., x_n]` (was `[y, seed, x]`).
+        - `interact_grad` walks the forward DAG once, building
+          a cotangent map ten -> term; emits a multi-output
+          KERNEL whose program produces n outputs in one fire.
+        - `materialize` allocates n output bufs (one per x_i),
+          links them via a new `outputs[]` table on KernelEntry
+          (was `output_tid`).
+        - WL bridge: `TGrad[loss, list]` returns a TList of
+          TTerm wrappers; existing `TGrad[loss, x]` keeps
+          working as the unary case (auto-wraps in `{x}`).
+
+      Acceptance: lenet bench Adam step kernel count drops
+      from 427 to <=200 (the 8 grad realizes collapse to 1
+      multi-output backward); peak_concurrent_kib should also
+      drop because the shared cotangents only allocate once.
+      Big change -- expected ~200-300 LOC across uop/grad.c +
+      interact/uop_grad.c + schedule/materialize.c +
+      schedule/kernel_alloc.c (KernelEntry layout) + the WL
+      bridge.  DECOMPOSE on next fire before implementation.
+
 - [ ] **k1: per-realize labeled stat dump**.  Currently we know
       "lenet Adam step = 427 kernels" but not which forward layer
       / backward chain contributes how many.  Extend the
