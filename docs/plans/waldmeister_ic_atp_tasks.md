@@ -348,6 +348,39 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 7.4 benchmark vs Twee on a handful of small TPTP-UEQ problems
       (`GRP`, `RNG` divisions); record wall-clock + saturation
       step count in `docs/bench-atp.md`
+  - [ ] 7.4a `docs/bench-atp.md` skeleton: methodology section
+        (which metrics, how `make` will drive the runs), the
+        problem set (start with what we already have:
+        `waldmeister/documents/example.pr`; list 3-5 candidate
+        TPTP-UEQ files for later inclusion), and a results
+        table populated with our ATP's wall-clock / step
+        count / `n_cps_dropped_*` for the group example only.
+        No Twee comparison yet -- 7.4d adds that.
+  - [ ] 7.4b small `.pr` test corpus under `tests/data/atp/`:
+        hand-write `group_assoc_left_inverse.pr`,
+        `monoid_left_id.pr`, `commutative_inverse.pr` (3-5
+        small-but-non-trivial group-flavored conjectures).
+        Each file is the `.pr` we feed our ATP; pair each with
+        a `.expect` describing the expected proof outcome
+        (PROVED / TIMEOUT / specific n_rules range).
+  - [ ] 7.4c `tests/test_bench_atp.c` (or a `make bench-atp`
+        target): runs our ATP on every `tests/data/atp/*.pr`,
+        records wall-clock (via `clock_gettime`) and the four
+        `n_cps_dropped_*` counters into a CSV
+        `build/bench-atp.csv`.  Hand-checks the output column
+        types but does not enforce thresholds (this is a
+        measurement, not a regression).  Append the CSV
+        contents into `docs/bench-atp.md` under a "Results --
+        thvm" heading.
+  - [ ] 7.4d Twee comparison: install Twee (Haskell, via
+        `cabal install twee` or `brew install twee`), convert
+        each `.pr` in `tests/data/atp/` to TPTP-UEQ format
+        (small adapter -- our `.pr` is already close), run
+        Twee with a matching step budget, and record its
+        wall-clock + reported saturation steps in a parallel
+        CSV.  Annotate `docs/bench-atp.md` with the
+        comparison table.  Defer if Twee install fails on the
+        local toolchain; record the failure mode for follow-up.
 
 ## Stage 8+ -- full-fledged ATP iteration
 
