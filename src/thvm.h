@@ -1068,6 +1068,24 @@ fn u8        thvm_atp_narrow_step (AtpState *s, Term lhs, Term rhs,
                                    RewriteSubst *witness);
 fn Term      thvm_atp_get_witness (const AtpState *s, u32 var_id);
 
+// 9.1b: bounded depth-first multi-witness narrowing.  Same starting
+// (lhs, rhs) as `thvm_atp_narrow_step`, but enumerates up to
+// `max_witnesses` successful witness paths within `max_depth` narrow
+// steps each.  At every node, tries every (position, rule) pair on
+// both sides; on a successful unification recurses with the
+// sigma-applied terms and the composed substitution.  A leaf with
+// `kbo_eq(lhs, rhs)` emits the accumulated subst into `witnesses[]`.
+// Returns the number of witnesses written (<= max_witnesses).
+//
+// Stateless w.r.t. `s->witness_subst`: leaves `s` unchanged.
+// `witnesses[]` must hold at least `max_witnesses` `RewriteSubst`
+// slots.  v0 returns DFS-order raw witnesses without alpha-equivalent
+// dedup; callers post-filter if needed.  See
+// `docs/plans/multi_witness_design.md` for the algorithm sketch.
+fn u32       thvm_atp_narrow_all  (AtpState *s, Term lhs, Term rhs,
+                                   u32 max_depth, u32 max_witnesses,
+                                   RewriteSubst *witnesses);
+
 // 8.9c: set an existential conjecture.  Sets goal_lhs / goal_rhs
 // AND flips `s->goal_existential = 1` so `thvm_atp_goal_check`
 // uses the narrowing path.  FVRs in lhs / rhs are interpreted

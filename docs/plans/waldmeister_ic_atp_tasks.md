@@ -743,7 +743,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         deferred trace-level SupGen (multi-witness IS a
         small-scale trace search; this could be the seed for
         the broader work).  Scope: ~150-line memo.
-  - [ ] 9.1b implement `thvm_atp_narrow_all` that runs a
+  - [x] 9.1b implement `thvm_atp_narrow_all` that runs a
         bounded DFS over narrow choices, collecting up to N
         witness substitutions.  Output: a stack-allocated
         `RewriteSubst` array + count.  Tests: hand-built

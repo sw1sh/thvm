@@ -1468,6 +1468,115 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Stage 9.1b: multi-witness DFS narrowing =======================
+
+  TEST_BEGIN("atp/narrow_all/no-rules-returns-zero");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    RewriteSubst out[4] = {{{0}}};
+    u32 n = thvm_atp_narrow_all(s, mk_a(), mk_e(), 4u, 4u, out);
+    CHECK_EQ(n, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow_all/already-equal-emits-empty-witness");
+  {
+    // lhs == rhs at depth 0: short-circuits to one witness with
+    // no bindings (empty acc).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e()); s->rhs[0] = mk_a(); s->n_rules = 1;
+    RewriteSubst out[4] = {{{0}}};
+    u32 n = thvm_atp_narrow_all(s, mk_a(), mk_a(), 4u, 4u, out);
+    CHECK_EQ(n, 1u);
+    // Empty acc: every binding slot stays 0.
+    for (u32 i = 0; i < REWRITE_MAX_VAR; i++) CHECK_EQ(out[0].bindings[i], 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow_all/depth-zero-no-narrow");
+  {
+    // Rule applies but max_depth=0 forbids any narrow step.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e()); s->rhs[0] = mk_a(); s->n_rules = 1;
+    RewriteSubst out[4] = {{{0}}};
+    u32 n = thvm_atp_narrow_all(s, mk_f(mk_v(VAR_x), mk_e()), mk_a(),
+                                0u, 4u, out);
+    CHECK_EQ(n, 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow_all/single-witness-binds-x");
+  {
+    // Same as 8.9b's narrow_step happy path: rule f(a, e) -> a,
+    // goal f(x, e) = a.  DFS finds exactly one witness with x=a.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e()); s->rhs[0] = mk_a(); s->n_rules = 1;
+    RewriteSubst out[4] = {{{0}}};
+    u32 n = thvm_atp_narrow_all(s, mk_f(mk_v(VAR_x), mk_e()), mk_a(),
+                                4u, 4u, out);
+    CHECK_EQ(n, 1u);
+    Term wx = out[0].bindings[VAR_x];
+    CHECK_EQ(term_tag(wx), TAG_CTR);
+    CHECK_EQ(term_ext(wx), 4u);   // LAB_a
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow_all/two-rules-two-witnesses");
+  {
+    // Two distinct rules, both unify with goal at top with
+    // different bindings.  Rule 0: f(a, e) -> a (binds x=a).
+    // Rule 1: f(e, e) -> a (binds x=e).  Goal: f(x, e) = a.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e()); s->rhs[0] = mk_a();
+    s->lhs[1] = mk_f(mk_e(), mk_e()); s->rhs[1] = mk_a();
+    s->n_rules = 2;
+    RewriteSubst out[8] = {{{0}}};
+    u32 n = thvm_atp_narrow_all(s, mk_f(mk_v(VAR_x), mk_e()), mk_a(),
+                                4u, 8u, out);
+    CHECK(n >= 2u);
+    // Collect distinct CTR labels for x across the witnesses; we
+    // expect both LAB_a (4) and LAB_e (1) to appear.
+    u8 saw_a = 0, saw_e = 0;
+    for (u32 i = 0; i < n; i++) {
+      Term wx = out[i].bindings[VAR_x];
+      if (term_tag(wx) != TAG_CTR) continue;
+      if (term_ext(wx) == 4u) saw_a = 1;
+      if (term_ext(wx) == 1u) saw_e = 1;
+    }
+    CHECK_EQ((int)saw_a, 1);
+    CHECK_EQ((int)saw_e, 1);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow_all/max-witnesses-caps-count");
+  {
+    // Same multi-witness setup but cap at 1.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e()); s->rhs[0] = mk_a();
+    s->lhs[1] = mk_f(mk_e(), mk_e()); s->rhs[1] = mk_a();
+    s->n_rules = 2;
+    RewriteSubst out[1] = {{{0}}};
+    u32 n = thvm_atp_narrow_all(s, mk_f(mk_v(VAR_x), mk_e()), mk_a(),
+                                4u, 1u, out);
+    CHECK_EQ(n, 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/narrow_all/state-untouched");
+  {
+    // Verify thvm_atp_narrow_all does not mutate s->witness_subst.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->lhs[0] = mk_f(mk_a(), mk_e()); s->rhs[0] = mk_a(); s->n_rules = 1;
+    s->witness_subst.bindings[VAR_x] = mk_e();   // pre-existing sentinel
+    RewriteSubst out[4] = {{{0}}};
+    (void)thvm_atp_narrow_all(s, mk_f(mk_v(VAR_x), mk_e()), mk_a(),
+                              4u, 4u, out);
+    // Sentinel survives.
+    CHECK_EQ(term_tag(s->witness_subst.bindings[VAR_x]), TAG_CTR);
+    CHECK_EQ(term_ext(s->witness_subst.bindings[VAR_x]), 1u);   // LAB_e
+    thvm_atp_free(s);
+  }
+
   // === Stage 8.9c: existential goal integration ======================
 
   TEST_BEGIN("atp/exist/default-off");

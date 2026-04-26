@@ -6,6 +6,36 @@ dated section.
 
 ## Unreleased
 
+### Added: bounded DFS multi-witness narrowing (stage 9.1b)
+
+`thvm_atp_narrow_all(s, lhs, rhs, max_depth, max_witnesses,
+witnesses[])` enumerates witness substitutions by recursively
+trying every `(position, rule)` choice on each side. Leaf
+condition: `kbo_eq(lhs, rhs)` emits the accumulated subst.
+Stateless w.r.t. `s->witness_subst` -- writes only the
+caller's array.
+
+Implementation (~110 LOC in `src/atp/_.c`):
+- `NarrowAllCtx` carries the witnesses array + caps + counter.
+- `NarrowAllVisitor` is the per-frame closure for
+  `cp_walk_positions`; on each successful unification it
+  composes the new subst into a fresh accumulator copy and
+  recurses with the sigma-applied terms.
+- `narrow_all_dfs` is the recursive driver; siblings start
+  from the same parent acc, so DFS branches stay independent.
+
+Tests (7 new cases in `tests/test_atp.c`):
+- `no-rules-returns-zero`
+- `already-equal-emits-empty-witness` (depth-0 short-circuit)
+- `depth-zero-no-narrow` (bound enforcement)
+- `single-witness-binds-x` (parity with 8.9b's narrow_step)
+- `two-rules-two-witnesses` (multi-witness happy path; both
+  `x=a` and `x=e` recovered)
+- `max-witnesses-caps-count` (cap honored)
+- `state-untouched` (sentinel in `s->witness_subst` survives)
+
+Tests stay green (166/166 C, 314 WL).
+
 ### Added: multi-witness narrowing design memo (stage 9.1a)
 
 `docs/plans/multi_witness_design.md` (~150 lines) specifies

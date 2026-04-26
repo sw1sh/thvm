@@ -1358,3 +1358,113 @@ fn Term thvm_atp_get_witness(const AtpState *s, u32 var_id) {
   if (s == NULL || var_id >= REWRITE_MAX_VAR) return 0;
   return s->witness_subst.bindings[var_id];
 }
+
+// === Stage 9.1b: bounded DFS multi-witness narrowing ================
+// Enumerates up to N witnesses by recursively trying every (position,
+// rule) choice at each node.  Stateless w.r.t. AtpState; populates
+// the caller's RewriteSubst array directly.
+
+typedef struct {
+  AtpState     *s;
+  RewriteSubst *witnesses;
+  u32           max_witnesses;
+  u32           found;
+  u32           max_depth;
+} NarrowAllCtx;
+
+typedef struct {
+  NarrowAllCtx *ctx;
+  Term          side;       // currently being narrowed
+  Term          other;      // the other side (sigma is applied here too)
+  RewriteSubst  acc;        // accumulator at this DFS frame
+  u32           depth;
+  u8            narrowing_lhs;  // 1 = narrow side==lhs; 0 = narrow side==rhs
+} NarrowAllVisitor;
+
+static void narrow_all_dfs(NarrowAllCtx *ctx,
+                           Term lhs, Term rhs,
+                           const RewriteSubst *acc,
+                           u32 depth);
+
+static u32 narrow_all_visit(const u32 *p, u32 p_len, void *raw) {
+  NarrowAllVisitor *v = (NarrowAllVisitor *)raw;
+  if (v->ctx->found >= v->ctx->max_witnesses) return 0;
+
+  Term sub = cp_subterm_at(v->side, p, p_len);
+  if (sub == 0 || term_tag(sub) == TAG_FVR) return 0;
+
+  for (u32 k = 0; k < v->ctx->s->n_rules; k++) {
+    if (v->ctx->found >= v->ctx->max_witnesses) return 0;
+
+    Term lj = thvm_rename_vars(v->ctx->s->lhs[k], CP_RENAME_OFFSET);
+    Term rj = thvm_rename_vars(v->ctx->s->rhs[k], CP_RENAME_OFFSET);
+    RewriteSubst subst = {{0}};
+    if (!thvm_unify(sub, lj, &subst)) continue;
+
+    Term replaced  = cp_replace_at(v->side, p, p_len, rj);
+    Term new_side  = thvm_unify_apply(replaced,  &subst);
+    Term new_other = thvm_unify_apply(v->other,  &subst);
+
+    // Compose sigma into a fresh accumulator copy: each branch sees
+    // its own bindings, siblings stay independent.
+    RewriteSubst new_acc = v->acc;
+    for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
+      if (subst.bindings[i] != 0) new_acc.bindings[i] = subst.bindings[i];
+    }
+
+    if (v->narrowing_lhs)
+      narrow_all_dfs(v->ctx, new_side, new_other, &new_acc, v->depth + 1);
+    else
+      narrow_all_dfs(v->ctx, new_other, new_side, &new_acc, v->depth + 1);
+  }
+  return 0;
+}
+
+static void narrow_all_dfs(NarrowAllCtx *ctx,
+                           Term lhs, Term rhs,
+                           const RewriteSubst *acc,
+                           u32 depth) {
+  if (ctx->found >= ctx->max_witnesses) return;
+  if (kbo_eq(lhs, rhs)) {
+    ctx->witnesses[ctx->found++] = *acc;
+    return;
+  }
+  if (depth >= ctx->max_depth) return;
+
+  u32 path[CP_MAX_DEPTH];
+  NarrowAllVisitor v;
+  v.ctx   = ctx;
+  v.acc   = *acc;
+  v.depth = depth;
+
+  // Narrow on lhs first.
+  v.side          = lhs;
+  v.other         = rhs;
+  v.narrowing_lhs = 1;
+  cp_walk_positions(lhs, path, 0, CP_MAX_DEPTH, narrow_all_visit, &v, 0);
+  if (ctx->found >= ctx->max_witnesses) return;
+
+  // Then rhs.
+  v.side          = rhs;
+  v.other         = lhs;
+  v.narrowing_lhs = 0;
+  cp_walk_positions(rhs, path, 0, CP_MAX_DEPTH, narrow_all_visit, &v, 0);
+}
+
+fn u32 thvm_atp_narrow_all(AtpState *s,
+                           Term lhs, Term rhs,
+                           u32 max_depth, u32 max_witnesses,
+                           RewriteSubst *witnesses) {
+  if (s == NULL || witnesses == NULL || max_witnesses == 0) return 0;
+
+  NarrowAllCtx ctx;
+  ctx.s             = s;
+  ctx.witnesses     = witnesses;
+  ctx.max_witnesses = max_witnesses;
+  ctx.found         = 0;
+  ctx.max_depth     = max_depth;
+
+  RewriteSubst empty = {{0}};
+  narrow_all_dfs(&ctx, lhs, rhs, &empty, 0);
+  return ctx.found;
+}
