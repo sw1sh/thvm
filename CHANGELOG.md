@@ -6,6 +6,27 @@ dated section.
 
 ## Unreleased
 
+### Added: Wolfram-axiom design memo (stage 10a)
+
+`docs/plans/wolfram_axiom_design.md` (~150 lines) picks two
+fixtures based on Wolfram's 2000 single-equation axiomatisation
+of Boolean algebra in NAND form (proven equivalent to standard
+Boolean algebra by McCune et al., JAR 2002):
+
+    ((x NAND y) NAND z) NAND (x NAND ((x NAND z) NAND x)) = z
+
+| Fixture | Predicted | Step bound | Notes |
+|---|---|---|---|
+| `wolfram_axiom_literal`         | PROVED  | 0      | Literal axiom instance with constants |
+| `wolfram_sheffer_commutativity` | TIMEOUT | 32 cap | `nand(a, b) = nand(b, a)`; lemma-discovery hard |
+
+One PROVED + one TIMEOUT, brings corpus from 12 to 14 fixtures.
+KBO/LPO orient the axiom identically (lhs depth 4 vs rhs
+variable; no weight-vs-precedence flip).  10b implements the
+fixtures, 10c reruns the bench-twee comparison.
+
+Documentation-only.  Tests stay green (166/166 C, 323 WL).
+
 ### Added: corpus expansion findings memo (stage 9.4c)
 
 `docs/plans/corpus_expansion_findings.md` (~150 lines) captures

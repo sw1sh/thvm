@@ -807,7 +807,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       `docs/plans/corpus_expansion_findings.md` with the new
       rows.  Reference: McCune et al., "Short Single Axioms for
       Boolean Algebra", J. Automated Reasoning 2002.
-  - [ ] 10a design memo `docs/plans/wolfram_axiom_design.md`:
+  - [x] 10a design memo `docs/plans/wolfram_axiom_design.md`:
         pick the two conjectures (one PROVED-fast, one TIMEOUT-
         stress) from the Wolfram axiom.  For each: signature
         (a single binary `nand` symbol + 1-3 constants),
