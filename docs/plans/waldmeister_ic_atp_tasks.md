@@ -432,6 +432,29 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         on a feature flag -- with the SUP encoding.  Re-run
         the bench harness; expect comparable proof rates and
         latency within 2x of the C-side baseline.
+    - [ ] 8.1e-i `use_ic_cp_gen` feature flag on `AtpState`
+          (u8, default 0) plus a setter.  Plumb through
+          `thvm_atp_generate_cps`: when 0, current C path;
+          when 1, dispatch to a stub `thvm_atp_generate_cps_ic`
+          that returns the same CPs (initial impl: just calls
+          the C path so the flag is observably a no-op).  Adds
+          a single test verifying the flag round-trips.
+          Scope: ~30 LOC.
+    - [ ] 8.1e-ii implement `thvm_atp_generate_cps_ic` using
+          SUP+PRI for the unify step.  Keep the (i, j, position)
+          enumeration in C for now -- the IC contribution is
+          the per-position unify call goes through APP-PRI,
+          producing the same Term results.  Tests: parity vs C
+          path at the at_push_cps_traced call boundary on the
+          group axioms.  Scope: ~80 LOC.
+    - [ ] 8.1e-iii bench analysis: re-run `make test` (which
+          drives `test_bench_atp`) and `make bench-twee` with
+          `use_ic_cp_gen = 1` set in the harness and compare
+          latency vs C path.  Update `docs/bench-atp.md` with
+          a new column showing the IC-path numbers.  Document
+          whether the latency is within 2x; if not, identify
+          the bottleneck and decide whether to keep IC default
+          off or invest in further optimization.
 - [ ] 8.2 KBO as a pure IC program (deferred 2.4 -- compile from
       the C version once it's stable)
 - [ ] 8.3 IC-native rule dispatch: closed-form rule = LAM-binder,
