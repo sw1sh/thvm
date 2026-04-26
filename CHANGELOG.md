@@ -6,6 +6,30 @@ dated section.
 
 ## Unreleased
 
+### Added: corpus expansion design memo (stage 9.4a)
+
+`docs/plans/corpus_expansion_design.md` (~200 lines) picks the
+candidates for 9.4b to implement.
+
+Five hand-encoded textbook UEQ fixtures spanning GRP / RNG /
+LCL / LAT divisions:
+
+| Fixture | Division | Predicted | Step bound |
+|---|---|---|---|
+| `comm_monoid_swap`         | GRP | PROVED  | 0-1     |
+| `lattice_absorb_simple`    | LAT | PROVED  | 0       |
+| `ring_distrib_zero`        | RNG | PROVED  | 1-2     |
+| `comb_K`                   | LCL | PROVED  | 1       |
+| `group_left_id_from_assoc` | GRP | TIMEOUT | 32 cap  |
+
+Hits the >=1 PROVED + >=1 TIMEOUT mix.  Brings corpus from 7 to
+12 fixtures.  Each candidate is axiomatized inline, with KBO-vs-
+LPO orientation notes (every axiom is `lhs > rhs` under both
+orderings except commutativity in #1, which is unorientable
+under both -- closes via the unfailing 2-way fallback).
+
+Documentation-only.  Tests stay green (166/166 C, 323 WL).
+
 ### Added: heap checkpoint/reset for saturation hygiene (stage 9.3)
 
 `thvm_atp_heap_checkpoint()` snapshots `HEAP_NEXT`;

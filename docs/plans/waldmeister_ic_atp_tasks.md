@@ -773,7 +773,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       enlarged corpus; document IC-vs-Twee gaps where they
       emerge.  This is where the 8.5d "KBO and LPO agree on
       our corpus" finding gets stress-tested.
-  - [ ] 9.4a design memo `docs/plans/corpus_expansion_design.md`:
+  - [x] 9.4a design memo `docs/plans/corpus_expansion_design.md`:
         pick 3-5 textbook UEQ candidates from
         GRP / RNG / LCL / LAT (we don't have network access in
         a cron firing, so hand-encode from textbook axioms).
