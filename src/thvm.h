@@ -738,6 +738,28 @@ typedef struct {
 
 fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg);
 
+// === lpo/ ===
+// Lexicographic Path Ordering (LPO; Waldmeister's
+// `Lexikografische-Pfad-Ordnung`, Dershowitz 1982).  An
+// alternative reduction ordering on TAG_CTR + TAG_FVR terms,
+// driven purely by a precedence relation on function symbols
+// -- no per-symbol weights.  More discriminating than KBO on
+// some rewrite systems; the standard pick for many TPTP-UEQ
+// problems.  Stage 8.5b of `docs/plans/lpo_design.md`.
+typedef enum {
+  LPO_EQ =  0,
+  LPO_GT =  1,
+  LPO_LT = -1,
+  LPO_UN =  2,    // incomparable
+} LpoCmp;
+
+typedef struct {
+  const u32 *precedence;   // higher value = greater symbol
+  u32        n_labels;
+} LpoConfig;
+
+fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg);
+
 // === rewrite/ ===
 // One-shot equational rewriter on TAG_CTR + TAG_FVR (stage 3 of
 // docs/plans/waldmeister_ic_atp.md).  No recursive descent into

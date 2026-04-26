@@ -6,6 +6,44 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_lpo Lexicographic Path Ordering (stage 8.5b)
+
+`src/lpo/_.c` (~150 lines) implements the LPO comparator
+following Dershowitz (1982).  Mirrors `src/kbo/_.c`'s structure:
+
+- `lpo_eq` -- structural equality on Terms (local copy of the
+  KBO pattern; static-but-TU-visible from kbo would also work)
+- `lpo_var_occurs_in` -- "does FVR var_id appear anywhere in
+  t?", used for the variable subterm-occurrence cases
+- `lpo_some_arg_dominates` -- case (1) check (subterm
+  domination)
+- `lpo_dominates_all_args` -- case (2)/(3) condition
+- `lpo_lex` -- lexicographic argument comparison
+- `lpo_rec` -- top-level recursion implementing all three
+  Dershowitz cases plus variable handling
+
+New types in `src/thvm.h`:
+- `typedef enum { LPO_EQ, LPO_GT, LPO_LT, LPO_UN } LpoCmp;`
+- `typedef struct { const u32 *precedence; u32 n_labels; }
+  LpoConfig;` (no weights or var_weight -- LPO is precedence-
+  only).
+- `fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg);`
+
+`tests/test_lpo.c` (12 sub-checks, 9 cases):
+- `eq-on-identical-terms`
+- `gt-via-precedence`: `h(b) > f(a)` when `h >_F f`
+- `gt-via-subterm-domination`: `f(a, b) > a`
+- `gt-via-lex-on-equal-heads`: `f(a, c) > f(a, b)` when
+  `c >_F b`
+- `un-on-distinct-vars`
+- `var-occurs-as-strict-subterm`: `f(x) > x` and `x < f(x)`
+- `var-not-in-term-incomparable`
+- `eq-fvr-same-id`
+- `group-axiom-orient-gt`: `f(x, a) > x` (right-id-style rule)
+
+Stage 8.5c will wire LPO into `AtpState` + dispatch from
+`thvm_atp_orient_and_add`.
+
 ### Added: LPO ordering design memo (stage 8.5a)
 
 `docs/plans/lpo_design.md` (~150 lines) lays out the design for

@@ -601,7 +601,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         between KBO and LPO -- a config field on AtpState, an
         OrderConfig sum type, or two parallel
         thvm_atp_init variants.  Scope: ~150-line memo.
-  - [ ] 8.5b implement `thvm_lpo(s, t, cfg)` in `src/lpo/_.c`
+  - [x] 8.5b implement `thvm_lpo(s, t, cfg)` in `src/lpo/_.c`
         mirroring `src/kbo/_.c`'s structure: kbo_eq -> lpo_eq
         (or reuse), variable-domination, top-symbol comparison
         by precedence, lexicographic recursion.  Tests in

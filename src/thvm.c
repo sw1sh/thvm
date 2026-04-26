@@ -213,6 +213,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // Knuth-Bendix ordering as a C function.  No reduction or heap
 // allocation; reads CTR/FVR terms and a caller-supplied KboConfig.
 #include "kbo/_.c"
+#include "lpo/_.c"
 
 // === rewrite/ ===
 // Equational rewriter (one-shot rule application + iterative
