@@ -624,7 +624,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       HVM4 when upstream lands them)
 - [ ] 8.7 WL bridge: `TATP[axioms, conjecture] -> proof tree` so
       the prover is reachable from notebooks
-  - [ ] 8.7a design memo `docs/plans/wl_atp_bridge.md`: pick
+  - [x] 8.7a design memo `docs/plans/wl_atp_bridge.md`: pick
         the WL surface form (`TATP[{axiom_1, axiom_2, ...},
         conjecture]` returning a `ProofTree[]` association?
         a list of rewrite steps? a `Failure[...]` on TIMEOUT?),

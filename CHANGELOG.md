@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: WL ATP bridge design memo (stage 8.7a)
+
+`docs/plans/wl_atp_bridge.md` (~190 lines) lays out the design
+for `TATP[axioms, conjecture]`.
+
+**WL surface**:
+```mathematica
+TATP[
+  { f[x_, e] == x, f[x_, i[x_]] == e,
+    f[f[x_, y_], z_] == f[x_, f[y_, z_]] },
+  f[a, i[a]] == e
+]
+(* -> Association["Status" -> "PROVED", "Steps" -> 1, ... ] *)
+```
+
+**Encoding**:
+- `Symbol[s]` (e.g. `e`) -> nullary `term_new_ctr`
+- `head[args...]` -> `term_new_ctr` with encoded children
+- `Pattern[var, Blank[]]` (`x_`) -> `term_new_fvr`
+- `Equal[lhs, rhs]` -> equation pair fed to
+  `thvm_atp_add_equation`
+
+**Two-layer LibraryLink plumbing**:
+- 8.7b: pre-encoded Term entry point `thvm_wl_atp_run`
+  isolates the saturator-from-LibraryLink plumbing; tested
+  with manually-built Terms.
+- 8.7c-d: WL-side encoder + wrapper.  Encoder is pure WL (no
+  new C); calls existing `thvm_wl_term_new` primitives.
+
+Out of scope (deferred): TPTP-UEQ file parsing from WL,
+proof-tree-as-graphics, typed pattern handling.  Documented
+stop conditions for 8.7b-d.
+
 ### Added: ORDERING-kind capture + bench dispatch (stage 8.5d)
 
 `WaldSpec` gains a `u8 ordering_kind` field (default
