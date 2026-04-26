@@ -323,7 +323,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
   - [x] 7.2b implement the chosen criterion as a new helper in
         `src/atp/_.c` with stat counter + tests.  Expected
         scope: ~50 LOC implementation + ~30 LOC tests.
-- [ ] 7.3 subsumption pruning on R and the CP queue
+- [x] 7.3 subsumption pruning on R and the CP queue
   - [x] 7.3a **rule subsumption counter**: helper
         `atp_cp_subsumed_by_rules(s, lhs, rhs)` returns 1 if
         there is `(l, r) ∈ R` and substitution σ such that
@@ -335,7 +335,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         7.1's full-R normalize.  Add `n_cps_dropped_rule_subsumed`
         counter for empirical confirmation.  Expected scope:
         ~30 LOC + ~30 LOC tests.
-  - [ ] 7.3b **queue subsumption filter**: helper
+  - [x] 7.3b **queue subsumption filter**: helper
         `atp_cp_subsumed_by_queue(s, lhs, rhs)` returns 1 if
         the candidate is an instance of an already-queued CP
         `(s', t')` -- i.e. there is σ with `(lhs, rhs) =

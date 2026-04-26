@@ -1032,6 +1032,106 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  // === Stage 7.3b: queue-subsumption filter ==========================
+
+  TEST_BEGIN("atp/cp-queue-subsumed-direct-instance");
+  {
+    // Pre-populate the queue with the more-general CP
+    // (f(x, e), x).  A candidate (f(a, e), a) is its instance
+    // under σ = {x -> a}; queue-subsumed should fire.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->cp_rhs[0] = mk_v(VAR_x);
+    s->cp_trace[0] = ATP_TRACE_NONE;
+    s->n_cps = 1;
+
+    Term lhs = mk_f(mk_a(), mk_e());
+    Term rhs = mk_a();
+    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 1);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-queue-subsumed-symmetric-instance");
+  {
+    // Same setup but candidate sides swapped.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->cp_rhs[0] = mk_v(VAR_x);
+    s->cp_trace[0] = ATP_TRACE_NONE;
+    s->n_cps = 1;
+
+    Term lhs = mk_a();
+    Term rhs = mk_f(mk_a(), mk_e());
+    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 1);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-queue-subsumed-empty-queue-no-fire");
+  {
+    // Empty queue: nothing to subsume against.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_a(), mk_e());
+    Term rhs = mk_a();
+    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 0);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-queue-subsumed-non-instance-no-fire");
+  {
+    // Queue has (f(x, e), x).  Candidate (g(a), a) does not
+    // unify with the queued LHS (different head symbol).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->cp_rhs[0] = mk_v(VAR_x);
+    s->n_cps = 1;
+
+    Term lhs = mk_a();         // not a CTR with the f label
+    Term rhs = mk_e();
+    CHECK_EQ((int)atp_cp_queue_subsumed(s, lhs, rhs), 0);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/cp-queue-subsumed-filter-drops-instance");
+  {
+    // Functional test: pre-queue a general CP, then run
+    // generate_cps with a setup that produces an instance.
+    // Verify the instance is dropped by the queue filter
+    // (n_cps_dropped_queue_subsumed ticks) and the queue size
+    // does not grow.
+    //
+    // Pre-queue the more-general (f(x, e), x).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    s->cp_lhs[0] = mk_f(mk_v(VAR_x), mk_e());
+    s->cp_rhs[0] = mk_v(VAR_x);
+    s->cp_trace[0] = ATP_TRACE_NONE;
+    s->n_cps = 1;
+
+    // Two rules whose cross-overlap manufactures the instance
+    // (f(a, e), a):
+    //   r0: f(a, x) -> a
+    //   r1: f(x, e) -> x
+    // Top unification: r0.lhs = f(a, x), r1.lhs = f(y, e);
+    // unify y=a, x=e; r0 RHS subst -> a, r1 RHS subst -> e.
+    // CP = (a, e).  Hmm, that's not the instance we wanted.
+    //
+    // Take the simpler route: directly verify the filter via
+    // atp_push_cps_traced with a hand-built CriticalPair
+    // batch.
+    s->n_rules = 0;   // no rules so trivially-joinable doesn't fire spuriously
+
+    CriticalPair batch[1];
+    batch[0].lhs = mk_f(mk_a(), mk_e());
+    batch[0].rhs = mk_a();
+    u32 before_cnt = s->n_cps;
+    u32 pushed = atp_push_cps_traced(s, batch, 1,
+                                     ATP_TRACE_NONE, ATP_TRACE_NONE,
+                                     ATP_MAX_RULES, ATP_MAX_RULES);
+    CHECK_EQ(pushed, 0u);
+    CHECK_EQ(s->n_cps, before_cnt);   // queue did not grow
+    CHECK(s->n_cps_dropped_queue_subsumed >= 1u);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

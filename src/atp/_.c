@@ -526,6 +526,43 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
   return 0;
 }
 
+// Stage 7.3b: queue subsumption check.  Returns 1 if the candidate
+// `(lhs, rhs)` is a substitution instance of some queued CP
+// `(s->cp_lhs[k], s->cp_rhs[k])` -- i.e., there is σ such that
+// `(lhs, rhs) = (σ cp_lhs[k], σ cp_rhs[k])` (or symmetric).
+//
+// Genuinely orthogonal to 7.1: the queue does not participate in
+// `thvm_rewrite_normalize`, so a CP can be queue-subsumed without
+// being trivially-joinable (and vice versa).  Used as a real
+// filter: the candidate is dropped before reaching the queue.
+//
+// Cost: O(|queue| * |term|) per candidate; cheap relative to a
+// `thvm_rewrite_normalize` because matching has no fixed-point
+// loop.
+static u8 atp_cp_queue_subsumed(AtpState *s, Term lhs, Term rhs) {
+  for (u32 k = 0; k < s->n_cps; k++) {
+    Term qs = s->cp_lhs[k];
+    Term qt = s->cp_rhs[k];
+    // Forward: σqs = lhs AND σqt = rhs (one σ).
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(qs, lhs, &subst) &&
+          thvm_match(qt, rhs, &subst)) {
+        return 1;
+      }
+    }
+    // Symmetric.
+    {
+      RewriteSubst subst = {{0}};
+      if (thvm_match(qs, rhs, &subst) &&
+          thvm_match(qt, lhs, &subst)) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
 // Helper: push a batch of CPs onto the queue with TRACE_CP entries
 // pointing at the two source rules' trace indices.  Drops overflow
 // silently.  Filters and counters fire on each CP:
@@ -534,6 +571,8 @@ static u8 atp_cp_rule_subsumed(AtpState *s, Term lhs, Term rhs) {
 //                                                 (counter only)
 //   - 7.3a: rule-subsumed by some `(l, r) ∈ R` -> tick `n_cps_dropped_rule_subsumed`
 //                                                 (counter only)
+//   - 7.3b: queue-subsumed by some queued CP   -> drop, tick `n_cps_dropped_queue_subsumed`
+//                                                 (real filter, orthogonal to 7.1)
 // `rule_a`/`rule_b` are the rule indices that birthed this CP batch
 // (passed through to the connectedness check); `parent_a`/`parent_b`
 // are their trace indices.  Returns count of CPs pushed.
@@ -547,10 +586,15 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     u8 connected   = atp_cp_source_disjoint_connected(s, cps[i].lhs, cps[i].rhs,
                                                       rule_a, rule_b);
     u8 rule_subsmd = atp_cp_rule_subsumed(s, cps[i].lhs, cps[i].rhs);
+    u8 q_subsmd    = atp_cp_queue_subsumed(s, cps[i].lhs, cps[i].rhs);
     if (connected)   s->n_cps_dropped_connected++;
     if (rule_subsmd) s->n_cps_dropped_rule_subsumed++;
     if (joinable) {
       s->n_cps_dropped_joinable++;
+      continue;
+    }
+    if (q_subsmd) {
+      s->n_cps_dropped_queue_subsumed++;
       continue;
     }
     u32 t = atp_trace_push(s, TRACE_CP, parent_a, parent_b,

@@ -867,6 +867,14 @@ typedef struct {
   // 7.1 already catches via full normalization.  Counter ticks
   // unconditionally for empirical measurement; not a filter.
   u32  n_cps_dropped_rule_subsumed;
+
+  // Stage 7.3b: count of CPs dropped because they are subsumed
+  // by an already-queued CP `(s', t')` -- there exists σ such
+  // that `(lhs, rhs) = (σs', σt')` (or symmetric).  Genuinely
+  // orthogonal to 7.1 (the queue does not participate in
+  // normalization), so this IS a filter -- the candidate is
+  // discarded.
+  u32  n_cps_dropped_queue_subsumed;
 } AtpState;
 
 fn AtpState *thvm_atp_init        (const KboConfig *cfg, u32 step_cap);

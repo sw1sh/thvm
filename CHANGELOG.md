@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: queue-subsumption filter (stage 7.3b)
+
+`src/atp/_.c` gains `atp_cp_queue_subsumed(s, lhs, rhs)`: returns 1
+if the candidate `(lhs, rhs)` is a substitution instance of some
+already-queued CP `(s->cp_lhs[k], s->cp_rhs[k])` -- i.e., there is
+σ such that `(lhs, rhs) = (σs', σt')` (forward) or `(σt', σs')`
+(symmetric).
+
+Genuinely orthogonal to 7.1: the queue does not participate in
+`thvm_rewrite_normalize`, so the queue-subsumption check can fire
+on CPs that 7.1 misses (and vice versa).  Wired as a real FILTER
+in `atp_push_cps_traced`: candidate is dropped, `n_cps_dropped_
+queue_subsumed` ticks, queue does not grow.
+
+`tests/test_atp.c` adds 5 cases:
+- `cp-queue-subsumed-direct-instance`: forward direction fires
+- `cp-queue-subsumed-symmetric-instance`: symmetric direction fires
+- `cp-queue-subsumed-empty-queue-no-fire`: nothing to subsume
+  against
+- `cp-queue-subsumed-non-instance-no-fire`: non-instance does not
+  fire
+- `cp-queue-subsumed-filter-drops-instance`: end-to-end filter
+  test via `atp_push_cps_traced`
+
+Stage 7.3 is now complete.
+
 ### Added: rule-subsumption counter (stage 7.3a)
 
 `src/atp/_.c` gains `atp_cp_rule_subsumed(s, lhs, rhs)`: returns 1
