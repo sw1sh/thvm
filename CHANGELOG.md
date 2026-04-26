@@ -6,6 +6,31 @@ dated section.
 
 ## Unreleased
 
+### Added: TAG_AND, TAG_OR with short-circuit + SUP commutation
+
+`TAG_AND = 16` and `TAG_OR = 17` land as short-circuit boolean
+nodes; both are strict on the left operand and lazy on the right:
+
+  AND(NUM(0), _)        -> NUM(0)        (right stays unreduced)
+  AND(NUM(n != 0), b)   -> wnf(b)
+  AND(ERA, _)           -> ERA
+  AND(&L{a0,a1}, b)     -> &L{AND(a0,B0), AND(a1,B1)}, !&L{B0,B1}=b
+
+  OR(NUM(0), b)         -> wnf(b)
+  OR(NUM(n != 0), _)    -> NUM(1)        (right stays unreduced)
+  OR(ERA, _)            -> ERA
+  OR(&L{a0,a1}, b)      -> &L{OR(a0,B0), OR(a1,B1)}, !&L{B0,B1}=b
+
+The SUP commutation routes a superposed left operand through both
+branches with the right operand DUPed, mirroring EQL-SUP.  This
+enables the SupGen-style filter pattern `AND(EQL(cand, expected),
+cand)`: the matching candidate survives, the rest become NUM(0).
+Full ERA-propagating filter (collapse to *only* the matching
+candidate) needs the MAT/constructor work in stage 1.7.
+
+Constructors: `term_new_and(a, b)`, `term_new_or(a, b)` in
+`src/term/`.  Tests: `tests/test_and_or.c`.
+
 ### Added: EQL-SUP commutation + DUP-NUM annihilation
 
 The `EQL` reducer now commutes through `SUP` on either port:

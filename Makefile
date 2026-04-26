@@ -45,7 +45,8 @@ TESTS := \
   $(BIN)/test_use_realize \
   $(BIN)/test_collapse \
   $(BIN)/test_eql \
-  $(BIN)/test_dup_num
+  $(BIN)/test_dup_num \
+  $(BIN)/test_and_or
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.

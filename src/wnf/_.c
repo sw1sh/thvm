@@ -246,6 +246,100 @@ enter:
       whnf = next;
       goto apply;
     }
+    case TAG_AND: {
+      // Short-circuit boolean AND.  Strict on a only:
+      //   AND(NUM(0), _)     -> NUM(0)        (b stays unreduced)
+      //   AND(NUM(n!=0), b)  -> wnf(b)
+      //   AND(ERA, _)        -> ERA
+      //   AND(&L{a0,a1}, b)  -> &L{AND(a0,B0), AND(a1,B1)}, !&L{B0,B1}=b
+      //   otherwise          -> stuck
+      u64  loc = term_val(next);
+      Term a   = wnf(heap_read(loc + 0));
+      if (term_tag(a) == TAG_ERA) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        whnf = a;
+        goto apply;
+      }
+      if (term_tag(a) == TAG_NUM) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        if ((u32)term_val(a) == 0) {
+          whnf = a;
+          goto apply;
+        }
+        next = heap_read(loc + 1);
+        goto enter;
+      }
+      if (term_tag(a) == TAG_SUP) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        u32  lab  = term_ext(a);
+        u64  sloc = term_val(a);
+        Term a0   = heap_read(sloc + 0);
+        Term a1   = heap_read(sloc + 1);
+        Term b    = heap_read(loc + 1);
+        u64  dup  = heap_alloc(1);
+        heap_set(dup, b);
+        Term n0   = term_new_and(a0, term_new(0, TAG_DP0, lab, dup));
+        Term n1   = term_new_and(a1, term_new(0, TAG_DP1, lab, dup));
+        u64  ns   = heap_alloc(2);
+        heap_set(ns + 0, n0);
+        heap_set(ns + 1, n1);
+        ITRS++;
+        next = term_new(0, TAG_SUP, lab, ns);
+        goto enter;
+      }
+      heap_set(loc + 0, a);
+      whnf = next;
+      goto apply;
+    }
+    case TAG_OR: {
+      // Short-circuit boolean OR.  Strict on a only:
+      //   OR(NUM(0), b)      -> wnf(b)
+      //   OR(NUM(n!=0), _)   -> NUM(1)        (b stays unreduced)
+      //   OR(ERA, _)         -> ERA
+      //   OR(&L{a0,a1}, b)   -> &L{OR(a0,B0), OR(a1,B1)}, !&L{B0,B1}=b
+      //   otherwise          -> stuck
+      u64  loc = term_val(next);
+      Term a   = wnf(heap_read(loc + 0));
+      if (term_tag(a) == TAG_ERA) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        whnf = a;
+        goto apply;
+      }
+      if (term_tag(a) == TAG_NUM) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        if ((u32)term_val(a) == 0) {
+          next = heap_read(loc + 1);
+          goto enter;
+        }
+        whnf = term_new(0, TAG_NUM, term_ext(a), 1);
+        goto apply;
+      }
+      if (term_tag(a) == TAG_SUP) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        u32  lab  = term_ext(a);
+        u64  sloc = term_val(a);
+        Term a0   = heap_read(sloc + 0);
+        Term a1   = heap_read(sloc + 1);
+        Term b    = heap_read(loc + 1);
+        u64  dup  = heap_alloc(1);
+        heap_set(dup, b);
+        Term n0   = term_new_or(a0, term_new(0, TAG_DP0, lab, dup));
+        Term n1   = term_new_or(a1, term_new(0, TAG_DP1, lab, dup));
+        u64  ns   = heap_alloc(2);
+        heap_set(ns + 0, n0);
+        heap_set(ns + 1, n1);
+        ITRS++;
+        next = term_new(0, TAG_SUP, lab, ns);
+        goto enter;
+      }
+      heap_set(loc + 0, a);
+      whnf = next;
+      goto apply;
+    }
     case TAG_LAM:
     case TAG_ERA:
     case TAG_SUP:
