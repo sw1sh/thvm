@@ -526,11 +526,21 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
     u32 kind = (u32)term_val(heap_read(loc + 1));
     u32 axis = (u32)term_val(heap_read(loc + 2));
+    // arg encoding (cpu_op_reduce / Metal reduce shader):
+    //   bits 24..31 = kind, bits 0..23 = inner = prod(dims[axis+1..]).
+    // Packing axis here (the round-1 bug) gave inner = 0 -> fallback
+    // to 1 -> axis treated as innermost, which is correct only when
+    // axis IS innermost.  Compute inner from the source shape.
+    Shape src_shape = {0};
+    u32 inner = 1;
+    if (term_shape_in(heap_read(loc), 0, &src_shape)) {
+      for (u32 i = axis + 1; i < src_shape.ndim; i++) inner *= src_shape.dims[i];
+    }
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
     p->opcode = UOP_REDUCE;
     p->dtype  = src_dtype(ke, src_idx);
-    p->arg    = (kind << 24) | axis;
+    p->arg    = (kind << 24) | (inner & 0x00FFFFFFu);
     p->numel  = ke->output_numel;
     p->n_src  = 1;
     p->src[0] = src_idx;
