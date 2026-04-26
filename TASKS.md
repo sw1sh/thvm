@@ -4789,7 +4789,25 @@ implemented + tested (f1a) but never invoked by the pipeline.
 
 
 
-  - [ ] **f1d-d4b1c: bump KERNELS_CAP + flip default**.
+  - [blocked: cap bumps (16K -> 32K -> 64K) all hit some
+    exhaustion under toggle ON.  At 16K and 32K it's
+    KERNELS_CAP for the heaviest WL tests + Metal LeNet
+    verify.  At 64K the WL sweep passes but Metal LeNet
+    verify hits a SECONDARY ceiling: metal_buf_alloc fills
+    its table and tensor_alloc hits TENS_CAP=64K.  This
+    confirms the duplication isn't a fixed overhead --
+    materialize_expr's no-dedup recursion re-materializes
+    shared subexpressions in the grad chain, scaling the
+    kernel count linearly with chain depth + sharing.
+    Cap-bumping treats the symptom but doesn't address
+    the duplication itself.  The proper fix lives in
+    f1d-d4b2 (deliver the fusion gain) or a new sibling:
+    add a memo across recursive materialize_expr calls so
+    a shared UOp gets ONE kernel instead of N.  Until
+    that lands, the toggle stays opt-in (default OFF) and
+    callers that want fusion call TSetUseRealizeInfo[True]
+    on small forward graphs only.] **f1d-d4b1c: bump
+    KERNELS_CAP + flip default**.
         After d4b1a + d4b1b clear the structural breakage,
         bump KERNELS_CAP from 1<<12 (4K) to 1<<14 (16K) to
         absorb LeNet-scale graphs under toggle ON.  Then
