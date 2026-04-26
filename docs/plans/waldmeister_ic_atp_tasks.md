@@ -589,7 +589,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `tests/data/atp/` (e.g. a small sorted-list fragment:
         nat, list, with cons taking a nat and a list).  Bench
         harness picks it up automatically.
-- [ ] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
+- [x] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
       -- LPO is `Lexikografische-Pfad-Ordnung`, "lexicographic
       path ordering")
   - [x] 8.5a design memo `docs/plans/lpo_design.md`: survey
@@ -614,7 +614,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         KBO and LPO.  Tests verify orient outcomes match
         between KBO and LPO on a fixture where both succeed,
         and differ where LPO is more discriminating.
-  - [ ] 8.5d add an LPO test fixture or update existing ones:
+  - [x] 8.5d add an LPO test fixture or update existing ones:
         the existing group / monoid fixtures use `ORDERING LPO`
         in their `.pr` files but the saturator currently maps
         them to KBO; switch one fixture to actually use LPO

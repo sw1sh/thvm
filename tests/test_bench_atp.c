@@ -98,9 +98,19 @@ static AtpStatus run_one(const char *pr_path,
   cfg.n_labels   = max_label + 1;
   cfg.var_weight = 1;
 
+  // 8.5d: when the .pr file declared `ORDERING LPO`, also build
+  // an LpoConfig from the precedences and attach it -- AtpState's
+  // dispatcher (`atp_compare`) prefers LPO when both are set.
+  static LpoConfig lpo_cfg;
+  lpo_cfg.precedence = prec;
+  lpo_cfg.n_labels   = max_label + 1;
+
   AtpState *atp = thvm_atp_init(&cfg, BENCH_STEP_BUDGET);
   atp->use_ic_cp_gen  = use_ic_cp_gen;
   atp->use_ic_rewrite = use_ic_rewrite;
+  if (spec->ordering_kind == WALD_ORDER_LPO) {
+    thvm_atp_set_lpo(atp, &lpo_cfg);
+  }
   for (u32 i = 0; i < spec->n_eqns; i++) {
     thvm_atp_add_equation(atp, spec->eqn_lhs[i], spec->eqn_rhs[i]);
   }

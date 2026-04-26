@@ -6,6 +6,39 @@ dated section.
 
 ## Unreleased
 
+### Added: ORDERING-kind capture + bench dispatch (stage 8.5d)
+
+`WaldSpec` gains a `u8 ordering_kind` field (default
+`WALD_ORDER_KBO = 0`); the parser captures `WALD_ORDER_LPO = 1`
+when the `.pr` file's ORDERING section starts with `LPO`,
+otherwise stays at KBO.  The leading-letter discriminator is
+sufficient (only KBO and LPO are recognized by Waldmeister's
+.pr format).
+
+Bench harness `tests/test_bench_atp.c` now builds an `LpoConfig`
+from the same precedence array and calls `thvm_atp_set_lpo` when
+`spec->ordering_kind == WALD_ORDER_LPO`.  All 5 fixtures in
+`tests/data/atp/` declare `ORDERING LPO`, so they now actually
+run under LPO instead of being silently mapped to KBO.
+
+**Empirical finding**: bench numbers are byte-identical between
+KBO and LPO on these axioms.  KBO-with-weights and LPO-with-
+precedence happen to orient the canonical group / monoid /
+list-length axioms the same way.  This is consistent with the
+classical KB-completion literature (both orderings agree when
+the "obvious" precedence and weight functions are aligned).
+
+`tests/test_wald.c` adds 3 cases (5527 sub-checks, was 5522):
+- `wald/ordering/lpo-captured`
+- `wald/ordering/kbo-captured`
+- `wald/ordering/missing-defaults-to-kbo`
+
+`tests/test_atp.c` adds 1 case (8394 sub-checks, was 8392):
+- `atp/lpo-vs-kbo-parity-on-group-axioms`: full saturation under
+  both orderings produces the same final status and rule count
+
+Stage 8.5 is now complete.
+
 ### Added: LPO wired into saturation (stage 8.5c)
 
 `AtpState` gains a `const LpoConfig *lpo` field alongside the

@@ -1311,6 +1311,49 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/lpo-vs-kbo-parity-on-group-axioms");
+  {
+    // Run the group-axiom saturation under both KBO and LPO.
+    // On these axioms, both orderings are expected to orient
+    // the rules the same way (KBO-with-weights and LPO-with-
+    // precedence agree on the canonical group orientation),
+    // so n_rules at termination should match.  This is the
+    // empirical foundation for the bench-numbers-unchanged
+    // observation in 8.5d.
+    static u32 lpo_prec[5] = {0, 1, 4, 3, 2};   // matches DUMMY_CFG's precedence
+    static const LpoConfig LPO_CFG = {
+      .precedence = lpo_prec,
+      .n_labels   = 5,
+    };
+
+    AtpState *s_kbo = thvm_atp_init(&DUMMY_CFG, 32);
+    thvm_atp_set_goal(s_kbo, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_kbo, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s_kbo, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s_kbo,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_kbo = thvm_atp_run(s_kbo);
+
+    AtpState *s_lpo = thvm_atp_init(&DUMMY_CFG, 32);
+    thvm_atp_set_lpo(s_lpo, &LPO_CFG);
+    thvm_atp_set_goal(s_lpo, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_lpo, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s_lpo, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s_lpo,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_lpo = thvm_atp_run(s_lpo);
+
+    // Same final status and rule count -- these axioms are oriented
+    // identically by KBO and LPO.
+    CHECK_EQ((int)rst_kbo, (int)rst_lpo);
+    CHECK_EQ(s_kbo->n_rules, s_lpo->n_rules);
+
+    thvm_atp_free(s_kbo);
+    thvm_atp_free(s_lpo);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

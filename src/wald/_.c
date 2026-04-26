@@ -522,6 +522,13 @@ fn WaldSection wald_parse_ordering(WaldSpec *spec, WaldLex *lex) {
   if (sec != WSEC_NONE) { wald_lex_next(lex); return sec; }
   wald_lex_next(lex);   // consume KBO / LPO
 
+  // 8.5d: capture ordering kind.  Compare leading letter: 'L' -> LPO,
+  // anything else (typically 'K') -> KBO (default).
+  if (spec != NULL && lex->tok_len > 0) {
+    spec->ordering_kind = (lex->tok_text[0] == 'L') ? WALD_ORDER_LPO
+                                                    : WALD_ORDER_KBO;
+  }
+
   // Most recently seen ident (candidate next chain entry).
   u8   has_last = 0;
   char last[WALD_NAME_LEN];

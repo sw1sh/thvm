@@ -1053,11 +1053,18 @@ typedef struct {
   u32  sort;      // 8.4b: sort id (index into spec->sorts[])
 } WaldVar;
 
+// 8.5d: ordering kind declared in the `.pr` file's ORDERING
+// section.  0 = KBO (default), 1 = LPO.  Captured at parse time
+// so callers can build the right config for the saturator.
+#define WALD_ORDER_KBO 0u
+#define WALD_ORDER_LPO 1u
+
 typedef struct WaldSpec {
   // Spec identity.  `mode_proof = 1` for "MODE PROOF", 0 for
   // "MODE COMPLETION" (defaults to 1 when unspecified).
   char    name[WALD_NAME_LEN];
   u8      mode_proof;
+  u8      ordering_kind;   // 8.5d: WALD_ORDER_KBO / WALD_ORDER_LPO
 
   // Signature: `symbols[0..n_symbols)` with monotonically-assigned
   // CTR labels via `next_label` (starts at 1; 0 is the CTR

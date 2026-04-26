@@ -1267,6 +1267,55 @@ int main(void) {
     wald_free(spec);
   }
 
+  // === Stage 8.5d: ORDERING kind captured from .pr ===================
+
+  TEST_BEGIN("wald/ordering/lpo-captured");
+  {
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       a: -> ANY\n"
+      "                f: ANY -> ANY\n"
+      "ORDERING        LPO\n"
+      "                f > a\n"
+      "VARIABLES       x : ANY\n"
+      "EQUATIONS       a = a\n"
+      "CONCLUSION      a = a\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+    CHECK_EQ(spec->ordering_kind, WALD_ORDER_LPO);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/ordering/kbo-captured");
+  {
+    static const char *src =
+      "NAME            x\n"
+      "MODE            PROOF\n"
+      "SORTS           ANY\n"
+      "SIGNATURE       a: -> ANY\n"
+      "                f: ANY -> ANY\n"
+      "ORDERING        KBO\n"
+      "                f=1, a=1\n"
+      "                f > a\n"
+      "VARIABLES       x : ANY\n"
+      "EQUATIONS       a = a\n"
+      "CONCLUSION      a = a\n";
+    WaldSpec *spec = wald_init();
+    CHECK_EQ((int)wald_parse(src, spec), (int)WALD_OK);
+    CHECK_EQ(spec->ordering_kind, WALD_ORDER_KBO);
+    wald_free(spec);
+  }
+
+  TEST_BEGIN("wald/ordering/missing-defaults-to-kbo");
+  {
+    // No ORDERING section: spec stays at default WALD_ORDER_KBO.
+    WaldSpec *spec = wald_init();
+    CHECK_EQ(spec->ordering_kind, WALD_ORDER_KBO);
+    wald_free(spec);
+  }
+
   // === Stage 8.4d: sort-check gating in saturation entry points ======
 
   TEST_BEGIN("wald/sort-gate/add-equation-rejects-mismatch");
