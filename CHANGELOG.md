@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Added: multi-target chain rule for UOP_GRAD
+
+`interact_grad` now handles `n>1` by lowering to a `TAG_CTR` of `n`
+unary `uop_grad(y, gy, x_i)` terms.  Each unary grad walks the
+chain rule independently; the forward DAG (y and its descendants)
+lives at shared heap locs so materialize's per-realize memo dedups
+every kernel emitted from those forward UOps across all `n`
+targets.  `n=1` keeps the scalar return for backward compat.
+
 ### Changed: UOP_GRAD heap layout is now multi-target (k0b)
 
 `uop_grad` heap is now `[y, gy, NUM(n), x_1, ..., x_n]` (was

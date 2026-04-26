@@ -53,13 +53,25 @@ fn Term interact_grad(Term grad_term) {
   u64  loc    = term_val(grad_term);
   Term y      = heap_read(loc + 0);
   Term gy     = heap_read(loc + 1);
-  // k0b: heap layout is [y, gy, NUM(n), x_1, ..., x_n].  k0c will
-  // implement the n>1 multi-target chain rule (one shared cotangent
-  // walk emitting a TAG_CTR of N grads); for now bail on n>1 so the
-  // term surfaces as WHNF and the multi-target consumer waits.
+  // Heap layout is [y, gy, NUM(n), x_1, ..., x_n].  n>1 fires the
+  // chain rule per target by lowering to a TAG_CTR of n unary
+  // uop_grad(y, gy, x_i) terms.  Each unary grad walks the chain
+  // rule independently, but the forward DAG (y and its descendants)
+  // lives at SHARED heap locs so materialize's per-realize memo
+  // dedups every kernel emitted from those forward UOps -- the
+  // savings show up as one realize + one set of forward kernels
+  // covering all n targets.
   Term n_cell = heap_read(loc + 2);
   u32  n      = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
-  if (n != 1) return grad_term;
+  if (n > 1) {
+    Term children[256];   // n_max guarded by the cap below
+    if (n > 256) return grad_term;   // bail; very rare
+    for (u32 i = 0; i < n; i++) {
+      Term x_i = heap_read(loc + 3 + i);
+      children[i] = uop_grad(y, gy, x_i);
+    }
+    return term_new_ctr(0, children, n);
+  }
   Term target = heap_read(loc + 3);
 
   // Lazy outermost-layer resolution -- follows VAR-SUB chains and

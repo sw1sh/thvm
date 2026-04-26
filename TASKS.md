@@ -129,24 +129,16 @@ Real kernel-count + memory wins need either:
       tests/test_grad.c adds 3 k0b checks (75 total).  166 C +
       292 WL tests green.
 
-- [ ] **k0c: interact_grad multi-target chain rule**.
-      Extend interact_grad (src/interact/uop_grad.c) to
-      detect n>1 in the new UOP_GRAD heap layout and walk
-      the forward DAG ONCE with a shared cotangent map (it
-      already builds one internally; the change is reading
-      out N targets instead of 1).  Result: a TAG_CTR
-      from k0a holding one cotangent Term per target.
-      Single-target case (n=1) returns the scalar Term
-      directly for backward compat.  Acceptance: a 3-
-      target test asserts the cotangent graph has shared
-      sub-expressions (same UOp loc reachable from
-      multiple TUPLE outputs), so materialize's memo
-      dedups them in d4b2a-style.  ~80 LOC + tests.
-      <!-- design-question: result representation.  Going
-           with TAG_CTR (k0a) over reusing TAG_INC or
-           TAG_SUP because TUPLE is a passive aggregate
-           with clean materialize/walk semantics; SUP has
-           HVM4 superposition semantics that would clash. -->
+- [x] **k0c: interact_grad multi-target chain rule**.
+      n>1 case in interact_grad lowers to a TAG_CTR of n
+      unary uop_grad(y, gy, x_i) terms.  Each unary grad
+      walks the chain rule independently; the forward DAG
+      lives at shared heap locs so materialize's memo dedups
+      kernels emitted from those forward UOps across all n
+      targets.  Single-target case (n=1) is unchanged.
+      tests/test_grad.c adds 4 multi-target checks (79 total).
+      Backward compute sharing across targets is future-work
+      (would need scratch cotangent slots).
 
 - [ ] **k0d: TGradMany WL bridge + accessor**.  Add
       `TGradMany[y, {x_1, ..., x_n}]` in

@@ -55,7 +55,7 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         case UOP_LOAD:                                     return 1;
         case UOP_REDUCE:                                   return 3;
-        // k0b: UOP_GRAD heap is [y, gy, NUM(n), x_1..x_n] -- variable
+        // UOP_GRAD heap is [y, gy, NUM(n), x_1..x_n] -- variable
         // tail.  Read NUM(n) at val+2 to compute 3+n; recursive
         // optimizer lambdas (TOptim) embed UOP_GRAD in their body
         // template, which book_from_dynamic clones into BOOK_HEAP.

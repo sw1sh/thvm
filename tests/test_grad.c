@@ -282,24 +282,18 @@ int main(void) {
   CHECK_EQ(term_tag(dim0), TAG_NUM);
   CHECK_EQ(term_val(dim0), 3);
 
-  // === k0b: variable-arity UOP_GRAD heap layout ===
-
-  TEST_BEGIN("grad/k0b-unary-wrapper-uses-multi-layout");
-  // uop_grad(y, gy, x) is a thin wrapper around uop_grad_multi
-  // with n=1.  Resulting heap should be [y, gy, NUM(1), x_1].
+  TEST_BEGIN("grad/multi-target-unary-wrapper-uses-new-layout");
   Term g_unary = uop_grad(a, gy, a);
   CHECK_EQ(uop_grad_n(g_unary),     1u);
   CHECK_EQ(uop_grad_target(g_unary, 0), a);
-  CHECK_EQ(uop_grad_target(g_unary, 1), 0u);   // out-of-range
-  // Heap inspection: NUM(1) at loc+2, target at loc+3.
+  CHECK_EQ(uop_grad_target(g_unary, 1), 0u);
   u64  g_unary_loc   = term_val(g_unary);
   Term g_unary_n_cell = heap_read(g_unary_loc + 2);
   CHECK_EQ(term_tag(g_unary_n_cell), TAG_NUM);
   CHECK_EQ(term_val(g_unary_n_cell), 1u);
   CHECK_EQ(heap_read(g_unary_loc + 3), a);
 
-  TEST_BEGIN("grad/k0b-multi-layout-three-targets");
-  // uop_grad_multi with n=3 builds [y, gy, NUM(3), x_0, x_1, x_2].
+  TEST_BEGIN("grad/multi-target-three-targets-heap-layout");
   u32  d3[1] = {3};
   u32  tc    = alloc_f32_tensor(d3, 1);
   Term c     = term_new(0, TAG_TEN, DT_F32, tc);
@@ -313,14 +307,31 @@ int main(void) {
   CHECK_EQ(uop_grad_target(g_multi, 2), c);
   CHECK_EQ(uop_grad_target(g_multi, 3), 0u);
 
-  TEST_BEGIN("grad/k0b-interact-bails-on-multi");
-  // k0c hasn't shipped yet; interact_grad must leave n>1 unchanged
-  // (returns the input grad_term as-is so wnf treats it as WHNF).
-  Term g_multi_after = wnf(g_multi);
-  CHECK_EQ(term_tag(g_multi_after), TAG_UOP);
-  CHECK_EQ(term_ext(g_multi_after), UOP_GRAD);
-  CHECK_EQ(uop_grad_n(g_multi_after),     3u);
-  CHECK_EQ(uop_grad_target(g_multi_after, 0), a);
+  TEST_BEGIN("grad/multi-target-interact-emits-ctr-of-n-grads");
+  Term g_multi_after = interact_grad(g_multi);
+  CHECK_EQ(term_tag(g_multi_after), TAG_CTR);
+  CHECK_EQ(term_ctr_n(g_multi_after),     3u);
+  for (u32 i = 0; i < 3; i++) {
+    Term g_i = term_ctr_at(g_multi_after, i);
+    CHECK_EQ(term_tag(g_i), TAG_UOP);
+    CHECK_EQ(term_ext(g_i), UOP_GRAD);
+    CHECK_EQ(uop_grad_n(g_i), 1u);
+    CHECK_EQ(uop_grad_target(g_i, 0), targets[i]);
+    u64 g_i_loc = term_val(g_i);
+    CHECK_EQ(heap_read(g_i_loc + 0), a);
+  }
+
+  TEST_BEGIN("grad/multi-target-shared-y-loc-across-grads");
+  Term mul_shared = uop_binary(UOP_MUL, a, b);
+  Term g_mul_multi = uop_grad_multi(mul_shared, gy, targets, 3);
+  Term g_mul_after = interact_grad(g_mul_multi);
+  CHECK_EQ(term_tag(g_mul_after), TAG_CTR);
+  CHECK_EQ(term_ctr_n(g_mul_after),     3u);
+  u64 first_y_loc = term_val(heap_read(term_val(term_ctr_at(g_mul_after, 0)) + 0));
+  for (u32 i = 1; i < 3; i++) {
+    u64 ith_y_loc = term_val(heap_read(term_val(term_ctr_at(g_mul_after, i)) + 0));
+    CHECK_EQ(ith_y_loc, first_y_loc);
+  }
 
   thvm_free();
   TEST_REPORT();

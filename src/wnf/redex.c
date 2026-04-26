@@ -208,7 +208,7 @@ static u32 term_arity(Term t) {
       u8 op = term_ext(t);
       if (op == UOP_KERNEL) return 2;
       if (op == UOP_GRAD) {
-        // k0b: variable arity 3+n (heap = [y, gy, NUM(n), x_1..x_n]).
+        // Variable arity 3+n (heap = [y, gy, NUM(n), x_1..x_n]).
         Term n_cell = heap_read(term_val(t) + 2);
         u32  n = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
         return 3 + n;

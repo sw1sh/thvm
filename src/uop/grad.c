@@ -3,9 +3,8 @@
 // Heap layout: [y, gy_seed, NUM(n), x_1, ..., x_n].  Reducing under
 // TWnf fires interact_grad, which applies the chain rule lazily and
 // short-circuits at TAG_TEN leaves: returning gy_seed at any target
-// leaf, and zero elsewhere.  The n>1 multi-target firing rule lands
-// in k0c; until then interact_grad bails on n>1 and returns the
-// grad term unchanged.
+// leaf, and zero elsewhere.  Multi-target n>1 lowers to a TAG_CTR
+// of n unary GRADs that share the forward DAG via heap-loc identity.
 
 fn Term uop_grad_multi(Term y, Term gy, const Term *targets, u32 n) {
   u64 loc = heap_alloc(3 + n);

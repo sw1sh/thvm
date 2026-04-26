@@ -19,8 +19,8 @@
 
 // Returns the dyn arity for a fixed-arity tag/opcode (matches the
 // table used in book/from_dynamic.c).  UOP_GRAD's tail is variable
-// (k0b: heap = [y, gy, NUM(n), x_1..x_n]) so we read n from the
-// book cell at val+2.
+// (heap = [y, gy, NUM(n), x_1..x_n]) so we read n from the book
+// cell at val+2.
 static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
   switch (tag) {
     case TAG_APP: return 2;
