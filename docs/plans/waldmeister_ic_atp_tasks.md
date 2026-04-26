@@ -348,7 +348,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
 - [ ] 7.4 benchmark vs Twee on a handful of small TPTP-UEQ problems
       (`GRP`, `RNG` divisions); record wall-clock + saturation
       step count in `docs/bench-atp.md`
-  - [ ] 7.4a `docs/bench-atp.md` skeleton: methodology section
+  - [x] 7.4a `docs/bench-atp.md` skeleton: methodology section
         (which metrics, how `make` will drive the runs), the
         problem set (start with what we already have:
         `waldmeister/documents/example.pr`; list 3-5 candidate

@@ -6,6 +6,31 @@ dated section.
 
 ## Unreleased
 
+### Added: ATP benchmark log skeleton (stage 7.4a)
+
+`docs/bench-atp.md` lands the methodology + first results table
+for our IC-native ATP. Records 8 metrics per run (status,
+wall-clock ms, saturation step count, rule-set size, trace
+length, and the four `n_cps_dropped_*` counters from 7.1/7.2b/
+7.3a/7.3b) on two starting cases:
+
+| File | Status | Wall (ms) | Steps |
+|---|---|---|---|
+| simple goal `f(a, i(a)) = e` | PROVED | 0.007 | 1 |
+| `waldmeister/documents/example.pr` (`f(a, i(a)) = f(i(a), a)`) | TIMEOUT | 130.765 | 256 |
+
+Confirms (a) the simple goal closes in step 1 via direct rewrite,
+(b) the harder commutativity-of-inverse goal needs more than 256
+steps under the current KBO config (~52% of generated CPs are
+trivially joinable; 231 rules accumulated without proving),
+(c) the domination invariants from 7.2b / 7.3a hold empirically
+(`drop_connected` 697 <= `drop_joinable` 743;
+`drop_rule_subsumed` 212 <= 743), and (d) 7.3b's queue-
+subsumption fires rarely (2 hits) on the group example.
+
+Twee comparison deferred to 7.4d (Twee not installed locally).
+Bench harness deferred to 7.4c.
+
 ### Added: queue-subsumption filter (stage 7.3b)
 
 `src/atp/_.c` gains `atp_cp_queue_subsumed(s, lhs, rhs)`: returns 1

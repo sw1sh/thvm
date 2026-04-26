@@ -1,0 +1,112 @@
+# IC-native ATP benchmark log
+
+> Skeleton landed by stage 7.4a.  Will accumulate side-by-side
+> comparisons with Twee (stage 7.4d) once Twee is wired in.
+
+## Methodology
+
+Each run takes a single Waldmeister-style `.pr` file
+(see `waldmeister/documents/example.pr` for the format), parses
+it, builds a `KboConfig` from the parsed precedences, pushes the
+axioms, sets the goal, and calls `thvm_atp_run` with a fixed step
+budget. We record:
+
+- **status**: `PROVED`, `TIMEOUT`, or `QUEUE_EMPTY`
+- **wall_ms**: wall-clock time of `thvm_atp_run`, measured with
+  `clock_gettime(CLOCK_MONOTONIC)`.  Excludes parse + setup so
+  the number is comparable across input sizes
+- **step**: how many CPs were popped from the queue (saturation
+  steps, in Waldmeister's `Hauptkomponenten` "main components"
+  sense)
+- **n_rules**: rules in R at termination
+- **n_trace**: total trace entries (axioms + orients + cps; not
+  counting filtered CPs)
+- **dropped_joinable**: trivially-joinable CPs filtered at
+  generate time (stage 7.1)
+- **dropped_connected**: source-rule-disjoint connected CP
+  counter (stage 7.2b -- counter only; bounded by joinable
+  per the domination lemma)
+- **dropped_rule_subsumed**: rule-subsumed CP counter (stage
+  7.3a -- counter only; bounded by joinable)
+- **dropped_queue_subsumed**: queue-subsumed CPs filtered out
+  (stage 7.3b -- real filter, orthogonal to 7.1)
+
+Step budget for these runs: 256.  Norm cap (per-rewrite step
+budget inside `thvm_rewrite_normalize`): 64.
+
+A future `make bench-atp` target (stage 7.4c) will automate
+this; for now the skeleton is hand-driven.
+
+## Problem set
+
+Initial set is whatever we already have on hand; stage 7.4b
+adds a hand-curated corpus under `tests/data/atp/`.
+
+| File | Shape | Goal |
+|---|---|---|
+| `waldmeister/documents/example.pr` | Group axioms (assoc, right-id, right-inverse) | `f(a, i(a)) = f(i(a), a)` (commutativity-of-inverse-on-element; left-inverse derived from right-inverse) |
+| `tmp/group_simple.pr` (ad-hoc) | Same axioms | `f(a, i(a)) = e` (immediate from the right-inverse axiom) |
+
+Stage 7.4b will replace `tmp/group_simple.pr` with versioned
+fixtures under `tests/data/atp/`.
+
+## Results -- thvm
+
+Run on darwin/arm64 with `cc -std=c11 -O2`, 2026-04-26:
+
+| File | Status | Wall (ms) | Steps | Rules | Trace | drop_joinable | drop_connected | drop_rule_subs | drop_queue_subs |
+|---|---|---|---|---|---|---|---|---|---|
+| `tmp/group_simple.pr` | PROVED | 0.007 | 1 | 2 | 5 | 2 | 2 | 0 | 0 |
+| `waldmeister/documents/example.pr` | TIMEOUT | 130.765 | 256 | 231 | 1426 | 743 | 697 | 212 | 2 |
+
+Observations:
+
+- The simple-goal case proves in step=1 because right-inverse is a
+  direct rewrite to the conclusion.  Saturation never has to
+  generate a single CP that survives 7.1's filter -- the goal-
+  check loop closes first.
+- The full example.pr conclusion (`f(a, i(a)) = f(i(a), a)`) is
+  notably harder.  256 steps are insufficient under our current
+  KBO configuration (LPO precedences mapped to KBO weights with
+  `var_weight=1`); the saturation reaches 231 rules without
+  proving the goal.  Likely fixes for follow-up: (a) a real LPO
+  comparator (stage 8.5) so the LPO precedences orient axioms
+  the way Waldmeister does, (b) AC-aware joinability for
+  associativity/commutativity (stage 8+), (c) a better CP
+  selection heuristic than `--add` (stage 8.x).
+- 7.1 (`drop_joinable`) is the dominant filter: 743 CPs dropped
+  vs 1226 entries in the trace = ~52% of generated CPs are
+  trivially joinable on the example.  Confirms 7.1 is the right
+  thing to have implemented first.
+- The domination invariants from 7.2b / 7.3a hold:
+  `drop_connected` (697) <= `drop_joinable` (743).
+  `drop_rule_subsumed` (212) <= `drop_joinable` (743).
+- 7.3b (`drop_queue_subsumed`) fired only twice on this run.
+  Queue subsumption is orthogonal to 7.1 but bites only when a
+  later CP is a strict instance of an earlier one; the group-
+  axiom pattern produces few such cases.  May matter more on
+  larger problem sets.
+
+## Results -- Twee
+
+*Pending stage 7.4d. Methodology: install Twee
+(`cabal install twee` or `brew install twee`), convert each
+`.pr` into TPTP-UEQ format (small adapter -- `.pr` is already
+close), and run with a matching `--max-cp-depth` or step budget.
+Capture `--print-summary` output for the comparison table.*
+
+## Open questions
+
+1. **Step-budget calibration**: 256 steps was a conservative
+   default. Twee runs CASC-J10 problems with thousands of steps;
+   we should probably raise the budget for the bench runs to
+   give the saturation room to converge.
+2. **Wall-clock vs interaction count**: HVM4's ADD-CARRY benchmark
+   reports `interactions/s`; for our ATP, "interactions" don't
+   correspond cleanly to saturation work. Step count + wall-clock
+   is the closer analog of Waldmeister's own diagnostics.
+3. **Counter overlap measurement**: 7.2b/7.3a counters are bounded
+   above by 7.1's, but the *gap* matters. We could add a
+   `n_cps_dropped_joinable_only` counter that ticks only when 7.1
+   fires AND neither 7.2b nor 7.3a does -- that quantifies the
+   "joinability beyond connectedness" pruning.
