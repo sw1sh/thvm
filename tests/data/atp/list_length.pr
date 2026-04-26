@@ -1,0 +1,21 @@
+% Multi-sort fixture (stage 8.4e): a small sorted-list fragment.
+% Two sorts (nat, list) with cons taking a nat and a list; len
+% mapping list -> nat.  The conjecture computes the length of a
+% one-element list and is provable in 2 rewrite steps under any
+% reasonable strategy (step 1 unfolds len at the top, step 2
+% reduces len(nil) to zero).
+NAME            list_length
+MODE            PROOF
+SORTS           nat list
+SIGNATURE       zero: -> nat
+                succ: nat -> nat
+                nil: -> list
+                cons: nat list -> list
+                len: list -> nat
+ORDERING        LPO
+                len > cons > succ > zero > nil
+VARIABLES       n : nat
+                xs : list
+EQUATIONS       len(nil) = zero
+                len(cons(n, xs)) = succ(len(xs))
+CONCLUSION      len(cons(zero, nil)) = succ(zero)

@@ -6,6 +6,36 @@ dated section.
 
 ## Unreleased
 
+### Added: multi-sort `.pr` test fixture (stage 8.4e)
+
+`tests/data/atp/list_length.pr` lands the first real multi-sort
+fixture: two sorts (nat, list); five symbols (zero, succ, nil,
+cons, len) with sort-discriminating signatures (`cons : nat list
+-> list`, `len : list -> nat`); two FVR variables of distinct
+sorts.  The conjecture `len(cons(zero, nil)) = succ(zero)`
+proves in 1 step under the bench's saturator.
+
+Companion `list_length.expect`: `status=PROVED, max_step=2,
+max_rules=3`.
+
+`build/bench-atp.csv` (16 rows -> 20 rows; 4 modes per fixture
+across 5 fixtures now): the new fixture proves in 1 step under
+all four CP-gen / rewrite paths with byte-identical counters,
+adding additional coverage of the parser + saturation pipeline
+on a non-homogeneous signature.
+
+Note: 8.4d's gate is OFF in the bench harness (the harness
+doesn't call `thvm_atp_set_spec`), so this fixture exercises
+the parser + saturation pipeline on a multi-sort signature
+without sort policing.  Wiring spec attachment into the bench
+harness is a possible follow-up but not required by 8.4e's
+"bench picks it up automatically" criterion.
+
+Stage 8.4 is now complete (a-e shipped).  Closing it unblocks
+**8.3d** (ICC TAG_BRI / TAG_ANN integration) per its design
+memo.  Future perf work: sort-aware KBO and early CP-pair sort
+precheck.
+
 ### Added: sort-check gating in saturation entry points (stage 8.4d)
 
 `AtpState` gains a `const struct WaldSpec *spec` field (default

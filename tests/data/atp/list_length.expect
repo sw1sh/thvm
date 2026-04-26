@@ -1,0 +1,7 @@
+% Stage 8.4e: multi-sort .pr fixture (nat, list).  Conjecture
+% len(cons(zero, nil)) = succ(zero) reduces to succ(zero)
+% directly via the goal-rewrite check; saturation needs at most
+% one step on either side.
+status=PROVED
+max_step=2
+max_rules=3

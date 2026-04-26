@@ -557,7 +557,10 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           a smaller cross product (default + both-IC).  Update
           `docs/bench-atp.md` with the latency comparison;
           decide on default.
-- [ ] 8.4 multi-sort signatures (stages 1-4 assume one sort)
+- [x] 8.4 multi-sort signatures (stages 1-4 assume one sort)
+      Note: 8.4 closes; this also unblocks 8.3d (ICC TAG_BRI /
+      TAG_ANN integration) per its design memo.  Future perf
+      work: sort-aware KBO, early CP-pair sort precheck.
   - [x] 8.4a design memo `docs/plans/multi_sort.md`: survey
         the representation choices.  Where do sorts live --
         on `WaldSym` / `WaldVar` / a global sort table on
@@ -582,7 +585,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         equations / CPs / orient-and-add inputs that fail
         `wald_sort_check`.  Update tests to confirm the gate
         fires on a hand-constructed sort-mismatched equation.
-  - [ ] 8.4e add a multi-sort `.pr` fixture under
+  - [x] 8.4e add a multi-sort `.pr` fixture under
         `tests/data/atp/` (e.g. a small sorted-list fragment:
         nat, list, with cons taking a nat and a list).  Bench
         harness picks it up automatically.
