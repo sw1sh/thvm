@@ -4567,59 +4567,53 @@ implemented + tested (f1a) but never invoked by the pipeline.
     shader codegen (option B) -- see f1d-d3 history comment
     for trade-offs.
 
-  - [ ] **f1d-d4: flip default + verify**.  After d1+d2+d3
-        land, set the toggle default to 1 at its declaration
-        site.  Run full sweep: 166 C + 292 WL must stay
-        green; lenet-mnist verify.wls Metal must converge;
-        linear-train memory-probe.wls should show the
-        kernel-count drop in its TMemoryPlanReport output.
-        ~5 LOC.
-        <!-- attempt 1 failed: with default flipped to 1, all
-             166 C tests pass + 24 of 28 WL test files pass,
-             but TWO heavy tests crash hard via
-             `kernel_alloc: out of slots` (which calls exit(1)):
-                 - wl/THVMLink/Tests/beautiful_mnist.wlt
-                 - wl/THVMLink/Tests/nn.wlt
-             Tried bumping KERNELS_CAP from 4K -> 8K -> 16K;
-             still exhausts.  Not a sizing issue -- toggle ON
-             genuinely allocates a pathological number of
-             kernels for these training-graph patterns.
+  <!-- 2026-04-26 re-decompose: f1d-d4 attempt 1 hit a hard
+       kernel-cap exhaustion on beautiful_mnist.wlt + nn.wlt
+       even at 16K cap.  Toggle ON allocates pathologically
+       many kernels for cross-realize grad chains -- not a
+       sizing issue.  See commit 09ae8af for the full
+       diagnosis.  Splitting d4 into 3 sub-items per that
+       analysis. -->
 
-             Most likely cause: when materialize_kernel_inlined
-             succeeds, it absorbs un-realized children's compute
-             into the kernel's program AND returns a UOP_KERNEL
-             term wrapping it.  But the un-realized child UOP
-             cells are LEFT IN THE HEAP unchanged.  When the
-             same heap region gets re-walked under a SUBSEQUENT
-             TRealize call (e.g. TRealize[loss] then
-             TRealize[TGrad[loss, w]]), realize_classify rebuilds
-             its table for the new root -- the old un-realized
-             UOPs may now be reachable from the grad chain and
-             get re-classified, and the helper may emit FRESH
-             kernels for what's effectively the same compute.
-             Multiplied across LeNet's grad chain, this blows
-             the cap.
+  - [ ] **f1d-d4a: probe kernel-count growth under toggle ON**.
+        Add a small WL test or C probe that flips toggle ON and
+        counts kernel_allocs across a poly-regression-style
+        chain (forward + 2 grads, 3 separate TRealize calls).
+        Compare to legacy.  Output: how many kernels each
+        realize emits, whether the count grows linearly in the
+        number of realizes (suggests duplication), and which
+        kernel-allocation site is hottest (legacy
+        materialize_uop_in_env vs the inlined helper itself).
+        Diagnostic only -- no production code change.
+        Acceptance: 166 C + 292 WL still green (default OFF);
+        the probe output makes the duplication source explicit
+        in TASKS.md or a comment.  ~30 LOC.
 
-             Re-decompose:
-               f1d-d4a: investigate kernel-count growth under
-                        toggle ON.  Add a probe (count
-                        kernel_allocs across realizes for a
-                        small grad-heavy chain like
-                        poly-regression-gradients) and identify
-                        the duplication source.  Diagnostic
-                        only; ~30 LOC.
-               f1d-d4b: fix the pathology.  Likely needs a
-                        memo / dedup so the same source_uop
-                        chain doesn't get re-emitted across
-                        realizes.  Or restructure so the
-                        helper's success ALSO rewrites the
-                        absorbed cells (so subsequent walks
-                        see UOP_KERNEL refs instead of raw
-                        UOPs).  Out-of-fire-budget; ~150 LOC.
-               f1d-d4c: actually flip default (the original
-                        ~5 LOC).  Lands once d4b makes the
-                        WL test sweep stay under 4K kernels. -->
+  - [ ] **f1d-d4b: fix the duplication pathology**.  Based
+        on d4a's diagnosis, fix the root cause.  Two leading
+        candidates:
+          (i)  Helper's success ALSO rewrites the absorbed
+               un-realized cells in the heap to point at the
+               emitted KERNEL term (or a sentinel) so a
+               subsequent TRealize re-walk sees them as
+               already-handled.
+          (ii) Memo across realizes: cache (root_loc -> kid)
+               so the same source_uop subtree returns the
+               same kernel id.  Cleared on TInit/TReset.
+        Pick whichever d4a's analysis points at.  Acceptance:
+        with toggle ON, the WL test sweep stays under the
+        4K kernel cap on the heaviest tests
+        (beautiful_mnist.wlt, nn.wlt); 166 C + 292 WL green.
+        ~80-150 LOC + tests; DECOMPOSE FURTHER on first fire
+        if the chosen path is bigger than ~100 LOC.
 
+  - [ ] **f1d-d4c: actually flip default + verify**.  After
+        d4b lands, set MATERIALIZE_USE_REALIZE_INFO default
+        to 1.  Run full sweep: 166 C + 292 WL green;
+        lenet-mnist verify.wls Metal still converges
+        loss 2.61 -> 0.025; linear-train memory-probe.wls
+        TMemoryPlanReport shows the kernel-count drop.
+        ~5 LOC + measurement.
 
   - [ ] **f1e: bench delta + docs update**.  Re-run
         `wl/Examples/_bench/baseline.wls` on both backends.
