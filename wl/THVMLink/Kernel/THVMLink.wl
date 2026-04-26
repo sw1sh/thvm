@@ -36,6 +36,7 @@ THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputati
 
 (* === reduce / stats === *)
 TWnf::usage       = "TWnf[term] reduces `term` to weak normal form.  TWnf[term, n] bails after at most `n` interactions and returns the partially reduced term; pending eliminator frames are exposed via TStack[].  n = 0 means unbounded (same as TWnf[term]).";
+TNf::usage        = "TNf[term] reduces `term` to full normal form by sweeping the live heap and firing every redex via redex_fire.  Where TWnf surfaces only the head, TNf reaches GRADs / KERNELs / OP2s nested anywhere in the graph.  Excludes TAG_REF / TAG_ALO from eager firing so recursive named definitions don't non-terminatingly unfold.";
 TStep::usage      = "TStep[term] = TWnf[term, 1].  Fires exactly one interaction.  Inspect TStack[] for the pending frames.";
 TStack::usage     = "TStack[] returns the eliminator frames pending at the most recent bail point of TStep / TWnf[_, n].  Each frame is a TTerm tagged APP / DP0 / DP1.  Empty list when no bail occurred.";
 TRedexes::usage   = "TRedexes[] lists every redex in the live heap.  TRedexes[t] additionally DFS-walks `t` so a root the caller is holding directly is included.  Each entry is a TTerm uniquely identifying the redex by its packed Term value.";
@@ -219,6 +220,7 @@ $heapSetFn   := $heapSetFn   = load["thvm_wl_heap_set",   {Integer, Integer},   
 
 $wnfFn          := $wnfFn          = load["thvm_wl_wnf",            {Integer},          Integer];
 $wnfNFn         := $wnfNFn         = load["thvm_wl_wnf_n",          {Integer, Integer}, Integer];
+$nfFn           := $nfFn           = load["thvm_wl_nf",              {Integer},          Integer];
 $stackSizeFn    := $stackSizeFn    = load["thvm_wl_stack_size",     {},                 Integer];
 $stackGetFn     := $stackGetFn     = load["thvm_wl_stack_get",      {Integer},          Integer];
 $redexSnapFn    := $redexSnapFn    = load["thvm_wl_redex_snapshot", {{Integer, 1}},     Integer];
@@ -430,6 +432,7 @@ THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
 
 TWnf[t_]                       := (ensureInit[]; withTermCtx[t, TTerm[$wnfFn[ttermRaw[t]]]])
 TWnf[t_, n_Integer /; n >= 0]  := (ensureInit[]; withTermCtx[t, TTerm[$wnfNFn[ttermRaw[t], n]]])
+TNf[t_]                        := (ensureInit[]; withTermCtx[t, TTerm[$nfFn[ttermRaw[t]]]])
 
 (* TStep[t] = TWnf[t, 1] -- fire exactly one interaction, then return
    the partially reduced term.  The pending eliminator stack at the

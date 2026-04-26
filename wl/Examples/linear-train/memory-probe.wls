@@ -1,9 +1,19 @@
 #!/usr/bin/env wolframscript
-(* memory-probe.wls -- linear-train forward + multi-target backward
-   in ONE realize.  Captures the post-realize TMemoryPlan + heap
-   diagram so the reader sees what the fused scheduler actually
-   produces (kernels, bufs, lifecycles) without per-grad re-realize
-   noise.
+(* memory-probe.wls -- linear-train forward + multi-target backward,
+   captured at THREE distinct stages so the reader sees how the
+   graph evolves through the IC + scheduler:
+
+     1. Pure forward  -- just the loss UOp graph.
+     2. With backward -- after building UOP_GRAD_MULTI and TNf-
+                         reducing it (interact_grad walks the
+                         chain rule; result is a graph of plain
+                         elementwise + reduce + movement UOps,
+                         no kernels yet, no kernels emitted).
+     3. With kernels  -- after TMaterialize compiles the lazy
+                         compute into UOP_KERNEL terms.
+
+   Plus a TMemoryPlan Gantt at stage 3 (only stage where any
+   kernels exist).
 
    Run from the repo root:
        wolframscript -f wl/Examples/linear-train/memory-probe.wls
@@ -16,45 +26,87 @@ Get["THVMLink`"];
 debugPrint[args___] := WriteString["stdout",
     StringJoin @@ Map[ToString, {args}], "\n"]
 
+$renderBudget = 90;
+
+(* Try Grid arrange first (matches docs/images/diagrams/ style);
+   fall back to the default layout if Grid takes too long.  Grid
+   is O(n^2) in heap cells; for the post-grad chain (~150 cells)
+   it doesn't finish in any reasonable budget, but the default
+   layout still produces a usable (if uglier) diagram. *)
+renderHeapDiagram[seed_, label_] := Module[{backend, path, gridOk},
+    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
+    path    = "wl/Examples/linear-train/heap-diagram-" <> label
+                <> "-" <> backend <> ".svg";
+    gridOk = TimeConstrained[
+        Export[path,
+            THeapDiagram[seed]["Arrange"]["Grid", "PortLabels" -> False],
+            Background -> White];
+        True,
+        $renderBudget,
+        False];
+    If[ gridOk,
+        debugPrint[label, " heap diagram (Grid) -> ", path],
+        (* Grid timed out; fall back to default layout. *)
+        TimeConstrained[
+            Export[path, THeapDiagram[seed], Background -> White];
+            debugPrint[label, " heap diagram (default layout) -> ", path],
+            $renderBudget,
+            debugPrint[label, " heap diagram TIMED OUT (>", 2 $renderBudget, "s) -- skipped"]
+        ]
+    ]
+]
+
 SeedRandom[7];
 TInit[];
 
-(* === Setup: Glorot init + a single hand-picked sample. === *)
-xHost = NumericArray[{1.0, 0.2, -0.1, 0.0}, "Real32"];
-yLabel = 0;
-
-wHost = NumericArray[
-    RandomVariate[NormalDistribution[0., Sqrt[2.0 / 4]], {3, 4}],
-    "Real32"];
-bHost = NumericArray[ConstantArray[0., 3], "Real32"];
+(* === Setup.  Small dimensions so stages 2 and 3 stay renderable
+   under the IC string-diagram layout: post-grad, the heap holds
+   the unfolded chain rule for every weight scalar (~20x cells per
+   element for this loss), and Wolfram's Grid arranger doesn't
+   scale past ~50 agents in reasonable time.  3x4 weights would
+   produce a ~400-cell heap which the renderer can't lay out. *)
+xHost  = NumericArray[{1.0, 0.5}, "Real32"];
+wHost  = NumericArray[{0.3, -0.2}, "Real32"];
+target = NumericArray[{0.0}, "Real32"];
 
 w = TTensorCreate @ wHost;
-b = TTensorCreate @ bHost;
 x = TTensorCreate @ xHost;
-target = TTensorCreate @ NumericArray[
-    UnitVector[3, yLabel + 1], "Real32"];
+tgt = TTensorCreate @ target;
 
-(* === Forward + multi-target backward as a single graph: the loss
-   sink is a UOP graph; TGradMany builds ONE UOP_GRAD packing all
-   parameter targets into a TAG_CTR; the single TRealize inside
-   TGradMany fires forward + backward + the CTR descent in one shot.
-   MSE loss instead of softmax+CE because the softmax+CE backward
-   currently has a UOp pattern visit() can't compile (see CHANGELOG
-   note about thvm_materialize bail/rewind); MSE keeps the same
-   structural shape (Linear layer + per-element loss + reduce) and
-   exercises the same materialize+grad path. *)
-h    = TUOpAdd[TMatVec[w, x], b];
-loss = TMSELoss[h, target];
-grads = TGradMany[loss, {w, b}];
+(* === Stage 1: pure forward.  Loss is a UOp graph -- no grads
+   built, nothing materialized.  Diagram captures the unfused AST
+   that the scheduler will compile. *)
+loss = TMSELoss[TDot[w, x], tgt];
 
-debugPrint["TGradMany[loss, {w, b}] returned ", Length[grads], " grads"];
-debugPrint["Final totals after one realize:"];
-debugPrint["  TenDescs : ", TTensCount[]];
-debugPrint["  Buf bytes: ",
-           Round[TTotalBufBytes[] / 1024.0, 0.1], " KiB"];
-debugPrint["  Kernels  : ", TKernelCount[] - 1];
+debugPrint["stage 1 (pure forward): heap=", THeapPos[],
+           " kernels=", TKernelCount[] - 1];
+renderHeapDiagram[loss, "1-forward"];
 
-(* === TMemoryPlan summary + Gantt export. === *)
+(* === Stage 2: forward + backward (still no kernels).  Build
+   UOP_GRAD directly (bypass TGrad's auto-realize) and reduce via
+   TNf so interact_grad walks the chain rule, emitting the
+   backward UOps inline.  Single-target grad keeps the heap small
+   enough for the IC string-diagram renderer.  thvm_materialize
+   hasn't been called yet. *)
+gy       = TUOpConst[1.0, "f32"];
+gradTerm = TUOpGrad[loss, gy, w];
+gradReduced = TNf[gradTerm];
+
+debugPrint["stage 2 (after grad+nf): heap=", THeapPos[],
+           " kernels=", TKernelCount[] - 1];
+renderHeapDiagram[gradReduced, "2-with-backward"];
+
+(* === Stage 3: kernels emitted.  TMaterialize compiles the lazy
+   compute into UOP_KERNEL terms; nothing fired yet (no TWnf), so
+   the buffer state is still pre-firing. *)
+gradMaterialized = TMaterialize[gradReduced];
+
+debugPrint["stage 3 (after materialize): heap=", THeapPos[],
+           " kernels=", TKernelCount[] - 1];
+renderHeapDiagram[gradMaterialized, "3-with-kernels"];
+
+(* === TMemoryPlan summary + Gantt export.  Only meaningful at
+   stage 3 since stages 1-2 emit no KernelEntrys. *)
 debugPrint[""];
 debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];
 
@@ -64,18 +116,4 @@ Module[{plan = TMemoryPlan[], backend, path},
     Export[path, TMemoryPlanGantt[plan], Background -> White];
     debugPrint[""];
     debugPrint["TMemoryPlanGantt -> ", path]
-]
-
-(* === Heap diagram: DiagramNetwork view (one Diagram per agent),
-   arranged on a Grid so the layout matches the IC string-diagram
-   renderings under docs/images/diagrams/.  PortLabels off because
-   the loss graph carries enough TenDescs that the per-port text
-   overwhelms the agent shapes. *)
-Module[{backend, path},
-    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
-    path    = "wl/Examples/linear-train/heap-diagram-" <> backend <> ".svg";
-    Export[path,
-        THeapDiagram[loss]["Arrange"]["Grid", "PortLabels" -> False],
-        Background -> White];
-    debugPrint["THeapDiagram   -> ", path]
 ]

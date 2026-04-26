@@ -212,6 +212,22 @@ EXTERN_C DLLEXPORT int thvm_wl_wnf(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Full normal-form reduction: sweeps the heap and fires every
+// redex via redex_fire (see src/wnf/nf.c).  Used by callers that
+// want every chain-rule-produced UOp surfaced before materialize
+// (otherwise wnf's WHNF discipline leaves grads nested inside
+// elementwise wrappers unfired).  Excludes TAG_REF / TAG_ALO from
+// eager firing -- recursive named definitions would non-
+// terminatingly unfold.
+EXTERN_C DLLEXPORT int thvm_wl_nf(WolframLibraryData libData, mint argc,
+                                  MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  Term r = nf(t);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 // Step-bounded reduce.  max_steps == 0 == unbounded (same as wnf).
 EXTERN_C DLLEXPORT int thvm_wl_wnf_n(WolframLibraryData libData, mint argc,
                                      MArgument *args, MArgument res) {
