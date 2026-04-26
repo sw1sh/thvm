@@ -318,17 +318,15 @@ Root causes:
   from this mechanism per r2a.] **r2d: bench delta + verify
   acceptance**.
 
-- [ ] **r3: Gantt rendering that survives tiny-buf graphs**.
-      Linear-train's bufs are sub-1-KiB so linear-scan packing
-      with a nbytes-y-axis stacks them all at y=0 indistinguishably.
-      Fix: switch the y-axis to LOG2(1 + nbytes) (already an
-      option in TMemoryPlanGantt's "BarHeight" -> "Log" mode --
-      currently DEFAULT but per the m1 PNG seems not active OR
-      not wired into the linear-scan packer).  Verify the option
-      actually works; if "Log" is degenerate for tiny bufs,
-      fall back to UNIFORM bar height with bytes shown in the
-      tooltip.  Acceptance: linear-train memory-plan-cpu.svg
-      shows distinct y-stripes for each buf; the dominant
-      preserved buf is visually smaller (proportional to its
-      tiny footprint), not the whole-page band it is now.
-      ~30 LOC in MemoryPlan.wl + visual smoke test.
+- [x] **r3: Gantt rendering that survives tiny-buf graphs**.
+      The `"BarHeight" -> "Log"` option was documented in
+      TMemoryPlanGantt::usage but unwired -- linearScanPack hard-
+      coded raw nbytes for slot height.  Fixed by adding
+      `barHeightFor[nbytes, mode]` (Log -> Log2[1+nbytes],
+      Linear -> nbytes), threading the option through
+      `TMemoryPlanGantt` -> `linearScanPack[bufs, mode]`, and
+      making the y-axis tick labels mode-aware (Log mode shows
+      `(2^y - 1)/1024` KiB).  Default is "Log".  Visual check on
+      linear-train SVG: each buf gets a distinct y-stripe and the
+      dominant preserved buf is proportional to its size instead
+      of dominating the whole page.  ~50 LOC in MemoryPlan.wl.

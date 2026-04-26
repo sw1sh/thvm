@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Fixed: TMemoryPlanGantt y-axis -- "BarHeight"->"Log" actually works
+
+The `"BarHeight"->"Log"` option was documented in
+`TMemoryPlanGantt::usage` but unwired: `linearScanPack` hardcoded
+raw nbytes for slot height, so sub-1-KiB bufs in linear-train
+all stacked at y=0 and a single preserved buffer dominated the
+whole page.  Threaded the option through (default "Log") +
+made y-axis tick labels mode-aware (Log mode shows
+`(2^y - 1)/1024` KiB).  Each buf now gets a distinct y-stripe,
+proportional to log2 of its size.
+
 ### Added: thvm_atp_step + thvm_atp_run -- saturation loop driver (stage 5.2f)
 
 `src/atp/_.c` glues 5.2a..5.2e into the full step.  Order from

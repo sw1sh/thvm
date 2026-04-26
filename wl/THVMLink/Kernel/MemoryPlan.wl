@@ -394,7 +394,18 @@ backendsActive[bufs_] := DeleteDuplicates[#["backend"] & /@ bufs] /. {
    Returns the input bufs with an additional "y_range" -> {y0, y1}
    key.  Not optimal (true bin-packing is NP-hard) but matches
    what tinygrad's runtime allocator does in practice. *)
-linearScanPack[bufs_] := Block[{
+(* barHeightFor[nbytes, mode] -- maps a buf's nbytes to its
+   y-extent on the chart.  "Linear" is faithful to the actual byte
+   count (good when bufs are roughly uniform in size); "Log" uses
+   Log2[1 + nbytes] so a 4-byte buf and a 4-MiB buf are both
+   visible without one disappearing into a sliver (good for graphs
+   with mixed-magnitude bufs like LeNet, which has 0.001 KiB
+   intermediates next to 120 KiB weights).  Default "Log". *)
+barHeightFor[nbytes_?NumericQ, "Log"]    := Log2[1.0 + nbytes]
+barHeightFor[nbytes_?NumericQ, "Linear"] := nbytes
+barHeightFor[nbytes_?NumericQ, _]        := Log2[1.0 + nbytes]
+
+linearScanPack[bufs_, barHeightMode_:"Log"] := Block[{
     sorted,
     slots = {},
     yMax = 0,
@@ -404,30 +415,30 @@ linearScanPack[bufs_] := Block[{
     Do[
         Block[{
             b = sorted[[i]],
-            n,
+            h,
             fitIdx,
             slot,
             y0,
             y1
         },
-            n = b["nbytes"];
+            h = barHeightFor[b["nbytes"], barHeightMode];
             fitIdx = SelectFirst[
                 Range[Length[slots]],
                 Function[k,
                     slots[[k, 3]] < b["alloc_depth"]
-                    && (slots[[k, 2]] - slots[[k, 1]]) >= n
+                    && (slots[[k, 2]] - slots[[k, 1]]) >= h
                 ],
                 Missing[]
             ];
             If[ MissingQ[fitIdx],
                 y0 = yMax;
-                y1 = y0 + n;
+                y1 = y0 + h;
                 yMax = y1;
                 AppendTo[slots, {y0, y1, b["last_use_depth"]}];
                 ,
                 slot = slots[[fitIdx]];
                 y0 = slot[[1]];
-                y1 = y0 + n;
+                y1 = y0 + h;
                 slots[[fitIdx, 3]] = b["last_use_depth"];
             ];
             AppendTo[out, Append[b, "y_range" -> {y0, y1}]]
@@ -437,12 +448,13 @@ linearScanPack[bufs_] := Block[{
     {out, yMax}
 ]
 
-Options[TMemoryPlanGantt] = {"TopN" -> 40};
+Options[TMemoryPlanGantt] = {"TopN" -> 40, "BarHeight" -> "Log"};
 TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
     Block[{
         allBufs = a["Bufs"],
         bufs,
         topN,
+        barHeightMode,
         packed,
         maxDepth,
         totalBytes,
@@ -453,6 +465,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
         legendStatuses
     },
         topN = OptionValue["TopN"];
+        barHeightMode = OptionValue["BarHeight"];
         If[ allBufs === {}, Return[Graphics[{}, ImageSize -> 320]]];
         (* Show only the top-N largest bufs (by nbytes) so each card
            remains visible.  TopN -> Infinity / All renders every
@@ -475,7 +488,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
            The y-axis becomes "memory bytes" with a meaningful
            scale, and slot reuse is visible as multiple cards
            stacked along the same vertical strip. *)
-        {packed, totalHeight} = linearScanPack[bufs];
+        {packed, totalHeight} = linearScanPack[bufs, barHeightMode];
         If[ totalHeight === 0, totalHeight = 1];
         (* Status legend: only show entries that actually appear in
            the rendered set so the legend doesn't list categories
@@ -527,13 +540,19 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
             Frame -> True,
             FrameTicks -> {
                 Automatic,
-                (* Y-axis ticks in KiB so the memory scale is
-                   readable.  Pick ~6 round values across the
-                   total height. *)
-                Block[{step},
-                    step = Quotient[totalHeight, 6];
+                (* Y-axis ticks: in Linear mode the y unit IS bytes,
+                   so ticks are y/1024 KiB.  In Log mode y is
+                   Log2[1+nbytes], so the human-readable label is
+                   `2^y - 1` bytes -> KiB.  Pick ~6 evenly spaced
+                   y values for either mode. *)
+                Block[{step, yToKib},
+                    yToKib = If[ barHeightMode === "Log",
+                        Function[y, (2.0^y - 1.0) / 1024.0],
+                        Function[y, y / 1024.0]
+                    ];
+                    step = totalHeight / 6.0;
                     If[ step <= 0, step = 1];
-                    Table[{y, Round[y/1024., 0.1]}, {y, 0, totalHeight, step}]
+                    Table[{y, Round[yToKib[y], 0.01]}, {y, 0, totalHeight, step}]
                 ]
             },
             FrameLabel -> {
