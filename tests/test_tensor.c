@@ -25,7 +25,8 @@ int main(void) {
   CHECK(TAG_INC  == 19);
   CHECK(TAG_CTR  == 20);
   CHECK(TAG_WHEN == 21);
-  CHECK(TAG_COUNT == 22);
+  CHECK(TAG_FVR  == 22);
+  CHECK(TAG_COUNT == 23);
 
   TEST_BEGIN("term/TAG_TEN-roundtrip");
   Term t = term_new(0, TAG_TEN, DT_F32, 42);

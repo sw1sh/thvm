@@ -97,8 +97,14 @@ typedef u64 Term;
                      //   today by k0c's multi-target interact_grad to
                      //   bundle one cotangent Term per requires_grad target.
 #define TAG_WHEN 21  // boolean filter.   val = heap loc -> [cond, body]; truthy -> body, 0/ERA -> ERA
+#define TAG_FVR  22  // first-order variable (FOL). atom; ext = variable id.
+                     //   Distinct from TAG_VAR (the IC's bound variable, tied
+                     //   to a binder loc).  Used to encode the universally /
+                     //   existentially quantified variables of equational
+                     //   logic: f(x, e) = x has FVR(x_id) at the leaves where
+                     //   x appears.  Atomic: no heap cells.
 
-#define TAG_COUNT 22
+#define TAG_COUNT 23
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -509,6 +515,7 @@ fn Term term_new_or  (Term a, Term b);
 fn Term term_new_any (void);
 fn Term term_new_inc (Term body);
 fn Term term_new_when(Term cond, Term body);
+fn Term term_new_fvr (u32 var_id);
 
 // k0a: build a TAG_CTR labelled constructor over `n` child Terms.
 // Heap layout: [NUM(arity=n), c_0, ..., c_{n-1}].  ext = label
@@ -676,6 +683,29 @@ fn Term wnf_n(Term t, u64 max_steps);
 // head.  Deep enumeration through APP / OP2 / EQL / ... lands as those
 // SUP-commutation interactions are added.
 fn u64 thvm_collapse(Term t, Term *out, u64 cap);
+
+// === kbo/ ===
+// Knuth-Bendix ordering on first-order terms (TAG_CTR + TAG_FVR).
+// Stage 2 of the IC-native ATP roadmap (docs/plans/waldmeister_ic_atp.md).
+typedef enum {
+  KBO_EQ =  0,
+  KBO_GT =  1,
+  KBO_LT = -1,
+  KBO_UN =  2,    // incomparable
+} KboCmp;
+
+// KboConfig: shared (read-only) tables for one signature.  The caller
+// owns the memory; thvm_kbo only reads.  precedence is a total order
+// on labels (higher value = greater); weights[l] is the per-symbol
+// weight for label l; var_weight is the scalar w0 for TAG_FVR.
+typedef struct {
+  const u32 *weights;
+  const u32 *precedence;
+  u32        n_labels;
+  u32        var_weight;
+} KboConfig;
+
+fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg);
 
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction

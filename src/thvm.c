@@ -57,6 +57,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "term/new_inc.c"
 #include "term/new_ctr.c"
 #include "term/new_when.c"
+#include "term/new_fvr.c"
 
 // === heap/ ===
 #include "heap/alloc.c"
@@ -198,6 +199,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // the WL bridge and tests.
 #include "collapse/_.c"
 #include "collapse/ordered.c"
+
+// === kbo/ ===
+// Knuth-Bendix ordering as a C function.  No reduction or heap
+// allocation; reads CTR/FVR terms and a caller-supplied KboConfig.
+#include "kbo/_.c"
 
 // hrp1: heap-rooted preserve walk -- alternative to
 // realize.c's mark_preserved_chain.  Standalone helper; hrp2
