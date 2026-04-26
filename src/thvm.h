@@ -846,6 +846,13 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs);
 // pushed.  Drops overflow silently.
 fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added);
 
+// Interreduce: walk the older rules in R and drop any whose LHS
+// reduces under the freshly-added rule(s); requeue each dropped
+// rule's simplified equation onto the CP queue.  Top-only today;
+// 5.4's recursive descent widens coverage automatically.  Returns
+// the number of older rules dropped.
+fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input

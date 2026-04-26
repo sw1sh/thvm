@@ -66,6 +66,55 @@ static u8 atp_push_rule(AtpState *s, Term lhs, Term rhs) {
   return 1;
 }
 
+// Walk the older rules (indices [0, added.first)) and drop any
+// whose LHS reduces under the freshly-added rule(s).  Each dropped
+// rule's simplified equation goes back onto the CP queue so the
+// saturation loop has a chance to re-orient it under the smaller R.
+//
+// Today this uses the top-position-only `thvm_rewrite_normalize`;
+// stage 5.4's recursive-descent rewriter will automatically widen
+// the coverage to sub-positions without changing this function.
+//
+// Returns the number of older rules that were dropped.
+fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
+  if (s == NULL || added.count == 0 || added.first == 0) return 0;
+
+  // Copy the new rules' Terms by value so we can safely compact the
+  // R array beneath them.  Term is 64-bit; the heap cells they point
+  // to don't move.
+  Term new_lhs[2];
+  Term new_rhs[2];
+  u32  n_new = added.count;
+  if (n_new > 2) n_new = 2;
+  for (u32 k = 0; k < n_new; k++) {
+    new_lhs[k] = s->lhs[added.first + k];
+    new_rhs[k] = s->rhs[added.first + k];
+  }
+
+  u32 dropped = 0;
+  u32 i       = 0;
+  while (i < added.first - dropped) {
+    Term old_lhs = s->lhs[i];
+    Term old_rhs = s->rhs[i];
+    Term reduced = thvm_rewrite_normalize(old_lhs, new_lhs, new_rhs, n_new, 16);
+    if (!kbo_eq(reduced, old_lhs)) {
+      // The older rule's LHS simplified -- drop it and requeue
+      // (reduced, old_rhs) for re-orientation.
+      thvm_atp_add_equation(s, reduced, old_rhs);
+      for (u32 j = i + 1; j < s->n_rules; j++) {
+        s->lhs[j - 1] = s->lhs[j];
+        s->rhs[j - 1] = s->rhs[j];
+      }
+      s->n_rules--;
+      dropped++;
+      // Don't increment i; the next older rule shifted down to slot i.
+    } else {
+      i++;
+    }
+  }
+  return dropped;
+}
+
 // Generate fresh CPs from the freshly-added rules `added` against
 // the current rule set R, push survivors onto the CP queue.
 // Drops overflow silently (queue cap or temp-buffer cap).  Returns

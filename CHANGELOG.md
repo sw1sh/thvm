@@ -6,6 +6,29 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_atp_interreduce (stage 5.2c)
+
+`thvm_atp_interreduce(s, added)` walks the older rules in `R`
+(indices `[0, added.first)`), normalizes each LHS under the
+freshly-added rule(s), and drops any rule whose LHS simplifies.
+The dropped rule's `(reduced, old_rhs)` equation is pushed back
+onto the CP queue for the saturation loop to re-orient under the
+smaller `R`.
+
+Top-only rewriting today via the existing
+`thvm_rewrite_normalize`; stage 5.4's recursive descent widens
+coverage to sub-positions without changing this function.
+
+The new rules are copied out by Term value before the loop so the
+array can be compacted without invalidating the dispatch.  Mirrors
+Waldmeister's `Interreduktion.c` ("interreduction") cleanup phase.
+
+Tests cover empty-added, drop-on-specialization (an `f(a, e) ->
+f(a, a)` rule disappears under a fresh `f(x, e) -> x`),
+keep-on-irreducible (a rule with a different top symbol survives),
+and the underflow guard for the first-ever rule add (`added.first
+== 0`).
+
 ### Added: thvm_atp_generate_cps + thvm_critical_pairs_range (stage 5.2d)
 
 `src/cp/_.c` gains `thvm_critical_pairs_range(lhs, rhs, n,

@@ -279,6 +279,85 @@ int main(void) {
     CHECK_EQ(na, nb);
   }
 
+  TEST_BEGIN("atp/interreduce-empty-added-no-op");
+  {
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    AtpAddedRange empty = {0, 0};
+    CHECK_EQ(thvm_atp_interreduce(s, empty), 0u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/interreduce-drops-specialization");
+  {
+    // Pre-populate R with a SPECIALIZED rule:
+    //   R[0]: f(a, e) -> f(a, a)
+    // Add the more-general rule via orient_and_add:
+    //   R[1]: f(x, e) -> x          (KBO_GT under DUMMY_CFG)
+    // After interreduce, R[0]'s LHS reduces under R[1] (top match
+    // with x = a), so it should be dropped and the simplified
+    // equation (a, f(a, a)) requeued.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+
+    s->lhs[0] = mk_f(mk_a(), mk_e());
+    s->rhs[0] = mk_f(mk_a(), mk_a());
+    s->n_rules = 1;
+    u32 n_cps_before = s->n_cps;
+
+    Term gen_lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term gen_rhs = mk_v(VAR_x);
+    AtpAddedRange added = thvm_atp_orient_and_add(s, gen_lhs, gen_rhs);
+    CHECK_EQ(added.count, 1u);
+    CHECK_EQ(added.first, 1u);
+    CHECK_EQ(s->n_rules, 2u);
+
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 1u);
+    // R now holds only the new general rule, shifted down to slot 0.
+    CHECK_EQ(s->n_rules, 1u);
+    CHECK_EQ(term_ext(s->lhs[0]), LAB_f);
+    // CP queue grew by one: the requeued (reduced, old_rhs).
+    CHECK_EQ(s->n_cps, n_cps_before + 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/interreduce-keeps-irreducible-rules");
+  {
+    // R[0]: i(a) -> i(a)         (degenerate; just to fill a slot)
+    // Add R[1]: f(x, e) -> x.  R[0]'s LHS i(a) doesn't match
+    // f(?, ?) at top, so nothing reduces; R[0] stays.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term ia0 = term_new_ctr(LAB_f - 1, /* unused; want different label */ NULL, 0);
+    (void)ia0;
+    Term cs[1] = { mk_a() };
+    s->lhs[0] = term_new_ctr(2, cs, 1);  // label 2 (i)
+    s->rhs[0] = term_new_ctr(2, cs, 1);
+    s->n_rules = 1;
+
+    Term gen_lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term gen_rhs = mk_v(VAR_x);
+    AtpAddedRange added = thvm_atp_orient_and_add(s, gen_lhs, gen_rhs);
+    CHECK_EQ(added.count, 1u);
+
+    u32 dropped = thvm_atp_interreduce(s, added);
+    CHECK_EQ(dropped, 0u);
+    CHECK_EQ(s->n_rules, 2u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/interreduce-no-old-rules-no-op");
+  {
+    // First-rule-add case: added.first == 0, nothing older to
+    // interreduce.  Function should return 0 without underflowing.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term gen_lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term gen_rhs = mk_v(VAR_x);
+    AtpAddedRange added = thvm_atp_orient_and_add(s, gen_lhs, gen_rhs);
+    CHECK_EQ(added.first, 0u);
+    CHECK_EQ(thvm_atp_interreduce(s, added), 0u);
+    CHECK_EQ(s->n_rules, 1u);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

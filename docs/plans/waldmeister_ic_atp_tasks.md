@@ -64,11 +64,14 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       buffer ATP_CP_BATCH (1024 CPs); drops overflow silently.
       Tests cover empty-added no-op, single-rule self-overlap, and
       old-times-new with assoc + left-id.
-- [ ] 5.2c `thvm_atp_interreduce`: walk R; for any older rule whose
-      LHS reduces under the new rule (using
-      `thvm_rewrite_normalize` over a singleton ruleset), drop it
-      and push its original equation back onto the CP queue.
-      Depends on 5.4's recursive descent for sub-position rewrites.
+- [x] 5.2c `thvm_atp_interreduce`: walks R[0..added.first), copies
+      the new rules' Terms by value, normalizes each old rule's LHS
+      under those new rules; if it reduces, drops the old rule
+      (compacts the array) and requeues `(reduced, old_rhs)` onto
+      the CP queue.  Top-only rewriting today; 5.4's recursive
+      descent will widen coverage automatically.  Tests cover the
+      empty-added no-op, drop-on-specialization, keep-on-irreducible,
+      and the no-old-rules edge case (added.first == 0 underflow guard).
 - [ ] 5.2e `thvm_atp_goal_check`: normalize both sides of the goal
       under R; if they're now `kbo_eq`, return ATP_PROVED.  Skip
       cleanly when goal_lhs == 0 (completion mode).  Depends on
