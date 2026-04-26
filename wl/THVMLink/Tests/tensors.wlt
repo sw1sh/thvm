@@ -126,21 +126,15 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    Module[{prev, a, b, c, k, result},
-        prev = TSetUseRealizeInfo[False];   (* legacy per-UOp emit *)
+    Module[{a, b, c, k},
         a   = TTensor[{4}, {1.0, 2.0, 3.0, 4.0}];
         b   = TTensor[{4}, {5.0, 6.0, 7.0, 8.0}];
         c   = TTensor[{4}, {9.0, 10.0, 11.0, 12.0}];
         k   = TMaterialize[(a + b) * c];
-        (* two kernels (ADD then MUL), no fusion in step-12 v1.
-           This test pins the legacy structure; the f1d
-           inlined helper would fuse to 1 kernel. *)
-        result = {TUOpKind[k], TKernelCount[]};
-        TSetUseRealizeInfo[prev];
-        result
+        {TUOpKind[k], TKernelCount[]}
     ],
-    {"KERNEL", 3},
-    TestID -> "TMaterialize/compound-two-kernels"
+    {"KERNEL", 2},
+    TestID -> "TMaterialize/compound-fuses-to-one-kernel"
 ]
 
 VerificationTest[

@@ -1,23 +1,11 @@
-// schedule/materialize.c - rewrite a UOp graph into a scheduled DAG of
-//                          UOP_KERNEL nodes.
+// schedule/materialize.c - PURGED stub.
 //
-// Step 12 v1 strategy: every UOp becomes its own 1-op kernel.  No
-// cross-UOp fusion (step 14 will introduce elementwise chains and a
-// kernel-cache keyed by signature).  Each kernel has:
-//   - N inputs (TenDescs it reads from)
-//   - 1 output (a freshly allocated TenDesc)
-//   - a 1-entry program[] describing the compute
-//
-// Children that are themselves UOps are materialized first; their
-// kernel's output TenDesc becomes an input to the parent kernel.
-// So calling thvm_materialize on the user's root produces a DAG of
-// UOP_KERNELs wiring output->input, bottom-up.
-//
-// The heap layout of an emitted UOP_KERNEL term is:
-//   Heap[loc + 0] = output_buf (TAG_TEN, allocated but not filled)
-//   Heap[loc + 1] = NUM(kernel_id) pointing at KERNELS[kid]
-
-// --- helpers ---
+// The previous round-1/2 materialize implementation (recursive emit
+// + inlined-helper + memo + walk + shape_env, ~2050 LOC) is gone.
+// This stub keeps just the leaf utilities that other compilation
+// units (realize_classify, gc_mark, wnf/redex, interact/uop_kernel)
+// reference, plus a no-op thvm_materialize entry point so the build
+// still links.  The clean rewrite lands in g2.
 
 fn u8 uop_arity(u8 op) {
   switch (op) {
@@ -40,627 +28,124 @@ fn u8 uop_is_unary_elementwise(u8 op) {
   return op == UOP_NEG || op == UOP_RECIP || op == UOP_EXP2
       || op == UOP_LOG2 || op == UOP_SQRT;
 }
+
 fn u8 uop_is_binary_elementwise(u8 op) {
   return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ;
 }
 
-// ---- Splice support (sub-item f1a of the kernel-fusion arc).
-//      A KernelEntry is "inlineable" when its program is exactly
-//      n_inputs LOAD ops (the prefix from sub-item c) followed by
-//      a single elementwise op.  Such kernels can be merged into a
-//      consumer's program[] via materialize_splice_into.
-// ----
-
-fn u8 is_kernel_inlineable(KernelEntry *ke) {
-  if (ke->spliced) return 0;
-  if (ke->n_ops != ke->n_inputs + 1) return 0;
-  KProgOp *p = &ke->program[ke->n_inputs];
-  return uop_is_unary_elementwise(p->opcode)
-      || uop_is_binary_elementwise(p->opcode);
-}
-
-// Splice `child` into `parent`.  Appends child's non-prefix-LOAD
-// program ops to parent->program[], merges child input slots into
-// parent's (with dedup), and remaps each appended op's src refs:
-//
-//   - KSRC_AS_INPUT(N) on a child input  -> KSRC_AS_INPUT(remap[N])
-//     in parent's input table.
-//   - Inter-op program-index references inside child get offset by
-//     the parent's n_ops at splice start (so they stay self-
-//     consistent).
-//
-// Marks `child->spliced = 1` so kernel_fire_by_id skips it (the
-// parent now produces the same value into its output buffer).
-//
-// Returns the parent program-slot index where child's LAST op
-// landed -- the caller can reference it via that program-index in
-// any subsequent op's src[].  Returns 0xFFFFFFFF on cap-exceeded.
-fn u32 materialize_splice_into(u32 parent_kid, u32 child_kid) {
-  if (parent_kid == 0 || parent_kid >= KERNELS_NEXT) return 0xFFFFFFFF;
-  if (child_kid  == 0 || child_kid  >= KERNELS_NEXT) return 0xFFFFFFFF;
-  KernelEntry *parent = &KERNELS[parent_kid];
-  KernelEntry *child  = &KERNELS[child_kid];
-  if (child->spliced) return 0xFFFFFFFF;
-
-  // Map each child input slot to a parent input slot (creating new
-  // ones for non-duplicates).
-  u32 input_remap[KERNEL_MAX_INPUT];
-  for (u32 i = 0; i < child->n_inputs; i++) {
-    int found = -1;
-    for (u32 j = 0; j < parent->n_inputs; j++) {
-      if (parent->input_tids [j] == child->input_tids [i]
-       && parent->input_terms[j] == child->input_terms[i]) {
-        found = (int)j;
-        break;
-      }
+// Best-effort shape inference used by interact_grad to figure
+// out the shape of an upstream UOp/TEN at GRAD-unroll time.
+// Pure function over the heap; does NOT consult any shape
+// environment (callers always pass env_id=0).  The g2 rewrite
+// will likely replace this with a one-pass shape annotation, but
+// keeping the recursion here is the smallest surface that lets
+// interact_grad keep working through the purge.
+fn int term_shape_in(Term t, u32 env_id, Shape *out) {
+  (void)env_id;
+  u8 tag = term_tag(t);
+  if (tag == TAG_TEN) {
+    u32 tid = (u32)term_val(t);
+    if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].view.shape; return 1; }
+    return 0;
+  }
+  if (tag != TAG_UOP) return 0;
+  u8  op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_KERNEL) {
+    Term outbuf = heap_read(loc);
+    if (term_tag(outbuf) == TAG_TEN) {
+      u32 tid = (u32)term_val(outbuf);
+      if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].view.shape; return 1; }
     }
-    if (found >= 0) {
-      input_remap[i] = (u32)found;
-    } else {
-      if (parent->n_inputs >= KERNEL_MAX_INPUT) return 0xFFFFFFFF;
-      u32 slot = parent->n_inputs++;
-      parent->input_tids  [slot] = child->input_tids  [i];
-      parent->input_dtypes[slot] = child->input_dtypes[i];
-      parent->input_numels[slot] = child->input_numels[i];
-      parent->input_terms [slot] = child->input_terms [i];
-      input_remap[i] = slot;
-    }
+    return 0;
   }
-
-  // Append child's program ops, skipping the prefix LOAD that
-  // mirrors child's now-merged inputs (they would just be
-  // redundant; parent will emit its own LOAD prefix later).
-  // Map old child program-indices to new parent program-indices
-  // so inter-op refs stay correct after the offset.
-  u32 prog_remap[KPROG_MAX_OPS];
-  u32 last_appended = 0xFFFFFFFF;
-  for (u32 i = 0; i < child->n_ops; i++) {
-    KProgOp *cp = &child->program[i];
-    // Skip the per-input prefix LOAD (the input is already bound
-    // in parent's input table; downstream child ops referencing
-    // this LOAD's program-index get retargeted via prog_remap to
-    // the parent's KSRC_AS_INPUT(remap[N]) form below).
-    if (cp->opcode == UOP_LOAD && i + 1 < child->n_ops
-        && cp->n_src == 1 && KSRC_IS_INPUT(cp->src[0])) {
-      // Mark the slot as "absorbed into input N"; downstream
-      // refs to it will rewrite to KSRC_AS_INPUT(remap[N]).
-      prog_remap[i] = KSRC_AS_INPUT(input_remap[KSRC_INDEX(cp->src[0])]);
-      continue;
-    }
-    if (parent->n_ops >= KPROG_MAX_OPS) return 0xFFFFFFFF;
-    KProgOp *pp = &parent->program[parent->n_ops];
-    *pp = *cp;
-    for (u8 s = 0; s < pp->n_src; s++) {
-      u32 raw = pp->src[s];
-      if (KSRC_IS_INPUT(raw)) {
-        u32 idx = KSRC_INDEX(raw);
-        pp->src[s] = KSRC_AS_INPUT(input_remap[idx]);
-      } else {
-        // child program-index -- look it up.  If absorbed, use the
-        // KSRC_AS_INPUT remap; else re-offset to parent space.
-        u32 idx = KSRC_INDEX(raw);
-        u32 mapped = prog_remap[idx];
-        if ((mapped & KSRC_INPUT_FLAG) != 0) {
-          pp->src[s] = mapped;          // already KSRC_AS_INPUT-encoded
-        } else {
-          pp->src[s] = mapped;          // bare program-index in parent
-        }
-      }
-    }
-    prog_remap[i] = parent->n_ops;
-    last_appended = parent->n_ops;
-    parent->n_ops++;
+  if (uop_is_unary_elementwise(op) || op == UOP_LOAD || op == UOP_FLIP) {
+    return term_shape_in(heap_read(loc), 0, out);
   }
-
-  child->spliced = 1;
-  return last_appended;
-}
-
-// ---- Compute output shape / dtype for a single op given its input
-//      TenDesc ids.  Step 12:
-//        elementwise      = broadcast pick non-scalar side,
-//        REDUCE           = drop the reduced axis (rank >= 2) or
-//                           collapse to {1} for 1-D inputs,
-//        movement ops     = inherit for now (step 14 implements).
-// ----
-fn Shape op_output_shape(u8 op, u32 const *in_tids, u8 n_in, u32 reduce_axis) {
-  Shape s = {0};
-  s.ndim    = 1;
-  s.dims[0] = 1;
-
-  if (n_in == 0) {
-    // Leaves (CONST): shape {1}.  A CONST carries a scalar; the
-    // interpreter broadcasts when combining with larger shapes.
-    return s;
+  if (uop_is_binary_elementwise(op)) {
+    Shape la, lb; int la_ok = term_shape_in(heap_read(loc + 0), 0, &la);
+    int lb_ok = term_shape_in(heap_read(loc + 1), 0, &lb);
+    if (!la_ok && !lb_ok) return 0;
+    if (!la_ok) { *out = lb; return 1; }
+    if (!lb_ok) { *out = la; return 1; }
+    u32 na = 1, nb = 1;
+    for (u32 i = 0; i < la.ndim; i++) na *= la.dims[i];
+    for (u32 i = 0; i < lb.ndim; i++) nb *= lb.dims[i];
+    *out = (na >= nb) ? la : lb; return 1;
   }
-
-  View *v0 = &TENS[in_tids[0]].view;
-  s = v0->shape;
-
-  if (uop_is_binary_elementwise(op) && n_in >= 2) {
-    View *v1 = &TENS[in_tids[1]].view;
-    if (v0->numel == 1 && v1->numel > 1) s = v1->shape;
-  }
-
-  if (op == UOP_REDUCE) {
-    if (v0->shape.ndim <= 1) {
-      s.ndim    = 1;
-      s.dims[0] = 1;
-    } else {
-      // Drop reduce_axis.
-      u32 dst = 0;
-      for (u32 i = 0; i < v0->shape.ndim; i++) {
-        if (i == reduce_axis) continue;
-        s.dims[dst++] = v0->shape.dims[i];
-      }
-      s.ndim = dst;
-      for (u32 i = dst; i < MAX_DIM; i++) s.dims[i] = 0;
-    }
-  }
-  return s;
-}
-
-// EXPAND output shape: ndim is stored explicitly at expr_loc+1
-// (see src/uop/expand.c for the heap layout), so EXPAND can
-// change rank -- e.g. broadcasting a scalar/lower-rank cotangent
-// to a target's higher-rank shape during backprop.  Dim sizes
-// follow at expr_loc+2..expr_loc+1+ndim.
-fn Shape expand_output_shape(u64 expr_loc) {
-  Shape s = {0};
-  u32 ndim = (u32)term_val(heap_read(expr_loc + 1));
-  s.ndim = ndim;
-  for (u32 i = 0; i < ndim; i++) {
-    Term n = heap_read(expr_loc + 2 + i);
-    s.dims[i] = (u32)term_val(n);
-  }
-  return s;
-}
-
-fn u32 op_output_dtype(u8 op, u32 const *in_tids, u8 n_in, u32 const_dtype) {
-  (void)op;
-  if (n_in == 0) return const_dtype;           // CONST carries its own dtype
-  return TENS[in_tids[0]].dtype;
-}
-
-// Forward decl: the recursive calls below (GRAD unrolling and the
-// child loop) go through the memo-wrapped public entry point so
-// shared subexpressions hit the dedup table.
-fn Term materialize_expr(Term expr);
-
-// ---- core: materialize a single UOp into a fresh UOP_KERNEL term.
-//      Children that are UOps are recursively materialized (bottom-up). ----
-static Term materialize_expr_inner(Term expr) {
-  // Lazy outermost-layer resolution (VAR-SUB / ALO chains) first,
-  // then a single wnf step ONLY if the result still isn't
-  // structurally a UOP / TEN / NUM -- which catches LAM / APP /
-  // REF terms that need beta or unfolding before we can see
-  // their UOp shape.  wnf is naturally lazy (stops at the first
-  // WHNF root), so the call doesn't drag in the rest of the graph.
-  expr = term_resolve(expr);
-  u8 tag = term_tag(expr);
-  if (tag != TAG_UOP && tag != TAG_TEN && tag != TAG_NUM && tag != TAG_CTR) {
-    expr = wnf(expr);
-  }
-
-  // TAG_CTR: passive aggregate (e.g., the multi-target grad result).
-  // Materialize each child within the same realize so the per-realize
-  // memo dedups every kernel emitted from a forward UOp shared
-  // across the n children -- this is the whole point of TGradMany:
-  // one realize covering n targets emits ONE set of forward kernels.
-  if (term_tag(expr) == TAG_CTR) {
-    u32  n   = term_ctr_n(expr);
-    u32  lab = term_ext(expr);
-    Term mat_children[256];
-    if (n > 256) return expr;
-    for (u32 i = 0; i < n; i++) {
-      mat_children[i] = materialize_expr(term_ctr_at(expr, i));
-    }
-    return term_new_ctr(lab, mat_children, n);
-  }
-
-  // TAG_TEN leaves: already concrete, nothing to do.
-  if (term_tag(expr) != TAG_UOP) return expr;
-
-  u8 op = term_ext(expr);
-
-  // Already a KERNEL: pass through unchanged.
-  if (op == UOP_KERNEL) return expr;
-
-  // GRAD: reduce the chain rule first (the rewrite rule is pure;
-  // it produces a UOp graph with no GRAD nodes), then materialize
-  // the resulting graph.  The unrolled UOps have fresh heap locs
-  // not in the pre-unroll realize-classifier table, so re-classify
-  // before the recursive materialize -- otherwise realize_is_realized
-  // returns 0 for every backward UOp and the f1d helper never fires.
-  if (op == UOP_GRAD) {
-    Term unrolled = interact_grad(expr);
-    if (MATERIALIZE_USE_REALIZE_INFO) realize_classify(unrolled);
-    return materialize_expr(unrolled);
-  }
-
-  // f1d-d4b1: when the toggle is on, route every inlinable UOp
-  // (realized OR not) through the inlined helper.  An inlinable
-  // un-realized UOP collapses its upstream elementwise chain
-  // into a single kernel; without this hook, materialize_expr's
-  // legacy per-UOp recursive emit would allocate one kernel per
-  // chain element AND walk's hook would have left those cells
-  // raw, so each realize ended up emitting ~31% MORE kernels
-  // than legacy (per d4a's probe).  Helper bails on movement /
-  // REDUCE / GRAD roots; in that case fall through to the
-  // legacy per-UOp emit below.
-  // Only fire helper for REALIZED.  Routing un-realized inlinable
-  // through helper would allocate one 1-op kernel per absorbable
-  // child, so the realized parent's helper invocation (which
-  // re-inlines from the original UOp on the heap) ends up
-  // double-emitting the compute -- exactly the duplication d4b1c
-  // hit.  materialize_expr_inner's child loop expects fully-
-  // materialized children, so we cannot "return UOp unchanged"
-  // here the way walk's hook does; instead, fall through to the
-  // legacy per-UOp emit below for un-realized cases.
-  if (MATERIALIZE_USE_REALIZE_INFO && realize_is_realized(expr)) {
-    Term k = materialize_kernel_inlined(expr);
-    if (k != 0) { MAT_STATS_HELPER_OK++; return k; }
-    MAT_STATS_HELPER_BAIL++;
-  }
-  MAT_STATS_LEGACY_EXPR++;
-
-  u64 expr_loc = term_val(expr);
-  u8  arity    = uop_arity(op);
-
-  // 1. Recursively materialize every child.  If the child materializes
-  //    to a UOP_KERNEL, extract its output TAG_TEN (the first heap
-  //    cell) so parents see a concrete input.
-  u32 child_tids[MAX_UOP_SRC];
-  for (u8 i = 0; i < arity; i++) {
-    Term child = heap_read(expr_loc + i);
-    Term mat   = materialize_expr(child);
-    if (term_tag(mat) == TAG_UOP && term_ext(mat) == UOP_KERNEL) {
-      Term out_buf = heap_read(term_val(mat));
-      child_tids[i] = (u32)term_val(out_buf);
-    } else if (term_tag(mat) == TAG_TEN) {
-      child_tids[i] = (u32)term_val(mat);
-    } else {
-      // Unsupported leaf (e.g. raw NUM without a CONST wrapper).
-      child_tids[i] = 0;
-    }
-  }
-
-  // Per-op argument extraction from the surrounding heap cells.
-  // CONST:  arg = raw bits, dtype from the NUM cell.
-  // REDUCE: arg = (kind << 16) | axis, read from the kind/axis NUM cells.
-  u32 const_dtype = DT_F32;
-  u32 op_arg      = 0;
   if (op == UOP_CONST) {
-    Term num = heap_read(expr_loc);
-    op_arg      = (u32)term_val(num);
-    const_dtype = term_ext(num);
-  } else if (op == UOP_REDUCE) {
-    u32 kind = (u32)term_val(heap_read(expr_loc + 1));
-    u32 axis = (u32)term_val(heap_read(expr_loc + 2));
-    op_arg   = (kind << 16) | (axis & 0xFFFF);
-  } else if (op == UOP_FLIP) {
-    op_arg = (u32)term_val(heap_read(expr_loc + 1));
+    out->ndim = 1; out->dims[0] = 1;
+    for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0;
+    return 1;
   }
-
-  // 2. Build a KernelEntry describing this op.
-  u32 kid = kernel_alloc();
-  KernelEntry *ke = &KERNELS[kid];
-
-  // Inputs: the children's TenDesc ids.  (Dedup identical inputs so
-  // a + a uses one input slot with two src references.)
-  for (u8 i = 0; i < arity; i++) {
-    u32 tid = child_tids[i];
-    i32 slot = -1;
-    for (u32 j = 0; j < ke->n_inputs; j++) {
-      if (ke->input_tids[j] == tid) { slot = (i32)j; break; }
-    }
-    if (slot < 0) {
-      slot = (i32)ke->n_inputs++;
-      ke->input_tids  [slot] = tid;
-      ke->input_dtypes[slot] = TENS[tid].dtype;
-      ke->input_numels[slot] = TENS[tid].view.numel;
-    }
-    // (child order preserved in program op below)
+  if (op == UOP_RESHAPE || op == UOP_EXPAND) {
+    u32 ndim = (u32)term_val(heap_read(loc + 1));
+    out->ndim = ndim;
+    for (u32 i = 0; i < ndim && i < MAX_DIM; i++)
+      out->dims[i] = (u32)term_val(heap_read(loc + 2 + i));
+    for (u32 i = ndim; i < MAX_DIM; i++) out->dims[i] = 0;
+    return 1;
   }
-
-  // Output shape + dtype + TenDesc.  For REDUCE the axis is in the
-  // low 16 bits of the packed op_arg we filled above.  EXPAND reads
-  // its target shape straight from the heap NUM cells; the default
-  // op_output_shape would inherit the source view's shape and miss
-  // the broadcast.
-  u32   reduce_axis = (op == UOP_REDUCE) ? (op_arg & 0xFFFF) : 0;
-  Shape out_shape;
-  if (op == UOP_EXPAND) {
-    // ndim is stored explicitly in the EXPAND heap (see
-    // src/uop/expand.c); EXPAND can legitimately change rank.
-    out_shape = expand_output_shape(expr_loc);
-  } else if (op == UOP_RESHAPE) {
-    // RESHAPE's heap layout (post the ndim-explicit fix) is
-    // [src, NUM(ndim), NUM(d0), ...].  ndim is authoritative;
-    // op_output_shape's default of "inherit source" is wrong
-    // for any rank change.
-    u32 ndim = (u32)term_val(heap_read(expr_loc + 1));
-    out_shape.ndim = ndim;
-    for (u32 i = 0; i < ndim && i < MAX_DIM; i++) {
-      out_shape.dims[i] = (u32)term_val(heap_read(expr_loc + 2 + i));
+  if (op == UOP_PAD || op == UOP_SHRINK) {
+    Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
+    out->ndim = cs.ndim;
+    for (u32 i = 0; i < cs.ndim; i++) {
+      u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
+      u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+      out->dims[i] = (op == UOP_PAD) ? cs.dims[i] + b + e
+                                     : ((e > b) ? (e - b) : 0);
     }
-    for (u32 i = ndim; i < MAX_DIM; i++) out_shape.dims[i] = 0;
-  } else if (op == UOP_PERMUTE && child_tids[0] != 0) {
-    // PERMUTE: out.dim[i] = src.dim[perm[i]].
-    Shape s0 = TENS[child_tids[0]].view.shape;
-    out_shape.ndim = s0.ndim;
-    for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
-      u32 pi = (u32)term_val(heap_read(expr_loc + 1 + i));
-      out_shape.dims[i] = s0.dims[pi];
-    }
-    for (u32 i = s0.ndim; i < MAX_DIM; i++) out_shape.dims[i] = 0;
-  } else if (op == UOP_PAD && child_tids[0] != 0) {
-    // PAD: out.dim[i] = src.dim[i] + b_i + e_i.  Heap layout
-    // [src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]; ndim
-    // implicit in the source.
-    Shape s0 = TENS[child_tids[0]].view.shape;
-    out_shape = s0;
-    for (u32 i = 0; i < s0.ndim; i++) {
-      u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
-      u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
-      out_shape.dims[i] = s0.dims[i] + b + e;
-    }
-  } else if (op == UOP_SHRINK && child_tids[0] != 0) {
-    // SHRINK: out.dim[i] = e_i - b_i.
-    Shape s0 = TENS[child_tids[0]].view.shape;
-    out_shape = s0;
-    for (u32 i = 0; i < s0.ndim; i++) {
-      u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
-      u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
-      out_shape.dims[i] = (e > b) ? (e - b) : 0;
-    }
-  } else {
-    out_shape = op_output_shape(op, child_tids, arity, reduce_axis);
+    for (u32 i = cs.ndim; i < MAX_DIM; i++) out->dims[i] = 0;
+    return 1;
   }
-  u32   out_dtype   = op_output_dtype(op, child_tids, arity, const_dtype);
-  ke->output_shape = out_shape;
-  ke->output_dtype = out_dtype;
-  u32 out_numel = shape_numel(out_shape);
-  ke->output_numel = out_numel;
-  ke->output_tid   = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
-  TENS[ke->output_tid].producer_kid = kid;
-
-  // 3. Linearize: for v1 every kernel has exactly one program op.
-  //    Source slot 0 and slot 1 (if any) reference inputs by index.
-  //    Repack REDUCE's op_arg from (kind << 16 | axis) to
-  //    (kind << 24 | inner) -- see backend/cpu/op/reduce.c for the
-  //    runtime encoding.  inner = product of input dims AFTER the
-  //    reduced axis.
-  if (op == UOP_REDUCE && arity > 0 && child_tids[0] != 0) {
-    u32 kind = (op_arg >> 16) & 0xFFFF;
-    Shape sh = TENS[child_tids[0]].view.shape;
-    u32 inner = 1;
-    for (u32 i = reduce_axis + 1; i < sh.ndim; i++) inner *= sh.dims[i];
-    op_arg = ((kind & 0xFF) << 24) | (inner & 0x00FFFFFF);
-  }
-  // Prepend one LOAD instruction per input slot.  Structural marker
-   // (sub-item c of the UOP_LOAD arc); the main op below still
-   // references KSRC_AS_INPUT(N) directly, so backends can either
-   // run cpu_op_load (memcpy to a scratch buffer; current behavior)
-   // or treat LOAD as a no-op (sub-item d).
-   for (u32 i = 0; i < ke->n_inputs; i++) {
-     KProgOp *l = &ke->program[ke->n_ops++];
-     l->opcode    = UOP_LOAD;
-     l->dtype     = (u8)ke->input_dtypes[i];
-     l->n_src     = 1;
-     l->numel     = ke->input_numels[i];
-     l->arg       = 0;
-     l->src0_ndim = 0;
-     l->out_ndim  = 0;
-     for (u32 j = 0; j < MAX_DIM; j++) l->src0_dims[j] = 0;
-     for (u32 j = 0; j < MAX_DIM; j++) l->out_dims [j] = 0;
-     l->src[0]    = KSRC_AS_INPUT(i);
-   }
-  KProgOp *p = &ke->program[ke->n_ops++];
-  p->opcode    = op;
-  p->dtype     = (u8)out_dtype;
-  p->n_src     = arity;
-  p->numel     = out_numel;
-  p->arg       = op_arg;                  // CONST bits, REDUCE kind/inner, etc.
-  p->src0_ndim = 0;
-  p->out_ndim  = 0;
-  for (u32 i = 0; i < MAX_DIM; i++) p->src0_dims[i] = 0;
-  for (u32 i = 0; i < MAX_DIM; i++) p->out_dims [i] = 0;
-  for (u8 i = 0; i < arity; i++) {
-    // Find which input slot this child ended up in (after dedup).
-    for (u32 j = 0; j < ke->n_inputs; j++) {
-      if (ke->input_tids[j] == child_tids[i]) {
-        p->src[i] = KSRC_AS_INPUT(j);
-        break;
-      }
+  if (op == UOP_PERMUTE) {
+    Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
+    out->ndim = cs.ndim;
+    for (u32 i = 0; i < cs.ndim; i++) {
+      u32 pi = (u32)term_val(heap_read(loc + 1 + i));
+      out->dims[i] = cs.dims[pi];
     }
+    for (u32 i = cs.ndim; i < MAX_DIM; i++) out->dims[i] = 0;
+    return 1;
   }
-
-  // Movement ops (currently EXPAND, FLIP) need source slot 0's
-  // per-axis shape AND the output's per-axis shape so the kernel
-  // can resolve broadcast indexing (EXPAND) or per-axis mirroring
-  // (FLIP) without having to re-derive it from in_numel / out_numel
-  // alone.
-  if ((op == UOP_EXPAND || op == UOP_FLIP || op == UOP_PAD
-    || op == UOP_PERMUTE || op == UOP_SHRINK)
-   && arity > 0 && child_tids[0] != 0) {
-    Shape s0 = TENS[child_tids[0]].view.shape;
-    p->src0_ndim = (u8)(s0.ndim & 0xFF);
-    for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
-      p->src0_dims[i] = s0.dims[i];
+  if (op == UOP_REDUCE) {
+    Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
+    u32 axis = (u32)term_val(heap_read(loc + 2));
+    if (cs.ndim <= 1) {
+      out->ndim = 1; out->dims[0] = 1;
+      for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0; return 1;
     }
-    p->out_ndim = (u8)(out_shape.ndim & 0xFF);
-    for (u32 i = 0; i < out_shape.ndim && i < MAX_DIM; i++) {
-      p->out_dims[i] = out_shape.dims[i];
-    }
+    u32 dst = 0;
+    for (u32 i = 0; i < cs.ndim; i++) { if (i == axis) continue; out->dims[dst++] = cs.dims[i]; }
+    out->ndim = dst;
+    for (u32 i = dst; i < MAX_DIM; i++) out->dims[i] = 0;
+    return 1;
   }
-  if ((op == UOP_PAD || op == UOP_SHRINK) && arity > 0
-   && child_tids[0] != 0) {
-    Shape s0 = TENS[child_tids[0]].view.shape;
-    for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
-      u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
-      u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
-      p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
-      p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
-    }
-  }
-  if (op == UOP_PERMUTE && arity > 0 && child_tids[0] != 0) {
-    Shape s0 = TENS[child_tids[0]].view.shape;
-    for (u32 i = 0; i < s0.ndim && i < MAX_DIM; i++) {
-      u32 pi = (u32)term_val(heap_read(expr_loc + 1 + i));
-      p->axis_perm[i] = (u8)(pi & 0xFF);
-    }
-  }
-
-  // 4. Emit UOP_KERNEL term:  [output_buf, NUM(kernel_id)].
-  u64 kloc = heap_alloc(2);
-  heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, ke->output_tid));
-  heap_set(kloc + 1, term_new(0, TAG_NUM, DT_I32,   kid));
-
-  ke->compiled   = NULL;                  // interpreter fallback
-  ke->source_uop = expr;                  // for grad walks via the original UOp
-  return term_new(0, TAG_UOP, UOP_KERNEL, kloc);
+  return 0;
 }
 
-// Memo-wrapped public entry point.  Shared UOp instances reachable
-// through multiple parents (typical of grad chains) otherwise emit
-// one kernel per reaching path; the memo collapses them to a single
-// emit per thvm_materialize call.  See src/schedule/materialize_memo.c
-// for the table semantics + clear policy.
-fn Term materialize_expr(Term expr) {
-  u64 memo_key = (term_tag(expr) == TAG_UOP
-                  && term_ext(expr) != UOP_KERNEL)
-               ? term_val(expr) : 0;
-  if (memo_key != 0) {
-    Term hit = materialize_memo_lookup(memo_key);
-    if (hit != 0) return hit;
+fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
+  (void)env_id;
+  u8 tag = term_tag(t);
+  if (tag == TAG_TEN) {
+    u32 tid = (u32)term_val(t);
+    if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].dtype; return 1; }
   }
-  Term out = materialize_expr_inner(expr);
-  if (memo_key != 0) materialize_memo_store(memo_key, out);
-  return out;
-}
-
-// Post-materialize: if the result is a TAG_TEN whose View is
-// non-contiguous (e.g., a sub-item-f3c view-only EXPAND alias at
-// the ROOT of a TRealize), allocate a fresh contig target-numel
-// buffer and populate via view_strided_index.  Returns a TAG_TEN
-// wrapping the contig tid so flat-buffer readers (TTensorData /
-// test_metal_real / etc.) see the materialized layout.
-fn Term materialize_root_alias(Term t) {
-  if (term_tag(t) != TAG_TEN) return t;
-  u32 tid = (u32)term_val(t);
-  if (tid == 0 || tid >= TENS_NEXT) return t;
-  TenDesc *d = &TENS[tid];
-  if (d->view.contiguous) return t;
-  // Allocate a fresh contig tensor of the same shape + dtype.
-  u32 dst_tid = tensor_alloc(d->backend, d->view.shape, d->dtype);
-  if (dst_tid == 0) return t;
-  // Bytes to read from the source = max element index reachable
-  // from view_strided_index, plus 1.  Computed as offset + sum of
-  // (dim[i] - 1) * strides[i] over axes with positive strides
-  // (broadcast axes have stride 0 and contribute nothing; FLIP's
-  // negative strides start the offset at the high end and walk
-  // downward, so they're already covered by offset).  Backend-
-  // agnostic; works for EXPAND (zeros on broadcast axes coincide
-  // with source numel = product of non-broadcast dims, matching
-  // the prior formula) and SHRINK (positive strides + non-zero
-  // offset extend the read range beyond the alias's own numel).
-  i32 max_idx = d->view.offset;
-  for (u32 i = 0; i < d->view.shape.ndim; i++) {
-    if (d->view.shape.dims[i] > 1 && d->view.strides[i] > 0) {
-      max_idx += (i32)(d->view.shape.dims[i] - 1) * d->view.strides[i];
+  if (tag == TAG_UOP && term_ext(t) == UOP_KERNEL) {
+    Term outbuf = heap_read(term_val(t));
+    if (term_tag(outbuf) == TAG_TEN) {
+      u32 tid = (u32)term_val(outbuf);
+      if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].dtype; return 1; }
     }
   }
-  u32 src_numel = (u32)(max_idx + 1);
-  size_t src_bytes = (size_t)src_numel * 4;
-  void  *raw = malloc(src_bytes);
-  d->backend->buf_read(d->buf_id, raw, src_bytes);
-  void *dst_host = malloc((size_t)d->view.numel * 4);
-  if (d->dtype == DT_F32) {
-    f32 *o = (f32 *)dst_host; f32 *s = (f32 *)raw;
-    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
-  } else {
-    i32 *o = (i32 *)dst_host; i32 *s = (i32 *)raw;
-    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
-  }
-  d->backend->buf_write(TENS[dst_tid].buf_id, dst_host, (size_t)d->view.numel * 4);
-  free(raw);
-  free(dst_host);
-  return term_new(0, TAG_TEN, d->dtype, dst_tid);
+  *out = DT_F32; return 1;
 }
 
-fn Term thvm_materialize(Term term) {
-  // Heap-walk materializer: scans reachable cells (through LAM / APP /
-  // REF / ALO / UOP etc.), propagates shapes through APP-LAM, and in-
-  // place rewrites UOP cells to UOP_KERNEL cells.  For UOPs that
-  // couldn't be kernelized (e.g. VAR child with no shape binding yet),
-  // the walker leaves them alone and materialize_expr picks up the
-  // slack on whatever's still reachable at the root afterwards.
-  //
-  // f1d-a: populate the realize-classifier table before the walk
-  // so f1d-b/c can consult it.  Output is read-only here; the
-  // toggle MATERIALIZE_USE_REALIZE_INFO gates whether downstream
-  // code paths actually use it.
-  realize_classify(term);
-  // f1d-d4b2: reset the per-realize dedup memo.  Heap locs may be
-  // reused after a pool_rollback between realizes, so a stale
-  // memo entry from the previous realize would alias an unrelated
-  // UOp to the wrong cached kernel.
-  materialize_memo_clear();
-  // f1d-d4b2d: reset stat counters too.  When THVM_MAT_STATS is set
-  // we dump a one-line summary at the end of this realize; the
-  // probe script greps these lines from a logfile.
-  u32 kernels_at_start = KERNELS_NEXT;
-  MAT_STATS_HELPER_OK = MAT_STATS_HELPER_BAIL = 0;
-  MAT_STATS_LEGACY_EXPR = MAT_STATS_LEGACY_WALK = 0;
-  MAT_STATS_MEMO_HITS = MAT_STATS_MEMO_STORES = 0;
+// Stub: view tests still call this directly to exercise the
+// movement-op kernelize path.  g2 will replace with the real
+// build_kernel entry point.  Returns the input unchanged for
+// now so callers compile; tests that depend on the side effects
+// will fail until g2 lands.
+fn Term materialize_uop_in_env(Term t, u32 env_id) { (void)env_id; return t; }
 
-  Term out;
-  if (term_tag(term) == TAG_TEN) out = materialize_root_alias(term);
-  else if (term_tag(term) == TAG_UOP && term_ext(term) == UOP_KERNEL) out = term;
-  else {
-    Term walked = materialize_walk(term);
-    if (term_tag(walked) == TAG_TEN) out = materialize_root_alias(walked);
-    else if (term_tag(walked) == TAG_UOP && term_ext(walked) == UOP_KERNEL) out = walked;
-    else out = materialize_expr(walked);
-  }
-  // After materialize_expr returns, if the root is a TAG_CTR we need
-  // to also alias-materialize each child that landed as a non-contig
-  // TEN view (mirror the root_alias path above for the unary case).
-  if (term_tag(out) == TAG_CTR) {
-    u32 n = term_ctr_n(out);
-    Term aliased[256];
-    u8  changed = 0;
-    if (n <= 256) {
-      for (u32 i = 0; i < n; i++) {
-        Term c = term_ctr_at(out, i);
-        Term a = (term_tag(c) == TAG_TEN) ? materialize_root_alias(c) : c;
-        if (a != c) changed = 1;
-        aliased[i] = a;
-      }
-      if (changed) out = term_new_ctr(term_ext(out), aliased, n);
-    }
-  }
-
-  const char *stats_path = getenv("THVM_MAT_STATS");
-  if (stats_path != NULL) {
-    FILE *f = fopen(stats_path, "a");
-    if (f != NULL) {
-      const char *label = MAT_STATS_LABEL[0] ? MAT_STATS_LABEL : "-";
-      fprintf(f,
-        "[mat label=%s toggle=%u] kernels=%u helper_ok=%llu helper_bail=%llu "
-        "legacy_expr=%llu legacy_walk=%llu memo_hits=%llu memo_stores=%llu\n",
-        label, MATERIALIZE_USE_REALIZE_INFO,
-        KERNELS_NEXT - kernels_at_start,
-        (unsigned long long)MAT_STATS_HELPER_OK,
-        (unsigned long long)MAT_STATS_HELPER_BAIL,
-        (unsigned long long)MAT_STATS_LEGACY_EXPR,
-        (unsigned long long)MAT_STATS_LEGACY_WALK,
-        (unsigned long long)MAT_STATS_MEMO_HITS,
-        (unsigned long long)MAT_STATS_MEMO_STORES);
-      fclose(f);
-    }
-  }
-  MAT_STATS_LABEL[0] = '\0';
-  return out;
-}
+fn Term thvm_materialize(Term term) { return term; }

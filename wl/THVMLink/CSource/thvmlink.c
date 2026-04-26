@@ -136,19 +136,6 @@ EXTERN_C DLLEXPORT int thvm_wl_extern_pin_count(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
-// Flip the f1d toggle from WL.  Returns the previous value
-// (1 if was on, 0 if was off).  Used by wl tests / probes
-// that want to exercise the inlined-kernel path.
-EXTERN_C DLLEXPORT int thvm_wl_set_use_realize_info(WolframLibraryData libData,
-                                                    mint argc, MArgument *args,
-                                                    MArgument res) {
-  (void)libData; (void)argc;
-  u8 prev = MATERIALIZE_USE_REALIZE_INFO;
-  MATERIALIZE_USE_REALIZE_INFO = (u8)(MArgument_getInteger(args[0]) ? 1 : 0);
-  MArgument_setInteger(res, (mint)prev);
-  return LIBRARY_NO_ERROR;
-}
-
 EXTERN_C DLLEXPORT int thvm_wl_term_tag(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc;
@@ -646,25 +633,6 @@ EXTERN_C DLLEXPORT int thvm_wl_term_ctr_at(WolframLibraryData libData, mint argc
   Term t = (Term)MArgument_getInteger(args[0]);
   mint i = MArgument_getInteger(args[1]);
   MArgument_setInteger(res, (mint)term_ctr_at(t, (u32)i));
-  return LIBRARY_NO_ERROR;
-}
-
-// Set the per-realize label for the THVM_MAT_STATS log.  Caller passes
-// a UTF8 string (e.g., "fwd_conv1", "grad_w3"); the next thvm_realize
-// dumps it on its summary line and clears the buffer.  No-op when
-// THVM_MAT_STATS isn't set.  Returns 0.
-EXTERN_C DLLEXPORT int thvm_wl_mat_stats_label(WolframLibraryData libData, mint argc,
-                                                MArgument *args, MArgument res) {
-  (void)argc;
-  char *s = MArgument_getUTF8String(args[0]);
-  if (s != NULL) {
-    size_t n = strlen(s);
-    if (n >= sizeof(MAT_STATS_LABEL)) n = sizeof(MAT_STATS_LABEL) - 1;
-    memcpy(MAT_STATS_LABEL, s, n);
-    MAT_STATS_LABEL[n] = '\0';
-    libData->UTF8String_disown(s);
-  }
-  MArgument_setInteger(res, 0);
   return LIBRARY_NO_ERROR;
 }
 

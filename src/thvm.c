@@ -34,7 +34,6 @@ static void init_default_ctx_scalars(TContext *ctx) {
     ctx->kernels_next     = 1;   // 0 reserved
     ctx->book_next        = 1;   // 0 reserved
     ctx->alo_states_next  = 1;   // 0 reserved
-    ctx->shape_env_next   = 1;   // 0 reserved
     ctx->cpu_bufs_next    = 1;   // 0 reserved
     ctx->cpu_freelist_len = 0;
 }
@@ -169,14 +168,9 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // Produces the scheduled DAG of UOP_KERNEL terms that
 // interact_kernel fires bottom-up.
 #include "schedule/kernel_alloc.c"
-#include "schedule/shape_env.c"
-#include "schedule/materialize_memo.c"
 #include "schedule/materialize.c"
-#include "schedule/materialize_in_env.c"
-#include "schedule/walk.c"
 #include "schedule/consumer_count.c"
 #include "schedule/realize_classify.c"
-#include "schedule/materialize_inlined.c"
 
 // === interact/ ===
 // Interaction rules.  uop_kernel.c needs the schedule pipeline above
@@ -281,7 +275,6 @@ static void init_ctx_arrays(TContext *ctx) {
     ctx->kernels        = (KernelEntry *)calloc(KERNELS_CAP, sizeof(KernelEntry));
     ctx->book_heap      = (Term *)calloc(BOOK_CAP,     sizeof(Term));
     ctx->alo_states     = (AloState *)calloc(ALO_STATE_CAP, sizeof(AloState));
-    ctx->shape_env      = (ShapeBinding *)calloc(SHAPE_ENV_CAP, sizeof(ShapeBinding));
     ctx->cpu_bufs       = (CpuBuf *)calloc(CPU_BUFS_CAP, sizeof(CpuBuf));
     init_default_ctx_scalars(ctx);
     memset(ctx->defs,             0, sizeof(ctx->defs));
@@ -320,7 +313,6 @@ void thvm_free(void) {
   free(KERNELS);         KERNELS         = NULL;
   free(BOOK_HEAP);       BOOK_HEAP       = NULL;
   free(ALO_STATES);      ALO_STATES      = NULL;
-  free(SHAPE_ENV);       SHAPE_ENV       = NULL;
   free(CPU_BUFS);        CPU_BUFS        = NULL;
   HEAP_NEXT       = 0;
   WNF_S_POS       = 0;
@@ -330,7 +322,6 @@ void thvm_free(void) {
   KERNELS_NEXT    = 1;
   BOOK_NEXT       = 1;
   ALO_STATES_NEXT = 1;
-  SHAPE_ENV_NEXT  = 1;
   CPU_BUFS_NEXT   = 1;
   CPU_FREELIST_LEN = 0;
   memset(DEFS,             0, sizeof(((TContext *)0)->defs));
@@ -390,7 +381,6 @@ void thvm_context_destroy(u32 slot) {
     free(ctx->kernels);
     free(ctx->book_heap);
     free(ctx->alo_states);
-    free(ctx->shape_env);
     free(ctx->cpu_bufs);
     CURRENT_CTX = prev;
     if (CURRENT_CTX == ctx) CURRENT_CTX = CONTEXTS[0];

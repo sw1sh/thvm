@@ -32,11 +32,6 @@ typedef struct {
 static UOpInfo REALIZE_INFO    [REALIZE_INFO_CAP];
 static u32     REALIZE_INFO_LEN = 0;
 
-// f1d toggle.  When 0 (default), the materializer ignores
-// realize_is_realized and behaves as before (per-UOp kernels).
-// f1d-b/c flip it on once their selective code paths land.
-u8 MATERIALIZE_USE_REALIZE_INFO = 0;
-
 fn void realize_info_clear(void) {
   REALIZE_INFO_LEN = 0;
 }

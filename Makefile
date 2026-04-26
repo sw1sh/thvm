@@ -17,7 +17,6 @@ TESTS := \
   $(BIN)/test_dup_lam \
   $(BIN)/test_tensor \
   $(BIN)/test_uop \
-  $(BIN)/test_materialize \
   $(BIN)/test_grad \
   $(BIN)/test_ref \
   $(BIN)/test_mat_op2 \
@@ -25,7 +24,6 @@ TESTS := \
   $(BIN)/test_redex \
   $(BIN)/test_metal_stub \
   $(BIN)/test_expand_axis \
-  $(BIN)/test_splice \
   $(BIN)/test_view_strided \
   $(BIN)/test_buf_pool \
   $(BIN)/test_consumer_count \
@@ -41,8 +39,6 @@ TESTS := \
   $(BIN)/test_gc_mark_term \
   $(BIN)/test_extern_pin \
   $(BIN)/test_realize_classify \
-  $(BIN)/test_materialize_inlined \
-  $(BIN)/test_use_realize \
   $(BIN)/test_collapse \
   $(BIN)/test_eql \
   $(BIN)/test_dup_num \

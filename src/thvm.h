@@ -335,18 +335,6 @@ typedef struct {
     u64 new_loc;    // freshly allocated dyn-heap loc that replaces it
 } AloState;
 
-// === ShapeBinding (used by schedule/shape_env.c) ===
-// Threaded through the materialize walk so a deeper VAR(binder_loc)
-// can be kernelised with a known output shape.  Linked-list parent
-// chain; ID 0 = empty environment.  Embedded inline in TContext so
-// each context has its own non-overlapping environment.
-#define SHAPE_ENV_CAP (1ULL << 14)
-typedef struct {
-    u32   parent;
-    u64   var_loc;
-    Shape shape;
-} ShapeBinding;
-
 // === CpuBuf (used by backend/cpu/) ===
 // Parallel table to TENS[]: each TenDesc.buf_id indexes into ctx->cpu_bufs.
 // Multiple TenDescs can share a buf_id (view aliasing); refcount controls
@@ -387,7 +375,6 @@ typedef struct TContext {
     KernelEntry*kernels;
     Term       *book_heap;
     AloState   *alo_states;
-    ShapeBinding *shape_env;             // materialize-pass arena
     CpuBuf     *cpu_bufs;                // CPU backend buf table
 
     /* Inline small arrays (per-context, zero-init in BSS). */
@@ -411,7 +398,6 @@ typedef struct TContext {
     u32 kernels_next;
     u64 book_next;
     u32 alo_states_next;
-    u32 shape_env_next;
     u64 cpu_bufs_next;
     u32 cpu_freelist_len;
 } TContext;
@@ -446,8 +432,6 @@ extern TContext *CONTEXTS[CONTEXTS_CAP];
 #define ALO_STATES          (CURRENT_CTX->alo_states)
 #define ALO_STATES_NEXT     (CURRENT_CTX->alo_states_next)
 #define BOOK_REF_VISITED    (CURRENT_CTX->book_ref_visited)
-#define SHAPE_ENV           (CURRENT_CTX->shape_env)
-#define SHAPE_ENV_NEXT      (CURRENT_CTX->shape_env_next)
 #define CPU_BUFS            (CURRENT_CTX->cpu_bufs)
 #define CPU_BUFS_NEXT       (CURRENT_CTX->cpu_bufs_next)
 #define CPU_FREELIST        (CURRENT_CTX->cpu_freelist)
@@ -578,34 +562,6 @@ Term materialize_walk(Term root);
 fn void realize_classify(Term root);
 fn u8   realize_is_realized(Term uop_term);
 fn u32  realize_consumer_count(Term uop_term);
-
-// f1d toggle: 0 = legacy behavior (per-UOp kernels, no
-// fusion); 1 = consult realize_is_realized to inline
-// un-realized upstream compute into the consumer's program.
-// Default 0; flipped on once f1d-b/c land.
-extern u8 MATERIALIZE_USE_REALIZE_INFO;
-
-// f1d-b1: emit ONE kernel for a realized UOp that inlines its
-// un-realized elementwise upstream compute.  Returns 0 if the
-// chain contains a non-elementwise un-realized UOp (caller
-// falls back to legacy per-UOp kernel emission).
-fn Term materialize_kernel_inlined(Term realized_uop_term);
-
-// True for elementwise + UOP_CONST (the ops the inlined helper
-// can absorb into a parent kernel's program).  Movement ops
-// (RESHAPE/EXPAND/SHRINK/PERMUTE/PAD/FLIP) return false so the
-// f1d hook in materialize_uop_in_env falls them through to the
-// legacy view-only alias / kernel emit path.
-fn u8 inline_is_inlinable(u8 op);
-
-// f1d-d4b2: per-realize dedup memo for the materialize entry
-// points.  Without it, shared UOps in grad chains emit one
-// kernel per reaching path; with it, each UOp loc maps to a
-// single emitted Term (UOP_KERNEL or TAG_TEN) for the duration
-// of one thvm_materialize call.  See src/schedule/materialize_memo.c.
-fn void materialize_memo_clear (void);
-fn Term materialize_memo_lookup(u64 loc);
-fn void materialize_memo_store (u64 loc, Term t);
 
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.

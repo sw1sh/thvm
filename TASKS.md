@@ -341,3 +341,47 @@ progress -- the fundamentals (forward chain fusion, lifetime-aware
 peak claim, gantt readability) are now investigated; next moves
 are either harvesting the forward win via TRealizeFused[] or
 attacking graph-structural memory wins.
+
+---
+
+# Round 3 (Tinygrad-style fusion: purge + clean rewrite)
+
+Per `~/.claude/plans/magical-wondering-biscuit.md`.  The dual-path
+round-1/2 scaffolding hit 8 kernels for a single Linear forward
+(should be 1-2 in tinygrad terms).  Wrong shape, not just buggy.
+Purge wholesale, rewrite the scheduler from scratch tinygrad-style.
+**Kernel count is the pass/fail signal**: any rewrite that
+overshoots gets reverted, not patched.
+
+Expected ceilings:
+- Linear + softmax + CE loss: 2 kernels forward, 4 with backward.
+- LeNet inference: 5-7 kernels.
+- LeNet train step: 12-15 kernels total.
+
+- [x] **g1: PURGE**.  Delete the round-1/2 fusion scaffolding.  Stub
+      `thvm_materialize` to a no-op + keep just the leaf utilities
+      (`uop_arity`, `uop_is_*_elementwise`, `term_shape_in`,
+      `term_dtype_in`, `materialize_uop_in_env` no-op).  Delete the
+      `MATERIALIZE_USE_REALIZE_INFO` toggle, `MAT_STATS_*` counters,
+      `TMatStatsLabel`, `TSetUseRealizeInfo`, `ShapeBinding`/
+      `SHAPE_ENV` from TContext.  Delete the 4 tests that targeted
+      the deleted scaffolding.  `make test` fails 99/166 (expected;
+      most surviving tests call `thvm_materialize`).  Net deletion:
+      ~2050 LOC.
+
+- [ ] **g2: rewrite materialize.c with the tinygrad scheduler**.
+      ~250 LOC.  One pass: `unroll_grads` -> `realize_classify` ->
+      topo-sort boundaries -> `build_kernel` per boundary.  Movement
+      ops (RESHAPE/EXPAND/PERMUTE/PAD/SHRINK/FLIP) rewrite the View
+      and pass through; never become kernels.  Add
+      `tests/test_materialize_v2.c`: assert Linear=1 kernel,
+      softmax=2 kernels, Linear+softmax=3 kernels.  Make `make test`
+      green.  Do NOT yet run wl-test.
+
+- [ ] **g3: WL surface fixes + fusion_count.wlt**.  Patch any WL
+      bridge/surface that breaks (likely `TRealize` and
+      `TKernelCount`).  Add `wl/THVMLink/Tests/fusion_count.wlt`
+      asserting linear-train forward+backward == 4 kernels and
+      LeNet train step <= 15 kernels.  Make `timeout 180 make
+      wl-test` green.  If counts overshoot: revert g3, revert g2,
+      replan g2 from scratch (do NOT patch in place).

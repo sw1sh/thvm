@@ -6,6 +6,31 @@ dated section.
 
 ## Unreleased
 
+### Removed: rounds 1-2 fusion scaffolding (g1)
+
+Purged the dual-path fusion code that gated OFF in production:
+
+- Deleted `src/schedule/{materialize_inlined,materialize_memo,materialize_in_env,walk,shape_env}.c` (~1430 LOC).
+- Reduced `src/schedule/materialize.c` from 666 LOC to a 116-LOC stub
+  keeping just `uop_arity`, `uop_is_unary_elementwise`,
+  `uop_is_binary_elementwise`, `term_shape_in`, `term_dtype_in`, and
+  no-op `thvm_materialize` / `materialize_uop_in_env` so the build
+  links until the g2 rewrite lands.
+- Removed `MATERIALIZE_USE_REALIZE_INFO` toggle (global + extern +
+  WL bridge `thvm_wl_set_use_realize_info` + `TSetUseRealizeInfo`).
+- Removed `MAT_STATS_*` diagnostic counters + `MAT_STATS_LABEL` +
+  `THVM_MAT_STATS` env hook + WL bridge `thvm_wl_mat_stats_label` +
+  `TMatStatsLabel`.
+- Removed `ShapeBinding` + `SHAPE_ENV` from TContext.
+- Deleted `tests/{test_materialize,test_materialize_inlined,test_splice,test_use_realize}.c`
+  and `wl/THVMLink/Tests/use_realize.wlt` (all targeted the deleted
+  scaffolding).
+
+`make test` fails 99/166 because most surviving tests call
+`thvm_materialize` / `materialize_uop_in_env` and now get a no-op.
+Per the approved plan: this is the expected post-purge state;
+the green count comes back as the g2 rewrite + g3 WL fixups land.
+
 ### Added: Wolfram-axiom bench-twee comparison (stage 10c)
 
 `docs/plans/corpus_expansion_findings.md` gains a "Stage 10c
