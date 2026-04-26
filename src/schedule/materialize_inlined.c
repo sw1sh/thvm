@@ -219,12 +219,18 @@ fn Term materialize_kernel_inlined(Term realized_uop_term) {
     ke->n_ops = n_inputs + n_compute;
   }
   // Output shape: pick from the input matching the root numel.
+  // NOTE: `root_p` was captured BEFORE the LOAD-prefix shift
+  // above, so after the shift it points at a SHIFTED op (CONST
+  // or another inlined op), not the actual root.  Use the local
+  // `out_numel` and `ke->output_numel` (both set before the
+  // shift) instead -- these hold the right values regardless of
+  // the shift.
   ke->output_shape.ndim    = 1;
-  ke->output_shape.dims[0] = root_p->numel;
+  ke->output_shape.dims[0] = ke->output_numel;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
     if (tid != 0 && tid < TENS_NEXT
-        && TENS[tid].view.numel == root_p->numel) {
+        && TENS[tid].view.numel == ke->output_numel) {
       ke->output_shape = TENS[tid].view.shape;
       break;
     }

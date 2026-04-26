@@ -4715,7 +4715,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
        child alongside a CONST.  d4b1b's "test opt-out"
        mechanism is the wrong fix; replaced with: -->
 
-  - [ ] **f1d-d4b1b1: investigate + fix the broadcast bug
+  - [x] **f1d-d4b1b1: investigate + fix the broadcast bug
         in helper-built MUL kernels**.  With toggle ON +
         d4b1a, gradient tests fail with patterns like
         `grad/mul-product-rule got {4,4,4} expected {4,5,6}`
@@ -4736,6 +4736,34 @@ implemented + tested (f1a) but never invoked by the pipeline.
         + tensors.wlt failures also resolved (probably the
         same root cause); 166 C + 292 WL green.  ~50-100
         LOC + targeted regression test.
+        <!-- DONE: root cause was a use-after-shift in
+             materialize_kernel_inlined's output_shape
+             inference.  `root_p = &ke->program[last]` was
+             captured BEFORE the d4b1a LOAD-prefix shift;
+             after the shift, that pointer aliases a
+             DIFFERENT op (the shifted CONST, not the
+             actual MUL root), so root_p->numel returned 1
+             instead of 3 -- the output buffer got allocated
+             at numel=1, and only the first element of the
+             result was populated.  Fixed by reading
+             ke->output_numel (set BEFORE the shift) instead
+             of dereferencing the stale root_p pointer.
+
+             Direct probe: MUL(b={4,5,6}, CONST(1)) under
+             toggle ON now returns {4,5,6} (was {4.}).
+             Per-test verification:
+                 cmpeq.wlt:         3/0 (was 2/1)
+                 grad.wlt:         38/0 (was 32/6)
+                 tensor_numeric:   10/0 (was 7/3)
+                 tensors.wlt:      14/1 (was 14/1; remaining
+                     failure is "TMaterialize/compound-
+                     two-kernels" which expects 3 kernels but
+                     toggle ON fuses to 2 -- this is
+                     STRUCTURAL, d4b1b2's job).
+
+             166 C + 292 WL green with default OFF
+             (no behavior change). -->
+
 
   - [ ] **f1d-d4b1b2: remaining structural opt-outs**.
         After d4b1b1 fixes correctness, re-audit which
