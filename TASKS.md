@@ -4709,6 +4709,37 @@ implemented + tested (f1a) but never invoked by the pipeline.
              toggle) -- 166 C + 292 WL stay green.  Landing
              the partial fix; d4b1-bis (next fire) targets
              the remaining LeNet overhead. -->
+        <!-- attempt 2: cap exhaustion is SIZING, not
+             duplication.  Bumped KERNELS_CAP from 4K to
+             32K with toggle ON: cap exhaustion gone.  But
+             a different cohort of WL tests now fail with
+             toggle ON: structural assertions that expect
+             legacy kernel layouts -- specifically LOAD
+             prefix in program[] and exact n_ops counts.
+             Tests like
+             "uop-load/linearizer-prepends-load-per-input"
+             expect 2 LOAD ops + 1 ADD; helper-built kernels
+             have no LOAD prefix, just the inlined ops.
+             Plus "TMaterialize/dedups-duplicate-inputs"
+             fails -- maybe my helper's input dedup differs
+             from legacy.
+
+             So d4b1's stated acceptance ("WL test sweep
+             stays under 4K cap on heaviest tests") is the
+             WRONG acceptance.  The real blockers are:
+             (a) helper kernels need LOAD prefix +
+                 metadata to match legacy shape, AND
+             (b) input dedup must mirror legacy's behavior,
+             OR (c) those structural tests need
+             toggle-OFF opt-outs (like d2 did).
+
+             d4b1 left [ ] for one more attempt that
+             addresses these.  Or re-decompose into:
+                f1d-d4b1a: emit LOAD prefix in helper-built
+                           kernels for structural parity.
+                f1d-d4b1b: opt structural tests out of
+                           toggle ON (extend d2's pattern).
+                f1d-d4b1c: cap bump + actually flip default. -->
 
 
   - [ ] **f1d-d4b2: deliver the fusion gain**.  After
