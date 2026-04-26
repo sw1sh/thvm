@@ -51,7 +51,8 @@ TESTS := \
   $(BIN)/test_inc \
   $(BIN)/test_ctr \
   $(BIN)/test_when \
-  $(BIN)/test_kbo
+  $(BIN)/test_kbo \
+  $(BIN)/test_rewrite
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.

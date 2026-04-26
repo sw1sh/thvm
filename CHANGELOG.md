@@ -6,6 +6,38 @@ dated section.
 
 ## Unreleased
 
+### Added: equational rewriter -- stage 3 (one-shot, top-position only)
+
+`src/rewrite/_.c` exports a small C-side equational rewriter for
+TAG_CTR + TAG_FVR terms:
+
+- `thvm_match(pattern, term, subst)` -- one-way matching with
+  linearity check (a variable seen multiple times must bind to
+  the same sub-term, verified via `kbo_eq`).
+- `thvm_subst_apply(t, subst)` -- substitution-with-rebuild: TAG_FVR
+  becomes its bound sub-term; TAG_CTR is rebuilt with substituted
+  children; everything else passes through.
+- `thvm_rewrite_step(t, lhs, rhs, n_rules)` -- try each rule in
+  order at the *top* position; first match wins, RHS returned with
+  substitution applied.
+- `thvm_rewrite_normalize(t, lhs, rhs, n_rules, step_cap)` -- iterate
+  rewrite_step to a fixpoint or until step_cap exhausts.
+
+Recursive descent into sub-terms is not yet wired -- that's part of
+the saturation loop in stage 5.
+
+The headline demo from `docs/plans/waldmeister_ic_atp.md` sec.5
+runs in `tests/test_rewrite.c`: under the full group axioms
+
+  f(x, e)        = x
+  f(x, i(x))     = e
+  f(f(x,y), z)   = f(x, f(y, z))
+
+`f(a, e)` normalizes to `a` (one rewrite_step fires; the second
+step is a fixpoint).  Plus 8 supporting cases for matching,
+non-linear consistency, substitution, no-applicable-rule, and the
+inverse rule firing.
+
 ### Added: TAG_FVR + thvm_kbo -- stage 2 (term encoding + KBO ordering)
 
 `TAG_FVR = 22` is an atomic first-order variable: `EXT = var_id`,

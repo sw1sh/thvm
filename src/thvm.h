@@ -707,6 +707,27 @@ typedef struct {
 
 fn KboCmp thvm_kbo(Term s, Term t, const KboConfig *cfg);
 
+// === rewrite/ ===
+// One-shot equational rewriter on TAG_CTR + TAG_FVR (stage 3 of
+// docs/plans/waldmeister_ic_atp.md).  No recursive descent into
+// sub-terms yet -- rules match the top position only.
+#define REWRITE_MAX_VAR    64
+#define REWRITE_MAX_ARITY  16
+
+typedef struct {
+  Term bindings[REWRITE_MAX_VAR];   // 0 = unbound (0 isn't a valid Term)
+} RewriteSubst;
+
+// Returns 1 on successful match, populating subst's bindings with the
+// matched sub-terms.  Variables seen multiple times must match the
+// same sub-term (linear matching).
+fn u8   thvm_match            (Term pattern, Term term, RewriteSubst *subst);
+fn Term thvm_subst_apply      (Term term, const RewriteSubst *subst);
+fn Term thvm_rewrite_step     (Term t, const Term *lhs, const Term *rhs,
+                               u32 n_rules);
+fn Term thvm_rewrite_normalize(Term t, const Term *lhs, const Term *rhs,
+                               u32 n_rules, u32 step_cap);
+
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction
 // and returns the result Term (0 if validation fails -- the input
