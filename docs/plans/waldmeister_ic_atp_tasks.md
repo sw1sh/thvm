@@ -308,6 +308,21 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       / `Grundzusammenfuehrung.c` -- "ground union" criterion that
       drops trivially-joinable CPs)
 - [ ] 7.2 connectedness redundancy (Bachmair-Dershowitz-Plaisted)
+  - [ ] 7.2a design memo `docs/plans/connectedness_design.md`:
+        survey BDP's "connected below c" criterion vs the
+        trivial-joinability filter from 7.1.  Pick a concrete
+        sub-criterion to implement that adds *non-overlapping*
+        pruning on top of 7.1.  Candidates: (1) subsumption-
+        connectedness ("one step from s lands at t under any rule
+        in R"), (2) rule-pair-disjoint connectedness ("normalize
+        with R \ {R_a, R_b} -- the rules that birthed the CP"),
+        (3) BDP's literal "joinable using rules whose max-side is
+        strictly smaller than max(s, t)".  Document why the
+        chosen criterion is worth implementing given that 7.1
+        already drops fully-joinable CPs.
+  - [ ] 7.2b implement the chosen criterion as a new helper in
+        `src/atp/_.c` with stat counter + tests.  Expected
+        scope: ~50 LOC implementation + ~30 LOC tests.
 - [ ] 7.3 subsumption pruning on R and the CP queue
 - [ ] 7.4 benchmark vs Twee on a handful of small TPTP-UEQ problems
       (`GRP`, `RNG` divisions); record wall-clock + saturation
