@@ -85,7 +85,7 @@ endif
 # runtime change retriggers a rebuild.
 SRC := $(shell find src -name '*.c' -o -name '*.h') tests/test.h
 
-.PHONY: all test clean wl wl-test wl-examples
+.PHONY: all test clean wl wl-test wl-examples bench-twee
 all: $(TESTS)
 
 # === Wolfram Language paclet (LibraryLink bridge) ===
@@ -188,3 +188,16 @@ test: $(TESTS)
 
 clean:
 	rm -rf $(BIN)
+
+# === Twee comparison bench (stage 7.4d) ============================
+# Requires `twee` on PATH or at ~/.cabal/bin/twee (install via
+# `cabal install twee`).  Walks tests/data/atp/*.pr, converts each
+# to TPTP-CNF, runs Twee with the same step budget our ATP uses
+# (256), writes build/bench-twee.csv.  Not part of `make test`
+# because Twee is an external dependency.
+$(BUILD)/bench_twee: tools/bench_twee.c $(SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $<
+
+bench-twee: $(BUILD)/bench_twee
+	$(BUILD)/bench_twee
+	@echo "Wrote build/bench-twee.csv"

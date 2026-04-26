@@ -345,7 +345,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         FILTER in `atp_push_cps_traced` (drops the CP) and
         bump `n_cps_dropped_queue_subsumed`.  Expected scope:
         ~40 LOC + ~50 LOC tests.
-- [ ] 7.4 benchmark vs Twee on a handful of small TPTP-UEQ problems
+- [x] 7.4 benchmark vs Twee on a handful of small TPTP-UEQ problems
       (`GRP`, `RNG` divisions); record wall-clock + saturation
       step count in `docs/bench-atp.md`
   - [x] 7.4a `docs/bench-atp.md` skeleton: methodology section
@@ -372,7 +372,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         measurement, not a regression).  Append the CSV
         contents into `docs/bench-atp.md` under a "Results --
         thvm" heading.
-  - [ ] 7.4d Twee comparison: install Twee (Haskell, via
+  - [x] 7.4d Twee comparison: install Twee (Haskell, via
         `cabal install twee` or `brew install twee`), convert
         each `.pr` in `tests/data/atp/` to TPTP-UEQ format
         (small adapter -- our `.pr` is already close), run

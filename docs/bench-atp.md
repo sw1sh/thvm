@@ -95,11 +95,44 @@ Observations:
 
 ## Results -- Twee
 
-*Pending stage 7.4d. Methodology: install Twee
-(`cabal install twee` or `brew install twee`), convert each
-`.pr` into TPTP-UEQ format (small adapter -- `.pr` is already
-close), and run with a matching `--max-cp-depth` or step budget.
-Capture `--print-summary` output for the comparison table.*
+Twee installed via `cabal install twee` (twee-2.6.1, see
+release notes for upstream).  `tools/bench_twee.c` parses each
+`.pr` via `wald_parse_file`, emits TPTP-CNF
+(`cnf(eqn<i>, axiom, lhs = rhs).` for axioms,
+`cnf(goal, negated_conjecture, lhs != rhs).` for the goal)
+into `build/bench_twee_<i>.tptp`, and runs
+`twee --quiet --no-proof --max-cps 256 <tptp>` matching our own
+budget.  Run via `make bench-twee` (or
+`build/bench_twee` directly); raw CSV in
+`build/bench-twee.csv`.
+
+Last refresh, darwin/arm64, twee 2.6.1, 2026-04-26:
+
+| File | Twee Status | Twee wall (ms) | thvm Status | thvm wall (ms) |
+|---|---|---|---|---|
+| `tests/data/atp/group_commutative_inverse.pr` | PROVED | 26.1 | TIMEOUT | 132.7 |
+| `tests/data/atp/group_right_inverse_to_e.pr` | PROVED | 26.7 | PROVED | 0.006 |
+| `tests/data/atp/idempotent_nested.pr` | PROVED | 24.2 | PROVED | 0.001 |
+| `tests/data/atp/monoid_right_id.pr` | PROVED | 30.0 | PROVED | 0.001 |
+
+Observations:
+
+- Twee proves all four problems within 30 ms each, including
+  the commutativity-of-inverse goal that times out for our
+  ATP at 256 steps.  This isolates the gap: our saturation
+  needs LPO (stage 8.5) and a more aggressive heuristic to
+  match Twee's behavior on this problem family.
+- For the easy goals (direct rewrite), our ATP is ~3-4 orders
+  of magnitude faster wall-clock because we close immediately
+  via the goal-rewrite check before any saturation work.  Twee
+  pays its 25 ms startup overhead (process spawn, TPTP parse,
+  initial CP queue setup) on every problem.  This makes
+  short-goal latency a dimension where the simpler IC-native
+  approach wins; long-tail saturation throughput is the
+  dimension where Twee's 25+ years of engineering wins.
+- TPTP "Unsatisfiable" maps to our PROVED (the negated
+  conjecture combined with axioms is unsatisfiable iff the
+  conjecture is provable).
 
 ## Open questions
 

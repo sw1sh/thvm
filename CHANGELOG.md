@@ -6,6 +6,46 @@ dated section.
 
 ## Unreleased
 
+### Added: Twee comparison harness `tools/bench_twee.c` (stage 7.4d)
+
+`tools/bench_twee.c` parses each `.pr` in `tests/data/atp/` via
+`wald_parse_file`, emits a TPTP-CNF representation
+(`cnf(eqn<i>, axiom, lhs = rhs).` for axioms,
+`cnf(goal, negated_conjecture, lhs != rhs).` for the goal) into
+`build/bench_twee_<i>.tptp`, then invokes
+`twee --quiet --no-proof --max-cps 256 <tptp>` matching our own
+budget.  Wall-clock + Twee's status are written to
+`build/bench-twee.csv`.
+
+`make bench-twee` builds and runs the comparison; not part of
+`make test` (Twee is an external dependency, install via
+`cabal install twee`).
+
+Twee 2.6.1 was successfully installed via `cabal install twee`
+on this host (darwin/arm64 + GHC 9.12.1; cabal warned about
+GHC version but compile succeeded for all 20 transitive
+dependencies including `twee-lib`, `jukebox`, `minisat`).
+
+First comparison numbers, 2026-04-26:
+
+| File | Twee | thvm |
+|---|---|---|
+| `group_commutative_inverse.pr` | PROVED 26.1 ms | TIMEOUT 132.7 ms |
+| `group_right_inverse_to_e.pr` | PROVED 26.7 ms | PROVED 0.006 ms |
+| `idempotent_nested.pr` | PROVED 24.2 ms | PROVED 0.001 ms |
+| `monoid_right_id.pr` | PROVED 30.0 ms | PROVED 0.001 ms |
+
+Twee proves all four; we prove three out of four.  The harder
+group-commutativity goal isolates a real gap (LPO + better
+heuristic).  For the easy goals our IC-native ATP wins on
+latency by 3-4 orders of magnitude (no process spawn, no TPTP
+parse, no warm-up), but Twee wins on hard-saturation
+throughput.  `docs/bench-atp.md` records the full table and
+observations.
+
+Stage 7.4 complete; stage 7 (Twee-class redundancy criteria
+and benchmarking) closed.
+
 ### Added: ATP bench harness `test_bench_atp` (stage 7.4c)
 
 `tests/test_bench_atp.c` walks `tests/data/atp/*.pr`, runs our
