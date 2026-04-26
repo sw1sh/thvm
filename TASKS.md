@@ -115,17 +115,19 @@ Real kernel-count + memory wins need either:
       No DUP-CTR / ERA-CTR yet; land when an IC consumer
       needs them.  166 C + 292 WL tests green.
 
-- [ ] **k0b: multi-target uop_grad constructor + heap layout**.
-      Extend `uop_grad` (src/uop/grad.c) to accept a list of
-      target Terms.  New heap layout: `[y, gy, n, x_1, ...,
-      x_n]`.  Single-target compat: existing `uop_grad(y, gy,
-      x)` becomes a wrapper around `uop_grad_multi(y, gy,
-      {x}, 1)`.  Walk / realize_classify must NOT walk the
-      variable tail (already gated on uop_arity returning 0
-      for UOP_GRAD; verify and test).  Tests add the new
-      layout to test_grad.c.  Out of scope: any
-      interact_grad change; bailing on n>1 is fine for now.
-      ~40 LOC + ~20 LOC tests.
+- [x] **k0b: multi-target uop_grad constructor + heap layout**.
+      `uop_grad_multi(y, gy, targets, n)` builds the new layout
+      `[y, gy, NUM(n), x_1, ..., x_n]`; `uop_grad(y, gy, x)`
+      is a thin wrapper with n=1.  Accessors `uop_grad_n` /
+      `uop_grad_target` in src/uop/grad.c.  interact_grad now
+      reads target from loc+3 and bails on n>1 (k0c will fire).
+      Variable-arity readers updated (wnf/redex.c term_arity
+      reads NUM(n) from heap; book/from_dynamic.c dyn_arity
+      and alo/realize.c alo_node_arity take `val` to read NUM
+      via heap_read/book_read so book templates with embedded
+      UOP_GRAD -- TOptim's recursive lambdas -- clone correctly).
+      tests/test_grad.c adds 3 k0b checks (75 total).  166 C +
+      292 WL tests green.
 
 - [ ] **k0c: interact_grad multi-target chain rule**.
       Extend interact_grad (src/interact/uop_grad.c) to

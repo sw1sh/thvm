@@ -53,7 +53,14 @@ fn Term interact_grad(Term grad_term) {
   u64  loc    = term_val(grad_term);
   Term y      = heap_read(loc + 0);
   Term gy     = heap_read(loc + 1);
-  Term target = heap_read(loc + 2);
+  // k0b: heap layout is [y, gy, NUM(n), x_1, ..., x_n].  k0c will
+  // implement the n>1 multi-target chain rule (one shared cotangent
+  // walk emitting a TAG_CTR of N grads); for now bail on n>1 so the
+  // term surfaces as WHNF and the multi-target consumer waits.
+  Term n_cell = heap_read(loc + 2);
+  u32  n      = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
+  if (n != 1) return grad_term;
+  Term target = heap_read(loc + 3);
 
   // Lazy outermost-layer resolution -- follows VAR-SUB chains and
   // ALO unfoldings but does NOT fire materialize / kernel / grad.

@@ -18,8 +18,10 @@
 // wnf later enters that ALO.
 
 // Returns the dyn arity for a fixed-arity tag/opcode (matches the
-// table used in book/from_dynamic.c).
-static u32 alo_node_arity(u8 tag, u32 ext) {
+// table used in book/from_dynamic.c).  UOP_GRAD's tail is variable
+// (k0b: heap = [y, gy, NUM(n), x_1..x_n]) so we read n from the
+// book cell at val+2.
+static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
   switch (tag) {
     case TAG_APP: return 2;
     case TAG_SUP: return 2;
@@ -33,7 +35,11 @@ static u32 alo_node_arity(u8 tag, u32 ext) {
         case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         case UOP_REDUCE:                                   return 3;
-        case UOP_GRAD:                                     return 3;
+        case UOP_GRAD: {
+          Term n_cell = book_read(val + 2);
+          u32  n = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
+          return 3 + n;
+        }
         case UOP_LOAD:                                     return 1;
         case UOP_KERNEL:                                   return 2;
         default:                                           return 0;
@@ -84,7 +90,7 @@ Term alo_realize(Term book_term, u32 state_id) {
     }
 
     default: {
-      u32 ar = alo_node_arity(tag, ext);
+      u32 ar = alo_node_arity(tag, ext, val);
       if (ar == 0) return book_term;       // unsupported tag: leave verbatim
       u64 new_loc = heap_alloc(ar);
       for (u32 i = 0; i < ar; i++) {

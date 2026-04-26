@@ -6,6 +6,22 @@ dated section.
 
 ## Unreleased
 
+### Changed: UOP_GRAD heap layout is now multi-target (k0b)
+
+`uop_grad` heap is now `[y, gy, NUM(n), x_1, ..., x_n]` (was
+`[y, gy, target]`).  New `uop_grad_multi(y, gy, targets, n)` is
+the primary constructor; the legacy unary `uop_grad(y, gy, x)`
+is a thin wrapper with `n=1`.  `interact_grad` bails on `n>1`
+for now -- the multi-target chain rule lands in k0c.
+
+The change cascades through every site that knows GRAD's heap
+arity: `wnf/redex.c` `term_arity` reads `NUM(n)` to compute
+`3+n`; `alo/realize.c` `alo_node_arity` and
+`book/from_dynamic.c` `dyn_arity` take a `val` argument so they
+can `book_read` / `heap_read` the count when cloning UOP_GRAD
+templates (TOptim's recursive lambdas embed it).  Accessors
+`uop_grad_n` / `uop_grad_target` provide read-side parity.
+
 ### Added: TAG_WHEN boolean filter -- closes the stage-1 e2e demo
 
 `TAG_WHEN = 21` is the IC-side primitive for "collapse to the

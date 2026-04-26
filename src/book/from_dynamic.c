@@ -38,7 +38,7 @@ static u64 remap_lookup_or_alloc(BookRemap *map, u32 *map_pos,
   return b;
 }
 
-static u32 dyn_arity(u8 tag, u32 ext) {
+static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
   switch (tag) {
     case TAG_LAM: return 1;
     case TAG_APP: return 2;
@@ -55,7 +55,15 @@ static u32 dyn_arity(u8 tag, u32 ext) {
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         case UOP_LOAD:                                     return 1;
         case UOP_REDUCE:                                   return 3;
-        case UOP_GRAD:                                     return 3;
+        // k0b: UOP_GRAD heap is [y, gy, NUM(n), x_1..x_n] -- variable
+        // tail.  Read NUM(n) at val+2 to compute 3+n; recursive
+        // optimizer lambdas (TOptim) embed UOP_GRAD in their body
+        // template, which book_from_dynamic clones into BOOK_HEAP.
+        case UOP_GRAD: {
+          Term n_cell = heap_read(val + 2);
+          u32  n = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
+          return 3 + n;
+        }
         case UOP_KERNEL:                                   return 2;
         case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
         case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
@@ -102,7 +110,7 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
 
     default: {
       // Generic fixed-arity node (APP / UOP-fixed-arity).
-      u32 ar = dyn_arity(tag, ext);
+      u32 ar = dyn_arity(tag, ext, val);
       if (ar == 0) return t;     // unsupported tag/opcode -- pass through verbatim
       u64 b = remap_lookup_or_alloc(map, map_pos, val, ar);
       for (u32 i = 0; i < ar; i++) {
