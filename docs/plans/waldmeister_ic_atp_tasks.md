@@ -412,7 +412,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         to the surviving CPs.  Compare against the C-side
         `thvm_critical_pairs_range` output for the same
         inputs.  Tests: 3-5 cases that demonstrate parity.
-    - [ ] 8.1d-i APP-SUP commutation: `src/interact/app_sup.c`
+    - [x] 8.1d-i APP-SUP commutation: `src/interact/app_sup.c`
           implementing `APP(&L{a, b}, x) -> &L{APP(a, x_dup_0),
           APP(b, x_dup_1)}` with the right-side DUP pattern
           for sharing the argument across the two children.

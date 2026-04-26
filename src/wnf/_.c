@@ -459,6 +459,13 @@ apply:
             next = interact_app_pri(whnf, arg);
             goto enter;
           }
+          case TAG_SUP: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            // 8.1d-i: APP-SUP commutation -- distribute the APP
+            // across the SUP's children, sharing arg via a DUP.
+            next = interact_app_sup(whnf, arg);
+            goto enter;
+          }
           case TAG_ERA: {
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             whnf = interact_app_era();

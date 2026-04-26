@@ -6,6 +6,35 @@ dated section.
 
 ## Unreleased
 
+### Added: APP-SUP commutation (stage 8.1d-i)
+
+`src/interact/app_sup.c` lands the standard HVM4 rule:
+
+```
+APP(&L{f, g}, arg)
+------------------ APP-SUP
+&L{ APP(f, arg_0), APP(g, arg_1) }   where ! &L{arg_0, arg_1} = arg
+```
+
+Allocates a 7-cell block: shared DUP body for `arg`, two APP slots
+referencing the DUP via DP0/DP1, two SUP children pointing at the
+APPs.  Wired into the WNF dispatch in `src/wnf/_.c` and
+`src/wnf/redex.c` next to APP-LAM / APP-BRI / APP-PRI.
+
+Foundational interaction; not 8.1-specific but blocks 8.1d-ii
+(SUP-encoded CP fan-out).
+
+`tests/test_app_sup.c` (16 sub-checks, 5 cases): single-fanout
+with PRI children, label preservation, asymmetric children
+(PRI vs ERA), ERA arg fan-out, ITRS counter increment.
+
+Caveat documented in the test header: APP-SUP shares the arg
+via a DUP, which fires only for tags with DUP-* interactions.
+Today our IC has `DUP-{ERA, LAM, NUM, SUP, BRI, ANY}`; CTR and
+FVR remain passive.  8.1d-ii will route CP enumeration around
+this (pass the rule pair through the SUP rather than as the
+APP arg) or land DUP-CTR as a separate task.
+
 ### Added: ATP unification as a TAG_PRI primitive (stage 8.1c)
 
 `src/atp/_.c` registers `prim_unify_apply` (arity 2) at id

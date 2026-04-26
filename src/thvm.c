@@ -190,6 +190,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/dup_any.c"
 #include "interact/app_bri.c"
 #include "interact/app_pri.c"
+#include "interact/app_sup.c"
 #include "interact/ann_lam.c"
 #include "interact/ann_bri.c"
 #include "interact/dup_bri.c"
