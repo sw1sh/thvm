@@ -401,7 +401,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         pointer ID (lookup table) and is "called" by APP.
         Tests: `tests/test_pri.c` -- 4-6 cases covering call
         behavior on simple data.
-  - [ ] 8.1c encode unification as a `TAG_PRI` callback: a
+  - [x] 8.1c encode unification as a `TAG_PRI` callback: a
         single primitive that takes two superposed terms and
         returns either ERA (no unifier) or a substitution
         application.  Tests: hand-encode 2-3 pairs and verify

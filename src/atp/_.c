@@ -8,11 +8,39 @@
 //
 // See docs/plans/saturation_loop.md for the algorithm.
 
+// === 8.1c: ATP primitives registered into the TAG_PRI table ========
+//
+// `prim_unify_apply` is the first primitive: takes two terms (s, t),
+// tries `thvm_unify`, and on success returns `thvm_unify_apply(s,
+// &subst)` -- the unified term that both s and t collapse to under
+// σ.  On failure, returns ERA so the surrounding APP-PRI structure
+// short-circuits via APP-ERA when consumed by SUP-encoded CP
+// enumeration in 8.1d.
+//
+// Linear matching: thvm_unify uses a stack-allocated RewriteSubst,
+// so the primitive is reentrant and stateless w.r.t. the caller.
+static Term prim_unify_apply(Term *args) {
+  Term s = args[0];
+  Term t = args[1];
+  RewriteSubst subst = {{0}};
+  if (!thvm_unify(s, t, &subst)) {
+    return term_new(0, TAG_ERA, 0, 0);
+  }
+  return thvm_unify_apply(s, &subst);
+}
+
+// Idempotent: tests / saturation init both call this; the registry
+// just overwrites with the same function pointer.
+static void atp_register_primitives(void) {
+  prim_register(ATP_PRIM_UNIFY_APPLY, prim_unify_apply, 2);
+}
+
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
   s->kbo      = cfg;
   s->step_cap = step_cap;
+  atp_register_primitives();
   // Trace-index slots default to ATP_TRACE_NONE (calloc gives 0,
   // which is a valid trace index, so we explicitly fill).
   for (u32 i = 0; i < ATP_MAX_RULES; i++) s->r_trace[i]  = ATP_TRACE_NONE;

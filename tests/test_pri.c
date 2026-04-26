@@ -133,6 +133,92 @@ int main(void) {
     CHECK_EQ(term_tag(out), TAG_ERA);
   }
 
+  // === Stage 8.1c: ATP_PRIM_UNIFY_APPLY round-trip =================
+
+  // Helper: build APP(APP(PRI(id), s), t) and reduce.
+  // We can't use a static helper that calls wnf cleanly due to
+  // the top-level test_pri layout, so this shape is repeated
+  // in each test case below.
+
+  TEST_BEGIN("pri/unify-apply/var-ctr");
+  {
+    // (f(x), f(a)) unifies with σ = {x -> a}; thvm_unify_apply(s)
+    // returns f(a).
+    AtpState *s = thvm_atp_init(NULL, 0);   // registers primitive
+
+    Term a = term_new_ctr(20u, NULL, 0);              // a
+    Term s_arg = term_new_ctr(30u, (Term[]){term_new_fvr(0u)}, 1);  // f(x)
+    Term t_arg = term_new_ctr(30u, (Term[]){a}, 1);   // f(a)
+
+    u64 l1 = heap_alloc(2);
+    heap_set(l1 + 0, term_new_pri(ATP_PRIM_UNIFY_APPLY));
+    heap_set(l1 + 1, s_arg);
+    Term step1 = term_new(0, TAG_APP, 0, l1);
+
+    u64 l2 = heap_alloc(2);
+    heap_set(l2 + 0, step1);
+    heap_set(l2 + 1, t_arg);
+    Term step2 = term_new(0, TAG_APP, 0, l2);
+
+    Term out = wnf(step2);
+    // Expect CTR(30, [CTR(20, [])]) -- f(a).
+    CHECK_EQ(term_tag(out), TAG_CTR);
+    CHECK_EQ(term_ext(out), 30u);
+    CHECK_EQ(term_ctr_n(out), 1u);
+    CHECK_EQ(term_ext(term_ctr_at(out, 0)), 20u);
+
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("pri/unify-apply/incompatible-ctrs-give-ERA");
+  {
+    // (f(_), g(_)) cannot unify (different head symbols).
+    AtpState *s = thvm_atp_init(NULL, 0);
+
+    Term s_arg = term_new_ctr(30u, (Term[]){term_new_fvr(0u)}, 1);  // f(x)
+    Term t_arg = term_new_ctr(31u, (Term[]){term_new_fvr(1u)}, 1);  // g(y)
+
+    u64 l1 = heap_alloc(2);
+    heap_set(l1 + 0, term_new_pri(ATP_PRIM_UNIFY_APPLY));
+    heap_set(l1 + 1, s_arg);
+    Term step1 = term_new(0, TAG_APP, 0, l1);
+
+    u64 l2 = heap_alloc(2);
+    heap_set(l2 + 0, step1);
+    heap_set(l2 + 1, t_arg);
+    Term step2 = term_new(0, TAG_APP, 0, l2);
+
+    Term out = wnf(step2);
+    CHECK_EQ(term_tag(out), TAG_ERA);
+
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("pri/unify-apply/identical-vars-trivial-success");
+  {
+    // (x, x) unifies with σ = {} (or σ = {x -> x}, idempotent).
+    // thvm_unify_apply(x) just returns x.
+    AtpState *s = thvm_atp_init(NULL, 0);
+
+    Term v = term_new_fvr(7u);
+
+    u64 l1 = heap_alloc(2);
+    heap_set(l1 + 0, term_new_pri(ATP_PRIM_UNIFY_APPLY));
+    heap_set(l1 + 1, v);
+    Term step1 = term_new(0, TAG_APP, 0, l1);
+
+    u64 l2 = heap_alloc(2);
+    heap_set(l2 + 0, step1);
+    heap_set(l2 + 1, v);
+    Term step2 = term_new(0, TAG_APP, 0, l2);
+
+    Term out = wnf(step2);
+    CHECK_EQ(term_tag(out), TAG_FVR);
+    CHECK_EQ(term_ext(out), 7u);
+
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

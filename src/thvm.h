@@ -816,6 +816,14 @@ typedef enum {
 #define TRACE_CP       3u   // critical pair generated from two rules
 #define ATP_TRACE_NONE 0xFFFFFFFFu
 
+// 8.1c: ATP primitives registered into the TAG_PRI table by
+// thvm_atp_init.  Tests registers them once; the saturation loop
+// in 8.1d-e calls them via APP-PRI evaluation.
+//   ATP_PRIM_UNIFY_APPLY: arity 2; takes (s, t); returns
+//   `thvm_unify_apply(s, &subst)` on successful unification, or
+//   ERA on failure.
+#define ATP_PRIM_UNIFY_APPLY 0u
+
 typedef struct {
   // Rule set R: parallel arrays sized for thvm_rewrite_normalize /
   // thvm_critical_pairs to consume directly.  r_trace[i] is the

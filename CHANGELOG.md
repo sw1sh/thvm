@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: ATP unification as a TAG_PRI primitive (stage 8.1c)
+
+`src/atp/_.c` registers `prim_unify_apply` (arity 2) at id
+`ATP_PRIM_UNIFY_APPLY = 0` during `thvm_atp_init`.  The
+primitive takes two terms `(s, t)`, runs `thvm_unify`; on
+success returns `thvm_unify_apply(s, &subst)` (the unified
+term), on failure returns `ERA` so the surrounding APP-PRI
+structure short-circuits cleanly via APP-ERA when consumed by
+SUP-encoded CP enumeration in 8.1d.
+
+`tests/test_pri.c` adds 3 round-trip cases (now 25 sub-checks
+total):
+- `pri/unify-apply/var-ctr`: `(f(x), f(a))` -> `f(a)`
+- `pri/unify-apply/incompatible-ctrs-give-ERA`:
+  `(f(x), g(y))` -> `ERA`
+- `pri/unify-apply/identical-vars-trivial-success`:
+  `(x, x)` -> `x`
+
+`atp_register_primitives` is idempotent (registry overwrites
+with the same fn pointer), so multiple `thvm_atp_init` calls
+do not double-register.
+
 ### Added: TAG_PRI primitive function call (stage 8.1b)
 
 New IC tag `TAG_PRI = 25` (HVM4 port) lands a "primitive function
