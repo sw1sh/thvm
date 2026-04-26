@@ -718,3 +718,36 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         and what the natural follow-on stages would be (TPTP
         file parsing in WL, AC matching, full pure-IC KBO
         port).  Closing the arc.
+
+## Stage 9 -- follow-on continuation
+
+> 8.10c marked the arc complete.  Stage 9 reopens with concrete
+> items from the closing memo's "Natural follow-on stages" list,
+> picked for buildability on existing infrastructure.  Each
+> 9.x item gets its own design memo + decomposition on pickup
+> per the closing memo's pattern of "discrete follow-on stages
+> with their own design memos."
+
+- [ ] 9.1 multi-witness narrowing enumeration: stage 8.9's
+      narrowing returns the FIRST witness found.  9.1 extends
+      `thvm_atp_narrow_step` (or adds a sibling) that
+      enumerates ALL witnesses up to a bound.  WL surface:
+      `TATP[..., AllWitnesses -> True]` returns a list of
+      Association entries.
+- [ ] 9.2 TPTP file parsing from WL: `TATP[File["foo.p"]]` --
+      thin wrapper around the existing `wald_parse_file`.
+      Detects file path argument, reads via the C-side
+      parser, runs the saturator, decodes the result.  Most of
+      the work is the file-vs-expression dispatch in TATP.
+- [ ] 9.3 heap-resetting mechanism between saturation steps:
+      8.3e-iii's bench finding noted IC-rewrite at budget=256
+      overflows HEAP_CAP.  Add a `thvm_atp_heap_checkpoint`
+      that snapshots the heap pointer; saturation step pops
+      back after the rewrite, reclaiming intermediate cells.
+      Lets `use_ic_rewrite = 1` scale to longer runs.
+- [ ] 9.4 TPTP-UEQ corpus expansion: add 3-5 fixtures from
+      GRP / RNG / LCL / LAT divisions to `tests/data/atp/`.
+      Re-run `tools/bench_twee.c` and `test_bench_atp` on the
+      enlarged corpus; document IC-vs-Twee gaps where they
+      emerge.  This is where the 8.5d "KBO and LPO agree on
+      our corpus" finding gets stress-tested.
