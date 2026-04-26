@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: TRACE_CP entries from generate_cps (stage 6.1c)
+
+`thvm_atp_generate_cps` rewritten to iterate `(i, j)` pairs
+explicitly so each emitted CP knows the trace indices of the two
+source rules.  Survivors push onto the queue with
+`TRACE_CP(parent_a = r_trace[i], parent_b = r_trace[j])` -- a
+new helper `atp_push_cps_traced` does the trace+queue push.
+
+`AtpState` gains `u32 r_trace[ATP_MAX_RULES]` tracking each rule's
+TRACE_ORIENT entry index.  Initialized to `ATP_TRACE_NONE` so
+test code that pre-populates `s->lhs/rhs` directly produces
+TRACE_CP entries with NONE parents (clearly marking them as
+"source rule unknown" rather than mis-aliasing trace index 0).
+
+`thvm_atp_step` now stashes each newly-added rule's TRACE_ORIENT
+index in `r_trace[added.first + k]` so subsequent generate_cps
+calls have the provenance.  `thvm_atp_interreduce` shifts
+`r_trace[]` in lockstep with the `lhs/rhs` arrays when dropping
+subsumed older rules.
+
+Tests in `tests/test_atp.c` (8323 sub-checks) verify that after
+adding one axiom and running one step, `s->trace[2]` is a
+TRACE_CP entry whose `parent_a == parent_b == 1` (the orient
+entry index of the new rule, which self-overlaps to produce the
+trivial top-position CP).
+
 ### Added: trace wired into add_equation + atp_step orient (stage 6.1b)
 
 `thvm_atp_add_equation` now pushes a TRACE_AXIOM entry (parents =

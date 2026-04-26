@@ -13,6 +13,10 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   if (s == NULL) return NULL;
   s->kbo      = cfg;
   s->step_cap = step_cap;
+  // Trace-index slots default to ATP_TRACE_NONE (calloc gives 0,
+  // which is a valid trace index, so we explicitly fill).
+  for (u32 i = 0; i < ATP_MAX_RULES; i++) s->r_trace[i]  = ATP_TRACE_NONE;
+  for (u32 i = 0; i < ATP_MAX_CPS;   i++) s->cp_trace[i] = ATP_TRACE_NONE;
   return s;
 }
 
@@ -213,10 +217,14 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
   // Trace each newly-added rule with its source CP as parent_a.
   // For unfailing 2-way fallback both directions get separate
   // entries so PCL output can identify each rule individually.
+  // Stash the trace index in r_trace[] so generate_cps can
+  // record TRACE_CP parents for any CP born from this rule.
   for (u32 k = 0; k < added.count; k++) {
     Term rl = s->lhs[added.first + k];
     Term rr = s->rhs[added.first + k];
-    atp_trace_push(s, TRACE_ORIENT, src_trace, ATP_TRACE_NONE, rl, rr);
+    u32  t  = atp_trace_push(s, TRACE_ORIENT, src_trace,
+                             ATP_TRACE_NONE, rl, rr);
+    s->r_trace[added.first + k] = t;
   }
 
   // Interreduce shifts new-rule indices down by `dropped`.
@@ -300,8 +308,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // (reduced, old_rhs) for re-orientation.
       thvm_atp_add_equation(s, reduced, old_rhs);
       for (u32 j = i + 1; j < s->n_rules; j++) {
-        s->lhs[j - 1] = s->lhs[j];
-        s->rhs[j - 1] = s->rhs[j];
+        s->lhs[j - 1]     = s->lhs[j];
+        s->rhs[j - 1]     = s->rhs[j];
+        s->r_trace[j - 1] = s->r_trace[j];
       }
       s->n_rules--;
       dropped++;
@@ -329,6 +338,25 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 
 #define ATP_CP_BATCH 1024
 
+// Helper: push a batch of CPs onto the queue with TRACE_CP entries
+// pointing at the two source rules' trace indices.  Drops overflow
+// silently.  Returns the count of CPs successfully pushed.
+static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
+                               u32 ncps, u32 parent_a, u32 parent_b) {
+  u32 pushed = 0;
+  for (u32 i = 0; i < ncps; i++) {
+    if (s->n_cps >= ATP_MAX_CPS) break;
+    u32 t = atp_trace_push(s, TRACE_CP, parent_a, parent_b,
+                           cps[i].lhs, cps[i].rhs);
+    s->cp_lhs[s->n_cps]   = cps[i].lhs;
+    s->cp_rhs[s->n_cps]   = cps[i].rhs;
+    s->cp_trace[s->n_cps] = t;
+    s->n_cps++;
+    pushed++;
+  }
+  return pushed;
+}
+
 fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0) return 0;
 
@@ -339,28 +367,33 @@ fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
   if (first > last) return 0;
 
   CriticalPair buf[ATP_CP_BATCH];
-  u32 nbuf = 0;
-
-  // (new x all_R): new rule on the outside.
-  nbuf = thvm_critical_pairs_range(s->lhs, s->rhs, n,
-                                   first, last, 0, n,
-                                   buf, ATP_CP_BATCH);
-  // (old x new): old rule on the outside, new rule fed as inner.
-  // Skip (new x new) -- already covered above.
-  if (first > 0 && nbuf < ATP_CP_BATCH) {
-    nbuf += thvm_critical_pairs_range(s->lhs, s->rhs, n,
-                                      0, first, first, last,
-                                      buf + nbuf, ATP_CP_BATCH - nbuf);
-  }
-
   u32 pushed = 0;
-  for (u32 i = 0; i < nbuf; i++) {
-    if (s->n_cps >= ATP_MAX_CPS) break;
-    s->cp_lhs[s->n_cps] = buf[i].lhs;
-    s->cp_rhs[s->n_cps] = buf[i].rhs;
-    s->n_cps++;
-    pushed++;
+
+  // (new x all_R): the new rule is i (outer), j ranges over all
+  // existing rules (including the new ones for new x new self-overlap).
+  for (u32 i = first; i < last; i++) {
+    for (u32 j = 0; j < n; j++) {
+      if (s->n_cps >= ATP_MAX_CPS) break;
+      u32 nbuf = thvm_critical_pairs_range(s->lhs, s->rhs, n,
+                                           i, i + 1, j, j + 1,
+                                           buf, ATP_CP_BATCH);
+      pushed += atp_push_cps_traced(s, buf, nbuf,
+                                    s->r_trace[i], s->r_trace[j]);
+    }
   }
+
+  // (old x new): old rule on the outside, new rule fed as inner.
+  for (u32 i = 0; i < first; i++) {
+    for (u32 j = first; j < last; j++) {
+      if (s->n_cps >= ATP_MAX_CPS) break;
+      u32 nbuf = thvm_critical_pairs_range(s->lhs, s->rhs, n,
+                                           i, i + 1, j, j + 1,
+                                           buf, ATP_CP_BATCH);
+      pushed += atp_push_cps_traced(s, buf, nbuf,
+                                    s->r_trace[i], s->r_trace[j]);
+    }
+  }
+
   return pushed;
 }
 

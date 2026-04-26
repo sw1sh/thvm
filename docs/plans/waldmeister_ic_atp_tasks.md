@@ -134,11 +134,16 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       `parent_a` = source CP's trace.  Tests verify axiom is
       recorded on add_equation and orient parent threading on a
       single step.
-- [ ] 6.1c wire `atp_trace_push` into `thvm_atp_generate_cps`
-      (TRACE_CP, parents = the two source rule trace indices).
-      Each new CP pushed onto the queue gets a corresponding
-      trace entry; the queue stores the trace index alongside
-      the CP so step 6.1b's orient can recover it.
+- [x] 6.1c `thvm_atp_generate_cps` rewritten to enumerate
+      `(i, j)` pairs explicitly so each emitted CP knows its
+      parent rules.  AtpState gains `u32 r_trace[ATP_MAX_RULES]`
+      tracking the orient trace index per rule (init'd to
+      ATP_TRACE_NONE; populated in `atp_step` after orient;
+      shifted in `interreduce`).  New helper `atp_push_cps_traced`
+      pushes each CP with `TRACE_CP(parent_a = r_trace[i],
+      parent_b = r_trace[j])`.  Tests verify a CP entry's parents
+      both point at the orient trace index of the rule that
+      birthed it (self-overlap case: parent_a == parent_b == 1).
 - [ ] 6.1d test that the headline demo
       (`atp/headline-prove-f-a-ia-equals-e-from-group-axioms`)
       produces a trace with the expected shape: 3+ TRACE_AXIOM

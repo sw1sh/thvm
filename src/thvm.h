@@ -798,9 +798,13 @@ typedef enum {
 
 typedef struct {
   // Rule set R: parallel arrays sized for thvm_rewrite_normalize /
-  // thvm_critical_pairs to consume directly.
+  // thvm_critical_pairs to consume directly.  r_trace[i] is the
+  // trace-entry index that produced rule i (TRACE_ORIENT for rules
+  // added by atp_step; ATP_TRACE_NONE for rules manually injected
+  // by tests / setup code that bypassed the saturation pipeline).
   Term lhs[ATP_MAX_RULES];
   Term rhs[ATP_MAX_RULES];
+  u32  r_trace[ATP_MAX_RULES];
   u32  n_rules;
 
   // CP queue (open-form: not INC-wrapped here; the priority encoding

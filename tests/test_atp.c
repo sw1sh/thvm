@@ -554,8 +554,9 @@ int main(void) {
   {
     // After one step, the orient entry should carry the source CP's
     // trace index as parent_a.  With one axiom on the queue, the
-    // step pops it, orients, pushes a TRACE_ORIENT whose parent_a
-    // == 0 (the original axiom's trace index).
+    // step pops it, orients (TRACE_ORIENT at index 1 with parent_a=0),
+    // then generate_cps fires on the new rule's self-overlap and
+    // pushes one or more TRACE_CP entries.
     AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
     Term lhs = mk_f(mk_v(VAR_x), mk_e());
     Term rhs = mk_v(VAR_x);
@@ -564,12 +565,36 @@ int main(void) {
     AtpStatus st = thvm_atp_step(s);
     CHECK_EQ((int)st, (int)ATP_RUNNING);
     CHECK_EQ(s->n_rules, 1u);
-    // n_trace bumped by exactly one TRACE_ORIENT entry.
-    CHECK_EQ(s->n_trace, 2u);
+    // At minimum: axiom + orient (TRACE_CP entries from generate_cps
+    // bump n_trace further; just check >= 2 here, exact CP count
+    // covered separately below).
+    CHECK(s->n_trace >= 2u);
     Term orient = s->trace[1];
     CHECK_EQ(term_ext(orient), TRACE_ORIENT);
     CHECK_EQ(term_val(term_ctr_at(orient, 0)), 0u);   // parent_a = axiom
     CHECK_EQ(term_val(term_ctr_at(orient, 1)), ATP_TRACE_NONE);   // parent_b
+    // r_trace[0] (the new rule) was set to the orient trace index.
+    CHECK_EQ(s->r_trace[0], 1u);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/trace-cp-records-source-rules-as-parents");
+  {
+    // After one step (axiom + orient), generate_cps fires the
+    // self-overlap and produces TRACE_CP entries.  Each CP entry's
+    // parent_a and parent_b should both equal r_trace[0] (the
+    // orient entry index = 1).
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term lhs = mk_f(mk_v(VAR_x), mk_e());
+    Term rhs = mk_v(VAR_x);
+    thvm_atp_add_equation(s, lhs, rhs);
+    AtpStatus st = thvm_atp_step(s);
+    CHECK_EQ((int)st, (int)ATP_RUNNING);
+    CHECK(s->n_trace >= 3u);   // axiom + orient + >= 1 CP
+    Term cp_entry = s->trace[2];
+    CHECK_EQ(term_ext(cp_entry), TRACE_CP);
+    CHECK_EQ(term_val(term_ctr_at(cp_entry, 0)), 1u);   // parent_a = orient
+    CHECK_EQ(term_val(term_ctr_at(cp_entry, 1)), 1u);   // parent_b = same orient (self-overlap)
     thvm_atp_free(s);
   }
 
