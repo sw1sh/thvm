@@ -45,11 +45,53 @@ static Term prim_unify_apply3(Term *args) {
   return thvm_unify_apply(target, &subst);
 }
 
+// 8.2b: process-global KboConfig registry.  Pointers don't fit
+// cleanly in a Term's `val` field, so IC code invokes the KBO
+// comparator with a NUM-encoded cfg_id and the registry resolves
+// the actual `KboConfig *` at fire time.
+//
+// `kbo_cfg_register` is idempotent for tests; saturation code
+// typically calls it once during setup.  `kbo_cfg_get` returns
+// NULL for unregistered ids so `prim_kbo` can return ERA
+// defensively.
+static const KboConfig *KBO_CFG_TABLE[KBO_CFG_TABLE_CAP];
+
+fn u32 kbo_cfg_register(u32 cfg_id, const KboConfig *cfg) {
+  if (cfg_id >= KBO_CFG_TABLE_CAP) return 0;
+  KBO_CFG_TABLE[cfg_id] = cfg;
+  return cfg_id;
+}
+
+fn const KboConfig *kbo_cfg_get(u32 cfg_id) {
+  if (cfg_id >= KBO_CFG_TABLE_CAP) return NULL;
+  return KBO_CFG_TABLE[cfg_id];
+}
+
+// 8.2b: arity-3 KBO primitive.  Takes (s, t, cfg_id_NUM); returns
+// NUM(KboCmp) -- the 4-valued comparison result -- or ERA if
+// cfg_id is bogus / no config registered.  Lets IC code invoke
+// the KBO comparator from inside an APP-PRI chain.
+static Term prim_kbo(Term *args) {
+  Term s   = args[0];
+  Term t   = args[1];
+  Term cid = args[2];
+  if (term_tag(cid) != TAG_NUM) {
+    return term_new(0, TAG_ERA, 0, 0);
+  }
+  const KboConfig *cfg = kbo_cfg_get((u32)term_val(cid));
+  if (cfg == NULL) {
+    return term_new(0, TAG_ERA, 0, 0);
+  }
+  KboCmp r = thvm_kbo(s, t, cfg);
+  return term_new(0, TAG_NUM, DT_I32, (u64)r);
+}
+
 // Idempotent: tests / saturation init both call this; the registry
 // just overwrites with the same function pointer.
 static void atp_register_primitives(void) {
   prim_register(ATP_PRIM_UNIFY_APPLY,  prim_unify_apply,  2);
   prim_register(ATP_PRIM_UNIFY_APPLY3, prim_unify_apply3, 3);
+  prim_register(ATP_PRIM_KBO,          prim_kbo,          3);
 }
 
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {

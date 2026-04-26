@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Added: thvm_kbo as TAG_PRI primitive (stage 8.2b)
+
+`prim_kbo` (arity 3) registered at `ATP_PRIM_KBO = 2` during
+`thvm_atp_init`.  Takes `(s, t, cfg_id_NUM)`; resolves cfg_id
+via the new process-global `KBO_CFG_TABLE` (cap 16); calls
+`thvm_kbo(s, t, cfg)`; returns `NUM(KboCmp)` (0=EQ, 1=GT, 2=LT,
+3=UN per the existing enum), or `ERA` if cfg_id is bogus / no
+config registered / cid arg is not a NUM.
+
+New API in `src/thvm.h`:
+- `u32 kbo_cfg_register(u32 cfg_id, const KboConfig *cfg);`
+- `const KboConfig *kbo_cfg_get(u32 cfg_id);`
+- `#define KBO_CFG_TABLE_CAP 16`
+- `#define ATP_PRIM_KBO 2u`
+
+`tests/test_kbo_pri.c` (17 sub-checks, 6 cases):
+- `kbo-pri/registry-roundtrip`: register/get + out-of-range
+- `kbo-pri/eq-outcome`: identical terms -> NUM(KBO_EQ),
+  parity-checked vs direct C call
+- `kbo-pri/gt-outcome`: `f(x, e) > x` -> NUM(KBO_GT)
+- `kbo-pri/lt-outcome`: mirror image -> NUM(KBO_LT)
+- `kbo-pri/un-outcome`: `f(x, y)` vs `f(y, x)` -> NUM(KBO_UN)
+- `kbo-pri/unregistered-cfg-falls-through-to-ERA`: bogus cfg_id
+
+This unblocks 8.10 (SupGen-style search) to invoke KBO from
+inside an APP-PRI evaluation chain -- the minimum useful
+increment per `docs/plans/kbo_ic_design.md`.
+
 ### Added: KBO-as-IC encoding design memo (stage 8.2a)
 
 `docs/plans/kbo_ic_design.md` (~150 lines) lands the design

@@ -829,6 +829,21 @@ typedef enum {
 //     TAG_PRI machinery.
 #define ATP_PRIM_UNIFY_APPLY  0u
 #define ATP_PRIM_UNIFY_APPLY3 1u
+//   ATP_PRIM_KBO: arity 3; takes `(s, t, cfg_id_NUM)` and returns
+//     `NUM(KboCmp)` -- the four-valued KBO comparison result.
+//     `cfg_id_NUM` indexes into the process-global
+//     `KBO_CFG_TABLE` (set up via `kbo_cfg_register`).
+//     Lets IC code (e.g., 8.10's SupGen-style search) invoke the
+//     KBO comparator from inside an APP-PRI evaluation chain.
+#define ATP_PRIM_KBO          2u
+
+// 8.2b: process-global registry mapping `cfg_id` (u32) to
+// `const KboConfig *`.  Needed because `KboConfig*` doesn't fit
+// cleanly in a Term's `val` field; `prim_kbo` looks up the
+// pointer at fire time.
+#define KBO_CFG_TABLE_CAP 16
+fn u32                kbo_cfg_register(u32 cfg_id, const KboConfig *cfg);
+fn const KboConfig   *kbo_cfg_get     (u32 cfg_id);
 
 typedef struct {
   // Rule set R: parallel arrays sized for thvm_rewrite_normalize /

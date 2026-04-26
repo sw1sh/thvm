@@ -467,7 +467,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         fit in subsequent firings.  Document why "pure IC"
         matters: it lets 8.10 SupGen-style search superpose
         alternative ordering choices.  Scope: ~150-line memo.
-  - [ ] 8.2b register `thvm_kbo` as a TAG_PRI primitive at
+  - [x] 8.2b register `thvm_kbo` as a TAG_PRI primitive at
         `ATP_PRIM_KBO = 2`; takes `(s, t, cfg_id)` -- where
         `cfg_id` is an index into a small process-global table
         of registered KboConfigs (since `KboConfig*` doesn't
