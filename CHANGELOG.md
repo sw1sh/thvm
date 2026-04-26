@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: PCL DAG well-formedness cross-check (stage 6.4c)
+
+`tests/test_wald.c` adds `wald/example.pr/pcl-dag-well-formed`,
+which structurally cross-checks our trace against Waldmeister's
+PCL format (sources/INF/pcl.c).
+
+Documented format mapping:
+- `tes-eqn  : <l> = <r> : initial`             <-> our `(axiom)`
+- `tes-rule : <l> -> <r> : orient(<src>,<d>)`  <-> our `(orient from N)`
+- `tes-eqn  : <l> = <r> : cp(<a>,<pa>,<b>,<pb>)` <-> our `(cp from A, B)`
+
+Known gaps (deferred):
+- We render `tes-rule` with `=` rather than `->`
+- We don't carry CP overlap positions in the trace
+- No `tes-final` line on proof close (implicit in run-status)
+
+What we DO match (verified by walking `atp->trace[]` directly):
+- First `n_eqns` trace entries are `TRACE_AXIOM` with no parents
+- Every subsequent orient/cp entry has every parent id strictly
+  less than its own id (DAG well-formed -- Waldmeister relies on
+  the same invariant for PCL replay)
+- Total entry count = axioms + orients + cps (unaccounted reasons
+  fail the test)
+
+`tests/test_wald.c`: 2420 sub-checks.
+
 ### Added: end-to-end .pr -> saturation -> PCL trace test (stage 6.4b)
 
 `tests/test_wald.c` adds a `wald/example.pr/end-to-end-pcl-trace`

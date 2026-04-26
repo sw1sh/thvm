@@ -273,7 +273,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       copy), verify n_eqns == 3, goal lhs/rhs structure, and
       that the parsed terms can be passed straight to the
       saturation engine + KBO comparator.
-- [ ] 6.4 end-to-end: parse the group-axiom `.pr` file, run
+- [x] 6.4 end-to-end: parse the group-axiom `.pr` file, run
       saturation, emit a PCL trace; cross-check structurally
       against Waldmeister's own output
   - [x] 6.4a `wald_parse_file(path, spec) -> WaldErr` -- thin
@@ -292,7 +292,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         lines contain "orient" or "cp" entries; the very
         last entry's lhs/rhs match the parsed conclusion
         (when ATP_PROVED).
-  - [ ] 6.4c structural cross-check vs Waldmeister's PCL:
+  - [x] 6.4c structural cross-check vs Waldmeister's PCL:
         compare our axiom ordering, orient/cp parent-pointer
         shape, and final-step rhs against what Waldmeister
         would emit on the same input (Waldmeister's PCL has

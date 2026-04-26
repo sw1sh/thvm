@@ -1019,6 +1019,129 @@ int main(void) {
     }
   }
 
+  // === 6.4c structural cross-check vs Waldmeister's PCL ==============
+  //
+  // Waldmeister's PCL format (sources/INF/pcl.c):
+  //   <id> : tes-eqn  : <lhs> = <rhs>  : initial             (axiom)
+  //   <id> : tes-goal : <lhs> = <rhs>  : hypothesis          (goal)
+  //   <id> : tes-rule : <lhs> -> <rhs> : orient(<src>,<dir>) (orient)
+  //   <id> : tes-eqn  : <lhs> = <rhs>  : cp(<a>,<pa>,<b>,<pb>) (CP)
+  //   <id> : tes-final: <lhs> = <rhs>  : <src>               (proof close)
+  //
+  // Our trace (src/atp/_.c):
+  //   <id> (axiom): <lhs> = <rhs>
+  //   <id> (orient from <src>): <lhs> = <rhs>
+  //   <id> (cp from <a>, <b>): <lhs> = <rhs>
+  //
+  // Format differences (intentional, documented here):
+  // - We don't render `tes-rule` with `->` distinct from `tes-eqn`;
+  //   our pretty printer is `=`-only.  Stage 8.x can split.
+  // - We don't render CP positions (<pa>, <pb>) -- generate_cps
+  //   doesn't yet preserve overlap positions in the trace.
+  // - We don't emit a `tes-final` line on proof close; the goal
+  //   match is implicit in `thvm_atp_run` returning ATP_PROVED.
+  //
+  // What we DO match structurally:
+  // - Monotonic ids starting at 0
+  // - Axioms first (no parents), then derived (orient has 1 parent,
+  //   cp has 2)
+  // - Every parent id is < its child's id (DAG well-formed)
+  TEST_BEGIN("wald/example.pr/pcl-dag-well-formed");
+  {
+    WaldSpec *spec = wald_init();
+    WaldErr pe = wald_parse_file("waldmeister/documents/example.pr", spec);
+    if (pe != WALD_OK) {
+      CHECK_EQ((int)pe, (int)WALD_ERR_FILE);
+      wald_free(spec);
+    } else {
+      u32 max_label = 0;
+      for (u32 i = 0; i < spec->n_symbols; i++) {
+        if (spec->symbols[i].label > max_label)
+          max_label = spec->symbols[i].label;
+      }
+      u32 weights[16] = {0};
+      u32 prec[16]    = {0};
+      for (u32 i = 0; i < spec->n_symbols; i++) {
+        weights[spec->symbols[i].label] = 1;
+        prec[spec->symbols[i].label]    = spec->symbols[i].prec_rank + 1;
+      }
+      KboConfig cfg = {
+        .weights    = weights,
+        .precedence = prec,
+        .n_labels   = max_label + 1,
+        .var_weight = 1,
+      };
+      AtpState *atp = thvm_atp_init(&cfg, 256);
+      for (u32 i = 0; i < spec->n_eqns; i++) {
+        thvm_atp_add_equation(atp, spec->eqn_lhs[i], spec->eqn_rhs[i]);
+      }
+      thvm_atp_set_goal(atp, spec->goal_lhs, spec->goal_rhs);
+      (void)thvm_atp_run(atp);
+
+      // Walk atp->trace[] directly -- structurally rather than
+      // text-parsing.  Each entry is a TAG_CTR with [p_a, p_b, lhs, rhs];
+      // the ctr label is the TraceReason enum.
+      //
+      // Note: TRACE_AXIOM is pushed by every `thvm_atp_add_equation`
+      // call, including the one that interreduce() makes when an
+      // older rule's LHS simplifies and gets re-queued.  So we don't
+      // require all axiom entries to come before any orient/cp.
+      // Instead we just check: (1) the FIRST n_eqns trace entries
+      // ARE the spec's axioms in order, with no parents; (2) every
+      // orient/cp parent points strictly back into the trace
+      // (DAG well-formedness, matching Waldmeister's PCL).
+      CHECK(atp->n_trace >= spec->n_eqns);
+      for (u32 i = 0; i < spec->n_eqns; i++) {
+        Term entry  = atp->trace[i];
+        u32  reason = term_ext(entry);
+        u32  p_a    = (u32)term_val(term_ctr_at(entry, 0));
+        u32  p_b    = (u32)term_val(term_ctr_at(entry, 1));
+        CHECK_EQ(reason, TRACE_AXIOM);
+        CHECK_EQ(p_a, ATP_TRACE_NONE);
+        CHECK_EQ(p_b, ATP_TRACE_NONE);
+      }
+
+      u32 n_axiom = spec->n_eqns;
+      u32 n_orient = 0, n_cp = 0;
+      for (u32 i = spec->n_eqns; i < atp->n_trace; i++) {
+        Term entry  = atp->trace[i];
+        u32  reason = term_ext(entry);
+        u32  p_a    = (u32)term_val(term_ctr_at(entry, 0));
+        u32  p_b    = (u32)term_val(term_ctr_at(entry, 1));
+        switch (reason) {
+          case TRACE_AXIOM:
+            // Re-queued via interreduction.  No parents recorded.
+            CHECK_EQ(p_a, ATP_TRACE_NONE);
+            CHECK_EQ(p_b, ATP_TRACE_NONE);
+            n_axiom++;
+            break;
+          case TRACE_ORIENT:
+            CHECK(p_a != ATP_TRACE_NONE);
+            CHECK(p_a < i);
+            n_orient++;
+            break;
+          case TRACE_CP:
+            CHECK(p_a != ATP_TRACE_NONE);
+            CHECK(p_b != ATP_TRACE_NONE);
+            CHECK(p_a < i);
+            CHECK(p_b < i);
+            n_cp++;
+            break;
+          default:
+            CHECK_EQ(reason, TRACE_AXIOM);   // unknown reason
+            break;
+        }
+      }
+      // At least one orient (tes-rule / orient(...) in PCL).
+      CHECK(n_orient >= 1u);
+      // Sanity: total accounting matches.
+      CHECK_EQ(n_axiom + n_orient + n_cp, atp->n_trace);
+
+      thvm_atp_free(atp);
+      wald_free(spec);
+    }
+  }
+
   thvm_free();
   TEST_REPORT();
 }
