@@ -282,24 +282,47 @@ Root causes:
       ON only for forward realizes) would let LeNet harvest
       the forward win without the backward cost.
 
-- [ ] **r2: slot reuse mid-step for the 57.6% headroom**.
-      The TMemoryPlan reports a 57.6% slot-reuse headroom on
-      linear-train and 52.8% on lenet -- bytes the perfect slot-
-      reusing allocator would never need.  The slot allocator
-      already has freelist push/pop wired through CPU + Metal
-      (see docs/bench-results.md "post-bm4abc"); it gets 0
-      entries because the wpt-pin walk pins every TTerm WL ever
-      touched.  The post-wpt section in bench-results.md sketches
-      three unblockers.  Pick option 3 (lifetime-aware schedule):
-      compute per-buf last-use at materialize time, emit explicit
-      "free buf X" ops in the kernel program, and let
-      cpu_buf_free push to the freelist independently of the
-      conservative wpt walk.  Acceptance: linear-train
-      memory-probe.wls peak_concurrent <= 0.3 KiB (50% of
-      current); lenet bench peak_concurrent <= 1500 KiB
-      (-20% of current 1882.3); verify.wls still converges.
-      Big arc -- DECOMPOSE on first fire (probe + schedule fn +
-      freelist-push wiring + bench delta).
+- [ ] **r2a: probe + decide what bufs are recyclable**.  Dump
+      per-buf {alloc_depth, last_use_depth, nbytes, status} from
+      TMemoryPlan on linear-train + lenet.  Target measurement:
+      "how many bufs are alive at peak depth?" and "if the
+      allocator freed them at last_use_depth, what would peak
+      drop to?".  Output: a 1-paragraph note + concrete numbers.
+      The TMemoryPlan code already computes peak_concurrent /
+      headroom -- this is mostly about reading those numbers off
+      cleanly and confirming the lifetime-aware claim ("freeing
+      at last_use would drop peak by X KiB").  ~20 LOC probe +
+      diagnosis paragraph in TASKS.md.
+
+- [ ] **r2b: per-kernel "free-after" list at materialize time**.
+      Walk the KERNELS table once after materialize; for each
+      input_tid, find its LAST consumer kernel.  Store as
+      `KernelEntry.free_tids[KERNEL_MAX_INPUT]` -- list of
+      tids that should be released right after this kernel
+      fires.  No runtime change yet -- just compute + store.
+      Tests: a 3-kernel chain `c = a + b; e = c * d; out = ...`
+      asserts kernel(`c=a+b`)'s free_tids contains a + b
+      (last-used by c).  ~50 LOC + ~30 LOC tests.
+
+- [ ] **r2c: kernel_fire releases free_tids[] to the freelist**.
+      In `interact_kernel` (or wherever a kernel finishes
+      firing), call `cpu_buf_decref` on each free_tid; that
+      already pushes to the freelist when refcount hits 0.
+      The wpt-pin walk's preserve set is bypassed because we're
+      not freeing via pool_rollback -- just decref'ing
+      explicitly per the schedule.  Tests: a 3-kernel chain
+      asserts that input bufs get freed (`refcount == 0`) right
+      after their last consumer fires, AND that subsequent
+      kernel_alloc reuses those slots.  ~30 LOC + ~30 LOC tests.
+
+- [ ] **r2d: bench delta + verify acceptance**.  Re-run
+      linear-train memory-probe.wls + bench baseline.wls on
+      both backends.  Acceptance: linear-train peak drops by
+      >=40% (was 0.6 KiB, target <=0.36 KiB); lenet peak drops
+      by >=20% (was 1882.3, target <=1500); verify.wls still
+      converges loss 2.61 -> 0.025.  Update
+      docs/bench-results.md with a "post-r2" row.  ~10 LOC +
+      measurement.
 
 - [ ] **r3: Gantt rendering that survives tiny-buf graphs**.
       Linear-train's bufs are sub-1-KiB so linear-scan packing
