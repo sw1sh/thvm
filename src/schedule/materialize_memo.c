@@ -29,6 +29,12 @@ u64 MAT_STATS_LEGACY_WALK  = 0;
 u64 MAT_STATS_MEMO_HITS    = 0;
 u64 MAT_STATS_MEMO_STORES  = 0;
 
+// Per-realize label for the THVM_MAT_STATS log.  Caller (WL probe via
+// thvm_wl_mat_stats_label) sets it before calling thvm_realize; the
+// dump line in thvm_materialize prints it then clears the buffer for
+// the next realize.  Empty string -> no label printed.
+char MAT_STATS_LABEL[64] = {0};
+
 typedef struct {
   u64  loc;       // 0 = empty slot
   Term cached;

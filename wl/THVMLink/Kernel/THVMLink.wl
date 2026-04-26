@@ -22,6 +22,7 @@ TTermExt::usage   = "TTermExt[term] returns the EXT field.";
 TTermVal::usage   = "TTermVal[term] returns the VAL field (heap loc, etc.).";
 TTermSub::usage   = "TTermSub[term] returns the SUB flag (0 or 1).";
 TTermUnpin::usage = "TTermUnpin[term] drops `term` from the extern-pinned-Terms GC root set.  Mostly superseded by the managed-handle auto-unpin attached to TTerm itself; kept for callers that want to release a pin without dropping the WL wrapper.";
+TMatStatsLabel::usage = "TMatStatsLabel[\"label\"] tags the next thvm_realize call's THVM_MAT_STATS log line with the given string.  Useful for probes that want to attribute kernel counts to specific layers / grad chains.  No-op when THVM_MAT_STATS isn't set in the env.  The buffer clears after one realize.";
 TExternPinCount::usage = "TExternPinCount[] returns the current number of entries in the external-caller pin table.  Useful for observing that WL's standard GC has dropped TTerm wrappers between evaluations.";
 TSetUseRealizeInfo::usage = "TSetUseRealizeInfo[True|False] enables or disables the f1d realize-classifier-driven kernel-fusion path in materialize.  Returns the previous setting (True/False).  Default off; tests / probes flip it on to exercise the fused path.";
 TTagName::usage   = "TTagName[tag] returns a string for a tag id.";
@@ -255,6 +256,7 @@ $uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Int
 $uopGradMultiFn:= $uopGradMultiFn= load["thvm_wl_uop_grad_multi",  {Integer, Integer, {Integer, 1}}, Integer];
 $termCtrNFn    := $termCtrNFn    = load["thvm_wl_term_ctr_n",      {Integer},                        Integer];
 $termCtrAtFn   := $termCtrAtFn   = load["thvm_wl_term_ctr_at",     {Integer, Integer},               Integer];
+$matStatsLabelFn := $matStatsLabelFn = load["thvm_wl_mat_stats_label", {"UTF8String"},               Integer];
 $uopLoadFn     := $uopLoadFn     = load["thvm_wl_uop_load",        {Integer},                        Integer];
 
 (* direct materialize (no wnf) + kernel-entry introspection *)
@@ -400,6 +402,7 @@ TTermExt[t_]                    := $termExtFn[ttermRaw[t]]
 TTermVal[t_]                    := $termValFn[ttermRaw[t]]
 TTermSub[t_]                    := $termSubFn[ttermRaw[t]]
 TTermUnpin[t_]                  := (ensureInit[]; $termUnpinFn[ttermRaw[t]])
+TMatStatsLabel[s_String]        := (ensureInit[]; $matStatsLabelFn[s])
 TExternPinCount[]               := (ensureInit[]; $externPinCountFn[])
 TSetUseRealizeInfo[on_]         := (ensureInit[];
     $setUseRealizeInfoFn[If[TrueQ[on], 1, 0]] === 1)

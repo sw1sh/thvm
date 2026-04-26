@@ -646,10 +646,11 @@ fn Term thvm_materialize(Term term) {
   if (stats_path != NULL) {
     FILE *f = fopen(stats_path, "a");
     if (f != NULL) {
+      const char *label = MAT_STATS_LABEL[0] ? MAT_STATS_LABEL : "-";
       fprintf(f,
-        "[mat toggle=%u] kernels=%u helper_ok=%llu helper_bail=%llu "
+        "[mat label=%s toggle=%u] kernels=%u helper_ok=%llu helper_bail=%llu "
         "legacy_expr=%llu legacy_walk=%llu memo_hits=%llu memo_stores=%llu\n",
-        MATERIALIZE_USE_REALIZE_INFO,
+        label, MATERIALIZE_USE_REALIZE_INFO,
         KERNELS_NEXT - kernels_at_start,
         (unsigned long long)MAT_STATS_HELPER_OK,
         (unsigned long long)MAT_STATS_HELPER_BAIL,
@@ -660,5 +661,6 @@ fn Term thvm_materialize(Term term) {
       fclose(f);
     }
   }
+  MAT_STATS_LABEL[0] = '\0';
   return out;
 }

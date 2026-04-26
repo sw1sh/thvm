@@ -6,6 +6,19 @@ dated section.
 
 ## Unreleased
 
+### Added: TMatStatsLabel for per-realize THVM_MAT_STATS attribution
+
+`TMatStatsLabel["fwd_conv1"]` tags the next `thvm_realize` call's
+`THVM_MAT_STATS=<path>` log line with the given string; the buffer
+clears after one realize.  Bridges:
+`thvm_wl_mat_stats_label(UTF8String)` in `wl/THVMLink/CSource/thvmlink.c`,
+backed by a 64-byte `MAT_STATS_LABEL` global in `materialize_memo.c`.
+
+Lets probes attribute kernel counts to specific layers / grad
+chains.  Sample LeNet breakdown: forward+loss=231 kernels;
+grad_b1..b3=20 each; grad_w4=40; grad_b4=36 -- forward Conv2D-
+lowered chain dominates and is the next fusion target.
+
 ### Changed: lenet bench + verify use TGradMany; materialize descends into TAG_CTR
 
 `lenetStep` (baseline.wls) and `stepGrads` (verify.wls) now build a

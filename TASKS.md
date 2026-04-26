@@ -164,17 +164,17 @@ Real kernel-count + memory wins need either:
       verify.wls still converges 2.61 -> 0.025 on both
       backends.  Detail in docs/bench-results.md "k0e".
 
-- [ ] **k1: per-realize labeled stat dump**.  Currently we know
-      "lenet Adam step = 427 kernels" but not which forward layer
-      / backward chain contributes how many.  Extend the
-      `THVM_MAT_STATS=<path>` env hook (added in
-      `src/schedule/materialize_memo.c` during d4b2d) to take an
-      optional WL-supplied label per `thvm_realize` call (e.g.,
-      "fwd_conv1", "grad_w3").  Acceptance: a probe script that
-      prints "label: N kernels" lines for every realize in a
-      LeNet Adam step, grouped by layer/grad.  ~30 LOC across
-      thvmlink.c (new `TMatStatsLabel` bridge fn) + materialize.c
-      (write the label into the dump line).
+- [x] **k1: per-realize labeled stat dump**.  WL surface
+      `TMatStatsLabel["fwd_conv1"]` tags the next thvm_realize's
+      `THVM_MAT_STATS` log line with the supplied string; the
+      buffer clears after one realize.  C bridge in
+      thvmlink.c (`thvm_wl_mat_stats_label`) writes into a 64-byte
+      file-scope `MAT_STATS_LABEL` buffer; the dump line in
+      materialize.c prefixes `label=...`.  Sample LeNet
+      breakdown captured: forward+loss=231 kernels, grad_b1..b3=20
+      each, grad_w4=40, grad_b4=36 (totals to the 427 bench
+      number).  Forward dominates -- Conv2D-lowered chain is the
+      next fusion target.
 
 - [ ] **k2: pick the next fusion target from k1's data**.
       Decompose once k1 is in.  Likely candidates per the
