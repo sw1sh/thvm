@@ -6,6 +6,43 @@ dated section.
 
 ## Unreleased
 
+### Added: WL-expression-to-Term encoder (stage 8.7c)
+
+New LibraryLink helper `thvm_wl_term_new_ctr` in
+`wl/THVMLink/CSource/thvmlink.c` builds a `TAG_CTR` Term from a
+label + list of child Term integers (uses `MTensor` for clean
+empty-list handling).  WL-side loader `$termNewCtrFn`.
+
+WL-side encoder `encodeAtpTerm[expr, state]` in
+`wl/THVMLink/Kernel/THVMLink.wl` walks an expression and produces
+`{term, state'}`:
+
+- `Verbatim[Pattern][name_Symbol, Blank[]]` (the `x_` syntax)
+  -> `term_new_fvr(var_id)` via raw `thvm_wl_term_new`.  Variable
+  ids are stable across occurrences of the same name within a
+  single encode.
+- Bare `Symbol` -> nullary CTR.
+- Compound `head[args...]` -> CTR with recursively-encoded
+  children.
+- Symbol labels start at 1 and increment per fresh symbol; var
+  ids start at 0.
+
+State threaded explicitly via `Association` (Module-local mutation
+on Associations doesn't work in WL; use `ReplacePart` to thread).
+The pattern-matched dispatch via `Verbatim[Pattern]` correctly
+distinguishes the `x_` form from a literal `Pattern[]` head.
+
+`wl/THVMLink/Tests/atp.wlt` adds 5 cases (304 WL tests total --
+was 299):
+- `ATP/encoder/symbol-becomes-nullary-ctr`
+- `ATP/encoder/distinct-symbols-get-distinct-labels`
+- `ATP/encoder/compound-head-becomes-ctr-with-children`:
+  `f[zero, succ[zero]]` -> CTR with arity 2
+- `ATP/encoder/pattern-becomes-fvr`
+- `ATP/encoder/pattern-var-stable-across-occurrences`
+
+8.7d wires this into the `TATP[]` user-facing surface.
+
 ### Added: thvm_wl_atp_run LibraryLink helper (stage 8.7b)
 
 New entry point in `wl/THVMLink/CSource/thvmlink.c`:

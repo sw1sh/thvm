@@ -247,6 +247,73 @@ $tensorFromNAFn  := $tensorFromNAFn  = load["thvm_wl_tensor_from_na", {{"Numeric
    NumericArray `[status, n_rules, n_trace, n_cps]`. *)
 $atpRunFn        := $atpRunFn        = load["thvm_wl_atp_run", {{"NumericArray", "Shared"}, Integer, Integer}, "NumericArray"];
 
+(* 8.7c: CTR-builder for the ATP expression encoder.  Takes a
+   label and a NumericArray of child Term values; returns the
+   packed Term value of the new TAG_CTR. *)
+$termNewCtrFn    := $termNewCtrFn    = load["thvm_wl_term_new_ctr", {Integer, {Integer, 1}}, Integer];
+
+(* 8.7c: WL-expression-to-Term encoder.  Maps:
+     Pattern[name, Blank[]]  -> term_new_fvr(var_id)
+     Symbol[name]            -> nullary CTR
+     head[args...]           -> CTR with encoded children
+   State is threaded explicitly: takes (expr, state) and returns
+   {term, state'} where state is an Association
+   {"sym" -> <|name -> label|>, "var" -> <|name -> id|>,
+    "next_lab" -> next_label}.
+   Patterns are matched via Verbatim[Pattern] so the Pattern head
+   isn't itself parsed as a pattern. *)
+encodeAtpTerm[Verbatim[Pattern][name_Symbol, Blank[]], state_Association] :=
+  Module[{vars, varName, varId, st = state},
+    varName = SymbolName[Unevaluated[name]];
+    vars = st["var"];
+    If[ KeyExistsQ[vars, varName],
+      varId = vars[varName],
+      varId = Length[vars];
+      st = ReplacePart[st, "var" -> Append[vars, varName -> varId]];
+    ];
+    {THVMLink`Private`$termNewFn[0, 22 (* TAG_FVR *), varId, 0], st}
+  ]
+
+encodeAtpTerm[s_Symbol, state_Association] :=
+  Module[{sym, syms, lab, st = state},
+    sym = ToString[Unevaluated[s]];
+    syms = st["sym"];
+    If[ KeyExistsQ[syms, sym],
+      lab = syms[sym],
+      lab = st["next_lab"];
+      st = ReplacePart[st,
+        {"sym"      -> Append[syms, sym -> lab],
+         "next_lab" -> lab + 1}];
+    ];
+    {THVMLink`Private`$termNewCtrFn[lab, {}], st}
+  ]
+
+encodeAtpTerm[expr_, state_Association] :=
+  Module[{h, sym, syms, lab, st = state, childEncs, childRes, ctr},
+    h = Head[expr];
+    sym = ToString[h];
+    syms = st["sym"];
+    If[ KeyExistsQ[syms, sym],
+      lab = syms[sym],
+      lab = st["next_lab"];
+      st = ReplacePart[st,
+        {"sym"      -> Append[syms, sym -> lab],
+         "next_lab" -> lab + 1}];
+    ];
+    childEncs = {};
+    Do[
+      childRes = encodeAtpTerm[expr[[i]], st];
+      AppendTo[childEncs, childRes[[1]]];
+      st = childRes[[2]],
+      {i, Length[expr]}
+    ];
+    ctr = THVMLink`Private`$termNewCtrFn[lab, childEncs];
+    {ctr, st}
+  ]
+
+(* Convenience wrapper: build the empty encoder state. *)
+encodeAtpTermInit[] := <|"sym" -> <||>, "var" -> <||>, "next_lab" -> 1|>
+
 (* uop graph *)
 $uopConstFn    := $uopConstFn    = load["thvm_wl_uop_const",    {Integer, Real},                     Integer];
 $uopUnaryFn    := $uopUnaryFn    = load["thvm_wl_uop_unary",    {Integer, Integer},                  Integer];

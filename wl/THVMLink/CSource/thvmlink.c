@@ -1121,6 +1121,40 @@ EXTERN_C DLLEXPORT int thvm_wl_context_count(WolframLibraryData libData, mint ar
   return LIBRARY_NO_ERROR;
 }
 
+// === 8.7c: CTR-builder helper for the WL-side ATP encoder ========
+//
+// Builds a TAG_CTR Term whose children come from a list of
+// pre-built Term integer values.  Returns the new Term's raw
+// integer value.
+//
+// Inputs:
+//   args[0] = label (mint).
+//   args[1] = children MTensor (Integer rank-1); empty list for
+//             nullary CTR.
+//
+// Output: mint = packed Term value.
+//
+// Uses MTensor (rather than NumericArray) for the children list
+// because empty MTensor[] flows cleanly through LibraryLink type
+// coercion.
+EXTERN_C DLLEXPORT int thvm_wl_term_new_ctr(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)argc;
+  mint label = MArgument_getInteger(args[0]);
+  MTensor t  = MArgument_getMTensor(args[1]);
+  mint n     = libData->MTensor_getFlattenedLength(t);
+  const mint *data = libData->MTensor_getIntegerData(t);
+
+  Term children[REWRITE_MAX_ARITY];
+  if ((u32)n > REWRITE_MAX_ARITY) return LIBRARY_FUNCTION_ERROR;
+  for (mint i = 0; i < n; i++) children[i] = (Term)data[i];
+
+  Term out = term_new_ctr((u32)label, children, (u32)n);
+  MArgument_setInteger(res, (mint)out);
+  return LIBRARY_NO_ERROR;
+}
+
 // === 8.7b: ATP runner via LibraryLink ============================
 //
 // Inputs:

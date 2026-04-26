@@ -641,7 +641,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         Term lists + goal Terms + an LpoConfig stub; returns
         the trace serialized to a string.  Direct WL test
         with manually-encoded Terms.
-  - [ ] 8.7c WL-expression-to-Term encoder: the bulk of 8.7,
+  - [x] 8.7c WL-expression-to-Term encoder: the bulk of 8.7,
         walks an expression tree and produces a Term.  Handle
         atoms, symbols, FVR (probably via `Pattern[x, _]`),
         and `==` (eq-pair).  Tests with hand-built WL
