@@ -160,12 +160,14 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       (label rendering), CTR-with-args + FVR rendering, post-step
       trace with `from N` parent annotations, and small-buffer
       truncation null-termination.
-- [ ] 6.3a parser data model: `WaldSpec` struct holding parsed
-      signature (name -> { label, arity }), variable table
-      (name -> FVR id), equations[] (parallel lhs/rhs), and
-      goal_lhs/goal_rhs.  Add fixed caps `WALD_MAX_SYMBOLS`,
-      `WALD_MAX_VARS`, `WALD_MAX_EQNS`, `WALD_NAME_LEN`.  Init
-      / free helpers; no parsing logic yet.
+- [x] 6.3a `WaldSpec` data model lands in `src/thvm.h` plus
+      `src/wald/_.c` with `wald_init` / `wald_free`.  Holds the
+      parsed signature (`WaldSym[64]` with monotonically-assigned
+      CTR labels starting at 1), variable table (`WaldVar[32]`
+      with sequential FVR ids), equations[64] parallel arrays, and
+      a single `(goal_lhs, goal_rhs)` for proof-mode CONCLUSION.
+      `mode_proof` defaults to 1.  Tests cover init defaults,
+      NULL-safe free, and cap sanity.
 - [ ] 6.3b lexer: tokenize a NUL-terminated source buffer.  Skip
       whitespace + `%`-to-end-of-line comments.  Tokens: ident
       (alpha / digit / `_`), `:`, `->`, `=`, `(`, `)`, `,`, `>`,

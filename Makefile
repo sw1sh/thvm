@@ -56,6 +56,7 @@ TESTS := \
   $(BIN)/test_unify \
   $(BIN)/test_cp \
   $(BIN)/test_icc \
+  $(BIN)/test_wald \
   $(BIN)/test_atp
 
 # === Metal backend (Darwin only) =====================================

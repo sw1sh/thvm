@@ -856,6 +856,59 @@ fn void      thvm_atp_set_goal    (AtpState *s, Term lhs, Term rhs);
 // returned byte count against `cap - 1` to detect that case.
 fn u32       thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
 
+// === wald/ ===
+// Parser for Waldmeister .pr-style spec files.  Stage 6.3 of
+// docs/plans/waldmeister_ic_atp_tasks.md.  WaldSpec holds the
+// parsed signature + variable table + equations + single
+// conclusion goal; downstream feeds it to thvm_atp_run.
+#define WALD_MAX_SYMBOLS 64
+#define WALD_MAX_VARS    32
+#define WALD_MAX_EQNS    64
+#define WALD_NAME_LEN    32
+
+typedef struct {
+  char name[WALD_NAME_LEN];
+  u32  label;     // CTR label assigned at parse time
+  u32  arity;
+} WaldSym;
+
+typedef struct {
+  char name[WALD_NAME_LEN];
+  u32  var_id;    // FVR id assigned at parse time
+} WaldVar;
+
+typedef struct {
+  // Spec identity.  `mode_proof = 1` for "MODE PROOF", 0 for
+  // "MODE COMPLETION" (defaults to 1 when unspecified).
+  char    name[WALD_NAME_LEN];
+  u8      mode_proof;
+
+  // Signature: `symbols[0..n_symbols)` with monotonically-assigned
+  // CTR labels via `next_label` (starts at 1; 0 is the CTR
+  // "anonymous tuple" label so we skip it).
+  WaldSym symbols[WALD_MAX_SYMBOLS];
+  u32     n_symbols;
+  u32     next_label;
+
+  // Variables: each gets a sequential FVR id.
+  WaldVar vars[WALD_MAX_VARS];
+  u32     n_vars;
+
+  // Equations: parallel arrays; the saturation engine consumes
+  // these via thvm_atp_add_equation in order.
+  Term    eqn_lhs[WALD_MAX_EQNS];
+  Term    eqn_rhs[WALD_MAX_EQNS];
+  u32     n_eqns;
+
+  // Single conjecture for proof mode.  goal_lhs == 0 means no
+  // goal was specified (completion mode or empty CONCLUSION).
+  Term    goal_lhs;
+  Term    goal_rhs;
+} WaldSpec;
+
+fn WaldSpec *wald_init(void);
+fn void      wald_free(WaldSpec *s);
+
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.

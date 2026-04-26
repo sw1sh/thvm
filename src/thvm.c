@@ -231,6 +231,12 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // add_equation / set_goal.  Step + run drivers land in 5.2.
 #include "atp/_.c"
 
+// === wald/ ===
+// Waldmeister .pr spec parser (stage 6.3).  Data model only at
+// 6.3a; lexer / section drivers / term parser / equations land
+// in 6.3b..g.
+#include "wald/_.c"
+
 // hrp1: heap-rooted preserve walk -- alternative to
 // realize.c's mark_preserved_chain.  Standalone helper; hrp2
 // wires it into thvm_realize.

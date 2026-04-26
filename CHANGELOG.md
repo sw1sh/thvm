@@ -6,6 +6,23 @@ dated section.
 
 ## Unreleased
 
+### Added: WaldSpec data model for the .pr parser (stage 6.3a)
+
+`src/wald/_.c` lands the Waldmeister-spec data container plus
+`wald_init` (heap-allocated, defaults to `mode_proof = 1` and
+`next_label = 1`) and `wald_free` (NULL-safe).  Public types in
+`src/thvm.h`: `WaldSym`, `WaldVar`, `WaldSpec`, plus caps
+`WALD_MAX_SYMBOLS = 64`, `WALD_MAX_VARS = 32`, `WALD_MAX_EQNS =
+64`, `WALD_NAME_LEN = 32`.  The struct holds the parsed
+signature (each symbol gets a monotonic CTR label starting at 1
+to skip the anonymous-tuple label), variable table (sequential
+FVR ids), parallel `eqn_lhs/rhs[]` axiom arrays, and a single
+`(goal_lhs, goal_rhs)` for proof-mode CONCLUSION.
+
+Lexer / section drivers / term parser / equations / driver land
+in 6.3b..f; end-to-end test against the group example follows in
+6.3g.
+
 ### Added: PCL-shaped trace serializer (stage 6.2)
 
 `thvm_atp_trace_serialize(s, buf, cap)` walks `s->trace[]` and
