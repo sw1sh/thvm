@@ -176,25 +176,26 @@ Real kernel-count + memory wins need either:
       number).  Forward dominates -- Conv2D-lowered chain is the
       next fusion target.
 
-- [ ] **k2a: TUOpAddN multi-input ADD kernel**.  Per k1's
-      breakdown the forward pass is dominated by 24+24 = 48
-      partial-sum ADD kernels emitted from the
-      `Fold[TUOpAdd, partials]` chain inside
-      `TUOpConv2DLowered` (kh=kw=5 -> 25 partials per conv,
-      24 ADDs to fold).  Replace the chain with one kernel
-      whose program is N-1 cascading ADDs reading N input
-      tensors into one output buffer.  Includes:
-        - new UOP_ADDN opcode in src/thvm.h
-        - constructor `uop_addn(Term *xs, u32 n)` in
-          new file src/uop/addn.c (heap = [NUM(n), x_1..x_n])
-        - materialize support: build a multi-op program
-          (reuses the inline-helper LOAD-prefix + cascading
-          ADD plumbing -- see materialize_inlined.c)
-        - cpu/metal backend dispatch (n-1 ADDs over the same
-          output buffer)
-        - tests covering 2/3/8-input ADDN against the
-          equivalent Fold[TUOpAdd, ...] result.
-      ~80 LOC C + ~30 LOC tests.
+- [ ] **k2a1: UOP_ADDN opcode + constructor + arity plumbing**.
+      Add `UOP_ADDN` opcode (heap = `[NUM(n), x_1..x_n]`),
+      constructor `uop_addn(Term *xs, u32 n)`, accessors
+      `uop_addn_n` / `uop_addn_at`.  Variable arity like
+      UOP_GRAD: `uop_arity(UOP_ADDN)` returns 0; walk skips
+      it; alo_realize/from_dynamic read NUM(n) for clone arity.
+      Tests: round-trip + arity inspection.  ~40 LOC + tests.
+      Out of scope: any materialize / kernel-emission change.
+
+- [ ] **k2a2: materialize UOP_ADDN as one multi-op kernel**
+      (CPU first; Metal falls back to chain).  At materialize
+      time emit a single kernel with N inputs + N-1 cascading
+      ADD program ops + the LOAD prefix the existing inline-
+      helper uses.  CPU's interpret.c already loops program[]
+      with intermediate register chaining, so no backend code
+      change there.  Metal: detect UOP_ADDN at materialize
+      and lower to a chain of N-1 binary ADDs (same as Fold
+      today) so correctness is preserved on Metal even though
+      the kernel-count win is CPU-only for now.  Tests for
+      2/3/8-input correctness.  ~70 LOC + tests.
 
 - [ ] **k2b: switch TUOpConv2DLowered to TUOpAddN**.  In
       `wl/THVMLink/Kernel/NN.wl`, the Conv2D-lowered helper
