@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Added: corpus expansion findings memo (stage 9.4c)
+
+`docs/plans/corpus_expansion_findings.md` (~150 lines) captures
+the IC-vs-Twee bench comparison on the 12-fixture enlarged
+corpus.
+
+**Score: 9 thvm-wins, 3 thvm-fails** (against Twee 12/12).
+The 9 wins are dominated by goal-rewrite shortcutting at
+step 0; thvm's wall-clock advantage is real but biased toward
+"answer is one rewrite away" cases (Twee always pays ~20 ms
+saturation startup).
+
+**The 3 fails cluster on AC redundancy + lemma discovery**:
+- `comm_monoid_swap` -- QUEUE_EMPTY @ 2 (commutativity rewrite
+  cycle, needs AC-aware joinability)
+- `group_commutative_inverse` -- TIMEOUT @ 32 (left-inverse
+  lemma discovery costs ~10-15 CPs)
+- `group_left_id_from_assoc` -- TIMEOUT @ 32 (same root cause
+  as above; same per-fail counters: 32/20/116/95/51)
+
+8.5d's "KBO and LPO agree on our corpus" claim survives the
+expansion: every fixture's axioms orient identically under
+both. All 4 (cp-gen x rewrite) modes report byte-identical
+counters per fixture, re-confirming 8.1e-ii / 8.3e-ii parity.
+
+Closes 9.4 (parent + 9.4a/b/c all `[x]`). Documentation +
+bench snapshots; tests stay green (166/166 C, 323 WL).
+
 ### Added: corpus expansion fixtures (stage 9.4b)
 
 Five new bench fixtures (`.pr` + `.expect`) under

@@ -767,7 +767,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       that snapshots the heap pointer; saturation step pops
       back after the rewrite, reclaiming intermediate cells.
       Lets `use_ic_rewrite = 1` scale to longer runs.
-- [ ] 9.4 TPTP-UEQ corpus expansion: add 3-5 fixtures from
+- [x] 9.4 TPTP-UEQ corpus expansion: add 3-5 fixtures from
       GRP / RNG / LCL / LAT divisions to `tests/data/atp/`.
       Re-run `tools/bench_twee.c` and `test_bench_atp` on the
       enlarged corpus; document IC-vs-Twee gaps where they
@@ -788,7 +788,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         prediction OR update the prediction if reality differs).
         Update CHANGELOG with status of each.  Scope: 3-5 small
         fixtures, ~30-50 lines each.
-  - [ ] 9.4c bench comparison + findings memo
+  - [x] 9.4c bench comparison + findings memo
         `docs/plans/corpus_expansion_findings.md`: re-run
         `tools/bench_twee` on the enlarged corpus; capture the
         IC-vs-Twee deltas; document KBO-vs-LPO disagreements (if
