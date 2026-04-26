@@ -548,20 +548,39 @@ fn Term term_ctr_at  (Term ctr_term, u32 i);
 // kernel / materialize / grad firing.
 fn Term term_resolve(Term t);
 
-// === heap-walk materialize ===
-// Visits cells reachable from `root`, propagates shapes through
-// APP[LAM, arg], and rewrites UOPs into UOP_KERNELs in place.  See
-// src/schedule/walk.c.
-Term materialize_walk(Term root);
-
-// f1c: classify which UOPs in the DAG rooted at `root` must
-// realize into a backing buffer; populates a private table
-// consulted via realize_is_realized / realize_consumer_count.
-// f1d's selective materializer reads this; f1c on its own is
-// read-only.  See src/schedule/realize_classify.c.
+// === schedule ===
+// realize_classify walks the UOp DAG rooted at `root` and marks
+// kernel boundaries (root + multi-consumer + REDUCE) in REALIZE_INFO.
+// materialize.c reads the table directly to topo-sort and emit.
+#define REALIZE_INFO_CAP 4096
+typedef struct {
+  u64 loc;
+  u32 consumer_count;
+  u8  op;
+  u8  realized;
+} UOpInfo;
+extern UOpInfo REALIZE_INFO[REALIZE_INFO_CAP];
+extern u32     REALIZE_INFO_LEN;
+fn u32  realize_info_find(u64 loc);
 fn void realize_classify(Term root);
 fn u8   realize_is_realized(Term uop_term);
 fn u32  realize_consumer_count(Term uop_term);
+
+// g2a: after realize_classify populates the boundary set, the
+// scheduler topo-sorts those boundaries by producer-to-consumer
+// depth.  These accessors expose the sorted order so tests / future
+// code-emit can iterate boundaries in dependency order.
+fn u32  materialize_boundary_count(void);
+fn u64  materialize_boundary_at(u32 i);
+
+// Leaf utilities other compilation units (realize_classify,
+// gc_mark, wnf/redex, interact/uop_kernel) reference.
+fn u8   uop_arity(u8 op);
+fn u8   uop_is_unary_elementwise(u8 op);
+fn u8   uop_is_binary_elementwise(u8 op);
+fn int  term_shape_in(Term t, u32 env_id, Shape *out);
+fn int  term_dtype_in(Term t, u32 env_id, u32 *out);
+fn Term materialize_uop_in_env(Term t, u32 env_id);
 
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.

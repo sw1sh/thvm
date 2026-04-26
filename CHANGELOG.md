@@ -6,6 +6,25 @@ dated section.
 
 ## Unreleased
 
+### Added: scheduler skeleton + topo-sort over realize boundaries (g2a)
+
+`thvm_materialize` now runs the first half of the tinygrad-style
+scheduler: `realize_classify` populates `REALIZE_INFO`, then a new
+`topo_sort_boundaries` pass walks the marked boundary UOps and
+sorts them by producer-to-consumer depth.  The order is exposed via
+`materialize_boundary_count()` / `materialize_boundary_at(i)` for
+g2b's kernel-emit pass.
+
+Restructure: `uop_arity`, `uop_is_*_elementwise`, `term_shape_in`,
+`term_dtype_in` moved out of `materialize.c` into a new
+`src/schedule/uop_meta.c` so the include order is `uop_meta ->
+consumer_count -> realize_classify -> materialize` (materialize now
+consumes `REALIZE_INFO` from `realize_classify.c`).
+
+`tests/test_materialize_v2.c` covers shared-subexpression, linear
+chain, REDUCE-as-root, and chain-of-two-REDUCEs.  10/10 green; no
+regression on the 99/166 stub-baseline fail count from g1.
+
 ### Removed: rounds 1-2 fusion scaffolding (g1)
 
 Purged the dual-path fusion code that gated OFF in production:

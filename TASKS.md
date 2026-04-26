@@ -369,16 +369,20 @@ Expected ceilings:
       most surviving tests call `thvm_materialize`).  Net deletion:
       ~2050 LOC.
 
-- [ ] **g2a: scheduler skeleton + topo-sort over realize boundaries**.
-      Replace the `thvm_materialize` stub with: call
-      `realize_classify(sink)`, walk the heap to enumerate every
-      reachable boundary UOp, topo-sort them by producer-to-consumer
-      depth, and return a placeholder Term referencing them.  No
-      kernel emission yet.  ~70 LOC.  Test
-      `tests/test_materialize_v2.c` (new): assert that for a linear
-      chain `a + b + c + d` the topo-sorted boundary list has the
-      expected length and ordering (only the sink is a boundary;
-      intermediates are non-boundary).
+- [x] **g2a: scheduler skeleton + topo-sort over realize boundaries**.
+      `thvm_materialize` now calls `realize_classify` then
+      `topo_sort_boundaries`, populating a `BOUNDARY_ORDER` array
+      sorted by producer-to-consumer depth.  Accessors
+      `materialize_boundary_count` / `materialize_boundary_at`
+      expose the order to callers.  Pulled the leaf utilities
+      (`uop_arity`, `uop_is_*_elementwise`, `term_shape_in`,
+      `term_dtype_in`) into a new `src/schedule/uop_meta.c` so the
+      include order is `uop_meta -> consumer_count -> realize_classify
+      -> materialize` (materialize now consumes REALIZE_INFO from
+      `realize_classify.c`).  `tests/test_materialize_v2.c` covers
+      shared-subexpression (s + sink), linear chain (sink only),
+      single REDUCE root, and chain of two REDUCEs.  10/10 green;
+      no regression on the existing 99/166 stub-baseline fail count.
 
 - [ ] **g2b: build_kernel for elementwise + REDUCE-as-tail roots**.
       Implement the `visit(uop)` recursion that collects program

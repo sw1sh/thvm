@@ -168,9 +168,10 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // Produces the scheduled DAG of UOP_KERNEL terms that
 // interact_kernel fires bottom-up.
 #include "schedule/kernel_alloc.c"
-#include "schedule/materialize.c"
+#include "schedule/uop_meta.c"
 #include "schedule/consumer_count.c"
 #include "schedule/realize_classify.c"
+#include "schedule/materialize.c"
 
 // === interact/ ===
 // Interaction rules.  uop_kernel.c needs the schedule pipeline above

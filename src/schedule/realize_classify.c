@@ -20,23 +20,17 @@
 // parent (e.g., MUL[x, x]) counts as ONE consumer of x, since
 // the materializer dedups.
 
-#define REALIZE_INFO_CAP 4096
+// REALIZE_INFO_CAP + UOpInfo struct + REALIZE_INFO/REALIZE_INFO_LEN
+// declared in thvm.h so materialize.c can iterate the table.
 
-typedef struct {
-  u64 loc;             // heap loc identifying the UOp instance
-  u32 consumer_count;  // # of distinct UOp parents that reference it
-  u8  op;              // UOP_*
-  u8  realized;        // set in classify_apply
-} UOpInfo;
-
-static UOpInfo REALIZE_INFO    [REALIZE_INFO_CAP];
-static u32     REALIZE_INFO_LEN = 0;
+UOpInfo REALIZE_INFO    [REALIZE_INFO_CAP];
+u32     REALIZE_INFO_LEN = 0;
 
 fn void realize_info_clear(void) {
   REALIZE_INFO_LEN = 0;
 }
 
-static u32 realize_info_find(u64 loc) {
+fn u32 realize_info_find(u64 loc) {
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     if (REALIZE_INFO[i].loc == loc) return i;
   }

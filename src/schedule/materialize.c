@@ -1,151 +1,98 @@
-// schedule/materialize.c - PURGED stub.
+// schedule/materialize.c - tinygrad-style scheduler.
 //
-// The previous round-1/2 materialize implementation (recursive emit
-// + inlined-helper + memo + walk + shape_env, ~2050 LOC) is gone.
-// This stub keeps just the leaf utilities that other compilation
-// units (realize_classify, gc_mark, wnf/redex, interact/uop_kernel)
-// reference, plus a no-op thvm_materialize entry point so the build
-// still links.  The clean rewrite lands in g2.
+// g2a (current): scheduler skeleton.  Calls realize_classify to mark
+// kernel-boundary UOps (root + multi-consumer + REDUCE), then topo-
+// sorts the boundary set by producer-to-consumer depth so g2b's
+// build_kernel can iterate in dependency order.  No code emission
+// yet -- thvm_materialize returns the input term unchanged.
 
-fn u8 uop_arity(u8 op) {
-  switch (op) {
-    case UOP_CONST:
-      return 0;
-    case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2: case UOP_SQRT:
-    case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
-    case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
-    case UOP_REDUCE:  case UOP_LOAD:
-      return 1;
-    case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
-      return 2;
-    default:
-      return 0;
+#define BOUNDARY_ORDER_CAP 1024
+static u64 BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
+static u32 BOUNDARY_ORDER_LEN = 0;
+
+#define BOUNDARY_DEPTH_INVALID 0xFFFFFFFFu
+static u32 BOUNDARY_DEPTH[REALIZE_INFO_CAP];
+
+// Depth of a UOp loc in terms of upstream BOUNDARY count: 1 + max
+// upstream boundary depth if `loc` itself is a boundary; otherwise
+// just the max upstream depth (so non-boundary intermediates pass
+// the count through to their downstream consumer).  Returns 0 for
+// locs not in REALIZE_INFO (TEN leaves, KERNELs, anything outside
+// the classified subgraph).
+static u32 boundary_depth_rec(u64 loc) {
+  u32 idx = realize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 0;
+  if (BOUNDARY_DEPTH[idx] != BOUNDARY_DEPTH_INVALID) return BOUNDARY_DEPTH[idx];
+  // Pre-set to 0 so any (impossible) cycle terminates without
+  // infinite recursion.
+  BOUNDARY_DEPTH[idx] = 0;
+
+  u32 max_up = 0;
+  u8  ar     = uop_arity(REALIZE_INFO[idx].op);
+  u64 seen[MAX_UOP_SRC] = {0};
+  u8  n_seen = 0;
+  for (u8 i = 0; i < ar; i++) {
+    Term child = heap_read(loc + i);
+    if (term_tag(child) != TAG_UOP)        continue;
+    if (term_ext(child) == UOP_KERNEL)     continue;
+    u64 cloc = term_val(child);
+    u8  dup  = 0;
+    for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
+    if (dup) continue;
+    seen[n_seen++] = cloc;
+    u32 cd = boundary_depth_rec(cloc);
+    if (cd > max_up) max_up = cd;
   }
+  u32 d = REALIZE_INFO[idx].realized ? max_up + 1 : max_up;
+  BOUNDARY_DEPTH[idx] = d;
+  return d;
 }
 
-fn u8 uop_is_unary_elementwise(u8 op) {
-  return op == UOP_NEG || op == UOP_RECIP || op == UOP_EXP2
-      || op == UOP_LOG2 || op == UOP_SQRT;
+// Populate BOUNDARY_ORDER with realized UOp locs sorted by depth
+// ascending; tie-break by loc to make the order deterministic.
+static void topo_sort_boundaries(Term root) {
+  BOUNDARY_ORDER_LEN = 0;
+  for (u32 i = 0; i < REALIZE_INFO_CAP; i++)
+    BOUNDARY_DEPTH[i] = BOUNDARY_DEPTH_INVALID;
+  // Trigger depth computation across the whole reachable subgraph.
+  boundary_depth_rec(term_val(root));
+
+  // Collect (loc, depth) for every realized entry.
+  struct { u64 loc; u32 depth; } items[BOUNDARY_ORDER_CAP];
+  u32 n = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN && n < BOUNDARY_ORDER_CAP; i++) {
+    if (!REALIZE_INFO[i].realized) continue;
+    items[n].loc   = REALIZE_INFO[i].loc;
+    items[n].depth = BOUNDARY_DEPTH[i];
+    n++;
+  }
+  // Insertion sort: depth ascending, then loc ascending.
+  for (u32 i = 1; i < n; i++) {
+    for (u32 j = i; j > 0; j--) {
+      u8 swap = (items[j].depth <  items[j-1].depth)
+            || (items[j].depth == items[j-1].depth && items[j].loc < items[j-1].loc);
+      if (!swap) break;
+      u64 lt = items[j].loc;   items[j].loc   = items[j-1].loc;   items[j-1].loc   = lt;
+      u32 dt = items[j].depth; items[j].depth = items[j-1].depth; items[j-1].depth = dt;
+    }
+  }
+  for (u32 i = 0; i < n; i++) BOUNDARY_ORDER[BOUNDARY_ORDER_LEN++] = items[i].loc;
 }
 
-fn u8 uop_is_binary_elementwise(u8 op) {
-  return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ;
-}
-
-// Best-effort shape inference used by interact_grad to figure
-// out the shape of an upstream UOp/TEN at GRAD-unroll time.
-// Pure function over the heap; does NOT consult any shape
-// environment (callers always pass env_id=0).  The g2 rewrite
-// will likely replace this with a one-pass shape annotation, but
-// keeping the recursion here is the smallest surface that lets
-// interact_grad keep working through the purge.
-fn int term_shape_in(Term t, u32 env_id, Shape *out) {
-  (void)env_id;
-  u8 tag = term_tag(t);
-  if (tag == TAG_TEN) {
-    u32 tid = (u32)term_val(t);
-    if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].view.shape; return 1; }
-    return 0;
-  }
-  if (tag != TAG_UOP) return 0;
-  u8  op  = term_ext(t);
-  u64 loc = term_val(t);
-  if (op == UOP_KERNEL) {
-    Term outbuf = heap_read(loc);
-    if (term_tag(outbuf) == TAG_TEN) {
-      u32 tid = (u32)term_val(outbuf);
-      if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].view.shape; return 1; }
-    }
-    return 0;
-  }
-  if (uop_is_unary_elementwise(op) || op == UOP_LOAD || op == UOP_FLIP) {
-    return term_shape_in(heap_read(loc), 0, out);
-  }
-  if (uop_is_binary_elementwise(op)) {
-    Shape la, lb; int la_ok = term_shape_in(heap_read(loc + 0), 0, &la);
-    int lb_ok = term_shape_in(heap_read(loc + 1), 0, &lb);
-    if (!la_ok && !lb_ok) return 0;
-    if (!la_ok) { *out = lb; return 1; }
-    if (!lb_ok) { *out = la; return 1; }
-    u32 na = 1, nb = 1;
-    for (u32 i = 0; i < la.ndim; i++) na *= la.dims[i];
-    for (u32 i = 0; i < lb.ndim; i++) nb *= lb.dims[i];
-    *out = (na >= nb) ? la : lb; return 1;
-  }
-  if (op == UOP_CONST) {
-    out->ndim = 1; out->dims[0] = 1;
-    for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0;
-    return 1;
-  }
-  if (op == UOP_RESHAPE || op == UOP_EXPAND) {
-    u32 ndim = (u32)term_val(heap_read(loc + 1));
-    out->ndim = ndim;
-    for (u32 i = 0; i < ndim && i < MAX_DIM; i++)
-      out->dims[i] = (u32)term_val(heap_read(loc + 2 + i));
-    for (u32 i = ndim; i < MAX_DIM; i++) out->dims[i] = 0;
-    return 1;
-  }
-  if (op == UOP_PAD || op == UOP_SHRINK) {
-    Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
-    out->ndim = cs.ndim;
-    for (u32 i = 0; i < cs.ndim; i++) {
-      u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
-      u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
-      out->dims[i] = (op == UOP_PAD) ? cs.dims[i] + b + e
-                                     : ((e > b) ? (e - b) : 0);
-    }
-    for (u32 i = cs.ndim; i < MAX_DIM; i++) out->dims[i] = 0;
-    return 1;
-  }
-  if (op == UOP_PERMUTE) {
-    Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
-    out->ndim = cs.ndim;
-    for (u32 i = 0; i < cs.ndim; i++) {
-      u32 pi = (u32)term_val(heap_read(loc + 1 + i));
-      out->dims[i] = cs.dims[pi];
-    }
-    for (u32 i = cs.ndim; i < MAX_DIM; i++) out->dims[i] = 0;
-    return 1;
-  }
-  if (op == UOP_REDUCE) {
-    Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
-    u32 axis = (u32)term_val(heap_read(loc + 2));
-    if (cs.ndim <= 1) {
-      out->ndim = 1; out->dims[0] = 1;
-      for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0; return 1;
-    }
-    u32 dst = 0;
-    for (u32 i = 0; i < cs.ndim; i++) { if (i == axis) continue; out->dims[dst++] = cs.dims[i]; }
-    out->ndim = dst;
-    for (u32 i = dst; i < MAX_DIM; i++) out->dims[i] = 0;
-    return 1;
-  }
-  return 0;
-}
-
-fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
-  (void)env_id;
-  u8 tag = term_tag(t);
-  if (tag == TAG_TEN) {
-    u32 tid = (u32)term_val(t);
-    if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].dtype; return 1; }
-  }
-  if (tag == TAG_UOP && term_ext(t) == UOP_KERNEL) {
-    Term outbuf = heap_read(term_val(t));
-    if (term_tag(outbuf) == TAG_TEN) {
-      u32 tid = (u32)term_val(outbuf);
-      if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].dtype; return 1; }
-    }
-  }
-  *out = DT_F32; return 1;
-}
+fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
+fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN ? BOUNDARY_ORDER[i] : 0; }
 
 // Stub: view tests still call this directly to exercise the
-// movement-op kernelize path.  g2 will replace with the real
-// build_kernel entry point.  Returns the input unchanged for
-// now so callers compile; tests that depend on the side effects
-// will fail until g2 lands.
+// movement-op kernelize path.  g2c will replace with the real
+// view-rewrite path.  Returns the input unchanged for now.
 fn Term materialize_uop_in_env(Term t, u32 env_id) { (void)env_id; return t; }
 
-fn Term thvm_materialize(Term term) { return term; }
+fn Term thvm_materialize(Term term) {
+  if (term_tag(term) != TAG_UOP)        return term;
+  if (term_ext(term) == UOP_KERNEL)     return term;
+  realize_classify(term);
+  topo_sort_boundaries(term);
+  // g2b will iterate BOUNDARY_ORDER and build a kernel per boundary,
+  // then return a Term referencing the sink kernel.
+  return term;
+}
