@@ -4906,25 +4906,20 @@ implemented + tested (f1a) but never invoked by the pipeline.
         exhaustion -- is gone; toggle ON now lands cleanly
         across the full sweep).  ~80 LOC.
 
-  - [ ] **f1d-d4b2b1: stop helper from bailing on realized
-        upstream**.  In src/schedule/materialize_inlined.c,
-        `inline_emit` returns 0xFFFFFFFFu when it meets a
-        child UOp that's classified realized:
-            if (realize_is_realized(r)) return 0xFFFFFFFFu;
-        The bail cascades up to materialize_kernel_inlined,
-        which dealloc's the kernel and returns 0; the
-        caller then falls back to legacy emit.  Fix:
-        instead of bailing, recursively materialize the
-        realized child via `materialize_expr` (which goes
-        through the per-realize memo, so the child gets
-        ONE kernel even if reachable through many paths),
-        then add that kernel's output TenDesc as an input
-        slot to the current kernel.  This eliminates the
-        cascade without needing multi-stage programs.
-        Acceptance: 166 C + 292 WL green with default ON
-        AND OFF; linear-train memory-probe.wls toggle-ON
-        kernel count drops below the toggle-OFF baseline
-        (currently OFF=93, ON=168).  ~30-50 LOC.
+  - [x] **f1d-d4b2b1: stop helper from bailing on realized
+        upstream**.  inline_emit's realized-bail
+        (`if (realize_is_realized(r)) return 0xFFFFFFFFu;`)
+        now recursively materializes the realized child
+        via materialize_expr (memo-wrapped, so dedups
+        across paths) and adds the resulting kernel's
+        output TenDesc as an input slot to the current
+        kernel.  Helper now succeeds on the realized-
+        upstream cohort -- linear-train toggle-ON drops
+        from 18+79+71=168 to 15+75+67=157 kernels.  Still
+        above the toggle-OFF baseline (93); the rest of
+        the gap is movement-op upstream which d4b2b2
+        addresses.  166 C + 292 WL green with default OFF.
+        ~30 LOC in materialize_inlined.c.
 
   - [ ] **f1d-d4b2b2: stop helper from bailing on non-
         inlinable un-realized upstream (movement ops)**.

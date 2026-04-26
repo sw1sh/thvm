@@ -74,7 +74,32 @@ static u32 inline_emit(InlineCtx *ctx, Term t) {
 
   if (tag != TAG_UOP) return 0xFFFFFFFFu;
   u8 op = term_ext(r);
-  if (realize_is_realized(r)) return 0xFFFFFFFFu;   // would need its own kernel
+  // f1d-d4b2b1: realized upstream gets its own kernel via the
+  // memo-wrapped materialize_expr (which dedups across paths).
+  // The output TenDesc becomes an input slot here -- so the bail
+  // that used to cascade up to materialize_kernel_inlined and
+  // force a legacy fall-through is gone.  Helper now succeeds on
+  // graphs whose realized parents have realized (REDUCE / multi-
+  // consumer) upstream, which is the common LeNet/linear-train
+  // backward shape.
+  if (realize_is_realized(r)) {
+    Term mat = materialize_expr(r);
+    u32  tid = 0;
+    if (term_tag(mat) == TAG_UOP && term_ext(mat) == UOP_KERNEL) {
+      Term out_buf = heap_read(term_val(mat));
+      if (term_tag(out_buf) != TAG_TEN) return 0xFFFFFFFFu;
+      tid = (u32)term_val(out_buf);
+    } else if (term_tag(mat) == TAG_TEN) {
+      tid = (u32)term_val(mat);
+    } else {
+      return 0xFFFFFFFFu;
+    }
+    if (tid == 0 || tid >= TENS_NEXT) return 0xFFFFFFFFu;
+    i32 slot = inline_find_or_add_input(ctx->ke, tid,
+        TENS[tid].dtype, TENS[tid].view.numel);
+    if (slot < 0) return 0xFFFFFFFFu;
+    return KSRC_AS_INPUT((u32)slot);
+  }
   if (!inline_is_inlinable(op))   return 0xFFFFFFFFu;
 
   // Memo: same UOp instance may appear via shared subexpression.
