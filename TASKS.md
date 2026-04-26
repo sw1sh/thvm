@@ -282,47 +282,41 @@ Root causes:
       ON only for forward realizes) would let LeNet harvest
       the forward win without the backward cost.
 
-- [ ] **r2a: probe + decide what bufs are recyclable**.  Dump
-      per-buf {alloc_depth, last_use_depth, nbytes, status} from
-      TMemoryPlan on linear-train + lenet.  Target measurement:
-      "how many bufs are alive at peak depth?" and "if the
-      allocator freed them at last_use_depth, what would peak
-      drop to?".  Output: a 1-paragraph note + concrete numbers.
-      The TMemoryPlan code already computes peak_concurrent /
-      headroom -- this is mostly about reading those numbers off
-      cleanly and confirming the lifetime-aware claim ("freeing
-      at last_use would drop peak by X KiB").  ~20 LOC probe +
-      diagnosis paragraph in TASKS.md.
+- [x] **r2a: probe + decide what bufs are recyclable**.
+      Probed both graphs by computing the "naive lifetime-aware
+      peak" = max-over-depth of (sum of nbytes of bufs whose
+      [alloc_depth, last_use_depth] interval covers that depth):
+        linear-train: peak 0.562 KiB, naive lifetime-aware
+                      peak 0.562 KiB -> **0% potential drop**.
+        lenet      : peak 1882.3 KiB, naive lifetime-aware
+                      peak 1882.3 KiB -> **0% potential drop**.
+      The peak IS already the lifetime-aware optimum.  The
+      57.6%/52.8% slot-reuse-headroom metric is misleading:
+      it's `(total_alloc - peak) / total_alloc`, which is the
+      gap between cumulative allocations and concurrent peak.
+      The slot allocator can only reduce peak if some buf is
+      freed AND a new alloc could reuse the slot during the
+      same depth window.  Here every buf alive at peak depth
+      is concurrently needed by the DAG -- nothing to release.
+      r2's premise was wrong; r2b/r2c/r2d would deliver 0%
+      peak drop and are now blocked.
 
-- [ ] **r2b: per-kernel "free-after" list at materialize time**.
-      Walk the KERNELS table once after materialize; for each
-      input_tid, find its LAST consumer kernel.  Store as
-      `KernelEntry.free_tids[KERNEL_MAX_INPUT]` -- list of
-      tids that should be released right after this kernel
-      fires.  No runtime change yet -- just compute + store.
-      Tests: a 3-kernel chain `c = a + b; e = c * d; out = ...`
-      asserts kernel(`c=a+b`)'s free_tids contains a + b
-      (last-used by c).  ~50 LOC + ~30 LOC tests.
+- [blocked: r2a probe shows naive lifetime-aware peak == current
+  peak (0% potential drop).  The bufs alive at peak depth are
+  concurrently needed by the DAG; no scheduling-side fix can
+  reduce peak.  Real memory wins need a graph-structural
+  change (smaller forward, fewer realized intermediates) or
+  in-place compute -- both are bigger arcs than r2 was
+  scoped for.] **r2b: per-kernel "free-after" list at
+  materialize time**.
 
-- [ ] **r2c: kernel_fire releases free_tids[] to the freelist**.
-      In `interact_kernel` (or wherever a kernel finishes
-      firing), call `cpu_buf_decref` on each free_tid; that
-      already pushes to the freelist when refcount hits 0.
-      The wpt-pin walk's preserve set is bypassed because we're
-      not freeing via pool_rollback -- just decref'ing
-      explicitly per the schedule.  Tests: a 3-kernel chain
-      asserts that input bufs get freed (`refcount == 0`) right
-      after their last consumer fires, AND that subsequent
-      kernel_alloc reuses those slots.  ~30 LOC + ~30 LOC tests.
+- [blocked: same as r2b -- gated on r2's premise being
+  correct, which r2a falsified.] **r2c: kernel_fire releases
+  free_tids[] to the freelist**.
 
-- [ ] **r2d: bench delta + verify acceptance**.  Re-run
-      linear-train memory-probe.wls + bench baseline.wls on
-      both backends.  Acceptance: linear-train peak drops by
-      >=40% (was 0.6 KiB, target <=0.36 KiB); lenet peak drops
-      by >=20% (was 1882.3, target <=1500); verify.wls still
-      converges loss 2.61 -> 0.025.  Update
-      docs/bench-results.md with a "post-r2" row.  ~10 LOC +
-      measurement.
+- [blocked: same as r2b/r2c -- no peak drop is reachable
+  from this mechanism per r2a.] **r2d: bench delta + verify
+  acceptance**.
 
 - [ ] **r3: Gantt rendering that survives tiny-buf graphs**.
       Linear-train's bufs are sub-1-KiB so linear-scan packing
