@@ -191,13 +191,17 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       EOF survives multiple calls, skip_to_section finds the
       keyword and leaves the lexer positioned past it, and the
       EOF / empty-source paths.
-- [ ] 6.3c2 NAME / MODE / SORTS section parsers: each reads
-      its single-line content (one ident for NAME, "PROOF"
-      vs "COMPLETION" for MODE, ident list for SORTS) and
-      returns the next section keyword via the shared
-      `wald_skip_to_section` helper.  Tests drive each
-      parser with a fixture string that ends in a known
-      section keyword.
+- [x] 6.3c2 `wald_parse_name` / `wald_parse_mode` /
+      `wald_parse_sorts` land in `src/wald/_.c`.  Each peeks for
+      an immediate section keyword (empty section), otherwise
+      consumes its content (one ident for NAME copied into
+      `spec->name`; one ident for MODE setting `mode_proof = 0`
+      iff "COMPLETION", else 1; ident list for SORTS, consumed
+      and discarded).  Internal helper
+      `wald_consume_if_section` factors the empty-section check.
+      Tests drive each parser with a fixture, verify the right
+      next-section enum is returned, and that the lexer is
+      positioned past the keyword for downstream parsers.
 - [ ] 6.3c3 SIGNATURE section parser: per entry
       `name : arg_sorts -> result_sort` register the symbol
       in `spec->symbols[]` with a fresh CTR label and arity =

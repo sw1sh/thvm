@@ -183,3 +183,70 @@ fn WaldSection wald_skip_to_section(WaldLex *lex) {
     }
   }
 }
+
+// === 6.3c2: NAME / MODE / SORTS section parsers ====================
+
+// Peek the next token; if it's a section keyword consume + return
+// the section enum, else return WSEC_NONE without consuming.  Used
+// at the top of each section parser to handle empty sections (the
+// next keyword can sit right at the start).
+static WaldSection wald_consume_if_section(WaldLex *lex) {
+  if (wald_lex_peek(lex) != WT_IDENT) return WSEC_NONE;
+  WaldSection sec = wald_section_from_ident(lex->peeked_text);
+  if (sec != WSEC_NONE) wald_lex_next(lex);
+  return sec;
+}
+
+// NAME: one ident as the spec's identifier.  Empty NAME (immediate
+// section keyword) leaves spec->name unchanged.
+fn WaldSection wald_parse_name(WaldSpec *spec, WaldLex *lex) {
+  WaldSection sec = wald_consume_if_section(lex);
+  if (sec != WSEC_NONE) return sec;
+  if (wald_lex_peek(lex) == WT_IDENT) {
+    wald_lex_next(lex);
+    if (spec != NULL) {
+      u32 n = lex->tok_len;
+      if (n >= WALD_NAME_LEN) n = WALD_NAME_LEN - 1;
+      for (u32 i = 0; i < n; i++) spec->name[i] = lex->tok_text[i];
+      spec->name[n] = '\0';
+    }
+  }
+  return wald_skip_to_section(lex);
+}
+
+// MODE: "PROOF" -> mode_proof = 1; "COMPLETION" -> 0; anything else
+// or empty -> leave default (PROOF).
+fn WaldSection wald_parse_mode(WaldSpec *spec, WaldLex *lex) {
+  WaldSection sec = wald_consume_if_section(lex);
+  if (sec != WSEC_NONE) return sec;
+  if (wald_lex_peek(lex) == WT_IDENT) {
+    wald_lex_next(lex);
+    if (spec != NULL) {
+      spec->mode_proof = (strcmp(lex->tok_text, "COMPLETION") == 0) ? 0 : 1;
+    }
+  }
+  return wald_skip_to_section(lex);
+}
+
+// SORTS: list of sort names separated by whitespace.  We assume a
+// homogeneous signature for stages 5-7, so the sort names are
+// consumed but not stored.
+fn WaldSection wald_parse_sorts(WaldSpec *spec, WaldLex *lex) {
+  (void)spec;
+  for (;;) {
+    WaldTokKind k = wald_lex_peek(lex);
+    if (k == WT_END) return WSEC_NONE;
+    if (k == WT_IDENT) {
+      WaldSection sec = wald_section_from_ident(lex->peeked_text);
+      if (sec != WSEC_NONE) {
+        wald_lex_next(lex);
+        return sec;
+      }
+      // Sort name; consume + ignore.
+      wald_lex_next(lex);
+      continue;
+    }
+    // Anything else: skip.
+    wald_lex_next(lex);
+  }
+}

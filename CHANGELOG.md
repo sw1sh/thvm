@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: NAME / MODE / SORTS section parsers (stage 6.3c2)
+
+`src/wald/_.c` lands three parsers with the same shape:
+
+- `wald_parse_name`  -- one ident -> `spec->name`
+- `wald_parse_mode`  -- one ident; `"COMPLETION"` -> `mode_proof
+  = 0`, anything else (or empty) -> `mode_proof = 1`
+- `wald_parse_sorts` -- ident list consumed and discarded
+  (homogeneous-signature assumption for stages 5-7)
+
+Each peeks for an immediate section keyword (empty section ->
+return next section's enum without touching `spec`), otherwise
+consumes its content + falls through to `wald_skip_to_section`.
+Internal helper `wald_consume_if_section` factors the empty
+check.
+
+Tests in `tests/test_wald.c` (88 sub-checks) cover the populated
+path (`name == "group"`, `mode_proof = 1` for PROOF / 0 for
+COMPLETION, sorts consumed leaving the lexer at the next
+section), the empty-section path (immediate next keyword leaves
+defaults intact), and the EOF path (returns `WSEC_NONE`).
+
 ### Added: section-detect infrastructure for the .pr parser (stage 6.3c1)
 
 `src/thvm.h`:

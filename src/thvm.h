@@ -963,6 +963,16 @@ typedef enum {
 fn WaldSection wald_section_from_ident(const char *name);
 fn WaldSection wald_skip_to_section   (WaldLex *lex);
 
+// 6.3c2: per-section parsers for the simple text sections.  Each
+// takes a `WaldSpec *` (may be NULL to discard the parsed value),
+// expects the lexer to be positioned just past the section header,
+// reads the section content, and returns the next section's enum
+// (or WSEC_NONE on EOF).  Falls back through `wald_skip_to_section`
+// on unrecognized content.
+fn WaldSection wald_parse_name (WaldSpec *spec, WaldLex *lex);
+fn WaldSection wald_parse_mode (WaldSpec *spec, WaldLex *lex);
+fn WaldSection wald_parse_sorts(WaldSpec *spec, WaldLex *lex);
+
 // Pop the next CP off the queue.  FIFO for now; 5.3 upgrades to
 // priority-collapse over INC-wrapped CPs.  Returns 1 on success
 // (out-params populated), 0 if the queue is empty.

@@ -209,6 +209,76 @@ int main(void) {
     CHECK_EQ((int)wald_skip_to_section(&lex), (int)WSEC_NONE);
   }
 
+  // === 6.3c2 NAME / MODE / SORTS parsers =============================
+
+  TEST_BEGIN("wald/parse-name-stores-and-finds-next-section");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "group MODE PROOF");
+    WaldSpec *s = wald_init();
+    WaldSection next = wald_parse_name(s, &lex);
+    CHECK_EQ((int)next, (int)WSEC_MODE);
+    CHECK_EQ((int)strcmp(s->name, "group"), 0);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-name-empty-section-keeps-default");
+  {
+    // Section keyword right after NAME header -> empty NAME.
+    WaldLex lex;
+    wald_lex_init(&lex, "MODE PROOF");
+    WaldSpec *s = wald_init();
+    WaldSection next = wald_parse_name(s, &lex);
+    CHECK_EQ((int)next, (int)WSEC_MODE);
+    CHECK_EQ((int)s->name[0], 0);   // unchanged
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-mode-proof-keeps-flag");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "PROOF SIGNATURE");
+    WaldSpec *s = wald_init();
+    s->mode_proof = 0;   // start cleared so we can see the parser set it
+    WaldSection next = wald_parse_mode(s, &lex);
+    CHECK_EQ((int)next, (int)WSEC_SIGNATURE);
+    CHECK_EQ((int)s->mode_proof, 1);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-mode-completion-clears-flag");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "COMPLETION SIGNATURE");
+    WaldSpec *s = wald_init();
+    WaldSection next = wald_parse_mode(s, &lex);
+    CHECK_EQ((int)next, (int)WSEC_SIGNATURE);
+    CHECK_EQ((int)s->mode_proof, 0);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-sorts-consumes-list");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "ANY ANY1 ANY2 SIGNATURE foo");
+    WaldSpec *s = wald_init();
+    WaldSection next = wald_parse_sorts(s, &lex);
+    CHECK_EQ((int)next, (int)WSEC_SIGNATURE);
+    // The next token after the parser should be "foo".
+    CHECK_EQ((int)wald_lex_next(&lex), (int)WT_IDENT);
+    CHECK_EQ((int)strcmp(lex.tok_text, "foo"), 0);
+    wald_free(s);
+  }
+
+  TEST_BEGIN("wald/parse-sorts-eof-yields-none");
+  {
+    WaldLex lex;
+    wald_lex_init(&lex, "ANY ANY1");
+    WaldSpec *s = wald_init();
+    CHECK_EQ((int)wald_parse_sorts(s, &lex), (int)WSEC_NONE);
+    wald_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
