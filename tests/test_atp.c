@@ -1844,6 +1844,66 @@ int main(void) {
     thvm_atp_free(s_lpo);
   }
 
+  // === Stage 9.3: heap checkpoint/reset =============================
+
+  TEST_BEGIN("atp/heap-checkpoint/reads-heap-next");
+  {
+    u64 c1 = thvm_atp_heap_checkpoint();
+    // Allocate a fresh CTR; checkpoint should advance.
+    (void)mk_a();
+    u64 c2 = thvm_atp_heap_checkpoint();
+    CHECK(c2 > c1);
+  }
+
+  TEST_BEGIN("atp/heap-reset/pops-back");
+  {
+    u64 c0 = thvm_atp_heap_checkpoint();
+    Term t = mk_f(mk_a(), mk_e());
+    (void)t;
+    u64 c1 = thvm_atp_heap_checkpoint();
+    CHECK(c1 > c0);
+    thvm_atp_heap_reset(c0);
+    u64 c2 = thvm_atp_heap_checkpoint();
+    CHECK_EQ(c2, c0);
+  }
+
+  TEST_BEGIN("atp/heap-reset/refuses-to-advance");
+  {
+    u64 c0 = thvm_atp_heap_checkpoint();
+    (void)mk_a();
+    u64 c1 = thvm_atp_heap_checkpoint();
+    // Calling reset with a checkpoint past the current HEAP_NEXT
+    // is a silent no-op; HEAP_NEXT must not move forward.
+    thvm_atp_heap_reset(c1 + 1024);
+    u64 c2 = thvm_atp_heap_checkpoint();
+    CHECK_EQ(c2, c1);
+  }
+
+  TEST_BEGIN("atp/heap-reset/joined-cp-reclaims-cells");
+  {
+    // After running saturation on axioms whose first CP is
+    // trivially joinable, the per-step rewrite block in
+    // thvm_atp_step pops back via heap_reset.  Compare HEAP_NEXT
+    // before vs. after a single step that should join trivially.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 8);
+    s->use_ic_rewrite = 1u;
+    // Equation a = a -- normalize on both sides is a no-op, kbo_eq
+    // matches at the top, the CP is discarded.
+    thvm_atp_add_equation(s, mk_a(), mk_a());
+
+    u64 before = thvm_atp_heap_checkpoint();
+    AtpStatus st = thvm_atp_step(s);
+    u64 after  = thvm_atp_heap_checkpoint();
+
+    CHECK_EQ((int)st, (int)ATP_RUNNING);
+    // For the joined-CP case the normalize cells are reclaimed,
+    // so HEAP_NEXT does not balloon past `before` by more than a
+    // small constant (at most a few cells from select_cp / book-
+    // keeping that live above the checkpoint).
+    CHECK(after <= before + 8u);
+    thvm_atp_free(s);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

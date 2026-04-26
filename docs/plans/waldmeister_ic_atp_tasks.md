@@ -761,7 +761,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       Detects file path argument, reads via the C-side
       parser, runs the saturator, decodes the result.  Most of
       the work is the file-vs-expression dispatch in TATP.
-- [ ] 9.3 heap-resetting mechanism between saturation steps:
+- [x] 9.3 heap-resetting mechanism between saturation steps:
       8.3e-iii's bench finding noted IC-rewrite at budget=256
       overflows HEAP_CAP.  Add a `thvm_atp_heap_checkpoint`
       that snapshots the heap pointer; saturation step pops

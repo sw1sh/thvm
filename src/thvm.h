@@ -1086,6 +1086,22 @@ fn u32       thvm_atp_narrow_all  (AtpState *s, Term lhs, Term rhs,
                                    u32 max_depth, u32 max_witnesses,
                                    RewriteSubst *witnesses);
 
+// 9.3: heap checkpoint/reset for saturation memory hygiene.
+// IC-routed rewrites (use_ic_rewrite=1) allocate many cells per
+// step; over a long saturation those accumulate into the 16M-cell
+// HEAP_CAP.  Many of them are dead by the time the step completes
+// (e.g. CPs that turn out to be trivially joinable -- the
+// normalized lhs/rhs are not referenced afterward).
+//
+// `thvm_atp_heap_checkpoint()` snapshots HEAP_NEXT;
+// `thvm_atp_heap_reset(c)` pops back, reclaiming the cells in
+// between.  Caller is responsible for ensuring no live Term
+// references those cells before resetting -- the saturation step
+// resets only on the discard path (CP becomes trivially joined),
+// where neither l nor r is used downstream.
+fn u64       thvm_atp_heap_checkpoint(void);
+fn void      thvm_atp_heap_reset     (u64 checkpoint);
+
 // 8.9c: set an existential conjecture.  Sets goal_lhs / goal_rhs
 // AND flips `s->goal_existential = 1` so `thvm_atp_goal_check`
 // uses the narrowing path.  FVRs in lhs / rhs are interpreted

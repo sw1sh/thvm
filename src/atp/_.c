@@ -289,6 +289,18 @@ fn void thvm_atp_free(AtpState *s) {
   free(s);
 }
 
+// === 9.3: heap checkpoint/reset =====================================
+fn u64 thvm_atp_heap_checkpoint(void) {
+  return HEAP_NEXT;
+}
+
+fn void thvm_atp_heap_reset(u64 checkpoint) {
+  // Only allow popping back; never advance (callers should use
+  // term_new_* for that).  Silent no-op on out-of-range to make
+  // the API safe to sprinkle in step paths.
+  if (checkpoint <= HEAP_NEXT) HEAP_NEXT = checkpoint;
+}
+
 // Push a trace entry as a TAG_CTR with label = reason and children
 // [NUM(parent_a), NUM(parent_b), lhs, rhs].  Returns the entry's
 // index in s->trace, or ATP_TRACE_NONE if the buffer is full.
@@ -537,11 +549,18 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
     return ATP_QUEUE_EMPTY;
   }
 
+  // 9.3: snapshot the heap before the (potentially heavy) IC-routed
+  // rewrite cells are allocated.  When the CP is trivially joined
+  // (kbo_eq(l, r) below), neither l nor r is referenced downstream
+  // and the entire normalize block is dead -- pop back.
+  u64 hcp_norm = thvm_atp_heap_checkpoint();
+
   const u32 NORM_CAP = 64;
   Term l = atp_rewrite_normalize(s, cp_lhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
   Term r = atp_rewrite_normalize(s, cp_rhs, s->lhs, s->rhs, s->n_rules, NORM_CAP);
 
   if (kbo_eq(l, r)) {
+    thvm_atp_heap_reset(hcp_norm);
     s->step++;
     return ATP_RUNNING;
   }

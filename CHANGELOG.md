@@ -6,6 +6,33 @@ dated section.
 
 ## Unreleased
 
+### Added: heap checkpoint/reset for saturation hygiene (stage 9.3)
+
+`thvm_atp_heap_checkpoint()` snapshots `HEAP_NEXT`;
+`thvm_atp_heap_reset(c)` pops it back, reclaiming the cells
+in between. The saturation step (`thvm_atp_step`) now
+checkpoints just before the per-CP rewrite-normalize block
+and resets on the trivially-joined branch, where neither `l`
+nor `r` is referenced downstream. Reset is a silent no-op if
+the requested checkpoint is past the current `HEAP_NEXT`
+(API safe to sprinkle in step paths).
+
+Most CPs end up trivially joined, so this should materially
+reduce intra-saturation cell accumulation under
+`use_ic_rewrite = 1`. 8.3e-iii's `BENCH_STEP_BUDGET = 32`
+was set to dodge `HEAP_CAP` overflow at 256; this change
+gives back headroom on that bound.
+
+Tests (4 new cases in `tests/test_atp.c`):
+- `heap-checkpoint/reads-heap-next`
+- `heap-reset/pops-back`
+- `heap-reset/refuses-to-advance` (silent no-op invariant)
+- `heap-reset/joined-cp-reclaims-cells` (functional check on
+  a trivially-joined axiom: HEAP_NEXT after a step stays
+  within a few cells of the pre-step checkpoint)
+
+166/166 C, 323 WL.
+
 ### Added: file-driven TATP runner (stage 9.2)
 
 `TATP[File["path.pr"]]` parses a Waldmeister .pr spec via
