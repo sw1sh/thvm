@@ -6,6 +6,31 @@ dated section.
 
 ## Unreleased
 
+### Added: ICC sort dispatch resolution memo (stage 8.3d)
+
+`docs/plans/icc_sort_dispatch.md` (~110 lines) closes 8.3d with
+**no IC code changes**.  Analysis: the "wrong-sort dispatch"
+intent is already satisfied by 8.4's infrastructure:
+
+1. Entry-point gating (8.4d) rejects ill-sorted equations /
+   goals before they reach saturation.
+2. Closed-world inheritance: well-sorted entry + well-typed
+   rules guarantees well-sorted CPs through the rewriting
+   chain.
+3. Head-symbol dispatch in `prim_rewrite_step` already
+   discriminates correctly when signatures aren't overloaded.
+
+ICC `TAG_BRI` / `TAG_ANN` (about lambda-calculus dependent
+types) would only buy something with **operator overloading**
+(same name, multiple sort signatures) or **SupGen-style sort
+superposition** (stage 8.10) -- neither of which is in our v0
+scope.  Both documented as follow-up research items.
+
+The 8.3d task description allowed "rolling up under 8.4
+(multi-sort) instead", which is what this resolution does.
+
+Stage 8.3 is now fully closed (a-e, no more pending sub-items).
+
 ### Added: multi-sort `.pr` test fixture (stage 8.4e)
 
 `tests/data/atp/list_length.pr` lands the first real multi-sort

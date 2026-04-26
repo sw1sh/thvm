@@ -524,7 +524,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         producing a SUP of (rewritten or ERA) results, and
         compare against the C-side single-rule rewriting from
         `src/rewrite/_.c`.  ~50 LOC + 3-4 tests.
-  - [ ] 8.3d ICC TAG_BRI / TAG_ANN integration (optional;
+  - [x] 8.3d ICC TAG_BRI / TAG_ANN integration (optional;
         revisit after 8.3c lands).  If sort-checking proves
         useful at dispatch time, wrap rules in BRI/ANN and
         verify the type-flow rules let the wrong-sort branches
