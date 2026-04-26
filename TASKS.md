@@ -4559,13 +4559,13 @@ implemented + tested (f1a) but never invoked by the pipeline.
              investigate before flipping default. -->
 
 
-  - [ ] **f1d-d3b: deferred Metal fusion (real fix)**.
-        Either a Metal-side interpreter (option A) or
-        shader codegen (option B) -- see f1d-d3 history
-        comment for trade-offs.  Out of scope for f1
-        arc; revisit after f1e bench measurements show
-        the CPU fusion win and we have a baseline to
-        compare Metal against.
+  - [blocked: deferred to a follow-up arc; out of scope for
+    f1 per the f1d-d3 re-decompose comment.  Reopen after
+    f1e measures the CPU fusion win and gives a baseline
+    to compare Metal against.] **f1d-d3b: real Metal
+    fusion**.  Either a Metal-side interpreter (option A) or
+    shader codegen (option B) -- see f1d-d3 history comment
+    for trade-offs.
 
   - [ ] **f1d-d4: flip default + verify**.  After d1+d2+d3
         land, set the toggle default to 1 at its declaration
