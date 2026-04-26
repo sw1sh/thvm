@@ -4574,6 +4574,52 @@ implemented + tested (f1a) but never invoked by the pipeline.
         linear-train memory-probe.wls should show the
         kernel-count drop in its TMemoryPlanReport output.
         ~5 LOC.
+        <!-- attempt 1 failed: with default flipped to 1, all
+             166 C tests pass + 24 of 28 WL test files pass,
+             but TWO heavy tests crash hard via
+             `kernel_alloc: out of slots` (which calls exit(1)):
+                 - wl/THVMLink/Tests/beautiful_mnist.wlt
+                 - wl/THVMLink/Tests/nn.wlt
+             Tried bumping KERNELS_CAP from 4K -> 8K -> 16K;
+             still exhausts.  Not a sizing issue -- toggle ON
+             genuinely allocates a pathological number of
+             kernels for these training-graph patterns.
+
+             Most likely cause: when materialize_kernel_inlined
+             succeeds, it absorbs un-realized children's compute
+             into the kernel's program AND returns a UOP_KERNEL
+             term wrapping it.  But the un-realized child UOP
+             cells are LEFT IN THE HEAP unchanged.  When the
+             same heap region gets re-walked under a SUBSEQUENT
+             TRealize call (e.g. TRealize[loss] then
+             TRealize[TGrad[loss, w]]), realize_classify rebuilds
+             its table for the new root -- the old un-realized
+             UOPs may now be reachable from the grad chain and
+             get re-classified, and the helper may emit FRESH
+             kernels for what's effectively the same compute.
+             Multiplied across LeNet's grad chain, this blows
+             the cap.
+
+             Re-decompose:
+               f1d-d4a: investigate kernel-count growth under
+                        toggle ON.  Add a probe (count
+                        kernel_allocs across realizes for a
+                        small grad-heavy chain like
+                        poly-regression-gradients) and identify
+                        the duplication source.  Diagnostic
+                        only; ~30 LOC.
+               f1d-d4b: fix the pathology.  Likely needs a
+                        memo / dedup so the same source_uop
+                        chain doesn't get re-emitted across
+                        realizes.  Or restructure so the
+                        helper's success ALSO rewrites the
+                        absorbed cells (so subsequent walks
+                        see UOP_KERNEL refs instead of raw
+                        UOPs).  Out-of-fire-budget; ~150 LOC.
+               f1d-d4c: actually flip default (the original
+                        ~5 LOC).  Lands once d4b makes the
+                        WL test sweep stay under 4K kernels. -->
+
 
   - [ ] **f1e: bench delta + docs update**.  Re-run
         `wl/Examples/_bench/baseline.wls` on both backends.
