@@ -6,6 +6,43 @@ dated section.
 
 ## Unreleased
 
+### Added: explicit nf() reducer + worklist-driven loop
+
+`wnf` is WHNF-only -- it surfaces the head and stops at plain UOPs.
+That leaves redexes nested inside (e.g. the UOPs an `interact_grad`
+chain rule produces) unfired -- they're redexes by IC semantics but
+WHNF never visits them.
+
+`nf` (`src/wnf/nf.c`) is a worklist-driven full-NF reducer:
+
+1. Seed worklist via `redex_enumerate` from root + global heap scan.
+2. Pop a redex, call `redex_fire`.
+3. If the fired redex was the root, track the new root (heap_replace
+   inside redex_fire can't update Terms held off-heap).
+4. Push (a) the result if it's itself a redex, (b) any cells the
+   fire allocated that contain redexes.
+5. Loop until the worklist is empty.
+
+Per-fire cost is O(redexes-locally-created), not O(heap-size) per
+sweep -- a long chain of grad + elementwise interactions runs in
+linear interactions, not quadratic in heap_size * sweeps.
+
+Pure IC machinery -- no opcode is privileged.  GRAD reduces because
+`interact_grad` is wired into `redex_fire`, the same way APP-LAM
+and KERNEL do.  Future combinators wired through `is_redex` /
+`redex_fire` get nf coverage automatically.
+
+`thvm_realize` swapped its first/last `wnf` calls for `nf` so the
+materialize+wnf loop is now an `nf -> materialize -> nf` loop.
+
+Renamed `docs/wnf.md` -> `docs/normal_form.md` and added an `nf`
+section + the composition with materialize.
+
+WL recovery on top of g3c: per-file run goes from "60 fail in nn"
+when bypassing nf to grad 35/41 + nn 33/41 + tensors 15/15 +
+beautiful_mnist 0/2 + uop_load segfault, with all other 24 files
+green.  `make test` stays 166/166.
+
 ### Refactored: eager-grad-in-materialize -> wnf-first loop (g3c)
 
 User clarified that eager-vs-lazy GRAD is a user-facing choice, not

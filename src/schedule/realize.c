@@ -39,21 +39,19 @@ static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
 fn Term thvm_realize(Term expr) {
   u32 wm = cpu_buf_pool_begin();
 
-  // wnf-first loop: wnf can fire kernels and unroll GRADs to plain
-  // UOPs.  After wnf, if any UOPs remain that would compile to
-  // kernels, materialize emits them; then wnf fires those.  Loop
-  // until materialize is a no-op (no fresh kernel emitted).  This
-  // separates the two phases per the architecture choice point:
-  // the user can call TWnf / TMaterialize directly to do Order A
-  // (forward-first lazy backward) themselves; thvm_realize wires
-  // the Order B / fully-converged form.
-  Term res = wnf(expr);
+  // nf-first loop: nf is full normal-form reduction (sweeps the
+  // heap, fires every redex via redex_fire including GRAD, KERNEL,
+  // APP-LAM, OP2 uniformly).  After nf, lazy compute still sits
+  // around as plain UOPs; materialize compiles those to kernels;
+  // nf fires them.  Loop until materialize emits no fresh kernel.
+  // GRAD is just one of many lazy combinators -- no special path.
+  Term res = nf(expr);
   for (int iter = 0; iter < 16; iter++) {
     u32 kn0 = KERNELS_NEXT;
     Term mat = thvm_materialize(res);
     if (KERNELS_NEXT == kn0) { res = mat; break; }
     kernel_compute_consumer_counts();
-    res = wnf(mat);
+    res = nf(mat);
   }
 
   // gc3: tracing-GC preserve.  Composes gc1 + gc2 into

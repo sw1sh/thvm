@@ -31,7 +31,7 @@ fn Term interact_app_lam(Term lam, Term arg) {
 `lam.val` is the binder loc, which doubles as the cell that holds the
 body and the slot that substitution writes to. The reducer dispatches
 to this rule from the APP frame's apply phase
-([wnf.md](../wnf.md)) and `goto enter`s the returned `body`.
+([normal_form.md](../normal_form.md)) and `goto enter`s the returned `body`.
 
 ## Worked example
 

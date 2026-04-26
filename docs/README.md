@@ -11,7 +11,9 @@ If you are new to the project, read these in order:
 1. [term.md](term.md): how a 64-bit `Term` is packed.
 2. [heap.md](heap.md): the flat heap, the bump allocator, and the
    substitution model that makes interactions work.
-3. [wnf.md](wnf.md): the two-phase enter/apply stack-machine reducer.
+3. [normal_form.md](normal_form.md): two reducers -- `wnf` (weak
+   normal form, two-phase enter/apply stack machine) and `nf`
+   (full normal form, redex-list sweep).
 4. [interact/_.md](interact/_.md): index of the active-pair rules,
    one page per rule.
 5. [wl.md](wl.md): the Wolfram LibraryLink bridge and the high-level

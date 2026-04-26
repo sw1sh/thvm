@@ -1,11 +1,27 @@
-# WNF stack-machine reducer
+# Normal-form reducers
 
-`wnf(t)` reduces a `Term` to weak normal form: enough reduction to
-expose the head constructor (LAM, ERA, SUP, ...) but no work inside
-its arguments. Defined in [src/wnf/_.c](../src/wnf/_.c). Modeled on
-[HVM4's clang/wnf/_.c](../TinyHVM/HVM4/clang/wnf/_.c).
+Two reducers, layered:
 
-## Two phases
+- **`wnf(t)`** -- *weak* normal form.  Reduces enough to expose the
+  head constructor (LAM, ERA, SUP, ...) but no work inside its
+  arguments.  Defined in [src/wnf/_.c](../src/wnf/_.c).  Modeled on
+  [HVM4's clang/wnf/_.c](../TinyHVM/HVM4/clang/wnf/_.c).
+- **`nf(t)`** -- *normal* form.  Sweeps the live heap via
+  `redex_enumerate`, fires every redex via `redex_fire`, loops until
+  a sweep makes no progress.  Defined in [src/wnf/nf.c](../src/wnf/nf.c).
+  Used by [`thvm_realize`](../src/schedule/realize.c) so chain-rule-
+  produced UOps deep inside a graph (e.g. `ADD(GRAD, GRAD)` from a
+  multi-leaf grad) reduce naturally -- they are plain redexes by IC
+  semantics, but `wnf`'s WHNF discipline never visits them.
+
+`wnf` is the right primitive when the caller only needs the head
+(e.g., the OP2 strict reduction loop, or APP-LAM body re-entry).
+`nf` is the right primitive when the caller wants every reachable
+redex fired -- typically because the result will be inspected as a
+value, or because downstream passes (materialize) need a redex-free
+graph to work on.
+
+## `wnf`: two phases
 
 ```
 enter:                          apply:
@@ -141,3 +157,53 @@ ITRS++;            // each interact_*.c after argument validation
 
 A future tracing facility (planned for step 15) will piggyback on
 this counter to snapshot the heap after each step.
+
+## `nf`: explicit normal-form reducer
+
+```c
+fn Term nf(Term root) {
+  Term redexes[NF_REDEX_CAP];
+  for (u32 sweep = 0; sweep < NF_MAX_SWEEPS; sweep++) {
+    u32 n = redex_enumerate(&root, 1, redexes, NF_REDEX_CAP);
+    if (n == 0) break;
+    u64 itrs0 = ITRS;
+    for (u32 i = 0; i < n; i++) redex_fire(redexes[i]);
+    if (ITRS == itrs0) break;     // no progress; remaining redexes are stuck
+  }
+  return root;
+}
+```
+
+`redex_enumerate` (defined in [src/wnf/redex.c](../src/wnf/redex.c))
+walks the caller-provided roots PLUS the live heap, returning every
+`Term` for which `is_redex` returns true.  `redex_fire` dispatches
+on the redex's tag and calls the matching `interact_*` rule.  No
+opcode is privileged -- APP-LAM, DUP-SUP, OP2 over NUMs, KERNEL,
+GRAD, etc. all reduce through the same `redex_fire` call.
+
+The progress guard (`if (ITRS == itrs0) break`) handles redexes
+whose interaction is presently a no-op (e.g., a UOP_GRAD whose `y`
+argument resolves to a free VAR; `interact_grad` returns the term
+unchanged and ITRS doesn't advance).  Such redexes are left intact
+in the result -- the caller can re-`nf` later when surrounding
+context provides the missing binding.
+
+Composition with `materialize`: `thvm_realize` wraps an `nf`/
+`materialize` loop --
+
+```c
+Term res = nf(expr);
+for (int iter = 0; iter < 16; iter++) {
+  u32 kn0 = KERNELS_NEXT;
+  Term mat = thvm_materialize(res);
+  if (KERNELS_NEXT == kn0) { res = mat; break; }
+  kernel_compute_consumer_counts();
+  res = nf(mat);
+}
+```
+
+`nf` reduces every UOp redex it can; `materialize` compiles the
+remaining lazy compute (plain UOPs that cannot reduce by themselves
+-- ADD, MUL, REDUCE, movement ops) into KERNELs whose dispatch is
+itself a redex; the next `nf` fires those.  Loop converges when
+`materialize` emits no fresh kernel.

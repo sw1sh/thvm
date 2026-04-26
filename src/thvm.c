@@ -197,6 +197,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // so every file it calls must be defined above.
 #include "wnf/_.c"
 #include "wnf/redex.c"
+#include "wnf/nf.c"
 
 // === collapse/ ===
 // Depends on wnf().  No dependants in the runtime itself; called by
