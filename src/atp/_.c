@@ -177,14 +177,84 @@ static void atp_register_primitives(void) {
   prim_register(ATP_PRIM_REWRITE_STEP, prim_rewrite_step, 3);
 }
 
-// 8.3e-i: IC-routed rewrite normalization.  Currently a stub
-// that delegates to the C path so the `use_ic_rewrite` flag is
-// observable but semantically inert.  Stage 8.3e-ii will replace
-// the body with PRI-routed rule dispatch via prim_rewrite_step.
+// 8.3e-ii: IC-routed top-only rewrite try.  For each rule, builds
+// APP(APP(APP(PRI(REWRITE_STEP), lhs_i), rhs_i), t) and reduces
+// via wnf.  Returns the rewritten term on first non-ERA result;
+// sets *fired = 1.  Otherwise *fired = 0 and returns t.
+//
+// Mirrors the C-side `rewrite_try_top` (in `src/rewrite/_.c`)
+// with the per-rule matching going through APP-PRI evaluation
+// instead of direct `thvm_match` calls.
+static Term atp_ic_rewrite_try_top(Term t, const Term *lhs, const Term *rhs,
+                               u32 n_rules, u8 *fired) {
+  for (u32 i = 0; i < n_rules; i++) {
+    u64 l1 = heap_alloc(2);
+    heap_set(l1 + 0, term_new_pri(ATP_PRIM_REWRITE_STEP));
+    heap_set(l1 + 1, lhs[i]);
+    Term step1 = term_new(0, TAG_APP, 0, l1);
+
+    u64 l2 = heap_alloc(2);
+    heap_set(l2 + 0, step1);
+    heap_set(l2 + 1, rhs[i]);
+    Term step2 = term_new(0, TAG_APP, 0, l2);
+
+    u64 l3 = heap_alloc(2);
+    heap_set(l3 + 0, step2);
+    heap_set(l3 + 1, t);
+    Term step3 = term_new(0, TAG_APP, 0, l3);
+
+    Term result = wnf(step3);
+    if (term_tag(result) != TAG_ERA) {
+      *fired = 1;
+      return result;
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// 8.3e-ii: IC-routed analog of `thvm_rewrite_step`.  Same outermost-
+// leftmost strategy (try top, else descend into CTR children
+// left-to-right); per-rule matching dispatches through APP-PRI
+// evaluation via `prim_rewrite_step`.  Same outputs as the C path
+// (parity-tested in `tests/test_atp.c`).
+static Term atp_ic_rewrite_step(Term t, const Term *lhs, const Term *rhs,
+                            u32 n_rules) {
+  u8 fired = 0;
+  Term r = atp_ic_rewrite_try_top(t, lhs, rhs, n_rules, &fired);
+  if (fired) return r;
+
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) return t;
+    Term children[REWRITE_MAX_ARITY];
+    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      Term original = children[i];
+      Term rewritten = atp_ic_rewrite_step(original, lhs, rhs, n_rules);
+      if (!kbo_eq(rewritten, original)) {
+        children[i] = rewritten;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+
+  return t;
+}
+
+// 8.3e-ii: IC-routed rewrite normalization.  Iterates
+// `atp_ic_rewrite_step` until fixpoint or step_cap exhausted -- same
+// shape as `thvm_rewrite_normalize` but with the per-step
+// matching routed through APP-PRI.
 static Term atp_rewrite_normalize_ic(Term t,
                                      const Term *lhs, const Term *rhs,
                                      u32 n_rules, u32 step_cap) {
-  return thvm_rewrite_normalize(t, lhs, rhs, n_rules, step_cap);
+  for (u32 i = 0; i < step_cap; i++) {
+    Term t2 = atp_ic_rewrite_step(t, lhs, rhs, n_rules);
+    if (kbo_eq(t, t2)) return t;
+    t = t2;
+  }
+  return t;
 }
 
 // 8.3e-i: AtpState-aware shim.  Dispatches between the C-direct

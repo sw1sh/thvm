@@ -539,7 +539,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
           Stub `atp_rewrite_normalize_ic` initially delegates
           to the C path so the flag is observable but inert.
           Tests verify the flag round-trips.  ~40 LOC.
-    - [ ] 8.3e-ii implement `thvm_rewrite_step_ic` using
+    - [x] 8.3e-ii implement `thvm_rewrite_step_ic` using
           `prim_rewrite_step` via APP-PRI evaluation per
           the 8.3a memo Strategy B.  Walks rules in the same
           order as the C path; for each, builds the saturated

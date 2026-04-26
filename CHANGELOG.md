@@ -6,6 +6,36 @@ dated section.
 
 ## Unreleased
 
+### Added: IC-routed rewrite normalization (stage 8.3e-ii)
+
+`atp_rewrite_normalize_ic` now actually routes per-rule matching
+through the TAG_PRI machinery instead of delegating to the C
+path:
+
+- New helper `atp_ic_rewrite_try_top(t, lhs, rhs, n, &fired)`
+  builds the saturated APP chain
+  `APP(APP(APP(PRI(REWRITE_STEP), lhs_i), rhs_i), t)` per rule
+  and reduces via `wnf`.  Returns the rewritten term on the
+  first non-ERA result.
+- New helper `atp_ic_rewrite_step` mirrors `thvm_rewrite_step`
+  (try top, else descend left-to-right into CTR children) but
+  uses `atp_ic_rewrite_try_top` for the top-position match.
+- `atp_rewrite_normalize_ic` iterates `atp_ic_rewrite_step`
+  until fixpoint, mirroring `thvm_rewrite_normalize`.
+
+Same outermost-leftmost strategy as the C path; structurally
+identical outputs verified by parity tests.
+
+`tests/test_atp.c` (8386 sub-checks, was 8384):
+- `atp/rewrite-flag-toggle-preserves-output` updated to assert
+  the IC path now actually runs (not delegating)
+- `atp/rewrite-ic-parity-on-group-axioms` new: full saturation
+  on group axioms under both rewrite paths must agree on rst
+  and n_rules
+
+Stage 8.3e-iii will benchmark the IC overhead and decide on
+the default.
+
 ### Added: `use_ic_rewrite` feature flag (stage 8.3e-i)
 
 New `u8 use_ic_rewrite` field on `AtpState` (default 0) selects

@@ -1177,11 +1177,10 @@ int main(void) {
 
   TEST_BEGIN("atp/rewrite-flag-toggle-preserves-output");
   {
-    // 8.3e-i: flag is currently a no-op (IC path delegates to
-    // C).  Setting it to 1 must produce the same outputs as the
-    // default path.  Run a single saturation step on the same
-    // axiom under both flag values; n_cps, n_rules, and the
-    // joinability counter must agree.
+    // 8.3e-ii: enabling use_ic_rewrite routes per-rule matching
+    // through APP-PRI / prim_rewrite_step.  Two parallel runs on
+    // the same axiom; verify n_cps, n_rules, and the joinability
+    // counter agree exactly between the two paths.
     AtpState *s_c = thvm_atp_init(&DUMMY_CFG, 100);
     thvm_atp_add_equation(s_c, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
     AtpStatus st_c = thvm_atp_step(s_c);
@@ -1196,6 +1195,35 @@ int main(void) {
     CHECK_EQ(s_c->n_cps,                  s_ic->n_cps);
     CHECK_EQ(s_c->n_rules,                s_ic->n_rules);
     CHECK_EQ(s_c->n_cps_dropped_joinable, s_ic->n_cps_dropped_joinable);
+
+    thvm_atp_free(s_c);
+    thvm_atp_free(s_ic);
+  }
+
+  TEST_BEGIN("atp/rewrite-ic-parity-on-group-axioms");
+  {
+    // Full group-axiom saturation under both rewrite paths.
+    AtpState *s_c = thvm_atp_init(&DUMMY_CFG, 32);
+    thvm_atp_set_goal(s_c, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_c, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s_c, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s_c,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_c = thvm_atp_run(s_c);
+
+    AtpState *s_ic = thvm_atp_init(&DUMMY_CFG, 32);
+    s_ic->use_ic_rewrite = 1;
+    thvm_atp_set_goal(s_ic, mk_f(mk_a(), mk_i(mk_a())), mk_e());
+    thvm_atp_add_equation(s_ic, mk_f(mk_v(VAR_x), mk_e()),                 mk_v(VAR_x));
+    thvm_atp_add_equation(s_ic, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))),      mk_e());
+    thvm_atp_add_equation(s_ic,
+                          mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                          mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+    AtpStatus rst_ic = thvm_atp_run(s_ic);
+
+    CHECK_EQ((int)rst_c, (int)rst_ic);
+    CHECK_EQ(s_c->n_rules, s_ic->n_rules);
 
     thvm_atp_free(s_c);
     thvm_atp_free(s_ic);
