@@ -6,6 +6,45 @@ dated section.
 
 ## Unreleased
 
+### Added: TATP[] WL surface form (stage 8.7d)
+
+`TATP[{lhs == rhs, ...}, conjecture]` lands as a public WL
+function (declared via `TATP::usage` in the package's public
+section).  Wires 8.7c (encoder) into 8.7b (LibraryLink runner)
+and decodes the stats array into a notebook-friendly
+Association.
+
+```mathematica
+TATP[{f[Pattern[x, Blank[]], e] == Pattern[x, Blank[]]},
+     f[a, e] == a]
+(* -> <|"Status" -> "PROVED", "Steps" -> 0, "Rules" -> 0,
+        "QueueSize" -> 0|> *)
+```
+
+Implementation notes:
+- `SetAttributes[TATP, HoldAll]`: WL evaluates `a == a` to
+  `True` before reaching us, so we hold both axioms list and
+  conjecture and destructure via `Extract[..., HoldComplete]`.
+- `Catch[..., "TATPError"]` at the boundary; parse errors
+  Throw a `Failure[]` early without unwinding the threaded
+  encoder state piecewise.
+- `MaxSteps -> 64` option (default).
+- Status decoded from the `AtpStatus` enum:
+  `0=RUNNING, 1=PROVED, 2=REFUTED, 3=TIMEOUT, 4=QUEUE_EMPTY`.
+
+`wl/THVMLink/Tests/atp.wlt` adds 5 cases (309 WL tests, was
+304):
+- `ATP/TATP/trivial-reflexive-proves`: `a == a` derives `a == a`
+- `ATP/TATP/direct-rewrite-proves`: `f[x_, e] == x` rewrite
+- `ATP/TATP/return-keys`: Association keys are
+  `{QueueSize, Rules, Status, Steps}`
+- `ATP/TATP/bad-axiom-yields-failure`: missing `==` -> Failure
+- `ATP/TATP/bad-conjecture-yields-failure`
+
+Stage 8.7 is now complete (a-d shipped).  The IC-native ATP is
+reachable from Wolfram notebooks for hand-written equational
+problems.
+
 ### Added: WL-expression-to-Term encoder (stage 8.7c)
 
 New LibraryLink helper `thvm_wl_term_new_ctr` in

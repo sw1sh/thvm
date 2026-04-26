@@ -622,7 +622,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         regression/improvement).
 - [blocked: waiting on HVM4 upstream to land unordered SUP/DUP first; tracked in docs/plans/sup_encoded_cps.md] 8.6 unordered SUP/DUP for O(1) rule-set sharing (port from
       HVM4 when upstream lands them)
-- [ ] 8.7 WL bridge: `TATP[axioms, conjecture] -> proof tree` so
+- [x] 8.7 WL bridge: `TATP[axioms, conjecture] -> proof tree` so
       the prover is reachable from notebooks
   - [x] 8.7a design memo `docs/plans/wl_atp_bridge.md`: pick
         the WL surface form (`TATP[{axiom_1, axiom_2, ...},
@@ -646,7 +646,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         atoms, symbols, FVR (probably via `Pattern[x, _]`),
         and `==` (eq-pair).  Tests with hand-built WL
         expressions of various shapes.
-  - [ ] 8.7d `TATP[axioms, conjecture]` WL surface form +
+  - [x] 8.7d `TATP[axioms, conjecture]` WL surface form +
         return-shape pretty printer.  Wires 8.7c (encode) into
         8.7b (run) and decodes the trace back into a
         notebook-friendly `Association[]`.  Tests use the

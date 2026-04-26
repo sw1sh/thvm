@@ -127,6 +127,7 @@ TGrad::usage         = "TGrad[y, target] = TUOpGrad[y, TUOpConst[1], target].  T
 TGradMany::usage     = "TGradMany[y, {x_1, ..., x_n}] computes d(y)/d(x_i) for every target in one realize.  Returns a List of n TTerm wrappers.  Forward DAG is shared via heap-loc identity so the per-realize memo dedups every kernel emitted from those forward UOps across all n targets.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
 TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term, in heap order.";
+TATP::usage          = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).";
 
 Begin["`Private`"];
 
@@ -313,6 +314,94 @@ encodeAtpTerm[expr_, state_Association] :=
 
 (* Convenience wrapper: build the empty encoder state. *)
 encodeAtpTermInit[] := <|"sym" -> <||>, "var" -> <||>, "next_lab" -> 1|>
+
+(* 8.7d: TATP[axioms, conjecture] WL surface.  Encodes axioms +
+   goal via encodeAtpTerm, calls $atpRunFn, decodes the stats
+   into a notebook-friendly Association.
+
+   Each axiom must be a `lhs == rhs` form (Equal[lhs, rhs]); the
+   conjecture is a single such form.  Variables are written as
+   `x_` (Pattern[x, Blank[]]).  Symbols and head[args...] forms
+   are translated to nullary / compound CTRs.
+
+   Returns: <|"Status" -> str, "Steps" -> n, "Rules" -> n, ...|>.
+   Status decoded from the AtpStatus enum:
+     0 -> "RUNNING" (shouldn't appear after thvm_atp_run returns)
+     1 -> "PROVED"
+     2 -> "REFUTED"
+     3 -> "TIMEOUT"
+     4 -> "QUEUE_EMPTY"
+*)
+$atpStatusName = <|
+  0 -> "RUNNING", 1 -> "PROVED", 2 -> "REFUTED",
+  3 -> "TIMEOUT", 4 -> "QUEUE_EMPTY"
+|>
+
+(* HoldAll on TATP: WL evaluates `a == a` to True before
+   reaching us; we need the syntactic Equal[lhs, rhs] form to
+   destructure.  Inside TATP we map over axioms[i] / conjecture
+   without forcing evaluation.  Internal helper TATPCore takes
+   the held-list-of-equations and the held-conjecture. *)
+SetAttributes[TATP, HoldAll];
+
+TATP[axioms_, conjecture_, OptionsPattern[{MaxSteps -> 64}]] :=
+  Catch[
+    Module[
+      {state, packed, axTerms, goalLhs, goalRhs, stats,
+       maxLab, statusCode, ax, lhs, rhs, lhsRes, rhsRes, cj},
+      ensureInit[];
+      state = encodeAtpTermInit[];
+      axTerms = {};
+      If[ Head[Unevaluated[axioms]] =!= List,
+        Throw[Failure["TATPParseError",
+          <|"Reason" -> "axioms must be a List"|>], "TATPError"]
+      ];
+      Do[
+        ax = Extract[Hold[axioms], {1, i}, HoldComplete];
+        If[ ! MatchQ[ax, HoldComplete[Equal[_, _]]],
+          Throw[Failure["TATPParseError",
+            <|"Axiom" -> i, "Reason" -> "expected `lhs == rhs`"|>],
+            "TATPError"]
+        ];
+        lhs = Extract[ax, {1, 1}, HoldComplete];
+        rhs = Extract[ax, {1, 2}, HoldComplete];
+        lhsRes = encodeAtpTerm[lhs[[1]], state];
+        AppendTo[axTerms, lhsRes[[1]]];
+        state = lhsRes[[2]];
+        rhsRes = encodeAtpTerm[rhs[[1]], state];
+        AppendTo[axTerms, rhsRes[[1]]];
+        state = rhsRes[[2]],
+        {i, Length[Unevaluated[axioms]]}
+      ];
+      cj = Extract[Hold[conjecture], 1, HoldComplete];
+      If[ ! MatchQ[cj, HoldComplete[Equal[_, _]]],
+        Throw[Failure["TATPParseError",
+          <|"Reason" -> "conjecture must be `lhs == rhs`"|>],
+          "TATPError"]
+      ];
+      lhsRes = encodeAtpTerm[Extract[cj, {1, 1}, HoldComplete][[1]], state];
+      goalLhs = lhsRes[[1]];
+      state = lhsRes[[2]];
+      rhsRes = encodeAtpTerm[Extract[cj, {1, 2}, HoldComplete][[1]], state];
+      goalRhs = rhsRes[[1]];
+      state = rhsRes[[2]];
+      packed = NumericArray[
+        Join[{Length[Unevaluated[axioms]]}, axTerms, {goalLhs, goalRhs}],
+        "Integer64"
+      ];
+      maxLab = state["next_lab"];
+      stats = Normal @ $atpRunFn[packed, OptionValue[MaxSteps], maxLab];
+      statusCode = stats[[1]];
+      <|
+        "Status" -> Lookup[$atpStatusName, statusCode,
+                           "UNKNOWN(" <> ToString[statusCode] <> ")"],
+        "Steps"  -> stats[[3]],
+        "Rules"  -> stats[[2]],
+        "QueueSize" -> stats[[4]]
+      |>
+    ],
+    "TATPError"
+  ]
 
 (* uop graph *)
 $uopConstFn    := $uopConstFn    = load["thvm_wl_uop_const",    {Integer, Real},                     Integer];

@@ -135,3 +135,49 @@ VerificationTest[
     {1, True},
     TestID -> "ATP/encoder/pattern-var-stable-across-occurrences"
 ]
+
+(* === 8.7d: TATP[] WL surface === *)
+
+VerificationTest[
+    (* Trivial reflexive-axiom proof: a == a derives a == a. *)
+    Lookup[
+      TATP[{a == a}, a == a],
+      "Status"
+    ],
+    "PROVED",
+    TestID -> "ATP/TATP/trivial-reflexive-proves"
+]
+
+VerificationTest[
+    (* Direct rewrite: rule f[x_, e] == x; goal f[a, e] == a.
+       Goal-check fires on the first normalize pass; saturator
+       converges immediately. *)
+    Lookup[
+      TATP[{f[Pattern[x, Blank[]], e] == Pattern[x, Blank[]]},
+           f[a, e] == a],
+      "Status"
+    ],
+    "PROVED",
+    TestID -> "ATP/TATP/direct-rewrite-proves"
+]
+
+VerificationTest[
+    (* TATP returns an Association with the expected keys. *)
+    Sort @ Keys @ TATP[{a == a}, a == a],
+    {"QueueSize", "Rules", "Status", "Steps"},
+    TestID -> "ATP/TATP/return-keys"
+]
+
+VerificationTest[
+    (* Bad-shape axiom: not Equal[lhs, rhs] -> Failure. *)
+    Head @ TATP[{a (* missing == *)}, a == a],
+    Failure,
+    TestID -> "ATP/TATP/bad-axiom-yields-failure"
+]
+
+VerificationTest[
+    (* Bad-shape conjecture. *)
+    Head @ TATP[{a == a}, a (* missing == *)],
+    Failure,
+    TestID -> "ATP/TATP/bad-conjecture-yields-failure"
+]
