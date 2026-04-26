@@ -207,3 +207,9 @@ Real kernel-count + memory wins need either:
       var isn't set -- zero-cost on the default hot path.  The
       original "+42% CPU lenet" regression cited by c1 was
       mostly run-to-run jitter, not the env hook.
+
+---
+
+All tasks resolved 2026-04-26: m1/m2/k0a-k0e/k1 done; m3/k2/k2'
+blocked with documented reasons; c1 closed (no code change).
+Add new tasks to drive further progress.
