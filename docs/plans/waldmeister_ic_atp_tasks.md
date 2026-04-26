@@ -324,6 +324,27 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `src/atp/_.c` with stat counter + tests.  Expected
         scope: ~50 LOC implementation + ~30 LOC tests.
 - [ ] 7.3 subsumption pruning on R and the CP queue
+  - [ ] 7.3a **rule subsumption counter**: helper
+        `atp_cp_subsumed_by_rules(s, lhs, rhs)` returns 1 if
+        there is `(l, r) ∈ R` and substitution σ such that
+        `(lhs, rhs) = (σl, σr)` (modulo symmetry).  Per the
+        same domination argument as 7.2b
+        (`docs/plans/connectedness_design.md`): rule-
+        subsumption fires only when the rule rewrites lhs
+        directly to rhs in one step, which is also caught by
+        7.1's full-R normalize.  Add `n_cps_dropped_rule_subsumed`
+        counter for empirical confirmation.  Expected scope:
+        ~30 LOC + ~30 LOC tests.
+  - [ ] 7.3b **queue subsumption filter**: helper
+        `atp_cp_subsumed_by_queue(s, lhs, rhs)` returns 1 if
+        the candidate is an instance of an already-queued CP
+        `(s', t')` -- i.e. there is σ with `(lhs, rhs) =
+        (σs', σt')` (modulo symmetry).  This is genuinely
+        orthogonal to 7.1 (the queue does not participate in
+        normalization) so it adds real pruning.  Wire as a
+        FILTER in `atp_push_cps_traced` (drops the CP) and
+        bump `n_cps_dropped_queue_subsumed`.  Expected scope:
+        ~40 LOC + ~50 LOC tests.
 - [ ] 7.4 benchmark vs Twee on a handful of small TPTP-UEQ problems
       (`GRP`, `RNG` divisions); record wall-clock + saturation
       step count in `docs/bench-atp.md`
