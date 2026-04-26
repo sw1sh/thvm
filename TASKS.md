@@ -4575,7 +4575,7 @@ implemented + tested (f1a) but never invoked by the pipeline.
        diagnosis.  Splitting d4 into 3 sub-items per that
        analysis. -->
 
-  - [ ] **f1d-d4a: probe kernel-count growth under toggle ON**.
+  - [x] **f1d-d4a: probe kernel-count growth under toggle ON**.
         Add a small WL test or C probe that flips toggle ON and
         counts kernel_allocs across a poly-regression-style
         chain (forward + 2 grads, 3 separate TRealize calls).
@@ -4588,6 +4588,63 @@ implemented + tested (f1a) but never invoked by the pipeline.
         Acceptance: 166 C + 292 WL still green (default OFF);
         the probe output makes the duplication source explicit
         in TASKS.md or a comment.  ~30 LOC.
+        <!-- DONE.  Probe (one-shot wls, not committed) measured
+             poly-regression (forward + grad-a + grad-b, 3
+             separate TRealize calls):
+
+               toggle OFF (legacy):
+                 +9 kernels for realize loss
+                 +45 kernels for realize grad-a
+                 +45 kernels for realize grad-b
+                 = 100 total
+
+               toggle ON (inlined):
+                 +14 kernels for realize loss     (+5 vs OFF)
+                 +59 kernels for realize grad-a   (+14 vs OFF)
+                 +57 kernels for realize grad-b   (+12 vs OFF)
+                 = 131 total                       (+31, ~31%)
+
+             Overhead is per-realize and somewhat constant per
+             realize (not linearly growing across realizes), so
+             not a "memo across realizes is missing" pathology.
+             Each realize ALONE emits more kernels under
+             toggle ON.
+
+             Likely root cause: when materialize_walk's hook
+             routes a realized REDUCE root through the helper,
+             the helper bails (REDUCE not inlinable) and walk
+             falls through to legacy.  Legacy's classify_child
+             then sees err² as a raw UOP (un-realized inlinable
+             that the hook returned unchanged), classifies it
+             as CHILD_UNKNOWN, and returns the REDUCE term
+             unchanged.  thvm_materialize then calls
+             materialize_expr which RECURSIVELY materializes
+             the whole chain including the REDUCE, allocating
+             a kernel for EACH UOP -- but materialize_expr
+             also emits an extra kernel per intermediate
+             that walk's hook left raw (no dedup).  The chain
+             gets re-walked end-to-end.
+
+             Net effect: the helper's "leave un-realized cells
+             raw" interacts badly with materialize_expr's
+             fallback recursion -- materialize_expr doesn't
+             know the realized children should already have
+             been kernels and emits per-UOp kernels for the
+             whole chain.
+
+             Recommendation for f1d-d4b: when the helper
+             succeeds for a realized UOp and absorbs its
+             un-realized upstream, REWRITE the absorbed cells
+             in the heap so they look like already-handled.
+             E.g., write a UOP_KERNEL term referencing the
+             same emitted kid (the kid produces the value that
+             would have been the absorbed UOP's output).
+             Then a subsequent walk / materialize_expr sees a
+             UOP_KERNEL refs and short-circuits.
+
+             For LeNet-scale (KERNELS_CAP=4096), this 31%-per-
+             realize overhead easily blows the cap. -->
+
 
   - [ ] **f1d-d4b: fix the duplication pathology**.  Based
         on d4a's diagnosis, fix the root cause.  Two leading
