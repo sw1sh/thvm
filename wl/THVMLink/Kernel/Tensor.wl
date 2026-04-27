@@ -34,8 +34,8 @@ tensorTermQ[_]       := False
 
 (* A TUOpConst wraps a plain numeric.  Used to lift a scalar on the
    right-hand side of Plus / Times against a tensor term. *)
-liftNumeric[n_?NumericQ, dtype_String] := TUOpConst[n, dtype]
-liftNumeric[t_TTerm,     _]            := t
+liftNumeric[n_ ? NumericQ, dtype_String] := TUOpConst[n, dtype]
+liftNumeric[t_TTerm,       _]            := t
 
 (* Pick a dtype to broadcast into.  If any side is a TAG_TEN or
    TAG_UOP with a dtype, use that; else default to f32. *)
@@ -209,26 +209,13 @@ TUOpConv2D[input_, weights_, bias_] := TUOpConv2DLowered[input, weights, bias]
    cotangent seed 1. *)
 TGrad[y_, target_] := TUOpGrad[y, TUOpConst[1.0, "f32"], target]
 
-(* Multi-target VJP: builds ONE UOP_GRAD whose interact rule lowers
-   to a TAG_CTR of n unary grads.  Returns a List of n TTerm
-   wrappers, ready to TRealize independently.  The forward DAG
-   lives at shared heap locs across all n targets so materialize's
-   per-realize memo dedups every kernel emitted from those forward
-   UOps -- the savings show up as one realize + one set of forward
-   kernels covering all targets, vs. n independent walks. *)
-TGradMany[y_, targets_List] := (
-    ensureInit[];
-    Module[{gy, gMulti, gradPacked, n, raws},
-      gy        = TUOpConst[1.0, "f32"];
-      gMulti    = TTerm[$uopGradMultiFn[
-                    ttermRaw[y], ttermRaw[gy],
-                    Developer`ToPackedArray[ttermRaw /@ targets, Integer]]];
-      gradPacked = TRealize[gMulti];
-      n         = $termCtrNFn[ttermRaw[gradPacked]];
-      raws      = Table[$termCtrAtFn[ttermRaw[gradPacked], i], {i, 0, n - 1}];
-      TTerm /@ raws
-    ]
-)
+(* Multi-target VJP: build n unary TGrads sharing the y subgraph by
+   heap-loc identity, apply the user's body to them positionally.
+   materialize's per-realize memo dedups every forward kernel emitted
+   from the shared UOps -- one realize, one forward set, n backward
+   chains. *)
+TGradMany[y_, {target_}, body_]    := body[TGrad[y, target]]
+TGradMany[y_, targets_List, body_] := body @@ (TGrad[y, #] & /@ targets)
 
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)
    then TWnf to beta-reduce and fire the kernels.  No UOP_MATERIALIZE
