@@ -286,11 +286,12 @@ buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Blo
 },
     showLabels  = OptionValue["ShowEdgeLabels"];
     edgeRecords = Flatten[KeyValueMap[agentEdgeRecords, agents], 1];
-    (* DeleteDuplicates on the (src, dst) pair so we don't draw a
-       second arrow for a UOP that reads the same TEN through two
-       slots -- once is enough for the topology view. *)
-    edgeRecords = DeleteDuplicatesBy[edgeRecords, Take[#, 2] &];
-    edges       = (DirectedEdge @@ Take[#, 2]) & /@ edgeRecords;
+    (* Tag each edge with its port name so DirectedEdge[a, b, "src0"]
+       and DirectedEdge[a, b, "src1"] are distinct -- a UOP reading
+       the same TEN through two slots gets two parallel arrows.  The
+       caller can hide labels via "ShowEdgeLabels" -> False (default)
+       but the tag still keeps Graph from collapsing the edges. *)
+    edges       = DirectedEdge[#[[1]], #[[2]], #[[3]]] & /@ edgeRecords;
     edgeLabels  = MapThread[Rule, {edges, Last /@ edgeRecords}];
 
     vertices = DeleteDuplicates @ Join[
@@ -302,7 +303,7 @@ buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Blo
            original referencing UOP got rewritten to a kernel and
            is now orphaned).  Without this, the Graph would
            silently drop edges to those tids. *)
-        edges /. DirectedEdge[a_, b_] :> Sequence[a, b]
+        edges /. DirectedEdge[a_, b_, ___] :> Sequence[a, b]
     ];
 
     subVertices = Flatten[KeyValueMap[subVerticesForAgent, agents]];

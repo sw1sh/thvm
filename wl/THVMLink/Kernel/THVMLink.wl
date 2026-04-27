@@ -116,7 +116,7 @@ TUOpSqrt::usage      = "TUOpSqrt[a] builds a UOP_SQRT node.";
 TUOpCmplt::usage     = "TUOpCmplt[a, b] builds a UOP_CMPLT node.";
 TUOpCmpeq::usage     = "TUOpCmpeq[a, b] builds a UOP_CMPEQ node (elementwise a == b mask).";
 TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; kind = \"SUM\" or \"MAX\".";
-TUOpGrad::usage      = "TUOpGrad[y, gy, target] builds a UOP_GRAD node.  Reducing under TWnf applies the chain rule recursively until no UOP_GRAD nodes remain; the result is a UOp graph that can be fed to TRealize / TMaterialize like any other.";
+TUOpGrad::usage      = "TUOpGrad[y, target] builds a UOP_GRAD node (outer form, no eager seed -- the cotangent is materialized lazily by interact_grad on first fire).  Reducing under TWnf applies the chain rule recursively until no UOP_GRAD nodes remain; the result is a UOp graph that can be fed to TRealize / TMaterialize like any other.";
 TUOpLoad::usage      = "TUOpLoad[src] builds a UOP_LOAD node wrapping src.  Structural marker mirroring tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in the cpu kernel).";
 
 TAssign::usage       = "TAssign[dst, src] builds a UOP_ASSIGN node.  Wnf-fired in-place buffer write: once `src` reduces to a TAG_TEN, backend memcpy copies src.buf into dst.buf and the redex rewrites to dst.  Mirrors tinygrad's UOps.ASSIGN.  Use to mutate weight tensors in optimizer loops without allocating fresh tids per step.";
@@ -124,7 +124,7 @@ TAssign::usage       = "TAssign[dst, src] builds a UOP_ASSIGN node.  Wnf-fired i
 TUOpConv2D::usage    = "TUOpConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  Dispatches to TUOpConv2DLowered so autograd flows through primitives via the chain rule.";
 
 TUOpConv2DLowered::usage = "TUOpConv2DLowered[input, weights, bias] builds the same valid 2-D convolution as TUOpConv2D but as a kh*kw-unrolled chain of primitive UOPs (SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD).  No new opcodes; pure WL composition.";
-TGrad::usage         = "TGrad[y, target] = TUOpGrad[y, TUOpConst[1], target].  Top-level VJP -- d(y)/d(target) with cotangent seed 1.";
+TGrad::usage         = "TGrad[y, target] = TUOpGrad[y, target].  Top-level VJP -- d(y)/d(target).  Cotangent seed 1 is built lazily by interact_grad at first reduction (so the constructed term carries no CONST node).";
 TGradMany::usage     = "TGradMany[y, {x_1, ..., x_n}] computes d(y)/d(x_i) for every target in one realize.  Returns a List of n TTerm wrappers.  Forward DAG is shared via heap-loc identity so the per-realize memo dedups every kernel emitted from those forward UOps across all n targets.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";
 TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term, in heap order.";
@@ -264,8 +264,7 @@ $uopExpandFn   := $uopExpandFn   = load["thvm_wl_uop_expand",   {Integer, {Integ
 $uopPadFn      := $uopPadFn      = load["thvm_wl_uop_pad",      {Integer, {Integer, 1}},             Integer];
 $uopShrinkFn   := $uopShrinkFn   = load["thvm_wl_uop_shrink",   {Integer, {Integer, 1}},             Integer];
 $uopFlipFn     := $uopFlipFn     = load["thvm_wl_uop_flip",     {Integer, Integer},                  Integer];
-$uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Integer, Integer},      Integer];
-$uopGradMultiFn:= $uopGradMultiFn= load["thvm_wl_uop_grad_multi",  {Integer, Integer, {Integer, 1}}, Integer];
+$uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Integer},                Integer];
 $termCtrNFn    := $termCtrNFn    = load["thvm_wl_term_ctr_n",      {Integer},                        Integer];
 $termCtrAtFn   := $termCtrAtFn   = load["thvm_wl_term_ctr_at",     {Integer, Integer},               Integer];
 $uopLoadFn     := $uopLoadFn     = load["thvm_wl_uop_load",        {Integer},                        Integer];

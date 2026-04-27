@@ -50,29 +50,25 @@ fn Term grad_zero(Term target) {
 }
 
 fn Term interact_grad(Term grad_term) {
-  u64  loc    = term_val(grad_term);
-  Term y      = heap_read(loc + 0);
-  Term gy     = heap_read(loc + 1);
-  // Heap layout is [y, gy, NUM(n), x_1, ..., x_n].  n>1 fires the
-  // chain rule per target by lowering to a TAG_CTR of n unary
-  // uop_grad(y, gy, x_i) terms.  Each unary grad walks the chain
-  // rule independently, but the forward DAG (y and its descendants)
-  // lives at SHARED heap locs so materialize's per-realize memo
-  // dedups every kernel emitted from those forward UOps -- the
-  // savings show up as one realize + one set of forward kernels
-  // covering all n targets.
-  Term n_cell = heap_read(loc + 2);
-  u32  n      = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
-  if (n > 1) {
-    Term children[256];   // n_max guarded by the cap below
-    if (n > 256) return grad_term;   // bail; very rare
-    for (u32 i = 0; i < n; i++) {
-      Term x_i = heap_read(loc + 3 + i);
-      children[i] = uop_grad(y, gy, x_i);
-    }
-    return term_new_ctr(0, children, n);
+  u64  loc = term_val(grad_term);
+  Term y   = heap_read(loc + 0);
+  Term gy, target;
+  // Two layouts share UOP_GRAD; disambiguated by slot 1's tag
+  // (see src/uop/grad.c).
+  //   OUTER  [y, NUM(1), target]   -- slot 1 is a NUM marker.
+  //          Build the cotangent seed here, lazily, so the user-
+  //          facing TGrad's heap doesn't dangle a CONST(1.0) at
+  //          construction time.
+  //   INNER  [y, gy, target]       -- slot 1 is the gy term.
+  //          Emitted by the chain rule below for sub-positions;
+  //          existing rules thread gy unchanged or transformed.
+  Term slot1 = heap_read(loc + 1);
+  target = heap_read(loc + 2);
+  if (term_tag(slot1) == TAG_NUM) {
+    gy = uop_const(DT_F32, 0x3F800000u);   // 1.0f
+  } else {
+    gy = slot1;
   }
-  Term target = heap_read(loc + 3);
 
   // Lazy outermost-layer resolution -- follows VAR-SUB chains and
   // ALO unfoldings but does NOT fire materialize / kernel / grad.
@@ -109,7 +105,7 @@ fn Term interact_grad(Term grad_term) {
       if (kid == 0 || kid >= KERNELS_NEXT) return grad_zero(target);
       Term src = KERNELS[kid].source_uop;
       if (src == 0) return grad_zero(target);
-      return uop_grad(src, gy, target);
+      return uop_grad_inner(src, gy, target);
     }
 
     case UOP_CONST:
@@ -120,8 +116,8 @@ fn Term interact_grad(Term grad_term) {
       // they fire on demand.
       Term a = heap_read(y_loc + 0);
       Term b = heap_read(y_loc + 1);
-      Term ga = uop_grad(a, gy, target);
-      Term gb = uop_grad(b, gy, target);
+      Term ga = uop_grad_inner(a, gy, target);
+      Term gb = uop_grad_inner(b, gy, target);
       return uop_binary(UOP_ADD, ga, gb);
     }
 
@@ -137,8 +133,8 @@ fn Term interact_grad(Term grad_term) {
       Term b = heap_read(y_loc + 1);
       Term gy_a = uop_binary(UOP_MUL, b, gy);
       Term gy_b = uop_binary(UOP_MUL, a, gy);
-      Term ga = uop_grad(a, gy_a, target);
-      Term gb = uop_grad(b, gy_b, target);
+      Term ga = uop_grad_inner(a, gy_a, target);
+      Term gb = uop_grad_inner(b, gy_b, target);
       return uop_binary(UOP_ADD, ga, gb);
     }
 
@@ -151,7 +147,7 @@ fn Term interact_grad(Term grad_term) {
       // input is a multi-element tensor.)
       Term a    = heap_read(y_loc + 0);
       Term n_gy = uop_unary(UOP_NEG, gy);
-      return uop_grad(a, n_gy, target);
+      return uop_grad_inner(a, n_gy, target);
     }
 
     case UOP_LOG2: {
@@ -167,7 +163,7 @@ fn Term interact_grad(Term grad_term) {
       Term ra      = uop_unary(UOP_RECIP, a);
       Term ra_k    = uop_binary(UOP_MUL, ra, k);
       Term gy_a    = uop_binary(UOP_MUL, gy, ra_k);
-      return uop_grad(a, gy_a, target);
+      return uop_grad_inner(a, gy_a, target);
     }
 
     case UOP_EXP2: {
@@ -182,7 +178,7 @@ fn Term interact_grad(Term grad_term) {
       Term ea      = uop_unary(UOP_EXP2, a);
       Term ea_ln2  = uop_binary(UOP_MUL, ea, ln2);
       Term gy_a    = uop_binary(UOP_MUL, gy, ea_ln2);
-      return uop_grad(a, gy_a, target);
+      return uop_grad_inner(a, gy_a, target);
     }
 
     case UOP_RECIP: {
@@ -197,7 +193,7 @@ fn Term interact_grad(Term grad_term) {
       Term sq     = uop_binary(UOP_MUL, ra1, ra2);
       Term nsq    = uop_unary(UOP_NEG, sq);
       Term gy_a   = uop_binary(UOP_MUL, gy, nsq);
-      return uop_grad(a, gy_a, target);
+      return uop_grad_inner(a, gy_a, target);
     }
 
     case UOP_REDUCE: {
@@ -230,10 +226,10 @@ fn Term interact_grad(Term grad_term) {
           Term gy_at_out = uop_expand(gy, out_ndim, out_shape);
           Term gy_keep   = uop_reshape(gy_at_out, a_shape.ndim, keep_shape);
           Term lifted    = uop_expand(gy_keep, a_shape.ndim, a_shape.dims);
-          return uop_grad(a, lifted, target);
+          return uop_grad_inner(a, lifted, target);
         }
         Term lifted = expand_to_target(gy, target);
-        return uop_grad(a, lifted, target);
+        return uop_grad_inner(a, lifted, target);
       }
 
       // REDUCE_MAX: need a's shape to lift gy and to expand the
@@ -244,7 +240,7 @@ fn Term interact_grad(Term grad_term) {
         // single-leaf case; less safe in multi-tensor chains, but
         // preserves the SUM-rule's behaviour as a degraded default).
         Term lifted = expand_to_target(gy, target);
-        return uop_grad(a, lifted, target);
+        return uop_grad_inner(a, lifted, target);
       }
 
       // mx naturally has a's shape with `axis` dropped; gy has the
@@ -272,7 +268,7 @@ fn Term interact_grad(Term grad_term) {
 
       Term mask      = uop_binary(UOP_CMPEQ, a, mx_lifted);
       Term cotangent = uop_binary(UOP_MUL, gy_lifted, mask);
-      return uop_grad(a, cotangent, target);
+      return uop_grad_inner(a, cotangent, target);
     }
 
     case UOP_CMPLT:
@@ -300,7 +296,7 @@ fn Term interact_grad(Term grad_term) {
         // which axes were expanded statically, so passthrough -- the
         // leaf's expand_to_target reconciles shape via numel-cycling at
         // materialize time.
-        return uop_grad(a, gy, target);
+        return uop_grad_inner(a, gy, target);
       }
 
       // EXPAND heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})];
@@ -322,7 +318,7 @@ fn Term interact_grad(Term grad_term) {
           g = uop_reduce(REDUCE_SUM, (u32)axis, g);
         }
       }
-      return uop_grad(a, g, target);
+      return uop_grad_inner(a, g, target);
     }
 
     case UOP_RESHAPE: {
@@ -334,7 +330,7 @@ fn Term interact_grad(Term grad_term) {
       // memcpy branch of cpu_op_expand -- shape is reconciled at the
       // leaf without an explicit cotangent reshape here.
       Term a = heap_read(y_loc + 0);
-      return uop_grad(a, gy, target);
+      return uop_grad_inner(a, gy, target);
     }
 
     case UOP_SHRINK: {
@@ -353,7 +349,7 @@ fn Term interact_grad(Term grad_term) {
 
       Shape src_shape;
       if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
-        return uop_grad(a, gy, target);
+        return uop_grad_inner(a, gy, target);
       }
 
       u32 out_dims[MAX_DIM];
@@ -367,7 +363,7 @@ fn Term interact_grad(Term grad_term) {
       }
       Term gy_shaped = uop_expand(gy, src_shape.ndim, out_dims);
       Term g         = uop_pad(gy_shaped, src_shape.ndim, widths);
-      return uop_grad(a, g, target);
+      return uop_grad_inner(a, g, target);
     }
 
     case UOP_FLIP: {
@@ -383,13 +379,13 @@ fn Term interact_grad(Term grad_term) {
 
       Shape src_shape;
       if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
-        return uop_grad(a, gy, target);
+        return uop_grad_inner(a, gy, target);
       }
 
       u32 mask       = (u32)term_val(heap_read(y_loc + 1));
       Term gy_shaped = uop_expand(gy, src_shape.ndim, src_shape.dims);
       Term g         = uop_flip(gy_shaped, mask);
-      return uop_grad(a, g, target);
+      return uop_grad_inner(a, g, target);
     }
 
     case UOP_PERMUTE: {
@@ -406,7 +402,7 @@ fn Term interact_grad(Term grad_term) {
 
       Shape src_shape;
       if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
-        return uop_grad(a, gy, target);
+        return uop_grad_inner(a, gy, target);
       }
 
       u32 ndim = src_shape.ndim;
@@ -419,7 +415,7 @@ fn Term interact_grad(Term grad_term) {
 
       Term gy_shaped = uop_expand(gy, ndim, out_dims);
       Term g         = uop_permute(gy_shaped, ndim, inv_perm);
-      return uop_grad(a, g, target);
+      return uop_grad_inner(a, g, target);
     }
 
     case UOP_PAD: {
@@ -438,7 +434,7 @@ fn Term interact_grad(Term grad_term) {
 
       Shape src_shape;
       if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
-        return uop_grad(a, gy, target);
+        return uop_grad_inner(a, gy, target);
       }
 
       u32 out_dims[MAX_DIM];
@@ -452,7 +448,7 @@ fn Term interact_grad(Term grad_term) {
       }
       Term gy_shaped = uop_expand(gy, src_shape.ndim, out_dims);
       Term g         = uop_shrink(gy_shaped, src_shape.ndim, ranges);
-      return uop_grad(a, g, target);
+      return uop_grad_inner(a, g, target);
     }
 
     default:

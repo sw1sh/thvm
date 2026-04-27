@@ -126,9 +126,9 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
     TTerm[$uopFlipFn[ttermRaw[src], mask]]
 ]
 
-TUOpGrad[y_, gy_, target_] := (
+TUOpGrad[y_, target_] := (
     ensureInit[];
-    TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]]
+    TTerm[$uopGradFn[ttermRaw[y], ttermRaw[target]]]
 )
 
 TUOpLoad[src_] := (ensureInit[]; TTerm[$uopLoadFn[ttermRaw[src]]])
@@ -207,7 +207,7 @@ TUOpConv2D[input_, weights_, bias_] := TUOpConv2DLowered[input, weights, bias]
 
 (* Top-level VJP shortcut: gradient of `y` w.r.t. `target` with
    cotangent seed 1. *)
-TGrad[y_, target_] := TUOpGrad[y, TUOpConst[1.0, "f32"], target]
+TGrad[y_, target_] := TUOpGrad[y, target]
 
 (* Multi-target VJP: build n unary TGrads sharing the y subgraph by
    heap-loc identity, apply the user's body to them positionally.

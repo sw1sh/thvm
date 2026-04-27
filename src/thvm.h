@@ -657,9 +657,10 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // cotangent seed (typically a CONST(1) for top-level VJP), target is
 // the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
 // the chain-rule rewrite rule defined in interact/uop_grad.c.
-fn Term uop_grad      (Term y, Term gy, Term target);
-fn Term uop_grad_multi(Term y, Term gy, const Term *targets, u32 n);
-fn u32  uop_grad_n    (Term grad_term);
+fn Term uop_grad       (Term y, Term target);                  // outer; no gy
+fn Term uop_grad_inner (Term y, Term gy, Term target);         // chain-rule recursion
+fn u8   uop_grad_is_outer(Term grad_term);
+fn u32  uop_grad_n     (Term grad_term);
 fn Term uop_grad_target(Term grad_term, u32 i);
 
 // Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
