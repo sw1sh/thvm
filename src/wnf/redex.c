@@ -296,7 +296,6 @@ fn Term redex_fire(Term redex) {
         }
       } else if (uop_is_unary_elementwise(op)) {
         // UOP-SUP (unary):  UOP_op(SUP^L(a, b)) -> SUP^L(UOP_op(a), UOP_op(b))
-        // No second operand to DUP.
         Term a = term_resolve(heap_read(val + 0));
         if (term_tag(a) == TAG_SUP) {
           u32 lab  = term_ext(a);

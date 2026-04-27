@@ -244,16 +244,28 @@ gradLeafTidsUop[opcode_, base_] := Module[{n = uopArity[opcode]},
 ]
 
 TGrad[y_, target_TTerm] := Module[
-    {targetTid, leafTids, matchProj, mismatchProj},
+    {targetTid, leafTids, matchProj, mismatchProj, dupNest, targetShape},
     targetTid    = TTermVal[target];
     leafTids     = gradLeafTids[y];
     matchProj    = Function[{a, b}, b];
     mismatchProj = Function[{a, b}, a];
-    Fold[
+    dupNest = Fold[
         Function[{inner, tid},
             TDup[tid, inner, If[tid === targetTid, matchProj, mismatchProj]]],
         TUOpGrad[y],
         leafTids
+    ];
+    (* Reshape to target's shape.  Chain-rule rules emit movement uops
+       whose composed output shape may differ from target.shape (e.g.
+       a REDUCE inside the chain leaves bw at the REDUCE's input shape
+       rather than at target's).  Numel always matches by construction
+       so RESHAPE is a no-cost view fix.  Without this fix, e.g.
+       SUM(RESHAPE(MUL(a, a), {2, 2}), 0) wrt a returns the right
+       values at shape {2, 2} instead of a's shape {4}. *)
+    targetShape = TTensorShape[target];
+    If[ ListQ[targetShape] && Length[targetShape] > 0,
+        TUOpReshape[dupNest, targetShape],
+        dupNest
     ]
 ]
 

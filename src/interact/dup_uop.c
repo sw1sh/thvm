@@ -47,7 +47,20 @@ fn u32 uop_dup_arity(Term uop) {
       if (term_tag(ndim_cell) != TAG_NUM) return 0;
       return 2 + (u32)term_val(ndim_cell);
     }
-    default: return 0;   // PERMUTE/PAD/SHRINK/KERNEL/GRAD/FWD/ASSIGN: bail
+    case UOP_PERMUTE: {
+      // ndim inferred from src's shape; bail if src is non-shape-able.
+      Shape s;
+      if (!term_shape_in(heap_read(loc), 0, &s) || s.ndim == 0) return 0;
+      return 1 + s.ndim;
+    }
+    case UOP_PAD: case UOP_SHRINK: {
+      // Heap = [src, NUM(b0), NUM(e0), ..., NUM(b_{ndim-1}), NUM(e_{ndim-1})].
+      // ndim from src's shape.
+      Shape s;
+      if (!term_shape_in(heap_read(loc), 0, &s) || s.ndim == 0) return 0;
+      return 1 + 2 * s.ndim;
+    }
+    default: return 0;   // KERNEL/ASSIGN: bail (active)
   }
 }
 

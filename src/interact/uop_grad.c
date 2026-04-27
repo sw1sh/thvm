@@ -222,7 +222,7 @@ fn Term interact_grad(Term grad_term) {
         Term gy_lifted = uop_expand(ga.bwd, a_shape.ndim, a_shape.dims);
         new_bw         = uop_binary(UOP_MUL, gy_lifted, mask);
       } else {
-        new_bw = ga.bwd;   // best effort -- passthrough
+        new_bw = ga.bwd;
       }
       return new_bw;
     }
@@ -283,16 +283,24 @@ fn Term interact_grad(Term grad_term) {
     }
 
     case UOP_PERMUTE: {
-      // ndim is encoded in ext's high bits per the comment; here we
-      // can't easily decode that without a dedicated helper.  Fall
-      // back to passthrough on bw and rely on shape-inference at
-      // materialize time.  TODO: handle properly.
+      // PERMUTE: bw_outer = PERMUTE(bw_a, inv_perm) -- undo the axis
+      // reorder.  ndim is inferred from src's shape (uop_meta does
+      // the same trick).
       Term a = heap_read(y_loc + 0);
+      Shape src_shape;
+      if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
+        return grad_term;
+      }
+      u32 ndim = src_shape.ndim;
+      u32 perm[MAX_DIM], inv_perm[MAX_DIM];
+      for (u32 i = 0; i < ndim; i++) {
+        perm[i] = (u32)term_val(heap_read(y_loc + 1 + i));
+      }
+      for (u32 i = 0; i < ndim; i++) {
+        inv_perm[perm[i]] = i;
+      }
       GradPair ga = grad_pair(a);
-      // We don't know permutation rank here without decoding ext;
-      // bail (return WHNF) for now.
-      (void)ga;
-      return grad_term;
+      return uop_permute(ga.bwd, ndim, inv_perm);
     }
 
     case UOP_PAD: case UOP_SHRINK: {
