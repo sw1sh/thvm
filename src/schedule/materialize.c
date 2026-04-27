@@ -34,7 +34,9 @@ static u32 boundary_depth_rec(u64 loc) {
   u64 seen[MAX_UOP_SRC] = {0};
   u8  n_seen = 0;
   for (u8 i = 0; i < ar; i++) {
-    Term child = heap_read(loc + i);
+    // term_resolve to follow VAR/ALO chains -- match realize_walk_rec
+    // and visit() so the topo-sort sees the same boundary set.
+    Term child = term_resolve(heap_read(loc + i));
     if (term_tag(child) != TAG_UOP)        continue;
     if (term_ext(child) == UOP_KERNEL)     continue;
     u64 cloc = term_val(child);
@@ -330,6 +332,11 @@ static u32 src_numel(KernelEntry *ke, u32 src_idx) {
 // Recursive visit.  Returns a program-index (0..n_ops-1) or
 // VISIT_BAIL on any unsupported op.
 static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
+  // Resolve VAR (SUB-bit) + ALO (one-layer force) chains so a body
+  // post-APP-LAM-beta exposes its bound argument's TEN/UOP rather
+  // than the bare VAR cell that visit() would otherwise bail on.
+  // term_resolve is a pure pointer hop -- no allocation, no firing.
+  t = term_resolve(t);
   u8 tag = term_tag(t);
 
   if (tag == TAG_TEN) {
@@ -574,10 +581,44 @@ static Term emit_kernel_for_boundary(u32 bi) {
     return 0;
   }
 
+  // Degenerate case: visit() consumed the whole boundary subgraph as
+  // a single input slot (n_ops == 0, result == KSRC_AS_INPUT).  This
+  // happens when the boundary's root is a movement-op chain whose
+  // view_resolve found a direct alias TenDesc -- no compute to do.
+  // Without this branch the kernel commits with an empty program;
+  // cpu_interpret runs nothing; the alloc'd output buffer stays
+  // zero-initialized, silently zeroing whatever signal was supposed
+  // to flow through (the gy=CONST(1.0) seed in MSE backward, etc).
+  // Skip kernel emission and alias the boundary's output to the
+  // input tid directly.
+  if (ke->n_ops == 0 && KSRC_IS_INPUT(result)) {
+    u32 alias_tid = ke->input_tids[KSRC_INDEX(result)];
+    if (alias_tid != 0 && alias_tid < TENS_NEXT) {
+      // Release the unused output_tid we speculatively allocated.
+      tensor_release(out_tid);
+      kernel_dealloc_last(kid);
+      Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
+      BOUNDARY_TID [bi] = alias_tid;
+      BOUNDARY_TERM[bi] = alias_term;
+      return alias_term;
+    }
+  }
+
   u64 kloc = heap_alloc(2);
   heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, out_tid));
   heap_set(kloc + 1, term_new(0, TAG_NUM, DT_I32, kid));
   Term kernel_term = term_new(0, TAG_UOP, UOP_KERNEL, kloc);
+
+  // Pin a heap cell carrying the UOP_KERNEL Term itself so heap-walk
+  // discovery (e.g. THeapDiagram, gc_mark) sees every emitted kernel,
+  // not only the sink that gets returned to the WL handle.  Without
+  // this pin, only the sink kernel_term is reachable (via the WL
+  // surface Term); the non-sink kernels' Terms live in BOUNDARY_TERM[]
+  // C-side scratch and never become heap-resident.  Cost: one Term
+  // (~8B) per emitted kernel; the pinned cell is read-only (the Term
+  // it holds is identical to BOUNDARY_TERM[bi], no aliasing concern).
+  u64 pin = heap_alloc(1);
+  heap_set(pin, kernel_term);
 
   BOUNDARY_TID [bi] = out_tid;
   BOUNDARY_TERM[bi] = kernel_term;
@@ -602,6 +643,26 @@ fn Term materialize_uop_in_env(Term t, u32 env_id) {
 }
 
 fn Term thvm_materialize(Term term) {
+  // REF / ALO transparency: jump (don't unfold) into the body cell.
+  // term_resolve walks VAR-SUB and ALO chains -- pure pointer hops,
+  // no heap allocation.  TAG_REF jumps directly to DEFS[name], the
+  // book-heap pointer registered by TDef -- still no allocation, no
+  // rewriting of the original term, just reading where the body
+  // lives.  Cap at 8 hops as a safety net against degenerate
+  // self-referencing REF chains; in practice 1-2 suffices.
+  for (int hops = 0; hops < 8; hops++) {
+    Term resolved = term_resolve(term);
+    if (term_tag(resolved) == TAG_REF) {
+      u32 name = term_ext(resolved);
+      Term book = (name < DEFS_CAP) ? DEFS[name] : 0;
+      if (book == 0) break;
+      term = book;
+      continue;
+    }
+    if (resolved == term) break;
+    term = resolved;
+  }
+
   // TAG_CTR (multi-target grad bundle): materialize each child
   // independently and rebuild the CTR.  Pure structural recursion;
   // the children themselves are normal UOp graphs (or already TAG_TEN
@@ -619,6 +680,20 @@ fn Term thvm_materialize(Term term) {
   // GRAD is a stop point in materialize -- wnf fires interact_grad,
   // then thvm_realize loops back here to compile the unrolled UOps.
   if (term_ext(term) == UOP_GRAD)       return term;
+  // ASSIGN is a wnf-fired primitive (interact_assign) -- not a kernel.
+  // Materialize the SRC subgraph so its kernels are compiled, then
+  // re-wrap as ASSIGN(dst, materialized_src).  Wnf later fires the
+  // src kernels, lands a TEN in heap[loc+1], and interact_assign
+  // memcpys it into dst.buf.
+  if (term_ext(term) == UOP_ASSIGN) {
+    u64  loc        = term_val(term);
+    Term dst_cell   = heap_read(loc + 0);
+    Term src_cell   = heap_read(loc + 1);
+    Term src_mat    = thvm_materialize(src_cell);
+    if (src_mat != src_cell) heap_set(loc + 1, src_mat);
+    (void)dst_cell;
+    return term;
+  }
 
   // Movement-op root: resolve the chain to an alias TenDesc, then
   // flatten to a contig copy so wnf-side flat reads work.

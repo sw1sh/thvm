@@ -165,7 +165,13 @@ typedef u64 Term;
                              //   marker (mirrors tinygrad's UOps.LOAD).  Slot
                              //   reserved -- constructor + materializer land in
                              //   sub-item (b); see TASKS.md UOP_LOAD arc.
-#define UOP_COUNT       22
+#define UOP_ASSIGN      22   // heap = [dst, src]; in-place buffer write.
+                             //   Both children must reduce to TAG_TEN.  Wnf-fired
+                             //   (interact_assign) -- copies src.buf -> dst.buf
+                             //   and rewrites the redex to the dst Term.  Mirrors
+                             //   tinygrad's UOps.ASSIGN.  Materialize bails so
+                             //   the UOp survives until both children are TENs.
+#define UOP_COUNT       23
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -180,8 +186,14 @@ typedef u64 Term;
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
 #define ALO_STATE_CAP (1ULL << 16)  // ALO substitution-chain entries.
 #define MAX_DIM      8              // max tensor rank
-#define KPROG_MAX_OPS    64         // max ops per kernel program
-#define KERNEL_MAX_INPUT 8          // max input tensors per kernel
+#define KPROG_MAX_OPS    256        // max ops per kernel program
+                                    // (Conv2D Fold-add chains run ~5 ops
+                                    // per partial * kh*kw partials + adds;
+                                    // 5x5 conv backward = ~150 ops)
+#define KERNEL_MAX_INPUT 64         // max input tensors per kernel
+                                    // (Conv2D fuses 2*kh*kw input/weight
+                                    // tids into one kernel; 64 covers up
+                                    // to 5x5 with headroom)
 #define MAX_UOP_SRC  3              // max source slots per KProgOp (CONV2D needs 3: input/weights/bias)
 
 // === Tensor descriptor + backend ===
@@ -307,7 +319,6 @@ typedef struct KernelEntry {
   // recurses into the original UOp graph naturally.
   Term      source_uop;
 
-  u8        fired;                 // 1 once the kernel has run
   u8        spliced;               // 1 if the kernel's program was inlined
                                    // into a parent via
                                    // materialize_splice_into; kernel_fire_by_id
@@ -653,6 +664,14 @@ fn Term thvm_materialize(Term term);
 // Forward-declared so materialize_expr can reduce UOP_GRAD nodes
 // inline before kernelizing.  Defined later in src/interact/uop_grad.c.
 fn Term interact_grad(Term grad_term);
+
+// === interact/uop_assign ===
+// Wnf-fired ASSIGN(dst_TEN, src_TEN): memcpy src.buf -> dst.buf, return
+// dst Term.  Eligible (is_redex true) only when both children resolve
+// to TAG_TEN -- otherwise wnf walks src's producer first.  Used as the
+// in-place mutation primitive for optimizer loops; weights stay
+// tid-stable while their buffer contents update each iteration.
+fn Term interact_assign(Term assign_term);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.

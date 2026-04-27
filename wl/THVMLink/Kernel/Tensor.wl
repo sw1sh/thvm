@@ -133,6 +133,15 @@ TUOpGrad[y_, gy_, target_] := (
 
 TUOpLoad[src_] := (ensureInit[]; TTerm[$uopLoadFn[ttermRaw[src]]])
 
+(* TAssign[dst_TEN, src_UOP_or_TEN] -- in-place buffer write.  Wnf
+   fires it once `src` reduces to a TAG_TEN: backend memcpy of
+   src.buf into dst.buf, returns dst.  Used by optimizer loops to
+   mutate weight tensors without allocating fresh tids per step.
+   Both children share the binary heap layout; reuses $uopBinaryFn
+   under opcode $UopAssign. *)
+TAssign[dst_, src_] := (ensureInit[];
+    TTerm[$uopBinaryFn[$UopAssign, ttermRaw[dst], ttermRaw[src]]])
+
 (* TUOpConv2DLowered[input, weights, bias] -- builds 2-D
    convolution forward from primitive UOPs only.  Public
    entry point TUOpConv2D below dispatches to this.

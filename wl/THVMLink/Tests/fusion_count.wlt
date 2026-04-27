@@ -23,9 +23,12 @@ VerificationTest[
     TestID -> "fusion-count/linear-mse-forward-eq-2"
 ]
 
-(* Linear + MSE forward+backward: per the plan, full pipeline
-   converges to 4 kernels (2 forward + 2 backward).  This is the
-   key kernel-count claim of the rewrite arc. *)
+(* Linear + MSE forward+backward: full pipeline emits 3 kernels
+   after the degenerate-kernel-skip fix in materialize.c -- the
+   gy=CONST(1.0) seed used to materialize as a 0-op kernel that
+   silently zeroed the gradient signal; that branch is now an
+   alias to the input TenDesc, dropping one kernel from the count.
+   2 forward + 1 backward chain. *)
 VerificationTest[
     TInit[];
     x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
@@ -34,8 +37,8 @@ VerificationTest[
     before = TKernelCount[];
     TRealize @ TGrad[TMSELoss[TDot[w, x], t], w];
     kernelDelta[before, TKernelCount[]],
-    4,
-    TestID -> "fusion-count/linear-mse-forward-plus-backward-eq-4"
+    3,
+    TestID -> "fusion-count/linear-mse-forward-plus-backward-eq-3"
 ]
 
 (* Softmax forward.  Naive softmax = exp(x) / sum(exp(x)) -- the

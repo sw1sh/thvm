@@ -27,21 +27,22 @@ fn void kernel_fire_by_id(u32 kid) {
   // SUB-bit chain to reach a TAG_TEN.  If we still don't see a
   // concrete TEN, the kernel can't fire -- bail.
   u32 resolved_tids[KERNEL_MAX_INPUT];
-  int has_symbolic = 0;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
     if (tid == 0 && ke->input_terms[i] != 0) {
       Term r = term_resolve(ke->input_terms[i]);
       if (term_tag(r) != TAG_TEN) return;
       tid = (u32)term_val(r);
-      has_symbolic = 1;
     }
     resolved_tids[i] = tid;
   }
 
-  // Concrete-only kernels fire once; symbolic-input kernels can be
-  // re-fired with different bindings each time.
-  if (!has_symbolic && ke->fired) return;
+  // No `fired` memoization.  A kernel re-fires on every interact_kernel
+  // entry, the same way OP2 re-collapses on every NUM-NUM redex.  IC's
+  // structural sharing (DUP/SUP) decides how many distinct redex
+  // instances exist; the dispatcher just runs the program for each.
+  // ASSIGN UOPs in optimizer loops mutate input buffers between
+  // re-fires so the same kid produces different output values.
 
   // Depth-first: fire every input's producing kernel first.
   for (u32 i = 0; i < ke->n_inputs; i++) {
@@ -63,38 +64,12 @@ fn void kernel_fire_by_id(u32 kid) {
     b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   }
 
-  // Decref hook (sub-item b of the refcount-driven free arc).
-  // Inputs have been read; tell each producer kernel "one more
-  // consumer is done with you."  When a producer's count hits zero,
-  // its output buf is no longer needed -- mark it freeable so the
-  // next pool rollback can reclaim it.  Skipped for symbolic
-  // kernels because they may re-fire with different bindings, where
-  // the static consumer_count from kernel_compute_consumer_counts
-  // doesn't correspond 1:1 to actual reads.
-  if (!has_symbolic) {
-    for (u32 i = 0; i < ke->n_inputs; i++) {
-      u32 tid = ke->input_tids[i];
-      if (tid == 0 || tid >= TENS_NEXT) continue;
-      u32 producer = TENS[tid].producer_kid;
-      if (producer == 0 || producer >= KERNELS_NEXT) continue;
-      KernelEntry *pe = &KERNELS[producer];
-      // Only act on a real 1->0 transition.  A producer whose count
-      // never reached non-zero (e.g., because the caller skipped
-      // kernel_compute_consumer_counts) wouldn't have been counted
-      // by anyone, so freeing on a 0->0 "decref" would be
-      // unjustified -- and worse, would leave a stale freeable bit
-      // across realize boundaries.
-      if (pe->consumer_count > 0) {
-        pe->consumer_count--;
-        if (pe->consumer_count == 0) {
-          u32 prod_buf = TENS[pe->output_tid].buf_id;
-          cpu_buf_mark_freeable(prod_buf);
-        }
-      }
-    }
-  }
+  // Per-fire consumer-count decref removed alongside `fired`: the
+  // assumption "one fire = one full read of every input" only holds
+  // for the static one-shot case, and re-firing kernels in optimizer
+  // loops would over-decrement.  Future work: structural lifetime
+  // analysis on the kernel DAG, not per-fire accounting.
 
-  ke->fired = 1;
   ITRS++;
 }
 

@@ -191,6 +191,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/dup_bri.c"
 #include "interact/uop_grad.c"
 #include "interact/uop_kernel.c"
+#include "interact/uop_assign.c"
 
 // === wnf/ ===
 // The reducer dispatches to the interactions and to materialize,

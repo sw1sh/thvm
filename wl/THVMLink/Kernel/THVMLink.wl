@@ -119,6 +119,8 @@ TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; ki
 TUOpGrad::usage      = "TUOpGrad[y, gy, target] builds a UOP_GRAD node.  Reducing under TWnf applies the chain rule recursively until no UOP_GRAD nodes remain; the result is a UOp graph that can be fed to TRealize / TMaterialize like any other.";
 TUOpLoad::usage      = "TUOpLoad[src] builds a UOP_LOAD node wrapping src.  Structural marker mirroring tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in the cpu kernel).";
 
+TAssign::usage       = "TAssign[dst, src] builds a UOP_ASSIGN node.  Wnf-fired in-place buffer write: once `src` reduces to a TAG_TEN, backend memcpy copies src.buf into dst.buf and the redex rewrites to dst.  Mirrors tinygrad's UOps.ASSIGN.  Use to mutate weight tensors in optimizer loops without allocating fresh tids per step.";
+
 TUOpConv2D::usage    = "TUOpConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  Dispatches to TUOpConv2DLowered so autograd flows through primitives via the chain rule.";
 
 TUOpConv2DLowered::usage = "TUOpConv2DLowered[input, weights, bias] builds the same valid 2-D convolution as TUOpConv2D but as a kh*kw-unrolled chain of primitive UOPs (SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD).  No new opcodes; pure WL composition.";
@@ -176,7 +178,7 @@ $UopAdd = 9;          $UopMul = 10;    $UopNeg = 11;
 $UopRecip = 12;       $UopExp2 = 13;   $UopLog2 = 14;
 $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
 $UopGrad = 18;        $UopCmpeq = 20;
-$UopLoad = 21;
+$UopLoad = 21;        $UopAssign = 22;
 (* slot 19 was $UopConv2D -- removed; lowering is in WL via TUOpConv2DLowered *)
 
 $uopNames = <|
@@ -186,7 +188,8 @@ $uopNames = <|
     9  -> "ADD",         10 -> "MUL",    11 -> "NEG",
     12 -> "RECIP",       13 -> "EXP2",   14 -> "LOG2",
     15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE",
-    18 -> "GRAD",        20 -> "CMPEQ", 21 -> "LOAD"
+    18 -> "GRAD",        20 -> "CMPEQ", 21 -> "LOAD",
+    22 -> "ASSIGN"
 |>;
 
 (* Reduce-kind constants *)
@@ -521,6 +524,7 @@ uopCellCount[op_] := Switch[op,
     $UopReduce,                                                     3,
     $UopGrad,                                                       3,
     $UopKernel,                                                     2,
+    $UopAssign,                                                     2,
     (* RESHAPE: report 1 (the src) so TTermExpr renders UOP[RESHAPE,
        <src-subtree>].  The trailing NUM(d_i) cells are integer
        parameters, not children of structural interest. *)

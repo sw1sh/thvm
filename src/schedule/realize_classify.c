@@ -66,7 +66,11 @@ static void realize_walk_rec(Term t, u8 *visited) {
   u64 seen[MAX_UOP_SRC] = {0};
   u8  n_seen = 0;
   for (u8 i = 0; i < ar; i++) {
-    Term child = heap_read(loc + i);
+    // Resolve VAR (SUB-bit) + ALO chains so a body post-APP-LAM
+    // beta exposes the bound argument's UOP rather than the bare
+    // VAR cell -- mirrors visit() in materialize.c so the walker
+    // and the kernel walker agree on what's a kernel boundary.
+    Term child = term_resolve(heap_read(loc + i));
     if (term_tag(child) != TAG_UOP) continue;
     if (term_ext(child) == UOP_KERNEL) continue;
     u64 cloc = term_val(child);

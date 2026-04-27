@@ -130,6 +130,26 @@ enter:
         next = g_out;
         goto enter;
       }
+      if (op == UOP_ASSIGN) {
+        // Force src (heap[loc+1]) first -- could be a kernel chain
+        // that has to fire before we have a TEN to copy from.  dst
+        // (heap[loc+0]) should already be a TEN handle but resolve
+        // it for symmetry.  Once both are TEN, fire interact_assign
+        // which memcpys src.buf -> dst.buf and returns dst.
+        u64  aloc   = term_val(next);
+        if (BUDGET_HIT) BAIL_AT(next);
+        Term src_w  = wnf(heap_read(aloc + 1));
+        Term dst_w  = wnf(heap_read(aloc + 0));
+        if (term_tag(src_w) == TAG_TEN && term_tag(dst_w) == TAG_TEN) {
+          heap_set(aloc + 0, dst_w);
+          heap_set(aloc + 1, src_w);
+          whnf = interact_assign(next);  // ITRS++ inside on success
+          goto apply;
+        }
+        // Either side stuck (e.g. dst still a UOP) -- leave as WHNF.
+        whnf = next;
+        goto apply;
+      }
       // BUFFER / CONST / VIEW / movement / elementwise / REDUCE / ...
       // are WNF by themselves; they become active only inside a KERNEL AST
       // the interpreter walks after firing.

@@ -712,8 +712,11 @@ EXTERN_C DLLEXPORT int thvm_wl_total_buf_bytes(WolframLibraryData libData, mint 
 EXTERN_C DLLEXPORT int thvm_wl_kernel_table(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {
   (void)argc; (void)args;
-  // Cols per kernel: [n_inputs, output_tid, fired, spliced,
+  // Cols per kernel: [n_inputs, output_tid, _reserved0, spliced,
   //                   consumer_count, output_numel, output_dtype].
+  // Slot 2 was `fired`; removed (kernels re-fire on every redex,
+  // OP2-style).  Kept as a 0 placeholder so the existing 7-col
+  // schema and TMemoryPlan column indexing stay stable.
   mint nRows = (mint)(KERNELS_NEXT > 0 ? KERNELS_NEXT - 1 : 0);
   mint nCols = 7;
   mint dims[1] = {nRows * nCols};
@@ -724,7 +727,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_table(WolframLibraryData libData, mint arg
     KernelEntry *ke = &KERNELS[k + 1];
     dst[k * nCols + 0] = (mint)ke->n_inputs;
     dst[k * nCols + 1] = (mint)ke->output_tid;
-    dst[k * nCols + 2] = (mint)ke->fired;
+    dst[k * nCols + 2] = 0;        /* reserved (was `fired`) */
     dst[k * nCols + 3] = (mint)ke->spliced;
     dst[k * nCols + 4] = (mint)ke->consumer_count;
     dst[k * nCols + 5] = (mint)ke->output_numel;

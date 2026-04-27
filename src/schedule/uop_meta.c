@@ -18,6 +18,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_REDUCE:  case UOP_LOAD:
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_ASSIGN:
       return 2;
     default:
       return 0;
@@ -41,6 +42,10 @@ fn u8 uop_is_binary_elementwise(u8 op) {
 // is the smallest surface that lets interact_grad keep working.
 fn int term_shape_in(Term t, u32 env_id, Shape *out) {
   (void)env_id;
+  // Same VAR/ALO resolve as visit() in materialize.c -- shape inference
+  // walking through a beta-substituted body needs to see the bound
+  // arg's TEN, not the bare VAR cell.
+  t = term_resolve(t);
   u8 tag = term_tag(t);
   if (tag == TAG_TEN) {
     u32 tid = (u32)term_val(t);

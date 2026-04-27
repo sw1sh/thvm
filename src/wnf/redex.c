@@ -53,11 +53,20 @@ fn u8 is_redex(Term t) {
     }
     case TAG_UOP: {
       u8 op = term_ext(t);
-      // KERNEL always reducible (one fire each, but enumeration
-      // doesn't track fired-ness; the dispatcher is idempotent
-      // enough for inspection).  GRAD always *eligible* -- the fire
-      // is a no-op when y isn't structurally pattern-matchable.
-      return op == UOP_KERNEL || op == UOP_GRAD;
+      // KERNEL always reducible (the dispatcher is idempotent for
+      // inspection -- with `fired` removed, every entry re-runs).
+      // GRAD always *eligible* -- the fire is a no-op when y isn't
+      // structurally pattern-matchable.
+      // ASSIGN reducible only when both children resolve to TAG_TEN;
+      // otherwise wnf walks src's producer first to materialize the
+      // value being assigned.
+      if (op == UOP_KERNEL || op == UOP_GRAD) return 1;
+      if (op == UOP_ASSIGN) {
+        Term dst = term_resolve(heap_read(val + 0));
+        Term src = term_resolve(heap_read(val + 1));
+        return term_tag(dst) == TAG_TEN && term_tag(src) == TAG_TEN;
+      }
+      return 0;
     }
     default: return 0;
   }
@@ -169,6 +178,9 @@ fn Term redex_fire(Term redex) {
         if (g == redex) return 0;          // stuck -- treat as non-redex
         ITRS++;
         result = g;
+      } else if (op == UOP_ASSIGN) {
+        result = interact_assign(redex);   // ITRS++ inside
+        if (result == redex) return 0;     // stuck -- not a redex yet
       } else {
         return 0;
       }
@@ -209,6 +221,7 @@ static u32 term_arity(Term t) {
     case TAG_UOP: {
       u8 op = term_ext(t);
       if (op == UOP_KERNEL) return 2;
+      if (op == UOP_ASSIGN) return 2;
       if (op == UOP_GRAD) {
         // Variable arity 3+n (heap = [y, gy, NUM(n), x_1..x_n]).
         Term n_cell = heap_read(term_val(t) + 2);
