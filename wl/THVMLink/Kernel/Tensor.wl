@@ -126,10 +126,20 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
     TTerm[$uopFlipFn[ttermRaw[src], mask]]
 ]
 
-TUOpGrad[y_, target_] := (
-    ensureInit[];
-    TTerm[$uopGradFn[ttermRaw[y], ttermRaw[target]]]
-)
+(* Build the BWD projection over a fresh dup-like grad cell holding
+   y.  The companion FWD projection is reachable via TUOpFwd at the
+   same loc (or via TGradPair below for both at once). *)
+TUOpGrad[y_] := (ensureInit[]; TTerm[$uopGradFn[ttermRaw[y]]])
+TUOpFwd [y_] := (ensureInit[]; TTerm[$uopFwdFn [ttermRaw[y]]])
+
+(* Build {fwd, bwd} pair sharing one cell [y].  The dup-like
+   discipline -- both projections reference the same heap loc, so the
+   forward subgraph isn't duplicated. *)
+TGradPair[y_] := With[{bwd = TUOpGrad[y]},
+    With[{loc = TTermVal[bwd]},
+        {packTerm[0, $TagUOP, $UopFwd, loc], bwd}
+    ]
+]
 
 TUOpLoad[src_] := (ensureInit[]; TTerm[$uopLoadFn[ttermRaw[src]]])
 
@@ -207,7 +217,44 @@ TUOpConv2D[input_, weights_, bias_] := TUOpConv2DLowered[input, weights, bias]
 
 (* Top-level VJP shortcut: gradient of `y` w.r.t. `target` with
    cotangent seed 1. *)
-TGrad[y_, target_] := TUOpGrad[y, target]
+(* TGrad[y, target]: the user-facing VJP.
+
+   The chain rule emits SUP^{leaf_tid}(zero, one) at each TEN leaf
+   of y.  After full reduction these SUPs propagate to the top via
+   UOP-SUP commutation; to extract a clean gradient we need ONE DUP
+   per distinct leaf-tid in y, projecting:
+     - MATCH side  for the target's leaf SUP   (= 1, the gradient)
+     - MISMATCH side for every other leaf SUP  (= 0, no contribution)
+
+   We discover leaf tids by walking y once at construction time and
+   nest the DUPs: TDup[t1, ..., TDup[t2, ..., TUOpGrad[y]]] each
+   projecting the appropriate side based on whether ti == target.tid. *)
+gradLeafTids[t_TTerm] := Module[{tag = TTermTag[t]},
+    Which[
+        tag === $TagTEN, {TTermVal[t]},
+        tag === $TagUOP, gradLeafTidsUop[TTermExt[t], TTermVal[t]],
+        True, {}
+    ]
+]
+gradLeafTids[_] := {}
+
+gradLeafTidsUop[opcode_, base_] := Module[{n = uopArity[opcode]},
+    DeleteDuplicates @ Flatten @ Table[gradLeafTids[THeapRead[base + i]], {i, 0, n - 1}]
+]
+
+TGrad[y_, target_TTerm] := Module[
+    {targetTid, leafTids, matchProj, mismatchProj},
+    targetTid    = TTermVal[target];
+    leafTids     = gradLeafTids[y];
+    matchProj    = Function[{a, b}, b];
+    mismatchProj = Function[{a, b}, a];
+    Fold[
+        Function[{inner, tid},
+            TDup[tid, inner, If[tid === targetTid, matchProj, mismatchProj]]],
+        TUOpGrad[y],
+        leafTids
+    ]
+]
 
 (* Multi-target VJP: build n unary TGrads sharing the y subgraph by
    heap-loc identity, apply the user's body to them positionally.

@@ -615,12 +615,23 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_flip(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Builds the dup-like GRAD pair: heap cell holds [y]; the returned
+// Term is the BWD projection (UOP_GRAD).  WL pairs it with a UOP_FWD
+// at the same cell loc via packTerm.
 EXTERN_C DLLEXPORT int thvm_wl_uop_grad(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc;
-  Term y      = (Term)MArgument_getInteger(args[0]);
-  Term target = (Term)MArgument_getInteger(args[1]);
-  Term r = uop_grad(y, target);
+  Term y = (Term)MArgument_getInteger(args[0]);
+  Term r = uop_grad(y);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_fwd(WolframLibraryData libData, mint argc,
+                                       MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term y = (Term)MArgument_getInteger(args[0]);
+  Term r = uop_fwd(y);
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }

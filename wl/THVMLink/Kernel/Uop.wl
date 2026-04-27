@@ -38,7 +38,8 @@ uopArity[$UopPad]         = 1;
 uopArity[$UopShrink]      = 1;
 uopArity[$UopFlip]        = 1;
 uopArity[$UopReduce]      = 1;
-uopArity[$UopGrad]        = 3;
+uopArity[$UopGrad]        = 1;
+uopArity[$UopFwd]         = 1;
 uopArity[_]               = 0;
 
 (* === names =========================================================== *)
@@ -54,7 +55,8 @@ uopName[$UopMul]         = "MUL";         uopName[$UopNeg]     = "NEG";
 uopName[$UopRecip]       = "RECIP";       uopName[$UopExp2]    = "EXP2";
 uopName[$UopLog2]        = "LOG2";        uopName[$UopSqrt]    = "SQRT";
 uopName[$UopCmplt]       = "CMPLT";       uopName[$UopReduce]  = "REDUCE";
-uopName[$UopGrad]        = "GRAD";        uopName[$UopCmpeq]   = "CMPEQ";
+uopName[$UopGrad]        = "GRAD";        uopName[$UopFwd]     = "FWD";
+uopName[$UopCmpeq]       = "CMPEQ";
 uopName[op_]             := "UOP?" <> ToString[op]
 
 (* === heap fallback ===================================================
@@ -120,7 +122,10 @@ uopShapeOfFor[$UopExpand, base_] := With[{src = uopSrcShape[base, 0]},
     ]
 ]
 
-uopShapeOfFor[$UopGrad, base_] := uopSrcShape[base, 2]   (* target's shape *)
+(* GRAD/FWD share cell [y]; both have y's shape (the bw is shape-
+   lifted at the leaf via expand_to_target, then propagated up). *)
+uopShapeOfFor[$UopGrad, base_] := uopSrcShape[base, 0]
+uopShapeOfFor[$UopFwd,  base_] := uopSrcShape[base, 0]
 
 uopShapeOfFor[_, base_] := uopSrcShape[base, 0]
 

@@ -155,11 +155,19 @@ typedef u64 Term;
 #define UOP_SQRT        15   // heap = [src]
 #define UOP_CMPLT       16   // heap = [a, b]
 #define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(axis)]
-#define UOP_GRAD        18   // heap = [y, gy_seed, target]; rewrite rule
-                             // (slot 19 was UOP_CONV2D -- removed; lowering
-                             // happens entirely in WL via TUOpConv2DLowered.
-                             // Slot left unused so existing opcode integers
-                             // for CMPEQ/LOAD don't shift.)
+// UOP_GRAD / UOP_FWD form a dup-like combinator.  Both share a cell
+// holding [y] and represent the two aux ports of a "grad agent":
+//     UOP_GRAD = backward projection (chain-rule rewrite)
+//     UOP_FWD  = forward projection (passthrough to y)
+// When the chain rule fires (via interact_grad on a UOP_GRAD term),
+// it rewrites BOTH projections atomically: heap_replace updates every
+// parent slot referencing UOP_FWD(cell) and UOP_GRAD(cell) in one
+// step.  No target stored in the cell -- target identification happens
+// at the leaf, where interact_grad emits SUP^{leaf_tid}(0, 1) labeled
+// by the leaf's tid; the WL surface DUP^{target_tid} routes the
+// projection.
+#define UOP_GRAD        18   // heap = [y]; backward (∂y/∂target via SUP routing)
+#define UOP_FWD         19   // heap = [y]; forward projection (returns y)
 #define UOP_CMPEQ       20   // heap = [a, b]; mask of (a == b), 0/1 floats
 #define UOP_LOAD        21   // heap = [src]; explicit "read this tensor" boundary
                              //   marker (mirrors tinygrad's UOps.LOAD).  Slot
@@ -657,11 +665,11 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // cotangent seed (typically a CONST(1) for top-level VJP), target is
 // the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
 // the chain-rule rewrite rule defined in interact/uop_grad.c.
-fn Term uop_grad       (Term y, Term target);                  // outer; no gy
-fn Term uop_grad_inner (Term y, Term gy, Term target);         // chain-rule recursion
-fn u8   uop_grad_is_outer(Term grad_term);
-fn u32  uop_grad_n     (Term grad_term);
-fn Term uop_grad_target(Term grad_term, u32 i);
+// Allocate a shared grad cell holding [y].  Both projections (FWD
+// and GRAD) reference this cell with their tag/opcode as discriminator.
+fn u64  uop_grad_cell  (Term y);
+fn Term uop_grad       (Term y);   // BWD projection over a fresh cell
+fn Term uop_fwd        (Term y);   // FWD projection over a fresh cell
 
 // Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in

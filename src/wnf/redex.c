@@ -61,6 +61,11 @@ fn u8 is_redex(Term t) {
       // otherwise wnf walks src's producer first to materialize the
       // value being assigned.
       if (op == UOP_KERNEL || op == UOP_GRAD) return 1;
+      // UOP_FWD reduces to its cell's y -- always eligible.  The
+      // companion UOP_GRAD's chain rule may rewrite this FWD via
+      // grad_replace_fwd; if a stale FWD survives, this redex
+      // resolves it transparently.
+      if (op == UOP_FWD) return 1;
       if (op == UOP_ASSIGN) {
         Term dst = term_resolve(heap_read(val + 0));
         Term src = term_resolve(heap_read(val + 1));
@@ -206,37 +211,59 @@ fn Term redex_fire(Term redex) {
         if (g == redex) return 0;          // stuck -- treat as non-redex
         ITRS++;
         result = g;
+      } else if (op == UOP_FWD) {
+        // FWD passthrough: read cell.y and substitute.  If the chain
+        // rule already heap_replaced this FWD with the new structural
+        // expression (via grad_replace_fwd), we won't reach here -- our
+        // parent slot already holds the new term.
+        ITRS++;
+        result = heap_read(val);
       } else if (op == UOP_ASSIGN) {
         result = interact_assign(redex);   // ITRS++ inside
         if (result == redex) return 0;     // stuck -- not a redex yet
       } else if (uop_is_binary_elementwise(op)) {
-        // UOP-SUP commutation:
-        //   UOP_op(SUP^L(a, b), c)   ->  SUP^L(UOP_op(a, c), UOP_op(b, c))
-        //   UOP_op(c, SUP^L(a, b))   ->  SUP^L(UOP_op(c, a), UOP_op(c, b))
-        // No DUP on c -- tensor sharing in our model is by heap-loc
-        // identity, so both new UOPs simply reference c's cell.
+        // UOP-SUP commutation (HVM4 OP2-SUP shape):
+        //   UOP_op(SUP^L(a, b), c) ->
+        //     ! &L { c0, c1 } = c;
+        //     &L { UOP_op(a, c0), UOP_op(b, c1) }
+        //
+        // The DUP on `c` is critical: when `c` is also SUP^L (same
+        // label), DUP^L collapses against it via DUP-SUP, producing
+        // the (a-side-of-c, b-side-of-c) pair.  Without it we'd get
+        // SUP^L nested inside SUP^L on every same-label co-occurrence
+        // (one per leaf-of-same-tid, which is exactly what blows up
+        // for ADD(x, x)).  For non-SUP `c`, DUP-TEN / DUP-UOP / DUP-NUM
+        // pass `c` through to both sides (sharing by heap-loc identity).
         Term a = term_resolve(heap_read(val + 0));
         Term b = term_resolve(heap_read(val + 1));
         if (term_tag(a) == TAG_SUP) {
-          u32 lab  = term_ext(a);
-          u64 sloc = term_val(a);
-          Term a0  = heap_read(sloc + 0);
-          Term a1  = heap_read(sloc + 1);
-          Term op0 = uop_binary(op, a0, b);
-          Term op1 = uop_binary(op, a1, b);
-          u64 ns   = heap_alloc(2);
+          u32  lab  = term_ext(a);
+          u64  sloc = term_val(a);
+          Term a0   = heap_read(sloc + 0);
+          Term a1   = heap_read(sloc + 1);
+          u64  dup  = heap_alloc(1);
+          heap_set(dup, b);
+          Term c0   = term_new(0, TAG_DP0, lab, dup);
+          Term c1   = term_new(0, TAG_DP1, lab, dup);
+          Term op0  = uop_binary(op, a0, c0);
+          Term op1  = uop_binary(op, a1, c1);
+          u64  ns   = heap_alloc(2);
           heap_set(ns + 0, op0);
           heap_set(ns + 1, op1);
           ITRS++;
           result = term_new(0, TAG_SUP, lab, ns);
         } else if (term_tag(b) == TAG_SUP) {
-          u32 lab  = term_ext(b);
-          u64 sloc = term_val(b);
-          Term b0  = heap_read(sloc + 0);
-          Term b1  = heap_read(sloc + 1);
-          Term op0 = uop_binary(op, a, b0);
-          Term op1 = uop_binary(op, a, b1);
-          u64 ns   = heap_alloc(2);
+          u32  lab  = term_ext(b);
+          u64  sloc = term_val(b);
+          Term b0   = heap_read(sloc + 0);
+          Term b1   = heap_read(sloc + 1);
+          u64  dup  = heap_alloc(1);
+          heap_set(dup, a);
+          Term c0   = term_new(0, TAG_DP0, lab, dup);
+          Term c1   = term_new(0, TAG_DP1, lab, dup);
+          Term op0  = uop_binary(op, c0, b0);
+          Term op1  = uop_binary(op, c1, b1);
+          u64  ns   = heap_alloc(2);
           heap_set(ns + 0, op0);
           heap_set(ns + 1, op1);
           ITRS++;
@@ -245,8 +272,8 @@ fn Term redex_fire(Term redex) {
           return 0;
         }
       } else if (uop_is_unary_elementwise(op)) {
-        // UOP-SUP commutation (unary):
-        //   UOP_op(SUP^L(a, b))  ->  SUP^L(UOP_op(a), UOP_op(b))
+        // UOP-SUP (unary):  UOP_op(SUP^L(a, b)) -> SUP^L(UOP_op(a), UOP_op(b))
+        // No second operand to DUP.
         Term a = term_resolve(heap_read(val + 0));
         if (term_tag(a) == TAG_SUP) {
           u32 lab  = term_ext(a);

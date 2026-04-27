@@ -425,6 +425,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   // here makes the enclosing kernel emission abort so the caller
   // (thvm_realize) loops back through wnf to fire interact_grad.
   if (op == UOP_GRAD) return VISIT_BAIL;
+  // FWD projection: bail similarly so wnf can resolve it before
+  // materialize tries to compile through.
+  if (op == UOP_FWD) return VISIT_BAIL;
 
   // Movement ops as a child of the kernel: try view-only resolve
   // first.  If the source isn't a contig TenDesc-resolvable chain
@@ -710,6 +713,7 @@ fn Term thvm_materialize(Term term) {
   // GRAD is a stop point in materialize -- wnf fires interact_grad,
   // then thvm_realize loops back here to compile the unrolled UOps.
   if (term_ext(term) == UOP_GRAD)       return term;
+  if (term_ext(term) == UOP_FWD)        return term;
   // ASSIGN is a wnf-fired primitive (interact_assign) -- not a kernel.
   // Materialize the SRC subgraph so its kernels are compiled, then
   // re-wrap as ASSIGN(dst, materialized_src).  Wnf later fires the

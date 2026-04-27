@@ -35,11 +35,8 @@ static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
         case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         case UOP_REDUCE:                                   return 3;
-        case UOP_GRAD: {
-          Term n_cell = book_read(val + 2);
-          u32  n = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
-          return 3 + n;
-        }
+        case UOP_GRAD:                                     return 1;
+        case UOP_FWD:                                      return 1;
         case UOP_LOAD:                                     return 1;
         case UOP_KERNEL:                                   return 2;
         default:                                           return 0;

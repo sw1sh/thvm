@@ -130,6 +130,17 @@ enter:
         next = g_out;
         goto enter;
       }
+      if (op == UOP_FWD) {
+        // FWD projection of a dup-like grad cell: passthrough to
+        // cell.y (the forward subgraph).  If the companion GRAD's
+        // chain rule has already rewritten this FWD via heap_replace,
+        // our parent slot points at the new structural term and we
+        // never enter here.
+        if (BUDGET_HIT) BAIL_AT(next);
+        ITRS++;
+        next = heap_read(term_val(next));
+        goto enter;
+      }
       if (op == UOP_ASSIGN) {
         // Force src (heap[loc+1]) first -- could be a kernel chain
         // that has to fire before we have a TEN to copy from.  dst
@@ -588,6 +599,16 @@ apply:
             whnf = interact_dup_any(side, loc, whnf);
             continue;
           }
+          case TAG_TEN: {
+            // TEN is atomic (just a tid handle): copy into both.
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            whnf = interact_dup_ten(side, loc, whnf);
+            continue;
+          }
+          // DUP / TAG_UOP: stay stuck via default branch.  Annihilating
+          // would discard the DUP's label before any SUP^L emitted by
+          // the chain rule has a chance to bubble up via UOP-SUP
+          // commutation and meet a matching DUP^L.
           default: {
             heap_set(loc, whnf);
             whnf = frame;

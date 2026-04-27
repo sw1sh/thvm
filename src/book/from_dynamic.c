@@ -55,15 +55,8 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         case UOP_LOAD:                                     return 1;
         case UOP_REDUCE:                                   return 3;
-        // UOP_GRAD heap is [y, gy, NUM(n), x_1..x_n] -- variable
-        // tail.  Read NUM(n) at val+2 to compute 3+n; recursive
-        // optimizer lambdas (TOptim) embed UOP_GRAD in their body
-        // template, which book_from_dynamic clones into BOOK_HEAP.
-        case UOP_GRAD: {
-          Term n_cell = heap_read(val + 2);
-          u32  n = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
-          return 3 + n;
-        }
+        case UOP_GRAD:                                     return 1;
+        case UOP_FWD:                                      return 1;
         case UOP_KERNEL:                                   return 2;
         case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
         case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
