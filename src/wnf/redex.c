@@ -66,6 +66,19 @@ fn u8 is_redex(Term t) {
         Term src = term_resolve(heap_read(val + 1));
         return term_tag(dst) == TAG_TEN && term_tag(src) == TAG_TEN;
       }
+      // UOP-SUP commutation: a binary or unary elementwise UOP whose
+      // input contains a SUP commutes the SUP outward (HVM4-style).
+      // Tensor sharing is by heap-loc identity, so the "other" operand
+      // doesn't need a DUP -- both new UOPs reference its cell.
+      if (uop_is_binary_elementwise(op)) {
+        Term a = term_resolve(heap_read(val + 0));
+        Term b = term_resolve(heap_read(val + 1));
+        if (term_tag(a) == TAG_SUP || term_tag(b) == TAG_SUP) return 1;
+      }
+      if (uop_is_unary_elementwise(op)) {
+        Term a = term_resolve(heap_read(val + 0));
+        if (term_tag(a) == TAG_SUP) return 1;
+      }
       return 0;
     }
     default: return 0;
@@ -196,6 +209,60 @@ fn Term redex_fire(Term redex) {
       } else if (op == UOP_ASSIGN) {
         result = interact_assign(redex);   // ITRS++ inside
         if (result == redex) return 0;     // stuck -- not a redex yet
+      } else if (uop_is_binary_elementwise(op)) {
+        // UOP-SUP commutation:
+        //   UOP_op(SUP^L(a, b), c)   ->  SUP^L(UOP_op(a, c), UOP_op(b, c))
+        //   UOP_op(c, SUP^L(a, b))   ->  SUP^L(UOP_op(c, a), UOP_op(c, b))
+        // No DUP on c -- tensor sharing in our model is by heap-loc
+        // identity, so both new UOPs simply reference c's cell.
+        Term a = term_resolve(heap_read(val + 0));
+        Term b = term_resolve(heap_read(val + 1));
+        if (term_tag(a) == TAG_SUP) {
+          u32 lab  = term_ext(a);
+          u64 sloc = term_val(a);
+          Term a0  = heap_read(sloc + 0);
+          Term a1  = heap_read(sloc + 1);
+          Term op0 = uop_binary(op, a0, b);
+          Term op1 = uop_binary(op, a1, b);
+          u64 ns   = heap_alloc(2);
+          heap_set(ns + 0, op0);
+          heap_set(ns + 1, op1);
+          ITRS++;
+          result = term_new(0, TAG_SUP, lab, ns);
+        } else if (term_tag(b) == TAG_SUP) {
+          u32 lab  = term_ext(b);
+          u64 sloc = term_val(b);
+          Term b0  = heap_read(sloc + 0);
+          Term b1  = heap_read(sloc + 1);
+          Term op0 = uop_binary(op, a, b0);
+          Term op1 = uop_binary(op, a, b1);
+          u64 ns   = heap_alloc(2);
+          heap_set(ns + 0, op0);
+          heap_set(ns + 1, op1);
+          ITRS++;
+          result = term_new(0, TAG_SUP, lab, ns);
+        } else {
+          return 0;
+        }
+      } else if (uop_is_unary_elementwise(op)) {
+        // UOP-SUP commutation (unary):
+        //   UOP_op(SUP^L(a, b))  ->  SUP^L(UOP_op(a), UOP_op(b))
+        Term a = term_resolve(heap_read(val + 0));
+        if (term_tag(a) == TAG_SUP) {
+          u32 lab  = term_ext(a);
+          u64 sloc = term_val(a);
+          Term a0  = heap_read(sloc + 0);
+          Term a1  = heap_read(sloc + 1);
+          Term op0 = uop_unary(op, a0);
+          Term op1 = uop_unary(op, a1);
+          u64 ns   = heap_alloc(2);
+          heap_set(ns + 0, op0);
+          heap_set(ns + 1, op1);
+          ITRS++;
+          result = term_new(0, TAG_SUP, lab, ns);
+        } else {
+          return 0;
+        }
       } else {
         return 0;
       }
