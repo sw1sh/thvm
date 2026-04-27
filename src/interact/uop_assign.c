@@ -7,50 +7,43 @@
 // surrounding kernels can keep referencing them by tid across loop
 // iterations.
 //
+// Two entry points:
+//   interact_assign_with(dst, src)  -- caller passes already-resolved
+//                                      TAG_TEN terms.  Used by wnf/_.c
+//                                      where the heap cells deliberately
+//                                      stay un-mutated so a recursive
+//                                      training loop can re-fire the
+//                                      ASSIGN against fresh upstream
+//                                      kernel outputs each iter.
+//   interact_assign(assign_term)    -- legacy (and redex.c nf path):
+//                                      reads the heap cells, then
+//                                      delegates to _with.
+//
 // Mirrors tinygrad's UOps.ASSIGN.  Not a kernel -- there's no
 // program, no fused dispatch, just a buffer round-trip via the
-// backend's buf_read + buf_write pair.  The two-memcpy cost is OK
-// for the optimizer-update use case (weights are tiny relative to
-// activations); a future buf_copy backend op could collapse it.
+// backend's buf_read + buf_write pair.
 
-fn Term interact_assign(Term assign_term) {
-  u64  loc = term_val(assign_term);
-  Term dst = term_resolve(heap_read(loc + 0));
-  Term src = term_resolve(heap_read(loc + 1));
-
-  // Both children must be TAG_TEN by fire time.  is_redex enforces
-  // this; defensive re-check here in case the redex set lost sync.
-  if (term_tag(dst) != TAG_TEN || term_tag(src) != TAG_TEN) {
-    return assign_term;
-  }
+fn Term interact_assign_with(Term dst, Term src) {
+  if (term_tag(dst) != TAG_TEN || term_tag(src) != TAG_TEN) return dst;
 
   u32 dst_tid = (u32)term_val(dst);
   u32 src_tid = (u32)term_val(src);
-  if (dst_tid == 0 || dst_tid >= TENS_NEXT) return assign_term;
-  if (src_tid == 0 || src_tid >= TENS_NEXT) return assign_term;
+  if (dst_tid == 0 || dst_tid >= TENS_NEXT) return dst;
+  if (src_tid == 0 || src_tid >= TENS_NEXT) return dst;
 
   TenDesc *dd = &TENS[dst_tid];
   TenDesc *sd = &TENS[src_tid];
 
-  // Same backend -- can't cross CPU/Metal in one ASSIGN.  A future
-  // arc could insert an implicit transfer kernel; for now bail so the
-  // user sees an unreduced ASSIGN they can debug.
-  if (dd->backend != sd->backend) return assign_term;
-  if (dd->backend == NULL) return assign_term;
+  if (dd->backend != sd->backend) return dst;
+  if (dd->backend == NULL) return dst;
 
-  // Numel match (the dtype-encoded element count, NOT view shape).
-  // ASSIGN's contract: dst's view-defined region is overwritten with
-  // src's view-defined region, element-for-element.
   u32 numel = dd->view.numel;
-  if (sd->view.numel != numel) return assign_term;
+  if (sd->view.numel != numel) return dst;
 
-  // Element size from dtype.  Matches tensor_alloc's per-element
-  // sizing (DT_F32 / DT_I32 are both 4 bytes today; spelt out so a
-  // future DT_F16 / DT_I64 doesn't silently miscompute).
   u32 elem_bytes;
   switch (dd->dtype) {
     case DT_F32: case DT_I32: elem_bytes = 4; break;
-    default: return assign_term;
+    default: return dst;
   }
   u64 nbytes = (u64)numel * (u64)elem_bytes;
 
@@ -58,11 +51,24 @@ fn Term interact_assign(Term assign_term) {
   // buf_read + buf_write but no direct buf_copy; the host hop is
   // straightforward and keeps this independent of backend internals.
   void *tmp = malloc((size_t)nbytes);
-  if (!tmp) return assign_term;
+  if (!tmp) return dst;
   dd->backend->buf_read (sd->buf_id, tmp, nbytes);
   dd->backend->buf_write(dd->buf_id, tmp, nbytes);
   free(tmp);
 
   ITRS++;
   return dst;
+}
+
+fn Term interact_assign(Term assign_term) {
+  u64  loc = term_val(assign_term);
+  Term dst = term_resolve(heap_read(loc + 0));
+  Term src = term_resolve(heap_read(loc + 1));
+  Term r = interact_assign_with(dst, src);
+  // Stuck if interact_assign_with returned dst directly without firing
+  // (the !TEN guard at the top), or if the backend mismatch failed.
+  // The redex.c caller bails on result == assign_term; we return the
+  // unchanged ASSIGN term in that case.
+  if (term_tag(dst) != TAG_TEN || term_tag(src) != TAG_TEN) return assign_term;
+  return r;
 }

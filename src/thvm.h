@@ -543,6 +543,18 @@ fn PrimFn prim_fun    (u32 prim_id);
 fn u32  prim_arity    (u32 prim_id);
 #define PRIM_TABLE_CAP 64
 
+// THVM core primitives (slots 16+, leaving room for ATP at 0-4).
+//   THVM_PRIM_PRI : (slot_NUM, val, cont) -- wnf forces `val` (firing
+//                   any kernel/ASSIGN chain it sits over), invokes
+//                   the WL callback registered under `slot` with the
+//                   resulting Term (slot=0 = no callback, pure
+//                   sequencer), then returns `cont`.  This is the
+//                   "TSeq without TSeq" + "log loss each iter" combo:
+//                   one general PRI, customised by per-slot WL
+//                   functions.  Bridge lives in CSource/thvmlink.c.
+#define THVM_PRIM_PRI   16u
+fn void thvm_register_core_prims(void);
+
 // k0a: build a TAG_CTR labelled constructor over `n` child Terms.
 // Heap layout: [NUM(arity=n), c_0, ..., c_{n-1}].  ext = label
 // (0 = anonymous tuple).  Passive in the IC reducer.  Used by
@@ -671,7 +683,12 @@ fn Term interact_grad(Term grad_term);
 // to TAG_TEN -- otherwise wnf walks src's producer first.  Used as the
 // in-place mutation primitive for optimizer loops; weights stay
 // tid-stable while their buffer contents update each iteration.
-fn Term interact_assign(Term assign_term);
+//
+// Two entries: _with takes already-resolved TENs (used by wnf/_.c so
+// the heap cells stay un-mutated for re-fire); the no-suffix variant
+// reads the heap and delegates.
+fn Term interact_assign     (Term assign_term);
+fn Term interact_assign_with(Term dst, Term src);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.

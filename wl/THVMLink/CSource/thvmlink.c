@@ -37,9 +37,21 @@ EXTERN_C DLLEXPORT mint WolframLibrary_getVersion(void) {
   return WolframLibraryVersion;
 }
 
+// Manager for ConnectLibraryCallbackFunction["thvm_pri_cb", cf].  Stores
+// the framework-assigned callback id so WL can pair it with a slot via
+// thvm_wl_pri_last_cb_id[].
+static mint LAST_PRI_CB_ID = 0;
+
+static mbool pri_cb_manager(WolframLibraryData libData, mint id, MTensor data) {
+  (void)libData; (void)data;
+  LAST_PRI_CB_ID = id;
+  return True;
+}
+
 EXTERN_C DLLEXPORT int WolframLibrary_initialize(WolframLibraryData libData) {
   CACHED_LIB_DATA = libData;
   libData->registerLibraryExpressionManager("ExternPin", extern_pin_manager);
+  libData->registerLibraryCallbackManager("thvm_pri_cb", pri_cb_manager);
   return LIBRARY_NO_ERROR;
 }
 
@@ -889,6 +901,180 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ref(WolframLibraryData libData, mint arg
   u32 name = (u32)MArgument_getInteger(args[0]);
   Term r = term_new_ref(name);
   MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_term_new_pri(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 prim_id = (u32)MArgument_getInteger(args[0]);
+  Term r = term_new_pri(prim_id);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+// === PRI-WL callback dispatch =============================================
+// THVM_PRIM_PRI fires inside wnf, deep in C-side recursion.  Two paths:
+//
+//   (A) SYNCHRONOUS via callLibraryCallbackFunction.  Available for
+//       slots whose callback is a CompiledFunction (the ONLY thing
+//       ConnectLibraryCallbackFunction accepts).  Re-entry is safe
+//       because compiled code runs in OUR thread, not the kernel
+//       evaluator -- no deadlock.  Restriction: CompiledFunction's
+//       body must be numerical; Print/$var/patterns hit cfex and
+//       silently fail INSIDE the re-entry.  WL surface checks the
+//       Head and routes to this path only for CompiledFunctions.
+//
+//   (B) QUEUED FALLBACK.  For Function / Symbol / anything non-
+//       compiled, prim_pri appends (slot, snapshotted-value) to a
+//       fixed-cap queue; WL's TPriDrain[] dequeues + dispatches
+//       between TWnf invocations.  Snapshotting (pri_snapshot_value)
+//       ensures recursive-loop iterations each see THEIR value
+//       rather than the buffer's last-written state.
+//
+// Why not WSTP for arbitrary-WL sync?  EvaluatePacket from inside a
+// LibraryFunction call deadlocks: the kernel is blocked waiting on
+// our return, can't process incoming packets.  Verified empirically.
+#define THVM_PRI_QUEUE_CAP 65536
+#define THVM_PRI_SLOT_CAP    256
+typedef struct { u32 slot; Term value; } PriQueueEntry;
+static PriQueueEntry PRI_QUEUE[THVM_PRI_QUEUE_CAP];
+static u32           PRI_QUEUE_LEN = 0;
+static mint          PRI_CB_ID[THVM_PRI_SLOT_CAP] = {0};   // 0 = unbound
+
+// (C) FOREIGN CALLBACK pointers: CreateForeignCallback in WL produces
+// a libffi closure -- a regular C function pointer that, when called,
+// transitions back into the WL kernel evaluator and runs the registered
+// WL function.  Re-entry is safe (libffi handles the kernel state) and
+// works for ARBITRARY WL functions (no Compile restriction).
+//
+// Signature: int64_t (*)(int64_t).  WL callbacks receive the wnf'd Term
+// as a raw int64; their return value OVERRIDES the redex result if
+// nonzero, else the redex falls through to `cont`.  Trace-only callbacks
+// just return 0; rewriting callbacks return the new Term.
+typedef int64_t (*pri_foreign_fn)(int64_t);
+static pri_foreign_fn PRI_FOREIGN_CB[THVM_PRI_SLOT_CAP] = {NULL};
+
+EXTERN_C DLLEXPORT void thvm_pri_bind_foreign(int slot, void *fnptr) {
+  if (slot < 0 || slot >= THVM_PRI_SLOT_CAP) return;
+  PRI_FOREIGN_CB[slot] = (pri_foreign_fn)fnptr;
+}
+
+EXTERN_C DLLEXPORT void thvm_pri_unbind_foreign(int slot) {
+  if (slot < 0 || slot >= THVM_PRI_SLOT_CAP) return;
+  PRI_FOREIGN_CB[slot] = NULL;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_pri_last_cb_id(WolframLibraryData libData, mint argc,
+                                              MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, LAST_PRI_CB_ID);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_bind_pri_slot(WolframLibraryData libData, mint argc,
+                                             MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  mint slot  = MArgument_getInteger(args[0]);
+  mint cb_id = MArgument_getInteger(args[1]);
+  if (slot < 0 || slot >= THVM_PRI_SLOT_CAP) {
+    MArgument_setInteger(res, 0);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  PRI_CB_ID[slot] = cb_id;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_unbind_pri_slot(WolframLibraryData libData, mint argc,
+                                               MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  mint slot = MArgument_getInteger(args[0]);
+  if (slot < 0 || slot >= THVM_PRI_SLOT_CAP) {
+    MArgument_setInteger(res, 0);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  if (PRI_CB_ID[slot] != 0 && CACHED_LIB_DATA) {
+    CACHED_LIB_DATA->releaseLibraryCallbackFunction(PRI_CB_ID[slot]);
+    PRI_CB_ID[slot] = 0;
+  }
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+static Term pri_snapshot_value(Term v) {
+  if (term_tag(v) != TAG_TEN) return v;
+  u32 src_tid = (u32)term_val(v);
+  if (src_tid == 0 || src_tid >= TENS_NEXT) return v;
+  TenDesc *sd = &TENS[src_tid];
+  if (sd->backend == NULL) return v;
+  u32 elem_bytes;
+  switch (sd->dtype) {
+    case DT_F32: case DT_I32: elem_bytes = 4; break;
+    default: return v;
+  }
+  u32 dst_tid = tensor_alloc(sd->backend, sd->view.shape, sd->dtype);
+  if (dst_tid == 0) return v;
+  u64 nbytes = (u64)sd->view.numel * (u64)elem_bytes;
+  void *tmp = malloc((size_t)nbytes);
+  if (!tmp) { tensor_release(dst_tid); return v; }
+  sd->backend->buf_read (sd->buf_id, tmp, nbytes);
+  TENS[dst_tid].backend->buf_write(TENS[dst_tid].buf_id, tmp, nbytes);
+  free(tmp);
+  return term_new(0, TAG_TEN, sd->dtype, dst_tid);
+}
+
+// Returning variant: invoke the slot's callback synchronously and
+// return its result Term (0 = no override, anything else = override
+// the redex result).  prim_pri uses this; a non-zero return becomes
+// the new redex value, otherwise the redex falls through to `cont`.
+//
+// Only the foreign-callback path can RETURN a value (libffi marshalls
+// the WL fn's Integer return back as int64).  CompiledFunction +
+// queued paths are observe-only -- they always yield 0 here.
+Term thvm_pri_wl_invoke_returning(u32 slot, Term value) {
+  if (slot < THVM_PRI_SLOT_CAP && PRI_FOREIGN_CB[slot] != NULL) {
+    return (Term)PRI_FOREIGN_CB[slot]((int64_t)value);
+  }
+  if (slot < THVM_PRI_SLOT_CAP && PRI_CB_ID[slot] != 0 && CACHED_LIB_DATA) {
+    MArgument cb_args[1];
+    MArgument cb_res;
+    mint v_int = (mint)value;
+    cb_args[0].integer = &v_int;
+    mint res_int = 0;
+    cb_res.integer = &res_int;
+    CACHED_LIB_DATA->callLibraryCallbackFunction(
+        PRI_CB_ID[slot], 1, cb_args, cb_res);
+    return 0;   // Compiled callbacks don't return Terms
+  }
+  if (PRI_QUEUE_LEN < THVM_PRI_QUEUE_CAP) {
+    PRI_QUEUE[PRI_QUEUE_LEN].slot  = slot;
+    PRI_QUEUE[PRI_QUEUE_LEN].value = pri_snapshot_value(value);
+    PRI_QUEUE_LEN++;
+  }
+  return 0;
+}
+
+// Legacy void variant -- kept for compatibility; just discards the
+// returned override.
+void thvm_pri_wl_invoke(u32 slot, Term value) {
+  (void)thvm_pri_wl_invoke_returning(slot, value);
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_pri_drain(WolframLibraryData libData, mint argc,
+                                         MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  mint n     = (mint)PRI_QUEUE_LEN;
+  mint dims[1] = {n * 2};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (mint i = 0; i < n; i++) {
+    dst[i * 2 + 0] = (mint)PRI_QUEUE[i].slot;
+    dst[i * 2 + 1] = (mint)PRI_QUEUE[i].value;
+  }
+  PRI_QUEUE_LEN = 0;
+  MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
 }
 

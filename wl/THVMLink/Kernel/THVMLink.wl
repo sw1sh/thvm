@@ -131,6 +131,13 @@ TUOpSrcs::usage      = "TUOpSrcs[u] returns the source-cell terms for a UOp term
 (* TATP::usage and TATP[] live in Kernel/ATP.wl (loaded via the
    sibling-file scan at the bottom of this file). *)
 
+(* Forward-declare symbols owned by sibling files (Pri.wl, ...) so
+   references from TWnf below don't get bound to phantom Private
+   symbols.  Bare-evaluating the symbol name at BeginPackage scope
+   creates the public THVMLink`X symbol; Pri.wl's later
+   `BeginPackage["THVMLink`"]` reuses the same symbol. *)
+{TPriDrain};
+
 Begin["`Private`"];
 
 $libDir = FileNameJoin[{
@@ -433,8 +440,23 @@ THeapAlloc[size_Integer]         := (ensureInit[]; $heapAllocFn[size])
 THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
 
-TWnf[t_]                       := (ensureInit[]; withTermCtx[t, TTerm[$wnfFn[ttermRaw[t]]]])
-TWnf[t_, n_Integer /; n >= 0]  := (ensureInit[]; withTermCtx[t, TTerm[$wnfNFn[ttermRaw[t], n]]])
+TWnf[t_]                       := Module[{r},
+    ensureInit[];
+    r = withTermCtx[t, TTerm[$wnfFn[ttermRaw[t]]]];
+    (* Auto-drain queued PRI callbacks (Function/Symbol slots that
+       prim_pri couldn't invoke synchronously).  CompiledFunction
+       slots already fired during wnf via callLibraryCallbackFunction;
+       this drain only catches the queued path.  No-op when the queue
+       is empty. *)
+    TPriDrain[];
+    r
+]
+TWnf[t_, n_Integer /; n >= 0]  := Module[{r},
+    ensureInit[];
+    r = withTermCtx[t, TTerm[$wnfNFn[ttermRaw[t], n]]];
+    TPriDrain[];
+    r
+]
 TNf[t_]                        := (ensureInit[]; withTermCtx[t, TTerm[$nfFn[ttermRaw[t]]]])
 
 (* TStep[t] = TWnf[t, 1] -- fire exactly one interaction, then return

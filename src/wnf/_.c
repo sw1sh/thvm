@@ -134,16 +134,23 @@ enter:
         // Force src (heap[loc+1]) first -- could be a kernel chain
         // that has to fire before we have a TEN to copy from.  dst
         // (heap[loc+0]) should already be a TEN handle but resolve
-        // it for symmetry.  Once both are TEN, fire interact_assign
-        // which memcpys src.buf -> dst.buf and returns dst.
+        // it for symmetry.  Once both are TEN, hand the resolved
+        // values to interact_assign_with which memcpys src.buf ->
+        // dst.buf and returns dst.
+        //
+        // Recursive training loops produce a FRESH ASSIGN cell each
+        // iteration via alo_realize (REF/ALO unfold deep-copies into
+        // dyn heap), so heap-mutating the cells per fire is fine --
+        // next iter has its own copy and re-fires its own upstream
+        // kernel chain.  We pass the resolved values directly rather
+        // than heap_set'ing them so the original cell structure is
+        // preserved for tooling (THeapDiagram, debug traces).
         u64  aloc   = term_val(next);
         if (BUDGET_HIT) BAIL_AT(next);
         Term src_w  = wnf(heap_read(aloc + 1));
         Term dst_w  = wnf(heap_read(aloc + 0));
         if (term_tag(src_w) == TAG_TEN && term_tag(dst_w) == TAG_TEN) {
-          heap_set(aloc + 0, dst_w);
-          heap_set(aloc + 1, src_w);
-          whnf = interact_assign(next);  // ITRS++ inside on success
+          whnf = interact_assign_with(dst_w, src_w);
           goto apply;
         }
         // Either side stuck (e.g. dst still a UOP) -- leave as WHNF.

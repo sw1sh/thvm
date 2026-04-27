@@ -200,6 +200,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "wnf/redex.c"
 #include "wnf/nf.c"
 
+// === term/prims_core.c ===
+// Core THVM_PRIM_* primitives (SEQ + LOG).  Has to live below wnf/
+// because the prim functions call wnf() to drive their first arg.
+#include "term/prims_core.c"
+
 // === collapse/ ===
 // Depends on wnf().  No dependants in the runtime itself; called by
 // the WL bridge and tests.
@@ -305,6 +310,10 @@ void thvm_init(void) {
   // could in principle live on a different backend than the default.
   install_ctx_backends(CURRENT_CTX, getenv("THVM_BACKEND"));
   DEFAULT_BACKEND->init();
+  // Register core PRI primitives (SEQ + LOG) -- idempotent overwrite,
+  // safe across re-init.  ATP registers its own block separately on
+  // first thvm_atp_init.
+  thvm_register_core_prims();
 }
 
 void thvm_free(void) {

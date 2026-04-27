@@ -675,6 +675,36 @@ fn Term thvm_materialize(Term term) {
       children[i] = thvm_materialize(term_ctr_at(term, i));
     return term_new_ctr(term_ext(term), children, n);
   }
+  // Compound IC nodes (APP/LAM/SUP/DUP/OP2/MAT/ALO): walk children
+  // in-place so a single TMaterialize call on a full recursive
+  // training term -- e.g. TPri[loss, ASSIGN(...)] = APP(APP(APP(PRI),
+  // loss), step) at root, or TLam[k, body] for the loop wrapper --
+  // descends to find the embedded UOP graphs and compiles each one.
+  // Children are materialized in place (heap_set on the original
+  // cell) so the surrounding structure stays intact for wnf to drive
+  // at fire time.  Atoms (NUM/TEN/REF/ERA/VAR) are leaves -- nothing
+  // to materialize, recursion bottoms out via the early returns above.
+  {
+    u8 t = term_tag(term);
+    u32 ar = 0;
+    switch (t) {
+      case TAG_APP: case TAG_SUP: case TAG_OP2: case TAG_MAT:
+      case TAG_ALO:
+        ar = 2; break;
+      case TAG_LAM: case TAG_DUP:
+        ar = 1; break;
+      default: ar = 0; break;
+    }
+    if (ar > 0) {
+      u64 loc = term_val(term);
+      for (u32 i = 0; i < ar; i++) {
+        Term child = heap_read(loc + i);
+        Term child_mat = thvm_materialize(child);
+        if (child_mat != child) heap_set(loc + i, child_mat);
+      }
+      return term;
+    }
+  }
   if (term_tag(term) != TAG_UOP)        return term;
   if (term_ext(term) == UOP_KERNEL)     return term;
   // GRAD is a stop point in materialize -- wnf fires interact_grad,
