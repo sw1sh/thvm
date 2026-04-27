@@ -55,8 +55,6 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         case UOP_LOAD:                                     return 1;
         case UOP_REDUCE:                                   return 3;
-        case UOP_GRAD:                                     return 1;
-        case UOP_FWD:                                      return 1;
         case UOP_KERNEL:                                   return 2;
         case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
         case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:

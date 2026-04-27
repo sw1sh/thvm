@@ -35,6 +35,10 @@ fn u8 is_redex(Term t) {
     }
     case TAG_DP0:
     case TAG_DP1: {
+      // Grad-flavored projections (DUP_GRAD_FLAG on ext): always
+      // eligible.  DP0 = FWD passthrough; DP1 = chain-rule fire (may
+      // bail back to non-redex if y can't pattern-match yet).
+      if (term_ext(t) & DUP_GRAD_FLAG) return 1;
       Term cell = heap_read(val);
       // Skip if the dup slot already holds a SUB (a previous fire's
       // residue) -- that's a substitution shortcut, not a fresh
@@ -45,14 +49,11 @@ fn u8 is_redex(Term t) {
       if (bt == TAG_SUP || bt == TAG_LAM || bt == TAG_ERA ||
           bt == TAG_NUM || bt == TAG_TEN) return 1;
       // DUP-UOP commute: a lazy-compute UOP (CONST/ADD/MUL/NEG/REDUCE/
-      // EXPAND/RESHAPE/FLIP) is eligible.  Active UOPs (KERNEL/GRAD/
-      // FWD/ASSIGN) are NOT -- they need to fire their own interaction
-      // first so any SUPs they emit get a chance to bubble up before
-      // the DUP collapses.
+      // EXPAND/RESHAPE/FLIP) is eligible.  Active UOPs (KERNEL/ASSIGN)
+      // are NOT -- they need to fire their own interaction first.
       if (bt == TAG_UOP) {
         u8 op = term_ext(body);
-        return op != UOP_KERNEL && op != UOP_GRAD &&
-               op != UOP_FWD    && op != UOP_ASSIGN;
+        return op != UOP_KERNEL && op != UOP_ASSIGN;
       }
       return 0;
     }
@@ -72,12 +73,7 @@ fn u8 is_redex(Term t) {
       // ASSIGN reducible only when both children resolve to TAG_TEN;
       // otherwise wnf walks src's producer first to materialize the
       // value being assigned.
-      if (op == UOP_KERNEL || op == UOP_GRAD) return 1;
-      // UOP_FWD reduces to its cell's y -- always eligible.  The
-      // companion UOP_GRAD's chain rule may rewrite this FWD via
-      // grad_replace_fwd; if a stale FWD survives, this redex
-      // resolves it transparently.
-      if (op == UOP_FWD) return 1;
+      if (op == UOP_KERNEL) return 1;
       if (op == UOP_ASSIGN) {
         Term dst = term_resolve(heap_read(val + 0));
         Term src = term_resolve(heap_read(val + 1));
@@ -167,6 +163,22 @@ fn Term redex_fire(Term redex) {
     case TAG_DP0:
     case TAG_DP1: {
       u64  loc  = val;
+      // Grad-flavored projection: dispatch to grad-fwd / grad-bwd
+      // BEFORE touching the cell (so both projections can read y).
+      if (term_ext(redex) & DUP_GRAD_FLAG) {
+        if (tag == TAG_DP0) {
+          // FWD passthrough: cell holds y, return it.
+          ITRS++;
+          result = heap_read(loc);
+          break;
+        }
+        // BWD: fire chain rule on y.
+        Term g = interact_grad(redex);
+        if (g == redex) return 0;   // stuck (y can't pattern-match yet)
+        ITRS++;
+        result = g;
+        break;
+      }
       Term cell = heap_take(loc);
       Term body = term_resolve(cell);
       u8 side = (tag == TAG_DP0) ? 0 : 1;
@@ -229,18 +241,6 @@ fn Term redex_fire(Term redex) {
       u8 op = term_ext(redex);
       if (op == UOP_KERNEL) {
         result = interact_kernel(redex);   // ITRS++ inside
-      } else if (op == UOP_GRAD) {
-        Term g = interact_grad(redex);
-        if (g == redex) return 0;          // stuck -- treat as non-redex
-        ITRS++;
-        result = g;
-      } else if (op == UOP_FWD) {
-        // FWD passthrough: read cell.y and substitute.  If the chain
-        // rule already heap_replaced this FWD with the new structural
-        // expression (via grad_replace_fwd), we won't reach here -- our
-        // parent slot already holds the new term.
-        ITRS++;
-        result = heap_read(val);
       } else if (op == UOP_ASSIGN) {
         result = interact_assign(redex);   // ITRS++ inside
         if (result == redex) return 0;     // stuck -- not a redex yet
@@ -354,12 +354,6 @@ static u32 term_arity(Term t) {
       u8 op = term_ext(t);
       if (op == UOP_KERNEL) return 2;
       if (op == UOP_ASSIGN) return 2;
-      if (op == UOP_GRAD) {
-        // Variable arity 3+n (heap = [y, gy, NUM(n), x_1..x_n]).
-        Term n_cell = heap_read(term_val(t) + 2);
-        u32  n = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
-        return 3 + n;
-      }
       return uop_arity(op);
     }
     default: return 0;

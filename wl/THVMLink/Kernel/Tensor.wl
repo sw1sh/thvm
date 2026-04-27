@@ -127,8 +127,9 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
 ]
 
 (* Build the BWD projection over a fresh dup-like grad cell holding
-   y.  The companion FWD projection is reachable via TUOpFwd at the
-   same loc (or via TGradPair below for both at once). *)
+   y.  Returns a TAG_DP1 term with DUP_GRAD_FLAG set on its ext.
+   The companion FWD projection is TAG_DP0 at the same loc (via
+   TUOpFwd below or TGradPair for both at once). *)
 TUOpGrad[y_] := (ensureInit[]; TTerm[$uopGradFn[ttermRaw[y]]])
 TUOpFwd [y_] := (ensureInit[]; TTerm[$uopFwdFn [ttermRaw[y]]])
 
@@ -137,7 +138,7 @@ TUOpFwd [y_] := (ensureInit[]; TTerm[$uopFwdFn [ttermRaw[y]]])
    forward subgraph isn't duplicated. *)
 TGradPair[y_] := With[{bwd = TUOpGrad[y]},
     With[{loc = TTermVal[bwd]},
-        {packTerm[0, $TagUOP, $UopFwd, loc], bwd}
+        {packTerm[0, $TagDP0, $DupGradFlag, loc], bwd}
     ]
 ]
 

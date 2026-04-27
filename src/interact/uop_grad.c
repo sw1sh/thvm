@@ -1,9 +1,11 @@
-// interact/uop_grad.c - dup-like chain-rule rewrite for UOP_GRAD.
+// interact/uop_grad.c - dup-like chain-rule rewrite for the BWD
+// projection of a grad cell (TAG_DP1 + DUP_GRAD_FLAG).
 //
-// UOP_GRAD and UOP_FWD form a 3-port combinator: one principal port
-// (the cell's `y`) and two aux ports (FWD = forward projection,
-// BWD = backward projection a.k.a. UOP_GRAD).  Each lazy chain-rule
-// fire walks one structural step on y's outermost UOp:
+// A grad cell shares the IC dup-cell mechanism with two aux ports:
+// TAG_DP0 (FWD = passthrough) and TAG_DP1 (BWD = chain rule).  The
+// DUP_GRAD_FLAG bit on the projection's ext distinguishes grad-flavor
+// from regular DUP/SUP semantics.  Each lazy chain-rule fire walks
+// one structural step on y's outermost UOp:
 //
 //   GRAD(ADD(a, b))   -> { ADD(fw_a, fw_b),    ADD(bw_a, bw_b) }
 //   GRAD(MUL(a, b))   -> { MUL(fw_a, fw_b),    ADD(MUL(fw_b, bw_a),
@@ -29,13 +31,15 @@
 //   GRAD(TEN_t)       -> { TEN_t,              SUP^{t.tid}(zero, one) }
 //
 // where {fw_a, bw_a} = GRAD(a), built fresh per child via a new cell
-// holding [a].  Sibling forwards reach via UOP_FWD projections;
-// `bw` references reach via UOP_GRAD projections of the same cells.
+// holding [a].  Sibling forwards reach via TAG_DP0 (FWD) projections;
+// `bw` references reach via TAG_DP1 (BWD) projections of the same
+// cells, both with DUP_GRAD_FLAG set on their ext.
 //
-// The fire is ATOMIC over the dup-like pair: it computes both new_fw
-// and new_bw, then heap_replaces UOP_FWD(orig_cell) -> new_fw and
-// returns new_bw to the caller (which heap_replaces UOP_GRAD(orig_cell)
-// -> new_bw).
+// Each projection fires INDEPENDENTLY -- DP0 of a grad-flagged cell
+// passes y through; DP1 fires the chain rule below.  The forward
+// subgraph is shared via heap-loc identity (sub-cells reference the
+// same `a` Term that y references).  No heap-walk -- pure local
+// interactions like every other IC rule.
 //
 // No gy threading, no target stored.  Target identification happens
 // at the leaf via SUP^{leaf_tid}(zero, one); the WL surface DUPs the
@@ -61,13 +65,15 @@ fn Term grad_one_at(Term y) {
 }
 
 // Allocate a fresh GRAD cell for `child` and return its FWD/BWD
-// projection terms.  Both projections share the cell.
+// projection terms.  Both projections share the cell; both carry
+// DUP_GRAD_FLAG so their TAG_DP{0,1} dispatch goes to the
+// grad-flavored interaction (FWD passthrough / BWD chain rule).
 typedef struct { Term fwd; Term bwd; } GradPair;
 static GradPair grad_pair(Term child) {
   u64 c = uop_grad_cell(child);
   GradPair p;
-  p.fwd = term_new(0, TAG_UOP, UOP_FWD,  c);
-  p.bwd = term_new(0, TAG_UOP, UOP_GRAD, c);
+  p.fwd = term_new(0, TAG_DP0, DUP_GRAD_FLAG, c);
+  p.bwd = term_new(0, TAG_DP1, DUP_GRAD_FLAG, c);
   return p;
 }
 
@@ -112,7 +118,6 @@ fn Term interact_grad(Term grad_term) {
       GradPair ga = grad_pair(a);
       GradPair gb = grad_pair(b);
 
-      Term new_fw = uop_binary(y_op, ga.fwd, gb.fwd);
       Term new_bw;
       if (y_op == UOP_ADD) {
         new_bw = uop_binary(UOP_ADD, ga.bwd, gb.bwd);
@@ -131,7 +136,6 @@ fn Term interact_grad(Term grad_term) {
     case UOP_NEG: {
       Term a = heap_read(y_loc + 0);
       GradPair ga = grad_pair(a);
-      Term new_fw = uop_unary(UOP_NEG, ga.fwd);
       Term new_bw = uop_unary(UOP_NEG, ga.bwd);
       return new_bw;
     }
@@ -143,7 +147,6 @@ fn Term interact_grad(Term grad_term) {
       memcpy(&inv_bits, &inv_ln2, sizeof inv_bits);
       Term a = heap_read(y_loc + 0);
       GradPair ga = grad_pair(a);
-      Term new_fw = uop_unary(UOP_LOG2, ga.fwd);
       Term ra     = uop_unary(UOP_RECIP, ga.fwd);
       Term k      = uop_const(DT_F32, inv_bits);
       Term factor = uop_binary(UOP_MUL, ra, k);
@@ -158,9 +161,9 @@ fn Term interact_grad(Term grad_term) {
       memcpy(&ln2_bits, &ln2, sizeof ln2_bits);
       Term a = heap_read(y_loc + 0);
       GradPair ga = grad_pair(a);
-      Term new_fw = uop_unary(UOP_EXP2, ga.fwd);
+      Term ea     = uop_unary(UOP_EXP2, ga.fwd);
       Term k      = uop_const(DT_F32, ln2_bits);
-      Term factor = uop_binary(UOP_MUL, new_fw, k);
+      Term factor = uop_binary(UOP_MUL, ea, k);
       Term new_bw = uop_binary(UOP_MUL, ga.bwd, factor);
       return new_bw;
     }
@@ -169,7 +172,6 @@ fn Term interact_grad(Term grad_term) {
       // d(1/a)/dx = (-1/a^2) * da/dx
       Term a = heap_read(y_loc + 0);
       GradPair ga = grad_pair(a);
-      Term new_fw  = uop_unary(UOP_RECIP, ga.fwd);
       // Two independent RECIP nodes so materialize doesn't think
       // they're a shared computation (we want the same computed value
       // re-read, but structurally separate so the diagram is clean).
@@ -186,7 +188,6 @@ fn Term interact_grad(Term grad_term) {
       Term a = heap_read(y_loc + 0);
       GradPair ga = grad_pair(a);
       Term sa     = uop_unary(UOP_SQRT, ga.fwd);
-      Term new_fw = sa;
       Term inv_sa = uop_unary(UOP_RECIP, sa);
       f32 half = 0.5f;
       u32 half_bits;
@@ -203,7 +204,6 @@ fn Term interact_grad(Term grad_term) {
       u32  kind = (u32)term_val(heap_read(y_loc + 1));
       u32  axis = (u32)term_val(heap_read(y_loc + 2));
       GradPair ga = grad_pair(a);
-      Term new_fw = uop_reduce(kind, axis, ga.fwd);
 
       Shape a_shape;
       Term new_bw;
@@ -235,7 +235,6 @@ fn Term interact_grad(Term grad_term) {
       for (u32 i = 0; i < ndim; i++)
         out_dims[i] = (u32)term_val(heap_read(y_loc + 2 + i));
       GradPair ga = grad_pair(a);
-      Term new_fw = uop_reshape(ga.fwd, ndim, out_dims);
       // bw_outer = RESHAPE(bw_a, a.shape).  bw_a has whatever shape
       // GRAD(a) gave; if a is a TEN target leaf, bw_a has a.shape
       // already and RESHAPE is identity-ish.  Otherwise we try to
@@ -257,7 +256,6 @@ fn Term interact_grad(Term grad_term) {
       for (u32 i = 0; i < ndim; i++)
         out_dims[i] = (u32)term_val(heap_read(y_loc + 2 + i));
       GradPair ga = grad_pair(a);
-      Term new_fw = uop_expand(ga.fwd, ndim, out_dims);
 
       // bw_outer: REDUCE_SUM along axes that were expanded (where
       // src.dim == 1 < out.dim).  bw_a is at a's shape.
@@ -280,7 +278,6 @@ fn Term interact_grad(Term grad_term) {
       Term a = heap_read(y_loc + 0);
       u32 mask = (u32)term_val(heap_read(y_loc + 1));
       GradPair ga = grad_pair(a);
-      Term new_fw = uop_flip(ga.fwd, mask);
       Term new_bw = uop_flip(ga.bwd, mask);
       return new_bw;
     }
@@ -318,13 +315,12 @@ fn Term interact_grad(Term grad_term) {
         ranges[2 * i + 1] = e;
       }
 
-      Term new_fw, new_bw;
+      Term new_bw;
       if (y_op == UOP_PAD) {
         // PAD output dims = src.dim + b + e
         u32 out_dims[MAX_DIM];
         for (u32 i = 0; i < ndim; i++)
           out_dims[i] = a_shape.dims[i] + ranges[2*i] + ranges[2*i + 1];
-        new_fw = uop_pad(ga.fwd, ndim, ranges);
         // bw_outer: SHRINK bw_a to the un-padded extent [b, b+a.dim).
         u32 sranges[2 * MAX_DIM];
         for (u32 i = 0; i < ndim; i++) {
@@ -340,7 +336,6 @@ fn Term interact_grad(Term grad_term) {
         for (u32 i = 0; i < ndim; i++)
           out_dims[i] = (ranges[2*i + 1] > ranges[2*i])
                            ? (ranges[2*i + 1] - ranges[2*i]) : 0;
-        new_fw = uop_shrink(ga.fwd, ndim, ranges);
         // bw_outer: PAD bw_a back to source extent with widths
         // [b_i, src.dim_i - e_i].
         u32 widths[2 * MAX_DIM];

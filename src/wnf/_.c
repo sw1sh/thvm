@@ -60,6 +60,26 @@ enter:
     case TAG_DP0:
     case TAG_DP1: {
       u64  loc  = term_val(next);
+      // Grad-flavored projection: dispatch BEFORE touching the cell
+      // so the other projection can still read y.
+      if (term_ext(next) & DUP_GRAD_FLAG) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        if (term_tag(next) == TAG_DP0) {
+          // FWD passthrough: cell holds y, force it.
+          ITRS++;
+          next = heap_read(loc);
+          goto enter;
+        }
+        // BWD: fire chain rule.
+        Term g = interact_grad(next);
+        if (g == next) {
+          whnf = next;
+          goto apply;
+        }
+        ITRS++;
+        next = g;
+        goto enter;
+      }
       Term cell = heap_take(loc);
       if (term_sub_get(cell)) {
         next = term_sub_set(cell, 0);
@@ -113,34 +133,8 @@ enter:
         whnf = interact_kernel(next);
         goto apply;
       }
-      if (op == UOP_GRAD) {
-        // Lazy chain-rule rewrite: each fire does ONE structural
-        // step on y's outermost UOp, deferring sub-positions as
-        // fresh UOP_GRAD nodes.  If interact_grad returns the
-        // term unchanged it means y wasn't structurally pattern-
-        // matchable yet (e.g., a free VAR / un-realised ALO),
-        // so leave the GRAD as WHNF for a later re-entry.
-        if (BUDGET_HIT) BAIL_AT(next);
-        Term g_out = interact_grad(next);
-        if (g_out == next) {
-          whnf = next;
-          goto apply;
-        }
-        ITRS++;
-        next = g_out;
-        goto enter;
-      }
-      if (op == UOP_FWD) {
-        // FWD projection of a dup-like grad cell: passthrough to
-        // cell.y (the forward subgraph).  If the companion GRAD's
-        // chain rule has already rewritten this FWD via heap_replace,
-        // our parent slot points at the new structural term and we
-        // never enter here.
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        next = heap_read(term_val(next));
-        goto enter;
-      }
+      // (slots UOP_GRAD/UOP_FWD have moved to TAG_DP0/DP1+DUP_GRAD_FLAG;
+      // see the TAG_DP{0,1} branch above.)
       if (op == UOP_ASSIGN) {
         // Force src (heap[loc+1]) first -- could be a kernel chain
         // that has to fire before we have a TEN to copy from.  dst

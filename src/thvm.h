@@ -54,6 +54,17 @@ typedef u64 Term;
 #define SUB_MASK  0x1ULL
 #define TAG_MASK  0x7FULL
 #define EXT_MASK  0x3FFFFULL
+
+// === DUP-cell flavor ===
+// TAG_DP0/DP1 reuse the dup-cell mechanism for two distinct cell
+// types.  Bit 17 of the ext (the label) marks the projection as
+// "grad-flavored" -- the cell holds [y] and the projections do
+// FWD/BWD instead of HVM-style DUP-X dispatch.  The remaining 17
+// bits of ext are the dup label (matched against SUP^L for projection
+// in the regular case; unused / target-tid by convention in the grad
+// case).
+#define DUP_GRAD_FLAG  (1U << 17)
+#define DUP_LABEL_MASK (0x1FFFFU)            // bits 0..16
 #define VAL_MASK  0x3FFFFFFFFFULL
 
 // === Tags (minimal initial set) ===
@@ -155,19 +166,14 @@ typedef u64 Term;
 #define UOP_SQRT        15   // heap = [src]
 #define UOP_CMPLT       16   // heap = [a, b]
 #define UOP_REDUCE      17   // heap = [src, NUM(kind), NUM(axis)]
-// UOP_GRAD / UOP_FWD form a dup-like combinator.  Both share a cell
-// holding [y] and represent the two aux ports of a "grad agent":
-//     UOP_GRAD = backward projection (chain-rule rewrite)
-//     UOP_FWD  = forward projection (passthrough to y)
-// When the chain rule fires (via interact_grad on a UOP_GRAD term),
-// it rewrites BOTH projections atomically: heap_replace updates every
-// parent slot referencing UOP_FWD(cell) and UOP_GRAD(cell) in one
-// step.  No target stored in the cell -- target identification happens
-// at the leaf, where interact_grad emits SUP^{leaf_tid}(0, 1) labeled
-// by the leaf's tid; the WL surface DUP^{target_tid} routes the
-// projection.
-#define UOP_GRAD        18   // heap = [y]; backward (∂y/∂target via SUP routing)
-#define UOP_FWD         19   // heap = [y]; forward projection (returns y)
+// (slots 18, 19 were UOP_GRAD / UOP_FWD -- folded into TAG_DP0 /
+// TAG_DP1 with the DUP_GRAD_FLAG bit set on the ext (label) field.
+// A grad cell is just a regular dup-style cell holding [y]; its two
+// aux ports are TAG_DP0 (forward projection: passthrough to y) and
+// TAG_DP1 (backward projection: chain-rule rewrite via interact_grad).
+// The DUP_GRAD_FLAG distinguishes "grad-flavored" cell projections
+// from regular DUP/SUP projections in TAG_DP{0,1}'s redex dispatch.
+// See src/uop/grad.c + src/wnf/redex.c.)
 #define UOP_CMPEQ       20   // heap = [a, b]; mask of (a == b), 0/1 floats
 #define UOP_LOAD        21   // heap = [src]; explicit "read this tensor" boundary
                              //   marker (mirrors tinygrad's UOps.LOAD).  Slot
@@ -666,10 +672,11 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
 // the chain-rule rewrite rule defined in interact/uop_grad.c.
 // Allocate a shared grad cell holding [y].  Both projections (FWD
-// and GRAD) reference this cell with their tag/opcode as discriminator.
+// and BWD) reference this cell as TAG_DP0 / TAG_DP1 with the
+// DUP_GRAD_FLAG bit set on the ext (label) field.
 fn u64  uop_grad_cell  (Term y);
-fn Term uop_grad       (Term y);   // BWD projection over a fresh cell
-fn Term uop_fwd        (Term y);   // FWD projection over a fresh cell
+fn Term uop_grad       (Term y);   // BWD projection (TAG_DP1 + grad flag)
+fn Term uop_fwd        (Term y);   // FWD projection (TAG_DP0 + grad flag)
 
 // Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in

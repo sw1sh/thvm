@@ -161,6 +161,11 @@ $TagDP0 = 4; $TagDP1 = 5; $TagSUP = 6; $TagDUP = 7;
 $TagTEN = 8; $TagUOP = 9; $TagNUM = 10;
 $TagREF = 11; $TagALO = 12; $TagOP2 = 13; $TagMAT = 14;
 
+(* DUP-cell flavor flag: TAG_DP{0,1} with this bit set on ext is a
+   grad-flavored projection (DP0=FWD passthrough, DP1=BWD chain rule).
+   See DUP_GRAD_FLAG in src/thvm.h. *)
+$DupGradFlag = 2^17;
+
 $tagNames = <|
     0  -> "APP", 1  -> "LAM", 2  -> "VAR",  3  -> "ERA",
     4  -> "DP0", 5  -> "DP1", 6  -> "SUP",  7  -> "DUP",

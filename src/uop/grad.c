@@ -1,21 +1,16 @@
-// uop/grad.c - construct a UOP_GRAD / UOP_FWD pair sharing a cell.
+// uop/grad.c - construct dup-flavored grad-cell projections.
 //
-// Cell layout: heap[loc] = y.  Both UOP_FWD and UOP_GRAD terms point
-// at the same loc with their opcode as discriminator.  Mirrors a
-// dup-like agent with two aux ports:
+// A grad cell is a regular dup-style cell holding [y].  Its two
+// aux ports are TAG_DP0 (forward projection: passthrough to y) and
+// TAG_DP1 (backward projection: chain-rule rewrite via interact_grad).
+// We share the IC's DUP/DP0/DP1 machinery; the DUP_GRAD_FLAG bit on
+// the projection's ext (label) tells redex_fire / wnf to dispatch
+// the grad-flavored interaction instead of the regular DUP-X
+// dispatch.
 //
-//                      y (principal)
-//                      |
-//                    GRAD                           y at heap[loc]
-//                   /    \                              ^
-//                  fw     bw           --->       FWD --+-- GRAD
-//
-// The chain-rule rewrite fires when interact_grad is invoked on the
-// BWD projection.  It allocates fresh sub-cells for each child of y,
-// builds new fw/bw expressions referencing those children's
-// projections, and heap_replaces BOTH the original UOP_FWD(loc) and
-// UOP_GRAD(loc) at once.  Lazy: each level only fires when its
-// projection is consumed.
+// Mirrors a 3-port combinator with one principal port (cell.y) and
+// two aux ports (FWD, BWD), exactly the dup-like structure HVM4
+// gives DUP -- just with grad semantics on the aux ports.
 
 fn u64 uop_grad_cell(Term y) {
   u64 loc = heap_alloc(1);
@@ -24,9 +19,9 @@ fn u64 uop_grad_cell(Term y) {
 }
 
 fn Term uop_grad(Term y) {
-  return term_new(0, TAG_UOP, UOP_GRAD, uop_grad_cell(y));
+  return term_new(0, TAG_DP1, DUP_GRAD_FLAG, uop_grad_cell(y));
 }
 
 fn Term uop_fwd(Term y) {
-  return term_new(0, TAG_UOP, UOP_FWD, uop_grad_cell(y));
+  return term_new(0, TAG_DP0, DUP_GRAD_FLAG, uop_grad_cell(y));
 }
