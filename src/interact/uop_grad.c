@@ -60,17 +60,6 @@ fn Term grad_one_at(Term y) {
   return expand_to_target(uop_const(DT_F32, 0x3F800000u), y);
 }
 
-// Atomically rewrite the FWD projection paired with this BWD cell.
-// The caller (redex_fire) heap_replaces UOP_GRAD(cell_orig) with our
-// returned new_bw; we additionally heap_replace UOP_FWD(cell_orig)
-// with new_fw so the dup-like pair stays in sync.
-fn void grad_replace_fwd(u64 cell_orig, Term new_fw) {
-  Term old_fwd = term_new(0, TAG_UOP, UOP_FWD, cell_orig);
-  for (u64 i = 0; i < HEAP_NEXT; i++) {
-    if (heap_read(i) == old_fwd) heap_set(i, new_fw);
-  }
-}
-
 // Allocate a fresh GRAD cell for `child` and return its FWD/BWD
 // projection terms.  Both projections share the cell.
 typedef struct { Term fwd; Term bwd; } GradPair;
@@ -100,13 +89,11 @@ fn Term interact_grad(Term grad_term) {
     heap_set(sloc + 0, zero);
     heap_set(sloc + 1, one);
     Term sup = term_new(0, TAG_SUP, tid, sloc);
-    grad_replace_fwd(cell_orig, y);
     return sup;
   }
 
   // NUM as a constant -- no gradient anywhere; emit zero on bw.
   if (y_tag == TAG_NUM) {
-    grad_replace_fwd(cell_orig, y);
     return uop_const(DT_F32, 0);
   }
 
@@ -137,7 +124,6 @@ fn Term interact_grad(Term grad_term) {
         // CMPLT / CMPEQ are non-differentiable -- bw is zero.
         new_bw = grad_zero_at(y);
       }
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -147,7 +133,6 @@ fn Term interact_grad(Term grad_term) {
       GradPair ga = grad_pair(a);
       Term new_fw = uop_unary(UOP_NEG, ga.fwd);
       Term new_bw = uop_unary(UOP_NEG, ga.bwd);
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -163,7 +148,6 @@ fn Term interact_grad(Term grad_term) {
       Term k      = uop_const(DT_F32, inv_bits);
       Term factor = uop_binary(UOP_MUL, ra, k);
       Term new_bw = uop_binary(UOP_MUL, ga.bwd, factor);
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -178,7 +162,6 @@ fn Term interact_grad(Term grad_term) {
       Term k      = uop_const(DT_F32, ln2_bits);
       Term factor = uop_binary(UOP_MUL, new_fw, k);
       Term new_bw = uop_binary(UOP_MUL, ga.bwd, factor);
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -195,7 +178,6 @@ fn Term interact_grad(Term grad_term) {
       Term sq      = uop_binary(UOP_MUL, ra1, ra2);
       Term nsq     = uop_unary(UOP_NEG, sq);
       Term new_bw  = uop_binary(UOP_MUL, ga.bwd, nsq);
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -212,7 +194,6 @@ fn Term interact_grad(Term grad_term) {
       Term k      = uop_const(DT_F32, half_bits);
       Term factor = uop_binary(UOP_MUL, inv_sa, k);
       Term new_bw = uop_binary(UOP_MUL, ga.bwd, factor);
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -243,7 +224,6 @@ fn Term interact_grad(Term grad_term) {
       } else {
         new_bw = ga.bwd;   // best effort -- passthrough
       }
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -267,7 +247,6 @@ fn Term interact_grad(Term grad_term) {
       } else {
         new_bw = ga.bwd;   // passthrough
       }
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -294,7 +273,6 @@ fn Term interact_grad(Term grad_term) {
           }
         }
       }
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -304,7 +282,6 @@ fn Term interact_grad(Term grad_term) {
       GradPair ga = grad_pair(a);
       Term new_fw = uop_flip(ga.fwd, mask);
       Term new_bw = uop_flip(ga.bwd, mask);
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -375,7 +352,6 @@ fn Term interact_grad(Term grad_term) {
         Term lifted = uop_expand(ga.bwd, ndim, out_dims);
         new_bw      = uop_pad(lifted, ndim, widths);
       }
-      grad_replace_fwd(cell_orig, new_fw);
       return new_bw;
     }
 
@@ -386,16 +362,13 @@ fn Term interact_grad(Term grad_term) {
       // (orphaned) on the heap.
       u32 kid = (u32)term_val(heap_read(y_loc + 1));
       if (kid == 0 || kid >= KERNELS_NEXT) {
-        grad_replace_fwd(cell_orig, y);
         return grad_zero_at(y);
       }
       Term src = KERNELS[kid].source_uop;
       if (src == 0) {
-        grad_replace_fwd(cell_orig, y);
         return grad_zero_at(y);
       }
       GradPair ga = grad_pair(src);
-      grad_replace_fwd(cell_orig, ga.fwd);
       return ga.bwd;
     }
 
@@ -403,7 +376,6 @@ fn Term interact_grad(Term grad_term) {
     case UOP_LOAD:
     case UOP_ASSIGN:
       // Not differentiable -- bw is zero.
-      grad_replace_fwd(cell_orig, y);
       return grad_zero_at(y);
 
     default:
