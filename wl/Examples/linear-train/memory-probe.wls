@@ -98,7 +98,10 @@ renderHeapDiagram[gradReduced, "2-with-backward"];
 
 (* === Stage 3: kernels emitted.  TMaterialize compiles the lazy
    compute into UOP_KERNEL terms; nothing fired yet (no TWnf), so
-   the buffer state is still pre-firing. *)
+   the buffer state is still pre-firing.  Each emitted kernel
+   gets a pinned UOP_KERNEL heap cell (see emit_kernel_for_boundary
+   in src/schedule/materialize.c) so heap-walk discovery surfaces
+   the full kernel set in the diagram, not just the sink. *)
 gradMaterialized = TMaterialize[gradReduced];
 
 debugPrint["stage 3 (after materialize): heap=", THeapPos[],
@@ -109,6 +112,21 @@ renderHeapDiagram[gradMaterialized, "3-with-kernels"];
    stage 3 since stages 1-2 emit no KernelEntrys. *)
 debugPrint[""];
 debugPrint @ ToString[TMemoryPlanReport[TMemoryPlan[]], OutputForm];
+
+(* === Schedule DAG: kernel-only view of the dependency graph,
+   stripped of UOp-level detail.  Each vertex = one emitted kernel;
+   directed edges follow producer-to-consumer TenDesc flow.  Useful
+   side-by-side with the gantt: gantt shows when bufs live, this
+   shows who feeds whom. *)
+Module[{backend, gPath, gPathNoExt},
+    backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
+    gPath      = "wl/Examples/linear-train/schedule-graph-" <> backend <> ".svg";
+    gPathNoExt = "wl/Examples/linear-train/schedule-graph-no-ext-" <> backend <> ".svg";
+    Export[gPath,      TScheduleGraph[],                                Background -> White];
+    Export[gPathNoExt, TScheduleGraph["ShowExternalInputs" -> False],   Background -> White];
+    debugPrint["TScheduleGraph -> ", gPath];
+    debugPrint["TScheduleGraph (kernel-only) -> ", gPathNoExt]
+];
 
 Module[{plan = TMemoryPlan[], backend, path},
     backend = If[ Environment["THVM_BACKEND"] === "metal", "metal", "cpu"];
