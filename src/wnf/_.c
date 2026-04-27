@@ -499,9 +499,17 @@ apply:
             continue;
           }
           case TAG_MAT: {
-            // APP-MAT-NUM: force the arg, dispatch on its NUM value.
-            // Heap[mat_loc+0] = handler (used on match).
-            // Heap[mat_loc+1] = fallback (applied to arg on miss).
+            // APP-MAT: force the arg, dispatch by its tag.
+            //   APP-MAT-NUM (arg is TAG_NUM, val == match):  return handler.
+            //   APP-MAT-CTR (arg is TAG_CTR, ext == match):  destructure --
+            //                  apply handler to each CTR child via APP-chain.
+            //                  Mirrors HVM4's APP-MAT-CTR-MAT: a MAT lambda
+            //                  matching constructor #K applied to a CTR with
+            //                  the same #K extracts its fields and passes
+            //                  them positionally to the handler.
+            //   miss:           build APP(fallback, arg) and continue.
+            // Heap[mat_loc+0] = handler.
+            // Heap[mat_loc+1] = fallback.
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             u64  mat_loc = term_val(whnf);
             u32  match   = term_ext(whnf);
@@ -510,6 +518,21 @@ apply:
             if (term_tag(arg_w) == TAG_NUM &&
                 (u32)term_val(arg_w) == match) {
               next = heap_read(mat_loc + 0);
+              goto enter;
+            }
+            if (term_tag(arg_w) == TAG_CTR && term_ext(arg_w) == match) {
+              // Destructure: apply handler to each child via fresh APP cells.
+              Term handler = heap_read(mat_loc + 0);
+              u32 n = term_ctr_n(arg_w);
+              Term res = handler;
+              for (u32 i = 0; i < n; i++) {
+                Term child = term_ctr_at(arg_w, i);
+                u64 a = heap_alloc(2);
+                heap_set(a + 0, res);
+                heap_set(a + 1, child);
+                res = term_new(0, TAG_APP, 0, a);
+              }
+              next = res;
               goto enter;
             }
             // Miss: build APP(fallback, arg_w) and continue.

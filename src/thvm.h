@@ -171,6 +171,9 @@ typedef u64 Term;
                              //   and rewrites the redex to the dst Term.  Mirrors
                              //   tinygrad's UOps.ASSIGN.  Materialize bails so
                              //   the UOp survives until both children are TENs.
+// (slot 23 was UOP_CTR_AT -- removed; CTR destructuring now goes
+// through APP-MAT-CTR per HVM4 idiom, no dedicated projection opcode
+// needed.  See TGradMany in wl/THVMLink/Kernel/Tensor.wl.)
 #define UOP_COUNT       23
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.

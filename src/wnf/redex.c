@@ -106,6 +106,21 @@ fn Term redex_fire(Term redex) {
           if (term_tag(arg_w) == TAG_NUM &&
               (u32)term_val(arg_w) == match) {
             result = heap_read(mat_loc);
+          } else if (term_tag(arg_w) == TAG_CTR &&
+                     term_ext(arg_w) == match) {
+            // APP-MAT-CTR: destructure -- apply handler to each child via
+            // a fresh APP-chain.  Same-shape rule as wnf/_.c:510.
+            Term handler = heap_read(mat_loc);
+            u32 n = term_ctr_n(arg_w);
+            Term res = handler;
+            for (u32 i = 0; i < n; i++) {
+              Term child = term_ctr_at(arg_w, i);
+              u64 a = heap_alloc(2);
+              heap_set(a + 0, res);
+              heap_set(a + 1, child);
+              res = term_new(0, TAG_APP, 0, a);
+            }
+            result = res;
           } else {
             Term fb = heap_read(mat_loc + 1);
             u64  a2 = heap_alloc(2);

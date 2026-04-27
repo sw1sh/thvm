@@ -41,27 +41,47 @@ fn Term nf(Term root) {
   Term work[NF_WORK_CAP];
   u32  n     = redex_enumerate(&root, 1, work, NF_WORK_CAP);
   u32  fired = 0;
+  // Outer loop: when the worklist drains, re-enumerate.  heap_replace
+  // inside redex_fire can promote latent cells to redexes (e.g. an
+  // APP-MAT redex becomes eligible only after its scrutinee cell is
+  // patched from an unfired multi-GRAD to a CTR by an upstream fire).
+  // We can't catch those via worklist-push from inside the firing
+  // interaction because heap_replace targets existing cells, not the
+  // hb..HEAP_NEXT range.  A fresh redex_enumerate after each drain
+  // picks them up; loop until enumeration returns 0.
   while (n > 0 && fired < NF_FIRE_CAP) {
-    Term r = work[--n];
-    if (!nf_is_eager_redex(r)) continue;
-    u64 hb = HEAP_NEXT;
-    u64 itrs0 = ITRS;
-    Term result = redex_fire(r);
-    if (ITRS == itrs0) continue;       // stuck (e.g. UOP_GRAD with unresolvable y)
-    fired++;
-    // heap_replace(old, new) inside redex_fire substitutes new for
-    // old in every heap cell -- but it can't update Terms held off-
-    // heap, like the caller's root.  Track that explicitly so the
-    // returned root reflects the head reduction.
-    if (r == root && result != 0) root = result;
-    if (result != 0 && nf_is_eager_redex(result) && n < NF_WORK_CAP)
-      work[n++] = result;
-    // Cells the fire allocated may carry fresh redexes the
-    // interaction just produced.
-    for (u64 i = hb; i < HEAP_NEXT && n < NF_WORK_CAP; i++) {
-      Term c = heap_read(i);
-      if (nf_is_eager_redex(c)) work[n++] = c;
+    u32 fired_this_round = 0;
+    while (n > 0 && fired < NF_FIRE_CAP) {
+      Term r = work[--n];
+      if (!nf_is_eager_redex(r)) continue;
+      u64 hb = HEAP_NEXT;
+      u64 itrs0 = ITRS;
+      Term result = redex_fire(r);
+      if (ITRS == itrs0) continue;       // stuck
+      fired++;
+      fired_this_round++;
+      // heap_replace(old, new) inside redex_fire substitutes new for
+      // old in every heap cell -- but it can't update Terms held off-
+      // heap, like the caller's root.  Track that explicitly so the
+      // returned root reflects the head reduction.
+      if (r == root && result != 0) root = result;
+      if (result != 0 && nf_is_eager_redex(result) && n < NF_WORK_CAP)
+        work[n++] = result;
+      // Cells the fire allocated may carry fresh redexes the
+      // interaction just produced.
+      for (u64 i = hb; i < HEAP_NEXT && n < NF_WORK_CAP; i++) {
+        Term c = heap_read(i);
+        if (nf_is_eager_redex(c)) work[n++] = c;
+      }
     }
+    // Worklist drained.  Re-enumerate to catch redexes that became
+    // eligible via heap_replace cascades (e.g. an APP-MAT redex
+    // becomes eligible only after its scrutinee cell is patched
+    // from an unfired multi-GRAD to a CTR by an upstream fire).
+    // Terminate if NOTHING fired this round -- re-enumerating the
+    // same stuck redexes would loop forever.
+    if (fired_this_round == 0) break;
+    n = redex_enumerate(&root, 1, work, NF_WORK_CAP);
   }
   return root;
 }
