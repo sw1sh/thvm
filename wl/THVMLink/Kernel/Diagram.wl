@@ -68,6 +68,15 @@ wireFor[loc_Integer] := Block[{t, tag, val, ext},
                 "w"   <> ToString[loc],
                 "uop" <> ToString[val]
             ],
+        (* TAG_TEN: key the wire on the *tensor handle* (tid), not the
+           cell loc.  Every cell holding a reference to the same tid
+           collapses onto one shared wire, so a kernel reading another
+           kernel's output_buf draws a direct edge between the two
+           kernels (their two TAG_TEN cells -- producer's at kloc+0,
+           consumer's anywhere -- share "tenTid<tid>").  External
+           tensors used by multiple kernels likewise spider out from
+           one TEN leaf. *)
+        $TagTEN,           "tenTid" <> ToString[val],
         _,                 "w" <> ToString[loc]
     ]
 ]
@@ -352,9 +361,10 @@ agentDiagram[base_Integer, $TagSUP, principal_, _Association, _Association] := W
 agentDiagram[base_Integer, $TagUOP, principal_, _Association, opcodes_Association] := Block[{
     opcode = Lookup[opcodes, base, 0]
 },
-    If[ opcode === $UopGrad,
-        gradDiagram[base, principal],
-        plainUopDiagram[base, principal, opcode]
+    Which[
+        opcode === $UopGrad,   gradDiagram[base, principal],
+        opcode === $UopKernel, kernelDiagram[base, principal],
+        True,                  plainUopDiagram[base, principal, opcode]
     ]
 ]
 
@@ -373,6 +383,35 @@ plainUopDiagram[base_Integer, principal_, opcode_Integer] := Block[{
         shape   = agentShape[$TagUOP], style = uopStyle[opcode]
     },
         Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
+    ]
+]
+
+(* KERNEL agent: like plainUopDiagram but with N additional input
+   ports drawn from the C-side input_tids[] array (the kernel's
+   actual upstream tensors -- not present in any heap cell of the
+   UOP_KERNEL itself, which only carries (output_buf, NUM(kid))).
+   Each input wire keys on the input tid via "tenTid<tid>", so
+   another kernel's output_buf TEN cell -- whose wireFor is the
+   same string -- auto-merges into a single edge.  External inputs
+   (weights, the SGD targets) get a synthetic TEN leaf rendered
+   separately by externalKernelInputLeaves below. *)
+kernelDiagram[base_Integer, principal_] := Block[{
+    kid, inputTids, outBufWire, kidLabelWire, inputWires, pWire,
+    label
+},
+    kid          = TTermVal[THeapRead[base + 1]];
+    inputTids    = TKernelInputs[kid];
+    label        = uopHeader[base, $UopKernel];
+    outBufWire   = wireFor[base];           (* "tenTid<output_tid>" *)
+    kidLabelWire = wireFor[base + 1];       (* NUM(kid) cell -- label only *)
+    inputWires   = ("tenTid" <> ToString[#]) & /@ inputTids;
+    pWire        = If[ principal === None, "uop" <> ToString[base], wireFor[principal]];
+    With[{
+        ins   = Join[{outBufWire, kidLabelWire}, inputWires],
+        outs  = {pWire},
+        shape = agentShape[$TagUOP], style = uopStyle[$UopKernel]
+    },
+        Diagram[label, ins, outs, "Shape" -> shape, "Style" -> style]
     ]
 ]
 
@@ -610,9 +649,22 @@ reachableTenCells[reachOps_Association] :=
 reachableConstCells[reachOps_Association] := reachableSlotCells[reachOps,
     TTermTag[#] === $TagUOP && TTermExt[#] === $UopConst &]
 
+(* Synthetic TEN leaf for a kernel input tid that has no
+   corresponding TAG_TEN cell in any rendered UOP slot.  The wire
+   "tenTid<tid>" is the same one the kernel's input port uses, so
+   DiagramNetwork connects them.  Apex-down, label = "TEN#<tid>". *)
+externalKernelInputLeaf[tid_Integer] := Diagram[
+    "TEN#" <> ToString[tid],
+    {},
+    {"tenTid" <> ToString[tid]},
+    "Shape" -> agentShape[$TagTEN],
+    "Style" -> agentStyle[$TagTEN]
+]
+
 THeapDiagram[t_] := Block[{
-    fullAgents, reachOps, agents, opcodes, eras, tens, consts, ds,
-    $uopOpcodeContext
+    fullAgents, reachOps, allKernels, kernelKids, allInputTids,
+    coveredTids, externalInputTids, agents, opcodes, eras, tens,
+    consts, ds, $uopOpcodeContext
 },
     fullAgents = discoverAgentsHere[{t}];
     reachOps   = reachableUopsHere[{t}];
@@ -621,6 +673,15 @@ THeapDiagram[t_] := Block[{
        base without re-scanning the heap.  Block above scopes the
        rebind to this render. *)
     $uopOpcodeContext = discoverUopOpcodesHere[{t}];
+    (* UOP_KERNEL cells store their input tids OUTSIDE the heap (in
+       the C-side KERNELS table), so non-sink kernels are unreachable
+       via the BFS even though they're alive in the heap.  Pull every
+       KERNEL UOP from the full opcode discovery so the diagram
+       surfaces the entire kernel population, not just the sink. *)
+    allKernels = Select[Keys[$uopOpcodeContext],
+                        $uopOpcodeContext[#] === $UopKernel &];
+    reachOps = Join[reachOps,
+                    Association[(# -> $UopKernel) & /@ allKernels]];
     (* Keep IC agents from full discovery; replace UOP entries with
        only the reachable ones so old pre-rewrite UOPs (plus their
        transitively-reached TENs) drop out of the diagram. *)
@@ -632,6 +693,17 @@ THeapDiagram[t_] := Block[{
     eras    = discoverErasHere[];
     tens    = reachableTenCells[reachOps];
     consts  = reachableConstCells[reachOps];
+    (* Synthetic external-input leaves for kernel input_tids that
+       aren't produced by another kernel and aren't sitting in any
+       rendered TAG_TEN cell.  These are weights / TTensorCreate
+       inputs the kernel reads externally. *)
+    kernelKids = TTermVal[THeapRead[# + 1]] & /@ allKernels;
+    allInputTids = DeleteDuplicates @ Flatten[TKernelInputs /@ kernelKids];
+    coveredTids = DeleteDuplicates @ Join[
+        TTermVal[THeapRead[#]] & /@ tens,
+        TTermVal[THeapRead[# + 0]] & /@ allKernels   (* output_buf tids *)
+    ];
+    externalInputTids = Complement[allInputTids, coveredTids];
     ds = Join[
         KeyValueMap[
             agentDiagram[#1, #2, principalCellOf[#1, #2, agents, opcodes],
@@ -640,7 +712,8 @@ THeapDiagram[t_] := Block[{
         ],
         eraDiagram[#, agents, opcodes]      & /@ eras,
         tenLeafDiagram[#, agents, opcodes]   & /@ tens,
-        constLeafDiagram[#, agents, opcodes] & /@ consts
+        constLeafDiagram[#, agents, opcodes] & /@ consts,
+        externalKernelInputLeaf /@ externalInputTids
     ];
     DiagramNetwork @@ ds
 ]

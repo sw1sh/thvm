@@ -521,7 +521,9 @@ cellTreeWalkTerm[cells_, Term[tag_String, ext_, val_, ___], seen_] := Module[{
     Switch[tagCode,
         $TagERA, "ERA",
         $TagVAR, "VAR"[val],
-        $TagNUM, "NUM"[ext, val],
+        (* Mirror TTermExpr in THVMLink.wl: drop dtype for the common
+           i32 case, surface "f32" only for f32 NUM cells. *)
+        $TagNUM, If[ext === 0, "NUM"["f32", val], "NUM"[val]],
         $TagTEN, "TEN"[val],
         $TagREF, "REF"[ext, val],
         $TagDP0, "DP0"[ext, cellTreeWalkLoc[cells, val, seen]],

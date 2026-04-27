@@ -542,7 +542,10 @@ tTreeWalk[t_, seen_] := Block[{
     Switch[tag,
         $TagERA, "ERA",
         $TagVAR, "VAR"[val],
-        $TagNUM, "NUM"[ext, val],
+        (* Drop the dtype field for the common i32 case; surface it
+           only when the cell holds an f32 (CONST scalar payload).
+           Keeps "NUM"[2] readable for kernel kid / view dim cells. *)
+        $TagNUM, If[ext === 0, "NUM"["f32", val], "NUM"[val]],
         $TagTEN, "TEN"[val],
         $TagREF, "REF"[ext],
         (* DP0 / DP1 recurse into the dup body so each projection's
@@ -592,9 +595,26 @@ tTreeWalk[t_, seen_] := Block[{
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
                 n = uopCellCount[ext];
-                "UOP" @@ Prepend[
-                    Table[tTreeWalk[$heapReadFn[val + i], seen2], {i, 0, n - 1}],
-                    Lookup[$uopNames, ext, "UOP?" <> ToString[ext]]
+                If[ ext === $UopKernel,
+                    (* Surface the C-side KernelEntry.input_tids[] as
+                       additional "TEN"[tid] args so KERNEL renders as
+                       "UOP"["KERNEL", kid, "TEN"[out_tid], "TEN"[in1],
+                       "TEN"[in2], ...].  Without this the input_tids
+                       are invisible (they don't appear in any heap
+                       child of the UOP_KERNEL cell). *)
+                    Module[{kid    = $termValFn[$heapReadFn[val + 1]],
+                            outTid = $termValFn[$heapReadFn[val]],
+                            inTids},
+                        inTids = TKernelInputs[kid];
+                        "UOP" @@ Join[
+                            {"KERNEL", kid, "TEN"[outTid]},
+                            "TEN" /@ inTids
+                        ]
+                    ],
+                    "UOP" @@ Prepend[
+                        Table[tTreeWalk[$heapReadFn[val + i], seen2], {i, 0, n - 1}],
+                        Lookup[$uopNames, ext, "UOP?" <> ToString[ext]]
+                    ]
                 ]],
         _, "Unknown"[tag]
     ]

@@ -262,7 +262,24 @@ backendName[1] = "CPU";
 backendName[2] = "Metal";
 backendName[_] = "?";
 
-formatBytes[n_] := Round[n / 1024.0, 0.1];
+(* Significant-digit byte formatter.  "0.0KiB" labels were
+   useless on small intermediates (4-byte counters, 64-byte
+   activations); pick a unit so the mantissa always sits in
+   [1, 1024) and round to 3 sig figs.  Returns a string like
+   "12B" / "5.43KiB" / "1.20MiB". *)
+formatBytes[0 | 0.] := "0B";
+formatBytes[n_?NumericQ] := Block[{x = N[Abs[n]], unit, scale, mantissa, digits},
+    {unit, scale} = Which[
+        x >= 1024.^3, {"GiB", 1024.^3},
+        x >= 1024.^2, {"MiB", 1024.^2},
+        x >= 1024.,   {"KiB", 1024.},
+        True,         {"B",   1.}
+    ];
+    mantissa = x / scale;
+    (* 3 sig figs: keep 2 decimals < 10, 1 decimal < 100, 0 decimals >= 100. *)
+    digits = Which[mantissa < 10, 2, mantissa < 100, 1, True, 0];
+    ToString[NumberForm[Sign[n] mantissa, {Infinity, digits}]] <> unit
+];
 
 (* Peak concurrent live bytes: at each topological depth t, sum
    nbytes of every buf whose alive interval covers t.  The max
@@ -304,7 +321,7 @@ TMemoryPlanReport[TMemoryPlan[a_Association]] := Block[{
     topByBytes,
     topBySpan,
     peak,
-    savingsKib,
+    savingsBytes,
     savingsPct
 },
     byStatus  = KeySort @ Counts[#["status"] & /@ bufs];
@@ -313,7 +330,7 @@ TMemoryPlanReport[TMemoryPlan[a_Association]] := Block[{
     topByBytes = TakeLargestBy[bufs, #["nbytes"] &, UpTo[5]];
     topBySpan  = TakeLargestBy[bufs, #["alive_span"] &, UpTo[5]];
     peak       = peakConcurrentLive[bufs];
-    savingsKib = formatBytes[peak["total_bytes"] - peak["peak_bytes"]];
+    savingsBytes = formatBytes[peak["total_bytes"] - peak["peak_bytes"]];
     savingsPct = If[ peak["total_bytes"] > 0,
         Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1],
         0
@@ -322,24 +339,24 @@ TMemoryPlanReport[TMemoryPlan[a_Association]] := Block[{
         Row[{"TMemoryPlan: ",
              Length[kernels], " kernels, ",
              Length[bufs],    " bufs, ",
-             formatBytes[totalBytes], " KiB live"}],
+             formatBytes[totalBytes], " live"}],
         Row[{"  by status:  ", byStatus}],
         Row[{"  by backend: ", byBackend}],
         Row[{"  peak concurrent live: ",
-             formatBytes[peak["peak_bytes"]], " KiB at depth ", peak["peak_depth"],
-             "  (slot-reuse headroom: ", savingsKib, " KiB = ",
+             formatBytes[peak["peak_bytes"]], " at depth ", peak["peak_depth"],
+             "  (slot-reuse headroom: ", savingsBytes, " = ",
              savingsPct, "% of total)"}],
         Row[{"  top-5 by bytes:"}],
         Column[Function[b, Row[{"    buf ", b["id"], " (",
             backendName[b["backend"]], "): ",
-            formatBytes[b["nbytes"]], " KiB, ",
+            formatBytes[b["nbytes"]], ", ",
             "depth [", b["alloc_depth"], "..", b["last_use_depth"], "], ",
             b["status"]}]] /@ topByBytes],
         Row[{"  top-5 by alive span:"}],
         Column[Function[b, Row[{"    buf ", b["id"], " (",
             backendName[b["backend"]], "): span ",
             b["alive_span"], ", ",
-            formatBytes[b["nbytes"]], " KiB, ",
+            formatBytes[b["nbytes"]], ", ",
             b["status"]}]] /@ topBySpan]
     }]
 ]
@@ -549,7 +566,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                                      If[b["backend"] === 1, "CPU",
                                         If[b["backend"] === 2, "Metal", "?"]],
                                      ")"}],
-                                Row[{"nbytes: ", Round[b["nbytes"]/1024., 0.01], " KiB"}],
+                                Row[{"nbytes: ", formatBytes[b["nbytes"]]}],
                                 Row[{"dtype: ",  b["dtype"]}],
                                 Row[{"status: ", b["status"]}],
                                 Row[{"depth: ",  b["alloc_depth"], " .. ",
@@ -572,7 +589,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                                     Column[{
                                         Row[{"buf", b["id"],
                                              " kid", b["producer_kid"],
-                                             " ", Round[b["nbytes"]/1024., 0.01], "KiB"}],
+                                             " ", formatBytes[b["nbytes"]]}],
                                         Row[{"tid:",
                                              StringRiffle[ToString /@ b["alias_tids"], ","]}]
                                     }, ItemSize -> Automatic, Spacings -> 0],
@@ -594,18 +611,18 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                    Log2[1+nbytes], so the human-readable label is
                    `2^y - 1` bytes -> KiB.  Pick ~6 evenly spaced
                    y values for either mode. *)
-                Block[{step, yToKib, asKib},
-                    (* Linear: y units ARE bytes -> /1024 = KiB.
-                       Log:    y is a SUM of Log2[1+nbytes] across
-                       stacked bufs, so 2^y is meaningless.  Label
-                       y in raw log-units; tooltips give per-buf
-                       bytes for the actual reads. *)
-                    asKib = barHeightMode =!= "Log";
-                    yToKib = If[asKib, Function[y, y / 1024.0],
-                                       Function[y, y]];
+                Block[{step, label, isLinear},
+                    (* Linear: y units ARE bytes -> formatBytes picks
+                       a sensible unit per tick.  Log: y is a SUM of
+                       Log2[1+nbytes] across stacked bufs, so 2^y is
+                       meaningless -- label y in raw log-units. *)
+                    isLinear = barHeightMode =!= "Log";
+                    label = If[isLinear,
+                               formatBytes,
+                               Function[y, ToString[Round[y, 0.1]]]];
                     step = totalHeight / 6.0;
                     If[ step <= 0, step = 1];
-                    Table[{y, Round[yToKib[y], 0.01]}, {y, 0, totalHeight, step}]
+                    Table[{y, label[y]}, {y, 0, totalHeight, step}]
                 ]
             },
             FrameLabel -> {
@@ -632,8 +649,8 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                           {peak["peak_depth"], totalHeight}}]},
                 Text[
                     Style[
-                        Row[{"peak ", Round[peak["peak_bytes"]/1024., 0.01],
-                             " KiB @ depth ", peak["peak_depth"]}],
+                        Row[{"peak ", formatBytes[peak["peak_bytes"]],
+                             " @ depth ", peak["peak_depth"]}],
                         FontSize -> Scaled[0.014],
                         FontFamily -> "Source Code Pro",
                         StandardRed
@@ -646,11 +663,11 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
                 Row[{"TMemoryPlan / ", backendsActive[allBufs], " -- ",
                      Length[allBufs], " bufs / ",
                      Length[a["Kernels"]], " kernels / ",
-                     Round[totalBytes/1024., 0.1], " KiB total / depth ",
+                     formatBytes[totalBytes], " total / depth ",
                      If[ allBufs === {}, 0, maxDepth + 1]}],
                 Row[{"peak concurrent: ",
-                     Round[peak["peak_bytes"]/1024., 0.1],
-                     " KiB at depth ", peak["peak_depth"],
+                     formatBytes[peak["peak_bytes"]],
+                     " at depth ", peak["peak_depth"],
                      " (slot-reuse headroom ", savingsPct, "%)"}],
                 (* Surface the TopN cut as a separate prominent line
                    so the rendering doesn't silently hide most of the
@@ -728,7 +745,7 @@ TMemoryPlan /: MakeBoxes[p_TMemoryPlan /; memoryPlanQ[Unevaluated[p]], fmt_] :=
             },
             {
                 {
-                    BoxForm`SummaryItem[{"live: ",    Round[totalBytes/1024., 0.1], " KiB"}],
+                    BoxForm`SummaryItem[{"live: ",    formatBytes[totalBytes]}],
                     BoxForm`SummaryItem[{"backend: ", backendsActive[bufs]}]
                 }
             },
