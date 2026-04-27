@@ -605,10 +605,24 @@ apply:
             whnf = interact_dup_ten(side, loc, whnf);
             continue;
           }
-          // DUP / TAG_UOP: stay stuck via default branch.  Annihilating
-          // would discard the DUP's label before any SUP^L emitted by
-          // the chain rule has a chance to bubble up via UOP-SUP
-          // commutation and meet a matching DUP^L.
+          case TAG_UOP: {
+            // DUP-UOP commute: structurally replicate the UOP at both
+            // projection sides, pushing DUPs into the compute slots.
+            // Returns 0 when the UOP is "active" (KERNEL/GRAD/FWD/
+            // ASSIGN) or otherwise unsupported -- in that case stay
+            // stuck so the UOP gets a chance to evolve via its own
+            // interaction first (chain rule emits SUPs, etc.).
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            Term r = interact_dup_uop(lab, loc, side, whnf);
+            if (r == 0) {
+              // Stuck: restore body, return DP frame as WHNF.
+              heap_set(loc, whnf);
+              whnf = frame;
+              continue;
+            }
+            whnf = r;
+            continue;
+          }
           default: {
             heap_set(loc, whnf);
             whnf = frame;

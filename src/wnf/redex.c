@@ -42,7 +42,19 @@ fn u8 is_redex(Term t) {
       if (term_sub_get(cell)) return 0;
       Term body = term_resolve(cell);
       u8 bt = term_tag(body);
-      return bt == TAG_SUP || bt == TAG_LAM || bt == TAG_ERA;
+      if (bt == TAG_SUP || bt == TAG_LAM || bt == TAG_ERA ||
+          bt == TAG_NUM || bt == TAG_TEN) return 1;
+      // DUP-UOP commute: a lazy-compute UOP (CONST/ADD/MUL/NEG/REDUCE/
+      // EXPAND/RESHAPE/FLIP) is eligible.  Active UOPs (KERNEL/GRAD/
+      // FWD/ASSIGN) are NOT -- they need to fire their own interaction
+      // first so any SUPs they emit get a chance to bubble up before
+      // the DUP collapses.
+      if (bt == TAG_UOP) {
+        u8 op = term_ext(body);
+        return op != UOP_KERNEL && op != UOP_GRAD &&
+               op != UOP_FWD    && op != UOP_ASSIGN;
+      }
+      return 0;
     }
     case TAG_REF: return 1;
     case TAG_ALO: return 1;
@@ -163,6 +175,17 @@ fn Term redex_fire(Term redex) {
         case TAG_SUP: result = interact_dup_sup(lab, loc, side, body); break;
         case TAG_ERA: result = interact_dup_era(side, loc, body);      break;
         case TAG_LAM: result = interact_dup_lam(lab, loc, side, body); break;
+        case TAG_NUM: result = interact_dup_num(side, loc, body);      break;
+        case TAG_TEN: result = interact_dup_ten(side, loc, body);      break;
+        case TAG_UOP: {
+          Term r = interact_dup_uop(lab, loc, side, body);
+          if (r == 0) {
+            heap_set(loc, cell);   // active UOP -- restore, stay stuck
+            return 0;
+          }
+          result = r;
+          break;
+        }
         default:
           heap_set(loc, cell);  // restore -- not a redex anymore
           return 0;
