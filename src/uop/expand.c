@@ -11,11 +11,23 @@
 // backprop, which the source-rank-inference path could not represent).
 
 fn Term uop_expand(Term src, u32 ndim, const u32 *dims) {
+  // Hash-cons by (op, src, ndim, dims).  Repeat construction (e.g.
+  // EXPAND(CONST(0), target.shape) appearing in every TGrad WL
+  // wrap, multiplied across nested rounds) reuses the existing
+  // heap loc.
+  u32 key_buf[1 + MAX_DIM];
+  key_buf[0] = ndim;
+  for (u32 i = 0; i < ndim; i++) key_buf[1 + i] = dims[i];
+  u64 key = uop_mov_hash(UOP_EXPAND, src, key_buf, 1 + ndim);
+  Term hit = uop_mov_lookup(key);
+  if (hit != 0) return hit;
   u64 loc = heap_alloc(2 + ndim);
   heap_set(loc + 0, src);
   heap_set(loc + 1, term_new(0, TAG_NUM, DT_I32, ndim));
   for (u32 i = 0; i < ndim; i++) {
     heap_set(loc + 2 + i, term_new(0, TAG_NUM, DT_I32, dims[i]));
   }
-  return term_new(0, TAG_UOP, UOP_EXPAND, loc);
+  Term t = term_new(0, TAG_UOP, UOP_EXPAND, loc);
+  uop_mov_insert(key, t);
+  return t;
 }

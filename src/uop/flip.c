@@ -5,8 +5,14 @@
 // strides[i] and adjusting offset.
 
 fn Term uop_flip(Term src, u32 axes_bitmask) {
+  u32 args[1] = {axes_bitmask};
+  u64 key = uop_mov_hash(UOP_FLIP, src, args, 1);
+  Term hit = uop_mov_lookup(key);
+  if (hit != 0) return hit;
   u64 loc = heap_alloc(2);
   heap_set(loc + 0, src);
   heap_set(loc + 1, term_new(0, TAG_NUM, DT_I32, axes_bitmask));
-  return term_new(0, TAG_UOP, UOP_FLIP, loc);
+  Term t = term_new(0, TAG_UOP, UOP_FLIP, loc);
+  uop_mov_insert(key, t);
+  return t;
 }

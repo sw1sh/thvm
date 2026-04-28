@@ -5,10 +5,18 @@
 // of UOP_PAD's shape operation.
 
 fn Term uop_shrink(Term src, u32 ndim, const u32 *begin_end) {
+  u32 key_buf[1 + 2 * MAX_DIM];
+  key_buf[0] = ndim;
+  for (u32 i = 0; i < 2 * ndim; i++) key_buf[1 + i] = begin_end[i];
+  u64 key = uop_mov_hash(UOP_SHRINK, src, key_buf, 1 + 2 * ndim);
+  Term hit = uop_mov_lookup(key);
+  if (hit != 0) return hit;
   u64 loc = heap_alloc(1 + 2 * ndim);
   heap_set(loc, src);
   for (u32 i = 0; i < 2 * ndim; i++) {
     heap_set(loc + 1 + i, term_new(0, TAG_NUM, DT_I32, begin_end[i]));
   }
-  return term_new(0, TAG_UOP, UOP_SHRINK, loc);
+  Term t = term_new(0, TAG_UOP, UOP_SHRINK, loc);
+  uop_mov_insert(key, t);
+  return t;
 }

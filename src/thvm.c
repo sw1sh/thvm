@@ -151,6 +151,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // Constructors for raw UOp graph nodes.  Each helper allocates the
 // heap cells for one opcode and returns a TAG_UOP term; nothing reduces.
 #include "uop/const.c"
+#include "uop/mov_cache.c"
 #include "uop/unary.c"
 #include "uop/binary.c"
 #include "uop/reduce.c"
@@ -307,6 +308,7 @@ void thvm_init(void) {
   init_ctx_arrays(CURRENT_CTX);
   uop_const_cache_reset();   // CONST cache keyed by raw bits + dtype;
                              // stale entries point into a freed heap.
+  uop_mov_cache_reset();     // movement-op cache, same lifecycle.
   extern_pin_clear();   // drop any leftover pins from a prior session
   // Backend selection: THVM_BACKEND=metal picks Metal as the default
   // device for newly allocated tensors.  Per-tensor backends are still
