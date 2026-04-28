@@ -195,42 +195,70 @@ This caps **program** memory at the number of distinct
 structural shapes (typically 1-2 per loop), which is the
 groundwork the next path needs.
 
-## Path forward: ANN/BRI shape inference (next)
+## Path 3: shape inference for compile-once-dispatch-many (landed)
 
-To compile the lambda body **before** APP-LAM beta we need
-each `TVAR`'s shape.  The `TAG_ANN` (annotation) and `TAG_BRI`
-(bridge) tags already in the runtime (`src/wnf/_.c:227-380`)
-are exactly the ICC primitives for this.  ANN's rule:
+Three commits, ~400 lines total:
 
-  ANN val (λx.body) = λx (ANN val $k) body[x <- θ$k.x]
-  ANN val (θx.body) = body[x <- val]      (type erasure)
-  ANN val var       = stuck
+1. **`src/lam/shape.c`** -- side table mapping LAM heap loc to a
+   bound-var shape.  Propagated through `clone_to_book_rec`
+   (dyn -> book) and `alo_realize` (book -> dyn) so each
+   instantiation of a recursive REF inherits the annotation.
+   `term_shape_in(TVAR(loc))` consults this table when the
+   binding cell isn't SUB-marked yet (= pre APP-LAM beta).
 
-So a "shape-annotated" lambda
-`TLamShaped[shape, λw.body] := ANN[shape_term, λw.body]`
-reduces under the existing wnf machinery, propagating the
-shape `down` to each `TVAR(w)` use site.  Sketch:
+2. **`materialize.c` visit() TVAR branch** -- when a `TAG_VAR`
+   has a shape annotation, allocate a symbolic input slot
+   (`input_tids[i] = 0`, `input_terms[i] = VAR-Term`).  The
+   kernel program references it via `KSRC_AS_INPUT(slot)`.
+   At fire time `interact_kernel` resolves the VAR through
+   SUB to whatever APP-LAM beta has bound it to and reads
+   that tensor's buffer.
 
-1. `TLamShaped[shape, body]` becomes `ANN[shape_term, LAM[w, body]]`
-   where `shape_term` encodes the bound var's shape (a small
-   compile-time term).
-2. Materialize, when seeing `App(LAM, arg)` after wnf has driven
-   the ANN to the var sites, looks at the shape carried via
-   `ANN`-flavored `TVAR(w)` -- a one-bit ext flag would say "this
-   TVAR has an attached shape; read it from the ANN sibling cell".
-3. Visit() treats `TVAR(w)` as `KSRC_AS_INPUT(slot)` with that
-   shape, compiles the body once.
-4. Cache by `(structural_program_hash, bound_shapes)` -- the
-   existing `kernel_program_cache_insert` keys.  Subsequent
-   `App(REF, arg2)` with `arg2.shape == cached_shape` get a
-   cache hit; just dispatch the cached kernel with `arg2`.
+3. **`TLamMaterialized[shape, x, body]`** -- the user-facing
+   constructor.  Compiles the body once into a UOP_KERNEL,
+   binds it as the LAM's body, returns the LAM term.  Each
+   subsequent `TApp[lam, ten]` re-fires the cached kernel with
+   `ten` substituted into the input slot.
 
-The wins:
-  - Single materialize call covers all iters (no per-iter visit).
-  - One kid serves N fire sites (path 2 falls out for free).
-  - Shape errors caught at materialize time.
+(We considered using the existing `TAG_ANN` / `TAG_BRI`
+machinery for shape propagation -- ICC's type-directed
+reduction would naturally push annotations to var sites -- but
+the existing rules do full type-checking with BRI bridges,
+which is heavier than what shape inference needs.  The side
+table is opt-in, has zero overhead for unannotated LAMs, and
+keeps the ICC reduction rules untouched.)
 
-Not landed yet -- substantive work, ~500 lines.
+End-to-end test (`lam-shape/tlam-materialized-compile-once`):
+
+```wolfram
+lam = TLamMaterialized[{3}, w, TUOpAdd[w, w]]
+ten = TTensorCreate[NumericArray[{1, 2, 3}, "Real32"]]
+TWnf[TApp[lam, ten]]
+   -> {2., 4., 6.}
+TKernelCount[]              -> 1   (one kernel emitted)
+TKernelProgramCacheSize[]   -> 1   (one distinct program)
+```
+
+### What's still missing for fully-automatic loops
+
+`TLamMaterialized` makes the user opt in.  For the recursive
+REF/ALO sgd_loop pattern in `sgd.wlt` to benefit
+automatically, the realize loop would need to walk into
+REF bodies, detect shape-annotated lambdas, materialize their
+bodies once, and cache by `(book_loc, arg_shape_signature)`.
+Each iter's `App(REF, arg_K)` then hits the cache and just
+dispatches with `arg_K`.
+
+Approximate work:
+  - `realize_classify` recognizes `App(REF, arg)` with
+    shape-annotated REF body.
+  - `materialize_lam_body` (new) compiles the body once,
+    keyed on (book_loc, arg_shape).
+  - `interact_kernel` extended for the TVAR-resolve at fire
+    time (already done in 9e66ab3 -- input_tids[i]=0 +
+    input_terms[i]!=0 path).
+
+Not landed yet; ~200 lines.
 
 ## Other open follow-ups
 
