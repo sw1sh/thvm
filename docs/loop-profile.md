@@ -1,11 +1,77 @@
-# Recursive lambda loop profile
+# Recursive loop profile
 
-Snapshot of `sgd_loop` running n iterations of L2-loss SGD from
-`wl/THVMLink/Tests/sgd.wlt` against `target = {1, 2, 3}`,
-`w0 = {0, 0, 0}`, `lr = 0.1`.  All numbers from a fresh `TInit[]`
-per iter so heap state isn't shared across `n` values.
+Two patterns for expressing a training loop in thvm, with very
+different scaling characteristics.
 
-## Per-iter linear growth (good)
+## TL;DR
+
+Use the **ASSIGN pattern** for any loop you want to scale to
+non-toy iteration counts.  Pre-materialize the step graph,
+recurse with `TPriForce` to re-fire the same kernel each iter.
+One kernel total, regardless of `n`.
+
+The **bound-w lambda pattern** (sgd.wlt) is correct but emits a
+fresh kernel per iter and hits a cubic wallclock cliff past
+n~12.  Useful for understanding the IC machinery; not for real
+training.
+
+| pattern  | n=10  | n=100 | n=1000 | kernels   |
+|----------|-------|-------|--------|-----------|
+| bound-w  | 0.02s | (timeout, n>=20) | -      | n         |
+| ASSIGN   | 0s    | 0s    | 0.006s | **1**     |
+
+Tests: `wl/THVMLink/Tests/training_loop.wlt` (5 cases).
+
+## Why kernels emit per-iter in the bound-w pattern
+
+`TGrad` and the step graph reference `w` as a `TLam`-bound
+variable (`TVAR`).  The IC machinery substitutes `w → w0`,
+`w → step1`, `w → step2`, ... per iter via APP-LAM beta.  Each
+iter's substituted body lives at *different heap locs*
+(allocated fresh by `alo_realize`), so `thvm_materialize`'s
+boundary classifier sees N independent compute graphs and emits
+N kernels with bit-for-bit identical programs but distinct
+input tids.
+
+Could materialize compile the *body template once*, before
+substitution, and dispatch with new inputs each iter?  In
+principle yes -- but `TVAR` carries no shape.  Shape inference
+would need to track shapes *through* `TApp` (looking at the
+applied argument and propagating into the binder's body), or
+require explicit shape annotations on `TLam`.  Open follow-up.
+
+## Why the ASSIGN pattern emits one kernel
+
+The step expression references `w` by **tid** (a concrete
+`TTen`), not as a bound variable:
+
+```wolfram
+w = TTensorCreate @ NumericArray[{0., 0., 0.}, "Real32"];
+gradExpr = TGrad[TL2Loss[TUOpAdd[w, TUOpNeg[tgt]]], w];
+step = TAssign[w, TUOpAdd[w, TUOpNeg[TUOpMul[lr, gradExpr]]]];
+matStep = TMaterialize[TNf[step]];
+```
+
+`TAssign[w, ...]` rewrites `w`'s buffer in place and returns
+`w`'s tid unchanged (verified by
+`training-loop/assign-preserves-weight-tid`).  The recursive
+loop just re-fires the same `matStep` kernel each iter:
+
+```wolfram
+TDef["loop", TLam[m,
+    TIfZero[m, TUOpConst[0.0, "f32"],
+        TPriForce[TRef["step"],
+            TApp[TRef["loop"], TOp2["-", m, TNum[1]]]]]]];
+TDef["step", matStep];
+TWnf @ TApp[TRef["loop"], TNum[1000]];
+```
+
+The lambda body has no UOP-with-TVAR -- the bound `m` is just
+the recursion counter, type-checked through `TIfZero` /
+`TOp2`.  Materialize sees the step graph once (during the
+`TMaterialize` call); the loop just sequences re-fires.
+
+## Bound-w pattern: per-iter linear growth (good)
 
 | n  | cells | kernels | ITRS | cells/iter |
 |----|-------|---------|------|------------|
@@ -90,15 +156,47 @@ lambda bodies.  Counter instrumentation is still pending here.
 - **O(1) dedup in `redex_collect_one`** (`785c0b5`).  Drops
   N*R quadratic from `redex_enumerate` to N.
 
-## Open follow-ups
+## ASSIGN pattern scaling
 
-1. Profile interactions inside `redex_fire`'s case dispatch to
-   localise the 3x-per-iter cliff.
-2. Heap compaction.  Per-iter cell growth is linear so n=1000
-   gives ~130K cells (1MB heap).  Tolerable but unbounded; a mark-
-   and-sweep that drops cells unreachable from the result tensor
-   would let arbitrarily long training loops run.
-3. Replace `heap_replace`'s O(HEAP_NEXT) cascade with HVM4-style
-   SUB-bit substitution.  Removes one per-fire linear cost.
-4. Kernel program hash-cons: minor memory win, useful when
-   programs are large (deep MLPs).
+Same expression numerically (n iters of `w_{i+1} = 0.8 w_i + 0.2 tgt`,
+target `{1, 2, 3}`):
+
+| n    | cells  | kernels | ITRS    | time    |
+|------|--------|---------|---------|---------|
+| 1    | 103    | 1       | 29      | 0s      |
+| 10   | 562    | 1       | 362     | 0s      |
+| 100  | 5152   | 1       | 17K     | 0s      |
+| 500  | 25K    | 1       | 385K    | 0.001s  |
+| 1000 | 51K    | 1       | 1.52M   | 0.006s  |
+
+Per-iter ~50 cells, **always 1 kernel**.  ITRS scales O(n^2)
+because each REF-unfold + APP-LAM beta + heap_replace cascade
+costs ~n; total time is still <10 ms at n=1000 because
+heap_replace's per-fire cost is on a small heap (no compute
+graph piling up -- ASSIGN reuses the same buffers).
+
+## Open follow-ups for the bound-w pattern
+
+These would unblock fully-symbolic training loops where the
+weights flow through `TLam` bound vars.  Not blocking real-world
+training (use ASSIGN), but useful for higher-order grad and ATP-
+style program search:
+
+1. **Shape tracking through `TApp`**: when materialize is called
+   on `App(Lam[w, body], arg)`, propagate `arg`'s shape into the
+   body before compiling.  Lets the body materialize *once* with
+   `KSRC_AS_INPUT(slot)` for the bound var.
+2. **Heap compaction**.  Per-iter cell growth is linear so
+   n=1000 gives ~130K cells (1MB heap).  Tolerable but
+   unbounded; a mark-and-sweep that drops cells unreachable from
+   the result tensor would let arbitrarily long training loops
+   run.
+3. **Replace `heap_replace`'s O(HEAP_NEXT) cascade with HVM4-
+   style SUB-bit substitution**.  Removes one per-fire linear
+   cost.
+4. **Kernel program hash-cons**: minor memory win, useful when
+   programs are large (deep MLPs); each iter's `KProgOp[]` is
+   identical but currently allocated separately.
+5. **Profile interactions inside `redex_fire`'s case dispatch**
+   to localise the cubic cliff in the bound-w pattern (already
+   ruled out: heap_replace, redex_enumerate, is_redex).
