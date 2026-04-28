@@ -320,6 +320,23 @@ static u32 input_slot_dedup(KernelEntry *ke, u32 tid, Term term) {
   return slot;
 }
 
+// Symbolic input slot: a TVAR whose binding LAM has a shape
+// annotation but no concrete TEN yet (pre APP-LAM beta).
+// `tid = 0` flags the slot as needing fire-time resolution
+// (interact_kernel sees tid==0 + term!=0 and term_resolves).
+static u32 input_slot_dedup_var(KernelEntry *ke, Term var_term,
+                                 u32 dtype, u32 numel) {
+  for (u32 i = 0; i < ke->n_inputs; i++)
+    if (ke->input_tids[i] == 0 && ke->input_terms[i] == var_term) return i;
+  kernel_inputs_reserve(ke, ke->n_inputs + 1);
+  u32 slot = ke->n_inputs++;
+  ke->input_tids   [slot] = 0;          // resolved at fire time
+  ke->input_dtypes [slot] = dtype;
+  ke->input_numels [slot] = numel;
+  ke->input_terms  [slot] = var_term;
+  return slot;
+}
+
 static u32 src_dtype(KernelEntry *ke, u32 src_idx) {
   return KSRC_IS_INPUT(src_idx) ? ke->input_dtypes[KSRC_INDEX(src_idx)]
                                  : ke->program[src_idx].dtype;
@@ -359,6 +376,27 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     u32 slot = input_slot_dedup(ke, tid, t);
     if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
     return KSRC_AS_INPUT(slot);
+  }
+  // Shape-annotated TVAR: bound by a TLamShape whose annotation
+  // sits in the lam_shape side table.  Treat as a symbolic input
+  // slot: the kernel program references KSRC_AS_INPUT(slot), and
+  // at fire time interact_kernel resolves input_terms[slot]
+  // (the VAR Term) through SUB to whatever APP-LAM beta has
+  // bound it to -- typically the recursive-loop iter's current
+  // weight tensor.  Lets a lambda body materialize ONCE without
+  // waiting for substitution; the kernel-program cache then
+  // dedups this kernel against future structurally identical
+  // emissions from re-instantiations of the same body.
+  if (tag == TAG_VAR) {
+    Shape s;
+    if (lam_shape_lookup(term_val(t), &s)) {
+      u32 numel = 1;
+      for (u32 i = 0; i < s.ndim; i++) numel *= s.dims[i];
+      u32 slot = input_slot_dedup_var(ke, t, DT_F32, numel);
+      if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
+      return KSRC_AS_INPUT(slot);
+    }
+    return VISIT_BAIL;          // no shape annotation -- can't compile
   }
   if (tag != TAG_UOP) return VISIT_BAIL;
 

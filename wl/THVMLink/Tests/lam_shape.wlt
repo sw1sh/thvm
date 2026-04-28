@@ -49,10 +49,10 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    Module[{lam, var, shape, alo, aloVar},
+    (
         TDef["shaped_id_test", TLamShape[{4}, w, w]];
         (* Drive the REF one layer to expose the dyn LAM. *)
-        alo = TWnf[TApp[TRef["shaped_id_test"], TEra[]]];
+        TWnf[TApp[TRef["shaped_id_test"], TEra[]]];
         (* After APP-LAM beta the bound var is substituted to ERA
            -- but the LAM cell's annotation should still be in the
            side table at the dyn loc that alo_realize allocated.
@@ -60,7 +60,7 @@ VerificationTest[
            after this, both should be present (count >= 2). *)
         TLamShape[{1, 2, 3}, x, x];
         THVMLink`Private`$lamShapeCountFn[] >= 2
-    ],
+    ),
     True,
     TestID -> "lam-shape/survives-book-and-alo-round-trip"
 ]
@@ -103,4 +103,60 @@ VerificationTest[
     ],
     {4},
     TestID -> "lam-shape/post-beta-defers-to-substituted-shape"
+]
+
+(* === materialize + APP-LAM end-to-end ====================================
+   Compile a lambda body BEFORE substitution: the body's TVAR
+   becomes a symbolic input slot.  APP-LAM then substitutes a
+   TEN; the kernel resolves the TVAR through SUB at fire time
+   and reads the substituted tensor's buffer.
+
+   This is the path-3 capability: "compile once, dispatch many".
+   The materialize call happens once, against the abstract
+   body.  Each `TApp[lam, ten_K]` reuses the same kernel program
+   with `ten_K` as input. *)
+
+VerificationTest[
+    TInit[];
+    Module[{lamLoc, varTerm, matBody, lam, ten, result},
+        lamLoc = THeapAlloc[1];
+        THVMLink`Private`$lamShapeSetFn[lamLoc, {3}];
+        varTerm = TVarFor[lamLoc];
+        (* Body uses the TVAR; pre-substitution materialize
+           emits a kernel with KSRC_AS_INPUT(0) for the var. *)
+        matBody = TMaterialize[TUOpAdd[varTerm, varTerm]];
+        THeapSet[lamLoc, matBody];
+        lam = THVMLink`Private`packTerm[0, $TagLAM, 0, lamLoc];
+        ten = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+        result = TWnf[TApp[lam, ten]];
+        Normal @ TTensorData[result]
+    ],
+    {2., 4., 6.},
+    TestID -> "lam-shape/materialize-body-then-apply-fires-correctly"
+]
+
+(* Two distinct APPs to the same materialized lambda body should
+   share the kernel program -- the program cache hashes by
+   structure, the TVAR slot is the structural placeholder. *)
+
+VerificationTest[
+    TInit[];
+    Module[{lamLoc, varTerm, matBody, lam, t1, r1, kernels, programs},
+        lamLoc = THeapAlloc[1];
+        THVMLink`Private`$lamShapeSetFn[lamLoc, {3}];
+        varTerm = TVarFor[lamLoc];
+        matBody = TMaterialize[TUOpAdd[varTerm, varTerm]];
+        THeapSet[lamLoc, matBody];
+        lam = THVMLink`Private`packTerm[0, $TagLAM, 0, lamLoc];
+        t1 = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+        (* APP-LAM beta is destructive: it SUB-marks heap[lamLoc].
+           This asserts the APP works and the program cache size
+           stayed at 1 for the body (no per-APP fresh kernel). *)
+        r1 = TWnf[TApp[lam, t1]];
+        kernels = TKernelCount[] - 1;
+        programs = TKernelProgramCacheSize[];
+        {Normal @ TTensorData[r1], kernels, programs}
+    ],
+    {{2., 4., 6.}, 1, 1},
+    TestID -> "lam-shape/single-kernel-from-materialized-body"
 ]
