@@ -311,7 +311,7 @@ static u32 boundary_index_for_loc(u64 loc) {
 static u32 input_slot_dedup(KernelEntry *ke, u32 tid, Term term) {
   for (u32 i = 0; i < ke->n_inputs; i++)
     if (ke->input_tids[i] == tid && ke->input_terms[i] == term) return i;
-  if (ke->n_inputs >= KERNEL_MAX_INPUT) return 0xFFFFFFFFu;
+  kernel_inputs_reserve(ke, ke->n_inputs + 1);
   u32 slot = ke->n_inputs++;
   ke->input_tids   [slot] = tid;
   ke->input_dtypes [slot] = TENS[tid].dtype;
@@ -375,7 +375,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   }
 
   if (op == UOP_CONST) {
-    if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
+    kernel_program_reserve(ke, ke->n_ops + 1);
     Term num = heap_read(loc);
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
@@ -390,7 +390,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   if (uop_is_unary_elementwise(op) || op == UOP_LOAD) {
     u32 src_idx = visit(heap_read(loc), ke, root_loc);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-    if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
+    kernel_program_reserve(ke, ke->n_ops + 1);
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
     p->opcode = (u8)op;
@@ -406,7 +406,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     if (li == VISIT_BAIL) return VISIT_BAIL;
     u32 ri = visit(heap_read(loc + 1), ke, root_loc);
     if (ri == VISIT_BAIL) return VISIT_BAIL;
-    if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
+    kernel_program_reserve(ke, ke->n_ops + 1);
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
     p->opcode = (u8)op;
@@ -444,7 +444,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     // shapes, populate the metadata cpu_op_<op> + Metal shaders need.
     u32 src_idx = visit(heap_read(loc), ke, root_loc);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-    if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
+    kernel_program_reserve(ke, ke->n_ops + 1);
     Shape src_shape = {0};
     if (!term_shape_in(heap_read(loc), 0, &src_shape)) return VISIT_BAIL;
     Shape out_shape = {0};
@@ -486,7 +486,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   if (op == UOP_PAD) {
     u32 src_idx = visit(heap_read(loc), ke, root_loc);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-    if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
+    kernel_program_reserve(ke, ke->n_ops + 1);
     // Source shape: from the PAD's source term (TenDesc lookup).
     Shape src_shape = {0};
     if (!term_shape_in(heap_read(loc), 0, &src_shape)) return VISIT_BAIL;
@@ -524,7 +524,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   if (op == UOP_REDUCE && loc == root_loc) {
     u32 src_idx = visit(heap_read(loc), ke, root_loc);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
-    if (ke->n_ops >= KPROG_MAX_OPS) return VISIT_BAIL;
+    kernel_program_reserve(ke, ke->n_ops + 1);
     u32 kind = (u32)term_val(heap_read(loc + 1));
     u32 axis = (u32)term_val(heap_read(loc + 2));
     // arg encoding (cpu_op_reduce / Metal reduce shader):
@@ -756,6 +756,12 @@ fn Term thvm_materialize(Term term) {
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     Term k = emit_kernel_for_boundary(i);
     if (k == 0) {
+      // Rewind KERNELS_NEXT, freeing per-kernel heap arrays for the
+      // kernels emitted in this attempt (each kernel_alloc grew the
+      // input/program arrays via realloc; without this loop they'd
+      // leak).
+      for (u32 r = kernels_at_start; r < KERNELS_NEXT; r++)
+        kernel_free_arrays(&KERNELS[r]);
       KERNELS_NEXT = kernels_at_start;
       TENS_NEXT    = tens_at_start;
       return term;

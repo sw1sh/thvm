@@ -883,15 +883,37 @@ VerificationTest[
     TestID -> "grad/higher-order-vec-a4-third-edge"
 ]
 
-(* Known limitation:
-   TGrad[...]^k of a^N where k + (#MUL nodes in y) exceeds ~7
-   (e.g. a^4 at 4th order, a^5 at 3rd order) leaves a stuck regular
-   TAG_DP1 inside the outer UOP_ADD.  The cell body is a chain-rule
-   sub-cell that wnf-from-inside-the-chain-rule could in principle
-   drive, but doing so introduces re-entrance issues with the
-   shared wnf stack (tried; broke a^2 second-order).  Practical
-   workaround: TRealize between rounds (loses symbolic structure
-   but produces a fresh TEN that the next TGrad differentiates
-   trivially).  Resolving this properly would need either a
-   reentrant wnf or restructuring chain-rule output to avoid
-   nesting regular DP wrappers. *)
+(* === Deep higher-order (was known-limited at depth 3 before
+   KernelEntry switched to dynamic input/program arrays).  These
+   used to overflow KERNEL_MAX_INPUT=64 in materialize. *)
+
+(* d^4(a^4)/da^4 vector = 24 (constant), at any a. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0, 3.0}, "Real32"];
+    y = TUOpMul[TUOpMul[TUOpMul[a, a], a], a];   (* a^4 *)
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[TGrad[TGrad[y, a, seed], a, seed], a, seed], a, seed],
+    {24.0, 24.0},
+    TestID -> "grad/higher-order-vec-a4-fourth"
+]
+
+(* d^4(a^5)/da^4 = 5! a = 120a.  Scalar a=2 -> 240. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0}, "Real32"];
+    y = TUOpMul[TUOpMul[TUOpMul[TUOpMul[a, a], a], a], a];   (* a^5 *)
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[TGrad[TGrad[y, a], a], a], a],
+    {240.0},
+    TestID -> "grad/higher-order-scalar-a5-fourth"
+]
+
+(* d^6(a^6)/da^6 = 720.  Scalar; constant. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.5}, "Real32"];
+    y = TUOpMul[TUOpMul[TUOpMul[TUOpMul[TUOpMul[a, a], a], a], a], a];   (* a^6 *)
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[TGrad[TGrad[TGrad[TGrad[y, a], a], a], a], a], a],
+    {720.0},
+    TestID -> "grad/higher-order-scalar-a6-sixth"
+]

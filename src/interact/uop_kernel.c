@@ -26,7 +26,10 @@ fn void kernel_fire_by_id(u32 kid) {
   // should have substituted the binder and term_resolve walks the
   // SUB-bit chain to reach a TAG_TEN.  If we still don't see a
   // concrete TEN, the kernel can't fire -- bail.
-  u32 resolved_tids[KERNEL_MAX_INPUT];
+  // Sized to ke->n_inputs (KERNEL_MAX_INPUT is now a 1M sanity bound,
+  // not a typical size, so a static [KERNEL_MAX_INPUT] would blow
+  // the stack).
+  u32 resolved_tids[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
     if (tid == 0 && ke->input_terms[i] != 0) {
@@ -53,7 +56,7 @@ fn void kernel_fire_by_id(u32 kid) {
   }
 
   // Resolve concrete buffer ids now that all upstream outputs are filled.
-  u32 in_buf_ids[KERNEL_MAX_INPUT];
+  u32 in_buf_ids[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
     in_buf_ids[i] = TENS[resolved_tids[i]].buf_id;
   }

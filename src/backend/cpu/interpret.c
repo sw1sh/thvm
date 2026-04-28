@@ -17,8 +17,15 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // with stride=0 broadcast) get pre-materialized into temp
   // contiguous buffers via view_strided_index so per-op kernels
   // can stay flat-buffer-simple.
-  void *in_ptrs  [KERNEL_MAX_INPUT];
-  void *temp_bufs[KERNEL_MAX_INPUT] = {0};
+  // Dynamically sized to ke->n_inputs (was static [KERNEL_MAX_INPUT]
+  // when that was a small fixed cap; now KernelEntry's input arrays
+  // are heap-grown so we mirror that here via stack-malloc).
+  u32   n_inputs = ke->n_inputs;
+  void *in_ptrs_buf  [n_inputs ? n_inputs : 1];
+  void *temp_bufs_buf[n_inputs ? n_inputs : 1];
+  void **in_ptrs   = in_ptrs_buf;
+  void **temp_bufs = temp_bufs_buf;
+  for (u32 i = 0; i < n_inputs; i++) temp_bufs[i] = NULL;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
     if (tid != 0 && tid < TENS_NEXT && !TENS[tid].view.contiguous) {
@@ -41,10 +48,20 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 
   // Allocate one scratch slot per program op.  The last op writes
   // into the real output buffer; all earlier ops write into their
-  // own f32/i32 scratch of the right size.
-  void *regs  [KPROG_MAX_OPS] = {0};
-  u64   rbytes[KPROG_MAX_OPS] = {0};
-  u32   rsize [KPROG_MAX_OPS] = {0};
+  // own f32/i32 scratch of the right size.  Sized to ke->n_ops
+  // (was static [KPROG_MAX_OPS] when that was a small fixed cap).
+  u32   n_ops_local = ke->n_ops;
+  void *regs_buf  [n_ops_local ? n_ops_local : 1];
+  u64   rbytes_buf[n_ops_local ? n_ops_local : 1];
+  u32   rsize_buf [n_ops_local ? n_ops_local : 1];
+  void **regs   = regs_buf;
+  u64   *rbytes = rbytes_buf;
+  u32   *rsize  = rsize_buf;
+  for (u32 i = 0; i < n_ops_local; i++) {
+    regs  [i] = NULL;
+    rbytes[i] = 0;
+    rsize [i] = 0;
+  }
 
   int rc = 0;
   for (u32 step = 0; step < ke->n_ops; step++) {

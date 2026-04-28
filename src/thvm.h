@@ -219,11 +219,13 @@ typedef u64 Term;
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
 #define ALO_STATE_CAP (1ULL << 16)  // ALO substitution-chain entries.
 #define MAX_DIM      8              // max tensor rank
-#define KPROG_MAX_OPS    256        // max ops per kernel program
+#define KPROG_INIT_OPS   8          // initial program capacity (grows on demand)
+#define KPROG_MAX_OPS    (1ULL<<20) // hard sanity bound (1M ops/kernel)
                                     // (Conv2D Fold-add chains run ~5 ops
                                     // per partial * kh*kw partials + adds;
                                     // 5x5 conv backward = ~150 ops)
-#define KERNEL_MAX_INPUT 64         // max input tensors per kernel
+#define KERNEL_INIT_INPUT 8         // initial input-arrays capacity (grows on demand)
+#define KERNEL_MAX_INPUT  (1ULL<<20) // hard sanity bound (1M inputs/kernel)
                                     // (Conv2D fuses 2*kh*kw input/weight
                                     // tids into one kernel; 64 covers up
                                     // to 5x5 with headroom)
@@ -323,24 +325,31 @@ typedef struct {
 } KProgOp;
 
 typedef struct KernelEntry {
+  // Input-tensor arrays: dynamically grown.  inputs_cap is the
+  // allocated length; n_inputs is the number of slots actually used.
+  // Use kernel_inputs_reserve() before writing past n_inputs.
   u32       n_inputs;
-  u32       input_tids   [KERNEL_MAX_INPUT];  // TenDesc id, or 0 if symbolic
-  u32       input_dtypes [KERNEL_MAX_INPUT];
-  u32       input_numels [KERNEL_MAX_INPUT];
-
+  u32       inputs_cap;
+  u32      *input_tids;            // TenDesc id, or 0 if symbolic
+  u32      *input_dtypes;
+  u32      *input_numels;
   // For inputs that aren't statically a TenDesc (e.g., a free TAG_VAR
   // that gets bound to a TEN at fire time via APP-LAM beta), we
   // store the symbolic Term value here.  kernel_fire_by_id resolves
   // each non-zero entry through term_resolve before reading buffers.
-  Term      input_terms  [KERNEL_MAX_INPUT];
+  Term     *input_terms;
 
   u32       output_tid;            // TenDesc id we write to
   u32       output_dtype;
   Shape     output_shape;
   u32       output_numel;
 
+  // Program: dynamically grown.  ops_cap is the allocated length;
+  // n_ops is the count actually used.  Use kernel_program_reserve()
+  // before writing past n_ops.
   u32       n_ops;
-  KProgOp   program[KPROG_MAX_OPS];
+  u32       ops_cap;
+  KProgOp  *program;
 
   // Original root UOP term that this kernel was built from.  The
   // walker rewrites parent cells to UOP_KERNEL but leaves the

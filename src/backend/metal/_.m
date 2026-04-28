@@ -355,8 +355,12 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // cpu_interpret's strided pre-mat loop).  For each input whose
   // TenDesc carries a non-contiguous View, allocate a temp Metal
   // buffer and populate it via host-side strided index walk.
-  u32 effective_buf_ids[KERNEL_MAX_INPUT];
-  u32 temp_buf_ids     [KERNEL_MAX_INPUT] = {0};
+  // Sized to ke->n_inputs (KERNEL_MAX_INPUT is now a sanity bound,
+  // not a typical size).  ke->n_inputs == 0 is unusual but possible
+  // for a no-arg kernel (e.g. CONST root); the +1 keeps VLA legal.
+  u32 effective_buf_ids[ke->n_inputs ? ke->n_inputs : 1];
+  u32 temp_buf_ids     [ke->n_inputs ? ke->n_inputs : 1];
+  for (u32 i = 0; i < ke->n_inputs; i++) temp_buf_ids[i] = 0;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 ib = in_buf_ids[i];
     if (ib == 0 || ib >= METAL_BUFS_NEXT) { return -1; }
@@ -400,7 +404,10 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // buffers across encoders in the same command buffer, so each
   // encoder naturally sees the previous encoder's writes without an
   // explicit barrier.
-  u32 inter_buf_ids[KPROG_MAX_OPS] = {0};
+  // Sized to ke->n_ops (KPROG_MAX_OPS is now a sanity bound, not a
+  // typical size).  ke->n_ops > 0 since we early-bailed when 0.
+  u32 inter_buf_ids[ke->n_ops];
+  for (u32 i = 0; i < ke->n_ops; i++) inter_buf_ids[i] = 0;
   id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
   int rc = 0;
 
