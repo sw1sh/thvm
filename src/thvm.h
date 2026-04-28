@@ -67,15 +67,6 @@ typedef u64 Term;
 #define DUP_LABEL_MASK (0x1FFFFU)            // bits 0..16
 #define VAL_MASK  0x3FFFFFFFFFULL
 
-// Flag on TAG_LAM's ext: the body is to be JIT-compiled on first
-// APP-LAM beta.  The bound variable's shape is inferred from the
-// argument's shape; the body is materialized into a UOP_KERNEL
-// with the var as a symbolic input slot, then beta proceeds (the
-// SUB substitution at lam_loc routes the kernel's input through
-// the actual argument).  Used by `TLamMaterialized` -- shape-free
-// at construction time, compiles on demand.
-#define LAM_JIT_FLAG   (1U << 0)
-
 // === Tags (minimal initial set) ===
 // Order chosen so the hot interaction tags sit in the low byte.
 

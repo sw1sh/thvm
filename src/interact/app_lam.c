@@ -7,29 +7,32 @@
 // binder's heap cell (so a future VAR enter on that loc picks it up
 // and clears the SUB flag), then continue reducing the body.
 //
-// LAM_JIT_FLAG case: the body is currently a UOP graph with TVARs
-// of unknown shape.  Now that we have `arg`, we know the bound
-// var's shape -- register it in the lam_shape table, materialize
-// the body into a UOP_KERNEL, and then proceed with the standard
-// beta.  The kernel references TVAR(loc) as its input slot; the
-// SUB substitution we install routes subsequent reads through
-// `arg`.  Idempotent: if the body's already a UOP_KERNEL (e.g. on
-// a re-entry path), we skip the JIT step.
+// JIT-style: when the lambda body is a UOP graph (compute) and
+// the argument carries a shape (TEN or shape-inferable UOP),
+// register the bound var's shape and materialize the body into
+// a UOP_KERNEL before the standard beta.  The kernel's TVAR
+// input slot resolves through SUB to `arg` at fire time.
+//
+// Why this is safe to do for every lambda (no opt-in flag):
+//   - Bodies that aren't TAG_UOP (TLam, TApp, TMat, ...) are
+//     skipped -- materialize on a structural lambda is a no-op
+//     anyway.
+//   - Already-compiled bodies (TAG_UOP + UOP_KERNEL) skip the
+//     re-materialize step.
+//   - When `arg` carries no shape (TLam, TNum, TEra, ...) we
+//     fall through to plain beta unchanged.
+//   - The kernel-program hash-cons cache (c83c29b) deduplicates
+//     identical programs across iters of a recursive lambda, so
+//     the per-instance materialize cost is bounded.
 fn Term interact_app_lam(Term lam, Term arg) {
   ITRS++;
   u64  loc  = term_val(lam);
   Term body = heap_read(loc);
-  if ((term_ext(lam) & LAM_JIT_FLAG) &&
-      !(term_tag(body) == TAG_UOP && term_ext(body) == UOP_KERNEL)) {
+  if (term_tag(body) == TAG_UOP && term_ext(body) != UOP_KERNEL) {
     Shape s;
     if (term_shape_in(arg, 0, &s) && s.ndim > 0) {
       lam_shape_set(loc, &s);
-      Term mat = thvm_materialize(body);
-      // Re-read in case materialize ran during the call: heap[loc]
-      // might still hold the original body Term (it usually does;
-      // materialize writes the kernel into a fresh cell and returns
-      // it).  We replace heap[loc] below via heap_subst_var.
-      body = mat;
+      body = thvm_materialize(body);
     }
   }
   heap_subst_var(loc, arg);

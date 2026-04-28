@@ -135,15 +135,15 @@ VerificationTest[
     TestID -> "lam-shape/materialize-body-then-apply-fires-correctly"
 ]
 
-(* TLamMaterialized: JIT-style lambda.  Body stays
-   unmaterialized at construction; first TApp infers `x`'s shape
-   from the argument and materializes the body in place.  No
-   shape spelled out by the user. *)
+(* Plain TLam is JIT-aware: when the body is a UOP graph and the
+   first TApp's argument has a shape, APP-LAM materializes the
+   body before the standard beta.  No flag, no separate
+   constructor -- TLam itself does the right thing. *)
 
 VerificationTest[
     TInit[];
     Module[{lam, kernelsBefore, ten, result, kernelsAfter, programs},
-        lam = TLamMaterialized[w, TUOpAdd[w, w]];
+        lam = TLam[w, TUOpAdd[w, w]];
         kernelsBefore = TKernelCount[] - 1;
         ten = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
         result = TWnf[TApp[lam, ten]];
@@ -154,23 +154,43 @@ VerificationTest[
         {kernelsBefore, Normal @ TTensorData[result], kernelsAfter, programs}
     ],
     {0, {2., 4., 6.}, 1, 1},
-    TestID -> "lam-shape/tlam-materialized-jit-on-first-apply"
+    TestID -> "lam-shape/tlam-jit-on-first-apply"
 ]
 
-(* Different argument shapes: the same JIT lambda applied to a
-   {5}-vector compiles a fresh kernel with that input shape (each
-   instance materializes once for its own arg.shape). *)
+(* Different argument shapes: the same TLam applied to a
+   {5}-vector compiles a fresh kernel with that input shape
+   (each instance materializes once for its own arg.shape). *)
 
 VerificationTest[
     TInit[];
     Module[{lam5, ten5, result},
-        lam5 = TLamMaterialized[w, TUOpAdd[w, w]];
+        lam5 = TLam[w, TUOpAdd[w, w]];
         ten5 = TTensorCreate @ NumericArray[{10., 20., 30., 40., 50.}, "Real32"];
         result = TWnf[TApp[lam5, ten5]];
         Normal @ TTensorData[result]
     ],
     {20., 40., 60., 80., 100.},
-    TestID -> "lam-shape/tlam-materialized-shape-inferred-from-arg"
+    TestID -> "lam-shape/tlam-shape-inferred-from-arg"
+]
+
+(* Non-UOP body: a curried lambda's body is another TLam, not a
+   UOP graph -- the JIT step is skipped (materialize would be a
+   no-op).  Plain beta substitution proceeds. *)
+
+VerificationTest[
+    TInit[];
+    Module[{lam, ten, partial, kernelsAfterPartial},
+        lam = TLam[x, TLam[y, TUOpAdd[x, y]]];
+        ten = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+        partial = TWnf[TApp[lam, ten]];
+        kernelsAfterPartial = TKernelCount[] - 1;
+        (* Outer beta substitutes x, returns the inner lambda;
+           no kernel was emitted because the outer body wasn't
+           a UOP graph. *)
+        {TTagName[TTermTag[partial]], kernelsAfterPartial}
+    ],
+    {"LAM", 0},
+    TestID -> "lam-shape/curried-lambda-skips-jit-on-outer-app"
 ]
 
 (* Two distinct APPs to the same materialized lambda body should

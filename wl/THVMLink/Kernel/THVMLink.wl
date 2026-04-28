@@ -50,9 +50,8 @@ TTermTree::usage  = "TTermTree[term] = ExpressionTree[TTermExpr[term]] -- the sa
 TFreshLabel::usage = "TFreshLabel[] returns the next integer from a monotonic SUP/DUP label counter, then bumps it.  Reset by TReset[].";
 TEra::usage       = "TEra[] constructs an eraser term.";
 TVarFor::usage    = "TVarFor[lamLoc] constructs a VAR pointing at a binder loc.";
-TLam::usage       = "TLam[x, body] constructs a lambda; HoldAll, so `x` is the binder symbol and `body` is the lambda body referring to it (e.g. TLam[w, TUOpAdd[w, w]]).";
-TLamShape::usage  = "TLamShape[shape_List, x, body] constructs a lambda whose bound variable carries a shape annotation; e.g. TLamShape[{3}, w, TUOpAdd[w, w]].  The annotation is consulted by term_shape_in (and downstream by materialize) while the bound variable is still pre-substitution -- letting the body compile against `KSRC_AS_INPUT(slot)` of the annotated shape rather than waiting for APP-LAM beta.";
-TLamMaterialized::usage = "TLamMaterialized[x, body] is a JIT-style lambda: the body stays unmaterialized at construction, and the first TApp[lam, arg] infers x's shape from `arg`, materializes the body into a UOP_KERNEL with the TVAR as a symbolic input slot, then substitutes arg.  No need to spell out the shape -- inferred from the argument tensor.";
+TLam::usage       = "TLam[x, body] constructs a lambda; HoldAll, so `x` is the binder symbol and `body` is the lambda body referring to it (e.g. TLam[w, TUOpAdd[w, w]]).  When the body is a UOP graph and the first TApp's argument carries a shape, the APP-LAM interaction JIT-materializes the body into a UOP_KERNEL with the bound var as a symbolic input slot -- compile-once, dispatch with each subsequent arg.  Bodies that aren't UOP graphs (e.g. curried lambdas, TIfZero) skip the JIT step.";
+TLamShape::usage  = "TLamShape[shape_List, x, body] constructs a lambda whose bound variable carries an explicit shape annotation in the lam_shape side table.  Useful when the body needs to materialize BEFORE any TApp (e.g. for inspection / direct TMaterialize on the body); for the common case TLam alone is enough since the JIT path infers the shape from the first applied argument.";
 TApp::usage       = "TApp[fun, arg] constructs an application.";
 TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
 TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
@@ -677,49 +676,32 @@ TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg]
 TSup[a_, b_]                          := TSup[TFreshLabel[], a, b]
 TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]
 
+(* TLam is JIT-aware by default: when the body is a UOP graph
+   (compute) and the argument carries a shape (TEN), the APP-LAM
+   interaction registers the bound var's shape, materializes the
+   body into a UOP_KERNEL, and only then proceeds with the
+   standard beta.  The kernel's TVAR input slot resolves through
+   SUB to `arg` at fire time.  Bodies that aren't UOP graphs
+   (curried lambdas, TIfZero, etc.) skip materialize -- it'd be
+   a no-op anyway.  See src/interact/app_lam.c. *)
 SetAttributes[TLam, HoldAll]
 TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     THeapSet[loc, Function[x, body][TVarFor[loc]]];
     packTerm[0, $TagLAM, 0, loc]
 ]
 
-(* TLamShape[shape_list, x, body] -- a shape-annotated lambda.
-   The bound variable's shape is registered in the side table
-   keyed by the LAM's heap loc.  After APP-LAM beta the
-   substituted argument carries its own shape (via TEN's view);
-   the annotation is consulted only while the bound variable is
-   still un-substituted (e.g. when materialize is asked to
-   compile the body before any APP-LAM has fired).
-
-   `shape` is a list of integers (e.g. {3} for a vector-of-3).
-   Register before constructing the body so any inspection of
-   the body's TVAR resolves the shape immediately. *)
+(* TLamShape[shape_list, x, body] -- explicit shape annotation
+   for the bound variable.  Useful when the body needs to
+   materialize BEFORE any TApp (e.g. inspection / direct
+   TMaterialize on the body), or when the argument's shape can't
+   be inferred at first APP.  Most callers don't need this; just
+   use TLam and the JIT path will infer the shape from the
+   first applied argument. *)
 SetAttributes[TLamShape, HoldAll]
 TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     THVMLink`Private`$lamShapeSetFn[loc, shape];
     THeapSet[loc, Function[x, body][TVarFor[loc]]];
     packTerm[0, $TagLAM, 0, loc]
-]
-
-(* TLamMaterialized[x, body] -- JIT-style lambda.  At construction
-   time the body is stored UNMATERIALIZED (a UOp graph with TVAR
-   references to `x`).  On the first `TApp[lam, arg]`, the
-   APP-LAM interaction infers `x`'s shape from `arg`, registers
-   it in the lam_shape table, materializes the body into a
-   UOP_KERNEL with the TVAR as a symbolic input slot, then
-   substitutes `arg` so the kernel reads through SUB.  Subsequent
-   structurally-identical lambdas (e.g. each iter of a recursive
-   REF) materialize fresh per-instance, but the kernel-program
-   hash-cons cache deduplicates the program template across them.
-
-   Compile-once-dispatch-many without making the user spell out
-   the shape -- it's inferred from the argument tensor like
-   tinygrad's @TinyJit annotation. *)
-SetAttributes[TLamMaterialized, HoldAll]
-TLamMaterialized[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
-    THeapSet[loc, Function[x, body][TVarFor[loc]]];
-    (* LAM_JIT_FLAG = 1 << 0 in src/thvm.h *)
-    packTerm[0, $TagLAM, 1, loc]
 ]
 
 (* Sugar: TTerm[ctx, id][arg] == TApp[TTerm[ctx, id], arg] lets the
