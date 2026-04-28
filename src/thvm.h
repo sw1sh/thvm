@@ -533,6 +533,16 @@ fn Term heap_take(u64 loc);                                 // read + zero
 fn void heap_subst_var(u64 loc, Term value);
 fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1); // pair subst
 
+// === gc/ === (Cheney semi-space copying GC; defined in heap/collect.c)
+fn void gc_init(u64 space_words);
+fn void gc_reset(void);
+fn int  gc_enabled(void);
+fn u64  gc_from_start(void);
+fn u64  gc_from_end(void);
+fn u64  gc_count(void);
+fn void gc_collect(Term *roots, u32 n_roots);
+fn Term gc_collect_with(Term result);
+
 // === book heap (static templates) ===
 fn u64  book_alloc(u64 size);
 fn Term book_read (u64 loc);

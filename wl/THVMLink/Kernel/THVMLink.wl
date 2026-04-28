@@ -30,6 +30,8 @@ THeapPos::usage   = "THeapPos[] returns the next free heap location.";
 THeapAlloc::usage = "THeapAlloc[size] reserves `size` consecutive cells; returns the base loc.";
 THeapRead::usage  = "THeapRead[loc] returns the Term at heap[loc].";
 THeapSet::usage   = "THeapSet[loc, term] writes `term` to heap[loc].";
+TGCCollect::usage = "TGCCollect[] runs a Cheney semi-space collection of the dyn heap; returns the new HEAP_NEXT (live cell count).";
+TGCCount::usage   = "TGCCount[] returns the number of GC cycles since thvm_init.";
 THeap::usage      = "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/heap_graph.md.";
 THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram Graph.  THeapGraph[term] also seeds discovery with `term` so heapless compounds held only by the WL caller appear.  THeapGraph[{t1, t2, ...}] seeds with several.  See docs/heap_graph.md.";
 THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.  Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc.";
@@ -237,6 +239,8 @@ $heapPosFn   := $heapPosFn   = load["thvm_wl_heap_pos",   {},                   
 $heapAllocFn := $heapAllocFn = load["thvm_wl_heap_alloc", {Integer},                Integer];
 $heapReadFn  := $heapReadFn  = load["thvm_wl_heap_read",  {Integer},                Integer];
 $heapSetFn   := $heapSetFn   = load["thvm_wl_heap_set",   {Integer, Integer},       Integer];
+$gcCollectFn := $gcCollectFn = load["thvm_wl_gc_collect", {},                       Integer];
+$gcCountFn   := $gcCountFn   = load["thvm_wl_gc_count",   {},                       Integer];
 
 $wnfFn          := $wnfFn          = load["thvm_wl_wnf",            {Integer},          Integer];
 $wnfNFn         := $wnfNFn         = load["thvm_wl_wnf_n",          {Integer, Integer}, Integer];
@@ -454,6 +458,8 @@ THeapPos[]                       := (ensureInit[]; $heapPosFn[])
 THeapAlloc[size_Integer]         := (ensureInit[]; $heapAllocFn[size])
 THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
+TGCCollect[]                     := (ensureInit[]; $gcCollectFn[])
+TGCCount[]                       := (ensureInit[]; $gcCountFn[])
 
 TWnf[t_]                       := Module[{r},
     ensureInit[];

@@ -82,5 +82,14 @@ fn Term thvm_realize(Term expr) {
   cpu_buf_pool_rollback_with_preserve(wm);
   cpu_buf_clear_preserved(wm);
   cpu_buf_clear_freeable(wm);
+
+  // Note: gc_collect is NOT auto-triggered here.  WL holds cached
+  // raw Term integers inside its TTerm wrappers (created at the
+  // last bridge call); they aren't refreshed by the C-side pin
+  // table remap, so a mid-realize evacuation would leave any
+  // un-passed WL TTerm pointing at stale loc.  Callers who want
+  // compaction call TGCCollect[] explicitly after dropping or
+  // re-fetching their TTerm references; the test in
+  // wl/THVMLink/Tests/heap_compact.wlt exercises this contract.
   return res;
 }

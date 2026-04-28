@@ -269,6 +269,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // composes gc1 + gc2 into the thvm_realize integration.
 #include "schedule/gc_mark.c"
 
+// Cheney-style copying GC for the dyn heap.  Two semi-spaces; live
+// cells get evacuated on gc_collect.  Triggered from thvm_realize
+// once the per-step heap watermark crosses the threshold.
+#include "heap/collect.c"
+
 // thvm_realize: materialize + wnf + per-step buffer pool boundary
 // (sub-item b of the per-step buffer pool arc).  Lives here
 // because it depends on wnf + thvm_materialize + cpu pool helpers.
@@ -320,6 +325,10 @@ void thvm_init(void) {
   lam_shape_reset();         // LAM-bound-var shape table; stale
                              // entries reference invalid lam_loc.
   extern_pin_clear();   // drop any leftover pins from a prior session
+  // Cheney semi-spaces: split HEAP_CAP in half.  heap_alloc bumps
+  // within the active from-space; gc_collect evacuates live cells
+  // into to-space and swaps when triggered from thvm_realize.
+  gc_init(HEAP_CAP / 2);
   // Backend selection: THVM_BACKEND=metal picks Metal as the default
   // device for newly allocated tensors.  Per-tensor backends are still
   // stored on TenDesc.backend, so tensors created in a future session
@@ -349,6 +358,7 @@ void thvm_free(void) {
   free(BOOK_HEAP);       BOOK_HEAP       = NULL;
   free(ALO_STATES);      ALO_STATES      = NULL;
   free(CPU_BUFS);        CPU_BUFS        = NULL;
+  gc_reset();
   HEAP_NEXT       = 0;
   WNF_S_POS       = 0;
   WNF_LAST_STACK_LEN = 0;

@@ -188,6 +188,27 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_pos(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Manually trigger a Cheney collection.  Returns the new HEAP_NEXT
+// (= live cell count after evacuation).  Roots beyond the side
+// tables (extern pins, DEFS, KernelEntries, WNF_LAST_STACK) are
+// collected internally; this entry point is for tests + diagnostics.
+EXTERN_C DLLEXPORT int thvm_wl_gc_collect(WolframLibraryData libData,
+                                          mint argc, MArgument *args,
+                                          MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  gc_collect(NULL, 0);
+  MArgument_setInteger(res, (mint)HEAP_NEXT);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_gc_count(WolframLibraryData libData,
+                                        mint argc, MArgument *args,
+                                        MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)gc_count());
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_heap_alloc(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
   (void)libData; (void)argc;
