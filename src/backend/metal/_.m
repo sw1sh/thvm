@@ -285,37 +285,76 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
 //                                       1 = broadcast in shader)
 // Threads = ke->program[0].numel; threadgroup size capped at the
 // pipeline's maxTotalThreadsPerThreadgroup.
-static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
-  if (ke->n_ops == 0) return -1;
-  // The main op is the LAST op in the program (g2b convention:
-  // visit() emits the root op last and references inputs directly
-  // via KSRC_AS_INPUT instead of a LOAD prefix).  Metal currently
-  // dispatches single-op kernels only; for multi-op fused kernels
-  // (CPU-only path) Metal would still need a fused pipeline -- out
-  // of scope for g2c1.
-  KProgOp *p = &ke->program[ke->n_ops - 1];
-
+// Encode one op into `enc`: bind out, arg, srcs, numels, plus any
+// movement-op shape info.  src_bufs[s] / src_numels[s] resolve
+// already via the caller; this helper just walks the binding slots.
+// Returns 0 on success, -1 if the pipeline state is missing.
+// __unsafe_unretained on the buffer array avoids ARC's writeback
+// for inout pointer-to-id parameters (we don't write back).
+static int metal_encode_op(id<MTLComputeCommandEncoder> enc,
+                            KProgOp *p,
+                            __unsafe_unretained id<MTLBuffer> *src_bufs,
+                            u32 *src_numels,
+                            id<MTLBuffer> outBuf) {
   id<MTLComputePipelineState> pso = metal_pipeline_for(p->opcode);
   if (pso == nil) {
     fprintf(stderr, "thvm: metal dispatch -- no pipeline for opcode %u\n", p->opcode);
     return -1;
   }
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:outBuf offset:0 atIndex:0];
+  [enc setBytes:&p->arg length:sizeof(p->arg) atIndex:1];
+  for (u32 i = 0; i < p->n_src; i++) {
+    [enc setBuffer:src_bufs[i] offset:0 atIndex:(2 + i)];
+  }
+  for (u32 i = 0; i < p->n_src; i++) {
+    u32 nm = src_numels[i];
+    [enc setBytes:&nm length:sizeof(nm) atIndex:(2 + p->n_src + i)];
+  }
+  // Movement-op shape info: pack src0_ndim/src0_dims and out_ndim/
+  // out_dims as uint arrays of length 1+MAX_DIM so the shader can
+  // walk axes without re-deriving shape from numels.
+  if (p->opcode == UOP_EXPAND || p->opcode == UOP_FLIP
+      || p->opcode == UOP_PAD || p->opcode == UOP_PERMUTE
+      || p->opcode == UOP_SHRINK) {
+    u32 src0[1 + MAX_DIM] = {0};
+    u32 outd[1 + MAX_DIM] = {0};
+    src0[0] = p->src0_ndim;
+    outd[0] = p->out_ndim;
+    for (u32 i = 0; i < MAX_DIM; i++) src0[1 + i] = p->src0_dims[i];
+    for (u32 i = 0; i < MAX_DIM; i++) outd[1 + i] = p->out_dims [i];
+    [enc setBytes:src0 length:sizeof(src0) atIndex:(2 + 2 * p->n_src)];
+    [enc setBytes:outd length:sizeof(outd) atIndex:(2 + 2 * p->n_src + 1)];
+  }
+  if (p->opcode == UOP_PAD || p->opcode == UOP_SHRINK) {
+    u32 padw[2 * MAX_DIM] = {0};
+    for (u32 i = 0; i < 2 * MAX_DIM; i++) padw[i] = p->pad_widths[i];
+    [enc setBytes:padw length:sizeof(padw) atIndex:(2 + 2 * p->n_src + 2)];
+  }
+  if (p->opcode == UOP_PERMUTE) {
+    u32 perm[MAX_DIM] = {0};
+    for (u32 i = 0; i < MAX_DIM; i++) perm[i] = p->axis_perm[i];
+    [enc setBytes:perm length:sizeof(perm) atIndex:(2 + 2 * p->n_src + 2)];
+  }
+  NSUInteger n = (NSUInteger)p->numel;
+  if (n == 0) n = 1;
+  NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  return 0;
+}
+
+static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
+  if (ke->n_ops == 0) return -1;
   if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
   id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
   if (outBuf == nil) return -1;
 
   // View-aware pre-materialize (the Metal counterpart to
   // cpu_interpret's strided pre-mat loop).  For each input whose
-  // TenDesc carries a non-contiguous View (an f3 view-only alias
-  // from materialize_uop_in_env), allocate a temp Metal buffer of
-  // exactly view.numel*4 bytes, populate it via host-side strided
-  // index walk through view.shape / view.strides / view.offset,
-  // and bind the temp buffer instead of the alias-source buffer
-  // at slot (2 + i).  Frees the temp bufs after waitUntilCompleted.
-  // MTLResourceStorageModeShared keeps the bytes host-readable so
-  // the strided copy can do plain pointer arithmetic with no
-  // additional memcpy out of Metal.
+  // TenDesc carries a non-contiguous View, allocate a temp Metal
+  // buffer and populate it via host-side strided index walk.
   u32 effective_buf_ids[KERNEL_MAX_INPUT];
   u32 temp_buf_ids     [KERNEL_MAX_INPUT] = {0};
   for (u32 i = 0; i < ke->n_inputs; i++) {
@@ -336,7 +375,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       f32 *src = (f32 *)[METAL_BUFS[ib].buf contents];
       f32 *dst = (f32 *)[METAL_BUFS[tmp_id].buf contents];
       for (u32 k = 0; k < numel; k++) {
-        // Inlined view_strided_index (header-free in this .m TU).
         int64_t acc = v->offset;
         u32 rem = k;
         for (i32 axis = (i32)v->shape.ndim - 1; axis >= 0; axis--) {
@@ -355,72 +393,86 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     }
   }
 
-  id<MTLCommandBuffer>         cmd = [METAL_QUEUE commandBuffer];
-  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-  [enc setComputePipelineState:pso];
-  [enc setBuffer:outBuf offset:0 atIndex:0];
-  [enc setBytes:&p->arg length:sizeof(p->arg) atIndex:1];
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 ib = effective_buf_ids[i];
-    [enc setBuffer:METAL_BUFS[ib].buf offset:0 atIndex:(2 + i)];
-  }
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 nm = ke->input_numels[i];
-    [enc setBytes:&nm length:sizeof(nm) atIndex:(2 + ke->n_inputs + i)];
-  }
-  // Movement-op shape info (currently EXPAND only): pack
-  // src0_ndim/src0_dims and out_ndim/out_dims as uint arrays of
-  // length 1+MAX_DIM so the shader can walk axes without re-
-  // deriving shape from numels.  Slot indices live just past the
-  // input + numels block.
-  if (p->opcode == UOP_EXPAND || p->opcode == UOP_FLIP
-      || p->opcode == UOP_PAD || p->opcode == UOP_PERMUTE
-      || p->opcode == UOP_SHRINK) {
-    u32 src0[1 + MAX_DIM] = {0};
-    u32 outd[1 + MAX_DIM] = {0};
-    src0[0] = p->src0_ndim;
-    outd[0] = p->out_ndim;
-    for (u32 i = 0; i < MAX_DIM; i++) src0[1 + i] = p->src0_dims[i];
-    for (u32 i = 0; i < MAX_DIM; i++) outd[1 + i] = p->out_dims [i];
-    [enc setBytes:src0 length:sizeof(src0)
-          atIndex:(2 + 2 * ke->n_inputs)];
-    [enc setBytes:outd length:sizeof(outd)
-          atIndex:(2 + 2 * ke->n_inputs + 1)];
-  }
-  // PAD/SHRINK both need the per-axis widths (u32 widening of
-  // the u8 KProgOp field so the shader can use uint indexing).
-  // Same buffer slot; same layout; semantics differ at the
-  // shader level (PAD reads both b/e to detect pad regions;
-  // SHRINK reads only b_i since e_i = b_i + out_dim_i).
-  if (p->opcode == UOP_PAD || p->opcode == UOP_SHRINK) {
-    u32 padw[2 * MAX_DIM] = {0};
-    for (u32 i = 0; i < 2 * MAX_DIM; i++) padw[i] = p->pad_widths[i];
-    [enc setBytes:padw length:sizeof(padw)
-          atIndex:(2 + 2 * ke->n_inputs + 2)];
-  }
-  // PERMUTE: per-axis source-axis mapping (u32-widened axis_perm).
-  if (p->opcode == UOP_PERMUTE) {
-    u32 perm[MAX_DIM] = {0};
-    for (u32 i = 0; i < MAX_DIM; i++) perm[i] = p->axis_perm[i];
-    [enc setBytes:perm length:sizeof(perm)
-          atIndex:(2 + 2 * ke->n_inputs + 2)];
-  }
-  NSUInteger n = (NSUInteger)p->numel;
-  if (n == 0) n = 1;
-  NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);
-  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
-   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-  [enc endEncoding];
-  [cmd commit];
-  [cmd waitUntilCompleted];
+  // Multi-op driver: mirror cpu_interpret.  Allocate one Metal buf
+  // per intermediate op; final op writes to outBuf.  All ops run
+  // inside a single MTLCommandBuffer with one encoder per op --
+  // Metal hazard-tracks reads/writes of MTLResourceStorageModeShared
+  // buffers across encoders in the same command buffer, so each
+  // encoder naturally sees the previous encoder's writes without an
+  // explicit barrier.
+  u32 inter_buf_ids[KPROG_MAX_OPS] = {0};
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  int rc = 0;
 
-  // Release the per-dispatch pre-mat temp buffers (refcount=1 from
-  // metal_buf_alloc; decref drops to 0 and frees).  Originals (the
-  // alias-source bufs) are untouched.
+  for (u32 step = 0; step < ke->n_ops; step++) {
+    KProgOp *p = &ke->program[step];
+
+    // Skip prefix LOADs (mirror cpu_interpret line 59): when LOAD
+    // appears before the final op, the input buffer is already
+    // bound; downstream ops read it via KSRC_AS_INPUT directly.
+    // The final-position LOAD (when it's the user-intended op via
+    // TUOpLoad) still runs the memcpy kernel.
+    if (p->opcode == UOP_LOAD && step + 1 < ke->n_ops) continue;
+
+    // Resolve this op's src buffers and numels.  KSRC_IS_INPUT(s)
+    // -> kernel input (effective_buf_ids[KSRC_INDEX(s)]); plain
+    // index -> output of earlier op (inter_buf_ids[KSRC_INDEX(s)]).
+    __unsafe_unretained id<MTLBuffer> src_bufs[MAX_UOP_SRC] = {0};
+    u32                                src_numels[MAX_UOP_SRC] = {0};
+    int src_resolve_ok = 1;
+    for (u8 s = 0; s < p->n_src; s++) {
+      u32 raw = p->src[s];
+      u32 idx = KSRC_INDEX(raw);
+      if (KSRC_IS_INPUT(raw)) {
+        if (idx >= ke->n_inputs) { src_resolve_ok = 0; break; }
+        u32 ib = effective_buf_ids[idx];
+        if (ib == 0 || ib >= METAL_BUFS_NEXT) { src_resolve_ok = 0; break; }
+        src_bufs  [s] = METAL_BUFS[ib].buf;
+        src_numels[s] = ke->input_numels[idx];
+      } else {
+        if (idx >= step) { src_resolve_ok = 0; break; }
+        u32 ib = inter_buf_ids[idx];
+        if (ib == 0 || ib >= METAL_BUFS_NEXT) { src_resolve_ok = 0; break; }
+        src_bufs  [s] = METAL_BUFS[ib].buf;
+        src_numels[s] = ke->program[idx].numel;
+      }
+    }
+    if (!src_resolve_ok) { rc = -1; break; }
+
+    // Decide where this op writes: last op -> outBuf; else allocate
+    // a fresh intermediate Metal buffer at p->numel * 4 bytes.
+    id<MTLBuffer> dst_buf;
+    if (step + 1 == ke->n_ops) {
+      dst_buf = outBuf;
+    } else {
+      u32 dst_numel = p->numel ? p->numel : 1;
+      u32 tmp_id = metal_buf_alloc((u64)dst_numel * 4);
+      if (tmp_id == 0) { rc = -1; break; }
+      inter_buf_ids[step] = tmp_id;
+      dst_buf = METAL_BUFS[tmp_id].buf;
+    }
+
+    // New encoder per op; Metal hazard-tracks shared buffer
+    // dependencies across encoders in the same command buffer.
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    int enc_rc = metal_encode_op(enc, p, src_bufs, src_numels, dst_buf);
+    [enc endEncoding];
+    if (enc_rc != 0) { rc = enc_rc; break; }
+  }
+
+  if (rc == 0) {
+    [cmd commit];
+    [cmd waitUntilCompleted];
+  }
+
+  // Cleanup: drop intermediate Metal buffers + view-pre-mat temps.
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    if (inter_buf_ids[i]) metal_buf_decref(inter_buf_ids[i]);
+  }
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
   }
-  return 0;
+  return rc;
 }
 
 Backend METAL_BACKEND = {
