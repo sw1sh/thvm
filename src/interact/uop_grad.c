@@ -245,7 +245,15 @@ fn Term grad_half_const(void) {
 static Term interact_grad_dispatch(Term grad_term) {
   u64  cell_orig = term_val(grad_term);
   Term y         = term_resolve(heap_read(cell_orig + 0));
-  Term gy        = heap_read(cell_orig + 1);
+  // Resolve gy through ALO chains: each lambda iter wraps the
+  // grad cell's children in fresh ALOs (alo_suspend_child), so a
+  // bare heap_read gives back distinct ALO Terms across iters
+  // even when they all force to the same hash-consed CONST seed.
+  // Resolving here lets uop_reshape / uop_expand hit the movement-
+  // op cache, sharing the gy_lifted UOP graph across iters and
+  // collapsing what would otherwise be N identical "ones-at-shape"
+  // kernels into one.
+  Term gy        = term_resolve(heap_read(cell_orig + 1));
   Term target    = heap_read(cell_orig + 2);
 
   u8 y_tag = term_tag(y);
