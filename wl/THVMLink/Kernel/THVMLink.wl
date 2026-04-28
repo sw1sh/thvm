@@ -52,6 +52,7 @@ TEra::usage       = "TEra[] constructs an eraser term.";
 TVarFor::usage    = "TVarFor[lamLoc] constructs a VAR pointing at a binder loc.";
 TLam::usage       = "TLam[x, body] constructs a lambda; HoldAll, so `x` is the binder symbol and `body` is the lambda body referring to it (e.g. TLam[w, TUOpAdd[w, w]]).";
 TLamShape::usage  = "TLamShape[shape_List, x, body] constructs a lambda whose bound variable carries a shape annotation; e.g. TLamShape[{3}, w, TUOpAdd[w, w]].  The annotation is consulted by term_shape_in (and downstream by materialize) while the bound variable is still pre-substitution -- letting the body compile against `KSRC_AS_INPUT(slot)` of the annotated shape rather than waiting for APP-LAM beta.";
+TLamMaterialized::usage = "TLamMaterialized[shape_List, x, body] is a shape-annotated lambda whose body is TMaterialize'd into a UOP_KERNEL at construction time.  Each TApp[lam, arg] re-fires the same cached kernel with `arg` bound to the input slot -- compile once, dispatch many.";
 TApp::usage       = "TApp[fun, arg] constructs an application.";
 TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
 TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
@@ -697,6 +698,25 @@ SetAttributes[TLamShape, HoldAll]
 TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     THVMLink`Private`$lamShapeSetFn[loc, shape];
     THeapSet[loc, Function[x, body][TVarFor[loc]]];
+    packTerm[0, $TagLAM, 0, loc]
+]
+
+(* TLamMaterialized[shape, x, body] -- a shape-annotated lambda
+   whose body is COMPILED (TMaterialize'd) into a UOP_KERNEL
+   before the lambda is sealed.  Subsequent TApp[lam, arg] just
+   re-fires the cached kernel with `arg` bound to the input slot;
+   the body is never re-materialized.  This is the canonical
+   "compile once, dispatch many" form for recursive lambdas
+   (path 3 in docs/loop-profile.md).
+
+   Build order matters: the TVAR for `x` must be created against
+   `loc` BEFORE the body is constructed, so the body's TUOps
+   reference our shaped TVAR (and TMaterialize emits
+   KSRC_AS_INPUT(0) for it). *)
+SetAttributes[TLamMaterialized, HoldAll]
+TLamMaterialized[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
+    THVMLink`Private`$lamShapeSetFn[loc, shape];
+    THeapSet[loc, TMaterialize[Function[x, body][TVarFor[loc]]]];
     packTerm[0, $TagLAM, 0, loc]
 ]
 

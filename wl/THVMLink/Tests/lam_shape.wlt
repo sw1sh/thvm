@@ -135,6 +135,25 @@ VerificationTest[
     TestID -> "lam-shape/materialize-body-then-apply-fires-correctly"
 ]
 
+(* TLamMaterialized: the user-facing helper that wraps the
+   manual `THeapAlloc + lam_shape_set + TMaterialize + packTerm`
+   sequence above.  Compile-once-dispatch-many in one
+   constructor. *)
+
+VerificationTest[
+    TInit[];
+    Module[{lam, ten, result, kernels, programs},
+        lam = TLamMaterialized[{3}, w, TUOpAdd[w, w]];
+        ten = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+        result = TWnf[TApp[lam, ten]];
+        kernels  = TKernelCount[] - 1;
+        programs = TKernelProgramCacheSize[];
+        {Normal @ TTensorData[result], kernels, programs}
+    ],
+    {{2., 4., 6.}, 1, 1},
+    TestID -> "lam-shape/tlam-materialized-compile-once"
+]
+
 (* Two distinct APPs to the same materialized lambda body should
    share the kernel program -- the program cache hashes by
    structure, the TVAR slot is the structural placeholder. *)
