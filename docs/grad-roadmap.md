@@ -1,5 +1,10 @@
 # Backprop roadmap — what's missing for Adam-on-LeNet
 
+> **Note:** This doc describes an earlier (target-in-cell, JVP-equivalent)
+> grad design.  The current implementation uses dup-like cells with
+> gy threading and is documented in [`grad.md`](grad.md).  This file
+> is kept for historical reference.
+
 ## TL;DR
 
 `interact_grad` (in `src/interact/uop_grad.c`) currently rewrites

@@ -20,6 +20,10 @@ If you are new to the project, read these in order:
    constructors that sit on top of it.
 6. [heap_graph.md](heap_graph.md): the `THeapGraph[]` snapshot model,
    port conventions, and worked-example diagrams.
+7. [grad.md](grad.md): automatic differentiation -- dup-like grad
+   cells with gy threading, chain-rule adjoint table, leaf-SUP +
+   DUP routing, higher-order, materialization integration, and
+   `TProfile` for spotting allocation leaks.
 
 ## What's not here yet
 
