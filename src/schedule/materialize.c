@@ -621,6 +621,34 @@ static Term emit_kernel_for_boundary(u32 bi) {
     }
   }
 
+  // Hash-cons the KProgOp[] against the kernel-program cache.
+  // Two boundaries with bit-for-bit identical programs (opcode +
+  // dtype + n_src + arg + numel + src[] + shape/perm/pad bytes)
+  // share the underlying program array.  Memory savings on
+  // recursive lambda loops where each iter emits a structurally
+  // identical step kernel; correctness is unchanged because
+  // input_tids[] / output_tid stay per-kernel.
+  if (ke->n_ops > 0) {
+    u32 cached_n = 0;
+    KProgOp *cached = kernel_program_cache_lookup(ke->program, ke->n_ops, &cached_n);
+    if (cached != NULL) {
+      free(ke->program);
+      ke->program        = cached;
+      ke->n_ops          = cached_n;
+      ke->ops_cap        = cached_n;
+      ke->program_shared = 1;
+    } else {
+      KProgOp *interned = kernel_program_cache_insert(ke->program, ke->n_ops);
+      if (interned != NULL) {
+        free(ke->program);
+        ke->program        = interned;
+        ke->ops_cap        = ke->n_ops;
+        ke->program_shared = 1;
+      }
+      // (cache full -- silently keep the kernel-owned copy)
+    }
+  }
+
   u64 kloc = heap_alloc(2);
   heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, out_tid));
   heap_set(kloc + 1, term_new(0, TAG_NUM, DT_I32, kid));

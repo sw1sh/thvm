@@ -343,6 +343,11 @@ TMaterialize[expr_] := (ensureInit[]; TTerm[$materializeFn[ttermRaw[expr]]])
 
 TKernelCount[]    := (ensureInit[]; $kernelCountFn[])
 
+(* Number of distinct KProgOp[] arrays cached.  After a TRealize,
+   `TKernelProgramCacheSize[] <= TKernelCount[] - 1`: programs that
+   share structure share one cache entry. *)
+TKernelProgramCacheSize[] := (ensureInit[]; THVMLink`Private`$kernelProgramCacheSizeFn[])
+
 (* TKernelInfo[kid] returns an Association with the kernel's
    linearized program + shape metadata, useful for tests and
    THeapDiagram visualization overlays. *)

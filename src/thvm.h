@@ -350,6 +350,14 @@ typedef struct KernelEntry {
   u32       n_ops;
   u32       ops_cap;
   KProgOp  *program;
+  // 1 = `program` points into the kernel-program cache (owned by
+  // the cache, not by this kernel).  kernel_free_arrays must not
+  // free() it.  Set by emit_kernel_for_boundary after a cache hit
+  // or after the program is interned into the cache.  Sharing is
+  // safe because KProgOp[] is structurally keyed (input slot
+  // indices, not concrete tids), and per-kernel I/O lives in
+  // input_tids[] / output_tid which are NOT shared.
+  u8        program_shared;
 
   // Original root UOP term that this kernel was built from.  The
   // walker rewrites parent cells to UOP_KERNEL but leaves the
@@ -1463,6 +1471,18 @@ fn AtpStatus thvm_atp_run (AtpState *s);
 fn u8   is_redex(Term t);
 fn Term redex_fire(Term redex);
 fn u32  redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap);
+
+// Kernel-program hash-cons cache.  Reset from thvm_init.  Lookup
+// returns the cached program pointer + n_ops on hit (NULL on
+// miss); insert copies into a tight cache-owned buffer and
+// returns its pointer (or NULL if the cache is full).  Both
+// pointers are cache-owned; the caller marks its KernelEntry
+// with program_shared=1 to suppress double-free.
+fn void     kernel_program_cache_reset(void);
+fn KProgOp *kernel_program_cache_lookup(KProgOp const *prog, u32 n_ops,
+                                        u32 *out_n_ops);
+fn KProgOp *kernel_program_cache_insert(KProgOp const *prog, u32 n_ops);
+fn u32      kernel_program_cache_size(void);
 
 // Optional incremental worklist for nf.  When attached, redex_fire
 // pushes locally-fresh redexes (the result + every newly allocated

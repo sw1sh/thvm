@@ -45,7 +45,22 @@ fn void kernel_program_reserve(KernelEntry *ke, u32 needed) {
   }
   u32 new_cap = ke->ops_cap == 0 ? KPROG_INIT_OPS : ke->ops_cap * 2;
   while (new_cap < needed) new_cap *= 2;
-  ke->program = (KProgOp *)realloc(ke->program, (size_t)new_cap * sizeof(KProgOp));
+  // If the current `program` is shared (owned by the kernel-
+  // program cache), don't realloc -- copy out into a fresh owned
+  // buffer so we can grow it without disturbing other kernels.
+  // Reaching this branch is unusual: emit_kernel_for_boundary
+  // builds the program first (always owned), then optionally
+  // interns into the cache as the LAST step.  The shared state is
+  // post-final; subsequent grows shouldn't happen on the same ke.
+  if (ke->program_shared) {
+    KProgOp *fresh = (KProgOp *)malloc((size_t)new_cap * sizeof(KProgOp));
+    if (ke->n_ops > 0 && ke->program != NULL)
+      memcpy(fresh, ke->program, (size_t)ke->n_ops * sizeof(KProgOp));
+    ke->program = fresh;
+    ke->program_shared = 0;
+  } else {
+    ke->program = (KProgOp *)realloc(ke->program, (size_t)new_cap * sizeof(KProgOp));
+  }
   // Zero new tail (memset(0)-initialized KProgOps are valid no-ops
   // until fully populated by visit()).
   memset(ke->program + ke->ops_cap, 0, (size_t)(new_cap - ke->ops_cap) * sizeof(KProgOp));
@@ -55,12 +70,18 @@ fn void kernel_program_reserve(KernelEntry *ke, u32 needed) {
 // Free the heap-allocated arrays in a KernelEntry; reset counts and
 // caps to zero.  Call when releasing a kernel slot or resetting the
 // runtime context.  Safe to call repeatedly (NULL-tolerant).
+//
+// `program` is freed only if owned by this kernel (program_shared
+// = 0).  When it points into the kernel-program cache, the cache
+// retains ownership and frees on its own reset.
 fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->input_tids);   ke->input_tids   = NULL;
   free(ke->input_dtypes); ke->input_dtypes = NULL;
   free(ke->input_numels); ke->input_numels = NULL;
   free(ke->input_terms);  ke->input_terms  = NULL;
-  free(ke->program);      ke->program      = NULL;
+  if (!ke->program_shared) free(ke->program);
+  ke->program        = NULL;
+  ke->program_shared = 0;
   ke->n_inputs   = 0;
   ke->inputs_cap = 0;
   ke->n_ops      = 0;

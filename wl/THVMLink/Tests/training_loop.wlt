@@ -126,6 +126,53 @@ VerificationTest[
     TestID -> "training-loop/200-iters-one-kernel-under-5s"
 ]
 
+(* === Kernel program hash-cons: structurally identical kernels
+       across iterations share one KProgOp[] in the cache, even
+       in the slow bound-w pattern where each iter emits its own
+       KernelEntry.  Verifies kernel_program_cache_size stays
+       bounded as n grows. === *)
+
+VerificationTest[
+    TInit[];
+    Module[{target, lr, w0, kernels5, prog5, kernels10, prog10},
+        target = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+        lr     = TUOpConst[0.1, "f32"];
+        TDef["sgd_loop_kp_test",
+            TLam[w, TLam[n, TIfZero[n, w,
+                TApp[TApp[TRef["sgd_loop_kp_test"],
+                    TUOpAdd[w, TUOpNeg[TUOpMul[lr,
+                        TGrad[TL2Loss[TUOpAdd[w, TUOpNeg[target]]], w]]]]],
+                    TOp2["-", n, TNum[1]]]]]]];
+        w0 = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
+        TRealize[TApp[TApp[TRef["sgd_loop_kp_test"], w0], TNum[5]]];
+        kernels5 = TKernelCount[] - 1;
+        prog5    = TKernelProgramCacheSize[];
+
+        TInit[];
+        target = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+        lr     = TUOpConst[0.1, "f32"];
+        TDef["sgd_loop_kp_test",
+            TLam[w, TLam[n, TIfZero[n, w,
+                TApp[TApp[TRef["sgd_loop_kp_test"],
+                    TUOpAdd[w, TUOpNeg[TUOpMul[lr,
+                        TGrad[TL2Loss[TUOpAdd[w, TUOpNeg[target]]], w]]]]],
+                    TOp2["-", n, TNum[1]]]]]]];
+        w0 = TTensorCreate @ NumericArray[{0.0, 0.0, 0.0}, "Real32"];
+        TRealize[TApp[TApp[TRef["sgd_loop_kp_test"], w0], TNum[10]]];
+        kernels10 = TKernelCount[] - 1;
+        prog10    = TKernelProgramCacheSize[];
+
+        (* Kernel count grows with n (bound-w emits one KernelEntry per
+           iter); the program cache stays bounded -- the per-iter step
+           kernel is structurally identical so it gets one cache entry,
+           plus one for the small scalar-zero CONST kernel.  prog should
+           NOT grow with n. *)
+        {kernels5, prog5, kernels10, prog10, prog5 === prog10}
+    ],
+    {6, 2, 11, 2, True},
+    TestID -> "training-loop/bound-w-kernel-program-hash-cons"
+]
+
 (* === TGrad target lookup uses the ACTUAL tensor, not a TVAR.  The
        step graph references w by tid; ASSIGN patches w's buffer in
        place; subsequent kernel re-fires read the new buffer through

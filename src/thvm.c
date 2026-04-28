@@ -169,6 +169,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // Produces the scheduled DAG of UOP_KERNEL terms that
 // interact_kernel fires bottom-up.
 #include "schedule/kernel_alloc.c"
+#include "schedule/kernel_program_cache.c"
 #include "schedule/uop_meta.c"
 #include "schedule/consumer_count.c"
 #include "schedule/realize_classify.c"
@@ -309,6 +310,8 @@ void thvm_init(void) {
   uop_const_cache_reset();   // CONST cache keyed by raw bits + dtype;
                              // stale entries point into a freed heap.
   uop_mov_cache_reset();     // movement-op cache, same lifecycle.
+  kernel_program_cache_reset();   // KProgOp[] hash-cons; stale
+                             // entries would alias freed kernels.
   extern_pin_clear();   // drop any leftover pins from a prior session
   // Backend selection: THVM_BACKEND=metal picks Metal as the default
   // device for newly allocated tensors.  Per-tensor backends are still

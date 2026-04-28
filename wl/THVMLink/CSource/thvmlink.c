@@ -705,6 +705,18 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// Number of distinct KProgOp[] arrays interned in the kernel-
+// program hash-cons cache.  Used by tests to assert that two
+// kernels with structurally identical programs share storage.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_program_cache_size(WolframLibraryData libData,
+                                                          mint argc,
+                                                          MArgument *args,
+                                                          MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)kernel_program_cache_size());
+  return LIBRARY_NO_ERROR;
+}
+
 // === memory introspection (used by lenet-mnist/memory-probe.wls) ===
 EXTERN_C DLLEXPORT int thvm_wl_tens_count(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
