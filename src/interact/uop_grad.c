@@ -1,109 +1,150 @@
-// interact/uop_grad.c - dup-like chain-rule rewrite for the BWD
+// interact/uop_grad.c - dup-like, gy-threaded chain rule for the BWD
 // projection of a grad cell (TAG_DP1 + DUP_GRAD_FLAG).
 //
-// A grad cell shares the IC dup-cell mechanism with two aux ports:
-// TAG_DP0 (FWD = passthrough) and TAG_DP1 (BWD = chain rule).  The
-// DUP_GRAD_FLAG bit on the projection's ext distinguishes grad-flavor
-// from regular DUP/SUP semantics.  Each lazy chain-rule fire walks
-// one structural step on y's outermost UOp:
+// A grad cell is a regular dup-cell with two slots:
 //
-//   GRAD(ADD(a, b))   -> { ADD(fw_a, fw_b),    ADD(bw_a, bw_b) }
-//   GRAD(MUL(a, b))   -> { MUL(fw_a, fw_b),    ADD(MUL(fw_b, bw_a),
-//                                                   MUL(fw_a, bw_b)) }
-//   GRAD(NEG(a))      -> { NEG(fw_a),          NEG(bw_a) }
-//   GRAD(LOG2(a))     -> { LOG2(fw_a),         MUL(bw_a, MUL(RECIP(fw_a),
-//                                                            CONST(1/ln2))) }
-//   GRAD(EXP2(a))     -> { EXP2(fw_a),         MUL(bw_a, MUL(EXP2(fw_a),
-//                                                            CONST(ln2))) }
-//   GRAD(RECIP(a))    -> { RECIP(fw_a),        MUL(bw_a, NEG(MUL(RECIP(fw_a),
-//                                                                RECIP(fw_a)))) }
-//   GRAD(SQRT(a))     -> { SQRT(fw_a),         MUL(bw_a, MUL(CONST(0.5),
-//                                                            RECIP(SQRT(fw_a)))) }
-//   GRAD(SUM(a, ax))  -> { SUM(fw_a, ax),      EXPAND(bw_a, a.shape) }
-//   GRAD(MAX(a, ax))  -> { MAX(fw_a, ax),      MUL(MASK(a, MAX(a, ax)),
-//                                                  EXPAND(bw_a, a.shape)) }
-//   GRAD(EXPAND(a))   -> { EXPAND(fw_a, ...),  REDUCE_SUM(bw_a, expanded_ax) }
-//   GRAD(RESHAPE(a))  -> { RESHAPE(fw_a, ...), RESHAPE(bw_a, a.shape) }
-//   GRAD(PAD(a))      -> { PAD(fw_a, ...),     SHRINK(bw_a, b, b+a.shape) }
-//   GRAD(SHRINK(a))   -> { SHRINK(fw_a, ...),  PAD(bw_a, b, src_dim - e) }
-//   GRAD(FLIP(a))     -> { FLIP(fw_a, mask),   FLIP(bw_a, mask) }
-//   GRAD(PERMUTE(a))  -> { PERMUTE(fw_a, p),   PERMUTE(bw_a, inv_p) }
-//   GRAD(TEN_t)       -> { TEN_t,              SUP^{t.tid}(zero, one) }
+//     cell[0] = y    (the value being differentiated)
+//     cell[1] = gy   (the cotangent at y's shape -- ones for scalar
+//                     loss seed; transformed per-operator down the
+//                     chain so it always reaches a sub-cell at the
+//                     sub-cell's child shape)
 //
-// where {fw_a, bw_a} = GRAD(a), built fresh per child via a new cell
-// holding [a].  Sibling forwards reach via TAG_DP0 (FWD) projections;
-// `bw` references reach via TAG_DP1 (BWD) projections of the same
-// cells, both with DUP_GRAD_FLAG set on their ext.
+// Two aux ports share the cell:
 //
-// Each projection fires INDEPENDENTLY -- DP0 of a grad-flagged cell
-// passes y through; DP1 fires the chain rule below.  The forward
-// subgraph is shared via heap-loc identity (sub-cells reference the
-// same `a` Term that y references).  No heap-walk -- pure local
-// interactions like every other IC rule.
+//     TAG_DP0 + DUP_GRAD_FLAG  =  FWD = passthrough cell[0] = y
+//     TAG_DP1 + DUP_GRAD_FLAG  =  BWD = chain rule (this file)
 //
-// No gy threading, no target stored.  Target identification happens
-// at the leaf via SUP^{leaf_tid}(zero, one); the WL surface DUPs the
-// result by the requested target's tid to project the gradient.
+// Each chain-rule fire walks one structural step on y's outermost
+// UOp.  For each compute child a_i, the rule:
+//
+//   1. computes the per-op adjoint  gy_for_a_i  (cotangent-at-a_i.shape)
+//      using gy from cell[1] AND any forward sub-values it needs
+//      (e.g. b for the MUL adjoint  ∂(a*b)/∂a = b * gy);
+//   2. allocates a fresh sub-cell  [a_i, gy_for_a_i]  via
+//      grad_cell_alloc / heap_set, with FWD/BWD projections of the
+//      sub-cell carrying DUP_GRAD_FLAG;
+//   3. emits an outer expression that combines the children's BWD
+//      projections (sum over differentiable children).
+//
+// At a TEN leaf the rule emits  SUP^{tid}(zero_at_S, gy)  where S =
+// leaf.shape and gy is the cotangent that has been threaded down to
+// the leaf.  The outer DUP^t at the WL surface then projects:
+//   - match  side (target == t)        => gy   (= per-element grad)
+//   - mismatch side (target != t)      => zero (no contribution)
+//
+// Adjoint table (one row per UOP child slot):
+//
+//   ADD(a, b)        gy_for_a = gy            ; gy_for_b = gy
+//   MUL(a, b)        gy_for_a = MUL(b_fwd,gy) ; gy_for_b = MUL(a_fwd,gy)
+//   NEG(a)           gy_for_a = NEG(gy)
+//   RECIP(a)         gy_for_a = MUL(gy, NEG(MUL(RECIP(a), RECIP(a))))
+//   EXP2(a)          gy_for_a = MUL(gy, MUL(EXP2(a), CONST(ln 2)))
+//   LOG2(a)          gy_for_a = MUL(gy, MUL(RECIP(a), CONST(1/ln2)))
+//   SQRT(a)          gy_for_a = MUL(gy, MUL(CONST(0.5), RECIP(SQRT(a))))
+//   REDUCE_SUM(a, x) gy_for_a = EXPAND(reshape_keepdim(gy, x), a.shape)
+//   REDUCE_MAX(a, x) gy_for_a = MUL(mask, EXPAND(reshape_keepdim(gy, x), a.shape))
+//   EXPAND(a, S)     gy_for_a = REDUCE_SUM_along(expanded_axes, gy)
+//   RESHAPE(a, S)    gy_for_a = RESHAPE(gy, a.shape)
+//   PERMUTE(a, p)    gy_for_a = PERMUTE(gy, inv_perm)
+//   FLIP(a, m)       gy_for_a = FLIP(gy, m)
+//   PAD(a, b/e)      gy_for_a = SHRINK(gy, [b_i, b_i + a.dim_i])
+//   SHRINK(a, b/e)   gy_for_a = PAD(gy, [b_i, src.dim_i - e_i])
+//   CONST/LOAD/CMP   no children to differentiate (leaf cotangent dies)
 
-// Lift `src` to a tensor's shape via UOP_EXPAND.  No-op when src
-// already has that shape OR target_term isn't a TAG_TEN with rank.
+// Lift `src` to `target_term`'s shape via UOP_EXPAND.  Works for
+// both TAG_TEN (look up TENS[tid].view.shape) and TAG_UOP (use
+// term_shape_in to compute the result shape statically).  No-op
+// when shape can't be determined or the rank is zero.
 fn Term expand_to_target(Term src, Term target_term) {
-  if (term_tag(target_term) != TAG_TEN) return src;
-  u32 tid = term_val(target_term);
-  TenDesc *desc = &TENS[tid];
-  if (desc->view.shape.ndim == 0) return src;
-  return uop_expand(src, desc->view.shape.ndim, desc->view.shape.dims);
+  Shape s;
+  if (!term_shape_in(target_term, 0, &s) || s.ndim == 0) return src;
+  return uop_expand(src, s.ndim, s.dims);
 }
 
 fn Term grad_zero_at(Term y) {
   return expand_to_target(uop_const(DT_F32, 0), y);
 }
 
-fn Term grad_one_at(Term y) {
-  // 1.0f in IEEE-754 = 0x3F800000.
-  return expand_to_target(uop_const(DT_F32, 0x3F800000u), y);
+// Allocate a 2-slot grad cell with cell[0] = child and cell[1] = 0
+// (placeholder).  Caller MUST heap_set(loc + 1, gy_for_child) before
+// the BWD projection is forced.  Returning the loc lets us split the
+// fwd/bwd construction across the gy-build (caller may need the FWD
+// of one sibling to construct the other sibling's gy, e.g. MUL).
+typedef struct { Term fwd; Term bwd; u64 loc; } GradPair;
+static u64 grad_cell_alloc(Term child) {
+  u64 c = heap_alloc(2);
+  heap_set(c + 0, child);
+  heap_set(c + 1, 0);   // placeholder; caller fills in gy_for_child
+  return c;
+}
+static Term grad_fwd_of(u64 cell) {
+  return term_new(0, TAG_DP0, DUP_GRAD_FLAG, cell);
+}
+static Term grad_bwd_of(u64 cell) {
+  return term_new(0, TAG_DP1, DUP_GRAD_FLAG, cell);
 }
 
-// Allocate a fresh GRAD cell for `child` and return its FWD/BWD
-// projection terms.  Both projections share the cell; both carry
-// DUP_GRAD_FLAG so their TAG_DP{0,1} dispatch goes to the
-// grad-flavored interaction (FWD passthrough / BWD chain rule).
-typedef struct { Term fwd; Term bwd; } GradPair;
-static GradPair grad_pair(Term child) {
-  u64 c = uop_grad_cell(child);
-  GradPair p;
-  p.fwd = term_new(0, TAG_DP0, DUP_GRAD_FLAG, c);
-  p.bwd = term_new(0, TAG_DP1, DUP_GRAD_FLAG, c);
+// One-shot helper: allocate cell, write gy, return {fwd, bwd, loc}.
+static GradPair grad_pair_with_gy(Term child, Term gy_for_child) {
+  u64 c = grad_cell_alloc(child);
+  heap_set(c + 1, gy_for_child);
+  GradPair p = { grad_fwd_of(c), grad_bwd_of(c), c };
   return p;
+}
+
+// Helper: "ones at scalar" cotangent (used by RECIP/EXP2/etc. when
+// they need to thread gy through a chain that doesn't depend on it).
+// Note: in practice gy should always be passed in; this is a
+// fallback for cases where the chain rule needs a fresh constant.
+fn Term grad_ln2_const(void) {
+  f32 ln2 = 0.6931471805599453f;
+  u32 bits;
+  memcpy(&bits, &ln2, sizeof bits);
+  return uop_const(DT_F32, bits);
+}
+fn Term grad_inv_ln2_const(void) {
+  f32 inv = 1.4426950408889634f;
+  u32 bits;
+  memcpy(&bits, &inv, sizeof bits);
+  return uop_const(DT_F32, bits);
+}
+fn Term grad_half_const(void) {
+  f32 half = 0.5f;
+  u32 bits;
+  memcpy(&bits, &half, sizeof bits);
+  return uop_const(DT_F32, bits);
 }
 
 fn Term interact_grad(Term grad_term) {
   u64  cell_orig = term_val(grad_term);
-  Term y         = term_resolve(heap_read(cell_orig));
+  Term y         = term_resolve(heap_read(cell_orig + 0));
+  Term gy        = heap_read(cell_orig + 1);
 
   u8 y_tag = term_tag(y);
 
   // === LEAF: y is a TEN ===
-  // Emit SUP^{y.tid}(zero, one) shape-lifted to y's shape; the WL DUP^t
-  // projects the match side iff t == y.tid.  The companion FWD
-  // projection just resolves to y itself.
+  // Emit SUP^{y.tid}(CONST(0), gy).  The mismatch slot is a scalar
+  // zero (shape {1}); cpu_op_add / cpu_op_mul broadcast numel==1
+  // operands, so any outer combiner ADD(matched_at_S, scalar_zero)
+  // resolves to matched_at_S regardless of S.  This avoids the
+  // shape-mismatch trap of emitting zero at *leaf* shape, which
+  // breaks outer ADDs when sibling subtrees reach leaves of
+  // different shapes (e.g. MUL(w_at_{3,4}, EXPAND(x_at_{4}, {3,4}))).
+  // The match slot keeps gy at its natural (= leaf) shape so
+  // DUP^t.tid match returns the correct per-element VJP.
   if (y_tag == TAG_TEN) {
     u32 tid = (u32)term_val(y);
-    Term zero = grad_zero_at(y);
-    Term one  = grad_one_at(y);
-    u64  sloc = heap_alloc(2);
-    heap_set(sloc + 0, zero);
-    heap_set(sloc + 1, one);
-    Term sup = term_new(0, TAG_SUP, tid, sloc);
-    return sup;
+    u64 sloc = heap_alloc(2);
+    heap_set(sloc + 0, uop_const(DT_F32, 0));   // scalar 0, broadcasts in any ADD/MUL
+    heap_set(sloc + 1, gy);
+    return term_new(0, TAG_SUP, tid, sloc);
   }
 
-  // NUM as a constant -- no gradient anywhere; emit zero on bw.
+  // NUM: constant input -- no leaf contribution; cotangent dies.
   if (y_tag == TAG_NUM) {
     return uop_const(DT_F32, 0);
   }
 
-  // y not a UOP we can pattern-match -- leave the GRAD as WHNF.
   if (y_tag != TAG_UOP) return grad_term;
 
   u8  y_op  = term_ext(y);
@@ -112,180 +153,224 @@ fn Term interact_grad(Term grad_term) {
   switch (y_op) {
 
     // === Elementwise binary ===
-    case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ: {
+    // ADD(a, b): both children get gy unchanged.  We share gy across
+    // both sub-cells by raw heap-loc reference -- materialize dedups
+    // when both sides are realized.
+    case UOP_ADD: {
       Term a = heap_read(y_loc + 0);
       Term b = heap_read(y_loc + 1);
-      GradPair ga = grad_pair(a);
-      GradPair gb = grad_pair(b);
+      GradPair ga = grad_pair_with_gy(a, gy);
+      GradPair gb = grad_pair_with_gy(b, gy);
+      return uop_binary(UOP_ADD, ga.bwd, gb.bwd);
+    }
 
-      Term new_bw;
-      if (y_op == UOP_ADD) {
-        new_bw = uop_binary(UOP_ADD, ga.bwd, gb.bwd);
-      } else if (y_op == UOP_MUL) {
-        Term l = uop_binary(UOP_MUL, gb.fwd, ga.bwd);
-        Term r = uop_binary(UOP_MUL, ga.fwd, gb.bwd);
-        new_bw = uop_binary(UOP_ADD, l, r);
-      } else {
-        // CMPLT / CMPEQ are non-differentiable -- bw is zero.
-        new_bw = grad_zero_at(y);
-      }
-      return new_bw;
+    // MUL(a, b): chicken-and-egg between the two adjoints (gy_for_a
+    // needs b_fwd; gy_for_b needs a_fwd).  Allocate both cells with
+    // placeholder gy first, build FWD references, compose adjoints,
+    // then patch the gy slots.
+    case UOP_MUL: {
+      Term a = heap_read(y_loc + 0);
+      Term b = heap_read(y_loc + 1);
+      u64  ca = grad_cell_alloc(a);
+      u64  cb = grad_cell_alloc(b);
+      Term a_fwd = grad_fwd_of(ca);
+      Term b_fwd = grad_fwd_of(cb);
+      Term gy_a  = uop_binary(UOP_MUL, b_fwd, gy);
+      Term gy_b  = uop_binary(UOP_MUL, a_fwd, gy);
+      heap_set(ca + 1, gy_a);
+      heap_set(cb + 1, gy_b);
+      Term a_bwd = grad_bwd_of(ca);
+      Term b_bwd = grad_bwd_of(cb);
+      return uop_binary(UOP_ADD, a_bwd, b_bwd);
+    }
+
+    // CMPLT/CMPEQ: non-differentiable; cotangent dies.
+    case UOP_CMPLT: case UOP_CMPEQ: {
+      return grad_zero_at(y);
     }
 
     // === Elementwise unary ===
     case UOP_NEG: {
       Term a = heap_read(y_loc + 0);
-      GradPair ga = grad_pair(a);
-      Term new_bw = uop_unary(UOP_NEG, ga.bwd);
-      return new_bw;
+      Term gy_a = uop_unary(UOP_NEG, gy);
+      GradPair ga = grad_pair_with_gy(a, gy_a);
+      return ga.bwd;
     }
 
     case UOP_LOG2: {
-      // d(log2 a)/dx = (1/(a*ln 2)) * da/dx
-      f32 inv_ln2 = 1.4426950408889634f;
-      u32 inv_bits;
-      memcpy(&inv_bits, &inv_ln2, sizeof inv_bits);
+      // d(log2 a)/da = 1/(a*ln2) ; gy_for_a = gy * RECIP(a) * (1/ln2)
       Term a = heap_read(y_loc + 0);
-      GradPair ga = grad_pair(a);
-      Term ra     = uop_unary(UOP_RECIP, ga.fwd);
-      Term k      = uop_const(DT_F32, inv_bits);
+      u64  ca = grad_cell_alloc(a);
+      Term a_fwd = grad_fwd_of(ca);
+      Term ra    = uop_unary(UOP_RECIP, a_fwd);
+      Term k     = grad_inv_ln2_const();
       Term factor = uop_binary(UOP_MUL, ra, k);
-      Term new_bw = uop_binary(UOP_MUL, ga.bwd, factor);
-      return new_bw;
+      Term gy_a  = uop_binary(UOP_MUL, gy, factor);
+      heap_set(ca + 1, gy_a);
+      return grad_bwd_of(ca);
     }
 
     case UOP_EXP2: {
-      // d(2^a)/dx = (2^a * ln 2) * da/dx
-      f32 ln2 = 0.6931471805599453f;
-      u32 ln2_bits;
-      memcpy(&ln2_bits, &ln2, sizeof ln2_bits);
+      // d(2^a)/da = 2^a * ln2 ; gy_for_a = gy * EXP2(a) * ln2
       Term a = heap_read(y_loc + 0);
-      GradPair ga = grad_pair(a);
-      Term ea     = uop_unary(UOP_EXP2, ga.fwd);
-      Term k      = uop_const(DT_F32, ln2_bits);
+      u64  ca = grad_cell_alloc(a);
+      Term a_fwd = grad_fwd_of(ca);
+      Term ea    = uop_unary(UOP_EXP2, a_fwd);
+      Term k     = grad_ln2_const();
       Term factor = uop_binary(UOP_MUL, ea, k);
-      Term new_bw = uop_binary(UOP_MUL, ga.bwd, factor);
-      return new_bw;
+      Term gy_a  = uop_binary(UOP_MUL, gy, factor);
+      heap_set(ca + 1, gy_a);
+      return grad_bwd_of(ca);
     }
 
     case UOP_RECIP: {
-      // d(1/a)/dx = (-1/a^2) * da/dx
+      // d(1/a)/da = -1/a^2 ; gy_for_a = gy * NEG(RECIP(a)*RECIP(a))
       Term a = heap_read(y_loc + 0);
-      GradPair ga = grad_pair(a);
-      // Two independent RECIP nodes so materialize doesn't think
-      // they're a shared computation (we want the same computed value
-      // re-read, but structurally separate so the diagram is clean).
-      Term ra1     = uop_unary(UOP_RECIP, ga.fwd);
-      Term ra2     = uop_unary(UOP_RECIP, ga.fwd);
-      Term sq      = uop_binary(UOP_MUL, ra1, ra2);
-      Term nsq     = uop_unary(UOP_NEG, sq);
-      Term new_bw  = uop_binary(UOP_MUL, ga.bwd, nsq);
-      return new_bw;
+      u64  ca = grad_cell_alloc(a);
+      Term a_fwd = grad_fwd_of(ca);
+      // Two independent RECIP nodes for diagram clarity (materialize
+      // dedups by heap loc; structurally separate is intentional).
+      Term r1 = uop_unary(UOP_RECIP, a_fwd);
+      Term r2 = uop_unary(UOP_RECIP, a_fwd);
+      Term sq = uop_binary(UOP_MUL, r1, r2);
+      Term ns = uop_unary(UOP_NEG, sq);
+      Term gy_a = uop_binary(UOP_MUL, gy, ns);
+      heap_set(ca + 1, gy_a);
+      return grad_bwd_of(ca);
     }
 
     case UOP_SQRT: {
-      // d(sqrt a)/dx = (1/(2*sqrt a)) * da/dx
+      // d(sqrt a)/da = 1/(2*sqrt a) ; gy_for_a = gy * 0.5 * RECIP(SQRT(a))
       Term a = heap_read(y_loc + 0);
-      GradPair ga = grad_pair(a);
-      Term sa     = uop_unary(UOP_SQRT, ga.fwd);
+      u64  ca = grad_cell_alloc(a);
+      Term a_fwd  = grad_fwd_of(ca);
+      Term sa     = uop_unary(UOP_SQRT, a_fwd);
       Term inv_sa = uop_unary(UOP_RECIP, sa);
-      f32 half = 0.5f;
-      u32 half_bits;
-      memcpy(&half_bits, &half, sizeof half_bits);
-      Term k      = uop_const(DT_F32, half_bits);
-      Term factor = uop_binary(UOP_MUL, inv_sa, k);
-      Term new_bw = uop_binary(UOP_MUL, ga.bwd, factor);
-      return new_bw;
+      Term k      = grad_half_const();
+      Term factor = uop_binary(UOP_MUL, k, inv_sa);
+      Term gy_a   = uop_binary(UOP_MUL, gy, factor);
+      heap_set(ca + 1, gy_a);
+      return grad_bwd_of(ca);
     }
 
     // === REDUCE ===
+    // SUM: gy_for_a = EXPAND(reshape_keepdim(gy), a.shape).
+    // MAX: gy_for_a = MUL(mask_at_argmax, EXPAND(reshape_keepdim(gy), a.shape)).
     case UOP_REDUCE: {
       Term a    = heap_read(y_loc + 0);
       u32  kind = (u32)term_val(heap_read(y_loc + 1));
       u32  axis = (u32)term_val(heap_read(y_loc + 2));
-      GradPair ga = grad_pair(a);
 
       Shape a_shape;
-      Term new_bw;
-      if (kind == REDUCE_SUM && term_shape_in(a, 0, &a_shape) && a_shape.ndim > 0) {
-        // bw_outer = EXPAND bw_a back along the reduce axis.
-        new_bw = uop_expand(ga.bwd, a_shape.ndim, a_shape.dims);
-      } else if (kind == REDUCE_MAX && term_shape_in(a, 0, &a_shape) && a_shape.ndim > 0) {
-        // bw_outer = mask(a == max) * EXPAND(bw_a, a.shape).
-        u32 keep_dim_shape[MAX_DIM] = {0};
-        for (u32 i = 0; i < a_shape.ndim; i++)
-          keep_dim_shape[i] = (i == axis) ? 1u : a_shape.dims[i];
-        Term mx        = uop_reduce(REDUCE_MAX, axis, ga.fwd);
-        Term mx_keep   = uop_reshape(mx, a_shape.ndim, keep_dim_shape);
-        Term mx_lifted = uop_expand(mx_keep, a_shape.ndim, a_shape.dims);
-        Term mask      = uop_binary(UOP_CMPEQ, ga.fwd, mx_lifted);
-        Term gy_lifted = uop_expand(ga.bwd, a_shape.ndim, a_shape.dims);
-        new_bw         = uop_binary(UOP_MUL, gy_lifted, mask);
-      } else {
-        new_bw = ga.bwd;
+      if (!term_shape_in(a, 0, &a_shape) || a_shape.ndim == 0) {
+        return grad_term;   // can't determine src shape; bail
       }
-      return new_bw;
+
+      // Build reshape-keepdim of gy: insert a 1 at `axis` so the
+      // EXPAND back to a.shape is well-formed.  When a.ndim == 1,
+      // the reduce output shape is {1} (per uop_meta), so a
+      // RESHAPE to {1} is identity-ish; we still call it to be
+      // explicit about the intermediate.
+      u32 keep_dims[MAX_DIM] = {0};
+      if (a_shape.ndim == 1) {
+        // a.shape = {N}, y.shape = {1}, keepdim = {1}; expand back to {N}.
+        keep_dims[0] = 1;
+      } else {
+        for (u32 i = 0; i < a_shape.ndim; i++)
+          keep_dims[i] = (i == axis) ? 1u : a_shape.dims[i];
+      }
+      Term gy_keepdim = uop_reshape(gy, a_shape.ndim, keep_dims);
+      Term gy_lifted  = uop_expand(gy_keepdim, a_shape.ndim, a_shape.dims);
+
+      Term gy_a;
+      u64  ca = grad_cell_alloc(a);
+      Term a_fwd = grad_fwd_of(ca);
+      if (kind == REDUCE_SUM) {
+        gy_a = gy_lifted;
+      } else if (kind == REDUCE_MAX) {
+        // mask = (a == lift(MAX(a, axis)))
+        Term mx        = uop_reduce(REDUCE_MAX, axis, a_fwd);
+        Term mx_keep   = uop_reshape(mx, a_shape.ndim, keep_dims);
+        Term mx_lifted = uop_expand(mx_keep, a_shape.ndim, a_shape.dims);
+        Term mask      = uop_binary(UOP_CMPEQ, a_fwd, mx_lifted);
+        gy_a           = uop_binary(UOP_MUL, mask, gy_lifted);
+      } else {
+        // Unknown reduce kind: pass gy through unchanged (best effort).
+        gy_a = gy_lifted;
+      }
+      heap_set(ca + 1, gy_a);
+      return grad_bwd_of(ca);
     }
 
     // === Movement ops ===
     case UOP_RESHAPE: {
       Term a = heap_read(y_loc + 0);
-      u32  ndim = (u32)term_val(heap_read(y_loc + 1));
-      u32  out_dims[MAX_DIM];
-      for (u32 i = 0; i < ndim; i++)
-        out_dims[i] = (u32)term_val(heap_read(y_loc + 2 + i));
-      GradPair ga = grad_pair(a);
-      // bw_outer = RESHAPE(bw_a, a.shape).  bw_a has whatever shape
-      // GRAD(a) gave; if a is a TEN target leaf, bw_a has a.shape
-      // already and RESHAPE is identity-ish.  Otherwise we try to
-      // infer a's shape via term_shape_in.
       Shape a_shape;
-      Term new_bw;
+      Term gy_a;
       if (term_shape_in(a, 0, &a_shape) && a_shape.ndim > 0) {
-        new_bw = uop_reshape(ga.bwd, a_shape.ndim, a_shape.dims);
+        gy_a = uop_reshape(gy, a_shape.ndim, a_shape.dims);
       } else {
-        new_bw = ga.bwd;   // passthrough
+        gy_a = gy;   // best effort: passthrough
       }
-      return new_bw;
+      GradPair ga = grad_pair_with_gy(a, gy_a);
+      return ga.bwd;
     }
 
     case UOP_EXPAND: {
-      Term a = heap_read(y_loc + 0);
-      u32  ndim = (u32)term_val(heap_read(y_loc + 1));
+      Term a    = heap_read(y_loc + 0);
+      u32  ndim = (u32)term_val(heap_read(y_loc + 1));   // out ndim
       u32  out_dims[MAX_DIM];
       for (u32 i = 0; i < ndim; i++)
         out_dims[i] = (u32)term_val(heap_read(y_loc + 2 + i));
-      GradPair ga = grad_pair(a);
 
-      // bw_outer: REDUCE_SUM along axes that were expanded (where
-      // src.dim == 1 < out.dim).  bw_a is at a's shape.
-      Shape src_shape;
-      Term new_bw = ga.bwd;
-      if (term_shape_in(a, 0, &src_shape) && src_shape.ndim > 0) {
-        // First lift bw_a to expand-output shape so the per-axis
-        // REDUCE_SUMs see a well-defined source extent.
-        new_bw = uop_expand(new_bw, ndim, out_dims);
-        for (i32 axis = (i32)src_shape.ndim - 1; axis >= 0; axis--) {
-          if (src_shape.dims[axis] == 1 && out_dims[axis] > 1) {
-            new_bw = uop_reduce(REDUCE_SUM, (u32)axis, new_bw);
+      Shape a_shape;
+      Term gy_a;
+      if (term_shape_in(a, 0, &a_shape) && a_shape.ndim > 0
+          && ndim >= a_shape.ndim) {
+        // Pad a's shape with leading 1s up to out's ndim so we can
+        // detect implicit-broadcast axes (rank increase).  E.g.
+        // EXPAND({4} -> {3, 4}) broadcasts axis 0 (implicit 1->3).
+        u32 pad = ndim - a_shape.ndim;
+        u32 a_padded[MAX_DIM] = {0};
+        for (u32 i = 0; i < pad; i++) a_padded[i] = 1;
+        for (u32 i = 0; i < a_shape.ndim; i++) a_padded[pad + i] = a_shape.dims[i];
+
+        // Walk axes high-to-low; each REDUCE_SUM drops that axis.
+        // After all reduces, cur has rank a_shape.ndim and matches
+        // a.shape (no reshape needed -- reduces preserve non-broadcast
+        // dims and drop broadcast ones).
+        Term cur = gy;
+        for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
+          if (a_padded[axis] == 1 && out_dims[axis] > 1) {
+            cur = uop_reduce(REDUCE_SUM, (u32)axis, cur);
           }
         }
+        // If a had explicit dim==1 axes that we DIDN'T reduce (because
+        // out.dim was also 1), reduces leave them; rank still matches
+        // a_shape.ndim.  Reshape to a_shape to be defensive about any
+        // residual rank-1 collapse from the REDUCE-of-{N}->{1} case.
+        if (a_shape.ndim == 1 && a_shape.dims[0] == 1) {
+          // Special: a was {1}; cur is {1} after possible reduces.
+          gy_a = uop_reshape(cur, 1, a_shape.dims);
+        } else {
+          gy_a = uop_reshape(cur, a_shape.ndim, a_shape.dims);
+        }
+      } else {
+        gy_a = gy;
       }
-      return new_bw;
+      GradPair ga = grad_pair_with_gy(a, gy_a);
+      return ga.bwd;
     }
 
     case UOP_FLIP: {
-      Term a = heap_read(y_loc + 0);
-      u32 mask = (u32)term_val(heap_read(y_loc + 1));
-      GradPair ga = grad_pair(a);
-      Term new_bw = uop_flip(ga.bwd, mask);
-      return new_bw;
+      Term a    = heap_read(y_loc + 0);
+      u32  mask = (u32)term_val(heap_read(y_loc + 1));
+      Term gy_a = uop_flip(gy, mask);
+      GradPair ga = grad_pair_with_gy(a, gy_a);
+      return ga.bwd;
     }
 
     case UOP_PERMUTE: {
-      // PERMUTE: bw_outer = PERMUTE(bw_a, inv_perm) -- undo the axis
-      // reorder.  ndim is inferred from src's shape (uop_meta does
-      // the same trick).
       Term a = heap_read(y_loc + 0);
       Shape src_shape;
       if (!term_shape_in(a, 0, &src_shape) || src_shape.ndim == 0) {
@@ -293,76 +378,56 @@ fn Term interact_grad(Term grad_term) {
       }
       u32 ndim = src_shape.ndim;
       u32 perm[MAX_DIM], inv_perm[MAX_DIM];
-      for (u32 i = 0; i < ndim; i++) {
+      for (u32 i = 0; i < ndim; i++)
         perm[i] = (u32)term_val(heap_read(y_loc + 1 + i));
-      }
-      for (u32 i = 0; i < ndim; i++) {
+      for (u32 i = 0; i < ndim; i++)
         inv_perm[perm[i]] = i;
-      }
-      GradPair ga = grad_pair(a);
-      return uop_permute(ga.bwd, ndim, inv_perm);
+      Term gy_a = uop_permute(gy, ndim, inv_perm);
+      GradPair ga = grad_pair_with_gy(a, gy_a);
+      return ga.bwd;
     }
 
     case UOP_PAD: case UOP_SHRINK: {
-      // PAD/SHRINK have the same heap layout: [src, NUM(b0), NUM(e0),
-      // ..., NUM(b_{ndim-1}), NUM(e_{ndim-1})].  ndim isn't directly
-      // stored -- we'd need to derive it from a's shape.
       Term a = heap_read(y_loc + 0);
       Shape a_shape;
       if (!term_shape_in(a, 0, &a_shape) || a_shape.ndim == 0) {
-        return grad_term;   // can't determine ndim -- bail
+        return grad_term;
       }
-      GradPair ga = grad_pair(a);
-
       u32 ndim = a_shape.ndim;
       u32 ranges[2 * MAX_DIM];
       for (u32 i = 0; i < ndim; i++) {
-        u32 b = (u32)term_val(heap_read(y_loc + 1 + 2 * i));
-        u32 e = (u32)term_val(heap_read(y_loc + 2 + 2 * i));
-        ranges[2 * i + 0] = b;
-        ranges[2 * i + 1] = e;
+        ranges[2 * i + 0] = (u32)term_val(heap_read(y_loc + 1 + 2 * i));
+        ranges[2 * i + 1] = (u32)term_val(heap_read(y_loc + 2 + 2 * i));
       }
 
-      Term new_bw;
+      Term gy_a;
       if (y_op == UOP_PAD) {
-        // PAD output dims = src.dim + b + e
-        u32 out_dims[MAX_DIM];
-        for (u32 i = 0; i < ndim; i++)
-          out_dims[i] = a_shape.dims[i] + ranges[2*i] + ranges[2*i + 1];
-        // bw_outer: SHRINK bw_a to the un-padded extent [b, b+a.dim).
+        // PAD output dim_i = a.dim_i + b_i + e_i; gy has output shape.
+        // gy_for_a = SHRINK(gy, [b_i, b_i + a.dim_i)).
         u32 sranges[2 * MAX_DIM];
         for (u32 i = 0; i < ndim; i++) {
-          sranges[2*i + 0] = ranges[2*i];
-          sranges[2*i + 1] = ranges[2*i] + a_shape.dims[i];
+          sranges[2 * i + 0] = ranges[2 * i + 0];
+          sranges[2 * i + 1] = ranges[2 * i + 0] + a_shape.dims[i];
         }
-        // First lift bw_a to PAD's output shape.
-        Term lifted = uop_expand(ga.bwd, ndim, out_dims);
-        new_bw      = uop_shrink(lifted, ndim, sranges);
+        gy_a = uop_shrink(gy, ndim, sranges);
       } else {
-        // SHRINK extracts [b, e); output dim = e - b.
-        u32 out_dims[MAX_DIM];
-        for (u32 i = 0; i < ndim; i++)
-          out_dims[i] = (ranges[2*i + 1] > ranges[2*i])
-                           ? (ranges[2*i + 1] - ranges[2*i]) : 0;
-        // bw_outer: PAD bw_a back to source extent with widths
-        // [b_i, src.dim_i - e_i].
+        // SHRINK output dim_i = e_i - b_i; gy has output shape.
+        // gy_for_a = PAD(gy, [b_i, a.dim_i - e_i]) restoring full extent.
         u32 widths[2 * MAX_DIM];
         for (u32 i = 0; i < ndim; i++) {
-          widths[2*i + 0] = ranges[2*i];
-          widths[2*i + 1] = (a_shape.dims[i] > ranges[2*i + 1])
-                              ? (a_shape.dims[i] - ranges[2*i + 1]) : 0;
+          widths[2 * i + 0] = ranges[2 * i + 0];
+          widths[2 * i + 1] = (a_shape.dims[i] > ranges[2 * i + 1])
+                                ? (a_shape.dims[i] - ranges[2 * i + 1]) : 0;
         }
-        Term lifted = uop_expand(ga.bwd, ndim, out_dims);
-        new_bw      = uop_pad(lifted, ndim, widths);
+        gy_a = uop_pad(gy, ndim, widths);
       }
-      return new_bw;
+      GradPair ga = grad_pair_with_gy(a, gy_a);
+      return ga.bwd;
     }
 
     case UOP_KERNEL: {
       // KERNEL: chain rule should run on the pre-kernelize source UOp,
-      // recovered from KernelEntry.source_uop.  The walker mutates
-      // parent cells to UOP_KERNEL but leaves the source UOP intact
-      // (orphaned) on the heap.
+      // recovered from KernelEntry.source_uop.
       u32 kid = (u32)term_val(heap_read(y_loc + 1));
       if (kid == 0 || kid >= KERNELS_NEXT) {
         return grad_zero_at(y);
@@ -371,7 +436,7 @@ fn Term interact_grad(Term grad_term) {
       if (src == 0) {
         return grad_zero_at(y);
       }
-      GradPair ga = grad_pair(src);
+      GradPair ga = grad_pair_with_gy(src, gy);
       return ga.bwd;
     }
 

@@ -304,7 +304,7 @@ VerificationTest[
     seed = TTensorCreate @ NumericArray[{1.0, 1.0, 1.0}, "Real32"]; (* shape {3} *)
     (* y = EXPAND(a, {3}) is {2.5, 2.5, 2.5}; cotangent ones{3}.
        d/da = sum(gy) = 3, returned in a's shape {1}. *)
-    g = TRealize @ TUOpGrad[TUOpExpand[a, {3}], seed, a];
+    g = TRealize @ TGrad[TUOpExpand[a, {3}], a, seed];
     Normal @ TTensorData[g],
     {3.0},
     TestID -> "grad/expand-shape1-to-shape3"
@@ -633,3 +633,152 @@ VerificationTest[
     TestID -> "grad/many-equal-to-separate-grads"
 ]
 
+
+(* === Higher-order gradients ====================================
+   Differentiate a TGrad result with TGrad again.  The IC-form g1 is
+   a UOP graph with leaf SUPs from the first chain rule; passing it
+   to TGrad walks through these (gradLeafTids recurses through
+   TDP0/TDP1) and the chain rule fires again. *)
+
+(* d²(a²)/da² = 2.  Simplest scalar Hessian. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{3.0}, "Real32"];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[TUOpMul[a, a], a], a],
+    {2.0},
+    TestID -> "grad/higher-order-square"
+]
+
+(* d²(a³)/da² = 6a.  At a=2 gives 12. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0}, "Real32"];
+    y = TUOpMul[TUOpMul[a, a], a];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a], a],
+    {12.0},
+    TestID -> "grad/higher-order-cube"
+]
+
+(* d²(a⁴)/da² = 12a².  At a=2 gives 48. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0}, "Real32"];
+    y = TUOpMul[TUOpMul[a, a], TUOpMul[a, a]];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a], a],
+    {48.0},
+    TestID -> "grad/higher-order-fourth"
+]
+
+(* Mixed partial: ∂/∂b (∂/∂a (a*b)) = 1. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{5.0}, "Real32"];
+    y = TUOpMul[a, b];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a], b],
+    {1.0},
+    TestID -> "grad/higher-order-mixed-partial"
+]
+
+(* Same-target second derivative of bilinear: ∂²/∂a² (a*b) = 0. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{5.0}, "Real32"];
+    y = TUOpMul[a, b];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a], a],
+    {0.0},
+    TestID -> "grad/higher-order-bilinear-same"
+]
+
+(* Third derivative: d³(a³)/da³ = 6.  Stress-tests three nested
+   chain-rule walks. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.5}, "Real32"];
+    y = TUOpMul[TUOpMul[a, a], a];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[TGrad[y, a], a], a],
+    {6.0},
+    TestID -> "grad/higher-order-third-derivative"
+]
+
+(* === Non-scalar y, higher-order =================================
+   y is a vector/tensor (no outer REDUCE).  Cotangent seed `gy`
+   matches y's shape.  TGrad still produces a per-element gradient
+   at target.shape; differentiating it again exercises the
+   higher-order path on non-scalar cotangents. *)
+
+(* Vector squaring: y = a*a (shape {3}), gy = ones{3}.
+   First-order:  d/da (a*a) with gy = 2a.
+   Second-order: d/da (2a) with gy = 2*ones = {2, 2, 2}. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{3.0, 4.0, 5.0}, "Real32"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {3}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[TUOpMul[a, a], a, seed], a, seed],
+    {2.0, 2.0, 2.0},
+    TestID -> "grad/higher-order-vec-square"
+]
+
+(* Vector cube: y = a*a*a (shape {2}), gy = ones{2}.
+   First-order:  3a^2.
+   Second-order: 6a. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0, 3.0}, "Real32"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2}];
+    y = TUOpMul[TUOpMul[a, a], a];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a, seed], a, seed],
+    {12.0, 18.0},
+    TestID -> "grad/higher-order-vec-cube"
+]
+
+(* Vector bilinear, mixed partial: y = a*b (shape {2}).
+   ∂/∂b (∂/∂a (a*b)) = ones{2} -- uniform mixed partial. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0, 3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{5.0, 7.0}, "Real32"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2}];
+    y = TUOpMul[a, b];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a, seed], b, seed],
+    {1.0, 1.0},
+    TestID -> "grad/higher-order-vec-bilinear-mixed"
+]
+
+(* Vector bilinear, same-target second derivative: ∂²/∂a² (a*b) = 0. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0, 3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{5.0, 7.0}, "Real32"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2}];
+    y = TUOpMul[a, b];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a, seed], a, seed],
+    {0.0, 0.0},
+    TestID -> "grad/higher-order-vec-bilinear-same"
+]
+
+(* Vector ADD higher-order: y = a + b (shape {3}).  ∂/∂a = ones,
+   ∂²/∂a² = 0. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {3}];
+    y = TUOpAdd[a, b];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a, seed], a, seed],
+    {0.0, 0.0, 0.0},
+    TestID -> "grad/higher-order-vec-add-zero"
+]
+
+(* 2-D tensor: y = a*a at shape {2, 3}, gy = ones{2,3}.
+   d²/da² = 2 at every position. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[
+        {{1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}}, "Real32"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2, 3}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[TUOpMul[a, a], a, seed], a, seed],
+    {{2.0, 2.0, 2.0}, {2.0, 2.0, 2.0}},
+    TestID -> "grad/higher-order-2d-square"
+]

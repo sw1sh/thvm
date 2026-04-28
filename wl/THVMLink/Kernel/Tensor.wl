@@ -127,16 +127,17 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
 ]
 
 (* Build the BWD projection over a fresh dup-like grad cell holding
-   y.  Returns a TAG_DP1 term with DUP_GRAD_FLAG set on its ext.
-   The companion FWD projection is TAG_DP0 at the same loc (via
-   TUOpFwd below or TGradPair for both at once). *)
-TUOpGrad[y_] := (ensureInit[]; TTerm[$uopGradFn[ttermRaw[y]]])
-TUOpFwd [y_] := (ensureInit[]; TTerm[$uopFwdFn [ttermRaw[y]]])
+   [y, gy].  Returns a TAG_DP1 term with DUP_GRAD_FLAG set on its ext.
+   The companion FWD projection (TAG_DP0) at the same loc just reads
+   y; the BWD fires the gy-threaded chain rule.  gy must match y's
+   shape -- TGrad below builds a default ones-at-y.shape seed. *)
+TUOpGrad[y_, gy_] := (ensureInit[]; TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy]]])
+TUOpFwd [y_, gy_] := (ensureInit[]; TTerm[$uopFwdFn [ttermRaw[y], ttermRaw[gy]]])
 
-(* Build {fwd, bwd} pair sharing one cell [y].  The dup-like
+(* Build {fwd, bwd} pair sharing one cell [y, gy].  The dup-like
    discipline -- both projections reference the same heap loc, so the
    forward subgraph isn't duplicated. *)
-TGradPair[y_] := With[{bwd = TUOpGrad[y]},
+TGradPair[y_, gy_] := With[{bwd = TUOpGrad[y, gy]},
     With[{loc = TTermVal[bwd]},
         {packTerm[0, $TagDP0, $DupGradFlag, loc], bwd}
     ]
@@ -216,24 +217,32 @@ TUOpConv2DLowered[input_, weights_, bias_] := Module[{
    existing call sites pick up the lowering transparently. *)
 TUOpConv2D[input_, weights_, bias_] := TUOpConv2DLowered[input, weights, bias]
 
-(* Top-level VJP shortcut: gradient of `y` w.r.t. `target` with
-   cotangent seed 1. *)
-(* TGrad[y, target]: the user-facing VJP.
+(* TGrad[y, target] / TGrad[y, target, gy]: the user-facing VJP.
 
-   The chain rule emits SUP^{leaf_tid}(zero, one) at each TEN leaf
-   of y.  After full reduction these SUPs propagate to the top via
-   UOP-SUP commutation; to extract a clean gradient we need ONE DUP
-   per distinct leaf-tid in y, projecting:
-     - MATCH side  for the target's leaf SUP   (= 1, the gradient)
-     - MISMATCH side for every other leaf SUP  (= 0, no contribution)
+   The chain rule threads gy down to each TEN leaf, emitting
+   SUP^{leaf_tid}(zero_at_leaf.shape, gy_at_leaf.shape).  To extract
+   the per-target gradient we need ONE DUP per distinct leaf-tid in y,
+   projecting:
+     - MATCH side  for the target's leaf SUP   (= gy, the per-element grad)
+     - MISMATCH side for every other leaf SUP  (= zero, no contribution)
 
    We discover leaf tids by walking y once at construction time and
-   nest the DUPs: TDup[t1, ..., TDup[t2, ..., TUOpGrad[y]]] each
-   projecting the appropriate side based on whether ti == target.tid. *)
+   nest the DUPs: TDup[t1, ..., TDup[t2, ..., TUOpGrad[y, gy]]] each
+   projecting the appropriate side based on whether ti == target.tid.
+
+   Default gy = ones at y's shape.  For scalar y (shape {1}) this is
+   just CONST(1.0); for tensor y we EXPAND CONST(1.0) to y's shape so
+   the chain rule's adjoint shape transforms (RESHAPE/PERMUTE/etc.)
+   land at well-defined ranks. *)
 gradLeafTids[t_TTerm] := Module[{tag = TTermTag[t]},
     Which[
         tag === $TagTEN, {TTermVal[t]},
         tag === $TagUOP, gradLeafTidsUop[TTermExt[t], TTermVal[t]],
+        (* Higher-order TGrad: y can contain DUP projections (TDP0/DP1)
+           whose cell body holds the actual UOp/TEN.  Walk cell[0] so
+           we find leaves embedded in unfired sub-cells from a prior
+           chain-rule pass. *)
+        tag === $TagDP0 || tag === $TagDP1, gradLeafTids[THeapRead[TTermVal[t]]],
         True, {}
     ]
 ]
@@ -243,39 +252,56 @@ gradLeafTidsUop[opcode_, base_] := Module[{n = uopArity[opcode]},
     DeleteDuplicates @ Flatten @ Table[gradLeafTids[THeapRead[base + i]], {i, 0, n - 1}]
 ]
 
-TGrad[y_, target_TTerm] := Module[
-    {targetTid, leafTids, matchProj, mismatchProj, dupNest, targetShape},
+(* Default cotangent seed for TGrad: ones at y's shape.  CONST is a
+   scalar (shape {1}); EXPAND lifts it to y.shape when y is non-scalar. *)
+gradOnesSeed[y_TTerm] := Module[{shape = tUopShape[y], one},
+    one = TUOpConst[1.0, "f32"];
+    If[ ListQ[shape] && Length[shape] > 0 && shape =!= {1},
+        TUOpExpand[one, shape],
+        one
+    ]
+]
+
+TGrad[y_, target_TTerm] := TGrad[y, target, gradOnesSeed[y]]
+TGrad[y_, target_TTerm, gy_TTerm] := Module[
+    {targetTid, leafTids, matchProj, mismatchProj, targetShape, dupNest, zero},
     targetTid    = TTermVal[target];
     leafTids     = gradLeafTids[y];
-    matchProj    = Function[{a, b}, b];
-    mismatchProj = Function[{a, b}, a];
+    targetShape  = TTensorShape[target];
+    matchProj    = {a, b} |-> b;
+    mismatchProj = {a, b} |-> a;
     dupNest = Fold[
-        Function[{inner, tid},
-            TDup[tid, inner, If[tid === targetTid, matchProj, mismatchProj]]],
-        TUOpGrad[y],
+        {inner, tid} |-> TDup[tid, inner, If[ tid === targetTid, matchProj, mismatchProj]],
+        TUOpGrad[y, gy],
         leafTids
     ];
-    (* Reshape to target's shape.  Chain-rule rules emit movement uops
-       whose composed output shape may differ from target.shape (e.g.
-       a REDUCE inside the chain leaves bw at the REDUCE's input shape
-       rather than at target's).  Numel always matches by construction
-       so RESHAPE is a no-cost view fix.  Without this fix, e.g.
-       SUM(RESHAPE(MUL(a, a), {2, 2}), 0) wrt a returns the right
-       values at shape {2, 2} instead of a's shape {4}. *)
-    targetShape = TTensorShape[target];
+    (* Broadcast a scalar zero into the result so it always lands at
+       target.shape.  Two cases this fixes:
+         (a) target absent from y (or non-differentiable op like CMPLT)
+             -> chain rule yields scalar CONST(0); ADD broadcasts it
+             across target.shape giving zeros at target.shape.
+         (b) higher-order TGrad where the inner chain rule's matched
+             value reduces to a constant or a sub-shape -> the ADD
+             pads the shape declaration up to target.shape without
+             changing matched values (cpu_op_add with numel==1 src
+             broadcasts cleanly).
+       For the common case where dupNest already lands at
+       target.shape, the EXPAND of a scalar 0 + ADD is value-neutral. *)
     If[ ListQ[targetShape] && Length[targetShape] > 0,
-        TUOpReshape[dupNest, targetShape],
+        zero = TUOpExpand[TUOpConst[0.0, "f32"], targetShape];
+        TUOpAdd[dupNest, zero],
         dupNest
     ]
 ]
 
-(* Multi-target VJP: build n unary TGrads sharing the y subgraph by
-   heap-loc identity, apply the user's body to them positionally.
-   materialize's per-realize memo dedups every forward kernel emitted
-   from the shared UOps -- one realize, one forward set, n backward
-   chains. *)
+(* Multi-target VJP: build n unary TGrads sharing the y subgraph (and
+   the gy seed) by heap-loc identity, apply the user's body to them
+   positionally.  materialize's per-realize memo dedups every forward
+   kernel emitted from those shared UOps across all n targets. *)
 TGradMany[y_, {target_}, body_]    := body[TGrad[y, target]]
-TGradMany[y_, targets_List, body_] := body @@ (TGrad[y, #] & /@ targets)
+TGradMany[y_, targets_List, body_] := With[{seed = gradOnesSeed[y]},
+    body @@ (TGrad[y, #, seed] & /@ targets)
+]
 
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)
    then TWnf to beta-reduce and fire the kernels.  No UOP_MATERIALIZE

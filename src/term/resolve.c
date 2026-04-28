@@ -30,9 +30,20 @@ fn Term term_resolve(Term t) {
     // resolved value rather than a stale projection term.
     if (tag == TAG_DP0 || tag == TAG_DP1) {
       Term cell = heap_read(term_val(t));
-      if (!term_sub_get(cell)) return t;
-      t = term_sub_set(cell, 0);
-      continue;
+      if (term_sub_get(cell)) {
+        t = term_sub_set(cell, 0);
+        continue;
+      }
+      // Grad-flag DP0 = pure passthrough: cell[0] holds y, no DUP
+      // ever fires.  Unwrap eagerly so higher-order chain rules
+      // (which see fwd-projections from the inner pass embedded in
+      // gy_for_a expressions) can pattern-match on the underlying
+      // term instead of getting stuck on the DP0 wrapper.
+      if (tag == TAG_DP0 && (term_ext(t) & DUP_GRAD_FLAG)) {
+        t = heap_read(term_val(t));   // = cell[0] = y
+        continue;
+      }
+      return t;
     }
     if (tag == TAG_ALO) {
       t = alo_force(t);

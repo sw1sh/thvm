@@ -671,12 +671,14 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // cotangent seed (typically a CONST(1) for top-level VJP), target is
 // the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
 // the chain-rule rewrite rule defined in interact/uop_grad.c.
-// Allocate a shared grad cell holding [y].  Both projections (FWD
+// Allocate a shared grad cell holding [y, gy].  Both projections (FWD
 // and BWD) reference this cell as TAG_DP0 / TAG_DP1 with the
-// DUP_GRAD_FLAG bit set on the ext (label) field.
-fn u64  uop_grad_cell  (Term y);
-fn Term uop_grad       (Term y);   // BWD projection (TAG_DP1 + grad flag)
-fn Term uop_fwd        (Term y);   // FWD projection (TAG_DP0 + grad flag)
+// DUP_GRAD_FLAG bit set on the ext (label) field.  FWD reads cell[0]
+// (y); BWD reads both cell[0] and cell[1] (gy = cotangent seed) and
+// runs the gy-threaded chain rule.
+fn u64  uop_grad_cell  (Term y, Term gy);
+fn Term uop_grad       (Term y, Term gy);   // BWD projection (TAG_DP1 + grad flag)
+fn Term uop_fwd        (Term y, Term gy);   // FWD projection (TAG_DP0 + grad flag)
 
 // Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in

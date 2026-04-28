@@ -615,14 +615,15 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_flip(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
-// Builds the dup-like GRAD pair: heap cell holds [y]; the returned
-// Term is the BWD projection (UOP_GRAD).  WL pairs it with a UOP_FWD
-// at the same cell loc via packTerm.
+// Builds the dup-like GRAD pair: heap cell holds [y, gy]; the returned
+// Term is the BWD projection (TAG_DP1 + DUP_GRAD_FLAG).  WL pairs it
+// with a FWD projection (TAG_DP0) at the same cell loc via packTerm.
 EXTERN_C DLLEXPORT int thvm_wl_uop_grad(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc;
-  Term y = (Term)MArgument_getInteger(args[0]);
-  Term r = uop_grad(y);
+  Term y  = (Term)MArgument_getInteger(args[0]);
+  Term gy = (Term)MArgument_getInteger(args[1]);
+  Term r  = uop_grad(y, gy);
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
@@ -630,8 +631,9 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_grad(WolframLibraryData libData, mint argc,
 EXTERN_C DLLEXPORT int thvm_wl_uop_fwd(WolframLibraryData libData, mint argc,
                                        MArgument *args, MArgument res) {
   (void)libData; (void)argc;
-  Term y = (Term)MArgument_getInteger(args[0]);
-  Term r = uop_fwd(y);
+  Term y  = (Term)MArgument_getInteger(args[0]);
+  Term gy = (Term)MArgument_getInteger(args[1]);
+  Term r  = uop_fwd(y, gy);
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
