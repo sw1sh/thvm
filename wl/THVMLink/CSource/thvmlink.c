@@ -638,6 +638,25 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_fwd(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Same as thvm_wl_uop_grad but with an explicit `target` Term.
+// When non-zero, the chain rule's leaf-handler does direct
+// tid-equality match against target (returning gy on match, scalar
+// zero on mismatch) without needing the WL DUP nest.  Used by
+// TGrad when the target is a TVAR (lambda-bound variable) so leaf
+// tids aren't statically known at WL construction time.
+EXTERN_C DLLEXPORT int thvm_wl_uop_grad_with_target(WolframLibraryData libData,
+                                                    mint argc,
+                                                    MArgument *args,
+                                                    MArgument res) {
+  (void)libData; (void)argc;
+  Term y      = (Term)MArgument_getInteger(args[0]);
+  Term gy     = (Term)MArgument_getInteger(args[1]);
+  Term target = (Term)MArgument_getInteger(args[2]);
+  Term r      = uop_grad_with_target(y, gy, target);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 // TAG_CTR accessors: thvm_wl_term_ctr_n(t) -> arity, and
 // thvm_wl_term_ctr_at(t, i) -> i-th child Term (0 if out-of-range).
 EXTERN_C DLLEXPORT int thvm_wl_term_ctr_n(WolframLibraryData libData, mint argc,

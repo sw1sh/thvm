@@ -701,9 +701,10 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 // DUP_GRAD_FLAG bit set on the ext (label) field.  FWD reads cell[0]
 // (y); BWD reads both cell[0] and cell[1] (gy = cotangent seed) and
 // runs the gy-threaded chain rule.
-fn u64  uop_grad_cell  (Term y, Term gy);
+fn u64  uop_grad_cell  (Term y, Term gy, Term target);
 fn Term uop_grad       (Term y, Term gy);   // BWD projection (TAG_DP1 + grad flag)
 fn Term uop_fwd        (Term y, Term gy);   // FWD projection (TAG_DP0 + grad flag)
+fn Term uop_grad_with_target(Term y, Term gy, Term target);
 
 // Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in

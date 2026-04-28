@@ -132,6 +132,8 @@ TUOpFlip[src_, axes_List] := With[{mask = Total[2^# & /@ axes]},
    y; the BWD fires the gy-threaded chain rule.  gy must match y's
    shape -- TGrad below builds a default ones-at-y.shape seed. *)
 TUOpGrad[y_, gy_] := (ensureInit[]; TTerm[$uopGradFn[ttermRaw[y], ttermRaw[gy]]])
+TUOpGradWithTarget[y_, gy_, target_] := (ensureInit[];
+    TTerm[$uopGradWithTargetFn[ttermRaw[y], ttermRaw[gy], ttermRaw[target]]])
 TUOpFwd [y_, gy_] := (ensureInit[]; TTerm[$uopFwdFn [ttermRaw[y], ttermRaw[gy]]])
 
 (* Build {fwd, bwd} pair sharing one cell [y, gy].  The dup-like
@@ -264,10 +266,26 @@ gradOnesSeed[y_TTerm] := Module[{shape = tUopShape[y], one},
 
 TGrad[y_, target_TTerm] := TGrad[y, target, gradOnesSeed[y]]
 TGrad[y_, target_TTerm, gy_TTerm] := Module[
-    {targetTid, leafTids, matchProj, mismatchProj, targetShape, dupNest, zero},
+    {targetTid, leafTids, matchProj, mismatchProj, targetShape, dupNest, zero,
+     targetTag},
     targetTid    = TTermVal[target];
-    leafTids     = gradLeafTids[y];
+    targetTag    = TTermTag[target];
     targetShape  = TTensorShape[target];
+    (* When target is a free variable (TVAR -- typically captured by a
+       surrounding TLam that hasn't beta-reduced yet) leaf tids inside
+       y can't be discovered statically.  Build a single TUOpGradWith-
+       Target cell instead of the per-leaf DUP nest; the C-side chain
+       rule does direct tid match against `target` (resolved through
+       SUB at firing time, post-beta).  ListQ[targetShape] gates the
+       fall-through to the zero-broadcast: TVAR target has no shape
+       (TTensorShape returns Missing) so we just return the GRAD
+       term directly -- the chain rule produces a tensor at y's
+       shape, which is the natural gradient shape for the bound
+       variable. *)
+    If[ targetTag =!= $TagTEN,
+        Return[TUOpGradWithTarget[y, gy, target]]
+    ];
+    leafTids     = gradLeafTids[y];
     matchProj    = {a, b} |-> b;
     mismatchProj = {a, b} |-> a;
     dupNest = Fold[

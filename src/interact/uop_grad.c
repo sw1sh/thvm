@@ -65,16 +65,36 @@ fn Term grad_zero_at(Term y) {
   return expand_to_target(uop_const(DT_F32, 0), y);
 }
 
-// Allocate a 2-slot grad cell with cell[0] = child and cell[1] = 0
-// (placeholder).  Caller MUST heap_set(loc + 1, gy_for_child) before
-// the BWD projection is forced.  Returning the loc lets us split the
-// fwd/bwd construction across the gy-build (caller may need the FWD
-// of one sibling to construct the other sibling's gy, e.g. MUL).
+// Allocate a 3-slot grad cell with cell[0] = child, cell[1] = 0
+// (placeholder), cell[2] = target.  Caller MUST heap_set(loc + 1,
+// gy_for_child) before the BWD projection is forced.  Returning the
+// loc lets us split the fwd/bwd construction across the gy-build
+// (caller may need the FWD of one sibling to construct the other
+// sibling's gy, e.g. MUL).
+//
+// Sub-cells inherit `target` from a thread-static set up by
+// interact_grad on entry: the OUTER fire reads cell[2] and pushes
+// it on a small stack so sub-cells allocated during the chain-rule
+// rewrite carry the same target.  When target != 0, the leaf rule
+// does direct tid-equality match against target (returning gy on
+// match, scalar zero on mismatch) -- no SUP/DUP scaffolding needed.
+// When target == 0, the leaf falls back to the SUP/DUP path so the
+// outer DUP^t.tid nest at the WL surface can do per-target
+// projection (used by TGradMany and concrete-target single TGrad).
+#define GRAD_TARGET_STACK_CAP 32
+static Term GRAD_TARGET_STACK[GRAD_TARGET_STACK_CAP];
+static u32  GRAD_TARGET_TOP = 0;
+static inline Term grad_current_target(void) {
+  return GRAD_TARGET_TOP > 0
+       ? GRAD_TARGET_STACK[GRAD_TARGET_TOP - 1]
+       : 0;
+}
 typedef struct { Term fwd; Term bwd; u64 loc; } GradPair;
 static u64 grad_cell_alloc(Term child) {
-  u64 c = heap_alloc(2);
+  u64 c = heap_alloc(3);
   heap_set(c + 0, child);
-  heap_set(c + 1, 0);   // placeholder; caller fills in gy_for_child
+  heap_set(c + 1, 0);                     // placeholder; caller fills gy
+  heap_set(c + 2, grad_current_target()); // inherit
   return c;
 }
 static Term grad_fwd_of(u64 cell) {
@@ -97,17 +117,48 @@ static Term grad_fwd_inline(u64 cell, Term child) {
   return grad_fwd_of(cell);
 }
 
-// Build the leaf-rule SUP^tid(CONST(0), gy) directly (without
-// going through grad_cell_alloc + grad_bwd_of + interact_grad's
-// LEAF case).  Used by the chain rule's child-handling to short-
-// circuit cell allocation when the child is already a TEN -- the
-// BWD chain we'd build would just fire the leaf rule anyway, so
-// emit the SUP inline.  Saves 2 heap cells (the grad cell) +
-// 1 BWD term per TEN-child reference.  At depth-N TGrad with
-// many TEN leaves, this is the single biggest leak (per profile:
-// DP0/cells grow 15x round 1->2 from cell allocation per child).
+// Emit the leaf result for a TEN child.
+//
+// Two paths:
+//   (a) target-bearing fire (grad_current_target() != 0): resolve
+//       target to a concrete TEN; if its tid matches the leaf's,
+//       return gy_for_leaf directly; otherwise return a scalar zero.
+//       This is what makes TGrad work inside TLam bodies -- the WL
+//       constructor can pass the (still-symbolic) bound variable as
+//       target, and after APP-LAM beta the chain rule resolves it
+//       to the substituted TEN here.
+//   (b) plain fire (target == 0): emit SUP^{tid}(CONST(0), gy).
+//       The mismatch slot is a scalar zero (shape {1}); cpu_op_add /
+//       cpu_op_mul broadcast numel==1 operands, so any outer combiner
+//       ADD(matched_at_S, scalar_zero) resolves to matched_at_S
+//       regardless of S.  The match slot keeps gy at its natural
+//       (= leaf) shape so the surrounding DUP^t.tid match returns
+//       the correct per-element VJP.  Used when the WL surface
+//       wraps with the per-leaf DUP nest (concrete-target TGrad
+//       and TGradMany).
 static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
-  u32 tid = (u32)term_val(ten);
+  // Resolve `ten` defensively: callers either pass an already-
+  // resolved Term (MUL/RECIP/etc.) or the raw heap_read child
+  // (grad_bwd_for_child).  Reading term_val on an unresolved VAR
+  // gives the var-loc, not the substituted TEN's tid -- a tid
+  // comparison against `target` would silently mismatch.
+  Term ten_r  = term_resolve(ten);
+  if (term_tag(ten_r) != TAG_TEN) ten_r = ten;   // best effort; caller guarantees TEN
+  Term target = grad_current_target();
+  if (target != 0) {
+    // Drive target to WHNF before comparing: in a recursive lambda
+    // (sgd_loop) the bound variable is substituted to step(w0) --
+    // a UOP graph that hasn't materialized yet.  term_resolve only
+    // peels VAR/ALO indirection; we need wnf (or interact_kernel)
+    // to drive any pending compute so the target becomes a TEN.
+    Term tr = term_resolve(target);
+    if (term_tag(tr) != TAG_TEN) tr = term_resolve(wnf(tr));
+    if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(ten_r)) {
+      return gy_for_leaf;
+    }
+    return uop_const(DT_F32, 0);          // mismatch -> scalar zero
+  }
+  u32 tid = (u32)term_val(ten_r);
   u64 sloc = heap_alloc(2);
   heap_set(sloc + 0, uop_const(DT_F32, 0));
   heap_set(sloc + 1, gy_for_leaf);
@@ -159,24 +210,32 @@ fn Term grad_half_const(void) {
   return uop_const(DT_F32, bits);
 }
 
-fn Term interact_grad(Term grad_term) {
+// Inner dispatch: runs the actual chain-rule rewrite.  The outer
+// `interact_grad` wraps this with the push/pop of the target stack
+// so grad_cell_alloc / grad_leaf_sup see the right current target
+// during sub-cell allocation.
+static Term interact_grad_dispatch(Term grad_term) {
   u64  cell_orig = term_val(grad_term);
   Term y         = term_resolve(heap_read(cell_orig + 0));
   Term gy        = heap_read(cell_orig + 1);
+  Term target    = heap_read(cell_orig + 2);
 
   u8 y_tag = term_tag(y);
 
   // === LEAF: y is a TEN ===
-  // Emit SUP^{y.tid}(CONST(0), gy).  The mismatch slot is a scalar
-  // zero (shape {1}); cpu_op_add / cpu_op_mul broadcast numel==1
-  // operands, so any outer combiner ADD(matched_at_S, scalar_zero)
-  // resolves to matched_at_S regardless of S.  This avoids the
-  // shape-mismatch trap of emitting zero at *leaf* shape, which
-  // breaks outer ADDs when sibling subtrees reach leaves of
-  // different shapes (e.g. MUL(w_at_{3,4}, EXPAND(x_at_{4}, {3,4}))).
-  // The match slot keeps gy at its natural (= leaf) shape so
-  // DUP^t.tid match returns the correct per-element VJP.
+  // Same two-path treatment as grad_leaf_sup: when target is
+  // present, do direct tid-match (gy on match, scalar zero on
+  // mismatch); when target == 0, emit SUP^{y.tid}(CONST(0), gy)
+  // for the surrounding WL DUP nest to project.
   if (y_tag == TAG_TEN) {
+    if (target != 0) {
+      Term tr = term_resolve(target);
+      if (term_tag(tr) != TAG_TEN) tr = term_resolve(wnf(tr));
+      if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(y)) {
+        return gy;
+      }
+      return uop_const(DT_F32, 0);
+    }
     u32 tid = (u32)term_val(y);
     u64 sloc = heap_alloc(2);
     heap_set(sloc + 0, uop_const(DT_F32, 0));   // scalar 0, broadcasts in any ADD/MUL
@@ -521,4 +580,20 @@ fn Term interact_grad(Term grad_term) {
     default:
       return grad_term;
   }
+}
+
+// Public entry: read this cell's target and push it on the per-fire
+// stack so any sub-cell that grad_cell_alloc creates during the
+// dispatch inherits it.  Pop on exit, even if dispatch bails (the
+// caller may retry later, expecting a clean stack).
+fn Term interact_grad(Term grad_term) {
+  Term target = heap_read(term_val(grad_term) + 2);
+  u8 pushed = 0;
+  if (GRAD_TARGET_TOP < GRAD_TARGET_STACK_CAP) {
+    GRAD_TARGET_STACK[GRAD_TARGET_TOP++] = target;
+    pushed = 1;
+  }
+  Term r = interact_grad_dispatch(grad_term);
+  if (pushed) GRAD_TARGET_TOP--;
+  return r;
 }

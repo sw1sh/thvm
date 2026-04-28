@@ -49,13 +49,27 @@ fn void extern_pinned_for_each(void (*cb)(Term)) {
 // creates a handle, calls extern_pin_handle_set(handle_id, term)
 // to associate, and the host's GC eventually calls
 // extern_pin_handle_drop(handle_id) which releases the pin.
+//
+// WL's ManagedLibraryExpression ids are monotonically increasing
+// across the entire kernel session -- once a long-running test
+// suite or notebook drives the counter past the array cap, every
+// subsequent associate would silently drop, breaking the pin /
+// GC contract.  We grow the backing array on demand instead.
 
-#define EXTERN_PIN_HANDLE_CAP 8192
+static Term *EXTERN_PIN_HANDLES = NULL;
+static u64   EXTERN_PIN_HANDLE_CAP = 0;
 
-static Term EXTERN_PIN_HANDLES[EXTERN_PIN_HANDLE_CAP];
+static void extern_pin_handle_reserve(u64 id) {
+  if (id < EXTERN_PIN_HANDLE_CAP) return;
+  u64 new_cap = EXTERN_PIN_HANDLE_CAP > 0 ? EXTERN_PIN_HANDLE_CAP : 8192;
+  while (id >= new_cap) new_cap *= 2;
+  EXTERN_PIN_HANDLES = (Term *)realloc(EXTERN_PIN_HANDLES, new_cap * sizeof(Term));
+  for (u64 i = EXTERN_PIN_HANDLE_CAP; i < new_cap; i++) EXTERN_PIN_HANDLES[i] = 0;
+  EXTERN_PIN_HANDLE_CAP = new_cap;
+}
 
 fn void extern_pin_handle_set(u64 id, Term t) {
-  if (id >= EXTERN_PIN_HANDLE_CAP) return;
+  extern_pin_handle_reserve(id);
   EXTERN_PIN_HANDLES[id] = t;
   extern_pin_term(t);
 }
@@ -69,5 +83,6 @@ fn void extern_pin_handle_drop(u64 id) {
 }
 
 fn void extern_pin_handle_clear(void) {
-  memset(EXTERN_PIN_HANDLES, 0, sizeof(EXTERN_PIN_HANDLES));
+  if (EXTERN_PIN_HANDLES == NULL) return;
+  memset(EXTERN_PIN_HANDLES, 0, EXTERN_PIN_HANDLE_CAP * sizeof(Term));
 }

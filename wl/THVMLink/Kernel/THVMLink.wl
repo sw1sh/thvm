@@ -272,6 +272,7 @@ $uopPadFn      := $uopPadFn      = load["thvm_wl_uop_pad",      {Integer, {Integ
 $uopShrinkFn   := $uopShrinkFn   = load["thvm_wl_uop_shrink",   {Integer, {Integer, 1}},             Integer];
 $uopFlipFn     := $uopFlipFn     = load["thvm_wl_uop_flip",     {Integer, Integer},                  Integer];
 $uopGradFn     := $uopGradFn     = load["thvm_wl_uop_grad",        {Integer, Integer},               Integer];
+$uopGradWithTargetFn := $uopGradWithTargetFn = load["thvm_wl_uop_grad_with_target", {Integer, Integer, Integer}, Integer];
 $uopFwdFn      := $uopFwdFn      = load["thvm_wl_uop_fwd",         {Integer, Integer},               Integer];
 $termCtrNFn    := $termCtrNFn    = load["thvm_wl_term_ctr_n",      {Integer},                        Integer];
 $termCtrAtFn   := $termCtrAtFn   = load["thvm_wl_term_ctr_at",     {Integer, Integer},               Integer];

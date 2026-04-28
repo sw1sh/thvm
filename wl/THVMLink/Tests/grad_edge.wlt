@@ -58,12 +58,14 @@ VerificationTest[
    d/dx of sum(y) = mask = (x > 0). *)
 VerificationTest[
     TInit[];
-    x = TTensorCreate @ NumericArray[{-2.0, -1.0, 0.5, 1.5, 3.0}, "Real32"];
-    zero = TUOpExpand[TUOpConst[0.0, "f32"], {5}];
-    mask = TUOpCmplt[zero, x];   (* 1 where x > 0, else 0 *)
-    relu = TUOpMul[x, mask];
-    g = TRealize @ TGrad[ TUOpReduce[relu, 0, "SUM"], x];
-    Normal @ TTensorData[g],
+    Module[{x, zero, mask, relu, g},
+        x    = TTensorCreate @ NumericArray[{-2.0, -1.0, 0.5, 1.5, 3.0}, "Real32"];
+        zero = TUOpExpand[TUOpConst[0.0, "f32"], {5}];
+        mask = TUOpCmplt[zero, x];   (* 1 where x > 0, else 0 *)
+        relu = TUOpMul[x, mask];
+        g    = TRealize @ TGrad[ TUOpReduce[relu, 0, "SUM"], x];
+        Normal @ TTensorData[g]
+    ],
     {0.0, 0.0, 1.0, 1.0, 1.0},
     TestID -> "grad/relu-via-cmplt-mask"
 ]

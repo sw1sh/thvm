@@ -28,6 +28,16 @@ static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
     case TAG_DUP: return 1;
     case TAG_OP2: return 2;
     case TAG_MAT: return 2;
+    case TAG_DP0: case TAG_DP1: {
+      // grad-flavored projections wrap a 3-cell grad cell
+      // [y, gy, target_or_zero]; plain DUP projections wrap a
+      // 1-cell dup body.  Realize the cells so each lambda
+      // instance gets its own grad cell -- otherwise the body's
+      // TVAR target inside cell+2 would alias the template's
+      // bound var and resolve to the same LAM across instances.
+      if (ext & DUP_GRAD_FLAG) return 3;
+      return 1;
+    }
     case TAG_UOP: {
       switch (ext) {
         case UOP_CONST:                                    return 1;

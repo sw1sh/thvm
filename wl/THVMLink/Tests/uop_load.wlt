@@ -68,42 +68,41 @@ VerificationTest[
     TestID -> "uop-load/composes-under-add"
 ]
 
-(* === sub-item (c): linearizer prepends LOAD per input slot ===
-   A 2-input ADD kernel program now contains [LOAD, LOAD, ADD]. *)
+(* === sub-item (c): explicit TUOpLoad linearizes as a program step ===
+   A LOAD wrapping one of the inputs adds a LOAD step before the
+   ADD; plain `TUOpAdd[a, b]` (no explicit LOAD) is just `[ADD]`. *)
 
 VerificationTest[
     TInit[];
     a = TTensor[{3}, {1.0, 2.0, 3.0}];
     b = TTensor[{3}, {4.0, 5.0, 6.0}];
-    k    = TMaterialize[TUOpAdd[a, b]];
+    k    = TMaterialize[TUOpAdd[a, TUOpLoad[b]]];
     kid  = TTermVal @ THeapRead[TTermVal[k] + 1];
     info = TKernelInfo[kid];
     {info["n_inputs"], info["n_ops"],
      info["program"][[1, "opcode"]],
-     info["program"][[2, "opcode"]],
-     info["program"][[3, "opcode"]]},
-    {2, 3, "LOAD", "LOAD", "ADD"},
-    TestID -> "uop-load/linearizer-prepends-load-per-input"
+     info["program"][[2, "opcode"]]},
+    {2, 2, "LOAD", "ADD"},
+    TestID -> "uop-load/explicit-load-emits-program-step"
 ]
 
-(* === sub-item (d): backends honor LOAD as a no-op ===
-   The CPU interpret loop now skips prefix-LOAD program ops; Metal
-   already addresses program[n_inputs] directly so it never sees them.
-   Verify a 2-input ADD still produces the right elementwise sum
-   despite the LOAD prefix. *)
+(* === sub-item (d): backends honor LOAD as identity memcpy ===
+   When LOAD is in the prefix it copies the input through to a
+   scratch register that downstream ops read; when LOAD is the
+   final op it writes the output buffer.  Verify the elementwise
+   sum is still correct with explicit LOAD on one operand. *)
 
 VerificationTest[
     TInit[];
     a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
     b = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
-    Normal @ TTensorData @ TRealize @ TUOpAdd[a, b],
+    Normal @ TTensorData @ TRealize @ TUOpAdd[TUOpLoad[a], TUOpLoad[b]],
     {5.0, 7.0, 9.0},
-    TestID -> "uop-load/2-input-add-correct-with-load-prefix"
+    TestID -> "uop-load/2-input-add-correct-with-explicit-loads"
 ]
 
-(* TUOpLoad as the user-intended op (the FINAL program op) still
-   runs the cpu_op_load memcpy and writes its output -- only
-   prefix-LOADs are skipped. *)
+(* TUOpLoad as the user-intended op (the FINAL program op) runs
+   the cpu_op_load memcpy and writes its output. *)
 VerificationTest[
     TInit[];
     a   = TTensorCreate @ NumericArray[{7.0, 8.0, 9.0}, "Real32"];

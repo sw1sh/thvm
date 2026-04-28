@@ -12,11 +12,14 @@ VerificationTest[
     b    = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
     res  = TRealize @ TUOpAdd[a, b];
     kt   = TKernelTable[];
+    (* Cols: {n_inputs, output_tid, reserved0, spliced,
+       consumer_count, output_numel, output_dtype}.  The `fired`
+       flag at column 3 was removed (kernels re-fire on every redex,
+       OP2-style); slot reads 0 as a placeholder. *)
     {Length[kt] >= 1, Length[First[kt]] === 7,
-     (* fired flag at column 3 should be 1 for the ADD kernel *)
-     Max[#[[3]] & /@ kt] === 1},
+     Max[#[[3]] & /@ kt] === 0},
     {True, True, True},
-    TestID -> "memory-plan-bridge/kernel-table-shape-and-fired"
+    TestID -> "memory-plan-bridge/kernel-table-shape"
 ]
 
 VerificationTest[

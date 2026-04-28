@@ -414,13 +414,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   for (u32 step = 0; step < ke->n_ops; step++) {
     KProgOp *p = &ke->program[step];
 
-    // Skip prefix LOADs (mirror cpu_interpret line 59): when LOAD
-    // appears before the final op, the input buffer is already
-    // bound; downstream ops read it via KSRC_AS_INPUT directly.
-    // The final-position LOAD (when it's the user-intended op via
-    // TUOpLoad) still runs the memcpy kernel.
-    if (p->opcode == UOP_LOAD && step + 1 < ke->n_ops) continue;
-
     // Resolve this op's src buffers and numels.  KSRC_IS_INPUT(s)
     // -> kernel input (effective_buf_ids[KSRC_INDEX(s)]); plain
     // index -> output of earlier op (inter_buf_ids[KSRC_INDEX(s)]).

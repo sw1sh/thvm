@@ -339,6 +339,21 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   t = term_resolve(t);
   u8 tag = term_tag(t);
 
+  // GRAD projection (TAG_DP1 + DUP_GRAD_FLAG) stuck under a
+  // UOP_ADD/UOP_MUL spine: term_resolve doesn't unwrap it, and the
+  // surrounding TRealize loop's nf+wnf cadence may not reach this
+  // particular cell when it's hidden inside lazily-unfolded ALO
+  // bodies (recursive REF defs like sgd_loop).  Fire interact_grad
+  // inline so the chain rule's result can flow up.  TAG_DP0 +
+  // grad_flag (FWD passthrough) is already handled by term_resolve.
+  if ((tag == TAG_DP1) && (term_ext(t) & DUP_GRAD_FLAG)) {
+    Term g = interact_grad(t);
+    if (g != t) {
+      t = term_resolve(g);
+      tag = term_tag(t);
+    }
+  }
+
   if (tag == TAG_TEN) {
     u32 tid  = (u32)term_val(t);
     u32 slot = input_slot_dedup(ke, tid, t);
