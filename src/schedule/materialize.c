@@ -16,10 +16,42 @@ static u32  BOUNDARY_TID  [BOUNDARY_ORDER_CAP];   // emitted output TenDesc id
 static Term BOUNDARY_TERM [BOUNDARY_ORDER_CAP];   // emitted UOP_KERNEL term
 static u32  BOUNDARY_ORDER_LEN = 0;
 
+// Open-addressed loc -> BOUNDARY_ORDER index hash.  Without it,
+// boundary_index_for_loc was an O(BOUNDARY_ORDER_LEN) scan per
+// visited UOP child, called from every emit_kernel_for_boundary's
+// visit() recursion -- the dominant cost above n~12 in the bound-w
+// SGD pattern (O(N^3) materialize).
+#define BOUNDARY_HASH_CAP   (1u << 13)        // 8K slots, BOUNDARY_ORDER_CAP = 1024
+#define BOUNDARY_HASH_EMPTY 0xFFFFFFFFu
+static u32 BOUNDARY_HASH[BOUNDARY_HASH_CAP];
+
+static inline u32 boundary_hash_of(u64 loc) {
+  loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
+  loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
+  loc ^= loc >> 33;
+  return (u32)loc & (BOUNDARY_HASH_CAP - 1);
+}
+
+static void boundary_hash_clear(void) {
+  for (u32 i = 0; i < BOUNDARY_HASH_CAP; i++) BOUNDARY_HASH[i] = BOUNDARY_HASH_EMPTY;
+}
+
+static void boundary_hash_insert(u64 loc, u32 idx) {
+  u32 h = boundary_hash_of(loc);
+  for (u32 probe = 0; probe < BOUNDARY_HASH_CAP; probe++) {
+    u32 i = (h + probe) & (BOUNDARY_HASH_CAP - 1);
+    if (BOUNDARY_HASH[i] == BOUNDARY_HASH_EMPTY) {
+      BOUNDARY_HASH[i] = idx;
+      return;
+    }
+  }
+}
+
 #define BOUNDARY_DEPTH_INVALID 0xFFFFFFFFu
 static u32 BOUNDARY_DEPTH[REALIZE_INFO_CAP];
 
 #define VISIT_BAIL 0xDEADBEEFu
+
 
 // === topo-sort over realize boundaries (g2a) ===
 
@@ -54,6 +86,7 @@ static u32 boundary_depth_rec(u64 loc) {
 
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
+  boundary_hash_clear();
   for (u32 i = 0; i < REALIZE_INFO_CAP; i++)
     BOUNDARY_DEPTH[i] = BOUNDARY_DEPTH_INVALID;
   boundary_depth_rec(term_val(root));
@@ -75,7 +108,11 @@ static void topo_sort_boundaries(Term root) {
       u32 dt = items[j].depth; items[j].depth = items[j-1].depth; items[j-1].depth = dt;
     }
   }
-  for (u32 i = 0; i < n; i++) BOUNDARY_ORDER[BOUNDARY_ORDER_LEN++] = items[i].loc;
+  for (u32 i = 0; i < n; i++) {
+    u32 idx = BOUNDARY_ORDER_LEN++;
+    BOUNDARY_ORDER[idx] = items[i].loc;
+    boundary_hash_insert(items[i].loc, idx);
+  }
 }
 
 fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
@@ -303,8 +340,13 @@ static Term materialize_root_alias(Term t) {
 // === build_kernel: visit() recursion (g2b) ===
 
 static u32 boundary_index_for_loc(u64 loc) {
-  for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++)
-    if (BOUNDARY_ORDER[i] == loc) return i;
+  u32 h = boundary_hash_of(loc);
+  for (u32 probe = 0; probe < BOUNDARY_HASH_CAP; probe++) {
+    u32 i = (h + probe) & (BOUNDARY_HASH_CAP - 1);
+    u32 idx = BOUNDARY_HASH[i];
+    if (idx == BOUNDARY_HASH_EMPTY) return 0xFFFFFFFFu;
+    if (idx < BOUNDARY_ORDER_LEN && BOUNDARY_ORDER[idx] == loc) return idx;
+  }
   return 0xFFFFFFFFu;
 }
 

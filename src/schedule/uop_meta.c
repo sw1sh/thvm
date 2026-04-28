@@ -34,13 +34,97 @@ fn u8 uop_is_binary_elementwise(u8 op) {
   return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ;
 }
 
-// Best-effort shape inference used by interact_grad to figure out
-// the shape of an upstream UOp/TEN at GRAD-unroll time.  Pure
-// function over the heap; does NOT consult any shape environment
-// (callers always pass env_id=0).  The g2 rewrite may replace this
-// with a one-pass shape annotation, but keeping the recursion here
-// is the smallest surface that lets interact_grad keep working.
+// Per-call memoization for term_shape_in.  Without it, recursive
+// shape inference re-walked shared subgraphs exponentially -- the
+// dominant cost of materialize for the bound-w SGD pattern (where
+// each iter's gradient references the same target/lr UOPs).
+// Loc-keyed open-addressed hash; outer entry assigns a fresh
+// generation, so we never need to memset 8K slots.  Cell holds
+// (gen, loc, shape, valid) where valid=0 means cached-negative.
+#define SHAPE_CACHE_CAP 8192            // power of two, > deepest UOP DAG
+typedef struct {
+  u32   gen;
+  u32   valid;     // 0 = cached negative result, 1 = positive
+  u64   loc;
+  Shape shape;
+} ShapeCacheSlot;
+static ShapeCacheSlot SHAPE_CACHE[SHAPE_CACHE_CAP];
+static u32 SHAPE_CACHE_DEPTH = 0;       // re-entrant guard
+static u32 SHAPE_CACHE_GEN   = 0;       // monotonic; 0 = invalid
+
+static inline u32 shape_cache_hash(u64 loc) {
+  loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
+  loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
+  loc ^= loc >> 33;
+  return (u32)loc & (SHAPE_CACHE_CAP - 1);
+}
+
+// Returns: 0 = miss, 1 = positive hit (out = shape), -1 = negative hit.
+static int shape_cache_lookup(u64 loc, Shape *out) {
+  u32 h = shape_cache_hash(loc);
+  for (u32 probe = 0; probe < SHAPE_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (SHAPE_CACHE_CAP - 1);
+    ShapeCacheSlot *s = &SHAPE_CACHE[i];
+    if (s->gen != SHAPE_CACHE_GEN) return 0;     // empty (slot belongs to past gen)
+    if (s->loc == loc) {
+      if (s->valid) { *out = s->shape; return 1; }
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static void shape_cache_insert(u64 loc, Shape const *shape, int valid) {
+  u32 h = shape_cache_hash(loc);
+  for (u32 probe = 0; probe < SHAPE_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (SHAPE_CACHE_CAP - 1);
+    ShapeCacheSlot *s = &SHAPE_CACHE[i];
+    if (s->gen != SHAPE_CACHE_GEN || s->loc == loc) {
+      s->gen   = SHAPE_CACHE_GEN;
+      s->loc   = loc;
+      s->valid = valid ? 1 : 0;
+      if (valid) s->shape = *shape;
+      return;
+    }
+  }
+  // table full -- silently drop, caller falls back to recursion
+}
+
+// term_shape_in_inner: the recursive worker.  Outer entry bumps
+// the generation so prior cache entries become invisible without
+// the cost of a memset.
+static int term_shape_in_inner(Term t, u32 env_id, Shape *out);
+
 fn int term_shape_in(Term t, u32 env_id, Shape *out) {
+  if (SHAPE_CACHE_DEPTH == 0) {
+    SHAPE_CACHE_GEN++;
+    if (SHAPE_CACHE_GEN == 0) SHAPE_CACHE_GEN = 1;   // skip 0 sentinel on wrap
+  }
+  SHAPE_CACHE_DEPTH++;
+  int ok = term_shape_in_inner(t, env_id, out);
+  SHAPE_CACHE_DEPTH--;
+  return ok;
+}
+
+static int term_shape_in_uncached(Term t, u32 env_id, Shape *out);
+
+static int term_shape_in_inner(Term t, u32 env_id, Shape *out) {
+  // Cache lookup keyed on the packed Term value.  Skip for atoms /
+  // tags whose val isn't a heap loc; for those the recursion bottom
+  // is cheap anyway.
+  u8 tag0 = term_tag(t);
+  int cacheable = (tag0 == TAG_UOP || tag0 == TAG_TEN);
+  if (cacheable) {
+    int hit = shape_cache_lookup((u64)t, out);
+    if (hit == 1) return 1;
+    if (hit == -1) return 0;
+  }
+  int ok = term_shape_in_uncached(t, env_id, out);
+  if (cacheable) shape_cache_insert((u64)t, out, ok);
+  return ok;
+}
+
+static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
   (void)env_id;
   // Bound-var shape: a TLam can carry a shape annotation for its
   // bound variable (registered via TLamShape in the WL surface,

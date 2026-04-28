@@ -26,15 +26,50 @@
 UOpInfo REALIZE_INFO    [REALIZE_INFO_CAP];
 u32     REALIZE_INFO_LEN = 0;
 
+// Open-addressed hash table mapping loc -> REALIZE_INFO index.
+// Without this, realize_info_find did a linear scan of REALIZE_INFO,
+// which made realize_classify O(N^2) for the N UOPs in a recursive
+// training-loop graph and the dominant cost of long bound-w realizes.
+// Cap is the next power of two >= REALIZE_INFO_CAP for cheap masking.
+#define REALIZE_INFO_HASH_CAP (1u << 14)   // 16K slots, REALIZE_INFO_CAP = 8K
+#define REALIZE_INFO_HASH_EMPTY 0xFFFFFFFFu
+static u32 REALIZE_INFO_HASH[REALIZE_INFO_HASH_CAP];
+
+static inline u32 realize_info_hash(u64 loc) {
+  loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
+  loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
+  loc ^= loc >> 33;
+  return (u32)loc & (REALIZE_INFO_HASH_CAP - 1);
+}
+
 fn void realize_info_clear(void) {
   REALIZE_INFO_LEN = 0;
+  for (u32 i = 0; i < REALIZE_INFO_HASH_CAP; i++)
+    REALIZE_INFO_HASH[i] = REALIZE_INFO_HASH_EMPTY;
 }
 
 fn u32 realize_info_find(u64 loc) {
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    if (REALIZE_INFO[i].loc == loc) return i;
+  u32 h = realize_info_hash(loc);
+  for (u32 probe = 0; probe < REALIZE_INFO_HASH_CAP; probe++) {
+    u32 i = (h + probe) & (REALIZE_INFO_HASH_CAP - 1);
+    u32 idx = REALIZE_INFO_HASH[i];
+    if (idx == REALIZE_INFO_HASH_EMPTY) return 0xFFFFFFFFu;
+    if (REALIZE_INFO[idx].loc == loc) return idx;
   }
   return 0xFFFFFFFFu;
+}
+
+static void realize_info_hash_insert(u64 loc, u32 idx) {
+  u32 h = realize_info_hash(loc);
+  for (u32 probe = 0; probe < REALIZE_INFO_HASH_CAP; probe++) {
+    u32 i = (h + probe) & (REALIZE_INFO_HASH_CAP - 1);
+    if (REALIZE_INFO_HASH[i] == REALIZE_INFO_HASH_EMPTY) {
+      REALIZE_INFO_HASH[i] = idx;
+      return;
+    }
+  }
+  // Hash table full -- silently drop; lookups for this loc will
+  // miss but caller has the linear cap to fall back to.
 }
 
 static u32 realize_info_get_or_add(u64 loc, u8 op) {
@@ -46,6 +81,7 @@ static u32 realize_info_get_or_add(u64 loc, u8 op) {
   REALIZE_INFO[idx].consumer_count = 0;
   REALIZE_INFO[idx].op             = op;
   REALIZE_INFO[idx].realized       = 0;
+  realize_info_hash_insert(loc, idx);
   return idx;
 }
 
