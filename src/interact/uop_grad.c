@@ -84,6 +84,50 @@ static Term grad_bwd_of(u64 cell) {
   return term_new(0, TAG_DP1, DUP_GRAD_FLAG, cell);
 }
 
+// FWD reference for a sibling's chain-rule cell, used in cross-
+// references inside gy_for_other (e.g. MUL's gy_for_a needs b's
+// forward value).  When the child is already an atomic TEN we
+// inline it directly: the DP0+grad_flag wrapper would resolve to
+// the same TEN via term_resolve, but the wrapper costs one Term
+// per reference, and these multiply across nested TGrad rounds.
+// Skipping the wrap for TEN children is safe -- TEN is atomic, no
+// re-evaluation cost from sharing.
+static Term grad_fwd_inline(u64 cell, Term child) {
+  if (term_tag(term_resolve(child)) == TAG_TEN) return child;
+  return grad_fwd_of(cell);
+}
+
+// Build the leaf-rule SUP^tid(CONST(0), gy) directly (without
+// going through grad_cell_alloc + grad_bwd_of + interact_grad's
+// LEAF case).  Used by the chain rule's child-handling to short-
+// circuit cell allocation when the child is already a TEN -- the
+// BWD chain we'd build would just fire the leaf rule anyway, so
+// emit the SUP inline.  Saves 2 heap cells (the grad cell) +
+// 1 BWD term per TEN-child reference.  At depth-N TGrad with
+// many TEN leaves, this is the single biggest leak (per profile:
+// DP0/cells grow 15x round 1->2 from cell allocation per child).
+static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
+  u32 tid = (u32)term_val(ten);
+  u64 sloc = heap_alloc(2);
+  heap_set(sloc + 0, uop_const(DT_F32, 0));
+  heap_set(sloc + 1, gy_for_leaf);
+  return term_new(0, TAG_SUP, tid, sloc);
+}
+
+// Build the BWD reference for a child:
+//   - if child is TEN, short-circuit: emit SUP^tid(0, gy_for_child)
+//     directly (no grad cell needed, no BWD trigger needed).
+//   - else allocate a grad cell [child, gy_for_child] and return
+//     its DP1+grad_flag BWD projection (chain rule will recurse).
+static Term grad_bwd_for_child(Term child, Term gy_for_child) {
+  if (term_tag(term_resolve(child)) == TAG_TEN) {
+    return grad_leaf_sup(child, gy_for_child);
+  }
+  u64 c = grad_cell_alloc(child);
+  heap_set(c + 1, gy_for_child);
+  return grad_bwd_of(c);
+}
+
 // One-shot helper: allocate cell, write gy, return {fwd, bwd, loc}.
 static GradPair grad_pair_with_gy(Term child, Term gy_for_child) {
   u64 c = grad_cell_alloc(child);
@@ -159,9 +203,9 @@ fn Term interact_grad(Term grad_term) {
     case UOP_ADD: {
       Term a = heap_read(y_loc + 0);
       Term b = heap_read(y_loc + 1);
-      GradPair ga = grad_pair_with_gy(a, gy);
-      GradPair gb = grad_pair_with_gy(b, gy);
-      return uop_binary(UOP_ADD, ga.bwd, gb.bwd);
+      Term a_bwd = grad_bwd_for_child(a, gy);
+      Term b_bwd = grad_bwd_for_child(b, gy);
+      return uop_binary(UOP_ADD, a_bwd, b_bwd);
     }
 
     // MUL(a, b): chicken-and-egg between the two adjoints (gy_for_a
@@ -171,16 +215,35 @@ fn Term interact_grad(Term grad_term) {
     case UOP_MUL: {
       Term a = heap_read(y_loc + 0);
       Term b = heap_read(y_loc + 1);
-      u64  ca = grad_cell_alloc(a);
-      u64  cb = grad_cell_alloc(b);
-      Term a_fwd = grad_fwd_of(ca);
-      Term b_fwd = grad_fwd_of(cb);
-      Term gy_a  = uop_binary(UOP_MUL, b_fwd, gy);
-      Term gy_b  = uop_binary(UOP_MUL, a_fwd, gy);
-      heap_set(ca + 1, gy_a);
-      heap_set(cb + 1, gy_b);
-      Term a_bwd = grad_bwd_of(ca);
-      Term b_bwd = grad_bwd_of(cb);
+      Term a_resolved = term_resolve(a);
+      Term b_resolved = term_resolve(b);
+      u8   a_is_ten   = term_tag(a_resolved) == TAG_TEN;
+      u8   b_is_ten   = term_tag(b_resolved) == TAG_TEN;
+      // Cross-references.  When the sibling is TEN, use it directly
+      // (no DP0 wrapper needed).  Else we need its grad cell's FWD
+      // projection -- allocated below with a placeholder gy, patched
+      // after we build the gy expressions.
+      u64 ca = 0, cb = 0;
+      Term a_fwd = a_resolved, b_fwd = b_resolved;
+      if (!a_is_ten) { ca = grad_cell_alloc(a); a_fwd = grad_fwd_of(ca); }
+      if (!b_is_ten) { cb = grad_cell_alloc(b); b_fwd = grad_fwd_of(cb); }
+      Term gy_a = uop_binary(UOP_MUL, b_fwd, gy);
+      Term gy_b = uop_binary(UOP_MUL, a_fwd, gy);
+      // BWD references.  TEN children short-circuit to leaf SUPs;
+      // others use the cells above (whose gy slot we patch now).
+      Term a_bwd, b_bwd;
+      if (a_is_ten) {
+        a_bwd = grad_leaf_sup(a_resolved, gy_a);
+      } else {
+        heap_set(ca + 1, gy_a);
+        a_bwd = grad_bwd_of(ca);
+      }
+      if (b_is_ten) {
+        b_bwd = grad_leaf_sup(b_resolved, gy_b);
+      } else {
+        heap_set(cb + 1, gy_b);
+        b_bwd = grad_bwd_of(cb);
+      }
       return uop_binary(UOP_ADD, a_bwd, b_bwd);
     }
 
@@ -193,19 +256,22 @@ fn Term interact_grad(Term grad_term) {
     case UOP_NEG: {
       Term a = heap_read(y_loc + 0);
       Term gy_a = uop_unary(UOP_NEG, gy);
-      GradPair ga = grad_pair_with_gy(a, gy_a);
-      return ga.bwd;
+      return grad_bwd_for_child(a, gy_a);
     }
 
     case UOP_LOG2: {
       // d(log2 a)/da = 1/(a*ln2) ; gy_for_a = gy * RECIP(a) * (1/ln2)
       Term a = heap_read(y_loc + 0);
-      u64  ca = grad_cell_alloc(a);
-      Term a_fwd = grad_fwd_of(ca);
-      Term ra    = uop_unary(UOP_RECIP, a_fwd);
-      Term k     = grad_inv_ln2_const();
+      Term a_resolved = term_resolve(a);
+      u8 a_is_ten = term_tag(a_resolved) == TAG_TEN;
+      u64 ca = 0;
+      Term a_fwd = a_resolved;
+      if (!a_is_ten) { ca = grad_cell_alloc(a); a_fwd = grad_fwd_of(ca); }
+      Term ra     = uop_unary(UOP_RECIP, a_fwd);
+      Term k      = grad_inv_ln2_const();
       Term factor = uop_binary(UOP_MUL, ra, k);
-      Term gy_a  = uop_binary(UOP_MUL, gy, factor);
+      Term gy_a   = uop_binary(UOP_MUL, gy, factor);
+      if (a_is_ten) return grad_leaf_sup(a_resolved, gy_a);
       heap_set(ca + 1, gy_a);
       return grad_bwd_of(ca);
     }
@@ -213,12 +279,16 @@ fn Term interact_grad(Term grad_term) {
     case UOP_EXP2: {
       // d(2^a)/da = 2^a * ln2 ; gy_for_a = gy * EXP2(a) * ln2
       Term a = heap_read(y_loc + 0);
-      u64  ca = grad_cell_alloc(a);
-      Term a_fwd = grad_fwd_of(ca);
-      Term ea    = uop_unary(UOP_EXP2, a_fwd);
-      Term k     = grad_ln2_const();
+      Term a_resolved = term_resolve(a);
+      u8 a_is_ten = term_tag(a_resolved) == TAG_TEN;
+      u64 ca = 0;
+      Term a_fwd = a_resolved;
+      if (!a_is_ten) { ca = grad_cell_alloc(a); a_fwd = grad_fwd_of(ca); }
+      Term ea     = uop_unary(UOP_EXP2, a_fwd);
+      Term k      = grad_ln2_const();
       Term factor = uop_binary(UOP_MUL, ea, k);
-      Term gy_a  = uop_binary(UOP_MUL, gy, factor);
+      Term gy_a   = uop_binary(UOP_MUL, gy, factor);
+      if (a_is_ten) return grad_leaf_sup(a_resolved, gy_a);
       heap_set(ca + 1, gy_a);
       return grad_bwd_of(ca);
     }
@@ -226,8 +296,11 @@ fn Term interact_grad(Term grad_term) {
     case UOP_RECIP: {
       // d(1/a)/da = -1/a^2 ; gy_for_a = gy * NEG(RECIP(a)*RECIP(a))
       Term a = heap_read(y_loc + 0);
-      u64  ca = grad_cell_alloc(a);
-      Term a_fwd = grad_fwd_of(ca);
+      Term a_resolved = term_resolve(a);
+      u8 a_is_ten = term_tag(a_resolved) == TAG_TEN;
+      u64 ca = 0;
+      Term a_fwd = a_resolved;
+      if (!a_is_ten) { ca = grad_cell_alloc(a); a_fwd = grad_fwd_of(ca); }
       // Two independent RECIP nodes for diagram clarity (materialize
       // dedups by heap loc; structurally separate is intentional).
       Term r1 = uop_unary(UOP_RECIP, a_fwd);
@@ -235,6 +308,7 @@ fn Term interact_grad(Term grad_term) {
       Term sq = uop_binary(UOP_MUL, r1, r2);
       Term ns = uop_unary(UOP_NEG, sq);
       Term gy_a = uop_binary(UOP_MUL, gy, ns);
+      if (a_is_ten) return grad_leaf_sup(a_resolved, gy_a);
       heap_set(ca + 1, gy_a);
       return grad_bwd_of(ca);
     }
@@ -242,13 +316,17 @@ fn Term interact_grad(Term grad_term) {
     case UOP_SQRT: {
       // d(sqrt a)/da = 1/(2*sqrt a) ; gy_for_a = gy * 0.5 * RECIP(SQRT(a))
       Term a = heap_read(y_loc + 0);
-      u64  ca = grad_cell_alloc(a);
-      Term a_fwd  = grad_fwd_of(ca);
+      Term a_resolved = term_resolve(a);
+      u8 a_is_ten = term_tag(a_resolved) == TAG_TEN;
+      u64 ca = 0;
+      Term a_fwd = a_resolved;
+      if (!a_is_ten) { ca = grad_cell_alloc(a); a_fwd = grad_fwd_of(ca); }
       Term sa     = uop_unary(UOP_SQRT, a_fwd);
       Term inv_sa = uop_unary(UOP_RECIP, sa);
       Term k      = grad_half_const();
       Term factor = uop_binary(UOP_MUL, k, inv_sa);
       Term gy_a   = uop_binary(UOP_MUL, gy, factor);
+      if (a_is_ten) return grad_leaf_sup(a_resolved, gy_a);
       heap_set(ca + 1, gy_a);
       return grad_bwd_of(ca);
     }
@@ -284,7 +362,7 @@ fn Term interact_grad(Term grad_term) {
 
       Term gy_a;
       u64  ca = grad_cell_alloc(a);
-      Term a_fwd = grad_fwd_of(ca);
+      Term a_fwd = grad_fwd_inline(ca, a);
       if (kind == REDUCE_SUM) {
         gy_a = gy_lifted;
       } else if (kind == REDUCE_MAX) {
@@ -312,8 +390,7 @@ fn Term interact_grad(Term grad_term) {
       } else {
         gy_a = gy;   // best effort: passthrough
       }
-      GradPair ga = grad_pair_with_gy(a, gy_a);
-      return ga.bwd;
+      return grad_bwd_for_child(a, gy_a);
     }
 
     case UOP_EXPAND: {
@@ -358,16 +435,14 @@ fn Term interact_grad(Term grad_term) {
       } else {
         gy_a = gy;
       }
-      GradPair ga = grad_pair_with_gy(a, gy_a);
-      return ga.bwd;
+      return grad_bwd_for_child(a, gy_a);
     }
 
     case UOP_FLIP: {
       Term a    = heap_read(y_loc + 0);
       u32  mask = (u32)term_val(heap_read(y_loc + 1));
       Term gy_a = uop_flip(gy, mask);
-      GradPair ga = grad_pair_with_gy(a, gy_a);
-      return ga.bwd;
+      return grad_bwd_for_child(a, gy_a);
     }
 
     case UOP_PERMUTE: {
@@ -383,8 +458,7 @@ fn Term interact_grad(Term grad_term) {
       for (u32 i = 0; i < ndim; i++)
         inv_perm[perm[i]] = i;
       Term gy_a = uop_permute(gy, ndim, inv_perm);
-      GradPair ga = grad_pair_with_gy(a, gy_a);
-      return ga.bwd;
+      return grad_bwd_for_child(a, gy_a);
     }
 
     case UOP_PAD: case UOP_SHRINK: {
@@ -421,8 +495,7 @@ fn Term interact_grad(Term grad_term) {
         }
         gy_a = uop_pad(gy, ndim, widths);
       }
-      GradPair ga = grad_pair_with_gy(a, gy_a);
-      return ga.bwd;
+      return grad_bwd_for_child(a, gy_a);
     }
 
     case UOP_KERNEL: {
@@ -436,8 +509,7 @@ fn Term interact_grad(Term grad_term) {
       if (src == 0) {
         return grad_zero_at(y);
       }
-      GradPair ga = grad_pair_with_gy(src, gy);
-      return ga.bwd;
+      return grad_bwd_for_child(src, gy);
     }
 
     case UOP_CONST:
