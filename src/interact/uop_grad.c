@@ -559,7 +559,7 @@ static Term interact_grad_dispatch(Term grad_term) {
       u32 ndim = src_shape.ndim;
       u32 perm[MAX_DIM], inv_perm[MAX_DIM];
       for (u32 i = 0; i < ndim; i++)
-        perm[i] = (u32)term_val(heap_read(y_loc + 1 + i));
+        perm[i] = (u32)term_val(heap_read(y_loc + 2 + i));
       for (u32 i = 0; i < ndim; i++)
         inv_perm[perm[i]] = i;
       Term gy_a = uop_permute(gy, ndim, inv_perm);
@@ -575,8 +575,8 @@ static Term interact_grad_dispatch(Term grad_term) {
       u32 ndim = a_shape.ndim;
       u32 ranges[2 * MAX_DIM];
       for (u32 i = 0; i < ndim; i++) {
-        ranges[2 * i + 0] = (u32)term_val(heap_read(y_loc + 1 + 2 * i));
-        ranges[2 * i + 1] = (u32)term_val(heap_read(y_loc + 2 + 2 * i));
+        ranges[2 * i + 0] = (u32)term_val(heap_read(y_loc + 2 + 2 * i));
+        ranges[2 * i + 1] = (u32)term_val(heap_read(y_loc + 3 + 2 * i));
       }
 
       Term gy_a;

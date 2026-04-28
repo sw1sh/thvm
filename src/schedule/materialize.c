@@ -138,7 +138,7 @@ static int view_apply_permute(View const *src, u64 expr_loc, View *out) {
   u8 used[MAX_DIM] = {0};
   u8 identity = 1;
   for (u32 i = 0; i < src->shape.ndim; i++) {
-    u32 p = (u32)term_val(heap_read(expr_loc + 1 + i));
+    u32 p = (u32)term_val(heap_read(expr_loc + 2 + i));
     if (p >= src->shape.ndim || used[p]) return 0;
     used[p] = 1;
     ts.dims[i]      = src->shape.dims[p];
@@ -158,8 +158,8 @@ static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
   i32 add_off = 0;
   u32 t_numel = 1;
   for (u32 i = 0; i < src->shape.ndim; i++) {
-    u32 b = (u32)term_val(heap_read(expr_loc + 1 + 2 * i));
-    u32 e = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+    u32 b = (u32)term_val(heap_read(expr_loc + 2 + 2 * i));
+    u32 e = (u32)term_val(heap_read(expr_loc + 3 + 2 * i));
     if (e <= b || e > src->shape.dims[i]) return 0;
     ts.dims[i] = e - b;
     t_numel  *= (e - b);
@@ -517,14 +517,14 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     for (u32 i = 0; i < out_shape.ndim; i++) p->out_dims [i] = out_shape.dims[i];
     if (op == UOP_PERMUTE) {
       for (u32 i = 0; i < src_shape.ndim; i++) {
-        u32 pi = (u32)term_val(heap_read(loc + 1 + i));
+        u32 pi = (u32)term_val(heap_read(loc + 2 + i));
         p->axis_perm[i] = (u8)(pi & 0xFF);
       }
     }
     if (op == UOP_SHRINK) {
       for (u32 i = 0; i < src_shape.ndim; i++) {
-        u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
-        u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+        u32 b = (u32)term_val(heap_read(loc + 2 + 2 * i));
+        u32 e = (u32)term_val(heap_read(loc + 3 + 2 * i));
         p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
         p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
       }
@@ -547,8 +547,8 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     Shape out_shape = src_shape;
     u32   out_numel = 1;
     for (u32 i = 0; i < src_shape.ndim; i++) {
-      u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
-      u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+      u32 b = (u32)term_val(heap_read(loc + 2 + 2 * i));
+      u32 e = (u32)term_val(heap_read(loc + 3 + 2 * i));
       out_shape.dims[i] = src_shape.dims[i] + b + e;
       out_numel        *= out_shape.dims[i];
     }
@@ -564,8 +564,8 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     for (u32 i = 0; i < src_shape.ndim; i++) {
       p->src0_dims[i] = src_shape.dims[i];
       p->out_dims [i] = out_shape.dims[i];
-      u32 b = (u32)term_val(heap_read(loc + 1 + 2 * i));
-      u32 e = (u32)term_val(heap_read(loc + 2 + 2 * i));
+      u32 b = (u32)term_val(heap_read(loc + 2 + 2 * i));
+      u32 e = (u32)term_val(heap_read(loc + 3 + 2 * i));
       p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
       p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
     }

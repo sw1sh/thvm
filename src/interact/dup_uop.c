@@ -23,10 +23,9 @@
 //    before that happens would lose the label.  Caller leaves them
 //    stuck (the wnf default branch puts the body back and stops).
 //
-//  - PERMUTE / PAD / SHRINK encode ndim in the ext field rather than
-//    via a leading NUM(ndim), and our local utilities don't decode
-//    that yet.  Those bail (return 0 from uop_dup_arity, falling back
-//    to stuck) until the chain-rule cases that need them land.
+//  - PERMUTE / PAD / SHRINK store NUM(ndim) at heap offset 1 (same
+//    layout as RESHAPE / EXPAND), so uop_dup_arity reads ndim from
+//    the cell directly without a shape walk.
 //
 // uop_dup_arity returns the heap arity (total cell count).
 
@@ -48,17 +47,14 @@ fn u32 uop_dup_arity(Term uop) {
       return 2 + (u32)term_val(ndim_cell);
     }
     case UOP_PERMUTE: {
-      // ndim inferred from src's shape; bail if src is non-shape-able.
-      Shape s;
-      if (!term_shape_in(heap_read(loc), 0, &s) || s.ndim == 0) return 0;
-      return 1 + s.ndim;
+      Term ndim_cell = heap_read(loc + 1);
+      if (term_tag(ndim_cell) != TAG_NUM) return 0;
+      return 2 + (u32)term_val(ndim_cell);
     }
     case UOP_PAD: case UOP_SHRINK: {
-      // Heap = [src, NUM(b0), NUM(e0), ..., NUM(b_{ndim-1}), NUM(e_{ndim-1})].
-      // ndim from src's shape.
-      Shape s;
-      if (!term_shape_in(heap_read(loc), 0, &s) || s.ndim == 0) return 0;
-      return 1 + 2 * s.ndim;
+      Term ndim_cell = heap_read(loc + 1);
+      if (term_tag(ndim_cell) != TAG_NUM) return 0;
+      return 2 + 2 * (u32)term_val(ndim_cell);
     }
     default: return 0;   // KERNEL/ASSIGN: bail (active)
   }

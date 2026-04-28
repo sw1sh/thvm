@@ -168,10 +168,10 @@ typedef u64 Term;
 #define UOP_KERNEL       1   // heap = [output_buf, ast_root]; ext bits: see uop_kernel.c
 #define UOP_CONST        2   // heap = [NUM(bits)]; ext = dtype
 #define UOP_RESHAPE      3   // heap = [src, NUM(ndim), NUM(d0), ..., NUM(d_{n-1})]
-#define UOP_PERMUTE      4   // heap = [src, NUM(p0), ...]; ext = ndim
+#define UOP_PERMUTE      4   // heap = [src, NUM(ndim), NUM(p0), ...]
 #define UOP_EXPAND       5   // heap = [src, NUM(ndim), NUM(d0), ...]
-#define UOP_PAD          6   // heap = [src, NUM(b0), NUM(e0), ...]; ext = ndim
-#define UOP_SHRINK       7   // heap = [src, NUM(b0), NUM(e0), ...]; ext = ndim
+#define UOP_PAD          6   // heap = [src, NUM(ndim), NUM(b0), NUM(e0), ...]
+#define UOP_SHRINK       7   // heap = [src, NUM(ndim), NUM(b0), NUM(e0), ...]
 #define UOP_FLIP         8   // heap = [src, NUM(axes_bitmask)]
 #define UOP_ADD          9   // heap = [a, b]
 #define UOP_MUL         10   // heap = [a, b]

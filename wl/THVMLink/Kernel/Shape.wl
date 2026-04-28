@@ -124,17 +124,18 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                         Table[$termValFn[$heapReadFn[val + 2 + i]],
                               {i, 0, ndim - 1}]
                     ],
-                (* SHRINK / PAD heap: [src, NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...].
-                   ndim implicit in the source's rank.  SHRINK shrinks
-                   each axis to e_i - b_i; PAD grows by b_i + e_i. *)
+                (* SHRINK / PAD heap: [src, NUM(ndim), NUM(b0), NUM(e0), ...].
+                   ndim cell at val+1; pairs at val+2..val+1+2*ndim.
+                   SHRINK shrinks each axis to e_i - b_i; PAD grows by
+                   b_i + e_i. *)
                 $UopShrink,
                     Module[{cs, n},
                         cs = tUopShape[TTerm[$heapReadFn[val]]];
                         If[ cs === $Failed, Return[$Failed, Module]];
                         n = Length[cs];
                         Table[
-                            $termValFn[$heapReadFn[val + 2 + 2 * (i - 1)]] -
-                            $termValFn[$heapReadFn[val + 1 + 2 * (i - 1)]],
+                            $termValFn[$heapReadFn[val + 3 + 2 * (i - 1)]] -
+                            $termValFn[$heapReadFn[val + 2 + 2 * (i - 1)]],
                             {i, 1, n}]
                     ],
                 $UopPad,
@@ -144,11 +145,11 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                         n = Length[cs];
                         Table[
                             cs[[i]] +
-                            $termValFn[$heapReadFn[val + 1 + 2 * (i - 1)]] +
-                            $termValFn[$heapReadFn[val + 2 + 2 * (i - 1)]],
+                            $termValFn[$heapReadFn[val + 2 + 2 * (i - 1)]] +
+                            $termValFn[$heapReadFn[val + 3 + 2 * (i - 1)]],
                             {i, 1, n}]
                     ],
-                (* PERMUTE heap: [src, NUM(p0), NUM(p1), ...].
+                (* PERMUTE heap: [src, NUM(ndim), NUM(p0), NUM(p1), ...].
                    out.dim[i] = src.dim[perm[i]]. *)
                 $UopPermute,
                     Module[{cs, n},
@@ -156,7 +157,7 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
                         If[ cs === $Failed, Return[$Failed, Module]];
                         n = Length[cs];
                         Table[
-                            cs[[1 + $termValFn[$heapReadFn[val + i]]]],
+                            cs[[1 + $termValFn[$heapReadFn[val + 1 + i]]]],
                             {i, 1, n}]
                     ],
                 (* FLIP doesn't change shape. *)
