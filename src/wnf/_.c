@@ -70,14 +70,16 @@ enter:
           next = heap_read(loc);
           goto enter;
         }
-        // BWD: fire chain rule.
-        Term g = interact_grad(next);
-        if (g == next) {
-          whnf = next;
-          goto apply;
-        }
-        ITRS++;
-        next = g;
+        // BWD: HVM4-style stack-based descent.  Push the grad-DP1
+        // frame, descend into cell[0] (= y) so the normal enter loop
+        // drives any nested DPs / UOPs to head form.  The apply phase
+        // will pop the frame and call interact_grad with the resolved
+        // y.  This avoids the reentrant wnf() approach (which broke
+        // with deep nesting via cell-consumption / shared-stack
+        // surprises) and naturally handles arbitrarily deep DP-DP
+        // structures from prior chain-rule rounds.
+        stack[s_pos++] = next;
+        next = heap_read(loc + 0);
         goto enter;
       }
       Term cell = heap_take(loc);
@@ -557,6 +559,28 @@ apply:
       }
       case TAG_DP0:
       case TAG_DP1: {
+        // Grad-flavored DP1 frame (pushed in enter when we encountered
+        // TAG_DP1 + DUP_GRAD_FLAG): whnf is now the resolved cell[0]
+        // (= y in head form).  Re-stash it back so interact_grad
+        // sees the resolved value, then dispatch the chain rule.
+        // Grad-flag DP0 never gets pushed (FWD passthrough is
+        // immediate in enter), so we only handle DP1 here.
+        if (term_tag(frame) == TAG_DP1 && (term_ext(frame) & DUP_GRAD_FLAG)) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          u64 gloc = term_val(frame);
+          heap_set(gloc + 0, whnf);
+          Term g = interact_grad(frame);
+          if (g == frame) {
+            // Stuck (chain rule can't pattern-match -- e.g. y is a
+            // SUP that hasn't been routed yet).  Propagate frame as
+            // WHNF; outer DUPs / etc. will retry.
+            whnf = frame;
+            continue;
+          }
+          ITRS++;
+          next = g;
+          goto enter;
+        }
         u8  side = (term_tag(frame) == TAG_DP0) ? 0 : 1;
         u64 loc  = term_val(frame);
         u32 lab  = term_ext(frame);
