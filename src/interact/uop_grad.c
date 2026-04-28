@@ -136,6 +136,19 @@ static Term grad_fwd_inline(u64 cell, Term child) {
 //       the correct per-element VJP.  Used when the WL surface
 //       wraps with the per-leaf DUP nest (concrete-target TGrad
 //       and TGradMany).
+// Resolve through ALO chains but DO NOT follow VAR/DP-SUB.  Used
+// to compute "variable identity": for a lambda-bound `w` whose
+// template loc is buried under one or more ALOs, we want the
+// realized TVAR (the dyn loc) -- not whatever value APP-LAM beta
+// substituted at that loc.  That way two terms referring to the
+// same bound variable compare equal even when SUB has substituted
+// it to a yet-unmaterialized UOP graph (typical iter-2+ of a
+// recursive sgd loop).
+static Term grad_alo_resolve(Term t) {
+  while (term_tag(t) == TAG_ALO) t = alo_force(t);
+  return t;
+}
+
 static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
   // Resolve `ten` defensively: callers either pass an already-
   // resolved Term (MUL/RECIP/etc.) or the raw heap_read child
@@ -143,16 +156,19 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
   // gives the var-loc, not the substituted TEN's tid -- a tid
   // comparison against `target` would silently mismatch.
   Term ten_r  = term_resolve(ten);
-  if (term_tag(ten_r) != TAG_TEN) ten_r = ten;   // best effort; caller guarantees TEN
+  if (term_tag(ten_r) != TAG_TEN) ten_r = ten;   // best effort
   Term target = grad_current_target();
   if (target != 0) {
-    // Drive target to WHNF before comparing: in a recursive lambda
-    // (sgd_loop) the bound variable is substituted to step(w0) --
-    // a UOP graph that hasn't materialized yet.  term_resolve only
-    // peels VAR/ALO indirection; we need wnf (or interact_kernel)
-    // to drive any pending compute so the target becomes a TEN.
+    // Variable-identity match first: target's alo-resolved form is
+    // TVAR(dyn_loc).  If the leaf-as-passed (ten) alo-resolves to
+    // the same TVAR, we're at the bound variable and gy is the
+    // gradient regardless of what SUB has substituted.
+    Term ty = grad_alo_resolve(target);
+    Term tn = grad_alo_resolve(ten);
+    if (ty == tn) return gy_for_leaf;
+    // Concrete-tid match: target resolved through SUB to a TEN
+    // (iter-1 case where w0 is concrete).
     Term tr = term_resolve(target);
-    if (term_tag(tr) != TAG_TEN) tr = term_resolve(wnf(tr));
     if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(ten_r)) {
       return gy_for_leaf;
     }
@@ -166,11 +182,23 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
 }
 
 // Build the BWD reference for a child:
+//   - if child IS the target variable (alo-only resolve match),
+//     short-circuit to gy_for_child directly: this child is the
+//     differentiation target leaf, regardless of what SUB has
+//     substituted it to (catches recursive lambda iter-2+ where
+//     the bound w substitutes to a UOP graph not yet materialized).
 //   - if child is TEN, short-circuit: emit SUP^tid(0, gy_for_child)
-//     directly (no grad cell needed, no BWD trigger needed).
+//     (or gy_for_child directly when target is set) via the leaf
+//     rule.
 //   - else allocate a grad cell [child, gy_for_child] and return
 //     its DP1+grad_flag BWD projection (chain rule will recurse).
 static Term grad_bwd_for_child(Term child, Term gy_for_child) {
+  Term target = grad_current_target();
+  if (target != 0) {
+    Term ty = grad_alo_resolve(target);
+    Term tc = grad_alo_resolve(child);
+    if (ty == tc) return gy_for_child;
+  }
   if (term_tag(term_resolve(child)) == TAG_TEN) {
     return grad_leaf_sup(child, gy_for_child);
   }
@@ -227,10 +255,20 @@ static Term interact_grad_dispatch(Term grad_term) {
   // present, do direct tid-match (gy on match, scalar zero on
   // mismatch); when target == 0, emit SUP^{y.tid}(CONST(0), gy)
   // for the surrounding WL DUP nest to project.
+  // Variable-identity match: if y (raw, before term_resolve)
+  // equals target's alo-resolved form, this whole sub-cell is
+  // sitting at the bound variable -- gy is the gradient.  Catches
+  // the recursive-lambda case where y is TVAR(dyn_w) before SUB
+  // (which would point to a yet-unmaterialized UOP graph).
+  if (target != 0) {
+    Term ty = grad_alo_resolve(target);
+    Term yr = grad_alo_resolve(heap_read(cell_orig + 0));
+    if (ty == yr) return gy;
+  }
+
   if (y_tag == TAG_TEN) {
     if (target != 0) {
       Term tr = term_resolve(target);
-      if (term_tag(tr) != TAG_TEN) tr = term_resolve(wnf(tr));
       if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(y)) {
         return gy;
       }
