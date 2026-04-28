@@ -305,6 +305,8 @@ static void install_ctx_backends(TContext *ctx, const char *want) {
 
 void thvm_init(void) {
   init_ctx_arrays(CURRENT_CTX);
+  uop_const_cache_reset();   // CONST cache keyed by raw bits + dtype;
+                             // stale entries point into a freed heap.
   extern_pin_clear();   // drop any leftover pins from a prior session
   // Backend selection: THVM_BACKEND=metal picks Metal as the default
   // device for newly allocated tensors.  Per-tensor backends are still
