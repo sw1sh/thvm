@@ -135,23 +135,42 @@ VerificationTest[
     TestID -> "lam-shape/materialize-body-then-apply-fires-correctly"
 ]
 
-(* TLamMaterialized: the user-facing helper that wraps the
-   manual `THeapAlloc + lam_shape_set + TMaterialize + packTerm`
-   sequence above.  Compile-once-dispatch-many in one
-   constructor. *)
+(* TLamMaterialized: JIT-style lambda.  Body stays
+   unmaterialized at construction; first TApp infers `x`'s shape
+   from the argument and materializes the body in place.  No
+   shape spelled out by the user. *)
 
 VerificationTest[
     TInit[];
-    Module[{lam, ten, result, kernels, programs},
-        lam = TLamMaterialized[{3}, w, TUOpAdd[w, w]];
+    Module[{lam, kernelsBefore, ten, result, kernelsAfter, programs},
+        lam = TLamMaterialized[w, TUOpAdd[w, w]];
+        kernelsBefore = TKernelCount[] - 1;
         ten = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
         result = TWnf[TApp[lam, ten]];
-        kernels  = TKernelCount[] - 1;
-        programs = TKernelProgramCacheSize[];
-        {Normal @ TTensorData[result], kernels, programs}
+        kernelsAfter = TKernelCount[] - 1;
+        programs     = TKernelProgramCacheSize[];
+        (* No kernel before the first APP; one kernel emerges
+           from the JIT step; one distinct program in the cache. *)
+        {kernelsBefore, Normal @ TTensorData[result], kernelsAfter, programs}
     ],
-    {{2., 4., 6.}, 1, 1},
-    TestID -> "lam-shape/tlam-materialized-compile-once"
+    {0, {2., 4., 6.}, 1, 1},
+    TestID -> "lam-shape/tlam-materialized-jit-on-first-apply"
+]
+
+(* Different argument shapes: the same JIT lambda applied to a
+   {5}-vector compiles a fresh kernel with that input shape (each
+   instance materializes once for its own arg.shape). *)
+
+VerificationTest[
+    TInit[];
+    Module[{lam5, ten5, result},
+        lam5 = TLamMaterialized[w, TUOpAdd[w, w]];
+        ten5 = TTensorCreate @ NumericArray[{10., 20., 30., 40., 50.}, "Real32"];
+        result = TWnf[TApp[lam5, ten5]];
+        Normal @ TTensorData[result]
+    ],
+    {20., 40., 60., 80., 100.},
+    TestID -> "lam-shape/tlam-materialized-shape-inferred-from-arg"
 ]
 
 (* Two distinct APPs to the same materialized lambda body should

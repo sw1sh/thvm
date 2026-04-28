@@ -52,7 +52,7 @@ TEra::usage       = "TEra[] constructs an eraser term.";
 TVarFor::usage    = "TVarFor[lamLoc] constructs a VAR pointing at a binder loc.";
 TLam::usage       = "TLam[x, body] constructs a lambda; HoldAll, so `x` is the binder symbol and `body` is the lambda body referring to it (e.g. TLam[w, TUOpAdd[w, w]]).";
 TLamShape::usage  = "TLamShape[shape_List, x, body] constructs a lambda whose bound variable carries a shape annotation; e.g. TLamShape[{3}, w, TUOpAdd[w, w]].  The annotation is consulted by term_shape_in (and downstream by materialize) while the bound variable is still pre-substitution -- letting the body compile against `KSRC_AS_INPUT(slot)` of the annotated shape rather than waiting for APP-LAM beta.";
-TLamMaterialized::usage = "TLamMaterialized[shape_List, x, body] is a shape-annotated lambda whose body is TMaterialize'd into a UOP_KERNEL at construction time.  Each TApp[lam, arg] re-fires the same cached kernel with `arg` bound to the input slot -- compile once, dispatch many.";
+TLamMaterialized::usage = "TLamMaterialized[x, body] is a JIT-style lambda: the body stays unmaterialized at construction, and the first TApp[lam, arg] infers x's shape from `arg`, materializes the body into a UOP_KERNEL with the TVAR as a symbolic input slot, then substitutes arg.  No need to spell out the shape -- inferred from the argument tensor.";
 TApp::usage       = "TApp[fun, arg] constructs an application.";
 TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
 TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
@@ -701,23 +701,25 @@ TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     packTerm[0, $TagLAM, 0, loc]
 ]
 
-(* TLamMaterialized[shape, x, body] -- a shape-annotated lambda
-   whose body is COMPILED (TMaterialize'd) into a UOP_KERNEL
-   before the lambda is sealed.  Subsequent TApp[lam, arg] just
-   re-fires the cached kernel with `arg` bound to the input slot;
-   the body is never re-materialized.  This is the canonical
-   "compile once, dispatch many" form for recursive lambdas
-   (path 3 in docs/loop-profile.md).
+(* TLamMaterialized[x, body] -- JIT-style lambda.  At construction
+   time the body is stored UNMATERIALIZED (a UOp graph with TVAR
+   references to `x`).  On the first `TApp[lam, arg]`, the
+   APP-LAM interaction infers `x`'s shape from `arg`, registers
+   it in the lam_shape table, materializes the body into a
+   UOP_KERNEL with the TVAR as a symbolic input slot, then
+   substitutes `arg` so the kernel reads through SUB.  Subsequent
+   structurally-identical lambdas (e.g. each iter of a recursive
+   REF) materialize fresh per-instance, but the kernel-program
+   hash-cons cache deduplicates the program template across them.
 
-   Build order matters: the TVAR for `x` must be created against
-   `loc` BEFORE the body is constructed, so the body's TUOps
-   reference our shaped TVAR (and TMaterialize emits
-   KSRC_AS_INPUT(0) for it). *)
+   Compile-once-dispatch-many without making the user spell out
+   the shape -- it's inferred from the argument tensor like
+   tinygrad's @TinyJit annotation. *)
 SetAttributes[TLamMaterialized, HoldAll]
-TLamMaterialized[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
-    THVMLink`Private`$lamShapeSetFn[loc, shape];
-    THeapSet[loc, TMaterialize[Function[x, body][TVarFor[loc]]]];
-    packTerm[0, $TagLAM, 0, loc]
+TLamMaterialized[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
+    THeapSet[loc, Function[x, body][TVarFor[loc]]];
+    (* LAM_JIT_FLAG = 1 << 0 in src/thvm.h *)
+    packTerm[0, $TagLAM, 1, loc]
 ]
 
 (* Sugar: TTerm[ctx, id][arg] == TApp[TTerm[ctx, id], arg] lets the
