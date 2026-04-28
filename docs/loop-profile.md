@@ -175,28 +175,73 @@ costs ~n; total time is still <10 ms at n=1000 because
 heap_replace's per-fire cost is on a small heap (no compute
 graph piling up -- ASSIGN reuses the same buffers).
 
-## Open follow-ups for the bound-w pattern
+## What's been landed
 
-These would unblock fully-symbolic training loops where the
-weights flow through `TLam` bound vars.  Not blocking real-world
-training (use ASSIGN), but useful for higher-order grad and ATP-
-style program search:
+**Kernel program hash-cons** (`c83c29b`, src/schedule/kernel_program_cache.c).
+The `KProgOp[]` array is shared across boundaries with bit-for-
+bit identical programs (opcode + dtype + n_src + arg + numel +
+src[] + shape/perm/pad bytes).  Each `KernelEntry` keeps its
+own `input_tids[] / output_tid` -- per-instance I/O is
+unchanged.  Concretely:
 
-1. **Shape tracking through `TApp`**: when materialize is called
-   on `App(Lam[w, body], arg)`, propagate `arg`'s shape into the
-   body before compiling.  Lets the body materialize *once* with
-   `KSRC_AS_INPUT(slot)` for the bound var.
-2. **Heap compaction**.  Per-iter cell growth is linear so
+  bound-w n=5:  6 kernels,  **2 distinct programs**
+  bound-w n=10: 11 kernels, **2 distinct programs**
+  bound-w n=100: 101 kernels, 2 distinct programs (extrapolated)
+
+Tracked by `TKernelProgramCacheSize[]`; asserted in
+`training-loop/bound-w-kernel-program-hash-cons`.
+
+This caps **program** memory at the number of distinct
+structural shapes (typically 1-2 per loop), which is the
+groundwork the next path needs.
+
+## Path forward: ANN/BRI shape inference (next)
+
+To compile the lambda body **before** APP-LAM beta we need
+each `TVAR`'s shape.  The `TAG_ANN` (annotation) and `TAG_BRI`
+(bridge) tags already in the runtime (`src/wnf/_.c:227-380`)
+are exactly the ICC primitives for this.  ANN's rule:
+
+  ANN val (λx.body) = λx (ANN val $k) body[x <- θ$k.x]
+  ANN val (θx.body) = body[x <- val]      (type erasure)
+  ANN val var       = stuck
+
+So a "shape-annotated" lambda
+`TLamShaped[shape, λw.body] := ANN[shape_term, λw.body]`
+reduces under the existing wnf machinery, propagating the
+shape `down` to each `TVAR(w)` use site.  Sketch:
+
+1. `TLamShaped[shape, body]` becomes `ANN[shape_term, LAM[w, body]]`
+   where `shape_term` encodes the bound var's shape (a small
+   compile-time term).
+2. Materialize, when seeing `App(LAM, arg)` after wnf has driven
+   the ANN to the var sites, looks at the shape carried via
+   `ANN`-flavored `TVAR(w)` -- a one-bit ext flag would say "this
+   TVAR has an attached shape; read it from the ANN sibling cell".
+3. Visit() treats `TVAR(w)` as `KSRC_AS_INPUT(slot)` with that
+   shape, compiles the body once.
+4. Cache by `(structural_program_hash, bound_shapes)` -- the
+   existing `kernel_program_cache_insert` keys.  Subsequent
+   `App(REF, arg2)` with `arg2.shape == cached_shape` get a
+   cache hit; just dispatch the cached kernel with `arg2`.
+
+The wins:
+  - Single materialize call covers all iters (no per-iter visit).
+  - One kid serves N fire sites (path 2 falls out for free).
+  - Shape errors caught at materialize time.
+
+Not landed yet -- substantive work, ~500 lines.
+
+## Other open follow-ups
+
+1. **Heap compaction**.  Per-iter cell growth is linear so
    n=1000 gives ~130K cells (1MB heap).  Tolerable but
    unbounded; a mark-and-sweep that drops cells unreachable from
    the result tensor would let arbitrarily long training loops
    run.
-3. **Replace `heap_replace`'s O(HEAP_NEXT) cascade with HVM4-
+2. **Replace `heap_replace`'s O(HEAP_NEXT) cascade with HVM4-
    style SUB-bit substitution**.  Removes one per-fire linear
    cost.
-4. **Kernel program hash-cons**: minor memory win, useful when
-   programs are large (deep MLPs); each iter's `KProgOp[]` is
-   identical but currently allocated separately.
-5. **Profile interactions inside `redex_fire`'s case dispatch**
+3. **Profile interactions inside `redex_fire`'s case dispatch**
    to localise the cubic cliff in the bound-w pattern (already
    ruled out: heap_replace, redex_enumerate, is_redex).
