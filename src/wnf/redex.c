@@ -366,12 +366,41 @@ fn Term redex_fire(Term redex) {
   return result;
 }
 
+// Hash-set side table for O(1) dedup during redex_enumerate.
+// Plain `u8 seen[HEAP_CAP]` would be huge; an open-addressed hash
+// keyed on the packed Term value keeps the lookup roughly cache-
+// resident and grows lazily as enumeration runs.  Cleared at the
+// top of redex_enumerate.  Cap matches NF_WORK_CAP * 4 so worst
+// case (every redex unique) keeps load factor under 0.25.
+#define REDEX_DEDUP_CAP (1u << 15)
+static Term REDEX_DEDUP[REDEX_DEDUP_CAP];
+
+static inline u32 redex_dedup_hash(Term t) {
+  u64 h = (u64)t;
+  h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+  h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+  h ^= h >> 33;
+  return (u32)h & (REDEX_DEDUP_CAP - 1);
+}
+
+// Returns 1 if `t` was inserted (not previously present), 0 if seen.
+static inline u8 redex_dedup_insert(Term t) {
+  u32 h = redex_dedup_hash(t);
+  for (u32 probe = 0; probe < REDEX_DEDUP_CAP; probe++) {
+    u32 i = (h + probe) & (REDEX_DEDUP_CAP - 1);
+    if (REDEX_DEDUP[i] == t) return 0;
+    if (REDEX_DEDUP[i] == 0) {
+      REDEX_DEDUP[i] = t;
+      return 1;
+    }
+  }
+  return 1;   // table full -- accept (rare; cap is 32K)
+}
+
 // Add `t` to `out` if it's a redex we haven't already recorded.
 static void redex_collect_one(Term t, Term *out, u32 cap, u32 *count) {
   if (!is_redex(t)) return;
-  for (u32 j = 0; j < *count && j < cap; j++) {
-    if (out[j] == t) return;
-  }
+  if (!redex_dedup_insert(t)) return;
   if (*count < cap) out[*count] = t;
   (*count)++;
 }
@@ -406,34 +435,60 @@ static u32 term_arity(Term t) {
 // shared subgraph are caught even if the caller didn't pass the
 // containing root.  Dedup is by packed Term value.
 fn u32 redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap) {
+  // Reset the dedup hash table.  memset is fine -- the table is
+  // 32K * 8B = 256KB, well within L2.
+  memset(REDEX_DEDUP, 0, sizeof(REDEX_DEDUP));
+
   u32 count = 0;
 
   // Worklist DFS for caller-provided roots (which may not live in
   // any heap cell -- e.g. a TTerm the user is holding directly).
-  Term stack[256];
-  u32  s_pos = 0;
-  Term seen[256];
-  u32  seen_n = 0;
-  for (u32 i = 0; i < n_roots && s_pos < 256; i++) stack[s_pos++] = roots[i];
+  // Dedup-by-Term via REDEX_DEDUP so deeply shared subgraphs don't
+  // explode the visit count quadratically.  No upper stack cap:
+  // a deeply nested recursive lambda body can easily exceed 256
+  // distinct Terms before reaching its leaves.  Use a heap-grown
+  // stack via a static buffer that doubles on demand.
+  static Term *DFS_STACK = NULL;
+  static u32   DFS_STACK_CAP = 0;
+  if (DFS_STACK_CAP == 0) {
+    DFS_STACK_CAP = 4096;
+    DFS_STACK = (Term *)malloc(DFS_STACK_CAP * sizeof(Term));
+  }
+  u32 s_pos = 0;
+  for (u32 i = 0; i < n_roots; i++) {
+    if (s_pos >= DFS_STACK_CAP) {
+      DFS_STACK_CAP *= 2;
+      DFS_STACK = (Term *)realloc(DFS_STACK, DFS_STACK_CAP * sizeof(Term));
+    }
+    DFS_STACK[s_pos++] = roots[i];
+  }
   while (s_pos > 0) {
-    Term t = stack[--s_pos];
-    u8 dup = 0;
-    for (u32 j = 0; j < seen_n; j++) if (seen[j] == t) { dup = 1; break; }
-    if (dup) continue;
-    if (seen_n < 256) seen[seen_n++] = t;
-
-    redex_collect_one(t, out, cap, &count);
-
+    Term t = DFS_STACK[--s_pos];
+    if (!redex_dedup_insert(t)) continue;
+    if (is_redex(t)) {
+      if (count < cap) out[count] = t;
+      count++;
+    }
     u32 ar = term_arity(t);
     if (ar == 0) continue;
     u64 base = term_val(t);
-    for (u32 i = 0; i < ar && s_pos < 256; i++) {
-      stack[s_pos++] = heap_read(base + i);
+    for (u32 i = 0; i < ar; i++) {
+      if (s_pos >= DFS_STACK_CAP) {
+        DFS_STACK_CAP *= 2;
+        DFS_STACK = (Term *)realloc(DFS_STACK, DFS_STACK_CAP * sizeof(Term));
+      }
+      DFS_STACK[s_pos++] = heap_read(base + i);
     }
   }
 
-  // Plus the global heap scan so distant cells (e.g. shared via DUP,
-  // or just other roots not passed in) get covered too.
+  // Plus the global heap scan: catches redexes off the root tree
+  // (e.g. orphan grad sub-cells whose parent was heap_replaced
+  // away, but whose BWD projection still has work to do that the
+  // outer chain expects to consume).  With REDEX_DEDUP this is
+  // O(HEAP_NEXT) not O(HEAP_NEXT * redex_count) -- the linear
+  // scan inside redex_collect_one was the long-recursive-loop
+  // killer.  Cells already inserted into REDEX_DEDUP via the DFS
+  // are skipped in O(1).
   for (u64 i = 0; i < HEAP_NEXT; i++) {
     redex_collect_one(heap_read(i), out, cap, &count);
   }
