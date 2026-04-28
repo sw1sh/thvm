@@ -28,12 +28,24 @@ fn Term interact_app_lam(Term lam, Term arg) {
   ITRS++;
   u64  loc  = term_val(lam);
   Term body = heap_read(loc);
+  // Always shape-annotate the bound var when the argument
+  // carries a shape -- even for curried / structural-bodied
+  // lambdas.  The annotation propagates through nested LAMs:
+  // outer's `App(λw.λn.body, w0)` annotates w_loc; inner's
+  // `App(λn.body, NUM(N))` doesn't (NUM has no shape) but
+  // the deeper compute body's TVAR(w_loc) has a known shape
+  // by the time materialize gets to it.  Cheap insert; helps
+  // every later visit() / chain-rule pass that walks the body.
+  Shape s;
+  if (term_shape_in(arg, 0, &s) && s.ndim > 0) {
+    lam_shape_set(loc, &s);
+  }
+  // JIT: if the body is itself compute (a UOP graph), materialize
+  // it now -- shape is in the side table, visit() can compile.
+  // Bodies that aren't compute (curried lambdas, TIfZero, ...)
+  // skip materialize -- it'd be a no-op anyway.
   if (term_tag(body) == TAG_UOP && term_ext(body) != UOP_KERNEL) {
-    Shape s;
-    if (term_shape_in(arg, 0, &s) && s.ndim > 0) {
-      lam_shape_set(loc, &s);
-      body = thvm_materialize(body);
-    }
+    body = thvm_materialize(body);
   }
   heap_subst_var(loc, arg);
   return body;
