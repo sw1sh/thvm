@@ -214,11 +214,16 @@ Three commits, ~400 lines total:
    SUB to whatever APP-LAM beta has bound it to and reads
    that tensor's buffer.
 
-3. **`TLamMaterialized[shape, x, body]`** -- the user-facing
-   constructor.  Compiles the body once into a UOP_KERNEL,
-   binds it as the LAM's body, returns the LAM term.  Each
-   subsequent `TApp[lam, ten]` re-fires the cached kernel with
-   `ten` substituted into the input slot.
+3. **`interact_app_lam` JIT path** -- when a TLam is applied,
+   if the body is a UOP graph and the argument carries a shape
+   (TEN or shape-inferable UOP), APP-LAM infers the bound
+   variable's shape from the argument, registers it on
+   `lam_shape`, materializes the body into a UOP_KERNEL, and
+   then proceeds with the standard `heap_subst_var` beta.
+   No flag, no separate constructor: every `TLam` whose body
+   is compute goes through this path.  Bodies that aren't
+   compute (curried lambdas, `TIfZero`, `TApp`-headed) skip
+   the JIT step -- materialize would be a no-op anyway.
 
 (We considered using the existing `TAG_ANN` / `TAG_BRI`
 machinery for shape propagation -- ICC's type-directed
@@ -228,16 +233,22 @@ which is heavier than what shape inference needs.  The side
 table is opt-in, has zero overhead for unannotated LAMs, and
 keeps the ICC reduction rules untouched.)
 
-End-to-end test (`lam-shape/tlam-materialized-compile-once`):
+End-to-end test (`lam-shape/tlam-jit-on-first-apply`):
 
 ```wolfram
-lam = TLamMaterialized[{3}, w, TUOpAdd[w, w]]
+lam = TLam[w, TUOpAdd[w, w]]                    (* body unmaterialized *)
 ten = TTensorCreate[NumericArray[{1, 2, 3}, "Real32"]]
+TKernelCount[] - 1                              -> 0 (no kernel yet)
 TWnf[TApp[lam, ten]]
-   -> {2., 4., 6.}
-TKernelCount[]              -> 1   (one kernel emitted)
-TKernelProgramCacheSize[]   -> 1   (one distinct program)
+   -> {2., 4., 6.}                              (* shape {3} inferred from ten *)
+TKernelCount[] - 1                              -> 1   (JIT emitted one kernel)
+TKernelProgramCacheSize[]                       -> 1
 ```
+
+`TLamShape[shape, x, body]` is still available for the rare case
+where the body needs to materialize *before* any TApp (e.g.
+direct `TMaterialize` on the body for inspection, or when the
+argument's shape can't be inferred at first APP).
 
 ### What's still missing for fully-automatic loops
 
