@@ -171,289 +171,66 @@ enter:
       goto apply;
     }
     case TAG_OP2: {
-      // Strict on x then y; both must reduce to TAG_NUM for the op
-      // to fire.  Inline the inner reductions via a recursive wnf()
-      // call (single-threaded; the saved base keeps the stack
-      // clean).  If either operand stays non-NUM the OP2 is stuck
-      // and we return it as WHNF.
-      u64  loc = term_val(next);
-      u32  op  = term_ext(next);
-      Term x   = wnf(heap_read(loc + 0));
-      Term y   = wnf(heap_read(loc + 1));
-      if (term_tag(x) == TAG_NUM && term_tag(y) == TAG_NUM) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        u32 xv = (u32)term_val(x);
-        u32 yv = (u32)term_val(y);
-        u32 r;
-        switch (op) {
-          case OP_ADD: r = xv + yv; break;
-          case OP_SUB: r = xv - yv; break;
-          case OP_MUL: r = xv * yv; break;
-          case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
-          case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
-          default:     r = 0; break;
-        }
-        ITRS++;
-        whnf = term_new(0, TAG_NUM, term_ext(x), r);
-        goto apply;
-      }
-      heap_set(loc + 0, x);
-      heap_set(loc + 1, y);
-      whnf = next;
-      goto apply;
+      // HVM4-style stack-based strict eval.  Push the OP2 frame and
+      // descend into x.  When x reduces (apply phase), if x is NUM
+      // and y is also NUM, fire op directly; otherwise push a
+      // F_OP2_NUM frame with x's value baked in and descend into y.
+      if (BUDGET_HIT) BAIL_AT(next);
+      u64 loc = term_val(next);
+      stack[s_pos++] = next;
+      next = heap_read(loc + 0);
+      goto enter;
     }
     case TAG_EQL: {
-      // Strict on a then b.  Rules:
-      //   EQL-ERA-{L,R}: ERA on either side -> ERA  (failed branches
-      //                  collapse out)
-      //   EQL-SUP-L:     EQL(&L{a0,a1}, b) -> &L{EQL(a0,B0), EQL(a1,B1)}
-      //                  with !&L{B0,B1}=b  (DUP duplicates b across
-      //                  the two new EQLs)
-      //   EQL-SUP-R:     EQL(a, &L{b0,b1}) -> &L{EQL(A0,b0), EQL(A1,b1)}
-      //                  with !&L{A0,A1}=a  (DUP duplicates a;
-      //                  DUP-NUM annihilates cleanly when a is atomic)
-      //   EQL-NUM-NUM:   compare values, NUM(1) if equal else NUM(0)
-      //   otherwise:     stuck
-      u64  loc = term_val(next);
-      Term a   = wnf(heap_read(loc + 0));
-      if (term_tag(a) == TAG_ERA) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        whnf = a;
-        goto apply;
-      }
-      if (term_tag(a) == TAG_ANY) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        whnf = term_new(0, TAG_NUM, 0, 1);
-        goto apply;
-      }
-      if (term_tag(a) == TAG_SUP) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        u32  lab  = term_ext(a);
-        u64  sloc = term_val(a);
-        Term a0   = heap_read(sloc + 0);
-        Term a1   = heap_read(sloc + 1);
-        Term b    = heap_read(loc + 1);
-        u64  dup  = heap_alloc(1);
-        heap_set(dup, b);
-        Term b0   = term_new(0, TAG_DP0, lab, dup);
-        Term b1   = term_new(0, TAG_DP1, lab, dup);
-        Term e0   = term_new_eql(a0, b0);
-        Term e1   = term_new_eql(a1, b1);
-        u64  ns   = heap_alloc(2);
-        heap_set(ns + 0, e0);
-        heap_set(ns + 1, e1);
-        ITRS++;
-        next = term_new(0, TAG_SUP, lab, ns);
-        goto enter;
-      }
-      Term b = wnf(heap_read(loc + 1));
-      if (term_tag(b) == TAG_ERA) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        whnf = b;
-        goto apply;
-      }
-      if (term_tag(b) == TAG_ANY) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        whnf = term_new(0, TAG_NUM, 0, 1);
-        goto apply;
-      }
-      if (term_tag(b) == TAG_SUP) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        u32  lab  = term_ext(b);
-        u64  sloc = term_val(b);
-        Term b0   = heap_read(sloc + 0);
-        Term b1   = heap_read(sloc + 1);
-        u64  dup  = heap_alloc(1);
-        heap_set(dup, a);
-        Term a0   = term_new(0, TAG_DP0, lab, dup);
-        Term a1   = term_new(0, TAG_DP1, lab, dup);
-        Term e0   = term_new_eql(a0, b0);
-        Term e1   = term_new_eql(a1, b1);
-        u64  ns   = heap_alloc(2);
-        heap_set(ns + 0, e0);
-        heap_set(ns + 1, e1);
-        ITRS++;
-        next = term_new(0, TAG_SUP, lab, ns);
-        goto enter;
-      }
-      if (term_tag(a) == TAG_NUM && term_tag(b) == TAG_NUM) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        u32 r = ((u32)term_val(a) == (u32)term_val(b)) ? 1 : 0;
-        whnf = term_new(0, TAG_NUM, term_ext(a), r);
-        goto apply;
-      }
-      heap_set(loc + 0, a);
-      heap_set(loc + 1, b);
-      whnf = next;
-      goto apply;
+      // HVM4-style stack-based strict eval.  Push EQL frame, descend
+      // into a.  Apply pops EQL: dispatches on a's WHNF (ERA/ANY/SUP
+      // handle without forcing b; otherwise push F_EQL_R and descend
+      // into b).  The full rule table:
+      //   EQL-ERA-{L,R}: ERA on either side -> ERA
+      //   EQL-ANY-{L,R}: ANY on either side -> NUM(1)
+      //   EQL-SUP-L: EQL(&L{a0,a1}, b) -> &L{EQL(a0,B0), EQL(a1,B1)}
+      //              with !&L{B0,B1}=b (DUP duplicates b)
+      //   EQL-SUP-R: symmetric
+      //   EQL-NUM-NUM: compare values, NUM(1) if equal else NUM(0)
+      //   otherwise: stuck
+      if (BUDGET_HIT) BAIL_AT(next);
+      u64 loc = term_val(next);
+      stack[s_pos++] = next;
+      next = heap_read(loc + 0);
+      goto enter;
     }
     case TAG_AND: {
-      // Short-circuit boolean AND.  Strict on a only:
-      //   AND(NUM(0), _)     -> NUM(0)        (b stays unreduced)
-      //   AND(NUM(n!=0), b)  -> wnf(b)
-      //   AND(ERA, _)        -> ERA
-      //   AND(&L{a0,a1}, b)  -> &L{AND(a0,B0), AND(a1,B1)}, !&L{B0,B1}=b
-      //   otherwise          -> stuck
-      u64  loc = term_val(next);
-      Term a   = wnf(heap_read(loc + 0));
-      if (term_tag(a) == TAG_ERA) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        whnf = a;
-        goto apply;
-      }
-      if (term_tag(a) == TAG_NUM) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        if ((u32)term_val(a) == 0) {
-          whnf = a;
-          goto apply;
-        }
-        next = heap_read(loc + 1);
-        goto enter;
-      }
-      if (term_tag(a) == TAG_SUP) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        u32  lab  = term_ext(a);
-        u64  sloc = term_val(a);
-        Term a0   = heap_read(sloc + 0);
-        Term a1   = heap_read(sloc + 1);
-        Term b    = heap_read(loc + 1);
-        u64  dup  = heap_alloc(1);
-        heap_set(dup, b);
-        Term n0   = term_new_and(a0, term_new(0, TAG_DP0, lab, dup));
-        Term n1   = term_new_and(a1, term_new(0, TAG_DP1, lab, dup));
-        u64  ns   = heap_alloc(2);
-        heap_set(ns + 0, n0);
-        heap_set(ns + 1, n1);
-        ITRS++;
-        next = term_new(0, TAG_SUP, lab, ns);
-        goto enter;
-      }
-      heap_set(loc + 0, a);
-      whnf = next;
-      goto apply;
+      // HVM4-style: push AND frame, descend into a (the strict slot).
+      // Apply dispatches on a's WHNF; b stays lazy until needed.
+      if (BUDGET_HIT) BAIL_AT(next);
+      u64 loc = term_val(next);
+      stack[s_pos++] = next;
+      next = heap_read(loc + 0);
+      goto enter;
     }
     case TAG_OR: {
-      // Short-circuit boolean OR.  Strict on a only:
-      //   OR(NUM(0), b)      -> wnf(b)
-      //   OR(NUM(n!=0), _)   -> NUM(1)        (b stays unreduced)
-      //   OR(ERA, _)         -> ERA
-      //   OR(&L{a0,a1}, b)   -> &L{OR(a0,B0), OR(a1,B1)}, !&L{B0,B1}=b
-      //   otherwise          -> stuck
-      u64  loc = term_val(next);
-      Term a   = wnf(heap_read(loc + 0));
-      if (term_tag(a) == TAG_ERA) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        whnf = a;
-        goto apply;
-      }
-      if (term_tag(a) == TAG_NUM) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        if ((u32)term_val(a) == 0) {
-          next = heap_read(loc + 1);
-          goto enter;
-        }
-        whnf = term_new(0, TAG_NUM, term_ext(a), 1);
-        goto apply;
-      }
-      if (term_tag(a) == TAG_SUP) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        u32  lab  = term_ext(a);
-        u64  sloc = term_val(a);
-        Term a0   = heap_read(sloc + 0);
-        Term a1   = heap_read(sloc + 1);
-        Term b    = heap_read(loc + 1);
-        u64  dup  = heap_alloc(1);
-        heap_set(dup, b);
-        Term n0   = term_new_or(a0, term_new(0, TAG_DP0, lab, dup));
-        Term n1   = term_new_or(a1, term_new(0, TAG_DP1, lab, dup));
-        u64  ns   = heap_alloc(2);
-        heap_set(ns + 0, n0);
-        heap_set(ns + 1, n1);
-        ITRS++;
-        next = term_new(0, TAG_SUP, lab, ns);
-        goto enter;
-      }
-      heap_set(loc + 0, a);
-      whnf = next;
-      goto apply;
+      // HVM4-style: push OR frame, descend into a.
+      if (BUDGET_HIT) BAIL_AT(next);
+      u64 loc = term_val(next);
+      stack[s_pos++] = next;
+      next = heap_read(loc + 0);
+      goto enter;
     }
     case TAG_WHEN: {
-      // Boolean filter, strict on cond:
-      //   WHEN(NUM(0), _)        -> ERA
-      //   WHEN(NUM(n != 0), b)   -> wnf(b)
-      //   WHEN(ERA, _)           -> ERA
-      //   WHEN(&L{c0,c1}, b)     -> &L{WHEN(c0,B0), WHEN(c1,B1)}, !&L{B0,B1}=b
-      //   otherwise              -> stuck
-      u64  loc  = term_val(next);
-      Term cond = wnf(heap_read(loc + 0));
-      if (term_tag(cond) == TAG_ERA) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        whnf = cond;
-        goto apply;
-      }
-      if (term_tag(cond) == TAG_NUM) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        ITRS++;
-        if ((u32)term_val(cond) == 0) {
-          whnf = term_new(0, TAG_ERA, 0, 0);
-          goto apply;
-        }
-        next = heap_read(loc + 1);
-        goto enter;
-      }
-      if (term_tag(cond) == TAG_SUP) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        u32  lab  = term_ext(cond);
-        u64  sloc = term_val(cond);
-        Term c0   = heap_read(sloc + 0);
-        Term c1   = heap_read(sloc + 1);
-        Term body = heap_read(loc + 1);
-        u64  dup  = heap_alloc(1);
-        heap_set(dup, body);
-        Term w0   = term_new_when(c0, term_new(0, TAG_DP0, lab, dup));
-        Term w1   = term_new_when(c1, term_new(0, TAG_DP1, lab, dup));
-        u64  ns   = heap_alloc(2);
-        heap_set(ns + 0, w0);
-        heap_set(ns + 1, w1);
-        ITRS++;
-        next = term_new(0, TAG_SUP, lab, ns);
-        goto enter;
-      }
-      heap_set(loc + 0, cond);
-      whnf = next;
-      goto apply;
+      // HVM4-style: push WHEN frame, descend into cond.
+      if (BUDGET_HIT) BAIL_AT(next);
+      u64 loc = term_val(next);
+      stack[s_pos++] = next;
+      next = heap_read(loc + 0);
+      goto enter;
     }
     case TAG_ANN: {
-      // ICC annotation {val : typ}.  Strict on typ; dispatch on its tag:
-      //   ANN val (λx.body) -> ann_lam (type-forward-flow)
-      //   ANN val (θx.body) -> ann_bri (type erasure)
-      //   ANN val var       -> stuck (rebuild with reduced typ)
-      u64  loc = term_val(next);
-      Term val = heap_read(loc + 0);
-      Term typ = wnf(heap_read(loc + 1));
-      if (term_tag(typ) == TAG_LAM) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        next = interact_ann_lam(val, typ);
-        goto enter;
-      }
-      if (term_tag(typ) == TAG_BRI) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        next = interact_ann_bri(val, typ);
-        goto enter;
-      }
-      heap_set(loc + 1, typ);
-      whnf = next;
-      goto apply;
+      // HVM4-style: push ANN frame, descend into typ (the strict slot).
+      if (BUDGET_HIT) BAIL_AT(next);
+      u64 loc = term_val(next);
+      stack[s_pos++] = next;
+      next = heap_read(loc + 1);
+      goto enter;
     }
     case TAG_LAM:
     case TAG_ERA:
@@ -648,6 +425,311 @@ apply:
           }
         }
       }
+      case TAG_OP2: {
+        // OP2 frame: x reduced to whnf.  If x is NUM and y is also
+        // NUM (cheap heap_read), fire op directly.  Otherwise push a
+        // F_OP2_NUM frame with x's value baked in and descend into
+        // y.  If x didn't reach NUM, OP2 is stuck.
+        u64 loc = term_val(frame);
+        u32 op  = term_ext(frame);
+        if (term_tag(whnf) == TAG_NUM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          Term y = heap_read(loc + 1);
+          if (term_tag(y) == TAG_NUM) {
+            ITRS++;
+            u32 xv = (u32)term_val(whnf);
+            u32 yv = (u32)term_val(y);
+            u32 r;
+            switch (op) {
+              case OP_ADD: r = xv + yv; break;
+              case OP_SUB: r = xv - yv; break;
+              case OP_MUL: r = xv * yv; break;
+              case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
+              case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
+              default:     r = 0; break;
+            }
+            whnf = term_new(0, TAG_NUM, term_ext(whnf), r);
+            continue;
+          }
+          // x is NUM; descend into y with F_OP2_NUM frame holding
+          // x's NUM raw bits (val) + dtype (low 6 bits of ext, op
+          // packed at upper bits via ext field directly = op).
+          // Pack: ext = op | (dtype << 8); val = NUM raw bits.
+          u32 dtype = term_ext(whnf);
+          u32 packed_ext = (op & 0xFF) | ((dtype & 0xFF) << 8);
+          stack[s_pos++] = term_new(0, TAG_F_OP2_NUM, packed_ext, term_val(whnf));
+          next = y;
+          goto enter;
+        }
+        // x stuck (not NUM): rebuild OP2 with reduced x.
+        heap_set(loc + 0, whnf);
+        whnf = frame;
+        continue;
+      }
+      case TAG_F_OP2_NUM: {
+        // F_OP2_NUM frame: x is NUM (val=raw bits, ext low 8=op,
+        // ext bits 8..15=dtype).  Whnf is y's reduction.  If NUM,
+        // fire op; otherwise rebuild OP2 with reduced y.
+        u32 packed_ext = term_ext(frame);
+        u32 op    = packed_ext & 0xFF;
+        u32 dtype = (packed_ext >> 8) & 0xFF;
+        u32 xv    = (u32)term_val(frame);
+        if (term_tag(whnf) == TAG_NUM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          u32 yv = (u32)term_val(whnf);
+          u32 r;
+          switch (op) {
+            case OP_ADD: r = xv + yv; break;
+            case OP_SUB: r = xv - yv; break;
+            case OP_MUL: r = xv * yv; break;
+            case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
+            case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
+            default:     r = 0; break;
+          }
+          whnf = term_new(0, TAG_NUM, dtype, r);
+          continue;
+        }
+        // y stuck: rebuild OP2(NUM(xv), whnf) with fresh cell.
+        Term x = term_new(0, TAG_NUM, dtype, xv);
+        u64 nloc = heap_alloc(2);
+        heap_set(nloc + 0, x);
+        heap_set(nloc + 1, whnf);
+        whnf = term_new(0, TAG_OP2, op, nloc);
+        continue;
+      }
+      case TAG_EQL: {
+        // EQL frame: a reduced to whnf.  ERA/ANY short-circuit;
+        // SUP-L commutes; otherwise store a back, push F_EQL_R,
+        // descend into b.
+        u64 loc = term_val(frame);
+        if (term_tag(whnf) == TAG_ERA) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          continue;   // whnf = ERA stays
+        }
+        if (term_tag(whnf) == TAG_ANY) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          whnf = term_new(0, TAG_NUM, 0, 1);
+          continue;
+        }
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          u32  lab  = term_ext(whnf);
+          u64  sloc = term_val(whnf);
+          Term a0   = heap_read(sloc + 0);
+          Term a1   = heap_read(sloc + 1);
+          Term b    = heap_read(loc + 1);
+          u64  dup  = heap_alloc(1);
+          heap_set(dup, b);
+          Term b0   = term_new(0, TAG_DP0, lab, dup);
+          Term b1   = term_new(0, TAG_DP1, lab, dup);
+          Term e0   = term_new_eql(a0, b0);
+          Term e1   = term_new_eql(a1, b1);
+          u64  ns   = heap_alloc(2);
+          heap_set(ns + 0, e0);
+          heap_set(ns + 1, e1);
+          ITRS++;
+          next = term_new(0, TAG_SUP, lab, ns);
+          goto enter;
+        }
+        // Store a's WHNF in heap[loc+0]; push F_EQL_R; descend into b.
+        if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+        heap_set(loc + 0, whnf);
+        stack[s_pos++] = term_new(0, TAG_F_EQL_R, 0, loc);
+        next = heap_read(loc + 1);
+        goto enter;
+      }
+      case TAG_F_EQL_R: {
+        // F_EQL_R frame: b reduced to whnf, a's WHNF stored at
+        // heap[loc+0].  Apply the right-side rules.
+        u64  loc = term_val(frame);
+        Term a   = heap_read(loc + 0);
+        if (term_tag(whnf) == TAG_ERA) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          continue;   // whnf = ERA stays
+        }
+        if (term_tag(whnf) == TAG_ANY) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          whnf = term_new(0, TAG_NUM, 0, 1);
+          continue;
+        }
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          u32  lab  = term_ext(whnf);
+          u64  sloc = term_val(whnf);
+          Term b0   = heap_read(sloc + 0);
+          Term b1   = heap_read(sloc + 1);
+          u64  dup  = heap_alloc(1);
+          heap_set(dup, a);
+          Term a0   = term_new(0, TAG_DP0, lab, dup);
+          Term a1   = term_new(0, TAG_DP1, lab, dup);
+          Term e0   = term_new_eql(a0, b0);
+          Term e1   = term_new_eql(a1, b1);
+          u64  ns   = heap_alloc(2);
+          heap_set(ns + 0, e0);
+          heap_set(ns + 1, e1);
+          ITRS++;
+          next = term_new(0, TAG_SUP, lab, ns);
+          goto enter;
+        }
+        if (term_tag(a) == TAG_NUM && term_tag(whnf) == TAG_NUM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          u32 r = ((u32)term_val(a) == (u32)term_val(whnf)) ? 1 : 0;
+          whnf = term_new(0, TAG_NUM, term_ext(a), r);
+          continue;
+        }
+        // Both stuck: rebuild EQL(a, b) with reduced values in heap.
+        heap_set(loc + 1, whnf);
+        whnf = term_new(0, TAG_EQL, 0, loc);
+        continue;
+      }
+      case TAG_AND: {
+        // AND frame: a reduced to whnf.
+        u64 loc = term_val(frame);
+        if (term_tag(whnf) == TAG_ERA) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          continue;
+        }
+        if (term_tag(whnf) == TAG_NUM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          if ((u32)term_val(whnf) == 0) {
+            continue;     // whnf = NUM(0) stays
+          }
+          // a is NUM(non-zero): result is wnf(b).  Drop AND frame,
+          // descend into b.
+          next = heap_read(loc + 1);
+          goto enter;
+        }
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          u32  lab  = term_ext(whnf);
+          u64  sloc = term_val(whnf);
+          Term a0   = heap_read(sloc + 0);
+          Term a1   = heap_read(sloc + 1);
+          Term b    = heap_read(loc + 1);
+          u64  dup  = heap_alloc(1);
+          heap_set(dup, b);
+          Term n0   = term_new_and(a0, term_new(0, TAG_DP0, lab, dup));
+          Term n1   = term_new_and(a1, term_new(0, TAG_DP1, lab, dup));
+          u64  ns   = heap_alloc(2);
+          heap_set(ns + 0, n0);
+          heap_set(ns + 1, n1);
+          ITRS++;
+          next = term_new(0, TAG_SUP, lab, ns);
+          goto enter;
+        }
+        // a stuck.
+        heap_set(loc + 0, whnf);
+        whnf = frame;
+        continue;
+      }
+      case TAG_OR: {
+        // OR frame: a reduced to whnf.
+        u64 loc = term_val(frame);
+        if (term_tag(whnf) == TAG_ERA) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          continue;
+        }
+        if (term_tag(whnf) == TAG_NUM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          if ((u32)term_val(whnf) == 0) {
+            // a is NUM(0): result is wnf(b).
+            next = heap_read(loc + 1);
+            goto enter;
+          }
+          whnf = term_new(0, TAG_NUM, term_ext(whnf), 1);
+          continue;
+        }
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          u32  lab  = term_ext(whnf);
+          u64  sloc = term_val(whnf);
+          Term a0   = heap_read(sloc + 0);
+          Term a1   = heap_read(sloc + 1);
+          Term b    = heap_read(loc + 1);
+          u64  dup  = heap_alloc(1);
+          heap_set(dup, b);
+          Term n0   = term_new_or(a0, term_new(0, TAG_DP0, lab, dup));
+          Term n1   = term_new_or(a1, term_new(0, TAG_DP1, lab, dup));
+          u64  ns   = heap_alloc(2);
+          heap_set(ns + 0, n0);
+          heap_set(ns + 1, n1);
+          ITRS++;
+          next = term_new(0, TAG_SUP, lab, ns);
+          goto enter;
+        }
+        heap_set(loc + 0, whnf);
+        whnf = frame;
+        continue;
+      }
+      case TAG_WHEN: {
+        // WHEN frame: cond reduced to whnf.
+        u64 loc = term_val(frame);
+        if (term_tag(whnf) == TAG_ERA) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          continue;
+        }
+        if (term_tag(whnf) == TAG_NUM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          ITRS++;
+          if ((u32)term_val(whnf) == 0) {
+            whnf = term_new(0, TAG_ERA, 0, 0);
+            continue;
+          }
+          next = heap_read(loc + 1);
+          goto enter;
+        }
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          u32  lab  = term_ext(whnf);
+          u64  sloc = term_val(whnf);
+          Term c0   = heap_read(sloc + 0);
+          Term c1   = heap_read(sloc + 1);
+          Term body = heap_read(loc + 1);
+          u64  dup  = heap_alloc(1);
+          heap_set(dup, body);
+          Term w0   = term_new_when(c0, term_new(0, TAG_DP0, lab, dup));
+          Term w1   = term_new_when(c1, term_new(0, TAG_DP1, lab, dup));
+          u64  ns   = heap_alloc(2);
+          heap_set(ns + 0, w0);
+          heap_set(ns + 1, w1);
+          ITRS++;
+          next = term_new(0, TAG_SUP, lab, ns);
+          goto enter;
+        }
+        heap_set(loc + 0, whnf);
+        whnf = frame;
+        continue;
+      }
+      case TAG_ANN: {
+        // ANN frame: typ reduced to whnf.  val is at heap[loc+0].
+        u64 loc = term_val(frame);
+        Term val = heap_read(loc + 0);
+        if (term_tag(whnf) == TAG_LAM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          next = interact_ann_lam(val, whnf);
+          goto enter;
+        }
+        if (term_tag(whnf) == TAG_BRI) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          next = interact_ann_bri(val, whnf);
+          goto enter;
+        }
+        // typ stuck: rebuild ANN with reduced typ.
+        heap_set(loc + 1, whnf);
+        whnf = frame;
+        continue;
+      }
       default: {
         continue;
       }
@@ -675,6 +757,34 @@ bail:
     if (ftag == TAG_APP || ftag == TAG_DP0 || ftag == TAG_DP1) {
       heap_set(term_val(frame), whnf);
       whnf = frame;
+    } else if (ftag == TAG_OP2 || ftag == TAG_EQL || ftag == TAG_AND
+               || ftag == TAG_OR  || ftag == TAG_WHEN) {
+      // Strict-eval frames: store the in-flight WHNF back at slot 0
+      // so subsequent wnf re-entry sees the partially-reduced state.
+      heap_set(term_val(frame) + 0, whnf);
+      whnf = frame;
+    } else if (ftag == TAG_ANN) {
+      // ANN's strict slot is typ at slot 1.
+      heap_set(term_val(frame) + 1, whnf);
+      whnf = frame;
+    } else if (ftag == TAG_F_OP2_NUM) {
+      // x is NUM (baked in frame), in-flight whnf is partial y.
+      // Rebuild OP2(NUM, whnf) on a fresh cell so the bail snapshot
+      // points to a valid term we can resume.
+      u32 packed_ext = term_ext(frame);
+      u32 op    = packed_ext & 0xFF;
+      u32 dtype = (packed_ext >> 8) & 0xFF;
+      u32 xv    = (u32)term_val(frame);
+      Term x = term_new(0, TAG_NUM, dtype, xv);
+      u64 nloc = heap_alloc(2);
+      heap_set(nloc + 0, x);
+      heap_set(nloc + 1, whnf);
+      whnf = term_new(0, TAG_OP2, op, nloc);
+    } else if (ftag == TAG_F_EQL_R) {
+      // a stored at heap[loc+0]; in-flight whnf is partial b.
+      u64 loc = term_val(frame);
+      heap_set(loc + 1, whnf);
+      whnf = term_new(0, TAG_EQL, 0, loc);
     }
   }
   WNF_S_POS = s_pos;

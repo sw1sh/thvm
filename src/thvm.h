@@ -130,7 +130,23 @@ typedef u64 Term;
                      //   registered C function is called with the args and
                      //   its return Term replaces the redex.  Stage 8.1b.
 
-#define TAG_COUNT 26
+// === Frame-only tags (HVM4 alignment) ===
+// These tags only ever appear on the wnf eliminator stack -- never
+// in user-facing terms.  HVM4 uses them as intermediate frames for
+// strict eliminators that need to drive multiple slots in sequence:
+// after the first strict slot reduces to a value worth keeping
+// (NUM, etc.), push one of these frames with that value baked in
+// and descend into the next slot.
+//
+//   TAG_F_OP2_NUM   ext = OP_*       val = x's NUM raw bits (32 bits)
+//                                          + dtype in upper 6 bits.
+//                   x has been reduced to NUM; descending into y.
+//   TAG_F_EQL_R     ext = 0          val = EQL cell loc; a's WHNF
+//                   stored back in heap[loc + 0].  Descending into b.
+#define TAG_F_OP2_NUM 26
+#define TAG_F_EQL_R   27
+
+#define TAG_COUNT 28
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
