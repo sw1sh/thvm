@@ -782,3 +782,116 @@ VerificationTest[
     {{2.0, 2.0, 2.0}, {2.0, 2.0, 2.0}},
     TestID -> "grad/higher-order-2d-square"
 ]
+
+(* === Higher-order non-uniform gradients (PAD/SHRINK + MUL) ====
+   Stress-tests the second-order path through movement ops where
+   the gradient is non-uniform (zero outside the kept/unpadded
+   region, 2 inside).  These were the hardest first-order cases
+   pre-fix (the OLD JVP-at-ones model couldn't compute them); their
+   second-order counterparts confirm the gy threading composes
+   through the chain rule without losing the non-uniform support. *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0, 5.0}, "Real32"];
+    (* y = sum(SHRINK(a*a, [1,4))).  d/da = {0, 4, 6, 8, 0} (2a in, 0 out).
+       d2/da2 = {0, 2, 2, 2, 0}. *)
+    expr = TUOpReduce[TUOpShrink[TUOpMul[a, a], {{1, 4}}], 0, "SUM"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {5}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[expr, a], a, seed],
+    {0.0, 2.0, 2.0, 2.0, 0.0},
+    TestID -> "grad/higher-order-shrink-non-uniform"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0, 3.0}, "Real32"];
+    (* y = sum(PAD(a, 1, 1)^2) -- PAD pads, MUL squares, SUM reduces.
+       d/da = 2a = {4, 6} in unpadded region.  d2/da2 = {2, 2}. *)
+    expr = TUOpReduce[
+        TUOpMul[TUOpPad[a, {{1, 1}}], TUOpPad[a, {{1, 1}}]], 0, "SUM"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[expr, a], a, seed],
+    {2.0, 2.0},
+    TestID -> "grad/higher-order-pad-square"
+]
+
+(* === Deep movement-op composition higher-order ===
+   SHRINK + RESHAPE + PERMUTE + MUL + REDUCE chain; second-order
+   gradient at non-uniform support inherited from SHRINK. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[
+        {{1.0, 2.0, 3.0, 4.0}, {5.0, 6.0, 7.0, 8.0}}, "Real32"];
+    expr = TUOpReduce[TUOpReduce[
+        TUOpPermute[TUOpReshape[
+            TUOpShrink[TUOpMul[a, a], {{0, 2}, {1, 3}}],
+            {2, 2}], {1, 0}], 0, "SUM"], 0, "SUM"];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2, 4}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[expr, a], a, seed],
+    {{0.0, 2.0, 2.0, 0.0}, {0.0, 2.0, 2.0, 0.0}},
+    TestID -> "grad/higher-order-shrink-reshape-permute-chain"
+]
+
+(* === EXPAND rank-increase higher-order ====================
+   d/dw d/dx (sum(w * EXPAND(x, {3,4}))) = ones{3,4} -- the
+   rank-increase EXPAND adjoint composes correctly with the MUL
+   adjoint at second order. *)
+VerificationTest[
+    TInit[];
+    w = TTensorCreate @ NumericArray[
+        {{0.1, 0.2, 0.3, 0.4}, {0.5, 0.6, 0.7, 0.8}, {-0.1, -0.2, -0.3, -0.4}},
+        "Real32"];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    y = TUOpReduce[TUOpReduce[
+        TUOpMul[w, TUOpExpand[x, {3, 4}]], 0, "SUM"], 0, "SUM"];
+    seed34 = TUOpExpand[TUOpConst[1.0, "f32"], {3, 4}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, x], w, seed34],
+    {{1.0, 1.0, 1.0, 1.0}, {1.0, 1.0, 1.0, 1.0}, {1.0, 1.0, 1.0, 1.0}},
+    TestID -> "grad/higher-order-expand-rank-increase-mixed"
+]
+
+(* === Multi-occurrence target higher-order ====================
+   y = (a*b) * (a*c) where a appears twice.  d/da = 2abc per
+   element (wraps the multi-leaf SUM-of-contributions through
+   DUP^a.tid).  d^2/da^2 = 2bc. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0, 3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{5.0, 7.0}, "Real32"];
+    c = TTensorCreate @ NumericArray[{1.0, 2.0}, "Real32"];
+    y = TUOpMul[TUOpMul[a, b], TUOpMul[a, c]];
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[y, a, seed], a, seed],
+    {10.0, 28.0},   (* 2*b*c = 2*{5,7}*{1,2} = {10, 28} *)
+    TestID -> "grad/higher-order-multi-occurrence"
+]
+
+(* === Edge of the working envelope ============================
+   Documents the known reduction-completeness limit at depth-3
+   nesting of MUL with depth-3 TGrad.  This case works.  Higher
+   compositions (e.g. a^4 at 4th-order) currently produce a UOP
+   with a stuck regular DP that wnf can't unwind -- see "Known
+   limitation" at the bottom of this file. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2.0, 3.0}, "Real32"];
+    y = TUOpMul[TUOpMul[TUOpMul[a, a], a], a];   (* a^4 *)
+    seed = TUOpExpand[TUOpConst[1.0, "f32"], {2}];
+    Normal @ TTensorData @ TRealize @ TGrad[TGrad[TGrad[y, a, seed], a, seed], a, seed],
+    {48.0, 72.0},   (* d^3(a^4)/da^3 = 24a *)
+    TestID -> "grad/higher-order-vec-a4-third-edge"
+]
+
+(* Known limitation:
+   TGrad[...]^k of a^N where k + (#MUL nodes in y) exceeds ~7
+   (e.g. a^4 at 4th order, a^5 at 3rd order) leaves a stuck regular
+   TAG_DP1 inside the outer UOP_ADD.  The cell body is a chain-rule
+   sub-cell that wnf-from-inside-the-chain-rule could in principle
+   drive, but doing so introduces re-entrance issues with the
+   shared wnf stack (tried; broke a^2 second-order).  Practical
+   workaround: TRealize between rounds (loses symbolic structure
+   but produces a fresh TEN that the next TGrad differentiates
+   trivially).  Resolving this properly would need either a
+   reentrant wnf or restructuring chain-rule output to avoid
+   nesting regular DP wrappers. *)
