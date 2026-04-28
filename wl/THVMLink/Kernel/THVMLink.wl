@@ -51,6 +51,7 @@ TFreshLabel::usage = "TFreshLabel[] returns the next integer from a monotonic SU
 TEra::usage       = "TEra[] constructs an eraser term.";
 TVarFor::usage    = "TVarFor[lamLoc] constructs a VAR pointing at a binder loc.";
 TLam::usage       = "TLam[x, body] constructs a lambda; HoldAll, so `x` is the binder symbol and `body` is the lambda body referring to it (e.g. TLam[w, TUOpAdd[w, w]]).";
+TLamShape::usage  = "TLamShape[shape_List, x, body] constructs a lambda whose bound variable carries a shape annotation; e.g. TLamShape[{3}, w, TUOpAdd[w, w]].  The annotation is consulted by term_shape_in (and downstream by materialize) while the bound variable is still pre-substitution -- letting the body compile against `KSRC_AS_INPUT(slot)` of the annotated shape rather than waiting for APP-LAM beta.";
 TApp::usage       = "TApp[fun, arg] constructs an application.";
 TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
 TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
@@ -82,6 +83,7 @@ $ReduceSum::usage = $ReduceMax::usage =
 TTensor::usage         = "TTensor[shape, dtype] allocates a tensor and returns a TTerm wrapping a TAG_TEN handle.  TTensor[shape, data_List] also writes initial values.  dtype defaults to \"f32\".";
 TTensorCreate::usage   = "TTensorCreate[data] builds a tensor whose shape and dtype are inferred from `data`.  On the CPU backend the buffer is shared with the input NumericArray (zero copy).  PackedArrays and nested lists are first lifted to a NumericArray (one copy) then shared.";
 TTensorShape::usage    = "TTensorShape[t] returns the tensor's shape as a list of integers.";
+TTermShape::usage      = "TTermShape[t] runs the runtime's `term_shape_in` shape inference: returns a list of dim extents for a TEN, a shape-inferable UOP, or a TVAR with a registered shape annotation (TLamShape).  Returns {} when the shape cannot be determined.";
 TTensorDType::usage    = "TTensorDType[t] returns the dtype as a string (\"f32\" / \"i32\").";
 TTensorData::usage     = "TTensorData[t] reads the tensor's buffer as a NumericArray whose type matches the dtype (Real32 for f32, Integer32 for i32).  Wrap in `Normal` to get a plain list.";
 TTensorRefcount::usage = "TTensorRefcount[t] returns the descriptor refcount (TENS[id].refcount).";
@@ -284,6 +286,9 @@ $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},   
 $realizeFn     := $realizeFn     = load["thvm_wl_realize",         {Integer},                        Integer];
 $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},                               Integer];
 $kernelProgramCacheSizeFn := $kernelProgramCacheSizeFn = load["thvm_wl_kernel_program_cache_size", {}, Integer];
+$lamShapeSetFn   := $lamShapeSetFn   = load["thvm_wl_lam_shape_set",   {Integer, {Integer, 1}},     Integer];
+$lamShapeCountFn := $lamShapeCountFn = load["thvm_wl_lam_shape_count", {},                           Integer];
+$termShapeInFn   := $termShapeInFn   = load["thvm_wl_term_shape_in",   {Integer},                    {Integer, 1}];
 $kernelInfoFn  := $kernelInfoFn  = load["thvm_wl_kernel_info",     {Integer},                        {Integer, 1}];
 $tensCountFn   := $tensCountFn   = load["thvm_wl_tens_count",      {},                               Integer];
 $totalBufBytesFn := $totalBufBytesFn = load["thvm_wl_total_buf_bytes", {},                            Integer];
@@ -673,6 +678,24 @@ TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]
 
 SetAttributes[TLam, HoldAll]
 TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
+    THeapSet[loc, Function[x, body][TVarFor[loc]]];
+    packTerm[0, $TagLAM, 0, loc]
+]
+
+(* TLamShape[shape_list, x, body] -- a shape-annotated lambda.
+   The bound variable's shape is registered in the side table
+   keyed by the LAM's heap loc.  After APP-LAM beta the
+   substituted argument carries its own shape (via TEN's view);
+   the annotation is consulted only while the bound variable is
+   still un-substituted (e.g. when materialize is asked to
+   compile the body before any APP-LAM has fired).
+
+   `shape` is a list of integers (e.g. {3} for a vector-of-3).
+   Register before constructing the body so any inspection of
+   the body's TVAR resolves the shape immediately. *)
+SetAttributes[TLamShape, HoldAll]
+TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
+    THVMLink`Private`$lamShapeSetFn[loc, shape];
     THeapSet[loc, Function[x, body][TVarFor[loc]]];
     packTerm[0, $TagLAM, 0, loc]
 ]

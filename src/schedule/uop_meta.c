@@ -42,6 +42,21 @@ fn u8 uop_is_binary_elementwise(u8 op) {
 // is the smallest surface that lets interact_grad keep working.
 fn int term_shape_in(Term t, u32 env_id, Shape *out) {
   (void)env_id;
+  // Bound-var shape: a TLam can carry a shape annotation for its
+  // bound variable (registered via TLamShape in the WL surface,
+  // stored in the lam_shape table keyed by the LAM's heap loc).
+  // When a TVAR points at that loc and the cell hasn't been
+  // SUB-substituted yet (pre APP-LAM beta), look up the shape.
+  // After substitution term_resolve below would unwrap to the
+  // arg's TEN and the existing tag-dispatch would handle it.
+  if (term_tag(t) == TAG_VAR) {
+    u64 loc = term_val(t);
+    Term cell = heap_read(loc);
+    if (!term_sub_get(cell)) {
+      Shape s;
+      if (lam_shape_lookup(loc, &s)) { *out = s; return 1; }
+    }
+  }
   // Same VAR/ALO resolve as visit() in materialize.c -- shape inference
   // walking through a beta-substituted body needs to see the bound
   // arg's TEN, not the bare VAR cell.

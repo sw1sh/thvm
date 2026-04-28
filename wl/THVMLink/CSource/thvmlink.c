@@ -717,6 +717,61 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_program_cache_size(WolframLibraryData libD
   return LIBRARY_NO_ERROR;
 }
 
+// Register a shape annotation for a TLam-bound variable.  args[0]
+// is the LAM's heap loc; args[1] is a rank-1 Int array of
+// dimension extents (length = ndim).  TVAR(loc) lookups via
+// term_shape_in then return this shape -- letting materialize
+// compile bodies whose bound vars are still pre-substitution.
+EXTERN_C DLLEXPORT int thvm_wl_lam_shape_set(WolframLibraryData libData,
+                                              mint argc,
+                                              MArgument *args,
+                                              MArgument res) {
+  (void)argc;
+  u64 lam_loc = (u64)MArgument_getInteger(args[0]);
+  MTensor dims = MArgument_getMTensor(args[1]);
+  mint *src   = libData->MTensor_getIntegerData(dims);
+  mint nrank  = libData->MTensor_getFlattenedLength(dims);
+  Shape s = {0};
+  s.ndim = (u32)(nrank > MAX_DIM ? MAX_DIM : nrank);
+  for (u32 i = 0; i < s.ndim; i++) s.dims[i] = (u32)src[i];
+  lam_shape_set(lam_loc, &s);
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// Number of currently-registered LAM shape annotations.  Tests
+// use this to assert "the annotation survived a round-trip
+// through TDef + TRef + alo_realize".
+EXTERN_C DLLEXPORT int thvm_wl_lam_shape_count(WolframLibraryData libData,
+                                                mint argc,
+                                                MArgument *args,
+                                                MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)lam_shape_count());
+  return LIBRARY_NO_ERROR;
+}
+
+// Run term_shape_in on an arbitrary Term and return the shape as
+// a rank-1 Int array.  Empty array on failure (shape unknown).
+EXTERN_C DLLEXPORT int thvm_wl_term_shape_in(WolframLibraryData libData,
+                                              mint argc,
+                                              MArgument *args,
+                                              MArgument res) {
+  (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  Shape s = {0};
+  int ok = term_shape_in(t, 0, &s);
+  mint dims[1] = {ok ? (mint)s.ndim : 0};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  if (ok) {
+    mint *dst = libData->MTensor_getIntegerData(out);
+    for (u32 i = 0; i < s.ndim; i++) dst[i] = (mint)s.dims[i];
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 // === memory introspection (used by lenet-mnist/memory-probe.wls) ===
 EXTERN_C DLLEXPORT int thvm_wl_tens_count(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {

@@ -1484,6 +1484,20 @@ fn KProgOp *kernel_program_cache_lookup(KProgOp const *prog, u32 n_ops,
 fn KProgOp *kernel_program_cache_insert(KProgOp const *prog, u32 n_ops);
 fn u32      kernel_program_cache_size(void);
 
+// Lambda-bound-variable shape annotation table.  Populated by
+// `TLamShape[shape, body]` at the WL surface so a TVAR(lam_loc)
+// can be shape-resolved before APP-LAM beta substitutes a
+// concrete value.  Used by term_shape_in (and downstream by
+// materialize visit() to emit KSRC_AS_INPUT for shape-known
+// TVARs).  Reset from thvm_init.  Propagated through
+// clone_to_book_rec (dyn -> book) and alo_realize (book -> dyn).
+fn void lam_shape_reset(void);
+fn void lam_shape_set(u64 lam_loc, Shape const *shape);
+fn int  lam_shape_lookup(u64 lam_loc, Shape *out);
+fn void lam_shape_set_book(u64 book_loc, Shape const *shape);
+fn int  lam_shape_lookup_book(u64 book_loc, Shape *out);
+fn u32  lam_shape_count(void);
+
 // Optional incremental worklist for nf.  When attached, redex_fire
 // pushes locally-fresh redexes (the result + every newly allocated
 // cell whose content is a redex) into the buffer, advancing *n_ptr.

@@ -102,6 +102,12 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
       Term body = heap_read(val);
       Term cb   = clone_to_book_rec(body, map, map_pos);
       book_set(b, cb);
+      // Propagate any shape annotation on this LAM from dyn space
+      // to book space.  TLamShape sets the dyn-side annotation;
+      // here we mirror it on the book loc so alo_realize can
+      // re-instate the annotation on each fresh dyn instance.
+      Shape s;
+      if (lam_shape_lookup(val, &s)) lam_shape_set_book(b, &s);
       return term_new(0, TAG_LAM, ext, b);
     }
 

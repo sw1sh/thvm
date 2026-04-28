@@ -80,6 +80,15 @@ tensorIdQ[t_] := TTermTag[t] === $TagTEN
 TTensorShape[t_ ? tensorIdQ]    := $tensorShapeFn[TTermVal[t]]
 TTensorShape[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]
 
+(* TTermShape -- runs the C-side `term_shape_in` resolver, which
+   handles TEN, UOP (shape-inferred from children), and TVAR
+   (consults the lam_shape side table).  Returns {} when the
+   shape can't be determined; otherwise a list of dim extents.
+   Use this when you want shape inference, not just "is this a
+   concrete TEN". *)
+TTermShape[t_TTerm] := Normal @ THVMLink`Private`$termShapeInFn[ttermRaw[t]]
+TTermShape[i_Integer] := Normal @ THVMLink`Private`$termShapeInFn[i]
+
 TTensorDType[t_ ? tensorIdQ]    := dtypeName[TTermExt[t]]
 TTensorDType[t_TTerm]           := Missing["NotATensor", TTagName[TTermTag[t]]]
 

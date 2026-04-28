@@ -69,6 +69,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "heap/subst_var.c"
 #include "heap/subst_cop.c"
 
+// === lam/ ===
+// Side tables tied to LAM heap locs (shape annotation, future:
+// arity hints).  No reduction logic; pure storage.
+#include "lam/shape.c"
+
 // === book/ ===
 // from_dynamic depends on heap/, book/alloc, book/set; included after them.
 #include "book/alloc.c"
@@ -312,6 +317,8 @@ void thvm_init(void) {
   uop_mov_cache_reset();     // movement-op cache, same lifecycle.
   kernel_program_cache_reset();   // KProgOp[] hash-cons; stale
                              // entries would alias freed kernels.
+  lam_shape_reset();         // LAM-bound-var shape table; stale
+                             // entries reference invalid lam_loc.
   extern_pin_clear();   // drop any leftover pins from a prior session
   // Backend selection: THVM_BACKEND=metal picks Metal as the default
   // device for newly allocated tensors.  Per-tensor backends are still

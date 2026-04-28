@@ -91,6 +91,11 @@ Term alo_realize(Term book_term, u32 state_id) {
       u32 body_state = alo_state_push(state_id, val, new_loc);
       Term body = book_read(val);
       heap_set(new_loc, alo_suspend_child(body, body_state));
+      // Re-instate any shape annotation from the book LAM onto
+      // the fresh dyn instance, so each iter's bound var is
+      // shape-resolvable independently.
+      Shape s;
+      if (lam_shape_lookup_book(val, &s)) lam_shape_set(new_loc, &s);
       return term_new(0, TAG_LAM, ext, new_loc);
     }
 
