@@ -244,14 +244,16 @@ HeapSnapshot[Missing["NoRoot"]]   := snapshotImpl[Missing["NoRoot"]]
 HeapSnapshot[None]                := snapshotImpl[Missing["NoRoot"]]
 
 snapshotImpl[rootRawOrMissing_] := Module[{
-    n, nb, cellRaws, bookRaws, defRootRaws, bookHolders,
+    lo, n, nb, cellRaws, cellLocs, bookRaws, defRootRaws, bookHolders,
     allRaws, remap,
     cells, bookCells, tensors, defs, aloStates, rootTerm,
     extraRaws = If[ IntegerQ[rootRawOrMissing], {rootRawOrMissing}, {}]
 },
     ensureInit[];
+    lo          = $heapBaseFn[];
     n           = $heapPosFn[];
-    cellRaws    = Table[$heapReadFn[i],   {i, 0, n - 1}];
+    cellLocs    = Range[lo, n - 1];
+    cellRaws    = $heapReadFn /@ cellLocs;
     nb          = $bookPosFn[];
     bookRaws    = Table[$bookReadFn[i],   {i, 1, nb - 1}];
     defRootRaws = Table[$defGetFn[slot],  {slot, 0, 255}];
@@ -262,8 +264,8 @@ snapshotImpl[rootRawOrMissing_] := Module[{
 
     cells = Association @ MapIndexed[
         Function[{raw, idx},
-            With[{i = First[idx] - 1},
-                i -> If[ MemberQ[bookHolders, i],
+            With[{i = First[idx] - 1, locOff = lo},
+                (i + locOff) -> If[ MemberQ[bookHolders, i],
                     rawToBookTerm[raw, remap],
                     rawToTerm[raw, remap]
                 ]

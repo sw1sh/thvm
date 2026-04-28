@@ -65,12 +65,12 @@ uopName[op_]             := "UOP?" <> ToString[op]
    the IC-string-diagram path renders per reference instead of as a
    shared agent). *)
 
-opcodeFromHeap[base_Integer] := Block[{n = THeapPos[], cell, found = $UopConst},
+opcodeFromHeap[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell, found = $UopConst},
     Do[
         cell = THeapRead[loc];
         If[ TTermTag[cell] === $TagUOP && TTermVal[cell] === base,
             found = TTermExt[cell]; Break[]],
-        {loc, 0, n - 1}
+        {loc, lo, n - 1}
     ];
     found
 ]

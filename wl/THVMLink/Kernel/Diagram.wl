@@ -433,9 +433,9 @@ gradDiagram[base_Integer, principal_] := Block[{
 
 (* The DUP cell carries no label of its own; find one from any
    DP0/DP1 cell that references it.  Fallback 0 if none in heap. *)
-dupLabelFor[base_Integer] := Block[{n = THeapPos[], cell},
+dupLabelFor[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
     cell = SelectFirst[
-        Range[0, n - 1],
+        Range[lo, n - 1],
         With[{t = THeapRead[#]},
             (TTermTag[t] === $TagDP0 || TTermTag[t] === $TagDP1) &&
             TTermVal[t] === base] &,
@@ -583,18 +583,18 @@ uopOpcodeRule[t_] := If[
     Nothing
 ]
 
-discoverAgentsHere[seedTerms_List] := Block[{n = THeapPos[], terms},
-    terms = Join[seedTerms, Table[THeapRead[loc], {loc, 0, n - 1}]];
+discoverAgentsHere[seedTerms_List] := Block[{lo = THeapBase[], n = THeapPos[], terms},
+    terms = Join[seedTerms, Table[THeapRead[loc], {loc, lo, n - 1}]];
     Association[agentRule /@ terms]
 ]
 
-discoverUopOpcodesHere[seedTerms_List] := Block[{n = THeapPos[], terms},
-    terms = Join[seedTerms, Table[THeapRead[loc], {loc, 0, n - 1}]];
+discoverUopOpcodesHere[seedTerms_List] := Block[{lo = THeapBase[], n = THeapPos[], terms},
+    terms = Join[seedTerms, Table[THeapRead[loc], {loc, lo, n - 1}]];
     Association[uopOpcodeRule /@ terms]
 ]
 
-discoverErasHere[] := Block[{n = THeapPos[]},
-    Select[Range[0, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
+discoverErasHere[] := Block[{lo = THeapBase[], n = THeapPos[]},
+    Select[Range[lo, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
 ]
 
 (* Reachability for tensor (UOP/TEN) world only -- IC agents stay

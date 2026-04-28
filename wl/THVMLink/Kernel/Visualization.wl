@@ -78,13 +78,13 @@ agentFromTerm[term_] := With[{tag = TTermTag[term]},
     ]
 ]
 
-discoverAgents[seedTerms_List : {}] := Block[{n = THeapPos[], terms},
-    terms = Join[seedTerms, Table[THeapRead[loc], {loc, 0, n - 1}]];
+discoverAgents[seedTerms_List : {}] := Block[{lo = THeapBase[], n = THeapPos[], terms},
+    terms = Join[seedTerms, Table[THeapRead[loc], {loc, lo, n - 1}]];
     Association[agentFromTerm /@ terms]
 ]
 
-discoverEras[] := Block[{n = THeapPos[]},
-    Select[Range[0, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
+discoverEras[] := Block[{lo = THeapBase[], n = THeapPos[]},
+    Select[Range[lo, n - 1], TTermTag[THeapRead[#]] === $TagERA &]
 ]
 
 (* === edge records === *)

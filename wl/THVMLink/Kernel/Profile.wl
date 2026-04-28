@@ -43,18 +43,19 @@ TProfilePlot::usage = "TProfilePlot[{profile_1, ..., profile_n}, key] line-plots
 TProfileReport::usage = "TProfileReport[profile] returns a short Column rendering of headline metrics + per-tag cell counts + per-kernel inputs/ops.  TProfileReport[{p_1, ..., p_n}] formats a sequence of snapshots side-by-side, showing growth ratios.  Use for stdout / notebook display.";
 
 (* Forward-declare bridge symbols owned by THVMLink.wl. *)
-{THeapPos, THeapRead, TItrs, TTagName, TTermTag,
+{THeapPos, THeapBase, THeapRead, TItrs, TTagName, TTermTag,
  TKernelTable, TTensTable, decodeKernelInfo};
 
 Begin["`Private`"];
 
-profileCellsByTag[] := Module[{n, byTag = <||>, t, tag},
+profileCellsByTag[] := Module[{base, n, byTag = <||>, t, tag},
+    base = THeapBase[];
     n = THeapPos[];
     Do[
         t = THeapRead[i];
         tag = TTagName[TTermTag[t]];
         byTag[tag] = Lookup[byTag, tag, 0] + 1,
-        {i, 0, n - 1}];
+        {i, base, n - 1}];
     byTag
 ]
 
@@ -86,7 +87,7 @@ TProfile[label_String] := Module[{
     maxIn  = If[ Length[perK] > 0, Max[#["Inputs"] & /@ perK], 0];
     maxOps = If[ Length[perK] > 0, Max[#["Ops"]    & /@ perK], 0];
     <| "Label"            -> label,
-       "HeapCells"        -> THeapPos[],
+       "HeapCells"        -> THeapPos[] - THeapBase[],
        "CellsByTag"       -> profileCellsByTag[],
        "Tensors"          -> tStats[[1]],
        "DistinctBufs"     -> tStats[[2]],

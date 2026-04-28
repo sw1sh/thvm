@@ -83,13 +83,34 @@ fn Term thvm_realize(Term expr) {
   cpu_buf_clear_preserved(wm);
   cpu_buf_clear_freeable(wm);
 
-  // Note: gc_collect is NOT auto-triggered here.  WL holds cached
-  // raw Term integers inside its TTerm wrappers (created at the
-  // last bridge call); they aren't refreshed by the C-side pin
-  // table remap, so a mid-realize evacuation would leave any
-  // un-passed WL TTerm pointing at stale loc.  Callers who want
-  // compaction call TGCCollect[] explicitly after dropping or
-  // re-fetching their TTerm references; the test in
-  // wl/THVMLink/Tests/heap_compact.wlt exercises this contract.
+  // Auto-trigger Cheney collection once the dyn heap crosses a
+  // configurable fraction of from-space.  The result Term is added
+  // to the root set; everything else WL holds is reached through
+  // the EXTERN_PIN_HANDLES side table (extern_pin_handle_set on
+  // every TTerm wrap), so the C-side pin table is authoritative
+  // post-GC.  WL's ttermRaw refreshes through the handle on every
+  // read, so cached raw Term integers can't go stale.
+  // THVM_GC=0 disables; THVM_GC_KB overrides the trigger threshold
+  // (in KB of heap; one cell = 8B).
+  if (gc_enabled()) {
+    static int gc_disabled_env = -1;
+    static int gc_kb_env       = -1;
+    if (gc_disabled_env == -1) {
+      const char *e = getenv("THVM_GC");
+      gc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
+    }
+    if (gc_kb_env == -1) {
+      const char *e = getenv("THVM_GC_KB");
+      gc_kb_env = (e != NULL) ? atoi(e) : 0;
+    }
+    u64 trigger_words = (gc_kb_env > 0)
+                          ? (u64)gc_kb_env * 128
+                          : (gc_from_end() - gc_from_start()) / 2;
+    if (!gc_disabled_env && HEAP_NEXT > gc_from_start() + trigger_words) {
+      Term roots[1] = { res };
+      gc_collect(roots, 1);
+      res = roots[0];
+    }
+  }
   return res;
 }

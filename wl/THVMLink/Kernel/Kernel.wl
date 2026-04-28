@@ -79,9 +79,9 @@ TKernel[t_TTerm /; tKernelTermQ[t]] := TKernel[<|
    in src/schedule/materialize.c -- one heap cell per emitted kernel
    carrying the kernel_term, so this scan always finds something for
    every live kid (1 .. KERNELS_NEXT - 1). *)
-TKernel[kid_Integer] := Module[{n = THeapPos[], hit},
+TKernel[kid_Integer] := Module[{lo = THeapBase[], n = THeapPos[], hit},
     hit = SelectFirst[
-        Range[0, n - 1],
+        Range[lo, n - 1],
         Block[{c = THeapRead[#]},
             TTermTag[c] === $TagUOP &&
             TTermExt[c] === $UopKernel &&

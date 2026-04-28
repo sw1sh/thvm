@@ -148,6 +148,25 @@ EXTERN_C DLLEXPORT int thvm_wl_extern_pin_count(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Look up the current encoded Term for a pin handle id.  WL's
+// TTerm wrapper caches the raw Term integer at construction time;
+// after a copying GC moves the underlying heap loc, the cached raw
+// is stale.  ttermRaw refreshes via this accessor before any C
+// bridge call so downstream consumers always see the post-GC loc.
+EXTERN_C DLLEXPORT int thvm_wl_extern_pin_handle_get(WolframLibraryData libData,
+                                                     mint argc,
+                                                     MArgument *args,
+                                                     MArgument res) {
+  (void)libData; (void)argc;
+  mint id = MArgument_getInteger(args[0]);
+  if (id < 0) {
+    MArgument_setInteger(res, 0);
+    return LIBRARY_NO_ERROR;
+  }
+  MArgument_setInteger(res, (mint)extern_pin_handle_get((u64)id));
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_term_tag(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc;
@@ -185,6 +204,18 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_pos(WolframLibraryData libData, mint argc,
                                         MArgument *args, MArgument res) {
   (void)libData; (void)argc; (void)args;
   MArgument_setInteger(res, (mint)HEAP_NEXT);
+  return LIBRARY_NO_ERROR;
+}
+
+// Lower bound of the active heap region.  When the Cheney GC has
+// swapped, live cells live in [gc_from_start(), HEAP_NEXT); WL
+// iterators that walk the heap use this as the lower bound.
+// Returns 0 when GC is disabled (single-region semantics).
+EXTERN_C DLLEXPORT int thvm_wl_heap_base(WolframLibraryData libData,
+                                         mint argc, MArgument *args,
+                                         MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, gc_enabled() ? (mint)gc_from_start() : 0);
   return LIBRARY_NO_ERROR;
 }
 

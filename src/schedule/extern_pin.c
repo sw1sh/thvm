@@ -74,6 +74,15 @@ fn void extern_pin_handle_set(u64 id, Term t) {
   extern_pin_term(t);
 }
 
+// Look up the current Term for a handle id; returns 0 if the
+// handle is unknown.  Used by the WL bridge to refresh stale raw
+// Term values after a copying GC moves the handle's referenced
+// loc; the C-side EXTERN_PIN_HANDLES table is the source of truth.
+fn Term extern_pin_handle_get(u64 id) {
+  if (id >= EXTERN_PIN_HANDLE_CAP) return 0;
+  return EXTERN_PIN_HANDLES[id];
+}
+
 fn void extern_pin_handle_drop(u64 id) {
   if (id >= EXTERN_PIN_HANDLE_CAP) return;
   Term t = EXTERN_PIN_HANDLES[id];

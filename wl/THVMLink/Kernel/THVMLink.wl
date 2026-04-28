@@ -26,7 +26,8 @@ TExternPinCount::usage = "TExternPinCount[] returns the current number of entrie
 TTagName::usage   = "TTagName[tag] returns a string for a tag id.";
 
 (* === heap === *)
-THeapPos::usage   = "THeapPos[] returns the next free heap location.";
+THeapPos::usage   = "THeapPos[] returns the next free heap location (the upper bound of the active heap region).";
+THeapBase::usage  = "THeapBase[] returns the lower bound of the active heap region.  Equal to 0 in pre-Cheney layouts and after thvm_init; equal to gc_from_start() once the GC has swapped semi-spaces, so heap iterators should walk [THeapBase[], THeapPos[]) to cover live cells.";
 THeapAlloc::usage = "THeapAlloc[size] reserves `size` consecutive cells; returns the base loc.";
 THeapRead::usage  = "THeapRead[loc] returns the Term at heap[loc].";
 THeapSet::usage   = "THeapSet[loc, term] writes `term` to heap[loc].";
@@ -234,8 +235,11 @@ $externPinAssociateFn := $externPinAssociateFn =
     load["thvm_wl_extern_pin_associate", {Integer, Integer}, Integer];
 $externPinCountFn := $externPinCountFn =
     load["thvm_wl_extern_pin_count", {}, Integer];
+$externPinHandleGetFn := $externPinHandleGetFn =
+    load["thvm_wl_extern_pin_handle_get", {Integer}, Integer];
 
 $heapPosFn   := $heapPosFn   = load["thvm_wl_heap_pos",   {},                       Integer];
+$heapBaseFn  := $heapBaseFn  = load["thvm_wl_heap_base",  {},                       Integer];
 $heapAllocFn := $heapAllocFn = load["thvm_wl_heap_alloc", {Integer},                Integer];
 $heapReadFn  := $heapReadFn  = load["thvm_wl_heap_read",  {Integer},                Integer];
 $heapSetFn   := $heapSetFn   = load["thvm_wl_heap_set",   {Integer, Integer},       Integer];
@@ -384,8 +388,17 @@ TReset[ctx_TContext] := TInContext[ctx, TReset[]]
 TTerm[id_Integer] := TTerm[$contextCurrentFn[], id]
 TTerm[c_Integer, id_Integer] := TTerm[c, id, makePinHandle[id]]
 
-(* Internal extractors. *)
-ttermRaw[TTerm[_Integer, id_Integer, _]] := id
+(* Internal extractors.  3-arg TTerm with a handle: refresh the
+   raw via the C-side pin table, which is the source of truth post-
+   GC.  The cached `id` is the construction-time encoding; if a
+   copying GC has moved the underlying heap loc since, the
+   refreshed value reflects the new loc.  Fallback to the cached
+   id if the handle's C-side entry is zero (e.g. the handle was
+   dropped but the WL value is lingering). *)
+ttermRaw[TTerm[_Integer, id_Integer, h_]] := With[
+    {fresh = $externPinHandleGetFn[ManagedLibraryExpressionID[h]]},
+    If[ fresh =!= 0, fresh, id]
+]
 ttermRaw[id_Integer]                     := id
 
 ttermCtx[TTerm[c_Integer, _Integer, _]]  := c
@@ -455,6 +468,7 @@ TTerm[c_Integer, id_Integer, _]["info"]    := <|
 |>
 
 THeapPos[]                       := (ensureInit[]; $heapPosFn[])
+THeapBase[]                      := (ensureInit[]; $heapBaseFn[])
 THeapAlloc[size_Integer]         := (ensureInit[]; $heapAllocFn[size])
 THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
@@ -725,12 +739,12 @@ TDup[label_Integer, body_, k_] := With[{loc = heapWith[body]},
    Defined in Visualization.wl (loaded below).  Public symbol
    THeapGraph; per-tag shapes / colours are private. *)
 
-THeap[] := Block[{n = THeapPos[]},
+THeap[] := Block[{lo = THeapBase[], n = THeapPos[]},
     THeap[<|
         "nextLoc" -> n,
         "cells"   -> Association @ Table[
             i -> THeapRead[i],
-            {i, 0, n - 1}
+            {i, lo, n - 1}
         ],
         "Graph"   -> THeapGraph[]
     |>]
