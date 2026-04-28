@@ -325,6 +325,15 @@ void thvm_init(void) {
   lam_shape_reset();         // LAM-bound-var shape table; stale
                              // entries reference invalid lam_loc.
   extern_pin_clear();   // drop any leftover pins from a prior session
+  // Also wipe the sparse pin-handle table -- entries from a prior
+  // session point at the old heap, which is now freed.  WL's
+  // ManagedLibraryExpression manager will eventually call
+  // extern_pin_handle_drop on each old id; that becomes a harmless
+  // no-op once the entry is zero, while gc_evacuate_side_tables is
+  // saved from following stale Term values into bogus from-space
+  // locs (the ttermRaw fast-path falls back to the cached id, which
+  // never reaches the GC).
+  extern_pin_handle_clear();
   // Cheney semi-spaces: split HEAP_CAP in half.  heap_alloc bumps
   // within the active from-space; gc_collect evacuates live cells
   // into to-space and swaps when triggered from thvm_realize.
