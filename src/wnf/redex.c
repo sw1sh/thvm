@@ -109,11 +109,43 @@ static void heap_replace(Term old, Term new_) {
   }
 }
 
+// Incremental nf worklist.  `nf` attaches a buffer + counter pointer
+// before its main loop; redex_fire pushes locally-fresh redexes
+// (result + cells the interaction allocated) directly so nf doesn't
+// need to re-enumerate the global heap after every drain.  When no
+// worklist is attached (e.g. WL `TInteract` direct fire), pushes
+// are silently dropped.
+static Term *NF_WORK_PTR    = 0;
+static u32  *NF_WORK_N_PTR  = 0;
+static u32   NF_WORK_CAP_VAL = 0;
+
+fn void redex_worklist_attach(Term *buf, u32 *n_ptr, u32 cap) {
+  NF_WORK_PTR     = buf;
+  NF_WORK_N_PTR   = n_ptr;
+  NF_WORK_CAP_VAL = cap;
+}
+
+fn void redex_worklist_detach(void) {
+  NF_WORK_PTR     = 0;
+  NF_WORK_N_PTR   = 0;
+  NF_WORK_CAP_VAL = 0;
+}
+
+static inline void nf_work_push(Term t) {
+  if (NF_WORK_PTR == 0) return;
+  if (!is_redex(t)) return;
+  u32 n = *NF_WORK_N_PTR;
+  if (n >= NF_WORK_CAP_VAL) return;   // overflow: silently drop
+  NF_WORK_PTR[n] = t;
+  *NF_WORK_N_PTR = n + 1;
+}
+
 fn Term redex_fire(Term redex) {
   if (!is_redex(redex)) return 0;
   u8  tag = term_tag(redex);
   u64 val = term_val(redex);
   Term result = redex;
+  u64 hb_at_fire = HEAP_NEXT;
 
   switch (tag) {
     case TAG_APP: {
@@ -321,6 +353,16 @@ fn Term redex_fire(Term redex) {
   }
 
   heap_replace(redex, result);
+  // Incremental worklist propagation: push the result (if it's a
+  // fresh redex on its own) and every newly allocated cell whose
+  // content is a redex.  Replaces nf.c's old `[hb, HEAP_NEXT)` scan
+  // and the post-drain global re-enumerate.
+  if (NF_WORK_PTR != 0) {
+    if (result != 0) nf_work_push(result);
+    for (u64 i = hb_at_fire; i < HEAP_NEXT; i++) {
+      nf_work_push(heap_read(i));
+    }
+  }
   return result;
 }
 

@@ -1463,6 +1463,15 @@ fn u8   is_redex(Term t);
 fn Term redex_fire(Term redex);
 fn u32  redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap);
 
+// Optional incremental worklist for nf.  When attached, redex_fire
+// pushes locally-fresh redexes (the result + every newly allocated
+// cell whose content is a redex) into the buffer, advancing *n_ptr.
+// nf attaches before its main loop and detaches after.  Other
+// callers (WL TInteract, TStep) leave the worklist detached and
+// pay zero overhead.
+fn void redex_worklist_attach(Term *buf, u32 *n_ptr, u32 cap);
+fn void redex_worklist_detach(void);
+
 // === runtime lifecycle ===
 void thvm_init(void);
 void thvm_free(void);

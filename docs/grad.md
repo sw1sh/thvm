@@ -176,6 +176,31 @@ walks the term, classifies realize boundaries (each compute UOP
 becomes a candidate), and emits one `KernelEntry` per boundary
 via `visit()`.
 
+`wnf` and `nf` cover complementary work: `wnf` drives the head
+spine (TAG_REF / TAG_ALO unfolding plus all the strict eliminator
+descents — APP, OP2, EQL/AND/OR, DSU/DDU, MAT/SWI/USE, DP0/DP1)
+exactly the way HVM4's WHNF does.  `nf` then sweeps every
+remaining redex on the heap (the chain-rule GRADs nested inside
+ADD's children, KERNELs lifted by `thvm_materialize`, etc.) — a
+job HVM4 has no analog for, since HVM4 only observes results at
+strict positions.  `nf` deliberately excludes REF/ALO from eager
+firing so recursive named definitions (`sgd_loop = \w n. if n==0
+...`) don't unfold non-terminatingly; that one job stays with
+`wnf`.
+
+Inside `nf` itself the loop is incremental.  An initial
+`redex_enumerate` seeds the worklist; from then on every
+`redex_fire` pushes its locally-fresh successors directly into
+the worklist (the result + every newly allocated cell whose
+content is a redex).  Per-fire cost is `O(allocated-cells)`, not
+`O(heap_size)`.  When the worklist drains we re-enumerate as a
+parent-promotion fallback (a UOP_ADD whose child cell was patched
+from a stuck DUP to a CTR by `heap_replace` is newly a redex but
+sits at no fresh cell), terminating once a full pass fires
+nothing.  See
+[`src/wnf/nf.c`](../src/wnf/nf.c) and
+[`src/wnf/redex.c`](../src/wnf/redex.c#L130).
+
 ### Dynamic KernelEntry arrays (commit `1b0c0a2`)
 
 Originally `KernelEntry::input_*` and `program` were inline
