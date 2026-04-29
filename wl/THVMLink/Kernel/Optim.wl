@@ -20,7 +20,7 @@ BeginPackage["THVMLink`"];
 
 TOptim::usage = "TOptim[\"SGD\", lr] returns a function {gradFn, w0, n} -> TTerm that, when realised, performs n SGD steps from w0 with learning rate `lr`.  TOptim[\"Adam\", lr, beta1, beta2, eps] likewise for Adam.  gradFn is a host-side function w_TTerm -> TTerm carrying the gradient w.r.t. w.";
 
-TAdam::usage = "TAdam[params, grads, m, v, t, lr, beta1, beta2, eps] applies one Adam step in tensor-land.  params, grads, m, v are lists of TTerm tensor handles (TAG_TEN); t is the integer step counter (host-side; bias-correction constants 1/(1-beta1^t) and 1/sqrt(1-beta2^t) are precomputed at emit time so the kernel program stays POW-free).\n\nFor each param i, the body is:\n    m_new = beta1*m + (1-beta1)*grad;        TSet[m, m_new]\n    v_new = beta2*v + (1-beta2)*grad*grad;   TSet[v, v_new]\n    w_new = w - lrHat*m / (sqrt(v)*invSqrtB2cor + eps); TSet[w, w_new]\nThe TSet writes through to the externally-pinned tensor immediately so subsequent steps read the updated values back through the same handle (m_new and v_new are the post-update bytes, accessed via mTen / vTen).  Returns `params` for chainability.";
+TAdam::usage = "TAdam[loss, params, m, v, t, opts] applies one Adam step in tensor-land.\n\nArguments:\n    loss    -- TTerm scalar; the value being minimised.  Grads w.r.t.\n               every entry of `params` are computed internally via\n               TGradMany (one realize, shared forward DAG, per-target\n               kernel-emit memo dedup).\n    params  -- List of TTerm tensor handles (TAG_TEN) to update.\n    m, v    -- Same-shape running first/second moment buffers (TTerm\n               tensors); seed with `TZerosLike /@ params`.\n    t       -- Integer step index (host-side).  Bias-correction\n               constants 1/(1-beta1^t) and 1/sqrt(1-beta2^t) are\n               precomputed at emit time so the kernel program stays\n               POW-free.\n    opts    -- Hyperparameters as Wolfram options.  Defaults:\n                   \"lr\"    -> 0.001\n                   \"beta1\" -> 0.9\n                   \"beta2\" -> 0.999\n                   \"eps\"   -> 1.0*^-8\n\nThe per-param body is the textbook Adam update built as a lazy\nUOP_ASSIGN chain:\n    m := beta1*m + (1-beta1)*grad\n    v := beta2*v + (1-beta2)*grad*grad\n    w := w - lrHat*m / (sqrt(v)*invSqrtB2cor + eps)\nReturns `params` for chainability.";
 
 (* Forward-declare symbols owned by later-loading siblings (Ref.wl,
    Switch.wl, Tensor.wl).  Without this, bare references to TDef /
@@ -125,47 +125,71 @@ TOptim["Adam", lr_TTerm, beta1_, beta2_, eps_] :=
    time and folded into the lr_hat scalar so the graph stays
    POW-free.  This keeps the Adam step inside the kernel surface
    that Phase 7's TJit will capture verbatim. *)
-TAdam[
-    params_List, grads_List, mList_List, vList_List,
-    t_Integer, lr_ ? NumericQ, beta1_ ? NumericQ, beta2_ ? NumericQ,
-    eps_ ? NumericQ
-] :=
+Options[TAdam] = {
+    "lr"    -> 0.001,
+    "beta1" -> 0.9,
+    "beta2" -> 0.999,
+    "eps"   -> 1.0*^-8
+};
+
+TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
+      opts : OptionsPattern[]] :=
     (* Bias-correction folded in at emit time so the kernel program
        stays POW-free.  Algebra:
            step = lr * m_hat / (sqrt(v_hat) + eps)
                 = (lr / (1 - b1^t)) * m_new
                           / (sqrt(v_new) / sqrt(1 - b2^t) + eps)
                 = lrHat * m_new / (sqrt(v_new) * invSqrtB2cor + eps)
-       so lrHat and invSqrtB2cor are precomputed scalars. *)
+       so lrHat and invSqrtB2cor are precomputed scalars.
+
+       Grads come from TGradMany (one realize, shared forward DAG)
+       so per-target kernels go through the same materialize-pass
+       memo and forward intermediates dedup across targets. *)
     Block[{
-        lrHat        = lr  / (1.0 - beta1^t),
-        invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t]
+        lr     = OptionValue["lr"],
+        beta1  = OptionValue["beta1"],
+        beta2  = OptionValue["beta2"],
+        eps    = OptionValue["eps"],
+        lrHat, invSqrtB2cor, grads
     },
-    Do[
-        Block[{
-            wTen = params[[i]], gTen = grads[[i]],
-            mTen = mList[[i]],  vTen = vList[[i]],
-            denom
-        },
-            (* Lazy ASSIGN-per-buffer.  Each TAssign builds a
-               UOP_ASSIGN node; TRealize reduces it (fires WNF +
-               the kernel + the in-place memcpy).  Three separate
-               realizes per param because thvm's WNF currently
-               fires only the FIRST encountered ASSIGN per realize
-               -- two sibling ASSIGNs in one chain leave the second
-               unfired.  Phase 14 follow-up: extend WNF to drain
-               every ASSIGN in the term tree and collapse this back
-               to a single TRealize over a List.  Reading vTen / mTen
-               in subsequent steps gets the post-write bytes since
-               the ASSIGN fired in the prior realize. *)
-            TRealize @ TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen];
-            TRealize @ TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)];
-            denom = Sqrt[vTen] * invSqrtB2cor + eps;
-            TRealize @ TAssign[wTen, wTen - lrHat * mTen / denom];
-        ],
-        {i, Length[params]}];
-    params
-]
+        lrHat        = lr  / (1.0 - beta1^t);
+        invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t];
+        grads        = TGradMany[loss, params];
+        Do[
+            Block[{
+                wTen = params[[i]], gTen = grads[[i]],
+                mTen = mList[[i]],  vTen = vList[[i]],
+                denom
+            },
+                (* Lazy ASSIGN-per-buffer.  THREE separate
+                   TRealizes per param because thvm's current WNF
+                   dispatch on UOP_ASSIGN forces only its
+                   IMMEDIATE src/dst children to TAG_TEN
+                   (src/wnf/_.c lines 140-166); a src expressed as
+                   e.g. `TUOpAdd[ASSIGN_m, ASSIGN_v]` stays at
+                   TAG_UOP because UOP non-kernel non-assign nodes
+                   are "WNF by themselves" (line 170) and never
+                   recurse into their children.  So a single outer
+                   TAssign[w, ...] wrapping two sibling ASSIGNs
+                   leaves the inner ASSIGNs unfired (verified by
+                   the test 3 case in /tmp/test_assign_simple.wls
+                   during Phase 13).  Phase 14 fix: extend WNF to
+                   drain every ASSIGN reachable from the redex
+                   before settling the parent UOP, OR teach
+                   materialize to insert dependency edges that
+                   force ASSIGNs to fire before downstream kernels
+                   read their dst.  Until then: three realizes is
+                   correct; TJit replay still captures the
+                   captured kernel chain so steady-state cost is
+                   only the per-realize dispatch overhead. *)
+                TRealize @ TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen];
+                TRealize @ TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)];
+                denom = Sqrt[vTen] * invSqrtB2cor + eps;
+                TRealize @ TAssign[wTen, wTen - lrHat * mTen / denom];
+            ],
+            {i, Length[params]}];
+        params
+    ]
 
 End[];
 EndPackage[];

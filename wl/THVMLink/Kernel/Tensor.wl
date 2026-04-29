@@ -269,12 +269,13 @@ TGrad[y_, target_TTerm, gy_TTerm] := Module[
 ]
 
 (* Multi-target VJP: build n unary TGrads sharing the y subgraph (and
-   the gy seed) by heap-loc identity, apply the user's body to them
-   positionally.  materialize's per-realize memo dedups every forward
-   kernel emitted from those shared UOps across all n targets. *)
-TGradMany[y_, {target_}, body_]    := body[TGrad[y, target]]
-TGradMany[y_, targets_List, body_] := With[{seed = gradOnesSeed[y]},
-    body @@ (TGrad[y, #, seed] & /@ targets)
+   the gy seed) by heap-loc identity.  materialize's per-realize memo
+   dedups every forward kernel emitted from those shared UOps across
+   all n targets.  Returns a List of n TTerms in the same order as
+   `targets`. *)
+TGradMany[y_, {target_}]    := {TGrad[y, target]}
+TGradMany[y_, targets_List] := With[{seed = gradOnesSeed[y]},
+    TGrad[y, #, seed] & /@ targets
 ]
 
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)

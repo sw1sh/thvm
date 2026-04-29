@@ -673,22 +673,27 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    (* In-backend TAdam, one step at lr=0.001, beta1=0.9, beta2=0.999.
-       Matches the textbook Adam formula:
-           m_new = 0.9*0 + 0.1 * 0.1   = 0.01
-           v_new = 0.999*0 + 0.001 * 0.01 = 0.00001
-           m_hat = m_new / (1-0.9^1) = 0.1
-           v_hat = v_new / (1-0.999^1) = 0.01
-           w_new = 1.0 - 0.001 * 0.1 / (sqrt(0.01)+1e-8) = 0.999  *)
-    w = TTensorCreate @ NumericArray[{1.0}, "Real32"];
-    g = TTensorCreate @ NumericArray[{0.1}, "Real32"];
+    (* In-backend TAdam at lr=0.001, beta1=0.9, beta2=0.999, against
+       loss = (w - 0.05)^2 -- a degenerate per-element regression
+       whose gradient is 2(w - 0.05) = 2(1 - 0.05) = 1.9 at w = 1.
+       Note: TGradMany doesn't support gTen as input directly, so
+       we test with a non-trivial loss that produces a known grad.
+           grad   = 1.9
+           m_new  = 0.9*0 + 0.1*1.9   = 0.19
+           v_new  = 0.999*0 + 0.001 * 1.9^2 = 0.00361
+           m_hat  = 0.19 / (1-0.9)    = 1.9
+           v_hat  = 0.00361 / (1-0.999) = 3.61
+           w_new  = 1.0 - 0.001 * 1.9 / (sqrt(3.61)+1e-8) = 0.999  *)
+    w   = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+    tgt = TTensorCreate @ NumericArray[{0.05}, "Real32"];
     m = TTensorCreate @ NumericArray[{0.0}, "Real32"];
     v = TTensorCreate @ NumericArray[{0.0}, "Real32"];
-    TAdam[{w}, {g}, {m}, {v}, 1, 0.001, 0.9, 0.999, 1.0*^-8];
+    loss = TL2Loss[w - tgt];
+    TAdam[loss, {w}, {m}, {v}, 1];
     Max @ Abs @ Flatten @ {
         Normal @ TTensorData[w] - {0.999},
-        Normal @ TTensorData[m] - {0.01},
-        Normal @ TTensorData[v] - {0.00001}
+        Normal @ TTensorData[m] - {0.19},
+        Normal @ TTensorData[v] - {0.00361}
     },
     _ ? (# < 1.0*^-5 &),
     SameTest -> MatchQ,

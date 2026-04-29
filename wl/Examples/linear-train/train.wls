@@ -24,14 +24,13 @@ lr     = TUOpConst[0.1, "f32"]
        destructures the CTR into the body's bound names via N nested
        APP-LAM betas.  No projection opcode -- pure IC primitives. == *)
 loss      = TMSELoss[TMatVec[w, x] + b, target]
-trainStep = TGradMany[loss, {w, b}, Function[{gW, gB},
-    TPri[
-        Function[lt, WriteString["stdout",
-            "loss=", CForm @ TTensorData[lt][[1]], "\n"]],
-        loss,
-        TPriForce[TAssign[w, w - lr * gW],
-                  TAssign[b, b - lr * gB]]]
-]]
+{gW, gB}  = TGradMany[loss, {w, b}];
+trainStep = TPri[
+    Function[lt, WriteString["stdout",
+        "loss=", CForm @ TTensorData[lt][[1]], "\n"]],
+    loss,
+    TPriForce[TAssign[w, w - lr * gW],
+              TAssign[b, b - lr * gB]]]
 
 (* === ONE TMaterialize over the whole APP-PRI tree, inlined into the
        recursive loop body (no separate "step" def needed).  k - 1 uses
