@@ -122,30 +122,30 @@ print["  config: vocab=", vocab, " dim=", dim,
       " n_heads=", nHeads, " n_layers=", nLayers, " seq=", seq];
 
 mkLayer[] := <|
-    "g1"   -> TTensorCreate @ TOnes[{dim}],
-    "b1"   -> TTensorCreate @ TZeros[{dim}],
-    "wq"   -> TTensorCreate @ TGlorot[{dim, dim}],
-    "bq"   -> TTensorCreate @ TZeros[{dim}],
-    "wk"   -> TTensorCreate @ TGlorot[{dim, dim}],
-    "bk"   -> TTensorCreate @ TZeros[{dim}],
-    "wv"   -> TTensorCreate @ TGlorot[{dim, dim}],
-    "bv"   -> TTensorCreate @ TZeros[{dim}],
-    "wo"   -> TTensorCreate @ TGlorot[{dim, dim}],
-    "bo"   -> TTensorCreate @ TZeros[{dim}],
-    "g2"   -> TTensorCreate @ TOnes[{dim}],
-    "b2"   -> TTensorCreate @ TZeros[{dim}],
-    "wff1" -> TTensorCreate @ TGlorot[{dim, ffDim}],
-    "bff1" -> TTensorCreate @ TZeros[{ffDim}],
-    "wff2" -> TTensorCreate @ TGlorot[{ffDim, dim}],
-    "bff2" -> TTensorCreate @ TZeros[{dim}]
+    "g1"   -> TOnes[{dim}],
+    "b1"   -> TZeros[{dim}],
+    "wq"   -> TGlorot[{dim, dim}],
+    "bq"   -> TZeros[{dim}],
+    "wk"   -> TGlorot[{dim, dim}],
+    "bk"   -> TZeros[{dim}],
+    "wv"   -> TGlorot[{dim, dim}],
+    "bv"   -> TZeros[{dim}],
+    "wo"   -> TGlorot[{dim, dim}],
+    "bo"   -> TZeros[{dim}],
+    "g2"   -> TOnes[{dim}],
+    "b2"   -> TZeros[{dim}],
+    "wff1" -> TGlorot[{dim, ffDim}],
+    "bff1" -> TZeros[{ffDim}],
+    "wff2" -> TGlorot[{ffDim, dim}],
+    "bff2" -> TZeros[{dim}]
 |>;
 
 layers = Table[mkLayer[], nLayers];
-tokEmb = TTensorCreate @ TGlorot[{vocab, dim}];
-posEmb = TTensorCreate @ TGlorot[{seq, dim}];
-gFinal = TTensorCreate @ TOnes[{dim}];
-bFinal = TTensorCreate @ TZeros[{dim}];
-wOut   = TTensorCreate @ TGlorot[{dim, vocab}];
+tokEmb = TGlorot[{vocab, dim}];
+posEmb = TGlorot[{seq, dim}];
+gFinal = TOnes[{dim}];
+bFinal = TZeros[{dim}];
+wOut   = TGlorot[{dim, vocab}];
 
 block[x_TTerm, p_Association, mask_TTerm] := Module[{
     ln1, q, k, v, attn, attnProj, x1, ln2, ff1, ff1g, ff2
@@ -241,8 +241,8 @@ If[ Length[flatGen] =!= nGen ||
    on the first call; subsequent calls replay the captured
    sequence directly (no materialise / dispatch overhead). *)
 
-inputBuf  = TTensorCreate @ TZeros[{seq, dim}];
-logitsBuf = TTensorCreate @ TZeros[{seq, vocab}];
+inputBuf  = TZeros[{seq, dim}];
+logitsBuf = TZeros[{seq, vocab}];
 
 forwardFromInput[xT_TTerm] := Module[{x, lnf, mask},
     mask = TCausalMask[seq];

@@ -48,9 +48,9 @@ SeedRandom[42];
 
 print["=== Stage 0: TTerm expression  ==="];
 
-a = TTensorCreate @ TGlorot[{8, 16}];
-b = TTensorCreate @ TGlorot[{8, 16}];
-c = TTensorCreate @ TGlorot[{8, 16}];
+a = TGlorot[{8, 16}];
+b = TGlorot[{8, 16}];
+c = TGlorot[{8, 16}];
 
 (* (a + b) * c via the WL UpValues -- lowers to TUOpMul + TUOpAdd. *)
 expr = (a + b) * c;

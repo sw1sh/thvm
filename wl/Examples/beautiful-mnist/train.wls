@@ -49,10 +49,10 @@ nSteps = With[{n = Interpreter["Integer"][Environment["N_STEPS"]]},
    in a couple of seconds.  Scaling up to the real beautiful_mnist
    architecture waits on Phase 9. *)
 
-W1 = TTensorCreate @ TGlorot[{4, 1, 3, 3}];
-b1 = TTensorCreate @ TZeros [{4}];
-W2 = TTensorCreate @ TGlorot[{10, 36}];
-b2 = TTensorCreate @ TZeros [{10}];
+W1 = TGlorot[{4, 1, 3, 3}];
+b1 = TZeros [{4}];
+W2 = TGlorot[{10, 36}];
+b2 = TZeros [{10}];
 
 print["params: ",
     Times @@ TTensorShape[W1], " conv + ",
@@ -65,8 +65,8 @@ vBufs = TZerosLike /@ {W1, b1, W2, b2};
    new bytes into these buffers via TSet rather than constructing
    fresh TenDescs (which would change the buf_id and invalidate
    the captured kernel sequence). *)
-imgT = TTensorCreate @ TZeros[{1, 8, 8}];
-tgtT = TTensorCreate @ TZeros[{10}];
+imgT = TZeros[{1, 8, 8}];
+tgtT = TZeros[{10}];
 
 (* Forward: returns the {10}-vector logits for one sample. *)
 forward[img_TTerm] := Module[{h1, r1, p1, flat, h2},
@@ -117,7 +117,7 @@ trainOne[step_Integer] := Module[{imgArr, label, t0, dt, kBefore, kAfter},
        kernels read from imgT/tgtT's stable buf_id, so this TSet
        feeds the next replay with fresh data. *)
     TSet[imgT, TTensorCreate @ NumericArray[imgArr, "Real32"]];
-    TSet[tgtT, TTensorCreate @ TOneHot[label, 10]];
+    TSet[tgtT, TOneHot[label, 10]];
 
     t0 = AbsoluteTime[];
     jittedStep[step];

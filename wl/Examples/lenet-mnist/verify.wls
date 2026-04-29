@@ -25,10 +25,10 @@ nSteps = 4;
 
 (* === LeNet weights as TTerms ============================== *)
 
-w1 = TTensorCreate @ TGlorot[{6,   1, 5, 5}];  b1 = TTensorCreate @ TZeros[{6}];
-w2 = TTensorCreate @ TGlorot[{16,  6, 5, 5}];  b2 = TTensorCreate @ TZeros[{16}];
-w3 = TTensorCreate @ TGlorot[{120, 256}];      b3 = TTensorCreate @ TZeros[{120}];
-w4 = TTensorCreate @ TGlorot[{10,  120}];      b4 = TTensorCreate @ TZeros[{10}];
+w1 = TGlorot[{6,   1, 5, 5}];  b1 = TZeros[{6}];
+w2 = TGlorot[{16,  6, 5, 5}];  b2 = TZeros[{16}];
+w3 = TGlorot[{120, 256}];      b3 = TZeros[{120}];
+w4 = TGlorot[{10,  120}];      b4 = TZeros[{10}];
 
 params = {w1, b1, w2, b2, w3, b3, w4, b4};
 mState = TZerosLike /@ params;
@@ -40,7 +40,7 @@ batch  = TMnistBatch[1];
 imgArr = Normal[TTensorData @ batch["images"]][[1]];
 label  = First @ Normal[TTensorData @ batch["labels"]];
 imgT   = TTensorCreate @ NumericArray[imgArr, "Real32"];
-tgtT   = TTensorCreate @ TOneHot[label, 10];
+tgtT   = TOneHot[label, 10];
 print["training sample: true label = ", label];
 
 (* === Forward + loss + classifier =========================== *)

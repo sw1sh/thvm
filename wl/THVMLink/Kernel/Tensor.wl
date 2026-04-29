@@ -350,16 +350,20 @@ asSharableNA[data_?Developer`PackedArrayQ] :=
             Switch[t, Integer, "Integer32", Real, "Real32", _, "Real32"]]
     ]
 
-TTensorCreate[data_] := (
+(* dtype label -> NumericArray storage type.  Default (no dtype
+   given) means "infer from data" -- IntegerQ -> i32, otherwise f32. *)
+naTypeFor["f32"] := "Real32"
+naTypeFor["i32"] := "Integer32"
+naTypeFor[_]     := "Real32"
+
+TTensorCreate[data_]                       := (
     ensureInit[];
-    Module[{na = asSharableNA[data]},
-        (* Infer target dtype from NumericArray type.  Reshape comes
-           from the Dimensions of the data itself. *)
-        With[{t = TTerm[$tensorFromNAFn[na]]},
-            t
-        ]
-    ]
-)
+    TTerm[$tensorFromNAFn[asSharableNA[data]]])
+
+TTensorCreate[data_, dtype_String]         := (
+    ensureInit[];
+    TTerm[$tensorFromNAFn[NumericArray[
+        Normal @ asSharableNA[data], naTypeFor[dtype]]]])
 
 TUOpKind[u_] := Lookup[$uopNames, TTermExt[u], "UOP?" <> ToString[TTermExt[u]]]
 

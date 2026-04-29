@@ -56,17 +56,17 @@ bench[name_, expr_] := Module[{t},
     print["  ", name, ": ", NumberForm[1000. * t, {6, 2}], " ms"];
     t]
 
-xProf = TTensorCreate @ TGlorot[{seq, dim}];
+xProf = TGlorot[{seq, dim}];
 TRealize[xProf + xProf];   (* warm caches *)
 
 print["per-layer profile (eager):"];
-gP = TTensorCreate @ TOnes[{dim}];   bP = TTensorCreate @ TZeros[{dim}];
-qP = TTensorCreate @ TGlorot[{seq, dim}];
-kP = TTensorCreate @ TGlorot[{seq, dim}];
-vP = TTensorCreate @ TGlorot[{seq, dim}];
+gP = TOnes[{dim}];   bP = TZeros[{dim}];
+qP = TGlorot[{seq, dim}];
+kP = TGlorot[{seq, dim}];
+vP = TGlorot[{seq, dim}];
 maskP = TCausalMask[seq];
-wP = TTensorCreate @ TGlorot[{dim, dim}];
-bDimP = TTensorCreate @ TZeros[{dim}];
+wP = TGlorot[{dim, dim}];
+bDimP = TZeros[{dim}];
 
 bench["TLayerNormAffine[{seq,dim}]", TLayerNormAffine[xProf, gP, bP]];
 bench["TGELU[{seq,dim}]",            TGELU[xProf]];
@@ -74,7 +74,7 @@ bench["TMultiHeadAttention",         TMultiHeadAttention[qP, kP, vP, nHeads, mas
 bench["TLinear[{seq,dim},{dim,dim}]", TLinear[xProf, wP, bDimP]];
 bench["TEmbeddingMatrix[seq]",
     TEmbeddingMatrix[
-        TTensorCreate @ TGlorot[{vocab, dim}],
+        TGlorot[{vocab, dim}],
         Range[0, seq - 1]]];
 
 (* === Init weights as TTerms ONCE ============================
@@ -83,30 +83,30 @@ bench["TEmbeddingMatrix[seq]",
    The transformer block reads them directly. *)
 
 mkLayer[] := <|
-    "g1"   -> TTensorCreate @ TOnes[{dim}],
-    "b1"   -> TTensorCreate @ TZeros[{dim}],
-    "wq"   -> TTensorCreate @ TGlorot[{dim, dim}],
-    "bq"   -> TTensorCreate @ TZeros[{dim}],
-    "wk"   -> TTensorCreate @ TGlorot[{dim, dim}],
-    "bk"   -> TTensorCreate @ TZeros[{dim}],
-    "wv"   -> TTensorCreate @ TGlorot[{dim, dim}],
-    "bv"   -> TTensorCreate @ TZeros[{dim}],
-    "wo"   -> TTensorCreate @ TGlorot[{dim, dim}],
-    "bo"   -> TTensorCreate @ TZeros[{dim}],
-    "g2"   -> TTensorCreate @ TOnes[{dim}],
-    "b2"   -> TTensorCreate @ TZeros[{dim}],
-    "wff1" -> TTensorCreate @ TGlorot[{dim, ffDim}],
-    "bff1" -> TTensorCreate @ TZeros[{ffDim}],
-    "wff2" -> TTensorCreate @ TGlorot[{ffDim, dim}],
-    "bff2" -> TTensorCreate @ TZeros[{dim}]
+    "g1"   -> TOnes[{dim}],
+    "b1"   -> TZeros[{dim}],
+    "wq"   -> TGlorot[{dim, dim}],
+    "bq"   -> TZeros[{dim}],
+    "wk"   -> TGlorot[{dim, dim}],
+    "bk"   -> TZeros[{dim}],
+    "wv"   -> TGlorot[{dim, dim}],
+    "bv"   -> TZeros[{dim}],
+    "wo"   -> TGlorot[{dim, dim}],
+    "bo"   -> TZeros[{dim}],
+    "g2"   -> TOnes[{dim}],
+    "b2"   -> TZeros[{dim}],
+    "wff1" -> TGlorot[{dim, ffDim}],
+    "bff1" -> TZeros[{ffDim}],
+    "wff2" -> TGlorot[{ffDim, dim}],
+    "bff2" -> TZeros[{dim}]
 |>;
 
 layers   = Table[mkLayer[], nLayers];
-tokEmb   = TTensorCreate @ TGlorot[{vocab, dim}];
-posEmb   = TTensorCreate @ TGlorot[{seq, dim}];
-gFinal   = TTensorCreate @ TOnes[{dim}];
-bFinal   = TTensorCreate @ TZeros[{dim}];
-wOut     = TTensorCreate @ TGlorot[{dim, vocab}];
+tokEmb   = TGlorot[{vocab, dim}];
+posEmb   = TGlorot[{seq, dim}];
+gFinal   = TOnes[{dim}];
+bFinal   = TZeros[{dim}];
+wOut     = TGlorot[{dim, vocab}];
 
 ids = {7, 13, 21, 30};
 

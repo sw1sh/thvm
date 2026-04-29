@@ -63,11 +63,11 @@ TSoftmaxAxis::usage      = "TSoftmaxAxis[x, axis] = exp(x) / sum(exp(x)) reduced
 TAttention::usage        = "TAttention[Q, K, V] computes scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.  Q is {seq_q, d_k}; K is {seq_k, d_k}; V is {seq_k, d_v}.  Result is {seq_q, d_v}.  Pure assembly of TMatMul + TSoftmaxAxis + TMatMul; the two matmuls dispatch through cblas_sgemm.";
 TBatchNorm::usage        = "TBatchNorm[x, gamma, beta, mean, var] / TBatchNorm[x, gamma, beta, mean, var, eps] applies the inference-form batch-norm transform: y = gamma * (x - mean) / sqrt(var + eps) + beta along the channel axis.  x is rank-3 {C, H, W} (channels-first); gamma/beta/mean/var are all rank-1 {C}.  Default eps = 1e-5.  The trainer maintains running mean/var with TAssign on the WL side; this op is the pure forward shape used by both train and infer.";
 TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution as a kh*kw-unrolled chain of SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD primitives.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  No bespoke CONV2D opcode -- autograd flows through primitives via the chain rule.  Phase 9 follow-up: replace the kh*kw partials with a single im2col + sgemm dispatch.";
-TGlorot::usage           = "TGlorot[shape] returns a NumericArray of the given shape, filled with samples from N(0, sqrt(2 / fan_in)) (Glorot/Xavier-He init).  fan_in = product of all dims after the first.  Suitable for ReLU / linear layer weight init.";
-TZeros::usage            = "TZeros[shape] returns a Real32 NumericArray of zeros at the given shape.  Convenience for bias init / running-stat init.";
-TOnes::usage             = "TOnes[shape] returns a Real32 NumericArray of ones at the given shape.  Convenience for layer-norm gamma init / scale-1 placeholders.";
+TGlorot::usage           = "TGlorot[shape] returns a fresh f32 TTerm tensor of the given shape, filled with samples from N(0, sqrt(2 / fan_in)) (Glorot/Xavier-He init).  fan_in = product of all dims after the first.  Suitable for ReLU / linear layer weight init.";
+TZeros::usage            = "TZeros[shape] returns a fresh f32 TTerm tensor of zeros at the given shape.  Convenience for bias init / running-stat init.";
+TOnes::usage             = "TOnes[shape] returns a fresh f32 TTerm tensor of ones at the given shape.  Convenience for layer-norm gamma init / scale-1 placeholders.";
 TZerosLike::usage        = "TZerosLike[t] returns a TTensor handle of zeros matching the shape and dtype of TTerm `t`.  Suitable for seeding Adam m/v moment buffers.";
-TOneHot::usage           = "TOneHot[label, n] returns a Real32 NumericArray of length n with a 1.0 at index `label` (0-indexed) and 0.0 elsewhere.  Convenience for sparse-categorical-CE targets.";
+TOneHot::usage           = "TOneHot[label, n] / TOneHot[label, n, dtype] returns a TTerm tensor of length n with a 1.0 at index `label` (0-indexed) and 0.0 elsewhere.  Convenience for sparse-categorical-CE targets.";
 
 TSparseCategoricalCrossEntropy::usage = "TSparseCategoricalCrossEntropy[logits, targetOneHot] computes the categorical cross-entropy loss given pre-softmax logits and a one-hot target.  Lowers to log(sum(exp(logits))) - sum(target * logits) along the last axis, then averages over the leading batch axis (rank-1 logits have no batch dim and skip the average).  Numerically naive (no max-subtract); for the f32 inputs the MNIST training pipeline produces the magnitudes stay well within range.";
 
@@ -169,22 +169,23 @@ TConv2D[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
 
 (* === host-side init helpers for example scripts ============== *)
 
-TGlorot[shape_List] := NumericArray[
-    RandomVariate[
-        NormalDistribution[0., Sqrt[2.0 / If[Length[shape] >= 2,
-            Times @@ Drop[shape, 1], shape[[1]]]]],
-        shape],
-    "Real32"]
+TGlorot[shape_List, dtype_String : "f32"] := With[{
+    fanIn = If[Length[shape] >= 2, Times @@ Drop[shape, 1], shape[[1]]]
+},
+    TTensorCreate[
+        RandomVariate[NormalDistribution[0., Sqrt[2.0 / fanIn]], shape],
+        dtype]]
 
-TZeros[shape_List] := NumericArray[ConstantArray[0., shape], "Real32"]
+TZeros[shape_List, dtype_String : "f32"] :=
+    TTensorCreate[ConstantArray[0., shape], dtype]
 
-TOnes[shape_List] := NumericArray[ConstantArray[1., shape], "Real32"]
+TOnes[shape_List, dtype_String : "f32"] :=
+    TTensorCreate[ConstantArray[1., shape], dtype]
 
-TZerosLike[t_TTerm] := TTensorCreate @ TZeros[TTensorShape[t]]
+TZerosLike[t_TTerm] := TZeros[TTensorShape[t], TTensorDType[t]]
 
-TOneHot[label_Integer, n_Integer] := NumericArray[
-    Table[If[i - 1 == label, 1.0, 0.0], {i, n}],
-    "Real32"]
+TOneHot[label_Integer, n_Integer, dtype_String : "f32"] :=
+    TTensorCreate[Table[If[i - 1 == label, 1.0, 0.0], {i, n}], dtype]
 
 TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
     Module[{out, in, xb},
