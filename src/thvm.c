@@ -194,6 +194,12 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "schedule/realize_classify.c"
 #include "schedule/materialize.c"
 
+// === jit/ ===
+// Capture+replay of a kernel-dispatch sequence (Phase 7 of the
+// tinygrad-parity arc).  Loaded BEFORE interact/uop_kernel.c so
+// kernel_fire_by_id can call the capture hook.
+#include "jit/capture.c"
+
 // === interact/ ===
 // Interaction rules.  uop_kernel.c needs the schedule pipeline above
 // (KERNELS table, CPU dispatch vtable), so it's loaded last.
@@ -348,6 +354,10 @@ void thvm_init(void) {
   // locs (the ttermRaw fast-path falls back to the cached id, which
   // never reaches the GC).
   extern_pin_handle_clear();
+  jit_capture_reset_all();   // drop stale TJit capture slots from a
+                             // prior session (their kid pointers
+                             // would refer to the now-cleared
+                             // KERNELS table).
   cg_profile_reset();        // per-kid FLOPS / dispatch counters; reset
                              // so each session starts at zero.
   // Cheney semi-spaces: split HEAP_CAP in half.  heap_alloc bumps

@@ -240,6 +240,57 @@ EXTERN_C DLLEXPORT int thvm_wl_gc_count(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// === JIT capture / replay (Phase 7 of the tinygrad-parity arc) ===
+
+// jit_capture_begin / end / drop / replay / op_count primitives are
+// in src/jit/capture.c.  Bridge surface returns 1-indexed slot ids
+// to WL; slot 0 means "no slot available" and is returned on error.
+
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_begin(WolframLibraryData libData,
+                                                 mint argc, MArgument *args,
+                                                 MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)jit_capture_begin());
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_end(WolframLibraryData libData,
+                                               mint argc, MArgument *args,
+                                               MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  jit_capture_end();
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_drop(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
+  (void)libData; (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  jit_capture_drop(slot);
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_op_count(WolframLibraryData libData,
+                                                    mint argc, MArgument *args,
+                                                    MArgument res) {
+  (void)libData; (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)jit_capture_op_count(slot));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_jit_replay(WolframLibraryData libData,
+                                          mint argc, MArgument *args,
+                                          MArgument res) {
+  (void)libData; (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)jit_replay(slot));
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_heap_alloc(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
   (void)libData; (void)argc;

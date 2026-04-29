@@ -47,6 +47,15 @@ fn Term interact_assign_with(Term dst, Term src) {
   }
   u64 nbytes = (u64)numel * (u64)elem_bytes;
 
+  // JIT capture: record the (dst, src) tid pair so a TJit closure
+  // can replay the assign as part of its captured sequence.  This
+  // happens BEFORE the memcpy so a capture failure (table full)
+  // doesn't make us double-execute -- jit_capture_record_assign
+  // is itself a no-op when JIT_ACTIVE_SLOT == 0.
+  if (jit_is_capturing()) {
+    jit_capture_record_assign(dst_tid, src_tid);
+  }
+
   // Round-trip via host buffer.  The backend interface gives us
   // buf_read + buf_write but no direct buf_copy; the host hop is
   // straightforward and keeps this independent of backend internals.

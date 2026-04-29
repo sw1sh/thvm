@@ -61,6 +61,13 @@ print["params: ",
 mBufs = TZerosLike /@ {W1, b1, W2, b2};
 vBufs = TZerosLike /@ {W1, b1, W2, b2};
 
+(* Pre-allocate per-iter input + target slots ONCE.  Each step writes
+   new bytes into these buffers via TSet rather than constructing
+   fresh TenDescs (which would change the buf_id and invalidate
+   the captured kernel sequence). *)
+imgT = TTensorCreate @ TZeros[{1, 8, 8}];
+tgtT = TTensorCreate @ TZeros[{10}];
+
 (* Forward: returns the {10}-vector logits for one sample. *)
 forward[img_TTerm] := Module[{h1, r1, p1, flat, h2},
     h1   = TConv2D[img, W1, b1];      (* {4, 6, 6} *)
@@ -82,37 +89,51 @@ makeSample[step_Integer] := Module[{seed = 42 + step},
 print["Phase-6 training: ", nSteps, " steps, BS=1, lr=1e-3"];
 print[""];
 
-trainOne[step_Integer] := Module[{
-    imgArr, label, imgT, tgtT, logits, loss,
-    gW1, gb1, gW2, gb2, t0, dt, kBefore, kAfter
-},
+(* The optimizer step is wrapped as a TJit closure that captures the
+   forward + backward + Adam-update kernel sequence on the FIRST
+   call.  Subsequent calls replay the captured sequence directly --
+   skipping realize_classify, materialize, and the kernel-program
+   hash-cons lookup -- so the per-iter wallclock drops from
+   "minutes" (TGrad-bound) to whatever the actual kernel work
+   takes. *)
+stepFn = Function[{stepIdx},
+    Module[{logits, loss},
+        logits = forward[imgT];
+        loss   = TSparseCategoricalCrossEntropy[logits, tgtT];
+        TAdam[
+            {W1, b1, W2, b2},
+            TRealize /@ Table[TGrad[loss, p], {p, {W1, b1, W2, b2}}],
+            mBufs, vBufs,
+            stepIdx, 0.001, 0.9, 0.999, 1.0*^-8]
+    ]
+];
+
+jittedStep = TJit[stepFn];
+
+trainOne[step_Integer] := Module[{imgArr, label, t0, dt, kBefore, kAfter},
     kBefore = TKernelCount[];
     {imgArr, label} = makeSample[step];
-    imgT = TTensorCreate @ NumericArray[imgArr, "Real32"];
-    tgtT = TTensorCreate @ TOneHot[label, 10];
+    (* Refresh per-iter input + target bytes in place.  The captured
+       kernels read from imgT/tgtT's stable buf_id, so this TSet
+       feeds the next replay with fresh data. *)
+    TSet[imgT, TTensorCreate @ NumericArray[imgArr, "Real32"]];
+    TSet[tgtT, TTensorCreate @ TOneHot[label, 10]];
 
-    t0     = AbsoluteTime[];
-    logits = forward[imgT];
-    loss   = TSparseCategoricalCrossEntropy[logits, tgtT];
+    t0 = AbsoluteTime[];
+    jittedStep[step];
+    dt = AbsoluteTime[] - t0;
 
-    {gW1, gb1, gW2, gb2} = TGrad[loss, #] & /@ {W1, b1, W2, b2};
-    TAdam[
-        {W1, b1, W2, b2},
-        TRealize /@ {gW1, gb1, gW2, gb2},
-        mBufs, vBufs,
-        step, 0.001, 0.9, 0.999, 1.0*^-8];
-
-    dt     = AbsoluteTime[] - t0;
     kAfter = TKernelCount[];
     print["step ", step,
         ": label=", label,
         " wall=", NumberForm[dt * 1000., {6, 1}], "ms",
-        " kernels=", kAfter - kBefore,
+        " kernels(new)=", kAfter - kBefore,
+        " jit-replays=", TJitOpCount[jittedStep],
         " heap=", THeapPos[]];
 
-    (* GC after each step so the per-iter UOP graph + grad
-       intermediates don't accumulate.  The weight tids are
-       reachable through EXTERN_PINS so they survive the sweep. *)
+    (* GC after each step so per-iter UOP graph + grad intermediates
+       don't accumulate.  Weight tids are reachable through
+       EXTERN_PINS so they survive the sweep. *)
     TGCCollect[];
 ];
 

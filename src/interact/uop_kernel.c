@@ -64,6 +64,15 @@ fn void kernel_fire_by_id(u32 kid) {
 
   Backend *b = TENS[ke->output_tid].backend;
   if (b && b->dispatch_kernel) {
+    // JIT capture hook: when a TJit closure is mid-record, push the
+    // (kid, in_buf_ids, out_buf_id) tuple onto its capture buffer
+    // BEFORE dispatch fires.  The dispatch happens normally on the
+    // capture pass; subsequent replays skip materialize entirely
+    // and just re-dispatch the recorded sequence.
+    if (jit_is_capturing()) {
+      jit_capture_record((u32)(ke - KERNELS),
+                         in_buf_ids, ke->n_inputs, out_buf_id);
+    }
     b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   }
 
