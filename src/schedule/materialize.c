@@ -605,20 +605,12 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   t = term_resolve(t);
   u8 tag = term_tag(t);
 
-  // GRAD projection (TAG_DP1 + DUP_GRAD_FLAG) stuck under a
-  // UOP_ADD/UOP_MUL spine: term_resolve doesn't unwrap it, and the
-  // surrounding TRealize loop's nf+wnf cadence may not reach this
-  // particular cell when it's hidden inside lazily-unfolded ALO
-  // bodies (recursive REF defs like sgd_loop).  Fire interact_grad
-  // inline so the chain rule's result can flow up.  TAG_DP0 +
-  // grad_flag (FWD passthrough) is already handled by term_resolve.
-  if ((tag == TAG_DP1) && (term_ext(t) & DUP_GRAD_FLAG)) {
-    Term g = interact_grad(t);
-    if (g != t) {
-      t = term_resolve(g);
-      tag = term_tag(t);
-    }
-  }
+  // DP1_GRAD projections are driven by wnf's uop_drive_inner_actives
+  // before materialize ever sees them.  If one survives into visit
+  // (e.g. shape inference happening too early), fall through to the
+  // VISIT_BAIL at line 641 -- the realize loop will iterate, wnf
+  // will fire it next pass, and re-enter materialize.  Materialize
+  // is graph -> kernel compile, NEVER fires interactions.
 
   if (tag == TAG_TEN) {
     u32 tid  = (u32)term_val(t);
@@ -1055,6 +1047,7 @@ static void materialize_inner_assigns(Term term) {
 }
 
 fn Term thvm_materialize(Term term) {
+  HOT_MATERIALIZE_CALLS++;
   // REF / ALO transparency: jump (don't unfold) into the body cell.
   // term_resolve walks VAR-SUB and ALO chains -- pure pointer hops,
   // no heap allocation.  TAG_REF jumps directly to DEFS[name], the

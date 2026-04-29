@@ -35,6 +35,7 @@
 // is heap-allocated in thvm_init / thvm_context_create.
 
 fn Term wnf_n(Term term, u64 max_steps) {
+  HOT_WNF_CALLS++;
   Term *stack = WNF_STACK;
   u32   s_pos = WNF_S_POS;
   u32   base  = s_pos;
@@ -154,8 +155,16 @@ enter:
         // preserved for tooling (THeapDiagram, debug traces).
         u64  aloc   = term_val(next);
         if (BUDGET_HIT) BAIL_AT(next);
+        // Sync WNF_S_POS with our local s_pos before reentering wnf:
+        // the outer (this) call may have pushed frames (F_UOP_CHILD
+        // ancestors).  Without this, the inner wnf snapshots a stale
+        // WNF_S_POS and clobbers outer frames.  Re-read on return.
+        WNF_S_POS = s_pos;
         Term src_w  = wnf(heap_read(aloc + 1));
+        s_pos = WNF_S_POS;
+        WNF_S_POS = s_pos;
         Term dst_w  = wnf(heap_read(aloc + 0));
+        s_pos = WNF_S_POS;
         if (term_tag(src_w) == TAG_TEN && term_tag(dst_w) == TAG_TEN) {
           whnf = interact_assign_with(dst_w, src_w);
           goto apply;
@@ -167,6 +176,35 @@ enter:
       // BUFFER / CONST / VIEW / movement / elementwise / REDUCE / ...
       // are WNF by themselves; they become active only inside a KERNEL AST
       // the interpreter walks after firing.
+      //
+      // BUT: a descendant slot may hold an ACTIVE term (chain-rule
+      // DP1_GRAD; DUP-projection inside a UOP from TGrad's leafTids
+      // nest; nested UOP_ASSIGN / UOP_KERNEL).  wnf would otherwise
+      // leave it unfired and materialize would BAIL.  Push an
+      // F_UOP_CHILD frame for the first active child and descend
+      // into it; the apply phase resumes scanning for siblings (and
+      // recursively drives the result if it's itself UOP-with-
+      // actives) until the parent UOP is fully WHNF.  When all
+      // children are passive (the common forward-only case), the
+      // initial scan finds nothing and we fall through immediately.
+      u64 uloc = term_val(next);
+      u8  uar  = uop_arity((u8)op);
+      u8  next_idx = uop_next_active_child(uloc, uar, 0);
+      if (next_idx < uar) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        // Frame ext layout:
+        //   bits  0.. 7  child idx (slot we're driving)
+        //   bits  8..15  parent UOP opcode (so apply rebuilds the
+        //                parent Term without re-reading the heap)
+        //   bit  16      rescan flag: when set, apply skips the
+        //                heap_set (already done before recursive
+        //                descent) and just resumes scanning from
+        //                child_idx for the next active sibling.
+        u32 packed = (u32)next_idx | ((u32)op << 8);
+        stack[s_pos++] = term_new(0, TAG_F_UOP_CHILD, packed, uloc);
+        next = heap_read(uloc + next_idx);
+        goto enter;
+      }
       whnf = next;
       goto apply;
     }
@@ -496,6 +534,48 @@ apply:
         heap_set(nloc + 0, x);
         heap_set(nloc + 1, whnf);
         whnf = term_new(0, TAG_OP2, op, nloc);
+        continue;
+      }
+      case TAG_F_UOP_CHILD: {
+        // Active UOP child finished.  Frame layout: ext low 8 bits
+        // = child idx, bits 8..15 = parent UOP opcode (baked at
+        // enter-site push so apply rebuilds the parent Term).
+        // whnf may itself be a UOP whose children are now active
+        // (e.g. DUP-UOP commute returns a UOP with fresh DUPs).
+        // Recursively re-drive via reentrant wnf so any new actives
+        // fire before we finalize the parent.
+        u64 uloc      = term_val(frame);
+        u32 packed    = term_ext(frame);
+        u8  child_idx = (u8)(packed & 0xFF);
+        u8  parent_op = (u8)((packed >> 8) & 0xFF);
+        // Re-drive whnf to FULL WHNF if it's a UOP with active
+        // descendants (e.g. DUP-UOP commute returns a UOP with
+        // fresh DUPs around its children).  Sync WNF_S_POS so the
+        // inner snapshots its base ABOVE this outer's frames.
+        if (term_tag(whnf) == TAG_UOP) {
+          u32 wop = term_ext(whnf);
+          if (wop != UOP_KERNEL && wop != UOP_ASSIGN) {
+            u64 wloc = term_val(whnf);
+            u8  war  = uop_arity((u8)wop);
+            if (uop_next_active_child(wloc, war, 0) < war) {
+              WNF_S_POS = s_pos;
+              whnf = wnf(whnf);
+              s_pos = WNF_S_POS;
+            }
+          }
+        }
+        heap_set(uloc + child_idx, whnf);
+        u8 ar       = uop_arity(parent_op);
+        u8 next_idx = uop_next_active_child(uloc, ar, child_idx + 1);
+        if (next_idx < ar) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          stack[s_pos++] = term_new(0, TAG_F_UOP_CHILD,
+                                    (u32)next_idx | ((u32)parent_op << 8),
+                                    uloc);
+          next = heap_read(uloc + next_idx);
+          goto enter;
+        }
+        whnf = term_new(0, TAG_UOP, parent_op, uloc);
         continue;
       }
       case TAG_EQL: {

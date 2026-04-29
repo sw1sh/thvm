@@ -86,6 +86,7 @@ fn void kernel_fire_by_id(u32 kid) {
 }
 
 fn Term interact_kernel(Term kernel) {
+  HOT_KERNEL_FIRES++;
   u64  loc    = term_val(kernel);
   Term outbuf = heap_read(loc + 0);
   Term kidnum = heap_read(loc + 1);

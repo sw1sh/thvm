@@ -25,6 +25,7 @@
 // the inspector workflow this is fine.
 
 fn u8 is_redex(Term t) {
+  HOT_IS_REDEX_CALLS++;
   u8  tag = term_tag(t);
   u64 val = term_val(t);
   switch (tag) {
@@ -104,6 +105,8 @@ fn u8 is_redex(Term t) {
 // content equals the redex term gets replaced by the result.
 static void heap_replace(Term old, Term new_) {
   if (old == new_) return;
+  HOT_HEAP_REPLACE_CALLS++;
+  HOT_HEAP_REPLACE_CELLS += HEAP_NEXT;
   for (u64 i = 0; i < HEAP_NEXT; i++) {
     if (heap_read(i) == old) heap_set(i, new_);
   }
@@ -435,6 +438,8 @@ static u32 term_arity(Term t) {
 // shared subgraph are caught even if the caller didn't pass the
 // containing root.  Dedup is by packed Term value.
 fn u32 redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap) {
+  HOT_REDEX_ENUM_CALLS++;
+  HOT_REDEX_ENUM_CELLS += HEAP_NEXT;
   // Reset the dedup hash table.  memset is fine -- the table is
   // 32K * 8B = 256KB, well within L2.
   memset(REDEX_DEDUP, 0, sizeof(REDEX_DEDUP));

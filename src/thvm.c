@@ -69,6 +69,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "heap/subst_var.c"
 #include "heap/subst_cop.c"
 
+// === instrument/ ===
+// Process-global hot-path counters for WL-side debugging.  Single
+// file-scope statics; downstream consumers `HOT_*++` directly.
+#include "instrument/hot_counters.c"
+
 // === lam/ ===
 // Side tables tied to LAM heap locs (shape annotation, future:
 // arity hints).  No reduction logic; pure storage.

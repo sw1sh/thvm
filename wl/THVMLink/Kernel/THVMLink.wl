@@ -260,6 +260,8 @@ $redexSnapFn    := $redexSnapFn    = load["thvm_wl_redex_snapshot", {{Integer, 1
 $redexGetFn     := $redexGetFn     = load["thvm_wl_redex_get",      {Integer},          Integer];
 $interactFn     := $interactFn     = load["thvm_wl_interact",       {Integer},          Integer];
 $itrsFn         := $itrsFn         = load["thvm_wl_itrs",           {},                 Integer];
+$hotCountersFn      := $hotCountersFn      = load["thvm_wl_hot_counters",       {}, {Integer, 1}];
+$hotCountersResetFn := $hotCountersResetFn = load["thvm_wl_hot_counters_reset", {}, Integer];
 
 (* tensor *)
 $tensorAllocFn   := $tensorAllocFn   = load["thvm_wl_tensor_alloc",   {Integer, {Integer, 1}}, Integer];

@@ -377,6 +377,33 @@ EXTERN_C DLLEXPORT int thvm_wl_itrs(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// === hot-path counters ===
+// Snapshot the per-context HotCounters block into a {Integer, 1}
+// MTensor.  Order matches `hot_counters_snapshot` in
+// `src/instrument/hot_counters.c` and `$hotCounterNames` in
+// `wl/THVMLink/Kernel/Profile.wl` -- keep them in sync.
+EXTERN_C DLLEXPORT int thvm_wl_hot_counters(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  u64 buf[HOT_COUNTER_COUNT];
+  hot_counters_snapshot(buf);
+  mint dims[1] = {(mint)HOT_COUNTER_COUNT};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u32 i = 0; i < HOT_COUNTER_COUNT; i++) dst[i] = (mint)buf[i];
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_hot_counters_reset(WolframLibraryData libData, mint argc,
+                                                  MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  hot_counters_reset();
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
 // === redex enumeration / single-redex firing ===
 // Pattern matches TStack: snapshot into a static buffer, then expose
 // length + indexed get.  thvm_wl_redex_snapshot takes a single root

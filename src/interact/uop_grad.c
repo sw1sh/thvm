@@ -632,7 +632,114 @@ static Term interact_grad_dispatch(Term grad_term) {
 // stack so any sub-cell that grad_cell_alloc creates during the
 // dispatch inherits it.  Pop on exit, even if dispatch bails (the
 // caller may retry later, expecting a clean stack).
+// Forward decl: transitive active check needs to recurse into
+// UOP children, but is itself called from uop_child_is_active.
+static u8 uop_has_active_descendant_memo(Term t);
+
+// Per-call memoization for the transitive active scan: shared
+// sub-DAGs (e.g. gT referenced by gT*gT and 0.1*gT in Adam) would
+// otherwise walk exponentially.  Loc-keyed bit-bucket cleared by
+// the outer entry point each time wnf re-enters a UOP head.
+//
+// Generation-counter scheme: outer call bumps gen; each cell stores
+// (gen, value).  A stale gen means uncached.  Cap is power-of-two
+// for AND-mask indexing.
+#define UOP_ACT_MEMO_CAP (1u << 14)
+typedef struct { u32 gen; u32 valid_loc; u8 result; u8 visiting; } UopActMemoEntry;
+static UopActMemoEntry UOP_ACT_MEMO[UOP_ACT_MEMO_CAP];
+static u32 UOP_ACT_MEMO_GEN = 0;
+static u32 UOP_ACT_MEMO_DEPTH = 0;     // re-entrant guard
+
+static inline u32 uop_act_memo_hash(u64 loc) {
+  loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
+  loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
+  loc ^= loc >> 33;
+  return (u32)loc & (UOP_ACT_MEMO_CAP - 1);
+}
+
+// Is `t` a child slot worth driving when we hit a UOP-WHNF
+// inflection?  Active forms are the ones whose own interaction has
+// to fire to reach WHNF:
+//
+//   - DP0/DP1              chain-rule projection (interact_grad)
+//                          or regular DUP commute (interact_dup_X)
+//   - UOP_KERNEL           kernel dispatch (interact_kernel)
+//   - UOP_ASSIGN           in-place buffer write (interact_assign_with)
+//
+// Plus TRANSITIVE actives: a passive UOP (ADD/MUL/REDUCE/...) whose
+// subgraph contains any of the above.  Without this, a deeply-
+// nested chain-rule grad like `ADD(MUL(x, GRAD), ...)` would never
+// be reached: the immediate child is MUL (passive), but MUL hides
+// an active GRAD descendant.
+//
+// Used by wnf's UOP enter/apply path (TAG_F_UOP_CHILD frames) to
+// scan a UOP's children for the next slot worth descending into.
+fn u8 uop_child_is_active(Term t) {
+  Term r = term_resolve(t);
+  u8   tag = term_tag(r);
+  if (tag == TAG_DP0 || tag == TAG_DP1) return 1;
+  if (tag == TAG_UOP) {
+    u32 op = term_ext(r);
+    if (op == UOP_KERNEL || op == UOP_ASSIGN) return 1;
+    return uop_has_active_descendant_memo(r);
+  }
+  return 0;
+}
+
+static u8 uop_has_active_descendant_memo(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_KERNEL || op == UOP_ASSIGN) return 0;
+  u8 ar = uop_arity((u8)op);
+  u64 loc = term_val(t);
+  // Outer entry bumps gen so we don't need to wipe the table.
+  u8 outer = (UOP_ACT_MEMO_DEPTH == 0);
+  if (outer) { UOP_ACT_MEMO_GEN++; }
+  UOP_ACT_MEMO_DEPTH++;
+  // Open-addressed probe; visiting flag breaks self-cycles (rare
+  // but possible via shared sub-DAGs).
+  u32 idx = uop_act_memo_hash(loc);
+  for (u32 probe = 0; probe < UOP_ACT_MEMO_CAP; probe++) {
+    u32 i = (idx + probe) & (UOP_ACT_MEMO_CAP - 1);
+    UopActMemoEntry *e = &UOP_ACT_MEMO[i];
+    if (e->gen == UOP_ACT_MEMO_GEN && e->valid_loc == (u32)loc) {
+      UOP_ACT_MEMO_DEPTH--;
+      if (outer) UOP_ACT_MEMO_DEPTH = 0;
+      return e->visiting ? 0 : e->result;
+    }
+    if (e->gen != UOP_ACT_MEMO_GEN) {
+      e->gen       = UOP_ACT_MEMO_GEN;
+      e->valid_loc = (u32)loc;
+      e->visiting  = 1;
+      e->result    = 0;
+      u8 res = 0;
+      for (u8 c = 0; c < ar; c++) {
+        if (uop_child_is_active(heap_read(loc + c))) { res = 1; break; }
+      }
+      e->visiting = 0;
+      e->result   = res;
+      UOP_ACT_MEMO_DEPTH--;
+      if (outer) UOP_ACT_MEMO_DEPTH = 0;
+      return res;
+    }
+  }
+  UOP_ACT_MEMO_DEPTH--;
+  if (outer) UOP_ACT_MEMO_DEPTH = 0;
+  // Table full -- conservative answer.
+  return 0;
+}
+
+// First active-or-active-bearing child slot index in a UOP at or
+// after `start`, or `ar` if none.
+fn u8 uop_next_active_child(u64 uop_loc, u8 ar, u8 start) {
+  for (u8 i = start; i < ar; i++) {
+    if (uop_child_is_active(heap_read(uop_loc + i))) return i;
+  }
+  return ar;
+}
+
 fn Term interact_grad(Term grad_term) {
+  HOT_GRAD_FIRES++;
   Term target = heap_read(term_val(grad_term) + 2);
   u8 pushed = 0;
   if (GRAD_TARGET_TOP < GRAD_TARGET_STACK_CAP) {

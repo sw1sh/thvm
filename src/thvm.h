@@ -143,10 +143,19 @@ typedef u64 Term;
 //                   x has been reduced to NUM; descending into y.
 //   TAG_F_EQL_R     ext = 0          val = EQL cell loc; a's WHNF
 //                   stored back in heap[loc + 0].  Descending into b.
-#define TAG_F_OP2_NUM 26
-#define TAG_F_EQL_R   27
+//   TAG_F_UOP_CHILD ext = child_idx  val = uop loc.  Inside wnf's
+//                   UOP-WHNF descent: this child slot was active
+//                   (DP1_GRAD / DUP-projection / nested ASSIGN /
+//                   nested KERNEL) and was driven via stack-frame
+//                   recursion.  Apply phase heap_sets the resolved
+//                   value back in place, then scans for the next
+//                   active sibling; when none remain, the UOP
+//                   itself is WHNF.
+#define TAG_F_OP2_NUM   26
+#define TAG_F_EQL_R     27
+#define TAG_F_UOP_CHILD 28
 
-#define TAG_COUNT 28
+#define TAG_COUNT 29
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -414,6 +423,32 @@ typedef struct {
 #define CPU_BUFS_CAP     (1ULL << 16)
 #define CPU_FREELIST_CAP 4096
 
+// === HotCounters ===
+// Per-context hot-path counters for WL-side debugging.  Bumped from
+// the heaviest loops (heap_replace cascade, is_redex, redex_enumerate,
+// wnf, realize, materialize, kernel/grad fires) and snapshotted via
+// `THotCounters[]` from WL.  Use to confirm whether per-step time is
+// dominated by the substitution cascade (heap_replace_cells), the
+// chain-rule expansion (grad_fires), or kernel emit/dispatch.
+//
+// When you add a counter, append its field here AND the same name in
+// `$hotCounterNames` in `wl/THVMLink/Kernel/Profile.wl`; the WL side
+// decodes the {Integer, 1} payload by position.
+typedef struct {
+    u64 heap_replace_calls;
+    u64 heap_replace_cells;     // sum of HEAP_NEXT at each call -- the cascade-cost integral
+    u64 is_redex_calls;
+    u64 redex_enum_calls;
+    u64 redex_enum_cells;       // sum of HEAP_NEXT at each call
+    u64 wnf_calls;
+    u64 realize_calls;
+    u64 materialize_calls;
+    u64 kernel_fires;
+    u64 grad_fires;
+} HotCounters;
+
+#define HOT_COUNTER_COUNT 10
+
 // === TContext ===
 // Bundles every piece of mutable runtime state into one struct so users
 // can hold multiple coexisting heaps via TContextNew[] / TInContext[].
@@ -461,6 +496,9 @@ typedef struct TContext {
     u32 alo_states_next;
     u64 cpu_bufs_next;
     u32 cpu_freelist_len;
+
+    /* Hot-path counters (see HotCounters). */
+    HotCounters hot;
 } TContext;
 
 #define THVM_MAX_BACKENDS 4
@@ -497,6 +535,18 @@ extern TContext *CONTEXTS[CONTEXTS_CAP];
 #define CPU_BUFS_NEXT       (CURRENT_CTX->cpu_bufs_next)
 #define CPU_FREELIST        (CURRENT_CTX->cpu_freelist)
 #define CPU_FREELIST_LEN    (CURRENT_CTX->cpu_freelist_len)
+
+// Hot-path counters (see HotCounters / instrument/hot_counters.c).
+#define HOT_HEAP_REPLACE_CALLS  (CURRENT_CTX->hot.heap_replace_calls)
+#define HOT_HEAP_REPLACE_CELLS  (CURRENT_CTX->hot.heap_replace_cells)
+#define HOT_IS_REDEX_CALLS      (CURRENT_CTX->hot.is_redex_calls)
+#define HOT_REDEX_ENUM_CALLS    (CURRENT_CTX->hot.redex_enum_calls)
+#define HOT_REDEX_ENUM_CELLS    (CURRENT_CTX->hot.redex_enum_cells)
+#define HOT_WNF_CALLS           (CURRENT_CTX->hot.wnf_calls)
+#define HOT_REALIZE_CALLS       (CURRENT_CTX->hot.realize_calls)
+#define HOT_MATERIALIZE_CALLS   (CURRENT_CTX->hot.materialize_calls)
+#define HOT_KERNEL_FIRES        (CURRENT_CTX->hot.kernel_fires)
+#define HOT_GRAD_FIRES          (CURRENT_CTX->hot.grad_fires)
 
 // Replaces the old CURRENT_BACKEND global -- "default backend for
 // newly allocated tensors only".  Per-tensor ops use ten->backend.
@@ -672,6 +722,11 @@ fn Term interact_app_era(void);
 fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup);
 fn Term interact_dup_era(u8 side, u64 loc, Term era);
 fn Term interact_dup_lam(u32 lab, u64 loc, u8 side, Term lam);
+fn Term interact_dup_bri(u32 lab, u64 loc, u8 side, Term bri);
+fn Term interact_dup_num(u8 side, u64 loc, Term num);
+fn Term interact_dup_ten(u8 side, u64 loc, Term ten);
+fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop);
+fn Term interact_kernel (Term kernel);
 
 // === tensor/ ===
 // Tensor descriptor lifecycle.  Step 12: bump-only allocation in TENS[];
