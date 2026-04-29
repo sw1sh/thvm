@@ -5,6 +5,31 @@
 // output axis.  Total cells: 2 + ndim.
 
 fn Term uop_permute(Term src, u32 ndim, const u32 *perm) {
+  // Identity permute: perm[i] == i for all i -> drop the op.
+  // (Common in autograd where the inverse-of-identity transpose
+  // appears for symmetric chains.)
+  u8 identity = 1;
+  for (u32 i = 0; i < ndim; i++) {
+    if (perm[i] != i) { identity = 0; break; }
+  }
+  if (identity) return src;
+  // Compose permute-of-permute: outer.perm[i] = inner.perm[outer.perm[i]].
+  // Drops the intermediate node; the composition gets hash-cons'd
+  // like any normal permute.
+  if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_PERMUTE) {
+    u64 inner_loc = term_val(src);
+    Term inner_ndim_cell = heap_read(inner_loc + 1);
+    if (term_tag(inner_ndim_cell) == TAG_NUM
+        && (u32)term_val(inner_ndim_cell) == ndim) {
+      u32 composed[MAX_DIM];
+      for (u32 i = 0; i < ndim; i++) {
+        u32 inner_p = (u32)term_val(heap_read(inner_loc + 2 + perm[i]));
+        composed[i] = inner_p;
+      }
+      Term inner_src = heap_read(inner_loc);
+      return uop_permute(inner_src, ndim, composed);
+    }
+  }
   u32 key_buf[1 + MAX_DIM];
   key_buf[0] = ndim;
   for (u32 i = 0; i < ndim; i++) key_buf[1 + i] = perm[i];
