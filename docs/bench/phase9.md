@@ -116,29 +116,26 @@ thvm doesn't have STACK, and the strided-tricks variant requires
 non-trivial view-stride math that the current view system doesn't
 cover (overlapping windows = view with stride < shape per axis).
 
-Three implementation options considered:
+Correction: an earlier draft claimed im2col needed a new
+`UOP_IM2COL` opcode. That's wrong -- tinygrad implements the same
+operation via `Tensor._pool`, which is pure-WL composition of the
+MovementOps thvm already has (`SHRINK`, `RESHAPE`, `EXPAND`,
+`PERMUTE`, `PAD`).  The `View` struct here carries `i32 strides[]`
+per axis with arbitrary values; the CPU interpreter handles
+non-contig views via `view_strided_index`; the Metal backend
+pre-materialises non-contig inputs the same way.  So the
+infrastructure is already there.
 
-- **New `UOP_IM2COL` opcode**: dedicated C op that does the strided
-  copy directly. Cleanest performance result. Cost: new opcode + WL
-  constructor + materialize handler + cpu interpreter + Metal
-  shader + autograd rule (im2col grad is col2im, also non-trivial).
-  Estimated ~600 LOC.
+What's actually needed is the WL-side composition that produces
+the windowed shape `{C_in, H_out, W_out, kh, kw}` (the receptive-
+field tensor), then `PERMUTE` + `RESHAPE` it into the
+`{C_in*kh*kw, H_out*W_out}` im2col matrix, then `TMatMul` against
+the flattened weights.  The `MovementOps` chain that does this is
+non-trivial -- I haven't worked through it cleanly yet.  It lands
+as part of Phase 10 alongside the BEAM work; the planning task
+is "translate tinygrad's `Tensor._pool` to thvm's WL surface".
 
-- **Pure-IR im2col via SHRINK + assemble**: walk over kh*kw,
-  SHRINK each window, copy into an output slab via TAssign. Avoids
-  new opcodes but emits kh*kw assigns + the matmul -- still many
-  kernels. Likely SLOWER than the current partial-sum form.
-
-- **Stride-trick view**: extend the `View` struct to allow
-  per-axis stride < shape (overlapping windows), then express
-  im2col as `RESHAPE -> EXPAND-with-strided-view`. The view-aware
-  dispatchers (CPU interpreter, Metal pre-mat) would need to
-  honor the new stride semantics. Estimated ~400 LOC + audit
-  pass.
-
-Decision: defer. The third option (stride-trick view) is the most
-elegant and likely lands as part of Phase 10 (BEAM via SUP) since
-that work also needs richer view semantics.
+Decision: defer to Phase 10's view-composition piece.
 
 ## (4) Lifetime tracking that ungates THVM_REUSE_BUFS — redundant
 
