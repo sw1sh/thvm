@@ -381,12 +381,27 @@ TUOpSrcs[u_] := With[{loc = TTermVal[u], op = TTermExt[u]},
 
 pairFold[op_, args_List] := Fold[op, First[args], Rest[args]]
 
-(* Pre-EXPAND any rank-0 scalar lifted from a numeric to the LHS's
-   shape.  Without the explicit EXPAND, the elementwise dispatch
-   relies on the numel-cycle broadcast, which produces a different
-   KProgOp[] kernel than the rank-matched form -- and that kernel
-   misses the kernel-program-cache on every call.  Pre-EXPAND'd
-   form caches cleanly (~0.1 ms after warmup vs ~60 ms eager). *)
+(* Frontend pre-broadcast: rank-0 / shape-{1} scalars lifted from
+   a host-side numeric get EXPAND'd to the LHS shape BEFORE the
+   binop UOP is constructed.  Same architectural slot as tinygrad's
+   `Tensor._broadcasted` (tinygrad/tensor.py:3554-3571): both
+   operands of an elementwise binop are normalised to a common
+   shape at term-construction time, so the UOP graph downstream
+   is rank-matched from the start.
+
+   Without it, MUL[t:{N}, scalar:{1}] would fall to the
+   elementwise numel-cycle broadcast, which produces a DIFFERENT
+   KProgOp[] than the rank-matched form -- the kernel-program-
+   cache hashes on KProgOp[] bytes, so the unbroadcasted form
+   misses on every call (~60 ms cold-clang-JIT cost) while the
+   pre-broadcasted form caches to ~0.1 ms.
+
+   Why frontend, not a UOP-rewriting pass: a rewriter would walk
+   every elementwise op + insert EXPAND post-hoc; the frontend
+   does it once at construction.  Why not in the kernel codegen
+   itself: same KProgOp[] hash divergence; the cache would still
+   need a frontend-level normalisation upstream.  Tinygrad makes
+   the same choice. *)
 broadcastScalar[t_TTerm, targetShape_List] := With[{s = tUopShape[t]},
     If[ (s === {} || s === {1}) && targetShape =!= s,
         TUOpExpand[t, targetShape],
