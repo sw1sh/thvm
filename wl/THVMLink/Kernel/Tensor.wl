@@ -380,16 +380,32 @@ TUOpSrcs[u_] := With[{loc = TTermVal[u], op = TTermExt[u]},
 
 pairFold[op_, args_List] := Fold[op, First[args], Rest[args]]
 
+(* Pre-EXPAND any rank-0 scalar lifted from a numeric to the LHS's
+   shape.  Without the explicit EXPAND, the elementwise dispatch
+   relies on the numel-cycle broadcast, which produces a different
+   KProgOp[] kernel than the rank-matched form -- and that kernel
+   misses the kernel-program-cache on every call.  Pre-EXPAND'd
+   form caches cleanly (~0.1 ms after warmup vs ~60 ms eager). *)
+broadcastScalar[t_TTerm, targetShape_List] := With[{s = tUopShape[t]},
+    If[ (s === {} || s === {1}) && targetShape =!= s,
+        TUOpExpand[t, targetShape],
+        t]]
+broadcastScalar[other_, _] := other
+
 TTerm /: Plus[t_TTerm ? tensorTermQ, rest__] := With[{
+    targetShape = tUopShape[t],
     lifted = liftNumeric[#, broadcastDType[t, #]] & /@ {rest}
 },
-    pairFold[TUOpAdd, Prepend[lifted, t]]
+    pairFold[TUOpAdd,
+        Prepend[broadcastScalar[#, targetShape] & /@ lifted, t]]
 ]
 
 TTerm /: Times[t_TTerm ? tensorTermQ, rest__] := With[{
+    targetShape = tUopShape[t],
     lifted = liftNumeric[#, broadcastDType[t, #]] & /@ {rest}
 },
-    pairFold[TUOpMul, Prepend[lifted, t]]
+    pairFold[TUOpMul,
+        Prepend[broadcastScalar[#, targetShape] & /@ lifted, t]]
 ]
 
 TTerm /: Minus[t_TTerm ? tensorTermQ] := TUOpNeg[t]
@@ -428,8 +444,12 @@ TTerm /: Total[t_TTerm ? tensorTermQ, All]             := Fold[
     Range[Length[tUopShape[t]]]    (* one reduce per axis, all from axis 0 *)
 ]
 
-TTerm /: Less[a_TTerm ? tensorTermQ, b_] := TUOpCmplt[a, liftNumeric[b, inheritDType[a]]]
-TTerm /: Less[a_, b_TTerm ? tensorTermQ] := TUOpCmplt[liftNumeric[a, inheritDType[b]], b]
+TTerm /: Less[a_TTerm ? tensorTermQ, b_] :=
+    TUOpCmplt[a,
+        broadcastScalar[liftNumeric[b, inheritDType[a]], tUopShape[a]]]
+TTerm /: Less[a_, b_TTerm ? tensorTermQ] :=
+    TUOpCmplt[
+        broadcastScalar[liftNumeric[a, inheritDType[b]], tUopShape[b]], b]
 
 (* === Movement / linalg UpValues =============================
    Idiomatic WL forms route to existing TUOp* / T* primitives so

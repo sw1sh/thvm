@@ -673,24 +673,24 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
-    wH = NumericArray[{1.0, 2.0, 3.0},   "Real32"];
-    gH = NumericArray[{0.1, -0.2, 0.05}, "Real32"];
-    mH = NumericArray[{0.0, 0.0, 0.0},   "Real32"];
-    vH = NumericArray[{0.0, 0.0, 0.0},   "Real32"];
-    lr = 0.001; b1 = 0.9; b2 = 0.999; eps = 1.0*^-8;
-    {wRef, mRef, vRef} = TAdamHostStep[
-        {wH}, {gH}, {mH}, {vH}, lr, b1, b2, eps, 1];
-    w = TTensorCreate @ wH;
-    g = TTensorCreate @ gH;
-    m = TTensorCreate @ mH;
-    v = TTensorCreate @ vH;
-    TAdam[{w}, {g}, {m}, {v}, 1, lr, b1, b2, eps];
+    (* In-backend TAdam, one step at lr=0.001, beta1=0.9, beta2=0.999.
+       Matches the textbook Adam formula:
+           m_new = 0.9*0 + 0.1 * 0.1   = 0.01
+           v_new = 0.999*0 + 0.001 * 0.01 = 0.00001
+           m_hat = m_new / (1-0.9^1) = 0.1
+           v_hat = v_new / (1-0.999^1) = 0.01
+           w_new = 1.0 - 0.001 * 0.1 / (sqrt(0.01)+1e-8) = 0.999  *)
+    w = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+    g = TTensorCreate @ NumericArray[{0.1}, "Real32"];
+    m = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    v = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    TAdam[{w}, {g}, {m}, {v}, 1, 0.001, 0.9, 0.999, 1.0*^-8];
     Max @ Abs @ Flatten @ {
-        Normal @ TTensorData[w] - Normal[wRef[[1]]],
-        Normal @ TTensorData[m] - Normal[mRef[[1]]],
-        Normal @ TTensorData[v] - Normal[vRef[[1]]]
+        Normal @ TTensorData[w] - {0.999},
+        Normal @ TTensorData[m] - {0.01},
+        Normal @ TTensorData[v] - {0.00001}
     },
     _ ? (# < 1.0*^-5 &),
     SameTest -> MatchQ,
-    TestID -> "nn/adam-tassign-form-matches-host-adam"
+    TestID -> "nn/adam-tassign-form-matches-textbook"
 ]

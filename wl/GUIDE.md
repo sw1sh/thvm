@@ -90,6 +90,30 @@ the start.
 
   Single-line `If[cond, then, else]` does not need the leading space.
 
+### Never split a binary operator's operands across lines
+
+Operators (`+`, `-`, `*`, `/`, `.`, `&&`, `||`, etc.) must have both
+operands on the same line.  The Wolfram IDE flags split operands as
+`DifferentLine` and the resulting form reads worse than a longer
+single line.
+
+```wolfram
+(* BAD: trips DifferentLine lint *)
+TSet[wTen, wTen - lrHat * mTen
+                  / (Sqrt[vTen] * invSqrtB2cor + eps)];
+
+(* GOOD: keep the whole arithmetic chain on one line, even if it's
+   long; or factor an intermediate into a named binding first. *)
+TSet[wTen, wTen - lrHat * mTen / (Sqrt[vTen] * invSqrtB2cor + eps)];
+
+(* GOOD: factor when the line gets unreadably wide *)
+denom = Sqrt[vTen] * invSqrtB2cor + eps;
+TSet[wTen, wTen - lrHat * mTen / denom];
+```
+
+The lint rule is `wolfram lint(DifferentLine)`; if you see it,
+either join the line or factor.
+
 ### Optional arguments
 
 For functions that take Wolfram-style options, use
