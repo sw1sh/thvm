@@ -320,22 +320,43 @@ TKernelDispatch[k_TKernel /; tKernelInternalQ[k]] := k[]
 TKernelProgram[k_TKernel /; tKernelInternalQ[k]] := tKernelProp[k, "Program"]
 
 (* === top-level kid-keyed convenience accessors ===
-   Mirror the TKernel property surface so existing call sites
-   (`TKernelFlops[kid]`) keep working.  Each one pipes through
-   TKernel[kid] so the construction path validates the kid and
-   the Information surface stays the single source of truth. *)
-TKernelSourceC[kid_Integer]      := TKernel[kid]["SourceC"]
-TKernelSourceMetal[kid_Integer]  := TKernel[kid]["SourceMetal"]
-TKernelFlops[kid_Integer]        := TKernel[kid]["Flops"]
-TKernelDispatchKind[kid_Integer] := TKernel[kid]["DispatchKind"]
-TKernelDispatchCount[kid_Integer] := TKernel[kid]["DispatchCount"]
-TKernelTotalUs[kid_Integer]       := TKernel[kid]["TotalUs"]
-TKernelJitDylibPath[kid_Integer]  := TKernel[kid]["JitDylibPath"]
+   These call the loader fns directly rather than routing through
+   TKernel[kid] -- TKernel's heap-walk constructor can't find the
+   UOP_KERNEL cell once it's been substituted away post-fire, but
+   the C-side KERNELS[kid] entry persists for the whole session and
+   is what the loader fns read.  When a TKernel object is in hand,
+   the property surface (`k["Flops"]`) and these accessors return
+   identical values via the same loaders. *)
+TKernelSourceC[kid_Integer]       := (ensureInit[]; $kernelSourceCFn[kid])
+TKernelSourceMetal[kid_Integer]   := (ensureInit[]; $kernelSourceMetalFn[kid])
+TKernelFlops[kid_Integer]         := (ensureInit[]; $kernelFlopsFn[kid])
+TKernelDispatchKind[kid_Integer]  := (ensureInit[];
+    decodeDispatchKind[$kernelDispatchKindFn[kid]])
+TKernelDispatchCount[kid_Integer] := (ensureInit[]; $kernelDispatchCountFn[kid])
+TKernelTotalUs[kid_Integer]       := (ensureInit[]; $kernelTotalUsFn[kid])
+TKernelJitDylibPath[kid_Integer]  := (ensureInit[]; $kernelJitDylibPathFn[kid])
 
-(* TKernelProfile = full Information[] dump for one kid.  Same shape
-   as Information[TKernel[kid]] but without forcing the caller to
-   construct the wrapper explicitly. *)
-TKernelProfile[kid_Integer] := Information[TKernel[kid]]
+(* TKernelProfile = same Association shape Information[TKernel[kid]]
+   would return, but synthesized directly from the loader fns so it
+   keeps working after the kernel term has fired (and its heap pin
+   has been substituted away). *)
+TKernelProfile[kid_Integer] := <|
+    "Kid"           -> kid,
+    "Flops"         -> TKernelFlops[kid],
+    "DispatchKind"  -> TKernelDispatchKind[kid],
+    "DispatchCount" -> TKernelDispatchCount[kid],
+    "TotalUs"       -> TKernelTotalUs[kid],
+    "AvgUs"         -> If[ TKernelDispatchCount[kid] > 0,
+                           N[TKernelTotalUs[kid] / TKernelDispatchCount[kid]],
+                           0],
+    "GFlopsPerSec"  -> If[ TKernelTotalUs[kid] > 0 && TKernelDispatchCount[kid] > 0,
+                           N[TKernelFlops[kid] * TKernelDispatchCount[kid] / (TKernelTotalUs[kid] * 1000)],
+                           0],
+    "JitDylibPath"  -> TKernelJitDylibPath[kid],
+    "SourceC"       -> TKernelSourceC[kid],
+    "SourceMetal"   -> TKernelSourceMetal[kid]
+|>
+
 
 (* All currently-live kernels' profiles, indexed by kid. *)
 TProfileAll[] := Association[

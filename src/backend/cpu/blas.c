@@ -130,12 +130,64 @@ static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   return 1;
 }
 
+// Try GEMM.  A:{M,K} @ B:{K,N} -> {M,N}.  TMatMul materializes the
+// pair as a common-shape EXPAND-broadcast so MUL becomes elementwise:
+//
+//   op[0] = MUL(in0, in1)               numel = M*K*N
+//   op[1] = REDUCE_SUM(op[0])           numel = M*N, REDUCE inner = N
+//                                       (i.e. reducing the middle axis
+//                                        of the {M,K,N} layout).
+//
+// Disambiguates from GEMV by inner: GEMV has inner = 1, GEMM has
+// inner = N > 1 + a non-trivial K (nMul / nOut > 1).  A buffer-size
+// check distinguishes A (M*K floats) from B (K*N floats).
+static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (ke->n_inputs != 2) return 0;
+  if (ke->n_ops    != 2) return 0;
+  if (ke->input_dtypes[0] != DT_F32 || ke->input_dtypes[1] != DT_F32) return 0;
+  if (ke->program[0].dtype != DT_F32 || ke->program[1].dtype != DT_F32) return 0;
+  if (!blas_op_is_mul_of(&ke->program[0], 0, 1)) return 0;
+  if (!blas_op_is_reduce_sum(&ke->program[1], 0)) return 0;
+  u32 inner = BLAS_REDUCE_INNER(ke->program[1].arg);
+  if (inner <= 1) return 0;  // inner == 1 is GEMV's territory.
+  u32 nMul = ke->program[0].numel;
+  u32 nOut = ke->program[1].numel;
+  if (nOut == 0 || nMul == 0 || nMul % nOut != 0) return 0;
+  u32 N = inner;
+  u32 K = nMul / nOut;
+  if (nOut % N != 0) return 0;
+  u32 M = nOut / N;
+  if (M == 0 || K == 0) return 0;
+  // Identify A (M*K floats) vs B (K*N floats) by underlying CpuBuf
+  // size.  view.numel reflects the EXPANDED shape (M*K*N for both
+  // inputs); the contig buffers behind A and B have M*K and K*N
+  // floats respectively.
+  u32 b0 = in_buf_ids[0], b1 = in_buf_ids[1];
+  if (b0 == 0 || b1 == 0) return 0;
+  u32 f0 = (u32)(CPU_BUFS[b0].nbytes / sizeof(float));
+  u32 f1 = (u32)(CPU_BUFS[b1].nbytes / sizeof(float));
+  u32 aidx, bidx;
+  if      (f0 == M * K && f1 == K * N) { aidx = 0; bidx = 1; }
+  else if (f1 == M * K && f0 == K * N) { aidx = 1; bidx = 0; }
+  else return 0;
+  float const *A = (float const *)CPU_BUFS[in_buf_ids[aidx]].data;
+  float const *B = (float const *)CPU_BUFS[in_buf_ids[bidx]].data;
+  float       *C = (float       *)CPU_BUFS[out_buf_id].data;
+  // CblasRowMajor: A is M-by-K row-major (lda = K), B is K-by-N
+  // row-major (ldb = N), C is M-by-N row-major (ldc = N).  No transpose.
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+              (int)M, (int)N, (int)K,
+              1.0f, A, (int)K, B, (int)N, 0.0f, C, (int)N);
+  return 1;
+}
+
 // Returns the specific KDispatchKind that fired (BLAS_DOT / BLAS_GEMV
 // / BLAS_GEMM) so the profiler can record the route, or 0 on no-match
 // (caller falls through to JIT / interpreter).
 fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
   if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
+  if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
   return 0;
 }
 

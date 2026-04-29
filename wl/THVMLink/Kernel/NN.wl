@@ -48,6 +48,7 @@ TSum::usage             = "TSum[x] = TUOpReduce[x, 0, \"SUM\"].";
 TSquare::usage          = "TSquare[x] = TUOpMul[x, x].";
 TDot::usage             = "TDot[a, b] = TSum[TUOpMul[a, b]].";
 TMatVec::usage          = "TMatVec[W, x] computes W @ x where W has shape {out, in} and x has shape {1, in}.  Result has shape {out}.  EXPAND-broadcast then REDUCE_SUM along the inner axis.";
+TMatMul::usage          = "TMatMul[A, B] computes A @ B where A has shape {M, K} and B has shape {K, N}.  Result has shape {M, N}.  Lowered as RESHAPE + EXPAND to a common {M, K, N} shape, MUL elementwise, then REDUCE_SUM along axis 1.  cpu_blas_dispatch recognises this KProgOp[] pattern and routes to cblas_sgemm.";
 TL2Loss::usage          = "TL2Loss[x] = TSum[TSquare[x]].";
 TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
 TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
@@ -120,6 +121,30 @@ TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
         in  = shapeW[[2]];
         xb  = TUOpExpand[x, {out, in}];
         TUOpReduce[TUOpMul[w, xb], 1, "SUM"]
+    ]
+]
+
+(* TMatMul[A, B] -- A:{M,K} @ B:{K,N} -> {M,N}.  Lowered to a common
+   {M,K,N} shape so MUL is elementwise and REDUCE_SUM along axis 1
+   collapses the K dimension.  Both reshapes are contiguity-preserving
+   (A:{M,K} -> {M,K,1} only inserts a unit axis; B:{K,N} -> {1,K,N}
+   likewise) so EXPAND just sets a broadcast stride; no extra
+   materialization.
+
+   cpu_blas_dispatch recognises this exact KProgOp[] (MUL +
+   REDUCE_SUM with inner=N, where input buffers are M*K and K*N
+   floats) and routes to cblas_sgemm. *)
+TMatMul[a_TTerm, b_TTerm] := With[{
+    shapeA = TTensorShape[a],
+    shapeB = TTensorShape[b]
+},
+    Module[{m, k, n, ab, bb},
+        m = shapeA[[1]];
+        k = shapeA[[2]];
+        n = shapeB[[2]];
+        ab = TUOpExpand[TUOpReshape[a, {m, k, 1}], {m, k, n}];
+        bb = TUOpExpand[TUOpReshape[b, {1, k, n}], {m, k, n}];
+        TUOpReduce[TUOpMul[ab, bb], 1, "SUM"]
     ]
 ]
 
