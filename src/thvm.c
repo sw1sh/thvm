@@ -157,6 +157,8 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // heap cells for one opcode and returns a TAG_UOP term; nothing reduces.
 #include "uop/const.c"
 #include "uop/mov_cache.c"
+#include "uop/rewrite.c"   // constant fold + algebraic identities;
+                            // called by binary / unary constructors.
 #include "uop/unary.c"
 #include "uop/binary.c"
 #include "uop/reduce.c"

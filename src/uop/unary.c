@@ -8,6 +8,10 @@
 // recursive lambda's chain rule.
 
 fn Term uop_unary(u32 opcode, Term src) {
+  // Constructor-time rewrites (uop/rewrite.c): constant fold +
+  // self-inverse pairs (`neg(neg(x)) = x`, etc.).
+  Term r = uop_rewrite_unary(opcode, src);
+  if (r != 0) return r;
   u32 args[2] = { (u32)src, (u32)(src >> 32) };
   u64 key = uop_mov_hash(opcode, 0, args, 2);
   Term hit = uop_mov_lookup(key);

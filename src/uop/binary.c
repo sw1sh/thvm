@@ -7,6 +7,11 @@
 // the movement-op hash-cons but with two src args instead of one.
 
 fn Term uop_binary(u32 opcode, Term a, Term b) {
+  // Constructor-time rewrites (uop/rewrite.c): constant fold +
+  // algebraic identities (`x + 0 = x`, etc.).  Run before the
+  // hash-cons cache so simplified forms also get dedup'd.
+  Term r = uop_rewrite_binary(opcode, a, b);
+  if (r != 0) return r;
   // Pack (a_lo, a_hi, b_lo, b_hi) into the u32-array vals so the
   // mov-cache hash discriminates u64 Term values exactly.
   u32 args[4] = { (u32)a, (u32)(a >> 32), (u32)b, (u32)(b >> 32) };
