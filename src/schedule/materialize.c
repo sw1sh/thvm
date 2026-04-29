@@ -48,9 +48,134 @@ static void boundary_hash_insert(u64 loc, u32 idx) {
 }
 
 #define BOUNDARY_DEPTH_INVALID 0xFFFFFFFFu
-static u32 BOUNDARY_DEPTH[REALIZE_INFO_CAP];
+static u32 BOUNDARY_DEPTH    [REALIZE_INFO_CAP];
+// Per-boundary maximum-consumer depth.  Filled after topo by
+// boundary_compute_last_use; consumed by the depth-aware mem planner
+// to recycle output bufs once their LAST consumer has emitted.  0 =
+// "no consumer is itself a realize boundary"; that includes the
+// realize root (the caller reads it; never recycle) and any orphan
+// preserved tensor.
+static u32 BOUNDARY_LAST_USE [REALIZE_INFO_CAP];
 
 #define VISIT_BAIL 0xDEADBEEFu
+
+// === per-realize memory planner =====================================
+//
+// Phase 8 of the tinygrad-parity arc.  After topo_sort + last_use
+// computation, the emit loop walks boundaries in alloc-depth order;
+// before each kernel allocates its output buf, the planner pushes
+// any earlier kernel's output buf whose last_use_depth has already
+// passed onto the backend's freelist.  cpu_buf_alloc /
+// metal_buf_alloc then pop a same-nbytes match instead of growing
+// CPU_BUFS_NEXT / METAL_BUFS_NEXT.  Net effect: per-iter
+// intermediates get recycled across the same realize call (eager
+// path) and across replays (TJit path consumes the same buf_id
+// sequence).
+
+#ifdef THVM_HAS_METAL
+extern void thvm_metal_buf_freelist_push(u32 buf_id);
+#endif
+
+#define MEM_PLAN_CAP BOUNDARY_ORDER_CAP
+typedef struct {
+  u32 buf_id;
+  u32 last_use_depth;
+  u8  backend_id;       // 1 = CPU, 2 = Metal
+  u8  pushed;
+} MemPlanEntry;
+
+static MemPlanEntry MEM_PLAN[MEM_PLAN_CAP];
+static u32          MEM_PLAN_LEN = 0;
+
+// Default-off opt-in via THVM_REUSE_BUFS=1.  Within-pass reuse is
+// safe for forward-only flat graphs; the chain-rule + Phase-3
+// fusion-relaxation cases need DUP/SUP-aware lifetime tracking
+// that's a Phase-9 follow-up.  Until then, the planner ships
+// gated -- opt in for the bench numbers, training graphs stick
+// with the eager allocator.
+static int mem_plan_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_REUSE_BUFS");
+    enabled       = (e && e[0] == '1');
+    known         = 1;
+  }
+  return enabled;
+}
+
+static void mem_plan_reset(void) { MEM_PLAN_LEN = 0; }
+
+// Pop every entry the planner left on CPU_FREELIST that hasn't been
+// re-issued by an in-pass cpu_buf_alloc.  thvm_realize loops
+// materialize+wnf to fixed-point; if a planner push from pass N
+// survived into pass N+1's freelist, pass N+1's allocations could
+// reuse a buf whose original TenDesc is still referenced by the
+// chain rule's freshly-emitted UOPs, corrupting the read.  Drain
+// at end-of-pass so the planner's freelist scope stays strictly
+// per-pass; within-pass reuse (alloc-then-pop within the same emit
+// loop) still works.
+static void mem_plan_drain_freelist(void) {
+  if (!mem_plan_enabled()) return;
+  for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
+    MemPlanEntry *e = &MEM_PLAN[i];
+    if (!e->pushed)         continue;
+    if (e->backend_id != 1) continue;       // CPU only for now
+    // Walk CPU_FREELIST looking for this buf_id.  If still there,
+    // pop it (without reissuing) so it returns to the original
+    // owner's "live" state.  Drop refcount stays 0 until either a
+    // future TenDesc grabs it or end-of-realize rollback frees it.
+    for (u32 k = 0; k < CPU_FREELIST_LEN; k++) {
+      if (CPU_FREELIST[k] != e->buf_id)     continue;
+      // Swap-with-last + shrink: remove from freelist without
+      // changing CPU_BUFS[e->buf_id].refcount or contents.  The
+      // buf goes back to refcount=1 so the existing extern-pin /
+      // preserve walk handles it correctly.
+      CPU_FREELIST[k] = CPU_FREELIST[CPU_FREELIST_LEN - 1];
+      CPU_FREELIST_LEN--;
+      CPU_BUFS[e->buf_id].refcount = 1;
+      break;
+    }
+  }
+}
+
+static void mem_plan_record(u32 buf_id, u32 last_use_depth, Backend *b) {
+  if (b == NULL || buf_id == 0)         return;
+  if (MEM_PLAN_LEN >= MEM_PLAN_CAP)     return;
+  MemPlanEntry *e = &MEM_PLAN[MEM_PLAN_LEN++];
+  e->buf_id         = buf_id;
+  e->last_use_depth = last_use_depth;
+  e->backend_id     = (u8)b->id;
+  e->pushed         = 0;
+}
+
+static void mem_plan_push_dead(u32 current_depth) {
+  if (!mem_plan_enabled()) return;
+  for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
+    MemPlanEntry *e = &MEM_PLAN[i];
+    if (e->pushed)                              continue;
+    if (e->last_use_depth >= current_depth)     continue;
+    if (e->buf_id == 0)                         continue;
+    if (e->backend_id == 1) {
+      // Refcount > 1 means another TenDesc aliases this buf
+      // (typically a view-only RESHAPE / EXPAND chain).  Recycling
+      // would yank the bytes from the alias too, so skip.  The
+      // existing post-realize preserve walk + rollback releases
+      // these via the refcount-driven path.
+      if (CPU_BUFS[e->buf_id].refcount > 1) { e->pushed = 1; continue; }
+      // External / WL-shared bufs (NumericArray imports) own no
+      // backing storage; don't push them onto the freelist (the
+      // freelist owns the malloc'd region).
+      if (!CPU_BUFS[e->buf_id].owns_data)   { e->pushed = 1; continue; }
+      cpu_buf_freelist_push(e->buf_id);
+    }
+#ifdef THVM_HAS_METAL
+    else if (e->backend_id == 2) {
+      thvm_metal_buf_freelist_push(e->buf_id);
+    }
+#endif
+    e->pushed = 1;
+  }
+}
 
 
 // === topo-sort over realize boundaries (g2a) ===
@@ -84,12 +209,94 @@ static u32 boundary_depth_rec(u64 loc) {
   return d;
 }
 
+// Walk DOWN from `from_loc` through non-realized intermediates.  For
+// each realized boundary B encountered along the way, set
+// BOUNDARY_LAST_USE[B] = max(BOUNDARY_LAST_USE[B], visiting_depth).
+// `visited` is a bitmap sized to HEAP_NEXT to dedup the recursion.
+//
+// The walk has to descend through non-realized UOps because the
+// emit loop INLINES them into the parent's program (visit() in
+// emit_kernel_for_boundary recurses through them as KProgOp slots);
+// the boundary that the program eventually reads is the realized
+// kid, so its true last_use_depth is the realized PARENT'S depth,
+// not the non-realized intermediate's "depth" (which equals the
+// child's, see boundary_depth_rec where non-realized just inherits).
+static void boundary_last_use_descend(u64 from_loc, u32 visiting_depth,
+                                      u8 *visited) {
+  if (from_loc == 0 || from_loc >= HEAP_NEXT) return;
+  if (visited[from_loc]) return;
+  visited[from_loc] = 1;
+  u32 idx = realize_info_find(from_loc);
+  if (idx == 0xFFFFFFFFu) return;
+  if (REALIZE_INFO[idx].realized) {
+    if (visiting_depth > BOUNDARY_LAST_USE[idx]) {
+      BOUNDARY_LAST_USE[idx] = visiting_depth;
+    }
+    return;     // stop at the boundary -- its OWN children get
+                // handled when boundary_compute_last_use walks
+                // them as realized parents.
+  }
+  // Non-realized intermediate: recurse through its UOp children.
+  u8 ar = uop_arity(REALIZE_INFO[idx].op);
+  u64 seen[MAX_UOP_SRC] = {0};
+  u8  n_seen = 0;
+  for (u8 c = 0; c < ar; c++) {
+    Term child = term_resolve(heap_read(from_loc + c));
+    if (term_tag(child) != TAG_UOP)         continue;
+    if (term_ext(child) == UOP_KERNEL)      continue;
+    u64 cloc = term_val(child);
+    u8  dup  = 0;
+    for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
+    if (dup) continue;
+    seen[n_seen++] = cloc;
+    boundary_last_use_descend(cloc, visiting_depth, visited);
+  }
+}
+
+// For each realized parent at depth D, walk its UOp subtree (through
+// any non-realized intermediates) and bump BOUNDARY_LAST_USE on every
+// realized child it reaches to D.  After this, the planner can
+// safely freelist-push a buf at depth = last_use + 1 because every
+// realized parent that consumes it has already emitted by then.
+static void boundary_compute_last_use(void) {
+  for (u32 i = 0; i < REALIZE_INFO_CAP; i++) BOUNDARY_LAST_USE[i] = 0;
+  if (HEAP_NEXT == 0) return;
+  u8 *visited = (u8 *)calloc(HEAP_NEXT, 1);
+  if (visited == NULL) return;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *p = &REALIZE_INFO[i];
+    if (!p->realized)                              continue;
+    u32 p_depth = BOUNDARY_DEPTH[i];
+    if (p_depth == BOUNDARY_DEPTH_INVALID)         continue;
+    u8 ar = uop_arity(p->op);
+    u64 seen[MAX_UOP_SRC] = {0};
+    u8  n_seen = 0;
+    // Reset the visited bitmap per-parent so the walk doesn't
+    // collapse across parents (each parent independently roots
+    // its own consumer-depth update).
+    memset(visited, 0, HEAP_NEXT);
+    for (u8 c = 0; c < ar; c++) {
+      Term child = term_resolve(heap_read(p->loc + c));
+      if (term_tag(child) != TAG_UOP)         continue;
+      if (term_ext(child) == UOP_KERNEL)      continue;
+      u64 cloc = term_val(child);
+      u8  dup  = 0;
+      for (u8 j = 0; j < n_seen; j++) if (seen[j] == cloc) { dup = 1; break; }
+      if (dup) continue;
+      seen[n_seen++] = cloc;
+      boundary_last_use_descend(cloc, p_depth, visited);
+    }
+  }
+  free(visited);
+}
+
 static void topo_sort_boundaries(Term root) {
   BOUNDARY_ORDER_LEN = 0;
   boundary_hash_clear();
   for (u32 i = 0; i < REALIZE_INFO_CAP; i++)
     BOUNDARY_DEPTH[i] = BOUNDARY_DEPTH_INVALID;
   boundary_depth_rec(term_val(root));
+  boundary_compute_last_use();
 
   struct { u64 loc; u32 depth; } items[BOUNDARY_ORDER_CAP];
   u32 n = 0;
@@ -681,6 +888,14 @@ static Term emit_kernel_for_boundary(u32 bi) {
   u32 out_dtype = DT_F32;
   term_dtype_in(root_term, 0, &out_dtype);
 
+  // Memory planner: push any earlier kernel's output buf onto the
+  // backend freelist if its last consumer (in alloc-depth terms)
+  // has already emitted.  cpu_buf_alloc / metal_buf_alloc inside
+  // tensor_alloc below then pop a same-nbytes match instead of
+  // growing the buf table.
+  u32 this_depth = BOUNDARY_DEPTH[idx];
+  mem_plan_push_dead(this_depth);
+
   u32 out_tid = tensor_alloc(CURRENT_BACKEND, out_shape, out_dtype);
   u32 kid     = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
@@ -767,6 +982,30 @@ static Term emit_kernel_for_boundary(u32 bi) {
 
   BOUNDARY_TID [bi] = out_tid;
   BOUNDARY_TERM[bi] = kernel_term;
+
+  // Record this output buf so a later-depth emit can recycle it.
+  // last_use_depth = 0 means "no consumer is itself a realize
+  // boundary" -- typically the realize root + any preserved orphan;
+  // those never get pushed (the threshold mem_plan_push_dead checks
+  // is `last_use < current_depth`, which 0 satisfies for any
+  // current_depth >= 1, so we'd freelist-push the root and the
+  // caller would read freed bytes).  Skip recording in that case.
+  // Recycle only single-consumer outputs.  Multi-consumer ones may
+  // be aliased through DUP/SUP / read by interactions outside the
+  // realize-info-tracked DAG (e.g. UOP_ASSIGN in optimizer loops),
+  // and their true last_use isn't always equal to BOUNDARY_LAST_USE.
+  // The Phase-3 fusion relaxation also lets some non-realized
+  // intermediates feed multiple consumers without a shared buf;
+  // restricting recycling here keeps those cases safe.  Phase 9
+  // can lift this guard once the planner has explicit ASSIGN +
+  // DUP-aware lifetime tracking.
+  if (BOUNDARY_LAST_USE[idx] > 0
+      && REALIZE_INFO[idx].consumer_count == 1) {
+    mem_plan_record(TENS[out_tid].buf_id,
+                    BOUNDARY_LAST_USE[idx],
+                    CURRENT_BACKEND);
+  }
+
   return kernel_term;
 }
 
@@ -881,6 +1120,7 @@ fn Term thvm_materialize(Term term) {
 
   realize_classify(term);
   topo_sort_boundaries(term);
+  mem_plan_reset();
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     BOUNDARY_TID [i] = 0;
     BOUNDARY_TERM[i] = 0;
@@ -907,9 +1147,15 @@ fn Term thvm_materialize(Term term) {
         kernel_free_arrays(&KERNELS[r]);
       KERNELS_NEXT = kernels_at_start;
       TENS_NEXT    = tens_at_start;
+      mem_plan_drain_freelist();
       return term;
     }
     if (BOUNDARY_ORDER[i] == term_val(term)) sink_kernel = k;
   }
+  // End-of-pass: pop any planner-pushed bufs still on CPU_FREELIST so
+  // a subsequent thvm_realize -> materialize iteration doesn't pull
+  // from them (the chain rule's freshly-emitted UOPs may still
+  // reference those tids).
+  mem_plan_drain_freelist();
   return sink_kernel != 0 ? sink_kernel : term;
 }
