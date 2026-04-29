@@ -155,6 +155,54 @@ form took a `body` callback that was a no-op wrapper around `List`.
 Now returns the list of TGrad TTerms directly; callers destructure
 with `{ga, gb} = TGradMany[loss, {a, b}]`.
 
+## Phase 13c: pre-transpose LinearLayer weights (commit 4f8049c)
+
+NetMapOperator(LinearLayer) lost ~190 ms / call to `TUOpPermute[w,
+{1,0}]` materialising a fresh transposed weight buffer (Wolfram
+stores LinearLayer Weights in `{out, in}` order; thvm's TLinear
+wants `{in, out}`).  Fix: a host-side `$linearTransposedCache`
+keyed on the layer object — first call extracts Weights via
+NetExtract, transposes via plain WL `Transpose`, `TTensorCreate`s
+the contig `{in, out}` array; subsequent calls hit the cache and
+reuse the pre-materialised TTerm.  Bias gets the same treatment.
+
+Bench (real GPT-2 dim=768):
+- linear1 (NetMapOp Lin 768->3072) per call: 191 ms -> 0.35 ms (550x)
+- linear2 (NetMapOp Lin 3072->768) per call: 191 ms -> 0.35 ms (550x)
+- one transformer FFN block: 3100 ms -> 970 ms (3.2x)
+
+## Phase 13d: 10-token gen loop with TJit replay (commit pending)
+
+Extended `wl/Examples/gpt2/inference.wls` Part 3 with a 10-token
+greedy generation loop, both eager and TJit-wrapped.  Pre-allocates
+an input slot and a logits buf; the embedding lookup runs eagerly
+each step (cheap), `TSet`s the post-embedding TTerm into the input
+slot, then dispatches the captured TJit closure.
+
+Synthetic mini config (vocab=32, dim=64, n_heads=4, n_layers=1,
+seq=4):
+
+```
+eager 10-token wall:  5181 ms,  518 ms/token
+jit   10-token wall:  3904 ms,  390 ms/token  (1.33x speedup)
+TJit captured 30472 ops/step
+generated tokens:     {24, 24, 26, 20, 20, 20, 20, 30, 30, 20} (eager)
+                      {24, 24, 26, 20, 20, 20, 20, 30, 30, 20} (jit)
+```
+
+Eager and JIT produce IDENTICAL token sequences — capture-replay
+correctness is verified end-to-end.
+
+The 1.33x speedup is modest because at this mini config the
+per-call cost is ~50% materialise overhead (which TJit replay
+skips) and ~50% kernel-dispatch overhead (which TJit replay still
+incurs).  The captured 30472 ops include the embedding-stitch
+PAD+sum chain, which the JIT replay still has to dispatch every
+step because the ids change.  At real GPT-2 dim=768 the
+materialise share is much higher and the JIT win would be larger;
+not yet runnable end-to-end because of the FFN block's residual
+~970 ms / call (Phase 14 path).
+
 ## What's NOT done (Phase 14)
 
 - **WNF / materialize fix** to drain sibling ASSIGNs in one

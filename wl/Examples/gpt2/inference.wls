@@ -195,3 +195,100 @@ nextId = First @ Position[logits[[-1]], Max[logits[[-1]]]] - 1;
 print["  greedy next token id: ", nextId];
 
 print["PASS: mini-GPT-2 forward + greedy decode produces finite logits"];
+print[""];
+
+(* ===========================================================
+   Part 3: 10-token greedy generation, eager + TJit replay
+   =========================================================== *)
+
+print["=== Part 3: 10-token greedy generation ==="];
+
+nGen = 10;
+genWindow = prompt;   (* host-side rolling window of length seq *)
+
+print["  prompt: ", prompt, "  generating ", nGen, " tokens"];
+
+(* Eager loop -- TFromNet builds a fresh graph per token, runs
+   through the full per-call materialise + dispatch path. *)
+t0 = AbsoluteTime[];
+generated = Reap[
+    Module[{ids = genWindow, logitsArr, nextTok},
+        Do[
+            logitsArr = Normal @ TTensorData @ TRealize @ forward[ids];
+            nextTok   = First[Position[logitsArr[[-1]], Max[logitsArr[[-1]]]]] - 1;
+            Sow[nextTok];
+            ids = Append[Drop[ids, 1], First[nextTok]],
+            {nGen}
+        ]];
+][[2]];
+eagerMs = (AbsoluteTime[] - t0) * 1000.;
+
+print["  eager 10-token wall: ", NumberForm[eagerMs, {7, 0}], " ms"];
+print["  eager ms/token:      ", NumberForm[eagerMs / nGen, {6, 1}], " ms"];
+print["  generated tokens:    ", First[generated]];
+
+(* Sanity: every step produced a finite token id within vocab range *)
+flatGen = Flatten[generated];
+If[ Length[flatGen] =!= nGen ||
+    AnyTrue[flatGen, ! IntegerQ[#] || # < 0 || # >= vocab &],
+    print["FAIL: generation produced bad token ids"];
+    Exit[1]];
+
+(* === TJit-wrapped variant ====================================
+   The per-block forward writes into a pre-allocated logits buf;
+   the embedding lookup runs eagerly each step (cheap) and TSets
+   the input slot.  TJit captures the post-embedding kernel chain
+   on the first call; subsequent calls replay the captured
+   sequence directly (no materialise / dispatch overhead). *)
+
+inputBuf  = TTensorCreate @ TZeros[{seq, dim}];
+logitsBuf = TTensorCreate @ TZeros[{seq, vocab}];
+
+forwardFromInput[xT_TTerm] := Module[{x, lnf, mask},
+    mask = TCausalMask[seq];
+    x    = xT;
+    Do[ x = block[x, layers[[i]], mask], {i, nLayers}];
+    lnf = TLayerNormAffine[x, gFinal, bFinal];
+    TMatMul[lnf, wOut]
+]
+
+stepFn = Function[{}, TSet[logitsBuf, forwardFromInput[inputBuf]]];
+jittedStep = TJit[stepFn];
+
+(* Warm: capture *)
+embed0 = TRealize[TEmbeddingMatrix[tokEmb, prompt] +
+                  TEmbeddingMatrix[posEmb, Range[0, seq - 1]]];
+TSet[inputBuf, embed0];
+jittedStep[];   (* capture *)
+print[""];
+print["TJit captured ", TJitOpCount[jittedStep], " ops"];
+
+(* JIT-replay 10 tokens *)
+t0 = AbsoluteTime[];
+genJit = Reap[
+    Module[{ids = prompt, embT, logitsArr, nextTok},
+        Do[
+            embT = TRealize[TEmbeddingMatrix[tokEmb, ids] +
+                            TEmbeddingMatrix[posEmb, Range[0, seq - 1]]];
+            TSet[inputBuf, embT];
+            jittedStep[];
+            logitsArr = Normal @ TTensorData[logitsBuf];
+            nextTok   = First[Position[logitsArr[[-1]], Max[logitsArr[[-1]]]]] - 1;
+            Sow[nextTok];
+            ids = Append[Drop[ids, 1], First[nextTok]],
+            {nGen}
+        ]];
+][[2]];
+jitMs = (AbsoluteTime[] - t0) * 1000.;
+
+print["  jit 10-token wall:   ", NumberForm[jitMs, {7, 0}], " ms"];
+print["  jit ms/token:        ", NumberForm[jitMs / nGen, {6, 1}], " ms"];
+print["  jit replays/step:    ", TJitOpCount[jittedStep]];
+print["  speedup vs eager:    ", NumberForm[eagerMs / jitMs, {4, 2}], "x"];
+print["  generated tokens:    ", First[genJit]];
+
+If[ Flatten[genJit] =!= Flatten[generated],
+    print["FAIL: jit and eager disagree on generated tokens"];
+    Exit[1]];
+
+print["PASS: jit and eager produce identical token sequences"];
