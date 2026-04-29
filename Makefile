@@ -132,9 +132,11 @@ $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(WL_L
 	  exit 1; \
 	fi
 	$(CC) $(CFLAGS) -fPIC $(WL_DYLIB_FLAGS) \
+	  -DACCELERATE_NEW_LAPACK \
 	  -I"$(WL_INCLUDE)" \
 	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
-	  -o $@ $(WL_SRC) $(METAL_OBJ) $(METAL_LDFLAGS)
+	  -o $@ $(WL_SRC) $(METAL_OBJ) $(METAL_LDFLAGS) \
+	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,)
 ifeq ($(UNAME_S),Darwin)
 	codesign --force --sign - $@
 endif

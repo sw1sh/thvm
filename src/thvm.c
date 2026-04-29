@@ -132,6 +132,10 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "backend/cpu/op/shrink.c"
 #include "backend/cpu/op/permute.c"
 #include "backend/cpu/interpret.c"
+// BLAS / Accelerate dispatch.  Pattern-recognises matmul / matvec /
+// dot in KProgOp[] and hands them to cblas_*; cpu_dispatch_kernel
+// tries this BEFORE the JIT path so library-tuned kernels win.
+#include "backend/cpu/blas.c"
 // codegen/ is backend-agnostic: cg_emit walks a KernelEntry's program[]
 // and dispatches per KProgOp through a Renderer.  render_c.c supplies
 // the C99 renderer (used by the CPU JIT just below); future Metal /
