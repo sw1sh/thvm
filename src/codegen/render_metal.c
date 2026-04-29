@@ -136,6 +136,6 @@ static const Renderer METAL_RENDERER = {
 // KProgOp[] emits valid Metal source -- proves the Renderer
 // abstraction holds without requiring a Metal-side compile/dispatch
 // path (which lives in backend/metal/_.m and is single-op for now).
-fn char *cg_emit_metal(KernelEntry const *ke) {
+char *cg_emit_metal(KernelEntry const *ke) {
   return cg_emit(ke, &METAL_RENDERER);
 }

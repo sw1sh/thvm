@@ -230,6 +230,130 @@ static void metal_shutdown(void) {
   METAL_DEVICE = nil;
 }
 
+// === metal_jit: fused-program shaders ==================================
+//
+// Compile cg_emit_metal output to an MTLLibrary at first dispatch and
+// cache the resulting MTLComputePipelineState by program hash.
+// Mirrors src/backend/cpu/jit.c structurally (same FNV-1a hash, same
+// open-addressing cache layout) so a kernel that JITs cleanly on CPU
+// will JIT cleanly here too.
+//
+// Cache miss: cg_emit_metal -> [MTLDevice newLibraryWithSource:
+//   options:error:] -> [lib newFunctionWithName:@"k"] ->
+//   [device newComputePipelineStateWithFunction:].  The PSO lives in
+//   METAL_JIT_PSOS (ARC strong) so it survives the cache slot's
+//   weak-style id<MTLComputePipelineState> reference.
+//
+// Buffer-binding convention (matches render_metal.c's prologue):
+//   buffer(0)              : output (device float *)
+//   buffer(1..1+n_in-1)    : inputs (device const float *)
+// One thread per output element; threadgroup size capped at the
+// pipeline's maxTotalThreadsPerThreadgroup.
+
+#define METAL_JIT_CACHE_CAP 256
+typedef struct {
+  u64 key;   // 0 = empty
+} MetalJitSlot;
+static MetalJitSlot                METAL_JIT_CACHE[METAL_JIT_CACHE_CAP];
+static id<MTLComputePipelineState> METAL_JIT_PSOS [METAL_JIT_CACHE_CAP];
+
+static u64 metal_jit_hash(KernelEntry const *ke) {
+  u64 h = 0xcbf29ce484222325ULL;
+  h ^= (u64)ke->n_ops;    h *= 0x100000001b3ULL;
+  h ^= (u64)ke->n_inputs; h *= 0x100000001b3ULL;
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    h ^= (u64)ke->input_numels[i]; h *= 0x100000001b3ULL;
+  }
+  u8 const *bytes = (u8 const *)ke->program;
+  size_t total = (size_t)ke->n_ops * sizeof(KProgOp);
+  for (size_t i = 0; i < total; i++) {
+    h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
+  }
+  return h | (1ULL << 63);
+}
+
+// Open-addressing probe: returns the slot the key lives in, or the
+// first empty slot the key could be installed into.  NULL only on
+// table-full (which we treat as cache-bypass below).
+static u32 metal_jit_lookup_idx(u64 key) {
+  u32 h = (u32)(key ^ (key >> 32));
+  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+  for (u32 probe = 0; probe < METAL_JIT_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (METAL_JIT_CACHE_CAP - 1);
+    if (METAL_JIT_CACHE[i].key == key) return i;
+    if (METAL_JIT_CACHE[i].key == 0)   return i;
+  }
+  return (u32)-1;
+}
+
+static id<MTLComputePipelineState> metal_jit_build(KernelEntry const *ke, u64 key) {
+  char *src = cg_emit_metal(ke);
+  if (src == NULL) return nil;
+  NSString *srcStr = [NSString stringWithUTF8String:src];
+  free(src);
+  NSError *err = nil;
+  id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
+                                                  options:nil
+                                                    error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm: metal_jit -- compile failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"k"];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm: metal_jit -- function 'k' missing in compiled lib\n");
+    return nil;
+  }
+  id<MTLComputePipelineState> pso =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (pso == nil) {
+    fprintf(stderr, "thvm: metal_jit -- pipeline-state failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  u32 idx = metal_jit_lookup_idx(key);
+  if (idx != (u32)-1) {
+    METAL_JIT_CACHE[idx].key = key;
+    METAL_JIT_PSOS [idx]     = pso;
+  }
+  return pso;
+}
+
+// Encode a single fused-shader dispatch onto `cmd`.  Returns 1 on
+// success (caller commits the cmd buffer), 0 if the kernel can't be
+// JIT-compiled (caller falls back to the per-op interpreter path).
+// The src_bufs[] are post-pre-mat buffers from the caller -- this
+// helper doesn't read TENS or in_buf_ids directly.
+static int metal_jit_encode(KernelEntry *ke,
+                            __unsafe_unretained id<MTLBuffer> *src_bufs,
+                            id<MTLBuffer> outBuf,
+                            id<MTLCommandBuffer> cmd) {
+  if (!cg_supports(ke)) return 0;
+  u64 key = metal_jit_hash(ke);
+  u32 idx = metal_jit_lookup_idx(key);
+  id<MTLComputePipelineState> pso = nil;
+  if (idx != (u32)-1 && METAL_JIT_CACHE[idx].key == key) {
+    pso = METAL_JIT_PSOS[idx];
+  } else {
+    pso = metal_jit_build(ke, key);
+  }
+  if (pso == nil) return 0;
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:outBuf offset:0 atIndex:0];
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    [enc setBuffer:src_bufs[i] offset:0 atIndex:(1 + i)];
+  }
+  NSUInteger n = (NSUInteger)ke->program[ke->n_ops - 1].numel;
+  if (n == 0) n = 1;
+  NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  return 1;
+}
+
 static id<MTLComputePipelineState> METAL_PIPELINES[UOP_COUNT] = { nil };
 
 static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
@@ -351,6 +475,11 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
   if (outBuf == nil) return -1;
 
+  // Profile this dispatch.  kid = ke - KERNELS gives the slot index
+  // the WL TKernelProfile / TKernelDispatchKind surface reads.
+  u32 kid = (u32)(ke - KERNELS);
+  u64 t0  = cg_now_us();
+
   // View-aware pre-materialize (the Metal counterpart to
   // cpu_interpret's strided pre-mat loop).  For each input whose
   // TenDesc carries a non-contiguous View, allocate a temp Metal
@@ -397,11 +526,34 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     }
   }
 
-  // Multi-op driver: mirror cpu_interpret.  Allocate one Metal buf
-  // per intermediate op; final op writes to outBuf.  All ops run
-  // inside a single MTLCommandBuffer with one encoder per op --
-  // Metal hazard-tracks reads/writes of MTLResourceStorageModeShared
-  // buffers across encoders in the same command buffer, so each
+  // Try the JIT path: if cg_supports(ke), render the whole KProgOp[]
+  // to a single MSL kernel and dispatch one encoder.  metal_jit_encode
+  // returns 1 when it successfully encoded (caller commits + waits) and
+  // 0 to bail (cg_supports rejected, or compile/PSO failed -- either way
+  // we fall through to the per-op path below, which handles REDUCE +
+  // movement that the JIT can't yet).
+  {
+    __unsafe_unretained id<MTLBuffer> jit_src_bufs[ke->n_inputs ? ke->n_inputs : 1];
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      jit_src_bufs[i] = METAL_BUFS[effective_buf_ids[i]].buf;
+    }
+    id<MTLCommandBuffer> jit_cmd = [METAL_QUEUE commandBuffer];
+    if (metal_jit_encode(ke, jit_src_bufs, outBuf, jit_cmd)) {
+      [jit_cmd commit];
+      [jit_cmd waitUntilCompleted];
+      for (u32 i = 0; i < ke->n_inputs; i++) {
+        if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
+      }
+      cg_profile_record(kid, KDISPATCH_METAL_JIT, cg_now_us() - t0);
+      return 0;
+    }
+  }
+
+  // Per-op interpreter path: one encoder per KProgOp[] entry.  Mirror
+  // of cpu_interpret.  Allocate one Metal buf per intermediate op;
+  // the final op writes to outBuf.  All ops share a single
+  // MTLCommandBuffer, and Metal hazard-tracks reads/writes of
+  // MTLResourceStorageModeShared buffers across encoders so each
   // encoder naturally sees the previous encoder's writes without an
   // explicit barrier.
   // Sized to ke->n_ops (KPROG_MAX_OPS is now a sanity bound, not a
@@ -472,6 +624,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
   }
+  if (rc == 0) cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
   return rc;
 }
 

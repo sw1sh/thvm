@@ -11,14 +11,8 @@
 // methodology tinygrad's `BEAM` profiler uses; it's a coarse number
 // but useful for "are we hitting BLAS GFLOPs?" sanity checks.
 
-typedef enum {
-  KDISPATCH_NONE        = 0,
-  KDISPATCH_BLAS_DOT    = 1,
-  KDISPATCH_BLAS_GEMV   = 2,
-  KDISPATCH_BLAS_GEMM   = 3,
-  KDISPATCH_JIT         = 4,
-  KDISPATCH_INTERPRETER = 5,
-} KDispatchKind;
+// KDispatchKind is declared in thvm.h so the Metal .m file (compiled
+// in a separate TU) can pass route ids back to cg_profile_record.
 
 // Per-kid running counters.  Array indexed by kid; reset on
 // thvm_init via cg_profile_reset.  Out-of-range kids ignored.
@@ -72,7 +66,7 @@ fn u64 cg_kernel_flops(KernelEntry const *ke) {
   return total;
 }
 
-fn void cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us) {
+void cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us) {
   if (kid == 0 || kid >= KPROFILE_CAP) return;
   KProfileSlot *s = &K_PROFILE[kid];
   s->kind            = kind;
@@ -97,7 +91,7 @@ fn u64 cg_kernel_total_us(u32 kid) {
 
 // Wallclock helper -- gettimeofday / clock_gettime on macOS.
 #include <sys/time.h>
-fn u64 cg_now_us(void) {
+u64 cg_now_us(void) {
   struct timeval tv;
   gettimeofday(&tv, NULL);
   return (u64)tv.tv_sec * 1000000 + (u64)tv.tv_usec;

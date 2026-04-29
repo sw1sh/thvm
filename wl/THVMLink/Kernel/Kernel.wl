@@ -224,10 +224,11 @@ tenTermFromTid[tid_Integer] := With[{
 ]
 
 (* C-side dispatch enum -> readable label.  Mirrors KDispatchKind in
-   src/codegen/profile.c. *)
+   src/thvm.h. *)
 $dispatchKindNames = <|
-    0 -> "none", 1 -> "blas-dot", 2 -> "blas-gemv", 3 -> "blas-gemm",
-    4 -> "jit",  5 -> "interpreter"
+    0 -> "none",        1 -> "blas-dot",   2 -> "blas-gemv", 3 -> "blas-gemm",
+    4 -> "jit",         5 -> "interpreter",
+    6 -> "metal-jit",   7 -> "metal-op"
 |>;
 decodeDispatchKind[k_Integer] := Lookup[$dispatchKindNames, k, "unknown"]
 

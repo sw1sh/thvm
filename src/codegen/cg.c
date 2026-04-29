@@ -89,7 +89,7 @@ typedef struct Renderer {
 // elementwise ALU set.  REDUCE and movement ops bail; the caller
 // (cpu_jit_dispatch) falls back to the interpreter.
 
-fn int cg_supports(KernelEntry const *ke) {
+int cg_supports(KernelEntry const *ke) {
   for (u32 i = 0; i < ke->n_ops; i++) {
     u8 op = ke->program[i].opcode;
     switch (op) {

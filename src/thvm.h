@@ -755,6 +755,32 @@ fn Term interact_grad(Term grad_term);
 fn Term interact_assign     (Term assign_term);
 fn Term interact_assign_with(Term dst, Term src);
 
+// === codegen/ + profile/ ===
+// Backend-agnostic source emitters (render_c.c, render_metal.c) plus
+// per-kid dispatch profiling.  Exposed cross-TU so the Metal .m file
+// (compiled separately under -DTHVM_HAS_METAL) can render MSL via
+// cg_emit_metal, gate on cg_supports, and record dispatches into the
+// shared K_PROFILE table.
+
+// Per-kid route taken by the most recent fire.  Mirrored by the WL
+// surface decoder (TKernelDispatchKind) -- keep the names + ids
+// stable across TUs.
+typedef enum {
+  KDISPATCH_NONE        = 0,
+  KDISPATCH_BLAS_DOT    = 1,
+  KDISPATCH_BLAS_GEMV   = 2,
+  KDISPATCH_BLAS_GEMM   = 3,
+  KDISPATCH_JIT         = 4,   // CPU JIT (clang -shared)
+  KDISPATCH_INTERPRETER = 5,   // CPU interpreter
+  KDISPATCH_METAL_JIT   = 6,   // Metal: cg_emit_metal -> MTLLibrary -> single-encoder dispatch
+  KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (one encoder per KProgOp)
+} KDispatchKind;
+
+int   cg_supports(KernelEntry const *ke);
+char *cg_emit_metal(KernelEntry const *ke);   // caller frees
+u64   cg_now_us(void);
+void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
+
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.
 // Metal lands in step 14 behind the same Backend struct.
