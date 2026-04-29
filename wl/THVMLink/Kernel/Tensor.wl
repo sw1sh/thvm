@@ -20,6 +20,11 @@ BeginPackage["THVMLink`"];
 
 TSet::usage = "TSet[dst, src] writes the bytes of `src` into `dst`'s backing buffer in place; `dst` keeps its TenDesc id so callers still holding it observe the new contents.  Equivalent to `TRealize[TAssign[dst, src]]; dst`.  Also installed as the WL Set UpValue on literal-TTerm LHSes, so `Evaluate[w] = expr` mutates `w` rather than rebinding the symbol.";
 
+(* Forward-decl: these are defined in NN.wl (loads alphabetically
+   after Tensor.wl).  Without this, the UpValues below resolve to
+   phantoms in `THVMLink`Private`* with no DownValue. *)
+{TTanh, TMatMul, TDot, TSoftmaxAxis};
+
 Begin["`Private`"];
 
 (* === predicates ===
@@ -208,7 +213,7 @@ gradLeafTidsUop[opcode_, base_] := Module[{n = uopArity[opcode]},
 (* Default cotangent seed for TGrad: ones at y's shape.  CONST is a
    scalar (shape {1}); EXPAND lifts it to y.shape when y is non-scalar. *)
 gradOnesSeed[y_TTerm] := Module[{shape = tUopShape[y], one},
-    one = TUOpConst[1.0, "f32"];
+    one = TUOpConst[1.0];
     If[ ListQ[shape] && Length[shape] > 0 && shape =!= {1},
         TUOpExpand[one, shape],
         one
@@ -257,7 +262,7 @@ TGrad[y_, target_TTerm, gy_TTerm] := Module[
        For the common case where dupNest already lands at
        target.shape, the EXPAND of a scalar 0 + ADD is value-neutral. *)
     If[ ListQ[targetShape] && Length[targetShape] > 0,
-        zero = TUOpExpand[TUOpConst[0.0, "f32"], targetShape];
+        zero = TUOpExpand[TUOpConst[0.0], targetShape];
         TUOpAdd[dupNest, zero],
         dupNest
     ]
@@ -391,8 +396,16 @@ TTerm /: Minus[t_TTerm ? tensorTermQ] := TUOpNeg[t]
 
 TTerm /: Power[t_TTerm ? tensorTermQ, Rational[1, 2]] := TUOpSqrt[t]
 TTerm /: Power[t_TTerm ? tensorTermQ, -1]             := TUOpRecip[t]
+(* Integer exponent n >= 1: expand to repeated multiplication.  Required
+   so plain WL `t^3` (e.g. inside an ElementwiseLayer's GELU function
+   body) lowers to a TTerm chain rather than staying as Power[TTerm, 3].
+   No bespoke UOP_POW; the chain is folded MUL ops the existing path
+   already handles. *)
+TTerm /: Power[t_TTerm ? tensorTermQ, n_Integer ? Positive] :=
+    Fold[TUOpMul[#1, t] &, t, ConstantArray[t, n - 1]]
 
 TTerm /: Sqrt[t_TTerm ? tensorTermQ] := TUOpSqrt[t]
+TTerm /: Tanh[t_TTerm ? tensorTermQ] := TTanh[t]
 
 (* Exp / Log: route through the EXP2 / LOG2 primitives via the
    constant log2(e) / ln(2) factors.  Mirror the tExp / TLog helpers
@@ -417,6 +430,39 @@ TTerm /: Total[t_TTerm ? tensorTermQ, All]             := Fold[
 
 TTerm /: Less[a_TTerm ? tensorTermQ, b_] := TUOpCmplt[a, liftNumeric[b, inheritDType[a]]]
 TTerm /: Less[a_, b_TTerm ? tensorTermQ] := TUOpCmplt[liftNumeric[a, inheritDType[b]], b]
+
+(* === Movement / linalg UpValues =============================
+   Idiomatic WL forms route to existing TUOp* / T* primitives so
+   user code reads as ordinary Mathematica rather than a soup of
+   T-prefixed builders.
+
+   - Transpose[t]        -> reverse-axis permute
+   - Transpose[t, perm]  -> general permute (1-indexed -> 0-indexed)
+   - Dot[a, b]           -> TMatMul (rank-2 @ rank-2) / TDot (rank-1)
+   - ArrayReshape[t, sh] -> TUOpReshape *)
+
+TTerm /: Transpose[t_TTerm ? tensorTermQ] :=
+    With[{rank = Length @ tUopShape[t]},
+        TUOpPermute[t, Reverse @ Range[0, rank - 1]]]
+TTerm /: Transpose[t_TTerm ? tensorTermQ, perm_List] :=
+    TUOpPermute[t, perm - 1]
+
+TTerm /: Dot[a_TTerm ? tensorTermQ, b_TTerm ? tensorTermQ] :=
+    With[{ra = Length @ tUopShape[a], rb = Length @ tUopShape[b]},
+        Which[
+            ra === 2 && rb === 2,  TMatMul[a, b],
+            ra === 1 && rb === 1,  TDot[a, b],
+            True, TMatMul[a, b]]]      (* fallback; refine when needed *)
+
+TTerm /: ArrayReshape[t_TTerm ? tensorTermQ, shape_List] :=
+    TUOpReshape[t, shape]
+
+(* Layer-call UpValues: `Layer[opts][t_TTerm]` is still a TTerm
+   UpValue -- TagSetDelayed on TTerm, with the layer bound as
+   `l_SoftmaxLayer` so we can read its options.  WL's "Level"
+   parameter is 1-indexed; thvm's TSoftmaxAxis is 0-indexed. *)
+TTerm /: l_SoftmaxLayer[t_TTerm ? tensorTermQ] :=
+    TSoftmaxAxis[t, NetExtract[l, "Parameters"]["Level"] - 1]
 
 (* Set on a literal-TTerm LHS rewrites in place: realises src into a
    fresh TenDesc, memcpys those bytes into dst's backing buffer.  dst

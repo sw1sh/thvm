@@ -369,25 +369,13 @@ TSparseCategoricalCrossEntropy[logits_TTerm, target_TTerm] := With[{
     ]
 ]
 
-TAttention[q_TTerm, k_TTerm, v_TTerm] := With[{
-    shapeQ = tUopShape[q],
-    shapeK = tUopShape[k]
-},
-    Module[{seqQ, seqK, dk, scale, kT, scores, attn},
-        seqQ  = shapeQ[[1]];
-        seqK  = shapeK[[1]];
-        dk    = shapeK[[2]];
-        scale = TUOpConst[N[1.0/Sqrt[dk]], "f32"];
-        (* K^T : {seq_k, d_k} -> {d_k, seq_k}.  Non-contiguous view;
-           TMatMul's RESHAPE forces materialization through the view-
-           strided fast path the CPU/Metal interpreters already handle. *)
-        kT     = TUOpPermute[k, {1, 0}];
-        scores = TUOpMul[TMatMul[q, kT],
-                         TUOpExpand[scale, {seqQ, seqK}]];
-        attn   = TSoftmaxAxis[scores, 1];
-        TMatMul[attn, v]
-    ]
-]
+(* Idiomatic: `q . Transpose[k]` lowers via the Dot + Transpose
+   UpValues; `SoftmaxLayer[2][...]` lowers via the Layer-call
+   UpValue installed in Tensor.wl; `/ Sqrt[N @ dk]` and `... . v`
+   ride the Times / Power / Dot UpValues.  Reads as the textbook
+   formula. *)
+TAttention[q_TTerm, k_TTerm, v_TTerm] := With[{dk = tUopShape[k][[2]]},
+    SoftmaxLayer[2][(q . Transpose[k]) / Sqrt[N @ dk]] . v]
 
 (* === GPT-2 building blocks ==================================
    The five entries below are pure WL composition over the layers
@@ -414,7 +402,7 @@ TEmbeddingMatrix[table_TTerm, ids_List] := With[{
         padded = MapIndexed[
             TUOpPad[#1, {{First[#2] - 1, len - First[#2]}, {0, 0}}] &,
             rows];
-        Fold[Plus, First[padded], Rest[padded]]
+        Total[padded]
     ]
 ]
 
@@ -422,9 +410,7 @@ TGELU[x_TTerm] := With[{
     sqrt2OverPi = Sqrt[2.0 / Pi]            (* ~ 0.7978845608... *),
     halfCubeC   = 0.044715
 },
-    (* x * x * x rather than x^3: there's no Power[t_TTerm, n_Integer]
-       UpValue for n != 1/2, -1, so x^3 would stay unevaluated. *)
-    0.5 * x * (1 + TTanh[sqrt2OverPi * (x + halfCubeC * (x * x * x))])
+    0.5 * x * (1 + TTanh[sqrt2OverPi * (x + halfCubeC * x^3)])
 ]
 
 TCausalMask[seq_Integer] := TTensorCreate @ NumericArray[
@@ -456,30 +442,26 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
                     nHeads_Integer, mask_:None] := With[{
     shapeQ = tUopShape[q]
 },
-    Module[{seq, dim, dHead, qH, kH, vH, perHead, headOuts},
+    Module[{seq, dim, dHead, headView, sliceHead, perHead, headOuts},
         seq   = shapeQ[[1]];
         dim   = shapeQ[[2]];
         dHead = dim / nHeads;
-        (* {seq, dim} -> {seq, nHeads, dHead} -> {nHeads, seq, dHead} *)
-        qH = TUOpPermute[TUOpReshape[q, {seq, nHeads, dHead}], {1, 0, 2}];
-        kH = TUOpPermute[TUOpReshape[k, {seq, nHeads, dHead}], {1, 0, 2}];
-        vH = TUOpPermute[TUOpReshape[v, {seq, nHeads, dHead}], {1, 0, 2}];
-        perHead[h_] := Module[{qSlice, kSlice, vSlice, scores, scoresM, attn},
-            qSlice = TUOpReshape[
-                TUOpShrink[qH, {{h, h + 1}, {0, seq}, {0, dHead}}],
-                {seq, dHead}];
-            kSlice = TUOpReshape[
-                TUOpShrink[kH, {{h, h + 1}, {0, seq}, {0, dHead}}],
-                {seq, dHead}];
-            vSlice = TUOpReshape[
-                TUOpShrink[vH, {{h, h + 1}, {0, seq}, {0, dHead}}],
-                {seq, dHead}];
-            scores = TMatMul[qSlice, TUOpPermute[kSlice, {1, 0}]] /
-                     Sqrt[N @ dHead];
-            scoresM = If[ mask === None, scores, scores + mask];
-            attn   = TSoftmaxAxis[scoresM, 1];
-            TMatMul[attn, vSlice]
-        ];
+        (* {seq, dim} -> {seq, nHeads, dHead} -> {nHeads, seq, dHead}.
+           Transpose with 1-indexed perm via the WL UpValue. *)
+        headView[t_] := Transpose[ArrayReshape[t, {seq, nHeads, dHead}],
+                                  {2, 1, 3}];
+        sliceHead[hView_, h_] := ArrayReshape[
+            TUOpShrink[hView, {{h, h + 1}, {0, seq}, {0, dHead}}],
+            {seq, dHead}];
+        perHead[h_] := With[{
+            qS = sliceHead[headView[q], h],
+            kS = sliceHead[headView[k], h],
+            vS = sliceHead[headView[v], h]
+        },
+            Module[{scores, scoresM},
+                scores  = (qS . Transpose[kS]) / Sqrt[N @ dHead];
+                scoresM = If[ mask === None, scores, scores + mask];
+                TSoftmaxAxis[scoresM, 1] . vS]];
         headOuts = perHead /@ Range[0, nHeads - 1];
         headStitch[headOuts, seq, nHeads, dHead]
     ]
@@ -488,28 +470,28 @@ TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
 (* Stitch a list of nHeads {seq, dHead} TTerms into {seq, dim=
    nHeads*dHead} via per-head PAD into the corresponding column
    slice + sum.  No STACK op in thvm. *)
-headStitch[heads_List, seq_, nHeads_, dHead_] := With[{
-    padded = Table[
-        TUOpPad[heads[[h + 1]],
-            {{0, 0}, {h * dHead, (nHeads - h - 1) * dHead}}],
-        {h, 0, nHeads - 1}]
-},
-    Fold[Plus, First[padded], Rest[padded]]
-]
+headStitch[heads_List, seq_, nHeads_, dHead_] := Total @ Table[
+    TUOpPad[heads[[h + 1]],
+        {{0, 0}, {h * dHead, (nHeads - h - 1) * dHead}}],
+    {h, 0, nHeads - 1}]
 
 (* === Wolfram-layer parameter access ===================== *)
 
 (* Parameter names for each layer kind, in canonical declaration
    order.  Adding a new layer means adding an entry here + a
    fromLayer[<head>, ...] forward rule below. *)
-$layerParams[LinearLayer]      = {"Weights", "Biases"}
-$layerParams[ConvolutionLayer] = {"Weights", "Biases"}
-$layerParams[ElementwiseLayer] = {}
-$layerParams[ReshapeLayer]     = {}
-$layerParams[FlattenLayer]     = {}
-$layerParams[PoolingLayer]     = {}
-$layerParams[SoftmaxLayer]     = {}
-$layerParams[_]                = {}
+$layerParams[LinearLayer]        = {"Weights", "Biases"}
+$layerParams[ConvolutionLayer]   = {"Weights", "Biases"}
+$layerParams[NormalizationLayer] = {"Scaling", "Biases"}
+$layerParams[EmbeddingLayer]     = {"Weights"}
+$layerParams[ElementwiseLayer]   = {}
+$layerParams[ReshapeLayer]       = {}
+$layerParams[FlattenLayer]       = {}
+$layerParams[PoolingLayer]       = {}
+$layerParams[SoftmaxLayer]       = {}
+$layerParams[DropoutLayer]       = {}
+$layerParams[ThreadingLayer]     = {}
+$layerParams[_]                  = {}
 
 TLayerWeights[layer_] :=
     NetExtract[layer, #] & /@ $layerParams[Head[layer]]
@@ -548,6 +530,7 @@ $elementwiseDispatch = <|
     Ramp           -> TReLU,
     Tanh           -> TTanh
 |>;
+
 
 (* ReshapeLayer[shape]: target shape via `NetExtract[layer, "Output"]`.
    Note that for a rank-1 target (e.g. ReshapeLayer[{6}]) NetExtract
@@ -610,14 +593,206 @@ fromLayer[PoolingLayer, layer_, x_TTerm] := Module[{
     TMaxPool2d[x, kh]
 ]
 
-fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op},
+(* ElementwiseLayer dispatch.  Tries an explicit symbol-based
+   lookup first (fast path for `Tanh`, `Identity`, etc.).  If the
+   layer carries an arbitrary Function body (e.g. GPT-2's tanh-form
+   GELU `0.5 (#1 (1 + Tanh[0.797885 (#1 + 0.044715 #1^3)])) &`),
+   apply the function directly to the TTerm input -- the WL Plus
+   / Times / Power[t, n_Integer] / Tanh UpValues installed in
+   Tensor.wl construct the equivalent UOp graph automatically. *)
+fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op, applied},
     f  = NetExtract[layer, "Function"];
     op = Lookup[$elementwiseDispatch, f, None];
-    If[ op === None,
-        Message[TFromNet::eltunsupported, f]; $Failed,
-        op[x]
+    If[ op =!= None, Return @ op[x]];
+    applied = f[x];
+    If[ Head[applied] === TTerm, applied,
+        Message[TFromNet::eltunsupported, f]; $Failed
     ]
 ]
+
+(* NormalizationLayer: GPT-2-style learned scale/shift along the
+   feature axis.  NetExtract gives us "Scaling" (gamma) and
+   "Biases" (beta), both rank-1 {dim}.  Maps cleanly to
+   TLayerNormAffine.  Wolfram's NormalizationLayer also supports
+   per-channel norm with axis spec; we ignore that and assume
+   last-axis until a concrete test asks for it. *)
+fromLayer[NormalizationLayer, layer_, x_TTerm] := Module[{gamma, beta},
+    {gamma, beta} = TLayerToTensors[layer];
+    TLayerNormAffine[x, gamma, beta]
+]
+
+(* DropoutLayer at inference is identity. *)
+fromLayer[DropoutLayer, _, x_TTerm] := x
+
+(* EmbeddingLayer takes integer indices and returns embedded
+   vectors.  Static-int input (a List[Integer]) lowers via
+   TEmbeddingMatrix.  TTerm input would need UOP_GATHER (Phase 12+
+   primitive); flag with Failure for now.
+
+   Wolfram's EmbeddingLayer is 1-INDEXED: `emb[{1}]` returns the
+   first row of Weights.  Our TEmbeddingMatrix (matching tinygrad /
+   numpy / PyTorch) is 0-indexed.  Subtract 1 to translate. *)
+fromLayer[EmbeddingLayer, layer_, ids_List] := Module[{w},
+    {w} = TLayerToTensors[layer];
+    TEmbeddingMatrix[w, ids - 1]
+]
+fromLayer[EmbeddingLayer, _, _TTerm] :=
+    Failure["NotImplemented",
+        <|"Message" -> "EmbeddingLayer with TTerm input requires UOP_GATHER (Phase 12+).  Pass List[Integer] ids on the host side instead."|>]
+
+(* ThreadingLayer is multi-input by definition; it appears inside
+   NetGraph only.  fromLayer dispatched directly with a single x
+   doesn't make sense -- the NetGraph traversal calls
+   fromLayer[ThreadingLayer, layer, {x1, x2, ...}] with a List of
+   predecessor outputs.  We extract the function and apply it. *)
+fromLayer[ThreadingLayer, layer_, xs_List] := Module[{f, isPlus, isTimes},
+    f = NetExtract[layer, "Function"];
+    isPlus  = f === Plus  || MatchQ[f, Function[Plus[Slot[_]..]]];
+    isTimes = f === Times || MatchQ[f, Function[Times[Slot[_]..]]];
+    Which[
+        (* Plus / Times forms: Total[xs] / (Times @@ xs) expand to
+           Plus @@ xs / Times @@ xs, which the WL Plus / Times
+           UpValues on TTerm catch. *)
+        isPlus,  Total[xs],
+        isTimes, Times @@ xs,
+        True,    Failure["NotImplemented",
+                     <|"Message" -> "ThreadingLayer Function not supported",
+                       "Function" -> f|>]
+    ]
+]
+
+(* NetMapOperator[innerNet] applies innerNet to each element along
+   the leading axis of the input.  For NetMapOperator[LinearLayer]
+   on {seq, in} input: produces {seq, out}; this is exactly TLinear
+   on the whole batched tensor (no per-position loop needed -- the
+   matmul broadcasts along the seq axis automatically).  Wolfram's
+   LinearLayer carries Weights of shape {out, in} and Biases {out};
+   the matmul we want is `x . W^T + b`, so transpose the weights
+   via TUOpPermute when handing them to TLinear (which wants
+   {in, out}). *)
+fromLayer[NetMapOperator, layer_, x_TTerm] := Module[{inner},
+    inner = NetExtract[layer, "Net"];
+    If[ Head[inner] === LinearLayer,
+        Module[{w, b, wT},
+            {w, b} = TLayerToTensors[inner];
+            wT = TUOpPermute[w, {1, 0}];
+            TLinear[x, wT, b]
+        ],
+        (* Fallback: try generic dispatch with the same x. *)
+        TFromLayer[inner, x]
+    ]
+]
+
+(* SequenceIndicesLayer: produces a sequence of integer position
+   indices [1..len] for use as Embedding lookup ids.  Wolfram's
+   layer is 1-indexed (matching its EmbeddingLayer convention), so
+   `seqIdx[{7,13,21,30}]` returns `{1,2,3,4}`.  In our
+   compositional model the host knows the prompt length, so this
+   is just `Range[1, len]`. *)
+fromLayer[SequenceIndicesLayer, _, ids_List] /; AllTrue[ids, IntegerQ] :=
+    Range[1, Length[ids]]
+fromLayer[SequenceIndicesLayer, _, _] :=
+    Failure["NotImplemented",
+        <|"Message" -> "SequenceIndicesLayer needs host-side List[Integer] input"|>]
+
+(* NetGraph: topological evaluation of TOP-LEVEL subnodes.
+   `NetExtract[g, All]` returns an Association of name -> sub-net
+   (or a List for positional NetGraphs); we treat the keys as the
+   set of top-level nodes.  Edges come from `LayersGraph`, which
+   is FLATTENED across nested sub-NetGraphs / NetMapOperators;
+   we project each flat-path endpoint down to its TOP-LEVEL prefix
+   (the first segment of the path that is a top-level node) and
+   keep edges that cross top-level boundaries. *)
+fromLayer[NetGraph, g_, input_] := Module[{
+    childAssoc, topNodes, lg, rawEdges, projectTop,
+    topEdges, sortGraph, sorted, results, predsOf, getInput
+},
+    childAssoc = NetExtract[g, All];
+    childAssoc = If[ AssociationQ[childAssoc],
+        childAssoc,
+        AssociationThread[Range[Length[childAssoc]], childAssoc]];
+    topNodes = Keys[childAssoc];
+
+    (* projectTop: given a multi-segment vertex name like
+       {attention, 1, key, Net}, return its top-level prefix
+       `attention`.  For a single-segment path {dropout}, the
+       projection is `dropout`.  Returns Missing if no segment is
+       in topNodes (shouldn't happen). *)
+    projectTop[path_List] :=
+        SelectFirst[path, MemberQ[topNodes, #] &, Missing[]];
+
+    lg       = Information[g, "LayersGraph"];
+    rawEdges = EdgeList[lg];
+    topEdges = DeleteDuplicates @ DeleteCases[
+        Cases[rawEdges,
+            DirectedEdge[s_List, d_List] :>
+                {projectTop[s], projectTop[d]}],
+        {a_, a_} | {_Missing, _} | {_, _Missing}];
+
+    sortGraph = Graph[topNodes, DirectedEdge @@@ topEdges];
+    sorted    = TopologicalSort[sortGraph];
+
+    predsOf[n_] := Cases[topEdges, {src_, n} :> src];
+
+    results = <||>;
+    (* getInput: build the input(s) for a node.
+       - Zero predecessors -> the node reads from the NetGraph's
+         input port directly.
+       - One predecessor matching the node's input arity -> a single
+         TTerm.
+       - Multi-input layers (ThreadingLayer, AttentionLayer):
+         predecessor count may be < arity because the NetGraph's
+         own input port also feeds the node (residual pattern); we
+         pad the front of the predecessor list with the input.  Plus
+         and Times (the only ThreadingLayer functions we map) are
+         commutative, so the order is harmless.  For non-commutative
+         multi-input layers a Phase 12+ extension would need to
+         consult the NetGraph's connection spec. *)
+    getInput[n_] := Module[{
+        node = childAssoc[n],
+        preds = predsOf[n],
+        arity, predTerms
+    },
+        arity = Length @ Replace[
+            Information[node, "InputPortNames"],
+            _Missing -> {Input}];
+        predTerms = results /@ preds;
+        Switch[ {arity, Length[predTerms]},
+            {1, 0},   input,
+            {1, _},   First[predTerms],
+            (* arity > 1 with too few predecessors -> input fills the
+               front (residual-add convention). *)
+            {_, _} /; arity > Length[predTerms],
+                      Join[ConstantArray[input, arity - Length[predTerms]],
+                           predTerms],
+            _,        predTerms
+        ]];
+
+    Do[
+        results[n] = TFromLayer[childAssoc[n], getInput[n]],
+        {n, sorted}
+    ];
+    results[Last[sorted]]
+]
+
+(* AttentionLayer: Wolfram's built-in.  For GPT-2 it's a
+   single-head dot-product attention with optional masking.  We
+   map it to TAttention (Q @ K^T / sqrt(d_k) softmax @ V).  Note
+   that GPT-2's NetModel uses 12 separate AttentionLayers (one
+   per head) inside a NetGraph that catenates their outputs --
+   the top-level NetGraph dispatch above handles the fan-out
+   plus catenate, and each per-head AttentionLayer dispatches
+   here.  Multi-input: takes {Q, K, V} as a List of TTerms.
+
+   Mask handling: AttentionLayer can carry a "Mask" option;
+   we don't read it here -- callers supply the mask via the
+   q,k,v packing (or use TMultiHeadAttention[..., mask] directly
+   when not going through TFromNet). *)
+fromLayer[AttentionLayer, _, qkv_List] /; Length[qkv] === 3 :=
+    Module[{q, k, v}, {q, k, v} = qkv; TAttention[q, k, v]]
+fromLayer[AttentionLayer, _, _] :=
+    Failure["NotImplemented",
+        <|"Message" -> "AttentionLayer expects {Q, K, V} TTerm triple via NetGraph multi-input dispatch"|>]
 
 (* ConvolutionLayer 2-D, stride 1, no padding/dilation.  Forward
    only -- interact_grad has no rule for UOP_CONV2D yet.  Inputs
@@ -652,7 +827,11 @@ TIdentity[x_] := x
 
 (* === entry points ====================================== *)
 
-TFromLayer[layer_, x_TTerm] := fromLayer[Head[layer], layer, x]
+(* Entry-level dispatch.  Accepts a TTerm (the usual case), a
+   List[Integer] (EmbeddingLayer ids), or a List[TTerm] (multi-
+   input layers like ThreadingLayer that NetGraph traversal feeds
+   their predecessor outputs to). *)
+TFromLayer[layer_, x_] := fromLayer[Head[layer], layer, x]
 
 TFromNet[chain_NetChain, x_TTerm] := Fold[
     TFromLayer[#2, #1] &,

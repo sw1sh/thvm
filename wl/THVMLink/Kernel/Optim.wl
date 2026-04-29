@@ -63,7 +63,7 @@ tZerosLike[wTen_TTerm] := With[{shape = TTensorShape[wTen]},
     TTensorCreate @ NumericArray[ConstantArray[0., shape], "Real32"]
 ]
 
-tF32[x_] := TUOpConst[N[x], "f32"]
+tF32[x_] := TUOpConst[N[x]]
 
 (* SGD body: build the recursive lambda + invocation as one TTerm. *)
 sgdRecursiveTerm[gradFn_, lr_, w0_, n_] :=
