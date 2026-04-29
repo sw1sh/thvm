@@ -33,6 +33,8 @@ THeapRead::usage  = "THeapRead[loc] returns the Term at heap[loc].";
 THeapSet::usage   = "THeapSet[loc, term] writes `term` to heap[loc].";
 TGCCollect::usage = "TGCCollect[] runs a Cheney semi-space collection of the dyn heap; returns the new HEAP_NEXT (live cell count).";
 TGCCount::usage   = "TGCCount[] returns the number of GC cycles since thvm_init.";
+TKernelSourceC::usage     = "TKernelSourceC[kid] renders kernel kid's program through the C99 codegen renderer and returns the generated source.  Empty string if kid is invalid or the program contains ops outside cg_supports (REDUCE, movement) -- those fall back to the interpreter.";
+TKernelSourceMetal::usage = "TKernelSourceMetal[kid] renders kernel kid's program through the Metal Shading Language renderer.  Source-only stub today (the Metal backend dispatches single-op shaders, not fused programs).  Useful for verifying that the codegen Renderer abstraction emits valid MSL alongside C from the same KProgOp[].";
 THeap::usage      = "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/heap_graph.md.";
 THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram Graph.  THeapGraph[term] also seeds discovery with `term` so heapless compounds held only by the WL caller appear.  THeapGraph[{t1, t2, ...}] seeds with several.  See docs/heap_graph.md.";
 THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.  Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc.";
@@ -245,6 +247,8 @@ $heapReadFn  := $heapReadFn  = load["thvm_wl_heap_read",  {Integer},            
 $heapSetFn   := $heapSetFn   = load["thvm_wl_heap_set",   {Integer, Integer},       Integer];
 $gcCollectFn := $gcCollectFn = load["thvm_wl_gc_collect", {},                       Integer];
 $gcCountFn   := $gcCountFn   = load["thvm_wl_gc_count",   {},                       Integer];
+$kernelSourceCFn     := $kernelSourceCFn     = load["thvm_wl_kernel_source_c",     {Integer}, "UTF8String"];
+$kernelSourceMetalFn := $kernelSourceMetalFn = load["thvm_wl_kernel_source_metal", {Integer}, "UTF8String"];
 
 $wnfFn          := $wnfFn          = load["thvm_wl_wnf",            {Integer},          Integer];
 $wnfNFn         := $wnfNFn         = load["thvm_wl_wnf_n",          {Integer, Integer}, Integer];
@@ -474,6 +478,8 @@ THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
 TGCCollect[]                     := (ensureInit[]; $gcCollectFn[])
 TGCCount[]                       := (ensureInit[]; $gcCountFn[])
+TKernelSourceC[kid_Integer]      := (ensureInit[]; $kernelSourceCFn[kid])
+TKernelSourceMetal[kid_Integer]  := (ensureInit[]; $kernelSourceMetalFn[kid])
 
 TWnf[t_]                       := Module[{r},
     ensureInit[];

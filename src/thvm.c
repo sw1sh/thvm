@@ -138,6 +138,12 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // CUDA / LLVM renderers slot in next to render_c.c.
 #include "codegen/cg.c"
 #include "codegen/render_c.c"
+// Metal renderer.  Today only emits MSL source via cg_emit_metal --
+// the dispatcher in backend/metal/_.m is still single-op-per-shader
+// and would need a fused-kernel path to use this.  Included up front
+// so a future per-fused-kernel Metal path doesn't need a second
+// cg pipeline.
+#include "codegen/render_metal.c"
 // JIT codegen + dispatch.  Lives after interpret.c so cpu_dispatch_kernel
 // can fall back to cpu_interpret on any unsupported op or build failure.
 #include "backend/cpu/jit.c"

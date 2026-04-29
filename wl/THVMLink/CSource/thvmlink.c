@@ -757,6 +757,53 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// Render a kernel's program through the C renderer (cg_emit +
+// C_RENDERER) and return the source as a UTF8 string.  Used by
+// tests + diagnostics to inspect what the JIT will compile.  Pass
+// kid (KERNELS table index, 1..KERNELS_NEXT-1).
+EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
+                                               mint argc, MArgument *args,
+                                               MArgument res) {
+  (void)libData; (void)argc;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  char *src = cg_emit(&KERNELS[kid], &C_RENDERER);
+  if (src == NULL) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  // libData->UTF8String_disown is the matching free; WL retains the
+  // pointer until that's called.  Caller (WL side) holds it long
+  // enough to pull the string contents and then it gets reaped.
+  MArgument_setUTF8String(res, src);
+  return LIBRARY_NO_ERROR;
+}
+
+// Same but for the Metal renderer.  Stub today: emits MSL source but
+// thvm's Metal backend doesn't yet dispatch fused programs (single-
+// op shaders only).  Useful for proving the codegen Renderer
+// abstraction compiles two backends from the same KProgOp[].
+EXTERN_C DLLEXPORT int thvm_wl_kernel_source_metal(WolframLibraryData libData,
+                                                   mint argc, MArgument *args,
+                                                   MArgument res) {
+  (void)libData; (void)argc;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  char *src = cg_emit_metal(&KERNELS[kid]);
+  if (src == NULL) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  MArgument_setUTF8String(res, src);
+  return LIBRARY_NO_ERROR;
+}
+
 // Number of distinct KProgOp[] arrays interned in the kernel-
 // program hash-cons cache.  Used by tests to assert that two
 // kernels with structurally identical programs share storage.
