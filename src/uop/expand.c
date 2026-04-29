@@ -11,6 +11,9 @@
 // backprop, which the source-rank-inference path could not represent).
 
 fn Term uop_expand(Term src, u32 ndim, const u32 *dims) {
+  // Collapse expand-of-expand (intermediate shape is overridden).
+  Term collapsed = uop_rewrite_movement_src(UOP_EXPAND, src);
+  if (collapsed != 0) src = collapsed;
   // Hash-cons by (op, src, ndim, dims).  Repeat construction (e.g.
   // EXPAND(CONST(0), target.shape) appearing in every TGrad WL
   // wrap, multiplied across nested rounds) reuses the existing

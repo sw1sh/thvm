@@ -127,3 +127,27 @@ fn Term uop_rewrite_unary(u32 opcode, Term src) {
   }
   return 0;
 }
+
+// === movement-op chain collapse ===
+//
+// reshape(reshape(x, _), s)  -> reshape(x, s)
+// expand(expand(x, _), s)    -> expand(x, s)
+//
+// Both shape changes terminate at `s`; the intermediate one is
+// redundant.  Returns the source term to feed into a fresh
+// constructor; caller still allocates the outer reshape/expand
+// with its `dims` array, just at the deeper source.
+
+fn Term uop_rewrite_movement_src(u32 outer_op, Term src) {
+  if (term_tag(src) != TAG_UOP) return 0;
+  u32 inner_op = term_ext(src);
+  // RESHAPE-of-RESHAPE collapses (the inner shape is fully overridden).
+  if (outer_op == UOP_RESHAPE && inner_op == UOP_RESHAPE) {
+    return heap_read(term_val(src));    // src's src
+  }
+  // EXPAND-of-EXPAND collapses similarly.
+  if (outer_op == UOP_EXPAND && inner_op == UOP_EXPAND) {
+    return heap_read(term_val(src));
+  }
+  return 0;
+}

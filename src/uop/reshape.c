@@ -13,6 +13,9 @@
 // after the first cell, losing the trailing dim).
 
 fn Term uop_reshape(Term src, u32 ndim, const u32 *dims) {
+  // Collapse reshape-of-reshape (intermediate shape is overridden).
+  Term collapsed = uop_rewrite_movement_src(UOP_RESHAPE, src);
+  if (collapsed != 0) src = collapsed;
   // Hash-cons by (op, src, ndim, dims).  See uop/mov_cache.c.
   u32 key_buf[1 + MAX_DIM];
   key_buf[0] = ndim;
