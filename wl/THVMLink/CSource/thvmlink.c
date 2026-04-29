@@ -1051,6 +1051,28 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_inputs(WolframLibraryData libData, mint ar
   return LIBRARY_NO_ERROR;
 }
 
+// Walk the UOP DAG rooted at `root` (a Term integer) and return the
+// distinct TAG_TEN-leaf tids encountered.  Generic UOP-DAG -> leaves
+// utility; TGrad / TGradMany are the first callers.  Cap silently
+// truncates past 256 distinct leaves (well above any current
+// workload's per-realize live-tensor count).
+#define UOP_LEAF_TIDS_CAP 256
+EXTERN_C DLLEXPORT int thvm_wl_uop_leaf_tids(WolframLibraryData libData, mint argc,
+                                             MArgument *args, MArgument res) {
+  (void)argc;
+  Term root = (Term)MArgument_getInteger(args[0]);
+  u32 buf[UOP_LEAF_TIDS_CAP];
+  u32 n = 0;
+  uop_leaf_tids(root, buf, UOP_LEAF_TIDS_CAP, &n);
+  mint dims[1] = {(mint)n};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u32 i = 0; i < n; i++) dst[i] = (mint)buf[i];
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_tens_table(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
   (void)argc; (void)args;

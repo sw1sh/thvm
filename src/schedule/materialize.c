@@ -1026,6 +1026,34 @@ fn Term materialize_uop_in_env(Term t, u32 env_id) {
   return thvm_materialize(t);
 }
 
+// Recursive descent: walk a UOP DAG looking for UOP_ASSIGN nodes
+// at any depth.  Each ASSIGN's src subgraph is materialized in
+// place (heap_set on cell+1) so the surrounding kernel-emission
+// pass sees a kernel chain producing a TEN, not a raw UOP graph.
+// Bottoms out at non-UOP tags and at UOP_KERNEL (already materialized).
+// Idempotent across re-entries via the early returns inside
+// thvm_materialize.
+static void materialize_inner_assigns(Term term) {
+  if (term_tag(term) != TAG_UOP) return;
+  u32 op = term_ext(term);
+  if (op == UOP_KERNEL) return;
+  u8 ar = uop_arity((u8)op);
+  if (ar == 0) return;
+  u64 loc = term_val(term);
+  for (u8 i = 0; i < ar; i++) {
+    Term child = heap_read(loc + i);
+    if (term_tag(child) != TAG_UOP) continue;
+    if (term_ext(child) == UOP_ASSIGN) {
+      u64  cloc     = term_val(child);
+      Term csrc     = heap_read(cloc + 1);
+      Term csrc_mat = thvm_materialize(csrc);
+      if (csrc_mat != csrc) heap_set(cloc + 1, csrc_mat);
+    } else {
+      materialize_inner_assigns(child);
+    }
+  }
+}
+
 fn Term thvm_materialize(Term term) {
   // REF / ALO transparency: jump (don't unfold) into the body cell.
   // term_resolve walks VAR-SUB and ALO chains -- pure pointer hops,
@@ -1107,6 +1135,13 @@ fn Term thvm_materialize(Term term) {
     (void)dst_cell;
     return term;
   }
+  // Pre-walk: recursively scan the UOP DAG for NESTED ASSIGNs and
+  // materialize each one's src subgraph in place.  Without this, an
+  // ASSIGN buried inside the src of an outer ASSIGN (or several
+  // levels deep in a compound UOP -- e.g. Adam's
+  // `w - lr * mAfter / denom`) keeps a raw UOP src that wnf can't
+  // reduce to a TEN, so the ASSIGN never fires.
+  materialize_inner_assigns(term);
 
   // Movement-op root: resolve the chain to an alias TenDesc, then
   // flatten to a contig copy so wnf-side flat reads work.

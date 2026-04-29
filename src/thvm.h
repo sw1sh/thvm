@@ -211,7 +211,7 @@ typedef u64 Term;
 #define REDUCE_MAX   1
 
 // === Capacities ===
-#define HEAP_CAP     (1ULL << 24)   // 16M cells * 8B = 128 MiB. Plenty for tests.
+#define HEAP_CAP     (1ULL << 26)   // 64M cells * 8B = 512 MiB.  Cheney splits in half (256 MiB per semi-space).  Larger than needed for unit tests but matches a real LeNet TGradMany realize peak (~12M cells / 96 MiB observed).
 #define WNF_CAP      (1ULL << 16)   // 64K stack slots.
 #define TENS_CAP     (1ULL << 16)   // 64K tensor descriptor slots.
 #define KERNELS_CAP  (1ULL << 14)   // 16K compiled kernels.
@@ -723,6 +723,7 @@ fn u64  uop_grad_cell  (Term y, Term gy, Term target);
 fn Term uop_grad       (Term y, Term gy);   // BWD projection (TAG_DP1 + grad flag)
 fn Term uop_fwd        (Term y, Term gy);   // FWD projection (TAG_DP0 + grad flag)
 fn Term uop_grad_with_target(Term y, Term gy, Term target);
+fn void uop_leaf_tids(Term root, u32 *out_tids, u32 cap, u32 *n_out);
 
 // Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
 // tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in

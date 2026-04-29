@@ -205,23 +205,14 @@ TAssign[dst_, src_] := (ensureInit[];
    just CONST(1.0); for tensor y we EXPAND CONST(1.0) to y's shape so
    the chain rule's adjoint shape transforms (RESHAPE/PERMUTE/etc.)
    land at well-defined ranks. *)
-gradLeafTids[t_TTerm] := Module[{tag = TTermTag[t]},
-    Which[
-        tag === $TagTEN, {TTermVal[t]},
-        tag === $TagUOP, gradLeafTidsUop[TTermExt[t], TTermVal[t]],
-        (* Higher-order TGrad: y can contain DUP projections (TDP0/DP1)
-           whose cell body holds the actual UOp/TEN.  Walk cell[0] so
-           we find leaves embedded in unfired sub-cells from a prior
-           chain-rule pass. *)
-        tag === $TagDP0 || tag === $TagDP1, gradLeafTids[THeapRead[TTermVal[t]]],
-        True, {}
-    ]
-]
-gradLeafTids[_] := {}
-
-gradLeafTidsUop[opcode_, base_] := Module[{n = uopArity[opcode]},
-    DeleteDuplicates @ Flatten @ Table[gradLeafTids[THeapRead[base + i]], {i, 0, n - 1}]
-]
+(* uop_leaf_tids (src/uop/leaf_tids.c) is a generic UOP-DAG walk
+   that returns the distinct TAG_TEN-leaf tids reachable from a
+   root term.  Iterative + visited bitmap, sub-ms even for deep
+   graphs.  TGrad / TGradMany are the first callers (this used to
+   be a recursive WL walk that took 1.6 s on LeNet's 8-weight
+   forward). *)
+uopLeafTids[t_TTerm] := (ensureInit[]; Normal @ $uopLeafTidsFn[ttermRaw[t]])
+uopLeafTids[_]       := {}
 
 (* Default cotangent seed for TGrad: ones at y's shape.  CONST is a
    scalar (shape {1}); EXPAND lifts it to y.shape when y is non-scalar. *)
@@ -234,27 +225,22 @@ gradOnesSeed[y_TTerm] := Module[{shape = tUopShape[y], one},
 ]
 
 TGrad[y_, target_TTerm] := TGrad[y, target, gradOnesSeed[y]]
-TGrad[y_, target_TTerm, gy_TTerm] := Module[
-    {targetTid, leafTids, matchProj, mismatchProj, targetShape, dupNest, zero,
+TGrad[y_, target_TTerm, gy_TTerm] :=
+    tGradWithLeaves[y, target, gy, uopLeafTids[y]]
+
+(* Shared-leaves form: caller supplies leafTids so TGradMany can
+   compute them ONCE per forward graph instead of once per target.
+   uopLeafTids walks the full UOP DAG; for an 8-weight LeNet
+   that's the dominant per-step cost (13s -> sub-second). *)
+tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := Module[
+    {targetTid, matchProj, mismatchProj, targetShape, dupNest, zero,
      targetTag},
     targetTid    = TTermVal[target];
     targetTag    = TTermTag[target];
     targetShape  = TTensorShape[target];
-    (* When target is a free variable (TVAR -- typically captured by a
-       surrounding TLam that hasn't beta-reduced yet) leaf tids inside
-       y can't be discovered statically.  Build a single TUOpGradWith-
-       Target cell instead of the per-leaf DUP nest; the C-side chain
-       rule does direct tid match against `target` (resolved through
-       SUB at firing time, post-beta).  ListQ[targetShape] gates the
-       fall-through to the zero-broadcast: TVAR target has no shape
-       (TTensorShape returns Missing) so we just return the GRAD
-       term directly -- the chain rule produces a tensor at y's
-       shape, which is the natural gradient shape for the bound
-       variable. *)
     If[ targetTag =!= $TagTEN,
         Return[TUOpGradWithTarget[y, gy, target]]
     ];
-    leafTids     = gradLeafTids[y];
     matchProj    = {a, b} |-> b;
     mismatchProj = {a, b} |-> a;
     dupNest = Fold[
@@ -287,8 +273,11 @@ TGrad[y_, target_TTerm, gy_TTerm] := Module[
    all n targets.  Returns a List of n TTerms in the same order as
    `targets`. *)
 TGradMany[y_, {target_}]    := {TGrad[y, target]}
-TGradMany[y_, targets_List] := With[{seed = gradOnesSeed[y]},
-    TGrad[y, #, seed] & /@ targets
+TGradMany[y_, targets_List] := With[{
+    seed     = gradOnesSeed[y],
+    leafTids = uopLeafTids[y]
+},
+    tGradWithLeaves[y, #, seed, leafTids] & /@ targets
 ]
 
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)

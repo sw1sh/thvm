@@ -315,6 +315,8 @@ $tensTableFn     := $tensTableFn     = load["thvm_wl_tens_table",      {},      
 $cpuBufTableFn   := $cpuBufTableFn   = load["thvm_wl_cpu_buf_table",   {},        {Integer, 1}];
 $metalBufTableFn := $metalBufTableFn = load["thvm_wl_metal_buf_table", {},        {Integer, 1}];
 
+$uopLeafTidsFn   := $uopLeafTidsFn   = load["thvm_wl_uop_leaf_tids",   {Integer}, {Integer, 1}];
+
 (* TKernelTable / TKernelInputs / TTensTable / TCpuBufTable /
    TMetalBufTable / TTensCount / TTotalBufBytes  --  defined in
    MemoryPlan.wl. *)

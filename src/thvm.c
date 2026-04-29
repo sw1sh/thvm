@@ -181,6 +181,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "uop/shrink.c"
 #include "uop/flip.c"
 #include "uop/grad.c"
+#include "uop/leaf_tids.c"
 #include "uop/load.c"
 
 // === schedule/ ===

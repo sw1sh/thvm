@@ -198,12 +198,14 @@ print["PASS: mini-GPT-2 forward + greedy decode produces finite logits"];
 print[""];
 
 (* ===========================================================
-   Part 3: 10-token greedy generation, eager + TJit replay
+   Part 3: greedy generation, eager + TJit replay
    =========================================================== *)
 
-print["=== Part 3: 10-token greedy generation ==="];
+(* N_GEN env override; defaults to 100 tokens. *)
+nGen = With[{n = Interpreter["Integer"][Environment["N_GEN"]]},
+    If[ FailureQ[n] || n === $Failed, 100, n]];
 
-nGen = 10;
+print["=== Part 3: ", nGen, "-token greedy generation ==="];
 genWindow = prompt;   (* host-side rolling window of length seq *)
 
 print["  prompt: ", prompt, "  generating ", nGen, " tokens"];
@@ -223,7 +225,7 @@ generated = Reap[
 ][[2]];
 eagerMs = (AbsoluteTime[] - t0) * 1000.;
 
-print["  eager 10-token wall: ", NumberForm[eagerMs, {7, 0}], " ms"];
+print["  eager ", nGen, "-token wall: ", NumberForm[eagerMs, {7, 0}], " ms"];
 print["  eager ms/token:      ", NumberForm[eagerMs / nGen, {6, 1}], " ms"];
 print["  generated tokens:    ", First[generated]];
 
@@ -281,7 +283,7 @@ genJit = Reap[
 ][[2]];
 jitMs = (AbsoluteTime[] - t0) * 1000.;
 
-print["  jit 10-token wall:   ", NumberForm[jitMs, {7, 0}], " ms"];
+print["  jit ", nGen, "-token wall:   ", NumberForm[jitMs, {7, 0}], " ms"];
 print["  jit ms/token:        ", NumberForm[jitMs / nGen, {6, 1}], " ms"];
 print["  jit replays/step:    ", TJitOpCount[jittedStep]];
 print["  speedup vs eager:    ", NumberForm[eagerMs / jitMs, {4, 2}], "x"];

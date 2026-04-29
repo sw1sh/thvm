@@ -161,31 +161,25 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
                 mTen = mList[[i]],  vTen = vList[[i]],
                 denom
             },
-                (* Lazy ASSIGN-per-buffer.  THREE separate
-                   TRealizes per param because thvm's current WNF
-                   dispatch on UOP_ASSIGN forces only its
-                   IMMEDIATE src/dst children to TAG_TEN
-                   (src/wnf/_.c lines 140-166); a src expressed as
-                   e.g. `TUOpAdd[ASSIGN_m, ASSIGN_v]` stays at
-                   TAG_UOP because UOP non-kernel non-assign nodes
-                   are "WNF by themselves" (line 170) and never
-                   recurse into their children.  So a single outer
-                   TAssign[w, ...] wrapping two sibling ASSIGNs
-                   leaves the inner ASSIGNs unfired (verified by
-                   the test 3 case in /tmp/test_assign_simple.wls
-                   during Phase 13).  Phase 14 fix: extend WNF to
-                   drain every ASSIGN reachable from the redex
-                   before settling the parent UOP, OR teach
-                   materialize to insert dependency edges that
-                   force ASSIGNs to fire before downstream kernels
-                   read their dst.  Until then: three realizes is
-                   correct; TJit replay still captures the
-                   captured kernel chain so steady-state cost is
-                   only the per-realize dispatch overhead. *)
-                TRealize @ TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen];
-                TRealize @ TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)];
-                denom = Sqrt[vTen] * invSqrtB2cor + eps;
-                TRealize @ TAssign[wTen, wTen - lrHat * mTen / denom];
+                (* Lazy nested-ASSIGN chain reduced in a single
+                   TRealize.  Phase 14 wired materialize to walk the
+                   UOP DAG and recursively materialize every
+                   ASSIGN's src (src/schedule/materialize.c
+                   `materialize_inner_assigns`) so the wnf dispatch
+                   for the outer ASSIGN sees its src as a kernel
+                   chain it can actually fire.  Each inner ASSIGN
+                   (mAfter, vAfter) fires once during the kernel
+                   chain expansion -- read-after-write through
+                   mTen/vTen sees the post-update bytes via the
+                   dependency edge from sqrt/mul to the assigned
+                   tensors. *)
+                Block[{
+                    mAfter = TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen],
+                    vAfter = TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)]
+                },
+                    denom = Sqrt[vAfter] * invSqrtB2cor + eps;
+                    TRealize @ TAssign[wTen, wTen - lrHat * mAfter / denom]
+                ];
             ],
             {i, Length[params]}];
         params
