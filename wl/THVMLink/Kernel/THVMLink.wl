@@ -33,9 +33,9 @@ THeapRead::usage  = "THeapRead[loc] returns the Term at heap[loc].";
 THeapSet::usage   = "THeapSet[loc, term] writes `term` to heap[loc].";
 TGCCollect::usage = "TGCCollect[] runs a Cheney semi-space collection of the dyn heap; returns the new HEAP_NEXT (live cell count).";
 TGCCount::usage   = "TGCCount[] returns the number of GC cycles since thvm_init.";
-(* TKernelSourceC / TKernelSourceMetal / TKernelFlops / TKernelDispatchKind /
-   TKernelDispatchCount / TKernelTotalUs / TKernelJitDylibPath / TKernelProfile /
-   TProfileAll  --  declared and defined in Kernel.wl as TKernel-property accessors. *)
+(* TKernelSource / TKernelFlops / TKernelDispatchKind / TKernelDispatchCount /
+   TKernelTotalUs / TKernelJitDylibPath / TKernelProfile / TProfileAll
+   -- declared and defined in Kernel.wl as TKernel-property accessors. *)
 THeap::usage      = "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/heap_graph.md.";
 THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram Graph.  THeapGraph[term] also seeds discovery with `term` so heapless compounds held only by the WL caller appear.  THeapGraph[{t1, t2, ...}] seeds with several.  See docs/heap_graph.md.";
 THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.  Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc.";

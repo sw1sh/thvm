@@ -20,12 +20,25 @@ BeginPackage["THVMLink`"];
 
 TSet::usage = "TSet[dst, src] writes the bytes of `src` into `dst`'s backing buffer in place; `dst` keeps its TenDesc id so callers still holding it observe the new contents.  Equivalent to `TRealize[TAssign[dst, src]]; dst`.  Also installed as the WL Set UpValue on literal-TTerm LHSes, so `Evaluate[w] = expr` mutates `w` rather than rebinding the symbol.";
 
+(* === C-side TenDesc side-table accessors ===
+   Live here (rather than MemoryPlan.wl) because they're the core
+   tensor-introspection bridge.  Kernel.wl owns the parallel
+   KernelEntry accessors; MemoryPlan.wl owns per-backend buf
+   accessors. *)
+TTensTable::usage     = "TTensTable[] returns a list of {producer_kid, buf_id, dtype, view_numel, view_contiguous, refcount, backend_id} per TenDesc (tid 1 .. TENS_NEXT - 1).  backend_id is 1 for CPU, 2 for Metal, 0 for unbound.";
+TTensCount::usage     = "TTensCount[] returns the number of allocated TenDescs (excluding the reserved slot 0).";
+TTotalBufBytes::usage = "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount > 0).";
+
 (* Forward-decl: these are defined in NN.wl (loads alphabetically
    after Tensor.wl).  Without this, the UpValues below resolve to
    phantoms in `THVMLink`Private`* with no DownValue. *)
 {TTanh, TMatMul, TDot, TSoftmaxAxis};
 
 Begin["`Private`"];
+
+TTensTable[]     := (ensureInit[]; Partition[Normal @ $tensTableFn[], 7])
+TTensCount[]     := (ensureInit[]; $tensCountFn[])
+TTotalBufBytes[] := (ensureInit[]; $totalBufBytesFn[])
 
 (* === predicates ===
    tensorTermQ[t]: true iff t is a TTerm whose tag makes it a
@@ -351,18 +364,11 @@ TTensorCreate[data_] := (
 TUOpKind[u_] := Lookup[$uopNames, TTermExt[u], "UOP?" <> ToString[TTermExt[u]]]
 
 TUOpSrcs[u_] := With[{loc = TTermVal[u], op = TTermExt[u]},
-    Module[{n},
-        n = Which[
-            op === $UopMaterialize,                                                            1,
-            op === $UopKernel,                                                                  2,
-            op === $UopConst,                                                                   1,
-            MemberQ[{$UopReshape, $UopPermute, $UopExpand,
-                     $UopPad, $UopShrink, $UopFlip}, op],                                      1,
-            MemberQ[{$UopAdd, $UopMul, $UopCmplt, $UopCmpeq}, op],                             2,
-            MemberQ[{$UopNeg, $UopRecip, $UopExp2, $UopLog2, $UopSqrt}, op],                   1,
-            op === $UopReduce,                                                                  1,
-            True,                                                                               1
-        ];
+    With[{n = Switch[op,
+            $UopKernel,                                                              2,
+            $UopAdd | $UopMul | $UopCmplt | $UopCmpeq,                              2,
+            _,                                                                       1
+        ]},
         Table[THeapRead[loc + i], {i, 0, n - 1}]
     ]
 ]

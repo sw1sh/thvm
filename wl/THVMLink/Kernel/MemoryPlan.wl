@@ -41,13 +41,12 @@ TMemoryPlanReport::usage = "TMemoryPlanReport[plan] returns a Column with top-5 
    index by row schema documented in the ::usage.  Used directly
    by TMemoryPlan + indirectly by Kernel.wl, Visualization.wl,
    Heap.wl etc. (anywhere a kid -> tid -> buf walk is needed). *)
-TKernelTable::usage   = "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per kernel (kid 1 .. KERNELS_NEXT - 1).  Used by TMemoryPlan to derive per-buf alloc/last_use depths.";
-TKernelInputs::usage  = "TKernelInputs[kid] returns the input_tids of kernel `kid` (length n_inputs).";
-TTensTable::usage     = "TTensTable[] returns a list of {producer_kid, buf_id, dtype, view_numel, view_contiguous, refcount, backend_id} per TenDesc (tid 1 .. TENS_NEXT - 1).  backend_id is 1 for CPU, 2 for Metal, 0 for unbound.";
+(* TKernelTable / TKernelInputs are declared in Kernel.wl (kernel
+   side-table accessors).  TTensTable / TTensCount / TTotalBufBytes
+   are declared in Tensor.wl (tensor side-table accessors).
+   MemoryPlan.wl owns only the per-backend buf-table accessors. *)
 TCpuBufTable::usage   = "TCpuBufTable[] returns a list of {nbytes, refcount, preserved, freeable, owns_data} per CPU buffer (buf_id 1 .. CPU_BUFS_NEXT - 1).";
 TMetalBufTable::usage = "TMetalBufTable[] returns a list of {nbytes, refcount} per Metal buffer.  Empty when the dylib was built without Metal support.";
-TTensCount::usage     = "TTensCount[] returns the number of allocated TenDescs (excluding the reserved slot 0).";
-TTotalBufBytes::usage = "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount > 0).";
 
 Begin["`Private`"];
 
@@ -60,14 +59,10 @@ Begin["`Private`"];
    Each accessor is a snapshot, NOT a live view: the data is copied out
    of the C-side side tables on call, so mutating it in WL has no effect
    on the runtime. *)
-TKernelTable[]           := (ensureInit[]; Partition[Normal @ $kernelTableFn[],   7])
-TKernelInputs[k_Integer] := (ensureInit[]; Normal @ $kernelInputsFn[k])
-TTensTable[]             := (ensureInit[]; Partition[Normal @ $tensTableFn[],     7])
+(* TKernelTable / TKernelInputs are defined in Kernel.wl.
+   TTensTable / TTensCount / TTotalBufBytes are defined in Tensor.wl. *)
 TCpuBufTable[]           := (ensureInit[]; Partition[Normal @ $cpuBufTableFn[],   5])
 TMetalBufTable[]         := (ensureInit[]; Partition[Normal @ $metalBufTableFn[], 2])
-
-TTensCount[]             := (ensureInit[]; $tensCountFn[])
-TTotalBufBytes[]         := (ensureInit[]; $totalBufBytesFn[])
 
 (* === Topological depth ===
    depth[kid] = 1 + max(depth of producer kernel of any input tid).

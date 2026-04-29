@@ -49,8 +49,7 @@ TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
 
-TKernelSourceC::usage     = "TKernelSourceC[kid] = TKernel[kid][\"SourceC\"].  Renders kid's program through the C99 codegen renderer and returns the generated source.  Empty string when the program contains ops outside cg_supports (REDUCE, movement) -- those fall back to the interpreter.";
-TKernelSourceMetal::usage = "TKernelSourceMetal[kid] = TKernel[kid][\"SourceMetal\"].  Renders kid's program through the Metal Shading Language renderer.  Source-only stub today (the Metal backend dispatches single-op shaders, not fused programs).";
+TKernelSource::usage      = "TKernelSource[kid] / TKernelSource[kid, backend] returns the source kid's program would render to on the named backend (\"C\" / \"Metal\").  Default backend is the active one (THVM_BACKEND env var; \"C\" otherwise).  Empty string when the program contains ops outside cg_supports (REDUCE, movement) -- those fall back to the interpreter.  Property surface: TKernel[kid][\"Source\"] / TKernel[kid][\"Source\", backend].";
 TKernelFlops::usage         = "TKernelFlops[kid] = TKernel[kid][\"Flops\"].  Static FLOPS estimate for one execution of kid (sum over KProgOp[]: 1 flop per elementwise op per element, 1 flop per REDUCE source element).  0 for movement / load.";
 TKernelDispatchKind::usage  = "TKernelDispatchKind[kid] = TKernel[kid][\"DispatchKind\"].  The route the last fire of kid took: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", or \"interpreter\".";
 TKernelDispatchCount::usage = "TKernelDispatchCount[kid] = TKernel[kid][\"DispatchCount\"].  Cumulative number of times kid has fired since thvm_init.";
@@ -58,6 +57,29 @@ TKernelTotalUs::usage       = "TKernelTotalUs[kid] = TKernel[kid][\"TotalUs\"]. 
 TKernelJitDylibPath::usage  = "TKernelJitDylibPath[kid] = TKernel[kid][\"JitDylibPath\"].  On-disk path the JIT cache uses for kid's compiled .dylib (deterministic from the program hash).  File may not exist if the JIT bailed at codegen.";
 TKernelProfile::usage       = "TKernelProfile[kid] returns Information[TKernel[kid]] -- an Association of every property listed by Information[k, \"Properties\"], including the profiling fields.";
 TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid.";
+
+(* === axis-typed scheduling slot (mirrors tinygrad's Kernel.opt) === *)
+
+Opt::usage = "Opt[op_, axis_, arg_] is a typed kernel-optimization action.  Mirrors tinygrad's `Opt(OptOps.UPCAST, axis=2, arg=4)` (tinygrad/codegen/opt/kernel.py:Opt).  Valid op names: \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\", \"PADTO\", \"NOLOCALS\", \"TC\".  axis is 0-indexed (thvm convention; tinygrad-side ports may want to subtract 1).  arg meaning is op-specific (for UPCAST/UNROLL: split factor; for SWAP: target axis index).  Apply via `TKernelApplyOpt[k, opt]`; introspect via `TKernelOpts[k]`.";
+
+TKernelOpts::usage = "TKernelOpts[kid] returns the kernel's axis structure as <|\"AxisTypes\" -> {...}, \"FullShape\" -> {...}, \"Applied\" -> {Opt[...], ...}|>.  AxisTypes parallels FullShape: each entry is one of \"GLOBAL\" / \"LOCAL\" / \"LOOP\" / \"UPCAST\" / \"GROUP_REDUCE\" / \"REDUCE\" / \"UNROLL\".  Default (no opts applied) is all LOOP for elementwise output axes plus REDUCE for any reduction axes -- matching tinygrad's pre-opt Kernel.axis_types view.  Applied is the chronological list of `Opt[...]` actions.";
+
+TKernelApplyOpt::usage = "TKernelApplyOpt[kid, opt_Opt] applies `opt` to the kernel's axis structure.  Today this is a WL-side scaffold that records the opt + updates the AxisTypes view (so TKernelOpts reflects it); the C-side codegen consumer is Phase 14+ (cg_emit_variants per docs/bench/phase10.md).  Returns the updated TKernelOpts Association.  Available opts: see Opt::usage.";
+
+(* === C-side kernel side-table accessors ===
+   Live here (rather than MemoryPlan.wl) because they're the core
+   kernel-introspection bridge -- every consumer that walks
+   kid -> kernel info needs them.  Tensor.wl owns the parallel
+   TenDesc accessors; MemoryPlan.wl owns the per-backend buf
+   accessors. *)
+TKernelTable::usage  = "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per kernel (kid 1 .. KERNELS_NEXT - 1).  Snapshot, not a live view.";
+TKernelInputs::usage = "TKernelInputs[kid] returns the input_tids of kernel `kid` (length n_inputs).";
+
+(* Forward-decl TTensTable: defined in Tensor.wl which loads
+   alphabetically AFTER Kernel.wl.  Without the public stub here,
+   Kernel.wl Private references resolve to a private phantom and
+   Tensor.wl's later DownValue is shadowed. *)
+TTensTable;
 
 Begin["`Private`"];
 
@@ -76,6 +98,13 @@ tKernelInternalQ[TKernel[a_Association]] :=
 tKernelInternalQ[___] := False
 
 TKernelQ = tKernelInternalQ;
+
+(* === C-side kernel side-table accessors ===
+   Loader symbols ($kernelTableFn etc.) live in THVMLink.wl alongside
+   every other LibraryFunctionLoad call; both files share
+   THVMLink`Private` so the references resolve. *)
+TKernelTable[]           := (ensureInit[]; Partition[Normal @ $kernelTableFn[], 7])
+TKernelInputs[k_Integer] := (ensureInit[]; Normal @ $kernelInputsFn[k])
 
 (* Read kid out of the UOP_KERNEL cell's NUM(kid) child at base+1.
    kloc = TTermVal[t]; heap[kloc + 1] is the TAG_NUM kid cell. *)
@@ -201,14 +230,14 @@ kernelRowAsoc[kid_Integer] := Block[{row = TKernelTable[][[kid]]},
      identity / shape    : Kid, Term, OutputTid, OutputShape, OutputDtype,
                            OutputNumel, InputCount, InputTids, InputTensors,
                            OpCount, Program, Fired, Spliced, ConsumerCount
-     codegen output      : SourceC, SourceMetal, JitDylibPath
+     codegen output      : Source[backend], JitDylibPath
      dispatch profile    : Flops, DispatchKind, DispatchCount, TotalUs,
                            AvgUs, GFlopsPerSec *)
 $tKernelProperties = {
     "Kid", "Term", "OutputTid", "OutputShape", "OutputDtype",
     "OutputNumel", "InputCount", "InputTids", "InputTensors",
     "OpCount", "Program", "Fired", "Spliced", "ConsumerCount",
-    "SourceC", "SourceMetal", "JitDylibPath",
+    "Source", "JitDylibPath",
     "Flops", "DispatchKind", "DispatchCount", "TotalUs",
     "AvgUs", "GFlopsPerSec"
 };
@@ -251,8 +280,8 @@ tKernelProp[k:TKernel[a_Association], "OutputShape"]  := With[{
 (* === codegen / profile properties ===
    Each routes through the loader fn declared in THVMLink.wl.  Both
    files share THVMLink`Private` so the $...Fn symbols resolve. *)
-tKernelProp[k:TKernel[a_Association], "SourceC"]      := (ensureInit[]; $kernelSourceCFn[a["Kid"]])
-tKernelProp[k:TKernel[a_Association], "SourceMetal"]  := (ensureInit[]; $kernelSourceMetalFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "Source"]              := TKernelSource[a["Kid"]]
+tKernelProp[k:TKernel[a_Association], "Source", backend_String] := TKernelSource[a["Kid"], backend]
 tKernelProp[k:TKernel[a_Association], "JitDylibPath"] := (ensureInit[]; $kernelJitDylibPathFn[a["Kid"]])
 tKernelProp[k:TKernel[a_Association], "Flops"]         := (ensureInit[]; $kernelFlopsFn[a["Kid"]])
 tKernelProp[k:TKernel[a_Association], "DispatchKind"]  := (ensureInit[];
@@ -328,8 +357,15 @@ TKernelProgram[k_TKernel /; tKernelInternalQ[k]] := tKernelProp[k, "Program"]
    is what the loader fns read.  When a TKernel object is in hand,
    the property surface (`k["Flops"]`) and these accessors return
    identical values via the same loaders. *)
-TKernelSourceC[kid_Integer]       := (ensureInit[]; $kernelSourceCFn[kid])
-TKernelSourceMetal[kid_Integer]   := (ensureInit[]; $kernelSourceMetalFn[kid])
+tActiveBackendName[] := With[{e = Environment["THVM_BACKEND"]},
+    If[ StringQ[e] && ToLowerCase[e] === "metal", "Metal", "C"]]
+
+TKernelSource[kid_Integer]                       := TKernelSource[kid, tActiveBackendName[]]
+TKernelSource[kid_Integer, "C"]                  := (ensureInit[]; $kernelSourceCFn[kid])
+TKernelSource[kid_Integer, "Metal"]              := (ensureInit[]; $kernelSourceMetalFn[kid])
+TKernelSource[kid_Integer, b_String] := Failure["UnknownBackend",
+    <|"Message" -> "TKernelSource backend must be \"C\" or \"Metal\"",
+      "Backend" -> b|>]
 TKernelFlops[kid_Integer]         := (ensureInit[]; $kernelFlopsFn[kid])
 TKernelDispatchKind[kid_Integer]  := (ensureInit[];
     decodeDispatchKind[$kernelDispatchKindFn[kid]])
@@ -354,9 +390,111 @@ TKernelProfile[kid_Integer] := <|
                            N[TKernelFlops[kid] * TKernelDispatchCount[kid] / (TKernelTotalUs[kid] * 1000)],
                            0],
     "JitDylibPath"  -> TKernelJitDylibPath[kid],
-    "SourceC"       -> TKernelSourceC[kid],
-    "SourceMetal"   -> TKernelSourceMetal[kid]
+    "Source"        -> TKernelSource[kid]
 |>
+
+(* === axis-typed scheduling slot ============================
+   WL-side scaffold for the kernel-optimization layer.  Tinygrad's
+   `Kernel` (tinygrad/codegen/opt/kernel.py) carries `axis_types[]`
+   alongside `full_shape[]`; opt actions like `Opt(UPCAST, 2, 4)`
+   rewrite that axis structure (split N into N//4 + 4, mark the 4
+   as UPCAST), and the linearizer emits the iteration nest
+   accordingly.
+
+   thvm's KernelEntry today holds a flat `KProgOp[]` post-
+   linearization (one implicit `for i = 0..numel-1` loop), so the
+   axis structure isn't materialised yet.  This block:
+
+   - Defines the `Opt[op_String, axis_Integer, arg_]` typed object
+     (mirrors tinygrad's `Opt(OptOps.X, axis, arg)`).
+   - Synthesises a default AxisTypes view from the kernel's output
+     shape: every output axis is LOOP, plus a REDUCE axis appended
+     for kernels whose program ends in a UOP_REDUCE_* op.
+   - Records applied opts in a per-kid side store and reflects them
+     in TKernelOpts.
+
+   The C-side codegen consumer (cg_emit_variants per
+   docs/bench/phase10.md) is the Phase 14+ delivery.  Once it
+   lands, this WL scaffold becomes the user-facing knob; the side
+   store handoff becomes a kid-keyed dispatch the C-side reads. *)
+
+(* Per-kid opts side store: kid -> <|"AxisTypes", "FullShape", "Applied"|>. *)
+$kernelAppliedOpts = <||>
+
+(* Resolve the output shape via the existing kid->row->tid chain.
+   TTensorShape on the synthesised tenTerm decodes the TenDesc's
+   view shape correctly (mirrors tKernelProp[..., "OutputShape"]). *)
+kernelOutputShape[kid_Integer] := Module[{tid, term, shape},
+    tid = kernelRowAsoc[kid]["OutputTid"];
+    If[ ! IntegerQ[tid] || tid <= 0, Return[{}]];
+    term  = tenTermFromTid[tid];
+    shape = TTensorShape[term];
+    If[ ListQ[shape], shape, {}]]
+
+kernelEndsInReduce[kid_Integer] := Module[{prog = decodeKernelInfo[kid][[2]]},
+    Length[prog] > 0 && StringMatchQ[Last[prog]["Op"], "REDUCE_" ~~ ___]]
+
+defaultAxisTypes[kid_Integer] := With[{shape = kernelOutputShape[kid]},
+    If[ kernelEndsInReduce[kid],
+        Append[ConstantArray["LOOP", Length[shape]], "REDUCE"],
+        ConstantArray["LOOP", Length[shape]]]]
+
+defaultFullShape[kid_Integer] := With[{shape = kernelOutputShape[kid]},
+    If[ kernelEndsInReduce[kid],
+        (* Best-effort: append the last KProgOp's Numel / output_numel
+           ratio as the reduce-axis size.  REDUCE collapses one axis,
+           so input_numel / output_numel = reduce_axis_size. *)
+        Module[{prog = decodeKernelInfo[kid][[2]], outNumel, redOp, axisSize},
+            outNumel = TKernelInfo[kid][[1]]["OutputNumel"];
+            redOp    = Last[prog];
+            axisSize = If[ outNumel > 0, Quotient[redOp["Numel"], outNumel], 1];
+            Append[shape, axisSize]],
+        shape]]
+
+TKernelOpts[kid_Integer] := With[{stored = Lookup[$kernelAppliedOpts, kid, <||>]},
+    <|
+        "AxisTypes" -> Lookup[stored, "AxisTypes", defaultAxisTypes[kid]],
+        "FullShape" -> Lookup[stored, "FullShape", defaultFullShape[kid]],
+        "Applied"   -> Lookup[stored, "Applied", {}]
+    |>]
+
+(* Apply an opt to the AxisTypes view.  WL-side bookkeeping today:
+   rewrites the axis-types entry at `axis` to match the opt, splits
+   the FullShape entry where the opt's arg is a split factor.  C-side
+   codegen consumes this only once cg_emit_variants lands. *)
+TKernelApplyOpt[kid_Integer, opt : Opt[op_String, axis_Integer, arg_]] :=
+    Module[{cur, axisTypes, fullShape, applied, axTypeMap},
+        cur       = TKernelOpts[kid];
+        axisTypes = cur["AxisTypes"];
+        fullShape = cur["FullShape"];
+        applied   = cur["Applied"];
+        axTypeMap = <|
+            "UPCAST"   -> "UPCAST",  "UNROLL" -> "UNROLL",
+            "LOCAL"    -> "LOCAL",   "GROUP"  -> "GROUP_REDUCE",
+            "GROUPTOP" -> "GROUP_REDUCE"|>;
+        Which[
+            KeyExistsQ[axTypeMap, op],
+                (* Split fullShape[[axis+1]] into outer + arg;
+                   mark the new inner axis as op type. *)
+                With[{outerSize = Quotient[fullShape[[axis + 1]], arg]},
+                    fullShape = Insert[
+                        ReplacePart[fullShape, axis + 1 -> outerSize],
+                        arg, axis + 2];
+                    axisTypes = Insert[axisTypes, axTypeMap[op], axis + 2]],
+            op === "SWAP",
+                With[{i = axis + 1, j = arg + 1},
+                    fullShape = ReplacePart[fullShape,
+                        {i -> fullShape[[j]], j -> fullShape[[i]]}];
+                    axisTypes = ReplacePart[axisTypes,
+                        {i -> axisTypes[[j]], j -> axisTypes[[i]]}]],
+            True, Null];
+        applied = Append[applied, opt];
+        $kernelAppliedOpts[kid] = <|
+            "AxisTypes" -> axisTypes,
+            "FullShape" -> fullShape,
+            "Applied"   -> applied|>;
+        TKernelOpts[kid]
+    ]
 
 
 (* All currently-live kernels' profiles, indexed by kid. *)
