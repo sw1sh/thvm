@@ -148,7 +148,7 @@ VerificationTest[
 (* === SHRINK + PERMUTE + PAD + FLIP composition smoke ===
    Sub-item (e) of the SHRINK/PAD/PERMUTE/FLIP grad arc:
    verifies the four rules compose under the chain rule so the
-   forthcoming TUOpConv2D lowering (which fans through these
+   forthcoming TConv2D lowering (which fans through these
    movement ops) backprops to a finite, source-shaped gradient. *)
 
 VerificationTest[
@@ -490,7 +490,7 @@ VerificationTest[
     weights = TTensorCreate @ NumericArray[
         ConstantArray[0.0, {2, 1, 3, 3}], "Real32"];
     bias    = TTensorCreate @ NumericArray[{0.0, 0.0}, "Real32"];
-    g = TRealize @ TGrad[TUOpConv2D[input, weights, bias], bias];
+    g = TRealize @ TGrad[TConv2D[input, weights, bias], bias];
     Normal @ TTensorData[g],
     {4.0, 4.0},
     TestID -> "grad/conv2d-bias-equals-spatial-sum-of-gy"
@@ -511,7 +511,7 @@ VerificationTest[
     weights = TTensorCreate @ NumericArray[
         ConstantArray[0.0, {2, 1, 3, 3}], "Real32"];
     bias    = TTensorCreate @ NumericArray[{0.0, 0.0}, "Real32"];
-    g = TRealize @ TGrad[TUOpConv2D[input, weights, bias], weights];
+    g = TRealize @ TGrad[TConv2D[input, weights, bias], weights];
     Normal @ TTensorData[g],
     ConstantArray[4.0, {2, 1, 3, 3}],
     SameTest -> (Max[Abs[Flatten[#1] - Flatten[#2]]] < 1.0*^-5 &),
@@ -540,7 +540,7 @@ VerificationTest[
     weights = TTensorCreate @ NumericArray[
         ConstantArray[1.0, {1, 1, 3, 3}], "Real32"];
     bias    = TTensorCreate @ NumericArray[{0.0}, "Real32"];
-    g = TRealize @ TGrad[TUOpConv2D[input, weights, bias], input];
+    g = TRealize @ TGrad[TConv2D[input, weights, bias], input];
     Normal @ TTensorData[g],
     {{{1.0, 2.0, 2.0, 1.0},
       {2.0, 4.0, 4.0, 2.0},
@@ -568,7 +568,7 @@ VerificationTest[
     weights = TTensorCreate @ NumericArray[
         ConstantArray[0.0, {1, 2, 3, 3}], "Real32"];
     bias    = TTensorCreate @ NumericArray[{0.0}, "Real32"];
-    g = TRealize @ TGrad[TUOpConv2D[input, weights, bias], weights];
+    g = TRealize @ TGrad[TConv2D[input, weights, bias], weights];
     Normal @ TTensorData[g],
     {{ConstantArray[4.0, {3, 3}],
       ConstantArray[8.0, {3, 3}]}},

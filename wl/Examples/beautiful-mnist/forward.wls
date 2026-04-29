@@ -64,9 +64,9 @@ buildForward[wH1_, bH1_, wH2_, bH2_, wH3_, bH3_, img_] :=
         W2 = TTensorCreate @ wH2;  b2 = TTensorCreate @ bH2;
         W3 = TTensorCreate @ wH3;  b3 = TTensorCreate @ bH3;
         x  = TTensorCreate @ NumericArray[img, "Real32"];
-        h1 = TUOpConv2D[x,  W1, b1];           (* {32, 24, 24} *)
+        h1 = TConv2D[x,  W1, b1];           (* {32, 24, 24} *)
         r1 = TReLU[h1];
-        h2 = TUOpConv2D[r1, W2, b2];           (* {64, 20, 20} *)
+        h2 = TConv2D[r1, W2, b2];           (* {64, 20, 20} *)
         r2 = TReLU[h2];
         (* MaxPool 2x2: reshape to {64, 10, 2, 10, 2}, reduce-MAX
            on axes 2 and (post-shrink) 3.  Same pattern as LeNet's

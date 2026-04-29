@@ -60,64 +60,120 @@ TMaxPool2d::usage        = "TMaxPool2d[x] / TMaxPool2d[x, k] runs a non-overlapp
 TLayerNorm::usage        = "TLayerNorm[x] / TLayerNorm[x, eps] normalises along the last axis: y = (x - mean) / sqrt(var + eps).  Default eps=1e-5.  mean / var are scalar reductions broadcast back via the softmax-style reduce-broadcast pattern; the scheduler's relaxation pass collapses each reduce + its broadcast tail into one kernel where it can.";
 TSoftmaxAxis::usage      = "TSoftmaxAxis[x, axis] = exp(x) / sum(exp(x)) reduced along `axis`.  Generalises TSoftmax (which is hard-coded to axis 0).  The dropped axis is re-introduced as size 1 + EXPAND'd back so the elementwise mul has matching shapes; same softmax-style reduce-broadcast shape.";
 TAttention::usage        = "TAttention[Q, K, V] computes scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.  Q is {seq_q, d_k}; K is {seq_k, d_k}; V is {seq_k, d_v}.  Result is {seq_q, d_v}.  Pure assembly of TMatMul + TSoftmaxAxis + TMatMul; the two matmuls dispatch through cblas_sgemm.";
+TBatchNorm::usage        = "TBatchNorm[x, gamma, beta, mean, var] / TBatchNorm[x, gamma, beta, mean, var, eps] applies the inference-form batch-norm transform: y = gamma * (x - mean) / sqrt(var + eps) + beta along the channel axis.  x is rank-3 {C, H, W} (channels-first); gamma/beta/mean/var are all rank-1 {C}.  Default eps = 1e-5.  The trainer maintains running mean/var with TAssign on the WL side; this op is the pure forward shape used by both train and infer.";
+TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution as a kh*kw-unrolled chain of SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD primitives.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  No bespoke CONV2D opcode -- autograd flows through primitives via the chain rule.  Phase 9 follow-up: replace the kh*kw partials with a single im2col + sgemm dispatch.";
+TGlorot::usage           = "TGlorot[shape] returns a NumericArray of the given shape, filled with samples from N(0, sqrt(2 / fan_in)) (Glorot/Xavier-He init).  fan_in = product of all dims after the first.  Suitable for ReLU / linear layer weight init.";
+TZeros::usage            = "TZeros[shape] returns a Real32 NumericArray of zeros at the given shape.  Convenience for bias init / running-stat init.";
+TZerosLike::usage        = "TZerosLike[t] returns a TTensor handle of zeros matching the shape and dtype of TTerm `t`.  Suitable for seeding Adam m/v moment buffers.";
+TOneHot::usage           = "TOneHot[label, n] returns a Real32 NumericArray of length n with a 1.0 at index `label` (0-indexed) and 0.0 elsewhere.  Convenience for sparse-categorical-CE targets.";
+
+TSparseCategoricalCrossEntropy::usage = "TSparseCategoricalCrossEntropy[logits, targetOneHot] computes the categorical cross-entropy loss given pre-softmax logits and a one-hot target.  Lowers to log(sum(exp(logits))) - sum(target * logits) along the last axis, then averages over the leading batch axis (rank-1 logits have no batch dim and skip the average).  Numerically naive (no max-subtract); for the f32 inputs the MNIST training pipeline produces the magnitudes stay well within range.";
 
 Begin["`Private`"];
 
 (* === Tensor-method helpers ============================== *)
+(*
+   These are thin aliases on top of the WL UpValues installed by
+   Tensor.wl.  Plus / Times / Power[..., -1] / Power[..., 1/2] / Sqrt
+   / Exp / Log / Total all operate on TTerm tensor values directly,
+   so the helpers below read like ordinary math rather than UOp
+   constructor soup.
+*)
 
-TSum[x_TTerm]                   := TUOpReduce[x, 0, "SUM"]
-TSquare[x_TTerm]                := TUOpMul[x, x]
-TDot[a_TTerm, b_TTerm]          := TSum[TUOpMul[a, b]]
-TL2Loss[x_TTerm]                := TSum[TSquare[x]]
-TMSELoss[pred_TTerm, tgt_TTerm] := TL2Loss[TUOpAdd[pred, TUOpNeg[tgt]]]
-TReLU[x_TTerm]                  := TUOpMul[x, TUOpCmplt[TUOpConst[0.0, "f32"], x]]
+TSum[x_TTerm]                   := Total[x]
+TSquare[x_TTerm]                := x * x
+TDot[a_TTerm, b_TTerm]          := Total[a * b]
+TL2Loss[x_TTerm]                := Total[x * x]
+TMSELoss[pred_TTerm, tgt_TTerm] := TL2Loss[pred - tgt]
+TReLU[x_TTerm]                  := x * (0 < x)
 
-(* tanh(x) = (e^(2x) - 1) / (e^(2x) + 1).
-   We have EXP2 (= 2^x) but not exp (= e^x).
-   exp(y) = 2^(y * log2 e), so e^(2x) = EXP2(x * 2 * log2 e). *)
-TTanh[x_TTerm] := With[{
-    twoLog2E = TUOpConst[N[2 * Log2[E]], "f32"],
-    one      = TUOpConst[1.0, "f32"]
-},
-    With[{u = TUOpExp2[TUOpMul[x, twoLog2E]]},
-        TUOpMul[
-            TUOpAdd[u, TUOpNeg[one]],
-            TUOpRecip[TUOpAdd[u, one]]
-        ]
-    ]
+(* tanh(x) = (e^(2x) - 1) / (e^(2x) + 1). *)
+TTanh[x_TTerm] := With[{u = Exp[2 * x]}, (u - 1) / (u + 1)]
+
+(* TLog is kept as a public alias; new code should write Log[x]. *)
+TLog[x_TTerm] := Log[x]
+
+(* softmax(x)_i = exp(x_i) / sum(exp(x)).  The RECIP of the scalar sum
+   is EXPLICITLY broadcast to e's shape via TUOpExpand rather than
+   relying on the kernel-level numel-cycle broadcast in MUL: without
+   the explicit EXPAND the chain rule for MUL has no notion of the
+   implicit broadcast and drops the cross-coupling term in
+       d(CE)/dz = probs - target. *)
+TSoftmax[x_TTerm] := With[{e = Exp[x], shape = tUopShape[x]},
+    e * TUOpExpand[1 / Total[e], shape]
 ]
 
-(* exp(x) via EXP2: exp(x) = 2^(x * log2 e). *)
-tExp[x_TTerm] := TUOpExp2[TUOpMul[x, TUOpConst[N[Log2[E]], "f32"]]]
-
-(* softmax(x)_i = exp(x_i) / sum(exp(x)).  Sum reduces over axis 0
-   (rank-1 inputs only for v1 -- the LeNet path produces a rank-1
-   class-score vector at the SoftmaxLayer position).  The RECIP of
-   the scalar sum is EXPLICITLY broadcast to e's shape via
-   TUOpExpand rather than relying on the kernel-level numel-cycle
-   broadcast in MUL.  Without the explicit EXPAND the chain rule
-   for MUL has no notion of the implicit broadcast and propagates
-   the cotangent for the RECIP-branch as `e * lifted_gy` (shape
-   {N}) instead of `sum(e * lifted_gy)` (shape {1}), losing the
-   probs-i cross-coupling term that makes
-       d(CE)/dz = probs - target
-   come out correctly with one-hot targets. *)
-TSoftmax[x_TTerm] := With[{e = tExp[x], shape = tUopShape[x]},
-    TUOpMul[e,
-        TUOpExpand[
-            TUOpRecip[TUOpReduce[e, 0, "SUM"]],
-            shape]]
-]
-
-(* log(x) = log2(x) * ln(2).  Runtime has UOP_LOG2 but no UOP_LOG. *)
-TLog[x_TTerm] := TUOpMul[TUOpLog2[x], TUOpConst[N[Log[2]], "f32"]]
-
-(* CrossEntropy "probabilities" form: target is a probability
+(* CrossEntropy probabilities form: target is a probability
    distribution (typically one-hot), pred is the model's predicted
-   distribution.  Loss = -sum_i target_i * log(pred_i).  Returns a
-   scalar TTerm (rank-{1}). *)
-TCrossEntropyLoss[pred_TTerm, target_TTerm] :=
-    TUOpNeg[TUOpReduce[TUOpMul[target, TLog[pred]], 0, "SUM"]]
+   distribution.  Loss = -sum_i target_i * log(pred_i). *)
+TCrossEntropyLoss[pred_TTerm, target_TTerm] := -Total[target * Log[pred]]
+
+(* TConv2D[input, weights, bias] -- stride-1, no-padding 2-D
+   convolution, lowered into a chain of kh*kw partial sums:
+
+       For each (ki, kj) in [0, kh) x [0, kw):
+         x_slice = SHRINK(input,   all C_in,  [ki, ki + H_out), [kj, kj + W_out))
+         w_slice = SHRINK(weights, all C_out, all C_in,
+                                   [ki, ki + 1), [kj, kj + 1))
+         x_b     = EXPAND(RESHAPE(x_slice, {1, C_in, H_out, W_out}),
+                                 {C_out, C_in, H_out, W_out})
+         w_b     = EXPAND(w_slice, {C_out, C_in, H_out, W_out})
+         partial = REDUCE_SUM(x_b * w_b, axis = 1)
+                                                     {C_out, H_out, W_out}
+       sum the kh*kw partials, broadcast bias, return.
+
+   Why kh*kw partials (rather than tinygrad's _pool unfold): the
+   unfolded tensor would have shape {C_in, H_out, W_out, kh, kw}
+   which for a 28x28 -> 24x24 conv with kh=kw=5 is 24*24*25 = 14400
+   elements per channel; the partial-sum form only allocates a few
+   {C_out, C_in, H_out, W_out} intermediates per kernel position,
+   which fits the per-op-allocates-a-buffer materializer better.
+   Phase 9 follow-up: replace with one im2col + sgemm dispatch. *)
+TConv2D[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
+    inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
+    partials, xSlice, wSlice, xB, wB, summed, biasBcast
+},
+    inShape = tUopShape[input];
+    wShape  = tUopShape[weights];
+    {cIn, h, wd}        = inShape;
+    {cOut, cIn, kh, kw} = wShape;
+    hOut = h  - kh + 1;
+    wOut = wd - kw + 1;
+    partials = Flatten @ Table[
+        xSlice = TUOpShrink[input,
+            {{0, cIn}, {ki, ki + hOut}, {kj, kj + wOut}}];
+        wSlice = TUOpShrink[weights,
+            {{0, cOut}, {0, cIn}, {ki, ki + 1}, {kj, kj + 1}}];
+        xB = TUOpExpand[
+            TUOpReshape[xSlice, {1, cIn, hOut, wOut}],
+            {cOut, cIn, hOut, wOut}];
+        wB = TUOpExpand[wSlice, {cOut, cIn, hOut, wOut}];
+        TUOpReduce[xB * wB, 1, "SUM"],
+        {ki, 0, kh - 1}, {kj, 0, kw - 1}
+    ];
+    summed = Fold[Plus, First[partials], Rest[partials]];
+    biasBcast = TUOpExpand[
+        TUOpReshape[bias, {cOut, 1, 1}],
+        {cOut, hOut, wOut}];
+    summed + biasBcast
+]
+
+(* === host-side init helpers for example scripts ============== *)
+
+TGlorot[shape_List] := NumericArray[
+    RandomVariate[
+        NormalDistribution[0., Sqrt[2.0 / If[Length[shape] >= 2,
+            Times @@ Drop[shape, 1], shape[[1]]]]],
+        shape],
+    "Real32"]
+
+TZeros[shape_List] := NumericArray[ConstantArray[0., shape], "Real32"]
+
+TZerosLike[t_TTerm] := TTensorCreate @ TZeros[TTensorShape[t]]
+
+TOneHot[label_Integer, n_Integer] := NumericArray[
+    Table[If[i - 1 == label, 1.0, 0.0], {i, n}],
+    "Real32"]
 
 TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
     Module[{out, in, xb},
@@ -192,29 +248,16 @@ TMaxPool2d[x_TTerm, k_Integer] := With[{shape = tUopShape[x]},
    square-sum-recip-sqrt-broadcast-mul). *)
 TLayerNorm[x_TTerm] := TLayerNorm[x, 1.0*^-5]
 TLayerNorm[x_TTerm, eps_?NumericQ] := With[{shape = tUopShape[x]},
-    Module[{rank, axis, n, sumShape, recipN, mean, centered, var, denom},
-        rank     = Length[shape];
-        axis     = rank - 1;                         (* last axis *)
-        n        = shape[[rank]];
-        sumShape = ReplacePart[shape, rank -> 1];    (* for re-broadcast *)
-        recipN   = TUOpConst[N[1.0/n], "f32"];
-        (* mean = (sum(x) / N), broadcast back to input shape *)
-        mean = TUOpExpand[
-            TUOpReshape[
-                TUOpMul[TUOpReduce[x, axis, "SUM"],
-                        TUOpExpand[recipN, ReplacePart[shape, rank -> 1]]],
-                sumShape],
-            shape];
-        centered = TUOpAdd[x, TUOpNeg[mean]];
-        var = TUOpExpand[
-            TUOpReshape[
-                TUOpMul[TUOpReduce[TUOpMul[centered, centered], axis, "SUM"],
-                        TUOpExpand[recipN, ReplacePart[shape, rank -> 1]]],
-                sumShape],
-            shape];
-        denom = TUOpRecip[TUOpSqrt[
-            TUOpAdd[var, TUOpExpand[TUOpConst[N[eps], "f32"], shape]]]];
-        TUOpMul[centered, denom]
+    Module[{rank, axis, n, sumShape, broadcast, mean, centered, var},
+        rank      = Length[shape];
+        axis      = rank - 1;
+        n         = shape[[rank]];
+        sumShape  = ReplacePart[shape, rank -> 1];
+        broadcast = TUOpExpand[TUOpReshape[#, sumShape], shape] &;
+        mean      = broadcast[TUOpReduce[x, axis, "SUM"] / n];
+        centered  = x - mean;
+        var       = broadcast[TUOpReduce[centered * centered, axis, "SUM"] / n];
+        centered / Sqrt[var + eps]
     ]
 ]
 
@@ -229,13 +272,10 @@ TLayerNorm[x_TTerm, eps_?NumericQ] := With[{shape = tUopShape[x]},
    softmax over the last axis of a {seq_q, seq_k} score matrix) use
    the same code path. *)
 TSoftmaxAxis[x_TTerm, axis_Integer] := With[{shape = tUopShape[x]},
-    Module[{e, sumShape, r, recipBroadcast},
-        e        = tExp[x];
+    Module[{e, sumShape},
+        e        = Exp[x];
         sumShape = ReplacePart[shape, axis + 1 -> 1];
-        r        = TUOpReduce[e, axis, "SUM"];
-        recipBroadcast =
-            TUOpExpand[TUOpRecip[TUOpReshape[r, sumShape]], shape];
-        TUOpMul[e, recipBroadcast]
+        e * TUOpExpand[1 / TUOpReshape[TUOpReduce[e, axis, "SUM"], sumShape], shape]
     ]
 ]
 
@@ -250,6 +290,54 @@ TSoftmaxAxis[x_TTerm, axis_Integer] := With[{shape = tUopShape[x]},
    the shape via the standard RESHAPE+EXPAND pattern.  Both matmuls
    dispatch through cblas_sgemm.  Softmax-along-last-axis is the
    row-wise normalisation each query needs. *)
+(* TBatchNorm[x, gamma, beta, mean, var, eps] -- inference form.
+       y[c, h, w] = gamma[c] * (x[c, h, w] - mean[c]) / sqrt(var[c] + eps)
+                  + beta[c]
+   Refactored so the per-channel scale/shift collapse to scalar
+   computations once each: scale = gamma / sqrt(var + eps),
+   shift = beta - mean * scale.  Then both broadcast across {H, W}
+   as one MUL + one ADD on the rank-3 tensor.  Rank-1 ops on {C}
+   stay tiny; the rank-3 ops fuse cleanly with the JIT path. *)
+TBatchNorm[x_TTerm, gamma_TTerm, beta_TTerm, mean_TTerm, var_TTerm] :=
+    TBatchNorm[x, gamma, beta, mean, var, 1.0*^-5]
+TBatchNorm[x_TTerm, gamma_TTerm, beta_TTerm, mean_TTerm, var_TTerm,
+           eps_?NumericQ] := With[{shape = tUopShape[x]},
+    Module[{c, h, w, scaleC, shiftC, scaleBcast, shiftBcast},
+        c = shape[[1]];
+        h = shape[[2]];
+        w = shape[[3]];
+        (* Per-channel scale + shift collapse to scalar computations
+           over the rank-1 {C} parameter tensors -- Plus / Times /
+           Sqrt UpValues lift the scalar `eps` through liftNumeric. *)
+        scaleC     = gamma / Sqrt[var + eps];
+        shiftC     = beta  - mean * scaleC;
+        scaleBcast = TUOpExpand[TUOpReshape[scaleC, {c, 1, 1}], {c, h, w}];
+        shiftBcast = TUOpExpand[TUOpReshape[shiftC, {c, 1, 1}], {c, h, w}];
+        x * scaleBcast + shiftBcast
+    ]
+]
+
+(* TSparseCategoricalCrossEntropy[logits, targetOneHot] -- categorical
+   cross-entropy from logits.  loss = log(sum(exp(logits))) -
+   sum(target * logits), reduced along the LAST axis (the class axis);
+   for rank-2 batched inputs the per-sample loss is then averaged
+   along axis 0.  Numerically naive (no max-subtract); fine for the
+   activation magnitudes a typical NN forward produces. *)
+TSparseCategoricalCrossEntropy[logits_TTerm, target_TTerm] := With[{
+    shape = tUopShape[logits]
+},
+    Module[{rank, classAxis, perSample},
+        rank      = Length[shape];
+        classAxis = rank - 1;
+        perSample = Log[TUOpReduce[Exp[logits], classAxis, "SUM"]]
+                  - TUOpReduce[target * logits, classAxis, "SUM"];
+        If[ rank <= 1,
+            perSample,
+            Total[perSample] / shape[[1]]    (* batch mean over axis 0 *)
+        ]
+    ]
+]
+
 TAttention[q_TTerm, k_TTerm, v_TTerm] := With[{
     shapeQ = tUopShape[q],
     shapeK = tUopShape[k]
@@ -418,7 +506,7 @@ fromLayer[ConvolutionLayer, layer_, x_TTerm] := Module[{
             <|"Message" -> "ConvolutionLayer Dilation != {1,1} not yet supported",
               "Dilation" -> dil|>]];
     {w, b} = TLayerToTensors[layer];
-    TUOpConv2D[x, w, b]
+    TConv2D[x, w, b]
 ]
 
 TIdentity[x_] := x

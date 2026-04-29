@@ -49,7 +49,7 @@ VerificationTest[
     input   = TTensorCreate @ NumericArray[ConstantArray[0.5, {1, 5, 5}], "Real32"];
     weights = TTensorCreate @ NumericArray[ConstantArray[1.0, {2, 1, 3, 3}], "Real32"];
     bias    = TTensorCreate @ NumericArray[{0.0, 0.0}, "Real32"];
-    THVMLink`Private`tUopShape[TUOpConv2D[input, weights, bias]],
+    THVMLink`Private`tUopShape[TConv2D[input, weights, bias]],
     {2, 3, 3},
     TestID -> "shape/conv2d-1ch-2outch-3x3-kernel"
 ]

@@ -56,7 +56,7 @@ buildLeNetForward[w1H_, b1H_, w2H_, b2H_, w3H_, b3H_, w4H_, b4H_] :=
 
         x  = TTensorCreate @ NumericArray[img, "Real32"];
 
-        h1 = TUOpConv2D[x, W1, b1];
+        h1 = TConv2D[x, W1, b1];
         r1 = TReLU[h1];
         p1 = TUOpReduce[
                 TUOpReduce[
@@ -64,7 +64,7 @@ buildLeNetForward[w1H_, b1H_, w2H_, b2H_, w3H_, b3H_, w4H_, b4H_] :=
                     2, "MAX"],
                 3, "MAX"];
 
-        h2 = TUOpConv2D[p1, W2, b2];
+        h2 = TConv2D[p1, W2, b2];
         r2 = TReLU[h2];
         p2 = TUOpReduce[
                 TUOpReduce[

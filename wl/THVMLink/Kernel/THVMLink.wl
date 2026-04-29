@@ -125,9 +125,9 @@ TUOpLoad::usage      = "TUOpLoad[src] builds a UOP_LOAD node wrapping src.  Stru
 
 TAssign::usage       = "TAssign[dst, src] builds a UOP_ASSIGN node.  Wnf-fired in-place buffer write: once `src` reduces to a TAG_TEN, backend memcpy copies src.buf into dst.buf and the redex rewrites to dst.  Mirrors tinygrad's UOps.ASSIGN.  Use to mutate weight tensors in optimizer loops without allocating fresh tids per step.";
 
-TUOpConv2D::usage    = "TUOpConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  Dispatches to TUOpConv2DLowered so autograd flows through primitives via the chain rule.";
+(* TConv2D / TConv2D / TConv2D all live in NN.wl now. *)
 
-TUOpConv2DLowered::usage = "TUOpConv2DLowered[input, weights, bias] builds the same valid 2-D convolution as TUOpConv2D but as a kh*kw-unrolled chain of primitive UOPs (SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD).  No new opcodes; pure WL composition.";
+(* (see above) *)
 TGrad::usage         = "TGrad[y, target] computes d(y)/d(target) via VJP.  Default cotangent seed = ones-at-y.shape (CONST(1.0) optionally expanded).  For non-default seeds use TGrad[y, target, gy].";
 TGradMany::usage     = "TGradMany[y, {x_1, ..., x_n}] computes d(y)/d(x_i) for every target in one realize.  Returns a List of n TTerm wrappers.  Forward DAG is shared via heap-loc identity so the per-realize memo dedups every kernel emitted from those forward UOps across all n targets.";
 TUOpKind::usage      = "TUOpKind[u] returns the opcode name for a UOp term.";

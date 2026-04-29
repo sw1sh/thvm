@@ -57,10 +57,10 @@ lenetForward[wH_, img_, label_] := Block[{
     w3 = TTensorCreate @ wH[[5]];   b3 = TTensorCreate @ wH[[6]];
     w4 = TTensorCreate @ wH[[7]];   b4 = TTensorCreate @ wH[[8]];
     x  = TTensorCreate @ NumericArray[img, "Real32"];
-    h1 = TUOpConv2D[x, w1, b1];   r1 = TReLU[h1];
+    h1 = TConv2D[x, w1, b1];   r1 = TReLU[h1];
     p1 = TUOpReduce[TUOpReduce[
             TUOpReshape[r1, {6, 12, 2, 12, 2}], 2, "MAX"], 3, "MAX"];
-    h2 = TUOpConv2D[p1, w2, b2];  r2 = TReLU[h2];
+    h2 = TConv2D[p1, w2, b2];  r2 = TReLU[h2];
     p2 = TUOpReduce[TUOpReduce[
             TUOpReshape[r2, {16, 4, 2, 4, 2}], 2, "MAX"], 3, "MAX"];
     flat = TUOpReshape[p2, {1, 256}];
@@ -123,8 +123,8 @@ beautifulStep[hosts_, t_] := Block[{
     w2 = TTensorCreate @ hosts[[3]];   b2 = TTensorCreate @ hosts[[4]];
     w3 = TTensorCreate @ hosts[[5]];   b3 = TTensorCreate @ hosts[[6]];
     x  = TTensorCreate @ NumericArray[hosts[[7]], "Real32"];
-    h1 = TUOpConv2D[x,  w1, b1];   r1 = TReLU[h1];
-    h2 = TUOpConv2D[r1, w2, b2];   r2 = TReLU[h2];
+    h1 = TConv2D[x,  w1, b1];   r1 = TReLU[h1];
+    h2 = TConv2D[r1, w2, b2];   r2 = TReLU[h2];
     p2 = TUOpReduce[TUOpReduce[
             TUOpReshape[r2, {64, 10, 2, 10, 2}], 2, "MAX"], 3, "MAX"];
     flat = TUOpReshape[p2, {1, 6400}];

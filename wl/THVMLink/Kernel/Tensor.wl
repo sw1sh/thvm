@@ -18,6 +18,8 @@
 
 BeginPackage["THVMLink`"];
 
+TSet::usage = "TSet[dst, src] writes the bytes of `src` into `dst`'s backing buffer in place; `dst` keeps its TenDesc id so callers still holding it observe the new contents.  Equivalent to `TRealize[TAssign[dst, src]]; dst`.  Also installed as the WL Set UpValue on literal-TTerm LHSes, so `Evaluate[w] = expr` mutates `w` rather than rebinding the symbol.";
+
 Begin["`Private`"];
 
 (* === predicates ===
@@ -165,68 +167,8 @@ TUOpLoad[src_] := (ensureInit[]; TTerm[$uopLoadFn[ttermRaw[src]]])
 TAssign[dst_, src_] := (ensureInit[];
     TTerm[$uopBinaryFn[$UopAssign, ttermRaw[dst], ttermRaw[src]]])
 
-(* TUOpConv2DLowered[input, weights, bias] -- builds 2-D
-   convolution forward from primitive UOPs only.  Public
-   entry point TUOpConv2D below dispatches to this.
-
-   Per-kernel-position partial-sum strategy:
-       For each (ki, kj) in [0, kh) x [0, kw):
-         x_slice = SHRINK(input, all C_in, [ki, ki+H_out), [kj, kj+W_out))
-                                                              {C_in, H_out, W_out}
-         w_slice = SHRINK(weights, all C_out, all C_in, [ki, ki+1), [kj, kj+1))
-                                                       {C_out, C_in, 1, 1}
-         x_b     = EXPAND(RESHAPE(x_slice, {1, C_in, H_out, W_out}),
-                          {C_out, C_in, H_out, W_out})
-         w_b     = EXPAND(w_slice, {C_out, C_in, H_out, W_out})
-         partial = REDUCE_SUM(MUL(x_b, w_b), axis = 1)
-                                                  {C_out, H_out, W_out}
-       sum all kh*kw partials, then add bias broadcast {C_out, 1, 1}
-       expanded to {C_out, H_out, W_out}.
-
-   Why kh*kw partial sums (rather than the tinygrad _pool unfold):
-   the unfolded tensor would have shape {C_in, H_out, W_out, kh, kw}
-   which for LeNet's 28x28 -> 24x24 with kh=kw=5 is 24*24*25 = 14400
-   elements per channel; the partial-sum form only allocates a few
-   {C_out, C_in, H_out, W_out} intermediates per kernel position,
-   which fits the per-op-allocates-a-buffer materializer better. *)
-TUOpConv2DLowered[input_, weights_, bias_] := Module[{
-    inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
-    partials, xSlice, wSlice, xB, wB, summed, biasBroadcast
-},
-    ensureInit[];
-    (* Use tUopShape (handles UOP chains) rather than TTensorShape
-       (TAG_TEN only) -- LeNet's second conv takes the Pool output,
-       which is a UOP_REDUCE chain, not a materialised tensor. *)
-    inShape = tUopShape[input];
-    wShape  = tUopShape[weights];
-    {cIn, h, wd}        = inShape;
-    {cOut, cIn, kh, kw} = wShape;
-    hOut = h  - kh + 1;
-    wOut = wd - kw + 1;
-    partials = Flatten @ Table[
-        xSlice = TUOpShrink[input,
-            {{0, cIn}, {ki, ki + hOut}, {kj, kj + wOut}}];
-        wSlice = TUOpShrink[weights,
-            {{0, cOut}, {0, cIn}, {ki, ki + 1}, {kj, kj + 1}}];
-        xB = TUOpExpand[
-            TUOpReshape[xSlice, {1, cIn, hOut, wOut}],
-            {cOut, cIn, hOut, wOut}];
-        wB = TUOpExpand[wSlice, {cOut, cIn, hOut, wOut}];
-        TUOpReduce[TUOpMul[xB, wB], 1, "SUM"],
-        {ki, 0, kh - 1}, {kj, 0, kw - 1}
-    ];
-    summed = Fold[TUOpAdd, First @ partials, Rest @ partials];
-    biasBroadcast = TUOpExpand[
-        TUOpReshape[bias, {cOut, 1, 1}],
-        {cOut, hOut, wOut}];
-    TUOpAdd[summed, biasBroadcast]
-]
-
-(* TUOpConv2D[input, weights, bias] -- public conv2d entry point.
-   Dispatches to the lowered primitive chain so autograd flows
-   through the chain rule (no bespoke CONV2D grad branch).  All
-   existing call sites pick up the lowering transparently. *)
-TUOpConv2D[input_, weights_, bias_] := TUOpConv2DLowered[input, weights, bias]
+(* TConv2D[input, weights, bias] is defined in NN.wl alongside the
+   other neural-network layers. *)
 
 (* TGrad[y, target] / TGrad[y, target, gy]: the user-facing VJP.
 
@@ -450,8 +392,49 @@ TTerm /: Minus[t_TTerm ? tensorTermQ] := TUOpNeg[t]
 TTerm /: Power[t_TTerm ? tensorTermQ, Rational[1, 2]] := TUOpSqrt[t]
 TTerm /: Power[t_TTerm ? tensorTermQ, -1]             := TUOpRecip[t]
 
+TTerm /: Sqrt[t_TTerm ? tensorTermQ] := TUOpSqrt[t]
+
+(* Exp / Log: route through the EXP2 / LOG2 primitives via the
+   constant log2(e) / ln(2) factors.  Mirror the tExp / TLog helpers
+   in NN.wl but exposed on the standard WL function names so callers
+   write `Exp[x]` / `Log[x]` against a TTerm naturally. *)
+TTerm /: Exp[t_TTerm ? tensorTermQ] :=
+    TUOpExp2[TUOpMul[t, TUOpConst[N[Log2[E]], inheritDType[t]]]]
+TTerm /: Log[t_TTerm ? tensorTermQ] :=
+    TUOpMul[TUOpLog2[t], TUOpConst[N[Log[2]], inheritDType[t]]]
+
+(* Total[t]: REDUCE_SUM along axis 0 (matches WL's Total which sums
+   the outermost level).  Total[t, axis] reduces along an arbitrary
+   axis (1-indexed in WL convention; the runtime is 0-indexed so we
+   subtract).  Total[t, All] sums every axis to a scalar via repeated
+   reductions. *)
+TTerm /: Total[t_TTerm ? tensorTermQ]                  := TUOpReduce[t, 0, "SUM"]
+TTerm /: Total[t_TTerm ? tensorTermQ, axis_Integer]    := TUOpReduce[t, axis - 1, "SUM"]
+TTerm /: Total[t_TTerm ? tensorTermQ, All]             := Fold[
+    TUOpReduce[#1, 0, "SUM"] &, t,
+    Range[Length[tUopShape[t]]]    (* one reduce per axis, all from axis 0 *)
+]
+
 TTerm /: Less[a_TTerm ? tensorTermQ, b_] := TUOpCmplt[a, liftNumeric[b, inheritDType[a]]]
 TTerm /: Less[a_, b_TTerm ? tensorTermQ] := TUOpCmplt[liftNumeric[a, inheritDType[b]], b]
+
+(* Set on a literal-TTerm LHS rewrites in place: realises src into a
+   fresh TenDesc, memcpys those bytes into dst's backing buffer.  dst
+   keeps its TenDesc id (so any caller still holding it sees the new
+   contents).  Only fires when the LHS is the literal TTerm form --
+   `Set[m, src]` where m is a Symbol whose VALUE is a TTerm doesn't
+   match, because Set holds the LHS unevaluated.  Use one of:
+
+       TSet[dst, src]                  (* preferred: short, evaluates dst *)
+       Evaluate[dst] = src             (* forces dst to its TTerm value *)
+
+   to invoke this without literally typing out the TTerm form. *)
+TTerm /: Set[t_TTerm, src_] := TSet[t, src]
+
+(* TSet[dst, src]: in-place buffer write.  Evaluates dst (so callers
+   can pass a Module-bound symbol) before dispatching the literal-form
+   TAssign + TRealize.  Returns dst so chains compose. *)
+TSet[dst_TTerm, src_] := (TRealize[TAssign[dst, src]]; dst)
 
 End[];
 

@@ -13,9 +13,9 @@ buildBeautiful[wH1_, bH1_, wH2_, bH2_, wH3_, bH3_, img_] :=
         w2 = TTensorCreate @ wH2;  b2 = TTensorCreate @ bH2;
         w3 = TTensorCreate @ wH3;  b3 = TTensorCreate @ bH3;
         x  = TTensorCreate @ NumericArray[img, "Real32"];
-        h1 = TUOpConv2D[x,  w1, b1];
+        h1 = TConv2D[x,  w1, b1];
         r1 = TReLU[h1];
-        h2 = TUOpConv2D[r1, w2, b2];
+        h2 = TConv2D[r1, w2, b2];
         r2 = TReLU[h2];
         p2 = TUOpReduce[
                 TUOpReduce[

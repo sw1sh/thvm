@@ -30,13 +30,15 @@ TAdamSessionStep::usage = "TAdamSessionStep[key, weightsHosts, gradsHosts, lr, b
 
 TAdamSessionDrop::usage = "TAdamSessionDrop[key] frees the session m/v entries for the given key.  TAdamSessionDrop[] (no args) clears every session.";
 
+TAdam::usage = "TAdam[params, grads, m, v, t, lr, beta1, beta2, eps] applies one Adam step in tensor-land.  params, grads, m, v are lists of TTerm tensor handles (TAG_TEN); t is the integer step counter (host-side; bias-correction constants are precomputed at emit time so the kernel program stays POW-free).  lr/beta1/beta2/eps are real scalars baked as TUOpConst.\n\nFor each param i, internally:\n  1. Realize m_new and v_new into FRESH TenDescs (so subsequent kernels reading m/v see the OLD values, not the post-assign new ones -- TAssign mutates the underlying buffer, so reads chained after a write would read the new value).\n  2. Realize w_new using those fresh m_new/v_new TenDescs.\n  3. TAssign each fresh tensor's bytes into the corresponding m/v/w buffer.\n\nReturns the list of param TTerms (chainable; identical to the input `params` list since TAssign mutates in place).";
+
 (* Forward-declare symbols owned by later-loading siblings (Ref.wl,
-   Switch.wl).  Without this, bare references to TDef / TIfZero /
-   TRef / TOp2 / TNum below would resolve to phantom symbols in
-   THVMLink`Private` (since those symbols don't yet exist on the
-   $ContextPath when this file is Get'd), leading to silently
-   broken term construction at call time. *)
-{TDef, TRef, TIfZero, TOp2, TNum, TMatNum};
+   Switch.wl, Tensor.wl).  Without this, bare references to TDef /
+   TIfZero / TRef / TOp2 / TNum / TSet below would resolve to phantom
+   symbols in THVMLink`Private` (since those symbols don't yet exist
+   on the $ContextPath when this file is Get'd in alphabetical order),
+   leading to silently broken term construction at call time. *)
+{TDef, TRef, TIfZero, TOp2, TNum, TMatNum, TSet};
 
 Begin["`Private`"];
 
@@ -226,6 +228,60 @@ TAdamSessionStep::nostate = "No Adam session initialized for key `1`; call TAdam
 
 TAdamSessionDrop[key_] := ($adamSessions = KeyDrop[$adamSessions, key]; Null)
 TAdamSessionDrop[]     := ($adamSessions = <||>; Null)
+
+(* === TAdam: TAssign-form Adam (graph-resident) ===
+
+   Each call returns a flat list of TAssign TTerms (3 per param: m, v,
+   then w in that order so Realize'ing in sequence sees the freshly-
+   computed m and v when computing m_hat / v_hat).  The math sits
+   inside one TUOpAdd / TUOpMul chain per buffer; bias-correction
+   terms (1 - beta1^t), (1 - beta2^t) are computed host-side at emit
+   time and folded into the lr_hat scalar so the graph stays
+   POW-free.  This keeps the Adam step inside the kernel surface
+   that Phase 7's TJit will capture verbatim. *)
+TAdam[
+    params_List, grads_List, mList_List, vList_List,
+    t_Integer, lr_ ? NumericQ, beta1_ ? NumericQ, beta2_ ? NumericQ,
+    eps_ ? NumericQ
+] :=
+    (* Bias-correction folded in at emit time so the kernel program
+       stays POW-free.  Algebra:
+           step = lr * m_hat / (sqrt(v_hat) + eps)
+                = (lr / (1 - b1^t)) * m_new
+                          / (sqrt(v_new) / sqrt(1 - b2^t) + eps)
+                = lrHat * m_new / (sqrt(v_new) * invSqrtB2cor + eps)
+       so lrHat and invSqrtB2cor are precomputed scalars. *)
+    Block[{
+        lrHat        = lr  / (1.0 - beta1^t),
+        invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t]
+    },
+    Do[
+        Block[{
+            wTen  = params[[i]],
+            gTen  = grads [[i]],
+            mTen  = mList [[i]],
+            vTen  = vList [[i]],
+            mNewT, vNewT, wNewT
+        },
+            (* Realise EVERY new value (m, v, w) into fresh TenDescs
+               BEFORE any in-place write fires.  TSet (= the Set
+               UpValue on TTerm) memcpys src bytes into dst's
+               backing buffer; once that happens, freelist reuse
+               could hand the freed buffer back to a downstream
+               materialise, leaving stale bytes for any later read.
+               Computing all three updates first makes the assigns
+               pure memcpys with no live-state dependency. *)
+            mNewT = TRealize[beta1 * mTen + (1.0 - beta1) * gTen];
+            vNewT = TRealize[beta2 * vTen + (1.0 - beta2) * (gTen * gTen)];
+            wNewT = TRealize[wTen - lrHat * mNewT
+                                  / (Sqrt[vNewT] * invSqrtB2cor + eps)];
+            TSet[mTen, mNewT];
+            TSet[vTen, vNewT];
+            TSet[wTen, wNewT];
+        ],
+        {i, Length[params]}];
+    params
+]
 
 End[];
 EndPackage[];

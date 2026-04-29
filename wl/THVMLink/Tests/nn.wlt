@@ -452,7 +452,7 @@ VerificationTest[
     TestID -> "nn/ce-loss-uniform-target"
 ]
 
-(* === ConvolutionLayer 2-D forward via TUOpConv2D + dispatch ===
+(* === ConvolutionLayer 2-D forward via TConv2D + dispatch ===
    Hand-verified on a 1-channel 3x3 input, 2 output channels, 2x2
    kernel (sum + diagonal masks).  NetApply cross-checks would be
    nice but the local Wolfram NeuralNetworks runtime errors with
@@ -466,14 +466,14 @@ VerificationTest[
     weights = TTensorCreate @ NumericArray[
         {{{{1.,1.},{1.,1.}}}, {{{1.,0.},{0.,1.}}}}, "Real32"];
     bias = TTensorCreate @ NumericArray[{0.5, -0.5}, "Real32"];
-    Round[Normal @ TTensorData @ TRealize @ TUOpConv2D[input, weights, bias], 0.001],
+    Round[Normal @ TTensorData @ TRealize @ TConv2D[input, weights, bias], 0.001],
     {{{12.5, 16.5}, {24.5, 28.5}}, {{5.5, 7.5}, {11.5, 13.5}}},
     TestID -> "nn/conv2d-helper-1ch-2outch-2x2-kernel"
 ]
 
-(* === TUOpConv2DLowered: kh*kw-unrolled chain of primitives === *)
+(* === TConv2D: kh*kw-unrolled chain of primitives === *)
 (* Sub-item (a) of the conv2d-lowering arc: forward parity with the
-   bespoke TUOpConv2D for the same hand-verified case above. *)
+   bespoke TConv2D for the same hand-verified case above. *)
 
 VerificationTest[
     TInit[];
@@ -482,14 +482,14 @@ VerificationTest[
     weights = TTensorCreate @ NumericArray[
         {{{{1.,1.},{1.,1.}}}, {{{1.,0.},{0.,1.}}}}, "Real32"];
     bias = TTensorCreate @ NumericArray[{0.5, -0.5}, "Real32"];
-    Round[Normal @ TTensorData @ TRealize @ TUOpConv2DLowered[input, weights, bias],
+    Round[Normal @ TTensorData @ TRealize @ TConv2D[input, weights, bias],
           0.001],
     {{{12.5, 16.5}, {24.5, 28.5}}, {{5.5, 7.5}, {11.5, 13.5}}},
     TestID -> "nn/conv2d-lowered-1ch-2outch-2x2-parity"
 ]
 
 (* fromLayer dispatch path -- TFromNet[ConvolutionLayer[...], x] uses
-   the same TUOpConv2D with weights/bias pulled from the layer. *)
+   the same TConv2D with weights/bias pulled from the layer. *)
 VerificationTest[
     TInit[];
     Module[{net, conv, x},
@@ -611,4 +611,86 @@ VerificationTest[
     SameTest -> (#1[[1]] === #2[[1]]
               && Max[Abs[Flatten[#1[[2]] - #2[[2]]]]] < 1.0*^-4 &),
     TestID -> "nn/attention-identity-q-row-selection"
+]
+
+(* === Phase-6 NN building blocks ===
+   TBatchNorm / TSparseCategoricalCrossEntropy / TAdam (TAssign-form). *)
+
+VerificationTest[
+    TInit[];
+    c = 2; h = 3; w = 3;
+    xData  = N @ Table[ic + 0.1 (ih w + iw), {ic, c}, {ih, h}, {iw, w}];
+    gammaH = N @ {2.0, 1.5};
+    betaH  = N @ {0.1, -0.2};
+    meanH  = N @ {1.5, 2.5};
+    varH   = N @ {0.5, 0.7};
+    x = TTensorCreate @ NumericArray[xData,  "Real32"];
+    g = TTensorCreate @ NumericArray[gammaH, "Real32"];
+    b = TTensorCreate @ NumericArray[betaH,  "Real32"];
+    mu  = TTensorCreate @ NumericArray[meanH, "Real32"];
+    sg2 = TTensorCreate @ NumericArray[varH,  "Real32"];
+    r   = TRealize @ TBatchNorm[x, g, b, mu, sg2, 1.0*^-5];
+    ref = Table[
+        gammaH[[ic]] (xData[[ic, ih, iw]] - meanH[[ic]]) / Sqrt[varH[[ic]] + 1.0*^-5]
+            + betaH[[ic]],
+        {ic, c}, {ih, h}, {iw, w}];
+    {TTensorShape[r], Max @ Abs @ Flatten[Normal @ TTensorData[r] - ref]},
+    {{c, h, w}, _ ? (# < 1.0*^-5 &)},
+    SameTest -> MatchQ,
+    TestID -> "nn/batchnorm-rank3-matches-formula"
+]
+
+VerificationTest[
+    TInit[];
+    logitsH = N @ {1.0, 2.0, 3.0};
+    targetH = N @ {0.0, 1.0, 0.0};       (* one-hot at index 1 *)
+    logits  = TTensorCreate @ NumericArray[logitsH, "Real32"];
+    target  = TTensorCreate @ NumericArray[targetH, "Real32"];
+    loss    = First @ Normal @ TTensorData @ TRealize @
+                TSparseCategoricalCrossEntropy[logits, target];
+    expected = Log[Total[Exp[logitsH]]] - logitsH[[2]];
+    Abs[loss - expected],
+    _ ? (# < 1.0*^-5 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/sparse-ce-rank1-matches-logsumexp"
+]
+
+VerificationTest[
+    TInit[];
+    logitsH = N @ {{1, 2, 3}, {2, 1, 0}};
+    targetsH = N @ {{0, 1, 0}, {1, 0, 0}};
+    logits   = TTensorCreate @ NumericArray[logitsH, "Real32"];
+    target   = TTensorCreate @ NumericArray[targetsH, "Real32"];
+    loss     = First @ Normal @ TTensorData @ TRealize @
+                 TSparseCategoricalCrossEntropy[logits, target];
+    perRow   = Table[Log[Total[Exp[logitsH[[i]]]]] - logitsH[[i]] . targetsH[[i]],
+                     {i, Length[logitsH]}];
+    Abs[loss - Mean[perRow]],
+    _ ? (# < 1.0*^-5 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/sparse-ce-rank2-batch-mean"
+]
+
+VerificationTest[
+    TInit[];
+    wH = NumericArray[{1.0, 2.0, 3.0},   "Real32"];
+    gH = NumericArray[{0.1, -0.2, 0.05}, "Real32"];
+    mH = NumericArray[{0.0, 0.0, 0.0},   "Real32"];
+    vH = NumericArray[{0.0, 0.0, 0.0},   "Real32"];
+    lr = 0.001; b1 = 0.9; b2 = 0.999; eps = 1.0*^-8;
+    {wRef, mRef, vRef} = TAdamHostStep[
+        {wH}, {gH}, {mH}, {vH}, lr, b1, b2, eps, 1];
+    w = TTensorCreate @ wH;
+    g = TTensorCreate @ gH;
+    m = TTensorCreate @ mH;
+    v = TTensorCreate @ vH;
+    TAdam[{w}, {g}, {m}, {v}, 1, lr, b1, b2, eps];
+    Max @ Abs @ Flatten @ {
+        Normal @ TTensorData[w] - Normal[wRef[[1]]],
+        Normal @ TTensorData[m] - Normal[mRef[[1]]],
+        Normal @ TTensorData[v] - Normal[vRef[[1]]]
+    },
+    _ ? (# < 1.0*^-5 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/adam-tassign-form-matches-host-adam"
 ]
