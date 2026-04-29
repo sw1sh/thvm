@@ -670,14 +670,29 @@ fromLayer[ThreadingLayer, layer_, xs_List] := Module[{f, isPlus, isTimes},
    the matmul we want is `x . W^T + b`, so transpose the weights
    via TUOpPermute when handing them to TLinear (which wants
    {in, out}). *)
+(* Per-layer cache of pre-transposed weight tensors.  Wolfram's
+   LinearLayer stores Weights in {out, in} order; TLinear wants
+   {in, out}.  A runtime TUOpPermute forces strided materialisation
+   of the WHOLE weight buffer on every call (~200ms for a 768x3072
+   matmul); pre-transposing once host-side and caching the resulting
+   contig TTerm keeps the per-call cost down to the actual sgemm. *)
+$linearTransposedCache = <||>;
+
+linearTransposedTensor[layer_LinearLayer] := With[{key = layer},
+    Lookup[$linearTransposedCache, key,
+        $linearTransposedCache[key] = TTensorCreate @ NumericArray[
+            Transpose @ Normal @ NetExtract[layer, "Weights"], "Real32"]
+    ]]
+
+linearBiasTensor[layer_LinearLayer] := With[{key = Hold[layer, "b"]},
+    Lookup[$linearTransposedCache, key,
+        $linearTransposedCache[key] =
+            TTensorCreate @ NetExtract[layer, "Biases"]]]
+
 fromLayer[NetMapOperator, layer_, x_TTerm] := Module[{inner},
     inner = NetExtract[layer, "Net"];
     If[ Head[inner] === LinearLayer,
-        Module[{w, b, wT},
-            {w, b} = TLayerToTensors[inner];
-            wT = TUOpPermute[w, {1, 0}];
-            TLinear[x, wT, b]
-        ],
+        TLinear[x, linearTransposedTensor[inner], linearBiasTensor[inner]],
         (* Fallback: try generic dispatch with the same x. *)
         TFromLayer[inner, x]
     ]
