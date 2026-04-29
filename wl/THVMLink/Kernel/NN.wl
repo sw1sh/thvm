@@ -56,6 +56,10 @@ TTanh::usage            = "TTanh[x] = elementwise tanh, implemented as (u - 1)/(
 TSoftmax::usage         = "TSoftmax[x] = exp(x) / sum(exp(x)) over the last axis.  exp via the EXP2 + log2(e) chain.  Numerically naive (no max-subtract stabilisation) -- input magnitudes >~80 will overflow exp.  Forward only.";
 TLog::usage             = "TLog[x] = elementwise natural log, implemented as LOG2(x) * ln(2) since the runtime has UOP_LOG2 but no UOP_LOG.";
 TCrossEntropyLoss::usage = "TCrossEntropyLoss[pred, target] = -sum(target * log(pred)).  Probability-form categorical cross-entropy.  Both inputs are TTerms with the same shape; target is typically a one-hot vector.  Forward only -- LOG2 has no grad rule yet.";
+TMaxPool2d::usage        = "TMaxPool2d[x] / TMaxPool2d[x, k] runs a non-overlapping kxk max-pool over the trailing two axes of a rank-3 channels-first tensor {C, H, W}.  Default k=2.  Lowered as RESHAPE {C, H, W} -> {C, H/k, k, W/k, k} + two REDUCE_MAX over the inserted k-axes.  H and W must be divisible by k.";
+TLayerNorm::usage        = "TLayerNorm[x] / TLayerNorm[x, eps] normalises along the last axis: y = (x - mean) / sqrt(var + eps).  Default eps=1e-5.  mean / var are scalar reductions broadcast back via the softmax-style reduce-broadcast pattern; the scheduler's relaxation pass collapses each reduce + its broadcast tail into one kernel where it can.";
+TSoftmaxAxis::usage      = "TSoftmaxAxis[x, axis] = exp(x) / sum(exp(x)) reduced along `axis`.  Generalises TSoftmax (which is hard-coded to axis 0).  The dropped axis is re-introduced as size 1 + EXPAND'd back so the elementwise mul has matching shapes; same softmax-style reduce-broadcast shape.";
+TAttention::usage        = "TAttention[Q, K, V] computes scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.  Q is {seq_q, d_k}; K is {seq_k, d_k}; V is {seq_k, d_v}.  Result is {seq_q, d_v}.  Pure assembly of TMatMul + TSoftmaxAxis + TMatMul; the two matmuls dispatch through cblas_sgemm.";
 
 Begin["`Private`"];
 
@@ -135,8 +139,8 @@ TMatVec[w_TTerm, x_TTerm] := With[{shapeW = TTensorShape[w]},
    REDUCE_SUM with inner=N, where input buffers are M*K and K*N
    floats) and routes to cblas_sgemm. *)
 TMatMul[a_TTerm, b_TTerm] := With[{
-    shapeA = TTensorShape[a],
-    shapeB = TTensorShape[b]
+    shapeA = tUopShape[a],
+    shapeB = tUopShape[b]
 },
     Module[{m, k, n, ab, bb},
         m = shapeA[[1]];
@@ -145,6 +149,124 @@ TMatMul[a_TTerm, b_TTerm] := With[{
         ab = TUOpExpand[TUOpReshape[a, {m, k, 1}], {m, k, n}];
         bb = TUOpExpand[TUOpReshape[b, {1, k, n}], {m, k, n}];
         TUOpReduce[TUOpMul[ab, bb], 1, "SUM"]
+    ]
+]
+
+(* TMaxPool2d[x, k] -- non-overlapping kxk max-pool over the last
+   two axes of {C, H, W}.  Reshape {C, H, W} -> {C, H/k, k, W/k, k}
+   is contiguity-preserving (memory layout of {C, H, W} row-major
+   IS {C, H/k, k, W/k, k} row-major when H = (H/k)*k and W likewise),
+   so EXPAND/PERMUTE aren't needed -- a plain RESHAPE plus two
+   REDUCE_MAX on the inserted k-axes does it.  Reduce axis 2 first
+   (so axis 3 in the rank-5 shape -- the second k -- shifts down to
+   axis 3 in the resulting rank-4 shape, ready for the second reduce). *)
+TMaxPool2d[x_TTerm] := TMaxPool2d[x, 2]
+TMaxPool2d[x_TTerm, k_Integer] := With[{shape = tUopShape[x]},
+    Module[{c, h, w},
+        c = shape[[1]];
+        h = shape[[2]];
+        w = shape[[3]];
+        TUOpReduce[
+            TUOpReduce[
+                TUOpReshape[x, {c, h/k, k, w/k, k}],
+                2, "MAX"],
+            3, "MAX"]
+    ]
+]
+
+(* TLayerNorm[x, eps] -- normalize along the last axis.
+       mean    = sum(x)         / N        scalar (per "row" if rank > 1)
+       var     = sum((x-mean)^2) / N
+       y       = (x - mean) / sqrt(var + eps)
+
+   For a rank-1 input {N}, both reductions collapse to true scalars.
+   For higher rank, reductions drop the last axis and we reshape +
+   EXPAND back to broadcast across that axis (same shape pattern as
+   TSoftmaxAxis below).
+
+   Two REDUCEs (mean + var) means the Phase-3 single-REDUCE relaxation
+   doesn't fire; layernorm currently materializes mean as its own
+   kernel.  The variance + normalise tail then fuses into one kernel
+   via the same softmax-style relaxation when var's broadcast chain
+   ends in an EXPAND (which it does -- (x - mean) feeds into a
+   square-sum-recip-sqrt-broadcast-mul). *)
+TLayerNorm[x_TTerm] := TLayerNorm[x, 1.0*^-5]
+TLayerNorm[x_TTerm, eps_?NumericQ] := With[{shape = tUopShape[x]},
+    Module[{rank, axis, n, sumShape, recipN, mean, centered, var, denom},
+        rank     = Length[shape];
+        axis     = rank - 1;                         (* last axis *)
+        n        = shape[[rank]];
+        sumShape = ReplacePart[shape, rank -> 1];    (* for re-broadcast *)
+        recipN   = TUOpConst[N[1.0/n], "f32"];
+        (* mean = (sum(x) / N), broadcast back to input shape *)
+        mean = TUOpExpand[
+            TUOpReshape[
+                TUOpMul[TUOpReduce[x, axis, "SUM"],
+                        TUOpExpand[recipN, ReplacePart[shape, rank -> 1]]],
+                sumShape],
+            shape];
+        centered = TUOpAdd[x, TUOpNeg[mean]];
+        var = TUOpExpand[
+            TUOpReshape[
+                TUOpMul[TUOpReduce[TUOpMul[centered, centered], axis, "SUM"],
+                        TUOpExpand[recipN, ReplacePart[shape, rank -> 1]]],
+                sumShape],
+            shape];
+        denom = TUOpRecip[TUOpSqrt[
+            TUOpAdd[var, TUOpExpand[TUOpConst[N[eps], "f32"], shape]]]];
+        TUOpMul[centered, denom]
+    ]
+]
+
+(* TSoftmaxAxis[x, axis] -- softmax along an arbitrary axis of a
+   rank-N tensor.  Generalises TSoftmax (axis = 0 only).  The
+   reduced axis is re-introduced as a unit dim via TUOpReshape so
+   TUOpExpand can broadcast back.
+
+   For axis = 0 on a rank-1 input the math reduces to TSoftmax: the
+   sumShape is {1}, the reshape is contig, the expand fans the
+   scalar back to {N}.  Higher-rank cases (e.g. attention's row-wise
+   softmax over the last axis of a {seq_q, seq_k} score matrix) use
+   the same code path. *)
+TSoftmaxAxis[x_TTerm, axis_Integer] := With[{shape = tUopShape[x]},
+    Module[{e, sumShape, r, recipBroadcast},
+        e        = tExp[x];
+        sumShape = ReplacePart[shape, axis + 1 -> 1];
+        r        = TUOpReduce[e, axis, "SUM"];
+        recipBroadcast =
+            TUOpExpand[TUOpRecip[TUOpReshape[r, sumShape]], shape];
+        TUOpMul[e, recipBroadcast]
+    ]
+]
+
+(* TAttention[Q, K, V] -- scaled dot-product attention.
+       Q : {seq_q, d_k}
+       K : {seq_k, d_k}
+       V : {seq_k, d_v}
+       output = softmax(Q K^T / sqrt(d_k)) V    : {seq_q, d_v}
+
+   K^T comes from a TUOpPermute axes={1,0}; the resulting
+   non-contiguous view feeds straight into TMatMul, which materialises
+   the shape via the standard RESHAPE+EXPAND pattern.  Both matmuls
+   dispatch through cblas_sgemm.  Softmax-along-last-axis is the
+   row-wise normalisation each query needs. *)
+TAttention[q_TTerm, k_TTerm, v_TTerm] := With[{
+    shapeQ = tUopShape[q],
+    shapeK = tUopShape[k]
+},
+    Module[{seqQ, seqK, dk, scale, kT, scores, attn},
+        seqQ  = shapeQ[[1]];
+        seqK  = shapeK[[1]];
+        dk    = shapeK[[2]];
+        scale = TUOpConst[N[1.0/Sqrt[dk]], "f32"];
+        (* K^T : {seq_k, d_k} -> {d_k, seq_k}.  Non-contiguous view;
+           TMatMul's RESHAPE forces materialization through the view-
+           strided fast path the CPU/Metal interpreters already handle. *)
+        kT     = TUOpPermute[k, {1, 0}];
+        scores = TUOpMul[TMatMul[q, kT],
+                         TUOpExpand[scale, {seqQ, seqK}]];
+        attn   = TSoftmaxAxis[scores, 1];
+        TMatMul[attn, v]
     ]
 ]
 
@@ -254,11 +376,11 @@ fromLayer[PoolingLayer, layer_, x_TTerm] := Module[{
         Return @ Failure["NotImplemented",
             <|"Message" -> "PoolingLayer non-overlap requires H, W divisible by kernel",
               "InputShape" -> shape, "KernelSize" -> kSize|>]];
-    TUOpReduce[
-        TUOpReduce[
-            TUOpReshape[x, {c, h/kh, kh, w/kw, kw}],
-            2, "MAX"],
-        3, "MAX"]
+    If[ kh =!= kw,
+        Return @ Failure["NotImplemented",
+            <|"Message" -> "PoolingLayer non-square kernel sizes need a separate path",
+              "KernelSize" -> kSize|>]];
+    TMaxPool2d[x, kh]
 ]
 
 fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op},

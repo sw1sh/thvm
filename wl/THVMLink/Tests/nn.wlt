@@ -550,3 +550,65 @@ VerificationTest[
     {{10}, 1.0},
     TestID -> "nn/lenet-end-to-end-forward-shape-and-softmax-sum"
 ]
+
+(* === Phase-5 NN building blocks ===
+   TMaxPool2d / TLayerNorm / TSoftmaxAxis / TAttention.  Pin both
+   the numerics and the kernel-count claim so the scheduler can't
+   silently regress fusion. *)
+
+(* TMaxPool2d 2x2 on a {1, 4, 4} channels-first input.  Memory layout
+   reshape {1,4,4} -> {1,2,2,2,2} is contiguity-preserving, then two
+   REDUCE_MAX (one per inserted k-axis) collapse to {1,2,2}. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[N @ {Partition[Range[16], 4]}, "Real32"];
+    r = TRealize @ TMaxPool2d[x, 2];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{1, 2, 2}, {{{6., 8.}, {14., 16.}}}},
+    TestID -> "nn/maxpool2d-2x2-on-1x4x4"
+]
+
+(* TLayerNorm on a rank-1 {N} input: zero-mean, unit-variance output.
+   Two REDUCEs (mean + variance) prevent the Phase-3 single-REDUCE
+   fusion from collapsing the whole graph; the variance + normalise
+   tail still fuses through the broadcast-chain relaxation. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    r = TRealize @ TLayerNorm[x];
+    Normal @ TTensorData[r],
+    {-1.34164, -0.447212, 0.447212, 1.34164},
+    SameTest -> (Max[Abs[#1 - #2]] < 1.0*^-4 &),
+    TestID -> "nn/layernorm-rank1-zero-mean-unit-var"
+]
+
+(* TSoftmaxAxis along the last axis of a rank-2 input.  Each row
+   independently sums to 1.  Same KProgOp[] shape as the row-wise
+   softmax inside attention. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[N @ {{1, 2, 3}, {0, 0, 0}}, "Real32"];
+    r = TRealize @ TSoftmaxAxis[x, 1];
+    Total /@ Normal @ TTensorData[r],
+    {1.0, 1.0},
+    SameTest -> (Max[Abs[#1 - #2]] < 1.0*^-4 &),
+    TestID -> "nn/softmaxaxis-rows-sum-to-one"
+]
+
+(* TAttention with an identity-like Q against an axis-aligned K
+   selects rows of V softly via the scaled scores.  The exact values
+   are computed offline (scores = Q@K^T / sqrt(4) -> softmax over the
+   last axis -> @ V); pin them so a regression in TMatMul or the
+   axis-1 softmax broadcast pattern is caught. *)
+VerificationTest[
+    TInit[];
+    q = TTensorCreate @ NumericArray[N @ {{1, 0, 0, 0}, {0, 1, 0, 0}}, "Real32"];
+    k = TTensorCreate @ NumericArray[N @ {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}, "Real32"];
+    v = TTensorCreate @ NumericArray[N @ {{0.1, 0.2}, {0.3, 0.4}, {0.5, 0.6}}, "Real32"];
+    r = TRealize @ TAttention[q, k, v];
+    {TTensorShape[r], Normal @ TTensorData[r]},
+    {{2, 2}, {{0.264441, 0.364441}, {0.300000, 0.400000}}},
+    SameTest -> (#1[[1]] === #2[[1]]
+              && Max[Abs[Flatten[#1[[2]] - #2[[2]]]]] < 1.0*^-4 &),
+    TestID -> "nn/attention-identity-q-row-selection"
+]
