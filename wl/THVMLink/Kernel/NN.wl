@@ -49,6 +49,7 @@ TSquare::usage          = "TSquare[x] = TUOpMul[x, x].";
 TDot::usage             = "TDot[a, b] = TSum[TUOpMul[a, b]].";
 TMatVec::usage          = "TMatVec[W, x] computes W @ x where W has shape {out, in} and x has shape {1, in}.  Result has shape {out}.  EXPAND-broadcast then REDUCE_SUM along the inner axis.";
 TMatMul::usage          = "TMatMul[A, B] computes A @ B where A has shape {M, K} and B has shape {K, N}.  Result has shape {M, N}.  Lowered as RESHAPE + EXPAND to a common {M, K, N} shape, MUL elementwise, then REDUCE_SUM along axis 1.  cpu_blas_dispatch recognises this KProgOp[] pattern and routes to cblas_sgemm.";
+TLinear::usage          = "TLinear[x, W, b] computes x @ W + b where x has shape {..., M, K}, W has shape {K, N}, and b has shape {N} (or None for bias-free).  The bias is reshaped to {1,...,1,N} and EXPAND'd to the matmul output shape; without the explicit EXPAND the elementwise numel-cycle aligns only the first leading-axis row and writes garbage into the rest.  Standard nn.Linear analogue (tinygrad's Tensor.linear).";
 TL2Loss::usage          = "TL2Loss[x] = TSum[TSquare[x]].";
 TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
 TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
@@ -64,10 +65,18 @@ TBatchNorm::usage        = "TBatchNorm[x, gamma, beta, mean, var] / TBatchNorm[x
 TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution as a kh*kw-unrolled chain of SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD primitives.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  No bespoke CONV2D opcode -- autograd flows through primitives via the chain rule.  Phase 9 follow-up: replace the kh*kw partials with a single im2col + sgemm dispatch.";
 TGlorot::usage           = "TGlorot[shape] returns a NumericArray of the given shape, filled with samples from N(0, sqrt(2 / fan_in)) (Glorot/Xavier-He init).  fan_in = product of all dims after the first.  Suitable for ReLU / linear layer weight init.";
 TZeros::usage            = "TZeros[shape] returns a Real32 NumericArray of zeros at the given shape.  Convenience for bias init / running-stat init.";
+TOnes::usage             = "TOnes[shape] returns a Real32 NumericArray of ones at the given shape.  Convenience for layer-norm gamma init / scale-1 placeholders.";
 TZerosLike::usage        = "TZerosLike[t] returns a TTensor handle of zeros matching the shape and dtype of TTerm `t`.  Suitable for seeding Adam m/v moment buffers.";
 TOneHot::usage           = "TOneHot[label, n] returns a Real32 NumericArray of length n with a 1.0 at index `label` (0-indexed) and 0.0 elsewhere.  Convenience for sparse-categorical-CE targets.";
 
 TSparseCategoricalCrossEntropy::usage = "TSparseCategoricalCrossEntropy[logits, targetOneHot] computes the categorical cross-entropy loss given pre-softmax logits and a one-hot target.  Lowers to log(sum(exp(logits))) - sum(target * logits) along the last axis, then averages over the leading batch axis (rank-1 logits have no batch dim and skip the average).  Numerically naive (no max-subtract); for the f32 inputs the MNIST training pipeline produces the magnitudes stay well within range.";
+
+TEmbedding::usage        = "TEmbedding[table, idx] returns row idx of a {V, D} table as a TTerm of shape {D}.  idx is a host-side Integer; lowers as TUOpShrink[table, {{idx, idx+1}, {0, D}}] + TUOpReshape to {D}.  Dynamic-idx gather (idx as a runtime tensor) needs a future UOP_GATHER opcode.";
+TEmbeddingMatrix::usage  = "TEmbeddingMatrix[table, ids] gathers rows `ids` from a {V, D} table into a {Length[ids], D} matrix.  ids is a host-side List[Integer].  Lowers as one TEmbedding + TUOpReshape to {1, D} per id, then stitches along the leading axis via PAD + sum (same idiom as TMultiHeadAttention's per-head concat -- no STACK op in thvm).  Dynamic-id gather needs a future UOP_GATHER opcode.";
+TGELU::usage             = "TGELU[x] applies the tanh-form GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).  Composes via existing TTanh -- no new opcode required.";
+TCausalMask::usage       = "TCausalMask[seq] returns a {seq, seq} TTerm wrapping a fresh tensor whose entries are 0 at (i, j) with j <= i and -1e9 at j > i.  Add to attention scores before softmax to zero out future-token attention.";
+TLayerNormAffine::usage  = "TLayerNormAffine[x, gamma, beta] applies TLayerNorm[x] then multiplies by gamma + adds beta along the last axis.  GPT-2's layer-norm carries learned gamma/beta; the bare TLayerNorm in this file normalises only.";
+TMultiHeadAttention::usage = "TMultiHeadAttention[Q, K, V, n_heads, mask] computes multi-head scaled dot-product attention.  Q, K, V are {seq, dim} TTerms with dim = n_heads * d_head; mask is a {seq, seq} additive bias (use TCausalMask) or None.  Splits each projection to {n_heads, seq, d_head} via reshape + permute, runs scaled-dot per head, concatenates back to {seq, dim}.  Per-head loop today (batched sgemm is a Phase 12 follow-up).";
 
 Begin["`Private`"];
 
@@ -169,6 +178,8 @@ TGlorot[shape_List] := NumericArray[
 
 TZeros[shape_List] := NumericArray[ConstantArray[0., shape], "Real32"]
 
+TOnes[shape_List] := NumericArray[ConstantArray[1., shape], "Real32"]
+
 TZerosLike[t_TTerm] := TTensorCreate @ TZeros[TTensorShape[t]]
 
 TOneHot[label_Integer, n_Integer] := NumericArray[
@@ -205,6 +216,26 @@ TMatMul[a_TTerm, b_TTerm] := With[{
         ab = TUOpExpand[TUOpReshape[a, {m, k, 1}], {m, k, n}];
         bb = TUOpExpand[TUOpReshape[b, {1, k, n}], {m, k, n}];
         TUOpReduce[TUOpMul[ab, bb], 1, "SUM"]
+    ]
+]
+
+(* TLinear[x, W, b] -- standard nn.Linear forward = x @ W + b.
+   The bias is rank-1 {N}; reshape to {1, ..., 1, N} and EXPAND
+   to the matmul's output shape.  Without the explicit EXPAND,
+   {seq,N} + {N} via the elementwise numel-cycle aligns only the
+   first row and writes garbage into the rest.  The TLayerNorm
+   reduction-broadcast pattern uses the same EXPAND trick. *)
+TLinear[x_TTerm, w_TTerm, b_TTerm] := With[{
+    shapeX = tUopShape[x],
+    shapeW = tUopShape[w]
+},
+    Module[{out, bcast, prod, biasShape},
+        prod = TMatMul[x, w];
+        out = ReplacePart[shapeX, Length[shapeX] -> shapeW[[2]]];
+        biasShape = ConstantArray[1, Length[out]];
+        biasShape[[Length[out]]] = shapeW[[2]];
+        bcast = TUOpExpand[TUOpReshape[b, biasShape], out];
+        prod + bcast
     ]
 ]
 
@@ -356,6 +387,114 @@ TAttention[q_TTerm, k_TTerm, v_TTerm] := With[{
         attn   = TSoftmaxAxis[scores, 1];
         TMatMul[attn, v]
     ]
+]
+
+(* === GPT-2 building blocks ==================================
+   The five entries below are pure WL composition over the layers
+   above (TLayerNorm, TMatMul, TSoftmaxAxis, TTanh) plus existing
+   movement primitives.  Modeled on tinygrad's `extra/models/gpt2.py`
+   surface but expressed in thvm's `T*` flavor.  No new C/IR work. *)
+
+TEmbedding[table_TTerm, idx_Integer] := With[{shape = tUopShape[table]},
+    Module[{d},
+        d = shape[[2]];
+        TUOpReshape[
+            TUOpShrink[table, {{idx, idx + 1}, {0, d}}],
+            {d}]
+    ]
+]
+
+TEmbeddingMatrix[table_TTerm, ids_List] := With[{
+    shape = tUopShape[table]
+},
+    Module[{d, len, rows, padded},
+        d   = shape[[2]];
+        len = Length[ids];
+        rows = TUOpReshape[TEmbedding[table, #], {1, d}] & /@ ids;
+        padded = MapIndexed[
+            TUOpPad[#1, {{First[#2] - 1, len - First[#2]}, {0, 0}}] &,
+            rows];
+        Fold[Plus, First[padded], Rest[padded]]
+    ]
+]
+
+TGELU[x_TTerm] := With[{
+    sqrt2OverPi = Sqrt[2.0 / Pi]            (* ~ 0.7978845608... *),
+    halfCubeC   = 0.044715
+},
+    (* x * x * x rather than x^3: there's no Power[t_TTerm, n_Integer]
+       UpValue for n != 1/2, -1, so x^3 would stay unevaluated. *)
+    0.5 * x * (1 + TTanh[sqrt2OverPi * (x + halfCubeC * (x * x * x))])
+]
+
+TCausalMask[seq_Integer] := TTensorCreate @ NumericArray[
+    Table[ If[ j <= i, 0.0, -1.0*^9], {i, seq}, {j, seq}],
+    "Real32"]
+
+TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{
+    shape = tUopShape[x],
+    norm  = TLayerNorm[x]
+},
+    Module[{rank, gammaB, betaB, broadcastShape},
+        rank = Length[shape];
+        broadcastShape = ConstantArray[1, rank];
+        broadcastShape[[rank]] = shape[[rank]];
+        (* Reshape rank-1 {D} -> {1,...,1,D} then EXPAND to full
+           shape.  Without the explicit EXPAND, the elementwise
+           numel-cycle in MUL/ADD reads gamma/beta in the wrong
+           stride pattern across the leading axes and silently
+           produces denormals.  Tested at seq=4, dim=16: bare
+           {seq,dim}*{1,dim} returns garbage; EXPAND[{1,dim} ->
+           {seq,dim}] is correct. *)
+        gammaB = TUOpExpand[TUOpReshape[gamma, broadcastShape], shape];
+        betaB  = TUOpExpand[TUOpReshape[beta,  broadcastShape], shape];
+        norm * gammaB + betaB
+    ]
+]
+
+TMultiHeadAttention[q_TTerm, k_TTerm, v_TTerm,
+                    nHeads_Integer, mask_:None] := With[{
+    shapeQ = tUopShape[q]
+},
+    Module[{seq, dim, dHead, qH, kH, vH, perHead, headOuts},
+        seq   = shapeQ[[1]];
+        dim   = shapeQ[[2]];
+        dHead = dim / nHeads;
+        (* {seq, dim} -> {seq, nHeads, dHead} -> {nHeads, seq, dHead} *)
+        qH = TUOpPermute[TUOpReshape[q, {seq, nHeads, dHead}], {1, 0, 2}];
+        kH = TUOpPermute[TUOpReshape[k, {seq, nHeads, dHead}], {1, 0, 2}];
+        vH = TUOpPermute[TUOpReshape[v, {seq, nHeads, dHead}], {1, 0, 2}];
+        perHead[h_] := Module[{qSlice, kSlice, vSlice, scores, scoresM, attn},
+            qSlice = TUOpReshape[
+                TUOpShrink[qH, {{h, h + 1}, {0, seq}, {0, dHead}}],
+                {seq, dHead}];
+            kSlice = TUOpReshape[
+                TUOpShrink[kH, {{h, h + 1}, {0, seq}, {0, dHead}}],
+                {seq, dHead}];
+            vSlice = TUOpReshape[
+                TUOpShrink[vH, {{h, h + 1}, {0, seq}, {0, dHead}}],
+                {seq, dHead}];
+            scores = TMatMul[qSlice, TUOpPermute[kSlice, {1, 0}]] /
+                     Sqrt[N @ dHead];
+            scoresM = If[ mask === None, scores, scores + mask];
+            attn   = TSoftmaxAxis[scoresM, 1];
+            TMatMul[attn, vSlice]
+        ];
+        headOuts = perHead /@ Range[0, nHeads - 1];
+        headStitch[headOuts, seq, nHeads, dHead]
+    ]
+]
+
+(* Stitch a list of nHeads {seq, dHead} TTerms into {seq, dim=
+   nHeads*dHead} via per-head PAD into the corresponding column
+   slice + sum.  No STACK op in thvm. *)
+headStitch[heads_List, seq_, nHeads_, dHead_] := With[{
+    padded = Table[
+        TUOpPad[heads[[h + 1]],
+            {{0, 0}, {h * dHead, (nHeads - h - 1) * dHead}}],
+        {h, 0, nHeads - 1}]
+},
+    Fold[Plus, First[padded], Rest[padded]]
 ]
 
 (* === Wolfram-layer parameter access ===================== *)
