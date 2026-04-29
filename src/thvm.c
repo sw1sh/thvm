@@ -132,6 +132,15 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "backend/cpu/op/shrink.c"
 #include "backend/cpu/op/permute.c"
 #include "backend/cpu/interpret.c"
+// codegen/ is backend-agnostic: cg_emit walks a KernelEntry's program[]
+// and dispatches per KProgOp through a Renderer.  render_c.c supplies
+// the C99 renderer (used by the CPU JIT just below); future Metal /
+// CUDA / LLVM renderers slot in next to render_c.c.
+#include "codegen/cg.c"
+#include "codegen/render_c.c"
+// JIT codegen + dispatch.  Lives after interpret.c so cpu_dispatch_kernel
+// can fall back to cpu_interpret on any unsupported op or build failure.
+#include "backend/cpu/jit.c"
 #include "backend/cpu/_.c"
 
 // === backend/metal/ ===

@@ -128,6 +128,14 @@ cleanup:
   return rc;
 }
 
+// Forward decl: defined in backend/cpu/jit.c (included after this file
+// in thvm.c, so we declare here to satisfy the dispatcher).
+fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+
 fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  // Try the JIT path first (clang-compiled fused inner loop, cached
+  // by program hash).  Returns 0 on any unsupported case (REDUCE,
+  // movement, large input count) and we fall back to the interpreter.
+  if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) return 0;
   return cpu_interpret(ke, in_buf_ids, out_buf_id);
 }
