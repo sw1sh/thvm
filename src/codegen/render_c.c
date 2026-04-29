@@ -1,7 +1,9 @@
 // codegen/render_c.c - C99 renderer for cg_emit.
 //
-// Emits a single fused inner loop that the CPU JIT (backend/cpu/jit.c)
-// shells out to clang to compile into a .dylib.  Function shape:
+// Emits a fused inner-loop kernel that the CPU JIT (backend/cpu/jit.c)
+// shells out to clang to compile into a .dylib.
+//
+// Elementwise mode (no REDUCE in the program):
 //
 //   #include <math.h>
 //   void k(float *out, const float *const *ins,
@@ -10,16 +12,35 @@
 //     ...
 //     for (unsigned i = 0; i < n; i++) {
 //       float r0 = ...;
-//       float r1 = ...;
 //       ...
 //       out[i] = rN;
 //     }
 //     (void)in_numels;
 //   }
 //
+// Reduce-tail mode (last op is UOP_REDUCE):
+//
+//   ...
+//   for (unsigned oi = 0; oi < n; oi++) {
+//     unsigned _outer = oi / _inner;
+//     unsigned _inner_i = oi % _inner;
+//     float acc = 0.0f;     // or -INFINITY for MAX
+//     for (unsigned _k = 0; _k < _axis; _k++) {
+//       unsigned i = _outer * (_axis * _inner) + _k * _inner + _inner_i;
+//       float r0 = ...;     // chain ops re-emitted inside k loop
+//       ...
+//       acc += r{N-1};      // (or `if (rX > acc) acc = rX;` for MAX)
+//     }
+//     out[oi] = acc;
+//   }
+//
+// Variable shadowing: inside the inner k-loop, `unsigned i = ...;` shadows
+// the outer `oi` so per-op input refs (`in0[i]`) keep working with no
+// renderer-side changes.
+//
 // `ins` is an array of float-pointers; numels are passed alongside for
-// future use (today the broadcast decision -- "input numel == 1?" --
-// is baked into the source at emit time).
+// future use (today the broadcast decision -- "input numel == 1?" -- is
+// baked into the source at emit time).
 
 static void rc_emit_src_ref(CgBuf *b, u32 raw, u32 const *in_numels) {
   u32 idx = KSRC_INDEX(raw);
@@ -37,14 +58,49 @@ static void rc_prologue(CgBuf *b, u32 n_inputs) {
                "unsigned n, const unsigned *in_numels) {\n");
   for (u32 i = 0; i < n_inputs; i++)
     cg_append(b, "  const float *in%u = ins[%u];\n", i, i);
-  cg_append(b, "  for (unsigned i = 0; i < n; i++) {\n");
 }
 
 static void rc_epilogue(CgBuf *b, u32 n_inputs) {
   (void)n_inputs;
-  cg_append(b, "  }\n");
   cg_append(b, "  (void)in_numels;\n");
   cg_append(b, "}\n");
+}
+
+static void rc_loop_open_elementwise(CgBuf *b) {
+  cg_append(b, "  for (unsigned i = 0; i < n; i++) {\n");
+}
+
+static void rc_loop_close_elementwise(CgBuf *b, u32 last_step) {
+  cg_append(b, "    out[i] = r%u;\n", last_step);
+  cg_append(b, "  }\n");
+}
+
+static void rc_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size) {
+  cg_append(b, "  unsigned _inner = %uu;\n", inner);
+  cg_append(b, "  unsigned _axis  = %uu;\n", axis_size);
+  cg_append(b, "  for (unsigned oi = 0; oi < n; oi++) {\n");
+  cg_append(b, "    unsigned _outer   = oi / _inner;\n");
+  cg_append(b, "    unsigned _inner_i = oi %% _inner;\n");
+  if (kind == REDUCE_MAX) cg_append(b, "    float acc = -INFINITY;\n");
+  else                    cg_append(b, "    float acc = 0.0f;\n");
+  cg_append(b, "    for (unsigned _k = 0; _k < _axis; _k++) {\n");
+  cg_append(b, "      unsigned i = _outer * (_axis * _inner) + _k * _inner + _inner_i;\n");
+}
+
+static void rc_loop_close_reduce(CgBuf *b, u32 reduce_src_raw, u8 kind,
+                                 u32 const *in_numels) {
+  if (kind == REDUCE_MAX) {
+    cg_append(b, "      { float _v = ");
+    rc_emit_src_ref(b, reduce_src_raw, in_numels);
+    cg_append(b, "; if (_v > acc) acc = _v; }\n");
+  } else {
+    cg_append(b, "      acc += ");
+    rc_emit_src_ref(b, reduce_src_raw, in_numels);
+    cg_append(b, ";\n");
+  }
+  cg_append(b, "    }\n");
+  cg_append(b, "    out[oi] = acc;\n");
+  cg_append(b, "  }\n");
 }
 
 static void rc_emit_const(CgBuf *b, u32 step, u32 dtype, u32 bits) {
@@ -100,15 +156,14 @@ static void rc_emit_unary(CgBuf *b, u32 step, u8 opcode,
   cg_append(b, ";\n");
 }
 
-static void rc_emit_store(CgBuf *b, u32 step) {
-  cg_append(b, "    out[i] = r%u;\n", step);
-}
-
 static const Renderer C_RENDERER = {
-  .prologue    = rc_prologue,
-  .epilogue    = rc_epilogue,
-  .emit_const  = rc_emit_const,
-  .emit_binary = rc_emit_binary,
-  .emit_unary  = rc_emit_unary,
-  .emit_store  = rc_emit_store,
+  .prologue              = rc_prologue,
+  .epilogue              = rc_epilogue,
+  .loop_open_elementwise  = rc_loop_open_elementwise,
+  .loop_close_elementwise = rc_loop_close_elementwise,
+  .loop_open_reduce       = rc_loop_open_reduce,
+  .loop_close_reduce      = rc_loop_close_reduce,
+  .emit_const            = rc_emit_const,
+  .emit_binary           = rc_emit_binary,
+  .emit_unary            = rc_emit_unary,
 };

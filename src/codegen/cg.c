@@ -2,17 +2,26 @@
 //
 // Walks a KernelEntry's program[] and dispatches each KProgOp to a
 // Renderer, which knows how to emit code for one target language
-// (C, MSL, ...).  The emitter is responsible for the iteration
-// order and the high-level structure (prologue, per-op body,
-// epilogue, store).  The Renderer fills in the target-specific
-// syntax (function signature, intrinsic names, broadcast access,
-// ...).
+// (C, MSL, ...).  The emitter owns the high-level structure (function
+// preamble, loop opening, per-op temporaries, loop closing, function
+// postamble); the Renderer fills in the target-specific syntax
+// (signature, intrinsic names, broadcast access, loop headers).
 //
-// Scope today: pure elementwise + CONST chains.  REDUCE / movement
-// ops bail at the predicate (cg_supports) so the caller falls back
-// to the interpreter.  Adding REDUCE later means extending the IR
-// (or rather, the per-op dispatch in cg_emit) with explicit
-// accumulator slots; the Renderer interface stays the same.
+// Two emission modes:
+//
+//   1. "elementwise": program contains only CONST + ALU ops.  Single
+//      per-output loop binds `i = 0..numel-1`; each op writes a
+//      temporary; the last temporary is stored to `out[i]`.
+//
+//   2. "reduce-tail": last op is a REDUCE; everything before it is
+//      elementwise.  Outer loop iterates over output elements (`oi`);
+//      an inner k-loop accumulates over the reduction axis;
+//      inside the inner loop `i` shadows oi to point at the source
+//      index, so existing per-op emitters work unchanged.
+//
+// Anything outside these two shapes (movement ops, multiple REDUCEs,
+// non-tail REDUCE) bails at cg_supports and the caller falls back to
+// the interpreter / per-op shaders.
 
 #include <stdarg.h>
 
@@ -54,53 +63,78 @@ static int cg_append(CgBuf *b, const char *fmt, ...) {
 //   - Inputs named in0, in1, ... (one pointer per ke->n_inputs).
 //   - Output named `out` (single pointer).
 //   - Per-op temporaries named r0, r1, ..., r{n_ops-1}.
-//   - Loop induction var named `i`.
+//   - Iteration variable named `i` -- in elementwise mode this is the
+//     thread/loop index 0..n-1; in reduce mode it's shadowed inside
+//     the inner k-loop to point at the source index, so per-op input
+//     refs (`in0[i]`) keep working unchanged.
 
 typedef struct Renderer {
-  // Emit prologue: includes / using-declarations + function signature
-  // + any "unpack inputs" boilerplate + the per-element loop opener.
-  // After this, the emitter starts emitting per-op temporaries.
+  // Function preamble: includes / using-declarations + signature +
+  // input pointer unpack (no loop yet).
   void (*prologue)(CgBuf *b, u32 n_inputs);
 
-  // Emit per-element loop closer + function close.
+  // Function postamble: closing brace, etc.
   void (*epilogue)(CgBuf *b, u32 n_inputs);
 
-  // Emit a CONST temporary: `<dtype> r{step} = <const>;`
+  // Open/close the per-output loop in the elementwise case.  open
+  // binds `i` as 0..n-1.  close emits `out[i] = r{step};` and closes
+  // the loop.
+  void (*loop_open_elementwise) (CgBuf *b);
+  void (*loop_close_elementwise)(CgBuf *b, u32 last_step);
+
+  // Open the reduce-tail loop nest: outer over `oi`, inner over `_k`.
+  // Declares `acc` (zero for SUM, -INFINITY for MAX) and binds `i`
+  // inside the inner loop to the source index.  Caller passes the
+  // REDUCE op's kind / inner / axis_size pre-decoded.
+  void (*loop_open_reduce)(CgBuf *b, u8 kind, u32 inner, u32 axis_size);
+
+  // Close the reduce-tail loop: emit the accumulator update reading
+  // `reduce_src_raw` (input slot or program-step result), close the
+  // inner k-loop, store `out[oi] = acc;`, close the outer loop.
+  void (*loop_close_reduce)(CgBuf *b, u32 reduce_src_raw, u8 kind,
+                            u32 const *in_numels);
+
+  // CONST temporary: `<dtype> r{step} = <const>;`
   void (*emit_const)(CgBuf *b, u32 step, u32 dtype, u32 bits);
 
-  // Emit a binary ALU temporary: `<dtype> r{step} = <lhs> <op> <rhs>;`
-  // or for compares, `<dtype> r{step} = (<lhs> <op> <rhs>) ? 1 : 0;`
-  // src refs: KSRC_AS_INPUT(slot) for input-i references (use bcast
-  // info from in_numels) or program slot index for r{j}.
+  // Binary ALU: `<dtype> r{step} = <lhs> <op> <rhs>;`.  Compares
+  // become `(... < ...) ? 1.0f : 0.0f`.
   void (*emit_binary)(CgBuf *b, u32 step, u8 opcode,
                       u32 src_a, u32 src_b, u32 const *in_numels);
 
-  // Emit a unary ALU temporary: `<dtype> r{step} = op(<src>);`.
+  // Unary ALU: `<dtype> r{step} = op(<src>);`
   void (*emit_unary)(CgBuf *b, u32 step, u8 opcode,
                      u32 src, u32 const *in_numels);
-
-  // Emit the final store: `out[i] = r{step};`
-  void (*emit_store)(CgBuf *b, u32 step);
 } Renderer;
 
 // === supported-op predicate ============================================
 //
-// The current cg_emit / Renderer interface only handles CONST + the
-// elementwise ALU set.  REDUCE and movement ops bail; the caller
-// (cpu_jit_dispatch) falls back to the interpreter.
+// Accepts CONST + the elementwise ALU set anywhere; accepts REDUCE
+// only as the last op (and only SUM / MAX kinds).  Anything else --
+// movement, multi-REDUCE, mid-program REDUCE -- bails and the caller
+// falls back to the interpreter.
 
 int cg_supports(KernelEntry const *ke) {
   for (u32 i = 0; i < ke->n_ops; i++) {
     u8 op = ke->program[i].opcode;
-    switch (op) {
-      case UOP_CONST:
-      case UOP_ADD: case UOP_MUL:
-      case UOP_NEG: case UOP_RECIP: case UOP_SQRT:
-      case UOP_EXP2: case UOP_LOG2:
-      case UOP_CMPLT: case UOP_CMPEQ:
-        break;
-      default:
-        return 0;
+    if (op == UOP_REDUCE) {
+      // REDUCE has to be the last op (the "reduce-tail" pattern --
+      // outer per-output loop + inner accumulator).  A REDUCE
+      // followed by more ops would need a two-pass shader.
+      if (i + 1 != ke->n_ops) return 0;
+      u8 kind = (u8)((ke->program[i].arg >> 24) & 0xFFu);
+      if (kind != REDUCE_SUM && kind != REDUCE_MAX) return 0;
+    } else {
+      switch (op) {
+        case UOP_CONST:
+        case UOP_ADD: case UOP_MUL:
+        case UOP_NEG: case UOP_RECIP: case UOP_SQRT:
+        case UOP_EXP2: case UOP_LOG2:
+        case UOP_CMPLT: case UOP_CMPEQ:
+          break;
+        default:
+          return 0;
+      }
     }
     if (ke->program[i].dtype != DT_F32) return 0;
   }
@@ -120,8 +154,33 @@ fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
   CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0 };
   if (!b.buf) return NULL;
 
+  int has_reduce_tail = ke->n_ops > 0
+                     && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE;
+  u32 chain_end = has_reduce_tail ? ke->n_ops - 1 : ke->n_ops;
+
   r->prologue(&b, ke->n_inputs);
-  for (u32 step = 0; step < ke->n_ops; step++) {
+
+  if (has_reduce_tail) {
+    KProgOp const *rd = &ke->program[ke->n_ops - 1];
+    u8  kind  = (u8)((rd->arg >> 24) & 0xFFu);
+    u32 inner = rd->arg & 0xFFFFFFu;
+    if (inner == 0) inner = 1;
+    // Recover axis_size = src_numel / out_numel.  src is either an
+    // input or an earlier program slot; both numel sources sit in ke.
+    u32 src_numel;
+    {
+      u32 raw = rd->src[0];
+      if (KSRC_IS_INPUT(raw)) src_numel = ke->input_numels[KSRC_INDEX(raw)];
+      else                    src_numel = ke->program[KSRC_INDEX(raw)].numel;
+    }
+    u32 out_numel = rd->numel ? rd->numel : 1;
+    u32 axis_size = src_numel / out_numel;
+    r->loop_open_reduce(&b, kind, inner, axis_size);
+  } else {
+    r->loop_open_elementwise(&b);
+  }
+
+  for (u32 step = 0; step < chain_end; step++) {
     KProgOp const *p = &ke->program[step];
     switch (p->opcode) {
       case UOP_CONST:
@@ -142,7 +201,15 @@ fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
         return NULL;
     }
   }
-  r->emit_store(&b, ke->n_ops - 1);
+
+  if (has_reduce_tail) {
+    KProgOp const *rd = &ke->program[ke->n_ops - 1];
+    u8 kind = (u8)((rd->arg >> 24) & 0xFFu);
+    r->loop_close_reduce(&b, rd->src[0], kind, ke->input_numels);
+  } else {
+    r->loop_close_elementwise(&b, ke->n_ops - 1);
+  }
+
   r->epilogue(&b, ke->n_inputs);
   return b.buf;
 }

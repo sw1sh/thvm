@@ -1,15 +1,15 @@
 // codegen/render_metal.c - Metal Shading Language renderer for cg_emit.
 //
-// Stubs out the Renderer interface for MSL.  Generated function shape:
+// Mirrors render_c.c structurally but emits MSL.  Two emission modes:
+//
+// Elementwise mode (no REDUCE in the program):
 //
 //   #include <metal_stdlib>
 //   using namespace metal;
 //
 //   kernel void k(device float *out                [[buffer(0)]],
 //                 device const float *in0          [[buffer(1)]],
-//                 device const float *in1          [[buffer(2)]],
 //                 ...
-//                 constant const uint *in_numels   [[buffer(N+1)]],
 //                 uint i                           [[thread_position_in_grid]],
 //                 uint n                           [[threads_per_grid]]) {
 //     if (i >= n) return;
@@ -18,25 +18,32 @@
 //     out[i] = rN;
 //   }
 //
-// Differences from C99 renderer (render_c.c):
-//   - No `#include <math.h>`; MSL pulls intrinsics from
-//     <metal_stdlib>.
-//   - No outer for-loop -- the thread index `i` is supplied by the
-//     dispatcher, and one thread maps to one output element.
-//     The bounds check `if (i >= n) return;` covers the over-dispatch
-//     when threads_per_grid is rounded up to a threadgroup multiple.
-//   - Math intrinsics drop the `f` suffix (MSL is C++-templated):
-//     sqrt / exp2 / log2 instead of sqrtf / exp2f / log2f.
-//   - Address-space qualifiers on every pointer parameter (device,
-//     constant, threadgroup).  We use `device` for r/w buffers,
-//     `device const` for read-only inputs.
+// Reduce-tail mode (last op is UOP_REDUCE):
 //
-// This file ONLY emits source.  Compiling MSL into a .metallib +
-// dispatching it lives in src/backend/metal/_.m, which would need a
-// per-fused-program path (currently it builds one shader per UOP
-// primitive).  The stub here is enough to validate the codegen
-// Renderer abstraction; wiring the dispatcher comes when we
-// actually move thvm's Metal backend to fused kernels.
+//     ... // same kernel signature; `i` here = output index
+//     if (i >= n) return;
+//     uint _outer = i / _inner;
+//     uint _inner_i = i % _inner;
+//     float acc = 0.0f;     // or -INFINITY for MAX
+//     for (uint _k = 0; _k < _axis; _k++) {
+//       uint i = _outer * (_axis * _inner) + _k * _inner + _inner_i;  // shadow
+//       float r0 = ...;
+//       ...
+//       acc += r{N-1};
+//     }
+//     out[i_outer_was_thread_idx] = acc;   // emitted as `out[/* threadId */]`
+//
+// The MSL kernel parameter `uint i [[thread_position_in_grid]]` doubles
+// as the output index in reduce mode; we save it into `_oi` before
+// shadowing `i` inside the inner loop, then store back via `out[_oi]`.
+//
+// Differences from C99 renderer (render_c.c):
+//   - <metal_stdlib> for intrinsics; no <math.h>.
+//   - No outer for-loop in elementwise mode -- the thread index `i` is
+//     supplied by the dispatcher, one thread per output element.
+//   - sqrt / exp2 / log2 (no `f` suffix; MSL is C++-templated).
+//   - Address-space qualifiers: `device` for r/w, `device const` for inputs.
+//   - INFINITY: MSL provides `INFINITY` via <metal_stdlib>.
 
 static void rm_emit_src_ref(CgBuf *b, u32 raw, u32 const *in_numels) {
   u32 idx = KSRC_INDEX(raw);
@@ -63,6 +70,43 @@ static void rm_prologue(CgBuf *b, u32 n_inputs) {
 static void rm_epilogue(CgBuf *b, u32 n_inputs) {
   (void)n_inputs;
   cg_append(b, "}\n");
+}
+
+static void rm_loop_open_elementwise(CgBuf *b) {
+  // Nothing to do: the kernel signature already binds `i` and bounds-
+  // checked it; the body just emits per-op temporaries.
+  (void)b;
+}
+
+static void rm_loop_close_elementwise(CgBuf *b, u32 last_step) {
+  cg_append(b, "  out[i] = r%u;\n", last_step);
+}
+
+static void rm_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size) {
+  cg_append(b, "  uint _inner = %uu;\n", inner);
+  cg_append(b, "  uint _axis  = %uu;\n", axis_size);
+  cg_append(b, "  uint _oi    = i;\n");
+  cg_append(b, "  uint _outer   = _oi / _inner;\n");
+  cg_append(b, "  uint _inner_i = _oi %% _inner;\n");
+  if (kind == REDUCE_MAX) cg_append(b, "  float acc = -INFINITY;\n");
+  else                    cg_append(b, "  float acc = 0.0f;\n");
+  cg_append(b, "  for (uint _k = 0; _k < _axis; _k++) {\n");
+  cg_append(b, "    uint i = _outer * (_axis * _inner) + _k * _inner + _inner_i;\n");
+}
+
+static void rm_loop_close_reduce(CgBuf *b, u32 reduce_src_raw, u8 kind,
+                                 u32 const *in_numels) {
+  if (kind == REDUCE_MAX) {
+    cg_append(b, "    { float _v = ");
+    rm_emit_src_ref(b, reduce_src_raw, in_numels);
+    cg_append(b, "; if (_v > acc) acc = _v; }\n");
+  } else {
+    cg_append(b, "    acc += ");
+    rm_emit_src_ref(b, reduce_src_raw, in_numels);
+    cg_append(b, ";\n");
+  }
+  cg_append(b, "  }\n");
+  cg_append(b, "  out[_oi] = acc;\n");
 }
 
 static void rm_emit_const(CgBuf *b, u32 step, u32 dtype, u32 bits) {
@@ -118,24 +162,23 @@ static void rm_emit_unary(CgBuf *b, u32 step, u8 opcode,
   cg_append(b, ";\n");
 }
 
-static void rm_emit_store(CgBuf *b, u32 step) {
-  cg_append(b, "  out[i] = r%u;\n", step);
-}
-
 static const Renderer METAL_RENDERER = {
-  .prologue    = rm_prologue,
-  .epilogue    = rm_epilogue,
-  .emit_const  = rm_emit_const,
-  .emit_binary = rm_emit_binary,
-  .emit_unary  = rm_emit_unary,
-  .emit_store  = rm_emit_store,
+  .prologue              = rm_prologue,
+  .epilogue              = rm_epilogue,
+  .loop_open_elementwise  = rm_loop_open_elementwise,
+  .loop_close_elementwise = rm_loop_close_elementwise,
+  .loop_open_reduce       = rm_loop_open_reduce,
+  .loop_close_reduce      = rm_loop_close_reduce,
+  .emit_const            = rm_emit_const,
+  .emit_binary           = rm_emit_binary,
+  .emit_unary            = rm_emit_unary,
 };
 
 // Bridge for tests: render an arbitrary KernelEntry to MSL and return
 // the source.  Lets the WL-side test grid sanity-check that the same
 // KProgOp[] emits valid Metal source -- proves the Renderer
 // abstraction holds without requiring a Metal-side compile/dispatch
-// path (which lives in backend/metal/_.m and is single-op for now).
+// path.
 char *cg_emit_metal(KernelEntry const *ke) {
   return cg_emit(ke, &METAL_RENDERER);
 }
