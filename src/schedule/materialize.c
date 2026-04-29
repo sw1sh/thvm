@@ -614,9 +614,19 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     return ke->n_ops - 1;
   }
 
-  // REDUCE only allowed when it IS the root (tail-fuse).  Movement
-  // ops + non-tail REDUCE bail (deferred to g2c / g2d).
-  if (op == UOP_REDUCE && loc == root_loc) {
+  // REDUCE -- as the kernel root (tail-fuse) or as an intermediate
+  // op whose result is consumed elementwise (broadcast) by later
+  // program ops.  The "at most one REDUCE per kernel" invariant
+  // (used by cg_emit's reduce-tail / reduce-broadcast modes and by
+  // cpu_op_reduce's per-output indexing) is enforced by counting
+  // REDUCEs already in the program.
+  if (op == UOP_REDUCE) {
+    if (loc != root_loc) {
+      // Non-root REDUCE: only allow ONE per kernel.
+      for (u32 i = 0; i < ke->n_ops; i++) {
+        if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
+      }
+    }
     u32 src_idx = visit(heap_read(loc), ke, root_loc);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
     kernel_program_reserve(ke, ke->n_ops + 1);
@@ -629,15 +639,25 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     // axis IS innermost.  Compute inner from the source shape.
     Shape src_shape = {0};
     u32 inner = 1;
+    u32 src_numel_total = src_numel(ke, src_idx);
     if (term_shape_in(heap_read(loc), 0, &src_shape)) {
       for (u32 i = axis + 1; i < src_shape.ndim; i++) inner *= src_shape.dims[i];
+    }
+    // Output numel of THIS REDUCE op (not necessarily the kernel's
+    // output): src_numel / axis_size.  axis_size = src_shape.dims[axis]
+    // when shape is known; otherwise fall back to the kernel's
+    // output_numel (root-REDUCE case).
+    u32 reduce_numel = ke->output_numel;
+    if (src_shape.ndim > axis) {
+      u32 axis_size = src_shape.dims[axis] ? src_shape.dims[axis] : 1;
+      reduce_numel = src_numel_total / axis_size;
     }
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
     p->opcode = UOP_REDUCE;
     p->dtype  = src_dtype(ke, src_idx);
     p->arg    = (kind << 24) | (inner & 0x00FFFFFFu);
-    p->numel  = ke->output_numel;
+    p->numel  = reduce_numel;
     p->n_src  = 1;
     p->src[0] = src_idx;
     return ke->n_ops - 1;

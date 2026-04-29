@@ -42,20 +42,25 @@ VerificationTest[
 ]
 
 (* Softmax forward.  Naive softmax = exp(x) / sum(exp(x)) -- the
-   exp output is shared by both the REDUCE-tail kernel and the
-   divide kernel, so realize_classify marks it as a multi-consumer
-   boundary and emits it as its own kernel.  Three kernels total
-   (exp, sum-of-exp, divide).  Tinygrad's fused-softmax that
-   re-computes exp inside the divide is deliberately out of scope
-   for this rewrite -- the safe per-realize cap stays at three. *)
+   exp output is shared by both the REDUCE and the divide, so
+   realize_classify still marks it as a multi-consumer boundary
+   (rule b).  After the Phase-3 softmax-style relaxation, the REDUCE
+   itself fuses into the divide kernel: the chain
+   REDUCE -> RECIP -> EXPAND -> MUL collapses to one kernel because
+   the REDUCE's only consumer (RECIP) sits on a scalar-preserving
+   chain bottoming out at an EXPAND back to vector shape.  Two
+   kernels total (exp, fused divide-with-inlined-reduce).  Tinygrad's
+   fully-fused softmax that ALSO recomputes exp inside the divide
+   stays out of scope -- that needs a "vector-cost" inlining
+   heuristic that the relaxation pass does not yet implement. *)
 VerificationTest[
     TInit[];
     x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
     before = TKernelCount[];
     TRealize @ TSoftmax[x];
     kernelDelta[before, TKernelCount[]],
-    3,
-    TestID -> "fusion-count/softmax-forward-eq-3"
+    2,
+    TestID -> "fusion-count/softmax-forward-eq-2"
 ]
 
 (* (a + b) * c -- single elementwise chain fuses to one kernel.

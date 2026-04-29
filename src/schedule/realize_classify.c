@@ -121,6 +121,55 @@ static void realize_walk_rec(Term t, u8 *visited) {
   }
 }
 
+// Walk the heap looking for the unique UOp parent of `child_loc`.
+// Returns the parent's loc, or 0 if there are zero or 2+ parents.
+// Used by the softmax-relaxation pass to confirm the consumer chain.
+static u64 realize_unique_uop_parent(u64 child_loc) {
+  u64 found = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    u64 ploc = REALIZE_INFO[i].loc;
+    u8  pop  = REALIZE_INFO[i].op;
+    if (ploc == child_loc) continue;
+    u8 ar = uop_arity(pop);
+    int hits = 0;
+    for (u8 j = 0; j < ar; j++) {
+      Term c = term_resolve(heap_read(ploc + j));
+      if (term_tag(c) != TAG_UOP) continue;
+      if (term_val(c) == child_loc) { hits = 1; break; }
+    }
+    if (hits) {
+      if (found != 0) return 0;     // 2+ parents: bail
+      found = ploc;
+    }
+  }
+  return found;
+}
+
+// Walk a REDUCE's consumer chain and return 1 iff every hop is
+// scalar-preserving until we hit an EXPAND (the broadcast back to
+// vector shape).  The chain pattern this matches is exactly:
+//     REDUCE -> {RECIP|NEG|SQRT|EXP2|LOG2|...} -> EXPAND
+// which is what TSoftmax + the "normalize by sum" idiom produce.
+// CONST + binary ops where both srcs are scalars also pass.
+static int realize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
+  u64 cur = reduce_loc;
+  for (u32 hops = 0; hops < 8; hops++) {     // bounded -- pathological chain bails
+    u64 parent = realize_unique_uop_parent(cur);
+    if (parent == 0) return 0;
+    u32 idx = realize_info_find(parent);
+    if (idx == 0xFFFFFFFFu) return 0;
+    u8 pop = REALIZE_INFO[idx].op;
+    if (pop == UOP_EXPAND) return 1;          // success: chain bottoms out at broadcast
+    if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
+     || pop == UOP_EXP2 || pop == UOP_LOG2) {
+      cur = parent;
+      continue;
+    }
+    return 0;     // any other op (binary, movement-other, REDUCE) breaks the pattern
+  }
+  return 0;
+}
+
 fn void realize_classify(Term root) {
   realize_info_clear();
   if (term_tag(root) != TAG_UOP) return;
@@ -144,6 +193,39 @@ fn void realize_classify(Term root) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->consumer_count >= 2) info->realized = 1;
     if (info->op == UOP_REDUCE)    info->realized = 1;
+  }
+
+  // Softmax-style relaxation: a REDUCE whose single consumer is a
+  // scalar-preserving ALU chain (RECIP / NEG / SQRT / ...) ending in
+  // an EXPAND back to the reduce SOURCE's shape can be inlined into
+  // the EXPAND's consumer kernel without recomputation cost (the
+  // REDUCE result is a scalar that gets broadcast-elementwise into
+  // the elementwise tail).  Walk the consumer chain: if every hop is
+  // scalar-preserving until an EXPAND, drop the REDUCE's realize bit
+  // so visit() inlines it.
+  //
+  // Conservative additional guard: only relax when this is the SOLE
+  // REDUCE in the whole realize-info graph.  Multi-REDUCE patterns
+  // (cross-entropy + softmax, autograd through reductions, ...)
+  // create complex consumer trees where blindly inlining one REDUCE
+  // can cascade into a kernel-emit bail downstream.  When more than
+  // one REDUCE shows up, fall back to the original "REDUCE always
+  // realizes" rule for everything; that costs the softmax-fusion
+  // win for those graphs but keeps correctness.  A future pass can
+  // count REDUCEs PER consumer-kernel boundary and relax per-kernel
+  // instead of globally.
+  u32 reduce_count = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    if (REALIZE_INFO[i].op == UOP_REDUCE) reduce_count++;
+  }
+  if (reduce_count != 1) return;
+
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (info->op != UOP_REDUCE)    continue;
+    if (info->consumer_count != 1) continue;
+    if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+    info->realized = 0;
   }
 }
 
