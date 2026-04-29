@@ -36,7 +36,7 @@ typedef struct {
 } CpuJitSlot;
 static CpuJitSlot CPU_JIT_CACHE[CPU_JIT_CACHE_CAP];
 
-static u64 cpu_jit_hash(KernelEntry const *ke) {
+fn u64 cpu_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL;
   h ^= (u64)ke->n_ops; h *= 0x100000001b3ULL;
   h ^= (u64)ke->n_inputs; h *= 0x100000001b3ULL;

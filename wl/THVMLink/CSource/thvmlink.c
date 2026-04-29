@@ -804,6 +804,61 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_metal(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Per-kernel profile inspection.  All four return Integer; cap kid at
+// KERNELS_NEXT to keep WL probes safe.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_flops(WolframLibraryData l, mint a,
+                                            MArgument *args, MArgument res) {
+  (void)l;(void)a;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  u64 f = (kid > 0 && kid < KERNELS_NEXT) ? cg_kernel_flops(&KERNELS[kid]) : 0;
+  MArgument_setInteger(res, (mint)f);
+  return LIBRARY_NO_ERROR;
+}
+
+// 0=none, 1=blas-dot, 2=blas-gemv, 3=blas-gemm, 4=jit, 5=interpreter.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_dispatch_kind(WolframLibraryData l, mint a,
+                                                    MArgument *args, MArgument res) {
+  (void)l;(void)a;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)cg_kernel_dispatch_kind(kid));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_kernel_dispatch_count(WolframLibraryData l, mint a,
+                                                     MArgument *args, MArgument res) {
+  (void)l;(void)a;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)cg_kernel_dispatch_count(kid));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_kernel_total_us(WolframLibraryData l, mint a,
+                                               MArgument *args, MArgument res) {
+  (void)l;(void)a;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)cg_kernel_total_us(kid));
+  return LIBRARY_NO_ERROR;
+}
+
+// Path of the JIT'd .dylib for kid's program (deterministic from
+// the program hash; the file may not exist if the JIT bailed at
+// codegen time).
+EXTERN_C DLLEXPORT int thvm_wl_kernel_jit_dylib_path(WolframLibraryData l, mint a,
+                                                     MArgument *args, MArgument res) {
+  (void)l;(void)a;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  static char path[256];
+  u64 key = cpu_jit_hash(&KERNELS[kid]);
+  snprintf(path, sizeof path, "/tmp/thvm_jit_%016llx.dylib",
+           (unsigned long long)key);
+  MArgument_setUTF8String(res, path);
+  return LIBRARY_NO_ERROR;
+}
+
 // Number of distinct KProgOp[] arrays interned in the kernel-
 // program hash-cons cache.  Used by tests to assert that two
 // kernels with structurally identical programs share storage.

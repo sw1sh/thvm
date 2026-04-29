@@ -35,6 +35,13 @@ TGCCollect::usage = "TGCCollect[] runs a Cheney semi-space collection of the dyn
 TGCCount::usage   = "TGCCount[] returns the number of GC cycles since thvm_init.";
 TKernelSourceC::usage     = "TKernelSourceC[kid] renders kernel kid's program through the C99 codegen renderer and returns the generated source.  Empty string if kid is invalid or the program contains ops outside cg_supports (REDUCE, movement) -- those fall back to the interpreter.";
 TKernelSourceMetal::usage = "TKernelSourceMetal[kid] renders kernel kid's program through the Metal Shading Language renderer.  Source-only stub today (the Metal backend dispatches single-op shaders, not fused programs).  Useful for verifying that the codegen Renderer abstraction emits valid MSL alongside C from the same KProgOp[].";
+TKernelFlops::usage         = "TKernelFlops[kid] returns a static FLOPS estimate for one execution of kid (sum over KProgOp[]: 1 flop per elementwise op per element, 1 flop per REDUCE source element).  0 for movement / load.";
+TKernelDispatchKind::usage  = "TKernelDispatchKind[kid] returns the route the last fire of kid took: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", or \"interpreter\".";
+TKernelDispatchCount::usage = "TKernelDispatchCount[kid] returns the cumulative number of times kid has fired since thvm_init.";
+TKernelTotalUs::usage       = "TKernelTotalUs[kid] returns the cumulative wallclock microseconds across every fire of kid.";
+TKernelJitDylibPath::usage  = "TKernelJitDylibPath[kid] returns the on-disk path the JIT cache uses for kid's compiled .dylib (deterministic from the program hash).  File may not exist if the JIT bailed at codegen.";
+TKernelProfile::usage       = "TKernelProfile[kid] returns an Association with FLOPS / dispatch route / cumulative microseconds / GFLOP/s / source / .dylib path for one kid.";
+TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid.";
 THeap::usage      = "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/heap_graph.md.";
 THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram Graph.  THeapGraph[term] also seeds discovery with `term` so heapless compounds held only by the WL caller appear.  THeapGraph[{t1, t2, ...}] seeds with several.  See docs/heap_graph.md.";
 THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.  Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc.";
@@ -249,6 +256,11 @@ $gcCollectFn := $gcCollectFn = load["thvm_wl_gc_collect", {},                   
 $gcCountFn   := $gcCountFn   = load["thvm_wl_gc_count",   {},                       Integer];
 $kernelSourceCFn     := $kernelSourceCFn     = load["thvm_wl_kernel_source_c",     {Integer}, "UTF8String"];
 $kernelSourceMetalFn := $kernelSourceMetalFn = load["thvm_wl_kernel_source_metal", {Integer}, "UTF8String"];
+$kernelFlopsFn         := $kernelFlopsFn         = load["thvm_wl_kernel_flops",          {Integer}, Integer];
+$kernelDispatchKindFn  := $kernelDispatchKindFn  = load["thvm_wl_kernel_dispatch_kind",  {Integer}, Integer];
+$kernelDispatchCountFn := $kernelDispatchCountFn = load["thvm_wl_kernel_dispatch_count", {Integer}, Integer];
+$kernelTotalUsFn       := $kernelTotalUsFn       = load["thvm_wl_kernel_total_us",       {Integer}, Integer];
+$kernelJitDylibPathFn  := $kernelJitDylibPathFn  = load["thvm_wl_kernel_jit_dylib_path", {Integer}, "UTF8String"];
 
 $wnfFn          := $wnfFn          = load["thvm_wl_wnf",            {Integer},          Integer];
 $wnfNFn         := $wnfNFn         = load["thvm_wl_wnf_n",          {Integer, Integer}, Integer];
@@ -480,6 +492,35 @@ TGCCollect[]                     := (ensureInit[]; $gcCollectFn[])
 TGCCount[]                       := (ensureInit[]; $gcCountFn[])
 TKernelSourceC[kid_Integer]      := (ensureInit[]; $kernelSourceCFn[kid])
 TKernelSourceMetal[kid_Integer]  := (ensureInit[]; $kernelSourceMetalFn[kid])
+TKernelFlops[kid_Integer]        := (ensureInit[]; $kernelFlopsFn[kid])
+TKernelDispatchKind[kid_Integer] := (ensureInit[];
+    Replace[$kernelDispatchKindFn[kid],
+        {0 -> "none", 1 -> "blas-dot", 2 -> "blas-gemv",
+         3 -> "blas-gemm", 4 -> "jit", 5 -> "interpreter"}])
+TKernelDispatchCount[kid_Integer] := (ensureInit[]; $kernelDispatchCountFn[kid])
+TKernelTotalUs[kid_Integer]       := (ensureInit[]; $kernelTotalUsFn[kid])
+TKernelJitDylibPath[kid_Integer]  := (ensureInit[]; $kernelJitDylibPathFn[kid])
+(* Convenience: full Association of all profiling fields for one kid. *)
+TKernelProfile[kid_Integer] := <|
+    "Kid"           -> kid,
+    "Flops"         -> TKernelFlops[kid],
+    "DispatchKind"  -> TKernelDispatchKind[kid],
+    "DispatchCount" -> TKernelDispatchCount[kid],
+    "TotalUs"       -> TKernelTotalUs[kid],
+    "AvgUs"         -> If[ TKernelDispatchCount[kid] > 0,
+                           N[TKernelTotalUs[kid] / TKernelDispatchCount[kid]],
+                           0],
+    "GFlopsPerSec"  -> If[ TKernelTotalUs[kid] > 0 && TKernelDispatchCount[kid] > 0,
+                           N[TKernelFlops[kid] * TKernelDispatchCount[kid] / (TKernelTotalUs[kid] * 1000)],
+                           0],
+    "JitDylibPath"  -> TKernelJitDylibPath[kid],
+    "SourceC"       -> TKernelSourceC[kid],
+    "SourceMetal"   -> TKernelSourceMetal[kid]
+|>
+(* All currently-live kernels' profiles, indexed by kid. *)
+TProfileAll[] := Association[
+    Table[ k -> TKernelProfile[k], {k, 1, TKernelCount[] - 1}]
+]
 
 TWnf[t_]                       := Module[{r},
     ensureInit[];

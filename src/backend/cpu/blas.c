@@ -130,9 +130,12 @@ static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   return 1;
 }
 
+// Returns the specific KDispatchKind that fired (BLAS_DOT / BLAS_GEMV
+// / BLAS_GEMM) so the profiler can record the route, or 0 on no-match
+// (caller falls through to JIT / interpreter).
 fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return 1;
-  if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return 1;
+  if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
+  if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
   return 0;
 }
 

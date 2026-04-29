@@ -131,25 +131,18 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "backend/cpu/op/pad.c"
 #include "backend/cpu/op/shrink.c"
 #include "backend/cpu/op/permute.c"
-#include "backend/cpu/interpret.c"
-// BLAS / Accelerate dispatch.  Pattern-recognises matmul / matvec /
-// dot in KProgOp[] and hands them to cblas_*; cpu_dispatch_kernel
-// tries this BEFORE the JIT path so library-tuned kernels win.
-#include "backend/cpu/blas.c"
-// codegen/ is backend-agnostic: cg_emit walks a KernelEntry's program[]
-// and dispatches per KProgOp through a Renderer.  render_c.c supplies
-// the C99 renderer (used by the CPU JIT just below); future Metal /
-// CUDA / LLVM renderers slot in next to render_c.c.
+// codegen/ is backend-agnostic.  Included before the cpu dispatchers
+// so they can call cg_profile_record / cg_now_us / cg_kernel_flops
+// + reference KDispatchKind enum constants.
 #include "codegen/cg.c"
+#include "codegen/profile.c"
 #include "codegen/render_c.c"
-// Metal renderer.  Today only emits MSL source via cg_emit_metal --
-// the dispatcher in backend/metal/_.m is still single-op-per-shader
-// and would need a fused-kernel path to use this.  Included up front
-// so a future per-fused-kernel Metal path doesn't need a second
-// cg pipeline.
 #include "codegen/render_metal.c"
-// JIT codegen + dispatch.  Lives after interpret.c so cpu_dispatch_kernel
-// can fall back to cpu_interpret on any unsupported op or build failure.
+// CPU dispatch: interpreter + BLAS pattern dispatch + clang-JIT.
+// cpu_dispatch_kernel composes the three (BLAS first, then JIT, then
+// interpreter); each records its route via cg_profile_record.
+#include "backend/cpu/interpret.c"
+#include "backend/cpu/blas.c"
 #include "backend/cpu/jit.c"
 #include "backend/cpu/_.c"
 
@@ -355,6 +348,8 @@ void thvm_init(void) {
   // locs (the ttermRaw fast-path falls back to the cached id, which
   // never reaches the GC).
   extern_pin_handle_clear();
+  cg_profile_reset();        // per-kid FLOPS / dispatch counters; reset
+                             // so each session starts at zero.
   // Cheney semi-spaces: split HEAP_CAP in half.  heap_alloc bumps
   // within the active from-space; gc_collect evacuates live cells
   // into to-space and swaps when triggered from thvm_realize.

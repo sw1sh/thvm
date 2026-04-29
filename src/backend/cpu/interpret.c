@@ -134,13 +134,26 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_jit_dispatch (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 
 fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  // Recover kid by pointer arithmetic into KERNELS[].  Used for
+  // per-kid profiling (cg_profile_record).
+  u32 kid = (u32)(ke - KERNELS);
+  u64 t0  = cg_now_us();
   // 1. BLAS first: matmul / matvec / dot patterns get cblas_*
   //    (Accelerate on macOS) -- 10-100x faster than anything we can
   //    JIT-compile near-term.
-  if (cpu_blas_dispatch(ke, in_buf_ids, out_buf_id)) return 0;
+  int blas_kind = cpu_blas_dispatch(ke, in_buf_ids, out_buf_id);
+  if (blas_kind) {
+    cg_profile_record(kid, (KDispatchKind)blas_kind, cg_now_us() - t0);
+    return 0;
+  }
   // 2. JIT next: clang-compiled fused inner loop for elementwise
   //    chains, cached by program hash.
-  if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) return 0;
+  if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
+    cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
+    return 0;
+  }
   // 3. Interpreter fallback.
-  return cpu_interpret(ke, in_buf_ids, out_buf_id);
+  int rc = cpu_interpret(ke, in_buf_ids, out_buf_id);
+  cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
+  return rc;
 }
