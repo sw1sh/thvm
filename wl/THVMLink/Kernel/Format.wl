@@ -270,6 +270,59 @@ TKernel /: MakeBoxes[k:TKernel[a_Association] /; tKernelInternalQ[k], fmt_] :=
         ]
     ]
 
+(* === TMemoryPlan summary box ===
+   Mini stack-of-rectangles icon + counts + total bytes + active
+   backend(s).  formatBytes / backendsActive are MemoryPlan.wl
+   helpers in the shared THVMLink`Private` namespace. *)
+{formatBytes, backendsActive};
+
+memoryPlanSummaryIcon[] := Graphics[
+    {
+        EdgeForm[LightDarkSwitched[Black, White]],
+        FaceForm[LightDarkSwitched[Lighter[StandardBlue,  0.55], Darker[StandardBlue,  0.4]]],
+        Rectangle[{-0.7, -0.55}, { 0.3, -0.20}],
+        FaceForm[LightDarkSwitched[Lighter[StandardGreen, 0.55], Darker[StandardGreen, 0.4]]],
+        Rectangle[{-0.5, -0.15}, { 0.7,  0.20}],
+        FaceForm[LightDarkSwitched[Lighter[StandardGray,  0.55], Darker[StandardGray,  0.4]]],
+        Rectangle[{-0.7,  0.25}, { 0.5,  0.60}]
+    },
+    ImageSize -> Dynamic[{Automatic, 3.5 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
+memoryPlanQ[TMemoryPlan[a_Association]] :=
+    KeyExistsQ[a, "Kernels"] && KeyExistsQ[a, "Tens"] && KeyExistsQ[a, "Bufs"]
+memoryPlanQ[___] := False
+
+TMemoryPlan /: MakeBoxes[p_TMemoryPlan /; memoryPlanQ[Unevaluated[p]], fmt_] :=
+    With[{
+        a    = First[p],
+        icon = memoryPlanSummaryIcon[]
+    }, Module[{
+        bufs = a["Bufs"], totalBytes
+    },
+        totalBytes = Total[#["nbytes"] & /@ bufs];
+        BoxForm`ArrangeSummaryBox[
+            "TMemoryPlan",
+            p,
+            icon,
+            {
+                {
+                    BoxForm`SummaryItem[{"kernels: ", Length[a["Kernels"]]}],
+                    BoxForm`SummaryItem[{"bufs: ",    Length[bufs]}]
+                }
+            },
+            {
+                {
+                    BoxForm`SummaryItem[{"live: ",    formatBytes[totalBytes]}],
+                    BoxForm`SummaryItem[{"backend: ", backendsActive[bufs]}]
+                }
+            },
+            fmt,
+            "Interpretable" -> Automatic
+        ]
+    ]]
+
 (* === TContext (multi-heap handle from Context.wl) === *)
 
 tContextQ[TContext[_Integer]] := True

@@ -19,11 +19,11 @@ loader hub there is for LibraryFunctionLoad bindings only.
 | `Tensor.wl`         | `TTensor`, `TTensorCreate`, `TTensorShape`, `TTensorData`, `TRealize`, `TMaterialize`, NumericArray bridges.                                    |
 | `Uop.wl`            | UOp graph constructors (`TUOpAdd`, `TUOpMul`, `TUOpReshape`, ...) and `TUOpKind`/`TUOpSrcs` introspection.                                      |
 | `Kernel.wl`         | `TKernel` typed wrapper + property surface (`Information[k]`, `k["Name"]`, `k[]`). Top-level kid-keyed accessors: `TKernelCount`, `TKernelInfo`, `TKernelProgramCacheSize`, `TKernelSourceC`/`SourceMetal`, `TKernelFlops`, `TKernelDispatchKind`/`Count`/`TotalUs`, `TKernelJitDylibPath`, `TKernelProfile`, `TProfileAll`. |
-| `MemoryPlan.wl`     | mp1 bridge tables: `TKernelTable`, `TKernelInputs`, `TTensTable`, `TCpuBufTable`, `TMetalBufTable`, `TTensCount`, `TTotalBufBytes`. The `TMemoryPlan` snapshot + `TMemoryPlanReport`/`Gantt`. |
+| `MemoryPlan.wl`     | mp1 bridge tables: `TKernelTable`, `TKernelInputs`, `TTensTable`, `TCpuBufTable`, `TMetalBufTable`, `TTensCount`, `TTotalBufBytes`. The `TMemoryPlan` snapshot + `TMemoryPlanReport`. Helpers (`linearScanPack`, `peakConcurrentLive`, `statusFill`/`Edge`, `formatBytes`, `backendsActive`) shared with the Gantt renderer. |
 | `Heap.wl`           | `THeap`, heap walker, `THeapCells`, def-table accessors.                                                                                        |
-| `Visualization.wl`  | `THeapGraph` (heap as IC string-diagram) and `TScheduleGraph` (kernel DAG view).                                                                |
+| `Visualization.wl`  | `THeapGraph` (heap as IC string-diagram), `TScheduleGraph` (kernel DAG), and `TMemoryPlanGantt` (buffer-lifecycle Gantt over a `TMemoryPlan`).  |
 | `Diagram.wl`        | `THeapDiagram` (DiagramNetwork rendering).                                                                                                      |
-| `Format.wl`         | `MakeBoxes` summary boxes for every atomic THVMLink object: `THeap`, `TTerm` (+ TEN/UOP/NUM specializations), `TKernel`, `TContext`.            |
+| `Format.wl`         | `MakeBoxes` summary boxes for every atomic THVMLink object: `THeap`, `TTerm` (+ TEN/UOP/NUM specializations), `TKernel`, `TMemoryPlan`, `TContext`. |
 | `Style.wl`          | Shared color/shape primitives: `$nodeStyle`, `nodeShapeFn`, `edgeStyleDirective`. Everything in `Visualization.wl`/`Diagram.wl`/`Kernel.wl`/`MemoryPlan.wl` paints through these so KERNEL/TEN/UOP look the same everywhere. |
 | `Context.wl`        | `TContext` multi-heap handle.                                                                                                                   |
 | `Switch.wl`         | `TSwitch` runtime branching primitive.                                                                                                          |

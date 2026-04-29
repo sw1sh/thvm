@@ -34,6 +34,8 @@ THeapGraph::usage = "THeapGraph[] / THeapGraph[term] / THeapGraph[{t1, t2, ...}]
 
 TScheduleGraph::usage = "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.  External inputs (TenDescs with no producer kernel -- weights, host tensors) appear as cyan TEN-shaped vertices when \"ShowExternalInputs\" -> True (default).  Disconnected kernels render as isolated vertices.  Accepts all standard Graph options.";
 
+TMemoryPlanGantt::usage = "TMemoryPlanGantt[plan] returns a Graphics-headed Gantt-style chart of buffer lifecycles.  X-axis is topological depth on the kernel DAG; Y-axis is one row per buffer (sorted by alloc_depth, then nbytes desc).  Each bar spans [alloc_depth, last_use_depth] and is colored by status: blue=Preserved, green=Freeable, gray=Live, orange=External, red=Dead.  Hover tooltips expose buf id, nbytes, dtype, status, depths, alias_tids.  Options: \"BarHeight\" -> \"Log\" (default; height proportional to Log2[1 + nbytes]) or \"Uniform\" (all bars 1 unit tall).";
+
 Begin["`Private`"];
 
 (* Forward refs to private symbols owned by Style.wl + Kernel.wl;
@@ -477,6 +479,191 @@ TScheduleGraph[opts : OptionsPattern[]] := Block[{
         PerformanceGoal     -> "Quality"
     ]
 ]
+
+(* === TMemoryPlanGantt -- buffer-lifecycle Gantt chart ===
+
+   Renders a packed-strip view of a TMemoryPlan snapshot.  The
+   plan-construction logic + helpers (formatBytes, statusFill /
+   statusEdge, peakConcurrentLive, linearScanPack, backendsActive)
+   live in MemoryPlan.wl.  This file owns just the Graphics
+   composition since it's the visual / option surface; the
+   numerical work that backs each card is shared with
+   TMemoryPlanReport. *)
+
+(* Forward refs to MemoryPlan.wl + Style.wl helpers (THVMLink`Private`
+   is shared across all sibling files). *)
+{linearScanPack, peakConcurrentLive, statusFill, statusEdge,
+ formatBytes, backendsActive};
+
+Options[TMemoryPlanGantt] = {"TopN" -> 40, "BarHeight" -> "Linear"};
+TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] :=
+    Block[{
+        allBufs = a["Bufs"],
+        bufs,
+        topN,
+        barHeightMode,
+        packed,
+        maxDepth,
+        totalBytes,
+        peak,
+        savingsPct,
+        totalHeight,
+        omittedCount,
+        legendStatuses
+    },
+        topN = OptionValue["TopN"];
+        barHeightMode = OptionValue["BarHeight"];
+        If[ allBufs === {}, Return[Graphics[{}, ImageSize -> 320]]];
+        bufs = If[ MatchQ[topN, _Integer] && topN > 0 && Length[allBufs] > topN,
+            TakeLargestBy[allBufs, #["nbytes"] &, topN],
+            allBufs
+        ];
+        omittedCount = Length[allBufs] - Length[bufs];
+        maxDepth = Max[#["last_use_depth"] & /@ allBufs];
+        totalBytes = Total[#["nbytes"] & /@ allBufs];
+        peak = peakConcurrentLive[allBufs];
+        savingsPct = If[ peak["total_bytes"] > 0,
+            Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1],
+            0
+        ];
+        {packed, totalHeight} = linearScanPack[bufs, barHeightMode];
+        If[ totalHeight === 0, totalHeight = 1];
+        legendStatuses = DeleteDuplicates[#["status"] & /@ packed];
+        Graphics[
+            {
+                Function[b, Block[{
+                    y0     = b["y_range"][[1]],
+                    y1     = b["y_range"][[2]],
+                    h, inset, x0, x1
+                },
+                    h      = y1 - y0;
+                    inset  = 0.05 h;
+                    x0     = b["alloc_depth"];
+                    x1     = If[ b["status"] === "Preserved",
+                                 maxDepth + 1,
+                                 b["last_use_depth"] + 1];
+                    {
+                        FaceForm[statusFill[b["status"]]],
+                        EdgeForm[Directive[
+                            statusEdge[b["status"]],
+                            Thickness[0.0015]
+                        ]],
+                        Tooltip[
+                            Rectangle[
+                                {x0, y0 + inset},
+                                {x1, y1 - inset},
+                                RoundingRadius -> 0.06
+                            ],
+                            Column[{
+                                Row[{"buf ", b["id"], " (",
+                                     If[b["backend"] === 1, "CPU",
+                                        If[b["backend"] === 2, "Metal", "?"]],
+                                     ")"}],
+                                Row[{"nbytes: ", formatBytes[b["nbytes"]]}],
+                                Row[{"dtype: ",  b["dtype"]}],
+                                Row[{"status: ", b["status"]}],
+                                Row[{"depth: ",  b["alloc_depth"], " .. ",
+                                                  b["last_use_depth"]}],
+                                Row[{"producer kid: ", b["producer_kid"]}],
+                                Row[{"consumer kids: ", b["consumer_kids"]}],
+                                Row[{"alias tids: ", b["alias_tids"]}]
+                            }]
+                        ],
+                        If[ h > 0.05 totalHeight,
+                            Text[
+                                Style[
+                                    Column[{
+                                        Row[{"buf", b["id"],
+                                             " kid", b["producer_kid"],
+                                             " ", formatBytes[b["nbytes"]]}],
+                                        Row[{"tid:",
+                                             StringRiffle[ToString /@ b["alias_tids"], ","]}]
+                                    }, ItemSize -> Automatic, Spacings -> 0],
+                                    FontSize -> Scaled[0.013],
+                                    FontFamily -> "Source Code Pro"
+                                ],
+                                {(x0 + x1)/2, (y0 + y1)/2}
+                            ],
+                            Sequence @@ {}
+                        ]
+                    }
+                ]] /@ packed
+            },
+            Frame -> True,
+            FrameTicks -> {
+                Automatic,
+                Block[{step, label, isLinear},
+                    isLinear = barHeightMode =!= "Log";
+                    label = If[isLinear,
+                               formatBytes,
+                               Function[y, ToString[Round[y, 0.1]]]];
+                    step = totalHeight / 6.0;
+                    If[ step <= 0, step = 1];
+                    Table[{y, label[y]}, {y, 0, totalHeight, step}]
+                ]
+            },
+            FrameLabel -> {
+                "topological depth (kernel DAG)",
+                If[ barHeightMode === "Log",
+                    "stacked Log2[1+nbytes] -- linear-scan slot allocator",
+                    "memory (KiB) -- linear-scan slot allocator"]
+            },
+            Epilog -> {
+                {Dashed, Thick, StandardRed,
+                    Line[{{peak["peak_depth"], 0},
+                          {peak["peak_depth"], totalHeight}}]},
+                Text[
+                    Style[
+                        Row[{"peak ", formatBytes[peak["peak_bytes"]],
+                             " @ depth ", peak["peak_depth"]}],
+                        FontSize -> Scaled[0.014],
+                        FontFamily -> "Source Code Pro",
+                        StandardRed
+                    ],
+                    {peak["peak_depth"], totalHeight},
+                    {-1, -1}
+                ]
+            },
+            PlotLabel -> Column[{
+                Row[{"TMemoryPlan / ", backendsActive[allBufs], " -- ",
+                     Length[allBufs], " bufs / ",
+                     Length[a["Kernels"]], " kernels / ",
+                     formatBytes[totalBytes], " total / depth ",
+                     If[ allBufs === {}, 0, maxDepth + 1]}],
+                Row[{"peak concurrent: ",
+                     formatBytes[peak["peak_bytes"]],
+                     " at depth ", peak["peak_depth"],
+                     " (slot-reuse headroom ", savingsPct, "%)"}],
+                If[ omittedCount > 0,
+                    With[{
+                      shownBytes = Total[#["nbytes"] & /@ bufs],
+                      shownPct = Round[100. Total[#["nbytes"] & /@ bufs] / totalBytes, 0.1]
+                    },
+                      Row[{Style["showing top " <> ToString[Length[bufs]]
+                                <> " of " <> ToString[Length[allBufs]]
+                                <> " bufs (= "
+                                <> ToString[shownPct] <> "% of bytes)",
+                                Italic, GrayLevel[0.4]]}]
+                    ],
+                    Sequence @@ {}
+                ]
+            }, Alignment -> Center],
+            ImageSize -> Large,
+            AspectRatio -> 1/2,
+            PlotRangePadding -> Scaled[0.02]
+        ] // Legended[#,
+            SwatchLegend[
+                statusFill /@ legendStatuses,
+                legendStatuses,
+                LegendMarkers -> Graphics[{
+                    EdgeForm[Directive[Black, Thickness[0.02]]],
+                    Rectangle[{0, 0}, {1, 1}, RoundingRadius -> 0.18]
+                }],
+                LegendLabel -> "buffer status",
+                LabelStyle -> {FontSize -> 11}
+            ]
+        ] &
+    ]
 
 End[];
 
