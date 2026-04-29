@@ -33,15 +33,9 @@ THeapRead::usage  = "THeapRead[loc] returns the Term at heap[loc].";
 THeapSet::usage   = "THeapSet[loc, term] writes `term` to heap[loc].";
 TGCCollect::usage = "TGCCollect[] runs a Cheney semi-space collection of the dyn heap; returns the new HEAP_NEXT (live cell count).";
 TGCCount::usage   = "TGCCount[] returns the number of GC cycles since thvm_init.";
-TKernelSourceC::usage     = "TKernelSourceC[kid] renders kernel kid's program through the C99 codegen renderer and returns the generated source.  Empty string if kid is invalid or the program contains ops outside cg_supports (REDUCE, movement) -- those fall back to the interpreter.";
-TKernelSourceMetal::usage = "TKernelSourceMetal[kid] renders kernel kid's program through the Metal Shading Language renderer.  Source-only stub today (the Metal backend dispatches single-op shaders, not fused programs).  Useful for verifying that the codegen Renderer abstraction emits valid MSL alongside C from the same KProgOp[].";
-TKernelFlops::usage         = "TKernelFlops[kid] returns a static FLOPS estimate for one execution of kid (sum over KProgOp[]: 1 flop per elementwise op per element, 1 flop per REDUCE source element).  0 for movement / load.";
-TKernelDispatchKind::usage  = "TKernelDispatchKind[kid] returns the route the last fire of kid took: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", or \"interpreter\".";
-TKernelDispatchCount::usage = "TKernelDispatchCount[kid] returns the cumulative number of times kid has fired since thvm_init.";
-TKernelTotalUs::usage       = "TKernelTotalUs[kid] returns the cumulative wallclock microseconds across every fire of kid.";
-TKernelJitDylibPath::usage  = "TKernelJitDylibPath[kid] returns the on-disk path the JIT cache uses for kid's compiled .dylib (deterministic from the program hash).  File may not exist if the JIT bailed at codegen.";
-TKernelProfile::usage       = "TKernelProfile[kid] returns an Association with FLOPS / dispatch route / cumulative microseconds / GFLOP/s / source / .dylib path for one kid.";
-TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid.";
+(* TKernelSourceC / TKernelSourceMetal / TKernelFlops / TKernelDispatchKind /
+   TKernelDispatchCount / TKernelTotalUs / TKernelJitDylibPath / TKernelProfile /
+   TProfileAll  --  declared and defined in Kernel.wl as TKernel-property accessors. *)
 THeap::usage      = "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/heap_graph.md.";
 THeapGraph::usage = "THeapGraph[] renders the heap state as an IC string-diagram Graph.  THeapGraph[term] also seeds discovery with `term` so heapless compounds held only by the WL caller appear.  THeapGraph[{t1, t2, ...}] seeds with several.  See docs/heap_graph.md.";
 THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.  Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc.";
@@ -101,17 +95,12 @@ TTensorData::usage     = "TTensorData[t] reads the tensor's buffer as a NumericA
 TTensorRefcount::usage = "TTensorRefcount[t] returns the descriptor refcount (TENS[id].refcount).";
 TRealize::usage        = "TRealize[expr] = TWnf[TMaterialize[expr]].  Fires the whole pipeline: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs) then beta-reduce + dispatch kernels.";
 TMaterialize::usage    = "TMaterialize[expr] runs the schedule + kernelize + linearize rewrite directly (no wnf) and returns the scheduled DAG term.  Fires no kernels.  Use to visualize the graph after scheduling but before dispatch.";
-TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
-TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns the number of distinct KProgOp[] arrays interned in the kernel-program hash-cons cache.  After a TRealize, this is at most TKernelCount[]-1; structurally identical kernels (e.g. successive iters of a recursive lambda's step) share a single entry.";
-TTensCount::usage     = "TTensCount[] returns the number of allocated TenDescs (excluding the reserved slot 0).";
-TTotalBufBytes::usage = "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount > 0).";
+(* TKernelCount / TKernelProgramCacheSize / TKernelInfo  --  declared
+   and defined in Kernel.wl.
 
-TKernelTable::usage   = "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per kernel (kid 1 .. KERNELS_NEXT - 1).  Used by TMemoryPlan to derive per-buf alloc/last_use depths.";
-TKernelInputs::usage  = "TKernelInputs[kid] returns the input_tids of kernel `kid` (length n_inputs).";
-TTensTable::usage     = "TTensTable[] returns a list of {producer_kid, buf_id, dtype, view_numel, view_contiguous, refcount, backend_id} per TenDesc (tid 1 .. TENS_NEXT - 1).  backend_id is 1 for CPU, 2 for Metal, 0 for unbound.";
-TCpuBufTable::usage   = "TCpuBufTable[] returns a list of {nbytes, refcount, preserved, freeable, owns_data} per CPU buffer (buf_id 1 .. CPU_BUFS_NEXT - 1).";
-TMetalBufTable::usage = "TMetalBufTable[] returns a list of {nbytes, refcount} per Metal buffer.  Empty when the dylib was built without Metal support.";
-TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].";
+   TKernelTable / TKernelInputs / TTensTable / TCpuBufTable /
+   TMetalBufTable / TTensCount / TTotalBufBytes  --  declared and
+   defined in MemoryPlan.wl ("mp1 bridge tables"). *)
 
 (* === UOp graph constructors === *)
 TUOpConst::usage     = "TUOpConst[value, dtype] builds a UOP_CONST node carrying a scalar.";
@@ -326,14 +315,9 @@ $tensTableFn     := $tensTableFn     = load["thvm_wl_tens_table",      {},      
 $cpuBufTableFn   := $cpuBufTableFn   = load["thvm_wl_cpu_buf_table",   {},        {Integer, 1}];
 $metalBufTableFn := $metalBufTableFn = load["thvm_wl_metal_buf_table", {},        {Integer, 1}];
 
-TKernelTable[]    := Partition[Normal @ $kernelTableFn[],   7]
-TKernelInputs[k_Integer] := Normal @ $kernelInputsFn[k]
-TTensTable[]      := Partition[Normal @ $tensTableFn[],     7]
-TCpuBufTable[]    := Partition[Normal @ $cpuBufTableFn[],   5]
-TMetalBufTable[]  := Partition[Normal @ $metalBufTableFn[], 2]
-
-TTensCount[]    := $tensCountFn[]
-TTotalBufBytes[] := $totalBufBytesFn[]
+(* TKernelTable / TKernelInputs / TTensTable / TCpuBufTable /
+   TMetalBufTable / TTensCount / TTotalBufBytes  --  defined in
+   MemoryPlan.wl. *)
 
 (* === fresh-label counter (WL-side; per-context, reset by TReset).
        Keyed by ctx slot id from $contextCurrentFn[]. *)
@@ -490,38 +474,6 @@ THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
 TGCCollect[]                     := (ensureInit[]; $gcCollectFn[])
 TGCCount[]                       := (ensureInit[]; $gcCountFn[])
-TKernelSourceC[kid_Integer]      := (ensureInit[]; $kernelSourceCFn[kid])
-TKernelSourceMetal[kid_Integer]  := (ensureInit[]; $kernelSourceMetalFn[kid])
-TKernelFlops[kid_Integer]        := (ensureInit[]; $kernelFlopsFn[kid])
-TKernelDispatchKind[kid_Integer] := (ensureInit[];
-    Replace[$kernelDispatchKindFn[kid],
-        {0 -> "none", 1 -> "blas-dot", 2 -> "blas-gemv",
-         3 -> "blas-gemm", 4 -> "jit", 5 -> "interpreter"}])
-TKernelDispatchCount[kid_Integer] := (ensureInit[]; $kernelDispatchCountFn[kid])
-TKernelTotalUs[kid_Integer]       := (ensureInit[]; $kernelTotalUsFn[kid])
-TKernelJitDylibPath[kid_Integer]  := (ensureInit[]; $kernelJitDylibPathFn[kid])
-(* Convenience: full Association of all profiling fields for one kid. *)
-TKernelProfile[kid_Integer] := <|
-    "Kid"           -> kid,
-    "Flops"         -> TKernelFlops[kid],
-    "DispatchKind"  -> TKernelDispatchKind[kid],
-    "DispatchCount" -> TKernelDispatchCount[kid],
-    "TotalUs"       -> TKernelTotalUs[kid],
-    "AvgUs"         -> If[ TKernelDispatchCount[kid] > 0,
-                           N[TKernelTotalUs[kid] / TKernelDispatchCount[kid]],
-                           0],
-    "GFlopsPerSec"  -> If[ TKernelTotalUs[kid] > 0 && TKernelDispatchCount[kid] > 0,
-                           N[TKernelFlops[kid] * TKernelDispatchCount[kid] / (TKernelTotalUs[kid] * 1000)],
-                           0],
-    "JitDylibPath"  -> TKernelJitDylibPath[kid],
-    "SourceC"       -> TKernelSourceC[kid],
-    "SourceMetal"   -> TKernelSourceMetal[kid]
-|>
-(* All currently-live kernels' profiles, indexed by kid. *)
-TProfileAll[] := Association[
-    Table[ k -> TKernelProfile[k], {k, 1, TKernelCount[] - 1}]
-]
-
 TWnf[t_]                       := Module[{r},
     ensureInit[];
     r = withTermCtx[t, TTerm[$wnfFn[ttermRaw[t]]]];

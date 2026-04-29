@@ -74,6 +74,18 @@ uopSummaryIcon[] := Graphics[
     PlotRangePadding -> Scaled[0.05]
 ]
 
+(* Orange rounded-rectangle icon for TKernel: matches the KERNEL
+   palette in Style.wl + THeapGraph + TScheduleGraph. *)
+tKernelSummaryIcon[] := Graphics[
+    {
+        EdgeForm[LightDarkSwitched[Black, White]],
+        FaceForm[LightDarkSwitched[Lighter[StandardOrange, 0.55], Darker[StandardOrange, 0.4]]],
+        Rectangle[{-0.6, -0.6}, {0.6, 0.6}, RoundingRadius -> 0.18]
+    },
+    ImageSize -> Dynamic[{Automatic, 3.5 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
 (* Three-circle icon for TContext: chain-of-runtime-state metaphor. *)
 contextSummaryIcon[] := Graphics[
     {
@@ -215,6 +227,48 @@ TTerm /: MakeBoxes[t_TTerm /; tNumQ[t], fmt_] := With[{
         "Interpretable" -> Automatic
     ]
 ]
+
+(* === TKernel summary box ===
+   Mirrors the TUOp summary-box pattern but surfaces the kernel's
+   identifying fields (kid, output shape, input count, fired flag).
+   The TKernel constructor + property surface lives in Kernel.wl;
+   here we only render. *)
+
+TKernel /: MakeBoxes[k:TKernel[a_Association] /; tKernelInternalQ[k], fmt_] :=
+    With[{
+        kid     = a["Kid"],
+        row     = kernelRowAsoc[a["Kid"]],
+        nProg   = TTermVal[a["Term"]],
+        icon    = tKernelSummaryIcon[]
+    },
+        BoxForm`ArrangeSummaryBox[
+            "TKernel",
+            k,
+            icon,
+            {
+                {
+                    BoxForm`SummaryItem[{"kid: ",      kid}],
+                    BoxForm`SummaryItem[{"inputs: ",   row["InputCount"]}]
+                },
+                {
+                    BoxForm`SummaryItem[{"out tid: ",  row["OutputTid"]}],
+                    BoxForm`SummaryItem[{"out dtype: ",row["OutputDtype"]}]
+                }
+            },
+            {
+                {
+                    BoxForm`SummaryItem[{"out numel: ", row["OutputNumel"]}],
+                    BoxForm`SummaryItem[{"fired: ",     row["Fired"]}]
+                },
+                {
+                    BoxForm`SummaryItem[{"consumers: ", row["ConsumerCount"]}],
+                    BoxForm`SummaryItem[{"spliced: ",   row["Spliced"]}]
+                }
+            },
+            fmt,
+            "Interpretable" -> Automatic
+        ]
+    ]
 
 (* === TContext (multi-heap handle from Context.wl) === *)
 

@@ -32,6 +32,8 @@ BeginPackage["THVMLink`"];
 
 THeapGraph::usage = "THeapGraph[] / THeapGraph[term] / THeapGraph[{t1, t2, ...}] renders the heap as a Graph: every IC agent + UOP cell + TEN handle becomes a vertex, edges follow *data flow* (sources point at consumers).  UOP_KERNEL cells expose their TKernelInputs[] as input edges so a fused-graph view shows the same kernel-DAG topology as TScheduleGraph.  Style comes from $nodeStyle in Style.wl -- consistent with every other renderer.  Options: \"ShowEdgeLabels\" -> False (default; labels hidden so dense graphs read clean), plus all standard Graph options.";
 
+TScheduleGraph::usage = "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.  External inputs (TenDescs with no producer kernel -- weights, host tensors) appear as cyan TEN-shaped vertices when \"ShowExternalInputs\" -> True (default).  Disconnected kernels render as isolated vertices.  Accepts all standard Graph options.";
+
 Begin["`Private`"];
 
 (* Forward refs to private symbols owned by Style.wl + Kernel.wl;
@@ -347,6 +349,132 @@ buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Blo
         GraphLayout         -> layout,
         PerformanceGoal     -> "Quality",
         ImagePadding        -> 25
+    ]
+]
+
+(* === TScheduleGraph -- DAG-of-kernels view ===
+
+   Builds straight from the C-side KERNELS / TENS tables (no heap
+   walk).  For each emitted kernel kid in 1..KERNELS_NEXT-1:
+     - vertex "k<kid>" with kernel-shaped style (orange rounded
+       rectangle, label = kid + program op count + output shape)
+     - one directed edge per input_tid: source = the producer
+       kernel "k<producer_kid>" if any (=> kernel-to-kernel
+       dependency), else "t<tid>" (an external TEN leaf, only
+       added when "ShowExternalInputs" -> True)
+     - edge label = tid
+
+   Disconnected kernels (no producer or consumer) render as
+   isolated vertices in the layered embedding -- they're still
+   part of the schedule, they just don't share TenDescs with the
+   rest. *)
+
+(* Forward refs to private symbols owned by Kernel.wl + Style.wl;
+   they share THVMLink`Private` with this file so resolution is
+   load-order-agnostic via SetDelayed. *)
+{decodeKernelInfo, kernelRowAsoc, tenTermFromTid};
+
+(* Compose a short per-kernel label.  Two lines:
+     kid, op count
+     output shape and dtype (or "no out" for the rare bail). *)
+scheduleKernelLabel[kid_Integer] := Block[{
+    info = decodeKernelInfo[kid],
+    row  = kernelRowAsoc[kid],
+    shape
+},
+    shape = With[{tid = row["OutputTid"]},
+        If[ tid > 0, TTensorShape[tenTermFromTid[tid]], {}]];
+    "k" <> ToString[kid] <> " (" <> ToString[info[[1]]["OpCount"]] <> "ops)"
+        <> "\n" <> ToString[shape] <> " " <> row["OutputDtype"]
+]
+
+scheduleExternalLabel[tid_Integer] := Block[{
+    shape = TTensorShape[tenTermFromTid[tid]],
+    dtype = TTensorDType[tenTermFromTid[tid]]
+},
+    "t" <> ToString[tid] <> "\n"
+        <> ToString[shape] <> " "
+        <> If[StringQ[dtype], dtype, "?"]
+]
+
+Options[TScheduleGraph] = Join[
+    {"ShowExternalInputs" -> True},
+    Options[Graph]
+];
+
+TScheduleGraph[opts : OptionsPattern[]] := Block[{
+    nKernels = TKernelCount[] - 1,
+    showExt = OptionValue["ShowExternalInputs"],
+    tens, kernelVerts, edges, edgeLabels, extTids, extVerts,
+    vshapes
+},
+    If[ nKernels <= 0, Return[Graph[{}, ImageSize -> 240]]];
+    tens = TTensTable[];
+
+    kernelVerts = Table["k" <> ToString[k], {k, nKernels}];
+
+    (* For each kernel, walk its input_tids and emit one edge per
+       tid back to the producing kernel (or to an external-TEN
+       vertex if there's no producer).  Edge label is the tid. *)
+    {edges, edgeLabels, extTids} = Block[{es = {}, ls = {}, exs = {}},
+        Do[
+            Block[{
+                inTids = TKernelInputs[kid],
+                consumerVert = "k" <> ToString[kid],
+                producerKid, srcVert
+            },
+                Do[
+                    producerKid = If[ tid > 0 && tid <= Length[tens],
+                                      tens[[tid, 1]], 0];
+                    srcVert = If[ producerKid =!= 0,
+                                  "k" <> ToString[producerKid],
+                                  "t" <> ToString[tid]];
+                    If[ producerKid === 0, AppendTo[exs, tid]];
+                    AppendTo[es, DirectedEdge[srcVert, consumerVert]];
+                    AppendTo[ls, DirectedEdge[srcVert, consumerVert] -> tid],
+                    {tid, inTids}
+                ]
+            ],
+            {kid, nKernels}
+        ];
+        {es, ls, DeleteDuplicates[exs]}
+    ];
+
+    extVerts = If[ showExt, "t" <> ToString[#] & /@ extTids, {}];
+    (* Drop edges pointing into hidden external vertices, otherwise
+       Graph would auto-add stub vertices for them. *)
+    If[ !showExt,
+        edges = Select[edges, !StringStartsQ[#[[1]], "t"] &];
+        edgeLabels = Select[edgeLabels, !StringStartsQ[#[[1, 1]], "t"] &]
+    ];
+
+    vshapes = Join[
+        Table[
+            With[{vid = "k" <> ToString[k], lab = scheduleKernelLabel[k]},
+                vid -> nodeShapeFn["KERNEL", lab]],
+            {k, nKernels}
+        ],
+        If[ showExt,
+            Table[
+                With[{vid = "t" <> ToString[t], lab = scheduleExternalLabel[t]},
+                    vid -> nodeShapeFn["ExternalTEN", lab]],
+                {t, extTids}
+            ],
+            {}
+        ]
+    ];
+
+    Graph[
+        Join[kernelVerts, extVerts],
+        edges,
+        FilterRules[{opts}, Options[Graph]],
+        VertexShapeFunction -> vshapes,
+        VertexSize          -> 0.45,
+        EdgeLabelStyle      -> Directive[FontFamily -> "Helvetica", FontSize -> 9,
+                                         LightDarkSwitched[Black, White]],
+        EdgeStyle           -> edgeStyleDirective,
+        GraphLayout         -> "LayeredDigraphEmbedding",
+        PerformanceGoal     -> "Quality"
     ]
 ]
 

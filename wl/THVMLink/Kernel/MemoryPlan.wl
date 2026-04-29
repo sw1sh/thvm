@@ -32,12 +32,39 @@ TMemoryPlanReport::usage = "TMemoryPlanReport[plan] returns a Column with top-5 
 
 TMemoryPlanGantt::usage = "TMemoryPlanGantt[plan] returns a Graphics-headed Gantt-style chart of buffer lifecycles.  X-axis is topological depth on the kernel DAG; Y-axis is one row per buffer (sorted by alloc_depth, then nbytes desc).  Each bar spans [alloc_depth, last_use_depth] and is colored by status: blue=Preserved, green=Freeable, gray=Live, orange=External, red=Dead.  Hover tooltips expose buf id, nbytes, dtype, status, depths, alias_tids.  Options: \"BarHeight\" -> \"Log\" (default; height proportional to Log2[1 + nbytes]) or \"Uniform\" (all bars 1 unit tall).";
 
-(* Forward-declare bridge symbols owned by THVMLink.wl (loaded
-   first via the autoload Sort + Get pattern in THVMLink.wl). *)
-{TKernelTable, TKernelInputs, TTensTable, TCpuBufTable,
- TMetalBufTable, TKernelCount, TTensCount};
+(* === mp1 bridge tables ===
+   Snapshot accessors over the runtime side tables (KERNELS, TENS,
+   CPU/Metal bufs).  Each returns a flat list-of-rows -- consumers
+   index by row schema documented in the ::usage.  Used directly
+   by TMemoryPlan + indirectly by Kernel.wl, Visualization.wl,
+   Heap.wl etc. (anywhere a kid -> tid -> buf walk is needed). *)
+TKernelTable::usage   = "TKernelTable[] returns a list of {n_inputs, output_tid, fired, spliced, consumer_count, output_numel, output_dtype} per kernel (kid 1 .. KERNELS_NEXT - 1).  Used by TMemoryPlan to derive per-buf alloc/last_use depths.";
+TKernelInputs::usage  = "TKernelInputs[kid] returns the input_tids of kernel `kid` (length n_inputs).";
+TTensTable::usage     = "TTensTable[] returns a list of {producer_kid, buf_id, dtype, view_numel, view_contiguous, refcount, backend_id} per TenDesc (tid 1 .. TENS_NEXT - 1).  backend_id is 1 for CPU, 2 for Metal, 0 for unbound.";
+TCpuBufTable::usage   = "TCpuBufTable[] returns a list of {nbytes, refcount, preserved, freeable, owns_data} per CPU buffer (buf_id 1 .. CPU_BUFS_NEXT - 1).";
+TMetalBufTable::usage = "TMetalBufTable[] returns a list of {nbytes, refcount} per Metal buffer.  Empty when the dylib was built without Metal support.";
+TTensCount::usage     = "TTensCount[] returns the number of allocated TenDescs (excluding the reserved slot 0).";
+TTotalBufBytes::usage = "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount > 0).";
 
 Begin["`Private`"];
+
+(* === mp1 bridge tables: thin wrappers over the LibraryLink loaders ===
+   Loader symbols ($kernelTableFn etc.) live in THVMLink.wl alongside
+   every other LibraryFunctionLoad call; both files share THVMLink`Private`
+   so the references resolve regardless of file load order (alphabetical:
+   Kernel.wl < MemoryPlan.wl < THVMLink.wl).
+
+   Each accessor is a snapshot, NOT a live view: the data is copied out
+   of the C-side side tables on call, so mutating it in WL has no effect
+   on the runtime. *)
+TKernelTable[]           := (ensureInit[]; Partition[Normal @ $kernelTableFn[],   7])
+TKernelInputs[k_Integer] := (ensureInit[]; Normal @ $kernelInputsFn[k])
+TTensTable[]             := (ensureInit[]; Partition[Normal @ $tensTableFn[],     7])
+TCpuBufTable[]           := (ensureInit[]; Partition[Normal @ $cpuBufTableFn[],   5])
+TMetalBufTable[]         := (ensureInit[]; Partition[Normal @ $metalBufTableFn[], 2])
+
+TTensCount[]             := (ensureInit[]; $tensCountFn[])
+TTotalBufBytes[]         := (ensureInit[]; $totalBufBytesFn[])
 
 (* === Topological depth ===
    depth[kid] = 1 + max(depth of producer kernel of any input tid).

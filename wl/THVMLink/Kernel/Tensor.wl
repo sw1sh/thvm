@@ -348,40 +348,8 @@ TRealize[expr_] := (ensureInit[]; TTerm[$realizeFn[ttermRaw[expr]]])
    TWnf fires the kernels bottom-up (once commit 4 lands). *)
 TMaterialize[expr_] := (ensureInit[]; TTerm[$materializeFn[ttermRaw[expr]]])
 
-(* === kernel-entry introspection === *)
-
-TKernelCount[]    := (ensureInit[]; $kernelCountFn[])
-
-(* Number of distinct KProgOp[] arrays cached.  After a TRealize,
-   `TKernelProgramCacheSize[] <= TKernelCount[] - 1`: programs that
-   share structure share one cache entry. *)
-TKernelProgramCacheSize[] := (ensureInit[]; THVMLink`Private`$kernelProgramCacheSizeFn[])
-
-(* TKernelInfo[kid] returns an Association with the kernel's
-   linearized program + shape metadata, useful for tests and
-   THeapDiagram visualization overlays. *)
-TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid], n, nOps},
-    n    = raw[[1]];
-    nOps = raw[[2]];
-    <|
-      "n_inputs"    -> n,
-      "n_ops"       -> nOps,
-      "output_numel"-> raw[[3]],
-      "output_dtype"-> dtypeName[raw[[4]]],
-      "program"     -> Table[
-          With[{base = 4 + (i - 1) * 6},
-            <|
-              "opcode" -> Lookup[$uopNames, raw[[base + 1]], "?"],
-              "n_src"  -> raw[[base + 2]],
-              "src"    -> { raw[[base + 3]], raw[[base + 4]] },
-              "arg"    -> raw[[base + 5]],
-              "numel"  -> raw[[base + 6]]
-            |>
-          ],
-          {i, nOps}
-      ]
-    |>
-]
+(* TKernelCount / TKernelProgramCacheSize / TKernelInfo  --  defined
+   in Kernel.wl alongside the rest of the kernel-introspection surface. *)
 
 (* === TTensorCreate: implicit shape from data ===
 

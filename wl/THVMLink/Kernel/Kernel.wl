@@ -1,48 +1,63 @@
 (* ::Package:: *)
 (* Kernel.wl - TKernel object: a typed wrapper around a UOP_KERNEL
    TTerm that exposes the C-side KernelEntry contents (input tids,
-   output shape/dtype, program ops) through a uniform Information[]
-   surface, dispatches via call syntax `k[]`, and auto-coerces back
-   to its underlying TTerm so it can be embedded inside other UOps
-   (TUOpAdd[k, x] etc.) without an explicit unwrap.
+   output shape/dtype, program ops) plus the codegen / dispatch
+   profiling surface (FLOPS, dispatch route, cumulative microseconds,
+   rendered C / Metal source, JIT dylib path) through a uniform
+   Information[] API; dispatches via call syntax `k[]`; auto-coerces
+   back to its underlying TTerm so it can be embedded inside other
+   UOps (TUOpAdd[k, x] etc.) without an explicit unwrap.
 
    Public surface:
-     TKernel[t_TTerm]      wrap a TTerm whose tag is UOP_KERNEL
-     TKernel[kid_Integer]  resolve a kid back to its pinned heap
-                           kernel_term and wrap that
-     TKernel[<|"InputTensors", "OutputShape", "OutputDtype",
-               "Program"|>]
-                           [planned] construct a fresh KernelEntry +
-                           UOP_KERNEL term from a hand-written program;
-                           currently returns Failure -- needs the
-                           thvm_wl_kernel_emit_program C bridge.
+     TKernel[t_TTerm]          wrap a TTerm whose tag is UOP_KERNEL
+     TKernel[kid_Integer]      resolve a kid back to its pinned heap
+                               kernel_term and wrap that
 
-     Information[k, "Properties"]   list of property names
-     Information[k, prop_String]    fetch one property
-     k[prop_String]                 shortcut for Information[k, prop]
-     k[]                            dispatch the kernel via TWnf
-                                    (no-op if already fired)
+     Information[k]            full Association of all properties
+     Information[k, "Properties"]  the property name list (public contract)
+     Information[k, "Name"]    fetch one property
+     k["Name"]                 shortcut for Information[k, "Name"]
+     k[]                       dispatch via TWnf (no-op if already fired)
 
-   Auto-coercion:
-     ttermRaw[k_TKernel]      -> packed Term value of the wrapped UOP
-     TTermVal/Tag/Ext[k]      -> the underlying TTerm's fields
-   so a TKernel passes transparently anywhere a TTerm is accepted. *)
+   Top-level convenience accessors all delegate to the property
+   surface, so `TKernelFlops[kid] == TKernel[kid]["Flops"]`.
+
+   Where the rest of TKernel lives:
+     - MakeBoxes summary box ........ Format.wl
+     - TScheduleGraph (kernel DAG) ... Visualization.wl
+     - heap-graph KERNEL rendering ... Visualization.wl (via kerVertexId) *)
 
 BeginPackage["THVMLink`"];
 
-TKernel::usage = "TKernel[t_TTerm] wraps a UOP_KERNEL term as a typed object.  TKernel[kid_Integer] resolves a kernel id back to its pinned heap term and wraps that.  Use Information[k, \"Properties\"] for the queryable property list, k[\"name\"] to fetch one, and k[] to dispatch.  A TKernel auto-coerces to its underlying TTerm in any UOp constructor.";
+TKernel::usage = "TKernel[t_TTerm] wraps a UOP_KERNEL term as a typed object.  TKernel[kid_Integer] resolves a kernel id back to its pinned heap term and wraps that.  Use Information[k, \"Properties\"] for the queryable property list, k[\"Name\"] to fetch one, and k[] to dispatch.  A TKernel auto-coerces to its underlying TTerm in any UOp constructor.";
 
 TKernelQ::usage = "TKernelQ[k] returns True if k is a well-formed TKernel object wrapping a UOP_KERNEL term.";
 
 TKernelProgram::usage = "TKernelProgram[k] returns the kernel's program as a list of associations <|\"Op\", \"Sources\", \"Arg\", \"Numel\", \"Dtype\"|>.  Sources are tagged KIn[slot] for kernel-input references and KOp[idx] for SSA references to earlier program slots.";
-
-TScheduleGraph::usage = "TScheduleGraph[] returns a Graph of the live kernel schedule: one vertex per emitted kernel, directed edges from producer kernel to consumer kernel labeled by the connecting TenDesc id.  External inputs (TenDescs with no producer kernel -- weights, host tensors) appear as cyan TEN-shaped vertices when \"ShowExternalInputs\" -> True (default).  Disconnected kernels render as isolated vertices.  Accepts all standard Graph options.";
 
 KIn::usage = "KIn[slot] tags a kernel-program source operand that reads from input slot `slot` (one of TKernelInputs).  Returned by TKernelProgram in each op's Sources list.";
 
 KOp::usage = "KOp[idx] tags a kernel-program source operand that reads from the output of program op index `idx`.  Returned by TKernelProgram in each op's Sources list.";
 
 TKernelDispatch::usage = "TKernelDispatch[k] dispatches the kernel by TWnf-firing its underlying term.  Same as calling `k[]`.";
+
+(* === kernel-entry introspection (kid-keyed, no TKernel wrap needed) === *)
+
+TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
+TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns the number of distinct KProgOp[] arrays interned in the kernel-program hash-cons cache.  After a TRealize, this is at most TKernelCount[]-1; structurally identical kernels (e.g. successive iters of a recursive lambda's step) share a single entry.";
+TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].  Equivalent to TKernel[kid][\"Program\"] paired with the header (n_inputs, n_ops, output_numel, output_dtype).";
+
+(* === codegen / profiling surface (delegated to TKernel properties) === *)
+
+TKernelSourceC::usage     = "TKernelSourceC[kid] = TKernel[kid][\"SourceC\"].  Renders kid's program through the C99 codegen renderer and returns the generated source.  Empty string when the program contains ops outside cg_supports (REDUCE, movement) -- those fall back to the interpreter.";
+TKernelSourceMetal::usage = "TKernelSourceMetal[kid] = TKernel[kid][\"SourceMetal\"].  Renders kid's program through the Metal Shading Language renderer.  Source-only stub today (the Metal backend dispatches single-op shaders, not fused programs).";
+TKernelFlops::usage         = "TKernelFlops[kid] = TKernel[kid][\"Flops\"].  Static FLOPS estimate for one execution of kid (sum over KProgOp[]: 1 flop per elementwise op per element, 1 flop per REDUCE source element).  0 for movement / load.";
+TKernelDispatchKind::usage  = "TKernelDispatchKind[kid] = TKernel[kid][\"DispatchKind\"].  The route the last fire of kid took: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", or \"interpreter\".";
+TKernelDispatchCount::usage = "TKernelDispatchCount[kid] = TKernel[kid][\"DispatchCount\"].  Cumulative number of times kid has fired since thvm_init.";
+TKernelTotalUs::usage       = "TKernelTotalUs[kid] = TKernel[kid][\"TotalUs\"].  Cumulative wallclock microseconds across every fire of kid.";
+TKernelJitDylibPath::usage  = "TKernelJitDylibPath[kid] = TKernel[kid][\"JitDylibPath\"].  On-disk path the JIT cache uses for kid's compiled .dylib (deterministic from the program hash).  File may not exist if the JIT bailed at codegen.";
+TKernelProfile::usage       = "TKernelProfile[kid] returns Information[TKernel[kid]] -- an Association of every property listed by Information[k, \"Properties\"], including the profiling fields.";
+TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid.";
 
 Begin["`Private`"];
 
@@ -180,11 +195,22 @@ kernelRowAsoc[kid_Integer] := Block[{row = TKernelTable[][[kid]]},
 
 (* The canonical Information property list.  Listed in the same
    order Information[k, "Properties"] returns -- the order is the
-   public contract, so don't permute without thought. *)
+   public contract, so don't permute without thought.
+
+   Three groups:
+     identity / shape    : Kid, Term, OutputTid, OutputShape, OutputDtype,
+                           OutputNumel, InputCount, InputTids, InputTensors,
+                           OpCount, Program, Fired, Spliced, ConsumerCount
+     codegen output      : SourceC, SourceMetal, JitDylibPath
+     dispatch profile    : Flops, DispatchKind, DispatchCount, TotalUs,
+                           AvgUs, GFlopsPerSec *)
 $tKernelProperties = {
     "Kid", "Term", "OutputTid", "OutputShape", "OutputDtype",
     "OutputNumel", "InputCount", "InputTids", "InputTensors",
-    "OpCount", "Program", "Fired", "Spliced", "ConsumerCount"
+    "OpCount", "Program", "Fired", "Spliced", "ConsumerCount",
+    "SourceC", "SourceMetal", "JitDylibPath",
+    "Flops", "DispatchKind", "DispatchCount", "TotalUs",
+    "AvgUs", "GFlopsPerSec"
 };
 
 (* Build a TAG_TEN-wrapped TTerm from a tid.  Looks up the tid's
@@ -197,8 +223,17 @@ tenTermFromTid[tid_Integer] := With[{
     packTerm[0, $TagTEN, dtype, tid]
 ]
 
+(* C-side dispatch enum -> readable label.  Mirrors KDispatchKind in
+   src/codegen/profile.c. *)
+$dispatchKindNames = <|
+    0 -> "none", 1 -> "blas-dot", 2 -> "blas-gemv", 3 -> "blas-gemm",
+    4 -> "jit",  5 -> "interpreter"
+|>;
+decodeDispatchKind[k_Integer] := Lookup[$dispatchKindNames, k, "unknown"]
+
 (* Single-property fetch.  Composed from kernelRowAsoc + decoded
-   program; "Term" / "Kid" come straight from the wrapper. *)
+   program; "Term" / "Kid" come straight from the wrapper.  All
+   profiling/source clauses ensureInit + call the loader fn. *)
 tKernelProp[k:TKernel[a_Association], "Kid"]   := a["Kid"]
 tKernelProp[k:TKernel[a_Association], "Term"]  := a["Term"]
 tKernelProp[k:TKernel[a_Association], "InputTids"]    := TKernelInputs[a["Kid"]]
@@ -211,6 +246,33 @@ tKernelProp[k:TKernel[a_Association], "OutputShape"]  := With[{
 },
     If[ tid > 0, TTensorShape[tenTermFromTid[tid]], Missing["NoOutput"]]
 ]
+
+(* === codegen / profile properties ===
+   Each routes through the loader fn declared in THVMLink.wl.  Both
+   files share THVMLink`Private` so the $...Fn symbols resolve. *)
+tKernelProp[k:TKernel[a_Association], "SourceC"]      := (ensureInit[]; $kernelSourceCFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "SourceMetal"]  := (ensureInit[]; $kernelSourceMetalFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "JitDylibPath"] := (ensureInit[]; $kernelJitDylibPathFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "Flops"]         := (ensureInit[]; $kernelFlopsFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "DispatchKind"]  := (ensureInit[];
+    decodeDispatchKind[$kernelDispatchKindFn[a["Kid"]]])
+tKernelProp[k:TKernel[a_Association], "DispatchCount"] := (ensureInit[]; $kernelDispatchCountFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "TotalUs"]       := (ensureInit[]; $kernelTotalUsFn[a["Kid"]])
+tKernelProp[k:TKernel[a_Association], "AvgUs"]         := With[{
+    n = tKernelProp[k, "DispatchCount"], us = tKernelProp[k, "TotalUs"]
+},
+    If[n > 0, N[us / n], 0]
+]
+tKernelProp[k:TKernel[a_Association], "GFlopsPerSec"]  := With[{
+    n     = tKernelProp[k, "DispatchCount"],
+    us    = tKernelProp[k, "TotalUs"],
+    flops = tKernelProp[k, "Flops"]
+},
+    If[us > 0 && n > 0, N[flops * n / (us * 1000)], 0]
+]
+
+(* Catchall: row-association lookup for any string we don't have a
+   dedicated clause for, with a Missing[] fallback for unknown keys. *)
 tKernelProp[k:TKernel[a_Association], prop_String] := Lookup[
     kernelRowAsoc[a["Kid"]], prop, Missing["UnknownProperty", prop]
 ]
@@ -257,180 +319,60 @@ TKernelDispatch[k_TKernel /; tKernelInternalQ[k]] := k[]
 
 TKernelProgram[k_TKernel /; tKernelInternalQ[k]] := tKernelProp[k, "Program"]
 
-(* === MakeBoxes summary ===
-   Mirrors the TUOp summary-box pattern but surfaces the kernel's
-   identifying fields (kid, output shape, input count, fired flag).
-   Two rows so the summary is informative-at-a-glance without
-   requiring an Information[] follow-up. *)
-tKernelSummaryIcon[] := Graphics[
-    {
-        EdgeForm[LightDarkSwitched[Black, White]],
-        FaceForm[LightDarkSwitched[Lighter[StandardOrange, 0.55], Darker[StandardOrange, 0.4]]],
-        Rectangle[{-0.6, -0.6}, {0.6, 0.6}, RoundingRadius -> 0.18]
-    },
-    ImageSize -> Dynamic[{Automatic, 3.5 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
-    PlotRangePadding -> Scaled[0.05]
+(* === top-level kid-keyed convenience accessors ===
+   Mirror the TKernel property surface so existing call sites
+   (`TKernelFlops[kid]`) keep working.  Each one pipes through
+   TKernel[kid] so the construction path validates the kid and
+   the Information surface stays the single source of truth. *)
+TKernelSourceC[kid_Integer]      := TKernel[kid]["SourceC"]
+TKernelSourceMetal[kid_Integer]  := TKernel[kid]["SourceMetal"]
+TKernelFlops[kid_Integer]        := TKernel[kid]["Flops"]
+TKernelDispatchKind[kid_Integer] := TKernel[kid]["DispatchKind"]
+TKernelDispatchCount[kid_Integer] := TKernel[kid]["DispatchCount"]
+TKernelTotalUs[kid_Integer]       := TKernel[kid]["TotalUs"]
+TKernelJitDylibPath[kid_Integer]  := TKernel[kid]["JitDylibPath"]
+
+(* TKernelProfile = full Information[] dump for one kid.  Same shape
+   as Information[TKernel[kid]] but without forcing the caller to
+   construct the wrapper explicitly. *)
+TKernelProfile[kid_Integer] := Information[TKernel[kid]]
+
+(* All currently-live kernels' profiles, indexed by kid. *)
+TProfileAll[] := Association[
+    Table[k -> TKernelProfile[k], {k, 1, TKernelCount[] - 1}]
 ]
 
-TKernel /: MakeBoxes[k:TKernel[a_Association] /; tKernelInternalQ[k], fmt_] :=
-    With[{
-        kid     = a["Kid"],
-        row     = kernelRowAsoc[a["Kid"]],
-        nProg   = TTermVal[a["Term"]],   (* base loc, useful for debug *)
-        icon    = tKernelSummaryIcon[]
-    },
-        BoxForm`ArrangeSummaryBox[
-            "TKernel",
-            k,
-            icon,
-            {
-                {
-                    BoxForm`SummaryItem[{"kid: ",      kid}],
-                    BoxForm`SummaryItem[{"inputs: ",   row["InputCount"]}]
-                },
-                {
-                    BoxForm`SummaryItem[{"out tid: ",  row["OutputTid"]}],
-                    BoxForm`SummaryItem[{"out dtype: ",row["OutputDtype"]}]
-                }
-            },
-            {
-                {
-                    BoxForm`SummaryItem[{"out numel: ", row["OutputNumel"]}],
-                    BoxForm`SummaryItem[{"fired: ",     row["Fired"]}]
-                },
-                {
-                    BoxForm`SummaryItem[{"consumers: ", row["ConsumerCount"]}],
-                    BoxForm`SummaryItem[{"spliced: ",   row["Spliced"]}]
-                }
-            },
-            fmt,
-            "Interpretable" -> Automatic
-        ]
-    ]
+(* === kernel-entry introspection ===
+   Direct kid-keyed accessors.  The TKernel object's property
+   surface ultimately routes through these too (decodeKernelInfo). *)
+TKernelCount[]            := (ensureInit[]; $kernelCountFn[])
+TKernelProgramCacheSize[] := (ensureInit[]; $kernelProgramCacheSizeFn[])
 
-(* === TScheduleGraph -- DAG-of-kernels view ===
-
-   Builds straight from the C-side KERNELS / TENS tables (no heap
-   walk).  For each emitted kernel kid in 1..KERNELS_NEXT-1:
-     - vertex "k<kid>" with kernel-shaped style (orange rounded
-       rectangle, label = kid + program op count + output shape)
-     - one directed edge per input_tid: source = the producer
-       kernel "k<producer_kid>" if any (=> kernel-to-kernel
-       dependency), else "t<tid>" (an external TEN leaf, only
-       added when "ShowExternalInputs" -> True)
-     - edge label = tid
-
-   Disconnected kernels (no producer or consumer) render as
-   isolated vertices in the layered embedding -- they're still
-   part of the schedule, they just don't share TenDescs with the
-   rest. *)
-
-(* Vertex draw funnels through the shared Style.wl primitives so a
-   KERNEL here matches a KERNEL in THeapGraph and the Style.wl
-   palette is the only place colors live. *)
-
-(* Compose a short per-kernel label.  Two lines:
-     kid, op count
-     output shape and dtype (or "no out" for the rare bail). *)
-scheduleKernelLabel[kid_Integer] := Block[{
-    info = decodeKernelInfo[kid],
-    row  = kernelRowAsoc[kid],
-    shape
-},
-    shape = With[{tid = row["OutputTid"]},
-        If[ tid > 0, TTensorShape[tenTermFromTid[tid]], {}]];
-    "k" <> ToString[kid] <> " (" <> ToString[info[[1]]["OpCount"]] <> "ops)"
-        <> "\n" <> ToString[shape] <> " " <> row["OutputDtype"]
-]
-
-scheduleExternalLabel[tid_Integer] := Block[{
-    shape = TTensorShape[tenTermFromTid[tid]],
-    dtype = TTensorDType[tenTermFromTid[tid]]
-},
-    "t" <> ToString[tid] <> "\n"
-        <> ToString[shape] <> " "
-        <> If[StringQ[dtype], dtype, "?"]
-]
-
-Options[TScheduleGraph] = Join[
-    {"ShowExternalInputs" -> True},
-    Options[Graph]
-];
-
-TScheduleGraph[opts : OptionsPattern[]] := Block[{
-    nKernels = TKernelCount[] - 1,
-    showExt = OptionValue["ShowExternalInputs"],
-    tens, kernelVerts, edges, edgeLabels, extTids, extVerts,
-    vshapes
-},
-    If[ nKernels <= 0, Return[Graph[{}, ImageSize -> 240]]];
-    tens = TTensTable[];
-
-    kernelVerts = Table["k" <> ToString[k], {k, nKernels}];
-
-    (* For each kernel, walk its input_tids and emit one edge per
-       tid back to the producing kernel (or to an external-TEN
-       vertex if there's no producer).  Edge label is the tid. *)
-    {edges, edgeLabels, extTids} = Block[{es = {}, ls = {}, exs = {}},
-        Do[
-            Block[{
-                inTids = TKernelInputs[kid],
-                consumerVert = "k" <> ToString[kid],
-                producerKid, srcVert
-            },
-                Do[
-                    producerKid = If[ tid > 0 && tid <= Length[tens],
-                                      tens[[tid, 1]], 0];
-                    srcVert = If[ producerKid =!= 0,
-                                  "k" <> ToString[producerKid],
-                                  "t" <> ToString[tid]];
-                    If[ producerKid === 0, AppendTo[exs, tid]];
-                    AppendTo[es, DirectedEdge[srcVert, consumerVert]];
-                    AppendTo[ls, DirectedEdge[srcVert, consumerVert] -> tid],
-                    {tid, inTids}
-                ]
-            ],
-            {kid, nKernels}
-        ];
-        {es, ls, DeleteDuplicates[exs]}
-    ];
-
-    extVerts = If[ showExt, "t" <> ToString[#] & /@ extTids, {}];
-    (* Drop edges pointing into hidden external vertices, otherwise
-       Graph would auto-add stub vertices for them. *)
-    If[ !showExt,
-        edges = Select[edges, !StringStartsQ[#[[1]], "t"] &];
-        edgeLabels = Select[edgeLabels, !StringStartsQ[#[[1, 1]], "t"] &]
-    ];
-
-    vshapes = Join[
-        Table[
-            With[{vid = "k" <> ToString[k], lab = scheduleKernelLabel[k]},
-                vid -> nodeShapeFn["KERNEL", lab]],
-            {k, nKernels}
-        ],
-        If[ showExt,
-            Table[
-                With[{vid = "t" <> ToString[t], lab = scheduleExternalLabel[t]},
-                    vid -> nodeShapeFn["ExternalTEN", lab]],
-                {t, extTids}
-            ],
-            {}
-        ]
-    ];
-
-    Graph[
-        Join[kernelVerts, extVerts],
-        edges,
-        FilterRules[{opts}, Options[Graph]],
-        VertexShapeFunction -> vshapes,
-        VertexSize          -> 0.45,
-        EdgeLabelStyle      -> Directive[FontFamily -> "Helvetica", FontSize -> 9,
-                                         LightDarkSwitched[Black, White]],
-        EdgeStyle           -> edgeStyleDirective,
-        GraphLayout         -> "LayeredDigraphEmbedding",
-        PerformanceGoal     -> "Quality"
-    ]
+(* TKernelInfo[kid] returns a flat Association with the kernel's
+   linearized program + shape metadata.  Used by tests + visualization
+   overlays.  Same data as decodeKernelInfo above, repackaged with the
+   legacy snake_case keys callers expect. *)
+TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid], n, nOps},
+    n    = raw[[1]];
+    nOps = raw[[2]];
+    <|
+      "n_inputs"     -> n,
+      "n_ops"        -> nOps,
+      "output_numel" -> raw[[3]],
+      "output_dtype" -> dtypeName[raw[[4]]],
+      "program"      -> Table[
+          With[{base = 4 + (i - 1) * 6},
+            <|
+              "opcode" -> Lookup[$uopNames, raw[[base + 1]], "?"],
+              "n_src"  -> raw[[base + 2]],
+              "src"    -> { raw[[base + 3]], raw[[base + 4]] },
+              "arg"    -> raw[[base + 5]],
+              "numel"  -> raw[[base + 6]]
+            |>
+          ],
+          {i, nOps}
+      ]
+    |>
 ]
 
 End[];
