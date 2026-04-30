@@ -586,7 +586,11 @@ static u32 view_resolve(Term t) {
       t_numel *= d;
     }
     if (t_numel != src_view->numel) return 0;   // numel must match
-    return tensor_view_chain_append(src_tid, view_create(ts));
+    u32 r = tensor_view_chain_append(src_tid, view_create(ts));
+    fprintf(stderr, "DBG chain-append: src_tid=%u r=%u src.contig=%u src.numel=%u t_numel=%u t_ndim=%u\n",
+            src_tid, r, src_view->contiguous, src_view->numel, t_numel, t_ndim);
+    fflush(stderr);
+    return r;
   }
   return 0;
 }
