@@ -376,7 +376,11 @@ static int view_apply_expand(View const *src, u64 expr_loc, View *out) {
 }
 
 static int view_apply_permute(View const *src, u64 expr_loc, View *out) {
-  if (!src->contiguous) return 0;       // simple-source-only for v1
+  // Permute on a non-contig source is mathematically fine: just
+  // reorder strides + dims to match the new axis order.  The output
+  // is contig only if (a) src was contig AND (b) the permutation is
+  // identity; the existing `contiguous = identity ? src->contiguous : 0`
+  // assignment below already reflects that.
   Shape ts = {0}; ts.ndim = src->shape.ndim;
   out->offset = src->offset;
   u8 used[MAX_DIM] = {0};
@@ -397,7 +401,10 @@ static int view_apply_permute(View const *src, u64 expr_loc, View *out) {
 }
 
 static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
-  if (!src->contiguous) return 0;
+  // Shrink on a non-contig source is mathematically fine: bump
+  // offset by `b * src->strides[i]` per axis, keep src strides.
+  // The output is contig only if (a) src was contig AND (b) the
+  // shrink doesn't actually drop any element (numel preserved).
   Shape ts = {0}; ts.ndim = src->shape.ndim;
   i32 add_off = 0;
   u32 t_numel = 1;
@@ -414,12 +421,16 @@ static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
   out->offset = src->offset + add_off;
   for (u32 i = 0; i < src->shape.ndim; i++) out->strides[i] = src->strides[i];
   for (u32 i = src->shape.ndim; i < MAX_DIM; i++) out->strides[i] = 0;
-  out->contiguous = (t_numel == src->numel) ? 1 : 0;
+  out->contiguous = src->contiguous && t_numel == src->numel;
   return 1;
 }
 
 static int view_apply_flip(View const *src, u64 expr_loc, View *out) {
-  if (!src->contiguous) return 0;
+  // Flip on a non-contig source is mathematically fine: negate
+  // the per-axis stride and bump offset by (dim-1)*src_stride.
+  // The output is contig only if no axis was actually flipped AND
+  // src was contig.  `out->contiguous = any ? 0 : src->contiguous`
+  // below already captures that.
   u32 mask = (u32)term_val(heap_read(expr_loc + 1));
   out->shape  = src->shape;
   out->numel  = src->numel;
@@ -478,6 +489,20 @@ static u32 const_to_tendesc(u64 const_loc) {
       static u8 buf_bytes[8];
       from_fp32_lane(buf_bytes, dtype, &v, 1);
       src = buf_bytes; nbytes = dtype_storage_bytes(dtype, 1);
+      break;
+    }
+    case DT_INT4: {
+      static u8 nibble_byte;
+      i8 v8 = (i8)((i32)bits);
+      pack_int4(&nibble_byte, &v8, 1);
+      src = &nibble_byte; nbytes = 1;
+      break;
+    }
+    case DT_UINT4: {
+      static u8 nibble_byte;
+      u8 v8 = (u8)(bits & 0xFu);
+      pack_uint4(&nibble_byte, &v8, 1);
+      src = &nibble_byte; nbytes = 1;
       break;
     }
     default:
