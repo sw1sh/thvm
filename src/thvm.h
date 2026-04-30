@@ -324,6 +324,16 @@ typedef struct {
   u8   n_axes;                 // 0 = uninitialized (not yet defaulted)
   KOpt applied_opts[MAX_OPTS];
   u8   n_applied;
+  u8   autotuned;              // 1 = kernel_autotune has run on this
+                               // KernelAxes (per-program-shape via the
+                               // KpCacheSlot).  Guards the "fire-time
+                               // autotune" path against re-running on
+                               // every dispatch and against infinite
+                               // recursion when autotune itself fires
+                               // the kernel for benching.  Preserved
+                               // across axes_reset_to_default so a
+                               // proposer-explored variant doesn't
+                               // re-trigger autotune mid-bench.
 } KernelAxes;
 
 struct Backend {
@@ -831,6 +841,11 @@ fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 // iter 2 onward).  Returns 1 if a winning opt was applied,
 // 0 if no candidate beat baseline (or no candidates).
 fn int kernel_autotune(u32 kid);
+
+// Cheap predicate used by the fire-time auto-tune trigger.  True
+// iff (env opt-in `THVM_AUTOTUNE=1`) AND (this KernelAxes hasn't
+// been autotuned yet) AND (proposer has at least one candidate).
+fn int kernel_should_autotune(struct KernelEntry const *ke);
 
 // === tensor/ ===
 // Tensor descriptor lifecycle.  Step 12: bump-only allocation in TENS[];

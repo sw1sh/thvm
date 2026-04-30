@@ -22,9 +22,14 @@
 // Reset axes->applied_opts[] back to empty.  Recomputes default
 // axis_types/full_shape from the kernel's output_shape + tail
 // REDUCE so subsequent axes_apply_opt sees a clean slate.
+// Preserves the `autotuned` flag so the fire-time autotune trigger
+// doesn't re-fire while we're benching variants of an already-
+// tuned kernel.
 static void axes_reset_to_default(KernelEntry *ke) {
   if (ke->axes == NULL) return;
+  u8 autotuned = ke->axes->autotuned;
   memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->autotuned = autotuned;
   axes_default_for(ke);
 }
 
@@ -55,7 +60,17 @@ fn int kernel_autotune(u32 kid) {
   KOpt candidates[16];
   u32  n_cand = kernel_opts_propose(ke, candidates,
                                     sizeof(candidates)/sizeof(*candidates));
-  if (n_cand == 0) return 0;
+  if (n_cand == 0) {
+    // No candidates -- still mark autotuned so the fire-time trigger
+    // doesn't re-propose every dispatch.
+    if (ke->axes != NULL) ke->axes->autotuned = 1;
+    return 0;
+  }
+
+  // Mark autotuned at the START so the bench-loop's kernel_fire_by_id
+  // calls don't recurse back into autotune via kernel_should_autotune.
+  // axes_reset_to_default preserves the flag.
+  ke->axes->autotuned = 1;
 
   // Baseline (no opts).
   axes_reset_to_default(ke);
@@ -78,10 +93,35 @@ fn int kernel_autotune(u32 kid) {
   }
 
   // Re-apply the winner (or leave baseline if nothing beat it).
+  // `autotuned` was set at the start; reset_to_default preserves it.
   axes_reset_to_default(ke);
   if (best_opt.op != KOP_NONE) {
     axes_apply_opt(ke->axes, best_opt);
     return 1;
   }
   return 0;
+}
+
+// Should this kernel auto-tune on its next fire?  Three conditions:
+// the env opt-in is on, the per-program-shape `autotuned` flag is
+// still 0, and the proposer would offer at least one candidate
+// (otherwise autotune is a guaranteed no-op).  Cheap: env check
+// memoizes; the propose call returns quickly when the kernel
+// shape doesn't trigger any rules.
+static int autotune_env_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_AUTOTUNE");
+    enabled = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return enabled;
+}
+
+fn int kernel_should_autotune(KernelEntry const *ke) {
+  if (!autotune_env_enabled()) return 0;
+  if (ke == NULL || ke->axes == NULL) return 0;
+  if (ke->axes->autotuned) return 0;
+  KOpt buf[16];
+  return kernel_opts_propose(ke, buf, sizeof(buf)/sizeof(*buf)) > 0;
 }

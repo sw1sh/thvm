@@ -299,6 +299,24 @@ VerificationTest[
     TestID -> "kernel-opts/propose-reduce-no-upcast"
 ]
 
+(* === fire-time autotune trigger: env opt-in via THVM_AUTOTUNE.
+       Default off so existing users don't pay surprise bench costs;
+       on, every new program shape gets autotuned at first fire. *)
+
+VerificationTest[
+    (* Without env: no auto-fire.  Single dispatch (the user's
+       TRealize) and Applied stays empty. *)
+    TInit[];
+    xT = TTensorCreate @ N @ Range[256];
+    yT = TTensorCreate @ N @ Range[256, 1, -1];
+    TRealize @ TUOpAdd[TUOpMul[xT, yT], TUOpMul[TUOpConst[2.0], xT]];
+    kid = TKernelCount[] - 1;
+    {TKernelDispatchCount[kid],
+     First[TKernelOpts[kid]]["Applied"]},
+    {1, {}},
+    TestID -> "kernel-opts/auto-fire-disabled-by-default"
+]
+
 (* === per-program-shape sharing: opt on kid_1 visible on kid_2
        when both kids share the same KProgOp[] via the cache.  This
        is what makes the proposer + auto-bench (next pass) actually
