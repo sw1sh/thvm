@@ -185,185 +185,225 @@ cleanup:
   return rc;
 }
 
-// === Phase B: scalar-UOp interpreter ================================
+// === Phase B/C: scalar-UOp interpreter ===============================
 //
-// Walks ke->scalar_uops once per output element, evaluating each
-// scalar op into a per-op u64 register file.  f32 / i32 values are
-// bit-cast through the u64 register; this is fine on every backend
-// we target since u64 holds both.  Phase B handles the elementwise
-// + CONST + simple-INDEX subset; reduce / strided INDEX / multi-
-// output land in later phases.
+// Recursive evaluator over ke->scalar_uops.  Each op produces a u64
+// value (range iter, address, or f32-bit-cast scalar) that is
+// either:
+//   - immediate-recomputed via eval_scalar (for ops whose value
+//     depends on the current iter context -- including REDUCE
+//     bodies)
+//   - or read from `range_iter[op_id]` for S_RANGE ops, which the
+//     dispatcher mutates at loop boundaries.
 //
-// Per-element layout:
-//   reg[id] holds the value emitted by scalar_uops[id] for the
-//   current output index k.  Ops without a value (S_RANGE leaf,
-//   S_DEFINE_PARAM, S_DEFINE_OUTPUT, S_STORE, S_BUFFERIZE) write
-//   either the iter / pointer / nothing.
+// The dispatcher iterates LOOP-typed ranges in their canonical
+// row-major order, sets the per-range iter values, then evaluates
+// the kernel's S_STORE op at each iteration.  REDUCE-typed ranges
+// are nested INSIDE the eval (S_REDUCE_SUM/_MAX op opens an inner
+// loop, mutates its range's iter, accumulates).
 //
-// CONST scalars and same-shape inputs both compile to flat indexing
-// using k directly; broadcast (numel == 1) inputs use offset 0.
+// f32 only for now; bit-cast through u32 stored in the low 32 bits
+// of the returned u64.
+
+typedef struct {
+  KernelEntry *ke;
+  void       **in_ptrs;
+  void        *out_p;
+  u32         *range_iter;     // per-op-id; only S_RANGE slots are used
+  u32          odtype;
+} ScalarCtx;
+
+static u64 eval_scalar(ScalarCtx *c, u32 op_id);
+
+// Decode S_INDEX: address = sum(range_iter[src[1+d]] * stride[d]).
+// Returns the byte-offset address (input element index, output
+// element index, etc.) plus the slot id in the high 32 bits when
+// the buffer is a DEFINE_PARAM.
+static u64 eval_index(ScalarCtx *c, ScalarUop const *u) {
+  u32 buf_id = u->src[0];
+  ScalarUop const *bu = &c->ke->scalar_uops[buf_id];
+  u64 strides_packed = u->extra;
+  u32 addr = 0;
+  u32 nrng = (u32)u->src_count - 1;
+  for (u32 d = 0; d < nrng; d++) {
+    u32 rng_id = u->src[1 + d];
+    u32 iter   = c->range_iter[rng_id];
+    u32 stride = (u32)((strides_packed >> (16 * d)) & 0xFFFFu);
+    addr += iter * stride;
+  }
+  if (bu->op == S_DEFINE_OUTPUT) return (u64)addr;
+  // Input: stash the slot id in the high half so S_LOAD can find the
+  // buffer pointer.
+  u32 slot = (u32)bu->extra;
+  return ((u64)slot << 32) | (u64)addr;
+}
+
+static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
+  if (op_id == 0) return 0;
+  ScalarUop const *u = &c->ke->scalar_uops[op_id];
+  switch (u->op) {
+    case S_RANGE:           return (u64)c->range_iter[op_id];
+    case S_DEFINE_PARAM:    return u->extra;
+    case S_DEFINE_OUTPUT:   return 0;
+    case S_CONST:           return u->extra & 0xFFFFFFFFu;
+    case S_INDEX:           return eval_index(c, u);
+    case S_LOAD: {
+      u64 idx_r = eval_scalar(c, u->src[0]);
+      u32 slot  = (u32)(idx_r >> 32);
+      u32 off   = (u32)(idx_r & 0xFFFFFFFFu);
+      void *p   = c->in_ptrs[slot];
+      f32   v;
+      memcpy(&v, (const u8 *)p + off * 4, 4);
+      u32 bits; memcpy(&bits, &v, 4);
+      return (u64)bits;
+    }
+    case S_REDUCE_SUM:
+    case S_REDUCE_MAX: {
+      // src[0] = body; src[1] = REDUCE-typed range.
+      u32 rng_id = u->src[1];
+      ScalarUop const *r = &c->ke->scalar_uops[rng_id];
+      u32 extent = (u32)(r->extra & 0xFFFFFFFFu);
+      f32 acc    = (u->op == S_REDUCE_MAX) ? -INFINITY : 0.0f;
+      u32 saved  = c->range_iter[rng_id];
+      for (u32 ri = 0; ri < extent; ri++) {
+        c->range_iter[rng_id] = ri;
+        u32 b = (u32)eval_scalar(c, u->src[0]);
+        f32 v; memcpy(&v, &b, 4);
+        if (u->op == S_REDUCE_MAX) acc = (v > acc ? v : acc);
+        else                       acc += v;
+      }
+      c->range_iter[rng_id] = saved;
+      u32 rb; memcpy(&rb, &acc, 4);
+      return (u64)rb;
+    }
+    case S_ADD: {
+      f32 a, b;
+      u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      u32 bb = (u32)eval_scalar(c, u->src[1]); memcpy(&b, &bb, 4);
+      f32 r = a + b; u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    case S_MUL: {
+      f32 a, b;
+      u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      u32 bb = (u32)eval_scalar(c, u->src[1]); memcpy(&b, &bb, 4);
+      f32 r = a * b; u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    case S_NEG: {
+      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      f32 r = -a; u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    case S_RECIP: {
+      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      f32 r = 1.0f / a; u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    case S_SQRT: {
+      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      f32 r = sqrtf(a); u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    case S_EXP2: {
+      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      f32 r = exp2f(a); u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    case S_LOG2: {
+      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      f32 r = log2f(a); u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    case S_CMPLT: {
+      f32 a, b;
+      u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      u32 bb = (u32)eval_scalar(c, u->src[1]); memcpy(&b, &bb, 4);
+      f32 r = (a < b) ? 1.0f : 0.0f;
+      u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    case S_CMPEQ: {
+      f32 a, b;
+      u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
+      u32 bb = (u32)eval_scalar(c, u->src[1]); memcpy(&b, &bb, 4);
+      f32 r = (a == b) ? 1.0f : 0.0f;
+      u32 rb; memcpy(&rb, &r, 4); return rb;
+    }
+    default:
+      return 0;
+  }
+}
+
 fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ke->scalar_uops == NULL || ke->n_scalar_uops < 2) return -1;
-  u32 n        = ke->n_scalar_uops;
-  u32 onum     = ke->output_numel;
-  u32 odtype   = ke->output_dtype;
-  void *out_p  = CPU_BUFS[out_buf_id].data;
-  // Resolve raw input pointers up-front (same as cpu_interpret).  We
-  // bailed earlier on non-contig inputs, so no view pre-mat needed.
+  // Find the S_BUFFERIZE root.  Its src[0] is the kernel's S_STORE.
+  u32 buf_id = 0;
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    if (ke->scalar_uops[i].op == S_BUFFERIZE) { buf_id = i; break; }
+  }
+  if (buf_id == 0) return -1;
+  u32 store_id = ke->scalar_uops[buf_id].src[0];
+  if (ke->scalar_uops[store_id].op != S_STORE) return -1;
+
+  // Collect LOOP ranges + their extents from the BUFFERIZE root.
+  // BUFFERIZE.src[0..n) = STORE then 1+n LOOP ranges in axis order.
+  ScalarUop *bu = &ke->scalar_uops[buf_id];
+  u32 n_loops = (u32)bu->src_count - 1;
+  u32 loop_ids    [4];
+  u32 loop_extents[4];
+  for (u32 d = 0; d < n_loops && d < 4; d++) {
+    u32 r = bu->src[1 + d];
+    loop_ids    [d] = r;
+    loop_extents[d] = (u32)(ke->scalar_uops[r].extra & 0xFFFFFFFFu);
+  }
+
+  // Resolve raw input pointers.  We bailed at lower-time on non-
+  // contig inputs, so no view pre-mat is needed.
   u32 n_inputs = ke->n_inputs;
   void *in_ptrs_buf[n_inputs ? n_inputs : 1];
   void **in_ptrs = in_ptrs_buf;
   for (u32 i = 0; i < n_inputs; i++) {
     in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
   }
-  // Per-element register file.  Reused across iterations.
-  u64 *reg = (u64 *)malloc((size_t)n * sizeof(u64));
-  if (reg == NULL) return -1;
+
+  // Per-op iter slot.  Only S_RANGE op ids are read; reusing one
+  // u32 array indexed by op id keeps the dispatcher branch-free.
+  u32 *range_iter = (u32 *)calloc(ke->n_scalar_uops, sizeof(u32));
+  if (range_iter == NULL) return -1;
+
+  ScalarCtx ctx = {
+    .ke          = ke,
+    .in_ptrs     = in_ptrs,
+    .out_p       = CPU_BUFS[out_buf_id].data,
+    .range_iter  = range_iter,
+    .odtype      = ke->output_dtype,
+  };
+
+  // Outer LOOP nest: iterate every LOOP range.  For Phase B/C we
+  // support up to 3 LOOP dims; the BUFFERIZE captured them in
+  // canonical row-major order so we can iterate flat by k and
+  // decode strides.
+  u32 onum = ke->output_numel;
+  // Precompute the LOOP strides for k -> per-range-iter decoding.
+  u32 loop_strides[4] = {0, 0, 0, 0};
+  if (n_loops > 0) {
+    loop_strides[n_loops - 1] = 1;
+    for (i32 d = (i32)n_loops - 2; d >= 0; d--)
+      loop_strides[d] = loop_strides[d + 1] * loop_extents[d + 1];
+  }
   for (u32 k = 0; k < onum; k++) {
-    for (u32 i = 1; i < n; i++) {
-      ScalarUop *u = &ke->scalar_uops[i];
-      switch (u->op) {
-        case S_RANGE: {
-          // Unused for the simple elementwise path -- we drive
-          // INDEX directly with k.  Keep the iter slot zeroed so
-          // any stray reader gets a deterministic value.
-          reg[i] = 0;
-          break;
-        }
-        case S_DEFINE_PARAM: {
-          // extra holds the input slot index.  Store the slot id
-          // so S_INDEX can decide between "k" (per-element) and
-          // "0" (broadcast).  Pointer indirection happens at LOAD.
-          reg[i] = (u64)(u->extra & 0xFFFFFFFFu);
-          break;
-        }
-        case S_DEFINE_OUTPUT: {
-          reg[i] = 0;   // sentinel; S_STORE knows to use out_p.
-          break;
-        }
-        case S_INDEX: {
-          // src[0] = buffer; src[1..] = ranges.  For Phase B,
-          // index into output is k; index into a non-broadcast
-          // input is also k; broadcast input collapses to 0.
-          // Encode the address as a (slot << 1) | scalar_flag for
-          // input INDEX, or just a flat offset for output.
-          u32 buf_id = u->src[0];
-          ScalarUop *bu = &ke->scalar_uops[buf_id];
-          if (bu->op == S_DEFINE_OUTPUT) {
-            reg[i] = (u64)k;     // output address is k
-          } else {
-            // input slot: lookup numel; if 1, address is 0; else k.
-            u32 slot = (u32)reg[buf_id];
-            u32 inum = ke->input_numels[slot];
-            reg[i] = (inum == 1) ? 0 : (u64)k;
-            // Stash slot in the high half so LOAD can find the buffer.
-            reg[i] |= ((u64)slot << 32);
-          }
-          break;
-        }
-        case S_LOAD: {
-          // src[0] = INDEX over an input.  Decode (slot, offset).
-          u64 idx_r = reg[u->src[0]];
-          u32 slot  = (u32)(idx_r >> 32);
-          u32 off   = (u32)(idx_r & 0xFFFFFFFFu);
-          u32 dtype = ke->input_dtypes[slot];
-          void *p   = in_ptrs[slot];
-          // Phase B handles f32 and i32; other dtypes bail at lower
-          // time, so this switch covers the supported set.
-          if (dtype == DT_FP32) {
-            f32 v; memcpy(&v, (const u8 *)p + off * 4, 4);
-            u32 bits; memcpy(&bits, &v, 4); reg[i] = (u64)bits;
-          } else {
-            // Fall through for non-f32: read raw 4 bytes for now.
-            u32 v; memcpy(&v, (const u8 *)p + off * 4, 4);
-            reg[i] = (u64)v;
-          }
-          break;
-        }
-        case S_STORE: {
-          // src[0] = INDEX into output, src[1] = value.
-          u64 idx_r = reg[u->src[0]];
-          u32 off   = (u32)(idx_r & 0xFFFFFFFFu);
-          u32 bits  = (u32)reg[u->src[1]];
-          if (odtype == DT_FP32) {
-            f32 v; memcpy(&v, &bits, 4);
-            memcpy((u8 *)out_p + off * 4, &v, 4);
-          } else {
-            memcpy((u8 *)out_p + off * 4, &bits, 4);
-          }
-          break;
-        }
-        case S_BUFFERIZE: {
-          // No-op at runtime; the STORE already wrote.  Marks the
-          // graph root for introspection / future BUFFERIZE-driven
-          // memory planning.
-          break;
-        }
-        case S_CONST: {
-          reg[i] = u->extra & 0xFFFFFFFFu;
-          break;
-        }
-        case S_ADD: {
-          f32 a, b;
-          u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          u32 bb = (u32)reg[u->src[1]]; memcpy(&b, &bb, 4);
-          f32 r = a + b; u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        case S_MUL: {
-          f32 a, b;
-          u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          u32 bb = (u32)reg[u->src[1]]; memcpy(&b, &bb, 4);
-          f32 r = a * b; u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        case S_NEG: {
-          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          f32 r = -a; u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        case S_RECIP: {
-          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          f32 r = 1.0f / a; u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        case S_SQRT: {
-          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          f32 r = sqrtf(a); u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        case S_EXP2: {
-          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          f32 r = exp2f(a); u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        case S_LOG2: {
-          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          f32 r = log2f(a); u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        case S_CMPLT: {
-          f32 a, b;
-          u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          u32 bb = (u32)reg[u->src[1]]; memcpy(&b, &bb, 4);
-          f32 r = (a < b) ? 1.0f : 0.0f;
-          u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        case S_CMPEQ: {
-          f32 a, b;
-          u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
-          u32 bb = (u32)reg[u->src[1]]; memcpy(&b, &bb, 4);
-          f32 r = (a == b) ? 1.0f : 0.0f;
-          u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
-          break;
-        }
-        default:
-          free(reg); return -1;
-      }
+    for (u32 d = 0; d < n_loops; d++) {
+      u32 ext = loop_extents[d];
+      u32 str = loop_strides[d];
+      range_iter[loop_ids[d]] = (str > 0) ? ((k / str) % ext) : 0;
+    }
+    // Evaluate the STORE: writes one element to out_p.
+    ScalarUop const *st = &ke->scalar_uops[store_id];
+    u64 idx_r   = eval_scalar(&ctx, st->src[0]);
+    u32 off     = (u32)(idx_r & 0xFFFFFFFFu);
+    u32 bits    = (u32)eval_scalar(&ctx, st->src[1]);
+    if (ctx.odtype == DT_FP32) {
+      f32 v; memcpy(&v, &bits, 4);
+      memcpy((u8 *)ctx.out_p + off * 4, &v, 4);
+    } else {
+      memcpy((u8 *)ctx.out_p + off * 4, &bits, 4);
     }
   }
-  free(reg);
+
+  free(range_iter);
   return 0;
 }
 

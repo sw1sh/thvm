@@ -138,18 +138,56 @@ VerificationTest[
     TestID -> "lowering/unary-sqrt-correct"
 ]
 
-(* Bail path: a kernel with REDUCE inside must NOT be lowered (Phase
-   C work).  TKernelScalarUops should report Missing for it.  TSum
-   over a vector emits a REDUCE kernel. *)
+(* Phase C: TSum over a vector lowers to one kernel with a single
+   REDUCE-typed RANGE wrapped in S_REDUCE_SUM.  Same shape as the
+   Phase B elementwise add but with an extra REDUCE range and one
+   S_REDUCE_SUM op instead of S_ADD. *)
 VerificationTest[
     withRangeify[True,
       TInit[];
       v = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
       TRealize @ TSum[v];
-      (* The SUM kernel is the last one emitted; check every kernel. *)
-      AllTrue[Range[TKernelCount[] - 1],
-              TKernelScalarUops[#] === Missing["NotLowered"] &]
+      (* The SUM kernel is the only one (TSum on a TEN). *)
+      sumKid = SelectFirst[Range[TKernelCount[] - 1],
+                 TKernelScalarUops[#] =!= Missing["NotLowered"] &];
+      tally = scalarOpTally[sumKid];
+      KeyTake[tally, {"S_RANGE", "S_DEFINE_PARAM", "S_DEFINE_OUTPUT",
+                      "S_INDEX",  "S_LOAD",        "S_REDUCE_SUM",
+                      "S_STORE",  "S_BUFFERIZE"}]
+    ],
+    <|"S_RANGE" -> 2, "S_DEFINE_PARAM" -> 1, "S_DEFINE_OUTPUT" -> 1,
+      "S_INDEX" -> 2, "S_LOAD" -> 1, "S_REDUCE_SUM" -> 1,
+      "S_STORE" -> 1, "S_BUFFERIZE" -> 1|>,
+    TestID -> "lowering/reduce-sum-shape"
+]
+
+(* Phase C: TSum output bitwise matches legacy.  Sum-of-1..10 should
+   give 55. *)
+VerificationTest[
+    Module[{legacy, lowered, expected = 55.0},
+      legacy = withRangeify[False,
+        TInit[];
+        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+        First @ Normal @ TTensorData @ TRealize @ TSum[v]];
+      lowered = withRangeify[True,
+        TInit[];
+        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+        First @ Normal @ TTensorData @ TRealize @ TSum[v]];
+      legacy === lowered === expected
     ],
     True,
-    TestID -> "lowering/reduce-bails-to-legacy"
+    TestID -> "lowering/reduce-sum-output-eq"
+]
+
+(* Phase C: REDUCE_MAX lowers via S_REDUCE_MAX.  Max of
+   {-1, 5, 3, 2} = 5.  Use TUOpReduce[..., "MAX"] directly since
+   there's no public TMax wrapper. *)
+VerificationTest[
+    withRangeify[True,
+      TInit[];
+      v = TTensorCreate @ NumericArray[{-1.0, 5.0, 3.0, 2.0}, "Real32"];
+      First @ Normal @ TTensorData @ TRealize @ TUOpReduce[v, 0, "MAX"]
+    ],
+    5.0,
+    TestID -> "lowering/reduce-max-output-eq"
 ]

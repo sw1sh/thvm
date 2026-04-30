@@ -113,6 +113,40 @@ fn const char *scalar_axis_name(u32 axis_type) {
   }
 }
 
+// Pack up to 3 u16 strides into the S_INDEX `extra` field.  Strides
+// > 65535 force a bail (caller falls back to legacy KProgOp[]).
+// Stride layout: stride[d] is at bit [16*d, 16*d+16); d in [0, 3).
+static u64 pack_strides_u16(u32 const *strides, u32 ndim) {
+  u64 packed = 0;
+  if (ndim > 3) return UINT64_MAX;
+  for (u32 d = 0; d < ndim; d++) {
+    if (strides[d] > 0xFFFFu) return UINT64_MAX;
+    packed |= ((u64)strides[d] & 0xFFFFu) << (16 * d);
+  }
+  return packed;
+}
+
+// Compute canonical row-major strides for `dims[0..ndim)`.
+static void row_major_strides(u32 const *dims, u32 ndim, u32 *out) {
+  if (ndim == 0) return;
+  out[ndim - 1] = 1;
+  for (i32 d = (i32)ndim - 2; d >= 0; d--) {
+    out[d] = out[d + 1] * dims[d + 1];
+  }
+}
+
+// Emit S_INDEX with strides packed into extra.  Returns the new uop
+// id, or 0 on overflow (stride > 65535).
+static u32 emit_index(KernelEntry *ke, u32 dtype, u32 buf_id,
+                      u32 const *range_ids, u32 const *strides, u32 ndim) {
+  if (ndim > 3) return 0;
+  u64 packed = pack_strides_u16(strides, ndim);
+  if (packed == UINT64_MAX) return 0;
+  u32 src[4] = {buf_id, 0, 0, 0};
+  for (u32 d = 0; d < ndim; d++) src[1 + d] = range_ids[d];
+  return rangeify_emit(ke, S_INDEX, dtype, (u8)(1 + ndim), src, packed);
+}
+
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
 //
 // Inputs:
@@ -147,9 +181,8 @@ fn const char *scalar_axis_name(u32 axis_type) {
 // gates on `ke->scalar_uops != NULL` to choose which path runs.
 fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   if (ke == NULL || ke->n_ops == 0) return 0;
-  // Phase B handles f32-only.  Other dtypes (i32 / f16 / bf16 / int
-  // family) go to later phases -- the scalar interpreter's f32
-  // bit-cast path would silently misinterpret them.
+  // f32 only -- the scalar interpreter's bit-cast path would silently
+  // misinterpret other dtypes.
   if (ke->output_dtype != DT_FP32) return 0;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (ke->input_dtypes[i] != DT_FP32) return 0;
@@ -157,8 +190,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   for (u32 i = 0; i < ke->n_ops; i++) {
     if (ke->program[i].dtype != DT_FP32) return 0;
   }
-  // Bail if any op is outside the supported set.  Reduce / movement
-  // / load / cast / bitcast all go to later phases (or stay legacy).
+  // Phase B/C supported opcodes: elementwise + REDUCE.  Movement /
+  // cast / bitcast / load go to later phases.
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     switch (p->opcode) {
@@ -166,84 +199,155 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_SQRT: case UOP_EXP2: case UOP_LOG2:
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
         break;
+      case UOP_REDUCE:
+        // Phase C-1: REDUCE only allowed as the FINAL op of the
+        // kernel (no chained elementwise after).  Otherwise bail.
+        if (i != ke->n_ops - 1) return 0;
+        break;
       default:
         return 0;
     }
   }
-  // Bail if any input view is non-contig.  Phase B only handles
-  // flat reads; absorbing strides into INDEX expressions is a
-  // follow-up.  Strided pre-mat already happens in cpu_interpret;
-  // we'd be replicating that work otherwise.
+  // All input views must be contig over their underlying buffer.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     View const *v = &ke->input_views[i];
     if (!v->contiguous || v->offset != 0) return 0;
   }
-  // Output rank must fit our per-call ranges[] stack array.
   Shape const *os = &ke->output_shape;
-  if (os->ndim == 0 || os->ndim > MAX_DIM) return 0;
-  // Numel sanity: every program op must produce output_numel
-  // (broadcast handled below for CONST scalars at numel == 1).
+  if (os->ndim == 0 || os->ndim > 3) return 0;
+
+  // Detect REDUCE-as-tail.  When present, the kernel emits a nested
+  // loop: outer LOOP ranges over the output dims, inner REDUCE
+  // range over axis_size.  Phase C-1 only handles the inner=1 case
+  // (reduce axis is the trailing dim of input).
+  KProgOp *last      = &ke->program[ke->n_ops - 1];
+  int      has_reduce = (last->opcode == UOP_REDUCE);
+  u32      reduce_kind  = 0;
+  u32      reduce_inner = 0;
+  u32      reduce_size  = 0;
+  if (has_reduce) {
+    reduce_kind  = (last->arg >> 24) & 0xFFu;
+    reduce_inner =  last->arg        & 0x00FFFFFFu;
+    if (reduce_inner != 1) return 0;     // inner != 1 NIY
+    if (last->n_src != 1) return 0;
+    if (KSRC_IS_INPUT(last->src[0])) {
+      // REDUCE reads input directly: input numel = output_numel * axis_size.
+      u32 in_slot  = KSRC_INDEX(last->src[0]);
+      u32 in_numel = ke->input_numels[in_slot];
+      if (in_numel == 0 || in_numel < ke->output_numel) return 0;
+      reduce_size = in_numel / ke->output_numel;
+      if (reduce_size * ke->output_numel != in_numel) return 0;
+    } else {
+      // REDUCE reads a previous program op's output: that op's
+      // numel must equal output_numel * axis_size.
+      u32 src_idx = KSRC_INDEX(last->src[0]);
+      if (src_idx >= ke->n_ops) return 0;
+      u32 src_numel = ke->program[src_idx].numel;
+      if (src_numel == 0 || src_numel < ke->output_numel) return 0;
+      reduce_size = src_numel / ke->output_numel;
+      if (reduce_size * ke->output_numel != src_numel) return 0;
+    }
+    if (reduce_size == 0 || reduce_size > 0xFFFFu) return 0;
+  }
+
   u32 onum = ke->output_numel;
+  // Numel sanity: non-REDUCE ops must produce output_numel
+  // (broadcast handled for CONST scalars at numel == 1).  REDUCE op
+  // (when present, always last) takes a larger source -- handled
+  // separately above.
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
+    if (p->opcode == UOP_REDUCE) continue;
     if (p->numel != onum && !(p->opcode == UOP_CONST && p->numel == 1)) return 0;
+    // Phase C also allows ops feeding the REDUCE to have the larger
+    // pre-reduce numel.  Today we only allow the REDUCE's direct src
+    // (handled above); chained pre-reduce elementwise lands in C-2.
   }
-  // Every input also must match output numel (broadcast NIY) OR be
-  // a numel-1 scalar that gets ranged at zero offset.
+  // Inputs: same numel as output (Phase B), or REDUCE-input size, or
+  // numel-1 scalar broadcast.
+  u32 reduce_numel = onum * (has_reduce ? reduce_size : 1);
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_numels[i] != onum && ke->input_numels[i] != 1) return 0;
+    u32 in_numel = ke->input_numels[i];
+    if (in_numel != onum && in_numel != 1 && in_numel != reduce_numel) return 0;
   }
 
   // Start fresh -- emit_kernel_for_boundary may have run rangeify on
   // a previous attempt that bailed mid-way.
   rangeify_free(ke);
 
-  // 1. Loop iterators: one S_RANGE per output dim, axis_type LOOP.
-  u32 ranges[MAX_DIM];
+  // 1. LOOP ranges: one S_RANGE per output dim, axis_type LOOP.
+  u32 loop_ranges[MAX_DIM];
+  u32 loop_strides[MAX_DIM];
+  row_major_strides(os->dims, os->ndim, loop_strides);
   for (u32 d = 0; d < os->ndim; d++) {
     u64 extra = ((u64)S_AXIS_LOOP << 32) | (u64)os->dims[d];
-    ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+    loop_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+  }
+  // REDUCE range (Phase C): an additional inner-most range with
+  // axis_type=REDUCE.  Only present when the kernel ends in
+  // UOP_REDUCE.
+  u32 reduce_range = 0;
+  u32 in_ndim      = os->ndim;
+  u32 in_strides[MAX_DIM + 1];
+  if (has_reduce) {
+    u64 extra = ((u64)S_AXIS_REDUCE << 32) | (u64)reduce_size;
+    reduce_range = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+    // Pre-reduce input shape = output_shape ++ {reduce_size}.
+    in_ndim = os->ndim + 1;
+    if (in_ndim > 3) { rangeify_free(ke); return 0; }
+    u32 in_dims[MAX_DIM];
+    for (u32 d = 0; d < os->ndim; d++) in_dims[d] = os->dims[d];
+    in_dims[os->ndim] = reduce_size;
+    row_major_strides(in_dims, in_ndim, in_strides);
   }
 
-  // 2. Output buffer + per-element STORE address.
+  // 2. Output buffer + STORE address (uses LOOP ranges only).
   u32 out_buf = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, ke->output_dtype, 0);
-  u32 out_idx_src[5] = {out_buf, 0,0,0,0};
-  for (u32 d = 0; d < os->ndim && d < 4; d++) out_idx_src[1 + d] = ranges[d];
-  u32 out_index = rangeify_emit(ke, S_INDEX, ke->output_dtype,
-                                (u8)(1 + (os->ndim < 3 ? os->ndim : 3)),
-                                out_idx_src, 0);
-  // Note: S_INDEX max src_count is 4; if ndim > 3 we'd need to chain
-  // INDEX nodes.  Bail conservatively for now.
-  if (os->ndim > 3) { rangeify_free(ke); return 0; }
+  u32 out_index = emit_index(ke, ke->output_dtype, out_buf,
+                             loop_ranges, loop_strides, os->ndim);
+  if (out_index == 0) { rangeify_free(ke); return 0; }
 
-  // 3. Per-input load expressions (cached so multiple consumers share).
-  u32 input_load[KERNEL_INIT_INPUT * 4];   // headroom; emit_kernel
-                                           // typically runs <16 inputs
+  // 3. Per-input load expressions.  Branch on numel:
+  //   - in_numel == 1                   -> scalar broadcast (INDEX over 0 ranges)
+  //   - in_numel == output_numel        -> per-output-element read (LOOP ranges)
+  //   - in_numel == output_numel*axis_size (only with REDUCE)
+  //                                      -> per-(LOOP,REDUCE) read
+  u32 input_load[KERNEL_INIT_INPUT * 4];
   if (ke->n_inputs > sizeof(input_load) / sizeof(input_load[0])) {
     rangeify_free(ke); return 0;
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 dtype = ke->input_dtypes[i];
-    u32 param = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)i);
-    u32 idx_src[5] = {param, 0, 0, 0, 0};
-    u8  idx_count  = 1;
-    if (ke->input_numels[i] == 1) {
-      // Scalar broadcast: INDEX with no range sources -- the load
-      // resolves to a constant element of the input buffer.
-      idx_count = 1;
-    } else {
-      for (u32 d = 0; d < os->ndim && d < 3; d++) {
-        idx_src[1 + d] = ranges[d];
+    u32 dtype    = ke->input_dtypes[i];
+    u32 in_numel = ke->input_numels[i];
+    u32 param    = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)i);
+    u32 idx;
+    if (in_numel == 1) {
+      // Scalar broadcast: 0 range sources, address is always 0.
+      u32 src[1] = {param};
+      idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, 0);
+    } else if (has_reduce && in_numel == reduce_numel && in_numel != onum) {
+      // Per-(LOOP, REDUCE) read.  Combined ranges + strides.  Only
+      // taken in the actual REDUCE case where the input is bigger
+      // than the output (in_numel == output_numel * axis_size and
+      // axis_size > 1; the axis_size == 1 case collapses back to
+      // per-output-element which is the else branch).
+      u32 r_ids    [4]; u32 r_strides[4];
+      for (u32 d = 0; d < os->ndim; d++) {
+        r_ids[d]     = loop_ranges[d];
+        r_strides[d] = in_strides[d];
       }
-      idx_count = (u8)(1 + (os->ndim < 3 ? os->ndim : 3));
+      r_ids    [os->ndim] = reduce_range;
+      r_strides[os->ndim] = in_strides[os->ndim];
+      idx = emit_index(ke, dtype, param, r_ids, r_strides, in_ndim);
+    } else {
+      idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
     }
-    u32 idx  = rangeify_emit(ke, S_INDEX, dtype, idx_count, idx_src, 0);
+    if (idx == 0) { rangeify_free(ke); return 0; }
     u32 load = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
     input_load[i] = load;
   }
 
-  // 4. ALU lowering: one S_X per KProgOp.  Source resolution mirrors
-  // cpu_interpret's KSRC_IS_INPUT/_INDEX path.
+  // 4. ALU lowering: one S_X per KProgOp.
   u32 prog_value[KPROG_INIT_OPS * 4];
   if (ke->n_ops > sizeof(prog_value) / sizeof(prog_value[0])) {
     rangeify_free(ke); return 0;
@@ -252,8 +356,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
     if (p->opcode == UOP_CONST) {
-      // arg holds the f32/i32 bit pattern.
       prog_value[i] = rangeify_emit_leaf(ke, S_CONST, dtype, (u64)p->arg);
+      continue;
+    }
+    if (p->opcode == UOP_REDUCE) {
+      // src[0] body: either an input load or a previous prog op.
+      u32 raw = p->src[0];
+      u32 body = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
+                                    : prog_value[KSRC_INDEX(raw)];
+      u32 src[2] = {body, reduce_range};
+      u8  sop    = (reduce_kind == REDUCE_MAX) ? S_REDUCE_MAX : S_REDUCE_SUM;
+      prog_value[i] = rangeify_emit(ke, sop, dtype, 2, src, 0);
       continue;
     }
     // Resolve up to 2 sources.
@@ -289,9 +402,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   u32 final_v = prog_value[ke->n_ops - 1];
   u32 store   = rangeify_emit_binary(ke, S_STORE, ke->output_dtype,
                                      out_index, final_v);
-  u32 buf_src[5] = {store, 0, 0, 0, 0};
-  u8  buf_count  = (u8)(1 + (os->ndim < 3 ? os->ndim : 3));
-  for (u32 d = 0; d < os->ndim && d < 3; d++) buf_src[1 + d] = ranges[d];
+  u32 buf_src[4] = {store, 0, 0, 0};
+  u8  buf_count  = (u8)(1 + os->ndim);
+  for (u32 d = 0; d < os->ndim; d++) buf_src[1 + d] = loop_ranges[d];
   rangeify_emit(ke, S_BUFFERIZE, ke->output_dtype, buf_count, buf_src, 0);
   return 1;
 }
