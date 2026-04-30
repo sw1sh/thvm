@@ -818,29 +818,34 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // per-kid profiling (cg_profile_record).
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
-  // 0. Phase B: if this kernel was lowered to scalar form, run the
-  //    scalar interpreter.  Bypasses BLAS / JIT / KProgOp[] -- the
-  //    scalar form is the authoritative program when present.
-  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
-    int rc = cpu_dispatch_scalar(ke, in_buf_ids, out_buf_id);
-    cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
-    return rc;
-  }
   // 1. BLAS first: matmul / matvec / dot patterns get cblas_*
   //    (Accelerate on macOS) -- 10-100x faster than anything we can
-  //    JIT-compile near-term.
+  //    JIT-compile or scalar-interpret near-term.  Pattern-matches
+  //    on KProgOp[]; scalar_uops fallback runs only on no-match.
   int blas_kind = cpu_blas_dispatch(ke, in_buf_ids, out_buf_id);
   if (blas_kind) {
     cg_profile_record(kid, (KDispatchKind)blas_kind, cg_now_us() - t0);
     return 0;
   }
   // 2. JIT next: clang-compiled fused inner loop for elementwise
-  //    chains, cached by program hash.
+  //    chains (cached by program hash).  Faster than the scalar
+  //    interpreter for the patterns it covers (no REDUCE > 1, etc.).
   if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;
   }
-  // 3. Interpreter fallback.
+  // 3. Rangeify scalar-uops interpreter: the broad fallback that
+  //    handles every pattern the WL grid produces (REDUCE, FLIP,
+  //    PAD/SHRINK chains, BITCAST, packed nibbles, narrow FPs).
+  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
+    int rc = cpu_dispatch_scalar(ke, in_buf_ids, out_buf_id);
+    cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
+    return rc;
+  }
+  // 4. Legacy KProgOp interpreter -- last-resort fallback for
+  //    kernels that didn't lower to scalar uops (THVM_RANGEIFY=0,
+  //    or rangeify bailed).  Slated for removal once the WL grid
+  //    holds zero rangeify bails for all configurations.
   int rc = cpu_interpret(ke, in_buf_ids, out_buf_id);
   cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
   return rc;
