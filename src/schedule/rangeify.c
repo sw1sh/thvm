@@ -279,13 +279,16 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_ADD: case UOP_MUL: case UOP_NEG: case UOP_RECIP:
       case UOP_SQRT: case UOP_EXP2: case UOP_LOG2:
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
-      case UOP_EXPAND: case UOP_RESHAPE:
+      case UOP_EXPAND: case UOP_RESHAPE: case UOP_LOAD:
         break;
       case UOP_REDUCE:
         if (reduce_pos != -1) RBAIL_PRE("> 1 reduce");
         reduce_pos = (int)i;
         break;
       default:
+        if (getenv("THVM_RANGEIFY_BAIL")) {
+          fprintf(stderr, "  unsupported opcode: %u\n", p->opcode);
+        }
         RBAIL_PRE("unsupported opcode");
     }
   }
@@ -579,11 +582,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       prog_value[i] = rangeify_emit_leaf(ke, S_CONST, dtype, (u64)p->arg);
       continue;
     }
-    if (p->opcode == UOP_EXPAND || p->opcode == UOP_RESHAPE) {
-      // Movement-as-identity: src[0] is the value, output uses the
-      // same scalar bits.  At the per-LOOP-element scalar level
-      // EXPAND broadcast and RESHAPE flat-buffer rewrap are both
-      // no-ops -- the LOOP ranges are already the output shape's
+    if (p->opcode == UOP_EXPAND || p->opcode == UOP_RESHAPE
+        || p->opcode == UOP_LOAD) {
+      // Movement-as-identity / structural marker: src[0] is the
+      // value, output uses the same scalar bits.  At the per-LOOP-
+      // element scalar level EXPAND broadcast, RESHAPE flat-buffer
+      // rewrap, and LOAD ("read this tensor" marker) are all no-
+      // ops -- the LOOP ranges are already the output shape's
       // ranges, and contig-source movement ops don't change the
       // flat read pattern.
       u32 raw = p->src[0];
