@@ -1,47 +1,18 @@
-// wnf/nf.c - explicit normal-form (NF) reducer driven by an
-// incremental worklist with a re-enumerate fallback.  wnf is WHNF:
-// it surfaces the head and stops at plain UOPs (ADD, MUL, REDUCE,
-// ...) without descending into their children.  That leaves
-// redexes nested inside (e.g. the UOPs an interact_grad chain
-// rule produces) unfired -- they are redexes by IC semantics but
-// the WHNF reducer never visits them.
+// wnf/nf.c - full-NF reducer.  wnf only walks the head spine; nf
+// descends into every child so redexes nested inside UOP / GRAD /
+// kernel chains all get fired.
 //
-// Hot path is incremental: nf seeds the worklist via
-// redex_enumerate then attaches the worklist to redex.c.  Every
-// redex_fire then pushes its own locally-fresh successors (result
-// + cells the interaction allocated) directly into the worklist
-// before returning.  Per-fire cost is O(allocated-cells), not
-// O(heap_size), so a long chain of grad + elementwise
-// interactions is linear in the number of interactions.  Pushes
-// happen at the firing site, so a per-thread worklist would slot
-// in directly when nf moves to multi-threaded firing.
+// Worklist-driven: redex_fire pushes its locally-fresh successors
+// (result + cells it allocated) so per-fire cost is the redexes
+// the interaction created, not O(heap).  Re-enumerate fallback
+// catches parent promotions (heap_replace turning a UOP_ADD's
+// child into a value); typically 1-2 sweeps to fixed point.
 //
-// Cold path: when the worklist drains we re-enumerate.  Required
-// for correctness because heap_replace inside redex_fire can
-// promote a parent term to a redex (e.g. a UOP_ADD whose child
-// cell was patched from a stuck DUP to a CTR -- the ADD itself
-// wasn't on the worklist, no allocation happened during the fire,
-// so the incremental push misses it).  Catching parent
-// promotions incrementally would need explicit parent pointers,
-// which the flat heap doesn't carry.  In practice the loop
-// converges in 1-2 re-enumerates -- the inner incremental loop
-// drains the bulk of the work, and the re-enumerate just sweeps
-// a few promoted cells before reaching the fixed point.
-//
-// Pure IC machinery -- no opcode is privileged.  GRAD reduces
-// because interact_grad is wired into redex_fire, the same way
-// APP-LAM and KERNEL do.  Future combinators wired through
-// is_redex / redex_fire pick up nf coverage automatically.
-//
-// Caveat: TAG_REF / TAG_ALO are EXCLUDED from eager firing because
-// they unfold named (potentially recursive) definitions.  In a
-// recursive definition like `sgd_loop = \w n. if n==0 then w else
-// sgd_loop ...`, eagerly forcing every reachable ALO descends into
-// the recursive call inside the `else` branch before the
-// conditional has fired -- non-terminating.  wnf handles them
-// lazily (force only when their value is consumed by a head
-// position); nf delegates to wnf via the surrounding TRealize
-// loop's nf -> materialize -> nf cadence.
+// TAG_REF / TAG_ALO stay lazy: a recursive `sgd_loop = \w n. if
+// n==0 then w else sgd_loop ...` would diverge if every reachable
+// ALO were forced before the conditional fires.  wnf forces them
+// only at head positions; nf delegates via the surrounding
+// thvm_realize loop's nf -> materialize -> nf cadence.
 
 static u8 nf_is_eager_redex(Term t) {
   if (!is_redex(t)) return 0;

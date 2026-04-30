@@ -237,8 +237,7 @@ int             dtype_is_packed   (u32 dt);
 // === UOp opcodes (TAG_UOP ext field) ===
 // See docs/tensors.md for per-opcode heap layouts.
 
-// (slot 0 is reserved/unused -- previously UOP_MATERIALIZE, now dropped
-// in favour of calling thvm_materialize directly.)
+// slot 0 reserved.
 #define UOP_KERNEL       1   // heap = [output_buf, ast_root]; ext bits: see uop_kernel.c
 #define UOP_CONST        2   // heap = [NUM(bits)]; ext = dtype
 #define UOP_RESHAPE      3   // heap = [src, NUM(ndim), NUM(d0), ..., NUM(d_{n-1})]
@@ -382,6 +381,7 @@ struct KernelEntry;
 // The C-side state is the source of truth; WL is a thin LibraryLink
 // wrapper.
 
+// Scaffolding: recorded by apply_opt; renderer honors only KAX_PARALLEL today.
 #define KAX_LOOP          0    // default: nested for-loop in the iter nest
 #define KAX_REDUCE        1    // tail-REDUCE k-loop (default for reduce kernels)
 #define KAX_UPCAST        2    // unrolled inner output axis (no loop emitted)

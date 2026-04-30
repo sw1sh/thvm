@@ -12,7 +12,7 @@
 // Falls back to memcpy if shape info missing (defensive; shouldn't
 // happen given the materializer always populates src0_dims for PAD).
 //
-// Phase B: width-driven so int8/16/64 + bool reuse the same body.
+// Width-driven so int8/16/64 + bool reuse the same body.
 
 #define PAD_GATHER(T)                                                        \
     do {                                                                     \

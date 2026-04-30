@@ -15,9 +15,9 @@
 //                                      training loop can re-fire the
 //                                      ASSIGN against fresh upstream
 //                                      kernel outputs each iter.
-//   interact_assign(assign_term)    -- legacy (and redex.c nf path):
-//                                      reads the heap cells, then
-//                                      delegates to _with.
+//   interact_assign(assign_term)    -- redex_fire entry point: reads
+//                                      the assign cells off the heap
+//                                      then delegates to _with.
 //
 // Mirrors tinygrad's UOps.ASSIGN.  Not a kernel -- there's no
 // program, no fused dispatch, just a buffer round-trip via the

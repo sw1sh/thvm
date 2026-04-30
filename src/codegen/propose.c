@@ -2,7 +2,7 @@
 //
 // Given a finalized KernelEntry (post-default-axes), suggest a small
 // set of candidate TOpts the autotune loop should try.  Today's
-// heuristics are deliberately narrow (Phase 16 MVP):
+// heuristics are deliberately narrow:
 //
 //   reduce-tail kernel + axis_size % factor == 0 -> propose UNROLL
 //   factor for factor in {2, 4, 8, 16}.

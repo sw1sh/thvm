@@ -94,9 +94,9 @@ static void rm_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size,
   cg_append(b, "  uint _inner_i = _oi %% _inner;\n");
   if (kind == REDUCE_MAX) cg_append(b, "  float acc = -INFINITY;\n");
   else                    cg_append(b, "  float acc = 0.0f;\n");
-  // MSL recognises clang's loop unroll pragma -- same syntax as the
-  // C renderer.  Skipped at factor=1 so the no-opt source stays
-  // byte-identical to the pre-Phase-16 emit.
+  // MSL recognises clang's loop unroll pragma; same syntax as the C
+  // renderer.  Skipped at factor=1 so the no-opt source emits as a
+  // plain loop.
   if (unroll_factor > 1) {
     cg_append(b, "  #pragma clang loop unroll_count(%u)\n", unroll_factor);
   }

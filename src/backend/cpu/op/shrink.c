@@ -9,7 +9,7 @@
 // per op so the same storage is unambiguous.
 //
 // Falls back to memcpy if shape info missing (defensive).
-// Phase B: width-driven; per-dtype interpretation collapses to bytes.
+// Width-driven: per-dtype interpretation collapses to bytes.
 
 #define SHRINK_GATHER(T)                                                     \
     do {                                                                     \

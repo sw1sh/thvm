@@ -532,7 +532,7 @@ TKernelProgramCacheSize[] := (ensureInit[]; $kernelProgramCacheSizeFn[])
 (* TKernelInfo[kid] returns a flat Association with the kernel's
    linearized program + shape metadata.  Used by tests + visualization
    overlays.  Same data as decodeKernelInfo above, repackaged with the
-   legacy snake_case keys callers expect. *)
+   snake_case keys callers expect. *)
 TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid], n, nOps},
     n    = raw[[1]];
     nOps = raw[[2]];

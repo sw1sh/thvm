@@ -2,7 +2,7 @@
 //
 // Output dtype matches input dtype (f32 -> 1.0f/0.0f, integer dtypes
 // -> typed 1/0); conventionally a bool, but the convention predates
-// Phase B's bool dtype.  See the comment in cpu_op_cmpeq for context.
+// the bool dtype.  See cpu_op_cmpeq for context.
 
 #define CMPLT_INT_CASE(DT, T)                                          \
     case DT: {                                                         \

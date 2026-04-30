@@ -5,11 +5,10 @@
 // elementwise ops broadcast it via the n_elems check in the
 // per-op loops.
 //
-// Phase A: 32-bit constants only (the KProgOp arg field is u32).
-// 64-bit dtypes (i64/u64/f64) need either a widened arg or a
-// two-cell payload; deferred to Phase C.  For now i64/u64 store
-// the low 32 bits sign-extended (matching the WL surface that
-// caps user-passed scalar constants at i32 range).
+// 32-bit constants only (the KProgOp arg field is u32).  64-bit
+// dtypes (i64/u64/f64) need either a widened arg or a two-cell
+// payload; for now i64/u64 store the low 32 bits sign-extended
+// (matches the WL surface that caps user scalars to i32 range).
 
 fn void cpu_op_const(void *out, void **srcs, u32 const *src_numels,
                      KProgOp const *p, u32 out_numel) {
@@ -47,9 +46,9 @@ fn void cpu_op_const(void *out, void **srcs, u32 const *src_numels,
     case DT_FP8E4M3:
     case DT_FP8E5M2: {
       // Interpret the u32 arg as f32 bits, then convert to the
-      // narrow / wide float.  Phase C: 64-bit constants exact only
-      // up to f32 precision; the WL bridge clamps user-passed
-      // scalars to that range until the two-cell payload lands.
+      // narrow / wide float.  64-bit constants are exact only up
+      // to f32 precision until the two-cell payload lands; the WL
+      // bridge clamps user-passed scalars to that range.
       f32 v;
       u32 bits = p->arg;
       memcpy(&v, &bits, sizeof(v));

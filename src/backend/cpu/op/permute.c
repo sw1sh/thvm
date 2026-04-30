@@ -10,8 +10,8 @@
 // (defensive; identity perm should be rare since the constructor
 // is typically invoked precisely to reorder).
 //
-// Phase B: width-driven (1/2/4/8 bytes); per-dtype interpretation
-// happens in the caller (the gather only moves bytes).
+// Width-driven (1/2/4/8 bytes); per-dtype interpretation happens
+// in the caller (the gather only moves bytes).
 
 #define PERMUTE_GATHER(T)                                                    \
     do {                                                                     \

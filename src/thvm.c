@@ -1,11 +1,10 @@
 // thvm.c - single-translation-unit hub.
 //
-// Each .c included below contributes one function (or a tiny family
-// of helpers). The order matters: term packing first, then heap, then
-// view + backend + tensor lifecycle, then UOp constructors + the
-// schedule pipeline, then interactions (which depend on the schedule
-// pipeline through uop_kernel), and finally the WNF stack machine
-// that drives them.
+// Each .c contributes one function (or a tiny family of helpers).
+// Include order is the dependency order: term -> dtype -> heap ->
+// view -> backend -> tensor -> uop -> schedule -> interact -> wnf.
+// Interactions depend on the schedule pipeline (uop_kernel reaches
+// into KERNELS), and wnf drives the interactions.
 
 #include "thvm.h"
 
@@ -132,7 +131,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "backend/cpu/buf_read.c"
 #include "backend/cpu/buf_write.c"
 #include "backend/cpu/buf_pool.c"
-// Phase C promote-to-fp32 helper for narrow-float / fp8 elementwise.
+// Promote-to-fp32 helper for narrow-float / fp8 elementwise.
 #include "backend/cpu/op/_promote.c"
 #include "backend/cpu/op/const.c"
 #include "backend/cpu/op/add.c"
@@ -307,21 +306,17 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // in 6.3b..g.
 #include "wald/_.c"
 
-// hrp1: heap-rooted preserve walk -- alternative to
-// realize.c's mark_preserved_chain.  Standalone helper; hrp2
-// wires it into thvm_realize.
+// Heap-rooted preserve walk; alternative to mark_preserved_chain.
 #include "schedule/heap_rooted_preserve.c"
 
 // External-caller pin table.  Tracks every Term that a foreign
 // caller is holding so gc_collect_roots can keep them live.
 #include "schedule/extern_pin.c"
 
-// gc1: collect the dyn-heap GC root set.  Standalone helper;
-// gc2/gc3 build the recursive mark + integrate.
+// Collect the dyn-heap GC root set.
 #include "schedule/gc_roots.c"
 
-// gc2: recursive mark-from-root.  Standalone helper; gc3
-// composes gc1 + gc2 into the thvm_realize integration.
+// Recursive mark-from-root over the collected roots.
 #include "schedule/gc_mark.c"
 
 // Cheney-style copying GC for the dyn heap.  Two semi-spaces; live

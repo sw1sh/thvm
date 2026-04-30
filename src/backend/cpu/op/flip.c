@@ -7,7 +7,7 @@
 //
 // Output shape == input shape (FLIP doesn't change rank or sizes,
 // only data ordering), so out_dims == src0_dims at this point.
-// Phase B: width-driven (1/2/4/8 bytes).
+// Width-driven (1/2/4/8 bytes).
 
 #define FLIP_GATHER(T)                                                       \
     do {                                                                     \

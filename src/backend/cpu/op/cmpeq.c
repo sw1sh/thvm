@@ -1,10 +1,10 @@
 // backend/cpu/op/cmpeq.c - element-wise compare-equal.
 //
 // Output dtype matches the input dtype (f32 -> 1.0f/0.0f, integer
-// dtypes -> typed 1/0).  This convention predates the bool dtype
-// (Phase B); the REDUCE_MAX grad rule and other graph-level consumers
-// rely on the output sharing dtype with the inputs.  Phase E will
-// add an explicit CAST to bool when the consumer needs it.
+// dtypes -> typed 1/0).  This convention predates the bool dtype;
+// the REDUCE_MAX grad rule and other graph-level consumers rely on
+// the output sharing dtype with the inputs.  An explicit CAST to
+// bool will be added when a consumer needs it.
 
 #define CMPEQ_INT_CASE(DT, T)                                          \
     case DT: {                                                         \

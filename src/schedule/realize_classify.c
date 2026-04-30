@@ -7,12 +7,12 @@
 //   (b) it has 2+ distinct UOp parents (multi-consumer),
 //   (c) it is a REDUCE (REDUCE outputs always escape into a
 //       buffer; one reduce per kernel),
-//   (d) f1d may add: movement op whose source can't be aliased.
+//   (d) it is a movement op whose source can't be aliased.
 //
-// Output: a small table indexed by the UOp's heap loc; f1d's
-// selective materializer will consult realize_is_realized to
-// decide whether to emit a UOP_KERNEL or inline the compute
-// into its consumer kernel's program.
+// Output: a small table indexed by the UOp's heap loc; the
+// selective materializer consults realize_is_realized to decide
+// whether to emit a UOP_KERNEL or inline the compute into its
+// consumer kernel's program.
 //
 // Note: this pass DOES NOT mutate the heap or the kernel
 // table.  It only reads the UOp DAG and populates the table.

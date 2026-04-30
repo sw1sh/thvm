@@ -314,11 +314,10 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   //    from-space.
   HEAP_NEXT = alloc;
 
-  // 7. Zero the old from-space (= the new to-space) so stale heaps
-  //    don't masquerade as live cells when re-used.  Optional but
-  //    helps debugging.  Kept off in release; calloc'd HEAP starts
-  //    zero, and forward pointers we wrote will be overwritten on
-  //    next alloc anyway.  No-op for now.
+  // 7. Cheney semi-spaces: the old from-space becomes the next
+  //    to-space.  No zeroing needed -- evacuation overwrites every
+  //    live cell on the next collection, and forward pointers left
+  //    behind are stale by definition.
 }
 
 // Convenience: collect using the standard root set (result + extern

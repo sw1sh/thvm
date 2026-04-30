@@ -18,9 +18,8 @@
 // pre-plumbing call sites the materializer hadn't been updated for
 // when the field was first added.
 //
-// Phase B: width-driven so every byte-aligned dtype (1/2/4/8 bytes)
-// shares one walker; per-dtype branches collapse to the gather loop
-// below.
+// Width-driven so every byte-aligned dtype (1/2/4/8 bytes) shares
+// one walker; per-dtype branches collapse to the gather loop below.
 
 static inline void expand_index_walker(u32 oi, u8 ndim,
                                        u32 const *out_dims,

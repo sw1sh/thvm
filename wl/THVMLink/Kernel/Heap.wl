@@ -21,7 +21,7 @@
    of those three keys is non-empty, HeapInitialize calls the C-side
    wipe (book + defs + alo states) before restoring everything from
    the bundle.  When they're all empty, HeapInitialize falls back to
-   the legacy TReset + dyn-only restore.
+   the dyn-only TReset path (no book/defs/alo to restore).
 
    Snapshot strategy: dump the entire [0, THeapPos[]) dyn range and
    the entire [0, BookPos[]) book range.  No reachability walk -- it

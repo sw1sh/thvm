@@ -441,10 +441,10 @@ TReset[ctx_TContext] := TInContext[ctx, TReset[]]
    TTerm value, the handle's manager fires on the C side and the
    pin is dropped automatically.
 
-   Bare 1-arg `TTerm[raw]` and 2-arg `TTerm[ctx, raw]` (from
-   legacy code or fresh bridge results) auto-normalize to the
-   tagged 3-arg form so pattern-matchers downstream only ever
-   see 3-arg. *)
+   Bare 1-arg `TTerm[raw]` and 2-arg `TTerm[ctx, raw]` auto-
+   normalize to the tagged 3-arg form so pattern-matchers downstream
+   only ever see 3-arg.  Forward-compat for shorter ctor forms used
+   by fresh bridge results. *)
 TTerm[id_Integer] := TTerm[$contextCurrentFn[], id]
 TTerm[c_Integer, id_Integer] := TTerm[c, id, makePinHandle[id]]
 

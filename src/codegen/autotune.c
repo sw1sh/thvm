@@ -2,11 +2,11 @@
 //
 // Given a kernel, walk the proposer's candidates, time each variant
 // (n_runs back-to-back fires + min wallclock), pick the winner, and
-// leave the kernel's KernelAxes mutated to the winning opt.  Because
-// axes live on the shared KpCacheSlot (Phase 16 per-program-shape
-// sharing), the pick automatically applies to every other kid with
-// the same KProgOp[] -- a training loop that emits one new kid per
-// step inherits the autotuned variant on iter 2+.
+// leave the kernel's KernelAxes mutated to the winning opt.  Axes
+// live on the shared KpCacheSlot (autotune knobs cached per-program-
+// shape), so the pick applies to every other kid with the same
+// KProgOp[] -- a training loop that emits one new kid per step
+// inherits the autotuned variant on iter 2+.
 //
 // Reset semantics: each variant is benched against the SAME baseline
 // axes (no opts).  Composite proposals (UNROLL=4 then UPCAST=2) are

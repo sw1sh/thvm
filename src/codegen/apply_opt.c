@@ -1,8 +1,7 @@
 // codegen/apply_opt.c -- mutate a KernelAxes by applying one TOpt.
 //
-// Ported from the WL-side TKernelApplyOpt logic that used to live in
-// wl/THVMLink/Kernel/Kernel.wl (Phase 10 scaffold).  WL is now a
-// thin LibraryLink wrapper; the C side owns the axis rewrite.
+// Owns the axis rewrite previously done by WL TKernelApplyOpt; WL
+// is a thin LibraryLink wrapper now.
 //
 // Each opt class:
 //
