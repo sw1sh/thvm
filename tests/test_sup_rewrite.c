@@ -30,7 +30,6 @@ static Term mk_a(void) { return term_new_ctr(LAB_a, NULL, 0); }
 static Term mk_b(void) { return term_new_ctr(LAB_b, NULL, 0); }
 static Term mk_g(Term x)         { Term cs[1] = {x}; return term_new_ctr(LAB_g, cs, 1); }
 static Term mk_f(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_f, cs, 2); }
-static Term mk_v(u32 id) { return term_new_fvr(id); }
 
 static Term mk_app(Term fun, Term arg) {
   u64 loc = heap_alloc(2);

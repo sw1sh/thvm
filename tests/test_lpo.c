@@ -34,7 +34,6 @@ static Term mk_f1(Term x)         { Term cs[1] = {x};    return term_new_ctr(LAB
 static Term mk_f2(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_f, cs, 2); }
 static Term mk_g(Term x)          { Term cs[1] = {x};    return term_new_ctr(LAB_g, cs, 1); }
 static Term mk_h(Term x)          { Term cs[1] = {x};    return term_new_ctr(LAB_h, cs, 1); }
-static Term mk_v(u32 id) { return term_new_fvr(id); }
 
 int main(void) {
   thvm_init();

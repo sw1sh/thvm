@@ -16,7 +16,6 @@ static Term mk_e(void) { return term_new_ctr(LAB_e, NULL, 0); }
 static Term mk_a(void) { return term_new_ctr(LAB_a, NULL, 0); }
 static Term mk_f(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_f, cs, 2); }
 static Term mk_i(Term x)         { Term cs[1] = {x};    return term_new_ctr(LAB_i, cs, 1); }
-static Term mk_v(u32 id) { return term_new_fvr(id); }
 
 static u32 dummy_weights   [5] = {0, 1, 0, 1, 1};
 static u32 dummy_precedence[5] = {0, 2, 4, 3, 1};

@@ -29,7 +29,6 @@ static const KboConfig DEMO_CFG = {
 static Term mk_e(void) { return term_new_ctr(LAB_e, NULL, 0); }
 static Term mk_a(void) { return term_new_ctr(LAB_a, NULL, 0); }
 static Term mk_f(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_f, cs, 2); }
-static Term mk_v(u32 id) { return term_new_fvr(id); }
 
 // Helper: invoke prim_kbo_eq_ic via 2-step APP chain and wnf.
 // The primitive itself either returns NUM directly (leaf cases)

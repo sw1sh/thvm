@@ -56,4 +56,20 @@ static const char *test_name = "<unnamed>";
   return 0;                                                                  \
 } while (0)
 
+// Shared term builders used by multiple tests/test_*.c files.  The
+// runtime types (`Term`, `u32`, `u64`) and helpers (`term_new_fvr`,
+// `term_new`, `heap_alloc`, `heap_set`, `TAG_NUM`, `TAG_SUP`) come from
+// ../src/thvm.c, which every test #includes before this header.
+
+static inline Term mk_v(u32 id) { return term_new_fvr(id); }
+
+static inline Term build_num(u32 v) { return term_new(0, TAG_NUM, 0, v); }
+
+static inline Term build_sup(u32 lab, Term a, Term b) {
+  u64 loc = heap_alloc(2);
+  heap_set(loc + 0, a);
+  heap_set(loc + 1, b);
+  return term_new(0, TAG_SUP, lab, loc);
+}
+
 #endif // THVM_TEST_H

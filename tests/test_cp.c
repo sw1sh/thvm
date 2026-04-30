@@ -16,7 +16,6 @@
 
 static Term mk_e(void) { return term_new_ctr(LAB_e, NULL, 0); }
 static Term mk_f(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_f, cs, 2); }
-static Term mk_v(u32 id) { return term_new_fvr(id); }
 
 // Search for a CP with structure (f(y, z), f(e, f(y, z))) -- shape
 // only, ignoring concrete var ids (which depend on rename offset).

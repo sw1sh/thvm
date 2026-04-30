@@ -12,14 +12,6 @@
 #include "../src/thvm.c"
 #include "test.h"
 
-// Build &lab{a, b} -- allocates 2 cells, returns the SUP term.
-static Term build_sup(u32 lab, Term a, Term b) {
-  u64 loc = heap_alloc(2);
-  heap_set(loc + 0, a);
-  heap_set(loc + 1, b);
-  return term_new(0, TAG_SUP, lab, loc);
-}
-
 // Build the DUP cell holding `body`, returning the dup_loc so callers
 // can construct DP0/DP1 against it.
 static u64 build_dup(Term body) {
