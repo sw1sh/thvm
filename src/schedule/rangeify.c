@@ -380,10 +380,23 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     // value reused across iterations.
     if (p->numel == 1) continue;
     if ((int)i < reduce_pos) {
-      if (p->numel != reduce_in_numel) RBAIL_PRE("pre-reduce numel mismatch");
+      if (p->numel != reduce_in_numel) {
+        if (getenv("THVM_RANGEIFY_BAIL")) {
+          fprintf(stderr, "  pre-reduce: op[%u] %s numel=%u (expected %u)\n",
+                  i, "?", p->numel, reduce_in_numel);
+        }
+        RBAIL_PRE("pre-reduce numel mismatch");
+      }
     } else {
       if (p->numel != onum
-          && (!has_reduce || p->numel != red->numel)) RBAIL_PRE("post-reduce numel mismatch");
+          && (!has_reduce || p->numel != red->numel)) {
+        if (getenv("THVM_RANGEIFY_BAIL")) {
+          fprintf(stderr, "  post-reduce: op[%u] op=%u numel=%u (expected %u or %u)\n",
+                  i, p->opcode, p->numel, onum,
+                  has_reduce ? red->numel : 0u);
+        }
+        RBAIL_PRE("post-reduce numel mismatch");
+      }
     }
   }
 
