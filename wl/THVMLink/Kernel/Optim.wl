@@ -144,44 +144,38 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
 
        Grads come from TGradMany (one realize, shared forward DAG)
        so per-target kernels go through the same materialize-pass
-       memo and forward intermediates dedup across targets. *)
+       memo and forward intermediates dedup across targets.
+
+       Per-param ASSIGNs are bundled into one TRealize so the entire
+       Adam step (forward + backward + 24 ASSIGNs) materializes in a
+       single pass.  Tinygrad analogue: loss.realize splatted with
+       opt.schedule_step -- one scheduler pass over the whole step.
+       The earlier Do[..., TRealize @ assign] form re-walked the
+       gradient chain for every param, emitting ~5K kernel slots/step
+       on LeNet (~89x tinygrad's 57). *)
     Block[{
         lr     = OptionValue["lr"],
         beta1  = OptionValue["beta1"],
         beta2  = OptionValue["beta2"],
         eps    = OptionValue["eps"],
-        lrHat, invSqrtB2cor, grads
+        lrHat, invSqrtB2cor, grads, paramAssigns
     },
         lrHat        = lr  / (1.0 - beta1^t);
         invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t];
         grads        = TGradMany[loss, params];
-        Do[
+        paramAssigns = Table[
             Block[{
                 wTen = params[[i]], gTen = grads[[i]],
                 mTen = mList[[i]],  vTen = vList[[i]],
-                denom
+                mAfter, vAfter, denom
             },
-                (* Lazy nested-ASSIGN chain reduced in a single
-                   TRealize.  Phase 14 wired materialize to walk the
-                   UOP DAG and recursively materialize every
-                   ASSIGN's src (src/schedule/materialize.c
-                   `materialize_inner_assigns`) so the wnf dispatch
-                   for the outer ASSIGN sees its src as a kernel
-                   chain it can actually fire.  Each inner ASSIGN
-                   (mAfter, vAfter) fires once during the kernel
-                   chain expansion -- read-after-write through
-                   mTen/vTen sees the post-update bytes via the
-                   dependency edge from sqrt/mul to the assigned
-                   tensors. *)
-                Block[{
-                    mAfter = TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen],
-                    vAfter = TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)]
-                },
-                    denom = Sqrt[vAfter] * invSqrtB2cor + eps;
-                    TRealize @ TAssign[wTen, wTen - lrHat * mAfter / denom]
-                ];
+                mAfter = TAssign[mTen, beta1 * mTen + (1.0 - beta1) * gTen];
+                vAfter = TAssign[vTen, beta2 * vTen + (1.0 - beta2) * (gTen * gTen)];
+                denom  = Sqrt[vAfter] * invSqrtB2cor + eps;
+                TAssign[wTen, wTen - lrHat * mAfter / denom]
             ],
             {i, Length[params]}];
+        TRealize @ paramAssigns;
         params
     ]
 

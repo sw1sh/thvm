@@ -98,16 +98,43 @@ does NOT recycle KernelEntry slot ids -- a slot reuse would
 mis-dispatch when a future realize DFS-fires the old kid via
 TENS[].producer_kid.
 
-**Still open:**
-- KERNELS_NEXT itself still grows monotonically.  At ~2.8K
-  kernels/step we hit KERNELS_CAP=256K after ~85 steps.
-- Investigation needed on the orphan-kernel-emission pattern
-  found while debugging M4: each TAdam realize emits ~2.8K
-  kernels but the surface UOP graph references only a small
-  fraction.  Most kernels are dead-on-arrival from materialize's
-  bail/rewind path leaving outputs unreferenced from the heap.
-  Fixing that emission pattern would shrink KERNELS_NEXT growth
-  by 10-100x and unblock slot reuse.
+**Still open (root-cause now understood, 2026-04-30):**
+
+Measurement: `wolframscript /tmp/measure_thvm.wls`:
+- LeNet forward only: 64 kernel slots, 40 unique programs
+- One TAdam step: **5,023 slots, 130 unique programs** (cache-warm: 36 new)
+- Tinygrad LeNet equivalent: **57 scheduled kernels per step**
+
+Two distinct gaps stack:
+
+1. **Slot inflation (39x):** 5,023 slots backed by only 130 unique
+   programs.  `emit_kernel_for_boundary` allocates a fresh
+   `KernelEntry` + output `TenDesc` per boundary even when the
+   program is already in the kernel-program cache.  Fix: at
+   emit time, when the program signature matches a previously-
+   emitted kernel for THIS REALIZE (or one whose output buffer
+   is still alive), reuse that kid + output_tid instead of
+   creating a new one.  Should drop slot count to roughly the
+   unique-program count.
+
+2. **Fusion gap (~2x vs tinygrad):** 130 unique programs vs
+   tinygrad's 57.  Architectural -- tinygrad lowers the high-
+   level UOp graph through RANGE / BUFFERIZE / INDEX / LOAD /
+   STORE primitives, fusing entire elementwise+reduce chains
+   into one BUFFERIZE point per kernel.  thvm has only the
+   high-level UOps (tensor-level ADD / MUL / REDUCE etc.); the
+   "kernel program" is built per-boundary by the realize
+   classifier, which can fuse only what's in a single contig
+   chain between boundaries.  Bigger lift: add a lowering pass
+   that translates UOP graphs to scalar-level UOps with explicit
+   ranges/indices, then schedule BUFFERIZE points based on
+   read-after-write dependencies.
+
+The TRealize-list bundling form (commit landing alongside this
+update) routes per-param ASSIGNs through one realize call, so
+Adam goes from 9 realizes/step (~5,087 slots) to 1 realize/step
+(~5,023 slots) -- bookkeeping win, doesn't move the slot/program
+ratio.  The slot-inflation fix is the next concrete step.
 
 **Verify (current bar):** N_STEPS=5 LeNet trains; loss decreases
 monotonically; per-step kernel array memory does not grow

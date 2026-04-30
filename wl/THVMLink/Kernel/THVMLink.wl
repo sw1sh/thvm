@@ -350,6 +350,7 @@ $uopLoadFn     := $uopLoadFn     = load["thvm_wl_uop_load",        {Integer},   
 (* direct materialize (no wnf) + kernel-entry introspection *)
 $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},                        Integer];
 $realizeFn     := $realizeFn     = load["thvm_wl_realize",         {Integer},                        Integer];
+$realizeManyFn := $realizeManyFn = load["thvm_wl_realize_many",    {{Integer, 1}},                   Integer];
 $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},                               Integer];
 $kernelProgramCacheSizeFn := $kernelProgramCacheSizeFn = load["thvm_wl_kernel_program_cache_size", {}, Integer];
 $kernelAxesGetFn          := $kernelAxesGetFn          = load["thvm_wl_kernel_axes_get",            {Integer}, {Integer, 1}];

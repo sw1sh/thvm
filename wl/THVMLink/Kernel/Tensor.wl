@@ -296,6 +296,16 @@ TGradMany[y_, targets_List] := With[{
    arc).  Equivalent to TWnf[TMaterialize[expr]] except every CPU
    buffer alloc'd during materialize+wnf that ISN'T reachable from
    the result tensor's producer chain gets freed at exit. *)
+(* TRealize -- single root: TRealize[expr]
+                multi-root:  TRealize[{t1, t2, ...}]
+   The list form bundles every root into one materialize+wnf pass so
+   shared forward kernels dedup across roots; without it, callers
+   that loop TRealize per param (TAdam) emit ~N x the kernel count
+   they need.  Both forms return a TTerm. *)
+TRealize[exprs_List] := (
+    ensureInit[];
+    TTerm[$realizeManyFn[Developer`ToPackedArray[ttermRaw /@ exprs, Integer]]]
+)
 TRealize[expr_] := (ensureInit[]; TTerm[$realizeFn[ttermRaw[expr]]])
 
 (* TMaterialize = direct schedule + kernelize + linearize rewrite,

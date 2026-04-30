@@ -84,3 +84,84 @@ VerificationTest[
     1,
     TestID -> "fusion-count/compound-elementwise-eq-1"
 ]
+
+(* Long elementwise chain (8 ADDs over 9 distinct inputs).  All
+   pairwise + binary; nothing reads an intermediate twice; the
+   whole chain MUST fuse to one kernel.  Tinygrad: 1.  Failing
+   here flags a regression in elementwise-chain absorption
+   (realize_classify mis-classifying an interior ADD as a
+   multi-consumer boundary, or a movement-op chain breaking the
+   contig path). *)
+VerificationTest[
+    TInit[];
+    ts  = Table[
+        TTensorCreate @ NumericArray[{1.0 * i, 2.0 * i}, "Real32"],
+        {i, 9}];
+    sum = Fold[Plus, First @ ts, Rest @ ts];
+    before = TKernelCount[];
+    TRealize @ sum;
+    kernelDelta[before, TKernelCount[]],
+    1,
+    TestID -> "fusion-count/long-add-chain-eq-1"
+]
+
+(* 16-deep elementwise chain alternating ADD / MUL.  Pure scalar
+   op tree, no shared intermediates -- still one kernel. *)
+VerificationTest[
+    TInit[];
+    ts  = Table[
+        TTensorCreate @ NumericArray[{1.0 * i, 2.0 * i}, "Real32"],
+        {i, 17}];
+    expr = Fold[
+        If[ EvenQ[#2], #1 + ts[[#2]], #1 * ts[[#2]]] &,
+        First @ ts, Range[2, 17]];
+    before = TKernelCount[];
+    TRealize @ expr;
+    kernelDelta[before, TKernelCount[]],
+    1,
+    TestID -> "fusion-count/16-deep-mixed-elementwise-eq-1"
+]
+
+(* Two-layer MLP forward (linear-relu-linear) -- fuses to 2
+   matmul kernels, one per Dot.  ReLU absorbs into the
+   downstream matmul's epilogue (or out as a separate pointwise
+   kernel; today's classifier emits a separate pointwise kernel,
+   so the bound is 3).  Tinygrad: 2.  This test pins our current
+   ceiling and surfaces regressions when classifier rules
+   change. *)
+VerificationTest[
+    TInit[];
+    x  = TTensorCreate @ NumericArray[Range[8] * 1.0, "Real32"];
+    w1 = TTensorCreate @ NumericArray[Table[i + j * 0.1, {i, 4}, {j, 8}], "Real32"];
+    w2 = TTensorCreate @ NumericArray[Table[i - j * 0.1, {i, 2}, {j, 4}], "Real32"];
+    h1 = TReLU @ TDot[w1, x];
+    out = TDot[w2, h1];
+    before = TKernelCount[];
+    TRealize @ out;
+    kernelDelta[before, TKernelCount[]] <= 3,
+    True,
+    TestID -> "fusion-count/two-layer-mlp-forward-le-3"
+]
+
+(* TGradMany must NOT pay quadratically for sharing N targets.
+   With 4 targets sharing a forward DAG of ~8 forward kernels,
+   total realize cost should stay well under "one separate full
+   forward+backward per target" (which would be 4 * (forward + 1)
+   ~ 36).  Empirical ceiling for the shared-leaves form is around
+   12-18; we pin <= 24 as a generous regression guard.  A
+   regression past this means the shared-forward-DAG memo broke. *)
+VerificationTest[
+    TInit[];
+    x  = TTensorCreate @ NumericArray[Range[8] * 1.0, "Real32"];
+    a  = TTensorCreate @ NumericArray[Table[i + j * 0.1, {i, 4}, {j, 8}], "Real32"];
+    b  = TTensorCreate @ NumericArray[Table[i - j * 0.1, {i, 2}, {j, 4}], "Real32"];
+    c  = TTensorCreate @ NumericArray[Range[2] * 1.0, "Real32"];
+    out = TDot[b, TReLU @ TDot[a, x]] + c;
+    loss = TSum @ (out * out);
+    before = TKernelCount[];
+    TRealize /@ TGradMany[loss, {x, a, b, c}];
+    kernelDelta[before, TKernelCount[]] <= 24,
+    True,
+    TestID -> "fusion-count/gradmany-4-targets-le-24"
+]
+

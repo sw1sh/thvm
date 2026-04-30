@@ -1161,6 +1161,29 @@ EXTERN_C DLLEXPORT int thvm_wl_realize(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Bundle a list of independent root Terms (passed as an Integer
+// MTensor of packed Term values) into a TAG_CTR and dispatch through
+// thvm_realize_many so they share one materialize pass / pool
+// boundary.  Used by TAdam to fire all per-param ASSIGNs in one go;
+// without this every param's TRealize re-walks the whole gradient
+// chain and emits ~5K kernel slots per step on LeNet.
+EXTERN_C DLLEXPORT int thvm_wl_realize_many(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)argc;
+  MTensor t = MArgument_getMTensor(args[0]);
+  mint n    = libData->MTensor_getFlattenedLength(t);
+  const mint *data = libData->MTensor_getIntegerData(t);
+  if (n <= 0) { MArgument_setInteger(res, 0); return LIBRARY_NO_ERROR; }
+  if (n > 256) return LIBRARY_FUNCTION_ERROR;
+  Term children[256];
+  for (mint i = 0; i < n; i++) children[i] = (Term)data[i];
+  Term ctr = term_new_ctr(0, children, (u32)n);
+  Term r   = thvm_realize_many(ctr);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 // Expose kernel-entry introspection for tests.
 EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {

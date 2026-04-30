@@ -36,6 +36,13 @@ static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
   }
 }
 
+#define THVM_REALIZE_MAX_ITERS 64
+
+// Forward decl: CTR-bundle entry point used by thvm_realize when a
+// caller hands us a TAG_CTR of independent root Terms (e.g. all the
+// per-param ASSIGNs of one Adam step).  Defined below.
+fn Term thvm_realize_many(Term ctr_term);
+
 fn Term thvm_realize(Term expr) {
   HOT_REALIZE_CALLS++;
   // TEN short-circuit: a Term that's already a TAG_TEN (typical when
@@ -45,6 +52,10 @@ fn Term thvm_realize(Term expr) {
   // VAR-SUB / ALO chains pointing at a TEN.
   Term resolved = term_resolve(expr);
   if (term_tag(resolved) == TAG_TEN) return resolved;
+  // CTR-bundle short-circuit: dispatch to the multi-root entry so
+  // every child shares one materialize pass + one buffer-pool
+  // boundary.  Per-param TAdam ASSIGNs land here.
+  if (term_tag(resolved) == TAG_CTR) return thvm_realize_many(resolved);
 
   u32 wm = cpu_buf_pool_begin();
 
@@ -64,19 +75,25 @@ fn Term thvm_realize(Term expr) {
   //     Materialize is graph -> kernel compile, NEVER fires
   //     interactions.
   // Fixed point: a pass where materialize emits no fresh kernel AND
-  // wnf fires no interactions.  Safety cap (THVM_REALIZE_MAX_ITERS)
-  // bounds runaway loops; in practice the loop converges in 2-3
-  // iterations.
-#define THVM_REALIZE_MAX_ITERS 64
+  // wnf fires no interactions.  Safety cap (THVM_REALIZE_MAX_ITERS,
+  // hoisted to file scope above so thvm_realize_many shares it).
+  // Loop converges in 2-3 iterations in practice.
   Term res = expr;
+  u32 kn_at_call_start = KERNELS_NEXT;
+  int iters_used = 0;
   for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
     u32 kn0   = KERNELS_NEXT;
     u64 itrs0 = ITRS;
     res = wnf(res);
     Term mat = thvm_materialize(res);
+    iters_used = iter + 1;
     if (KERNELS_NEXT == kn0 && ITRS == itrs0) { res = mat; break; }
     kernel_compute_consumer_counts();
     res = mat;
+  }
+  if (getenv("THVM_KCNT")) {
+    fprintf(stderr, "DBG realize emit: %u kernels in %d iters\n",
+            KERNELS_NEXT - kn_at_call_start, iters_used);
   }
 
   // gc3: tracing-GC preserve.  Composes gc1 + gc2 into
@@ -138,5 +155,94 @@ fn Term thvm_realize(Term expr) {
   }
   if (!kgc_disabled_env) kernel_gc_sweep(res);
 
+  return res;
+}
+
+// Multi-root realize: caller bundles N independent root Terms in a
+// TAG_CTR; we run a single materialize + wnf loop over the bundle so
+// shared forward kernels dedup across roots, then drive each child
+// through wnf to fire any side-effecting nodes (UOP_ASSIGN, etc.).
+//
+// Why this matters: TAdam used to emit a separate TRealize per param,
+// each one re-walking the gradient chain from scratch (8 realizes ->
+// ~5K kernel slots/step on LeNet).  With one bundled realize the
+// forward DAG materialize sees every per-param backward chain in the
+// same pass and emits each forward kernel once.  Tinygrad analogue:
+// `loss.realize(*opt.schedule_step())` fires the whole step in one
+// scheduler pass.
+fn Term thvm_realize_many(Term ctr_term) {
+  HOT_REALIZE_CALLS++;
+  if (term_tag(ctr_term) != TAG_CTR) return thvm_realize(ctr_term);
+  u32 n = term_ctr_n(ctr_term);
+  if (n == 0) return ctr_term;
+
+  u32 wm = cpu_buf_pool_begin();
+  u32 kn_at_call_start = KERNELS_NEXT;
+
+  Term res = ctr_term;
+  int iters_used = 0;
+  int kcnt_dbg = (getenv("THVM_KCNT") != NULL);
+  for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
+    u32 kn0   = KERNELS_NEXT;
+    u64 itrs0 = ITRS;
+    // wnf is a no-op on a CTR (passive), so drive each child to
+    // fire its kernels / ASSIGNs.  Materialize then walks the
+    // entire bundle, sharing forward-kernel dedup across roots.
+    u32 cn = term_ctr_n(res);
+    Term children[256];
+    if (cn > 256) cn = 256;
+    for (u32 i = 0; i < cn; i++) children[i] = wnf(term_ctr_at(res, i));
+    Term wnf_ctr = term_new_ctr(term_ext(res), children, cn);
+    Term mat = thvm_materialize(wnf_ctr);
+    iters_used = iter + 1;
+    if (kcnt_dbg) {
+      fprintf(stderr, "DBG realize_many iter %d: emitted %u kernels (ITRS+%llu)\n",
+              iter, KERNELS_NEXT - kn0, (unsigned long long)(ITRS - itrs0));
+    }
+    if (KERNELS_NEXT == kn0 && ITRS == itrs0) { res = mat; break; }
+    kernel_compute_consumer_counts();
+    res = mat;
+  }
+  if (kcnt_dbg) {
+    fprintf(stderr, "DBG realize_many emit: %u kernels in %d iters (%u children)\n",
+            KERNELS_NEXT - kn_at_call_start, iters_used, n);
+  }
+
+  // Preserve mark + GC same as thvm_realize.  Walk every child of
+  // the result CTR so each root's producer chain is preserved.
+  u32 cn = term_ctr_n(res);
+  for (u32 i = 0; i < cn && i < 256; i++) mark_gc_preserve(term_ctr_at(res, i));
+
+  cpu_buf_pool_rollback_with_preserve(wm);
+  cpu_buf_clear_preserved(wm);
+  cpu_buf_clear_freeable(wm);
+
+  if (gc_enabled()) {
+    static int gc_disabled_env = -1;
+    static int gc_kb_env       = -1;
+    if (gc_disabled_env == -1) {
+      const char *e = getenv("THVM_GC");
+      gc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
+    }
+    if (gc_kb_env == -1) {
+      const char *e = getenv("THVM_GC_KB");
+      gc_kb_env = (e != NULL) ? atoi(e) : 0;
+    }
+    u64 trigger_words = (gc_kb_env > 0)
+                          ? (u64)gc_kb_env * 128
+                          : (gc_from_end() - gc_from_start()) / 2;
+    if (!gc_disabled_env && HEAP_NEXT > gc_from_start() + trigger_words) {
+      Term roots[1] = { res };
+      gc_collect(roots, 1);
+      res = roots[0];
+    }
+  }
+
+  static int kgc_disabled_env = -1;
+  if (kgc_disabled_env == -1) {
+    const char *e = getenv("THVM_KGC");
+    kgc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
+  }
+  if (!kgc_disabled_env) kernel_gc_sweep(res);
   return res;
 }
