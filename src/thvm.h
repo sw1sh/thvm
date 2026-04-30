@@ -1048,6 +1048,10 @@ fn void rangeify_free(struct KernelEntry *ke);
 // introspection / debug printing.
 fn const char *scalar_op_name (u8 op);
 fn const char *scalar_axis_name(u32 axis_type);
+// Phase B: try to lower a fully-emitted KernelEntry's KProgOp[] to
+// the scalar form.  Returns 1 on success (ke->scalar_uops populated;
+// caller can dispatch through the scalar path) and 0 on bail.
+fn int  rangeify_try_lower_elementwise(struct KernelEntry *ke);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 

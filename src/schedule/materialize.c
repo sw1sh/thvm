@@ -1218,6 +1218,19 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // survive across new kid emissions.
   axes_default_for(ke);
 
+  // Phase B: rangeify lowering.  Try to produce a parallel scalar-
+  // UOp form alongside the legacy KProgOp[].  Opt-in via
+  // THVM_RANGEIFY=1.  When the lowering succeeds, cpu_dispatch_kernel
+  // routes through the scalar interpreter; when it bails (op not
+  // yet supported, broadcast pattern not handled, etc.), the legacy
+  // KProgOp[] dispatch runs and ke->scalar_uops stays empty.  Reads
+  // getenv per emit (cheap; ~1us) so test harnesses can flip the
+  // flag mid-session without restarting the runtime.
+  {
+    const char *e = getenv("THVM_RANGEIFY");
+    if (e != NULL && e[0] == '1') rangeify_try_lower_elementwise(ke);
+  }
+
   u64 kloc = heap_alloc(2);
   heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, out_tid));
   heap_set(kloc + 1, term_new(0, TAG_NUM, DT_INT32, kid));

@@ -185,6 +185,188 @@ cleanup:
   return rc;
 }
 
+// === Phase B: scalar-UOp interpreter ================================
+//
+// Walks ke->scalar_uops once per output element, evaluating each
+// scalar op into a per-op u64 register file.  f32 / i32 values are
+// bit-cast through the u64 register; this is fine on every backend
+// we target since u64 holds both.  Phase B handles the elementwise
+// + CONST + simple-INDEX subset; reduce / strided INDEX / multi-
+// output land in later phases.
+//
+// Per-element layout:
+//   reg[id] holds the value emitted by scalar_uops[id] for the
+//   current output index k.  Ops without a value (S_RANGE leaf,
+//   S_DEFINE_PARAM, S_DEFINE_OUTPUT, S_STORE, S_BUFFERIZE) write
+//   either the iter / pointer / nothing.
+//
+// CONST scalars and same-shape inputs both compile to flat indexing
+// using k directly; broadcast (numel == 1) inputs use offset 0.
+fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (ke->scalar_uops == NULL || ke->n_scalar_uops < 2) return -1;
+  u32 n        = ke->n_scalar_uops;
+  u32 onum     = ke->output_numel;
+  u32 odtype   = ke->output_dtype;
+  void *out_p  = CPU_BUFS[out_buf_id].data;
+  // Resolve raw input pointers up-front (same as cpu_interpret).  We
+  // bailed earlier on non-contig inputs, so no view pre-mat needed.
+  u32 n_inputs = ke->n_inputs;
+  void *in_ptrs_buf[n_inputs ? n_inputs : 1];
+  void **in_ptrs = in_ptrs_buf;
+  for (u32 i = 0; i < n_inputs; i++) {
+    in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
+  }
+  // Per-element register file.  Reused across iterations.
+  u64 *reg = (u64 *)malloc((size_t)n * sizeof(u64));
+  if (reg == NULL) return -1;
+  for (u32 k = 0; k < onum; k++) {
+    for (u32 i = 1; i < n; i++) {
+      ScalarUop *u = &ke->scalar_uops[i];
+      switch (u->op) {
+        case S_RANGE: {
+          // Unused for the simple elementwise path -- we drive
+          // INDEX directly with k.  Keep the iter slot zeroed so
+          // any stray reader gets a deterministic value.
+          reg[i] = 0;
+          break;
+        }
+        case S_DEFINE_PARAM: {
+          // extra holds the input slot index.  Store the slot id
+          // so S_INDEX can decide between "k" (per-element) and
+          // "0" (broadcast).  Pointer indirection happens at LOAD.
+          reg[i] = (u64)(u->extra & 0xFFFFFFFFu);
+          break;
+        }
+        case S_DEFINE_OUTPUT: {
+          reg[i] = 0;   // sentinel; S_STORE knows to use out_p.
+          break;
+        }
+        case S_INDEX: {
+          // src[0] = buffer; src[1..] = ranges.  For Phase B,
+          // index into output is k; index into a non-broadcast
+          // input is also k; broadcast input collapses to 0.
+          // Encode the address as a (slot << 1) | scalar_flag for
+          // input INDEX, or just a flat offset for output.
+          u32 buf_id = u->src[0];
+          ScalarUop *bu = &ke->scalar_uops[buf_id];
+          if (bu->op == S_DEFINE_OUTPUT) {
+            reg[i] = (u64)k;     // output address is k
+          } else {
+            // input slot: lookup numel; if 1, address is 0; else k.
+            u32 slot = (u32)reg[buf_id];
+            u32 inum = ke->input_numels[slot];
+            reg[i] = (inum == 1) ? 0 : (u64)k;
+            // Stash slot in the high half so LOAD can find the buffer.
+            reg[i] |= ((u64)slot << 32);
+          }
+          break;
+        }
+        case S_LOAD: {
+          // src[0] = INDEX over an input.  Decode (slot, offset).
+          u64 idx_r = reg[u->src[0]];
+          u32 slot  = (u32)(idx_r >> 32);
+          u32 off   = (u32)(idx_r & 0xFFFFFFFFu);
+          u32 dtype = ke->input_dtypes[slot];
+          void *p   = in_ptrs[slot];
+          // Phase B handles f32 and i32; other dtypes bail at lower
+          // time, so this switch covers the supported set.
+          if (dtype == DT_FP32) {
+            f32 v; memcpy(&v, (const u8 *)p + off * 4, 4);
+            u32 bits; memcpy(&bits, &v, 4); reg[i] = (u64)bits;
+          } else {
+            // Fall through for non-f32: read raw 4 bytes for now.
+            u32 v; memcpy(&v, (const u8 *)p + off * 4, 4);
+            reg[i] = (u64)v;
+          }
+          break;
+        }
+        case S_STORE: {
+          // src[0] = INDEX into output, src[1] = value.
+          u64 idx_r = reg[u->src[0]];
+          u32 off   = (u32)(idx_r & 0xFFFFFFFFu);
+          u32 bits  = (u32)reg[u->src[1]];
+          if (odtype == DT_FP32) {
+            f32 v; memcpy(&v, &bits, 4);
+            memcpy((u8 *)out_p + off * 4, &v, 4);
+          } else {
+            memcpy((u8 *)out_p + off * 4, &bits, 4);
+          }
+          break;
+        }
+        case S_BUFFERIZE: {
+          // No-op at runtime; the STORE already wrote.  Marks the
+          // graph root for introspection / future BUFFERIZE-driven
+          // memory planning.
+          break;
+        }
+        case S_CONST: {
+          reg[i] = u->extra & 0xFFFFFFFFu;
+          break;
+        }
+        case S_ADD: {
+          f32 a, b;
+          u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          u32 bb = (u32)reg[u->src[1]]; memcpy(&b, &bb, 4);
+          f32 r = a + b; u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        case S_MUL: {
+          f32 a, b;
+          u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          u32 bb = (u32)reg[u->src[1]]; memcpy(&b, &bb, 4);
+          f32 r = a * b; u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        case S_NEG: {
+          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          f32 r = -a; u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        case S_RECIP: {
+          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          f32 r = 1.0f / a; u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        case S_SQRT: {
+          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          f32 r = sqrtf(a); u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        case S_EXP2: {
+          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          f32 r = exp2f(a); u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        case S_LOG2: {
+          f32 a; u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          f32 r = log2f(a); u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        case S_CMPLT: {
+          f32 a, b;
+          u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          u32 bb = (u32)reg[u->src[1]]; memcpy(&b, &bb, 4);
+          f32 r = (a < b) ? 1.0f : 0.0f;
+          u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        case S_CMPEQ: {
+          f32 a, b;
+          u32 ab = (u32)reg[u->src[0]]; memcpy(&a, &ab, 4);
+          u32 bb = (u32)reg[u->src[1]]; memcpy(&b, &bb, 4);
+          f32 r = (a == b) ? 1.0f : 0.0f;
+          u32 rb; memcpy(&rb, &r, 4); reg[i] = rb;
+          break;
+        }
+        default:
+          free(reg); return -1;
+      }
+    }
+  }
+  free(reg);
+  return 0;
+}
+
 // Forward decls: defined in backend/cpu/{blas,jit}.c (included after
 // this file in thvm.c, so declare here for the dispatcher).
 fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
@@ -195,6 +377,14 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // per-kid profiling (cg_profile_record).
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
+  // 0. Phase B: if this kernel was lowered to scalar form, run the
+  //    scalar interpreter.  Bypasses BLAS / JIT / KProgOp[] -- the
+  //    scalar form is the authoritative program when present.
+  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
+    int rc = cpu_dispatch_scalar(ke, in_buf_ids, out_buf_id);
+    cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
+    return rc;
+  }
   // 1. BLAS first: matmul / matvec / dot patterns get cblas_*
   //    (Accelerate on macOS) -- 10-100x faster than anything we can
   //    JIT-compile near-term.
