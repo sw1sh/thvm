@@ -217,6 +217,18 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
   if (refcount_out) *refcount_out = METAL_BUFS[i].refcount;
 }
 
+// Per-(opcode, dtype) pipeline cache.  Defined here so metal_shutdown
+// can clear it before the MTLLibrary it points into goes away; the
+// metal_pipeline_for accessor + on-demand fill live with the rest of
+// the dispatch path further down.
+static id<MTLComputePipelineState> METAL_PIPELINES_CACHE[UOP_COUNT][32];
+
+// metal_jit cache decls live further down (alongside the MSL emit
+// path).  Forward-declare the cache reset so metal_shutdown can
+// drop the stale PSOs before the MTLLibrary they reference goes
+// away.
+static void metal_jit_cache_reset_impl(void);
+
 static void metal_shutdown(void) {
   METAL_FREELIST_LEN = 0;
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
@@ -225,6 +237,15 @@ static void metal_shutdown(void) {
     METAL_BUFS[i].refcount = 0;
   }
   METAL_BUFS_NEXT = 1;
+  // Drop every cached PSO -- they reference the MTLLibrary we're
+  // about to nil, and a re-init will produce fresh pipelines from
+  // a fresh MTLLibrary.  metal_jit's cache is cleared on the next
+  // metal_init (defined further down so it can see METAL_JIT_CACHE
+  // / METAL_JIT_PSOS).
+  for (u32 op = 0; op < UOP_COUNT; op++)
+    for (u32 dt = 0; dt < 32; dt++)
+      METAL_PIPELINES_CACHE[op][dt] = nil;
+  metal_jit_cache_reset_impl();
   METAL_LIB    = nil;
   METAL_QUEUE  = nil;
   METAL_DEVICE = nil;
@@ -256,6 +277,15 @@ typedef struct {
 } MetalJitSlot;
 static MetalJitSlot                METAL_JIT_CACHE[METAL_JIT_CACHE_CAP];
 static id<MTLComputePipelineState> METAL_JIT_PSOS [METAL_JIT_CACHE_CAP];
+
+// Forward-declared as metal_jit_cache_reset_impl above; called from
+// metal_shutdown so the next metal_init starts with a clean slate.
+static void metal_jit_cache_reset_impl(void) {
+  for (u32 i = 0; i < METAL_JIT_CACHE_CAP; i++) {
+    METAL_JIT_CACHE[i].key = 0;
+    METAL_JIT_PSOS [i]     = nil;
+  }
+}
 
 static u64 metal_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL;
@@ -330,6 +360,10 @@ static int metal_jit_encode(KernelEntry *ke,
                             id<MTLBuffer> outBuf,
                             id<MTLCommandBuffer> cmd) {
   if (!cg_supports(ke)) return 0;
+  // Metal MSL emitter is f32-only today; non-F32 kernels fall back
+  // to the per-op pipeline path (which has dtype-specific shader
+  // variants from Phase I).
+  if (cg_program_dtype(ke) != DT_FP32) return 0;
   u64 key = metal_jit_hash(ke);
   u32 idx = metal_jit_lookup_idx(key);
   id<MTLComputePipelineState> pso = nil;
@@ -354,33 +388,48 @@ static int metal_jit_encode(KernelEntry *ke,
   return 1;
 }
 
-static id<MTLComputePipelineState> METAL_PIPELINES[UOP_COUNT] = { nil };
+// METAL_PIPELINES_CACHE is the per-(opcode, dtype) pipeline cache;
+// it's defined further up so metal_shutdown can clear it.
 
-static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
-  if (opcode >= UOP_COUNT) return nil;
-  if (METAL_PIPELINES[opcode] != nil) return METAL_PIPELINES[opcode];
-  if (METAL_LIB == nil)               return nil;
-  NSString *fnName = nil;
+// Map a dtype to its shader-name suffix.  Only dtypes with native MSL
+// types are listed; others bail at metal_kernel_supported.
+static const char *metal_dtype_suffix(uint32_t dtype) {
+  switch (dtype) {
+    case DT_FP32:  return "f32";
+    case DT_INT32: return "i32";
+    default:       return NULL;
+  }
+}
+
+static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode,
+                                                      uint32_t dtype) {
+  if (opcode >= UOP_COUNT || dtype >= 32) return nil;
+  if (METAL_PIPELINES_CACHE[opcode][dtype] != nil) return METAL_PIPELINES_CACHE[opcode][dtype];
+  if (METAL_LIB == nil) return nil;
+  const char *suffix = metal_dtype_suffix(dtype);
+  if (suffix == NULL) return nil;
+  const char *base = NULL;
   switch (opcode) {
-    case UOP_CONST: fnName = @"thvm_const"; break;
-    case UOP_ADD:   fnName = @"thvm_add";   break;
-    case UOP_MUL:   fnName = @"thvm_mul";   break;
-    case UOP_CMPLT: fnName = @"thvm_cmplt"; break;
-    case UOP_CMPEQ: fnName = @"thvm_cmpeq"; break;
-    case UOP_NEG:   fnName = @"thvm_neg";   break;
-    case UOP_RECIP: fnName = @"thvm_recip"; break;
-    case UOP_SQRT:  fnName = @"thvm_sqrt";  break;
-    case UOP_EXP2:  fnName = @"thvm_exp2";  break;
-    case UOP_LOG2:  fnName = @"thvm_log2";  break;
-    case UOP_REDUCE: fnName = @"thvm_reduce";  break;
-    case UOP_EXPAND: fnName = @"thvm_expand";  break;
-    case UOP_RESHAPE:fnName = @"thvm_reshape"; break;
-    case UOP_FLIP:   fnName = @"thvm_flip";    break;
-    case UOP_PAD:    fnName = @"thvm_pad";     break;
-    case UOP_SHRINK: fnName = @"thvm_shrink";  break;
-    case UOP_PERMUTE:fnName = @"thvm_permute"; break;
+    case UOP_CONST:  base = "thvm_const";   break;
+    case UOP_ADD:    base = "thvm_add";     break;
+    case UOP_MUL:    base = "thvm_mul";     break;
+    case UOP_CMPLT:  base = "thvm_cmplt";   break;
+    case UOP_CMPEQ:  base = "thvm_cmpeq";   break;
+    case UOP_NEG:    base = "thvm_neg";     break;
+    case UOP_RECIP:  base = "thvm_recip";   break;
+    case UOP_SQRT:   base = "thvm_sqrt";    break;
+    case UOP_EXP2:   base = "thvm_exp2";    break;
+    case UOP_LOG2:   base = "thvm_log2";    break;
+    case UOP_REDUCE: base = "thvm_reduce";  break;
+    case UOP_EXPAND: base = "thvm_expand";  break;
+    case UOP_RESHAPE:base = "thvm_reshape"; break;
+    case UOP_FLIP:   base = "thvm_flip";    break;
+    case UOP_PAD:    base = "thvm_pad";     break;
+    case UOP_SHRINK: base = "thvm_shrink";  break;
+    case UOP_PERMUTE:base = "thvm_permute"; break;
     default:         return nil;
   }
+  NSString *fnName = [NSString stringWithFormat:@"%s_%s", base, suffix];
   // `fn` is taken by thvm.h as a `static inline` macro; use `mtlFn`.
   id<MTLFunction> mtlFn = [METAL_LIB newFunctionWithName:fnName];
   if (mtlFn == nil) {
@@ -397,7 +446,7 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode) {
             err ? [[err localizedDescription] UTF8String] : "(no error)");
     return nil;
   }
-  METAL_PIPELINES[opcode] = pso;
+  METAL_PIPELINES_CACHE[opcode][dtype] = pso;
   return pso;
 }
 
@@ -420,9 +469,10 @@ static int metal_encode_op(id<MTLComputeCommandEncoder> enc,
                             __unsafe_unretained id<MTLBuffer> *src_bufs,
                             u32 *src_numels,
                             id<MTLBuffer> outBuf) {
-  id<MTLComputePipelineState> pso = metal_pipeline_for(p->opcode);
+  id<MTLComputePipelineState> pso = metal_pipeline_for(p->opcode, p->dtype);
   if (pso == nil) {
-    fprintf(stderr, "thvm: metal dispatch -- no pipeline for opcode %u\n", p->opcode);
+    fprintf(stderr, "thvm: metal dispatch -- no pipeline for opcode %u dtype %u\n",
+            p->opcode, p->dtype);
     return -1;
   }
   [enc setComputePipelineState:pso];
@@ -468,9 +518,29 @@ static int metal_encode_op(id<MTLComputeCommandEncoder> enc,
   return 0;
 }
 
+// Predicate: every input + every program op is one of the dtypes
+// the Metal shader library covers (f32 + i32 today; f16 + the rest
+// follow as shader variants land).  Mixed-dtype or unsupported
+// kernels return -1 so cpu_dispatch_kernel falls back to the CPU
+// path (interpret / JIT).
+static int metal_kernel_supported(struct KernelEntry const *ke) {
+  if (ke->n_ops == 0) return 0;
+  u32 dt = ke->program[0].dtype;
+  // v1: only the dtypes that have shader variants in the metallib.
+  // f32 always; i32 added in Phase I.  f16 / bf16 / fp8 / int4 fall
+  // back to CPU until per-dtype shader variants land for them.
+  if (dt != DT_FP32 && dt != DT_INT32) return 0;
+  for (u32 i = 0; i < ke->n_ops; i++)
+    if (ke->program[i].dtype != dt) return 0;
+  for (u32 i = 0; i < ke->n_inputs; i++)
+    if (ke->input_dtypes[i] != dt) return 0;
+  return 1;
+}
+
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
   if (ke->n_ops == 0) return -1;
+  if (!metal_kernel_supported(ke)) return -1;
   if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
   id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
   if (outBuf == nil) return -1;

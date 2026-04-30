@@ -1075,6 +1075,7 @@ typedef enum {
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);
+u32   cg_program_dtype(KernelEntry const *ke);   // DT_COUNT on mixed
 char *cg_emit_metal(KernelEntry const *ke);   // caller frees
 u64   cg_now_us(void);
 void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);

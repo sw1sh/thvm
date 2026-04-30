@@ -154,7 +154,7 @@ static int cg_op_is_float_only(u8 op) {
 // Pick the kernel's uniform dtype: scan every op + every input and
 // return the dtype if all match, else DT_COUNT (= sentinel).  Used
 // by render_c.c to emit a single typed C kernel.
-fn u32 cg_program_dtype(KernelEntry const *ke) {
+u32 cg_program_dtype(KernelEntry const *ke) {
   if (ke->n_ops == 0) return DT_COUNT;
   u32 dt = ke->program[0].dtype;
   for (u32 i = 1; i < ke->n_ops; i++) {
