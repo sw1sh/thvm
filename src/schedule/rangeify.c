@@ -555,8 +555,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
-      } else if (red->numel == 1 && in_numel == reduce_size
-                 && v->shape.ndim == 1) {
+      } else if (in_numel == reduce_size && v->shape.ndim == 1) {
+        // Per-reduce-iter rank-1 broadcast.  Input depends only on
+        // the REDUCE iter (invariant across LOOP iters); the address
+        // is reduce_iter * stride[0] + offset.  Covers both the
+        // full-reduce case (red->numel == 1) and partial-reduce
+        // (red->numel > 1) with a per-reduce-element constant input
+        // -- common in BN gradient backward chains.
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {(u32)v->strides[0]};
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
@@ -639,6 +644,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // No supported pre-INDEX shape branch matched.  Bailing
         // here is safer than emitting wrong addresses with
         // canonical loop_strides.
+        if (getenv("THVM_RANGEIFY_BAIL")) {
+          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u\n",
+                  i, in_numel, onum, v->shape.ndim, os->ndim,
+                  in_ndim, has_reduce ? red->numel : 0,
+                  has_reduce ? reduce_size : 0, reduce_in_numel);
+        }
         RBAIL_MID("pre-INDEX no branch matched");
       }
       if (idx == 0) RBAIL_MID("pre-INDEX emit failed");
