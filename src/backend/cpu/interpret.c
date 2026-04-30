@@ -255,13 +255,26 @@ static u64 eval_index(ScalarCtx *c, ScalarUop const *u) {
 
 // === per-dtype LOAD / STORE helpers =================================
 // Read / write one element of `dtype` at `(p + off * itemsize)`.  The
-// returned u64 holds the raw bits (zero-extended for narrow ints,
-// FP bit-cast for floats).  Used by S_LOAD, S_STORE, and the REDUCE
-// inner loop's accumulator wiring.
+// returned u64 holds:
+//   - FP-family (fp16/bf16/fp8/fp32) -- f32 bits widened from native.
+//   - fp64 -- raw f64 bits.
+//   - int/uint/bool -- raw bits zero-extended.
+// Used by S_LOAD, S_STORE, and the REDUCE inner loop accumulator.
+// The "promote narrow FPs to f32" policy mirrors
+// cpu_op_run_via_f32 in the legacy elementwise dispatch and lets
+// ALU stay f32-only for the FP family except fp64.
 
 static u64 scalar_load_typed(const void *p, u32 off, u32 dtype) {
   u32 esz = dtype_itemsize(dtype);
   const u8 *base = (const u8 *)p + (size_t)off * esz;
+  // Narrow-FP dtypes need value conversion, not raw memcpy.
+  if (dtype == DT_FP16 || dtype == DT_BF16
+   || dtype == DT_FP8E4M3 || dtype == DT_FP8E5M2) {
+    f32 v;
+    to_fp32_lane(&v, base, dtype, 1);
+    u32 bits; memcpy(&bits, &v, 4);
+    return (u64)bits;
+  }
   switch (esz) {
     case 1: { u8  v; memcpy(&v, base, 1); return (u64)v; }
     case 2: { u16 v; memcpy(&v, base, 2); return (u64)v; }
@@ -274,6 +287,13 @@ static u64 scalar_load_typed(const void *p, u32 off, u32 dtype) {
 static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
   u32 esz = dtype_itemsize(dtype);
   u8 *base = (u8 *)p + (size_t)off * esz;
+  if (dtype == DT_FP16 || dtype == DT_BF16
+   || dtype == DT_FP8E4M3 || dtype == DT_FP8E5M2) {
+    u32 b32 = (u32)bits;
+    f32 v; memcpy(&v, &b32, 4);
+    from_fp32_lane(base, dtype, &v, 1);
+    return;
+  }
   switch (esz) {
     case 1: { u8  v = (u8 )bits; memcpy(base, &v, 1); break; }
     case 2: { u16 v = (u16)bits; memcpy(base, &v, 2); break; }
@@ -302,11 +322,17 @@ static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
 #define ENCODE_BOOL(val)                                                       \
   return (val) ? 1ULL : 0ULL
 
-// Per-dtype binary op dispatch.  `op_macro(a, b)` should compute the
-// result; `bool_op(a, b)` is the bool/int form for CMP.
+// Per-dtype binary op dispatch.  Narrow FPs (fp16/bf16/fp8) use the
+// f32 ALU path -- LOAD/STORE widen/narrow at the buffer boundary,
+// reg[] internally holds f32 bits for the entire FP family except
+// fp64.
 #define DISPATCH_FP_BINARY(op_macro)                                          \
   switch (u->dtype) {                                                          \
-    case DT_FP32: { DECODE2(f32, a, b); ENCODE(f32, op_macro(a, b)); }        \
+    case DT_FP32:                                                              \
+    case DT_FP16: case DT_BF16:                                                \
+    case DT_FP8E4M3: case DT_FP8E5M2: {                                        \
+      DECODE2(f32, a, b); ENCODE(f32, op_macro(a, b));                        \
+    }                                                                          \
     case DT_FP64: { DECODE2(f64, a, b); ENCODE(f64, op_macro(a, b)); }        \
     case DT_INT8:   { DECODE2(i8 , a, b); ENCODE(i8 , (i8 )op_macro(a, b)); } \
     case DT_UINT8:  { DECODE2(u8 , a, b); ENCODE(u8 , (u8 )op_macro(a, b)); } \
@@ -323,9 +349,14 @@ static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
 // Compare ops: per cpu_op_cmplt convention, the output dtype matches
 // the input dtype.  For FP32, the result bits are 1.0f / 0.0f
 // (NOT the integer 1/0).  For ints, just 1 / 0 of that width.
+// Narrow FPs route through f32 internally (see scalar_load_typed).
 #define DISPATCH_CMP(op_macro)                                                \
   switch (u->dtype) {                                                          \
-    case DT_FP32: { DECODE2(f32, a, b); ENCODE(f32, op_macro(a, b) ? 1.0f : 0.0f); } \
+    case DT_FP32:                                                              \
+    case DT_FP16: case DT_BF16:                                                \
+    case DT_FP8E4M3: case DT_FP8E5M2: {                                        \
+      DECODE2(f32, a, b); ENCODE(f32, op_macro(a, b) ? 1.0f : 0.0f);          \
+    }                                                                          \
     case DT_FP64: { DECODE2(f64, a, b); ENCODE(f64, op_macro(a, b) ? 1.0  : 0.0 ); } \
     case DT_INT8:   { DECODE2(i8 , a, b); ENCODE(i8 , (i8 )(op_macro(a, b) ? 1 : 0)); } \
     case DT_UINT8:  { DECODE2(u8 , a, b); ENCODE(u8 , (u8 )(op_macro(a, b) ? 1 : 0)); } \
@@ -349,9 +380,14 @@ static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
   }
 
 // NEG: signed/FP unary minus.  Unsigned NEG wraps via two's complement.
+// Narrow FPs route through f32.
 #define DISPATCH_NEG()                                                         \
   switch (u->dtype) {                                                          \
-    case DT_FP32: { DECODE1(f32, a); ENCODE(f32, -a); }                       \
+    case DT_FP32:                                                              \
+    case DT_FP16: case DT_BF16:                                                \
+    case DT_FP8E4M3: case DT_FP8E5M2: {                                        \
+      DECODE1(f32, a); ENCODE(f32, -a);                                       \
+    }                                                                          \
     case DT_FP64: { DECODE1(f64, a); ENCODE(f64, -a); }                       \
     case DT_INT8:   { DECODE1(i8 , a); ENCODE(i8 , (i8 )-a); }                \
     case DT_UINT8:  { DECODE1(u8 , a); ENCODE(u8 , (u8 )(-(i32)a)); }         \
@@ -388,7 +424,12 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       // f64 outputs; we must cast f32->f64 to recover -1.0).
       u32 bits = (u32)(u->extra & 0xFFFFFFFFu);
       switch (u->dtype) {
-        case DT_FP32: return (u64)bits;
+        // Narrow FPs see CONST.arg as f32 bits (matches legacy
+        // cpu_op_const).  The STORE narrows at the buffer boundary.
+        case DT_FP32:
+        case DT_FP16: case DT_BF16:
+        case DT_FP8E4M3: case DT_FP8E5M2:
+          return (u64)bits;
         case DT_FP64: {
           f32 v32; memcpy(&v32, &bits, 4);
           f64 v64 = (f64)v32;
@@ -435,7 +476,12 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
         return _r;                                                             \
       } while (0)
       switch (u->dtype) {
-        case DT_FP32:   REDUCE_BODY(f32, -INFINITY, 0.0f, BINOP_LT_FLIP);
+        // Narrow FPs (fp16/bf16/fp8) use f32 accumulator since
+        // scalar_load_typed already widened the body's loads.
+        case DT_FP32:
+        case DT_FP16: case DT_BF16:
+        case DT_FP8E4M3: case DT_FP8E5M2:
+                        REDUCE_BODY(f32, -INFINITY, 0.0f, BINOP_LT_FLIP);
         case DT_FP64:   REDUCE_BODY(f64, -INFINITY, 0.0,  BINOP_LT_FLIP);
         case DT_INT8:   REDUCE_BODY(i8 , INT8_MIN,   0,   BINOP_LT_FLIP);
         case DT_UINT8:  REDUCE_BODY(u8 , 0,          0,   BINOP_LT_FLIP);
@@ -455,34 +501,22 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
     case S_ADD:    DISPATCH_FP_BINARY(BINOP_ADD);
     case S_MUL:    DISPATCH_FP_BINARY(BINOP_MUL);
     case S_NEG:    DISPATCH_NEG();
-    case S_RECIP: {
-      switch (u->dtype) {
-        case DT_FP32: { DECODE1(f32, a); ENCODE(f32, 1.0f / a); }
-        case DT_FP64: { DECODE1(f64, a); ENCODE(f64, 1.0  / a); }
-        default: return 0;
-      }
-    }
-    case S_SQRT: {
-      switch (u->dtype) {
-        case DT_FP32: { DECODE1(f32, a); ENCODE(f32, sqrtf(a)); }
-        case DT_FP64: { DECODE1(f64, a); ENCODE(f64, sqrt (a)); }
-        default: return 0;
-      }
-    }
-    case S_EXP2: {
-      switch (u->dtype) {
-        case DT_FP32: { DECODE1(f32, a); ENCODE(f32, exp2f(a)); }
-        case DT_FP64: { DECODE1(f64, a); ENCODE(f64, exp2 (a)); }
-        default: return 0;
-      }
-    }
-    case S_LOG2: {
-      switch (u->dtype) {
-        case DT_FP32: { DECODE1(f32, a); ENCODE(f32, log2f(a)); }
-        case DT_FP64: { DECODE1(f64, a); ENCODE(f64, log2 (a)); }
-        default: return 0;
-      }
-    }
+#define DISPATCH_FP_UNARY(op_f32, op_f64)                                     \
+  switch (u->dtype) {                                                          \
+    case DT_FP32:                                                              \
+    case DT_FP16: case DT_BF16:                                                \
+    case DT_FP8E4M3: case DT_FP8E5M2: {                                        \
+      DECODE1(f32, a); ENCODE(f32, op_f32(a));                                \
+    }                                                                          \
+    case DT_FP64: { DECODE1(f64, a); ENCODE(f64, op_f64(a)); }                \
+    default: return 0;                                                         \
+  }
+#define UNOP_RECIP_F(a) (1.0f / (a))
+#define UNOP_RECIP_D(a) (1.0  / (a))
+    case S_RECIP: DISPATCH_FP_UNARY(UNOP_RECIP_F, UNOP_RECIP_D);
+    case S_SQRT:  DISPATCH_FP_UNARY(sqrtf, sqrt);
+    case S_EXP2:  DISPATCH_FP_UNARY(exp2f, exp2);
+    case S_LOG2:  DISPATCH_FP_UNARY(log2f, log2);
     case S_CMPLT:  DISPATCH_CMP(BINOP_LT);
     case S_CMPEQ:  DISPATCH_CMP(BINOP_EQ);
     case S_SHRINK: {
@@ -552,7 +586,12 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       // the same lossy semantics legacy cpu_op_cast inherits.
       f64 v;
       switch (src_dtype) {
-        case DT_FP32: { CAST_DECODE(f32, x); v = (f64)x; break; }
+        // Narrow FPs already widened to f32 bits at LOAD time, so
+        // decode as f32.
+        case DT_FP32:
+        case DT_FP16: case DT_BF16:
+        case DT_FP8E4M3: case DT_FP8E5M2:
+                      { CAST_DECODE(f32, x); v = (f64)x; break; }
         case DT_FP64: { CAST_DECODE(f64, x); v = x; break; }
         case DT_BOOL:
         case DT_UINT8:  { CAST_DECODE(u8 , x); v = (f64)x; break; }
@@ -567,9 +606,12 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       }
 #undef CAST_DECODE
 
-      // Step 2: encode v as u->dtype.
+      // Step 2: encode v as u->dtype.  Narrow FPs encode as f32
+      // bits; STORE later narrows.
       switch (u->dtype) {
-        case DT_FP32:   ENCODE(f32, (f32)v);
+        case DT_FP32:
+        case DT_FP16: case DT_BF16:
+        case DT_FP8E4M3: case DT_FP8E5M2: ENCODE(f32, (f32)v);
         case DT_FP64:   ENCODE(f64, v);
         case DT_BOOL:   ENCODE(u8 , (u8 )(v != 0.0 ? 1 : 0));
         case DT_UINT8:  ENCODE(u8 , (u8 )v);

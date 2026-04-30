@@ -262,17 +262,18 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   if (ke == NULL || ke->n_ops == 0) return 0;
   // f32 only -- the scalar interpreter's bit-cast path would silently
   // misinterpret other dtypes.
-  // Phase F-5 supported dtypes: bool / int (8/16/32/64 signed +
-  // unsigned) / fp32 / fp64.  Reject the special FP formats
-  // (fp16/bf16/fp8) and packed nibbles (int4/uint4) for now -- those
-  // need bit-width-aware load/store paths in cpu_dispatch_scalar
-  // beyond the current 1/2/4/8-byte memcpy.
+  // Supported dtypes: bool / int{8..64} / fp32 / fp64 / narrow FPs
+  // (fp16/bf16/fp8e4m3/fp8e5m2 -- run through f32 ALU internally).
+  // Packed nibbles (int4/uint4) still bail; they need bit-level
+  // INDEX addressing.
 #define RANGEIFY_SUPPORTED_DTYPE(dt)                                          \
   ((dt) == DT_BOOL    || (dt) == DT_INT8   || (dt) == DT_UINT8             \
    || (dt) == DT_INT16  || (dt) == DT_UINT16                                  \
    || (dt) == DT_INT32  || (dt) == DT_UINT32                                  \
    || (dt) == DT_INT64  || (dt) == DT_UINT64                                  \
-   || (dt) == DT_FP32   || (dt) == DT_FP64)
+   || (dt) == DT_FP32   || (dt) == DT_FP64                                    \
+   || (dt) == DT_FP16   || (dt) == DT_BF16                                    \
+   || (dt) == DT_FP8E4M3 || (dt) == DT_FP8E5M2)
   if (!RANGEIFY_SUPPORTED_DTYPE(ke->output_dtype)) RBAIL_PRE("output dtype");
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (!RANGEIFY_SUPPORTED_DTYPE(ke->input_dtypes[i])) RBAIL_PRE("input dtype");
@@ -648,6 +649,32 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     if (p->opcode == UOP_CONST) {
       prog_value[i] = rangeify_emit_leaf(ke, S_CONST, dtype, (u64)p->arg);
       continue;
+    }
+    if (p->opcode == UOP_BITCAST) {
+      // BITCAST is identity at the scalar level for non-narrow FPs:
+      // reg holds the raw bits and downstream u->dtype reinterprets
+      // them.  But for narrow FPs (fp16/bf16/fp8), scalar_load_typed
+      // widens to f32 bits at the buffer boundary -- so the raw fp16
+      // bit pattern is gone by the time BITCAST runs.  Bail on those
+      // until we add a "raw bytes" LOAD path.
+      u32 dst_dtype = p->dtype;
+      u32 src_dtype = dst_dtype;
+      if (!KSRC_IS_INPUT(p->src[0])) {
+        u32 src_idx = KSRC_INDEX(p->src[0]);
+        if (src_idx < ke->n_ops) src_dtype = ke->program[src_idx].dtype;
+      } else {
+        src_dtype = ke->input_dtypes[KSRC_INDEX(p->src[0])];
+      }
+      if (dst_dtype == DT_FP16 || dst_dtype == DT_BF16
+       || dst_dtype == DT_FP8E4M3 || dst_dtype == DT_FP8E5M2
+       || src_dtype == DT_FP16 || src_dtype == DT_BF16
+       || src_dtype == DT_FP8E4M3 || src_dtype == DT_FP8E5M2) {
+        if (getenv("THVM_RANGEIFY_BAIL")) {
+          fprintf(stderr, "rangeify bail (mid-emit): BITCAST narrow-FP\n");
+        }
+        rangeify_free(ke); return 0;
+      }
+      // Fall through to the identity path below.
     }
     if (p->opcode == UOP_EXPAND || p->opcode == UOP_RESHAPE
         || p->opcode == UOP_LOAD || p->opcode == UOP_BITCAST) {
