@@ -179,11 +179,14 @@ $(METAL_LIBPATH): $(METAL_AIRS) | $(BUILD)
 # test_metal_real opts into the dual-TU build: -DTHVM_HAS_METAL
 # tells src/thvm.c to skip the C stub and instead link the .o.
 # Depends on the metallib so metal_init can find it at runtime.
+TEST_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,)
+TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,)
+
 $(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
 test: $(TESTS)
 	@fail=0; \

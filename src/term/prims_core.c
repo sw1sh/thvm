@@ -23,7 +23,13 @@
 //   (return 0), conditional control flow (return alternative cont),
 //   value transformation (return modified Term), etc.
 
-extern Term thvm_pri_wl_invoke_returning(u32 slot, Term value);
+// Weak default: C-only builds (unit tests, bench harnesses) link this
+// no-op stub.  The WL bridge in CSource/thvmlink.c provides a non-weak
+// override that takes precedence when the paclet dylib is linked.
+__attribute__((weak)) Term thvm_pri_wl_invoke_returning(u32 slot, Term value) {
+  (void)slot; (void)value;
+  return 0;
+}
 
 static Term prim_pri(Term *args) {
   Term slot_num = wnf(args[0]);
