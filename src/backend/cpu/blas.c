@@ -58,12 +58,25 @@ static int blas_op_is_reduce_sum(KProgOp const *p, u32 src_step) {
   return KSRC_INDEX(s) == src_step;
 }
 
+// Predicate: every input + every program op shares the same float
+// dtype (f32 or f64).  Mixed dtypes bail; integer dtypes bail too.
+static int blas_uniform_float(KernelEntry *ke, u32 *out_dtype) {
+  u32 dt = ke->program[0].dtype;
+  if (dt != DT_FP32 && dt != DT_FP64) return 0;
+  for (u32 i = 0; i < ke->n_ops; i++)
+    if (ke->program[i].dtype != dt) return 0;
+  for (u32 i = 0; i < ke->n_inputs; i++)
+    if (ke->input_dtypes[i] != dt) return 0;
+  *out_dtype = dt;
+  return 1;
+}
+
 // Try DOT.  Returns 1 on dispatch, 0 on no-match (caller fall-back).
 static int blas_try_dot(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ke->n_inputs != 2) return 0;
   if (ke->n_ops    != 2) return 0;
-  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32) return 0;
-  if (ke->program[0].dtype != DT_FP32 || ke->program[1].dtype != DT_FP32) return 0;
+  u32 dt;
+  if (!blas_uniform_float(ke, &dt)) return 0;
   u32 n0 = ke->input_numels[0], n1 = ke->input_numels[1];
   if (n0 != n1 || n0 == 0) return 0;
   if (ke->program[0].numel != n0) return 0;
@@ -77,10 +90,17 @@ static int blas_try_dot(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     if (tid != 0 && tid < TENS_NEXT
         && (!TENS[tid].view.contiguous || TENS[tid].nviews > 0)) return 0;
   }
-  float const *a = (float const *)CPU_BUFS[in_buf_ids[0]].data;
-  float const *b = (float const *)CPU_BUFS[in_buf_ids[1]].data;
-  float       *o = (float       *)CPU_BUFS[out_buf_id].data;
-  o[0] = cblas_sdot((int)n0, a, 1, b, 1);
+  if (dt == DT_FP32) {
+    float const *a = (float const *)CPU_BUFS[in_buf_ids[0]].data;
+    float const *b = (float const *)CPU_BUFS[in_buf_ids[1]].data;
+    float       *o = (float       *)CPU_BUFS[out_buf_id].data;
+    o[0] = cblas_sdot((int)n0, a, 1, b, 1);
+  } else {
+    double const *a = (double const *)CPU_BUFS[in_buf_ids[0]].data;
+    double const *b = (double const *)CPU_BUFS[in_buf_ids[1]].data;
+    double       *o = (double       *)CPU_BUFS[out_buf_id].data;
+    o[0] = cblas_ddot((int)n0, a, 1, b, 1);
+  }
   return 1;
 }
 
@@ -95,8 +115,8 @@ static int blas_try_dot(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ke->n_inputs != 2) return 0;
   if (ke->n_ops    != 2) return 0;
-  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32) return 0;
-  if (ke->program[0].dtype != DT_FP32 || ke->program[1].dtype != DT_FP32) return 0;
+  u32 dt;
+  if (!blas_uniform_float(ke, &dt)) return 0;
   if (!blas_op_is_mul_of(&ke->program[0], 0, 1)) return 0;
   if (!blas_op_is_reduce_sum(&ke->program[1], 0)) return 0;
   if (BLAS_REDUCE_INNER(ke->program[1].arg) != 1) return 0;
@@ -105,30 +125,33 @@ static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (nOut == 0 || nMul == 0 || nMul % nOut != 0) return 0;
   u32 M = nOut;
   u32 K = nMul / nOut;
-  // Identify which input is W (contig M*K) and which is x (broadcast
-  // EXPAND of K elements).  Use the underlying TenDesc.view.shape
-  // to disambiguate -- W has shape {M, K} and is contiguous; x has
-  // shape {1, K} or {K} with one of the strides being 0 in the
-  // expanded view.
-  // Identify W (M*K floats) vs x (K floats) via the underlying CpuBuf
-  // size.  view.numel reflects the EXPANDED shape (M*K for both inputs
-  // when x came in as an EXPAND-broadcast); the actual contig buffer
-  // behind x has K floats and nbytes = 4*K.
+  // Identify W (M*K elements) vs x (K elements) by underlying CpuBuf
+  // size.  view.numel reflects the EXPANDED shape (M*K for both
+  // inputs when x came in as an EXPAND-broadcast); the actual contig
+  // buffer behind x has K elements.
+  u32 elem_bytes = (dt == DT_FP32) ? sizeof(float) : sizeof(double);
   u32 widx = 0xFFFFFFFFu, xidx = 0xFFFFFFFFu;
   for (u32 i = 0; i < 2; i++) {
     u32 buf_id = in_buf_ids[i];
     if (buf_id == 0) return 0;
-    u32 buf_floats = (u32)(CPU_BUFS[buf_id].nbytes / sizeof(float));
-    if (buf_floats == M * K)       widx = i;
-    else if (buf_floats == K)      xidx = i;
+    u32 buf_elems = (u32)(CPU_BUFS[buf_id].nbytes / elem_bytes);
+    if (buf_elems == M * K)       widx = i;
+    else if (buf_elems == K)      xidx = i;
   }
   if (widx == 0xFFFFFFFFu || xidx == 0xFFFFFFFFu) return 0;
-  float const *W = (float const *)CPU_BUFS[in_buf_ids[widx]].data;
-  float const *x = (float const *)CPU_BUFS[in_buf_ids[xidx]].data;
-  float       *o = (float       *)CPU_BUFS[out_buf_id].data;
-  // CblasRowMajor: W is M-by-K stored row-major (lda = K); op = NoTrans.
-  cblas_sgemv(CblasRowMajor, CblasNoTrans, (int)M, (int)K,
-              1.0f, W, (int)K, x, 1, 0.0f, o, 1);
+  if (dt == DT_FP32) {
+    float const *W = (float const *)CPU_BUFS[in_buf_ids[widx]].data;
+    float const *x = (float const *)CPU_BUFS[in_buf_ids[xidx]].data;
+    float       *o = (float       *)CPU_BUFS[out_buf_id].data;
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, (int)M, (int)K,
+                1.0f, W, (int)K, x, 1, 0.0f, o, 1);
+  } else {
+    double const *W = (double const *)CPU_BUFS[in_buf_ids[widx]].data;
+    double const *x = (double const *)CPU_BUFS[in_buf_ids[xidx]].data;
+    double       *o = (double       *)CPU_BUFS[out_buf_id].data;
+    cblas_dgemv(CblasRowMajor, CblasNoTrans, (int)M, (int)K,
+                1.0, W, (int)K, x, 1, 0.0, o, 1);
+  }
   return 1;
 }
 
@@ -146,8 +169,8 @@ static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ke->n_inputs != 2) return 0;
   if (ke->n_ops    != 2) return 0;
-  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32) return 0;
-  if (ke->program[0].dtype != DT_FP32 || ke->program[1].dtype != DT_FP32) return 0;
+  u32 dt;
+  if (!blas_uniform_float(ke, &dt)) return 0;
   if (!blas_op_is_mul_of(&ke->program[0], 0, 1)) return 0;
   if (!blas_op_is_reduce_sum(&ke->program[1], 0)) return 0;
   u32 inner = BLAS_REDUCE_INNER(ke->program[1].arg);
@@ -160,26 +183,34 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (nOut % N != 0) return 0;
   u32 M = nOut / N;
   if (M == 0 || K == 0) return 0;
-  // Identify A (M*K floats) vs B (K*N floats) by underlying CpuBuf
+  // Identify A (M*K elements) vs B (K*N elements) by underlying CpuBuf
   // size.  view.numel reflects the EXPANDED shape (M*K*N for both
   // inputs); the contig buffers behind A and B have M*K and K*N
-  // floats respectively.
+  // elements respectively.
+  u32 elem_bytes = (dt == DT_FP32) ? sizeof(float) : sizeof(double);
   u32 b0 = in_buf_ids[0], b1 = in_buf_ids[1];
   if (b0 == 0 || b1 == 0) return 0;
-  u32 f0 = (u32)(CPU_BUFS[b0].nbytes / sizeof(float));
-  u32 f1 = (u32)(CPU_BUFS[b1].nbytes / sizeof(float));
+  u32 e0 = (u32)(CPU_BUFS[b0].nbytes / elem_bytes);
+  u32 e1 = (u32)(CPU_BUFS[b1].nbytes / elem_bytes);
   u32 aidx, bidx;
-  if      (f0 == M * K && f1 == K * N) { aidx = 0; bidx = 1; }
-  else if (f1 == M * K && f0 == K * N) { aidx = 1; bidx = 0; }
+  if      (e0 == M * K && e1 == K * N) { aidx = 0; bidx = 1; }
+  else if (e1 == M * K && e0 == K * N) { aidx = 1; bidx = 0; }
   else return 0;
-  float const *A = (float const *)CPU_BUFS[in_buf_ids[aidx]].data;
-  float const *B = (float const *)CPU_BUFS[in_buf_ids[bidx]].data;
-  float       *C = (float       *)CPU_BUFS[out_buf_id].data;
-  // CblasRowMajor: A is M-by-K row-major (lda = K), B is K-by-N
-  // row-major (ldb = N), C is M-by-N row-major (ldc = N).  No transpose.
-  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-              (int)M, (int)N, (int)K,
-              1.0f, A, (int)K, B, (int)N, 0.0f, C, (int)N);
+  if (dt == DT_FP32) {
+    float const *A = (float const *)CPU_BUFS[in_buf_ids[aidx]].data;
+    float const *B = (float const *)CPU_BUFS[in_buf_ids[bidx]].data;
+    float       *C = (float       *)CPU_BUFS[out_buf_id].data;
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                (int)M, (int)N, (int)K,
+                1.0f, A, (int)K, B, (int)N, 0.0f, C, (int)N);
+  } else {
+    double const *A = (double const *)CPU_BUFS[in_buf_ids[aidx]].data;
+    double const *B = (double const *)CPU_BUFS[in_buf_ids[bidx]].data;
+    double       *C = (double       *)CPU_BUFS[out_buf_id].data;
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                (int)M, (int)N, (int)K,
+                1.0, A, (int)K, B, (int)N, 0.0, C, (int)N);
+  }
   return 1;
 }
 
