@@ -685,7 +685,22 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                  && reduce_in_numel == onum) {
         idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
                                os->ndim, in_off);
+      } else if (in_numel == onum) {
+        // Flat-buffer alias / RESHAPE: same total elements as output
+        // but with a lower- (or higher-) rank view.  Walk the output
+        // in canonical row-major order; the corresponding input
+        // position is the flat index, so loop_strides over LOOP
+        // ranges gives the correct address.  Assumes the input view
+        // is contiguous from offset (standard after RESHAPE).
+        idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
+                               os->ndim, in_off);
       } else {
+        if (getenv("THVM_RANGEIFY_BAIL")) {
+          fprintf(stderr, "  post-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red_numel=%u reduce_size=%u reduce_in_numel=%u has_reduce=%d\n",
+                  i, in_numel, onum, v->shape.ndim, os->ndim,
+                  in_ndim, has_reduce ? red->numel : 0,
+                  has_reduce ? reduce_size : 0, reduce_in_numel, has_reduce);
+        }
         RBAIL_MID("post-INDEX no branch matched");
       }
       if (idx == 0) RBAIL_MID("post-INDEX emit failed");
