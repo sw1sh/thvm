@@ -335,12 +335,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   int      has_reduce  = (reduce_pos >= 0);
   u32      reduce_kind = 0;
   u32      reduce_size = 0;
+  u32      reduce_inner = 0;
   KProgOp *red         = NULL;
   if (has_reduce) {
     red                = &ke->program[reduce_pos];
     reduce_kind        =  (red->arg >> 24) & 0xFFu;
-    u32 reduce_inner   =   red->arg        & 0x00FFFFFFu;
-    if (reduce_inner != 1) return 0;          // inner != 1 NIY
+    reduce_inner       =   red->arg        & 0x00FFFFFFu;
+    if (reduce_inner != 1) RBAIL_PRE("reduce inner > 1 NIY");
     if (red->n_src    != 1) return 0;
     u32 src_numel;
     if (KSRC_IS_INPUT(red->src[0])) {
@@ -534,20 +535,56 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_strides[1] = {(u32)v->strides[0]};
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
       } else if (in_numel == reduce_in_numel && in_numel != red->numel) {
+        // Partial reduce.  Input rank = output rank + 1; the reduce
+        // axis sits at position `reduce_axis` inferred from
+        // `reduce_inner`:
+        //   inner = product(input.dims[reduce_axis + 1 ..])
+        // so walking from the back of the input shape, the smallest
+        // suffix product matching inner identifies the position.
+        // For inner == 1 the reduce axis is trailing (Phase C-1
+        // case); for inner > 1 it sits in the middle (Conv2D-
+        // backward over batch, etc.).
         if (v->shape.ndim != in_ndim) { rangeify_free(ke); return 0; }
+        // Find the largest k in [0, in_ndim) with
+        //   product(dims[k+1 .. in_ndim-1]) == reduce_inner.
+        // For inner=1 -> k = in_ndim - 1 (trailing axis); for inner
+        // = dims[last] -> k = in_ndim - 2; etc.  Walk k from
+        // in_ndim-1 downward, comparing the running suffix product
+        // BEFORE multiplying dims[k] in.
+        u32 reduce_axis = (u32)-1;
+        {
+          u32 partial = 1;     // = product(dims[in_ndim ..]) = 1
+          for (i32 k = (i32)in_ndim - 1; k >= 0; k--) {
+            if (partial == reduce_inner) { reduce_axis = (u32)k; break; }
+            partial *= v->shape.dims[k];
+          }
+        }
+        if (reduce_axis >= in_ndim) { rangeify_free(ke); return 0; }
+        // Build r_ids in INPUT-axis order: input axis -> range id.
+        // input axes [0..reduce_axis-1] come from output axes
+        // [0..reduce_axis-1]; input axis reduce_axis is the REDUCE
+        // range; input axes [reduce_axis+1..] come from output axes
+        // [reduce_axis..].
+        u32 r_ids    [MAX_DIM + 1]; u32 r_strides[MAX_DIM + 1];
         for (u32 d = 0; d < in_ndim; d++) {
-          u32 expected_dim = (d < os->ndim) ? os->dims[d] : reduce_size;
+          if (d < reduce_axis) {
+            r_ids[d] = loop_ranges[d];
+          } else if (d == reduce_axis) {
+            r_ids[d] = reduce_range;
+          } else {
+            // d > reduce_axis: maps to output axis d-1.
+            r_ids[d] = loop_ranges[d - 1];
+          }
+          // Sanity: dim mismatch with non-broadcast stride bails.
+          u32 expected_dim;
+          if (d < reduce_axis)       expected_dim = os->dims[d];
+          else if (d == reduce_axis) expected_dim = reduce_size;
+          else                       expected_dim = os->dims[d - 1];
           if (v->shape.dims[d] != expected_dim && v->strides[d] != 0) {
             rangeify_free(ke); return 0;
           }
-        }
-        u32 r_ids    [MAX_DIM + 1]; u32 r_strides[MAX_DIM + 1];
-        for (u32 d = 0; d < os->ndim; d++) {
-          r_ids[d]     = loop_ranges[d];
           r_strides[d] = (u32)v->strides[d];
         }
-        r_ids    [os->ndim] = reduce_range;
-        r_strides[os->ndim] = (u32)v->strides[os->ndim];
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
       } else {
         idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
