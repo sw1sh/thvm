@@ -331,18 +331,6 @@ $sharedNATypes = {
     "Integer64", "UnsignedInteger64"
 };
 
-sharedDTypeOf["Real32"]            := "f32"
-sharedDTypeOf["Real64"]            := "f64"
-sharedDTypeOf["Integer8"]          := "i8"
-sharedDTypeOf["UnsignedInteger8"]  := "u8"
-sharedDTypeOf["Integer16"]         := "i16"
-sharedDTypeOf["UnsignedInteger16"] := "u16"
-sharedDTypeOf["Integer32"]         := "i32"
-sharedDTypeOf["UnsignedInteger32"] := "u32"
-sharedDTypeOf["Integer64"]         := "i64"
-sharedDTypeOf["UnsignedInteger64"] := "u64"
-sharedDTypeOf[_]                   := Missing["UnsupportedNAType"]
-
 asSharableNA[na_NumericArray] /; MemberQ[$sharedNATypes, NumericArrayType[na]] := na
 asSharableNA[na_NumericArray]           := NumericArray[Normal[na], "Real32"]
 
