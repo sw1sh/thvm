@@ -566,6 +566,11 @@ typedef enum {
   // by BITCAST(narrow-FP -> int) so the original bit pattern survives
   // to the STORE.  src[0] = INDEX, dtype = source dtype (informational).
   S_LOAD_RAW,
+  // Per-axis index reversal (UOP_FLIP).  src[0] = body, src[1..ndim] =
+  // LOOP ranges to potentially flip; extra holds a u8 bitmask -- bit d
+  // set means flip axis d (replace iter with extent-1-iter for the
+  // body eval, restore after).
+  S_FLIP,
   S__COUNT
 } ScalarOp;
 

@@ -298,7 +298,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
       case UOP_EXPAND: case UOP_RESHAPE: case UOP_LOAD:
       case UOP_CAST:  case UOP_BITCAST:
-      case UOP_SHRINK: case UOP_PAD:
+      case UOP_SHRINK: case UOP_PAD: case UOP_FLIP:
         break;
       case UOP_REDUCE:
         if (reduce_pos != -1) RBAIL_PRE("> 1 reduce");
@@ -782,6 +782,25 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       for (u32 d = 0; d < ndim; d++) src_arr[1 + d] = loop_ranges[d];
       prog_value[i] = rangeify_emit(ke, sop, p->dtype, (u8)(1 + ndim),
                                     src_arr, extra);
+      continue;
+    }
+    if (p->opcode == UOP_FLIP) {
+      // Per-axis index reversal.  The bitmask of axes to flip lives
+      // in p->arg (set by materialize from heap[loc+1]).  We pass the
+      // mask through extra; S_FLIP at dispatch reverses range_iter[d]
+      // for each set bit before evaluating the body.
+      u32 raw = p->src[0];
+      u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
+                                   : prog_value[KSRC_INDEX(raw)];
+      if (v == 0) { rangeify_free(ke); return 0; }
+      u32 ndim = p->out_ndim ? p->out_ndim : os->ndim;
+      // Cap at 8 axes -- bitmask is u8, and SCALAR_MAX_SRC = MAX_DIM+1.
+      if (ndim > 8 || ndim > os->ndim) { rangeify_free(ke); return 0; }
+      u64 axes_mask = (u64)(p->arg & 0xFFu);
+      u32 src_arr[SCALAR_MAX_SRC] = {v};
+      for (u32 d = 0; d < ndim; d++) src_arr[1 + d] = loop_ranges[d];
+      prog_value[i] = rangeify_emit(ke, S_FLIP, p->dtype, (u8)(1 + ndim),
+                                    src_arr, axes_mask);
       continue;
     }
     if (p->opcode == UOP_REDUCE) {

@@ -632,6 +632,31 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       }
       return v;
     }
+    case S_FLIP: {
+      // Per-axis index reversal.  For each LOOP range src[1+d] with
+      // bit d set in extra, replace iter with (extent-1-iter) before
+      // evaluating the body, restore after.  No bounds check needed
+      // (extent is the LOOP range's own extent, so the reversed iter
+      // always stays in-range).
+      u32 nrng = (u32)u->src_count - 1;
+      u32 saved[SCALAR_MAX_SRC];
+      u32 mask = (u32)(u->extra & 0xFFu);
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        saved[d] = c->range_iter[rng_id];
+        if (mask & (1u << d)) {
+          ScalarUop const *r = &c->ke->scalar_uops[rng_id];
+          u32 extent = (u32)(r->extra & 0xFFFFFFFFu);
+          c->range_iter[rng_id] = extent - 1u - saved[d];
+        }
+      }
+      u64 v = eval_scalar(c, u->src[0]);
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        c->range_iter[rng_id] = saved[d];
+      }
+      return v;
+    }
     case S_CAST: {
       // Value-preserving cross-dtype cast.  The source op carries
       // its own dtype; we decode the bits as that type, convert to
