@@ -39,6 +39,9 @@ TRealToFP8E5M2::usage = "TRealToFP8E5M2[reals] packs a list of Reals into a Nume
 TFP8E4M3ToReal::usage = "TFP8E4M3ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e4m3 bytes into a Real list.";
 TFP8E5M2ToReal::usage = "TFP8E5M2ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e5m2 bytes into a Real list.";
 
+TUOpCast::usage    = "TUOpCast[src, dtype] returns a UOP node that value-preservingly casts `src` to the named dtype.  Backward gradient (under TGrad) is a CAST back to src.dtype, matching tinygrad's Ops.CAST rule.";
+TUOpBitcast::usage = "TUOpBitcast[src, dtype] returns a UOP node that bit-level reinterprets `src` as the named dtype.  Source and destination must share itemsize.  Backward gradient is zero (BITCAST has no value-preserving gradient).";
+
 (* Forward-decl: these are defined in NN.wl (loads alphabetically
    after Tensor.wl).  Without this, the UpValues below resolve to
    phantoms in `THVMLink`Private`* with no DownValue. *)
@@ -145,6 +148,9 @@ TUOpConst[value_, dtype_String : "f32"] := (
     ensureInit[];
     TTerm[$uopConstFn[dtypeCode[dtype], N[value]]]
 )
+
+TUOpCast[src_, dtype_String]    := (ensureInit[]; TTerm[$uopCastFn   [ttermRaw[src], dtypeCode[dtype]]])
+TUOpBitcast[src_, dtype_String] := (ensureInit[]; TTerm[$uopBitcastFn[ttermRaw[src], dtypeCode[dtype]]])
 
 TUOpAdd[a_, b_]   := (ensureInit[]; TTerm[$uopBinaryFn[$UopAdd,   ttermRaw[a], ttermRaw[b]]])
 TUOpMul[a_, b_]   := (ensureInit[]; TTerm[$uopBinaryFn[$UopMul,   ttermRaw[a], ttermRaw[b]]])

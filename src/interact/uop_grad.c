@@ -701,6 +701,22 @@ static Term interact_grad_dispatch(Term grad_term) {
       return grad_bwd_for_child(src, gy);
     }
 
+    case UOP_CAST: {
+      // d/dx cast(x, dt) = cast(gy, x.dtype) -- value-preserving so
+      // the chain rule passes the cotangent back through the source
+      // dtype.  Mirrors tinygrad/gradient.py:17.
+      Term src = heap_read(y_loc);
+      u32 src_dtype = DT_F32;
+      term_dtype_in(src, 0, &src_dtype);
+      Term gy_in = uop_cast(gy, src_dtype);
+      return grad_bwd_for_child(src, gy_in);
+    }
+    case UOP_BITCAST:
+      // BITCAST has no value-preserving gradient (the bit
+      // reinterpretation isn't differentiable).  Return zero per
+      // tinygrad/gradient.py:42.
+      return grad_zero_at(y);
+
     case UOP_CONST:
     case UOP_LOAD:
     case UOP_ASSIGN:

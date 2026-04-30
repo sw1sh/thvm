@@ -16,6 +16,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
     case UOP_REDUCE:  case UOP_LOAD:
+    case UOP_CAST:    case UOP_BITCAST:
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_ASSIGN:
@@ -162,7 +163,8 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
     }
     return 0;
   }
-  if (uop_is_unary_elementwise(op) || op == UOP_LOAD || op == UOP_FLIP) {
+  if (uop_is_unary_elementwise(op) || op == UOP_LOAD || op == UOP_FLIP
+      || op == UOP_CAST || op == UOP_BITCAST) {
     return term_shape_in(heap_read(loc), 0, out);
   }
   if (uop_is_binary_elementwise(op)) {
@@ -247,6 +249,11 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       // The CONST cell carries [NUM(bits)]; the dtype is the NUM's ext.
       Term num = heap_read(loc);
       if (term_tag(num) == TAG_NUM) { *out = term_ext(num); return 1; }
+    }
+    if (op == UOP_CAST || op == UOP_BITCAST) {
+      // dtype lives in the second heap cell as NUM(dst_dtype).
+      Term num = heap_read(loc + 1);
+      if (term_tag(num) == TAG_NUM) { *out = (u32)term_val(num); return 1; }
     }
     // Elementwise + reduce + movement ops inherit dtype from src[0]
     // (and binary ops require both srcs share a dtype -- the strict

@@ -116,7 +116,7 @@ TSoftmax[x_TTerm] := With[{e = Exp[x], shape = tUopShape[x]},
 (* CrossEntropy probabilities form: target is a probability
    distribution (typically one-hot), pred is the model's predicted
    distribution.  Loss = -sum_i target_i * log(pred_i). *)
-TCrossEntropyLoss[pred_TTerm, target_TTerm] := -Total[target * Log[pred]]
+TCrossEntropyLoss[pred_TTerm, target_TTerm] := - Total[target * Log[pred]]
 
 (* TConv2D[input, weights, bias] -- stride-1, no-padding 2-D
    convolution, lowered into a chain of kh*kw partial sums:
@@ -210,7 +210,7 @@ TConv2DIm2Col[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
         ],
         {ki, 0, kh - 1}, {kj, 0, kw - 1}
     ];
-    summed    = Fold[Plus, First[patches], Rest[patches]];
+    summed    = Total[patches];
     xCol      = TUOpReshape[summed,  {cIn * kSpat, hOut * wOut}];
     wFlat     = TUOpReshape[weights, {cOut, cIn * kSpat}];
     outFlat   = TMatMul[wFlat, xCol];
@@ -228,7 +228,9 @@ TGlorot[shape_List, dtype_String : "f32"] := With[{
 },
     TTensorCreate[
         RandomVariate[NormalDistribution[0., Sqrt[2.0 / fanIn]], shape],
-        dtype]]
+        dtype
+    ]
+]
 
 TZeros[shape_List, dtype_String : "f32"] :=
     TTensorCreate[ConstantArray[0., shape], dtype]

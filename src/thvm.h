@@ -284,7 +284,15 @@ int             dtype_is_packed   (u32 dt);
 // (slot 23 was UOP_CTR_AT -- removed; CTR destructuring now goes
 // through APP-MAT-CTR per HVM4 idiom, no dedicated projection opcode
 // needed.  See TGradMany in wl/THVMLink/Kernel/Tensor.wl.)
-#define UOP_COUNT       23
+#define UOP_CAST        23   // heap = [src, NUM(dst_dtype)].
+                             //   Value-preserving cast (sint/uint/float).
+                             //   tinygrad's Ops.CAST -- backward rule:
+                             //   gy.cast(src.dtype).
+#define UOP_BITCAST     24   // heap = [src, NUM(dst_dtype)].
+                             //   Bit-level reinterpret; src and dst must
+                             //   share itemsize.  tinygrad's Ops.BITCAST
+                             //   -- backward returns CONST(0).
+#define UOP_COUNT       25
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -971,6 +979,8 @@ fn Term uop_expand (Term src, u32 ndim, const u32 *dims);
 fn Term uop_pad    (Term src, u32 ndim, const u32 *begin_end);   // begin_end[2*ndim]
 fn Term uop_shrink (Term src, u32 ndim, const u32 *begin_end);
 fn Term uop_flip   (Term src, u32 axes_bitmask);
+fn Term uop_cast   (Term src, u32 dst_dtype);                    // value-preserving cast
+fn Term uop_bitcast(Term src, u32 dst_dtype);                    // same-itemsize reinterpret
 
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is

@@ -151,6 +151,8 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "backend/cpu/op/pad.c"
 #include "backend/cpu/op/shrink.c"
 #include "backend/cpu/op/permute.c"
+#include "backend/cpu/op/cast.c"
+#include "backend/cpu/op/bitcast.c"
 // codegen/ is backend-agnostic.  axis.c + apply_opt.c land first
 // so renderer + cg passes see the KernelAxes scheduling structure.
 // so they can call cg_profile_record / cg_now_us / cg_kernel_flops
@@ -207,6 +209,8 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "uop/grad.c"
 #include "uop/leaf_tids.c"
 #include "uop/load.c"
+#include "uop/cast.c"
+#include "uop/bitcast.c"
 
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.

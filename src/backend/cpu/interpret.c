@@ -135,6 +135,8 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       case UOP_PAD:   cpu_op_pad   (dst, srcs, src_numels, p, n_elem); break;
       case UOP_SHRINK:cpu_op_shrink(dst, srcs, src_numels, p, n_elem); break;
       case UOP_PERMUTE: cpu_op_permute(dst, srcs, src_numels, p, n_elem); break;
+      case UOP_CAST:    cpu_op_cast   (dst, srcs, src_numels, p, n_elem); break;
+      case UOP_BITCAST: cpu_op_bitcast(dst, srcs, src_numels, p, n_elem); break;
       default:
         rc = -1;
         goto cleanup;

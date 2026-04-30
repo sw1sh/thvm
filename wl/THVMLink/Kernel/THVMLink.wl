@@ -86,7 +86,8 @@ $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =
   $UopRecip::usage      = $UopExp2::usage = $UopLog2::usage =
   $UopSqrt::usage       = $UopCmplt::usage = $UopReduce::usage =
   $UopGrad::usage       = $UopCmpeq::usage =
-  $UopLoad::usage       =
+  $UopLoad::usage       = $UopAssign::usage =
+  $UopCast::usage       = $UopBitcast::usage =
     "UOp opcode id; mirrors UOP_* in src/thvm.h.";
 
 $ReduceSum::usage = $ReduceMax::usage =
@@ -233,6 +234,7 @@ $UopRecip = 12;       $UopExp2 = 13;   $UopLog2 = 14;
 $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
 $UopGrad = 18;        $UopFwd = 19;     $UopCmpeq = 20;
 $UopLoad = 21;        $UopAssign = 22;
+$UopCast = 23;        $UopBitcast = 24;
 (* UOP_GRAD / UOP_FWD form a dup-like grad combinator -- both share
    a heap cell holding [y].  UOP_GRAD = backward projection (chain
    rule); UOP_FWD = forward projection (passthrough). *)
@@ -245,7 +247,8 @@ $uopNames = <|
     12 -> "RECIP",       13 -> "EXP2",   14 -> "LOG2",
     15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE",
     18 -> "GRAD",        19 -> "FWD",   20 -> "CMPEQ",
-    21 -> "LOAD",        22 -> "ASSIGN"
+    21 -> "LOAD",        22 -> "ASSIGN",
+    23 -> "CAST",        24 -> "BITCAST"
 |>;
 
 (* Reduce-kind constants *)
@@ -329,6 +332,8 @@ $fp8UnpackFn  := $fp8UnpackFn  = load["thvm_wl_fp8_unpack",  {{"NumericArray", "
 (* uop graph *)
 $uopConstFn    := $uopConstFn    = load["thvm_wl_uop_const",    {Integer, Real},                     Integer];
 $uopUnaryFn    := $uopUnaryFn    = load["thvm_wl_uop_unary",    {Integer, Integer},                  Integer];
+$uopCastFn     := $uopCastFn     = load["thvm_wl_uop_cast",     {Integer, Integer},                  Integer];
+$uopBitcastFn  := $uopBitcastFn  = load["thvm_wl_uop_bitcast",  {Integer, Integer},                  Integer];
 $uopBinaryFn   := $uopBinaryFn   = load["thvm_wl_uop_binary",   {Integer, Integer, Integer},         Integer];
 $uopReduceFn   := $uopReduceFn   = load["thvm_wl_uop_reduce",   {Integer, Integer, Integer},         Integer];
 $uopReshapeFn  := $uopReshapeFn  = load["thvm_wl_uop_reshape",  {Integer, {Integer, 1}},             Integer];

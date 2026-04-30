@@ -745,6 +745,26 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     return ke->n_ops - 1;
   }
 
+  if (op == UOP_CAST || op == UOP_BITCAST) {
+    u32 src_idx = visit(heap_read(loc), ke, root_loc);
+    if (src_idx == VISIT_BAIL) return VISIT_BAIL;
+    Term num = heap_read(loc + 1);
+    if (term_tag(num) != TAG_NUM) return VISIT_BAIL;
+    u32 dst_dtype = (u32)term_val(num);
+    kernel_program_reserve(ke, ke->n_ops + 1);
+    KProgOp *p = &ke->program[ke->n_ops++];
+    memset(p, 0, sizeof(*p));
+    p->opcode = (u8)op;
+    p->dtype  = dst_dtype;
+    // arg carries the source dtype so the kernel can route through
+    // to_fp32_lane / from_fp32_lane (see backend/cpu/op/cast.c).
+    p->arg    = src_dtype(ke, src_idx);
+    p->numel  = src_numel(ke, src_idx);
+    p->n_src  = 1;
+    p->src[0] = src_idx;
+    return ke->n_ops - 1;
+  }
+
   if (uop_is_binary_elementwise(op)) {
     u32 li = visit(heap_read(loc + 0), ke, root_loc);
     if (li == VISIT_BAIL) return VISIT_BAIL;

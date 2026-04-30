@@ -866,6 +866,26 @@ EXTERN_C DLLEXPORT int thvm_wl_fp16_pack(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+EXTERN_C DLLEXPORT int thvm_wl_uop_cast(WolframLibraryData libData, mint argc,
+                                         MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term src        = (Term)MArgument_getInteger(args[0]);
+  mint dst_dtype  = MArgument_getInteger(args[1]);
+  Term r = uop_cast(src, (u32)dst_dtype);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_bitcast(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term src        = (Term)MArgument_getInteger(args[0]);
+  mint dst_dtype  = MArgument_getInteger(args[1]);
+  Term r = uop_bitcast(src, (u32)dst_dtype);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_uop_unary(WolframLibraryData libData, mint argc,
                                          MArgument *args, MArgument res) {
   (void)libData; (void)argc;
