@@ -118,6 +118,40 @@ investigation:
    the outer loop completes near-instantly because the callback
    doesn't force a fresh realize).
 
+3. **TGrad on `Conv2D + ReLU + MaxPool2d` returns a wrong-
+   shaped gradient.**  Surfaced while bisecting the LeNet 1e37
+   gradient values that earlier looked like a numerical issue
+   but are actually downstream of a shape mismatch.
+
+   Minimal repro:
+   ```
+   x = TTensorCreate @ NumericArray[RandomReal[{-1, 1}, {1, 8, 8}], "Real32"];
+   w = TTensorCreate @ NumericArray[RandomReal[{-1, 1}, {2, 1, 3, 3}], "Real32"];
+   b = TZeros[{2}];
+   h = TMaxPool2d[TReLU[TConv2D[x, w, b]], 2];
+   y = TUOpReduce[TUOpReduce[TUOpReduce[h, 0, "SUM"], 0, "SUM"], 0, "SUM"];
+   g = TRealize @ TGrad[y, w];
+   TTensorShape[g]   (* expected {2, 1, 3, 3}; actual {2, 6, 6} *)
+   ```
+
+   - `TGrad[y, w]` for `Conv2D` alone:           shape `{2, 1, 3, 3}` ✓
+   - `TGrad[y, w]` for `Conv2D + ReLU`:          shape `{2, 1, 3, 3}` ✓
+   - `TGrad[y, w]` for `Conv2D + MaxPool2d`:     shape `{2, 1, 3, 3}` ✓
+   - `TGrad[y, w]` for `Conv2D + ReLU + Pool`:   shape `{2, 6, 6}` ✗
+
+   The wrong shape is the conv OUTPUT shape (post-activation,
+   pre-pool), not the conv WEIGHT shape.  The chain rule walks
+   pool->ReLU correctly back to the conv output level but then
+   emits a tensor at conv-output rank instead of inverting the
+   convolution to weight rank.  Bug is in how the chain rule
+   composes `TConv2D`'s lowering (kh*kw partials of
+   SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM, then
+   Fold[Plus]) with the EXPAND/REDUCE_SUM adjoints emitted by
+   the pool gradient.  Fix needed BEFORE LeNet train can be
+   verified end-to-end -- the 1e37/Inf gradients we saw are
+   wrong-shaped buffers being read as the weight gradient and
+   accumulating garbage.
+
 Both are out of Phase 16's scope.  Per-grad memo is the next
 milestone -- it unblocks the LeNet/Adam bench AND likely
 collapses the kernel-count regression in `fusion-count` and
