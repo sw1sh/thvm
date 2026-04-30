@@ -416,6 +416,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   //     per-element).
   u8 input_used_pre [KERNEL_INIT_INPUT * 4] = {0};
   u8 input_used_post[KERNEL_INIT_INPUT * 4] = {0};
+  // input_via_padshrink[i]: this input is consumed (transitively or
+  // directly) by a UOP_PAD or UOP_SHRINK.  Such ops wrap the load with
+  // an iter-shift + bounds gate, so the load's INDEX is computed at the
+  // *input's* shape -- a size mismatch vs. the output is intentional
+  // and must NOT trigger the standard pre-/post-INDEX size-mismatch
+  // bail.
+  u8 input_via_padshrink[KERNEL_INIT_INPUT * 4] = {0};
   if (ke->n_inputs > sizeof(input_used_pre) / sizeof(input_used_pre[0])) {
     return 0;
   }
@@ -434,6 +441,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     }
   } else {
     for (u32 i = 0; i < ke->n_inputs; i++) input_used_post[i] = 1;
+  }
+  for (u32 j = 0; j < ke->n_ops; j++) {
+    KProgOp *p = &ke->program[j];
+    if (p->opcode != UOP_PAD && p->opcode != UOP_SHRINK) continue;
+    if (p->n_src < 1) continue;
+    u32 raw = p->src[0];
+    if (KSRC_IS_INPUT(raw)) input_via_padshrink[KSRC_INDEX(raw)] = 1;
   }
   // Inputs: same numel as output (Phase B), or REDUCE-input size, or
   // numel-1 scalar broadcast.
@@ -596,9 +610,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // directly, mirroring the post-scope branch.  Inputs that are
         // broadcast (stride==0) or transposed need view-aware strides
         // -- the canonical loop_strides would silently mis-address.
+        // PAD/SHRINK consumers do their own iter shift + bounds gate,
+        // so a size mismatch on those inputs is intentional.
         u32 strides_u32[MAX_DIM];
         for (u32 d = 0; d < os->ndim; d++) {
-          if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0) {
+          if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0
+              && !input_via_padshrink[i]) {
             rangeify_free(ke); return 0;
           }
           strides_u32[d] = (u32)v->strides[d];
@@ -632,7 +649,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       } else if (v->shape.ndim == os->ndim) {
         u32 strides_u32[MAX_DIM];
         for (u32 d = 0; d < os->ndim; d++) {
-          if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0) {
+          if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0
+              && !input_via_padshrink[i]) {
             rangeify_free(ke); return 0;
           }
           strides_u32[d] = (u32)v->strides[d];
