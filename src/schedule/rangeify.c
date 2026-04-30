@@ -342,7 +342,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     red                = &ke->program[reduce_pos];
     reduce_kind        =  (red->arg >> 24) & 0xFFu;
     reduce_inner       =   red->arg        & 0x00FFFFFFu;
-    if (reduce_inner != 1) RBAIL_PRE("reduce inner > 1 NIY");
+    // inner>1 enabled (F-? -- view-aware pre-INDEX absorbed
+    // broadcast strides; reduce_axis-search picks the right axis).
     if (red->n_src    != 1) return 0;
     u32 src_numel;
     if (KSRC_IS_INPUT(red->src[0])) {
@@ -535,7 +536,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {(u32)v->strides[0]};
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
-      } else if (in_numel == reduce_in_numel && in_numel != red->numel) {
+      } else if (in_numel == reduce_in_numel
+                 && v->shape.ndim == in_ndim) {
+        // Partial reduce: input has rank in_ndim (= os->ndim + 1).
+        // Includes the trivial reduce_size==1 case where the
+        // reduce axis is size 1 -- still need view-aware INDEX
+        // because the input view may be broadcast (stride==0
+        // axes from chain-rule grad expansion).
         // Partial reduce.  Input rank = output rank + 1; the reduce
         // axis sits at position `reduce_axis` inferred from
         // `reduce_inner`:
@@ -587,6 +594,20 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           r_strides[d] = (u32)v->strides[d];
         }
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
+      } else if (v->shape.ndim == os->ndim) {
+        // Same rank as output (Phase F-fix): walk the View's strides
+        // directly, mirroring the post-scope branch.  Inputs that are
+        // broadcast (stride==0) or transposed need view-aware strides
+        // -- the canonical loop_strides would silently mis-address.
+        u32 strides_u32[MAX_DIM];
+        for (u32 d = 0; d < os->ndim; d++) {
+          if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0) {
+            rangeify_free(ke); return 0;
+          }
+          strides_u32[d] = (u32)v->strides[d];
+        }
+        idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
+                               os->ndim, in_off);
       } else {
         idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
                                os->ndim, in_off);
