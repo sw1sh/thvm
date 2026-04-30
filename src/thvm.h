@@ -548,6 +548,18 @@ typedef enum {
   // dtype interpretation flows through u->dtype, so it does NOT
   // need a separate opcode.)
   S_CAST,
+  // SHRINK / PAD index transforms.  src[0] = body to evaluate
+  // under shifted ranges.  src[1..ndim] = the ranges to shift.
+  // S_SHRINK: extra packs per-axis begin offsets (u16 each, up
+  //           to 3 axes).  Body sees range_iter[d] += begin[d];
+  //           dispatcher save/restores around the body eval.
+  // S_PAD:   like S_SHRINK but the body is gated -- the output
+  //           is the source value at (iter - begin) IFF the
+  //           shifted iter is in [0, src_dim); otherwise 0.
+  //           extra packs (begin u8, src_dim u8) per axis (up to
+  //           4 axes).
+  S_SHRINK,
+  S_PAD,
   S__COUNT
 } ScalarOp;
 

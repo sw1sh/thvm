@@ -103,6 +103,8 @@ fn const char *scalar_op_name(u8 op) {
     case S_REDUCE_SUM:     return "S_REDUCE_SUM";
     case S_REDUCE_MAX:     return "S_REDUCE_MAX";
     case S_CAST:           return "S_CAST";
+    case S_SHRINK:         return "S_SHRINK";
+    case S_PAD:            return "S_PAD";
     default:               return "S_?";
   }
 }
@@ -294,6 +296,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
       case UOP_EXPAND: case UOP_RESHAPE: case UOP_LOAD:
       case UOP_CAST:  case UOP_BITCAST:
+      case UOP_SHRINK: case UOP_PAD:
         break;
       case UOP_REDUCE:
         if (reduce_pos != -1) RBAIL_PRE("> 1 reduce");
@@ -620,6 +623,52 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                                    : prog_value[KSRC_INDEX(raw)];
       if (v == 0) { rangeify_free(ke); return 0; }
       prog_value[i] = rangeify_emit_unary(ke, S_CAST, p->dtype, v);
+      continue;
+    }
+    if (p->opcode == UOP_SHRINK || p->opcode == UOP_PAD) {
+      // Per-axis index transform.  S_SHRINK shifts each LOOP range
+      // iter by `begin[d]` before evaluating the body; S_PAD shifts
+      // and gates against the source dim (returns 0 outside the
+      // valid range, matching cpu_op_pad).  Both encode begin per
+      // axis in extra (u16 / packed).  Phase F-3 caps at 3 axes
+      // (matches the per-INDEX axis cap; chain for higher rank).
+      u32 raw = p->src[0];
+      u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
+                                   : prog_value[KSRC_INDEX(raw)];
+      if (v == 0) { rangeify_free(ke); return 0; }
+      u32 ndim = p->out_ndim;
+      if (ndim == 0) ndim = os->ndim;
+      if (ndim > 3 || ndim > os->ndim) { rangeify_free(ke); return 0; }
+      // Pack offsets.  S_SHRINK uses u16 per axis (matches
+      // pad_widths' begin field).  S_PAD packs (begin u8, src_dim
+      // u8) per axis -- src_dim from p->src0_dims is what the
+      // dispatcher needs for the bounds check.
+      u8  sop;
+      u64 extra = 0;
+      if (p->opcode == UOP_SHRINK) {
+        sop = S_SHRINK;
+        for (u32 d = 0; d < ndim; d++) {
+          u32 begin = p->pad_widths[2 * d];
+          if (begin > 0xFFFFu) { rangeify_free(ke); return 0; }
+          extra |= ((u64)begin & 0xFFFFu) << (16 * d);
+        }
+      } else {
+        sop = S_PAD;
+        // Pack (begin u8, src_dim u8).  Caps both at 255; bail if
+        // exceeded.
+        for (u32 d = 0; d < ndim; d++) {
+          u32 begin   = p->pad_widths[2 * d];
+          u32 src_dim = p->src0_dims [d];
+          if (begin > 0xFFu || src_dim > 0xFFu) { rangeify_free(ke); return 0; }
+          extra |= ((u64)begin   & 0xFFu) << (16 * d);
+          extra |= ((u64)src_dim & 0xFFu) << (16 * d + 8);
+        }
+      }
+      // src[0] = body, src[1..ndim] = LOOP ranges (the ones to shift).
+      u32 src_arr[SCALAR_MAX_SRC] = {v};
+      for (u32 d = 0; d < ndim; d++) src_arr[1 + d] = loop_ranges[d];
+      prog_value[i] = rangeify_emit(ke, sop, p->dtype, (u8)(1 + ndim),
+                                    src_arr, extra);
       continue;
     }
     if (p->opcode == UOP_REDUCE) {

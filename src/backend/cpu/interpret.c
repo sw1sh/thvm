@@ -485,6 +485,53 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
     }
     case S_CMPLT:  DISPATCH_CMP(BINOP_LT);
     case S_CMPEQ:  DISPATCH_CMP(BINOP_EQ);
+    case S_SHRINK: {
+      // Shift each LOOP range iter by per-axis begin, evaluate the
+      // body, restore.  Up to 3 axes via the u16-packed extra.
+      u32 nrng = (u32)u->src_count - 1;
+      u32 saved[SCALAR_MAX_SRC];
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        u32 begin  = (u32)((u->extra >> (16 * d)) & 0xFFFFu);
+        saved[d] = c->range_iter[rng_id];
+        c->range_iter[rng_id] = saved[d] + begin;
+      }
+      u64 v = eval_scalar(c, u->src[0]);
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        c->range_iter[rng_id] = saved[d];
+      }
+      return v;
+    }
+    case S_PAD: {
+      // Per-axis shifted read with bounds check.  Output is 0
+      // (typed zero) when the shifted iter is outside [0, src_dim);
+      // otherwise it's the source value at the shifted iter.
+      u32 nrng = (u32)u->src_count - 1;
+      u32 saved[SCALAR_MAX_SRC];
+      int in_bounds = 1;
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id  = u->src[1 + d];
+        u32 packed  = (u32)((u->extra >> (16 * d)) & 0xFFFFu);
+        u32 begin   = packed & 0xFFu;
+        u32 src_dim = (packed >> 8) & 0xFFu;
+        u32 iter    = c->range_iter[rng_id];
+        // Shift: source coord = iter - begin.  In-bounds iff
+        // [0, src_dim).  begin is positive in our encoding so the
+        // shift is `iter < begin || iter >= begin + src_dim`.
+        if (iter < begin || iter >= begin + src_dim) {
+          in_bounds = 0;
+        }
+        saved[d] = iter;
+        c->range_iter[rng_id] = iter - begin;
+      }
+      u64 v = in_bounds ? eval_scalar(c, u->src[0]) : 0ULL;
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        c->range_iter[rng_id] = saved[d];
+      }
+      return v;
+    }
     case S_CAST: {
       // Value-preserving cross-dtype cast.  The source op carries
       // its own dtype; we decode the bits as that type, convert to
