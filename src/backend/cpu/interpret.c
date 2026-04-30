@@ -265,6 +265,20 @@ static u64 eval_index(ScalarCtx *c, ScalarUop const *u) {
 // ALU stay f32-only for the FP family except fp64.
 
 static u64 scalar_load_typed(const void *p, u32 off, u32 dtype) {
+  // Packed nibbles (int4/uint4): 2 elements per byte.  Element i
+  // lives at byte i/2; low nibble = even index, high nibble = odd.
+  // INT4 sign-extends; UINT4 zero-extends.  Result widens to a
+  // u64 that the integer ALU dispatch reads as i32/u32.
+  if (dtype == DT_INT4 || dtype == DT_UINT4) {
+    const u8 *base = (const u8 *)p;
+    u8 byte = base[off >> 1];
+    u8 nib  = (off & 1) ? (byte >> 4) : (byte & 0x0Fu);
+    if (dtype == DT_INT4 && (nib & 0x08u)) {
+      // Sign-extend bit 3 to all higher bits (i32 / i64 register).
+      return (u64)(i64)(i32)(int8_t)((i8)(nib | 0xF0u));
+    }
+    return (u64)nib;
+  }
   u32 esz = dtype_itemsize(dtype);
   const u8 *base = (const u8 *)p + (size_t)off * esz;
   // Narrow-FP dtypes need value conversion, not raw memcpy.
@@ -285,6 +299,17 @@ static u64 scalar_load_typed(const void *p, u32 off, u32 dtype) {
 }
 
 static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
+  // Packed nibbles: read-modify-write the byte holding this nibble.
+  // Note: NOT thread-safe across nibbles in the same byte; the
+  // cpu_dispatch_scalar outer loop is single-threaded today.
+  if (dtype == DT_INT4 || dtype == DT_UINT4) {
+    u8 *base = (u8 *)p;
+    u8 *bp   = &base[off >> 1];
+    u8 nib   = (u8)(bits & 0x0Fu);
+    if (off & 1) *bp = (u8)((*bp & 0x0Fu) | (nib << 4));
+    else         *bp = (u8)((*bp & 0xF0u) | nib);
+    return;
+  }
   u32 esz = dtype_itemsize(dtype);
   u8 *base = (u8 *)p + (size_t)off * esz;
   if (dtype == DT_FP16 || dtype == DT_BF16
@@ -343,6 +368,8 @@ static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
     case DT_INT64:  { DECODE2(i64, a, b); ENCODE(i64, (i64)op_macro(a, b)); } \
     case DT_UINT64: { DECODE2(u64, a, b); ENCODE(u64, (u64)op_macro(a, b)); } \
     case DT_BOOL:   { DECODE2(u8 , a, b); ENCODE(u8 , (u8 )op_macro(a, b)); } \
+    case DT_INT4:   { DECODE2(i32, a, b); ENCODE(i32, I4_SEXT(op_macro(a, b))); } \
+    case DT_UINT4:  { DECODE2(u32, a, b); ENCODE(u32, U4_ZEXT(op_macro(a, b))); } \
     default: return 0;                                                         \
   }
 
@@ -367,6 +394,8 @@ static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
     case DT_INT64:  { DECODE2(i64, a, b); ENCODE(i64, (i64)(op_macro(a, b) ? 1 : 0)); } \
     case DT_UINT64: { DECODE2(u64, a, b); ENCODE(u64, (u64)(op_macro(a, b) ? 1 : 0)); } \
     case DT_BOOL:   { DECODE2(u8 , a, b); ENCODE(u8 , (u8 )((op_macro((a)&1, (b)&1)) ? 1 : 0)); } \
+    case DT_INT4:   { DECODE2(i32, a, b); ENCODE(i32, (i32)(op_macro(a, b) ? 1 : 0)); } \
+    case DT_UINT4:  { DECODE2(u32, a, b); ENCODE(u32, (u32)(op_macro(a, b) ? 1 : 0)); } \
     default: return 0;                                                         \
   }
 
@@ -398,6 +427,8 @@ static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
     case DT_INT64:  { DECODE1(i64, a); ENCODE(i64, -a); }                     \
     case DT_UINT64: { DECODE1(u64, a); ENCODE(u64, 0u - a); }                 \
     case DT_BOOL:   { DECODE1(u8 , a); ENCODE(u8 , (u8 )((~a) & 1)); }        \
+    case DT_INT4:   { DECODE1(i32, a); ENCODE(i32, I4_SEXT(-a)); }            \
+    case DT_UINT4:  { DECODE1(u32, a); ENCODE(u32, U4_ZEXT(-(i32)a)); }       \
     default: return 0;                                                         \
   }
 
@@ -406,6 +437,15 @@ static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
 #define BINOP_LT(a, b)      ((a) <  (b))
 #define BINOP_EQ(a, b)      ((a) == (b))
 #define BINOP_LT_FLIP(a, b) ((a) >  (b))   // used by REDUCE_MAX inner loop
+
+// Packed-nibble register canonicalization.  The "register form" of an
+// int4 value is its sign-extended i32 bit pattern; uint4 is its
+// zero-extended u32.  scalar_load_typed produces this form and
+// scalar_store_typed masks back to a nibble at STORE.  Every producer
+// of an int4 register value (ALU, NEG, CAST encode) must sign-extend
+// so chained CASTs / ALUs see the right scalar.
+#define I4_SEXT(x) (((i32)(x) << 28) >> 28)
+#define U4_ZEXT(x) ((u32)(x) & 0x0Fu)
 
 static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
   if (op_id == 0) return 0;
@@ -437,10 +477,11 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
         }
         case DT_INT8:  case DT_INT16:
         case DT_INT32: case DT_INT64:
+        case DT_INT4:
           // Sign-extend the low 32 bits.
           return (u64)(i64)(i32)bits;
         case DT_UINT8: case DT_UINT16: case DT_UINT32:
-        case DT_UINT64: case DT_BOOL:
+        case DT_UINT64: case DT_BOOL: case DT_UINT4:
           return (u64)bits;
         default: return (u64)bits;
       }
@@ -492,6 +533,11 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
         case DT_INT64:  REDUCE_BODY(i64, INT64_MIN,  0,   BINOP_LT_FLIP);
         case DT_UINT64: REDUCE_BODY(u64, 0,          0,   BINOP_LT_FLIP);
         case DT_BOOL:   REDUCE_BODY(u8 , 0,          0,   BINOP_LT_FLIP);
+        // int4/uint4 use a wider accumulator (no overflow risk for
+        // realistic reduce sizes); store-time mask preserves nibble
+        // semantics.
+        case DT_INT4:   REDUCE_BODY(i32, -8,         0,   BINOP_LT_FLIP);
+        case DT_UINT4:  REDUCE_BODY(u32, 0,          0,   BINOP_LT_FLIP);
         default:
           c->range_iter[rng_id] = saved;
           return 0;
@@ -602,6 +648,10 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
         case DT_INT16:  { CAST_DECODE(i16, x); v = (f64)x; break; }
         case DT_INT32:  { CAST_DECODE(i32, x); v = (f64)x; break; }
         case DT_INT64:  { CAST_DECODE(i64, x); v = (f64)x; break; }
+        // int4/uint4 already widened by scalar_load_typed; reg
+        // holds i32/u32 bits (sign- or zero-extended).
+        case DT_INT4:   { CAST_DECODE(i32, x); v = (f64)x; break; }
+        case DT_UINT4:  { CAST_DECODE(u32, x); v = (f64)x; break; }
         default: return 0;
       }
 #undef CAST_DECODE
@@ -622,6 +672,11 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
         case DT_INT16:  ENCODE(i16, (i16)v);
         case DT_INT32:  ENCODE(i32, (i32)v);
         case DT_INT64:  ENCODE(i64, (i64)v);
+        // Sign-/zero-extend to register form so chained CASTs and
+        // ALU consumers see the correct scalar.  STORE masks back to
+        // a nibble at the buffer boundary.
+        case DT_INT4:   ENCODE(i32, I4_SEXT((i32)v));
+        case DT_UINT4:  ENCODE(u32, U4_ZEXT((u32)v));
         default: return 0;
       }
     }

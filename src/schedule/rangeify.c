@@ -262,15 +262,16 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   if (ke == NULL || ke->n_ops == 0) return 0;
   // f32 only -- the scalar interpreter's bit-cast path would silently
   // misinterpret other dtypes.
-  // Supported dtypes: bool / int{8..64} / fp32 / fp64 / narrow FPs
-  // (fp16/bf16/fp8e4m3/fp8e5m2 -- run through f32 ALU internally).
-  // Packed nibbles (int4/uint4) still bail; they need bit-level
-  // INDEX addressing.
+  // Supported dtypes: bool / int{4,8..64} / fp32 / fp64 / narrow
+  // FPs (fp16/bf16/fp8e4m3/fp8e5m2 widen to f32 internally) /
+  // packed nibbles (int4/uint4 -- per-element load/store via
+  // scalar_{load,store}_typed bit-shifts; ALU runs as i32/u32).
 #define RANGEIFY_SUPPORTED_DTYPE(dt)                                          \
   ((dt) == DT_BOOL    || (dt) == DT_INT8   || (dt) == DT_UINT8             \
    || (dt) == DT_INT16  || (dt) == DT_UINT16                                  \
    || (dt) == DT_INT32  || (dt) == DT_UINT32                                  \
    || (dt) == DT_INT64  || (dt) == DT_UINT64                                  \
+   || (dt) == DT_INT4   || (dt) == DT_UINT4                                   \
    || (dt) == DT_FP32   || (dt) == DT_FP64                                    \
    || (dt) == DT_FP16   || (dt) == DT_BF16                                    \
    || (dt) == DT_FP8E4M3 || (dt) == DT_FP8E5M2)
