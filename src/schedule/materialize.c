@@ -10,7 +10,7 @@
 //      which makes the boundary's emit bail and thvm_materialize
 //      fall back to returning the input unchanged.
 
-#define BOUNDARY_ORDER_CAP 1024
+#define BOUNDARY_ORDER_CAP 16384
 static u64  BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_TID  [BOUNDARY_ORDER_CAP];   // emitted output TenDesc id
 static Term BOUNDARY_TERM [BOUNDARY_ORDER_CAP];   // emitted UOP_KERNEL term
@@ -21,7 +21,7 @@ static u32  BOUNDARY_ORDER_LEN = 0;
 // visited UOP child, called from every emit_kernel_for_boundary's
 // visit() recursion -- the dominant cost above n~12 in the bound-w
 // SGD pattern (O(N^3) materialize).
-#define BOUNDARY_HASH_CAP   (1u << 13)        // 8K slots, BOUNDARY_ORDER_CAP = 1024
+#define BOUNDARY_HASH_CAP   (1u << 16)        // 64K slots, BOUNDARY_ORDER_CAP = 16384
 #define BOUNDARY_HASH_EMPTY 0xFFFFFFFFu
 static u32 BOUNDARY_HASH[BOUNDARY_HASH_CAP];
 

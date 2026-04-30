@@ -766,7 +766,7 @@ fn Term term_resolve(Term t);
 // realize_classify walks the UOp DAG rooted at `root` and marks
 // kernel boundaries (root + multi-consumer + REDUCE) in REALIZE_INFO.
 // materialize.c reads the table directly to topo-sort and emit.
-#define REALIZE_INFO_CAP 4096
+#define REALIZE_INFO_CAP 16384
 typedef struct {
   u64 loc;
   u32 consumer_count;

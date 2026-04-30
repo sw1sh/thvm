@@ -31,7 +31,7 @@ u32     REALIZE_INFO_LEN = 0;
 // which made realize_classify O(N^2) for the N UOPs in a recursive
 // training-loop graph and the dominant cost of long bound-w realizes.
 // Cap is the next power of two >= REALIZE_INFO_CAP for cheap masking.
-#define REALIZE_INFO_HASH_CAP (1u << 14)   // 16K slots, REALIZE_INFO_CAP = 8K
+#define REALIZE_INFO_HASH_CAP (1u << 16)   // 64K slots, REALIZE_INFO_CAP = 16K
 #define REALIZE_INFO_HASH_EMPTY 0xFFFFFFFFu
 static u32 REALIZE_INFO_HASH[REALIZE_INFO_HASH_CAP];
 
