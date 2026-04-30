@@ -935,33 +935,39 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // recursive lambda loops where each iter emits a structurally
   // identical step kernel; correctness is unchanged because
   // input_tids[] / output_tid stay per-kernel.
+  // Phase 16: kernel-program-cache slot owns the shared `KernelAxes`
+  // so every kid with the same KProgOp[] sees the same opts.  Apply
+  // once -> propagates to all sharing kids.  For kernels that don't
+  // make it into the cache (n_ops == 0 OR cache full), fall back to
+  // KernelEntry._local_axes.
+  KpCacheSlot *slot = NULL;
   if (ke->n_ops > 0) {
-    u32 cached_n = 0;
-    KProgOp *cached = kernel_program_cache_lookup(ke->program, ke->n_ops, &cached_n);
-    if (cached != NULL) {
+    slot = kernel_program_cache_lookup_slot(ke->program, ke->n_ops);
+    if (slot != NULL) {
       free(ke->program);
-      ke->program        = cached;
-      ke->n_ops          = cached_n;
-      ke->ops_cap        = cached_n;
+      ke->program        = slot->program;
+      ke->n_ops          = slot->n_ops;
+      ke->ops_cap        = slot->n_ops;
       ke->program_shared = 1;
     } else {
-      KProgOp *interned = kernel_program_cache_insert(ke->program, ke->n_ops);
-      if (interned != NULL) {
+      slot = kernel_program_cache_insert_slot(ke->program, ke->n_ops);
+      if (slot != NULL) {
         free(ke->program);
-        ke->program        = interned;
+        ke->program        = slot->program;
         ke->ops_cap        = ke->n_ops;
         ke->program_shared = 1;
       }
-      // (cache full -- silently keep the kernel-owned copy)
+      // (cache full -- silently keep the kernel-owned copy; axes
+      //  fall back to _local_axes below)
     }
   }
+  ke->axes = (slot != NULL) ? &slot->axes : &ke->_local_axes;
 
   // Default-init the axis-typed scheduling plan now that the program
-  // and output_shape are finalized.  Per-kid (NOT per-program-cache)
-  // because two kernels sharing a program may end up with different
-  // applied opts at runtime.  Today's default = all-LOOP + trailing
-  // REDUCE matches the existing flat emit; cg_emit_variants and
-  // axes_apply_opt are what introduce divergence.
+  // and output_shape are finalized.  Idempotent: a cached slot whose
+  // axes were already populated by an earlier kid sharing this
+  // program is a no-op, so opts already applied to the program shape
+  // survive across new kid emissions.
   axes_default_for(ke);
 
   u64 kloc = heap_alloc(2);

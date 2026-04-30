@@ -52,13 +52,15 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
   // identical KProgOp[] but different opts get distinct .dylibs.
   // axis_types[] / full_shape[] are derived from applied_opts +
   // output_shape so applied_opts alone is sufficient.
-  KernelAxes const *ax = &ke->axes;
-  h ^= (u64)ax->n_applied; h *= 0x100000001b3ULL;
-  for (u32 i = 0; i < ax->n_applied; i++) {
-    KOpt o = ax->applied_opts[i];
-    h ^= (u64)o.op;   h *= 0x100000001b3ULL;
-    h ^= (u64)o.axis; h *= 0x100000001b3ULL;
-    h ^= (u64)o.arg;  h *= 0x100000001b3ULL;
+  if (ke->axes != NULL) {
+    KernelAxes const *ax = ke->axes;
+    h ^= (u64)ax->n_applied; h *= 0x100000001b3ULL;
+    for (u32 i = 0; i < ax->n_applied; i++) {
+      KOpt o = ax->applied_opts[i];
+      h ^= (u64)o.op;   h *= 0x100000001b3ULL;
+      h ^= (u64)o.axis; h *= 0x100000001b3ULL;
+      h ^= (u64)o.arg;  h *= 0x100000001b3ULL;
+    }
   }
   return h | (1ULL << 63);
 }

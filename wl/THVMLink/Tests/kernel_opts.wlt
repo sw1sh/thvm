@@ -200,6 +200,29 @@ VerificationTest[
     TestID -> "kernel-opts/tkernelopts-makeboxes-renders-summary"
 ]
 
+(* === per-program-shape sharing: opt on kid_1 visible on kid_2
+       when both kids share the same KProgOp[] via the cache.  This
+       is what makes the proposer + auto-bench (next pass) actually
+       reach training-loop kernels rather than just one-off kids. *)
+
+VerificationTest[
+    TInit[];
+    xT = TTensorCreate @ N @ Range[12];
+    (* Two structurally-identical reduces -> two kids sharing one
+       cached KProgOp[]. *)
+    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    kid1 = TKernelCount[] - 1;
+    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    kid2 = TKernelCount[] - 1;
+    (* Apply opt to kid1; must show up on kid2's TKernelOpts because
+       both kids point at the same KpCacheSlot.axes. *)
+    TKernelApplyOpt[kid1, TOpt["UNROLL", 1, 4]];
+    {kid1 =!= kid2,
+     First[TKernelOpts[kid2]]["Applied"]},
+    {True, {TOpt["UNROLL", 1, 4]}},
+    TestID -> "kernel-opts/per-program-shape-sharing"
+]
+
 (* === applied_opts log: chronological list of TOpt actions === *)
 
 VerificationTest[

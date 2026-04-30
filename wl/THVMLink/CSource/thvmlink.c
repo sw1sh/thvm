@@ -965,7 +965,14 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
     MArgument_setMTensor(res, empty);
     return LIBRARY_NO_ERROR;
   }
-  KernelAxes const *ax = &KERNELS[kid].axes;
+  KernelAxes const *ax = KERNELS[kid].axes;
+  if (ax == NULL) {
+    mint dims[1] = {0};
+    MTensor empty;
+    libData->MTensor_new(MType_Integer, 1, dims, &empty);
+    MArgument_setMTensor(res, empty);
+    return LIBRARY_NO_ERROR;
+  }
   mint total = (mint)(2 + 2 * ax->n_axes + 3 * ax->n_applied);
   mint dims[1] = {total};
   MTensor out;
@@ -1002,8 +1009,12 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
     MArgument_setInteger(res, 0);
     return LIBRARY_NO_ERROR;
   }
+  if (KERNELS[kid].axes == NULL) {
+    MArgument_setInteger(res, 0);
+    return LIBRARY_NO_ERROR;
+  }
   KOpt opt = { (u8)op, (u8)axis, arg };
-  int ok = axes_apply_opt(&KERNELS[kid].axes, opt);
+  int ok = axes_apply_opt(KERNELS[kid].axes, opt);
   MArgument_setInteger(res, (mint)ok);
   return LIBRARY_NO_ERROR;
 }

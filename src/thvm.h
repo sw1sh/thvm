@@ -449,12 +449,19 @@ typedef struct KernelEntry {
                                    // is no longer needed.
   void     *compiled;              // backend-specific; NULL for interpreter
 
-  // Axis-typed scheduling plan.  Defaulted at materialize-time
-  // (axes_default_for) to all-LOOP + trailing REDUCE for reduce
-  // kernels; mutated by axes_apply_opt when the user / proposer
-  // applies a TOpt.  cg_emit_variants consumes this to emit
-  // structured iteration nests instead of one flat for-loop.
-  KernelAxes axes;
+  // Axis-typed scheduling plan.  Phase 16 per-program-shape
+  // sharing: `axes` is a POINTER, normally aimed at the
+  // KernelAxes embedded in this kernel's kernel_program_cache
+  // slot so every kid with the same KProgOp[] sees the same opts.
+  // Apply once -> propagates to all sharing kids; the C-side
+  // proposer can attach opts to a program shape and every future
+  // training-loop iter inherits them automatically.
+  //
+  // `_local_axes` is the fallback storage for kernels that didn't
+  // make it into the cache (n_ops == 0 or cache full); `axes`
+  // points at it in that case.
+  KernelAxes  *axes;
+  KernelAxes   _local_axes;
 } KernelEntry;
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
@@ -1653,6 +1660,15 @@ fn KProgOp *kernel_program_cache_lookup(KProgOp const *prog, u32 n_ops,
                                         u32 *out_n_ops);
 fn KProgOp *kernel_program_cache_insert(KProgOp const *prog, u32 n_ops);
 fn u32      kernel_program_cache_size(void);
+
+// Slot-bearing variants used by Phase 16 per-program-shape opt
+// sharing: materialize parks `&slot->axes` into KernelEntry.axes
+// so every kid emitted with the same KProgOp[] reads/writes the
+// same KernelAxes.  Apply once -> propagates to all sharing kids;
+// the C-side proposer attaches opts to a program shape, not a kid.
+typedef struct KpCacheSlot KpCacheSlot;
+fn KpCacheSlot *kernel_program_cache_lookup_slot(KProgOp const *prog, u32 n_ops);
+fn KpCacheSlot *kernel_program_cache_insert_slot(KProgOp const *prog, u32 n_ops);
 
 // Lambda-bound-variable shape annotation table.  Populated by
 // `TLamShape[shape, body]` at the WL surface so a TVAR(lam_loc)

@@ -11,9 +11,12 @@
 // variant emitter is under construction.
 
 fn void axes_default_for(KernelEntry *ke) {
-  if (ke->axes.n_axes != 0) return;     // already configured
+  // Idempotent: if `ke->axes` already has a non-zero n_axes, another
+  // kid sharing this kernel_program_cache slot already populated it
+  // (Phase 16 per-program-shape sharing) -- nothing to do.
+  if (ke->axes == NULL || ke->axes->n_axes != 0) return;
 
-  KernelAxes *ax = &ke->axes;
+  KernelAxes *ax = ke->axes;
   u32 nd = ke->output_shape.ndim;
   if (nd > MAX_AXES - 1) nd = MAX_AXES - 1;
 

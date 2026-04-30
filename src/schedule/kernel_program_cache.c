@@ -22,11 +22,19 @@
 
 #define KP_CACHE_CAP (1u << 14)            // 16K slots
 
-typedef struct {
-  u64       key;            // FNV-1a hash; 0 = empty slot
-  KProgOp  *program;        // cache-owned, freed on reset
-  u32       n_ops;
-} KpCacheSlot;
+struct KpCacheSlot {
+  u64        key;            // FNV-1a hash; 0 = empty slot
+  KProgOp   *program;        // cache-owned, freed on reset
+  u32        n_ops;
+  KernelAxes axes;           // shared scheduling plan: every kid that
+                             // hits this slot points at &axes through
+                             // KernelEntry.axes (Phase 16: per-
+                             // program-shape opt sharing).  Mutated
+                             // by axes_apply_opt; read by cg_emit and
+                             // cpu_jit_hash so the same opt automatically
+                             // applies to every kernel with this
+                             // program shape.
+};
 
 static KpCacheSlot KP_CACHE[KP_CACHE_CAP];
 
@@ -81,6 +89,57 @@ fn KProgOp *kernel_program_cache_lookup(KProgOp const *prog,
         kp_program_equal(prog, n_ops, s->program, s->n_ops)) {
       *out_n_ops = s->n_ops;
       return s->program;
+    }
+  }
+  return NULL;
+}
+
+// Slot-bearing variant: returns the cache slot whose program equals
+// `prog`, NULL on miss.  Used when the caller needs not just the
+// interned program pointer but also the shared `axes` so kids
+// sharing this program inherit any opts already applied (and any
+// future opts apply to all of them).  Phase 16 per-program-shape
+// opt sharing.
+fn KpCacheSlot *kernel_program_cache_lookup_slot(KProgOp const *prog,
+                                                  u32 n_ops) {
+  if (n_ops == 0) return NULL;
+  u64 key = kp_program_hash(prog, n_ops);
+  u32 mask = KP_CACHE_CAP - 1;
+  u32 h = (u32)(key ^ (key >> 32));
+  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+  for (u32 probe = 0; probe < KP_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & mask;
+    KpCacheSlot *s = &KP_CACHE[i];
+    if (s->key == 0) return NULL;
+    if (s->key == key &&
+        kp_program_equal(prog, n_ops, s->program, s->n_ops)) {
+      return s;
+    }
+  }
+  return NULL;
+}
+
+// Slot-bearing insert: same as kernel_program_cache_insert but
+// returns the slot pointer (so caller can grab &slot->axes).
+fn KpCacheSlot *kernel_program_cache_insert_slot(KProgOp const *prog, u32 n_ops) {
+  if (n_ops == 0) return NULL;
+  u64 key = kp_program_hash(prog, n_ops);
+  u32 mask = KP_CACHE_CAP - 1;
+  u32 h = (u32)(key ^ (key >> 32));
+  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+  for (u32 probe = 0; probe < KP_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & mask;
+    KpCacheSlot *s = &KP_CACHE[i];
+    if (s->key == 0) {
+      KProgOp *owned = (KProgOp *)malloc((size_t)n_ops * sizeof(KProgOp));
+      memcpy(owned, prog, (size_t)n_ops * sizeof(KProgOp));
+      s->key     = key;
+      s->program = owned;
+      s->n_ops   = n_ops;
+      memset(&s->axes, 0, sizeof(KernelAxes));    // axes default-init
+                                                  // happens at materialize-
+                                                  // time via axes_default_for.
+      return s;
     }
   }
   return NULL;

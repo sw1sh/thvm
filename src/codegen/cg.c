@@ -188,9 +188,11 @@ fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
     // divide axis_size (axes_apply_opt already validated this) but
     // we re-check defensively.
     u32 unroll_factor = 1;
-    for (u32 i = 0; i < ke->axes.n_applied; i++) {
-      KOpt o = ke->axes.applied_opts[i];
-      if (o.op == KOP_UNROLL && axis_size % o.arg == 0) unroll_factor = o.arg;
+    if (ke->axes != NULL) {
+      for (u32 i = 0; i < ke->axes->n_applied; i++) {
+        KOpt o = ke->axes->applied_opts[i];
+        if (o.op == KOP_UNROLL && axis_size % o.arg == 0) unroll_factor = o.arg;
+      }
     }
     r->loop_open_reduce(&b, kind, inner, axis_size, unroll_factor);
   } else {
