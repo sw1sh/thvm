@@ -748,5 +748,40 @@ fn Term interact_grad(Term grad_term) {
   }
   Term r = interact_grad_dispatch(grad_term);
   if (pushed) GRAD_TARGET_TOP--;
+
+  // Shape-pad to target.shape only at the OUTERMOST grad fire
+  // (pushed && GRAD_TARGET_TOP == 0 after the pop above).  Inner
+  // recursive sub-grads return per-leaf cotangent expressions
+  // whose shape is the leaf's, not the user's target shape; we
+  // only need padding on the user-visible result.  Without this
+  // gate every recursive grad cell wraps, multiplying ADD-of-
+  // EXPAND(0) kernels across the chain rule.
+  if (target != 0 && pushed && GRAD_TARGET_TOP == 0) {
+    Term tr = term_resolve(target);
+    if (term_tag(tr) == TAG_TEN) {
+      Shape tshape, rshape;
+      // Pad ONLY on a confirmed mismatch: both shape inferences
+      // succeed AND ndim/dims differ.  When shape inference fails on
+      // the result (common for compound UOP graphs), we assume the
+      // chain rule produced something at target.shape by construction
+      // -- adding the EXPAND(0)+ADD wrap unconditionally would
+      // introduce an extra kernel per outermost grad fire (visible
+      // in fusion-count and bound-w training-loop tests).
+      if (term_shape_in(tr, 0, &tshape) && tshape.ndim > 0
+          && term_shape_in(r,  0, &rshape) && rshape.ndim > 0) {
+        u8 mismatch = (rshape.ndim != tshape.ndim);
+        if (!mismatch) {
+          for (u32 i = 0; i < tshape.ndim; i++) {
+            if (rshape.dims[i] != tshape.dims[i]) { mismatch = 1; break; }
+          }
+        }
+        if (mismatch) {
+          Term zero    = uop_const(DT_F32, 0);
+          Term zero_lf = uop_expand(zero, tshape.ndim, tshape.dims);
+          r = uop_binary(UOP_ADD, r, zero_lf);
+        }
+      }
+    }
+  }
   return r;
 }

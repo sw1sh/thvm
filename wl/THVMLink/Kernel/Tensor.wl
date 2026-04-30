@@ -42,13 +42,21 @@ TTotalBufBytes[] := (ensureInit[]; $totalBufBytesFn[])
 
 (* === predicates ===
    tensorTermQ[t]: true iff t is a TTerm whose tag makes it a
-   tensor-shaped value (TAG_TEN or TAG_UOP).  Used to guard the
-   numerical UpValues so we never intercept IC combinators
-   (LAM, APP, DUP, ...) -- those still follow the normal IC
-   reduction rules. *)
+   tensor-shaped value (TAG_TEN, TAG_UOP, or TAG_DP0/DP1 with
+   the DUP_GRAD_FLAG bit set on its ext -- a chain-rule
+   projection from TUOpGradWithTarget that fires to a tensor).
+   Used to guard the numerical UpValues so we never intercept IC
+   combinators (LAM, APP, regular DUP, ...) -- those still follow
+   the normal IC reduction rules. *)
 
-tensorTermQ[t_TTerm] := With[{tag = $termTagFn[ttermRaw[t]]},
-    tag === $TagTEN || tag === $TagUOP
+tensorTermQ[t_TTerm] := With[{
+    raw = ttermRaw[t], tag = $termTagFn[ttermRaw[t]]
+},
+    Or[
+        tag === $TagTEN, tag === $TagUOP,
+        And[ Or[tag === $TagDP0, tag === $TagDP1],
+             BitAnd[$termExtFn[raw], $DupGradFlag] =!= 0 ]
+    ]
 ]
 tensorTermQ[_]       := False
 
@@ -232,40 +240,19 @@ TGrad[y_, target_TTerm, gy_TTerm] :=
    compute them ONCE per forward graph instead of once per target.
    uopLeafTids walks the full UOP DAG; for an 8-weight LeNet
    that's the dominant per-step cost (13s -> sub-second). *)
-tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := Module[
-    {targetTid, matchProj, mismatchProj, targetShape, dupNest, zero,
-     targetTag},
-    targetTid    = TTermVal[target];
-    targetTag    = TTermTag[target];
-    targetShape  = TTensorShape[target];
-    If[ targetTag =!= $TagTEN,
-        Return[TUOpGradWithTarget[y, gy, target]]
-    ];
-    matchProj    = {a, b} |-> b;
-    mismatchProj = {a, b} |-> a;
-    dupNest = Fold[
-        {inner, tid} |-> TDup[tid, inner, If[ tid === targetTid, matchProj, mismatchProj]],
-        TUOpGrad[y, gy],
-        leafTids
-    ];
-    (* Broadcast a scalar zero into the result so it always lands at
-       target.shape.  Two cases this fixes:
-         (a) target absent from y (or non-differentiable op like CMPLT)
-             -> chain rule yields scalar CONST(0); ADD broadcasts it
-             across target.shape giving zeros at target.shape.
-         (b) higher-order TGrad where the inner chain rule's matched
-             value reduces to a constant or a sub-shape -> the ADD
-             pads the shape declaration up to target.shape without
-             changing matched values (cpu_op_add with numel==1 src
-             broadcasts cleanly).
-       For the common case where dupNest already lands at
-       target.shape, the EXPAND of a scalar 0 + ADD is value-neutral. *)
-    If[ ListQ[targetShape] && Length[targetShape] > 0,
-        zero = TUOpExpand[TUOpConst[0.0], targetShape];
-        TUOpAdd[dupNest, zero],
-        dupNest
-    ]
-]
+tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := (
+    (* Target-aware chain rule: leaf rule emits gy at matching tids
+       and scalar zero elsewhere -- no SUPs, no DUP-nest projection.
+       Avoids the exponential cell blow-up in deep DAGs (LeNet:
+       10 leafTids x deep forward DAG would require 10 nested
+       DUP-SUP commute fires per leaf and cross-product fires).
+       Shape padding (when chain rule yields a scalar/sub-shape
+       result) lives in C-side interact_grad so the EXPAND+ADD
+       wrap is elided when the result already matches target.shape.
+       leafTids retained in the signature for caller compatibility
+       (TGradMany) but no longer consulted. *)
+    TUOpGradWithTarget[y, gy, target]
+)
 
 (* Multi-target VJP: build n unary TGrads sharing the y subgraph (and
    the gy seed) by heap-loc identity.  materialize's per-realize memo

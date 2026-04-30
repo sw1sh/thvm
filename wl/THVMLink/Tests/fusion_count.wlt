@@ -23,12 +23,15 @@ VerificationTest[
     TestID -> "fusion-count/linear-mse-forward-eq-2"
 ]
 
-(* Linear + MSE forward+backward: full pipeline emits 3 kernels
-   after the degenerate-kernel-skip fix in materialize.c -- the
-   gy=CONST(1.0) seed used to materialize as a 0-op kernel that
-   silently zeroed the gradient signal; that branch is now an
-   alias to the input TenDesc, dropping one kernel from the count.
-   2 forward + 1 backward chain. *)
+(* Linear + MSE forward+backward: full pipeline emits 5 kernels.
+   2 forward (Dot, MSELoss) + 3 backward (target-aware chain rule
+   produces a sub-graph per chain-rule step).  Re-baselined from
+   3 -> 5 in Phase 16's leak fix: the old DUP-nest projection
+   collapsed several backward kernels via SUP/DUP cross-products,
+   but at the cost of exponential cells in deep DAGs (LeNet OOMed).
+   Target-aware leaves emit gy / scalar-zero directly -- bounded
+   cells, slightly more kernels.  TODO: investigate fusing the
+   sub-graph kernels back to 3 via a uop_rewrite pass. *)
 VerificationTest[
     TInit[];
     x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
@@ -37,8 +40,8 @@ VerificationTest[
     before = TKernelCount[];
     TRealize @ TGrad[TMSELoss[TDot[w, x], t], w];
     kernelDelta[before, TKernelCount[]],
-    3,
-    TestID -> "fusion-count/linear-mse-forward-plus-backward-eq-3"
+    5,
+    TestID -> "fusion-count/linear-mse-forward-plus-backward-eq-5"
 ]
 
 (* Softmax forward.  Naive softmax = exp(x) / sum(exp(x)) -- the
