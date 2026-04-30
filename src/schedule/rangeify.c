@@ -41,8 +41,9 @@ fn u32 rangeify_emit(KernelEntry *ke, u8 op, u32 dtype,
     fprintf(stderr, "rangeify_emit: bad op=%u\n", op);
     exit(1);
   }
-  if (src_count > 4) {
-    fprintf(stderr, "rangeify_emit: src_count=%u exceeds max 4\n", src_count);
+  if (src_count > SCALAR_MAX_SRC) {
+    fprintf(stderr, "rangeify_emit: src_count=%u exceeds max %u\n",
+            src_count, SCALAR_MAX_SRC);
     exit(1);
   }
   rangeify_reserve(ke, ke->n_scalar_uops + 1);
@@ -52,7 +53,9 @@ fn u32 rangeify_emit(KernelEntry *ke, u8 op, u32 dtype,
   u->src_count = src_count;
   u->dtype     = dtype;
   u->extra     = extra;
-  for (u8 i = 0; i < 4; i++) u->src[i] = (i < src_count && src != NULL) ? src[i] : 0;
+  for (u8 i = 0; i < SCALAR_MAX_SRC; i++) {
+    u->src[i] = (i < src_count && src != NULL) ? src[i] : 0;
+  }
   return id;
 }
 
@@ -160,9 +163,40 @@ static u32 emit_index_off(KernelEntry *ke, u32 dtype, u32 buf_id,
   return rangeify_emit(ke, S_INDEX, dtype, (u8)(1 + ndim), src, packed);
 }
 
+// Emit an INDEX chain over `ndim` ranges, splitting into S_INDEX
+// nodes of at most 3 ranges each.  Offset is added on the innermost
+// node (the one whose src[0] is the actual buffer); subsequent
+// chained nodes add 0.  All callsites in the lowerer route through
+// here -- direct emit_index / emit_index_off use is reserved for
+// the per-chunk emission inside this function.
+static u32 emit_index_chain(KernelEntry *ke, u32 dtype, u32 buf_id,
+                            u32 const *range_ids, u32 const *strides,
+                            u32 ndim, u32 offset) {
+  if (ndim > MAX_DIM) return 0;
+  if (ndim == 0) {
+    u32 src[1] = {buf_id};
+    u64 packed = pack_index_extra(NULL, 0, offset);
+    if (packed == UINT64_MAX) return 0;
+    return rangeify_emit(ke, S_INDEX, dtype, 1, src, packed);
+  }
+  u32 cur     = buf_id;
+  u32 cur_off = offset;
+  u32 d       = 0;
+  while (d < ndim) {
+    u32 take = ndim - d;
+    if (take > 3) take = 3;
+    cur = emit_index_off(ke, dtype, cur, range_ids + d, strides + d,
+                         take, cur_off);
+    if (cur == 0) return 0;
+    cur_off = 0;       // offset belongs to the innermost node only
+    d      += take;
+  }
+  return cur;
+}
+
 static u32 emit_index(KernelEntry *ke, u32 dtype, u32 buf_id,
                       u32 const *range_ids, u32 const *strides, u32 ndim) {
-  return emit_index_off(ke, dtype, buf_id, range_ids, strides, ndim, 0);
+  return emit_index_chain(ke, dtype, buf_id, range_ids, strides, ndim, 0);
 }
 
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
@@ -272,7 +306,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     }
   }
   Shape const *os = &ke->output_shape;
-  if (os->ndim == 0 || os->ndim > 3) RBAIL_PRE("output ndim out of range");
+  if (os->ndim == 0 || os->ndim > MAX_DIM) RBAIL_PRE("output ndim out of range");
 
   // Detect REDUCE.  When present, the kernel emits a nested loop:
   // outer LOOP ranges over the kernel's output dims (== post-reduce
@@ -400,8 +434,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     reduce_range = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
     // Pre-reduce input shape = output_shape ++ {reduce_size}.
     in_ndim = os->ndim + 1;
-    if (in_ndim > 3) { rangeify_free(ke); return 0; }
-    u32 in_dims[MAX_DIM];
+    if (in_ndim > MAX_DIM) { rangeify_free(ke); return 0; }
+    u32 in_dims[MAX_DIM + 1];
     for (u32 d = 0; d < os->ndim; d++) in_dims[d] = os->dims[d];
     in_dims[os->ndim] = reduce_size;
     row_major_strides(in_dims, in_ndim, in_strides);
@@ -460,12 +494,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                  && in_numel == reduce_size) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
-        idx = emit_index_off(ke, dtype, param, r_ids, r_strides, 1, in_off);
+        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
       } else if (red->numel == 1 && in_numel == reduce_size
                  && v->shape.ndim == 1) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {(u32)v->strides[0]};
-        idx = emit_index_off(ke, dtype, param, r_ids, r_strides, 1, in_off);
+        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
       } else if (in_numel == reduce_in_numel && in_numel != red->numel) {
         if (v->shape.ndim != in_ndim) { rangeify_free(ke); return 0; }
         for (u32 d = 0; d < in_ndim; d++) {
@@ -474,17 +508,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             rangeify_free(ke); return 0;
           }
         }
-        u32 r_ids    [4]; u32 r_strides[4];
+        u32 r_ids    [MAX_DIM + 1]; u32 r_strides[MAX_DIM + 1];
         for (u32 d = 0; d < os->ndim; d++) {
           r_ids[d]     = loop_ranges[d];
           r_strides[d] = (u32)v->strides[d];
         }
         r_ids    [os->ndim] = reduce_range;
         r_strides[os->ndim] = (u32)v->strides[os->ndim];
-        idx = emit_index_off(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
+        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
       } else {
-        idx = emit_index_off(ke, dtype, param, loop_ranges, loop_strides,
-                             os->ndim, in_off);
+        idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
+                               os->ndim, in_off);
       }
       if (idx == 0) { rangeify_free(ke); return 0; }
       input_load_pre[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
@@ -512,12 +546,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           strides_u32[d] = (u32)v->strides[d];
         }
-        idx = emit_index_off(ke, dtype, param, loop_ranges, strides_u32,
-                             os->ndim, in_off);
+        idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
+                               os->ndim, in_off);
       } else if (has_reduce && in_numel == reduce_in_numel
                  && reduce_in_numel == onum) {
-        idx = emit_index_off(ke, dtype, param, loop_ranges, loop_strides,
-                             os->ndim, in_off);
+        idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
+                               os->ndim, in_off);
       } else {
         rangeify_free(ke); return 0;
       }
@@ -604,11 +638,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     }
   }
 
-  // 5. STORE the final value, BUFFERIZE the kernel.
+  // 5. STORE the final value, BUFFERIZE the kernel.  BUFFERIZE
+  // carries every LOOP range (up to MAX_DIM of them) so the
+  // dispatcher can iterate the outer loop nest without chasing
+  // INDEX chains.
   u32 final_v = prog_value[ke->n_ops - 1];
   u32 store   = rangeify_emit_binary(ke, S_STORE, ke->output_dtype,
                                      out_index, final_v);
-  u32 buf_src[4] = {store, 0, 0, 0};
+  u32 buf_src[SCALAR_MAX_SRC] = {store};
   u8  buf_count  = (u8)(1 + os->ndim);
   for (u32 d = 0; d < os->ndim; d++) buf_src[1 + d] = loop_ranges[d];
   rangeify_emit(ke, S_BUFFERIZE, ke->output_dtype, buf_count, buf_src, 0);

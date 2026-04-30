@@ -551,12 +551,17 @@ typedef enum {
 #define S_AXIS_UNROLL  2
 #define S_AXIS_GLOBAL  3
 
+// SCALAR_MAX_SRC = 1 buffer/store + up to MAX_DIM range refs.
+// Sized so a single S_INDEX or S_BUFFERIZE can carry every LOOP/
+// REDUCE range of an arbitrary-rank kernel without chaining.
+#define SCALAR_MAX_SRC (MAX_DIM + 1)
+
 typedef struct {
-  u8  op;          // ScalarOp
-  u8  src_count;   // number of valid src[] entries
-  u32 dtype;       // DT_*
-  u32 src[4];      // indices into the same ScalarUop[]; 0 = unused
-  u64 extra;       // op-specific payload (CONST bits, RANGE extent + type, ...)
+  u8  op;                    // ScalarOp
+  u8  src_count;             // number of valid src[] entries
+  u32 dtype;                 // DT_*
+  u32 src[SCALAR_MAX_SRC];   // indices into the same ScalarUop[]; 0 = unused
+  u64 extra;                 // op-specific payload (CONST bits, RANGE extent + type, ...)
 } ScalarUop;
 
 #define SUOP_INIT_CAP   16

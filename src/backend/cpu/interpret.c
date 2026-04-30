@@ -223,6 +223,10 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id);
 //   bits 16..31 -- stride for src[2]
 //   bits 32..47 -- stride for src[3]
 //   bits 48..63 -- per-INDEX offset (added to address)
+//
+// When src[0] is itself an S_INDEX (the chained-INDEX path used
+// for ndim > 3), recurse to gather the slot + accumulated address
+// from the inner node, then add this node's contributions.
 static u64 eval_index(ScalarCtx *c, ScalarUop const *u) {
   u32 buf_id = u->src[0];
   ScalarUop const *bu = &c->ke->scalar_uops[buf_id];
@@ -234,6 +238,13 @@ static u64 eval_index(ScalarCtx *c, ScalarUop const *u) {
     u32 iter   = c->range_iter[rng_id];
     u32 stride = (u32)((packed >> (16 * d)) & 0xFFFFu);
     addr += iter * stride;
+  }
+  if (bu->op == S_INDEX) {
+    // Chained: inner produces (slot << 32) | partial_addr; add our
+    // contributions and forward.
+    u64 inner = eval_index(c, bu);
+    u32 inner_addr = (u32)(inner & 0xFFFFFFFFu);
+    return (inner & 0xFFFFFFFF00000000ULL) | (u64)(inner_addr + addr);
   }
   if (bu->op == S_DEFINE_OUTPUT) return (u64)addr;
   // Input: stash the slot id in the high half so S_LOAD can find the
@@ -346,9 +357,10 @@ fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // BUFFERIZE.src[0..n) = STORE then 1+n LOOP ranges in axis order.
   ScalarUop *bu = &ke->scalar_uops[buf_id];
   u32 n_loops = (u32)bu->src_count - 1;
-  u32 loop_ids    [4];
-  u32 loop_extents[4];
-  for (u32 d = 0; d < n_loops && d < 4; d++) {
+  if (n_loops > MAX_DIM) return -1;
+  u32 loop_ids    [MAX_DIM];
+  u32 loop_extents[MAX_DIM];
+  for (u32 d = 0; d < n_loops; d++) {
     u32 r = bu->src[1 + d];
     loop_ids    [d] = r;
     loop_extents[d] = (u32)(ke->scalar_uops[r].extra & 0xFFFFFFFFu);
@@ -382,7 +394,7 @@ fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // decode strides.
   u32 onum = ke->output_numel;
   // Precompute the LOOP strides for k -> per-range-iter decoding.
-  u32 loop_strides[4] = {0, 0, 0, 0};
+  u32 loop_strides[MAX_DIM] = {0};
   if (n_loops > 0) {
     loop_strides[n_loops - 1] = 1;
     for (i32 d = (i32)n_loops - 2; d >= 0; d--)
