@@ -168,6 +168,59 @@ TConv2D[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
     summed + biasBcast
 ]
 
+(* TConv2DIm2Col[input, weights, bias] -- im2col + matmul lowering.
+   Same input/weight/bias signature and output shape as TConv2D.
+
+   Builds the im2col matrix `xCol : {cIn*kh*kw, hOut*wOut}` so the
+   convolution becomes one MatMul:
+       out_flat[cOut, p] = sum_q w_flat[cOut, q] * xCol[q, p]
+   where q indexes (cIn, ki, kj) and p indexes (i_out, j_out).
+
+   xCol slots are filled by SHRINK'ing each (ki, kj) spatial patch
+   from the input and PAD'ing the patch into its kh*kw-axis slot of
+   a zero {cIn, kh*kw, hOut*wOut} tensor.  Slots don't overlap, so
+   summing all kh*kw padded patches (Fold[Plus]) yields xCol_3d.
+   Reshape collapses the (kh*kw) axis into the cIn axis.
+
+   The final TMatMul dispatches via cpu_blas_dispatch's MUL +
+   REDUCE_SUM pattern -> cblas_sgemm.  Net effect: one sgemm per
+   conv layer (vs kh*kw partial-sum kernels in TConv2D), which is
+   the ceiling lift needed to scale beautiful-mnist past BS=1. *)
+TConv2DIm2Col[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
+    inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
+    patches, summed, xCol, wFlat, outFlat, outShaped, biasBcast
+},
+    inShape = tUopShape[input];
+    wShape  = tUopShape[weights];
+    {cIn, h, wd}      = inShape;
+    cOut = wShape[[1]];
+    kh   = wShape[[3]];
+    kw   = wShape[[4]];
+    hOut  = h  - kh + 1;
+    wOut  = wd - kw + 1;
+    kSpat = kh * kw;
+    patches = Flatten @ Table[
+        With[{slot = ki * kw + kj},
+            TUOpPad[
+                TUOpReshape[
+                    TUOpShrink[input,
+                        {{0, cIn}, {ki, ki + hOut}, {kj, kj + wOut}}],
+                    {cIn, 1, hOut * wOut}],
+                {{0, 0}, {slot, kSpat - 1 - slot}, {0, 0}}]
+        ],
+        {ki, 0, kh - 1}, {kj, 0, kw - 1}
+    ];
+    summed    = Fold[Plus, First[patches], Rest[patches]];
+    xCol      = TUOpReshape[summed,  {cIn * kSpat, hOut * wOut}];
+    wFlat     = TUOpReshape[weights, {cOut, cIn * kSpat}];
+    outFlat   = TMatMul[wFlat, xCol];
+    outShaped = TUOpReshape[outFlat, {cOut, hOut, wOut}];
+    biasBcast = TUOpExpand[
+        TUOpReshape[bias, {cOut, 1, 1}],
+        {cOut, hOut, wOut}];
+    outShaped + biasBcast
+]
+
 (* === host-side init helpers for example scripts ============== *)
 
 TGlorot[shape_List, dtype_String : "f32"] := With[{

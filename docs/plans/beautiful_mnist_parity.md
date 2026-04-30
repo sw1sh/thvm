@@ -133,9 +133,21 @@ travel across all kids of the same program.
 | Milestone | State | Notes |
 |-----------|-------|-------|
 | LeNet end-to-end | done | commits e0029b5, 4646189, 9c4f7f4 |
-| M1 batched Conv2D | open | biggest single perf win |
+| M1 batched Conv2D | in flight | TConv2DIm2Col landed alongside TConv2D; verified numerical + grad equivalence in `wl/THVMLink/Tests/conv_im2col.wlt` (6 tests).  TConv2D not yet switched over -- next ticks measure perf delta on LeNet/beautiful-mnist before flipping the public surface. |
 | M2 BN gradient | open | smaller; verifies existing TBatchNorm |
 | M3 structural-template TGradMany | deferred | not on the critical path yet |
 | M4 buffer-free between steps | open | becomes critical at N_STEPS > 100 |
 | M5 Metal Conv | open | depends on M1 |
 | M6 autotune sweep | open | depends on M1 (autotune needs real kernel shapes) |
+
+### M1 in-flight notes
+
+- `TConv2DIm2Col` builds `xCol : {cIn*kh*kw, hOut*wOut}` via PAD-and-sum
+  (no STACK primitive in thvm) then runs a single TMatMul which dispatches
+  through `cpu_blas_dispatch`'s MUL+REDUCE_SUM pattern -> cblas_sgemm.
+- Forward + d/dw + d/dx + d/db all match TConv2D within 1e-4 f32 tolerance.
+- Next ticks: (1) bench TConv2DIm2Col vs TConv2D on LeNet w/ N_STEPS=4
+  to confirm parity or speedup; (2) flip the public TConv2D over once
+  measurements look clean; (3) extend to BS>1 (input shape {N, C_in, H, W})
+  -- the PAD-and-sum slot trick generalises since the batch axis is
+  the leading dim.
