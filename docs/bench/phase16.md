@@ -65,26 +65,35 @@ to every other kid sharing that program.  Mutated by
 ## What's NOT (yet) measured
 
 End-to-end LeNet/Adam train.wls A/B (baseline vs autotune-all)
-was the goal but ran into two unrelated infrastructure issues:
+remains blocked by two issues that surfaced during the leak
+investigation:
 
-1. **LeNet per-realize allocation > 32M cells** (Cheney semi-
-   space cap = HEAP_CAP/2).  Even N_STEPS=1 exhausts.  This is
-   a pre-existing limit -- Phase 14's "lenet train converges"
-   target was deferred for the same reason.  Fixing it needs
-   either (a) larger HEAP_CAP, (b) GC during a single realize
-   (not just at the boundary), or (c) the per-grad memo +
-   chain-rule sharing pass that Phase 14 listed under "what's
-   still slow".
+1. **Multi-grad chain-rule walks shared sub-DAGs without memo.**
+   With the leak fix landed (commit b5b9766), single grads on
+   LeNet realize cleanly (~109K cells each).  Sequential grads
+   in one specific order (b4 -> w4 -> ... -> w1) all complete in
+   ~3.5s total.  But ANY OTHER order (e.g. starting with w1)
+   hangs partway through, around grad #5-#6.  The HotCounters
+   profile shows GradFires = 54025 for just 5 grads on a
+   ~65-node forward DAG -- 10K interact_grad calls per target,
+   exponential in the chain rule's shared-sub-DAG count.  This
+   is exactly Phase 14's "per-grad memo" deferral: cache
+   `interact_grad(uop, gy)` results keyed on (uop_loc, gy_loc)
+   so when 8 weights all read through the same forward DAG, the
+   chain-rule rewrites collapse.  Fixing this unblocks LeNet
+   train end-to-end (forward + 8 grads + Adam per step).
 2. **WL bench harnesses for the smaller training examples
    (linear-train, mlp-mnist) need the per-iter timing to land
    inside the recursive `TPriForce` callback** (the `TWnf` of
    the outer loop completes near-instantly because the callback
    doesn't force a fresh realize).
 
-Both are outside Phase 16's scope (one is heap/GC, the other is
-bench infrastructure).  Real perf delta on a training loop
-remains the next milestone, and unblocks once the LeNet heap
-issue is addressed.
+Both are out of Phase 16's scope.  Per-grad memo is the next
+milestone -- it unblocks the LeNet/Adam bench AND likely
+collapses the kernel-count regression in `fusion-count` and
+`training-loop` tests (extra kernels currently emitted because
+target-aware chain rule re-walks shared paths instead of
+sharing sub-grad cells).
 
 For tiny isolated kernels the autotune correctly reports either
 "no opt beat baseline" (when clang's `-O2` already vectorises)
