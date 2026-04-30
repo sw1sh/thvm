@@ -82,7 +82,8 @@ static void rm_loop_close_elementwise(CgBuf *b, u32 last_step) {
   cg_append(b, "  out[i] = r%u;\n", last_step);
 }
 
-static void rm_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size) {
+static void rm_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size,
+                                u32 unroll_factor) {
   cg_append(b, "  uint _inner = %uu;\n", inner);
   cg_append(b, "  uint _axis  = %uu;\n", axis_size);
   cg_append(b, "  uint _oi    = i;\n");
@@ -90,6 +91,12 @@ static void rm_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size) {
   cg_append(b, "  uint _inner_i = _oi %% _inner;\n");
   if (kind == REDUCE_MAX) cg_append(b, "  float acc = -INFINITY;\n");
   else                    cg_append(b, "  float acc = 0.0f;\n");
+  // MSL recognises clang's loop unroll pragma -- same syntax as the
+  // C renderer.  Skipped at factor=1 so the no-opt source stays
+  // byte-identical to the pre-Phase-16 emit.
+  if (unroll_factor > 1) {
+    cg_append(b, "  #pragma clang loop unroll_count(%u)\n", unroll_factor);
+  }
   cg_append(b, "  for (uint _k = 0; _k < _axis; _k++) {\n");
   cg_append(b, "    uint i = _outer * (_axis * _inner) + _k * _inner + _inner_i;\n");
 }

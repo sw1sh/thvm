@@ -75,7 +75,8 @@ static void rc_loop_close_elementwise(CgBuf *b, u32 last_step) {
   cg_append(b, "  }\n");
 }
 
-static void rc_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size) {
+static void rc_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size,
+                                u32 unroll_factor) {
   cg_append(b, "  unsigned _inner = %uu;\n", inner);
   cg_append(b, "  unsigned _axis  = %uu;\n", axis_size);
   cg_append(b, "  for (unsigned oi = 0; oi < n; oi++) {\n");
@@ -83,6 +84,14 @@ static void rc_loop_open_reduce(CgBuf *b, u8 kind, u32 inner, u32 axis_size) {
   cg_append(b, "    unsigned _inner_i = oi %% _inner;\n");
   if (kind == REDUCE_MAX) cg_append(b, "    float acc = -INFINITY;\n");
   else                    cg_append(b, "    float acc = 0.0f;\n");
+  // TOpt["UNROLL", reduce_axis, factor] -> emit a clang loop hint so
+  // the JIT pre-unrolls the inner k-loop.  factor=1 (default) skips
+  // the pragma; the back-compat path matches the pre-Phase-16 emit
+  // byte-for-byte so the kernel-program-cache key stays stable for
+  // unopt'd kernels (393/393 must keep passing).
+  if (unroll_factor > 1) {
+    cg_append(b, "    #pragma clang loop unroll_count(%u)\n", unroll_factor);
+  }
   cg_append(b, "    for (unsigned _k = 0; _k < _axis; _k++) {\n");
   cg_append(b, "      unsigned i = _outer * (_axis * _inner) + _k * _inner + _inner_i;\n");
 }

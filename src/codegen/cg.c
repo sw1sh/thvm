@@ -85,8 +85,13 @@ typedef struct Renderer {
   // Open the reduce-tail loop nest: outer over `oi`, inner over `_k`.
   // Declares `acc` (zero for SUM, -INFINITY for MAX) and binds `i`
   // inside the inner loop to the source index.  Caller passes the
-  // REDUCE op's kind / inner / axis_size pre-decoded.
-  void (*loop_open_reduce)(CgBuf *b, u8 kind, u32 inner, u32 axis_size);
+  // REDUCE op's kind / inner / axis_size pre-decoded, plus an
+  // `unroll_factor` extracted from KernelAxes.applied_opts[] (1 =
+  // no unroll, the default).  The renderer is free to emit a
+  // pragma hint, manually unroll the inner loop, or ignore the
+  // hint.  Per-target choice in render_c.c / render_metal.c.
+  void (*loop_open_reduce)(CgBuf *b, u8 kind, u32 inner, u32 axis_size,
+                           u32 unroll_factor);
 
   // Close the reduce-tail loop: emit the accumulator update reading
   // `reduce_src_raw` (input slot or program-step result), close the
@@ -175,7 +180,19 @@ fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
     }
     u32 out_numel = rd->numel ? rd->numel : 1;
     u32 axis_size = src_numel / out_numel;
-    r->loop_open_reduce(&b, kind, inner, axis_size);
+    // Extract UNROLL hint from KernelAxes.applied_opts[].  We accept
+    // the LAST UNROLL applied to the reduce axis; multi-level unroll
+    // composes (3 then 4 = 12-way) via the splits already recorded
+    // in axis_types / full_shape, but for the MVP renderer we just
+    // pass the most recent factor as the pragma hint.  Factor must
+    // divide axis_size (axes_apply_opt already validated this) but
+    // we re-check defensively.
+    u32 unroll_factor = 1;
+    for (u32 i = 0; i < ke->axes.n_applied; i++) {
+      KOpt o = ke->axes.applied_opts[i];
+      if (o.op == KOP_UNROLL && axis_size % o.arg == 0) unroll_factor = o.arg;
+    }
+    r->loop_open_reduce(&b, kind, inner, axis_size, unroll_factor);
   } else {
     r->loop_open_elementwise(&b);
   }
