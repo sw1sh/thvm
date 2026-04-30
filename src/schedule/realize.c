@@ -38,6 +38,14 @@ static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
 
 fn Term thvm_realize(Term expr) {
   HOT_REALIZE_CALLS++;
+  // TEN short-circuit: a Term that's already a TAG_TEN (typical when
+  // the user holds onto a TTerm wrapper and re-realizes it) has no
+  // remaining compute -- skip the wnf+materialize loop entirely so
+  // we don't bump kernel_alloc on a no-op.  term_resolve handles
+  // VAR-SUB / ALO chains pointing at a TEN.
+  Term resolved = term_resolve(expr);
+  if (term_tag(resolved) == TAG_TEN) return resolved;
+
   u32 wm = cpu_buf_pool_begin();
 
   // realize loop (wnf is the only reducer -- `nf` is the inspector

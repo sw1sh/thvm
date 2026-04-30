@@ -313,3 +313,21 @@ VerificationTest[
     "ERA",
     TestID -> "Church 2 applied to id and ERA reduces to ERA"
 ]
+
+(* TRealize on a TEN-tagged Term short-circuits the wnf+materialize
+   loop entirely -- no kernel emitted, no wnf or materialize calls.
+   Catches regressions where an idempotent realize would burn
+   per-call kernel slots / hot-path cycles. *)
+VerificationTest[
+    TInit[];
+    xT        = TTensorCreate @ N @ Range[12];
+    sumResult = TRealize @ TUOpReduce[xT, 0, "SUM"];   (* now a TEN *)
+    n0 = TKernelCount[];
+    THotCountersReset[];
+    Do[ TRealize @ sumResult, {10}];
+    {TKernelCount[] - n0,
+     THotCounters[]["WnfCalls"],
+     THotCounters[]["MaterializeCalls"]},
+    {0, 0, 0},
+    TestID -> "TRealize on TEN short-circuits"
+]
