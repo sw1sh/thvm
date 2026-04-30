@@ -504,6 +504,64 @@ typedef struct {
                                    //   since MAX_DIM=8.
 } KProgOp;
 
+// === scalar UOp lowering (Phase A of scalar_uops_lowering.md) ===
+// Tinygrad-style scalar-level UOps for the new schedule lowering
+// pass.  Each ScalarUop is one node in a per-kernel scalar-level
+// dataflow graph: explicit RANGE iterators, INDEX pointer arith,
+// LOAD/STORE memory access, and ALU ops on scalar values.  The
+// graph is transient infrastructure -- the realize pipeline
+// linearizes it down to KProgOp[] (the existing kernel-program
+// dispatch format) before kernel_fire_by_id runs.
+//
+// Stored on the KernelEntry as an introspectable snapshot
+// (`ke->scalar_uops`, NULL when the kernel was emitted via the
+// legacy per-tensor-UOp visit() path).  WL-side surface:
+// `TKernelScalarUops[kid]`.
+//
+// Slot 0 is reserved as the NONE sentinel; callers check
+// `src[i] == 0` to test "no source".
+typedef enum {
+  S_NONE = 0,
+  // Loop iterators + memory addressing.
+  S_RANGE,         // extra = (axis_type << 32) | extent
+                   //   axis_type: 0 = LOOP (default), 1 = REDUCE,
+                   //              2 = UNROLL (Phase F), 3 = GLOBAL (Phase F)
+                   //   src: none (RANGE is a leaf).
+  S_DEFINE_PARAM,  // extra = input slot index into ke->input_*.  Leaf
+                   //   that names a buffer pointer for INDEX/LOAD/STORE.
+  S_DEFINE_OUTPUT, // marker for the kernel's output buffer.  Leaf.
+  S_INDEX,         // src[0] = buffer (DEFINE_PARAM/OUTPUT), src[1..] = ranges
+  S_LOAD,          // src[0] = INDEX
+  S_STORE,         // src[0] = INDEX dest, src[1] = value
+  S_BUFFERIZE,     // arena root: src[0] = body STORE, src[1..] = ranges.
+                   //   One per kernel; identifies the root output binding.
+  // Constants.
+  S_CONST,         // extra = raw bits (f32 in low 32, or int).  dtype set.
+  // ALU (mirror tinygrad's GroupOp.ALU subset we'll lower to first).
+  S_ADD, S_MUL, S_NEG, S_RECIP, S_EXP2, S_LOG2, S_SQRT,
+  S_CMPLT, S_CMPEQ,
+  // Reductions.  src[0] = body inside the REDUCE-typed RANGE.
+  S_REDUCE_SUM, S_REDUCE_MAX,
+  S__COUNT
+} ScalarOp;
+
+// Axis types for S_RANGE.extra high 32 bits.
+#define S_AXIS_LOOP    0
+#define S_AXIS_REDUCE  1
+#define S_AXIS_UNROLL  2
+#define S_AXIS_GLOBAL  3
+
+typedef struct {
+  u8  op;          // ScalarOp
+  u8  src_count;   // number of valid src[] entries
+  u32 dtype;       // DT_*
+  u32 src[4];      // indices into the same ScalarUop[]; 0 = unused
+  u64 extra;       // op-specific payload (CONST bits, RANGE extent + type, ...)
+} ScalarUop;
+
+#define SUOP_INIT_CAP   16
+#define SUOP_MAX_CAP    (1u << 20)
+
 typedef struct KernelEntry {
   // Input-tensor arrays: dynamically grown.  inputs_cap is the
   // allocated length; n_inputs is the number of slots actually used.
@@ -593,6 +651,15 @@ typedef struct KernelEntry {
   // points at it in that case.
   KernelAxes  *axes;
   KernelAxes   _local_axes;
+
+  // Scalar-UOp lowering snapshot (Phase A of scalar_uops_lowering.md).
+  // NULL when the kernel was emitted via the legacy per-tensor-UOp
+  // visit() path; non-NULL when rangeify lowered it.  Slot 0 is the
+  // S_NONE sentinel; live ops occupy [1, n_scalar_uops).
+  // Owned by the KernelEntry; freed by kernel_free_arrays.
+  ScalarUop *scalar_uops;
+  u32        n_scalar_uops;
+  u32        scalar_uops_cap;
 } KernelEntry;
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
@@ -960,6 +1027,27 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt);
 fn u32  kernel_gc_sweep(Term result);
 fn u32  kernel_gc_freelist_pop(void);
 fn void kernel_gc_reset(void);
+
+// === scalar UOp arena ops (schedule/rangeify.c) ===
+// Reserve room on a kernel's scalar_uops[] array.  Geometric
+// growth; aborts past SUOP_MAX_CAP.  Idempotent at-or-below cap.
+fn void rangeify_reserve(struct KernelEntry *ke, u32 needed);
+// Append a new scalar UOp; returns its slot id (>= 1).  Slot 0
+// is the S_NONE sentinel and never returned.  Initializes scalar_uops
+// on first call.  src[] entries that are 0 mean "unused".
+fn u32  rangeify_emit(struct KernelEntry *ke, u8 op, u32 dtype,
+                      u8 src_count, const u32 *src, u64 extra);
+// Convenience: emit a leaf (no sources).
+fn u32  rangeify_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
+// Convenience: emit a unary / binary op.
+fn u32  rangeify_emit_unary (struct KernelEntry *ke, u8 op, u32 dtype, u32 a);
+fn u32  rangeify_emit_binary(struct KernelEntry *ke, u8 op, u32 dtype, u32 a, u32 b);
+// Free the per-kernel scalar arena.  Called from kernel_free_arrays.
+fn void rangeify_free(struct KernelEntry *ke);
+// Look up a scalar opname / axis-type name as a const C string for
+// introspection / debug printing.
+fn const char *scalar_op_name (u8 op);
+fn const char *scalar_axis_name(u32 axis_type);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 

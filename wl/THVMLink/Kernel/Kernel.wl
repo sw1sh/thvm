@@ -46,6 +46,7 @@ TKernelDispatch::usage = "TKernelDispatch[k] dispatches the kernel by TWnf-firin
 TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
 TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns the number of distinct KProgOp[] arrays interned in the kernel-program hash-cons cache.  After a TRealize, this is at most TKernelCount[]-1; structurally identical kernels (e.g. successive iters of a recursive lambda's step) share a single entry.";
 TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].  Equivalent to TKernel[kid][\"Program\"] paired with the header (n_inputs, n_ops, output_numel, output_dtype).";
+TKernelScalarUops::usage = "TKernelScalarUops[kid] returns the post-lowering scalar-UOp graph snapshot stored at KERNELS[kid].scalar_uops, as a List of Associations (one per scalar op, with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\", and -- for S_RANGE -- \"axis_type\" and \"extent\").  Returns Missing[\"NotLowered\"] when the kernel was emitted via the legacy per-tensor-UOp visit() path (i.e. rangeify lowering was off or didn't apply).  Slot 0 (S_NONE sentinel) is included so list indices match C-side ScalarUop[] indices; live ops occupy positions [2..].";
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
 
@@ -554,6 +555,64 @@ TKernelInfo[kid_Integer] := Module[{raw = $kernelInfoFn[kid], n, nOps},
           {i, nOps}
       ]
     |>
+]
+
+(* Scalar-UOp introspection (Phase A of scalar_uops_lowering).
+   Decodes the flat Integer MTensor from thvm_wl_kernel_scalar_uops
+   into a List of Associations.  Returns Missing["NotLowered"] when
+   the kernel didn't go through the rangeify path. *)
+$scalarOpNames = <|
+    0 -> "S_NONE",          1 -> "S_RANGE",         2 -> "S_DEFINE_PARAM",
+    3 -> "S_DEFINE_OUTPUT", 4 -> "S_INDEX",         5 -> "S_LOAD",
+    6 -> "S_STORE",         7 -> "S_BUFFERIZE",     8 -> "S_CONST",
+    9 -> "S_ADD",          10 -> "S_MUL",          11 -> "S_NEG",
+   12 -> "S_RECIP",        13 -> "S_EXP2",         14 -> "S_LOG2",
+   15 -> "S_SQRT",         16 -> "S_CMPLT",        17 -> "S_CMPEQ",
+   18 -> "S_REDUCE_SUM",   19 -> "S_REDUCE_MAX"
+|>;
+
+$scalarAxisNames = <|0 -> "LOOP", 1 -> "REDUCE", 2 -> "UNROLL", 3 -> "GLOBAL"|>;
+
+TKernelScalarUops[kid_Integer] := Module[{raw, n, decoded},
+    raw = Normal @ $kernelScalarUopsFn[kid];
+    If[ raw === {} || First[raw] == 0,
+      Return @ Missing["NotLowered"] ];
+    n = First[raw];
+    decoded = Table[
+      With[{base = 1 + (i - 1) * 10,
+            opCode = raw[[1 + (i - 1) * 10 + 1]],
+            extra  = BitOr[
+              raw[[1 + (i - 1) * 10 + 8]],
+              BitShiftLeft[raw[[1 + (i - 1) * 10 + 9]], 32]]},
+        With[{
+          opName    = Lookup[$scalarOpNames, opCode, "S_?"],
+          srcCount  = raw[[base + 3]],
+          src       = raw[[base + 4 ;; base + 7]]
+        },
+          (* S_RANGE special-case: split extra into (extent, axis_type)
+             so callers don't have to redo the bit math. *)
+          If[ opName === "S_RANGE",
+            <|
+              "id"        -> i - 1,
+              "op"        -> opName,
+              "dtype"     -> dtypeName[raw[[base + 2]]],
+              "src"       -> Take[src, srcCount],
+              "extent"    -> BitAnd[extra, 16^^FFFFFFFF],
+              "axis_type" -> Lookup[$scalarAxisNames,
+                               BitShiftRight[extra, 32], "?"]
+            |>,
+            <|
+              "id"     -> i - 1,
+              "op"     -> opName,
+              "dtype"  -> dtypeName[raw[[base + 2]]],
+              "src"    -> Take[src, srcCount],
+              "extra"  -> extra
+            |>
+          ]
+        ]
+      ],
+      {i, n}];
+    decoded
 ]
 
 End[];
