@@ -69,14 +69,61 @@ static int rc_is_signed_int(u32 dtype) {
       || dtype == DT_INT32 || dtype == DT_INT64;
 }
 
+// Tinygrad-style codegen-time index inlining.  When an input slot's
+// view is contig we emit `in%u[i]` (or `in%u[0]` for numel=1
+// broadcast); when it's non-contig we emit a strided expression
+// `in%u[s0*c0(i) + s1*c1(i) + ... + offset]` where each ci is a
+// modular decomposition of i through the view's shape.  Mirrors
+// View.to_indexed_uops -- each access is a few extra adds/muls,
+// no separate pre-mat pass.  Multi-view chains stay bailed
+// (cpu_interpret pre-mat handles them).
 static void rc_emit_src_ref(CgBuf *b, u32 raw, u32 const *in_numels) {
   u32 idx = KSRC_INDEX(raw);
-  if (KSRC_IS_INPUT(raw)) {
-    if (in_numels[idx] == 1) cg_append(b, "in%u[0]", idx);
-    else                     cg_append(b, "in%u[i]", idx);
-  } else {
+  if (!KSRC_IS_INPUT(raw)) {
     cg_append(b, "r%u", idx);
+    return;
   }
+  if (in_numels[idx] == 1) {
+    cg_append(b, "in%u[0]", idx);
+    return;
+  }
+  // Non-contig single-view input: emit strided index.  Multi-view
+  // chains and missing/symbolic inputs fall back to flat in%u[i]
+  // (cpu_interpret pre-mat takes care of strided in those cases).
+  if (b->ke != NULL && b->ke->input_views != NULL
+      && idx < b->ke->n_inputs
+      && !b->ke->input_views[idx].contiguous
+      && b->ke->input_views[idx].shape.ndim > 0) {
+    View const *v = &b->ke->input_views[idx];
+    cg_append(b, "in%u[", idx);
+    int wrote = 0;
+    if (v->offset != 0) {
+      cg_append(b, "%d", (int)v->offset);
+      wrote = 1;
+    }
+    // Decompose `i` into per-axis coords:
+    //   coord_axis = (i / inner_prod_after) % dim_axis
+    // inner_prod_after = product of dims AFTER this axis.
+    u32 inner_prod = 1;
+    for (i32 a = (i32)v->shape.ndim - 1; a >= 0; a--) {
+      i32 stride = v->strides[a];
+      u32 dim    = v->shape.dims[a];
+      if (stride != 0 && dim > 1) {
+        if (wrote) cg_append(b, " + ");
+        if (inner_prod == 1) {
+          cg_append(b, "%d*(i %% %u)", (int)stride, dim);
+        } else {
+          cg_append(b, "%d*((i / %u) %% %u)", (int)stride, inner_prod, dim);
+        }
+        wrote = 1;
+      }
+      inner_prod *= dim;
+    }
+    if (!wrote) cg_append(b, "0");
+    cg_append(b, "]");
+    return;
+  }
+  cg_append(b, "in%u[i]", idx);
 }
 
 static void rc_prologue(CgBuf *b, u32 n_inputs) {

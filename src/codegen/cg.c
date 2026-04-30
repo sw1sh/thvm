@@ -32,7 +32,15 @@
 // the program's uniform dtype.  cg_emit fills `program_dtype` after
 // cg_supports has confirmed the kernel is uniform.
 
-typedef struct { char *buf; u32 cap; u32 len; u32 program_dtype; } CgBuf;
+typedef struct {
+  char *buf; u32 cap; u32 len; u32 program_dtype;
+  // Renderer back-channel: access KernelEntry's per-slot view info
+  // (input_views, input_dtypes, ...) when emitting strided index
+  // expressions for non-contig inputs.  cg_emit fills this before
+  // the first renderer call.  NULL when not yet bound (early
+  // utility paths that build a CgBuf without a kernel).
+  KernelEntry const *ke;
+} CgBuf;
 
 static int cg_append(CgBuf *b, const char *fmt, ...) {
   va_list ap;
@@ -213,7 +221,7 @@ int cg_supports(KernelEntry const *ke) {
 fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
   if (!cg_supports(ke)) return NULL;
   CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
-              .program_dtype = cg_program_dtype(ke) };
+              .program_dtype = cg_program_dtype(ke), .ke = ke };
   if (!b.buf) return NULL;
 
   int has_reduce_tail = ke->n_ops > 0

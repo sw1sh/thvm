@@ -40,6 +40,24 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
   h ^= (u64)ke->n_inputs; h *= 0x100000001b3ULL;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     h ^= (u64)ke->input_numels[i]; h *= 0x100000001b3ULL;
+    // Fold per-input view stride pattern into the key.  Same
+    // KProgOp[] with different input strides now compiles to
+    // different inline strided expressions in render_c, so they
+    // MUST get distinct cache keys -- otherwise reuse of the
+    // wrong dylib reads memory at the wrong offsets.
+    if (ke->input_views != NULL && !ke->input_views[i].contiguous) {
+      View const *v = &ke->input_views[i];
+      h ^= (u64)v->shape.ndim; h *= 0x100000001b3ULL;
+      h ^= (u64)(u32)v->offset; h *= 0x100000001b3ULL;
+      for (u32 a = 0; a < v->shape.ndim; a++) {
+        h ^= (u64)v->shape.dims[a]; h *= 0x100000001b3ULL;
+        h ^= (u64)(u32)v->strides[a]; h *= 0x100000001b3ULL;
+      }
+    } else {
+      // Mark "contig" explicitly so a numel-equal contig input
+      // doesn't collide with a non-contig one of the same shape.
+      h ^= 0xC0u; h *= 0x100000001b3ULL;
+    }
   }
   u8 const *bytes = (u8 const *)ke->program;
   size_t total = (size_t)ke->n_ops * sizeof(KProgOp);
@@ -149,12 +167,28 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (!jfn) return 0;
 
   // Skip the JIT path if any input is a non-contiguous view -- the
-  // codegen reads in0[i] flat, with no stride support yet.  The
-  // interpreter pre-materializes strided inputs into temp buffers.
+  // Codegen-time strided-index inlining (render_c emits
+  // `in%u[s0*c0(i) + ... + offset]` for non-contig single-view
+  // inputs, mirroring tinygrad's View.to_indexed_uops) is wired
+  // and correct, but currently gated behind THVM_JIT_STRIDED=1.
+  // Without the gate, every unique stride pattern hits a fresh
+  // clang compile, doubling LeNet wallclock for one-shot training
+  // kernels.  Tinygrad amortizes via aggressive persistent
+  // caching; we'll enable by default once the cross-process JIT
+  // cache is warm enough for training-loop strides.  Multi-view
+  // chain inputs always bail (codegen would need to compose
+  // through prior_views per access, not implemented).
+  static int strided_jit_known = 0, strided_jit_enabled = 0;
+  if (!strided_jit_known) {
+    char const *e = getenv("THVM_JIT_STRIDED");
+    strided_jit_enabled = (e && e[0] == '1');
+    strided_jit_known = 1;
+  }
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
-    if (tid != 0 && tid < TENS_NEXT
-        && (!TENS[tid].view.contiguous || TENS[tid].nviews > 0)) return 0;
+    if (tid == 0 || tid >= TENS_NEXT) continue;
+    if (TENS[tid].nviews > 0) return 0;
+    if (!TENS[tid].view.contiguous && !strided_jit_enabled) return 0;
   }
   // Pack input pointers + numels into local arrays and call the
   // generated function.  Stack-sized to ke->n_inputs (covered by

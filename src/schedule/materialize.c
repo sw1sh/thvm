@@ -779,6 +779,7 @@ static u32 input_slot_dedup(KernelEntry *ke, u32 tid, Term term) {
   ke->input_dtypes [slot] = TENS[tid].dtype;
   ke->input_numels [slot] = TENS[tid].view.numel;
   ke->input_terms  [slot] = term;
+  ke->input_views  [slot] = TENS[tid].view;     // codegen consumes for strided reads
   return slot;
 }
 
@@ -796,6 +797,12 @@ static u32 input_slot_dedup_var(KernelEntry *ke, Term var_term,
   ke->input_dtypes [slot] = dtype;
   ke->input_numels [slot] = numel;
   ke->input_terms  [slot] = var_term;
+  // Symbolic input: shape-annotated but no concrete strides until
+  // fire time.  Synthesize a canonical contig view at the annotated
+  // shape so codegen doesn't try to emit strided reads against
+  // garbage stride bytes.
+  Shape s = {0}; s.ndim = 1; s.dims[0] = numel;
+  ke->input_views  [slot] = view_create(s);
   return slot;
 }
 
