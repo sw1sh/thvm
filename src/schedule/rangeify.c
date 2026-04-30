@@ -179,21 +179,47 @@ static u32 emit_index(KernelEntry *ke, u32 dtype, u32 buf_id,
 //
 // The lowering keeps the legacy KProgOp[] in place; cpu_dispatch_kernel
 // gates on `ke->scalar_uops != NULL` to choose which path runs.
+// Bail-debug: when THVM_RANGEIFY_BAIL=1, prints the reason any kernel
+// failed to lower along with the kernel's identifying info.  Used in
+// development to track down the next-supported pattern.
+#define RBAIL(reason) do {                                              \
+  if (getenv("THVM_RANGEIFY_BAIL")) {                                   \
+    fprintf(stderr, "rangeify bail: " reason                            \
+            " (n_ops=%u onum=%u ndim=%u)\n",                            \
+            ke ? ke->n_ops : 0,                                         \
+            ke ? ke->output_numel : 0,                                  \
+            ke ? ke->output_shape.ndim : 0);                            \
+  }                                                                     \
+  rangeify_free(ke); return 0;                                          \
+} while (0)
+#define RBAIL_PRE(reason) do {                                          \
+  if (getenv("THVM_RANGEIFY_BAIL")) {                                   \
+    fprintf(stderr, "rangeify bail (pre-emit): " reason                 \
+            " (n_ops=%u onum=%u ndim=%u)\n",                            \
+            ke ? ke->n_ops : 0,                                         \
+            ke ? ke->output_numel : 0,                                  \
+            ke ? ke->output_shape.ndim : 0);                            \
+  }                                                                     \
+  return 0;                                                             \
+} while (0)
+
 fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   if (ke == NULL || ke->n_ops == 0) return 0;
   // f32 only -- the scalar interpreter's bit-cast path would silently
   // misinterpret other dtypes.
-  if (ke->output_dtype != DT_FP32) return 0;
+  if (ke->output_dtype != DT_FP32) RBAIL_PRE("non-f32 output");
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_dtypes[i] != DT_FP32) return 0;
+    if (ke->input_dtypes[i] != DT_FP32) RBAIL_PRE("non-f32 input");
   }
   for (u32 i = 0; i < ke->n_ops; i++) {
-    if (ke->program[i].dtype != DT_FP32) return 0;
+    if (ke->program[i].dtype != DT_FP32) RBAIL_PRE("non-f32 op");
   }
-  // Phase B/C supported opcodes: elementwise + (one) REDUCE.
-  // Phase C-3 also accepts UOP_EXPAND (broadcast-back-to-source-
-  // shape after a REDUCE) -- lowered as identity since broadcast
-  // is implicit at the per-LOOP-element scalar level.
+  // Phase B/C/D supported opcodes: elementwise + (one) REDUCE +
+  // movement-as-identity (EXPAND, RESHAPE).  Movement ops between
+  // contig shapes are no-ops at the scalar level since the flat
+  // buffer is the same; the LOOP ranges adopt the output shape.
+  // PERMUTE / PAD / SHRINK / FLIP / CAST / BITCAST land in later
+  // phases.
   int reduce_pos = -1;
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
@@ -201,23 +227,33 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_ADD: case UOP_MUL: case UOP_NEG: case UOP_RECIP:
       case UOP_SQRT: case UOP_EXP2: case UOP_LOG2:
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
-      case UOP_EXPAND:
+      case UOP_EXPAND: case UOP_RESHAPE:
         break;
       case UOP_REDUCE:
-        if (reduce_pos != -1) return 0;       // > 1 reduce not yet supported
+        if (reduce_pos != -1) RBAIL_PRE("> 1 reduce");
         reduce_pos = (int)i;
         break;
       default:
-        return 0;
+        RBAIL_PRE("unsupported opcode");
     }
   }
-  // All input views must be contig over their underlying buffer.
+  // Phase D: input views can be non-contig (view.strides encode the
+  // access pattern; 0 strides == broadcast, used heavily by chain-
+  // rule grad expansion).  We bail only on:
+  //   - non-zero offset (offset would need adding to every INDEX)
+  //   - negative strides (FLIP; lands later)
+  //   - shape mismatch (input rank > output rank, etc.)
+  // Strides up to 65535 (u16-packed) are accepted; larger forces a
+  // bail at emit_index.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     View const *v = &ke->input_views[i];
-    if (!v->contiguous || v->offset != 0) return 0;
+    if (v->offset != 0) RBAIL_PRE("non-zero view offset");
+    for (u32 d = 0; d < v->shape.ndim; d++) {
+      if (v->strides[d] < 0) RBAIL_PRE("negative stride (FLIP)");
+    }
   }
   Shape const *os = &ke->output_shape;
-  if (os->ndim == 0 || os->ndim > 3) return 0;
+  if (os->ndim == 0 || os->ndim > 3) RBAIL_PRE("output ndim out of range");
 
   // Detect REDUCE.  When present, the kernel emits a nested loop:
   // outer LOOP ranges over the kernel's output dims (== post-reduce
@@ -265,12 +301,16 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     KProgOp *p = &ke->program[i];
     if (p->opcode == UOP_REDUCE) continue;     // numel == red->numel
                                                // (trivially)
-    if (p->opcode == UOP_CONST && p->numel == 1) continue;
+    // Scalar ops (numel == 1) -- includes CONST broadcasts, MUL of
+    // two scalars, RESHAPE of a scalar, etc.  Always allowed: in
+    // the per-LOOP-element scalar walk they evaluate to a single
+    // value reused across iterations.
+    if (p->numel == 1) continue;
     if ((int)i < reduce_pos) {
-      if (p->numel != reduce_in_numel) return 0;
+      if (p->numel != reduce_in_numel) RBAIL_PRE("pre-reduce numel mismatch");
     } else {
       if (p->numel != onum
-          && (!has_reduce || p->numel != red->numel)) return 0;
+          && (!has_reduce || p->numel != red->numel)) RBAIL_PRE("post-reduce numel mismatch");
     }
   }
 
@@ -313,7 +353,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   u32 reduce_numel = onum * (has_reduce ? reduce_size : 1);
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 in_numel = ke->input_numels[i];
-    if (in_numel != onum && in_numel != 1 && in_numel != reduce_numel) return 0;
+    if (in_numel != onum && in_numel != 1 && in_numel != reduce_numel) {
+      RBAIL_PRE("input numel mismatch");
+    }
   }
 
   // Start fresh -- emit_kernel_for_boundary may have run rangeify on
@@ -400,14 +442,39 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
         idx = emit_index(ke, dtype, param, r_ids, r_strides, 1);
+      } else if (red->numel == 1 && in_numel == reduce_size
+                 && ke->input_views[i].shape.ndim == 1) {
+        // Full reduce over a rank-1 input.  Output is {1} (LOOP
+        // range extent 1 -- positional info collapses to nothing).
+        // Reduce body indexes input[REDUCE] using the input view's
+        // single stride.
+        View const *v = &ke->input_views[i];
+        u32 r_ids[1]    = {reduce_range};
+        u32 r_strides[1] = {(u32)v->strides[0]};
+        idx = emit_index(ke, dtype, param, r_ids, r_strides, 1);
       } else if (in_numel == reduce_in_numel && in_numel != red->numel) {
+        // Partial reduce over trailing axis: input shape is
+        // (output_shape ++ {axis_size}).  Walk the input view's
+        // actual strides per axis -- broadcast (stride==0) inputs
+        // and other view-aware patterns must use the View, not
+        // the synthesized canonical strides.
+        View const *v = &ke->input_views[i];
+        if (v->shape.ndim != in_ndim) { rangeify_free(ke); return 0; }
+        for (u32 d = 0; d < in_ndim; d++) {
+          u32 expected_dim = (d < os->ndim) ? os->dims[d] : reduce_size;
+          // Allow stride==0 (broadcast) regardless of dim mismatch;
+          // otherwise dims must match.
+          if (v->shape.dims[d] != expected_dim && v->strides[d] != 0) {
+            rangeify_free(ke); return 0;
+          }
+        }
         u32 r_ids    [4]; u32 r_strides[4];
         for (u32 d = 0; d < os->ndim; d++) {
           r_ids[d]     = loop_ranges[d];
-          r_strides[d] = in_strides[d];
+          r_strides[d] = (u32)v->strides[d];
         }
         r_ids    [os->ndim] = reduce_range;
-        r_strides[os->ndim] = in_strides[os->ndim];
+        r_strides[os->ndim] = (u32)v->strides[os->ndim];
         idx = emit_index(ke, dtype, param, r_ids, r_strides, in_ndim);
       } else {
         idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
@@ -416,29 +483,35 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       input_load_pre[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
     }
 
-    // Post-scope LOAD: per-LOOP-element read.  Inputs sized at
-    // reduce_in_numel are NOT readable post-reduce (would require
-    // a different per-element address pattern); bail in that case.
+    // Post-scope LOAD: per-LOOP-element read.  Stride encoding
+    // mirrors the input's View -- non-contig inputs (e.g. broadcast
+    // EXPAND with stride==0 on a dim, or transpose patterns landed
+    // by Phase D's chain-rule grad expansion) are absorbed into
+    // INDEX without bailing.
     if (input_used_post[i]) {
       u32 idx;
       if (in_numel == 1) {
         u32 src[1] = {param};
         idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, 0);
-      } else if (in_numel == onum) {
-        idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
-      } else if (has_reduce && in_numel == reduce_in_numel) {
-        // Softmax pattern: input has shape (output_shape ++
-        // {axis_size}) and the post-reduce uses LOOP ranges only
-        // -- meaning we want to read input[loop_ranges, 0..axis_size).
-        // This requires the LOAD to know which "slot" of the
-        // input row to read, which is only well-defined when the
-        // post-reduce read uses a SECOND REDUCE-typed range or
-        // when axis_size == reduce_size and we treat the
-        // per-output read as a stride pattern matching the
-        // primary axis.  For now only handle the symmetric case
-        // where in_numel == onum (covered above).  Bail if
-        // reduce_in_numel != onum (would be wrong-address).
-        if (reduce_in_numel != onum) { rangeify_free(ke); return 0; }
+      } else if (ke->input_views[i].shape.ndim == os->ndim) {
+        // Same rank: walk the View's strides directly.  Stride 0
+        // marks a broadcast axis (the load reuses the same value
+        // for every iter of that range).
+        View const *v = &ke->input_views[i];
+        u32 strides_u32[MAX_DIM];
+        for (u32 d = 0; d < os->ndim; d++) {
+          if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0) {
+            // Mismatched dims with non-broadcast stride: not yet
+            // supported; bail.
+            rangeify_free(ke); return 0;
+          }
+          strides_u32[d] = (u32)v->strides[d];
+        }
+        idx = emit_index(ke, dtype, param, loop_ranges, strides_u32, os->ndim);
+      } else if (has_reduce && in_numel == reduce_in_numel
+                 && reduce_in_numel == onum) {
+        // Softmax-symmetric: input rank may differ from output
+        // rank but numel matches; treat as same-shape contig.
         idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
       } else {
         rangeify_free(ke); return 0;
@@ -467,10 +540,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       prog_value[i] = rangeify_emit_leaf(ke, S_CONST, dtype, (u64)p->arg);
       continue;
     }
-    if (p->opcode == UOP_EXPAND) {
-      // src[0] is the value to broadcast; just pass through.  Phase
-      // C-3 only handles EXPAND post-REDUCE (typical softmax tail);
-      // pre-REDUCE EXPANDs lands later.
+    if (p->opcode == UOP_EXPAND || p->opcode == UOP_RESHAPE) {
+      // Movement-as-identity: src[0] is the value, output uses the
+      // same scalar bits.  At the per-LOOP-element scalar level
+      // EXPAND broadcast and RESHAPE flat-buffer rewrap are both
+      // no-ops -- the LOOP ranges are already the output shape's
+      // ranges, and contig-source movement ops don't change the
+      // flat read pattern.
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];

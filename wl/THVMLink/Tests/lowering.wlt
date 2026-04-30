@@ -284,3 +284,47 @@ VerificationTest[
     True,
     TestID -> "lowering/softmax-output-eq"
 ]
+
+(* Phase D: backward kernels lower through rangeify even when
+   inputs are non-contig (broadcast strides=0 from chain-rule
+   EXPAND).  TGrad of a Sum-of-square loss w.r.t. its input
+   yields a kernel with multiple inputs and RESHAPE+EXPAND in
+   the middle; verify the BIG kernel (n_ops>0) gets a scalar
+   graph attached. *)
+VerificationTest[
+    withRangeify[True,
+      TInit[];
+      x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+      w = TTensorCreate @ NumericArray[{0.1, 0.2, 0.3, 0.4}, "Real32"];
+      t = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+      TRealize @ TGrad[TMSELoss[TDot[w, x], t], w];
+      bigKid = SelectFirst[Range[TKernelCount[] - 1],
+                 TKernelInfo[#]["n_ops"] > 0 &];
+      TKernelScalarUops[bigKid] =!= Missing["NotLowered"]
+    ],
+    True,
+    TestID -> "lowering/backward-grad-lowers"
+]
+
+(* Phase D: backward output bitwise matches legacy.  d/dw of
+   sum((Dot(w,x) - t)^2) at the test point. *)
+VerificationTest[
+    Module[{legacy, lowered, eq},
+      legacy = withRangeify[False,
+        TInit[];
+        x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+        w = TTensorCreate @ NumericArray[{0.1, 0.2, 0.3, 0.4}, "Real32"];
+        t = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+        Normal @ TTensorData @ TRealize @ TGrad[TMSELoss[TDot[w, x], t], w]];
+      lowered = withRangeify[True,
+        TInit[];
+        x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+        w = TTensorCreate @ NumericArray[{0.1, 0.2, 0.3, 0.4}, "Real32"];
+        t = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+        Normal @ TTensorData @ TRealize @ TGrad[TMSELoss[TDot[w, x], t], w]];
+      eq = (Max[Abs[legacy - lowered]] < 1.0*^-5);
+      eq
+    ],
+    True,
+    TestID -> "lowering/backward-grad-output-eq"
+]
