@@ -13,10 +13,13 @@ fn u32 tensor_alloc(Backend *b, Shape shape, u32 dtype) {
   }
   u32 id = TENS_NEXT++;
   TenDesc *d = &TENS[id];
-  d->dtype    = dtype;
-  d->refcount = 1;
-  d->view     = view_create(shape);
-  d->backend  = b;
-  d->buf_id   = b->buf_alloc(dtype_storage_bytes(dtype, (u64)d->view.numel));
+  d->dtype        = dtype;
+  d->refcount     = 1;
+  d->view         = view_create(shape);
+  d->prior_views  = NULL;       // ShapeTracker: simple-single-view default
+  d->nviews       = 0;
+  d->backend      = b;
+  d->producer_kid = 0;
+  d->buf_id       = b->buf_alloc(dtype_storage_bytes(dtype, (u64)d->view.numel));
   return id;
 }

@@ -39,6 +39,10 @@
 
 fn void cpu_op_pad(void *out, void **srcs, u32 const *src_numels,
                    KProgOp const *p, u32 out_numel) {
+  if (dtype_is_packed(p->dtype)) {
+    cpu_op_run_via_i8(cpu_op_pad, out, srcs, src_numels, p, out_numel);
+    return;
+  }
   (void)src_numels;
   void *src    = srcs[0];
   u8    ndim   = p->src0_ndim;

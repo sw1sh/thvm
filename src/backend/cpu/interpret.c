@@ -28,41 +28,77 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   for (u32 i = 0; i < n_inputs; i++) temp_bufs[i] = NULL;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
-    if (tid != 0 && tid < TENS_NEXT && !TENS[tid].view.contiguous) {
-      View const *v = &TENS[tid].view;
-      void *src = CPU_BUFS[in_buf_ids[i]].data;
-      u32   esz = dtype_itemsize(TENS[tid].dtype);
-      void *tmp = malloc((size_t)dtype_storage_bytes(TENS[tid].dtype, v->numel));
-      switch (esz) {
-        case 1: {
-          u8 *d = (u8 *)tmp, *s = (u8 *)src;
-          for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
-          break;
-        }
-        case 2: {
-          u16 *d = (u16 *)tmp, *s = (u16 *)src;
-          for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
-          break;
-        }
-        case 4: {
-          u32 *d = (u32 *)tmp, *s = (u32 *)src;
-          for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
-          break;
-        }
-        case 8: {
-          u64 *d = (u64 *)tmp, *s = (u64 *)src;
-          for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
-          break;
-        }
-        default:
-          fprintf(stderr, "cpu_interpret: view pre-mat itemsize %u unsupported\n", esz);
-          abort();
-      }
-      in_ptrs  [i] = tmp;
-      temp_bufs[i] = tmp;
-    } else {
+    if (tid == 0 || tid >= TENS_NEXT) {
       in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
+      continue;
     }
+    TenDesc const *td = &TENS[tid];
+    // Pre-materialize when the public view is non-contig OR when
+    // the ShapeTracker has a chain (multi-view composition).  Both
+    // cases need the index walked through tendesc_strided_index.
+    if (td->view.contiguous && td->nviews == 0) {
+      in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
+      continue;
+    }
+    View const *v = &td->view;
+    void *src = CPU_BUFS[in_buf_ids[i]].data;
+    // Packed nibble dtypes: unpack the underlying byte buffer to i8,
+    // gather under the view (i8 indexing), then repack to nibbles.
+    if (dtype_is_packed(td->dtype)) {
+      i32 max_idx = v->offset;
+      for (u32 k = 0; k < v->shape.ndim; k++) {
+        if (v->shape.dims[k] > 1 && v->strides[k] > 0)
+          max_idx += (i32)(v->shape.dims[k] - 1) * v->strides[k];
+      }
+      u32 src_logical = (u32)max_idx + 1;
+      i8 *unpacked = (i8 *)malloc(src_logical);
+      if (td->dtype == DT_INT4)
+        unpack_int4 (unpacked, (u8 const *)src, src_logical);
+      else
+        unpack_uint4((u8 *)unpacked, (u8 const *)src, src_logical);
+      i8 *gathered = (i8 *)malloc(v->numel);
+      for (u32 k = 0; k < v->numel; k++)
+        gathered[k] = unpacked[tendesc_strided_index(td, k)];
+      free(unpacked);
+      void *packed = malloc((size_t)dtype_storage_bytes(td->dtype, v->numel));
+      if (td->dtype == DT_INT4)
+        pack_int4 ((u8 *)packed, gathered, v->numel);
+      else
+        pack_uint4((u8 *)packed, (u8 *)gathered, v->numel);
+      free(gathered);
+      in_ptrs  [i] = packed;
+      temp_bufs[i] = packed;
+      continue;
+    }
+    u32   esz = dtype_itemsize(td->dtype);
+    void *tmp = malloc((size_t)dtype_storage_bytes(td->dtype, v->numel));
+    switch (esz) {
+      case 1: {
+        u8 *d = (u8 *)tmp, *s = (u8 *)src;
+        for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
+        break;
+      }
+      case 2: {
+        u16 *d = (u16 *)tmp, *s = (u16 *)src;
+        for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
+        break;
+      }
+      case 4: {
+        u32 *d = (u32 *)tmp, *s = (u32 *)src;
+        for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
+        break;
+      }
+      case 8: {
+        u64 *d = (u64 *)tmp, *s = (u64 *)src;
+        for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
+        break;
+      }
+      default:
+        fprintf(stderr, "cpu_interpret: view pre-mat itemsize %u unsupported\n", esz);
+        abort();
+    }
+    in_ptrs  [i] = tmp;
+    temp_bufs[i] = tmp;
   }
 
   // Allocate one scratch slot per program op.  The last op writes

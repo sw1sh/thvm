@@ -36,6 +36,8 @@ fn void cpu_op_cmpeq(void *out, void **srcs, u32 const *src_numels,
     case DT_BF16:
     case DT_FP8E4M3:
     case DT_FP8E5M2:
+    case DT_INT4:
+    case DT_UINT4:
       cpu_op_run_via_f32(cpu_op_cmpeq, out, srcs, src_numels, p, out_numel);
       break;
     case DT_BOOL: {

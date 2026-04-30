@@ -336,10 +336,33 @@ typedef struct {
 
 typedef struct Backend Backend;
 
+// ShapeTracker = primary `view` (the public-facing shape) + an
+// OPTIONAL chain of prior_views composed from outermost to innermost.
+// Mirrors tinygrad's `ShapeTracker = tuple[View, ...]` where the
+// last view is what the user sees and the index into the underlying
+// buffer is computed by composing through the chain.  Required for
+// patterns where a movement op can't be absorbed into a single view
+// (e.g. RESHAPE on a non-contig view): rather than bail or copy, we
+// APPEND a fresh canonical view at the front and walk the chain at
+// dispatch time via view_strided_index_chain.
+//
+// Chain semantics (matching tinygrad's views_to_indexed_uops):
+//   - `view` is the OUTERMOST; flat_idx is unravelled through its
+//     shape, strides+offset applied to produce a flat idx in the
+//     next-inner view's shape.
+//   - prior_views[nviews-1] ... prior_views[0] are the inner views;
+//     each step unravels the incoming flat idx through its shape,
+//     applies its strides+offset, passes outward.
+//   - prior_views[0] (innermost) maps to the buffer index.
+//
+// Most TenDescs have nviews == 0 (just the primary `view`); the
+// chain is only allocated when truly needed.
 typedef struct {
   u32      dtype;               // DT_F32 / DT_I32 / ...
   u32      refcount;            // shared by DUP; decremented by ERA
-  View     view;                // single view for step 12; ShapeTracker in step 14
+  View     view;                // primary (outermost, public-facing)
+  View    *prior_views;         // NULL when nviews == 0; else heap array of nviews entries
+  u8       nviews;              // 0 = simple single view, >0 = chain depth
   u32      buf_id;              // backend buffer handle (0 = no buffer yet)
   u32      producer_kid;        // kernel id that produces this tensor, 0 = external
   Backend *backend;             // vtable
@@ -951,12 +974,20 @@ fn void tensor_incref (u32 id);
 fn void tensor_decref (u32 id);
 fn void tensor_release(u32 id);   // decref + buf_decref; free at 0
 fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
+// ShapeTracker chain extension: when a movement op can't be absorbed
+// into a single view (RESHAPE on non-contig src), the caller calls this
+// to make `new_outermost` the new public view and push the previous
+// public view onto the prior_views chain.  Buf is shared (incref bumped).
+fn u32  tensor_view_chain_append(u32 src_id, View new_outermost);
 
 // === view/ ===
 // Map an output flat index to the underlying buffer index through
 // a (possibly non-contiguous) View.  Contiguous views short-circuit
 // to flat_idx + offset; strided views walk per-axis strides.
 fn u32 view_strided_index(View const *v, u32 flat_idx);
+// Chain-aware index for a TenDesc's full ShapeTracker.  When
+// nviews == 0, equivalent to view_strided_index(&t->view, ...).
+fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).

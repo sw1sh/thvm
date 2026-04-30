@@ -28,3 +28,18 @@ fn u32 view_strided_index(View const *v, u32 flat_idx) {
   }
   return (u32)acc;
 }
+
+// Chain-aware index for a TenDesc's full ShapeTracker
+// (`view` + `prior_views[0..nviews)`).  Walks outermost-to-innermost
+// matching tinygrad's `views_to_indexed_uops`: each step takes the
+// current flat index, unravels through the next inner view's shape
+// to apply its strides+offset, producing the next inner flat index.
+// prior_views[0] is the innermost; its output is the underlying
+// buffer index.  When nviews == 0 this collapses to view_strided_index.
+fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx) {
+  u32 idx = view_strided_index(&t->view, flat_idx);
+  for (i32 i = (i32)t->nviews - 1; i >= 0; i--) {
+    idx = view_strided_index(&t->prior_views[i], idx);
+  }
+  return idx;
+}

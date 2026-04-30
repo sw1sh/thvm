@@ -36,8 +36,8 @@ static DTypeInfo const DTYPE_INFO[32] = {
     [DT_BF16]      = { 2, DK_BF16,    16, 1, "bf16"     },
     [DT_FP32]      = { 4, DK_FLOAT,    32, 1, "f32"      },
     [DT_FP64]      = { 8, DK_FLOAT,    64, 1, "f64"      },
-    [DT_INT4]      = { 0, DK_RESERVED, 0,  0, "i4"       },  // wired in Phase F
-    [DT_UINT4]     = { 0, DK_RESERVED, 0,  0, "u4"       },  // wired in Phase F
+    [DT_INT4]      = { 0, DK_INT4,    4,  1, "i4"       },
+    [DT_UINT4]     = { 0, DK_UINT4,   4,  0, "u4"       },
 };
 
 _Static_assert(DT_COUNT <= 32, "dtype id must fit a 6-bit ext field with headroom");

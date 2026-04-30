@@ -45,6 +45,14 @@ void to_fp32_lane(f32 *dst, void const *src, u32 dt, u32 n) {
                       for (u32 i = 0; i < n; i++) dst[i] = (f32)s[i]; break; }
     case DT_UINT64: { u64 const *s = (u64 const *)src;
                       for (u32 i = 0; i < n; i++) dst[i] = (f32)s[i]; break; }
+    case DT_INT4:   { i8 *tmp = (i8 *)malloc((size_t)n);
+                      unpack_int4(tmp, (u8 const *)src, n);
+                      for (u32 i = 0; i < n; i++) dst[i] = (f32)tmp[i];
+                      free(tmp); break; }
+    case DT_UINT4:  { u8 *tmp = (u8 *)malloc((size_t)n);
+                      unpack_uint4(tmp, (u8 const *)src, n);
+                      for (u32 i = 0; i < n; i++) dst[i] = (f32)tmp[i];
+                      free(tmp); break; }
     default:
       fprintf(stderr, "to_fp32_lane: dtype %u not yet wired\n", dt);
       abort();
@@ -82,6 +90,14 @@ void from_fp32_lane(void *dst, u32 dt, f32 const *src, u32 n) {
                       for (u32 i = 0; i < n; i++) d[i] = (i64)src[i]; break; }
     case DT_UINT64: { u64 *d = (u64 *)dst;
                       for (u32 i = 0; i < n; i++) d[i] = (u64)src[i]; break; }
+    case DT_INT4:   { i8 *tmp = (i8 *)malloc((size_t)n);
+                      for (u32 i = 0; i < n; i++) tmp[i] = (i8)src[i];
+                      pack_int4((u8 *)dst, tmp, n);
+                      free(tmp); break; }
+    case DT_UINT4:  { u8 *tmp = (u8 *)malloc((size_t)n);
+                      for (u32 i = 0; i < n; i++) tmp[i] = (u8)src[i];
+                      pack_uint4((u8 *)dst, tmp, n);
+                      free(tmp); break; }
     default:
       fprintf(stderr, "from_fp32_lane: dtype %u not yet wired\n", dt);
       abort();

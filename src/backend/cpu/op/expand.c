@@ -66,6 +66,10 @@ static inline void expand_index_walker(u32 oi, u8 ndim,
 
 fn void cpu_op_expand(void *out, void **srcs, u32 const *src_numels,
                       KProgOp const *p, u32 out_numel) {
+  if (dtype_is_packed(p->dtype)) {
+    cpu_op_run_via_i8(cpu_op_expand, out, srcs, src_numels, p, out_numel);
+    return;
+  }
   void *src = srcs[0];
   u32 in_numel = src_numels[0];
   u8 use_axis_aware = (p->out_ndim > 0)

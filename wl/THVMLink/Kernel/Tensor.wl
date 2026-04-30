@@ -39,6 +39,11 @@ TRealToFP8E5M2::usage = "TRealToFP8E5M2[reals] packs a list of Reals into a Nume
 TFP8E4M3ToReal::usage = "TFP8E4M3ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e4m3 bytes into a Real list.";
 TFP8E5M2ToReal::usage = "TFP8E5M2ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e5m2 bytes into a Real list.";
 
+TPackInt4::usage   = "TPackInt4[ints] packs a list of Integers in [-8, 7] into a UnsignedInteger8 NumericArray of packed nibbles (2 elements per byte, low nibble first).";
+TPackUInt4::usage  = "TPackUInt4[ints] packs a list of Integers in [0, 15] into a UnsignedInteger8 NumericArray of packed nibbles.";
+TUnpackInt4::usage = "TUnpackInt4[na, numel] unpacks `numel` signed nibbles from a packed-byte NumericArray into a list of Integers.";
+TUnpackUInt4::usage= "TUnpackUInt4[na, numel] unpacks `numel` unsigned nibbles into a list of Integers.";
+
 TUOpCast::usage    = "TUOpCast[src, dtype] returns a UOP node that value-preservingly casts `src` to the named dtype.  Backward gradient (under TGrad) is a CAST back to src.dtype, matching tinygrad's Ops.CAST rule.";
 TUOpBitcast::usage = "TUOpBitcast[src, dtype] returns a UOP node that bit-level reinterprets `src` as the named dtype.  Source and destination must share itemsize.  Backward gradient is zero (BITCAST has no value-preserving gradient).";
 
@@ -386,6 +391,10 @@ TRealToFP8E4M3[xs_List]           := (ensureInit[]; $fp8PackFn  [N @ xs, $DTFp8E
 TRealToFP8E5M2[xs_List]           := (ensureInit[]; $fp8PackFn  [N @ xs, $DTFp8E5M2])
 TFP8E4M3ToReal[na_NumericArray]   := (ensureInit[]; $fp8UnpackFn[na,    $DTFp8E4M3])
 TFP8E5M2ToReal[na_NumericArray]   := (ensureInit[]; $fp8UnpackFn[na,    $DTFp8E5M2])
+TPackInt4   [xs_List]                       := (ensureInit[]; $int4PackFn  [Round @ Flatten[{xs}], $DTInt4])
+TPackUInt4  [xs_List]                       := (ensureInit[]; $int4PackFn  [Round @ Flatten[{xs}], $DTUInt4])
+TUnpackInt4 [na_NumericArray, numel_Integer]:= (ensureInit[]; $int4UnpackFn[na, $DTInt4,  numel])
+TUnpackUInt4[na_NumericArray, numel_Integer]:= (ensureInit[]; $int4UnpackFn[na, $DTUInt4, numel])
 
 TTensorCreate[data_]                       := (
     ensureInit[];
@@ -393,9 +402,12 @@ TTensorCreate[data_]                       := (
 
 TTensorCreate[data_, dtype_String]         := (
     ensureInit[];
-    Module[{na, useTyped, normalized, shape, flatNa, t},
+    Module[{na, useTyped, normalized, shape, flatNa, t, logicalShape},
         useTyped = MemberQ[{"f16", "bf16", "fp8e4m3", "fp8e5m2",
                             "i4", "u4", "bool"}, dtype];
+        logicalShape = If[ MatchQ[data, _NumericArray],
+            Dimensions[data], Dimensions[data]];
+        If[ logicalShape === {}, logicalShape = {Length @ Flatten[{data}]}];
         Which[
             (* f16 / bf16: data may already be a packed UnsignedInteger16
                NumericArray, OR a nested list of Reals to be packed
@@ -423,13 +435,25 @@ TTensorCreate[data_, dtype_String]         := (
                 na = If[ shape === {},
                     flatNa,
                     NumericArray[ArrayReshape[Normal[flatNa], shape], "UnsignedInteger8"]],
+            dtype === "i4" || dtype === "u4",
+                normalized = If[ MatchQ[data, _NumericArray], Normal[data], data];
+                shape = Dimensions[normalized];
+                (* Storage: ceil(numel / 2) bytes packed, 1D. *)
+                na = If[ dtype === "i4",
+                    TPackInt4 [Round @ Flatten[normalized]],
+                    TPackUInt4[Round @ Flatten[normalized]]];
+                (* Stash logical shape on the tensor; tensor_from_na_typed
+                   keeps the byte-flat NA shape, but TTensorShape returns
+                   the logical shape we set after alloc.  Re-impose by
+                   reshaping the freshly-allocated tensor's view below. *)
+                ,
             (* Default int / float path: coerce through the NA carrier. *)
             True,
                 normalized = If[ MatchQ[data, _NumericArray], Normal[data], data];
                 na = NumericArray[normalized, naTypeFor[dtype]]
         ];
         If[ useTyped,
-            TTerm[$tensorFromNATypedFn[na, dtypeCode[dtype]]],
+            TTerm[$tensorFromNATypedFn[na, dtypeCode[dtype], logicalShape]],
             TTerm[$tensorFromNAFn[na]]
         ]
     ])

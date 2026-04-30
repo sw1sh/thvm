@@ -525,7 +525,16 @@ static u32 const_to_tendesc(u64 const_loc) {
 static u32 view_resolve(Term t) {
   if (CURRENT_BACKEND == NULL || !CURRENT_BACKEND->view_aware) return 0;
   u8 tag = term_tag(t);
-  if (tag == TAG_TEN) return (u32)term_val(t);
+  if (tag == TAG_TEN) {
+    u32 tid = (u32)term_val(t);
+    // Packed nibble dtypes can't ride the view-only path: every
+    // gather step in materialize_root_alias and the cpu_interpret
+    // pre-mat loop is byte-aligned (1/2/4/8) and packed itemsize
+    // is 0.  Force a kernel emit so cpu_op_run_via_i8 handles the
+    // unpack/repack for movement ops.
+    if (tid != 0 && tid < TENS_NEXT && dtype_is_packed(TENS[tid].dtype)) return 0;
+    return tid;
+  }
   if (tag != TAG_UOP) return 0;
 
   u8  op  = term_ext(t);
@@ -558,8 +567,28 @@ static u32 view_resolve(Term t) {
     case UOP_FLIP:    ok = view_apply_flip   (src_view, loc, &nv); break;
     default: return 0;                      // PAD + non-movement ops bail
   }
-  if (!ok) return 0;
-  return tensor_view_of(src_tid, nv);
+  if (ok) return tensor_view_of(src_tid, nv);
+
+  // Single-view absorb failed.  For RESHAPE (the only op whose math
+  // genuinely requires a contig source), fall back to the
+  // ShapeTracker chain: APPEND a fresh canonical view at the front,
+  // pushing the existing (non-contig) view onto prior_views.
+  // tendesc_strided_index then composes the user's flat index
+  // through both at dispatch time -- no buffer copy.  Mirrors
+  // tinygrad's `ShapeTracker(views + (View.create(new_shape),))`.
+  if (op == UOP_RESHAPE) {
+    u32 t_ndim  = (u32)term_val(heap_read(loc + 1));
+    Shape ts = {0}; ts.ndim = t_ndim;
+    u32 t_numel = 1;
+    for (u32 i = 0; i < t_ndim; i++) {
+      u32 d = (u32)term_val(heap_read(loc + 2 + i));
+      ts.dims[i] = d;
+      t_numel *= d;
+    }
+    if (t_numel != src_view->numel) return 0;   // numel must match
+    return tensor_view_chain_append(src_tid, view_create(ts));
+  }
+  return 0;
 }
 
 // True when a UOp opcode is one of the 5 view-only-path movement ops.
@@ -864,6 +893,14 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
         p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
         p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
       }
+    }
+    if (op == UOP_FLIP) {
+      // axes_mask sits in the wrapping UOP cell's ext field
+      // (uop_flip stuffs it via term_new's ext).  Wait -- actually
+      // uop_flip puts the mask in heap[loc+1] as a NUM cell.  Check
+      // the constructor.
+      Term mask_num = heap_read(loc + 1);
+      if (term_tag(mask_num) == TAG_NUM) p->arg = (u32)term_val(mask_num);
     }
     return ke->n_ops - 1;
   }

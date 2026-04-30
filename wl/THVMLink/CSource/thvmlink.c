@@ -577,6 +577,13 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
   mint dims[MAX_DIM];
   mint rank = (mint)d->view.shape.ndim;
   for (mint i = 0; i < rank; i++) dims[i] = (mint)d->view.shape.dims[i];
+  // Packed nibble dtypes: collapse to a flat byte count for the
+  // NumericArray.  WL reconstructs the logical shape via
+  // TTensorShape[]; the byte count = ceil(numel/2).
+  if (d->dtype == DT_INT4 || d->dtype == DT_UINT4) {
+    rank = 1;
+    dims[0] = (mint)dtype_storage_bytes(d->dtype, d->view.numel);
+  }
 
   numericarray_data_t t;
   switch (d->dtype) {
@@ -598,6 +605,13 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
     // fp8 rides on raw u8 bytes; decoded via TFP8E4M3ToReal etc.
     case DT_FP8E4M3:
     case DT_FP8E5M2: t = MNumericArray_Type_UBit8;  break;
+    // int4 / uint4: 2 nibbles per byte, packed.  Read returns the
+    // raw byte buffer; WL helpers (TUnpackInt4 etc.) walk the
+    // logical numel.  Shape carries the LOGICAL nibble count, so
+    // the returned NumericArray has length ceil(numel/2) -- callers
+    // must reconstruct the source numel from TTensorShape[].
+    case DT_INT4:
+    case DT_UINT4:   t = MNumericArray_Type_UBit8;  break;
     default:
       fprintf(stderr, "tensor_read: dtype %u (%s) not yet supported\n",
               d->dtype, dtype_name(d->dtype));
@@ -686,23 +700,25 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
 }
 
 // Variant of tensor_from_na that overrides the inferred dtype from
-// the NumericArray type.  Used by f16 / bf16 / fp8 (and later int4)
-// where the WL surface carries the bytes in a generic Unsigned*
-// NumericArray and the dtype tag is supplied separately.  The byte
-// layout must match: numel * dtype_storage_bytes(dtype, 1) bytes for
-// byte-aligned dtypes, ceil(numel/2) bytes for packed nibbles.
+// the NumericArray type and accepts an explicit logical shape.
+// Used by f16 / bf16 / fp8 / int4 / uint4 where the WL surface
+// carries the bytes in a generic Unsigned* NumericArray and the
+// dtype tag is supplied separately.  For packed nibble dtypes the
+// NumericArray has shape = ceil(numel/2) bytes (1D) but the logical
+// shape is multi-dimensional and must be passed via shape_arg.
 EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na_typed(WolframLibraryData libData, mint argc,
                                                     MArgument *args, MArgument res) {
   (void)argc;
   MNumericArray na = MArgument_getMNumericArray(args[0]);
   mint dtype_arg   = MArgument_getInteger(args[1]);
+  MTensor sh       = MArgument_getMTensor(args[2]);
   const struct st_WolframNumericArrayLibrary_Functions *naf
       = libData->numericarrayLibraryFunctions;
 
-  mint rank        = naf->MNumericArray_getRank(na);
-  mint const *naDims = naf->MNumericArray_getDimensions(na);
-  void *naData     = naf->MNumericArray_getData(na);
-  u32 dtype        = (u32)dtype_arg;
+  mint *shape_dims  = libData->MTensor_getIntegerData(sh);
+  mint  shape_rank  = libData->MTensor_getFlattenedLength(sh);
+  void *naData      = naf->MNumericArray_getData(na);
+  u32   dtype       = (u32)dtype_arg;
 
   if (TENS_NEXT >= TENS_CAP) {
     fprintf(stderr, "tensor_from_na_typed: out of descriptor slots\n");
@@ -711,9 +727,9 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na_typed(WolframLibraryData libData, 
   u32 id = TENS_NEXT++;
   TenDesc *d = &TENS[id];
   Shape shape;
-  shape.ndim = (u32)rank;
-  for (mint i = 0; i < rank && i < MAX_DIM; i++) shape.dims[i] = (u32)naDims[i];
-  for (mint i = rank; i < MAX_DIM; i++)          shape.dims[i] = 0;
+  shape.ndim = (u32)shape_rank;
+  for (mint i = 0; i < shape_rank && i < MAX_DIM; i++) shape.dims[i] = (u32)shape_dims[i];
+  for (mint i = shape_rank; i < MAX_DIM; i++)          shape.dims[i] = 0;
   d->dtype    = dtype;
   d->refcount = 1;
   d->view     = view_create(shape);
@@ -797,6 +813,66 @@ EXTERN_C DLLEXPORT int thvm_wl_fp16_unpack(WolframLibraryData libData, mint argc
   for (mint i = 0; i < n; i++) {
     f32 v = (dtype_code == DT_BF16) ? bf16_to_f32(src[i]) : fp16_to_f32(src[i]);
     dst[i] = (double)v;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// Pack a list of Integers (-8..7 for int4, 0..15 for uint4) into a
+// UnsignedInteger8 NumericArray of packed nibbles.  Inverse unpacks
+// back to a list of Integers (sign-extended for int4).  Logical
+// numel is implicit in the source list length; storage byte count
+// = ceil(numel/2).
+EXTERN_C DLLEXPORT int thvm_wl_int4_pack(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)argc;
+  MTensor data    = MArgument_getMTensor(args[0]);
+  mint dtype_code = MArgument_getInteger(args[1]);
+  mint n          = libData->MTensor_getFlattenedLength(data);
+  mint *src       = libData->MTensor_getIntegerData(data);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+      = libData->numericarrayLibraryFunctions;
+  mint nbytes     = (n + 1) / 2;
+  MNumericArray out;
+  naf->MNumericArray_new(MNumericArray_Type_UBit8, 1, &nbytes, &out);
+  u8 *dst = (u8 *)naf->MNumericArray_getData(out);
+  if (dtype_code == DT_INT4) {
+    i8 *tmp = (i8 *)malloc((size_t)n);
+    for (mint i = 0; i < n; i++) tmp[i] = (i8)src[i];
+    pack_int4(dst, tmp, (u32)n);
+    free(tmp);
+  } else {
+    u8 *tmp = (u8 *)malloc((size_t)n);
+    for (mint i = 0; i < n; i++) tmp[i] = (u8)src[i];
+    pack_uint4(dst, tmp, (u32)n);
+    free(tmp);
+  }
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_int4_unpack(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)argc;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  mint dtype_code  = MArgument_getInteger(args[1]);
+  mint logical_n   = MArgument_getInteger(args[2]);   // logical nibble count
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+      = libData->numericarrayLibraryFunctions;
+  u8 *src = (u8 *)naf->MNumericArray_getData(na);
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, &logical_n, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  if (dtype_code == DT_INT4) {
+    i8 *tmp = (i8 *)malloc((size_t)logical_n);
+    unpack_int4(tmp, src, (u32)logical_n);
+    for (mint i = 0; i < logical_n; i++) dst[i] = (mint)tmp[i];
+    free(tmp);
+  } else {
+    u8 *tmp = (u8 *)malloc((size_t)logical_n);
+    unpack_uint4(tmp, src, (u32)logical_n);
+    for (mint i = 0; i < logical_n; i++) dst[i] = (mint)tmp[i];
+    free(tmp);
   }
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;

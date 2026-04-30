@@ -72,6 +72,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "dtype/int_kernels.h"
 #include "dtype/fp_convert.c"
 #include "dtype/fp8.c"
+#include "dtype/nibble.c"
 #include "dtype/lane.c"
 
 // === heap/ ===

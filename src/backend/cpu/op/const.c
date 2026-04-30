@@ -31,6 +31,16 @@ fn void cpu_op_const(void *out, void **srcs, u32 const *src_numels,
     case DT_UINT32: ((u32 *)out)[0] = (u32)p->arg;                            break;
     case DT_INT64:  ((i64 *)out)[0] = (i64)(int32_t)p->arg;                   break;
     case DT_UINT64: ((u64 *)out)[0] = (u64)p->arg;                            break;
+    case DT_INT4:   {
+      i8 v8 = (i8)((i32)p->arg);
+      pack_int4((u8 *)out, &v8, 1);
+      break;
+    }
+    case DT_UINT4:  {
+      u8 v8 = (u8)(p->arg & 0xFu);
+      pack_uint4((u8 *)out, &v8, 1);
+      break;
+    }
     case DT_FP16:
     case DT_BF16:
     case DT_FP64:
