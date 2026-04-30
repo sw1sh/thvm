@@ -257,6 +257,19 @@ static u32 emit_index(KernelEntry *ke, u32 dtype, u32 buf_id,
   }                                                                     \
   return 0;                                                             \
 } while (0)
+// Mid-emit bail: structural issue discovered after we started building
+// the scalar uop graph.  Frees any partial work and returns failure.
+// F-8d added these to surface the silent return-0 sites that were
+// previously masked by the legacy cpu_interpret fallback.
+#define RBAIL_MID(reason) do {                                          \
+  if (getenv("THVM_RANGEIFY_BAIL")) {                                   \
+    fprintf(stderr, "rangeify bail (mid-emit): " reason                 \
+            " (n_ops=%u onum=%u)\n",                                    \
+            ke ? ke->n_ops : 0,                                         \
+            ke ? ke->output_numel : 0);                                 \
+  }                                                                     \
+  rangeify_free(ke); return 0;                                          \
+} while (0)
 
 fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   if (ke == NULL || ke->n_ops == 0) return 0;
@@ -481,7 +494,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     reduce_range = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
     // Pre-reduce input shape = output_shape ++ {reduce_size}.
     in_ndim = os->ndim + 1;
-    if (in_ndim > MAX_DIM) { rangeify_free(ke); return 0; }
+    if (in_ndim > MAX_DIM) RBAIL_MID("reduce in_ndim > MAX_DIM");
     u32 in_dims[MAX_DIM + 1];
     for (u32 d = 0; d < os->ndim; d++) in_dims[d] = os->dims[d];
     in_dims[os->ndim] = reduce_size;
@@ -492,7 +505,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   u32 out_buf = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, ke->output_dtype, 0);
   u32 out_index = emit_index(ke, ke->output_dtype, out_buf,
                              loop_ranges, loop_strides, os->ndim);
-  if (out_index == 0) { rangeify_free(ke); return 0; }
+  if (out_index == 0) RBAIL_MID("out INDEX emit failed");
 
   // 3. Per-input load expressions.  Two parallel tables when an
   // input is used in BOTH scopes:
@@ -507,7 +520,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   u32 input_load_pre [KERNEL_INIT_INPUT * 4] = {0};
   u32 input_load_post[KERNEL_INIT_INPUT * 4] = {0};
   if (ke->n_inputs > sizeof(input_load_pre) / sizeof(input_load_pre[0])) {
-    rangeify_free(ke); return 0;
+    RBAIL_MID("n_inputs > KERNEL_INIT_INPUT*4");
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 dtype    = ke->input_dtypes[i];
@@ -535,7 +548,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (in_numel == 1) {
         u32 src[1] = {param};
         u64 packed = pack_index_extra(NULL, 0, in_off);
-        if (packed == UINT64_MAX) { rangeify_free(ke); return 0; }
+        if (packed == UINT64_MAX) RBAIL_MID("pre-INDEX scalar offset > u16");
         idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, packed);
       } else if (in_numel == onum && red->numel == 1
                  && in_numel == reduce_size) {
@@ -563,7 +576,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // For inner == 1 the reduce axis is trailing (Phase C-1
         // case); for inner > 1 it sits in the middle (Conv2D-
         // backward over batch, etc.).
-        if (v->shape.ndim != in_ndim) { rangeify_free(ke); return 0; }
+        if (v->shape.ndim != in_ndim) RBAIL_MID("pre-reduce input ndim != in_ndim");
         // Find the largest k in [0, in_ndim) with
         //   product(dims[k+1 .. in_ndim-1]) == reduce_inner.
         // For inner=1 -> k = in_ndim - 1 (trailing axis); for inner
@@ -578,7 +591,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             partial *= v->shape.dims[k];
           }
         }
-        if (reduce_axis >= in_ndim) { rangeify_free(ke); return 0; }
+        if (reduce_axis >= in_ndim) RBAIL_MID("reduce_axis search exhausted");
         // Build r_ids in INPUT-axis order: input axis -> range id.
         // input axes [0..reduce_axis-1] come from output axes
         // [0..reduce_axis-1]; input axis reduce_axis is the REDUCE
@@ -600,7 +613,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           else if (d == reduce_axis) expected_dim = reduce_size;
           else                       expected_dim = os->dims[d - 1];
           if (v->shape.dims[d] != expected_dim && v->strides[d] != 0) {
-            rangeify_free(ke); return 0;
+            RBAIL_MID("pre-reduce dim mismatch (non-broadcast)");
           }
           r_strides[d] = (u32)v->strides[d];
         }
@@ -616,7 +629,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         for (u32 d = 0; d < os->ndim; d++) {
           if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0
               && !input_via_padshrink[i]) {
-            rangeify_free(ke); return 0;
+            RBAIL_MID("pre-INDEX shape mismatch (non-broadcast)");
           }
           strides_u32[d] = (u32)v->strides[d];
         }
@@ -626,9 +639,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // No supported pre-INDEX shape branch matched.  Bailing
         // here is safer than emitting wrong addresses with
         // canonical loop_strides.
-        rangeify_free(ke); return 0;
+        RBAIL_MID("pre-INDEX no branch matched");
       }
-      if (idx == 0) { rangeify_free(ke); return 0; }
+      if (idx == 0) RBAIL_MID("pre-INDEX emit failed");
       input_load_pre[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
     }
 
@@ -644,14 +657,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (in_numel == 1) {
         u32 src[1] = {param};
         u64 packed = pack_index_extra(NULL, 0, in_off);
-        if (packed == UINT64_MAX) { rangeify_free(ke); return 0; }
+        if (packed == UINT64_MAX) RBAIL_MID("post-INDEX scalar offset > u16");
         idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, packed);
       } else if (v->shape.ndim == os->ndim) {
         u32 strides_u32[MAX_DIM];
         for (u32 d = 0; d < os->ndim; d++) {
           if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0
               && !input_via_padshrink[i]) {
-            rangeify_free(ke); return 0;
+            RBAIL_MID("post-INDEX shape mismatch (non-broadcast)");
           }
           strides_u32[d] = (u32)v->strides[d];
         }
@@ -662,9 +675,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
                                os->ndim, in_off);
       } else {
-        rangeify_free(ke); return 0;
+        RBAIL_MID("post-INDEX no branch matched");
       }
-      if (idx == 0) { rangeify_free(ke); return 0; }
+      if (idx == 0) RBAIL_MID("post-INDEX emit failed");
       input_load_post[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
     }
   }
@@ -677,7 +690,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // per-LOOP-element scalar level.
   u32 prog_value[KPROG_INIT_OPS * 4];
   if (ke->n_ops > sizeof(prog_value) / sizeof(prog_value[0])) {
-    rangeify_free(ke); return 0;
+    RBAIL_MID("n_ops > KPROG_INIT_OPS*4");
   }
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
@@ -715,7 +728,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // S_LOAD_RAW with that same INDEX so the raw narrow-FP bits
         // land in the register.
         u32 load_id = input_load[KSRC_INDEX(raw0)];
-        if (load_id == 0) { rangeify_free(ke); return 0; }
+        if (load_id == 0) RBAIL_MID("BITCAST narrow-FP source LOAD missing");
         u32 idx = ke->scalar_uops[load_id].src[0];
         prog_value[i] = rangeify_emit_unary(ke, S_LOAD_RAW, dtype, idx);
         continue;
@@ -723,10 +736,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (dst_is_narrow || src_is_narrow_input) {
         // narrow-FP intermediate-source case (no test today) or
         // BITCAST *into* a narrow FP -- bail.
-        if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "rangeify bail (mid-emit): BITCAST narrow-FP\n");
-        }
-        rangeify_free(ke); return 0;
+        RBAIL_MID("BITCAST narrow-FP");
       }
       // Fall through to the identity path below.
     }
@@ -742,7 +752,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
-      if (v == 0) { rangeify_free(ke); return 0; }
+      if (v == 0) RBAIL_MID("identity (EXPAND/RESHAPE/LOAD/BITCAST) src 0");
       prog_value[i] = v;
       continue;
     }
@@ -752,7 +762,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
-      if (v == 0) { rangeify_free(ke); return 0; }
+      if (v == 0) RBAIL_MID("CAST src 0");
       prog_value[i] = rangeify_emit_unary(ke, S_CAST, p->dtype, v);
       continue;
     }
@@ -766,10 +776,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
-      if (v == 0) { rangeify_free(ke); return 0; }
+      if (v == 0) RBAIL_MID("SHRINK/PAD src 0");
       u32 ndim = p->out_ndim;
       if (ndim == 0) ndim = os->ndim;
-      if (ndim > 3 || ndim > os->ndim) { rangeify_free(ke); return 0; }
+      if (ndim > 3 || ndim > os->ndim) RBAIL_MID("SHRINK/PAD ndim > 3");
       // Pack offsets.  S_SHRINK uses u16 per axis (matches
       // pad_widths' begin field).  S_PAD packs (begin u8, src_dim
       // u8) per axis -- src_dim from p->src0_dims is what the
@@ -780,7 +790,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         sop = S_SHRINK;
         for (u32 d = 0; d < ndim; d++) {
           u32 begin = p->pad_widths[2 * d];
-          if (begin > 0xFFFFu) { rangeify_free(ke); return 0; }
+          if (begin > 0xFFFFu) RBAIL_MID("SHRINK begin > u16");
           extra |= ((u64)begin & 0xFFFFu) << (16 * d);
         }
       } else {
@@ -790,7 +800,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         for (u32 d = 0; d < ndim; d++) {
           u32 begin   = p->pad_widths[2 * d];
           u32 src_dim = p->src0_dims [d];
-          if (begin > 0xFFu || src_dim > 0xFFu) { rangeify_free(ke); return 0; }
+          if (begin > 0xFFu || src_dim > 0xFFu) RBAIL_MID("PAD begin/src_dim > u8");
           extra |= ((u64)begin   & 0xFFu) << (16 * d);
           extra |= ((u64)src_dim & 0xFFu) << (16 * d + 8);
         }
@@ -810,10 +820,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
-      if (v == 0) { rangeify_free(ke); return 0; }
+      if (v == 0) RBAIL_MID("FLIP src 0");
       u32 ndim = p->out_ndim ? p->out_ndim : os->ndim;
       // Cap at 8 axes -- bitmask is u8, and SCALAR_MAX_SRC = MAX_DIM+1.
-      if (ndim > 8 || ndim > os->ndim) { rangeify_free(ke); return 0; }
+      if (ndim > 8 || ndim > os->ndim) RBAIL_MID("FLIP ndim > 8");
       u64 axes_mask = (u64)(p->arg & 0xFFu);
       u32 src_arr[SCALAR_MAX_SRC] = {v};
       for (u32 d = 0; d < ndim; d++) src_arr[1 + d] = loop_ranges[d];
@@ -827,7 +837,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 raw = p->src[0];
       u32 body = KSRC_IS_INPUT(raw) ? input_load_pre[KSRC_INDEX(raw)]
                                     : prog_value[KSRC_INDEX(raw)];
-      if (body == 0) { rangeify_free(ke); return 0; }
+      if (body == 0) RBAIL_MID("REDUCE body 0");
       u32 src[2] = {body, reduce_range};
       u8  sop    = (reduce_kind == REDUCE_MAX) ? S_REDUCE_MAX : S_REDUCE_SUM;
       prog_value[i] = rangeify_emit(ke, sop, dtype, 2, src, 0);
@@ -839,7 +849,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 raw = p->src[s];
       if (KSRC_IS_INPUT(raw)) {
         src_v[s] = input_load[KSRC_INDEX(raw)];
-        if (src_v[s] == 0) { rangeify_free(ke); return 0; }
+        if (src_v[s] == 0) RBAIL_MID("ALU input src 0");
       } else {
         src_v[s] = prog_value[KSRC_INDEX(raw)];
       }
@@ -855,14 +865,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_LOG2:   sop = S_LOG2;  break;
       case UOP_CMPLT:  sop = S_CMPLT; break;
       case UOP_CMPEQ:  sop = S_CMPEQ; break;
-      default: rangeify_free(ke); return 0;
+      default: RBAIL_MID("ALU opcode unhandled in late switch");
     }
     if (p->n_src == 1) {
       prog_value[i] = rangeify_emit_unary(ke, sop, dtype, src_v[0]);
     } else if (p->n_src == 2) {
       prog_value[i] = rangeify_emit_binary(ke, sop, dtype, src_v[0], src_v[1]);
     } else {
-      rangeify_free(ke); return 0;
+      RBAIL_MID("ALU n_src not in {1,2}");
     }
   }
 
