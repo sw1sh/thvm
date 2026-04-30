@@ -259,13 +259,25 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   if (ke == NULL || ke->n_ops == 0) return 0;
   // f32 only -- the scalar interpreter's bit-cast path would silently
   // misinterpret other dtypes.
-  if (ke->output_dtype != DT_FP32) RBAIL_PRE("non-f32 output");
+  // Phase F-5 supported dtypes: bool / int (8/16/32/64 signed +
+  // unsigned) / fp32 / fp64.  Reject the special FP formats
+  // (fp16/bf16/fp8) and packed nibbles (int4/uint4) for now -- those
+  // need bit-width-aware load/store paths in cpu_dispatch_scalar
+  // beyond the current 1/2/4/8-byte memcpy.
+#define RANGEIFY_SUPPORTED_DTYPE(dt)                                          \
+  ((dt) == DT_BOOL    || (dt) == DT_INT8   || (dt) == DT_UINT8             \
+   || (dt) == DT_INT16  || (dt) == DT_UINT16                                  \
+   || (dt) == DT_INT32  || (dt) == DT_UINT32                                  \
+   || (dt) == DT_INT64  || (dt) == DT_UINT64                                  \
+   || (dt) == DT_FP32   || (dt) == DT_FP64)
+  if (!RANGEIFY_SUPPORTED_DTYPE(ke->output_dtype)) RBAIL_PRE("output dtype");
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_dtypes[i] != DT_FP32) RBAIL_PRE("non-f32 input");
+    if (!RANGEIFY_SUPPORTED_DTYPE(ke->input_dtypes[i])) RBAIL_PRE("input dtype");
   }
   for (u32 i = 0; i < ke->n_ops; i++) {
-    if (ke->program[i].dtype != DT_FP32) RBAIL_PRE("non-f32 op");
+    if (!RANGEIFY_SUPPORTED_DTYPE(ke->program[i].dtype)) RBAIL_PRE("op dtype");
   }
+#undef RANGEIFY_SUPPORTED_DTYPE
   // Phase B/C/D supported opcodes: elementwise + (one) REDUCE +
   // movement-as-identity (EXPAND, RESHAPE).  Movement ops between
   // contig shapes are no-ops at the scalar level since the flat

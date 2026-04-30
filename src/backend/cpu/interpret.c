@@ -253,6 +253,124 @@ static u64 eval_index(ScalarCtx *c, ScalarUop const *u) {
   return ((u64)slot << 32) | (u64)addr;
 }
 
+// === per-dtype LOAD / STORE helpers =================================
+// Read / write one element of `dtype` at `(p + off * itemsize)`.  The
+// returned u64 holds the raw bits (zero-extended for narrow ints,
+// FP bit-cast for floats).  Used by S_LOAD, S_STORE, and the REDUCE
+// inner loop's accumulator wiring.
+
+static u64 scalar_load_typed(const void *p, u32 off, u32 dtype) {
+  u32 esz = dtype_itemsize(dtype);
+  const u8 *base = (const u8 *)p + (size_t)off * esz;
+  switch (esz) {
+    case 1: { u8  v; memcpy(&v, base, 1); return (u64)v; }
+    case 2: { u16 v; memcpy(&v, base, 2); return (u64)v; }
+    case 4: { u32 v; memcpy(&v, base, 4); return (u64)v; }
+    case 8: { u64 v; memcpy(&v, base, 8); return v; }
+    default: return 0;
+  }
+}
+
+static void scalar_store_typed(void *p, u32 off, u32 dtype, u64 bits) {
+  u32 esz = dtype_itemsize(dtype);
+  u8 *base = (u8 *)p + (size_t)off * esz;
+  switch (esz) {
+    case 1: { u8  v = (u8 )bits; memcpy(base, &v, 1); break; }
+    case 2: { u16 v = (u16)bits; memcpy(base, &v, 2); break; }
+    case 4: { u32 v = (u32)bits; memcpy(base, &v, 4); break; }
+    case 8: memcpy(base, &bits, 8); break;
+  }
+}
+
+// Bit-cast u64 register slot to a typed C value and back.  These
+// macros let the per-op switch stay readable while still covering
+// the f32 / f64 / int8..int64 / uint8..uint64 dtype space.
+#define DECODE2(T, dst_a, dst_b)                                              \
+  T dst_a, dst_b;                                                              \
+  do { u64 _ab = eval_scalar(c, u->src[0]);                                    \
+       u64 _bb = eval_scalar(c, u->src[1]);                                    \
+       memcpy(&dst_a, &_ab, sizeof(T));                                        \
+       memcpy(&dst_b, &_bb, sizeof(T));                                        \
+  } while (0)
+#define DECODE1(T, dst_a)                                                      \
+  T dst_a;                                                                     \
+  do { u64 _ab = eval_scalar(c, u->src[0]);                                    \
+       memcpy(&dst_a, &_ab, sizeof(T));                                        \
+  } while (0)
+#define ENCODE(T, val)                                                         \
+  do { u64 _r = 0; T _v = (val); memcpy(&_r, &_v, sizeof(T)); return _r; } while (0)
+#define ENCODE_BOOL(val)                                                       \
+  return (val) ? 1ULL : 0ULL
+
+// Per-dtype binary op dispatch.  `op_macro(a, b)` should compute the
+// result; `bool_op(a, b)` is the bool/int form for CMP.
+#define DISPATCH_FP_BINARY(op_macro)                                          \
+  switch (u->dtype) {                                                          \
+    case DT_FP32: { DECODE2(f32, a, b); ENCODE(f32, op_macro(a, b)); }        \
+    case DT_FP64: { DECODE2(f64, a, b); ENCODE(f64, op_macro(a, b)); }        \
+    case DT_INT8:   { DECODE2(i8 , a, b); ENCODE(i8 , (i8 )op_macro(a, b)); } \
+    case DT_UINT8:  { DECODE2(u8 , a, b); ENCODE(u8 , (u8 )op_macro(a, b)); } \
+    case DT_INT16:  { DECODE2(i16, a, b); ENCODE(i16, (i16)op_macro(a, b)); } \
+    case DT_UINT16: { DECODE2(u16, a, b); ENCODE(u16, (u16)op_macro(a, b)); } \
+    case DT_INT32:  { DECODE2(i32, a, b); ENCODE(i32, (i32)op_macro(a, b)); } \
+    case DT_UINT32: { DECODE2(u32, a, b); ENCODE(u32, (u32)op_macro(a, b)); } \
+    case DT_INT64:  { DECODE2(i64, a, b); ENCODE(i64, (i64)op_macro(a, b)); } \
+    case DT_UINT64: { DECODE2(u64, a, b); ENCODE(u64, (u64)op_macro(a, b)); } \
+    case DT_BOOL:   { DECODE2(u8 , a, b); ENCODE(u8 , (u8 )op_macro(a, b)); } \
+    default: return 0;                                                         \
+  }
+
+// Compare ops: per cpu_op_cmplt convention, the output dtype matches
+// the input dtype.  For FP32, the result bits are 1.0f / 0.0f
+// (NOT the integer 1/0).  For ints, just 1 / 0 of that width.
+#define DISPATCH_CMP(op_macro)                                                \
+  switch (u->dtype) {                                                          \
+    case DT_FP32: { DECODE2(f32, a, b); ENCODE(f32, op_macro(a, b) ? 1.0f : 0.0f); } \
+    case DT_FP64: { DECODE2(f64, a, b); ENCODE(f64, op_macro(a, b) ? 1.0  : 0.0 ); } \
+    case DT_INT8:   { DECODE2(i8 , a, b); ENCODE(i8 , (i8 )(op_macro(a, b) ? 1 : 0)); } \
+    case DT_UINT8:  { DECODE2(u8 , a, b); ENCODE(u8 , (u8 )(op_macro(a, b) ? 1 : 0)); } \
+    case DT_INT16:  { DECODE2(i16, a, b); ENCODE(i16, (i16)(op_macro(a, b) ? 1 : 0)); } \
+    case DT_UINT16: { DECODE2(u16, a, b); ENCODE(u16, (u16)(op_macro(a, b) ? 1 : 0)); } \
+    case DT_INT32:  { DECODE2(i32, a, b); ENCODE(i32, (i32)(op_macro(a, b) ? 1 : 0)); } \
+    case DT_UINT32: { DECODE2(u32, a, b); ENCODE(u32, (u32)(op_macro(a, b) ? 1 : 0)); } \
+    case DT_INT64:  { DECODE2(i64, a, b); ENCODE(i64, (i64)(op_macro(a, b) ? 1 : 0)); } \
+    case DT_UINT64: { DECODE2(u64, a, b); ENCODE(u64, (u64)(op_macro(a, b) ? 1 : 0)); } \
+    case DT_BOOL:   { DECODE2(u8 , a, b); ENCODE(u8 , (u8 )((op_macro((a)&1, (b)&1)) ? 1 : 0)); } \
+    default: return 0;                                                         \
+  }
+
+// FP-only dispatch (RECIP / SQRT / EXP2 / LOG2).  Integer types are
+// not meaningful and bail.
+#define DISPATCH_FP_UNARY(op_macro)                                           \
+  switch (u->dtype) {                                                          \
+    case DT_FP32: { DECODE1(f32, a); ENCODE(f32, op_macro(a)); }              \
+    case DT_FP64: { DECODE1(f64, a); ENCODE(f64, op_macro(a)); }              \
+    default: return 0;                                                         \
+  }
+
+// NEG: signed/FP unary minus.  Unsigned NEG wraps via two's complement.
+#define DISPATCH_NEG()                                                         \
+  switch (u->dtype) {                                                          \
+    case DT_FP32: { DECODE1(f32, a); ENCODE(f32, -a); }                       \
+    case DT_FP64: { DECODE1(f64, a); ENCODE(f64, -a); }                       \
+    case DT_INT8:   { DECODE1(i8 , a); ENCODE(i8 , (i8 )-a); }                \
+    case DT_UINT8:  { DECODE1(u8 , a); ENCODE(u8 , (u8 )(-(i32)a)); }         \
+    case DT_INT16:  { DECODE1(i16, a); ENCODE(i16, (i16)-a); }                \
+    case DT_UINT16: { DECODE1(u16, a); ENCODE(u16, (u16)(-(i32)a)); }         \
+    case DT_INT32:  { DECODE1(i32, a); ENCODE(i32, -a); }                     \
+    case DT_UINT32: { DECODE1(u32, a); ENCODE(u32, (u32)(-(i64)a)); }         \
+    case DT_INT64:  { DECODE1(i64, a); ENCODE(i64, -a); }                     \
+    case DT_UINT64: { DECODE1(u64, a); ENCODE(u64, 0u - a); }                 \
+    case DT_BOOL:   { DECODE1(u8 , a); ENCODE(u8 , (u8 )((~a) & 1)); }        \
+    default: return 0;                                                         \
+  }
+
+#define BINOP_ADD(a, b)     ((a) + (b))
+#define BINOP_MUL(a, b)     ((a) * (b))
+#define BINOP_LT(a, b)      ((a) <  (b))
+#define BINOP_EQ(a, b)      ((a) == (b))
+#define BINOP_LT_FLIP(a, b) ((a) >  (b))   // used by REDUCE_MAX inner loop
+
 static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
   if (op_id == 0) return 0;
   ScalarUop const *u = &c->ke->scalar_uops[op_id];
@@ -260,87 +378,118 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
     case S_RANGE:           return (u64)c->range_iter[op_id];
     case S_DEFINE_PARAM:    return u->extra;
     case S_DEFINE_OUTPUT:   return 0;
-    case S_CONST:           return u->extra & 0xFFFFFFFFu;
+    case S_CONST: {
+      // The u32 arg is encoded by materialize as either:
+      //   - raw FP32 bits (also reused for FP64 -- legacy
+      //     cpu_op_const converts via from_fp32_lane / explicit cast)
+      //   - sign-extended low 32 bits for INT/UINT
+      // Mirror that so single-precision-derived constants survive the
+      // f64 path (e.g. CONST(-1.0) is encoded as 0xBF800000 even for
+      // f64 outputs; we must cast f32->f64 to recover -1.0).
+      u32 bits = (u32)(u->extra & 0xFFFFFFFFu);
+      switch (u->dtype) {
+        case DT_FP32: return (u64)bits;
+        case DT_FP64: {
+          f32 v32; memcpy(&v32, &bits, 4);
+          f64 v64 = (f64)v32;
+          u64 r; memcpy(&r, &v64, 8); return r;
+        }
+        case DT_INT8:  case DT_INT16:
+        case DT_INT32: case DT_INT64:
+          // Sign-extend the low 32 bits.
+          return (u64)(i64)(i32)bits;
+        case DT_UINT8: case DT_UINT16: case DT_UINT32:
+        case DT_UINT64: case DT_BOOL:
+          return (u64)bits;
+        default: return (u64)bits;
+      }
+    }
     case S_INDEX:           return eval_index(c, u);
     case S_LOAD: {
       u64 idx_r = eval_scalar(c, u->src[0]);
       u32 slot  = (u32)(idx_r >> 32);
       u32 off   = (u32)(idx_r & 0xFFFFFFFFu);
       void *p   = c->in_ptrs[slot];
-      f32   v;
-      memcpy(&v, (const u8 *)p + off * 4, 4);
-      u32 bits; memcpy(&bits, &v, 4);
-      return (u64)bits;
+      u32 dtype = c->ke->input_dtypes[slot];
+      return scalar_load_typed(p, off, dtype);
     }
     case S_REDUCE_SUM:
     case S_REDUCE_MAX: {
-      // src[0] = body; src[1] = REDUCE-typed range.
       u32 rng_id = u->src[1];
       ScalarUop const *r = &c->ke->scalar_uops[rng_id];
       u32 extent = (u32)(r->extra & 0xFFFFFFFFu);
-      f32 acc    = (u->op == S_REDUCE_MAX) ? -INFINITY : 0.0f;
       u32 saved  = c->range_iter[rng_id];
-      for (u32 ri = 0; ri < extent; ri++) {
-        c->range_iter[rng_id] = ri;
-        u32 b = (u32)eval_scalar(c, u->src[0]);
-        f32 v; memcpy(&v, &b, 4);
-        if (u->op == S_REDUCE_MAX) acc = (v > acc ? v : acc);
-        else                       acc += v;
+      // Type-specific accumulator.  Iterate inside dtype branch.
+#define REDUCE_BODY(T, init_max, init_sum, cmpgt)                              \
+      do {                                                                     \
+        T acc = (u->op == S_REDUCE_MAX) ? (T)(init_max) : (T)(init_sum);       \
+        for (u32 ri = 0; ri < extent; ri++) {                                  \
+          c->range_iter[rng_id] = ri;                                          \
+          u64 b = eval_scalar(c, u->src[0]);                                   \
+          T v; memcpy(&v, &b, sizeof(T));                                      \
+          if (u->op == S_REDUCE_MAX) acc = cmpgt(v, acc) ? v : acc;            \
+          else                       acc = (T)(acc + v);                       \
+        }                                                                      \
+        c->range_iter[rng_id] = saved;                                         \
+        u64 _r = 0; memcpy(&_r, &acc, sizeof(T));                              \
+        return _r;                                                             \
+      } while (0)
+      switch (u->dtype) {
+        case DT_FP32:   REDUCE_BODY(f32, -INFINITY, 0.0f, BINOP_LT_FLIP);
+        case DT_FP64:   REDUCE_BODY(f64, -INFINITY, 0.0,  BINOP_LT_FLIP);
+        case DT_INT8:   REDUCE_BODY(i8 , INT8_MIN,   0,   BINOP_LT_FLIP);
+        case DT_UINT8:  REDUCE_BODY(u8 , 0,          0,   BINOP_LT_FLIP);
+        case DT_INT16:  REDUCE_BODY(i16, INT16_MIN,  0,   BINOP_LT_FLIP);
+        case DT_UINT16: REDUCE_BODY(u16, 0,          0,   BINOP_LT_FLIP);
+        case DT_INT32:  REDUCE_BODY(i32, INT32_MIN,  0,   BINOP_LT_FLIP);
+        case DT_UINT32: REDUCE_BODY(u32, 0,          0,   BINOP_LT_FLIP);
+        case DT_INT64:  REDUCE_BODY(i64, INT64_MIN,  0,   BINOP_LT_FLIP);
+        case DT_UINT64: REDUCE_BODY(u64, 0,          0,   BINOP_LT_FLIP);
+        case DT_BOOL:   REDUCE_BODY(u8 , 0,          0,   BINOP_LT_FLIP);
+        default:
+          c->range_iter[rng_id] = saved;
+          return 0;
       }
-      c->range_iter[rng_id] = saved;
-      u32 rb; memcpy(&rb, &acc, 4);
-      return (u64)rb;
+#undef REDUCE_BODY
     }
-    case S_ADD: {
-      f32 a, b;
-      u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      u32 bb = (u32)eval_scalar(c, u->src[1]); memcpy(&b, &bb, 4);
-      f32 r = a + b; u32 rb; memcpy(&rb, &r, 4); return rb;
-    }
-    case S_MUL: {
-      f32 a, b;
-      u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      u32 bb = (u32)eval_scalar(c, u->src[1]); memcpy(&b, &bb, 4);
-      f32 r = a * b; u32 rb; memcpy(&rb, &r, 4); return rb;
-    }
-    case S_NEG: {
-      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      f32 r = -a; u32 rb; memcpy(&rb, &r, 4); return rb;
-    }
+    case S_ADD:    DISPATCH_FP_BINARY(BINOP_ADD);
+    case S_MUL:    DISPATCH_FP_BINARY(BINOP_MUL);
+    case S_NEG:    DISPATCH_NEG();
     case S_RECIP: {
-      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      f32 r = 1.0f / a; u32 rb; memcpy(&rb, &r, 4); return rb;
+      switch (u->dtype) {
+        case DT_FP32: { DECODE1(f32, a); ENCODE(f32, 1.0f / a); }
+        case DT_FP64: { DECODE1(f64, a); ENCODE(f64, 1.0  / a); }
+        default: return 0;
+      }
     }
     case S_SQRT: {
-      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      f32 r = sqrtf(a); u32 rb; memcpy(&rb, &r, 4); return rb;
+      switch (u->dtype) {
+        case DT_FP32: { DECODE1(f32, a); ENCODE(f32, sqrtf(a)); }
+        case DT_FP64: { DECODE1(f64, a); ENCODE(f64, sqrt (a)); }
+        default: return 0;
+      }
     }
     case S_EXP2: {
-      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      f32 r = exp2f(a); u32 rb; memcpy(&rb, &r, 4); return rb;
+      switch (u->dtype) {
+        case DT_FP32: { DECODE1(f32, a); ENCODE(f32, exp2f(a)); }
+        case DT_FP64: { DECODE1(f64, a); ENCODE(f64, exp2 (a)); }
+        default: return 0;
+      }
     }
     case S_LOG2: {
-      f32 a; u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      f32 r = log2f(a); u32 rb; memcpy(&rb, &r, 4); return rb;
+      switch (u->dtype) {
+        case DT_FP32: { DECODE1(f32, a); ENCODE(f32, log2f(a)); }
+        case DT_FP64: { DECODE1(f64, a); ENCODE(f64, log2 (a)); }
+        default: return 0;
+      }
     }
-    case S_CMPLT: {
-      f32 a, b;
-      u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      u32 bb = (u32)eval_scalar(c, u->src[1]); memcpy(&b, &bb, 4);
-      f32 r = (a < b) ? 1.0f : 0.0f;
-      u32 rb; memcpy(&rb, &r, 4); return rb;
-    }
-    case S_CMPEQ: {
-      f32 a, b;
-      u32 ab = (u32)eval_scalar(c, u->src[0]); memcpy(&a, &ab, 4);
-      u32 bb = (u32)eval_scalar(c, u->src[1]); memcpy(&b, &bb, 4);
-      f32 r = (a == b) ? 1.0f : 0.0f;
-      u32 rb; memcpy(&rb, &r, 4); return rb;
-    }
+    case S_CMPLT:  DISPATCH_CMP(BINOP_LT);
+    case S_CMPEQ:  DISPATCH_CMP(BINOP_EQ);
     default:
       return 0;
   }
 }
+
 
 fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ke->scalar_uops == NULL || ke->n_scalar_uops < 2) return -1;
@@ -406,17 +555,13 @@ fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       u32 str = loop_strides[d];
       range_iter[loop_ids[d]] = (str > 0) ? ((k / str) % ext) : 0;
     }
-    // Evaluate the STORE: writes one element to out_p.
+    // Evaluate the STORE: writes one element to out_p.  Address +
+    // value width are both dtype-aware via scalar_store_typed.
     ScalarUop const *st = &ke->scalar_uops[store_id];
     u64 idx_r   = eval_scalar(&ctx, st->src[0]);
     u32 off     = (u32)(idx_r & 0xFFFFFFFFu);
-    u32 bits    = (u32)eval_scalar(&ctx, st->src[1]);
-    if (ctx.odtype == DT_FP32) {
-      f32 v; memcpy(&v, &bits, 4);
-      memcpy((u8 *)ctx.out_p + off * 4, &v, 4);
-    } else {
-      memcpy((u8 *)ctx.out_p + off * 4, &bits, 4);
-    }
+    u64 bits    = eval_scalar(&ctx, st->src[1]);
+    scalar_store_typed(ctx.out_p, off, ctx.odtype, bits);
   }
 
   free(range_iter);
