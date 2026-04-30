@@ -847,6 +847,17 @@ fn int kernel_autotune(u32 kid);
 // been autotuned yet) AND (proposer has at least one candidate).
 fn int kernel_should_autotune(struct KernelEntry const *ke);
 
+// Time `n_runs` back-to-back fires of `kid`; return min wallclock
+// us.  Used by autotune internally + exposed via LibraryLink for
+// the WL TKernelVariants surface.
+fn u64 kernel_bench_us(u32 kid, u32 n_runs);
+
+// Bench every proposer candidate (slot 0 = baseline, no opts) and
+// write per-variant (KOpt, us) into out_opts/out_us.  Returns the
+// number of slots written.  Restores axes to baseline at exit so
+// the WL caller can pick what to apply via TKernelApplyOpt.
+fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap);
+
 // === tensor/ ===
 // Tensor descriptor lifecycle.  Step 12: bump-only allocation in TENS[];
 // refcount + backend-level buffer refcount govern the buffer lifetime.

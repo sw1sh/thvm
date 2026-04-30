@@ -299,6 +299,36 @@ VerificationTest[
     TestID -> "kernel-opts/propose-reduce-no-upcast"
 ]
 
+(* === TKernelVariants[kid]: bench-and-report every candidate
+       without committing any opt.  Slot 0 is baseline; rest are
+       proposed candidates with measured WallUs. *)
+
+VerificationTest[
+    TInit[];
+    xT = TTensorCreate @ N @ Range[1024];
+    yT = TTensorCreate @ N @ Range[1024];
+    TRealize @ TUOpAdd[TUOpMul[xT, yT], TUOpMul[TUOpConst[2.0], xT]];
+    kid = TKernelCount[] - 1;
+    res = TKernelVariants[kid];
+    {(* Slot 0 is baseline (Opt -> None). *)
+     res[[1, 1]]["Opt"],
+     (* Subsequent slots match TKernelProposed candidates. *)
+     #["Opt"] & /@ res[[2 ;;, 1]],
+     (* Every variant has a measured WallUs. *)
+     AllTrue[ #["WallUs"] & /@ res[[All, 1]], # >= 0 &],
+     (* Inspect-only: axes left at baseline (Applied empty). *)
+     First[TKernelOpts[kid]]["Applied"]},
+    {None, TKernelProposed[kid], True, {}},
+    TestID -> "kernel-opts/variants-inspect-only"
+]
+
+VerificationTest[
+    !FreeQ[ToBoxes[TKernelVariant[<|"Kid" -> 1, "Opt" -> None, "WallUs" -> 0|>]],
+        InterpretationBox],
+    True,
+    TestID -> "kernel-opts/tkernelvariant-makeboxes-renders-summary"
+]
+
 (* === TKernelAutotuneAll[] sweeps every live kid, returns
        Association kid -> TKernelOpts.  Useful as a one-shot
        pre-warm before a training loop. *)

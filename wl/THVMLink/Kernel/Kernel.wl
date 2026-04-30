@@ -70,7 +70,11 @@ TKernelOpts::usage = "TKernelOpts[kid] returns a wrapped `TKernelOpts[<|\"Kid\",
 
 TKernelApplyOpt::usage = "TKernelApplyOpt[kid, TOpt[op, axis, arg]] mutates the kernel's C-side KernelAxes via axes_apply_opt: splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), swaps two axes (SWAP), or records the opt for the codegen consumer (PADTO/NOLOCALS/TC).  Returns the updated TKernelOpts wrapper.  Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg doesn't divide axis size, opts table full).";
 
-TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` candidates suggested by the C-side shape-heuristic proposer (`kernel_opts_propose` in `src/codegen/propose.c`).  Today's heuristics propose UNROLL on the reduce axis at factors {2, 4, 8, 16} where divisible; future passes add UPCAST / LOCAL / GROUP rules as the codegen variant emitter grows.  TKernelAutotune consumes this list.";
+TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` candidates suggested by the C-side shape-heuristic proposer (`kernel_opts_propose` in `src/codegen/propose.c`).  Today's heuristics propose UNROLL on the reduce axis at factors {2, 4, 8, 16} where divisible plus UPCAST on the output axis for elementwise kernels at the same factor set; future passes add LOCAL / GROUP rules as the codegen variant emitter grows.  TKernelAutotune / TKernelVariants consume this list.";
+
+TKernelVariant::usage = "TKernelVariant[<|\"Kid\" -> _, \"Opt\" -> TOpt | None, \"WallUs\" -> _Real|>] is a typed wrapper for one proposed-or-measured kernel variant.  Returned by TKernelVariants[kid].  Carries summary boxes so notebook output renders the (op, axis, arg) triple + measured wallclock per fire next to the kid.";
+
+TKernelVariants::usage = "TKernelVariants[kid] returns a list of TKernelVariant: one for the no-opt baseline followed by one per TKernelProposed candidate.  Each has WallUs measured by 5 back-to-back fires (min wallclock).  Like TKernelAutotune internally but reports every candidate's measurement instead of just applying the winner -- useful for inspecting what the proposer found and why a particular winner was picked.  Side effect: leaves the kernel's KernelAxes at the BASELINE (no opts applied) since the measurements imply the user wants to inspect, not commit.";
 
 TKernelAutotune::usage = "TKernelAutotune[kid] benchmarks every TKernelProposed candidate against the no-opt baseline (5 dispatches each, min wallclock), applies the winning TOpt to the kernel's C-side KernelAxes, and returns the resulting TKernelOpts.  Because axes live on the shared KpCacheSlot (per-program-shape sharing), the winner auto-applies to every other kid with the same KProgOp[] -- a training loop that emits one new kid per step inherits the autotuned variant from iter 2 onward.  Returns the unchanged TKernelOpts (no opts applied) if no candidate beat baseline.";
 
@@ -488,6 +492,30 @@ TKernelAutotune[kid_Integer] := (ensureInit[];
 
 TKernelAutotuneAll[] := (ensureInit[];
     Association[ Table[k -> TKernelAutotune[k], {k, 1, TKernelCount[] - 1}] ])
+
+(* Inspect-only sibling of TKernelAutotune: bench the no-opt
+   baseline + each TKernelProposed candidate via the C-side
+   kernel_bench_variants, return as a list of TKernelVariant.
+   Slot 0 is always the baseline (Opt -> None); subsequent
+   slots carry one TOpt each.  Leaves the kernel's axes at
+   baseline so the user can pick what to apply via
+   TKernelApplyOpt -- this is for inspection, not commit. *)
+TKernelVariants[kid_Integer] := (ensureInit[];
+    Module[{packed},
+        packed = Normal @ $kernelBenchVariantsFn[kid];
+        Table[
+            With[{op = packed[[4*(i - 1) + 1]],
+                  ax = packed[[4*(i - 1) + 2]],
+                  ar = packed[[4*(i - 1) + 3]],
+                  us = packed[[4*(i - 1) + 4]]},
+                TKernelVariant[<|
+                    "Kid"    -> kid,
+                    "Opt"    -> If[ op === 0, None, TOpt[kopName[op], ax, ar]],
+                    "WallUs" -> us
+                |>]],
+            {i, Length[packed]/4}
+        ]
+    ])
 
 
 (* All currently-live kernels' profiles, indexed by kid. *)

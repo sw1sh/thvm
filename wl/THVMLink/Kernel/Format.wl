@@ -19,7 +19,7 @@ BeginPackage["THVMLink`"];
    Format.wl resolve to fresh `Private` symbols (Format.wl < their
    owners alphabetically), so the MakeBoxes UpValues never fire on
    the public symbol the user actually constructs. *)
-{TOpt, TKernelOpts};
+{TOpt, TKernelOpts, TKernelVariant};
 
 Begin["`Private`"];
 
@@ -415,6 +415,57 @@ TKernelOpts /: MakeBoxes[k:TKernelOpts[a_Association] /; tKernelOptsQ[Unevaluate
                 {
                     BoxForm`SummaryItem[{"Applied: ", If[ applied === {}, "(none)", Column[applied]]}]
                 }
+            },
+            fmt,
+            "Interpretable" -> Automatic
+        ]
+    ]
+
+(* === TKernelVariant summary box ===
+   One row of the bench-the-candidates table: kid + (op, axis,
+   arg) (or "baseline" if Opt is None) + measured WallUs.  Tiny
+   bar icon scaled by speedup vs baseline -- Phase-16 inspection
+   surface so notebooks render the bench results compactly. *)
+
+tKernelVariantQ[TKernelVariant[a_Association]] := AllTrue[
+    {"Kid", "Opt", "WallUs"}, KeyExistsQ[a, #] &]
+tKernelVariantQ[___] := False
+
+tKernelVariantSummaryIcon[isBaseline_] := Graphics[
+    {
+        EdgeForm[LightDarkSwitched[Black, White]],
+        FaceForm @ If[ isBaseline,
+            LightDarkSwitched[Lighter[StandardGray,   0.5], Darker[StandardGray,   0.4]],
+            LightDarkSwitched[Lighter[StandardOrange, 0.5], Darker[StandardOrange, 0.4]]],
+        Rectangle[{-0.5, -0.5}, {0.5, 0.5}]
+    },
+    ImageSize -> Dynamic[{Automatic, 3.0 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
+TKernelVariant /: MakeBoxes[v:TKernelVariant[a_Association] /; tKernelVariantQ[Unevaluated[v]], fmt_] :=
+    With[{
+        kid  = a["Kid"],
+        opt  = a["Opt"],
+        us   = a["WallUs"],
+        icon = tKernelVariantSummaryIcon[a["Opt"] === None]
+    },
+        BoxForm`ArrangeSummaryBox[
+            "TKernelVariant",
+            v,
+            icon,
+            {
+                {
+                    BoxForm`SummaryItem[{"kid: ", kid}],
+                    BoxForm`SummaryItem[{"us: ",  us}]
+                },
+                {
+                    BoxForm`SummaryItem[{"opt: ",
+                        If[ opt === None, "baseline (no opts)", opt]}]
+                }
+            },
+            {
+                {BoxForm`SummaryItem[{"Opt full: ", If[ opt === None, "(none)", opt]}]}
             },
             fmt,
             "Interpretable" -> Automatic

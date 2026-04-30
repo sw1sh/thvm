@@ -1032,6 +1032,46 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_autotune(WolframLibraryData l, mint a,
   return LIBRARY_NO_ERROR;
 }
 
+// Bench: time n_runs back-to-back kid fires, return min wallclock us.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_bench_us(WolframLibraryData l, mint a,
+                                               MArgument *args, MArgument res) {
+  (void)l; (void)a;
+  u32 kid    = (u32)MArgument_getInteger(args[0]);
+  u32 n_runs = (u32)MArgument_getInteger(args[1]);
+  u64 us = (kid > 0 && kid < KERNELS_NEXT) ? kernel_bench_us(kid, n_runs) : 0;
+  MArgument_setInteger(res, (mint)us);
+  return LIBRARY_NO_ERROR;
+}
+
+// Bench every proposer candidate + the no-opt baseline.  Returns a
+// flat {Integer, 1} of (op, axis, arg, us) quads -- slot 0 is
+// baseline.  Restores axes to baseline at exit so WL TKernelVariants
+// can surface raw measurements without committing any opt.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_bench_variants(WolframLibraryData libData,
+                                                     mint argc, MArgument *args,
+                                                     MArgument res) {
+  (void)argc;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  KOpt opts[16];
+  u64  uss [16];
+  u32 n = 0;
+  if (kid > 0 && kid < KERNELS_NEXT) {
+    n = kernel_bench_variants(kid, opts, uss, (u32)(sizeof(opts)/sizeof(*opts)));
+  }
+  mint dims[1] = {(mint)(4 * n)};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u32 i = 0; i < n; i++) {
+    dst[4*i + 0] = (mint)opts[i].op;
+    dst[4*i + 1] = (mint)opts[i].axis;
+    dst[4*i + 2] = (mint)opts[i].arg;
+    dst[4*i + 3] = (mint)uss [i];
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 // Shape-heuristic proposer.  Returns a flat {Integer, 1} of (op,
 // axis, arg) triples; the WL surface decodes into a list of TOpt.
 // Empty result for kid 0 / out-of-range / kernels with no

@@ -36,7 +36,7 @@ static void axes_reset_to_default(KernelEntry *ke) {
 // Time `n_runs` back-to-back kernel_fire_by_id calls; return min
 // wallclock in microseconds.  Min (not mean) filters one-shot OS
 // jitter (page faults, scheduler hiccups).
-static u64 autotune_time_kernel(u32 kid, u32 n_runs) {
+fn u64 kernel_bench_us(u32 kid, u32 n_runs) {
   if (n_runs == 0) n_runs = 1;
   u64 best = (u64)-1;
   for (u32 i = 0; i < n_runs; i++) {
@@ -46,6 +46,46 @@ static u64 autotune_time_kernel(u32 kid, u32 n_runs) {
     if (dt < best) best = dt;
   }
   return best;
+}
+
+// Inspect-only sibling of kernel_autotune: bench the no-opt
+// baseline + each proposer candidate, write the per-variant
+// (op, axis, arg, us) tuple into out[].  Slot 0 is the baseline
+// (op = KOP_NONE).  Returns the number of slots written
+// (1 baseline + n_cand).  Restores axes to baseline at exit so
+// the user can pick what to apply via TKernelApplyOpt.
+fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
+  if (kid == 0 || kid >= KERNELS_NEXT || cap == 0) return 0;
+  KernelEntry *ke = &KERNELS[kid];
+  if (ke->axes == NULL) return 0;
+
+  KOpt cands[16];
+  u32 n_cand = kernel_opts_propose(ke, cands, sizeof(cands)/sizeof(*cands));
+  u32 n_out  = 1 + n_cand;
+  if (n_out > cap) n_out = cap;
+
+  // Baseline first.
+  axes_reset_to_default(ke);
+  kernel_fire_by_id(kid);                         // JIT warm
+  out_opts[0] = (KOpt){ KOP_NONE, 0, 0 };
+  out_us  [0] = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
+
+  // Each candidate.
+  for (u32 i = 0; i + 1 < n_out; i++) {
+    axes_reset_to_default(ke);
+    if (!axes_apply_opt(ke->axes, cands[i])) {
+      out_opts[i + 1] = (KOpt){ KOP_NONE, 0, 0 };
+      out_us  [i + 1] = 0;
+      continue;
+    }
+    kernel_fire_by_id(kid);
+    out_opts[i + 1] = cands[i];
+    out_us  [i + 1] = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
+  }
+
+  // Leave at baseline.
+  axes_reset_to_default(ke);
+  return n_out;
 }
 
 // Run propose -> bench -> apply-winner.  Returns 1 if a winning opt
@@ -78,14 +118,14 @@ fn int kernel_autotune(u32 kid) {
   // alone -- compile each before timing the bench loop, so the
   // measurements compare hot kernels.
   kernel_fire_by_id(kid);
-  u64 best_us = autotune_time_kernel(kid, KAUTOTUNE_N_RUNS);
+  u64 best_us = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
   KOpt best_opt = { KOP_NONE, 0, 0 };
 
   for (u32 i = 0; i < n_cand; i++) {
     axes_reset_to_default(ke);
     if (!axes_apply_opt(ke->axes, candidates[i])) continue;
     kernel_fire_by_id(kid);                     // JIT warm
-    u64 us = autotune_time_kernel(kid, KAUTOTUNE_N_RUNS);
+    u64 us = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
     if (us < best_us) {
       best_us  = us;
       best_opt = candidates[i];

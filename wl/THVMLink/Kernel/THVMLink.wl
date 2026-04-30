@@ -305,6 +305,8 @@ $kernelAxesGetFn          := $kernelAxesGetFn          = load["thvm_wl_kernel_ax
 $kernelApplyOptFn         := $kernelApplyOptFn         = load["thvm_wl_kernel_apply_opt",           {Integer, Integer, Integer, Integer}, Integer];
 $kernelProposeFn          := $kernelProposeFn          = load["thvm_wl_kernel_propose",             {Integer}, {Integer, 1}];
 $kernelAutotuneFn         := $kernelAutotuneFn         = load["thvm_wl_kernel_autotune",            {Integer}, Integer];
+$kernelBenchUsFn          := $kernelBenchUsFn          = load["thvm_wl_kernel_bench_us",            {Integer, Integer}, Integer];
+$kernelBenchVariantsFn    := $kernelBenchVariantsFn    = load["thvm_wl_kernel_bench_variants",      {Integer}, {Integer, 1}];
 $lamShapeSetFn   := $lamShapeSetFn   = load["thvm_wl_lam_shape_set",   {Integer, {Integer, 1}},     Integer];
 $lamShapeCountFn := $lamShapeCountFn = load["thvm_wl_lam_shape_count", {},                           Integer];
 $termShapeInFn   := $termShapeInFn   = load["thvm_wl_term_shape_in",   {Integer},                    {Integer, 1}];
