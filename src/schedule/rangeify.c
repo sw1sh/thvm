@@ -674,21 +674,37 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       // BITCAST is identity at the scalar level for non-narrow FPs:
       // reg holds the raw bits and downstream u->dtype reinterprets
       // them.  But for narrow FPs (fp16/bf16/fp8), scalar_load_typed
-      // widens to f32 bits at the buffer boundary -- so the raw fp16
-      // bit pattern is gone by the time BITCAST runs.  Bail on those
-      // until we add a "raw bytes" LOAD path.
+      // widens to f32 bits at the buffer boundary -- so the raw
+      // bit pattern would be gone by the time BITCAST runs.
+      //
+      // For BITCAST of a narrow-FP *input*, emit a parallel
+      // S_LOAD_RAW that bypasses the widening and pass that through
+      // as identity.  For BITCAST of a narrow-FP *intermediate*
+      // (no current test triggers this) the raw bits are already lost
+      // upstream; we still bail there.
       u32 dst_dtype = p->dtype;
-      u32 src_dtype = dst_dtype;
-      if (!KSRC_IS_INPUT(p->src[0])) {
-        u32 src_idx = KSRC_INDEX(p->src[0]);
-        if (src_idx < ke->n_ops) src_dtype = ke->program[src_idx].dtype;
-      } else {
-        src_dtype = ke->input_dtypes[KSRC_INDEX(p->src[0])];
+      u32 raw0      = p->src[0];
+      int src_is_narrow_input = 0;
+      if (KSRC_IS_INPUT(raw0)) {
+        u32 sd = ke->input_dtypes[KSRC_INDEX(raw0)];
+        if (sd == DT_FP16 || sd == DT_BF16
+         || sd == DT_FP8E4M3 || sd == DT_FP8E5M2) src_is_narrow_input = 1;
       }
-      if (dst_dtype == DT_FP16 || dst_dtype == DT_BF16
-       || dst_dtype == DT_FP8E4M3 || dst_dtype == DT_FP8E5M2
-       || src_dtype == DT_FP16 || src_dtype == DT_BF16
-       || src_dtype == DT_FP8E4M3 || src_dtype == DT_FP8E5M2) {
+      int dst_is_narrow = (dst_dtype == DT_FP16 || dst_dtype == DT_BF16
+                        || dst_dtype == DT_FP8E4M3 || dst_dtype == DT_FP8E5M2);
+      if (src_is_narrow_input && !dst_is_narrow) {
+        // Reuse the INDEX of the existing S_LOAD; emit a fresh
+        // S_LOAD_RAW with that same INDEX so the raw narrow-FP bits
+        // land in the register.
+        u32 load_id = input_load[KSRC_INDEX(raw0)];
+        if (load_id == 0) { rangeify_free(ke); return 0; }
+        u32 idx = ke->scalar_uops[load_id].src[0];
+        prog_value[i] = rangeify_emit_unary(ke, S_LOAD_RAW, dtype, idx);
+        continue;
+      }
+      if (dst_is_narrow || src_is_narrow_input) {
+        // narrow-FP intermediate-source case (no test today) or
+        // BITCAST *into* a narrow FP -- bail.
         if (getenv("THVM_RANGEIFY_BAIL")) {
           fprintf(stderr, "rangeify bail (mid-emit): BITCAST narrow-FP\n");
         }

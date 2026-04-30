@@ -560,6 +560,12 @@ typedef enum {
   //           4 axes).
   S_SHRINK,
   S_PAD,
+  // Bit-pattern-preserving load.  Like S_LOAD but never widens
+  // narrow FPs (fp16/bf16/fp8) to f32 -- returns the raw nibble/
+  // byte/halfword bits in the low bits of the u64 register.  Emitted
+  // by BITCAST(narrow-FP -> int) so the original bit pattern survives
+  // to the STORE.  src[0] = INDEX, dtype = source dtype (informational).
+  S_LOAD_RAW,
   S__COUNT
 } ScalarOp;
 

@@ -495,6 +495,26 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       u32 dtype = c->ke->input_dtypes[slot];
       return scalar_load_typed(p, off, dtype);
     }
+    case S_LOAD_RAW: {
+      // Bit-preserving load: emit by BITCAST(narrow-FP -> int) so the
+      // original fp16/bf16/fp8 bit pattern survives to the integer
+      // STORE.  Skips scalar_load_typed's narrow-FP widening; returns
+      // the raw 1/2/4/8-byte read in the low bits of the register.
+      u64 idx_r = eval_scalar(c, u->src[0]);
+      u32 slot  = (u32)(idx_r >> 32);
+      u32 off   = (u32)(idx_r & 0xFFFFFFFFu);
+      void *p   = c->in_ptrs[slot];
+      u32 dtype = c->ke->input_dtypes[slot];
+      u32 esz   = dtype_itemsize(dtype);
+      const u8 *base = (const u8 *)p + (size_t)off * esz;
+      switch (esz) {
+        case 1: { u8  v; memcpy(&v, base, 1); return (u64)v; }
+        case 2: { u16 v; memcpy(&v, base, 2); return (u64)v; }
+        case 4: { u32 v; memcpy(&v, base, 4); return (u64)v; }
+        case 8: { u64 v; memcpy(&v, base, 8); return v; }
+        default: return 0;
+      }
+    }
     case S_REDUCE_SUM:
     case S_REDUCE_MAX: {
       u32 rng_id = u->src[1];
