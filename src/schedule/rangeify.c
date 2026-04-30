@@ -102,6 +102,7 @@ fn const char *scalar_op_name(u8 op) {
     case S_CMPEQ:          return "S_CMPEQ";
     case S_REDUCE_SUM:     return "S_REDUCE_SUM";
     case S_REDUCE_MAX:     return "S_REDUCE_MAX";
+    case S_CAST:           return "S_CAST";
     default:               return "S_?";
   }
 }
@@ -292,6 +293,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_SQRT: case UOP_EXP2: case UOP_LOG2:
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
       case UOP_EXPAND: case UOP_RESHAPE: case UOP_LOAD:
+      case UOP_CAST:  case UOP_BITCAST:
         break;
       case UOP_REDUCE:
         if (reduce_pos != -1) RBAIL_PRE("> 1 reduce");
@@ -595,19 +597,29 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       continue;
     }
     if (p->opcode == UOP_EXPAND || p->opcode == UOP_RESHAPE
-        || p->opcode == UOP_LOAD) {
-      // Movement-as-identity / structural marker: src[0] is the
-      // value, output uses the same scalar bits.  At the per-LOOP-
-      // element scalar level EXPAND broadcast, RESHAPE flat-buffer
-      // rewrap, and LOAD ("read this tensor" marker) are all no-
-      // ops -- the LOOP ranges are already the output shape's
-      // ranges, and contig-source movement ops don't change the
-      // flat read pattern.
+        || p->opcode == UOP_LOAD || p->opcode == UOP_BITCAST) {
+      // Movement-as-identity / structural marker / bitcast: src[0]
+      // is the value, output uses the same scalar bits.  At the
+      // per-LOOP-element scalar level EXPAND broadcast, RESHAPE
+      // flat-buffer rewrap, LOAD ("read this tensor" marker), and
+      // BITCAST (same bits, different dtype label) are all no-ops
+      // -- downstream dtype interpretation flows through u->dtype
+      // when the next op decodes its operands.
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
       if (v == 0) { rangeify_free(ke); return 0; }
       prog_value[i] = v;
+      continue;
+    }
+    if (p->opcode == UOP_CAST) {
+      // Value-preserving cast: emit S_CAST so the dispatcher reads
+      // the source's dtype, decodes, and re-encodes as u->dtype.
+      u32 raw = p->src[0];
+      u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
+                                   : prog_value[KSRC_INDEX(raw)];
+      if (v == 0) { rangeify_free(ke); return 0; }
+      prog_value[i] = rangeify_emit_unary(ke, S_CAST, p->dtype, v);
       continue;
     }
     if (p->opcode == UOP_REDUCE) {

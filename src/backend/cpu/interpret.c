@@ -485,6 +485,57 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
     }
     case S_CMPLT:  DISPATCH_CMP(BINOP_LT);
     case S_CMPEQ:  DISPATCH_CMP(BINOP_EQ);
+    case S_CAST: {
+      // Value-preserving cross-dtype cast.  The source op carries
+      // its own dtype; we decode the bits as that type, convert to
+      // the C type matching u->dtype, and re-encode.  Dispatch is
+      // src_dtype x dst_dtype = O(N^2) but inlined per-pair; the
+      // helper macros keep it readable.
+      u32 src_id = u->src[0];
+      ScalarUop const *su = &c->ke->scalar_uops[src_id];
+      u32 src_dtype = su->dtype;
+      u64 raw = eval_scalar(c, src_id);
+
+#define CAST_DECODE(T, dst)                                                    \
+        T dst; do { memcpy(&dst, &raw, sizeof(T)); } while (0)
+
+      // Step 1: decode `raw` to a C value of the source dtype, into
+      // a single double-precision intermediate (sufficient for f32 +
+      // all int widths).  i64/u64 lose precision past 2^53; that's
+      // the same lossy semantics legacy cpu_op_cast inherits.
+      f64 v;
+      switch (src_dtype) {
+        case DT_FP32: { CAST_DECODE(f32, x); v = (f64)x; break; }
+        case DT_FP64: { CAST_DECODE(f64, x); v = x; break; }
+        case DT_BOOL:
+        case DT_UINT8:  { CAST_DECODE(u8 , x); v = (f64)x; break; }
+        case DT_UINT16: { CAST_DECODE(u16, x); v = (f64)x; break; }
+        case DT_UINT32: { CAST_DECODE(u32, x); v = (f64)x; break; }
+        case DT_UINT64: { CAST_DECODE(u64, x); v = (f64)x; break; }
+        case DT_INT8:   { CAST_DECODE(i8 , x); v = (f64)x; break; }
+        case DT_INT16:  { CAST_DECODE(i16, x); v = (f64)x; break; }
+        case DT_INT32:  { CAST_DECODE(i32, x); v = (f64)x; break; }
+        case DT_INT64:  { CAST_DECODE(i64, x); v = (f64)x; break; }
+        default: return 0;
+      }
+#undef CAST_DECODE
+
+      // Step 2: encode v as u->dtype.
+      switch (u->dtype) {
+        case DT_FP32:   ENCODE(f32, (f32)v);
+        case DT_FP64:   ENCODE(f64, v);
+        case DT_BOOL:   ENCODE(u8 , (u8 )(v != 0.0 ? 1 : 0));
+        case DT_UINT8:  ENCODE(u8 , (u8 )v);
+        case DT_UINT16: ENCODE(u16, (u16)v);
+        case DT_UINT32: ENCODE(u32, (u32)v);
+        case DT_UINT64: ENCODE(u64, (u64)v);
+        case DT_INT8:   ENCODE(i8 , (i8 )v);
+        case DT_INT16:  ENCODE(i16, (i16)v);
+        case DT_INT32:  ENCODE(i32, (i32)v);
+        case DT_INT64:  ENCODE(i64, (i64)v);
+        default: return 0;
+      }
+    }
     default:
       return 0;
   }

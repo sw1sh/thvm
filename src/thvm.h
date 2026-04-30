@@ -542,6 +542,12 @@ typedef enum {
   S_CMPLT, S_CMPEQ,
   // Reductions.  src[0] = body inside the REDUCE-typed RANGE.
   S_REDUCE_SUM, S_REDUCE_MAX,
+  // Type conversion.  src[0] = source value; dispatcher reads the
+  // source op's dtype, decodes, converts to u->dtype, re-encodes.
+  // (BITCAST is identity at the scalar level -- same bits, downstream
+  // dtype interpretation flows through u->dtype, so it does NOT
+  // need a separate opcode.)
+  S_CAST,
   S__COUNT
 } ScalarOp;
 
