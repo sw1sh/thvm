@@ -191,7 +191,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     if (ke->program[i].dtype != DT_FP32) return 0;
   }
   // Phase B/C supported opcodes: elementwise + (one) REDUCE.
-  // Movement / cast / bitcast / load go to later phases.
+  // Phase C-3 also accepts UOP_EXPAND (broadcast-back-to-source-
+  // shape after a REDUCE) -- lowered as identity since broadcast
+  // is implicit at the per-LOOP-element scalar level.
   int reduce_pos = -1;
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
@@ -199,6 +201,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_ADD: case UOP_MUL: case UOP_NEG: case UOP_RECIP:
       case UOP_SQRT: case UOP_EXP2: case UOP_LOG2:
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
+      case UOP_EXPAND:
         break;
       case UOP_REDUCE:
         if (reduce_pos != -1) return 0;       // > 1 reduce not yet supported
@@ -251,39 +254,59 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // Numel sanity by region (pre / post REDUCE):
   //   - Pre-REDUCE non-REDUCE ops produce reduce_in_numel
   //     (or 1 for CONST broadcast).
-  //   - REDUCE op produces onum.
-  //   - Post-REDUCE non-REDUCE ops produce onum (or 1 for CONST).
+  //   - REDUCE op produces red->numel (the post-reduce-pre-broadcast
+  //     numel; can differ from onum when an EXPAND broadcasts the
+  //     reduce result back to the kernel's output shape).
+  //   - Post-REDUCE non-REDUCE ops produce either red->numel
+  //     (still scalar, e.g. RECIP after REDUCE) or onum (after
+  //     EXPAND broadcasts back; e.g. MUL of input * scalar).
   // Without REDUCE, all ops produce onum (or 1 for CONST).
   for (u32 i = 0; i < ke->n_ops; i++) {
-    KProgOp *p   = &ke->program[i];
-    if (p->opcode == UOP_REDUCE) {
-      if (p->numel != onum) return 0;
-      continue;
+    KProgOp *p = &ke->program[i];
+    if (p->opcode == UOP_REDUCE) continue;     // numel == red->numel
+                                               // (trivially)
+    if (p->opcode == UOP_CONST && p->numel == 1) continue;
+    if ((int)i < reduce_pos) {
+      if (p->numel != reduce_in_numel) return 0;
+    } else {
+      if (p->numel != onum
+          && (!has_reduce || p->numel != red->numel)) return 0;
     }
-    u32 expected = (has_reduce && (int)i < reduce_pos) ? reduce_in_numel : onum;
-    if (p->numel != expected
-        && !(p->opcode == UOP_CONST && p->numel == 1)) return 0;
   }
 
-  // Phase C-2 boundary: forbid an input read both pre- AND post-
-  // REDUCE.  That's the softmax pattern -- we'd need two distinct
-  // LOAD ops for the same input slot, which our 1:1 KProgOp -> input
-  // load mapping can't express today.  Lands in Phase C-3.
+  // Per-input scope usage: track whether each input slot is read
+  // pre-REDUCE (inside the reduce loop body) or post-REDUCE
+  // (per-element after the reduce result is broadcast).  When
+  // an input is used in BOTH scopes, we emit TWO LOAD nodes (the
+  // per-(LOOP, REDUCE) and per-(LOOP) reads).  This is the Phase
+  // C-3 path that unblocks softmax / BatchNorm-style fusion.
+  //
+  // Linear position semantics:
+  //   - position <= reduce_pos: ref is inside the reduce body
+  //     (pre-scope).  The REDUCE op itself sits here -- its src
+  //     IS the body.
+  //   - position >  reduce_pos: ref is post-reduce (scalar or
+  //     per-element).
+  u8 input_used_pre [KERNEL_INIT_INPUT * 4] = {0};
+  u8 input_used_post[KERNEL_INIT_INPUT * 4] = {0};
+  if (ke->n_inputs > sizeof(input_used_pre) / sizeof(input_used_pre[0])) {
+    return 0;
+  }
   if (has_reduce) {
-    for (u32 i = 0; i < ke->n_inputs; i++) {
-      int seen_pre = 0, seen_post = 0;
-      for (u32 j = 0; j < ke->n_ops; j++) {
-        KProgOp *p = &ke->program[j];
-        for (u8 s = 0; s < p->n_src; s++) {
-          u32 raw = p->src[s];
-          if (KSRC_IS_INPUT(raw) && KSRC_INDEX(raw) == i) {
-            if ((int)j <  reduce_pos) seen_pre  = 1;
-            if ((int)j >= reduce_pos) seen_post = 1;
-          }
+    for (u32 j = 0; j < ke->n_ops; j++) {
+      KProgOp *p = &ke->program[j];
+      int pre = ((int)j <= reduce_pos);
+      for (u8 s = 0; s < p->n_src; s++) {
+        u32 raw = p->src[s];
+        if (KSRC_IS_INPUT(raw)) {
+          u32 slot = KSRC_INDEX(raw);
+          if (pre)  input_used_pre [slot] = 1;
+          else      input_used_post[slot] = 1;
         }
       }
-      if (seen_pre && seen_post) return 0;
     }
+  } else {
+    for (u32 i = 0; i < ke->n_inputs; i++) input_used_post[i] = 1;
   }
   // Inputs: same numel as output (Phase B), or REDUCE-input size, or
   // numel-1 scalar broadcast.
@@ -329,47 +352,108 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                              loop_ranges, loop_strides, os->ndim);
   if (out_index == 0) { rangeify_free(ke); return 0; }
 
-  // 3. Per-input load expressions.  Branch on numel:
-  //   - in_numel == 1                   -> scalar broadcast (INDEX over 0 ranges)
-  //   - in_numel == output_numel        -> per-output-element read (LOOP ranges)
-  //   - in_numel == output_numel*axis_size (only with REDUCE)
-  //                                      -> per-(LOOP,REDUCE) read
-  u32 input_load[KERNEL_INIT_INPUT * 4];
-  if (ke->n_inputs > sizeof(input_load) / sizeof(input_load[0])) {
+  // 3. Per-input load expressions.  Two parallel tables when an
+  // input is used in BOTH scopes:
+  //   input_load_pre [i] -- LOAD inside the reduce body (per-
+  //                         (LOOP, REDUCE) address).  Used by ops
+  //                         at position <= reduce_pos.
+  //   input_load_post[i] -- LOAD outside the reduce body
+  //                         (per-LOOP address).  Used by ops at
+  //                         position > reduce_pos.
+  // For inputs used in only one scope, the unused slot stays 0.
+  // For non-REDUCE kernels, input_load_post is always populated.
+  u32 input_load_pre [KERNEL_INIT_INPUT * 4] = {0};
+  u32 input_load_post[KERNEL_INIT_INPUT * 4] = {0};
+  if (ke->n_inputs > sizeof(input_load_pre) / sizeof(input_load_pre[0])) {
     rangeify_free(ke); return 0;
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 dtype    = ke->input_dtypes[i];
     u32 in_numel = ke->input_numels[i];
     u32 param    = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)i);
-    u32 idx;
-    if (in_numel == 1) {
-      // Scalar broadcast: 0 range sources, address is always 0.
-      u32 src[1] = {param};
-      idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, 0);
-    } else if (has_reduce && in_numel == reduce_numel && in_numel != onum) {
-      // Per-(LOOP, REDUCE) read.  Combined ranges + strides.  Only
-      // taken in the actual REDUCE case where the input is bigger
-      // than the output (in_numel == output_numel * axis_size and
-      // axis_size > 1; the axis_size == 1 case collapses back to
-      // per-output-element which is the else branch).
-      u32 r_ids    [4]; u32 r_strides[4];
-      for (u32 d = 0; d < os->ndim; d++) {
-        r_ids[d]     = loop_ranges[d];
-        r_strides[d] = in_strides[d];
+
+    // Pre-scope LOAD: how we index inside the reduce body depends
+    // on the relationship between input shape and (output_shape +
+    // reduce_size).  Three cases handled today:
+    //  1. in_numel == 1 -> scalar broadcast (no ranges).
+    //  2. in_numel == onum (full-reduce-with-broadcast-back, the
+    //     softmax pattern): input shape == output shape.  The
+    //     reduce body indexes by the REDUCE range alone (the
+    //     LOOP range is the OUTER position; we sum across the
+    //     full input).  Post-reduce reads use the LOOP range.
+    //     Only valid when red->numel == 1 (fully reduced) AND
+    //     reduce_size == in_numel.
+    //  3. in_numel == reduce_in_numel != onum (partial reduce
+    //     where output has >=1 LOOP dim and reduce axis is the
+    //     trailing dim): index by (LOOP, REDUCE) ranges.
+    if (input_used_pre[i]) {
+      u32 idx;
+      if (in_numel == 1) {
+        u32 src[1] = {param};
+        idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, 0);
+      } else if (in_numel == onum && red->numel == 1
+                 && in_numel == reduce_size) {
+        // Softmax-style symmetric: reduce body reads input[REDUCE]
+        // independently of LOOP_iter.  Only the REDUCE range
+        // contributes to the address; stride matches the single
+        // input axis.
+        u32 r_ids[1]    = {reduce_range};
+        u32 r_strides[1] = {1};
+        idx = emit_index(ke, dtype, param, r_ids, r_strides, 1);
+      } else if (in_numel == reduce_in_numel && in_numel != red->numel) {
+        u32 r_ids    [4]; u32 r_strides[4];
+        for (u32 d = 0; d < os->ndim; d++) {
+          r_ids[d]     = loop_ranges[d];
+          r_strides[d] = in_strides[d];
+        }
+        r_ids    [os->ndim] = reduce_range;
+        r_strides[os->ndim] = in_strides[os->ndim];
+        idx = emit_index(ke, dtype, param, r_ids, r_strides, in_ndim);
+      } else {
+        idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
       }
-      r_ids    [os->ndim] = reduce_range;
-      r_strides[os->ndim] = in_strides[os->ndim];
-      idx = emit_index(ke, dtype, param, r_ids, r_strides, in_ndim);
-    } else {
-      idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
+      if (idx == 0) { rangeify_free(ke); return 0; }
+      input_load_pre[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
     }
-    if (idx == 0) { rangeify_free(ke); return 0; }
-    u32 load = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
-    input_load[i] = load;
+
+    // Post-scope LOAD: per-LOOP-element read.  Inputs sized at
+    // reduce_in_numel are NOT readable post-reduce (would require
+    // a different per-element address pattern); bail in that case.
+    if (input_used_post[i]) {
+      u32 idx;
+      if (in_numel == 1) {
+        u32 src[1] = {param};
+        idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, 0);
+      } else if (in_numel == onum) {
+        idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
+      } else if (has_reduce && in_numel == reduce_in_numel) {
+        // Softmax pattern: input has shape (output_shape ++
+        // {axis_size}) and the post-reduce uses LOOP ranges only
+        // -- meaning we want to read input[loop_ranges, 0..axis_size).
+        // This requires the LOAD to know which "slot" of the
+        // input row to read, which is only well-defined when the
+        // post-reduce read uses a SECOND REDUCE-typed range or
+        // when axis_size == reduce_size and we treat the
+        // per-output read as a stride pattern matching the
+        // primary axis.  For now only handle the symmetric case
+        // where in_numel == onum (covered above).  Bail if
+        // reduce_in_numel != onum (would be wrong-address).
+        if (reduce_in_numel != onum) { rangeify_free(ke); return 0; }
+        idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
+      } else {
+        rangeify_free(ke); return 0;
+      }
+      if (idx == 0) { rangeify_free(ke); return 0; }
+      input_load_post[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
+    }
   }
 
-  // 4. ALU lowering: one S_X per KProgOp.
+  // 4. ALU lowering: one S_X per KProgOp.  An op at position
+  // <= reduce_pos uses input_load_pre[] for its input refs; at
+  // position > reduce_pos uses input_load_post[].  The REDUCE op
+  // itself sits at reduce_pos (pre-scope ref to body input).
+  // UOP_EXPAND lowers as identity -- broadcast is implicit at the
+  // per-LOOP-element scalar level.
   u32 prog_value[KPROG_INIT_OPS * 4];
   if (ke->n_ops > sizeof(prog_value) / sizeof(prog_value[0])) {
     rangeify_free(ke); return 0;
@@ -377,26 +461,45 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
+    int pre    = (has_reduce && (int)i <= reduce_pos);
+    u32 *input_load = pre ? input_load_pre : input_load_post;
     if (p->opcode == UOP_CONST) {
       prog_value[i] = rangeify_emit_leaf(ke, S_CONST, dtype, (u64)p->arg);
       continue;
     }
+    if (p->opcode == UOP_EXPAND) {
+      // src[0] is the value to broadcast; just pass through.  Phase
+      // C-3 only handles EXPAND post-REDUCE (typical softmax tail);
+      // pre-REDUCE EXPANDs lands later.
+      u32 raw = p->src[0];
+      u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
+                                   : prog_value[KSRC_INDEX(raw)];
+      if (v == 0) { rangeify_free(ke); return 0; }
+      prog_value[i] = v;
+      continue;
+    }
     if (p->opcode == UOP_REDUCE) {
       // src[0] body: either an input load or a previous prog op.
+      // Sourced from pre-scope (the body sits inside the reduce loop).
       u32 raw = p->src[0];
-      u32 body = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
+      u32 body = KSRC_IS_INPUT(raw) ? input_load_pre[KSRC_INDEX(raw)]
                                     : prog_value[KSRC_INDEX(raw)];
+      if (body == 0) { rangeify_free(ke); return 0; }
       u32 src[2] = {body, reduce_range};
       u8  sop    = (reduce_kind == REDUCE_MAX) ? S_REDUCE_MAX : S_REDUCE_SUM;
       prog_value[i] = rangeify_emit(ke, sop, dtype, 2, src, 0);
       continue;
     }
-    // Resolve up to 2 sources.
+    // Resolve up to 2 sources, picking the scope-appropriate input load.
     u32 src_v[2] = {0, 0};
     for (u8 s = 0; s < p->n_src && s < 2; s++) {
       u32 raw = p->src[s];
-      if (KSRC_IS_INPUT(raw)) src_v[s] = input_load[KSRC_INDEX(raw)];
-      else                    src_v[s] = prog_value[KSRC_INDEX(raw)];
+      if (KSRC_IS_INPUT(raw)) {
+        src_v[s] = input_load[KSRC_INDEX(raw)];
+        if (src_v[s] == 0) { rangeify_free(ke); return 0; }
+      } else {
+        src_v[s] = prog_value[KSRC_INDEX(raw)];
+      }
     }
     u8 sop;
     switch (p->opcode) {

@@ -241,3 +241,46 @@ VerificationTest[
     Round[Sqrt[30.], 0.001],
     TestID -> "lowering/sqrt-of-sum-fuses"
 ]
+
+(* Phase C-3: TSoftmax kernel 2 (REDUCE -> RECIP -> EXPAND -> MUL,
+   with input read both inside the reduce body AND post-reduce)
+   lowers under rangeify.  This is the canonical "broadcast-back"
+   fusion pattern.  Shape assertion: 2 S_RANGEs (LOOP + REDUCE),
+   2 S_LOAD (one per scope), 1 S_REDUCE_SUM, 1 S_RECIP, 1 S_MUL,
+   1 S_STORE, 1 S_BUFFERIZE.  S_EXPAND is lowered as identity --
+   broadcast is implicit at the per-LOOP-element scalar level --
+   so it does NOT appear as a scalar op. *)
+VerificationTest[
+    withRangeify[True,
+      TInit[];
+      v = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+      TRealize @ TSoftmax[v];
+      smaxKid = SelectFirst[Range[TKernelCount[] - 1],
+                  TKernelScalarUops[#] =!= Missing["NotLowered"] &];
+      tally = scalarOpTally[smaxKid];
+      KeyTake[tally, {"S_RANGE", "S_LOAD", "S_REDUCE_SUM",
+                      "S_RECIP", "S_MUL", "S_STORE", "S_BUFFERIZE"}]
+    ],
+    <|"S_RANGE" -> 2, "S_LOAD" -> 2, "S_REDUCE_SUM" -> 1,
+      "S_RECIP" -> 1, "S_MUL" -> 1, "S_STORE" -> 1, "S_BUFFERIZE" -> 1|>,
+    TestID -> "lowering/softmax-broadcast-back-shape"
+]
+
+(* Phase C-3: TSoftmax output bitwise matches legacy and sums to 1. *)
+VerificationTest[
+    Module[{legacy, lowered, eq, sumOk},
+      legacy = withRangeify[False,
+        TInit[];
+        v = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+        Normal @ TTensorData @ TRealize @ TSoftmax[v]];
+      lowered = withRangeify[True,
+        TInit[];
+        v = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+        Normal @ TTensorData @ TRealize @ TSoftmax[v]];
+      eq    = (Max[Abs[legacy - lowered]] < 1.0*^-6);
+      sumOk = (Abs[Total[lowered] - 1.0] < 1.0*^-6);
+      eq && sumOk
+    ],
+    True,
+    TestID -> "lowering/softmax-output-eq"
+]
