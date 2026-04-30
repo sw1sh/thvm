@@ -72,10 +72,13 @@ static void rm_epilogue(CgBuf *b, u32 n_inputs) {
   cg_append(b, "}\n");
 }
 
-static void rm_loop_open_elementwise(CgBuf *b) {
+static void rm_loop_open_elementwise(CgBuf *b, u32 unroll_factor) {
   // Nothing to do: the kernel signature already binds `i` and bounds-
-  // checked it; the body just emits per-op temporaries.
-  (void)b;
+  // checked it; the body just emits per-op temporaries.  UPCAST
+  // factor is unused on Metal -- threadgroup-level dispatch already
+  // controls iteration; loop-unroll pragmas would apply only inside
+  // a manual inner-loop variant (not yet emitted).
+  (void)b; (void)unroll_factor;
 }
 
 static void rm_loop_close_elementwise(CgBuf *b, u32 last_step) {

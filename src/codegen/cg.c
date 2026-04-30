@@ -78,8 +78,10 @@ typedef struct Renderer {
 
   // Open/close the per-output loop in the elementwise case.  open
   // binds `i` as 0..n-1.  close emits `out[i] = r{step};` and closes
-  // the loop.
-  void (*loop_open_elementwise) (CgBuf *b);
+  // the loop.  `unroll_factor` is the UPCAST hint extracted from
+  // KernelAxes.applied_opts[] (1 = no opt, the default); the
+  // renderer is free to emit a pragma, manually unroll, or ignore.
+  void (*loop_open_elementwise) (CgBuf *b, u32 unroll_factor);
   void (*loop_close_elementwise)(CgBuf *b, u32 last_step);
 
   // Open the reduce-tail loop nest: outer over `oi`, inner over `_k`.
@@ -196,7 +198,17 @@ fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
     }
     r->loop_open_reduce(&b, kind, inner, axis_size, unroll_factor);
   } else {
-    r->loop_open_elementwise(&b);
+    // Elementwise UPCAST hint: the LAST UPCAST whose arg divides
+    // output_numel wins.  Same shape as UNROLL: the renderer
+    // emits a pragma above the per-output loop.
+    u32 upcast_factor = 1;
+    if (ke->axes != NULL) {
+      for (u32 i = 0; i < ke->axes->n_applied; i++) {
+        KOpt o = ke->axes->applied_opts[i];
+        if (o.op == KOP_UPCAST && ke->output_numel % o.arg == 0) upcast_factor = o.arg;
+      }
+    }
+    r->loop_open_elementwise(&b, upcast_factor);
   }
 
   for (u32 step = 0; step < chain_end; step++) {

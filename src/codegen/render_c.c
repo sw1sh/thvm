@@ -66,7 +66,14 @@ static void rc_epilogue(CgBuf *b, u32 n_inputs) {
   cg_append(b, "}\n");
 }
 
-static void rc_loop_open_elementwise(CgBuf *b) {
+static void rc_loop_open_elementwise(CgBuf *b, u32 unroll_factor) {
+  // TOpt["UPCAST", output_axis, factor] -> emit a clang loop hint so
+  // the JIT pre-unrolls the elementwise output loop.  factor=1
+  // (default) keeps the byte-for-byte pre-Phase-16 emit so the
+  // kernel-program-cache key stays stable for unopt'd kernels.
+  if (unroll_factor > 1) {
+    cg_append(b, "  #pragma clang loop unroll_count(%u)\n", unroll_factor);
+  }
   cg_append(b, "  for (unsigned i = 0; i < n; i++) {\n");
 }
 

@@ -37,9 +37,25 @@ static u8 propose_reduce_axis_index(KernelEntry const *ke) {
   return 0xFF;
 }
 
+// First LOOP-typed axis at or after `start`, or 0xFF if none.  Used
+// to find an output axis to UPCAST.  We pick the FIRST LOOP because
+// for elementwise kernels the output is flattened into one loop
+// today; later passes that emit a structured nest will want a more
+// nuanced choice (innermost LOOP, hardware vector width, etc.).
+static u8 propose_first_loop_axis(KernelEntry const *ke, u8 start) {
+  if (ke->axes == NULL) return 0xFF;
+  for (u8 i = start; i < ke->axes->n_axes; i++) {
+    if (ke->axes->axis_types[i] == KAX_LOOP) return i;
+  }
+  return 0xFF;
+}
+
 fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   if (ke == NULL || out == NULL || cap == 0) return 0;
   u32 n = 0;
+
+  static const u32 split_factors[] = {16, 8, 4, 2};
+  u32 n_factors = sizeof(split_factors)/sizeof(*split_factors);
 
   // Reduce-tail UNROLL candidates: {2, 4, 8, 16} where divisible.
   // Skip 1 (= no opt; the autotune loop tracks the baseline
@@ -48,15 +64,36 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   u32 axis_size = propose_reduce_axis_size(ke);
   u8  axis_idx  = propose_reduce_axis_index(ke);
   if (axis_size > 0 && axis_idx != 0xFF) {
-    static const u32 unroll_factors[] = {16, 8, 4, 2};
-    for (u32 i = 0; i < sizeof(unroll_factors)/sizeof(*unroll_factors); i++) {
-      u32 f = unroll_factors[i];
+    for (u32 i = 0; i < n_factors; i++) {
+      u32 f = split_factors[i];
       if (axis_size % f != 0) continue;
       if (n >= cap) break;
       out[n].op   = KOP_UNROLL;
       out[n].axis = axis_idx;
       out[n].arg  = f;
       n++;
+    }
+  }
+
+  // Elementwise UPCAST candidates: {2, 4, 8, 16} where output_numel
+  // divisible.  Targets the first LOOP axis (rank-1 kernels and
+  // tinygrad-style flattened outputs both have only one LOOP axis;
+  // multi-axis kernels will benefit from a smarter pick once the
+  // structured nest renderer arrives).  Skipped for reduce-tail
+  // kernels because UPCAST on a reduce kernel would cross the
+  // reduce-axis boundary.
+  if (axis_size == 0 && ke->output_numel > 0) {
+    u8 loop_axis = propose_first_loop_axis(ke, 0);
+    if (loop_axis != 0xFF) {
+      for (u32 i = 0; i < n_factors; i++) {
+        u32 f = split_factors[i];
+        if (ke->output_numel % f != 0) continue;
+        if (n >= cap) break;
+        out[n].op   = KOP_UPCAST;
+        out[n].axis = loop_axis;
+        out[n].arg  = f;
+        n++;
+      }
     }
   }
   return n;

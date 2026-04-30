@@ -222,12 +222,15 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Elementwise kernel proposes UPCAST on the output axis at all
+       divisors of output_numel (factor in {2,4,8,16}). *)
     TInit[];
-    a = TTensorCreate @ N @ {1.0, 2.0, 3.0};
-    TRealize @ TUOpMul[a, a];                  (* elementwise: no reduce axis *)
+    a = TTensorCreate @ N @ Range[16];         (* output_numel = 16 *)
+    TRealize @ TUOpMul[a, a];
     TKernelProposed[TKernelCount[] - 1],
-    {},
-    TestID -> "kernel-opts/propose-elementwise-empty"
+    {TOpt["UPCAST", 0, 16], TOpt["UPCAST", 0, 8],
+     TOpt["UPCAST", 0, 4],  TOpt["UPCAST", 0, 2]},
+    TestID -> "kernel-opts/propose-elementwise-upcast"
 ]
 
 VerificationTest[
@@ -267,16 +270,33 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Elementwise kernel: no proposer candidates -> autotune is a
-       no-op (Applied stays empty). *)
+    (* Elementwise UPCAST: emits clang loop pragma on the output
+       loop, preserves the computed result.  *)
     TInit[];
-    a = TTensorCreate @ N @ {1.0, 2.0, 3.0, 4.0};
-    TRealize @ TUOpMul[a, a];
+    xT  = TTensorCreate @ NumericArray[Table[N[i + 0.5], {i, 32}], "Real32"];
+    yT  = TTensorCreate @ NumericArray[Table[N[i * 0.1], {i, 32}], "Real32"];
+    pre = Normal @ TTensorData @ TRealize @ TUOpAdd[TUOpMul[xT, yT], TUOpMul[TUOpConst[2.0], xT]];
     kid = TKernelCount[] - 1;
-    TKernelAutotune[kid];
-    First[TKernelOpts[kid]]["Applied"],
-    {},
-    TestID -> "kernel-opts/autotune-noop-on-elementwise"
+    TKernelApplyOpt[kid, TOpt["UPCAST", 0, 8]];
+    src  = TKernelSource[kid, "C"];
+    post = Normal @ TTensorData @ TRealize @ TUOpAdd[TUOpMul[xT, yT], TUOpMul[TUOpConst[2.0], xT]];
+    {StringContainsQ[src, "#pragma clang loop unroll_count(8)"],
+     AllTrue[Thread[Abs[pre - post] < 1.0*^-5], TrueQ]},
+    {True, True},
+    TestID -> "kernel-opts/codegen-upcast-pragma-correct"
+]
+
+VerificationTest[
+    (* Reduce-tail kernel: proposer should NOT mix UPCAST with the
+       reduce-axis UNROLL candidates.  Today's heuristic skips
+       UPCAST entirely for reduce-tail kernels (axis_size > 0). *)
+    TInit[];
+    xT = TTensorCreate @ N @ Range[16];
+    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    kid = TKernelCount[] - 1;
+    AllTrue[TKernelProposed[kid], MatchQ[TOpt["UNROLL", _, _]]],
+    True,
+    TestID -> "kernel-opts/propose-reduce-no-upcast"
 ]
 
 (* === per-program-shape sharing: opt on kid_1 visible on kid_2
