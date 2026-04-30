@@ -383,23 +383,20 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     // value reused across iterations.
     if (p->numel == 1) continue;
     if ((int)i < reduce_pos) {
-      if (p->numel != reduce_in_numel) {
-        if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "  pre-reduce: op[%u] %s numel=%u (expected %u)\n",
-                  i, "?", p->numel, reduce_in_numel);
-        }
-        RBAIL_PRE("pre-reduce numel mismatch");
-      }
+      // Pre-REDUCE chains often have multi-stage shape transforms:
+      // SHRINK / RESHAPE produce smaller intermediate values that
+      // get EXPAND'd back to reduce_in_numel before the REDUCE.
+      // The strict "must equal reduce_in_numel" check rejected these
+      // legitimate patterns.  Trust visit()'s shape inference -- the
+      // scalar lowering walks each op's actual src/op encoding so
+      // intermediate-size ops are addressed correctly via their own
+      // shape info (SHRINK pad_widths, EXPAND srcs, etc.).
     } else {
-      if (p->numel != onum
-          && (!has_reduce || p->numel != red->numel)) {
-        if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "  post-reduce: op[%u] op=%u numel=%u (expected %u or %u)\n",
-                  i, p->opcode, p->numel, onum,
-                  has_reduce ? red->numel : 0u);
-        }
-        RBAIL_PRE("post-reduce numel mismatch");
-      }
+      // Post-REDUCE chain similarly has multi-stage shape transforms
+      // (RESHAPE / EXPAND / SHRINK / PAD) producing intermediate
+      // sizes between red->numel and onum.  Trust visit() shape
+      // inference here too -- the per-op lowering uses each op's
+      // own encoding for its address pattern.
     }
   }
 
@@ -440,12 +437,11 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // Inputs: same numel as output (Phase B), or REDUCE-input size, or
   // numel-1 scalar broadcast.
   u32 reduce_numel = onum * (has_reduce ? reduce_size : 1);
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 in_numel = ke->input_numels[i];
-    if (in_numel != onum && in_numel != 1 && in_numel != reduce_numel) {
-      RBAIL_PRE("input numel mismatch");
-    }
-  }
+  (void)reduce_numel;
+  // Input numel check dropped (Phase F-?): the per-input load
+  // branches handle whatever shape the input view actually has
+  // (scalar broadcast, same-shape, partial-reduce, full-reduce-
+  // rank-1) and bail individually if no branch matches.
 
   // Start fresh -- emit_kernel_for_boundary may have run rangeify on
   // a previous attempt that bailed mid-way.
@@ -609,8 +605,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
                                os->ndim, in_off);
       } else {
-        idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
-                               os->ndim, in_off);
+        // No supported pre-INDEX shape branch matched.  Bailing
+        // here is safer than emitting wrong addresses with
+        // canonical loop_strides.
+        rangeify_free(ke); return 0;
       }
       if (idx == 0) { rangeify_free(ke); return 0; }
       input_load_pre[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
