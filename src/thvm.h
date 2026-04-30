@@ -951,6 +951,16 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt);
 // Today's heuristics are narrow (UNROLL on the reduce axis at
 // {2,4,8,16}); add more rules here as new opt classes get codegen
 // support.
+// Kernel-arena GC: strip per-kernel program/input arrays for kernels
+// whose output buffer was released by the cpu_buf pool rollback.
+// Returns the number of kernels stripped.  Wired into thvm_realize
+// so the per-kernel array memory stays bounded across long training
+// loops (M4 of the beautiful-mnist parity arc).  See kernel_gc.c
+// header for why slot ids are intentionally NOT recycled.
+fn u32  kernel_gc_sweep(Term result);
+fn u32  kernel_gc_freelist_pop(void);
+fn void kernel_gc_reset(void);
+
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 
 // Autotune: walk the proposer's candidates, time each variant

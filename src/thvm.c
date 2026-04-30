@@ -323,6 +323,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // Recursive mark-from-root over the collected roots.
 #include "schedule/gc_mark.c"
 
+// Mark/sweep GC for the KernelEntry arena.  Invoked at end of
+// each thvm_realize so kernel/buffer counts stay bounded across
+// long training loops.  Reuses freed slots via a freelist.
+#include "schedule/kernel_gc.c"
+
 // Cheney-style copying GC for the dyn heap.  Two semi-spaces; live
 // cells get evacuated on gc_collect.  Triggered from thvm_realize
 // once the per-step heap watermark crosses the threshold.

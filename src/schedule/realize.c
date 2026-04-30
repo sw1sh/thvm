@@ -124,5 +124,19 @@ fn Term thvm_realize(Term expr) {
       res = roots[0];
     }
   }
+
+  // Kernel-arena GC: free per-kernel heap arrays + decref output
+  // TenDescs for kernels no longer reachable from any pinned Term.
+  // Bounds KERNELS_NEXT growth across long training loops -- without
+  // this, each Adam step adds ~5K kernels on LeNet, hitting
+  // KERNELS_CAP after ~50 steps.  Default-on; THVM_KGC=0 disables
+  // for benchmarks that want the old "leak everything" behaviour.
+  static int kgc_disabled_env = -1;
+  if (kgc_disabled_env == -1) {
+    const char *e = getenv("THVM_KGC");
+    kgc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
+  }
+  if (!kgc_disabled_env) kernel_gc_sweep(res);
+
   return res;
 }

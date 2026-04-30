@@ -88,17 +88,34 @@ weights).  After 100 steps the kernel table holds 600K entries
 -- past KERNELS_CAP=256K.  The kernel table itself is a flat
 arena and doesn't reuse slots.
 
-**Fix sketch:**
-- Per-step "clear all kernels reachable only from this step's
-  outputs" pass.  KernelEntry has consumer_count via
-  `kernel_compute_consumer_counts`; extend it to a free-when-
-  zero discipline.
-- Or: run `gc_collect` between Adam steps with the params +
-  optimizer state as roots.  Cheney evacuates only what's live;
-  step-scoped kernels die.
+**Status (2026-04):** in flight, partial.  `schedule/kernel_gc.c`
+runs at end of every `thvm_realize` and strips per-kernel
+program/input arrays for kernels whose output buffer was already
+released by `cpu_buf_pool_rollback_with_preserve` (refcount==0
+liveness signal).  This bounds the **per-kernel array memory**
+(KProgOp[] + input_tids[] etc.) across long training loops, but
+does NOT recycle KernelEntry slot ids -- a slot reuse would
+mis-dispatch when a future realize DFS-fires the old kid via
+TENS[].producer_kid.
 
-**Verify:** beautiful-mnist train at N_STEPS=1000 completes
-without arena exhaustion.
+**Still open:**
+- KERNELS_NEXT itself still grows monotonically.  At ~2.8K
+  kernels/step we hit KERNELS_CAP=256K after ~85 steps.
+- Investigation needed on the orphan-kernel-emission pattern
+  found while debugging M4: each TAdam realize emits ~2.8K
+  kernels but the surface UOP graph references only a small
+  fraction.  Most kernels are dead-on-arrival from materialize's
+  bail/rewind path leaving outputs unreferenced from the heap.
+  Fixing that emission pattern would shrink KERNELS_NEXT growth
+  by 10-100x and unblock slot reuse.
+
+**Verify (current bar):** N_STEPS=5 LeNet trains; loss decreases
+monotonically; per-step kernel array memory does not grow
+unboundedly.  `THVM_KGC=0` falls back to pre-M4 leak-everything
+behaviour.
+
+**Verify (full bar):** beautiful-mnist train at N_STEPS=1000
+completes without arena exhaustion.  Open.
 
 ### M5. Metal backend for the Conv kernels
 
@@ -136,7 +153,7 @@ travel across all kids of the same program.
 | M1 batched Conv2D | in flight, view-only path landed but JIT compile cost blocks default-on | TConv2DIm2Col landed alongside TConv2D (commit c1a6dac).  ShapeTracker chain (commits 58bb690, dca964d), codegen-time index UOP inlining (12b9cf3, 6b334e8), JIT warmup gate (0dd4003) all in.  THVM_JIT_STRIDED=1 enables the view-only path; default off because the cold-start clang compile (~74ms × N unique stride patterns) regresses LeNet 4-step from ~3min to ~6.5min on a fresh /tmp.  Microbench shows runtime is identical to interpreter pre-mat (within noise) -- both touch the same memory.  Need a faster JIT (libtcc dead on aarch64, libllvm orcjit ~1000 LOC, background-compile shaves ~10s) before flipping default. |
 | M2 BN gradient | open | smaller; verifies existing TBatchNorm |
 | M3 structural-template TGradMany | deferred | not on the critical path yet |
-| M4 buffer-free between steps | open | becomes critical at N_STEPS > 100 |
+| M4 buffer-free between steps | partial | per-kernel arrays freed; slot reuse blocked on orphan-emission cleanup |
 | M5 Metal Conv | open | depends on M1 |
 | M6 autotune sweep | open | depends on M1 (autotune needs real kernel shapes) |
 
