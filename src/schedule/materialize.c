@@ -421,7 +421,7 @@ static int view_apply_shrink(View const *src, u64 expr_loc, View *out) {
   out->offset = src->offset + add_off;
   for (u32 i = 0; i < src->shape.ndim; i++) out->strides[i] = src->strides[i];
   for (u32 i = src->shape.ndim; i < MAX_DIM; i++) out->strides[i] = 0;
-  out->contiguous = src->contiguous && t_numel == src->numel;
+  out->contiguous = (t_numel == src->numel) ? 1 : 0;
   return 1;
 }
 
@@ -606,14 +606,24 @@ static Term materialize_root_alias(Term t) {
   u32 dst_tid = tensor_alloc(d->backend, d->view.shape, d->dtype);
   if (dst_tid == 0) return t;
 
-  // Bytes to read = max element index reachable + 1.  Walk the full
-  // ShapeTracker chain to find the largest buffer index we'll touch:
-  // tendesc_strided_index maps every public flat index k in [0, numel)
-  // through the chain.  For a non-trivial chain we just probe each k.
+  // Bytes to read = max element index reachable + 1.  When there's
+  // no chain we can compute it from strides analytically (cheap).
+  // With a chain we'd need the full per-element walk -- defer that
+  // to the gather loop below by allocating enough to cover the
+  // underlying buffer's true size if the backend reports it.
   u32 max_idx = 0;
-  for (u32 k = 0; k < d->view.numel; k++) {
-    u32 bidx = tendesc_strided_index(d, k);
-    if (bidx > max_idx) max_idx = bidx;
+  if (d->nviews == 0) {
+    i32 m = d->view.offset;
+    for (u32 i = 0; i < d->view.shape.ndim; i++) {
+      if (d->view.shape.dims[i] > 1 && d->view.strides[i] > 0)
+        m += (i32)(d->view.shape.dims[i] - 1) * d->view.strides[i];
+    }
+    max_idx = (u32)m;
+  } else {
+    for (u32 k = 0; k < d->view.numel; k++) {
+      u32 bidx = tendesc_strided_index(d, k);
+      if (bidx > max_idx) max_idx = bidx;
+    }
   }
   size_t src_bytes = (size_t)dtype_storage_bytes(d->dtype, (u64)(max_idx + 1));
   void  *raw       = malloc(src_bytes);
