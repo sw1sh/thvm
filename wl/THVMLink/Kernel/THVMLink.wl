@@ -301,6 +301,8 @@ $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},   
 $realizeFn     := $realizeFn     = load["thvm_wl_realize",         {Integer},                        Integer];
 $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},                               Integer];
 $kernelProgramCacheSizeFn := $kernelProgramCacheSizeFn = load["thvm_wl_kernel_program_cache_size", {}, Integer];
+$kernelAxesGetFn          := $kernelAxesGetFn          = load["thvm_wl_kernel_axes_get",            {Integer}, {Integer, 1}];
+$kernelApplyOptFn         := $kernelApplyOptFn         = load["thvm_wl_kernel_apply_opt",           {Integer, Integer, Integer, Integer}, Integer];
 $lamShapeSetFn   := $lamShapeSetFn   = load["thvm_wl_lam_shape_set",   {Integer, {Integer, 1}},     Integer];
 $lamShapeCountFn := $lamShapeCountFn = load["thvm_wl_lam_shape_count", {},                           Integer];
 $termShapeInFn   := $termShapeInFn   = load["thvm_wl_term_shape_in",   {Integer},                    {Integer, 1}];

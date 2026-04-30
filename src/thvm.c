@@ -136,9 +136,12 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "backend/cpu/op/pad.c"
 #include "backend/cpu/op/shrink.c"
 #include "backend/cpu/op/permute.c"
-// codegen/ is backend-agnostic.  Included before the cpu dispatchers
+// codegen/ is backend-agnostic.  axis.c + apply_opt.c land first
+// so renderer + cg passes see the KernelAxes scheduling structure.
 // so they can call cg_profile_record / cg_now_us / cg_kernel_flops
 // + reference KDispatchKind enum constants.
+#include "codegen/axis.c"
+#include "codegen/apply_opt.c"
 #include "codegen/cg.c"
 #include "codegen/profile.c"
 #include "codegen/render_c.c"

@@ -956,6 +956,14 @@ static Term emit_kernel_for_boundary(u32 bi) {
     }
   }
 
+  // Default-init the axis-typed scheduling plan now that the program
+  // and output_shape are finalized.  Per-kid (NOT per-program-cache)
+  // because two kernels sharing a program may end up with different
+  // applied opts at runtime.  Today's default = all-LOOP + trailing
+  // REDUCE matches the existing flat emit; cg_emit_variants and
+  // axes_apply_opt are what introduce divergence.
+  axes_default_for(ke);
+
   u64 kloc = heap_alloc(2);
   heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, out_tid));
   heap_set(kloc + 1, term_new(0, TAG_NUM, DT_I32, kid));

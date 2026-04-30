@@ -269,6 +269,63 @@ typedef struct {
 // Forward declaration for the dispatch callback.
 struct KernelEntry;
 
+// === KernelAxes ===
+// Axis-typed scheduling structure carried per-KernelEntry, mirroring
+// tinygrad's `Kernel.axis_types[]` / `Kernel.full_shape[]`.  The
+// codegen variant emitter (cg_emit_variants) walks these to produce
+// a structured iteration nest -- nested loops, unrolled blocks,
+// thread/threadgroup bindings (Metal) -- instead of one flat
+// `for i = 0..numel-1`.
+//
+// Default state (set by axes_default_for at materialize-time): one
+// LOOP axis per output dim plus a trailing REDUCE for tail-REDUCE
+// kernels.  Equivalent to today's flat emit -- 393/393 must keep
+// passing with no opts applied.
+//
+// Opts are applied via axes_apply_opt and recorded in applied_opts[].
+// The C-side state is the source of truth; WL is a thin LibraryLink
+// wrapper.
+
+#define KAX_LOOP          0    // default: nested for-loop in the iter nest
+#define KAX_REDUCE        1    // tail-REDUCE k-loop (default for reduce kernels)
+#define KAX_UPCAST        2    // unrolled inner output axis (no loop emitted)
+#define KAX_UNROLL        3    // unrolled reduce-axis (k-loop unrolled)
+#define KAX_LOCAL         4    // Metal: bound to thread_position_in_threadgroup
+#define KAX_GLOBAL        5    // Metal: bound to threadgroup_position_in_grid
+#define KAX_GROUP_REDUCE  6    // Metal: threadgroup-shared accumulator + barrier
+
+#define MAX_AXES   16
+#define MAX_OPTS   32
+
+// KOpt op encoding -- matches WL TOpt's op_String at the LibraryLink
+// boundary (translated by thvm_wl_kernel_apply_opt).  KOP_NONE = 0
+// is a sentinel for empty applied_opts[] entries.
+#define KOP_NONE     0
+#define KOP_UPCAST   1
+#define KOP_UNROLL   2
+#define KOP_LOCAL    3
+#define KOP_GROUP    4
+#define KOP_GROUPTOP 5
+#define KOP_SWAP     6
+#define KOP_PADTO    7
+#define KOP_NOLOCALS 8
+#define KOP_TC       9
+
+typedef struct {
+  u8  op;        // KOP_*
+  u8  axis;      // 0-indexed; meaning depends on op
+  u32 arg;       // op-specific (split factor for UPCAST/UNROLL, target
+                 // axis index for SWAP, pad target for PADTO, ...)
+} KOpt;
+
+typedef struct {
+  u8   axis_types[MAX_AXES];   // KAX_*
+  u32  full_shape[MAX_AXES];
+  u8   n_axes;                 // 0 = uninitialized (not yet defaulted)
+  KOpt applied_opts[MAX_OPTS];
+  u8   n_applied;
+} KernelAxes;
+
 struct Backend {
   u32   id;
   // view_aware = 1 if dispatch_kernel pre-materializes non-contig
@@ -391,6 +448,13 @@ typedef struct KernelEntry {
                                    // decide when this kernel's output buf
                                    // is no longer needed.
   void     *compiled;              // backend-specific; NULL for interpreter
+
+  // Axis-typed scheduling plan.  Defaulted at materialize-time
+  // (axes_default_for) to all-LOOP + trailing REDUCE for reduce
+  // kernels; mutated by axes_apply_opt when the user / proposer
+  // applies a TOpt.  cg_emit_variants consumes this to emit
+  // structured iteration nests instead of one flat for-loop.
+  KernelAxes axes;
 } KernelEntry;
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
@@ -727,6 +791,20 @@ fn Term interact_dup_num(u8 side, u64 loc, Term num);
 fn Term interact_dup_ten(u8 side, u64 loc, Term ten);
 fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop);
 fn Term interact_kernel (Term kernel);
+
+// === codegen/ axis ===
+// Default-initialise a kernel's axis structure from its output shape +
+// final REDUCE op (if any).  Idempotent: a no-op if axes.n_axes != 0
+// (caller already configured it).  Called from materialize after
+// kernel program is committed.
+fn void axes_default_for(struct KernelEntry *ke);
+
+// Apply one TOpt to the axis structure: split the indicated axis,
+// mark the new inner axis with the opt's KAX_ type (UPCAST/UNROLL/
+// LOCAL/etc.), append to applied_opts[].  SWAP swaps two axes
+// in-place.  Returns 0 on validation failure (axis out of range,
+// arg doesn't divide, applied_opts full).
+fn int axes_apply_opt(KernelAxes *ax, KOpt opt);
 
 // === tensor/ ===
 // Tensor descriptor lifecycle.  Step 12: bump-only allocation in TENS[];

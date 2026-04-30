@@ -940,6 +940,74 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_jit_dylib_path(WolframLibraryData l, mint 
 // Number of distinct KProgOp[] arrays interned in the kernel-
 // program hash-cons cache.  Used by tests to assert that two
 // kernels with structurally identical programs share storage.
+// === KernelAxes / TOpt surface (Phase 16 codegen variant scaffold) ===
+//
+// Snapshot of a kernel's axis-typed scheduling plan + applied opts.
+// Packed as a flat {Integer, 1} for the WL side to decode:
+//
+//   [0]  n_axes
+//   [1]  n_applied
+//   [2 .. 2 + n_axes - 1]                  axis_types[i]
+//   [2 + n_axes .. 2 + 2*n_axes - 1]       full_shape[i]
+//   [2 + 2*n_axes ..]                      applied_opts as (op, axis, arg) triples
+//
+// The WL TKernelOpts wrapper turns this into the
+// <|"AxisTypes", "FullShape", "Applied"|> association.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
+                                               mint argc, MArgument *args,
+                                               MArgument res) {
+  (void)argc;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    mint dims[1] = {0};
+    MTensor empty;
+    libData->MTensor_new(MType_Integer, 1, dims, &empty);
+    MArgument_setMTensor(res, empty);
+    return LIBRARY_NO_ERROR;
+  }
+  KernelAxes const *ax = &KERNELS[kid].axes;
+  mint total = (mint)(2 + 2 * ax->n_axes + 3 * ax->n_applied);
+  mint dims[1] = {total};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  dst[0] = (mint)ax->n_axes;
+  dst[1] = (mint)ax->n_applied;
+  for (u32 i = 0; i < ax->n_axes; i++) {
+    dst[2 + i]               = (mint)ax->axis_types[i];
+    dst[2 + ax->n_axes + i]  = (mint)ax->full_shape[i];
+  }
+  mint base = 2 + 2 * ax->n_axes;
+  for (u32 i = 0; i < ax->n_applied; i++) {
+    dst[base + 3 * i + 0] = (mint)ax->applied_opts[i].op;
+    dst[base + 3 * i + 1] = (mint)ax->applied_opts[i].axis;
+    dst[base + 3 * i + 2] = (mint)ax->applied_opts[i].arg;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// Apply one TOpt to a kernel.  Returns 1 on success, 0 on validation
+// failure (axis out of range, arg doesn't divide axis size, opts
+// table full).  Op encoding matches KOP_* in src/thvm.h; the WL
+// surface translates the TOpt op_String into the integer.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
+                                                MArgument *args, MArgument res) {
+  (void)l; (void)a;
+  u32 kid  = (u32)MArgument_getInteger(args[0]);
+  u32 op   = (u32)MArgument_getInteger(args[1]);
+  u32 axis = (u32)MArgument_getInteger(args[2]);
+  u32 arg  = (u32)MArgument_getInteger(args[3]);
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    MArgument_setInteger(res, 0);
+    return LIBRARY_NO_ERROR;
+  }
+  KOpt opt = { (u8)op, (u8)axis, arg };
+  int ok = axes_apply_opt(&KERNELS[kid].axes, opt);
+  MArgument_setInteger(res, (mint)ok);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_kernel_program_cache_size(WolframLibraryData libData,
                                                           mint argc,
                                                           MArgument *args,

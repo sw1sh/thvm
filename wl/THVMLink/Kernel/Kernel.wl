@@ -58,13 +58,17 @@ TKernelJitDylibPath::usage  = "TKernelJitDylibPath[kid] = TKernel[kid][\"JitDyli
 TKernelProfile::usage       = "TKernelProfile[kid] returns Information[TKernel[kid]] -- an Association of every property listed by Information[k, \"Properties\"], including the profiling fields.";
 TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid.";
 
-(* === axis-typed scheduling slot (mirrors tinygrad's Kernel.opt) === *)
+(* === axis-typed scheduling slot (mirrors tinygrad's Kernel.opt) ===
+   WL is a thin shell -- the axis structure + apply-opt rewrite logic
+   lives in C (src/codegen/axis.c + src/codegen/apply_opt.c).  This
+   block just packages the C-side state into typed WL objects with
+   summary boxes. *)
 
-Opt::usage = "Opt[op_, axis_, arg_] is a typed kernel-optimization action.  Mirrors tinygrad's `Opt(OptOps.UPCAST, axis=2, arg=4)` (tinygrad/codegen/opt/kernel.py:Opt).  Valid op names: \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\", \"PADTO\", \"NOLOCALS\", \"TC\".  axis is 0-indexed (thvm convention; tinygrad-side ports may want to subtract 1).  arg meaning is op-specific (for UPCAST/UNROLL: split factor; for SWAP: target axis index).  Apply via `TKernelApplyOpt[k, opt]`; introspect via `TKernelOpts[k]`.";
+TOpt::usage = "TOpt[op_String, axis_Integer, arg_] is a typed kernel-optimization action.  Mirrors tinygrad's `Opt(OptOps.UPCAST, axis=2, arg=4)` (tinygrad/codegen/opt/kernel.py:Opt).  Valid ops: \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\", \"PADTO\", \"NOLOCALS\", \"TC\".  axis is 0-indexed.  arg meaning is op-specific (for UPCAST/UNROLL: split factor; for SWAP: target axis index).  Apply via `TKernelApplyOpt[kid, TOpt[...]]`; introspect via `TKernelOpts[kid]`.";
 
-TKernelOpts::usage = "TKernelOpts[kid] returns the kernel's axis structure as <|\"AxisTypes\" -> {...}, \"FullShape\" -> {...}, \"Applied\" -> {Opt[...], ...}|>.  AxisTypes parallels FullShape: each entry is one of \"GLOBAL\" / \"LOCAL\" / \"LOOP\" / \"UPCAST\" / \"GROUP_REDUCE\" / \"REDUCE\" / \"UNROLL\".  Default (no opts applied) is all LOOP for elementwise output axes plus REDUCE for any reduction axes -- matching tinygrad's pre-opt Kernel.axis_types view.  Applied is the chronological list of `Opt[...]` actions.";
+TKernelOpts::usage = "TKernelOpts[kid] returns a wrapped `TKernelOpts[<|\"Kid\", \"AxisTypes\", \"FullShape\", \"Applied\"|>]` summarising the kernel's axis-typed scheduling plan as carried in C.  AxisTypes parallels FullShape: each entry is one of \"LOOP\" / \"REDUCE\" / \"UPCAST\" / \"UNROLL\" / \"LOCAL\" / \"GLOBAL\" / \"GROUP_REDUCE\".  Default (no opts applied) is all LOOP for elementwise output axes plus a trailing REDUCE for reduce kernels.  Applied is the chronological list of TOpt actions.";
 
-TKernelApplyOpt::usage = "TKernelApplyOpt[kid, opt_Opt] applies `opt` to the kernel's axis structure.  Today this is a WL-side scaffold that records the opt + updates the AxisTypes view (so TKernelOpts reflects it); the C-side codegen consumer is Phase 14+ (cg_emit_variants per docs/bench/phase10.md).  Returns the updated TKernelOpts Association.  Available opts: see Opt::usage.";
+TKernelApplyOpt::usage = "TKernelApplyOpt[kid, TOpt[op, axis, arg]] mutates the kernel's C-side KernelAxes via axes_apply_opt: splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), swaps two axes (SWAP), or records the opt for the codegen consumer (PADTO/NOLOCALS/TC).  Returns the updated TKernelOpts wrapper.  Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg doesn't divide axis size, opts table full).";
 
 (* === C-side kernel side-table accessors ===
    Live here (rather than MemoryPlan.wl) because they're the core
@@ -394,107 +398,72 @@ TKernelProfile[kid_Integer] := <|
 |>
 
 (* === axis-typed scheduling slot ============================
-   WL-side scaffold for the kernel-optimization layer.  Tinygrad's
-   `Kernel` (tinygrad/codegen/opt/kernel.py) carries `axis_types[]`
-   alongside `full_shape[]`; opt actions like `Opt(UPCAST, 2, 4)`
-   rewrite that axis structure (split N into N//4 + 4, mark the 4
-   as UPCAST), and the linearizer emits the iteration nest
-   accordingly.
+   Thin LibraryLink wrappers over the C-side KernelAxes
+   (src/codegen/axis.c).  The C side owns the axis structure +
+   apply-opt rewrite logic; WL just packages the snapshot into
+   typed objects with summary boxes (Format.wl).  All previous
+   WL-side scaffold (defaultAxisTypes, defaultFullShape,
+   $kernelAppliedOpts side store) is retired -- C is the single
+   source of truth. *)
 
-   thvm's KernelEntry today holds a flat `KProgOp[]` post-
-   linearization (one implicit `for i = 0..numel-1` loop), so the
-   axis structure isn't materialised yet.  This block:
+(* String <-> KOP_ ordinal.  Order MUST match KOP_* in src/thvm.h.
+   KOP_NONE = 0 is the empty-slot sentinel, never user-visible. *)
+$kopNames = {"NONE", "UPCAST", "UNROLL", "LOCAL", "GROUP",
+             "GROUPTOP", "SWAP", "PADTO", "NOLOCALS", "TC"}
 
-   - Defines the `Opt[op_String, axis_Integer, arg_]` typed object
-     (mirrors tinygrad's `Opt(OptOps.X, axis, arg)`).
-   - Synthesises a default AxisTypes view from the kernel's output
-     shape: every output axis is LOOP, plus a REDUCE axis appended
-     for kernels whose program ends in a UOP_REDUCE_* op.
-   - Records applied opts in a per-kid side store and reflects them
-     in TKernelOpts.
+kopOrdinal[op_String] := With[{i = FirstPosition[$kopNames, op, {-1}][[1]]},
+    If[ i > 0, i - 1, $Failed]]
 
-   The C-side codegen consumer (cg_emit_variants per
-   docs/bench/phase10.md) is the Phase 14+ delivery.  Once it
-   lands, this WL scaffold becomes the user-facing knob; the side
-   store handoff becomes a kid-keyed dispatch the C-side reads. *)
+kopName[ord_Integer] := If[ ord >= 0 && ord < Length[$kopNames],
+    $kopNames[[ord + 1]], "?"]
 
-(* Per-kid opts side store: kid -> <|"AxisTypes", "FullShape", "Applied"|>. *)
-$kernelAppliedOpts = <||>
+(* String <-> KAX_ ordinal.  Order MUST match KAX_* in src/thvm.h. *)
+$kaxNames = {"LOOP", "REDUCE", "UPCAST", "UNROLL",
+             "LOCAL", "GLOBAL", "GROUP_REDUCE"}
 
-(* Resolve the output shape via the existing kid->row->tid chain.
-   TTensorShape on the synthesised tenTerm decodes the TenDesc's
-   view shape correctly (mirrors tKernelProp[..., "OutputShape"]). *)
-kernelOutputShape[kid_Integer] := Module[{tid, term, shape},
-    tid = kernelRowAsoc[kid]["OutputTid"];
-    If[ ! IntegerQ[tid] || tid <= 0, Return[{}]];
-    term  = tenTermFromTid[tid];
-    shape = TTensorShape[term];
-    If[ ListQ[shape], shape, {}]]
+kaxName[ord_Integer] := If[ ord >= 0 && ord < Length[$kaxNames],
+    $kaxNames[[ord + 1]], "?"]
 
-kernelEndsInReduce[kid_Integer] := Module[{prog = decodeKernelInfo[kid][[2]]},
-    Length[prog] > 0 && StringMatchQ[Last[prog]["Op"], "REDUCE_" ~~ ___]]
+(* Decode the packed {Integer, 1} payload from thvm_wl_kernel_axes_get
+   into a {axisTypes, fullShape, applied} triple.  Layout:
+     [0]  n_axes,  [1] n_applied,
+     [2..2+n_axes-1]                  axis_types[i],
+     [2+n_axes..2+2*n_axes-1]         full_shape[i],
+     [2+2*n_axes..]                   applied as (op, axis, arg) triples. *)
+decodeKernelAxes[packed_List] := Module[{nA, nO, base, axisTypes, fullShape, applied},
+    If[ Length[packed] < 2, Return[{{}, {}, {}}] ];
+    nA = packed[[1]]; nO = packed[[2]];
+    axisTypes = kaxName /@ packed[[3 ;; 2 + nA]];
+    fullShape = packed[[3 + nA ;; 2 + 2*nA]];
+    base      = 2 + 2*nA;
+    applied   = Table[
+        TOpt[ kopName @ packed[[base + 3*(i - 1) + 1]],
+              packed[[base + 3*(i - 1) + 2]],
+              packed[[base + 3*(i - 1) + 3]] ],
+        {i, nO}];
+    {axisTypes, fullShape, applied}]
 
-defaultAxisTypes[kid_Integer] := With[{shape = kernelOutputShape[kid]},
-    If[ kernelEndsInReduce[kid],
-        Append[ConstantArray["LOOP", Length[shape]], "REDUCE"],
-        ConstantArray["LOOP", Length[shape]]]]
+TKernelOpts[kid_Integer] := (ensureInit[];
+    Module[{packed, decoded},
+        packed  = Normal @ $kernelAxesGetFn[kid];
+        decoded = decodeKernelAxes[packed];
+        TKernelOpts[<|
+            "Kid"       -> kid,
+            "AxisTypes" -> decoded[[1]],
+            "FullShape" -> decoded[[2]],
+            "Applied"   -> decoded[[3]]
+        |>]
+    ])
 
-defaultFullShape[kid_Integer] := With[{shape = kernelOutputShape[kid]},
-    If[ kernelEndsInReduce[kid],
-        (* Best-effort: append the last KProgOp's Numel / output_numel
-           ratio as the reduce-axis size.  REDUCE collapses one axis,
-           so input_numel / output_numel = reduce_axis_size. *)
-        Module[{prog = decodeKernelInfo[kid][[2]], outNumel, redOp, axisSize},
-            outNumel = TKernelInfo[kid][[1]]["OutputNumel"];
-            redOp    = Last[prog];
-            axisSize = If[ outNumel > 0, Quotient[redOp["Numel"], outNumel], 1];
-            Append[shape, axisSize]],
-        shape]]
-
-TKernelOpts[kid_Integer] := With[{stored = Lookup[$kernelAppliedOpts, kid, <||>]},
-    <|
-        "AxisTypes" -> Lookup[stored, "AxisTypes", defaultAxisTypes[kid]],
-        "FullShape" -> Lookup[stored, "FullShape", defaultFullShape[kid]],
-        "Applied"   -> Lookup[stored, "Applied", {}]
-    |>]
-
-(* Apply an opt to the AxisTypes view.  WL-side bookkeeping today:
-   rewrites the axis-types entry at `axis` to match the opt, splits
-   the FullShape entry where the opt's arg is a split factor.  C-side
-   codegen consumes this only once cg_emit_variants lands. *)
-TKernelApplyOpt[kid_Integer, opt : Opt[op_String, axis_Integer, arg_]] :=
-    Module[{cur, axisTypes, fullShape, applied, axTypeMap},
-        cur       = TKernelOpts[kid];
-        axisTypes = cur["AxisTypes"];
-        fullShape = cur["FullShape"];
-        applied   = cur["Applied"];
-        axTypeMap = <|
-            "UPCAST"   -> "UPCAST",  "UNROLL" -> "UNROLL",
-            "LOCAL"    -> "LOCAL",   "GROUP"  -> "GROUP_REDUCE",
-            "GROUPTOP" -> "GROUP_REDUCE"|>;
-        Which[
-            KeyExistsQ[axTypeMap, op],
-                (* Split fullShape[[axis+1]] into outer + arg;
-                   mark the new inner axis as op type. *)
-                With[{outerSize = Quotient[fullShape[[axis + 1]], arg]},
-                    fullShape = Insert[
-                        ReplacePart[fullShape, axis + 1 -> outerSize],
-                        arg, axis + 2];
-                    axisTypes = Insert[axisTypes, axTypeMap[op], axis + 2]],
-            op === "SWAP",
-                With[{i = axis + 1, j = arg + 1},
-                    fullShape = ReplacePart[fullShape,
-                        {i -> fullShape[[j]], j -> fullShape[[i]]}];
-                    axisTypes = ReplacePart[axisTypes,
-                        {i -> axisTypes[[j]], j -> axisTypes[[i]]}]],
-            True, Null];
-        applied = Append[applied, opt];
-        $kernelAppliedOpts[kid] = <|
-            "AxisTypes" -> axisTypes,
-            "FullShape" -> fullShape,
-            "Applied"   -> applied|>;
-        TKernelOpts[kid]
-    ]
+TKernelApplyOpt[kid_Integer, TOpt[op_String, axis_Integer, arg_Integer]] :=
+    (ensureInit[];
+        Module[{ord = kopOrdinal[op]},
+            If[ ord === $Failed, Return[Failure["unknown-opt", <|"Op" -> op|>]] ];
+            If[ $kernelApplyOptFn[kid, ord, axis, arg] === 1,
+                TKernelOpts[kid],
+                Failure["opt-rejected", <|"Kid" -> kid, "Opt" -> TOpt[op, axis, arg]|>]
+            ]
+        ])
 
 
 (* All currently-live kernels' profiles, indexed by kid. *)

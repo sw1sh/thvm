@@ -14,6 +14,13 @@
 
 BeginPackage["THVMLink`"];
 
+(* Forward-declare symbols owned by later-loading siblings whose
+   summary boxes are rendered here.  Without this, references in
+   Format.wl resolve to fresh `Private` symbols (Format.wl < their
+   owners alphabetically), so the MakeBoxes UpValues never fire on
+   the public symbol the user actually constructs. *)
+{TOpt, TKernelOpts};
+
 Begin["`Private`"];
 
 (* === structural validity tests === *)
@@ -263,6 +270,150 @@ TKernel /: MakeBoxes[k:TKernel[a_Association] /; tKernelInternalQ[k], fmt_] :=
                 {
                     BoxForm`SummaryItem[{"consumers: ", row["ConsumerCount"]}],
                     BoxForm`SummaryItem[{"spliced: ",   row["Spliced"]}]
+                }
+            },
+            fmt,
+            "Interpretable" -> Automatic
+        ]
+    ]
+
+(* === TOpt summary box ===
+   Small wedge icon (kernel-orange) + the (op, axis, arg) triple
+   inline.  Collapsed view explains the op's effect for users new
+   to the codegen-variant scaffold. *)
+
+tOptQ[TOpt[op_String, axis_Integer, _]] := True
+tOptQ[___] := False
+
+tOptSummaryIcon[] := Graphics[
+    {
+        EdgeForm[LightDarkSwitched[Black, White]],
+        FaceForm[LightDarkSwitched[Lighter[StandardOrange, 0.6], Darker[StandardOrange, 0.4]]],
+        Polygon[{{-0.6, -0.5}, {0.5, 0}, {-0.6, 0.5}}]
+    },
+    ImageSize -> Dynamic[{Automatic, 3.0 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRangePadding -> Scaled[0.05]
+]
+
+tOptExplanation[op_String] := Switch[op,
+    "UPCAST",   "split inner output axis; unroll without a loop",
+    "UNROLL",   "split reduce-axis; unroll the k-loop",
+    "LOCAL",    "Metal: bind axis to thread_position_in_threadgroup",
+    "GROUP" | "GROUPTOP",
+                "Metal: threadgroup-shared accumulator + barrier",
+    "SWAP",     "swap axis order in the iteration nest",
+    "PADTO",    "pad axis up to a multiple of arg",
+    "NOLOCALS", "disable LOCAL bindings on this kernel",
+    "TC",       "Metal: bind to a tensor-core MMA intrinsic",
+    _,          "(unknown op)"]
+
+TOpt /: MakeBoxes[t:TOpt[op_String, axis_Integer, arg_] /; tOptQ[Unevaluated[t]], fmt_] :=
+    With[{icon = tOptSummaryIcon[]},
+        BoxForm`ArrangeSummaryBox[
+            "TOpt",
+            t,
+            icon,
+            {
+                {
+                    BoxForm`SummaryItem[{"op: ",   op}],
+                    BoxForm`SummaryItem[{"axis: ", axis}],
+                    BoxForm`SummaryItem[{"arg: ",  arg}]
+                }
+            },
+            {
+                {BoxForm`SummaryItem[{"effect: ", tOptExplanation[op]}]}
+            },
+            fmt,
+            "Interpretable" -> Automatic
+        ]
+    ]
+
+(* === TKernelOpts summary box ===
+   Stacked-bars icon (one bar per axis, color-coded by axis type)
+   + a one-line axis signature ("LOOP x 1 + UPCAST(4) + REDUCE")
+   + applied-opt count.  Collapsed: full axis_types/full_shape
+   table + the chronological applied list. *)
+
+tKernelOptsQ[TKernelOpts[a_Association]] := AllTrue[
+    {"Kid", "AxisTypes", "FullShape", "Applied"}, KeyExistsQ[a, #] &]
+tKernelOptsQ[___] := False
+
+(* Per-axis-type swatch color.  LOOP = neutral gray (passive);
+   REDUCE = blue (k-loop); UPCAST/UNROLL = orange (unrolled);
+   LOCAL/GLOBAL/GROUP_REDUCE = green (parallel binding). *)
+$kaxColors = <|
+    "LOOP"         -> StandardGray,
+    "REDUCE"       -> StandardBlue,
+    "UPCAST"       -> StandardOrange,
+    "UNROLL"       -> StandardOrange,
+    "LOCAL"        -> StandardGreen,
+    "GLOBAL"       -> StandardGreen,
+    "GROUP_REDUCE" -> StandardGreen
+|>
+
+tKernelOptsSummaryIcon[axisTypes_List] := Graphics[
+    Table[
+        With[{
+            t = axisTypes[[i]],
+            x = -0.6 + 1.2 * (i - 1) / Max[Length[axisTypes], 1]
+        },
+            {
+                EdgeForm[LightDarkSwitched[Black, White]],
+                FaceForm[LightDarkSwitched[
+                    Lighter[Lookup[$kaxColors, t, StandardGray], 0.5],
+                    Darker [Lookup[$kaxColors, t, StandardGray], 0.4]]],
+                Rectangle[{x, -0.55}, {x + 1.0/Max[Length[axisTypes], 1], 0.55}]
+            }],
+        {i, Length[axisTypes]}],
+    ImageSize -> Dynamic[{Automatic, 3.5 CurrentValue["FontCapHeight"] / AbsoluteCurrentValue[Magnification]}],
+    PlotRange -> {{-0.7, 0.7}, {-0.7, 0.7}},
+    PlotRangePadding -> Scaled[0.05]
+]
+
+(* One-line "LOOP x 2 + UPCAST(4) + REDUCE" signature, runs adjacent
+   axes of same type into a "x N" group, annotates split-induced
+   axes with their size in parens. *)
+tKernelOptsAxisSignature[axisTypes_List, fullShape_List] := Module[{parts, runs},
+    runs = Split[Transpose[{axisTypes, fullShape}], #1[[1]] === #2[[1]] &];
+    parts = Table[
+        With[{tag = run[[1, 1]], n = Length[run]},
+            Which[
+                MemberQ[{"UPCAST", "UNROLL", "LOCAL", "GLOBAL", "GROUP_REDUCE"}, tag],
+                    StringJoin[tag, "(", ToString[run[[1, 2]]], ")"],
+                n === 1, tag,
+                True,    StringJoin[tag, " x ", ToString[n]]
+            ]],
+        {run, runs}];
+    StringRiffle[parts, " + "]]
+
+TKernelOpts /: MakeBoxes[k:TKernelOpts[a_Association] /; tKernelOptsQ[Unevaluated[k]], fmt_] :=
+    With[{
+        kid       = a["Kid"],
+        axisTypes = a["AxisTypes"],
+        fullShape = a["FullShape"],
+        applied   = a["Applied"],
+        icon      = tKernelOptsSummaryIcon[a["AxisTypes"]]
+    },
+        BoxForm`ArrangeSummaryBox[
+            "TKernelOpts",
+            k,
+            icon,
+            {
+                {
+                    BoxForm`SummaryItem[{"kid: ",     kid}],
+                    BoxForm`SummaryItem[{"applied: ", Length[applied]}]
+                },
+                {
+                    BoxForm`SummaryItem[{"axes: ", tKernelOptsAxisSignature[axisTypes, fullShape]}]
+                }
+            },
+            {
+                {
+                    BoxForm`SummaryItem[{"AxisTypes: ", axisTypes}],
+                    BoxForm`SummaryItem[{"FullShape: ", fullShape}]
+                },
+                {
+                    BoxForm`SummaryItem[{"Applied: ", If[ applied === {}, "(none)", Column[applied]]}]
                 }
             },
             fmt,
