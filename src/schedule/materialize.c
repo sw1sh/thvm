@@ -335,8 +335,61 @@ fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN 
 // producer_kid).  PAD intentionally falls through (g2c2) -- a
 // view-only PAD would have to read bytes outside the alloc.
 
+// _merge_dims: collapse runs of stride-compatible axes in `src` into
+// (merged_dim, stride, expand_real_dim) triples.  Mirrors tinygrad's
+// View._merge_dims at tinygrad/shape/view.py:19.  Two adjacent axes
+// (size s_a, stride st_a) and (size s_b, stride st_b) are
+// stride-compatible iff st_a == s_b * st_b -- the outer axis steps
+// over exactly one inner block, so logically the pair acts as a
+// single axis of size s_a*s_b with the inner stride.
+//
+// Unit axes (size 1) are treated as "merging" placeholders and join
+// the next axis without affecting the merged stride.  Stride-0
+// (broadcast) axes form their own block; expand_real_dim is set to 0
+// for them so the reshape fitter knows that block doesn't carry
+// memory width.  No-mask version: thvm's View has no `mask` field.
+//
+// Output count <= src->shape.ndim; caller pre-allocates MAX_DIM slots.
+typedef struct {
+  u32 merged_dim;          // logical size of merged block
+  i32 stride;              // stride of the inner-most axis in the block
+  u32 expand_real_dim;     // merged_dim if stride!=0 else 0; tracks
+                           //   how much memory width the block spans
+} MergedDim;
+
+static u32 view_merge_dims(View const *v, MergedDim *out) {
+  if (v->shape.ndim == 0) return 0;
+  out[0].merged_dim      = v->shape.dims[0];
+  out[0].stride          = v->strides[0];
+  out[0].expand_real_dim = v->strides[0] ? v->shape.dims[0] : 0;
+  u32 n = 1;
+  u8 merging = (v->shape.dims[0] == 1);
+  for (u32 i = 1; i < v->shape.ndim; i++) {
+    u32 s  = v->shape.dims[i];
+    i32 st = v->strides[i];
+    if (s == 1) continue;                                  // unit axes always merge
+    MergedDim *last = &out[n - 1];
+    if (merging || last->stride == (i32)s * st) {
+      last->merged_dim     *= s;
+      last->stride          = st;
+      last->expand_real_dim = st ? (merging ? s : last->expand_real_dim * s) : 0;
+    } else {
+      out[n].merged_dim      = s;
+      out[n].stride          = st;
+      out[n].expand_real_dim = st ? s : 0;
+      n++;
+    }
+    merging = (s == 1);
+  }
+  return n;
+}
+
+// Tinygrad-faithful reshape that absorbs into a single (possibly non-
+// contig) view via _merge_dims when the new shape's axis decomposition
+// aligns with the source's contig sub-blocks.  Mirrors
+// View.reshape (tinygrad/shape/view.py:267).  Returns 1 on success,
+// 0 when no single-view absorb exists (caller chains views).
 static int view_apply_reshape(View const *src, u64 expr_loc, View *out) {
-  if (!src->contiguous) return 0;
   u32 t_ndim  = (u32)term_val(heap_read(expr_loc + 1));
   Shape ts = {0}; ts.ndim = t_ndim;
   u32 t_numel = 1;
@@ -346,7 +399,58 @@ static int view_apply_reshape(View const *src, u64 expr_loc, View *out) {
     t_numel *= d;
   }
   if (t_numel != src->numel) return 0;
-  *out = view_create(ts);
+  if (t_ndim > MAX_DIM) return 0;
+
+  // Fast path: contig source -- canonical strides for new shape.
+  if (src->contiguous) {
+    *out = view_create(ts);
+    return 1;
+  }
+
+  // Non-contig source: try to express the reshape as new strides
+  // walking through src's merged contig sub-blocks, in REVERSE
+  // (tinygrad walks from the trailing axis inward).
+  MergedDim merged[MAX_DIM];
+  u32 n_merged = view_merge_dims(src, merged);
+
+  i32 strides_rev[MAX_DIM];   // collected back-to-front
+  u32 strides_n = 0;
+  i32 r_idx = (i32)t_ndim - 1;
+
+  for (i32 mi = (i32)n_merged - 1; mi >= 0 && r_idx >= 0; mi--) {
+    u32 acc        = 1;
+    i32 new_stride = merged[mi].stride;
+    u32 real_dim   = merged[mi].expand_real_dim;
+    while (acc < merged[mi].merged_dim
+        && acc != merged[mi].merged_dim
+        && r_idx >= 0) {
+      u32 new_dim = ts.dims[r_idx];
+      r_idx--;
+      strides_rev[strides_n++] = new_stride;
+      if (new_dim != 1) {
+        acc        *= new_dim;
+        new_stride *= (acc < real_dim) ? (i32)new_dim : 0;
+      }
+    }
+    if (acc != merged[mi].merged_dim) return 0;   // mismatch -- caller falls back
+  }
+  // Pad any remaining outer axes with stride 0 (leading 1-dims).
+  while ((u32)strides_n < t_ndim) strides_rev[strides_n++] = 0;
+  if (strides_n != t_ndim) return 0;
+
+  out->shape = ts;
+  out->numel = t_numel;
+  out->offset = src->offset;
+  for (u32 i = 0; i < t_ndim; i++) out->strides[i] = strides_rev[t_ndim - 1 - i];
+  for (u32 i = t_ndim; i < MAX_DIM; i++) out->strides[i] = 0;
+  // Contig iff the resulting strides are canonical row-major.
+  out->contiguous = 1;
+  i32 cs = 1;
+  for (i32 i = (i32)t_ndim - 1; i >= 0; i--) {
+    if (out->strides[i] != cs) { out->contiguous = 0; break; }
+    cs *= (i32)ts.dims[i];
+  }
+  if (out->offset != 0) out->contiguous = 0;
   return 1;
 }
 
