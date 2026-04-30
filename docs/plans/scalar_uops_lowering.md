@@ -262,18 +262,57 @@ inferable from `TKernelCount[]`.
   patterns; full retirement is the Phase F goal once all
   realistic kernel patterns lower.
 
-### Phase F: retire visit() (deferred)
+### Phase F: retire visit() (in progress)
 
-Open work before `visit()` can be removed:
-- TSoftmaxAxis multi-axis (rank > 1 input, axis != 0).
-- PERMUTE / PAD / SHRINK / FLIP movement ops.
-- CAST / BITCAST.
-- Negative strides (FLIP under-the-hood).
-- Non-zero view offsets.
-- > 1 REDUCE per kernel (BatchNorm mean+var pattern).
-- Strides > 65535 (current u16 packing).
-- Conv2D / matmul kernels (currently stay on BLAS path; no
-  scalar lowering attempted).
+Goal: every kernel pattern lowers through rangeify so that
+visit(), cpu_interpret, and the cpu_op_*.c family can be deleted.
+
+**Progress**: 354 -> 72 bails across the WL grid (8 commits in
+this iteration: F-1 through F-3 part 3 plus F-5).  WL grid 599 / 0
+under default-on rangeify; LeNet canary trains correctly.
+
+| ref | what landed | bail delta |
+|-----|-------------|-----------|
+| e15efab F-1 | non-zero view offset (u16 in extra) | -134 |
+| 28ae558 F-2 | chained INDEX + BUFFERIZE for ndim>3 | -8 |
+| 0ee8ff7 F-3a | UOP_LOAD as identity | -6 |
+| 92e1b7e F-5 | bool/int{8..64}/fp32/fp64 dispatch | -39 |
+| af9e8b4 F-3b | UOP_CAST + UOP_BITCAST | -16 |
+| 9384e9c F-3c | UOP_SHRINK + UOP_PAD index transforms | -79 |
+| 70c5209 F-3d | inner>1 REDUCE algorithm WIP | (revert) |
+
+**Still bailing today (72 patterns):**
+
+- 26 + 5 + 3 = **34 special-FP / packed dtypes** (f16, bf16,
+  fp8e4m3, fp8e5m2, int4, uint4).  Need dtype-aware load/store
+  via the existing from_fp32_lane / pack_int4 helpers, plus an
+  arithmetic precision policy (likely promote-to-f32).
+- 19 + 5 = **24 numel mismatches** in REDUCE chains where the
+  canonical post-reduce-pre-broadcast shape inference doesn't
+  match the actual op layout (multi-stage shape transforms
+  through chain rule).
+- **14 input-numel mismatches** -- newly exposed; need
+  per-input numel inference rather than the current "must match
+  output_numel or 1 or reduce_in_numel" heuristic.
+
+**Still bailing but algorithm staged (WIP):**
+
+- **inner > 1 REDUCE** (LeNet's dominant Conv2D-backward
+  pattern; ~352+ instances per Adam step).  The reduce_axis-
+  search and INPUT-axis-ordered INDEX builder are in tree
+  (rangeify.c), but the input-shape recognition doesn't yet
+  cover broadcast (stride==0 axes) under non-trailing reduce.
+  Conv2D forward currently regresses if enabled.
+
+**Final cleanup (after zero bails):**
+
+- Delete visit() + visit_*.c helpers in materialize.c.
+- Delete cpu_interpret in backend/cpu/interpret.c.
+- Delete the cpu_op_*.c family.
+- BLAS / JIT dispatch stays (BLAS pattern-matches KProgOp[];
+  scalar form's BLAS recognizer is a separate refactor).
+- KProgOp[] format itself stays as the fixed dispatch IR
+  consumed by BLAS / JIT / soon-rendered scalar dispatch.
 
 ### Phase F (optional, follow-up): Conv2D / MatMul lowering
 
