@@ -69,14 +69,91 @@ static int rc_is_signed_int(u32 dtype) {
       || dtype == DT_INT32 || dtype == DT_INT64;
 }
 
+// Emit a single-view strided index expression: takes a flat input
+// variable name (e.g. "i" or "_t") and emits
+//   offset + s0*((var/inner0)%dim0) + s1*((var/inner1)%dim1) + ...
+// matching tinygrad's View.to_indexed_uops.  All terms with stride 0
+// or unit dim are skipped.  When NO axis contributes (broadcast scalar
+// view, or all-unit-dim) we just emit `offset` (or `0`).
+static void rc_emit_view_index(CgBuf *b, View const *v, const char *var) {
+  int wrote = 0;
+  if (v->offset != 0) {
+    cg_append(b, "%d", (int)v->offset);
+    wrote = 1;
+  }
+  u32 inner_prod = 1;
+  for (i32 a = (i32)v->shape.ndim - 1; a >= 0; a--) {
+    i32 stride = v->strides[a];
+    u32 dim    = v->shape.dims[a];
+    if (stride != 0 && dim > 1) {
+      if (wrote) cg_append(b, " + ");
+      if (inner_prod == 1) {
+        cg_append(b, "%d*(%s %% %u)", (int)stride, var, dim);
+      } else {
+        cg_append(b, "%d*((%s / %u) %% %u)", (int)stride, var, inner_prod, dim);
+      }
+      wrote = 1;
+    }
+    inner_prod *= dim;
+  }
+  if (!wrote) cg_append(b, "0");
+}
+
+// Per-input chained-index helper functions.  When an input is a
+// multi-view ShapeTracker chain (TENS[tid].nviews > 0), the renderer
+// emits a static helper at file scope BEFORE the kernel function:
+//
+//   static inline unsigned idx_in%u(unsigned i) {
+//     unsigned _t = <outer-view strided expr from i>;
+//     _t          = <prior_views[N-1] strided expr from _t>;
+//     ...
+//     return     <prior_views[0] strided expr from _t>;
+//   }
+//
+// Mirrors the chain semantics in src/view/strided_index.c:
+// tendesc_strided_index, and exactly what tinygrad's
+// `views_to_indexed_uops` composes symbolically.  rc_emit_src_ref
+// then emits `in%u[idx_in%u(i)]` for chained inputs.
+//
+// For single-view non-contig inputs we still inline the index
+// expression directly at the access site (no helper) -- one View
+// is short enough that nesting it doesn't hurt readability and
+// the compiler folds the arithmetic away.
+static void rc_emit_chain_helper(CgBuf *b, u32 input_idx, View const *outer,
+                                  View const *prior_views, u32 nviews) {
+  cg_append(b, "static inline unsigned idx_in%u(unsigned i) {\n", input_idx);
+  cg_append(b, "  unsigned _t = (unsigned)(");
+  rc_emit_view_index(b, outer, "i");
+  cg_append(b, ");\n");
+  // Walk prior_views from outermost (nviews-1) to innermost (0).
+  for (i32 i = (i32)nviews - 1; i >= 0; i--) {
+    cg_append(b, "  _t = (unsigned)(");
+    rc_emit_view_index(b, &prior_views[i], "_t");
+    cg_append(b, ");\n");
+  }
+  cg_append(b, "  return _t;\n");
+  cg_append(b, "}\n");
+}
+
+// True when input slot `idx` carries non-contig metadata that
+// rc_emit_src_ref should consult for codegen-time index inlining.
+static int rc_input_needs_strided(CgBuf const *b, u32 idx) {
+  if (b->ke == NULL || b->ke->input_views == NULL) return 0;
+  if (idx >= b->ke->n_inputs) return 0;
+  // Multi-view chain: query TENS[tid].nviews for the chain depth.
+  u32 tid = b->ke->input_tids[idx];
+  if (tid != 0 && tid < TENS_NEXT && TENS[tid].nviews > 0) return 1;
+  // Single-view non-contig.
+  View const *v = &b->ke->input_views[idx];
+  return !v->contiguous && v->shape.ndim > 0;
+}
+
 // Tinygrad-style codegen-time index inlining.  When an input slot's
 // view is contig we emit `in%u[i]` (or `in%u[0]` for numel=1
-// broadcast); when it's non-contig we emit a strided expression
-// `in%u[s0*c0(i) + s1*c1(i) + ... + offset]` where each ci is a
-// modular decomposition of i through the view's shape.  Mirrors
-// View.to_indexed_uops -- each access is a few extra adds/muls,
-// no separate pre-mat pass.  Multi-view chains stay bailed
-// (cpu_interpret pre-mat handles them).
+// broadcast); when it's a single-view non-contig we inline a strided
+// expression `in%u[s0*c0(i) + ... + offset]`; when it's a multi-view
+// ShapeTracker chain we route through a per-input idx_in%u(i) helper
+// emitted in the prologue.  Mirrors tinygrad's View.to_indexed_uops.
 static void rc_emit_src_ref(CgBuf *b, u32 raw, u32 const *in_numels) {
   u32 idx = KSRC_INDEX(raw);
   if (!KSRC_IS_INPUT(raw)) {
@@ -87,39 +164,18 @@ static void rc_emit_src_ref(CgBuf *b, u32 raw, u32 const *in_numels) {
     cg_append(b, "in%u[0]", idx);
     return;
   }
-  // Non-contig single-view input: emit strided index.  Multi-view
-  // chains and missing/symbolic inputs fall back to flat in%u[i]
-  // (cpu_interpret pre-mat takes care of strided in those cases).
-  if (b->ke != NULL && b->ke->input_views != NULL
-      && idx < b->ke->n_inputs
-      && !b->ke->input_views[idx].contiguous
-      && b->ke->input_views[idx].shape.ndim > 0) {
+  if (b->ke != NULL && rc_input_needs_strided(b, idx)) {
+    u32 tid = b->ke->input_tids[idx];
+    u8  nviews = (tid != 0 && tid < TENS_NEXT) ? TENS[tid].nviews : 0;
+    if (nviews > 0) {
+      // Multi-view chain: call helper.
+      cg_append(b, "in%u[idx_in%u(i)]", idx, idx);
+      return;
+    }
+    // Single-view non-contig: inline.
     View const *v = &b->ke->input_views[idx];
     cg_append(b, "in%u[", idx);
-    int wrote = 0;
-    if (v->offset != 0) {
-      cg_append(b, "%d", (int)v->offset);
-      wrote = 1;
-    }
-    // Decompose `i` into per-axis coords:
-    //   coord_axis = (i / inner_prod_after) % dim_axis
-    // inner_prod_after = product of dims AFTER this axis.
-    u32 inner_prod = 1;
-    for (i32 a = (i32)v->shape.ndim - 1; a >= 0; a--) {
-      i32 stride = v->strides[a];
-      u32 dim    = v->shape.dims[a];
-      if (stride != 0 && dim > 1) {
-        if (wrote) cg_append(b, " + ");
-        if (inner_prod == 1) {
-          cg_append(b, "%d*(i %% %u)", (int)stride, dim);
-        } else {
-          cg_append(b, "%d*((i / %u) %% %u)", (int)stride, inner_prod, dim);
-        }
-        wrote = 1;
-      }
-      inner_prod *= dim;
-    }
-    if (!wrote) cg_append(b, "0");
+    rc_emit_view_index(b, v, "i");
     cg_append(b, "]");
     return;
   }
@@ -130,6 +186,20 @@ static void rc_prologue(CgBuf *b, u32 n_inputs) {
   const char *T = rc_c_type(b->program_dtype);
   cg_append(b, "#include <math.h>\n");
   cg_append(b, "#include <stdint.h>\n");
+  // File-scope chain index helpers (emitted before `void k`).  One
+  // helper per input that has a multi-view ShapeTracker chain.
+  // Single-view non-contig inputs don't get a helper -- the index
+  // expression is inlined at the access site.
+  if (b->ke != NULL && b->ke->input_views != NULL) {
+    for (u32 i = 0; i < n_inputs; i++) {
+      u32 tid = b->ke->input_tids[i];
+      if (tid == 0 || tid >= TENS_NEXT) continue;
+      TenDesc const *t = &TENS[tid];
+      if (t->nviews == 0) continue;
+      rc_emit_chain_helper(b, i, &b->ke->input_views[i],
+                           t->prior_views, t->nviews);
+    }
+  }
   cg_append(b, "void k(void *out_v, const void *const *ins_v, "
                "unsigned n, const unsigned *in_numels) {\n");
   cg_append(b, "  %s *out = (%s *)out_v;\n", T, T);

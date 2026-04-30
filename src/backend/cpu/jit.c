@@ -40,18 +40,35 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
   h ^= (u64)ke->n_inputs; h *= 0x100000001b3ULL;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     h ^= (u64)ke->input_numels[i]; h *= 0x100000001b3ULL;
-    // Fold per-input view stride pattern into the key.  Same
-    // KProgOp[] with different input strides now compiles to
-    // different inline strided expressions in render_c, so they
-    // MUST get distinct cache keys -- otherwise reuse of the
-    // wrong dylib reads memory at the wrong offsets.
-    if (ke->input_views != NULL && !ke->input_views[i].contiguous) {
+    // Fold per-input view stride pattern (and full ShapeTracker
+    // chain) into the key.  Same KProgOp[] with different input
+    // strides or chain depth now renders to different inline
+    // expressions / chain helpers, so MUST get distinct cache
+    // keys -- otherwise reuse of the wrong dylib reads memory at
+    // wrong offsets.
+    u32 tid = ke->input_tids[i];
+    int chained = (tid != 0 && tid < TENS_NEXT && TENS[tid].nviews > 0);
+    if (ke->input_views != NULL
+        && (!ke->input_views[i].contiguous || chained)) {
       View const *v = &ke->input_views[i];
-      h ^= (u64)v->shape.ndim; h *= 0x100000001b3ULL;
+      h ^= (u64)v->shape.ndim;  h *= 0x100000001b3ULL;
       h ^= (u64)(u32)v->offset; h *= 0x100000001b3ULL;
       for (u32 a = 0; a < v->shape.ndim; a++) {
-        h ^= (u64)v->shape.dims[a]; h *= 0x100000001b3ULL;
-        h ^= (u64)(u32)v->strides[a]; h *= 0x100000001b3ULL;
+        h ^= (u64)v->shape.dims[a];     h *= 0x100000001b3ULL;
+        h ^= (u64)(u32)v->strides[a];   h *= 0x100000001b3ULL;
+      }
+      if (chained) {
+        h ^= 0xC4u;                     h *= 0x100000001b3ULL;
+        h ^= (u64)TENS[tid].nviews;     h *= 0x100000001b3ULL;
+        for (u8 k = 0; k < TENS[tid].nviews; k++) {
+          View const *pv = &TENS[tid].prior_views[k];
+          h ^= (u64)pv->shape.ndim;     h *= 0x100000001b3ULL;
+          h ^= (u64)(u32)pv->offset;    h *= 0x100000001b3ULL;
+          for (u32 a = 0; a < pv->shape.ndim; a++) {
+            h ^= (u64)pv->shape.dims[a];   h *= 0x100000001b3ULL;
+            h ^= (u64)(u32)pv->strides[a]; h *= 0x100000001b3ULL;
+          }
+        }
       }
     } else {
       // Mark "contig" explicitly so a numel-equal contig input
@@ -187,8 +204,15 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
     if (tid == 0 || tid >= TENS_NEXT) continue;
-    if (TENS[tid].nviews > 0) return 0;
-    if (!TENS[tid].view.contiguous && !strided_jit_enabled) return 0;
+    // Same gate for both single-view non-contig and multi-view
+    // chains: render_c emits inline strided index expressions
+    // (single-view) or a per-input idx helper (chain), both
+    // composing to the buffer offset at codegen time.  Disable
+    // by default until the JIT cache amortizes the per-stride-
+    // pattern compile cost.
+    if (TENS[tid].nviews > 0 || !TENS[tid].view.contiguous) {
+      if (!strided_jit_enabled) return 0;
+    }
   }
   // Pack input pointers + numels into local arrays and call the
   // generated function.  Stack-sized to ke->n_inputs (covered by
