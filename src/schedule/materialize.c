@@ -568,26 +568,18 @@ static u32 view_resolve(Term t) {
     default: return 0;                      // PAD + non-movement ops bail
   }
   if (ok) return tensor_view_of(src_tid, nv);
-
-  // Single-view absorb failed.  For RESHAPE (the only op whose math
-  // genuinely requires a contig source), fall back to the
-  // ShapeTracker chain: APPEND a fresh canonical view at the front,
-  // pushing the existing (non-contig) view onto prior_views.
-  // tendesc_strided_index then composes the user's flat index
-  // through both at dispatch time -- no buffer copy.  Mirrors
-  // tinygrad's `ShapeTracker(views + (View.create(new_shape),))`.
-  if (op == UOP_RESHAPE) {
-    u32 t_ndim  = (u32)term_val(heap_read(loc + 1));
-    Shape ts = {0}; ts.ndim = t_ndim;
-    u32 t_numel = 1;
-    for (u32 i = 0; i < t_ndim; i++) {
-      u32 d = (u32)term_val(heap_read(loc + 2 + i));
-      ts.dims[i] = d;
-      t_numel *= d;
-    }
-    if (t_numel != src_view->numel) return 0;   // numel must match
-    return tensor_view_chain_append(src_tid, view_create(ts));
-  }
+  // Single-view absorb failed.  Caller falls back to emitting a
+  // kernel op (cpu_op_reshape memcpy, etc.) -- that's strictly
+  // faster than chain-appending and forcing per-kernel
+  // tendesc_strided_index pre-mat.  Auto chain-append regressed
+  // LeNet badly because every EXPAND->RESHAPE in the gy lift
+  // chain produced a multi-view that pre-mat had to walk per
+  // element.  The chain-append API
+  // (tensor_view_chain_append) stays available for code that
+  // EXPLICITLY needs a stride-trick view no kernel-op-emit path
+  // can produce -- e.g. tinygrad-style im2col -- where the
+  // upfront chain cost is paid back by collapsing kh*kw
+  // partial-sum kernels into one sgemm.
   return 0;
 }
 

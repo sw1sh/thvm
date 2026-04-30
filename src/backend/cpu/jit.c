@@ -3,17 +3,15 @@
 // `void k(...)` symbol against the program's hash so subsequent
 // dispatches skip both compilation and dlsym.
 //
-// Per-kernel function signature (matches codegen.c):
-//   void k(float *out,
-//          const float *in0, ..., const float *in{N-1},
+// Per-kernel function signature (matches render_c.c):
+//   void k(void *out_v,
+//          const void *const *ins_v,
 //          unsigned out_numel,
-//          unsigned in_numel0, ..., unsigned in_numel{N-1});
+//          const unsigned *in_numels);
 //
-// Dispatch packs the input pointers + numels and calls through a
-// generated trampoline -- variadic invocation isn't portable, but
-// since N is bounded by the kernel's n_inputs we just walk the
-// args manually and ferry through CpuJitFn (a function pointer
-// whose signature matches the generated function).
+// The renderer casts `out_v` and each `ins_v[i]` to the program's
+// dtype-typed pointer in the prologue, so the generated kernel
+// stays uniform across dtypes from the caller's POV.
 //
 // Cache key: KProgOp[] + n_inputs + per-input numel.  Numel goes
 // in because the codegen embeds broadcast checks (numel==1) at
@@ -24,7 +22,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-typedef void (*CpuJitFn)(float *out, const float *const *ins,
+typedef void (*CpuJitFn)(void *out, const void *const *ins,
                          unsigned n, const unsigned *in_numels);
 
 #define CPU_JIT_CACHE_CAP 256
@@ -161,14 +159,16 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Pack input pointers + numels into local arrays and call the
   // generated function.  Stack-sized to ke->n_inputs (covered by
   // VLA below); no fixed cap beyond what the codegen supports.
+  // Pointers are typed as `const void *` so the same dispatch path
+  // covers every supported dtype.
   u32 ni = ke->n_inputs;
-  const float *ins_buf  [ni ? ni : 1];
-  unsigned     nums_buf [ni ? ni : 1];
+  const void *ins_buf  [ni ? ni : 1];
+  unsigned    nums_buf [ni ? ni : 1];
   for (u32 i = 0; i < ni; i++) {
-    ins_buf [i] = (const float *)CPU_BUFS[in_buf_ids[i]].data;
+    ins_buf [i] = CPU_BUFS[in_buf_ids[i]].data;
     nums_buf[i] = ke->input_numels[i];
   }
-  float *out = (float *)CPU_BUFS[out_buf_id].data;
+  void *out = CPU_BUFS[out_buf_id].data;
   unsigned numel = ke->program[ke->n_ops - 1].numel;
   jfn(out, ins_buf, numel, nums_buf);
   return 1;

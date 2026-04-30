@@ -26,8 +26,13 @@
 #include <stdarg.h>
 
 // === growable text buffer ==============================================
+//
+// CgBuf carries a small bit of dtype context alongside the byte buffer
+// so renderers can specialize CONST literals and accumulator types on
+// the program's uniform dtype.  cg_emit fills `program_dtype` after
+// cg_supports has confirmed the kernel is uniform.
 
-typedef struct { char *buf; u32 cap; u32 len; } CgBuf;
+typedef struct { char *buf; u32 cap; u32 len; u32 program_dtype; } CgBuf;
 
 static int cg_append(CgBuf *b, const char *fmt, ...) {
   va_list ap;
@@ -121,6 +126,46 @@ typedef struct Renderer {
 // movement, multi-REDUCE, mid-program REDUCE -- bails and the caller
 // falls back to the interpreter.
 
+// Predicate: does this dtype have a clang-buildable native C type
+// the JIT renderer can emit directly?  f16/bf16/fp8/int4 need
+// conversion routines that don't inline cleanly into the fused
+// elementwise loop, so they bail to the interpreter.
+static int cg_dtype_supported(u32 dt) {
+  switch (dt) {
+    case DT_BOOL:
+    case DT_INT8:  case DT_UINT8:
+    case DT_INT16: case DT_UINT16:
+    case DT_INT32: case DT_UINT32:
+    case DT_INT64: case DT_UINT64:
+    case DT_FP32:  case DT_FP64:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+// Does the op support non-float dtypes?  The transcendentals
+// (RECIP / EXP2 / LOG2 / SQRT) are float-only at the kernel level.
+static int cg_op_is_float_only(u8 op) {
+  return op == UOP_RECIP || op == UOP_EXP2
+      || op == UOP_LOG2  || op == UOP_SQRT;
+}
+
+// Pick the kernel's uniform dtype: scan every op + every input and
+// return the dtype if all match, else DT_COUNT (= sentinel).  Used
+// by render_c.c to emit a single typed C kernel.
+fn u32 cg_program_dtype(KernelEntry const *ke) {
+  if (ke->n_ops == 0) return DT_COUNT;
+  u32 dt = ke->program[0].dtype;
+  for (u32 i = 1; i < ke->n_ops; i++) {
+    if (ke->program[i].dtype != dt) return DT_COUNT;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ke->input_dtypes[i] != dt) return DT_COUNT;
+  }
+  return dt;
+}
+
 int cg_supports(KernelEntry const *ke) {
   for (u32 i = 0; i < ke->n_ops; i++) {
     u8 op = ke->program[i].opcode;
@@ -135,18 +180,27 @@ int cg_supports(KernelEntry const *ke) {
       switch (op) {
         case UOP_CONST:
         case UOP_ADD: case UOP_MUL:
-        case UOP_NEG: case UOP_RECIP: case UOP_SQRT:
-        case UOP_EXP2: case UOP_LOG2:
+        case UOP_NEG:
         case UOP_CMPLT: case UOP_CMPEQ:
           break;
+        case UOP_RECIP: case UOP_SQRT:
+        case UOP_EXP2:  case UOP_LOG2:
+          break;     // float-only; uniformity check below catches int dtypes
         default:
           return 0;
       }
     }
-    if (ke->program[i].dtype != DT_FP32) return 0;
   }
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_dtypes[i] != DT_FP32) return 0;
+  // Uniform-dtype check: pick one dtype for the whole kernel; any
+  // mixed-dtype kernel (post-CAST chain inlined into one boundary,
+  // for example) bails to the interpreter.
+  u32 dt = cg_program_dtype(ke);
+  if (dt == DT_COUNT)               return 0;
+  if (!cg_dtype_supported(dt))      return 0;
+  // Float-only ops on integer dtypes can't compile.
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    if (cg_op_is_float_only(ke->program[i].opcode)
+        && dt != DT_FP32 && dt != DT_FP64) return 0;
   }
   return 1;
 }
@@ -158,7 +212,8 @@ int cg_supports(KernelEntry const *ke) {
 
 fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
   if (!cg_supports(ke)) return NULL;
-  CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0 };
+  CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
+              .program_dtype = cg_program_dtype(ke) };
   if (!b.buf) return NULL;
 
   int has_reduce_tail = ke->n_ops > 0
