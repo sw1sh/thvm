@@ -133,7 +133,7 @@ travel across all kids of the same program.
 | Milestone | State | Notes |
 |-----------|-------|-------|
 | LeNet end-to-end | done | commits e0029b5, 4646189, 9c4f7f4 |
-| M1 batched Conv2D | in flight, blocked on view system | TConv2DIm2Col landed alongside TConv2D (commit c1a6dac).  Bench verdict below: 1.7-1.9x speedup in isolated forward+grad, but **100x SLOWDOWN end-to-end on LeNet** (4 Adam steps: 3s -> 341s) because PAD-and-sum materializes kh*kw zero-padded buffers that the chain rule walks back through, exploding kernel count.  Flipping the public TConv2D over is a regression.  The right design is tinygrad-style view-only im2col, which thvm's current `view_apply_*` doesn't support. |
+| M1 batched Conv2D | in flight, view-only path landed but JIT compile cost blocks default-on | TConv2DIm2Col landed alongside TConv2D (commit c1a6dac).  ShapeTracker chain (commits 58bb690, dca964d), codegen-time index UOP inlining (12b9cf3, 6b334e8), JIT warmup gate (0dd4003) all in.  THVM_JIT_STRIDED=1 enables the view-only path; default off because the cold-start clang compile (~74ms × N unique stride patterns) regresses LeNet 4-step from ~3min to ~6.5min on a fresh /tmp.  Microbench shows runtime is identical to interpreter pre-mat (within noise) -- both touch the same memory.  Need a faster JIT (libtcc dead on aarch64, libllvm orcjit ~1000 LOC, background-compile shaves ~10s) before flipping default. |
 | M2 BN gradient | open | smaller; verifies existing TBatchNorm |
 | M3 structural-template TGradMany | deferred | not on the critical path yet |
 | M4 buffer-free between steps | open | becomes critical at N_STEPS > 100 |
