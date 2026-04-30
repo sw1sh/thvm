@@ -303,6 +303,8 @@ $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},          
 $kernelProgramCacheSizeFn := $kernelProgramCacheSizeFn = load["thvm_wl_kernel_program_cache_size", {}, Integer];
 $kernelAxesGetFn          := $kernelAxesGetFn          = load["thvm_wl_kernel_axes_get",            {Integer}, {Integer, 1}];
 $kernelApplyOptFn         := $kernelApplyOptFn         = load["thvm_wl_kernel_apply_opt",           {Integer, Integer, Integer, Integer}, Integer];
+$kernelProposeFn          := $kernelProposeFn          = load["thvm_wl_kernel_propose",             {Integer}, {Integer, 1}];
+$kernelAutotuneFn         := $kernelAutotuneFn         = load["thvm_wl_kernel_autotune",            {Integer}, Integer];
 $lamShapeSetFn   := $lamShapeSetFn   = load["thvm_wl_lam_shape_set",   {Integer, {Integer, 1}},     Integer];
 $lamShapeCountFn := $lamShapeCountFn = load["thvm_wl_lam_shape_count", {},                           Integer];
 $termShapeInFn   := $termShapeInFn   = load["thvm_wl_term_shape_in",   {Integer},                    {Integer, 1}];

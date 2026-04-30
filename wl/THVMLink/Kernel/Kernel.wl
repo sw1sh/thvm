@@ -70,6 +70,10 @@ TKernelOpts::usage = "TKernelOpts[kid] returns a wrapped `TKernelOpts[<|\"Kid\",
 
 TKernelApplyOpt::usage = "TKernelApplyOpt[kid, TOpt[op, axis, arg]] mutates the kernel's C-side KernelAxes via axes_apply_opt: splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), swaps two axes (SWAP), or records the opt for the codegen consumer (PADTO/NOLOCALS/TC).  Returns the updated TKernelOpts wrapper.  Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg doesn't divide axis size, opts table full).";
 
+TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` candidates suggested by the C-side shape-heuristic proposer (`kernel_opts_propose` in `src/codegen/propose.c`).  Today's heuristics propose UNROLL on the reduce axis at factors {2, 4, 8, 16} where divisible; future passes add UPCAST / LOCAL / GROUP rules as the codegen variant emitter grows.  TKernelAutotune consumes this list.";
+
+TKernelAutotune::usage = "TKernelAutotune[kid] benchmarks every TKernelProposed candidate against the no-opt baseline (5 dispatches each, min wallclock), applies the winning TOpt to the kernel's C-side KernelAxes, and returns the resulting TKernelOpts.  Because axes live on the shared KpCacheSlot (per-program-shape sharing), the winner auto-applies to every other kid with the same KProgOp[] -- a training loop that emits one new kid per step inherits the autotuned variant from iter 2 onward.  Returns the unchanged TKernelOpts (no opts applied) if no candidate beat baseline.";
+
 (* === C-side kernel side-table accessors ===
    Live here (rather than MemoryPlan.wl) because they're the core
    kernel-introspection bridge -- every consumer that walks
@@ -464,6 +468,21 @@ TKernelApplyOpt[kid_Integer, TOpt[op_String, axis_Integer, arg_Integer]] :=
                 Failure["opt-rejected", <|"Kid" -> kid, "Opt" -> TOpt[op, axis, arg]|>]
             ]
         ])
+
+TKernelProposed[kid_Integer] := (ensureInit[];
+    Module[{packed},
+        packed = Normal @ $kernelProposeFn[kid];
+        Table[
+            TOpt[ kopName @ packed[[3*(i - 1) + 1]],
+                  packed[[3*(i - 1) + 2]],
+                  packed[[3*(i - 1) + 3]] ],
+            {i, Length[packed]/3}
+        ]
+    ])
+
+TKernelAutotune[kid_Integer] := (ensureInit[];
+    $kernelAutotuneFn[kid];
+    TKernelOpts[kid])
 
 
 (* All currently-live kernels' profiles, indexed by kid. *)

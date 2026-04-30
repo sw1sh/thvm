@@ -142,6 +142,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // + reference KDispatchKind enum constants.
 #include "codegen/axis.c"
 #include "codegen/apply_opt.c"
+#include "codegen/propose.c"
 #include "codegen/cg.c"
 #include "codegen/profile.c"
 #include "codegen/render_c.c"
@@ -230,6 +231,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/uop_grad.c"
 #include "interact/uop_kernel.c"
 #include "interact/uop_assign.c"
+
+// codegen/autotune.c needs kernel_fire_by_id (uop_kernel.c) so it
+// lives down here, AFTER the interact pass.  Bench-and-pick the
+// winning TOpt per program shape.
+#include "codegen/autotune.c"
 
 // === wnf/ ===
 // The reducer dispatches to the interactions and to materialize,

@@ -200,6 +200,85 @@ VerificationTest[
     TestID -> "kernel-opts/tkernelopts-makeboxes-renders-summary"
 ]
 
+(* === proposer: shape-heuristic candidate TOpts === *)
+
+VerificationTest[
+    TInit[];
+    xT = TTensorCreate @ N @ Range[32];        (* divisible by 16/8/4/2 *)
+    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    TKernelProposed[TKernelCount[] - 1],
+    {TOpt["UNROLL", 1, 16], TOpt["UNROLL", 1, 8],
+     TOpt["UNROLL", 1, 4],  TOpt["UNROLL", 1, 2]},
+    TestID -> "kernel-opts/propose-reduce-unroll-divisors"
+]
+
+VerificationTest[
+    TInit[];
+    xT = TTensorCreate @ N @ Range[12];        (* divisible by 4, 2 only *)
+    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    TKernelProposed[TKernelCount[] - 1],
+    {TOpt["UNROLL", 1, 4], TOpt["UNROLL", 1, 2]},
+    TestID -> "kernel-opts/propose-reduce-unroll-partial-divisors"
+]
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ N @ {1.0, 2.0, 3.0};
+    TRealize @ TUOpMul[a, a];                  (* elementwise: no reduce axis *)
+    TKernelProposed[TKernelCount[] - 1],
+    {},
+    TestID -> "kernel-opts/propose-elementwise-empty"
+]
+
+VerificationTest[
+    TInit[];
+    xT = TTensorCreate @ N @ Range[7];         (* prime axis: no divisors > 1 *)
+    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    TKernelProposed[TKernelCount[] - 1],
+    {},
+    TestID -> "kernel-opts/propose-prime-axis-empty"
+]
+
+(* === autotune: bench candidates, apply the winner === *)
+
+VerificationTest[
+    TInit[];
+    xT = TTensorCreate @ N @ Range[16];
+    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    kid = TKernelCount[] - 1;
+    res = TKernelAutotune[kid];
+    Head[res],
+    TKernelOpts,
+    TestID -> "kernel-opts/autotune-returns-tkernelopts"
+]
+
+VerificationTest[
+    (* Correctness: post-autotune realize value matches a no-opt
+       baseline (within f32 reduction-order tolerance). *)
+    TInit[];
+    xT  = TTensorCreate @ NumericArray[Table[N[i / 100.0], {i, 256}], "Real32"];
+    pre = First @ Normal @ TTensorData @ TRealize @ TUOpReduce[xT, 0, "SUM"];
+    kid = TKernelCount[] - 1;
+    TKernelAutotune[kid];
+    post = First @ Normal @ TTensorData @ TRealize @ TUOpReduce[xT, 0, "SUM"];
+    Abs[pre - post] < 1.0*^-3,
+    True,
+    TestID -> "kernel-opts/autotune-preserves-correctness"
+]
+
+VerificationTest[
+    (* Elementwise kernel: no proposer candidates -> autotune is a
+       no-op (Applied stays empty). *)
+    TInit[];
+    a = TTensorCreate @ N @ {1.0, 2.0, 3.0, 4.0};
+    TRealize @ TUOpMul[a, a];
+    kid = TKernelCount[] - 1;
+    TKernelAutotune[kid];
+    First[TKernelOpts[kid]]["Applied"],
+    {},
+    TestID -> "kernel-opts/autotune-noop-on-elementwise"
+]
+
 (* === per-program-shape sharing: opt on kid_1 visible on kid_2
        when both kids share the same KProgOp[] via the cache.  This
        is what makes the proposer + auto-bench (next pass) actually

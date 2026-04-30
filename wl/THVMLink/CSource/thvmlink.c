@@ -1019,6 +1019,46 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
   return LIBRARY_NO_ERROR;
 }
 
+// Autotune: bench-and-pick the winning TOpt for kid.  Returns 1 on
+// "winning opt applied", 0 on "no opt beat baseline / no candidates
+// / invalid kid".  The applied opt lives on KpCacheSlot.axes so it
+// propagates to every other kid sharing this KProgOp[].
+EXTERN_C DLLEXPORT int thvm_wl_kernel_autotune(WolframLibraryData l, mint a,
+                                               MArgument *args, MArgument res) {
+  (void)l; (void)a;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  int won = kernel_autotune(kid);
+  MArgument_setInteger(res, (mint)won);
+  return LIBRARY_NO_ERROR;
+}
+
+// Shape-heuristic proposer.  Returns a flat {Integer, 1} of (op,
+// axis, arg) triples; the WL surface decodes into a list of TOpt.
+// Empty result for kid 0 / out-of-range / kernels with no
+// proposable opts.
+EXTERN_C DLLEXPORT int thvm_wl_kernel_propose(WolframLibraryData libData,
+                                              mint argc, MArgument *args,
+                                              MArgument res) {
+  (void)argc;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  KOpt buf[16];
+  u32  n = 0;
+  if (kid > 0 && kid < KERNELS_NEXT) {
+    n = kernel_opts_propose(&KERNELS[kid], buf, (u32)(sizeof(buf)/sizeof(*buf)));
+  }
+  mint dims[1] = {(mint)(3 * n)};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u32 i = 0; i < n; i++) {
+    dst[3*i + 0] = (mint)buf[i].op;
+    dst[3*i + 1] = (mint)buf[i].axis;
+    dst[3*i + 2] = (mint)buf[i].arg;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_kernel_program_cache_size(WolframLibraryData libData,
                                                           mint argc,
                                                           MArgument *args,

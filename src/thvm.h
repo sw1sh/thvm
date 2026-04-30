@@ -813,6 +813,25 @@ fn void axes_default_for(struct KernelEntry *ke);
 // arg doesn't divide, applied_opts full).
 fn int axes_apply_opt(KernelAxes *ax, KOpt opt);
 
+// Shape-heuristic kernel opt proposer: looks at the kernel's
+// program + axes and writes up to `cap` candidate KOpts into
+// `out`.  Returns the number written.  The autotune loop applies
+// each in isolation against the baseline and picks the winner.
+// Today's heuristics are narrow (UNROLL on the reduce axis at
+// {2,4,8,16}); add more rules here as new opt classes get codegen
+// support.
+fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
+
+// Autotune: walk the proposer's candidates, time each variant
+// against the baseline (no opts) via kernel_fire_by_id, pick the
+// winner, leave the kernel's KernelAxes mutated to the winning
+// opt.  Because axes live on the shared KpCacheSlot, the winner
+// auto-applies to every other kid sharing this KProgOp[] (a
+// training loop emitting one new kid per step inherits from
+// iter 2 onward).  Returns 1 if a winning opt was applied,
+// 0 if no candidate beat baseline (or no candidates).
+fn int kernel_autotune(u32 kid);
+
 // === tensor/ ===
 // Tensor descriptor lifecycle.  Step 12: bump-only allocation in TENS[];
 // refcount + backend-level buffer refcount govern the buffer lifetime.
