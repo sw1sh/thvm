@@ -4,16 +4,35 @@
 // was allocated with numel=1 by materialize_expr, so downstream
 // elementwise ops broadcast it via the n_elems check in the
 // per-op loops.
+//
+// Phase A: 32-bit constants only (the KProgOp arg field is u32).
+// 64-bit dtypes (i64/u64/f64) need either a widened arg or a
+// two-cell payload; deferred to Phase C.  For now i64/u64 store
+// the low 32 bits sign-extended (matching the WL surface that
+// caps user-passed scalar constants at i32 range).
 
 fn void cpu_op_const(void *out, void **srcs, u32 const *src_numels,
                      KProgOp const *p, u32 out_numel) {
   (void)srcs; (void)src_numels; (void)out_numel;
-  if (p->dtype == DT_F32) {
-    f32 v;
-    u32 bits = p->arg;
-    memcpy(&v, &bits, sizeof(v));
-    ((f32 *)out)[0] = v;
-  } else {
-    ((i32 *)out)[0] = (i32)p->arg;
+  switch (p->dtype) {
+    case DT_FP32: {
+      f32 v;
+      u32 bits = p->arg;
+      memcpy(&v, &bits, sizeof(v));
+      ((f32 *)out)[0] = v;
+      break;
+    }
+    case DT_BOOL:   ((u8  *)out)[0] = (u8 )(p->arg & 1);                     break;
+    case DT_INT8:   ((i8  *)out)[0] = (i8 )(int32_t)p->arg;                   break;
+    case DT_UINT8:  ((u8  *)out)[0] = (u8 )p->arg;                            break;
+    case DT_INT16:  ((i16 *)out)[0] = (i16)(int32_t)p->arg;                   break;
+    case DT_UINT16: ((u16 *)out)[0] = (u16)p->arg;                            break;
+    case DT_INT32:  ((i32 *)out)[0] = (i32)p->arg;                            break;
+    case DT_UINT32: ((u32 *)out)[0] = (u32)p->arg;                            break;
+    case DT_INT64:  ((i64 *)out)[0] = (i64)(int32_t)p->arg;                   break;
+    case DT_UINT64: ((u64 *)out)[0] = (u64)p->arg;                            break;
+    default:
+      fprintf(stderr, "cpu_op_const: dtype %u not supported\n", p->dtype);
+      abort();
   }
 }

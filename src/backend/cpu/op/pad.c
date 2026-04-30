@@ -11,6 +11,31 @@
 //
 // Falls back to memcpy if shape info missing (defensive; shouldn't
 // happen given the materializer always populates src0_dims for PAD).
+//
+// Phase B: width-driven so int8/16/64 + bool reuse the same body.
+
+#define PAD_GATHER(T)                                                        \
+    do {                                                                     \
+        T *dst = (T *)out;                                                   \
+        T *s   = (T *)src;                                                   \
+        for (u32 oi = 0; oi < out_numel; oi++) {                             \
+            u32 tmp = oi;                                                    \
+            u32 src_idx = 0;                                                 \
+            u32 src_stride = 1;                                              \
+            u8  in_pad = 0;                                                  \
+            for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {              \
+                u32 od = p->out_dims[axis];                                  \
+                u32 sd = p->src0_dims[axis];                                 \
+                u32 b  = p->pad_widths[2 * (u32)axis];                       \
+                u32 c  = tmp % od;                                           \
+                tmp   /= od;                                                 \
+                if (c < b || c >= b + sd) { in_pad = 1; break; }             \
+                src_idx += (c - b) * src_stride;                             \
+                src_stride *= sd;                                            \
+            }                                                                \
+            if (!in_pad) dst[oi] = s[src_idx];                               \
+        }                                                                    \
+    } while (0)
 
 fn void cpu_op_pad(void *out, void **srcs, u32 const *src_numels,
                    KProgOp const *p, u32 out_numel) {
@@ -28,48 +53,15 @@ fn void cpu_op_pad(void *out, void **srcs, u32 const *src_numels,
   // copied-from-source positions below.
   memset(out, 0, (size_t)out_numel * esz);
 
-  if (p->dtype == DT_F32) {
-    f32 *dst = (f32 *)out;
-    f32 *s   = (f32 *)src;
-    for (u32 oi = 0; oi < out_numel; oi++) {
-      // Decompose oi into per-axis output coords; check each
-      // against its begin/end pad region; build the source flat
-      // index if all axes are inside the source extent.
-      u32 tmp = oi;
-      u32 src_idx = 0;
-      u32 src_stride = 1;
-      u8  in_pad = 0;
-      for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-        u32 od = p->out_dims[axis];
-        u32 sd = p->src0_dims[axis];
-        u32 b  = p->pad_widths[2 * (u32)axis];
-        u32 c  = tmp % od;
-        tmp   /= od;
-        if (c < b || c >= b + sd) { in_pad = 1; break; }
-        src_idx += (c - b) * src_stride;
-        src_stride *= sd;
-      }
-      if (!in_pad) dst[oi] = s[src_idx];
-    }
-  } else {
-    i32 *dst = (i32 *)out;
-    i32 *s   = (i32 *)src;
-    for (u32 oi = 0; oi < out_numel; oi++) {
-      u32 tmp = oi;
-      u32 src_idx = 0;
-      u32 src_stride = 1;
-      u8  in_pad = 0;
-      for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-        u32 od = p->out_dims[axis];
-        u32 sd = p->src0_dims[axis];
-        u32 b  = p->pad_widths[2 * (u32)axis];
-        u32 c  = tmp % od;
-        tmp   /= od;
-        if (c < b || c >= b + sd) { in_pad = 1; break; }
-        src_idx += (c - b) * src_stride;
-        src_stride *= sd;
-      }
-      if (!in_pad) dst[oi] = s[src_idx];
-    }
+  switch (esz) {
+    case 1: PAD_GATHER(u8 ); break;
+    case 2: PAD_GATHER(u16); break;
+    case 4: PAD_GATHER(u32); break;
+    case 8: PAD_GATHER(u64); break;
+    default:
+      fprintf(stderr, "cpu_op_pad: itemsize %u unsupported\n", esz);
+      abort();
   }
 }
+
+#undef PAD_GATHER

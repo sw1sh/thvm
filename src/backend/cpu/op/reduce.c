@@ -16,6 +16,21 @@
 //     in_flat = outer_idx * (axis_size * inner) + k * inner + inner_idx
 // axis_size is recovered as in_numel / out_numel.
 
+#define REDUCE_INT_BODY(T, MIN_VAL)                                          \
+    do {                                                                     \
+        T *o = (T *)out, *a = (T *)srcs[0];                                  \
+        for (u32 oi = 0; oi < out_numel; oi++) {                             \
+            u32 outer_idx = oi / inner;                                      \
+            u32 inner_idx = oi % inner;                                      \
+            T   acc = (kind == REDUCE_MAX) ? (T)(MIN_VAL) : (T)0;            \
+            for (u32 k = 0; k < axis_size; k++) {                            \
+                T v = a[outer_idx * (axis_size * inner) + k * inner + inner_idx];\
+                acc = (kind == REDUCE_MAX) ? (v > acc ? v : acc) : (T)(acc + v);\
+            }                                                                \
+            o[oi] = acc;                                                     \
+        }                                                                    \
+    } while (0)
+
 fn void cpu_op_reduce(void *out, void **srcs, u32 const *src_numels,
                       KProgOp const *p, u32 out_numel) {
   u32 kind     = (p->arg >> 24) & 0xFF;
@@ -25,31 +40,47 @@ fn void cpu_op_reduce(void *out, void **srcs, u32 const *src_numels,
   if (inner    == 0) inner    = 1;
   u32 axis_size = in_numel / out_numel;
 
-  if (p->dtype == DT_F32) {
-    f32 *o = (f32 *)out;
-    f32 *a = (f32 *)srcs[0];
-    for (u32 oi = 0; oi < out_numel; oi++) {
-      u32 outer_idx = oi / inner;
-      u32 inner_idx = oi % inner;
-      f32 acc = (kind == REDUCE_MAX) ? -INFINITY : 0.0f;
-      for (u32 k = 0; k < axis_size; k++) {
-        f32 v = a[outer_idx * (axis_size * inner) + k * inner + inner_idx];
-        acc = (kind == REDUCE_MAX) ? (v > acc ? v : acc) : (acc + v);
+  switch (p->dtype) {
+    case DT_FP32: {
+      f32 *o = (f32 *)out, *a = (f32 *)srcs[0];
+      for (u32 oi = 0; oi < out_numel; oi++) {
+        u32 outer_idx = oi / inner;
+        u32 inner_idx = oi % inner;
+        f32 acc = (kind == REDUCE_MAX) ? -INFINITY : 0.0f;
+        for (u32 k = 0; k < axis_size; k++) {
+          f32 v = a[outer_idx * (axis_size * inner) + k * inner + inner_idx];
+          acc = (kind == REDUCE_MAX) ? (v > acc ? v : acc) : (acc + v);
+        }
+        o[oi] = acc;
       }
-      o[oi] = acc;
+      break;
     }
-  } else {
-    i32 *o = (i32 *)out;
-    i32 *a = (i32 *)srcs[0];
-    for (u32 oi = 0; oi < out_numel; oi++) {
-      u32 outer_idx = oi / inner;
-      u32 inner_idx = oi % inner;
-      i32 acc = (kind == REDUCE_MAX) ? INT32_MIN : 0;
-      for (u32 k = 0; k < axis_size; k++) {
-        i32 v = a[outer_idx * (axis_size * inner) + k * inner + inner_idx];
-        acc = (kind == REDUCE_MAX) ? (v > acc ? v : acc) : (acc + v);
+    case DT_BOOL: {
+      // SUM = OR-reduce, MAX = OR-reduce too (same answer for bools).
+      u8 *o = (u8 *)out, *a = (u8 *)srcs[0];
+      for (u32 oi = 0; oi < out_numel; oi++) {
+        u32 outer_idx = oi / inner;
+        u32 inner_idx = oi % inner;
+        u8  acc = 0;
+        for (u32 k = 0; k < axis_size; k++) {
+          acc |= a[outer_idx * (axis_size * inner) + k * inner + inner_idx] & 1;
+        }
+        o[oi] = acc;
       }
-      o[oi] = acc;
+      break;
     }
+    case DT_INT8:   REDUCE_INT_BODY(i8 , INT8_MIN );  break;
+    case DT_UINT8:  REDUCE_INT_BODY(u8 , 0);          break;
+    case DT_INT16:  REDUCE_INT_BODY(i16, INT16_MIN);  break;
+    case DT_UINT16: REDUCE_INT_BODY(u16, 0);          break;
+    case DT_INT32:  REDUCE_INT_BODY(i32, INT32_MIN);  break;
+    case DT_UINT32: REDUCE_INT_BODY(u32, 0);          break;
+    case DT_INT64:  REDUCE_INT_BODY(i64, INT64_MIN);  break;
+    case DT_UINT64: REDUCE_INT_BODY(u64, 0);          break;
+    default:
+      fprintf(stderr, "cpu_op_reduce: dtype %u not supported\n", p->dtype);
+      abort();
   }
 }
+
+#undef REDUCE_INT_BODY

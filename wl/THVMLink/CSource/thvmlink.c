@@ -503,18 +503,39 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_write(WolframLibraryData libData, mint arg
   MTensor data = MArgument_getMTensor(args[1]);
   mint n       = libData->MTensor_getFlattenedLength(data);
   TenDesc *d   = &TENS[id];
-  // WL passes Real -> double; convert to f32 for DT_F32 buffers.
-  if (d->dtype == DT_F32) {
+  // WL passes Real -> double / Integer -> mint; both go through a
+  // per-dtype convert+pack into the tensor's native storage.
+  if (dtype_is_float(d->dtype)) {
     double *src = libData->MTensor_getRealData(data);
-    f32 *tmp = (f32 *)malloc((size_t)n * sizeof(f32));
-    for (mint i = 0; i < n; i++) tmp[i] = (f32)src[i];
-    d->backend->buf_write(d->buf_id, tmp, (u64)n * sizeof(f32));
-    free(tmp);
-  } else if (d->dtype == DT_I32) {
+    if (d->dtype == DT_FP32) {
+      f32 *tmp = (f32 *)malloc((size_t)n * sizeof(f32));
+      for (mint i = 0; i < n; i++) tmp[i] = (f32)src[i];
+      d->backend->buf_write(d->buf_id, tmp, (u64)n * sizeof(f32));
+      free(tmp);
+    } else {
+      fprintf(stderr, "tensor_write: float dtype %u not yet wired\n", d->dtype);
+      return LIBRARY_FUNCTION_ERROR;
+    }
+  } else if (dtype_is_int(d->dtype) || dtype_is_bool(d->dtype)) {
     mint *src = libData->MTensor_getIntegerData(data);
-    i32 *tmp = (i32 *)malloc((size_t)n * sizeof(i32));
-    for (mint i = 0; i < n; i++) tmp[i] = (i32)src[i];
-    d->backend->buf_write(d->buf_id, tmp, (u64)n * sizeof(i32));
+    u64 nbytes = dtype_storage_bytes(d->dtype, (u64)n);
+    void *tmp = malloc((size_t)nbytes);
+    switch (d->dtype) {
+      case DT_BOOL:   { u8  *t8  = (u8  *)tmp; for (mint i = 0; i < n; i++) t8 [i] = (u8 )(src[i] & 1); break; }
+      case DT_INT8:   { i8  *t8  = (i8  *)tmp; for (mint i = 0; i < n; i++) t8 [i] = (i8 )src[i]; break; }
+      case DT_UINT8:  { u8  *t8  = (u8  *)tmp; for (mint i = 0; i < n; i++) t8 [i] = (u8 )src[i]; break; }
+      case DT_INT16:  { i16 *t16 = (i16 *)tmp; for (mint i = 0; i < n; i++) t16[i] = (i16)src[i]; break; }
+      case DT_UINT16: { u16 *t16 = (u16 *)tmp; for (mint i = 0; i < n; i++) t16[i] = (u16)src[i]; break; }
+      case DT_INT32:  { i32 *t32 = (i32 *)tmp; for (mint i = 0; i < n; i++) t32[i] = (i32)src[i]; break; }
+      case DT_UINT32: { u32 *t32 = (u32 *)tmp; for (mint i = 0; i < n; i++) t32[i] = (u32)src[i]; break; }
+      case DT_INT64:  { i64 *t64 = (i64 *)tmp; for (mint i = 0; i < n; i++) t64[i] = (i64)src[i]; break; }
+      case DT_UINT64: { u64 *t64 = (u64 *)tmp; for (mint i = 0; i < n; i++) t64[i] = (u64)src[i]; break; }
+      default:
+        free(tmp);
+        fprintf(stderr, "tensor_write: int dtype %u unsupported\n", d->dtype);
+        return LIBRARY_FUNCTION_ERROR;
+    }
+    d->backend->buf_write(d->buf_id, tmp, nbytes);
     free(tmp);
   }
   MArgument_setInteger(res, 1);
@@ -536,8 +557,23 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
   mint rank = (mint)d->view.shape.ndim;
   for (mint i = 0; i < rank; i++) dims[i] = (mint)d->view.shape.dims[i];
 
-  numericarray_data_t t = (d->dtype == DT_F32) ? MNumericArray_Type_Real32
-                                               : MNumericArray_Type_Bit32;
+  numericarray_data_t t;
+  switch (d->dtype) {
+    case DT_BOOL:   t = MNumericArray_Type_UBit8;   break;
+    case DT_INT8:   t = MNumericArray_Type_Bit8;    break;
+    case DT_UINT8:  t = MNumericArray_Type_UBit8;   break;
+    case DT_INT16:  t = MNumericArray_Type_Bit16;   break;
+    case DT_UINT16: t = MNumericArray_Type_UBit16;  break;
+    case DT_INT32:  t = MNumericArray_Type_Bit32;   break;
+    case DT_UINT32: t = MNumericArray_Type_UBit32;  break;
+    case DT_INT64:  t = MNumericArray_Type_Bit64;   break;
+    case DT_UINT64: t = MNumericArray_Type_UBit64;  break;
+    case DT_FP32:   t = MNumericArray_Type_Real32;  break;
+    default:
+      fprintf(stderr, "tensor_read: dtype %u (%s) not yet supported\n",
+              d->dtype, dtype_name(d->dtype));
+      return LIBRARY_FUNCTION_ERROR;
+  }
 
   MNumericArray out;
   libData->numericarrayLibraryFunctions->MNumericArray_new(t, rank, dims, &out);
@@ -567,11 +603,19 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
   void                *naData  = naf->MNumericArray_getData(na);
 
   u32 dtype;
-  if      (t == MNumericArray_Type_Real32) dtype = DT_F32;
-  else if (t == MNumericArray_Type_Bit32)  dtype = DT_I32;
-  else {
-    fprintf(stderr, "tensor_from_na: unsupported NumericArray type %d\n", (int)t);
-    return LIBRARY_FUNCTION_ERROR;
+  switch (t) {
+    case MNumericArray_Type_Real32:  dtype = DT_FP32;   break;
+    case MNumericArray_Type_Bit8:    dtype = DT_INT8;   break;
+    case MNumericArray_Type_UBit8:   dtype = DT_UINT8;  break;
+    case MNumericArray_Type_Bit16:   dtype = DT_INT16;  break;
+    case MNumericArray_Type_UBit16:  dtype = DT_UINT16; break;
+    case MNumericArray_Type_Bit32:   dtype = DT_INT32;  break;
+    case MNumericArray_Type_UBit32:  dtype = DT_UINT32; break;
+    case MNumericArray_Type_Bit64:   dtype = DT_INT64;  break;
+    case MNumericArray_Type_UBit64:  dtype = DT_UINT64; break;
+    default:
+      fprintf(stderr, "tensor_from_na: unsupported NumericArray type %d\n", (int)t);
+      return LIBRARY_FUNCTION_ERROR;
   }
 
   // Build the TenDesc manually so we can point its buf_id at an

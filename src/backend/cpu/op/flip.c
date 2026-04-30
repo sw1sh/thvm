@@ -7,6 +7,27 @@
 //
 // Output shape == input shape (FLIP doesn't change rank or sizes,
 // only data ordering), so out_dims == src0_dims at this point.
+// Phase B: width-driven (1/2/4/8 bytes).
+
+#define FLIP_GATHER(T)                                                       \
+    do {                                                                     \
+        T *dst = (T *)out;                                                   \
+        T *s   = (T *)src;                                                   \
+        for (u32 oi = 0; oi < out_numel; oi++) {                             \
+            u32 tmp = oi;                                                    \
+            u32 src_idx = 0;                                                 \
+            u32 stride  = 1;                                                 \
+            for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {              \
+                u32 d = p->src0_dims[axis];                                  \
+                u32 c = tmp % d;                                             \
+                tmp  /= d;                                                   \
+                if (axes_mask & (1u << (u32)axis)) c = d - 1u - c;           \
+                src_idx += c * stride;                                       \
+                stride  *= d;                                                \
+            }                                                                \
+            dst[oi] = s[src_idx];                                            \
+        }                                                                    \
+    } while (0)
 
 fn void cpu_op_flip(void *out, void **srcs, u32 const *src_numels,
                     KProgOp const *p, u32 out_numel) {
@@ -23,41 +44,15 @@ fn void cpu_op_flip(void *out, void **srcs, u32 const *src_numels,
     return;
   }
 
-  if (p->dtype == DT_F32) {
-    f32 *dst = (f32 *)out;
-    f32 *s   = (f32 *)src;
-    for (u32 oi = 0; oi < out_numel; oi++) {
-      // Decompose oi into per-axis coords (row-major), mirror the
-      // flipped axes, then re-encode into the source flat index.
-      u32 tmp = oi;
-      u32 src_idx = 0;
-      u32 stride  = 1;
-      for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-        u32 d = p->src0_dims[axis];
-        u32 c = tmp % d;
-        tmp  /= d;
-        if (axes_mask & (1u << (u32)axis)) c = d - 1u - c;
-        src_idx += c * stride;
-        stride  *= d;
-      }
-      dst[oi] = s[src_idx];
-    }
-  } else {
-    i32 *dst = (i32 *)out;
-    i32 *s   = (i32 *)src;
-    for (u32 oi = 0; oi < out_numel; oi++) {
-      u32 tmp = oi;
-      u32 src_idx = 0;
-      u32 stride  = 1;
-      for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-        u32 d = p->src0_dims[axis];
-        u32 c = tmp % d;
-        tmp  /= d;
-        if (axes_mask & (1u << (u32)axis)) c = d - 1u - c;
-        src_idx += c * stride;
-        stride  *= d;
-      }
-      dst[oi] = s[src_idx];
-    }
+  switch (dtype_itemsize(p->dtype)) {
+    case 1: FLIP_GATHER(u8 ); break;
+    case 2: FLIP_GATHER(u16); break;
+    case 4: FLIP_GATHER(u32); break;
+    case 8: FLIP_GATHER(u64); break;
+    default:
+      fprintf(stderr, "cpu_op_flip: itemsize unsupported\n");
+      abort();
   }
 }
+
+#undef FLIP_GATHER

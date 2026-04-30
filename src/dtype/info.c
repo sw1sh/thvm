@@ -21,15 +21,15 @@
 // field safe.  Phase A: only DT_FP32 (slot 13) and DT_INT32 (slot 5)
 // are wired; reserved slots have itemsize=0.
 static DTypeInfo const DTYPE_INFO[32] = {
-    [DT_BOOL]      = { 0, DK_RESERVED, 0,  0, "bool"     },  // wired in Phase B
-    [DT_INT8]      = { 0, DK_RESERVED, 0,  0, "i8"       },  // wired in Phase B
-    [DT_UINT8]     = { 0, DK_RESERVED, 0,  0, "u8"       },  // wired in Phase B
-    [DT_INT16]     = { 0, DK_RESERVED, 0,  0, "i16"      },  // wired in Phase B
-    [DT_UINT16]    = { 0, DK_RESERVED, 0,  0, "u16"      },  // wired in Phase B
+    [DT_BOOL]      = { 1, DK_BOOL,      8, 0, "bool"     },
+    [DT_INT8]      = { 1, DK_SINT,      8, 1, "i8"       },
+    [DT_UINT8]     = { 1, DK_UINT,      8, 0, "u8"       },
+    [DT_INT16]     = { 2, DK_SINT,     16, 1, "i16"      },
+    [DT_UINT16]    = { 2, DK_UINT,     16, 0, "u16"      },
     [DT_INT32]     = { 4, DK_SINT,     32, 1, "i32"      },
-    [DT_UINT32]    = { 0, DK_RESERVED, 0,  0, "u32"      },  // wired in Phase B
-    [DT_INT64]     = { 0, DK_RESERVED, 0,  0, "i64"      },  // wired in Phase B
-    [DT_UINT64]    = { 0, DK_RESERVED, 0,  0, "u64"      },  // wired in Phase B
+    [DT_UINT32]    = { 4, DK_UINT,     32, 0, "u32"      },
+    [DT_INT64]     = { 8, DK_SINT,     64, 1, "i64"      },
+    [DT_UINT64]    = { 8, DK_UINT,     64, 0, "u64"      },
     [DT_FP8E4M3]   = { 0, DK_RESERVED, 0,  0, "fp8e4m3"  },  // wired in Phase D
     [DT_FP8E5M2]   = { 0, DK_RESERVED, 0,  0, "fp8e5m2"  },  // wired in Phase D
     [DT_FP16]      = { 0, DK_RESERVED, 0,  0, "f16"      },  // wired in Phase C

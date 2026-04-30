@@ -62,10 +62,12 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "term/new_pri.c"
 
 // === dtype/ ===
-// dtype info table + element-size primitives.  Must come before any
-// TU that calls dtype_itemsize / dtype_storage_bytes (tensor/alloc.c,
-// schedule/materialize.c, backend/cpu/op/*.c, jit/capture.c).
+// dtype info table + element-size primitives + integer-kernel macros.
+// Must come before any TU that calls dtype_itemsize / dtype_storage_bytes
+// (tensor/alloc.c, schedule/materialize.c, backend/cpu/op/*.c,
+// jit/capture.c).
 #include "dtype/info.c"
+#include "dtype/int_kernels.h"
 
 // === heap/ ===
 #include "heap/alloc.c"

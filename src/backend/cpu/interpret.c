@@ -31,13 +31,32 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     if (tid != 0 && tid < TENS_NEXT && !TENS[tid].view.contiguous) {
       View const *v = &TENS[tid].view;
       void *src = CPU_BUFS[in_buf_ids[i]].data;
+      u32   esz = dtype_itemsize(TENS[tid].dtype);
       void *tmp = malloc((size_t)dtype_storage_bytes(TENS[tid].dtype, v->numel));
-      if (TENS[tid].dtype == DT_F32) {
-        f32 *d = (f32 *)tmp; f32 *s = (f32 *)src;
-        for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
-      } else {
-        i32 *d = (i32 *)tmp; i32 *s = (i32 *)src;
-        for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
+      switch (esz) {
+        case 1: {
+          u8 *d = (u8 *)tmp, *s = (u8 *)src;
+          for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
+          break;
+        }
+        case 2: {
+          u16 *d = (u16 *)tmp, *s = (u16 *)src;
+          for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
+          break;
+        }
+        case 4: {
+          u32 *d = (u32 *)tmp, *s = (u32 *)src;
+          for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
+          break;
+        }
+        case 8: {
+          u64 *d = (u64 *)tmp, *s = (u64 *)src;
+          for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
+          break;
+        }
+        default:
+          fprintf(stderr, "cpu_interpret: view pre-mat itemsize %u unsupported\n", esz);
+          abort();
       }
       in_ptrs  [i] = tmp;
       temp_bufs[i] = tmp;

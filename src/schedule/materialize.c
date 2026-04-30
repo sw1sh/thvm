@@ -449,7 +449,31 @@ static u32 const_to_tendesc(u64 const_loc) {
   u32  bits  = (u32)term_val(num);
   Shape s = {0}; s.ndim = 1; s.dims[0] = 1;
   u32 tid = tensor_alloc(CURRENT_BACKEND, s, dtype);
-  CURRENT_BACKEND->buf_write(TENS[tid].buf_id, &bits, 4);
+  // Write the dtype-correctly-sized scalar.  For F32 the bits field
+  // already carries the IEEE-754 layout; integer dtypes interpret
+  // `bits` as an i32 (sign-extended at the WL bridge) and pack down
+  // to the narrow width.
+  u8  buf8;  u16 buf16;  u32 buf32;  u64 buf64;
+  void *src = NULL;  u64 nbytes = 0;
+  switch (dtype) {
+    case DT_BOOL:   buf8  = (u8)(bits & 1);                     src = &buf8;  nbytes = 1; break;
+    case DT_INT8:   buf8  = (u8)(i8)(int32_t)bits;              src = &buf8;  nbytes = 1; break;
+    case DT_UINT8:  buf8  = (u8)bits;                           src = &buf8;  nbytes = 1; break;
+    case DT_INT16:  buf16 = (u16)(i16)(int32_t)bits;            src = &buf16; nbytes = 2; break;
+    case DT_UINT16: buf16 = (u16)bits;                          src = &buf16; nbytes = 2; break;
+    case DT_INT32:
+    case DT_UINT32:
+    case DT_FP32:   buf32 = bits;                               src = &buf32; nbytes = 4; break;
+    case DT_INT64:  buf64 = (u64)(i64)(int32_t)bits;            src = &buf64; nbytes = 8; break;
+    case DT_UINT64: buf64 = (u64)bits;                          src = &buf64; nbytes = 8; break;
+    default:
+      // Larger / packed dtypes need a 64-bit payload (Phase C/D/F).
+      // Fall back to a zero-fill so we don't write garbage past the
+      // buffer end; caller will see all-zeros and fail visibly.
+      buf64 = 0; src = &buf64; nbytes = dtype_storage_bytes(dtype, 1);
+      break;
+  }
+  CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src, nbytes);
   return tid;
 }
 
@@ -536,8 +560,19 @@ static Term materialize_root_alias(Term t) {
     f32 *o = (f32 *)dst_host; f32 *s = (f32 *)raw;
     for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
   } else {
-    i32 *o = (i32 *)dst_host; i32 *s = (i32 *)raw;
-    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
+    // Width-driven gather covers every byte-aligned dtype.
+    switch (dtype_itemsize(d->dtype)) {
+      case 1: { u8  *o = (u8  *)dst_host, *s = (u8  *)raw;
+                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)]; break; }
+      case 2: { u16 *o = (u16 *)dst_host, *s = (u16 *)raw;
+                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)]; break; }
+      case 4: { u32 *o = (u32 *)dst_host, *s = (u32 *)raw;
+                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)]; break; }
+      case 8: { u64 *o = (u64 *)dst_host, *s = (u64 *)raw;
+                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)]; break; }
+      default:
+        free(raw); free(dst_host); tensor_release(dst_tid); return t;
+    }
   }
   d->backend->buf_write(TENS[dst_tid].buf_id, dst_host, dst_bytes);
   free(raw);

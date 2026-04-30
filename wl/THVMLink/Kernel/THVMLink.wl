@@ -69,7 +69,14 @@ $TagAPP::usage = $TagLAM::usage = $TagVAR::usage = $TagERA::usage =
     "Tag id; mirrors the corresponding TAG_* in src/thvm.h.";
 
 (* === dtype + opcode constants (mirror src/thvm.h) === *)
-$DTF32::usage = $DTI32::usage =
+$DTBool::usage = $DTInt8::usage = $DTUInt8::usage =
+  $DTInt16::usage = $DTUInt16::usage = $DTInt32::usage =
+  $DTUInt32::usage = $DTInt64::usage = $DTUInt64::usage =
+  $DTFp8E4M3::usage = $DTFp8E5M2::usage =
+  $DTFp16::usage = $DTBf16::usage =
+  $DTFp32::usage = $DTFp64::usage =
+  $DTInt4::usage = $DTUInt4::usage =
+  $DTF32::usage = $DTI32::usage =
     "Dtype id; mirrors DT_* in src/thvm.h.";
 
 $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =

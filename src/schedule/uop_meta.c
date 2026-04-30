@@ -228,17 +228,35 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
 }
 
 fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
-  (void)env_id;
   u8 tag = term_tag(t);
   if (tag == TAG_TEN) {
     u32 tid = (u32)term_val(t);
     if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].dtype; return 1; }
   }
-  if (tag == TAG_UOP && term_ext(t) == UOP_KERNEL) {
-    Term outbuf = heap_read(term_val(t));
-    if (term_tag(outbuf) == TAG_TEN) {
-      u32 tid = (u32)term_val(outbuf);
-      if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].dtype; return 1; }
+  if (tag == TAG_UOP) {
+    u32 op  = term_ext(t);
+    u64 loc = term_val(t);
+    if (op == UOP_KERNEL) {
+      Term outbuf = heap_read(loc);
+      if (term_tag(outbuf) == TAG_TEN) {
+        u32 tid = (u32)term_val(outbuf);
+        if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].dtype; return 1; }
+      }
+    }
+    if (op == UOP_CONST) {
+      // The CONST cell carries [NUM(bits)]; the dtype is the NUM's ext.
+      Term num = heap_read(loc);
+      if (term_tag(num) == TAG_NUM) { *out = term_ext(num); return 1; }
+    }
+    // Elementwise + reduce + movement ops inherit dtype from src[0]
+    // (and binary ops require both srcs share a dtype -- the strict
+    // policy matches tinygrad's no-implicit-promotion stance).
+    if (uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
+        || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
+        || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP
+        || op == UOP_REDUCE  || op == UOP_LOAD    || op == UOP_ASSIGN) {
+      Term src0 = heap_read(loc);
+      return term_dtype_in(src0, env_id, out);
     }
   }
   *out = DT_F32; return 1;

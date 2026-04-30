@@ -9,6 +9,25 @@
 // per op so the same storage is unambiguous.
 //
 // Falls back to memcpy if shape info missing (defensive).
+// Phase B: width-driven; per-dtype interpretation collapses to bytes.
+
+#define SHRINK_GATHER(T)                                                     \
+    do {                                                                     \
+        T *dst = (T *)out;                                                   \
+        T *s   = (T *)src;                                                   \
+        for (u32 oi = 0; oi < out_numel; oi++) {                             \
+            u32 tmp = oi;                                                    \
+            u32 src_idx = 0;                                                 \
+            for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {              \
+                u32 od = p->out_dims[axis];                                  \
+                u32 b  = p->pad_widths[2 * (u32)axis];                       \
+                u32 c  = tmp % od;                                           \
+                tmp   /= od;                                                 \
+                src_idx += (c + b) * src_stride[axis];                       \
+            }                                                                \
+            dst[oi] = s[src_idx];                                            \
+        }                                                                    \
+    } while (0)
 
 fn void cpu_op_shrink(void *out, void **srcs, u32 const *src_numels,
                       KProgOp const *p, u32 out_numel) {
@@ -29,35 +48,15 @@ fn void cpu_op_shrink(void *out, void **srcs, u32 const *src_numels,
     src_stride[axis] = src_stride[axis + 1] * p->src0_dims[axis + 1];
   }
 
-  if (p->dtype == DT_F32) {
-    f32 *dst = (f32 *)out;
-    f32 *s   = (f32 *)src;
-    for (u32 oi = 0; oi < out_numel; oi++) {
-      u32 tmp = oi;
-      u32 src_idx = 0;
-      for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-        u32 od = p->out_dims[axis];
-        u32 b  = p->pad_widths[2 * (u32)axis];
-        u32 c  = tmp % od;
-        tmp   /= od;
-        src_idx += (c + b) * src_stride[axis];
-      }
-      dst[oi] = s[src_idx];
-    }
-  } else {
-    i32 *dst = (i32 *)out;
-    i32 *s   = (i32 *)src;
-    for (u32 oi = 0; oi < out_numel; oi++) {
-      u32 tmp = oi;
-      u32 src_idx = 0;
-      for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-        u32 od = p->out_dims[axis];
-        u32 b  = p->pad_widths[2 * (u32)axis];
-        u32 c  = tmp % od;
-        tmp   /= od;
-        src_idx += (c + b) * src_stride[axis];
-      }
-      dst[oi] = s[src_idx];
-    }
+  switch (esz) {
+    case 1: SHRINK_GATHER(u8 ); break;
+    case 2: SHRINK_GATHER(u16); break;
+    case 4: SHRINK_GATHER(u32); break;
+    case 8: SHRINK_GATHER(u64); break;
+    default:
+      fprintf(stderr, "cpu_op_shrink: itemsize %u unsupported\n", esz);
+      abort();
   }
 }
+
+#undef SHRINK_GATHER

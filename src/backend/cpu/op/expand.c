@@ -17,14 +17,15 @@
 // shape info (out_ndim == 0) -- preserves correctness for the
 // pre-plumbing call sites the materializer hadn't been updated for
 // when the field was first added.
+//
+// Phase B: width-driven so every byte-aligned dtype (1/2/4/8 bytes)
+// shares one walker; per-dtype branches collapse to the gather loop
+// below.
 
 static inline void expand_index_walker(u32 oi, u8 ndim,
                                        u32 const *out_dims,
                                        u32 const *src_dims,
                                        u32 *src_index_out) {
-  // Decompose oi into per-axis coords (row-major over out_dims),
-  // accumulating into the source flat index using src_strides
-  // computed on the fly.  Walk axes from innermost to outermost.
   u32 src_idx = 0;
   u32 src_stride = 1;
   for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
@@ -32,66 +33,53 @@ static inline void expand_index_walker(u32 oi, u8 ndim,
     u32 sd = src_dims[axis];
     u32 coord = oi % od;
     oi /= od;
-    if (sd != 1) {                  // not a broadcast axis: contribute
-      src_idx += coord * src_stride;
-    }
-    src_stride *= sd;               // sd is 1 on broadcast axes -> no growth
+    if (sd != 1) src_idx += coord * src_stride;
+    src_stride *= sd;
   }
   *src_index_out = src_idx;
 }
+
+#define EXPAND_GATHER(T)                                                     \
+    do {                                                                     \
+        T *dst = (T *)out;                                                   \
+        T *s   = (T *)src;                                                   \
+        if (in_numel == 1) {                                                 \
+            T v = s[0];                                                      \
+            for (u32 i = 0; i < out_numel; i++) dst[i] = v;                  \
+            break;                                                           \
+        }                                                                    \
+        if (in_numel == out_numel) {                                         \
+            memcpy(dst, s, (size_t)out_numel * sizeof(T));                   \
+            break;                                                           \
+        }                                                                    \
+        if (use_axis_aware) {                                                \
+            for (u32 oi = 0; oi < out_numel; oi++) {                         \
+                u32 si;                                                      \
+                expand_index_walker(oi, p->out_ndim, p->out_dims,            \
+                                    p->src0_dims, &si);                      \
+                dst[oi] = s[si];                                             \
+            }                                                                \
+            break;                                                           \
+        }                                                                    \
+        for (u32 i = 0; i < out_numel; i++) dst[i] = s[i % in_numel];        \
+    } while (0)
 
 fn void cpu_op_expand(void *out, void **srcs, u32 const *src_numels,
                       KProgOp const *p, u32 out_numel) {
   void *src = srcs[0];
   u32 in_numel = src_numels[0];
-
   u8 use_axis_aware = (p->out_ndim > 0)
                    && (p->src0_ndim == p->out_ndim);
 
-  if (p->dtype == DT_F32) {
-    f32 *dst = (f32 *)out;
-    f32 *s   = (f32 *)src;
-    if (in_numel == 1) {
-      f32 v = s[0];
-      for (u32 i = 0; i < out_numel; i++) dst[i] = v;
-      return;
-    }
-    if (in_numel == out_numel) {
-      memcpy(dst, s, (size_t)out_numel * sizeof(f32));
-      return;
-    }
-    if (use_axis_aware) {
-      for (u32 oi = 0; oi < out_numel; oi++) {
-        u32 si;
-        expand_index_walker(oi, p->out_ndim, p->out_dims,
-                            p->src0_dims, &si);
-        dst[oi] = s[si];
-      }
-      return;
-    }
-    // Legacy fallback (correct for trailing-axis broadcast only).
-    for (u32 i = 0; i < out_numel; i++) dst[i] = s[i % in_numel];
-  } else {
-    i32 *dst = (i32 *)out;
-    i32 *s   = (i32 *)src;
-    if (in_numel == 1) {
-      i32 v = s[0];
-      for (u32 i = 0; i < out_numel; i++) dst[i] = v;
-      return;
-    }
-    if (in_numel == out_numel) {
-      memcpy(dst, s, (size_t)out_numel * sizeof(i32));
-      return;
-    }
-    if (use_axis_aware) {
-      for (u32 oi = 0; oi < out_numel; oi++) {
-        u32 si;
-        expand_index_walker(oi, p->out_ndim, p->out_dims,
-                            p->src0_dims, &si);
-        dst[oi] = s[si];
-      }
-      return;
-    }
-    for (u32 i = 0; i < out_numel; i++) dst[i] = s[i % in_numel];
+  switch (dtype_itemsize(p->dtype)) {
+    case 1: EXPAND_GATHER(u8 ); break;
+    case 2: EXPAND_GATHER(u16); break;
+    case 4: EXPAND_GATHER(u32); break;
+    case 8: EXPAND_GATHER(u64); break;
+    default:
+      fprintf(stderr, "cpu_op_expand: dtype %u itemsize unsupported\n", p->dtype);
+      abort();
   }
 }
+
+#undef EXPAND_GATHER

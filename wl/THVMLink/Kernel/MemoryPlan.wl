@@ -113,12 +113,10 @@ computeKernelDepths[kernels_, tens_] := Block[{
    Backend dispatch: backend_id == 1 reads the CPU buf table for
    nbytes/refcount/preserved/freeable; backend_id == 2 reads the
    Metal table (no preserved/freeable, defaulted to 0). *)
-(* Map dtype enum -> human-readable string, mirroring DT_F32 / DT_I32
-   in src/thvm.h.  Keep the lookup local so a future DT_* doesn't
-   silently render as "Missing". *)
-dtypeName[0] = "f32";
-dtypeName[1] = "i32";
-dtypeName[n_] := "dt" <> ToString[n];
+(* dtypeName covers the full DT_* enum; THVMLink.wl wires the table.
+   No fallback here -- the THVMLink.wl table covers every wired slot,
+   and an unknown integer should surface as the symbolic dtypeName[n]
+   so callers can spot it (rather than collide with a string). *)
 
 collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
     byBuf,

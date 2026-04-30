@@ -302,11 +302,24 @@ TMaterialize[expr_] := (ensureInit[]; TTerm[$materializeFn[ttermRaw[expr]]])
      dtype]` form. *)
 
 (* Detect the NumericArray subtype we can consume directly. *)
-$sharedNATypes = {"Real32", "Integer32"};
+$sharedNATypes = {
+    "Real32",
+    "Integer8",  "UnsignedInteger8",
+    "Integer16", "UnsignedInteger16",
+    "Integer32", "UnsignedInteger32",
+    "Integer64", "UnsignedInteger64"
+};
 
-sharedDTypeOf["Real32"]   := "f32"
-sharedDTypeOf["Integer32"]:= "i32"
-sharedDTypeOf[_]          := Missing["UnsupportedNAType"]
+sharedDTypeOf["Real32"]            := "f32"
+sharedDTypeOf["Integer8"]          := "i8"
+sharedDTypeOf["UnsignedInteger8"]  := "u8"
+sharedDTypeOf["Integer16"]         := "i16"
+sharedDTypeOf["UnsignedInteger16"] := "u16"
+sharedDTypeOf["Integer32"]         := "i32"
+sharedDTypeOf["UnsignedInteger32"] := "u32"
+sharedDTypeOf["Integer64"]         := "i64"
+sharedDTypeOf["UnsignedInteger64"] := "u64"
+sharedDTypeOf[_]                   := Missing["UnsupportedNAType"]
 
 asSharableNA[na_NumericArray] /; MemberQ[$sharedNATypes, NumericArrayType[na]] := na
 asSharableNA[na_NumericArray]           := NumericArray[Normal[na], "Real32"]
@@ -327,10 +340,20 @@ asSharableNA[data_?Developer`PackedArrayQ] :=
     ]
 
 (* dtype label -> NumericArray storage type.  Default (no dtype
-   given) means "infer from data" -- IntegerQ -> i32, otherwise f32. *)
-naTypeFor["f32"] := "Real32"
-naTypeFor["i32"] := "Integer32"
-naTypeFor[_]     := "Real32"
+   given) means "infer from data" -- IntegerQ -> i32, otherwise f32.
+   Phase B wires every byte-aligned integer dtype; the float and FP8
+   families ride on raw-bytes carriers landed in Phases C/D. *)
+naTypeFor["bool"] := "UnsignedInteger8"
+naTypeFor["i8"]   := "Integer8"
+naTypeFor["u8"]   := "UnsignedInteger8"
+naTypeFor["i16"]  := "Integer16"
+naTypeFor["u16"]  := "UnsignedInteger16"
+naTypeFor["i32"]  := "Integer32"
+naTypeFor["u32"]  := "UnsignedInteger32"
+naTypeFor["i64"]  := "Integer64"
+naTypeFor["u64"]  := "UnsignedInteger64"
+naTypeFor["f32"]  := "Real32"
+naTypeFor[_]      := "Real32"
 
 TTensorCreate[data_]                       := (
     ensureInit[];

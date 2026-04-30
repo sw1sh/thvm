@@ -4,7 +4,10 @@
 
 fn void cpu_op_sqrt(void *out, void **srcs, u32 const *src_numels,
                     KProgOp const *p, u32 out_numel) {
-  (void)p;
+  if (p->dtype != DT_FP32) {
+    fprintf(stderr, "cpu_op_sqrt: dtype %u not supported (float-only)\n", p->dtype);
+    abort();
+  }
   u8 bs = (src_numels[0] == 1);
   f32 *o = (f32 *)out;
   f32 *a = (f32 *)srcs[0];
