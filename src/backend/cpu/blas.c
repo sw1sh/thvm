@@ -196,20 +196,68 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if      (e0 == M * K && e1 == K * N) { aidx = 0; bidx = 1; }
   else if (e1 == M * K && e0 == K * N) { aidx = 1; bidx = 0; }
   else return 0;
+
+  // View-only-transpose detection.  TMatMul lowers each input as
+  // EXPAND(RESHAPE(t, {1,K,N}), {M,K,N}); when t comes from a
+  // view-only Transpose chain, the underlying buffer is the
+  // ORIGINAL pre-transpose layout.  e.g. for `q . Transpose[k]`:
+  //   - k is row-major {3,4}  -- buffer = [k[0,0]..k[2,3]]
+  //   - Transpose[k] view: shape {4,3}, strides {1,4} (non-contig)
+  //   - after RESHAPE+EXPAND: input_views[bidx] has shape {M,K,N}
+  //     and strides {0, 1, K_underlying} where K_underlying is the
+  //     original innermost dim.
+  // Naive cblas_sgemm reads the buffer as row-major {K,N} -- wrong.
+  // Fix: detect strides[2] != 1 (i.e. non-contig innermost on B's
+  // EXPAND'd view) and use CblasTrans on B with leading-dim equal
+  // to the buffer's actual contig stride (== strides[2] when
+  // strides[1] == 1 in the {M,K,N} view).
+  //
+  // Same idea applies to A on the other side: A's EXPAND'd view is
+  // {M,K,N} with normal strides {K,1,0}; if A came from a Transpose
+  // it'd land at {1,M,0} with strides[2]==0 still (broadcast on N)
+  // but strides[0]==1 instead of K.  Detect both and forward
+  // CblasTrans+correct ld to cblas.
+  enum CBLAS_TRANSPOSE transA = CblasNoTrans;
+  enum CBLAS_TRANSPOSE transB = CblasNoTrans;
+  int ldA = (int)K;
+  int ldB = (int)N;
+  if (ke->input_views != NULL) {
+    View const *va = &ke->input_views[aidx];
+    View const *vb = &ke->input_views[bidx];
+    // A: expected {M,K,N} contig -> strides {K, 1, 0}.
+    //    Trans variant: underlying {K,M} row-major -> EXPAND'd view
+    //    has strides {1, M, 0}.
+    if (va->shape.ndim == 3
+        && va->strides[2] == 0 && va->strides[1] == (i32)M
+        && va->strides[0] == 1) {
+      transA = CblasTrans;
+      ldA    = (int)M;
+    }
+    // B: expected {M,K,N} contig -> strides {0, N, 1}.
+    //    Trans variant: underlying {N,K} row-major -> EXPAND'd view
+    //    has strides {0, 1, K}.
+    if (vb->shape.ndim == 3
+        && vb->strides[0] == 0 && vb->strides[1] == 1
+        && vb->strides[2] == (i32)K) {
+      transB = CblasTrans;
+      ldB    = (int)K;
+    }
+  }
+
   if (dt == DT_FP32) {
     float const *A = (float const *)CPU_BUFS[in_buf_ids[aidx]].data;
     float const *B = (float const *)CPU_BUFS[in_buf_ids[bidx]].data;
     float       *C = (float       *)CPU_BUFS[out_buf_id].data;
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    cblas_sgemm(CblasRowMajor, transA, transB,
                 (int)M, (int)N, (int)K,
-                1.0f, A, (int)K, B, (int)N, 0.0f, C, (int)N);
+                1.0f, A, ldA, B, ldB, 0.0f, C, (int)N);
   } else {
     double const *A = (double const *)CPU_BUFS[in_buf_ids[aidx]].data;
     double const *B = (double const *)CPU_BUFS[in_buf_ids[bidx]].data;
     double       *C = (double       *)CPU_BUFS[out_buf_id].data;
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    cblas_dgemm(CblasRowMajor, transA, transB,
                 (int)M, (int)N, (int)K,
-                1.0, A, (int)K, B, (int)N, 0.0, C, (int)N);
+                1.0, A, ldA, B, ldB, 0.0, C, (int)N);
   }
   return 1;
 }
