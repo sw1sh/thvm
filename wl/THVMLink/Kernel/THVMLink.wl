@@ -313,6 +313,14 @@ $tensorRcFn      := $tensorRcFn      = load["thvm_wl_tensor_refcount",{Integer},
    tells WL to give the C side a shared reference; C bridge stores
    the handle and disowns on release.  *)
 $tensorFromNAFn  := $tensorFromNAFn  = load["thvm_wl_tensor_from_na", {{"NumericArray", "Shared"}}, Integer];
+$tensorFromNATypedFn := $tensorFromNATypedFn = load["thvm_wl_tensor_from_na_typed", {{"NumericArray", "Shared"}, Integer}, Integer];
+
+(* f16 / bf16 round-trip helpers: pack a Real list into a
+   UnsignedInteger16 NumericArray of raw narrow-float bytes; unpack the
+   inverse direction.  Used by Tensor.wl's TFP16ToReal / TRealToFP16
+   / TBf16ToReal / TRealToBf16 surface. *)
+$fp16PackFn   := $fp16PackFn   = load["thvm_wl_fp16_pack",   {{Real, 1}, Integer}, "NumericArray"];
+$fp16UnpackFn := $fp16UnpackFn = load["thvm_wl_fp16_unpack", {{"NumericArray", "Constant"}, Integer}, {Real, 1}];
 
 (* ATP loaders, encoder, and TATP[] surface live in Kernel/ATP.wl. *)
 

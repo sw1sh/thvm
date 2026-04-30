@@ -55,6 +55,24 @@ fn void cpu_op_reduce(void *out, void **srcs, u32 const *src_numels,
       }
       break;
     }
+    case DT_FP64: {
+      f64 *o = (f64 *)out, *a = (f64 *)srcs[0];
+      for (u32 oi = 0; oi < out_numel; oi++) {
+        u32 outer_idx = oi / inner;
+        u32 inner_idx = oi % inner;
+        f64 acc = (kind == REDUCE_MAX) ? -INFINITY : 0.0;
+        for (u32 k = 0; k < axis_size; k++) {
+          f64 v = a[outer_idx * (axis_size * inner) + k * inner + inner_idx];
+          acc = (kind == REDUCE_MAX) ? (v > acc ? v : acc) : (acc + v);
+        }
+        o[oi] = acc;
+      }
+      break;
+    }
+    case DT_FP16:
+    case DT_BF16:
+      cpu_op_run_via_f32(cpu_op_reduce, out, srcs, src_numels, p, out_numel);
+      break;
     case DT_BOOL: {
       // SUM = OR-reduce, MAX = OR-reduce too (same answer for bools).
       u8 *o = (u8 *)out, *a = (u8 *)srcs[0];

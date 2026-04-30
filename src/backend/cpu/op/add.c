@@ -2,6 +2,8 @@
 //
 // Broadcast rule: if a source has numel 1, repeat its single
 // element for every output position.  Bool ADD reduces to logical OR.
+// f16 / bf16 use the promote-to-f32 path (cpu_op_run_via_f32);
+// f32 / f64 / integers run native.
 
 fn void cpu_op_add(void *out, void **srcs, u32 const *src_numels,
                    KProgOp const *p, u32 out_numel) {
@@ -12,6 +14,16 @@ fn void cpu_op_add(void *out, void **srcs, u32 const *src_numels,
       for (u32 i = 0; i < out_numel; i++) o[i] = a[ba ? 0 : i] + b[bb ? 0 : i];
       break;
     }
+    case DT_FP64: {
+      f64 *o = (f64 *)out, *a = (f64 *)srcs[0], *b = (f64 *)srcs[1];
+      u8 ba = (src_numels[0] == 1), bb = (src_numels[1] == 1);
+      for (u32 i = 0; i < out_numel; i++) o[i] = a[ba ? 0 : i] + b[bb ? 0 : i];
+      break;
+    }
+    case DT_FP16:
+    case DT_BF16:
+      cpu_op_run_via_f32(cpu_op_add, out, srcs, src_numels, p, out_numel);
+      break;
     case DT_BOOL: {
       u8 *o = (u8 *)out, *a = (u8 *)srcs[0], *b = (u8 *)srcs[1];
       u8 ba = (src_numels[0] == 1), bb = (src_numels[1] == 1);

@@ -29,6 +29,11 @@ TTensTable::usage     = "TTensTable[] returns a list of {producer_kid, buf_id, d
 TTensCount::usage     = "TTensCount[] returns the number of allocated TenDescs (excluding the reserved slot 0).";
 TTotalBufBytes::usage = "TTotalBufBytes[] returns the sum of live CPU buffer bytes (refcount > 0).";
 
+TRealToFP16::usage = "TRealToFP16[reals] packs a list of Reals into a NumericArray of UnsignedInteger16 raw fp16 bytes.  Pair with TFP16ToReal to round-trip; see TTensor[shape, na, \"f16\"] for the tensor surface.";
+TRealToBf16::usage = "TRealToBf16[reals] packs a list of Reals into a NumericArray of UnsignedInteger16 raw bfloat16 bytes.";
+TFP16ToReal::usage = "TFP16ToReal[na] unpacks a UnsignedInteger16 NumericArray of raw fp16 bytes into a Real list.";
+TBf16ToReal::usage = "TBf16ToReal[na] unpacks a UnsignedInteger16 NumericArray of raw bfloat16 bytes into a Real list.";
+
 (* Forward-decl: these are defined in NN.wl (loads alphabetically
    after Tensor.wl).  Without this, the UpValues below resolve to
    phantoms in `THVMLink`Private`* with no DownValue. *)
@@ -303,7 +308,7 @@ TMaterialize[expr_] := (ensureInit[]; TTerm[$materializeFn[ttermRaw[expr]]])
 
 (* Detect the NumericArray subtype we can consume directly. *)
 $sharedNATypes = {
-    "Real32",
+    "Real32", "Real64",
     "Integer8",  "UnsignedInteger8",
     "Integer16", "UnsignedInteger16",
     "Integer32", "UnsignedInteger32",
@@ -311,6 +316,7 @@ $sharedNATypes = {
 };
 
 sharedDTypeOf["Real32"]            := "f32"
+sharedDTypeOf["Real64"]            := "f64"
 sharedDTypeOf["Integer8"]          := "i8"
 sharedDTypeOf["UnsignedInteger8"]  := "u8"
 sharedDTypeOf["Integer16"]         := "i16"
@@ -352,8 +358,19 @@ naTypeFor["i32"]  := "Integer32"
 naTypeFor["u32"]  := "UnsignedInteger32"
 naTypeFor["i64"]  := "Integer64"
 naTypeFor["u64"]  := "UnsignedInteger64"
+naTypeFor["f16"]  := "UnsignedInteger16"   (* raw bytes carrier *)
+naTypeFor["bf16"] := "UnsignedInteger16"   (* raw bytes carrier *)
 naTypeFor["f32"]  := "Real32"
+naTypeFor["f64"]  := "Real64"
 naTypeFor[_]      := "Real32"
+
+(* f16 / bf16 round-trip helpers.  Use TRealToFP16 / TRealToBf16 to
+   pack a Real list into a NumericArray of raw narrow-float bytes;
+   the inverse TFP16ToReal / TBf16ToReal unpacks back to Reals. *)
+TRealToFP16[xs_List]            := (ensureInit[]; $fp16PackFn  [N @ xs, $DTFp16])
+TRealToBf16[xs_List]            := (ensureInit[]; $fp16PackFn  [N @ xs, $DTBf16])
+TFP16ToReal[na_NumericArray]    := (ensureInit[]; $fp16UnpackFn[na,    $DTFp16])
+TBf16ToReal[na_NumericArray]    := (ensureInit[]; $fp16UnpackFn[na,    $DTBf16])
 
 TTensorCreate[data_]                       := (
     ensureInit[];
@@ -361,8 +378,37 @@ TTensorCreate[data_]                       := (
 
 TTensorCreate[data_, dtype_String]         := (
     ensureInit[];
-    TTerm[$tensorFromNAFn[NumericArray[
-        Normal @ asSharableNA[data], naTypeFor[dtype]]]])
+    Module[{na, useTyped, normalized, shape, flatNa, t},
+        useTyped = MemberQ[{"f16", "bf16", "fp8e4m3", "fp8e5m2",
+                            "i4", "u4", "bool"}, dtype];
+        Which[
+            (* f16 / bf16: data may already be a packed UnsignedInteger16
+               NumericArray, OR a nested list of Reals to be packed
+               first.  Packing flattens, so we capture the source
+               shape and re-impose it after the round-trip. *)
+            (dtype === "f16" || dtype === "bf16") &&
+                MatchQ[data, _NumericArray]
+                && NumericArrayType[data] === "UnsignedInteger16",
+                na = data,
+            dtype === "f16" || dtype === "bf16",
+                normalized = If[ MatchQ[data, _NumericArray], Normal[data], data];
+                shape = Dimensions[normalized];
+                flatNa = If[ dtype === "f16",
+                    TRealToFP16[N @ Flatten[normalized]],
+                    TRealToBf16[N @ Flatten[normalized]]];
+                na = If[ shape === {},
+                    flatNa,
+                    NumericArray[ArrayReshape[Normal[flatNa], shape], "UnsignedInteger16"]],
+            (* Default int / float path: coerce through the NA carrier. *)
+            True,
+                normalized = If[ MatchQ[data, _NumericArray], Normal[data], data];
+                na = NumericArray[normalized, naTypeFor[dtype]]
+        ];
+        If[ useTyped,
+            TTerm[$tensorFromNATypedFn[na, dtypeCode[dtype]]],
+            TTerm[$tensorFromNAFn[na]]
+        ]
+    ])
 
 TUOpKind[u_] := Lookup[$uopNames, TTermExt[u], "UOP?" <> ToString[TTermExt[u]]]
 

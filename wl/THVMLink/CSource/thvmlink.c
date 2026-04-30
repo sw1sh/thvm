@@ -512,6 +512,19 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_write(WolframLibraryData libData, mint arg
       for (mint i = 0; i < n; i++) tmp[i] = (f32)src[i];
       d->backend->buf_write(d->buf_id, tmp, (u64)n * sizeof(f32));
       free(tmp);
+    } else if (d->dtype == DT_FP64) {
+      // Already double-precision -- pass through.
+      d->backend->buf_write(d->buf_id, src, (u64)n * sizeof(f64));
+    } else if (d->dtype == DT_FP16 || d->dtype == DT_BF16) {
+      // Promote double -> f32 -> narrow float; lane.c handles the
+      // round-to-nearest-even bit pack.
+      f32 *tmp32 = (f32 *)malloc((size_t)n * sizeof(f32));
+      for (mint i = 0; i < n; i++) tmp32[i] = (f32)src[i];
+      u16 *tmp16 = (u16 *)malloc((size_t)n * sizeof(u16));
+      from_fp32_lane(tmp16, d->dtype, tmp32, (u32)n);
+      d->backend->buf_write(d->buf_id, tmp16, (u64)n * sizeof(u16));
+      free(tmp32);
+      free(tmp16);
     } else {
       fprintf(stderr, "tensor_write: float dtype %u not yet wired\n", d->dtype);
       return LIBRARY_FUNCTION_ERROR;
@@ -569,6 +582,11 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
     case DT_INT64:  t = MNumericArray_Type_Bit64;   break;
     case DT_UINT64: t = MNumericArray_Type_UBit64;  break;
     case DT_FP32:   t = MNumericArray_Type_Real32;  break;
+    case DT_FP64:   t = MNumericArray_Type_Real64;  break;
+    // f16 / bf16 ride on raw u16 bytes; the WL surface decodes via
+    // TFP16ToReal / TBf16ToReal helpers in Tensor.wl.
+    case DT_FP16:
+    case DT_BF16:   t = MNumericArray_Type_UBit16;  break;
     default:
       fprintf(stderr, "tensor_read: dtype %u (%s) not yet supported\n",
               d->dtype, dtype_name(d->dtype));
@@ -605,6 +623,7 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
   u32 dtype;
   switch (t) {
     case MNumericArray_Type_Real32:  dtype = DT_FP32;   break;
+    case MNumericArray_Type_Real64:  dtype = DT_FP64;   break;
     case MNumericArray_Type_Bit8:    dtype = DT_INT8;   break;
     case MNumericArray_Type_UBit8:   dtype = DT_UINT8;  break;
     case MNumericArray_Type_Bit16:   dtype = DT_INT16;  break;
@@ -655,6 +674,53 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
   return LIBRARY_NO_ERROR;
 }
 
+// Variant of tensor_from_na that overrides the inferred dtype from
+// the NumericArray type.  Used by f16 / bf16 / fp8 (and later int4)
+// where the WL surface carries the bytes in a generic Unsigned*
+// NumericArray and the dtype tag is supplied separately.  The byte
+// layout must match: numel * dtype_storage_bytes(dtype, 1) bytes for
+// byte-aligned dtypes, ceil(numel/2) bytes for packed nibbles.
+EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na_typed(WolframLibraryData libData, mint argc,
+                                                    MArgument *args, MArgument res) {
+  (void)argc;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  mint dtype_arg   = MArgument_getInteger(args[1]);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+      = libData->numericarrayLibraryFunctions;
+
+  mint rank        = naf->MNumericArray_getRank(na);
+  mint const *naDims = naf->MNumericArray_getDimensions(na);
+  void *naData     = naf->MNumericArray_getData(na);
+  u32 dtype        = (u32)dtype_arg;
+
+  if (TENS_NEXT >= TENS_CAP) {
+    fprintf(stderr, "tensor_from_na_typed: out of descriptor slots\n");
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 id = TENS_NEXT++;
+  TenDesc *d = &TENS[id];
+  Shape shape;
+  shape.ndim = (u32)rank;
+  for (mint i = 0; i < rank && i < MAX_DIM; i++) shape.dims[i] = (u32)naDims[i];
+  for (mint i = rank; i < MAX_DIM; i++)          shape.dims[i] = 0;
+  d->dtype    = dtype;
+  d->refcount = 1;
+  d->view     = view_create(shape);
+  d->backend  = CURRENT_BACKEND;
+  u64 nbytes  = dtype_storage_bytes(dtype, d->view.numel);
+  if (CURRENT_BACKEND == &CPU_BACKEND) {
+    d->buf_id = cpu_buf_alloc_external(
+        naData, nbytes, release_numeric_array, (void *)na);
+  } else {
+    d->buf_id = CURRENT_BACKEND->buf_alloc(nbytes);
+    CURRENT_BACKEND->buf_write(d->buf_id, naData, nbytes);
+    libData->numericarrayLibraryFunctions->MNumericArray_disown(na);
+  }
+  Term term = term_new(0, TAG_TEN, dtype, id);
+  MArgument_setInteger(res, (mint)term);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_tensor_shape(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {
   (void)libData; (void)argc;
@@ -687,7 +753,12 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_const(WolframLibraryData libData, mint argc,
   mint    dtype = MArgument_getInteger(args[0]);
   mreal   value = MArgument_getReal   (args[1]);
   u32 bits;
-  if (dtype == DT_F32) {
+  if (dtype == DT_FP32 || dtype == DT_FP64
+      || dtype == DT_FP16 || dtype == DT_BF16) {
+    // The KProgOp arg is u32, so all float constants pass through
+    // an f32 intermediate at materialize time.  For DT_FP64 inputs
+    // outside f32 range, the WL caller can fall back to a typed
+    // tensor (TTensorCreate from a Real64 NumericArray).
     f32 v = (f32)value;
     memcpy(&bits, &v, sizeof(bits));
   } else {
@@ -695,6 +766,51 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_const(WolframLibraryData libData, mint argc,
   }
   Term r = uop_const((u32)dtype, bits);
   MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+// Convert a packed UnsignedInteger16 NumericArray (raw f16 bytes) to
+// a Real64 list.  Used by Tensor.wl's TFP16ToReal helper when reading
+// f16 tensors back through the bridge.
+EXTERN_C DLLEXPORT int thvm_wl_fp16_unpack(WolframLibraryData libData, mint argc,
+                                           MArgument *args, MArgument res) {
+  (void)argc;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  mint dtype_code  = MArgument_getInteger(args[1]);   // DT_FP16 or DT_BF16
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+      = libData->numericarrayLibraryFunctions;
+  mint n = naf->MNumericArray_getFlattenedLength(na);
+  u16 *src = (u16 *)naf->MNumericArray_getData(na);
+  MTensor out;
+  libData->MTensor_new(MType_Real, 1, &n, &out);
+  double *dst = libData->MTensor_getRealData(out);
+  for (mint i = 0; i < n; i++) {
+    f32 v = (dtype_code == DT_BF16) ? bf16_to_f32(src[i]) : fp16_to_f32(src[i]);
+    dst[i] = (double)v;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// Pack a Real list into a UnsignedInteger16 NumericArray of raw f16
+// or bf16 bytes.  Inverse of thvm_wl_fp16_unpack.
+EXTERN_C DLLEXPORT int thvm_wl_fp16_pack(WolframLibraryData libData, mint argc,
+                                         MArgument *args, MArgument res) {
+  (void)argc;
+  MTensor data    = MArgument_getMTensor(args[0]);
+  mint dtype_code = MArgument_getInteger(args[1]);
+  mint n          = libData->MTensor_getFlattenedLength(data);
+  double *src     = libData->MTensor_getRealData(data);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+      = libData->numericarrayLibraryFunctions;
+  MNumericArray out;
+  naf->MNumericArray_new(MNumericArray_Type_UBit16, 1, &n, &out);
+  u16 *dst = (u16 *)naf->MNumericArray_getData(out);
+  for (mint i = 0; i < n; i++) {
+    f32 v = (f32)src[i];
+    dst[i] = (dtype_code == DT_BF16) ? f32_to_bf16(v) : f32_to_fp16(v);
+  }
+  MArgument_setMNumericArray(res, out);
   return LIBRARY_NO_ERROR;
 }
 

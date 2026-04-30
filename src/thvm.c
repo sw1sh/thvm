@@ -65,9 +65,13 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // dtype info table + element-size primitives + integer-kernel macros.
 // Must come before any TU that calls dtype_itemsize / dtype_storage_bytes
 // (tensor/alloc.c, schedule/materialize.c, backend/cpu/op/*.c,
-// jit/capture.c).
+// jit/capture.c).  fp_convert + lane primitives ride alongside;
+// they're consumed by backend/cpu/op/_promote.c (loaded a bit later)
+// for the f16 / bf16 / fp8 promote-to-f32 ALU path.
 #include "dtype/info.c"
 #include "dtype/int_kernels.h"
+#include "dtype/fp_convert.c"
+#include "dtype/lane.c"
 
 // === heap/ ===
 #include "heap/alloc.c"
@@ -126,6 +130,8 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "backend/cpu/buf_read.c"
 #include "backend/cpu/buf_write.c"
 #include "backend/cpu/buf_pool.c"
+// Phase C promote-to-fp32 helper for narrow-float / fp8 elementwise.
+#include "backend/cpu/op/_promote.c"
 #include "backend/cpu/op/const.c"
 #include "backend/cpu/op/add.c"
 #include "backend/cpu/op/mul.c"

@@ -32,10 +32,10 @@ static DTypeInfo const DTYPE_INFO[32] = {
     [DT_UINT64]    = { 8, DK_UINT,     64, 0, "u64"      },
     [DT_FP8E4M3]   = { 0, DK_RESERVED, 0,  0, "fp8e4m3"  },  // wired in Phase D
     [DT_FP8E5M2]   = { 0, DK_RESERVED, 0,  0, "fp8e5m2"  },  // wired in Phase D
-    [DT_FP16]      = { 0, DK_RESERVED, 0,  0, "f16"      },  // wired in Phase C
-    [DT_BF16]      = { 0, DK_RESERVED, 0,  0, "bf16"     },  // wired in Phase C
+    [DT_FP16]      = { 2, DK_FP16,    16, 1, "f16"      },
+    [DT_BF16]      = { 2, DK_BF16,    16, 1, "bf16"     },
     [DT_FP32]      = { 4, DK_FLOAT,    32, 1, "f32"      },
-    [DT_FP64]      = { 0, DK_RESERVED, 0,  0, "f64"      },  // wired in Phase C
+    [DT_FP64]      = { 8, DK_FLOAT,    64, 1, "f64"      },
     [DT_INT4]      = { 0, DK_RESERVED, 0,  0, "i4"       },  // wired in Phase F
     [DT_UINT4]     = { 0, DK_RESERVED, 0,  0, "u4"       },  // wired in Phase F
 };

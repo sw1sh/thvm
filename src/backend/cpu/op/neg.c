@@ -14,6 +14,15 @@ fn void cpu_op_neg(void *out, void **srcs, u32 const *src_numels,
       for (u32 i = 0; i < out_numel; i++) o[i] = -a[bs ? 0 : i];
       break;
     }
+    case DT_FP64: {
+      f64 *o = (f64 *)out, *a = (f64 *)srcs[0];
+      for (u32 i = 0; i < out_numel; i++) o[i] = -a[bs ? 0 : i];
+      break;
+    }
+    case DT_FP16:
+    case DT_BF16:
+      cpu_op_run_via_f32(cpu_op_neg, out, srcs, src_numels, p, out_numel);
+      break;
 #define CASE(DT, T) INT_UN_CASE(DT, T, -x)
     EACH_INT_DTYPE(CASE)
 #undef CASE

@@ -466,8 +466,20 @@ static u32 const_to_tendesc(u64 const_loc) {
     case DT_FP32:   buf32 = bits;                               src = &buf32; nbytes = 4; break;
     case DT_INT64:  buf64 = (u64)(i64)(int32_t)bits;            src = &buf64; nbytes = 8; break;
     case DT_UINT64: buf64 = (u64)bits;                          src = &buf64; nbytes = 8; break;
+    case DT_FP16:
+    case DT_BF16:
+    case DT_FP64: {
+      // Promote f32 bits -> target float (lossy for 64-bit beyond
+      // f32 precision; precise enough for the common 0.0 / 1.0 /
+      // log(2) literals the grad chain rule emits).
+      f32 v; memcpy(&v, &bits, sizeof(v));
+      static u8 buf_bytes[8];
+      from_fp32_lane(buf_bytes, dtype, &v, 1);
+      src = buf_bytes; nbytes = dtype_storage_bytes(dtype, 1);
+      break;
+    }
     default:
-      // Larger / packed dtypes need a 64-bit payload (Phase C/D/F).
+      // Larger / packed dtypes need a 64-bit payload (Phase D/F).
       // Fall back to a zero-fill so we don't write garbage past the
       // buffer end; caller will see all-zeros and fail visibly.
       buf64 = 0; src = &buf64; nbytes = dtype_storage_bytes(dtype, 1);
