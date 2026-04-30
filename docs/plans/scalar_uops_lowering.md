@@ -249,15 +249,31 @@ inferable from `TKernelCount[]`.
 
 ### Phase E: turn it on by default (1-2 days)
 
-- Flip `THVM_RANGEIFY=1` to default-on.
-- Re-run beautiful-mnist canary at N_STEPS=5; confirm loss
-  curve and per-step kernel-program count drop toward
-  tinygrad's ceiling.
-- Update fusion_count.wlt baselines (some existing ceilings
-  will tighten -- e.g. softmax-forward 2 -> 1, two-layer-mlp
-  3 -> 2).
-- Retire the old per-tensor-UOp emit path (`visit()` in
-  materialize.c) once all tests pass on the new path.
+- ~~Flip `THVM_RANGEIFY=1` to default-on.~~ DONE.  Opt-out
+  via `THVM_RANGEIFY=0`.  WL grid 599 / 0 under both modes.
+  LeNet canary runs to convergence: loss 2.6071 -> 1.819 in
+  one step.
+- Audit (foreground): TSum / MSE / TSoftmax / TGrad-MSE /
+  TLayerNorm all lower (1 of 1 non-trivial kernels each).
+  TSoftmaxAxis row-wise still bails (1 kernel) -- multi-axis
+  softmax pattern lands later.
+- ~~Retire the old per-tensor-UOp emit path (`visit()` in
+  materialize.c).~~ Still in tree as the fallback for bailed
+  patterns; full retirement is the Phase F goal once all
+  realistic kernel patterns lower.
+
+### Phase F: retire visit() (deferred)
+
+Open work before `visit()` can be removed:
+- TSoftmaxAxis multi-axis (rank > 1 input, axis != 0).
+- PERMUTE / PAD / SHRINK / FLIP movement ops.
+- CAST / BITCAST.
+- Negative strides (FLIP under-the-hood).
+- Non-zero view offsets.
+- > 1 REDUCE per kernel (BatchNorm mean+var pattern).
+- Strides > 65535 (current u16 packing).
+- Conv2D / matmul kernels (currently stay on BLAS path; no
+  scalar lowering attempted).
 
 ### Phase F (optional, follow-up): Conv2D / MatMul lowering
 

@@ -273,16 +273,17 @@ fn void realize_classify(Term root) {
   }
 
   // Phase C-2: scalar-tail relaxation.  When rangeify is enabled
-  // (THVM_RANGEIFY=1) AND the REDUCE's single-consumer chain stays
-  // at the post-reduce shape and reaches the realize root (no
-  // EXPAND), the consumer kernel can absorb the REDUCE inline.
-  // Gate on rangeify because the legacy KProgOp[] dispatch hasn't
-  // been audited for the wider scalar-tail patterns this opens up.
-  // Read getenv per call (cheap) so test harnesses can flip the
-  // flag mid-session without restarting.
+  // (THVM_RANGEIFY default-on as of Phase E) AND the REDUCE's
+  // single-consumer chain stays at the post-reduce shape and
+  // reaches the realize root (no EXPAND), the consumer kernel can
+  // absorb the REDUCE inline.  Gated on rangeify because the legacy
+  // KProgOp[] dispatch hasn't been audited for the wider scalar-
+  // tail patterns this opens up; THVM_RANGEIFY=0 disables both
+  // this relaxation and the rangeify lower path together.
   {
     const char *e = getenv("THVM_RANGEIFY");
-    if (e != NULL && e[0] == '1') {
+    int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
+    if (rangeify_on) {
       u64 root_loc = term_val(root);
       for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
         UOpInfo *info = &REALIZE_INFO[i];
