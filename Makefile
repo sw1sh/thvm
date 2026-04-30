@@ -15,6 +15,7 @@ TESTS := \
   $(BIN)/test_era \
   $(BIN)/test_dup_sup \
   $(BIN)/test_dup_lam \
+  $(BIN)/test_lam_era \
   $(BIN)/test_tensor \
   $(BIN)/test_uop \
   $(BIN)/test_grad \

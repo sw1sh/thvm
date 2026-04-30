@@ -260,6 +260,7 @@ $freeFn      := $freeFn      = load["thvm_wl_free",       {},                   
 $resetFn     := $resetFn     = load["thvm_wl_reset",      {},                       Integer];
 
 $termNewFn   := $termNewFn   = load["thvm_wl_term_new",   {Integer, Integer, Integer, Integer}, Integer];
+$lamSealExtFn := $lamSealExtFn = load["thvm_wl_lam_seal_ext", {Integer, Integer},      Integer];
 $termTagFn   := $termTagFn   = load["thvm_wl_term_tag",   {Integer},                Integer];
 $termExtFn   := $termExtFn   = load["thvm_wl_term_ext",   {Integer},                Integer];
 $termValFn   := $termValFn   = load["thvm_wl_term_val",   {Integer},                Integer];
@@ -766,7 +767,7 @@ TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]
 SetAttributes[TLam, HoldAll]
 TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     THeapSet[loc, Function[x, body][TVarFor[loc]]];
-    packTerm[0, $TagLAM, 0, loc]
+    packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
 (* TLamShape[shape_list, x, body] -- explicit shape annotation
@@ -780,7 +781,7 @@ SetAttributes[TLamShape, HoldAll]
 TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     THVMLink`Private`$lamShapeSetFn[loc, shape];
     THeapSet[loc, Function[x, body][TVarFor[loc]]];
-    packTerm[0, $TagLAM, 0, loc]
+    packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
 (* Sugar: TTerm[ctx, id][arg] == TApp[TTerm[ctx, id], arg] lets the

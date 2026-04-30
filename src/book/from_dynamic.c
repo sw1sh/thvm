@@ -108,7 +108,13 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
       // re-instate the annotation on each fresh dyn instance.
       Shape s;
       if (lam_shape_lookup(val, &s)) lam_shape_set_book(b, &s);
-      return term_new(0, TAG_LAM, ext, b);
+      // Re-seal LAM_ERA_MASK against the dyn body we just cloned
+      // in.  This catches LAMs that were constructed with ext=0
+      // (e.g. by tests that bypass lam_seal_ext) so the book copy
+      // still gets an accurate mask.  We OR over `ext`'s remaining
+      // bits so any other flags the dyn LAM carried survive.
+      u32 sealed_ext = lam_seal_ext(val, ext & ~LAM_ERA_MASK);
+      return term_new(0, TAG_LAM, sealed_ext, b);
     }
 
     default: {

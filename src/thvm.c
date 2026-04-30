@@ -90,7 +90,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // === lam/ ===
 // Side tables tied to LAM heap locs (shape annotation, future:
 // arity hints).  No reduction logic; pure storage.
+// body_uses_var.c follows shape.c so alo_realize and
+// clone_to_book_rec (loaded next) can call it from their LAM
+// construction sites to set LAM_ERA_MASK on unused-binder lambdas.
 #include "lam/shape.c"
+#include "lam/body_uses_var.c"
 
 // === book/ ===
 // from_dynamic depends on heap/, book/alloc, book/set; included after them.

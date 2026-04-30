@@ -96,6 +96,11 @@ Term alo_realize(Term book_term, u32 state_id) {
       // shape-resolvable independently.
       Shape s;
       if (lam_shape_lookup_book(val, &s)) lam_shape_set(new_loc, &s);
+      // LAM_ERA_MASK is already baked into `ext` from the book copy
+      // (set by clone_to_book_rec when the dyn LAM was registered).
+      // Don't re-seal here: the dyn body we're emitting has ALO-
+      // wrapped children, which would hide a downstream VAR(new_loc)
+      // and produce a false positive for the mask.
       return term_new(0, TAG_LAM, ext, new_loc);
     }
 

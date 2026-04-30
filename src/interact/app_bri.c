@@ -28,7 +28,9 @@ fn Term interact_app_bri(Term bri, Term arg) {
 
   Term new_x = term_new(0, TAG_VAR, 0, new_bri_loc);
   heap_set(k_loc, new_x);
-  Term inner_lam = term_new(0, TAG_LAM, 0, k_loc);
+  // inner_lam binds $k; body is VAR(new_bri_loc), not VAR(k_loc), so
+  // the binder is unused -- LAM_ERA_MASK should fire here in practice.
+  Term inner_lam = term_new(0, TAG_LAM, lam_seal_ext(k_loc, 0), k_loc);
 
   Term k_var = term_new(0, TAG_VAR, 0, k_loc);
   heap_set(ann_loc + 0, k_var);

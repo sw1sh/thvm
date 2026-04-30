@@ -69,6 +69,14 @@ typedef u64 Term;
 // case).
 #define DUP_GRAD_FLAG  (1U << 17)
 #define DUP_LABEL_MASK (0x1FFFFU)            // bits 0..16
+
+// === LAM ext flags ===
+// Bit 17 of a TAG_LAM's ext (separate namespace from DP0/DP1's ext)
+// marks "binder unused in body".  When set, APP-LAM and DUP-LAM skip
+// the heap_subst_var step (no VAR -> binder cell exists, so the
+// substitution would dangle).  Set by lam_body_uses_var at every
+// LAM-construction site.  Mirrors HVM4's LAM_ERA_MASK (hvm.c:102).
+#define LAM_ERA_MASK   (1U << 17)
 #define VAL_MASK  0x3FFFFFFFFFULL
 
 // === Tags (minimal initial set) ===

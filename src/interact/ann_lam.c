@@ -42,5 +42,5 @@ fn Term interact_ann_lam(Term val, Term lam) {
   heap_set(new_lam_loc, ann_inner_term);
 
   heap_subst_var(lam_loc, inner_val);
-  return term_new(0, TAG_LAM, 0, new_lam_loc);
+  return term_new(0, TAG_LAM, lam_seal_ext(new_lam_loc, 0), new_lam_loc);
 }

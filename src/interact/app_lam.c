@@ -7,6 +7,15 @@
 // binder's heap cell (so a future VAR enter on that loc picks it up
 // and clears the SUB flag), then continue reducing the body.
 //
+// LAM_ERA_MASK fast-path (HVM4 wnf/app_lam.c:10):
+//   When the bit is set on the LAM's ext, the body has no VAR(loc)
+//   reference so heap_subst_var would write a substitute that nothing
+//   reads.  We skip the write and return body directly.  The bit is
+//   set at construction by lam_body_uses_var (src/lam/body_uses_var.c),
+//   called from every LAM-construction site (DUP-LAM, APP-BRI,
+//   ANN-LAM, alo_realize, book/from_dynamic, the WL bridge's
+//   thvm_wl_term_new shim).
+//
 // JIT-style: when the lambda body is a UOP graph (compute) and
 // the argument carries a shape (TEN or shape-inferable UOP),
 // register the bound var's shape and materialize the body into
@@ -26,8 +35,20 @@
 //     the per-instance materialize cost is bounded.
 fn Term interact_app_lam(Term lam, Term arg) {
   ITRS++;
-  u64  loc  = term_val(lam);
-  Term body = heap_read(loc);
+  u32  lam_ext = term_ext(lam);
+  u64  loc     = term_val(lam);
+  Term body    = heap_read(loc);
+  if (lam_ext & LAM_ERA_MASK) {
+    // Binder unused: skip both shape-annotation and heap_subst_var;
+    // the former wouldn't be observed by any TVAR(loc), the latter
+    // would dangle.  We still run the JIT-materialize step because
+    // its job (compiling a UOP body to a KERNEL) is independent of
+    // whether the binder is referenced.
+    if (term_tag(body) == TAG_UOP && term_ext(body) != UOP_KERNEL) {
+      body = thvm_materialize(body);
+    }
+    return body;
+  }
   // Always shape-annotate the bound var when the argument
   // carries a shape -- even for curried / structural-bodied
   // lambdas.  The annotation propagates through nested LAMs:

@@ -21,8 +21,12 @@ binder's heap cell, return the body to be reduced next.
 ```c
 fn Term interact_app_lam(Term lam, Term arg) {
   ITRS++;
-  u64  loc  = term_val(lam);
-  Term body = heap_read(loc);
+  u32  lam_ext = term_ext(lam);
+  u64  loc     = term_val(lam);
+  Term body    = heap_read(loc);
+  if (lam_ext & LAM_ERA_MASK) {
+    return body;        // (plus the JIT-materialize step, see below)
+  }
   heap_subst_var(loc, arg);
   return body;
 }
@@ -32,6 +36,28 @@ fn Term interact_app_lam(Term lam, Term arg) {
 body and the slot that substitution writes to. The reducer dispatches
 to this rule from the APP frame's apply phase
 ([normal_form.md](../normal_form.md)) and `goto enter`s the returned `body`.
+
+### LAM_ERA_MASK fast-path
+
+When the binder is unused inside the body (no `VAR(loc)` reference),
+substituting `arg` would write a cell that nothing reads. The
+`LAM_ERA_MASK` bit (bit 17 of the LAM's ext) records this property.
+When set, the rule skips `heap_subst_var` and just returns the body.
+
+The bit is set at construction time by `lam_body_uses_var`
+([src/lam/body_uses_var.c](../../src/lam/body_uses_var.c)), called
+from every site that builds a fresh LAM: `interact_dup_lam`,
+`interact_app_bri`, `interact_ann_lam`, `alo_realize`,
+`book/from_dynamic`, and the WL bridge's `thvm_wl_term_new` shim.
+Mirrors HVM4's `parse/term/lam.c` decision logic, but applied at
+runtime against the live heap rather than at parse time.
+
+### JIT-materialize step
+
+When the body is a `TAG_UOP` graph and not yet a `UOP_KERNEL`, the
+rule routes through `thvm_materialize` to compile it into a kernel
+before returning. This step is independent of the LAM_ERA fast-path
+and runs in both branches.
 
 ## Worked example
 

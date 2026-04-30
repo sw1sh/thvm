@@ -112,8 +112,28 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new(WolframLibraryData libData, mint argc,
   u8  tag = (u8) MArgument_getInteger(args[1]);
   u32 ext = (u32)MArgument_getInteger(args[2]);
   u64 val = (u64)MArgument_getInteger(args[3]);
+  // No automatic LAM_ERA_MASK injection here -- this entry point is
+  // also used by HeapInitialize's packCell to rebuild snapshot cells,
+  // where val may refer to a book loc (not yet populated in the dyn
+  // heap), and lam_seal_ext would walk the wrong cells.  WL's TLam
+  // helper wires the mask via the dedicated thvm_wl_lam_seal_ext FFI
+  // after the body is installed.
   Term t = term_new(sub, tag, ext, val);
   MArgument_setInteger(res, (mint)t);
+  return LIBRARY_NO_ERROR;
+}
+
+// Compute the LAM ext (with LAM_ERA_MASK or'd in iff lam_body_uses_var
+// proves the binder is unused) for a freshly-constructed LAM whose
+// body has been installed at HEAP[lam_loc].  Called from WL's TLam
+// helper after THeapSet[loc, body], before packTerm seals the LAM.
+EXTERN_C DLLEXPORT int thvm_wl_lam_seal_ext(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u64 lam_loc  = (u64)MArgument_getInteger(args[0]);
+  u32 base_ext = (u32)MArgument_getInteger(args[1]);
+  u32 sealed   = lam_seal_ext(lam_loc, base_ext);
+  MArgument_setInteger(res, (mint)sealed);
   return LIBRARY_NO_ERROR;
 }
 
