@@ -170,6 +170,50 @@ static int realize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
   return 0;
 }
 
+// Phase C-2 relaxation: a REDUCE whose single consumer is an ALU
+// chain that STAYS at the post-reduce shape (no EXPAND back to the
+// source shape, no follow-on REDUCE) can be inlined into its
+// consumer's kernel.  Pattern: REDUCE -> ALU(scalar, CONST/scalar)
+// -> root.  Examples: TMean = REDUCE_SUM/N, sqrt(TSum), etc.
+//
+// Distinguished from broadcast_chain by the absence of EXPAND --
+// here the chain ends at the realize root, not at a broadcast.
+// Returns 1 only when the consumer chain reaches the realize root
+// (so the whole computation collapses into one kernel).
+static int realize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc) {
+  u64 cur = reduce_loc;
+  for (u32 hops = 0; hops < 8; hops++) {
+    if (cur == root_loc) return 1;   // chain reaches the realize root
+    u64 parent = realize_unique_uop_parent(cur);
+    if (parent == 0) return 0;
+    u32 idx = realize_info_find(parent);
+    if (idx == 0xFFFFFFFFu) return 0;
+    u8 pop = REALIZE_INFO[idx].op;
+    // Scalar-preserving unary ops keep the post-reduce shape.
+    if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
+     || pop == UOP_EXP2 || pop == UOP_LOG2) {
+      cur = parent;
+      continue;
+    }
+    // Binary ops where the OTHER child is a scalar (CONST or
+    // numel-1 EXPAND) also keep the post-reduce shape.  We approx
+    // by allowing ADD/MUL when the parent has a CONST sibling.
+    if (pop == UOP_ADD || pop == UOP_MUL) {
+      // Check if any child is CONST.
+      Term ca = term_resolve(heap_read(parent + 0));
+      Term cb = term_resolve(heap_read(parent + 1));
+      u8 has_const = 0;
+      if (term_tag(ca) == TAG_UOP && term_ext(ca) == UOP_CONST) has_const = 1;
+      if (term_tag(cb) == TAG_UOP && term_ext(cb) == UOP_CONST) has_const = 1;
+      if (!has_const) return 0;
+      cur = parent;
+      continue;
+    }
+    return 0;
+  }
+  return 0;
+}
+
 fn void realize_classify(Term root) {
   realize_info_clear();
   if (term_tag(root) != TAG_UOP) return;
@@ -226,6 +270,29 @@ fn void realize_classify(Term root) {
     if (info->consumer_count != 1) continue;
     if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
     info->realized = 0;
+  }
+
+  // Phase C-2: scalar-tail relaxation.  When rangeify is enabled
+  // (THVM_RANGEIFY=1) AND the REDUCE's single-consumer chain stays
+  // at the post-reduce shape and reaches the realize root (no
+  // EXPAND), the consumer kernel can absorb the REDUCE inline.
+  // Gate on rangeify because the legacy KProgOp[] dispatch hasn't
+  // been audited for the wider scalar-tail patterns this opens up.
+  // Read getenv per call (cheap) so test harnesses can flip the
+  // flag mid-session without restarting.
+  {
+    const char *e = getenv("THVM_RANGEIFY");
+    if (e != NULL && e[0] == '1') {
+      u64 root_loc = term_val(root);
+      for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+        UOpInfo *info = &REALIZE_INFO[i];
+        if (info->op != UOP_REDUCE)    continue;
+        if (info->consumer_count != 1) continue;
+        if (!realize_reduce_consumer_is_scalar_tail(info->loc, root_loc))
+          continue;
+        info->realized = 0;
+      }
+    }
   }
 }
 

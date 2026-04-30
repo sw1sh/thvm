@@ -191,3 +191,53 @@ VerificationTest[
     5.0,
     TestID -> "lowering/reduce-max-output-eq"
 ]
+
+(* Phase C-2: scalar-tail fusion.  TMean = TSum[v]/N collapses from
+   2 kernels (legacy: REDUCE materialized + scalar divide) to 1
+   kernel under rangeify.  Same rule covers Sqrt[TSum], TSum*K, etc. *)
+VerificationTest[
+    {
+      withRangeify[False,
+        TInit[];
+        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+        TRealize[TSum[v] / 10.0];
+        TKernelCount[] - 1],
+      withRangeify[True,
+        TInit[];
+        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+        TRealize[TSum[v] / 10.0];
+        TKernelCount[] - 1]
+    },
+    {2, 1},
+    TestID -> "lowering/scalar-tail-fuses-to-one"
+]
+
+(* Phase C-2: scalar-tail output equivalence.  Mean of 1..10 = 5.5. *)
+VerificationTest[
+    Module[{legacy, lowered, expected = 5.5},
+      legacy = withRangeify[False,
+        TInit[];
+        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+        First @ Normal @ TTensorData @ TRealize[TSum[v] / 10.0]];
+      lowered = withRangeify[True,
+        TInit[];
+        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+        First @ Normal @ TTensorData @ TRealize[TSum[v] / 10.0]];
+      legacy === lowered === expected
+    ],
+    True,
+    TestID -> "lowering/scalar-tail-output-eq"
+]
+
+(* Phase C-2: Sqrt[TSum[v]] also fuses (single REDUCE -> single
+   unary -> root). *)
+VerificationTest[
+    withRangeify[True,
+      TInit[];
+      (* sum(1^2 + 2^2 + 3^2 + 4^2) = 30; sqrt(30) ~= 5.4772 *)
+      v = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+      Round[First @ Normal @ TTensorData @ TRealize[Sqrt[TSum[v * v]]], 0.001]
+    ],
+    Round[Sqrt[30.], 0.001],
+    TestID -> "lowering/sqrt-of-sum-fuses"
+]

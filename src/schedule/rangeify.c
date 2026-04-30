@@ -190,8 +190,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   for (u32 i = 0; i < ke->n_ops; i++) {
     if (ke->program[i].dtype != DT_FP32) return 0;
   }
-  // Phase B/C supported opcodes: elementwise + REDUCE.  Movement /
-  // cast / bitcast / load go to later phases.
+  // Phase B/C supported opcodes: elementwise + (one) REDUCE.
+  // Movement / cast / bitcast / load go to later phases.
+  int reduce_pos = -1;
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     switch (p->opcode) {
@@ -200,9 +201,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
         break;
       case UOP_REDUCE:
-        // Phase C-1: REDUCE only allowed as the FINAL op of the
-        // kernel (no chained elementwise after).  Otherwise bail.
-        if (i != ke->n_ops - 1) return 0;
+        if (reduce_pos != -1) return 0;       // > 1 reduce not yet supported
+        reduce_pos = (int)i;
         break;
       default:
         return 0;
@@ -216,52 +216,74 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   Shape const *os = &ke->output_shape;
   if (os->ndim == 0 || os->ndim > 3) return 0;
 
-  // Detect REDUCE-as-tail.  When present, the kernel emits a nested
-  // loop: outer LOOP ranges over the output dims, inner REDUCE
-  // range over axis_size.  Phase C-1 only handles the inner=1 case
-  // (reduce axis is the trailing dim of input).
-  KProgOp *last      = &ke->program[ke->n_ops - 1];
-  int      has_reduce = (last->opcode == UOP_REDUCE);
-  u32      reduce_kind  = 0;
-  u32      reduce_inner = 0;
-  u32      reduce_size  = 0;
+  // Detect REDUCE.  When present, the kernel emits a nested loop:
+  // outer LOOP ranges over the kernel's output dims (== post-reduce
+  // shape), inner REDUCE range over axis_size.  Phase C handles
+  // inner==1 (reduce axis is the trailing dim of the input).
+  int      has_reduce  = (reduce_pos >= 0);
+  u32      reduce_kind = 0;
+  u32      reduce_size = 0;
+  KProgOp *red         = NULL;
   if (has_reduce) {
-    reduce_kind  = (last->arg >> 24) & 0xFFu;
-    reduce_inner =  last->arg        & 0x00FFFFFFu;
-    if (reduce_inner != 1) return 0;     // inner != 1 NIY
-    if (last->n_src != 1) return 0;
-    if (KSRC_IS_INPUT(last->src[0])) {
-      // REDUCE reads input directly: input numel = output_numel * axis_size.
-      u32 in_slot  = KSRC_INDEX(last->src[0]);
-      u32 in_numel = ke->input_numels[in_slot];
-      if (in_numel == 0 || in_numel < ke->output_numel) return 0;
-      reduce_size = in_numel / ke->output_numel;
-      if (reduce_size * ke->output_numel != in_numel) return 0;
+    red                = &ke->program[reduce_pos];
+    reduce_kind        =  (red->arg >> 24) & 0xFFu;
+    u32 reduce_inner   =   red->arg        & 0x00FFFFFFu;
+    if (reduce_inner != 1) return 0;          // inner != 1 NIY
+    if (red->n_src    != 1) return 0;
+    u32 src_numel;
+    if (KSRC_IS_INPUT(red->src[0])) {
+      u32 in_slot = KSRC_INDEX(red->src[0]);
+      src_numel   = ke->input_numels[in_slot];
     } else {
-      // REDUCE reads a previous program op's output: that op's
-      // numel must equal output_numel * axis_size.
-      u32 src_idx = KSRC_INDEX(last->src[0]);
+      u32 src_idx = KSRC_INDEX(red->src[0]);
       if (src_idx >= ke->n_ops) return 0;
-      u32 src_numel = ke->program[src_idx].numel;
-      if (src_numel == 0 || src_numel < ke->output_numel) return 0;
-      reduce_size = src_numel / ke->output_numel;
-      if (reduce_size * ke->output_numel != src_numel) return 0;
+      src_numel = ke->program[src_idx].numel;
     }
+    if (src_numel == 0 || src_numel < red->numel) return 0;
+    reduce_size = src_numel / red->numel;
+    if (reduce_size * red->numel != src_numel) return 0;
     if (reduce_size == 0 || reduce_size > 0xFFFFu) return 0;
   }
 
-  u32 onum = ke->output_numel;
-  // Numel sanity: non-REDUCE ops must produce output_numel
-  // (broadcast handled for CONST scalars at numel == 1).  REDUCE op
-  // (when present, always last) takes a larger source -- handled
-  // separately above.
+  u32 onum            = ke->output_numel;
+  u32 reduce_in_numel = has_reduce ? (red->numel * reduce_size) : 0;
+
+  // Numel sanity by region (pre / post REDUCE):
+  //   - Pre-REDUCE non-REDUCE ops produce reduce_in_numel
+  //     (or 1 for CONST broadcast).
+  //   - REDUCE op produces onum.
+  //   - Post-REDUCE non-REDUCE ops produce onum (or 1 for CONST).
+  // Without REDUCE, all ops produce onum (or 1 for CONST).
   for (u32 i = 0; i < ke->n_ops; i++) {
-    KProgOp *p = &ke->program[i];
-    if (p->opcode == UOP_REDUCE) continue;
-    if (p->numel != onum && !(p->opcode == UOP_CONST && p->numel == 1)) return 0;
-    // Phase C also allows ops feeding the REDUCE to have the larger
-    // pre-reduce numel.  Today we only allow the REDUCE's direct src
-    // (handled above); chained pre-reduce elementwise lands in C-2.
+    KProgOp *p   = &ke->program[i];
+    if (p->opcode == UOP_REDUCE) {
+      if (p->numel != onum) return 0;
+      continue;
+    }
+    u32 expected = (has_reduce && (int)i < reduce_pos) ? reduce_in_numel : onum;
+    if (p->numel != expected
+        && !(p->opcode == UOP_CONST && p->numel == 1)) return 0;
+  }
+
+  // Phase C-2 boundary: forbid an input read both pre- AND post-
+  // REDUCE.  That's the softmax pattern -- we'd need two distinct
+  // LOAD ops for the same input slot, which our 1:1 KProgOp -> input
+  // load mapping can't express today.  Lands in Phase C-3.
+  if (has_reduce) {
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      int seen_pre = 0, seen_post = 0;
+      for (u32 j = 0; j < ke->n_ops; j++) {
+        KProgOp *p = &ke->program[j];
+        for (u8 s = 0; s < p->n_src; s++) {
+          u32 raw = p->src[s];
+          if (KSRC_IS_INPUT(raw) && KSRC_INDEX(raw) == i) {
+            if ((int)j <  reduce_pos) seen_pre  = 1;
+            if ((int)j >= reduce_pos) seen_post = 1;
+          }
+        }
+      }
+      if (seen_pre && seen_post) return 0;
+    }
   }
   // Inputs: same numel as output (Phase B), or REDUCE-input size, or
   // numel-1 scalar broadcast.
