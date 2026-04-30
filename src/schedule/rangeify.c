@@ -113,17 +113,29 @@ fn const char *scalar_axis_name(u32 axis_type) {
   }
 }
 
-// Pack up to 3 u16 strides into the S_INDEX `extra` field.  Strides
-// > 65535 force a bail (caller falls back to legacy KProgOp[]).
-// Stride layout: stride[d] is at bit [16*d, 16*d+16); d in [0, 3).
-static u64 pack_strides_u16(u32 const *strides, u32 ndim) {
+// Pack up to 3 u16 strides + 1 u16 offset into the S_INDEX `extra`
+// field.  Anything > 65535 forces a bail.
+// Layout:
+//   bits [ 0..15] : stride for src[1] (range axis 0)
+//   bits [16..31] : stride for src[2] (range axis 1)
+//   bits [32..47] : stride for src[3] (range axis 2)
+//   bits [48..63] : per-INDEX offset (added to address)
+static u64 pack_index_extra(u32 const *strides, u32 ndim, u32 offset) {
   u64 packed = 0;
   if (ndim > 3) return UINT64_MAX;
+  if (offset > 0xFFFFu) return UINT64_MAX;
   for (u32 d = 0; d < ndim; d++) {
     if (strides[d] > 0xFFFFu) return UINT64_MAX;
     packed |= ((u64)strides[d] & 0xFFFFu) << (16 * d);
   }
+  packed |= ((u64)offset & 0xFFFFu) << 48;
   return packed;
+}
+
+// Convenience: pack strides only (offset = 0).  Used for chained
+// INDEX nodes where the offset lives on the innermost.
+static u64 pack_strides_u16(u32 const *strides, u32 ndim) {
+  return pack_index_extra(strides, ndim, 0);
 }
 
 // Compute canonical row-major strides for `dims[0..ndim)`.
@@ -135,16 +147,22 @@ static void row_major_strides(u32 const *dims, u32 ndim, u32 *out) {
   }
 }
 
-// Emit S_INDEX with strides packed into extra.  Returns the new uop
-// id, or 0 on overflow (stride > 65535).
-static u32 emit_index(KernelEntry *ke, u32 dtype, u32 buf_id,
-                      u32 const *range_ids, u32 const *strides, u32 ndim) {
+// Emit S_INDEX with strides + offset packed into extra.  Returns
+// the new uop id, or 0 on overflow (stride or offset > 65535).
+static u32 emit_index_off(KernelEntry *ke, u32 dtype, u32 buf_id,
+                          u32 const *range_ids, u32 const *strides,
+                          u32 ndim, u32 offset) {
   if (ndim > 3) return 0;
-  u64 packed = pack_strides_u16(strides, ndim);
+  u64 packed = pack_index_extra(strides, ndim, offset);
   if (packed == UINT64_MAX) return 0;
   u32 src[4] = {buf_id, 0, 0, 0};
   for (u32 d = 0; d < ndim; d++) src[1 + d] = range_ids[d];
   return rangeify_emit(ke, S_INDEX, dtype, (u8)(1 + ndim), src, packed);
+}
+
+static u32 emit_index(KernelEntry *ke, u32 dtype, u32 buf_id,
+                      u32 const *range_ids, u32 const *strides, u32 ndim) {
+  return emit_index_off(ke, dtype, buf_id, range_ids, strides, ndim, 0);
 }
 
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
@@ -239,15 +257,16 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   }
   // Phase D: input views can be non-contig (view.strides encode the
   // access pattern; 0 strides == broadcast, used heavily by chain-
-  // rule grad expansion).  We bail only on:
-  //   - non-zero offset (offset would need adding to every INDEX)
-  //   - negative strides (FLIP; lands later)
-  //   - shape mismatch (input rank > output rank, etc.)
-  // Strides up to 65535 (u16-packed) are accepted; larger forces a
-  // bail at emit_index.
+  // rule grad expansion).  Phase F-1 lifts the non-zero-offset
+  // restriction by packing the offset into S_INDEX.extra (u16
+  // bits).  Bail conditions today:
+  //   - negative strides (FLIP; needs a sign-aware INDEX, lands
+  //     in F-3 alongside the FLIP movement op).
+  //   - offset > 65535 (current u16 packing; bail until we widen
+  //     extra encoding).
   for (u32 i = 0; i < ke->n_inputs; i++) {
     View const *v = &ke->input_views[i];
-    if (v->offset != 0) RBAIL_PRE("non-zero view offset");
+    if (v->offset < 0 || v->offset > 0xFFFF) RBAIL_PRE("offset out of u16 range");
     for (u32 d = 0; d < v->shape.ndim; d++) {
       if (v->strides[d] < 0) RBAIL_PRE("negative stride (FLIP)");
     }
@@ -429,41 +448,28 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     //     where output has >=1 LOOP dim and reduce axis is the
     //     trailing dim): index by (LOOP, REDUCE) ranges.
     if (input_used_pre[i]) {
+      View const *v = &ke->input_views[i];
+      u32 in_off   = (u32)v->offset;
       u32 idx;
       if (in_numel == 1) {
         u32 src[1] = {param};
-        idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, 0);
+        u64 packed = pack_index_extra(NULL, 0, in_off);
+        if (packed == UINT64_MAX) { rangeify_free(ke); return 0; }
+        idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, packed);
       } else if (in_numel == onum && red->numel == 1
                  && in_numel == reduce_size) {
-        // Softmax-style symmetric: reduce body reads input[REDUCE]
-        // independently of LOOP_iter.  Only the REDUCE range
-        // contributes to the address; stride matches the single
-        // input axis.
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
-        idx = emit_index(ke, dtype, param, r_ids, r_strides, 1);
+        idx = emit_index_off(ke, dtype, param, r_ids, r_strides, 1, in_off);
       } else if (red->numel == 1 && in_numel == reduce_size
-                 && ke->input_views[i].shape.ndim == 1) {
-        // Full reduce over a rank-1 input.  Output is {1} (LOOP
-        // range extent 1 -- positional info collapses to nothing).
-        // Reduce body indexes input[REDUCE] using the input view's
-        // single stride.
-        View const *v = &ke->input_views[i];
+                 && v->shape.ndim == 1) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {(u32)v->strides[0]};
-        idx = emit_index(ke, dtype, param, r_ids, r_strides, 1);
+        idx = emit_index_off(ke, dtype, param, r_ids, r_strides, 1, in_off);
       } else if (in_numel == reduce_in_numel && in_numel != red->numel) {
-        // Partial reduce over trailing axis: input shape is
-        // (output_shape ++ {axis_size}).  Walk the input view's
-        // actual strides per axis -- broadcast (stride==0) inputs
-        // and other view-aware patterns must use the View, not
-        // the synthesized canonical strides.
-        View const *v = &ke->input_views[i];
         if (v->shape.ndim != in_ndim) { rangeify_free(ke); return 0; }
         for (u32 d = 0; d < in_ndim; d++) {
           u32 expected_dim = (d < os->ndim) ? os->dims[d] : reduce_size;
-          // Allow stride==0 (broadcast) regardless of dim mismatch;
-          // otherwise dims must match.
           if (v->shape.dims[d] != expected_dim && v->strides[d] != 0) {
             rangeify_free(ke); return 0;
           }
@@ -475,9 +481,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
         r_ids    [os->ndim] = reduce_range;
         r_strides[os->ndim] = (u32)v->strides[os->ndim];
-        idx = emit_index(ke, dtype, param, r_ids, r_strides, in_ndim);
+        idx = emit_index_off(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
       } else {
-        idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
+        idx = emit_index_off(ke, dtype, param, loop_ranges, loop_strides,
+                             os->ndim, in_off);
       }
       if (idx == 0) { rangeify_free(ke); return 0; }
       input_load_pre[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
@@ -489,30 +496,28 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     // by Phase D's chain-rule grad expansion) are absorbed into
     // INDEX without bailing.
     if (input_used_post[i]) {
+      View const *v = &ke->input_views[i];
+      u32 in_off    = (u32)v->offset;
       u32 idx;
       if (in_numel == 1) {
         u32 src[1] = {param};
-        idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, 0);
-      } else if (ke->input_views[i].shape.ndim == os->ndim) {
-        // Same rank: walk the View's strides directly.  Stride 0
-        // marks a broadcast axis (the load reuses the same value
-        // for every iter of that range).
-        View const *v = &ke->input_views[i];
+        u64 packed = pack_index_extra(NULL, 0, in_off);
+        if (packed == UINT64_MAX) { rangeify_free(ke); return 0; }
+        idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, packed);
+      } else if (v->shape.ndim == os->ndim) {
         u32 strides_u32[MAX_DIM];
         for (u32 d = 0; d < os->ndim; d++) {
           if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0) {
-            // Mismatched dims with non-broadcast stride: not yet
-            // supported; bail.
             rangeify_free(ke); return 0;
           }
           strides_u32[d] = (u32)v->strides[d];
         }
-        idx = emit_index(ke, dtype, param, loop_ranges, strides_u32, os->ndim);
+        idx = emit_index_off(ke, dtype, param, loop_ranges, strides_u32,
+                             os->ndim, in_off);
       } else if (has_reduce && in_numel == reduce_in_numel
                  && reduce_in_numel == onum) {
-        // Softmax-symmetric: input rank may differ from output
-        // rank but numel matches; treat as same-shape contig.
-        idx = emit_index(ke, dtype, param, loop_ranges, loop_strides, os->ndim);
+        idx = emit_index_off(ke, dtype, param, loop_ranges, loop_strides,
+                             os->ndim, in_off);
       } else {
         rangeify_free(ke); return 0;
       }

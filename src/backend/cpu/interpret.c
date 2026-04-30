@@ -215,20 +215,24 @@ typedef struct {
 
 static u64 eval_scalar(ScalarCtx *c, u32 op_id);
 
-// Decode S_INDEX: address = sum(range_iter[src[1+d]] * stride[d]).
+// Decode S_INDEX: address = offset + sum(range_iter[src[1+d]] * stride[d]).
 // Returns the byte-offset address (input element index, output
 // element index, etc.) plus the slot id in the high 32 bits when
-// the buffer is a DEFINE_PARAM.
+// the buffer is a DEFINE_PARAM.  `extra` packs:
+//   bits  0..15 -- stride for src[1]
+//   bits 16..31 -- stride for src[2]
+//   bits 32..47 -- stride for src[3]
+//   bits 48..63 -- per-INDEX offset (added to address)
 static u64 eval_index(ScalarCtx *c, ScalarUop const *u) {
   u32 buf_id = u->src[0];
   ScalarUop const *bu = &c->ke->scalar_uops[buf_id];
-  u64 strides_packed = u->extra;
-  u32 addr = 0;
-  u32 nrng = (u32)u->src_count - 1;
+  u64 packed = u->extra;
+  u32 addr   = (u32)((packed >> 48) & 0xFFFFu);
+  u32 nrng   = (u32)u->src_count - 1;
   for (u32 d = 0; d < nrng; d++) {
     u32 rng_id = u->src[1 + d];
     u32 iter   = c->range_iter[rng_id];
-    u32 stride = (u32)((strides_packed >> (16 * d)) & 0xFFFFu);
+    u32 stride = (u32)((packed >> (16 * d)) & 0xFFFFu);
     addr += iter * stride;
   }
   if (bu->op == S_DEFINE_OUTPUT) return (u64)addr;
