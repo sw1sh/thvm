@@ -377,6 +377,22 @@ EXTERN_C DLLEXPORT int thvm_wl_itrs(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+EXTERN_C DLLEXPORT int thvm_wl_grad_memo_stats(WolframLibraryData libData,
+                                               mint argc, MArgument *args,
+                                               MArgument res) {
+  (void)argc; (void)args;
+  mint dims[1] = {2};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  extern u64 GRAD_MEMO_HITS, GRAD_MEMO_MISSES;
+  dst[0] = (mint)GRAD_MEMO_HITS;
+  dst[1] = (mint)GRAD_MEMO_MISSES;
+  GRAD_MEMO_HITS = GRAD_MEMO_MISSES = 0;
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 // === hot-path counters ===
 // Snapshot the per-context HotCounters block into a {Integer, 1}
 // MTensor.  Order matches `hot_counters_snapshot` in

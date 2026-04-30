@@ -192,19 +192,92 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
 //     rule.
 //   - else allocate a grad cell [child, gy_for_child] and return
 //     its DP1+grad_flag BWD projection (chain rule will recurse).
+//
+// Per-realize memoization on (child, gy, target):
+// `interact_grad(uop, gy, target)` is deterministic in those three
+// keys, but the chain rule's straight recursion re-walks shared
+// sub-DAGs once per parent (visible in HotCounters as
+// GradFires=54025 on LeNet's 5 grads = 10K interact_grad calls per
+// target on a 65-node forward DAG).  This open-addressed gen-keyed
+// table caches the BWD result so subsequent visits to the same
+// (child, gy, target) triple share the existing grad cell instead
+// of allocating a fresh one + re-firing the chain rule from scratch.
+// Generation bumps at the OUTERMOST interact_grad entry
+// (GRAD_TARGET_TOP transitions 0->1) so per-realize entries don't
+// stale across separate user TGrad calls.
+#define GRAD_MEMO_CAP (1u << 14)
+typedef struct { u32 gen; Term child, gy, target, result; } GradMemoEntry;
+static GradMemoEntry GRAD_MEMO[GRAD_MEMO_CAP];
+static u32 GRAD_MEMO_GEN = 0;
+
+static inline u32 grad_memo_hash(Term child, Term gy, Term target) {
+  u64 h = (u64)child;
+  h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+  h ^= (u64)gy;     h *= 0xff51afd7ed558ccdULL;
+  h ^= (u64)target; h *= 0xff51afd7ed558ccdULL;
+  h ^= h >> 33;
+  return (u32)h & (GRAD_MEMO_CAP - 1);
+}
+
+static u64 GRAD_MEMO_HITS  = 0;
+static u64 GRAD_MEMO_MISSES = 0;
+
+static int grad_memo_lookup(Term child, Term gy, Term target, Term *out) {
+  u32 base = grad_memo_hash(child, gy, target);
+  for (u32 probe = 0; probe < GRAD_MEMO_CAP; probe++) {
+    GradMemoEntry *e = &GRAD_MEMO[(base + probe) & (GRAD_MEMO_CAP - 1)];
+    if (e->gen != GRAD_MEMO_GEN) { GRAD_MEMO_MISSES++; return 0; }
+    if (e->child == child && e->gy == gy && e->target == target) {
+      GRAD_MEMO_HITS++;
+      *out = e->result;
+      return 1;
+    }
+  }
+  GRAD_MEMO_MISSES++;
+  return 0;
+}
+
+static void grad_memo_insert(Term child, Term gy, Term target, Term result) {
+  u32 base = grad_memo_hash(child, gy, target);
+  for (u32 probe = 0; probe < GRAD_MEMO_CAP; probe++) {
+    GradMemoEntry *e = &GRAD_MEMO[(base + probe) & (GRAD_MEMO_CAP - 1)];
+    if (e->gen != GRAD_MEMO_GEN
+        || (e->child == child && e->gy == gy && e->target == target)) {
+      e->gen    = GRAD_MEMO_GEN;
+      e->child  = child;
+      e->gy     = gy;
+      e->target = target;
+      e->result = result;
+      return;
+    }
+  }
+  // table full -- silently drop (memo is an optimization, not
+  // load-bearing for correctness).
+}
+
 static Term grad_bwd_for_child(Term child, Term gy_for_child) {
   Term target = grad_current_target();
+  Term cached;
+  if (grad_memo_lookup(child, gy_for_child, target, &cached)) return cached;
+
+  Term result;
   if (target != 0) {
     Term ty = grad_alo_resolve(target);
     Term tc = grad_alo_resolve(child);
-    if (ty == tc) return gy_for_child;
+    if (ty == tc) { result = gy_for_child; goto done; }
   }
   if (term_tag(term_resolve(child)) == TAG_TEN) {
-    return grad_leaf_sup(child, gy_for_child);
+    result = grad_leaf_sup(child, gy_for_child);
+    goto done;
   }
-  u64 c = grad_cell_alloc(child);
-  heap_set(c + 1, gy_for_child);
-  return grad_bwd_of(c);
+  {
+    u64 c = grad_cell_alloc(child);
+    heap_set(c + 1, gy_for_child);
+    result = grad_bwd_of(c);
+  }
+done:
+  grad_memo_insert(child, gy_for_child, target, result);
+  return result;
 }
 
 // One-shot helper: allocate cell, write gy, return {fwd, bwd, loc}.
@@ -743,6 +816,11 @@ fn Term interact_grad(Term grad_term) {
   Term target = heap_read(term_val(grad_term) + 2);
   u8 pushed = 0;
   if (GRAD_TARGET_TOP < GRAD_TARGET_STACK_CAP) {
+    // Bump the per-realize grad memo generation at the outermost
+    // entry so cached entries from a previous TGrad call don't
+    // stale-hit on this fresh chain rule (Term values can collide
+    // across calls if heap_alloc handed back a recycled loc).
+    if (GRAD_TARGET_TOP == 0) GRAD_MEMO_GEN++;
     GRAD_TARGET_STACK[GRAD_TARGET_TOP++] = target;
     pushed = 1;
   }
