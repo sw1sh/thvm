@@ -148,7 +148,6 @@ WL paclet (`wl/THVMLink/`):
 
 Tracked in PLAN.md. Do not pre-build for them.
 
-- Tensor ops (`src/tensor/`, `src/ops/`): step 12+
 - Autograd interactions (`src/grad/`): step 13
 - Kernel fusion / codegen / Metal backend: step 14
 - Multi-threading: not in the initial roadmap; runtime is single-threaded

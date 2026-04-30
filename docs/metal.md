@@ -1,4 +1,9 @@
-# Metal backend — embedding strategy
+# Metal backend - embedding strategy
+
+See [cpu.md](cpu.md) for the codegen pipeline this backend shares
+with the CPU JIT (`cg_emit_metal` lives next to `cg_emit`); the
+section "Comparison with Metal" there cites the dispatch
+asymmetry between `metal_dispatch_kernel` and `cpu_dispatch_kernel`.
 
 ## TL;DR
 

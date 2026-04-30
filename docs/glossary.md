@@ -47,7 +47,7 @@ file paths, and other docs.
 | stage | what it does | where it lives |
 |-----|-----|-----|
 | **build** | User constructs a UOp graph through WL surface (`TUOpAdd`, `TUOpReshape`, ...). No reduction yet. | wl/THVMLink/Kernel/Tensor.wl |
-| **materialize** | Rewriting a raw UOp graph into a scheduled DAG of `UOP_KERNEL` nodes. Runs schedule + kernelize + compile in one rewrite. **Fires no kernels.** Reachable two ways: as a rule on `UOP_MATERIALIZE` under `TWnf`, or directly via the `TMaterialize` WL helper (which calls the rewrite without invoking `wnf`). | src/interact/uop_materialize.c |
+| **materialize** | Rewriting a raw UOp graph into a scheduled DAG of `UOP_KERNEL` nodes. Runs schedule + kernelize + compile in one rewrite. **Fires no kernels.** Reachable two ways: as a rule on `UOP_MATERIALIZE` under `TWnf`, or directly via the `TMaterialize` WL helper (which calls the rewrite without invoking `wnf`). | src/schedule/materialize.c |
 | **schedule** | Decide which UOps become kernels and in what order. v1 = trivial (one kernel per materialize). Part of materialize. | src/schedule/schedule.c |
 | **kernelize** | Rewrite the raw UOp graph into `UOP_KERNEL[output_buf, ast_root]` (and later `UOP_ASSIGN` / `UOP_SINK`) nodes. Part of materialize. | src/schedule/kernelize.c |
 | **fusion** | Decide which compute ops run in one kernel without intermediate buffers. v1 = elementwise chains until a shape-changing op; step 14 = full producer-consumer fusion. Part of **schedule**. | src/schedule/schedule.c |

@@ -24,6 +24,11 @@ If you are new to the project, read these in order:
    cells with gy threading, chain-rule adjoint table, leaf-SUP +
    DUP routing, higher-order, materialization integration, and
    `TProfile` for spotting allocation leaks.
+8. [cpu.md](cpu.md): the CPU backend (`src/backend/cpu/`) and the
+   backend-agnostic codegen pipeline (`src/codegen/`).  Walks the
+   `cpu_dispatch_kernel` order (BLAS, JIT, interpreter), the
+   `propose -> apply_opt -> render_c` chain, and the JIT cache
+   key.
 
 ## What's not here yet
 
