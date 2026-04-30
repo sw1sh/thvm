@@ -26,21 +26,19 @@ scalarOpTally[kid_] := Module[{uops = TKernelScalarUops[kid]},
       KeyDrop[Counts[#["op"] & /@ uops], "S_NONE"]]
 ]
 
-(* When rangeify is off, every kernel emits via the legacy visit()
-   path and TKernelScalarUops should report Missing["NotLowered"].
-   Wrap explicitly so the test passes regardless of the shell's
-   THVM_RANGEIFY setting. *)
+(* Every realized kernel lowers through rangeify (zero-bail invariant
+   established at F-?).  Each kid > 0 with n_ops > 0 should have a
+   non-Missing scalar-UOp graph. *)
 VerificationTest[
-    withRangeify[False,
-      TInit[];
-      a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
-      b = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
-      TRealize[a + b];
-      n = TKernelCount[] - 1;
-      AllTrue[Range[n], TKernelScalarUops[#] === Missing["NotLowered"] &]
-    ],
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+    TRealize[a + b];
+    n = TKernelCount[] - 1;
+    AllTrue[Range[n],
+      kid |-> TKernelInfo[kid]["n_ops"] === 0 || TKernelScalarUops[kid] =!= Missing["NotLowered"]],
     True,
-    TestID -> "lowering/legacy-path-reports-missing"
+    TestID -> "lowering/all-kernels-lower"
 ]
 
 (* TKernelScalarUops[0] (the reserved sentinel slot) should also
@@ -103,25 +101,15 @@ VerificationTest[
     TestID -> "lowering/compound-elementwise-fuses-shape"
 ]
 
-(* Output equivalence: rangeified result must match legacy result
-   bitwise.  Run the same expression with each path and diff. *)
+(* Output equivalence: rangeified result must match the analytic
+   componentwise reference bitwise. *)
 VerificationTest[
-    Module[{legacy, lowered},
-      legacy = withRangeify[False,
-        TInit[];
-        a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
-        b = TTensorCreate @ NumericArray[{0.5, 1.5, 2.5, 3.5}, "Real32"];
-        c = TTensorCreate @ NumericArray[{2.0, 2.0, 2.0, 2.0}, "Real32"];
-        Normal @ TTensorData @ TRealize[(a + b) * c]];
-      lowered = withRangeify[True,
-        TInit[];
-        a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
-        b = TTensorCreate @ NumericArray[{0.5, 1.5, 2.5, 3.5}, "Real32"];
-        c = TTensorCreate @ NumericArray[{2.0, 2.0, 2.0, 2.0}, "Real32"];
-        Normal @ TTensorData @ TRealize[(a + b) * c]];
-      legacy === lowered
-    ],
-    True,
+    TInit[];
+    a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{0.5, 1.5, 2.5, 3.5}, "Real32"];
+    c = TTensorCreate @ NumericArray[{2.0, 2.0, 2.0, 2.0}, "Real32"];
+    Normal @ TTensorData @ TRealize[(a + b) * c],
+    {3.0, 7.0, 11.0, 15.0},
     TestID -> "lowering/elementwise-output-bitwise-eq"
 ]
 
@@ -161,21 +149,13 @@ VerificationTest[
     TestID -> "lowering/reduce-sum-shape"
 ]
 
-(* Phase C: TSum output bitwise matches legacy.  Sum-of-1..10 should
-   give 55. *)
+(* Phase C: TSum bitwise matches the analytic reference.
+   Sum-of-1..10 = 55. *)
 VerificationTest[
-    Module[{legacy, lowered, expected = 55.0},
-      legacy = withRangeify[False,
-        TInit[];
-        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
-        First @ Normal @ TTensorData @ TRealize @ TSum[v]];
-      lowered = withRangeify[True,
-        TInit[];
-        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
-        First @ Normal @ TTensorData @ TRealize @ TSum[v]];
-      legacy === lowered === expected
-    ],
-    True,
+    TInit[];
+    v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+    First @ Normal @ TTensorData @ TRealize @ TSum[v],
+    55.0,
     TestID -> "lowering/reduce-sum-output-eq"
 ]
 
@@ -192,40 +172,24 @@ VerificationTest[
     TestID -> "lowering/reduce-max-output-eq"
 ]
 
-(* Phase C-2: scalar-tail fusion.  TMean = TSum[v]/N collapses from
-   2 kernels (legacy: REDUCE materialized + scalar divide) to 1
-   kernel under rangeify.  Same rule covers Sqrt[TSum], TSum*K, etc. *)
+(* Phase C-2: scalar-tail fusion.  TMean = TSum[v]/N collapses to a
+   single kernel (REDUCE + scalar divide fused into one S_BUFFERIZE).
+   Same rule covers Sqrt[TSum], TSum*K, etc. *)
 VerificationTest[
-    {
-      withRangeify[False,
-        TInit[];
-        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
-        TRealize[TSum[v] / 10.0];
-        TKernelCount[] - 1],
-      withRangeify[True,
-        TInit[];
-        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
-        TRealize[TSum[v] / 10.0];
-        TKernelCount[] - 1]
-    },
-    {2, 1},
+    TInit[];
+    v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+    TRealize[TSum[v] / 10.0];
+    TKernelCount[] - 1,
+    1,
     TestID -> "lowering/scalar-tail-fuses-to-one"
 ]
 
 (* Phase C-2: scalar-tail output equivalence.  Mean of 1..10 = 5.5. *)
 VerificationTest[
-    Module[{legacy, lowered, expected = 5.5},
-      legacy = withRangeify[False,
-        TInit[];
-        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
-        First @ Normal @ TTensorData @ TRealize[TSum[v] / 10.0]];
-      lowered = withRangeify[True,
-        TInit[];
-        v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
-        First @ Normal @ TTensorData @ TRealize[TSum[v] / 10.0]];
-      legacy === lowered === expected
-    ],
-    True,
+    TInit[];
+    v = TTensorCreate @ NumericArray[Range[10] * 1.0, "Real32"];
+    First @ Normal @ TTensorData @ TRealize[TSum[v] / 10.0],
+    5.5,
     TestID -> "lowering/scalar-tail-output-eq"
 ]
 
@@ -266,19 +230,18 @@ VerificationTest[
     TestID -> "lowering/softmax-broadcast-back-shape"
 ]
 
-(* Phase C-3: TSoftmax output bitwise matches legacy and sums to 1. *)
+(* Phase C-3: TSoftmax output matches the analytic reference and
+   sums to 1.  Reference: numerically-stable softmax computed in
+   Mathematica from the same input. *)
 VerificationTest[
-    Module[{legacy, lowered, eq, sumOk},
-      legacy = withRangeify[False,
-        TInit[];
-        v = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
-        Normal @ TTensorData @ TRealize @ TSoftmax[v]];
-      lowered = withRangeify[True,
-        TInit[];
-        v = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
-        Normal @ TTensorData @ TRealize @ TSoftmax[v]];
-      eq    = (Max[Abs[legacy - lowered]] < 1.0*^-6);
-      sumOk = (Abs[Total[lowered] - 1.0] < 1.0*^-6);
+    Module[{lowered, ref, vData = {1.0, 2.0, 3.0, 4.0}, shifted, eq, sumOk},
+      TInit[];
+      v       = TTensorCreate @ NumericArray[vData, "Real32"];
+      lowered = Normal @ TTensorData @ TRealize @ TSoftmax[v];
+      shifted = Exp[vData - Max[vData]];
+      ref     = shifted / Total[shifted];
+      eq      = (Max[Abs[ref - lowered]] < 1.0*^-6);
+      sumOk   = (Abs[Total[lowered] - 1.0] < 1.0*^-6);
       eq && sumOk
     ],
     True,
@@ -306,24 +269,17 @@ VerificationTest[
     TestID -> "lowering/backward-grad-lowers"
 ]
 
-(* Phase D: backward output bitwise matches legacy.  d/dw of
-   sum((Dot(w,x) - t)^2) at the test point. *)
+(* Phase D: backward output matches the analytic reference.
+   L  = sum((w.x - t)^2);  with w.x = 3.0, t = 1.0, residual r = 2.0,
+   dL/dw = 2 * r * x = 4.0 * {1, 2, 3, 4} = {4, 8, 12, 16}. *)
 VerificationTest[
-    Module[{legacy, lowered, eq},
-      legacy = withRangeify[False,
-        TInit[];
-        x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
-        w = TTensorCreate @ NumericArray[{0.1, 0.2, 0.3, 0.4}, "Real32"];
-        t = TTensorCreate @ NumericArray[{1.0}, "Real32"];
-        Normal @ TTensorData @ TRealize @ TGrad[TMSELoss[TDot[w, x], t], w]];
-      lowered = withRangeify[True,
-        TInit[];
-        x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
-        w = TTensorCreate @ NumericArray[{0.1, 0.2, 0.3, 0.4}, "Real32"];
-        t = TTensorCreate @ NumericArray[{1.0}, "Real32"];
-        Normal @ TTensorData @ TRealize @ TGrad[TMSELoss[TDot[w, x], t], w]];
-      eq = (Max[Abs[legacy - lowered]] < 1.0*^-5);
-      eq
+    Module[{lowered, ref = {4.0, 8.0, 12.0, 16.0}},
+      TInit[];
+      x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
+      w = TTensorCreate @ NumericArray[{0.1, 0.2, 0.3, 0.4}, "Real32"];
+      t = TTensorCreate @ NumericArray[{1.0}, "Real32"];
+      lowered = Normal @ TTensorData @ TRealize @ TGrad[TMSELoss[TDot[w, x], t], w];
+      Max[Abs[ref - lowered]] < 1.0*^-5
     ],
     True,
     TestID -> "lowering/backward-grad-output-eq"
