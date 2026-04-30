@@ -74,6 +74,8 @@ TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` can
 
 TKernelAutotune::usage = "TKernelAutotune[kid] benchmarks every TKernelProposed candidate against the no-opt baseline (5 dispatches each, min wallclock), applies the winning TOpt to the kernel's C-side KernelAxes, and returns the resulting TKernelOpts.  Because axes live on the shared KpCacheSlot (per-program-shape sharing), the winner auto-applies to every other kid with the same KProgOp[] -- a training loop that emits one new kid per step inherits the autotuned variant from iter 2 onward.  Returns the unchanged TKernelOpts (no opts applied) if no candidate beat baseline.";
 
+TKernelAutotuneAll::usage = "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel (kid 1..TKernelCount[]-1) and returns an Association mapping kid -> TKernelOpts after tuning.  Useful as a one-shot pre-warm before a training loop: every program shape gets a winner cached in its KpCacheSlot, so subsequent dispatches use the optimised variant from iter 1.  Alternative to setting THVM_AUTOTUNE=1 (which auto-tunes on first dispatch).";
+
 (* === C-side kernel side-table accessors ===
    Live here (rather than MemoryPlan.wl) because they're the core
    kernel-introspection bridge -- every consumer that walks
@@ -483,6 +485,9 @@ TKernelProposed[kid_Integer] := (ensureInit[];
 TKernelAutotune[kid_Integer] := (ensureInit[];
     $kernelAutotuneFn[kid];
     TKernelOpts[kid])
+
+TKernelAutotuneAll[] := (ensureInit[];
+    Association[ Table[k -> TKernelAutotune[k], {k, 1, TKernelCount[] - 1}] ])
 
 
 (* All currently-live kernels' profiles, indexed by kid. *)

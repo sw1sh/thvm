@@ -299,6 +299,24 @@ VerificationTest[
     TestID -> "kernel-opts/propose-reduce-no-upcast"
 ]
 
+(* === TKernelAutotuneAll[] sweeps every live kid, returns
+       Association kid -> TKernelOpts.  Useful as a one-shot
+       pre-warm before a training loop. *)
+
+VerificationTest[
+    TInit[];
+    aT = TTensorCreate @ N @ Range[16];
+    bT = TTensorCreate @ N @ Range[32];
+    TRealize @ TUOpReduce[bT, 0, "SUM"];
+    TRealize @ TUOpMul[aT, aT];
+    res = TKernelAutotuneAll[];
+    {AssociationQ[res],
+     Length[res],
+     AllTrue[Values[res], MatchQ[_TKernelOpts]]},
+    {True, TKernelCount[] - 1, True},
+    TestID -> "kernel-opts/autotune-all-sweeps-every-kid"
+]
+
 (* === fire-time autotune trigger: env opt-in via THVM_AUTOTUNE.
        Default off so existing users don't pay surprise bench costs;
        on, every new program shape gets autotuned at first fire. *)
