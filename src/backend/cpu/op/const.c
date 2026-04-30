@@ -33,7 +33,9 @@ fn void cpu_op_const(void *out, void **srcs, u32 const *src_numels,
     case DT_UINT64: ((u64 *)out)[0] = (u64)p->arg;                            break;
     case DT_FP16:
     case DT_BF16:
-    case DT_FP64: {
+    case DT_FP64:
+    case DT_FP8E4M3:
+    case DT_FP8E5M2: {
       // Interpret the u32 arg as f32 bits, then convert to the
       // narrow / wide float.  Phase C: 64-bit constants exact only
       // up to f32 precision; the WL bridge clamps user-passed

@@ -321,6 +321,8 @@ $tensorFromNATypedFn := $tensorFromNATypedFn = load["thvm_wl_tensor_from_na_type
    / TBf16ToReal / TRealToBf16 surface. *)
 $fp16PackFn   := $fp16PackFn   = load["thvm_wl_fp16_pack",   {{Real, 1}, Integer}, "NumericArray"];
 $fp16UnpackFn := $fp16UnpackFn = load["thvm_wl_fp16_unpack", {{"NumericArray", "Constant"}, Integer}, {Real, 1}];
+$fp8PackFn    := $fp8PackFn    = load["thvm_wl_fp8_pack",    {{Real, 1}, Integer}, "NumericArray"];
+$fp8UnpackFn  := $fp8UnpackFn  = load["thvm_wl_fp8_unpack",  {{"NumericArray", "Constant"}, Integer}, {Real, 1}];
 
 (* ATP loaders, encoder, and TATP[] surface live in Kernel/ATP.wl. *)
 

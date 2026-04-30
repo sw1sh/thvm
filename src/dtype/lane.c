@@ -23,6 +23,10 @@ void to_fp32_lane(f32 *dst, void const *src, u32 dt, u32 n) {
                       for (u32 i = 0; i < n; i++) dst[i] = fp16_to_f32(s[i]); break; }
     case DT_BF16:   { u16 const *s = (u16 const *)src;
                       for (u32 i = 0; i < n; i++) dst[i] = bf16_to_f32(s[i]); break; }
+    case DT_FP8E4M3:{ u8  const *s = (u8  const *)src;
+                      for (u32 i = 0; i < n; i++) dst[i] = fp8e4m3_to_f32(s[i]); break; }
+    case DT_FP8E5M2:{ u8  const *s = (u8  const *)src;
+                      for (u32 i = 0; i < n; i++) dst[i] = fp8e5m2_to_f32(s[i]); break; }
     case DT_BOOL:   { u8  const *s = (u8  const *)src;
                       for (u32 i = 0; i < n; i++) dst[i] = (s[i] & 1) ? 1.0f : 0.0f; break; }
     case DT_INT8:   { i8  const *s = (i8  const *)src;
@@ -56,6 +60,10 @@ void from_fp32_lane(void *dst, u32 dt, f32 const *src, u32 n) {
                       for (u32 i = 0; i < n; i++) d[i] = f32_to_fp16(src[i]); break; }
     case DT_BF16:   { u16 *d = (u16 *)dst;
                       for (u32 i = 0; i < n; i++) d[i] = f32_to_bf16(src[i]); break; }
+    case DT_FP8E4M3:{ u8  *d = (u8  *)dst;
+                      for (u32 i = 0; i < n; i++) d[i] = f32_to_fp8e4m3(src[i]); break; }
+    case DT_FP8E5M2:{ u8  *d = (u8  *)dst;
+                      for (u32 i = 0; i < n; i++) d[i] = f32_to_fp8e5m2(src[i]); break; }
     case DT_BOOL:   { u8  *d = (u8  *)dst;
                       for (u32 i = 0; i < n; i++) d[i] = (src[i] != 0.0f) ? 1u : 0u; break; }
     case DT_INT8:   { i8  *d = (i8  *)dst;

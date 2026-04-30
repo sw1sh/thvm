@@ -34,6 +34,11 @@ TRealToBf16::usage = "TRealToBf16[reals] packs a list of Reals into a NumericArr
 TFP16ToReal::usage = "TFP16ToReal[na] unpacks a UnsignedInteger16 NumericArray of raw fp16 bytes into a Real list.";
 TBf16ToReal::usage = "TBf16ToReal[na] unpacks a UnsignedInteger16 NumericArray of raw bfloat16 bytes into a Real list.";
 
+TRealToFP8E4M3::usage = "TRealToFP8E4M3[reals] packs a list of Reals into a NumericArray of UnsignedInteger8 raw fp8e4m3 bytes.  Pair with TFP8E4M3ToReal to round-trip.";
+TRealToFP8E5M2::usage = "TRealToFP8E5M2[reals] packs a list of Reals into a NumericArray of UnsignedInteger8 raw fp8e5m2 bytes.";
+TFP8E4M3ToReal::usage = "TFP8E4M3ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e4m3 bytes into a Real list.";
+TFP8E5M2ToReal::usage = "TFP8E5M2ToReal[na] unpacks a UnsignedInteger8 NumericArray of raw fp8e5m2 bytes into a Real list.";
+
 (* Forward-decl: these are defined in NN.wl (loads alphabetically
    after Tensor.wl).  Without this, the UpValues below resolve to
    phantoms in `THVMLink`Private`* with no DownValue. *)
@@ -367,10 +372,14 @@ naTypeFor[_]      := "Real32"
 (* f16 / bf16 round-trip helpers.  Use TRealToFP16 / TRealToBf16 to
    pack a Real list into a NumericArray of raw narrow-float bytes;
    the inverse TFP16ToReal / TBf16ToReal unpacks back to Reals. *)
-TRealToFP16[xs_List]            := (ensureInit[]; $fp16PackFn  [N @ xs, $DTFp16])
-TRealToBf16[xs_List]            := (ensureInit[]; $fp16PackFn  [N @ xs, $DTBf16])
-TFP16ToReal[na_NumericArray]    := (ensureInit[]; $fp16UnpackFn[na,    $DTFp16])
-TBf16ToReal[na_NumericArray]    := (ensureInit[]; $fp16UnpackFn[na,    $DTBf16])
+TRealToFP16[xs_List]              := (ensureInit[]; $fp16PackFn  [N @ xs, $DTFp16])
+TRealToBf16[xs_List]              := (ensureInit[]; $fp16PackFn  [N @ xs, $DTBf16])
+TFP16ToReal[na_NumericArray]      := (ensureInit[]; $fp16UnpackFn[na,    $DTFp16])
+TBf16ToReal[na_NumericArray]      := (ensureInit[]; $fp16UnpackFn[na,    $DTBf16])
+TRealToFP8E4M3[xs_List]           := (ensureInit[]; $fp8PackFn  [N @ xs, $DTFp8E4M3])
+TRealToFP8E5M2[xs_List]           := (ensureInit[]; $fp8PackFn  [N @ xs, $DTFp8E5M2])
+TFP8E4M3ToReal[na_NumericArray]   := (ensureInit[]; $fp8UnpackFn[na,    $DTFp8E4M3])
+TFP8E5M2ToReal[na_NumericArray]   := (ensureInit[]; $fp8UnpackFn[na,    $DTFp8E5M2])
 
 TTensorCreate[data_]                       := (
     ensureInit[];
@@ -399,6 +408,15 @@ TTensorCreate[data_, dtype_String]         := (
                 na = If[ shape === {},
                     flatNa,
                     NumericArray[ArrayReshape[Normal[flatNa], shape], "UnsignedInteger16"]],
+            dtype === "fp8e4m3" || dtype === "fp8e5m2",
+                normalized = If[ MatchQ[data, _NumericArray], Normal[data], data];
+                shape = Dimensions[normalized];
+                flatNa = If[ dtype === "fp8e4m3",
+                    TRealToFP8E4M3[N @ Flatten[normalized]],
+                    TRealToFP8E5M2[N @ Flatten[normalized]]];
+                na = If[ shape === {},
+                    flatNa,
+                    NumericArray[ArrayReshape[Normal[flatNa], shape], "UnsignedInteger8"]],
             (* Default int / float path: coerce through the NA carrier. *)
             True,
                 normalized = If[ MatchQ[data, _NumericArray], Normal[data], data];

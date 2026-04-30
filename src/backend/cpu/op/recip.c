@@ -19,7 +19,8 @@ fn void cpu_op_recip(void *out, void **srcs, u32 const *src_numels,
     for (u32 i = 0; i < out_numel; i++) o[i] = 1.0 / a[bs ? 0 : i];
     return;
   }
-  if (p->dtype == DT_FP16 || p->dtype == DT_BF16) {
+  if (p->dtype == DT_FP16 || p->dtype == DT_BF16
+      || p->dtype == DT_FP8E4M3 || p->dtype == DT_FP8E5M2) {
     cpu_op_run_via_f32(cpu_op_recip, out, srcs, src_numels, p, out_numel);
     return;
   }

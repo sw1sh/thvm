@@ -18,6 +18,8 @@ fn void cpu_op_sqrt(void *out, void **srcs, u32 const *src_numels,
     }
     case DT_FP16:
     case DT_BF16:
+    case DT_FP8E4M3:
+    case DT_FP8E5M2:
       cpu_op_run_via_f32(cpu_op_sqrt, out, srcs, src_numels, p, out_numel);
       break;
     default:

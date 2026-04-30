@@ -468,7 +468,9 @@ static u32 const_to_tendesc(u64 const_loc) {
     case DT_UINT64: buf64 = (u64)bits;                          src = &buf64; nbytes = 8; break;
     case DT_FP16:
     case DT_BF16:
-    case DT_FP64: {
+    case DT_FP64:
+    case DT_FP8E4M3:
+    case DT_FP8E5M2: {
       // Promote f32 bits -> target float (lossy for 64-bit beyond
       // f32 precision; precise enough for the common 0.0 / 1.0 /
       // log(2) literals the grad chain rule emits).
