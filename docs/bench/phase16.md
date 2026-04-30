@@ -68,20 +68,50 @@ End-to-end LeNet/Adam train.wls A/B (baseline vs autotune-all)
 remains blocked by two issues that surfaced during the leak
 investigation:
 
-1. **Multi-grad chain-rule walks shared sub-DAGs without memo.**
-   With the leak fix landed (commit b5b9766), single grads on
-   LeNet realize cleanly (~109K cells each).  Sequential grads
-   in one specific order (b4 -> w4 -> ... -> w1) all complete in
-   ~3.5s total.  But ANY OTHER order (e.g. starting with w1)
-   hangs partway through, around grad #5-#6.  The HotCounters
-   profile shows GradFires = 54025 for just 5 grads on a
-   ~65-node forward DAG -- 10K interact_grad calls per target,
-   exponential in the chain rule's shared-sub-DAG count.  This
-   is exactly Phase 14's "per-grad memo" deferral: cache
-   `interact_grad(uop, gy)` results keyed on (uop_loc, gy_loc)
-   so when 8 weights all read through the same forward DAG, the
-   chain-rule rewrites collapse.  Fixing this unblocks LeNet
-   train end-to-end (forward + 8 grads + Adam per step).
+1. **Multi-grad chain-rule walks shared sub-DAGs without
+   structural memo.**  With the leak fix (b5b9766) single grads
+   complete cleanly (~109K cells each).  HotCounters: GradFires
+   = 54025 / 5 grads = 10K interact_grad calls per target on a
+   ~65-node forward DAG -- exponential in the chain rule's
+   shared-sub-DAG count.  Commit 1b6999c added a per-realize
+   memo on (child, gy, target) for `grad_bwd_for_child`, but it
+   only hits when the parent op gives every child the SAME gy
+   (ADD-style: gy_for_a == gy_for_b == gy).  MUL/MatVec stacks
+   transform gy per child (`gy_for_a = MUL(b_fwd, gy)`) so each
+   visit has a fresh gy Term and the memo key never matches --
+   no help for LeNet's matmul-heavy chain rule.
+
+   The proper fix factors the chain rule into a gy-INDEPENDENT
+   structural pass + gy threading.  One sketch: cache
+   `interact_grad(uop, target)` -> structural template with a
+   TAG_VAR placeholder for gy; each fire substitutes its actual
+   gy via SUB-bit (re-uses the existing VAR/SUB substitution
+   infrastructure).  Per-call cost drops from O(walk shared
+   sub-DAG once per parent) to O(walk once total), unblocking
+   the LeNet/Adam train end-to-end.  Bigger refactor -- next
+   real milestone.
+
+   Experimented with a SUP-projector approach as an alternative:
+   walk the chain rule ONCE with target=0 (emits SUP^{tid}(0,
+   gy_for_leaf) at each TEN leaf), then per target traverse the
+   result graph and pick the gy or zero arm at each SUP, side-
+   stepping the IC's DUP-SUP commute (which was the original
+   leak source).  Built `uop_project_grad` C-side projector +
+   WL TGradMany rewrite + CTR-bundled batch realize.  The chain
+   rule walk completes (158K cells for LeNet's 8-weight forward)
+   and a single projection's TRealize succeeds (~1s for a small
+   target like w1), but realizing TWO projections back-to-back
+   segfaults during the second.  Root cause: TRealize's per-
+   call `cpu_buf_pool_rollback_with_preserve` frees forward-
+   intermediate buffers reachable only from OTHER projections
+   in the batch -- the next target's realize then reads freed
+   memory.  Fixing this needs either a batch-aware buffer-pool
+   boundary (preserve every projection in the batch, not just
+   the current call's result chain) or a single all-targets
+   wnf pass that fires every kernel inside one boundary.
+   Reverted; the structural-template fix above is the better
+   long-term direction (no shared-buffer hazard) and folds in
+   here when it lands.
 2. **WL bench harnesses for the smaller training examples
    (linear-train, mlp-mnist) need the per-iter timing to land
    inside the recursive `TPriForce` callback** (the `TWnf` of
