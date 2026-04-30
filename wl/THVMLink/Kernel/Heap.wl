@@ -85,11 +85,11 @@ op2ToCode[i_Integer] := i
 uopToCode[s_String] := Lookup[$uopCode, s, $Failed]
 uopToCode[i_Integer] := i
 
-(* dtypeCode handles both "f32"/"i32" and 0/1 already (Tensor.wl). *)
+(* dtypeCode/dtypeName cover the full enum (THVMLink.wl).
+   dtypeNameSafe lets a string fall through unchanged. *)
 
-dtypeNameSafe[0]  := "f32"
-dtypeNameSafe[1]  := "i32"
-dtypeNameSafe[d_] := d
+dtypeNameSafe[d_Integer] := dtypeName[d]
+dtypeNameSafe[d_]        := d
 
 numericArrayDType[na_NumericArray] := Switch[ NumericArrayType[na],
     "Real32",    "f32",
@@ -426,13 +426,13 @@ HeapInitialize[Heap[a_Association], opts:OptionsPattern[]] := Module[{
 ]
 
 (* Allocate + (optionally) write a single tensor entry; return the
-   runtime tensor id. *)
+   runtime tensor id (TenDesc slot, not the packed TAG_TEN term). *)
 initTensorEntry[na_NumericArray, _] := Module[{
     shape, dtype, rid
 },
     shape = Dimensions[na];
     dtype = numericArrayDType[na];
-    rid   = $tensorAllocFn[dtypeCode[dtype], shape];
+    rid   = TTermVal @ $tensorAllocFn[dtypeCode[dtype], shape];
     If[ dtype === "f32",
         $tensorWriteFn [rid, N    @ Flatten @ Normal @ na],
         $tensorWriteIFn[rid, Round @ Flatten @ Normal @ na]
@@ -447,7 +447,7 @@ initTensorEntry[a_Association, zeroFill_] := Module[{
         Message[HeapInitialize::uninit];
         Throw[$Failed, "HeapInitialize::uninit"]
     ];
-    rid   = $tensorAllocFn[dtypeCode[dtype], shape];
+    rid   = TTermVal @ $tensorAllocFn[dtypeCode[dtype], shape];
     count = Times @@ shape;
     If[ dtype === "f32",
         $tensorWriteFn [rid, ConstantArray[0., count]],

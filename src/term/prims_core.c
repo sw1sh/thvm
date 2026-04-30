@@ -24,12 +24,20 @@
 //   value transformation (return modified Term), etc.
 
 // Weak default: C-only builds (unit tests, bench harnesses) link this
-// no-op stub.  The WL bridge in CSource/thvmlink.c provides a non-weak
+// no-op stub.  The WL bridge in CSource/thvmlink.c provides a strong
 // override that takes precedence when the paclet dylib is linked.
+//
+// THVM_HAS_WL_BRIDGE is defined by the WL bridge source before
+// pulling in thvm.c; when set, the bridge supplies its own definition
+// directly and we must skip this default to avoid a redefinition.
+#ifndef THVM_HAS_WL_BRIDGE
 __attribute__((weak)) Term thvm_pri_wl_invoke_returning(u32 slot, Term value) {
   (void)slot; (void)value;
   return 0;
 }
+#else
+extern Term thvm_pri_wl_invoke_returning(u32 slot, Term value);
+#endif
 
 static Term prim_pri(Term *args) {
   Term slot_num = wnf(args[0]);

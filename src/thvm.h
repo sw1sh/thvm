@@ -165,9 +165,76 @@ typedef u64 Term;
 #define OP_LT   4   // less-than: NUM(1) if x<y else NUM(0)
 
 // === Dtypes ===
-#define DT_F32   0
-#define DT_I32   1
-#define DT_COUNT 2
+//
+// Mirrors tinygrad's full dtype set (TinyHVM/tinygrad/tinygrad/dtype.py:
+// 130-146) plus packed int4/uint4 for modern quantization.  Enum
+// values are stable; new dtypes append at the bottom.  Phase A
+// reserves every slot but only wires DT_FP32 and DT_INT32; subsequent
+// phases activate the remaining rows.  See src/dtype/info.c for the
+// metadata table (itemsize / kind / signed-ness / canonical name).
+//
+// IDs intentionally fit a 6-bit ext field; static-asserted in
+// src/dtype/info.c.
+#define DT_BOOL      0
+#define DT_INT8      1
+#define DT_UINT8     2
+#define DT_INT16     3
+#define DT_UINT16    4
+#define DT_INT32     5
+#define DT_UINT32    6
+#define DT_INT64     7
+#define DT_UINT64    8
+#define DT_FP8E4M3   9
+#define DT_FP8E5M2  10
+#define DT_FP16     11
+#define DT_BF16     12
+#define DT_FP32     13
+#define DT_FP64     14
+#define DT_INT4     15   // packed nibble (signed)
+#define DT_UINT4    16   // packed nibble (unsigned)
+#define DT_COUNT    17
+
+// Compatibility aliases for code that predates the wider enum.  Both
+// names continue to compile so existing uop_const(DT_F32, ...) calls
+// keep working unchanged.
+#define DT_F32   DT_FP32
+#define DT_I32   DT_INT32
+
+// Family kinds carried in DTypeInfo.kind.  Used by predicates
+// (dtype_is_int / dtype_is_float / ...) and by future kernel dispatch.
+typedef enum {
+    DK_RESERVED = 0,
+    DK_BOOL,
+    DK_SINT,    // signed int8/16/32/64
+    DK_UINT,    // unsigned int8/16/32/64
+    DK_FLOAT,   // f32 / f64 (native ALU)
+    DK_FP16,    // ieee754 half (promote-to-fp32 ALU)
+    DK_BF16,    // bfloat16    (promote-to-fp32 ALU)
+    DK_FP8,     // fp8e4m3 / fp8e5m2 (promote-to-fp32 ALU)
+    DK_INT4,    // signed nibble  (eager unpack-to-int8)
+    DK_UINT4    // unsigned nibble
+} DTypeKind;
+
+typedef struct {
+    u8          itemsize;       // bytes per element; 0 for packed/reserved
+    u8          kind;           // DK_*
+    u8          bits;           // bits per element (4 for nibble)
+    u8          is_signed;      // 1 for signed integer/float, 0 otherwise
+    char const *name;           // canonical short name ("f32", "i8", ...)
+} DTypeInfo;
+
+// Per-dtype metadata accessor.  Returns NULL on out-of-range; the
+// table itself lives in src/dtype/info.c.
+DTypeInfo const *dtype_info(u32 dt);
+u32             dtype_itemsize    (u32 dt);
+u64             dtype_storage_bytes(u32 dt, u64 numel);
+char const     *dtype_name        (u32 dt);
+u8              dtype_kind        (u32 dt);
+int             dtype_is_float    (u32 dt);
+int             dtype_is_int      (u32 dt);
+int             dtype_is_signed   (u32 dt);
+int             dtype_is_bool     (u32 dt);
+int             dtype_is_packed   (u32 dt);
 
 // === UOp opcodes (TAG_UOP ext field) ===
 // See docs/tensors.md for per-opcode heap layouts.

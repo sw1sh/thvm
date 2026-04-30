@@ -17,7 +17,6 @@ fn u32 tensor_alloc(Backend *b, Shape shape, u32 dtype) {
   d->refcount = 1;
   d->view     = view_create(shape);
   d->backend  = b;
-  u64 elem_size = (dtype == DT_F32 || dtype == DT_I32) ? 4 : 4;
-  d->buf_id   = b->buf_alloc((u64)d->view.numel * elem_size);
+  d->buf_id   = b->buf_alloc(dtype_storage_bytes(dtype, (u64)d->view.numel));
   return id;
 }

@@ -8,6 +8,11 @@
 
 #include "WolframLibrary.h"
 #include "WolframNumericArrayLibrary.h"
+
+// Tell prims_core.c not to emit the weak no-op default for
+// thvm_pri_wl_invoke_returning -- we provide the strong definition
+// further down in this TU.
+#define THVM_HAS_WL_BRIDGE 1
 #include "../../../src/thvm.c"
 
 // Cached libData so callbacks (e.g. NumericArray disown) can reach
@@ -537,7 +542,7 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_read(WolframLibraryData libData, mint argc
   MNumericArray out;
   libData->numericarrayLibraryFunctions->MNumericArray_new(t, rank, dims, &out);
   void *dst = libData->numericarrayLibraryFunctions->MNumericArray_getData(out);
-  u64   nbytes = (u64)d->view.numel * 4;   // both DT_F32 and DT_I32 are 4B
+  u64   nbytes = dtype_storage_bytes(d->dtype, d->view.numel);
   d->backend->buf_read(d->buf_id, dst, nbytes);
 
   MArgument_setMNumericArray(res, out);
@@ -585,18 +590,19 @@ EXTERN_C DLLEXPORT int thvm_wl_tensor_from_na(WolframLibraryData libData, mint a
   d->refcount = 1;
   d->view     = view_create(shape);
   d->backend  = CURRENT_BACKEND;
+  u64 nbytes = dtype_storage_bytes(dtype, (u64)numel);
   if (CURRENT_BACKEND == &CPU_BACKEND) {
     // CPU fast path: zero-copy reference into the NumericArray's
     // bytes; release_numeric_array drops the WL handle when the
     // underlying buffer hits refcount 0.
     d->buf_id = cpu_buf_alloc_external(
-        naData, (u64)numel * 4, release_numeric_array, (void *)na);
+        naData, nbytes, release_numeric_array, (void *)na);
   } else {
     // Other backends (Metal): allocate + memcpy.  The
     // NumericArray reference is released right after the copy --
     // the data lives in backend-owned storage.
-    d->buf_id = CURRENT_BACKEND->buf_alloc((u64)numel * 4);
-    CURRENT_BACKEND->buf_write(d->buf_id, naData, (u64)numel * 4);
+    d->buf_id = CURRENT_BACKEND->buf_alloc(nbytes);
+    CURRENT_BACKEND->buf_write(d->buf_id, naData, nbytes);
     libData->numericarrayLibraryFunctions->MNumericArray_disown(na);
   }
 
@@ -1516,14 +1522,11 @@ static Term pri_snapshot_value(Term v) {
   if (src_tid == 0 || src_tid >= TENS_NEXT) return v;
   TenDesc *sd = &TENS[src_tid];
   if (sd->backend == NULL) return v;
-  u32 elem_bytes;
-  switch (sd->dtype) {
-    case DT_F32: case DT_I32: elem_bytes = 4; break;
-    default: return v;
-  }
+  // Phase A: gate on the dtypes whose buf_read/buf_write paths exist.
+  if (sd->dtype != DT_F32 && sd->dtype != DT_I32) return v;
   u32 dst_tid = tensor_alloc(sd->backend, sd->view.shape, sd->dtype);
   if (dst_tid == 0) return v;
-  u64 nbytes = (u64)sd->view.numel * (u64)elem_bytes;
+  u64 nbytes = dtype_storage_bytes(sd->dtype, sd->view.numel);
   void *tmp = malloc((size_t)nbytes);
   if (!tmp) { tensor_release(dst_tid); return v; }
   sd->backend->buf_read (sd->buf_id, tmp, nbytes);

@@ -499,7 +499,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     if (needs_premat) {
       View const *v = &TENS[tid].view;
       u32 numel = v->numel;
-      u32 tmp_id = metal_buf_alloc((u64)numel * 4);
+      u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(TENS[tid].dtype, numel));
       if (tmp_id == 0) {
         for (u32 k = 0; k < i; k++)
           if (temp_buf_ids[k]) metal_buf_decref(temp_buf_ids[k]);
@@ -592,13 +592,13 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     if (!src_resolve_ok) { rc = -1; break; }
 
     // Decide where this op writes: last op -> outBuf; else allocate
-    // a fresh intermediate Metal buffer at p->numel * 4 bytes.
+    // a fresh intermediate Metal buffer sized for this op's dtype.
     id<MTLBuffer> dst_buf;
     if (step + 1 == ke->n_ops) {
       dst_buf = outBuf;
     } else {
       u32 dst_numel = p->numel ? p->numel : 1;
-      u32 tmp_id = metal_buf_alloc((u64)dst_numel * 4);
+      u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(p->dtype, dst_numel));
       if (tmp_id == 0) { rc = -1; break; }
       inter_buf_ids[step] = tmp_id;
       dst_buf = METAL_BUFS[tmp_id].buf;

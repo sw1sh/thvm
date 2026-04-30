@@ -527,10 +527,11 @@ static Term materialize_root_alias(Term t) {
     if (d->view.shape.dims[i] > 1 && d->view.strides[i] > 0)
       max_idx += (i32)(d->view.shape.dims[i] - 1) * d->view.strides[i];
   }
-  size_t src_bytes = (size_t)(max_idx + 1) * 4;
+  size_t src_bytes = (size_t)dtype_storage_bytes(d->dtype, (u64)(max_idx + 1));
   void  *raw       = malloc(src_bytes);
   d->backend->buf_read(d->buf_id, raw, src_bytes);
-  void *dst_host = malloc((size_t)d->view.numel * 4);
+  size_t dst_bytes = (size_t)dtype_storage_bytes(d->dtype, d->view.numel);
+  void *dst_host = malloc(dst_bytes);
   if (d->dtype == DT_F32) {
     f32 *o = (f32 *)dst_host; f32 *s = (f32 *)raw;
     for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
@@ -538,7 +539,7 @@ static Term materialize_root_alias(Term t) {
     i32 *o = (i32 *)dst_host; i32 *s = (i32 *)raw;
     for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
   }
-  d->backend->buf_write(TENS[dst_tid].buf_id, dst_host, (size_t)d->view.numel * 4);
+  d->backend->buf_write(TENS[dst_tid].buf_id, dst_host, dst_bytes);
   free(raw);
   free(dst_host);
   return term_new(0, TAG_TEN, d->dtype, dst_tid);

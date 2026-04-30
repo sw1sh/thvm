@@ -18,7 +18,7 @@ fn void cpu_op_flip(void *out, void **srcs, u32 const *src_numels,
   // Fall back to memcpy if no axes are flipped or if shape info is
   // missing -- both are correct (FLIP with zero mask is a no-op).
   if (axes_mask == 0u || ndim == 0) {
-    u32 esz = (p->dtype == DT_F32) ? sizeof(f32) : sizeof(i32);
+    u32 esz = dtype_itemsize(p->dtype);
     memcpy(out, src, (size_t)out_numel * esz);
     return;
   }

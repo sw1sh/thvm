@@ -15,7 +15,7 @@ fn void cpu_op_permute(void *out, void **srcs, u32 const *src_numels,
   (void)src_numels;
   void *src   = srcs[0];
   u8    ndim  = p->src0_ndim;
-  u32   esz   = (p->dtype == DT_F32) ? sizeof(f32) : sizeof(i32);
+  u32   esz   = dtype_itemsize(p->dtype);
 
   if (ndim == 0) {
     memcpy(out, src, (size_t)out_numel * esz);

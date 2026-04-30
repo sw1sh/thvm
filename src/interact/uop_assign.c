@@ -40,12 +40,11 @@ fn Term interact_assign_with(Term dst, Term src) {
   u32 numel = dd->view.numel;
   if (sd->view.numel != numel) return dst;
 
-  u32 elem_bytes;
-  switch (dd->dtype) {
-    case DT_F32: case DT_I32: elem_bytes = 4; break;
-    default: return dst;
-  }
-  u64 nbytes = (u64)numel * (u64)elem_bytes;
+  // Phase A: gate on the dtypes whose buf_read/buf_write paths exist;
+  // dtype_storage_bytes aborts on unwired dtypes, so the gate keeps
+  // us safe until later phases enable them.
+  if (dd->dtype != DT_F32 && dd->dtype != DT_I32) return dst;
+  u64 nbytes = dtype_storage_bytes(dd->dtype, numel);
 
   // JIT capture: record the (dst, src) tid pair so a TJit closure
   // can replay the assign as part of its captured sequence.  This

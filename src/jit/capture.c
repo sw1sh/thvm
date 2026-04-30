@@ -188,9 +188,11 @@ fn u32 jit_replay(u32 slot) {
         if (dd->backend == NULL || dd->backend != sd->backend) continue;
         u32 numel = dd->view.numel;
         if (sd->view.numel != numel) continue;
-        u32 elem_bytes = (dd->dtype == DT_F32 || dd->dtype == DT_I32) ? 4 : 0;
-        if (elem_bytes == 0) continue;
-        u64 nbytes = (u64)numel * (u64)elem_bytes;
+        // Phase A: dtype_storage_bytes aborts on unwired dtypes; gate
+        // on the kinds we actually fire ASSIGN for (everything wired
+        // through Phase B onward goes here too once enabled).
+        if (dd->dtype != DT_F32 && dd->dtype != DT_I32) continue;
+        u64 nbytes = dtype_storage_bytes(dd->dtype, numel);
         void *tmp = malloc((size_t)nbytes);
         if (tmp == NULL) continue;
         dd->backend->buf_read (sd->buf_id, tmp, nbytes);

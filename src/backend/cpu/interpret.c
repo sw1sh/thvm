@@ -31,7 +31,7 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     if (tid != 0 && tid < TENS_NEXT && !TENS[tid].view.contiguous) {
       View const *v = &TENS[tid].view;
       void *src = CPU_BUFS[in_buf_ids[i]].data;
-      void *tmp = malloc((size_t)v->numel * 4);
+      void *tmp = malloc((size_t)dtype_storage_bytes(TENS[tid].dtype, v->numel));
       if (TENS[tid].dtype == DT_F32) {
         f32 *d = (f32 *)tmp; f32 *s = (f32 *)src;
         for (u32 k = 0; k < v->numel; k++) d[k] = s[view_strided_index(v, k)];
@@ -67,7 +67,7 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   for (u32 step = 0; step < ke->n_ops; step++) {
     KProgOp *p = &ke->program[step];
     u32 n_elem = p->numel ? p->numel : 1;
-    u64 nbytes = (u64)n_elem * 4;     // DT_F32 + DT_I32 are 4B
+    u64 nbytes = dtype_storage_bytes(p->dtype, n_elem);
 
     // Assemble source pointers + numels for this op.
     void *srcs      [MAX_UOP_SRC] = {0};

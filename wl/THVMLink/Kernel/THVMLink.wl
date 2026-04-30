@@ -179,12 +179,43 @@ $tagNames = <|
 
 $op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<" |>;
 
-(* Dtype constants - keep in sync with src/thvm.h *)
-$DTF32 = 0; $DTI32 = 1;
+(* Dtype constants - keep in sync with src/thvm.h.  The enum mirrors
+   tinygrad's full dtype set; Phase A wires only f32/i32 through the
+   bridge, but the constants for every slot are reserved up front so
+   later phases land without churning every WL-facing name. *)
+$DTBool   =  0;  $DTInt8   =  1;  $DTUInt8   =  2;
+$DTInt16  =  3;  $DTUInt16 =  4;  $DTInt32   =  5;
+$DTUInt32 =  6;  $DTInt64  =  7;  $DTUInt64  =  8;
+$DTFp8E4M3=  9;  $DTFp8E5M2= 10;  $DTFp16    = 11;
+$DTBf16   = 12;  $DTFp32   = 13;  $DTFp64    = 14;
+$DTInt4   = 15;  $DTUInt4  = 16;
 
-dtypeCode["f32"] = $DTF32;  dtypeCode["i32"] = $DTI32;
-dtypeCode[$DTF32] = $DTF32; dtypeCode[$DTI32] = $DTI32;
-dtypeName[$DTF32] = "f32";  dtypeName[$DTI32] = "i32";
+(* Compatibility aliases.  Existing WL code reads $DTF32 / $DTI32. *)
+$DTF32 = $DTFp32;
+$DTI32 = $DTInt32;
+
+dtypeCode["bool"]    = $DTBool;
+dtypeCode["i8"]      = $DTInt8;     dtypeCode["u8"]   = $DTUInt8;
+dtypeCode["i16"]     = $DTInt16;    dtypeCode["u16"]  = $DTUInt16;
+dtypeCode["i32"]     = $DTInt32;    dtypeCode["u32"]  = $DTUInt32;
+dtypeCode["i64"]     = $DTInt64;    dtypeCode["u64"]  = $DTUInt64;
+dtypeCode["fp8e4m3"] = $DTFp8E4M3;  dtypeCode["fp8e5m2"] = $DTFp8E5M2;
+dtypeCode["f16"]     = $DTFp16;     dtypeCode["bf16"] = $DTBf16;
+dtypeCode["f32"]     = $DTFp32;     dtypeCode["f64"]  = $DTFp64;
+dtypeCode["i4"]      = $DTInt4;     dtypeCode["u4"]   = $DTUInt4;
+
+(* Numeric -> numeric identity (for code that already passes a code). *)
+Do[ With[ {c = i }, dtypeCode[c] = c ], { i, 0, 16 } ];
+
+dtypeName[$DTBool   ] = "bool";
+dtypeName[$DTInt8   ] = "i8";       dtypeName[$DTUInt8   ] = "u8";
+dtypeName[$DTInt16  ] = "i16";      dtypeName[$DTUInt16  ] = "u16";
+dtypeName[$DTInt32  ] = "i32";      dtypeName[$DTUInt32  ] = "u32";
+dtypeName[$DTInt64  ] = "i64";      dtypeName[$DTUInt64  ] = "u64";
+dtypeName[$DTFp8E4M3] = "fp8e4m3";  dtypeName[$DTFp8E5M2 ] = "fp8e5m2";
+dtypeName[$DTFp16   ] = "f16";      dtypeName[$DTBf16    ] = "bf16";
+dtypeName[$DTFp32   ] = "f32";      dtypeName[$DTFp64    ] = "f64";
+dtypeName[$DTInt4   ] = "i4";       dtypeName[$DTUInt4   ] = "u4";
 
 (* UOp opcode constants - keep in sync with src/thvm.h *)
 $UopMaterialize = 0;  $UopKernel = 1;  $UopConst = 2;
