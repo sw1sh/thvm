@@ -61,8 +61,19 @@ fn Term expand_to_target(Term src, Term target_term) {
   return uop_expand(src, s.ndim, s.dims);
 }
 
+// Scalar zero for a non-differentiable branch (CMPLT/CMPEQ,
+// CONST/LOAD/ASSIGN, unknown KERNEL).  Returns numel-1 CONST(0)
+// rather than EXPAND'd-to-y's-shape zero -- the chain rule's outer
+// ADD combiner relies on numel-1 broadcasting to combine sibling
+// branches whose gradients land at the TARGET's shape (typically
+// much smaller than y's shape).  Returning at y's shape forces the
+// outer ADD to broadcast the OTHER (target-shaped) branch up to y's
+// shape, producing a wrong-shaped gradient at the leaf.  Mirrors
+// the scalar-zero convention used at non-target TEN leaves
+// (grad_leaf_sup) and at the dispatch's TEN-leaf mismatch path.
 fn Term grad_zero_at(Term y) {
-  return expand_to_target(uop_const(DT_F32, 0), y);
+  (void)y;
+  return uop_const(DT_F32, 0);
 }
 
 // Allocate a 3-slot grad cell with cell[0] = child, cell[1] = 0

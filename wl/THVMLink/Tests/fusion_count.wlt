@@ -23,15 +23,19 @@ VerificationTest[
     TestID -> "fusion-count/linear-mse-forward-eq-2"
 ]
 
-(* Linear + MSE forward+backward: full pipeline emits 5 kernels.
-   2 forward (Dot, MSELoss) + 3 backward (target-aware chain rule
-   produces a sub-graph per chain-rule step).  Re-baselined from
-   3 -> 5 in Phase 16's leak fix: the old DUP-nest projection
-   collapsed several backward kernels via SUP/DUP cross-products,
-   but at the cost of exponential cells in deep DAGs (LeNet OOMed).
-   Target-aware leaves emit gy / scalar-zero directly -- bounded
-   cells, slightly more kernels.  TODO: investigate fusing the
-   sub-graph kernels back to 3 via a uop_rewrite pass. *)
+(* Linear + MSE forward+backward: full pipeline emits 3 kernels.
+   2 forward (Dot, MSELoss) + 1 backward.  Phase 16's leak fix
+   re-baselined this 3 -> 5 because the target-aware leaf rule
+   wrapped non-target / non-differentiable branches in
+   EXPAND-shaped scalar zeros that no longer numel-broadcast
+   cleanly with the target-shaped sibling, so the outer ADD
+   combiner had to materialize each side as its own kernel.
+   The fix in `grad_zero_at` (return scalar CONST(0) instead of
+   EXPAND'd zero) restores numel-1 broadcast through the ADD,
+   collapsing the backward sub-graph back to one kernel and
+   incidentally fixing the LeNet wrong-shape gradient bug
+   (Conv2D + ReLU + MaxPool2d producing a {2, H_out, W_out}
+   tensor instead of the {C_out, C_in, kh, kw} weight gradient). *)
 VerificationTest[
     TInit[];
     x = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0, 4.0}, "Real32"];
@@ -40,8 +44,8 @@ VerificationTest[
     before = TKernelCount[];
     TRealize @ TGrad[TMSELoss[TDot[w, x], t], w];
     kernelDelta[before, TKernelCount[]],
-    5,
-    TestID -> "fusion-count/linear-mse-forward-plus-backward-eq-5"
+    3,
+    TestID -> "fusion-count/linear-mse-forward-plus-backward-eq-3"
 ]
 
 (* Softmax forward.  Naive softmax = exp(x) / sum(exp(x)) -- the
