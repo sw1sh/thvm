@@ -222,8 +222,8 @@ typedef u64 Term;
 // === Capacities ===
 #define HEAP_CAP     (1ULL << 26)   // 64M cells * 8B = 512 MiB.  Cheney splits in half (256 MiB per semi-space).  Larger than needed for unit tests but matches a real LeNet TGradMany realize peak (~12M cells / 96 MiB observed).
 #define WNF_CAP      (1ULL << 16)   // 64K stack slots.
-#define TENS_CAP     (1ULL << 16)   // 64K tensor descriptor slots.
-#define KERNELS_CAP  (1ULL << 14)   // 16K compiled kernels.
+#define TENS_CAP     (1ULL << 20)   // 1M tensor descriptor slots.
+#define KERNELS_CAP  (1ULL << 18)   // 256K compiled kernels.
 #define BOOK_CAP     (1ULL << 18)   // 256K cells of static def template heap.
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
 #define ALO_STATE_CAP (1ULL << 16)  // ALO substitution-chain entries.
@@ -457,6 +457,12 @@ typedef struct KernelEntry {
                                    // by the refcount-driven free pass to
                                    // decide when this kernel's output buf
                                    // is no longer needed.
+  u32       fire_gen;              // last KERNEL_FIRE_GEN this kernel
+                                   // dispatched at.  kernel_fire_by_id skips
+                                   // when fire_gen == current gen so a
+                                   // kernel referenced by N consumers in one
+                                   // realize fires once instead of N times.
+                                   // Bumped per top-level interact_kernel.
   void     *compiled;              // backend-specific; NULL for interpreter
 
   // Axis-typed scheduling plan.  Phase 16 per-program-shape
@@ -501,7 +507,7 @@ typedef struct {
   void (*on_release)(void *handle);
 } CpuBuf;
 
-#define CPU_BUFS_CAP     (1ULL << 16)
+#define CPU_BUFS_CAP     (1ULL << 20)
 #define CPU_FREELIST_CAP 4096
 
 // === HotCounters ===

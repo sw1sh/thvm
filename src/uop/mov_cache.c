@@ -16,7 +16,7 @@
 // Cleared by uop_mov_cache_reset() in thvm_init -- a stale entry
 // pointing into a freed heap range would mis-resolve.
 
-#define UOP_MOV_CACHE_CAP (1u << 14)            // 16K slots
+#define UOP_MOV_CACHE_CAP (1u << 18)            // 256K slots
 typedef struct {
   u64  key;                                      // 0 = empty
   Term term;                                     // cached UOP term

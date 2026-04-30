@@ -11,9 +11,29 @@
 // Increments ITRS: one kernel firing is one interaction (matches
 // how HVM4 counts an OP2-NUM-NUM collapse).
 
+// Per-outer-realize firing memo.  Within a single interact_kernel
+// entry (one user-facing fire), the kernel DAG is a pure function of
+// inputs -- a kernel referenced by multiple consumers should fire
+// exactly once, not once per consumer.  Without this guard, w2's
+// chain rule on LeNet (where forward intermediates are shared across
+// dozens of partial-conv kernels) re-fires kernels exponentially:
+// 640 kernels x ~1700 visits each = >1M dispatches per realize.
+//
+// Bumped at each top-level interact_kernel entry so subsequent
+// user-facing realizes (which may include ASSIGN-driven mutation
+// of input buffers) start fresh.  Reset on overflow so we never
+// stale-skip after a u32 wrap.
+static u32 KERNEL_FIRE_GEN = 0;
+fn void kernel_fire_gen_bump(void) {
+  KERNEL_FIRE_GEN++;
+  if (KERNEL_FIRE_GEN == 0) KERNEL_FIRE_GEN = 1;   // skip 0 sentinel
+}
+
 fn void kernel_fire_by_id(u32 kid) {
   if (kid == 0 || kid >= KERNELS_NEXT) return;
   KernelEntry *ke = &KERNELS[kid];
+  if (ke->fire_gen == KERNEL_FIRE_GEN) return;     // already fired this pass
+  ke->fire_gen = KERNEL_FIRE_GEN;
   // Spliced kernels (sub-item f1a of the kernel-fusion arc) had
   // their program ops absorbed into a consumer; the consumer
   // produces this kernel's output buffer too, so dispatching here
@@ -103,6 +123,7 @@ fn Term interact_kernel(Term kernel) {
   Term outbuf = heap_read(loc + 0);
   Term kidnum = heap_read(loc + 1);
   u32  kid    = (u32)term_val(kidnum);
+  kernel_fire_gen_bump();   // start a fresh per-realize fire memo
   kernel_fire_by_id(kid);
   return outbuf;
 }
