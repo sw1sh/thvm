@@ -408,6 +408,18 @@ void thvm_init(void) {
 
 void thvm_free(void) {
   if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
+  // Wipe every file-static cache / side table that thvm_init seeds.
+  // These hold Terms / heap pointers; once the heap below is freed,
+  // a stale entry would dangle until the next thvm_init reseeds it.
+  // Same order as thvm_init for obvious symmetry.
+  uop_const_cache_reset();
+  uop_mov_cache_reset();
+  kernel_program_cache_reset();
+  lam_shape_reset();
+  extern_pin_clear();
+  extern_pin_handle_clear();
+  jit_capture_reset_all();
+  cg_profile_reset();
   free(HEAP);            HEAP            = NULL;
   free(WNF_STACK);       WNF_STACK       = NULL;
   free(WNF_LAST_STACK);  WNF_LAST_STACK  = NULL;
@@ -436,7 +448,6 @@ void thvm_free(void) {
   CPU_FREELIST_LEN = 0;
   memset(DEFS,             0, sizeof(((TContext *)0)->defs));
   memset(BOOK_REF_VISITED, 0, sizeof(((TContext *)0)->book_ref_visited));
-  extern_pin_clear();
   for (u32 i = 0; i < THVM_MAX_BACKENDS; i++) CURRENT_CTX->backends[i] = NULL;
   CURRENT_CTX->n_backends     = 0;
   CURRENT_CTX->default_device = 0;
@@ -484,6 +495,11 @@ void thvm_context_destroy(u32 slot) {
     TContext *prev = CURRENT_CTX;
     CURRENT_CTX = ctx;
     if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
+    // No cache / side-table resets here: uop_const_cache, uop_mov_cache,
+    // KP_CACHE, LAM_SHAPE_TABLE, EXTERN_PIN*, JIT_CAPTURES, K_PROFILE
+    // are all file-static globals shared across every context, not
+    // per-ctx state.  Wiping them here would clobber live entries from
+    // other contexts.  thvm_free() is the only correct site.
     free(ctx->heap);
     free(ctx->wnf_stack);
     free(ctx->wnf_last_stack);
