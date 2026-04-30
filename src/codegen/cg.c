@@ -143,10 +143,10 @@ int cg_supports(KernelEntry const *ke) {
           return 0;
       }
     }
-    if (ke->program[i].dtype != DT_F32) return 0;
+    if (ke->program[i].dtype != DT_FP32) return 0;
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_dtypes[i] != DT_F32) return 0;
+    if (ke->input_dtypes[i] != DT_FP32) return 0;
   }
   return 1;
 }

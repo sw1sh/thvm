@@ -8,7 +8,7 @@ VerificationTest[
     TInit[];
     t = TTensor[{4}, "f32"];
     {TTermTag[t], TTermExt[t], Length[TTensorShape[t]]},
-    {$TagTEN, $DTF32, 1},
+    {$TagTEN, $DTFp32, 1},
     TestID -> "TTensor/alloc-empty"
 ]
 

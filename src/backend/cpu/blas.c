@@ -62,18 +62,20 @@ static int blas_op_is_reduce_sum(KProgOp const *p, u32 src_step) {
 static int blas_try_dot(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ke->n_inputs != 2) return 0;
   if (ke->n_ops    != 2) return 0;
-  if (ke->input_dtypes[0] != DT_F32 || ke->input_dtypes[1] != DT_F32) return 0;
-  if (ke->program[0].dtype != DT_F32 || ke->program[1].dtype != DT_F32) return 0;
+  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32) return 0;
+  if (ke->program[0].dtype != DT_FP32 || ke->program[1].dtype != DT_FP32) return 0;
   u32 n0 = ke->input_numels[0], n1 = ke->input_numels[1];
   if (n0 != n1 || n0 == 0) return 0;
   if (ke->program[0].numel != n0) return 0;
   if (ke->program[1].numel != 1)  return 0;
   if (!blas_op_is_mul_of(&ke->program[0], 0, 1)) return 0;
   if (!blas_op_is_reduce_sum(&ke->program[1], 0)) return 0;
-  // Non-contig view inputs: bail (interpreter materializes them).
+  // Non-contig view inputs OR ShapeTracker chain inputs: bail
+  // (interpreter pre-materializes them).
   for (u32 i = 0; i < 2; i++) {
     u32 tid = ke->input_tids[i];
-    if (tid != 0 && tid < TENS_NEXT && !TENS[tid].view.contiguous) return 0;
+    if (tid != 0 && tid < TENS_NEXT
+        && (!TENS[tid].view.contiguous || TENS[tid].nviews > 0)) return 0;
   }
   float const *a = (float const *)CPU_BUFS[in_buf_ids[0]].data;
   float const *b = (float const *)CPU_BUFS[in_buf_ids[1]].data;
@@ -93,8 +95,8 @@ static int blas_try_dot(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ke->n_inputs != 2) return 0;
   if (ke->n_ops    != 2) return 0;
-  if (ke->input_dtypes[0] != DT_F32 || ke->input_dtypes[1] != DT_F32) return 0;
-  if (ke->program[0].dtype != DT_F32 || ke->program[1].dtype != DT_F32) return 0;
+  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32) return 0;
+  if (ke->program[0].dtype != DT_FP32 || ke->program[1].dtype != DT_FP32) return 0;
   if (!blas_op_is_mul_of(&ke->program[0], 0, 1)) return 0;
   if (!blas_op_is_reduce_sum(&ke->program[1], 0)) return 0;
   if (BLAS_REDUCE_INNER(ke->program[1].arg) != 1) return 0;
@@ -144,8 +146,8 @@ static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ke->n_inputs != 2) return 0;
   if (ke->n_ops    != 2) return 0;
-  if (ke->input_dtypes[0] != DT_F32 || ke->input_dtypes[1] != DT_F32) return 0;
-  if (ke->program[0].dtype != DT_F32 || ke->program[1].dtype != DT_F32) return 0;
+  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32) return 0;
+  if (ke->program[0].dtype != DT_FP32 || ke->program[1].dtype != DT_FP32) return 0;
   if (!blas_op_is_mul_of(&ke->program[0], 0, 1)) return 0;
   if (!blas_op_is_reduce_sum(&ke->program[1], 0)) return 0;
   u32 inner = BLAS_REDUCE_INNER(ke->program[1].arg);

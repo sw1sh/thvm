@@ -14,7 +14,7 @@
 
 fn Term uop_bitcast(Term src, u32 dst_dtype) {
   // Identity.
-  u32 src_dtype = DT_F32;
+  u32 src_dtype = DT_FP32;
   if (term_dtype_in(src, 0, &src_dtype) && src_dtype == dst_dtype) {
     return src;
   }

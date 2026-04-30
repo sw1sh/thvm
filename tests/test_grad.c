@@ -16,7 +16,7 @@ static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
   Shape s = {0};
   s.ndim = ndim;
   for (u32 i = 0; i < ndim; i++) s.dims[i] = dims[i];
-  return tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
 // Strip an outer UOP_EXPAND to reach what was lifted (target-shape
@@ -34,9 +34,9 @@ int main(void) {
   u32 d[1] = {3};
   u32 ta = alloc_f32_tensor(d, 1);
   u32 tb = alloc_f32_tensor(d, 1);
-  Term a = term_new(0, TAG_TEN, DT_F32, ta);
-  Term b = term_new(0, TAG_TEN, DT_F32, tb);
-  Term gy = uop_const(DT_F32, 0x3f800000u);   // 1.0f bits
+  Term a = term_new(0, TAG_TEN, DT_FP32, ta);
+  Term b = term_new(0, TAG_TEN, DT_FP32, tb);
+  Term gy = uop_const(DT_FP32, 0x3f800000u);   // 1.0f bits
 
   TEST_BEGIN("grad/leaf-target-returns-gy");
   // y === target leaf: lifts gy to target.shape directly.
@@ -107,7 +107,7 @@ int main(void) {
 
   TEST_BEGIN("grad/const-input-zero");
   // CONST never depends on target, so this is a one-shot zero.
-  Term cnst = uop_const(DT_F32, 0x40400000u);    // 3.0f bits
+  Term cnst = uop_const(DT_FP32, 0x40400000u);    // 3.0f bits
   Term g_c  = wnf(uop_grad(cnst, gy, a));
   CHECK_EQ(term_ext(g_c), UOP_EXPAND);
   CHECK_EQ(term_ext(unexpand(g_c)), UOP_CONST);
@@ -161,7 +161,7 @@ int main(void) {
   // EXPAND of a CONST short-circuits: constants have no gradient
   // wrt anything.  Output is target-shaped grad_zero.
   u32 dim3[1]  = {3};
-  Term cst_e   = uop_const(DT_F32, 0x3f800000u);
+  Term cst_e   = uop_const(DT_FP32, 0x3f800000u);
   Term ex_c    = uop_expand(cst_e, 1, dim3);
   Term g_ec    = wnf(uop_grad(ex_c, gy, a));
   CHECK_EQ(term_ext(g_ec), UOP_EXPAND);
@@ -173,7 +173,7 @@ int main(void) {
   u32 d1[1]   = {1};
   u32 to3_[1] = {3};
   u32 t1      = alloc_f32_tensor(d1, 1);
-  Term a1     = term_new(0, TAG_TEN, DT_F32, t1);
+  Term a1     = term_new(0, TAG_TEN, DT_FP32, t1);
   Term ex1    = uop_expand(a1, 1, to3_);
   Term g_e    = wnf(uop_grad(ex1, gy, a1));
   // Cascades to leaf-EXPAND wrapping the reduced cotangent (a REDUCE).
@@ -191,7 +191,7 @@ int main(void) {
   // ReLU = MUL[x, CMPLT(0, x)].  d(ReLU)/dx = mask, structurally:
   // MUL rule splits to ADD[GRAD(x, mask*gy, x), GRAD(mask, x*gy, x)].
   // The second branch hits the CMPLT-zero rule above.
-  Term zero    = uop_const(DT_F32, 0);
+  Term zero    = uop_const(DT_FP32, 0);
   Term mask    = uop_binary(UOP_CMPLT, zero, a);
   Term relu    = uop_binary(UOP_MUL, a, mask);
   Term g_relu  = wnf(uop_grad(relu, gy, a));
@@ -204,7 +204,7 @@ int main(void) {
   // PADs gy with 1 zero on each side.
   u32 d5[1] = {5};
   u32 t5    = alloc_f32_tensor(d5, 1);
-  Term a5   = term_new(0, TAG_TEN, DT_F32, t5);
+  Term a5   = term_new(0, TAG_TEN, DT_FP32, t5);
   u32 sh_be[2] = {1, 4};
   Term sk   = uop_shrink(a5, 1, sh_be);
   Term g_sk = wnf(uop_grad(sk, gy, a5));
@@ -237,7 +237,7 @@ int main(void) {
   // it in EXPAND back to a's shape.
   u32 d2x3[2] = {2, 3};
   u32 t2x3    = alloc_f32_tensor(d2x3, 2);
-  Term a23    = term_new(0, TAG_TEN, DT_F32, t2x3);
+  Term a23    = term_new(0, TAG_TEN, DT_FP32, t2x3);
   u32 perm10[2] = {1, 0};
   Term pm     = uop_permute(a23, 2, perm10);
   Term g_pm   = wnf(uop_grad(pm, gy, a23));
@@ -296,7 +296,7 @@ int main(void) {
   TEST_BEGIN("grad/multi-target-three-targets-heap-layout");
   u32  d3[1] = {3};
   u32  tc    = alloc_f32_tensor(d3, 1);
-  Term c     = term_new(0, TAG_TEN, DT_F32, tc);
+  Term c     = term_new(0, TAG_TEN, DT_FP32, tc);
   Term targets[3] = {a, b, c};
   Term g_multi = uop_grad_multi(a, gy, targets, 3);
   CHECK_EQ(term_tag(g_multi), TAG_UOP);

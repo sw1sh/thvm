@@ -1831,7 +1831,7 @@ static Term pri_snapshot_value(Term v) {
   TenDesc *sd = &TENS[src_tid];
   if (sd->backend == NULL) return v;
   // Phase A: gate on the dtypes whose buf_read/buf_write paths exist.
-  if (sd->dtype != DT_F32 && sd->dtype != DT_I32) return v;
+  if (sd->dtype != DT_FP32 && sd->dtype != DT_INT32) return v;
   u32 dst_tid = tensor_alloc(sd->backend, sd->view.shape, sd->dtype);
   if (dst_tid == 0) return v;
   u64 nbytes = dtype_storage_bytes(sd->dtype, sd->view.numel);

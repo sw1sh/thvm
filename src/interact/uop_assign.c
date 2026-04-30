@@ -43,7 +43,7 @@ fn Term interact_assign_with(Term dst, Term src) {
   // Phase A: gate on the dtypes whose buf_read/buf_write paths exist;
   // dtype_storage_bytes aborts on unwired dtypes, so the gate keeps
   // us safe until later phases enable them.
-  if (dd->dtype != DT_F32 && dd->dtype != DT_I32) return dst;
+  if (dd->dtype != DT_FP32 && dd->dtype != DT_INT32) return dst;
   u64 nbytes = dtype_storage_bytes(dd->dtype, numel);
 
   // JIT capture: record the (dst, src) tid pair so a TJit closure

@@ -163,8 +163,8 @@ int main(void) {
     // (each branch is a partial PRI with 1 of 1 args -- saturates
     // immediately and returns the arg via id_prim)
     prim_register(40u, id_prim, 1u);
-    Term n1 = term_new(0, TAG_NUM, DT_I32, 11);
-    Term n2 = term_new(0, TAG_NUM, DT_I32, 22);
+    Term n1 = term_new(0, TAG_NUM, DT_INT32, 11);
+    Term n2 = term_new(0, TAG_NUM, DT_INT32, 22);
     Term sup = mk_sup(9u, term_new_pri(40u), term_new_pri(40u));
     // APP(sup, n1) -- but PRI is arity 1 and the SUP children are
     // already constructed, so APP-SUP fan-out picks the per-child

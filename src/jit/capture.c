@@ -191,7 +191,7 @@ fn u32 jit_replay(u32 slot) {
         // Phase A: dtype_storage_bytes aborts on unwired dtypes; gate
         // on the kinds we actually fire ASSIGN for (everything wired
         // through Phase B onward goes here too once enabled).
-        if (dd->dtype != DT_F32 && dd->dtype != DT_I32) continue;
+        if (dd->dtype != DT_FP32 && dd->dtype != DT_INT32) continue;
         u64 nbytes = dtype_storage_bytes(dd->dtype, numel);
         void *tmp = malloc((size_t)nbytes);
         if (tmp == NULL) continue;

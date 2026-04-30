@@ -11,23 +11,23 @@ int main(void) {
   thvm_init();
 
   TEST_BEGIN("uop/const-heap-layout");
-  Term c  = uop_const(DT_F32, 0x40000000);   // 2.0f bit pattern
+  Term c  = uop_const(DT_FP32, 0x40000000);   // 2.0f bit pattern
   CHECK_EQ(term_tag(c), TAG_UOP);
   CHECK_EQ(term_ext(c), UOP_CONST);
   Term num = heap_read(term_val(c));
   CHECK_EQ(term_tag(num), TAG_NUM);
-  CHECK_EQ(term_ext(num), DT_F32);
+  CHECK_EQ(term_ext(num), DT_FP32);
   CHECK_EQ(term_val(num), 0x40000000);
 
   TEST_BEGIN("uop/unary-layout");
-  Term a  = term_new(0, TAG_TEN, DT_F32, 1);
+  Term a  = term_new(0, TAG_TEN, DT_FP32, 1);
   Term n  = uop_unary(UOP_NEG, a);
   CHECK_EQ(term_tag(n),  TAG_UOP);
   CHECK_EQ(term_ext(n),  UOP_NEG);
   CHECK_EQ(heap_read(term_val(n)), a);
 
   TEST_BEGIN("uop/binary-layout");
-  Term b = term_new(0, TAG_TEN, DT_F32, 2);
+  Term b = term_new(0, TAG_TEN, DT_FP32, 2);
   Term sum = uop_binary(UOP_ADD, a, b);
   CHECK_EQ(term_tag(sum), TAG_UOP);
   CHECK_EQ(term_ext(sum), UOP_ADD);

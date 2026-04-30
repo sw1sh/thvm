@@ -3,12 +3,9 @@
 // The runtime carries a dtype tag on every numeric value (TAG_NUM ext,
 // UOP_CONST ext, TAG_TEN ext, TenDesc.dtype, KProgOp.dtype).  The set
 // mirrors tinygrad's full dtype enum (15 concrete dtypes plus packed
-// int4/uint4 for modern quantization).  Phase A wires the table and
-// the size primitives without enabling any new dtype: only DT_FP32
-// (= DT_F32 alias) and DT_INT32 (= DT_I32 alias) are populated; every
-// other slot is reserved with itemsize=0 so any accidental use trips
-// the assertion in dtype_itemsize().  Subsequent phases populate the
-// remaining rows and wire kernels.
+// int4/uint4 for modern quantization).  Every slot has a populated
+// row by the end of Phase F; reserved rows (none today) trip the
+// assertion in dtype_itemsize().
 //
 // Reference: TinyHVM/tinygrad/tinygrad/dtype.py:130-146.
 //

@@ -37,8 +37,8 @@ scalarTextFromCell[cellTerm_] := With[{
 },
     If[ tag === $TagNUM,
         Switch[ext,
-            $DTF32, ToString[bitsToReal32[val]],
-            $DTI32, ToString[bitsToInt32[val]],
+            $DTFp32, ToString[bitsToReal32[val]],
+            $DTInt32, ToString[bitsToInt32[val]],
             _,      ""
         ],
         ""

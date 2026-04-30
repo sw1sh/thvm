@@ -86,15 +86,6 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       case 4: {
         u32 *d = (u32 *)tmp, *s = (u32 *)src;
         for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
-        if (td->nviews > 0) {
-          fprintf(stderr, "DBG pre-mat tid_view=(numel=%u nviews=%u)", v->numel, td->nviews);
-          for (u32 k = 0; k < v->numel && k < 8; k++) {
-            u32 bidx = tendesc_strided_index(td, k);
-            f32 fv; memcpy(&fv, &s[bidx], 4);
-            fprintf(stderr, " [%u]=buf[%u]=%g", k, bidx, fv);
-          }
-          fprintf(stderr, "\n"); fflush(stderr);
-        }
         break;
       }
       case 8: {

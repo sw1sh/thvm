@@ -13,7 +13,7 @@ static u32 alloc_f32_tensor(u32 dim) {
   Shape s = {0};
   s.ndim    = 1;
   s.dims[0] = dim;
-  return tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
 int main(void) {
@@ -29,10 +29,10 @@ int main(void) {
   TEST_BEGIN("materialize-v2/shared-subexpr-yields-two-boundaries");
   u32 ta = alloc_f32_tensor(4), tb = alloc_f32_tensor(4);
   u32 tc = alloc_f32_tensor(4), td = alloc_f32_tensor(4);
-  Term a = term_new(0, TAG_TEN, DT_F32, ta);
-  Term b = term_new(0, TAG_TEN, DT_F32, tb);
-  Term c = term_new(0, TAG_TEN, DT_F32, tc);
-  Term d = term_new(0, TAG_TEN, DT_F32, td);
+  Term a = term_new(0, TAG_TEN, DT_FP32, ta);
+  Term b = term_new(0, TAG_TEN, DT_FP32, tb);
+  Term c = term_new(0, TAG_TEN, DT_FP32, tc);
+  Term d = term_new(0, TAG_TEN, DT_FP32, td);
   Term s     = uop_binary(UOP_ADD, a, b);
   Term left  = uop_binary(UOP_MUL, s, c);
   Term right = uop_binary(UOP_MUL, s, d);

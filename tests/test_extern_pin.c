@@ -16,8 +16,8 @@ int main(void) {
   CHECK_EQ(G_ITER_COUNT, 0);
 
   TEST_BEGIN("extern-pin/pin-and-iter");
-  Term a = term_new(0, TAG_TEN, DT_F32, 7);
-  Term b = term_new(0, TAG_TEN, DT_F32, 9);
+  Term a = term_new(0, TAG_TEN, DT_FP32, 7);
+  Term b = term_new(0, TAG_TEN, DT_FP32, 9);
   extern_pin_term(a);
   extern_pin_term(b);
   G_ITER_COUNT = 0;
@@ -55,9 +55,9 @@ int main(void) {
 
   TEST_BEGIN("extern-pin/saturated-push-silently-drops");
   for (u32 i = 0; i < EXTERN_PINNED_TERMS_CAP; i++) {
-    extern_pin_term(term_new(0, TAG_TEN, DT_F32, i + 1));
+    extern_pin_term(term_new(0, TAG_TEN, DT_FP32, i + 1));
   }
-  extern_pin_term(term_new(0, TAG_TEN, DT_F32, 99999));   // overflow
+  extern_pin_term(term_new(0, TAG_TEN, DT_FP32, 99999));   // overflow
   G_ITER_COUNT = 0;
   extern_pinned_for_each(count_cb);
   CHECK_EQ(G_ITER_COUNT, EXTERN_PINNED_TERMS_CAP);

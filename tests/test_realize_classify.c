@@ -10,7 +10,7 @@ static u32 alloc_f32_tensor(u32 dim) {
   Shape s = {0};
   s.ndim    = 1;
   s.dims[0] = dim;
-  return tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
 int main(void) {
@@ -20,8 +20,8 @@ int main(void) {
   // Just one ADD over two TENs: only the root realizes.
   u32 ta = alloc_f32_tensor(3);
   u32 tb = alloc_f32_tensor(3);
-  Term a = term_new(0, TAG_TEN, DT_F32, ta);
-  Term b = term_new(0, TAG_TEN, DT_F32, tb);
+  Term a = term_new(0, TAG_TEN, DT_FP32, ta);
+  Term b = term_new(0, TAG_TEN, DT_FP32, tb);
   Term add = uop_binary(UOP_ADD, a, b);
   realize_classify(add);
   CHECK_EQ(realize_is_realized(add), 1);
@@ -32,7 +32,7 @@ int main(void) {
   // The ADD has 1 consumer (the MUL); the MUL is the root.
   // Expect: ADD not realized, MUL realized.
   u32 tc = alloc_f32_tensor(3);
-  Term c = term_new(0, TAG_TEN, DT_F32, tc);
+  Term c = term_new(0, TAG_TEN, DT_FP32, tc);
   Term add2 = uop_binary(UOP_ADD, a, b);
   Term mul2 = uop_binary(UOP_MUL, add2, c);
   realize_classify(mul2);
@@ -110,9 +110,9 @@ int main(void) {
   u32 ta2 = alloc_f32_tensor(3);
   u32 tb2 = alloc_f32_tensor(3);
   u32 tc2 = alloc_f32_tensor(3);
-  Term aa = term_new(0, TAG_TEN, DT_F32, ta2);
-  Term bb = term_new(0, TAG_TEN, DT_F32, tb2);
-  Term cc = term_new(0, TAG_TEN, DT_F32, tc2);
+  Term aa = term_new(0, TAG_TEN, DT_FP32, ta2);
+  Term bb = term_new(0, TAG_TEN, DT_FP32, tb2);
+  Term cc = term_new(0, TAG_TEN, DT_FP32, tc2);
   Term aa_plus_bb = uop_binary(UOP_ADD, aa, bb);
   Term times_cc   = uop_binary(UOP_MUL, aa_plus_bb, cc);
   thvm_materialize(times_cc);

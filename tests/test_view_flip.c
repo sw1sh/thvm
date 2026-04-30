@@ -22,10 +22,10 @@ int main(void) {
   // 4-element 1D source.  FLIP axis 0 (mask=1) reverses to
   // [4, 3, 2, 1].
   Shape s1 = {0}; s1.ndim = 1; s1.dims[0] = 4;
-  u32 src_tid = tensor_alloc(CURRENT_BACKEND, s1, DT_F32);
+  u32 src_tid = tensor_alloc(CURRENT_BACKEND, s1, DT_FP32);
   f32 src_buf[4] = {1, 2, 3, 4};
   CURRENT_BACKEND->buf_write(TENS[src_tid].buf_id, src_buf, sizeof(src_buf));
-  Term src = term_new(0, TAG_TEN, DT_F32, src_tid);
+  Term src = term_new(0, TAG_TEN, DT_FP32, src_tid);
 
   Term flipped = uop_flip(src, /*axes_bitmask=*/1);
 
@@ -81,10 +81,10 @@ int main(void) {
   // FLIP axes 0 + 1 (mask=3) -> reversed both ways:
   //   {{6,5,4},{3,2,1}}.
   Shape s2 = {0}; s2.ndim = 2; s2.dims[0] = 2; s2.dims[1] = 3;
-  u32 src2_tid = tensor_alloc(CURRENT_BACKEND, s2, DT_F32);
+  u32 src2_tid = tensor_alloc(CURRENT_BACKEND, s2, DT_FP32);
   f32 src2_buf[6] = {1, 2, 3, 4, 5, 6};
   CURRENT_BACKEND->buf_write(TENS[src2_tid].buf_id, src2_buf, sizeof(src2_buf));
-  Term src2 = term_new(0, TAG_TEN, DT_F32, src2_tid);
+  Term src2 = term_new(0, TAG_TEN, DT_FP32, src2_tid);
   Term flip2 = uop_flip(src2, 3);
   Term out2  = materialize_uop_in_env(flip2, /*env_id=*/0);
   CHECK_EQ(term_tag(out2), TAG_TEN);

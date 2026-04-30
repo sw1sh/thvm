@@ -32,8 +32,8 @@ int main(void) {
 
     TEST_BEGIN("op2/sub-of-nums");
     {
-        Term x = term_new(0, TAG_NUM, DT_I32, 7);
-        Term y = term_new(0, TAG_NUM, DT_I32, 3);
+        Term x = term_new(0, TAG_NUM, DT_INT32, 7);
+        Term y = term_new(0, TAG_NUM, DT_INT32, 3);
         Term r = wnf(term_new_op2(OP_SUB, x, y));
         CHECK_EQ(term_tag(r), TAG_NUM);
         CHECK_EQ((u32)term_val(r), 4u);
@@ -42,41 +42,41 @@ int main(void) {
     TEST_BEGIN("op2/add-and-eq");
     {
         Term r1 = wnf(term_new_op2(OP_ADD,
-            term_new(0, TAG_NUM, DT_I32, 5),
-            term_new(0, TAG_NUM, DT_I32, 6)));
+            term_new(0, TAG_NUM, DT_INT32, 5),
+            term_new(0, TAG_NUM, DT_INT32, 6)));
         CHECK_EQ((u32)term_val(r1), 11u);
         Term r2 = wnf(term_new_op2(OP_EQ,
-            term_new(0, TAG_NUM, DT_I32, 9),
-            term_new(0, TAG_NUM, DT_I32, 9)));
+            term_new(0, TAG_NUM, DT_INT32, 9),
+            term_new(0, TAG_NUM, DT_INT32, 9)));
         CHECK_EQ((u32)term_val(r2), 1u);
         Term r3 = wnf(term_new_op2(OP_EQ,
-            term_new(0, TAG_NUM, DT_I32, 9),
-            term_new(0, TAG_NUM, DT_I32, 8)));
+            term_new(0, TAG_NUM, DT_INT32, 9),
+            term_new(0, TAG_NUM, DT_INT32, 8)));
         CHECK_EQ((u32)term_val(r3), 0u);
     }
 
     TEST_BEGIN("mat/zero-match-returns-handler");
     {
         // (λ{0: NUM(99); λn. NUM(11)} NUM(0))  ->  NUM(99)
-        Term handler  = term_new(0, TAG_NUM, DT_I32, 99);
+        Term handler  = term_new(0, TAG_NUM, DT_INT32, 99);
         // Fallback: λn. NUM(11)
         u64  fb_lam   = heap_alloc(1);
-        heap_set(fb_lam, term_new(0, TAG_NUM, DT_I32, 11));
+        heap_set(fb_lam, term_new(0, TAG_NUM, DT_INT32, 11));
         Term fallback = term_new(0, TAG_LAM, 0, fb_lam);
         Term mat      = term_new_mat(0, handler, fallback);
-        Term zero     = term_new(0, TAG_NUM, DT_I32, 0);
+        Term zero     = term_new(0, TAG_NUM, DT_INT32, 0);
         Term r        = wnf(build_app(mat, zero));
         CHECK_EQ((u32)term_val(r), 99u);
     }
 
     TEST_BEGIN("mat/non-zero-falls-back");
     {
-        Term handler  = term_new(0, TAG_NUM, DT_I32, 99);
+        Term handler  = term_new(0, TAG_NUM, DT_INT32, 99);
         u64  fb_lam   = heap_alloc(1);
-        heap_set(fb_lam, term_new(0, TAG_NUM, DT_I32, 11));
+        heap_set(fb_lam, term_new(0, TAG_NUM, DT_INT32, 11));
         Term fallback = term_new(0, TAG_LAM, 0, fb_lam);
         Term mat      = term_new_mat(0, handler, fallback);
-        Term seven    = term_new(0, TAG_NUM, DT_I32, 7);
+        Term seven    = term_new(0, TAG_NUM, DT_INT32, 7);
         // MAT misses -> APP(fallback, 7) -> 11.
         Term r        = wnf(build_app(mat, seven));
         CHECK_EQ((u32)term_val(r), 11u);
@@ -107,11 +107,11 @@ int main(void) {
         // (acc + 1)
         Term acc_plus_1 = term_new_op2(OP_ADD,
                               acc,
-                              term_new(0, TAG_NUM, DT_I32, 1));
+                              term_new(0, TAG_NUM, DT_INT32, 1));
         // (n' - 1)
         Term np_minus_1 = term_new_op2(OP_SUB,
                               npvar,
-                              term_new(0, TAG_NUM, DT_I32, 1));
+                              term_new(0, TAG_NUM, DT_INT32, 1));
 
         // (@count (acc+1) (n'-1))
         Term recur = build_app2(term_new_ref(0), acc_plus_1, np_minus_1);
@@ -135,8 +135,8 @@ int main(void) {
 
         // Call: @count 0 5  ->  5
         Term call = build_app2(term_new_ref(0),
-                        term_new(0, TAG_NUM, DT_I32, 0),
-                        term_new(0, TAG_NUM, DT_I32, 5));
+                        term_new(0, TAG_NUM, DT_INT32, 0),
+                        term_new(0, TAG_NUM, DT_INT32, 5));
         Term r = wnf(call);
         CHECK_EQ(term_tag(r), TAG_NUM);
         CHECK_EQ((u32)term_val(r), 5u);

@@ -76,7 +76,6 @@ $DTBool::usage = $DTInt8::usage = $DTUInt8::usage =
   $DTFp16::usage = $DTBf16::usage =
   $DTFp32::usage = $DTFp64::usage =
   $DTInt4::usage = $DTUInt4::usage =
-  $DTF32::usage = $DTI32::usage =
     "Dtype id; mirrors DT_* in src/thvm.h.";
 
 $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =
@@ -197,10 +196,6 @@ $DTUInt32 =  6;  $DTInt64  =  7;  $DTUInt64  =  8;
 $DTFp8E4M3=  9;  $DTFp8E5M2= 10;  $DTFp16    = 11;
 $DTBf16   = 12;  $DTFp32   = 13;  $DTFp64    = 14;
 $DTInt4   = 15;  $DTUInt4  = 16;
-
-(* Compatibility aliases.  Existing WL code reads $DTF32 / $DTI32. *)
-$DTF32 = $DTFp32;
-$DTI32 = $DTInt32;
 
 dtypeCode["bool"]    = $DTBool;
 dtypeCode["i8"]      = $DTInt8;     dtypeCode["u8"]   = $DTUInt8;

@@ -13,7 +13,7 @@ static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
   Shape s = {0};
   s.ndim = ndim;
   for (u32 i = 0; i < ndim; i++) s.dims[i] = dims[i];
-  return tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
 int main(void) {

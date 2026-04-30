@@ -48,7 +48,7 @@ static Term ic_kbo_eq(Term s, Term t) {
 
 // Helper: invoke prim_kbo via 3-step APP chain and return the wnf.
 static Term ic_kbo(Term s, Term t, u32 cfg_id) {
-  Term cid = term_new(0, TAG_NUM, DT_I32, cfg_id);
+  Term cid = term_new(0, TAG_NUM, DT_INT32, cfg_id);
 
   u64 l1 = heap_alloc(2);
   heap_set(l1 + 0, term_new_pri(ATP_PRIM_KBO));

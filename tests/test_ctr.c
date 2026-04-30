@@ -24,9 +24,9 @@ int main(void) {
   CHECK_EQ(term_ctr_at(empty, 0), 0u);   // out-of-range -> 0
 
   TEST_BEGIN("ctr/three-children-roundtrip");
-  Term a = term_new(0, TAG_NUM, DT_F32, 0x40000000);   // 2.0f bits
-  Term b = term_new(0, TAG_NUM, DT_F32, 0x40400000);   // 3.0f bits
-  Term c = term_new(0, TAG_NUM, DT_F32, 0x40800000);   // 4.0f bits
+  Term a = term_new(0, TAG_NUM, DT_FP32, 0x40000000);   // 2.0f bits
+  Term b = term_new(0, TAG_NUM, DT_FP32, 0x40400000);   // 3.0f bits
+  Term c = term_new(0, TAG_NUM, DT_FP32, 0x40800000);   // 4.0f bits
   Term children[3] = {a, b, c};
   Term tup = term_new_ctr(0, children, 3);
   CHECK_EQ(term_tag(tup), TAG_CTR);
@@ -52,7 +52,7 @@ int main(void) {
   TEST_BEGIN("ctr/non-ctr-input-returns-zero");
   // Defensive: passing a non-CTR term returns 0/0 instead of
   // dereferencing garbage.
-  Term not_a_ctr = term_new(0, TAG_NUM, DT_F32, 42);
+  Term not_a_ctr = term_new(0, TAG_NUM, DT_FP32, 42);
   CHECK_EQ(term_ctr_n(not_a_ctr),     0u);
   CHECK_EQ(term_ctr_at(not_a_ctr, 0), 0u);
 

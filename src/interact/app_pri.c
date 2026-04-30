@@ -32,7 +32,7 @@ fn Term interact_app_pri(Term pri, Term arg) {
   // Build new accumulator with one more arg.
   u32 new_n   = old_n + 1;
   u64 new_loc = heap_alloc(1 + new_n);
-  heap_set(new_loc, term_new(0, TAG_NUM, DT_I32, new_n));
+  heap_set(new_loc, term_new(0, TAG_NUM, DT_INT32, new_n));
   for (u32 i = 0; i < old_n; i++) {
     heap_set(new_loc + 1 + i, heap_read(old_loc + 1 + i));
   }

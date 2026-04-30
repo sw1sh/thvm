@@ -155,7 +155,8 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // interpreter pre-materializes strided inputs into temp buffers.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
-    if (tid != 0 && tid < TENS_NEXT && !TENS[tid].view.contiguous) return 0;
+    if (tid != 0 && tid < TENS_NEXT
+        && (!TENS[tid].view.contiguous || TENS[tid].nviews > 0)) return 0;
   }
   // Pack input pointers + numels into local arrays and call the
   // generated function.  Stack-sized to ke->n_inputs (covered by

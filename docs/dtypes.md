@@ -45,12 +45,6 @@ For packed nibble dtypes (`i4`, `u4`) the storage byte count is
 The WL surface receives the raw byte buffer and reconstructs the
 logical shape via `TTensorShape[]`.
 
-## Compatibility aliases
-
-`DT_F32` and `DT_I32` continue to expand to `DT_FP32` and `DT_INT32`
-so existing call sites compile unchanged.  The same is true on the
-WL surface: `$DTF32` -> `$DTFp32`, `$DTI32` -> `$DTInt32`.
-
 ## ALU strategy
 
 Native lanes -- f32, f64, the integer family.  The kernel reads /

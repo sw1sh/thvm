@@ -20,17 +20,17 @@ static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
   Shape s = {0};
   s.ndim = ndim;
   for (u32 i = 0; i < ndim; i++) s.dims[i] = dims[i];
-  return tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
 int main(void) {
   thvm_init();
 
   u32 dims[1] = {3};
-  Term a = term_new(0, TAG_TEN, DT_F32, alloc_f32_tensor(dims, 1));
-  Term b = term_new(0, TAG_TEN, DT_F32, alloc_f32_tensor(dims, 1));
-  Term c = term_new(0, TAG_TEN, DT_F32, alloc_f32_tensor(dims, 1));
-  Term d = term_new(0, TAG_TEN, DT_F32, alloc_f32_tensor(dims, 1));
+  Term a = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(dims, 1));
+  Term b = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(dims, 1));
+  Term c = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(dims, 1));
+  Term d = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(dims, 1));
 
   u32 kernels_before = KERNELS_NEXT;
 

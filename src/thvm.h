@@ -198,12 +198,6 @@ typedef u64 Term;
 #define DT_UINT4    16   // packed nibble (unsigned)
 #define DT_COUNT    17
 
-// Compatibility aliases for code that predates the wider enum.  Both
-// names continue to compile so existing uop_const(DT_F32, ...) calls
-// keep working unchanged.
-#define DT_F32   DT_FP32
-#define DT_I32   DT_INT32
-
 // Family kinds carried in DTypeInfo.kind.  Used by predicates
 // (dtype_is_int / dtype_is_float / ...) and by future kernel dispatch.
 typedef enum {
@@ -358,7 +352,7 @@ typedef struct Backend Backend;
 // Most TenDescs have nviews == 0 (just the primary `view`); the
 // chain is only allocated when truly needed.
 typedef struct {
-  u32      dtype;               // DT_F32 / DT_I32 / ...
+  u32      dtype;               // DT_BOOL .. DT_UINT4 (see info.c)
   u32      refcount;            // shared by DUP; decremented by ERA
   View     view;                // primary (outermost, public-facing)
   View    *prior_views;         // NULL when nviews == 0; else heap array of nviews entries

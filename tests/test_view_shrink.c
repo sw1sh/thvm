@@ -22,10 +22,10 @@ int main(void) {
 
   // 4x4 source filled 1..16.
   Shape s = {0}; s.ndim = 2; s.dims[0] = 4; s.dims[1] = 4;
-  u32 src_tid = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  u32 src_tid = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
   f32 src_buf[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
   CURRENT_BACKEND->buf_write(TENS[src_tid].buf_id, src_buf, sizeof(src_buf));
-  Term src = term_new(0, TAG_TEN, DT_F32, src_tid);
+  Term src = term_new(0, TAG_TEN, DT_FP32, src_tid);
 
   // SHRINK to 2x2 center: keep rows 1..2, cols 1..2 -> {{6,7},{10,11}}.
   u32 be[4] = {1, 3, 1, 3};

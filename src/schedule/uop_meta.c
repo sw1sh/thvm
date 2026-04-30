@@ -266,5 +266,5 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       return term_dtype_in(src0, env_id, out);
     }
   }
-  *out = DT_F32; return 1;
+  *out = DT_FP32; return 1;
 }

@@ -51,7 +51,7 @@ int main(void) {
     Term f0  = term_new_pri(40u);
     Term f1  = term_new_pri(40u);
     Term sup = mk_sup(7u, f0, f1);
-    Term arg = term_new(0, TAG_NUM, DT_I32, 99);
+    Term arg = term_new(0, TAG_NUM, DT_INT32, 99);
     Term app = mk_app(sup, arg);
 
     Term out = wnf(app);
@@ -87,7 +87,7 @@ int main(void) {
     Term f0  = term_new_pri(40u);
     Term f1  = term_new(0, TAG_ERA, 0, 0);
     Term sup = mk_sup(7u, f0, f1);
-    Term arg = term_new(0, TAG_NUM, DT_I32, 42);
+    Term arg = term_new(0, TAG_NUM, DT_INT32, 42);
     Term app = mk_app(sup, arg);
 
     Term out = wnf(app);

@@ -17,7 +17,7 @@
 
 fn Term term_new_ctr(u32 label, const Term *children, u32 n) {
   u64 loc = heap_alloc(1 + n);
-  heap_set(loc, term_new(0, TAG_NUM, DT_I32, n));
+  heap_set(loc, term_new(0, TAG_NUM, DT_INT32, n));
   for (u32 i = 0; i < n; i++) {
     heap_set(loc + 1 + i, children[i]);
   }

@@ -193,7 +193,7 @@ int main(void) {
     // each branch returns the NUM unchanged.
     prim_register(50u, id_prim, 1u);
     Term sup_partials = mk_sup(11u, term_new_pri(50u), term_new_pri(50u));
-    Term arg = term_new(0, TAG_NUM, DT_I32, 33);
+    Term arg = term_new(0, TAG_NUM, DT_INT32, 33);
     Term app = mk_app(sup_partials, arg);
     Term out = wnf(app);
     CHECK_EQ(term_tag(out), TAG_SUP);

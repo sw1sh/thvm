@@ -33,7 +33,7 @@ static u32 uop_const_bits(Term t) {
 
 static int uop_const_is_zero_f32(Term t) {
   if (!uop_is_const(t)) return 0;
-  if (uop_const_dtype(t) != DT_F32) return 0;
+  if (uop_const_dtype(t) != DT_FP32) return 0;
   f32 v;
   u32 b = uop_const_bits(t);
   memcpy(&v, &b, sizeof v);
@@ -42,7 +42,7 @@ static int uop_const_is_zero_f32(Term t) {
 
 static int uop_const_is_one_f32(Term t) {
   if (!uop_is_const(t)) return 0;
-  if (uop_const_dtype(t) != DT_F32) return 0;
+  if (uop_const_dtype(t) != DT_FP32) return 0;
   f32 v;
   u32 b = uop_const_bits(t);
   memcpy(&v, &b, sizeof v);
@@ -57,8 +57,8 @@ static f32 bits_f32(u32 b) { f32 v; memcpy(&v, &b, sizeof v); return v; }
 fn Term uop_rewrite_binary(u32 opcode, Term a, Term b) {
   // Constant fold: both operands CONST f32.
   if (uop_is_const(a) && uop_is_const(b)
-      && uop_const_dtype(a) == DT_F32
-      && uop_const_dtype(b) == DT_F32) {
+      && uop_const_dtype(a) == DT_FP32
+      && uop_const_dtype(b) == DT_FP32) {
     f32 av = bits_f32(uop_const_bits(a));
     f32 bv = bits_f32(uop_const_bits(b));
     f32 r;
@@ -70,7 +70,7 @@ fn Term uop_rewrite_binary(u32 opcode, Term a, Term b) {
       case UOP_CMPEQ: r = (av == bv) ? 1.0f : 0.0f; break;
       default: folded = 0; r = 0;
     }
-    if (folded) return uop_const(DT_F32, f32_bits(r));
+    if (folded) return uop_const(DT_FP32, f32_bits(r));
   }
 
   // Identity rules.  `x op CONST(identity) -> x` keeps x's shape;
@@ -88,10 +88,10 @@ fn Term uop_rewrite_binary(u32 opcode, Term a, Term b) {
       // x < x -> false everywhere.  Safe even at tensor shapes:
       // CMPLT broadcasts 0 to the input shape, so a CONST(0) at
       // shape {1} reduces to the same all-zero output downstream.
-      if (a == b) return uop_const(DT_F32, f32_bits(0.0f));
+      if (a == b) return uop_const(DT_FP32, f32_bits(0.0f));
       break;
     case UOP_CMPEQ:
-      if (a == b) return uop_const(DT_F32, f32_bits(1.0f));
+      if (a == b) return uop_const(DT_FP32, f32_bits(1.0f));
       break;
     default: break;
   }
@@ -102,7 +102,7 @@ fn Term uop_rewrite_binary(u32 opcode, Term a, Term b) {
 
 fn Term uop_rewrite_unary(u32 opcode, Term src) {
   // Constant fold.
-  if (uop_is_const(src) && uop_const_dtype(src) == DT_F32) {
+  if (uop_is_const(src) && uop_const_dtype(src) == DT_FP32) {
     f32 v = bits_f32(uop_const_bits(src));
     f32 r;
     int folded = 1;
@@ -114,7 +114,7 @@ fn Term uop_rewrite_unary(u32 opcode, Term src) {
       case UOP_SQRT:  r = (f32)sqrt(v); break;
       default: folded = 0; r = 0;
     }
-    if (folded) return uop_const(DT_F32, f32_bits(r));
+    if (folded) return uop_const(DT_FP32, f32_bits(r));
   }
 
   // Self-inverse pairs: f(f(x)) -> x.

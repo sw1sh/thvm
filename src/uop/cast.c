@@ -14,7 +14,7 @@
 
 fn Term uop_cast(Term src, u32 dst_dtype) {
   // Identity: cast to the term's existing dtype is a no-op.
-  u32 src_dtype = DT_F32;
+  u32 src_dtype = DT_FP32;
   if (term_dtype_in(src, 0, &src_dtype) && src_dtype == dst_dtype) {
     return src;
   }

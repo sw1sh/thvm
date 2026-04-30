@@ -85,7 +85,7 @@ int main(void) {
   union { f32 f; u32 u; } cu; cu.f = 3.14f;
   unsetenv("THVM_BACKEND");
   thvm_init();
-  Term cpu_kern = thvm_materialize(uop_const(DT_F32, cu.u));
+  Term cpu_kern = thvm_materialize(uop_const(DT_FP32, cu.u));
   Term cpu_done = wnf(cpu_kern);
   CHECK_EQ(term_tag(cpu_done), TAG_TEN);
   u32 cpu_tid = (u32)term_val(cpu_done);
@@ -96,7 +96,7 @@ int main(void) {
   // Same graph under Metal; output should match bit-for-bit.
   setenv("THVM_BACKEND", "metal", 1);
   thvm_init();
-  Term gpu_kern = thvm_materialize(uop_const(DT_F32, cu.u));
+  Term gpu_kern = thvm_materialize(uop_const(DT_FP32, cu.u));
   Term gpu_done = wnf(gpu_kern);
   CHECK_EQ(term_tag(gpu_done), TAG_TEN);
   u32 gpu_tid = (u32)term_val(gpu_done);
@@ -123,13 +123,13 @@ int main(void) {
 
     unsetenv("THVM_BACKEND"); thvm_init();
     {
-      u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
-      u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+      u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
+      u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[ta].buf_id, src_a, sizeof(src_a));
       CURRENT_BACKEND->buf_write(TENS[tb].buf_id, src_b, sizeof(src_b));
       Term done = wnf(thvm_materialize(uop_binary(op,
-          term_new(0, TAG_TEN, DT_F32, ta),
-          term_new(0, TAG_TEN, DT_F32, tb))));
+          term_new(0, TAG_TEN, DT_FP32, ta),
+          term_new(0, TAG_TEN, DT_FP32, tb))));
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 cpu_buf, sizeof(cpu_buf));
     }
@@ -137,13 +137,13 @@ int main(void) {
 
     setenv("THVM_BACKEND", "metal", 1); thvm_init();
     {
-      u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
-      u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+      u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
+      u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[ta].buf_id, src_a, sizeof(src_a));
       CURRENT_BACKEND->buf_write(TENS[tb].buf_id, src_b, sizeof(src_b));
       Term done = wnf(thvm_materialize(uop_binary(op,
-          term_new(0, TAG_TEN, DT_F32, ta),
-          term_new(0, TAG_TEN, DT_F32, tb))));
+          term_new(0, TAG_TEN, DT_FP32, ta),
+          term_new(0, TAG_TEN, DT_FP32, tb))));
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 gpu_buf, sizeof(gpu_buf));
     }
@@ -164,10 +164,10 @@ int main(void) {
 
     unsetenv("THVM_BACKEND"); thvm_init();
     {
-      u32 tid = tensor_alloc(CURRENT_BACKEND, su, DT_F32);
+      u32 tid = tensor_alloc(CURRENT_BACKEND, su, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_u, sizeof(src_u));
       Term done = wnf(thvm_materialize(uop_unary(op,
-          term_new(0, TAG_TEN, DT_F32, tid))));
+          term_new(0, TAG_TEN, DT_FP32, tid))));
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 cpu_buf, sizeof(cpu_buf));
     }
@@ -175,10 +175,10 @@ int main(void) {
 
     setenv("THVM_BACKEND", "metal", 1); thvm_init();
     {
-      u32 tid = tensor_alloc(CURRENT_BACKEND, su, DT_F32);
+      u32 tid = tensor_alloc(CURRENT_BACKEND, su, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_u, sizeof(src_u));
       Term done = wnf(thvm_materialize(uop_unary(op,
-          term_new(0, TAG_TEN, DT_F32, tid))));
+          term_new(0, TAG_TEN, DT_FP32, tid))));
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 gpu_buf, sizeof(gpu_buf));
     }
@@ -212,10 +212,10 @@ int main(void) {
 
     unsetenv("THVM_BACKEND"); thvm_init();
     {
-      u32 tid = tensor_alloc(CURRENT_BACKEND, sr, DT_F32);
+      u32 tid = tensor_alloc(CURRENT_BACKEND, sr, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_r, sizeof(src_r));
       Term done = wnf(thvm_materialize(uop_reduce(kind, 0,
-          term_new(0, TAG_TEN, DT_F32, tid))));
+          term_new(0, TAG_TEN, DT_FP32, tid))));
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 cpu_buf, sizeof(cpu_buf));
     }
@@ -223,10 +223,10 @@ int main(void) {
 
     setenv("THVM_BACKEND", "metal", 1); thvm_init();
     {
-      u32 tid = tensor_alloc(CURRENT_BACKEND, sr, DT_F32);
+      u32 tid = tensor_alloc(CURRENT_BACKEND, sr, DT_FP32);
       CURRENT_BACKEND->buf_write(TENS[tid].buf_id, src_r, sizeof(src_r));
       Term done = wnf(thvm_materialize(uop_reduce(kind, 0,
-          term_new(0, TAG_TEN, DT_F32, tid))));
+          term_new(0, TAG_TEN, DT_FP32, tid))));
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 gpu_buf, sizeof(gpu_buf));
     }
@@ -243,11 +243,11 @@ int main(void) {
 
   unsetenv("THVM_BACKEND"); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, sx, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, sx, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_x, sizeof(src_x));
     u32 dims[1] = {5};
     Term done = wnf(thvm_materialize(uop_expand(
-        term_new(0, TAG_TEN, DT_F32, t), 1, dims)));
+        term_new(0, TAG_TEN, DT_FP32, t), 1, dims)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               cpu_e, sizeof(cpu_e));
   }
@@ -255,11 +255,11 @@ int main(void) {
 
   setenv("THVM_BACKEND", "metal", 1); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, sx, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, sx, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_x, sizeof(src_x));
     u32 dims[1] = {5};
     Term done = wnf(thvm_materialize(uop_expand(
-        term_new(0, TAG_TEN, DT_F32, t), 1, dims)));
+        term_new(0, TAG_TEN, DT_FP32, t), 1, dims)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               gpu_e, sizeof(gpu_e));
   }
@@ -275,11 +275,11 @@ int main(void) {
 
   unsetenv("THVM_BACKEND"); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, sm, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, sm, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_m, sizeof(src_m));
     u32 dims[2] = {2, 3};
     Term done = wnf(thvm_materialize(uop_reshape(
-        term_new(0, TAG_TEN, DT_F32, t), 2, dims)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, dims)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               cpu_m, sizeof(cpu_m));
   }
@@ -287,11 +287,11 @@ int main(void) {
 
   setenv("THVM_BACKEND", "metal", 1); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, sm, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, sm, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_m, sizeof(src_m));
     u32 dims[2] = {2, 3};
     Term done = wnf(thvm_materialize(uop_reshape(
-        term_new(0, TAG_TEN, DT_F32, t), 2, dims)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, dims)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               gpu_m, sizeof(gpu_m));
   }
@@ -311,10 +311,10 @@ int main(void) {
 
   unsetenv("THVM_BACKEND"); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_la, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_la, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_la, sizeof(src_la));
     Term done = wnf(thvm_materialize(uop_expand(
-        term_new(0, TAG_TEN, DT_F32, t), 2, to_la)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, to_la)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               cpu_la, sizeof(cpu_la));
   }
@@ -322,10 +322,10 @@ int main(void) {
 
   setenv("THVM_BACKEND", "metal", 1); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_la, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_la, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_la, sizeof(src_la));
     Term done = wnf(thvm_materialize(uop_expand(
-        term_new(0, TAG_TEN, DT_F32, t), 2, to_la)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, to_la)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               gpu_la, sizeof(gpu_la));
   }
@@ -345,10 +345,10 @@ int main(void) {
 
   unsetenv("THVM_BACKEND"); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_ta, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_ta, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_ta, sizeof(src_ta));
     Term done = wnf(thvm_materialize(uop_expand(
-        term_new(0, TAG_TEN, DT_F32, t), 2, to_ta)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, to_ta)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               cpu_ta, sizeof(cpu_ta));
   }
@@ -356,10 +356,10 @@ int main(void) {
 
   setenv("THVM_BACKEND", "metal", 1); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_ta, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_ta, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_ta, sizeof(src_ta));
     Term done = wnf(thvm_materialize(uop_expand(
-        term_new(0, TAG_TEN, DT_F32, t), 2, to_ta)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, to_ta)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               gpu_ta, sizeof(gpu_ta));
   }
@@ -378,10 +378,10 @@ int main(void) {
 
   unsetenv("THVM_BACKEND"); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_fl, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_fl, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_fl, sizeof(src_fl));
     Term done = wnf(thvm_materialize(uop_flip(
-        term_new(0, TAG_TEN, DT_F32, t), 0x3)));   // flip both axes
+        term_new(0, TAG_TEN, DT_FP32, t), 0x3)));   // flip both axes
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               cpu_fl, sizeof(cpu_fl));
   }
@@ -389,10 +389,10 @@ int main(void) {
 
   setenv("THVM_BACKEND", "metal", 1); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_fl, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_fl, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_fl, sizeof(src_fl));
     Term done = wnf(thvm_materialize(uop_flip(
-        term_new(0, TAG_TEN, DT_F32, t), 0x3)));
+        term_new(0, TAG_TEN, DT_FP32, t), 0x3)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               gpu_fl, sizeof(gpu_fl));
   }
@@ -414,10 +414,10 @@ int main(void) {
 
   unsetenv("THVM_BACKEND"); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_pad, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_pad, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pad, sizeof(src_pad));
     Term done = wnf(thvm_materialize(uop_pad(
-        term_new(0, TAG_TEN, DT_F32, t), 2, be)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, be)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               cpu_pad, sizeof(cpu_pad));
   }
@@ -425,10 +425,10 @@ int main(void) {
 
   setenv("THVM_BACKEND", "metal", 1); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_pad, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_pad, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pad, sizeof(src_pad));
     Term done = wnf(thvm_materialize(uop_pad(
-        term_new(0, TAG_TEN, DT_F32, t), 2, be)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, be)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               gpu_pad, sizeof(gpu_pad));
   }
@@ -451,10 +451,10 @@ int main(void) {
 
   unsetenv("THVM_BACKEND"); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_sh, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_sh, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_sh, sizeof(src_sh));
     Term done = wnf(thvm_materialize(uop_shrink(
-        term_new(0, TAG_TEN, DT_F32, t), 2, sh_be)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, sh_be)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               cpu_sh, sizeof(cpu_sh));
   }
@@ -462,10 +462,10 @@ int main(void) {
 
   setenv("THVM_BACKEND", "metal", 1); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_sh, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_sh, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_sh, sizeof(src_sh));
     Term done = wnf(thvm_materialize(uop_shrink(
-        term_new(0, TAG_TEN, DT_F32, t), 2, sh_be)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, sh_be)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               gpu_sh, sizeof(gpu_sh));
   }
@@ -486,10 +486,10 @@ int main(void) {
 
   unsetenv("THVM_BACKEND"); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_pe, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_pe, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pe, sizeof(src_pe));
     Term done = wnf(thvm_materialize(uop_permute(
-        term_new(0, TAG_TEN, DT_F32, t), 2, perm)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, perm)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               cpu_pe, sizeof(cpu_pe));
   }
@@ -497,10 +497,10 @@ int main(void) {
 
   setenv("THVM_BACKEND", "metal", 1); thvm_init();
   {
-    u32 t = tensor_alloc(CURRENT_BACKEND, s_pe, DT_F32);
+    u32 t = tensor_alloc(CURRENT_BACKEND, s_pe, DT_FP32);
     CURRENT_BACKEND->buf_write(TENS[t].buf_id, src_pe, sizeof(src_pe));
     Term done = wnf(thvm_materialize(uop_permute(
-        term_new(0, TAG_TEN, DT_F32, t), 2, perm)));
+        term_new(0, TAG_TEN, DT_FP32, t), 2, perm)));
     CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                               gpu_pe, sizeof(gpu_pe));
   }

@@ -14,7 +14,7 @@ static Term build_sup(u32 lab, Term a, Term b) {
   return term_new(0, TAG_SUP, lab, loc);
 }
 
-// Encode a small natural as TAG_NUM (default dtype DT_F32 unused; just
+// Encode a small natural as TAG_NUM (default dtype DT_FP32 unused; just
 // a tag-bearing atom we can compare).
 static Term build_num(u32 v) {
   return term_new(0, TAG_NUM, 0, v);

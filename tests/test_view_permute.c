@@ -23,10 +23,10 @@ int main(void) {
   // 2x3 source: {{1,2,3},{4,5,6}} -> permute {1,0} -> 3x2 transpose
   // {{1,4},{2,5},{3,6}}.
   Shape s = {0}; s.ndim = 2; s.dims[0] = 2; s.dims[1] = 3;
-  u32 src_tid = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  u32 src_tid = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
   f32 src_buf[6] = {1, 2, 3, 4, 5, 6};
   CURRENT_BACKEND->buf_write(TENS[src_tid].buf_id, src_buf, sizeof(src_buf));
-  Term src = term_new(0, TAG_TEN, DT_F32, src_tid);
+  Term src = term_new(0, TAG_TEN, DT_FP32, src_tid);
 
   u32 perm[2] = {1, 0};
   Term permuted = uop_permute(src, 2, perm);

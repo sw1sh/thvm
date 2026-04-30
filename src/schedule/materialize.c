@@ -586,11 +586,7 @@ static u32 view_resolve(Term t) {
       t_numel *= d;
     }
     if (t_numel != src_view->numel) return 0;   // numel must match
-    u32 r = tensor_view_chain_append(src_tid, view_create(ts));
-    fprintf(stderr, "DBG chain-append: src_tid=%u r=%u src.contig=%u src.numel=%u t_numel=%u t_ndim=%u\n",
-            src_tid, r, src_view->contiguous, src_view->numel, t_numel, t_ndim);
-    fflush(stderr);
-    return r;
+    return tensor_view_chain_append(src_tid, view_create(ts));
   }
   return 0;
 }
@@ -610,38 +606,41 @@ static Term materialize_root_alias(Term t) {
   u32 tid = (u32)term_val(t);
   if (tid == 0 || tid >= TENS_NEXT) return t;
   TenDesc *d = &TENS[tid];
-  if (d->view.contiguous && d->view.offset == 0) return t;
+  // Skip the gather only when EVERYTHING is contig: public view is
+  // contig with no offset AND no ShapeTracker chain (which would
+  // map a contig outer view through non-contig inner views).
+  if (d->view.contiguous && d->view.offset == 0 && d->nviews == 0) return t;
 
   u32 dst_tid = tensor_alloc(d->backend, d->view.shape, d->dtype);
   if (dst_tid == 0) return t;
 
-  // Bytes to read = max element index reachable + 1.  Negative
-  // strides (FLIP) start the offset at the high end and walk
-  // downward, so they're already covered by `offset`.
-  i32 max_idx = d->view.offset;
-  for (u32 i = 0; i < d->view.shape.ndim; i++) {
-    if (d->view.shape.dims[i] > 1 && d->view.strides[i] > 0)
-      max_idx += (i32)(d->view.shape.dims[i] - 1) * d->view.strides[i];
+  // Bytes to read = max element index reachable + 1.  Walk the full
+  // ShapeTracker chain to find the largest buffer index we'll touch:
+  // tendesc_strided_index maps every public flat index k in [0, numel)
+  // through the chain.  For a non-trivial chain we just probe each k.
+  u32 max_idx = 0;
+  for (u32 k = 0; k < d->view.numel; k++) {
+    u32 bidx = tendesc_strided_index(d, k);
+    if (bidx > max_idx) max_idx = bidx;
   }
   size_t src_bytes = (size_t)dtype_storage_bytes(d->dtype, (u64)(max_idx + 1));
   void  *raw       = malloc(src_bytes);
   d->backend->buf_read(d->buf_id, raw, src_bytes);
   size_t dst_bytes = (size_t)dtype_storage_bytes(d->dtype, d->view.numel);
   void *dst_host = malloc(dst_bytes);
-  if (d->dtype == DT_F32) {
+  if (d->dtype == DT_FP32) {
     f32 *o = (f32 *)dst_host; f32 *s = (f32 *)raw;
-    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)];
+    for (u32 k = 0; k < d->view.numel; k++) o[k] = s[tendesc_strided_index(d, k)];
   } else {
-    // Width-driven gather covers every byte-aligned dtype.
     switch (dtype_itemsize(d->dtype)) {
       case 1: { u8  *o = (u8  *)dst_host, *s = (u8  *)raw;
-                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)]; break; }
+                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[tendesc_strided_index(d, k)]; break; }
       case 2: { u16 *o = (u16 *)dst_host, *s = (u16 *)raw;
-                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)]; break; }
+                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[tendesc_strided_index(d, k)]; break; }
       case 4: { u32 *o = (u32 *)dst_host, *s = (u32 *)raw;
-                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)]; break; }
+                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[tendesc_strided_index(d, k)]; break; }
       case 8: { u64 *o = (u64 *)dst_host, *s = (u64 *)raw;
-                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[view_strided_index(&d->view, k)]; break; }
+                for (u32 k = 0; k < d->view.numel; k++) o[k] = s[tendesc_strided_index(d, k)]; break; }
       default:
         free(raw); free(dst_host); tensor_release(dst_tid); return t;
     }
@@ -741,7 +740,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     if (lam_shape_lookup(term_val(t), &s)) {
       u32 numel = 1;
       for (u32 i = 0; i < s.ndim; i++) numel *= s.dims[i];
-      u32 slot = input_slot_dedup_var(ke, t, DT_F32, numel);
+      u32 slot = input_slot_dedup_var(ke, t, DT_FP32, numel);
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
       return KSRC_AS_INPUT(slot);
     }
@@ -1013,7 +1012,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
 
   Shape out_shape = {0};
   if (!term_shape_in(root_term, 0, &out_shape)) return 0;
-  u32 out_dtype = DT_F32;
+  u32 out_dtype = DT_FP32;
   term_dtype_in(root_term, 0, &out_dtype);
 
   // Memory planner: push any earlier kernel's output buf onto the
@@ -1108,7 +1107,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
 
   u64 kloc = heap_alloc(2);
   heap_set(kloc + 0, term_new(0, TAG_TEN, out_dtype, out_tid));
-  heap_set(kloc + 1, term_new(0, TAG_NUM, DT_I32, kid));
+  heap_set(kloc + 1, term_new(0, TAG_NUM, DT_INT32, kid));
   Term kernel_term = term_new(0, TAG_UOP, UOP_KERNEL, kloc);
 
   // Pin a heap cell carrying the UOP_KERNEL Term itself so heap-walk

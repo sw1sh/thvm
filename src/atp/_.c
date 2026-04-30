@@ -83,7 +83,7 @@ static Term prim_kbo(Term *args) {
     return term_new(0, TAG_ERA, 0, 0);
   }
   KboCmp r = thvm_kbo(s, t, cfg);
-  return term_new(0, TAG_NUM, DT_I32, (u64)r);
+  return term_new(0, TAG_NUM, DT_INT32, (u64)r);
 }
 
 // 8.2c: pure-IC structural-equality on terms.  The C body handles
@@ -114,19 +114,19 @@ static Term prim_kbo_eq_ic(Term *args) {
   Term s = args[0];
   Term t = args[1];
 
-  if (term_tag(s) != term_tag(t)) return term_new(0, TAG_NUM, DT_I32, 0);
-  if (term_ext(s) != term_ext(t)) return term_new(0, TAG_NUM, DT_I32, 0);
+  if (term_tag(s) != term_tag(t)) return term_new(0, TAG_NUM, DT_INT32, 0);
+  if (term_ext(s) != term_ext(t)) return term_new(0, TAG_NUM, DT_INT32, 0);
 
   switch (term_tag(s)) {
     case TAG_FVR:
       // Same ext means same FVR id; equality follows.
-      return term_new(0, TAG_NUM, DT_I32, 1);
+      return term_new(0, TAG_NUM, DT_INT32, 1);
 
     case TAG_CTR: {
       u32 ns = term_ctr_n(s);
       u32 nt = term_ctr_n(t);
-      if (ns != nt) return term_new(0, TAG_NUM, DT_I32, 0);
-      if (ns == 0) return term_new(0, TAG_NUM, DT_I32, 1);
+      if (ns != nt) return term_new(0, TAG_NUM, DT_INT32, 0);
+      if (ns == 0) return term_new(0, TAG_NUM, DT_INT32, 1);
 
       // Build AND(c_0, AND(c_1, ..., c_{n-1})).  Right-fold so the
       // last child is the innermost; AND is right-strict so this
@@ -143,7 +143,7 @@ static Term prim_kbo_eq_ic(Term *args) {
     }
 
     default:
-      return term_new(0, TAG_NUM, DT_I32,
+      return term_new(0, TAG_NUM, DT_INT32,
                       (term_val(s) == term_val(t)) ? 1 : 0);
   }
 }

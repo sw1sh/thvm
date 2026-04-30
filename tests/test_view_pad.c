@@ -29,10 +29,10 @@ int main(void) {
   // [{1,1},{1,1}] -> 4x4 with zero border:
   //   {{0,0,0,0}, {0,1,2,0}, {0,3,4,0}, {0,0,0,0}}.
   Shape s = {0}; s.ndim = 2; s.dims[0] = 2; s.dims[1] = 2;
-  u32 src_tid = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  u32 src_tid = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
   f32 src_buf[4] = {1, 2, 3, 4};
   CURRENT_BACKEND->buf_write(TENS[src_tid].buf_id, src_buf, sizeof(src_buf));
-  Term src = term_new(0, TAG_TEN, DT_F32, src_tid);
+  Term src = term_new(0, TAG_TEN, DT_FP32, src_tid);
 
   u32 widths[4] = {1, 1, 1, 1};   // [b0, e0, b1, e1]
   u32 kernels_before = KERNELS_NEXT;

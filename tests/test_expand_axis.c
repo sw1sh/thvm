@@ -20,7 +20,7 @@ static u32 alloc_f32_tensor(u32 *dims, u32 ndim, f32 const *data) {
   Shape s = {0};
   s.ndim = ndim;
   for (u32 i = 0; i < ndim; i++) s.dims[i] = dims[i];
-  u32 tid = tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  u32 tid = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
   if (data) {
     u32 numel = 1;
     for (u32 i = 0; i < ndim; i++) numel *= dims[i];
@@ -45,7 +45,7 @@ int main(void) {
   f32 data1[1] = {7.5f};
   u32 t1 = alloc_f32_tensor(d0, 1, data1);
   Term done1 = wnf(thvm_materialize(uop_expand(
-      term_new(0, TAG_TEN, DT_F32, t1), 2, to1)));
+      term_new(0, TAG_TEN, DT_FP32, t1), 2, to1)));
   CHECK_EQ(term_tag(done1), TAG_TEN);
   f32 out1[6] = {0};
   read_buf((u32)term_val(done1), out1, 6);
@@ -57,7 +57,7 @@ int main(void) {
   f32 data2[3] = {1.0f, 2.0f, 3.0f};
   u32 t2 = alloc_f32_tensor(d1, 1, data2);
   Term done2 = wnf(thvm_materialize(uop_expand(
-      term_new(0, TAG_TEN, DT_F32, t2), 1, d1)));
+      term_new(0, TAG_TEN, DT_FP32, t2), 1, d1)));
   f32 out2[3] = {0};
   read_buf((u32)term_val(done2), out2, 3);
   CHECK(out2[0] == 1.0f && out2[1] == 2.0f && out2[2] == 3.0f);
@@ -70,7 +70,7 @@ int main(void) {
   f32 data3[3] = {1.0f, 2.0f, 3.0f};
   u32 t3 = alloc_f32_tensor(d3, 2, data3);
   Term done3 = wnf(thvm_materialize(uop_expand(
-      term_new(0, TAG_TEN, DT_F32, t3), 2, to3)));
+      term_new(0, TAG_TEN, DT_FP32, t3), 2, to3)));
   f32 out3[6] = {0};
   read_buf((u32)term_val(done3), out3, 6);
   CHECK(out3[0] == 1.0f && out3[1] == 2.0f && out3[2] == 3.0f);
@@ -85,7 +85,7 @@ int main(void) {
   f32 data4[2] = {5.0f, 7.0f};
   u32 t4 = alloc_f32_tensor(d4, 2, data4);
   Term done4 = wnf(thvm_materialize(uop_expand(
-      term_new(0, TAG_TEN, DT_F32, t4), 2, to4)));
+      term_new(0, TAG_TEN, DT_FP32, t4), 2, to4)));
   f32 out4[6] = {0};
   read_buf((u32)term_val(done4), out4, 6);
   CHECK(out4[0] == 5.0f && out4[1] == 5.0f && out4[2] == 5.0f);
@@ -108,7 +108,7 @@ int main(void) {
   f32 data5[2] = {1.0f, 2.0f};
   u32 t5 = alloc_f32_tensor(d5, 1, data5);
   Term done5 = wnf(thvm_materialize(uop_expand(
-      term_new(0, TAG_TEN, DT_F32, t5), 2, to5)));
+      term_new(0, TAG_TEN, DT_FP32, t5), 2, to5)));
   // Just verify the call doesn't crash and returns numel-6 output.
   CHECK_EQ(term_tag(done5), TAG_TEN);
   CHECK_EQ(TENS[(u32)term_val(done5)].view.numel, 6);

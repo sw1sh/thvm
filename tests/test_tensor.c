@@ -32,9 +32,9 @@ int main(void) {
   CHECK(TAG_COUNT == 26);
 
   TEST_BEGIN("term/TAG_TEN-roundtrip");
-  Term t = term_new(0, TAG_TEN, DT_F32, 42);
+  Term t = term_new(0, TAG_TEN, DT_FP32, 42);
   CHECK_EQ(term_tag(t), TAG_TEN);
-  CHECK_EQ(term_ext(t), DT_F32);
+  CHECK_EQ(term_ext(t), DT_FP32);
   CHECK_EQ(term_val(t), 42);
 
   TEST_BEGIN("view/create-row-major-2D");
@@ -48,9 +48,9 @@ int main(void) {
 
   TEST_BEGIN("tensor/alloc-basic");
   Shape s1 = { .ndim = 1, .dims = {4} };
-  u32   id = tensor_alloc(CURRENT_BACKEND, s1, DT_F32);
+  u32   id = tensor_alloc(CURRENT_BACKEND, s1, DT_FP32);
   CHECK(id != 0);
-  CHECK_EQ(TENS[id].dtype,    DT_F32);
+  CHECK_EQ(TENS[id].dtype,    DT_FP32);
   CHECK_EQ(TENS[id].refcount, 1);
   CHECK_EQ(TENS[id].view.numel, 4);
   CHECK(TENS[id].buf_id != 0);
@@ -76,7 +76,7 @@ int main(void) {
 
   TEST_BEGIN("tensor/view_of-shares-buffer");
   Shape s2 = { .ndim = 2, .dims = {2, 3} };
-  u32   src = tensor_alloc(CURRENT_BACKEND, s2, DT_F32);
+  u32   src = tensor_alloc(CURRENT_BACKEND, s2, DT_FP32);
   u32   src_buf = TENS[src].buf_id;
   CHECK_EQ(CPU_BUFS[src_buf].refcount, 1);
   Shape s3 = { .ndim = 1, .dims = {6} };

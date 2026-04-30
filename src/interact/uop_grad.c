@@ -73,7 +73,7 @@ fn Term expand_to_target(Term src, Term target_term) {
 // (grad_leaf_sup) and at the dispatch's TEN-leaf mismatch path.
 fn Term grad_zero_at(Term y) {
   (void)y;
-  return uop_const(DT_F32, 0);
+  return uop_const(DT_FP32, 0);
 }
 
 // Allocate a 3-slot grad cell with cell[0] = child, cell[1] = 0
@@ -183,11 +183,11 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
     if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(ten_r)) {
       return gy_for_leaf;
     }
-    return uop_const(DT_F32, 0);          // mismatch -> scalar zero
+    return uop_const(DT_FP32, 0);          // mismatch -> scalar zero
   }
   u32 tid = (u32)term_val(ten_r);
   u64 sloc = heap_alloc(2);
-  heap_set(sloc + 0, uop_const(DT_F32, 0));
+  heap_set(sloc + 0, uop_const(DT_FP32, 0));
   heap_set(sloc + 1, gy_for_leaf);
   return term_new(0, TAG_SUP, tid, sloc);
 }
@@ -307,19 +307,19 @@ fn Term grad_ln2_const(void) {
   f32 ln2 = 0.6931471805599453f;
   u32 bits;
   memcpy(&bits, &ln2, sizeof bits);
-  return uop_const(DT_F32, bits);
+  return uop_const(DT_FP32, bits);
 }
 fn Term grad_inv_ln2_const(void) {
   f32 inv = 1.4426950408889634f;
   u32 bits;
   memcpy(&bits, &inv, sizeof bits);
-  return uop_const(DT_F32, bits);
+  return uop_const(DT_FP32, bits);
 }
 fn Term grad_half_const(void) {
   f32 half = 0.5f;
   u32 bits;
   memcpy(&bits, &half, sizeof bits);
-  return uop_const(DT_F32, bits);
+  return uop_const(DT_FP32, bits);
 }
 
 // Inner dispatch: runs the actual chain-rule rewrite.  The outer
@@ -364,18 +364,18 @@ static Term interact_grad_dispatch(Term grad_term) {
       if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(y)) {
         return gy;
       }
-      return uop_const(DT_F32, 0);
+      return uop_const(DT_FP32, 0);
     }
     u32 tid = (u32)term_val(y);
     u64 sloc = heap_alloc(2);
-    heap_set(sloc + 0, uop_const(DT_F32, 0));   // scalar 0, broadcasts in any ADD/MUL
+    heap_set(sloc + 0, uop_const(DT_FP32, 0));   // scalar 0, broadcasts in any ADD/MUL
     heap_set(sloc + 1, gy);
     return term_new(0, TAG_SUP, tid, sloc);
   }
 
   // NUM: constant input -- no leaf contribution; cotangent dies.
   if (y_tag == TAG_NUM) {
-    return uop_const(DT_F32, 0);
+    return uop_const(DT_FP32, 0);
   }
 
   if (y_tag != TAG_UOP) return grad_term;
@@ -706,7 +706,7 @@ static Term interact_grad_dispatch(Term grad_term) {
       // the chain rule passes the cotangent back through the source
       // dtype.  Mirrors tinygrad/gradient.py:17.
       Term src = heap_read(y_loc);
-      u32 src_dtype = DT_F32;
+      u32 src_dtype = DT_FP32;
       term_dtype_in(src, 0, &src_dtype);
       Term gy_in = uop_cast(gy, src_dtype);
       return grad_bwd_for_child(src, gy_in);
@@ -881,7 +881,7 @@ fn Term interact_grad(Term grad_term) {
           }
         }
         if (mismatch) {
-          Term zero    = uop_const(DT_F32, 0);
+          Term zero    = uop_const(DT_FP32, 0);
           Term zero_lf = uop_expand(zero, tshape.ndim, tshape.dims);
           r = uop_binary(UOP_ADD, r, zero_lf);
         }

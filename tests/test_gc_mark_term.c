@@ -8,7 +8,7 @@
 
 static u32 alloc_f32(u32 n) {
   Shape s = {0}; s.ndim = 1; s.dims[0] = n;
-  return tensor_alloc(CURRENT_BACKEND, s, DT_F32);
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
 int main(void) {
@@ -20,7 +20,7 @@ int main(void) {
   TEST_BEGIN("gc-mark/leaf-tag-ten-marks-its-buf");
   u32 tA = alloc_f32(4);
   cpu_buf_clear_preserved(0);
-  gc_mark_term(term_new(0, TAG_TEN, DT_F32, tA), visited);
+  gc_mark_term(term_new(0, TAG_TEN, DT_FP32, tA), visited);
   CHECK_EQ(CPU_BUFS[TENS[tA].buf_id].preserved, 1);
 
   TEST_BEGIN("gc-mark/uop-add-marks-both-children");
@@ -33,8 +33,8 @@ int main(void) {
   u32 a = alloc_f32(4);
   u32 b = alloc_f32(4);
   u32 c = alloc_f32(4);
-  Term ta = term_new(0, TAG_TEN, DT_F32, a);
-  Term tb = term_new(0, TAG_TEN, DT_F32, b);
+  Term ta = term_new(0, TAG_TEN, DT_FP32, a);
+  Term tb = term_new(0, TAG_TEN, DT_FP32, b);
   u64 loc = heap_alloc(2);
   heap_set(loc + 0, ta);
   heap_set(loc + 1, tb);
@@ -59,7 +59,7 @@ int main(void) {
   // mark anything.
   u32 d = alloc_f32(4);
   cpu_buf_clear_preserved(0);
-  gc_mark_term(term_new(0, TAG_NUM, DT_F32, 42),  visited);
+  gc_mark_term(term_new(0, TAG_NUM, DT_FP32, 42),  visited);
   gc_mark_term(term_new(0, TAG_VAR, 0, 0),        visited);
   gc_mark_term(term_new(0, TAG_ERA, 0, 0),        visited);
   CHECK_EQ(CPU_BUFS[TENS[d].buf_id].preserved, 0);
@@ -85,7 +85,7 @@ int main(void) {
   thvm_init();
   memset(visited, 0, HEAP_CAP);
   u32 e = alloc_f32(4);
-  DEFS[3] = term_new(0, TAG_TEN, DT_F32, e);
+  DEFS[3] = term_new(0, TAG_TEN, DT_FP32, e);
   cpu_buf_clear_preserved(0);
   gc_mark_term(term_new(0, TAG_REF, 0, 3), visited);
   CHECK_EQ(CPU_BUFS[TENS[e].buf_id].preserved, 1);
