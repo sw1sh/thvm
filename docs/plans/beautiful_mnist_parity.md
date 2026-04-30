@@ -133,7 +133,7 @@ travel across all kids of the same program.
 | Milestone | State | Notes |
 |-----------|-------|-------|
 | LeNet end-to-end | done | commits e0029b5, 4646189, 9c4f7f4 |
-| M1 batched Conv2D | in flight | TConv2DIm2Col landed alongside TConv2D; verified numerical + grad equivalence in `wl/THVMLink/Tests/conv_im2col.wlt` (6 tests).  TConv2D not yet switched over -- next ticks measure perf delta on LeNet/beautiful-mnist before flipping the public surface. |
+| M1 batched Conv2D | in flight, blocked on view system | TConv2DIm2Col landed alongside TConv2D (commit c1a6dac).  Bench verdict below: 1.7-1.9x speedup in isolated forward+grad, but **100x SLOWDOWN end-to-end on LeNet** (4 Adam steps: 3s -> 341s) because PAD-and-sum materializes kh*kw zero-padded buffers that the chain rule walks back through, exploding kernel count.  Flipping the public TConv2D over is a regression.  The right design is tinygrad-style view-only im2col, which thvm's current `view_apply_*` doesn't support. |
 | M2 BN gradient | open | smaller; verifies existing TBatchNorm |
 | M3 structural-template TGradMany | deferred | not on the critical path yet |
 | M4 buffer-free between steps | open | becomes critical at N_STEPS > 100 |
@@ -142,12 +142,75 @@ travel across all kids of the same program.
 
 ### M1 in-flight notes
 
-- `TConv2DIm2Col` builds `xCol : {cIn*kh*kw, hOut*wOut}` via PAD-and-sum
-  (no STACK primitive in thvm) then runs a single TMatMul which dispatches
+#### Step 1: TConv2DIm2Col landed (commit c1a6dac)
+
+- Builds `xCol : {cIn*kh*kw, hOut*wOut}` via PAD-and-sum (no STACK
+  primitive in thvm) then runs a single TMatMul which dispatches
   through `cpu_blas_dispatch`'s MUL+REDUCE_SUM pattern -> cblas_sgemm.
-- Forward + d/dw + d/dx + d/db all match TConv2D within 1e-4 f32 tolerance.
-- Next ticks: (1) bench TConv2DIm2Col vs TConv2D on LeNet w/ N_STEPS=4
-  to confirm parity or speedup; (2) flip the public TConv2D over once
-  measurements look clean; (3) extend to BS>1 (input shape {N, C_in, H, W})
-  -- the PAD-and-sum slot trick generalises since the batch axis is
-  the leading dim.
+- Forward + d/dw + d/dx + d/db all match TConv2D within 1e-4 f32 tolerance
+  (`wl/THVMLink/Tests/conv_im2col.wlt`, 6 tests).
+
+#### Step 2: bench (verdict: PAD-and-sum is the wrong design)
+
+| Path             | conv1 fwd+grad | conv2 fwd+grad | LeNet 4-Adam-steps |
+|------------------|----------------|----------------|--------------------|
+| TConv2D          | 44.7 ms        | 41.2 ms        | ~3 s               |
+| TConv2DIm2Col    | 23.9 ms (1.87x)| 23.8 ms (1.73x)| **341 s (~100x slowdown)** |
+
+Isolated forward+grad is ~1.8x faster.  But end-to-end LeNet train
+is 100x slower because:
+- Each PAD kernel materialises a `cIn * kh*kw * hOut*wOut` buffer
+  that's mostly zeros.  For LeNet conv1 that's 25 PADs each
+  allocating ~14KB.  Plus the chain rule walks back through every
+  PAD with a SHRINK adjoint, multiplying the per-grad kernel count.
+- TConv2D's kh*kw partials each produce a smaller `cOut*hOut*wOut`
+  buffer (`6*576*4 ≈ 14KB`) directly without the zero-pad detour.
+
+#### M1 blocker: view-only im2col needs a view system extension
+
+The tinygrad performance path is **stride-trick im2col**: build
+`xCol` as a non-contiguous view of the input (no byte motion), and
+let the matmul kernel pre-materialize the view into a contig buffer
+exactly once before sgemm.  thvm's `cpu_interpret` already
+pre-materializes non-contig inputs for kernel dispatch
+(src/backend/cpu/interpret.c:31), so the dispatch side is ready.
+
+The construction side is not.  All `view_apply_*` primitives in
+`src/schedule/materialize.c` bail on non-contig sources (`if
+(!src->contiguous) return 0`).  Worse, `view_apply_expand` can only
+produce stride-0 broadcasts; the im2col stride trick needs a
+non-zero stride on the kernel-patch axis (e.g. `stride(kh) = stride(H)`),
+which can't be expressed via EXPAND from a unit axis.
+
+The path forward is one of:
+
+A. **Stride-aware reshape** -- relax `view_apply_reshape` to handle
+   non-contig sources where the reshape decomposes to pure axis
+   split/merge.  Plus relax `view_apply_permute` similarly.  Plus
+   teach EXPAND to optionally inherit the source axis's stride
+   (instead of 0) for the "as-strided" duplication pattern.
+   ~150-300 LOC across `view_apply_*` and probably a new
+   `UOP_AS_STRIDED` primitive.  Largest scope.
+
+B. **Native conv kernel** -- C-side function that does its own
+   im2col + sgemm in one kernel boundary, bypassing the WL chain
+   rule entirely for the forward pass.  Backward pass still needs
+   to express conv-adjoint somehow (could be a second native
+   kernel for the bwd, or fall back to TConv2D's lowering for
+   gradients).  Smaller scope but two implementations to maintain
+   and the bwd-via-TConv2D defeats half the speedup.
+
+C. **Defer M1, focus on what TConv2D can be made faster** --
+   the 25 partials chain has obvious fusion opportunities (e.g.
+   the kh*kw EXPANDs all read disjoint slices of the same input;
+   the per-partial REDUCE outputs all add to the same accumulator).
+   `cpu_blas_dispatch` could in principle recognize the whole
+   kh*kw partial-sum pattern and lower it as a single sgemm
+   internally, without changing the WL surface.
+
+For now: (A) is the right tinygrad-faithful fix but big.  (C) might
+be quicker to extract some of the perf without a view-system rewrite.
+Defer M1's "flip the public TConv2D" until one of A/B/C lands;
+TConv2DIm2Col stays available as an alternate lowering for users
+who explicitly want it (mostly useful for testing the matmul
+dispatch path).
