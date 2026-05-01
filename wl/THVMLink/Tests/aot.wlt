@@ -493,3 +493,44 @@ VerificationTest[
     True,
     TestID -> "TAOTEmit on full fib_nat body emits CTR + dup + nested MAT"
 ]
+
+(* === 11. End-to-end TAOTCompile (emit + clang + dlopen + register) ==== *)
+(* This is the auto-AOT "live wire": the same bench script that
+   uses the hand-coded TAOT["u32_fib", {"u32_fib"}] should produce
+   identical values when we instead drive it via TAOTCompile.  No
+   manual rebuild, no hand-coded program shipped -- the C source is
+   generated, compiled by clang, dlopen'd, and registered all from
+   inside one WL function call. *)
+
+VerificationTest[
+    (* Compile + load + run u32_fib at n=10.  Must agree with
+       interpreter on the value. *)
+    TInit[];
+    TDef["compile_u32_fib_test", TMatChain[
+        <|0 -> TNum[0],
+          1 -> TNum[1]
+         |>,
+        TLam[k, TOp2["+",
+            TApp[TRef["compile_u32_fib_test"], TOp2["-", k, TNum[1]]],
+            TApp[TRef["compile_u32_fib_test"], TOp2["-", k, TNum[2]]]
+        ]]
+    ]];
+    Module[{interpVal, aotVal, ok},
+        interpVal = TWnf[TApp[TRef["compile_u32_fib_test"], TNum[10]]]["val"];
+        TInit[];
+        TDef["compile_u32_fib_test", TMatChain[
+            <|0 -> TNum[0],
+              1 -> TNum[1]
+             |>,
+            TLam[k, TOp2["+",
+                TApp[TRef["compile_u32_fib_test"], TOp2["-", k, TNum[1]]],
+                TApp[TRef["compile_u32_fib_test"], TOp2["-", k, TNum[2]]]
+            ]]
+        ]];
+        ok = TAOTCompile["compile_u32_fib_test"];
+        aotVal = TWnf[TApp[TRef["compile_u32_fib_test"], TNum[10]]]["val"];
+        {ok, interpVal, aotVal, Fibonacci[10]}
+    ],
+    {1, 55, 55, 55},
+    TestID -> "TAOTCompile end-to-end: u32_fib(10) emit+clang+dlopen+run -> 55"
+]

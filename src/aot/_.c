@@ -94,6 +94,14 @@ static inline Term aot_num_i32(u32 v) {
   return term_new(0, TAG_NUM, DT_INT32, v);
 }
 
+// Bump ITRS by `n`.  Wrapped as a function (not a macro) so the
+// auto-emitted code can call it identically in the host (compiled
+// into thvm.c) and in a dlopen'd dylib (where abi.h's macros
+// re-route to OPS->itrs_inc(n) instead).
+static inline void aot_itrs_inc(u64 n) {
+    ITRS += n;
+}
+
 // Build APP(fun, arg) on a fresh 2-cell.  Used when the AOT can't
 // emit a call_direct (e.g. when the fun is itself a non-REF term).
 static inline Term aot_new_app(Term fun, Term arg) {

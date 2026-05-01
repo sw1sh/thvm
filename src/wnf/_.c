@@ -117,7 +117,20 @@ enter:
       if (aot != NULL) {
         if (BUDGET_HIT) BAIL_AT(next);
         AOT_CALLS++;
-        next = aot(stack, &s_pos, base);
+        // The AOT receives a pointer to WNF_S_POS directly (not
+        // our local s_pos).  This way:
+        //   - aot_pop_app_arg updates WNF_S_POS (the global), so
+        //     a subsequent recursive wnf inside the AOT (via
+        //     aot_force) reads the updated stack top and doesn't
+        //     overwrite our pushed frames.
+        //   - On return we read s_pos = WNF_S_POS to pick up the
+        //     net effect of the AOT's pops + any recursive wnf
+        //     pushes.
+        // Setting WNF_S_POS = s_pos first carries our outer pushes
+        // through to the AOT.
+        WNF_S_POS = s_pos;
+        next = aot(stack, &WNF_S_POS, base);
+        s_pos = WNF_S_POS;
         goto enter;
       }
       // Fall back to the lazy ALO unfold.  ALO-VAR / ALO-LAM /

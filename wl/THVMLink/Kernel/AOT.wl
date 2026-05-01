@@ -43,6 +43,8 @@ TAOTCalls::usage = "TAOTCalls[] returns the cumulative count of WNF -> AOT dispa
 
 TAOTPrograms::usage = "TAOTPrograms[] returns the list of program names that ship a hand-coded AOT under src/aot/programs/.  Each can be registered via TAOT[name, defNames].";
 
+TAOTCompile::usage = "TAOTCompile[name] runs the auto-emitter on the named TDef, writes the C source to /tmp/thvm_aot_<hash>.c, invokes clang -O2 -shared to build /tmp/thvm_aot_<hash>.dylib, dlopens it, and calls its aot_dylib_init() with the host's runtime-ops struct.  Returns 1 on success, 0 on failure.  The TAG_REF dispatch routes through the AOT immediately; subsequent TWnf goes through native code.  Phase coverage matches TAOTEmit -- bodies the emitter doesn't fully cover (e.g. TUOp / TSup / TBri) fall back to the interpreter for unsupported sub-trees.";
+
 TAOTEmit::usage = "TAOTEmit[name] returns the C source the auto-emitter would produce for the def at TDefName[name].  Phase 0 of the auto-emitter: only constants and the identity lambda are supported; unsupported AST nodes emit a fallback comment.  Drop the result under src/aot/programs/<name>.c and rebuild thvm to use it.";
 
 TAOT::badprog = "Unknown AOT program `1`; expected one of `2`.";
@@ -60,6 +62,7 @@ $aotRegU32FibFn := $aotRegU32FibFn = load["thvm_wl_aot_register_u32_fib",
     {Integer}, Integer];
 $aotCallsFn     := $aotCallsFn     = load["thvm_wl_aot_calls",     {}, Integer];
 $aotEmitDefFn   := $aotEmitDefFn   = load["thvm_wl_aot_emit_def",  {Integer}, "UTF8String"];
+$aotCompileFn   := $aotCompileFn   = load["thvm_wl_aot_compile",   {Integer}, Integer];
 
 (* === Program registry ================================================
    Each entry: program-name -> {arity, register-fn taking that many
@@ -116,6 +119,20 @@ TAOTReset[] := TInit[]
 TAOTEmit[name_] := (
     ensureInit[];
     $aotEmitDefFn[TDefName[name]]
+)
+
+(* TAOTCompile[name]: end-to-end auto-AOT.  Emits the def's body
+   to /tmp/thvm_aot_<hash>.c, invokes clang -O2 -shared, dlopens
+   the resulting .dylib, and calls its aot_dylib_init() with the
+   host's runtime-ops struct + the def's slot.  Returns 1 on
+   success, 0 on failure (compile error, missing dlopen, etc.).
+   The TAG_REF dispatch picks up the registered AOT immediately;
+   subsequent TWnf calls go through native code instead of the
+   lazy ALO interpreter. *)
+
+TAOTCompile[name_] := (
+    ensureInit[];
+    $aotCompileFn[TDefName[name]]
 )
 
 (* === TAOTProgram payload accessors ================================== *)

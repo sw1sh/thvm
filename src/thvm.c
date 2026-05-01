@@ -270,6 +270,11 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // since we're a single TU).
 fn Term wnf(Term term);
 #include "aot/_.c"
+// Function-pointer ABI for runtime-loadable AOT dylibs.  Loaded
+// after aot/_.c so it can reference aot_register / aot_pop_app_arg
+// / etc.  Must come BEFORE wnf/_.c so any future TAG_REF dispatch
+// hooks see the same set of helpers.
+#include "aot/runtime_ops.c"
 // Auto-emitter that walks a TDef'd body and produces C source.
 // Phase 0: constants and identity only -- the rest of the patterns
 // (MAT chain, CTR destructure, OP2, DUP) land in follow-ups.  Sits
@@ -284,6 +289,14 @@ fn Term wnf(Term term);
 #include "aot/programs/fib_nat.c"
 #include "aot/programs/gab_tak.c"
 #include "aot/programs/u32_fib.c"
+// Build pipeline: emit + clang + dlopen + register.  References
+// thvm_aot_emit_def + aot_runtime_ops + aot_register from above.
+// Defines AOT_THVM_ROOT so the dylib's emitted #include can find
+// abi.h.  TODO when the source moves: pass via build flag.
+#ifndef AOT_THVM_ROOT
+#define AOT_THVM_ROOT "/Users/swish/src/thvm"
+#endif
+#include "aot/build.c"
 
 // === wnf/ ===
 // The reducer dispatches to the interactions and to materialize,

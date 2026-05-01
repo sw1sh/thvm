@@ -397,7 +397,7 @@ static const char *aot_emit_mat_chain(AotEmitBuf *b, Term mat,
         aot_emit_fmt(b,
             "%sif (term_tag(%s) == TAG_NUM && (u32)term_val(%s) == %u) {\n",
             indent, arg_var, arg_var, match);
-        aot_emit_fmt(b, "%s  ITRS += 1;\n", indent);
+        aot_emit_fmt(b, "%s  aot_itrs_inc(1);\n", indent);
         const char *hv_num = aot_emit_term(b, handler, bind, inner_indent);
         aot_emit_fmt(b, "%s  return %s;\n%s}\n", indent, hv_num, indent);
 
@@ -417,7 +417,7 @@ static const char *aot_emit_mat_chain(AotEmitBuf *b, Term mat,
         aot_emit_fmt(b,
             "%sif (term_tag(%s) == TAG_CTR && term_ext(%s) == %u) {\n",
             indent, arg_var, arg_var, match);
-        aot_emit_fmt(b, "%s  ITRS += 1;\n", indent);
+        aot_emit_fmt(b, "%s  aot_itrs_inc(1);\n", indent);
 
         // Peel as many TLam binders as the handler offers, binding
         // each one to a `term_ctr_at(arg, i)` lookup.  Stop when we
@@ -502,7 +502,7 @@ static const char *aot_emit_mat_chain(AotEmitBuf *b, Term mat,
     if (term_tag(mat) == TAG_LAM) {
         u64 lam_loc = term_val(mat);
         Term body = book_read(lam_loc);
-        aot_emit_fmt(b, "%sITRS += 2;  /* MIS chain depth + APP-LAM */\n", indent);
+        aot_emit_fmt(b, "%saot_itrs_inc(2);  /* MIS chain depth + APP-LAM */\n", indent);
         aot_bind_push(bind, lam_loc, arg_var);
         const char *rv = aot_emit_term(b, body, bind, indent);
         aot_emit_fmt(b, "%sreturn %s;\n", indent, rv);
@@ -512,7 +512,7 @@ static const char *aot_emit_mat_chain(AotEmitBuf *b, Term mat,
     // Non-LAM default: emit APP(default, arg) and let wnf dispatch.
     const char *fbv = aot_emit_term(b, mat, bind, indent);
     aot_emit_fmt(b,
-        "%sITRS += 2;  /* MIS chain depth */\n"
+        "%saot_itrs_inc(2);  /* MIS chain depth */\n"
         "%sreturn aot_new_app(%s, %s);\n",
         indent, indent, fbv, arg_var);
     return arg_var;
@@ -537,7 +537,7 @@ static int aot_emit_def_body(AotEmitBuf *b, Term root, AotBindings *bind) {
         aot_emit_fmt(b,
             "  Term %s = aot_pop_app_arg(stack, sp, base);\n"
             "  if (%s == 0) return aot_fallback(def_slot);\n"
-            "  ITRS += 1;  /* APP-LAM */\n",
+            "  aot_itrs_inc(1);  /* APP-LAM */\n",
             arg_name, arg_name);
         aot_bind_push(bind, lam_loc, arg_name);
         cursor = book_read(lam_loc);

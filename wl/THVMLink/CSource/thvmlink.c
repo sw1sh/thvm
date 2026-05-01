@@ -1849,6 +1849,34 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_calls(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Compile + load the AOT for a TDef'd def.  Args: [def_id].
+// Returns 1 on success, 0 on failure.
+EXTERN_C DLLEXPORT int thvm_wl_aot_compile(WolframLibraryData libData,
+                                           mint argc, MArgument *args,
+                                           MArgument res) {
+  (void)libData; (void)argc;
+  u32 def_id = (u32)MArgument_getInteger(args[0]);
+  int ok = thvm_aot_compile_and_load(def_id);
+  MArgument_setInteger(res, ok);
+  return LIBRARY_NO_ERROR;
+}
+
+// Load a pre-compiled AOT dylib + register it under a given def slot.
+// Args: [dylib_path (UTF8), def_slot].  Returns 1 on success.
+EXTERN_C DLLEXPORT int thvm_wl_aot_load_dylib(WolframLibraryData libData,
+                                              mint argc, MArgument *args,
+                                              MArgument res) {
+  (void)libData; (void)argc;
+  const char *path = MArgument_getUTF8String(args[0]);
+  u32 def_slot = (u32)MArgument_getInteger(args[1]);
+  int ok = thvm_aot_load_dylib(path, def_slot);
+  if (libData != NULL && libData->UTF8String_disown != NULL) {
+    libData->UTF8String_disown((char *)path);
+  }
+  MArgument_setInteger(res, ok);
+  return LIBRARY_NO_ERROR;
+}
+
 // Emit C source for a TDef'd def slot.  Phase 0 of the auto-emitter:
 // supports constant-returning defs and the identity lambda.
 // Returns the emitted source as a UTF-8 string; caller (WL side)
