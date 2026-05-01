@@ -488,3 +488,48 @@ The split in Option C might fail for kernels where the rank-changing
 RESHAPE is in a closed loop (e.g. tail-RESHAPE, no buffer materialization
 possible without infinite recursion).  Need to check each of the 124
 patterns isn't pathological before committing to the split approach.
+
+---
+
+## F-8e-12 attempted: realize_classify approach insufficient
+
+Tried marking the source of every rank-changing RESHAPE as
+`realized` in `realize_classify`.  This should have made each
+SHRINK become its own kernel, after which the RESHAPE on the
+materialized buffer would view-resolve as a free alias.
+
+Trace confirmed the rule fires (op=7 SHRINK, op=5 EXPAND
+sources marked realized for their RESHAPE consumers).  But the
+mid-emit bail count actually went up slightly (124 -> 126), and
+the F-8e-11 audit shows the SAME failing kernels still appearing
+with the same n_ops=5 / op[0]=SHRINK / op[1]=RESHAPE structure.
+
+Root cause hypothesis:
+- The 50+25 dominant kernels are hash-cons-shared
+  (kernel_program_cache).  Even after realize_classify forces
+  the SHRINK source for ONE site, the kernel-program cache
+  re-emits the same multi-op program at OTHER sites where the
+  realize_classify tree didn't see the fix.
+- realize_classify is per-realize-root.  Many roots share the
+  same sub-graph; only the roots that explicitly walk the
+  rank-changing RESHAPE get the source-realize.  Others reuse
+  the cached unsplit program.
+
+The right fix lives deeper: in materialize.c's `visit()`, when
+about to emit a UOP_RESHAPE KProgOp with src0_dims != out_dims,
+force a kernel boundary BEFORE the RESHAPE by recursively
+calling `emit_kernel_for_boundary` on the source's loc.  This
+mid-walk boundary insertion is the missing primitive.
+
+Sequencing:
+- **F-8e-12-attempt-1** (this turn): realize_classify approach
+  reverted -- doesn't bypass kernel-program-cache hash-cons.
+- **F-8e-12-attempt-2** (next turn): visit()-level surgery in
+  materialize.c.  Add a helper `emit_intermediate_boundary`
+  that takes a heap loc and returns the materialized TenDesc's
+  KSRC_AS_INPUT slot.  Use at the UOP_RESHAPE handler when
+  src0_dims != out_dims.  Risk: the kernel-program-cache logic
+  has to be re-validated for the resulting smaller kernels.
+- Alternative for next turn: invalidate the kernel-program-cache
+  for kernels containing rank-changing RESHAPE before
+  realize_classify runs.  Simpler but blunter.
