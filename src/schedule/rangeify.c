@@ -1174,6 +1174,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
       if (v == 0) RBAIL_MID("RESHAPE src 0");
+      // Identity-pass when source is via_rngs: rngs already baked in
+      // the chain's RESHAPE transform via flat-roundtrip.
+      if (SRC_VIA_RNGS(raw, pre)) {
+        prog_value[i] = v;
+        via_rngs[i] = 1;
+        continue;
+      }
       int shape_changes = (p->src0_ndim != p->out_ndim);
       if (!shape_changes) {
         for (u32 d = 0; d < p->src0_ndim; d++) {
@@ -1535,6 +1542,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     }
     // Resolve up to 2 sources, picking the scope-appropriate input load.
     u32 src_v[2] = {0, 0};
+    int all_via_rngs = (p->n_src > 0);
     for (u8 s = 0; s < p->n_src && s < 2; s++) {
       u32 raw = p->src[s];
       if (KSRC_IS_INPUT(raw)) {
@@ -1543,6 +1551,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       } else {
         src_v[s] = prog_value[KSRC_INDEX(raw)];
       }
+      if (!SRC_VIA_RNGS(raw, pre)) all_via_rngs = 0;
     }
     u8 sop;
     switch (p->opcode) {
@@ -1564,6 +1573,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     } else {
       RBAIL_MID("ALU n_src not in {1,2}");
     }
+    if (all_via_rngs) via_rngs[i] = 1;
   }
 
   // 5. STORE the final value, BUFFERIZE the kernel.  BUFFERIZE
