@@ -877,14 +877,30 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // ranges become fresh PLACEHOLDER/VIRT ranges that the wrap
           // writes from a flat-index roundtrip of the LOOP iters).
           //
-          // MVP coverage: source must be a direct contig input load
-          // (KSRC_IS_INPUT(raw) and the input view is contig).  Other
-          // sources (prog_value chains, non-contig views) bail and
-          // fall through to cpu_interpret as before.
+          // MVP coverage requires:
+          // 1. Source is a direct contig input load (KSRC_IS_INPUT,
+          //    input_view contiguous, src0_dims numel matches view).
+          // 2. RESHAPE's OUTPUT shape (out_dims) matches the kernel's
+          //    output shape (os->dims) exactly.  Otherwise the LOOP
+          //    iters traverse the kernel's full output space (which
+          //    may be a downstream-EXPANDed higher-rank shape), and
+          //    using them as the S_RESHAPE_V "output side" mis-indexes
+          //    the RESHAPE's pre-EXPAND value (e.g. softmax's
+          //    [2,1] -> [2] -> EXPAND[2,3] chain caused row-mixing).
+          //
+          // Other cases (prog_value chains, non-contig views, RESHAPE
+          // followed by EXPAND/movement) bail and fall through to
+          // cpu_interpret as before.
           int can_use_v = KSRC_IS_INPUT(raw)
                        && p->src0_ndim <= MAX_DIM
                        && p->out_ndim  <= MAX_DIM
+                       && p->out_ndim  == os->ndim
                        && (1 + (u32)os->ndim + (u32)p->src0_ndim) <= SCALAR_MAX_SRC;
+          if (can_use_v) {
+            for (u32 d = 0; d < p->out_ndim; d++) {
+              if (p->out_dims[d] != os->dims[d]) { can_use_v = 0; break; }
+            }
+          }
           if (can_use_v) {
             u32 slot = KSRC_INDEX(raw);
             View const *src_view = &ke->input_views[slot];
