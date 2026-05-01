@@ -1105,9 +1105,39 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
                                  os->ndim, in_off);
+        } else if (input_rngs_post[i].ndim == v->shape.ndim
+                   && v->shape.ndim > 0) {
+          // RNGS-BASED FALLBACK (post-scope analog of the pre-scope
+          // branch above).  The backward walk computed input_rngs_post
+          // = per-axis iter expressions for this input.  Build the
+          // address symbolically via S_INDEX_E.  Handles the case where
+          // a chain (PERMUTE/RESHAPE/EXPAND/...) makes v.shape and
+          // os.shape incompatible by direct prefix/suffix matching.
+          via_rngs_post[i] = 1;
+          RngsCtx const *r = &input_rngs_post[i];
+          u32 acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
+          int bailed = 0;
+          for (u32 d = 0; d < r->ndim; d++) {
+            if (v->strides[d] < 0) { bailed = 1; break; }
+            if (v->strides[d] == 0) continue;
+            u32 t = r->refs[d];
+            if (v->strides[d] != 1) {
+              u32 c = emit_iconst(ke, (i64)v->strides[d]);
+              t = emit_ibinop(ke, S_IMUL, t, c);
+            }
+            acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+          }
+          if (bailed) {
+            RBAIL_MID("post-INDEX rngs negative stride");
+          }
+          if (acc == 0) acc = emit_iconst(ke, 0);
+          u32 src[2] = {param, acc};
+          idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
         } else {
           if (getenv("THVM_RANGEIFY_BAIL")) {
-            fprintf(stderr, "  post-INDEX broadcast no prefix/suffix match\n");
+            fprintf(stderr, "  post-INDEX broadcast no prefix/suffix match"
+                            " v.shape.ndim=%u rngs.ndim=%u\n",
+                    v->shape.ndim, input_rngs_post[i].ndim);
           }
           RBAIL_MID("post-INDEX broadcast unmatched");
         }
