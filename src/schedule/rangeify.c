@@ -1214,11 +1214,48 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (v == 0) RBAIL_MID("SHRINK/PAD src 0");
       u32 ndim = p->out_ndim;
       if (ndim == 0) ndim = os->ndim;
-      if (ndim > 3 || ndim > os->ndim) RBAIL_MID("SHRINK/PAD ndim > 3");
-      // Pack offsets.  S_SHRINK uses u16 per axis (matches
-      // pad_widths' begin field).  S_PAD packs (begin u8, src_dim
-      // u8) per axis -- src_dim from p->src0_dims is what the
-      // dispatcher needs for the bounds check.
+      if (ndim > 3) RBAIL_MID("SHRINK/PAD ndim > 3");
+      // SHRINK fusion path: when the source is an S_RESHAPE_V wrap and
+      // ndim > os->ndim, the SHRINK operates on the rank-promoted
+      // intermediate.  The intermediate axes don't have LOOP iters of
+      // their own; they're driven by RESHAPE_V's flat-roundtrip.  Fuse
+      // by re-emitting RESHAPE_V with shifted output refs (S_IADD wraps
+      // the matching LOOP range with the SHRINK's begin).  S_PAD also
+      // needs a bounds-check via S_IWHERE -- that's the next step;
+      // for now only fuse SHRINK.
+      if (p->opcode == UOP_SHRINK && ndim > os->ndim
+          && ke->scalar_uops[v].op == S_RESHAPE_V) {
+        ScalarUop const *rv = &ke->scalar_uops[v];
+        u32 n_out_orig = (u32)(rv->extra & 0xFFu);
+        if (n_out_orig != ndim) {
+          // Fuse only when SHRINK ndim == RESHAPE_V's n_out (each
+          // intermediate axis has a corresponding RESHAPE_V output ref).
+          RBAIL_MID("SHRINK fusion: ndim != RESHAPE_V n_out");
+        }
+        u32 n_in   = (u32)rv->src_count - 1 - n_out_orig;
+        // Build new output refs: for each axis d, if begin[d] != 0,
+        // wrap the original ref in S_IADD; else keep the original.
+        u32 new_out_refs[MAX_DIM];
+        for (u32 d = 0; d < n_out_orig; d++) {
+          u32 begin = p->pad_widths[2 * d];
+          u32 orig_ref = rv->src[1 + d];
+          if (begin == 0) {
+            new_out_refs[d] = orig_ref;
+          } else {
+            u32 c_ic = emit_iconst(ke, (i64)begin);
+            new_out_refs[d] = emit_ibinop(ke, S_IADD, orig_ref, c_ic);
+          }
+        }
+        u32 src_arr_v[SCALAR_MAX_SRC] = {rv->src[0]};
+        for (u32 d = 0; d < n_out_orig; d++) src_arr_v[1 + d] = new_out_refs[d];
+        for (u32 d = 0; d < n_in; d++) src_arr_v[1 + n_out_orig + d] = rv->src[1 + n_out_orig + d];
+        u8  src_count = (u8)(1 + n_out_orig + n_in);
+        u64 extra_v   = (u64)n_out_orig & 0xFFu;
+        prog_value[i] = rangeify_emit(ke, S_RESHAPE_V, p->dtype,
+                                      src_count, src_arr_v, extra_v);
+        continue;
+      }
+      if (ndim > os->ndim) RBAIL_MID("SHRINK/PAD ndim > 3");
       u8  sop;
       u64 extra = 0;
       if (p->opcode == UOP_SHRINK) {
@@ -1230,8 +1267,6 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
       } else {
         sop = S_PAD;
-        // Pack (begin u8, src_dim u8).  Caps both at 255; bail if
-        // exceeded.
         for (u32 d = 0; d < ndim; d++) {
           u32 begin   = p->pad_widths[2 * d];
           u32 src_dim = p->src0_dims [d];
@@ -1240,7 +1275,6 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           extra |= ((u64)src_dim & 0xFFu) << (16 * d + 8);
         }
       }
-      // src[0] = body, src[1..ndim] = LOOP ranges (the ones to shift).
       u32 src_arr[SCALAR_MAX_SRC] = {v};
       for (u32 d = 0; d < ndim; d++) src_arr[1 + d] = loop_ranges[d];
       prog_value[i] = rangeify_emit(ke, sop, p->dtype, (u8)(1 + ndim),

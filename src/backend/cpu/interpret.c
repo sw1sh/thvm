@@ -698,11 +698,16 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       return v;
     }
     case S_RESHAPE_V: {
-      // Split-src form: src[1..1+N_out) are OUTPUT range refs whose
-      // iters drive flat_idx; src[1+N_out..src_count) are INPUT range
-      // refs whose iters get written from the decomposition.  Each
-      // range's extent is read from its S_RANGE.extra.  N_out lives
-      // in extra's low byte.  See thvm.h ScalarOp::S_RESHAPE_V.
+      // Split-src form: src[1..1+N_out) are OUTPUT iter refs whose
+      // values drive flat_idx; src[1+N_out..src_count) are INPUT range
+      // refs whose iters get written from the decomposition.  N_out
+      // lives in extra's low byte.  See thvm.h ScalarOp::S_RESHAPE_V.
+      //
+      // Output refs accept ANY iter expression (S_RANGE direct, S_IADD
+      // for shifted iters from a fused SHRINK, etc.).  The expression's
+      // value is read via eval_scalar; the extent is found by walking
+      // to the underlying S_RANGE (for S_IADD/S_ISUB the extent comes
+      // from the operand that's a S_RANGE).
       u32 n_out = (u32)(u->extra & 0xFFu);
       u32 nrest = (u32)u->src_count - 1;
       if (n_out == 0 || n_out > nrest) return 0;
@@ -710,9 +715,19 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       u64 flat_idx = 0;
       u64 out_stride = 1;
       for (i32 d = (i32)n_out - 1; d >= 0; d--) {
-        u32 rng_id = u->src[1 + d];
-        u32 iter   = c->range_iter[rng_id];
-        u32 ext    = (u32)(c->ke->scalar_uops[rng_id].extra & 0xFFFFFFFFu);
+        u32 ref = u->src[1 + d];
+        ScalarUop const *ru = &c->ke->scalar_uops[ref];
+        u32 iter = (u32)eval_scalar(c, ref);
+        // Find the underlying S_RANGE for the extent.  Direct S_RANGE
+        // hits the fast path; S_IADD/S_ISUB walk one operand.
+        u32 ext_op = ref;
+        if (ru->op == S_IADD || ru->op == S_ISUB) {
+          ScalarUop const *a = &c->ke->scalar_uops[ru->src[0]];
+          ScalarUop const *b = &c->ke->scalar_uops[ru->src[1]];
+          ext_op = (a->op == S_RANGE) ? ru->src[0]
+                 : (b->op == S_RANGE) ? ru->src[1] : ref;
+        }
+        u32 ext = (u32)(c->ke->scalar_uops[ext_op].extra & 0xFFFFFFFFu);
         flat_idx  += (u64)iter * out_stride;
         out_stride *= (ext != 0 ? ext : 1);
       }
