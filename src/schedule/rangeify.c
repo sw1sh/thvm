@@ -971,18 +971,46 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // -- the canonical loop_strides would silently mis-address.
         // PAD/SHRINK consumers do their own iter shift + bounds gate,
         // so a size mismatch on those inputs is intentional.
-        u32 strides_u32[MAX_DIM];
+        int shape_mismatch = 0;
         for (u32 d = 0; d < os->ndim; d++) {
           if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0
               && !input_via_padshrink[i]) {
-            RBAIL_MID("pre-INDEX shape mismatch (non-broadcast)");
+            shape_mismatch = 1;
+            break;
           }
+        }
+        // Try the rngs-based fallback when shape mismatches but rngs
+        // are extent-compatible with v.shape per axis (so addresses
+        // computed from rngs * v.strides land within v's flat bounds).
+        // The extent check is what makes this safe: without it, rngs
+        // iterating over the larger os.dim sizes would address past
+        // v's bounds and break tests like nn/attention-identity-q.
+        if (shape_mismatch && input_rngs_pre[i].ndim == v->shape.ndim
+            && v->shape.ndim > 0) {
+          int ext_ok = 1;
+          for (u32 d = 0; d < v->shape.ndim; d++) {
+            if (v->strides[d] == 0) continue;  // broadcast axis is fine
+            u32 ref = input_rngs_pre[i].refs[d];
+            if (ref == 0) { ext_ok = 0; break; }
+            ScalarUop const *ru = &ke->scalar_uops[ref];
+            if (ru->op != S_RANGE) { ext_ok = 0; break; }
+            u32 extent = (u32)(ru->extra & 0xFFFFFFFFu);
+            if (extent != v->shape.dims[d]) { ext_ok = 0; break; }
+          }
+          if (ext_ok) goto pre_index_rngs_fallback;
+        }
+        if (shape_mismatch) {
+          RBAIL_MID("pre-INDEX shape mismatch (non-broadcast)");
+        }
+        u32 strides_u32[MAX_DIM];
+        for (u32 d = 0; d < os->ndim; d++) {
           strides_u32[d] = (u32)v->strides[d];
         }
         idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
                                os->ndim, in_off);
       } else if (input_rngs_pre[i].ndim == v->shape.ndim
                  && v->shape.ndim > 0) {
+       pre_index_rngs_fallback:
         via_rngs_pre[i] = 1;
         // RNGS-BASED FALLBACK (Phase 3 of apply_movement_op port).
         // The backward walk computed input_rngs_pre[i] = per-axis iter
