@@ -990,6 +990,56 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           break;
         }
+        case UOP_RESHAPE: {
+          // Numel-preserving reshape A -> B.  Tinygrad's _apply_reshape
+          // (indexing.py:113-125): flat = sum(out_iter[d] * B_strides[d]);
+          // in_iter[d] = (flat / A_strides[d]) % A_dims[d].
+          // Built symbolically over S_IADD/S_IMUL/S_IDIV/S_IMOD.
+          if (p->src0_ndim == 0 || p->out_ndim == 0
+              || p->src0_ndim > MAX_DIM || p->out_ndim > MAX_DIM
+              || in_rngs.ndim != p->out_ndim) {
+            // Identity-propagate when shapes don't fit; the input load
+            // bail-fallback handles incorrect addressing.
+            break;
+          }
+          // Build flat = sum(out_rngs[d] * B_strides[d]) where B_strides
+          // are row-major over p->out_dims.
+          u32 b_strides[MAX_DIM];
+          row_major_strides(p->out_dims, p->out_ndim, b_strides);
+          u32 flat = 0;
+          for (u32 d = 0; d < p->out_ndim; d++) {
+            if (b_strides[d] == 0) continue;
+            u32 t = in_rngs.refs[d];
+            if (b_strides[d] != 1) {
+              u32 c = emit_iconst(ke, (i64)b_strides[d]);
+              t = emit_ibinop(ke, S_IMUL, t, c);
+            }
+            if (flat == 0) flat = t;
+            else           flat = emit_ibinop(ke, S_IADD, flat, t);
+          }
+          if (flat == 0) flat = emit_iconst(ke, 0);
+          // Decompose flat into in_rngs[d] = (flat / A_strides[d]) %
+          // A_dims[d] over p->src0_dims (row-major).
+          u32 a_strides[MAX_DIM];
+          row_major_strides(p->src0_dims, p->src0_ndim, a_strides);
+          RngsCtx new_rngs = {0};
+          new_rngs.ndim = p->src0_ndim;
+          for (u32 d = 0; d < p->src0_ndim; d++) {
+            u32 coord = flat;
+            if (a_strides[d] != 1) {
+              u32 c = emit_iconst(ke, (i64)a_strides[d]);
+              coord = emit_ibinop(ke, S_IDIV, coord, c);
+            }
+            if (d != 0) {
+              u32 dc = emit_iconst(ke, (i64)p->src0_dims[d]);
+              coord = emit_ibinop(ke, S_IMOD, coord, dc);
+            }
+            new_rngs.refs[d] = coord;
+          }
+          new_rngs.valid_mask = in_rngs.valid_mask;  // preserve mask
+          in_rngs = new_rngs;
+          break;
+        }
         case UOP_PAD: {
           // output[i] = input[i - begin] when in bounds, else 0.
           // Tinygrad: r if (s==0 and e==0) else
