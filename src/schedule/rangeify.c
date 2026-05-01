@@ -1582,38 +1582,96 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         via_rngs[i] = 1;
         continue;
       }
-      // SHRINK fusion path: when the source is an S_RESHAPE_V wrap and
-      // ndim > os->ndim, the SHRINK operates on the rank-promoted
-      // intermediate.  The intermediate axes don't have LOOP iters of
-      // their own; they're driven by RESHAPE_V's flat-roundtrip.  Fuse
-      // by re-emitting RESHAPE_V with shifted output refs (S_IADD wraps
-      // the matching LOOP range with the SHRINK's begin).  S_PAD also
-      // needs a bounds-check via S_IWHERE -- that's the next step;
-      // for now only fuse SHRINK.
-      if (p->opcode == UOP_SHRINK && ndim > os->ndim
+      // SHRINK/PAD fusion path: when the source is an S_RESHAPE_V wrap
+      // and ndim > os->ndim, the SHRINK/PAD operates on a rank-promoted
+      // intermediate.  Fuse by re-emitting RESHAPE_V with adjusted
+      // output refs.
+      //
+      // SHRINK is straightforward: shift each output ref by begin via
+      // S_IADD.
+      //
+      // PAD is subtler: when PAD inflates a size-1 axis to size-N
+      // (src_dim=1 -> out_dim=N), the new axis isn't driven by any
+      // LOOP iter from the kernel's outer scope -- the corresponding
+      // RESHAPE_V output ref is a placeholder VIRT(extent=1) whose
+      // iter is always 0.  For the conv2d-style chain, that new axis
+      // semantically corresponds to the reduce axis (kw position):
+      // axis is summed away by a downstream SUM_REDUCE.  When
+      // out_dim == reduce_size we route this axis's orig_ref through
+      // reduce_range and bounds-check reduce_range vs [begin,
+      // begin+src_dim).  Per-axis pass-through / shift / reduce-route
+      // decisions; if any axis can't be classified, bail.
+      if ((p->opcode == UOP_SHRINK || p->opcode == UOP_PAD)
+          && ndim > os->ndim
           && ke->scalar_uops[v].op == S_RESHAPE_V) {
         ScalarUop const *rv = &ke->scalar_uops[v];
         u32 n_out_orig = (u32)(rv->extra & 0xFFu);
         if (n_out_orig != ndim) {
-          // Fuse only when SHRINK ndim == RESHAPE_V's n_out (each
-          // intermediate axis has a corresponding RESHAPE_V output ref).
-          RBAIL_MID("SHRINK fusion: ndim != RESHAPE_V n_out");
+          RBAIL_MID("SHRINK/PAD fusion: ndim != RESHAPE_V n_out");
         }
         u32 n_in   = (u32)rv->src_count - 1 - n_out_orig;
-        // Build new output refs: for each axis d, if begin[d] != 0,
-        // wrap the original ref in S_IADD; else keep the original.
         u32 new_out_refs[MAX_DIM];
+        u32 valid_mask = 0;
+        int can_fuse = 1;
         for (u32 d = 0; d < n_out_orig; d++) {
-          u32 begin = p->pad_widths[2 * d];
+          u32 begin    = p->pad_widths[2 * d];
+          u32 src_dim  = p->src0_dims [d];
+          u32 out_dim  = p->out_dims  [d];
           u32 orig_ref = rv->src[1 + d];
-          if (begin == 0) {
-            new_out_refs[d] = orig_ref;
+          if (p->opcode == UOP_SHRINK) {
+            if (begin == 0) {
+              new_out_refs[d] = orig_ref;
+            } else {
+              u32 c_ic = emit_iconst(ke, (i64)begin);
+              new_out_refs[d] = emit_ibinop(ke, S_IADD, orig_ref, c_ic);
+            }
           } else {
-            u32 c_ic = emit_iconst(ke, (i64)begin);
-            new_out_refs[d] = emit_ibinop(ke, S_IADD, orig_ref, c_ic);
+            // PAD per-axis classification.
+            if (begin == 0 && src_dim == out_dim) {
+              new_out_refs[d] = orig_ref;
+              continue;
+            }
+            u32 ref_iter;
+            if (src_dim == out_dim) {
+              // Same-size axis with begin offset -- SHRINK-style shift.
+              ref_iter = orig_ref;
+            } else if (src_dim < out_dim && reduce_size != 0
+                       && out_dim == reduce_size) {
+              // Rank-promoted axis whose extent matches reduce_size.
+              // Use reduce_range as the iter and bounds-check it.
+              ref_iter = reduce_range;
+            } else {
+              can_fuse = 0; break;
+            }
+            // Shift back by begin: source coord = ref_iter - begin.
+            if (begin > 0) {
+              u32 c = emit_iconst(ke, (i64)begin);
+              new_out_refs[d] = emit_ibinop(ke, S_ISUB, ref_iter, c);
+            } else {
+              new_out_refs[d] = ref_iter;
+            }
+            // Bounds: ref_iter < begin+src_dim AND ref_iter >= begin.
+            u32 hi_lim  = emit_iconst(ke, (i64)(begin + src_dim));
+            u32 axis_ok = emit_ibinop(ke, S_ILT, ref_iter, hi_lim);
+            if (begin > 0) {
+              u32 lo_lim = emit_iconst(ke, (i64)begin);
+              u32 lt_lo  = emit_ibinop(ke, S_ILT, ref_iter, lo_lim);
+              u32 one    = emit_iconst(ke, 1);
+              u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
+              axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
+            }
+            if (valid_mask == 0) valid_mask = axis_ok;
+            else valid_mask = emit_ibinop(ke, S_IAND, valid_mask, axis_ok);
           }
         }
-        u32 src_arr_v[SCALAR_MAX_SRC] = {rv->src[0]};
+        if (!can_fuse) RBAIL_MID("PAD fusion: per-axis classification failed");
+        u32 body = rv->src[0];
+        if (p->opcode == UOP_PAD && valid_mask != 0) {
+          u32 zero = emit_iconst(ke, 0);
+          u32 wsrc[3] = {valid_mask, body, zero};
+          body = rangeify_emit(ke, S_IWHERE, p->dtype, 3, wsrc, 0);
+        }
+        u32 src_arr_v[SCALAR_MAX_SRC] = {body};
         for (u32 d = 0; d < n_out_orig; d++) src_arr_v[1 + d] = new_out_refs[d];
         for (u32 d = 0; d < n_in; d++) src_arr_v[1 + n_out_orig + d] = rv->src[1 + n_out_orig + d];
         u8  src_count = (u8)(1 + n_out_orig + n_in);
