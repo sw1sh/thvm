@@ -192,3 +192,317 @@ static const Renderer METAL_RENDERER = {
 char *cg_emit_metal(KernelEntry const *ke) {
   return cg_emit(ke, &METAL_RENDERER);
 }
+
+static int rmt_dtype_supported(u32 dtype) {
+  return dtype == DT_FP32;
+}
+
+static int rmt_axis_shape_supported(CtKernelInfo const *info) {
+  u32 n_global = 0;
+  u32 n_local  = 0;
+  for (u32 i = 0; i < info->n_axes; i++) {
+    if (info->axis_types[i] == KAX_GLOBAL) {
+      n_global++;
+    } else if (info->axis_types[i] == KAX_LOCAL) {
+      n_local++;
+    } else {
+      return 0;
+    }
+  }
+  return n_global == 1 && n_local == 1;
+}
+
+static int rmt_scalar_op_supported(ScalarUop const *u) {
+  switch (u->op) {
+    case S_NONE:
+    case S_RANGE:
+    case S_DEFINE_PARAM:
+    case S_DEFINE_OUTPUT:
+    case S_INDEX:
+    case S_INDEX_E:
+    case S_LOAD:
+    case S_STORE:
+    case S_BUFFERIZE:
+    case S_ADD:
+    case S_MUL:
+    case S_NEG:
+    case S_CMPLT:
+    case S_CMPEQ:
+    case S_CONST:
+    case S_ICONST:
+    case S_IADD:
+    case S_ISUB:
+    case S_IMUL:
+    case S_IDIV:
+    case S_IMOD:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int rmt_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
+  if (!ct_collect_kernel_info(ke, out)) {
+    return 0;
+  }
+  if (out->scalar.has_reduce || !rmt_axis_shape_supported(out)) {
+    return 0;
+  }
+  if (!rmt_dtype_supported(ke->output_dtype)) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (!rmt_dtype_supported(ke->input_dtypes[i])) {
+      return 0;
+    }
+  }
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    ScalarUop const *u = &ke->scalar_uops[i];
+    if (!rmt_scalar_op_supported(u)) {
+      return 0;
+    }
+    if (cs_op_carries_kernel_dtype(u) && !rmt_dtype_supported(u->dtype)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id);
+
+static int rmt_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
+  ScalarUop const *u = &ke->scalar_uops[idx_id];
+  if (u->op == S_INDEX_E) {
+    return rmt_emit_uint_expr(b, ke, u->src[1]);
+  }
+  if (u->op != S_INDEX) {
+    return 0;
+  }
+  ScalarUop const *child = &ke->scalar_uops[u->src[0]];
+  int wrote = 0;
+  if (child->op == S_INDEX) {
+    if (!rmt_emit_index_offset(b, ke, u->src[0])) {
+      return 0;
+    }
+    wrote = 1;
+  } else if (child->op != S_DEFINE_PARAM && child->op != S_DEFINE_OUTPUT) {
+    return 0;
+  }
+
+  u32 stride0 = (u32)((u->extra >>  0) & 0xFFFFu);
+  u32 stride1 = (u32)((u->extra >> 16) & 0xFFFFu);
+  u32 stride2 = (u32)((u->extra >> 32) & 0xFFFFu);
+  u32 offset  = (u32)((u->extra >> 48) & 0xFFFFu);
+  u32 nrng = (u32)u->src_count - 1;
+  u32 strides[3] = {stride0, stride1, stride2};
+  if (offset != 0) {
+    if (wrote) {
+      cg_append(b, " + ");
+    }
+    cg_append(b, "%uu", offset);
+    wrote = 1;
+  }
+  for (u32 d = 0; d < nrng && d < 3; d++) {
+    if (strides[d] == 0) {
+      continue;
+    }
+    u32 rng_id = u->src[1 + d];
+    if (wrote) {
+      cg_append(b, " + ");
+    }
+    if (strides[d] == 1) {
+      cg_append(b, "_v%u", rng_id);
+    } else {
+      cg_append(b, "%uu*_v%u", strides[d], rng_id);
+    }
+    wrote = 1;
+  }
+  if (!wrote) {
+    cg_append(b, "0u");
+  }
+  return 1;
+}
+
+static int rmt_index_param_slot(KernelEntry const *ke, u32 idx_id,
+                                u32 *slot_out) {
+  ScalarUop const *u = &ke->scalar_uops[idx_id];
+  if (u->op != S_INDEX && u->op != S_INDEX_E) {
+    return 0;
+  }
+  ScalarUop const *base = &ke->scalar_uops[u->src[0]];
+  while (base->op == S_INDEX || base->op == S_INDEX_E) {
+    u = base;
+    base = &ke->scalar_uops[u->src[0]];
+  }
+  if (base->op != S_DEFINE_PARAM) {
+    return 0;
+  }
+  *slot_out = (u32)base->extra;
+  return *slot_out < ke->n_inputs;
+}
+
+static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
+  ScalarUop const *u = &ke->scalar_uops[op_id];
+  switch (u->op) {
+    case S_RANGE:
+      cg_append(b, "_v%u", op_id);
+      return 1;
+    case S_ICONST:
+      cg_append(b, "%uu", (u32)u->extra);
+      return 1;
+    case S_IADD:
+    case S_ISUB:
+    case S_IMUL:
+    case S_IDIV:
+    case S_IMOD: {
+      const char *op = (u->op == S_IADD) ? "+"
+                     : (u->op == S_ISUB) ? "-"
+                     : (u->op == S_IMUL) ? "*"
+                     : (u->op == S_IDIV) ? "/"
+                     : "%";
+      cg_append(b, "(");
+      if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, " %s ", op);
+      if (!rmt_emit_uint_expr(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, ")");
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
+  ScalarUop const *u = &ke->scalar_uops[op_id];
+  switch (u->op) {
+    case S_CONST: {
+      f32 v;
+      u32 bits = (u32)u->extra;
+      memcpy(&v, &bits, sizeof(v));
+      cg_append(b, "%.17gf", v);
+      return 1;
+    }
+    case S_LOAD: {
+      u32 slot = 0;
+      if (!rmt_index_param_slot(ke, u->src[0], &slot)) {
+        return 0;
+      }
+      cg_append(b, "in%u[", slot);
+      if (!rmt_emit_index_offset(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "]");
+      return 1;
+    }
+    case S_ADD:
+    case S_MUL:
+    case S_CMPLT:
+    case S_CMPEQ: {
+      const char *op = (u->op == S_ADD) ? "+"
+                     : (u->op == S_MUL) ? "*"
+                     : (u->op == S_CMPLT) ? "<"
+                     : "==";
+      cg_append(b, "(");
+      if (!rmt_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, " %s ", op);
+      if (!rmt_emit_value(b, ke, u->src[1])) {
+        return 0;
+      }
+      if (u->op == S_CMPLT || u->op == S_CMPEQ) {
+        cg_append(b, ") ? 1.0f : 0.0f");
+      } else {
+        cg_append(b, ")");
+      }
+      return 1;
+    }
+    case S_NEG:
+      cg_append(b, "-(");
+      if (!rmt_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ")");
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+char *cg_emit_tile_metal(KernelEntry const *ke) {
+  CtKernelInfo info;
+  if (!rmt_collect_kernel_info(ke, &info)) {
+    return NULL;
+  }
+
+  CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
+              .program_dtype = DT_FP32, .ke = ke };
+  if (!b.buf) {
+    return NULL;
+  }
+
+  cg_append(&b, "#include <metal_stdlib>\nusing namespace metal;\n\n");
+  cg_append(&b, "kernel void k(device float *out [[buffer(0)]]");
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    cg_append(&b, ",\n              device const float *in%u [[buffer(%u)]]",
+              i, i + 1);
+  }
+  cg_append(&b, ",\n              uint3 _tgid3 [[threadgroup_position_in_grid]],");
+  cg_append(&b, "\n              uint3 _ltid3 [[thread_position_in_threadgroup]]) {\n");
+  cg_append(&b, "  uint _tgid = _tgid3.x;\n");
+  cg_append(&b, "  uint _ltid = _ltid3.x;\n");
+
+  for (u32 d = 0; d < info.n_axes; d++) {
+    if (info.axis_types[d] == KAX_GLOBAL) {
+      cg_append(&b, "  uint _ta%u = _tgid;\n", d);
+    } else if (info.axis_types[d] == KAX_LOCAL) {
+      cg_append(&b, "  uint _ta%u = _ltid;\n", d);
+    } else {
+      free(b.buf);
+      return NULL;
+    }
+  }
+
+  cg_append(&b, "  bool _ok = true");
+  for (u32 d = 0; d < info.n_axes; d++) {
+    cg_append(&b, " && _ta%u < %uu", d, info.axis_extents[d]);
+  }
+  cg_append(&b, ";\n");
+  cg_append(&b, "  threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+  cg_append(&b, "  if (!_ok) return;\n");
+  cg_append(&b, "  uint _tk = 0u;\n");
+  for (u32 d = 0; d < info.n_axes; d++) {
+    cg_append(&b, "  _tk = _tk * %uu + _ta%u;\n", info.axis_extents[d], d);
+  }
+
+  u32 loop_strides[MAX_DIM] = {0};
+  if (info.scalar.n_loops > 0) {
+    loop_strides[info.scalar.n_loops - 1] = 1;
+    for (i32 d = (i32)info.scalar.n_loops - 2; d >= 0; d--) {
+      loop_strides[d] = loop_strides[d + 1] * info.scalar.loop_extents[d + 1];
+    }
+  }
+  for (u32 d = 0; d < info.scalar.n_loops; d++) {
+    cg_append(&b, "  uint _v%u = (_tk / %uu) %% %uu;\n",
+              info.scalar.loop_ids[d], loop_strides[d],
+              info.scalar.loop_extents[d]);
+  }
+
+  ScalarUop const *st = &ke->scalar_uops[info.scalar.store_id];
+  cg_append(&b, "  out[");
+  if (!rmt_emit_index_offset(&b, ke, st->src[0])) {
+    free(b.buf);
+    return NULL;
+  }
+  cg_append(&b, "] = ");
+  if (!rmt_emit_value(&b, ke, st->src[1])) {
+    free(b.buf);
+    return NULL;
+  }
+  cg_append(&b, ";\n}\n");
+  return b.buf;
+}

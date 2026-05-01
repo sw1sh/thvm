@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: Metal tile source renderer
+
+Added `cg_emit_tile_metal` for f32 `LOCAL`/`GLOBAL` tile plans.  The
+renderer maps global tile axes to `threadgroup_position_in_grid`, local
+tile axes to `thread_position_in_threadgroup`, and emits a threadgroup
+barrier before the scalar body.  Backend dispatch wiring is still a
+follow-up.
+
 ### Added: generated tile C reductions
 
 Generated CPU tile C now accepts reduction tile plans when the scalar

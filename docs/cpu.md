@@ -211,8 +211,11 @@ verification).
 ## Comparison with Metal
 
 The Metal backend at [src/backend/metal/_.m](../src/backend/metal/_.m)
-runs the same codegen pipeline (`cg_emit_metal`) but the dispatch
-shape is asymmetric. `cpu_dispatch_kernel` delegates to a
+runs the KProgOp codegen pipeline (`cg_emit_metal`) but the dispatch
+shape is asymmetric. A TileUop MSL source renderer
+(`cg_emit_tile_metal`) exists for f32 `LOCAL`/`GLOBAL` tile plans, but
+the Metal backend does not dispatch through it yet. `cpu_dispatch_kernel`
+delegates to a
 `cpu_jit_dispatch` helper that owns the JIT decision; if the JIT
 bails the dispatcher falls through to a separate `cpu_interpret`.
 `metal_dispatch_kernel` inlines the same decision in its own body:

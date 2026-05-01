@@ -299,6 +299,16 @@ int main(void) {
     CHECK(strstr(local_global_src, "#pragma clang loop unroll_count") == NULL);
     free(local_global_src);
   }
+  char *metal_tile_src = cg_emit_tile_metal(ke);
+  CHECK(metal_tile_src != NULL);
+  if (metal_tile_src != NULL) {
+    CHECK(strstr(metal_tile_src, "threadgroup_position_in_grid") != NULL);
+    CHECK(strstr(metal_tile_src, "thread_position_in_threadgroup") != NULL);
+    CHECK(strstr(metal_tile_src, "threadgroup_barrier") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _ta0 = _tgid;") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _ta1 = _ltid;") != NULL);
+    free(metal_tile_src);
+  }
 
   TEST_BEGIN("tile-graph/group-reduce-axis-falls-back-from-c-renderer");
   memset(ke->axes, 0, sizeof(KernelAxes));

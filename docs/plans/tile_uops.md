@@ -41,6 +41,12 @@ that future renderers can lower differently for CPU and Metal.
 - tile C accepts `REDUCE`/`UNROLL`/`GROUP_REDUCE` axes only as
   reduction-schedule metadata on scalar graphs that contain a reducer;
   those axes do not become outer output loops yet;
+- `cg_emit_tile_metal` emits source for f32 `LOCAL`/`GLOBAL`
+  elementwise tile plans, mapping `GLOBAL` to
+  `threadgroup_position_in_grid`, `LOCAL` to
+  `thread_position_in_threadgroup`, and emitting a threadgroup
+  barrier before the scalar body; backend dispatch is not wired to
+  this source renderer yet;
 - f32/f64 `S_CAST` is generated with per-input and output pointer
   types, so scalar C no longer requires one uniform kernel dtype for
   simple cast chains;
@@ -95,8 +101,8 @@ interpreter for focused validation and profiling.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
-   threadgroup/grid ids and uses `TILE_BARRIER`.
+2. Wire `cg_emit_tile_metal` into Metal backend dispatch with
+   concrete threadgroup/grid sizing.
 3. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
    kernels.
 4. Add `TILE_MMA` only after reductions and local-memory tiling are
