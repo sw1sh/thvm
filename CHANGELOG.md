@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: generated tile C reductions
+
+Generated CPU tile C now accepts reduction tile plans when the scalar
+graph contains `S_REDUCE_SUM` or `S_REDUCE_MAX`, treating
+`REDUCE`/`UNROLL`/`GROUP_REDUCE` axes as schedule metadata while the
+scalar expression emits the accumulator loop.
+
 ### Added: generated tile C movement and cast coverage
 
 The generated CPU tile renderer now has focused execution tests for

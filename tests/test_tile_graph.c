@@ -15,6 +15,8 @@
 #include "../src/thvm.c"
 #include "test.h"
 
+#define TEST_REDUCE_NO_TAIL 0xFFFFFFFFu
+
 static u32 build_scalar_add_graph(KernelEntry *ke, u32 extent) {
   u32 r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
               ((u64)S_AXIS_LOOP << 32) | (u64)extent);
@@ -106,6 +108,52 @@ static u32 build_scalar_cast64_to32_graph(KernelEntry *ke) {
   u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, cast);
   u32 buf_src[2] = {sto, r0};
   return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+}
+
+static u32 build_scalar_reduce_sum_graph(KernelEntry *ke) {
+  kernel_inputs_reserve(ke, 1);
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 4;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 1;
+
+  u32 r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                              ((u64)S_AXIS_LOOP << 32) | 1u);
+  u32 rr = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                              ((u64)S_AXIS_REDUCE << 32) | 4u);
+  u32 pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  u32 pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 in_src[2] = {pa, rr};
+  u32 ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  u32 la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  u32 red_src[2] = {la, rr};
+  u32 red = rangeify_emit(ke, S_REDUCE_SUM, DT_FP32, 2, red_src, 0);
+  u32 out_src[2] = {pc, r0};
+  u32 ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, red);
+  u32 buf_src[2] = {sto, r0};
+  return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+}
+
+static void set_reduce_axes(KernelEntry *ke, u32 tail_axis_type) {
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 1;
+  if (tail_axis_type == TEST_REDUCE_NO_TAIL) {
+    ke->axes->n_axes = 2;
+    ke->axes->axis_types[1] = KAX_REDUCE;
+    ke->axes->full_shape[1] = 4;
+  } else {
+    ke->axes->n_axes = 3;
+    ke->axes->axis_types[1] = KAX_REDUCE;
+    ke->axes->full_shape[1] = 2;
+    ke->axes->axis_types[2] = tail_axis_type;
+    ke->axes->full_shape[2] = 2;
+  }
+  ke->axes->version++;
 }
 
 int main(void) {
@@ -422,6 +470,65 @@ int main(void) {
   CHECK(cast_out[0] == -8.0f);
   CHECK(cast_out[1] == 0.5f);
   CHECK(cast_out[2] == 16.0f);
+  kernel_free_arrays(tk);
+
+  TEST_BEGIN("tile-graph/c-renderer-reduce-axis-jit");
+  CHECK(build_scalar_reduce_sum_graph(tk) != 0);
+  set_reduce_axes(tk, TEST_REDUCE_NO_TAIL);
+  CHECK(tile_build_from_scalar(tk));
+  CHECK(cg_supports_tile(tk));
+  char *red_src = cg_emit_tile(tk);
+  CHECK(red_src != NULL);
+  if (red_src != NULL) {
+    CHECK(strstr(red_src, "_acc") != NULL);
+    CHECK(strstr(red_src, "for (unsigned _ta0") != NULL);
+    CHECK(strstr(red_src, "for (unsigned _ta1") == NULL);
+    free(red_src);
+  }
+  f32 red_in[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  f32 red_out[1] = {0.0f};
+  run_tile_jit_1(tk, red_in, sizeof(red_in), red_out, sizeof(red_out));
+  CHECK(red_out[0] == 10.0f);
+  kernel_free_arrays(tk);
+  tk->axes = NULL;
+
+  TEST_BEGIN("tile-graph/c-renderer-reduce-unroll-axis-jit");
+  CHECK(build_scalar_reduce_sum_graph(tk) != 0);
+  set_reduce_axes(tk, KAX_UNROLL);
+  CHECK(tile_build_from_scalar(tk));
+  CHECK(cg_supports_tile(tk));
+  red_src = cg_emit_tile(tk);
+  CHECK(red_src != NULL);
+  if (red_src != NULL) {
+    CHECK(strstr(red_src, "_acc") != NULL);
+    CHECK(strstr(red_src, "for (unsigned _ta0") != NULL);
+    CHECK(strstr(red_src, "for (unsigned _ta1") == NULL);
+    CHECK(strstr(red_src, "for (unsigned _ta2") == NULL);
+    free(red_src);
+  }
+  red_out[0] = 0.0f;
+  run_tile_jit_1(tk, red_in, sizeof(red_in), red_out, sizeof(red_out));
+  CHECK(red_out[0] == 10.0f);
+  kernel_free_arrays(tk);
+  tk->axes = NULL;
+
+  TEST_BEGIN("tile-graph/c-renderer-reduce-group-axis-jit");
+  CHECK(build_scalar_reduce_sum_graph(tk) != 0);
+  set_reduce_axes(tk, KAX_GROUP_REDUCE);
+  CHECK(tile_build_from_scalar(tk));
+  CHECK(cg_supports_tile(tk));
+  red_src = cg_emit_tile(tk);
+  CHECK(red_src != NULL);
+  if (red_src != NULL) {
+    CHECK(strstr(red_src, "_acc") != NULL);
+    CHECK(strstr(red_src, "for (unsigned _ta0") != NULL);
+    CHECK(strstr(red_src, "for (unsigned _ta1") == NULL);
+    CHECK(strstr(red_src, "for (unsigned _ta2") == NULL);
+    free(red_src);
+  }
+  red_out[0] = 0.0f;
+  run_tile_jit_1(tk, red_in, sizeof(red_in), red_out, sizeof(red_out));
+  CHECK(red_out[0] == 10.0f);
   kernel_free_arrays(tk);
 
   thvm_free();

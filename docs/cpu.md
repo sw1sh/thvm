@@ -237,10 +237,10 @@ only some are honored by each renderer.
   not lower the split structure in `axis_types[]` / `full_shape[]`.
 - The scalar/tile C renderer in `render_c_scalar.c` lowers validated
   tile plans with `LOOP`, `UPCAST`, `LOCAL`, and `GLOBAL` axes to
-  nested CPU loops, using `UPCAST` as the unroll hint. It still
-  rejects `REDUCE`, `UNROLL`, and `GROUP_REDUCE` axes so reduction
-  plans fall back to the tile interpreter until tile-level reductions
-  land.
+  nested CPU loops, using `UPCAST` as the unroll hint. For scalar
+  graphs that contain `S_REDUCE_SUM` or `S_REDUCE_MAX`, it accepts
+  `REDUCE`, `UNROLL`, and `GROUP_REDUCE` axes as schedule metadata
+  while the scalar expression emits the accumulator loop.
 - `KOP_PADTO`, `KOP_NOLOCALS`, `KOP_TC`: see the comment block in
   [apply_opt.c](../src/codegen/apply_opt.c) -- they are appended to
   `applied_opts[]` but the apply itself is a no-op on the axis

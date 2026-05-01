@@ -33,16 +33,14 @@ that future renderers can lower differently for CPU and Metal.
   validated tile plan over scalar UOps, records dispatch kind
   `"tile"`, and falls back to the normal BLAS/JIT/scalar paths when
   no supported tile plan is present;
-- that tile path first tries a generated C tile renderer for
-  non-reduction f32/f64 scalar graphs with
-  `LOOP`/`UPCAST`/`LOCAL`/`GLOBAL` axes, including `S_INDEX_E`
-  addresses built from `S_I*` expression nodes, f32/f64 casts, and
-  movement wrappers, then falls back to the tile interpreter for
-  broader scalar graphs such as reductions;
-- the scalar C renderer also covers f32/f64 `S_REDUCE_SUM` and
-  `S_REDUCE_MAX`; tile C dispatch still rejects tile plans carrying
-  `REDUCE`/`UNROLL`/`GROUP_REDUCE` axes until the tile-level
-  reduction path lands;
+- that tile path first tries a generated C tile renderer for f32/f64
+  scalar graphs with `LOOP`/`UPCAST`/`LOCAL`/`GLOBAL` output axes,
+  including `S_INDEX_E` addresses built from `S_I*` expression nodes,
+  f32/f64 casts, movement wrappers, and scalar `S_REDUCE_SUM` /
+  `S_REDUCE_MAX` accumulators;
+- tile C accepts `REDUCE`/`UNROLL`/`GROUP_REDUCE` axes only as
+  reduction-schedule metadata on scalar graphs that contain a reducer;
+  those axes do not become outer output loops yet;
 - f32/f64 `S_CAST` is generated with per-input and output pointer
   types, so scalar C no longer requires one uniform kernel dtype for
   simple cast chains;
@@ -97,11 +95,9 @@ interpreter for focused validation and profiling.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Add generated CPU tile support for reductions instead of relying on
-   the tile interpreter fallback.
-3. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
+2. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
    threadgroup/grid ids and uses `TILE_BARRIER`.
-4. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
+3. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
    kernels.
-5. Add `TILE_MMA` only after reductions and local-memory tiling are
+4. Add `TILE_MMA` only after reductions and local-memory tiling are
    stable.

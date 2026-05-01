@@ -110,6 +110,7 @@ typedef struct {
   u32        loop_ids    [MAX_DIM];
   u32        loop_extents[MAX_DIM];
   u32        output_dtype;
+  int        has_reduce;
 } CsKernelInfo;
 
 static int cs_collect_kernel_info(KernelEntry const *ke, CsKernelInfo *out) {
@@ -123,6 +124,8 @@ static int cs_collect_kernel_info(KernelEntry const *ke, CsKernelInfo *out) {
     }
   }
 
+  out->has_reduce = 0;
+
   // Walk every scalar op; bail on unsupported dtypes.
   for (u32 i = 1; i < ke->n_scalar_uops; i++) {
     ScalarUop const *u = &ke->scalar_uops[i];
@@ -131,6 +134,9 @@ static int cs_collect_kernel_info(KernelEntry const *ke, CsKernelInfo *out) {
       if (!cs_dtype_supported(u->dtype)) {
         return 0;
       }
+    }
+    if (u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX) {
+      out->has_reduce = 1;
     }
   }
   out->output_dtype = ke->output_dtype;
@@ -784,6 +790,21 @@ typedef struct {
 static int ct_axis_supported(u32 axis_type) {
   switch (axis_type) {
     case KAX_LOOP:
+    case KAX_REDUCE:
+    case KAX_UPCAST:
+    case KAX_UNROLL:
+    case KAX_LOCAL:
+    case KAX_GLOBAL:
+    case KAX_GROUP_REDUCE:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int ct_axis_is_output(u32 axis_type) {
+  switch (axis_type) {
+    case KAX_LOOP:
     case KAX_UPCAST:
     case KAX_LOCAL:
     case KAX_GLOBAL:
@@ -805,18 +826,25 @@ static int ct_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
   }
 
   u64 tile_numel = 1;
-  out->n_axes = out->tile.n_axes;
-  if (out->n_axes > MAX_AXES) {
-    return 0;
-  }
-  for (u32 i = 0; i < out->n_axes; i++) {
+  out->n_axes = 0;
+  for (u32 i = 0; i < out->tile.n_axes; i++) {
     u32 axis_type = out->tile.axis_types[i];
     u32 extent    = out->tile.axis_extents[i];
     if (!ct_axis_supported(axis_type) || extent == 0) {
       return 0;
     }
-    out->axis_types  [i] = axis_type;
-    out->axis_extents[i] = extent;
+    if (!ct_axis_is_output(axis_type)) {
+      if (!out->scalar.has_reduce) {
+        return 0;
+      }
+      continue;
+    }
+    if (out->n_axes >= MAX_AXES) {
+      return 0;
+    }
+    out->axis_types  [out->n_axes] = axis_type;
+    out->axis_extents[out->n_axes] = extent;
+    out->n_axes++;
     tile_numel *= extent;
   }
   if (tile_numel != (u64)(ke->output_numel ? ke->output_numel : 1)) {
