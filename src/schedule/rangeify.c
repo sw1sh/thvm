@@ -297,6 +297,8 @@ typedef struct {
                    // through S_IWHERE.
 } RngsCtx;
 
+#define MAX_KPROG_SRC 4
+
 static int reshape_identity_mod_ones(KProgOp const *p) {
   if (p->src0_ndim == 0 || p->out_ndim == 0) {
     return 0;
@@ -347,9 +349,52 @@ static int reshape_pad_chain_peel_ok(KProgOp const *p) {
   if (src_numel != out_numel) {
     return 0;
   }
-  // Leading-1 flatten-then-PAD chains still mis-address LeNet's first
-  // conv image patches; keep them on the legacy fallback path for now.
-  return p->src0_dims[0] > 1;
+  return 1;
+}
+
+static u32 scalar_ref_extent(KernelEntry const *ke, u32 ref) {
+  if (ke == NULL || ref == 0 || ref >= ke->n_scalar_uops) return 0;
+  ScalarUop const *u = &ke->scalar_uops[ref];
+  switch (u->op) {
+    case S_RANGE:
+      return (u32)(u->extra & 0xFFFFFFFFu);
+    case S_IADD:
+    case S_ISUB: {
+      u32 a = scalar_ref_extent(ke, u->src[0]);
+      if (a != 0) return a;
+      return scalar_ref_extent(ke, u->src[1]);
+    }
+    case S_IMOD: {
+      u32 rhs = u->src[1];
+      if (rhs != 0 && rhs < ke->n_scalar_uops
+          && ke->scalar_uops[rhs].op == S_ICONST
+          && ke->scalar_uops[rhs].extra > 0
+          && ke->scalar_uops[rhs].extra <= UINT32_MAX) {
+        return (u32)ke->scalar_uops[rhs].extra;
+      }
+      return 0;
+    }
+    default:
+      return 0;
+  }
+}
+
+static u32 emit_flat_from_rngs(KernelEntry *ke, RngsCtx const *r,
+                               u32 const *extents) {
+  u32 acc = 0;
+  u32 stride = 1;
+  for (i32 d = (i32)r->ndim - 1; d >= 0; d--) {
+    u32 ref = r->refs[d];
+    if (ref == 0) return 0;
+    u32 t = ref;
+    if (stride != 1) {
+      u32 c = emit_iconst(ke, (i64)stride);
+      t = emit_ibinop(ke, S_IMUL, t, c);
+    }
+    acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, t, acc);
+    stride *= extents[d] != 0 ? extents[d] : 1;
+  }
+  return acc != 0 ? acc : emit_iconst(ke, 0);
 }
 
 // Emit a use-local input load: S_INDEX_E(param, addr_expr) + S_LOAD
@@ -366,19 +411,46 @@ fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
   View const *v = &ke->input_views[slot];
   u32 in_off = (u32)v->offset;
   u32 param  = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)slot);
-  u32 acc    = in_off ? emit_iconst(ke, (i64)in_off) : 0;
-  for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
-    if (v->strides[d] < 0) return 0;
-    if (v->strides[d] == 0) continue;
-    u32 t = r->refs[d];
-    if (t == 0) return 0;
-    if (v->strides[d] != 1) {
-      u32 c = emit_iconst(ke, (i64)v->strides[d]);
-      t = emit_ibinop(ke, S_IMUL, t, c);
+  u32 acc    = 0;
+  if (r->ndim == v->shape.ndim) {
+    acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
+    for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
+      if (v->strides[d] < 0) return 0;
+      if (v->strides[d] == 0) continue;
+      u32 t = r->refs[d];
+      if (t == 0) return 0;
+      if (v->strides[d] != 1) {
+        u32 c = emit_iconst(ke, (i64)v->strides[d]);
+        t = emit_ibinop(ke, S_IMUL, t, c);
+      }
+      acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
     }
-    acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+    if (acc == 0) acc = emit_iconst(ke, 0);
+  } else if (r->ndim > 0 && r->ndim <= MAX_DIM
+             && v->shape.ndim > 0 && v->shape.ndim <= MAX_DIM) {
+    u32 extents[MAX_DIM];
+    u64 ctx_numel = 1;
+    int ok = 1;
+    for (u32 d = 0; d < r->ndim; d++) {
+      extents[d] = scalar_ref_extent(ke, r->refs[d]);
+      if (extents[d] == 0) { ok = 0; break; }
+      ctx_numel *= extents[d];
+    }
+    if (!ok || ctx_numel != (u64)ke->input_numels[slot]) return 0;
+    u32 dims_u32[MAX_DIM];
+    u32 strides_u32[MAX_DIM];
+    for (u32 d = 0; d < v->shape.ndim; d++) {
+      if (v->strides[d] < 0) return 0;
+      dims_u32[d] = v->shape.dims[d];
+      strides_u32[d] = (u32)v->strides[d];
+    }
+    u32 flat = emit_flat_from_rngs(ke, r, extents);
+    if (flat == 0) return 0;
+    acc = build_addr_from_flat_iter(ke, flat, dims_u32, strides_u32,
+                                    v->shape.ndim, in_off);
+  } else {
+    return 0;
   }
-  if (acc == 0) acc = emit_iconst(ke, 0);
   u32 src[2] = {param, acc};
   u32 idx    = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
   u32 load   = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
@@ -388,6 +460,214 @@ fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
     load = rangeify_emit(ke, S_IWHERE, dtype, 3, wsrc, 0);
   }
   return load;
+}
+
+static int rngs_ctx_reshape(KernelEntry *ke, KProgOp const *p,
+                            RngsCtx const *out, RngsCtx *in) {
+  if (p->src0_ndim == 0 || p->out_ndim == 0
+      || p->src0_ndim > MAX_DIM || p->out_ndim > MAX_DIM
+      || out->ndim != p->out_ndim) {
+    return 0;
+  }
+  u32 out_strides[MAX_DIM];
+  row_major_strides(p->out_dims, p->out_ndim, out_strides);
+  u32 flat = 0;
+  for (u32 d = 0; d < p->out_ndim; d++) {
+    u32 t = out->refs[d];
+    if (t == 0) return 0;
+    if (out_strides[d] != 1) {
+      u32 c = emit_iconst(ke, (i64)out_strides[d]);
+      t = emit_ibinop(ke, S_IMUL, t, c);
+    }
+    flat = (flat == 0) ? t : emit_ibinop(ke, S_IADD, flat, t);
+  }
+  if (flat == 0) flat = emit_iconst(ke, 0);
+  u32 in_strides[MAX_DIM];
+  row_major_strides(p->src0_dims, p->src0_ndim, in_strides);
+  memset(in, 0, sizeof(*in));
+  in->ndim = p->src0_ndim;
+  in->valid_mask = out->valid_mask;
+  for (u32 d = 0; d < p->src0_ndim; d++) {
+    u32 coord = flat;
+    if (in_strides[d] != 1) {
+      u32 c = emit_iconst(ke, (i64)in_strides[d]);
+      coord = emit_ibinop(ke, S_IDIV, coord, c);
+    }
+    if (d != 0) {
+      u32 dc = emit_iconst(ke, (i64)p->src0_dims[d]);
+      coord = emit_ibinop(ke, S_IMOD, coord, dc);
+    }
+    in->refs[d] = coord;
+  }
+  return 1;
+}
+
+static int rngs_ctx_movement_src(KernelEntry *ke, KProgOp const *p,
+                                 RngsCtx const *out, RngsCtx *in) {
+  memset(in, 0, sizeof(*in));
+  *in = *out;
+  switch (p->opcode) {
+    case UOP_LOAD:
+    case UOP_BITCAST:
+      return 1;
+    case UOP_EXPAND: {
+      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+          || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+        return 0;
+      }
+      in->ndim = p->src0_ndim;
+      in->valid_mask = out->valid_mask;
+      for (u32 d = 0; d < p->src0_ndim; d++) {
+        u32 src_dim = p->src0_dims[d];
+        u32 out_dim = p->out_dims[d];
+        in->refs[d] = (src_dim != out_dim) ? emit_iconst(ke, 0)
+                                           : out->refs[d];
+      }
+      return 1;
+    }
+    case UOP_RESHAPE:
+      return rngs_ctx_reshape(ke, p, out, in);
+    case UOP_SHRINK: {
+      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+          || out->ndim != p->out_ndim) {
+        return 0;
+      }
+      in->ndim = p->src0_ndim;
+      in->valid_mask = out->valid_mask;
+      for (u32 d = 0; d < p->src0_ndim; d++) {
+        u32 ref = out->refs[d];
+        u32 begin = p->pad_widths[2 * d];
+        if (begin != 0) {
+          u32 c = emit_iconst(ke, (i64)begin);
+          ref = emit_ibinop(ke, S_IADD, ref, c);
+        }
+        in->refs[d] = ref;
+      }
+      return 1;
+    }
+    case UOP_PAD: {
+      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+          || out->ndim != p->out_ndim) {
+        return 0;
+      }
+      in->ndim = p->src0_ndim;
+      in->valid_mask = out->valid_mask;
+      for (u32 d = 0; d < p->src0_ndim; d++) {
+        u32 begin   = p->pad_widths[2 * d];
+        u32 src_dim = p->src0_dims[d];
+        u32 ref     = out->refs[d];
+        if (ref == 0) return 0;
+        u32 src_ref = ref;
+        if (begin != 0) {
+          u32 c = emit_iconst(ke, (i64)begin);
+          src_ref = emit_ibinop(ke, S_ISUB, ref, c);
+        }
+        in->refs[d] = src_ref;
+        u32 hi_lim  = emit_iconst(ke, (i64)(begin + src_dim));
+        u32 axis_ok = emit_ibinop(ke, S_ILT, ref, hi_lim);
+        if (begin > 0) {
+          u32 lo_lim = emit_iconst(ke, (i64)begin);
+          u32 lt_lo  = emit_ibinop(ke, S_ILT, ref, lo_lim);
+          u32 one    = emit_iconst(ke, 1);
+          u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
+          axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
+        }
+        in->valid_mask = in->valid_mask == 0
+            ? axis_ok
+            : emit_ibinop(ke, S_IAND, in->valid_mask, axis_ok);
+      }
+      return 1;
+    }
+    case UOP_FLIP: {
+      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+          || out->ndim != p->out_ndim) {
+        return 0;
+      }
+      in->ndim = p->src0_ndim;
+      in->valid_mask = out->valid_mask;
+      u32 mask = p->arg & 0xFFu;
+      for (u32 d = 0; d < p->src0_ndim; d++) {
+        u32 ref = out->refs[d];
+        if (mask & (1u << d)) {
+          u32 ext = p->src0_dims[d] > 0 ? p->src0_dims[d] : 1;
+          u32 c = emit_iconst(ke, (i64)(ext - 1));
+          ref = emit_ibinop(ke, S_ISUB, c, ref);
+        }
+        in->refs[d] = ref;
+      }
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+static u32 scalar_op_for_kprog(u8 op) {
+  switch (op) {
+    case UOP_ADD:   return S_ADD;
+    case UOP_MUL:   return S_MUL;
+    case UOP_NEG:   return S_NEG;
+    case UOP_RECIP: return S_RECIP;
+    case UOP_EXP2:  return S_EXP2;
+    case UOP_LOG2:  return S_LOG2;
+    case UOP_SQRT:  return S_SQRT;
+    case UOP_CMPLT: return S_CMPLT;
+    case UOP_CMPEQ: return S_CMPEQ;
+    default:        return S_NONE;
+  }
+}
+
+static u32 emit_scalar_raw_for_rngs(KernelEntry *ke, u32 raw,
+                                    RngsCtx const *r, u32 depth);
+
+static u32 emit_scalar_op_for_rngs(KernelEntry *ke, u32 op_id,
+                                   RngsCtx const *r, u32 depth) {
+  if (ke == NULL || op_id >= ke->n_ops || depth > 64) return 0;
+  KProgOp const *p = &ke->program[op_id];
+  if (r->valid_mask != 0) {
+    RngsCtx clean = *r;
+    clean.valid_mask = 0;
+    u32 body = emit_scalar_op_for_rngs(ke, op_id, &clean, depth + 1);
+    if (body == 0) return 0;
+    u32 zero = emit_iconst(ke, 0);
+    u32 src[3] = {r->valid_mask, body, zero};
+    return rangeify_emit(ke, S_IWHERE, p->dtype, 3, src, 0);
+  }
+  if (p->opcode == UOP_CONST) {
+    return rangeify_emit_leaf(ke, S_CONST, p->dtype, (u64)p->arg);
+  }
+  if (p->opcode == UOP_CAST) {
+    u32 v = emit_scalar_raw_for_rngs(ke, p->src[0], r, depth + 1);
+    return v == 0 ? 0 : rangeify_emit_unary(ke, S_CAST, p->dtype, v);
+  }
+  if (p->opcode == UOP_LOAD || p->opcode == UOP_EXPAND
+      || p->opcode == UOP_RESHAPE || p->opcode == UOP_SHRINK
+      || p->opcode == UOP_PAD || p->opcode == UOP_FLIP
+      || p->opcode == UOP_BITCAST) {
+    if (p->n_src < 1) return 0;
+    RngsCtx src_rngs;
+    if (!rngs_ctx_movement_src(ke, p, r, &src_rngs)) return 0;
+    return emit_scalar_raw_for_rngs(ke, p->src[0], &src_rngs, depth + 1);
+  }
+  u32 sop = scalar_op_for_kprog(p->opcode);
+  if (sop == S_NONE || p->n_src == 0 || p->n_src > 2) return 0;
+  u32 src_v[2] = {0, 0};
+  for (u8 s = 0; s < p->n_src; s++) {
+    src_v[s] = emit_scalar_raw_for_rngs(ke, p->src[s], r, depth + 1);
+    if (src_v[s] == 0) return 0;
+  }
+  if (p->n_src == 1) return rangeify_emit_unary(ke, sop, p->dtype, src_v[0]);
+  return rangeify_emit_binary(ke, sop, p->dtype, src_v[0], src_v[1]);
+}
+
+static u32 emit_scalar_raw_for_rngs(KernelEntry *ke, u32 raw,
+                                    RngsCtx const *r, u32 depth) {
+  if (KSRC_IS_INPUT(raw)) {
+    u32 slot = KSRC_INDEX(raw);
+    if (slot >= ke->n_inputs) return 0;
+    return emit_input_load_for_use(ke, slot, r, ke->input_dtypes[slot]);
+  }
+  return emit_scalar_op_for_rngs(ke, KSRC_INDEX(raw), r, depth + 1);
 }
 
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
@@ -754,7 +1034,6 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   //
   // Indexing: edge_id = consumer_i * MAX_KPROG_SRC + src_index.
   // (MAX_KPROG_SRC matches KProgOp.src[].)
-  #define MAX_KPROG_SRC 4
   u32 use_rngs_size = nops_local * MAX_KPROG_SRC;
   RngsCtx use_rngs[use_rngs_size];
   u8      use_via_rngs[use_rngs_size];
@@ -784,8 +1063,21 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           if (!has_reduce || in_rngs.ndim >= MAX_DIM) break;
           u32 body_ndim = p->src0_ndim;
           if (body_ndim == 0) {
-            // Fallback: append (matches old behavior).
-            in_rngs.refs[in_rngs.ndim++] = reduce_range;
+            u32 r_axis = (u32)-1;
+            u32 partial = 1;
+            for (i32 k = (i32)os->ndim; k >= 0; k--) {
+              if (partial == reduce_inner) { r_axis = (u32)k; break; }
+              if (k > 0) partial *= os->dims[k - 1];
+            }
+            if (r_axis > os->ndim || in_rngs.ndim != os->ndim) {
+              in_rngs.refs[in_rngs.ndim++] = reduce_range;
+              break;
+            }
+            for (i32 d = (i32)in_rngs.ndim; d > (i32)r_axis; d--) {
+              in_rngs.refs[d] = in_rngs.refs[d - 1];
+            }
+            in_rngs.refs[r_axis] = reduce_range;
+            in_rngs.ndim++;
             break;
           }
           u32 r_axis = (u32)-1;
@@ -1196,28 +1488,20 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             break;
           }
         }
-        // Try the rngs-based fallback when shape mismatches but rngs
-        // are extent-compatible with v.shape per axis (so addresses
-        // computed from rngs * v.strides land within v's flat bounds).
-        // The extent check is what makes this safe: without it, rngs
-        // iterating over the larger os.dim sizes would address past
-        // v's bounds and break tests like nn/attention-identity-q.
+        // Try the rngs-based fallback when shape mismatches.  Raw
+        // S_RANGE refs must be extent-compatible with v.shape per
+        // axis; expression refs (S_IDIV/S_IMOD/etc.) are accepted only
+        // through the S_INDEX_E fallback below, because the expression
+        // itself encodes the consumer edge's coordinate transform.
         if (shape_mismatch && input_rngs_pre[i].ndim == v->shape.ndim
             && v->shape.ndim > 0) {
-          // Strict gate: every non-zero-stride axis must have a raw
-          // S_RANGE ref whose extent matches v.shape.dims[d].  Chain
-          // expressions (S_IDIV/S_IMOD/...) can't safely take this
-          // path because the backward walk's rngs encode iter
-          // expressions for the chain's INTENT (e.g. RESHAPE flat-
-          // roundtrip), not necessarily the addressing the materializer
-          // actually wants here -- verified via attention test.
           int ext_ok = 1;
           for (u32 d = 0; d < v->shape.ndim; d++) {
             if (v->strides[d] == 0) continue;
             u32 ref = input_rngs_pre[i].refs[d];
             if (ref == 0) { ext_ok = 0; break; }
             ScalarUop const *ru = &ke->scalar_uops[ref];
-            if (ru->op != S_RANGE) { ext_ok = 0; break; }
+            if (ru->op != S_RANGE) continue;
             u32 extent = (u32)(ru->extra & 0xFFFFFFFFu);
             if (extent != v->shape.dims[d]) { ext_ok = 0; break; }
           }
@@ -1550,15 +1834,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // ranges become fresh PLACEHOLDER/VIRT ranges that the wrap
           // writes from a flat-index roundtrip of selected LOOP iters).
           //
-          // MVP coverage requires:
-          // 1. Source is a direct contig input load (KSRC_IS_INPUT,
-          //    input_view contiguous, src0_dims numel matches view).
-          // 2. Each non-1 axis in out_dims maps to a unique LOOP axis
-          //    in os with matching extent.  Size-1 axes in out_dims
-          //    contribute no flat_idx (they're just labels for
-          //    downstream EXPAND).  os axes with no corresponding
-          //    out_dim entry are broadcast axes -- the source value
-          //    is constant across their LOOP iter.
+          // Coverage requires each non-1 axis in out_dims to map to a
+          // unique LOOP axis in os with matching extent, or to the
+          // REDUCE axis when the reshape is inside a reduce body.
+          // The source itself is emitted edge-locally under fresh
+          // input-side VIRT ranges, so it may be a short scalar
+          // subgraph rather than only a direct input load.
           //
           // The selected LOOP iters drive flat_idx (in the order they
           // appear in out_dims, contributing only for non-1 axes); the
@@ -1568,13 +1849,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // size-9 os axis matters; the size-2 os axis (broadcast) is
           // ignored, so the S_LOAD doesn't depend on it.
           //
-          // Other cases (prog_value chains, non-contig views, out_dims
-          // non-1 axes that don't match an os axis) bail and fall
-          // through to cpu_interpret.
-          int can_use_v = KSRC_IS_INPUT(raw)
-                       && p->src0_ndim <= MAX_DIM
+          // Other cases (out_dims non-1 axes that don't match a
+          // consumer axis, unsupported subgraph movement, negative
+          // input strides) bail and fall through to cpu_interpret.
+          int can_use_v = p->src0_ndim <= MAX_DIM
                        && p->out_ndim  <= MAX_DIM
-                       && (1 + (u32)os->ndim + (u32)p->src0_ndim) <= SCALAR_MAX_SRC;
+                       && (1 + (u32)p->out_ndim + (u32)p->src0_ndim) <= SCALAR_MAX_SRC;
           // Match each non-1 out_dim to a unique LOOP axis in os by
           // extent equality.  Also collect the per-out_dim contribution:
           //   contrib_iter[d]  -- LOOP range ref to use for out_dim d
@@ -1612,37 +1892,6 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             }
           }
           if (can_use_v) {
-            u32 slot = KSRC_INDEX(raw);
-            View const *src_view = &ke->input_views[slot];
-            // Verify view shape matches src0_dims AND numel matches.
-            // For non-contig views (e.g. slice views with strides like
-            // [25,5,1] on a [1,3,3] shape into a [5,5,5] parent), we
-            // can still index correctly using the view's actual strides
-            // -- as long as the view shape matches, S_INDEX with
-            // v->strides + per-axis VIRT iters reads the right elements.
-            if (src_view->shape.ndim != p->src0_ndim) can_use_v = 0;
-            if (can_use_v) {
-              for (u32 d = 0; d < p->src0_ndim; d++) {
-                if (src_view->shape.dims[d] != p->src0_dims[d]) {
-                  can_use_v = 0; break;
-                }
-                if (src_view->strides[d] < 0) {
-                  can_use_v = 0; break;  // negative stride: bail
-                }
-                if ((u32)src_view->strides[d] > 0xFFFFu) {
-                  can_use_v = 0; break;  // stride doesn't fit u16
-                }
-              }
-            }
-            if (can_use_v) {
-              u32 src0_numel = 1;
-              for (u32 d = 0; d < p->src0_ndim; d++) src0_numel *= p->src0_dims[d];
-              if (src0_numel != ke->input_numels[slot]) can_use_v = 0;
-            }
-          }
-          if (can_use_v) {
-            u32 slot = KSRC_INDEX(raw);
-            View const *src_view = &ke->input_views[slot];
             u32 in_ndim = p->src0_ndim;
             // Build the output-side ref list: one ref per non-1
             // out_dim, in out_dims order.  size-1 out_dims contribute
@@ -1673,27 +1922,21 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               u64 r_extra = ((u64)S_AXIS_VIRT << 32) | (u64)p->src0_dims[d];
               virt_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, r_extra);
             }
-            // Fresh DEFINE_PARAM + S_LOAD via VIRT ranges.  Use the
-            // view's actual strides so non-contig slice views work
-            // correctly.  For a contig view this matches
-            // row_major_strides(src0_dims); for a non-contig slice
-            // (e.g. shape [1,3,3] strides [25,5,1] viewing a [5,5,5]
-            // parent), it reads the right window into the parent.
-            u32 fresh_param = rangeify_emit_leaf(ke, S_DEFINE_PARAM,
-                                                 p->dtype, (u64)slot);
-            u32 strides[MAX_DIM];
-            for (u32 d = 0; d < in_ndim; d++) {
-              strides[d] = (u32)src_view->strides[d];
+            RngsCtx body_rngs = {0};
+            body_rngs.ndim = in_ndim;
+            for (u32 d = 0; d < in_ndim; d++) body_rngs.refs[d] = virt_ranges[d];
+            u32 v_body = emit_scalar_raw_for_rngs(ke, raw, &body_rngs, 0);
+            if (v_body == 0) can_use_v = 0;
+            if (!can_use_v) {
+              if (getenv("THVM_RANGEIFY_BAIL")) {
+                fprintf(stderr, "  RESHAPE-V body emit failed\n");
+              }
+              RBAIL_MID("RESHAPE-V body emit failed");
             }
-            u32 idx = emit_index_chain(ke, p->dtype, fresh_param,
-                                        virt_ranges, strides, in_ndim,
-                                        (u32)src_view->offset);
-            if (idx == 0) RBAIL_MID("RESHAPE-V emit_index_chain failed");
-            u32 v_load = rangeify_emit_unary(ke, S_LOAD, p->dtype, idx);
             // Emit S_RESHAPE_V: src[0] = body, src[1..1+n_out) =
             // output refs (selected LOOP iters + size-1 VIRT placeholders),
             // src[1+n_out..) = input (VIRT) refs.  extra[byte 0] = n_out.
-            u32 src_arr[SCALAR_MAX_SRC] = {v_load};
+            u32 src_arr[SCALAR_MAX_SRC] = {v_body};
             for (u32 d = 0; d < n_out;   d++) src_arr[1 + d]              = out_refs[d];
             for (u32 d = 0; d < in_ndim; d++) src_arr[1 + n_out + d]      = virt_ranges[d];
             u8  src_count = (u8)(1 + n_out + in_ndim);
@@ -1701,6 +1944,20 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             prog_value[i] = rangeify_emit(ke, S_RESHAPE_V, p->dtype,
                                           src_count, src_arr, extra);
             continue;
+          }
+          if (getenv("THVM_RANGEIFY_BAIL")) {
+            fprintf(stderr, "  RESHAPE-V-fail: src0_dims=[");
+            for (u32 d = 0; d < p->src0_ndim; d++)
+              fprintf(stderr, "%u%s", p->src0_dims[d], d+1==p->src0_ndim?"":",");
+            fprintf(stderr, "] out_dims=[");
+            for (u32 d = 0; d < p->out_ndim; d++)
+              fprintf(stderr, "%u%s", p->out_dims[d], d+1==p->out_ndim?"":",");
+            fprintf(stderr, "] os.dims=[");
+            for (u32 d = 0; d < os->ndim; d++)
+              fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
+            fprintf(stderr, "] raw_is_input=%u src_op=%u\n",
+                    KSRC_IS_INPUT(raw) ? 1u : 0u,
+                    KSRC_IS_INPUT(raw) ? 0u : ke->program[KSRC_INDEX(raw)].opcode);
           }
           RBAIL_MID("RESHAPE shape-change ndim cap or != os->ndim");
         }
@@ -1775,6 +2032,24 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         prog_value[i] = v;
         via_rngs[i] = 1;
         continue;
+      }
+      // Edge-local PAD lowering: the backward walk already converted
+      // PAD output coordinates into source coordinates and attached
+      // the bounds mask.  Re-emit the source under that exact edge
+      // context, which works for direct inputs and short movement/ALU
+      // chains without relying on a shared prog_value emitted for a
+      // different consumer.
+      if (p->opcode == UOP_PAD) {
+        u32 edge = i * MAX_KPROG_SRC + 0;
+        if (use_via_rngs[edge]) {
+          u32 ulocal = emit_scalar_raw_for_rngs(ke, raw, &use_rngs[edge], 0);
+          if (ulocal != 0) {
+            prog_value[i]  = ulocal;
+            via_rngs[i]    = 1;
+            use_load[edge] = ulocal;
+            continue;
+          }
+        }
       }
       // Per-USE PAD identity-pass: when PAD reads a direct INPUT and
       // the backward walk captured this consumer's rngs (shift +

@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Fixed: rangeify movement-chain gaps
+
+Rangeify now re-emits scalar subgraphs under consumer-edge coordinate
+contexts for rank-changing reshapes and PAD chains.  This closes the
+grad reshape/reduce-max fallback, the LeNet leading-1 PAD fanout
+fallback, and the attention pre-INDEX mismatch while preserving the
+focused grad/NN numerics.
+
 ### Added: WL tile-UOp introspection
 
 LibraryLink now exposes raw `TileUop` snapshots and validated tile

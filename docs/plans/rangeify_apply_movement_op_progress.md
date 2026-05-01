@@ -1,5 +1,22 @@
 # apply_movement_op port: progress + next steps
 
+## Update: focused rangeify gaps closed
+
+The three focused bails from `grad.wlt` / `nn.wlt` are now covered by
+`wl/THVMLink/Tests/rangeify_gaps.wlt` and lower without fallback:
+
+- grad pool-style `RESHAPE -> REDUCE_MAX -> SUM` backward now emits
+  `S_RESHAPE_V` with a non-input scalar body.
+- LeNet's leading-1 PAD fanout now re-emits the PAD source from the
+  consumer edge's `RngsCtx` instead of peeling through a shared
+  per-input load.
+- attention's pre-INDEX reshape mismatch now routes expression refs
+  through `S_INDEX_E`, with REDUCE axis insertion inferred from
+  `reduce_inner` when KProgOp shape metadata is absent.
+
+The older "Remaining bails" notes below are retained as historical
+context for why these cases were guarded.
+
 ## What landed (this session, ~14 commits)
 
 Backward-walk infrastructure mirroring tinygrad's `apply_movement_op`
