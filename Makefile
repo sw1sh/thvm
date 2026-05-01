@@ -28,7 +28,7 @@ TESTS := \
   $(BIN)/test_view_strided \
   $(BIN)/test_buf_pool \
   $(BIN)/test_consumer_count \
-  $(BIN)/test_decref_hook \
+  $(BIN)/test_kernel_fire_gen \
   $(BIN)/test_view_shrink \
   $(BIN)/test_view_permute \
   $(BIN)/test_view_pad \

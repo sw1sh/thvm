@@ -64,8 +64,9 @@ int main(void) {
   u32 be[4] = {1, 1, 2, 3};   // axis 0: pad (1,1); axis 1: pad (2,3)
   Term p = uop_pad(a, 2, be);
   CHECK_EQ(term_ext(p), UOP_PAD);
+  CHECK_EQ(term_val(heap_read(term_val(p) + 1)), 2);
   for (u32 i = 0; i < 4; i++) {
-    CHECK_EQ(term_val(heap_read(term_val(p) + 1 + i)), be[i]);
+    CHECK_EQ(term_val(heap_read(term_val(p) + 2 + i)), be[i]);
   }
 
   TEST_BEGIN("uop/graph-can-nest-deeply");

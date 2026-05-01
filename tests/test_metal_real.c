@@ -18,7 +18,26 @@
 // the linked backend_metal.o.
 extern void thvm_metal_buf_freelist_push(u32 buf_id);
 
+static int metal_available(void) {
+  setenv("THVM_BACKEND", "metal", 1);
+  thvm_init();
+  int ok = 0;
+  if (CURRENT_BACKEND == &METAL_BACKEND) {
+    u32 bid = CURRENT_BACKEND->buf_alloc(4);
+    if (bid != 0) {
+      CURRENT_BACKEND->buf_free(bid);
+      ok = 1;
+    }
+  }
+  thvm_free();
+  return ok;
+}
+
 int main(void) {
+  if (!metal_available()) {
+    PENDING("no Metal device available");
+  }
+
   TEST_BEGIN("metal-real/dual-tu-build-links");
   unsetenv("THVM_BACKEND");
   thvm_init();

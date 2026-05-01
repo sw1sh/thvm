@@ -154,12 +154,14 @@ refcount = 0.  That cleanly separates "result bufs to keep" from
 without the producer-chain-preservation paradox.
 
 The pool boundary infrastructure is correct + covered by tests;
-it'll provide actual savings once the refcount work lands and
-swaps the preserve-walk for "free what hit refcount=0".
+it'll provide actual savings once lifetime analysis can replace the
+producer-chain preserve walk with a precise "free proven-dead bufs"
+rollback.
 
 ## Refcount-driven free arc (sub-items a + b + c)
 
-Status: infrastructure complete end-to-end; STILL ZERO measured
+Status: structural consumer-count metadata is still present, but the
+dispatch-time decref hook was removed.  This still has ZERO measured
 savings.
 
 What landed:
@@ -169,29 +171,25 @@ What landed:
   attributes each input read back to its producing kernel (via
   `TENS[tid].producer_kid`), correctly handling view-aliased
   TenDescs (RESHAPE/EXPAND aliases inherit `producer_kid`).
-- A post-dispatch decref hook in `kernel_fire_by_id` decrements
-  the producer's count and, on a real 1->0 transition, marks the
-  producer's output buf via `cpu_buf_mark_freeable`.
 - `thvm_realize` calls `kernel_compute_consumer_counts` between
-  materialize + wnf so the freeable signal is computed correctly
-  per realize, and clears the freeable bits on the way out.
+  materialize + wnf so the structural counts are available per
+  realize.
 - `cpu_buf_mark_freeable` / `cpu_buf_clear_freeable` /
   `CpuBuf.freeable` flag (sibling to `preserved`).
 
+What was removed: the post-dispatch decref hook in
+`kernel_fire_by_id`.  A kernel can legitimately re-dispatch across
+optimizer-loop iterations after ASSIGN mutates its inputs, so treating
+"one fire" as "one permanent read by every consumer" over-decrements.
+`kernel_fire_by_id` now uses `fire_gen` only as a per-top-level-fire
+memo so a shared producer in a diamond dispatches once per generation
+and can dispatch again in the next generation.
+
 What did NOT land: the rollback swap.  `thvm_realize` still uses
 `cpu_buf_pool_rollback_with_preserve`, which conservatively keeps
-every buf reachable from the result's producer chain.  The
-freeable bits are computed correctly but ignored by the rollback.
-
-Why: the aggressive variant (drop preserve walk; free
-`freeable && !preserved`) segfaults `nn.wlt` patterns of the form
-`{TRealize[loss], TRealize[TGrad[loss, x]]}`.  The second TRealize
-materializes a backward graph that emits new kernels referencing
-forward TenDescs whose bufs were freed by the first realize.
-The kernel `fired` flag short-circuits re-firing, so the buf
-can't be reconstructed.  This is the same dead-end the prior
-"preserve only result.buf" attempt hit; the two paths converge
-because both lack a heap-rooted preserve mechanism.
+every buf reachable from the result's producer chain.  The structural
+counts are introspection data until lifetime analysis can prove a buf
+is no longer reachable by any future materialized graph.
 
 Memory-probe.wls (post sub-item c integration):
 

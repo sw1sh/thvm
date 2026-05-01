@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Fixed: stale C test contracts
+
+Refreshed the C tests around the current dup-style grad projection
+layout, `KernelEntry.fire_gen` dispatch memoization, PAD heap layout,
+frame-only tag constants, and host-gated Metal real-backend coverage.
+The memory notes now describe `consumer_count` as structural metadata
+rather than a dispatch-time decref path.
+
 ### Fixed: rangeify per-use PAD chain lowering
 
 Rangeify now emits use-local input loads for safe PAD chains using the

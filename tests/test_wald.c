@@ -1202,12 +1202,12 @@ int main(void) {
     u32 lab_nil  = spec->symbols[1].label;
     u32 lab_cons = spec->symbols[2].label;
     Term zero = term_new_ctr(lab_zero, NULL, 0);
-    Term nil  = term_new_ctr(lab_nil,  NULL, 0);
+    Term nil_term = term_new_ctr(lab_nil,  NULL, 0);
     Term cons_zero_nil =
-      term_new_ctr(lab_cons, (Term[]){zero, nil}, 2);
+      term_new_ctr(lab_cons, (Term[]){zero, nil_term}, 2);
 
     CHECK_EQ((int)wald_term_sort(spec, zero),           0); // nat
-    CHECK_EQ((int)wald_term_sort(spec, nil),            1); // list
+    CHECK_EQ((int)wald_term_sort(spec, nil_term),       1); // list
     CHECK_EQ((int)wald_term_sort(spec, cons_zero_nil),  1); // list
     CHECK_EQ((int)wald_sort_check(spec, cons_zero_nil), 1);
 
@@ -1238,9 +1238,9 @@ int main(void) {
     u32 lab_nil  = spec->symbols[1].label;
     u32 lab_cons = spec->symbols[2].label;
     Term zero = term_new_ctr(lab_zero, NULL, 0);
-    Term nil  = term_new_ctr(lab_nil,  NULL, 0);
+    Term nil_term = term_new_ctr(lab_nil,  NULL, 0);
     // cons(nil, zero): args are swapped from the signature.
-    Term ill = term_new_ctr(lab_cons, (Term[]){nil, zero}, 2);
+    Term ill = term_new_ctr(lab_cons, (Term[]){nil_term, zero}, 2);
 
     CHECK_EQ((int)wald_term_sort(spec, ill), (int)WALD_MAX_SORTS);
     CHECK_EQ((int)wald_sort_check(spec, ill), 0);
@@ -1472,10 +1472,10 @@ int main(void) {
 
     // Ill-sorted equation: zero = nil -- nat vs list.
     u32 lab_nil = spec->symbols[1].label;
-    Term nil = term_new_ctr(lab_nil, NULL, 0);
+    Term nil_term = term_new_ctr(lab_nil, NULL, 0);
     Term zero3 = term_new_ctr(lab_zero, NULL, 0);
     u32 cps_before = atp->n_cps;
-    CHECK_EQ((int)thvm_atp_add_equation(atp, zero3, nil), 0);
+    CHECK_EQ((int)thvm_atp_add_equation(atp, zero3, nil_term), 0);
     CHECK_EQ(atp->n_cps, cps_before);   // state unchanged
 
     thvm_atp_free(atp);
@@ -1514,10 +1514,10 @@ int main(void) {
 
     // Ill-sorted goal rejected; previous goal preserved.
     Term zero  = term_new_ctr(lab_zero, NULL, 0);
-    Term nil   = term_new_ctr(lab_nil,  NULL, 0);
+    Term nil_term = term_new_ctr(lab_nil,  NULL, 0);
     Term prev_lhs = atp->goal_lhs;
     Term prev_rhs = atp->goal_rhs;
-    CHECK_EQ((int)thvm_atp_set_goal(atp, zero, nil), 0);
+    CHECK_EQ((int)thvm_atp_set_goal(atp, zero, nil_term), 0);
     CHECK_EQ(atp->goal_lhs, prev_lhs);
     CHECK_EQ(atp->goal_rhs, prev_rhs);
 
