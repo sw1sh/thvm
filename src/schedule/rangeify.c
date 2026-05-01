@@ -589,6 +589,39 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
+      } else if (in_numel == reduce_size && !v->contiguous
+                 && v->shape.ndim <= MAX_DIM
+                 && (1 + 1 + (u32)v->shape.ndim) <= SCALAR_MAX_SRC) {
+        // Non-contig slice view (e.g. shape [2,3,3] strides [25,5,1]
+        // viewing a [5,5,5] parent buffer).  Decompose reduce_iter
+        // into per-axis coords via S_RESHAPE_V flat-roundtrip into
+        // fresh VIRT ranges sized to v->shape, then index with the
+        // view's actual strides.  Mirrors the dominant rank-mismatch
+        // RESHAPE input-load case but driven by reduce_range.
+        u32 v_ndim = v->shape.ndim;
+        u32 virt_ranges[MAX_DIM];
+        for (u32 d = 0; d < v_ndim; d++) {
+          u64 r_extra = ((u64)S_AXIS_VIRT << 32) | (u64)v->shape.dims[d];
+          virt_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, r_extra);
+        }
+        u32 strides_u32[MAX_DIM];
+        for (u32 d = 0; d < v_ndim; d++) {
+          if (v->strides[d] < 0) RBAIL_MID("pre-INDEX-V negative stride");
+          strides_u32[d] = (u32)v->strides[d];
+        }
+        u32 idx_v = emit_index_chain(ke, dtype, param, virt_ranges,
+                                      strides_u32, v_ndim, in_off);
+        if (idx_v == 0) RBAIL_MID("pre-INDEX-V emit failed");
+        u32 v_load = rangeify_emit_unary(ke, S_LOAD, dtype, idx_v);
+        // Wrap with S_RESHAPE_V: output side = reduce_range (1),
+        // input side = virt_ranges (v_ndim).
+        u32 src_arr[SCALAR_MAX_SRC] = {v_load, reduce_range};
+        for (u32 d = 0; d < v_ndim; d++) src_arr[2 + d] = virt_ranges[d];
+        u8  src_count = (u8)(1 + 1 + v_ndim);
+        u64 extra     = (u64)1;  // n_out = 1
+        input_load_pre[i] = rangeify_emit(ke, S_RESHAPE_V, dtype,
+                                          src_count, src_arr, extra);
+        continue;  // skip the post-emit S_LOAD wrap (already done)
       } else if (in_numel == reduce_in_numel
                  && v->shape.ndim == in_ndim) {
         // Partial reduce: input has rank in_ndim (= os->ndim + 1).
@@ -688,11 +721,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // here is safer than emitting wrong addresses with
         // canonical loop_strides.
         if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u reduce_inner=%u\n",
+          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u reduce_inner=%u contig=%d v.shape=[",
                   i, in_numel, onum, v->shape.ndim, os->ndim,
                   in_ndim, has_reduce ? red->numel : 0,
                   has_reduce ? reduce_size : 0, reduce_in_numel,
-                  has_reduce ? reduce_inner : 0);
+                  has_reduce ? reduce_inner : 0, v->contiguous);
+          for (u32 d = 0; d < v->shape.ndim; d++)
+            fprintf(stderr, "%u%s", v->shape.dims[d], d+1==v->shape.ndim?"":",");
+          fprintf(stderr, "] v.strides=[");
+          for (u32 d = 0; d < v->shape.ndim; d++)
+            fprintf(stderr, "%d%s", v->strides[d], d+1==v->shape.ndim?"":",");
+          fprintf(stderr, "]\n");
         }
         RBAIL_MID("pre-INDEX no branch matched");
       }
