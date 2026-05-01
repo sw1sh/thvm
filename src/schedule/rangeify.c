@@ -900,6 +900,24 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   u32 nops_local = ke->n_ops ? ke->n_ops : 1;
   u32 prog_value[nops_local];
   for (u32 i = 0; i < nops_local; i++) prog_value[i] = 0;
+  // rngs[i] -- per-axis iter expressions describing the intermediate
+  // shape at prog_value[i].  Mirrors tinygrad's rngs[] in run_rangeify
+  // (indexing.py:148+).  Each entry is an op_id of an integer
+  // expression (S_RANGE direct, S_IADD/S_ISUB/S_IMUL/etc. composed
+  // over S_RANGE atoms).  Movement ops update rngs[i] via the
+  // apply_movement_op rules; ALU ops propagate from src.
+  //
+  // Currently used for: scalar_uops_pad_fusion_finding.md documents
+  // why naive fusion fails without this tracking.  Wiring up
+  // incrementally; for now this is just allocated + zeroed -- no
+  // behavior change.  Subsequent commits will populate per-op rules.
+  typedef struct { u32 ndim; u32 refs[MAX_DIM]; } RngsCtx;
+  RngsCtx rngs[nops_local];
+  for (u32 i = 0; i < nops_local; i++) {
+    rngs[i].ndim = 0;
+    for (u32 d = 0; d < MAX_DIM; d++) rngs[i].refs[d] = 0;
+  }
+  (void)rngs;  // unused for now -- next iteration wires the fill
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
