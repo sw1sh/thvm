@@ -605,6 +605,179 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     input_load_pre [i] = 0;
     input_load_post[i] = 0;
   }
+
+  // === BACKWARD WALK: compute rngs[i] per op + per-input-slot rngs.
+  // Mirrors tinygrad's rangeify (indexing.py:148+).  Each op tells
+  // us what iter expressions its sources see; for KSRC_IS_INPUT
+  // sources, those expressions get captured into input_rngs_pre/post
+  // for the input_load emission below.  Non-input sources flow back
+  // through the chain.
+  //
+  // The walk EMITS S_RANGE/S_IADD/S_ISUB/S_IMUL/S_IDIV/S_IMOD/S_IAND
+  // expressions into the scalar uop graph (these are values, not
+  // dispatcher state, so emitting them here is fine).  The forward
+  // pass below then references them when building input loads.
+  typedef struct {
+    u32 ndim;
+    u32 refs[MAX_DIM];
+    u32 valid_mask;  // 0 = always valid (no PAD upstream); else
+                     // op_id of integer expression returning 0/1
+                     // that gates the input load via S_IWHERE.
+  } RngsCtx;
+  u32 nops_local = ke->n_ops ? ke->n_ops : 1;
+  RngsCtx rngs[nops_local];
+  for (u32 i = 0; i < nops_local; i++) {
+    rngs[i].ndim = 0; rngs[i].valid_mask = 0;
+    for (u32 d = 0; d < MAX_DIM; d++) rngs[i].refs[d] = 0;
+  }
+  RngsCtx input_rngs_pre [nin_local];
+  RngsCtx input_rngs_post[nin_local];
+  for (u32 i = 0; i < nin_local; i++) {
+    input_rngs_pre [i].ndim = 0; input_rngs_pre [i].valid_mask = 0;
+    input_rngs_post[i].ndim = 0; input_rngs_post[i].valid_mask = 0;
+    for (u32 d = 0; d < MAX_DIM; d++) {
+      input_rngs_pre [i].refs[d] = 0;
+      input_rngs_post[i].refs[d] = 0;
+    }
+  }
+  if (ke->n_ops > 0) {
+    i32 last = (i32)ke->n_ops - 1;
+    rngs[last].ndim = os->ndim;
+    for (u32 d = 0; d < os->ndim; d++) rngs[last].refs[d] = loop_ranges[d];
+    for (i32 i = last; i >= 0; i--) {
+      KProgOp *p = &ke->program[i];
+      RngsCtx in_rngs = rngs[i];
+      switch (p->opcode) {
+        case UOP_REDUCE: {
+          if (has_reduce && in_rngs.ndim < MAX_DIM) {
+            in_rngs.refs[in_rngs.ndim++] = reduce_range;
+          }
+          break;
+        }
+        case UOP_SHRINK: {
+          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
+            u32 begin = p->pad_widths[2 * d];
+            if (begin == 0) continue;
+            u32 c = emit_iconst(ke, (i64)begin);
+            in_rngs.refs[d] = emit_ibinop(ke, S_IADD, in_rngs.refs[d], c);
+          }
+          break;
+        }
+        case UOP_FLIP: {
+          u32 mask = p->arg & 0xFFu;
+          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
+            if (!(mask & (1u << d))) continue;
+            u32 ext = p->src0_ndim > d ? p->src0_dims[d] : 1;
+            u32 c = emit_iconst(ke, (i64)(ext - 1));
+            in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, c, in_rngs.refs[d]);
+          }
+          break;
+        }
+        case UOP_EXPAND: {
+          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
+            u32 src_dim = p->src0_ndim > d ? p->src0_dims[d] : 1;
+            u32 out_dim = p->out_dims[d];
+            if (src_dim != out_dim) in_rngs.refs[d] = emit_iconst(ke, 0);
+          }
+          break;
+        }
+        case UOP_PERMUTE: {
+          if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+              || in_rngs.ndim != p->out_ndim) break;
+          RngsCtx new_rngs = {0};
+          new_rngs.ndim = p->out_ndim;
+          new_rngs.valid_mask = in_rngs.valid_mask;
+          for (u32 d = 0; d < p->out_ndim; d++) {
+            u8 src_axis = p->axis_perm[d];
+            if (src_axis >= MAX_DIM) { new_rngs.ndim = 0; break; }
+            new_rngs.refs[src_axis] = in_rngs.refs[d];
+          }
+          if (new_rngs.ndim != 0) in_rngs = new_rngs;
+          break;
+        }
+        case UOP_RESHAPE: {
+          if (p->src0_ndim == 0 || p->out_ndim == 0
+              || p->src0_ndim > MAX_DIM || p->out_ndim > MAX_DIM
+              || in_rngs.ndim != p->out_ndim) break;
+          u32 b_strides[MAX_DIM];
+          row_major_strides(p->out_dims, p->out_ndim, b_strides);
+          u32 flat = 0;
+          for (u32 d = 0; d < p->out_ndim; d++) {
+            if (b_strides[d] == 0) continue;
+            u32 t = in_rngs.refs[d];
+            if (b_strides[d] != 1) {
+              u32 c = emit_iconst(ke, (i64)b_strides[d]);
+              t = emit_ibinop(ke, S_IMUL, t, c);
+            }
+            if (flat == 0) flat = t;
+            else           flat = emit_ibinop(ke, S_IADD, flat, t);
+          }
+          if (flat == 0) flat = emit_iconst(ke, 0);
+          u32 a_strides[MAX_DIM];
+          row_major_strides(p->src0_dims, p->src0_ndim, a_strides);
+          RngsCtx new_rngs = {0};
+          new_rngs.ndim = p->src0_ndim;
+          new_rngs.valid_mask = in_rngs.valid_mask;
+          for (u32 d = 0; d < p->src0_ndim; d++) {
+            u32 coord = flat;
+            if (a_strides[d] != 1) {
+              u32 c = emit_iconst(ke, (i64)a_strides[d]);
+              coord = emit_ibinop(ke, S_IDIV, coord, c);
+            }
+            if (d != 0) {
+              u32 dc = emit_iconst(ke, (i64)p->src0_dims[d]);
+              coord = emit_ibinop(ke, S_IMOD, coord, dc);
+            }
+            new_rngs.refs[d] = coord;
+          }
+          in_rngs = new_rngs;
+          break;
+        }
+        case UOP_PAD: {
+          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
+            u32 begin   = p->pad_widths[2 * d];
+            u32 src_dim = p->src0_dims[d];
+            if (begin == 0 && src_dim == p->out_dims[d]) continue;
+            u32 orig_ref = in_rngs.refs[d];
+            if (begin > 0) {
+              u32 c = emit_iconst(ke, (i64)begin);
+              in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, orig_ref, c);
+            }
+            u32 hi_lim = emit_iconst(ke, (i64)(begin + src_dim));
+            u32 axis_ok = emit_ibinop(ke, S_ILT, orig_ref, hi_lim);
+            if (begin > 0) {
+              u32 lo_lim = emit_iconst(ke, (i64)begin);
+              u32 lt_lo  = emit_ibinop(ke, S_ILT, orig_ref, lo_lim);
+              u32 one    = emit_iconst(ke, 1);
+              u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
+              axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
+            }
+            if (in_rngs.valid_mask == 0) in_rngs.valid_mask = axis_ok;
+            else in_rngs.valid_mask = emit_ibinop(ke, S_IAND,
+                                                   in_rngs.valid_mask, axis_ok);
+          }
+          break;
+        }
+        default: break;
+      }
+      for (u8 s = 0; s < p->n_src; s++) {
+        u32 raw = p->src[s];
+        if (KSRC_IS_INPUT(raw)) {
+          u32 slot = KSRC_INDEX(raw);
+          int pre_scope = (has_reduce && (int)i <= reduce_pos);
+          RngsCtx *target = pre_scope ? &input_rngs_pre [slot]
+                                       : &input_rngs_post[slot];
+          if (target->ndim == 0) *target = in_rngs;
+          continue;
+        }
+        u32 src_idx = KSRC_INDEX(raw);
+        if (rngs[src_idx].ndim == 0) rngs[src_idx] = in_rngs;
+      }
+    }
+  }
+  // Suppress unused warnings; consumers wired in subsequent commits.
+  (void)rngs; (void)input_rngs_pre; (void)input_rngs_post;
+
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 dtype    = ke->input_dtypes[i];
     u32 in_numel = ke->input_numels[i];
@@ -897,233 +1070,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // itself sits at reduce_pos (pre-scope ref to body input).
   // UOP_EXPAND lowers as identity -- broadcast is implicit at the
   // per-LOOP-element scalar level.
-  u32 nops_local = ke->n_ops ? ke->n_ops : 1;
   u32 prog_value[nops_local];
   for (u32 i = 0; i < nops_local; i++) prog_value[i] = 0;
-  // rngs[i] -- per-axis iter expressions describing the intermediate
-  // shape at prog_value[i].  Mirrors tinygrad's rngs[] in run_rangeify
-  // (indexing.py:148+).  Each entry is an op_id of an integer
-  // expression (S_RANGE direct, S_IADD/S_ISUB/S_IMUL/etc. composed
-  // over S_RANGE atoms).  Movement ops update rngs[i] via the
-  // apply_movement_op rules; ALU ops propagate from src.
-  //
-  // Currently used for: scalar_uops_pad_fusion_finding.md documents
-  // why naive fusion fails without this tracking.  Wiring up
-  // incrementally; for now this is just allocated + zeroed -- no
-  // behavior change.  Subsequent commits will populate per-op rules.
-  typedef struct {
-    u32 ndim;
-    u32 refs[MAX_DIM];
-    u32 valid_mask;  // 0 = always valid (no PAD upstream); else
-                     // op_id of integer expression returning 0/1 that
-                     // gates the input load via IWHERE(mask, val, 0).
-  } RngsCtx;
-  RngsCtx rngs[nops_local];
-  for (u32 i = 0; i < nops_local; i++) {
-    rngs[i].ndim = 0;
-    for (u32 d = 0; d < MAX_DIM; d++) rngs[i].refs[d] = 0;
-    rngs[i].valid_mask = 0;
-  }
-  // BACKWARD PASS: compute out_rngs[i] = per-axis iter expressions
-  // describing each op's output position (in terms of LOOP/REDUCE
-  // ranges).  Walk from terminal op backward; each op tells us what
-  // iter expressions its sources see (= its inputs' out_rngs).
-  //
-  // Currently wired for: REDUCE (adds reduce_range to body's rngs),
-  // and ALU ops (propagate unchanged).  Movement ops (SHRINK/PAD/
-  // EXPAND/FLIP/RESHAPE/PERMUTE) are next iterations.
-  //
-  // Initialize the terminal op's out_rngs to LOOP iters (the kernel
-  // STORE iterates the os shape).  Walk backward, propagating to
-  // sources via per-op rules.
-  if (ke->n_ops > 0) {
-    i32 last = (i32)ke->n_ops - 1;
-    rngs[last].ndim = os->ndim;
-    for (u32 d = 0; d < os->ndim; d++) rngs[last].refs[d] = loop_ranges[d];
-    for (i32 i = last; i >= 0; i--) {
-      KProgOp *p = &ke->program[i];
-      RngsCtx in_rngs = rngs[i];
-      // Per-op transform: compute what rngs the inputs see.
-      // Mirrors tinygrad's apply_movement_op (indexing.py:128-145).
-      switch (p->opcode) {
-        case UOP_REDUCE: {
-          // The REDUCE op's body sees one extra iter (reduce_range)
-          // appended.  reduce_in_numel == output * reduce_size.
-          if (has_reduce && in_rngs.ndim < MAX_DIM) {
-            in_rngs.refs[in_rngs.ndim++] = reduce_range;
-          }
-          break;
-        }
-        case UOP_SHRINK: {
-          // output[i] = input[i + begin].  Source rngs[d] = output
-          // rngs[d] + begin[d].  Tinygrad: a if ss == 0 else a+ss.
-          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
-            u32 begin = p->pad_widths[2 * d];
-            if (begin == 0) continue;
-            u32 c = emit_iconst(ke, (i64)begin);
-            in_rngs.refs[d] = emit_ibinop(ke, S_IADD, in_rngs.refs[d], c);
-          }
-          break;
-        }
-        case UOP_FLIP: {
-          // output[i] = input[(extent-1) - i] for flipped axes.
-          // Tinygrad: ((s-1)-a) if f else a.  axes_mask is in p->arg.
-          u32 mask = p->arg & 0xFFu;
-          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
-            if (!(mask & (1u << d))) continue;
-            u32 ext = p->src0_ndim > d ? p->src0_dims[d] : 1;
-            u32 c = emit_iconst(ke, (i64)(ext - 1));
-            in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, c, in_rngs.refs[d]);
-          }
-          break;
-        }
-        case UOP_EXPAND: {
-          // Broadcast axes (where src dim < out dim) read input at
-          // position 0.  Other axes pass iter through.  Tinygrad:
-          // a if in_sh == out_sh else a.const_like(0).
-          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
-            u32 src_dim = p->src0_ndim > d ? p->src0_dims[d] : 1;
-            u32 out_dim = p->out_dims[d];
-            if (src_dim != out_dim) {
-              in_rngs.refs[d] = emit_iconst(ke, 0);
-            }
-          }
-          break;
-        }
-        case UOP_PERMUTE: {
-          // output[i_0..i_{n-1}] = input[i_{axis_perm[0]}..i_{axis_perm[n-1]}]
-          // i.e., input axis axis_perm[d] is read at value out_rngs[d].
-          // So in_rngs[axis_perm[d]] = out_rngs[d].  Tinygrad: rngs =
-          // tuple(rngs[p] for p in argsort(arg)).
-          if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-              || in_rngs.ndim != p->out_ndim) {
-            break;  // identity-propagate on shape mismatch
-          }
-          RngsCtx new_rngs = {0};
-          new_rngs.ndim = p->out_ndim;
-          new_rngs.valid_mask = in_rngs.valid_mask;
-          for (u32 d = 0; d < p->out_ndim; d++) {
-            u8 src_axis = p->axis_perm[d];
-            if (src_axis >= MAX_DIM) { new_rngs.ndim = 0; break; }
-            new_rngs.refs[src_axis] = in_rngs.refs[d];
-          }
-          if (new_rngs.ndim != 0) in_rngs = new_rngs;
-          break;
-        }
-        case UOP_RESHAPE: {
-          // Numel-preserving reshape A -> B.  Tinygrad's _apply_reshape
-          // (indexing.py:113-125): flat = sum(out_iter[d] * B_strides[d]);
-          // in_iter[d] = (flat / A_strides[d]) % A_dims[d].
-          // Built symbolically over S_IADD/S_IMUL/S_IDIV/S_IMOD.
-          if (p->src0_ndim == 0 || p->out_ndim == 0
-              || p->src0_ndim > MAX_DIM || p->out_ndim > MAX_DIM
-              || in_rngs.ndim != p->out_ndim) {
-            // Identity-propagate when shapes don't fit; the input load
-            // bail-fallback handles incorrect addressing.
-            break;
-          }
-          // Build flat = sum(out_rngs[d] * B_strides[d]) where B_strides
-          // are row-major over p->out_dims.
-          u32 b_strides[MAX_DIM];
-          row_major_strides(p->out_dims, p->out_ndim, b_strides);
-          u32 flat = 0;
-          for (u32 d = 0; d < p->out_ndim; d++) {
-            if (b_strides[d] == 0) continue;
-            u32 t = in_rngs.refs[d];
-            if (b_strides[d] != 1) {
-              u32 c = emit_iconst(ke, (i64)b_strides[d]);
-              t = emit_ibinop(ke, S_IMUL, t, c);
-            }
-            if (flat == 0) flat = t;
-            else           flat = emit_ibinop(ke, S_IADD, flat, t);
-          }
-          if (flat == 0) flat = emit_iconst(ke, 0);
-          // Decompose flat into in_rngs[d] = (flat / A_strides[d]) %
-          // A_dims[d] over p->src0_dims (row-major).
-          u32 a_strides[MAX_DIM];
-          row_major_strides(p->src0_dims, p->src0_ndim, a_strides);
-          RngsCtx new_rngs = {0};
-          new_rngs.ndim = p->src0_ndim;
-          for (u32 d = 0; d < p->src0_ndim; d++) {
-            u32 coord = flat;
-            if (a_strides[d] != 1) {
-              u32 c = emit_iconst(ke, (i64)a_strides[d]);
-              coord = emit_ibinop(ke, S_IDIV, coord, c);
-            }
-            if (d != 0) {
-              u32 dc = emit_iconst(ke, (i64)p->src0_dims[d]);
-              coord = emit_ibinop(ke, S_IMOD, coord, dc);
-            }
-            new_rngs.refs[d] = coord;
-          }
-          new_rngs.valid_mask = in_rngs.valid_mask;  // preserve mask
-          in_rngs = new_rngs;
-          break;
-        }
-        case UOP_PAD: {
-          // output[i] = input[i - begin] when in bounds, else 0.
-          // Tinygrad: r if (s==0 and e==0) else
-          //          (r >= s) & (r < (sh + s)) ? r-s : invalid()
-          //
-          // Source rngs[d] = out_rngs[d] - begin[d] (when in bounds).
-          // Validity mask = AND over axes of:
-          //   (out_rngs[d] >= begin[d]) AND (out_rngs[d] < begin[d] + src_dim[d])
-          // Combined into rngs.valid_mask via S_IAND (chained across
-          // multiple upstream PADs).
-          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
-            u32 begin   = p->pad_widths[2 * d];
-            u32 src_dim = p->src0_dims[d];
-            // Skip no-op axes (begin==0 AND src spans full output).
-            if (begin == 0 && src_dim == p->out_dims[d]) continue;
-            u32 orig_ref = in_rngs.refs[d];
-            // Shift by -begin for the source addressing.
-            if (begin > 0) {
-              u32 c = emit_iconst(ke, (i64)begin);
-              in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, orig_ref, c);
-            }
-            // Bounds: (orig_ref < begin + src_dim) AND
-            //         (begin == 0 ? 1 : 1 - (orig_ref < begin))
-            u32 hi_lim = emit_iconst(ke, (i64)(begin + src_dim));
-            u32 axis_ok = emit_ibinop(ke, S_ILT, orig_ref, hi_lim);
-            if (begin > 0) {
-              u32 lo_lim = emit_iconst(ke, (i64)begin);
-              u32 lt_lo  = emit_ibinop(ke, S_ILT, orig_ref, lo_lim);
-              u32 one    = emit_iconst(ke, 1);
-              u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
-              axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
-            }
-            if (in_rngs.valid_mask == 0) {
-              in_rngs.valid_mask = axis_ok;
-            } else {
-              in_rngs.valid_mask = emit_ibinop(ke, S_IAND,
-                                                in_rngs.valid_mask, axis_ok);
-            }
-          }
-          break;
-        }
-        // RESHAPE, PERMUTE: propagate unchanged for now.  RESHAPE
-        // needs the flat-roundtrip across all axes (DIV/MOD); PERMUTE
-        // needs an axis re-order.  Next iterations.
-        default: break;
-      }
-      // Propagate to non-input sources.  Inputs (KSRC_IS_INPUT) carry
-      // the in_rngs implicitly to the input_load emission, which
-      // happens before this loop in the current materializer; for now
-      // we only propagate to op-result sources.
-      for (u8 s = 0; s < p->n_src; s++) {
-        u32 raw = p->src[s];
-        if (KSRC_IS_INPUT(raw)) continue;
-        u32 src_idx = KSRC_INDEX(raw);
-        // Only set if not already set by a closer-to-terminal consumer
-        // (first writer wins -- sources with multiple consumers may
-        // need different rngs; this is a known limitation that the
-        // proper rngs port will resolve).
-        if (rngs[src_idx].ndim == 0) rngs[src_idx] = in_rngs;
-      }
-    }
-  }
-  (void)rngs;  // backward-walk computed but not yet consumed
-                // (unused until we wire input_load + movement ops to use it)
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
