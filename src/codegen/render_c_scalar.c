@@ -1,0 +1,326 @@
+// codegen/render_c_scalar.c -- C99 renderer for the rangeify
+// scalar-UOp graph (ScalarUop[]).  The KProgOp[] pipeline (cg_emit
+// + render_c.c) covers the legacy tensor-op kernels; this file
+// covers the post-rangeify scalar form so kernels lowered through
+// rangeify can hit the same JIT path the legacy KProgOp[] path uses.
+//
+// Scope (MVP):
+//   - Elementwise: S_BUFFERIZE / S_STORE / S_INDEX / S_LOAD /
+//     S_LOAD_RAW (pass-through) / S_CONST / S_ADD / S_MUL / S_NEG /
+//     S_RECIP / S_SQRT / S_EXP2 / S_LOG2 / S_CMPLT / S_CMPEQ.
+//   - One LOOP nest at the BUFFERIZE root (rank 1..MAX_DIM).
+//   - f32 / f64 only.
+//   - No REDUCE, SHRINK, PAD, FLIP, RESHAPE, CAST, BITCAST yet.
+//
+// Out of scope (bail; falls through to cpu_dispatch_scalar):
+//   - REDUCE-typed RANGE / S_REDUCE_*
+//   - S_SHRINK / S_PAD / S_FLIP / S_RESHAPE iter shifts
+//   - S_CAST cross-dtype conversion
+//   - Narrow FPs / packed nibbles
+//
+// Generated function signature matches render_c.c:
+//   void k(void *out_v, const void *const *ins_v, unsigned n,
+//          const unsigned *in_numels);
+
+static const char *cs_dtype_to_c(u32 dtype) {
+  switch (dtype) {
+    case DT_FP32: return "float";
+    case DT_FP64: return "double";
+    default:      return "float";
+  }
+}
+
+static int cs_dtype_supported(u32 dtype) {
+  return dtype == DT_FP32 || dtype == DT_FP64;
+}
+
+// MVP supported-op predicate.  Must mirror the emit switch's
+// coverage so cs_supports never green-lights an op the emit doesn't
+// know how to render.
+static int cs_op_supported(u8 op) {
+  switch (op) {
+    case S_RANGE:
+    case S_DEFINE_PARAM:
+    case S_DEFINE_OUTPUT:
+    case S_INDEX:
+    case S_LOAD:
+    case S_LOAD_RAW:
+    case S_STORE:
+    case S_BUFFERIZE:
+    case S_CONST:
+    case S_ADD: case S_MUL: case S_NEG:
+    case S_RECIP: case S_SQRT: case S_EXP2: case S_LOG2:
+    case S_CMPLT: case S_CMPEQ:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+// Find the BUFFERIZE root + STORE child, gather LOOP ranges, and
+// validate the dtype invariants.  Returns 1 on success, 0 to bail.
+typedef struct {
+  ScalarUop *bufferize;
+  u32        store_id;
+  u32        n_loops;
+  u32        loop_ids    [MAX_DIM];
+  u32        loop_extents[MAX_DIM];
+  u32        dtype;       // uniform dtype for the kernel
+} CsKernelInfo;
+
+static int cs_collect_kernel_info(KernelEntry const *ke, CsKernelInfo *out) {
+  if (ke->scalar_uops == NULL || ke->n_scalar_uops < 2) return 0;
+  // Walk every scalar op; bail on unsupported or non-uniform dtype.
+  u32 dt = (u32)-1;
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    ScalarUop const *u = &ke->scalar_uops[i];
+    if (!cs_op_supported(u->op)) return 0;
+    // Uniform-dtype check: ignore S_INDEX / S_RANGE / S_DEFINE_*
+    // which carry dtype only as a label.
+    if (u->op == S_LOAD || u->op == S_LOAD_RAW || u->op == S_STORE
+     || u->op == S_CONST || u->op == S_ADD || u->op == S_MUL
+     || u->op == S_NEG || u->op == S_RECIP || u->op == S_SQRT
+     || u->op == S_EXP2 || u->op == S_LOG2 || u->op == S_CMPLT
+     || u->op == S_CMPEQ) {
+      if (dt == (u32)-1) dt = u->dtype;
+      else if (dt != u->dtype) return 0;
+    }
+  }
+  if (dt == (u32)-1) return 0;
+  if (!cs_dtype_supported(dt)) return 0;
+  out->dtype = dt;
+
+  // Find BUFFERIZE.
+  u32 buf_id = 0;
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    if (ke->scalar_uops[i].op == S_BUFFERIZE) { buf_id = i; break; }
+  }
+  if (buf_id == 0) return 0;
+  out->bufferize = &ke->scalar_uops[buf_id];
+  out->store_id  = out->bufferize->src[0];
+  if (ke->scalar_uops[out->store_id].op != S_STORE) return 0;
+
+  out->n_loops = (u32)out->bufferize->src_count - 1;
+  if (out->n_loops > MAX_DIM) return 0;
+  for (u32 d = 0; d < out->n_loops; d++) {
+    u32 r = out->bufferize->src[1 + d];
+    if (ke->scalar_uops[r].op != S_RANGE) return 0;
+    // LOOP-typed only (axis_type == S_AXIS_LOOP, in extra high 32).
+    u32 axis_type = (u32)((ke->scalar_uops[r].extra >> 32) & 0xFFFFFFFFu);
+    if (axis_type != S_AXIS_LOOP) return 0;
+    out->loop_ids    [d] = r;
+    out->loop_extents[d] = (u32)(ke->scalar_uops[r].extra & 0xFFFFFFFFu);
+  }
+  return 1;
+}
+
+// Predicate: can this kernel be JIT-rendered via cg_emit_scalar?
+fn int cg_supports_scalar(KernelEntry const *ke) {
+  CsKernelInfo info;
+  return cs_collect_kernel_info(ke, &info);
+}
+
+// Recursively emit a C expression for the value produced by `op_id`.
+// Each scalar op except S_BUFFERIZE / S_STORE produces a value when
+// the outer LOOP iter context (bound to range_iter[loop_ids[d]] = the
+// per-axis loop variable) is fixed.  The emitter inlines the
+// computation -- no temporaries -- which lets clang fuse the chain.
+static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id);
+
+// Emit an INDEX expression evaluated to its flat-buffer offset.
+// S_INDEX.src[0] is the buffer (DEFINE_PARAM/DEFINE_OUTPUT); src[1..]
+// are the LOOP RANGE refs, and extra packs (stride0, stride1, stride2,
+// offset) as 4 x u16.  Only up to 3 strided axes per node; longer
+// chains nest INDEX nodes (each later INDEX takes the previous as its
+// buffer src and adds 0 offset).
+static void cs_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
+  ScalarUop const *u = &ke->scalar_uops[idx_id];
+  // Recurse into src[0] if it's another S_INDEX (chain); else it's a
+  // DEFINE_PARAM/DEFINE_OUTPUT terminal (no offset contribution).
+  ScalarUop const *child = &ke->scalar_uops[u->src[0]];
+  int wrote = 0;
+  if (child->op == S_INDEX) {
+    cs_emit_index_offset(b, ke, u->src[0]);
+    wrote = 1;
+  }
+  // Extra: bits[0..15]=stride0, [16..31]=stride1, [32..47]=stride2,
+  //        [48..63]=offset.
+  u32 stride0 = (u32)((u->extra >>  0) & 0xFFFFu);
+  u32 stride1 = (u32)((u->extra >> 16) & 0xFFFFu);
+  u32 stride2 = (u32)((u->extra >> 32) & 0xFFFFu);
+  u32 offset  = (u32)((u->extra >> 48) & 0xFFFFu);
+  u32 nrng = (u32)u->src_count - 1;  // RANGE refs after the buffer
+  u32 strides[3] = {stride0, stride1, stride2};
+  if (offset != 0) {
+    if (wrote) cg_append(b, " + ");
+    cg_append(b, "%uu", offset);
+    wrote = 1;
+  }
+  for (u32 d = 0; d < nrng && d < 3; d++) {
+    if (strides[d] == 0) continue;
+    u32 rng_id = u->src[1 + d];
+    if (wrote) cg_append(b, " + ");
+    if (strides[d] == 1) cg_append(b, "_v%u", rng_id);
+    else                 cg_append(b, "%uu*_v%u", strides[d], rng_id);
+    wrote = 1;
+  }
+  if (!wrote) cg_append(b, "0u");
+}
+
+// Emit the C value-producing expression for one scalar op.  S_RANGE
+// expands to its bound loop variable; S_LOAD reads from in%u; S_CONST
+// is a literal; ALU ops parenthesize their children; etc.
+static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
+  ScalarUop const *u = &ke->scalar_uops[op_id];
+  switch (u->op) {
+    case S_RANGE:
+      cg_append(b, "_v%u", op_id);
+      return 1;
+    case S_DEFINE_PARAM:
+    case S_DEFINE_OUTPUT:
+      // Buffer leaves never appear in value position (they appear
+      // only as INDEX.src[0]); reaching them here is a bug.
+      return 0;
+    case S_LOAD:
+    case S_LOAD_RAW: {
+      // Recover the input slot from the INDEX chain's terminal
+      // DEFINE_PARAM, then emit `in%u[(offset)]`.
+      ScalarUop const *idx = &ke->scalar_uops[u->src[0]];
+      // Walk down the INDEX chain to find the buffer.
+      while (idx->op == S_INDEX
+          && ke->scalar_uops[idx->src[0]].op == S_INDEX) {
+        idx = &ke->scalar_uops[idx->src[0]];
+      }
+      if (idx->op != S_INDEX) return 0;
+      ScalarUop const *param = &ke->scalar_uops[idx->src[0]];
+      if (param->op != S_DEFINE_PARAM) return 0;
+      u32 slot = (u32)param->extra;
+      cg_append(b, "in%u[", slot);
+      cs_emit_index_offset(b, ke, u->src[0]);
+      cg_append(b, "]");
+      return 1;
+    }
+    case S_CONST: {
+      u32 bits = (u32)(u->extra & 0xFFFFFFFFu);
+      if (u->dtype == DT_FP32) {
+        f32 v; memcpy(&v, &bits, 4);
+        cg_append(b, "%.9gf", (double)v);
+      } else {
+        f32 v; memcpy(&v, &bits, 4);
+        cg_append(b, "%.17g", (double)(f64)v);
+      }
+      return 1;
+    }
+    case S_ADD: {
+      cg_append(b, "(");
+      if (!cs_emit_value(b, ke, u->src[0])) return 0;
+      cg_append(b, " + ");
+      if (!cs_emit_value(b, ke, u->src[1])) return 0;
+      cg_append(b, ")");
+      return 1;
+    }
+    case S_MUL: {
+      cg_append(b, "(");
+      if (!cs_emit_value(b, ke, u->src[0])) return 0;
+      cg_append(b, " * ");
+      if (!cs_emit_value(b, ke, u->src[1])) return 0;
+      cg_append(b, ")");
+      return 1;
+    }
+    case S_NEG: {
+      cg_append(b, "(-(");
+      if (!cs_emit_value(b, ke, u->src[0])) return 0;
+      cg_append(b, "))");
+      return 1;
+    }
+    case S_RECIP: {
+      const char *one = (u->dtype == DT_FP32) ? "1.0f" : "1.0";
+      cg_append(b, "(%s/(", one);
+      if (!cs_emit_value(b, ke, u->src[0])) return 0;
+      cg_append(b, "))");
+      return 1;
+    }
+    case S_SQRT:
+    case S_EXP2:
+    case S_LOG2: {
+      const char *suffix = (u->dtype == DT_FP32) ? "f" : "";
+      const char *fname  = (u->op == S_SQRT) ? "sqrt"
+                         : (u->op == S_EXP2) ? "exp2"
+                                             : "log2";
+      cg_append(b, "%s%s(", fname, suffix);
+      if (!cs_emit_value(b, ke, u->src[0])) return 0;
+      cg_append(b, ")");
+      return 1;
+    }
+    case S_CMPLT:
+    case S_CMPEQ: {
+      const char *cmp = (u->op == S_CMPLT) ? "<" : "==";
+      const char *one = (u->dtype == DT_FP32) ? "1.0f" : "1.0";
+      const char *zero = (u->dtype == DT_FP32) ? "0.0f" : "0.0";
+      cg_append(b, "((");
+      if (!cs_emit_value(b, ke, u->src[0])) return 0;
+      cg_append(b, " %s ", cmp);
+      if (!cs_emit_value(b, ke, u->src[1])) return 0;
+      cg_append(b, ") ? %s : %s)", one, zero);
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+// Top-level entry: render a complete C source file the JIT can
+// compile + dlopen.  Returns malloc'd buffer (caller free), or NULL
+// on emit failure.  The C function signature matches render_c.c so
+// cpu_jit_dispatch can call into it via the same CpuJitFn typedef.
+fn char *cg_emit_scalar(KernelEntry const *ke) {
+  CsKernelInfo info;
+  if (!cs_collect_kernel_info(ke, &info)) return NULL;
+
+  CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
+              .program_dtype = info.dtype, .ke = ke };
+  if (!b.buf) return NULL;
+
+  const char *T = cs_dtype_to_c(info.dtype);
+  cg_append(&b, "#include <math.h>\n");
+  cg_append(&b, "#include <stdint.h>\n\n");
+  cg_append(&b, "void k(void *out_v, const void *const *ins_v, "
+                "unsigned n, const unsigned *in_numels) {\n");
+  cg_append(&b, "  %s *out = (%s *)out_v;\n", T, T);
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    cg_append(&b, "  const %s *in%u = (const %s *)ins_v[%u];\n",
+              T, i, T, i);
+  }
+  cg_append(&b, "  (void)n; (void)in_numels;\n");
+
+  // Open the LOOP nest.  Outermost = loop_ids[0].  Use the loop
+  // op_id as the variable suffix so cs_emit_value's S_RANGE branch
+  // can refer to it directly: `_v%u`.
+  for (u32 d = 0; d < info.n_loops; d++) {
+    for (u32 indent = 0; indent < d + 1; indent++) cg_append(&b, "  ");
+    cg_append(&b, "for (unsigned _v%u = 0; _v%u < %uu; _v%u++) {\n",
+              info.loop_ids[d], info.loop_ids[d],
+              info.loop_extents[d], info.loop_ids[d]);
+  }
+
+  // Emit the STORE: out[idx] = value.
+  ScalarUop const *st = &ke->scalar_uops[info.store_id];
+  for (u32 indent = 0; indent < info.n_loops + 1; indent++) cg_append(&b, "  ");
+  cg_append(&b, "out[");
+  cs_emit_index_offset(&b, ke, st->src[0]);
+  cg_append(&b, "] = ");
+  if (!cs_emit_value(&b, ke, st->src[1])) {
+    free(b.buf);
+    return NULL;
+  }
+  cg_append(&b, ";\n");
+
+  // Close the LOOP nest.
+  for (i32 d = (i32)info.n_loops - 1; d >= 0; d--) {
+    for (u32 indent = 0; indent < (u32)d + 1; indent++) cg_append(&b, "  ");
+    cg_append(&b, "}\n");
+  }
+  cg_append(&b, "}\n");
+
+  return b.buf;
+}

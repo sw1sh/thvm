@@ -167,6 +167,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "codegen/cg.c"
 #include "codegen/profile.c"
 #include "codegen/render_c.c"
+#include "codegen/render_c_scalar.c"
 #include "codegen/render_metal.c"
 // CPU dispatch: interpreter + BLAS pattern dispatch + clang-JIT.
 // cpu_dispatch_kernel composes the three (BLAS first, then JIT, then
@@ -246,6 +247,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/dup_any.c"
 #include "interact/dup_ten.c"
 #include "interact/dup_uop.c"
+#include "interact/dup_ctr.c"
 #include "interact/app_bri.c"
 #include "interact/app_pri.c"
 #include "interact/app_sup.c"

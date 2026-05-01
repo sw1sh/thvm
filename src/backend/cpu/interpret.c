@@ -855,8 +855,9 @@ fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 
 // Forward decls: defined in backend/cpu/{blas,jit}.c (included after
 // this file in thvm.c, so declare here for the dispatcher).
-fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
-fn int cpu_jit_dispatch (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+fn int cpu_blas_dispatch       (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+fn int cpu_jit_dispatch        (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+fn int cpu_jit_dispatch_scalar (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 
 fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Recover kid by pointer arithmetic into KERNELS[].  Used for
@@ -872,14 +873,24 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     cg_profile_record(kid, (KDispatchKind)blas_kind, cg_now_us() - t0);
     return 0;
   }
-  // 2. JIT next: clang-compiled fused inner loop for elementwise
+  // 2. KProgOp JIT: clang-compiled fused inner loop for elementwise
   //    chains (cached by program hash).  Faster than the scalar
   //    interpreter for the patterns it covers (no REDUCE > 1, etc.).
   if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;
   }
-  // 3. Rangeify scalar-uops interpreter: the broad fallback that
+  // 3. Scalar-UOps JIT: clang-compiled fused inner loop rendered
+  //    from ke->scalar_uops[] (the rangeify output).  Same JIT
+  //    pipeline as path 2 but covers the rangeified patterns
+  //    (multi-input EXPAND broadcast, REDUCE-broadcast tail, etc.)
+  //    that the KProgOp JIT can't render directly.  Falls back to
+  //    the scalar interpreter on cg_supports_scalar miss.
+  if (cpu_jit_dispatch_scalar(ke, in_buf_ids, out_buf_id)) {
+    cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
+    return 0;
+  }
+  // 4. Rangeify scalar-uops interpreter: the broad fallback that
   //    handles every pattern the WL grid produces (REDUCE, FLIP,
   //    PAD/SHRINK chains, BITCAST, packed nibbles, narrow FPs).
   if (ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {

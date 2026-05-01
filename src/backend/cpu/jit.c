@@ -278,3 +278,110 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   jfn(out, ins_buf, numel, nums_buf);
   return 1;
 }
+
+// Scalar-uops variant: same JIT pipeline (clang -O2 + dlopen) but
+// the source comes from cg_emit_scalar (rendering ke->scalar_uops[]
+// instead of ke->program[]).  Hash key includes a sentinel bit so it
+// doesn't collide with the KProgOp[] cache.
+static u64 cpu_jit_hash_scalar(KernelEntry const *ke) {
+  u64 h = 0xcbf29ce484222325ULL ^ 0xDEADBEEFCAFEBABEULL;
+  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
+    u8 const *bytes = (u8 const *)ke->scalar_uops;
+    size_t total = (size_t)ke->n_scalar_uops * sizeof(ScalarUop);
+    for (size_t i = 0; i < total; i++) {
+      h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
+    }
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    h ^= (u64)ke->input_dtypes[i]; h *= 0x100000001b3ULL;
+  }
+  h ^= (u64)ke->output_dtype;      h *= 0x100000001b3ULL;
+  // High bit set marks "scalar-uop" key vs KProgOp key.
+  return h | (1ULL << 62);
+}
+
+static CpuJitFn cpu_jit_build_scalar(KernelEntry const *ke, u64 key) {
+  char *src = cg_emit_scalar(ke);
+  if (!src) return NULL;
+  char src_path[256], dl_path[256];
+  snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_s_%016llx.c",
+           (unsigned long long)key);
+  snprintf(dl_path,  sizeof dl_path,  "/tmp/thvm_jit_s_%016llx.dylib",
+           (unsigned long long)key);
+  struct stat st;
+  if (stat(dl_path, &st) == 0) {
+    free(src);
+    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+    if (!h) return NULL;
+    CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
+    if (!jfn) { dlclose(h); return NULL; }
+    CpuJitSlot *s = cpu_jit_lookup_slot(key);
+    if (s) { s->key = key; s->func = jfn; s->dl_handle = h; s->n_inputs = ke->n_inputs; }
+    return jfn;
+  }
+  FILE *f = fopen(src_path, "w");
+  if (!f) { free(src); return NULL; }
+  fputs(src, f);
+  fclose(f);
+  free(src);
+  char cmd[768];
+  snprintf(cmd, sizeof cmd,
+           "clang -O2 -fPIC -shared -o '%s' '%s' 2>/dev/null",
+           dl_path, src_path);
+  if (system(cmd) != 0) return NULL;
+  void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+  if (!h) return NULL;
+  CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
+  if (!jfn) { dlclose(h); return NULL; }
+  CpuJitSlot *s = cpu_jit_lookup_slot(key);
+  if (s) { s->key = key; s->func = jfn; s->dl_handle = h; s->n_inputs = ke->n_inputs; }
+  return jfn;
+}
+
+fn int cpu_jit_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (!cg_supports_scalar(ke)) return 0;
+  // Skip non-contig inputs (same gate as KProgOp JIT path).
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 tid = ke->input_tids[i];
+    if (tid == 0 || tid >= TENS_NEXT) continue;
+    if (TENS[tid].nviews > 0 || !TENS[tid].view.contiguous) return 0;
+  }
+  u64 key = cpu_jit_hash_scalar(ke);
+  CpuJitSlot *s = cpu_jit_lookup_slot(key);
+  CpuJitFn jfn = (s && s->key == key) ? s->func : NULL;
+  if (jfn == NULL) {
+    char dl_path[256];
+    snprintf(dl_path, sizeof dl_path, "/tmp/thvm_jit_s_%016llx.dylib",
+             (unsigned long long)key);
+    struct stat st;
+    int dl_exists = (stat(dl_path, &st) == 0);
+    if (!dl_exists) {
+      if (s != NULL) {
+        if (s->key == 0) {
+          s->key = key; s->func = NULL; s->dl_handle = NULL;
+          s->n_inputs = ke->n_inputs; s->fire_count = 1;
+          return 0;
+        }
+        if (s->key == key && s->func == NULL) {
+          s->fire_count++;
+          if (s->fire_count < CPU_JIT_WARMUP) return 0;
+        }
+      } else {
+        return 0;
+      }
+    }
+    jfn = cpu_jit_build_scalar(ke, key);
+    if (!jfn) return 0;
+  }
+  u32 ni = ke->n_inputs;
+  const void *ins_buf  [ni ? ni : 1];
+  unsigned    nums_buf [ni ? ni : 1];
+  for (u32 i = 0; i < ni; i++) {
+    ins_buf [i] = CPU_BUFS[in_buf_ids[i]].data;
+    nums_buf[i] = ke->input_numels[i];
+  }
+  void *out = CPU_BUFS[out_buf_id].data;
+  unsigned numel = ke->output_numel;
+  jfn(out, ins_buf, numel, nums_buf);
+  return 1;
+}
