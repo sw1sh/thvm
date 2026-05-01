@@ -270,6 +270,12 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // since we're a single TU).
 fn Term wnf(Term term);
 #include "aot/_.c"
+// Auto-emitter that walks a TDef'd body and produces C source.
+// Phase 0: constants and identity only -- the rest of the patterns
+// (MAT chain, CTR destructure, OP2, DUP) land in follow-ups.  Sits
+// next to the runtime helpers because it walks book-heap cells via
+// book_read() and uses the same Term layout macros.
+#include "aot/emit.c"
 // Hand-coded AOT programs (proof-of-concept; will be replaced by
 // auto-emitted code once src/aot/emit.c lands).  Each program file
 // exposes one aot_program_<name>_register(def_id1, def_id2, ...)

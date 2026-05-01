@@ -43,6 +43,8 @@ TAOTCalls::usage = "TAOTCalls[] returns the cumulative count of WNF -> AOT dispa
 
 TAOTPrograms::usage = "TAOTPrograms[] returns the list of program names that ship a hand-coded AOT under src/aot/programs/.  Each can be registered via TAOT[name, defNames].";
 
+TAOTEmit::usage = "TAOTEmit[name] returns the C source the auto-emitter would produce for the def at TDefName[name].  Phase 0 of the auto-emitter: only constants and the identity lambda are supported; unsupported AST nodes emit a fallback comment.  Drop the result under src/aot/programs/<name>.c and rebuild thvm to use it.";
+
 TAOT::badprog = "Unknown AOT program `1`; expected one of `2`.";
 TAOT::badargc = "AOT program `1` expects `2` def name(s); got `3`.";
 
@@ -57,6 +59,7 @@ $aotRegGabTakFn := $aotRegGabTakFn = load["thvm_wl_aot_register_gab_tak",
 $aotRegU32FibFn := $aotRegU32FibFn = load["thvm_wl_aot_register_u32_fib",
     {Integer}, Integer];
 $aotCallsFn     := $aotCallsFn     = load["thvm_wl_aot_calls",     {}, Integer];
+$aotEmitDefFn   := $aotEmitDefFn   = load["thvm_wl_aot_emit_def",  {Integer}, "UTF8String"];
 
 (* === Program registry ================================================
    Each entry: program-name -> {arity, register-fn taking that many
@@ -101,6 +104,19 @@ TAOT[programName_String, defNames_List] := Module[{spec, ids, n, registered},
 TAOTCalls[] := (ensureInit[]; $aotCallsFn[])
 
 TAOTReset[] := TInit[]
+
+(* === Phase 0 auto-emitter ============================================
+   TAOTEmit[name] returns the C source the auto-emitter generates for
+   a TDef'd body.  Phase 0 supports just constants and the identity
+   lambda; anything else emits "/* unsupported */" comments and a
+   fallback to the interpreter.  Drop the result under
+   src/aot/programs/<name>.c and rebuild thvm to use it.  Future
+   phases will compile + dlopen automatically (TAOTCompile). *)
+
+TAOTEmit[name_] := (
+    ensureInit[];
+    $aotEmitDefFn[TDefName[name]]
+)
 
 (* === TAOTProgram payload accessors ================================== *)
 

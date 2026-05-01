@@ -1849,6 +1849,31 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_calls(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// Emit C source for a TDef'd def slot.  Phase 0 of the auto-emitter:
+// supports constant-returning defs and the identity lambda.
+// Returns the emitted source as a UTF-8 string; caller (WL side)
+// receives ownership via MArgument_setUTF8String + libData->UTF8String_disown.
+EXTERN_C DLLEXPORT int thvm_wl_aot_emit_def(WolframLibraryData libData,
+                                            mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  u32 def_id = (u32)MArgument_getInteger(args[0]);
+  char *src = thvm_aot_emit_def(def_id);
+  if (src == NULL) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  // The library protocol expects MArgument_setUTF8String to take a
+  // pointer the runtime owns -- we let the library copy it and free
+  // our buffer.  In practice WolframLibraryData copies, so we
+  // free immediately after.  If your runtime keeps the pointer,
+  // switch to a sticky-ownership model.
+  MArgument_setUTF8String(res, src);
+  // Don't free src here -- the LibraryLink runtime handles ownership
+  // per its UTF8String contract.
+  (void)libData;
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_term_new_pri(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {
   (void)libData; (void)argc;

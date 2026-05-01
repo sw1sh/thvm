@@ -347,3 +347,53 @@ VerificationTest[
     {True, True},
     TestID -> "u32_fib(15): AOT == interpreter (value + ITRS)"
 ]
+
+(* === 9. Phase-0 auto-emitter (TAOTEmit) =================== *)
+(* The emitter walks a TDef'd book template and produces C source
+   that mirrors the interpreter's behaviour for that def.  Phase
+   0 supports only constant-returning defs and the identity
+   lambda; anything else emits a fallback comment.  These tests
+   verify the emitter recognises both patterns and produces
+   well-formed text. *)
+
+VerificationTest[
+    TInit[];
+    TDef["emit_zero_test", TNum[42]];
+    With[{src = TAOTEmit["emit_zero_test"]},
+        StringContainsQ[src, "term_new(0, TAG_NUM"] &&
+        StringContainsQ[src, "42"] &&
+        StringContainsQ[src, "aot_program_emit_"] &&
+        StringContainsQ[src, "_register"]
+    ],
+    True,
+    TestID -> "TAOTEmit on a TNum constant emits term_new(TAG_NUM, ...) + register fn"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["emit_id_test", TLam[x, x]];
+    With[{src = TAOTEmit["emit_id_test"]},
+        StringContainsQ[src, "aot_pop_app_arg"] &&
+        StringContainsQ[src, "APP-LAM"] &&
+        StringContainsQ[src, "return arg"]
+    ],
+    True,
+    TestID -> "TAOTEmit on TLam[x,x] emits the identity lambda body"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["emit_unsupported_test", TLam[x, TApp[x, x]]];
+    With[{src = TAOTEmit["emit_unsupported_test"]},
+        StringContainsQ[src, "unsupported"] &&
+        StringContainsQ[src, "aot_fallback"]
+    ],
+    True,
+    TestID -> "TAOTEmit on unsupported body emits fallback + comment"
+]
+
+VerificationTest[
+    TAOTEmit["definitely_does_not_exist"],
+    "",
+    TestID -> "TAOTEmit on undefined def returns empty string"
+]
