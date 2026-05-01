@@ -191,6 +191,112 @@ int main(void) {
   CHECK(dst_vals[3] == 0.0f);
   rangeify_free(ke);
 
+  TEST_BEGIN("scalar-graph/c-renderer-reduce-sum-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 4;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 1;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 1u);
+  u32 rr = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                              ((u64)S_AXIS_REDUCE << 32) | 4u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 red_in_src[2] = {pa, rr};
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, red_in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  u32 red_src[2] = {la, rr};
+  u32 red = rangeify_emit(ke, S_REDUCE_SUM, DT_FP32, 2, red_src, 0);
+  out_src[0] = pc;
+  out_src[1] = r0;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, red);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  src = cg_emit_scalar(ke);
+  CHECK(src != NULL);
+  CHECK(strstr(src, "_acc") != NULL);
+  CHECK(strstr(src, "for (unsigned _v") != NULL);
+  free(src);
+
+  f32 red_vals[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  f32 red_out[1] = {0.0f};
+  in_buf = cpu_buf_alloc(sizeof(red_vals));
+  out_buf = cpu_buf_alloc(sizeof(red_out));
+  CHECK_EQ(cpu_buf_write(in_buf, red_vals, sizeof(red_vals)), 0);
+  CHECK_EQ(cpu_buf_write(out_buf, red_out, sizeof(red_out)), 0);
+  in_bufs[0] = in_buf;
+  cpu_jit_cache_reset();
+  jit_hit = 0;
+  for (u32 attempt = 0; attempt < 8; attempt++) {
+    if (cpu_jit_dispatch_scalar(ke, in_bufs, out_buf)) {
+      jit_hit = 1;
+    }
+  }
+  CHECK(jit_hit);
+  CHECK_EQ(cpu_buf_read(out_buf, red_out, sizeof(red_out)), 0);
+  CHECK(red_out[0] == 10.0f);
+  rangeify_free(ke);
+
+  TEST_BEGIN("scalar-graph/c-renderer-reduce-max-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 4;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 1;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 1u);
+  rr = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_REDUCE << 32) | 4u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  red_in_src[0] = pa;
+  red_in_src[1] = rr;
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, red_in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  red_src[0] = la;
+  red_src[1] = rr;
+  red = rangeify_emit(ke, S_REDUCE_MAX, DT_FP32, 2, red_src, 0);
+  out_src[0] = pc;
+  out_src[1] = r0;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, red);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  src = cg_emit_scalar(ke);
+  CHECK(src != NULL);
+  CHECK(strstr(src, "-INFINITY") != NULL);
+  CHECK(strstr(src, "> _acc") != NULL);
+  free(src);
+
+  f32 max_vals[4] = {-3.0f, 7.0f, 5.0f, 2.0f};
+  f32 max_out[1] = {0.0f};
+  in_buf = cpu_buf_alloc(sizeof(max_vals));
+  out_buf = cpu_buf_alloc(sizeof(max_out));
+  CHECK_EQ(cpu_buf_write(in_buf, max_vals, sizeof(max_vals)), 0);
+  CHECK_EQ(cpu_buf_write(out_buf, max_out, sizeof(max_out)), 0);
+  in_bufs[0] = in_buf;
+  cpu_jit_cache_reset();
+  jit_hit = 0;
+  for (u32 attempt = 0; attempt < 8; attempt++) {
+    if (cpu_jit_dispatch_scalar(ke, in_bufs, out_buf)) {
+      jit_hit = 1;
+    }
+  }
+  CHECK(jit_hit);
+  CHECK_EQ(cpu_buf_read(out_buf, max_out, sizeof(max_out)), 0);
+  CHECK(max_out[0] == 7.0f);
+  rangeify_free(ke);
+
   thvm_free();
   TEST_REPORT();
 }

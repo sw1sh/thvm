@@ -8,15 +8,15 @@
 //   - Elementwise: S_BUFFERIZE / S_STORE / S_INDEX / S_LOAD /
 //     S_LOAD_RAW (pass-through) / S_CONST / S_ADD / S_MUL / S_NEG /
 //     S_RECIP / S_SQRT / S_EXP2 / S_LOG2 / S_CMPLT / S_CMPEQ.
+//   - Reductions: S_REDUCE_SUM / S_REDUCE_MAX over one REDUCE range.
 //   - One LOOP nest at the BUFFERIZE root (rank 1..MAX_DIM).
 //   - f32 / f64 only.
 //   - Expression indexes: S_INDEX_E plus S_ICONST / S_IADD /
 //     S_ISUB / S_IMUL / S_IDIV / S_IMOD / S_ILT / S_IAND /
 //     S_IWHERE.
-//   - No REDUCE, SHRINK, PAD, FLIP, RESHAPE, CAST, BITCAST yet.
+//   - No SHRINK, PAD, FLIP, RESHAPE, CAST, BITCAST yet.
 //
 // Out of scope (bail; falls through to cpu_dispatch_scalar):
-//   - REDUCE-typed RANGE / S_REDUCE_*
 //   - S_SHRINK / S_PAD / S_FLIP / S_RESHAPE iter shifts
 //   - S_CAST cross-dtype conversion
 //   - Narrow FPs / packed nibbles
@@ -55,6 +55,7 @@ static int cs_op_supported(u8 op) {
     case S_ADD: case S_MUL: case S_NEG:
     case S_RECIP: case S_SQRT: case S_EXP2: case S_LOG2:
     case S_CMPLT: case S_CMPEQ:
+    case S_REDUCE_SUM: case S_REDUCE_MAX:
     case S_ICONST:
     case S_IADD: case S_ISUB: case S_IMUL:
     case S_IDIV: case S_IMOD: case S_ILT:
@@ -80,6 +81,8 @@ static int cs_op_carries_kernel_dtype(ScalarUop const *u) {
     case S_LOG2:
     case S_CMPLT:
     case S_CMPEQ:
+    case S_REDUCE_SUM:
+    case S_REDUCE_MAX:
       return 1;
     case S_IWHERE:
       return u->dtype != DT_INT64;
@@ -321,6 +324,40 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       cg_append(b, " %s ", cmp);
       if (!cs_emit_value(b, ke, u->src[1])) return 0;
       cg_append(b, ") ? %s : %s)", one, zero);
+      return 1;
+    }
+    case S_REDUCE_SUM:
+    case S_REDUCE_MAX: {
+      u32 rng_id = u->src[1];
+      if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
+        return 0;
+      }
+      ScalarUop const *r = &ke->scalar_uops[rng_id];
+      if (r->op != S_RANGE) {
+        return 0;
+      }
+      u32 axis_type = (u32)((r->extra >> 32) & 0xFFFFFFFFu);
+      if (axis_type != S_AXIS_REDUCE && axis_type != S_AXIS_UNROLL) {
+        return 0;
+      }
+      u32 extent = (u32)(r->extra & 0xFFFFFFFFu);
+      const char *T = cs_dtype_to_c(u->dtype);
+      const char *init = (u->op == S_REDUCE_MAX) ? "-INFINITY" : "0";
+      cg_append(b, "({ %s _acc%u = (%s)%s; ", T, op_id, T, init);
+      cg_append(b, "for (unsigned _v%u = 0; _v%u < %uu; _v%u++) { ",
+                rng_id, rng_id, extent, rng_id);
+      cg_append(b, "%s _rv%u = ", T, op_id);
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "; ");
+      if (u->op == S_REDUCE_MAX) {
+        cg_append(b, "if (_rv%u > _acc%u) { _acc%u = _rv%u; } ",
+                  op_id, op_id, op_id, op_id);
+      } else {
+        cg_append(b, "_acc%u += _rv%u; ", op_id, op_id);
+      }
+      cg_append(b, "} _acc%u; })", op_id);
       return 1;
     }
     case S_ICONST: {

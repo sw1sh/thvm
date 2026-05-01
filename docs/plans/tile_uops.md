@@ -38,6 +38,9 @@ that future renderers can lower differently for CPU and Metal.
   `S_INDEX_E` addresses built from `S_I*` expression nodes, then
   falls back to the tile interpreter for broader scalar graphs such
   as reductions;
+- the scalar C renderer also covers f32/f64 `S_REDUCE_SUM` and
+  `S_REDUCE_MAX`; tile C dispatch still rejects tile plans carrying
+  `REDUCE`/`UNROLL` axes until the tile-level reduction path lands;
 - `tile_build_from_scalar` seeds a minimal plan from `scalar_uops`:
 
 ```text
@@ -84,8 +87,8 @@ interpreter for focused validation and profiling.
 
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
-   remaining gaps include reductions, movement wrappers, casts, and
-   narrow/packed dtypes.
+   remaining gaps include movement wrappers, casts, and narrow/packed
+   dtypes.
 2. Teach the builder and renderers how to consume richer axis classes:
    `LOCAL`, `GROUP_REDUCE`, and `GLOBAL` bindings beyond the current
    introspectable `UPCAST`/`UNROLL`/`SWAP` sync.

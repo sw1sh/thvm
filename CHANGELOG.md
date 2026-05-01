@@ -14,6 +14,12 @@ lets generated scalar and tile C paths cover rangeify graphs that use
 symbolic movement-derived addresses instead of only packed-stride
 `S_INDEX`.
 
+### Added: scalar C reduction rendering
+
+The scalar-UOp C renderer now emits generated loops for f32/f64
+`S_REDUCE_SUM` and `S_REDUCE_MAX`, with focused C JIT tests covering
+both reducer kinds.
+
 ### Added: generated C tile renderer
 
 `THVM_TILE=1` now tries a generated C tile renderer for simple
