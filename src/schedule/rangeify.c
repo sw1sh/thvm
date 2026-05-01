@@ -833,8 +833,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       }
       if (shape_changes) {
         // Cap each ndim at 4 (the u8 packing of in/out dims into
-        // extra: 4 bytes each side, 8 bytes total).  And require
-        // both ndims to match os->ndim so loop_ranges line up.
+        // extra: 4 bytes each side, 8 bytes total).  Both ndims must
+        // equal os->ndim so the LOOP ranges' iters fully define
+        // flat_idx and the in_dims decompose covers all axes.
+        // Mismatch cases (either side different from os->ndim) need
+        // synthetic iter dims -- deferred to a future S_RESHAPE
+        // generalization.
         if (p->src0_ndim > 4 || p->out_ndim > 4
             || p->src0_ndim != os->ndim || p->out_ndim != os->ndim) {
           if (getenv("THVM_RANGEIFY_BAIL")) {
