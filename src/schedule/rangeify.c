@@ -577,6 +577,18 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
+      } else if (in_numel == reduce_size && v->contiguous) {
+        // General rank case of "input depends only on reduce iter":
+        // any contig view (regardless of ndim) with total numel ==
+        // reduce_size can be addressed by a single reduce_iter walk
+        // over the flat buffer.  Covers BatchNorm/LayerNorm backward
+        // patterns where the input view is rank-3 like [a, b, c] with
+        // a*b*c == reduce_size and reduce_inner != 1 (so the
+        // reduce-trailing branch above doesn't fire, but flat
+        // indexing still works because the input is contig).
+        u32 r_ids[1]    = {reduce_range};
+        u32 r_strides[1] = {1};
+        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
       } else if (in_numel == reduce_in_numel
                  && v->shape.ndim == in_ndim) {
         // Partial reduce: input has rank in_ndim (= os->ndim + 1).
