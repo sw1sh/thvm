@@ -990,6 +990,26 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           break;
         }
+        case UOP_PERMUTE: {
+          // output[i_0..i_{n-1}] = input[i_{axis_perm[0]}..i_{axis_perm[n-1]}]
+          // i.e., input axis axis_perm[d] is read at value out_rngs[d].
+          // So in_rngs[axis_perm[d]] = out_rngs[d].  Tinygrad: rngs =
+          // tuple(rngs[p] for p in argsort(arg)).
+          if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+              || in_rngs.ndim != p->out_ndim) {
+            break;  // identity-propagate on shape mismatch
+          }
+          RngsCtx new_rngs = {0};
+          new_rngs.ndim = p->out_ndim;
+          new_rngs.valid_mask = in_rngs.valid_mask;
+          for (u32 d = 0; d < p->out_ndim; d++) {
+            u8 src_axis = p->axis_perm[d];
+            if (src_axis >= MAX_DIM) { new_rngs.ndim = 0; break; }
+            new_rngs.refs[src_axis] = in_rngs.refs[d];
+          }
+          if (new_rngs.ndim != 0) in_rngs = new_rngs;
+          break;
+        }
         case UOP_RESHAPE: {
           // Numel-preserving reshape A -> B.  Tinygrad's _apply_reshape
           // (indexing.py:113-125): flat = sum(out_iter[d] * B_strides[d]);
