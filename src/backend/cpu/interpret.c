@@ -657,6 +657,51 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       }
       return v;
     }
+    case S_RESHAPE: {
+      // Iter-coord shape reinterpret: re-decompose flat index from
+      // out_dims (caller-side shape) into in_dims (body-side shape).
+      // extra[low 32]  = out_dims (4 x u8 row-major)
+      // extra[high 32] = in_dims  (4 x u8 row-major)
+      // Up to MAX_DIM ranges; if a side has fewer dims than nrng
+      // the trailing dims are 1.
+      u32 nrng = (u32)u->src_count - 1;
+      u32 saved[SCALAR_MAX_SRC];
+      u8 out_dims[MAX_DIM] = {0}, in_dims[MAX_DIM] = {0};
+      u32 lo = (u32)(u->extra & 0xFFFFFFFFu);
+      u32 hi = (u32)((u->extra >> 32) & 0xFFFFFFFFu);
+      for (u32 d = 0; d < 4 && d < MAX_DIM; d++) {
+        out_dims[d] = (u8)((lo >> (8 * d)) & 0xFFu);
+        in_dims [d] = (u8)((hi >> (8 * d)) & 0xFFu);
+      }
+      // Compute flat_idx using current iters and out_dims row-major
+      // strides (computed on the fly).
+      u64 flat_idx = 0;
+      u64 stride = 1;
+      for (i32 d = (i32)nrng - 1; d >= 0; d--) {
+        u32 rng_id = u->src[1 + d];
+        saved[d] = c->range_iter[rng_id];
+        flat_idx += (u64)saved[d] * stride;
+        stride   *= (out_dims[d] != 0 ? out_dims[d] : 1);
+      }
+      // Decompose flat_idx using in_dims row-major.
+      u64 in_stride[MAX_DIM];
+      u64 s = 1;
+      for (i32 d = (i32)nrng - 1; d >= 0; d--) {
+        in_stride[d] = s;
+        s *= (in_dims[d] != 0 ? in_dims[d] : 1);
+      }
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        u32 dim    = (in_dims[d] != 0 ? in_dims[d] : 1);
+        c->range_iter[rng_id] = (u32)((flat_idx / in_stride[d]) % dim);
+      }
+      u64 v = eval_scalar(c, u->src[0]);
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        c->range_iter[rng_id] = saved[d];
+      }
+      return v;
+    }
     case S_CAST: {
       // Value-preserving cross-dtype cast.  The source op carries
       // its own dtype; we decode the bits as that type, convert to

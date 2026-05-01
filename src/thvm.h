@@ -571,6 +571,15 @@ typedef enum {
   // set means flip axis d (replace iter with extent-1-iter for the
   // body eval, restore after).
   S_FLIP,
+  // Iter-coord shape reinterpret (UOP_RESHAPE when src0_dims !=
+  // out_dims AND a downstream PAD/SHRINK consumes the new shape).
+  // src[0] = body, src[1..ndim] = LOOP ranges (whose iters are
+  // reinterpreted).  extra packs out_dims (the shape PAD's iter
+  // came from) in low 32 bits and in_dims (the shape SHRINK
+  // expects to consume) in high 32 bits, both as 4xu8 row-major.
+  // At eval: flat_idx = sum(iter[d] * out_strides[d]); decompose
+  // into in_strides; overwrite range_iter, eval body, restore.
+  S_RESHAPE,
   S__COUNT
 } ScalarOp;
 

@@ -570,7 +570,7 @@ $scalarOpNames = <|
    15 -> "S_SQRT",         16 -> "S_CMPLT",        17 -> "S_CMPEQ",
    18 -> "S_REDUCE_SUM",   19 -> "S_REDUCE_MAX",   20 -> "S_CAST",
    21 -> "S_SHRINK",       22 -> "S_PAD",          23 -> "S_LOAD_RAW",
-   24 -> "S_FLIP"
+   24 -> "S_FLIP",         25 -> "S_RESHAPE"
 |>;
 
 $scalarAxisNames = <|0 -> "LOOP", 1 -> "REDUCE", 2 -> "UNROLL", 3 -> "GLOBAL"|>;

@@ -459,38 +459,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     u32 raw = p->src[0];
     if (KSRC_IS_INPUT(raw)) input_via_padshrink[KSRC_INDEX(raw)] = 1;
   }
-  // Bail on kernels with a shape-changing RESHAPE that sits in a
-  // chain with SHRINK/PAD.  Rangeify treats RESHAPE as identity at
-  // the per-iter level, but when the output shape differs from the
-  // input shape AND a downstream PAD/SHRINK applies iter shifts
-  // assuming the new shape, the iter coords need a flat-index
-  // transform that the scalar interpreter doesn't perform.
-  // (col2im uses this pattern: SHRINK (2,1,9) -> RESHAPE (2,3,3) ->
-  //  PAD (2,5,5).)  Legacy cpu_interpret materializes the
-  // intermediate so RESHAPE becomes a free view alias.
-  {
-    int has_padshrink = 0;
-    for (u32 j = 0; j < ke->n_ops; j++) {
-      u8 op = ke->program[j].opcode;
-      if (op == UOP_PAD || op == UOP_SHRINK) { has_padshrink = 1; break; }
-    }
-    if (has_padshrink) {
-      for (u32 j = 0; j < ke->n_ops; j++) {
-        KProgOp *p = &ke->program[j];
-        if (p->opcode != UOP_RESHAPE) continue;
-        if (p->src0_ndim == 0 || p->out_ndim == 0) continue;
-        int shape_changes = (p->src0_ndim != p->out_ndim);
-        if (!shape_changes) {
-          for (u32 d = 0; d < p->src0_ndim; d++) {
-            if (p->src0_dims[d] != p->out_dims[d]) {
-              shape_changes = 1; break;
-            }
-          }
-        }
-        if (shape_changes) RBAIL_MID("RESHAPE shape-change in PAD/SHRINK chain");
-      }
-    }
-  }
+  // (Earlier F-8e-5 bailed all kernels with a shape-changing RESHAPE
+  //  in a PAD/SHRINK chain.  F-8e-7 lowers them via S_RESHAPE -- the
+  //  iter-coord transform op -- in the per-op emit loop below.)
   // Inputs: same numel as output (Phase B), or REDUCE-input size, or
   // numel-1 scalar broadcast.
   u32 reduce_numel = onum * (has_reduce ? reduce_size : 1);
@@ -842,6 +813,54 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         RBAIL_MID("BITCAST narrow-FP");
       }
       // Fall through to the identity path below.
+    }
+    if (p->opcode == UOP_RESHAPE && p->src0_ndim > 0 && p->out_ndim > 0) {
+      // RESHAPE that changes shape AND sits in a chain with downstream
+      // PAD/SHRINK needs an iter-coord transform: PAD's iter (in
+      // out_dims coords) must be flattened + re-decomposed into
+      // src0_dims coords before SHRINK applies its begin.  Other
+      // RESHAPE positions (no PAD/SHRINK downstream) are pure
+      // identity at the scalar level.
+      u32 raw = p->src[0];
+      u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
+                                   : prog_value[KSRC_INDEX(raw)];
+      if (v == 0) RBAIL_MID("RESHAPE src 0");
+      int shape_changes = (p->src0_ndim != p->out_ndim);
+      if (!shape_changes) {
+        for (u32 d = 0; d < p->src0_ndim; d++) {
+          if (p->src0_dims[d] != p->out_dims[d]) { shape_changes = 1; break; }
+        }
+      }
+      if (shape_changes) {
+        // Cap each ndim at 4 (the u8 packing of in/out dims into
+        // extra: 4 bytes each side, 8 bytes total).  And require
+        // both ndims to match os->ndim so loop_ranges line up.
+        if (p->src0_ndim > 4 || p->out_ndim > 4
+            || p->src0_ndim != os->ndim || p->out_ndim != os->ndim) {
+          if (getenv("THVM_RANGEIFY_BAIL")) {
+            fprintf(stderr, "  RESHAPE-detail: src0_ndim=%u out_ndim=%u os.ndim=%u\n",
+                    p->src0_ndim, p->out_ndim, os->ndim);
+          }
+          RBAIL_MID("RESHAPE shape-change ndim cap or != os->ndim");
+        }
+        u64 lo = 0, hi = 0;
+        for (u32 d = 0; d < p->out_ndim; d++) {
+          if (p->out_dims[d] > 0xFFu) RBAIL_MID("RESHAPE out_dim > u8");
+          lo |= ((u64)p->out_dims[d] & 0xFFu) << (8 * d);
+        }
+        for (u32 d = 0; d < p->src0_ndim; d++) {
+          if (p->src0_dims[d] > 0xFFu) RBAIL_MID("RESHAPE in_dim > u8");
+          hi |= ((u64)p->src0_dims[d] & 0xFFu) << (8 * d);
+        }
+        u64 extra = lo | (hi << 32);
+        u32 src_arr[SCALAR_MAX_SRC] = {v};
+        for (u32 d = 0; d < os->ndim; d++) src_arr[1 + d] = loop_ranges[d];
+        prog_value[i] = rangeify_emit(ke, S_RESHAPE, p->dtype,
+                                      (u8)(1 + os->ndim), src_arr, extra);
+      } else {
+        prog_value[i] = v;
+      }
+      continue;
     }
     if (p->opcode == UOP_EXPAND || p->opcode == UOP_RESHAPE
         || p->opcode == UOP_LOAD || p->opcode == UOP_BITCAST) {
