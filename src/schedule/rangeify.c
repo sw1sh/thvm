@@ -911,11 +911,18 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // why naive fusion fails without this tracking.  Wiring up
   // incrementally; for now this is just allocated + zeroed -- no
   // behavior change.  Subsequent commits will populate per-op rules.
-  typedef struct { u32 ndim; u32 refs[MAX_DIM]; } RngsCtx;
+  typedef struct {
+    u32 ndim;
+    u32 refs[MAX_DIM];
+    u32 valid_mask;  // 0 = always valid (no PAD upstream); else
+                     // op_id of integer expression returning 0/1 that
+                     // gates the input load via IWHERE(mask, val, 0).
+  } RngsCtx;
   RngsCtx rngs[nops_local];
   for (u32 i = 0; i < nops_local; i++) {
     rngs[i].ndim = 0;
     for (u32 d = 0; d < MAX_DIM; d++) rngs[i].refs[d] = 0;
+    rngs[i].valid_mask = 0;
   }
   // BACKWARD PASS: compute out_rngs[i] = per-axis iter expressions
   // describing each op's output position (in terms of LOOP/REDUCE
@@ -983,11 +990,50 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           break;
         }
-        // PAD, RESHAPE, PERMUTE: propagate unchanged for now.  PAD
-        // also needs a validity-mask side channel for the bounds
-        // check that this scaffold doesn't yet carry; RESHAPE needs
-        // a flat-roundtrip across all axes (DIV/MOD); PERMUTE needs
-        // a re-order step.  Future iterations.
+        case UOP_PAD: {
+          // output[i] = input[i - begin] when in bounds, else 0.
+          // Tinygrad: r if (s==0 and e==0) else
+          //          (r >= s) & (r < (sh + s)) ? r-s : invalid()
+          //
+          // Source rngs[d] = out_rngs[d] - begin[d] (when in bounds).
+          // Validity mask = AND over axes of:
+          //   (out_rngs[d] >= begin[d]) AND (out_rngs[d] < begin[d] + src_dim[d])
+          // Combined into rngs.valid_mask via S_IAND (chained across
+          // multiple upstream PADs).
+          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
+            u32 begin   = p->pad_widths[2 * d];
+            u32 src_dim = p->src0_dims[d];
+            // Skip no-op axes (begin==0 AND src spans full output).
+            if (begin == 0 && src_dim == p->out_dims[d]) continue;
+            u32 orig_ref = in_rngs.refs[d];
+            // Shift by -begin for the source addressing.
+            if (begin > 0) {
+              u32 c = emit_iconst(ke, (i64)begin);
+              in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, orig_ref, c);
+            }
+            // Bounds: (orig_ref < begin + src_dim) AND
+            //         (begin == 0 ? 1 : 1 - (orig_ref < begin))
+            u32 hi_lim = emit_iconst(ke, (i64)(begin + src_dim));
+            u32 axis_ok = emit_ibinop(ke, S_ILT, orig_ref, hi_lim);
+            if (begin > 0) {
+              u32 lo_lim = emit_iconst(ke, (i64)begin);
+              u32 lt_lo  = emit_ibinop(ke, S_ILT, orig_ref, lo_lim);
+              u32 one    = emit_iconst(ke, 1);
+              u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
+              axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
+            }
+            if (in_rngs.valid_mask == 0) {
+              in_rngs.valid_mask = axis_ok;
+            } else {
+              in_rngs.valid_mask = emit_ibinop(ke, S_IAND,
+                                                in_rngs.valid_mask, axis_ok);
+            }
+          }
+          break;
+        }
+        // RESHAPE, PERMUTE: propagate unchanged for now.  RESHAPE
+        // needs the flat-roundtrip across all axes (DIV/MOD); PERMUTE
+        // needs an axis re-order.  Next iterations.
         default: break;
       }
       // Propagate to non-input sources.  Inputs (KSRC_IS_INPUT) carry
