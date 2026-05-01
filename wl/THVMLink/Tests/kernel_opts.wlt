@@ -4,8 +4,8 @@
    Covers:
      - construction + structural form of TOpt
      - default axes for elementwise + reduce-tail kernels
-     - axes_apply_opt mutations: UNROLL/UPCAST split, SWAP swap
-     - validation (out-of-range axis, non-divisible arg, unknown op)
+     - axes_apply_opt mutations: UNROLL/UPCAST split, GLOBAL mark, SWAP swap
+     - validation (out-of-range axis, non-divisible arg, reserved/unknown op)
      - codegen: post-UNROLL TKernelSource contains the loop pragma
      - JIT cache key: distinct dylib hash post-opt
      - correctness: realize result identical pre/post UNROLL
@@ -79,6 +79,22 @@ VerificationTest[
     TestID -> "kernel-opts/apply-upcast-splits-output"
 ]
 
+(* === LOCAL + GLOBAL: split output axis, then mark remaining LOOP as GLOBAL === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[Table[N[i], {i, 8}], "Real32"];
+    TRealize @ TUOpMul[a, a];
+    kid = TKernelCount[] - 1;
+    TKernelApplyOpt[kid, TOpt["LOCAL", 0, 4]];
+    res = TKernelApplyOpt[kid, TOpt["GLOBAL", 0, 2]];
+    {First[res]["AxisTypes"], First[res]["FullShape"],
+     First[res]["Applied"]},
+    {{"GLOBAL", "LOCAL"}, {2, 4},
+     {TOpt["LOCAL", 0, 4], TOpt["GLOBAL", 0, 2]}},
+    TestID -> "kernel-opts/apply-local-global-output"
+]
+
 (* === SWAP exchanges two axes (in-place; no new axis) === *)
 
 VerificationTest[
@@ -132,6 +148,21 @@ VerificationTest[
     Head[res],
     Failure,
     TestID -> "kernel-opts/validation-unknown-op"
+]
+
+(* === Validation: reserved no-op opts are rejected until renderers consume them === *)
+
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[Table[N[i], {i, 8}], "Real32"];
+    TRealize @ TUOpMul[a, a];
+    kid = TKernelCount[] - 1;
+    {Head @ TKernelApplyOpt[kid, TOpt["PADTO", 0, 16]],
+     Head @ TKernelApplyOpt[kid, TOpt["NOLOCALS", 0, 1]],
+     Head @ TKernelApplyOpt[kid, TOpt["TC", 0, 1]],
+     First[TKernelOpts[kid]]["Applied"]},
+    {Failure, Failure, Failure, {}},
+    TestID -> "kernel-opts/validation-reserved-opts-rejected"
 ]
 
 (* === Codegen: post-UNROLL TKernelSource contains clang loop pragma === *)

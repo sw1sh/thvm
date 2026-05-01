@@ -414,12 +414,13 @@ struct KernelEntry;
 #define KOP_PADTO    7
 #define KOP_NOLOCALS 8
 #define KOP_TC       9
+#define KOP_GLOBAL  10
 
 typedef struct {
   u8  op;        // KOP_*
   u8  axis;      // 0-indexed; meaning depends on op
   u32 arg;       // op-specific (split factor for UPCAST/UNROLL, target
-                 // axis index for SWAP, pad target for PADTO, ...)
+                 // axis index for SWAP, full axis size for GLOBAL, ...)
 } KOpt;
 
 typedef struct {
@@ -1185,9 +1186,10 @@ fn void axes_default_for(struct KernelEntry *ke);
 
 // Apply one TOpt to the axis structure: split the indicated axis,
 // mark the new inner axis with the opt's KAX_ type (UPCAST/UNROLL/
-// LOCAL/etc.), append to applied_opts[].  SWAP swaps two axes
-// in-place.  Returns 0 on validation failure (axis out of range,
-// arg doesn't divide, applied_opts full).
+// LOCAL/etc.), mark a full LOOP axis as GLOBAL, append to
+// applied_opts[].  SWAP swaps two axes in-place.  Returns 0 on
+// validation failure (axis out of range, arg doesn't divide,
+// applied_opts full, unsupported opt).
 fn int axes_apply_opt(KernelAxes *ax, KOpt opt);
 
 // Shape-heuristic kernel opt proposer: looks at the kernel's

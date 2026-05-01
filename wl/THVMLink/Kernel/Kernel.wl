@@ -67,13 +67,13 @@ TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every li
    block just packages the C-side state into typed WL objects with
    summary boxes. *)
 
-TOpt::usage = "TOpt[op_String, axis_Integer, arg_] is a typed kernel-optimization action.  Mirrors tinygrad's `Opt(OptOps.UPCAST, axis=2, arg=4)` (tinygrad/codegen/opt/kernel.py:Opt).  Valid ops: \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\", \"PADTO\", \"NOLOCALS\", \"TC\".  axis is 0-indexed.  arg meaning is op-specific (for UPCAST/UNROLL: split factor; for SWAP: target axis index).  Apply via `TKernelApplyOpt[kid, TOpt[...]]`; introspect via `TKernelOpts[kid]`.";
+TOpt::usage = "TOpt[op_String, axis_Integer, arg_] is a typed kernel-optimization action.  Mirrors tinygrad's `Opt(OptOps.UPCAST, axis=2, arg=4)` (tinygrad/codegen/opt/kernel.py:Opt).  Supported ops: \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GLOBAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\".  Reserved ops \"PADTO\", \"NOLOCALS\", and \"TC\" are recognized but rejected until a renderer consumes them.  axis is 0-indexed.  arg meaning is op-specific (for UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP: split factor; for GLOBAL: full current axis size; for SWAP: target axis index).  Apply via `TKernelApplyOpt[kid, TOpt[...]]`; introspect via `TKernelOpts[kid]`.";
 
 TKernelOpts::usage = "TKernelOpts[kid] returns a wrapped `TKernelOpts[<|\"Kid\", \"AxisTypes\", \"FullShape\", \"Applied\"|>]` summarising the kernel's axis-typed scheduling plan as carried in C.  AxisTypes parallels FullShape: each entry is one of \"LOOP\" / \"REDUCE\" / \"UPCAST\" / \"UNROLL\" / \"LOCAL\" / \"GLOBAL\" / \"GROUP_REDUCE\".  Default (no opts applied) is all LOOP for elementwise output axes plus a trailing REDUCE for reduce kernels.  Applied is the chronological list of TOpt actions.";
 
-TKernelApplyOpt::usage = "TKernelApplyOpt[kid, TOpt[op, axis, arg]] mutates the kernel's C-side KernelAxes via axes_apply_opt: splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), swaps two axes (SWAP), or records the opt for the codegen consumer (PADTO/NOLOCALS/TC).  Returns the updated TKernelOpts wrapper.  Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg doesn't divide axis size, opts table full).";
+TKernelApplyOpt::usage = "TKernelApplyOpt[kid, TOpt[op, axis, arg]] mutates the kernel's C-side KernelAxes via axes_apply_opt: splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), marks a full LOOP axis as GLOBAL, or swaps two axes (SWAP).  Returns the updated TKernelOpts wrapper.  Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg doesn't divide axis size, opts table full, or reserved opt not implemented).";
 
-TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` candidates suggested by the C-side shape-heuristic proposer (`kernel_opts_propose` in `src/codegen/propose.c`).  Today's heuristics propose UNROLL on the reduce axis at factors {2, 4, 8, 16} where divisible plus UPCAST on the output axis for elementwise kernels at the same factor set; future passes add LOCAL / GROUP rules as the codegen variant emitter grows.  TKernelAutotune / TKernelVariants consume this list.";
+TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` candidates suggested by the C-side shape-heuristic proposer (`kernel_opts_propose` in `src/codegen/propose.c`).  Today's heuristics propose UNROLL on the reduce axis at factors {2, 4, 8, 16} where divisible plus UPCAST on the output axis for elementwise kernels at the same factor set; future passes add LOCAL / GLOBAL / GROUP rules as the codegen variant emitter grows.  TKernelAutotune / TKernelVariants consume this list.";
 
 TKernelVariant::usage = "TKernelVariant[<|\"Kid\" -> _, \"Opt\" -> TOpt | None, \"WallUs\" -> _Real|>] is a typed wrapper for one proposed-or-measured kernel variant.  Returned by TKernelVariants[kid].  Carries summary boxes so notebook output renders the (op, axis, arg) triple + measured wallclock per fire next to the kid.";
 
@@ -422,7 +422,8 @@ TKernelProfile[kid_Integer] := <|
 (* String <-> KOP_ ordinal.  Order MUST match KOP_* in src/thvm.h.
    KOP_NONE = 0 is the empty-slot sentinel, never user-visible. *)
 $kopNames = {"NONE", "UPCAST", "UNROLL", "LOCAL", "GROUP",
-             "GROUPTOP", "SWAP", "PADTO", "NOLOCALS", "TC"}
+             "GROUPTOP", "SWAP", "PADTO", "NOLOCALS", "TC",
+             "GLOBAL"}
 
 kopOrdinal[op_String] := With[{i = FirstPosition[$kopNames, op, {-1}][[1]]},
     If[ i > 0, i - 1, $Failed]]

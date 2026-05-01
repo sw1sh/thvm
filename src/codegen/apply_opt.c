@@ -11,14 +11,20 @@
 //     size = arg.  Outer keeps the original type (LOOP / REDUCE / ...).
 //     Validation: arg must divide full_shape[axis].
 //
+//   GLOBAL
+//     Mark the selected LOOP axis as GLOBAL.  Validation: arg must
+//     equal the current axis size.  This pairs naturally with LOCAL:
+//     LOCAL splits N into LOOP(N/L) + LOCAL(L), then GLOBAL marks
+//     that remaining LOOP(N/L) axis for threadgroup/grid binding.
+//
 //   SWAP
 //     Swap full_shape[axis] <-> full_shape[arg] and the matching
 //     axis_types entries.  No new axis.
 //
 //   PADTO / NOLOCALS / TC
-//     Recorded in applied_opts[] but not yet implemented in the
-//     codegen variant emitter.  The apply itself is a no-op on the
-//     axis structure.
+//     Reserved for future tensor-core / padding passes.  Rejected
+//     until a renderer consumes them; no-op opts must not mutate the
+//     JIT cache key or pretend to be an applied variant.
 //
 // Returns 1 on success, 0 on validation failure (axis out of range,
 // arg doesn't divide, applied_opts full, MAX_AXES exceeded).
@@ -77,6 +83,12 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
     ax->axis_types[opt.axis + 1]  = kop_to_axis_type(opt.op);
     ax->full_shape[opt.axis + 1]  = opt.arg;
     ax->n_axes++;
+  } else if (opt.op == KOP_GLOBAL) {
+    u32 axis_size = ax->full_shape[opt.axis];
+    if (opt.arg != axis_size || ax->axis_types[opt.axis] != KAX_LOOP) {
+      return 0;
+    }
+    ax->axis_types[opt.axis] = KAX_GLOBAL;
   } else if (opt.op == KOP_SWAP) {
     if ((u8)opt.arg >= ax->n_axes) {
       return 0;
@@ -89,8 +101,9 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
     ax->axis_types[opt.arg]  = ti;
     ax->full_shape[opt.axis] = sj;
     ax->full_shape[opt.arg]  = si;
+  } else {
+    return 0;
   }
-  // PADTO / NOLOCALS / TC: recorded but no axis mutation today.
 
   ax->applied_opts[ax->n_applied++] = opt;
   ax->version++;

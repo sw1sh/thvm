@@ -475,6 +475,14 @@ int main(void) {
   CHECK(strstr(src, "for (unsigned _ta1") != NULL);
   free(src);
 
+  TEST_BEGIN("tile-graph/apply-global-marks-loop-axis");
+  KOpt glob = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
+  CHECK(axes_apply_opt(mk->axes, glob));
+  CHECK_EQ(mk->axes->axis_types[0], (u32)KAX_GLOBAL);
+  CHECK_EQ(mk->axes->full_shape[0], 2u);
+  KOpt tc = { .op = KOP_TC, .axis = 0, .arg = 1 };
+  CHECK(!axes_apply_opt(mk->axes, tc));
+
   TEST_BEGIN("tile-graph/c-renderer-pad-wrapper-jit");
   u32 tile_kid = kernel_alloc();
   KernelEntry *tk = &KERNELS[tile_kid];

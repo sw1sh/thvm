@@ -109,8 +109,8 @@ the same pipeline through `cg_emit_metal`.
   out_numel` if the program ends in `UOP_REDUCE`.
 - [apply_opt.c](../src/codegen/apply_opt.c): `axes_apply_opt(ax,
   opt)`. Mutates the axes to record one `KOpt`. Splits an axis (UPCAST
-  / UNROLL / LOCAL / GROUP / GROUPTOP) or swaps two (SWAP); appends
-  to `applied_opts[]` either way.
+  / UNROLL / LOCAL / GROUP / GROUPTOP), marks a full LOOP axis as
+  GLOBAL, or swaps two (SWAP); appends to `applied_opts[]` either way.
 - [propose.c](../src/codegen/propose.c): `kernel_opts_propose(ke, out,
   cap)`. Shape heuristics that nominate `KOpt` candidates. Today:
   reduce-tail kernels get `UNROLL` candidates in `{2, 4, 8, 16}`
@@ -160,10 +160,14 @@ two kernels that share a `KProgOp[]` but were autotuned differently.
 
 A `KOpt` (alias `TOpt` on the WL side) is a triple `{op, axis, arg}`.
 `op` is one of `KOP_UPCAST`, `KOP_UNROLL`, `KOP_LOCAL`, `KOP_GROUP`,
-`KOP_GROUPTOP`, `KOP_SWAP`, `KOP_PADTO`, `KOP_NOLOCALS`, `KOP_TC`.
-`apply_opt.c` translates each split-class opt into "shrink axis
-`axis` by factor `arg`, insert a new sibling axis of the matching
-`KAX_*` type with size `arg`".
+`KOP_GROUPTOP`, `KOP_GLOBAL`, `KOP_SWAP`, `KOP_PADTO`,
+`KOP_NOLOCALS`, `KOP_TC`. `apply_opt.c` translates each split-class
+opt into "shrink axis `axis` by factor `arg`, insert a new sibling
+axis of the matching `KAX_*` type with size `arg`". `KOP_GLOBAL`
+marks an existing full LOOP axis as `KAX_GLOBAL`; this is how a
+`LOCAL` split can become a Metal-style `GLOBAL x LOCAL` plan. The
+reserved `PADTO` / `NOLOCALS` / `TC` ops are rejected until a renderer
+consumes them.
 
 The pipeline is `axes_default_for` -> `kernel_opts_propose` ->
 (autotune loop: `axes_apply_opt` -> bench -> revert / keep) ->
@@ -244,10 +248,10 @@ only some are honored by each renderer.
   graphs that contain `S_REDUCE_SUM` or `S_REDUCE_MAX`, it accepts
   `REDUCE`, `UNROLL`, and `GROUP_REDUCE` axes as schedule metadata
   while the scalar expression emits the accumulator loop.
-- `KOP_PADTO`, `KOP_NOLOCALS`, `KOP_TC`: see the comment block in
-  [apply_opt.c](../src/codegen/apply_opt.c) -- they are appended to
-  `applied_opts[]` but the apply itself is a no-op on the axis
-  structure, and no renderer reads them.
+- `KOP_PADTO`, `KOP_NOLOCALS`, `KOP_TC`: reserved, but rejected by
+  [apply_opt.c](../src/codegen/apply_opt.c) until a renderer reads
+  them. This keeps no-op opts out of `applied_opts[]` and out of JIT
+  cache keys.
 
 The roadmap for each lives in [PLAN.md](../PLAN.md) and
 [kernelization.md](kernelization.md).

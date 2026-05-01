@@ -21,6 +21,11 @@ Full LeNet autotune sweep:
 
     THVM_TILE=1 MAX_TUNE_KERNELS=All wolframscript -f wl/Examples/lenet-mnist/autotune.wls
 
+Benchmark single-sample LeNet training with baseline vs bounded
+autotune:
+
+    THVM_TILE=1 wolframscript -f wl/Examples/lenet-mnist/bench-train.wls
+
 The Metal path looks for `build/default.metallib` relative to the
 current working directory, so run from the repo root.
 
@@ -47,20 +52,19 @@ within tolerance.  The default tunes the first 16 candidate kernels so
 the script remains interactive; set `MAX_TUNE_KERNELS=All` for the
 full sweep.
 
-## Why no training (yet)
+`bench-train.wls` runs the lazy LeNet/Adam training step from
+`train.wls` with a separate warmup phase, optional bounded
+`TKernelAutotune`, and timed training steps.  Use
+`TRAIN_BENCH_MODE=baseline|autotune|both`, `N_STEPS`,
+`WARMUP_STEPS`, and `MAX_TUNE_KERNELS` to control the run.
 
-`interact_grad` currently has chain-rule rewrite rules for
-ADD / MUL / NEG / REDUCE_SUM / KERNEL only.  Adam-on-LeNet needs
-grad rules for at least:
+## Training status
 
-  - `UOP_CONV2D`  (the heaviest; matches LeNet's two conv layers)
-  - `UOP_REDUCE` with `kind = MAX`  (max-pool gradient = one-hot)
-  - `UOP_RESHAPE`  (Flatten = identity-on-data, identity-on-grad)
-  - `UOP_EXP2`, `UOP_RECIP`  (softmax + Adam's denom both call them)
-  - propagation through CMPLT (the ReLU mask we built in NN.wl)
-
-See `docs/grad-roadmap.md` (lands with the next task item) for
-the order to land them in.
+`train.wls`, `verify.wls`, and `bench-train.wls` exercise the current
+lazy LeNet/Adam training path end to end on one MNIST sample.  The
+benchmark is intentionally single-sample for now so kernel generation,
+autotune, and dispatch timing stay visible while the wider tiling
+pipeline is still evolving.
 
 ## Files
 
@@ -69,6 +73,9 @@ the order to land them in.
                              materialize, inspect proposer
                              candidates, tune, rerun, and compare
                              probabilities.
+  - `bench-train.wls`     -- LeNet training benchmark with warmup,
+                             optional bounded autotune, per-step
+                             timing, losses, and dispatch summary.
   - `grad-check.wls`      -- end-to-end forward + grad smoke test:
                              materializes the full LeNet chain
                              and takes `TGrad[loss, x]`,

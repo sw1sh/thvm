@@ -91,9 +91,9 @@ references the reducer's per-element input expression.
 
 When `KernelAxes` is present, its axis types and extents define the
 `TILE_AXIS` nodes. This includes applied schedule opts such as
-`UPCAST`, `UNROLL`, `LOCAL`, `GROUP`, and `SWAP` after the tile plan
-is synced. Otherwise the builder falls back to the ranges on the
-scalar `S_BUFFERIZE` root.
+`UPCAST`, `UNROLL`, `LOCAL`, `GLOBAL`, `GROUP`, and `SWAP` after the
+tile plan is synced. Otherwise the builder falls back to the ranges
+on the scalar `S_BUFFERIZE` root.
 
 The builder validates the emitted graph before returning success.
 Malformed or partial tile arenas are allowed during manual construction

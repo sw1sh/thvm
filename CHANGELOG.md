@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: LeNet training benchmark
+
+Added `wl/Examples/lenet-mnist/bench-train.wls`, a training benchmark
+that separates warmup, optional bounded `TKernelAutotune`, and timed
+LeNet/Adam steps.  Closed the current `TOpt` gap by adding a real
+`GLOBAL` opt for `GLOBAL x LOCAL` tile plans and rejecting reserved
+no-op opts (`PADTO`, `NOLOCALS`, `TC`) until renderers consume them.
+
 ### Added: LeNet autotune example
 
 Added `wl/Examples/lenet-mnist/autotune.wls`, a bounded LeNet

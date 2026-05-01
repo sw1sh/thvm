@@ -119,6 +119,20 @@ VerificationTest[
 VerificationTest[
     tileWithRangeify[True,
       TInit[];
+      a = TTensorCreate @ NumericArray[Table[N[i], {i, 8}], "Real32"];
+      TRealize @ TUOpMul[a, a];
+      kid = TKernelCount[] - 1;
+      TKernelApplyOpt[kid, TOpt["LOCAL", 0, 4]];
+      TKernelApplyOpt[kid, TOpt["GLOBAL", 0, 2]];
+      tileAxisSig @ TKernelTilePlan[kid]
+    ],
+    {{"GLOBAL", 2}, {"LOCAL", 4}},
+    TestID -> "tile-uops/apply-global-local-syncs-plan"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
+      TInit[];
       xT = TTensorCreate @ N @ Range[12];
       TRealize @ TUOpReduce[xT, 0, "SUM"];
       kid = TKernelCount[] - 1;

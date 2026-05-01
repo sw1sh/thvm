@@ -41,9 +41,12 @@ to every other kid sharing that program.  Mutated by
 | Opt        | Codegen                                    | Proposer rule                                   |
 |------------|--------------------------------------------|-------------------------------------------------|
 | `UNROLL`   | `#pragma clang loop unroll_count(N)` over inner k-loop (reduce-tail kernels) | factors {2, 4, 8, 16} where reduce_axis_size divisible |
-| `UPCAST`   | `#pragma clang loop unroll_count(N)` over per-output for-loop (elementwise) | factors {2, 4, 8, 16} where output_numel divisible    |
+| `UPCAST`   | `#pragma clang loop unroll_count(N)` over per-output for-loop (elementwise) | factors {2, 4, 8, 16} where selected output axis divisible |
 | `SWAP`     | axis-order rewrite in `KernelAxes` (no codegen consumer yet -- our flat emit ignores axis order) | not proposed |
-| `LOCAL` / `GLOBAL` / `GROUP_REDUCE` / `PADTO` / `NOLOCALS` / `TC` | recorded only -- codegen support pending (Metal threadgroup binding, etc.) | not proposed |
+| `LOCAL`    | split output axis for tile/Metal local-thread binding | not proposed |
+| `GLOBAL`   | mark a full LOOP axis for tile/Metal grid binding; pairs with `LOCAL` as `GLOBAL x LOCAL` | not proposed |
+| `GROUP` / `GROUPTOP` | split reduce axis to `GROUP_REDUCE` schedule metadata | not proposed |
+| `PADTO` / `NOLOCALS` / `TC` | reserved and rejected until a renderer consumes them | not proposed |
 
 ## Verified end-to-end (smoke)
 
@@ -164,8 +167,8 @@ For tiny isolated kernels the autotune correctly reports either
 or picks a small-factor UNROLL/UPCAST that nudges wallclock by
 ~1-3%.  Real wins need bigger compute kernels (e.g., matmul,
 conv) where unrolling matters more, plus more opt classes
-(UPCAST output axis with structured nest emit, LOCAL/GLOBAL on
-Metal).
+(UPCAST output axis with structured nest emit, broader LOCAL/GLOBAL
+proposer coverage on Metal).
 
 ## Files added
 
