@@ -438,6 +438,9 @@ typedef struct {
                                // across axes_reset_to_default so a
                                // proposer-explored variant doesn't
                                // re-trigger autotune mid-bench.
+  u32  version;                // bumped whenever axis structure changes;
+                               // TileUop plans use this to detect stale
+                               // snapshots after TKernelApplyOpt/autotune.
 } KernelAxes;
 
 struct Backend {
@@ -829,6 +832,7 @@ typedef struct KernelEntry {
   u32        n_tile_uops;
   u32        tile_uops_cap;
   u32        tile_root;       // root TileUop id, usually TILE_LOOP_NEST; 0 = none
+  u32        tile_axes_version;
 } KernelEntry;
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
@@ -1242,6 +1246,9 @@ fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
 // Seed a TILE_LOOP_NEST(TILE_STORE(...)) plan from scalar_uops + KernelAxes.
 // Returns 1 on success, 0 when scalar_uops is absent or malformed.
 fn int  tile_build_from_scalar(struct KernelEntry *ke);
+// Rebuild only when the cached tile plan is missing, invalid, or was
+// built against an older KernelAxes version.
+fn int  tile_sync_from_scalar(struct KernelEntry *ke);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 

@@ -26,6 +26,9 @@ that future renderers can lower differently for CPU and Metal.
   `tile_loop_axis_extent` expose root-loop axis metadata without
   assuming the root is the last emitted node; internally they only
   report data for a valid collected plan;
+- tile plans remember the `KernelAxes.version` they were built
+  against, and `tile_sync_from_scalar` rebuilds stale plans after
+  `TKernelApplyOpt`, autotune resets, or lazy WL introspection;
 - `tile_build_from_scalar` seeds a minimal plan from `scalar_uops`:
 
 ```text
@@ -45,8 +48,9 @@ kernel, but the tile root's body starts at the memory-write boundary:
 by that `S_STORE`.
 
 When `KernelAxes` is present, its axis types and extents define the
-`TILE_AXIS` nodes. Otherwise the builder falls back to the ranges on
-the scalar `S_BUFFERIZE` root.
+`TILE_AXIS` nodes. This includes applied schedule opts such as
+`UPCAST`, `UNROLL`, and `SWAP` after the tile plan is synced. Otherwise
+the builder falls back to the ranges on the scalar `S_BUFFERIZE` root.
 
 The builder validates the emitted graph before returning success.
 Malformed or partial tile arenas are allowed during manual construction
@@ -68,8 +72,9 @@ layer becomes a stable target for autotuning and future renderers.
 
 1. Extend the scalar C renderer until the emitted scalar graph covers
    the same correctness surface as the scalar interpreter.
-2. Teach `tile_build_from_scalar` to preserve more schedule structure:
-   `UPCAST`, `UNROLL`, `LOCAL`, `GROUP_REDUCE`, and `GLOBAL`.
+2. Teach the builder and renderers how to consume richer axis classes:
+   `LOCAL`, `GROUP_REDUCE`, and `GLOBAL` bindings beyond the current
+   introspectable `UPCAST`/`UNROLL`/`SWAP` sync.
 3. Add a CPU tile renderer that lowers `TILE_LOOP_NEST` to nested
    loops and honors `UPCAST`/`UNROLL`.
 4. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to

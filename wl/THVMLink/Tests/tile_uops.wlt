@@ -18,6 +18,8 @@ tileSimpleAdd[] := (
     TRealize[a + b];
 )
 
+tileAxisSig[plan_] := ({#["axis_type"], #["extent"]} & /@ plan["axes"])
+
 VerificationTest[
     TInit[];
     TKernelTileUops[0],
@@ -57,6 +59,48 @@ VerificationTest[
     {4, 2, 1, "f32",
      {<|"id" -> 3, "axis_type" -> "LOOP", "extent" -> 3|>}},
     TestID -> "tile-uops/elementwise-add-plan"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
+      TInit[];
+      a = TTensorCreate @ NumericArray[Table[N[i], {i, 8}], "Real32"];
+      TRealize @ TUOpMul[a, a];
+      kid = TKernelCount[] - 1;
+      before = tileAxisSig @ TKernelTilePlan[kid];
+      TKernelApplyOpt[kid, TOpt["UPCAST", 0, 4]];
+      after = tileAxisSig @ TKernelTilePlan[kid];
+      {before, after}
+    ],
+    {{{"LOOP", 8}}, {{"LOOP", 2}, {"UPCAST", 4}}},
+    TestID -> "tile-uops/apply-upcast-syncs-plan"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
+      TInit[];
+      xT = TTensorCreate @ N @ Range[12];
+      TRealize @ TUOpReduce[xT, 0, "SUM"];
+      kid = TKernelCount[] - 1;
+      TKernelApplyOpt[kid, TOpt["UNROLL", 1, 4]];
+      tileAxisSig @ TKernelTilePlan[kid]
+    ],
+    {{"LOOP", 1}, {"REDUCE", 3}, {"UNROLL", 4}},
+    TestID -> "tile-uops/apply-unroll-syncs-reduce-plan"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
+      TInit[];
+      a = TTensorCreate @ NumericArray[Table[N[i], {i, 8}], "Real32"];
+      TRealize @ TUOpMul[a, a];
+      kid = TKernelCount[] - 1;
+      TKernelApplyOpt[kid, TOpt["UPCAST", 0, 4]];
+      TKernelApplyOpt[kid, TOpt["SWAP", 0, 1]];
+      tileAxisSig @ TKernelTilePlan[kid]
+    ],
+    {{"UPCAST", 4}, {"LOOP", 2}},
+    TestID -> "tile-uops/apply-swap-syncs-plan"
 ]
 
 VerificationTest[

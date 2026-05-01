@@ -67,6 +67,7 @@ fn void tile_free(KernelEntry *ke) {
   ke->n_tile_uops   = 0;
   ke->tile_uops_cap = 0;
   ke->tile_root     = 0;
+  ke->tile_axes_version = 0;
 }
 
 fn const char *tile_op_name(u8 op) {
@@ -354,5 +355,18 @@ fn int tile_build_from_scalar(KernelEntry *ke) {
     tile_free(ke);
     return 0;
   }
+  ke->tile_axes_version = ke->axes != NULL ? ke->axes->version : 0;
   return 1;
+}
+
+fn int tile_sync_from_scalar(KernelEntry *ke) {
+  if (ke == NULL || ke->scalar_uops == NULL) {
+    return 0;
+  }
+  u32 axes_version = ke->axes != NULL ? ke->axes->version : 0;
+  if (ke->tile_uops != NULL && ke->tile_axes_version == axes_version
+      && tile_validate(ke)) {
+    return 1;
+  }
+  return tile_build_from_scalar(ke);
 }

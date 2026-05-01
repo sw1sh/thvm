@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: tile plan sync with KernelAxes opts
+
+Tile plans now track the `KernelAxes` version they were built against
+and rebuild from scalar UOps after `TKernelApplyOpt`, autotune resets,
+or lazy WL tile introspection.  Focused WL tests cover `UPCAST`,
+`UNROLL`, and `SWAP` showing up in `TKernelTilePlan`.
+
 ### Fixed: rangeify movement-chain gaps
 
 Rangeify now re-emits scalar subgraphs under consumer-edge coordinate

@@ -1372,6 +1372,9 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
   }
   KOpt opt = { (u8)op, (u8)axis, arg };
   int ok = axes_apply_opt(KERNELS[kid].axes, opt);
+  if (ok) {
+    tile_sync_from_scalar(&KERNELS[kid]);
+  }
   MArgument_setInteger(res, (mint)ok);
   return LIBRARY_NO_ERROR;
 }
@@ -1791,6 +1794,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_uops(WolframLibraryData libData,
     return LIBRARY_FUNCTION_ERROR;
   }
   KernelEntry *ke = &KERNELS[kid];
+  tile_sync_from_scalar(ke);
   mint n         = (ke->tile_uops == NULL) ? 0 : (mint)ke->n_tile_uops;
   mint src_width = (mint)TILE_MAX_SRC;
   mint row_width = 3 + src_width + 2;
@@ -1830,6 +1834,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
     return LIBRARY_FUNCTION_ERROR;
   }
   KernelEntry  *ke      = &KERNELS[kid];
+  tile_sync_from_scalar(ke);
   TilePlanInfo  info;
   int           ok      = tile_collect_plan_info(ke, &info);
   mint          nFields = ok ? (9 + (mint)info.n_axes * 3) : 1;

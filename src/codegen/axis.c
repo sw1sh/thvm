@@ -14,11 +14,15 @@ fn void axes_default_for(KernelEntry *ke) {
   // Idempotent: if `ke->axes` already has a non-zero n_axes, another
   // kid sharing this kernel_program_cache slot already populated
   // it.  Per-program-shape sharing means there's nothing to do.
-  if (ke->axes == NULL || ke->axes->n_axes != 0) return;
+  if (ke->axes == NULL || ke->axes->n_axes != 0) {
+    return;
+  }
 
   KernelAxes *ax = ke->axes;
   u32 nd = ke->output_shape.ndim;
-  if (nd > MAX_AXES - 1) nd = MAX_AXES - 1;
+  if (nd > MAX_AXES - 1) {
+    nd = MAX_AXES - 1;
+  }
 
   for (u32 i = 0; i < nd; i++) {
     ax->axis_types[i] = KAX_LOOP;
@@ -44,5 +48,9 @@ fn void axes_default_for(KernelEntry *ke) {
       ax->full_shape[ax->n_axes] = axis_size;
       ax->n_axes++;
     }
+  }
+  ax->version++;
+  if (ax->version == 0) {
+    ax->version = 1;
   }
 }

@@ -26,10 +26,14 @@
 // doesn't re-fire while we're benching variants of an already-
 // tuned kernel.
 static void axes_reset_to_default(KernelEntry *ke) {
-  if (ke->axes == NULL) return;
+  if (ke->axes == NULL) {
+    return;
+  }
   u8 autotuned = ke->axes->autotuned;
+  u32 version  = ke->axes->version;
   memset(ke->axes, 0, sizeof(KernelAxes));
   ke->axes->autotuned = autotuned;
+  ke->axes->version   = version;
   axes_default_for(ke);
 }
 
@@ -37,7 +41,9 @@ static void axes_reset_to_default(KernelEntry *ke) {
 // wallclock in microseconds.  Min (not mean) filters one-shot OS
 // jitter (page faults, scheduler hiccups).
 fn u64 kernel_bench_us(u32 kid, u32 n_runs) {
-  if (n_runs == 0) n_runs = 1;
+  if (n_runs == 0) {
+    n_runs = 1;
+  }
   u64 best = (u64)-1;
   for (u32 i = 0; i < n_runs; i++) {
     u64 t0 = cg_now_us();
@@ -55,9 +61,13 @@ fn u64 kernel_bench_us(u32 kid, u32 n_runs) {
 // (1 baseline + n_cand).  Restores axes to baseline at exit so
 // the user can pick what to apply via TKernelApplyOpt.
 fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
-  if (kid == 0 || kid >= KERNELS_NEXT || cap == 0) return 0;
+  if (kid == 0 || kid >= KERNELS_NEXT || cap == 0) {
+    return 0;
+  }
   KernelEntry *ke = &KERNELS[kid];
-  if (ke->axes == NULL) return 0;
+  if (ke->axes == NULL) {
+    return 0;
+  }
 
   KOpt cands[16];
   u32 n_cand = kernel_opts_propose(ke, cands, sizeof(cands)/sizeof(*cands));
@@ -85,6 +95,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
 
   // Leave at baseline.
   axes_reset_to_default(ke);
+  tile_sync_from_scalar(ke);
   return n_out;
 }
 
@@ -93,9 +104,13 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
 // Idempotent: calling twice on the same kid runs the bench again
 // (bench numbers may differ; that's OK, the winner converges).
 fn int kernel_autotune(u32 kid) {
-  if (kid == 0 || kid >= KERNELS_NEXT) return 0;
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    return 0;
+  }
   KernelEntry *ke = &KERNELS[kid];
-  if (ke->axes == NULL) return 0;
+  if (ke->axes == NULL) {
+    return 0;
+  }
 
   KOpt candidates[16];
   u32  n_cand = kernel_opts_propose(ke, candidates,
@@ -103,7 +118,9 @@ fn int kernel_autotune(u32 kid) {
   if (n_cand == 0) {
     // No candidates -- still mark autotuned so the fire-time trigger
     // doesn't re-propose every dispatch.
-    if (ke->axes != NULL) ke->axes->autotuned = 1;
+    if (ke->axes != NULL) {
+      ke->axes->autotuned = 1;
+    }
     return 0;
   }
 
@@ -137,8 +154,10 @@ fn int kernel_autotune(u32 kid) {
   axes_reset_to_default(ke);
   if (best_opt.op != KOP_NONE) {
     axes_apply_opt(ke->axes, best_opt);
+    tile_sync_from_scalar(ke);
     return 1;
   }
+  tile_sync_from_scalar(ke);
   return 0;
 }
 
@@ -159,9 +178,15 @@ static int autotune_env_enabled(void) {
 }
 
 fn int kernel_should_autotune(KernelEntry const *ke) {
-  if (!autotune_env_enabled()) return 0;
-  if (ke == NULL || ke->axes == NULL) return 0;
-  if (ke->axes->autotuned) return 0;
+  if (!autotune_env_enabled()) {
+    return 0;
+  }
+  if (ke == NULL || ke->axes == NULL) {
+    return 0;
+  }
+  if (ke->axes->autotuned) {
+    return 0;
+  }
   KOpt buf[16];
   return kernel_opts_propose(ke, buf, sizeof(buf)/sizeof(*buf)) > 0;
 }

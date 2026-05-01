@@ -42,15 +42,27 @@ static int kop_splits_axis(u8 op) {
 }
 
 fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
-  if (ax == NULL) return 0;
-  if (ax->n_applied >= MAX_OPTS) return 0;
-  if (opt.axis >= ax->n_axes)    return 0;
+  if (ax == NULL) {
+    return 0;
+  }
+  if (ax->n_applied >= MAX_OPTS) {
+    return 0;
+  }
+  if (opt.axis >= ax->n_axes) {
+    return 0;
+  }
 
   if (kop_splits_axis(opt.op)) {
-    if (opt.arg == 0) return 0;
+    if (opt.arg == 0) {
+      return 0;
+    }
     u32 axis_size = ax->full_shape[opt.axis];
-    if (axis_size % opt.arg != 0) return 0;
-    if (ax->n_axes >= MAX_AXES)   return 0;
+    if (axis_size % opt.arg != 0) {
+      return 0;
+    }
+    if (ax->n_axes >= MAX_AXES) {
+      return 0;
+    }
 
     // Shift axes after opt.axis right by one to make room for the
     // new inner axis.
@@ -66,7 +78,9 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
     ax->full_shape[opt.axis + 1]  = opt.arg;
     ax->n_axes++;
   } else if (opt.op == KOP_SWAP) {
-    if ((u8)opt.arg >= ax->n_axes) return 0;
+    if ((u8)opt.arg >= ax->n_axes) {
+      return 0;
+    }
     u8  ti = ax->axis_types[opt.axis];
     u8  tj = ax->axis_types[opt.arg];
     u32 si = ax->full_shape[opt.axis];
@@ -79,5 +93,9 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
   // PADTO / NOLOCALS / TC: recorded but no axis mutation today.
 
   ax->applied_opts[ax->n_applied++] = opt;
+  ax->version++;
+  if (ax->version == 0) {
+    ax->version = 1;
+  }
   return 1;
 }
