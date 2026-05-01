@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: tile-UOp plan info extraction
+
+Tile plans now expose `tile_collect_plan_info`, a validated compact
+view of the root/store/body ids, scalar store/index/value ids, dtype,
+and axis metadata.  The existing axis query helpers now read through
+that validated view instead of indexing directly into possibly
+malformed tile refs.
+
 ### Added: tile-UOp root, store boundary, and validation helpers
 
 Tile plans now record an explicit `KernelEntry.tile_root`, validate

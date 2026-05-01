@@ -708,6 +708,20 @@ typedef struct {
   u64 extra;                 // op-specific payload
 } TileUop;
 
+typedef struct {
+  u32 root_id;
+  u32 store_tile_id;
+  u32 body_tile_id;
+  u32 scalar_store_id;
+  u32 scalar_index_id;
+  u32 scalar_value_id;
+  u32 dtype;
+  u32 n_axes;
+  u32 axis_ids    [MAX_AXES];
+  u32 axis_types  [MAX_AXES];
+  u32 axis_extents[MAX_AXES];
+} TilePlanInfo;
+
 typedef struct KernelEntry {
   // Input-tensor arrays: dynamically grown.  inputs_cap is the
   // allocated length; n_inputs is the number of slots actually used.
@@ -1220,6 +1234,8 @@ fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);
 fn int  tile_validate(struct KernelEntry const *ke);
+fn int  tile_collect_plan_info(struct KernelEntry const *ke,
+                               TilePlanInfo *out);
 fn u32  tile_loop_axis_count(struct KernelEntry const *ke);
 fn u32  tile_loop_axis_type(struct KernelEntry const *ke, u32 axis);
 fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);

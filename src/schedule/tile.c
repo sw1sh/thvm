@@ -118,33 +118,27 @@ static int tile_id_ok(KernelEntry const *ke, u32 id) {
 }
 
 fn u32 tile_loop_axis_count(KernelEntry const *ke) {
-  if (ke == NULL || ke->tile_uops == NULL || !tile_id_ok(ke, ke->tile_root)) {
+  TilePlanInfo info;
+  if (!tile_collect_plan_info(ke, &info)) {
     return 0;
   }
-  TileUop const *root = &ke->tile_uops[ke->tile_root];
-  if (root->op != TILE_LOOP_NEST || root->src_count == 0
-      || root->src_count > TILE_MAX_SRC) {
-    return 0;
-  }
-  return (u32)root->src_count - 1;
+  return info.n_axes;
 }
 
 fn u32 tile_loop_axis_type(KernelEntry const *ke, u32 axis) {
-  if (axis >= tile_loop_axis_count(ke)) {
+  TilePlanInfo info;
+  if (!tile_collect_plan_info(ke, &info) || axis >= info.n_axes) {
     return 0;
   }
-  TileUop const *root = &ke->tile_uops[ke->tile_root];
-  TileUop const *u = &ke->tile_uops[root->src[1 + axis]];
-  return (u32)(u->extra >> 32);
+  return info.axis_types[axis];
 }
 
 fn u32 tile_loop_axis_extent(KernelEntry const *ke, u32 axis) {
-  if (axis >= tile_loop_axis_count(ke)) {
+  TilePlanInfo info;
+  if (!tile_collect_plan_info(ke, &info) || axis >= info.n_axes) {
     return 0;
   }
-  TileUop const *root = &ke->tile_uops[ke->tile_root];
-  TileUop const *u = &ke->tile_uops[root->src[1 + axis]];
-  return (u32)(u->extra & 0xFFFFFFFFu);
+  return info.axis_extents[axis];
 }
 
 fn int tile_validate(KernelEntry const *ke) {
@@ -193,6 +187,14 @@ fn int tile_validate(KernelEntry const *ke) {
       || ke->scalar_uops[scalar_store].src[1] != scalar_value) {
     return 0;
   }
+  u32 scalar_index = ke->scalar_uops[scalar_store].src[0];
+  if (scalar_index == 0 || scalar_index >= ke->n_scalar_uops) {
+    return 0;
+  }
+  u8 scalar_index_op = ke->scalar_uops[scalar_index].op;
+  if (scalar_index_op != S_INDEX && scalar_index_op != S_INDEX_E) {
+    return 0;
+  }
 
   for (u32 i = 1; i < root->src_count; i++) {
     u32 axis_id = root->src[i];
@@ -206,6 +208,41 @@ fn int tile_validate(KernelEntry const *ke) {
         || !tile_axis_type_ok(axis_type) || extent == 0) {
       return 0;
     }
+  }
+  return 1;
+}
+
+fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
+  if (out == NULL) {
+    return 0;
+  }
+  memset(out, 0, sizeof(TilePlanInfo));
+  if (!tile_validate(ke)) {
+    return 0;
+  }
+
+  TileUop const *root  = &ke->tile_uops[ke->tile_root];
+  u32 store_tile_id    = root->src[0];
+  TileUop const *store = &ke->tile_uops[store_tile_id];
+  u32 body_tile_id     = store->src[0];
+  u32 scalar_store_id  = (u32)store->extra;
+  ScalarUop const *su  = &ke->scalar_uops[scalar_store_id];
+
+  out->root_id         = ke->tile_root;
+  out->store_tile_id   = store_tile_id;
+  out->body_tile_id    = body_tile_id;
+  out->scalar_store_id = scalar_store_id;
+  out->scalar_index_id = su->src[0];
+  out->scalar_value_id = su->src[1];
+  out->dtype           = root->dtype;
+  out->n_axes          = (u32)root->src_count - 1;
+
+  for (u32 i = 0; i < out->n_axes; i++) {
+    u32 axis_id = root->src[1 + i];
+    TileUop const *axis = &ke->tile_uops[axis_id];
+    out->axis_ids    [i] = axis_id;
+    out->axis_types  [i] = (u32)(axis->extra >> 32);
+    out->axis_extents[i] = (u32)(axis->extra & 0xFFFFFFFFu);
   }
   return 1;
 }

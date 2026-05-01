@@ -17,9 +17,13 @@ that future renderers can lower differently for CPU and Metal.
 - `tile_free` is called by `kernel_free_arrays`;
 - `tile_validate` checks the root/store/body/axis structure before a
   renderer or autotuner consumes the plan;
+- `tile_collect_plan_info` extracts the validated root into a compact
+  `TilePlanInfo` view: tile root/store/body ids, scalar store/index/
+  value ids, dtype, and per-axis ids/types/extents;
 - `tile_loop_axis_count`, `tile_loop_axis_type`, and
   `tile_loop_axis_extent` expose root-loop axis metadata without
-  assuming the root is the last emitted node;
+  assuming the root is the last emitted node; internally they only
+  report data for a valid collected plan;
 - `tile_build_from_scalar` seeds a minimal plan from `scalar_uops`:
 
 ```text
@@ -46,7 +50,9 @@ The builder validates the emitted graph before returning success.
 Malformed or partial tile arenas are allowed during manual construction
 but report `tile_validate == 0` until `tile_root` points at a valid
 loop nest whose body is a `TILE_STORE(TILE_SCALAR_BODY(value))` pair
-linked back to the scalar `S_STORE`.
+linked back to the scalar `S_STORE`.  Consumers should call
+`tile_collect_plan_info` instead of manually walking `tile_uops` when
+they need ids or axis metadata.
 
 `materialize.c` calls the builder automatically when rangeify succeeds,
 so every rangeified kernel carries a tile-plan snapshot even though no

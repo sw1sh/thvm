@@ -52,6 +52,9 @@ int main(void) {
   CHECK_EQ(ke->n_tile_uops, 0);
   CHECK_EQ(ke->tile_uops_cap, 0);
   CHECK_EQ(ke->tile_root, 0);
+  TilePlanInfo info = {0};
+  CHECK(!tile_collect_plan_info(ke, &info));
+  CHECK(!tile_collect_plan_info(ke, NULL));
 
   TEST_BEGIN("tile-graph/opname-helpers-cover-enum");
   for (u8 op = TILE_NONE; op < TILE__COUNT; op++) {
@@ -89,6 +92,18 @@ int main(void) {
   CHECK_EQ(tile_loop_axis_count(ke), 1);
   CHECK_EQ(tile_loop_axis_type(ke, 0), (u32)KAX_LOOP);
   CHECK_EQ(tile_loop_axis_extent(ke, 0), 8u);
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.root_id, 4);
+  CHECK_EQ(info.store_tile_id, 2);
+  CHECK_EQ(info.body_tile_id, 1);
+  CHECK_EQ(info.scalar_store_id, scalar_store);
+  CHECK_EQ(info.scalar_index_id, ke->scalar_uops[scalar_store].src[0]);
+  CHECK_EQ(info.scalar_value_id, scalar_value);
+  CHECK_EQ(info.dtype, (u32)DT_FP32);
+  CHECK_EQ(info.n_axes, 1);
+  CHECK_EQ(info.axis_ids[0], 3);
+  CHECK_EQ(info.axis_types[0], (u32)KAX_LOOP);
+  CHECK_EQ(info.axis_extents[0], 8u);
 
   TEST_BEGIN("tile-graph/kernel-axes-override");
   ke->axes = &ke->_local_axes;
@@ -119,6 +134,17 @@ int main(void) {
   CHECK_EQ(tile_loop_axis_extent(ke, 0), 2u);
   CHECK_EQ(tile_loop_axis_type(ke, 1), (u32)KAX_UPCAST);
   CHECK_EQ(tile_loop_axis_extent(ke, 1), 4u);
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.root_id, 5);
+  CHECK_EQ(info.store_tile_id, 2);
+  CHECK_EQ(info.body_tile_id, 1);
+  CHECK_EQ(info.n_axes, 2);
+  CHECK_EQ(info.axis_ids[0], 3);
+  CHECK_EQ(info.axis_ids[1], 4);
+  CHECK_EQ(info.axis_types[0], (u32)KAX_LOOP);
+  CHECK_EQ(info.axis_extents[0], 2u);
+  CHECK_EQ(info.axis_types[1], (u32)KAX_UPCAST);
+  CHECK_EQ(info.axis_extents[1], 4u);
 
   TEST_BEGIN("tile-graph/validator-rejects-bad-root");
   u32 good_root = ke->tile_root;
@@ -132,6 +158,22 @@ int main(void) {
   CHECK(!tile_validate(ke));
   CHECK_EQ(tile_loop_axis_count(ke), 0);
   ke->tile_uops[good_root].src_count = good_src_count;
+  CHECK(tile_validate(ke));
+
+  TEST_BEGIN("tile-graph/validator-rejects-bad-refs");
+  u32 good_axis = ke->tile_uops[good_root].src[1];
+  ke->tile_uops[good_root].src[1] = ke->n_tile_uops + 7;
+  CHECK(!tile_validate(ke));
+  CHECK(!tile_collect_plan_info(ke, &info));
+  CHECK_EQ(tile_loop_axis_count(ke), 0);
+  ke->tile_uops[good_root].src[1] = good_axis;
+  CHECK(tile_validate(ke));
+  u32 good_index = ke->scalar_uops[scalar_store].src[0];
+  ke->scalar_uops[scalar_store].src[0] = 0;
+  CHECK(!tile_validate(ke));
+  CHECK(!tile_collect_plan_info(ke, &info));
+  CHECK_EQ(tile_loop_axis_count(ke), 0);
+  ke->scalar_uops[scalar_store].src[0] = good_index;
   CHECK(tile_validate(ke));
 
   TEST_BEGIN("tile-graph/free-then-reemit");
