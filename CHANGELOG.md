@@ -6,12 +6,13 @@ dated section.
 
 ## Unreleased
 
-### Added: tile-UOp root and validation helpers
+### Added: tile-UOp root, store boundary, and validation helpers
 
 Tile plans now record an explicit `KernelEntry.tile_root`, validate
-their root/body/axis structure, and expose root-loop axis count/type/
-extent helpers so future renderers and autotuners do not depend on
-emission order.
+their root/store/body/axis structure, and expose root-loop axis count/
+type/extent helpers so future renderers and autotuners do not depend on
+emission order.  Seeded plans now make the scalar `S_STORE` boundary
+explicit with `TILE_STORE(TILE_SCALAR_BODY(value))`.
 
 ### Fixed: stale C test contracts
 
@@ -34,9 +35,9 @@ addressing is modeled safely.
 
 Added a non-dispatching `TileUop` arena on `KernelEntry` as the next
 optimization layer above scalar UOps.  The initial builder seeds a
-`TILE_LOOP_NEST(TILE_SCALAR_BODY, TILE_AXIS...)` plan from
-`scalar_uops` plus `KernelAxes` when present, materialize runs it
-after successful rangeify, and lifecycle cleanup goes through
+`TILE_LOOP_NEST(TILE_STORE(TILE_SCALAR_BODY), TILE_AXIS...)` plan from
+`scalar_uops` plus `KernelAxes` when present, materialize runs it after
+successful rangeify, and lifecycle cleanup goes through
 `kernel_free_arrays`.  Added a focused C test and a plan doc for the
 CPU/Metal tiled renderer path.
 

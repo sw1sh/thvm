@@ -679,17 +679,17 @@ typedef struct {
 // MMA intrinsics.
 //
 // MVP invariant: tile_build_from_scalar creates
-//   TILE_LOOP_NEST(TILE_SCALAR_BODY(bufferize_id), TILE_AXIS...)
+//   TILE_LOOP_NEST(TILE_STORE(TILE_SCALAR_BODY(value_id)), TILE_AXIS...)
 // from a KernelEntry's scalar_uops[] + KernelAxes.  Dispatch ignores
 // tile_uops for now; they are an introspectable optimization plan.
 typedef enum {
   TILE_NONE = 0,
   TILE_AXIS,        // extra = (KAX_* << 32) | extent
-  TILE_SCALAR_BODY, // extra = ScalarUop id of S_BUFFERIZE root
-  TILE_LOOP_NEST,   // src[0] = body, src[1..] = TILE_AXIS nodes
+  TILE_SCALAR_BODY, // extra = ScalarUop id of value expression
+  TILE_LOOP_NEST,   // src[0] = TILE_STORE body, src[1..] = TILE_AXIS nodes
   TILE_LOCAL_ALLOC, // future: threadgroup/local memory allocation
   TILE_LOAD,        // future: cooperative tile load
-  TILE_STORE,       // future: cooperative tile store
+  TILE_STORE,       // src[0] = TILE_SCALAR_BODY value, extra = scalar S_STORE id
   TILE_BARRIER,     // future: target barrier between tile stages
   TILE_REDUCE,      // future: tiled/tree reduction
   TILE_MMA,         // future: tensor-core / simdgroup matmul
@@ -1223,7 +1223,7 @@ fn int  tile_validate(struct KernelEntry const *ke);
 fn u32  tile_loop_axis_count(struct KernelEntry const *ke);
 fn u32  tile_loop_axis_type(struct KernelEntry const *ke, u32 axis);
 fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
-// Seed a TILE_LOOP_NEST plan from ke->scalar_uops[] + KernelAxes.
+// Seed a TILE_LOOP_NEST(TILE_STORE(...)) plan from scalar_uops + KernelAxes.
 // Returns 1 on success, 0 when scalar_uops is absent or malformed.
 fn int  tile_build_from_scalar(struct KernelEntry *ke);
 

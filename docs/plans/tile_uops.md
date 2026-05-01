@@ -15,7 +15,7 @@ that future renderers can lower differently for CPU and Metal.
 - live nodes are stored in `[1, n_tile_uops)`;
 - `tile_root` stores the root node id, currently a `TILE_LOOP_NEST`;
 - `tile_free` is called by `kernel_free_arrays`;
-- `tile_validate` checks the root/body/axis structure before a
+- `tile_validate` checks the root/store/body/axis structure before a
   renderer or autotuner consumes the plan;
 - `tile_loop_axis_count`, `tile_loop_axis_type`, and
   `tile_loop_axis_extent` expose root-loop axis metadata without
@@ -24,10 +24,19 @@ that future renderers can lower differently for CPU and Metal.
 
 ```text
 TILE_LOOP_NEST(
-  TILE_SCALAR_BODY(S_BUFFERIZE root),
+  TILE_STORE(
+    TILE_SCALAR_BODY(value expression),
+    S_STORE id
+  ),
   TILE_AXIS(...)
 )
 ```
+
+The scalar `S_BUFFERIZE` root still defines the complete scalar
+kernel, but the tile root's body starts at the memory-write boundary:
+`TILE_STORE.extra` references the scalar `S_STORE`, and
+`TILE_SCALAR_BODY.extra` references the scalar value expression stored
+by that `S_STORE`.
 
 When `KernelAxes` is present, its axis types and extents define the
 `TILE_AXIS` nodes. Otherwise the builder falls back to the ranges on
@@ -36,7 +45,8 @@ the scalar `S_BUFFERIZE` root.
 The builder validates the emitted graph before returning success.
 Malformed or partial tile arenas are allowed during manual construction
 but report `tile_validate == 0` until `tile_root` points at a valid
-loop nest whose body references a scalar `S_BUFFERIZE` root.
+loop nest whose body is a `TILE_STORE(TILE_SCALAR_BODY(value))` pair
+linked back to the scalar `S_STORE`.
 
 `materialize.c` calls the builder automatically when rangeify succeeds,
 so every rangeified kernel carries a tile-plan snapshot even though no

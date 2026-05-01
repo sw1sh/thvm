@@ -122,7 +122,8 @@ fn u32 tile_loop_axis_count(KernelEntry const *ke) {
     return 0;
   }
   TileUop const *root = &ke->tile_uops[ke->tile_root];
-  if (root->op != TILE_LOOP_NEST || root->src_count == 0) {
+  if (root->op != TILE_LOOP_NEST || root->src_count == 0
+      || root->src_count > TILE_MAX_SRC) {
     return 0;
   }
   return (u32)root->src_count - 1;
@@ -158,11 +159,27 @@ fn int tile_validate(KernelEntry const *ke) {
   }
 
   TileUop const *root = &ke->tile_uops[ke->tile_root];
-  if (root->op != TILE_LOOP_NEST || root->src_count < 2) {
+  if (root->op != TILE_LOOP_NEST || root->src_count < 2
+      || root->src_count > TILE_MAX_SRC) {
     return 0;
   }
 
-  u32 body_id = root->src[0];
+  u32 store_id = root->src[0];
+  if (!tile_id_ok(ke, store_id)) {
+    return 0;
+  }
+  TileUop const *store = &ke->tile_uops[store_id];
+  if (store->op != TILE_STORE || store->src_count != 1) {
+    return 0;
+  }
+  u32 scalar_store = (u32)store->extra;
+  if (ke->scalar_uops == NULL || scalar_store == 0
+      || scalar_store >= ke->n_scalar_uops
+      || ke->scalar_uops[scalar_store].op != S_STORE) {
+    return 0;
+  }
+
+  u32 body_id = store->src[0];
   if (!tile_id_ok(ke, body_id)) {
     return 0;
   }
@@ -170,10 +187,10 @@ fn int tile_validate(KernelEntry const *ke) {
   if (body->op != TILE_SCALAR_BODY || body->src_count != 0) {
     return 0;
   }
-  u32 scalar_root = (u32)body->extra;
-  if (ke->scalar_uops == NULL || scalar_root == 0
-      || scalar_root >= ke->n_scalar_uops
-      || ke->scalar_uops[scalar_root].op != S_BUFFERIZE) {
+  u32 scalar_value = (u32)body->extra;
+  if (scalar_value == 0 || scalar_value >= ke->n_scalar_uops
+      || ke->scalar_uops[scalar_store].src_count < 2
+      || ke->scalar_uops[scalar_store].src[1] != scalar_value) {
     return 0;
   }
 
@@ -262,11 +279,24 @@ fn int tile_build_from_scalar(KernelEntry *ke) {
   if (ke->scalar_uops[root].src_count == 0) {
     return 0;
   }
+  u32 scalar_store = ke->scalar_uops[root].src[0];
+  if (scalar_store == 0 || scalar_store >= ke->n_scalar_uops
+      || ke->scalar_uops[scalar_store].op != S_STORE
+      || ke->scalar_uops[scalar_store].src_count < 2) {
+    return 0;
+  }
+  u32 scalar_value = ke->scalar_uops[scalar_store].src[1];
+  if (scalar_value == 0 || scalar_value >= ke->n_scalar_uops) {
+    return 0;
+  }
 
   tile_free(ke);
 
   u32 body = tile_emit_leaf(ke, TILE_SCALAR_BODY,
-                            ke->scalar_uops[root].dtype, root);
+                            ke->scalar_uops[scalar_value].dtype, scalar_value);
+  u32 store_src[1] = {body};
+  u32 store = tile_emit(ke, TILE_STORE, ke->scalar_uops[scalar_store].dtype,
+                        1, store_src, scalar_store);
   u32 axes[MAX_AXES];
   u32 n_axes = tile_emit_axes_from_kernel_axes(ke, axes, MAX_AXES);
   if (n_axes == 0) {
@@ -277,7 +307,7 @@ fn int tile_build_from_scalar(KernelEntry *ke) {
     return 0;
   }
 
-  u32 src[TILE_MAX_SRC] = {body};
+  u32 src[TILE_MAX_SRC] = {store};
   for (u32 i = 0; i < n_axes; i++) {
     src[1 + i] = axes[i];
   }
