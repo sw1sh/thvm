@@ -109,6 +109,32 @@ VerificationTest[
       a = TTensorCreate @ NumericArray[Table[N[i], {i, 8}], "Real32"];
       TRealize @ TUOpMul[a, a];
       kid = TKernelCount[] - 1;
+      TKernelApplyOpt[kid, TOpt["LOCAL", 0, 4]];
+      tileAxisSig @ TKernelTilePlan[kid]
+    ],
+    {{"LOOP", 2}, {"LOCAL", 4}},
+    TestID -> "tile-uops/apply-local-syncs-plan"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
+      TInit[];
+      xT = TTensorCreate @ N @ Range[12];
+      TRealize @ TUOpReduce[xT, 0, "SUM"];
+      kid = TKernelCount[] - 1;
+      TKernelApplyOpt[kid, TOpt["GROUP", 1, 4]];
+      tileAxisSig @ TKernelTilePlan[kid]
+    ],
+    {{"LOOP", 1}, {"REDUCE", 3}, {"GROUP_REDUCE", 4}},
+    TestID -> "tile-uops/apply-group-syncs-reduce-plan"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
+      TInit[];
+      a = TTensorCreate @ NumericArray[Table[N[i], {i, 8}], "Real32"];
+      TRealize @ TUOpMul[a, a];
+      kid = TKernelCount[] - 1;
       TKernelApplyOpt[kid, TOpt["UPCAST", 0, 4]];
       TKernelApplyOpt[kid, TOpt["SWAP", 0, 1]];
       tileAxisSig @ TKernelTilePlan[kid]

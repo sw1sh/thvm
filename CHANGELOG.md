@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: richer tile axis consumption
+
+Tile plans now sync `LOCAL` and `GROUP`/`GROUP_REDUCE` opts into the
+validated tile-plan view.  The generated CPU tile renderer accepts
+`LOCAL` and `GLOBAL` axes as loop-like output bindings while keeping
+`GROUP_REDUCE` on the tile-interpreter fallback path until explicit
+tile reductions land.
+
 ### Added: scalar C expression-index rendering
 
 The scalar-UOp C renderer now accepts `S_INDEX_E` address expressions

@@ -65,9 +65,22 @@ int main(void) {
   CHECK_EQ((u64)tile_axis_name(KAX_LOOP)[0],   (u64)'L');
   CHECK_EQ((u64)tile_axis_name(KAX_REDUCE)[0], (u64)'R');
   CHECK_EQ((u64)tile_axis_name(KAX_UPCAST)[0], (u64)'U');
+  CHECK_EQ((u64)tile_axis_name(KAX_LOCAL)[0],  (u64)'L');
+  CHECK_EQ((u64)tile_axis_name(KAX_GLOBAL)[0], (u64)'G');
+  CHECK_EQ((u64)tile_axis_name(KAX_GROUP_REDUCE)[0], (u64)'G');
 
   TEST_BEGIN("tile-graph/build-from-scalar-ranges");
   u32 scalar_root = build_scalar_add_graph(ke, 8);
+  kernel_inputs_reserve(ke, 2);
+  ke->n_inputs        = 2;
+  ke->input_tids[0]   = 0;
+  ke->input_tids[1]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_dtypes[1] = DT_FP32;
+  ke->input_numels[0] = 8;
+  ke->input_numels[1] = 8;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 8;
   u32 scalar_store = ke->scalar_uops[scalar_root].src[0];
   u32 scalar_value = ke->scalar_uops[scalar_store].src[1];
   CHECK(tile_build_from_scalar(ke));
@@ -145,6 +158,61 @@ int main(void) {
   CHECK_EQ(info.axis_extents[0], 2u);
   CHECK_EQ(info.axis_types[1], (u32)KAX_UPCAST);
   CHECK_EQ(info.axis_extents[1], 4u);
+
+  TEST_BEGIN("tile-graph/kernel-axes-local-global");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 2;
+  ke->axes->axis_types[0] = KAX_GLOBAL;
+  ke->axes->full_shape[0] = 2;
+  ke->axes->axis_types[1] = KAX_LOCAL;
+  ke->axes->full_shape[1] = 4;
+  ke->axes->version++;
+  CHECK(tile_build_from_scalar(ke));
+  CHECK(tile_validate(ke));
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.n_axes, 2);
+  CHECK_EQ(info.axis_types[0], (u32)KAX_GLOBAL);
+  CHECK_EQ(info.axis_extents[0], 2u);
+  CHECK_EQ(info.axis_types[1], (u32)KAX_LOCAL);
+  CHECK_EQ(info.axis_extents[1], 4u);
+  CHECK(cg_supports_tile(ke));
+  char *local_global_src = cg_emit_tile(ke);
+  CHECK(local_global_src != NULL);
+  if (local_global_src != NULL) {
+    CHECK(strstr(local_global_src, "for (unsigned _ta0") != NULL);
+    CHECK(strstr(local_global_src, "for (unsigned _ta1") != NULL);
+    CHECK(strstr(local_global_src, "#pragma clang loop unroll_count") == NULL);
+    free(local_global_src);
+  }
+
+  TEST_BEGIN("tile-graph/group-reduce-axis-falls-back-from-c-renderer");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 3;
+  ke->axes->axis_types[0] = KAX_GLOBAL;
+  ke->axes->full_shape[0] = 2;
+  ke->axes->axis_types[1] = KAX_LOCAL;
+  ke->axes->full_shape[1] = 4;
+  ke->axes->axis_types[2] = KAX_GROUP_REDUCE;
+  ke->axes->full_shape[2] = 1;
+  ke->axes->version++;
+  CHECK(tile_build_from_scalar(ke));
+  CHECK(tile_validate(ke));
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.n_axes, 3);
+  CHECK_EQ(info.axis_types[2], (u32)KAX_GROUP_REDUCE);
+  CHECK_EQ(info.axis_extents[2], 1u);
+  CHECK(!cg_supports_tile(ke));
+
+  TEST_BEGIN("tile-graph/restore-kernel-axes-override");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 2;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 2;
+  ke->axes->axis_types[1] = KAX_UPCAST;
+  ke->axes->full_shape[1] = 4;
+  ke->axes->version++;
+  CHECK(tile_build_from_scalar(ke));
+  CHECK(tile_validate(ke));
 
   TEST_BEGIN("tile-graph/validator-rejects-bad-root");
   u32 good_root = ke->tile_root;

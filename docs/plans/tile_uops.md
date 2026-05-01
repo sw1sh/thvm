@@ -34,13 +34,14 @@ that future renderers can lower differently for CPU and Metal.
   `"tile"`, and falls back to the normal BLAS/JIT/scalar paths when
   no supported tile plan is present;
 - that tile path first tries a generated C tile renderer for simple
-  elementwise f32/f64 plans with `LOOP`/`UPCAST` axes, including
-  `S_INDEX_E` addresses built from `S_I*` expression nodes, then
-  falls back to the tile interpreter for broader scalar graphs such
-  as reductions;
+  elementwise f32/f64 plans with `LOOP`/`UPCAST`/`LOCAL`/`GLOBAL`
+  axes, including `S_INDEX_E` addresses built from `S_I*`
+  expression nodes, then falls back to the tile interpreter for
+  broader scalar graphs such as reductions;
 - the scalar C renderer also covers f32/f64 `S_REDUCE_SUM` and
   `S_REDUCE_MAX`; tile C dispatch still rejects tile plans carrying
-  `REDUCE`/`UNROLL` axes until the tile-level reduction path lands;
+  `REDUCE`/`UNROLL`/`GROUP_REDUCE` axes until the tile-level
+  reduction path lands;
 - f32/f64 `S_CAST` is generated with per-input and output pointer
   types, so scalar C no longer requires one uniform kernel dtype for
   simple cast chains;
@@ -67,8 +68,9 @@ by that `S_STORE`.
 
 When `KernelAxes` is present, its axis types and extents define the
 `TILE_AXIS` nodes. This includes applied schedule opts such as
-`UPCAST`, `UNROLL`, and `SWAP` after the tile plan is synced. Otherwise
-the builder falls back to the ranges on the scalar `S_BUFFERIZE` root.
+`UPCAST`, `UNROLL`, `LOCAL`, `GROUP`, and `SWAP` after the tile plan
+is synced. Otherwise the builder falls back to the ranges on the
+scalar `S_BUFFERIZE` root.
 
 The builder validates the emitted graph before returning success.
 Malformed or partial tile arenas are allowed during manual construction
@@ -94,16 +96,13 @@ interpreter for focused validation and profiling.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Teach the builder and renderers how to consume richer axis classes:
-   `LOCAL`, `GROUP_REDUCE`, and `GLOBAL` bindings beyond the current
-   introspectable `UPCAST`/`UNROLL`/`SWAP` sync.
-3. Broaden the generated CPU tile renderer beyond elementwise f32/f64
+2. Broaden the generated CPU tile renderer beyond elementwise f32/f64
    so it covers the scalar interpreter's movement and dtype surface.
-4. Add generated CPU tile support for reductions instead of relying on
+3. Add generated CPU tile support for reductions instead of relying on
    the tile interpreter fallback.
-5. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
+4. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
    threadgroup/grid ids and uses `TILE_BARRIER`.
-6. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
+5. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
    kernels.
-7. Add `TILE_MMA` only after reductions and local-memory tiling are
+6. Add `TILE_MMA` only after reductions and local-memory tiling are
    stable.

@@ -153,10 +153,10 @@ the same pipeline through `cg_emit_metal`.
 `KernelAxes` is the shape-and-layout struct the renderer reads.
 Two arrays of length `n_axes`: `axis_types[]` (one of `KAX_LOOP`,
 `KAX_REDUCE`, `KAX_UPCAST`, `KAX_UNROLL`, `KAX_LOCAL`,
-`KAX_GROUP_REDUCE`) and `full_shape[]` (the per-axis size after any
-splits). A separate `applied_opts[]` records every `KOpt` that's
-been folded in, so the JIT cache key can distinguish two kernels
-that share a `KProgOp[]` but were autotuned differently.
+`KAX_GLOBAL`, `KAX_GROUP_REDUCE`) and `full_shape[]` (the per-axis
+size after any splits). A separate `applied_opts[]` records every
+`KOpt` that's been folded in, so the JIT cache key can distinguish
+two kernels that share a `KProgOp[]` but were autotuned differently.
 
 A `KOpt` (alias `TOpt` on the WL side) is a triple `{op, axis, arg}`.
 `op` is one of `KOP_UPCAST`, `KOP_UNROLL`, `KOP_LOCAL`, `KOP_GROUP`,
@@ -229,17 +229,18 @@ strategies.
 ## What's not yet wired
 
 Several axis types and opt classes are recorded in `KernelAxes` but
-not honored by the renderer. They exist as scaffolding for the
-upcoming structured-nest emitter; do not waste time grepping for
-their codegen logic.
+only some are honored by each renderer.
 
-- `KAX_UPCAST`, `KAX_UNROLL`, `KAX_LOCAL`: the axis-type tags get
-  written into `axis_types[]` by `axes_apply_opt`, but `render_c.c`
-  only honors `KAX_PARALLEL` / `KAX_LOOP` (the flat per-output loop)
-  and reads `applied_opts[]` directly to extract the LAST `UPCAST` /
-  `UNROLL` factor as a single `#pragma clang loop unroll_count`
-  hint. The split structure recorded in `axis_types[]` /
-  `full_shape[]` is ignored.
+- The legacy KProgOp C renderer in `render_c.c` still reads
+  `applied_opts[]` directly to extract the last `UPCAST` or `UNROLL`
+  factor as a single `#pragma clang loop unroll_count` hint. It does
+  not lower the split structure in `axis_types[]` / `full_shape[]`.
+- The scalar/tile C renderer in `render_c_scalar.c` lowers validated
+  tile plans with `LOOP`, `UPCAST`, `LOCAL`, and `GLOBAL` axes to
+  nested CPU loops, using `UPCAST` as the unroll hint. It still
+  rejects `REDUCE`, `UNROLL`, and `GROUP_REDUCE` axes so reduction
+  plans fall back to the tile interpreter until tile-level reductions
+  land.
 - `KOP_PADTO`, `KOP_NOLOCALS`, `KOP_TC`: see the comment block in
   [apply_opt.c](../src/codegen/apply_opt.c) -- they are appended to
   `applied_opts[]` but the apply itself is a no-op on the axis

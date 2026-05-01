@@ -785,6 +785,8 @@ static int ct_axis_supported(u32 axis_type) {
   switch (axis_type) {
     case KAX_LOOP:
     case KAX_UPCAST:
+    case KAX_LOCAL:
+    case KAX_GLOBAL:
       return 1;
     default:
       return 0;
