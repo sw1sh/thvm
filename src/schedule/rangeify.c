@@ -1613,6 +1613,19 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 new_out_refs[MAX_DIM];
         u32 valid_mask = 0;
         int can_fuse = 1;
+        // Track which os/loop_ranges axes are already used by orig_refs
+        // (to avoid double-routing one os axis through two PAD axes).
+        u8 os_axis_used[MAX_DIM] = {0};
+        for (u32 d = 0; d < n_out_orig; d++) {
+          u32 ref = rv->src[1 + d];
+          for (u32 e = 0; e < os->ndim; e++) {
+            if (ref == loop_ranges[e]) { os_axis_used[e] = 1; break; }
+          }
+        }
+        int reduce_used = 0;
+        for (u32 d = 0; d < n_out_orig; d++) {
+          if (rv->src[1 + d] == reduce_range) { reduce_used = 1; break; }
+        }
         for (u32 d = 0; d < n_out_orig; d++) {
           u32 begin    = p->pad_widths[2 * d];
           u32 src_dim  = p->src0_dims [d];
@@ -1631,15 +1644,29 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               new_out_refs[d] = orig_ref;
               continue;
             }
-            u32 ref_iter;
+            u32 ref_iter = 0;
             if (src_dim == out_dim) {
               // Same-size axis with begin offset -- SHRINK-style shift.
               ref_iter = orig_ref;
-            } else if (src_dim < out_dim && reduce_size != 0
-                       && out_dim == reduce_size) {
-              // Rank-promoted axis whose extent matches reduce_size.
-              // Use reduce_range as the iter and bounds-check it.
-              ref_iter = reduce_range;
+            } else if (src_dim < out_dim) {
+              // Rank-promoted axis: route through reduce_range (if
+              // out_dim matches reduce_size and reduce isn't already
+              // claimed) or the unique unused os.dim with matching
+              // extent.
+              if (reduce_size != 0 && out_dim == reduce_size && !reduce_used) {
+                ref_iter = reduce_range;
+                reduce_used = 1;
+              } else {
+                for (u32 e = 0; e < os->ndim; e++) {
+                  if (os_axis_used[e]) continue;
+                  if (os->dims[e] == out_dim) {
+                    ref_iter = loop_ranges[e];
+                    os_axis_used[e] = 1;
+                    break;
+                  }
+                }
+              }
+              if (ref_iter == 0) { can_fuse = 0; break; }
             } else {
               can_fuse = 0; break;
             }
@@ -1664,7 +1691,24 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             else valid_mask = emit_ibinop(ke, S_IAND, valid_mask, axis_ok);
           }
         }
-        if (!can_fuse) RBAIL_MID("PAD fusion: per-axis classification failed");
+        if (!can_fuse) {
+          if (getenv("THVM_RANGEIFY_BAIL")) {
+            fprintf(stderr, "  PAD-fusion-fail: out_dims=[");
+            for (u32 d = 0; d < n_out_orig; d++)
+              fprintf(stderr, "%u%s", p->out_dims[d], d+1==n_out_orig?"":",");
+            fprintf(stderr, "] src_dims=[");
+            for (u32 d = 0; d < n_out_orig; d++)
+              fprintf(stderr, "%u%s", p->src0_dims[d], d+1==n_out_orig?"":",");
+            fprintf(stderr, "] begins=[");
+            for (u32 d = 0; d < n_out_orig; d++)
+              fprintf(stderr, "%u%s", p->pad_widths[2*d], d+1==n_out_orig?"":",");
+            fprintf(stderr, "] os.dims=[");
+            for (u32 d = 0; d < os->ndim; d++)
+              fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
+            fprintf(stderr, "] reduce_size=%u\n", reduce_size);
+          }
+          RBAIL_MID("PAD fusion: per-axis classification failed");
+        }
         u32 body = rv->src[0];
         if (p->opcode == UOP_PAD && valid_mask != 0) {
           u32 zero = emit_iconst(ke, 0);
