@@ -29,10 +29,14 @@ that future renderers can lower differently for CPU and Metal.
 - tile plans remember the `KernelAxes.version` they were built
   against, and `tile_sync_from_scalar` rebuilds stale plans after
   `TKernelApplyOpt`, autotune resets, or lazy WL introspection;
-- CPU dispatch has an opt-in `THVM_TILE=1` interpreter that consumes
-  the validated tile plan over scalar UOps, records dispatch kind
+- CPU dispatch has an opt-in `THVM_TILE=1` path that consumes the
+  validated tile plan over scalar UOps, records dispatch kind
   `"tile"`, and falls back to the normal BLAS/JIT/scalar paths when
   no supported tile plan is present;
+- that tile path first tries a generated C tile renderer for simple
+  elementwise f32/f64 plans with `LOOP`/`UPCAST` axes, then falls
+  back to the tile interpreter for broader scalar graphs such as
+  reductions;
 - `tile_build_from_scalar` seeds a minimal plan from `scalar_uops`:
 
 ```text
@@ -72,7 +76,8 @@ Default dispatch ignores `tile_uops` today. This is deliberate:
 rangeify and the scalar interpreter/JIT continue to own correctness
 while the tile layer becomes a stable target for autotuning and future
 renderers. Setting `THVM_TILE=1` routes supported CPU kernels through
-the tile interpreter for focused validation and profiling.
+the generated tile C renderer when possible, otherwise through the tile
+interpreter for focused validation and profiling.
 
 ## Intended Next Steps
 
@@ -81,12 +86,13 @@ the tile interpreter for focused validation and profiling.
 2. Teach the builder and renderers how to consume richer axis classes:
    `LOCAL`, `GROUP_REDUCE`, and `GLOBAL` bindings beyond the current
    introspectable `UPCAST`/`UNROLL`/`SWAP` sync.
-3. Replace the CPU tile interpreter with a generated C tile renderer
-   that lowers `TILE_LOOP_NEST` to nested loops and emits direct scalar
-   expressions instead of calling the scalar evaluator.
-4. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
+3. Broaden the generated CPU tile renderer beyond elementwise f32/f64
+   so it covers the scalar interpreter's movement and dtype surface.
+4. Add generated CPU tile support for reductions instead of relying on
+   the tile interpreter fallback.
+5. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
    threadgroup/grid ids and uses `TILE_BARRIER`.
-5. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
+6. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
    kernels.
-6. Add `TILE_MMA` only after reductions and local-memory tiling are
+7. Add `TILE_MMA` only after reductions and local-memory tiling are
    stable.

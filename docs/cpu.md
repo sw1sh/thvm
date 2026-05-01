@@ -4,8 +4,9 @@ The directory layout hides a real boundary. `src/backend/cpu/` is one
 layer (runtime dispatch + buffer lifecycle + a per-UOp interpreter),
 and `src/codegen/` is a second, backend-agnostic layer that produces
 the source text the CPU JIT then hands to clang. They meet inside
-`cpu_dispatch_kernel`, which tries three routes in order: BLAS
-pattern match, JIT (codegen + clang), per-op interpreter.
+`cpu_dispatch_kernel`, which tries the fast or specialized routes
+first: BLAS pattern match, optional tile dispatch, C JITs, then the
+scalar or legacy interpreters.
 
 ## Runtime layer (`src/backend/cpu/`)
 
@@ -67,6 +68,8 @@ Compute paths:
   `cg_emit(ke, &C_RENDERER)` to render C source, writes
   `/tmp/thvm_jit_<hash>.c`, shells out to `clang -O2 -fPIC -shared`,
   `dlopen`s the resulting `.dylib`, and `dlsym`s the `k` symbol.
+  The same cache also carries scalar-UOp and tile-UOp generated C
+  variants under distinct hash sentinels.
 
 ### Dispatch order
 
@@ -77,9 +80,17 @@ through `Backend.dispatch_kernel`. The body lives at the bottom of
 1. Recover `kid = ke - KERNELS` and snapshot `t0 = cg_now_us()`.
 2. `cpu_blas_dispatch(ke, ...)` first. On a non-zero return, record
    the route via `cg_profile_record(kid, blas_kind, ...)` and stop.
-3. Else `cpu_jit_dispatch(ke, ...)`. On a 1 return, record
+3. If `THVM_TILE=1`, try `cpu_jit_dispatch_tile(ke, ...)` for simple
+   generated C tile plans, then `cpu_dispatch_tile(ke, ...)` for the
+   tile interpreter fallback. On a hit, record `KDISPATCH_CPU_TILE`
+   and stop.
+4. Else `cpu_jit_dispatch(ke, ...)`. On a 1 return, record
    `KDISPATCH_JIT` and stop.
-4. Else fall through to `cpu_interpret(ke, ...)` and record
+5. Else `cpu_jit_dispatch_scalar(ke, ...)`. On a 1 return, record
+   `KDISPATCH_JIT` and stop.
+6. Else, if scalar UOps exist, run `cpu_dispatch_scalar(ke, ...)` and
+   record `KDISPATCH_INTERPRETER`.
+7. Else fall through to `cpu_interpret(ke, ...)` and record
    `KDISPATCH_INTERPRETER`.
 
 Each path writes its elapsed wallclock through `cg_profile_record`

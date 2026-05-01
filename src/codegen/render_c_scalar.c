@@ -324,3 +324,148 @@ fn char *cg_emit_scalar(KernelEntry const *ke) {
 
   return b.buf;
 }
+
+typedef struct {
+  CsKernelInfo scalar;
+  TilePlanInfo tile;
+  u32          n_axes;
+  u32          axis_types  [MAX_AXES];
+  u32          axis_extents[MAX_AXES];
+} CtKernelInfo;
+
+static int ct_axis_supported(u32 axis_type) {
+  switch (axis_type) {
+    case KAX_LOOP:
+    case KAX_UPCAST:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int ct_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
+  if (!cs_collect_kernel_info(ke, &out->scalar)) {
+    return 0;
+  }
+  if (!tile_collect_plan_info(ke, &out->tile)) {
+    return 0;
+  }
+  if (out->tile.scalar_store_id != out->scalar.store_id) {
+    return 0;
+  }
+
+  u64 tile_numel = 1;
+  out->n_axes = out->tile.n_axes;
+  if (out->n_axes > MAX_AXES) {
+    return 0;
+  }
+  for (u32 i = 0; i < out->n_axes; i++) {
+    u32 axis_type = out->tile.axis_types[i];
+    u32 extent    = out->tile.axis_extents[i];
+    if (!ct_axis_supported(axis_type) || extent == 0) {
+      return 0;
+    }
+    out->axis_types  [i] = axis_type;
+    out->axis_extents[i] = extent;
+    tile_numel *= extent;
+  }
+  if (tile_numel != (u64)(ke->output_numel ? ke->output_numel : 1)) {
+    return 0;
+  }
+  return 1;
+}
+
+fn int cg_supports_tile(KernelEntry const *ke) {
+  CtKernelInfo info;
+  return ct_collect_kernel_info(ke, &info);
+}
+
+fn char *cg_emit_tile(KernelEntry const *ke) {
+  CtKernelInfo info;
+  if (!ct_collect_kernel_info(ke, &info)) {
+    return NULL;
+  }
+
+  CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
+              .program_dtype = info.scalar.dtype, .ke = ke };
+  if (!b.buf) {
+    return NULL;
+  }
+
+  const char *T = cs_dtype_to_c(info.scalar.dtype);
+  cg_append(&b, "#include <math.h>\n");
+  cg_append(&b, "#include <stdint.h>\n\n");
+  cg_append(&b, "void k(void *out_v, const void *const *ins_v, "
+                "unsigned n, const unsigned *in_numels) {\n");
+  cg_append(&b, "  %s *out = (%s *)out_v;\n", T, T);
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    cg_append(&b, "  const %s *in%u = (const %s *)ins_v[%u];\n",
+              T, i, T, i);
+  }
+  cg_append(&b, "  (void)n; (void)in_numels;\n");
+
+  for (u32 d = 0; d < info.n_axes; d++) {
+    for (u32 indent = 0; indent < d + 1; indent++) {
+      cg_append(&b, "  ");
+    }
+    if (info.axis_types[d] == KAX_UPCAST && info.axis_extents[d] > 1) {
+      cg_append(&b, "#pragma clang loop unroll_count(%u)\n",
+                info.axis_extents[d]);
+      for (u32 indent = 0; indent < d + 1; indent++) {
+        cg_append(&b, "  ");
+      }
+    }
+    cg_append(&b, "for (unsigned _ta%u = 0; _ta%u < %uu; _ta%u++) {\n",
+              d, d, info.axis_extents[d], d);
+  }
+
+  for (u32 indent = 0; indent < info.n_axes + 1; indent++) {
+    cg_append(&b, "  ");
+  }
+  cg_append(&b, "unsigned _tk = 0u;\n");
+  for (u32 d = 0; d < info.n_axes; d++) {
+    for (u32 indent = 0; indent < info.n_axes + 1; indent++) {
+      cg_append(&b, "  ");
+    }
+    cg_append(&b, "_tk = _tk * %uu + _ta%u;\n", info.axis_extents[d], d);
+  }
+
+  u32 loop_strides[MAX_DIM] = {0};
+  if (info.scalar.n_loops > 0) {
+    loop_strides[info.scalar.n_loops - 1] = 1;
+    for (i32 d = (i32)info.scalar.n_loops - 2; d >= 0; d--) {
+      loop_strides[d] = loop_strides[d + 1] * info.scalar.loop_extents[d + 1];
+    }
+  }
+  for (u32 d = 0; d < info.scalar.n_loops; d++) {
+    for (u32 indent = 0; indent < info.n_axes + 1; indent++) {
+      cg_append(&b, "  ");
+    }
+    cg_append(&b, "unsigned _v%u = (_tk / %uu) %% %uu;\n",
+              info.scalar.loop_ids[d], loop_strides[d],
+              info.scalar.loop_extents[d]);
+  }
+
+  ScalarUop const *st = &ke->scalar_uops[info.scalar.store_id];
+  for (u32 indent = 0; indent < info.n_axes + 1; indent++) {
+    cg_append(&b, "  ");
+  }
+  cg_append(&b, "out[");
+  cs_emit_index_offset(&b, ke, st->src[0]);
+  cg_append(&b, "] = ");
+  if (!cs_emit_value(&b, ke, st->src[1])) {
+    free(b.buf);
+    return NULL;
+  }
+  cg_append(&b, ";\n");
+
+  for (i32 d = (i32)info.n_axes - 1; d >= 0; d--) {
+    for (u32 indent = 0; indent < (u32)d + 1; indent++) {
+      cg_append(&b, "  ");
+    }
+    cg_append(&b, "}\n");
+  }
+  cg_append(&b, "}\n");
+
+  return b.buf;
+}

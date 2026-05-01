@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: generated C tile renderer
+
+`THVM_TILE=1` now tries a generated C tile renderer for simple
+elementwise f32/f64 `TileUop` plans before falling back to the tile
+interpreter.  The renderer lowers `TILE_LOOP_NEST` axes to nested C
+loops, emits direct scalar expressions, and maps `UPCAST` axes to clang
+unroll pragmas.
+
 ### Added: opt-in CPU tile dispatch
 
 CPU dispatch now has a `THVM_TILE=1` path that executes validated

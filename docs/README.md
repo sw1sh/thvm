@@ -26,9 +26,9 @@ If you are new to the project, read these in order:
    `TProfile` for spotting allocation leaks.
 8. [cpu.md](cpu.md): the CPU backend (`src/backend/cpu/`) and the
    backend-agnostic codegen pipeline (`src/codegen/`).  Walks the
-   `cpu_dispatch_kernel` order (BLAS, JIT, interpreter), the
-   `propose -> apply_opt -> render_c` chain, and the JIT cache
-   key.
+   `cpu_dispatch_kernel` order (BLAS, optional tile path, JITs,
+   interpreters), the `propose -> apply_opt -> render_c` chain, and
+   the JIT cache key.
 
 ## What's not here yet
 

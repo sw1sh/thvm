@@ -224,6 +224,28 @@ int main(void) {
   CHECK_EQ(tile_loop_axis_count(mk), 1);
   CHECK_EQ(tile_loop_axis_extent(mk, 0), 4u);
 
+  TEST_BEGIN("tile-graph/c-renderer-emits-loop");
+  CHECK(cg_supports_tile(mk));
+  char *src = cg_emit_tile(mk);
+  CHECK(src != NULL);
+  CHECK(strstr(src, "for (unsigned _ta0") != NULL);
+  CHECK(strstr(src, "unsigned _tk = 0u;") != NULL);
+  CHECK(strstr(src, "out[") != NULL);
+  CHECK(strstr(src, "eval_scalar") == NULL);
+  free(src);
+
+  TEST_BEGIN("tile-graph/c-renderer-honors-upcast-axis");
+  CHECK(mk->axes != NULL);
+  KOpt opt = { .op = KOP_UPCAST, .axis = 0, .arg = 2 };
+  CHECK(axes_apply_opt(mk->axes, opt));
+  CHECK(tile_sync_from_scalar(mk));
+  CHECK(cg_supports_tile(mk));
+  src = cg_emit_tile(mk);
+  CHECK(src != NULL);
+  CHECK(strstr(src, "#pragma clang loop unroll_count(2)") != NULL);
+  CHECK(strstr(src, "for (unsigned _ta1") != NULL);
+  free(src);
+
   thvm_free();
   TEST_REPORT();
 }
