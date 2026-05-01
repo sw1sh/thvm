@@ -947,21 +947,52 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
         idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
                                os->ndim, in_off);
+      } else if (input_rngs_pre[i].ndim == v->shape.ndim
+                 && v->shape.ndim > 0) {
+        // RNGS-BASED FALLBACK (Phase 3 of apply_movement_op port).
+        // The backward walk computed input_rngs_pre[i] = per-axis iter
+        // expressions for this input read inside the reduce body.
+        // Build addr = sum(rngs[d] * v.strides[d]) + offset directly
+        // via S_INDEX_E.  Handles arbitrary chain shapes that the
+        // per-pattern branches above don't recognize.
+        RngsCtx const *r = &input_rngs_pre[i];
+        u32 acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
+        for (u32 d = 0; d < r->ndim; d++) {
+          if (v->strides[d] < 0) { acc = 0; break; }  // bail
+          if (v->strides[d] == 0) continue;  // broadcast axis
+          u32 t = r->refs[d];
+          if (v->strides[d] != 1) {
+            u32 c = emit_iconst(ke, (i64)v->strides[d]);
+            t = emit_ibinop(ke, S_IMUL, t, c);
+          }
+          acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+        }
+        if (acc == 0) acc = emit_iconst(ke, 0);
+        u32 src[2] = {param, acc};
+        idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
       } else {
         // No supported pre-INDEX shape branch matched.  Bailing
         // here is safer than emitting wrong addresses with
         // canonical loop_strides.
         if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u reduce_inner=%u\n",
+          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u reduce_inner=%u rngs.ndim=%u\n",
                   i, in_numel, onum, v->shape.ndim, os->ndim,
                   in_ndim, has_reduce ? red->numel : 0,
                   has_reduce ? reduce_size : 0, reduce_in_numel,
-                  has_reduce ? reduce_inner : 0);
+                  has_reduce ? reduce_inner : 0,
+                  input_rngs_pre[i].ndim);
         }
         RBAIL_MID("pre-INDEX no branch matched");
       }
       if (idx == 0) RBAIL_MID("pre-INDEX emit failed");
-      input_load_pre[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
+      // Wrap with valid_mask if PAD chain produced one.
+      u32 load = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
+      if (input_rngs_pre[i].valid_mask != 0) {
+        u32 zero = emit_iconst(ke, 0);
+        u32 wsrc[3] = {input_rngs_pre[i].valid_mask, load, zero};
+        load = rangeify_emit(ke, S_IWHERE, dtype, 3, wsrc, 0);
+      }
+      input_load_pre[i] = load;
     }
 
     // Post-scope LOAD: per-LOOP-element read.  Stride encoding
