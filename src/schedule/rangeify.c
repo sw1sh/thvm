@@ -623,10 +623,18 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             r_ids[d] = loop_ranges[d - 1];
           }
           // Sanity: dim mismatch with non-broadcast stride bails.
+          // Exception: a size-1 axis is an implicit broadcast (iter
+          // always 0 on that axis from the input's perspective).
+          // Force stride to 0 there to make the LOOP iter address
+          // collapse to offset+0 regardless of the LOOP's extent.
           u32 expected_dim;
           if (d < reduce_axis)       expected_dim = os->dims[d];
           else if (d == reduce_axis) expected_dim = reduce_size;
           else                       expected_dim = os->dims[d - 1];
+          if (v->shape.dims[d] == 1 && expected_dim != 1) {
+            r_strides[d] = 0;
+            continue;
+          }
           if (v->shape.dims[d] != expected_dim && v->strides[d] != 0) {
             RBAIL_MID("pre-reduce dim mismatch (non-broadcast)");
           }
