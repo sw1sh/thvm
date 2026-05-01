@@ -214,6 +214,76 @@ static u32 emit_index(KernelEntry *ke, u32 dtype, u32 buf_id,
   return emit_index_chain(ke, dtype, buf_id, range_ids, strides, ndim, 0);
 }
 
+// Helpers for emitting integer arithmetic on iter expressions (Phase 3
+// of the apply_movement_op port).  Builds expressions over S_I* ops
+// returning i64 values that S_INDEX_E can consume.
+
+static u32 emit_iconst(KernelEntry *ke, i64 v) {
+  u64 extra = (u64)v;
+  return rangeify_emit_leaf(ke, S_ICONST, DT_INT64, extra);
+}
+
+static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
+  return rangeify_emit_binary(ke, op, DT_INT64, a, b);
+}
+
+// Build an expression for `range_id_iter * stride + offset_term`.  Folds
+// trivial cases (stride==0, stride==1) to keep the expression small.
+// `offset_term` is 0 to omit the additive term, otherwise an op_id.
+static u32 emit_axis_term(KernelEntry *ke, u32 range_id, u32 stride,
+                          u32 offset_term) {
+  if (stride == 0) return offset_term;  // axis contributes nothing
+  u32 t = range_id;
+  if (stride != 1) {
+    u32 sc = emit_iconst(ke, (i64)stride);
+    t = emit_ibinop(ke, S_IMUL, t, sc);
+  }
+  if (offset_term == 0) return t;
+  return emit_ibinop(ke, S_IADD, t, offset_term);
+}
+
+// Build an integer expression that decomposes a flat iter into a
+// per-axis coordinate, then multiplies by the input view's stride
+// for that axis.  Used for cases where in_numel == reduce_size and
+// the input has rank > 1: walk the input axes from outer to inner,
+// computing coord[d] = (flat / suffix_size) % v->shape.dims[d], and
+// accumulate addr += coord[d] * v->strides[d].  Suffix_size and the
+// dim are constants known at emit time, so the expression is a tree
+// of S_IDIV/S_IMOD/S_IMUL/S_IADD over a single S_RANGE.
+static u32 build_addr_from_flat_iter(KernelEntry *ke, u32 flat_range_id,
+                                     u32 const *dims, u32 const *strides,
+                                     u32 ndim, u32 offset) {
+  u32 acc = offset != 0 ? emit_iconst(ke, (i64)offset) : 0;
+  // Compute suffix product from the right: suffix[ndim-1]=1,
+  // suffix[d] = suffix[d+1] * dims[d+1].  coord[d] = (flat /
+  // suffix[d]) % dims[d].
+  u32 suffix[MAX_DIM];
+  if (ndim == 0) return acc != 0 ? acc : emit_iconst(ke, 0);
+  suffix[ndim - 1] = 1;
+  for (i32 d = (i32)ndim - 2; d >= 0; d--) {
+    suffix[d] = suffix[d + 1] * dims[d + 1];
+  }
+  for (u32 d = 0; d < ndim; d++) {
+    if (strides[d] == 0) continue;  // broadcast axis: no contribution
+    // coord = (flat / suffix[d]) % dims[d]
+    u32 coord = flat_range_id;
+    if (suffix[d] != 1) {
+      u32 sc = emit_iconst(ke, (i64)suffix[d]);
+      coord = emit_ibinop(ke, S_IDIV, coord, sc);
+    }
+    if (d != 0) {  // d==0 has dims[0] >= flat_max+1, so mod is no-op
+      u32 dc = emit_iconst(ke, (i64)dims[d]);
+      coord = emit_ibinop(ke, S_IMOD, coord, dc);
+    }
+    if (strides[d] != 1) {
+      u32 sc = emit_iconst(ke, (i64)strides[d]);
+      coord = emit_ibinop(ke, S_IMUL, coord, sc);
+    }
+    acc = (acc == 0) ? coord : emit_ibinop(ke, S_IADD, acc, coord);
+  }
+  return acc != 0 ? acc : emit_iconst(ke, 0);
+}
+
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
 //
 // Inputs:
@@ -587,51 +657,29 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
-      } else if (in_numel == reduce_size && v->contiguous) {
-        // General rank case of "input depends only on reduce iter":
-        // any contig view (regardless of ndim) with total numel ==
-        // reduce_size can be addressed by a single reduce_iter walk
-        // over the flat buffer.  Covers BatchNorm/LayerNorm backward
-        // patterns where the input view is rank-3 like [a, b, c] with
-        // a*b*c == reduce_size and reduce_inner != 1 (so the
-        // reduce-trailing branch above doesn't fire, but flat
-        // indexing still works because the input is contig).
-        u32 r_ids[1]    = {reduce_range};
-        u32 r_strides[1] = {1};
-        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
-      } else if (in_numel == reduce_size && !v->contiguous
-                 && v->shape.ndim <= MAX_DIM
-                 && (1 + 1 + (u32)v->shape.ndim) <= SCALAR_MAX_SRC) {
-        // Non-contig slice view (e.g. shape [2,3,3] strides [25,5,1]
-        // viewing a [5,5,5] parent buffer).  Decompose reduce_iter
-        // into per-axis coords via S_RESHAPE_V flat-roundtrip into
-        // fresh VIRT ranges sized to v->shape, then index with the
-        // view's actual strides.  Mirrors the dominant rank-mismatch
-        // RESHAPE input-load case but driven by reduce_range.
+      } else if (in_numel == reduce_size && v->shape.ndim <= MAX_DIM) {
+        // General "input depends only on reduce iter" case (any rank,
+        // contig OR non-contig).  Builds the address as a symbolic
+        // expression from reduce_iter via per-axis DIV/MOD/MUL using
+        // the view's actual strides.  Replaces the rank-1 stride-aware
+        // branch above (now redundant) and the prior S_RESHAPE_V wrap
+        // for non-contig views with a direct S_INDEX_E emission.
+        // Mirrors tinygrad's rangeify, which builds index expressions
+        // as symbolic UOps over RANGE atoms (apply_movement_op).
         u32 v_ndim = v->shape.ndim;
-        u32 virt_ranges[MAX_DIM];
-        for (u32 d = 0; d < v_ndim; d++) {
-          u64 r_extra = ((u64)S_AXIS_VIRT << 32) | (u64)v->shape.dims[d];
-          virt_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, r_extra);
-        }
+        u32 dims_u32[MAX_DIM];
         u32 strides_u32[MAX_DIM];
         for (u32 d = 0; d < v_ndim; d++) {
-          if (v->strides[d] < 0) RBAIL_MID("pre-INDEX-V negative stride");
+          if (v->strides[d] < 0) RBAIL_MID("pre-INDEX-E negative stride");
+          dims_u32   [d] = v->shape.dims[d];
           strides_u32[d] = (u32)v->strides[d];
         }
-        u32 idx_v = emit_index_chain(ke, dtype, param, virt_ranges,
-                                      strides_u32, v_ndim, in_off);
-        if (idx_v == 0) RBAIL_MID("pre-INDEX-V emit failed");
-        u32 v_load = rangeify_emit_unary(ke, S_LOAD, dtype, idx_v);
-        // Wrap with S_RESHAPE_V: output side = reduce_range (1),
-        // input side = virt_ranges (v_ndim).
-        u32 src_arr[SCALAR_MAX_SRC] = {v_load, reduce_range};
-        for (u32 d = 0; d < v_ndim; d++) src_arr[2 + d] = virt_ranges[d];
-        u8  src_count = (u8)(1 + 1 + v_ndim);
-        u64 extra     = (u64)1;  // n_out = 1
-        input_load_pre[i] = rangeify_emit(ke, S_RESHAPE_V, dtype,
-                                          src_count, src_arr, extra);
-        continue;  // skip the post-emit S_LOAD wrap (already done)
+        u32 addr = build_addr_from_flat_iter(ke, reduce_range,
+                                              dims_u32, strides_u32,
+                                              v_ndim, in_off);
+        if (addr == 0) RBAIL_MID("pre-INDEX-E build_addr failed");
+        u32 src[2] = {param, addr};
+        idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
       } else if (in_numel == reduce_in_numel
                  && v->shape.ndim == in_ndim) {
         // Partial reduce: input has rank in_ndim (= os->ndim + 1).
