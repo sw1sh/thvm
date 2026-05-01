@@ -862,6 +862,32 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           if (p->src0_dims[d] != p->out_dims[d]) { shape_changes = 1; break; }
         }
       }
+      // Size-1-axis insertion/removal: if src0_dims and out_dims have
+      // the same multiset of non-1 dims in the same order, the RESHAPE
+      // is identity at the scalar level (no data movement).  Downstream
+      // EXPAND/movement ops use LOOP iters at os->ndim; the inserted
+      // size-1 axes are handled by stride-0 broadcasts emitted earlier.
+      // Covers the dominant `[N] -> [N, 1, 1]` broadcast-prep pattern.
+      if (shape_changes) {
+        u32 a_idx = 0, b_idx = 0;
+        int identity_mod_ones = 1;
+        while (a_idx < p->src0_ndim || b_idx < p->out_ndim) {
+          while (a_idx < p->src0_ndim && p->src0_dims[a_idx] == 1) a_idx++;
+          while (b_idx < p->out_ndim  && p->out_dims [b_idx] == 1) b_idx++;
+          if (a_idx == p->src0_ndim && b_idx == p->out_ndim) break;
+          if (a_idx == p->src0_ndim || b_idx == p->out_ndim
+              || p->src0_dims[a_idx] != p->out_dims[b_idx]) {
+            identity_mod_ones = 0;
+            break;
+          }
+          a_idx++;
+          b_idx++;
+        }
+        if (identity_mod_ones) {
+          prog_value[i] = v;
+          continue;
+        }
+      }
       if (shape_changes) {
         // Cap each ndim at 4 (the u8 packing of in/out dims into
         // extra: 4 bytes each side, 8 bytes total).  Both ndims must
@@ -951,8 +977,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             continue;
           }
           if (getenv("THVM_RANGEIFY_BAIL")) {
-            fprintf(stderr, "  RESHAPE-detail: src0_ndim=%u out_ndim=%u os.ndim=%u\n",
-                    p->src0_ndim, p->out_ndim, os->ndim);
+            fprintf(stderr, "  RESHAPE-detail: src0_ndim=%u src0_dims=[",
+                    p->src0_ndim);
+            for (u32 d = 0; d < p->src0_ndim; d++)
+              fprintf(stderr, "%u%s", p->src0_dims[d], d+1==p->src0_ndim?"":",");
+            fprintf(stderr, "] out_ndim=%u out_dims=[", p->out_ndim);
+            for (u32 d = 0; d < p->out_ndim; d++)
+              fprintf(stderr, "%u%s", p->out_dims[d], d+1==p->out_ndim?"":",");
+            fprintf(stderr, "] os.ndim=%u os.dims=[", os->ndim);
+            for (u32 d = 0; d < os->ndim; d++)
+              fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
+            fprintf(stderr, "] src_is_input=%d\n", KSRC_IS_INPUT(raw) ? 1 : 0);
           }
           RBAIL_MID("RESHAPE shape-change ndim cap or != os->ndim");
         }
