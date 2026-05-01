@@ -1475,6 +1475,16 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 ndim = p->out_ndim;
       if (ndim == 0) ndim = os->ndim;
       if (ndim > 3) RBAIL_MID("SHRINK/PAD ndim > 3");
+      // Identity-pass SHRINK only (PAD identity-pass breaks lenet's
+      // softmax chain -- needs deeper investigation).  When the
+      // source value's via_rngs flag is set, the chain's iter shifts
+      // are baked into the load address by the backward walk, so the
+      // forward emission can skip wrapping with S_SHRINK.
+      if (p->opcode == UOP_SHRINK && SRC_VIA_RNGS(raw, pre)) {
+        prog_value[i] = v;
+        via_rngs[i] = 1;
+        continue;
+      }
       // SHRINK fusion path: when the source is an S_RESHAPE_V wrap and
       // ndim > os->ndim, the SHRINK operates on the rank-promoted
       // intermediate.  The intermediate axes don't have LOOP iters of
