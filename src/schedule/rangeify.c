@@ -1724,20 +1724,97 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                                       src_count, src_arr_v, extra_v);
         continue;
       }
-      // PAD-as-size1-inflation fusion (very narrow case to be safe):
+      // PAD-as-size1-inflation fusion:
       // - single inflated axis (all others pass-through)
       // - inflated axis must have src_dim==1 AND out_dim==reduce_size
-      // - source must be exactly S_LOAD (no IWHERE / chain)
+      // - source must be either S_LOAD or S_IWHERE wrapping S_LOAD,
+      //   AND the underlying LOAD's INDEX must NOT reference
+      //   reduce_range (so the load address provably doesn't depend
+      //   on the rank-promoted axis's iter)
       //
-      // Then AND a single bounds-check on reduce_range into a fresh
-      // S_IWHERE wrapping the LOAD.  Wider fusion variants (multi-
-      // axis, IWHERE-wrapped loads, intermediate sources) all
-      // failed lenet softmax in iteration 31 -- the load's address
-      // can transitively depend on the rank-promoted axis through
-      // upstream chain transforms in ways that aren't visible
-      // locally.
+      // Then AND a single bounds-check on reduce_range and re-wrap
+      // the value in S_IWHERE.  Wider variants without the INDEX-
+      // independence check break lenet softmax (the address can
+      // transitively depend on reduce_range through upstream chain
+      // transforms even when the LOAD's input has dim 1 on that
+      // axis).
+      u32 load_id = 0;
+      u32 existing_mask = 0;
+      if (ke->scalar_uops[v].op == S_LOAD) {
+        load_id = v;
+      } else if (ke->scalar_uops[v].op == S_IWHERE) {
+        u32 inner = ke->scalar_uops[v].src[1];
+        if (inner != 0 && ke->scalar_uops[inner].op == S_LOAD) {
+          load_id = inner;
+          existing_mask = ke->scalar_uops[v].src[0];
+        }
+      }
+      int load_indep_of_reduce = 0;
+      if (load_id != 0) {
+        u32 idx_id = ke->scalar_uops[load_id].src[0];
+        if (idx_id != 0) {
+          ScalarUop const *iu = &ke->scalar_uops[idx_id];
+          // S_INDEX with packed strides: range refs in src[1..].
+          // If reduce_range never appears, address is independent.
+          // S_INDEX_E with expression addr: conservatively treat as
+          // dependent (its addr could include reduce_range as a
+          // sub-expression we don't walk).
+          if (iu->op == S_INDEX) {
+            // INDEX may include reduce_range as a range src, but if
+            // its packed stride for that axis is 0, the address
+            // truly doesn't depend on reduce_range.  See
+            // pack_index_extra: bits [16d..16d+15] = stride for src[1+d].
+            int reduce_uses_load = 0;
+            for (u8 s = 1; s < iu->src_count; s++) {
+              if (iu->src[s] != reduce_range) continue;
+              u32 stride = (u32)((iu->extra >> (16 * (s - 1))) & 0xFFFFu);
+              if (stride != 0) { reduce_uses_load = 1; break; }
+            }
+            if (!reduce_uses_load) load_indep_of_reduce = 1;
+          } else if (iu->op == S_INDEX_E) {
+            // Expression-form INDEX: src[1] is the address expression.
+            // Walk it recursively (bounded depth) and check if
+            // reduce_range is referenced anywhere.
+            u32 stack[64];
+            int sp = 0;
+            stack[sp++] = iu->src[1];
+            int found = 0;
+            int hops = 0;
+            while (sp > 0 && hops++ < 256) {
+              u32 node = stack[--sp];
+              if (node == 0) continue;
+              if (node == reduce_range) { found = 1; break; }
+              ScalarUop const *nu = &ke->scalar_uops[node];
+              if (nu->op == S_RANGE || nu->op == S_ICONST) continue;
+              for (u8 s = 0; s < nu->src_count && sp < 64; s++) {
+                if (nu->src[s] != 0) stack[sp++] = nu->src[s];
+              }
+            }
+            if (!found) load_indep_of_reduce = 1;
+          }
+        }
+      }
+      if (getenv("THVM_RANGEIFY_TRACE") && p->opcode == UOP_PAD
+          && ndim > os->ndim) {
+        fprintf(stderr, "  PAD-fusion-probe: src.op=%s load_id=%u indep=%d "
+                        "reduce_size=%u\n",
+                scalar_op_name(ke->scalar_uops[v].op), load_id,
+                load_indep_of_reduce, reduce_size);
+        if (load_id != 0) {
+          u32 idx_id = ke->scalar_uops[load_id].src[0];
+          if (idx_id != 0) {
+            ScalarUop const *iu = &ke->scalar_uops[idx_id];
+            fprintf(stderr, "    INDEX op=%s src_count=%u extra=0x%lx srcs=[",
+                    scalar_op_name(iu->op), iu->src_count, (unsigned long)iu->extra);
+            for (u8 s = 0; s < iu->src_count; s++) {
+              fprintf(stderr, "%u%s", iu->src[s], s+1==iu->src_count?"":",");
+            }
+            fprintf(stderr, "] reduce_range=%u\n", reduce_range);
+          }
+        }
+      }
       if (p->opcode == UOP_PAD && ndim > os->ndim
-          && ke->scalar_uops[v].op == S_LOAD
+          && load_id != 0 && load_indep_of_reduce
           && reduce_size != 0) {
         u32 inflated_axis = (u32)-1;
         u32 inflated_begin = 0;
@@ -1767,8 +1844,11 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
             axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
           }
+          u32 combined_mask = existing_mask != 0
+              ? emit_ibinop(ke, S_IAND, existing_mask, axis_ok)
+              : axis_ok;
           u32 zero    = emit_iconst(ke, 0);
-          u32 wsrc[3] = {axis_ok, v, zero};
+          u32 wsrc[3] = {combined_mask, load_id, zero};
           prog_value[i] = rangeify_emit(ke, S_IWHERE, p->dtype, 3, wsrc, 0);
           continue;
         }
