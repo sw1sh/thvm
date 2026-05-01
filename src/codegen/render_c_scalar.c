@@ -15,10 +15,11 @@
 //     S_ISUB / S_IMUL / S_IDIV / S_IMOD / S_ILT / S_IAND /
 //     S_IWHERE.
 //   - f32 <-> f64 value-preserving S_CAST.
-//   - No SHRINK, PAD, FLIP, RESHAPE, BITCAST yet.
+//   - Movement wrappers: S_SHRINK / S_PAD / S_FLIP / S_RESHAPE /
+//     S_RESHAPE_V.
+//   - No BITCAST yet.
 //
 // Out of scope (bail; falls through to cpu_dispatch_scalar):
-//   - S_SHRINK / S_PAD / S_FLIP / S_RESHAPE iter shifts
 //   - Narrow FPs / packed nibbles
 //
 // Generated function signature matches render_c.c:
@@ -57,6 +58,8 @@ static int cs_op_supported(u8 op) {
     case S_CMPLT: case S_CMPEQ:
     case S_REDUCE_SUM: case S_REDUCE_MAX:
     case S_CAST:
+    case S_SHRINK: case S_PAD: case S_FLIP:
+    case S_RESHAPE: case S_RESHAPE_V:
     case S_ICONST:
     case S_IADD: case S_ISUB: case S_IMUL:
     case S_IDIV: case S_IMOD: case S_ILT:
@@ -85,6 +88,11 @@ static int cs_op_carries_kernel_dtype(ScalarUop const *u) {
     case S_REDUCE_SUM:
     case S_REDUCE_MAX:
     case S_CAST:
+    case S_SHRINK:
+    case S_PAD:
+    case S_FLIP:
+    case S_RESHAPE:
+    case S_RESHAPE_V:
       return 1;
     case S_IWHERE:
       return u->dtype != DT_INT64;
@@ -240,6 +248,49 @@ static int cs_index_input_slot(KernelEntry const *ke, u32 idx_id, u32 *slot) {
   return 1;
 }
 
+static u32 cs_range_extent(KernelEntry const *ke, u32 range_id) {
+  if (range_id == 0 || range_id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *r = &ke->scalar_uops[range_id];
+  if (r->op != S_RANGE) {
+    return 0;
+  }
+  return (u32)(r->extra & 0xFFFFFFFFu);
+}
+
+static u32 cs_range_axis_type(KernelEntry const *ke, u32 range_id) {
+  if (range_id == 0 || range_id >= ke->n_scalar_uops) {
+    return (u32)-1;
+  }
+  ScalarUop const *r = &ke->scalar_uops[range_id];
+  if (r->op != S_RANGE) {
+    return (u32)-1;
+  }
+  return (u32)((r->extra >> 32) & 0xFFFFFFFFu);
+}
+
+static u32 cs_iter_ref_extent(KernelEntry const *ke, u32 ref_id) {
+  if (ref_id == 0 || ref_id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *u = &ke->scalar_uops[ref_id];
+  if (u->op == S_RANGE) {
+    return cs_range_extent(ke, ref_id);
+  }
+  if (u->op == S_IADD || u->op == S_ISUB) {
+    ScalarUop const *a = &ke->scalar_uops[u->src[0]];
+    ScalarUop const *b = &ke->scalar_uops[u->src[1]];
+    if (a->op == S_RANGE) {
+      return cs_range_extent(ke, u->src[0]);
+    }
+    if (b->op == S_RANGE) {
+      return cs_range_extent(ke, u->src[1]);
+    }
+  }
+  return 0;
+}
+
 // Emit the C value-producing expression for one scalar op.  S_RANGE
 // expands to its bound loop variable; S_LOAD reads from in%u; S_CONST
 // is a literal; ALU ops parenthesize their children; etc.
@@ -374,6 +425,218 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
         return 0;
       }
       cg_append(b, "))");
+      return 1;
+    }
+    case S_SHRINK: {
+      u32 nrng = (u32)u->src_count - 1;
+      const char *T = cs_dtype_to_c(u->dtype);
+      cg_append(b, "({ %s _mv%u; ", T, op_id);
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        if (cs_range_extent(ke, rng_id) == 0) {
+          return 0;
+        }
+        u32 begin = (u32)((u->extra >> (16 * d)) & 0xFFFFu);
+        cg_append(b, "unsigned _sv%u_%u = _v%u; ", op_id, d, rng_id);
+        cg_append(b, "_v%u = _sv%u_%u + %uu; ",
+                  rng_id, op_id, d, begin);
+      }
+      cg_append(b, "_mv%u = ", op_id);
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "; ");
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        cg_append(b, "_v%u = _sv%u_%u; ", rng_id, op_id, d);
+      }
+      cg_append(b, "_mv%u; })", op_id);
+      return 1;
+    }
+    case S_PAD: {
+      u32 nrng = (u32)u->src_count - 1;
+      const char *T = cs_dtype_to_c(u->dtype);
+      cg_append(b, "({ int _ok%u = 1; %s _mv%u = (%s)0; ",
+                op_id, T, op_id, T);
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        if (cs_range_extent(ke, rng_id) == 0) {
+          return 0;
+        }
+        u32 packed  = (u32)((u->extra >> (16 * d)) & 0xFFFFu);
+        u32 begin   = packed & 0xFFu;
+        u32 src_dim = (packed >> 8) & 0xFFu;
+        if (src_dim == 0) {
+          return 0;
+        }
+        cg_append(b, "unsigned _sv%u_%u = _v%u; ", op_id, d, rng_id);
+        cg_append(b, "if (_sv%u_%u < %uu || _sv%u_%u >= %uu) { _ok%u = 0; } ",
+                  op_id, d, begin, op_id, d, begin + src_dim, op_id);
+        cg_append(b, "_v%u = _sv%u_%u - %uu; ",
+                  rng_id, op_id, d, begin);
+      }
+      cg_append(b, "if (_ok%u) { _mv%u = ", op_id, op_id);
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "; } ");
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        cg_append(b, "_v%u = _sv%u_%u; ", rng_id, op_id, d);
+      }
+      cg_append(b, "_mv%u; })", op_id);
+      return 1;
+    }
+    case S_FLIP: {
+      u32 nrng = (u32)u->src_count - 1;
+      u32 mask = (u32)(u->extra & 0xFFu);
+      const char *T = cs_dtype_to_c(u->dtype);
+      cg_append(b, "({ %s _mv%u; ", T, op_id);
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        u32 extent = cs_range_extent(ke, rng_id);
+        if (extent == 0) {
+          return 0;
+        }
+        cg_append(b, "unsigned _sv%u_%u = _v%u; ", op_id, d, rng_id);
+        if (mask & (1u << d)) {
+          cg_append(b, "_v%u = %uu - 1u - _sv%u_%u; ",
+                    rng_id, extent, op_id, d);
+        }
+      }
+      cg_append(b, "_mv%u = ", op_id);
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "; ");
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        cg_append(b, "_v%u = _sv%u_%u; ", rng_id, op_id, d);
+      }
+      cg_append(b, "_mv%u; })", op_id);
+      return 1;
+    }
+    case S_RESHAPE: {
+      u32 nrng = (u32)u->src_count - 1;
+      if (nrng > MAX_DIM) {
+        return 0;
+      }
+      u8 out_dims[MAX_DIM] = {0};
+      u8 in_dims [MAX_DIM] = {0};
+      u32 lo = (u32)(u->extra & 0xFFFFFFFFu);
+      u32 hi = (u32)((u->extra >> 32) & 0xFFFFFFFFu);
+      for (u32 d = 0; d < 4 && d < MAX_DIM; d++) {
+        out_dims[d] = (u8)((lo >> (8 * d)) & 0xFFu);
+        in_dims [d] = (u8)((hi >> (8 * d)) & 0xFFu);
+      }
+      u64 in_stride[MAX_DIM] = {0};
+      u64 s = 1;
+      for (i32 d = (i32)nrng - 1; d >= 0; d--) {
+        u32 dim = (in_dims[d] != 0 ? in_dims[d] : 1);
+        in_stride[d] = s;
+        s *= dim;
+      }
+      const char *T = cs_dtype_to_c(u->dtype);
+      cg_append(b, "({ uint64_t _flat%u = 0; uint64_t _st%u = 1; ",
+                op_id, op_id);
+      for (i32 d = (i32)nrng - 1; d >= 0; d--) {
+        u32 rng_id = u->src[1 + (u32)d];
+        if (cs_range_extent(ke, rng_id) == 0) {
+          return 0;
+        }
+        u32 dim = (out_dims[d] != 0 ? out_dims[d] : 1);
+        cg_append(b, "unsigned _sv%u_%u = _v%u; ",
+                  op_id, (u32)d, rng_id);
+        cg_append(b, "_flat%u += (uint64_t)_sv%u_%u * _st%u; ",
+                  op_id, op_id, (u32)d, op_id);
+        cg_append(b, "_st%u *= %uu; ", op_id, dim);
+      }
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        u32 dim = (in_dims[d] != 0 ? in_dims[d] : 1);
+        cg_append(b, "_v%u = (unsigned)((_flat%u / %lluULL) %% %uu); ",
+                  rng_id, op_id, (unsigned long long)in_stride[d], dim);
+      }
+      cg_append(b, "%s _mv%u = ", T, op_id);
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "; ");
+      for (u32 d = 0; d < nrng; d++) {
+        u32 rng_id = u->src[1 + d];
+        cg_append(b, "_v%u = _sv%u_%u; ", rng_id, op_id, d);
+      }
+      cg_append(b, "_mv%u; })", op_id);
+      return 1;
+    }
+    case S_RESHAPE_V: {
+      u32 n_out = (u32)(u->extra & 0xFFu);
+      u32 nrest = (u32)u->src_count - 1;
+      if (n_out == 0 || n_out > nrest) {
+        return 0;
+      }
+      u32 n_in = nrest - n_out;
+      if (n_in > SCALAR_MAX_SRC || n_out > SCALAR_MAX_SRC) {
+        return 0;
+      }
+      u32 in_ranges[SCALAR_MAX_SRC] = {0};
+      u32 in_extent[SCALAR_MAX_SRC] = {0};
+      u64 in_stride[SCALAR_MAX_SRC] = {0};
+      u64 s = 1;
+      for (i32 d = (i32)n_in - 1; d >= 0; d--) {
+        u32 rng_id = u->src[1 + n_out + (u32)d];
+        u32 extent = cs_range_extent(ke, rng_id);
+        if (extent == 0) {
+          return 0;
+        }
+        in_ranges[d] = rng_id;
+        in_extent[d] = extent;
+        in_stride[d] = s;
+        s *= extent;
+      }
+      cg_append(b, "({ uint64_t _flat%u = 0; uint64_t _st%u = 1; ",
+                op_id, op_id);
+      for (i32 d = (i32)n_out - 1; d >= 0; d--) {
+        u32 ref = u->src[1 + (u32)d];
+        u32 extent = cs_iter_ref_extent(ke, ref);
+        if (extent == 0) {
+          return 0;
+        }
+        cg_append(b, "_flat%u += (uint64_t)(", op_id);
+        if (!cs_emit_value(b, ke, ref)) {
+          return 0;
+        }
+        cg_append(b, ") * _st%u; ", op_id);
+        cg_append(b, "_st%u *= %uu; ", op_id, extent);
+      }
+      for (u32 d = 0; d < n_in; d++) {
+        u32 rng_id = in_ranges[d];
+        u32 axis_type = cs_range_axis_type(ke, rng_id);
+        if (axis_type == S_AXIS_VIRT) {
+          cg_append(b, "unsigned _v%u = (unsigned)((_flat%u / %lluULL) %% %uu); ",
+                    rng_id, op_id, (unsigned long long)in_stride[d],
+                    in_extent[d]);
+        } else {
+          cg_append(b, "unsigned _sv%u_%u = _v%u; ", op_id, d, rng_id);
+          cg_append(b, "_v%u = (unsigned)((_flat%u / %lluULL) %% %uu); ",
+                    rng_id, op_id, (unsigned long long)in_stride[d],
+                    in_extent[d]);
+        }
+      }
+      const char *T = cs_dtype_to_c(u->dtype);
+      cg_append(b, "%s _mv%u = ", T, op_id);
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "; ");
+      for (u32 d = 0; d < n_in; d++) {
+        u32 rng_id = in_ranges[d];
+        u32 axis_type = cs_range_axis_type(ke, rng_id);
+        if (axis_type != S_AXIS_VIRT) {
+          cg_append(b, "_v%u = _sv%u_%u; ", rng_id, op_id, d);
+        }
+      }
+      cg_append(b, "_mv%u; })", op_id);
       return 1;
     }
     case S_ICONST: {

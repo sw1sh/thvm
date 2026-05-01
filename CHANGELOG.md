@@ -26,6 +26,12 @@ The scalar-UOp C renderer now accepts mixed f32/f64 kernels when the
 mix is represented by `S_CAST`, emitting per-input and output pointer
 types instead of requiring one uniform kernel dtype.
 
+### Added: scalar C movement wrapper rendering
+
+The scalar-UOp C renderer now emits f32/f64 `S_SHRINK`, `S_PAD`,
+`S_FLIP`, `S_RESHAPE`, and `S_RESHAPE_V` wrappers by saving and
+rewriting generated loop coordinates around the wrapped scalar body.
+
 ### Added: generated C tile renderer
 
 `THVM_TILE=1` now tries a generated C tile renderer for simple

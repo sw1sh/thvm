@@ -25,6 +25,24 @@
 #include "../src/thvm.c"
 #include "test.h"
 
+static void run_jit_f32(KernelEntry *ke, const f32 *input, u32 input_count,
+                        f32 *output, u32 output_count) {
+  u32 in_buf  = cpu_buf_alloc((u64)input_count * sizeof(f32));
+  u32 out_buf = cpu_buf_alloc((u64)output_count * sizeof(f32));
+  CHECK_EQ(cpu_buf_write(in_buf, input, (u64)input_count * sizeof(f32)), 0);
+  CHECK_EQ(cpu_buf_write(out_buf, output, (u64)output_count * sizeof(f32)), 0);
+  u32 in_bufs[1] = {in_buf};
+  cpu_jit_cache_reset();
+  int jit_hit = 0;
+  for (u32 attempt = 0; attempt < 8; attempt++) {
+    if (cpu_jit_dispatch_scalar(ke, in_bufs, out_buf)) {
+      jit_hit = 1;
+    }
+  }
+  CHECK(jit_hit);
+  CHECK_EQ(cpu_buf_read(out_buf, output, (u64)output_count * sizeof(f32)), 0);
+}
+
 int main(void) {
   thvm_init();
 
@@ -67,7 +85,7 @@ int main(void) {
   u32 sum = rangeify_emit_binary(ke, S_ADD,   DT_FP32, la, lb);
   u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, sum);
   // BUFFERIZE: 2 sources (body, range).
-  u32 buf_src[2] = {sto, r0};
+  u32 buf_src[3] = {sto, r0, 0};
   u32 buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
   CHECK_EQ(pa,  2);   CHECK_EQ(pb,  3);   CHECK_EQ(pc,  4);
   CHECK_EQ(ia,  5);   CHECK_EQ(ib,  6);   CHECK_EQ(ic,  7);
@@ -401,6 +419,202 @@ int main(void) {
   CHECK(cast32_out[0] == -8.0f);
   CHECK(cast32_out[1] == 0.5f);
   CHECK(cast32_out[2] == 16.0f);
+  rangeify_free(ke);
+
+  TEST_BEGIN("scalar-graph/c-renderer-shrink-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 5;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 3;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 3u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  in_src[0] = pa;
+  in_src[1] = r0;
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  u32 wrap_src[3] = {la, r0, 0};
+  u32 shrink = rangeify_emit(ke, S_SHRINK, DT_FP32, 2, wrap_src, 1u);
+  out_src[0] = pc;
+  out_src[1] = r0;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, shrink);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  f32 move_in5[5] = {10.0f, 20.0f, 30.0f, 40.0f, 50.0f};
+  f32 move_out3[3] = {0.0f, 0.0f, 0.0f};
+  run_jit_f32(ke, move_in5, 5, move_out3, 3);
+  CHECK(move_out3[0] == 20.0f);
+  CHECK(move_out3[1] == 30.0f);
+  CHECK(move_out3[2] == 40.0f);
+  rangeify_free(ke);
+
+  TEST_BEGIN("scalar-graph/c-renderer-pad-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 3;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 5;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 5u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  in_src[0] = pa;
+  in_src[1] = r0;
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  wrap_src[0] = la;
+  wrap_src[1] = r0;
+  u32 pad = rangeify_emit(ke, S_PAD, DT_FP32, 2, wrap_src,
+                          1u | (3u << 8));
+  out_src[0] = pc;
+  out_src[1] = r0;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, pad);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  f32 pad_in[3] = {10.0f, 20.0f, 30.0f};
+  f32 pad_out[5] = {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f};
+  run_jit_f32(ke, pad_in, 3, pad_out, 5);
+  CHECK(pad_out[0] == 0.0f);
+  CHECK(pad_out[1] == 10.0f);
+  CHECK(pad_out[2] == 20.0f);
+  CHECK(pad_out[3] == 30.0f);
+  CHECK(pad_out[4] == 0.0f);
+  rangeify_free(ke);
+
+  TEST_BEGIN("scalar-graph/c-renderer-flip-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 4;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 4;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 4u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  in_src[0] = pa;
+  in_src[1] = r0;
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  wrap_src[0] = la;
+  wrap_src[1] = r0;
+  u32 flip = rangeify_emit(ke, S_FLIP, DT_FP32, 2, wrap_src, 1u);
+  out_src[0] = pc;
+  out_src[1] = r0;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, flip);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  f32 flip_in[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  f32 flip_out[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  run_jit_f32(ke, flip_in, 4, flip_out, 4);
+  CHECK(flip_out[0] == 4.0f);
+  CHECK(flip_out[1] == 3.0f);
+  CHECK(flip_out[2] == 2.0f);
+  CHECK(flip_out[3] == 1.0f);
+  rangeify_free(ke);
+
+  TEST_BEGIN("scalar-graph/c-renderer-reshape-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 6;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 6;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 3u);
+  u32 r1 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                              ((u64)S_AXIS_LOOP << 32) | 2u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 c_three_i = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 3);
+  u32 c_two_i   = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 2);
+  u32 in_mul = rangeify_emit_binary(ke, S_IMUL, DT_INT64, r0, c_three_i);
+  u32 in_addr = rangeify_emit_binary(ke, S_IADD, DT_INT64, in_mul, r1);
+  in_src[0] = pa;
+  in_src[1] = in_addr;
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  wrap_src[0] = la;
+  wrap_src[1] = r0;
+  wrap_src[2] = r1;
+  u64 reshape_extra = 3ULL | (2ULL << 8) | (2ULL << 32) | (3ULL << 40);
+  u32 reshape = rangeify_emit(ke, S_RESHAPE, DT_FP32, 3, wrap_src,
+                              reshape_extra);
+  u32 out_mul = rangeify_emit_binary(ke, S_IMUL, DT_INT64, r0, c_two_i);
+  u32 out_addr = rangeify_emit_binary(ke, S_IADD, DT_INT64, out_mul, r1);
+  out_src[0] = pc;
+  out_src[1] = out_addr;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, reshape);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf_src[2] = r1;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 3, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  f32 reshape_in[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  f32 reshape_out[6] = {0};
+  run_jit_f32(ke, reshape_in, 6, reshape_out, 6);
+  for (u32 i = 0; i < 6; i++) {
+    CHECK(reshape_out[i] == reshape_in[i]);
+  }
+  rangeify_free(ke);
+
+  TEST_BEGIN("scalar-graph/c-renderer-reshape-v-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 6;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 6;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 2u);
+  r1 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 3u);
+  u32 rv = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                              ((u64)S_AXIS_VIRT << 32) | 6u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  in_src[0] = pa;
+  in_src[1] = rv;
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  u32 rv_src[4] = {la, r0, r1, rv};
+  reshape = rangeify_emit(ke, S_RESHAPE_V, DT_FP32, 4, rv_src, 2u);
+  c_three_i = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 3);
+  out_mul = rangeify_emit_binary(ke, S_IMUL, DT_INT64, r0, c_three_i);
+  out_addr = rangeify_emit_binary(ke, S_IADD, DT_INT64, out_mul, r1);
+  out_src[0] = pc;
+  out_src[1] = out_addr;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, reshape);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf_src[2] = r1;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 3, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  f32 reshape_v_out[6] = {0};
+  run_jit_f32(ke, reshape_in, 6, reshape_v_out, 6);
+  for (u32 i = 0; i < 6; i++) {
+    CHECK(reshape_v_out[i] == reshape_in[i]);
+  }
   rangeify_free(ke);
 
   thvm_free();
