@@ -937,6 +937,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       KProgOp *p = &ke->program[i];
       RngsCtx in_rngs = rngs[i];
       // Per-op transform: compute what rngs the inputs see.
+      // Mirrors tinygrad's apply_movement_op (indexing.py:128-145).
       switch (p->opcode) {
         case UOP_REDUCE: {
           // The REDUCE op's body sees one extra iter (reduce_range)
@@ -946,10 +947,47 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           break;
         }
-        // All other ops (ALU, CONST, UOP_CAST/BITCAST/LOAD/EXPAND/
-        // RESHAPE/SHRINK/PAD/FLIP/PERMUTE) currently propagate
-        // unchanged -- they're correct for ALU + same-shape transforms,
-        // and movement-op rules will be added in later iterations.
+        case UOP_SHRINK: {
+          // output[i] = input[i + begin].  Source rngs[d] = output
+          // rngs[d] + begin[d].  Tinygrad: a if ss == 0 else a+ss.
+          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
+            u32 begin = p->pad_widths[2 * d];
+            if (begin == 0) continue;
+            u32 c = emit_iconst(ke, (i64)begin);
+            in_rngs.refs[d] = emit_ibinop(ke, S_IADD, in_rngs.refs[d], c);
+          }
+          break;
+        }
+        case UOP_FLIP: {
+          // output[i] = input[(extent-1) - i] for flipped axes.
+          // Tinygrad: ((s-1)-a) if f else a.  axes_mask is in p->arg.
+          u32 mask = p->arg & 0xFFu;
+          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
+            if (!(mask & (1u << d))) continue;
+            u32 ext = p->src0_ndim > d ? p->src0_dims[d] : 1;
+            u32 c = emit_iconst(ke, (i64)(ext - 1));
+            in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, c, in_rngs.refs[d]);
+          }
+          break;
+        }
+        case UOP_EXPAND: {
+          // Broadcast axes (where src dim < out dim) read input at
+          // position 0.  Other axes pass iter through.  Tinygrad:
+          // a if in_sh == out_sh else a.const_like(0).
+          for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
+            u32 src_dim = p->src0_ndim > d ? p->src0_dims[d] : 1;
+            u32 out_dim = p->out_dims[d];
+            if (src_dim != out_dim) {
+              in_rngs.refs[d] = emit_iconst(ke, 0);
+            }
+          }
+          break;
+        }
+        // PAD, RESHAPE, PERMUTE: propagate unchanged for now.  PAD
+        // also needs a validity-mask side channel for the bounds
+        // check that this scaffold doesn't yet carry; RESHAPE needs
+        // a flat-roundtrip across all axes (DIV/MOD); PERMUTE needs
+        // a re-order step.  Future iterations.
         default: break;
       }
       // Propagate to non-input sources.  Inputs (KSRC_IS_INPUT) carry
