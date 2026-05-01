@@ -601,9 +601,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // For non-REDUCE kernels, input_load_post is always populated.
   u32 input_load_pre [nin_local];
   u32 input_load_post[nin_local];
+  u8  via_rngs_pre   [nin_local];
+  u8  via_rngs_post  [nin_local];
   for (u32 i = 0; i < nin_local; i++) {
     input_load_pre [i] = 0;
     input_load_post[i] = 0;
+    via_rngs_pre   [i] = 0;
+    via_rngs_post  [i] = 0;
   }
 
   // === BACKWARD WALK: compute rngs[i] per op + per-input-slot rngs.
@@ -949,6 +953,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                                os->ndim, in_off);
       } else if (input_rngs_pre[i].ndim == v->shape.ndim
                  && v->shape.ndim > 0) {
+        via_rngs_pre[i] = 1;
         // RNGS-BASED FALLBACK (Phase 3 of apply_movement_op port).
         // The backward walk computed input_rngs_pre[i] = per-axis iter
         // expressions for this input read inside the reduce body.
@@ -1102,7 +1107,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // UOP_EXPAND lowers as identity -- broadcast is implicit at the
   // per-LOOP-element scalar level.
   u32 prog_value[nops_local];
-  for (u32 i = 0; i < nops_local; i++) prog_value[i] = 0;
+  u8  via_rngs[nops_local];
+  for (u32 i = 0; i < nops_local; i++) { prog_value[i] = 0; via_rngs[i] = 0; }
+  // Helper for checking via_rngs from a src ref.
+  #define SRC_VIA_RNGS(raw, pre_scope) \
+    (KSRC_IS_INPUT(raw) \
+      ? ((pre_scope) ? via_rngs_pre [KSRC_INDEX(raw)] \
+                     : via_rngs_post[KSRC_INDEX(raw)]) \
+      : via_rngs[KSRC_INDEX(raw)])
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
@@ -1414,6 +1426,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
+      // (Future: identity-pass when SRC_VIA_RNGS(raw, pre) -- rngs
+      // already baked the per-axis shift into the load address.
+      // Currently disabled: identity-passing SHRINK on its own gives
+      // no bail reduction (failing kernels are PAD); identity-passing
+      // PAD breaks nn/lenet-end-to-end-forward.  Need to find what
+      // PAD chain pattern is unsafe before re-enabling.)
       if (v == 0) RBAIL_MID("SHRINK/PAD src 0");
       u32 ndim = p->out_ndim;
       if (ndim == 0) ndim = os->ndim;
