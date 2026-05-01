@@ -1687,27 +1687,49 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
         }
       }
-      // Per-USE PAD identity-pass for CHAIN sources: only safe when
-      // the chain consists purely of UOP_LOAD identity wrappers (no
-      // shape-changing ops).  RESHAPE / EXPAND / BITCAST can change
-      // addressing semantics in ways the use_rngs[edge] doesn't
-      // account for -- attempted in iter 35 and broke 5 tests.
-      // For LOAD-only peel: walk up; if we hit INPUT, the use_rngs
-      // captured at this PAD's edge correctly reflects the addressing
-      // (since UOP_LOAD doesn't transform iter coords).
+      // Per-USE PAD identity-pass for CHAIN sources.  Walks the
+      // KProgOp chain from PAD up to a direct INPUT, accepting LOAD
+      // (identity), RESHAPE (iter-coord transform via backward walk's
+      // flat-roundtrip), EXPAND/BITCAST (identity at scalar level).
+      //
+      // KEY: read use_rngs from the op CLOSEST TO INPUT (not PAD's
+      // own edge).  Backward walk records, at each chain edge, the
+      // rngs in THAT consumer's coords.  PAD's edge rngs are in
+      // PAD's source-shape coords; the RESHAPE/etc above transform
+      // them down to INPUT-shape coords, captured at the next edge
+      // up.  emit_input_load_for_use needs INPUT-shape rngs.
+      //
+      // SHRINK in chain is rejected: SHRINK shifts rngs by begin,
+      // but the use_rngs at the next-up edge would lose PAD's own
+      // bounds (PAD propagates its valid_mask back; SHRINK doesn't
+      // preserve valid_mask correctly through its iter shift).
       if (p->opcode == UOP_PAD && !KSRC_IS_INPUT(raw)
           && (u8)0 < MAX_KPROG_SRC) {
         u32 walk = raw;
         u32 walk_hops = 0;
         int chain_ok = 1;
+        u32 last_chain_op = (u32)-1;
         while (!KSRC_IS_INPUT(walk) && walk_hops++ < 16) {
           u32 prev = KSRC_INDEX(walk);
           KProgOp *prev_op = &ke->program[prev];
-          if (prev_op->opcode != UOP_LOAD) { chain_ok = 0; break; }
+          // Only peel through ops that don't transform iter coords.
+          // UOP_RESHAPE was tried but breaks lenet/beautiful-mnist
+          // softmax: even though backward walk computes the inverse-
+          // RESHAPE rngs at the chain's INPUT-side edge, those rngs
+          // lose information (e.g. the PAD's bounds via S_IWHERE
+          // wrapping interacts with RESHAPE's flat-roundtrip in ways
+          // I haven't worked out).  Restricted to LOAD/EXPAND/BITCAST.
+          if (prev_op->opcode != UOP_LOAD
+              && prev_op->opcode != UOP_EXPAND
+              && prev_op->opcode != UOP_BITCAST) {
+            chain_ok = 0; break;
+          }
+          last_chain_op = prev;
           walk = prev_op->src[0];
         }
-        if (chain_ok && KSRC_IS_INPUT(walk)) {
-          u32 edge = i * MAX_KPROG_SRC + 0;
+        if (chain_ok && KSRC_IS_INPUT(walk) && last_chain_op != (u32)-1) {
+          // Use the chain op closest to INPUT for rngs lookup.
+          u32 edge = last_chain_op * MAX_KPROG_SRC + 0;
           if (use_via_rngs[edge]) {
             u32 slot = KSRC_INDEX(walk);
             u32 ulocal = emit_input_load_for_use(ke, slot,
@@ -2024,7 +2046,24 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           fprintf(stderr, "] os.dims=[");
           for (u32 d = 0; d < os->ndim; d++)
             fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
-          fprintf(stderr, "] src.op=%s\n", scalar_op_name(ke->scalar_uops[v].op));
+          fprintf(stderr, "] src.op=%s", scalar_op_name(ke->scalar_uops[v].op));
+          // Walk back the KProgOp chain from this PAD's source for
+          // root-cause analysis.  Useful when iterating on the per-USE
+          // PAD identity-pass: ops between PAD and INPUT determine
+          // whether a peel is safe.
+          fprintf(stderr, " chain:");
+          u32 walk = raw;
+          for (u32 hop = 0; hop < 8; hop++) {
+            if (KSRC_IS_INPUT(walk)) {
+              fprintf(stderr, " INPUT[%u]", KSRC_INDEX(walk));
+              break;
+            }
+            u32 prev = KSRC_INDEX(walk);
+            KProgOp *prev_op = &ke->program[prev];
+            fprintf(stderr, " op[%u].opcode=%u", prev, prev_op->opcode);
+            walk = prev_op->src[0];
+          }
+          fprintf(stderr, "\n");
         }
         RBAIL_MID("SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)");
       }
