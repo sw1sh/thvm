@@ -177,3 +177,99 @@ VerificationTest[
     $Failed,
     TestID -> "TAOT with wrong arity returns $Failed"
 ]
+
+(* === 7. gab_tak AOT correctness =========================== *)
+(* Five-def hand-coded AOT.  ITRS counts diverge from HVM4 by a
+   constant factor (we skip the auto-dup-induced DUP-NODs); only
+   value correctness is checked here.  Performance is documented
+   in src/aot/programs/gab_tak.c -- AOT is faster than the
+   interpreter for small inputs and slower for deep recursion. *)
+
+setupGabTakDefs[] := (
+    TInit[];
+    TDef["pred", TMatChain[
+        <|0 -> TCtr[0],
+          1 -> TLam[p, p]
+         |>, TLam[ignored, TEra[]]]];
+    TDef["lte", TMatChain[
+        <|0 -> TLam[ignoredb, TCtr[2]],
+          1 -> TLam[p, TMatChain[
+                 <|0 -> TCtr[3],
+                   1 -> TLam[q, TApp[TApp[TRef["lte"], p], q]]
+                  |>, TLam[ignored, TEra[]]]]
+         |>, TLam[ignored, TEra[]]]];
+    TDef["tak_go", TMatChain[
+        <|2 -> TLam[x, TLam[y, TLam[z, y]]],
+          3 -> TLam[x, TLam[y, TLam[z,
+                 TApp[TApp[TApp[TRef["tak"],
+                          TApp[TApp[TApp[TRef["tak"], TApp[TRef["pred"], x]], y], z]],
+                          TApp[TApp[TApp[TRef["tak"], TApp[TRef["pred"], y]], z], x]],
+                          TApp[TApp[TApp[TRef["tak"], TApp[TRef["pred"], z]], x], y]
+                 ]]]]
+         |>, TLam[ignored, TEra[]]]];
+    TDef["tak", TLam[x, TLam[y, TLam[z,
+        TApp[TApp[TApp[TApp[TRef["tak_go"],
+            TApp[TApp[TRef["lte"], x], y]], x], y], z]
+    ]]]];
+    TDef["u32_to", TMatChain[
+        <|0 -> TNum[0],
+          1 -> TLam[p, TOp2["+", TApp[TRef["u32_to"], p], TNum[1]]]
+         |>, TLam[ignored, TEra[]]]];
+);
+
+natTermGT[n_Integer] := If[ n <= 0, TCtr[0], TCtr[1, natTermGT[n - 1]]];
+takMain[x_, y_, z_] := TApp[TRef["u32_to"],
+    TApp[TApp[TApp[TRef["tak"], natTermGT[x]], natTermGT[y]], natTermGT[z]]];
+
+VerificationTest[
+    MemberQ[TAOTPrograms[], "gab_tak"],
+    True,
+    TestID -> "TAOTPrograms lists gab_tak"
+]
+
+VerificationTest[
+    setupGabTakDefs[];
+    Head[TAOT["gab_tak", {"pred", "lte", "tak_go", "tak", "u32_to"}]],
+    TAOTProgram,
+    TestID -> "TAOT[gab_tak] returns a TAOTProgram"
+]
+
+(* tak(2,1,0) = 2 -- AOT and interp agree on value. *)
+VerificationTest[
+    setupGabTakDefs[];
+    Module[{interpVal, aotVal},
+        interpVal = TWnf[takMain[2, 1, 0]]["val"];
+        setupGabTakDefs[];
+        TAOT["gab_tak", {"pred", "lte", "tak_go", "tak", "u32_to"}];
+        aotVal = TWnf[takMain[2, 1, 0]]["val"];
+        {interpVal, aotVal}
+    ],
+    {2, 2},
+    TestID -> "tak(2,1,0): AOT == interpreter == 2"
+]
+
+VerificationTest[
+    setupGabTakDefs[];
+    Module[{interpVal, aotVal},
+        interpVal = TWnf[takMain[5, 4, 3]]["val"];
+        setupGabTakDefs[];
+        TAOT["gab_tak", {"pred", "lte", "tak_go", "tak", "u32_to"}];
+        aotVal = TWnf[takMain[5, 4, 3]]["val"];
+        {interpVal, aotVal}
+    ],
+    {5, 5},
+    TestID -> "tak(5,4,3): AOT == interpreter == 5"
+]
+
+VerificationTest[
+    setupGabTakDefs[];
+    Module[{interpVal, aotVal},
+        interpVal = TWnf[takMain[8, 6, 4]]["val"];
+        setupGabTakDefs[];
+        TAOT["gab_tak", {"pred", "lte", "tak_go", "tak", "u32_to"}];
+        aotVal = TWnf[takMain[8, 6, 4]]["val"];
+        {interpVal, aotVal}
+    ],
+    {8, 8},
+    TestID -> "tak(8,6,4): AOT == interpreter == 8"
+]

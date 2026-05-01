@@ -52,6 +52,8 @@ Begin["`Private`"];
 
 $aotRegFibNatFn := $aotRegFibNatFn = load["thvm_wl_aot_register_fib_nat",
     {Integer, Integer, Integer}, Integer];
+$aotRegGabTakFn := $aotRegGabTakFn = load["thvm_wl_aot_register_gab_tak",
+    {Integer, Integer, Integer, Integer, Integer}, Integer];
 $aotCallsFn     := $aotCallsFn     = load["thvm_wl_aot_calls",     {}, Integer];
 
 (* === Program registry ================================================
@@ -61,7 +63,10 @@ $aotCallsFn     := $aotCallsFn     = load["thvm_wl_aot_calls",     {}, Integer];
    bridge in thvmlink.c, then one line here. *)
 
 $aotPrograms = <|
-    "fib_nat" -> <|"arity" -> 3, "register" -> ($aotRegFibNatFn[#1, #2, #3] &)|>
+    "fib_nat" -> <|"arity" -> 3,
+                   "register" -> ($aotRegFibNatFn[#1, #2, #3] &)|>,
+    "gab_tak" -> <|"arity" -> 5,
+                   "register" -> ($aotRegGabTakFn[#1, #2, #3, #4, #5] &)|>
 |>;
 
 TAOTPrograms[] := Keys[$aotPrograms]

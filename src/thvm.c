@@ -276,6 +276,7 @@ fn Term wnf(Term term);
 // entry that the WL surface or a C test calls after TDef'ing the
 // matching bodies.
 #include "aot/programs/fib_nat.c"
+#include "aot/programs/gab_tak.c"
 
 // === wnf/ ===
 // The reducer dispatches to the interactions and to materialize,

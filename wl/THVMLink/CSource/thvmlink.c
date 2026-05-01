@@ -1813,6 +1813,23 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_register_fib_nat(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// AOT bridge: register the hand-coded gab_tak AOT under the given
+// def slots.  Args: [def_pred, def_lte, def_tak_go, def_tak, def_u32_to].
+// Returns 5 on success.
+EXTERN_C DLLEXPORT int thvm_wl_aot_register_gab_tak(WolframLibraryData libData,
+                                                    mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 def_pred   = (u32)MArgument_getInteger(args[0]);
+  u32 def_lte    = (u32)MArgument_getInteger(args[1]);
+  u32 def_tak_go = (u32)MArgument_getInteger(args[2]);
+  u32 def_tak    = (u32)MArgument_getInteger(args[3]);
+  u32 def_u32_to = (u32)MArgument_getInteger(args[4]);
+  aot_program_gab_tak_register(def_pred, def_lte, def_tak_go,
+                               def_tak, def_u32_to);
+  MArgument_setInteger(res, 5);
+  return LIBRARY_NO_ERROR;
+}
+
 // Returns the cumulative AOT call count since the last reset.
 EXTERN_C DLLEXPORT int thvm_wl_aot_calls(WolframLibraryData libData, mint argc,
                                          MArgument *args, MArgument res) {
