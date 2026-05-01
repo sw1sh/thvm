@@ -376,3 +376,115 @@ each kernel covers a whole BUFFERIZE'd subgraph.
   -- topological linearization with priority.
 - `/Users/swish/src/tinygrad/tinygrad/renderer/cstyle.py` -- C
   rendering rewrite rules (`base_rewrite`, lines 12-61).
+
+---
+
+## F-8e-10 design sketch: rank-mismatch RESHAPE
+
+After F-8e-7 added S_RESHAPE (iter coord transform) for the col2im
+chain, 124 mid-emit bails remain in the pattern
+"RESHAPE shape-change ndim cap or != os->ndim".  Breakdown (from
+the F-8e-8 RESHAPE-detail diagnostic):
+
+- 75 cases: src0_ndim=3 out_ndim=4 os.ndim=3
+- 28 cases: src0_ndim=1 out_ndim=3 os.ndim=2
+-  5 cases: src0_ndim=1 out_ndim=3 os.ndim=3
+-  4 cases: src0_ndim=2 out_ndim=4 os.ndim=4
+-  4 cases: src0_ndim=2 out_ndim=3 os.ndim=3
+-  3 cases: src0_ndim=1 out_ndim=2 os.ndim=2
+-  2 misc
+
+Plus 7 of the deferred 15 mismatch bails are sub-cases of the same
+gap (8 pre-INDEX with reduce_inner != 1, etc.).
+
+### Root cause
+
+S_RESHAPE / S_PAD / S_SHRINK / S_FLIP all use the kernel's LOOP
+ranges directly as iter slots (via `src[1..]`).  When an op's ndim
+differs from `os->ndim`:
+
+- **Op-ndim > os->ndim**: not enough LOOP slots to hold all op-axis
+  iters (`SCALAR_MAX_SRC = MAX_DIM + 1`).
+- **Op-ndim < os->ndim**: writing 0 to trailing LOOP slots (the
+  "default" in S_RESHAPE eval) corrupts addressing for downstream
+  ops at higher rank -- F-8e-8 confirmed this with two reverted
+  relaxations.
+
+### Three approach options
+
+**Option A: synthetic iter slots in ScalarCtx.**
+Add a `c->virt_iter[N_VIRT]` array (e.g. N_VIRT=16) parallel to
+`c->range_iter`.  Iter-shifting ops can take "virtual" range refs
+in `src[1..]` distinguished by a flag bit (e.g. high bit of the u32
+src means "virt slot N").  S_RESHAPE writes to virt_iter slots
+(decomposed from the LOOP iters via flat-index roundtrip), evaluates
+body, virt slots auto-cleared on body exit.
+
+Pros: clean separation; ops still take an ordered axis list via
+`src[1..]`; no per-eval allocation.
+Cons: touches every iter-shifting op's eval (S_PAD, S_SHRINK,
+S_FLIP, S_INDEX, S_LOAD) to read from either range_iter or
+virt_iter based on the flag.  ~150-300 LOC across interpret.c +
+rangeify.c.  Tracking which scope each ref belongs to during
+rangeify emit is non-trivial.
+
+**Option B: per-op private iter offsets.**
+Each iter-shifting op carries its own array of iter values that
+override the parent's (via passing a `synth_iter[]` parameter
+through eval_scalar's recursion).  Compositional but requires
+restructuring eval_scalar's signature or adding TLS-ish state.
+
+Pros: very local change.
+Cons: changes the eval_scalar protocol that's in use everywhere;
+high risk for subtle bugs.
+
+**Option C: split rank-mismatch RESHAPE chains in materialize.c.**
+At kernel-emit time, detect RESHAPE ops where src0_dims != out_dims
+AND the kernel has downstream PAD/SHRINK at the new rank.  Split
+the kernel at the RESHAPE boundary -- the SHRINK output gets
+materialized to a real buffer (kernel A), the RESHAPE becomes a
+free view alias on that buffer (no kernel), and the rest runs as a
+new kernel B that consumes the aliased view at its native rank.
+
+Pros: keeps rangeify simpler; the resulting smaller kernels each
+have uniform rank and lower easily.
+Cons: more dispatch overhead per kernel; materialize.c is already
+complex; may interact with the program-cache hash-cons logic.
+
+### Recommendation
+
+**Pursue Option C first.**  It's the smallest change to the scalar
+uop interpreter, doesn't alter the iter-flow protocol, and
+naturally generates kernels that fit the existing rangeify model.
+The trade-off (more kernel dispatches) is manageable: BLAS / JIT
+take precedence anyway, and the WL grid's per-kernel overhead is
+~1us.
+
+If Option C proves too tangled with materialize.c's other split
+heuristics, fall back to Option A.
+
+### Sequencing for F-8e-11+
+
+1. **F-8e-11**: Add a one-shot diagnostic in materialize.c at
+   kernel-emit that flags kernels containing a rank-changing
+   RESHAPE adjacent to PAD/SHRINK.  Confirm that the failing 124
+   bails all match this signature.
+2. **F-8e-12**: Implement the kernel split in materialize.c at
+   that boundary.  Keep the current rangeify bail as the safety
+   net during initial roll-out.
+3. **F-8e-13**: Verify WL grid 599/0 holds with the split active.
+   Drop the rangeify F-8e-5 bail; the 124 RESHAPE mid-emit bails
+   become 0.
+4. **F-8e-14**: Re-audit remaining mid-emit bails (likely the 8
+   pre-INDEX reduce_inner != 1 cases + 5 post-INDEX shape mismatch
+   + 2 lone bails, total 15).  These are independent of the
+   RESHAPE work and can be tackled per-pattern.
+5. **F-8f**: Once mid-emit bails are zero, retire cpu_interpret +
+   cpu_op_*.c + THVM_RANGEIFY=0 paths.
+
+### Risk
+
+The split in Option C might fail for kernels where the rank-changing
+RESHAPE is in a closed loop (e.g. tail-RESHAPE, no buffer materialization
+possible without infinite recursion).  Need to check each of the 124
+patterns isn't pathological before committing to the split approach.
