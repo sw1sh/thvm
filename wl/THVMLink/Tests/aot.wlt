@@ -429,3 +429,67 @@ VerificationTest[
     "",
     TestID -> "TAOTEmit on undefined def returns empty string"
 ]
+
+(* === 10. Phase 2 emitter (TCtr + DUP + CTR-MAT) =========== *)
+
+VerificationTest[
+    TInit[];
+    TDef["emit_mksuc_test", TLam[x, TCtr[1, x]]];
+    With[{src = TAOTEmit["emit_mksuc_test"]},
+        StringContainsQ[src, "term_new_ctr"] &&
+        StringContainsQ[src, "aot_pop_app_arg"]
+    ],
+    True,
+    TestID -> "TAOTEmit on TLam[x, SUC{x}] emits term_new_ctr"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["emit_unsuc_test", TMatChain[
+        <|0 -> TCtr[0],
+          1 -> TLam[p, p]
+         |>,
+        TLam[ignored, TEra[]]
+    ]];
+    With[{src = TAOTEmit["emit_unsuc_test"]},
+        StringContainsQ[src, "TAG_CTR"] &&
+        StringContainsQ[src, "term_ctr_at"]
+    ],
+    True,
+    TestID -> "TAOTEmit on CTR-MAT destructure emits term_ctr_at"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["emit_dup_test", TLam[x,
+        TDup[7, x, {x0, x1} |->
+            TApp[TApp[TRef["emit_dup_test"], x0], x1]]]];
+    With[{src = TAOTEmit["emit_dup_test"]},
+        StringContainsQ[src, "aot_make_dup"] &&
+        StringContainsQ[src, "dp0_"] &&
+        StringContainsQ[src, "dp1_"]
+    ],
+    True,
+    TestID -> "TAOTEmit on TDup body emits aot_make_dup"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["emit_fib_test", TMatChain[
+        <|0 -> TCtr[0],
+          1 -> TMatChain[
+                 <|0 -> TCtr[1, TCtr[0]],
+                   1 -> TLam[p, TDup[7, p, {p0, p1} |->
+                         TApp[TApp[TRef["emit_fib_test"],
+                                  TApp[TRef["emit_fib_test"], TCtr[1, p0]]],
+                              TApp[TRef["emit_fib_test"], p1]]]]
+                  |>, TLam[ignored, TEra[]]]
+         |>, TLam[ignored, TEra[]]]];
+    With[{src = TAOTEmit["emit_fib_test"]},
+        StringContainsQ[src, "term_new_ctr"] &&
+        StringContainsQ[src, "term_ctr_at"] &&
+        StringContainsQ[src, "aot_make_dup"]
+    ],
+    True,
+    TestID -> "TAOTEmit on full fib_nat body emits CTR + dup + nested MAT"
+]
