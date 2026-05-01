@@ -573,3 +573,58 @@ Sequencing for now:
 Until then, cpu_interpret + cpu_op_*.c remain in the codebase as
 the fallback for the 124+15 bailing kernel patterns.  WL grid
 599/0 holds throughout.
+
+---
+
+## F-8 retirement status freeze (after F-8e-13 part 1)
+
+After ~14 turns of incremental rangeify lowering work
+(F-8a..d + F-8e-1..7 + F-8e-9 + F-8e-11 + F-8e-13 part 1), the
+remaining mid-emit bails are:
+
+- 124 RESHAPE shape-change ndim cap or != os->ndim
+-   8 pre-INDEX no branch matched (reduce_inner != 1)
+-   5 post-INDEX shape mismatch (subtle)
+-   1 pre-INDEX shape mismatch
+-   1 post-INDEX no branch matched (lone v.ndim=4)
+- 139 total
+
+The 124 RESHAPE bails (and ~7 of the deferred 15) require an
+architectural change to support rank-mismatched ops:
+- **Option A** (synthetic iter dims in ScalarCtx): clean but
+  touches all 22 range_iter[] read/write sites in interpret.c,
+  changes the iter-flow protocol.  Estimated ~200 LOC + extensive
+  testing.
+- **Option C** (mid-walk boundary insertion in materialize.c):
+  tangled with BOUNDARY_ORDER / topo_sort / kernel-program-cache
+  invariants (per F-8e-12 attempts).
+- Both are multi-turn investments with non-trivial risk.
+
+**F-8 retirement (cpu_interpret + cpu_op_*.c + THVM_RANGEIFY=0
+deletion) is FROZEN** until either Option A or C lands.  The 124
+bailing kernel patterns continue to fall back to cpu_interpret,
+which works correctly (WL grid 599/0).  Net cost of the freeze:
+the legacy ~2KLOC of cpu_op_*.c stays in the codebase.
+
+**Pragmatic pivot**: the broader project goal (tinygrad parity for
+beautiful-mnist) doesn't strictly require cpu_interpret retired.
+Subsequent work can resume on the broader plan
+(docs/plans/beautiful_mnist_parity.md) -- per-kernel optimization,
+fusion improvements, training-loop perf, etc.  Return to F-8e-14
+when there's a focused multi-turn block of time AND a clear
+decision between Option A and C.
+
+Bail-tally trajectory across the F-phase work (for the project
+log):
+  Phase F-1..6 (rangeify supported-pattern expansion):  326 bails -> 12
+  Phase F-7 (retirement attempt + reset):                12 bails -> 80 silent
+  F-8d (instrumentation):                                80 silent surfaced
+  F-8e-1 (pre-INDEX rank-1 partial-reduce):              80 -> 49
+  F-8e-2 (post-INDEX same-numel RESHAPE alias):          49 -> 42
+  F-8e-3 (post-INDEX prefix/suffix broadcast):           42 -> 35
+  F-8e-7 (S_RESHAPE iter coord transform for col2im):    35 -> 144 (RESHAPE bail surfaced)
+  F-8e-9 part 1 (pre-INDEX lower-rank views):           144 -> 139
+  F-8e-13 part 1 (size-1 axis broadcast):               139 -> 144 (oops, recount?) -- 139
+
+Net: dropped from 326 bails (Phase F start) to 139 (Phase F-8 end).
+WL grid 599/0 maintained throughout.
