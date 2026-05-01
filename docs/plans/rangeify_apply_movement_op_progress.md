@@ -94,46 +94,48 @@ This requires restructuring the materializer to:
 Estimated ~200-300 LOC rework across rangeify.c.  Doable but didn't
 fit in this session.
 
-## Remaining bails (after follow-up commit `0beada6` reduce_range fallback)
+## Cumulative progress (session arc: 56 -> 16 bails, 71% reduction)
 
 ```
-~15 SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)
- 2  post-INDEX broadcast unmatched
- 2  RESHAPE shape-change ndim cap or != os->ndim
- 1  pre-INDEX shape mismatch (non-broadcast)
+13 SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)
+ 2 RESHAPE shape-change ndim cap or != os->ndim
+ 1 pre-INDEX shape mismatch (non-broadcast)
 ```
 
-`0beada6` extended RESHAPE-V output-axis matching to fall back on
-`reduce_range` when no os axis matches an out_dim's extent (closes
-the flatten-into-reduce pattern `[a,b,c] -> [1, a*b*c]` where
-`a*b*c == reduce_size`).  This fixed the conv2d weight-tile RESHAPE
-[1,2,2]→[1,1,4] case + 7 transitive SHRINK/PAD bails downstream.
-Tests 630/0.
+Commits driving the recent reductions (newest first):
 
-`3586273` bumped the SHRINK/PAD `ndim > 3` cap to `ndim > 4` (u64
-extra holds 4 axes cleanly) and renamed the rank-promoted bail
-message for clarity.  Behaviorally neutral.
+- `d65e4a6` PAD fusion accepts S_IWHERE-wrapped LOAD + S_INDEX_E
+  expression-walk for reduce_range independence (infrastructure;
+  no current bail closes since all current SHRINK/PAD bails have
+  loads that genuinely depend on reduce_range).
+- `5b73a73` narrow PAD-as-size1-inflation scaffold for source==S_LOAD.
+- `2e4bbc1` PAD-fusion classifier extends to loop_ranges for non-
+  reduce axes (closed [1,9,4] case).
+- `2c84b06` PAD fusion via S_RESHAPE_V routes new axis through
+  reduce_range when out_dim==reduce_size (closed 6 conv-chain bails).
+- `08c431e` clarify pre-INDEX rngs gate + diagnostic (no count
+  change; doc only).
+- `b170c08` pre-INDEX rngs fallback for same-rank shape mismatch
+  (extent-gated; no current bail closes but infrastructure ready).
+- `a03dd6e` post-INDEX rngs-based fallback via S_INDEX_E (closed 2
+  fusion_count.wlt broadcast-unmatched bails + 1 transitive).
+- `3586273` bump SHRINK/PAD ndim cap 3->4 + rename rank-promoted
+  bail msg.
+- `0beada6` RESHAPE-V matches reduce_range when no os axis matches
+  (closed 4 RESHAPE bails + 4 transitive SHRINK/PAD).
+- `db88cbc` and earlier: backward walk + per-input rngs + first
+  RESHAPE-V emission + REDUCE axis fix (28 bails closed earlier
+  in session).
 
-### What's left
+### What's left and why
 
-**SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)**: PAD
-fusion via S_RESHAPE_V intermediate fails for the same reason general
-PAD identity-pass fails (per [scalar_uops_pad_fusion_finding.md]):
-RESHAPE_V's output-side ref for a new (rank-promoted) axis is a
-fresh VIRT(extent=1) range whose iter is always 0.  PAD's bounds
-check on that VIRT iter ignores the downstream consumer's actual
-iter context.  Verified by attempting the fusion (commit was
-reverted): `nn/conv2d-helper-1ch-2outch-2x2-kernel` fails identically
-to the original `4.5/8.5` vs `12.5/16.5` pattern.  Real fix needs
-per-USE rngs.
-
-**post-INDEX broadcast unmatched** (in `fusion_count.wlt`):
-`v.shape=[2] strides=[1] os=[4,8] in_numel=2 onum=32` -- a 2-element
-input being broadcast into a [4,8] grid via context the materializer
-doesn't surface in this scope.  Likely the gradmany 4-target test's
-`a` (shape [4,8]) gradient pulling in `c` or `b` of shape [2].
-Closing safely needs the chain context to disambiguate the broadcast
-mapping.
+**13 SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)**: All
+have `src.op = S_IWHERE` wrapping S_LOAD where the LOAD's S_INDEX_E
+address provably uses reduce_range (the chain is reading reduce-
+axis-varying input data that PAD relayouts).  My narrow fusion at
+`d65e4a6` correctly identifies these as not-fuseable: bounds-AND'ing
+without addressing remap would gate the same data, not reposition.
+Closing requires per-USE rngs to remap addressing.
 
 **RESHAPE rank-mismatch on chain body**:
 - `out=[1] src=[2] os=[2,4]` (collapse with rank mismatch)
@@ -144,8 +146,14 @@ emit synthesizes a fresh DEFINE_PARAM + INDEX + LOAD chain.
 Wrapping a non-input chain body needs an iter-shape transform
 (flat-roundtrip into the body's own iter shape).
 
-**pre-INDEX shape mismatch (non-broadcast)** (1 bail): single rare
-case; not investigated.
+**pre-INDEX shape mismatch (non-broadcast)** (1 bail in nn.wlt
+attention test path): `v.shape=[2,3] strides=[3,1] os=[2,2]
+rngs=[S_IDIV, S_IMOD]`.  The chain rngs are S_IDIV/S_IMOD
+expressions encoding a RESHAPE flat-roundtrip's INTENT, not the
+addressing the materializer wants.  The bail is load-bearing:
+forces fallback to a different lowering path that addresses
+correctly.  Verified by `08c431e`'s diagnostic + the relaxed-gate
+attempt that broke `nn/attention-identity-q-row-selection`.
 
 ## Reference
 
