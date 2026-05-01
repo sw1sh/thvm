@@ -194,6 +194,23 @@ VerificationTest[
 
 VerificationTest[
     tileWithRangeify[True,
+      TInit[];
+      xT = TTensorCreate @ N @ {1, 9, 3, 7};
+      TRealize @ TUOpReduce[xT, 0, "MAX"];
+      kid = TKernelCount[] - 1;
+      plan = TKernelTilePlan[kid];
+      scalar = TKernelScalarUops[kid];
+      {plan["reduce_tile"] > 0,
+       scalar[[plan["scalar_reduce"] + 1]]["op"],
+       plan["scalar_reduce"] === plan["scalar_value"],
+       plan["scalar_body_value"] =!= plan["scalar_value"]}
+    ],
+    {True, "S_REDUCE_MAX", True, True},
+    TestID -> "tile-uops/reduce-max-node-links"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
       tileSimpleAdd[];
       plan = TKernelTilePlan[1];
       uops = TKernelTileUops[1];

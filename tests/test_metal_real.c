@@ -33,7 +33,8 @@ static int metal_available(void) {
   return ok;
 }
 
-static u32 build_metal_tile_add_kernel(u32 extent, u32 groups, u32 threads) {
+static u32 build_metal_tile_add_kernel(u32 extent, u32 groups, u32 threads,
+                                       int local_first) {
   u32 kid = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
   kernel_inputs_reserve(ke, 2);
@@ -68,10 +69,17 @@ static u32 build_metal_tile_add_kernel(u32 extent, u32 groups, u32 threads) {
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
   ke->axes->n_axes = 2;
-  ke->axes->axis_types[0] = KAX_GLOBAL;
-  ke->axes->full_shape[0] = groups;
-  ke->axes->axis_types[1] = KAX_LOCAL;
-  ke->axes->full_shape[1] = threads;
+  if (local_first) {
+    ke->axes->axis_types[0] = KAX_LOCAL;
+    ke->axes->full_shape[0] = threads;
+    ke->axes->axis_types[1] = KAX_GLOBAL;
+    ke->axes->full_shape[1] = groups;
+  } else {
+    ke->axes->axis_types[0] = KAX_GLOBAL;
+    ke->axes->full_shape[0] = groups;
+    ke->axes->axis_types[1] = KAX_LOCAL;
+    ke->axes->full_shape[1] = threads;
+  }
   ke->axes->version++;
   return kid;
 }
@@ -221,24 +229,26 @@ int main(void) {
   {
     f32 in0[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
     f32 in1[8] = {8.0f, 7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f};
-    f32 out[8] = {0};
-    u32 kid = build_metal_tile_add_kernel(8, 2, 4);
-    KernelEntry *ke = &KERNELS[kid];
-    u32 in0_buf = METAL_BACKEND.buf_alloc(sizeof(in0));
-    u32 in1_buf = METAL_BACKEND.buf_alloc(sizeof(in1));
-    u32 out_buf = METAL_BACKEND.buf_alloc(sizeof(out));
-    CHECK(in0_buf != 0);
-    CHECK(in1_buf != 0);
-    CHECK(out_buf != 0);
-    CHECK_EQ(METAL_BACKEND.buf_write(in0_buf, in0, sizeof(in0)), 0);
-    CHECK_EQ(METAL_BACKEND.buf_write(in1_buf, in1, sizeof(in1)), 0);
-    CHECK_EQ(METAL_BACKEND.buf_write(out_buf, out, sizeof(out)), 0);
-    u32 in_bufs[2] = {in0_buf, in1_buf};
-    CHECK_EQ(METAL_BACKEND.dispatch_kernel(ke, in_bufs, out_buf), 0);
-    CHECK_EQ(cg_kernel_dispatch_kind(kid), (u32)KDISPATCH_METAL_TILE);
-    CHECK_EQ(METAL_BACKEND.buf_read(out_buf, out, sizeof(out)), 0);
-    for (u32 i = 0; i < 8; i++) {
-      CHECK(out[i] == in0[i] + in1[i]);
+    for (u32 local_first = 0; local_first < 2; local_first++) {
+      f32 out[8] = {0};
+      u32 kid = build_metal_tile_add_kernel(8, 2, 4, (int)local_first);
+      KernelEntry *ke = &KERNELS[kid];
+      u32 in0_buf = METAL_BACKEND.buf_alloc(sizeof(in0));
+      u32 in1_buf = METAL_BACKEND.buf_alloc(sizeof(in1));
+      u32 out_buf = METAL_BACKEND.buf_alloc(sizeof(out));
+      CHECK(in0_buf != 0);
+      CHECK(in1_buf != 0);
+      CHECK(out_buf != 0);
+      CHECK_EQ(METAL_BACKEND.buf_write(in0_buf, in0, sizeof(in0)), 0);
+      CHECK_EQ(METAL_BACKEND.buf_write(in1_buf, in1, sizeof(in1)), 0);
+      CHECK_EQ(METAL_BACKEND.buf_write(out_buf, out, sizeof(out)), 0);
+      u32 in_bufs[2] = {in0_buf, in1_buf};
+      CHECK_EQ(METAL_BACKEND.dispatch_kernel(ke, in_bufs, out_buf), 0);
+      CHECK_EQ(cg_kernel_dispatch_kind(kid), (u32)KDISPATCH_METAL_TILE);
+      CHECK_EQ(METAL_BACKEND.buf_read(out_buf, out, sizeof(out)), 0);
+      for (u32 i = 0; i < 8; i++) {
+        CHECK(out[i] == in0[i] + in1[i]);
+      }
     }
   }
   thvm_free();

@@ -11,7 +11,9 @@ dated section.
 Tile plans now represent scalar `S_REDUCE_SUM`/`S_REDUCE_MAX` values
 as `TILE_REDUCE(TILE_SCALAR_BODY(...))` instead of only carrying
 reduction axes as renderer metadata.  `TKernelTilePlan` exposes the
-reduce tile and reducer scalar ids for introspection.
+reduce tile and reducer scalar ids for introspection.  Focused
+coverage includes SUM and MAX reduce plans plus both `GLOBAL`/`LOCAL`
+axis orders for Metal tile dispatch.
 
 ### Added: Metal tile dispatch
 

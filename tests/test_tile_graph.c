@@ -109,7 +109,7 @@ static u32 build_scalar_cast64_to32_graph(KernelEntry *ke) {
   return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
 }
 
-static u32 build_scalar_reduce_sum_graph(KernelEntry *ke) {
+static u32 build_scalar_reduce_graph(KernelEntry *ke, u8 reduce_op) {
   kernel_inputs_reserve(ke, 1);
   ke->n_inputs        = 1;
   ke->input_tids[0]   = 0;
@@ -128,12 +128,20 @@ static u32 build_scalar_reduce_sum_graph(KernelEntry *ke) {
   u32 ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
   u32 la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
   u32 red_src[2] = {la, rr};
-  u32 red = rangeify_emit(ke, S_REDUCE_SUM, DT_FP32, 2, red_src, 0);
+  u32 red = rangeify_emit(ke, reduce_op, DT_FP32, 2, red_src, 0);
   u32 out_src[2] = {pc, r0};
   u32 ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
   u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, red);
   u32 buf_src[2] = {sto, r0};
   return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+}
+
+static u32 build_scalar_reduce_sum_graph(KernelEntry *ke) {
+  return build_scalar_reduce_graph(ke, S_REDUCE_SUM);
+}
+
+static u32 build_scalar_reduce_max_graph(KernelEntry *ke) {
+  return build_scalar_reduce_graph(ke, S_REDUCE_MAX);
 }
 
 static void set_reduce_axes(KernelEntry *ke, u32 tail_axis_type) {
@@ -311,6 +319,30 @@ int main(void) {
     CHECK(strstr(metal_tile_src, "threadgroup_barrier") != NULL);
     CHECK(strstr(metal_tile_src, "uint _ta0 = _tgid;") != NULL);
     CHECK(strstr(metal_tile_src, "uint _ta1 = _ltid;") != NULL);
+    free(metal_tile_src);
+  }
+
+  TEST_BEGIN("tile-graph/kernel-axes-local-global-swapped");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 2;
+  ke->axes->axis_types[0] = KAX_LOCAL;
+  ke->axes->full_shape[0] = 4;
+  ke->axes->axis_types[1] = KAX_GLOBAL;
+  ke->axes->full_shape[1] = 2;
+  ke->axes->version++;
+  CHECK(tile_build_from_scalar(ke));
+  CHECK(tile_validate(ke));
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.axis_types[0], (u32)KAX_LOCAL);
+  CHECK_EQ(info.axis_types[1], (u32)KAX_GLOBAL);
+  CHECK(cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
+  CHECK_EQ(groups_x, 2u);
+  CHECK_EQ(threads_x, 4u);
+  metal_tile_src = cg_emit_tile_metal(ke);
+  CHECK(metal_tile_src != NULL);
+  if (metal_tile_src != NULL) {
+    CHECK(strstr(metal_tile_src, "uint _ta0 = _ltid;") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _ta1 = _tgid;") != NULL);
     free(metal_tile_src);
   }
 
@@ -516,6 +548,28 @@ int main(void) {
   f32 red_out[1] = {0.0f};
   run_tile_jit_1(tk, red_in, sizeof(red_in), red_out, sizeof(red_out));
   CHECK(red_out[0] == 10.0f);
+  kernel_free_arrays(tk);
+  tk->axes = NULL;
+
+  TEST_BEGIN("tile-graph/c-renderer-reduce-max-axis-jit");
+  CHECK(build_scalar_reduce_max_graph(tk) != 0);
+  set_reduce_axes(tk, TEST_REDUCE_NO_TAIL);
+  CHECK(tile_build_from_scalar(tk));
+  CHECK(tile_collect_plan_info(tk, &info));
+  CHECK(info.reduce_tile_id != 0);
+  CHECK_EQ(tk->scalar_uops[info.scalar_reduce_id].op, S_REDUCE_MAX);
+  CHECK(cg_supports_tile(tk));
+  red_src = cg_emit_tile(tk);
+  CHECK(red_src != NULL);
+  if (red_src != NULL) {
+    CHECK(strstr(red_src, "-INFINITY") != NULL);
+    CHECK(strstr(red_src, "if (_rv") != NULL);
+    free(red_src);
+  }
+  f32 red_max_in[4] = {-3.0f, 7.0f, 2.0f, 5.0f};
+  red_out[0] = 0.0f;
+  run_tile_jit_1(tk, red_max_in, sizeof(red_max_in), red_out, sizeof(red_out));
+  CHECK(red_out[0] == 7.0f);
   kernel_free_arrays(tk);
   tk->axes = NULL;
 
