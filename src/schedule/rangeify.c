@@ -1293,6 +1293,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // over the out_dims layout.
           u32 contrib_iter[MAX_DIM] = {0};
           u8  os_used[MAX_DIM] = {0};
+          int reduce_used = 0;
           if (can_use_v) {
             for (u32 d = 0; d < p->out_ndim; d++) {
               if (p->out_dims[d] == 1) continue;  // size-1 contributes nothing
@@ -1305,6 +1306,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                   matched = 1;
                   break;
                 }
+              }
+              // Fallback: if no os axis matched, try reduce_range.
+              // Unambiguous only when the extent doesn't ALSO appear in
+              // os.dims (we'd have matched it above).  Used by reduce-
+              // chain RESHAPEs that flatten the reducible region:
+              // [a,b,c] -> [1, a*b*c] when a*b*c == reduce_size.
+              if (!matched && reduce_size != 0 && !reduce_used
+                  && p->out_dims[d] == reduce_size) {
+                contrib_iter[d] = reduce_range;
+                reduce_used = 1;
+                matched = 1;
               }
               if (!matched) { can_use_v = 0; break; }
             }
@@ -1399,10 +1411,6 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             prog_value[i] = rangeify_emit(ke, S_RESHAPE_V, p->dtype,
                                           src_count, src_arr, extra);
             continue;
-          }
-          if (getenv("THVM_RANGEIFY_BAIL")) {
-            fprintf(stderr, "  RESHAPE-detail: src0_ndim=%u out_ndim=%u os.ndim=%u\n",
-                    p->src0_ndim, p->out_ndim, os->ndim);
           }
           RBAIL_MID("RESHAPE shape-change ndim cap or != os->ndim");
         }
