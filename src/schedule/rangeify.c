@@ -694,12 +694,60 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // is contiguous from offset (standard after RESHAPE).
         idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
                                os->ndim, in_off);
+      } else if (in_numel < onum && v->shape.ndim <= os->ndim) {
+        // Lower-rank broadcast: input shape is a contiguous prefix
+        // (most common: per-channel/leading axis) or suffix (per-row
+        // trailing axis) of the output shape.  Per-axis strides:
+        // v's strides for the matched axes, 0 for the broadcast axes.
+        // The materializer emits an EXPAND op that's lowered as
+        // identity at the scalar level; this branch supplies the
+        // broadcast addressing the EXPAND would otherwise need.
+        u32 v_ndim = v->shape.ndim;
+        int prefix_ok = 1;
+        for (u32 d = 0; d < v_ndim; d++) {
+          if (v->shape.dims[d] != os->dims[d]) { prefix_ok = 0; break; }
+        }
+        int suffix_ok = 0;
+        u32 suffix_off = (os->ndim >= v_ndim) ? (os->ndim - v_ndim) : 0;
+        if (!prefix_ok && os->ndim >= v_ndim) {
+          suffix_ok = 1;
+          for (u32 d = 0; d < v_ndim; d++) {
+            if (v->shape.dims[d] != os->dims[suffix_off + d]) {
+              suffix_ok = 0; break;
+            }
+          }
+        }
+        if (prefix_ok || suffix_ok) {
+          u32 base_axis = prefix_ok ? 0 : suffix_off;
+          u32 strides_u32[MAX_DIM];
+          for (u32 d = 0; d < os->ndim; d++) {
+            if (d >= base_axis && d < base_axis + v_ndim) {
+              strides_u32[d] = (u32)v->strides[d - base_axis];
+            } else {
+              strides_u32[d] = 0;  // broadcast axis
+            }
+          }
+          idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
+                                 os->ndim, in_off);
+        } else {
+          if (getenv("THVM_RANGEIFY_BAIL")) {
+            fprintf(stderr, "  post-INDEX broadcast no prefix/suffix match\n");
+          }
+          RBAIL_MID("post-INDEX broadcast unmatched");
+        }
       } else {
         if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "  post-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red_numel=%u reduce_size=%u reduce_in_numel=%u has_reduce=%d\n",
-                  i, in_numel, onum, v->shape.ndim, os->ndim,
-                  in_ndim, has_reduce ? red->numel : 0,
-                  has_reduce ? reduce_size : 0, reduce_in_numel, has_reduce);
+          fprintf(stderr, "  post-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u v.shape=[",
+                  i, in_numel, onum, v->shape.ndim, os->ndim);
+          for (u32 d = 0; d < v->shape.ndim; d++)
+            fprintf(stderr, "%u%s", v->shape.dims[d], d+1==v->shape.ndim?"":",");
+          fprintf(stderr, "] v.strides=[");
+          for (u32 d = 0; d < v->shape.ndim; d++)
+            fprintf(stderr, "%d%s", v->strides[d], d+1==v->shape.ndim?"":",");
+          fprintf(stderr, "] os=[");
+          for (u32 d = 0; d < os->ndim; d++)
+            fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
+          fprintf(stderr, "]\n");
         }
         RBAIL_MID("post-INDEX no branch matched");
       }
