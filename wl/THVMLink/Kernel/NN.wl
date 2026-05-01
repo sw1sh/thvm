@@ -62,8 +62,9 @@ TLayerNorm::usage        = "TLayerNorm[x] / TLayerNorm[x, eps] normalises along 
 TSoftmaxAxis::usage      = "TSoftmaxAxis[x, axis] = exp(x) / sum(exp(x)) reduced along `axis`.  Generalises TSoftmax (which is hard-coded to axis 0).  The dropped axis is re-introduced as size 1 + EXPAND'd back so the elementwise mul has matching shapes; same softmax-style reduce-broadcast shape.";
 TAttention::usage        = "TAttention[Q, K, V] computes scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.  Q is {seq_q, d_k}; K is {seq_k, d_k}; V is {seq_k, d_v}.  Result is {seq_q, d_v}.  Pure assembly of TMatMul + TSoftmaxAxis + TMatMul; the two matmuls dispatch through cblas_sgemm.";
 TBatchNorm::usage        = "TBatchNorm[x, gamma, beta, mean, var] / TBatchNorm[x, gamma, beta, mean, var, eps] applies the inference-form batch-norm transform: y = gamma * (x - mean) / sqrt(var + eps) + beta along the channel axis.  x is rank-3 {C, H, W} (channels-first); gamma/beta/mean/var are all rank-1 {C}.  Default eps = 1e-5.  The trainer maintains running mean/var with TAssign on the WL side; this op is the pure forward shape used by both train and infer.";
-TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution as a kh*kw-unrolled chain of SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM + ADD primitives.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  No bespoke CONV2D opcode -- autograd flows through primitives via the chain rule.  Phase 9 follow-up: replace the kh*kw partials with a single im2col + sgemm dispatch.";
-TConv2DIm2Col::usage     = "TConv2DIm2Col[input, weights, bias] is the im2col + matmul lowering of a stride-1, no-padding 2-D convolution.  Same signature/output shape as TConv2D.  Builds the im2col matrix `xCol : {C_in*kh*kw, H_out*W_out}` by SHRINK'ing the kh*kw spatial slices, reshaping each to {C_in, 1, H_out*W_out}, PAD'ing into the proper kh*kw-axis slot of {C_in, kh*kw, H_out*W_out} and summing (no STACK primitive in thvm).  Then `out = w_flat @ xCol` via TMatMul which dispatches through cblas_sgemm.  Phase 9: this is the path that scales to BS>1 -- a single sgemm per layer instead of kh*kw partial-sum kernels per batch element.";
+TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  Routes through TConv2DIm2Col (M1).  TConv2DKhKw kept as the kh*kw reference path.";
+TConv2DIm2Col::usage     = "TConv2DIm2Col[input, weights, bias] is the im2col + matmul lowering of a stride-1, no-padding 2-D convolution.  Same signature/output shape as TConv2D.  Builds the im2col matrix `xCol : {C_in*kh*kw, H_out*W_out}`, then `out = w_flat @ xCol` via TMatMul which dispatches through cblas_sgemm.  TConv2D defaults to this path.";
+TConv2DKhKw::usage       = "TConv2DKhKw[input, weights, bias] is the kh*kw partial-sum lowering -- original TConv2D body kept for reference.";
 TGlorot::usage           = "TGlorot[shape] returns a fresh f32 TTerm tensor of the given shape, filled with samples from N(0, sqrt(2 / fan_in)) (Glorot/Xavier-He init).  fan_in = product of all dims after the first.  Suitable for ReLU / linear layer weight init.";
 TZeros::usage            = "TZeros[shape] returns a fresh f32 TTerm tensor of zeros at the given shape.  Convenience for bias init / running-stat init.";
 TOnes::usage             = "TOnes[shape] returns a fresh f32 TTerm tensor of ones at the given shape.  Convenience for layer-norm gamma init / scale-1 placeholders.";
@@ -139,7 +140,11 @@ TCrossEntropyLoss[pred_TTerm, target_TTerm] := - Total[target * Log[pred]]
    {C_out, C_in, H_out, W_out} intermediates per kernel position,
    which fits the per-op-allocates-a-buffer materializer better.
    Phase 9 follow-up: replace with one im2col + sgemm dispatch. *)
-TConv2D[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
+(* M1: route through im2col + sgemm; TConv2DKhKw keeps the kh*kw path. *)
+TConv2D[input_TTerm, weights_TTerm, bias_TTerm] :=
+    TConv2DIm2Col[input, weights, bias]
+
+TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
     inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
     partials, xSlice, wSlice, xB, wB, summed, biasBcast
 },
@@ -210,7 +215,12 @@ TConv2DIm2Col[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
         ],
         {ki, 0, kh - 1}, {kj, 0, kw - 1}
     ];
-    summed    = Total[patches];
+    (* Use Fold[TUOpAdd, ...] instead of Total[]: Mathematica's
+       Plus[] dispatch on n-ary TTerm args goes pathological at
+       n>~16 (Orderless attribute triggers an expensive arg sort
+       that runs for minutes on a 25-element list).  TUOpAdd
+       direct fold builds the same left-leaning tree in 1ms. *)
+    summed    = Fold[TUOpAdd, First[patches], Rest[patches]];
     xCol      = TUOpReshape[summed,  {cIn * kSpat, hOut * wOut}];
     wFlat     = TUOpReshape[weights, {cOut, cIn * kSpat}];
     outFlat   = TMatMul[wFlat, xCol];
