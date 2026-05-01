@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: tile-UOp root and validation helpers
+
+Tile plans now record an explicit `KernelEntry.tile_root`, validate
+their root/body/axis structure, and expose root-loop axis count/type/
+extent helpers so future renderers and autotuners do not depend on
+emission order.
+
 ### Fixed: stale C test contracts
 
 Refreshed the C tests around the current dup-style grad projection

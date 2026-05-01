@@ -814,6 +814,7 @@ typedef struct KernelEntry {
   TileUop   *tile_uops;
   u32        n_tile_uops;
   u32        tile_uops_cap;
+  u32        tile_root;       // root TileUop id, usually TILE_LOOP_NEST; 0 = none
 } KernelEntry;
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
@@ -1218,6 +1219,10 @@ fn u32  tile_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);
+fn int  tile_validate(struct KernelEntry const *ke);
+fn u32  tile_loop_axis_count(struct KernelEntry const *ke);
+fn u32  tile_loop_axis_type(struct KernelEntry const *ke, u32 axis);
+fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
 // Seed a TILE_LOOP_NEST plan from ke->scalar_uops[] + KernelAxes.
 // Returns 1 on success, 0 when scalar_uops is absent or malformed.
 fn int  tile_build_from_scalar(struct KernelEntry *ke);

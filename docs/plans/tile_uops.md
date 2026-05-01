@@ -13,7 +13,13 @@ that future renderers can lower differently for CPU and Metal.
 
 - slot 0 is `TILE_NONE`;
 - live nodes are stored in `[1, n_tile_uops)`;
+- `tile_root` stores the root node id, currently a `TILE_LOOP_NEST`;
 - `tile_free` is called by `kernel_free_arrays`;
+- `tile_validate` checks the root/body/axis structure before a
+  renderer or autotuner consumes the plan;
+- `tile_loop_axis_count`, `tile_loop_axis_type`, and
+  `tile_loop_axis_extent` expose root-loop axis metadata without
+  assuming the root is the last emitted node;
 - `tile_build_from_scalar` seeds a minimal plan from `scalar_uops`:
 
 ```text
@@ -26,6 +32,11 @@ TILE_LOOP_NEST(
 When `KernelAxes` is present, its axis types and extents define the
 `TILE_AXIS` nodes. Otherwise the builder falls back to the ranges on
 the scalar `S_BUFFERIZE` root.
+
+The builder validates the emitted graph before returning success.
+Malformed or partial tile arenas are allowed during manual construction
+but report `tile_validate == 0` until `tile_root` points at a valid
+loop nest whose body references a scalar `S_BUFFERIZE` root.
 
 `materialize.c` calls the builder automatically when rangeify succeeds,
 so every rangeified kernel carries a tile-plan snapshot even though no

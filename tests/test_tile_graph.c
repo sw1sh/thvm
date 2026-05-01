@@ -50,6 +50,7 @@ int main(void) {
   CHECK_EQ((unsigned long long)ke->tile_uops, 0);
   CHECK_EQ(ke->n_tile_uops, 0);
   CHECK_EQ(ke->tile_uops_cap, 0);
+  CHECK_EQ(ke->tile_root, 0);
 
   TEST_BEGIN("tile-graph/opname-helpers-cover-enum");
   for (u8 op = TILE_NONE; op < TILE__COUNT; op++) {
@@ -72,10 +73,15 @@ int main(void) {
   CHECK_EQ((u32)(ke->tile_uops[2].extra >> 32), (u32)KAX_LOOP);
   CHECK_EQ((u32)(ke->tile_uops[2].extra & 0xFFFFFFFFu), 8u);
   CHECK_EQ(ke->tile_uops[3].op, TILE_LOOP_NEST);
+  CHECK_EQ(ke->tile_root, 3);
   CHECK_EQ(ke->tile_uops[3].src_count, 2);
   CHECK_EQ(ke->tile_uops[3].src[0], 1);
   CHECK_EQ(ke->tile_uops[3].src[1], 2);
   CHECK_EQ(ke->tile_uops[3].src[2], 0);
+  CHECK(tile_validate(ke));
+  CHECK_EQ(tile_loop_axis_count(ke), 1);
+  CHECK_EQ(tile_loop_axis_type(ke, 0), (u32)KAX_LOOP);
+  CHECK_EQ(tile_loop_axis_extent(ke, 0), 8u);
 
   TEST_BEGIN("tile-graph/kernel-axes-override");
   ke->axes = &ke->_local_axes;
@@ -94,15 +100,31 @@ int main(void) {
   CHECK_EQ((u32)(ke->tile_uops[3].extra >> 32), (u32)KAX_UPCAST);
   CHECK_EQ((u32)(ke->tile_uops[3].extra & 0xFFFFFFFFu), 4u);
   CHECK_EQ(ke->tile_uops[4].op, TILE_LOOP_NEST);
+  CHECK_EQ(ke->tile_root, 4);
   CHECK_EQ(ke->tile_uops[4].src_count, 3);
   CHECK_EQ(ke->tile_uops[4].src[1], 2);
   CHECK_EQ(ke->tile_uops[4].src[2], 3);
+  CHECK(tile_validate(ke));
+  CHECK_EQ(tile_loop_axis_count(ke), 2);
+  CHECK_EQ(tile_loop_axis_type(ke, 0), (u32)KAX_LOOP);
+  CHECK_EQ(tile_loop_axis_extent(ke, 0), 2u);
+  CHECK_EQ(tile_loop_axis_type(ke, 1), (u32)KAX_UPCAST);
+  CHECK_EQ(tile_loop_axis_extent(ke, 1), 4u);
+
+  TEST_BEGIN("tile-graph/validator-rejects-bad-root");
+  u32 good_root = ke->tile_root;
+  ke->tile_root = 2;
+  CHECK(!tile_validate(ke));
+  CHECK_EQ(tile_loop_axis_count(ke), 0);
+  ke->tile_root = good_root;
+  CHECK(tile_validate(ke));
 
   TEST_BEGIN("tile-graph/free-then-reemit");
   tile_free(ke);
   CHECK_EQ((unsigned long long)ke->tile_uops, 0);
   CHECK_EQ(ke->n_tile_uops, 0);
   CHECK_EQ(ke->tile_uops_cap, 0);
+  CHECK_EQ(ke->tile_root, 0);
   for (u32 i = 0; i < 100; i++) {
     u32 id = tile_emit_leaf(ke, TILE_AXIS, DT_INT64,
                             ((u64)KAX_LOOP << 32) | i);
@@ -112,12 +134,15 @@ int main(void) {
   CHECK(ke->tile_uops_cap >= 101);
   CHECK_EQ(ke->tile_uops[100].op, TILE_AXIS);
   CHECK_EQ((u32)ke->tile_uops[100].extra, 99u);
+  CHECK_EQ(ke->tile_root, 0);
+  CHECK(!tile_validate(ke));
 
   TEST_BEGIN("tile-graph/kernel-free-cleans-tile-and-scalar");
   kernel_free_arrays(ke);
   CHECK_EQ((unsigned long long)ke->tile_uops, 0);
   CHECK_EQ(ke->n_tile_uops, 0);
   CHECK_EQ(ke->tile_uops_cap, 0);
+  CHECK_EQ(ke->tile_root, 0);
   CHECK_EQ((unsigned long long)ke->scalar_uops, 0);
   CHECK_EQ(ke->n_scalar_uops, 0);
   CHECK_EQ(ke->scalar_uops_cap, 0);
@@ -135,7 +160,11 @@ int main(void) {
   CHECK(mk->n_tile_uops >= 4);
   CHECK_EQ(mk->tile_uops[0].op, TILE_NONE);
   CHECK_EQ(mk->tile_uops[1].op, TILE_SCALAR_BODY);
-  CHECK_EQ(mk->tile_uops[mk->n_tile_uops - 1].op, TILE_LOOP_NEST);
+  CHECK(tile_validate(mk));
+  CHECK(mk->tile_root != 0);
+  CHECK_EQ(mk->tile_uops[mk->tile_root].op, TILE_LOOP_NEST);
+  CHECK_EQ(tile_loop_axis_count(mk), 1);
+  CHECK_EQ(tile_loop_axis_extent(mk, 0), 4u);
 
   thvm_free();
   TEST_REPORT();
