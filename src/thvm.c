@@ -263,6 +263,20 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // winning TOpt per program shape.
 #include "codegen/autotune.c"
 
+// === aot/ ===
+// AOT function-pointer table + helpers.  Declared BEFORE wnf so
+// TAG_REF dispatch can call aot_lookup() / AOT_CALLS.  Forward-
+// declares wnf so aot_force can call it (resolved at link time
+// since we're a single TU).
+fn Term wnf(Term term);
+#include "aot/_.c"
+// Hand-coded AOT programs (proof-of-concept; will be replaced by
+// auto-emitted code once src/aot/emit.c lands).  Each program file
+// exposes one aot_program_<name>_register(def_id1, def_id2, ...)
+// entry that the WL surface or a C test calls after TDef'ing the
+// matching bodies.
+#include "aot/programs/fib_nat.c"
+
 // === wnf/ ===
 // The reducer dispatches to the interactions and to materialize,
 // so every file it calls must be defined above.
@@ -457,6 +471,7 @@ void thvm_free(void) {
   BOOK_NEXT       = 1;
   ALO_STATES_NEXT = 1;
   alo_dup_share_reset();
+  aot_reset();
   CPU_BUFS_NEXT   = 1;
   CPU_FREELIST_LEN = 0;
   memset(DEFS,             0, sizeof(((TContext *)0)->defs));

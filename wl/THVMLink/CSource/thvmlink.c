@@ -1799,6 +1799,28 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ref(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// AOT bridge: register the hand-coded fib_nat AOT under the given
+// def slots.  Args: [def_add, def_fib, def_u32].  Returns the count
+// of AOT entries registered (3 on success).
+EXTERN_C DLLEXPORT int thvm_wl_aot_register_fib_nat(WolframLibraryData libData,
+                                                    mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 def_add = (u32)MArgument_getInteger(args[0]);
+  u32 def_fib = (u32)MArgument_getInteger(args[1]);
+  u32 def_u32 = (u32)MArgument_getInteger(args[2]);
+  aot_program_fib_nat_register(def_add, def_fib, def_u32);
+  MArgument_setInteger(res, 3);
+  return LIBRARY_NO_ERROR;
+}
+
+// Returns the cumulative AOT call count since the last reset.
+EXTERN_C DLLEXPORT int thvm_wl_aot_calls(WolframLibraryData libData, mint argc,
+                                         MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)aot_calls());
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_term_new_pri(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {
   (void)libData; (void)argc;

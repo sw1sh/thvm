@@ -106,11 +106,23 @@ enter:
       goto enter;
     }
     case TAG_REF: {
-      // Look up the static template and wrap it in an empty-state ALO.
-      // ALO-VAR / ALO-LAM / ALO-NOD then walk one layer per fire as
-      // wnf re-enters this term (lazy unfolding -- no eager expansion
-      // even for self-referential defs).
+      // AOT fast path: if a specialised C function is registered for
+      // this name, dispatch to it instead of the lazy ALO unfold.
+      // The AOT consumes the spine APP frames directly via &s_pos
+      // and returns the continuation Term.  Same control-flow
+      // contract as ALO unfold (`next = ...; goto enter`); ITRS
+      // counting is the AOT's responsibility.
       u32  name = term_ext(next);
+      AotFn aot = aot_lookup(name);
+      if (aot != NULL) {
+        if (BUDGET_HIT) BAIL_AT(next);
+        AOT_CALLS++;
+        next = aot(stack, &s_pos, base);
+        goto enter;
+      }
+      // Fall back to the lazy ALO unfold.  ALO-VAR / ALO-LAM /
+      // ALO-NOD then walk one layer per fire as wnf re-enters this
+      // term (no eager expansion even for self-referential defs).
       Term book = (name < DEFS_CAP) ? DEFS[name] : 0;
       if (book == 0) {
         // Undefined ref -- treat as WHNF atom; won't reduce further.
