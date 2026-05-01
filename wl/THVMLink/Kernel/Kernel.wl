@@ -47,6 +47,8 @@ TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEn
 TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns the number of distinct KProgOp[] arrays interned in the kernel-program hash-cons cache.  After a TRealize, this is at most TKernelCount[]-1; structurally identical kernels (e.g. successive iters of a recursive lambda's step) share a single entry.";
 TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].  Equivalent to TKernel[kid][\"Program\"] paired with the header (n_inputs, n_ops, output_numel, output_dtype).";
 TKernelScalarUops::usage = "TKernelScalarUops[kid] returns the post-lowering scalar-UOp graph snapshot stored at KERNELS[kid].scalar_uops, as a List of Associations (one per scalar op, with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\", and -- for S_RANGE -- \"axis_type\" and \"extent\").  Returns Missing[\"NotLowered\"] when the kernel was emitted via the legacy per-tensor-UOp visit() path (i.e. rangeify lowering was off or didn't apply).  Slot 0 (S_NONE sentinel) is included so list indices match C-side ScalarUop[] indices; live ops occupy positions [2..].";
+TKernelTileUops::usage = "TKernelTileUops[kid] returns the tile-UOp plan snapshot stored at KERNELS[kid].tile_uops, as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", and \"extra\".  TILE_AXIS entries also expose \"axis_type\" and \"extent\".  Returns Missing[\"NotLowered\"] when no rangeify tile plan exists.  Slot 0 (TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.";
+TKernelTilePlan::usage = "TKernelTilePlan[kid] returns a validated compact Association for KERNELS[kid].tile_uops: tile root/store/body ids, scalar store/index/value ids, dtype, and axis metadata.  Returns Missing[\"NotLowered\"] when no validated rangeify tile plan exists.";
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
 
@@ -615,6 +617,91 @@ TKernelScalarUops[kid_Integer] := Module[{raw, n, decoded},
       ],
       {i, n}];
     decoded
+]
+
+$tileOpNames = <|
+    0 -> "TILE_NONE",        1 -> "TILE_AXIS",
+    2 -> "TILE_SCALAR_BODY", 3 -> "TILE_LOOP_NEST",
+    4 -> "TILE_LOCAL_ALLOC", 5 -> "TILE_LOAD",
+    6 -> "TILE_STORE",       7 -> "TILE_BARRIER",
+    8 -> "TILE_REDUCE",      9 -> "TILE_MMA"
+|>;
+
+$tileAxisNames = <|
+    0 -> "LOOP",   1 -> "REDUCE", 2 -> "UPCAST", 3 -> "UNROLL",
+    4 -> "LOCAL",  5 -> "GLOBAL", 6 -> "GROUP_REDUCE"
+|>;
+
+TKernelTileUops[kid_Integer] := Module[{raw, n, srcWidth, rowWidth, decoded},
+    raw = Normal @ $kernelTileUopsFn[kid];
+    If[ raw === {} || First[raw] == 0,
+      Return @ Missing["NotLowered"] ];
+    n = raw[[1]];
+    srcWidth = raw[[2]];
+    rowWidth = 3 + srcWidth + 2;
+    decoded = Table[
+      With[{base = 2 + (i - 1) * rowWidth},
+        With[{
+          opCode = raw[[base + 1]],
+          extra  = BitOr[
+            raw[[base + 4 + srcWidth]],
+            BitShiftLeft[raw[[base + 5 + srcWidth]], 32]]
+        },
+          With[{
+            opName   = Lookup[$tileOpNames, opCode, "TILE_?"],
+            srcCount = raw[[base + 3]],
+            src      = raw[[base + 4 ;; base + 3 + srcWidth]]
+          },
+            If[ opName === "TILE_AXIS",
+              <|
+                "id"        -> i - 1,
+                "op"        -> opName,
+                "dtype"     -> dtypeName[raw[[base + 2]]],
+                "src"       -> Take[src, srcCount],
+                "extent"    -> BitAnd[extra, 16^^FFFFFFFF],
+                "axis_type" -> Lookup[$tileAxisNames,
+                                  BitShiftRight[extra, 32], "?"]
+              |>,
+              <|
+                "id"     -> i - 1,
+                "op"     -> opName,
+                "dtype"  -> dtypeName[raw[[base + 2]]],
+                "src"    -> Take[src, srcCount],
+                "extra"  -> extra
+              |>
+            ]
+          ]
+        ]
+      ],
+      {i, n}];
+    decoded
+]
+
+TKernelTilePlan[kid_Integer] := Module[{raw, nAxes},
+    raw = Normal @ $kernelTilePlanInfoFn[kid];
+    If[ raw === {} || First[raw] == 0,
+      Return @ Missing["NotLowered"] ];
+    nAxes = raw[[2]];
+    <|
+      "valid"        -> True,
+      "root"         -> raw[[3]],
+      "store_tile"   -> raw[[4]],
+      "body_tile"    -> raw[[5]],
+      "scalar_store" -> raw[[6]],
+      "scalar_index" -> raw[[7]],
+      "scalar_value" -> raw[[8]],
+      "dtype"        -> dtypeName[raw[[9]]],
+      "axes"         -> Table[
+          With[{base = 9 + (i - 1) * 3},
+            <|
+              "id"        -> raw[[base + 1]],
+              "axis_type" -> Lookup[$tileAxisNames, raw[[base + 2]], "?"],
+              "extent"    -> raw[[base + 3]]
+            |>
+          ],
+          {i, nAxes}
+      ]
+    |>
 ]
 
 End[];

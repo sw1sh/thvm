@@ -20,6 +20,8 @@ that future renderers can lower differently for CPU and Metal.
 - `tile_collect_plan_info` extracts the validated root into a compact
   `TilePlanInfo` view: tile root/store/body ids, scalar store/index/
   value ids, dtype, and per-axis ids/types/extents;
+- WL exposes `TKernelTileUops[kid]` for the raw tile arena and
+  `TKernelTilePlan[kid]` for the validated `TilePlanInfo` view;
 - `tile_loop_axis_count`, `tile_loop_axis_type`, and
   `tile_loop_axis_extent` expose root-loop axis metadata without
   assuming the root is the last emitted node; internally they only

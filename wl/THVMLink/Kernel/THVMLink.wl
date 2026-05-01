@@ -353,6 +353,8 @@ $realizeFn     := $realizeFn     = load["thvm_wl_realize",         {Integer},   
 $realizeManyFn := $realizeManyFn = load["thvm_wl_realize_many",    {{Integer, 1}},                   Integer];
 $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count",    {},                               Integer];
 $kernelScalarUopsFn := $kernelScalarUopsFn = load["thvm_wl_kernel_scalar_uops", {Integer}, {Integer, 1}];
+$kernelTileUopsFn := $kernelTileUopsFn = load["thvm_wl_kernel_tile_uops", {Integer}, {Integer, 1}];
+$kernelTilePlanInfoFn := $kernelTilePlanInfoFn = load["thvm_wl_kernel_tile_plan_info", {Integer}, {Integer, 1}];
 $kernelProgramCacheSizeFn := $kernelProgramCacheSizeFn = load["thvm_wl_kernel_program_cache_size", {}, Integer];
 $kernelAxesGetFn          := $kernelAxesGetFn          = load["thvm_wl_kernel_axes_get",            {Integer}, {Integer, 1}];
 $kernelApplyOptFn         := $kernelApplyOptFn         = load["thvm_wl_kernel_apply_opt",           {Integer, Integer, Integer, Integer}, Integer];

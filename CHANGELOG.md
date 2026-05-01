@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: WL tile-UOp introspection
+
+LibraryLink now exposes raw `TileUop` snapshots and validated tile
+plan summaries to WL as `TKernelTileUops[kid]` and
+`TKernelTilePlan[kid]`, with tests covering the seeded loop/store/body
+plan over a rangeified elementwise kernel.
+
 ### Added: tile-UOp plan info extraction
 
 Tile plans now expose `tile_collect_plan_info`, a validated compact
