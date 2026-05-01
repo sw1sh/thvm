@@ -6,13 +6,13 @@ dated section.
 
 ## Unreleased
 
-### Added: Metal tile source renderer
+### Added: Metal tile dispatch
 
-Added `cg_emit_tile_metal` for f32 `LOCAL`/`GLOBAL` tile plans.  The
-renderer maps global tile axes to `threadgroup_position_in_grid`, local
-tile axes to `thread_position_in_threadgroup`, and emits a threadgroup
-barrier before the scalar body.  Backend dispatch wiring is still a
-follow-up.
+Added an opt-in `THVM_TILE=1` Metal tile path for f32
+`LOCAL`/`GLOBAL` elementwise plans.  The backend now compiles
+`cg_emit_tile_metal`, caches the pipeline state, dispatches
+`GLOBAL` axes as threadgroups and `LOCAL` axes as threads per
+threadgroup, and records dispatch kind `"metal-tile"`.
 
 ### Added: generated tile C reductions
 

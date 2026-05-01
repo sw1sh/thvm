@@ -41,12 +41,13 @@ that future renderers can lower differently for CPU and Metal.
 - tile C accepts `REDUCE`/`UNROLL`/`GROUP_REDUCE` axes only as
   reduction-schedule metadata on scalar graphs that contain a reducer;
   those axes do not become outer output loops yet;
-- `cg_emit_tile_metal` emits source for f32 `LOCAL`/`GLOBAL`
-  elementwise tile plans, mapping `GLOBAL` to
-  `threadgroup_position_in_grid`, `LOCAL` to
-  `thread_position_in_threadgroup`, and emitting a threadgroup
-  barrier before the scalar body; backend dispatch is not wired to
-  this source renderer yet;
+- Metal dispatch has a matching opt-in `THVM_TILE=1` path for f32
+  `LOCAL`/`GLOBAL` elementwise tile plans.  It compiles
+  `cg_emit_tile_metal`, maps `GLOBAL` to
+  `threadgroup_position_in_grid`, maps `LOCAL` to
+  `thread_position_in_threadgroup`, dispatches
+  `GLOBAL x LOCAL` as threadgroups x threads-per-threadgroup, and
+  records dispatch kind `"metal-tile"`;
 - f32/f64 `S_CAST` is generated with per-input and output pointer
   types, so scalar C no longer requires one uniform kernel dtype for
   simple cast chains;
@@ -86,24 +87,23 @@ linked back to the scalar `S_STORE`.  Consumers should call
 they need ids or axis metadata.
 
 `materialize.c` calls the builder automatically when rangeify succeeds,
-so every rangeified kernel carries a tile-plan snapshot even though no
-backend consumes it yet.
+so every rangeified kernel carries a tile-plan snapshot for
+introspection, CPU tile execution, and Metal tile execution.
 
-Default dispatch ignores `tile_uops` today. This is deliberate:
-rangeify and the scalar interpreter/JIT continue to own correctness
-while the tile layer becomes a stable target for autotuning and future
-renderers. Setting `THVM_TILE=1` routes supported CPU kernels through
-the generated tile C renderer when possible, otherwise through the tile
-interpreter for focused validation and profiling.
+Default dispatch ignores `tile_uops` unless `THVM_TILE=1` is set. This
+is deliberate: rangeify and the scalar interpreter/JIT continue to own
+correctness while the tile layer becomes a stable target for autotuning.
+With `THVM_TILE=1`, supported CPU kernels route through generated tile
+C or the tile interpreter; supported Metal kernels route through
+generated tile MSL when the plan has one `GLOBAL` and one `LOCAL`
+output axis.
 
 ## Intended Next Steps
 
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Wire `cg_emit_tile_metal` into Metal backend dispatch with
-   concrete threadgroup/grid sizing.
-3. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
+2. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
    kernels.
-4. Add `TILE_MMA` only after reductions and local-memory tiling are
+3. Add `TILE_MMA` only after reductions and local-memory tiling are
    stable.

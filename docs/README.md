@@ -51,8 +51,8 @@ until that step lands.
   [glossary.md](glossary.md) -- "superposition" means two different
   things on the two sides.
 - [plans/tile_uops.md](plans/tile_uops.md): tile-level schedule
-  plan above scalar UOps.  Starts as non-dispatching infrastructure
-  and is intended to become the CPU/Metal autotuning target.
+  plan above scalar UOps.  Documents the opt-in CPU/Metal tile paths
+  and the remaining work toward an autotuning target.
 
 ## Conventions
 

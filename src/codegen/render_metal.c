@@ -268,6 +268,39 @@ static int rmt_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
   return 1;
 }
 
+int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
+                                 u32 *threads_x) {
+  if (ke == NULL) {
+    return 0;
+  }
+  if (!tile_sync_from_scalar(ke)) {
+    return 0;
+  }
+  CtKernelInfo info;
+  if (!rmt_collect_kernel_info(ke, &info)) {
+    return 0;
+  }
+  u32 groups  = 0;
+  u32 threads = 0;
+  for (u32 i = 0; i < info.n_axes; i++) {
+    if (info.axis_types[i] == KAX_GLOBAL) {
+      groups = info.axis_extents[i];
+    } else if (info.axis_types[i] == KAX_LOCAL) {
+      threads = info.axis_extents[i];
+    }
+  }
+  if (groups == 0 || threads == 0) {
+    return 0;
+  }
+  if (groups_x != NULL) {
+    *groups_x = groups;
+  }
+  if (threads_x != NULL) {
+    *threads_x = threads;
+  }
+  return 1;
+}
+
 static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id);
 
 static int rmt_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {

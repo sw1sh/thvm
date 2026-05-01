@@ -134,10 +134,10 @@ the same pipeline through `cg_emit_metal`.
   temporarily rewrite generated loop coordinates.  The tile variant
   lowers validated non-reduction `TILE_LOOP_NEST` plans to nested C
   loops before emitting the same scalar expression body.
-- [render_metal.c](../src/codegen/render_metal.c): `cg_emit_metal`.
-  Same shape, MSL flavor. One thread per output element instead of
-  an outer loop; `device` / `device const` qualifiers; no `f` suffix
-  on intrinsics.
+- [render_metal.c](../src/codegen/render_metal.c): `cg_emit_metal`
+  and `cg_emit_tile_metal`.  The KProgOp renderer emits one thread per
+  output element instead of an outer loop; the tile renderer emits f32
+  `LOCAL`/`GLOBAL` elementwise plans as threadgroup-shaped MSL.
 - [profile.c](../src/codegen/profile.c): per-kid counters
   (`cg_profile_record`, `cg_kernel_dispatch_count`,
   `cg_kernel_total_us`) and static FLOPS estimation
@@ -211,16 +211,16 @@ verification).
 ## Comparison with Metal
 
 The Metal backend at [src/backend/metal/_.m](../src/backend/metal/_.m)
-runs the KProgOp codegen pipeline (`cg_emit_metal`) but the dispatch
-shape is asymmetric. A TileUop MSL source renderer
-(`cg_emit_tile_metal`) exists for f32 `LOCAL`/`GLOBAL` tile plans, but
-the Metal backend does not dispatch through it yet. `cpu_dispatch_kernel`
+runs the KProgOp codegen pipeline (`cg_emit_metal`) and, when
+`THVM_TILE=1`, can run the TileUop MSL path (`cg_emit_tile_metal`) for
+f32 `LOCAL`/`GLOBAL` elementwise plans.  `cpu_dispatch_kernel`
 delegates to a
 `cpu_jit_dispatch` helper that owns the JIT decision; if the JIT
 bails the dispatcher falls through to a separate `cpu_interpret`.
 `metal_dispatch_kernel` inlines the same decision in its own body:
-it tries `metal_jit_encode` first, then on miss falls through to a
-per-op interpreter loop that's also inlined in the same function.
+it tries `metal_tile_jit_encode` when tile dispatch is enabled, then
+`metal_jit_encode`, then on miss falls through to a per-op interpreter
+loop that's also inlined in the same function.
 
 The two dispatchers do the same thing logically; only the CPU side
 has been factored into separate translation units. This is

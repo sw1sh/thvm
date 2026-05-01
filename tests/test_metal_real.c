@@ -33,6 +33,49 @@ static int metal_available(void) {
   return ok;
 }
 
+static u32 build_metal_tile_add_kernel(u32 extent, u32 groups, u32 threads) {
+  u32 kid = kernel_alloc();
+  KernelEntry *ke = &KERNELS[kid];
+  kernel_inputs_reserve(ke, 2);
+  ke->n_inputs        = 2;
+  ke->input_tids[0]   = 0;
+  ke->input_tids[1]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_dtypes[1] = DT_FP32;
+  ke->input_numels[0] = extent;
+  ke->input_numels[1] = extent;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = extent;
+
+  u32 r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                              ((u64)S_AXIS_LOOP << 32) | extent);
+  u32 pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  u32 pb = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 1);
+  u32 pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 src_a[2] = {pa, r0};
+  u32 src_b[2] = {pb, r0};
+  u32 src_c[2] = {pc, r0};
+  u32 ia = rangeify_emit(ke, S_INDEX, DT_FP32, 2, src_a, 1);
+  u32 ib = rangeify_emit(ke, S_INDEX, DT_FP32, 2, src_b, 1);
+  u32 ic = rangeify_emit(ke, S_INDEX, DT_FP32, 2, src_c, 1);
+  u32 la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  u32 lb = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ib);
+  u32 sum = rangeify_emit_binary(ke, S_ADD, DT_FP32, la, lb);
+  u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, sum);
+  u32 root_src[2] = {sto, r0};
+  rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, root_src, 0);
+
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 2;
+  ke->axes->axis_types[0] = KAX_GLOBAL;
+  ke->axes->full_shape[0] = groups;
+  ke->axes->axis_types[1] = KAX_LOCAL;
+  ke->axes->full_shape[1] = threads;
+  ke->axes->version++;
+  return kid;
+}
+
 int main(void) {
   if (!metal_available()) {
     PENDING("no Metal device available");
@@ -170,6 +213,36 @@ int main(void) {
 
     for (int i = 0; i < 4; i++) CHECK(cpu_buf[i] == gpu_buf[i]);
   }
+
+  TEST_BEGIN("metal-real/tile-local-global-dispatch-parity");
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_TILE", "1", 1);
+  thvm_init();
+  {
+    f32 in0[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+    f32 in1[8] = {8.0f, 7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f};
+    f32 out[8] = {0};
+    u32 kid = build_metal_tile_add_kernel(8, 2, 4);
+    KernelEntry *ke = &KERNELS[kid];
+    u32 in0_buf = METAL_BACKEND.buf_alloc(sizeof(in0));
+    u32 in1_buf = METAL_BACKEND.buf_alloc(sizeof(in1));
+    u32 out_buf = METAL_BACKEND.buf_alloc(sizeof(out));
+    CHECK(in0_buf != 0);
+    CHECK(in1_buf != 0);
+    CHECK(out_buf != 0);
+    CHECK_EQ(METAL_BACKEND.buf_write(in0_buf, in0, sizeof(in0)), 0);
+    CHECK_EQ(METAL_BACKEND.buf_write(in1_buf, in1, sizeof(in1)), 0);
+    CHECK_EQ(METAL_BACKEND.buf_write(out_buf, out, sizeof(out)), 0);
+    u32 in_bufs[2] = {in0_buf, in1_buf};
+    CHECK_EQ(METAL_BACKEND.dispatch_kernel(ke, in_bufs, out_buf), 0);
+    CHECK_EQ(cg_kernel_dispatch_kind(kid), (u32)KDISPATCH_METAL_TILE);
+    CHECK_EQ(METAL_BACKEND.buf_read(out_buf, out, sizeof(out)), 0);
+    for (u32 i = 0; i < 8; i++) {
+      CHECK(out[i] == in0[i] + in1[i]);
+    }
+  }
+  thvm_free();
+  unsetenv("THVM_TILE");
 
   // === Unary elementwise parity (NEG, RECIP, SQRT, EXP2, LOG2) ===
   TEST_BEGIN("metal-real/unary-parity-with-cpu");

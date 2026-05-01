@@ -1391,12 +1391,14 @@ typedef enum {
   KDISPATCH_METAL_JIT   = 6,   // Metal: cg_emit_metal -> MTLLibrary -> single-encoder dispatch
   KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (one encoder per KProgOp)
   KDISPATCH_CPU_TILE    = 8,   // CPU TileUop path over ScalarUop
+  KDISPATCH_METAL_TILE  = 9,   // Metal: TileUop MSL source -> threadgroup dispatch
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);
 u32   cg_program_dtype(KernelEntry const *ke);   // DT_COUNT on mixed
 char *cg_emit_metal(KernelEntry const *ke);   // caller frees
 char *cg_emit_tile_metal(KernelEntry const *ke);   // caller frees
+int   cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x, u32 *threads_x);
 u64   cg_now_us(void);
 void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
 

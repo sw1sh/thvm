@@ -7,10 +7,9 @@
 //   TILE_AXIS(...)
 //   TILE_LOOP_NEST(store, axes...)
 //
-// The tile plan is non-dispatching scaffolding for future CPU/Metal
-// tiled renderers.  This test pins arena lifecycle, name helpers, and
-// the seed builder's two axis sources: scalar S_RANGE fallback and
-// KernelAxes override.
+// The tile plan is now an opt-in CPU/Metal dispatch target.  This
+// test pins arena lifecycle, name helpers, and the seed builder's two
+// axis sources: scalar S_RANGE fallback and KernelAxes override.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -291,6 +290,11 @@ int main(void) {
   CHECK_EQ(info.axis_types[1], (u32)KAX_LOCAL);
   CHECK_EQ(info.axis_extents[1], 4u);
   CHECK(cg_supports_tile(ke));
+  u32 groups_x = 0;
+  u32 threads_x = 0;
+  CHECK(cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
+  CHECK_EQ(groups_x, 2u);
+  CHECK_EQ(threads_x, 4u);
   char *local_global_src = cg_emit_tile(ke);
   CHECK(local_global_src != NULL);
   if (local_global_src != NULL) {

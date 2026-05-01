@@ -1,9 +1,8 @@
 // schedule/tile.c -- tile-plan arena above scalar-UOps.
 //
-// This is intentionally non-dispatching scaffolding.  rangeify owns
-// semantic lowering to ScalarUop; tile.c owns a future schedule/memory
-// plan that can wrap those scalar bodies with explicit axes, local
-// memory, barriers, reductions, and MMA nodes.
+// Rangeify owns semantic lowering to ScalarUop; tile.c owns the
+// schedule/memory plan that wraps those scalar bodies with explicit
+// axes, local memory, barriers, reductions, and future MMA nodes.
 
 fn void tile_reserve(KernelEntry *ke, u32 needed) {
   if (needed <= ke->tile_uops_cap) {

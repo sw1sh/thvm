@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #import <Foundation/Foundation.h>
@@ -388,6 +389,105 @@ static int metal_jit_encode(KernelEntry *ke,
   return 1;
 }
 
+static int metal_tile_enabled(void) {
+  char const *e = getenv("THVM_TILE");
+  return e != NULL && e[0] == '1';
+}
+
+static u64 metal_tile_jit_hash(KernelEntry const *ke) {
+  u64 h = 0xcbf29ce484222325ULL ^ 0x4D54494C45554F50ULL;
+  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
+    u8 const *bytes = (u8 const *)ke->scalar_uops;
+    size_t total = (size_t)ke->n_scalar_uops * sizeof(ScalarUop);
+    for (size_t i = 0; i < total; i++) {
+      h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
+    }
+  }
+  if (ke->tile_uops != NULL && ke->n_tile_uops > 0) {
+    u8 const *bytes = (u8 const *)ke->tile_uops;
+    size_t total = (size_t)ke->n_tile_uops * sizeof(TileUop);
+    for (size_t i = 0; i < total; i++) {
+      h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
+    }
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    h ^= (u64)ke->input_dtypes[i]; h *= 0x100000001b3ULL;
+    h ^= (u64)ke->input_numels[i]; h *= 0x100000001b3ULL;
+  }
+  h ^= (u64)ke->n_inputs;          h *= 0x100000001b3ULL;
+  h ^= (u64)ke->output_dtype;      h *= 0x100000001b3ULL;
+  h ^= (u64)ke->output_numel;      h *= 0x100000001b3ULL;
+  h ^= (u64)ke->tile_axes_version; h *= 0x100000001b3ULL;
+  return h | (1ULL << 62);
+}
+
+static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
+                                                        u64 key) {
+  char *src = cg_emit_tile_metal(ke);
+  if (src == NULL) return nil;
+  NSString *srcStr = [NSString stringWithUTF8String:src];
+  free(src);
+  NSError *err = nil;
+  id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
+                                                  options:nil
+                                                    error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm: metal_tile_jit -- compile failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"k"];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm: metal_tile_jit -- function 'k' missing in compiled lib\n");
+    return nil;
+  }
+  id<MTLComputePipelineState> pso =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (pso == nil) {
+    fprintf(stderr, "thvm: metal_tile_jit -- pipeline-state failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  u32 idx = metal_jit_lookup_idx(key);
+  if (idx != (u32)-1) {
+    METAL_JIT_CACHE[idx].key = key;
+    METAL_JIT_PSOS [idx]     = pso;
+  }
+  return pso;
+}
+
+static int metal_tile_jit_encode(KernelEntry *ke,
+                                 __unsafe_unretained id<MTLBuffer> *src_bufs,
+                                 id<MTLBuffer> outBuf,
+                                 id<MTLCommandBuffer> cmd,
+                                 u32 groups_x,
+                                 u32 threads_x) {
+  if (groups_x == 0 || threads_x == 0) return 0;
+  u64 key = metal_tile_jit_hash(ke);
+  u32 idx = metal_jit_lookup_idx(key);
+  id<MTLComputePipelineState> pso = nil;
+  if (idx != (u32)-1 && METAL_JIT_CACHE[idx].key == key) {
+    pso = METAL_JIT_PSOS[idx];
+  } else {
+    pso = metal_tile_jit_build(ke, key);
+  }
+  if (pso == nil) return 0;
+  if ((NSUInteger)threads_x > [pso maxTotalThreadsPerThreadgroup]) {
+    return 0;
+  }
+
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:outBuf offset:0 atIndex:0];
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    [enc setBuffer:src_bufs[i] offset:0 atIndex:(1 + i)];
+  }
+  [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)groups_x, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads_x, 1, 1)];
+  [enc endEncoding];
+  return 1;
+}
+
 // METAL_PIPELINES_CACHE is the per-(opcode, dtype) pipeline cache;
 // it's defined further up so metal_shutdown can clear it.
 
@@ -539,11 +639,16 @@ static int metal_kernel_supported(struct KernelEntry const *ke) {
 
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
-  if (ke->n_ops == 0) return -1;
-  if (!metal_kernel_supported(ke)) return -1;
   if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
   id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
   if (outBuf == nil) return -1;
+
+  u32 tile_groups_x  = 0;
+  u32 tile_threads_x = 0;
+  int tile_supported = metal_tile_enabled()
+      && cg_tile_metal_dispatch_shape(ke, &tile_groups_x, &tile_threads_x);
+  int kprog_supported = metal_kernel_supported(ke);
+  if (!tile_supported && !kprog_supported) return -1;
 
   // Profile this dispatch.  kid = ke - KERNELS gives the slot index
   // the WL TKernelProfile / TKernelDispatchKind surface reads.
@@ -596,6 +701,32 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     }
   }
 
+  __unsafe_unretained id<MTLBuffer> jit_src_bufs[ke->n_inputs ? ke->n_inputs : 1];
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    jit_src_bufs[i] = METAL_BUFS[effective_buf_ids[i]].buf;
+  }
+
+  if (tile_supported) {
+    id<MTLCommandBuffer> tile_cmd = [METAL_QUEUE commandBuffer];
+    if (metal_tile_jit_encode(ke, jit_src_bufs, outBuf, tile_cmd,
+                              tile_groups_x, tile_threads_x)) {
+      [tile_cmd commit];
+      [tile_cmd waitUntilCompleted];
+      for (u32 i = 0; i < ke->n_inputs; i++) {
+        if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
+      }
+      cg_profile_record(kid, KDISPATCH_METAL_TILE, cg_now_us() - t0);
+      return 0;
+    }
+  }
+
+  if (!kprog_supported) {
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
+    }
+    return -1;
+  }
+
   // Try the JIT path: if cg_supports(ke), render the whole KProgOp[]
   // to a single MSL kernel and dispatch one encoder.  metal_jit_encode
   // returns 1 when it successfully encoded (caller commits + waits) and
@@ -603,10 +734,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // we fall through to the per-op path below, which handles REDUCE +
   // movement that the JIT can't yet).
   {
-    __unsafe_unretained id<MTLBuffer> jit_src_bufs[ke->n_inputs ? ke->n_inputs : 1];
-    for (u32 i = 0; i < ke->n_inputs; i++) {
-      jit_src_bufs[i] = METAL_BUFS[effective_buf_ids[i]].buf;
-    }
     id<MTLCommandBuffer> jit_cmd = [METAL_QUEUE commandBuffer];
     if (metal_jit_encode(ke, jit_src_bufs, outBuf, jit_cmd)) {
       [jit_cmd commit];
