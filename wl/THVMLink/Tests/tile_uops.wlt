@@ -175,6 +175,25 @@ VerificationTest[
 
 VerificationTest[
     tileWithRangeify[True,
+      TInit[];
+      xT = TTensorCreate @ N @ Range[12];
+      TRealize @ TUOpReduce[xT, 0, "SUM"];
+      kid = TKernelCount[] - 1;
+      plan = TKernelTilePlan[kid];
+      uops = TKernelTileUops[kid];
+      store = uops[[plan["store_tile"] + 1]];
+      reduce = uops[[plan["reduce_tile"] + 1]];
+      body = uops[[plan["body_tile"] + 1]];
+      {store["src"], reduce["op"], reduce["src"], body["op"],
+       plan["scalar_reduce"] === plan["scalar_value"],
+       plan["scalar_body_value"] =!= plan["scalar_value"]}
+    ],
+    {{2}, "TILE_REDUCE", {1}, "TILE_SCALAR_BODY", True, True},
+    TestID -> "tile-uops/reduce-node-links"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
       tileSimpleAdd[];
       plan = TKernelTilePlan[1];
       uops = TKernelTileUops[1];

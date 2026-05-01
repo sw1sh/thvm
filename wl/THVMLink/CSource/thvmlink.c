@@ -1823,8 +1823,9 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_uops(WolframLibraryData libData,
 }
 
 // thvm_wl_kernel_tile_plan_info(kid) -- compact TilePlanInfo snapshot:
-// [valid, n_axes, root, store_tile, body_tile, scalar_store,
-//  scalar_index, scalar_value, dtype, axis_id, axis_type, extent, ...].
+// [valid, n_axes, root, store_tile, reduce_tile, body_tile,
+//  scalar_store, scalar_index, scalar_value, scalar_body_value,
+//  scalar_reduce, dtype, axis_id, axis_type, extent, ...].
 EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
                                                      mint argc, MArgument *args,
                                                      MArgument res) {
@@ -1838,7 +1839,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
   tile_sync_from_scalar(ke);
   TilePlanInfo  info;
   int           ok      = tile_collect_plan_info(ke, &info);
-  mint          nFields = ok ? (9 + (mint)info.n_axes * 3) : 1;
+  mint          nFields = ok ? (12 + (mint)info.n_axes * 3) : 1;
   mint          dims[1] = {nFields};
   MTensor out;
   libData->MTensor_new(MType_Integer, 1, dims, &out);
@@ -1849,10 +1850,13 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
     dst[idx++] = (mint)info.n_axes;
     dst[idx++] = (mint)info.root_id;
     dst[idx++] = (mint)info.store_tile_id;
+    dst[idx++] = (mint)info.reduce_tile_id;
     dst[idx++] = (mint)info.body_tile_id;
     dst[idx++] = (mint)info.scalar_store_id;
     dst[idx++] = (mint)info.scalar_index_id;
     dst[idx++] = (mint)info.scalar_value_id;
+    dst[idx++] = (mint)info.scalar_body_value_id;
+    dst[idx++] = (mint)info.scalar_reduce_id;
     dst[idx++] = (mint)info.dtype;
     for (u32 i = 0; i < info.n_axes; i++) {
       dst[idx++] = (mint)info.axis_ids[i];

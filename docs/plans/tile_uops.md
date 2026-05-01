@@ -18,8 +18,9 @@ that future renderers can lower differently for CPU and Metal.
 - `tile_validate` checks the root/store/body/axis structure before a
   renderer or autotuner consumes the plan;
 - `tile_collect_plan_info` extracts the validated root into a compact
-  `TilePlanInfo` view: tile root/store/body ids, scalar store/index/
-  value ids, dtype, and per-axis ids/types/extents;
+  `TilePlanInfo` view: tile root/store/reduce/body ids, scalar
+  store/index/value/body/reduce ids, dtype, and per-axis
+  ids/types/extents;
 - WL exposes `TKernelTileUops[kid]` for the raw tile arena and
   `TKernelTilePlan[kid]` for the validated `TilePlanInfo` view;
 - `tile_loop_axis_count`, `tile_loop_axis_type`, and
@@ -66,11 +67,27 @@ TILE_LOOP_NEST(
 )
 ```
 
+For scalar reduction values it makes the reduction explicit:
+
+```text
+TILE_LOOP_NEST(
+  TILE_STORE(
+    TILE_REDUCE(
+      TILE_SCALAR_BODY(per-element value)
+    ),
+    S_STORE id
+  ),
+  TILE_AXIS(...)
+)
+```
+
 The scalar `S_BUFFERIZE` root still defines the complete scalar
 kernel, but the tile root's body starts at the memory-write boundary:
-`TILE_STORE.extra` references the scalar `S_STORE`, and
-`TILE_SCALAR_BODY.extra` references the scalar value expression stored
-by that `S_STORE`.
+`TILE_STORE.extra` references the scalar `S_STORE`.  On elementwise
+plans, `TILE_SCALAR_BODY.extra` references the scalar value expression
+stored by that `S_STORE`.  On reduce plans, `TILE_REDUCE.extra`
+references the scalar `S_REDUCE_*` value and `TILE_SCALAR_BODY.extra`
+references the reducer's per-element input expression.
 
 When `KernelAxes` is present, its axis types and extents define the
 `TILE_AXIS` nodes. This includes applied schedule opts such as
@@ -81,8 +98,9 @@ scalar `S_BUFFERIZE` root.
 The builder validates the emitted graph before returning success.
 Malformed or partial tile arenas are allowed during manual construction
 but report `tile_validate == 0` until `tile_root` points at a valid
-loop nest whose body is a `TILE_STORE(TILE_SCALAR_BODY(value))` pair
-linked back to the scalar `S_STORE`.  Consumers should call
+loop nest whose body is a `TILE_STORE(TILE_SCALAR_BODY(value))` or
+`TILE_STORE(TILE_REDUCE(TILE_SCALAR_BODY(value)))` chain linked back
+to the scalar `S_STORE`.  Consumers should call
 `tile_collect_plan_info` instead of manually walking `tile_uops` when
 they need ids or axis metadata.
 
@@ -103,7 +121,7 @@ output axis.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
-   kernels.
+2. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
+   instead of using only scalar reducer loops.
 3. Add `TILE_MMA` only after reductions and local-memory tiling are
    stable.

@@ -490,6 +490,14 @@ int main(void) {
   CHECK(build_scalar_reduce_sum_graph(tk) != 0);
   set_reduce_axes(tk, TEST_REDUCE_NO_TAIL);
   CHECK(tile_build_from_scalar(tk));
+  CHECK(tile_collect_plan_info(tk, &info));
+  CHECK(info.reduce_tile_id != 0);
+  CHECK_EQ(tk->tile_uops[info.store_tile_id].src[0], info.reduce_tile_id);
+  CHECK_EQ(tk->tile_uops[info.reduce_tile_id].op, TILE_REDUCE);
+  CHECK_EQ(tk->tile_uops[info.reduce_tile_id].src[0], info.body_tile_id);
+  CHECK_EQ(info.scalar_reduce_id, info.scalar_value_id);
+  CHECK_EQ(info.scalar_body_value_id,
+           tk->scalar_uops[info.scalar_value_id].src[0]);
   CHECK(cg_supports_tile(tk));
   char *red_src = cg_emit_tile(tk);
   CHECK(red_src != NULL);

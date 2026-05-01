@@ -681,10 +681,13 @@ typedef struct {
 // loops, Metal threadgroups, local memory, barriers, and eventually
 // MMA intrinsics.
 //
-// MVP invariant: tile_build_from_scalar creates
+// tile_build_from_scalar creates
 //   TILE_LOOP_NEST(TILE_STORE(TILE_SCALAR_BODY(value_id)), TILE_AXIS...)
-// from a KernelEntry's scalar_uops[] + KernelAxes.  Dispatch ignores
-// tile_uops for now; they are an introspectable optimization plan.
+// or, for scalar reducers,
+//   TILE_LOOP_NEST(TILE_STORE(TILE_REDUCE(TILE_SCALAR_BODY(value_id))), ...)
+// from a KernelEntry's scalar_uops[] + KernelAxes.  Dispatch consumes
+// tile_uops only on opt-in tile paths; default execution still follows
+// the scalar/KProgOp routes.
 typedef enum {
   TILE_NONE = 0,
   TILE_AXIS,        // extra = (KAX_* << 32) | extent
@@ -692,9 +695,9 @@ typedef enum {
   TILE_LOOP_NEST,   // src[0] = TILE_STORE body, src[1..] = TILE_AXIS nodes
   TILE_LOCAL_ALLOC, // future: threadgroup/local memory allocation
   TILE_LOAD,        // future: cooperative tile load
-  TILE_STORE,       // src[0] = TILE_SCALAR_BODY value, extra = scalar S_STORE id
+  TILE_STORE,       // src[0] = TILE_SCALAR_BODY/TILE_REDUCE, extra = scalar S_STORE id
   TILE_BARRIER,     // future: target barrier between tile stages
-  TILE_REDUCE,      // future: tiled/tree reduction
+  TILE_REDUCE,      // src[0] = TILE_SCALAR_BODY, extra = scalar S_REDUCE_* id
   TILE_MMA,         // future: tensor-core / simdgroup matmul
   TILE__COUNT
 } TileOp;
@@ -714,10 +717,13 @@ typedef struct {
 typedef struct {
   u32 root_id;
   u32 store_tile_id;
+  u32 reduce_tile_id;
   u32 body_tile_id;
   u32 scalar_store_id;
   u32 scalar_index_id;
   u32 scalar_value_id;
+  u32 scalar_body_value_id;
+  u32 scalar_reduce_id;
   u32 dtype;
   u32 n_axes;
   u32 axis_ids    [MAX_AXES];

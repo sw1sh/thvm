@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: explicit tile reduction nodes
+
+Tile plans now represent scalar `S_REDUCE_SUM`/`S_REDUCE_MAX` values
+as `TILE_REDUCE(TILE_SCALAR_BODY(...))` instead of only carrying
+reduction axes as renderer metadata.  `TKernelTilePlan` exposes the
+reduce tile and reducer scalar ids for introspection.
+
 ### Added: Metal tile dispatch
 
 Added an opt-in `THVM_TILE=1` Metal tile path for f32
