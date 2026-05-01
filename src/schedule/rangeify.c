@@ -721,17 +721,11 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // here is safer than emitting wrong addresses with
         // canonical loop_strides.
         if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u reduce_inner=%u contig=%d v.shape=[",
+          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u reduce_inner=%u\n",
                   i, in_numel, onum, v->shape.ndim, os->ndim,
                   in_ndim, has_reduce ? red->numel : 0,
                   has_reduce ? reduce_size : 0, reduce_in_numel,
-                  has_reduce ? reduce_inner : 0, v->contiguous);
-          for (u32 d = 0; d < v->shape.ndim; d++)
-            fprintf(stderr, "%u%s", v->shape.dims[d], d+1==v->shape.ndim?"":",");
-          fprintf(stderr, "] v.strides=[");
-          for (u32 d = 0; d < v->shape.ndim; d++)
-            fprintf(stderr, "%d%s", v->strides[d], d+1==v->shape.ndim?"":",");
-          fprintf(stderr, "]\n");
+                  has_reduce ? reduce_inner : 0);
         }
         RBAIL_MID("pre-INDEX no branch matched");
       }
