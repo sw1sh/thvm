@@ -33,10 +33,11 @@ that future renderers can lower differently for CPU and Metal.
   validated tile plan over scalar UOps, records dispatch kind
   `"tile"`, and falls back to the normal BLAS/JIT/scalar paths when
   no supported tile plan is present;
-- that tile path first tries a generated C tile renderer for simple
-  elementwise f32/f64 plans with `LOOP`/`UPCAST`/`LOCAL`/`GLOBAL`
-  axes, including `S_INDEX_E` addresses built from `S_I*`
-  expression nodes, then falls back to the tile interpreter for
+- that tile path first tries a generated C tile renderer for
+  non-reduction f32/f64 scalar graphs with
+  `LOOP`/`UPCAST`/`LOCAL`/`GLOBAL` axes, including `S_INDEX_E`
+  addresses built from `S_I*` expression nodes, f32/f64 casts, and
+  movement wrappers, then falls back to the tile interpreter for
   broader scalar graphs such as reductions;
 - the scalar C renderer also covers f32/f64 `S_REDUCE_SUM` and
   `S_REDUCE_MAX`; tile C dispatch still rejects tile plans carrying
@@ -96,13 +97,11 @@ interpreter for focused validation and profiling.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Broaden the generated CPU tile renderer beyond elementwise f32/f64
-   so it covers the scalar interpreter's movement and dtype surface.
-3. Add generated CPU tile support for reductions instead of relying on
+2. Add generated CPU tile support for reductions instead of relying on
    the tile interpreter fallback.
-4. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
+3. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
    threadgroup/grid ids and uses `TILE_BARRIER`.
-5. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
+4. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like
    kernels.
-6. Add `TILE_MMA` only after reductions and local-memory tiling are
+5. Add `TILE_MMA` only after reductions and local-memory tiling are
    stable.

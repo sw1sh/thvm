@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: generated tile C movement and cast coverage
+
+The generated CPU tile renderer now has focused execution tests for
+movement wrappers and mixed f32/f64 casts, proving that tile C reuses
+the broader scalar expression emitter instead of only covering plain
+elementwise arithmetic.
+
 ### Added: richer tile axis consumption
 
 Tile plans now sync `LOCAL` and `GROUP`/`GROUP_REDUCE` opts into the

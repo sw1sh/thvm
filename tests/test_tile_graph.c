@@ -41,6 +41,73 @@ static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
   return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
+static void run_tile_jit_1(KernelEntry *ke, const void *input, u64 input_bytes,
+                           void *output, u64 output_bytes) {
+  u32 in_buf  = cpu_buf_alloc(input_bytes);
+  u32 out_buf = cpu_buf_alloc(output_bytes);
+  CHECK_EQ(cpu_buf_write(in_buf, input, input_bytes), 0);
+  CHECK_EQ(cpu_buf_write(out_buf, output, output_bytes), 0);
+  u32 in_bufs[1] = {in_buf};
+  cpu_jit_cache_reset();
+  int jit_hit = 0;
+  for (u32 attempt = 0; attempt < 3; attempt++) {
+    if (cpu_jit_dispatch_tile(ke, in_bufs, out_buf)) {
+      jit_hit = 1;
+    }
+  }
+  CHECK(jit_hit);
+  CHECK_EQ(cpu_buf_read(out_buf, output, output_bytes), 0);
+}
+
+static u32 build_scalar_pad_graph(KernelEntry *ke) {
+  kernel_inputs_reserve(ke, 1);
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 3;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 5;
+
+  u32 r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                              ((u64)S_AXIS_LOOP << 32) | 5u);
+  u32 pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  u32 pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 in_src[2] = {pa, r0};
+  u32 ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  u32 la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  u32 wrap_src[2] = {la, r0};
+  u32 pad = rangeify_emit(ke, S_PAD, DT_FP32, 2, wrap_src, 1u | (3u << 8));
+  u32 out_src[2] = {pc, r0};
+  u32 ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, pad);
+  u32 buf_src[2] = {sto, r0};
+  return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+}
+
+static u32 build_scalar_cast64_to32_graph(KernelEntry *ke) {
+  kernel_inputs_reserve(ke, 1);
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP64;
+  ke->input_numels[0] = 3;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 3;
+
+  u32 r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                              ((u64)S_AXIS_LOOP << 32) | 3u);
+  u32 pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP64, 0);
+  u32 pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 in_src[2] = {pa, r0};
+  u32 ia = rangeify_emit(ke, S_INDEX_E, DT_FP64, 2, in_src, 0);
+  u32 la = rangeify_emit_unary(ke, S_LOAD, DT_FP64, ia);
+  u32 cast = rangeify_emit_unary(ke, S_CAST, DT_FP32, la);
+  u32 out_src[2] = {pc, r0};
+  u32 ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, cast);
+  u32 buf_src[2] = {sto, r0};
+  return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+}
+
 int main(void) {
   thvm_init();
 
@@ -313,6 +380,49 @@ int main(void) {
   CHECK(strstr(src, "#pragma clang loop unroll_count(2)") != NULL);
   CHECK(strstr(src, "for (unsigned _ta1") != NULL);
   free(src);
+
+  TEST_BEGIN("tile-graph/c-renderer-pad-wrapper-jit");
+  u32 tile_kid = kernel_alloc();
+  KernelEntry *tk = &KERNELS[tile_kid];
+  CHECK(build_scalar_pad_graph(tk) != 0);
+  CHECK(tile_build_from_scalar(tk));
+  CHECK(cg_supports_tile(tk));
+  char *pad_src = cg_emit_tile(tk);
+  CHECK(pad_src != NULL);
+  if (pad_src != NULL) {
+    CHECK(strstr(pad_src, "for (unsigned _ta0") != NULL);
+    CHECK(strstr(pad_src, "_ok") != NULL);
+    free(pad_src);
+  }
+  f32 pad_in[3] = {10.0f, 20.0f, 30.0f};
+  f32 pad_out[5] = {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f};
+  run_tile_jit_1(tk, pad_in, sizeof(pad_in), pad_out, sizeof(pad_out));
+  CHECK(pad_out[0] == 0.0f);
+  CHECK(pad_out[1] == 10.0f);
+  CHECK(pad_out[2] == 20.0f);
+  CHECK(pad_out[3] == 30.0f);
+  CHECK(pad_out[4] == 0.0f);
+  kernel_free_arrays(tk);
+
+  TEST_BEGIN("tile-graph/c-renderer-cast-f64-to-f32-jit");
+  CHECK(build_scalar_cast64_to32_graph(tk) != 0);
+  CHECK(tile_build_from_scalar(tk));
+  CHECK(cg_supports_tile(tk));
+  char *cast_src = cg_emit_tile(tk);
+  CHECK(cast_src != NULL);
+  if (cast_src != NULL) {
+    CHECK(strstr(cast_src, "float *out") != NULL);
+    CHECK(strstr(cast_src, "const double *in0") != NULL);
+    CHECK(strstr(cast_src, "((float)(") != NULL);
+    free(cast_src);
+  }
+  f64 cast_in[3] = {-8.0, 0.5, 16.0};
+  f32 cast_out[3] = {0.0f, 0.0f, 0.0f};
+  run_tile_jit_1(tk, cast_in, sizeof(cast_in), cast_out, sizeof(cast_out));
+  CHECK(cast_out[0] == -8.0f);
+  CHECK(cast_out[1] == 0.5f);
+  CHECK(cast_out[2] == 16.0f);
+  kernel_free_arrays(tk);
 
   thvm_free();
   TEST_REPORT();
