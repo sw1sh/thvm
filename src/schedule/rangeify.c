@@ -1482,7 +1482,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (v == 0) RBAIL_MID("SHRINK/PAD src 0");
       u32 ndim = p->out_ndim;
       if (ndim == 0) ndim = os->ndim;
-      if (ndim > 3) RBAIL_MID("SHRINK/PAD ndim > 3");
+      // Cap is u64-extra packing: 16 bits/axis (begin u16 for SHRINK,
+      // begin u8 + src_dim u8 for PAD).  4 axes fit; chain for more.
+      if (ndim > 4) RBAIL_MID("SHRINK/PAD ndim > 4");
       // Identity-pass SHRINK only (PAD identity-pass breaks lenet's
       // softmax chain -- needs deeper investigation).  When the
       // source value's via_rngs flag is set, the chain's iter shifts
@@ -1533,7 +1535,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                                       src_count, src_arr_v, extra_v);
         continue;
       }
-      if (ndim > os->ndim) RBAIL_MID("SHRINK/PAD ndim > 3");
+      if (ndim > os->ndim) RBAIL_MID("SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)");
       u8  sop;
       u64 extra = 0;
       if (p->opcode == UOP_SHRINK) {
