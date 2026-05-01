@@ -114,6 +114,27 @@ fn int lam_body_uses_var(u64 lam_loc) {
       }
     }
 
+    // TAG_CTR has its children at val+1..val+n (val+0 holds the arity
+    // NUM cell).  Use the public accessors and walk those slots
+    // explicitly rather than the generic val+i loop below, which would
+    // miss the last child by one.
+    if (tag == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      if (n == 0) continue;
+      u8 seen_ctr = 0;
+      for (u32 i = 0; i < v_count; i++) {
+        if (visited[i] == val) { seen_ctr = 1; break; }
+      }
+      if (seen_ctr) continue;
+      if (v_count >= LAM_BODY_MAX_VISITS) return 1;
+      visited[v_count++] = val;
+      for (u32 i = 0; i < n; i++) {
+        if (s_pos >= LAM_BODY_MAX_VISITS) return 1;
+        stack[s_pos++] = term_ctr_at(t, i);
+      }
+      continue;
+    }
+
     u32 ar = lam_body_arity(t);
     if (ar == 0) continue;
 

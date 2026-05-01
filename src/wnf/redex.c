@@ -48,7 +48,7 @@ fn u8 is_redex(Term t) {
       Term body = term_resolve(cell);
       u8 bt = term_tag(body);
       if (bt == TAG_SUP || bt == TAG_LAM || bt == TAG_ERA ||
-          bt == TAG_NUM || bt == TAG_TEN) return 1;
+          bt == TAG_NUM || bt == TAG_TEN || bt == TAG_CTR) return 1;
       // DUP-UOP commute: a lazy-compute UOP (CONST/ADD/MUL/NEG/REDUCE/
       // EXPAND/RESHAPE/FLIP) is eligible.  Active UOPs (KERNEL/ASSIGN)
       // are NOT -- they need to fire their own interaction first.
@@ -169,25 +169,37 @@ fn Term redex_fire(Term redex) {
             result = heap_read(mat_loc);
           } else if (term_tag(arg_w) == TAG_CTR &&
                      term_ext(arg_w) == match) {
-            // APP-MAT-CTR: destructure -- apply handler to each child via
-            // a fresh APP-chain.  Same-shape rule as wnf/_.c:510.
+            // Destructure with cell reuse: APP #1 lives in the
+            // consumed MAT cell, APP #2 in the consumed CTR's child
+            // slots.  See wnf/_.c TAG_MAT for the layout argument.
             Term handler = heap_read(mat_loc);
             u32 n = term_ctr_n(arg_w);
-            Term res = handler;
-            for (u32 i = 0; i < n; i++) {
-              Term child = term_ctr_at(arg_w, i);
-              u64 a = heap_alloc(2);
-              heap_set(a + 0, res);
-              heap_set(a + 1, child);
-              res = term_new(0, TAG_APP, 0, a);
+            if (n == 0) { result = handler; break; }
+            u64 ctr_loc = term_val(arg_w);
+            Term child0 = heap_read(ctr_loc + 1);
+            heap_set(mat_loc + 1, child0);
+            Term res = term_new(0, TAG_APP, 0, mat_loc);
+            if (n >= 2) {
+              Term child1 = heap_read(ctr_loc + 2);
+              heap_set(ctr_loc + 1, res);
+              heap_set(ctr_loc + 2, child1);
+              res = term_new(0, TAG_APP, 0, ctr_loc + 1);
+            }
+            if (n > 2) {
+              u64 apps = heap_alloc(2 * (u64)(n - 2));
+              for (u32 i = 2; i < n; i++) {
+                u64 a = apps + 2 * (u64)(i - 2);
+                heap_set(a + 0, res);
+                heap_set(a + 1, term_ctr_at(arg_w, i));
+                res = term_new(0, TAG_APP, 0, a);
+              }
             }
             result = res;
           } else {
-            Term fb = heap_read(mat_loc + 1);
-            u64  a2 = heap_alloc(2);
-            heap_set(a2 + 0, fb);
-            heap_set(a2 + 1, arg_w);
-            result = term_new(0, TAG_APP, 0, a2);
+            // Miss: reuse the consumed MAT cell as APP(fallback, arg).
+            heap_set(mat_loc + 0, heap_read(mat_loc + 1));
+            heap_set(mat_loc + 1, arg_w);
+            result = term_new(0, TAG_APP, 0, mat_loc);
           }
           break;
         }
@@ -224,6 +236,7 @@ fn Term redex_fire(Term redex) {
         case TAG_LAM: result = interact_dup_lam(lab, loc, side, body); break;
         case TAG_NUM: result = interact_dup_num(side, loc, body);      break;
         case TAG_TEN: result = interact_dup_ten(side, loc, body);      break;
+        case TAG_CTR: result = interact_dup_ctr(lab, loc, side, body); break;
         case TAG_UOP: {
           Term r = interact_dup_uop(lab, loc, side, body);
           if (r == 0) {
@@ -243,12 +256,14 @@ fn Term redex_fire(Term redex) {
       u32  name = term_ext(redex);
       Term book = (name < DEFS_CAP) ? DEFS[name] : 0;
       if (book == 0) return 0;
-      ITRS++;
+      // No ITRS bump: REF -> ALO is a structural unfolding step,
+      // not an interaction.  Match wnf/_.c TAG_REF.
       result = alo_realize(book, 0);
       break;
     }
     case TAG_ALO: {
-      ITRS++;
+      // No ITRS bump: ALO is a structural deep-copy step, not
+      // an interaction.  Match wnf/_.c TAG_ALO.
       result = alo_force(redex);
       break;
     }

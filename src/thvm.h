@@ -300,13 +300,13 @@ int             dtype_is_packed   (u32 dt);
 #define REDUCE_MAX   1
 
 // === Capacities ===
-#define HEAP_CAP     (1ULL << 26)   // 64M cells * 8B = 512 MiB.  Cheney splits in half (256 MiB per semi-space).  Larger than needed for unit tests but matches a real LeNet TGradMany realize peak (~12M cells / 96 MiB observed).
+#define HEAP_CAP     (1ULL << 28)   // 256M cells * 8B = 2 GiB.  Cheney splits in half (1 GiB per semi-space).  Bumped from 1<<26 so the HVM bench fib_nat (~1.2B cells over its tree) fits without GC.
 #define WNF_CAP      (1ULL << 16)   // 64K stack slots.
 #define TENS_CAP     (1ULL << 20)   // 1M tensor descriptor slots.
 #define KERNELS_CAP  (1ULL << 18)   // 256K compiled kernels.
 #define BOOK_CAP     (1ULL << 18)   // 256K cells of static def template heap.
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
-#define ALO_STATE_CAP (1ULL << 16)  // ALO substitution-chain entries.
+#define ALO_STATE_CAP (1ULL << 22)  // ALO substitution-chain entries.
 #define MAX_DIM      8              // max tensor rank
 #define KPROG_INIT_OPS   8          // initial program capacity (grows on demand)
 #define KPROG_MAX_OPS    (1ULL<<20) // hard sanity bound (1M ops/kernel)

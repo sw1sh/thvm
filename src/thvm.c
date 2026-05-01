@@ -456,6 +456,7 @@ void thvm_free(void) {
   KERNELS_NEXT    = 1;
   BOOK_NEXT       = 1;
   ALO_STATES_NEXT = 1;
+  alo_dup_share_reset();
   CPU_BUFS_NEXT   = 1;
   CPU_FREELIST_LEN = 0;
   memset(DEFS,             0, sizeof(((TContext *)0)->defs));

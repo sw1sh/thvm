@@ -50,9 +50,10 @@ int main(void) {
         u64  itrs_before = ITRS;
         Term out = wnf(app);
         CHECK_EQ(term_tag(out), TAG_ERA);
-        // Expected fires: REF unfold (1) + at least one ALO force (1)
-        // + APP-LAM beta (1).  Lower bound 3.
-        CHECK(ITRS - itrs_before >= 3);
+        // Only the APP-LAM beta counts as an interaction; REF -> ALO
+        // unfolding is a structural deep-copy step (matches HVM4's
+        // wnf_alo_*.c, none of which bumps ITRS).  Exactly 1.
+        CHECK_EQ(ITRS - itrs_before, 1);
     }
 
     TEST_BEGIN("ref/two-calls-allocate-fresh-cells");

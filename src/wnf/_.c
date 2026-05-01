@@ -118,13 +118,15 @@ enter:
         goto apply;
       }
       if (BUDGET_HIT) BAIL_AT(next);
-      ITRS++;
+      // REF -> ALO unfolding is structural, not a beta/dup/mat
+      // reduction -- HVM4's wnf_alo_*.c never bumps ITRS for it
+      // either.  Counting these inflated thvm's ITRS ~3x versus
+      // HVM4 on REF-heavy benches like fib_nat.
       next = alo_realize(book, 0);
       goto enter;
     }
     case TAG_ALO: {
       if (BUDGET_HIT) BAIL_AT(next);
-      ITRS++;
       next = alo_force(next);
       goto enter;
     }
@@ -335,7 +337,14 @@ apply:
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             u64  mat_loc = term_val(whnf);
             u32  match   = term_ext(whnf);
+            // Sync WNF_S_POS with our local s_pos before reentering wnf:
+            // the outer (this) call has already pushed APP frames onto
+            // the shared stack.  Without the sync the inner wnf would
+            // start at a stale base and overwrite our frames.  Same
+            // pattern as the UOP_ASSIGN path above.
+            WNF_S_POS = s_pos;
             Term arg_w   = wnf(arg);
+            s_pos = WNF_S_POS;
             ITRS++;
             if (term_tag(arg_w) == TAG_NUM &&
                 (u32)term_val(arg_w) == match) {
@@ -343,26 +352,54 @@ apply:
               goto enter;
             }
             if (term_tag(arg_w) == TAG_CTR && term_ext(arg_w) == match) {
-              // Destructure: apply handler to each child via fresh APP cells.
+              // Destructure: apply handler to each CTR child via an
+              // APP chain.  Reuse the consumed MAT cell for the first
+              // APP and the consumed CTR's child cells for the second
+              // APP; only allocate fresh storage from APP #3 onward.
+              // Mirrors HVM4's wnf_app_mat_ctr.c cell-reuse trick.
+              //
+              // Layout reminder:
+              //   MAT cell:  [mat_loc+0 = handler, mat_loc+1 = fallback]
+              //   CTR cell:  [ctr_loc+0 = NUM(arity),
+              //               ctr_loc+1 = c_0, ctr_loc+2 = c_1, ...]
+              // APP cell: [loc+0 = fun, loc+1 = arg].
+              //   APP #1 fits at mat_loc (already 2 cells; slot 0
+              //     already holds handler, write child0 to slot 1).
+              //   APP #2 fits at ctr_loc+1..ctr_loc+2 (the slots that
+              //     held c_0 and c_1; write APP#1 to ctr_loc+1 and
+              //     keep c_1 at ctr_loc+2).
               Term handler = heap_read(mat_loc + 0);
               u32 n = term_ctr_n(arg_w);
-              Term res = handler;
-              for (u32 i = 0; i < n; i++) {
-                Term child = term_ctr_at(arg_w, i);
-                u64 a = heap_alloc(2);
+              if (n == 0) {
+                next = handler;
+                goto enter;
+              }
+              u64 ctr_loc = term_val(arg_w);
+              Term child0 = heap_read(ctr_loc + 1);
+              heap_set(mat_loc + 1, child0);
+              Term res = term_new(0, TAG_APP, 0, mat_loc);
+              if (n == 1) { next = res; goto enter; }
+              Term child1 = heap_read(ctr_loc + 2);
+              heap_set(ctr_loc + 1, res);
+              heap_set(ctr_loc + 2, child1);
+              res = term_new(0, TAG_APP, 0, ctr_loc + 1);
+              if (n == 2) { next = res; goto enter; }
+              u64 apps = heap_alloc(2 * (u64)(n - 2));
+              for (u32 i = 2; i < n; i++) {
+                u64 a = apps + 2 * (u64)(i - 2);
                 heap_set(a + 0, res);
-                heap_set(a + 1, child);
+                heap_set(a + 1, term_ctr_at(arg_w, i));
                 res = term_new(0, TAG_APP, 0, a);
               }
               next = res;
               goto enter;
             }
-            // Miss: build APP(fallback, arg_w) and continue.
-            Term fallback = heap_read(mat_loc + 1);
-            u64  app2     = heap_alloc(2);
-            heap_set(app2 + 0, fallback);
-            heap_set(app2 + 1, arg_w);
-            next = term_new(0, TAG_APP, 0, app2);
+            // Miss: build APP(fallback, arg_w).  Reuse the consumed
+            // MAT cell -- it's already 2 words, slot 1 already holds
+            // fallback; copy fallback to slot 0, write arg_w to slot 1.
+            heap_set(mat_loc + 0, heap_read(mat_loc + 1));
+            heap_set(mat_loc + 1, arg_w);
+            next = term_new(0, TAG_APP, 0, mat_loc);
             goto enter;
           }
           default: {
@@ -437,6 +474,14 @@ apply:
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             whnf = interact_dup_ten(side, loc, whnf);
             continue;
+          }
+          case TAG_CTR: {
+            // DUP-CTR commute: rebuild #K{...} on both projection sides
+            // with each child wrapped in a fresh DUP.  Same shape as
+            // HVM4's generic DUP-NOD specialised to TAG_CTR.
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_ctr(lab, loc, side, whnf);
+            goto enter;
           }
           case TAG_UOP: {
             // DUP-UOP commute: structurally replicate the UOP at both

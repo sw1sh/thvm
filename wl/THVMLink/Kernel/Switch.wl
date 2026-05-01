@@ -17,6 +17,10 @@ TMatNum::usage = "TMatNum[matchVal, handler, fallback] returns a TAG_MAT atom th
 TMatCtr::usage = "TMatCtr[ctorName, handler, fallback] -- sugar for TMatNum[ctorName, handler, fallback] when the intended use is destructuring a CTR (constructor name `ctorName`, anonymous CTR uses 0).  When applied to a matching CTR, applies `handler` positionally to each CTR child.  Used by TGradMany to bind multi-target gradient results into a body lambda without an indexed projection primitive.";
 TIfZero::usage  = "TIfZero[counter, thenTerm, elseTerm] is sugar for APP[ TMatNum[0, thenTerm, lam _ . elseTerm], counter ].  The else branch ignores the bound argument so the user-side reads like a plain conditional.";
 
+TCtr::usage = "TCtr[label, c1, c2, ...] constructs a TAG_CTR with the given integer label and child terms.  Mirrors HVM4's `#K{a, b, ...}`.  Arity capped at 16 (matches HVM4's CTR limit).  An IC-level dup of the result fires DUP-CTR via interact_dup_ctr.";
+
+TMatChain::usage = "TMatChain[<|label1 -> handler1, label2 -> handler2, ...|>, fallback] builds nested TMatNum atoms so a single matcher dispatches multiple constructor labels, mirroring HVM4's `lambda { #L1: h1; #L2: h2; ... }` syntax.  Each handler receives the destructured CTR fields positionally via APP-MAT-CTR-MAT.";
+
 Begin["`Private`"];
 
 $op2Codes = <|
@@ -31,6 +35,8 @@ $termNewOp2Fn := $termNewOp2Fn = load["thvm_wl_term_new_op2",
     {Integer, Integer, Integer}, Integer]
 $termNewMatFn := $termNewMatFn = load["thvm_wl_term_new_mat",
     {Integer, Integer, Integer}, Integer]
+$termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr",
+    {Integer, {Integer, 1}}, Integer]
 
 (* TAG_NUM is just a packed term -- no library call needed. *)
 TNum[i_Integer]                      := TNum[i, "i32"]
@@ -62,6 +68,22 @@ TMatCtr[ctorName_Integer, handler_, fallback_] :=
    never referenced) so MAT-MIS lands correctly. *)
 TIfZero[counter_, thenTerm_, elseTerm_] :=
     TApp[TMatNum[0, thenTerm, TLam[ignored, elseTerm]], counter]
+
+TCtr[label_Integer, children___] := (
+    ensureInit[];
+    TTerm[$termNewCtrFn[label, ttermRaw /@ {children}]]
+)
+
+(* TMatChain[<|0 -> h0, 1 -> h1, ...|>, fb] expands to
+     TMatNum[0, h0, TMatNum[1, h1, ... TMatNum[k, hk, fb] ...]].
+   The chain dispatches by matching the applied arg's CTR label
+   against each TMatNum in turn; if none match, fallback gets the
+   arg via APP-MAT-MIS.  Mirrors HVM4's `lam { #K1: h1; #K2: h2 }`. *)
+TMatChain[arms_Association, fallback_] := Fold[
+    TMatNum[#2[[1]], #2[[2]], #1] &,
+    fallback,
+    Reverse @ Normal @ arms
+]
 
 (* === numeric arithmetic UpValues ====================================
    Lift `k - 1`, `k + 1`, `2 * k` etc. against integer-context TTerms

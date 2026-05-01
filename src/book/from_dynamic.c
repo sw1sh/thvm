@@ -97,6 +97,22 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
       return term_new(0, TAG_VAR, ext, book_binder);
     }
 
+    case TAG_CTR: {
+      // CTR layout: heap[val] = NUM(arity), heap[val+1..val+n] = children.
+      // Snapshot the whole 1+n run; recurse into each child so a VAR
+      // inside resolves to its remapped book LAM binder.
+      Term n_cell = heap_read(val);
+      if (term_tag(n_cell) != TAG_NUM) return t;
+      u32 n = (u32)term_val(n_cell);
+      u64 b = remap_lookup_or_alloc(map, map_pos, val, 1 + n);
+      book_set(b, n_cell);
+      for (u32 i = 0; i < n; i++) {
+        Term child = heap_read(val + 1 + i);
+        book_set(b + 1 + i, clone_to_book_rec(child, map, map_pos));
+      }
+      return term_new(0, TAG_CTR, ext, b);
+    }
+
     case TAG_LAM: {
       u64 b = remap_lookup_or_alloc(map, map_pos, val, 1);
       Term body = heap_read(val);
