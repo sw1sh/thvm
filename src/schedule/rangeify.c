@@ -1724,7 +1724,71 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                                       src_count, src_arr_v, extra_v);
         continue;
       }
-      if (ndim > os->ndim) RBAIL_MID("SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)");
+      // PAD-as-size1-inflation fusion (very narrow case to be safe):
+      // - single inflated axis (all others pass-through)
+      // - inflated axis must have src_dim==1 AND out_dim==reduce_size
+      // - source must be exactly S_LOAD (no IWHERE / chain)
+      //
+      // Then AND a single bounds-check on reduce_range into a fresh
+      // S_IWHERE wrapping the LOAD.  Wider fusion variants (multi-
+      // axis, IWHERE-wrapped loads, intermediate sources) all
+      // failed lenet softmax in iteration 31 -- the load's address
+      // can transitively depend on the rank-promoted axis through
+      // upstream chain transforms in ways that aren't visible
+      // locally.
+      if (p->opcode == UOP_PAD && ndim > os->ndim
+          && ke->scalar_uops[v].op == S_LOAD
+          && reduce_size != 0) {
+        u32 inflated_axis = (u32)-1;
+        u32 inflated_begin = 0;
+        u32 inflated_srcdim = 0;
+        int multi_inflate = 0;
+        for (u32 d = 0; d < ndim; d++) {
+          u32 begin   = p->pad_widths[2 * d];
+          u32 src_dim = p->src0_dims [d];
+          u32 out_dim = p->out_dims  [d];
+          if (begin == 0 && src_dim == out_dim) continue;
+          if (src_dim == 1 && out_dim == reduce_size) {
+            if (inflated_axis != (u32)-1) { multi_inflate = 1; break; }
+            inflated_axis   = d;
+            inflated_begin  = begin;
+            inflated_srcdim = src_dim;
+          } else {
+            multi_inflate = 1; break;
+          }
+        }
+        if (!multi_inflate && inflated_axis != (u32)-1) {
+          u32 hi_lim  = emit_iconst(ke, (i64)(inflated_begin + inflated_srcdim));
+          u32 axis_ok = emit_ibinop(ke, S_ILT, reduce_range, hi_lim);
+          if (inflated_begin > 0) {
+            u32 lo_lim = emit_iconst(ke, (i64)inflated_begin);
+            u32 lt_lo  = emit_ibinop(ke, S_ILT, reduce_range, lo_lim);
+            u32 one    = emit_iconst(ke, 1);
+            u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
+            axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
+          }
+          u32 zero    = emit_iconst(ke, 0);
+          u32 wsrc[3] = {axis_ok, v, zero};
+          prog_value[i] = rangeify_emit(ke, S_IWHERE, p->dtype, 3, wsrc, 0);
+          continue;
+        }
+      }
+      if (ndim > os->ndim) {
+        if (getenv("THVM_RANGEIFY_BAIL")) {
+          fprintf(stderr, "  SHRINK/PAD-rank: opcode=%s out_dims=[",
+                  p->opcode == UOP_PAD ? "PAD" : "SHRINK");
+          for (u32 d = 0; d < ndim; d++)
+            fprintf(stderr, "%u%s", p->out_dims[d], d+1==ndim?"":",");
+          fprintf(stderr, "] src_dims=[");
+          for (u32 d = 0; d < ndim; d++)
+            fprintf(stderr, "%u%s", p->src0_dims[d], d+1==ndim?"":",");
+          fprintf(stderr, "] os.dims=[");
+          for (u32 d = 0; d < os->ndim; d++)
+            fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
+          fprintf(stderr, "] src.op=%s\n", scalar_op_name(ke->scalar_uops[v].op));
+        }
+        RBAIL_MID("SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)");
+      }
       u8  sop;
       u64 extra = 0;
       if (p->opcode == UOP_SHRINK) {
