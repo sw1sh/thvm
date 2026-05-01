@@ -106,6 +106,16 @@ fn const char *scalar_op_name(u8 op) {
     case S_SHRINK:         return "S_SHRINK";
     case S_PAD:            return "S_PAD";
     case S_RESHAPE_V:      return "S_RESHAPE_V";
+    case S_ICONST:         return "S_ICONST";
+    case S_IADD:           return "S_IADD";
+    case S_ISUB:           return "S_ISUB";
+    case S_IMUL:           return "S_IMUL";
+    case S_IDIV:           return "S_IDIV";
+    case S_IMOD:           return "S_IMOD";
+    case S_ILT:            return "S_ILT";
+    case S_IAND:           return "S_IAND";
+    case S_IWHERE:         return "S_IWHERE";
+    case S_INDEX_E:        return "S_INDEX_E";
     default:               return "S_?";
   }
 }

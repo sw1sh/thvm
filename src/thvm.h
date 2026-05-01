@@ -605,6 +605,40 @@ typedef enum {
   // Used for rank-mismatch RESHAPE (input rank != output rank or !=
   // kernel LOOP rank); input refs point to fresh S_AXIS_VIRT ranges.
   S_RESHAPE_V,
+  // ===========================================================
+  // Integer iter-arithmetic ops -- the backbone for porting
+  // tinygrad's apply_movement_op (indexing.py:128-145).  Each
+  // returns an i64 value (in the low bits of u64) computed from
+  // its sources.  All sources must themselves return integer
+  // values (S_RANGE iter, S_ICONST, or other S_I* ops).  Used to
+  // build address expressions for S_INDEX_E.
+  //
+  // Examples:
+  //   SHRINK adds a per-axis begin to an iter:
+  //     S_IADD(iter, S_ICONST(begin))
+  //   FLIP negates: S_ISUB(S_ICONST(extent-1), iter)
+  //   RESHAPE flat-roundtrip: S_IMOD(S_IDIV(flat, S_ICONST(s)), S_ICONST(d))
+  //   PAD bounds-checked load: S_IWHERE(S_IAND(S_ILT(begin, iter),
+  //                                            S_ILT(iter, begin+sd)),
+  //                                     S_LOAD(...), S_ICONST(0))
+  S_ICONST,    // extra = signed integer literal (i64 reinterpret)
+  S_IADD,      // src[0] + src[1]
+  S_ISUB,      // src[0] - src[1]
+  S_IMUL,      // src[0] * src[1]
+  S_IDIV,      // src[0] / src[1] (integer truncating divide)
+  S_IMOD,      // src[0] % src[1]
+  S_ILT,       // src[0] < src[1] -> 0 or 1
+  S_IAND,      // src[0] & src[1] (bitwise; used for boolean AND of 0/1 values)
+  S_IWHERE,    // src[0] ? src[1] : src[2]
+  // Expression-based INDEX.  src[0] = buffer (DEFINE_PARAM/OUTPUT),
+  // src[1] = integer expression giving the byte/element offset.  No
+  // per-axis stride packing -- the caller builds the address as a
+  // tree of S_I* ops over S_RANGE iters.  Mirrors tinygrad's INDEX
+  // (a BinaryOp on a pointer + an arbitrary symbolic offset).
+  // The output of S_LOAD/S_STORE on this INDEX behaves identically
+  // to the legacy S_INDEX form -- only the address computation
+  // differs.
+  S_INDEX_E,
   S__COUNT
 } ScalarOp;
 

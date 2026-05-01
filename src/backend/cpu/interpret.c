@@ -740,6 +740,46 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       }
       return v;
     }
+    // === Integer iter-arithmetic (S_I* family) ===========================
+    // Each returns an i64 value in the low 64 bits of the u64 result.
+    // Sources are other S_I* ops, S_RANGE iters (returned as integer),
+    // or S_ICONST.  See thvm.h S_I* comments for the use cases.
+    case S_ICONST: return u->extra;
+    case S_IADD:   return (u64)((i64)eval_scalar(c, u->src[0]) +
+                                (i64)eval_scalar(c, u->src[1]));
+    case S_ISUB:   return (u64)((i64)eval_scalar(c, u->src[0]) -
+                                (i64)eval_scalar(c, u->src[1]));
+    case S_IMUL:   return (u64)((i64)eval_scalar(c, u->src[0]) *
+                                (i64)eval_scalar(c, u->src[1]));
+    case S_IDIV: {
+      i64 b = (i64)eval_scalar(c, u->src[1]);
+      if (b == 0) return 0;
+      return (u64)((i64)eval_scalar(c, u->src[0]) / b);
+    }
+    case S_IMOD: {
+      i64 b = (i64)eval_scalar(c, u->src[1]);
+      if (b == 0) return 0;
+      return (u64)((i64)eval_scalar(c, u->src[0]) % b);
+    }
+    case S_ILT:    return ((i64)eval_scalar(c, u->src[0]) <
+                           (i64)eval_scalar(c, u->src[1])) ? 1ULL : 0ULL;
+    case S_IAND:   return eval_scalar(c, u->src[0]) & eval_scalar(c, u->src[1]);
+    case S_IWHERE: return eval_scalar(c, u->src[0])
+                          ? eval_scalar(c, u->src[1])
+                          : eval_scalar(c, u->src[2]);
+    // Expression-based INDEX: addr = eval_scalar(src[1]).  src[0] is
+    // the buffer (DEFINE_PARAM or DEFINE_OUTPUT).  Mirrors S_INDEX's
+    // returns: high 32 bits hold the slot id (for DEFINE_PARAM, so
+    // S_LOAD/STORE finds the right buffer pointer); low 32 bits hold
+    // the address.
+    case S_INDEX_E: {
+      u32 buf_id = u->src[0];
+      ScalarUop const *bu = &c->ke->scalar_uops[buf_id];
+      u64 addr = eval_scalar(c, u->src[1]);
+      if (bu->op == S_DEFINE_OUTPUT) return addr & 0xFFFFFFFFu;
+      u32 slot = (u32)bu->extra;
+      return ((u64)slot << 32) | (addr & 0xFFFFFFFFu);
+    }
     case S_CAST: {
       // Value-preserving cross-dtype cast.  The source op carries
       // its own dtype; we decode the bits as that type, convert to
