@@ -1,0 +1,142 @@
+// test_tile_graph.c -- tile-plan arena above scalar-UOps.
+//
+// Builds the same tiny scalar graph as test_scalar_graph, then seeds
+// a tile plan from it:
+//   TILE_SCALAR_BODY(S_BUFFERIZE id)
+//   TILE_AXIS(...)
+//   TILE_LOOP_NEST(body, axes...)
+//
+// The tile plan is non-dispatching scaffolding for future CPU/Metal
+// tiled renderers.  This test pins arena lifecycle, name helpers, and
+// the seed builder's two axis sources: scalar S_RANGE fallback and
+// KernelAxes override.
+
+#include "../src/thvm.c"
+#include "test.h"
+
+static u32 build_scalar_add_graph(KernelEntry *ke, u32 extent) {
+  u32 r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+              ((u64)S_AXIS_LOOP << 32) | (u64)extent);
+  u32 pa  = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  u32 pb  = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 1);
+  u32 pc  = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 ia  = rangeify_emit_binary(ke, S_INDEX, DT_FP32, pa, r0);
+  u32 ib  = rangeify_emit_binary(ke, S_INDEX, DT_FP32, pb, r0);
+  u32 ic  = rangeify_emit_binary(ke, S_INDEX, DT_FP32, pc, r0);
+  u32 la  = rangeify_emit_unary (ke, S_LOAD,  DT_FP32, ia);
+  u32 lb  = rangeify_emit_unary (ke, S_LOAD,  DT_FP32, ib);
+  u32 sum = rangeify_emit_binary(ke, S_ADD,   DT_FP32, la, lb);
+  u32 sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, sum);
+  u32 src[2] = {sto, r0};
+  return rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, src, 0);
+}
+
+static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
+  Shape s = {0};
+  s.ndim = ndim;
+  for (u32 i = 0; i < ndim; i++) {
+    s.dims[i] = dims[i];
+  }
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
+}
+
+int main(void) {
+  thvm_init();
+
+  u32 kid = kernel_alloc();
+  KernelEntry *ke = &KERNELS[kid];
+
+  TEST_BEGIN("tile-graph/initial-state");
+  CHECK_EQ((unsigned long long)ke->tile_uops, 0);
+  CHECK_EQ(ke->n_tile_uops, 0);
+  CHECK_EQ(ke->tile_uops_cap, 0);
+
+  TEST_BEGIN("tile-graph/opname-helpers-cover-enum");
+  for (u8 op = TILE_NONE; op < TILE__COUNT; op++) {
+    const char *nm = tile_op_name(op);
+    CHECK(nm != NULL);
+    CHECK(nm[0] == 'T' && nm[1] == 'I');
+  }
+  CHECK_EQ((u64)tile_axis_name(KAX_LOOP)[0],   (u64)'L');
+  CHECK_EQ((u64)tile_axis_name(KAX_REDUCE)[0], (u64)'R');
+  CHECK_EQ((u64)tile_axis_name(KAX_UPCAST)[0], (u64)'U');
+
+  TEST_BEGIN("tile-graph/build-from-scalar-ranges");
+  u32 scalar_root = build_scalar_add_graph(ke, 8);
+  CHECK(tile_build_from_scalar(ke));
+  CHECK_EQ(ke->n_tile_uops, 4);       // sentinel + body + axis + loop
+  CHECK_EQ(ke->tile_uops[0].op, TILE_NONE);
+  CHECK_EQ(ke->tile_uops[1].op, TILE_SCALAR_BODY);
+  CHECK_EQ((u32)ke->tile_uops[1].extra, scalar_root);
+  CHECK_EQ(ke->tile_uops[2].op, TILE_AXIS);
+  CHECK_EQ((u32)(ke->tile_uops[2].extra >> 32), (u32)KAX_LOOP);
+  CHECK_EQ((u32)(ke->tile_uops[2].extra & 0xFFFFFFFFu), 8u);
+  CHECK_EQ(ke->tile_uops[3].op, TILE_LOOP_NEST);
+  CHECK_EQ(ke->tile_uops[3].src_count, 2);
+  CHECK_EQ(ke->tile_uops[3].src[0], 1);
+  CHECK_EQ(ke->tile_uops[3].src[1], 2);
+  CHECK_EQ(ke->tile_uops[3].src[2], 0);
+
+  TEST_BEGIN("tile-graph/kernel-axes-override");
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 2;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 2;
+  ke->axes->axis_types[1] = KAX_UPCAST;
+  ke->axes->full_shape[1] = 4;
+  CHECK(tile_build_from_scalar(ke));
+  CHECK_EQ(ke->n_tile_uops, 5);       // sentinel + body + two axes + loop
+  CHECK_EQ(ke->tile_uops[2].op, TILE_AXIS);
+  CHECK_EQ((u32)(ke->tile_uops[2].extra >> 32), (u32)KAX_LOOP);
+  CHECK_EQ((u32)(ke->tile_uops[2].extra & 0xFFFFFFFFu), 2u);
+  CHECK_EQ(ke->tile_uops[3].op, TILE_AXIS);
+  CHECK_EQ((u32)(ke->tile_uops[3].extra >> 32), (u32)KAX_UPCAST);
+  CHECK_EQ((u32)(ke->tile_uops[3].extra & 0xFFFFFFFFu), 4u);
+  CHECK_EQ(ke->tile_uops[4].op, TILE_LOOP_NEST);
+  CHECK_EQ(ke->tile_uops[4].src_count, 3);
+  CHECK_EQ(ke->tile_uops[4].src[1], 2);
+  CHECK_EQ(ke->tile_uops[4].src[2], 3);
+
+  TEST_BEGIN("tile-graph/free-then-reemit");
+  tile_free(ke);
+  CHECK_EQ((unsigned long long)ke->tile_uops, 0);
+  CHECK_EQ(ke->n_tile_uops, 0);
+  CHECK_EQ(ke->tile_uops_cap, 0);
+  for (u32 i = 0; i < 100; i++) {
+    u32 id = tile_emit_leaf(ke, TILE_AXIS, DT_INT64,
+                            ((u64)KAX_LOOP << 32) | i);
+    CHECK_EQ(id, i + 1);
+  }
+  CHECK_EQ(ke->n_tile_uops, 101);
+  CHECK(ke->tile_uops_cap >= 101);
+  CHECK_EQ(ke->tile_uops[100].op, TILE_AXIS);
+  CHECK_EQ((u32)ke->tile_uops[100].extra, 99u);
+
+  TEST_BEGIN("tile-graph/kernel-free-cleans-tile-and-scalar");
+  kernel_free_arrays(ke);
+  CHECK_EQ((unsigned long long)ke->tile_uops, 0);
+  CHECK_EQ(ke->n_tile_uops, 0);
+  CHECK_EQ(ke->tile_uops_cap, 0);
+  CHECK_EQ((unsigned long long)ke->scalar_uops, 0);
+  CHECK_EQ(ke->n_scalar_uops, 0);
+  CHECK_EQ(ke->scalar_uops_cap, 0);
+
+  TEST_BEGIN("tile-graph/materialize-auto-seeds-tile-plan");
+  setenv("THVM_RANGEIFY", "1", 1);
+  u32 dims[1] = {4};
+  Term a = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(dims, 1));
+  Term b = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(dims, 1));
+  thvm_materialize(uop_binary(UOP_ADD, a, b));
+  KernelEntry *mk = &KERNELS[KERNELS_NEXT - 1];
+  CHECK(mk->scalar_uops != NULL);
+  CHECK(mk->n_scalar_uops > 1);
+  CHECK(mk->tile_uops != NULL);
+  CHECK(mk->n_tile_uops >= 4);
+  CHECK_EQ(mk->tile_uops[0].op, TILE_NONE);
+  CHECK_EQ(mk->tile_uops[1].op, TILE_SCALAR_BODY);
+  CHECK_EQ(mk->tile_uops[mk->n_tile_uops - 1].op, TILE_LOOP_NEST);
+
+  thvm_free();
+  TEST_REPORT();
+}

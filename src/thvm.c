@@ -222,6 +222,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // Produces the scheduled DAG of UOP_KERNEL terms that
 // interact_kernel fires bottom-up.
 #include "schedule/rangeify.c"
+#include "schedule/tile.c"
 #include "schedule/kernel_alloc.c"
 #include "schedule/kernel_program_cache.c"
 #include "schedule/uop_meta.c"

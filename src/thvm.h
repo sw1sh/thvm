@@ -671,6 +671,43 @@ typedef struct {
 #define SUOP_INIT_CAP   16
 #define SUOP_MAX_CAP    (1u << 20)
 
+// === tile UOp plan =====================================================
+// TileUop is the next scheduling layer above ScalarUop.  It does not
+// replace rangeify: it wraps a proven scalar graph with an explicit
+// tile / loop / memory plan that renderers can later lower to CPU
+// loops, Metal threadgroups, local memory, barriers, and eventually
+// MMA intrinsics.
+//
+// MVP invariant: tile_build_from_scalar creates
+//   TILE_LOOP_NEST(TILE_SCALAR_BODY(bufferize_id), TILE_AXIS...)
+// from a KernelEntry's scalar_uops[] + KernelAxes.  Dispatch ignores
+// tile_uops for now; they are an introspectable optimization plan.
+typedef enum {
+  TILE_NONE = 0,
+  TILE_AXIS,        // extra = (KAX_* << 32) | extent
+  TILE_SCALAR_BODY, // extra = ScalarUop id of S_BUFFERIZE root
+  TILE_LOOP_NEST,   // src[0] = body, src[1..] = TILE_AXIS nodes
+  TILE_LOCAL_ALLOC, // future: threadgroup/local memory allocation
+  TILE_LOAD,        // future: cooperative tile load
+  TILE_STORE,       // future: cooperative tile store
+  TILE_BARRIER,     // future: target barrier between tile stages
+  TILE_REDUCE,      // future: tiled/tree reduction
+  TILE_MMA,         // future: tensor-core / simdgroup matmul
+  TILE__COUNT
+} TileOp;
+
+#define TILE_MAX_SRC  (MAX_AXES + 1)
+#define TILE_INIT_CAP 16
+#define TILE_MAX_CAP  (1u << 20)
+
+typedef struct {
+  u8  op;                    // TileOp
+  u8  src_count;             // number of valid src[] entries
+  u32 dtype;                 // DT_* where meaningful, DT_COUNT otherwise
+  u32 src[TILE_MAX_SRC];     // indices into TileUop[]; 0 = unused
+  u64 extra;                 // op-specific payload
+} TileUop;
+
 typedef struct KernelEntry {
   // Input-tensor arrays: dynamically grown.  inputs_cap is the
   // allocated length; n_inputs is the number of slots actually used.
@@ -769,6 +806,14 @@ typedef struct KernelEntry {
   ScalarUop *scalar_uops;
   u32        n_scalar_uops;
   u32        scalar_uops_cap;
+
+  // Tile-level schedule/memory plan above scalar_uops.  NULL until
+  // tile_build_from_scalar (or a future tile planner) populates it.
+  // Slot 0 is TILE_NONE; live ops occupy [1, n_tile_uops).
+  // Owned by the KernelEntry; freed by kernel_free_arrays.
+  TileUop   *tile_uops;
+  u32        n_tile_uops;
+  u32        tile_uops_cap;
 } KernelEntry;
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
@@ -1161,6 +1206,21 @@ fn const char *scalar_axis_name(u32 axis_type);
 // the scalar form.  Returns 1 on success (ke->scalar_uops populated;
 // caller can dispatch through the scalar path) and 0 on bail.
 fn int  rangeify_try_lower_elementwise(struct KernelEntry *ke);
+
+// === tile UOp arena ops (schedule/tile.c) ===
+// The tile plan is the optimization layer above scalar_uops.  These
+// helpers mirror the scalar arena API: slot 0 is TILE_NONE, live ops
+// start at 1, and src[] entries of 0 mean "unused".
+fn void tile_reserve(struct KernelEntry *ke, u32 needed);
+fn u32  tile_emit(struct KernelEntry *ke, u8 op, u32 dtype,
+                  u8 src_count, const u32 *src, u64 extra);
+fn u32  tile_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
+fn void tile_free(struct KernelEntry *ke);
+fn const char *tile_op_name(u8 op);
+fn const char *tile_axis_name(u32 axis_type);
+// Seed a TILE_LOOP_NEST plan from ke->scalar_uops[] + KernelAxes.
+// Returns 1 on success, 0 when scalar_uops is absent or malformed.
+fn int  tile_build_from_scalar(struct KernelEntry *ke);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 

@@ -1219,18 +1219,21 @@ static Term emit_kernel_for_boundary(u32 bi) {
   axes_default_for(ke);
 
   // Rangeify lowering: produce a parallel scalar-UOp form alongside
-  // the legacy KProgOp[].  When the lowering succeeds,
-  // cpu_dispatch_kernel routes through the scalar interpreter; when
-  // it bails (op not yet supported, broadcast pattern not handled,
-  // etc.), the legacy KProgOp[] dispatch runs and ke->scalar_uops
-  // stays empty.  DEFAULT-ON as of Phase E -- THVM_RANGEIFY=0
-  // disables and reverts to the legacy emit path for every kernel.
+  // the legacy KProgOp[].  When the lowering succeeds, seed the
+  // non-dispatching TileUop plan above it; cpu_dispatch_kernel still
+  // routes through the scalar interpreter/JIT.  When rangeify bails
+  // (op not yet supported, broadcast pattern not handled, etc.), the
+  // legacy KProgOp[] dispatch runs and scalar_uops/tile_uops stay
+  // empty.  DEFAULT-ON as of Phase E -- THVM_RANGEIFY=0 disables and
+  // reverts to the legacy emit path for every kernel.
   // Reads getenv per emit (cheap; ~1us) so test harnesses can flip
   // the flag mid-session without restarting the runtime.
   {
     const char *e = getenv("THVM_RANGEIFY");
     int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
-    if (rangeify_on) rangeify_try_lower_elementwise(ke);
+    if (rangeify_on && rangeify_try_lower_elementwise(ke)) {
+      tile_build_from_scalar(ke);
+    }
   }
 
   u64 kloc = heap_alloc(2);

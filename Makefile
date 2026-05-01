@@ -41,6 +41,7 @@ TESTS := \
   $(BIN)/test_extern_pin \
   $(BIN)/test_realize_classify \
   $(BIN)/test_scalar_graph \
+  $(BIN)/test_tile_graph \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \
   $(BIN)/test_eql \

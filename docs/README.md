@@ -50,6 +50,9 @@ until that step lands.
   *Equational reasoning and the IC-as-ATP layer* section of
   [glossary.md](glossary.md) -- "superposition" means two different
   things on the two sides.
+- [plans/tile_uops.md](plans/tile_uops.md): tile-level schedule
+  plan above scalar UOps.  Starts as non-dispatching infrastructure
+  and is intended to become the CPU/Metal autotuning target.
 
 ## Conventions
 

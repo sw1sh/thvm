@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Added: tile-UOp schedule scaffold
+
+Added a non-dispatching `TileUop` arena on `KernelEntry` as the next
+optimization layer above scalar UOps.  The initial builder seeds a
+`TILE_LOOP_NEST(TILE_SCALAR_BODY, TILE_AXIS...)` plan from
+`scalar_uops` plus `KernelAxes` when present, materialize runs it
+after successful rangeify, and lifecycle cleanup goes through
+`kernel_free_arrays`.  Added a focused C test and a plan doc for the
+CPU/Metal tiled renderer path.
+
 ### Added: fusion_count.wlt + realize loop fixed-point (g3d)
 
 `wl/THVMLink/Tests/fusion_count.wlt` (4/4 green) pins the plan's
