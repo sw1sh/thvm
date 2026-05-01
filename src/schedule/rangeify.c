@@ -297,6 +297,61 @@ typedef struct {
                    // through S_IWHERE.
 } RngsCtx;
 
+static int reshape_identity_mod_ones(KProgOp const *p) {
+  if (p->src0_ndim == 0 || p->out_ndim == 0) {
+    return 0;
+  }
+  u32 a_idx = 0;
+  u32 b_idx = 0;
+  while (a_idx < p->src0_ndim || b_idx < p->out_ndim) {
+    while (a_idx < p->src0_ndim && p->src0_dims[a_idx] == 1) {
+      a_idx++;
+    }
+    while (b_idx < p->out_ndim && p->out_dims[b_idx] == 1) {
+      b_idx++;
+    }
+    if (a_idx == p->src0_ndim && b_idx == p->out_ndim) {
+      break;
+    }
+    if (a_idx == p->src0_ndim || b_idx == p->out_ndim) {
+      return 0;
+    }
+    if (p->src0_dims[a_idx] != p->out_dims[b_idx]) {
+      return 0;
+    }
+    a_idx++;
+    b_idx++;
+  }
+  return 1;
+}
+
+static int reshape_pad_chain_peel_ok(KProgOp const *p) {
+  if (p->opcode != UOP_RESHAPE) {
+    return 0;
+  }
+  if (reshape_identity_mod_ones(p)) {
+    return 1;
+  }
+  if (p->src0_ndim == 0 || p->out_ndim == 0
+      || p->src0_ndim != p->out_ndim) {
+    return 0;
+  }
+  u64 src_numel = 1;
+  u64 out_numel = 1;
+  for (u32 d = 0; d < p->src0_ndim; d++) {
+    src_numel *= p->src0_dims[d];
+  }
+  for (u32 d = 0; d < p->out_ndim; d++) {
+    out_numel *= p->out_dims[d];
+  }
+  if (src_numel != out_numel) {
+    return 0;
+  }
+  // Leading-1 flatten-then-PAD chains still mis-address LeNet's first
+  // conv image patches; keep them on the legacy fallback path for now.
+  return p->src0_dims[0] > 1;
+}
+
 // Emit a use-local input load: S_INDEX_E(param, addr_expr) + S_LOAD
 // + optional S_IWHERE(valid_mask, load, 0).  The address is built
 // from `r->refs[d]` * `view->strides[d]` + offset.  Returns the load
@@ -834,6 +889,85 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           break;
         }
         case UOP_PAD: {
+          // First-pass: extend in_rngs.ndim to match p->out_ndim by
+          // inferring iter expressions for rank-promoted axes (where
+          // PAD adds an axis the downstream iter context doesn't yet
+          // have).  Strategy: if a missing axis's out_dim matches
+          // reduce_size, route it through reduce_range; else if it
+          // matches an unused os.dim, route through loop_ranges[that].
+          // Without this extension, backward walk skips rank-promoted
+          // axes, and the PAD's bounds + later RESHAPE flat-roundtrip
+          // can't see the promoted iter, leaving downstream addressing
+          // ambiguous.
+          if (p->out_ndim > in_rngs.ndim) {
+            u8 os_used[MAX_DIM] = {0};
+            int reduce_used_local = 0;
+            // Mark currently-used os/reduce axes (from existing refs).
+            for (u32 d = 0; d < in_rngs.ndim; d++) {
+              for (u32 e = 0; e < os->ndim; e++) {
+                if (in_rngs.refs[d] == loop_ranges[e]) {
+                  os_used[e] = 1;
+                  break;
+                }
+              }
+              if (in_rngs.refs[d] == reduce_range) {
+                reduce_used_local = 1;
+              }
+            }
+            // For each missing axis, find an iter source.
+            u32 new_refs[MAX_DIM];
+            for (u32 d = 0; d < p->out_ndim; d++) {
+              new_refs[d] = 0;
+            }
+            // Map existing refs to PAD axes that look identity-ish:
+            // a PAD axis with src_dim == out_dim isn't rank-promoted,
+            // so it inherits an existing in_rngs ref.  Walk the
+            // existing refs in order, assigning to identity-ish axes.
+            u32 in_d = 0;
+            for (u32 d = 0; d < p->out_ndim && in_d < in_rngs.ndim; d++) {
+              if (p->src0_dims[d] == p->out_dims[d]) {
+                new_refs[d] = in_rngs.refs[in_d++];
+              }
+            }
+            // Fill rank-promoted axes (src_dim < out_dim) by routing
+            // through reduce_range or an unused os axis.
+            int extension_ok = 1;
+            for (u32 d = 0; d < p->out_ndim; d++) {
+              if (new_refs[d] != 0) {
+                continue;
+              }
+              u32 out_dim = p->out_dims[d];
+              if (reduce_size != 0 && out_dim == reduce_size && !reduce_used_local) {
+                new_refs[d] = reduce_range;
+                reduce_used_local = 1;
+              } else {
+                int matched = 0;
+                for (u32 e = 0; e < os->ndim; e++) {
+                  if (os_used[e]) {
+                    continue;
+                  }
+                  if (os->dims[e] == out_dim) {
+                    new_refs[d] = loop_ranges[e];
+                    os_used[e] = 1;
+                    matched = 1;
+                    break;
+                  }
+                }
+                if (!matched) {
+                  extension_ok = 0;
+                  break;
+                }
+              }
+            }
+            if (extension_ok) {
+              for (u32 d = 0; d < p->out_ndim; d++) {
+                in_rngs.refs[d] = new_refs[d];
+              }
+              in_rngs.ndim = p->out_ndim;
+            }
+            // If extension failed, fall through with original ndim;
+            // downstream will still bail correctly.
+          }
           for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
             u32 begin   = p->pad_widths[2 * d];
             u32 src_dim = p->src0_dims[d];
@@ -1396,21 +1530,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       // size-1 axes are handled by stride-0 broadcasts emitted earlier.
       // Covers the dominant `[N] -> [N, 1, 1]` broadcast-prep pattern.
       if (shape_changes) {
-        u32 a_idx = 0, b_idx = 0;
-        int identity_mod_ones = 1;
-        while (a_idx < p->src0_ndim || b_idx < p->out_ndim) {
-          while (a_idx < p->src0_ndim && p->src0_dims[a_idx] == 1) a_idx++;
-          while (b_idx < p->out_ndim  && p->out_dims [b_idx] == 1) b_idx++;
-          if (a_idx == p->src0_ndim && b_idx == p->out_ndim) break;
-          if (a_idx == p->src0_ndim || b_idx == p->out_ndim
-              || p->src0_dims[a_idx] != p->out_dims[b_idx]) {
-            identity_mod_ones = 0;
-            break;
-          }
-          a_idx++;
-          b_idx++;
-        }
-        if (identity_mod_ones) {
+        if (reshape_identity_mod_ones(p)) {
           prog_value[i] = v;
           continue;
         }
@@ -1643,23 +1763,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
-      // (Future: identity-pass when SRC_VIA_RNGS(raw, pre) -- rngs
-      // already baked the per-axis shift into the load address.
-      // Currently disabled: identity-passing SHRINK on its own gives
-      // no bail reduction (failing kernels are PAD); identity-passing
-      // PAD breaks nn/lenet-end-to-end-forward.  Need to find what
-      // PAD chain pattern is unsafe before re-enabling.)
       if (v == 0) RBAIL_MID("SHRINK/PAD src 0");
       u32 ndim = p->out_ndim;
       if (ndim == 0) ndim = os->ndim;
       // Cap is u64-extra packing: 16 bits/axis (begin u16 for SHRINK,
       // begin u8 + src_dim u8 for PAD).  4 axes fit; chain for more.
       if (ndim > 4) RBAIL_MID("SHRINK/PAD ndim > 4");
-      // Identity-pass SHRINK only (PAD identity-pass breaks lenet's
-      // softmax chain -- needs deeper investigation).  When the
-      // source value's via_rngs flag is set, the chain's iter shifts
-      // are baked into the load address by the backward walk, so the
-      // forward emission can skip wrapping with S_SHRINK.
+      // When source value's via_rngs flag is set, SHRINK's iter shift
+      // is already baked into the load address by the backward walk.
       if (p->opcode == UOP_SHRINK && SRC_VIA_RNGS(raw, pre)) {
         prog_value[i] = v;
         via_rngs[i] = 1;
@@ -1672,8 +1783,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       // gets its own load with addressing reflecting its own chain
       // transforms -- no first-writer-wins ambiguity, no per-slot
       // conflict with other consumers.
-      if (p->opcode == UOP_PAD && KSRC_IS_INPUT(raw)
-          && (u8)0 < MAX_KPROG_SRC) {
+      if (p->opcode == UOP_PAD && KSRC_IS_INPUT(raw)) {
         u32 edge = i * MAX_KPROG_SRC + 0;
         if (use_via_rngs[edge]) {
           u32 slot = KSRC_INDEX(raw);
@@ -1687,10 +1797,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
         }
       }
-      // Per-USE PAD identity-pass for CHAIN sources.  Walks the
-      // KProgOp chain from PAD up to a direct INPUT, accepting LOAD
-      // (identity), RESHAPE (iter-coord transform via backward walk's
-      // flat-roundtrip), EXPAND/BITCAST (identity at scalar level).
+      // Per-USE PAD identity-pass for CHAIN sources.  Walk the KProgOp
+      // chain from PAD up to a direct INPUT, accepting scalar-identity
+      // wrappers, SHRINK, and the conservative RESHAPE subset accepted
+      // by reshape_pad_chain_peel_ok().
       //
       // KEY: read use_rngs from the op CLOSEST TO INPUT (not PAD's
       // own edge).  Backward walk records, at each chain edge, the
@@ -1699,12 +1809,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       // them down to INPUT-shape coords, captured at the next edge
       // up.  emit_input_load_for_use needs INPUT-shape rngs.
       //
-      // SHRINK in chain is rejected: SHRINK shifts rngs by begin,
-      // but the use_rngs at the next-up edge would lose PAD's own
-      // bounds (PAD propagates its valid_mask back; SHRINK doesn't
-      // preserve valid_mask correctly through its iter shift).
-      if (p->opcode == UOP_PAD && !KSRC_IS_INPUT(raw)
-          && (u8)0 < MAX_KPROG_SRC) {
+      // Non-trivial leading-1 RESHAPE chains are deliberately excluded:
+      // LeNet's first conv fanout otherwise mis-addresses its image
+      // patch views and corrupts the softmax output.
+      if (p->opcode == UOP_PAD && !KSRC_IS_INPUT(raw)) {
         u32 walk = raw;
         u32 walk_hops = 0;
         int chain_ok = 1;
@@ -1712,17 +1820,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         while (!KSRC_IS_INPUT(walk) && walk_hops++ < 16) {
           u32 prev = KSRC_INDEX(walk);
           KProgOp *prev_op = &ke->program[prev];
-          // Only peel through ops that don't transform iter coords.
-          // UOP_RESHAPE was tried but breaks lenet/beautiful-mnist
-          // softmax: even though backward walk computes the inverse-
-          // RESHAPE rngs at the chain's INPUT-side edge, those rngs
-          // lose information (e.g. the PAD's bounds via S_IWHERE
-          // wrapping interacts with RESHAPE's flat-roundtrip in ways
-          // I haven't worked out).  Restricted to LOAD/EXPAND/BITCAST.
-          if (prev_op->opcode != UOP_LOAD
-              && prev_op->opcode != UOP_EXPAND
-              && prev_op->opcode != UOP_BITCAST) {
-            chain_ok = 0; break;
+          int peel_ok = (prev_op->opcode == UOP_LOAD
+                      || prev_op->opcode == UOP_EXPAND
+                      || prev_op->opcode == UOP_SHRINK
+                      || prev_op->opcode == UOP_BITCAST
+                      || reshape_pad_chain_peel_ok(prev_op));
+          if (!peel_ok) {
+            chain_ok = 0;
+            break;
           }
           last_chain_op = prev;
           walk = prev_op->src[0];

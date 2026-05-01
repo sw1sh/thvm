@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Fixed: rangeify per-use PAD chain lowering
+
+Rangeify now emits use-local input loads for safe PAD chains using the
+consumer edge's own `RngsCtx`, including chains through `LOAD`,
+`EXPAND`, `BITCAST`, `SHRINK`, and conservative RESHAPE cases.  This
+removes the conv-im2col and grad PAD rank-promotion bails while keeping
+the leading-1 LeNet fanout on the fallback path until its view
+addressing is modeled safely.
+
 ### Added: tile-UOp schedule scaffold
 
 Added a non-dispatching `TileUop` arena on `KernelEntry` as the next

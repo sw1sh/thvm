@@ -20,6 +20,16 @@ Forward-walk consumers wired:
 - pre-INDEX rngs fallback: when no per-pattern shape branch matches,
   build the load address symbolically from rngs via `S_INDEX_E` +
   optional `S_IWHERE` wrap on `valid_mask`.
+- per-USE PAD identity-pass: a PAD reading an input, or a short chain
+  ending in an input, emits a fresh use-local `S_INDEX_E` + `S_LOAD`
+  from that edge's own `RngsCtx`.  This avoids the old per-input-slot
+  first-writer-wins bug where one consumer's movement chain could
+  mis-address another consumer's load.
+- PAD chain peeling currently accepts `LOAD`, `EXPAND`, `BITCAST`,
+  `SHRINK`, and RESHAPE in two cases: size-1-axis insertion/removal,
+  or same-rank same-numel reshape with leading source extent > 1.
+  The leading-1 case is deliberately excluded because it corrupts the
+  LeNet first-conv fanout.
 - UOP_RESHAPE identity-pass: when source `via_rngs`, the chain's
   RESHAPE transform was already baked into the load → propagate
   source value unchanged.
@@ -38,71 +48,58 @@ Other:
 - S_RESHAPE_V split-src form for rank-mismatch RESHAPE (commit
   67495cf, refined in 64ec316/199b326).
 
-Bail-count delta on conv_im2col + bn_grad + grad:
-- Session start: 12 mid-emit bails
-- Session end: 11 mid-emit bails
-- (broader baseline pre-session: 56 → 11 = 80% reduction)
-Grid: 621 passed, 0 failed (excl beautiful_mnist + pending_*).
+Bail-count delta on focused suites after the per-USE PAD path:
+- `conv_im2col.wlt`: 6/0, no rangeify bails reported.
+- `grad.wlt`: 62/0, only the older RESHAPE rank-mismatch bail remains.
+- `nn.wlt`: 49/0, one deliberate leading-1 PAD bail remains in LeNet
+  first conv, plus the load-bearing attention pre-INDEX mismatch bail.
 
-## What's blocked: PAD identity-pass
+## Remaining bails
 
-The remaining 9 SHRINK/PAD ndim>3 bails (all PAD on conv-backward
-chains) would close if forward-walk could identity-pass UOP_PAD when
-source is via_rngs.  Multiple attempts all break
-`nn/lenet-end-to-end-forward-shape-and-softmax-sum`:
+### Leading-1 PAD fanout
 
-| restriction | bails | tests fail |
-|---|---:|---:|
-| no restriction | 4 | 1 (lenet) |
-| `+ input_n_uses[i] == 1` | 4 | 1 (lenet) |
-| `+ ndim > os->ndim` | 4 | 1 (lenet) |
-| `+ valid_mask != 0` | 4 | 2 (lenet + others) |
-
-**Diagnosis**: the IMAGE input in lenet's chain gets `via_rngs_pre[i]
-= 1` because rngs.ndim matches v.shape.ndim, but no PAD upstream
-means no `valid_mask`, so no `S_IWHERE` wrap.  The bare `S_LOAD`
-then computes addresses via `S_INDEX_E(rngs * strides)` where the
-rngs were correctly computed for the WEIGHT TILE chain interpretation
-but not for the IMAGE chain.  Result: OOB loads (off=784 vs
-in_numel=576), garbage values, NaN propagation through the softmax.
-
-Concrete OOBs traced (commit ee2ee72 + later attempts):
-- op_id=600 slot=1 off=784 in_numel=576
-- op_id=613 slot=2 off=784 in_numel=576
-- ... 25 inputs total
-
-The OOB happens BECAUSE the rngs flow assumes one chain interpretation
-across multiple inputs that have DIFFERENT chain structures.  The
-backward walk's "first writer wins" captured one consumer's
-view of rngs; other consumers see those rngs as if they were their
-own — wrong for the image which doesn't have the PAD-shifted
-addressing pattern.
-
-## What's needed to unblock PAD identity-pass
-
-Per-USE rngs instead of per-slot.  Each consumer of an input gets its
-own `RngsCtx` reflecting that consumer's specific chain transforms.
-The input_load is emitted per-USE (one `S_INDEX_E` + optional
-`S_IWHERE` per consumer) rather than once-per-slot.
-
-This requires restructuring the materializer to:
-1. Re-emit input loads at consumer-time (currently hoisted up-front).
-2. Track rngs per (slot, consumer) tuple, not per-slot.
-3. Handle the dispatcher's input_load_pre/post arrays differently
-   (since they were per-slot caches).
-
-Estimated ~200-300 LOC rework across rangeify.c.  Doable but didn't
-fit in this session.
-
-## Cumulative progress (session arc: 56 -> 16 bails, 71% reduction)
+`nn.wlt` still reports:
 
 ```
-13 SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)
- 2 RESHAPE shape-change ndim cap or != os->ndim
- 1 pre-INDEX shape mismatch (non-broadcast)
+SHRINK/PAD-rank: opcode=PAD out_dims=[1,25,576]
+src_dims=[1,1,576] os.dims=[20,576] chain: RESHAPE -> INPUT
 ```
 
-Commits driving the recent reductions (newest first):
+Broad RESHAPE peeling closes this bail but breaks
+`nn/lenet-end-to-end-forward-shape-and-softmax-sum`: the first conv
+image fanout mis-addresses its patch views and the softmax output
+becomes invalid.  Keep this bail until the view-addressing model for
+leading-1 flatten-then-PAD chains is understood.
+
+### RESHAPE rank-mismatch on chain body
+
+`grad.wlt` still has:
+
+```
+rangeify bail (mid-emit): RESHAPE shape-change ndim cap or != os->ndim
+```
+
+The `S_RESHAPE_V` path still mainly handles direct input loads.  A
+non-input chain body needs a general iter-shape transform around the
+body expression rather than synthesizing a fresh DEFINE_PARAM load.
+
+### Attention pre-INDEX mismatch
+
+The remaining `nn/attention-identity-q-row-selection` pre-INDEX
+mismatch is still load-bearing:
+
+```
+pre-INDEX-mismatch: v.shape=[2,3] strides=[3,1] os=[2,2]
+rngs=[S_IDIV,S_IMOD]
+```
+
+Those rngs encode RESHAPE flat-roundtrip intent, not a safe materializer
+addressing pattern.  Relaxing this gate previously broke the attention
+row-selection test.
+
+## Cumulative progress
+
+Commits driving the earlier reductions (newest first):
 
 - `d65e4a6` PAD fusion accepts S_IWHERE-wrapped LOAD + S_INDEX_E
   expression-walk for reduce_range independence (infrastructure;
@@ -127,41 +124,13 @@ Commits driving the recent reductions (newest first):
   RESHAPE-V emission + REDUCE axis fix (28 bails closed earlier
   in session).
 
-### What's left and why
-
-**13 SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)**: All
-have `src.op = S_IWHERE` wrapping S_LOAD where the LOAD's S_INDEX_E
-address provably uses reduce_range (the chain is reading reduce-
-axis-varying input data that PAD relayouts).  My narrow fusion at
-`d65e4a6` correctly identifies these as not-fuseable: bounds-AND'ing
-without addressing remap would gate the same data, not reposition.
-Closing requires per-USE rngs to remap addressing.
-
-**RESHAPE rank-mismatch on chain body**:
-- `out=[1] src=[2] os=[2,4]` (collapse with rank mismatch)
-- `out=[4] src=[2,2] os=[4]` (flat-decompose with non-input source)
-
-The `S_RESHAPE_V` path requires `KSRC_IS_INPUT(raw)` because the
-emit synthesizes a fresh DEFINE_PARAM + INDEX + LOAD chain.
-Wrapping a non-input chain body needs an iter-shape transform
-(flat-roundtrip into the body's own iter shape).
-
-**pre-INDEX shape mismatch (non-broadcast)** (1 bail in nn.wlt
-attention test path): `v.shape=[2,3] strides=[3,1] os=[2,2]
-rngs=[S_IDIV, S_IMOD]`.  The chain rngs are S_IDIV/S_IMOD
-expressions encoding a RESHAPE flat-roundtrip's INTENT, not the
-addressing the materializer wants.  The bail is load-bearing:
-forces fallback to a different lowering path that addresses
-correctly.  Verified by `08c431e`'s diagnostic + the relaxed-gate
-attempt that broke `nn/attention-identity-q-row-selection`.
-
 ## Reference
 
 - tinygrad: `apply_movement_op` and `_apply_reshape` in
   `/Users/swish/src/tinygrad/tinygrad/schedule/indexing.py:113-145`.
 - thvm IR: ScalarOp enum + S_I* family in `src/thvm.h:520-630`.
-- Backward walk: `src/schedule/rangeify.c:609-720` (rngs[] +
+- Backward walk: `src/schedule/rangeify.c:680-975` (rngs[] +
   per-input-slot capture).
-- pre-INDEX rngs path: `src/schedule/rangeify.c:984-1030`.
-- Forward identity-pass: `src/schedule/rangeify.c:1186-1198`
-  (RESHAPE), `1474-1480` (SHRINK).
+- pre-INDEX rngs path: `src/schedule/rangeify.c:998-1244`.
+- Forward identity-pass: `src/schedule/rangeify.c:1449-1676`
+  (RESHAPE), `1740-1844` (PAD/SHRINK).
