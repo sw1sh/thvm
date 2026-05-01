@@ -375,21 +375,53 @@ VerificationTest[
     With[{src = TAOTEmit["emit_id_test"]},
         StringContainsQ[src, "aot_pop_app_arg"] &&
         StringContainsQ[src, "APP-LAM"] &&
-        StringContainsQ[src, "return arg"]
+        StringContainsQ[src, "arg_0"]
     ],
     True,
-    TestID -> "TAOTEmit on TLam[x,x] emits the identity lambda body"
+    TestID -> "TAOTEmit on TLam[x,x] emits aot_pop_app_arg + APP-LAM"
 ]
 
 VerificationTest[
     TInit[];
-    TDef["emit_unsupported_test", TLam[x, TApp[x, x]]];
-    With[{src = TAOTEmit["emit_unsupported_test"]},
-        StringContainsQ[src, "unsupported"] &&
-        StringContainsQ[src, "aot_fallback"]
+    TDef["emit_apply_test", TLam[x, TApp[x, x]]];
+    With[{src = TAOTEmit["emit_apply_test"]},
+        (* Phase 1 handles TApp via aot_new_app -- no longer
+           "unsupported" as it was in Phase 0. *)
+        StringContainsQ[src, "aot_new_app"] &&
+        StringContainsQ[src, "aot_pop_app_arg"]
     ],
     True,
-    TestID -> "TAOTEmit on unsupported body emits fallback + comment"
+    TestID -> "TAOTEmit on TLam[x, x x] emits aot_new_app"
+]
+
+(* Phase 1: numeric MAT chain dispatch + recursive REF call + OP2.
+   The whole u32_fib body should auto-emit cleanly. *)
+
+VerificationTest[
+    TInit[];
+    TDef["emit_u32_fib_test", TMatChain[
+        <|0 -> TNum[0],
+          1 -> TNum[1]
+         |>,
+        TLam[k, TOp2["+",
+            TApp[TRef["emit_u32_fib_test"], TOp2["-", k, TNum[1]]],
+            TApp[TRef["emit_u32_fib_test"], TOp2["-", k, TNum[2]]]
+        ]]
+    ]];
+    With[{src = TAOTEmit["emit_u32_fib_test"]},
+        (* MAT chain dispatched via tag/value if-tree *)
+        StringContainsQ[src, "TAG_NUM"] &&
+        StringContainsQ[src, "term_val"] &&
+        (* OP2 cells built lazily *)
+        StringContainsQ[src, "TAG_OP2"] &&
+        StringContainsQ[src, "OP_SUB"] &&
+        StringContainsQ[src, "OP_ADD"] &&
+        (* Recursive call via REF *)
+        StringContainsQ[src, "TAG_REF"] &&
+        StringContainsQ[src, "aot_new_app"]
+    ],
+    True,
+    TestID -> "TAOTEmit on u32_fib body emits MAT/OP2/REF correctly"
 ]
 
 VerificationTest[
