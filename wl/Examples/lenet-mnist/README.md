@@ -13,6 +13,14 @@ Metal (Apple Silicon):
 
     THVM_BACKEND=metal wolframscript -f wl/Examples/lenet-mnist/forward.wls
 
+Autotune a bounded sample of LeNet kernels:
+
+    THVM_TILE=1 wolframscript -f wl/Examples/lenet-mnist/autotune.wls
+
+Full LeNet autotune sweep:
+
+    THVM_TILE=1 MAX_TUNE_KERNELS=All wolframscript -f wl/Examples/lenet-mnist/autotune.wls
+
 The Metal path looks for `build/default.metallib` relative to the
 current working directory, so run from the repo root.
 
@@ -29,6 +37,15 @@ predicted digit + softmax confidence per sample.
 Predictions are essentially random (~10% accuracy) -- no training
 has happened.  This is the framework smoke test: end-to-end
 materialize + dispatch through every layer type LeNet uses.
+
+`autotune.wls` uses the same forward pass as a concrete autotuning
+example.  It materializes LeNet once, lists kernels with
+`TKernelProposed` candidates, optionally prints measured
+`TKernelVariants`, applies `TKernelAutotune` to the selected kernels,
+then reruns the forward pass and checks the softmax probabilities stay
+within tolerance.  The default tunes the first 16 candidate kernels so
+the script remains interactive; set `MAX_TUNE_KERNELS=All` for the
+full sweep.
 
 ## Why no training (yet)
 
@@ -48,6 +65,10 @@ the order to land them in.
 ## Files
 
   - `forward.wls`         -- the forward demo script.
+  - `autotune.wls`        -- bounded LeNet autotune walkthrough:
+                             materialize, inspect proposer
+                             candidates, tune, rerun, and compare
+                             probabilities.
   - `grad-check.wls`      -- end-to-end forward + grad smoke test:
                              materializes the full LeNet chain
                              and takes `TGrad[loss, x]`,

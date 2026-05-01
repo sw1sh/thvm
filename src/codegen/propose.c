@@ -75,8 +75,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     }
   }
 
-  // Elementwise UPCAST candidates: {2, 4, 8, 16} where output_numel
-  // divisible.  Targets the first LOOP axis (rank-1 kernels and
+  // Elementwise UPCAST candidates: {2, 4, 8, 16} where the selected
+  // LOOP axis is divisible.  Targets the first LOOP axis (rank-1 kernels and
   // tinygrad-style flattened outputs both have only one LOOP axis;
   // multi-axis kernels will benefit from a smarter pick once the
   // structured nest renderer arrives).  Skipped for reduce-tail
@@ -85,9 +85,10 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   if (axis_size == 0 && ke->output_numel > 0) {
     u8 loop_axis = propose_first_loop_axis(ke, 0);
     if (loop_axis != 0xFF) {
+      u32 loop_axis_size = ke->axes->full_shape[loop_axis];
       for (u32 i = 0; i < n_factors; i++) {
         u32 f = split_factors[i];
-        if (ke->output_numel % f != 0) continue;
+        if (loop_axis_size % f != 0) continue;
         if (n >= cap) break;
         out[n].op   = KOP_UPCAST;
         out[n].axis = loop_axis;

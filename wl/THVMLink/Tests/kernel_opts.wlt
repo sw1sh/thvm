@@ -223,7 +223,7 @@ VerificationTest[
 
 VerificationTest[
     (* Elementwise kernel proposes UPCAST on the output axis at all
-       divisors of output_numel (factor in {2,4,8,16}). *)
+       divisors of the selected output axis (factor in {2,4,8,16}). *)
     TInit[];
     a = TTensorCreate @ N @ Range[16];         (* output_numel = 16 *)
     TRealize @ TUOpMul[a, a];
@@ -231,6 +231,17 @@ VerificationTest[
     {TOpt["UPCAST", 0, 16], TOpt["UPCAST", 0, 8],
      TOpt["UPCAST", 0, 4],  TOpt["UPCAST", 0, 2]},
     TestID -> "kernel-opts/propose-elementwise-upcast"
+]
+
+VerificationTest[
+    (* Ranked elementwise outputs must not propose factors that
+       divide total numel but fail the selected axis split. *)
+    TInit[];
+    a = TTensorCreate @ NumericArray[ConstantArray[1., {20, 2, 2}], "Real32"];
+    TRealize @ TUOpMul[a, a];
+    TKernelProposed[TKernelCount[] - 1],
+    {TOpt["UPCAST", 0, 4], TOpt["UPCAST", 0, 2]},
+    TestID -> "kernel-opts/propose-ranked-upcast-axis-divisors"
 ]
 
 VerificationTest[

@@ -6,6 +6,18 @@ dated section.
 
 ## Unreleased
 
+### Added: LeNet autotune example
+
+Added `wl/Examples/lenet-mnist/autotune.wls`, a bounded LeNet
+autotuning walkthrough that materializes the forward pass, lists
+`TKernelProposed` candidates, measures sample `TKernelVariants`,
+applies `TKernelAutotune`, and reruns the forward pass to check the
+softmax probabilities remain stable.  Fixed `TKernelVariants`
+decoding so `UPCAST` candidate rows render as opts instead of
+baseline rows, and tightened the elementwise proposer so ranked
+outputs only advertise `UPCAST` factors that divide the selected
+axis.
+
 ### Added: explicit tile reduction nodes
 
 Tile plans now represent scalar `S_REDUCE_SUM`/`S_REDUCE_MAX` values

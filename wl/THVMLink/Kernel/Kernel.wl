@@ -513,7 +513,7 @@ TKernelVariants[kid_Integer] := (ensureInit[];
                   us = packed[[4*(i - 1) + 4]]},
                 TKernelVariant[<|
                     "Kid"    -> kid,
-                    "Opt"    -> If[ op === 0, None, TOpt[kopName[op], ax, ar]],
+                    "Opt"    -> If[ i === 1, None, TOpt[kopName[op], ax, ar]],
                     "WallUs" -> us
                 |>]],
             {i, Length[packed]/4}
