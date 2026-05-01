@@ -281,3 +281,49 @@ Next steps:
   the input is BS>1 (rank-4 with leading batch axis) -- that
   way the BS=1 tests stay on the kh*kw path, and only batched
   inference/training picks up the im2col speedup.
+
+---
+
+## M1 attempt 2 (post-linearizer-parity) -- still slow at BS=1
+
+After the linearizer parity MVP shipped (5b1a216), retried routing
+TConv2D -> TConv2DIm2Col.  The earlier "hang" turned out to be
+just slowness: with the routing in place, beautiful_mnist.wlt's
+2 forward tests took >3 minutes (vs ~10 seconds with the kh*kw
+lowering).  Tests were dying mid-run (1 reported failure when
+killed at 3m05s), confirming the path produces correct output but
+each per-call work is much higher than expected.
+
+Why im2col is slow at BS=1 small input:
+- Each TConv2D call builds kh*kw=25 SHRINK + RESHAPE + PAD ops,
+  sums them via Fold[Plus], reshapes, then matmuls.
+- For input (1, 28, 28) the resulting im2col xCol = (25, 576)
+  feeds a (32, 25) @ (25, 576) sgemm -- the actual sgemm is
+  tiny (~1us) but the surrounding 25-op build chain dominates.
+- For input (32, 24, 24) the chain is even bigger -- 25 SHRINKs
+  on a 32x24x24 tensor, each producing 32x20x20 intermediates.
+- The kh*kw lowering does 25 partial sums of (cOut, cIn, hOut, wOut)
+  reductions but each is a single fused MUL+REDUCE kernel.
+  Per-call kernel count is similar (~25) but each is "atomic"
+  rather than a chain of 4-5 ops.
+- Net: at BS=1 small, kh*kw wins on per-call overhead.  Im2col
+  only wins when the sgemm cost dominates the per-call setup --
+  which requires BS>1 OR much larger spatial dims.
+
+Proper M1 fix needs:
+- Either: route TConv2D -> TConv2DIm2Col only when the matmul
+  cost-to-setup ratio favors it (a heuristic: input.numel >
+  threshold, OR BS > 1).
+- Or: actual batched conv -- input shape {BS, C_in, H, W} with
+  one big im2col producing xCol = {BS*H_out*W_out, C_in*kh*kw}
+  and ONE sgemm.  This is the real beautiful-mnist BS=512 win.
+- The current TConv2D and TConv2DIm2Col both take rank-3 input
+  ({C_in, H, W}) -- BS>1 today is a per-sample loop on the
+  WL side, which is what makes BS=512 take "hundreds of seconds"
+  per the M1 description.  Fixing requires a rank-4 conv API.
+
+Reverted M1 attempt 2.  Bumping the priority of the rank-4 conv
+work (the actual M1 win) above the simpler TConv2D->TConv2DIm2Col
+routing.
+
+Status: M1 deferred until rank-4 conv is plumbed through.
