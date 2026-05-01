@@ -533,3 +533,43 @@ Sequencing:
 - Alternative for next turn: invalidate the kernel-program-cache
   for kernels containing rank-changing RESHAPE before
   realize_classify runs.  Simpler but blunter.
+
+---
+
+## F-8e-12-attempt-2: deferring visit()-level boundary insertion
+
+The visit()-level mid-walk boundary insertion (force-materialize a
+sub-graph as its own kernel via emit_kernel_for_boundary) is a
+substantial change to materialize.c's invariants:
+
+- emit_kernel_for_boundary takes a `bi` index into BOUNDARY_ORDER,
+  but BOUNDARY_ORDER is built once via topo_sort_boundaries from
+  REALIZE_INFO -- there's no API to add new entries mid-walk.
+- BOUNDARY_DEPTH ordering matters for memory planning; mid-walk
+  insertions would invalidate the topological ordering.
+- The recursive emit might infinite-loop if the source itself has
+  a rank-mismatch RESHAPE; needs depth guards.
+
+Per the loop instruction "If the implementation is too tangled with
+materialize.c's existing invariants, fall back to Option A": the
+fall-back is to add synthetic iter dims in ScalarCtx.  That keeps
+materialize.c simpler at the cost of changing the iter-flow protocol
+in interpret.c.  Option A is itself a substantial change (~150-300
+LOC across interpret.c + rangeify.c).
+
+**Pragmatic recommendation**: defer the rank-mismatch RESHAPE
+architectural fix to a multi-turn focused work item.  The current
+state (124 bails fall back to cpu_interpret) is correctness-safe;
+it just blocks the F-8f retirement.
+
+Sequencing for now:
+- **F-8e-13** (next): tackle the residual 15 mismatch bails (8
+  pre-INDEX reduce_inner != 1, 5 post-INDEX shape mismatch, 2 lone).
+  These are smaller wins independent of the RESHAPE architecture.
+- **F-8e-14+**: serious architectural work on either visit()-level
+  boundary insertion or synthetic iter dims.  Multi-turn.
+- **F-8f**: blocked until rank-mismatch RESHAPE is solved.
+
+Until then, cpu_interpret + cpu_op_*.c remain in the codebase as
+the fallback for the 124+15 bailing kernel patterns.  WL grid
+599/0 holds throughout.
