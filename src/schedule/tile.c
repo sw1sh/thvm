@@ -169,7 +169,8 @@ fn int tile_validate(KernelEntry const *ke) {
   u32 scalar_store = (u32)store->extra;
   if (ke->scalar_uops == NULL || scalar_store == 0
       || scalar_store >= ke->n_scalar_uops
-      || ke->scalar_uops[scalar_store].op != S_STORE) {
+      || ke->scalar_uops[scalar_store].op != S_STORE
+      || ke->scalar_uops[scalar_store].src_count < 2) {
     return 0;
   }
 
@@ -206,9 +207,16 @@ fn int tile_validate(KernelEntry const *ke) {
   if (body->op != TILE_SCALAR_BODY || body->src_count != 0) {
     return 0;
   }
-  if (scalar_value == 0 || scalar_value >= ke->n_scalar_uops
-      || ke->scalar_uops[scalar_store].src_count < 2
-      || (reduce_id == 0 && ke->scalar_uops[scalar_store].src[1] != scalar_value)
+  if (scalar_value == 0 || scalar_value >= ke->n_scalar_uops) {
+    return 0;
+  }
+  if (reduce_id == 0) {
+    u8 value_op = ke->scalar_uops[scalar_value].op;
+    if (value_op == S_REDUCE_SUM || value_op == S_REDUCE_MAX) {
+      return 0;
+    }
+  }
+  if ((reduce_id == 0 && ke->scalar_uops[scalar_store].src[1] != scalar_value)
       || (u32)body->extra != scalar_value) {
     return 0;
   }

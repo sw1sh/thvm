@@ -498,6 +498,11 @@ int main(void) {
   CHECK_EQ(info.scalar_reduce_id, info.scalar_value_id);
   CHECK_EQ(info.scalar_body_value_id,
            tk->scalar_uops[info.scalar_value_id].src[0]);
+  u32 saved_reduce_src = tk->tile_uops[info.store_tile_id].src[0];
+  tk->tile_uops[info.store_tile_id].src[0] = info.body_tile_id;
+  CHECK(!tile_validate(tk));
+  tk->tile_uops[info.store_tile_id].src[0] = saved_reduce_src;
+  CHECK(tile_validate(tk));
   CHECK(cg_supports_tile(tk));
   char *red_src = cg_emit_tile(tk);
   CHECK(red_src != NULL);
