@@ -879,6 +879,16 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
         u32 src_idx = KSRC_INDEX(raw);
         if (rngs[src_idx].ndim == 0) rngs[src_idx] = in_rngs;
+        // Per-USE: also record this consumer's rngs view of a CHAIN
+        // source.  The legacy rngs[src_idx] keeps first-writer-wins
+        // semantics for the source op's outgoing rngs (used by other
+        // backward-walk cases below); the per-edge entry preserves
+        // this specific consumer's interpretation.
+        if (s < MAX_KPROG_SRC) {
+          u32 edge = i * MAX_KPROG_SRC + s;
+          use_rngs    [edge] = in_rngs;
+          use_via_rngs[edge] = 1;
+        }
       }
     }
   }
@@ -1674,6 +1684,40 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             via_rngs[i]    = 1;
             use_load[edge] = ulocal;
             continue;
+          }
+        }
+      }
+      // Per-USE PAD identity-pass for CHAIN sources: only safe when
+      // the chain consists purely of UOP_LOAD identity wrappers (no
+      // shape-changing ops).  RESHAPE / EXPAND / BITCAST can change
+      // addressing semantics in ways the use_rngs[edge] doesn't
+      // account for -- attempted in iter 35 and broke 5 tests.
+      // For LOAD-only peel: walk up; if we hit INPUT, the use_rngs
+      // captured at this PAD's edge correctly reflects the addressing
+      // (since UOP_LOAD doesn't transform iter coords).
+      if (p->opcode == UOP_PAD && !KSRC_IS_INPUT(raw)
+          && (u8)0 < MAX_KPROG_SRC) {
+        u32 walk = raw;
+        u32 walk_hops = 0;
+        int chain_ok = 1;
+        while (!KSRC_IS_INPUT(walk) && walk_hops++ < 16) {
+          u32 prev = KSRC_INDEX(walk);
+          KProgOp *prev_op = &ke->program[prev];
+          if (prev_op->opcode != UOP_LOAD) { chain_ok = 0; break; }
+          walk = prev_op->src[0];
+        }
+        if (chain_ok && KSRC_IS_INPUT(walk)) {
+          u32 edge = i * MAX_KPROG_SRC + 0;
+          if (use_via_rngs[edge]) {
+            u32 slot = KSRC_INDEX(walk);
+            u32 ulocal = emit_input_load_for_use(ke, slot,
+                                                  &use_rngs[edge], p->dtype);
+            if (ulocal != 0) {
+              prog_value[i]  = ulocal;
+              via_rngs[i]    = 1;
+              use_load[edge] = ulocal;
+              continue;
+            }
           }
         }
       }
