@@ -1830,6 +1830,17 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_register_gab_tak(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// AOT bridge: register the hand-coded u32_fib AOT under the given
+// def slot.  Args: [def_u32_fib].  Returns 1 on success.
+EXTERN_C DLLEXPORT int thvm_wl_aot_register_u32_fib(WolframLibraryData libData,
+                                                    mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  u32 def_u32_fib = (u32)MArgument_getInteger(args[0]);
+  aot_program_u32_fib_register(def_u32_fib);
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
 // Returns the cumulative AOT call count since the last reset.
 EXTERN_C DLLEXPORT int thvm_wl_aot_calls(WolframLibraryData libData, mint argc,
                                          MArgument *args, MArgument res) {

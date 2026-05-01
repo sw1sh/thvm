@@ -54,6 +54,8 @@ $aotRegFibNatFn := $aotRegFibNatFn = load["thvm_wl_aot_register_fib_nat",
     {Integer, Integer, Integer}, Integer];
 $aotRegGabTakFn := $aotRegGabTakFn = load["thvm_wl_aot_register_gab_tak",
     {Integer, Integer, Integer, Integer, Integer}, Integer];
+$aotRegU32FibFn := $aotRegU32FibFn = load["thvm_wl_aot_register_u32_fib",
+    {Integer}, Integer];
 $aotCallsFn     := $aotCallsFn     = load["thvm_wl_aot_calls",     {}, Integer];
 
 (* === Program registry ================================================
@@ -66,7 +68,9 @@ $aotPrograms = <|
     "fib_nat" -> <|"arity" -> 3,
                    "register" -> ($aotRegFibNatFn[#1, #2, #3] &)|>,
     "gab_tak" -> <|"arity" -> 5,
-                   "register" -> ($aotRegGabTakFn[#1, #2, #3, #4, #5] &)|>
+                   "register" -> ($aotRegGabTakFn[#1, #2, #3, #4, #5] &)|>,
+    "u32_fib" -> <|"arity" -> 1,
+                   "register" -> ($aotRegU32FibFn[#1] &)|>
 |>;
 
 TAOTPrograms[] := Keys[$aotPrograms]

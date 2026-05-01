@@ -273,3 +273,77 @@ VerificationTest[
     {8, 8},
     TestID -> "tak(8,6,4): AOT == interpreter == 8"
 ]
+
+(* === 8. u32_fib AOT correctness =========================== *)
+(* Single-def, single-arg, dispatch on a NUM head.  Fully ITRS-
+   matching since the recursion works on FRESH NUMs.  Bigger
+   speedup than gab_tak: ~11x at n=25-30. *)
+
+setupU32FibDef[] := (
+    TInit[];
+    TDef["u32_fib", TMatChain[
+        <|0 -> TNum[0],
+          1 -> TNum[1]
+         |>,
+        TLam[k, TOp2["+",
+            TApp[TRef["u32_fib"], TOp2["-", k, TNum[1]]],
+            TApp[TRef["u32_fib"], TOp2["-", k, TNum[2]]]
+        ]]
+    ]];
+);
+
+u32FibTerm[n_Integer] := TApp[TRef["u32_fib"], TNum[n]];
+
+VerificationTest[
+    MemberQ[TAOTPrograms[], "u32_fib"],
+    True,
+    TestID -> "TAOTPrograms lists u32_fib"
+]
+
+VerificationTest[
+    setupU32FibDef[];
+    Head[TAOT["u32_fib", {"u32_fib"}]],
+    TAOTProgram,
+    TestID -> "TAOT[u32_fib] returns a TAOTProgram"
+]
+
+(* Single-def AOT, ITRS-exact match across N. *)
+
+verifyU32FibAgreement[n_Integer] := Module[{
+    interpItrs, interpVal, aotItrs, aotVal
+},
+    setupU32FibDef[];
+    Block[{itrs0 = TItrs[]},
+        TWnf @ u32FibTerm[n];
+        interpItrs = TItrs[] - itrs0
+    ];
+    interpVal = TWnf[u32FibTerm[n]]["val"];
+
+    setupU32FibDef[];
+    TAOT["u32_fib", {"u32_fib"}];
+    Block[{itrs0 = TItrs[]},
+        TWnf @ u32FibTerm[n];
+        aotItrs = TItrs[] - itrs0
+    ];
+    aotVal = TWnf[u32FibTerm[n]]["val"];
+
+    {interpVal === aotVal === Fibonacci[n], interpItrs === aotItrs}
+];
+
+VerificationTest[
+    verifyU32FibAgreement[5],
+    {True, True},
+    TestID -> "u32_fib(5): AOT == interpreter (value + ITRS)"
+]
+
+VerificationTest[
+    verifyU32FibAgreement[10],
+    {True, True},
+    TestID -> "u32_fib(10): AOT == interpreter (value + ITRS)"
+]
+
+VerificationTest[
+    verifyU32FibAgreement[15],
+    {True, True},
+    TestID -> "u32_fib(15): AOT == interpreter (value + ITRS)"
+]

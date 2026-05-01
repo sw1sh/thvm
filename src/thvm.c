@@ -277,6 +277,7 @@ fn Term wnf(Term term);
 // matching bodies.
 #include "aot/programs/fib_nat.c"
 #include "aot/programs/gab_tak.c"
+#include "aot/programs/u32_fib.c"
 
 // === wnf/ ===
 // The reducer dispatches to the interactions and to materialize,
