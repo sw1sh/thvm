@@ -566,6 +566,15 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {(u32)v->strides[0]};
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
+      } else if (in_numel == reduce_size && reduce_inner == 1) {
+        // Generalization of the rank-1 case above: same per-reduce-
+        // iter pattern but the input view has rank > 1 with all-but-
+        // one axes of size 1 (e.g. shape=[1,1,reduce_size]).  The
+        // input is contiguous from offset (reduce-trailing layout),
+        // so reduce_iter * 1 + offset gives the right address.
+        u32 r_ids[1]    = {reduce_range};
+        u32 r_strides[1] = {1};
+        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
       } else if (in_numel == reduce_in_numel
                  && v->shape.ndim == in_ndim) {
         // Partial reduce: input has rank in_ndim (= os->ndim + 1).
@@ -624,6 +633,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           r_strides[d] = (u32)v->strides[d];
         }
         idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
+      } else if (in_numel == reduce_in_numel && reduce_inner == 1) {
+        // Flat-buffer alias of the reduce-input shape: same total
+        // numel, lower rank view, contiguous, reduce axis trailing.
+        // Walk all (LOOP, REDUCE) iters in canonical row-major over
+        // (output_shape ++ reduce_size).  Common when the partial-
+        // reduce input is a flatten of the per-output strip.
+        u32 r_ids[MAX_DIM + 1];
+        for (u32 d = 0; d < os->ndim; d++) r_ids[d] = loop_ranges[d];
+        r_ids[os->ndim] = reduce_range;
+        idx = emit_index_chain(ke, dtype, param, r_ids, in_strides,
+                               in_ndim, in_off);
       } else if (v->shape.ndim == os->ndim) {
         // Same rank as output (Phase F-fix): walk the View's strides
         // directly, mirroring the post-scope branch.  Inputs that are
@@ -646,10 +666,11 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // here is safer than emitting wrong addresses with
         // canonical loop_strides.
         if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u\n",
+          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u reduce_inner=%u\n",
                   i, in_numel, onum, v->shape.ndim, os->ndim,
                   in_ndim, has_reduce ? red->numel : 0,
-                  has_reduce ? reduce_size : 0, reduce_in_numel);
+                  has_reduce ? reduce_size : 0, reduce_in_numel,
+                  has_reduce ? reduce_inner : 0);
         }
         RBAIL_MID("pre-INDEX no branch matched");
       }
