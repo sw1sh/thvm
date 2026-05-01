@@ -987,9 +987,16 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // v's bounds and break tests like nn/attention-identity-q.
         if (shape_mismatch && input_rngs_pre[i].ndim == v->shape.ndim
             && v->shape.ndim > 0) {
+          // Strict gate: every non-zero-stride axis must have a raw
+          // S_RANGE ref whose extent matches v.shape.dims[d].  Chain
+          // expressions (S_IDIV/S_IMOD/...) can't safely take this
+          // path because the backward walk's rngs encode iter
+          // expressions for the chain's INTENT (e.g. RESHAPE flat-
+          // roundtrip), not necessarily the addressing the materializer
+          // actually wants here -- verified via attention test.
           int ext_ok = 1;
           for (u32 d = 0; d < v->shape.ndim; d++) {
-            if (v->strides[d] == 0) continue;  // broadcast axis is fine
+            if (v->strides[d] == 0) continue;
             u32 ref = input_rngs_pre[i].refs[d];
             if (ref == 0) { ext_ok = 0; break; }
             ScalarUop const *ru = &ke->scalar_uops[ref];
@@ -1000,6 +1007,28 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           if (ext_ok) goto pre_index_rngs_fallback;
         }
         if (shape_mismatch) {
+          if (getenv("THVM_RANGEIFY_BAIL")) {
+            fprintf(stderr, "  pre-INDEX-mismatch: i=%u v.shape=[", i);
+            for (u32 d = 0; d < v->shape.ndim; d++)
+              fprintf(stderr, "%u%s", v->shape.dims[d], d+1==v->shape.ndim?"":",");
+            fprintf(stderr, "] v.strides=[");
+            for (u32 d = 0; d < v->shape.ndim; d++)
+              fprintf(stderr, "%d%s", v->strides[d], d+1==v->shape.ndim?"":",");
+            fprintf(stderr, "] os=[");
+            for (u32 d = 0; d < os->ndim; d++)
+              fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
+            fprintf(stderr, "] rngs.ndim=%u rngs.refs=[",
+                    input_rngs_pre[i].ndim);
+            for (u32 d = 0; d < input_rngs_pre[i].ndim; d++) {
+              u32 ref = input_rngs_pre[i].refs[d];
+              if (ref == 0) { fprintf(stderr, "(none)"); }
+              else fprintf(stderr, "%s/extra=%lu",
+                           scalar_op_name(ke->scalar_uops[ref].op),
+                           (unsigned long)(ke->scalar_uops[ref].extra & 0xFFFFFFFFu));
+              if (d+1 < input_rngs_pre[i].ndim) fprintf(stderr, ",");
+            }
+            fprintf(stderr, "]\n");
+          }
           RBAIL_MID("pre-INDEX shape mismatch (non-broadcast)");
         }
         u32 strides_u32[MAX_DIM];
