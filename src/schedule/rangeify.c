@@ -427,17 +427,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   //     IS the body.
   //   - position >  reduce_pos: ref is post-reduce (scalar or
   //     per-element).
-  u8 input_used_pre [KERNEL_INIT_INPUT * 4] = {0};
-  u8 input_used_post[KERNEL_INIT_INPUT * 4] = {0};
-  // input_via_padshrink[i]: this input is consumed (transitively or
-  // directly) by a UOP_PAD or UOP_SHRINK.  Such ops wrap the load with
-  // an iter-shift + bounds gate, so the load's INDEX is computed at the
-  // *input's* shape -- a size mismatch vs. the output is intentional
-  // and must NOT trigger the standard pre-/post-INDEX size-mismatch
-  // bail.
-  u8 input_via_padshrink[KERNEL_INIT_INPUT * 4] = {0};
-  if (ke->n_inputs > sizeof(input_used_pre) / sizeof(input_used_pre[0])) {
-    return 0;
+  u32 nin_local = ke->n_inputs ? ke->n_inputs : 1;
+  u8 input_used_pre [nin_local];
+  u8 input_used_post[nin_local];
+  u8 input_via_padshrink[nin_local];
+  for (u32 i = 0; i < nin_local; i++) {
+    input_used_pre [i] = 0;
+    input_used_post[i] = 0;
+    input_via_padshrink[i] = 0;
   }
   if (has_reduce) {
     for (u32 j = 0; j < ke->n_ops; j++) {
@@ -461,6 +458,38 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     if (p->n_src < 1) continue;
     u32 raw = p->src[0];
     if (KSRC_IS_INPUT(raw)) input_via_padshrink[KSRC_INDEX(raw)] = 1;
+  }
+  // Bail on kernels with a shape-changing RESHAPE that sits in a
+  // chain with SHRINK/PAD.  Rangeify treats RESHAPE as identity at
+  // the per-iter level, but when the output shape differs from the
+  // input shape AND a downstream PAD/SHRINK applies iter shifts
+  // assuming the new shape, the iter coords need a flat-index
+  // transform that the scalar interpreter doesn't perform.
+  // (col2im uses this pattern: SHRINK (2,1,9) -> RESHAPE (2,3,3) ->
+  //  PAD (2,5,5).)  Legacy cpu_interpret materializes the
+  // intermediate so RESHAPE becomes a free view alias.
+  {
+    int has_padshrink = 0;
+    for (u32 j = 0; j < ke->n_ops; j++) {
+      u8 op = ke->program[j].opcode;
+      if (op == UOP_PAD || op == UOP_SHRINK) { has_padshrink = 1; break; }
+    }
+    if (has_padshrink) {
+      for (u32 j = 0; j < ke->n_ops; j++) {
+        KProgOp *p = &ke->program[j];
+        if (p->opcode != UOP_RESHAPE) continue;
+        if (p->src0_ndim == 0 || p->out_ndim == 0) continue;
+        int shape_changes = (p->src0_ndim != p->out_ndim);
+        if (!shape_changes) {
+          for (u32 d = 0; d < p->src0_ndim; d++) {
+            if (p->src0_dims[d] != p->out_dims[d]) {
+              shape_changes = 1; break;
+            }
+          }
+        }
+        if (shape_changes) RBAIL_MID("RESHAPE shape-change in PAD/SHRINK chain");
+      }
+    }
   }
   // Inputs: same numel as output (Phase B), or REDUCE-input size, or
   // numel-1 scalar broadcast.
@@ -517,10 +546,11 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   //                         position > reduce_pos.
   // For inputs used in only one scope, the unused slot stays 0.
   // For non-REDUCE kernels, input_load_post is always populated.
-  u32 input_load_pre [KERNEL_INIT_INPUT * 4] = {0};
-  u32 input_load_post[KERNEL_INIT_INPUT * 4] = {0};
-  if (ke->n_inputs > sizeof(input_load_pre) / sizeof(input_load_pre[0])) {
-    RBAIL_MID("n_inputs > KERNEL_INIT_INPUT*4");
+  u32 input_load_pre [nin_local];
+  u32 input_load_post[nin_local];
+  for (u32 i = 0; i < nin_local; i++) {
+    input_load_pre [i] = 0;
+    input_load_post[i] = 0;
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 dtype    = ke->input_dtypes[i];
@@ -762,10 +792,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // itself sits at reduce_pos (pre-scope ref to body input).
   // UOP_EXPAND lowers as identity -- broadcast is implicit at the
   // per-LOOP-element scalar level.
-  u32 prog_value[KPROG_INIT_OPS * 4];
-  if (ke->n_ops > sizeof(prog_value) / sizeof(prog_value[0])) {
-    RBAIL_MID("n_ops > KPROG_INIT_OPS*4");
-  }
+  u32 nops_local = ke->n_ops ? ke->n_ops : 1;
+  u32 prog_value[nops_local];
+  for (u32 i = 0; i < nops_local; i++) prog_value[i] = 0;
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
