@@ -258,3 +258,26 @@ Defer M1's "flip the public TConv2D" until one of A/B/C lands;
 TConv2DIm2Col stays available as an alternate lowering for users
 who explicitly want it (mostly useful for testing the matmul
 dispatch path).
+
+---
+
+## M1 attempt log (post-F-8 freeze)
+
+Tried routing `TConv2D` through `TConv2DIm2Col` (alias the kh*kw
+lowering as `TConv2DKhKw` for the conv-im2col reference tests).
+Test run hung -- aborted before completion.
+
+The hang likely indicates an infinite loop or deep recursion
+introduced when more tests start exercising the im2col path.
+Reverted the change pending investigation.
+
+Next steps:
+- Bisect which specific test hangs by routing TConv2D through
+  TConv2DIm2Col only inside a single test file at a time.
+- Once the hanging test is isolated, dump the kernel program
+  structure and check whether the F-8e-7 S_RESHAPE iter coord
+  transform fires for an unsupported shape pattern.
+- Alternative: only route TConv2D through TConv2DIm2Col when
+  the input is BS>1 (rank-4 with leading batch axis) -- that
+  way the BS=1 tests stay on the kh*kw path, and only batched
+  inference/training picks up the im2col speedup.
