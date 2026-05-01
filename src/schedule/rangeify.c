@@ -1752,47 +1752,67 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       int load_indep_of_reduce = 0;
       if (load_id != 0) {
         u32 idx_id = ke->scalar_uops[load_id].src[0];
-        if (idx_id != 0) {
+        // Walk a chain of S_INDEX nodes (emit_index_chain splits ndim>3
+        // into a chain via src[0]).  If ANY node in the chain has a
+        // non-zero stride for reduce_range, the address depends.  Also
+        // walk into S_INDEX_E expression bodies; if a walk hits its
+        // bounded budget, treat as dependent (conservative).
+        int reduce_uses_load = 0;
+        int unknown          = 0;
+        u32 chain_hops       = 0;
+        while (idx_id != 0 && chain_hops++ < 32) {
           ScalarUop const *iu = &ke->scalar_uops[idx_id];
-          // S_INDEX with packed strides: range refs in src[1..].
-          // If reduce_range never appears, address is independent.
-          // S_INDEX_E with expression addr: conservatively treat as
-          // dependent (its addr could include reduce_range as a
-          // sub-expression we don't walk).
           if (iu->op == S_INDEX) {
-            // INDEX may include reduce_range as a range src, but if
-            // its packed stride for that axis is 0, the address
-            // truly doesn't depend on reduce_range.  See
-            // pack_index_extra: bits [16d..16d+15] = stride for src[1+d].
-            int reduce_uses_load = 0;
             for (u8 s = 1; s < iu->src_count; s++) {
               if (iu->src[s] != reduce_range) continue;
               u32 stride = (u32)((iu->extra >> (16 * (s - 1))) & 0xFFFFu);
               if (stride != 0) { reduce_uses_load = 1; break; }
             }
-            if (!reduce_uses_load) load_indep_of_reduce = 1;
+            if (reduce_uses_load) break;
+            // emit_index_chain wraps higher-rank INDEX as nested
+            // src[0]=inner_INDEX(buffer, more_ranges).  Continue down.
+            u32 next = iu->src[0];
+            ScalarUop const *nu = next != 0 ? &ke->scalar_uops[next] : NULL;
+            if (nu != NULL && (nu->op == S_INDEX || nu->op == S_INDEX_E)) {
+              idx_id = next;
+              continue;
+            }
+            break;
           } else if (iu->op == S_INDEX_E) {
             // Expression-form INDEX: src[1] is the address expression.
-            // Walk it recursively (bounded depth) and check if
-            // reduce_range is referenced anywhere.
+            // Walk it recursively (bounded depth).  If we exceed the
+            // budget, treat as dependent (unknown).
             u32 stack[64];
             int sp = 0;
             stack[sp++] = iu->src[1];
             int found = 0;
-            int hops = 0;
-            while (sp > 0 && hops++ < 256) {
+            int hops  = 0;
+            int budget_exceeded = 0;
+            while (sp > 0) {
+              if (hops++ >= 256) { budget_exceeded = 1; break; }
               u32 node = stack[--sp];
               if (node == 0) continue;
               if (node == reduce_range) { found = 1; break; }
               ScalarUop const *nu = &ke->scalar_uops[node];
               if (nu->op == S_RANGE || nu->op == S_ICONST) continue;
-              for (u8 s = 0; s < nu->src_count && sp < 64; s++) {
-                if (nu->src[s] != 0) stack[sp++] = nu->src[s];
+              for (u8 s = 0; s < nu->src_count; s++) {
+                if (nu->src[s] == 0) continue;
+                if (sp >= 64) { budget_exceeded = 1; break; }
+                stack[sp++] = nu->src[s];
               }
+              if (budget_exceeded) break;
             }
-            if (!found) load_indep_of_reduce = 1;
+            if (found) reduce_uses_load = 1;
+            if (budget_exceeded) unknown = 1;
+            break;
+          } else {
+            // Unrecognized index op shape: be conservative.
+            unknown = 1;
+            break;
           }
         }
+        if (chain_hops >= 32) unknown = 1;
+        if (!reduce_uses_load && !unknown) load_indep_of_reduce = 1;
       }
       if (getenv("THVM_RANGEIFY_TRACE") && p->opcode == UOP_PAD
           && ndim > os->ndim) {
