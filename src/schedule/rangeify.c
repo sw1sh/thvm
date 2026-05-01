@@ -866,6 +866,35 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             fprintf(stderr, "  RESHAPE-detail: src0_ndim=%u out_ndim=%u os.ndim=%u\n",
                     p->src0_ndim, p->out_ndim, os->ndim);
           }
+          // F-8e-11: dump the kernel's full op chain when this
+          // RESHAPE shape-change bails, to verify Option C (split at
+          // RESHAPE boundary in materialize.c) is feasible.  Captures
+          // the producer (op[i-1]) and consumer (op[i+1]) -- they
+          // determine whether the split is clean.
+          if (getenv("THVM_F8E11_AUDIT")) {
+            fprintf(stderr, "  F-8e-11-audit: kernel n_ops=%u onum=%u inputs=%u splittable-RESHAPE-at-pos=%u\n",
+                    ke->n_ops, ke->output_numel, ke->n_inputs, i);
+            for (u32 j = 0; j < ke->n_ops; j++) {
+              KProgOp const *q = &ke->program[j];
+              fprintf(stderr, "    op[%u] op=%u numel=%u n_src=%u src=[%u,%u,%u] src0_ndim=%u out_ndim=%u",
+                      j, q->opcode, q->numel, q->n_src,
+                      q->src[0], q->src[1], q->src[2],
+                      q->src0_ndim, q->out_ndim);
+              if (q->src0_ndim > 0) {
+                fprintf(stderr, " src0_dims=[");
+                for (u32 d = 0; d < q->src0_ndim; d++)
+                  fprintf(stderr, "%u%s", q->src0_dims[d], d+1==q->src0_ndim?"":",");
+                fprintf(stderr, "]");
+              }
+              if (q->out_ndim > 0) {
+                fprintf(stderr, " out_dims=[");
+                for (u32 d = 0; d < q->out_ndim; d++)
+                  fprintf(stderr, "%u%s", q->out_dims[d], d+1==q->out_ndim?"":",");
+                fprintf(stderr, "]");
+              }
+              fprintf(stderr, "\n");
+            }
+          }
           RBAIL_MID("RESHAPE shape-change ndim cap or != os->ndim");
         }
         u64 lo = 0, hi = 0;
