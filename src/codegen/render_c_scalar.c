@@ -14,11 +14,11 @@
 //   - Expression indexes: S_INDEX_E plus S_ICONST / S_IADD /
 //     S_ISUB / S_IMUL / S_IDIV / S_IMOD / S_ILT / S_IAND /
 //     S_IWHERE.
-//   - No SHRINK, PAD, FLIP, RESHAPE, CAST, BITCAST yet.
+//   - f32 <-> f64 value-preserving S_CAST.
+//   - No SHRINK, PAD, FLIP, RESHAPE, BITCAST yet.
 //
 // Out of scope (bail; falls through to cpu_dispatch_scalar):
 //   - S_SHRINK / S_PAD / S_FLIP / S_RESHAPE iter shifts
-//   - S_CAST cross-dtype conversion
 //   - Narrow FPs / packed nibbles
 //
 // Generated function signature matches render_c.c:
@@ -56,6 +56,7 @@ static int cs_op_supported(u8 op) {
     case S_RECIP: case S_SQRT: case S_EXP2: case S_LOG2:
     case S_CMPLT: case S_CMPEQ:
     case S_REDUCE_SUM: case S_REDUCE_MAX:
+    case S_CAST:
     case S_ICONST:
     case S_IADD: case S_ISUB: case S_IMUL:
     case S_IDIV: case S_IMOD: case S_ILT:
@@ -83,6 +84,7 @@ static int cs_op_carries_kernel_dtype(ScalarUop const *u) {
     case S_CMPEQ:
     case S_REDUCE_SUM:
     case S_REDUCE_MAX:
+    case S_CAST:
       return 1;
     case S_IWHERE:
       return u->dtype != DT_INT64;
@@ -99,26 +101,31 @@ typedef struct {
   u32        n_loops;
   u32        loop_ids    [MAX_DIM];
   u32        loop_extents[MAX_DIM];
-  u32        dtype;       // uniform dtype for the kernel
+  u32        output_dtype;
 } CsKernelInfo;
 
 static int cs_collect_kernel_info(KernelEntry const *ke, CsKernelInfo *out) {
   if (ke->scalar_uops == NULL || ke->n_scalar_uops < 2) return 0;
-  // Walk every scalar op; bail on unsupported or non-uniform dtype.
-  u32 dt = (u32)-1;
+  if (!cs_dtype_supported(ke->output_dtype)) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (!cs_dtype_supported(ke->input_dtypes[i])) {
+      return 0;
+    }
+  }
+
+  // Walk every scalar op; bail on unsupported dtypes.
   for (u32 i = 1; i < ke->n_scalar_uops; i++) {
     ScalarUop const *u = &ke->scalar_uops[i];
     if (!cs_op_supported(u->op)) return 0;
-    // Uniform-dtype check: ignore S_INDEX / S_RANGE / S_DEFINE_*
-    // which carry dtype only as a label.
     if (cs_op_carries_kernel_dtype(u)) {
-      if (dt == (u32)-1) dt = u->dtype;
-      else if (dt != u->dtype) return 0;
+      if (!cs_dtype_supported(u->dtype)) {
+        return 0;
+      }
     }
   }
-  if (dt == (u32)-1) return 0;
-  if (!cs_dtype_supported(dt)) return 0;
-  out->dtype = dt;
+  out->output_dtype = ke->output_dtype;
 
   // Find BUFFERIZE.
   u32 buf_id = 0;
@@ -360,6 +367,15 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       cg_append(b, "} _acc%u; })", op_id);
       return 1;
     }
+    case S_CAST: {
+      const char *T = cs_dtype_to_c(u->dtype);
+      cg_append(b, "((%s)(", T);
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "))");
+      return 1;
+    }
     case S_ICONST: {
       cg_append(b, "((int64_t)%lldLL)", (long long)(i64)u->extra);
       return 1;
@@ -443,18 +459,19 @@ fn char *cg_emit_scalar(KernelEntry const *ke) {
   if (!cs_collect_kernel_info(ke, &info)) return NULL;
 
   CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
-              .program_dtype = info.dtype, .ke = ke };
+              .program_dtype = info.output_dtype, .ke = ke };
   if (!b.buf) return NULL;
 
-  const char *T = cs_dtype_to_c(info.dtype);
+  const char *out_T = cs_dtype_to_c(info.output_dtype);
   cg_append(&b, "#include <math.h>\n");
   cg_append(&b, "#include <stdint.h>\n\n");
   cg_append(&b, "void k(void *out_v, const void *const *ins_v, "
                 "unsigned n, const unsigned *in_numels) {\n");
-  cg_append(&b, "  %s *out = (%s *)out_v;\n", T, T);
+  cg_append(&b, "  %s *out = (%s *)out_v;\n", out_T, out_T);
   for (u32 i = 0; i < ke->n_inputs; i++) {
+    const char *in_T = cs_dtype_to_c(ke->input_dtypes[i]);
     cg_append(&b, "  const %s *in%u = (const %s *)ins_v[%u];\n",
-              T, i, T, i);
+              in_T, i, in_T, i);
   }
   cg_append(&b, "  (void)n; (void)in_numels;\n");
 
@@ -555,20 +572,21 @@ fn char *cg_emit_tile(KernelEntry const *ke) {
   }
 
   CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
-              .program_dtype = info.scalar.dtype, .ke = ke };
+              .program_dtype = info.scalar.output_dtype, .ke = ke };
   if (!b.buf) {
     return NULL;
   }
 
-  const char *T = cs_dtype_to_c(info.scalar.dtype);
+  const char *out_T = cs_dtype_to_c(info.scalar.output_dtype);
   cg_append(&b, "#include <math.h>\n");
   cg_append(&b, "#include <stdint.h>\n\n");
   cg_append(&b, "void k(void *out_v, const void *const *ins_v, "
                 "unsigned n, const unsigned *in_numels) {\n");
-  cg_append(&b, "  %s *out = (%s *)out_v;\n", T, T);
+  cg_append(&b, "  %s *out = (%s *)out_v;\n", out_T, out_T);
   for (u32 i = 0; i < ke->n_inputs; i++) {
+    const char *in_T = cs_dtype_to_c(ke->input_dtypes[i]);
     cg_append(&b, "  const %s *in%u = (const %s *)ins_v[%u];\n",
-              T, i, T, i);
+              in_T, i, in_T, i);
   }
   cg_append(&b, "  (void)n; (void)in_numels;\n");
 

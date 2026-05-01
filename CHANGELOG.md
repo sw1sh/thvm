@@ -20,6 +20,12 @@ The scalar-UOp C renderer now emits generated loops for f32/f64
 `S_REDUCE_SUM` and `S_REDUCE_MAX`, with focused C JIT tests covering
 both reducer kinds.
 
+### Added: scalar C f32/f64 cast rendering
+
+The scalar-UOp C renderer now accepts mixed f32/f64 kernels when the
+mix is represented by `S_CAST`, emitting per-input and output pointer
+types instead of requiring one uniform kernel dtype.
+
 ### Added: generated C tile renderer
 
 `THVM_TILE=1` now tries a generated C tile renderer for simple

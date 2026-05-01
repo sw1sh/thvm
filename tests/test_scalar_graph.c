@@ -297,6 +297,112 @@ int main(void) {
   CHECK(max_out[0] == 7.0f);
   rangeify_free(ke);
 
+  TEST_BEGIN("scalar-graph/c-renderer-cast-f32-to-f64-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 3;
+  ke->output_dtype    = DT_FP64;
+  ke->output_numel    = 3;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 3u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP64, 0);
+  in_src[0] = pa;
+  in_src[1] = r0;
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  u32 cast = rangeify_emit_unary(ke, S_CAST, DT_FP64, la);
+  out_src[0] = pc;
+  out_src[1] = r0;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP64, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP64, ic, cast);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP64, 2, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  src = cg_emit_scalar(ke);
+  CHECK(src != NULL);
+  CHECK(strstr(src, "double *out") != NULL);
+  CHECK(strstr(src, "const float *in0") != NULL);
+  CHECK(strstr(src, "((double)(") != NULL);
+  free(src);
+
+  f32 cast32_vals[3] = {1.25f, -2.5f, 3.75f};
+  f64 cast64_out[3] = {0.0, 0.0, 0.0};
+  in_buf = cpu_buf_alloc(sizeof(cast32_vals));
+  out_buf = cpu_buf_alloc(sizeof(cast64_out));
+  CHECK_EQ(cpu_buf_write(in_buf, cast32_vals, sizeof(cast32_vals)), 0);
+  CHECK_EQ(cpu_buf_write(out_buf, cast64_out, sizeof(cast64_out)), 0);
+  in_bufs[0] = in_buf;
+  cpu_jit_cache_reset();
+  jit_hit = 0;
+  for (u32 attempt = 0; attempt < 8; attempt++) {
+    if (cpu_jit_dispatch_scalar(ke, in_bufs, out_buf)) {
+      jit_hit = 1;
+    }
+  }
+  CHECK(jit_hit);
+  CHECK_EQ(cpu_buf_read(out_buf, cast64_out, sizeof(cast64_out)), 0);
+  CHECK(cast64_out[0] == 1.25);
+  CHECK(cast64_out[1] == -2.5);
+  CHECK(cast64_out[2] == 3.75);
+  rangeify_free(ke);
+
+  TEST_BEGIN("scalar-graph/c-renderer-cast-f64-to-f32-jit");
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP64;
+  ke->input_numels[0] = 3;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 3;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 3u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP64, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  in_src[0] = pa;
+  in_src[1] = r0;
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP64, 2, in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP64, ia);
+  cast = rangeify_emit_unary(ke, S_CAST, DT_FP32, la);
+  out_src[0] = pc;
+  out_src[1] = r0;
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, cast);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  src = cg_emit_scalar(ke);
+  CHECK(src != NULL);
+  CHECK(strstr(src, "float *out") != NULL);
+  CHECK(strstr(src, "const double *in0") != NULL);
+  CHECK(strstr(src, "((float)(") != NULL);
+  free(src);
+
+  f64 cast64_vals[3] = {-8.0, 0.5, 16.0};
+  f32 cast32_out[3] = {0.0f, 0.0f, 0.0f};
+  in_buf = cpu_buf_alloc(sizeof(cast64_vals));
+  out_buf = cpu_buf_alloc(sizeof(cast32_out));
+  CHECK_EQ(cpu_buf_write(in_buf, cast64_vals, sizeof(cast64_vals)), 0);
+  CHECK_EQ(cpu_buf_write(out_buf, cast32_out, sizeof(cast32_out)), 0);
+  in_bufs[0] = in_buf;
+  cpu_jit_cache_reset();
+  jit_hit = 0;
+  for (u32 attempt = 0; attempt < 8; attempt++) {
+    if (cpu_jit_dispatch_scalar(ke, in_bufs, out_buf)) {
+      jit_hit = 1;
+    }
+  }
+  CHECK(jit_hit);
+  CHECK_EQ(cpu_buf_read(out_buf, cast32_out, sizeof(cast32_out)), 0);
+  CHECK(cast32_out[0] == -8.0f);
+  CHECK(cast32_out[1] == 0.5f);
+  CHECK(cast32_out[2] == 16.0f);
+  rangeify_free(ke);
+
   thvm_free();
   TEST_REPORT();
 }
