@@ -573,13 +573,38 @@ typedef enum {
   S_FLIP,
   // Iter-coord shape reinterpret (UOP_RESHAPE when src0_dims !=
   // out_dims AND a downstream PAD/SHRINK consumes the new shape).
-  // src[0] = body, src[1..ndim] = LOOP ranges (whose iters are
-  // reinterpreted).  extra packs out_dims (the shape PAD's iter
-  // came from) in low 32 bits and in_dims (the shape SHRINK
-  // expects to consume) in high 32 bits, both as 4xu8 row-major.
-  // At eval: flat_idx = sum(iter[d] * out_strides[d]); decompose
-  // into in_strides; overwrite range_iter, eval body, restore.
+  // Legacy "shared LOOP refs" form: src[1..nrng) are LOOP ranges
+  // used as both input and output via in-place iter shift.  extra
+  // packs out_dims (low 32, 4xu8) and in_dims (high 32, 4xu8).
+  // Body S_LOAD's strides match in_dims (caller's responsibility).
   S_RESHAPE,
+  // Iter-coord shape reinterpret (split-src form).  Mirrors
+  // tinygrad's RESHAPE-as-flat-roundtrip in apply_movement_op.
+  //
+  // Encoding:
+  //   src[0]                       = body (the wrapped expression)
+  //   extra[bits 0..7]             = N_out (number of output range refs)
+  //   src[1 .. 1+N_out)            = output range refs (iters drive
+  //                                   flat_idx; typically LOOP type)
+  //   src[1+N_out .. src_count)    = input range refs (S_RESHAPE_V
+  //                                   writes their iters from the
+  //                                   flat_idx decomposition; typically
+  //                                   VIRT type when ranks differ from
+  //                                   the kernel's LOOP nest)
+  //
+  // Each range's extent is read from its S_RANGE.extra (low 32 bits),
+  // so this form supports arbitrary u32 extents (legacy S_RESHAPE
+  // packs dims as u8s and is capped at 255 per axis).
+  // At eval:
+  //   flat_idx = sum_d(iter[out_d] * out_stride[d])  -- row-major over output extents
+  //   for d in 0..N_in:
+  //     iter[in_d] = (flat_idx / in_stride[d]) % in_extent[d]
+  //   v = eval body
+  //   restore in iters
+  //   return v
+  // Used for rank-mismatch RESHAPE (input rank != output rank or !=
+  // kernel LOOP rank); input refs point to fresh S_AXIS_VIRT ranges.
+  S_RESHAPE_V,
   S__COUNT
 } ScalarOp;
 
@@ -588,6 +613,13 @@ typedef enum {
 #define S_AXIS_REDUCE  1
 #define S_AXIS_UNROLL  2
 #define S_AXIS_GLOBAL  3
+// Virtual / placeholder range (mirrors tinygrad's AxisType.PLACEHOLDER).
+// Owns a slot in the dispatcher's range_iter[] array but is NOT iterated
+// by the outer LOOP nest.  An S_RESHAPE wrapper writes its iter at body
+// eval time (decomposed from output ranges' flat_idx) and restores after.
+// Lets a sub-expression at a different rank than the kernel's LOOP nest
+// flow through the same scalar-uop graph.
+#define S_AXIS_VIRT    4
 
 // SCALAR_MAX_SRC = 1 buffer/store + up to MAX_DIM range refs.
 // Sized so a single S_INDEX or S_BUFFERIZE can carry every LOOP/

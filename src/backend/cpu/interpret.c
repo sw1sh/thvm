@@ -658,12 +658,10 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       return v;
     }
     case S_RESHAPE: {
-      // Iter-coord shape reinterpret: re-decompose flat index from
-      // out_dims (caller-side shape) into in_dims (body-side shape).
-      // extra[low 32]  = out_dims (4 x u8 row-major)
-      // extra[high 32] = in_dims  (4 x u8 row-major)
-      // Up to MAX_DIM ranges; if a side has fewer dims than nrng
-      // the trailing dims are 1.
+      // Legacy shared-LOOP-refs form.  src[1..nrng) are LOOP ranges
+      // used as both input and output via in-place iter shift.
+      // extra packs out_dims (low 32, 4xu8) and in_dims (high 32,
+      // 4xu8).  Body S_LOAD's strides must match in_dims.
       u32 nrng = (u32)u->src_count - 1;
       u32 saved[SCALAR_MAX_SRC];
       u8 out_dims[MAX_DIM] = {0}, in_dims[MAX_DIM] = {0};
@@ -673,8 +671,6 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
         out_dims[d] = (u8)((lo >> (8 * d)) & 0xFFu);
         in_dims [d] = (u8)((hi >> (8 * d)) & 0xFFu);
       }
-      // Compute flat_idx using current iters and out_dims row-major
-      // strides (computed on the fly).
       u64 flat_idx = 0;
       u64 stride = 1;
       for (i32 d = (i32)nrng - 1; d >= 0; d--) {
@@ -683,7 +679,6 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
         flat_idx += (u64)saved[d] * stride;
         stride   *= (out_dims[d] != 0 ? out_dims[d] : 1);
       }
-      // Decompose flat_idx using in_dims row-major.
       u64 in_stride[MAX_DIM];
       u64 s = 1;
       for (i32 d = (i32)nrng - 1; d >= 0; d--) {
@@ -699,6 +694,49 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       for (u32 d = 0; d < nrng; d++) {
         u32 rng_id = u->src[1 + d];
         c->range_iter[rng_id] = saved[d];
+      }
+      return v;
+    }
+    case S_RESHAPE_V: {
+      // Split-src form: src[1..1+N_out) are OUTPUT range refs whose
+      // iters drive flat_idx; src[1+N_out..src_count) are INPUT range
+      // refs whose iters get written from the decomposition.  Each
+      // range's extent is read from its S_RANGE.extra.  N_out lives
+      // in extra's low byte.  See thvm.h ScalarOp::S_RESHAPE_V.
+      u32 n_out = (u32)(u->extra & 0xFFu);
+      u32 nrest = (u32)u->src_count - 1;
+      if (n_out == 0 || n_out > nrest) return 0;
+      u32 n_in  = nrest - n_out;
+      u64 flat_idx = 0;
+      u64 out_stride = 1;
+      for (i32 d = (i32)n_out - 1; d >= 0; d--) {
+        u32 rng_id = u->src[1 + d];
+        u32 iter   = c->range_iter[rng_id];
+        u32 ext    = (u32)(c->ke->scalar_uops[rng_id].extra & 0xFFFFFFFFu);
+        flat_idx  += (u64)iter * out_stride;
+        out_stride *= (ext != 0 ? ext : 1);
+      }
+      u32 saved_in [SCALAR_MAX_SRC];
+      u32 in_extent[SCALAR_MAX_SRC];
+      u64 in_stride[SCALAR_MAX_SRC];
+      u64 s = 1;
+      for (i32 d = (i32)n_in - 1; d >= 0; d--) {
+        u32 rng_id = u->src[1 + n_out + d];
+        u32 ext    = (u32)(c->ke->scalar_uops[rng_id].extra & 0xFFFFFFFFu);
+        in_extent[d] = (ext != 0 ? ext : 1);
+        in_stride[d] = s;
+        s *= in_extent[d];
+      }
+      for (u32 d = 0; d < n_in; d++) {
+        u32 rng_id = u->src[1 + n_out + d];
+        saved_in[d] = c->range_iter[rng_id];
+        c->range_iter[rng_id] =
+            (u32)((flat_idx / in_stride[d]) % in_extent[d]);
+      }
+      u64 v = eval_scalar(c, u->src[0]);
+      for (u32 d = 0; d < n_in; d++) {
+        u32 rng_id = u->src[1 + n_out + d];
+        c->range_iter[rng_id] = saved_in[d];
       }
       return v;
     }
@@ -882,10 +920,9 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   }
   // 3. Scalar-UOps JIT: clang-compiled fused inner loop rendered
   //    from ke->scalar_uops[] (the rangeify output).  Same JIT
-  //    pipeline as path 2 but covers the rangeified patterns
-  //    (multi-input EXPAND broadcast, REDUCE-broadcast tail, etc.)
-  //    that the KProgOp JIT can't render directly.  Falls back to
-  //    the scalar interpreter on cg_supports_scalar miss.
+  //    pipeline as path 2 but covers the rangeified patterns.
+  //    Falls back to the scalar interpreter on cg_supports_scalar
+  //    miss.
   if (cpu_jit_dispatch_scalar(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;

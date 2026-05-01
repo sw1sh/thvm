@@ -105,6 +105,7 @@ fn const char *scalar_op_name(u8 op) {
     case S_CAST:           return "S_CAST";
     case S_SHRINK:         return "S_SHRINK";
     case S_PAD:            return "S_PAD";
+    case S_RESHAPE_V:      return "S_RESHAPE_V";
     default:               return "S_?";
   }
 }
@@ -115,6 +116,7 @@ fn const char *scalar_axis_name(u32 axis_type) {
     case S_AXIS_REDUCE:  return "REDUCE";
     case S_AXIS_UNROLL:  return "UNROLL";
     case S_AXIS_GLOBAL:  return "GLOBAL";
+    case S_AXIS_VIRT:    return "VIRT";
     default:             return "?";
   }
 }
@@ -870,41 +872,78 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // generalization.
         if (p->src0_ndim > 4 || p->out_ndim > 4
             || p->src0_ndim != os->ndim || p->out_ndim != os->ndim) {
+          // Rank-mismatch RESHAPE.  Try the S_RESHAPE_V split-src form
+          // (mirrors tinygrad's apply_movement_op for RESHAPE -- input
+          // ranges become fresh PLACEHOLDER/VIRT ranges that the wrap
+          // writes from a flat-index roundtrip of the LOOP iters).
+          //
+          // MVP coverage: source must be a direct contig input load
+          // (KSRC_IS_INPUT(raw) and the input view is contig).  Other
+          // sources (prog_value chains, non-contig views) bail and
+          // fall through to cpu_interpret as before.
+          int can_use_v = KSRC_IS_INPUT(raw)
+                       && p->src0_ndim <= MAX_DIM
+                       && p->out_ndim  <= MAX_DIM
+                       && (1 + (u32)os->ndim + (u32)p->src0_ndim) <= SCALAR_MAX_SRC;
+          if (can_use_v) {
+            u32 slot = KSRC_INDEX(raw);
+            View const *src_view = &ke->input_views[slot];
+            if (!src_view->contiguous) can_use_v = 0;
+            // Verify the input view's flat shape matches src0_dims.  A
+            // RESHAPE's source should already be contig + correctly
+            // sized (numel preserved); if not, something upstream is
+            // unexpected and we'd rather bail than silently mis-index.
+            if (can_use_v) {
+              u32 src0_numel = 1;
+              for (u32 d = 0; d < p->src0_ndim; d++) src0_numel *= p->src0_dims[d];
+              if (src0_numel != ke->input_numels[slot]) can_use_v = 0;
+            }
+          }
+          if (can_use_v) {
+            u32 slot = KSRC_INDEX(raw);
+            View const *src_view = &ke->input_views[slot];
+            u32 in_ndim = p->src0_ndim;
+            u32 n_out   = os->ndim;
+            // Allocate VIRT ranges sized to src0_dims.
+            u32 virt_ranges[MAX_DIM];
+            for (u32 d = 0; d < in_ndim; d++) {
+              u64 r_extra = ((u64)S_AXIS_VIRT << 32) | (u64)p->src0_dims[d];
+              virt_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, r_extra);
+            }
+            // Fresh DEFINE_PARAM + S_LOAD via VIRT ranges, row-major
+            // strides over src0_dims.  Reuses input_views[slot].offset
+            // (the contig offset).
+            u32 fresh_param = rangeify_emit_leaf(ke, S_DEFINE_PARAM,
+                                                 p->dtype, (u64)slot);
+            u32 strides[MAX_DIM];
+            row_major_strides(p->src0_dims, in_ndim, strides);
+            u32 idx = emit_index_chain(ke, p->dtype, fresh_param,
+                                        virt_ranges, strides, in_ndim,
+                                        (u32)src_view->offset);
+            if (idx == 0) RBAIL_MID("RESHAPE-V emit_index_chain failed");
+            u32 v_load = rangeify_emit_unary(ke, S_LOAD, p->dtype, idx);
+            // Emit S_RESHAPE_V: src[0] = body, src[1..1+n_out) =
+            // output (LOOP) refs, src[1+n_out..) = input (VIRT) refs.
+            // extra[byte 0] = n_out.
+            u32 src_arr[SCALAR_MAX_SRC] = {v_load};
+            for (u32 d = 0; d < n_out;   d++) src_arr[1 + d]              = loop_ranges[d];
+            for (u32 d = 0; d < in_ndim; d++) src_arr[1 + n_out + d]      = virt_ranges[d];
+            u8  src_count = (u8)(1 + n_out + in_ndim);
+            u64 extra     = (u64)n_out & 0xFFu;
+            prog_value[i] = rangeify_emit(ke, S_RESHAPE_V, p->dtype,
+                                          src_count, src_arr, extra);
+            continue;
+          }
           if (getenv("THVM_RANGEIFY_BAIL")) {
             fprintf(stderr, "  RESHAPE-detail: src0_ndim=%u out_ndim=%u os.ndim=%u\n",
                     p->src0_ndim, p->out_ndim, os->ndim);
           }
-          // F-8e-11: dump the kernel's full op chain when this
-          // RESHAPE shape-change bails, to verify Option C (split at
-          // RESHAPE boundary in materialize.c) is feasible.  Captures
-          // the producer (op[i-1]) and consumer (op[i+1]) -- they
-          // determine whether the split is clean.
-          if (getenv("THVM_F8E11_AUDIT")) {
-            fprintf(stderr, "  F-8e-11-audit: kernel n_ops=%u onum=%u inputs=%u splittable-RESHAPE-at-pos=%u\n",
-                    ke->n_ops, ke->output_numel, ke->n_inputs, i);
-            for (u32 j = 0; j < ke->n_ops; j++) {
-              KProgOp const *q = &ke->program[j];
-              fprintf(stderr, "    op[%u] op=%u numel=%u n_src=%u src=[%u,%u,%u] src0_ndim=%u out_ndim=%u",
-                      j, q->opcode, q->numel, q->n_src,
-                      q->src[0], q->src[1], q->src[2],
-                      q->src0_ndim, q->out_ndim);
-              if (q->src0_ndim > 0) {
-                fprintf(stderr, " src0_dims=[");
-                for (u32 d = 0; d < q->src0_ndim; d++)
-                  fprintf(stderr, "%u%s", q->src0_dims[d], d+1==q->src0_ndim?"":",");
-                fprintf(stderr, "]");
-              }
-              if (q->out_ndim > 0) {
-                fprintf(stderr, " out_dims=[");
-                for (u32 d = 0; d < q->out_ndim; d++)
-                  fprintf(stderr, "%u%s", q->out_dims[d], d+1==q->out_ndim?"":",");
-                fprintf(stderr, "]");
-              }
-              fprintf(stderr, "\n");
-            }
-          }
           RBAIL_MID("RESHAPE shape-change ndim cap or != os->ndim");
         }
+        // Legacy shared-LOOP-refs encoding.  Body's S_LOAD strides
+        // match in_dims (input view's actual strides), and S_RESHAPE
+        // shifts the LOOP iters in-place from out_dims coords to
+        // in_dims coords via flat-index roundtrip.
         u64 lo = 0, hi = 0;
         for (u32 d = 0; d < p->out_ndim; d++) {
           if (p->out_dims[d] > 0xFFu) RBAIL_MID("RESHAPE out_dim > u8");
