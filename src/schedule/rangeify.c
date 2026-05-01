@@ -284,6 +284,57 @@ static u32 build_addr_from_flat_iter(KernelEntry *ke, u32 flat_range_id,
   return acc != 0 ? acc : emit_iconst(ke, 0);
 }
 
+// Per-axis iter expressions tracked by the backward walk and consumed
+// by the per-USE input-load helper.  Mirrors tinygrad's apply_movement_op
+// rngs tuple (indexing.py).  refs[d] = op_id of an integer expression
+// (S_RANGE / S_IADD / S_IDIV / S_IMOD / ...) that yields the iter for
+// axis d when the chain reads its input at the consuming op.
+typedef struct {
+  u32 ndim;
+  u32 refs[MAX_DIM];
+  u32 valid_mask;  // 0 = always valid; else op_id of S_IAND'd S_ILTs
+                   // forming a 0/1 bounds-check that gates the load
+                   // through S_IWHERE.
+} RngsCtx;
+
+// Emit a use-local input load: S_INDEX_E(param, addr_expr) + S_LOAD
+// + optional S_IWHERE(valid_mask, load, 0).  The address is built
+// from `r->refs[d]` * `view->strides[d]` + offset.  Returns the load
+// op_id (post-IWHERE if applicable), or 0 on bail (negative stride).
+//
+// Each call emits a FRESH set of nodes (no dedup): per-USE rngs means
+// each consumer of the same input gets its own load with addressing
+// that reflects that consumer's chain transforms.  Later scalar-tile
+// simplification can collapse identical copies.
+fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
+                               u32 dtype) {
+  View const *v = &ke->input_views[slot];
+  u32 in_off = (u32)v->offset;
+  u32 param  = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)slot);
+  u32 acc    = in_off ? emit_iconst(ke, (i64)in_off) : 0;
+  for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
+    if (v->strides[d] < 0) return 0;
+    if (v->strides[d] == 0) continue;
+    u32 t = r->refs[d];
+    if (t == 0) return 0;
+    if (v->strides[d] != 1) {
+      u32 c = emit_iconst(ke, (i64)v->strides[d]);
+      t = emit_ibinop(ke, S_IMUL, t, c);
+    }
+    acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+  }
+  if (acc == 0) acc = emit_iconst(ke, 0);
+  u32 src[2] = {param, acc};
+  u32 idx    = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
+  u32 load   = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
+  if (r->valid_mask != 0) {
+    u32 zero = emit_iconst(ke, 0);
+    u32 wsrc[3] = {r->valid_mask, load, zero};
+    load = rangeify_emit(ke, S_IWHERE, dtype, 3, wsrc, 0);
+  }
+  return load;
+}
+
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
 //
 // Inputs:
@@ -621,13 +672,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // expressions into the scalar uop graph (these are values, not
   // dispatcher state, so emitting them here is fine).  The forward
   // pass below then references them when building input loads.
-  typedef struct {
-    u32 ndim;
-    u32 refs[MAX_DIM];
-    u32 valid_mask;  // 0 = always valid (no PAD upstream); else
-                     // op_id of integer expression returning 0/1
-                     // that gates the input load via S_IWHERE.
-  } RngsCtx;
+  // (RngsCtx is defined at file scope -- shared with
+  // emit_input_load_for_use.)
   u32 nops_local = ke->n_ops ? ke->n_ops : 1;
   RngsCtx rngs[nops_local];
   for (u32 i = 0; i < nops_local; i++) {
@@ -643,6 +689,26 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       input_rngs_pre [i].refs[d] = 0;
       input_rngs_post[i].refs[d] = 0;
     }
+  }
+  // Per-USE rngs (per (consumer_op_id, src_index) edge).  The
+  // per-slot tables above are first-writer-wins, which is wrong when
+  // multiple consumers see the same input through different chain
+  // transforms.  use_rngs is the per-consumer truth -- backward walk
+  // populates it for every input edge, and the forward walk builds a
+  // fresh use-local load for each PAD identity-pass site.
+  //
+  // Indexing: edge_id = consumer_i * MAX_KPROG_SRC + src_index.
+  // (MAX_KPROG_SRC matches KProgOp.src[].)
+  #define MAX_KPROG_SRC 4
+  u32 use_rngs_size = nops_local * MAX_KPROG_SRC;
+  RngsCtx use_rngs[use_rngs_size];
+  u8      use_via_rngs[use_rngs_size];
+  u32     use_load    [use_rngs_size];
+  for (u32 e = 0; e < use_rngs_size; e++) {
+    use_rngs[e].ndim = 0; use_rngs[e].valid_mask = 0;
+    use_via_rngs[e] = 0;
+    use_load    [e] = 0;
+    for (u32 d = 0; d < MAX_DIM; d++) use_rngs[e].refs[d] = 0;
   }
   if (ke->n_ops > 0) {
     i32 last = (i32)ke->n_ops - 1;
@@ -802,6 +868,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           RngsCtx *target = pre_scope ? &input_rngs_pre [slot]
                                        : &input_rngs_post[slot];
           if (target->ndim == 0) *target = in_rngs;
+          // Per-USE: always record this consumer's rngs into the
+          // (consumer, src_index) edge slot.  No first-writer-wins.
+          if (s < MAX_KPROG_SRC) {
+            u32 edge = i * MAX_KPROG_SRC + s;
+            use_rngs    [edge] = in_rngs;
+            use_via_rngs[edge] = 1;
+          }
           continue;
         }
         u32 src_idx = KSRC_INDEX(raw);
@@ -1581,6 +1654,28 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         prog_value[i] = v;
         via_rngs[i] = 1;
         continue;
+      }
+      // Per-USE PAD identity-pass: when PAD reads a direct INPUT and
+      // the backward walk captured this consumer's rngs (shift +
+      // valid_mask already baked), emit a use-local load via
+      // emit_input_load_for_use.  Each consumer of the same input
+      // gets its own load with addressing reflecting its own chain
+      // transforms -- no first-writer-wins ambiguity, no per-slot
+      // conflict with other consumers.
+      if (p->opcode == UOP_PAD && KSRC_IS_INPUT(raw)
+          && (u8)0 < MAX_KPROG_SRC) {
+        u32 edge = i * MAX_KPROG_SRC + 0;
+        if (use_via_rngs[edge]) {
+          u32 slot = KSRC_INDEX(raw);
+          u32 ulocal = emit_input_load_for_use(ke, slot,
+                                                &use_rngs[edge], p->dtype);
+          if (ulocal != 0) {
+            prog_value[i]  = ulocal;
+            via_rngs[i]    = 1;
+            use_load[edge] = ulocal;
+            continue;
+          }
+        }
       }
       // SHRINK/PAD fusion path: when the source is an S_RESHAPE_V wrap
       // and ndim > os->ndim, the SHRINK/PAD operates on a rank-promoted
