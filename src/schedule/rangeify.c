@@ -653,9 +653,39 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       RngsCtx in_rngs = rngs[i];
       switch (p->opcode) {
         case UOP_REDUCE: {
-          if (has_reduce && in_rngs.ndim < MAX_DIM) {
+          // REDUCE input shape = output ++ {reduce_size at reduce_axis}.
+          // Compute reduce_axis from reduce_inner (product of input
+          // dims AFTER the reduce axis): walk body shape from the
+          // back, accumulating; when partial == reduce_inner, that's
+          // the reduce axis position.  Insert reduce_range at that
+          // position in in_rngs (NOT appended -- crucial for non-
+          // trailing reduces like LeNet's conv-backward chain).
+          if (!has_reduce || in_rngs.ndim >= MAX_DIM) break;
+          u32 body_ndim = p->src0_ndim;
+          if (body_ndim == 0) {
+            // Fallback: append (matches old behavior).
             in_rngs.refs[in_rngs.ndim++] = reduce_range;
+            break;
           }
+          u32 r_axis = (u32)-1;
+          {
+            u32 partial = 1;
+            for (i32 k = (i32)body_ndim - 1; k >= 0; k--) {
+              if (partial == reduce_inner) { r_axis = (u32)k; break; }
+              partial *= p->src0_dims[k];
+            }
+          }
+          if (r_axis >= body_ndim) {
+            // Couldn't infer; append as fallback.
+            in_rngs.refs[in_rngs.ndim++] = reduce_range;
+            break;
+          }
+          // Insert reduce_range at r_axis, shifting later refs right.
+          for (i32 d = (i32)in_rngs.ndim; d > (i32)r_axis; d--) {
+            in_rngs.refs[d] = in_rngs.refs[d - 1];
+          }
+          in_rngs.refs[r_axis] = reduce_range;
+          in_rngs.ndim++;
           break;
         }
         case UOP_SHRINK: {
