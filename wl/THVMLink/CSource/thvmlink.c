@@ -1250,7 +1250,8 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_flops(WolframLibraryData l, mint a,
   return LIBRARY_NO_ERROR;
 }
 
-// 0=none, 1=blas-dot, 2=blas-gemv, 3=blas-gemm, 4=jit, 5=interpreter.
+// 0=none, 1=blas-dot, 2=blas-gemv, 3=blas-gemm, 4=jit, 5=interpreter,
+// 6=metal-jit, 7=metal-op, 8=tile.
 EXTERN_C DLLEXPORT int thvm_wl_kernel_dispatch_kind(WolframLibraryData l, mint a,
                                                     MArgument *args, MArgument res) {
   (void)l;(void)a;

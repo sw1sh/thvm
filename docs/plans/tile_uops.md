@@ -29,6 +29,10 @@ that future renderers can lower differently for CPU and Metal.
 - tile plans remember the `KernelAxes.version` they were built
   against, and `tile_sync_from_scalar` rebuilds stale plans after
   `TKernelApplyOpt`, autotune resets, or lazy WL introspection;
+- CPU dispatch has an opt-in `THVM_TILE=1` interpreter that consumes
+  the validated tile plan over scalar UOps, records dispatch kind
+  `"tile"`, and falls back to the normal BLAS/JIT/scalar paths when
+  no supported tile plan is present;
 - `tile_build_from_scalar` seeds a minimal plan from `scalar_uops`:
 
 ```text
@@ -64,9 +68,11 @@ they need ids or axis metadata.
 so every rangeified kernel carries a tile-plan snapshot even though no
 backend consumes it yet.
 
-Dispatch ignores `tile_uops` today. This is deliberate: rangeify and
-the scalar interpreter/JIT continue to own correctness while the tile
-layer becomes a stable target for autotuning and future renderers.
+Default dispatch ignores `tile_uops` today. This is deliberate:
+rangeify and the scalar interpreter/JIT continue to own correctness
+while the tile layer becomes a stable target for autotuning and future
+renderers. Setting `THVM_TILE=1` routes supported CPU kernels through
+the tile interpreter for focused validation and profiling.
 
 ## Intended Next Steps
 
@@ -75,8 +81,9 @@ layer becomes a stable target for autotuning and future renderers.
 2. Teach the builder and renderers how to consume richer axis classes:
    `LOCAL`, `GROUP_REDUCE`, and `GLOBAL` bindings beyond the current
    introspectable `UPCAST`/`UNROLL`/`SWAP` sync.
-3. Add a CPU tile renderer that lowers `TILE_LOOP_NEST` to nested
-   loops and honors `UPCAST`/`UNROLL`.
+3. Replace the CPU tile interpreter with a generated C tile renderer
+   that lowers `TILE_LOOP_NEST` to nested loops and emits direct scalar
+   expressions instead of calling the scalar evaluator.
 4. Add a Metal tile renderer that maps `LOCAL`/`GLOBAL` axes to
    threadgroup/grid ids and uses `TILE_BARRIER`.
 5. Introduce `TILE_REDUCE` for row-wise reductions and softmax-like

@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: opt-in CPU tile dispatch
+
+CPU dispatch now has a `THVM_TILE=1` path that executes validated
+`TileUop` plans over scalar UOps and records dispatch kind `"tile"`.
+Focused WL tests cover elementwise tile dispatch and a reduce kernel
+whose tile plan carries an `UNROLL` split.
+
 ### Added: tile plan sync with KernelAxes opts
 
 Tile plans now track the `KernelAxes` version they were built against

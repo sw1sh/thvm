@@ -946,6 +946,129 @@ fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   return 0;
 }
 
+static int cpu_tile_enabled(void) {
+  char const *e = getenv("THVM_TILE");
+  return e != NULL && e[0] == '1';
+}
+
+static u32 cpu_scalar_bufferize_root(KernelEntry const *ke) {
+  if (ke == NULL || ke->scalar_uops == NULL) {
+    return 0;
+  }
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    if (ke->scalar_uops[i].op == S_BUFFERIZE) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+static int cpu_tile_axis_is_output(u32 axis_type) {
+  switch (axis_type) {
+    case KAX_LOOP:
+    case KAX_UPCAST:
+    case KAX_LOCAL:
+    case KAX_GLOBAL:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+fn int cpu_dispatch_tile(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (!cpu_tile_enabled()) {
+    return 0;
+  }
+  if (!tile_sync_from_scalar(ke)) {
+    return 0;
+  }
+
+  TilePlanInfo info;
+  if (!tile_collect_plan_info(ke, &info)) {
+    return 0;
+  }
+
+  u32 buf_id = cpu_scalar_bufferize_root(ke);
+  if (buf_id == 0) {
+    return 0;
+  }
+  ScalarUop const *bu = &ke->scalar_uops[buf_id];
+  u32 n_loops = (u32)bu->src_count - 1;
+  if (n_loops > MAX_DIM) {
+    return 0;
+  }
+
+  u32 loop_ids    [MAX_DIM] = {0};
+  u32 loop_extents[MAX_DIM] = {0};
+  for (u32 d = 0; d < n_loops; d++) {
+    u32 r = bu->src[1 + d];
+    if (r == 0 || r >= ke->n_scalar_uops) {
+      return 0;
+    }
+    loop_ids    [d] = r;
+    loop_extents[d] = (u32)(ke->scalar_uops[r].extra & 0xFFFFFFFFu);
+  }
+
+  u32 n_tile_loops = 0;
+  u64 tile_numel = 1;
+  for (u32 i = 0; i < info.n_axes; i++) {
+    if (!cpu_tile_axis_is_output(info.axis_types[i])) {
+      continue;
+    }
+    if (n_tile_loops >= MAX_AXES || info.axis_extents[i] == 0) {
+      return 0;
+    }
+    n_tile_loops++;
+    tile_numel *= info.axis_extents[i];
+  }
+  if (tile_numel != (u64)(ke->output_numel ? ke->output_numel : 1)) {
+    return 0;
+  }
+
+  u32 loop_strides[MAX_DIM] = {0};
+  if (n_loops > 0) {
+    loop_strides[n_loops - 1] = 1;
+    for (i32 d = (i32)n_loops - 2; d >= 0; d--) {
+      loop_strides[d] = loop_strides[d + 1] * loop_extents[d + 1];
+    }
+  }
+
+  void *in_ptrs_buf[ke->n_inputs ? ke->n_inputs : 1];
+  void **in_ptrs = in_ptrs_buf;
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
+  }
+
+  u32 *range_iter = (u32 *)calloc(ke->n_scalar_uops, sizeof(u32));
+  if (range_iter == NULL) {
+    return 0;
+  }
+
+  ScalarCtx ctx = {
+    .ke          = ke,
+    .in_ptrs     = in_ptrs,
+    .out_p       = CPU_BUFS[out_buf_id].data,
+    .range_iter  = range_iter,
+    .odtype      = ke->output_dtype,
+  };
+
+  ScalarUop const *st = &ke->scalar_uops[info.scalar_store_id];
+  for (u32 k = 0; k < (u32)tile_numel; k++) {
+    for (u32 d = 0; d < n_loops; d++) {
+      u32 ext = loop_extents[d];
+      u32 str = loop_strides[d];
+      range_iter[loop_ids[d]] = (str > 0 && ext > 0) ? ((k / str) % ext) : 0;
+    }
+    u64 idx_r = eval_scalar(&ctx, st->src[0]);
+    u32 off   = (u32)(idx_r & 0xFFFFFFFFu);
+    u64 bits  = eval_scalar(&ctx, st->src[1]);
+    scalar_store_typed(ctx.out_p, off, ctx.odtype, bits);
+  }
+
+  free(range_iter);
+  return 1;
+}
+
 // Forward decls: defined in backend/cpu/{blas,jit}.c (included after
 // this file in thvm.c, so declare here for the dispatcher).
 fn int cpu_blas_dispatch       (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
@@ -966,14 +1089,21 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     cg_profile_record(kid, (KDispatchKind)blas_kind, cg_now_us() - t0);
     return 0;
   }
-  // 2. KProgOp JIT: clang-compiled fused inner loop for elementwise
+  // 2. Env-gated TileUop interpreter.  This consumes the validated
+  //    tile plan over scalar_uops when THVM_TILE=1.  It is currently
+  //    a correctness/profiling path, not the default fast path.
+  if (cpu_dispatch_tile(ke, in_buf_ids, out_buf_id)) {
+    cg_profile_record(kid, KDISPATCH_CPU_TILE, cg_now_us() - t0);
+    return 0;
+  }
+  // 3. KProgOp JIT: clang-compiled fused inner loop for elementwise
   //    chains (cached by program hash).  Faster than the scalar
   //    interpreter for the patterns it covers (no REDUCE > 1, etc.).
   if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;
   }
-  // 3. Scalar-UOps JIT: clang-compiled fused inner loop rendered
+  // 4. Scalar-UOps JIT: clang-compiled fused inner loop rendered
   //    from ke->scalar_uops[] (the rangeify output).  Same JIT
   //    pipeline as path 2 but covers the rangeified patterns.
   //    Falls back to the scalar interpreter on cg_supports_scalar
@@ -982,7 +1112,7 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;
   }
-  // 4. Rangeify scalar-uops interpreter: the broad fallback that
+  // 5. Rangeify scalar-uops interpreter: the broad fallback that
   //    handles every pattern the WL grid produces (REDUCE, FLIP,
   //    PAD/SHRINK chains, BITCAST, packed nibbles, narrow FPs).
   if (ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
@@ -990,7 +1120,7 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
     return rc;
   }
-  // 4. Legacy KProgOp interpreter -- last-resort fallback for
+  // 6. Legacy KProgOp interpreter -- last-resort fallback for
   //    kernels that didn't lower to scalar uops (THVM_RANGEIFY=0,
   //    or rangeify bailed).  Slated for removal once the WL grid
   //    holds zero rangeify bails for all configurations.

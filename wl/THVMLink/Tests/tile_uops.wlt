@@ -11,6 +11,20 @@ tileWithRangeify[on_, body_] := Module[{prev, r},
     r
 ]
 
+SetAttributes[tileWithRuntime, HoldRest];
+tileWithRuntime[rangeify_, tile_, body_] := Module[{prevRangeify, prevTile, r},
+    prevRangeify = Environment["THVM_RANGEIFY"];
+    prevTile = Environment["THVM_TILE"];
+    If[ prevRangeify === $Failed, prevRangeify = None];
+    If[ prevTile === $Failed, prevTile = None];
+    SetEnvironment["THVM_RANGEIFY" -> If[ rangeify, "1", "0"]];
+    SetEnvironment["THVM_TILE" -> If[ tile, "1", "0"]];
+    r = body;
+    SetEnvironment["THVM_RANGEIFY" -> prevRangeify];
+    SetEnvironment["THVM_TILE" -> prevTile];
+    r
+]
+
 tileSimpleAdd[] := (
     TInit[];
     a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
@@ -101,6 +115,36 @@ VerificationTest[
     ],
     {{"UPCAST", 4}, {"LOOP", 2}},
     TestID -> "tile-uops/apply-swap-syncs-plan"
+]
+
+VerificationTest[
+    tileWithRuntime[True, True,
+      TInit[];
+      a = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+      b = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+      out = TRealize[a + b];
+      kid = TKernelCount[] - 1;
+      {Normal @ TTensorData[out], TKernelDispatchKind[kid]}
+    ],
+    {{5., 7., 9.}, "tile"},
+    TestID -> "tile-uops/cpu-tile-dispatch-elementwise"
+]
+
+VerificationTest[
+    tileWithRuntime[True, True,
+      TInit[];
+      xT = TTensorCreate @ N @ Range[12];
+      TRealize @ TUOpReduce[xT, 0, "SUM"];
+      oldKid = TKernelCount[] - 1;
+      TKernelApplyOpt[oldKid, TOpt["UNROLL", 1, 4]];
+      out = TRealize @ TUOpReduce[xT, 0, "SUM"];
+      kid = TKernelCount[] - 1;
+      {First @ Normal @ TTensorData[out],
+       TKernelDispatchKind[kid],
+       tileAxisSig @ TKernelTilePlan[kid]}
+    ],
+    {78., "tile", {{"LOOP", 1}, {"REDUCE", 3}, {"UNROLL", 4}}},
+    TestID -> "tile-uops/cpu-tile-dispatch-reduce-with-unroll-plan"
 ]
 
 VerificationTest[

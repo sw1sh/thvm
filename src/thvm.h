@@ -1390,6 +1390,7 @@ typedef enum {
   KDISPATCH_INTERPRETER = 5,   // CPU interpreter
   KDISPATCH_METAL_JIT   = 6,   // Metal: cg_emit_metal -> MTLLibrary -> single-encoder dispatch
   KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (one encoder per KProgOp)
+  KDISPATCH_CPU_TILE    = 8,   // CPU tile interpreter over TileUop + ScalarUop
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);
