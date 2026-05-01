@@ -10,6 +10,9 @@
 //     S_RECIP / S_SQRT / S_EXP2 / S_LOG2 / S_CMPLT / S_CMPEQ.
 //   - One LOOP nest at the BUFFERIZE root (rank 1..MAX_DIM).
 //   - f32 / f64 only.
+//   - Expression indexes: S_INDEX_E plus S_ICONST / S_IADD /
+//     S_ISUB / S_IMUL / S_IDIV / S_IMOD / S_ILT / S_IAND /
+//     S_IWHERE.
 //   - No REDUCE, SHRINK, PAD, FLIP, RESHAPE, CAST, BITCAST yet.
 //
 // Out of scope (bail; falls through to cpu_dispatch_scalar):
@@ -43,6 +46,7 @@ static int cs_op_supported(u8 op) {
     case S_DEFINE_PARAM:
     case S_DEFINE_OUTPUT:
     case S_INDEX:
+    case S_INDEX_E:
     case S_LOAD:
     case S_LOAD_RAW:
     case S_STORE:
@@ -51,7 +55,34 @@ static int cs_op_supported(u8 op) {
     case S_ADD: case S_MUL: case S_NEG:
     case S_RECIP: case S_SQRT: case S_EXP2: case S_LOG2:
     case S_CMPLT: case S_CMPEQ:
+    case S_ICONST:
+    case S_IADD: case S_ISUB: case S_IMUL:
+    case S_IDIV: case S_IMOD: case S_ILT:
+    case S_IAND: case S_IWHERE:
       return 1;
+    default:
+      return 0;
+  }
+}
+
+static int cs_op_carries_kernel_dtype(ScalarUop const *u) {
+  switch (u->op) {
+    case S_LOAD:
+    case S_LOAD_RAW:
+    case S_STORE:
+    case S_CONST:
+    case S_ADD:
+    case S_MUL:
+    case S_NEG:
+    case S_RECIP:
+    case S_SQRT:
+    case S_EXP2:
+    case S_LOG2:
+    case S_CMPLT:
+    case S_CMPEQ:
+      return 1;
+    case S_IWHERE:
+      return u->dtype != DT_INT64;
     default:
       return 0;
   }
@@ -77,11 +108,7 @@ static int cs_collect_kernel_info(KernelEntry const *ke, CsKernelInfo *out) {
     if (!cs_op_supported(u->op)) return 0;
     // Uniform-dtype check: ignore S_INDEX / S_RANGE / S_DEFINE_*
     // which carry dtype only as a label.
-    if (u->op == S_LOAD || u->op == S_LOAD_RAW || u->op == S_STORE
-     || u->op == S_CONST || u->op == S_ADD || u->op == S_MUL
-     || u->op == S_NEG || u->op == S_RECIP || u->op == S_SQRT
-     || u->op == S_EXP2 || u->op == S_LOG2 || u->op == S_CMPLT
-     || u->op == S_CMPEQ) {
+    if (cs_op_carries_kernel_dtype(u)) {
       if (dt == (u32)-1) dt = u->dtype;
       else if (dt != u->dtype) return 0;
     }
@@ -133,15 +160,25 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id);
 // offset) as 4 x u16.  Only up to 3 strided axes per node; longer
 // chains nest INDEX nodes (each later INDEX takes the previous as its
 // buffer src and adds 0 offset).
-static void cs_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
+static int cs_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
   ScalarUop const *u = &ke->scalar_uops[idx_id];
+  if (u->op == S_INDEX_E) {
+    return cs_emit_value(b, ke, u->src[1]);
+  }
+  if (u->op != S_INDEX) {
+    return 0;
+  }
   // Recurse into src[0] if it's another S_INDEX (chain); else it's a
   // DEFINE_PARAM/DEFINE_OUTPUT terminal (no offset contribution).
   ScalarUop const *child = &ke->scalar_uops[u->src[0]];
   int wrote = 0;
   if (child->op == S_INDEX) {
-    cs_emit_index_offset(b, ke, u->src[0]);
+    if (!cs_emit_index_offset(b, ke, u->src[0])) {
+      return 0;
+    }
     wrote = 1;
+  } else if (child->op != S_DEFINE_PARAM && child->op != S_DEFINE_OUTPUT) {
+    return 0;
   }
   // Extra: bits[0..15]=stride0, [16..31]=stride1, [32..47]=stride2,
   //        [48..63]=offset.
@@ -165,6 +202,32 @@ static void cs_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
     wrote = 1;
   }
   if (!wrote) cg_append(b, "0u");
+  return 1;
+}
+
+static int cs_index_input_slot(KernelEntry const *ke, u32 idx_id, u32 *slot) {
+  ScalarUop const *idx = &ke->scalar_uops[idx_id];
+  if (idx->op == S_INDEX_E) {
+    ScalarUop const *param = &ke->scalar_uops[idx->src[0]];
+    if (param->op != S_DEFINE_PARAM) {
+      return 0;
+    }
+    *slot = (u32)param->extra;
+    return 1;
+  }
+  while (idx->op == S_INDEX
+      && ke->scalar_uops[idx->src[0]].op == S_INDEX) {
+    idx = &ke->scalar_uops[idx->src[0]];
+  }
+  if (idx->op != S_INDEX) {
+    return 0;
+  }
+  ScalarUop const *param = &ke->scalar_uops[idx->src[0]];
+  if (param->op != S_DEFINE_PARAM) {
+    return 0;
+  }
+  *slot = (u32)param->extra;
+  return 1;
 }
 
 // Emit the C value-producing expression for one scalar op.  S_RANGE
@@ -185,18 +248,14 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
     case S_LOAD_RAW: {
       // Recover the input slot from the INDEX chain's terminal
       // DEFINE_PARAM, then emit `in%u[(offset)]`.
-      ScalarUop const *idx = &ke->scalar_uops[u->src[0]];
-      // Walk down the INDEX chain to find the buffer.
-      while (idx->op == S_INDEX
-          && ke->scalar_uops[idx->src[0]].op == S_INDEX) {
-        idx = &ke->scalar_uops[idx->src[0]];
+      u32 slot = 0;
+      if (!cs_index_input_slot(ke, u->src[0], &slot)) {
+        return 0;
       }
-      if (idx->op != S_INDEX) return 0;
-      ScalarUop const *param = &ke->scalar_uops[idx->src[0]];
-      if (param->op != S_DEFINE_PARAM) return 0;
-      u32 slot = (u32)param->extra;
       cg_append(b, "in%u[", slot);
-      cs_emit_index_offset(b, ke, u->src[0]);
+      if (!cs_emit_index_offset(b, ke, u->src[0])) {
+        return 0;
+      }
       cg_append(b, "]");
       return 1;
     }
@@ -264,6 +323,75 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       cg_append(b, ") ? %s : %s)", one, zero);
       return 1;
     }
+    case S_ICONST: {
+      cg_append(b, "((int64_t)%lldLL)", (long long)(i64)u->extra);
+      return 1;
+    }
+    case S_IADD:
+    case S_ISUB:
+    case S_IMUL:
+    case S_IAND: {
+      const char *op = (u->op == S_IADD) ? "+"
+                     : (u->op == S_ISUB) ? "-"
+                     : (u->op == S_IMUL) ? "*"
+                                          : "&";
+      cg_append(b, "((int64_t)(");
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ") %s (int64_t)(", op);
+      if (!cs_emit_value(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, "))");
+      return 1;
+    }
+    case S_IDIV:
+    case S_IMOD: {
+      const char *op = (u->op == S_IDIV) ? "/" : "%";
+      cg_append(b, "(((int64_t)(");
+      if (!cs_emit_value(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, ") == 0) ? (int64_t)0 : ((int64_t)(");
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ") %s (int64_t)(", op);
+      if (!cs_emit_value(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, ")))");
+      return 1;
+    }
+    case S_ILT: {
+      cg_append(b, "(((int64_t)(");
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ") < (int64_t)(");
+      if (!cs_emit_value(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, ")) ? (int64_t)1 : (int64_t)0)");
+      return 1;
+    }
+    case S_IWHERE: {
+      cg_append(b, "((");
+      if (!cs_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ") ? (");
+      if (!cs_emit_value(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, ") : (");
+      if (!cs_emit_value(b, ke, u->src[2])) {
+        return 0;
+      }
+      cg_append(b, "))");
+      return 1;
+    }
     default:
       return 0;
   }
@@ -307,7 +435,10 @@ fn char *cg_emit_scalar(KernelEntry const *ke) {
   ScalarUop const *st = &ke->scalar_uops[info.store_id];
   for (u32 indent = 0; indent < info.n_loops + 1; indent++) cg_append(&b, "  ");
   cg_append(&b, "out[");
-  cs_emit_index_offset(&b, ke, st->src[0]);
+  if (!cs_emit_index_offset(&b, ke, st->src[0])) {
+    free(b.buf);
+    return NULL;
+  }
   cg_append(&b, "] = ");
   if (!cs_emit_value(&b, ke, st->src[1])) {
     free(b.buf);
@@ -451,7 +582,10 @@ fn char *cg_emit_tile(KernelEntry const *ke) {
     cg_append(&b, "  ");
   }
   cg_append(&b, "out[");
-  cs_emit_index_offset(&b, ke, st->src[0]);
+  if (!cs_emit_index_offset(&b, ke, st->src[0])) {
+    free(b.buf);
+    return NULL;
+  }
   cg_append(&b, "] = ");
   if (!cs_emit_value(&b, ke, st->src[1])) {
     free(b.buf);

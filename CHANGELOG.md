@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: scalar C expression-index rendering
+
+The scalar-UOp C renderer now accepts `S_INDEX_E` address expressions
+and the `S_I*` integer expression family for f32/f64 kernels.  This
+lets generated scalar and tile C paths cover rangeify graphs that use
+symbolic movement-derived addresses instead of only packed-stride
+`S_INDEX`.
+
 ### Added: generated C tile renderer
 
 `THVM_TILE=1` now tries a generated C tile renderer for simple

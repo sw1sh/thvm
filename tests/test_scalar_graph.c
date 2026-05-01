@@ -129,6 +129,68 @@ int main(void) {
   CHECK_EQ(ke->scalar_uops[100].op, S_CONST);
   rangeify_free(ke);
 
+  TEST_BEGIN("scalar-graph/c-renderer-index-e-jit");
+  kernel_inputs_reserve(ke, 1);
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 8;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = 4;
+  r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                          ((u64)S_AXIS_LOOP << 32) | 4u);
+  pa = rangeify_emit_leaf(ke, S_DEFINE_PARAM,  DT_FP32, 0);
+  pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 c_two   = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 2);
+  u32 c_one   = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 1);
+  u32 c_three = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 3);
+  u32 mul2    = rangeify_emit_binary(ke, S_IMUL, DT_INT64, r0, c_two);
+  u32 addr    = rangeify_emit_binary(ke, S_IADD, DT_INT64, mul2, c_one);
+  u32 in_src[2] = {pa, addr};
+  ia = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, in_src, 0);
+  la = rangeify_emit_unary(ke, S_LOAD, DT_FP32, ia);
+  u32 cond = rangeify_emit_binary(ke, S_ILT, DT_INT64, r0, c_three);
+  u32 zero = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 0);
+  u32 where_src[3] = {cond, la, zero};
+  u32 guarded = rangeify_emit(ke, S_IWHERE, DT_FP32, 3, where_src, 0);
+  u32 out_src[2] = {pc, r0};
+  ic = rangeify_emit(ke, S_INDEX_E, DT_FP32, 2, out_src, 0);
+  sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, ic, guarded);
+  buf_src[0] = sto;
+  buf_src[1] = r0;
+  buf = rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_src, 0);
+  CHECK(buf != 0);
+  CHECK(cg_supports_scalar(ke));
+  char *src = cg_emit_scalar(ke);
+  CHECK(src != NULL);
+  CHECK(strstr(src, "in0[") != NULL);
+  CHECK(strstr(src, "int64_t") != NULL);
+  CHECK(strstr(src, " ? ") != NULL);
+  free(src);
+
+  f32 src_vals[8] = {10.0f, 20.0f, 30.0f, 40.0f,
+                     50.0f, 60.0f, 70.0f, 80.0f};
+  f32 dst_vals[4] = {0};
+  u32 in_buf = cpu_buf_alloc(sizeof(src_vals));
+  u32 out_buf = cpu_buf_alloc(sizeof(dst_vals));
+  CHECK_EQ(cpu_buf_write(in_buf, src_vals, sizeof(src_vals)), 0);
+  CHECK_EQ(cpu_buf_write(out_buf, dst_vals, sizeof(dst_vals)), 0);
+  u32 in_bufs[1] = {in_buf};
+  cpu_jit_cache_reset();
+  int jit_hit = 0;
+  for (u32 attempt = 0; attempt < 8; attempt++) {
+    if (cpu_jit_dispatch_scalar(ke, in_bufs, out_buf)) {
+      jit_hit = 1;
+    }
+  }
+  CHECK(jit_hit);
+  CHECK_EQ(cpu_buf_read(out_buf, dst_vals, sizeof(dst_vals)), 0);
+  CHECK(dst_vals[0] == 20.0f);
+  CHECK(dst_vals[1] == 40.0f);
+  CHECK(dst_vals[2] == 60.0f);
+  CHECK(dst_vals[3] == 0.0f);
+  rangeify_free(ke);
+
   thvm_free();
   TEST_REPORT();
 }

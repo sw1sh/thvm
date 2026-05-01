@@ -126,6 +126,12 @@ the same pipeline through `cg_emit_metal`.
   unsigned n, const unsigned *in_numels)` with a fused per-output
   loop or, for reduce-tail, an outer `oi` loop wrapping an inner
   `_k` accumulator.
+- [render_c_scalar.c](../src/codegen/render_c_scalar.c):
+  `cg_emit_scalar` and `cg_emit_tile`.  Emits generated C from the
+  rangeified scalar graph for f32/f64 elementwise kernels, including
+  symbolic `S_INDEX_E` addresses built from `S_I*` expressions.  The
+  tile variant lowers a validated `TILE_LOOP_NEST` to nested C loops
+  before emitting the same scalar expression body.
 - [render_metal.c](../src/codegen/render_metal.c): `cg_emit_metal`.
   Same shape, MSL flavor. One thread per output element instead of
   an outer loop; `device` / `device const` qualifiers; no `f` suffix

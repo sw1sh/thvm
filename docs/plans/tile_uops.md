@@ -34,9 +34,10 @@ that future renderers can lower differently for CPU and Metal.
   `"tile"`, and falls back to the normal BLAS/JIT/scalar paths when
   no supported tile plan is present;
 - that tile path first tries a generated C tile renderer for simple
-  elementwise f32/f64 plans with `LOOP`/`UPCAST` axes, then falls
-  back to the tile interpreter for broader scalar graphs such as
-  reductions;
+  elementwise f32/f64 plans with `LOOP`/`UPCAST` axes, including
+  `S_INDEX_E` addresses built from `S_I*` expression nodes, then
+  falls back to the tile interpreter for broader scalar graphs such
+  as reductions;
 - `tile_build_from_scalar` seeds a minimal plan from `scalar_uops`:
 
 ```text
@@ -81,8 +82,10 @@ interpreter for focused validation and profiling.
 
 ## Intended Next Steps
 
-1. Extend the scalar C renderer until the emitted scalar graph covers
-   the same correctness surface as the scalar interpreter.
+1. Continue extending the scalar C renderer until the emitted scalar
+   graph covers the same correctness surface as the scalar interpreter;
+   remaining gaps include reductions, movement wrappers, casts, and
+   narrow/packed dtypes.
 2. Teach the builder and renderers how to consume richer axis classes:
    `LOCAL`, `GROUP_REDUCE`, and `GLOBAL` bindings beyond the current
    introspectable `UPCAST`/`UNROLL`/`SWAP` sync.
