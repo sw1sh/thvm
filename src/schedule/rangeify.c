@@ -917,7 +917,59 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     rngs[i].ndim = 0;
     for (u32 d = 0; d < MAX_DIM; d++) rngs[i].refs[d] = 0;
   }
-  (void)rngs;  // unused for now -- next iteration wires the fill
+  // BACKWARD PASS: compute out_rngs[i] = per-axis iter expressions
+  // describing each op's output position (in terms of LOOP/REDUCE
+  // ranges).  Walk from terminal op backward; each op tells us what
+  // iter expressions its sources see (= its inputs' out_rngs).
+  //
+  // Currently wired for: REDUCE (adds reduce_range to body's rngs),
+  // and ALU ops (propagate unchanged).  Movement ops (SHRINK/PAD/
+  // EXPAND/FLIP/RESHAPE/PERMUTE) are next iterations.
+  //
+  // Initialize the terminal op's out_rngs to LOOP iters (the kernel
+  // STORE iterates the os shape).  Walk backward, propagating to
+  // sources via per-op rules.
+  if (ke->n_ops > 0) {
+    i32 last = (i32)ke->n_ops - 1;
+    rngs[last].ndim = os->ndim;
+    for (u32 d = 0; d < os->ndim; d++) rngs[last].refs[d] = loop_ranges[d];
+    for (i32 i = last; i >= 0; i--) {
+      KProgOp *p = &ke->program[i];
+      RngsCtx in_rngs = rngs[i];
+      // Per-op transform: compute what rngs the inputs see.
+      switch (p->opcode) {
+        case UOP_REDUCE: {
+          // The REDUCE op's body sees one extra iter (reduce_range)
+          // appended.  reduce_in_numel == output * reduce_size.
+          if (has_reduce && in_rngs.ndim < MAX_DIM) {
+            in_rngs.refs[in_rngs.ndim++] = reduce_range;
+          }
+          break;
+        }
+        // All other ops (ALU, CONST, UOP_CAST/BITCAST/LOAD/EXPAND/
+        // RESHAPE/SHRINK/PAD/FLIP/PERMUTE) currently propagate
+        // unchanged -- they're correct for ALU + same-shape transforms,
+        // and movement-op rules will be added in later iterations.
+        default: break;
+      }
+      // Propagate to non-input sources.  Inputs (KSRC_IS_INPUT) carry
+      // the in_rngs implicitly to the input_load emission, which
+      // happens before this loop in the current materializer; for now
+      // we only propagate to op-result sources.
+      for (u8 s = 0; s < p->n_src; s++) {
+        u32 raw = p->src[s];
+        if (KSRC_IS_INPUT(raw)) continue;
+        u32 src_idx = KSRC_INDEX(raw);
+        // Only set if not already set by a closer-to-terminal consumer
+        // (first writer wins -- sources with multiple consumers may
+        // need different rngs; this is a known limitation that the
+        // proper rngs port will resolve).
+        if (rngs[src_idx].ndim == 0) rngs[src_idx] = in_rngs;
+      }
+    }
+  }
+  (void)rngs;  // backward-walk computed but not yet consumed
+                // (unused until we wire input_load + movement ops to use it)
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
