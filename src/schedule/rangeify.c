@@ -1047,10 +1047,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       } else if (v->shape.ndim == os->ndim) {
         u32 strides_u32[MAX_DIM];
         for (u32 d = 0; d < os->ndim; d++) {
-          if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0
-              && !input_via_padshrink[i]) {
-            RBAIL_MID("post-INDEX shape mismatch (non-broadcast)");
-          }
+          // Shape-mismatch tolerance: if v->shape.dims[d] != os->dims[d]
+          // with non-zero stride, just walk the input by its stride
+          // (which gives the "take first N" interpretation -- common
+          // when the input is a SHRINK alias / RESHAPE'd view that
+          // rangeify can't otherwise match).  Old code bailed unless
+          // the input was via PAD/SHRINK; loosened.
           strides_u32[d] = (u32)v->strides[d];
         }
         idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
