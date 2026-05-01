@@ -946,40 +946,80 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // Rank-mismatch RESHAPE.  Try the S_RESHAPE_V split-src form
           // (mirrors tinygrad's apply_movement_op for RESHAPE -- input
           // ranges become fresh PLACEHOLDER/VIRT ranges that the wrap
-          // writes from a flat-index roundtrip of the LOOP iters).
+          // writes from a flat-index roundtrip of selected LOOP iters).
           //
           // MVP coverage requires:
           // 1. Source is a direct contig input load (KSRC_IS_INPUT,
           //    input_view contiguous, src0_dims numel matches view).
-          // 2. RESHAPE's OUTPUT shape (out_dims) matches the kernel's
-          //    output shape (os->dims) exactly.  Otherwise the LOOP
-          //    iters traverse the kernel's full output space (which
-          //    may be a downstream-EXPANDed higher-rank shape), and
-          //    using them as the S_RESHAPE_V "output side" mis-indexes
-          //    the RESHAPE's pre-EXPAND value (e.g. softmax's
-          //    [2,1] -> [2] -> EXPAND[2,3] chain caused row-mixing).
+          // 2. Each non-1 axis in out_dims maps to a unique LOOP axis
+          //    in os with matching extent.  Size-1 axes in out_dims
+          //    contribute no flat_idx (they're just labels for
+          //    downstream EXPAND).  os axes with no corresponding
+          //    out_dim entry are broadcast axes -- the source value
+          //    is constant across their LOOP iter.
           //
-          // Other cases (prog_value chains, non-contig views, RESHAPE
-          // followed by EXPAND/movement) bail and fall through to
-          // cpu_interpret as before.
+          // The selected LOOP iters drive flat_idx (in the order they
+          // appear in out_dims, contributing only for non-1 axes); the
+          // src0_dims VIRT ranges decompose the result.  This handles
+          // the "RESHAPE then EXPAND" pattern: e.g. RESHAPE [1,3,3] ->
+          // [1,1,9] then EXPAND to [2,9] -- only the LOOP iter for the
+          // size-9 os axis matters; the size-2 os axis (broadcast) is
+          // ignored, so the S_LOAD doesn't depend on it.
+          //
+          // Other cases (prog_value chains, non-contig views, out_dims
+          // non-1 axes that don't match an os axis) bail and fall
+          // through to cpu_interpret.
           int can_use_v = KSRC_IS_INPUT(raw)
                        && p->src0_ndim <= MAX_DIM
                        && p->out_ndim  <= MAX_DIM
-                       && p->out_ndim  == os->ndim
                        && (1 + (u32)os->ndim + (u32)p->src0_ndim) <= SCALAR_MAX_SRC;
+          // Match each non-1 out_dim to a unique LOOP axis in os by
+          // extent equality.  Also collect the per-out_dim contribution:
+          //   contrib_iter[d]  -- LOOP range ref to use for out_dim d
+          //                       (0 if axis is size-1, no contribution)
+          // Order matches out_dims so flat_idx accumulates row-major
+          // over the out_dims layout.
+          u32 contrib_iter[MAX_DIM] = {0};
+          u8  os_used[MAX_DIM] = {0};
           if (can_use_v) {
             for (u32 d = 0; d < p->out_ndim; d++) {
-              if (p->out_dims[d] != os->dims[d]) { can_use_v = 0; break; }
+              if (p->out_dims[d] == 1) continue;  // size-1 contributes nothing
+              int matched = 0;
+              for (u32 e = 0; e < os->ndim; e++) {
+                if (os_used[e]) continue;
+                if (os->dims[e] == p->out_dims[d]) {
+                  contrib_iter[d] = loop_ranges[e];
+                  os_used[e] = 1;
+                  matched = 1;
+                  break;
+                }
+              }
+              if (!matched) { can_use_v = 0; break; }
             }
           }
           if (can_use_v) {
             u32 slot = KSRC_INDEX(raw);
             View const *src_view = &ke->input_views[slot];
-            if (!src_view->contiguous) can_use_v = 0;
-            // Verify the input view's flat shape matches src0_dims.  A
-            // RESHAPE's source should already be contig + correctly
-            // sized (numel preserved); if not, something upstream is
-            // unexpected and we'd rather bail than silently mis-index.
+            // Verify view shape matches src0_dims AND numel matches.
+            // For non-contig views (e.g. slice views with strides like
+            // [25,5,1] on a [1,3,3] shape into a [5,5,5] parent), we
+            // can still index correctly using the view's actual strides
+            // -- as long as the view shape matches, S_INDEX with
+            // v->strides + per-axis VIRT iters reads the right elements.
+            if (src_view->shape.ndim != p->src0_ndim) can_use_v = 0;
+            if (can_use_v) {
+              for (u32 d = 0; d < p->src0_ndim; d++) {
+                if (src_view->shape.dims[d] != p->src0_dims[d]) {
+                  can_use_v = 0; break;
+                }
+                if (src_view->strides[d] < 0) {
+                  can_use_v = 0; break;  // negative stride: bail
+                }
+                if ((u32)src_view->strides[d] > 0xFFFFu) {
+                  can_use_v = 0; break;  // stride doesn't fit u16
+                }
+              }
+            }
             if (can_use_v) {
               u32 src0_numel = 1;
               for (u32 d = 0; d < p->src0_ndim; d++) src0_numel *= p->src0_dims[d];
@@ -990,30 +1030,57 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             u32 slot = KSRC_INDEX(raw);
             View const *src_view = &ke->input_views[slot];
             u32 in_ndim = p->src0_ndim;
-            u32 n_out   = os->ndim;
-            // Allocate VIRT ranges sized to src0_dims.
+            // Build the output-side ref list: one ref per non-1
+            // out_dim, in out_dims order.  size-1 out_dims contribute
+            // nothing (their extent is 1, so the flat_idx contribution
+            // would be 0 anyway).  We also need fresh size-1 VIRT ranges
+            // for those positions so S_RESHAPE_V's flat_idx accumulator
+            // can multiply by the correct out extent.
+            //
+            // Concrete encoding: emit a VIRT range with extent =
+            // out_dims[d] for each axis -- size-1 axes give an extent
+            // that contributes a stride of 1 in the multiplication,
+            // and their iter is forced to 0 by the wrap (since extent=1).
+            u32 out_refs[MAX_DIM] = {0};
+            u32 n_out = p->out_ndim;
+            for (u32 d = 0; d < n_out; d++) {
+              if (contrib_iter[d] != 0) {
+                out_refs[d] = contrib_iter[d];
+              } else {
+                // size-1 out_dim: emit a VIRT range with extent 1.
+                u64 r_extra = ((u64)S_AXIS_VIRT << 32) | 1ULL;
+                out_refs[d] = rangeify_emit_leaf(ke, S_RANGE,
+                                                  DT_INT32, r_extra);
+              }
+            }
+            // Allocate VIRT ranges sized to src0_dims (input side).
             u32 virt_ranges[MAX_DIM];
             for (u32 d = 0; d < in_ndim; d++) {
               u64 r_extra = ((u64)S_AXIS_VIRT << 32) | (u64)p->src0_dims[d];
               virt_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, r_extra);
             }
-            // Fresh DEFINE_PARAM + S_LOAD via VIRT ranges, row-major
-            // strides over src0_dims.  Reuses input_views[slot].offset
-            // (the contig offset).
+            // Fresh DEFINE_PARAM + S_LOAD via VIRT ranges.  Use the
+            // view's actual strides so non-contig slice views work
+            // correctly.  For a contig view this matches
+            // row_major_strides(src0_dims); for a non-contig slice
+            // (e.g. shape [1,3,3] strides [25,5,1] viewing a [5,5,5]
+            // parent), it reads the right window into the parent.
             u32 fresh_param = rangeify_emit_leaf(ke, S_DEFINE_PARAM,
                                                  p->dtype, (u64)slot);
             u32 strides[MAX_DIM];
-            row_major_strides(p->src0_dims, in_ndim, strides);
+            for (u32 d = 0; d < in_ndim; d++) {
+              strides[d] = (u32)src_view->strides[d];
+            }
             u32 idx = emit_index_chain(ke, p->dtype, fresh_param,
                                         virt_ranges, strides, in_ndim,
                                         (u32)src_view->offset);
             if (idx == 0) RBAIL_MID("RESHAPE-V emit_index_chain failed");
             u32 v_load = rangeify_emit_unary(ke, S_LOAD, p->dtype, idx);
             // Emit S_RESHAPE_V: src[0] = body, src[1..1+n_out) =
-            // output (LOOP) refs, src[1+n_out..) = input (VIRT) refs.
-            // extra[byte 0] = n_out.
+            // output refs (selected LOOP iters + size-1 VIRT placeholders),
+            // src[1+n_out..) = input (VIRT) refs.  extra[byte 0] = n_out.
             u32 src_arr[SCALAR_MAX_SRC] = {v_load};
-            for (u32 d = 0; d < n_out;   d++) src_arr[1 + d]              = loop_ranges[d];
+            for (u32 d = 0; d < n_out;   d++) src_arr[1 + d]              = out_refs[d];
             for (u32 d = 0; d < in_ndim; d++) src_arr[1 + n_out + d]      = virt_ranges[d];
             u8  src_count = (u8)(1 + n_out + in_ndim);
             u64 extra     = (u64)n_out & 0xFFu;
@@ -1022,17 +1089,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             continue;
           }
           if (getenv("THVM_RANGEIFY_BAIL")) {
-            fprintf(stderr, "  RESHAPE-detail: src0_ndim=%u src0_dims=[",
-                    p->src0_ndim);
-            for (u32 d = 0; d < p->src0_ndim; d++)
-              fprintf(stderr, "%u%s", p->src0_dims[d], d+1==p->src0_ndim?"":",");
-            fprintf(stderr, "] out_ndim=%u out_dims=[", p->out_ndim);
-            for (u32 d = 0; d < p->out_ndim; d++)
-              fprintf(stderr, "%u%s", p->out_dims[d], d+1==p->out_ndim?"":",");
-            fprintf(stderr, "] os.ndim=%u os.dims=[", os->ndim);
-            for (u32 d = 0; d < os->ndim; d++)
-              fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
-            fprintf(stderr, "] src_is_input=%d\n", KSRC_IS_INPUT(raw) ? 1 : 0);
+            fprintf(stderr, "  RESHAPE-detail: src0_ndim=%u out_ndim=%u os.ndim=%u\n",
+                    p->src0_ndim, p->out_ndim, os->ndim);
           }
           RBAIL_MID("RESHAPE shape-change ndim cap or != os->ndim");
         }
