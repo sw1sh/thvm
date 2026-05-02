@@ -134,6 +134,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "backend/cpu/buf_decref.c"
 #include "backend/cpu/buf_read.c"
 #include "backend/cpu/buf_write.c"
+#include "backend/cpu/buf_copy.c"
 #include "backend/cpu/buf_pool.c"
 // Promote-to-fp32 helper for narrow-float / fp8 elementwise.
 #include "backend/cpu/op/_promote.c"
@@ -187,6 +188,9 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #ifndef THVM_HAS_METAL
 #include "backend/metal/_.c"
 #endif
+#include "backend/dispatch/begin_all.c"
+#include "backend/dispatch/flush_all.c"
+#include "backend/dispatch/end_all.c"
 
 // === tensor/ ===
 #include "tensor/alloc.c"

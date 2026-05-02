@@ -51,6 +51,26 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* f32 matmul should bypass expanded-view pre-materialization and
+       route through the direct Metal GEMM shader. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result},
+        If[ ctx === 0, Return[True]];
+        result = TInContext[ctx,
+            a = TTensorCreate @ NumericArray[{{1., 2., 3.}, {4., 5., 6.}}, "Real32"];
+            b = TTensorCreate @ NumericArray[{{7., 8.}, {9., 10.}, {11., 12.}}, "Real32"];
+            out = TRealize @ TMatMul[a, b];
+            {Round[Normal @ TTensorData[out], 0.001],
+             TKernelDispatchKind[TKernelCount[] - 1]}
+        ];
+        TContextDestroy[ctx];
+        result === {{{58., 64.}, {139., 154.}}, "metal-gemm"} || ctx === 0
+    ],
+    True,
+    TestID -> "metal/f32-matmul-direct-gemm"
+]
+
+VerificationTest[
     (* i32 elementwise mul. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result},

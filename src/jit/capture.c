@@ -167,6 +167,7 @@ fn u32 jit_replay(u32 slot) {
   JitCapture *c = &JIT_CAPTURES[slot];
   if (!c->in_use)    return 0;
   if (c->n_ops == 0) return 0;
+  backend_dispatch_begin_all();
   for (u32 i = 0; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
     switch (op->kind) {
@@ -193,6 +194,11 @@ fn u32 jit_replay(u32 slot) {
         // through Phase B onward goes here too once enabled).
         if (dd->dtype != DT_FP32 && dd->dtype != DT_INT32) continue;
         u64 nbytes = dtype_storage_bytes(dd->dtype, numel);
+        if (dd->backend->buf_copy != NULL
+            && dd->backend->buf_copy(dd->buf_id, sd->buf_id, nbytes) == 0) {
+          ITRS++;
+          break;
+        }
         void *tmp = malloc((size_t)nbytes);
         if (tmp == NULL) continue;
         dd->backend->buf_read (sd->buf_id, tmp, nbytes);
@@ -203,6 +209,7 @@ fn u32 jit_replay(u32 slot) {
       }
     }
   }
+  backend_dispatch_end_all();
   return c->n_ops;
 }
 

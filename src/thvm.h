@@ -463,6 +463,10 @@ struct Backend {
   void  (*buf_decref)(u32 buf_id);
   int   (*buf_read) (u32 buf_id, void *dst, u64 nbytes);
   int   (*buf_write)(u32 buf_id, const void *src, u64 nbytes);
+  int   (*buf_copy) (u32 dst_buf_id, u32 src_buf_id, u64 nbytes);
+  void  (*dispatch_begin)(void);
+  void  (*dispatch_flush)(void);
+  void  (*dispatch_end)(void);
   int   (*dispatch_kernel)(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 };
 
@@ -1400,6 +1404,7 @@ typedef enum {
   KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (one encoder per KProgOp)
   KDISPATCH_CPU_TILE    = 8,   // CPU TileUop path over ScalarUop
   KDISPATCH_METAL_TILE  = 9,   // Metal: TileUop MSL source -> threadgroup dispatch
+  KDISPATCH_METAL_GEMM  = 10,  // Metal: direct f32 matmul over unexpanded inputs
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);
@@ -1417,6 +1422,10 @@ extern Backend CPU_BACKEND;
 extern Backend METAL_BACKEND;
 
 fn void cpu_jit_cache_reset(void);
+
+fn void backend_dispatch_begin_all(void);
+fn void backend_dispatch_flush_all(void);
+fn void backend_dispatch_end_all(void);
 
 // Allocate a borrowed buffer: we don't own `data`, and on release we
 // call `on_release(handle)` instead of free().  Used by the WL bridge

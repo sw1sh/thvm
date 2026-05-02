@@ -25,6 +25,8 @@
 static id<MTLDevice>       METAL_DEVICE = nil;
 static id<MTLCommandQueue> METAL_QUEUE  = nil;
 static id<MTLLibrary>      METAL_LIB    = nil;
+static id<MTLCommandBuffer> METAL_BATCH_CMD = nil;
+static u32                  METAL_BATCH_DEPTH = 0;
 
 #ifndef THVM_METAL_METALLIB
 #define THVM_METAL_METALLIB "build/default.metallib"
@@ -36,6 +38,56 @@ static id<MTLLibrary>      METAL_LIB    = nil;
 #define METAL_FREELIST_CAP 4096
 static u32 METAL_FREELIST    [METAL_FREELIST_CAP];
 static u32 METAL_FREELIST_LEN = 0;
+
+static int metal_batch_enabled(void) {
+  static int known = 0;
+  static int enabled = 1;
+  if (!known) {
+    char const *e = getenv("THVM_METAL_BATCH");
+    enabled = (e == NULL || e[0] != '0');
+    known = 1;
+  }
+  return enabled;
+}
+
+static void metal_dispatch_flush(void) {
+  if (METAL_BATCH_CMD == nil) return;
+  id<MTLCommandBuffer> cmd = METAL_BATCH_CMD;
+  METAL_BATCH_CMD = nil;
+  [cmd commit];
+  [cmd waitUntilCompleted];
+}
+
+static void metal_dispatch_begin(void) {
+  if (METAL_QUEUE == nil) return;
+  if (!metal_batch_enabled()) return;
+  METAL_BATCH_DEPTH++;
+}
+
+static void metal_dispatch_end(void) {
+  if (METAL_BATCH_DEPTH == 0) return;
+  METAL_BATCH_DEPTH--;
+  if (METAL_BATCH_DEPTH == 0) {
+    metal_dispatch_flush();
+  }
+}
+
+static id<MTLCommandBuffer> metal_command_buffer(void) {
+  if (METAL_BATCH_DEPTH == 0) {
+    return [METAL_QUEUE commandBuffer];
+  }
+  if (METAL_BATCH_CMD == nil) {
+    METAL_BATCH_CMD = [METAL_QUEUE commandBuffer];
+  }
+  return METAL_BATCH_CMD;
+}
+
+static void metal_submit_if_standalone(id<MTLCommandBuffer> cmd) {
+  if (cmd == nil) return;
+  if (METAL_BATCH_DEPTH > 0 && cmd == METAL_BATCH_CMD) return;
+  [cmd commit];
+  [cmd waitUntilCompleted];
+}
 
 static int metal_init(void) {
   METAL_DEVICE = MTLCreateSystemDefaultDevice();
@@ -68,6 +120,8 @@ static int metal_init(void) {
           (unsigned long)[[METAL_LIB functionNames] count],
           [[METAL_LIB functionNames] count] == 1 ? "" : "s");
   METAL_FREELIST_LEN = 0;
+  METAL_BATCH_CMD    = nil;
+  METAL_BATCH_DEPTH  = 0;
   return 0;
 }
 
@@ -189,6 +243,9 @@ static void metal_buf_incref(u32 buf_id) {
 static void metal_buf_decref(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
   if (METAL_BUFS[buf_id].refcount == 0) return;
+  if (METAL_BUFS[buf_id].refcount == 1) {
+    metal_dispatch_flush();
+  }
   if (--METAL_BUFS[buf_id].refcount != 0) return;
   if (!metal_buf_freelist_push_impl(buf_id)) {
     metal_buf_free(buf_id);
@@ -196,6 +253,7 @@ static void metal_buf_decref(u32 buf_id) {
 }
 
 static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
+  metal_dispatch_flush();
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[buf_id].buf == nil)            return -1;
   if (METAL_BUFS[buf_id].refcount == 0)         return -1;
@@ -206,12 +264,35 @@ static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
 }
 
 static int metal_buf_write(u32 buf_id, const void *src, u64 nbytes) {
+  metal_dispatch_flush();
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[buf_id].buf == nil)            return -1;
   if (METAL_BUFS[buf_id].refcount == 0)         return -1;
   u64 cap = METAL_BUFS[buf_id].nbytes;
   if (nbytes > cap) nbytes = cap;
   memcpy([METAL_BUFS[buf_id].buf contents], src, (size_t)nbytes);
+  return 0;
+}
+
+static int metal_buf_copy(u32 dst_buf_id, u32 src_buf_id, u64 nbytes) {
+  if (dst_buf_id == 0 || dst_buf_id >= METAL_BUFS_NEXT) return -1;
+  if (src_buf_id == 0 || src_buf_id >= METAL_BUFS_NEXT) return -1;
+  if (METAL_BUFS[dst_buf_id].buf == nil) return -1;
+  if (METAL_BUFS[src_buf_id].buf == nil) return -1;
+  if (METAL_BUFS[dst_buf_id].refcount == 0) return -1;
+  if (METAL_BUFS[src_buf_id].refcount == 0) return -1;
+  if (nbytes > METAL_BUFS[dst_buf_id].nbytes) nbytes = METAL_BUFS[dst_buf_id].nbytes;
+  if (nbytes > METAL_BUFS[src_buf_id].nbytes) nbytes = METAL_BUFS[src_buf_id].nbytes;
+  id<MTLCommandBuffer> cmd = metal_command_buffer();
+  if (cmd == nil) return -1;
+  id<MTLBlitCommandEncoder> enc = [cmd blitCommandEncoder];
+  [enc copyFromBuffer:METAL_BUFS[src_buf_id].buf
+         sourceOffset:0
+             toBuffer:METAL_BUFS[dst_buf_id].buf
+    destinationOffset:0
+                 size:(NSUInteger)nbytes];
+  [enc endEncoding];
+  metal_submit_if_standalone(cmd);
   return 0;
 }
 
@@ -235,6 +316,7 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
 // metal_pipeline_for accessor + on-demand fill live with the rest of
 // the dispatch path further down.
 static id<MTLComputePipelineState> METAL_PIPELINES_CACHE[UOP_COUNT][32];
+static id<MTLComputePipelineState> METAL_GEMM_PSO = nil;
 
 // metal_jit cache decls live further down (alongside the MSL emit
 // path).  Forward-declare the cache reset so metal_shutdown can
@@ -243,6 +325,8 @@ static id<MTLComputePipelineState> METAL_PIPELINES_CACHE[UOP_COUNT][32];
 static void metal_jit_cache_reset_impl(void);
 
 static void metal_shutdown(void) {
+  metal_dispatch_flush();
+  METAL_BATCH_DEPTH = 0;
   METAL_FREELIST_LEN = 0;
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     METAL_BUFS[i].buf      = nil;
@@ -258,6 +342,7 @@ static void metal_shutdown(void) {
   for (u32 op = 0; op < UOP_COUNT; op++)
     for (u32 dt = 0; dt < 32; dt++)
       METAL_PIPELINES_CACHE[op][dt] = nil;
+  METAL_GEMM_PSO = nil;
   metal_jit_cache_reset_impl();
   METAL_LIB    = nil;
   METAL_QUEUE  = nil;
@@ -649,6 +734,190 @@ static int metal_kernel_supported(struct KernelEntry const *ke) {
   return 1;
 }
 
+#define METAL_REDUCE_KIND(arg)  (((arg) >> 24) & 0xFFu)
+#define METAL_REDUCE_INNER(arg) ((arg) & 0xFFFFFFu)
+
+static int metal_gemm_op_is_mul_of(KProgOp const *p, u32 in_a, u32 in_b) {
+  if (p->opcode != UOP_MUL || p->n_src != 2) return 0;
+  u32 a = p->src[0], b = p->src[1];
+  if (!KSRC_IS_INPUT(a) || !KSRC_IS_INPUT(b)) return 0;
+  u32 ai = KSRC_INDEX(a), bi = KSRC_INDEX(b);
+  return (ai == in_a && bi == in_b) || (ai == in_b && bi == in_a);
+}
+
+static int metal_gemm_op_is_reduce_sum(KProgOp const *p, u32 src_step) {
+  if (p->opcode != UOP_REDUCE || p->n_src != 1) return 0;
+  if (METAL_REDUCE_KIND(p->arg) != REDUCE_SUM) return 0;
+  u32 s = p->src[0];
+  if (KSRC_IS_INPUT(s)) return 0;
+  return KSRC_INDEX(s) == src_step;
+}
+
+static id<MTLComputePipelineState> metal_gemm_pipeline(void) {
+  if (METAL_GEMM_PSO != nil) return METAL_GEMM_PSO;
+  static char const *src =
+      "#include <metal_stdlib>\n"
+      "using namespace metal;\n"
+      "kernel void thvm_gemm(device const float *A [[buffer(0)]],\n"
+      "                      device const float *B [[buffer(1)]],\n"
+      "                      device float *C [[buffer(2)]],\n"
+      "                      constant uint *cfg [[buffer(3)]],\n"
+      "                      uint gid [[thread_position_in_grid]]) {\n"
+      "  uint M = cfg[0], N = cfg[1], K = cfg[2];\n"
+      "  if (gid >= M * N) return;\n"
+      "  uint row = gid / N;\n"
+      "  uint col = gid - row * N;\n"
+      "  uint ldA = cfg[3], ldB = cfg[4], flags = cfg[5];\n"
+      "  bool transA = (flags & 1u) != 0u;\n"
+      "  bool transB = (flags & 2u) != 0u;\n"
+      "  float acc = 0.0f;\n"
+      "  for (uint k = 0; k < K; k++) {\n"
+      "    float av = transA ? A[k * ldA + row] : A[row * ldA + k];\n"
+      "    float bv = transB ? B[col * ldB + k] : B[k * ldB + col];\n"
+      "    acc += av * bv;\n"
+      "  }\n"
+      "  C[gid] = acc;\n"
+      "}\n";
+  NSError *err = nil;
+  NSString *srcStr = [NSString stringWithUTF8String:src];
+  id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
+                                                  options:nil
+                                                    error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm: metal_gemm -- compile failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"thvm_gemm"];
+  if (mtlFn == nil) return nil;
+  METAL_GEMM_PSO = [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn
+                                                                error:&err];
+  if (METAL_GEMM_PSO == nil) {
+    fprintf(stderr, "thvm: metal_gemm -- pipeline-state failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+  }
+  return METAL_GEMM_PSO;
+}
+
+static int metal_gemm_views_ok(KernelEntry const *ke, u32 aidx, u32 bidx,
+                               u32 M, u32 N, u32 K,
+                               u32 *ldA, u32 *ldB, u32 *flags) {
+  *ldA = K;
+  *ldB = N;
+  *flags = 0;
+  if (ke->input_views == NULL) return 1;
+
+  View const *va = &ke->input_views[aidx];
+  View const *vb = &ke->input_views[bidx];
+
+  if (M == 1 && N == 1) {
+    return 1;
+  }
+
+  if (N == 1) {
+    if (va->shape.ndim != 2 || vb->shape.ndim != 2) return 0;
+    if (!(va->shape.dims[0] == M && va->shape.dims[1] == K
+          && va->strides[0] == (i32)K && va->strides[1] == 1)) return 0;
+    if (!(vb->shape.dims[0] == M && vb->shape.dims[1] == K
+          && vb->strides[0] == 0 && vb->strides[1] == 1)) return 0;
+    *ldA = K;
+    *ldB = 1;
+    return 1;
+  }
+
+  if (va->shape.ndim != 3 || vb->shape.ndim != 3) return 0;
+
+  if (va->shape.dims[0] != M || va->shape.dims[1] != K
+      || va->shape.dims[2] != N) return 0;
+  if (vb->shape.dims[0] != M || vb->shape.dims[1] != K
+      || vb->shape.dims[2] != N) return 0;
+
+  if (va->strides[0] == (i32)K && va->strides[1] == 1
+      && va->strides[2] == 0) {
+    *ldA = K;
+  } else if (va->strides[0] == 1 && va->strides[1] == (i32)M
+             && va->strides[2] == 0) {
+    *ldA = M;
+    *flags |= 1u;
+  } else {
+    return 0;
+  }
+
+  if (vb->strides[0] == 0 && vb->strides[1] == (i32)N
+      && vb->strides[2] == 1) {
+    *ldB = N;
+  } else if (vb->strides[0] == 0 && vb->strides[1] == 1
+             && vb->strides[2] == (i32)K) {
+    *ldB = K;
+    *flags |= 2u;
+  } else {
+    return 0;
+  }
+
+  return 1;
+}
+
+static int metal_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (ke->n_inputs != 2 || ke->n_ops != 2) return 0;
+  if (ke->program[0].dtype != DT_FP32 || ke->program[1].dtype != DT_FP32) return 0;
+  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32) return 0;
+  if (!metal_gemm_op_is_mul_of(&ke->program[0], 0, 1)) return 0;
+  if (!metal_gemm_op_is_reduce_sum(&ke->program[1], 0)) return 0;
+
+  u32 inner = METAL_REDUCE_INNER(ke->program[1].arg);
+  u32 nMul  = ke->program[0].numel;
+  u32 nOut  = ke->program[1].numel;
+  if (inner == 0 || nOut == 0 || nMul == 0) return 0;
+  if (nMul % nOut != 0 || nOut % inner != 0) return 0;
+  u32 N = inner;
+  u32 K = nMul / nOut;
+  u32 M = nOut / N;
+  if (M == 0 || K == 0 || N == 0) return 0;
+
+  u32 b0 = in_buf_ids[0], b1 = in_buf_ids[1];
+  if (b0 == 0 || b1 == 0 || b0 >= METAL_BUFS_NEXT || b1 >= METAL_BUFS_NEXT) return 0;
+  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return 0;
+  if (METAL_BUFS[b0].buf == nil || METAL_BUFS[b1].buf == nil
+      || METAL_BUFS[out_buf_id].buf == nil) return 0;
+  u32 e0 = (u32)(METAL_BUFS[b0].nbytes / sizeof(float));
+  u32 e1 = (u32)(METAL_BUFS[b1].nbytes / sizeof(float));
+
+  u32 aidx = 0xFFFFFFFFu, bidx = 0xFFFFFFFFu;
+  if (M == 1 && N == 1 && e0 == K && e1 == K) {
+    aidx = 0; bidx = 1;
+  } else if (e0 == M * K && e1 == K * N) {
+    aidx = 0; bidx = 1;
+  } else if (e1 == M * K && e0 == K * N) {
+    aidx = 1; bidx = 0;
+  } else {
+    return 0;
+  }
+
+  u32 ldA = K, ldB = N, flags = 0;
+  if (!metal_gemm_views_ok(ke, aidx, bidx, M, N, K, &ldA, &ldB, &flags)) {
+    return 0;
+  }
+
+  id<MTLComputePipelineState> pso = metal_gemm_pipeline();
+  if (pso == nil) return 0;
+  id<MTLCommandBuffer> cmd = metal_command_buffer();
+  if (cmd == nil) return 0;
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:METAL_BUFS[in_buf_ids[aidx]].buf offset:0 atIndex:0];
+  [enc setBuffer:METAL_BUFS[in_buf_ids[bidx]].buf offset:0 atIndex:1];
+  [enc setBuffer:METAL_BUFS[out_buf_id].buf offset:0 atIndex:2];
+  u32 cfg[6] = {M, N, K, ldA, ldB, flags};
+  [enc setBytes:cfg length:sizeof(cfg) atIndex:3];
+  NSUInteger total = (NSUInteger)M * (NSUInteger)N;
+  NSUInteger tg = MIN(total, [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(total, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  metal_submit_if_standalone(cmd);
+  return 1;
+}
+
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
   if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
@@ -666,6 +935,11 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // the WL TKernelProfile / TKernelDispatchKind surface reads.
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
+
+  if (kprog_supported && metal_try_gemm(ke, in_buf_ids, out_buf_id)) {
+    cg_profile_record(kid, KDISPATCH_METAL_GEMM, cg_now_us() - t0);
+    return 0;
+  }
 
   // View-aware pre-materialize (the Metal counterpart to
   // cpu_interpret's strided pre-mat loop).  For each input whose
@@ -719,11 +993,13 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   }
 
   if (tile_supported) {
-    id<MTLCommandBuffer> tile_cmd = [METAL_QUEUE commandBuffer];
+    id<MTLCommandBuffer> tile_cmd = metal_command_buffer();
     if (metal_tile_jit_encode(ke, jit_src_bufs, outBuf, tile_cmd,
                               tile_groups_x, tile_threads_x)) {
-      [tile_cmd commit];
-      [tile_cmd waitUntilCompleted];
+      metal_submit_if_standalone(tile_cmd);
+      for (u32 i = 0; i < ke->n_inputs; i++) {
+        if (temp_buf_ids[i]) { metal_dispatch_flush(); break; }
+      }
       for (u32 i = 0; i < ke->n_inputs; i++) {
         if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
       }
@@ -746,10 +1022,12 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // we fall through to the per-op path below, which handles REDUCE +
   // movement that the JIT can't yet).
   {
-    id<MTLCommandBuffer> jit_cmd = [METAL_QUEUE commandBuffer];
+    id<MTLCommandBuffer> jit_cmd = metal_command_buffer();
     if (metal_jit_encode(ke, jit_src_bufs, outBuf, jit_cmd)) {
-      [jit_cmd commit];
-      [jit_cmd waitUntilCompleted];
+      metal_submit_if_standalone(jit_cmd);
+      for (u32 i = 0; i < ke->n_inputs; i++) {
+        if (temp_buf_ids[i]) { metal_dispatch_flush(); break; }
+      }
       for (u32 i = 0; i < ke->n_inputs; i++) {
         if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
       }
@@ -769,7 +1047,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // typical size).  ke->n_ops > 0 since we early-bailed when 0.
   u32 inter_buf_ids[ke->n_ops];
   for (u32 i = 0; i < ke->n_ops; i++) inter_buf_ids[i] = 0;
-  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLCommandBuffer> cmd = metal_command_buffer();
   int rc = 0;
 
   for (u32 step = 0; step < ke->n_ops; step++) {
@@ -822,8 +1100,16 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   }
 
   if (rc == 0) {
-    [cmd commit];
-    [cmd waitUntilCompleted];
+    metal_submit_if_standalone(cmd);
+  }
+
+  if (METAL_BATCH_DEPTH > 0) {
+    for (u32 i = 0; i < ke->n_ops; i++) {
+      if (inter_buf_ids[i]) { metal_dispatch_flush(); break; }
+    }
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      if (temp_buf_ids[i]) { metal_dispatch_flush(); break; }
+    }
   }
 
   // Cleanup: drop intermediate Metal buffers + view-pre-mat temps.
@@ -852,5 +1138,9 @@ Backend METAL_BACKEND = {
   .buf_decref      = metal_buf_decref,
   .buf_read        = metal_buf_read,
   .buf_write       = metal_buf_write,
+  .buf_copy        = metal_buf_copy,
+  .dispatch_begin  = metal_dispatch_begin,
+  .dispatch_flush  = metal_dispatch_flush,
+  .dispatch_end    = metal_dispatch_end,
   .dispatch_kernel = metal_dispatch_kernel,
 };

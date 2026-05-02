@@ -131,6 +131,23 @@ int main(void) {
   CURRENT_BACKEND->buf_free(bid);
   thvm_free();
 
+  TEST_BEGIN("metal-real/buf-copy-roundtrip");
+  setenv("THVM_BACKEND", "metal", 1);
+  thvm_init();
+  float copy_src[8], copy_dst[8] = {0};
+  for (int i = 0; i < 8; i++) copy_src[i] = (float)(i + 1);
+  u32 src_bid = CURRENT_BACKEND->buf_alloc(sizeof(copy_src));
+  u32 dst_bid = CURRENT_BACKEND->buf_alloc(sizeof(copy_dst));
+  CHECK(src_bid != 0);
+  CHECK(dst_bid != 0);
+  CHECK_EQ(CURRENT_BACKEND->buf_write(src_bid, copy_src, sizeof(copy_src)), 0);
+  CHECK_EQ(CURRENT_BACKEND->buf_copy(dst_bid, src_bid, sizeof(copy_src)), 0);
+  CHECK_EQ(CURRENT_BACKEND->buf_read(dst_bid, copy_dst, sizeof(copy_dst)), 0);
+  for (int i = 0; i < 8; i++) CHECK(copy_src[i] == copy_dst[i]);
+  CURRENT_BACKEND->buf_free(src_bid);
+  CURRENT_BACKEND->buf_free(dst_bid);
+  thvm_free();
+
   TEST_BEGIN("metal-real/buf-refcount-shared-storage");
   setenv("THVM_BACKEND", "metal", 1);
   thvm_init();

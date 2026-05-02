@@ -6,6 +6,19 @@ dated section.
 
 ## Unreleased
 
+### Added: Metal dispatch batching and direct GEMM
+
+Added backend dispatch scopes so `TRealize` and `TJit` replay can batch
+Metal kernel encodes into one command buffer, with
+`THVM_METAL_BATCH=0` as an opt-out for A/B measurement.  Metal
+host reads/writes and autotune timing now flush pending command
+buffers explicitly.  Added backend-native `buf_copy`, implemented as
+a Metal blit on the Metal backend, so `ASSIGN`/`TSet` no longer has
+to round-trip through host memory when a backend can copy directly.
+Metal also recognizes f32 `MUL + REDUCE_SUM` matmul kernels and
+routes them through a direct `metal-gemm` shader over the original
+unexpanded input buffers.
+
 ### Fixed: Metal training buffer reuse and tile autotune gates
 
 Metal buffers whose refcount drops to zero now recycle through the

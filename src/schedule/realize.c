@@ -58,6 +58,7 @@ fn Term thvm_realize(Term expr) {
   if (term_tag(resolved) == TAG_CTR) return thvm_realize_many(resolved);
 
   u32 wm = cpu_buf_pool_begin();
+  backend_dispatch_begin_all();
 
   // realize loop (wnf is the only reducer -- `nf` is the inspector
   // primitive, see wnf/nf.c, NOT in this hot path).
@@ -95,6 +96,8 @@ fn Term thvm_realize(Term expr) {
     fprintf(stderr, "DBG realize emit: %u kernels in %d iters\n",
             KERNELS_NEXT - kn_at_call_start, iters_used);
   }
+
+  backend_dispatch_end_all();
 
   // gc3: tracing-GC preserve.  Composes gc1 + gc2 into
   // mark_gc_preserve(res), which walks the live root set
@@ -177,6 +180,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   if (n == 0) return ctr_term;
 
   u32 wm = cpu_buf_pool_begin();
+  backend_dispatch_begin_all();
   u32 kn_at_call_start = KERNELS_NEXT;
 
   Term res = ctr_term;
@@ -207,6 +211,8 @@ fn Term thvm_realize_many(Term ctr_term) {
     fprintf(stderr, "DBG realize_many emit: %u kernels in %d iters (%u children)\n",
             KERNELS_NEXT - kn_at_call_start, iters_used, n);
   }
+
+  backend_dispatch_end_all();
 
   // Preserve mark + GC same as thvm_realize.  Walk every child of
   // the result CTR so each root's producer chain is preserved.

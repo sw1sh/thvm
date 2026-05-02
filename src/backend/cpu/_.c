@@ -15,5 +15,9 @@ Backend CPU_BACKEND = {
   .buf_decref      = cpu_buf_decref,
   .buf_read        = cpu_buf_read,
   .buf_write       = cpu_buf_write,
+  .buf_copy        = cpu_buf_copy,
+  .dispatch_begin  = NULL,
+  .dispatch_flush  = NULL,
+  .dispatch_end    = NULL,
   .dispatch_kernel = cpu_dispatch_kernel,
 };

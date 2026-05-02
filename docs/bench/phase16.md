@@ -97,11 +97,19 @@ plans build distinct variants.
 - The old `Conv2D + ReLU + MaxPool2d` weight-gradient shape bug is
   fixed in the current tree; the repro returns `{2, 1, 3, 3}`.
 - Metal primitive coverage is green on Apple M3 Max:
-  `test_metal_real` 205/205 and `metal_dtypes.wlt` 5/5.
+  `test_metal_real` 218/218 and `metal_dtypes.wlt` 7/7.
 - Metal LeNet forward, full input-gradient smoke, and Adam training
   pass.  `THVM_BACKEND=metal THVM_TILE=1 N_STEPS=4 train.wls`
   produced `{2.6071, 1.8054, 1.1324, 0.6546, 0.3559}` with no
   buffer-table-full warnings on May 2, 2026.
+- Metal dispatch now has a scoped command-buffer batch path around
+  `TRealize` and `TJit` replay (`THVM_METAL_BATCH=0` disables it),
+  plus backend-native `buf_copy` so `ASSIGN` can use a Metal blit
+  instead of forcing a host read/write pair.
+- Metal f32 matmul kernels now have a direct `metal-gemm` route that
+  recognizes `MUL + REDUCE_SUM` and reads the original A/B buffers
+  instead of pre-materializing their expanded `{M,K,N}` views.
+  Focused coverage confirms `TMatMul` dispatches as `metal-gemm`.
 - Metal fire-time autotune is wired for supported tile kernels:
   `LOCAL` proposals are expanded internally to `LOCAL + GLOBAL`, and
   impossible tile variants with more than 30 input buffers are rejected
@@ -128,9 +136,12 @@ plans build distinct variants.
    program arrays after `TRealize`, leaving only shared axes metadata.
 5. **Autotune value.**  Metal now has real `LOCAL/GLOBAL` tile
    candidates for rank-1 f32 scalar/tile kernels and MSL `UNROLL` for
-   supported reduce-tail JIT kernels.  Larger wins still need
-   structured multi-axis tile rendering, reductions over local memory,
-   and eventually `TILE_MMA`.
+   supported reduce-tail JIT kernels.  The direct `metal-gemm` path
+   removes one expanded-view matmul bottleneck, but full
+   beautiful-mnist performance still needs the next structural fix:
+   avoiding PAD-and-sum im2col materialization, then structured
+   multi-axis tile rendering, reductions over local memory, and
+   eventually `TILE_MMA`.
 
 For tiny isolated kernels the autotune correctly reports either
 "no opt beat baseline" (when clang's `-O2` already vectorises)

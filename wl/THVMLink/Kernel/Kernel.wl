@@ -55,7 +55,7 @@ TKernelTilePlan::usage = "TKernelTilePlan[kid] returns a validated compact Assoc
 
 TKernelSource::usage      = "TKernelSource[kid] / TKernelSource[kid, backend] returns the source kid's program would render to on the named backend (\"C\" / \"Metal\").  Default backend is the active one (THVM_BACKEND env var; \"C\" otherwise).  Empty string when the program contains ops outside cg_supports (REDUCE, movement) -- those fall back to the interpreter.  Property surface: TKernel[kid][\"Source\"] / TKernel[kid][\"Source\", backend].";
 TKernelFlops::usage         = "TKernelFlops[kid] = TKernel[kid][\"Flops\"].  Static FLOPS estimate for one execution of kid (sum over KProgOp[]: 1 flop per elementwise op per element, 1 flop per REDUCE source element).  0 for movement / load.";
-TKernelDispatchKind::usage  = "TKernelDispatchKind[kid] = TKernel[kid][\"DispatchKind\"].  The route the last fire of kid took: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", \"interpreter\", \"metal-jit\", \"metal-op\", \"tile\", or \"metal-tile\".";
+TKernelDispatchKind::usage  = "TKernelDispatchKind[kid] = TKernel[kid][\"DispatchKind\"].  The route the last fire of kid took: \"none\", \"blas-dot\", \"blas-gemv\", \"blas-gemm\", \"jit\", \"interpreter\", \"metal-jit\", \"metal-op\", \"tile\", \"metal-tile\", or \"metal-gemm\".";
 TKernelDispatchCount::usage = "TKernelDispatchCount[kid] = TKernel[kid][\"DispatchCount\"].  Cumulative number of times kid has fired since thvm_init.";
 TKernelTotalUs::usage       = "TKernelTotalUs[kid] = TKernel[kid][\"TotalUs\"].  Cumulative wallclock microseconds across every fire of kid.";
 TKernelJitDylibPath::usage  = "TKernelJitDylibPath[kid] = TKernel[kid][\"JitDylibPath\"].  On-disk path the JIT cache uses for kid's compiled .dylib (deterministic from the program hash).  File may not exist if the JIT bailed at codegen.";
@@ -278,7 +278,8 @@ tenTermFromTid[tid_Integer] := With[{
 $dispatchKindNames = <|
     0 -> "none",        1 -> "blas-dot",   2 -> "blas-gemv", 3 -> "blas-gemm",
     4 -> "jit",         5 -> "interpreter",
-    6 -> "metal-jit",   7 -> "metal-op",   8 -> "tile",      9 -> "metal-tile"
+    6 -> "metal-jit",   7 -> "metal-op",   8 -> "tile",      9 -> "metal-tile",
+    10 -> "metal-gemm"
 |>;
 decodeDispatchKind[k_Integer] := Lookup[$dispatchKindNames, k, "unknown"]
 

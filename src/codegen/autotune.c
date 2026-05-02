@@ -59,8 +59,10 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
 }
 
 static void kernel_bench_fire(u32 kid) {
+  backend_dispatch_flush_all();
   kernel_fire_gen_bump();
   kernel_fire_by_id(kid);
+  backend_dispatch_flush_all();
 }
 
 // Time `n_runs` back-to-back fresh-generation fires of `kid`; return

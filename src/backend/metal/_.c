@@ -24,6 +24,7 @@ static void metal_buf_incref(u32 buf_id)                        { (void)buf_id; 
 static void metal_buf_decref(u32 buf_id)                        { (void)buf_id;     /* nop */ }
 static int  metal_buf_read (u32 buf_id, void *dst, u64 nbytes)  { (void)buf_id; (void)dst; (void)nbytes; return -1; }
 static int  metal_buf_write(u32 buf_id, const void *src, u64 nbytes) { (void)buf_id; (void)src; (void)nbytes; return -1; }
+static int  metal_buf_copy (u32 dst_buf_id, u32 src_buf_id, u64 nbytes) { (void)dst_buf_id; (void)src_buf_id; (void)nbytes; return -1; }
 
 static int  metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   (void)ke; (void)in_buf_ids; (void)out_buf_id;
@@ -42,5 +43,9 @@ Backend METAL_BACKEND = {
   .buf_decref      = metal_buf_decref,
   .buf_read        = metal_buf_read,
   .buf_write       = metal_buf_write,
+  .buf_copy        = metal_buf_copy,
+  .dispatch_begin  = NULL,
+  .dispatch_flush  = NULL,
+  .dispatch_end    = NULL,
   .dispatch_kernel = metal_dispatch_kernel,
 };

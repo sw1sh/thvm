@@ -55,9 +55,14 @@ fn Term interact_assign_with(Term dst, Term src) {
     jit_capture_record_assign(dst_tid, src_tid);
   }
 
-  // Round-trip via host buffer.  The backend interface gives us
-  // buf_read + buf_write but no direct buf_copy; the host hop is
-  // straightforward and keeps this independent of backend internals.
+  if (dd->backend->buf_copy != NULL
+      && dd->backend->buf_copy(dd->buf_id, sd->buf_id, nbytes) == 0) {
+    ITRS++;
+    return dst;
+  }
+
+  // Fallback round-trip via host buffer for backends without a
+  // native copy path.
   void *tmp = malloc((size_t)nbytes);
   if (!tmp) return dst;
   dd->backend->buf_read (sd->buf_id, tmp, nbytes);

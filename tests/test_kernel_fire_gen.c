@@ -9,6 +9,14 @@
 #include "../src/thvm.c"
 #include "test.h"
 
+static u32 scope_begin_count = 0;
+static u32 scope_flush_count = 0;
+static u32 scope_end_count   = 0;
+
+static void scope_begin_cb(void) { scope_begin_count++; }
+static void scope_flush_cb(void) { scope_flush_count++; }
+static void scope_end_cb  (void) { scope_end_count++; }
+
 static u32 alloc_f32_tensor(u32 *dims, u32 ndim) {
   Shape s = {0};
   s.ndim = ndim;
@@ -103,6 +111,21 @@ int main(void) {
   CHECK_EQ(CPU_BUFS[b_buf].freeable, 0);
   CHECK_EQ(CPU_BUFS[c_buf].freeable, 0);
   CHECK_EQ(CPU_BUFS[d_buf].freeable, 0);
+
+  TEST_BEGIN("kernel-fire/realize-wraps-backend-dispatch-scope");
+  CPU_BACKEND.dispatch_begin = scope_begin_cb;
+  CPU_BACKEND.dispatch_flush = scope_flush_cb;
+  CPU_BACKEND.dispatch_end   = scope_end_cb;
+  scope_begin_count = scope_flush_count = scope_end_count = 0;
+  Term x = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(dims, 1));
+  Term y = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(dims, 1));
+  thvm_realize(uop_binary(UOP_ADD, x, y));
+  CHECK_EQ(scope_begin_count, 1);
+  CHECK_EQ(scope_end_count,   1);
+  CHECK_EQ(scope_flush_count, 0);
+  CPU_BACKEND.dispatch_begin = NULL;
+  CPU_BACKEND.dispatch_flush = NULL;
+  CPU_BACKEND.dispatch_end   = NULL;
 
   thvm_free();
   TEST_REPORT();
