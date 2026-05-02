@@ -139,6 +139,29 @@ int main(void) {
   CHECK_EQ((u32)ke->scalar_uops[1].extra, 0x40400000u);
   rangeify_free(ke);
 
+  TEST_BEGIN("scalar-graph/valid-mask-helpers-fold");
+  u32 mi_zero = emit_iconst(ke, 0);
+  u32 mi_one  = emit_iconst(ke, 1);
+  u32 mi_mask = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                                   ((u64)S_AXIS_LOOP << 32) | 4u);
+  u32 mi_yes  = rangeify_emit_leaf(ke, S_CONST, DT_FP32, 0x3F800000u);
+  u32 mi_no   = rangeify_emit_leaf(ke, S_CONST, DT_FP32, 0x00000000u);
+  CHECK_EQ(emit_ibinop(ke, S_IAND, mi_mask, mi_mask), mi_mask);
+  CHECK_EQ(emit_ibinop(ke, S_IAND, mi_one,  mi_mask), mi_mask);
+  CHECK_EQ(emit_ibinop(ke, S_IAND, mi_mask, mi_one),  mi_mask);
+  CHECK_EQ(emit_ibinop(ke, S_IAND, mi_zero, mi_mask), mi_zero);
+  CHECK_EQ(emit_ibinop(ke, S_IAND, mi_mask, mi_zero), mi_zero);
+  CHECK_EQ(emit_iwhere(ke, DT_FP32, 0,       mi_yes, mi_no), mi_yes);
+  CHECK_EQ(emit_iwhere(ke, DT_FP32, mi_one,  mi_yes, mi_no), mi_yes);
+  CHECK_EQ(emit_iwhere(ke, DT_FP32, mi_zero, mi_yes, mi_no), mi_no);
+  CHECK_EQ(emit_iwhere(ke, DT_FP32, mi_mask, mi_yes, mi_yes), mi_yes);
+  u32 mi_where = emit_iwhere(ke, DT_FP32, mi_mask, mi_yes, mi_no);
+  CHECK_EQ(ke->scalar_uops[mi_where].op, S_IWHERE);
+  CHECK_EQ(ke->scalar_uops[mi_where].src[0], mi_mask);
+  CHECK_EQ(ke->scalar_uops[mi_where].src[1], mi_yes);
+  CHECK_EQ(ke->scalar_uops[mi_where].src[2], mi_no);
+  rangeify_free(ke);
+
   TEST_BEGIN("scalar-graph/opname-helpers-cover-enum");
   // Every enum value should have a non-"?" name.  Belt-and-braces
   // against future additions where someone forgets to extend the

@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: fold scalar valid-mask helpers
+
+Rangeify now centralizes scalar valid-mask emission through helpers
+that fold `S_IAND` identities and constant-condition `S_IWHERE`
+nodes.  Existing PAD/RESHAPE valid-mask wrappers route through the
+helpers, reducing redundant mask nodes before CSE/DCE.
+
 ### Added: canonicalize identity movement in UOp graph simplification
 
 `uop_graph_simplify` now drops no-op movement nodes for identity

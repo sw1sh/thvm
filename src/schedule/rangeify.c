@@ -429,8 +429,48 @@ static u32 emit_iconst(KernelEntry *ke, i64 v) {
   return rangeify_emit_leaf(ke, S_ICONST, DT_INT64, extra);
 }
 
+static int scalar_iconst_value(KernelEntry const *ke, u32 id, i64 *out) {
+  if (ke == NULL || id == 0 || id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *u = &ke->scalar_uops[id];
+  if (u->op != S_ICONST) {
+    return 0;
+  }
+  if (out != NULL) {
+    *out = (i64)u->extra;
+  }
+  return 1;
+}
+
 static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
+  if (op == S_IAND) {
+    if (a == b) {
+      return a;
+    }
+    i64 av = 0;
+    i64 bv = 0;
+    if (scalar_iconst_value(ke, a, &av)) {
+      return av == 0 ? a : b;
+    }
+    if (scalar_iconst_value(ke, b, &bv)) {
+      return bv == 0 ? b : a;
+    }
+  }
   return rangeify_emit_binary(ke, op, DT_INT64, a, b);
+}
+
+static u32 emit_iwhere(KernelEntry *ke, u32 dtype,
+                       u32 cond, u32 yes_value, u32 no_value) {
+  if (cond == 0 || yes_value == no_value) {
+    return yes_value;
+  }
+  i64 cv = 0;
+  if (scalar_iconst_value(ke, cond, &cv)) {
+    return cv != 0 ? yes_value : no_value;
+  }
+  u32 src[3] = {cond, yes_value, no_value};
+  return rangeify_emit(ke, S_IWHERE, dtype, 3, src, 0);
 }
 
 // Build an expression for `range_id_iter * stride + offset_term`.  Folds
@@ -711,8 +751,7 @@ fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
   u32 load   = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
   if (r->valid_mask != 0) {
     u32 zero = emit_iconst(ke, 0);
-    u32 wsrc[3] = {r->valid_mask, load, zero};
-    load = rangeify_emit(ke, S_IWHERE, dtype, 3, wsrc, 0);
+    load = emit_iwhere(ke, dtype, r->valid_mask, load, zero);
   }
   return load;
 }
@@ -902,8 +941,7 @@ static u32 emit_scalar_op_for_rngs(KernelEntry *ke, u32 op_id,
     u32 body = emit_scalar_op_for_rngs(ke, op_id, &clean, depth + 1);
     if (body == 0) return 0;
     u32 zero = emit_iconst(ke, 0);
-    u32 src[3] = {r->valid_mask, body, zero};
-    return rangeify_emit(ke, S_IWHERE, p->dtype, 3, src, 0);
+    return emit_iwhere(ke, p->dtype, r->valid_mask, body, zero);
   }
   if (p->opcode == UOP_CONST) {
     return rangeify_emit_leaf(ke, S_CONST, p->dtype, (u64)p->arg);
@@ -1864,8 +1902,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 load = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
       if (input_rngs_pre[i].valid_mask != 0) {
         u32 zero = emit_iconst(ke, 0);
-        u32 wsrc[3] = {input_rngs_pre[i].valid_mask, load, zero};
-        load = rangeify_emit(ke, S_IWHERE, dtype, 3, wsrc, 0);
+        load = emit_iwhere(ke, dtype, input_rngs_pre[i].valid_mask, load, zero);
       }
       input_load_pre[i] = load;
     }
@@ -2030,8 +2067,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 load = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
       if (via_rngs_post[i] && input_rngs_post[i].valid_mask != 0) {
         u32 zero = emit_iconst(ke, 0);
-        u32 wsrc[3] = {input_rngs_post[i].valid_mask, load, zero};
-        load = rangeify_emit(ke, S_IWHERE, dtype, 3, wsrc, 0);
+        load = emit_iwhere(ke, dtype, input_rngs_post[i].valid_mask, load, zero);
       }
       input_load_post[i] = load;
     }
@@ -2251,8 +2287,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             }
             if (have_edge_out_rngs && reshape_out_rngs.valid_mask != 0) {
               u32 zero = emit_iconst(ke, 0);
-              u32 wsrc[3] = {reshape_out_rngs.valid_mask, v_body, zero};
-              v_body = rangeify_emit(ke, S_IWHERE, p->dtype, 3, wsrc, 0);
+              v_body = emit_iwhere(ke, p->dtype,
+                                    reshape_out_rngs.valid_mask,
+                                    v_body, zero);
             }
             // Emit S_RESHAPE_V: src[0] = body, src[1..1+n_out) =
             // output refs (edge-local refs or selected LOOP/REDUCE refs),
@@ -2593,8 +2630,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 body = rv->src[0];
         if (p->opcode == UOP_PAD && valid_mask != 0) {
           u32 zero = emit_iconst(ke, 0);
-          u32 wsrc[3] = {valid_mask, body, zero};
-          body = rangeify_emit(ke, S_IWHERE, p->dtype, 3, wsrc, 0);
+          body = emit_iwhere(ke, p->dtype, valid_mask, body, zero);
         }
         u32 src_arr_v[SCALAR_MAX_SRC] = {body};
         for (u32 d = 0; d < n_out_orig; d++) src_arr_v[1 + d] = new_out_refs[d];
@@ -2749,8 +2785,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               ? emit_ibinop(ke, S_IAND, existing_mask, axis_ok)
               : axis_ok;
           u32 zero    = emit_iconst(ke, 0);
-          u32 wsrc[3] = {combined_mask, load_id, zero};
-          prog_value[i] = rangeify_emit(ke, S_IWHERE, p->dtype, 3, wsrc, 0);
+          prog_value[i] = emit_iwhere(ke, p->dtype, combined_mask, load_id, zero);
           continue;
         }
       }
