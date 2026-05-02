@@ -6,6 +6,23 @@ dated section.
 
 ## Unreleased
 
+### Added: generated Metal TileUop reductions
+
+`THVM_TILE=1` can now dispatch f32 scalar `TILE_REDUCE` plans through
+generated Metal source.  The renderer maps default loop axes to a flat
+Metal grid, emits a serial per-output reduction from the scalar body,
+and preserves reduce-axis `UNROLL` candidates so movement-heavy lowered
+reductions can start participating in autotune without custom backend
+recognizers.
+
+### Added: rank-1 TMatVec promotes to generic TILE_MMA
+
+The tile analyzer now recognizes `EXPAND(vector) -> MUL(matrix, vector)
+-> REDUCE_SUM` as a GEMV-shaped `TILE_MMA` plan with `N=1`.  Metal
+therefore dispatches rank-1 `TMatVec` through the generic tile-driven
+GEMM path and exposes the usual `TC` autotune candidates, while the
+direct GEMV shader stays opt-in diagnostic-only.
+
 ### Changed: specialized Metal paths are diagnostic only
 
 Direct Metal conv2d/GEMV recognizers are now gated behind

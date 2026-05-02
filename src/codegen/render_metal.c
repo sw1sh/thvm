@@ -201,19 +201,42 @@ static int rmt_dtype_supported(u32 dtype) {
   return dtype == DT_FP32;
 }
 
-static int rmt_axis_shape_supported(CtKernelInfo const *info) {
+typedef enum {
+  RMT_AXIS_UNSUPPORTED = 0,
+  RMT_AXIS_FLAT_GRID,
+  RMT_AXIS_LOCAL_GLOBAL,
+} RmtAxisMode;
+
+static u64 rmt_axis_numel(CtKernelInfo const *info) {
+  u64 n = 1;
+  for (u32 i = 0; i < info->n_axes; i++) {
+    n *= info->axis_extents[i];
+  }
+  return n;
+}
+
+static RmtAxisMode rmt_axis_mode(CtKernelInfo const *info) {
   u32 n_global = 0;
   u32 n_local  = 0;
+  int flat_ok = 1;
   for (u32 i = 0; i < info->n_axes; i++) {
     if (info->axis_types[i] == KAX_GLOBAL) {
       n_global++;
     } else if (info->axis_types[i] == KAX_LOCAL) {
       n_local++;
-    } else {
-      return 0;
+    }
+    if (info->axis_types[i] != KAX_LOOP
+        && info->axis_types[i] != KAX_UPCAST) {
+      flat_ok = 0;
     }
   }
-  return n_global == 1 && n_local == 1;
+  if (n_global == 1 && n_local == 1 && n_global + n_local == info->n_axes) {
+    return RMT_AXIS_LOCAL_GLOBAL;
+  }
+  if (flat_ok) {
+    return RMT_AXIS_FLAT_GRID;
+  }
+  return RMT_AXIS_UNSUPPORTED;
 }
 
 static int rmt_scalar_op_supported(ScalarUop const *u) {
@@ -230,8 +253,15 @@ static int rmt_scalar_op_supported(ScalarUop const *u) {
     case S_ADD:
     case S_MUL:
     case S_NEG:
+    case S_RECIP:
+    case S_SQRT:
+    case S_EXP2:
+    case S_LOG2:
     case S_CMPLT:
     case S_CMPEQ:
+    case S_REDUCE_SUM:
+    case S_REDUCE_MAX:
+    case S_CAST:
     case S_CONST:
     case S_ICONST:
     case S_IADD:
@@ -239,6 +269,9 @@ static int rmt_scalar_op_supported(ScalarUop const *u) {
     case S_IMUL:
     case S_IDIV:
     case S_IMOD:
+    case S_ILT:
+    case S_IAND:
+    case S_IWHERE:
       return 1;
     default:
       return 0;
@@ -252,7 +285,7 @@ static int rmt_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
   if (!ct_collect_kernel_info(ke, out)) {
     return 0;
   }
-  if (out->scalar.has_reduce || !rmt_axis_shape_supported(out)) {
+  if (rmt_axis_mode(out) == RMT_AXIS_UNSUPPORTED) {
     return 0;
   }
   if (!rmt_dtype_supported(ke->output_dtype)) {
@@ -287,14 +320,26 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   if (!rmt_collect_kernel_info(ke, &info)) {
     return 0;
   }
-  u32 groups  = 0;
-  u32 threads = 0;
-  for (u32 i = 0; i < info.n_axes; i++) {
-    if (info.axis_types[i] == KAX_GLOBAL) {
-      groups = info.axis_extents[i];
-    } else if (info.axis_types[i] == KAX_LOCAL) {
-      threads = info.axis_extents[i];
+  RmtAxisMode mode = rmt_axis_mode(&info);
+  u32 groups  = 1;
+  u32 threads = 1;
+  if (mode == RMT_AXIS_LOCAL_GLOBAL) {
+    groups  = 0;
+    threads = 0;
+    for (u32 i = 0; i < info.n_axes; i++) {
+      if (info.axis_types[i] == KAX_GLOBAL) {
+        groups = info.axis_extents[i];
+      } else if (info.axis_types[i] == KAX_LOCAL) {
+        threads = info.axis_extents[i];
+      }
     }
+  } else if (mode == RMT_AXIS_FLAT_GRID) {
+    u64 total = rmt_axis_numel(&info);
+    if (total == 0 || total > 0xFFFFFFFFu) {
+      return 0;
+    }
+    threads = total < 256 ? (u32)total : 256u;
+    groups  = (u32)((total + (u64)threads - 1) / (u64)threads);
   }
   if (groups == 0 || threads == 0) {
     return 0;
@@ -388,18 +433,20 @@ static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       cg_append(b, "_v%u", op_id);
       return 1;
     case S_ICONST:
-      cg_append(b, "%uu", (u32)u->extra);
+      cg_append(b, "%uu", (u32)(i64)u->extra);
       return 1;
     case S_IADD:
     case S_ISUB:
     case S_IMUL:
     case S_IDIV:
-    case S_IMOD: {
+    case S_IMOD:
+    case S_IAND: {
       const char *op = (u->op == S_IADD) ? "+"
                      : (u->op == S_ISUB) ? "-"
                      : (u->op == S_IMUL) ? "*"
                      : (u->op == S_IDIV) ? "/"
-                     : "%";
+                     : (u->op == S_IMOD) ? "%"
+                                          : "&";
       cg_append(b, "(");
       if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
         return 0;
@@ -411,6 +458,32 @@ static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       cg_append(b, ")");
       return 1;
     }
+    case S_ILT:
+      cg_append(b, "((");
+      if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ") < (");
+      if (!rmt_emit_uint_expr(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, ") ? 1u : 0u)");
+      return 1;
+    case S_IWHERE:
+      cg_append(b, "((");
+      if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ") ? (");
+      if (!rmt_emit_uint_expr(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, ") : (");
+      if (!rmt_emit_uint_expr(b, ke, u->src[2])) {
+        return 0;
+      }
+      cg_append(b, "))");
+      return 1;
     default:
       return 0;
   }
@@ -424,6 +497,9 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       rm_emit_f32_bits(b, bits);
       return 1;
     }
+    case S_ICONST:
+      cg_append(b, "float(%d)", (int)(i64)u->extra);
+      return 1;
     case S_LOAD: {
       u32 slot = 0;
       if (!rmt_index_param_slot(ke, u->src[0], &slot)) {
@@ -466,14 +542,135 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       }
       cg_append(b, ")");
       return 1;
+    case S_RECIP:
+      cg_append(b, "(1.0f / (");
+      if (!rmt_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, "))");
+      return 1;
+    case S_SQRT:
+    case S_EXP2:
+    case S_LOG2: {
+      const char *name = (u->op == S_SQRT) ? "sqrt"
+                       : (u->op == S_EXP2) ? "exp2"
+                                            : "log2";
+      cg_append(b, "%s(", name);
+      if (!rmt_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ")");
+      return 1;
+    }
+    case S_CAST:
+      if (u->dtype != DT_FP32) {
+        return 0;
+      }
+      cg_append(b, "float(");
+      if (!rmt_emit_value(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ")");
+      return 1;
+    case S_IWHERE:
+      if (u->dtype != DT_FP32) {
+        return 0;
+      }
+      cg_append(b, "((");
+      if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
+        return 0;
+      }
+      cg_append(b, ") ? (");
+      if (!rmt_emit_value(b, ke, u->src[1])) {
+        return 0;
+      }
+      cg_append(b, ") : (");
+      if (!rmt_emit_value(b, ke, u->src[2])) {
+        return 0;
+      }
+      cg_append(b, "))");
+      return 1;
     default:
       return 0;
   }
 }
 
+static int rmt_emit_store_value(CgBuf *b, KernelEntry const *ke,
+                                CtKernelInfo const *info) {
+  ScalarUop const *st = &ke->scalar_uops[info->scalar.store_id];
+  if (!info->scalar.has_reduce) {
+    return rmt_emit_value(b, ke, st->src[1]);
+  }
+
+  u32 rid = info->tile.scalar_reduce_id;
+  if (rid == 0 || rid >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *ru = &ke->scalar_uops[rid];
+  if ((ru->op != S_REDUCE_SUM && ru->op != S_REDUCE_MAX)
+      || ru->src_count < 2) {
+    return 0;
+  }
+  u32 rng_id = ru->src[1];
+  if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *rng = &ke->scalar_uops[rng_id];
+  if (rng->op != S_RANGE) {
+    return 0;
+  }
+  u32 extent = (u32)(rng->extra & 0xFFFFFFFFu);
+  if (extent == 0) {
+    return 0;
+  }
+  u32 unroll_factor = 1;
+  if (ke->axes != NULL) {
+    for (u32 i = 0; i < ke->axes->n_applied; i++) {
+      KOpt o = ke->axes->applied_opts[i];
+      if (o.op == KOP_UNROLL && o.arg > 1 && extent % o.arg == 0) {
+        unroll_factor = o.arg;
+      }
+    }
+  }
+  if (ru->op == S_REDUCE_MAX) {
+    cg_append(b, "float _acc%u = -INFINITY;\n", rid);
+  } else {
+    cg_append(b, "float _acc%u = 0.0f;\n", rid);
+  }
+  if (unroll_factor > 1) {
+    cg_append(b, "  #pragma clang loop unroll_count(%u)\n",
+              unroll_factor);
+  }
+  cg_append(b, "  for (uint _rk%u = 0u; _rk%u < %uu; _rk%u++) {\n",
+            rid, rid, extent, rid);
+  cg_append(b, "    uint _v%u = _rk%u;\n", rng_id, rid);
+  cg_append(b, "    float _rv%u = ", rid);
+  if (!rmt_emit_value(b, ke, ru->src[0])) {
+    return 0;
+  }
+  cg_append(b, ";\n");
+  if (ru->op == S_REDUCE_MAX) {
+    cg_append(b, "    if (_rv%u > _acc%u) { _acc%u = _rv%u; }\n",
+              rid, rid, rid, rid);
+  } else {
+    cg_append(b, "    _acc%u += _rv%u;\n", rid, rid);
+  }
+  cg_append(b, "  }\n");
+  cg_append(b, "  out[");
+  if (!rmt_emit_index_offset(b, ke, st->src[0])) {
+    return 0;
+  }
+  cg_append(b, "] = _acc%u", rid);
+  return 1;
+}
+
 char *cg_emit_tile_metal(KernelEntry const *ke) {
   CtKernelInfo info;
   if (!rmt_collect_kernel_info(ke, &info)) {
+    return NULL;
+  }
+  RmtAxisMode mode = rmt_axis_mode(&info);
+  if (mode == RMT_AXIS_UNSUPPORTED) {
     return NULL;
   }
 
@@ -489,32 +686,40 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
     cg_append(&b, ",\n              device const float *in%u [[buffer(%u)]]",
               i, i + 1);
   }
-  cg_append(&b, ",\n              uint3 _tgid3 [[threadgroup_position_in_grid]],");
+  cg_append(&b, ",\n              uint3 _gid3 [[thread_position_in_grid]],");
+  cg_append(&b, "\n              uint3 _tgid3 [[threadgroup_position_in_grid]],");
   cg_append(&b, "\n              uint3 _ltid3 [[thread_position_in_threadgroup]]) {\n");
+  cg_append(&b, "  uint _tk = 0u;\n");
   cg_append(&b, "  uint _tgid = _tgid3.x;\n");
   cg_append(&b, "  uint _ltid = _ltid3.x;\n");
 
-  for (u32 d = 0; d < info.n_axes; d++) {
-    if (info.axis_types[d] == KAX_GLOBAL) {
-      cg_append(&b, "  uint _ta%u = _tgid;\n", d);
-    } else if (info.axis_types[d] == KAX_LOCAL) {
-      cg_append(&b, "  uint _ta%u = _ltid;\n", d);
-    } else {
-      free(b.buf);
-      return NULL;
+  if (mode == RMT_AXIS_LOCAL_GLOBAL) {
+    for (u32 d = 0; d < info.n_axes; d++) {
+      if (info.axis_types[d] == KAX_GLOBAL) {
+        cg_append(&b, "  uint _ta%u = _tgid;\n", d);
+      } else if (info.axis_types[d] == KAX_LOCAL) {
+        cg_append(&b, "  uint _ta%u = _ltid;\n", d);
+      } else {
+        free(b.buf);
+        return NULL;
+      }
     }
-  }
 
-  cg_append(&b, "  bool _ok = true");
-  for (u32 d = 0; d < info.n_axes; d++) {
-    cg_append(&b, " && _ta%u < %uu", d, info.axis_extents[d]);
-  }
-  cg_append(&b, ";\n");
-  cg_append(&b, "  threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-  cg_append(&b, "  if (!_ok) return;\n");
-  cg_append(&b, "  uint _tk = 0u;\n");
-  for (u32 d = 0; d < info.n_axes; d++) {
-    cg_append(&b, "  _tk = _tk * %uu + _ta%u;\n", info.axis_extents[d], d);
+    cg_append(&b, "  bool _ok = true");
+    for (u32 d = 0; d < info.n_axes; d++) {
+      cg_append(&b, " && _ta%u < %uu", d, info.axis_extents[d]);
+    }
+    cg_append(&b, ";\n");
+    cg_append(&b, "  threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    cg_append(&b, "  if (!_ok) return;\n");
+    for (u32 d = 0; d < info.n_axes; d++) {
+      cg_append(&b, "  _tk = _tk * %uu + _ta%u;\n", info.axis_extents[d], d);
+    }
+  } else {
+    u64 total = rmt_axis_numel(&info);
+    cg_append(&b, "  _tk = _gid3.x;\n");
+    cg_append(&b, "  if (_tk >= %lluULL) return;\n",
+              (unsigned long long)total);
   }
 
   u32 loop_strides[MAX_DIM] = {0};
@@ -531,15 +736,23 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
   }
 
   ScalarUop const *st = &ke->scalar_uops[info.scalar.store_id];
-  cg_append(&b, "  out[");
-  if (!rmt_emit_index_offset(&b, ke, st->src[0])) {
-    free(b.buf);
-    return NULL;
-  }
-  cg_append(&b, "] = ");
-  if (!rmt_emit_value(&b, ke, st->src[1])) {
-    free(b.buf);
-    return NULL;
+  if (info.scalar.has_reduce) {
+    cg_append(&b, "  ");
+    if (!rmt_emit_store_value(&b, ke, &info)) {
+      free(b.buf);
+      return NULL;
+    }
+  } else {
+    cg_append(&b, "  out[");
+    if (!rmt_emit_index_offset(&b, ke, st->src[0])) {
+      free(b.buf);
+      return NULL;
+    }
+    cg_append(&b, "] = ");
+    if (!rmt_emit_value(&b, ke, st->src[1])) {
+      free(b.buf);
+      return NULL;
+    }
   }
   cg_append(&b, ";\n}\n");
   return b.buf;

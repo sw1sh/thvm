@@ -67,6 +67,16 @@ that future renderers can lower differently for CPU and Metal.
   stay off by default; they exist only as correctness/performance
   oracles while the tile planner learns to rediscover equivalent
   schedules from lowered scalar/tile primitives;
+- rank-1 `TMatVec` now reaches that generic path: the tile analyzer
+  recognizes `EXPAND(vector) -> MUL(matrix, vector) -> REDUCE_SUM`
+  as a `TILE_MMA` plan with `N=1`, so Metal dispatches it via
+  `"metal-gemm"` and `TKernelProposed` exposes the normal `TC`
+  tile-size candidates without using the diagnostic GEMV recognizer;
+- generated Metal TileUop source now covers f32 scalar `TILE_REDUCE`
+  plans in addition to elementwise plans: default loop axes map to a
+  flat Metal grid, the reduce body is emitted from `ScalarUop`, and
+  reduce-axis `UNROLL` candidates remain visible to autotune for
+  movement-heavy lowered reductions;
 - f32/f64 `S_CAST` is generated with per-input and output pointer
   types, so scalar C no longer requires one uniform kernel dtype for
   simple cast chains;

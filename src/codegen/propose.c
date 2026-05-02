@@ -69,8 +69,101 @@ static int propose_metal_tile_enabled(void) {
   return propose_metal_backend_enabled() && tile != NULL && tile[0] == '1';
 }
 
+static int propose_metal_tile_scalar_reduce_op_ok(u8 op) {
+  switch (op) {
+    case S_NONE:
+    case S_RANGE:
+    case S_DEFINE_PARAM:
+    case S_DEFINE_OUTPUT:
+    case S_INDEX:
+    case S_INDEX_E:
+    case S_LOAD:
+    case S_STORE:
+    case S_BUFFERIZE:
+    case S_ADD:
+    case S_MUL:
+    case S_NEG:
+    case S_RECIP:
+    case S_SQRT:
+    case S_EXP2:
+    case S_LOG2:
+    case S_CMPLT:
+    case S_CMPEQ:
+    case S_REDUCE_SUM:
+    case S_REDUCE_MAX:
+    case S_CAST:
+    case S_CONST:
+    case S_ICONST:
+    case S_IADD:
+    case S_ISUB:
+    case S_IMUL:
+    case S_IDIV:
+    case S_IMOD:
+    case S_ILT:
+    case S_IAND:
+    case S_IWHERE:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int propose_scalar_op_carries_kernel_dtype(ScalarUop const *u) {
+  switch (u->op) {
+    case S_LOAD:
+    case S_STORE:
+    case S_CONST:
+    case S_ADD:
+    case S_MUL:
+    case S_NEG:
+    case S_RECIP:
+    case S_SQRT:
+    case S_EXP2:
+    case S_LOG2:
+    case S_CMPLT:
+    case S_CMPEQ:
+    case S_REDUCE_SUM:
+    case S_REDUCE_MAX:
+    case S_CAST:
+      return 1;
+    case S_IWHERE:
+      return u->dtype != DT_INT64;
+    default:
+      return 0;
+  }
+}
+
+static int propose_metal_tile_scalar_reduce_kernel(KernelEntry const *ke) {
+  if (!propose_metal_tile_enabled() || ke->scalar_uops == NULL
+      || ke->n_scalar_uops < 2 || ke->output_dtype != DT_FP32) {
+    return 0;
+  }
+  int has_reduce = 0;
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ke->input_dtypes[i] != DT_FP32) {
+      return 0;
+    }
+  }
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    ScalarUop const *u = &ke->scalar_uops[i];
+    if (!propose_metal_tile_scalar_reduce_op_ok(u->op)) {
+      return 0;
+    }
+    if (propose_scalar_op_carries_kernel_dtype(u) && u->dtype != DT_FP32) {
+      return 0;
+    }
+    if (u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX) {
+      has_reduce = 1;
+    }
+  }
+  return has_reduce;
+}
+
 static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
   if (!propose_metal_backend_enabled()) {
+    return 1;
+  }
+  if (propose_metal_tile_scalar_reduce_kernel(ke)) {
     return 1;
   }
   if (ke->n_ops == 0 || ke->program[ke->n_ops - 1].opcode != UOP_REDUCE) {

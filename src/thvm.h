@@ -1276,8 +1276,9 @@ fn int  tile_collect_plan_info(struct KernelEntry const *ke,
 fn u32  tile_loop_axis_count(struct KernelEntry const *ke);
 fn u32  tile_loop_axis_type(struct KernelEntry const *ke, u32 axis);
 fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
-// Recognize a matmul-shaped MUL + REDUCE_SUM program and recover the
-// logical M/N/K axes plus the physical input slots/leading dimensions.
+// Recognize matmul-shaped MUL + REDUCE_SUM programs, including the
+// rank-1 TMatVec EXPAND(vector) variant, and recover the logical M/N/K
+// axes plus the physical input slots/leading dimensions.
 // `input_storage_numels` is optional; when supplied it must carry the
 // actual backing-buffer element counts for each input slot.
 int     tile_analyze_gemm(struct KernelEntry const *ke,

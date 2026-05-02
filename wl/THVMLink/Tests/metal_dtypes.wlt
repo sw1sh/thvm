@@ -105,6 +105,48 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Rank-1 TMatVec should promote through the generic TILE_MMA
+       recognizer as GEMM with N=1.  This keeps the default path on
+       lowered primitives; the direct GEMV shader remains diagnostic. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result, oldBackend,
+            oldSpecialized, restore},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldSpecialized = Environment["THVM_METAL_SPECIALIZED"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldSpecialized],
+                SetEnvironment["THVM_METAL_SPECIALIZED" -> oldSpecialized],
+                SetEnvironment["THVM_METAL_SPECIALIZED" -> ""]]
+        );
+        SetEnvironment["THVM_BACKEND" -> "metal"];
+        SetEnvironment["THVM_METAL_SPECIALIZED" -> "0"];
+        If[ ctx === 0, restore[]; Return[True]];
+        result = TInContext[ctx,
+            w = TTensorCreate @ NumericArray[
+                {{1., 2., 3.}, {4., 5., 6.}}, "Real32"];
+            x = TTensorCreate @ NumericArray[{7., 8., 9.}, "Real32"];
+            out = TRealize @ TMatVec[w, x];
+            kid = TKernelCount[] - 1;
+            plan = TKernelTilePlan[kid];
+            {Round[Normal @ TTensorData[out], 0.001],
+             TKernelDispatchKind[kid],
+             TKernelProposed[kid],
+             plan["mma"]["M"], plan["mma"]["N"], plan["mma"]["K"]}
+        ];
+        TContextDestroy[ctx];
+        restore[];
+        result === {{50., 122.}, "metal-gemm",
+                    {TOpt["TC", 0, 32], TOpt["TC", 0, 16],
+                     TOpt["TC", 0, 8]}, 2, 1, 3}
+    ],
+    True,
+    TestID -> "metal/f32-matvec-rank1-promotes-tile-mma"
+]
+
+VerificationTest[
     (* f32 matrix-vector diagnostic path is opt-in; the default path
        should keep using the generic lowered graph. *)
     TInit[]; TReset[];
@@ -177,6 +219,46 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* With THVM_TILE enabled, scalar f32 reductions can route through
+       the generated TileUop Metal renderer instead of the per-op
+       Metal fallback. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result, oldBackend, oldTile,
+            restore},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile = Environment["THVM_TILE"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]]
+        );
+        SetEnvironment["THVM_BACKEND" -> "metal"];
+        SetEnvironment["THVM_TILE" -> "1"];
+        If[ ctx === 0, restore[]; Return[True]];
+        result = TInContext[ctx,
+            x = TTensorCreate @ NumericArray[Range[8.], "Real32"];
+            out = TRealize @ TUOpReduce[x, 0, "SUM"];
+            kid = TKernelCount[] - 1;
+            plan = TKernelTilePlan[kid];
+            {Round[Normal @ TTensorData[out], 0.001],
+             TKernelDispatchKind[kid],
+             plan["reduce_tile"] > 0,
+             TKernelProposed[kid]}
+        ];
+        TContextDestroy[ctx];
+        restore[];
+        result === {{36.}, "metal-tile", True,
+                    {TOpt["UNROLL", 1, 8], TOpt["UNROLL", 1, 4],
+                     TOpt["UNROLL", 1, 2]}}
+    ],
+    True,
+    TestID -> "metal/f32-reduce-sum-tile-dispatch"
+]
+
+VerificationTest[
     (* Fire-time autotune benchmarks must not poison the real TJit
        capture pass.  After input mutation, replay should refire the
        full producer chain instead of reusing benchmark intermediates. *)
@@ -222,6 +304,48 @@ VerificationTest[
     ],
     True,
     TestID -> "metal/tjit-autotune-captures-producer-chain"
+]
+
+VerificationTest[
+    (* Non-diagnostic Conv2D should be able to use the generic
+       TileUop Metal reduction path for the im2col-fused scalar graph. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result, oldSpecialized, oldTile,
+            restore},
+        oldSpecialized = Environment["THVM_METAL_SPECIALIZED"];
+        oldTile = Environment["THVM_TILE"];
+        restore[] := (
+            If[StringQ[oldSpecialized],
+                SetEnvironment["THVM_METAL_SPECIALIZED" -> oldSpecialized],
+                SetEnvironment["THVM_METAL_SPECIALIZED" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]]
+        );
+        SetEnvironment["THVM_METAL_SPECIALIZED" -> "0"];
+        SetEnvironment["THVM_TILE" -> "1"];
+        If[ ctx === 0, restore[]; Return[True]];
+        result = TInContext[ctx,
+            x = TTensorCreate @ NumericArray[
+                ConstantArray[1., {2, 6, 6}], "Real32"];
+            w = TTensorCreate @ NumericArray[
+                ConstantArray[1., {3, 2, 3, 3}], "Real32"];
+            b = TZeros[{3}];
+            out = TRealize @ TConv2D[TReLU[x], w, b];
+            reduceKids = Select[Range[1, TKernelCount[] - 1],
+                With[{plan = TKernelTilePlan[#]},
+                    AssociationQ[plan] && plan["reduce_tile"] > 0] &];
+            {Round[Normal @ TTensorData[out], 0.001],
+             AnyTrue[reduceKids, TKernelDispatchKind[#] === "metal-tile" &],
+             MemberQ[Table[TKernelDispatchKind[k],
+                 {k, 1, TKernelCount[] - 1}], "metal-conv"]}
+        ];
+        TContextDestroy[ctx];
+        restore[];
+        result === {ConstantArray[18., {3, 4, 4}], True, False}
+    ],
+    True,
+    TestID -> "metal/f32-conv2d-generic-tile-reduce"
 ]
 
 VerificationTest[

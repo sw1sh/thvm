@@ -231,15 +231,23 @@ static int tile_gemm_views_ok(KernelEntry const *ke, u32 aidx, u32 bidx,
   }
 
   if (N == 1) {
-    if (va->shape.ndim != 2 || vb->shape.ndim != 2) {
+    if (va->shape.ndim != 2) {
       return 0;
     }
     if (!(va->shape.dims[0] == M && va->shape.dims[1] == K
           && va->strides[0] == (i32)K && va->strides[1] == 1)) {
       return 0;
     }
-    if (!(vb->shape.dims[0] == M && vb->shape.dims[1] == K
-          && vb->strides[0] == 0 && vb->strides[1] == 1)) {
+    int b_vector = vb->shape.ndim == 1
+                && vb->shape.dims[0] == K
+                && vb->strides[0] == 1;
+    int b_row = vb->shape.ndim == 2
+             && vb->shape.dims[0] == 1 && vb->shape.dims[1] == K
+             && vb->strides[1] == 1;
+    int b_broadcast = vb->shape.ndim == 2
+                   && vb->shape.dims[0] == M && vb->shape.dims[1] == K
+                   && vb->strides[0] == 0 && vb->strides[1] == 1;
+    if (!b_vector && !b_row && !b_broadcast) {
       return 0;
     }
     *ldA = K;
@@ -324,16 +332,99 @@ static int tile_gemm_candidate_ok(KernelEntry const *ke,
   return 1;
 }
 
+static int tile_gemv_expand_input(KernelEntry const *ke, u32 step,
+                                  u32 M, u32 K, u32 *slot) {
+  if (step >= ke->n_ops) {
+    return 0;
+  }
+  KProgOp const *p = &ke->program[step];
+  if (p->opcode != UOP_EXPAND || p->n_src != 1
+      || !KSRC_IS_INPUT(p->src[0]) || p->numel != M * K) {
+    return 0;
+  }
+  if (p->out_ndim != 2 || p->out_dims[0] != M || p->out_dims[1] != K) {
+    return 0;
+  }
+  int rank1_vec = p->src0_ndim == 1 && p->src0_dims[0] == K;
+  int rank2_row = p->src0_ndim == 2
+               && p->src0_dims[0] == 1 && p->src0_dims[1] == K;
+  if (!rank1_vec && !rank2_row) {
+    return 0;
+  }
+  *slot = KSRC_INDEX(p->src[0]);
+  return *slot < ke->n_inputs;
+}
+
+static int tile_gemv_mul_input_and_expand(KernelEntry const *ke, u32 step,
+                                          u32 expand_step, u32 *matrix_slot) {
+  if (step >= ke->n_ops) {
+    return 0;
+  }
+  KProgOp const *p = &ke->program[step];
+  if (p->opcode != UOP_MUL || p->n_src != 2) {
+    return 0;
+  }
+  for (u32 i = 0; i < 2; i++) {
+    u32 a = p->src[i];
+    u32 b = p->src[1 - i];
+    if (KSRC_IS_INPUT(a) && !KSRC_IS_INPUT(b) && KSRC_INDEX(b) == expand_step) {
+      *matrix_slot = KSRC_INDEX(a);
+      return *matrix_slot < ke->n_inputs;
+    }
+  }
+  return 0;
+}
+
+static int tile_analyze_expanded_gemv(KernelEntry const *ke,
+                                      u32 const *input_storage_numels,
+                                      u32 dtype, TileGemmInfo *out) {
+  if (ke->n_inputs != 2 || ke->n_ops != 3) {
+    return 0;
+  }
+  if (!tile_gemm_op_is_reduce_sum_of(&ke->program[2], 1)) {
+    return 0;
+  }
+  u32 inner = TILE_REDUCE_INNER(ke->program[2].arg);
+  u32 n_mul = ke->program[1].numel;
+  u32 n_out = ke->program[2].numel;
+  if (inner != 1 || n_out == 0 || n_mul == 0 || n_mul % n_out != 0) {
+    return 0;
+  }
+  u32 M = n_out;
+  u32 N = 1;
+  u32 K = n_mul / n_out;
+  u32 aidx = 0;
+  u32 bidx = 0;
+  if (!tile_gemv_expand_input(ke, 0, M, K, &bidx)) {
+    return 0;
+  }
+  if (!tile_gemv_mul_input_and_expand(ke, 1, 0, &aidx)) {
+    return 0;
+  }
+  if (!tile_gemm_candidate_ok(ke, input_storage_numels, aidx, bidx,
+                              M, N, K, out)) {
+    return 0;
+  }
+  out->dtype = dtype;
+  return 1;
+}
+
 int tile_analyze_gemm(KernelEntry const *ke,
                       u32 const *input_storage_numels,
                       TileGemmInfo *out) {
   if (ke == NULL || out == NULL || ke->program == NULL
-      || ke->n_inputs != 2 || ke->n_ops != 2) {
+      || ke->n_inputs != 2) {
     return 0;
   }
   memset(out, 0, sizeof(TileGemmInfo));
   u32 dtype = 0;
   if (!tile_gemm_uniform_dtype(ke, &dtype)) {
+    return 0;
+  }
+  if (tile_analyze_expanded_gemv(ke, input_storage_numels, dtype, out)) {
+    return 1;
+  }
+  if (ke->n_ops != 2) {
     return 0;
   }
   if (!tile_gemm_op_is_mul_inputs(&ke->program[0])) {

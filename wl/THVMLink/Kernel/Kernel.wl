@@ -593,10 +593,17 @@ $scalarOpNames = <|
    15 -> "S_SQRT",         16 -> "S_CMPLT",        17 -> "S_CMPEQ",
    18 -> "S_REDUCE_SUM",   19 -> "S_REDUCE_MAX",   20 -> "S_CAST",
    21 -> "S_SHRINK",       22 -> "S_PAD",          23 -> "S_LOAD_RAW",
-   24 -> "S_FLIP",         25 -> "S_RESHAPE"
+   24 -> "S_FLIP",         25 -> "S_RESHAPE",      26 -> "S_RESHAPE_V",
+   27 -> "S_ICONST",       28 -> "S_IADD",         29 -> "S_ISUB",
+   30 -> "S_IMUL",         31 -> "S_IDIV",         32 -> "S_IMOD",
+   33 -> "S_ILT",          34 -> "S_IAND",         35 -> "S_IWHERE",
+   36 -> "S_INDEX_E"
 |>;
 
-$scalarAxisNames = <|0 -> "LOOP", 1 -> "REDUCE", 2 -> "UNROLL", 3 -> "GLOBAL"|>;
+$scalarAxisNames = <|
+    0 -> "LOOP", 1 -> "REDUCE", 2 -> "UNROLL", 3 -> "GLOBAL",
+    4 -> "VIRT"
+|>;
 
 TKernelScalarUops[kid_Integer] := Module[{raw, n, decoded},
     raw = Normal @ $kernelScalarUopsFn[kid];

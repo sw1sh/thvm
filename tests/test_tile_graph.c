@@ -177,6 +177,26 @@ static void test_set_view3(View *v, u32 d0, u32 d1, u32 d2,
   v->numel         = d0 * d1 * d2;
 }
 
+static void test_set_view2(View *v, u32 d0, u32 d1, i32 s0, i32 s1) {
+  memset(v, 0, sizeof(View));
+  v->shape.ndim    = 2;
+  v->shape.dims[0] = d0;
+  v->shape.dims[1] = d1;
+  v->strides[0]    = s0;
+  v->strides[1]    = s1;
+  v->numel         = d0 * d1;
+  v->contiguous    = (s0 == (i32)d1 && s1 == 1);
+}
+
+static void test_set_view1(View *v, u32 d0, i32 s0) {
+  memset(v, 0, sizeof(View));
+  v->shape.ndim    = 1;
+  v->shape.dims[0] = d0;
+  v->strides[0]    = s0;
+  v->numel         = d0;
+  v->contiguous    = (s0 == 1);
+}
+
 static void build_kprog_gemm(KernelEntry *ke, u32 M, u32 N, u32 K) {
   kernel_inputs_reserve(ke, 2);
   ke->n_inputs        = 2;
@@ -207,6 +227,51 @@ static void build_kprog_gemm(KernelEntry *ke, u32 M, u32 N, u32 K) {
     .src    = {0, 0, 0},
     .arg    = (REDUCE_SUM << 24) | (N & 0x00FFFFFFu),
     .numel  = M * N,
+  };
+}
+
+static void build_kprog_gemv_expand(KernelEntry *ke, u32 M, u32 K) {
+  kernel_inputs_reserve(ke, 2);
+  ke->n_inputs        = 2;
+  ke->input_tids[0]   = 0;
+  ke->input_tids[1]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_dtypes[1] = DT_FP32;
+  ke->input_numels[0] = M * K;
+  ke->input_numels[1] = K;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = M;
+  test_set_view2(&ke->input_views[0], M, K, (i32)K, 1);
+  test_set_view1(&ke->input_views[1], K, 1);
+
+  kernel_program_reserve(ke, 3);
+  ke->n_ops = 3;
+  ke->program[0] = (KProgOp){
+    .opcode    = UOP_EXPAND,
+    .dtype     = DT_FP32,
+    .n_src     = 1,
+    .src       = {KSRC_AS_INPUT(1), 0, 0},
+    .numel     = M * K,
+    .src0_ndim = 1,
+    .out_ndim  = 2,
+  };
+  ke->program[0].src0_dims[0] = K;
+  ke->program[0].out_dims [0] = M;
+  ke->program[0].out_dims [1] = K;
+  ke->program[1] = (KProgOp){
+    .opcode = UOP_MUL,
+    .dtype  = DT_FP32,
+    .n_src  = 2,
+    .src    = {KSRC_AS_INPUT(0), 0, 0},
+    .numel  = M * K,
+  };
+  ke->program[2] = (KProgOp){
+    .opcode = UOP_REDUCE,
+    .dtype  = DT_FP32,
+    .n_src  = 1,
+    .src    = {1, 0, 0},
+    .arg    = (REDUCE_SUM << 24) | 1u,
+    .numel  = M,
   };
 }
 
@@ -270,6 +335,28 @@ int main(void) {
   CHECK_EQ(gemm.a_input, 1u);
   CHECK_EQ(gemm.b_input, 0u);
   CHECK_EQ(gemm.flags, 0u);
+  kernel_free_arrays(ke);
+
+  TEST_BEGIN("tile-graph/gemv-expand-promotes-to-mma-plan");
+  build_kprog_gemv_expand(ke, 2, 3);
+  u32 gemv_storage_numels[2] = {6, 3};
+  CHECK(tile_analyze_gemm(ke, gemv_storage_numels, &gemm));
+  CHECK_EQ(gemm.dtype, (u32)DT_FP32);
+  CHECK_EQ(gemm.M, 2u);
+  CHECK_EQ(gemm.N, 1u);
+  CHECK_EQ(gemm.K, 3u);
+  CHECK_EQ(gemm.a_input, 0u);
+  CHECK_EQ(gemm.b_input, 1u);
+  CHECK_EQ(gemm.ldA, 3u);
+  CHECK_EQ(gemm.ldB, 1u);
+  CHECK_EQ(gemm.flags, 0u);
+  CHECK(tile_sync_from_scalar(ke));
+  CHECK(tile_validate(ke));
+  CHECK_EQ(ke->tile_uops[ke->tile_root].op, TILE_MMA);
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.mma.M, 2u);
+  CHECK_EQ(info.mma.N, 1u);
+  CHECK_EQ(info.mma.K, 3u);
   kernel_free_arrays(ke);
 
   TEST_BEGIN("tile-graph/build-mma-plan-from-gemm");
@@ -340,6 +427,31 @@ int main(void) {
   CHECK_EQ(n_tc, 3u);
   CHECK_EQ(tc_cands[0].op, (u32)KOP_TC);
   CHECK_EQ(tc_cands[0].axis, 0u);
+  CHECK_EQ(tc_cands[0].arg, 32u);
+  CHECK_EQ(tc_cands[1].op, (u32)KOP_TC);
+  CHECK_EQ(tc_cands[1].arg, 16u);
+  CHECK_EQ(tc_cands[2].op, (u32)KOP_TC);
+  CHECK_EQ(tc_cands[2].arg, 8u);
+  unsetenv("THVM_BACKEND");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes = NULL;
+  kernel_free_arrays(ke);
+
+  TEST_BEGIN("tile-graph/metal-gemv-expand-proposes-tc");
+  build_kprog_gemv_expand(ke, 16, 32);
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 2;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 16;
+  ke->axes->axis_types[1] = KAX_REDUCE;
+  ke->axes->full_shape[1] = 32;
+  ke->axes->version++;
+  setenv("THVM_BACKEND", "metal", 1);
+  n_tc = kernel_opts_propose(ke, tc_cands,
+                             (u32)(sizeof(tc_cands)/sizeof(*tc_cands)));
+  CHECK_EQ(n_tc, 3u);
+  CHECK_EQ(tc_cands[0].op, (u32)KOP_TC);
   CHECK_EQ(tc_cands[0].arg, 32u);
   CHECK_EQ(tc_cands[1].op, (u32)KOP_TC);
   CHECK_EQ(tc_cands[1].arg, 16u);
@@ -654,6 +766,19 @@ int main(void) {
   CHECK(strstr(src, "out[") != NULL);
   CHECK(strstr(src, "eval_scalar") == NULL);
   free(src);
+  u32 flat_groups_x = 0;
+  u32 flat_threads_x = 0;
+  CHECK(cg_tile_metal_dispatch_shape(mk, &flat_groups_x, &flat_threads_x));
+  CHECK_EQ(flat_groups_x, 1u);
+  CHECK_EQ(flat_threads_x, 4u);
+  char *flat_metal_src = cg_emit_tile_metal(mk);
+  CHECK(flat_metal_src != NULL);
+  if (flat_metal_src != NULL) {
+    CHECK(strstr(flat_metal_src, "thread_position_in_grid") != NULL);
+    CHECK(strstr(flat_metal_src, "_tk = _gid3.x") != NULL);
+    CHECK(strstr(flat_metal_src, "threadgroup_barrier") == NULL);
+    free(flat_metal_src);
+  }
 
   TEST_BEGIN("tile-graph/c-renderer-honors-upcast-axis");
   CHECK(mk->axes != NULL);
@@ -743,6 +868,19 @@ int main(void) {
     CHECK(strstr(red_src, "for (unsigned _ta0") != NULL);
     CHECK(strstr(red_src, "for (unsigned _ta1") == NULL);
     free(red_src);
+  }
+  u32 red_groups_x = 0;
+  u32 red_threads_x = 0;
+  CHECK(cg_tile_metal_dispatch_shape(tk, &red_groups_x, &red_threads_x));
+  CHECK_EQ(red_groups_x, 1u);
+  CHECK_EQ(red_threads_x, 1u);
+  char *red_metal_src = cg_emit_tile_metal(tk);
+  CHECK(red_metal_src != NULL);
+  if (red_metal_src != NULL) {
+    CHECK(strstr(red_metal_src, "thread_position_in_grid") != NULL);
+    CHECK(strstr(red_metal_src, "for (uint _rk") != NULL);
+    CHECK(strstr(red_metal_src, "_acc") != NULL);
+    free(red_metal_src);
   }
   f32 red_in[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   f32 red_out[1] = {0.0f};
