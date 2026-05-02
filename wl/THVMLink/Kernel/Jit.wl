@@ -155,6 +155,13 @@ TJitCaptureOps[TJitClosure[a_Association]] := Module[{
 captureCounts[rows_, key_] := ReverseSort @ Counts[
     Lookup[rows, key, 0] /. 0 -> Nothing]
 
+jitGraphRunLimit[] := Module[{raw = Environment["THVM_METAL_GRAPH_MAX_DISPATCHES"], n},
+    If[!StringQ[raw] || StringLength[StringTrim[raw]] == 0, Return[128]];
+    If[!StringMatchQ[StringTrim[raw], DigitCharacter ..], Return[128]];
+    n = ToExpression[StringTrim[raw]];
+    If[2 <= n <= 256, n, 128]
+]
+
 TJitCaptureRuns[c_TJitClosure] := Module[{
     ops = TJitCaptureOps[c], runs = {}, cur = {}, start = 0,
     flush
@@ -186,7 +193,8 @@ TJitCaptureRuns[c_TJitClosure] := Module[{
 
 TJitCaptureGraphRuns[c_TJitClosure] := Module[{
     ops = TJitCaptureOps[c], runs = {}, i = 1, n, j, consumed, aliases,
-    skipped, encoded, tileCount, jitCount, blocker, op, kind
+    skipped, encoded, tileCount, jitCount, blocker, blockerOp, op, kind,
+    limit = jitGraphRunLimit[]
 },
     n = Length[ops];
     While[i <= n,
@@ -198,16 +206,18 @@ TJitCaptureGraphRuns[c_TJitClosure] := Module[{
         tileCount = 0;
         jitCount = 0;
         blocker = "end";
-        While[j <= n && consumed < 256,
+        blockerOp = <||>;
+        While[j <= n && consumed < limit,
             op = ops[[j]];
-            If[op["Kind"] =!= "DISPATCH",
-                blocker = "assign";
-                Break[]];
             If[TrueQ[op["ReplaySkip"]],
                 skipped++;
                 consumed++;
                 j++;
                 Continue[]];
+            If[op["Kind"] =!= "DISPATCH",
+                blocker = "assign";
+                blockerOp = op;
+                Break[]];
             kind = op["DispatchKind"];
             Which[
                 kind === "metal-alias",
@@ -221,6 +231,7 @@ TJitCaptureGraphRuns[c_TJitClosure] := Module[{
                     j++,
                 True,
                     blocker = kind;
+                    blockerOp = op;
                     Break[]]];
         If[Length[encoded] >= 2 && consumed >= 2,
             AppendTo[runs, <|
@@ -233,6 +244,10 @@ TJitCaptureGraphRuns[c_TJitClosure] := Module[{
                 "AliasDispatches" -> aliases,
                 "SkippedDispatches" -> skipped,
                 "Blocker" -> blocker,
+                "BlockerKid" -> Lookup[blockerOp, "Kid", 0],
+                "BlockerProgramKey" -> Lookup[blockerOp, "ProgramKey", 0],
+                "BlockerOutputNumel" -> Lookup[blockerOp, "OutputNumel", 0],
+                "BlockerOpCount" -> Lookup[blockerOp, "OpCount", 0],
                 "TopProgramKeys" -> Take[captureCounts[encoded, "ProgramKey"], UpTo[8]],
                 "TopOutputNumels" -> Take[captureCounts[encoded, "OutputNumel"], UpTo[8]],
                 "TopOpCounts" -> Take[captureCounts[encoded, "OpCount"], UpTo[8]],

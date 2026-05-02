@@ -873,7 +873,8 @@ int main(void) {
     CHECK(strstr(metal_tile_src, "threadgroup_position_in_grid") != NULL);
     CHECK(strstr(metal_tile_src, "thread_position_in_threadgroup") != NULL);
     CHECK(strstr(metal_tile_src, "threadgroup_barrier") != NULL);
-    CHECK(strstr(metal_tile_src, "uint _ta0 = _tgid;") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _tg = _tgid;") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _ta0 = _tg % 2u;") != NULL);
     CHECK(strstr(metal_tile_src, "uint _ta1 = _ltid;") != NULL);
     free(metal_tile_src);
   }
@@ -931,7 +932,36 @@ int main(void) {
   CHECK(metal_tile_src != NULL);
   if (metal_tile_src != NULL) {
     CHECK(strstr(metal_tile_src, "uint _ta0 = _ltid;") != NULL);
-    CHECK(strstr(metal_tile_src, "uint _ta1 = _tgid;") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _ta1 = _tg % 2u;") != NULL);
+    free(metal_tile_src);
+  }
+
+  TEST_BEGIN("tile-graph/kernel-axes-local-global-with-loop");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 3;
+  ke->axes->axis_types[0] = KAX_GLOBAL;
+  ke->axes->full_shape[0] = 2;
+  ke->axes->axis_types[1] = KAX_LOCAL;
+  ke->axes->full_shape[1] = 2;
+  ke->axes->axis_types[2] = KAX_LOOP;
+  ke->axes->full_shape[2] = 2;
+  ke->axes->version++;
+  CHECK(tile_build_from_scalar(ke));
+  CHECK(tile_validate(ke));
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.axis_types[0], (u32)KAX_GLOBAL);
+  CHECK_EQ(info.axis_types[1], (u32)KAX_LOCAL);
+  CHECK_EQ(info.axis_types[2], (u32)KAX_LOOP);
+  CHECK(cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
+  CHECK_EQ(groups_x, 4u);
+  CHECK_EQ(threads_x, 2u);
+  metal_tile_src = cg_emit_tile_metal(ke);
+  CHECK(metal_tile_src != NULL);
+  if (metal_tile_src != NULL) {
+    CHECK(strstr(metal_tile_src, "uint _tg = _tgid;") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _ta2 = _tg % 2u;") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _ta0 = _tg % 2u;") != NULL);
+    CHECK(strstr(metal_tile_src, "uint _ta1 = _ltid;") != NULL);
     free(metal_tile_src);
   }
 

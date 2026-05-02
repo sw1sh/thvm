@@ -789,7 +789,20 @@ static RmtAxisMode rmt_axis_mode(CtKernelInfo const *info) {
       flat_ok = 0;
     }
   }
-  if (n_global == 1 && n_local == 1 && n_global + n_local == info->n_axes) {
+  int local_global_ok = !info->scalar.has_reduce
+                     && n_global == 1
+                     && n_local == 1;
+  if (local_global_ok) {
+    for (u32 i = 0; i < info->n_axes; i++) {
+      u8 ty = info->axis_types[i];
+      if (ty != KAX_GLOBAL && ty != KAX_LOCAL
+          && ty != KAX_LOOP && ty != KAX_UPCAST) {
+        local_global_ok = 0;
+        break;
+      }
+    }
+  }
+  if (local_global_ok) {
     return RMT_AXIS_LOCAL_GLOBAL;
   }
   if (info->scalar.has_reduce && n_group_reduce == 1 && flat_ok) {
@@ -945,15 +958,21 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   u32 groups  = 1;
   u32 threads = 1;
   if (mode == RMT_AXIS_LOCAL_GLOBAL) {
-    groups  = 0;
+    u64 group_total = 1;
     threads = 0;
     for (u32 i = 0; i < info.n_axes; i++) {
       if (info.axis_types[i] == KAX_GLOBAL) {
-        groups = info.axis_extents[i];
+        group_total *= info.axis_extents[i];
       } else if (info.axis_types[i] == KAX_LOCAL) {
         threads = info.axis_extents[i];
+      } else {
+        group_total *= info.axis_extents[i];
       }
     }
+    if (group_total == 0 || group_total > 0xFFFFFFFFu) {
+      return 0;
+    }
+    groups = (u32)group_total;
   } else if (mode == RMT_AXIS_FLAT_GRID) {
     u64 total = rmt_axis_numel(&info);
     if (total == 0 || total > 0xFFFFFFFFu) {
@@ -1774,14 +1793,17 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
   cg_append(&b, "  uint _ltid = _ltid3.x;\n");
 
   if (mode == RMT_AXIS_LOCAL_GLOBAL) {
+    cg_append(&b, "  uint _tg = _tgid;\n");
+    for (i32 d = (i32)info.n_axes - 1; d >= 0; d--) {
+      if (info.axis_types[d] != KAX_LOCAL) {
+        cg_append(&b, "  uint _ta%u = _tg %% %uu;\n",
+                  (u32)d, info.axis_extents[d]);
+        cg_append(&b, "  _tg /= %uu;\n", info.axis_extents[d]);
+      }
+    }
     for (u32 d = 0; d < info.n_axes; d++) {
-      if (info.axis_types[d] == KAX_GLOBAL) {
-        cg_append(&b, "  uint _ta%u = _tgid;\n", d);
-      } else if (info.axis_types[d] == KAX_LOCAL) {
+      if (info.axis_types[d] == KAX_LOCAL) {
         cg_append(&b, "  uint _ta%u = _ltid;\n", d);
-      } else {
-        free(b.buf);
-        return NULL;
       }
     }
 

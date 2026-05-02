@@ -281,6 +281,22 @@ static int jit_metal_graph_replay_enabled(void) {
   return e == NULL || e[0] != '0';
 }
 
+static u32 jit_metal_graph_max_dispatches(void) {
+  static int known = 0;
+  static u32 limit = 128;
+  if (!known) {
+    char const *e = getenv("THVM_METAL_GRAPH_MAX_DISPATCHES");
+    if (e != NULL && e[0] != '\0') {
+      u64 v = strtoull(e, NULL, 10);
+      if (v >= 2 && v <= 256) {
+        limit = (u32)v;
+      }
+    }
+    known = 1;
+  }
+  return limit;
+}
+
 // Export the capture sequence as a flat table for WL-side profiling.
 // Header: {n_ops, row_width}.  Row width is JIT_CAPTURE_EXPORT_ROW_WIDTH:
 // {kind, kid, dispatch_kind, n_inputs, out_buf_id, input0, input1,
@@ -508,6 +524,237 @@ static void jit_capture_drop_dead_output(JitCaptureOp const *op) {
   b->buf_decref(op->out_buf_id);
 }
 
+static i32 jit_scalar_index_param_slot(KernelEntry const *ke, u32 idx_id) {
+  if (ke == NULL || ke->scalar_uops == NULL) {
+    return -1;
+  }
+  while (idx_id != 0 && idx_id < ke->n_scalar_uops) {
+    ScalarUop const *u = &ke->scalar_uops[idx_id];
+    if (u->op != S_INDEX && u->op != S_INDEX_E) {
+      return -1;
+    }
+    u32 base_id = u->src[0];
+    if (base_id == 0 || base_id >= ke->n_scalar_uops) {
+      return -1;
+    }
+    ScalarUop const *base = &ke->scalar_uops[base_id];
+    if (base->op == S_DEFINE_PARAM) {
+      return (i32)(u32)base->extra;
+    }
+    idx_id = base_id;
+  }
+  return -1;
+}
+
+static int jit_scalar_same_index_coord(KernelEntry const *ke, u32 a_id,
+                                       u32 b_id) {
+  if (ke == NULL || ke->scalar_uops == NULL) {
+    return 0;
+  }
+  if (a_id == 0 || b_id == 0
+      || a_id >= ke->n_scalar_uops || b_id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *a = &ke->scalar_uops[a_id];
+  ScalarUop const *b = &ke->scalar_uops[b_id];
+  if (a->op != b->op) {
+    return 0;
+  }
+  if (a->op == S_INDEX_E) {
+    return a->src[1] == b->src[1];
+  }
+  if (a->op != S_INDEX || a->src_count != b->src_count
+      || a->extra != b->extra) {
+    return 0;
+  }
+  ScalarUop const *abase = &ke->scalar_uops[a->src[0]];
+  ScalarUop const *bbase = &ke->scalar_uops[b->src[0]];
+  if (abase->op == S_INDEX || bbase->op == S_INDEX) {
+    if (abase->op != S_INDEX || bbase->op != S_INDEX) {
+      return 0;
+    }
+    if (!jit_scalar_same_index_coord(ke, a->src[0], b->src[0])) {
+      return 0;
+    }
+  }
+  for (u32 i = 1; i < a->src_count; i++) {
+    if (a->src[i] != b->src[i]) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static u32 jit_kernel_store_index(KernelEntry const *ke) {
+  if (ke == NULL || ke->scalar_uops == NULL) {
+    return 0;
+  }
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    ScalarUop const *u = &ke->scalar_uops[i];
+    if (u->op == S_STORE && u->src_count >= 2) {
+      return u->src[0];
+    }
+  }
+  return 0;
+}
+
+static int jit_assign_sink_safe(JitCaptureOp const *producer,
+                                u32 dst_tid, u32 dst_buf_id) {
+  if (producer == NULL || producer->kind != JIT_OP_DISPATCH
+      || producer->kid == 0 || producer->kid >= KERNELS_NEXT) {
+    return 0;
+  }
+  KernelEntry const *ke = &KERNELS[producer->kid];
+  if (ke->output_numel == 0 || dst_tid == 0 || dst_tid >= TENS_NEXT) {
+    return 0;
+  }
+  TenDesc const *dst = &TENS[dst_tid];
+  if (dst->buf_id != dst_buf_id || dst->backend == NULL) {
+    return 0;
+  }
+#ifdef THVM_HAS_METAL
+  if (dst->backend->id != METAL_BACKEND.id) {
+    return 0;
+  }
+#else
+  return 0;
+#endif
+  if (cg_kernel_dispatch_kind(producer->kid) != KDISPATCH_METAL_TILE) {
+    return 0;
+  }
+  if (dst->nviews != 0 || !dst->view.contiguous || dst->view.offset != 0
+      || dst->view.numel != ke->output_numel) {
+    return 0;
+  }
+  u32 store_idx = jit_kernel_store_index(ke);
+  if (store_idx == 0) {
+    return 0;
+  }
+  u32 const *ids = producer->heap_in_buf_ids != NULL
+                 ? producer->heap_in_buf_ids
+                 : producer->in_buf_ids;
+  for (u32 slot = 0; slot < producer->n_inputs; slot++) {
+    int same_dst = ids[slot] == dst_buf_id;
+    if (ke->input_tids != NULL && slot < ke->n_inputs) {
+      same_dst = same_dst || ke->input_tids[slot] == dst_tid;
+    }
+    if (!same_dst) {
+      continue;
+    }
+    for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+      ScalarUop const *u = &ke->scalar_uops[i];
+      if (u->op != S_LOAD && u->op != S_LOAD_RAW) {
+        continue;
+      }
+      if (jit_scalar_index_param_slot(ke, u->src[0]) != (i32)slot) {
+        continue;
+      }
+      if (!jit_scalar_same_index_coord(ke, u->src[0], store_idx)) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static int jit_capture_op_refs_buf(JitCaptureOp const *op,
+                                   Backend *backend, u32 buf_id) {
+  if (op == NULL || op->replay_skip || backend == NULL || buf_id == 0) {
+    return 0;
+  }
+  switch (op->kind) {
+    case JIT_OP_DISPATCH: {
+      if (jit_dispatch_output_backend(op) == backend
+          && op->out_buf_id == buf_id) {
+        return 1;
+      }
+      u32 const *ids = op->heap_in_buf_ids != NULL
+                     ? op->heap_in_buf_ids
+                     : op->in_buf_ids;
+      for (u32 i = 0; i < op->n_inputs; i++) {
+        if (jit_dispatch_input_backend(op, i) == backend && ids[i] == buf_id) {
+          return 1;
+        }
+      }
+      return 0;
+    }
+    case JIT_OP_ASSIGN:
+      if (op->assign_dst_tid != 0 && op->assign_dst_tid < TENS_NEXT) {
+        TenDesc *td = &TENS[op->assign_dst_tid];
+        if (td->backend == backend && td->buf_id == buf_id) {
+          return 1;
+        }
+      }
+      if (op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT) {
+        TenDesc *td = &TENS[op->assign_src_tid];
+        if (td->backend == backend && td->buf_id == buf_id) {
+          return 1;
+        }
+      }
+      return 0;
+  }
+  return 0;
+}
+
+static void jit_capture_sink_assigns(JitCapture *c, Term root) {
+  if (c == NULL || root != 0) {
+    return;
+  }
+  for (u32 i = 1; i < c->n_ops; i++) {
+    JitCaptureOp *op = &c->ops[i];
+    if (op->kind != JIT_OP_ASSIGN || op->replay_skip) {
+      continue;
+    }
+    u32 dst_tid = op->assign_dst_tid;
+    u32 src_tid = op->assign_src_tid;
+    if (dst_tid == 0 || src_tid == 0
+        || dst_tid >= TENS_NEXT || src_tid >= TENS_NEXT) {
+      continue;
+    }
+    TenDesc *dst = &TENS[dst_tid];
+    TenDesc *src = &TENS[src_tid];
+    if (dst->backend == NULL || dst->backend != src->backend
+        || dst->buf_id == 0 || src->buf_id == 0
+        || dst->dtype != src->dtype
+        || dst->view.numel != src->view.numel) {
+      continue;
+    }
+    if (src->nviews != 0 || !src->view.contiguous || src->view.offset != 0) {
+      continue;
+    }
+    u32 p = i;
+    while (p > 0) {
+      p--;
+      if (!c->ops[p].replay_skip) {
+        break;
+      }
+    }
+    if (c->ops[p].kind != JIT_OP_DISPATCH || c->ops[p].replay_skip
+        || c->ops[p].out_buf_id != src->buf_id) {
+      continue;
+    }
+    int future_use = 0;
+    for (u32 j = i + 1; j < c->n_ops; j++) {
+      if (jit_capture_op_refs_buf(&c->ops[j], src->backend, src->buf_id)) {
+        future_use = 1;
+        break;
+      }
+    }
+    if (future_use) {
+      continue;
+    }
+    if (!jit_assign_sink_safe(&c->ops[p], dst_tid, dst->buf_id)) {
+      continue;
+    }
+    u32 old_out = c->ops[p].out_buf_id;
+    c->ops[p].out_buf_id = dst->buf_id;
+    op->replay_skip = 1;
+    if (src->backend->buf_decref != NULL && old_out != dst->buf_id) {
+      src->backend->buf_decref(old_out);
+    }
+  }
+}
+
 static void jit_capture_finalize(u32 slot, Term root) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) {
     return;
@@ -562,6 +809,8 @@ static void jit_capture_finalize(u32 slot, Term root) {
     }
   }
 
+  jit_capture_sink_assigns(c, root);
+
   jit_capture_release_retained(c);
   for (u32 i = 0; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
@@ -596,17 +845,18 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
     return 0;
   }
   JitReplayDispatch recs[256];
+  u32 limit = jit_metal_graph_max_dispatches();
   u32 n = 0;
   u32 consumed = 0;
   u32 live_consumed = 0;
-  for (u32 i = start; i < c->n_ops && consumed < 256; i++) {
+  for (u32 i = start; i < c->n_ops && consumed < limit; i++) {
     JitCaptureOp *op = &c->ops[i];
-    if (op->kind != JIT_OP_DISPATCH) {
-      break;
-    }
     if (op->replay_skip) {
       consumed++;
       continue;
+    }
+    if (op->kind != JIT_OP_DISPATCH) {
+      break;
     }
     if (op->kid == 0 || op->kid >= KERNELS_NEXT) {
       break;
@@ -637,7 +887,7 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
       break;
     }
 
-    if (n >= 256) {
+    if (n >= limit) {
       break;
     }
     JitReplayDispatch *r = &recs[n++];

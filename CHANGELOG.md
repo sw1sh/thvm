@@ -18,7 +18,14 @@ graph replay still treats `metal-jit` as a blocker until command-order
 correctness for producer chains is proven.  `DUMP_JIT_CAPTURE=1` now
 prints the simulated graph chunks and their blockers.  Dead
 `ReplaySkip` records are consumed through graph replay without
-splitting ICB chunks.
+splitting ICB chunks, and capture dumps include the concrete blocker
+kernel metadata for each top graph chunk.  Metal tile codegen now
+supports `GLOBAL`/`LOCAL` bindings with remaining serial `LOOP` or
+`UPCAST` axes by decoding `_tgid` across non-local axes.  Rootless
+optimizer-style TJit captures can sink safe ASSIGN copies into the
+immediately preceding Metal tile producer, and
+`THVM_METAL_GRAPH_MAX_DISPATCHES` bounds ICB chunk length for graph
+replay autotuning.
 
 ### Changed: make Metal graph replay the default TJit path
 

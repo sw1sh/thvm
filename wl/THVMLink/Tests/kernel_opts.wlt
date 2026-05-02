@@ -483,6 +483,44 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* A LOCAL/GLOBAL split on one output axis must not make remaining
+       serial LOOP axes fall back to the per-program Metal JIT.  This
+       shape mirrors the beautiful_mnist elementwise kernels that carry
+       one bound threadgroup axis plus extra serial tensor axes. *)
+    Module[{oldBackend, oldTile, restore, a, b, out, kid, opts, kind, data},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"],
+            TInit[];
+            a = TTensorCreate @ NumericArray[ConstantArray[1., {2, 4, 3}], "Real32"];
+            b = TTensorCreate @ NumericArray[ConstantArray[2., {2, 4, 3}], "Real32"];
+            out = TRealize[a + b];
+            kid = TKernelCount[] - 1;
+            TKernelApplyOpt[kid, TOpt["LOCAL", 1, 4]];
+            opts = First @ TKernelApplyOpt[kid, TOpt["GLOBAL", 0, 2]];
+            TKernel[kid][];
+            kind = TKernelDispatchKind[kid];
+            data = Normal @ TTensorData[out],
+            restore[]
+        ];
+        {opts["AxisTypes"], opts["FullShape"], kind, data}
+    ],
+    {{"GLOBAL", "LOOP", "LOCAL", "LOOP"}, {2, 1, 4, 3},
+     "metal-tile", ConstantArray[3., {2, 4, 3}]},
+    TestID -> "kernel-opts/metal-local-global-with-serial-loop-dispatch"
+]
+
+VerificationTest[
     (* Wide Metal elementwise ADD trees must split before they exceed
        the direct MSL buffer-argument budget.  Otherwise they drop to
        the per-op Metal interpreter even though each split subtree is
@@ -672,6 +710,58 @@ VerificationTest[
      Length[summary["TopRuns"]]},
     {1, 1, 8, True, 1, {1}, 1},
     TestID -> "kernel-opts/tjit-capture-introspection"
+]
+
+VerificationTest[
+    (* Rootless optimizer-style TJit steps may sink ASSIGN copies into
+       the immediately preceding Metal tile producer.  Skipped ASSIGN
+       rows should not split graph replay, and replay should still
+       mutate the destination buffers correctly. *)
+    Module[{oldBackend, oldTile, restore, w, x, y, f, summary, counters,
+            wData, yData},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"],
+            TInit[];
+            w = TTensorCreate @ NumericArray[N @ Range[4], "Real32"];
+            x = TTensorCreate @ NumericArray[ConstantArray[1., 4], "Real32"];
+            y = TTensorCreate @ NumericArray[ConstantArray[0., 4], "Real32"];
+            f = TJit[Function[{}, Module[{a, b},
+                a = TAssign[w, w + x];
+                b = TAssign[y, a * x];
+                TRealize @ b;
+                Null
+            ]]];
+            f[];
+            summary = TJitCaptureSummary[f];
+            THotCountersReset[];
+            f[];
+            counters = THotCounters[];
+            wData = Round[Normal @ TTensorData[w], 0.001];
+            yData = Round[Normal @ TTensorData[y], 0.001],
+            restore[]
+        ];
+        {summary["KindCounts"],
+         summary["ReplaySkipped"],
+         summary["GraphRunCount"],
+         summary["GraphEncodedDispatches"],
+         Lookup[counters, "JitReplayAssigns"],
+         wData,
+         yData}
+    ],
+    {<|"DISPATCH" -> 2, "ASSIGN" -> 2|>, 2, 1, 2, 0,
+     {3., 4., 5., 6.}, {3., 4., 5., 6.}},
+    TestID -> "kernel-opts/metal-tjit-sinks-assign-into-producer"
 ]
 
 (* === per-program-shape sharing: opt on kid_1 visible on kid_2
