@@ -6,6 +6,20 @@ dated section.
 
 ## Unreleased
 
+### Changed: fuse contiguous private reduce chains
+
+The scheduler can now collapse same-kind private `UOP_REDUCE` chains
+over a contiguous axis span into one KProg `REDUCE` while preserving
+SUM traversal order.  Materialize re-packs the chain through the
+existing `(kind << 24) | inner` encoding, and rangeify can carry a
+flattened coordinate context backward through reshapes.  Focused
+reduce tests now assert trailing SUM/MAX chains materialize as one
+kernel.  On the bounded BS=32 `beautiful_mnist` Metal+tile training
+canary this cuts replay dispatches from about `4137` to `1477` and
+JIT ops from about `4179` to `1519`; remaining movement-heavy fused
+reduce gaps still fall to `metal-jit`, so wall time is not improved
+yet.
+
 ### Fixed: avoid Metal alias-reshape refcount growth on replay
 
 Metal alias-only reshape dispatch now looks at the output tensor's

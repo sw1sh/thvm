@@ -1056,6 +1056,40 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   // cpu_op_reduce's per-output indexing) is enforced by counting
   // REDUCEs already in the program.
   if (op == UOP_REDUCE) {
+    ReduceChainInfo rc;
+    if (reduce_chain_collect(t, &rc)) {
+      int chain_inlined = 1;
+      for (u32 j = 1; j < rc.n_reduces; j++) {
+        u32 cidx = realize_info_find(rc.locs[j]);
+        if (cidx != 0xFFFFFFFFu && REALIZE_INFO[cidx].realized) {
+          chain_inlined = 0;
+          break;
+        }
+      }
+      if (!chain_inlined) goto single_reduce_emit;
+      if (loc != root_loc) {
+        for (u32 i = 0; i < ke->n_ops; i++) {
+          if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
+        }
+      }
+      u32 src_idx = visit(rc.src, ke, root_loc);
+      if (src_idx == VISIT_BAIL) return VISIT_BAIL;
+      for (u32 i = 0; i < ke->n_ops; i++) {
+        if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
+      }
+      kernel_program_reserve(ke, ke->n_ops + 1);
+      KProgOp *p = &ke->program[ke->n_ops++];
+      memset(p, 0, sizeof(*p));
+      p->opcode = UOP_REDUCE;
+      p->dtype  = src_dtype(ke, src_idx);
+      p->arg    = (rc.kind << 24) | (rc.inner & 0x00FFFFFFu);
+      p->numel  = rc.out_numel;
+      p->n_src  = 1;
+      p->src[0] = src_idx;
+      return ke->n_ops - 1;
+    }
+
+  single_reduce_emit:
     if (loc != root_loc) {
       // Non-root REDUCE: only allow ONE per kernel.
       for (u32 i = 0; i < ke->n_ops; i++) {

@@ -299,6 +299,31 @@ static void realize_apply_metal_tile_fanin_cap(Term root) {
   }
 }
 
+static int realize_op_is_movement(u8 op) {
+  return op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
+      || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
+}
+
+static int realize_inline_subtree_has_movement(Term t, u32 depth) {
+  if (depth > 64) return 1;
+  t = term_resolve(t);
+  if (term_tag(t) != TAG_UOP) return 0;
+  if (term_ext(t) == UOP_KERNEL) return 0;
+  u64 loc = term_val(t);
+  u32 idx = realize_info_find(loc);
+  if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) return 0;
+  u8 op = term_ext(t);
+  if (realize_op_is_movement(op)) return 1;
+  if (op == UOP_REDUCE) return 1;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (realize_inline_subtree_has_movement(heap_read(loc + i), depth + 1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 fn void realize_classify(Term root) {
   realize_info_clear();
   if (term_tag(root) != TAG_UOP) return;
@@ -322,6 +347,33 @@ fn void realize_classify(Term root) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->consumer_count >= 2) info->realized = 1;
     if (info->op == UOP_REDUCE)    info->realized = 1;
+  }
+
+  // Adjacent reductions over a contiguous axis span can stay inside
+  // one KProgOp REDUCE.  Keep the outer reduce as the boundary and
+  // drop the inner reduce boundaries when every inner hop is private
+  // to this chain.  materialize.c re-packs the chain as one wider
+  // reduce using the existing (kind << 24) | inner encoding.
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (info->op != UOP_REDUCE) continue;
+    ReduceChainInfo rc;
+    Term root_term = term_new(0, TAG_UOP, UOP_REDUCE, info->loc);
+    if (!reduce_chain_collect(root_term, &rc)) continue;
+    if (realize_inline_subtree_has_movement(rc.src, 0)) continue;
+    int ok = 1;
+    for (u32 j = 1; j < rc.n_reduces; j++) {
+      u32 cidx = realize_info_find(rc.locs[j]);
+      if (cidx == 0xFFFFFFFFu || REALIZE_INFO[cidx].consumer_count != 1) {
+        ok = 0;
+        break;
+      }
+    }
+    if (!ok) continue;
+    for (u32 j = 1; j < rc.n_reduces; j++) {
+      u32 cidx = realize_info_find(rc.locs[j]);
+      if (cidx != 0xFFFFFFFFu) REALIZE_INFO[cidx].realized = 0;
+    }
   }
 
   // Softmax-style relaxation: a REDUCE whose single consumer is a

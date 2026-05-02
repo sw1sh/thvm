@@ -1417,20 +1417,27 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         case UOP_RESHAPE: {
           if (p->src0_ndim == 0 || p->out_ndim == 0
               || p->src0_ndim > MAX_DIM || p->out_ndim > MAX_DIM
-              || in_rngs.ndim != p->out_ndim) break;
-          u32 b_strides[MAX_DIM];
-          row_major_strides(p->out_dims, p->out_ndim, b_strides);
-          u32 flat = 0;
-          for (u32 d = 0; d < p->out_ndim; d++) {
-            if (b_strides[d] == 0) continue;
-            u32 t = in_rngs.refs[d];
-            if (b_strides[d] != 1) {
-              u32 c = emit_iconst(ke, (i64)b_strides[d]);
-              t = emit_ibinop(ke, S_IMUL, t, c);
+              || in_rngs.ndim == 0 || in_rngs.ndim > MAX_DIM) break;
+          u32 ctx_dims[MAX_DIM];
+          if (in_rngs.ndim == p->out_ndim) {
+            for (u32 d = 0; d < p->out_ndim; d++) {
+              ctx_dims[d] = p->out_dims[d];
             }
-            if (flat == 0) flat = t;
-            else           flat = emit_ibinop(ke, S_IADD, flat, t);
+          } else {
+            u64 ctx_numel = 1;
+            u64 out_numel = 1;
+            int ok = 1;
+            for (u32 d = 0; d < in_rngs.ndim; d++) {
+              ctx_dims[d] = scalar_ref_extent(ke, in_rngs.refs[d]);
+              if (ctx_dims[d] == 0) { ok = 0; break; }
+              ctx_numel *= ctx_dims[d];
+            }
+            for (u32 d = 0; d < p->out_ndim; d++) {
+              out_numel *= p->out_dims[d];
+            }
+            if (!ok || ctx_numel != out_numel) break;
           }
+          u32 flat = emit_flat_from_rngs(ke, &in_rngs, ctx_dims);
           if (flat == 0) flat = emit_iconst(ke, 0);
           u32 a_strides[MAX_DIM];
           row_major_strides(p->src0_dims, p->src0_ndim, a_strides);

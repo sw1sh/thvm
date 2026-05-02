@@ -53,3 +53,47 @@ VerificationTest[
     {{3}, {4.0, 5.0, 6.0}},
     TestID -> "reduce/axis0-rank2-max"
 ]
+
+(* Contiguous trailing reduction chains lower as one wider REDUCE.
+   This keeps KProgOp/renderers on the existing one-reduce contract
+   while avoiding an intermediate boundary for patterns like
+   batchnorm's H/W reductions. *)
+VerificationTest[
+    TInit[];
+    data = ArrayReshape[Range[24] * 1.0, {2, 3, 4}];
+    x = TTensorCreate @ NumericArray[data, "Real32"];
+    before = TKernelCount[];
+    r = TRealize @ TUOpReduce[TUOpReduce[x, 2, "SUM"], 1, "SUM"];
+    after = TKernelCount[];
+    {
+        TTensorShape[r],
+        Normal @ TTensorData[r],
+        after - before
+    },
+    {
+        {2},
+        Table[Total[Flatten[data[[c]]]], {c, 2}],
+        1
+    },
+    TestID -> "reduce/chain-trailing-sum-one-kernel"
+]
+
+VerificationTest[
+    TInit[];
+    data = ArrayReshape[Range[120] * 1.0, {2, 3, 4, 5}];
+    x = TTensorCreate @ NumericArray[data, "Real32"];
+    before = TKernelCount[];
+    r = TRealize @ TUOpReduce[TUOpReduce[x, 3, "MAX"], 2, "MAX"];
+    after = TKernelCount[];
+    {
+        TTensorShape[r],
+        Normal @ TTensorData[r],
+        after - before
+    },
+    {
+        {2, 3},
+        Table[Max[Flatten[data[[b, c]]]], {b, 2}, {c, 3}],
+        1
+    },
+    TestID -> "reduce/chain-trailing-max-one-kernel"
+]

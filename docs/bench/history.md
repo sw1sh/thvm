@@ -207,6 +207,27 @@ BENCH_MODE=train BS=32:
                             deferred=0
 ```
 
+After adding contiguous private reduce-chain fusion, the same bounded
+canary is:
+
+```text
+BENCH_MODE=train BS=32:
+  steady_ms_per_step=552.1
+  jit-ops=1519
+  dispatch=metal-tile=583, none=35, metal-jit=48, metal-alias=63
+  hot counters: JitReplayCalls=1, JitReplayDispatches=1477,
+                JitReplayAssigns=42
+  metal memory after timed: live=20.1MB, retained=867.9MB,
+                            deferred=0
+```
+
+This proves replay granularity is addressable, but it is not yet a
+performance win: several newly larger movement-heavy reduce programs
+miss rangeify/tile and route through `metal-jit`.  The next useful
+optimization is to make those flattened-coordinate movement/reduce
+programs tile-lower, or keep that class split while fusing the pure
+batchnorm-style reductions.
+
 This is a real improvement over the previous `grad-3` replay
 (`~10.6s`) and removes the worst `PAD`/`SHRINK` materializer from
 the profile, but it is still orders of magnitude from tinygrad's

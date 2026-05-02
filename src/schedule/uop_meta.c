@@ -268,3 +268,119 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
   }
   *out = DT_FP32; return 1;
 }
+
+typedef struct {
+  Term src;
+  u32  kind;
+  u32  n_reduces;
+  u64  locs[MAX_DIM];
+  u32  axis_start;
+  u32  axis_end;
+  u32  inner;
+  u32  axis_size;
+  u32  out_numel;
+} ReduceChainInfo;
+
+static u32 shape_numel_u32(Shape const *s) {
+  u64 n = 1;
+  for (u32 i = 0; i < s->ndim; i++) n *= s->dims[i];
+  return (u32)n;
+}
+
+// Collapses a chain of same-kind reductions into the equivalent
+// single contiguous-axis reduction accepted by KProgOp REDUCE.  For
+// SUM, require the original axes to be consumed from inner to outer
+// so the fused loop preserves the old row-major addition order.
+static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
+  memset(out, 0, sizeof(*out));
+  root = term_resolve(root);
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_REDUCE) return 0;
+
+  Term cur = root;
+  u32  axes_outer[MAX_DIM] = {0};
+  u32  n = 0;
+  u32  kind = 0xFFFFFFFFu;
+  while (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_REDUCE) {
+    if (n >= MAX_DIM) return 0;
+    u64 loc = term_val(cur);
+    Term k_term = heap_read(loc + 1);
+    Term a_term = heap_read(loc + 2);
+    if (term_tag(k_term) != TAG_NUM || term_tag(a_term) != TAG_NUM) return 0;
+    u32 k = (u32)term_val(k_term);
+    if (kind == 0xFFFFFFFFu) kind = k;
+    else if (kind != k) return 0;
+    out->locs[n] = loc;
+    axes_outer[n] = (u32)term_val(a_term);
+    n++;
+    cur = term_resolve(heap_read(loc));
+  }
+  if (n < 2) return 0;
+
+  Shape src_shape = {0};
+  Shape out_shape = {0};
+  if (!term_shape_in(cur, 0, &src_shape))  return 0;
+  if (!term_shape_in(root, 0, &out_shape)) return 0;
+  if (src_shape.ndim > MAX_DIM || out_shape.ndim > MAX_DIM) return 0;
+
+  u32 live_axes[MAX_DIM] = {0};
+  for (u32 i = 0; i < src_shape.ndim; i++) live_axes[i] = i;
+  u32 live_n = src_shape.ndim;
+  u32 removed[MAX_DIM] = {0};
+  for (u32 oi = 0; oi < n; oi++) {
+    u32 ri = n - 1 - oi;
+    u32 axis = axes_outer[ri];
+    if (live_n == 0 || axis >= live_n) return 0;
+    removed[oi] = live_axes[axis];
+    for (u32 j = axis + 1; j < live_n; j++) {
+      live_axes[j - 1] = live_axes[j];
+    }
+    live_n--;
+  }
+
+  if (live_n != out_shape.ndim) return 0;
+  for (u32 i = 0; i < live_n; i++) {
+    if (src_shape.dims[live_axes[i]] != out_shape.dims[i]) return 0;
+  }
+
+  u32 min_axis = removed[0];
+  u32 max_axis = removed[0];
+  for (u32 i = 1; i < n; i++) {
+    if (removed[i] < min_axis) min_axis = removed[i];
+    if (removed[i] > max_axis) max_axis = removed[i];
+  }
+  if (max_axis - min_axis + 1 != n) return 0;
+  u8 seen[MAX_DIM] = {0};
+  for (u32 i = 0; i < n; i++) {
+    if (removed[i] >= MAX_DIM || seen[removed[i]]) return 0;
+    seen[removed[i]] = 1;
+  }
+  for (u32 axis = min_axis; axis <= max_axis; axis++) {
+    if (!seen[axis]) return 0;
+  }
+
+  if (kind == REDUCE_SUM) {
+    for (u32 i = 1; i < n; i++) {
+      if (removed[i - 1] != removed[i] + 1) return 0;
+    }
+  }
+
+  u64 axis_size = 1;
+  for (u32 i = min_axis; i <= max_axis; i++) axis_size *= src_shape.dims[i];
+  u64 inner = 1;
+  for (u32 i = max_axis + 1; i < src_shape.ndim; i++) inner *= src_shape.dims[i];
+  u64 out_numel = shape_numel_u32(&out_shape);
+  u64 src_numel = shape_numel_u32(&src_shape);
+  if (axis_size == 0 || inner == 0 || inner > 0x00FFFFFFu) return 0;
+  if (out_numel == 0 || axis_size * out_numel != src_numel) return 0;
+  if (axis_size > UINT32_MAX || out_numel > UINT32_MAX) return 0;
+
+  out->src        = cur;
+  out->kind       = kind;
+  out->n_reduces  = n;
+  out->axis_start = min_axis;
+  out->axis_end   = max_axis + 1;
+  out->inner      = (u32)inner;
+  out->axis_size  = (u32)axis_size;
+  out->out_numel  = (u32)out_numel;
+  return 1;
+}
