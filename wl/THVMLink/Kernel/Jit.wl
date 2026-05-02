@@ -186,13 +186,14 @@ TJitCaptureRuns[c_TJitClosure] := Module[{
 
 TJitCaptureGraphRuns[c_TJitClosure] := Module[{
     ops = TJitCaptureOps[c], runs = {}, i = 1, n, j, consumed, aliases,
-    encoded, tileCount, jitCount, blocker, op, kind
+    skipped, encoded, tileCount, jitCount, blocker, op, kind
 },
     n = Length[ops];
     While[i <= n,
         j = i;
         consumed = 0;
         aliases = 0;
+        skipped = 0;
         encoded = {};
         tileCount = 0;
         jitCount = 0;
@@ -203,8 +204,10 @@ TJitCaptureGraphRuns[c_TJitClosure] := Module[{
                 blocker = "assign";
                 Break[]];
             If[TrueQ[op["ReplaySkip"]],
-                blocker = "replay-skip";
-                Break[]];
+                skipped++;
+                consumed++;
+                j++;
+                Continue[]];
             kind = op["DispatchKind"];
             Which[
                 kind === "metal-alias",
@@ -228,6 +231,7 @@ TJitCaptureGraphRuns[c_TJitClosure] := Module[{
                 "TileDispatches" -> tileCount,
                 "JitDispatches" -> jitCount,
                 "AliasDispatches" -> aliases,
+                "SkippedDispatches" -> skipped,
                 "Blocker" -> blocker,
                 "TopProgramKeys" -> Take[captureCounts[encoded, "ProgramKey"], UpTo[8]],
                 "TopOutputNumels" -> Take[captureCounts[encoded, "OutputNumel"], UpTo[8]],
@@ -263,6 +267,7 @@ TJitCaptureSummary[c_TJitClosure] := Module[{
         "GraphTileDispatches" -> Total[Lookup[graphRuns, "TileDispatches", {}]],
         "GraphJitDispatches" -> Total[Lookup[graphRuns, "JitDispatches", {}]],
         "GraphAliasDispatches" -> Total[Lookup[graphRuns, "AliasDispatches", {}]],
+        "GraphSkippedDispatches" -> Total[Lookup[graphRuns, "SkippedDispatches", {}]],
         "GraphRunEncodedCounts" -> Lookup[graphRuns, "EncodedDispatches", {}],
         "GraphRunTileCounts" -> Lookup[graphRuns, "TileDispatches", {}],
         "GraphBlockers" -> Counts[Lookup[graphRuns, "Blocker", {}]],

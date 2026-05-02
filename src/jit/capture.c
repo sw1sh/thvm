@@ -595,20 +595,18 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   if (start >= c->n_ops || c->ops[start].kind != JIT_OP_DISPATCH) {
     return 0;
   }
-  if (c->ops[start].replay_skip) {
-    return 0;
-  }
-
   JitReplayDispatch recs[256];
   u32 n = 0;
   u32 consumed = 0;
+  u32 live_consumed = 0;
   for (u32 i = start; i < c->n_ops && consumed < 256; i++) {
     JitCaptureOp *op = &c->ops[i];
     if (op->kind != JIT_OP_DISPATCH) {
       break;
     }
     if (op->replay_skip) {
-      break;
+      consumed++;
+      continue;
     }
     if (op->kid == 0 || op->kid >= KERNELS_NEXT) {
       break;
@@ -619,6 +617,7 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
     u32 dispatch_kind = cg_kernel_dispatch_kind(op->kid);
     if (dispatch_kind == KDISPATCH_METAL_ALIAS) {
       consumed++;
+      live_consumed++;
       continue;
     }
     if (dispatch_kind != KDISPATCH_METAL_TILE) {
@@ -656,6 +655,7 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
       break;
     }
     consumed++;
+    live_consumed++;
   }
 
   if (n < 2 || consumed < 2) {
@@ -666,7 +666,7 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   }
   HOT_JIT_GRAPH_RUNS++;
   HOT_JIT_GRAPH_DISPATCHES += n;
-  for (u32 i = 0; i < consumed; i++) {
+  for (u32 i = 0; i < live_consumed; i++) {
     HOT_KERNEL_FIRES++;
     HOT_JIT_REPLAY_DISPATCHES++;
     ITRS++;

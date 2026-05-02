@@ -16,7 +16,9 @@ ICB and includes the config values in the cache key.  Generated
 `metal-jit` shaders now bake their logical output size into MSL, but
 graph replay still treats `metal-jit` as a blocker until command-order
 correctness for producer chains is proven.  `DUMP_JIT_CAPTURE=1` now
-prints the simulated graph chunks and their blockers.
+prints the simulated graph chunks and their blockers.  Dead
+`ReplaySkip` records are consumed through graph replay without
+splitting ICB chunks.
 
 ### Changed: make Metal graph replay the default TJit path
 
