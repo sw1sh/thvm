@@ -64,6 +64,13 @@ static u64 kp_program_hash(KProgOp const *prog, u32 n_ops) {
   return h | (1ULL << 63);   // never zero
 }
 
+fn u64 kernel_program_key(KProgOp const *prog, u32 n_ops) {
+  if (prog == NULL || n_ops == 0) {
+    return 0;
+  }
+  return kp_program_hash(prog, n_ops);
+}
+
 static int kp_program_equal(KProgOp const *a, u32 a_n,
                              KProgOp const *b, u32 b_n) {
   if (a_n != b_n) return 0;

@@ -45,6 +45,7 @@ TKernelDispatch::usage = "TKernelDispatch[k] dispatches the kernel by TWnf-firin
 
 TKernelCount::usage    = "TKernelCount[] returns the number of compiled KernelEntrys in the kernel side table.";
 TKernelProgramCacheSize::usage = "TKernelProgramCacheSize[] returns the number of distinct KProgOp[] arrays interned in the kernel-program hash-cons cache.  After a TRealize, this is at most TKernelCount[]-1; structurally identical kernels (e.g. successive iters of a recursive lambda's step) share a single entry.";
+TKernelProgramKey::usage = "TKernelProgramKey[kid] returns the structural KProgOp[] hash used by the kernel-program cache, or 0 when the kernel has no cached KProgOp program.  Kernels with the same nonzero key share one C-side KernelAxes schedule slot, so autotuning one representative applies to the whole program shape.";
 TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].  Equivalent to TKernel[kid][\"Program\"] paired with the header (n_inputs, n_ops, output_numel, output_dtype).";
 TKernelScalarUops::usage = "TKernelScalarUops[kid] returns the post-lowering scalar-UOp graph snapshot stored at KERNELS[kid].scalar_uops, as a List of Associations (one per scalar op, with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\", and -- for S_RANGE -- \"axis_type\" and \"extent\").  Returns Missing[\"NotLowered\"] when the kernel was emitted via the legacy per-tensor-UOp visit() path (i.e. rangeify lowering was off or didn't apply).  Slot 0 (S_NONE sentinel) is included so list indices match C-side ScalarUop[] indices; live ops occupy positions [2..].";
 TKernelTileUops::usage = "TKernelTileUops[kid] returns the tile-UOp plan snapshot stored at KERNELS[kid].tile_uops, as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", and \"extra\".  TILE_AXIS entries also expose \"axis_type\" and \"extent\".  Returns Missing[\"NotLowered\"] when no rangeify tile plan exists.  Slot 0 (TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.";
@@ -81,7 +82,9 @@ TKernelVariants::usage = "TKernelVariants[kid] returns a list of TKernelVariant:
 
 TKernelAutotune::usage = "TKernelAutotune[kid] benchmarks every TKernelProposed candidate against the no-opt baseline (5 dispatches each, min wallclock), applies the winning TOpt to the kernel's C-side KernelAxes, and returns the resulting TKernelOpts.  Because axes live on the shared KpCacheSlot (per-program-shape sharing), the winner auto-applies to every other kid with the same KProgOp[] -- a training loop that emits one new kid per step inherits the autotuned variant from iter 2 onward.  Returns the unchanged TKernelOpts (no opts applied) if no candidate beat baseline.";
 
-TKernelAutotuneAll::usage = "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel (kid 1..TKernelCount[]-1) and returns an Association mapping kid -> TKernelOpts after tuning.  Useful as a one-shot pre-warm before a training loop: every program shape gets a winner cached in its KpCacheSlot, so subsequent dispatches use the optimised variant from iter 1.  Alternative to setting THVM_AUTOTUNE=1 (which auto-tunes on first dispatch).";
+TKernelAutotuneAll::usage = "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel (kid 1..TKernelCount[]-1) and returns an Association mapping kid -> TKernelOpts after tuning.  Useful for exhaustive diagnostics; TKernelAutotuneUnique[] is usually cheaper for training-loop pre-warm.";
+
+TKernelAutotuneUnique::usage = "TKernelAutotuneUnique[] groups live kernels with proposer candidates by nonzero TKernelProgramKey and runs TKernelAutotune on one representative per cached program shape.  Zero-key kernels are tuned individually because they do not share a KProgOp cache slot.  Returns an Association mapping representative kid -> TKernelOpts.";
 
 (* === C-side kernel side-table accessors ===
    Live here (rather than MemoryPlan.wl) because they're the core
@@ -246,14 +249,15 @@ kernelRowAsoc[kid_Integer] := Block[{row = TKernelTable[][[kid]]},
    Three groups:
      identity / shape    : Kid, Term, OutputTid, OutputShape, OutputDtype,
                            OutputNumel, InputCount, InputTids, InputTensors,
-                           OpCount, Program, Fired, Spliced, ConsumerCount
+                           OpCount, Program, ProgramKey, Fired, Spliced,
+                           ConsumerCount
      codegen output      : Source[backend], JitDylibPath
      dispatch profile    : Flops, DispatchKind, DispatchCount, TotalUs,
                            AvgUs, GFlopsPerSec *)
 $tKernelProperties = {
     "Kid", "Term", "OutputTid", "OutputShape", "OutputDtype",
     "OutputNumel", "InputCount", "InputTids", "InputTensors",
-    "OpCount", "Program", "Fired", "Spliced", "ConsumerCount",
+    "OpCount", "Program", "ProgramKey", "Fired", "Spliced", "ConsumerCount",
     "Source", "JitDylibPath",
     "Flops", "DispatchKind", "DispatchCount", "TotalUs",
     "AvgUs", "GFlopsPerSec"
@@ -287,6 +291,7 @@ tKernelProp[k:TKernel[a_Association], "InputTids"]    := TKernelInputs[a["Kid"]]
 tKernelProp[k:TKernel[a_Association], "InputTensors"] :=
     tenTermFromTid /@ TKernelInputs[a["Kid"]]
 tKernelProp[k:TKernel[a_Association], "Program"]      := decodeKernelInfo[a["Kid"]][[2]]
+tKernelProp[k:TKernel[a_Association], "ProgramKey"]   := TKernelProgramKey[a["Kid"]]
 tKernelProp[k:TKernel[a_Association], "OpCount"]      := decodeKernelInfo[a["Kid"]][[1]]["OpCount"]
 tKernelProp[k:TKernel[a_Association], "OutputShape"]  := With[{
     tid = kernelRowAsoc[a["Kid"]]["OutputTid"]
@@ -389,6 +394,7 @@ TKernelDispatchKind[kid_Integer]  := (ensureInit[];
 TKernelDispatchCount[kid_Integer] := (ensureInit[]; $kernelDispatchCountFn[kid])
 TKernelTotalUs[kid_Integer]       := (ensureInit[]; $kernelTotalUsFn[kid])
 TKernelJitDylibPath[kid_Integer]  := (ensureInit[]; $kernelJitDylibPathFn[kid])
+TKernelProgramKey[kid_Integer]    := (ensureInit[]; $kernelProgramKeyFn[kid])
 
 (* TKernelProfile = same Association shape Information[TKernel[kid]]
    would return, but synthesized directly from the loader fns so it
@@ -406,6 +412,7 @@ TKernelProfile[kid_Integer] := <|
     "GFlopsPerSec"  -> If[ TKernelTotalUs[kid] > 0 && TKernelDispatchCount[kid] > 0,
                            N[TKernelFlops[kid] * TKernelDispatchCount[kid] / (TKernelTotalUs[kid] * 1000)],
                            0],
+    "ProgramKey"    -> TKernelProgramKey[kid],
     "JitDylibPath"  -> TKernelJitDylibPath[kid],
     "Source"        -> TKernelSource[kid]
 |>
@@ -496,6 +503,18 @@ TKernelAutotune[kid_Integer] := (ensureInit[];
 
 TKernelAutotuneAll[] := (ensureInit[];
     Association[ Table[k -> TKernelAutotune[k], {k, 1, TKernelCount[] - 1}] ])
+
+TKernelAutotuneUnique[] := (ensureInit[];
+    Module[{kids, props, candidates, groups, reps},
+        kids = If[TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {}];
+        props = Association @ Table[k -> TKernelProposed[k], {k, kids}];
+        candidates = Keys @ Select[props, Length[#] > 0 &];
+        groups = GatherBy[candidates, TKernelProgramKey];
+        reps = Flatten[
+            If[TKernelProgramKey[First[#]] === 0, #, {First[#]}] & /@ groups
+        ];
+        Association @ Table[k -> TKernelAutotune[k], {k, reps}]
+    ])
 
 (* Inspect-only sibling of TKernelAutotune: bench the no-opt
    baseline + each TKernelProposed candidate via the C-side

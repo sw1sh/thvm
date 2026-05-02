@@ -1469,6 +1469,23 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_program_cache_size(WolframLibraryData libD
   return LIBRARY_NO_ERROR;
 }
 
+EXTERN_C DLLEXPORT int thvm_wl_kernel_program_key(WolframLibraryData libData,
+                                                  mint argc,
+                                                  MArgument *args,
+                                                  MArgument res) {
+  (void)libData; (void)argc;
+  u32 kid = (u32)MArgument_getInteger(args[0]);
+  u64 key = 0;
+  if (kid > 0 && kid < KERNELS_NEXT) {
+    KernelEntry const *ke = &KERNELS[kid];
+    if (ke->program_shared) {
+      key = kernel_program_key(ke->program, ke->n_ops);
+    }
+  }
+  MArgument_setInteger(res, (mint)key);
+  return LIBRARY_NO_ERROR;
+}
+
 // Register a shape annotation for a TLam-bound variable.  args[0]
 // is the LAM's heap loc; args[1] is a rank-1 Int array of
 // dimension extents (length = ndim).  TVAR(loc) lookups via

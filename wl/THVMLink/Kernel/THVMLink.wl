@@ -356,6 +356,7 @@ $kernelScalarUopsFn := $kernelScalarUopsFn = load["thvm_wl_kernel_scalar_uops", 
 $kernelTileUopsFn := $kernelTileUopsFn = load["thvm_wl_kernel_tile_uops", {Integer}, {Integer, 1}];
 $kernelTilePlanInfoFn := $kernelTilePlanInfoFn = load["thvm_wl_kernel_tile_plan_info", {Integer}, {Integer, 1}];
 $kernelProgramCacheSizeFn := $kernelProgramCacheSizeFn = load["thvm_wl_kernel_program_cache_size", {}, Integer];
+$kernelProgramKeyFn       := $kernelProgramKeyFn       = load["thvm_wl_kernel_program_key",        {Integer}, Integer];
 $kernelAxesGetFn          := $kernelAxesGetFn          = load["thvm_wl_kernel_axes_get",            {Integer}, {Integer, 1}];
 $kernelApplyOptFn         := $kernelApplyOptFn         = load["thvm_wl_kernel_apply_opt",           {Integer, Integer, Integer, Integer}, Integer];
 $kernelProposeFn          := $kernelProposeFn          = load["thvm_wl_kernel_propose",             {Integer}, {Integer, 1}];

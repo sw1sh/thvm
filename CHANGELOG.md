@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Added: program-shape autotune de-duplication
+
+Added `TKernelProgramKey` and `TKernelAutotuneUnique` so training
+benchmarks can tune one representative per shared KProgOp program
+shape instead of benchmarking every live kernel id.  The LeNet
+autotune scripts now report live candidate count vs representative
+tuning count and use representative kernels for bounded tuning, while
+keeping zero-key kernels separate because they do not share a KProgOp
+cache slot.
+
 ### Fixed: autotune benchmark fires
 
 Fixed `TKernelVariants` and `TKernelAutotune` benchmarking so each

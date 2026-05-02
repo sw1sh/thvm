@@ -21,6 +21,14 @@ TKernelAutotune[kid]                    bench-and-pick the winner
 
 TKernelAutotuneAll[]                    sweep every live kid (one-shot pre-warm)
 
+TKernelProgramKey[kid]                  structural KProgOp[] cache hash,
+                                        or 0 when no cached program exists
+
+TKernelAutotuneUnique[]                 group proposer candidates by
+                                        nonzero TKernelProgramKey and tune
+                                        one representative per cached
+                                        program shape
+
 TKernelVariants[kid]                    inspect-only: bench all, leave baseline
   -> kernel_bench_variants(ke, ...)
   -> {TKernelVariant[<|"Kid","Opt","WallUs"|>], ...}
@@ -55,6 +63,10 @@ to every other kid sharing that program.  Mutated by
   pragma; JIT cache key produces a distinct dylib hash.
 - Per-program-shape sharing: 3 SUM realizes -> 3 kids, 1 cached
   KProgOp[]; opt on kid_1 surfaces on kid_2, kid_3 automatically.
+- `TKernelProgramKey` exposes that shared structural key to WL, and
+  `TKernelAutotuneUnique[]` uses nonzero keys to avoid
+  re-benchmarking duplicate live kids.  Zero-key kernels are left
+  separate because no shared KProgOp cache slot exists for them.
 - Autotune on SUM(x*y + 0.5*x) at 16384 elems picks UPCAST=4;
   source contains `#pragma clang loop unroll_count(4)`;
   computed value matches baseline to f32 tolerance.

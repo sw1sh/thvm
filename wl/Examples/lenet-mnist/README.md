@@ -46,15 +46,17 @@ materialize + dispatch through every layer type LeNet uses.
 `autotune.wls` uses the same forward pass as a concrete autotuning
 example.  It materializes LeNet once, lists kernels with
 `TKernelProposed` candidates, optionally prints measured
-`TKernelVariants`, applies `TKernelAutotune` to the selected kernels,
+`TKernelVariants`, groups candidates by nonzero `TKernelProgramKey`,
+applies `TKernelAutotune` to representative cached program shapes,
 then reruns the forward pass and checks the softmax probabilities stay
-within tolerance.  The default tunes the first 16 candidate kernels so
-the script remains interactive; set `MAX_TUNE_KERNELS=All` for the
-full sweep.
+within tolerance.  Zero-key kernels are kept separate because they do
+not share a KProgOp cache slot.  The default tunes the first 16
+representative candidates so the script remains interactive; set
+`MAX_TUNE_KERNELS=All` for the full representative sweep.
 
 `bench-train.wls` runs the lazy LeNet/Adam training step from
 `train.wls` with a separate warmup phase, optional bounded
-`TKernelAutotune`, and timed training steps.  Use
+program-shape `TKernelAutotune`, and timed training steps.  Use
 `TRAIN_BENCH_MODE=baseline|autotune|both`, `N_STEPS`,
 `WARMUP_STEPS`, and `MAX_TUNE_KERNELS` to control the run.
 

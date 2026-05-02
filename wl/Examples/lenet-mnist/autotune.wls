@@ -95,17 +95,30 @@ print["  dispatch kinds: ", formatCounts @ kindCounts[]];
 kids = Range[1, TKernelCount[] - 1];
 proposedByKid = Association @ Table[kid -> TKernelProposed[kid], {kid, kids}];
 candidateKids = Keys @ Select[proposedByKid, Length[#] > 0 &];
-tuneKids = takeLimit[candidateKids, maxTune];
+candidateGroups = GatherBy[candidateKids, TKernelProgramKey];
+representativeKids = Flatten[
+    If[TKernelProgramKey[First[#]] === 0, #, {First[#]}] & /@ candidateGroups
+];
+groupSizes = Association @ Flatten @ Map[
+    If[TKernelProgramKey[First[#]] === 0,
+        (# -> 1) & /@ #,
+        {First[#] -> Length[#]}] &,
+    candidateGroups
+];
+tuneKids = takeLimit[representativeKids, maxTune];
 variantKids = takeLimit[tuneKids, maxVariantRows];
 
-print["  kernels with proposals: ", Length[candidateKids]];
-If[Length[candidateKids] > 0,
+print["  kernels with proposals: ", Length[candidateKids],
+      "  tune reps: ", Length[representativeKids]];
+If[Length[representativeKids] > 0,
     Do[
         print["    kid ", kid,
+              " shared=", groupSizes[kid],
+              " key=", TKernelProgramKey[kid],
               " kind=", TKernelDispatchKind[kid],
               " numel=", TKernelInfo[kid]["output_numel"],
               " proposals=", formatOpts[proposedByKid[kid]]],
-        {kid, Take[candidateKids, UpTo[8]]}]]
+        {kid, Take[representativeKids, UpTo[8]]}]]
 
 If[Length[variantKids] > 0,
     print["benchmarking variants for ", Length[variantKids], " sample kernels..."];
@@ -113,7 +126,7 @@ If[Length[variantKids] > 0,
 
 If[Length[tuneKids] === 0,
     print["no kernels had proposer candidates; nothing to tune."],
-    print["autotuning ", Length[tuneKids], " candidate kernels..."];
+    print["autotuning ", Length[tuneKids], " representative candidate kernels..."];
     tunedRows = Table[
         Module[{opts = TKernelAutotune[kid], applied},
             applied = First[opts]["Applied"];

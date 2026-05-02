@@ -62,11 +62,27 @@ dispatchKindCounts[] := Counts @ Table[
     TKernelDispatchKind[kid],
     {kid, kernelIds[]}]
 
-candidateScan[] := Module[{kids, props, candidates},
+candidateScan[] := Module[{kids, props, candidates, groups, reps, groupSizes},
     kids = kernelIds[];
     props = Association @ Table[kid -> TKernelProposed[kid], {kid, kids}];
     candidates = Keys @ Select[props, Length[#] > 0 &];
-    <|"Props" -> props, "Kids" -> candidates|>
+    groups = GatherBy[candidates, TKernelProgramKey];
+    reps = Flatten[
+        If[TKernelProgramKey[First[#]] === 0, #, {First[#]}] & /@ groups
+    ];
+    groupSizes = Association @ Flatten @ Map[
+        If[TKernelProgramKey[First[#]] === 0,
+            (# -> 1) & /@ #,
+            {First[#] -> Length[#]}] &,
+        groups
+    ];
+    <|
+        "Props" -> props,
+        "Kids" -> reps,
+        "AllKids" -> candidates,
+        "Groups" -> groups,
+        "GroupSizes" -> groupSizes
+    |>
 ]
 
 autotuneSelected[maxTune_] := Module[{
@@ -84,6 +100,7 @@ autotuneSelected[maxTune_] := Module[{
     winners = Select[rows, #["Applied"] =!= {} &];
     <|
         "candidate_count" -> Length[scan["Kids"]],
+        "live_candidate_count" -> Length[scan["AllKids"]],
         "tuned_count" -> Length[tuneKids],
         "winner_count" -> Length[winners],
         "winner_rows" -> winners,
@@ -148,21 +165,27 @@ runBench[name_String, doTune_] := Module[{
 
     scan = candidateScan[];
     print["post-warmup kernels: ", TKernelCount[] - 1,
-          "  candidates: ", Length[scan["Kids"]]];
+          "  live candidates: ", Length[scan["AllKids"]],
+          "  tune reps: ", Length[scan["Kids"]]];
     If[Length[scan["Kids"]] > 0,
         Do[
             print["  candidate kid ", kid,
+                  " shared=", scan["GroupSizes"][kid],
+                  " key=", TKernelProgramKey[kid],
                   " proposals=", formatOpts[scan["Props"][kid]]],
             {kid, Take[scan["Kids"], UpTo[5]]}]];
 
     tune = If[doTune,
         autotuneSelected[maxTune],
-        <|"candidate_count" -> Length[scan["Kids"]], "tuned_count" -> 0,
+        <|"candidate_count" -> Length[scan["Kids"]],
+          "live_candidate_count" -> Length[scan["AllKids"]],
+          "tuned_count" -> 0,
           "winner_count" -> 0, "winner_rows" -> {}, "wall_ms" -> 0|>];
 
     If[doTune,
         print["autotune tuned ", tune["tuned_count"], "/",
-              tune["candidate_count"], " candidate kernels in ",
+              tune["candidate_count"], " representative candidates",
+              " (live candidates=", tune["live_candidate_count"], ") in ",
               tune["wall_ms"], " ms; winners=", tune["winner_count"]];
         Do[
             print["  winner kid ", row["Kid"],

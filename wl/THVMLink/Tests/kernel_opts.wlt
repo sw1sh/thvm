@@ -426,13 +426,32 @@ VerificationTest[
     kid1 = TKernelCount[] - 1;
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid2 = TKernelCount[] - 1;
+    key1 = TKernelProgramKey[kid1];
+    key2 = TKernelProgramKey[kid2];
     (* Apply opt to kid1; must show up on kid2's TKernelOpts because
        both kids point at the same KpCacheSlot.axes. *)
     TKernelApplyOpt[kid1, TOpt["UNROLL", 1, 4]];
     {kid1 =!= kid2,
+     key1 === key2,
+     key1 =!= 0,
      First[TKernelOpts[kid2]]["Applied"]},
-    {True, {TOpt["UNROLL", 1, 4]}},
+    {True, True, True, {TOpt["UNROLL", 1, 4]}},
     TestID -> "kernel-opts/per-program-shape-sharing"
+]
+
+VerificationTest[
+    TInit[];
+    xT = TTensorCreate @ N @ Range[16];
+    TRealize @ TUOpMul[xT, xT];
+    kid1 = TKernelCount[] - 1;
+    TRealize @ TUOpMul[xT, xT];
+    kid2 = TKernelCount[] - 1;
+    res = TKernelAutotuneUnique[];
+    {AssociationQ[res],
+     Length[Intersection[Keys[res], {kid1, kid2}]],
+     TKernelProgramKey[kid1] === TKernelProgramKey[kid2]},
+    {True, 1, True},
+    TestID -> "kernel-opts/autotune-unique-dedupes-program-shapes"
 ]
 
 (* === applied_opts log: chronological list of TOpt actions === *)

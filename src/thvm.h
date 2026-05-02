@@ -2146,6 +2146,7 @@ fn u32  redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap);
 // pointers are cache-owned; the caller marks its KernelEntry
 // with program_shared=1 to suppress double-free.
 fn void     kernel_program_cache_reset(void);
+fn u64      kernel_program_key(KProgOp const *prog, u32 n_ops);
 fn KProgOp *kernel_program_cache_lookup(KProgOp const *prog, u32 n_ops,
                                         u32 *out_n_ops);
 fn KProgOp *kernel_program_cache_insert(KProgOp const *prog, u32 n_ops);
