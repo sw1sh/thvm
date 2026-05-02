@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: Conv2D tile autotune scans every loop axis
+
+The Metal tile Conv2D proposer now emits `LOCAL` threadgroup-size
+candidates from any loop axis that can legally split, instead of only
+using the first output axis.  This exposes larger valid threadgroup
+choices for im2col-shaped convolution kernels while keeping the
+existing `TOpt["LOCAL", axis, factor]` semantics.
+
 ### Added: generic Metal tile Conv2D template
 
 The tile analyzer now recognizes the im2col-fused Conv2D reduce shape

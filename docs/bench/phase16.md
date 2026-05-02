@@ -268,6 +268,17 @@ tinygrad parity yet, but the main `~65ms -> ~10ms` throughput gap for
 the second beautiful-mnist convolution is closed without enabling the
 diagnostic backend recognizer.
 
+The next proposer pass broadened Conv2D `LOCAL` candidates to every
+loop axis that can legally split, instead of only the first output
+axis.  With fire-time autotune forced and cache disabled:
+
+- `THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0
+  THVM_AUTOTUNE=1 THVM_AUTOTUNE_CACHE=0`:
+  `85.3ms / 5.4ms / 5.2ms`.
+
+This shows the widened schedule search is functional and can beat the
+default steady-state Conv2D tile canary after the first tuned sample.
+
 ## Files added
 
 - `src/codegen/axis.c`         -- `KernelAxes` default constructor

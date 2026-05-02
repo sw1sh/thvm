@@ -649,12 +649,19 @@ int main(void) {
   u32 n_conv_cands = kernel_opts_propose(ke, conv_cands,
                                          (u32)(sizeof(conv_cands)/
                                                sizeof(*conv_cands)));
-  CHECK_EQ(n_conv_cands, 2u);
+  CHECK_EQ(n_conv_cands, 4u);
   CHECK_EQ(conv_cands[0].op, (u32)KOP_LOCAL);
-  CHECK_EQ(conv_cands[0].axis, 0u);
-  CHECK_EQ(conv_cands[0].arg, 4u);
+  CHECK_EQ(conv_cands[0].axis, 1u);
+  CHECK_EQ(conv_cands[0].arg, 16u);
   CHECK_EQ(conv_cands[1].op, (u32)KOP_LOCAL);
-  CHECK_EQ(conv_cands[1].arg, 2u);
+  CHECK_EQ(conv_cands[1].axis, 1u);
+  CHECK_EQ(conv_cands[1].arg, 8u);
+  CHECK_EQ(conv_cands[2].op, (u32)KOP_LOCAL);
+  CHECK_EQ(conv_cands[2].axis, 0u);
+  CHECK_EQ(conv_cands[2].arg, 4u);
+  CHECK_EQ(conv_cands[3].op, (u32)KOP_LOCAL);
+  CHECK_EQ(conv_cands[3].axis, 0u);
+  CHECK_EQ(conv_cands[3].arg, 2u);
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
   memset(ke->axes, 0, sizeof(KernelAxes));

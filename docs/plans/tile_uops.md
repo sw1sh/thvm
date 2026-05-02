@@ -48,8 +48,8 @@ that future renderers can lower differently for CPU and Metal.
   generated Metal tile path emits the corresponding strided Conv2D
   runtime template, skips generic input pre-materialization because
   the template consumes the original view strides directly, and
-  exposes `LOCAL` threadgroup-size candidates through the normal
-  proposer;
+  exposes `LOCAL` threadgroup-size candidates from every loop axis
+  that can legally split through the normal proposer;
 - `TKernelAutotune` keeps the in-process per-program-shape behavior
   and now also persists winning opts under
   `$XDG_CACHE_HOME/thvm/autotune` / `$HOME/.cache/thvm/autotune`
@@ -187,9 +187,9 @@ output axis.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Move the remaining GEMV diagnostic win into generic tile
-   recognition and broaden the Conv2D template's schedule space beyond
-   one SIMT threadgroup-size knob.
+2. Move the remaining GEMV diagnostic cleanup into the generic tile
+   story and broaden the Conv2D template's schedule space beyond one
+   SIMT threadgroup-size knob.
 3. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
    instead of using only scalar reducer loops.
 4. Generalize `TILE_MMA` target code beyond fixed 8/16/32

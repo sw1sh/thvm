@@ -96,6 +96,30 @@ static u8 propose_first_loop_axis(KernelEntry const *ke, u8 start) {
   return 0xFF;
 }
 
+static u32 propose_conv2d_local_opts(KernelEntry const *ke, KOpt *out,
+                                     u32 n, u32 cap) {
+  static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
+  u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
+  for (u32 i = 0; i < n_local_factors && n < cap; i++) {
+    u32 f = local_factors[i];
+    for (u8 axis = 0; axis < ke->axes->n_axes; axis++) {
+      if (ke->axes->axis_types[axis] != KAX_LOOP) {
+        continue;
+      }
+      u32 axis_size = ke->axes->full_shape[axis];
+      if (axis_size < f || axis_size % f != 0) {
+        continue;
+      }
+      out[n].op   = KOP_LOCAL;
+      out[n].axis = axis;
+      out[n].arg  = f;
+      n++;
+      break;
+    }
+  }
+  return n;
+}
+
 static int propose_metal_backend_enabled(void) {
   char const *backend = getenv("THVM_BACKEND");
   return backend != NULL && strcmp(backend, "metal") == 0;
@@ -287,23 +311,7 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
       && ke->axes->n_axes > 0) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {
-      u8 loop_axis = propose_first_loop_axis(ke, 0);
-      if (loop_axis != 0xFF) {
-        static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
-        u32 loop_axis_size = ke->axes->full_shape[loop_axis];
-        u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
-        for (u32 i = 0; i < n_local_factors && n < cap; i++) {
-          u32 f = local_factors[i];
-          if (loop_axis_size % f != 0 || f > loop_axis_size) {
-            continue;
-          }
-          out[n].op   = KOP_LOCAL;
-          out[n].axis = loop_axis;
-          out[n].arg  = f;
-          n++;
-        }
-      }
-      return n;
+      return propose_conv2d_local_opts(ke, out, n, cap);
     }
   }
 
