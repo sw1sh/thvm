@@ -31,10 +31,16 @@ wolframscript -f wl/Examples/run.wls
 wolframscript -f wl/Examples/run.wls dup-sup-annihilate
 wolframscript -f wl/Examples/run.wls dup-sup-annihilate --eval
 wolframscript -f wl/Examples/test_reductions.wls
+wolframscript -f wl/Examples/metal-gemm-autotune.wls
 ```
 
 `--eval` runs the example without writing any PNG -- useful for
 sanity-checking what the WL evaluator returns.
+
+`metal-gemm-autotune.wls` is a focused kernel benchmark rather than a
+term-rendering example: it builds one f32 GEMM on Metal, prints
+baseline plus `TC` tile-size variant timings, applies
+`TKernelAutotune`, and checks the result against a host reference.
 
 ## Catalogue
 

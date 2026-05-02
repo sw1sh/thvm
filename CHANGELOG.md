@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: focused Metal GEMM autotune smoke
+
+Added `wl/Examples/metal-gemm-autotune.wls`, a narrow benchmark
+harness for the new Metal `TILE_MMA` path.  It builds one f32 GEMM,
+checks that dispatch routes through `metal-gemm`, prints baseline and
+`TC` tile-size variant timings, applies `TKernelAutotune`, reruns the
+matmul, and verifies both runs against a host reference.
+
 ### Changed: generic GEMM plan analysis
 
 Moved the f32 Metal GEMM recognizer out of the Metal backend and into
