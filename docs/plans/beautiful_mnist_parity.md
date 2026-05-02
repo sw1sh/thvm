@@ -35,10 +35,25 @@ per-step training time (~milliseconds-scale per step on Apple
 Silicon) for this exact architecture.
 
 Current measurement discipline: ignore first capture / first sample
-overhead.  Compare steady TJit replay for the full BS=512 training
-loop against tinygrad's captured Metal training step.  On this
-machine, the local tinygrad checkout is around `30-33ms` per steady
-BS=512 training step after warmup.
+overhead.  Compare steady TJit replay for the full training loop
+against `tools/bench_tinygrad_beautiful_mnist.py`, which imports the
+sibling tinygrad checkout read-only and synchronizes the Metal device
+after each step.
+
+Current tinygrad anchors on this machine:
+
+- BS=32, `JITBEAM=1`: `14.1ms` steady replay,
+  `captured_leaf_calls=110`, `graph_calls=3`.
+- BS=512, `JITBEAM=0`: `96.8ms` steady replay,
+  `captured_leaf_calls=122`, `graph_calls=3`.
+- BS=512, `JITBEAM=1`: not yet a safe baseline.  A bounded capture
+  attempt was stopped after more than two minutes due to Metal
+  compiler timeout callbacks.
+
+The older `30-33ms` BS=512 note is treated as unverified until it is
+reproduced through this harness.  `TRAIN_BEAM=1` is not consumed by
+standalone tinygrad `beautiful_mnist`; the harness maps it to
+`JITBEAM` only as a convenience.
 
 Current thvm status:
 
@@ -52,8 +67,9 @@ Current thvm status:
   movement/ALU backward materializers without preempting tile kernels.
   This makes BS=512 `grad-7` replay about `127ms` and cuts `grad-3`
   to about `2.6s`.
-- Full BS=512 Adam replay now completes, but is still `~41-46s`
-  steady versus tinygrad's `30-33ms`.  The gap is the repeated
+- Full BS=512 Adam replay now completes, but is still `~41s`
+  steady versus tinygrad's measured `96.8ms` no-beam replay.  The
+  gap is the repeated
   all-target early-conv backward graph (`3285` kernels, including
   `1048` generated Metal JIT kernels and `48` per-op Metal fallbacks),
   not first-sample overhead.
@@ -194,8 +210,9 @@ travel across all kids of the same program.
 - Per-step training time on LeNet is the canary: if it regresses,
   the milestone work doesn't land.
 - Cumulative Adam-step wallclock on beautiful-mnist is the
-  primary metric -- compare to tinygrad's `python beautiful_mnist.py`
-  on the same machine for parity.
+  primary metric; compare to
+  `tools/bench_tinygrad_beautiful_mnist.py` on the same machine for
+  parity.
 
 ## Status
 

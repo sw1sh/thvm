@@ -144,11 +144,64 @@ BS=512 forward, post-autotuned:
   dispatch=metal-tile=36, none=3
 ```
 
-The same local tinygrad checkout with Metal, BS=512, `TinyJit`, and
-`IGNORE_JIT_FIRST_BEAM=1 TRAIN_BEAM=1 DEBUG=2` shows steady captured
-training batches around `30-33ms` after warmup.  That is the current
-parity target: full BS=512 training-loop replay, not the first
-materialization or the old single-sample forward canary.
+Tinygrad comparison now uses the THVM-side harness
+`tools/bench_tinygrad_beautiful_mnist.py`, which imports the sibling
+checkout read-only and forces a device synchronize after each step so
+the timed replay is not enqueue-only.
+
+Safe beamed small-batch run:
+
+```bash
+PYTHONPATH=TinyHVM/tinygrad DEVICE=METAL BS=32 WARMUP_STEPS=2 \
+N_STEPS=1 IGNORE_JIT_FIRST_BEAM=1 JITBEAM=1 DEBUG=0 \
+  python3 tools/bench_tinygrad_beautiful_mnist.py
+```
+
+```text
+BS=32 tinygrad train, JITBEAM=1:
+  warmup no-jit:       2452.7ms, kernels=107
+  warmup capture:      2094.4ms, kernels=3
+  steady replay:         14.1ms, kernels=3
+  captured_calls=3, captured_leaf_calls=110, graph_calls=3
+  mem=9.9MiB
+
+BS=32 thvm train, THVM_TILE=1:
+  steady replay:        500.4ms
+  jit-ops=2243, JitReplayDispatches=2201
+  dispatch=metal-tile=1238, none=35, metal-alias=126
+  retained=830.6MB
+```
+
+That puts the bounded small-batch replay gap at roughly `35x` wall
+time, with THVM replaying about `20x` more leaf dispatch records than
+tinygrad's captured leaf calls.
+
+Bounded BS=512 tinygrad run without JIT beam:
+
+```bash
+PYTHONPATH=TinyHVM/tinygrad DEVICE=METAL BS=512 WARMUP_STEPS=2 \
+N_STEPS=1 IGNORE_JIT_FIRST_BEAM=1 JITBEAM=0 DEBUG=2 \
+  python3 tools/bench_tinygrad_beautiful_mnist.py
+```
+
+```text
+BS=512 tinygrad train, JITBEAM=0:
+  warmup no-jit:       4221.0ms, kernels=119, gpu=88.0ms
+  warmup capture:      1406.9ms, kernels=3,   gpu=74.0ms
+  steady replay:         96.8ms, kernels=3,   gpu=92.5ms
+  captured_calls=3, captured_leaf_calls=122, graph_calls=3
+  graph batches: 32, 64, 26 leaf kernels
+  mem=160.1MiB
+```
+
+The earlier `30-33ms` note should not be used as the live baseline
+until it is reproduced through this synchronized harness.  In
+particular, `TRAIN_BEAM=1` is not consumed by standalone
+`examples/beautiful_mnist.py`; this harness maps it to tinygrad's
+`JITBEAM` only as a convenience.  A BS=512 `JITBEAM=1` capture was
+stopped after more than two minutes because Metal compiler callbacks
+started timing out; RSS stayed modest, but it is not a safe default
+profiling command.
 
 Gradient status:
 
@@ -230,11 +283,12 @@ re-open broader chain fusion.
 
 This is a real improvement over the previous `grad-3` replay
 (`~10.6s`) and removes the worst `PAD`/`SHRINK` materializer from
-the profile, but it is still orders of magnitude from tinygrad's
-`30-33ms` full captured train step.  The current full-loop gap is the
-repeated all-target early-conv backward graph: thousands of kernels
-are emitted for one Adam replay, and the slowest kernels are repeated
-movement-heavy partial-gradient materializers over
+the profile, but it is still roughly `35x` behind tinygrad on the
+bounded BS=32 beamed canary and roughly `400x` behind tinygrad's
+measured BS=512 no-beam captured train step.  The current full-loop
+gap is the repeated all-target early-conv backward graph: thousands
+of kernels are emitted for one Adam replay, and the slowest kernels
+are repeated movement-heavy partial-gradient materializers over
 `{512,32,20,20}`/pool-shaped inputs.
 
 Interpretation for the hackathon track:

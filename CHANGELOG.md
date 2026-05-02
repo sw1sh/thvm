@@ -6,6 +6,18 @@ dated section.
 
 ## Unreleased
 
+### Added: profile tinygrad beautiful_mnist from THVM
+
+`tools/bench_tinygrad_beautiful_mnist.py` now imports the sibling
+tinygrad checkout read-only and profiles the same beautiful_mnist
+training loop on a fixed synthetic batch.  The harness separates
+no-JIT warmup, TinyJit capture, and synchronized replay, and reports
+captured graph calls, leaf calls, kernel counters, memory, and beam
+settings.  The benchmark history now treats this harness as the live
+tinygrad comparison source: BS=32 with `JITBEAM=1` replays in about
+`14ms`, while BS=512 without JIT beam replays in about `97ms` on the
+current machine.
+
 ### Changed: fuse contiguous private reduce chains
 
 The scheduler can now collapse same-kind private `UOP_REDUCE` chains
