@@ -145,8 +145,12 @@ the same pipeline through `cg_emit_metal`.
 - [autotune.c](../src/codegen/autotune.c): `kernel_autotune(kid)`.
   Calls `kernel_opts_propose`, applies each candidate in isolation,
   benches `KAUTOTUNE_N_RUNS` fires per variant, picks the min, and
-  leaves the kernel mutated to the winner. Cached per program shape
-  via the `autotuned` flag on `KernelAxes`.
+  leaves the kernel mutated to the winner. Winners are cached per
+  program shape in memory via the `autotuned` flag on `KernelAxes`
+  and on disk under `$XDG_CACHE_HOME/thvm/autotune` (or
+  `$HOME/.cache/thvm/autotune`, or `THVM_AUTOTUNE_CACHE_DIR`).  Set
+  `THVM_AUTOTUNE_CACHE=0` or `THVM_AUTOTUNE_DISABLE_CACHE=1` to force
+  fresh benchmarking.
 
 ### `KernelAxes` and `TOpt`
 

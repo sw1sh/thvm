@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Added: persistent autotune cache
+
+`TKernelAutotune` now stores the winning `TOpt` decision on disk under
+`$XDG_CACHE_HOME/thvm/autotune` (or `$HOME/.cache/thvm/autotune`, or
+`THVM_AUTOTUNE_CACHE_DIR`) using a key derived from backend, structural
+program shape, tensor shapes/dtypes, candidate list, and autotune run
+count.  Later runtime sessions replay the cached winner without
+rerunning benchmark dispatches.  Set `THVM_AUTOTUNE_CACHE=0` or
+`THVM_AUTOTUNE_DISABLE_CACHE=1` to force fresh benchmarking.
+
 ### Added: generated Metal TileUop reductions
 
 `THVM_TILE=1` can now dispatch f32 scalar `TILE_REDUCE` plans through

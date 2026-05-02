@@ -32,6 +32,12 @@ that future renderers can lower differently for CPU and Metal.
 - tile plans remember the `KernelAxes.version` they were built
   against, and `tile_sync_from_scalar` rebuilds stale plans after
   `TKernelApplyOpt`, autotune resets, or lazy WL introspection;
+- `TKernelAutotune` keeps the in-process per-program-shape behavior
+  and now also persists winning opts under
+  `$XDG_CACHE_HOME/thvm/autotune` / `$HOME/.cache/thvm/autotune`
+  (override with `THVM_AUTOTUNE_CACHE_DIR`, disable with
+  `THVM_AUTOTUNE_CACHE=0` or `THVM_AUTOTUNE_DISABLE_CACHE=1`), so
+  repeated Metal tile experiments can skip benchmark rediscovery;
 - CPU dispatch has an opt-in `THVM_TILE=1` path that consumes the
   validated tile plan over scalar UOps, records dispatch kind
   `"tile"`, and falls back to the normal BLAS/JIT/scalar paths when

@@ -312,6 +312,58 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Disk cache: first autotune writes a winner; the second runtime
+       session with the same program shape should replay it without
+       running benchmark dispatches. *)
+    Module[{oldCache, oldDisable, oldDir, dir, restore, files, before, after},
+        oldCache   = Environment["THVM_AUTOTUNE_CACHE"];
+        oldDisable = Environment["THVM_AUTOTUNE_DISABLE_CACHE"];
+        oldDir     = Environment["THVM_AUTOTUNE_CACHE_DIR"];
+        dir = CreateDirectory @ FileNameJoin[{
+            $TemporaryDirectory,
+            "thvm-autotune-cache-" <> ToString[$ProcessID] <> "-" <>
+                IntegerString[RandomInteger[10^9]]
+        }];
+        restore[] := (
+            If[StringQ[oldCache],
+                SetEnvironment["THVM_AUTOTUNE_CACHE" -> oldCache],
+                SetEnvironment["THVM_AUTOTUNE_CACHE" -> ""]];
+            If[StringQ[oldDisable],
+                SetEnvironment["THVM_AUTOTUNE_DISABLE_CACHE" -> oldDisable],
+                SetEnvironment["THVM_AUTOTUNE_DISABLE_CACHE" -> ""]];
+            If[StringQ[oldDir],
+                SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> oldDir],
+                SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_AUTOTUNE_CACHE" -> "1"];
+            SetEnvironment["THVM_AUTOTUNE_DISABLE_CACHE" -> ""];
+            SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> dir],
+
+            TInit[];
+            xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
+            TRealize @ TUOpReduce[xT, 0, "SUM"];
+            TKernelAutotune[TKernelCount[] - 1];
+            files = FileNames["*.json", dir, Infinity];
+
+            TInit[];
+            xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
+            TRealize @ TUOpReduce[xT, 0, "SUM"];
+            kid = TKernelCount[] - 1;
+            before = TKernelDispatchCount[kid];
+            TKernelAutotune[kid];
+            after = TKernelDispatchCount[kid],
+
+            restore[];
+            Quiet @ DeleteDirectory[dir, DeleteContents -> True]
+        ];
+        {Length[files] > 0, before === after}
+    ],
+    {True, True},
+    TestID -> "kernel-opts/autotune-disk-cache-replays-winner"
+]
+
+VerificationTest[
     (* Elementwise UPCAST: emits clang loop pragma on the output
        loop, preserves the computed result.  *)
     TInit[];

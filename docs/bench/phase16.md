@@ -46,6 +46,14 @@ THVM_AUTOTUNE=1                         fire-time trigger -- first dispatch of
 
 THVM_AUTOTUNE_RUNS=N                    timed dispatches per candidate
                                         (default 5; min wallclock wins)
+
+THVM_AUTOTUNE_CACHE_DIR=path            optional on-disk winner cache
+                                        root; default is
+                                        $XDG_CACHE_HOME/thvm/autotune
+                                        or $HOME/.cache/thvm/autotune
+
+THVM_AUTOTUNE_CACHE=0 or
+THVM_AUTOTUNE_DISABLE_CACHE=1           force fresh benchmarking
 ```
 
 All opts pass through C-side `KernelAxes`.  For KProg kernels, axes
@@ -92,6 +100,11 @@ plans build distinct variants.
   real kernel sequence.
 - `TKernelVariants[kid]` returns 5 entries (1 baseline + 4
   candidates) with measured WallUs each, leaves axes at baseline.
+- `TKernelAutotune` persists winners on disk keyed by backend,
+  structural program shape, tensor shapes/dtypes, candidate list, and
+  `THVM_AUTOTUNE_RUNS`.  The regression in `kernel_opts.wlt`
+  confirms a second runtime session replays the cached winner without
+  running benchmark dispatches.
 - Summary boxes render for `TOpt`, `TKernelOpts`, `TKernelVariant`.
 - LeNet/Adam CPU training works end to end.  `N_STEPS=4
   train.wls` produced `{2.6071, 1.8054, 1.1324, 0.6546, 0.3559}`
@@ -172,6 +185,25 @@ or picks a small-factor UNROLL/UPCAST that nudges wallclock by
 conv) where unrolling matters more, plus more opt classes
 (UPCAST output axis with structured nest emit, broader LOCAL/GLOBAL
 proposer coverage on Metal).
+
+May 2, 2026 beautiful-mnist forward canary on Apple M3 Max:
+
+- Generic Metal tile path, no autotune:
+  `144.4ms / 66.9ms / 66.0ms`.
+- Generic Metal tile path, fire-time autotune with a fresh disk cache:
+  first process `1802.0ms / 63.5ms / 62.6ms`; second process using
+  the same cache `1799.8ms / 64.1ms / 65.5ms`.  The cache files are
+  produced and replayed, but the first-sample wall time is still
+  dominated by WL/TJit/materialization and selected MSL compilation,
+  not just benchmark rediscovery.
+- Diagnostic `THVM_METAL_SPECIALIZED=1` oracle:
+  `58.6ms / 8.2ms / 10.4ms`.
+
+Conclusion: persistent autotune cache is useful plumbing for repeated
+experiments, but it does not close the kernel-throughput gap.  The
+steady generic path remains roughly `64ms` versus `~9ms` for the
+diagnostic oracle, so the next real win is still generated conv/reduce
+schedule quality, not more decision-cache work.
 
 ## Files added
 
