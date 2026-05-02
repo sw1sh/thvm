@@ -160,6 +160,13 @@ int main(void) {
   CHECK_EQ(ke->scalar_uops[mi_where].src[0], mi_mask);
   CHECK_EQ(ke->scalar_uops[mi_where].src[1], mi_yes);
   CHECK_EQ(ke->scalar_uops[mi_where].src[2], mi_no);
+  u32 mi_hi_only = emit_pad_bounds_mask(ke, mi_mask, 0, 4);
+  CHECK_EQ(ke->scalar_uops[mi_hi_only].op, S_ILT);
+  CHECK_EQ(ke->scalar_uops[mi_hi_only].src[0], mi_mask);
+  u32 mi_bounded = emit_pad_bounds_mask(ke, mi_mask, 1, 3);
+  CHECK_EQ(ke->scalar_uops[mi_bounded].op, S_IAND);
+  CHECK_EQ(ke->scalar_uops[ke->scalar_uops[mi_bounded].src[0]].op, S_ILT);
+  CHECK_EQ(ke->scalar_uops[ke->scalar_uops[mi_bounded].src[1]].op, S_ISUB);
   rangeify_free(ke);
 
   TEST_BEGIN("scalar-graph/opname-helpers-cover-enum");

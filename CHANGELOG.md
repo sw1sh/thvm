@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: centralize PAD bounds-mask emission
+
+Rangeify now builds PAD per-axis bounds checks through one
+`emit_pad_bounds_mask` helper.  PAD context propagation, rank
+promotion fusion, and PAD-as-size1-inflation all share the same
+`lo <= iter < hi` mask form and the same folded valid-mask combine.
+
 ### Added: fold scalar valid-mask helpers
 
 Rangeify now centralizes scalar valid-mask emission through helpers

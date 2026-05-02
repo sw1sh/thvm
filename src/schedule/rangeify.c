@@ -473,6 +473,32 @@ static u32 emit_iwhere(KernelEntry *ke, u32 dtype,
   return rangeify_emit(ke, S_IWHERE, dtype, 3, src, 0);
 }
 
+static u32 emit_valid_and(KernelEntry *ke, u32 a, u32 b) {
+  if (a == 0) {
+    return b;
+  }
+  if (b == 0) {
+    return a;
+  }
+  return emit_ibinop(ke, S_IAND, a, b);
+}
+
+static u32 emit_pad_bounds_mask(KernelEntry *ke,
+                                u32 ref,
+                                u32 begin,
+                                u32 src_dim) {
+  u32 hi_lim  = emit_iconst(ke, (i64)(begin + src_dim));
+  u32 axis_ok = emit_ibinop(ke, S_ILT, ref, hi_lim);
+  if (begin > 0) {
+    u32 lo_lim = emit_iconst(ke, (i64)begin);
+    u32 lt_lo  = emit_ibinop(ke, S_ILT, ref, lo_lim);
+    u32 one    = emit_iconst(ke, 1);
+    u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
+    axis_ok    = emit_valid_and(ke, axis_ok, ge_lo);
+  }
+  return axis_ok;
+}
+
 // Build an expression for `range_id_iter * stride + offset_term`.  Folds
 // trivial cases (stride==0, stride==1) to keep the expression small.
 // `offset_term` is 0 to omit the additive term, otherwise an op_id.
@@ -857,18 +883,8 @@ static int rngs_ctx_movement_src(KernelEntry *ke, KProgOp const *p,
           src_ref = emit_ibinop(ke, S_ISUB, ref, c);
         }
         in->refs[d] = src_ref;
-        u32 hi_lim  = emit_iconst(ke, (i64)(begin + src_dim));
-        u32 axis_ok = emit_ibinop(ke, S_ILT, ref, hi_lim);
-        if (begin > 0) {
-          u32 lo_lim = emit_iconst(ke, (i64)begin);
-          u32 lt_lo  = emit_ibinop(ke, S_ILT, ref, lo_lim);
-          u32 one    = emit_iconst(ke, 1);
-          u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
-          axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
-        }
-        in->valid_mask = in->valid_mask == 0
-            ? axis_ok
-            : emit_ibinop(ke, S_IAND, in->valid_mask, axis_ok);
+        u32 axis_ok = emit_pad_bounds_mask(ke, ref, begin, src_dim);
+        in->valid_mask = emit_valid_and(ke, in->valid_mask, axis_ok);
       }
       return 1;
     }
@@ -1586,18 +1602,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               u32 c = emit_iconst(ke, (i64)begin);
               in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, orig_ref, c);
             }
-            u32 hi_lim = emit_iconst(ke, (i64)(begin + src_dim));
-            u32 axis_ok = emit_ibinop(ke, S_ILT, orig_ref, hi_lim);
-            if (begin > 0) {
-              u32 lo_lim = emit_iconst(ke, (i64)begin);
-              u32 lt_lo  = emit_ibinop(ke, S_ILT, orig_ref, lo_lim);
-              u32 one    = emit_iconst(ke, 1);
-              u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
-              axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
-            }
-            if (in_rngs.valid_mask == 0) in_rngs.valid_mask = axis_ok;
-            else in_rngs.valid_mask = emit_ibinop(ke, S_IAND,
-                                                   in_rngs.valid_mask, axis_ok);
+            u32 axis_ok = emit_pad_bounds_mask(ke, orig_ref, begin, src_dim);
+            in_rngs.valid_mask = emit_valid_and(ke, in_rngs.valid_mask, axis_ok);
           }
           break;
         }
@@ -2596,17 +2602,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               new_out_refs[d] = ref_iter;
             }
             // Bounds: ref_iter < begin+src_dim AND ref_iter >= begin.
-            u32 hi_lim  = emit_iconst(ke, (i64)(begin + src_dim));
-            u32 axis_ok = emit_ibinop(ke, S_ILT, ref_iter, hi_lim);
-            if (begin > 0) {
-              u32 lo_lim = emit_iconst(ke, (i64)begin);
-              u32 lt_lo  = emit_ibinop(ke, S_ILT, ref_iter, lo_lim);
-              u32 one    = emit_iconst(ke, 1);
-              u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
-              axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
-            }
-            if (valid_mask == 0) valid_mask = axis_ok;
-            else valid_mask = emit_ibinop(ke, S_IAND, valid_mask, axis_ok);
+            u32 axis_ok = emit_pad_bounds_mask(ke, ref_iter, begin, src_dim);
+            valid_mask = emit_valid_and(ke, valid_mask, axis_ok);
           }
         }
         if (!can_fuse) {
@@ -2772,18 +2769,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
         }
         if (!multi_inflate && inflated_axis != (u32)-1) {
-          u32 hi_lim  = emit_iconst(ke, (i64)(inflated_begin + inflated_srcdim));
-          u32 axis_ok = emit_ibinop(ke, S_ILT, reduce_range, hi_lim);
-          if (inflated_begin > 0) {
-            u32 lo_lim = emit_iconst(ke, (i64)inflated_begin);
-            u32 lt_lo  = emit_ibinop(ke, S_ILT, reduce_range, lo_lim);
-            u32 one    = emit_iconst(ke, 1);
-            u32 ge_lo  = emit_ibinop(ke, S_ISUB, one, lt_lo);
-            axis_ok    = emit_ibinop(ke, S_IAND, axis_ok, ge_lo);
-          }
-          u32 combined_mask = existing_mask != 0
-              ? emit_ibinop(ke, S_IAND, existing_mask, axis_ok)
-              : axis_ok;
+          u32 axis_ok = emit_pad_bounds_mask(ke, reduce_range,
+                                             inflated_begin,
+                                             inflated_srcdim);
+          u32 combined_mask = emit_valid_and(ke, existing_mask, axis_ok);
           u32 zero    = emit_iconst(ke, 0);
           prog_value[i] = emit_iwhere(ke, p->dtype, combined_mask, load_id, zero);
           continue;
