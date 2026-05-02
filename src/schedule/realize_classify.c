@@ -324,6 +324,15 @@ static int realize_inline_subtree_has_movement(Term t, u32 depth) {
   return 0;
 }
 
+static int realize_reduce_chain_source_is_direct(Term t) {
+  t = term_resolve(t);
+  if (term_tag(t) == TAG_TEN || term_tag(t) == TAG_VAR) return 1;
+  if (term_tag(t) != TAG_UOP) return 0;
+  if (term_ext(t) == UOP_KERNEL) return 1;
+  u32 idx = realize_info_find(term_val(t));
+  return idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized;
+}
+
 fn void realize_classify(Term root) {
   realize_info_clear();
   if (term_tag(root) != TAG_UOP) return;
@@ -360,6 +369,7 @@ fn void realize_classify(Term root) {
     ReduceChainInfo rc;
     Term root_term = term_new(0, TAG_UOP, UOP_REDUCE, info->loc);
     if (!reduce_chain_collect(root_term, &rc)) continue;
+    if (!realize_reduce_chain_source_is_direct(rc.src)) continue;
     if (realize_inline_subtree_has_movement(rc.src, 0)) continue;
     int ok = 1;
     for (u32 j = 1; j < rc.n_reduces; j++) {

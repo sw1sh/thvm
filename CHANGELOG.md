@@ -14,10 +14,12 @@ SUM traversal order.  Materialize re-packs the chain through the
 existing `(kind << 24) | inner` encoding, and rangeify can carry a
 flattened coordinate context backward through reshapes.  Focused
 reduce tests now assert trailing SUM/MAX chains materialize as one
-kernel.  On the bounded BS=32 `beautiful_mnist` Metal+tile training
-canary this cuts replay dispatches from about `4137` to `1477` and
-JIT ops from about `4179` to `1519`; remaining movement-heavy fused
-reduce gaps still fall to `metal-jit`, so wall time is not improved
+kernel.  The classifier currently fuses only direct/boundary reduce
+sources so movement-heavy backward programs stay split until tile
+lowering can represent their flattened coordinates.  On the bounded
+BS=32 `beautiful_mnist` Metal+tile training canary this cuts replay
+dispatches from about `4137` to `2201` and JIT ops from about `4179`
+to `2243`, with no `metal-jit` routes; wall time is still not improved
 yet.
 
 ### Fixed: avoid Metal alias-reshape refcount growth on replay
