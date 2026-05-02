@@ -243,16 +243,27 @@ VerificationTest[
             out = TRealize @ TUOpReduce[x, 0, "SUM"];
             kid = TKernelCount[] - 1;
             plan = TKernelTilePlan[kid];
+            props = TKernelProposed[kid];
+            TKernelApplyOpt[kid, TOpt["GROUP", 1, 8]];
+            out2 = TRealize @ TUOpReduce[x, 0, "SUM"];
+            kid2 = TKernelCount[] - 1;
             {Round[Normal @ TTensorData[out], 0.001],
              TKernelDispatchKind[kid],
              plan["reduce_tile"] > 0,
-             TKernelProposed[kid]}
+             props,
+             Round[Normal @ TTensorData[out2], 0.001],
+             TKernelDispatchKind[kid2],
+             First[TKernelOpts[kid2]]["AxisTypes"]}
         ];
         TContextDestroy[ctx];
         restore[];
         result === {{36.}, "metal-tile", True,
-                    {TOpt["UNROLL", 1, 8], TOpt["UNROLL", 1, 4],
-                     TOpt["UNROLL", 1, 2]}}
+                    {TOpt["GROUP", 1, 8], TOpt["GROUP", 1, 4],
+                     TOpt["GROUP", 1, 2],
+                     TOpt["UNROLL", 1, 8], TOpt["UNROLL", 1, 4],
+                     TOpt["UNROLL", 1, 2]},
+                    {36.}, "metal-tile",
+                    {"LOOP", "REDUCE", "GROUP_REDUCE"}}
     ],
     True,
     TestID -> "metal/f32-reduce-sum-tile-dispatch"

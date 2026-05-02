@@ -886,6 +886,21 @@ int main(void) {
   f32 red_out[1] = {0.0f};
   run_tile_jit_1(tk, red_in, sizeof(red_in), red_out, sizeof(red_out));
   CHECK(red_out[0] == 10.0f);
+  KOpt group4 = { .op = KOP_GROUP, .axis = 1, .arg = 4 };
+  CHECK(kernel_apply_opt(tk, group4));
+  CHECK(cg_tile_metal_dispatch_shape(tk, &red_groups_x, &red_threads_x));
+  CHECK_EQ(red_groups_x, 1u);
+  CHECK_EQ(red_threads_x, 4u);
+  red_metal_src = cg_emit_tile_metal(tk);
+  CHECK(red_metal_src != NULL);
+  if (red_metal_src != NULL) {
+    CHECK(strstr(red_metal_src, "threadgroup float") != NULL);
+    CHECK(strstr(red_metal_src, "_rk") != NULL);
+    CHECK(strstr(red_metal_src, "_ltid") != NULL);
+    CHECK(strstr(red_metal_src, "threadgroup_barrier") != NULL);
+    CHECK(strstr(red_metal_src, "if (_ltid == 0u)") != NULL);
+    free(red_metal_src);
+  }
   kernel_free_arrays(tk);
   tk->axes = NULL;
 

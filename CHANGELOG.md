@@ -11,7 +11,8 @@ dated section.
 `THVM_TILE=1` can now dispatch f32 scalar `TILE_REDUCE` plans through
 generated Metal source.  The renderer maps default loop axes to a flat
 Metal grid, emits a serial per-output reduction from the scalar body,
-and preserves reduce-axis `UNROLL` candidates so movement-heavy lowered
+emits threadgroup reductions for `GROUP` / `GROUP_REDUCE` opts, and
+preserves reduce-axis `UNROLL` candidates so movement-heavy lowered
 reductions can start participating in autotune without custom backend
 recognizers.
 

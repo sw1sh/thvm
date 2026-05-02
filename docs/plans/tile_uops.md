@@ -75,8 +75,8 @@ that future renderers can lower differently for CPU and Metal.
 - generated Metal TileUop source now covers f32 scalar `TILE_REDUCE`
   plans in addition to elementwise plans: default loop axes map to a
   flat Metal grid, the reduce body is emitted from `ScalarUop`, and
-  reduce-axis `UNROLL` candidates remain visible to autotune for
-  movement-heavy lowered reductions;
+  reduce-axis `GROUP` / `GROUP_REDUCE` plus `UNROLL` candidates remain
+  visible to autotune for movement-heavy lowered reductions;
 - f32/f64 `S_CAST` is generated with per-input and output pointer
   types, so scalar C no longer requires one uniform kernel dtype for
   simple cast chains;

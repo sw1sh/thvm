@@ -254,6 +254,24 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   u8  axis_idx  = propose_reduce_axis_index(ke);
   if (axis_size > 0 && axis_idx != 0xFF
       && propose_metal_reduce_unroll_kernel(ke)) {
+    if (propose_metal_tile_scalar_reduce_kernel(ke)) {
+      if (axis_size <= 256 && n < cap) {
+        out[n].op   = KOP_GROUP;
+        out[n].axis = axis_idx;
+        out[n].arg  = axis_size;
+        n++;
+      }
+      for (u32 i = 0; i < n_factors; i++) {
+        u32 f = split_factors[i];
+        if (f == axis_size) continue;
+        if (axis_size % f != 0 || f > axis_size) continue;
+        if (n >= cap) break;
+        out[n].op   = KOP_GROUP;
+        out[n].axis = axis_idx;
+        out[n].arg  = f;
+        n++;
+      }
+    }
     for (u32 i = 0; i < n_factors; i++) {
       u32 f = split_factors[i];
       if (axis_size % f != 0) continue;

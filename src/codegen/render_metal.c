@@ -205,6 +205,7 @@ typedef enum {
   RMT_AXIS_UNSUPPORTED = 0,
   RMT_AXIS_FLAT_GRID,
   RMT_AXIS_LOCAL_GLOBAL,
+  RMT_AXIS_GROUP_REDUCE,
 } RmtAxisMode;
 
 static u64 rmt_axis_numel(CtKernelInfo const *info) {
@@ -218,7 +219,13 @@ static u64 rmt_axis_numel(CtKernelInfo const *info) {
 static RmtAxisMode rmt_axis_mode(CtKernelInfo const *info) {
   u32 n_global = 0;
   u32 n_local  = 0;
+  u32 n_group_reduce = 0;
   int flat_ok = 1;
+  for (u32 i = 0; i < info->tile.n_axes; i++) {
+    if (info->tile.axis_types[i] == KAX_GROUP_REDUCE) {
+      n_group_reduce++;
+    }
+  }
   for (u32 i = 0; i < info->n_axes; i++) {
     if (info->axis_types[i] == KAX_GLOBAL) {
       n_global++;
@@ -233,10 +240,22 @@ static RmtAxisMode rmt_axis_mode(CtKernelInfo const *info) {
   if (n_global == 1 && n_local == 1 && n_global + n_local == info->n_axes) {
     return RMT_AXIS_LOCAL_GLOBAL;
   }
+  if (info->scalar.has_reduce && n_group_reduce == 1 && flat_ok) {
+    return RMT_AXIS_GROUP_REDUCE;
+  }
   if (flat_ok) {
     return RMT_AXIS_FLAT_GRID;
   }
   return RMT_AXIS_UNSUPPORTED;
+}
+
+static u32 rmt_group_reduce_extent(CtKernelInfo const *info) {
+  for (u32 i = 0; i < info->tile.n_axes; i++) {
+    if (info->tile.axis_types[i] == KAX_GROUP_REDUCE) {
+      return info->tile.axis_extents[i];
+    }
+  }
+  return 0;
 }
 
 static int rmt_scalar_op_supported(ScalarUop const *u) {
@@ -340,6 +359,14 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
     }
     threads = total < 256 ? (u32)total : 256u;
     groups  = (u32)((total + (u64)threads - 1) / (u64)threads);
+  } else if (mode == RMT_AXIS_GROUP_REDUCE) {
+    u64 total = rmt_axis_numel(&info);
+    u32 group = rmt_group_reduce_extent(&info);
+    if (total == 0 || total > 0xFFFFFFFFu || group == 0 || group > 256) {
+      return 0;
+    }
+    groups  = (u32)total;
+    threads = group;
   }
   if (groups == 0 || threads == 0) {
     return 0;
@@ -664,6 +691,84 @@ static int rmt_emit_store_value(CgBuf *b, KernelEntry const *ke,
   return 1;
 }
 
+static int rmt_emit_group_reduce_store(CgBuf *b, KernelEntry const *ke,
+                                       CtKernelInfo const *info) {
+  ScalarUop const *st = &ke->scalar_uops[info->scalar.store_id];
+  u32 group = rmt_group_reduce_extent(info);
+  if (group == 0 || group > 256) {
+    return 0;
+  }
+  u32 rid = info->tile.scalar_reduce_id;
+  if (rid == 0 || rid >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *ru = &ke->scalar_uops[rid];
+  if ((ru->op != S_REDUCE_SUM && ru->op != S_REDUCE_MAX)
+      || ru->src_count < 2) {
+    return 0;
+  }
+  u32 rng_id = ru->src[1];
+  if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *rng = &ke->scalar_uops[rng_id];
+  if (rng->op != S_RANGE) {
+    return 0;
+  }
+  u32 extent = (u32)(rng->extra & 0xFFFFFFFFu);
+  if (extent == 0) {
+    return 0;
+  }
+
+  cg_append(b, "  threadgroup float _sh%u[%uu];\n", rid, group);
+  if (ru->op == S_REDUCE_MAX) {
+    cg_append(b, "  float _acc%u = -INFINITY;\n", rid);
+  } else {
+    cg_append(b, "  float _acc%u = 0.0f;\n", rid);
+  }
+  cg_append(b, "  for (uint _rk%u = _ltid; _rk%u < %uu; _rk%u += %uu) {\n",
+            rid, rid, extent, rid, group);
+  cg_append(b, "    uint _v%u = _rk%u;\n", rng_id, rid);
+  cg_append(b, "    float _rv%u = ", rid);
+  if (!rmt_emit_value(b, ke, ru->src[0])) {
+    return 0;
+  }
+  cg_append(b, ";\n");
+  if (ru->op == S_REDUCE_MAX) {
+    cg_append(b, "    if (_rv%u > _acc%u) { _acc%u = _rv%u; }\n",
+              rid, rid, rid, rid);
+  } else {
+    cg_append(b, "    _acc%u += _rv%u;\n", rid, rid);
+  }
+  cg_append(b, "  }\n");
+  cg_append(b, "  _sh%u[_ltid] = _acc%u;\n", rid, rid);
+  cg_append(b, "  threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+  cg_append(b, "  for (uint _stride%u = 1u; _stride%u < %uu; _stride%u <<= 1u) {\n",
+            rid, rid, group, rid);
+  cg_append(b, "    if ((_ltid %% (_stride%u << 1u)) == 0u && _ltid + _stride%u < %uu) {\n",
+            rid, rid, group);
+  if (ru->op == S_REDUCE_MAX) {
+    cg_append(b, "      float _other%u = _sh%u[_ltid + _stride%u];\n",
+              rid, rid, rid);
+    cg_append(b, "      if (_other%u > _sh%u[_ltid]) { _sh%u[_ltid] = _other%u; }\n",
+              rid, rid, rid, rid);
+  } else {
+    cg_append(b, "      _sh%u[_ltid] += _sh%u[_ltid + _stride%u];\n",
+              rid, rid, rid);
+  }
+  cg_append(b, "    }\n");
+  cg_append(b, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+  cg_append(b, "  }\n");
+  cg_append(b, "  if (_ltid == 0u) {\n");
+  cg_append(b, "    out[");
+  if (!rmt_emit_index_offset(b, ke, st->src[0])) {
+    return 0;
+  }
+  cg_append(b, "] = _sh%u[0];\n", rid);
+  cg_append(b, "  }\n");
+  return 1;
+}
+
 char *cg_emit_tile_metal(KernelEntry const *ke) {
   CtKernelInfo info;
   if (!rmt_collect_kernel_info(ke, &info)) {
@@ -715,6 +820,11 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
     for (u32 d = 0; d < info.n_axes; d++) {
       cg_append(&b, "  _tk = _tk * %uu + _ta%u;\n", info.axis_extents[d], d);
     }
+  } else if (mode == RMT_AXIS_GROUP_REDUCE) {
+    u64 total = rmt_axis_numel(&info);
+    cg_append(&b, "  _tk = _tgid;\n");
+    cg_append(&b, "  if (_tk >= %lluULL) return;\n",
+              (unsigned long long)total);
   } else {
     u64 total = rmt_axis_numel(&info);
     cg_append(&b, "  _tk = _gid3.x;\n");
@@ -736,6 +846,14 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
   }
 
   ScalarUop const *st = &ke->scalar_uops[info.scalar.store_id];
+  if (mode == RMT_AXIS_GROUP_REDUCE) {
+    if (!rmt_emit_group_reduce_store(&b, ke, &info)) {
+      free(b.buf);
+      return NULL;
+    }
+    cg_append(&b, "}\n");
+    return b.buf;
+  }
   if (info.scalar.has_reduce) {
     cg_append(&b, "  ");
     if (!rmt_emit_store_value(&b, ke, &info)) {
