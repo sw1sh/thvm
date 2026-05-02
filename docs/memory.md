@@ -302,6 +302,17 @@ This avoids backend-specific custom kernels as the main solution.
 Metal GEMM and conv fast paths may exist as compatibility or parity
 bridges, but the target path is lowered primitives plus search.
 
+Boundary fusion policy now runs through a named realize-map rewrite
+harness in `src/schedule/realize_rewrite.c`.  `realize_classify`
+seeds conservative boundaries, then applies rules such as
+`inline-constants`, `inline-large-expand-fanout`,
+`inline-pure-fanout-probe`, and `metal-tile-fanin-cap`.  Set
+`DUMP_REWRITE=1` or `DUMP_FUSION_REWRITE=1` to print the rule hit
+summary for a materialization.  This is the first slice of the
+tinygrad-style approach: keep fusion decisions as explicit rewrite
+rules with legality/cost guards, rather than as untracked classifier
+branches or backend-specific custom kernels.
+
 Metal direct MSL kernels can bind at most 30 input buffers without
 argument buffers.  With `THVM_BACKEND=metal THVM_TILE=1`,
 `realize_classify` therefore splits over-wide ADD/MUL expression

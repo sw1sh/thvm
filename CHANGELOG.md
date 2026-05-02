@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Changed: name realization-boundary fusion rewrites
+
+`realize_classify` now seeds conservative boundaries and then runs a
+named realize-map rewrite table for fusion policy.  Existing
+relaxations such as shared constants, adjacent reduce chains,
+softmax-style reduce broadcast, large Metal `EXPAND` fanout, the
+default-off pure fanout probe, and the Metal tile fan-in cap now report
+rule hit counters via `DUMP_REWRITE=1` / `DUMP_FUSION_REWRITE=1`.
+This starts moving the scheduler toward tinygrad-style rewrite-driven
+fusion instead of hidden classifier branches.
+
 ### Changed: inline constants and gate broad Metal fanout recompute
 
 Shared `UOP_CONST` nodes now stay inline instead of becoming tiny

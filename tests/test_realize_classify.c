@@ -90,6 +90,8 @@ int main(void) {
   realize_classify(c_root);
   CHECK_EQ(realize_consumer_count(two), 2);
   CHECK_EQ(realize_is_realized(two), 0);
+  CHECK_EQ(realize_rewrite_stat_hits("inline-constants"), 1);
+  CHECK(realize_rewrite_stats_len() >= 1);
 
   TEST_BEGIN("realize-classify/reduce-always-realizes");
   // (a + b) reduced -- ADD is a single-consumer intermediate
@@ -154,6 +156,7 @@ int main(void) {
   realize_classify(combined);
   CHECK_EQ(realize_consumer_count(pad), 2);
   CHECK_EQ(realize_is_realized(pad), 0);
+  CHECK_EQ(realize_rewrite_stat_hits("inline-pure-fanout-probe"), 1);
 
   TEST_BEGIN("realize-classify/metal-pure-alu-fanout-still-realizes");
   u32 tn = alloc_f32_tensor(4);
@@ -165,6 +168,7 @@ int main(void) {
   realize_classify(pure_root);
   CHECK_EQ(realize_consumer_count(pure), 2);
   CHECK_EQ(realize_is_realized(pure), 1);
+  CHECK_EQ(realize_rewrite_stat_hits("inline-pure-fanout-probe"), 0);
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
   unsetenv("THVM_INLINE_MULTI_CONSUMER_PURE");

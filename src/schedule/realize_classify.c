@@ -236,9 +236,21 @@ static int realize_fanin_split_child_op(u8 op) {
   return op == UOP_ADD || op == UOP_MUL;
 }
 
-static u32 realize_fanin_term_count(Term t, u64 boundary_root, u32 cap);
+static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
+                                   u32 cap, u32 *hits);
 
-static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root, u32 cap) {
+static u32 realize_fanin_term_count(Term t, u64 boundary_root,
+                                    u32 cap, u32 *hits) {
+  t = term_resolve(t);
+  if (term_tag(t) == TAG_TEN) return 1;
+  if (term_tag(t) == TAG_VAR) return 1;
+  if (term_tag(t) != TAG_UOP) return 0;
+  if (term_ext(t) == UOP_KERNEL) return 1;
+  return realize_fanin_uop_count(term_val(t), boundary_root, cap, hits);
+}
+
+static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
+                                   u32 cap, u32 *hits) {
   if (loc >= HEAP_NEXT) return 1;
   u32 idx = realize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return 1;
@@ -253,7 +265,8 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root, u32 cap) {
   for (u8 i = 0; i < ar; i++) {
     child_idx[i] = 0xFFFFFFFFu;
     Term child = term_resolve(heap_read(loc + i));
-    child_count[i] = realize_fanin_term_count(child, boundary_root, cap);
+    child_count[i] = realize_fanin_term_count(child, boundary_root,
+                                              cap, hits);
     total += child_count[i];
     if (term_tag(child) == TAG_UOP && term_ext(child) != UOP_KERNEL) {
       child_idx[i] = realize_info_find(term_val(child));
@@ -272,31 +285,27 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root, u32 cap) {
       best_size = child_count[i];
     }
     if (best == 0xFF) break;
-    REALIZE_INFO[child_idx[best]].realized = 1;
+    UOpInfo *child_info = &REALIZE_INFO[child_idx[best]];
+    if (!child_info->realized && hits != NULL) (*hits)++;
+    child_info->realized = 1;
     total = total - child_count[best] + 1;
     child_count[best] = 1;
   }
   return total;
 }
 
-static u32 realize_fanin_term_count(Term t, u64 boundary_root, u32 cap) {
-  t = term_resolve(t);
-  if (term_tag(t) == TAG_TEN) return 1;
-  if (term_tag(t) == TAG_VAR) return 1;
-  if (term_tag(t) != TAG_UOP) return 0;
-  if (term_ext(t) == UOP_KERNEL) return 1;
-  return realize_fanin_uop_count(term_val(t), boundary_root, cap);
-}
-
-static void realize_apply_metal_tile_fanin_cap(Term root) {
-  if (!realize_metal_tile_fanin_cap_enabled()) return;
-  if (term_tag(root) != TAG_UOP || term_ext(root) == UOP_KERNEL) return;
+static u32 realize_rule_metal_tile_fanin_cap(Term root) {
+  if (!realize_metal_tile_fanin_cap_enabled()) return 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) == UOP_KERNEL) return 0;
 
   u32 cap = realize_metal_tile_fanin_cap();
+  u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     if (!REALIZE_INFO[i].realized) continue;
-    realize_fanin_uop_count(REALIZE_INFO[i].loc, REALIZE_INFO[i].loc, cap);
+    realize_fanin_uop_count(REALIZE_INFO[i].loc, REALIZE_INFO[i].loc,
+                            cap, &hits);
   }
+  return hits;
 }
 
 static int realize_op_is_movement(u8 op) {
@@ -371,10 +380,12 @@ static u64 realize_inline_multiconsumer_pure_min_numel(void) {
   return 65536;
 }
 
-static void realize_relax_multiconsumer_expands(void) {
+static u32 realize_rule_inline_large_expand_fanout(Term root) {
+  (void)root;
   if (!realize_inline_multiconsumer_expand_enabled()) {
-    return;
+    return 0;
   }
+  u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (!info->realized || info->op != UOP_EXPAND
@@ -396,8 +407,10 @@ static void realize_relax_multiconsumer_expands(void) {
     if (realize_subtree_has_reduce(src, 0)) {
       continue;
     }
+    hits++;
     info->realized = 0;
   }
+  return hits;
 }
 
 static int realize_recompute_pure_op(u8 op) {
@@ -452,11 +465,13 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
   return 1;
 }
 
-static void realize_relax_multiconsumer_pure_recompute(void) {
+static u32 realize_rule_inline_pure_fanout_probe(Term root) {
+  (void)root;
   if (!realize_inline_multiconsumer_pure_enabled()) {
-    return;
+    return 0;
   }
   u64 min_numel = realize_inline_multiconsumer_pure_min_numel();
+  u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (!info->realized || info->consumer_count < 2) {
@@ -481,8 +496,10 @@ static void realize_relax_multiconsumer_pure_recompute(void) {
     if (!has_movement) {
       continue;
     }
+    hits++;
     info->realized = 0;
   }
+  return hits;
 }
 
 static int realize_inline_subtree_has_movement(Term t, u32 depth) {
@@ -514,8 +531,96 @@ static int realize_reduce_chain_source_is_direct(Term t) {
   return idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized;
 }
 
+static u32 realize_reduce_count(void) {
+  u32 n = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    if (REALIZE_INFO[i].op == UOP_REDUCE) n++;
+  }
+  return n;
+}
+
+static int realize_rangeify_enabled(void) {
+  char const *e = getenv("THVM_RANGEIFY");
+  return e == NULL ? 1 : (e[0] != '0');
+}
+
+static u32 realize_rule_inline_constants(Term root) {
+  (void)root;
+  u32 hits = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (info->op != UOP_CONST) continue;
+    if (info->realized) hits++;
+    info->realized = 0;
+  }
+  return hits;
+}
+
+static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
+  (void)root;
+  u32 hits = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (info->op != UOP_REDUCE) continue;
+    ReduceChainInfo rc;
+    Term root_term = term_new(0, TAG_UOP, UOP_REDUCE, info->loc);
+    if (!reduce_chain_collect(root_term, &rc)) continue;
+    if (!realize_reduce_chain_source_is_direct(rc.src)) continue;
+    if (realize_inline_subtree_has_movement(rc.src, 0)) continue;
+    int ok = 1;
+    for (u32 j = 1; j < rc.n_reduces; j++) {
+      u32 cidx = realize_info_find(rc.locs[j]);
+      if (cidx == 0xFFFFFFFFu || REALIZE_INFO[cidx].consumer_count != 1) {
+        ok = 0;
+        break;
+      }
+    }
+    if (!ok) continue;
+    for (u32 j = 1; j < rc.n_reduces; j++) {
+      u32 cidx = realize_info_find(rc.locs[j]);
+      if (cidx == 0xFFFFFFFFu) continue;
+      if (REALIZE_INFO[cidx].realized) hits++;
+      REALIZE_INFO[cidx].realized = 0;
+    }
+  }
+  return hits;
+}
+
+static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
+  (void)root;
+  if (realize_reduce_count() != 1) return 0;
+  u32 hits = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (info->op != UOP_REDUCE)    continue;
+    if (info->consumer_count != 1) continue;
+    if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+    if (info->realized) hits++;
+    info->realized = 0;
+  }
+  return hits;
+}
+
+static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
+  if (term_tag(root) != TAG_UOP) return 0;
+  if (!realize_rangeify_enabled()) return 0;
+  if (realize_reduce_count() != 1) return 0;
+  u64 root_loc = term_val(root);
+  u32 hits = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (info->op != UOP_REDUCE)    continue;
+    if (info->consumer_count != 1) continue;
+    if (!realize_reduce_consumer_is_scalar_tail(info->loc, root_loc)) continue;
+    if (info->realized) hits++;
+    info->realized = 0;
+  }
+  return hits;
+}
+
 fn void realize_classify(Term root) {
   realize_info_clear();
+  realize_rewrite_stats_clear();
   if (term_tag(root) != TAG_UOP) return;
   if (term_ext(root) == UOP_KERNEL) return;
 
@@ -537,97 +642,18 @@ fn void realize_classify(Term root) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->consumer_count >= 2) info->realized = 1;
     if (info->op == UOP_REDUCE)    info->realized = 1;
-    if (info->op == UOP_CONST)     info->realized = 0;
   }
-
-  // Adjacent reductions over a contiguous axis span can stay inside
-  // one KProgOp REDUCE.  Keep the outer reduce as the boundary and
-  // drop the inner reduce boundaries when every inner hop is private
-  // to this chain.  materialize.c re-packs the chain as one wider
-  // reduce using the existing (kind << 24) | inner encoding.
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
-    if (info->op != UOP_REDUCE) continue;
-    ReduceChainInfo rc;
-    Term root_term = term_new(0, TAG_UOP, UOP_REDUCE, info->loc);
-    if (!reduce_chain_collect(root_term, &rc)) continue;
-    if (!realize_reduce_chain_source_is_direct(rc.src)) continue;
-    if (realize_inline_subtree_has_movement(rc.src, 0)) continue;
-    int ok = 1;
-    for (u32 j = 1; j < rc.n_reduces; j++) {
-      u32 cidx = realize_info_find(rc.locs[j]);
-      if (cidx == 0xFFFFFFFFu || REALIZE_INFO[cidx].consumer_count != 1) {
-        ok = 0;
-        break;
-      }
-    }
-    if (!ok) continue;
-    for (u32 j = 1; j < rc.n_reduces; j++) {
-      u32 cidx = realize_info_find(rc.locs[j]);
-      if (cidx != 0xFFFFFFFFu) REALIZE_INFO[cidx].realized = 0;
-    }
-  }
-
-  // Softmax-style relaxation: a REDUCE whose single consumer is a
-  // scalar-preserving ALU chain (RECIP / NEG / SQRT / ...) ending in
-  // an EXPAND back to the reduce SOURCE's shape can be inlined into
-  // the EXPAND's consumer kernel without recomputation cost (the
-  // REDUCE result is a scalar that gets broadcast-elementwise into
-  // the elementwise tail).  Walk the consumer chain: if every hop is
-  // scalar-preserving until an EXPAND, drop the REDUCE's realize bit
-  // so visit() inlines it.
-  //
-  // Conservative additional guard: only relax when this is the SOLE
-  // REDUCE in the whole realize-info graph.  Multi-REDUCE patterns
-  // (cross-entropy + softmax, autograd through reductions, ...)
-  // create complex consumer trees where blindly inlining one REDUCE
-  // can cascade into a kernel-emit bail downstream.  When more than
-  // one REDUCE shows up, fall back to the original "REDUCE always
-  // realizes" rule for everything; that costs the softmax-fusion
-  // win for those graphs but keeps correctness.  A future pass can
-  // count REDUCEs PER consumer-kernel boundary and relax per-kernel
-  // instead of globally.
-  u32 reduce_count = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    if (REALIZE_INFO[i].op == UOP_REDUCE) reduce_count++;
-  }
-  if (reduce_count == 1) {
-    for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-      UOpInfo *info = &REALIZE_INFO[i];
-      if (info->op != UOP_REDUCE)    continue;
-      if (info->consumer_count != 1) continue;
-      if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
-      info->realized = 0;
-    }
-
-    // Phase C-2: scalar-tail relaxation.  When rangeify is enabled
-    // (THVM_RANGEIFY default-on as of Phase E) AND the REDUCE's
-    // single-consumer chain stays at the post-reduce shape and
-    // reaches the realize root (no EXPAND), the consumer kernel can
-    // absorb the REDUCE inline.  Gated on rangeify because the legacy
-    // KProgOp[] dispatch hasn't been audited for the wider scalar-
-    // tail patterns this opens up; THVM_RANGEIFY=0 disables both
-    // this relaxation and the rangeify lower path together.
-    {
-      const char *e = getenv("THVM_RANGEIFY");
-      int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
-      if (rangeify_on) {
-        u64 root_loc = term_val(root);
-        for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-          UOpInfo *info = &REALIZE_INFO[i];
-          if (info->op != UOP_REDUCE)    continue;
-          if (info->consumer_count != 1) continue;
-          if (!realize_reduce_consumer_is_scalar_tail(info->loc, root_loc))
-            continue;
-          info->realized = 0;
-        }
-      }
-    }
-  }
-
-  realize_relax_multiconsumer_expands();
-  realize_relax_multiconsumer_pure_recompute();
-  realize_apply_metal_tile_fanin_cap(root);
+  RealizeRewriteRule rules[] = {
+    {"inline-constants",              realize_rule_inline_constants},
+    {"inline-adjacent-reduce-chains", realize_rule_inline_adjacent_reduce_chains},
+    {"inline-softmax-broadcast-reduce", realize_rule_inline_softmax_broadcast_reduce},
+    {"inline-reduce-scalar-tail",     realize_rule_inline_reduce_scalar_tail},
+    {"inline-large-expand-fanout",    realize_rule_inline_large_expand_fanout},
+    {"inline-pure-fanout-probe",      realize_rule_inline_pure_fanout_probe},
+    {"metal-tile-fanin-cap",          realize_rule_metal_tile_fanin_cap},
+  };
+  realize_rewrite_apply(root, rules, (u32)(sizeof(rules) / sizeof(rules[0])));
+  realize_rewrite_stats_dump();
 }
 
 fn u8 realize_is_realized(Term uop_term) {

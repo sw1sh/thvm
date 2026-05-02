@@ -1211,6 +1211,11 @@ fn u32  realize_info_find(u64 loc);
 fn void realize_classify(Term root);
 fn u8   realize_is_realized(Term uop_term);
 fn u32  realize_consumer_count(Term uop_term);
+fn void realize_rewrite_stats_clear(void);
+fn u32  realize_rewrite_stats_len(void);
+fn char const *realize_rewrite_stat_name(u32 i);
+fn u32  realize_rewrite_stat_hits_at(u32 i);
+fn u32  realize_rewrite_stat_hits(char const *name);
 
 // g2a: after realize_classify populates the boundary set, the
 // scheduler topo-sorts those boundaries by producer-to-consumer
