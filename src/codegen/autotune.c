@@ -74,17 +74,51 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
 }
 
 static void kernel_bench_fire(u32 kid) {
+  if (kid == 0 || kid >= KERNELS_NEXT) {
+    return;
+  }
+  KernelEntry *ke = &KERNELS[kid];
+  if (ke->spliced) {
+    return;
+  }
+  u32 resolved_tids[ke->n_inputs ? ke->n_inputs : 1];
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 tid = ke->input_tids[i];
+    if (tid == 0 && ke->input_terms[i] != 0) {
+      Term r = term_resolve(ke->input_terms[i]);
+      if (term_tag(r) != TAG_TEN) {
+        return;
+      }
+      tid = (u32)term_val(r);
+    }
+    if (tid == 0 || tid >= TENS_NEXT) {
+      return;
+    }
+    resolved_tids[i] = tid;
+  }
+  if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
+    return;
+  }
+  u32 in_buf_ids[ke->n_inputs ? ke->n_inputs : 1];
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    in_buf_ids[i] = TENS[resolved_tids[i]].buf_id;
+  }
+  u32 out_buf_id = TENS[ke->output_tid].buf_id;
+  Backend *b = TENS[ke->output_tid].backend;
+  if (b == NULL || b->dispatch_kernel == NULL) {
+    return;
+  }
   jit_capture_pause();
   backend_dispatch_flush_all();
-  kernel_fire_gen_bump();
-  kernel_fire_by_id(kid);
+  b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   backend_dispatch_flush_all();
   jit_capture_resume();
+  ITRS++;
 }
 
-// Time `n_runs` back-to-back fresh-generation fires of `kid`; return
-// min wallclock in microseconds.  Min (not mean) filters one-shot OS
-// jitter (page faults, scheduler hiccups).
+// Time `n_runs` back-to-back direct dispatches of `kid`; return min
+// wallclock in microseconds.  Min (not mean) filters one-shot OS jitter
+// (page faults, scheduler hiccups).
 fn u64 kernel_bench_us(u32 kid, u32 n_runs) {
   if (n_runs == 0) {
     n_runs = 1;
@@ -170,9 +204,9 @@ fn int kernel_autotune(u32 kid) {
     return 0;
   }
 
-  // Mark autotuned at the START so the bench-loop's kernel_fire_by_id
-  // calls don't recurse back into autotune via kernel_should_autotune.
-  // axes_reset_to_default preserves the flag.
+  // Mark autotuned at the START so nested/direct bench dispatches do
+  // not re-enter this path if a backend helper fires through the public
+  // kernel path.  axes_reset_to_default preserves the flag.
   ke->axes->autotuned = 1;
 
   // Baseline (no opts).

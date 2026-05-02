@@ -20,6 +20,7 @@
 
    Run from repo root:
        wolframscript -f wl/Examples/beautiful-mnist/forward.wls
+       THVM_BACKEND=metal THVM_TILE=1 THVM_AUTOTUNE=1 wolframscript -f wl/Examples/beautiful-mnist/forward.wls
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
@@ -53,17 +54,17 @@ debugPrint["beautiful_mnist params: ",
 
 (* Pre-trained weights would go here; we use random init so the
    prediction shape is what we're checking, not accuracy. *)
+W1 = TTensorCreate @ w1Host;  b1 = TTensorCreate @ b1Host;
+W2 = TTensorCreate @ w2Host;  b2 = TTensorCreate @ b2Host;
+W3 = TTensorCreate @ w3Host;  b3 = TTensorCreate @ b3Host;
+xSlot = TZeros[{1, 28, 28}];
 
 batch  = TMnistBatch[3];
 imgs   = Normal @ TTensorData @ batch["images"];   (* {3, 1, 28, 28} *)
 labels = Normal @ TTensorData @ batch["labels"];
 
-buildForward[wH1_, bH1_, wH2_, bH2_, wH3_, bH3_, img_] :=
-    Module[{W1, b1, W2, b2, W3, b3, x, h1, r1, h2, r2, p2, flat, h3, probs},
-        W1 = TTensorCreate @ wH1;  b1 = TTensorCreate @ bH1;
-        W2 = TTensorCreate @ wH2;  b2 = TTensorCreate @ bH2;
-        W3 = TTensorCreate @ wH3;  b3 = TTensorCreate @ bH3;
-        x  = TTensorCreate @ NumericArray[img, "Real32"];
+buildForward[x_TTerm] :=
+    Module[{h1, r1, h2, r2, p2, flat, h3, probs},
         h1 = TConv2D[x,  W1, b1];           (* {32, 24, 24} *)
         r1 = TReLU[h1];
         h2 = TConv2D[r1, W2, b2];           (* {64, 20, 20} *)
@@ -82,16 +83,30 @@ buildForward[wH1_, bH1_, wH2_, bH2_, wH3_, bH3_, img_] :=
         probs
     ]
 
-debugPrint["per-sample forward pass (random init):"];
+jittedForward = TJit[Function[{}, TRealize @ buildForward[xSlot]]];
+probsTerm = None;
+prevProbs = None;
+
+debugPrint["per-sample forward pass (random init, TJit replay):"];
 Do[
-    Module[{probs, pred, conf},
-        TInit[];
-        probs = Normal @ TTensorData @ TRealize @ buildForward[
-            w1Host, b1Host, w2Host, b2Host, w3Host, b3Host, imgs[[i]]];
+    Module[{probs, pred, conf, delta, t0, dt},
+        TSet[xSlot, TTensorCreate @ NumericArray[imgs[[i]], "Real32"]];
+        t0 = AbsoluteTime[];
+        If[probsTerm === None,
+            probsTerm = jittedForward[],
+            jittedForward[]];
+        dt = AbsoluteTime[] - t0;
+        probs = Normal @ TTensorData @ probsTerm;
+        delta = If[prevProbs === None, 0., Max[Abs[probs - prevProbs]]];
+        prevProbs = probs;
         pred  = Position[probs, Max[probs]][[1, 1]] - 1;
         conf  = Round[Max[probs], 0.001];
         debugPrint["  sample ", i, ": true=", labels[[i]],
-                   " pred=", pred, " confidence=", conf]
+                   " pred=", pred,
+                   " confidence=", conf,
+                   " delta=", NumberForm[delta, {5, 3}],
+                   " wall=", NumberForm[dt * 1000., {7, 1}], "ms",
+                   " jit-replays=", TJitOpCount[jittedForward]]
     ],
     {i, 3}
 ];

@@ -6,6 +6,34 @@ dated section.
 
 ## Unreleased
 
+### Fixed: autotune first-capture producer replay
+
+Fire-time autotune now runs after producer kernels have populated the
+current kernel's inputs, and variant benchmarks dispatch only the
+current kernel directly.  Benchmark fires no longer perturb the real
+fire-generation memo or cause the first `TJit` capture to skip
+upstream producer kernels, so `beautiful-mnist` replays fresh outputs
+after inputs change.  Added a Metal WL regression for the stale
+producer-capture case under `THVM_AUTOTUNE=1`.
+
+### Fixed: high-input TJit capture
+
+`TJit` now records fused kernels with up to 64 input buffers instead
+of dropping dispatches above the old 16-input inline cap.  This keeps
+full forward-pass captures, including `beautiful-mnist`, from falling
+back to partial replay when a fused scalar graph has many tensor
+inputs.  Added a WL regression that captures and replays a 20-input
+fused elementwise kernel.
+
+### Changed: beautiful-mnist forward canary uses replay
+
+`wl/Examples/beautiful-mnist/forward.wls` now builds weights and the
+input slot once, captures the full forward pass with `TJit`, and
+replays it for each sample.  The script reports per-sample wall time,
+captured op count, and output delta, making it a useful architecture
+canary instead of measuring runtime reinitialization and weight
+reconstruction.
+
 ### Fixed: autotune benchmark capture pollution
 
 Fire-time autotune now pauses `TJit` capture while it benchmarks

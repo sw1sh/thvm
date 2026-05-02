@@ -149,6 +149,54 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Fire-time autotune benchmarks must not poison the real TJit
+       capture pass.  After input mutation, replay should refire the
+       full producer chain instead of reusing benchmark intermediates. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result, oldAuto, oldRuns, restore},
+        oldAuto = Environment["THVM_AUTOTUNE"];
+        oldRuns = Environment["THVM_AUTOTUNE_RUNS"];
+        restore[] := (
+            If[StringQ[oldAuto],
+                SetEnvironment["THVM_AUTOTUNE" -> oldAuto],
+                SetEnvironment["THVM_AUTOTUNE" -> ""]];
+            If[StringQ[oldRuns],
+                SetEnvironment["THVM_AUTOTUNE_RUNS" -> oldRuns],
+                SetEnvironment["THVM_AUTOTUNE_RUNS" -> ""]]
+        );
+        SetEnvironment["THVM_AUTOTUNE" -> "1"];
+        SetEnvironment["THVM_AUTOTUNE_RUNS" -> "1"];
+        If[ ctx === 0, restore[]; Return[True]];
+        result = TInContext[ctx,
+            x = TZeros[{1, 8, 8}];
+            w = TTensorCreate @ NumericArray[
+                ConstantArray[1., {2, 1, 3, 3}], "Real32"];
+            b = TZeros[{2}];
+            fc = TTensorCreate @ NumericArray[
+                ConstantArray[1., {4, 72}], "Real32"];
+            TSet[x, TTensorCreate @ NumericArray[
+                ConstantArray[1., {1, 8, 8}], "Real32"]];
+            build[] := TMatVec[fc,
+                TUOpReshape[TReLU[TConv2D[x, w, b]], {1, 72}]];
+            f = TJit[Function[{}, TRealize @ build[]]];
+            out = f[];
+            v1 = Normal @ TTensorData @ out;
+            TSet[x, TTensorCreate @ NumericArray[
+                ConstantArray[2., {1, 8, 8}], "Real32"]];
+            f[];
+            v2 = Normal @ TTensorData @ out;
+            {TJitOpCount[f], v1, v2}
+        ];
+        TContextDestroy[ctx];
+        restore[];
+        result === {3, {648., 648., 648., 648.},
+                    {1296., 1296., 1296., 1296.}}
+    ],
+    True,
+    TestID -> "metal/tjit-autotune-captures-producer-chain"
+]
+
+VerificationTest[
     (* i32 elementwise mul. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result},

@@ -1297,8 +1297,8 @@ fn int  tile_sync_from_scalar(struct KernelEntry *ke);
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 
 // Autotune: walk the proposer's candidates, time each variant
-// against the baseline (no opts) via kernel_fire_by_id, pick the
-// winner, leave the kernel's KernelAxes mutated to the winning
+// against the baseline (no opts) with direct kernel dispatch, pick
+// the winner, leave the kernel's KernelAxes mutated to the winning
 // opt.  Because axes live on the shared KpCacheSlot, the winner
 // auto-applies to every other kid sharing this KProgOp[] (a
 // training loop emitting one new kid per step inherits from

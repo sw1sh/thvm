@@ -40,18 +40,6 @@ fn void kernel_fire_by_id(u32 kid) {
   // would just compute the same thing twice.
   if (ke->spliced) return;
 
-  // First-fire autotune trigger (env opt-in via THVM_AUTOTUNE=1).
-  // Marks `axes->autotuned = 1` so subsequent fires skip the
-  // bench loop; per-program-shape sharing means every other kid
-  // with this KProgOp[] inherits the winner.  kernel_autotune
-  // recurses into kernel_fire_by_id to bench each variant; the
-  // autotuned-flag check above breaks the recursion (autotune
-  // sets the flag at completion, but axes_reset_to_default
-  // preserves it across variant explorations).
-  if (kernel_should_autotune(ke)) {
-    kernel_autotune(kid);
-  }
-
   // Resolve any symbolic input slots first (input_tids[i] == 0 +
   // input_terms[i] != 0).  These come from materialize_uop_in_env
   // when a child was a free TAG_VAR; by fire time, APP-LAM beta
@@ -93,6 +81,14 @@ fn void kernel_fire_by_id(u32 kid) {
     in_buf_ids[i] = TENS[resolved_tids[i]].buf_id;
   }
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
+
+  // First-fire autotune trigger (env opt-in via THVM_AUTOTUNE=1).
+  // Run it after producers are populated; autotune benchmarks the
+  // current kernel directly over these ready input buffers, so it
+  // doesn't perturb the real fire-generation memo or TJit capture.
+  if (kernel_should_autotune(ke)) {
+    kernel_autotune(kid);
+  }
 
   Backend *b = TENS[ke->output_tid].backend;
   if (b && b->dispatch_kernel) {

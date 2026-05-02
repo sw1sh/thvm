@@ -49,7 +49,10 @@ typedef enum {
   JIT_OP_ASSIGN   = 1
 } JitOpKind;
 
-#define JIT_OP_INLINE_INPUTS 16
+// Full fused forward kernels can legitimately have dozens of input
+// buffers (beautiful_mnist hits 26 today).  Keep capture records inline
+// for replay speed; switch to a sidecar input table if this grows again.
+#define JIT_OP_INLINE_INPUTS 64
 
 typedef struct {
   JitOpKind kind;

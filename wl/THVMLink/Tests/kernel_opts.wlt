@@ -449,6 +449,27 @@ VerificationTest[
     TestID -> "kernel-opts/tjit-autotune-bench-fires-not-captured"
 ]
 
+VerificationTest[
+    (* Full fused forwards can exceed the old 16-input inline capture
+       cap.  A single high-input fused elementwise kernel should still
+       record as one replay op. *)
+    TInit[];
+    xs = Table[
+        TTensorCreate @ NumericArray[N @ Range[i, i + 3], "Real32"],
+        {i, 20}];
+    expr = Fold[TUOpAdd, First[xs], Rest[xs]];
+    f = TJit[Function[{}, TRealize @ expr]];
+    out = f[];
+    TSet[xs[[1]], TTensorCreate @ NumericArray[N @ Range[100, 103], "Real32"]];
+    f[];
+    {TJitOpCount[f],
+     Round[Normal @ TTensorData @ out, 0.001]},
+    {1, Round[
+        Normal @ (N @ Range[100, 103] + Total[Table[N @ Range[i, i + 3], {i, 2, 20}]]),
+        0.001]},
+    TestID -> "kernel-opts/tjit-captures-high-input-kernel"
+]
+
 (* === per-program-shape sharing: opt on kid_1 visible on kid_2
        when both kids share the same KProgOp[] via the cache.  This
        is what makes the proposer + auto-bench (next pass) actually
