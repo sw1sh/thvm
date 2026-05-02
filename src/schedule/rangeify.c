@@ -460,6 +460,8 @@ static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
   return rangeify_emit_binary(ke, op, DT_INT64, a, b);
 }
 
+static u32 emit_valid_and(KernelEntry *ke, u32 a, u32 b);
+
 static u32 emit_iwhere(KernelEntry *ke, u32 dtype,
                        u32 cond, u32 yes_value, u32 no_value) {
   if (cond == 0 || yes_value == no_value) {
@@ -468,6 +470,14 @@ static u32 emit_iwhere(KernelEntry *ke, u32 dtype,
   i64 cv = 0;
   if (scalar_iconst_value(ke, cond, &cv)) {
     return cv != 0 ? yes_value : no_value;
+  }
+  if (yes_value != 0 && yes_value < ke->n_scalar_uops) {
+    ScalarUop const *yes = &ke->scalar_uops[yes_value];
+    if (yes->op == S_IWHERE && yes->src_count == 3
+        && yes->src[2] == no_value) {
+      u32 combined = emit_valid_and(ke, cond, yes->src[0]);
+      return emit_iwhere(ke, dtype, combined, yes->src[1], no_value);
+    }
   }
   u32 src[3] = {cond, yes_value, no_value};
   return rangeify_emit(ke, S_IWHERE, dtype, 3, src, 0);

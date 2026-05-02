@@ -160,6 +160,13 @@ int main(void) {
   CHECK_EQ(ke->scalar_uops[mi_where].src[0], mi_mask);
   CHECK_EQ(ke->scalar_uops[mi_where].src[1], mi_yes);
   CHECK_EQ(ke->scalar_uops[mi_where].src[2], mi_no);
+  u32 mi_mask2 = rangeify_emit_binary(ke, S_ILT, DT_INT64, mi_mask, mi_one);
+  u32 mi_nested = emit_iwhere(ke, DT_FP32, mi_mask, mi_yes, mi_no);
+  u32 mi_flat = emit_iwhere(ke, DT_FP32, mi_mask2, mi_nested, mi_no);
+  CHECK_EQ(ke->scalar_uops[mi_flat].op, S_IWHERE);
+  CHECK_EQ(ke->scalar_uops[ke->scalar_uops[mi_flat].src[0]].op, S_IAND);
+  CHECK_EQ(ke->scalar_uops[mi_flat].src[1], mi_yes);
+  CHECK_EQ(ke->scalar_uops[mi_flat].src[2], mi_no);
   u32 mi_hi_only = emit_pad_bounds_mask(ke, mi_mask, 0, 4);
   CHECK_EQ(ke->scalar_uops[mi_hi_only].op, S_ILT);
   CHECK_EQ(ke->scalar_uops[mi_hi_only].src[0], mi_mask);

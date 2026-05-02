@@ -98,7 +98,7 @@ boundaries.
 | --- | --- | --- |
 | Pattern infrastructure: `UPat`, `PatternMatcher`, `graph_rewrite`, matcher composition, bottom-up walk, rewrite stats | `tinygrad/uop/ops.py`, `tinygrad/uop/upat.py` | Partial. `realize_rewrite.c` names realize-boundary rules; `uop_view` and `uop_graph_rewrite` now provide UOp inspection, bottom-up traversal, memoization, parent rebuilds, replacement callbacks, and hit stats, but not declarative UPat-style captures. |
 | Algebraic/symbolic simplification: constants, identities, commutative canonicalization, div/mod recombine, cast/bitcast folding, boolean/where folding | `tinygrad/uop/symbolic.py` | Partial. Constructor-time rules live in `src/uop/rewrite.c`; `uop_graph_simplify` now reuses the safe unary/binary/cast/bitcast/movement-chain subset as named graph rules, and `uop_graph_simplify_checked` gates materializer use on shape/dtype preservation. Big missing piece is index expression simplification. |
-| Valid-mask simplification and `WHERE`/load movement | `pm_simplify_valid`, `pm_move_where_on_load` in `tinygrad/uop/symbolic.py` | Partial. Rangeify now folds `S_IAND` identity masks and constant-condition `S_IWHERE` through shared emit helpers, and PAD lowering sites share one canonical bounds-mask helper. General `WHERE`/load movement is still missing. |
+| Valid-mask simplification and `WHERE`/load movement | `pm_simplify_valid`, `pm_move_where_on_load` in `tinygrad/uop/symbolic.py` | Partial. Rangeify now folds `S_IAND` identity masks, constant-condition `S_IWHERE`, and nested `WHERE(mask, WHERE(mask, value, zero), zero)` through shared emit helpers; PAD lowering sites share one canonical bounds-mask helper. General `WHERE`/load movement into pointer/index form is still missing. |
 | Realize-map seeding and rangeify application | `pm_generate_realize_map`, `pm_apply_rangeify` in `tinygrad/schedule/indexing.py` | Partial. `realize_classify.c` seeds boundaries; `rangeify.c` emits scalar graphs, but not through a general rewrite table. |
 | Movement-to-index rewrites | `apply_movement_op`, `pm_mops`, `pm_syntactic_sugar` in `tinygrad/schedule/rangeify.py` | Partial. THVM has edge-local rangeify fixes and view-only movement paths; `uop_graph_simplify` now has a reusable `movement-identity` table entry for no-op reshape/expand/permute/pad/shrink/flip. PAD-to-mask and full movement-to-index rules remain missing. |
 | Early schedule cleanup: function/tuple resolution, copy/store hazards, reduce split, movement cleanup | `earliest_rewrites`, `mop_cleanup`, `pm_fold_moved_after` | Partial/ad-hoc. Copy/store hazards and function/multi rules are not the current beautiful-mnist bottleneck. |
@@ -141,7 +141,8 @@ goal:
    they reach rangeify.  Rangeify also has shared valid-mask helpers
    that fold redundant `S_IAND` and constant `S_IWHERE` nodes emitted
    by PAD/RESHAPE mask paths, plus one PAD bounds-mask helper for the
-   canonical `lo <= iter < hi` expression.
+   canonical `lo <= iter < hi` expression.  Nested masked values are
+   flattened into one `S_IWHERE` with a combined mask.
 4. Add rewriteable `BUFFERIZE`/`INDEX` schedule IR so bufferize
    insertion/removal is not hard-coded into `realize_classify`.
 5. Port range/reduce simplification and reduce-to-accumulator rules.

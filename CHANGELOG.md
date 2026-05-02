@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: normalize nested scalar masked values
+
+`emit_iwhere` now flattens `WHERE(mask2, WHERE(mask1, value, zero),
+zero)` into one guarded value with a combined valid mask.  PAD and
+RESHAPE paths that wrap already-masked loads now produce a single
+canonical `S_IWHERE` boundary instead of nested mask nodes.
+
 ### Added: centralize PAD bounds-mask emission
 
 Rangeify now builds PAD per-axis bounds checks through one
