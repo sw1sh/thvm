@@ -329,8 +329,8 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
     case S_CONST: {
       u32 bits = (u32)(u->extra & 0xFFFFFFFFu);
       if (u->dtype == DT_FP32) {
-        f32 v; memcpy(&v, &bits, 4);
-        cg_append(b, "%.9gf", (double)v);
+        cg_append(b, "({ union { uint32_t u; float f; } _c%u = { 0x%08xu }; _c%u.f; })",
+                  op_id, bits, op_id);
       } else {
         f32 v; memcpy(&v, &bits, 4);
         cg_append(b, "%.17g", (double)(f64)v);

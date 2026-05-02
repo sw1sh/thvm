@@ -323,8 +323,9 @@ VerificationTest[
     src  = TKernelSource[kid, "C"];
     post = Normal @ TTensorData @ TRealize @ TUOpAdd[TUOpMul[xT, yT], TUOpMul[TUOpConst[2.0], xT]];
     {StringContainsQ[src, "#pragma clang loop unroll_count(8)"],
+     StringContainsQ[src, "0x40000000"],
      AllTrue[Thread[Abs[pre - post] < 1.0*^-5], TrueQ]},
-    {True, True},
+    {True, True, True},
     TestID -> "kernel-opts/codegen-upcast-pragma-correct"
 ]
 
@@ -351,16 +352,20 @@ VerificationTest[
     yT = TTensorCreate @ N @ Range[1024];
     TRealize @ TUOpAdd[TUOpMul[xT, yT], TUOpMul[TUOpConst[2.0], xT]];
     kid = TKernelCount[] - 1;
+    before = TKernelDispatchCount[kid];
     res = TKernelVariants[kid];
+    after = TKernelDispatchCount[kid];
     {(* Slot 0 is baseline (Opt -> None). *)
      res[[1, 1]]["Opt"],
      (* Subsequent slots match TKernelProposed candidates. *)
      #["Opt"] & /@ res[[2 ;;, 1]],
      (* Every variant has a measured WallUs. *)
      AllTrue[ #["WallUs"] & /@ res[[All, 1]], # >= 0 &],
+     (* Bench fires must bypass the per-realize fire-generation memo. *)
+     after > before,
      (* Inspect-only: axes left at baseline (Applied empty). *)
      First[TKernelOpts[kid]]["Applied"]},
-    {None, TKernelProposed[kid], True, {}},
+    {None, TKernelProposed[kid], True, True, {}},
     TestID -> "kernel-opts/variants-inspect-only"
 ]
 

@@ -86,6 +86,14 @@ int main(void) {
   CHECK_EQ(K1->consumer_count, 2);
   CHECK_EQ(CPU_BUFS[k1_buf].freeable, 0);
 
+  TEST_BEGIN("kernel-fire/benchmark-fire-forces-new-generations");
+  u32 before_k1 = cg_kernel_dispatch_count(k1);
+  u32 before_k2 = cg_kernel_dispatch_count(k2);
+  u64 bench_us = kernel_bench_us(k2, 3);
+  (void)bench_us;
+  CHECK_EQ(cg_kernel_dispatch_count(k1), before_k1 + 3);
+  CHECK_EQ(cg_kernel_dispatch_count(k2), before_k2 + 3);
+
   TEST_BEGIN("kernel-fire/leaf-input-bufs-not-marked-freeable");
   u32 a_buf = TENS[(u32)term_val(a)].buf_id;
   u32 b_buf = TENS[(u32)term_val(b)].buf_id;

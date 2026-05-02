@@ -286,9 +286,9 @@ static void rc_loop_close_reduce(CgBuf *b, u32 reduce_src_raw, u8 kind,
 static void rc_emit_const(CgBuf *b, u32 step, u32 dtype, u32 bits) {
   const char *T = rc_c_type(dtype);
   if (dtype == DT_FP32) {
-    f32 v;
-    memcpy(&v, &bits, sizeof v);
-    cg_append(b, "    %s r%u = %.17gf;\n", T, step, v);
+    cg_append(b, "    union { uint32_t u; float f; } _c%u = { 0x%08xu };\n",
+              step, bits);
+    cg_append(b, "    %s r%u = _c%u.f;\n", T, step, step);
   } else if (dtype == DT_FP64) {
     f32 v;
     memcpy(&v, &bits, sizeof v);

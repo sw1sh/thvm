@@ -1416,6 +1416,8 @@ void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
 extern Backend CPU_BACKEND;
 extern Backend METAL_BACKEND;
 
+fn void cpu_jit_cache_reset(void);
+
 // Allocate a borrowed buffer: we don't own `data`, and on release we
 // call `on_release(handle)` instead of free().  Used by the WL bridge
 // to share a Shared NumericArray's bytes without copying.

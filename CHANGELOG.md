@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Fixed: autotune benchmark fires
+
+Fixed `TKernelVariants` and `TKernelAutotune` benchmarking so each
+timed run advances the kernel-fire generation.  Variant benchmarks
+now actually dispatch kernels after a prior `TRealize` instead of
+being skipped by the per-realize fire memo and reporting zero-work
+measurements.  The CPU JIT cache is now reset with the runtime
+lifecycle, and generated C emits exact f32 constants via raw-bit
+unions instead of invalid literals such as `2f`.
+
 ### Added: LeNet training benchmark
 
 Added `wl/Examples/lenet-mnist/bench-train.wls`, a training benchmark

@@ -436,6 +436,9 @@ void thvm_init(void) {
                              // prior session (their kid pointers
                              // would refer to the now-cleared
                              // KERNELS table).
+  cpu_jit_cache_reset();     // close dlopen'd JIT variants from the
+                             // previous session before new keys reuse
+                             // the process-global cache table.
   cg_profile_reset();        // per-kid FLOPS / dispatch counters; reset
                              // so each session starts at zero.
   // Cheney semi-spaces: split HEAP_CAP in half.  heap_alloc bumps
@@ -467,6 +470,7 @@ void thvm_free(void) {
   extern_pin_clear();
   extern_pin_handle_clear();
   jit_capture_reset_all();
+  cpu_jit_cache_reset();
   cg_profile_reset();
   free(HEAP);            HEAP            = NULL;
   free(WNF_STACK);       WNF_STACK       = NULL;

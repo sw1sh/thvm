@@ -37,8 +37,13 @@ static void axes_reset_to_default(KernelEntry *ke) {
   axes_default_for(ke);
 }
 
-// Time `n_runs` back-to-back kernel_fire_by_id calls; return min
-// wallclock in microseconds.  Min (not mean) filters one-shot OS
+static void kernel_bench_fire(u32 kid) {
+  kernel_fire_gen_bump();
+  kernel_fire_by_id(kid);
+}
+
+// Time `n_runs` back-to-back fresh-generation fires of `kid`; return
+// min wallclock in microseconds.  Min (not mean) filters one-shot OS
 // jitter (page faults, scheduler hiccups).
 fn u64 kernel_bench_us(u32 kid, u32 n_runs) {
   if (n_runs == 0) {
@@ -47,7 +52,7 @@ fn u64 kernel_bench_us(u32 kid, u32 n_runs) {
   u64 best = (u64)-1;
   for (u32 i = 0; i < n_runs; i++) {
     u64 t0 = cg_now_us();
-    kernel_fire_by_id(kid);
+    kernel_bench_fire(kid);
     u64 dt = cg_now_us() - t0;
     if (dt < best) best = dt;
   }
@@ -76,7 +81,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
 
   // Baseline first.
   axes_reset_to_default(ke);
-  kernel_fire_by_id(kid);                         // JIT warm
+  kernel_bench_fire(kid);                         // JIT warm
   out_opts[0] = (KOpt){ KOP_NONE, 0, 0 };
   out_us  [0] = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
 
@@ -88,7 +93,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
       out_us  [i + 1] = 0;
       continue;
     }
-    kernel_fire_by_id(kid);
+    kernel_bench_fire(kid);
     out_opts[i + 1] = cands[i];
     out_us  [i + 1] = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
   }
@@ -134,14 +139,14 @@ fn int kernel_autotune(u32 kid) {
   // Warm the JIT so the first variant doesn't pay the compile cost
   // alone -- compile each before timing the bench loop, so the
   // measurements compare hot kernels.
-  kernel_fire_by_id(kid);
+  kernel_bench_fire(kid);
   u64 best_us = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
   KOpt best_opt = { KOP_NONE, 0, 0 };
 
   for (u32 i = 0; i < n_cand; i++) {
     axes_reset_to_default(ke);
     if (!axes_apply_opt(ke->axes, candidates[i])) continue;
-    kernel_fire_by_id(kid);                     // JIT warm
+    kernel_bench_fire(kid);                     // JIT warm
     u64 us = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
     if (us < best_us) {
       best_us  = us;
