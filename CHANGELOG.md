@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Changed: clarify rewrite-fusion as one goal
+
+`docs/plans/rewrite_fusion.md` now frames the work as a single goal:
+build a tinygrad-style UOp rewrite pipeline that lowers high-level
+tensor graphs into legal, autotunable scalar/tile kernels for Metal
+beautiful-mnist parity.  The tinygrad rule inventory is now a parity
+checklist, and the coverage order is framed as implementation phases
+under that goal.
+
 ### Changed: inventory tinygrad rewrite rule families
 
 The rewrite-fusion plan now tracks the declarative tinygrad

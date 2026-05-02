@@ -2,20 +2,27 @@
 
 Status: active.
 
-Tinygrad's fusion machinery is organized around rewriteable UOps:
-`UPat`/`PatternMatcher` rules canonicalize tensor graphs, rangeify
-movement into explicit index expressions, insert and remove
-`BUFFERIZE` nodes, compile kernels, run beam/local-size rewrites, and
-then memory-plan the captured linear replay.
+## Goal
 
-THVM should follow that shape.  Fusion should not live as custom
-backend kernels or scattered `if` chains.  The pipeline target is:
+Build a tinygrad-style UOp rewrite pipeline that lowers high-level
+tensor graphs into legal, autotunable scalar/tile kernels, eliminating
+unnecessary materialization and kernel-count overhead for Metal
+beautiful-mnist without relying on custom backend kernels.
+
+Custom GEMM, Conv, or FlashAttention fast paths may exist as
+compatibility bridges, but the primary strategy is lowered primitives
+plus search.
+
+## Acceptance Criteria
+
+The rewrite pipeline is good enough when it can:
 
 1. Seed conservative realization boundaries.
-2. Rewrite the boundary map under named legality/cost rules.
-3. Rangeify each boundary into scalar index/load/store expressions.
+2. Rewrite boundary maps under named legality/cost rules.
+3. Lower each boundary into scalar range/index/load/store expressions.
 4. Legalize scalar graphs into tile UOps.
-5. Autotune tile options and replay/memory plans.
+5. Autotune tile options.
+6. Replay kernels with bounded Metal memory planning.
 
 ## Current Slice
 
@@ -67,12 +74,12 @@ must be guarded by scalar/tile legality, not only by UOp purity.
 - Memory-plan rewrites over captured replay slots, sharing the same
   rule-hit diagnostics.
 
-## Tinygrad Rule Inventory
+## Parity Checklist
 
 Tinygrad has many declarative `PatternMatcher([...])` collections.
-For fusion parity, the important target is not literal one-for-one
-syntax, but covering the same rewrite families in the same pipeline
-positions.  Renderer string-format rules are lower priority than
+This checklist supports the single goal above: cover the same rewrite
+families in the same pipeline positions, without copying every rule
+literally.  Renderer string-format rules are lower priority than
 scheduler/rangeify/codegen rules because they do not decide fusion
 boundaries.
 
@@ -101,10 +108,10 @@ replace a UOp pattern matcher because fusion rules need op classes,
 shape/dtype predicates, consumer context, bottom-up graph memoization,
 and cost/legality checks.
 
-## Coverage Order
+## Implementation Phases
 
-For beautiful-mnist parity, implement the missing families in this
-order:
+Implement the missing rewrite families in this order under the single
+goal:
 
 1. General UOp graph rewrite skeleton: op/class predicates, child
    captures, bottom-up traversal, replacement callback, memo, and
