@@ -141,8 +141,8 @@ int main(void) {
   // Refcount still 1, buffer should still be readable.
   char tmp[8];
   CHECK_EQ(CURRENT_BACKEND->buf_read(bid2, tmp, sizeof(tmp)), 0);
-  CURRENT_BACKEND->buf_decref(bid2);  // drops to 0; frees.
-  // Now invalid; read should fail.
+  CURRENT_BACKEND->buf_decref(bid2);  // drops to 0; recycles.
+  // Refcount-0 freelist slots are invalid until reallocated.
   CHECK_EQ(CURRENT_BACKEND->buf_read(bid2, tmp, sizeof(tmp)), -1);
   thvm_free();
 
@@ -643,6 +643,29 @@ int main(void) {
     // 32-byte request can't reuse a 64-byte slot.
     u32 b = METAL_BACKEND.buf_alloc(32);
     CHECK(b != a);
+  }
+  thvm_free();
+
+  TEST_BEGIN("metal-real/decref-then-alloc-recycles-slot");
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 a = METAL_BACKEND.buf_alloc(128);
+    CHECK(a > 0);
+    METAL_BACKEND.buf_decref(a);
+    CHECK_EQ(METAL_BACKEND.buf_read(a, &a, sizeof(a)), -1);
+    u32 b = METAL_BACKEND.buf_alloc(128);
+    CHECK_EQ(b, a);
+  }
+  thvm_free();
+
+  TEST_BEGIN("metal-real/free-then-alloc-reuses-empty-table-slot");
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    u32 a = METAL_BACKEND.buf_alloc(64);
+    CHECK(a > 0);
+    METAL_BACKEND.buf_free(a);
+    u32 b = METAL_BACKEND.buf_alloc(32);
+    CHECK_EQ(b, a);
   }
   thvm_free();
 

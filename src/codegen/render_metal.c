@@ -246,6 +246,9 @@ static int rmt_scalar_op_supported(ScalarUop const *u) {
 }
 
 static int rmt_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
+  if (ke->n_inputs > 30) {
+    return 0;
+  }
   if (!ct_collect_kernel_info(ke, out)) {
     return 0;
   }

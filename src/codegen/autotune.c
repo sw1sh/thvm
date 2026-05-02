@@ -9,10 +9,9 @@
 // inherits the autotuned variant on iter 2+.
 //
 // Reset semantics: each variant is benched against the SAME baseline
-// axes (no opts).  Composite proposals (UNROLL=4 then UPCAST=2) are
-// not supported in this MVP -- proposers return single-opt candidates
-// only.  When a multi-opt proposer arrives it should append a new
-// outer loop here that explores combinations.
+// axes (no opts).  Proposers return a single visible KOpt per
+// candidate; the Metal tile LOCAL candidate is internally expanded to
+// LOCAL + matching GLOBAL because the renderer needs both bindings.
 
 // Number of dispatches per variant.  Larger reduces noise but costs
 // real wallclock; 5 is enough to separate small kernels from each
@@ -35,6 +34,28 @@ static void axes_reset_to_default(KernelEntry *ke) {
   ke->axes->autotuned = autotuned;
   ke->axes->version   = version;
   axes_default_for(ke);
+}
+
+static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
+  if (ke == NULL || ke->axes == NULL) {
+    return 0;
+  }
+  if (opt.op != KOP_LOCAL) {
+    return axes_apply_opt(ke->axes, opt);
+  }
+  if (!axes_apply_opt(ke->axes, opt)) {
+    return 0;
+  }
+  if (opt.axis >= ke->axes->n_axes
+      || ke->axes->axis_types[opt.axis] != KAX_LOOP) {
+    return 0;
+  }
+  KOpt global = {
+    .op   = KOP_GLOBAL,
+    .axis = opt.axis,
+    .arg  = ke->axes->full_shape[opt.axis],
+  };
+  return axes_apply_opt(ke->axes, global);
 }
 
 static void kernel_bench_fire(u32 kid) {
@@ -88,7 +109,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
   // Each candidate.
   for (u32 i = 0; i + 1 < n_out; i++) {
     axes_reset_to_default(ke);
-    if (!axes_apply_opt(ke->axes, cands[i])) {
+    if (!kernel_apply_tune_candidate(ke, cands[i])) {
       out_opts[i + 1] = (KOpt){ KOP_NONE, 0, 0 };
       out_us  [i + 1] = 0;
       continue;
@@ -145,7 +166,7 @@ fn int kernel_autotune(u32 kid) {
 
   for (u32 i = 0; i < n_cand; i++) {
     axes_reset_to_default(ke);
-    if (!axes_apply_opt(ke->axes, candidates[i])) continue;
+    if (!kernel_apply_tune_candidate(ke, candidates[i])) continue;
     kernel_bench_fire(kid);                     // JIT warm
     u64 us = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
     if (us < best_us) {
@@ -158,7 +179,7 @@ fn int kernel_autotune(u32 kid) {
   // `autotuned` was set at the start; reset_to_default preserves it.
   axes_reset_to_default(ke);
   if (best_opt.op != KOP_NONE) {
-    axes_apply_opt(ke->axes, best_opt);
+    kernel_apply_tune_candidate(ke, best_opt);
     tile_sync_from_scalar(ke);
     return 1;
   }

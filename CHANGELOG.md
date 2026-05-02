@@ -6,6 +6,18 @@ dated section.
 
 ## Unreleased
 
+### Fixed: Metal training buffer reuse and tile autotune gates
+
+Metal buffers whose refcount drops to zero now recycle through the
+freelist, and the allocator can reuse empty table slots before growing
+`METAL_BUFS_NEXT`.  Four-step LeNet/Adam training with
+`THVM_BACKEND=metal THVM_TILE=1` now completes without
+`metal_buf_alloc -- buffer table full` warnings.  Metal autotune also
+has a real `LOCAL` proposal path for supported rank-1 f32 tile kernels:
+the autotune loop expands `LOCAL` candidates to `LOCAL + GLOBAL`, and
+rejects tile variants with more than 30 MSL buffer bindings before
+compilation.
+
 ### Changed: refreshed LeNet autotune bench plan
 
 Revised the Phase 16 benchmark plan around the current state:

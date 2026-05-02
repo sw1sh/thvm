@@ -97,12 +97,15 @@ plans build distinct variants.
 - The old `Conv2D + ReLU + MaxPool2d` weight-gradient shape bug is
   fixed in the current tree; the repro returns `{2, 1, 3, 3}`.
 - Metal primitive coverage is green on Apple M3 Max:
-  `test_metal_real` 200/200 and `metal_dtypes.wlt` 5/5.
-- Metal LeNet forward, full input-gradient smoke, and one Adam step
-  pass.  Four Adam steps complete but emit many
-  `metal_buf_alloc -- buffer table full` warnings and flatten near
-  loss `1.9259`, so Metal is functionally alive but not yet a clean
-  performance baseline.
+  `test_metal_real` 205/205 and `metal_dtypes.wlt` 5/5.
+- Metal LeNet forward, full input-gradient smoke, and Adam training
+  pass.  `THVM_BACKEND=metal THVM_TILE=1 N_STEPS=4 train.wls`
+  produced `{2.6071, 1.8054, 1.1324, 0.6546, 0.3559}` with no
+  buffer-table-full warnings on May 2, 2026.
+- Metal fire-time autotune is wired for supported tile kernels:
+  `LOCAL` proposals are expanded internally to `LOCAL + GLOBAL`, and
+  impossible tile variants with more than 30 input buffers are rejected
+  before MSL compilation.
 
 ## Current Measurement Plan
 
@@ -115,18 +118,19 @@ plans build distinct variants.
    candidates, `TKernelProgramKey` groups, and selected reps.  The
    rangeified/axes-only schedule cache should prevent repeated
    training iterations from benchmarking identical schedule shapes.
-3. **Metal correctness smoke before Metal perf.**  Keep Metal perf
-   numbers separate until the buffer-table pressure is fixed.  The
-   current acceptance bar for Metal is: forward passes, grad-check,
-   one Adam step, `test_metal_real`, and `metal_dtypes.wlt`.
-4. **Metal memory follow-up.**  Diagnose the buffer-table-full spam in
-   4-step Metal training before treating Metal A/B timings as useful.
-   Likely areas: buffer freelist reuse, temporary pre-materialization
-   buffers, and per-step preservation boundaries.
-5. **Autotune value.**  Existing UPCAST/UNROLL candidates often report
-   no winner on tiny kernels.  Real wins likely need broader
-   opt classes (`LOCAL`/`GLOBAL` proposer for Metal tile, structured
-   axis-order renderers, and eventually `TILE_MMA`).
+3. **Metal correctness and autotune smoke.**  Run
+   `THVM_BACKEND=metal THVM_TILE=1 N_STEPS=4 train.wls` for the clean
+   training baseline, then `THVM_BACKEND=metal THVM_TILE=1
+   THVM_AUTOTUNE=1 N_STEPS=1 train.wls` to exercise fire-time tuning
+   without post-realize kernel stripping.
+4. **Post-hoc Metal inspection.**  Use `THVM_KGC=0` when running
+   `autotune.wls` as an inspection tool; otherwise kernel GC may strip
+   program arrays after `TRealize`, leaving only shared axes metadata.
+5. **Autotune value.**  Metal now has real `LOCAL/GLOBAL` tile
+   candidates for rank-1 f32 scalar/tile kernels and MSL `UNROLL` for
+   supported reduce-tail JIT kernels.  Larger wins still need
+   structured multi-axis tile rendering, reductions over local memory,
+   and eventually `TILE_MMA`.
 
 For tiny isolated kernels the autotune correctly reports either
 "no opt beat baseline" (when clang's `-O2` already vectorises)

@@ -7,6 +7,10 @@
 //   reduce-tail kernel + axis_size % factor == 0 -> propose UNROLL
 //   factor for factor in {2, 4, 8, 16}.
 //
+//   THVM_BACKEND=metal + THVM_TILE=1 + rank-1 f32 scalar/tile kernel
+//   -> propose LOCAL tile factors.  The autotune loop applies the
+//   matching outer GLOBAL mark when benchmarking these candidates.
+//
 // As more opt classes get codegen support (UPCAST output axes,
 // LOCAL/GLOBAL Metal bindings, GROUP_REDUCE, etc.) they slot in
 // here as additional rules.  The output is a flat list of KOpt;
@@ -50,6 +54,77 @@ static u8 propose_first_loop_axis(KernelEntry const *ke, u8 start) {
   return 0xFF;
 }
 
+static int propose_metal_backend_enabled(void) {
+  char const *backend = getenv("THVM_BACKEND");
+  return backend != NULL && strcmp(backend, "metal") == 0;
+}
+
+static int propose_metal_tile_enabled(void) {
+  char const *tile    = getenv("THVM_TILE");
+  return propose_metal_backend_enabled() && tile != NULL && tile[0] == '1';
+}
+
+static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
+  if (!propose_metal_backend_enabled()) {
+    return 1;
+  }
+  if (ke->n_ops == 0 || ke->program[ke->n_ops - 1].opcode != UOP_REDUCE) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ke->input_dtypes[i] != DT_FP32) {
+      return 0;
+    }
+  }
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    KProgOp const *op = &ke->program[i];
+    if (op->dtype != DT_FP32) {
+      return 0;
+    }
+    switch (op->opcode) {
+      case UOP_CONST:
+      case UOP_ADD:
+      case UOP_MUL:
+      case UOP_NEG:
+      case UOP_RECIP:
+      case UOP_SQRT:
+      case UOP_EXP2:
+      case UOP_LOG2:
+      case UOP_CMPLT:
+      case UOP_CMPEQ:
+        break;
+      case UOP_REDUCE:
+        if (i + 1 != ke->n_ops) {
+          return 0;
+        }
+        break;
+      default:
+        return 0;
+    }
+  }
+  return 1;
+}
+
+static int propose_metal_tile_kernel(KernelEntry const *ke) {
+  if (!propose_metal_tile_enabled()) {
+    return 0;
+  }
+  if (ke->output_dtype != DT_FP32 || ke->scalar_uops == NULL
+      || ke->n_scalar_uops < 2 || ke->tile_uops == NULL
+      || ke->n_tile_uops < 2 || ke->axes == NULL || ke->n_inputs > 30) {
+    return 0;
+  }
+  if (ke->axes->n_axes != 1 || ke->axes->axis_types[0] != KAX_LOOP) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ke->input_dtypes[i] != DT_FP32) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   if (ke == NULL || out == NULL || cap == 0) return 0;
   u32 n = 0;
@@ -63,7 +138,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // autotune later supports composite proposals.
   u32 axis_size = propose_reduce_axis_size(ke);
   u8  axis_idx  = propose_reduce_axis_index(ke);
-  if (axis_size > 0 && axis_idx != 0xFF) {
+  if (axis_size > 0 && axis_idx != 0xFF
+      && propose_metal_reduce_unroll_kernel(ke)) {
     for (u32 i = 0; i < n_factors; i++) {
       u32 f = split_factors[i];
       if (axis_size % f != 0) continue;
@@ -86,14 +162,29 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     u8 loop_axis = propose_first_loop_axis(ke, 0);
     if (loop_axis != 0xFF) {
       u32 loop_axis_size = ke->axes->full_shape[loop_axis];
-      for (u32 i = 0; i < n_factors; i++) {
-        u32 f = split_factors[i];
-        if (loop_axis_size % f != 0) continue;
-        if (n >= cap) break;
-        out[n].op   = KOP_UPCAST;
-        out[n].axis = loop_axis;
-        out[n].arg  = f;
-        n++;
+      if (propose_metal_tile_kernel(ke)) {
+        static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
+        u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
+        for (u32 i = 0; i < n_local_factors; i++) {
+          u32 f = local_factors[i];
+          if (loop_axis_size % f != 0 || f > loop_axis_size) continue;
+          if (n >= cap) break;
+          out[n].op   = KOP_LOCAL;
+          out[n].axis = loop_axis;
+          out[n].arg  = f;
+          n++;
+        }
+      }
+      if (!propose_metal_backend_enabled()) {
+        for (u32 i = 0; i < n_factors; i++) {
+          u32 f = split_factors[i];
+          if (loop_axis_size % f != 0) continue;
+          if (n >= cap) break;
+          out[n].op   = KOP_UPCAST;
+          out[n].axis = loop_axis;
+          out[n].arg  = f;
+          n++;
+        }
       }
     }
   }

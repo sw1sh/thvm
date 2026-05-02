@@ -103,20 +103,17 @@ static u32      METAL_BUFS_NEXT = 1;
 // clears it.  Drops refcount to 0 on push so the recycled-but-
 // unallocated slot doesn't keep counting toward
 // thvm_wl_metal_buf_table reports.
-//
-// No caller wired yet: thvm_realize's rollback only walks the
-// CPU pool.  A backend-aware preserve+rollback (queued as a
-// follow-up) will push from there.  Standalone the primitives
-// + alloc-side recycling are still useful when a future
-// metal_buf_decref hits zero -- the buf could go to the
-// freelist instead of an outright nil-out.
-
-static void metal_buf_freelist_push(u32 buf_id) {
-  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
-  if (METAL_FREELIST_LEN >= METAL_FREELIST_CAP) return;   // saturated
-  if (METAL_BUFS[buf_id].buf == nil) return;              // already freed
+static int metal_buf_freelist_push_impl(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
+  if (METAL_FREELIST_LEN >= METAL_FREELIST_CAP) return 0;
+  if (METAL_BUFS[buf_id].buf == nil) return 0;
   METAL_FREELIST[METAL_FREELIST_LEN++] = buf_id;
   METAL_BUFS[buf_id].refcount = 0;   // stop counting in live bytes
+  return 1;
+}
+
+static void metal_buf_freelist_push(u32 buf_id) {
+  (void)metal_buf_freelist_push_impl(buf_id);
 }
 
 static u32 metal_buf_freelist_try_pop(u64 nbytes) {
@@ -143,11 +140,21 @@ static u32 metal_buf_alloc(u64 nbytes) {
   // newBufferWithLength on miss.
   u32 recycled = metal_buf_freelist_try_pop(nbytes);
   if (recycled != 0) return recycled;
-  if (METAL_BUFS_NEXT >= METAL_BUFS_CAP) {
-    fprintf(stderr, "thvm: metal_buf_alloc -- buffer table full\n");
-    return 0;
+
+  u32 id = 0;
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].buf == nil && METAL_BUFS[i].refcount == 0) {
+      id = i;
+      break;
+    }
   }
-  u32 id = METAL_BUFS_NEXT++;
+  if (id == 0) {
+    if (METAL_BUFS_NEXT >= METAL_BUFS_CAP) {
+      fprintf(stderr, "thvm: metal_buf_alloc -- buffer table full\n");
+      return 0;
+    }
+    id = METAL_BUFS_NEXT++;
+  }
   METAL_BUFS[id].buf      = [METAL_DEVICE newBufferWithLength:nbytes
                                                       options:MTLResourceStorageModeShared];
   METAL_BUFS[id].nbytes   = nbytes;
@@ -182,12 +189,16 @@ static void metal_buf_incref(u32 buf_id) {
 static void metal_buf_decref(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
   if (METAL_BUFS[buf_id].refcount == 0) return;
-  if (--METAL_BUFS[buf_id].refcount == 0) metal_buf_free(buf_id);
+  if (--METAL_BUFS[buf_id].refcount != 0) return;
+  if (!metal_buf_freelist_push_impl(buf_id)) {
+    metal_buf_free(buf_id);
+  }
 }
 
 static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[buf_id].buf == nil)            return -1;
+  if (METAL_BUFS[buf_id].refcount == 0)         return -1;
   u64 cap = METAL_BUFS[buf_id].nbytes;
   if (nbytes > cap) nbytes = cap;
   memcpy(dst, [METAL_BUFS[buf_id].buf contents], (size_t)nbytes);
@@ -197,6 +208,7 @@ static int metal_buf_read(u32 buf_id, void *dst, u64 nbytes) {
 static int metal_buf_write(u32 buf_id, const void *src, u64 nbytes) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
   if (METAL_BUFS[buf_id].buf == nil)            return -1;
+  if (METAL_BUFS[buf_id].refcount == 0)         return -1;
   u64 cap = METAL_BUFS[buf_id].nbytes;
   if (nbytes > cap) nbytes = cap;
   memcpy([METAL_BUFS[buf_id].buf contents], src, (size_t)nbytes);

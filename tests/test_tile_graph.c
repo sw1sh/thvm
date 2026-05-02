@@ -321,6 +321,39 @@ int main(void) {
     CHECK(strstr(metal_tile_src, "uint _ta1 = _ltid;") != NULL);
     free(metal_tile_src);
   }
+  u32 saved_n_inputs = ke->n_inputs;
+  ke->n_inputs = 31;
+  CHECK(!cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
+  CHECK(cg_emit_tile_metal(ke) == NULL);
+  ke->n_inputs = saved_n_inputs;
+
+  TEST_BEGIN("tile-graph/metal-autotune-proposes-local-global");
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_TILE", "1", 1);
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 1;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 8;
+  ke->axes->version++;
+  KOpt cands[16];
+  u32 n_cands = kernel_opts_propose(ke, cands,
+                                    (u32)(sizeof(cands)/sizeof(*cands)));
+  CHECK(n_cands >= 3);
+  CHECK_EQ(cands[0].op, (u32)KOP_LOCAL);
+  CHECK_EQ(cands[0].axis, 0u);
+  CHECK_EQ(cands[0].arg, 8u);
+  KOpt local4 = { .op = KOP_LOCAL, .axis = 0, .arg = 4 };
+  CHECK(kernel_apply_tune_candidate(ke, local4));
+  CHECK_EQ(ke->axes->n_applied, 2u);
+  CHECK_EQ(ke->axes->axis_types[0], (u32)KAX_GLOBAL);
+  CHECK_EQ(ke->axes->axis_types[1], (u32)KAX_LOCAL);
+  CHECK_EQ(ke->axes->full_shape[0], 2u);
+  CHECK_EQ(ke->axes->full_shape[1], 4u);
+  CHECK(cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
+  CHECK_EQ(groups_x, 2u);
+  CHECK_EQ(threads_x, 4u);
+  unsetenv("THVM_BACKEND");
+  unsetenv("THVM_TILE");
 
   TEST_BEGIN("tile-graph/kernel-axes-local-global-swapped");
   memset(ke->axes, 0, sizeof(KernelAxes));
