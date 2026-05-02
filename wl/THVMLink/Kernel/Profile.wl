@@ -58,7 +58,7 @@ TProfilePlot::usage = "TProfilePlot[{profile_1, ..., profile_n}, key] line-plots
 
 TProfileReport::usage = "TProfileReport[profile] returns a short Column rendering of headline metrics + per-tag cell counts + per-kernel inputs/ops.  TProfileReport[{p_1, ..., p_n}] formats a sequence of snapshots side-by-side, showing growth ratios.  Use for stdout / notebook display.";
 
-THotCounters::usage = "THotCounters[] returns an Association of the per-context hot-path counter snapshot: heap_replace cascade calls/cells, is_redex calls, redex_enumerate calls/cells, wnf calls, realize calls, materialize calls, kernel fires, grad fires.  Use to confirm whether per-step time is dominated by the substitution cascade (heap_replace_cells), chain-rule expansion (grad_fires), or kernel emit/dispatch.";
+THotCounters::usage = "THotCounters[] returns an Association of the per-context hot-path counter snapshot: heap_replace cascade calls/cells, is_redex calls, redex_enumerate calls/cells, wnf calls, realize calls, materialize calls, kernel fires, grad fires, JIT replay calls, and Metal graph replay runs.  Use to confirm whether per-step time is dominated by the substitution cascade (heap_replace_cells), chain-rule expansion (grad_fires), kernel emit/dispatch, or graph replay granularity.";
 
 THotCountersReset::usage = "THotCountersReset[] zeros the per-context hot-path counters.";
 
@@ -207,7 +207,8 @@ $THotCounterNames = {
     "RedexEnumCalls", "RedexEnumCells",
     "WnfCalls", "RealizeCalls", "MaterializeCalls",
     "KernelFires", "GradFires",
-    "JitReplayCalls", "JitReplayDispatches", "JitReplayAssigns"};
+    "JitReplayCalls", "JitReplayDispatches", "JitReplayAssigns",
+    "JitGraphRuns", "JitGraphDispatches"};
 
 THotCounters[] := (ensureInit[];
     AssociationThread[$THotCounterNames, $hotCountersFn[]])

@@ -951,9 +951,11 @@ typedef struct {
     u64 jit_replay_calls;
     u64 jit_replay_dispatches;
     u64 jit_replay_assigns;
+    u64 jit_graph_runs;
+    u64 jit_graph_dispatches;
 } HotCounters;
 
-#define HOT_COUNTER_COUNT 13
+#define HOT_COUNTER_COUNT 15
 
 // === TContext ===
 // Bundles every piece of mutable runtime state into one struct so users
@@ -1056,6 +1058,8 @@ extern TContext *CONTEXTS[CONTEXTS_CAP];
 #define HOT_JIT_REPLAY_CALLS    (CURRENT_CTX->hot.jit_replay_calls)
 #define HOT_JIT_REPLAY_DISPATCHES (CURRENT_CTX->hot.jit_replay_dispatches)
 #define HOT_JIT_REPLAY_ASSIGNS  (CURRENT_CTX->hot.jit_replay_assigns)
+#define HOT_JIT_GRAPH_RUNS      (CURRENT_CTX->hot.jit_graph_runs)
+#define HOT_JIT_GRAPH_DISPATCHES (CURRENT_CTX->hot.jit_graph_dispatches)
 
 // Replaces the old CURRENT_BACKEND global -- "default backend for
 // newly allocated tensors only".  Per-tensor ops use ten->backend.

@@ -872,6 +872,14 @@ static int rmt_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
 
 static int rmt_collect_conv2d_info(KernelEntry const *ke,
                                    TileConv2DInfo *out) {
+  if (ke != NULL && ke->axes != NULL) {
+    for (u32 i = 0; i < ke->axes->n_applied; i++) {
+      u8 op = ke->axes->applied_opts[i].op;
+      if (op == KOP_GROUP || op == KOP_GROUPTOP) {
+        return 0;
+      }
+    }
+  }
   if (!tile_analyze_conv2d_flat(ke, out)) {
     return 0;
   }

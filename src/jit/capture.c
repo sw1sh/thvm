@@ -278,7 +278,7 @@ fn u32 jit_capture_op_count(u32 slot) {
 
 static int jit_metal_graph_replay_enabled(void) {
   char const *e = getenv("THVM_METAL_GRAPH_REPLAY");
-  return e != NULL && e[0] == '1';
+  return e == NULL || e[0] != '0';
 }
 
 // Export the capture sequence as a flat table for WL-side profiling.
@@ -588,6 +588,18 @@ static void jit_capture_finalize(u32 slot, Term root) {
 }
 
 #ifdef THVM_HAS_METAL
+static int jit_kernel_has_applied_opt(KernelEntry const *ke, u8 op) {
+  if (ke == NULL || ke->axes == NULL) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->axes->n_applied; i++) {
+    if (ke->axes->applied_opts[i].op == op) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   if (!jit_metal_graph_replay_enabled()) {
     return 0;
@@ -638,7 +650,9 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
       break;
     }
     TileConv2DInfo conv;
-    if (tile_analyze_conv2d_flat(ke, &conv)) {
+    if (!jit_kernel_has_applied_opt(ke, KOP_GROUP)
+        && !jit_kernel_has_applied_opt(ke, KOP_GROUPTOP)
+        && tile_analyze_conv2d_flat(ke, &conv)) {
       break;
     }
 
@@ -668,6 +682,8 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   if (thvm_metal_jit_replay_run(slot, start, recs, n) != 0) {
     return 0;
   }
+  HOT_JIT_GRAPH_RUNS++;
+  HOT_JIT_GRAPH_DISPATCHES += n;
   for (u32 i = 0; i < consumed; i++) {
     HOT_KERNEL_FIRES++;
     HOT_JIT_REPLAY_DISPATCHES++;

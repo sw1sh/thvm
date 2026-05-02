@@ -598,7 +598,8 @@ TProfileProgramGroups[profile_Association] := Module[{groups},
     groups = GatherBy[Values[profile], tProfileGroupKey];
     ReverseSortBy[
         Table[
-            Module[{rep, repKid, info, nDispatch, totalUs, totalFlops},
+            Module[{rep, repKid, info, nDispatch, totalUs, totalFlops,
+                    dispatchKinds},
                 rep = First @ ReverseSortBy[group, Lookup[#, "TotalUs", 0] &];
                 repKid = rep["Kid"];
                 info = TKernelInfo[repKid];
@@ -606,11 +607,14 @@ TProfileProgramGroups[profile_Association] := Module[{groups},
                 totalUs = Total[Lookup[#, "TotalUs", 0] & /@ group];
                 totalFlops = Total[
                     Lookup[#, "Flops", 0] * Lookup[#, "DispatchCount", 0] & /@ group];
+                dispatchKinds = GroupBy[group,
+                    Lookup[#, "DispatchKind", "none"] &,
+                    Total[Lookup[#, "DispatchCount", 0] & /@ #] &];
                 <|
                     "Key" -> Lookup[rep, "ProgramKey", 0],
                     "RepKid" -> repKid,
                     "KidCount" -> Length[group],
-                    "DispatchKinds" -> Counts[Lookup[#, "DispatchKind", "none"] & /@ group],
+                    "DispatchKinds" -> dispatchKinds,
                     "DispatchCount" -> nDispatch,
                     "TotalUs" -> totalUs,
                     "AvgUs" -> If[nDispatch > 0, N[totalUs / nDispatch], 0],
@@ -621,6 +625,7 @@ TProfileProgramGroups[profile_Association] := Module[{groups},
                     "InputCount" -> info["n_inputs"],
                     "OpCount" -> info["n_ops"],
                     "OutputNumel" -> info["output_numel"],
+                    "TotalOutputNumel" -> info["output_numel"] * nDispatch,
                     "OutputDtype" -> info["output_dtype"],
                     "Ops" -> Counts[info["program"][[All, "opcode"]]]
                 |>

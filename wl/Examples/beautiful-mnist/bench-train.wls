@@ -53,6 +53,10 @@ inputShapes[kid_Integer] := Quiet[
 
 formatMaybeAssoc[a_Association] := If[Length[a] == 0, "{}", formatCounts[a]]
 
+kernelAxesInfo[kid_Integer] := Quiet @ Check[
+    First @ TKernelOpts[kid],
+    <|"Applied" -> {}, "AxisTypes" -> {}, "FullShape" -> {}|>]
+
 formatRun[row_Association] := StringRiffle[{
     "start=" <> ToString[row["Start"]],
     "end=" <> ToString[row["End"]],
@@ -127,6 +131,7 @@ print["beautiful_mnist training benchmark"];
 print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"],
       "  THVM_AUTOTUNE=", envValue["THVM_AUTOTUNE", "off"],
+      "  THVM_METAL_GRAPH_REPLAY=", envValue["THVM_METAL_GRAPH_REPLAY", "default-on"],
       "  THVM_METAL_DEFER_BYTES=", envValue["THVM_METAL_DEFER_BYTES", "1073741824"],
       "  THVM_METAL_FREELIST_BYTES=", envValue["THVM_METAL_FREELIST_BYTES", "1073741824"]];
 print["  BS=", bs,
@@ -275,10 +280,14 @@ If[showProgramProfile,
                   " count=", row["DispatchCount"],
                   " total_us=", row["TotalUs"],
                   " avg_us=", NumberForm[row["AvgUs"], {8, 1}],
+                  " flops=", row["Flops"],
                   " kinds=", formatMaybeAssoc[row["DispatchKinds"]],
                   " n_inputs=", row["InputCount"],
                   " n_ops=", row["OpCount"],
                   " out_numel=", row["OutputNumel"],
+                  " total_out=", row["TotalOutputNumel"],
+                  " applied=", ToString[kernelAxesInfo[row["RepKid"]]["Applied"], InputForm],
+                  " axes=", ToString[kernelAxesInfo[row["RepKid"]]["AxisTypes"], InputForm],
                   " ops=", formatMaybeAssoc[row["Ops"]],
                   " inputs=", inputShapes[row["RepKid"]]];
             If[dumpTopProgram,
@@ -295,6 +304,25 @@ If[showProgramProfile,
                         tu,
                         Counts[tu[[All, "op"]]]]];
                     print["    tile_plan=", TKernelTilePlan[kid]]]],
+            {row, groups}]];
+    Module[{groups = Take[
+        ReverseSortBy[TProfileProgramGroups[profileTimedDelta], Lookup[#, "Flops", 0] &],
+        UpTo[topCount]]},
+        print["top timed program shapes by static flop estimate:"];
+        Do[
+            print["  key=", row["Key"],
+                  " rep_kid=", row["RepKid"],
+                  " kids=", row["KidCount"],
+                  " count=", row["DispatchCount"],
+                  " flops=", row["Flops"],
+                  " out_numel=", row["OutputNumel"],
+                  " total_out=", row["TotalOutputNumel"],
+                  " kinds=", formatMaybeAssoc[row["DispatchKinds"]],
+                  " n_inputs=", row["InputCount"],
+                  " n_ops=", row["OpCount"],
+                  " applied=", ToString[kernelAxesInfo[row["RepKid"]]["Applied"], InputForm],
+                  " axes=", ToString[kernelAxesInfo[row["RepKid"]]["AxisTypes"], InputForm],
+                  " ops=", formatMaybeAssoc[row["Ops"]]],
             {row, groups}]]];
 If[showFusionGaps,
     Module[{gaps = Take[TProfileFusionGaps[profileTimedDelta], UpTo[topCount]]},

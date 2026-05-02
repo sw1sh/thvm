@@ -30,6 +30,7 @@ static u32                  METAL_BATCH_DEPTH = 0;
 
 static void metal_buf_decref(u32 buf_id);
 static void metal_buf_free(u32 buf_id);
+static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op);
 
 #define METAL_DEFER_DECREF_CAP (1u << 20)
 static u32 METAL_DEFER_DECREFS[METAL_DEFER_DECREF_CAP];
@@ -1212,7 +1213,11 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
     u32 threads_x = 0;
     if (!cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x)) return nil;
     TileConv2DInfo conv;
-    if (tile_analyze_conv2d_flat(ke, &conv)) return nil;
+    if (!metal_kernel_has_applied_opt(ke, KOP_GROUP)
+        && !metal_kernel_has_applied_opt(ke, KOP_GROUPTOP)
+        && tile_analyze_conv2d_flat(ke, &conv)) {
+      return nil;
+    }
     id<MTLComputePipelineState> pso = metal_tile_jit_pipeline(ke);
     if (pso == nil) return nil;
     if ((NSUInteger)threads_x > [pso maxTotalThreadsPerThreadgroup]) return nil;
@@ -1482,6 +1487,18 @@ static int metal_specialized_diagnostics_enabled(void) {
 static int metal_cpu_small_add_enabled(void) {
   char const *e = getenv("THVM_METAL_CPU_SMALL_ADD");
   return e != NULL && e[0] == '1';
+}
+
+static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
+  if (ke == NULL || ke->axes == NULL) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->axes->n_applied; i++) {
+    if (ke->axes->applied_opts[i].op == op) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static id<MTLComputePipelineState> metal_gemm_pipeline(u32 tile) {

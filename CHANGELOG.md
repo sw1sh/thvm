@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Changed: make Metal graph replay the default TJit path
+
+Metal TJit replay now defaults to indirect-command-buffer graph
+replay; set `THVM_METAL_GRAPH_REPLAY=0` to force the old per-kernel
+replay path.  HotCounters now include `JitGraphRuns` and
+`JitGraphDispatches`, and the `beautiful_mnist` bench prints graph
+replay mode plus applied axis opts for hot program shapes.  Bounded
+BS=32 `beautiful_mnist` with Metal+tile+autotune now reaches roughly
+`190ms` per replay with graph replay enabled, versus about `420ms`
+without graph replay and about `760ms` before the new GROUP reduce
+proposal coverage.
+
+### Changed: expose GROUP candidates for tile-reduced conv-like graphs
+
+The Metal proposer now offers `GROUP` candidates for tile-reduced
+scalar graphs, including conv2d-flat-shaped reductions.  Applying
+`GROUP` intentionally bypasses the conv2d-flat template and routes
+through the generic scalar/tile group-reduce renderer so autotune can
+compare primitive schedules rather than only template-specific
+LOCAL/UPCAST/UNROLL variants.  Metal graph replay uses the same gate,
+so GROUP-routed conv-like kernels can be packed into ICB replay runs.
+
 ### Fixed: make TJit replay own live Metal buffers
 
 TJit capture now retains and preserves backend buffers needed by
@@ -13,9 +35,9 @@ future replay, finalizes the capture with a backward liveness pass,
 and marks dead dispatch records as `ReplaySkip`.  Replay now counts
 only successful backend dispatches, and `TJitCaptureSummary` reports
 live versus skipped dispatch records.  The Metal backend also has an
-opt-in `THVM_METAL_GRAPH_REPLAY=1` ICB replay prototype for consecutive
-`metal-tile` chunks; pipeline states are built with indirect-command
-buffer support and graph capture rejects dead buffers before encoding.
+ICB replay path for consecutive `metal-tile` chunks; pipeline states
+are built with indirect-command-buffer support and graph capture
+rejects dead buffers before encoding.
 
 The bounded BS=32 `beautiful_mnist` audit changed the trustworthy
 baseline: non-graph replay is about `751.5ms` with `2067` live

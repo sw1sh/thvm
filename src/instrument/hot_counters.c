@@ -36,4 +36,6 @@ fn void hot_counters_snapshot(u64 *out) {
   out[10] = HOT_JIT_REPLAY_CALLS;
   out[11] = HOT_JIT_REPLAY_DISPATCHES;
   out[12] = HOT_JIT_REPLAY_ASSIGNS;
+  out[13] = HOT_JIT_GRAPH_RUNS;
+  out[14] = HOT_JIT_GRAPH_DISPATCHES;
 }
