@@ -1127,7 +1127,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     if (ib == 0 || ib >= METAL_BUFS_NEXT) { return -1; }
     u32 tid = ke->input_tids[i];
     TenDesc const *td = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
-    int needs_premat = (!tile_conv_supported
+    int needs_premat = (!tile_supported
                         && td != NULL
                         && (!td->view.contiguous
                             || td->view.offset != 0

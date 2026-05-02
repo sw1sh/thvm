@@ -128,6 +128,22 @@ BS=16 forward replay:    67.6ms / 20.8ms / 16.0ms
 BS=512 forward replay:  314.3ms / 298.8ms / 292.0ms
 ```
 
+After broadening rangeify/Metal tile coverage for `PERMUTE` and
+`S_RESHAPE_V`, and skipping host pre-materialization for tile kernels
+that consume view indexing directly:
+
+```text
+BS=512 forward, no autotune:
+  timed_ms={74.2, 73.5, 69.1, 63.0, 61.5, 56.0, 57.4, 51.4, 49.3, 49.1}
+  steady_ms_per_step=60.5
+  dispatch=metal-tile=36, none=3
+
+BS=512 forward, post-autotuned:
+  timed_ms={28.6, 29.7, 29.9, 29.9, 29.4, 29.0, 30.6, 30.5}
+  steady_ms_per_step=29.7
+  dispatch=metal-tile=36, none=3
+```
+
 The same local tinygrad checkout with Metal, BS=512, `TinyJit`, and
 `IGNORE_JIT_FIRST_BEAM=1 TRAIN_BEAM=1 DEBUG=2` shows steady captured
 training batches around `30-33ms` after warmup.  That is the current
@@ -142,14 +158,16 @@ BENCH_MODE=grad-14 BS=1: capture 110.1ms, replay 13.1ms
 BENCH_MODE=grad-12 BS=1: capture 170.6ms, replay 14.4ms
 BENCH_MODE=grad-9  BS=1: capture 224.8ms, replay 17.6ms
 BENCH_MODE=grad-7  BS=1: capture 319.4ms, replay 163.3ms
+BENCH_MODE=grad-7  BS=1 after Metal reshape/permute coverage:
+  capture 241.4ms, replay 105.6ms, dispatch=metal-tile=82, none=2, metal-op=127
 BENCH_MODE=grad-1  BS=1: still too slow to use as a loop canary
 ```
 
 Interpretation for the hackathon track:
 
 - First-sample overhead is not the next gating metric.
-- Rank-4 forward now works, but BS=512 forward alone is still about
-  `10x` slower than tinygrad's full captured train step.
+- Rank-4 forward now works and the autotuned forward replay is in the
+  same `~30ms` class as tinygrad's full captured train step.
 - Target-pruned gradients make final-layer and late-block gradients
   replayable, but early conv-weight gradients still explode into many
   generic movement/reduction kernels.

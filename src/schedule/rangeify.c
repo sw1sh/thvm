@@ -728,6 +728,23 @@ static int rngs_ctx_movement_src(KernelEntry *ke, KProgOp const *p,
       }
       return 1;
     }
+    case UOP_PERMUTE: {
+      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+          || out->ndim != p->out_ndim) {
+        return 0;
+      }
+      memset(in, 0, sizeof(*in));
+      in->ndim = p->out_ndim;
+      in->valid_mask = out->valid_mask;
+      for (u32 d = 0; d < p->out_ndim; d++) {
+        u8 src_axis = p->axis_perm[d];
+        if (src_axis >= MAX_DIM) {
+          return 0;
+        }
+        in->refs[src_axis] = out->refs[d];
+      }
+      return 1;
+    }
     default:
       return 0;
   }
@@ -774,6 +791,7 @@ static u32 emit_scalar_op_for_rngs(KernelEntry *ke, u32 op_id,
   if (p->opcode == UOP_LOAD || p->opcode == UOP_EXPAND
       || p->opcode == UOP_RESHAPE || p->opcode == UOP_SHRINK
       || p->opcode == UOP_PAD || p->opcode == UOP_FLIP
+      || p->opcode == UOP_PERMUTE
       || p->opcode == UOP_BITCAST) {
     if (p->n_src < 1) return 0;
     RngsCtx src_rngs;
@@ -798,7 +816,8 @@ static u32 emit_scalar_raw_for_rngs(KernelEntry *ke, u32 raw,
     if (slot >= ke->n_inputs) return 0;
     return emit_input_load_for_use(ke, slot, r, ke->input_dtypes[slot]);
   }
-  return emit_scalar_op_for_rngs(ke, KSRC_INDEX(raw), r, depth + 1);
+  u32 op_id = KSRC_INDEX(raw);
+  return emit_scalar_op_for_rngs(ke, op_id, r, depth + 1);
 }
 
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
@@ -896,11 +915,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   }
 #undef RANGEIFY_SUPPORTED_DTYPE
   // Phase B/C/D supported opcodes: elementwise + (one) REDUCE +
-  // movement-as-identity (EXPAND, RESHAPE).  Movement ops between
-  // contig shapes are no-ops at the scalar level since the flat
-  // buffer is the same; the LOOP ranges adopt the output shape.
-  // PERMUTE / PAD / SHRINK / FLIP / CAST / BITCAST land in later
-  // phases.
+  // movement ops whose input coordinates are derived by the backward
+  // range walk below.
   int reduce_pos = -1;
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
@@ -910,7 +926,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_CMPLT: case UOP_CMPEQ: case UOP_CONST:
       case UOP_EXPAND: case UOP_RESHAPE: case UOP_LOAD:
       case UOP_CAST:  case UOP_BITCAST:
-      case UOP_SHRINK: case UOP_PAD: case UOP_FLIP:
+      case UOP_SHRINK: case UOP_PAD: case UOP_FLIP: case UOP_PERMUTE:
         break;
       case UOP_REDUCE:
         if (reduce_pos != -1) RBAIL_PRE("> 1 reduce");
@@ -2115,19 +2131,36 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       }
       continue;
     }
+    if (p->opcode == UOP_PERMUTE) {
+      RngsCtx out_rngs = {0};
+      out_rngs.ndim = os->ndim;
+      for (u32 d = 0; d < os->ndim; d++) {
+        out_rngs.refs[d] = loop_ranges[d];
+      }
+      RngsCtx src_rngs = {0};
+      if (!rngs_ctx_movement_src(ke, p, &out_rngs, &src_rngs)) {
+        RBAIL_MID("PERMUTE rng transform");
+      }
+      u32 raw = p->src[0];
+      u32 v = emit_scalar_raw_for_rngs(ke, raw, &src_rngs, 0);
+      if (v == 0) RBAIL_MID("PERMUTE src 0");
+      prog_value[i] = v;
+      via_rngs[i] = 1;
+      continue;
+    }
     if (p->opcode == UOP_EXPAND || p->opcode == UOP_RESHAPE
         || p->opcode == UOP_LOAD || p->opcode == UOP_BITCAST) {
       // Movement-as-identity / structural marker / bitcast: src[0]
       // is the value, output uses the same scalar bits.  At the
       // per-LOOP-element scalar level EXPAND broadcast, RESHAPE
-      // flat-buffer rewrap, LOAD ("read this tensor" marker), and
-      // BITCAST (same bits, different dtype label) are all no-ops
+      // flat-buffer rewrap, LOAD ("read this tensor" marker),
+      // and BITCAST (same bits, different dtype label) are all no-ops
       // -- downstream dtype interpretation flows through u->dtype
       // when the next op decodes its operands.
       u32 raw = p->src[0];
       u32 v   = KSRC_IS_INPUT(raw) ? input_load[KSRC_INDEX(raw)]
                                    : prog_value[KSRC_INDEX(raw)];
-      if (v == 0) RBAIL_MID("identity (EXPAND/RESHAPE/LOAD/BITCAST) src 0");
+      if (v == 0) RBAIL_MID("identity movement src 0");
       prog_value[i] = v;
       continue;
     }

@@ -1760,10 +1760,11 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_info(WolframLibraryData libData, mint argc
 // rangeify lowering snapshot retained on KERNELS[kid].  Returns:
 //   - empty MTensor (length 0) when ke->scalar_uops is NULL (legacy
 //     visit() path emitted this kernel; WL-side reads as Missing[]).
-//   - flat Integer MTensor encoding [n_scalar_uops, op0_op, op0_dtype,
-//     op0_src_count, op0_src0, op0_src1, op0_src2, op0_src3,
-//     op0_extra_lo, op0_extra_hi, ... per op ...].  10 ints per op
-//     (extra is u64 split into two i32 halves to fit MType_Integer).
+//   - flat Integer MTensor encoding [n_scalar_uops, src_width,
+//     op0_op, op0_dtype, op0_src_count, op0_src..., op0_extra_lo,
+//     op0_extra_hi, pad, ... per op ...].  The per-op row is
+//     6 + src_width integers; extra is u64 split into two i32 halves
+//     to fit MType_Integer.
 //   Slot 0 (S_NONE sentinel) IS included so caller-side indices
 //   match the C-side ScalarUop[] indexing.
 EXTERN_C DLLEXPORT int thvm_wl_kernel_scalar_uops(WolframLibraryData libData,
@@ -1777,23 +1778,26 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_scalar_uops(WolframLibraryData libData,
   }
   KernelEntry *ke = &KERNELS[kid];
   mint n = (ke->scalar_uops == NULL) ? 0 : (mint)ke->n_scalar_uops;
-  // Header is 1 int (n_scalar_uops); body is 10 ints per op.
-  mint nFields = 1 + n * 10;
+  // Header is 2 ints (n_scalar_uops, src_width); body is
+  // (6 + SCALAR_MAX_SRC) ints per op.
+  mint srcWidth = SCALAR_MAX_SRC;
+  mint rowWidth = 6 + srcWidth;
+  mint nFields = 2 + n * rowWidth;
   mint dims[1] = {nFields};
   MTensor out;
   libData->MTensor_new(MType_Integer, 1, dims, &out);
   mint *dst = libData->MTensor_getIntegerData(out);
   mint idx  = 0;
   dst[idx++] = n;
+  dst[idx++] = srcWidth;
   for (mint i = 0; i < n; i++) {
     ScalarUop *u = &ke->scalar_uops[i];
     dst[idx++] = (mint)u->op;
     dst[idx++] = (mint)u->dtype;
     dst[idx++] = (mint)u->src_count;
-    dst[idx++] = (mint)u->src[0];
-    dst[idx++] = (mint)u->src[1];
-    dst[idx++] = (mint)u->src[2];
-    dst[idx++] = (mint)u->src[3];
+    for (mint s = 0; s < srcWidth; s++) {
+      dst[idx++] = (mint)u->src[s];
+    }
     dst[idx++] = (mint)(u->extra & 0xFFFFFFFFu);
     dst[idx++] = (mint)((u->extra >> 32) & 0xFFFFFFFFu);
     dst[idx++] = 0;   // padding to keep alignment + future use

@@ -664,10 +664,11 @@ typedef enum {
 // flow through the same scalar-uop graph.
 #define S_AXIS_VIRT    4
 
-// SCALAR_MAX_SRC = 1 buffer/store + up to MAX_DIM range refs.
-// Sized so a single S_INDEX or S_BUFFERIZE can carry every LOOP/
-// REDUCE range of an arbitrary-rank kernel without chaining.
-#define SCALAR_MAX_SRC (MAX_DIM + 1)
+// SCALAR_MAX_SRC covers both ordinary 1+rank ops (S_INDEX,
+// S_BUFFERIZE) and split reshape wrappers.  S_RESHAPE_V carries
+// src[0] plus output-range refs and input-range refs, so it needs
+// room for 1 + 2 * MAX_DIM in the worst case.
+#define SCALAR_MAX_SRC (1 + 2 * MAX_DIM)
 
 typedef struct {
   u8  op;                    // ScalarOp

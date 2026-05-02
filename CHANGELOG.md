@@ -6,6 +6,25 @@ dated section.
 
 ## Unreleased
 
+### Changed: broaden Metal tile rangeify coverage
+
+Rangeify now lowers `PERMUTE` through edge-local coordinate contexts
+instead of treating axis swaps as flat identities, and Metal tile
+codegen can consume `S_RESHAPE_V` scalar wrappers while rejecting
+unsubstituted virtual ranges cleanly.  The Metal backend now skips
+host-side pre-materialization for generated tile kernels that can
+consume view indexing directly.
+
+### Bench: beautiful_mnist forward reaches tinygrad-class replay
+
+With `THVM_BACKEND=metal THVM_TILE=1 THVM_AUTOTUNE=1` and first
+capture/autotune outside the measured window, BS=512
+`BENCH_MODE=forward` replays at `29.7ms` mean over eight steady
+samples with no `metal-op` fallbacks.  Full training parity is still
+blocked by early conv-weight gradients: `BENCH_MODE=grad-1 BS=1`
+does not finish first capture in a useful time window, while
+`grad-7` replays at `105.6ms` with 127 generic `metal-op` fallbacks.
+
 ### Added: beautiful_mnist full-loop benchmark path
 
 `wl/Examples/beautiful-mnist/bench-train.wls` now builds the full

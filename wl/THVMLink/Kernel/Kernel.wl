@@ -605,21 +605,31 @@ $scalarAxisNames = <|
     4 -> "VIRT"
 |>;
 
-TKernelScalarUops[kid_Integer] := Module[{raw, n, decoded},
+TKernelScalarUops[kid_Integer] := Module[{raw, n, srcWidth, headerWidth,
+        rowWidth, decoded},
     raw = Normal @ $kernelScalarUopsFn[kid];
     If[ raw === {} || First[raw] == 0,
       Return @ Missing["NotLowered"] ];
     n = First[raw];
+    If[ Length[raw] == 1 + n * 10,
+        srcWidth = 4;
+        headerWidth = 1,
+        srcWidth = raw[[2]];
+        headerWidth = 2
+    ];
+    rowWidth = 6 + srcWidth;
     decoded = Table[
-      With[{base = 1 + (i - 1) * 10,
-            opCode = raw[[1 + (i - 1) * 10 + 1]],
+      With[{base = headerWidth + (i - 1) * rowWidth,
+            opCode = raw[[headerWidth + (i - 1) * rowWidth + 1]],
             extra  = BitOr[
-              raw[[1 + (i - 1) * 10 + 8]],
-              BitShiftLeft[raw[[1 + (i - 1) * 10 + 9]], 32]]},
+              raw[[headerWidth + (i - 1) * rowWidth + 4 + srcWidth]],
+              BitShiftLeft[
+                raw[[headerWidth + (i - 1) * rowWidth + 5 + srcWidth]],
+                32]]},
         With[{
           opName    = Lookup[$scalarOpNames, opCode, "S_?"],
           srcCount  = raw[[base + 3]],
-          src       = raw[[base + 4 ;; base + 7]]
+          src       = raw[[base + 4 ;; base + 3 + srcWidth]]
         },
           (* S_RANGE special-case: split extra into (extent, axis_type)
              so callers don't have to redo the bit math. *)

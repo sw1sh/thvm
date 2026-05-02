@@ -45,7 +45,9 @@ Current thvm status:
 - Rank-4 forward is plumbed through Conv2D, maxpool, and batch norm.
 - Generated Metal tile Conv2D handles rank-4 inputs and the
   single-channel first-conv patch-input form.
-- BS=512 forward-only replay is roughly `292-314ms`.
+- BS=512 forward-only replay is `60.5ms` without autotune over the
+  measured steady window and `29.7ms` with post-autotune; forward
+  is no longer the main parity blocker.
 - Final-layer and late-block target gradients replay, but early
   conv-weight gradients still explode.  `BENCH_MODE=grad-1 BS=1`
   remains too slow to be a training-loop canary.
@@ -69,15 +71,17 @@ still walks and lowers a very large movement/reduction graph.
 **Verify:** `BENCH_MODE=grad-1 BS=1` captures in under one second and
 replays in the same class as `grad-7`; then rerun full `BENCH_MODE=train`.
 
-### M2. BS=512 forward replay -- currently ~10x too slow
+### M2. Full backward tile coverage -- training-loop parity
 
-BS=512 forward-only replay is around `300ms`, while tinygrad's whole
-captured train step is around `30-33ms`.  The current profile is
-dominated by large generic movement/reduction kernels around BN,
-flatten/linear, and elementwise tails.
+Forward-only BS=512 replay can now hit `29.7ms` after autotune, but
+training still cannot be compared to tinygrad because early backward
+paths are not replayable.  `BENCH_MODE=grad-7 BS=1` replays at
+`105.6ms` with 127 generic `metal-op` fallbacks; `grad-1` still does
+not complete first capture in a useful time window.
 
-**Verify:** `BENCH_MODE=forward BS=512` reaches sub-50ms steady replay
-before spending effort on cold-start improvements.
+**Verify:** `BENCH_MODE=grad-1 BS=1` captures and replays, then
+`BENCH_MODE=train BS=512` reports a steady replay loop without
+generic `metal-op` dominating the profile.
 
 ### M3. Multi-grad structural sharing -- TGradMany walk-once
 

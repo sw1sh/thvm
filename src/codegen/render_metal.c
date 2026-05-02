@@ -284,6 +284,7 @@ static int rmt_scalar_op_supported(ScalarUop const *u) {
     case S_REDUCE_SUM:
     case S_REDUCE_MAX:
     case S_CAST:
+    case S_RESHAPE_V:
     case S_CONST:
     case S_ICONST:
     case S_IADD:
@@ -544,12 +545,83 @@ static char *rmt_emit_conv2d_flat(KernelEntry const *ke,
   return b.buf;
 }
 
-static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id);
+typedef struct {
+  u32  n;
+  u32  ids[SCALAR_MAX_SRC];
+  char exprs[SCALAR_MAX_SRC][2048];
+} RmtSubst;
 
-static int rmt_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
+static char const *rmt_subst_lookup(RmtSubst const *subst, u32 id) {
+  if (subst == NULL) {
+    return NULL;
+  }
+  for (u32 i = 0; i < subst->n; i++) {
+    if (subst->ids[i] == id) {
+      return subst->exprs[i];
+    }
+  }
+  return NULL;
+}
+
+static u32 rmt_range_extent(KernelEntry const *ke, u32 range_id) {
+  if (range_id == 0 || range_id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *r = &ke->scalar_uops[range_id];
+  if (r->op != S_RANGE) {
+    return 0;
+  }
+  return (u32)(r->extra & 0xFFFFFFFFu);
+}
+
+static u32 rmt_range_axis_type(KernelEntry const *ke, u32 range_id) {
+  if (range_id == 0 || range_id >= ke->n_scalar_uops) {
+    return UINT32_MAX;
+  }
+  ScalarUop const *r = &ke->scalar_uops[range_id];
+  if (r->op != S_RANGE) {
+    return UINT32_MAX;
+  }
+  return (u32)((r->extra >> 32) & 0xFFFFFFFFu);
+}
+
+static int rmt_range_ref_bound(KernelEntry const *ke, u32 range_id) {
+  u32 axis_type = rmt_range_axis_type(ke, range_id);
+  return axis_type != UINT32_MAX && axis_type != S_AXIS_VIRT;
+}
+
+static u32 rmt_iter_ref_extent(KernelEntry const *ke, u32 ref_id) {
+  if (ref_id == 0 || ref_id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *u = &ke->scalar_uops[ref_id];
+  if (u->op == S_RANGE) {
+    return rmt_range_extent(ke, ref_id);
+  }
+  if (u->op == S_IADD || u->op == S_ISUB) {
+    ScalarUop const *a = &ke->scalar_uops[u->src[0]];
+    ScalarUop const *c = &ke->scalar_uops[u->src[1]];
+    if (a->op == S_RANGE) {
+      return rmt_range_extent(ke, u->src[0]);
+    }
+    if (c->op == S_RANGE) {
+      return rmt_range_extent(ke, u->src[1]);
+    }
+  }
+  return 0;
+}
+
+static int rmt_emit_uint_expr_ctx(CgBuf *b, KernelEntry const *ke,
+                                  u32 op_id, RmtSubst const *subst);
+static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
+  return rmt_emit_uint_expr_ctx(b, ke, op_id, NULL);
+}
+
+static int rmt_emit_index_offset_ctx(CgBuf *b, KernelEntry const *ke,
+                                     u32 idx_id, RmtSubst const *subst) {
   ScalarUop const *u = &ke->scalar_uops[idx_id];
   if (u->op == S_INDEX_E) {
-    return rmt_emit_uint_expr(b, ke, u->src[1]);
+    return rmt_emit_uint_expr_ctx(b, ke, u->src[1], subst);
   }
   if (u->op != S_INDEX) {
     return 0;
@@ -557,7 +629,7 @@ static int rmt_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
   ScalarUop const *child = &ke->scalar_uops[u->src[0]];
   int wrote = 0;
   if (child->op == S_INDEX) {
-    if (!rmt_emit_index_offset(b, ke, u->src[0])) {
+    if (!rmt_emit_index_offset_ctx(b, ke, u->src[0], subst)) {
       return 0;
     }
     wrote = 1;
@@ -583,10 +655,20 @@ static int rmt_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
       continue;
     }
     u32 rng_id = u->src[1 + d];
+    char const *subst_expr = rmt_subst_lookup(subst, rng_id);
+    if (subst_expr == NULL && !rmt_range_ref_bound(ke, rng_id)) {
+      return 0;
+    }
     if (wrote) {
       cg_append(b, " + ");
     }
-    if (strides[d] == 1) {
+    if (subst_expr != NULL) {
+      if (strides[d] == 1) {
+        cg_append(b, "(%s)", subst_expr);
+      } else {
+        cg_append(b, "%uu*(%s)", strides[d], subst_expr);
+      }
+    } else if (strides[d] == 1) {
       cg_append(b, "_v%u", rng_id);
     } else {
       cg_append(b, "%uu*_v%u", strides[d], rng_id);
@@ -597,6 +679,10 @@ static int rmt_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
     cg_append(b, "0u");
   }
   return 1;
+}
+
+static int rmt_emit_index_offset(CgBuf *b, KernelEntry const *ke, u32 idx_id) {
+  return rmt_emit_index_offset_ctx(b, ke, idx_id, NULL);
 }
 
 static int rmt_index_param_slot(KernelEntry const *ke, u32 idx_id,
@@ -617,12 +703,22 @@ static int rmt_index_param_slot(KernelEntry const *ke, u32 idx_id,
   return *slot_out < ke->n_inputs;
 }
 
-static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
+static int rmt_emit_uint_expr_ctx(CgBuf *b, KernelEntry const *ke,
+                                  u32 op_id, RmtSubst const *subst) {
   ScalarUop const *u = &ke->scalar_uops[op_id];
   switch (u->op) {
-    case S_RANGE:
+    case S_RANGE: {
+      char const *subst_expr = rmt_subst_lookup(subst, op_id);
+      if (subst_expr != NULL) {
+        cg_append(b, "(%s)", subst_expr);
+        return 1;
+      }
+      if (!rmt_range_ref_bound(ke, op_id)) {
+        return 0;
+      }
       cg_append(b, "((int)_v%u)", op_id);
       return 1;
+    }
     case S_ICONST:
       cg_append(b, "%d", (int)(i64)u->extra);
       return 1;
@@ -639,11 +735,11 @@ static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
                      : (u->op == S_IMOD) ? "%"
                                           : "&";
       cg_append(b, "(");
-      if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
+      if (!rmt_emit_uint_expr_ctx(b, ke, u->src[0], subst)) {
         return 0;
       }
       cg_append(b, " %s ", op);
-      if (!rmt_emit_uint_expr(b, ke, u->src[1])) {
+      if (!rmt_emit_uint_expr_ctx(b, ke, u->src[1], subst)) {
         return 0;
       }
       cg_append(b, ")");
@@ -651,26 +747,26 @@ static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
     }
     case S_ILT:
       cg_append(b, "((");
-      if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
+      if (!rmt_emit_uint_expr_ctx(b, ke, u->src[0], subst)) {
         return 0;
       }
       cg_append(b, ") < (");
-      if (!rmt_emit_uint_expr(b, ke, u->src[1])) {
+      if (!rmt_emit_uint_expr_ctx(b, ke, u->src[1], subst)) {
         return 0;
       }
       cg_append(b, ") ? 1 : 0)");
       return 1;
     case S_IWHERE:
       cg_append(b, "((");
-      if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
+      if (!rmt_emit_uint_expr_ctx(b, ke, u->src[0], subst)) {
         return 0;
       }
       cg_append(b, ") ? (");
-      if (!rmt_emit_uint_expr(b, ke, u->src[1])) {
+      if (!rmt_emit_uint_expr_ctx(b, ke, u->src[1], subst)) {
         return 0;
       }
       cg_append(b, ") : (");
-      if (!rmt_emit_uint_expr(b, ke, u->src[2])) {
+      if (!rmt_emit_uint_expr_ctx(b, ke, u->src[2], subst)) {
         return 0;
       }
       cg_append(b, "))");
@@ -682,7 +778,12 @@ static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
 
 static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
                                       u32 op_id, u32 active_reduce_id,
-                                      char const *reduce_expr) {
+                                      char const *reduce_expr);
+
+static int rmt_emit_value_with_reduce_ctx(CgBuf *b, KernelEntry const *ke,
+                                          u32 op_id, u32 active_reduce_id,
+                                          char const *reduce_expr,
+                                          RmtSubst const *subst) {
   if (op_id == active_reduce_id && reduce_expr != NULL) {
     cg_append(b, "%s", reduce_expr);
     return 1;
@@ -703,7 +804,7 @@ static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
         return 0;
       }
       cg_append(b, "in%u[", slot);
-      if (!rmt_emit_index_offset(b, ke, u->src[0])) {
+      if (!rmt_emit_index_offset_ctx(b, ke, u->src[0], subst)) {
         return 0;
       }
       cg_append(b, "]");
@@ -718,13 +819,15 @@ static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
                      : (u->op == S_CMPLT) ? "<"
                      : "==";
       cg_append(b, "(");
-      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
-                                      active_reduce_id, reduce_expr)) {
+      if (!rmt_emit_value_with_reduce_ctx(b, ke, u->src[0],
+                                          active_reduce_id, reduce_expr,
+                                          subst)) {
         return 0;
       }
       cg_append(b, " %s ", op);
-      if (!rmt_emit_value_with_reduce(b, ke, u->src[1],
-                                      active_reduce_id, reduce_expr)) {
+      if (!rmt_emit_value_with_reduce_ctx(b, ke, u->src[1],
+                                          active_reduce_id, reduce_expr,
+                                          subst)) {
         return 0;
       }
       if (u->op == S_CMPLT || u->op == S_CMPEQ) {
@@ -736,16 +839,18 @@ static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
     }
     case S_NEG:
       cg_append(b, "-(");
-      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
-                                      active_reduce_id, reduce_expr)) {
+      if (!rmt_emit_value_with_reduce_ctx(b, ke, u->src[0],
+                                          active_reduce_id, reduce_expr,
+                                          subst)) {
         return 0;
       }
       cg_append(b, ")");
       return 1;
     case S_RECIP:
       cg_append(b, "(1.0f / (");
-      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
-                                      active_reduce_id, reduce_expr)) {
+      if (!rmt_emit_value_with_reduce_ctx(b, ke, u->src[0],
+                                          active_reduce_id, reduce_expr,
+                                          subst)) {
         return 0;
       }
       cg_append(b, "))");
@@ -757,8 +862,9 @@ static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
                        : (u->op == S_EXP2) ? "exp2"
                                             : "log2";
       cg_append(b, "%s(", name);
-      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
-                                      active_reduce_id, reduce_expr)) {
+      if (!rmt_emit_value_with_reduce_ctx(b, ke, u->src[0],
+                                          active_reduce_id, reduce_expr,
+                                          subst)) {
         return 0;
       }
       cg_append(b, ")");
@@ -769,8 +875,9 @@ static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
         return 0;
       }
       cg_append(b, "float(");
-      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
-                                      active_reduce_id, reduce_expr)) {
+      if (!rmt_emit_value_with_reduce_ctx(b, ke, u->src[0],
+                                          active_reduce_id, reduce_expr,
+                                          subst)) {
         return 0;
       }
       cg_append(b, ")");
@@ -780,24 +887,129 @@ static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
         return 0;
       }
       cg_append(b, "((");
-      if (!rmt_emit_uint_expr(b, ke, u->src[0])) {
+      if (!rmt_emit_uint_expr_ctx(b, ke, u->src[0], subst)) {
         return 0;
       }
       cg_append(b, ") ? (");
-      if (!rmt_emit_value_with_reduce(b, ke, u->src[1],
-                                      active_reduce_id, reduce_expr)) {
+      if (!rmt_emit_value_with_reduce_ctx(b, ke, u->src[1],
+                                          active_reduce_id, reduce_expr,
+                                          subst)) {
         return 0;
       }
       cg_append(b, ") : (");
-      if (!rmt_emit_value_with_reduce(b, ke, u->src[2],
-                                      active_reduce_id, reduce_expr)) {
+      if (!rmt_emit_value_with_reduce_ctx(b, ke, u->src[2],
+                                          active_reduce_id, reduce_expr,
+                                          subst)) {
         return 0;
       }
       cg_append(b, "))");
       return 1;
+    case S_RESHAPE_V: {
+      u32 n_out = (u32)(u->extra & 0xFFu);
+      u32 nrest = (u32)u->src_count - 1;
+      if (n_out == 0 || n_out > nrest) {
+        return 0;
+      }
+      u32 n_in = nrest - n_out;
+      if (n_in > SCALAR_MAX_SRC || n_out > SCALAR_MAX_SRC) {
+        return 0;
+      }
+
+      char flat_expr[2048];
+      CgBuf fb = { .buf = flat_expr, .cap = sizeof(flat_expr),
+                   .len = 0, .program_dtype = DT_FP32, .ke = ke };
+      cg_append(&fb, "(");
+      u64 out_stride = 1;
+      int wrote = 0;
+      for (i32 d = (i32)n_out - 1; d >= 0; d--) {
+        u32 ref = u->src[1 + (u32)d];
+        u32 extent = rmt_iter_ref_extent(ke, ref);
+        if (extent == 0) {
+          return 0;
+        }
+        if (wrote) {
+          cg_append(&fb, " + ");
+        }
+        cg_append(&fb, "(uint)(");
+        if (!rmt_emit_uint_expr_ctx(&fb, ke, ref, subst)) {
+          return 0;
+        }
+        cg_append(&fb, ") * %lluULL", (unsigned long long)out_stride);
+        out_stride *= extent;
+        wrote = 1;
+      }
+      if (!wrote) {
+        cg_append(&fb, "0u");
+      }
+      cg_append(&fb, ")");
+
+      ScalarUop const *body = &ke->scalar_uops[u->src[0]];
+      if (body->op == S_LOAD) {
+        u32 slot = 0;
+        if (rmt_index_param_slot(ke, body->src[0], &slot)
+            && slot < ke->n_inputs && ke->input_views != NULL) {
+          View const *v = &ke->input_views[slot];
+          int direct_flat = v->contiguous && v->offset >= 0
+                          && v->shape.ndim == n_in;
+          for (u32 d = 0; direct_flat && d < n_in; d++) {
+            u32 rng_id = u->src[1 + n_out + d];
+            if (v->shape.dims[d] != rmt_range_extent(ke, rng_id)) {
+              direct_flat = 0;
+            }
+          }
+          if (direct_flat) {
+            cg_append(b, "in%u[", slot);
+            if (v->offset != 0) {
+              cg_append(b, "%du + ", v->offset);
+            }
+            cg_append(b, "%s]", flat_expr);
+            return 1;
+          }
+        }
+      }
+
+      RmtSubst nested = {0};
+      if (subst != NULL) {
+        nested = *subst;
+      }
+      u64 in_stride = 1;
+      u64 strides[SCALAR_MAX_SRC] = {0};
+      u32 extents[SCALAR_MAX_SRC] = {0};
+      for (i32 d = (i32)n_in - 1; d >= 0; d--) {
+        u32 rng_id = u->src[1 + n_out + (u32)d];
+        u32 extent = rmt_range_extent(ke, rng_id);
+        if (extent == 0) {
+          return 0;
+        }
+        strides[d] = in_stride;
+        extents[d] = extent;
+        in_stride *= extent;
+      }
+      for (u32 d = 0; d < n_in; d++) {
+        if (nested.n >= SCALAR_MAX_SRC) {
+          return 0;
+        }
+        u32 rng_id = u->src[1 + n_out + d];
+        nested.ids[nested.n] = rng_id;
+        snprintf(nested.exprs[nested.n], sizeof(nested.exprs[nested.n]),
+                 "((uint)(((%s) / %lluULL) %% %uu))",
+                 flat_expr, (unsigned long long)strides[d], extents[d]);
+        nested.n++;
+      }
+      return rmt_emit_value_with_reduce_ctx(b, ke, u->src[0],
+                                            active_reduce_id, reduce_expr,
+                                            &nested);
+    }
     default:
       return 0;
   }
+}
+
+static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
+                                      u32 op_id, u32 active_reduce_id,
+                                      char const *reduce_expr) {
+  return rmt_emit_value_with_reduce_ctx(b, ke, op_id, active_reduce_id,
+                                        reduce_expr, NULL);
 }
 
 static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
