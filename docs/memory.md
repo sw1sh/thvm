@@ -160,7 +160,10 @@ the input buffer and release the preallocated output buffer without
 encoding a command buffer at all.  The output buffer was allocated
 speculatively and has never been submitted to the GPU, so the Metal
 backend drops it directly to the freelist/free path instead of queuing
-a deferred decref.  This is covered by
+a deferred decref.  During TJit replay the captured output id can be
+stale because the output tensor is already bound to the input buffer;
+the backend therefore checks the output tensor's current buffer before
+touching refcounts.  This is covered by
 `metal-real/alias-reshape-drops-unused-output-immediately`.
 
 ## Safety Boundary

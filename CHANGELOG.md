@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Fixed: avoid Metal alias-reshape refcount growth on replay
+
+Metal alias-only reshape dispatch now looks at the output tensor's
+current buffer before releasing the speculative output buffer.  This
+prevents TJit replay from repeatedly increfing the already-aliased
+input buffer or freelisting a stale captured output id.  On the
+bounded BS=32 `beautiful_mnist` Metal+tile probe, timed-window live
+Metal storage stays near `20MB` after replay instead of growing to
+about `249MB`, while steady wall time remains about `386ms`.
+
 ### Changed: expose TJit replay counters in benchmark profiles
 
 Hot counters now include TJit replay calls, replayed dispatches, and

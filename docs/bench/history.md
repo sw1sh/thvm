@@ -193,6 +193,20 @@ BENCH_MODE=train BS=512:
   dispatch=metal-tile=2138, none=51, metal-jit=1048, metal-op=48
 ```
 
+Current bounded small-batch canary after Metal rollback, rangeify
+reshape coverage, and alias-reshape replay refcount cleanup:
+
+```text
+BENCH_MODE=train BS=32:
+  steady_ms_per_step=386.5
+  jit-ops=4179
+  dispatch=metal-tile=2928, none=51, metal-op=318
+  hot counters: JitReplayCalls=1, JitReplayDispatches=4137,
+                JitReplayAssigns=42
+  metal memory after timed: live=20.3MB, retained=851.4MB,
+                            deferred=0
+```
+
 This is a real improvement over the previous `grad-3` replay
 (`~10.6s`) and removes the worst `PAD`/`SHRINK` materializer from
 the profile, but it is still orders of magnitude from tinygrad's

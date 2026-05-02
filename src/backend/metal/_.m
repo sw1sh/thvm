@@ -851,17 +851,19 @@ static int metal_try_alias_reshape(KernelEntry *ke,
       || METAL_BUFS[in_buf_id].buf == nil) {
     return 0;
   }
-  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT
-      || METAL_BUFS[out_buf_id].buf == nil) {
-    return 0;
-  }
-  if (in_buf_id == out_buf_id) {
+  u32 cur_out_buf_id = TENS[ke->output_tid].buf_id;
+  if (cur_out_buf_id == in_buf_id && METAL_BUFS[in_buf_id].refcount > 0) {
     return 1;
   }
+  if (cur_out_buf_id == 0 || cur_out_buf_id >= METAL_BUFS_NEXT
+      || METAL_BUFS[cur_out_buf_id].buf == nil) {
+    return 0;
+  }
+  (void)out_buf_id;
   metal_buf_incref(in_buf_id);
   TENS[ke->output_tid].buf_id = in_buf_id;
-  if (!metal_buf_freelist_push_impl(out_buf_id)) {
-    metal_buf_free(out_buf_id);
+  if (!metal_buf_freelist_push_impl(cur_out_buf_id)) {
+    metal_buf_free(cur_out_buf_id);
   }
   return 1;
 }
@@ -1461,9 +1463,6 @@ static int metal_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
-  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
-  id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
-  if (outBuf == nil) return -1;
 
   u32 tile_groups_x  = 0;
   u32 tile_threads_x = 0;
@@ -1485,6 +1484,10 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
     return 0;
   }
+
+  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return -1;
+  id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
+  if (outBuf == nil) return -1;
 
   if (kprog_supported && metal_specialized_diagnostics_enabled()) {
     if (metal_try_conv2d_flat(ke, in_buf_ids, out_buf_id)) {

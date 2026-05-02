@@ -29,6 +29,7 @@ extern u32  thvm_metal_buf_pool_begin(void);
 extern void thvm_metal_buf_pool_rollback_with_preserve(u32 wm);
 extern void thvm_metal_buf_mark_preserved(u32 buf_id);
 extern void thvm_metal_buf_clear_preserved(u32 wm);
+extern void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
 
 static int metal_available(void) {
   setenv("THVM_BACKEND", "metal", 1);
@@ -828,6 +829,25 @@ int main(void) {
     CHECK_EQ(thvm_metal_deferred_bytes(), 0);
     CHECK_EQ(thvm_metal_live_bytes(), 16);
     CHECK(thvm_metal_retained_bytes() >= 16);
+
+    u64 src_nbytes = 0;
+    u32 src_refs = 0;
+    u32 freelist_len = thvm_metal_freelist_len();
+    thvm_metal_buf_get(in_bufs[0], &src_nbytes, &src_refs);
+    CHECK_EQ(src_nbytes, 16);
+    CHECK_EQ(src_refs, 2);
+
+    METAL_BACKEND.buf_free(old_out_buf);
+    backend_dispatch_begin_all();
+    CHECK_EQ(METAL_BACKEND.dispatch_kernel(ke, in_bufs, old_out_buf), 0);
+    backend_dispatch_end_all();
+
+    src_nbytes = 0;
+    src_refs = 0;
+    thvm_metal_buf_get(in_bufs[0], &src_nbytes, &src_refs);
+    CHECK_EQ(src_nbytes, 16);
+    CHECK_EQ(src_refs, 2);
+    CHECK_EQ(thvm_metal_freelist_len(), freelist_len);
   }
   thvm_free();
 
