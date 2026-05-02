@@ -242,6 +242,32 @@ not yet beat the old route on beautiful-mnist.  The remaining gap is
 still the generated conv/reduce schedule itself, not proposal
 plumbing.
 
+Next iteration moved the Conv2D oracle out of backend-private
+recognition and into the tile path.  `tile_analyze_conv2d_flat`
+recognizes the im2col-fused Conv2D reduce shape as a reusable tile
+template, and `cg_emit_tile_metal` emits a runtime-configured Metal
+Conv2D tile kernel for that template.  The Metal dispatch path skips
+generic pre-materialization for this template because the generated
+kernel consumes the original strided input views directly; this fixed
+the non-uniform-weight correctness bug that all-ones conv tests did
+not catch.
+
+May 2 follow-up canary after generic tile Conv2D:
+
+- Generic Metal tile, no specialized diagnostics:
+  `125.2ms / 65.1ms / 66.3ms` before the pre-materialization fix,
+  then `81.4ms / 9.8ms / 11.1ms` after the fix.  The post-regression
+  rerun after the full C/WL suite was `36.0ms / 8.6ms / 9.0ms`.
+- Diagnostic `THVM_METAL_SPECIALIZED=1` oracle:
+  `35.0ms / 9.4ms / 9.7ms`.
+
+The steady generic path is now in the same class as the diagnostic
+oracle for this forward canary.  The first-sample cost still includes
+materialization and dynamic Metal compilation, and the result is not
+tinygrad parity yet, but the main `~65ms -> ~10ms` throughput gap for
+the second beautiful-mnist convolution is closed without enabling the
+diagnostic backend recognizer.
+
 ## Files added
 
 - `src/codegen/axis.c`         -- `KernelAxes` default constructor

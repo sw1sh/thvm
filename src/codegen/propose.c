@@ -16,6 +16,11 @@
 //   metadata for the fixed direct Metal GEMM renderer; later it maps
 //   to simdgroup MMA variants.
 //
+//   THVM_BACKEND=metal + THVM_TILE=1 + im2col-fused Conv2D template
+//   -> propose LOCAL threadgroup-size factors over a loop axis.  The
+//   generated tile renderer reads the LOCAL factor as its SIMT group
+//   width; the baseline remains 256 threads.
+//
 // As more opt classes get codegen support (UPCAST output axes,
 // LOCAL/GLOBAL Metal bindings, GROUP_REDUCE, etc.) they slot in
 // here as additional rules.  The output is a flat list of KOpt;
@@ -273,6 +278,30 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
         out[n].axis = 0;
         out[n].arg  = tc_tiles[i];
         n++;
+      }
+      return n;
+    }
+  }
+
+  if (propose_metal_tile_enabled() && ke->axes != NULL
+      && ke->axes->n_axes > 0) {
+    TileConv2DInfo conv;
+    if (tile_analyze_conv2d_flat(ke, &conv)) {
+      u8 loop_axis = propose_first_loop_axis(ke, 0);
+      if (loop_axis != 0xFF) {
+        static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
+        u32 loop_axis_size = ke->axes->full_shape[loop_axis];
+        u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
+        for (u32 i = 0; i < n_local_factors && n < cap; i++) {
+          u32 f = local_factors[i];
+          if (loop_axis_size % f != 0 || f > loop_axis_size) {
+            continue;
+          }
+          out[n].op   = KOP_LOCAL;
+          out[n].axis = loop_axis;
+          out[n].arg  = f;
+          n++;
+        }
       }
       return n;
     }

@@ -320,6 +320,7 @@ static void axes_reset_to_default(KernelEntry *ke) {
   ke->axes->autotuned = autotuned;
   ke->axes->version   = version;
   axes_default_for(ke);
+  axes_ensure_scalar_reduce(ke);
 }
 
 static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {

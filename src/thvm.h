@@ -735,6 +735,29 @@ typedef struct {
 } TileGemmInfo;
 
 typedef struct {
+  u32 dtype;
+  u32 w_input;
+  u32 x_input;
+  u32 c_out;
+  u32 c_in;
+  u32 h;
+  u32 w;
+  u32 kh;
+  u32 kw;
+  u32 h_out;
+  u32 w_out;
+  u32 patches;
+  i32 w_offset;
+  i32 w_stride0;
+  i32 w_stride1;
+  i32 x_offset;
+  i32 x_stride0;
+  i32 x_stride1;
+  i32 x_stride2;
+  u32 threads;     // Metal SIMT threads per threadgroup; 256 default
+} TileConv2DInfo;
+
+typedef struct {
   u32 root_id;
   u32 store_tile_id;
   u32 reduce_tile_id;
@@ -1291,6 +1314,11 @@ fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
 int     tile_analyze_gemm(struct KernelEntry const *ke,
                           u32 const *input_storage_numels,
                           TileGemmInfo *out);
+// Recognize the im2col-fused Conv2D reduce template produced by the
+// lowered UOp graph.  Renderers use this as a tile template instead
+// of carrying backend-private conv pattern matchers.
+int     tile_analyze_conv2d_flat(struct KernelEntry const *ke,
+                                 TileConv2DInfo *out);
 fn int  tile_mma_size_supported(u32 tile);
 // Sync and collect a validated TILE_MMA plan.  Used by backends that
 // compile outside the single C translation unit.

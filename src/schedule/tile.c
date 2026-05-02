@@ -468,6 +468,114 @@ int tile_analyze_gemm(KernelEntry const *ke,
   return 0;
 }
 
+static u32 tile_isqrt_exact(u32 x) {
+  for (u32 r = 1; r <= x / r; r++) {
+    if (r * r == x) {
+      return r;
+    }
+  }
+  return 0;
+}
+
+static u32 tile_conv2d_threads_from_opts(KernelEntry const *ke) {
+  u32 threads = 256;
+  if (ke == NULL || ke->axes == NULL) {
+    return threads;
+  }
+  for (u32 i = 0; i < ke->axes->n_applied; i++) {
+    KOpt opt = ke->axes->applied_opts[i];
+    if (opt.op == KOP_LOCAL && opt.arg > 0 && opt.arg <= 256) {
+      threads = opt.arg;
+    }
+  }
+  return threads;
+}
+
+int tile_analyze_conv2d_flat(KernelEntry const *ke, TileConv2DInfo *out) {
+  if (ke == NULL || out == NULL || ke->n_inputs != 2 || ke->n_ops == 0
+      || ke->program == NULL || ke->input_views == NULL) {
+    return 0;
+  }
+  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32
+      || ke->output_dtype != DT_FP32) {
+    return 0;
+  }
+  KProgOp const *last = &ke->program[ke->n_ops - 1];
+  if (last->opcode != UOP_REDUCE || last->n_src != 1
+      || TILE_REDUCE_KIND(last->arg) != REDUCE_SUM) {
+    return 0;
+  }
+
+  View const *wv = &ke->input_views[0];
+  View const *xv = &ke->input_views[1];
+  if (wv->shape.ndim != 3 || xv->shape.ndim != 3
+      || (ke->output_shape.ndim != 2 && ke->output_shape.ndim != 3)) {
+    return 0;
+  }
+  u32 c_out = wv->shape.dims[0];
+  u32 k     = wv->shape.dims[1];
+  u32 p     = wv->shape.dims[2];
+  u32 c_in  = xv->shape.dims[0];
+  u32 h     = xv->shape.dims[1];
+  u32 w     = xv->shape.dims[2];
+  if (c_out == 0 || c_in == 0 || k == 0 || p == 0) {
+    return 0;
+  }
+  if (k % c_in != 0) {
+    return 0;
+  }
+  u32 k_spatial = k / c_in;
+  u32 kh = tile_isqrt_exact(k_spatial);
+  if (kh == 0) {
+    return 0;
+  }
+  u32 kw = kh;
+  if (h < kh || w < kw) {
+    return 0;
+  }
+  u32 h_out = h - kh + 1;
+  u32 w_out = w - kw + 1;
+  if (h_out * w_out != p) {
+    return 0;
+  }
+  int output_flat = ke->output_shape.ndim == 2
+                 && ke->output_shape.dims[0] == c_out
+                 && ke->output_shape.dims[1] == p;
+  int output_chw = ke->output_shape.ndim == 3
+                && ke->output_shape.dims[0] == c_out
+                && ke->output_shape.dims[1] == h_out
+                && ke->output_shape.dims[2] == w_out;
+  if ((!output_flat && !output_chw) || ke->output_numel != c_out * p) {
+    return 0;
+  }
+  if (wv->strides[2] != 0) {
+    return 0;
+  }
+
+  memset(out, 0, sizeof(TileConv2DInfo));
+  out->dtype     = DT_FP32;
+  out->w_input   = 0;
+  out->x_input   = 1;
+  out->c_out     = c_out;
+  out->c_in      = c_in;
+  out->h         = h;
+  out->w         = w;
+  out->kh        = kh;
+  out->kw        = kw;
+  out->h_out     = h_out;
+  out->w_out     = w_out;
+  out->patches   = p;
+  out->w_offset  = wv->offset;
+  out->w_stride0 = wv->strides[0];
+  out->w_stride1 = wv->strides[1];
+  out->x_offset  = xv->offset;
+  out->x_stride0 = xv->strides[0];
+  out->x_stride1 = xv->strides[1];
+  out->x_stride2 = xv->strides[2];
+  out->threads   = tile_conv2d_threads_from_opts(ke);
+  return 1;
+}
+
 static int tile_collect_axis_info(KernelEntry const *ke, u32 axis_id,
                                   u32 *axis_type, u32 *extent) {
   if (!tile_id_ok(ke, axis_id)) {

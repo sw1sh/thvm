@@ -323,6 +323,53 @@ static void build_kprog_gemv_expand(KernelEntry *ke, u32 M, u32 K) {
   };
 }
 
+static void build_kprog_conv2d_flat(KernelEntry *ke) {
+  u32 c_out = 4;
+  u32 c_in  = 2;
+  u32 h     = 6;
+  u32 w     = 6;
+  u32 kh    = 3;
+  u32 kw    = 3;
+  u32 h_out = h - kh + 1;
+  u32 w_out = w - kw + 1;
+  u32 k     = c_in * kh * kw;
+  u32 p     = h_out * w_out;
+
+  kernel_inputs_reserve(ke, 2);
+  ke->n_inputs        = 2;
+  ke->input_tids[0]   = 0;
+  ke->input_tids[1]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_dtypes[1] = DT_FP32;
+  ke->input_numels[0] = c_out * k;
+  ke->input_numels[1] = c_in * h * w;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = c_out * p;
+  ke->output_shape.ndim = 2;
+  ke->output_shape.dims[0] = c_out;
+  ke->output_shape.dims[1] = p;
+  test_set_view3(&ke->input_views[0], c_out, k, p, (i32)k, 1, 0);
+  test_set_view3(&ke->input_views[1], c_in, h, w, (i32)(h * w), (i32)w, 1);
+
+  kernel_program_reserve(ke, 2);
+  ke->n_ops = 2;
+  ke->program[0] = (KProgOp){
+    .opcode = UOP_MUL,
+    .dtype  = DT_FP32,
+    .n_src  = 2,
+    .src    = {KSRC_AS_INPUT(0), KSRC_AS_INPUT(1), 0},
+    .numel  = c_out * k * p,
+  };
+  ke->program[1] = (KProgOp){
+    .opcode = UOP_REDUCE,
+    .dtype  = DT_FP32,
+    .n_src  = 1,
+    .src    = {0, 0, 0},
+    .arg    = (REDUCE_SUM << 24) | (p & 0x00FFFFFFu),
+    .numel  = c_out * p,
+  };
+}
+
 int main(void) {
   thvm_init();
 
@@ -529,6 +576,87 @@ int main(void) {
   CHECK_EQ(tc_cands[2].op, (u32)KOP_TC);
   CHECK_EQ(tc_cands[2].arg, 8u);
   unsetenv("THVM_BACKEND");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes = NULL;
+  kernel_free_arrays(ke);
+
+  TEST_BEGIN("tile-graph/conv2d-flat-analysis-and-metal-source");
+  build_kprog_conv2d_flat(ke);
+  TileConv2DInfo conv = {0};
+  CHECK(tile_analyze_conv2d_flat(ke, &conv));
+  CHECK_EQ(conv.dtype, (u32)DT_FP32);
+  CHECK_EQ(conv.c_out, 4u);
+  CHECK_EQ(conv.c_in, 2u);
+  CHECK_EQ(conv.kh, 3u);
+  CHECK_EQ(conv.kw, 3u);
+  CHECK_EQ(conv.h_out, 4u);
+  CHECK_EQ(conv.w_out, 4u);
+  CHECK_EQ(conv.patches, 16u);
+  CHECK_EQ(conv.w_stride0, 18);
+  CHECK_EQ(conv.w_stride1, 1);
+  CHECK_EQ(conv.x_stride0, 36);
+  CHECK_EQ(conv.x_stride1, 6);
+  CHECK_EQ(conv.x_stride2, 1);
+  u32 conv_groups_x = 0;
+  u32 conv_threads_x = 0;
+  CHECK(cg_tile_metal_dispatch_shape(ke, &conv_groups_x, &conv_threads_x));
+  CHECK_EQ(conv_groups_x, 1u);
+  CHECK_EQ(conv_threads_x, 256u);
+  char *conv_src = cg_emit_tile_metal(ke);
+  CHECK(conv_src != NULL);
+  if (conv_src != NULL) {
+    CHECK(strstr(conv_src, "for (int ci = 0") != NULL);
+    CHECK(strstr(conv_src, "constant int *cfg") != NULL);
+    CHECK(strstr(conv_src, "acc += in0[wi] * in1[xi]") != NULL);
+    free(conv_src);
+  }
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 3;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 4;
+  ke->axes->axis_types[1] = KAX_LOOP;
+  ke->axes->full_shape[1] = 16;
+  ke->axes->axis_types[2] = KAX_REDUCE;
+  ke->axes->full_shape[2] = 18;
+  ke->axes->version++;
+  KOpt conv_local4 = { .op = KOP_LOCAL, .axis = 0, .arg = 4 };
+  CHECK(kernel_apply_opt(ke, conv_local4));
+  CHECK(tile_analyze_conv2d_flat(ke, &conv));
+  CHECK_EQ(conv.threads, 4u);
+  CHECK(cg_tile_metal_dispatch_shape(ke, &conv_groups_x, &conv_threads_x));
+  CHECK_EQ(conv_groups_x, 16u);
+  CHECK_EQ(conv_threads_x, 4u);
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes = NULL;
+  kernel_free_arrays(ke);
+
+  TEST_BEGIN("tile-graph/metal-conv2d-flat-proposes-local");
+  build_kprog_conv2d_flat(ke);
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 3;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 4;
+  ke->axes->axis_types[1] = KAX_LOOP;
+  ke->axes->full_shape[1] = 16;
+  ke->axes->axis_types[2] = KAX_REDUCE;
+  ke->axes->full_shape[2] = 18;
+  ke->axes->version++;
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_TILE", "1", 1);
+  KOpt conv_cands[16];
+  u32 n_conv_cands = kernel_opts_propose(ke, conv_cands,
+                                         (u32)(sizeof(conv_cands)/
+                                               sizeof(*conv_cands)));
+  CHECK_EQ(n_conv_cands, 2u);
+  CHECK_EQ(conv_cands[0].op, (u32)KOP_LOCAL);
+  CHECK_EQ(conv_cands[0].axis, 0u);
+  CHECK_EQ(conv_cands[0].arg, 4u);
+  CHECK_EQ(conv_cands[1].op, (u32)KOP_LOCAL);
+  CHECK_EQ(conv_cands[1].arg, 2u);
+  unsetenv("THVM_BACKEND");
+  unsetenv("THVM_TILE");
   memset(ke->axes, 0, sizeof(KernelAxes));
   ke->axes = NULL;
   kernel_free_arrays(ke);

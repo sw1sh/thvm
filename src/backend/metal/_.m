@@ -521,6 +521,14 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   h ^= (u64)ke->output_dtype;      h *= 0x100000001b3ULL;
   h ^= (u64)ke->output_numel;      h *= 0x100000001b3ULL;
   h ^= (u64)ke->tile_axes_version; h *= 0x100000001b3ULL;
+  if (ke->axes != NULL) {
+    h ^= (u64)ke->axes->n_applied; h *= 0x100000001b3ULL;
+    u8 const *opts = (u8 const *)ke->axes->applied_opts;
+    size_t total = (size_t)ke->axes->n_applied * sizeof(KOpt);
+    for (size_t i = 0; i < total; i++) {
+      h ^= (u64)opts[i]; h *= 0x100000001b3ULL;
+    }
+  }
   return h | (1ULL << 62);
 }
 
@@ -585,8 +593,26 @@ static int metal_tile_jit_encode(KernelEntry *ke,
   for (u32 i = 0; i < ke->n_inputs; i++) {
     [enc setBuffer:src_bufs[i] offset:0 atIndex:(1 + i)];
   }
-  [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)groups_x, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads_x, 1, 1)];
+  TileConv2DInfo conv;
+  int is_conv = tile_analyze_conv2d_flat(ke, &conv);
+  if (is_conv) {
+    int cfg[16] = {
+      (int)conv.c_out, (int)conv.c_in,  (int)conv.h,     (int)conv.w,
+      (int)conv.kh,    (int)conv.kw,    (int)conv.h_out, (int)conv.w_out,
+      (int)conv.patches,
+      conv.w_offset, conv.w_stride0, conv.w_stride1,
+      conv.x_offset, conv.x_stride0, conv.x_stride1, conv.x_stride2,
+    };
+    [enc setBytes:cfg length:sizeof(cfg) atIndex:(1 + ke->n_inputs)];
+  }
+  if (is_conv) {
+    NSUInteger total = (NSUInteger)(conv.c_out * conv.patches);
+    [enc dispatchThreads:MTLSizeMake(total, 1, 1)
+     threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads_x, 1, 1)];
+  } else {
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)groups_x, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads_x, 1, 1)];
+  }
   [enc endEncoding];
   return 1;
 }
@@ -1133,6 +1159,10 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   u32 tile_threads_x = 0;
   int tile_supported = metal_tile_enabled()
       && cg_tile_metal_dispatch_shape(ke, &tile_groups_x, &tile_threads_x);
+  TileConv2DInfo tile_conv_info;
+  int tile_conv_supported = tile_supported
+      && tile_analyze_conv2d_flat(ke, &tile_conv_info);
+  (void)tile_conv_info;
   int kprog_supported = metal_kernel_supported(ke);
   if (!tile_supported && !kprog_supported) return -1;
 
@@ -1171,7 +1201,8 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     u32 ib = in_buf_ids[i];
     if (ib == 0 || ib >= METAL_BUFS_NEXT) { return -1; }
     u32 tid = ke->input_tids[i];
-    int needs_premat = (tid != 0 && tid < TENS_NEXT
+    int needs_premat = (!tile_conv_supported
+                        && tid != 0 && tid < TENS_NEXT
                         && !TENS[tid].view.contiguous);
     if (needs_premat) {
       View const *v = &TENS[tid].view;

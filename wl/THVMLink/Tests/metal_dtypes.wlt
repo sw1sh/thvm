@@ -322,7 +322,7 @@ VerificationTest[
        TileUop Metal reduction path for the im2col-fused scalar graph. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result, oldSpecialized, oldTile,
-            restore},
+            restore, xHost, wHost, expected},
         oldSpecialized = Environment["THVM_METAL_SPECIALIZED"];
         oldTile = Environment["THVM_TILE"];
         restore[] := (
@@ -336,11 +336,14 @@ VerificationTest[
         SetEnvironment["THVM_METAL_SPECIALIZED" -> "0"];
         SetEnvironment["THVM_TILE" -> "1"];
         If[ ctx === 0, restore[]; Return[True]];
+        xHost = ConstantArray[1., {2, 6, 6}];
+        wHost = N @ ArrayReshape[Range[54], {3, 2, 3, 3}];
+        expected = Table[
+            Total @ Flatten @ wHost[[co, All, All, All]],
+            {co, 3}, {oh, 1, 4}, {ow, 1, 4}];
         result = TInContext[ctx,
-            x = TTensorCreate @ NumericArray[
-                ConstantArray[1., {2, 6, 6}], "Real32"];
-            w = TTensorCreate @ NumericArray[
-                ConstantArray[1., {3, 2, 3, 3}], "Real32"];
+            x = TTensorCreate @ NumericArray[xHost, "Real32"];
+            w = TTensorCreate @ NumericArray[wHost, "Real32"];
             b = TZeros[{3}];
             out = TRealize @ TConv2D[TReLU[x], w, b];
             reduceKids = Select[Range[1, TKernelCount[] - 1],
@@ -353,7 +356,7 @@ VerificationTest[
         ];
         TContextDestroy[ctx];
         restore[];
-        result === {ConstantArray[18., {3, 4, 4}], True, False}
+        result === {expected, True, False}
     ],
     True,
     TestID -> "metal/f32-conv2d-generic-tile-reduce"
@@ -364,18 +367,22 @@ VerificationTest[
        opt-in direct Metal conv diagnostic shader for the im2col-fused
        scalar graph. *)
     TInit[]; TReset[];
-    Module[{ctx = TContextNew["metal"], result, oldSpecialized, restore},
+    Module[{ctx = TContextNew["metal"], result, oldSpecialized, restore,
+            xHost, wHost, expected},
         oldSpecialized = Environment["THVM_METAL_SPECIALIZED"];
         restore[] := If[StringQ[oldSpecialized],
             SetEnvironment["THVM_METAL_SPECIALIZED" -> oldSpecialized],
             SetEnvironment["THVM_METAL_SPECIALIZED" -> ""]];
         SetEnvironment["THVM_METAL_SPECIALIZED" -> "1"];
         If[ ctx === 0, restore[]; Return[True]];
+        xHost = ConstantArray[1., {2, 6, 6}];
+        wHost = N @ ArrayReshape[Range[54], {3, 2, 3, 3}];
+        expected = Table[
+            Total @ Flatten @ wHost[[co, All, All, All]],
+            {co, 3}, {oh, 1, 4}, {ow, 1, 4}];
         result = TInContext[ctx,
-            x = TTensorCreate @ NumericArray[
-                ConstantArray[1., {2, 6, 6}], "Real32"];
-            w = TTensorCreate @ NumericArray[
-                ConstantArray[1., {3, 2, 3, 3}], "Real32"];
+            x = TTensorCreate @ NumericArray[xHost, "Real32"];
+            w = TTensorCreate @ NumericArray[wHost, "Real32"];
             b = TZeros[{3}];
             out = TRealize @ TConv2D[TReLU[x], w, b];
             kinds = Table[TKernelDispatchKind[k], {k, 1, TKernelCount[] - 1}];
@@ -384,7 +391,7 @@ VerificationTest[
         ];
         TContextDestroy[ctx];
         restore[];
-        result === {ConstantArray[18., {3, 4, 4}], True}
+        result === {expected, True}
     ],
     True,
     TestID -> "metal/f32-conv2d-direct-produced-activation"

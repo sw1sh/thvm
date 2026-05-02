@@ -43,6 +43,13 @@ that future renderers can lower differently for CPU and Metal.
   source substitutes the threadgroup accumulator into post-reduce
   scalar expressions after a `GROUP` opt, while the no-opt baseline
   can still fall back to the old Metal route for autotune comparison;
+- `tile_analyze_conv2d_flat` recognizes the im2col-fused Conv2D
+  reduce shape as a reusable tile template (`TileConv2DInfo`).  The
+  generated Metal tile path emits the corresponding strided Conv2D
+  runtime template, skips generic input pre-materialization because
+  the template consumes the original view strides directly, and
+  exposes `LOCAL` threadgroup-size candidates through the normal
+  proposer;
 - `TKernelAutotune` keeps the in-process per-program-shape behavior
   and now also persists winning opts under
   `$XDG_CACHE_HOME/thvm/autotune` / `$HOME/.cache/thvm/autotune`
@@ -79,11 +86,11 @@ that future renderers can lower differently for CPU and Metal.
   `thread_position_in_threadgroup`, dispatches
   `GLOBAL x LOCAL` as threadgroups x threads-per-threadgroup, and
   records dispatch kind `"metal-tile"`;
-- Metal also has `THVM_METAL_SPECIALIZED=1` diagnostic direct
-  conv2d/GEMV paths.  These are not the intended architecture and
-  stay off by default; they exist only as correctness/performance
-  oracles while the tile planner learns to rediscover equivalent
-  schedules from lowered scalar/tile primitives;
+- Metal also has `THVM_METAL_SPECIALIZED=1` diagnostic direct GEMV
+  and legacy direct Conv2D paths.  These stay off by default; the
+  Conv2D win now routes through shared tile analysis plus generated
+  tile dispatch, while the diagnostic path remains a
+  correctness/performance oracle;
 - rank-1 `TMatVec` now reaches that generic path: the tile analyzer
   recognizes `EXPAND(vector) -> MUL(matrix, vector) -> REDUCE_SUM`
   as a `TILE_MMA` plan with `N=1`, so Metal dispatches it via
@@ -180,10 +187,9 @@ output axis.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Move the conv2d/GEMV diagnostic wins into generic tile
-   recognition: detect im2col-like reduce graphs as tile templates,
-   expose schedule choices through `TKernelProposed`, and let
-   `TKernelAutotune` / beam search pick among them.
+2. Move the remaining GEMV diagnostic win into generic tile
+   recognition and broaden the Conv2D template's schedule space beyond
+   one SIMT threadgroup-size knob.
 3. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
    instead of using only scalar reducer loops.
 4. Generalize `TILE_MMA` target code beyond fixed 8/16/32

@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Added: generic Metal tile Conv2D template
+
+The tile analyzer now recognizes the im2col-fused Conv2D reduce shape
+as a reusable `TileConv2DInfo` template.  `THVM_TILE=1` lowers that
+template through the generated Metal tile path, binds the original
+strided inputs directly instead of pre-materializing them, and exposes
+`LOCAL` threadgroup-size candidates for autotune.  The old
+`THVM_METAL_SPECIALIZED=1` conv shader remains a diagnostic oracle, but
+the default Metal tile path now reaches the same steady-state
+beautiful-mnist forward class without a backend-private recognizer.
+
 ### Added: scalar reduce axes feed Metal GROUP autotune
 
 Rangeified scalar kernels now append the scalar `S_REDUCE_*` range to
