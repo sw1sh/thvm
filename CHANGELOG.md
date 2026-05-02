@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Added: add UOp view helpers and graph simplification
+
+`uop_view` now gives graph rewrite callbacks a stable op/source-slot
+view, and `uop_graph_simplify` runs the first named symbolic UOp rules
+over `uop_graph_rewrite`.  The initial graph rules reuse the existing
+safe constructor-time unary, binary, and reshape/expand-chain
+simplifications so later range/index rewrites have a concrete pass to
+extend.
+
 ### Added: add a UOp graph rewrite skeleton
 
 `src/uop/graph_rewrite.c` now provides a named bottom-up rewrite pass

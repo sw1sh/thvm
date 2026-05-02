@@ -1456,6 +1456,18 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 fn Term uop_cast   (Term src, u32 dst_dtype);                    // value-preserving cast
 fn Term uop_bitcast(Term src, u32 dst_dtype);                    // same-itemsize reinterpret
 
+typedef struct {
+  Term term;
+  u8   op;
+  u8   arity;
+  u64  loc;
+  Term src[MAX_UOP_SRC];
+} UOpView;
+fn u8   uop_is_movement(u8 op);
+fn int  uop_view(Term t, UOpView *out);
+fn int  uop_view_op(Term t, u8 op, UOpView *out);
+fn Term uop_view_src(UOpView const *view, u8 idx);
+
 typedef Term (*UOpGraphRewriteFn)(Term t, void *user);
 typedef struct {
   char const        *name;
@@ -1470,6 +1482,7 @@ fn u32  uop_graph_rewrite_stats_len(void);
 fn char const *uop_graph_rewrite_stat_name(u32 i);
 fn u32  uop_graph_rewrite_stat_hits_at(u32 i);
 fn u32  uop_graph_rewrite_stat_hits(char const *name);
+fn Term uop_graph_simplify(Term root);
 
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is
