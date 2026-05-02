@@ -47,10 +47,10 @@ materialize + dispatch through every layer type LeNet uses.
 example.  It materializes LeNet once, lists kernels with
 `TKernelProposed` candidates, optionally prints measured
 `TKernelVariants`, groups candidates by nonzero `TKernelProgramKey`,
-applies `TKernelAutotune` to representative cached program shapes,
+applies `TKernelAutotune` to representative shared schedule shapes,
 then reruns the forward pass and checks the softmax probabilities stay
 within tolerance.  Zero-key kernels are kept separate because they do
-not share a KProgOp cache slot.  The default tunes the first 16
+not share a `KernelAxes` slot.  The default tunes the first 16
 representative candidates so the script remains interactive; set
 `MAX_TUNE_KERNELS=All` for the full representative sweep.
 
@@ -66,7 +66,11 @@ program-shape `TKernelAutotune`, and timed training steps.  Use
 lazy LeNet/Adam training path end to end on one MNIST sample.  The
 benchmark is intentionally single-sample for now so kernel generation,
 autotune, and dispatch timing stay visible while the wider tiling
-pipeline is still evolving.
+pipeline is still evolving.  CPU training is the current performance
+baseline.  Metal forward, grad-check, and one Adam step pass; longer
+Metal training currently emits `metal_buf_alloc -- buffer table full`
+warnings and should be treated as a memory-pressure follow-up before
+using its timings.
 
 ## Files
 
@@ -99,8 +103,8 @@ pipeline is still evolving.
                              (roughly ln(10) = uniform softmax);
                              Metal trains more slowly (saturation
                              through the chain on this random
-                             init -- documented under the
-                             grad-check Metal-vs-CPU follow-up).
+                             init) and currently exposes buffer-table
+                             pressure during longer runs.
   - `verify.wls`          -- end-to-end correctness check: trains
                              on one sample (4 Adam steps), then
                              asserts the trained model predicts

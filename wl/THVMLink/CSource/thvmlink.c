@@ -1480,6 +1480,8 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_program_key(WolframLibraryData libData,
     KernelEntry const *ke = &KERNELS[kid];
     if (ke->program_shared) {
       key = kernel_program_key(ke->program, ke->n_ops);
+    } else if (ke->axes != NULL && ke->axes != &ke->_local_axes) {
+      key = kernel_rangeified_key(ke);
     }
   }
   MArgument_setInteger(res, (mint)key);

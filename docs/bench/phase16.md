@@ -2,9 +2,10 @@
 
 End-to-end pipeline for shape-heuristic kernel optimization:
 proposer suggests TOpts, autotune benches each, JIT cache keys
-fold opts so distinct dylibs get built, per-program-shape sharing
-means a winning opt auto-applies across all kernels with the same
-KProgOp[].  Optional fire-time auto-trigger via `THVM_AUTOTUNE=1`.
+fold opts so distinct dylibs get built, and per-shape schedule
+sharing means a winning opt auto-applies across kernels with the same
+structural key.  Optional fire-time auto-trigger via
+`THVM_AUTOTUNE=1`.
 
 ## Architecture
 
@@ -21,13 +22,17 @@ TKernelAutotune[kid]                    bench-and-pick the winner
 
 TKernelAutotuneAll[]                    sweep every live kid (one-shot pre-warm)
 
-TKernelProgramKey[kid]                  structural KProgOp[] cache hash,
-                                        or 0 when no cached program exists
+TKernelProgramKey[kid]                  structural key for the shared
+                                        KernelAxes schedule slot:
+                                        KProgOp[] cache key for legacy
+                                        programs, scalar graph key for
+                                        rangeified/tile kernels, or 0
+                                        when no shared axes entry exists
 
 TKernelAutotuneUnique[]                 group proposer candidates by
                                         nonzero TKernelProgramKey and tune
-                                        one representative per cached
-                                        program shape
+                                        one representative per shared
+                                        schedule shape
 
 TKernelVariants[kid]                    inspect-only: bench all, leave baseline
   -> kernel_bench_variants(ke, ...)
@@ -38,11 +43,12 @@ THVM_AUTOTUNE=1                         fire-time trigger -- first dispatch of
                                         cost; iter 2+ runs the winning variant
 ```
 
-All opts pass through C-side `KernelAxes` which lives on the
-shared `KpCacheSlot` (per-program-shape).  Apply once -> propagates
-to every other kid sharing that program.  Mutated by
-`axes_apply_opt`; read by `cg_emit` (renderer pragma) and by
-`cpu_jit_hash` (distinct dylib per (program, opts) pair).
+All opts pass through C-side `KernelAxes`.  For KProg kernels, axes
+live on the `KpCacheSlot`.  For rangeified/tile or axes-only kernels,
+axes live on a parallel structural schedule cache.  Apply once ->
+propagates to every kid sharing that structural key.  Mutated by
+`axes_apply_opt`; read by renderers and JIT hashes so distinct opt
+plans build distinct variants.
 
 ## Opt classes (so far)
 
@@ -63,10 +69,11 @@ to every other kid sharing that program.  Mutated by
   pragma; JIT cache key produces a distinct dylib hash.
 - Per-program-shape sharing: 3 SUM realizes -> 3 kids, 1 cached
   KProgOp[]; opt on kid_1 surfaces on kid_2, kid_3 automatically.
-- `TKernelProgramKey` exposes that shared structural key to WL, and
+- `TKernelProgramKey` exposes the shared structural schedule key to
+  WL for both KProg kernels and rangeified/tile kernels.
   `TKernelAutotuneUnique[]` uses nonzero keys to avoid
   re-benchmarking duplicate live kids.  Zero-key kernels are left
-  separate because no shared KProgOp cache slot exists for them.
+  separate because no shared `KernelAxes` slot exists for them.
 - Autotune on SUM(x*y + 0.5*x) at 16384 elems picks UPCAST=4;
   source contains `#pragma clang loop unroll_count(4)`;
   computed value matches baseline to f32 tolerance.
@@ -76,103 +83,50 @@ to every other kid sharing that program.  Mutated by
 - `TKernelVariants[kid]` returns 5 entries (1 baseline + 4
   candidates) with measured WallUs each, leaves axes at baseline.
 - Summary boxes render for `TOpt`, `TKernelOpts`, `TKernelVariant`.
+- LeNet/Adam CPU training works end to end.  `N_STEPS=4
+  train.wls` produced `{2.6071, 1.8054, 1.1324, 0.6546, 0.3559}`
+  on May 2, 2026.
+- A bounded CPU LeNet A/B benchmark now runs:
+  `TRAIN_BENCH_MODE=both N_STEPS=1 WARMUP_STEPS=1
+  MAX_TUNE_KERNELS=3 THVM_TILE=1 bench-train.wls` saw 1543 live
+  candidates collapse to 68 representative schedule keys, tuned 3
+  reps in 0.4 ms, and measured 33.6s baseline vs 29.2s autotune
+  for the timed step.  No candidate beat baseline in that tiny
+  bounded sample; the speedup is within benchmark noise until the
+  heavier opt classes land.
+- The old `Conv2D + ReLU + MaxPool2d` weight-gradient shape bug is
+  fixed in the current tree; the repro returns `{2, 1, 3, 3}`.
+- Metal primitive coverage is green on Apple M3 Max:
+  `test_metal_real` 200/200 and `metal_dtypes.wlt` 5/5.
+- Metal LeNet forward, full input-gradient smoke, and one Adam step
+  pass.  Four Adam steps complete but emit many
+  `metal_buf_alloc -- buffer table full` warnings and flatten near
+  loss `1.9259`, so Metal is functionally alive but not yet a clean
+  performance baseline.
 
-## What's NOT (yet) measured
+## Current Measurement Plan
 
-End-to-end LeNet/Adam train.wls A/B (baseline vs autotune-all)
-remains blocked by two issues that surfaced during the leak
-investigation:
-
-1. **Multi-grad chain-rule walks shared sub-DAGs without
-   structural memo.**  With the leak fix (b5b9766) single grads
-   complete cleanly (~109K cells each).  HotCounters: GradFires
-   = 54025 / 5 grads = 10K interact_grad calls per target on a
-   ~65-node forward DAG -- exponential in the chain rule's
-   shared-sub-DAG count.  Commit 1b6999c added a per-realize
-   memo on (child, gy, target) for `grad_bwd_for_child`, but it
-   only hits when the parent op gives every child the SAME gy
-   (ADD-style: gy_for_a == gy_for_b == gy).  MUL/MatVec stacks
-   transform gy per child (`gy_for_a = MUL(b_fwd, gy)`) so each
-   visit has a fresh gy Term and the memo key never matches --
-   no help for LeNet's matmul-heavy chain rule.
-
-   The proper fix factors the chain rule into a gy-INDEPENDENT
-   structural pass + gy threading.  One sketch: cache
-   `interact_grad(uop, target)` -> structural template with a
-   TAG_VAR placeholder for gy; each fire substitutes its actual
-   gy via SUB-bit (re-uses the existing VAR/SUB substitution
-   infrastructure).  Per-call cost drops from O(walk shared
-   sub-DAG once per parent) to O(walk once total), unblocking
-   the LeNet/Adam train end-to-end.  Bigger refactor -- next
-   real milestone.
-
-   Experimented with a SUP-projector approach as an alternative:
-   walk the chain rule ONCE with target=0 (emits SUP^{tid}(0,
-   gy_for_leaf) at each TEN leaf), then per target traverse the
-   result graph and pick the gy or zero arm at each SUP, side-
-   stepping the IC's DUP-SUP commute (which was the original
-   leak source).  Built `uop_project_grad` C-side projector +
-   WL TGradMany rewrite + CTR-bundled batch realize.  The chain
-   rule walk completes (158K cells for LeNet's 8-weight forward)
-   and a single projection's TRealize succeeds (~1s for a small
-   target like w1), but realizing TWO projections back-to-back
-   segfaults during the second.  Root cause: TRealize's per-
-   call `cpu_buf_pool_rollback_with_preserve` frees forward-
-   intermediate buffers reachable only from OTHER projections
-   in the batch -- the next target's realize then reads freed
-   memory.  Fixing this needs either a batch-aware buffer-pool
-   boundary (preserve every projection in the batch, not just
-   the current call's result chain) or a single all-targets
-   wnf pass that fires every kernel inside one boundary.
-   Reverted; the structural-template fix above is the better
-   long-term direction (no shared-buffer hazard) and folds in
-   here when it lands.
-2. **WL bench harnesses for the smaller training examples
-   (linear-train, mlp-mnist) need the per-iter timing to land
-   inside the recursive `TPriForce` callback** (the `TWnf` of
-   the outer loop completes near-instantly because the callback
-   doesn't force a fresh realize).
-
-3. **TGrad on `Conv2D + ReLU + MaxPool2d` returns a wrong-
-   shaped gradient.**  Surfaced while bisecting the LeNet 1e37
-   gradient values that earlier looked like a numerical issue
-   but are actually downstream of a shape mismatch.
-
-   Minimal repro:
-   ```
-   x = TTensorCreate @ NumericArray[RandomReal[{-1, 1}, {1, 8, 8}], "Real32"];
-   w = TTensorCreate @ NumericArray[RandomReal[{-1, 1}, {2, 1, 3, 3}], "Real32"];
-   b = TZeros[{2}];
-   h = TMaxPool2d[TReLU[TConv2D[x, w, b]], 2];
-   y = TUOpReduce[TUOpReduce[TUOpReduce[h, 0, "SUM"], 0, "SUM"], 0, "SUM"];
-   g = TRealize @ TGrad[y, w];
-   TTensorShape[g]   (* expected {2, 1, 3, 3}; actual {2, 6, 6} *)
-   ```
-
-   - `TGrad[y, w]` for `Conv2D` alone:           shape `{2, 1, 3, 3}` ✓
-   - `TGrad[y, w]` for `Conv2D + ReLU`:          shape `{2, 1, 3, 3}` ✓
-   - `TGrad[y, w]` for `Conv2D + MaxPool2d`:     shape `{2, 1, 3, 3}` ✓
-   - `TGrad[y, w]` for `Conv2D + ReLU + Pool`:   shape `{2, 6, 6}` ✗
-
-   The wrong shape is the conv OUTPUT shape (post-activation,
-   pre-pool), not the conv WEIGHT shape.  The chain rule walks
-   pool->ReLU correctly back to the conv output level but then
-   emits a tensor at conv-output rank instead of inverting the
-   convolution to weight rank.  Bug is in how the chain rule
-   composes `TConv2D`'s lowering (kh*kw partials of
-   SHRINK + RESHAPE + EXPAND + MUL + REDUCE_SUM, then
-   Fold[Plus]) with the EXPAND/REDUCE_SUM adjoints emitted by
-   the pool gradient.  Fix needed BEFORE LeNet train can be
-   verified end-to-end -- the 1e37/Inf gradients we saw are
-   wrong-shaped buffers being read as the weight gradient and
-   accumulating garbage.
-
-Both are out of Phase 16's scope.  Per-grad memo is the next
-milestone -- it unblocks the LeNet/Adam bench AND likely
-collapses the kernel-count regression in `fusion-count` and
-`training-loop` tests (extra kernels currently emitted because
-target-aware chain rule re-walks shared paths instead of
-sharing sub-grad cells).
+1. **CPU LeNet baseline vs bounded autotune.**  Run
+   `bench-train.wls` with `TRAIN_BENCH_MODE=both`, `N_STEPS=2`,
+   `WARMUP_STEPS=1`, and bounded `MAX_TUNE_KERNELS` first.  This is
+   now a valid correctness/perf comparison because baseline training
+   and gradients pass.
+2. **Representative tuning coverage.**  Track live proposer
+   candidates, `TKernelProgramKey` groups, and selected reps.  The
+   rangeified/axes-only schedule cache should prevent repeated
+   training iterations from benchmarking identical schedule shapes.
+3. **Metal correctness smoke before Metal perf.**  Keep Metal perf
+   numbers separate until the buffer-table pressure is fixed.  The
+   current acceptance bar for Metal is: forward passes, grad-check,
+   one Adam step, `test_metal_real`, and `metal_dtypes.wlt`.
+4. **Metal memory follow-up.**  Diagnose the buffer-table-full spam in
+   4-step Metal training before treating Metal A/B timings as useful.
+   Likely areas: buffer freelist reuse, temporary pre-materialization
+   buffers, and per-step preservation boundaries.
+5. **Autotune value.**  Existing UPCAST/UNROLL candidates often report
+   no winner on tiny kernels.  Real wins likely need broader
+   opt classes (`LOCAL`/`GLOBAL` proposer for Metal tile, structured
+   axis-order renderers, and eventually `TILE_MMA`).
 
 For tiny isolated kernels the autotune correctly reports either
 "no opt beat baseline" (when clang's `-O2` already vectorises)

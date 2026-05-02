@@ -7,6 +7,16 @@
    Metal (TContextNew returns 0).  *)
 
 VerificationTest[
+    TInit[]; TReset[];
+    TRealize @ TUOpConst[-1.0, "f32"];
+    src = TKernelSource[TKernelCount[] - 1, "Metal"];
+    StringContainsQ[src, "as_type<float>(0xbf800000u)"]
+        && ! StringContainsQ[src, "-1f"],
+    True,
+    TestID -> "metal/source-f32-const-uses-raw-bits"
+]
+
+VerificationTest[
     (* f32 elementwise add via Metal. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result},

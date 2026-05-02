@@ -119,11 +119,15 @@ static void rm_loop_close_reduce(CgBuf *b, u32 reduce_src_raw, u8 kind,
   cg_append(b, "  out[_oi] = acc;\n");
 }
 
+static void rm_emit_f32_bits(CgBuf *b, u32 bits) {
+  cg_append(b, "as_type<float>(0x%08xu)", bits);
+}
+
 static void rm_emit_const(CgBuf *b, u32 step, u32 dtype, u32 bits) {
   (void)dtype;
-  f32 v;
-  memcpy(&v, &bits, sizeof v);
-  cg_append(b, "  float r%u = %.17gf;\n", step, v);
+  cg_append(b, "  float r%u = ", step);
+  rm_emit_f32_bits(b, bits);
+  cg_append(b, ";\n");
 }
 
 static void rm_emit_binary(CgBuf *b, u32 step, u8 opcode,
@@ -413,10 +417,8 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
   ScalarUop const *u = &ke->scalar_uops[op_id];
   switch (u->op) {
     case S_CONST: {
-      f32 v;
       u32 bits = (u32)u->extra;
-      memcpy(&v, &bits, sizeof(v));
-      cg_append(b, "%.17gf", v);
+      rm_emit_f32_bits(b, bits);
       return 1;
     }
     case S_LOAD: {

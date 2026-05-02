@@ -36,7 +36,24 @@ struct KpCacheSlot {
                              // program shape.
 };
 
+struct KAxisCacheSlot {
+  u64        key;
+  ScalarUop *scalar_uops;
+  u32        n_scalar_uops;
+  u32        n_inputs;
+  u32       *input_dtypes;
+  u32       *input_numels;
+  u32        output_dtype;
+  u32        output_numel;
+  Shape      output_shape;
+  u8         source_tag;
+  u32        source_ext;
+  KernelAxes axes;
+};
+typedef struct KAxisCacheSlot KAxisCacheSlot;
+
 static KpCacheSlot KP_CACHE[KP_CACHE_CAP];
+static KAxisCacheSlot KAXIS_CACHE[KP_CACHE_CAP];
 
 fn void kernel_program_cache_reset(void) {
   for (u32 i = 0; i < KP_CACHE_CAP; i++) {
@@ -44,7 +61,23 @@ fn void kernel_program_cache_reset(void) {
     KP_CACHE[i].key     = 0;
     KP_CACHE[i].program = NULL;
     KP_CACHE[i].n_ops   = 0;
+    if (KAXIS_CACHE[i].scalar_uops != NULL) free(KAXIS_CACHE[i].scalar_uops);
+    if (KAXIS_CACHE[i].input_dtypes != NULL) free(KAXIS_CACHE[i].input_dtypes);
+    if (KAXIS_CACHE[i].input_numels != NULL) free(KAXIS_CACHE[i].input_numels);
+    memset(&KAXIS_CACHE[i], 0, sizeof(KAXIS_CACHE[i]));
   }
+}
+
+static u64 kp_hash_bytes(u64 h, void const *ptr, size_t n) {
+  u8 const *bytes = (u8 const *)ptr;
+  for (size_t i = 0; i < n; i++) {
+    h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
+  }
+  return h;
+}
+
+static u64 kp_hash_u64(u64 h, u64 x) {
+  return kp_hash_bytes(h, &x, sizeof(x));
 }
 
 // Hash the bytes of every populated KProgOp.  We hash the entire
@@ -55,12 +88,8 @@ fn void kernel_program_cache_reset(void) {
 // future-proof against new fields.
 static u64 kp_program_hash(KProgOp const *prog, u32 n_ops) {
   u64 h = 0xcbf29ce484222325ULL;
-  h ^= (u64)n_ops; h *= 0x100000001b3ULL;
-  u8 const *bytes = (u8 const *)prog;
-  size_t total = (size_t)n_ops * sizeof(KProgOp);
-  for (size_t i = 0; i < total; i++) {
-    h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
-  }
+  h = kp_hash_u64(h, (u64)n_ops);
+  h = kp_hash_bytes(h, prog, (size_t)n_ops * sizeof(KProgOp));
   return h | (1ULL << 63);   // never zero
 }
 
@@ -69,6 +98,41 @@ fn u64 kernel_program_key(KProgOp const *prog, u32 n_ops) {
     return 0;
   }
   return kp_program_hash(prog, n_ops);
+}
+
+fn u64 kernel_rangeified_key(KernelEntry const *ke) {
+  if (ke == NULL) {
+    return 0;
+  }
+  u64 h = 0xcbf29ce484222325ULL ^ 0x52414E4745584B41ULL;
+  if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
+    h = kp_hash_u64(h, 1);
+    h = kp_hash_u64(h, (u64)ke->n_scalar_uops);
+    h = kp_hash_bytes(h, ke->scalar_uops,
+                      (size_t)ke->n_scalar_uops * sizeof(ScalarUop));
+  } else if (ke->axes != NULL && ke->axes->n_axes > 0) {
+    h = kp_hash_u64(h, 2);
+    h = kp_hash_u64(h, (u64)term_tag(ke->source_uop));
+    h = kp_hash_u64(h, (u64)term_ext(ke->source_uop));
+    h = kp_hash_u64(h, (u64)ke->axes->n_axes);
+    h = kp_hash_bytes(h, ke->axes->axis_types,
+                      (size_t)ke->axes->n_axes * sizeof(u8));
+    h = kp_hash_bytes(h, ke->axes->full_shape,
+                      (size_t)ke->axes->n_axes * sizeof(u32));
+  } else {
+    return 0;
+  }
+  h = kp_hash_u64(h, (u64)ke->n_inputs);
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    h = kp_hash_u64(h, (u64)ke->input_dtypes[i]);
+    h = kp_hash_u64(h, (u64)ke->input_numels[i]);
+  }
+  h = kp_hash_u64(h, (u64)ke->output_dtype);
+  h = kp_hash_u64(h, (u64)ke->output_numel);
+  h = kp_hash_u64(h, (u64)ke->output_shape.ndim);
+  h = kp_hash_bytes(h, ke->output_shape.dims,
+                    (size_t)ke->output_shape.ndim * sizeof(u32));
+  return (h & 0x3FFFFFFFFFFFFFFFULL) | (1ULL << 62);
 }
 
 static int kp_program_equal(KProgOp const *a, u32 a_n,
@@ -178,6 +242,106 @@ fn KProgOp *kernel_program_cache_insert(KProgOp const *prog, u32 n_ops) {
     //  hash that doesn't match equality will just probe past.)
   }
   return NULL;   // full -- caller keeps its own buffer
+}
+
+static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
+  if (s->n_scalar_uops != ke->n_scalar_uops) {
+    return 0;
+  }
+  if (memcmp(s->scalar_uops, ke->scalar_uops,
+             (size_t)ke->n_scalar_uops * sizeof(ScalarUop)) != 0) {
+    return 0;
+  }
+  if (s->n_inputs != ke->n_inputs
+      || s->output_dtype != ke->output_dtype
+      || s->output_numel != ke->output_numel
+      || s->output_shape.ndim != ke->output_shape.ndim
+      || s->source_tag != term_tag(ke->source_uop)
+      || s->source_ext != term_ext(ke->source_uop)
+      || memcmp(s->output_shape.dims, ke->output_shape.dims,
+                (size_t)s->output_shape.ndim * sizeof(u32)) != 0) {
+    return 0;
+  }
+  if (s->n_scalar_uops == 0) {
+    if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
+      return 0;
+    }
+    if (ke->axes == NULL || s->axes.n_axes != ke->axes->n_axes
+        || memcmp(s->axes.axis_types, ke->axes->axis_types,
+                  (size_t)s->axes.n_axes * sizeof(u8)) != 0
+        || memcmp(s->axes.full_shape, ke->axes->full_shape,
+                  (size_t)s->axes.n_axes * sizeof(u32)) != 0) {
+      return 0;
+    }
+  }
+  if (s->n_inputs > 0) {
+    if (memcmp(s->input_dtypes, ke->input_dtypes,
+               (size_t)s->n_inputs * sizeof(u32)) != 0) {
+      return 0;
+    }
+    if (memcmp(s->input_numels, ke->input_numels,
+               (size_t)s->n_inputs * sizeof(u32)) != 0) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+fn KernelAxes *kernel_rangeified_axes_cache_lookup_or_insert(KernelEntry const *ke) {
+  u64 key = kernel_rangeified_key(ke);
+  if (key == 0) {
+    return NULL;
+  }
+  u32 mask = KP_CACHE_CAP - 1;
+  u32 h = (u32)(key ^ (key >> 32));
+  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+  for (u32 probe = 0; probe < KP_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & mask;
+    KAxisCacheSlot *s = &KAXIS_CACHE[i];
+    if (s->key == 0) {
+      memset(s, 0, sizeof(*s));
+      if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
+        s->scalar_uops = (ScalarUop *)malloc((size_t)ke->n_scalar_uops
+                                             * sizeof(ScalarUop));
+        if (s->scalar_uops == NULL) {
+          return NULL;
+        }
+        memcpy(s->scalar_uops, ke->scalar_uops,
+               (size_t)ke->n_scalar_uops * sizeof(ScalarUop));
+      }
+      if (ke->n_inputs > 0) {
+        s->input_dtypes = (u32 *)malloc((size_t)ke->n_inputs * sizeof(u32));
+        s->input_numels = (u32 *)malloc((size_t)ke->n_inputs * sizeof(u32));
+        if (s->input_dtypes == NULL || s->input_numels == NULL) {
+          free(s->scalar_uops);
+          free(s->input_dtypes);
+          free(s->input_numels);
+          memset(s, 0, sizeof(*s));
+          return NULL;
+        }
+        memcpy(s->input_dtypes, ke->input_dtypes,
+               (size_t)ke->n_inputs * sizeof(u32));
+        memcpy(s->input_numels, ke->input_numels,
+               (size_t)ke->n_inputs * sizeof(u32));
+      }
+      s->key           = key;
+      s->n_scalar_uops = ke->n_scalar_uops;
+      s->n_inputs      = ke->n_inputs;
+      s->output_dtype  = ke->output_dtype;
+      s->output_numel  = ke->output_numel;
+      s->output_shape  = ke->output_shape;
+      s->source_tag    = term_tag(ke->source_uop);
+      s->source_ext    = term_ext(ke->source_uop);
+      if (ke->axes != NULL) {
+        s->axes = *ke->axes;
+      }
+      return &s->axes;
+    }
+    if (s->key == key && kaxis_slot_equal(s, ke)) {
+      return &s->axes;
+    }
+  }
+  return NULL;
 }
 
 // Stats for tests / introspection.

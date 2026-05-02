@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Changed: refreshed LeNet autotune bench plan
+
+Revised the Phase 16 benchmark plan around the current state:
+CPU LeNet/Adam training and the old Conv2D/ReLU/Pool gradient repro
+now pass, while Metal 4-step training still needs buffer-table
+cleanup before performance numbers are trustworthy.  `TKernelProgramKey`
+now also covers shared rangeified/axes-only schedule slots, and Metal
+constant rendering emits raw-bit `as_type<float>` literals instead of
+invalid forms such as `-1f`.
+
 ### Added: program-shape autotune de-duplication
 
 Added `TKernelProgramKey` and `TKernelAutotuneUnique` so training
