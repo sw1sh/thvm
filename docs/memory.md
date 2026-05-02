@@ -191,6 +191,33 @@ honest lifetime number rather than a silent replay failure, and it
 means broad autotune sweeps should remain blocked until replay-time
 memory reuse or stronger fusion reduces the live set.
 
+`DUMP_MEMORY_PLAN=1` on `wl/Examples/beautiful-mnist/bench-train.wls`
+prints the largest live Metal buffers with producer-kernel metadata.
+The current BS=32 profile is dominated by multi-consumer conv/backward
+movement-and-add intermediates:
+
+- two `327,680,000` element f32 buffers (`1.31GB` each) produced by
+  76-op `RESHAPE/PAD/ADD/EXPAND` graphs and consumed by 8 later
+  kernels;
+- several `37-42M` element f32 buffers (`151-170MB` each) produced by
+  28-op `RESHAPE/PAD/ADD/EXPAND` graphs and consumed by 4 later
+  kernels;
+- a long tail of `10,240,000` element reshape aliases/copies
+  (`40.96MB`) with short lifetimes.
+
+That points to two separate memory jobs:
+
+- **Fusion job:** avoid materializing shared im2col-like
+  movement/add producers when consumers can inline the scalar index
+  expression cheaply enough, or fuse the consumers around the shared
+  producer so the huge tensor is never a global buffer.
+- **Replay allocator job:** once a TJit capture is finalized, pack
+  live temporary outputs into reusable replay slots by captured op
+  lifetime.  The current memory plan reports about `3.62GB` peak
+  concurrent live bytes versus `5.26GB` total live bytes, so static
+  replay slot packing has roughly `1.6GB` of headroom even before
+  deeper fusion.
+
 ## Safety Boundary
 
 Current policy:

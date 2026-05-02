@@ -146,6 +146,7 @@ showHotCounters = envValue["SHOW_HOT_COUNTERS", "0"] === "1";
 dumpTopProgram = envValue["DUMP_TOP_PROGRAM", "0"] === "1";
 dumpTopLowered = envValue["DUMP_TOP_LOWERED", "0"] === "1";
 dumpJitCapture = envValue["DUMP_JIT_CAPTURE", "0"] === "1";
+dumpMemoryPlan = envValue["DUMP_MEMORY_PLAN", "0"] === "1";
 
 print["beautiful_mnist training benchmark"];
 print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
@@ -167,6 +168,7 @@ print["  BS=", bs,
       "  DUMP_TOP_PROGRAM=", If[dumpTopProgram, "1", "0"],
       "  DUMP_TOP_LOWERED=", If[dumpTopLowered, "1", "0"],
       "  DUMP_JIT_CAPTURE=", If[dumpJitCapture, "1", "0"],
+      "  DUMP_MEMORY_PLAN=", If[dumpMemoryPlan, "1", "0"],
       "  PROFILE_TOP=", topCount,
       "  POST_AUTOTUNE=", If[doPostAutotune, "1", "0"]];
 
@@ -300,6 +302,35 @@ If[dumpJitCapture,
         Do[print["  ", formatRun[row]], {row, summary["TopRuns"]}];
         print["jit_capture_top_graph_runs:"];
         Do[print["  ", formatGraphRun[row]], {row, summary["TopGraphRuns"]}]]];
+If[dumpMemoryPlan,
+    Module[{plan = First @ TMemoryPlan[], bufs, metalLive, top},
+        bufs = plan["Bufs"];
+        metalLive = Select[bufs, #["backend"] === 2 && #["refcount"] > 0 &];
+        top = Take[ReverseSortBy[metalLive, #["nbytes"] &], UpTo[topCount]];
+        print["memory_plan peak_bytes=", plan["Peak"]["peak_bytes"],
+              " peak_depth=", plan["Peak"]["peak_depth"],
+              " total_bytes=", plan["Peak"]["total_bytes"],
+              " metal_live_bufs=", Length[metalLive]];
+        print["top live metal buffers by bytes:"];
+        Do[
+            Module[{kid = row["producer_kid"], info, ops},
+                info = If[kid > 0, TKernelInfo[kid], <||>];
+                ops = If[KeyExistsQ[info, "program"],
+                    Counts[info["program"][[All, "opcode"]]],
+                    <||>];
+                print["  buf=", row["id"],
+                      " bytes=", row["nbytes"],
+                      " refs=", row["refcount"],
+                      " producer=", kid,
+                      " prod_out=", Lookup[info, "output_numel", 0],
+                      " prod_ops=", Lookup[info, "n_ops", 0],
+                      " prod_op_hist=", formatMaybeAssoc[ops],
+                      " consumers=", Length[row["consumer_kids"]],
+                      " span=", row["alive_span"],
+                      " dtype=", row["dtype"],
+                      " aliases=", ToString[Take[row["alias_tids"], UpTo[4]], InputForm]]
+            ],
+            {row, top}]]];
 If[showProgramProfile,
     Module[{groups = Take[TProfileProgramGroups[profileTimedDelta], UpTo[topCount]]},
         print["top timed program shapes by total dispatch time:"];
