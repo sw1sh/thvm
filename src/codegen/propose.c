@@ -11,6 +11,11 @@
 //   -> propose LOCAL tile factors.  The autotune loop applies the
 //   matching outer GLOBAL mark when benchmarking these candidates.
 //
+//   THVM_BACKEND=metal + f32 TILE_MMA/GEMM kernel
+//   -> propose TC tile sizes.  The first implementation uses TC as
+//   metadata for the fixed direct Metal GEMM renderer; later it maps
+//   to simdgroup MMA variants.
+//
 // As more opt classes get codegen support (UPCAST output axes,
 // LOCAL/GLOBAL Metal bindings, GROUP_REDUCE, etc.) they slot in
 // here as additional rules.  The output is a flat list of KOpt;
@@ -131,6 +136,22 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
 
   static const u32 split_factors[] = {16, 8, 4, 2};
   u32 n_factors = sizeof(split_factors)/sizeof(*split_factors);
+
+  if (propose_metal_backend_enabled() && ke->axes != NULL
+      && ke->axes->n_axes > 0) {
+    TileGemmInfo gemm;
+    if (tile_analyze_gemm(ke, NULL, &gemm) && gemm.dtype == DT_FP32) {
+      static const u32 tc_tiles[] = {32, 16, 8};
+      u32 n_tc_tiles = sizeof(tc_tiles)/sizeof(*tc_tiles);
+      for (u32 i = 0; i < n_tc_tiles && n < cap; i++) {
+        out[n].op   = KOP_TC;
+        out[n].axis = 0;
+        out[n].arg  = tc_tiles[i];
+        n++;
+      }
+      return n;
+    }
+  }
 
   // Reduce-tail UNROLL candidates: {2, 4, 8, 16} where divisible.
   // Skip 1 (= no opt; the autotune loop tracks the baseline

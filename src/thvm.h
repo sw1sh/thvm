@@ -420,7 +420,8 @@ typedef struct {
   u8  op;        // KOP_*
   u8  axis;      // 0-indexed; meaning depends on op
   u32 arg;       // op-specific (split factor for UPCAST/UNROLL, target
-                 // axis index for SWAP, full axis size for GLOBAL, ...)
+                 // axis index for SWAP, full axis size for GLOBAL,
+                 // MMA tile size for TC, ...)
 } KOpt;
 
 typedef struct {
@@ -690,9 +691,10 @@ typedef struct {
 //   TILE_LOOP_NEST(TILE_STORE(TILE_SCALAR_BODY(value_id)), TILE_AXIS...)
 // or, for scalar reducers,
 //   TILE_LOOP_NEST(TILE_STORE(TILE_REDUCE(TILE_SCALAR_BODY(value_id))), ...)
-// from a KernelEntry's scalar_uops[] + KernelAxes.  Dispatch consumes
-// tile_uops only on opt-in tile paths; default execution still follows
-// the scalar/KProgOp routes.
+// from a KernelEntry's scalar_uops[] + KernelAxes.  tile_sync_from_scalar
+// may instead seed a TILE_MMA root for recognized matmul programs.
+// Dispatch consumes tile_uops only on opt-in tile paths; default
+// execution still follows the scalar/KProgOp routes.
 typedef enum {
   TILE_NONE = 0,
   TILE_AXIS,        // extra = (KAX_* << 32) | extent
@@ -703,7 +705,7 @@ typedef enum {
   TILE_STORE,       // src[0] = TILE_SCALAR_BODY/TILE_REDUCE, extra = scalar S_STORE id
   TILE_BARRIER,     // future: target barrier between tile stages
   TILE_REDUCE,      // src[0] = TILE_SCALAR_BODY, extra = scalar S_REDUCE_* id
-  TILE_MMA,         // future: tensor-core / simdgroup matmul
+  TILE_MMA,         // src = M/N/K TILE_AXIS nodes, extra = input slots + flags
   TILE__COUNT
 } TileOp;
 
@@ -720,6 +722,19 @@ typedef struct {
 } TileUop;
 
 typedef struct {
+  u32 dtype;
+  u32 M;
+  u32 N;
+  u32 K;
+  u32 a_input;
+  u32 b_input;
+  u32 ldA;
+  u32 ldB;
+  u32 flags;       // bit 0 = transposed A storage, bit 1 = transposed B storage
+  u32 tile_size;   // 8/16/32; 16 is the default fixed Metal GEMM tile
+} TileGemmInfo;
+
+typedef struct {
   u32 root_id;
   u32 store_tile_id;
   u32 reduce_tile_id;
@@ -734,6 +749,8 @@ typedef struct {
   u32 axis_ids    [MAX_AXES];
   u32 axis_types  [MAX_AXES];
   u32 axis_extents[MAX_AXES];
+  u32 mma_tile_id;
+  TileGemmInfo mma;
 } TilePlanInfo;
 
 typedef struct KernelEntry {
@@ -1195,6 +1212,10 @@ fn void axes_default_for(struct KernelEntry *ke);
 // validation failure (axis out of range, arg doesn't divide,
 // applied_opts full, unsupported opt).
 fn int axes_apply_opt(KernelAxes *ax, KOpt opt);
+// Kernel-aware opt application.  Most opts delegate to axes_apply_opt;
+// metadata opts such as TC validate against the KernelEntry before
+// recording themselves in applied_opts[].
+fn int kernel_apply_opt(struct KernelEntry *ke, KOpt opt);
 
 // Shape-heuristic kernel opt proposer: looks at the kernel's
 // program + axes and writes up to `cap` candidate KOpts into
@@ -1255,11 +1276,22 @@ fn int  tile_collect_plan_info(struct KernelEntry const *ke,
 fn u32  tile_loop_axis_count(struct KernelEntry const *ke);
 fn u32  tile_loop_axis_type(struct KernelEntry const *ke, u32 axis);
 fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
+// Recognize a matmul-shaped MUL + REDUCE_SUM program and recover the
+// logical M/N/K axes plus the physical input slots/leading dimensions.
+// `input_storage_numels` is optional; when supplied it must carry the
+// actual backing-buffer element counts for each input slot.
+int     tile_analyze_gemm(struct KernelEntry const *ke,
+                          u32 const *input_storage_numels,
+                          TileGemmInfo *out);
+fn int  tile_mma_size_supported(u32 tile);
+// Sync and collect a validated TILE_MMA plan.  Used by backends that
+// compile outside the single C translation unit.
+int     tile_collect_mma_plan(struct KernelEntry *ke, TileGemmInfo *out);
 // Seed a TILE_LOOP_NEST(TILE_STORE(...)) plan from scalar_uops + KernelAxes.
 // Returns 1 on success, 0 when scalar_uops is absent or malformed.
 fn int  tile_build_from_scalar(struct KernelEntry *ke);
-// Rebuild only when the cached tile plan is missing, invalid, or was
-// built against an older KernelAxes version.
+// Rebuild only when the cached tile plan is missing, invalid, was built
+// against an older KernelAxes version, or can be promoted to TILE_MMA.
 fn int  tile_sync_from_scalar(struct KernelEntry *ke);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);

@@ -49,7 +49,7 @@ TKernelProgramKey::usage = "TKernelProgramKey[kid] returns the structural key fo
 TKernelInfo::usage     = "TKernelInfo[kid] returns an Association describing the linearized program stored at KERNELS[kid].  Equivalent to TKernel[kid][\"Program\"] paired with the header (n_inputs, n_ops, output_numel, output_dtype).";
 TKernelScalarUops::usage = "TKernelScalarUops[kid] returns the post-lowering scalar-UOp graph snapshot stored at KERNELS[kid].scalar_uops, as a List of Associations (one per scalar op, with keys \"id\", \"op\", \"dtype\", \"src\", \"extra\", and -- for S_RANGE -- \"axis_type\" and \"extent\").  Returns Missing[\"NotLowered\"] when the kernel was emitted via the legacy per-tensor-UOp visit() path (i.e. rangeify lowering was off or didn't apply).  Slot 0 (S_NONE sentinel) is included so list indices match C-side ScalarUop[] indices; live ops occupy positions [2..].";
 TKernelTileUops::usage = "TKernelTileUops[kid] returns the tile-UOp plan snapshot stored at KERNELS[kid].tile_uops, as a List of Associations with keys \"id\", \"op\", \"dtype\", \"src\", and \"extra\".  TILE_AXIS entries also expose \"axis_type\" and \"extent\".  Returns Missing[\"NotLowered\"] when no rangeify tile plan exists.  Slot 0 (TILE_NONE sentinel) is included so list indices match C-side TileUop[] indices.";
-TKernelTilePlan::usage = "TKernelTilePlan[kid] returns a validated compact Association for KERNELS[kid].tile_uops: tile root/store/body ids, scalar store/index/value ids, dtype, and axis metadata.  Returns Missing[\"NotLowered\"] when no validated rangeify tile plan exists.";
+TKernelTilePlan::usage = "TKernelTilePlan[kid] returns a validated compact Association for KERNELS[kid].tile_uops: tile root/store/body ids, scalar store/index/value ids, dtype, axis metadata, and \"mma\" metadata for recognized matmul plans.  Returns Missing[\"NotLowered\"] when no validated rangeify tile plan exists.";
 
 (* === codegen / profiling surface (delegated to TKernel properties) === *)
 
@@ -68,19 +68,19 @@ TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every li
    block just packages the C-side state into typed WL objects with
    summary boxes. *)
 
-TOpt::usage = "TOpt[op_String, axis_Integer, arg_] is a typed kernel-optimization action.  Mirrors tinygrad's `Opt(OptOps.UPCAST, axis=2, arg=4)` (tinygrad/codegen/opt/kernel.py:Opt).  Supported ops: \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GLOBAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\".  Reserved ops \"PADTO\", \"NOLOCALS\", and \"TC\" are recognized but rejected until a renderer consumes them.  axis is 0-indexed.  arg meaning is op-specific (for UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP: split factor; for GLOBAL: full current axis size; for SWAP: target axis index).  Apply via `TKernelApplyOpt[kid, TOpt[...]]`; introspect via `TKernelOpts[kid]`.";
+TOpt::usage = "TOpt[op_String, axis_Integer, arg_] is a typed kernel-optimization action.  Mirrors tinygrad's `Opt(OptOps.UPCAST, axis=2, arg=4)` (tinygrad/codegen/opt/kernel.py:Opt).  Supported ops: \"UPCAST\", \"UNROLL\", \"LOCAL\", \"GLOBAL\", \"GROUP\", \"GROUPTOP\", \"SWAP\", and \"TC\" for recognized f32 MMA/GEMM kernels.  Reserved ops \"PADTO\" and \"NOLOCALS\" are recognized but rejected until a renderer consumes them.  axis is 0-indexed.  arg meaning is op-specific (for UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP: split factor; for GLOBAL: full current axis size; for SWAP: target axis index; for TC: MMA tile size).  Apply via `TKernelApplyOpt[kid, TOpt[...]]`; introspect via `TKernelOpts[kid]`.";
 
 TKernelOpts::usage = "TKernelOpts[kid] returns a wrapped `TKernelOpts[<|\"Kid\", \"AxisTypes\", \"FullShape\", \"Applied\"|>]` summarising the kernel's axis-typed scheduling plan as carried in C.  AxisTypes parallels FullShape: each entry is one of \"LOOP\" / \"REDUCE\" / \"UPCAST\" / \"UNROLL\" / \"LOCAL\" / \"GLOBAL\" / \"GROUP_REDUCE\".  Default (no opts applied) is all LOOP for elementwise output axes plus a trailing REDUCE for reduce kernels.  Applied is the chronological list of TOpt actions.";
 
-TKernelApplyOpt::usage = "TKernelApplyOpt[kid, TOpt[op, axis, arg]] mutates the kernel's C-side KernelAxes via axes_apply_opt: splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), marks a full LOOP axis as GLOBAL, or swaps two axes (SWAP).  Returns the updated TKernelOpts wrapper.  Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg doesn't divide axis size, opts table full, or reserved opt not implemented).";
+TKernelApplyOpt::usage = "TKernelApplyOpt[kid, TOpt[op, axis, arg]] mutates the kernel's C-side scheduling plan: splits the indicated axis (UPCAST/UNROLL/LOCAL/GROUP), marks a full LOOP axis as GLOBAL, swaps two axes (SWAP), or records TC metadata for recognized f32 MMA/GEMM kernels.  Returns the updated TKernelOpts wrapper.  Returns Failure[\"opt-rejected\"] on validation failure (axis out of range, arg doesn't divide axis size, opts table full, unsupported TC size, or reserved opt not implemented).";
 
-TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` candidates suggested by the C-side shape-heuristic proposer (`kernel_opts_propose` in `src/codegen/propose.c`).  Today's CPU heuristics propose UNROLL on reduce axes plus UPCAST on elementwise output axes where divisible.  With THVM_BACKEND=metal and THVM_TILE=1, supported rank-1 f32 tile kernels propose LOCAL factors; TKernelAutotune expands those internally to LOCAL + matching GLOBAL because the Metal tile renderer needs both bindings.  TKernelAutotune / TKernelVariants consume this list.";
+TKernelProposed::usage = "TKernelProposed[kid] returns a list of `TOpt[...]` candidates suggested by the C-side shape-heuristic proposer (`kernel_opts_propose` in `src/codegen/propose.c`).  Today's CPU heuristics propose UNROLL on reduce axes plus UPCAST on elementwise output axes where divisible.  With THVM_BACKEND=metal, recognized f32 GEMM kernels propose TC tile sizes; with THVM_BACKEND=metal and THVM_TILE=1, supported rank-1 f32 tile kernels propose LOCAL factors that TKernelAutotune expands internally to LOCAL + matching GLOBAL.  TKernelAutotune / TKernelVariants consume this list.";
 
 TKernelVariant::usage = "TKernelVariant[<|\"Kid\" -> _, \"Opt\" -> TOpt | None, \"WallUs\" -> _Real|>] is a typed wrapper for one proposed-or-measured kernel variant.  Returned by TKernelVariants[kid].  Carries summary boxes so notebook output renders the (op, axis, arg) triple + measured wallclock per fire next to the kid.";
 
 TKernelVariants::usage = "TKernelVariants[kid] returns a list of TKernelVariant: one for the no-opt baseline followed by one per TKernelProposed candidate.  Each has WallUs measured by 5 back-to-back fires (min wallclock).  Like TKernelAutotune internally but reports every candidate's measurement instead of just applying the winner -- useful for inspecting what the proposer found and why a particular winner was picked.  Side effect: leaves the kernel's KernelAxes at the BASELINE (no opts applied) since the measurements imply the user wants to inspect, not commit.";
 
-TKernelAutotune::usage = "TKernelAutotune[kid] benchmarks every TKernelProposed candidate against the no-opt baseline (5 dispatches each, min wallclock), applies the winning TOpt to the kernel's C-side KernelAxes, and returns the resulting TKernelOpts.  Metal LOCAL winners record both LOCAL and the matching GLOBAL mark.  Because axes live on a shared schedule slot, the winner auto-applies to other kernels with the same structural key.  Returns the unchanged TKernelOpts (no opts applied) if no candidate beat baseline.";
+TKernelAutotune::usage = "TKernelAutotune[kid] benchmarks every TKernelProposed candidate against the no-opt baseline (5 dispatches each, min wallclock), applies the winning TOpt to the kernel's C-side KernelAxes, and returns the resulting TKernelOpts.  Metal LOCAL winners record both LOCAL and the matching GLOBAL mark; Metal TC winners record the chosen MMA tile size.  Because axes live on a shared schedule slot, the winner auto-applies to other kernels with the same structural key.  Returns the unchanged TKernelOpts (no opts applied) if no candidate beat baseline.";
 
 TKernelAutotuneAll::usage = "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel (kid 1..TKernelCount[]-1) and returns an Association mapping kid -> TKernelOpts after tuning.  Useful for exhaustive diagnostics; TKernelAutotuneUnique[] is usually cheaper for training-loop pre-warm.";
 
@@ -683,13 +683,25 @@ TKernelTileUops[kid_Integer] := Module[{raw, n, srcWidth, rowWidth, decoded},
                 "axis_type" -> Lookup[$tileAxisNames,
                                   BitShiftRight[extra, 32], "?"]
               |>,
-              <|
-                "id"     -> i - 1,
-                "op"     -> opName,
-                "dtype"  -> dtypeName[raw[[base + 2]]],
-                "src"    -> Take[src, srcCount],
-                "extra"  -> extra
-              |>
+              If[ opName === "TILE_MMA",
+                <|
+                  "id"       -> i - 1,
+                  "op"       -> opName,
+                  "dtype"    -> dtypeName[raw[[base + 2]]],
+                  "src"      -> Take[src, srcCount],
+                  "extra"    -> extra,
+                  "a_input"  -> BitAnd[extra, 16^^FFFF],
+                  "b_input"  -> BitAnd[BitShiftRight[extra, 16], 16^^FFFF],
+                  "flags"    -> BitAnd[BitShiftRight[extra, 32], 16^^FF]
+                |>,
+                <|
+                  "id"     -> i - 1,
+                  "op"     -> opName,
+                  "dtype"  -> dtypeName[raw[[base + 2]]],
+                  "src"    -> Take[src, srcCount],
+                  "extra"  -> extra
+                |>
+              ]
             ]
           ]
         ]
@@ -698,11 +710,30 @@ TKernelTileUops[kid_Integer] := Module[{raw, n, srcWidth, rowWidth, decoded},
     decoded
 ]
 
-TKernelTilePlan[kid_Integer] := Module[{raw, nAxes},
+TKernelTilePlan[kid_Integer] := Module[{raw, nAxes, mmaBase, mma},
     raw = Normal @ $kernelTilePlanInfoFn[kid];
     If[ raw === {} || First[raw] == 0,
       Return @ Missing["NotLowered"] ];
     nAxes = raw[[2]];
+    mmaBase = 12 + nAxes * 3;
+    mma = If[ Length[raw] >= mmaBase + 11 && raw[[mmaBase + 1]] =!= 0,
+      <|
+        "tile"        -> raw[[mmaBase + 1]],
+        "dtype"       -> dtypeName[raw[[mmaBase + 2]]],
+        "M"           -> raw[[mmaBase + 3]],
+        "N"           -> raw[[mmaBase + 4]],
+        "K"           -> raw[[mmaBase + 5]],
+        "a_input"     -> raw[[mmaBase + 6]],
+        "b_input"     -> raw[[mmaBase + 7]],
+        "ldA"         -> raw[[mmaBase + 8]],
+        "ldB"         -> raw[[mmaBase + 9]],
+        "flags"       -> raw[[mmaBase + 10]],
+        "tile_size"   -> raw[[mmaBase + 11]],
+        "transpose_a" -> BitAnd[raw[[mmaBase + 10]], 1] =!= 0,
+        "transpose_b" -> BitAnd[raw[[mmaBase + 10]], 2] =!= 0
+      |>,
+      Missing["NotMMA"]
+    ];
     <|
       "valid"        -> True,
       "root"         -> raw[[3]],
@@ -724,7 +755,8 @@ TKernelTilePlan[kid_Integer] := Module[{raw, nAxes},
             |>
           ],
           {i, nAxes}
-      ]
+      ],
+      "mma"          -> mma
     |>
 ]
 

@@ -106,10 +106,16 @@ plans build distinct variants.
   `TRealize` and `TJit` replay (`THVM_METAL_BATCH=0` disables it),
   plus backend-native `buf_copy` so `ASSIGN` can use a Metal blit
   instead of forcing a host read/write pair.
-- Metal f32 matmul kernels now have a direct `metal-gemm` route that
-  recognizes `MUL + REDUCE_SUM` and reads the original A/B buffers
-  instead of pre-materializing their expanded `{M,K,N}` views.
-  Focused coverage confirms `TMatMul` dispatches as `metal-gemm`.
+- Metal f32 matmul kernels now have a direct `metal-gemm` route fed by
+  a validated `TILE_MMA` plan.  The dispatch reads the original A/B
+  buffers instead of pre-materializing their expanded `{M,K,N}` views,
+  and now runs a fixed 16x16 threadgroup-memory tiled shader.  The
+  `MUL + REDUCE_SUM` recognition lives in the tile scheduler rather
+  than the Metal backend.  Focused coverage confirms `TMatMul`
+  dispatches as `metal-gemm` and exposes `TILE_MMA` metadata.
+- Metal GEMM autotune now has a first real `TC` knob: recognized f32
+  GEMM kernels propose 32/16/8 tile sizes, and `metal-gemm` compiles
+  one threadgroup-memory shader per selected tile size.
 - Metal fire-time autotune is wired for supported tile kernels:
   `LOCAL` proposals are expanded internally to `LOCAL + GLOBAL`, and
   impossible tile variants with more than 30 input buffers are rejected
@@ -131,17 +137,21 @@ plans build distinct variants.
    training baseline, then `THVM_BACKEND=metal THVM_TILE=1
    THVM_AUTOTUNE=1 N_STEPS=1 train.wls` to exercise fire-time tuning
    without post-realize kernel stripping.
-4. **Post-hoc Metal inspection.**  Use `THVM_KGC=0` when running
-   `autotune.wls` as an inspection tool; otherwise kernel GC may strip
-   program arrays after `TRealize`, leaving only shared axes metadata.
+4. **Post-hoc inspection.**  Metal-output kernels now stay
+   inspectable after `TRealize`; kernel GC skips non-CPU backends
+   because its liveness signal is CPU-buffer refcounts.  Use
+   `THVM_KGC=0` for CPU-only post-hoc inspection when you need old
+   kernels' program arrays after their output buffers were released.
 5. **Autotune value.**  Metal now has real `LOCAL/GLOBAL` tile
    candidates for rank-1 f32 scalar/tile kernels and MSL `UNROLL` for
    supported reduce-tail JIT kernels.  The direct `metal-gemm` path
-   removes one expanded-view matmul bottleneck, but full
+   now consumes the introspectable `TILE_MMA` plan root with
+   M/N/K/layout metadata and can autotune fixed 32/16/8 tiled
+   threadgroup-memory shader variants.  Full
    beautiful-mnist performance still needs the next structural fix:
    avoiding PAD-and-sum im2col materialization, then structured
    multi-axis tile rendering, reductions over local memory, and
-   eventually `TILE_MMA`.
+   eventually autotuned `TILE_MMA`/simdgroup rendering.
 
 For tiny isolated kernels the autotune correctly reports either
 "no opt beat baseline" (when clang's `-O2` already vectorises)

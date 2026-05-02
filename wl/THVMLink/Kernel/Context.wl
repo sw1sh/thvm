@@ -65,11 +65,15 @@ TContextNew[device_]           := With[{slot = $contextCreateFn[deviceCode[devic
     If[ slot === 0,
         Failure["TContextOverflow",
             <| "Message" -> "TContextNew: context table full (CONTEXTS_CAP=16)" |>],
+        $labelCounters[slot] = 1;
+        $initializedContexts[slot] = True;
         TContext[slot]
     ]
 ]
 
 TContextDestroy[TContext[slot_Integer]] := (
+    KeyDropFrom[$labelCounters, slot];
+    KeyDropFrom[$initializedContexts, slot];
     $contextDestroyFn[slot];
     slot
 )

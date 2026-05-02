@@ -225,6 +225,32 @@ VerificationTest[
 
 VerificationTest[
     tileWithRangeify[True,
+      TInit[]; TReset[];
+      a = TTensorCreate @ NumericArray[
+          {{1., 2., 3.}, {4., 5., 6.}}, "Real32"];
+      b = TTensorCreate @ NumericArray[
+          {{7., 8.}, {9., 10.}, {11., 12.}}, "Real32"];
+      TRealize @ TMatMul[a, b];
+      kid = TKernelCount[] - 1;
+      plan = TKernelTilePlan[kid];
+      uops = TKernelTileUops[kid];
+      mma = uops[[plan["mma"]["tile"] + 1]];
+      {uops[[plan["root"] + 1]]["op"],
+       tileAxisSig @ plan,
+       plan["mma"]["M"], plan["mma"]["N"], plan["mma"]["K"],
+       plan["mma"]["a_input"], plan["mma"]["b_input"],
+       plan["mma"]["ldA"], plan["mma"]["ldB"], plan["mma"]["flags"],
+       plan["mma"]["tile_size"],
+       Lookup[Counts[#["op"] & /@ uops], "TILE_MMA", 0],
+       mma["a_input"], mma["b_input"]}
+    ],
+    {"TILE_MMA", {{"LOOP", 2}, {"LOOP", 2}, {"REDUCE", 3}},
+     2, 2, 3, 0, 1, 3, 2, 0, 16, 1, 0, 1},
+    TestID -> "tile-uops/matmul-mma-plan"
+]
+
+VerificationTest[
+    tileWithRangeify[True,
       tileSimpleAdd[];
       plan = TKernelTilePlan[1];
       uops = TKernelTileUops[1];

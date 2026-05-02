@@ -1240,7 +1240,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
       }
     }
     if (lowered) {
-      tile_build_from_scalar(ke);
+      tile_sync_from_scalar(ke);
     }
   }
 

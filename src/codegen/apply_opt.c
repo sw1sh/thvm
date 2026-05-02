@@ -22,9 +22,9 @@
 //     axis_types entries.  No new axis.
 //
 //   PADTO / NOLOCALS / TC
-//     Reserved for future tensor-core / padding passes.  Rejected
-//     until a renderer consumes them; no-op opts must not mutate the
-//     JIT cache key or pretend to be an applied variant.
+//     PADTO / NOLOCALS remain reserved.  TC is kernel-aware metadata
+//     and is handled by kernel_apply_opt below so raw axes_apply_opt
+//     keeps rejecting it for non-GEMM callers.
 //
 // Returns 1 on success, 0 on validation failure (axis out of range,
 // arg doesn't divide, applied_opts full, MAX_AXES exceeded).
@@ -111,4 +111,33 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
     ax->version = 1;
   }
   return 1;
+}
+
+static int axes_record_metadata_opt(KernelAxes *ax, KOpt opt) {
+  if (ax == NULL || ax->n_applied >= MAX_OPTS) {
+    return 0;
+  }
+  ax->applied_opts[ax->n_applied++] = opt;
+  ax->version++;
+  if (ax->version == 0) {
+    ax->version = 1;
+  }
+  return 1;
+}
+
+fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
+  if (ke == NULL || ke->axes == NULL) {
+    return 0;
+  }
+  if (opt.op != KOP_TC) {
+    return axes_apply_opt(ke->axes, opt);
+  }
+  if (opt.axis >= ke->axes->n_axes || !tile_mma_size_supported(opt.arg)) {
+    return 0;
+  }
+  TileGemmInfo gemm;
+  if (!tile_analyze_gemm(ke, NULL, &gemm) || gemm.dtype != DT_FP32) {
+    return 0;
+  }
+  return axes_record_metadata_opt(ke->axes, opt);
 }

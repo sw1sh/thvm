@@ -72,6 +72,11 @@ fn u32 kernel_gc_sweep(Term result) {
       alive = (CPU_BUFS[buf_id].refcount > 0);
     }
     if (alive) continue;
+    // This sweep keys liveness off CPU_BUFS; non-CPU backends have
+    // their own buffer tables, so leave their kernels inspectable.
+    if (TENS[ke->output_tid].backend != &CPU_BACKEND) {
+      continue;
+    }
     // Buffer is dead.  Strip the program/input arrays; leave
     // output_tid pointing at the (now-empty) TenDesc so existing
     // kid references on the heap can resolve without faulting.

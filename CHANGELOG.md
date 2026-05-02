@@ -6,6 +6,30 @@ dated section.
 
 ## Unreleased
 
+### Changed: generic GEMM plan analysis
+
+Moved the f32 Metal GEMM recognizer out of the Metal backend and into
+the tile/scheduling layer as `tile_analyze_gemm`.  CPU BLAS GEMM and
+the tile planner now consume the same `TileGemmInfo` analysis for
+`MUL + REDUCE_SUM` matmul-shaped kernels, including view-stride
+detection for transposed inputs and ambiguous square matmul cases
+where buffer sizes alone cannot identify A vs B.  The same analysis
+seeds an introspectable `TILE_MMA` root with M/N/K axes and layout
+metadata; the direct Metal GEMM shader now dispatches from that
+validated `TILE_MMA` plan and uses a fixed 16x16 threadgroup-memory
+tiled shader for f32 matmul while CPU still uses the existing
+BLAS/scalar fallbacks until generated MMA renderers are added.
+The existing `TC` opt is now kernel-aware metadata for f32 GEMM/MMA:
+the Metal proposer offers 32/16/8 tile-size candidates, `TKernelApplyOpt`
+records the selected tile size on recognized GEMM kernels, and
+`metal-gemm` compiles/caches one tiled shader per tile size.
+Fixed WL context bookkeeping so `TContextNew["metal"]` contexts are
+treated as initialized instead of being reinitialized through the
+ambient `THVM_BACKEND` on first tensor creation.  Kernel GC now skips
+non-CPU output kernels because its liveness signal is CPU-buffer
+refcounts, preserving Metal `TILE_MMA` plans for post-realize
+inspection and autotune.
+
 ### Added: Metal dispatch batching and direct GEMM
 
 Added backend dispatch scopes so `TRealize` and `TJit` replay can batch

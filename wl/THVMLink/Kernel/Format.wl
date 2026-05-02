@@ -304,7 +304,7 @@ tOptExplanation[op_String] := Switch[op,
     "SWAP",     "swap axis order in the iteration nest",
     "PADTO",    "pad axis up to a multiple of arg",
     "NOLOCALS", "disable LOCAL bindings on this kernel",
-    "TC",       "Metal: bind to a tensor-core MMA intrinsic",
+    "TC",       "Metal: choose MMA/GEMM tile size",
     _,          "(unknown op)"]
 
 TOpt /: MakeBoxes[t:TOpt[op_String, axis_Integer, arg_] /; tOptQ[Unevaluated[t]], fmt_] :=

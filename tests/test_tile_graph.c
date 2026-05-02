@@ -8,8 +8,9 @@
 //   TILE_LOOP_NEST(store, axes...)
 //
 // The tile plan is now an opt-in CPU/Metal dispatch target.  This
-// test pins arena lifecycle, name helpers, and the seed builder's two
-// axis sources: scalar S_RANGE fallback and KernelAxes override.
+// test pins arena lifecycle, GEMM analysis, name helpers, and the
+// seed builder's two axis sources: scalar S_RANGE fallback and
+// KernelAxes override.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -163,6 +164,52 @@ static void set_reduce_axes(KernelEntry *ke, u32 tail_axis_type) {
   ke->axes->version++;
 }
 
+static void test_set_view3(View *v, u32 d0, u32 d1, u32 d2,
+                           i32 s0, i32 s1, i32 s2) {
+  memset(v, 0, sizeof(View));
+  v->shape.ndim    = 3;
+  v->shape.dims[0] = d0;
+  v->shape.dims[1] = d1;
+  v->shape.dims[2] = d2;
+  v->strides[0]    = s0;
+  v->strides[1]    = s1;
+  v->strides[2]    = s2;
+  v->numel         = d0 * d1 * d2;
+}
+
+static void build_kprog_gemm(KernelEntry *ke, u32 M, u32 N, u32 K) {
+  kernel_inputs_reserve(ke, 2);
+  ke->n_inputs        = 2;
+  ke->input_tids[0]   = 0;
+  ke->input_tids[1]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_dtypes[1] = DT_FP32;
+  ke->input_numels[0] = M * K * N;
+  ke->input_numels[1] = M * K * N;
+  ke->output_dtype    = DT_FP32;
+  ke->output_numel    = M * N;
+  test_set_view3(&ke->input_views[0], M, K, N, (i32)K, 1, 0);
+  test_set_view3(&ke->input_views[1], M, K, N, 0, (i32)N, 1);
+
+  kernel_program_reserve(ke, 2);
+  ke->n_ops = 2;
+  ke->program[0] = (KProgOp){
+    .opcode = UOP_MUL,
+    .dtype  = DT_FP32,
+    .n_src  = 2,
+    .src    = {KSRC_AS_INPUT(0), KSRC_AS_INPUT(1), 0},
+    .numel  = M * K * N,
+  };
+  ke->program[1] = (KProgOp){
+    .opcode = UOP_REDUCE,
+    .dtype  = DT_FP32,
+    .n_src  = 1,
+    .src    = {0, 0, 0},
+    .arg    = (REDUCE_SUM << 24) | (N & 0x00FFFFFFu),
+    .numel  = M * N,
+  };
+}
+
 int main(void) {
   thvm_init();
 
@@ -190,6 +237,118 @@ int main(void) {
   CHECK_EQ((u64)tile_axis_name(KAX_LOCAL)[0],  (u64)'L');
   CHECK_EQ((u64)tile_axis_name(KAX_GLOBAL)[0], (u64)'G');
   CHECK_EQ((u64)tile_axis_name(KAX_GROUP_REDUCE)[0], (u64)'G');
+
+  TEST_BEGIN("tile-graph/gemm-analysis-normal-and-transposed");
+  build_kprog_gemm(ke, 2, 3, 4);
+  u32 storage_numels[2] = {8, 12};
+  TileGemmInfo gemm = {0};
+  CHECK(tile_analyze_gemm(ke, storage_numels, &gemm));
+  CHECK_EQ(gemm.dtype, (u32)DT_FP32);
+  CHECK_EQ(gemm.M, 2u);
+  CHECK_EQ(gemm.N, 3u);
+  CHECK_EQ(gemm.K, 4u);
+  CHECK_EQ(gemm.a_input, 0u);
+  CHECK_EQ(gemm.b_input, 1u);
+  CHECK_EQ(gemm.ldA, 4u);
+  CHECK_EQ(gemm.ldB, 3u);
+  CHECK_EQ(gemm.flags, 0u);
+  CHECK_EQ(gemm.tile_size, 16u);
+
+  test_set_view3(&ke->input_views[1], 2, 4, 3, 0, 1, 4);
+  CHECK(tile_analyze_gemm(ke, storage_numels, &gemm));
+  CHECK_EQ(gemm.b_input, 1u);
+  CHECK_EQ(gemm.ldB, 4u);
+  CHECK_EQ(gemm.flags, 2u);
+  kernel_free_arrays(ke);
+
+  TEST_BEGIN("tile-graph/gemm-analysis-square-view-disambiguates");
+  build_kprog_gemm(ke, 4, 4, 4);
+  test_set_view3(&ke->input_views[0], 4, 4, 4, 0, 4, 1);
+  test_set_view3(&ke->input_views[1], 4, 4, 4, 4, 1, 0);
+  u32 square_storage_numels[2] = {16, 16};
+  CHECK(tile_analyze_gemm(ke, square_storage_numels, &gemm));
+  CHECK_EQ(gemm.a_input, 1u);
+  CHECK_EQ(gemm.b_input, 0u);
+  CHECK_EQ(gemm.flags, 0u);
+  kernel_free_arrays(ke);
+
+  TEST_BEGIN("tile-graph/build-mma-plan-from-gemm");
+  build_kprog_gemm(ke, 2, 3, 4);
+  CHECK(tile_sync_from_scalar(ke));
+  CHECK(tile_validate(ke));
+  CHECK_EQ(ke->tile_uops[ke->tile_root].op, TILE_MMA);
+  CHECK_EQ(ke->n_tile_uops, 5u);
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.root_id, ke->tile_root);
+  CHECK_EQ(info.mma_tile_id, ke->tile_root);
+  CHECK_EQ(info.dtype, (u32)DT_FP32);
+  CHECK_EQ(info.n_axes, 3u);
+  CHECK_EQ(info.axis_types[0], (u32)KAX_LOOP);
+  CHECK_EQ(info.axis_types[1], (u32)KAX_LOOP);
+  CHECK_EQ(info.axis_types[2], (u32)KAX_REDUCE);
+  CHECK_EQ(info.axis_extents[0], 2u);
+  CHECK_EQ(info.axis_extents[1], 3u);
+  CHECK_EQ(info.axis_extents[2], 4u);
+  CHECK_EQ(info.mma.M, 2u);
+  CHECK_EQ(info.mma.N, 3u);
+  CHECK_EQ(info.mma.K, 4u);
+  CHECK_EQ(info.mma.a_input, 0u);
+  CHECK_EQ(info.mma.b_input, 1u);
+  CHECK_EQ(info.mma.ldA, 4u);
+  CHECK_EQ(info.mma.ldB, 3u);
+  CHECK_EQ(info.mma.flags, 0u);
+  CHECK_EQ(info.mma.tile_size, 16u);
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 3;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 2;
+  ke->axes->axis_types[1] = KAX_LOOP;
+  ke->axes->full_shape[1] = 3;
+  ke->axes->axis_types[2] = KAX_REDUCE;
+  ke->axes->full_shape[2] = 4;
+  ke->axes->version++;
+  KOpt tc8 = { .op = KOP_TC, .axis = 0, .arg = 8 };
+  CHECK(kernel_apply_opt(ke, tc8));
+  CHECK_EQ(ke->axes->n_applied, 1u);
+  CHECK_EQ(ke->axes->applied_opts[0].op, (u32)KOP_TC);
+  CHECK(tile_sync_from_scalar(ke));
+  CHECK(tile_collect_plan_info(ke, &info));
+  CHECK_EQ(info.mma.tile_size, 8u);
+  KOpt tc7 = { .op = KOP_TC, .axis = 0, .arg = 7 };
+  CHECK(!kernel_apply_opt(ke, tc7));
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes = NULL;
+  kernel_free_arrays(ke);
+
+  TEST_BEGIN("tile-graph/metal-gemm-proposes-tc");
+  build_kprog_gemm(ke, 16, 16, 16);
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 3;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 16;
+  ke->axes->axis_types[1] = KAX_LOOP;
+  ke->axes->full_shape[1] = 16;
+  ke->axes->axis_types[2] = KAX_REDUCE;
+  ke->axes->full_shape[2] = 16;
+  ke->axes->version++;
+  setenv("THVM_BACKEND", "metal", 1);
+  KOpt tc_cands[16];
+  u32 n_tc = kernel_opts_propose(ke, tc_cands,
+                                 (u32)(sizeof(tc_cands)/sizeof(*tc_cands)));
+  CHECK_EQ(n_tc, 3u);
+  CHECK_EQ(tc_cands[0].op, (u32)KOP_TC);
+  CHECK_EQ(tc_cands[0].axis, 0u);
+  CHECK_EQ(tc_cands[0].arg, 32u);
+  CHECK_EQ(tc_cands[1].op, (u32)KOP_TC);
+  CHECK_EQ(tc_cands[1].arg, 16u);
+  CHECK_EQ(tc_cands[2].op, (u32)KOP_TC);
+  CHECK_EQ(tc_cands[2].arg, 8u);
+  unsetenv("THVM_BACKEND");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes = NULL;
+  kernel_free_arrays(ke);
 
   TEST_BEGIN("tile-graph/build-from-scalar-ranges");
   u32 scalar_root = build_scalar_add_graph(ke, 8);

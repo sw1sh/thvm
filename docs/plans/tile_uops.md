@@ -13,14 +13,16 @@ that future renderers can lower differently for CPU and Metal.
 
 - slot 0 is `TILE_NONE`;
 - live nodes are stored in `[1, n_tile_uops)`;
-- `tile_root` stores the root node id, currently a `TILE_LOOP_NEST`;
+- `tile_root` stores the root node id, currently either a
+  `TILE_LOOP_NEST` scalar plan or a recognized `TILE_MMA` matmul plan;
 - `tile_free` is called by `kernel_free_arrays`;
-- `tile_validate` checks the root/store/body/axis structure before a
-  renderer or autotuner consumes the plan;
+- `tile_validate` checks the root/store/body/axis structure for scalar
+  plans and the M/N/K axis/layout contract for `TILE_MMA` plans before
+  a renderer or autotuner consumes the plan;
 - `tile_collect_plan_info` extracts the validated root into a compact
   `TilePlanInfo` view: tile root/store/reduce/body ids, scalar
-  store/index/value/body/reduce ids, dtype, and per-axis
-  ids/types/extents;
+  store/index/value/body/reduce ids, dtype, per-axis ids/types/extents,
+  and optional `TileGemmInfo` metadata for `TILE_MMA`;
 - WL exposes `TKernelTileUops[kid]` for the raw tile arena and
   `TKernelTilePlan[kid]` for the validated `TilePlanInfo` view;
 - `tile_loop_axis_count`, `tile_loop_axis_type`, and
@@ -42,6 +44,17 @@ that future renderers can lower differently for CPU and Metal.
 - tile C accepts `REDUCE`/`UNROLL`/`GROUP_REDUCE` axes only as
   reduction-schedule metadata on scalar graphs that contain a reducer;
   those axes do not become outer output loops yet;
+- `tile_analyze_gemm` recognizes matmul-shaped `MUL + REDUCE_SUM`
+  programs and recovers a compact `TileGemmInfo` view (`M/N/K`, input
+  slots, leading dimensions, transpose flags).  CPU BLAS GEMM consumes
+  the shared analysis directly, while Metal direct GEMM consumes the
+  validated `TILE_MMA` plan produced from it, so GEMM recognition is
+  no longer duplicated inside backend dispatch code.  Metal's current
+  `metal-gemm` path lowers that plan to a threadgroup-memory tiled f32
+  shader.  `TC` opts select 32/16/8 fixed tile-size variants for
+  autotune; generated tile renderers still decline that root and fall
+  back to BLAS/direct Metal/scalar execution until full MMA renderers
+  land;
 - Metal dispatch has a matching opt-in `THVM_TILE=1` path for f32
   `LOCAL`/`GLOBAL` elementwise tile plans.  It compiles
   `cg_emit_tile_metal`, maps `GLOBAL` to
@@ -80,6 +93,20 @@ TILE_LOOP_NEST(
   TILE_AXIS(...)
 )
 ```
+
+For matmul-shaped KProg kernels, `tile_sync_from_scalar` can instead
+seed a metadata-only MMA plan:
+
+```text
+TILE_MMA(
+  TILE_AXIS(LOOP,   M),
+  TILE_AXIS(LOOP,   N),
+  TILE_AXIS(REDUCE, K)
+)
+```
+
+The `TILE_MMA.extra` field stores A/B input slots and transpose flags;
+`TKernelTilePlan[kid]["mma"]` exposes the decoded `TileGemmInfo`.
 
 The scalar `S_BUFFERIZE` root still defines the complete scalar
 kernel, but the tile root's body starts at the memory-write boundary:
@@ -123,5 +150,8 @@ output axis.
    remaining gaps are narrow/packed dtypes and bitcasts.
 2. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
    instead of using only scalar reducer loops.
-3. Add `TILE_MMA` only after reductions and local-memory tiling are
-   stable.
+3. Generalize `TILE_MMA` target code beyond fixed 8/16/32
+   threadgroup-memory shaders.  The next backend target is Metal
+   `simdgroup_multiply_accumulate`; the same generic analysis should
+   also be the hook for later attention-pattern discovery rather than
+   adding attention-specific backend shortcuts.

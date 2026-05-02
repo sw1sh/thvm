@@ -141,6 +141,302 @@ fn u32 tile_loop_axis_extent(KernelEntry const *ke, u32 axis) {
   return info.axis_extents[axis];
 }
 
+#define TILE_REDUCE_KIND(arg)  (((arg) >> 24) & 0xFFu)
+#define TILE_REDUCE_INNER(arg) ((arg) & 0xFFFFFFu)
+#define TILE_MMA_A(arg)        ((u32)((arg) & 0xFFFFu))
+#define TILE_MMA_B(arg)        ((u32)(((arg) >> 16) & 0xFFFFu))
+#define TILE_MMA_FLAGS(arg)    ((u32)(((arg) >> 32) & 0xFFu))
+
+fn int tile_mma_size_supported(u32 tile) {
+  return tile == 8 || tile == 16 || tile == 32;
+}
+
+static u64 tile_mma_pack(u32 a_input, u32 b_input, u32 flags) {
+  return ((u64)(flags & 0xFFu) << 32)
+       | ((u64)(b_input & 0xFFFFu) << 16)
+       | (u64)(a_input & 0xFFFFu);
+}
+
+static u32 tile_mma_size_from_opts(KernelEntry const *ke) {
+  u32 tile = 16;
+  if (ke == NULL || ke->axes == NULL) {
+    return tile;
+  }
+  for (u32 i = 0; i < ke->axes->n_applied; i++) {
+    KOpt opt = ke->axes->applied_opts[i];
+    if (opt.op == KOP_TC && tile_mma_size_supported(opt.arg)) {
+      tile = opt.arg;
+    }
+  }
+  return tile;
+}
+
+static int tile_gemm_op_is_mul_inputs(KProgOp const *p) {
+  if (p->opcode != UOP_MUL || p->n_src != 2) {
+    return 0;
+  }
+  return KSRC_IS_INPUT(p->src[0]) && KSRC_IS_INPUT(p->src[1]);
+}
+
+static int tile_gemm_op_is_reduce_sum_of(KProgOp const *p, u32 src_step) {
+  if (p->opcode != UOP_REDUCE || p->n_src != 1) {
+    return 0;
+  }
+  if (TILE_REDUCE_KIND(p->arg) != REDUCE_SUM) {
+    return 0;
+  }
+  if (KSRC_IS_INPUT(p->src[0])) {
+    return 0;
+  }
+  return KSRC_INDEX(p->src[0]) == src_step;
+}
+
+static int tile_gemm_uniform_dtype(KernelEntry const *ke, u32 *out_dtype) {
+  if (ke->n_ops == 0) {
+    return 0;
+  }
+  u32 dt = ke->program[0].dtype;
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    if (ke->program[i].dtype != dt) {
+      return 0;
+    }
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ke->input_dtypes[i] != dt) {
+      return 0;
+    }
+  }
+  if (ke->output_dtype != dt) {
+    return 0;
+  }
+  *out_dtype = dt;
+  return 1;
+}
+
+static int tile_gemm_views_ok(KernelEntry const *ke, u32 aidx, u32 bidx,
+                              u32 M, u32 N, u32 K,
+                              u32 *ldA, u32 *ldB, u32 *flags) {
+  *ldA = K;
+  *ldB = N;
+  *flags = 0;
+  if (ke->input_views == NULL) {
+    return 1;
+  }
+
+  View const *va = &ke->input_views[aidx];
+  View const *vb = &ke->input_views[bidx];
+
+  if (M == 1 && N == 1) {
+    return 1;
+  }
+
+  if (N == 1) {
+    if (va->shape.ndim != 2 || vb->shape.ndim != 2) {
+      return 0;
+    }
+    if (!(va->shape.dims[0] == M && va->shape.dims[1] == K
+          && va->strides[0] == (i32)K && va->strides[1] == 1)) {
+      return 0;
+    }
+    if (!(vb->shape.dims[0] == M && vb->shape.dims[1] == K
+          && vb->strides[0] == 0 && vb->strides[1] == 1)) {
+      return 0;
+    }
+    *ldA = K;
+    *ldB = 1;
+    return 1;
+  }
+
+  if (va->shape.ndim != 3 || vb->shape.ndim != 3) {
+    return 0;
+  }
+
+  if (va->shape.dims[0] != M || va->shape.dims[1] != K
+      || va->shape.dims[2] != N) {
+    return 0;
+  }
+  if (vb->shape.dims[0] != M || vb->shape.dims[1] != K
+      || vb->shape.dims[2] != N) {
+    return 0;
+  }
+
+  if (va->strides[0] == (i32)K && va->strides[1] == 1
+      && va->strides[2] == 0) {
+    *ldA = K;
+  } else if (va->strides[0] == 1 && va->strides[1] == (i32)M
+             && va->strides[2] == 0) {
+    *ldA = M;
+    *flags |= 1u;
+  } else {
+    return 0;
+  }
+
+  if (vb->strides[0] == 0 && vb->strides[1] == (i32)N
+      && vb->strides[2] == 1) {
+    *ldB = N;
+  } else if (vb->strides[0] == 0 && vb->strides[1] == 1
+             && vb->strides[2] == (i32)K) {
+    *ldB = K;
+    *flags |= 2u;
+  } else {
+    return 0;
+  }
+
+  return 1;
+}
+
+static int tile_gemm_candidate_ok(KernelEntry const *ke,
+                                  u32 const *input_storage_numels,
+                                  u32 aidx, u32 bidx,
+                                  u32 M, u32 N, u32 K,
+                                  TileGemmInfo *out) {
+  if (aidx >= ke->n_inputs || bidx >= ke->n_inputs || aidx == bidx) {
+    return 0;
+  }
+  if (input_storage_numels != NULL) {
+    u32 ea = input_storage_numels[aidx];
+    u32 eb = input_storage_numels[bidx];
+    if (M == 1 && N == 1) {
+      if (ea != K || eb != K) {
+        return 0;
+      }
+    } else if (ea != M * K || eb != K * N) {
+      return 0;
+    }
+  }
+
+  u32 ldA = K;
+  u32 ldB = N;
+  u32 flags = 0;
+  if (!tile_gemm_views_ok(ke, aidx, bidx, M, N, K, &ldA, &ldB, &flags)) {
+    return 0;
+  }
+
+  out->M       = M;
+  out->N       = N;
+  out->K       = K;
+  out->a_input = aidx;
+  out->b_input = bidx;
+  out->ldA     = ldA;
+  out->ldB     = ldB;
+  out->flags   = flags;
+  out->tile_size = 16;
+  return 1;
+}
+
+int tile_analyze_gemm(KernelEntry const *ke,
+                      u32 const *input_storage_numels,
+                      TileGemmInfo *out) {
+  if (ke == NULL || out == NULL || ke->program == NULL
+      || ke->n_inputs != 2 || ke->n_ops != 2) {
+    return 0;
+  }
+  memset(out, 0, sizeof(TileGemmInfo));
+  u32 dtype = 0;
+  if (!tile_gemm_uniform_dtype(ke, &dtype)) {
+    return 0;
+  }
+  if (!tile_gemm_op_is_mul_inputs(&ke->program[0])) {
+    return 0;
+  }
+  if (!tile_gemm_op_is_reduce_sum_of(&ke->program[1], 0)) {
+    return 0;
+  }
+
+  u32 inner = TILE_REDUCE_INNER(ke->program[1].arg);
+  u32 n_mul = ke->program[0].numel;
+  u32 n_out = ke->program[1].numel;
+  if (inner == 0 || n_out == 0 || n_mul == 0) {
+    return 0;
+  }
+  if (n_mul % n_out != 0 || n_out % inner != 0) {
+    return 0;
+  }
+
+  u32 N = inner;
+  u32 K = n_mul / n_out;
+  u32 M = n_out / N;
+  if (M == 0 || N == 0 || K == 0) {
+    return 0;
+  }
+
+  out->dtype = dtype;
+  u32 first  = KSRC_INDEX(ke->program[0].src[0]);
+  u32 second = KSRC_INDEX(ke->program[0].src[1]);
+
+  if (tile_gemm_candidate_ok(ke, input_storage_numels, first, second,
+                             M, N, K, out)) {
+    out->dtype = dtype;
+    return 1;
+  }
+  if (tile_gemm_candidate_ok(ke, input_storage_numels, second, first,
+                             M, N, K, out)) {
+    out->dtype = dtype;
+    return 1;
+  }
+  return 0;
+}
+
+static int tile_collect_axis_info(KernelEntry const *ke, u32 axis_id,
+                                  u32 *axis_type, u32 *extent) {
+  if (!tile_id_ok(ke, axis_id)) {
+    return 0;
+  }
+  TileUop const *axis = &ke->tile_uops[axis_id];
+  u32 type = (u32)(axis->extra >> 32);
+  u32 size = (u32)(axis->extra & 0xFFFFFFFFu);
+  if (axis->op != TILE_AXIS || axis->src_count != 0
+      || !tile_axis_type_ok(type) || size == 0) {
+    return 0;
+  }
+  if (axis_type != NULL) {
+    *axis_type = type;
+  }
+  if (extent != NULL) {
+    *extent = size;
+  }
+  return 1;
+}
+
+static int tile_collect_mma_info(KernelEntry const *ke, u32 root_id,
+                                 TileGemmInfo *out) {
+  if (out == NULL || !tile_id_ok(ke, root_id)) {
+    return 0;
+  }
+  TileUop const *root = &ke->tile_uops[root_id];
+  if (root->op != TILE_MMA || root->src_count != 3) {
+    return 0;
+  }
+  u32 axis_types[3] = {0};
+  u32 extents[3] = {0};
+  for (u32 i = 0; i < 3; i++) {
+    if (!tile_collect_axis_info(ke, root->src[i],
+                                &axis_types[i], &extents[i])) {
+      return 0;
+    }
+  }
+  if (axis_types[0] != KAX_LOOP || axis_types[1] != KAX_LOOP
+      || axis_types[2] != KAX_REDUCE) {
+    return 0;
+  }
+
+  TileGemmInfo gemm;
+  if (!tile_analyze_gemm(ke, NULL, &gemm)) {
+    return 0;
+  }
+  if (root->dtype != gemm.dtype
+      || extents[0] != gemm.M || extents[1] != gemm.N
+      || extents[2] != gemm.K
+      || TILE_MMA_A(root->extra) != gemm.a_input
+      || TILE_MMA_B(root->extra) != gemm.b_input
+      || TILE_MMA_FLAGS(root->extra) != gemm.flags) {
+    return 0;
+  }
+  gemm.tile_size = tile_mma_size_from_opts(ke);
+  *out = gemm;
+  return 1;
+}
+
 fn int tile_validate(KernelEntry const *ke) {
   if (ke == NULL || ke->tile_uops == NULL || ke->n_tile_uops == 0) {
     return 0;
@@ -153,6 +449,10 @@ fn int tile_validate(KernelEntry const *ke) {
   }
 
   TileUop const *root = &ke->tile_uops[ke->tile_root];
+  if (root->op == TILE_MMA) {
+    TileGemmInfo gemm;
+    return tile_collect_mma_info(ke, ke->tile_root, &gemm);
+  }
   if (root->op != TILE_LOOP_NEST || root->src_count < 2
       || root->src_count > TILE_MAX_SRC) {
     return 0;
@@ -231,14 +531,7 @@ fn int tile_validate(KernelEntry const *ke) {
 
   for (u32 i = 1; i < root->src_count; i++) {
     u32 axis_id = root->src[i];
-    if (!tile_id_ok(ke, axis_id)) {
-      return 0;
-    }
-    TileUop const *axis = &ke->tile_uops[axis_id];
-    u32 axis_type = (u32)(axis->extra >> 32);
-    u32 extent    = (u32)(axis->extra & 0xFFFFFFFFu);
-    if (axis->op != TILE_AXIS || axis->src_count != 0
-        || !tile_axis_type_ok(axis_type) || extent == 0) {
+    if (!tile_collect_axis_info(ke, axis_id, NULL, NULL)) {
       return 0;
     }
   }
@@ -255,6 +548,26 @@ fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
   }
 
   TileUop const *root  = &ke->tile_uops[ke->tile_root];
+  if (root->op == TILE_MMA) {
+    TileGemmInfo gemm;
+    if (!tile_collect_mma_info(ke, ke->tile_root, &gemm)) {
+      return 0;
+    }
+    out->root_id     = ke->tile_root;
+    out->dtype       = root->dtype;
+    out->n_axes      = 3;
+    out->mma_tile_id = ke->tile_root;
+    out->mma         = gemm;
+    for (u32 i = 0; i < out->n_axes; i++) {
+      u32 axis_id = root->src[i];
+      TileUop const *axis = &ke->tile_uops[axis_id];
+      out->axis_ids    [i] = axis_id;
+      out->axis_types  [i] = (u32)(axis->extra >> 32);
+      out->axis_extents[i] = (u32)(axis->extra & 0xFFFFFFFFu);
+    }
+    return 1;
+  }
+
   u32 store_tile_id    = root->src[0];
   TileUop const *store = &ke->tile_uops[store_tile_id];
   u32 reduce_tile_id   = 0;
@@ -293,6 +606,34 @@ fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
     out->axis_types  [i] = (u32)(axis->extra >> 32);
     out->axis_extents[i] = (u32)(axis->extra & 0xFFFFFFFFu);
   }
+  return 1;
+}
+
+static int tile_build_mma_from_gemm(KernelEntry *ke,
+                                    TileGemmInfo const *gemm) {
+  if (ke == NULL || gemm == NULL || gemm->M == 0 || gemm->N == 0
+      || gemm->K == 0) {
+    return 0;
+  }
+
+  TileGemmInfo keep = *gemm;
+  tile_free(ke);
+
+  u32 axes[3];
+  axes[0] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64,
+                           ((u64)KAX_LOOP << 32) | (u64)keep.M);
+  axes[1] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64,
+                           ((u64)KAX_LOOP << 32) | (u64)keep.N);
+  axes[2] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64,
+                           ((u64)KAX_REDUCE << 32) | (u64)keep.K);
+  ke->tile_root = tile_emit(ke, TILE_MMA, keep.dtype, 3, axes,
+                            tile_mma_pack(keep.a_input, keep.b_input,
+                                          keep.flags));
+  if (!tile_validate(ke)) {
+    tile_free(ke);
+    return 0;
+  }
+  ke->tile_axes_version = ke->axes != NULL ? ke->axes->version : 0;
   return 1;
 }
 
@@ -428,13 +769,39 @@ fn int tile_build_from_scalar(KernelEntry *ke) {
 }
 
 fn int tile_sync_from_scalar(KernelEntry *ke) {
-  if (ke == NULL || ke->scalar_uops == NULL) {
+  if (ke == NULL) {
     return 0;
   }
+  TileGemmInfo gemm;
+  int wants_mma = tile_analyze_gemm(ke, NULL, &gemm);
   u32 axes_version = ke->axes != NULL ? ke->axes->version : 0;
   if (ke->tile_uops != NULL && ke->tile_axes_version == axes_version
       && tile_validate(ke)) {
-    return 1;
+    if (!wants_mma || ke->tile_uops[ke->tile_root].op == TILE_MMA) {
+      return 1;
+    }
+  }
+  if (wants_mma) {
+    return tile_build_mma_from_gemm(ke, &gemm);
+  }
+  if (ke->scalar_uops == NULL) {
+    return 0;
   }
   return tile_build_from_scalar(ke);
+}
+
+int tile_collect_mma_plan(KernelEntry *ke, TileGemmInfo *out) {
+  if (out == NULL) {
+    return 0;
+  }
+  memset(out, 0, sizeof(TileGemmInfo));
+  if (!tile_sync_from_scalar(ke)) {
+    return 0;
+  }
+  TilePlanInfo plan;
+  if (!tile_collect_plan_info(ke, &plan) || plan.mma_tile_id == 0) {
+    return 0;
+  }
+  *out = plan.mma;
+  return 1;
 }

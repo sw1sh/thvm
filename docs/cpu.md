@@ -165,9 +165,11 @@ A `KOpt` (alias `TOpt` on the WL side) is a triple `{op, axis, arg}`.
 opt into "shrink axis `axis` by factor `arg`, insert a new sibling
 axis of the matching `KAX_*` type with size `arg`". `KOP_GLOBAL`
 marks an existing full LOOP axis as `KAX_GLOBAL`; this is how a
-`LOCAL` split can become a Metal-style `GLOBAL x LOCAL` plan. The
-reserved `PADTO` / `NOLOCALS` / `TC` ops are rejected until a renderer
-consumes them.
+`LOCAL` split can become a Metal-style `GLOBAL x LOCAL` plan.
+`KOP_TC` is kernel-aware metadata for recognized f32 GEMM/MMA plans;
+today its `arg` selects the fixed Metal GEMM tile size. The reserved
+`PADTO` / `NOLOCALS` ops are still rejected until a renderer consumes
+them.
 
 The pipeline is `axes_default_for` -> `kernel_opts_propose` ->
 (autotune loop: `axes_apply_opt` -> bench -> revert / keep) ->
@@ -248,7 +250,11 @@ only some are honored by each renderer.
   graphs that contain `S_REDUCE_SUM` or `S_REDUCE_MAX`, it accepts
   `REDUCE`, `UNROLL`, and `GROUP_REDUCE` axes as schedule metadata
   while the scalar expression emits the accumulator loop.
-- `KOP_PADTO`, `KOP_NOLOCALS`, `KOP_TC`: reserved, but rejected by
+- `KOP_TC`: accepted only through the kernel-aware apply path for
+  recognized f32 GEMM/MMA plans. It records a tile-size choice in
+  `applied_opts[]`, so Metal `metal-gemm` can benchmark 8/16/32
+  threadgroup tile variants.
+- `KOP_PADTO`, `KOP_NOLOCALS`: reserved and still rejected by
   [apply_opt.c](../src/codegen/apply_opt.c) until a renderer reads
   them. This keeps no-op opts out of `applied_opts[]` and out of JIT
   cache keys.

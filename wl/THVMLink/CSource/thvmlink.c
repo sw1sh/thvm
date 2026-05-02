@@ -1372,7 +1372,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
     return LIBRARY_NO_ERROR;
   }
   KOpt opt = { (u8)op, (u8)axis, arg };
-  int ok = axes_apply_opt(KERNELS[kid].axes, opt);
+  int ok = kernel_apply_opt(&KERNELS[kid], opt);
   if (ok) {
     tile_sync_from_scalar(&KERNELS[kid]);
   }
@@ -1844,7 +1844,9 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_uops(WolframLibraryData libData,
 // thvm_wl_kernel_tile_plan_info(kid) -- compact TilePlanInfo snapshot:
 // [valid, n_axes, root, store_tile, reduce_tile, body_tile,
 //  scalar_store, scalar_index, scalar_value, scalar_body_value,
-//  scalar_reduce, dtype, axis_id, axis_type, extent, ...].
+//  scalar_reduce, dtype, axis_id, axis_type, extent, ...,
+//  mma_tile, mma_dtype, M, N, K, a_input, b_input, ldA, ldB, flags,
+//  tile_size].
 EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
                                                      mint argc, MArgument *args,
                                                      MArgument res) {
@@ -1858,7 +1860,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
   tile_sync_from_scalar(ke);
   TilePlanInfo  info;
   int           ok      = tile_collect_plan_info(ke, &info);
-  mint          nFields = ok ? (12 + (mint)info.n_axes * 3) : 1;
+  mint          nFields = ok ? (23 + (mint)info.n_axes * 3) : 1;
   mint          dims[1] = {nFields};
   MTensor out;
   libData->MTensor_new(MType_Integer, 1, dims, &out);
@@ -1882,6 +1884,17 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
       dst[idx++] = (mint)info.axis_types[i];
       dst[idx++] = (mint)info.axis_extents[i];
     }
+    dst[idx++] = (mint)info.mma_tile_id;
+    dst[idx++] = (mint)info.mma.dtype;
+    dst[idx++] = (mint)info.mma.M;
+    dst[idx++] = (mint)info.mma.N;
+    dst[idx++] = (mint)info.mma.K;
+    dst[idx++] = (mint)info.mma.a_input;
+    dst[idx++] = (mint)info.mma.b_input;
+    dst[idx++] = (mint)info.mma.ldA;
+    dst[idx++] = (mint)info.mma.ldB;
+    dst[idx++] = (mint)info.mma.flags;
+    dst[idx++] = (mint)info.mma.tile_size;
   }
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;

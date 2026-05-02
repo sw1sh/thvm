@@ -51,8 +51,9 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* f32 matmul should bypass expanded-view pre-materialization and
-       route through the direct Metal GEMM shader. *)
+    (* f32 matmul should bypass expanded-view pre-materialization via
+       a validated TILE_MMA plan and route through the direct Metal
+       GEMM shader until the real MMA renderer lands. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result},
         If[ ctx === 0, Return[True]];
@@ -60,14 +61,91 @@ VerificationTest[
             a = TTensorCreate @ NumericArray[{{1., 2., 3.}, {4., 5., 6.}}, "Real32"];
             b = TTensorCreate @ NumericArray[{{7., 8.}, {9., 10.}, {11., 12.}}, "Real32"];
             out = TRealize @ TMatMul[a, b];
+            kid = TKernelCount[] - 1;
+            plan = TKernelTilePlan[kid];
             {Round[Normal @ TTensorData[out], 0.001],
-             TKernelDispatchKind[TKernelCount[] - 1]}
+             TKernelDispatchKind[kid],
+             plan["mma"]["M"], plan["mma"]["N"], plan["mma"]["K"],
+             plan["mma"]["a_input"], plan["mma"]["b_input"]}
         ];
         TContextDestroy[ctx];
-        result === {{{58., 64.}, {139., 154.}}, "metal-gemm"} || ctx === 0
+        result === {{{58., 64.}, {139., 154.}}, "metal-gemm",
+                    2, 2, 3, 0, 1} || ctx === 0
     ],
     True,
     TestID -> "metal/f32-matmul-direct-gemm"
+]
+
+VerificationTest[
+    (* Tiled GEMM bounds: non-multiple M/N/K exercises threadgroup
+       edge tiles and the second K block. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result, aData, bData, ref},
+        If[ ctx === 0, Return[True]];
+        aData = ArrayReshape[N[Mod[Range[17 * 23], 7] - 3], {17, 23}];
+        bData = ArrayReshape[N[Mod[Range[23 * 19], 5] - 2], {23, 19}];
+        ref = aData . bData;
+        result = TInContext[ctx,
+            a = TTensorCreate @ NumericArray[aData, "Real32"];
+            b = TTensorCreate @ NumericArray[bData, "Real32"];
+            out = TRealize @ TMatMul[a, b];
+            kid = TKernelCount[] - 1;
+            plan = TKernelTilePlan[kid];
+            actual = Normal @ TTensorData[out];
+            {Max[Abs[Flatten[actual - ref]]] < 0.001,
+             Dimensions[actual],
+             TKernelDispatchKind[kid],
+             plan["mma"]["M"], plan["mma"]["N"], plan["mma"]["K"]}
+        ];
+        TContextDestroy[ctx];
+        result === {True, {17, 19}, "metal-gemm", 17, 19, 23}
+    ],
+    True,
+    TestID -> "metal/f32-matmul-tiled-gemm-tails"
+]
+
+VerificationTest[
+    (* TC opts are metadata for the TILE_MMA-backed Metal GEMM path:
+       proposal exposes tile sizes, apply records the selected size,
+       and the next same-shape matmul dispatches through metal-gemm. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result, oldBackend, restore,
+            aData, bData, ref},
+        oldBackend = Environment["THVM_BACKEND"];
+        restore[] := If[StringQ[oldBackend],
+            SetEnvironment["THVM_BACKEND" -> oldBackend],
+            SetEnvironment["THVM_BACKEND" -> ""]];
+        SetEnvironment["THVM_BACKEND" -> "metal"];
+        If[ ctx === 0, restore[]; Return[True]];
+        aData = ArrayReshape[N[Mod[Range[17 * 23], 7] - 3], {17, 23}];
+        bData = ArrayReshape[N[Mod[Range[23 * 19], 5] - 2], {23, 19}];
+        ref = aData . bData;
+        result = TInContext[ctx,
+            a = TTensorCreate @ NumericArray[aData, "Real32"];
+            b = TTensorCreate @ NumericArray[bData, "Real32"];
+            TRealize @ TMatMul[a, b];
+            kid = TKernelCount[] - 1;
+            props = TKernelProposed[kid];
+            before = TKernelTilePlan[kid]["mma"]["tile_size"];
+            TKernelApplyOpt[kid, TOpt["TC", 0, 8]];
+            after = TKernelTilePlan[kid]["mma"]["tile_size"];
+            out2 = TRealize @ TMatMul[a, b];
+            kid2 = TKernelCount[] - 1;
+            actual = Normal @ TTensorData[out2];
+            {props,
+             before,
+             after,
+             TKernelTilePlan[kid2]["mma"]["tile_size"],
+             TKernelDispatchKind[kid2],
+             Max[Abs[Flatten[actual - ref]]] < 0.001}
+        ];
+        TContextDestroy[ctx];
+        restore[];
+        result === {{TOpt["TC", 0, 32], TOpt["TC", 0, 16],
+                     TOpt["TC", 0, 8]}, 16, 8, 8, "metal-gemm", True}
+    ],
+    True,
+    TestID -> "metal/f32-matmul-tc-tile-opt"
 ]
 
 VerificationTest[
