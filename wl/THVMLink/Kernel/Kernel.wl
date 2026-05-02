@@ -61,6 +61,9 @@ TKernelTotalUs::usage       = "TKernelTotalUs[kid] = TKernel[kid][\"TotalUs\"]. 
 TKernelJitDylibPath::usage  = "TKernelJitDylibPath[kid] = TKernel[kid][\"JitDylibPath\"].  On-disk path the JIT cache uses for kid's compiled .dylib (deterministic from the program hash).  File may not exist if the JIT bailed at codegen.";
 TKernelProfile::usage       = "TKernelProfile[kid] returns Information[TKernel[kid]] -- an Association of every property listed by Information[k, \"Properties\"], including the profiling fields.";
 TProfileAll::usage          = "TProfileAll[] returns TKernelProfile for every live kernel, keyed by kid.";
+TProfileDelta::usage        = "TProfileDelta[before, after] subtracts two TProfileAll[] snapshots and returns only kernels that fired in the window.  DispatchCount, TotalUs, AvgUs, and GFlopsPerSec describe the delta while static fields such as ProgramKey come from the after snapshot.";
+TProfileProgramGroups::usage = "TProfileProgramGroups[profile] groups a TProfileAll[] snapshot or TProfileDelta[] result by nonzero TKernelProgramKey, returning rows sorted by TotalUs.  This is the profile view used for per-program-shape autotune triage.";
+TProfileFusionGaps::usage   = "TProfileFusionGaps[profile] annotates TProfileProgramGroups[profile] with rangeify/tile/proposer status and returns hot groups that are not yet tile-tunable.  Useful with TMetalMemoryProfile[] to find fusion work that matters for both time and retained memory.";
 
 (* === axis-typed scheduling slot (mirrors tinygrad's Kernel.opt) ===
    WL is a thin shell -- the axis structure + apply-opt rewrite logic
@@ -545,6 +548,113 @@ TKernelVariants[kid_Integer] := (ensureInit[];
 (* All currently-live kernels' profiles, indexed by kid. *)
 TProfileAll[] := Association[
     Table[k -> TKernelProfile[k], {k, 1, TKernelCount[] - 1}]
+]
+
+tProfileZero[kid_Integer] := <|
+    "Kid" -> kid,
+    "Flops" -> 0,
+    "DispatchKind" -> "none",
+    "DispatchCount" -> 0,
+    "TotalUs" -> 0,
+    "ProgramKey" -> 0,
+    "JitDylibPath" -> "",
+    "Source" -> ""
+|>
+
+TProfileDelta[before_Association, after_Association] := Module[{kids},
+    kids = Union[Keys[before], Keys[after]];
+    Association @ DeleteCases[
+        Table[
+            Module[{b, a, dc, du, flops},
+                b = Lookup[before, kid, tProfileZero[kid]];
+                a = Lookup[after, kid, tProfileZero[kid]];
+                dc = a["DispatchCount"] - b["DispatchCount"];
+                du = a["TotalUs"] - b["TotalUs"];
+                If[dc <= 0 && du <= 0,
+                    Nothing,
+                    flops = Lookup[a, "Flops", 0];
+                    kid -> Join[
+                        KeyDrop[a, {"DispatchCount", "TotalUs", "AvgUs", "GFlopsPerSec"}],
+                        <|
+                            "DispatchCount" -> dc,
+                            "TotalUs" -> du,
+                            "AvgUs" -> If[dc > 0, N[du / dc], 0],
+                            "GFlopsPerSec" -> If[du > 0 && dc > 0,
+                                N[flops * dc / (du * 1000)],
+                                0]
+                        |>
+                    ]
+                ]
+            ],
+            {kid, kids}],
+        Nothing]]
+
+tProfileGroupKey[row_Association] := If[Lookup[row, "ProgramKey", 0] === 0,
+    "kid:" <> ToString[row["Kid"]],
+    "key:" <> ToString[row["ProgramKey"]]]
+
+TProfileProgramGroups[profile_Association] := Module[{groups},
+    groups = GatherBy[Values[profile], tProfileGroupKey];
+    ReverseSortBy[
+        Table[
+            Module[{rep, repKid, info, nDispatch, totalUs, totalFlops},
+                rep = First @ ReverseSortBy[group, Lookup[#, "TotalUs", 0] &];
+                repKid = rep["Kid"];
+                info = TKernelInfo[repKid];
+                nDispatch = Total[Lookup[#, "DispatchCount", 0] & /@ group];
+                totalUs = Total[Lookup[#, "TotalUs", 0] & /@ group];
+                totalFlops = Total[
+                    Lookup[#, "Flops", 0] * Lookup[#, "DispatchCount", 0] & /@ group];
+                <|
+                    "Key" -> Lookup[rep, "ProgramKey", 0],
+                    "RepKid" -> repKid,
+                    "KidCount" -> Length[group],
+                    "DispatchKinds" -> Counts[Lookup[#, "DispatchKind", "none"] & /@ group],
+                    "DispatchCount" -> nDispatch,
+                    "TotalUs" -> totalUs,
+                    "AvgUs" -> If[nDispatch > 0, N[totalUs / nDispatch], 0],
+                    "Flops" -> totalFlops,
+                    "GFlopsPerSec" -> If[totalUs > 0,
+                        N[totalFlops / (totalUs * 1000)],
+                        0],
+                    "InputCount" -> info["n_inputs"],
+                    "OpCount" -> info["n_ops"],
+                    "OutputNumel" -> info["output_numel"],
+                    "OutputDtype" -> info["output_dtype"],
+                    "Ops" -> Counts[info["program"][[All, "opcode"]]]
+                |>
+            ],
+            {group, groups}],
+        Lookup[#, "TotalUs", 0] &]]
+
+tFusionStatus[scalarQ_, tileQ_, proposalCount_Integer] := Which[
+    !scalarQ, "not-rangeified",
+    !tileQ, "scalar-only",
+    proposalCount <= 0, "tile-no-proposals",
+    True, "tile-tunable"
+]
+
+TProfileFusionGaps[profile_Association] := Module[{rows},
+    rows = Table[
+        Module[{kid, scalar, tile, proposed, scalarQ, tileQ, status},
+            kid = row["RepKid"];
+            scalar = TKernelScalarUops[kid];
+            tile = TKernelTileUops[kid];
+            proposed = TKernelProposed[kid];
+            scalarQ = Head[scalar] =!= Missing;
+            tileQ = Head[tile] =!= Missing;
+            status = tFusionStatus[scalarQ, tileQ, Length[proposed]];
+            Join[row, <|
+                "ScalarLowered" -> scalarQ,
+                "TileLowered" -> tileQ,
+                "ProposalCount" -> Length[proposed],
+                "FusionStatus" -> status
+            |>]
+        ],
+        {row, TProfileProgramGroups[profile]}];
+    ReverseSortBy[
+        Select[rows, #["FusionStatus"] =!= "tile-tunable" &],
+        Lookup[#, "TotalUs", 0] &]
 ]
 
 (* === kernel-entry introspection ===

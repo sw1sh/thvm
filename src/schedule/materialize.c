@@ -65,16 +65,10 @@ static u32 BOUNDARY_LAST_USE [REALIZE_INFO_CAP];
 // computation, the emit loop walks boundaries in alloc-depth order;
 // before each kernel allocates its output buf, the planner pushes
 // any earlier kernel's output buf whose last_use_depth has already
-// passed onto the backend's freelist.  cpu_buf_alloc /
-// metal_buf_alloc then pop a same-nbytes match instead of growing
-// CPU_BUFS_NEXT / METAL_BUFS_NEXT.  Net effect: per-iter
-// intermediates get recycled across the same realize call (eager
-// path) and across replays (TJit path consumes the same buf_id
-// sequence).
-
-#ifdef THVM_HAS_METAL
-extern void thvm_metal_buf_freelist_push(u32 buf_id);
-#endif
+// passed onto the backend's freelist.  cpu_buf_alloc then pops a
+// same-nbytes match instead of growing CPU_BUFS_NEXT.  Today this is
+// CPU-only: Metal has command-buffer batches plus deferred decrefs, so
+// speculative planner reuse needs a matching Metal drain/proof first.
 
 #define MEM_PLAN_CAP BOUNDARY_ORDER_CAP
 typedef struct {
@@ -168,11 +162,6 @@ static void mem_plan_push_dead(u32 current_depth) {
       if (!CPU_BUFS[e->buf_id].owns_data)   { e->pushed = 1; continue; }
       cpu_buf_freelist_push(e->buf_id);
     }
-#ifdef THVM_HAS_METAL
-    else if (e->backend_id == 2) {
-      thvm_metal_buf_freelist_push(e->buf_id);
-    }
-#endif
     e->pushed = 1;
   }
 }

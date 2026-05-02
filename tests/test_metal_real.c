@@ -17,6 +17,14 @@
 // bm4c: forward-declared in src/backend/metal/_.m, lives in
 // the linked backend_metal.o.
 extern void thvm_metal_buf_freelist_push(u32 buf_id);
+extern u64  thvm_metal_live_bytes(void);
+extern u64  thvm_metal_retained_bytes(void);
+extern u64  thvm_metal_deferred_bytes(void);
+extern u32  thvm_metal_deferred_len(void);
+extern u32  thvm_metal_freelist_len(void);
+extern u64  thvm_metal_peak_live_bytes(void);
+extern u64  thvm_metal_peak_retained_bytes(void);
+extern u64  thvm_metal_peak_deferred_bytes(void);
 
 static int metal_available(void) {
   setenv("THVM_BACKEND", "metal", 1);
@@ -683,6 +691,110 @@ int main(void) {
     METAL_BACKEND.buf_free(a);
     u32 b = METAL_BACKEND.buf_alloc(32);
     CHECK_EQ(b, a);
+  }
+  thvm_free();
+
+  TEST_BEGIN("metal-real/buf-summary-tracks-live-retained-freelist");
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    CHECK_EQ(thvm_metal_live_bytes(), 0);
+    CHECK_EQ(thvm_metal_retained_bytes(), 0);
+    CHECK_EQ(thvm_metal_deferred_bytes(), 0);
+    CHECK_EQ(thvm_metal_deferred_len(), 0);
+    CHECK_EQ(thvm_metal_freelist_len(), 0);
+    CHECK_EQ(thvm_metal_peak_live_bytes(), 0);
+    CHECK_EQ(thvm_metal_peak_retained_bytes(), 0);
+    CHECK_EQ(thvm_metal_peak_deferred_bytes(), 0);
+
+    u32 a = METAL_BACKEND.buf_alloc(64);
+    CHECK(a > 0);
+    CHECK_EQ(thvm_metal_live_bytes(), 64);
+    CHECK_EQ(thvm_metal_retained_bytes(), 64);
+    CHECK_EQ(thvm_metal_freelist_len(), 0);
+    CHECK_EQ(thvm_metal_peak_live_bytes(), 64);
+    CHECK_EQ(thvm_metal_peak_retained_bytes(), 64);
+
+    thvm_metal_buf_freelist_push(a);
+    CHECK_EQ(thvm_metal_live_bytes(), 0);
+    CHECK_EQ(thvm_metal_retained_bytes(), 64);
+    CHECK_EQ(thvm_metal_freelist_len(), 1);
+
+    u32 b = METAL_BACKEND.buf_alloc(64);
+    CHECK_EQ(b, a);
+    CHECK_EQ(thvm_metal_live_bytes(), 64);
+    CHECK_EQ(thvm_metal_retained_bytes(), 64);
+    CHECK_EQ(thvm_metal_freelist_len(), 0);
+
+    METAL_BACKEND.buf_decref(b);
+    CHECK_EQ(thvm_metal_live_bytes(), 0);
+    CHECK_EQ(thvm_metal_retained_bytes(), 64);
+    CHECK_EQ(thvm_metal_freelist_len(), 1);
+  }
+  thvm_free();
+
+  TEST_BEGIN("metal-real/freelist-byte-cap-zero-drops-dead-storage");
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_METAL_FREELIST_BYTES", "0", 1);
+  thvm_init();
+  {
+    u32 a = METAL_BACKEND.buf_alloc(64);
+    CHECK(a > 0);
+    CHECK_EQ(thvm_metal_live_bytes(), 64);
+    METAL_BACKEND.buf_decref(a);
+    CHECK_EQ(thvm_metal_live_bytes(), 0);
+    CHECK_EQ(thvm_metal_retained_bytes(), 0);
+    CHECK_EQ(thvm_metal_freelist_len(), 0);
+  }
+  thvm_free();
+  unsetenv("THVM_METAL_FREELIST_BYTES");
+
+  TEST_BEGIN("metal-real/alias-reshape-drops-unused-output-immediately");
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    Shape shape = {0};
+    shape.ndim = 1;
+    shape.dims[0] = 4;
+    u32 src_tid = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    u32 out_tid = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    CHECK(src_tid > 0 && out_tid > 0);
+    f32 src[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    METAL_BACKEND.buf_write(TENS[src_tid].buf_id, src, sizeof(src));
+
+    u32 kid = kernel_alloc();
+    KernelEntry *ke = &KERNELS[kid];
+    kernel_inputs_reserve(ke, 1);
+    kernel_program_reserve(ke, 1);
+    ke->n_inputs        = 1;
+    ke->input_tids[0]   = src_tid;
+    ke->input_dtypes[0] = DT_FP32;
+    ke->input_numels[0] = 4;
+    ke->output_tid      = out_tid;
+    ke->output_dtype    = DT_FP32;
+    ke->output_numel    = 4;
+    ke->n_ops           = 1;
+    ke->program[0].opcode = UOP_RESHAPE;
+    ke->program[0].dtype  = DT_FP32;
+    ke->program[0].n_src  = 1;
+    ke->program[0].src[0] = KSRC_AS_INPUT(0);
+    ke->program[0].numel  = 4;
+
+    u32 in_bufs[1] = {TENS[src_tid].buf_id};
+    u32 old_out_buf = TENS[out_tid].buf_id;
+    CHECK(old_out_buf != 0 && old_out_buf != in_bufs[0]);
+
+    backend_dispatch_begin_all();
+    CHECK_EQ(METAL_BACKEND.dispatch_kernel(ke, in_bufs, old_out_buf), 0);
+    CHECK_EQ(TENS[out_tid].buf_id, in_bufs[0]);
+    CHECK_EQ(thvm_metal_deferred_len(), 0);
+    CHECK_EQ(thvm_metal_deferred_bytes(), 0);
+    CHECK_EQ(thvm_metal_peak_deferred_bytes(), 0);
+    CHECK(thvm_metal_freelist_len() >= 1);
+    backend_dispatch_end_all();
+
+    CHECK_EQ(thvm_metal_deferred_len(), 0);
+    CHECK_EQ(thvm_metal_deferred_bytes(), 0);
+    CHECK_EQ(thvm_metal_live_bytes(), 16);
+    CHECK(thvm_metal_retained_bytes() >= 16);
   }
   thvm_free();
 

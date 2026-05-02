@@ -40,6 +40,8 @@ formatCounts[a_Association] := StringRiffle[
     KeyValueMap[ToString[#1] <> "=" <> ToString[#2] &, a],
     ", "]
 
+topCount = parseInt["PROFILE_TOP", 12];
+
 kernelIds[] := If[TKernelCount[] > 1, Range[1, TKernelCount[] - 1], {}]
 
 dispatchKindCounts[] := Counts @ Table[
@@ -48,6 +50,22 @@ dispatchKindCounts[] := Counts @ Table[
 
 inputShapes[kid_Integer] := Quiet[
     TTensorShape /@ (THVMLink`Private`tenTermFromTid /@ TKernelInputs[kid])]
+
+formatMaybeAssoc[a_Association] := If[Length[a] == 0, "{}", formatCounts[a]]
+
+formatMetalMemory[p_Association] := StringRiffle[{
+    "live=" <> ToString[p["LiveBytes"]],
+    "retained=" <> ToString[p["RetainedBytes"]],
+    "deferred=" <> ToString[p["DeferredBytes"]],
+    "deferred_count=" <> ToString[p["DeferredCount"]],
+    "freelist_bytes=" <> ToString[p["FreelistBytes"]],
+    "peak_live=" <> ToString[p["PeakLiveBytes"]],
+    "peak_retained=" <> ToString[p["PeakRetainedBytes"]],
+    "peak_deferred=" <> ToString[p["PeakDeferredBytes"]],
+    "buffers=" <> ToString[p["BufferCount"]] <> "/" <>
+        ToString[p["LiveBuffers"]] <> "/" <>
+        ToString[p["RetainedBuffers"]]
+}, " "]
 
 oneHotBatch[labels_List, n_Integer] := NumericArray[
     Table[If[j - 1 == labels[[i]], 1.0, 0.0],
@@ -84,16 +102,29 @@ nSteps = parseInt["N_STEPS", 3];
 doPostAutotune = envValue["POST_AUTOTUNE", "0"] === "1";
 benchMode = ToLowerCase @ envValue["BENCH_MODE", "train"];
 showProfile = envValue["SHOW_PROFILE", "0"] === "1";
+showProgramProfile = envValue["SHOW_PROGRAM_PROFILE", "0"] === "1" || showProfile;
+showMemoryProfile = envValue["SHOW_MEMORY_PROFILE", "1"] === "1";
+showFusionGaps = envValue["SHOW_FUSION_GAPS", "0"] === "1" || showProgramProfile;
+dumpTopProgram = envValue["DUMP_TOP_PROGRAM", "0"] === "1";
+dumpTopLowered = envValue["DUMP_TOP_LOWERED", "0"] === "1";
 
 print["beautiful_mnist training benchmark"];
 print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"],
-      "  THVM_AUTOTUNE=", envValue["THVM_AUTOTUNE", "off"]];
+      "  THVM_AUTOTUNE=", envValue["THVM_AUTOTUNE", "off"],
+      "  THVM_METAL_DEFER_BYTES=", envValue["THVM_METAL_DEFER_BYTES", "1073741824"],
+      "  THVM_METAL_FREELIST_BYTES=", envValue["THVM_METAL_FREELIST_BYTES", "1073741824"]];
 print["  BS=", bs,
       "  WARMUP_STEPS=", warmupSteps,
       "  N_STEPS=", nSteps,
       "  BENCH_MODE=", benchMode,
       "  SHOW_PROFILE=", If[showProfile, "1", "0"],
+      "  SHOW_PROGRAM_PROFILE=", If[showProgramProfile, "1", "0"],
+      "  SHOW_MEMORY_PROFILE=", If[showMemoryProfile, "1", "0"],
+      "  SHOW_FUSION_GAPS=", If[showFusionGaps, "1", "0"],
+      "  DUMP_TOP_PROGRAM=", If[dumpTopProgram, "1", "0"],
+      "  DUMP_TOP_LOWERED=", If[dumpTopLowered, "1", "0"],
+      "  PROFILE_TOP=", topCount,
       "  POST_AUTOTUNE=", If[doPostAutotune, "1", "0"]];
 
 W1 = randTensor[{32, 1, 5, 5}];   b1 = zerosTensor[{32}];
@@ -111,6 +142,8 @@ vState = TZerosLike /@ params;
 {xSlot, tgtSlot, labels} = makeSyntheticBatch[bs];
 print["params=", Total[Times @@ TTensorShape[#] & /@ params],
       "  fixed synthetic labels=", Take[labels, UpTo[12]]];
+If[showMemoryProfile,
+    print["metal_memory init: ", formatMetalMemory @ TMetalMemoryProfile[]]];
 
 forwardLoss[x_TTerm, target_TTerm] := Module[{
     h1, r1, h2, r2, n1, p1, h3, r3, h4, r4, n2, p2, flat, logits
@@ -177,19 +210,82 @@ If[doPostAutotune,
         print["post-autotune kernels=", Length[tuned],
               " wall=", NumberForm[(AbsoluteTime[] - t0) * 1000.0, {8, 1}], "ms"]]]
 
+profileBeforeTimed = If[showProfile || showProgramProfile,
+    TProfileAll[],
+    <||>];
+memoryBeforeTimed = If[showMemoryProfile, TMetalMemoryProfile[], <||>];
 timedTimes = Table[runStep[warmupSteps + i, "timed"], {i, nSteps}];
+profileAfterTimed = If[showProfile || showProgramProfile,
+    TProfileAll[],
+    <||>];
+memoryAfterTimed = If[showMemoryProfile, TMetalMemoryProfile[], <||>];
+profileTimedDelta = If[showProfile || showProgramProfile,
+    TProfileDelta[profileBeforeTimed, profileAfterTimed],
+    <||>];
 
 print[""];
 print["timed_ms=", NumberForm[timedTimes, {8, 1}]];
 print["steady_ms_per_step=", NumberForm[Mean[timedTimes], {8, 1}]];
 print["kernels=", TKernelCount[] - 1,
       " dispatch=", formatCounts[dispatchKindCounts[]]];
+If[showMemoryProfile,
+    print["metal_memory before_timed: ", formatMetalMemory[memoryBeforeTimed]];
+    print["metal_memory after_timed:  ", formatMetalMemory[memoryAfterTimed]]];
+If[showProgramProfile,
+    Module[{groups = Take[TProfileProgramGroups[profileTimedDelta], UpTo[topCount]]},
+        print["top timed program shapes by total dispatch time:"];
+        Do[
+            print["  key=", row["Key"],
+                  " rep_kid=", row["RepKid"],
+                  " kids=", row["KidCount"],
+                  " count=", row["DispatchCount"],
+                  " total_us=", row["TotalUs"],
+                  " avg_us=", NumberForm[row["AvgUs"], {8, 1}],
+                  " kinds=", formatMaybeAssoc[row["DispatchKinds"]],
+                  " n_inputs=", row["InputCount"],
+                  " n_ops=", row["OpCount"],
+                  " out_numel=", row["OutputNumel"],
+                  " ops=", formatMaybeAssoc[row["Ops"]],
+                  " inputs=", inputShapes[row["RepKid"]]];
+            If[dumpTopProgram,
+                print["    program=", TKernelInfo[row["RepKid"]]["program"]]];
+            If[dumpTopLowered,
+                Module[{kid = row["RepKid"], su, tu},
+                    su = TKernelScalarUops[kid];
+                    tu = TKernelTileUops[kid];
+                    print["    proposed=", TKernelProposed[kid]];
+                    print["    scalar=", If[Head[su] === Missing,
+                        su,
+                        Counts[su[[All, "op"]]]]];
+                    print["    tile=", If[Head[tu] === Missing,
+                        tu,
+                        Counts[tu[[All, "op"]]]]];
+                    print["    tile_plan=", TKernelTilePlan[kid]]]],
+            {row, groups}]]];
+If[showFusionGaps,
+    Module[{gaps = Take[TProfileFusionGaps[profileTimedDelta], UpTo[topCount]]},
+        print["top timed fusion gaps:"];
+        Do[
+            print["  status=", row["FusionStatus"],
+                  " key=", row["Key"],
+                  " rep_kid=", row["RepKid"],
+                  " total_us=", row["TotalUs"],
+                  " count=", row["DispatchCount"],
+                  " kinds=", formatMaybeAssoc[row["DispatchKinds"]],
+                  " scalar=", row["ScalarLowered"],
+                  " tile=", row["TileLowered"],
+                  " proposals=", row["ProposalCount"],
+                  " n_inputs=", row["InputCount"],
+                  " n_ops=", row["OpCount"],
+                  " out_numel=", row["OutputNumel"],
+                  " ops=", formatMaybeAssoc[row["Ops"]]],
+            {row, gaps}]]];
 If[showProfile,
     Module[{rows},
         rows = ReverseSortBy[
-            Table[TKernelProfile[kid], {kid, kernelIds[]}],
+            Values[profileTimedDelta],
             #["TotalUs"] &];
-        print["top kernels by total dispatch time:"];
+        print["top timed kernels by total dispatch time:"];
         Do[
             print["  kid=", row["Kid"],
                   " kind=", row["DispatchKind"],

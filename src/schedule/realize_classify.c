@@ -214,6 +214,91 @@ static int realize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc) 
   return 0;
 }
 
+static int realize_metal_tile_fanin_cap_enabled(void) {
+  char const *backend = getenv("THVM_BACKEND");
+  char const *tile    = getenv("THVM_TILE");
+  return backend != NULL && strcmp(backend, "metal") == 0
+      && tile != NULL && tile[0] == '1';
+}
+
+static u32 realize_metal_tile_fanin_cap(void) {
+  char const *e = getenv("THVM_METAL_FUSION_MAX_INPUTS");
+  if (e != NULL && e[0] != '\0') {
+    unsigned long v = strtoul(e, NULL, 10);
+    if (v >= 2 && v <= 30) {
+      return (u32)v;
+    }
+  }
+  return 30;
+}
+
+static int realize_fanin_split_child_op(u8 op) {
+  return op == UOP_ADD || op == UOP_MUL;
+}
+
+static u32 realize_fanin_term_count(Term t, u64 boundary_root, u32 cap);
+
+static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root, u32 cap) {
+  if (loc >= HEAP_NEXT) return 1;
+  u32 idx = realize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return 1;
+  UOpInfo *info = &REALIZE_INFO[idx];
+  if (loc != boundary_root && info->realized) return 1;
+  if (info->op == UOP_CONST) return 0;
+
+  u8  ar          = uop_arity(info->op);
+  u32 total       = 0;
+  u32 child_idx  [MAX_UOP_SRC] = {0};
+  u32 child_count[MAX_UOP_SRC] = {0};
+  for (u8 i = 0; i < ar; i++) {
+    child_idx[i] = 0xFFFFFFFFu;
+    Term child = term_resolve(heap_read(loc + i));
+    child_count[i] = realize_fanin_term_count(child, boundary_root, cap);
+    total += child_count[i];
+    if (term_tag(child) == TAG_UOP && term_ext(child) != UOP_KERNEL) {
+      child_idx[i] = realize_info_find(term_val(child));
+    }
+  }
+
+  while (total > cap) {
+    u8  best      = 0xFF;
+    u32 best_size = 1;
+    for (u8 i = 0; i < ar; i++) {
+      u32 cidx = child_idx[i];
+      if (cidx == 0xFFFFFFFFu) continue;
+      if (child_count[i] <= best_size) continue;
+      if (!realize_fanin_split_child_op(REALIZE_INFO[cidx].op)) continue;
+      best      = i;
+      best_size = child_count[i];
+    }
+    if (best == 0xFF) break;
+    REALIZE_INFO[child_idx[best]].realized = 1;
+    total = total - child_count[best] + 1;
+    child_count[best] = 1;
+  }
+  return total;
+}
+
+static u32 realize_fanin_term_count(Term t, u64 boundary_root, u32 cap) {
+  t = term_resolve(t);
+  if (term_tag(t) == TAG_TEN) return 1;
+  if (term_tag(t) == TAG_VAR) return 1;
+  if (term_tag(t) != TAG_UOP) return 0;
+  if (term_ext(t) == UOP_KERNEL) return 1;
+  return realize_fanin_uop_count(term_val(t), boundary_root, cap);
+}
+
+static void realize_apply_metal_tile_fanin_cap(Term root) {
+  if (!realize_metal_tile_fanin_cap_enabled()) return;
+  if (term_tag(root) != TAG_UOP || term_ext(root) == UOP_KERNEL) return;
+
+  u32 cap = realize_metal_tile_fanin_cap();
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    if (!REALIZE_INFO[i].realized) continue;
+    realize_fanin_uop_count(REALIZE_INFO[i].loc, REALIZE_INFO[i].loc, cap);
+  }
+}
+
 fn void realize_classify(Term root) {
   realize_info_clear();
   if (term_tag(root) != TAG_UOP) return;
@@ -262,39 +347,41 @@ fn void realize_classify(Term root) {
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     if (REALIZE_INFO[i].op == UOP_REDUCE) reduce_count++;
   }
-  if (reduce_count != 1) return;
+  if (reduce_count == 1) {
+    for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+      UOpInfo *info = &REALIZE_INFO[i];
+      if (info->op != UOP_REDUCE)    continue;
+      if (info->consumer_count != 1) continue;
+      if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+      info->realized = 0;
+    }
 
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
-    if (info->op != UOP_REDUCE)    continue;
-    if (info->consumer_count != 1) continue;
-    if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
-    info->realized = 0;
-  }
-
-  // Phase C-2: scalar-tail relaxation.  When rangeify is enabled
-  // (THVM_RANGEIFY default-on as of Phase E) AND the REDUCE's
-  // single-consumer chain stays at the post-reduce shape and
-  // reaches the realize root (no EXPAND), the consumer kernel can
-  // absorb the REDUCE inline.  Gated on rangeify because the legacy
-  // KProgOp[] dispatch hasn't been audited for the wider scalar-
-  // tail patterns this opens up; THVM_RANGEIFY=0 disables both
-  // this relaxation and the rangeify lower path together.
-  {
-    const char *e = getenv("THVM_RANGEIFY");
-    int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
-    if (rangeify_on) {
-      u64 root_loc = term_val(root);
-      for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-        UOpInfo *info = &REALIZE_INFO[i];
-        if (info->op != UOP_REDUCE)    continue;
-        if (info->consumer_count != 1) continue;
-        if (!realize_reduce_consumer_is_scalar_tail(info->loc, root_loc))
-          continue;
-        info->realized = 0;
+    // Phase C-2: scalar-tail relaxation.  When rangeify is enabled
+    // (THVM_RANGEIFY default-on as of Phase E) AND the REDUCE's
+    // single-consumer chain stays at the post-reduce shape and
+    // reaches the realize root (no EXPAND), the consumer kernel can
+    // absorb the REDUCE inline.  Gated on rangeify because the legacy
+    // KProgOp[] dispatch hasn't been audited for the wider scalar-
+    // tail patterns this opens up; THVM_RANGEIFY=0 disables both
+    // this relaxation and the rangeify lower path together.
+    {
+      const char *e = getenv("THVM_RANGEIFY");
+      int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
+      if (rangeify_on) {
+        u64 root_loc = term_val(root);
+        for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+          UOpInfo *info = &REALIZE_INFO[i];
+          if (info->op != UOP_REDUCE)    continue;
+          if (info->consumer_count != 1) continue;
+          if (!realize_reduce_consumer_is_scalar_tail(info->loc, root_loc))
+            continue;
+          info->realized = 0;
+        }
       }
     }
   }
+
+  realize_apply_metal_tile_fanin_cap(root);
 }
 
 fn u8 realize_is_realized(Term uop_term) {

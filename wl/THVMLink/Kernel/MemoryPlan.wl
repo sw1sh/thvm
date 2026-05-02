@@ -47,6 +47,8 @@ TMemoryPlanReport::usage = "TMemoryPlanReport[plan] returns a Column with top-5 
    MemoryPlan.wl owns only the per-backend buf-table accessors. *)
 TCpuBufTable::usage   = "TCpuBufTable[] returns a list of {nbytes, refcount, preserved, freeable, owns_data} per CPU buffer (buf_id 1 .. CPU_BUFS_NEXT - 1).";
 TMetalBufTable::usage = "TMetalBufTable[] returns a list of {nbytes, refcount} per Metal buffer.  Empty when the dylib was built without Metal support.";
+TMetalBufSummary::usage = "TMetalBufSummary[] returns <|\"LiveBytes\", \"RetainedBytes\", \"DeferredBytes\", \"DeferredCount\", \"FreelistCount\", \"PeakLiveBytes\", \"PeakRetainedBytes\", \"PeakDeferredBytes\"|> for the Metal buffer table.  RetainedBytes includes recycle-list buffers that no live tensor references.";
+TMetalMemoryProfile::usage = "TMetalMemoryProfile[] returns a flat Metal memory profile derived from TMetalBufSummary[] and TMetalBufTable[], including buffer counts, freelist bytes, and largest live/retained buffer sizes.";
 
 Begin["`Private`"];
 
@@ -63,6 +65,38 @@ Begin["`Private`"];
    TTensTable / TTensCount / TTotalBufBytes are defined in Tensor.wl. *)
 TCpuBufTable[]           := (ensureInit[]; Partition[Normal @ $cpuBufTableFn[],   5])
 TMetalBufTable[]         := (ensureInit[]; Partition[Normal @ $metalBufTableFn[], 2])
+TMetalBufSummary[]       := Module[{v},
+    ensureInit[];
+    v = PadRight[Normal @ $metalBufSummaryFn[], 8, 0];
+    <|"LiveBytes" -> v[[1]], "RetainedBytes" -> v[[2]],
+      "DeferredBytes" -> v[[3]], "DeferredCount" -> v[[4]],
+      "FreelistCount" -> v[[5]], "PeakLiveBytes" -> v[[6]],
+      "PeakRetainedBytes" -> v[[7]], "PeakDeferredBytes" -> v[[8]]|>
+]
+
+TMetalMemoryProfile[]    := Module[{
+    summary,
+    bufs,
+    liveBufs,
+    retainedBufs
+},
+    summary = TMetalBufSummary[];
+    bufs = TMetalBufTable[];
+    liveBufs = Select[bufs, #[[2]] > 0 &];
+    retainedBufs = Select[bufs, #[[1]] > 0 &];
+    Join[
+        summary,
+        <|"BufferCount" -> Length[bufs],
+          "LiveBuffers" -> Length[liveBufs],
+          "RetainedBuffers" -> Length[retainedBufs],
+          "FreelistBytes" -> Max[0,
+              summary["RetainedBytes"] - summary["LiveBytes"]],
+          "LargestLiveBytes" -> If[liveBufs === {}, 0,
+              Max[liveBufs[[All, 1]]]],
+          "LargestRetainedBytes" -> If[retainedBufs === {}, 0,
+              Max[retainedBufs[[All, 1]]]]|>
+    ]
+]
 
 (* === Topological depth ===
    depth[kid] = 1 + max(depth of producer kernel of any input tid).

@@ -200,6 +200,7 @@ static int propose_metal_tile_scalar_reduce_op_ok(u8 op) {
     case S_REDUCE_SUM:
     case S_REDUCE_MAX:
     case S_CAST:
+    case S_RESHAPE_V:
     case S_CONST:
     case S_ICONST:
     case S_IADD:
@@ -214,18 +215,6 @@ static int propose_metal_tile_scalar_reduce_op_ok(u8 op) {
     default:
       return 0;
   }
-}
-
-static int propose_kprog_has_opcode(KernelEntry const *ke, u8 opcode) {
-  if (ke == NULL || ke->program == NULL) {
-    return 0;
-  }
-  for (u32 i = 0; i < ke->n_ops; i++) {
-    if (ke->program[i].opcode == opcode) {
-      return 1;
-    }
-  }
-  return 0;
 }
 
 static int propose_scalar_op_carries_kernel_dtype(ScalarUop const *u) {
@@ -245,6 +234,7 @@ static int propose_scalar_op_carries_kernel_dtype(ScalarUop const *u) {
     case S_REDUCE_SUM:
     case S_REDUCE_MAX:
     case S_CAST:
+    case S_RESHAPE_V:
       return 1;
     case S_IWHERE:
       return u->dtype != DT_INT64;
@@ -259,9 +249,6 @@ static int propose_metal_tile_scalar_reduce_kernel(KernelEntry const *ke) {
     return 0;
   }
   if (tile_rejects_conv2d_flat_cin1(ke)) {
-    return 0;
-  }
-  if (propose_kprog_has_opcode(ke, UOP_PAD)) {
     return 0;
   }
   int has_reduce = 0;
@@ -338,7 +325,14 @@ static int propose_metal_tile_kernel(KernelEntry const *ke) {
       || ke->n_tile_uops < 2 || ke->axes == NULL || ke->n_inputs > 30) {
     return 0;
   }
-  if (ke->axes->n_axes != 1 || ke->axes->axis_types[0] != KAX_LOOP) {
+  int has_loop = 0;
+  for (u8 i = 0; i < ke->axes->n_axes; i++) {
+    if (ke->axes->axis_types[i] == KAX_LOOP) {
+      has_loop = 1;
+      break;
+    }
+  }
+  if (!has_loop) {
     return 0;
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {

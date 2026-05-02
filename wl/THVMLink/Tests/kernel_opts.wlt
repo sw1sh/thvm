@@ -449,6 +449,81 @@ VerificationTest[
     TestID -> "kernel-opts/metal-post-reduce-group-proposal"
 ]
 
+VerificationTest[
+    (* Multi-axis tile-lowered elementwise kernels should still get
+       LOCAL candidates.  The renderer flattens the axes when no
+       LOCAL/GLOBAL split is present, so proposer coverage should not
+       be restricted to rank-1 outputs. *)
+    Module[{oldBackend, oldTile, restore, kid, props},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"],
+            TInit[];
+            a = TTensorCreate @ NumericArray[ConstantArray[1., {4, 4}], "Real32"];
+            b = TTensorCreate @ NumericArray[ConstantArray[2., {4, 4}], "Real32"];
+            TRealize[a + b];
+            kid = TKernelCount[] - 1;
+            props = TKernelProposed[kid],
+            restore[]
+        ];
+        MemberQ[props, TOpt["LOCAL", 0, 4]]
+    ],
+    True,
+    TestID -> "kernel-opts/metal-multi-axis-tile-local-proposal"
+]
+
+VerificationTest[
+    (* Wide Metal elementwise ADD trees must split before they exceed
+       the direct MSL buffer-argument budget.  Otherwise they drop to
+       the per-op Metal interpreter even though each split subtree is
+       tile-renderable. *)
+    Module[{oldBackend, oldTile, oldCap, restore, xs, out, rows, kinds},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        oldCap     = Environment["THVM_METAL_FUSION_MAX_INPUTS"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]];
+            If[StringQ[oldCap],
+                SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> oldCap],
+                SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"];
+            SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> "30"],
+            TInit[];
+            xs = Table[
+                TTensorCreate @ NumericArray[ConstantArray[N[i], {4}], "Real32"],
+                {i, 34}];
+            out = TRealize @ Fold[TUOpAdd, First[xs], Rest[xs]];
+            rows = TKernelTable[];
+            kinds = Table[TKernelDispatchKind[k], {k, 1, TKernelCount[] - 1}],
+            restore[]
+        ];
+        {Length[rows] >= 2,
+         Max[rows[[All, 1]]] <= 30,
+         FreeQ[kinds, "metal-op"],
+         Round[Normal @ TTensorData[out], 0.001]}
+    ],
+    {True, True, True, ConstantArray[595., 4]},
+    TestID -> "kernel-opts/metal-wide-add-tree-splits-before-arg-limit"
+]
+
 (* === TKernelVariants[kid]: bench-and-report every candidate
        without committing any opt.  Slot 0 is baseline; rest are
        proposed candidates with measured WallUs. *)

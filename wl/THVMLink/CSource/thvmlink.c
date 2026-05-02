@@ -1690,6 +1690,14 @@ EXTERN_C DLLEXPORT int thvm_wl_cpu_buf_table(WolframLibraryData libData, mint ar
 #ifdef THVM_HAS_METAL
 extern u32  thvm_metal_buf_count(void);
 extern void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
+extern u64  thvm_metal_live_bytes(void);
+extern u64  thvm_metal_retained_bytes(void);
+extern u64  thvm_metal_deferred_bytes(void);
+extern u32  thvm_metal_deferred_len(void);
+extern u32  thvm_metal_freelist_len(void);
+extern u64  thvm_metal_peak_live_bytes(void);
+extern u64  thvm_metal_peak_retained_bytes(void);
+extern u64  thvm_metal_peak_deferred_bytes(void);
 #endif
 
 EXTERN_C DLLEXPORT int thvm_wl_metal_buf_table(WolframLibraryData libData, mint argc,
@@ -1716,6 +1724,33 @@ EXTERN_C DLLEXPORT int thvm_wl_metal_buf_table(WolframLibraryData libData, mint 
     dst[b * nCols + 0] = (mint)nbytes;
     dst[b * nCols + 1] = (mint)refcount;
   }
+#endif
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_metal_buf_summary(WolframLibraryData libData, mint argc,
+                                                 MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  // [live_bytes, retained_bytes, deferred_bytes, deferred_len,
+  //  freelist_len, peak_live_bytes, peak_retained_bytes,
+  //  peak_deferred_bytes].  live_bytes counts refcounted
+  // user-visible buffers; retained_bytes also includes recycle-list
+  // buffers still holding MTLBuffer storage.
+  mint dims[1] = {8};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u32 i = 0; i < 8; i++) dst[i] = 0;
+#ifdef THVM_HAS_METAL
+  dst[0] = (mint)thvm_metal_live_bytes();
+  dst[1] = (mint)thvm_metal_retained_bytes();
+  dst[2] = (mint)thvm_metal_deferred_bytes();
+  dst[3] = (mint)thvm_metal_deferred_len();
+  dst[4] = (mint)thvm_metal_freelist_len();
+  dst[5] = (mint)thvm_metal_peak_live_bytes();
+  dst[6] = (mint)thvm_metal_peak_retained_bytes();
+  dst[7] = (mint)thvm_metal_peak_deferred_bytes();
 #endif
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;

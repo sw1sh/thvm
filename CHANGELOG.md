@@ -6,6 +6,62 @@ dated section.
 
 ## Unreleased
 
+### Changed: make Metal memory pressure observable before sweeping
+
+`TMetalBufSummary[]` now reports Metal live bytes, retained bytes,
+deferred-decref bytes/count, freelist count, and peak live/retained/
+deferred bytes so benchmark runs can distinguish live tensors from
+buffers retained for reuse.  `TMetalMemoryProfile[]` adds derived
+buffer counts and freelist bytes, and `bench-train.wls` reports
+before/after timed-window Metal memory snapshots.  The opt-in
+`THVM_REUSE_BUFS=1` schedule planner is CPU-only for now; Metal keeps
+ordinary refcount-driven reuse, but speculative planner reuse is
+blocked until command-buffer and deferred-decref lifetimes have tighter
+proof coverage.  Added small Metal invariants for freelist accounting
+and alias-only batch flushes instead of running large sweeps.
+
+`TProfileFusionGaps[]` now annotates hot `TProfileProgramGroups[]`
+rows with rangeify/tile/proposer status so fusion work can be triaged
+against the same timed window as the Metal memory profile.
+
+Metal freelist retention is capped by `THVM_METAL_FREELIST_BYTES`
+(default `1073741824`); the backend drops the largest dead buffers
+first when the cap is exceeded.  The Metal tile proposer now offers
+`LOCAL` candidates for multi-axis tile-lowered elementwise kernels
+instead of only rank-1 outputs, removing a common small-batch
+`tile-no-proposals` gap.
+
+Metal+tile materialization now splits over-wide ADD/MUL expression
+trees before they exceed the 30-input direct Metal buffer limit
+(`THVM_METAL_FUSION_MAX_INPUTS`, default 30), so wide elementwise
+graphs can stay on generated tile kernels instead of falling to the
+per-op Metal interpreter.  Alias-only reshape dispatch also drops its
+unused speculative output buffer immediately instead of sending it
+through the deferred-decref queue.
+
+### Changed: bounded Metal batch retention and grouped profile deltas
+
+Metal deferred temporary-buffer releases are now byte-capped by
+`THVM_METAL_DEFER_BYTES` (default `1073741824`) and are drained even
+when an alias-only batch did not create a command buffer.  This avoids
+holding an entire `beautiful_mnist` training replay's dead temporaries
+inside one Metal batch.  `TProfileDelta` and `TProfileProgramGroups`
+promote the benchmark-local timed-window view into the public WL
+profile API, and `bench-train.wls` reports top repeated program shapes,
+optional lowered scalar/tile plans, and the active defer cap.
+
+### Changed: broaden rangeify coverage for conv-backward reductions
+
+Rangeify now lowers movement-heavy reduce chains through the
+backward-walk coordinate context for `PERMUTE`, falls back to
+`S_INDEX_E` when packed `S_INDEX` strides overflow, and allows the
+tile opt proposer to see scalar/tile-reduced graphs that originated
+from PAD/SHRINK KProg chains.  On BS=32 `beautiful_mnist` no-batch
+training this moves the remaining hot conv-backward reductions from
+`metal-jit` to `metal-tile`; with a 128MB defer cap the full replay
+smoke is about `2.5s` and leaves `total_buf_bytes=0`.  BS=512 is not
+rerun until the memory-pressure fix is validated at larger batch sizes.
+
 ### Changed: Metal expression JIT for backward movement graphs
 
 Generated Metal source can now inline f32 movement/ALU expression

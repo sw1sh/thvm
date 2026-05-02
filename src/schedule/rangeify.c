@@ -373,6 +373,38 @@ static u32 emit_axis_term(KernelEntry *ke, u32 range_id, u32 stride,
   return emit_ibinop(ke, S_IADD, t, offset_term);
 }
 
+static u32 emit_index_expr(KernelEntry *ke, u32 dtype, u32 buf_id,
+                           u32 const *range_ids, u32 const *strides,
+                           u32 ndim, u32 offset) {
+  if (ndim > MAX_DIM) {
+    return 0;
+  }
+  u32 acc = offset ? emit_iconst(ke, (i64)offset) : 0;
+  for (u32 d = 0; d < ndim; d++) {
+    if (strides[d] != 0 && range_ids[d] == 0) {
+      return 0;
+    }
+    acc = emit_axis_term(ke, range_ids[d], strides[d], acc);
+  }
+  if (acc == 0) {
+    acc = emit_iconst(ke, 0);
+  }
+  u32 src[2] = {buf_id, acc};
+  return rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
+}
+
+static u32 emit_index_chain_or_expr(KernelEntry *ke, u32 dtype, u32 buf_id,
+                                    u32 const *range_ids, u32 const *strides,
+                                    u32 ndim, u32 offset) {
+  u32 idx = emit_index_chain(ke, dtype, buf_id, range_ids, strides,
+                             ndim, offset);
+  if (idx != 0) {
+    return idx;
+  }
+  return emit_index_expr(ke, dtype, buf_id, range_ids, strides,
+                         ndim, offset);
+}
+
 // Build an integer expression that decomposes a flat iter into a
 // per-axis coordinate, then multiplies by the input view's stride
 // for that axis.  Used for cases where in_numel == reduce_size and
@@ -1118,8 +1150,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
 
   // 2. Output buffer + STORE address (uses LOOP ranges only).
   u32 out_buf = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, ke->output_dtype, 0);
-  u32 out_index = emit_index(ke, ke->output_dtype, out_buf,
-                             loop_ranges, loop_strides, os->ndim);
+  u32 out_index = emit_index_chain_or_expr(ke, ke->output_dtype, out_buf,
+                                           loop_ranges, loop_strides,
+                                           os->ndim, 0);
   if (out_index == 0) RBAIL_MID("out INDEX emit failed");
 
   // 3. Per-input load expressions.  Two parallel tables when an
@@ -1500,7 +1533,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                  && in_numel == reduce_size) {
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
-        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
+                                       1, in_off);
       } else if (in_numel == reduce_size && v->shape.ndim == 1) {
         // Per-reduce-iter rank-1 broadcast.  Input depends only on
         // the REDUCE iter (invariant across LOOP iters); the address
@@ -1510,7 +1544,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // -- common in BN gradient backward chains.
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {(u32)v->strides[0]};
-        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
+                                       1, in_off);
       } else if (in_numel == reduce_size && reduce_inner == 1) {
         // Generalization of the rank-1 case above: same per-reduce-
         // iter pattern but the input view has rank > 1 with all-but-
@@ -1519,7 +1554,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // so reduce_iter * 1 + offset gives the right address.
         u32 r_ids[1]    = {reduce_range};
         u32 r_strides[1] = {1};
-        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, 1, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
+                                       1, in_off);
       } else if (in_numel == reduce_size && v->shape.ndim <= MAX_DIM) {
         // General "input depends only on reduce iter" case (any rank,
         // contig OR non-contig).  Builds the address as a symbolic
@@ -1608,7 +1644,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           r_strides[d] = (u32)v->strides[d];
         }
-        idx = emit_index_chain(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
       } else if (in_numel == reduce_in_numel && reduce_inner == 1) {
         // Flat-buffer alias of the reduce-input shape: same total
         // numel, lower rank view, contiguous, reduce axis trailing.
@@ -1618,8 +1654,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 r_ids[MAX_DIM + 1];
         for (u32 d = 0; d < os->ndim; d++) r_ids[d] = loop_ranges[d];
         r_ids[os->ndim] = reduce_range;
-        idx = emit_index_chain(ke, dtype, param, r_ids, in_strides,
-                               in_ndim, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, in_strides,
+                                       in_ndim, in_off);
       } else if (v->shape.ndim == os->ndim) {
         // Same rank as output (Phase F-fix): walk the View's strides
         // directly, mirroring the post-scope branch.  Inputs that are
@@ -1683,8 +1719,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         for (u32 d = 0; d < os->ndim; d++) {
           strides_u32[d] = (u32)v->strides[d];
         }
-        idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
-                               os->ndim, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, loop_ranges, strides_u32,
+                                       os->ndim, in_off);
       } else if (input_rngs_pre[i].ndim == v->shape.ndim
                  && v->shape.ndim > 0) {
        pre_index_rngs_fallback:
@@ -1760,12 +1796,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // the input was via PAD/SHRINK; loosened.
           strides_u32[d] = (u32)v->strides[d];
         }
-        idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
-                               os->ndim, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, loop_ranges, strides_u32,
+                                       os->ndim, in_off);
       } else if (has_reduce && in_numel == reduce_in_numel
                  && reduce_in_numel == onum) {
-        idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
-                               os->ndim, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, loop_ranges, loop_strides,
+                                       os->ndim, in_off);
       } else if (in_numel == onum) {
         // Flat-buffer alias / RESHAPE: same total elements as output
         // but with a lower- (or higher-) rank view.  Walk the output
@@ -1773,8 +1809,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // position is the flat index, so loop_strides over LOOP
         // ranges gives the correct address.  Assumes the input view
         // is contiguous from offset (standard after RESHAPE).
-        idx = emit_index_chain(ke, dtype, param, loop_ranges, loop_strides,
-                               os->ndim, in_off);
+        idx = emit_index_chain_or_expr(ke, dtype, param, loop_ranges, loop_strides,
+                                       os->ndim, in_off);
       } else if (in_numel < onum && v->shape.ndim <= os->ndim) {
         // Lower-rank broadcast: input shape is a contiguous prefix
         // (most common: per-channel/leading axis) or suffix (per-row
@@ -1808,8 +1844,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               strides_u32[d] = 0;  // broadcast axis
             }
           }
-          idx = emit_index_chain(ke, dtype, param, loop_ranges, strides_u32,
-                                 os->ndim, in_off);
+          idx = emit_index_chain_or_expr(ke, dtype, param, loop_ranges, strides_u32,
+                                         os->ndim, in_off);
         } else if (input_rngs_post[i].ndim == v->shape.ndim
                    && v->shape.ndim > 0) {
           // RNGS-BASED FALLBACK (post-scope analog of the pre-scope
@@ -1846,6 +1882,35 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           RBAIL_MID("post-INDEX broadcast unmatched");
         }
+      } else if (input_rngs_post[i].ndim == v->shape.ndim
+                 && v->shape.ndim > 0) {
+        // General post-scope rngs fallback.  This covers split-view
+        // consumers where the input has MORE rank than the output
+        // shape, e.g. a maxpool/backward view `{B,C,H/2,W/2,2}`
+        // consumed under `{B,C,H,W}`.  The backward walk has already
+        // decomposed the consumer edge into the input-side per-axis
+        // expressions; emit those through S_INDEX_E instead of trying
+        // to match by prefix/suffix rank.
+        via_rngs_post[i] = 1;
+        RngsCtx const *r = &input_rngs_post[i];
+        u32 acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
+        int bailed = 0;
+        for (u32 d = 0; d < r->ndim; d++) {
+          if (v->strides[d] < 0) { bailed = 1; break; }
+          if (v->strides[d] == 0) continue;
+          u32 t = r->refs[d];
+          if (v->strides[d] != 1) {
+            u32 c = emit_iconst(ke, (i64)v->strides[d]);
+            t = emit_ibinop(ke, S_IMUL, t, c);
+          }
+          acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+        }
+        if (bailed) {
+          RBAIL_MID("post-INDEX rngs negative stride");
+        }
+        if (acc == 0) acc = emit_iconst(ke, 0);
+        u32 src[2] = {param, acc};
+        idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
       } else {
         if (getenv("THVM_RANGEIFY_BAIL")) {
           fprintf(stderr, "  post-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u v.shape=[",
@@ -1863,7 +1928,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         RBAIL_MID("post-INDEX no branch matched");
       }
       if (idx == 0) RBAIL_MID("post-INDEX emit failed");
-      input_load_post[i] = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
+      u32 load = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
+      if (via_rngs_post[i] && input_rngs_post[i].valid_mask != 0) {
+        u32 zero = emit_iconst(ke, 0);
+        u32 wsrc[3] = {input_rngs_post[i].valid_mask, load, zero};
+        load = rangeify_emit(ke, S_IWHERE, dtype, 3, wsrc, 0);
+      }
+      input_load_post[i] = load;
     }
   }
 
@@ -2132,10 +2203,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       continue;
     }
     if (p->opcode == UOP_PERMUTE) {
-      RngsCtx out_rngs = {0};
-      out_rngs.ndim = os->ndim;
-      for (u32 d = 0; d < os->ndim; d++) {
-        out_rngs.refs[d] = loop_ranges[d];
+      RngsCtx out_rngs = rngs[i];
+      if (out_rngs.ndim == 0) {
+        out_rngs.ndim = os->ndim;
+        for (u32 d = 0; d < os->ndim; d++) {
+          out_rngs.refs[d] = loop_ranges[d];
+        }
       }
       RngsCtx src_rngs = {0};
       if (!rngs_ctx_movement_src(ke, p, &out_rngs, &src_rngs)) {

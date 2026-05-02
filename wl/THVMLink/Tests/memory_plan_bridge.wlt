@@ -79,3 +79,59 @@ VerificationTest[
     True,
     TestID -> "memory-plan-bridge/metal-buf-table-schema-on-cpu"
 ]
+
+VerificationTest[
+    TInit[];
+    TReset[];
+    ms = TMetalBufSummary[];
+    {Sort @ Keys[ms],
+     And @@ IntegerQ /@ Values[ms],
+     ms["LiveBytes"], ms["DeferredBytes"], ms["DeferredCount"],
+     ms["PeakLiveBytes"], ms["PeakRetainedBytes"],
+     ms["PeakDeferredBytes"]},
+    {Sort @ {"LiveBytes", "RetainedBytes", "DeferredBytes",
+             "DeferredCount", "FreelistCount", "PeakLiveBytes",
+             "PeakRetainedBytes", "PeakDeferredBytes"},
+     True, 0, 0, 0, 0, 0, 0},
+    TestID -> "memory-plan-bridge/metal-buf-summary-schema-on-cpu"
+]
+
+VerificationTest[
+    TInit[];
+    TReset[];
+    mp = TMetalMemoryProfile[];
+    {SubsetQ[Keys[mp],
+        {"LiveBytes", "RetainedBytes", "DeferredBytes",
+         "PeakLiveBytes", "PeakRetainedBytes", "PeakDeferredBytes",
+         "BufferCount", "LiveBuffers", "RetainedBuffers",
+         "FreelistBytes", "LargestLiveBytes",
+         "LargestRetainedBytes"}],
+     And @@ IntegerQ /@ Values[mp],
+     mp["LiveBytes"], mp["FreelistBytes"]},
+    {True, True, 0, 0},
+    TestID -> "memory-plan-bridge/metal-memory-profile-schema-on-cpu"
+]
+
+VerificationTest[
+    TInit[];
+    TReset[];
+    Module[{ctx = TContextNew["metal"], ok},
+        If[ctx === 0, Return[True]];
+        ok = TInContext[ctx,
+            a = TTensorCreate @ NumericArray[{1., 2., 3., 4.}, "Real32"];
+            b = TTensorCreate @ NumericArray[{0.5, 0.5, 0.5, 0.5}, "Real32"];
+            TRealize[a + b];
+            mp = TMetalMemoryProfile[];
+            mp["LiveBytes"] > 0 &&
+            mp["RetainedBytes"] >= mp["LiveBytes"] &&
+            mp["PeakLiveBytes"] >= mp["LiveBytes"] &&
+            mp["PeakRetainedBytes"] >= mp["RetainedBytes"] &&
+            mp["DeferredBytes"] === 0 &&
+            mp["DeferredCount"] === 0
+        ];
+        TContextDestroy[ctx];
+        ok
+    ],
+    True,
+    TestID -> "memory-plan-bridge/metal-memory-profile-after-small-dispatch"
+]

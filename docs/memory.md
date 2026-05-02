@@ -1,305 +1,301 @@
-# Memory footprint during training
+# Memory And Lifetime Model
 
-What this doc answers: "how much memory does thvm allocate per
-LeNet training step today, and what would proper buffer reuse
-gain us?"
+This document is the current reference for thvm buffer lifetime,
+memory diagnostics, and the safety boundary around memory planning.
+It supersedes the older LeNet-only notes that treated memory as a CPU
+buffer-pool problem.
 
-## Status quo: per-op allocation, no reuse
+The practical rule is simple: do not run large autotune or batch-size
+sweeps until the small memory invariants here pass and repeated-step
+Metal profiles show bounded retained memory.
 
-`tensor_alloc` is called per-op during materialize.  Each
-`KernelEntry`'s output tensor gets its own freshly-allocated
-buffer.  Buffers are never freed mid-session; they live until
-`thvm_free()` (full reset).
+## Runtime Objects
 
-Concretely, for one LeNet forward + 1 backward (no Adam update):
+thvm separates tensor descriptors from backend storage:
 
-| Phase                             | TenDescs added | Buf bytes added |
-| --------------------------------- | -------------- | --------------- |
-| `TInit[]`                         | 0              | 0               |
-| MNIST 1-sample batch              | 2              | 3.1 KiB         |
-| Glorot host-init (8 weights)      | 0              | 0 (host-only)   |
-| Tensor upload (1 input + 8 wts)   | 9              | 1683.9 KiB      |
-| Forward + loss materialize        | 480            | 14292.6 KiB     |
-| `TGrad[loss, x]` materialize      | 20             | 39.8 KiB        |
-| **Total**                         | **511**        | **15.65 MiB**   |
+- `TenDesc` records shape, dtype, producer kernel, backend id, and
+  backend `buf_id`.
+- CPU buffers live in `CPU_BUFS`.
+- Metal buffers live in `METAL_BUFS`.
+- A view-only tensor may share a buffer with another tensor and raise
+  that buffer's refcount.
+- A materialized kernel output usually gets a new `TenDesc` and a new
+  backend buffer unless a view/alias fast path applies.
 
-(Numbers from `wl/Examples/lenet-mnist/memory-probe.wls` on a
-fresh `TInit` run.  `TenDescs` = `TENS_NEXT - 1`; `Buf bytes` =
-sum of live `CPU_BUFS[i].nbytes` where `refcount > 0`.)
+The heap owns graph structure; the backend tables own bytes.  Correct
+memory planning has to respect both: a buffer is reusable only when no
+live heap path, tensor descriptor, alias, pending command buffer, or
+future replay can read it.
 
-The forward pass dominates: 480 TenDescs and 14.3 MiB of
-intermediate buffers.  `TGrad[loss, x]` only adds 20 / 40 KiB
-because it primarily emits new compute graphs that get walked at
-the next materialize -- backward IS lazy here.  A full Adam step
-adds the backward materialization PLUS 8 new tensors for the
-weight gradients PLUS 16 host-side moment estimates (m, v) PLUS
-8 weight-update buffers, so a full training step probably
-reaches 25-30 MiB.
+## CPU Accounting
 
-## Where the bytes go
+`TTotalBufBytes[]` reports live CPU bytes: the sum of
+`CPU_BUFS[i].nbytes` where `refcount > 0`.
 
-The 14.3 MiB of forward-pass intermediates breaks down roughly:
+`TCpuBufTable[]` returns one row per CPU buffer:
 
-- **Conv1 output** (20 x 24 x 24 f32 = 45 KiB) materialized
-  through ~125 partial / fold buffers averaging ~kilobyte each
-  -- conv-lowered's kh*kw partial-sum chain allocates one
-  intermediate per (ki, kj) pair.
-- **Conv2 output** (50 x 8 x 8 f32 = 12.5 KiB) materialized
-  through ~150 partial / fold buffers, larger because LeNet's
-  inner conv is 20->50 channels (the partials are
-  {50, 8, 8} = 12.5 KiB each, and there's 25 of them = 312 KiB
-  per partial slice).
-- **Pool / ReLU / Linear** outputs are small (KiB-level each).
-- **Softmax + CE-loss intermediates** are ~10 elements each
-  (negligible).
-
-The biggest absolute consumer is **conv2's per-partial buffers**:
-25 partials at 12.5 KiB plus 24 ADD-fold outputs at 12.5 KiB =
-~600 KiB.  Conv1's per-partial buffers are smaller (~1 KiB each
-* 50 = ~50 KiB).
-
-## What tinygrad would do
-
-Tinygrad's runtime + scheduler give back most of this memory
-through three mechanisms:
-
-1. **Lazy buffer reuse** -- intermediate buffers that are read
-   exactly once are immediately freed (or never allocated:
-   the producer writes directly into the consumer's input slot).
-   thvm has no buffer-lifetime tracking; intermediates live
-   forever within a `TInit` session.
-
-2. **Movement-op view-only** (we landed RESHAPE + EXPAND in the
-   f3 arc; SHRINK / PERMUTE / PAD / FLIP still allocate).
-   View-only movement ops share buffers with their source --
-   no new allocation.
-
-3. **Kernel fusion** (the f1 arc, currently blocked) -- when
-   N elementwise ops fuse into one kernel, they share ONE
-   output buffer instead of N.  For our 24-deep ADD-fold per
-   conv, that would drop ~24 buffers down to 1.
-
-## Concrete reuse-pass opportunities
-
-In rough order of impact:
-
-- [ ] **Per-step buffer pool**.  Add a high-water-mark allocator
-      that keeps track of bufs allocated during one materialize
-      call and frees them when the materialize root's wnf
-      finishes.  Eliminates the "bufs live until thvm_free"
-      problem; ~50% memory reduction per step (we don't keep
-      forward intermediates alive after the backward pass
-      reads them).  ~150 LOC across `cpu_buf_alloc.c` +
-      `kernel_fire_by_id`.
-
-- [ ] **Refcount-driven free**.  When the last consumer reads a
-      kernel's output buffer, decref + free.  Requires a
-      consumer-count pass during materialize (similar to f1b's
-      `count_kernel_consumers` helper).  ~80 LOC plus the
-      consumer-count infrastructure.  Drops conv-partial
-      memory by ~5x (each partial is consumed by exactly one
-      ADD-fold position).
-
-- [ ] **Movement-op view-only for SHRINK / PERMUTE / PAD / FLIP**.
-      Mirror f3b/c.  Mostly orthogonal to the above two; once
-      these land, the per-conv buffer count drops 50-70 buffers.
-
-- [ ] **Adam-state arena**.  Today Adam's `m` and `v` host
-      arrays are allocated per-step (`TAdamHostStep` re-allocs).
-      Keep them alive across steps in a session-scoped store.
-      ~40 LOC; small bytes-per-step gain but reduces host-side
-      pressure.
-
-The cron-loop should pick up these as queued sub-items in
-TASKS.md when it gets to the memory work.
-
-## Per-step pool boundary lands (sub-items a + b)
-
-Status: infrastructure complete, ZERO measured savings yet.
-
-- `cpu_buf_pool_begin() -> wm` + `cpu_buf_pool_rollback_with_preserve(wm)`
-  in src/backend/cpu/buf_pool.c (sub-item a).
-- `thvm_realize` (src/schedule/realize.c) wraps materialize +
-  wnf with the pool boundary; `mark_preserved_chain` walks the
-  result tensor's producer_kid -> input_tids tree marking every
-  reachable buf as preserved (sub-item b).
-- WL TRealize calls the new `thvm_wl_realize` bridge as one C
-  round-trip.
-
-Memory-probe.wls before/after:
-
-| Stage              | Before | After  | Delta |
-| ------------------ | ------ | ------ | ----- |
-| TenDescs           | 511    | 511    | 0     |
-| Buf bytes (KiB)    | 16 022 | 16 022 | 0     |
-| KernelEntries      | 330    | 330    | 0     |
-
-The conservative whole-producer-chain preserve is the source of
-the zero delta: every forward intermediate is reachable from the
-loss tensor (transitively, via the chain of producer_kids), so
-EVERY intermediate gets marked preserved and rollback frees
-nothing.
-
-We tried the aggressive "preserve only the result.buf_id"
-variant.  It broke nn.wlt (5 failures) and segfaulted; some
-downstream paths (TGrad chain rule, view-only alias chains)
-read intermediate bufs after wnf returns, before the next
-TRealize starts.
-
-The right next step is **refcount-driven free** (the next item
-in the reuse-pass arc): track per-buf consumer count during
-materialize, decref when each consumer kernel fires, free at
-refcount = 0.  That cleanly separates "result bufs to keep" from
-"intermediate bufs that have been READ by all their consumers"
-without the producer-chain-preservation paradox.
-
-The pool boundary infrastructure is correct + covered by tests;
-it'll provide actual savings once lifetime analysis can replace the
-producer-chain preserve walk with a precise "free proven-dead bufs"
-rollback.
-
-## Refcount-driven free arc (sub-items a + b + c)
-
-Status: structural consumer-count metadata is still present, but the
-dispatch-time decref hook was removed.  This still has ZERO measured
-savings.
-
-What landed:
-
-- `KernelEntry.consumer_count` (src/thvm.h) + a single-pass
-  `kernel_compute_consumer_counts` (src/schedule/consumer_count.c)
-  attributes each input read back to its producing kernel (via
-  `TENS[tid].producer_kid`), correctly handling view-aliased
-  TenDescs (RESHAPE/EXPAND aliases inherit `producer_kid`).
-- `thvm_realize` calls `kernel_compute_consumer_counts` between
-  materialize + wnf so the structural counts are available per
-  realize.
-- `cpu_buf_mark_freeable` / `cpu_buf_clear_freeable` /
-  `CpuBuf.freeable` flag (sibling to `preserved`).
-
-What was removed: the post-dispatch decref hook in
-`kernel_fire_by_id`.  A kernel can legitimately re-dispatch across
-optimizer-loop iterations after ASSIGN mutates its inputs, so treating
-"one fire" as "one permanent read by every consumer" over-decrements.
-`kernel_fire_by_id` now uses `fire_gen` only as a per-top-level-fire
-memo so a shared producer in a diamond dispatches once per generation
-and can dispatch again in the next generation.
-
-What did NOT land: the rollback swap.  `thvm_realize` still uses
-`cpu_buf_pool_rollback_with_preserve`, which conservatively keeps
-every buf reachable from the result's producer chain.  The structural
-counts are introspection data until lifetime analysis can prove a buf
-is no longer reachable by any future materialized graph.
-
-Memory-probe.wls (post sub-item c integration):
-
-| Stage              | Value         |
-| ------------------ | ------------- |
-| TenDescs           | 511           |
-| Buf bytes          | 16 022.5 KiB  |
-| KernelEntries      | 330           |
-
-Same as the pre-refcount baseline -- preserve walk dominates.
-
-What unblocks the savings: a heap-rooted preserve pass that walks
-HEAP[0..HEAP_NEXT) for live `TAG_TEN`/`UOP_*` cells, collects
-their referenced TenDescs, and pins those bufs.  This replaces
-the producer-chain conservative walk with a precise live-reference
-walk; intermediate forward kernels whose outputs are no longer
-referenced anywhere in the heap (and whose count hit zero) get
-reclaimed.  Sized at one new schedule/heap_rooted_preserve.c plus
-swapping the rollback variant in thvm_realize -- queued as the
-next reuse-pass arc item.
-
-## EXPAND view-only on non-contig sources (post-f3d/e/g fix)
-
-After f3d (SHRINK) + f3e (PERMUTE) + f3g (FLIP) view-only paths
-landed, LeNet's memory probe rose from 16022 KiB (pre-f3d) to
-23297 KiB (+7 MiB) without changing the TenDesc count -- a
-surprise since each view-only alias is supposed to ELIMINATE a
-kernel-output buf.
-
-Bisect via per-alloc trace pointed at LeNet's bias-add chain:
-
-  Conv1.bias (shape {20}, 80 bytes)
-    -> EXPAND to {20, 24, 24} (11520 elements)
-    -> ADD with the conv output
-
-Pre-f3d, the EXPAND fast path (`materialize_in_env.c` block 2c)
-required `TENS[child].view.contiguous`.  The bias was a contig
-input, so EXPAND aliased -- no kernel, 0 new bytes.
-
-Post-f3d/e/g, when the SHRINK / PERMUTE / FLIP that fed an EXPAND
-emitted a non-contig alias, the contig check failed and EXPAND
-fell through to the kernel-emit path -- allocating a fresh buf
-of the FULL target shape (e.g., 46080 bytes for the conv1 chain
-above, on every position in the lowered conv kh*kw partial-sum).
-
-Fix: dropped the `view.contiguous` precondition on block 2c.
-EXPAND now aliases on any source by inheriting the source's
-per-axis strides (whatever they are) on non-broadcast axes and
-setting stride 0 on broadcast axes.  The inherited strides are
-already authoritative for non-contig sources (SHRINK alias keeps
-source row-major; PERMUTE permutes them; FLIP negates them) so
-view_strided_index walks them correctly.
-
-Measured impact on LeNet's memory probe:
-
-| Stage              | Pre-fix | Post-fix | Delta |
-| ------------------ | ------- | -------- | ----- |
-| TenDescs           | 511     | 511      | 0     |
-| Buf bytes (KiB)    | 23 297  | 15 922   | -7 375 |
-| KernelEntries      | 330     | 280      | -50   |
-
-Now ~100 KiB BELOW the pre-f3d baseline of 16 022 KiB and 50
-kernels lighter -- the f3d/e/g wins finally cascade through
-EXPAND as intended.
-
-## TMemoryPlan visualization (mp4-integrated)
-
-`memory-probe.wls` now ends with a `TMemoryPlanReport[TMemoryPlan[]]`
-block — a top-5-largest / top-5-longest-lived view of the live
-buffers, derived from static topological-depth analysis on the
-`producer_kid` / `input_tids` edges (no firing-order pinning;
-two valid topo linearizations of the same DAG produce identical
-depths).
-
-Sample output on the LeNet probe (CPU run):
-
-```
-TMemoryPlan: 279 kernels, 299 bufs, 15922.9 KiB live
-  by status:  <|External -> 10, Live -> 279, Preserved -> 10|>
-  by backend: <|CPU -> 299|>
-  top-5 by bytes:
-    buf 8   (CPU): 1562.5 KiB, depth [0..0],   External   <- input  500x800 weight
-    buf 17  (CPU): 1562.5 KiB, depth [0..64],  Preserved  <- FC1 weight (long-lived)
-    buf 257 (CPU): 1562.5 KiB, depth [64..65], Live       <- FC backward grad
-    buf 128 (CPU): 250.  KiB, depth [33..34], Live       <- conv2 partial
-    buf 132 (CPU): 250.  KiB, depth [33..34], Live
-  top-5 by alive span:
-    buf 12  (CPU): span 80, 0. KiB, Preserved
-    buf 275 (CPU): span 79, 0. KiB, Live
-    buf 267 (CPU): span 73, 0. KiB, Live
+```text
+{nbytes, refcount, preserved, freeable, owns_data}
 ```
 
-`THVM_BACKEND=metal wolframscript -f memory-probe.wls` produces
-the same shape with `by backend: <|Metal -> 299|>` and the
-preserved/freeable columns all 0 (Metal doesn't track those
-flags); status counts shift to `External -> 20, Live -> 279`
-because Metal's upload path creates separate per-tensor bufs
-without inheriting the CPU `preserved` mark.
+CPU also has a per-realize pool boundary:
 
-`TMemoryPlanGantt[TMemoryPlan[]]` renders the same data as a
-Graphics-headed Gantt chart for interactive exploration.
+- `cpu_buf_pool_begin()`
+- `cpu_buf_pool_rollback_with_preserve(wm)`
+- `mark_gc_preserve(res)`
 
-## Probe script
+This rollback is intentionally conservative.  It preserves buffers
+reachable from heap roots and result chains, then releases only what is
+proven unreachable.  That keeps correctness ahead of memory savings.
 
-`wl/Examples/lenet-mnist/memory-probe.wls` reports per-phase
-buffer / TenDesc / KernelEntry counts.  Re-run after any of the
-above lands to measure regression / progress.
+`THVM_REUSE_BUFS=1` enables the experimental schedule planner for CPU
+only.  It can push proven-dead same-pass outputs onto the CPU freelist,
+then drains unused pushes at the end of the pass so reuse cannot leak
+into a later WNF/materialize pass.
 
-C surface:
+## Metal Accounting
 
-- `TTensCount[]`     -- `TENS_NEXT - 1`
-- `TTotalBufBytes[]` -- sum of live `CPU_BUFS[i].nbytes`
-- `TKernelCount[]`   -- `KERNELS_NEXT`
+Metal has a different lifetime problem: command buffers can still be
+using temporary storage after the C dispatcher has finished encoding.
+The Metal backend therefore distinguishes four byte classes:
+
+- `LiveBytes`: buffers with `refcount > 0`; these are visible to live
+  tensor descriptors.
+- `RetainedBytes`: all non-nil `MTLBuffer` storage still held by the
+  backend, including freelist buffers with `refcount == 0`.
+- `DeferredBytes`: bytes queued for decref after the current Metal
+  batch boundary.
+- `FreelistBytes`: `RetainedBytes - LiveBytes`; storage held for reuse,
+  not currently referenced by tensors.
+
+`TMetalBufTable[]` returns one row per Metal buffer:
+
+```text
+{nbytes, refcount}
+```
+
+`TMetalBufSummary[]` returns:
+
+```text
+<|"LiveBytes" -> ...,
+  "RetainedBytes" -> ...,
+  "DeferredBytes" -> ...,
+  "DeferredCount" -> ...,
+  "FreelistCount" -> ...,
+  "PeakLiveBytes" -> ...,
+  "PeakRetainedBytes" -> ...,
+  "PeakDeferredBytes" -> ...|>
+```
+
+`TMetalMemoryProfile[]` derives a flatter profile from the summary and
+table:
+
+```text
+<|"LiveBytes", "RetainedBytes", "DeferredBytes",
+  "DeferredCount", "FreelistCount",
+  "PeakLiveBytes", "PeakRetainedBytes", "PeakDeferredBytes",
+  "BufferCount", "LiveBuffers", "RetainedBuffers",
+  "FreelistBytes", "LargestLiveBytes",
+  "LargestRetainedBytes"|>
+```
+
+Use `RetainedBytes` and `PeakRetainedBytes` to diagnose OS memory
+pressure.  `LiveBytes` can look healthy while the backend still holds a
+large freelist.
+
+## Metal Batch Retention
+
+Metal dispatch batching is enabled by default:
+
+```text
+THVM_METAL_BATCH=1
+```
+
+Temporary buffers released while a batch is open are queued through
+`metal_buf_decref_after_batch`.  The queue is drained by
+`metal_dispatch_flush()` when:
+
+- `backend_dispatch_end_all()` closes the outermost batch;
+- a host read/write needs synchronized contents;
+- an allocation would exceed `THVM_METAL_DEFER_BYTES`;
+- the deferred queue reaches its hard cap.
+
+`THVM_METAL_DEFER_BYTES` defaults to `1073741824` bytes.  Set it lower
+for debugging:
+
+```bash
+THVM_METAL_DEFER_BYTES=134217728 ...
+```
+
+Set it to `0` to flush as soon as a deferred decref is queued.  That is
+useful for lifetime tests, but it usually hurts throughput.
+
+Metal also caps retained freelist storage:
+
+```text
+THVM_METAL_FREELIST_BYTES=1073741824
+```
+
+The freelist stores `MTLBuffer` objects after their refcount reaches
+zero so exact-size future allocations can reuse them.  When freelist
+bytes exceed the cap, the backend drops the largest free buffers first.
+Set this to `0` to disable retention of dead Metal buffers while
+debugging memory pressure.
+
+Alias-only kernels need special care.  A same-numel reshape can alias
+the input buffer and release the preallocated output buffer without
+encoding a command buffer at all.  The output buffer was allocated
+speculatively and has never been submitted to the GPU, so the Metal
+backend drops it directly to the freelist/free path instead of queuing
+a deferred decref.  This is covered by
+`metal-real/alias-reshape-drops-unused-output-immediately`.
+
+## Safety Boundary
+
+Current policy:
+
+- CPU speculative schedule reuse is opt-in via `THVM_REUSE_BUFS=1`.
+- Metal speculative schedule reuse is disabled.
+- Metal still performs normal refcount-driven reuse after real decrefs.
+- Large performance sweeps stay blocked until Metal profiles prove
+  retained memory is bounded under repeated steps.
+
+Why Metal planner reuse is disabled: a schedule planner can decide an
+output is dead in graph order, but Metal also has command-buffer order
+and a deferred-decref queue.  Until the planner has a Metal-specific
+drain/proof equivalent to CPU's end-of-pass freelist drain, pushing
+planner-dead Metal buffers to the freelist risks reusing storage too
+early.
+
+## Fusion And Memory
+
+Fusion is the largest real memory win, because an unfused chain
+allocates every intermediate output.  The current direction is:
+
+1. Let `realize_classify` pick larger legal boundaries.
+2. Let `rangeify` lower movement, elementwise, and reduction chains
+   into one scalar graph.
+3. Let tile/scalar renderers consume that graph.
+4. Let `kernel_opts_propose` and autotune choose axis transforms.
+
+This avoids backend-specific custom kernels as the main solution.
+Metal GEMM and conv fast paths may exist as compatibility or parity
+bridges, but the target path is lowered primitives plus search.
+
+Metal direct MSL kernels can bind at most 30 input buffers without
+argument buffers.  With `THVM_BACKEND=metal THVM_TILE=1`,
+`realize_classify` therefore splits over-wide ADD/MUL expression
+trees before materialization.  The default cap is:
+
+```text
+THVM_METAL_FUSION_MAX_INPUTS=30
+```
+
+Lower it only for focused tests.  Raising it above 30 does not make
+direct Metal buffer binding legal; it should wait for argument-buffer
+support.
+
+Memory diagnostics should be read with fusion diagnostics:
+
+- `TProfileProgramGroups[TProfileDelta[before, after]]` tells which
+  repeated program shapes dominate time.
+- `TProfileFusionGaps[TProfileDelta[before, after]]` filters those
+  groups to hot shapes that are not yet tile-tunable.
+- `TKernelScalarUops[kid]` shows whether rangeify fused the boundary.
+- `TKernelTileUops[kid]` and `TKernelTilePlan[kid]` show whether the
+  tile path can consume it.
+- `TMetalMemoryProfile[]` shows whether that fused/tiled path keeps
+  retained Metal memory bounded.
+
+A good fusion change should usually reduce one or more of:
+
+- kernel count;
+- repeated program-group count;
+- live intermediate bytes;
+- peak retained Metal bytes;
+- per-step dispatch time.
+
+Do not accept a speed win that causes unbounded `PeakRetainedBytes`.
+
+## Diagnostic Workflow
+
+Use small correctness and lifetime tests first:
+
+```bash
+make bin/test_metal_real
+bin/test_metal_real
+make wl
+wolframscript -code 'PacletDirectoryLoad["wl/THVMLink"]; Get["THVMLink`"]; r=TestReport[{"wl/THVMLink/Tests/memory_plan_bridge.wlt","wl/THVMLink/Tests/metal_dtypes.wlt","wl/THVMLink/Tests/kernel_profile.wlt"}]; Print[r["TestsSucceededCount"], " passed, ", r["TestsFailedCount"], " failed"]; Exit[If[r["TestsFailedCount"] > 0, 1, 0]]'
+```
+
+Then use a small repeated-step probe.  Keep batch size and step count
+small until retained memory is proven bounded:
+
+```bash
+BS=32 WARMUP_STEPS=1 N_STEPS=2 \
+THVM_BACKEND=metal THVM_TILE=1 \
+THVM_METAL_DEFER_BYTES=134217728 \
+THVM_METAL_FREELIST_BYTES=1073741824 \
+SHOW_MEMORY_PROFILE=1 SHOW_PROGRAM_PROFILE=1 SHOW_FUSION_GAPS=1 \
+wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
+```
+
+Read the two benchmark memory lines:
+
+```text
+metal_memory before_timed: ...
+metal_memory after_timed:  ...
+```
+
+Expected properties for a healthy small run:
+
+- `DeferredBytes` is `0` after the timed window.
+- `DeferredCount` is `0` after the timed window.
+- `RetainedBytes` may exceed `LiveBytes`, but should stabilize across
+  repeated steps.
+- `PeakRetainedBytes` should not grow without bound when the same TJit
+  replay runs repeatedly.
+
+Only after that should larger batch tests be considered.  A single
+large run that spikes memory pressure is not a valid tuning result.
+
+## Historical LeNet Baseline
+
+The older LeNet probe measured one forward plus one backward target on
+CPU:
+
+```text
+TenDescs:      511
+Buf bytes:     about 15.6 MiB
+KernelEntries: 330 before view/fusion cleanup, about 280 after
+```
+
+Those numbers were useful for proving that conv partials and
+elementwise chains dominated CPU allocation.  They are not sufficient
+for Metal training today because Metal pressure is driven by retained
+`MTLBuffer` storage, deferred batch releases, and fused/tiled dispatch
+coverage.
+
+The probe script still exists:
+
+```bash
+wolframscript -f wl/Examples/lenet-mnist/memory-probe.wls
+```
+
+Use it for regression context, not as proof that Metal training memory
+is safe.
+
+## Open Work
+
+The remaining memory work is ordered:
+
+1. Add a small repeated-step memory regression that asserts
+   `DeferredBytes == 0` after every dispatch boundary and checks that
+   `PeakRetainedBytes` stays under a conservative cap.
+2. Add Metal-specific planner proof/drain machinery before enabling
+   `THVM_REUSE_BUFS` for Metal.
+3. Continue rangeify/tile fusion coverage so movement-heavy gradients
+   and reductions stop materializing large intermediate chains.
+4. Feed `TProfileProgramGroups` plus `TMetalMemoryProfile` into
+   autotune triage so search optimizes time without hiding memory
+   regressions.

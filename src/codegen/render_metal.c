@@ -916,9 +916,6 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   if (tile_rejects_conv2d_flat_cin1(ke)) {
     return 0;
   }
-  if (rmt_kprog_has_opcode(ke, UOP_PAD)) {
-    return 0;
-  }
   if (!tile_sync_from_scalar(ke)) {
     return 0;
   }
@@ -1721,10 +1718,6 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
   if (tile_rejects_conv2d_flat_cin1(ke)) {
     return NULL;
   }
-  if (rmt_kprog_has_opcode(ke, UOP_PAD)) {
-    return NULL;
-  }
-
   CtKernelInfo info;
   if (!rmt_collect_kernel_info(ke, &info)) {
     return NULL;

@@ -28,6 +28,20 @@ static id<MTLLibrary>      METAL_LIB    = nil;
 static id<MTLCommandBuffer> METAL_BATCH_CMD = nil;
 static u32                  METAL_BATCH_DEPTH = 0;
 
+static void metal_buf_decref(u32 buf_id);
+static void metal_buf_free(u32 buf_id);
+
+#define METAL_DEFER_DECREF_CAP (1u << 20)
+static u32 METAL_DEFER_DECREFS[METAL_DEFER_DECREF_CAP];
+static u32 METAL_DEFER_DECREF_LEN = 0;
+static u64 METAL_DEFER_DECREF_BYTES = 0;
+static u64 METAL_PEAK_LIVE_BYTES = 0;
+static u64 METAL_PEAK_RETAINED_BYTES = 0;
+static u64 METAL_PEAK_DEFERRED_BYTES = 0;
+
+static void metal_record_memory_peak(void);
+static void metal_freelist_trim(void);
+
 #ifndef THVM_METAL_METALLIB
 #define THVM_METAL_METALLIB "build/default.metallib"
 #endif
@@ -50,12 +64,41 @@ static int metal_batch_enabled(void) {
   return enabled;
 }
 
+static u64 metal_defer_limit_bytes(void) {
+  static int known = 0;
+  static u64 limit = 1024ull * 1024ull * 1024ull;
+  if (!known) {
+    char const *e = getenv("THVM_METAL_DEFER_BYTES");
+    if (e != NULL && e[0] != '\0') {
+      limit = strtoull(e, NULL, 10);
+    }
+    known = 1;
+  }
+  return limit;
+}
+
+static u64 metal_freelist_limit_bytes(void) {
+  char const *e = getenv("THVM_METAL_FREELIST_BYTES");
+  if (e != NULL && e[0] != '\0') {
+    return strtoull(e, NULL, 10);
+  }
+  return 1024ull * 1024ull * 1024ull;
+}
+
 static void metal_dispatch_flush(void) {
-  if (METAL_BATCH_CMD == nil) return;
   id<MTLCommandBuffer> cmd = METAL_BATCH_CMD;
   METAL_BATCH_CMD = nil;
-  [cmd commit];
-  [cmd waitUntilCompleted];
+  if (cmd != nil) {
+    [cmd commit];
+    [cmd waitUntilCompleted];
+  }
+  u32 n = METAL_DEFER_DECREF_LEN;
+  METAL_DEFER_DECREF_LEN = 0;
+  METAL_DEFER_DECREF_BYTES = 0;
+  for (u32 i = 0; i < n; i++) {
+    metal_buf_decref(METAL_DEFER_DECREFS[i]);
+  }
+  metal_record_memory_peak();
 }
 
 static void metal_dispatch_begin(void) {
@@ -122,6 +165,11 @@ static int metal_init(void) {
   METAL_FREELIST_LEN = 0;
   METAL_BATCH_CMD    = nil;
   METAL_BATCH_DEPTH  = 0;
+  METAL_DEFER_DECREF_LEN = 0;
+  METAL_DEFER_DECREF_BYTES = 0;
+  METAL_PEAK_LIVE_BYTES = 0;
+  METAL_PEAK_RETAINED_BYTES = 0;
+  METAL_PEAK_DEFERRED_BYTES = 0;
   return 0;
 }
 
@@ -150,6 +198,67 @@ typedef struct {
 static MetalBuf METAL_BUFS[METAL_BUFS_CAP];
 static u32      METAL_BUFS_NEXT = 1;
 
+static u64 metal_freelist_bytes(void) {
+  u64 total = 0;
+  for (u32 i = 0; i < METAL_FREELIST_LEN; i++) {
+    u32 bid = METAL_FREELIST[i];
+    if (bid == 0 || bid >= METAL_BUFS_NEXT) continue;
+    if (METAL_BUFS[bid].buf == nil) continue;
+    if (METAL_BUFS[bid].refcount != 0) continue;
+    total += METAL_BUFS[bid].nbytes;
+  }
+  return total;
+}
+
+static void metal_record_memory_peak(void) {
+  u64 live = 0;
+  u64 retained = 0;
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].buf == nil) continue;
+    retained += METAL_BUFS[i].nbytes;
+    if (METAL_BUFS[i].refcount > 0) {
+      live += METAL_BUFS[i].nbytes;
+    }
+  }
+  if (live > METAL_PEAK_LIVE_BYTES) {
+    METAL_PEAK_LIVE_BYTES = live;
+  }
+  if (retained > METAL_PEAK_RETAINED_BYTES) {
+    METAL_PEAK_RETAINED_BYTES = retained;
+  }
+  if (METAL_DEFER_DECREF_BYTES > METAL_PEAK_DEFERRED_BYTES) {
+    METAL_PEAK_DEFERRED_BYTES = METAL_DEFER_DECREF_BYTES;
+  }
+}
+
+static void metal_freelist_trim(void) {
+  u64 limit = metal_freelist_limit_bytes();
+  u64 total = metal_freelist_bytes();
+  while (METAL_FREELIST_LEN > 0 && total > limit) {
+    u32 best_i = METAL_FREELIST_LEN;
+    u32 best_bid = 0;
+    u64 best_bytes = 0;
+    for (u32 i = 0; i < METAL_FREELIST_LEN; i++) {
+      u32 bid = METAL_FREELIST[i];
+      if (bid == 0 || bid >= METAL_BUFS_NEXT) continue;
+      if (METAL_BUFS[bid].buf == nil || METAL_BUFS[bid].refcount != 0) continue;
+      if (METAL_BUFS[bid].nbytes >= best_bytes) {
+        best_i = i;
+        best_bid = bid;
+        best_bytes = METAL_BUFS[bid].nbytes;
+      }
+    }
+    if (best_i == METAL_FREELIST_LEN || best_bid == 0 || best_bytes == 0) {
+      break;
+    }
+    METAL_FREELIST[best_i] = METAL_FREELIST[METAL_FREELIST_LEN - 1];
+    METAL_FREELIST_LEN--;
+    metal_buf_free(best_bid);
+    total = best_bytes >= total ? 0 : total - best_bytes;
+  }
+}
+
+
 // bm4c: Metal mirror of CPU's free-list (cpu_buf_freelist_push /
 // cpu_buf_freelist_try_pop).  Recycles MTLBuffer slots by exact
 // nbytes match; the underlying MTLBuffer object survives in the
@@ -163,6 +272,8 @@ static int metal_buf_freelist_push_impl(u32 buf_id) {
   if (METAL_BUFS[buf_id].buf == nil) return 0;
   METAL_FREELIST[METAL_FREELIST_LEN++] = buf_id;
   METAL_BUFS[buf_id].refcount = 0;   // stop counting in live bytes
+  metal_freelist_trim();
+  metal_record_memory_peak();
   return 1;
 }
 
@@ -182,6 +293,7 @@ static u32 metal_buf_freelist_try_pop(u64 nbytes) {
     // Zero shared-mode contents so the recycled slot looks fresh.
     memset([METAL_BUFS[bid].buf contents], 0, (size_t)nbytes);
     METAL_BUFS[bid].refcount = 1;
+    metal_record_memory_peak();
     return bid;
   }
   return 0;   // miss
@@ -189,6 +301,11 @@ static u32 metal_buf_freelist_try_pop(u64 nbytes) {
 
 static u32 metal_buf_alloc(u64 nbytes) {
   if (METAL_DEVICE == nil) return 0;
+  u64 limit = metal_defer_limit_bytes();
+  if (METAL_DEFER_DECREF_LEN > 0
+      && (limit == 0 || METAL_DEFER_DECREF_BYTES + nbytes > limit)) {
+    metal_dispatch_flush();
+  }
   // bm4c: free-list lookup first.  Recycles a matching-size
   // MTLBuffer slot if available; falls through to fresh
   // newBufferWithLength on miss.
@@ -219,6 +336,7 @@ static u32 metal_buf_alloc(u64 nbytes) {
     METAL_BUFS[id].refcount = 0;
     return 0;
   }
+  metal_record_memory_peak();
   return id;
 }
 
@@ -233,11 +351,13 @@ static void metal_buf_free(u32 buf_id) {
   METAL_BUFS[buf_id].buf      = nil;
   METAL_BUFS[buf_id].nbytes   = 0;
   METAL_BUFS[buf_id].refcount = 0;
+  metal_record_memory_peak();
 }
 
 static void metal_buf_incref(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
   METAL_BUFS[buf_id].refcount++;
+  metal_record_memory_peak();
 }
 
 static void metal_buf_decref(u32 buf_id) {
@@ -249,6 +369,29 @@ static void metal_buf_decref(u32 buf_id) {
   if (--METAL_BUFS[buf_id].refcount != 0) return;
   if (!metal_buf_freelist_push_impl(buf_id)) {
     metal_buf_free(buf_id);
+  }
+}
+
+static void metal_buf_decref_after_batch(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  if (METAL_BATCH_DEPTH == 0 && METAL_BATCH_CMD == nil) {
+    metal_buf_decref(buf_id);
+    return;
+  }
+  u64 reclaim_bytes = METAL_BUFS[buf_id].refcount == 1
+      ? METAL_BUFS[buf_id].nbytes
+      : 0;
+  if (METAL_DEFER_DECREF_LEN >= METAL_DEFER_DECREF_CAP) {
+    metal_dispatch_flush();
+    metal_buf_decref(buf_id);
+    return;
+  }
+  METAL_DEFER_DECREFS[METAL_DEFER_DECREF_LEN++] = buf_id;
+  METAL_DEFER_DECREF_BYTES += reclaim_bytes;
+  metal_record_memory_peak();
+  u64 limit = metal_defer_limit_bytes();
+  if (limit == 0 || METAL_DEFER_DECREF_BYTES >= limit) {
+    metal_dispatch_flush();
   }
 }
 
@@ -311,6 +454,50 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
   if (refcount_out) *refcount_out = METAL_BUFS[i].refcount;
 }
 
+u64 thvm_metal_live_bytes(void) {
+  u64 total = 0;
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].buf != nil && METAL_BUFS[i].refcount > 0) {
+      total += METAL_BUFS[i].nbytes;
+    }
+  }
+  return total;
+}
+
+u64 thvm_metal_retained_bytes(void) {
+  u64 total = 0;
+  for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].buf != nil) {
+      total += METAL_BUFS[i].nbytes;
+    }
+  }
+  return total;
+}
+
+u64 thvm_metal_deferred_bytes(void) {
+  return METAL_DEFER_DECREF_BYTES;
+}
+
+u32 thvm_metal_deferred_len(void) {
+  return METAL_DEFER_DECREF_LEN;
+}
+
+u32 thvm_metal_freelist_len(void) {
+  return METAL_FREELIST_LEN;
+}
+
+u64 thvm_metal_peak_live_bytes(void) {
+  return METAL_PEAK_LIVE_BYTES;
+}
+
+u64 thvm_metal_peak_retained_bytes(void) {
+  return METAL_PEAK_RETAINED_BYTES;
+}
+
+u64 thvm_metal_peak_deferred_bytes(void) {
+  return METAL_PEAK_DEFERRED_BYTES;
+}
+
 // Per-(opcode, dtype) pipeline cache.  Defined here so metal_shutdown
 // can clear it before the MTLLibrary it points into goes away; the
 // metal_pipeline_for accessor + on-demand fill live with the rest of
@@ -329,6 +516,11 @@ static void metal_shutdown(void) {
   metal_dispatch_flush();
   METAL_BATCH_DEPTH = 0;
   METAL_FREELIST_LEN = 0;
+  METAL_DEFER_DECREF_LEN = 0;
+  METAL_DEFER_DECREF_BYTES = 0;
+  METAL_PEAK_LIVE_BYTES = 0;
+  METAL_PEAK_RETAINED_BYTES = 0;
+  METAL_PEAK_DEFERRED_BYTES = 0;
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     METAL_BUFS[i].buf      = nil;
     METAL_BUFS[i].nbytes   = 0;
@@ -595,6 +787,43 @@ static int metal_try_cpu_small_add(KernelEntry *ke,
       }
     }
     out[i] = vals[ke->n_ops - 1];
+  }
+  return 1;
+}
+
+static int metal_try_alias_reshape(KernelEntry *ke,
+                                   u32 *in_buf_ids,
+                                   u32 out_buf_id) {
+  if (ke == NULL || ke->n_ops != 1 || ke->output_tid == 0
+      || ke->output_tid >= TENS_NEXT) {
+    return 0;
+  }
+  KProgOp const *p = &ke->program[0];
+  if (p->opcode != UOP_RESHAPE || p->n_src != 1
+      || !KSRC_IS_INPUT(p->src[0])) {
+    return 0;
+  }
+  u32 slot = KSRC_INDEX(p->src[0]);
+  if (slot >= ke->n_inputs || p->numel != ke->output_numel
+      || ke->input_numels[slot] != ke->output_numel) {
+    return 0;
+  }
+  u32 in_buf_id = in_buf_ids[slot];
+  if (in_buf_id == 0 || in_buf_id >= METAL_BUFS_NEXT
+      || METAL_BUFS[in_buf_id].buf == nil) {
+    return 0;
+  }
+  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT
+      || METAL_BUFS[out_buf_id].buf == nil) {
+    return 0;
+  }
+  if (in_buf_id == out_buf_id) {
+    return 1;
+  }
+  metal_buf_incref(in_buf_id);
+  TENS[ke->output_tid].buf_id = in_buf_id;
+  if (!metal_buf_freelist_push_impl(out_buf_id)) {
+    metal_buf_free(out_buf_id);
   }
   return 1;
 }
@@ -916,6 +1145,11 @@ static int metal_specialized_diagnostics_enabled(void) {
   return e != NULL && e[0] == '1';
 }
 
+static int metal_cpu_small_add_enabled(void) {
+  char const *e = getenv("THVM_METAL_CPU_SMALL_ADD");
+  return e != NULL && e[0] == '1';
+}
+
 static id<MTLComputePipelineState> metal_gemm_pipeline(u32 tile) {
   u32 idx = 0;
   if (!metal_gemm_tile_index(tile, &idx)) {
@@ -1209,6 +1443,11 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
 
+  if (kprog_supported && metal_try_alias_reshape(ke, in_buf_ids, out_buf_id)) {
+    cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
+    return 0;
+  }
+
   if (kprog_supported && metal_specialized_diagnostics_enabled()) {
     if (metal_try_conv2d_flat(ke, in_buf_ids, out_buf_id)) {
       cg_profile_record(kid, KDISPATCH_METAL_CONV, cg_now_us() - t0);
@@ -1221,7 +1460,8 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     return 0;
   }
 
-  if (kprog_supported && metal_try_cpu_small_add(ke, in_buf_ids, out_buf_id)) {
+  if (kprog_supported && metal_cpu_small_add_enabled()
+      && metal_try_cpu_small_add(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
     return 0;
   }
@@ -1273,7 +1513,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(td->dtype, numel));
       if (tmp_id == 0) {
         for (u32 k = 0; k < i; k++)
-          if (temp_buf_ids[k]) metal_buf_decref(temp_buf_ids[k]);
+          if (temp_buf_ids[k]) metal_buf_decref_after_batch(temp_buf_ids[k]);
         return -1;
       }
       f32 *src = (f32 *)[METAL_BUFS[ib].buf contents];
@@ -1299,10 +1539,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
                               tile_groups_x, tile_threads_x)) {
       metal_submit_if_standalone(tile_cmd);
       for (u32 i = 0; i < ke->n_inputs; i++) {
-        if (temp_buf_ids[i]) { metal_dispatch_flush(); break; }
-      }
-      for (u32 i = 0; i < ke->n_inputs; i++) {
-        if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
+        if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
       }
       cg_profile_record(kid, KDISPATCH_METAL_TILE, cg_now_us() - t0);
       return 0;
@@ -1311,7 +1548,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
 
   if (!kprog_supported) {
     for (u32 i = 0; i < ke->n_inputs; i++) {
-      if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
+      if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
     }
     return -1;
   }
@@ -1327,10 +1564,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     if (metal_jit_encode(ke, jit_src_bufs, outBuf, jit_cmd)) {
       metal_submit_if_standalone(jit_cmd);
       for (u32 i = 0; i < ke->n_inputs; i++) {
-        if (temp_buf_ids[i]) { metal_dispatch_flush(); break; }
-      }
-      for (u32 i = 0; i < ke->n_inputs; i++) {
-        if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
+        if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
       }
       cg_profile_record(kid, KDISPATCH_METAL_JIT, cg_now_us() - t0);
       return 0;
@@ -1404,21 +1638,12 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     metal_submit_if_standalone(cmd);
   }
 
-  if (METAL_BATCH_DEPTH > 0) {
-    for (u32 i = 0; i < ke->n_ops; i++) {
-      if (inter_buf_ids[i]) { metal_dispatch_flush(); break; }
-    }
-    for (u32 i = 0; i < ke->n_inputs; i++) {
-      if (temp_buf_ids[i]) { metal_dispatch_flush(); break; }
-    }
-  }
-
   // Cleanup: drop intermediate Metal buffers + view-pre-mat temps.
   for (u32 i = 0; i < ke->n_ops; i++) {
-    if (inter_buf_ids[i]) metal_buf_decref(inter_buf_ids[i]);
+    if (inter_buf_ids[i]) metal_buf_decref_after_batch(inter_buf_ids[i]);
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (temp_buf_ids[i]) metal_buf_decref(temp_buf_ids[i]);
+    if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
   }
   if (rc == 0) cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
   return rc;
