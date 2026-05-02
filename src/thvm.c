@@ -197,6 +197,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "tensor/incref.c"
 #include "tensor/decref.c"
 #include "tensor/release.c"
+#include "tensor/mark_buf_preserved.c"
 #include "tensor/view_of.c"
 
 // === uop/ ===

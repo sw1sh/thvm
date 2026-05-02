@@ -3,7 +3,7 @@
 //
 // `mark_heap_rooted_preserve()` walks the live dyn heap range
 // [0, HEAP_NEXT) and marks every TenDesc reachable from a
-// TAG_TEN cell as preserved (via cpu_buf_mark_preserved).
+// TAG_TEN cell as preserved on its owning backend.
 // This is a strict superset of the bufs reachable from the
 // result tensor's producer chain that mark_preserved_chain
 // catches today, in two important ways:
@@ -36,8 +36,6 @@ fn void mark_heap_rooted_preserve(void) {
     Term r = term_resolve(t);
     if (term_tag(r) != TAG_TEN) continue;
     u32 tid = (u32)term_val(r);
-    if (tid == 0 || tid >= TENS_NEXT) continue;
-    u32 bid = TENS[tid].buf_id;
-    if (bid != 0) cpu_buf_mark_preserved(bid);
+    tensor_mark_buf_preserved(tid);
   }
 }

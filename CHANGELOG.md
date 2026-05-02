@@ -6,6 +6,19 @@ dated section.
 
 ## Unreleased
 
+### Fixed: rollback transient Metal buffers after each realize
+
+Metal buffers allocated after a realize boundary are now rolled back
+with the same root-preservation discipline as CPU buffers.  GC root
+marking preserves tensor storage through the owning backend, and the
+Metal backend can drop or freelist unrooted post-boundary buffers after
+flushing outstanding command buffers.  A bounded BS=32
+`beautiful_mnist` Metal+tile probe improved from about `2.6s` per step
+with `~9.8GB` live Metal storage to about `417ms` per step with
+`~249MB` live storage after the timed window; larger sweeps remain
+blocked until the remaining fusion gaps are closed and memory profiles
+stay bounded.
+
 ### Changed: make Metal memory pressure observable before sweeping
 
 `TMetalBufSummary[]` now reports Metal live bytes, retained bytes,

@@ -25,6 +25,10 @@ extern u32  thvm_metal_freelist_len(void);
 extern u64  thvm_metal_peak_live_bytes(void);
 extern u64  thvm_metal_peak_retained_bytes(void);
 extern u64  thvm_metal_peak_deferred_bytes(void);
+extern u32  thvm_metal_buf_pool_begin(void);
+extern void thvm_metal_buf_pool_rollback_with_preserve(u32 wm);
+extern void thvm_metal_buf_mark_preserved(u32 buf_id);
+extern void thvm_metal_buf_clear_preserved(u32 wm);
 
 static int metal_available(void) {
   setenv("THVM_BACKEND", "metal", 1);
@@ -744,6 +748,35 @@ int main(void) {
     CHECK_EQ(thvm_metal_live_bytes(), 0);
     CHECK_EQ(thvm_metal_retained_bytes(), 0);
     CHECK_EQ(thvm_metal_freelist_len(), 0);
+  }
+  thvm_free();
+  unsetenv("THVM_METAL_FREELIST_BYTES");
+
+  TEST_BEGIN("metal-real/pool-rollback-preserves-marked-root");
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_METAL_FREELIST_BYTES", "0", 1);
+  thvm_init();
+  {
+    Shape shape = {0};
+    shape.ndim = 1;
+    shape.dims[0] = 4;
+    u32 wm = thvm_metal_buf_pool_begin();
+    u32 keep_tid = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    u32 drop_tid = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    CHECK(keep_tid > 0 && drop_tid > 0);
+    CHECK_EQ(thvm_metal_live_bytes(), 32);
+
+    Term keep = term_new(0, TAG_TEN, DT_FP32, keep_tid);
+    mark_gc_preserve(keep);
+    thvm_metal_buf_pool_rollback_with_preserve(wm);
+    thvm_metal_buf_clear_preserved(wm);
+
+    CHECK_EQ(thvm_metal_live_bytes(), 16);
+    CHECK_EQ(thvm_metal_retained_bytes(), 16);
+    CHECK_EQ(thvm_metal_freelist_len(), 0);
+    f32 tmp[4] = {0};
+    CHECK_EQ(METAL_BACKEND.buf_read(TENS[keep_tid].buf_id, tmp, sizeof(tmp)), 0);
+    CHECK_EQ(METAL_BACKEND.buf_read(TENS[drop_tid].buf_id, tmp, sizeof(tmp)), -1);
   }
   thvm_free();
   unsetenv("THVM_METAL_FREELIST_BYTES");

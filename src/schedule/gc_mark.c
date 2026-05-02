@@ -18,10 +18,7 @@ fn void gc_mark_term(Term t, u8 *heap_visited) {
   switch (tag) {
     case TAG_TEN: {
       u32 tid = (u32)v;
-      if (tid > 0 && tid < TENS_NEXT) {
-        u32 bid = TENS[tid].buf_id;
-        if (bid != 0) cpu_buf_mark_preserved(bid);
-      }
+      tensor_mark_buf_preserved(tid);
       return;
     }
     case TAG_UOP: {

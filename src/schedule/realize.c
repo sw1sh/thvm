@@ -58,7 +58,8 @@ fn Term thvm_realize(Term expr) {
   if (term_tag(resolved) == TAG_CTR) return thvm_realize_many(resolved);
 
   grad_memo_begin_realize();
-  u32 wm = cpu_buf_pool_begin();
+  u32 cpu_wm   = cpu_buf_pool_begin();
+  u32 metal_wm = thvm_metal_buf_pool_begin();
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
 
@@ -114,9 +115,11 @@ fn Term thvm_realize(Term expr) {
   // find pending UOPs without the heap-rooted overlay.
   mark_gc_preserve(res);
 
-  cpu_buf_pool_rollback_with_preserve(wm);
-  cpu_buf_clear_preserved(wm);
-  cpu_buf_clear_freeable(wm);
+  cpu_buf_pool_rollback_with_preserve(cpu_wm);
+  thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
+  cpu_buf_clear_preserved(cpu_wm);
+  cpu_buf_clear_freeable(cpu_wm);
+  thvm_metal_buf_clear_preserved(metal_wm);
 
   // Auto-trigger Cheney collection once the dyn heap crosses a
   // configurable fraction of from-space.  The result Term is added
@@ -183,7 +186,8 @@ fn Term thvm_realize_many(Term ctr_term) {
   if (n == 0) return ctr_term;
 
   grad_memo_begin_realize();
-  u32 wm = cpu_buf_pool_begin();
+  u32 cpu_wm   = cpu_buf_pool_begin();
+  u32 metal_wm = thvm_metal_buf_pool_begin();
   kernel_fire_scope_begin();
   backend_dispatch_begin_all();
   u32 kn_at_call_start = KERNELS_NEXT;
@@ -225,9 +229,11 @@ fn Term thvm_realize_many(Term ctr_term) {
   u32 cn = term_ctr_n(res);
   for (u32 i = 0; i < cn && i < 256; i++) mark_gc_preserve(term_ctr_at(res, i));
 
-  cpu_buf_pool_rollback_with_preserve(wm);
-  cpu_buf_clear_preserved(wm);
-  cpu_buf_clear_freeable(wm);
+  cpu_buf_pool_rollback_with_preserve(cpu_wm);
+  thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
+  cpu_buf_clear_preserved(cpu_wm);
+  cpu_buf_clear_freeable(cpu_wm);
+  thvm_metal_buf_clear_preserved(metal_wm);
 
   if (gc_enabled()) {
     static int gc_disabled_env = -1;

@@ -193,6 +193,7 @@ typedef struct {
   id<MTLBuffer> buf;
   u64           nbytes;
   u32           refcount;
+  u8            preserved;
 } MetalBuf;
 
 static MetalBuf METAL_BUFS[METAL_BUFS_CAP];
@@ -272,6 +273,7 @@ static int metal_buf_freelist_push_impl(u32 buf_id) {
   if (METAL_BUFS[buf_id].buf == nil) return 0;
   METAL_FREELIST[METAL_FREELIST_LEN++] = buf_id;
   METAL_BUFS[buf_id].refcount = 0;   // stop counting in live bytes
+  METAL_BUFS[buf_id].preserved = 0;
   metal_freelist_trim();
   metal_record_memory_peak();
   return 1;
@@ -293,6 +295,7 @@ static u32 metal_buf_freelist_try_pop(u64 nbytes) {
     // Zero shared-mode contents so the recycled slot looks fresh.
     memset([METAL_BUFS[bid].buf contents], 0, (size_t)nbytes);
     METAL_BUFS[bid].refcount = 1;
+    METAL_BUFS[bid].preserved = 0;
     metal_record_memory_peak();
     return bid;
   }
@@ -330,6 +333,7 @@ static u32 metal_buf_alloc(u64 nbytes) {
                                                       options:MTLResourceStorageModeShared];
   METAL_BUFS[id].nbytes   = nbytes;
   METAL_BUFS[id].refcount = 1;
+  METAL_BUFS[id].preserved = 0;
   if (METAL_BUFS[id].buf == nil) {
     fprintf(stderr, "thvm: metal_buf_alloc -- failed to allocate %llu bytes\n",
             (unsigned long long)nbytes);
@@ -351,6 +355,7 @@ static void metal_buf_free(u32 buf_id) {
   METAL_BUFS[buf_id].buf      = nil;
   METAL_BUFS[buf_id].nbytes   = 0;
   METAL_BUFS[buf_id].refcount = 0;
+  METAL_BUFS[buf_id].preserved = 0;
   metal_record_memory_peak();
 }
 
@@ -454,6 +459,38 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
   if (refcount_out) *refcount_out = METAL_BUFS[i].refcount;
 }
 
+u32 thvm_metal_buf_pool_begin(void) {
+  return METAL_BUFS_NEXT;
+}
+
+void thvm_metal_buf_mark_preserved(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  if (METAL_BUFS[buf_id].buf == nil) return;
+  METAL_BUFS[buf_id].preserved = 1;
+}
+
+void thvm_metal_buf_pool_rollback_with_preserve(u32 wm) {
+  if (wm < 1) wm = 1;
+  if (wm > METAL_BUFS_NEXT) return;
+  metal_dispatch_flush();
+  for (u32 i = wm; i < METAL_BUFS_NEXT; i++) {
+    if (METAL_BUFS[i].preserved) continue;
+    if (METAL_BUFS[i].buf == nil) continue;
+    if (METAL_BUFS[i].refcount == 0) continue;
+    if (!metal_buf_freelist_push_impl(i)) {
+      metal_buf_free(i);
+    }
+  }
+  metal_record_memory_peak();
+}
+
+void thvm_metal_buf_clear_preserved(u32 wm) {
+  if (wm < 1) wm = 1;
+  for (u32 i = wm; i < METAL_BUFS_NEXT; i++) {
+    METAL_BUFS[i].preserved = 0;
+  }
+}
+
 u64 thvm_metal_live_bytes(void) {
   u64 total = 0;
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
@@ -525,6 +562,7 @@ static void metal_shutdown(void) {
     METAL_BUFS[i].buf      = nil;
     METAL_BUFS[i].nbytes   = 0;
     METAL_BUFS[i].refcount = 0;
+    METAL_BUFS[i].preserved = 0;
   }
   METAL_BUFS_NEXT = 1;
   // Drop every cached PSO -- they reference the MTLLibrary we're

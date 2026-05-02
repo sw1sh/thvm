@@ -103,6 +103,19 @@ Use `RetainedBytes` and `PeakRetainedBytes` to diagnose OS memory
 pressure.  `LiveBytes` can look healthy while the backend still holds a
 large freelist.
 
+Like CPU, Metal now has a per-realize rollback boundary:
+
+- `thvm_metal_buf_pool_begin()`
+- `thvm_metal_buf_pool_rollback_with_preserve(wm)`
+- `mark_gc_preserve(res)`
+
+The root marker is backend-aware: every reachable `TAG_TEN` preserves
+its owning backend buffer.  Metal rollback first flushes outstanding
+dispatch, then drops or freelists unpreserved buffers allocated after
+the boundary.  This is still conservative: it only reclaims storage
+that is no longer rooted by the heap/result chain, and it does not
+enable speculative planner reuse for Metal.
+
 ## Metal Batch Retention
 
 Metal dispatch batching is enabled by default:
@@ -255,6 +268,8 @@ Expected properties for a healthy small run:
   repeated steps.
 - `PeakRetainedBytes` should not grow without bound when the same TJit
   replay runs repeatedly.
+- BS=32 `beautiful_mnist` with one warmup and two timed steps should
+  finish with live Metal storage in the hundreds of MB, not many GB.
 
 Only after that should larger batch tests be considered.  A single
 large run that spikes memory pressure is not a valid tuning result.

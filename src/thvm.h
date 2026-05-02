@@ -1379,6 +1379,7 @@ fn u32  tensor_alloc  (Backend *b, Shape shape, u32 dtype);
 fn void tensor_incref (u32 id);
 fn void tensor_decref (u32 id);
 fn void tensor_release(u32 id);   // decref + buf_decref; free at 0
+fn void tensor_mark_buf_preserved(u32 id);
 fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
 // ShapeTracker chain extension: when a movement op can't be absorbed
 // into a single view (RESHAPE on non-contig src), the caller calls this
@@ -1399,6 +1400,14 @@ fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 // (reshape / permute / expand / pad / shrink / flip).
 fn View view_create(Shape shape);
 fn u32  shape_numel(Shape s);
+
+// Metal buffer pool hooks.  Real implementations live in
+// src/backend/metal/_.m; the C stub supplies no-op variants on
+// non-Metal builds so schedule code can call them unconditionally.
+u32  thvm_metal_buf_pool_begin(void);
+void thvm_metal_buf_pool_rollback_with_preserve(u32 wm);
+void thvm_metal_buf_mark_preserved(u32 buf_id);
+void thvm_metal_buf_clear_preserved(u32 wm);
 
 // === uop/ ===
 // Constructors for raw UOp graph nodes.  Each helper allocates the
