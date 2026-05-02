@@ -23,9 +23,9 @@
                        intermediates (GPU equivalent).
        SWAP            swap two global axis indices.
 
-   The C-side codegen consumer (cg_emit_variants per
-   docs/bench/phase10.md) is the Phase 14+ delivery; this demo
-   exercises the WL surface today.
+   The C-side codegen consumer is tracked in docs/bench/history.md
+   as part of the kernel-variant/autotune arc; this demo exercises
+   the WL surface today.
 
    Run from repo root:
        wolframscript wl/Examples/kernel-introspect.wls

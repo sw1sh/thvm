@@ -1,8 +1,9 @@
 // codegen/autotune.c -- per-program-shape opt benchmarker.
 //
 // Given a kernel, walk the proposer's candidates, time each variant
-// (n_runs back-to-back fires + min wallclock), pick the winner, and
-// leave the kernel's KernelAxes mutated to the winning opt.  Axes
+// (n_runs back-to-back fires + min wallclock), optionally expand the
+// best single opts into short sequences, pick the winner, and leave
+// the kernel's KernelAxes mutated to the winning opt sequence.  Axes
 // live on the shared KpCacheSlot (autotune knobs cached per-program-
 // shape), so the pick applies to every other kid with the same
 // KProgOp[] -- a training loop that emits one new kid per step
@@ -21,8 +22,23 @@
 // real wallclock; 5 is enough to separate small kernels from each
 // other against a ~10us-resolution clock.
 #define KAUTOTUNE_N_RUNS 5
-#define KAUTOTUNE_CACHE_VERSION 1
+#define KAUTOTUNE_CACHE_VERSION 2
 #define KAUTOTUNE_CACHE_PATH_CAP 1024
+#define KAUTOTUNE_MAX_CANDIDATES 16
+#define KAUTOTUNE_SEQ_MAX 4
+#define KAUTOTUNE_MAX_SEQS 64
+
+typedef struct {
+  u8   n;
+  KOpt opts[KAUTOTUNE_SEQ_MAX];
+} KOptSeq;
+
+typedef struct {
+  KOptSeq seq;
+  u64     us;
+} KOptSeqBench;
+
+static u32 kautotune_backend_id(KernelEntry const *ke);
 
 static u32 kautotune_n_runs(void) {
   char const *e = getenv("THVM_AUTOTUNE_RUNS");
@@ -37,6 +53,46 @@ static u32 kautotune_n_runs(void) {
     return 1000;
   }
   return (u32)n;
+}
+
+static u32 kautotune_env_u32(char const *name, u32 fallback, u32 max) {
+  char const *e = getenv(name);
+  if (e == NULL || e[0] == '\0') {
+    return fallback;
+  }
+  int n = atoi(e);
+  if (n <= 0) {
+    return fallback;
+  }
+  if ((u32)n > max) {
+    return max;
+  }
+  return (u32)n;
+}
+
+static int kautotune_metal_tile_enabled(void) {
+  char const *tile = getenv("THVM_TILE");
+  return tile != NULL && tile[0] == '1';
+}
+
+static u32 kautotune_default_depth(KernelEntry const *ke) {
+  if (kautotune_backend_id(ke) == 2 && kautotune_metal_tile_enabled()) {
+    TileConv2DInfo conv;
+    if (tile_analyze_conv2d_flat(ke, &conv)) {
+      return 2;
+    }
+  }
+  return 1;
+}
+
+static u32 kautotune_depth(KernelEntry const *ke) {
+  return kautotune_env_u32("THVM_AUTOTUNE_DEPTH",
+                           kautotune_default_depth(ke),
+                           KAUTOTUNE_SEQ_MAX);
+}
+
+static u32 kautotune_beam_width(void) {
+  return kautotune_env_u32("THVM_AUTOTUNE_BEAM", 2, 16);
 }
 
 static int kautotune_cache_disabled(void) {
@@ -105,7 +161,8 @@ static u64 kautotune_structural_key(KernelEntry const *ke) {
 }
 
 static u64 kautotune_cache_key(KernelEntry const *ke, KOpt const *candidates,
-                               u32 n_cand, u32 n_runs) {
+                               u32 n_cand, u32 n_runs, u32 depth,
+                               u32 beam_width) {
   u64 h = 0xcbf29ce484222325ULL;
   h = kautotune_hash_cstr(h, "thvm-autotune-cache");
   h = kautotune_hash_u64(h, KAUTOTUNE_CACHE_VERSION);
@@ -114,6 +171,8 @@ static u64 kautotune_cache_key(KernelEntry const *ke, KOpt const *candidates,
   h = kautotune_hash_u64(h, sizeof(KOpt));
   h = kautotune_hash_u64(h, kautotune_backend_id(ke));
   h = kautotune_hash_u64(h, n_runs);
+  h = kautotune_hash_u64(h, depth);
+  h = kautotune_hash_u64(h, beam_width);
   h = kautotune_hash_cstr(h, getenv("THVM_TILE"));
   h = kautotune_hash_cstr(h, getenv("THVM_METAL_SPECIALIZED"));
   h = kautotune_hash_u64(h, kautotune_structural_key(ke));
@@ -205,7 +264,8 @@ static int kautotune_cache_base_dir(char *out, size_t cap) {
 
 static int kautotune_cache_path(KernelEntry const *ke, KOpt const *candidates,
                                 u32 n_cand, u32 n_runs, char *out,
-                                size_t cap, u64 *out_key) {
+                                size_t cap, u64 *out_key, u32 depth,
+                                u32 beam_width) {
   char base[KAUTOTUNE_CACHE_PATH_CAP];
   if (!kautotune_cache_base_dir(base, sizeof(base))) {
     return 0;
@@ -223,7 +283,8 @@ static int kautotune_cache_path(KernelEntry const *ke, KOpt const *candidates,
   if (!kautotune_mkdir_p(dir)) {
     return 0;
   }
-  u64 key = kautotune_cache_key(ke, candidates, n_cand, n_runs);
+  u64 key = kautotune_cache_key(ke, candidates, n_cand, n_runs, depth,
+                                beam_width);
   n = snprintf(out, cap, "%s/%016llx.json", dir,
                (unsigned long long)key);
   if (n <= 0 || (size_t)n >= cap) {
@@ -239,22 +300,34 @@ static int kautotune_opt_equal(KOpt a, KOpt b) {
   return a.op == b.op && a.axis == b.axis && a.arg == b.arg;
 }
 
-static int kautotune_cached_opt_allowed(KOpt opt, KOpt const *candidates,
+static int kautotune_cached_seq_allowed(KOptSeq const *seq,
+                                        KOpt const *candidates,
                                         u32 n_cand) {
-  if (opt.op == KOP_NONE) {
+  if (seq == NULL || seq->n == 0) {
     return 1;
   }
-  for (u32 i = 0; i < n_cand; i++) {
-    if (kautotune_opt_equal(opt, candidates[i])) {
-      return 1;
+  if (seq->n > KAUTOTUNE_SEQ_MAX) {
+    return 0;
+  }
+  for (u32 s = 0; s < seq->n; s++) {
+    int found = 0;
+    for (u32 i = 0; i < n_cand; i++) {
+      if (kautotune_opt_equal(seq->opts[s], candidates[i])) {
+        found = 1;
+        break;
+      }
+    }
+    if (!found) {
+      return 0;
     }
   }
-  return 0;
+  return 1;
 }
 
 static int kautotune_cache_load(char const *path, u64 expected_key,
                                 u32 expected_backend, u32 expected_runs,
-                                KOpt *out_opt, u64 *out_us) {
+                                u32 expected_depth, u32 expected_beam,
+                                KOptSeq *out_seq, u64 *out_us) {
   FILE *f = fopen(path, "rb");
   if (f == NULL) {
     return 0;
@@ -262,26 +335,42 @@ static int kautotune_cache_load(char const *path, u64 expected_key,
   unsigned version = 0;
   unsigned backend = 0;
   unsigned runs    = 0;
-  unsigned op      = 0;
-  unsigned axis    = 0;
+  unsigned depth   = 0;
+  unsigned beam    = 0;
+  unsigned n_opts  = 0;
+  unsigned op[KAUTOTUNE_SEQ_MAX]   = {0};
+  unsigned axis[KAUTOTUNE_SEQ_MAX] = {0};
+  unsigned long long arg[KAUTOTUNE_SEQ_MAX] = {0};
   unsigned long long key     = 0;
-  unsigned long long arg     = 0;
   unsigned long long best_us = 0;
   int n = fscanf(f,
       "{\"version\":%u,\"key\":\"%llx\",\"backend\":%u,\"runs\":%u,"
-      "\"winner\":{\"op\":%u,\"axis\":%u,\"arg\":%llu},\"best_us\":%llu}",
-      &version, &key, &backend, &runs, &op, &axis, &arg, &best_us);
+      "\"depth\":%u,\"beam\":%u,\"n_opts\":%u,"
+      "\"opts\":[%u,%u,%llu,%u,%u,%llu,%u,%u,%llu,%u,%u,%llu],"
+      "\"best_us\":%llu}",
+      &version, &key, &backend, &runs, &depth, &beam, &n_opts,
+      &op[0], &axis[0], &arg[0], &op[1], &axis[1], &arg[1],
+      &op[2], &axis[2], &arg[2], &op[3], &axis[3], &arg[3],
+      &best_us);
   fclose(f);
-  if (n != 8 || version != KAUTOTUNE_CACHE_VERSION
+  if (n != 20 || version != KAUTOTUNE_CACHE_VERSION
       || (u64)key != expected_key || backend != expected_backend
-      || runs != expected_runs || op > 255 || axis > 255
-      || arg > 0xFFFFFFFFULL) {
+      || runs != expected_runs || depth != expected_depth
+      || beam != expected_beam || n_opts > KAUTOTUNE_SEQ_MAX) {
     return 0;
   }
-  if (out_opt != NULL) {
-    out_opt->op   = (u8)op;
-    out_opt->axis = (u8)axis;
-    out_opt->arg  = (u32)arg;
+  KOptSeq seq = {0};
+  seq.n = (u8)n_opts;
+  for (u32 i = 0; i < n_opts; i++) {
+    if (op[i] > 255 || axis[i] > 255 || arg[i] > 0xFFFFFFFFULL) {
+      return 0;
+    }
+    seq.opts[i].op   = (u8)op[i];
+    seq.opts[i].axis = (u8)axis[i];
+    seq.opts[i].arg  = (u32)arg[i];
+  }
+  if (out_seq != NULL) {
+    *out_seq = seq;
   }
   if (out_us != NULL) {
     *out_us = (u64)best_us;
@@ -290,17 +379,32 @@ static int kautotune_cache_load(char const *path, u64 expected_key,
 }
 
 static void kautotune_cache_store(char const *path, u64 key, u32 backend_id,
-                                  u32 n_runs, KOpt best_opt, u64 best_us) {
+                                  u32 n_runs, u32 depth, u32 beam_width,
+                                  KOptSeq best_seq, u64 best_us) {
   FILE *f = fopen(path, "wb");
   if (f == NULL) {
     return;
   }
+  KOpt opt[KAUTOTUNE_SEQ_MAX] = {0};
+  u32 n = best_seq.n;
+  if (n > KAUTOTUNE_SEQ_MAX) {
+    n = KAUTOTUNE_SEQ_MAX;
+  }
+  for (u32 i = 0; i < n; i++) {
+    opt[i] = best_seq.opts[i];
+  }
   fprintf(f,
           "{\"version\":%u,\"key\":\"%016llx\",\"backend\":%u,\"runs\":%u,"
-          "\"winner\":{\"op\":%u,\"axis\":%u,\"arg\":%u},\"best_us\":%llu}\n",
+          "\"depth\":%u,\"beam\":%u,\"n_opts\":%u,"
+          "\"opts\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u],"
+          "\"best_us\":%llu}\n",
           KAUTOTUNE_CACHE_VERSION, (unsigned long long)key, backend_id,
-          n_runs, (unsigned)best_opt.op, (unsigned)best_opt.axis,
-          best_opt.arg, (unsigned long long)best_us);
+          n_runs, depth, beam_width, n,
+          (unsigned)opt[0].op, (unsigned)opt[0].axis, opt[0].arg,
+          (unsigned)opt[1].op, (unsigned)opt[1].axis, opt[1].arg,
+          (unsigned)opt[2].op, (unsigned)opt[2].axis, opt[2].arg,
+          (unsigned)opt[3].op, (unsigned)opt[3].axis, opt[3].arg,
+          (unsigned long long)best_us);
   fclose(f);
 }
 
@@ -343,6 +447,119 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
     .arg  = ke->axes->full_shape[opt.axis],
   };
   return axes_apply_opt(ke->axes, global);
+}
+
+static void kernel_bench_fire(u32 kid);
+
+static int kautotune_seq_has_op(KOptSeq const *seq, u8 op) {
+  for (u32 i = 0; seq != NULL && i < seq->n; i++) {
+    if (seq->opts[i].op == op) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int kautotune_seq_contains_opt(KOptSeq const *seq, KOpt opt) {
+  for (u32 i = 0; seq != NULL && i < seq->n; i++) {
+    if (kautotune_opt_equal(seq->opts[i], opt)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int kautotune_seq_equal(KOptSeq const *a, KOptSeq const *b) {
+  if (a == NULL || b == NULL || a->n != b->n) {
+    return 0;
+  }
+  for (u32 i = 0; i < a->n; i++) {
+    if (!kautotune_opt_equal(a->opts[i], b->opts[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int kautotune_seq_seen(KOptSeq const *seq, KOptSeq const *seen,
+                              u32 n_seen) {
+  for (u32 i = 0; i < n_seen; i++) {
+    if (kautotune_seq_equal(seq, &seen[i])) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int kautotune_seq_can_append(KOptSeq const *seq, KOpt opt) {
+  if (seq == NULL || seq->n >= KAUTOTUNE_SEQ_MAX) {
+    return 0;
+  }
+  if (kautotune_seq_contains_opt(seq, opt)) {
+    return 0;
+  }
+  if (opt.op == KOP_TC) {
+    return seq->n == 0;
+  }
+  if ((opt.op == KOP_LOCAL || opt.op == KOP_GROUP)
+      && kautotune_seq_has_op(seq, opt.op)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int kautotune_apply_seq(KernelEntry *ke, KOptSeq const *seq) {
+  if (ke == NULL || ke->axes == NULL || seq == NULL) {
+    return 0;
+  }
+  if (seq->n == 0) {
+    return 1;
+  }
+  for (u32 i = 0; i < seq->n; i++) {
+    if (!kernel_apply_tune_candidate(ke, seq->opts[i])) {
+      return 0;
+    }
+  }
+  tile_sync_from_scalar(ke);
+  return 1;
+}
+
+static void kautotune_insert_top(KOptSeqBench *top, u32 *n_top, u32 cap,
+                                 KOptSeq seq, u64 us) {
+  if (cap == 0 || top == NULL || n_top == NULL) {
+    return;
+  }
+  u32 n = *n_top;
+  if (n < cap) {
+    top[n].seq = seq;
+    top[n].us  = us;
+    n++;
+  } else if (us < top[n - 1].us) {
+    top[n - 1].seq = seq;
+    top[n - 1].us  = us;
+  } else {
+    return;
+  }
+  for (u32 i = n - 1; i > 0 && top[i].us < top[i - 1].us; i--) {
+    KOptSeqBench tmp = top[i - 1];
+    top[i - 1] = top[i];
+    top[i] = tmp;
+  }
+  *n_top = n;
+}
+
+static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
+                               u32 n_runs, u64 *out_us) {
+  axes_reset_to_default(ke);
+  if (!kautotune_apply_seq(ke, seq)) {
+    axes_reset_to_default(ke);
+    return 0;
+  }
+  kernel_bench_fire(kid);
+  if (out_us != NULL) {
+    *out_us = kernel_bench_us(kid, n_runs);
+  }
+  return 1;
 }
 
 static void kernel_bench_fire(u32 kid) {
@@ -464,7 +681,7 @@ fn int kernel_autotune(u32 kid) {
     return 0;
   }
 
-  KOpt candidates[16];
+  KOpt candidates[KAUTOTUNE_MAX_CANDIDATES];
   u32  n_cand = kernel_opts_propose(ke, candidates,
                                     sizeof(candidates)/sizeof(*candidates));
   if (n_cand == 0) {
@@ -476,29 +693,29 @@ fn int kernel_autotune(u32 kid) {
     return 0;
   }
 
-  u32 n_runs = kautotune_n_runs();
+  u32 n_runs    = kautotune_n_runs();
+  u32 depth     = kautotune_depth(ke);
+  u32 beam_width = kautotune_beam_width();
   u32 backend_id = kautotune_backend_id(ke);
   char cache_path[KAUTOTUNE_CACHE_PATH_CAP];
   u64  cache_key = 0;
   int  cache_ready = kautotune_cache_path(ke, candidates, n_cand, n_runs,
                                           cache_path, sizeof(cache_path),
-                                          &cache_key);
+                                          &cache_key, depth, beam_width);
   if (cache_ready) {
-    KOpt cached_opt = { KOP_NONE, 0, 0 };
-    u64  cached_us  = 0;
+    KOptSeq cached_seq = {0};
+    u64     cached_us  = 0;
     if (kautotune_cache_load(cache_path, cache_key, backend_id, n_runs,
-                             &cached_opt, &cached_us)
-        && kautotune_cached_opt_allowed(cached_opt, candidates, n_cand)) {
+                             depth, beam_width, &cached_seq, &cached_us)
+        && kautotune_cached_seq_allowed(&cached_seq, candidates, n_cand)) {
       (void)cached_us;
       ke->axes->autotuned = 1;
       axes_reset_to_default(ke);
-      if (cached_opt.op != KOP_NONE) {
-        if (!kernel_apply_tune_candidate(ke, cached_opt)) {
-          axes_reset_to_default(ke);
-        } else {
-          tile_sync_from_scalar(ke);
+      if (cached_seq.n != 0) {
+        if (kautotune_apply_seq(ke, &cached_seq)) {
           return 1;
         }
+        axes_reset_to_default(ke);
       } else {
         tile_sync_from_scalar(ke);
         return 0;
@@ -511,42 +728,94 @@ fn int kernel_autotune(u32 kid) {
   // kernel path.  axes_reset_to_default preserves the flag.
   ke->axes->autotuned = 1;
 
-  // Baseline (no opts).
+  // Baseline (no opts).  Warm the JIT so the first variant doesn't
+  // pay the compile cost alone -- compile each before timing the
+  // bench loop, so the measurements compare hot kernels.
   axes_reset_to_default(ke);
-  // Warm the JIT so the first variant doesn't pay the compile cost
-  // alone -- compile each before timing the bench loop, so the
-  // measurements compare hot kernels.
   kernel_bench_fire(kid);
   u64 best_us = kernel_bench_us(kid, n_runs);
-  KOpt best_opt = { KOP_NONE, 0, 0 };
+  KOptSeq best_seq = {0};
+
+  if (depth == 0) {
+    depth = 1;
+  }
+  if (beam_width == 0) {
+    beam_width = 1;
+  }
+  if (beam_width > KAUTOTUNE_MAX_SEQS) {
+    beam_width = KAUTOTUNE_MAX_SEQS;
+  }
+
+  KOptSeqBench beam[KAUTOTUNE_MAX_SEQS];
+  KOptSeqBench next[KAUTOTUNE_MAX_SEQS];
+  KOptSeq      seen[KAUTOTUNE_MAX_SEQS];
+  u32 n_beam = 0;
+  u32 n_seen = 0;
 
   for (u32 i = 0; i < n_cand; i++) {
-    axes_reset_to_default(ke);
-    if (!kernel_apply_tune_candidate(ke, candidates[i])) continue;
-    kernel_bench_fire(kid);                     // JIT warm
-    u64 us = kernel_bench_us(kid, n_runs);
+    KOptSeq seq = {0};
+    seq.n = 1;
+    seq.opts[0] = candidates[i];
+    seen[n_seen++] = seq;
+    u64 us = 0;
+    if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &us)) {
+      continue;
+    }
     if (us < best_us) {
       best_us  = us;
-      best_opt = candidates[i];
+      best_seq = seq;
+    }
+    kautotune_insert_top(beam, &n_beam, beam_width, seq, us);
+  }
+
+  for (u32 d = 2; d <= depth && n_beam > 0; d++) {
+    u32 n_next = 0;
+    for (u32 b = 0; b < n_beam; b++) {
+      for (u32 i = 0; i < n_cand; i++) {
+        if (!kautotune_seq_can_append(&beam[b].seq, candidates[i])) {
+          continue;
+        }
+        KOptSeq seq = beam[b].seq;
+        seq.opts[seq.n++] = candidates[i];
+        if (kautotune_seq_seen(&seq, seen, n_seen)) {
+          continue;
+        }
+        if (n_seen < KAUTOTUNE_MAX_SEQS) {
+          seen[n_seen++] = seq;
+        }
+        u64 us = 0;
+        if (!kautotune_bench_seq(kid, ke, &seq, n_runs, &us)) {
+          continue;
+        }
+        if (us < best_us) {
+          best_us  = us;
+          best_seq = seq;
+        }
+        kautotune_insert_top(next, &n_next, beam_width, seq, us);
+      }
+    }
+    memcpy(beam, next, (size_t)n_next * sizeof(*beam));
+    n_beam = n_next;
+    if (n_seen >= KAUTOTUNE_MAX_SEQS) {
+      break;
     }
   }
 
   // Re-apply the winner (or leave baseline if nothing beat it).
   // `autotuned` was set at the start; reset_to_default preserves it.
   axes_reset_to_default(ke);
-  if (best_opt.op != KOP_NONE) {
-    int applied = kernel_apply_tune_candidate(ke, best_opt);
-    tile_sync_from_scalar(ke);
+  if (best_seq.n != 0) {
+    int applied = kautotune_apply_seq(ke, &best_seq);
     if (applied && cache_ready) {
       kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
-                            best_opt, best_us);
+                            depth, beam_width, best_seq, best_us);
     }
     return applied;
   }
   tile_sync_from_scalar(ke);
   if (cache_ready) {
     kautotune_cache_store(cache_path, cache_key, backend_id, n_runs,
-                          best_opt, best_us);
+                          depth, beam_width, best_seq, best_us);
   }
   return 0;
 }

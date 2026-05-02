@@ -491,7 +491,23 @@ static u32 tile_conv2d_threads_from_opts(KernelEntry const *ke) {
   return threads;
 }
 
-int tile_analyze_conv2d_flat(KernelEntry const *ke, TileConv2DInfo *out) {
+static u32 tile_conv2d_outputs_from_opts(KernelEntry const *ke) {
+  u32 outputs = 1;
+  if (ke == NULL || ke->axes == NULL) {
+    return outputs;
+  }
+  for (u32 i = 0; i < ke->axes->n_applied; i++) {
+    KOpt opt = ke->axes->applied_opts[i];
+    if (opt.op == KOP_UPCAST && opt.arg > 0 && opt.arg <= 16) {
+      outputs = opt.arg;
+    }
+  }
+  return outputs;
+}
+
+static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
+                                         TileConv2DInfo *out,
+                                         int allow_cin1) {
   if (ke == NULL || out == NULL || ke->n_inputs != 2 || ke->n_ops == 0
       || ke->program == NULL || ke->input_views == NULL) {
     return 0;
@@ -519,6 +535,11 @@ int tile_analyze_conv2d_flat(KernelEntry const *ke, TileConv2DInfo *out) {
   u32 h     = xv->shape.dims[1];
   u32 w     = xv->shape.dims[2];
   if (c_out == 0 || c_in == 0 || k == 0 || p == 0) {
+    return 0;
+  }
+  // The fused im2col graph degenerates at c_in==1 in a way this
+  // direct-strided template does not yet prove correct.
+  if (c_in == 1 && !allow_cin1) {
     return 0;
   }
   if (k % c_in != 0) {
@@ -573,7 +594,20 @@ int tile_analyze_conv2d_flat(KernelEntry const *ke, TileConv2DInfo *out) {
   out->x_stride1 = xv->strides[1];
   out->x_stride2 = xv->strides[2];
   out->threads   = tile_conv2d_threads_from_opts(ke);
+  out->outputs_per_thread = tile_conv2d_outputs_from_opts(ke);
   return 1;
+}
+
+int tile_analyze_conv2d_flat(KernelEntry const *ke, TileConv2DInfo *out) {
+  return tile_analyze_conv2d_flat_impl(ke, out, 0);
+}
+
+int tile_rejects_conv2d_flat_cin1(KernelEntry const *ke) {
+  TileConv2DInfo conv;
+  if (!tile_analyze_conv2d_flat_impl(ke, &conv, 1)) {
+    return 0;
+  }
+  return conv.c_in == 1;
 }
 
 static int tile_collect_axis_info(KernelEntry const *ke, u32 axis_id,

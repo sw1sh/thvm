@@ -338,6 +338,18 @@ static int rmt_collect_conv2d_info(KernelEntry const *ke,
   return out->threads > 0 && out->threads <= 256;
 }
 
+static int rmt_kprog_has_opcode(KernelEntry const *ke, u8 opcode) {
+  if (ke == NULL || ke->program == NULL) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    if (ke->program[i].opcode == opcode) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
                                  u32 *threads_x) {
   if (ke == NULL) {
@@ -349,8 +361,10 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
     if (total == 0 || total > 0xFFFFFFFFu) {
       return 0;
     }
+    u32 outputs = conv.outputs_per_thread ? conv.outputs_per_thread : 1;
+    u64 threads_total = (total + (u64)outputs - 1) / (u64)outputs;
     u32 threads = conv.threads;
-    u32 groups  = (u32)((total + (u64)threads - 1) / (u64)threads);
+    u32 groups  = (u32)((threads_total + (u64)threads - 1) / (u64)threads);
     if (groups_x != NULL) {
       *groups_x = groups;
     }
@@ -358,6 +372,12 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       *threads_x = threads;
     }
     return groups != 0;
+  }
+  if (tile_rejects_conv2d_flat_cin1(ke)) {
+    return 0;
+  }
+  if (rmt_kprog_has_opcode(ke, UOP_PAD)) {
+    return 0;
   }
   if (!tile_sync_from_scalar(ke)) {
     return 0;
@@ -409,12 +429,14 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 
 static char *rmt_emit_conv2d_flat(KernelEntry const *ke,
                                   TileConv2DInfo const *conv) {
-  CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
+  CgBuf b = { .buf = (char *)malloc(8192), .cap = 8192, .len = 0,
               .program_dtype = DT_FP32, .ke = ke };
   if (!b.buf) {
     return NULL;
   }
   cg_append(&b, "#include <metal_stdlib>\nusing namespace metal;\n\n");
+  cg_append(&b, "#define OUTS %uu\n\n",
+            conv->outputs_per_thread ? conv->outputs_per_thread : 1);
   cg_append(&b, "kernel void k(device float *out [[buffer(0)]],\n");
   cg_append(&b, "              device const float *in%u [[buffer(%u)]],\n",
             conv->w_input, conv->w_input + 1);
@@ -424,25 +446,30 @@ static char *rmt_emit_conv2d_flat(KernelEntry const *ke,
             ke->n_inputs + 1);
   cg_append(&b, "              uint gid [[thread_position_in_grid]]) {\n");
   cg_append(&b, "  uint total = (uint)(cfg[0] * cfg[8]);\n");
-  cg_append(&b, "  if (gid >= total) return;\n");
-  cg_append(&b, "  int co = (int)(gid / (uint)cfg[8]);\n");
-  cg_append(&b, "  int p = (int)(gid - (uint)co * (uint)cfg[8]);\n");
-  cg_append(&b, "  int ow = p %% cfg[7];\n");
-  cg_append(&b, "  int oh = p / cfg[7];\n");
-  cg_append(&b, "  float acc = 0.0f;\n");
-  cg_append(&b, "  for (int ci = 0; ci < cfg[1]; ci++) {\n");
-  cg_append(&b, "    for (int ki = 0; ki < cfg[4]; ki++) {\n");
-  cg_append(&b, "      for (int kj = 0; kj < cfg[5]; kj++) {\n");
-  cg_append(&b, "        int q = ((ci * cfg[4]) + ki) * cfg[5] + kj;\n");
-  cg_append(&b, "        int wi = cfg[9] + co * cfg[10] + q * cfg[11];\n");
-  cg_append(&b, "        int xi = cfg[12] + ci * cfg[13] + (oh + ki) * cfg[14]"
+  cg_append(&b, "  uint base = gid * OUTS;\n");
+  cg_append(&b, "  if (base >= total) return;\n");
+  cg_append(&b, "  for (uint oi = 0; oi < OUTS; oi++) {\n");
+  cg_append(&b, "    uint og = base + oi;\n");
+  cg_append(&b, "    if (og >= total) return;\n");
+  cg_append(&b, "    int co = (int)(og / (uint)cfg[8]);\n");
+  cg_append(&b, "    int p = (int)(og - (uint)co * (uint)cfg[8]);\n");
+  cg_append(&b, "    int ow = p %% cfg[7];\n");
+  cg_append(&b, "    int oh = p / cfg[7];\n");
+  cg_append(&b, "    float acc = 0.0f;\n");
+  cg_append(&b, "    for (int ci = 0; ci < cfg[1]; ci++) {\n");
+  cg_append(&b, "      for (int ki = 0; ki < cfg[4]; ki++) {\n");
+  cg_append(&b, "        for (int kj = 0; kj < cfg[5]; kj++) {\n");
+  cg_append(&b, "          int q = ((ci * cfg[4]) + ki) * cfg[5] + kj;\n");
+  cg_append(&b, "          int wi = cfg[9] + co * cfg[10] + q * cfg[11];\n");
+  cg_append(&b, "          int xi = cfg[12] + ci * cfg[13] + (oh + ki) * cfg[14]"
                 " + (ow + kj) * cfg[15];\n");
-  cg_append(&b, "        acc += in%u[wi] * in%u[xi];\n",
+  cg_append(&b, "          acc += in%u[wi] * in%u[xi];\n",
             conv->w_input, conv->x_input);
+  cg_append(&b, "        }\n");
   cg_append(&b, "      }\n");
   cg_append(&b, "    }\n");
+  cg_append(&b, "    out[og] = acc;\n");
   cg_append(&b, "  }\n");
-  cg_append(&b, "  out[gid] = acc;\n");
   cg_append(&b, "}\n");
   return b.buf;
 }
@@ -524,10 +551,10 @@ static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
   ScalarUop const *u = &ke->scalar_uops[op_id];
   switch (u->op) {
     case S_RANGE:
-      cg_append(b, "_v%u", op_id);
+      cg_append(b, "((int)_v%u)", op_id);
       return 1;
     case S_ICONST:
-      cg_append(b, "%uu", (u32)(i64)u->extra);
+      cg_append(b, "%d", (int)(i64)u->extra);
       return 1;
     case S_IADD:
     case S_ISUB:
@@ -561,7 +588,7 @@ static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       if (!rmt_emit_uint_expr(b, ke, u->src[1])) {
         return 0;
       }
-      cg_append(b, ") ? 1u : 0u)");
+      cg_append(b, ") ? 1 : 0)");
       return 1;
     case S_IWHERE:
       cg_append(b, "((");
@@ -869,6 +896,12 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
   TileConv2DInfo conv;
   if (rmt_collect_conv2d_info(ke, &conv)) {
     return rmt_emit_conv2d_flat(ke, &conv);
+  }
+  if (tile_rejects_conv2d_flat_cin1(ke)) {
+    return NULL;
+  }
+  if (rmt_kprog_has_opcode(ke, UOP_PAD)) {
+    return NULL;
   }
 
   CtKernelInfo info;

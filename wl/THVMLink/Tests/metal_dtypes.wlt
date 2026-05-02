@@ -107,7 +107,7 @@ VerificationTest[
 VerificationTest[
     (* Rank-1 TMatVec should promote through the generic TILE_MMA
        recognizer as GEMM with N=1.  This keeps the default path on
-       lowered primitives; the direct GEMV shader remains diagnostic. *)
+       lowered primitives. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result, oldBackend,
             oldSpecialized, restore},
@@ -147,8 +147,9 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* f32 matrix-vector diagnostic path is opt-in; the default path
-       should keep using the generic lowered graph. *)
+    (* The old direct GEMV diagnostic path is retired; even with
+       THVM_METAL_SPECIALIZED enabled, rank-1 TMatVec should keep
+       using the generic TILE_MMA/metal-gemm route. *)
     TInit[]; TReset[];
     Module[{ctx = TContextNew["metal"], result, oldSpecialized, restore},
         oldSpecialized = Environment["THVM_METAL_SPECIALIZED"];
@@ -168,10 +169,10 @@ VerificationTest[
         ];
         TContextDestroy[ctx];
         restore[];
-        result === {{50., 122.}, "metal-gemv"} || ctx === 0
+        result === {{50., 122.}, "metal-gemm"} || ctx === 0
     ],
     True,
-    TestID -> "metal/f32-matvec-direct-gemv"
+    TestID -> "metal/f32-matvec-specialized-still-generic"
 ]
 
 VerificationTest[

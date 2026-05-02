@@ -754,7 +754,8 @@ typedef struct {
   i32 x_stride0;
   i32 x_stride1;
   i32 x_stride2;
-  u32 threads;     // Metal SIMT threads per threadgroup; 256 default
+  u32 threads;            // Metal SIMT threads per threadgroup; 256 default
+  u32 outputs_per_thread; // output elements computed by one Metal thread
 } TileConv2DInfo;
 
 typedef struct {
@@ -1319,6 +1320,7 @@ int     tile_analyze_gemm(struct KernelEntry const *ke,
 // of carrying backend-private conv pattern matchers.
 int     tile_analyze_conv2d_flat(struct KernelEntry const *ke,
                                  TileConv2DInfo *out);
+int     tile_rejects_conv2d_flat_cin1(struct KernelEntry const *ke);
 fn int  tile_mma_size_supported(u32 tile);
 // Sync and collect a validated TILE_MMA plan.  Used by backends that
 // compile outside the single C translation unit.
@@ -1333,13 +1335,12 @@ fn int  tile_sync_from_scalar(struct KernelEntry *ke);
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 
 // Autotune: walk the proposer's candidates, time each variant
-// against the baseline (no opts) with direct kernel dispatch, pick
-// the winner, leave the kernel's KernelAxes mutated to the winning
-// opt.  Because axes live on the shared KpCacheSlot, the winner
-// auto-applies to every other kid sharing this KProgOp[] (a
-// training loop emitting one new kid per step inherits from
-// iter 2 onward).  Returns 1 if a winning opt was applied,
-// 0 if no candidate beat baseline (or no candidates).
+// against the baseline (no opts) with direct kernel dispatch, expand
+// the best variants into short opt sequences when enabled, pick the
+// winner, and leave KernelAxes mutated to the winning sequence.
+// Because axes live on the shared KpCacheSlot, the winner auto-
+// applies to every other kid sharing this KProgOp[].  Returns 1 if
+// a winning opt sequence was applied, 0 if baseline won.
 fn int kernel_autotune(u32 kid);
 
 // Cheap predicate used by the fire-time auto-tune trigger.  True
@@ -1480,7 +1481,7 @@ typedef enum {
   KDISPATCH_METAL_TILE  = 9,   // Metal: TileUop MSL source -> threadgroup dispatch
   KDISPATCH_METAL_GEMM  = 10,  // Metal: direct f32 matmul over unexpanded inputs
   KDISPATCH_METAL_CONV  = 11,  // Metal: direct f32 conv2d over im2col-fused graph
-  KDISPATCH_METAL_GEMV  = 12,  // Metal: direct f32 matrix-vector product
+  KDISPATCH_METAL_GEMV  = 12,  // retired; rank-1 matvec routes through METAL_GEMM
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);

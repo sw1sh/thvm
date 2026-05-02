@@ -73,8 +73,8 @@ beautiful-mnist's 8 weights x BS=512, the cumulative per-step
 allocation is ~10M cells -- well under HEAP_CAP/2 (32M) but with
 no sharing across the 8 grad walks.  The structural-template
 fix (cache `interact_grad(uop, target)` -> template parametric
-in `gy`) would cut this 8x.  See `docs/bench/phase16.md` for the
-sketch + the SUP-projector experiment that didn't pan out.
+in `gy`) would cut this 8x.  See `docs/bench/history.md` for the
+current benchmark context and deferred multi-grad sharing note.
 
 **Defer until M1 is in:** measuring shows the chain-rule walk is
 ~5% of LeNet wallclock today.  Won't move the needle until the

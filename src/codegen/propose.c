@@ -24,8 +24,8 @@
 // As more opt classes get codegen support (UPCAST output axes,
 // LOCAL/GLOBAL Metal bindings, GROUP_REDUCE, etc.) they slot in
 // here as additional rules.  The output is a flat list of KOpt;
-// the autotune loop applies each one in isolation against the
-// baseline (no-opt) variant.
+// the autotune loop first applies each one against the baseline and
+// can then expand the best variants into short opt sequences.
 
 // Reduce-axis size for a tail-REDUCE kernel, or 0 if not reduce-tail
 // (or if shape inference fails).  Mirrors the same calc that
@@ -120,6 +120,30 @@ static u32 propose_conv2d_local_opts(KernelEntry const *ke, KOpt *out,
   return n;
 }
 
+static u32 propose_conv2d_upcast_opts(KernelEntry const *ke, KOpt *out,
+                                      u32 n, u32 cap) {
+  static const u32 upcast_factors[] = {8, 4, 2};
+  u32 n_upcast_factors = sizeof(upcast_factors)/sizeof(*upcast_factors);
+  for (u32 i = 0; i < n_upcast_factors && n < cap; i++) {
+    u32 f = upcast_factors[i];
+    for (u8 axis = 0; axis < ke->axes->n_axes; axis++) {
+      if (ke->axes->axis_types[axis] != KAX_LOOP) {
+        continue;
+      }
+      u32 axis_size = ke->axes->full_shape[axis];
+      if (axis_size < f || axis_size % f != 0) {
+        continue;
+      }
+      out[n].op   = KOP_UPCAST;
+      out[n].axis = axis;
+      out[n].arg  = f;
+      n++;
+      break;
+    }
+  }
+  return n;
+}
+
 static int propose_metal_backend_enabled(void) {
   char const *backend = getenv("THVM_BACKEND");
   return backend != NULL && strcmp(backend, "metal") == 0;
@@ -169,6 +193,18 @@ static int propose_metal_tile_scalar_reduce_op_ok(u8 op) {
   }
 }
 
+static int propose_kprog_has_opcode(KernelEntry const *ke, u8 opcode) {
+  if (ke == NULL || ke->program == NULL) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    if (ke->program[i].opcode == opcode) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int propose_scalar_op_carries_kernel_dtype(ScalarUop const *u) {
   switch (u->op) {
     case S_LOAD:
@@ -197,6 +233,12 @@ static int propose_scalar_op_carries_kernel_dtype(ScalarUop const *u) {
 static int propose_metal_tile_scalar_reduce_kernel(KernelEntry const *ke) {
   if (!propose_metal_tile_enabled() || ke->scalar_uops == NULL
       || ke->n_scalar_uops < 2 || ke->output_dtype != DT_FP32) {
+    return 0;
+  }
+  if (tile_rejects_conv2d_flat_cin1(ke)) {
+    return 0;
+  }
+  if (propose_kprog_has_opcode(ke, UOP_PAD)) {
     return 0;
   }
   int has_reduce = 0;
@@ -311,7 +353,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
       && ke->axes->n_axes > 0) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {
-      return propose_conv2d_local_opts(ke, out, n, cap);
+      n = propose_conv2d_local_opts(ke, out, n, cap);
+      return propose_conv2d_upcast_opts(ke, out, n, cap);
     }
   }
 

@@ -33,14 +33,14 @@
       CatenateLayer + per-head NetMapOperator[LinearLayer]) does NOT
       yet convert: per-head input wiring through CatenateLayer needs
       ordered-multi-input edge tracking that the LayersGraph property
-      flattens away.  Documented in docs/bench/phase12.md as the
+      flattens away.  Documented in docs/bench/history.md as the
       Phase 13 follow-up.
    4. A single-token forward on a synthetic mini-GPT-2 (vocab=32,
       dim=64, n_heads=4, n_layers=1, seq=4) runs end-to-end and
       asserts the output is finite and correctly shaped.
 
    Why no 100-token bench vs tinygrad: the constant-arg
-   kernel-program-cache miss documented in docs/bench/phase11.md
+   kernel-program-cache miss documented in docs/bench/history.md
    makes each forward call dispatch ~270ms-per-numeric-constant-op
    even after warmup.  On real GPT-2 dimensions (dim=768) one FFN
    block alone is ~6 s; a full forward is ~minutes per token.

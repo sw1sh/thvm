@@ -53,6 +53,9 @@ until that step lands.
 - [plans/tile_uops.md](plans/tile_uops.md): tile-level schedule
   plan above scalar UOps.  Documents the opt-in CPU/Metal tile paths
   and the remaining work toward an autotuning target.
+- [bench/history.md](bench/history.md): consolidated benchmark
+  history and current canaries for training, GPT-2, Metal, tile, and
+  autotune work.
 
 ## Conventions
 

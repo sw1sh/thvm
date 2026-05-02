@@ -318,7 +318,6 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out) {
 static id<MTLComputePipelineState> METAL_PIPELINES_CACHE[UOP_COUNT][32];
 static id<MTLComputePipelineState> METAL_GEMM_PSOS[3];
 static id<MTLComputePipelineState> METAL_CONV2D_PSO;
-static id<MTLComputePipelineState> METAL_GEMV_PSO;
 
 // metal_jit cache decls live further down (alongside the MSL emit
 // path).  Forward-declare the cache reset so metal_shutdown can
@@ -348,7 +347,6 @@ static void metal_shutdown(void) {
     METAL_GEMM_PSOS[i] = nil;
   }
   METAL_CONV2D_PSO = nil;
-  METAL_GEMV_PSO   = nil;
   metal_jit_cache_reset_impl();
   METAL_LIB    = nil;
   METAL_QUEUE  = nil;
@@ -497,6 +495,32 @@ static int metal_tile_enabled(void) {
   return e != NULL && e[0] == '1';
 }
 
+static u32 metal_view_strided_index(View const *v, u32 flat_idx) {
+  if (v->contiguous) {
+    return flat_idx + (u32)v->offset;
+  }
+  int64_t acc = v->offset;
+  u32 rem = flat_idx;
+  for (i32 axis = (i32)v->shape.ndim - 1; axis >= 0; axis--) {
+    u32 dim = v->shape.dims[axis];
+    if (dim == 0) {
+      continue;
+    }
+    u32 c = rem % dim;
+    rem /= dim;
+    acc += (int64_t)c * (int64_t)v->strides[axis];
+  }
+  return (u32)acc;
+}
+
+static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx) {
+  u32 idx = metal_view_strided_index(&t->view, flat_idx);
+  for (i32 i = (i32)t->nviews - 1; i >= 0; i--) {
+    idx = metal_view_strided_index(&t->prior_views[i], idx);
+  }
+  return idx;
+}
+
 static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL ^ 0x4D54494C45554F50ULL;
   if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
@@ -520,7 +544,6 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   h ^= (u64)ke->n_inputs;          h *= 0x100000001b3ULL;
   h ^= (u64)ke->output_dtype;      h *= 0x100000001b3ULL;
   h ^= (u64)ke->output_numel;      h *= 0x100000001b3ULL;
-  h ^= (u64)ke->tile_axes_version; h *= 0x100000001b3ULL;
   if (ke->axes != NULL) {
     h ^= (u64)ke->axes->n_applied; h *= 0x100000001b3ULL;
     u8 const *opts = (u8 const *)ke->axes->applied_opts;
@@ -606,8 +629,11 @@ static int metal_tile_jit_encode(KernelEntry *ke,
     [enc setBytes:cfg length:sizeof(cfg) atIndex:(1 + ke->n_inputs)];
   }
   if (is_conv) {
+    NSUInteger outputs = (NSUInteger)(conv.outputs_per_thread
+                                      ? conv.outputs_per_thread : 1);
     NSUInteger total = (NSUInteger)(conv.c_out * conv.patches);
-    [enc dispatchThreads:MTLSizeMake(total, 1, 1)
+    NSUInteger threads_total = (total + outputs - 1) / outputs;
+    [enc dispatchThreads:MTLSizeMake(threads_total, 1, 1)
      threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads_x, 1, 1)];
   } else {
     [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)groups_x, 1, 1)
@@ -989,104 +1015,6 @@ static int metal_try_conv2d_flat(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_i
   return 1;
 }
 
-static id<MTLComputePipelineState> metal_gemv_pipeline(void) {
-  if (METAL_GEMV_PSO != nil) return METAL_GEMV_PSO;
-  static char const *src =
-      "#include <metal_stdlib>\n"
-      "using namespace metal;\n"
-      "kernel void thvm_gemv(device const float *W [[buffer(0)]],\n"
-      "                      device const float *X [[buffer(1)]],\n"
-      "                      device float *Y [[buffer(2)]],\n"
-      "                      constant int *cfg [[buffer(3)]],\n"
-      "                      uint row [[thread_position_in_grid]]) {\n"
-      "  if (row >= (uint)cfg[0]) return;\n"
-      "  float acc = 0.0f;\n"
-      "  for (int k = 0; k < cfg[1]; k++) {\n"
-      "    int wi = cfg[2] + (int)row * cfg[3] + k * cfg[4];\n"
-      "    int xi = cfg[5] + k;\n"
-      "    acc += W[wi] * X[xi];\n"
-      "  }\n"
-      "  Y[row] = acc;\n"
-      "}\n";
-  NSError *err = nil;
-  NSString *srcStr = [NSString stringWithUTF8String:src];
-  id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
-                                                  options:nil
-                                                    error:&err];
-  if (lib == nil) {
-    fprintf(stderr, "thvm: metal_gemv -- compile failed: %s\n",
-            err ? [[err localizedDescription] UTF8String] : "(no error)");
-    return nil;
-  }
-  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"thvm_gemv"];
-  if (mtlFn == nil) return nil;
-  METAL_GEMV_PSO = [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn
-                                                                error:&err];
-  if (METAL_GEMV_PSO == nil) {
-    fprintf(stderr, "thvm: metal_gemv -- pipeline-state failed: %s\n",
-            err ? [[err localizedDescription] UTF8String] : "(no error)");
-  }
-  return METAL_GEMV_PSO;
-}
-
-static int metal_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (ke == NULL || ke->n_inputs != 2 || ke->n_ops == 0) return 0;
-  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32) return 0;
-  if (TENS[ke->output_tid].dtype != DT_FP32) return 0;
-  KProgOp const *last = &ke->program[ke->n_ops - 1];
-  if (last->opcode != UOP_REDUCE) return 0;
-
-  u32 w_tid = ke->input_tids[0];
-  u32 x_tid = ke->input_tids[1];
-  if (w_tid == 0 || x_tid == 0 || w_tid >= TENS_NEXT || x_tid >= TENS_NEXT) {
-    return 0;
-  }
-  TenDesc const *w = &TENS[w_tid];
-  TenDesc const *x = &TENS[x_tid];
-  TenDesc const *y = &TENS[ke->output_tid];
-  if (w->nviews != 0 || x->nviews != 0 || y->nviews != 0) return 0;
-  View const *wv = &w->view;
-  View const *xv = &x->view;
-  View const *yv = &y->view;
-  if (wv->shape.ndim != 2 || yv->shape.ndim != 1) return 0;
-  if (!xv->contiguous || !wv->contiguous) return 0;
-  u32 m = wv->shape.dims[0];
-  u32 k = wv->shape.dims[1];
-  if (m == 0 || k == 0 || yv->shape.dims[0] != m || xv->numel != k) {
-    return 0;
-  }
-
-  u32 wb = in_buf_ids[0], xb = in_buf_ids[1];
-  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return 0;
-  if (wb == 0 || xb == 0 || wb >= METAL_BUFS_NEXT || xb >= METAL_BUFS_NEXT) {
-    return 0;
-  }
-  if (METAL_BUFS[wb].buf == nil || METAL_BUFS[xb].buf == nil
-      || METAL_BUFS[out_buf_id].buf == nil) {
-    return 0;
-  }
-
-  id<MTLComputePipelineState> pso = metal_gemv_pipeline();
-  if (pso == nil) return 0;
-  id<MTLCommandBuffer> cmd = metal_command_buffer();
-  if (cmd == nil) return 0;
-  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-  [enc setComputePipelineState:pso];
-  [enc setBuffer:METAL_BUFS[wb].buf offset:0 atIndex:0];
-  [enc setBuffer:METAL_BUFS[xb].buf offset:0 atIndex:1];
-  [enc setBuffer:METAL_BUFS[out_buf_id].buf offset:0 atIndex:2];
-  int cfg[6] = {
-    (int)m, (int)k, wv->offset, wv->strides[0], wv->strides[1], xv->offset,
-  };
-  [enc setBytes:cfg length:sizeof(cfg) atIndex:3];
-  NSUInteger tg = MIN((NSUInteger)256, [pso maxTotalThreadsPerThreadgroup]);
-  [enc dispatchThreads:MTLSizeMake((NSUInteger)m, 1, 1)
-   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-  [enc endEncoding];
-  metal_submit_if_standalone(cmd);
-  return 1;
-}
-
 static int metal_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   TileGemmInfo gemm;
   if (!tile_collect_mma_plan(ke, &gemm) || gemm.dtype != DT_FP32) {
@@ -1176,10 +1104,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       cg_profile_record(kid, KDISPATCH_METAL_CONV, cg_now_us() - t0);
       return 0;
     }
-    if (metal_try_gemv(ke, in_buf_ids, out_buf_id)) {
-      cg_profile_record(kid, KDISPATCH_METAL_GEMV, cg_now_us() - t0);
-      return 0;
-    }
   }
 
   if (kprog_supported && metal_try_gemm(ke, in_buf_ids, out_buf_id)) {
@@ -1201,13 +1125,16 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     u32 ib = in_buf_ids[i];
     if (ib == 0 || ib >= METAL_BUFS_NEXT) { return -1; }
     u32 tid = ke->input_tids[i];
+    TenDesc const *td = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
     int needs_premat = (!tile_conv_supported
-                        && tid != 0 && tid < TENS_NEXT
-                        && !TENS[tid].view.contiguous);
+                        && td != NULL
+                        && (!td->view.contiguous
+                            || td->view.offset != 0
+                            || td->nviews != 0));
     if (needs_premat) {
-      View const *v = &TENS[tid].view;
+      View const *v = &td->view;
       u32 numel = v->numel;
-      u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(TENS[tid].dtype, numel));
+      u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(td->dtype, numel));
       if (tmp_id == 0) {
         for (u32 k = 0; k < i; k++)
           if (temp_buf_ids[k]) metal_buf_decref(temp_buf_ids[k]);
@@ -1216,16 +1143,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       f32 *src = (f32 *)[METAL_BUFS[ib].buf contents];
       f32 *dst = (f32 *)[METAL_BUFS[tmp_id].buf contents];
       for (u32 k = 0; k < numel; k++) {
-        int64_t acc = v->offset;
-        u32 rem = k;
-        for (i32 axis = (i32)v->shape.ndim - 1; axis >= 0; axis--) {
-          u32 dim = v->shape.dims[axis];
-          if (dim == 0) continue;
-          u32 c = rem % dim;
-          rem /= dim;
-          acc += (int64_t)c * (int64_t)v->strides[axis];
-        }
-        dst[k] = src[(u32)acc];
+        dst[k] = src[metal_tendesc_strided_index(td, k)];
       }
       effective_buf_ids[i] = tmp_id;
       temp_buf_ids     [i] = tmp_id;

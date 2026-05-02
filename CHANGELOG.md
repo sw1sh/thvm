@@ -6,6 +6,54 @@ dated section.
 
 ## Unreleased
 
+### Removed: diagnostic Metal GEMV shortcut
+
+The old opt-in direct Metal GEMV shader has been removed from dispatch.
+Rank-1 `TMatVec` already lowers through the shared `TILE_MMA` analysis
+and routes via `metal-gemm`, so even `THVM_METAL_SPECIALIZED=1` no
+longer bypasses the generic tile/MMA path for matrix-vector kernels.
+
+### Changed: tile JIT hashes ignore mutation counters
+
+CPU and Metal tile JIT cache keys no longer include
+`tile_axes_version`, which is only an internal invalidation counter.
+The keys still include the generated scalar/tile graph, dtypes, shapes,
+and applied opts, so equivalent autotune variants can reuse compiled
+tile kernels across reset/apply cycles instead of recompiling because
+the version counter changed.
+
+### Added: autotune opt-sequence search
+
+`TKernelAutotune` can now expand the best single candidates into short
+opt sequences, controlled by `THVM_AUTOTUNE_DEPTH` and
+`THVM_AUTOTUNE_BEAM`.  Cached winners now store the full sequence, so
+Metal tile Conv2D can discover combined schedules like
+`UPCAST + LOCAL/GLOBAL` instead of choosing only one knob at a time.
+
+### Fixed: Metal tile PAD-heavy Conv2D fallback
+
+Metal tile codegen now treats scalar integer expressions as signed and
+declines generic Metal tile dispatch for KProg graphs that still
+contain PAD movement.  This keeps single-channel im2col Conv2D on the
+correct Metal fallback path until the generic tile renderer can prove
+the PAD-heavy scalar expression directly.
+
+### Added: Conv2D tile output-per-thread candidates
+
+Generated Metal Conv2D tile kernels can now compute multiple output
+elements per thread via a `KOP_UPCAST`-backed `outputs_per_thread`
+schedule knob.  The Conv2D proposer emits `UPCAST` candidates alongside
+`LOCAL` threadgroup-size candidates, giving autotune a second schedule
+dimension without adding another backend-private recognizer.
+
+### Changed: consolidated bench phase notes
+
+The old `docs/bench/phase6.md` through `phase16.md` notes and the
+beautiful-mnist trend file are now folded into one cleaned
+`docs/bench/history.md` page.  Stale source comments and plan links now
+point at the consolidated benchmark history instead of deleted phase
+files.
+
 ### Changed: Conv2D tile autotune scans every loop axis
 
 The Metal tile Conv2D proposer now emits `LOCAL` threadgroup-size
@@ -72,16 +120,15 @@ recognizers.
 The tile analyzer now recognizes `EXPAND(vector) -> MUL(matrix, vector)
 -> REDUCE_SUM` as a GEMV-shaped `TILE_MMA` plan with `N=1`.  Metal
 therefore dispatches rank-1 `TMatVec` through the generic tile-driven
-GEMM path and exposes the usual `TC` autotune candidates, while the
-direct GEMV shader stays opt-in diagnostic-only.
+GEMM path and exposes the usual `TC` autotune candidates.
 
 ### Changed: specialized Metal paths are diagnostic only
 
-Direct Metal conv2d/GEMV recognizers are now gated behind
-`THVM_METAL_SPECIALIZED=1` and disabled by default.  They remain as
-correctness/performance oracles, but the default path stays on the
-lowered scalar/tile graph so future speedups must come from
-tile-plan recognition, beam search, and autotuning.
+The direct Metal Conv2D recognizer is gated behind
+`THVM_METAL_SPECIALIZED=1` and disabled by default.  It remains as a
+correctness/performance oracle, but the default path stays on the
+lowered scalar/tile graph so future speedups must come from tile-plan
+recognition, beam search, and autotuning.
 
 ### Added: direct Metal conv2d dispatch
 
@@ -89,9 +136,7 @@ Metal now recognizes the im2col-fused scalar graph produced by
 `TConv2D` over an already-produced activation and dispatches a direct
 f32 convolution shader instead of the generic scalar `metal-op`
 renderer.  This targets the second `beautiful-mnist` convolution,
-which was the dominant steady forward cost.  Metal also recognizes the
-`TMatVec` f32 matrix-vector pattern and routes it through a direct GEMV
-shader for the final `beautiful-mnist` fully-connected layer.
+which was the dominant steady forward cost.
 
 ### Fixed: autotune first-capture producer replay
 

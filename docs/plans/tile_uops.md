@@ -49,13 +49,19 @@ that future renderers can lower differently for CPU and Metal.
   runtime template, skips generic input pre-materialization because
   the template consumes the original view strides directly, and
   exposes `LOCAL` threadgroup-size candidates from every loop axis
-  that can legally split through the normal proposer;
-- `TKernelAutotune` keeps the in-process per-program-shape behavior
-  and now also persists winning opts under
+  that can legally split plus `UPCAST` output-per-thread candidates
+  through the normal proposer;
+- `TKernelAutotune` keeps the in-process per-program-shape behavior,
+  can expand the best single candidates into short opt sequences
+  (`THVM_AUTOTUNE_DEPTH`, `THVM_AUTOTUNE_BEAM`), and now also persists
+  winning sequences under
   `$XDG_CACHE_HOME/thvm/autotune` / `$HOME/.cache/thvm/autotune`
   (override with `THVM_AUTOTUNE_CACHE_DIR`, disable with
   `THVM_AUTOTUNE_CACHE=0` or `THVM_AUTOTUNE_DISABLE_CACHE=1`), so
   repeated Metal tile experiments can skip benchmark rediscovery;
+  tile JIT cache keys are based on generated graphs and applied opts,
+  not the internal `tile_axes_version` mutation counter, so equivalent
+  reset/apply cycles reuse compiled kernels;
 - CPU dispatch has an opt-in `THVM_TILE=1` path that consumes the
   validated tile plan over scalar UOps, records dispatch kind
   `"tile"`, and falls back to the normal BLAS/JIT/scalar paths when
@@ -86,21 +92,23 @@ that future renderers can lower differently for CPU and Metal.
   `thread_position_in_threadgroup`, dispatches
   `GLOBAL x LOCAL` as threadgroups x threads-per-threadgroup, and
   records dispatch kind `"metal-tile"`;
-- Metal also has `THVM_METAL_SPECIALIZED=1` diagnostic direct GEMV
-  and legacy direct Conv2D paths.  These stay off by default; the
-  Conv2D win now routes through shared tile analysis plus generated
-  tile dispatch, while the diagnostic path remains a
-  correctness/performance oracle;
+- Metal also has a `THVM_METAL_SPECIALIZED=1` diagnostic legacy direct
+  Conv2D path.  It stays off by default; the Conv2D win now routes
+  through shared tile analysis plus generated tile dispatch, while the
+  diagnostic path remains a correctness/performance oracle;
 - rank-1 `TMatVec` now reaches that generic path: the tile analyzer
   recognizes `EXPAND(vector) -> MUL(matrix, vector) -> REDUCE_SUM`
   as a `TILE_MMA` plan with `N=1`, so Metal dispatches it via
   `"metal-gemm"` and `TKernelProposed` exposes the normal `TC`
-  tile-size candidates without using the diagnostic GEMV recognizer;
+  tile-size candidates without using a backend-private GEMV recognizer;
 - generated Metal TileUop source now covers f32 scalar `TILE_REDUCE`
   plans in addition to elementwise plans: default loop axes map to a
   flat Metal grid, the reduce body is emitted from `ScalarUop`, and
   reduce-axis `GROUP` / `GROUP_REDUCE` plus `UNROLL` candidates remain
-  visible to autotune for movement-heavy lowered reductions;
+  visible to autotune for movement-heavy lowered reductions.  The
+  Metal renderer currently declines KProg graphs that still contain
+  PAD movement, preserving correctness for single-channel im2col
+  Conv2D until that generic movement path is proven;
 - f32/f64 `S_CAST` is generated with per-input and output pointer
   types, so scalar C no longer requires one uniform kernel dtype for
   simple cast chains;
@@ -187,9 +195,8 @@ output axis.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Move the remaining GEMV diagnostic cleanup into the generic tile
-   story and broaden the Conv2D template's schedule space beyond one
-   SIMT threadgroup-size knob.
+2. Broaden the Conv2D template's schedule space beyond threadgroup size
+   plus output-per-thread.
 3. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
    instead of using only scalar reducer loops.
 4. Generalize `TILE_MMA` target code beyond fixed 8/16/32

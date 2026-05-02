@@ -406,7 +406,6 @@ static u64 cpu_jit_hash_tile(KernelEntry const *ke) {
     h ^= (u64)ke->input_dtypes[i]; h *= 0x100000001b3ULL;
   }
   h ^= (u64)ke->output_dtype;       h *= 0x100000001b3ULL;
-  h ^= (u64)ke->tile_axes_version;  h *= 0x100000001b3ULL;
   return h | (1ULL << 61);
 }
 

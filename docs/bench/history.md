@@ -1,0 +1,464 @@
+# Benchmark History
+
+This file is the consolidated benchmark log for the tinygrad-parity,
+training, kernelization, Metal, and autotune arcs.
+
+The old `phase6.md` through `phase16.md` files were useful while the
+work was being done, but they mixed current measurements with stale
+plans, false starts, and file-touch lists.  The original details remain
+in git history.  This document keeps the measurements, decisions, and
+open gaps that still help future work.
+
+## Current Snapshot
+
+Measured on Apple M3 Max unless noted.
+
+### Validation
+
+Current broad checks from the Metal tile/autotune arc:
+
+- `make test`: passing, including `test_tile_graph` and
+  `test_metal_real`.
+- Full WL suite before the final Conv2D proposer cleanup:
+  `669 passed, 0 failed`.
+- Focused WL after the Conv2D proposer cleanup:
+  `kernel_opts.wlt` `36 passed, 0 failed`,
+  `metal_dtypes.wlt` `15 passed, 0 failed`.
+- `git diff --check`: clean for the committed iterations.
+
+### LeNet Training
+
+LeNet/Adam CPU and Metal training now run end to end for the current
+smoke size:
+
+```text
+N_STEPS=4 train.wls
+losses: {2.6071, 1.8054, 1.1324, 0.6546, 0.3559}
+```
+
+The same sequence was observed for:
+
+```bash
+wolframscript -f wl/Examples/lenet-mnist/train.wls
+THVM_BACKEND=metal THVM_TILE=1 N_STEPS=4 wolframscript -f wl/Examples/lenet-mnist/train.wls
+```
+
+The old `Conv2D + ReLU + MaxPool2d` weight-gradient shape bug is fixed
+in the current tree; the minimal repro returns the weight shape
+`{2, 1, 3, 3}`.
+
+### beautiful_mnist Forward
+
+The latest canary uses the tinygrad-style `beautiful_mnist` forward
+example with diagnostic backend specializations disabled:
+
+```bash
+THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0 \
+  wolframscript -f wl/Examples/beautiful-mnist/forward.wls
+```
+
+Latest generic Metal tile numbers:
+
+```text
+sample walls: 36.0ms / 8.6ms / 9.0ms
+```
+
+With fire-time autotune forced and the autotune cache disabled:
+
+```bash
+THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0 \
+THVM_AUTOTUNE=1 THVM_AUTOTUNE_CACHE=0 \
+  wolframscript -f wl/Examples/beautiful-mnist/forward.wls
+```
+
+Latest autotuned run:
+
+```text
+sample walls: 85.3ms / 5.4ms / 5.2ms
+```
+
+After adding the Conv2D `UPCAST`/`outputs_per_thread` schedule knob:
+
+```text
+generic tile, no autotune:                  75.2ms / 7.3ms / 7.6ms
+fire-time autotune, cache disabled:        397.0ms / 6.5ms / 6.6ms
+```
+
+After adding opt-sequence search and gating generic Metal tile away
+from PAD-heavy single-channel im2col Conv2D:
+
+```text
+generic tile, no autotune:                 107.1ms / 4.9ms / 4.1ms
+fire-time autotune, cache disabled:        125.8ms / 5.8ms / 5.9ms
+```
+
+After dropping non-semantic tile JIT hash versioning and retiring the
+diagnostic Metal GEMV shortcut:
+
+```text
+generic tile, no autotune:                  33.2ms / 8.6ms / 10.2ms
+fire-time autotune, cache disabled:        137.2ms / 4.4ms / 4.9ms
+autotune fresh tmp cache:                  118.6ms / 6.4ms / 5.7ms
+autotune tmp cache replay:                 112.4ms / 4.5ms / 4.6ms
+```
+
+Interpretation:
+
+- The old generic Metal tile path was roughly `64-69ms` steady-state
+  for the second Conv2D.
+- The diagnostic `THVM_METAL_SPECIALIZED=1` oracle was roughly
+  `7-10ms`.
+- The shared tile Conv2D template plus pre-materialization fix moved
+  the generic path into the same class as the diagnostic oracle.
+- The widened `LOCAL` proposer and `UPCAST` output-per-thread knob give
+  autotune real schedule choices.  The current tuned steady-state is in
+  the `5-7ms` range depending on run noise and selected variants.
+- Tile JIT cache keys now ignore `tile_axes_version`, an internal
+  mutation counter, so autotune reset/apply cycles can reuse compiled
+  kernels when the generated graph and applied opts are identical.
+- The old opt-in direct Metal GEMV shader is retired; rank-1
+  `TMatVec` stays on the shared `TILE_MMA`/`metal-gemm` route even
+  when `THVM_METAL_SPECIALIZED=1` is enabled.
+- The single-channel first Conv2D currently uses the correct Metal
+  fallback instead of generic Metal tile, because the PAD-heavy im2col
+  scalar graph is not yet safe for that renderer.
+- This is not tinygrad parity yet.  First-sample time still includes
+  materialization and dynamic Metal compilation, and the schedule space
+  is still much narrower than tinygrad's search.
+
+## Rerun Commands
+
+Useful canaries:
+
+```bash
+make test
+make wl-test
+
+wolframscript -f wl/Examples/beautiful-mnist/forward.wls
+THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0 \
+  wolframscript -f wl/Examples/beautiful-mnist/forward.wls
+THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0 \
+THVM_AUTOTUNE=1 THVM_AUTOTUNE_CACHE=0 \
+  wolframscript -f wl/Examples/beautiful-mnist/forward.wls
+
+wolframscript -f wl/Examples/lenet-mnist/train.wls
+THVM_BACKEND=metal THVM_TILE=1 N_STEPS=4 \
+  wolframscript -f wl/Examples/lenet-mnist/train.wls
+
+wolframscript -f wl/Examples/metal-gemm-autotune.wls
+```
+
+Bounded CPU LeNet autotune comparison:
+
+```bash
+TRAIN_BENCH_MODE=both N_STEPS=1 WARMUP_STEPS=1 MAX_TUNE_KERNELS=3 \
+THVM_TILE=1 wolframscript -f wl/Examples/lenet-mnist/bench-train.wls
+```
+
+Observed in the Phase 16 arc:
+
+```text
+1543 live candidates -> 68 representative schedule keys
+tuned 3 reps in 0.4ms
+timed step: 33.6s baseline vs 29.2s autotune
+```
+
+That result is a harness smoke, not a strong speedup claim.  The
+bounded sample was too small and no candidate clearly beat baseline.
+
+## Open Performance Gaps
+
+Current work should prioritize these in order:
+
+1. Reduce first-sample overhead for Metal: materialization, dynamic MSL
+   compilation, and cache replay behavior.
+2. Broaden the generated Conv2D schedule beyond threadgroup size plus
+   output-per-thread.  Next useful knobs are output axis mapping,
+   cooperative reduction shape, local-memory staging, and vector width.
+3. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
+   instead of scalar reducer loops.
+4. Add Metal `simdgroup_matrix`/MMA variants after reductions and
+   local-memory tiling are stable.
+5. Keep improving multi-grad structural sharing.  It is not the top
+   bottleneck in the latest LeNet measurements, but it will matter once
+   larger training loops become kernel-dispatch bound.
+
+## Timeline
+
+### Phase 6: Initial beautiful_mnist Training Pipeline
+
+The first BS=1 `beautiful_mnist` training example exercised:
+
+- `TConv2D`, then lowered as `kh * kw` partial sums;
+- `TReLU`, `TMaxPool2d`, reshape/flatten;
+- `TMatVec` plus bias;
+- sparse categorical cross entropy;
+- `TGrad` and tensor-land Adam updates.
+
+CPU forward plus loss was about `0.9s`, while individual gradients
+through the conv and pool stack took minutes.  The important lesson was
+that the forward path was usable, but the chain-rule expansion and
+per-sample conv lowering made training impractical.
+
+### Phase 7: TJit Capture/Replay
+
+`TJit` landed as the thvm analogue of tinygrad `TinyJit`.
+
+Measurements:
+
+```text
+64x64 matmul + bias, 50 eager iters: 440.7ms total, 8.8ms/iter
+64x64 matmul + bias, 50 TJit iters: 0.5ms total
+
+linear train step:
+  step 1 capture: 2602.6ms
+  step 2 replay: 0.2ms
+  steps 3-5 replay: 0.1ms each
+  captured ops: 114
+```
+
+This proved that scheduler/materialize overhead dominated small stable
+loops, and capture/replay could skip it.
+
+### Phase 8: Memory Plan Feedback
+
+The memory planner recorded per-kernel allocation depth and last-use
+depth, gated behind `THVM_REUSE_BUFS=1`.
+
+Decision: keep it opt-in.  It was safe for forward-only flat graphs but
+unsafe for chain-rule graphs because later WNF passes could still read a
+buffer that the within-pass planner had already returned to the free
+list.  End-of-realize rollback remained the safe default.
+
+### Phase 9: Smarter Dispatch Planning
+
+Four possible wins were analyzed:
+
+1. Matmul plus bias fused dispatch.
+2. Movement-prefix BLAS recognition for attention `K^T`.
+3. Conv as im2col plus one GEMM.
+4. Lifetime tracking strong enough to make `THVM_REUSE_BUFS` default.
+
+Most code changes were deferred.  The useful correction was that
+im2col did not require a new opcode; it can be expressed through
+movement/view operations.  The hard part is producing a good lowered
+shape that does not explode materialization or chain-rule work.
+
+### Phase 10: BEAM Scaffold
+
+`TBeamPick` landed as a WL-side version of candidate calibration and
+winner replay.
+
+Measurements:
+
+```text
+sum-of-squares BEAM replay 200x: 1.6ms
+eager winner 200x: 32ms
+
+4096-element reduction:
+  calibration: mkA 414ms, mkB 743ms -> mkA wins
+  replay 500x: beam 17.25ms, eager mkA 76.66ms, eager mkB 104.54ms
+```
+
+This was useful as a surface experiment, but the real system moved
+toward C-side `TOpt` proposal and autotune instead of WL-only BEAM.
+
+### Phase 11: GPT-2 Building Blocks
+
+The GPT-2 layer surface landed in `NN.wl`: embeddings, GELU, causal
+mask, layer norm affine, multi-head attention, linear, and ones.
+
+Per-layer eager profile for a tiny config:
+
+```text
+TLayerNormAffine[{seq, dim}]:   2.16ms
+TGELU[{seq, dim}]:            266.67ms
+TMultiHeadAttention:            3.61ms
+TLinear:                        0.87ms
+TEmbeddingMatrix:               0.11ms
+```
+
+The major finding was a constant-argument kernel-program-cache miss:
+numeric scalar ops such as `x + 1` or `1 + Exp[x]` produced fresh
+constant tensors and re-JITed repeatedly.  That made tiny GPT-2
+end-to-end forward cost about `100s`.
+
+### Phase 12: TFromNet Surface
+
+`TFromNet` learned enough NetGraph/NetChain structure to convert GPT-2
+subgraphs.  The smoke compared against Wolfram reference evaluation:
+
+```text
+embedding subgraph: 31ms, shape {4, 768}, max abs diff 0
+FFN subgraph: 4879ms, shape {4, 768}, max abs diff 2.35e-6
+synthetic mini-GPT-2 single forward: 201927ms
+```
+
+The FFN was numerically correct but still much too slow because of the
+Phase 11 constant-argument cache miss.
+
+### Phase 13: Constant-Arg Fixes and Optimizer Surface
+
+The frontend began pre-expanding scalar numeric operands so binop
+kernels reused cache-friendly shapes.  Adam was reshaped around lazy
+in-backend updates.
+
+Headline numbers:
+
+| Case | Before | After |
+|------|--------|-------|
+| `x + 1`, shape `{8,64}` | 60ms | 0.17ms |
+| `TGELU[x]`, shape `{8,64}` | 270ms | 4ms |
+| mini GPT-2 `forward.wls` | 100000ms | 694ms |
+| `inference.wls` Part 2 single-token forward | 200000ms | 653ms |
+| GPT-2 NetModel FFN block, dim 768 | 6000ms | 3500ms |
+
+Later in the same arc, pre-transposing Wolfram `LinearLayer` weights
+removed repeated materialization:
+
+```text
+linear1 768->3072: 191ms -> 0.35ms
+linear2 3072->768: 191ms -> 0.35ms
+one transformer FFN block: 3100ms -> 970ms
+```
+
+The 10-token synthetic generation loop showed TJit correctness:
+
+```text
+eager: 5181ms, 518ms/token
+jit:   3904ms, 390ms/token
+```
+
+### Phase 14: Single-Realize Assign and Faster Grad Helpers
+
+Nested `ASSIGN` terms began draining in one materialize/realize path,
+so Adam could update `m`, `v`, and `w` in one realize per parameter.
+
+The recursive WL helper for collecting UOP leaf tids was replaced by a
+C walk:
+
+```text
+LeNet 8-weight forward graph:
+  WL recursive walk:  ~1600ms/call
+  C iterative walk:   ~1ms/call
+  TGradMany:          13270ms -> 4ms
+```
+
+Synthetic 100-token GPT-2 generation:
+
+```text
+eager: 53916ms, 539.2ms/token
+jit:   40396ms, 404.0ms/token
+captured ops/step: 30472
+```
+
+The default heap was also raised to avoid LeNet training exhaustion.
+
+### Phase 15: WNF-Only Realize
+
+`nf` left the hot path.  `wnf` became the only reducer in the realize
+loop, with `TAG_F_UOP_CHILD` frames to descend into active UOP
+children.
+
+The cubic heap replacement cliff disappeared:
+
+| Case | Before wall | Before heap_replace cells | After wall | After cells |
+|------|-------------|---------------------------|------------|-------------|
+| MLP step 1 grad 1 | 160ms | 533108986 | 6.4ms | 0 |
+| MLP step 2 grad 1 | 1108ms | 3761561858 | 2.3ms | 0 |
+| MLP step 3 grad 1 | 1970ms | 6989896723 | 2.3ms | 0 |
+
+After this change, `GradFires`, `WnfCalls`, and `MaterializeCalls`
+were flat per step instead of growing with heap size.
+
+### Phase 16: Kernel Opts, Autotune, Tile, and Metal
+
+The kernel optimization stack moved into C:
+
+```text
+TKernelProposed[kid]       -> kernel_opts_propose
+TKernelAutotune[kid]       -> benchmark candidates/sequences and apply winner
+TKernelAutotuneUnique[]    -> tune one representative per schedule key
+TKernelVariants[kid]       -> inspect baseline/candidate timings
+THVM_AUTOTUNE=1            -> fire-time autotune trigger
+THVM_AUTOTUNE_DEPTH=N      -> maximum opt-sequence depth
+THVM_AUTOTUNE_BEAM=N       -> sequence expansion width
+```
+
+Implemented opt classes:
+
+| Opt | Current role |
+|-----|--------------|
+| `UNROLL` | reduce-tail C/JIT unroll hint |
+| `UPCAST` | elementwise output-loop unroll hint |
+| `LOCAL` | Metal tile local thread binding |
+| `GLOBAL` | Metal tile grid binding paired with `LOCAL` |
+| `GROUP` / `GROUPTOP` | reduce-axis group metadata |
+| `TC` | Metal GEMM tile-size metadata for `TILE_MMA` |
+| `SWAP`, `PADTO`, `NOLOCALS` | reserved or not yet consumed |
+
+Metal improvements in this arc:
+
+- `TILE_MMA` recognition for f32 matmul and rank-1 matvec.
+- Direct `metal-gemm` route fed by validated tile metadata.
+- `TC` candidates for 32/16/8 tiled GEMM variants.
+- Generated Metal tile route for f32 elementwise and reduction plans.
+- Scalar UOp structural CSE before tile planning.
+- Scalar reduce axes appended into `KernelAxes` so `GROUP` candidates
+  become reachable.
+- Shared `tile_analyze_conv2d_flat` template for im2col-fused Conv2D
+  reduce graphs.
+- Generated runtime-configured Metal Conv2D tile kernel.
+- Conv2D tile dispatch reads original strided views directly instead
+  of pre-materializing non-contiguous inputs.
+- Conv2D `LOCAL` proposer scans every splittable loop axis.
+- Conv2D `UPCAST` proposer exposes an output-per-thread knob for the
+  generated Metal tile kernel.
+- Autotune can expand the best single candidates into short opt
+  sequences, so Conv2D search can test combinations such as
+  `UPCAST + LOCAL/GLOBAL`.
+- Generic Metal tile declines PAD-heavy KProg graphs for now; this
+  preserves correctness for single-channel im2col Conv2D while the
+  direct template and generic movement renderer mature.
+
+Important canary progression:
+
+| State | beautiful_mnist forward sample walls |
+|-------|--------------------------------------|
+| Generic Metal tile, no autotune, early Phase 16 | `144.4ms / 66.9ms / 66.0ms` |
+| Diagnostic specialized oracle | `58.6ms / 8.2ms / 10.4ms` |
+| After scalar-UOp CSE | `146.2ms / 69.2ms / 66.3ms` |
+| After reduce-axis/GROUP plumbing | `95.0ms / 63.3ms / 67.7ms` |
+| Generated Conv2D tile before pre-materialization fix | `125.2ms / 65.1ms / 66.3ms` |
+| Generated Conv2D tile after fix | `81.4ms / 9.8ms / 11.1ms` |
+| Post-regression generic tile rerun | `36.0ms / 8.6ms / 9.0ms` |
+| Fire-time autotune, cache disabled | `85.3ms / 5.4ms / 5.2ms` |
+| After output-per-thread knob, no autotune | `75.2ms / 7.3ms / 7.6ms` |
+| After output-per-thread knob, fire-time autotune | `397.0ms / 6.5ms / 6.6ms` |
+| After sequence search + PAD fallback, no autotune | `107.1ms / 4.9ms / 4.1ms` |
+| After sequence search + PAD fallback, fire-time autotune | `125.8ms / 5.8ms / 5.9ms` |
+
+Scalar CSE helped compile input size but did not close the throughput
+gap by itself:
+
+```text
+first conv reduce graph:  1615 -> 590 scalar nodes
+second conv reduce graph: 1415 -> 563 scalar nodes
+```
+
+The throughput step change came from moving the Conv2D pattern into the
+shared tile path and avoiding the incorrect pre-materialized view path.
+
+## Historical beautiful_mnist Trend
+
+The old trend file tracked an early failed attempt to flip
+`TConv2DIm2Col` into the public path:
+
+| timestamp | commit | tick | LeNet 4-step ms | final loss |
+|-----------|--------|------|-----------------|------------|
+| 2026-04-30T14:31Z | `c1a6dac` | `TConv2DIm2Col` landed + verified | ~3000 | 0.3693 |
+| 2026-04-30T14:45Z | `c1a6dac` | im2col swap-in regressed | 341733 | 0.6789 |
+
+Outcome: the old PAD-and-sum im2col lowering stayed opt-in because it
+caused a roughly 100x end-to-end regression.  The later generated
+Metal tile Conv2D template is the replacement direction.
