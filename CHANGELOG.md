@@ -6,6 +6,21 @@ dated section.
 
 ## Unreleased
 
+### Changed: pack rootless TJit replay temporaries on Metal
+
+Rootless TJit capture finalization now rewrites non-overlapping Metal
+tile temporaries onto reusable same-size replay slots after liveness
+and ASSIGN sinking.  `TJitCaptureOps` exposes a `ReplayPacked` bit, and
+`TJitCaptureSummary` reports `ReplayPackedDispatches` so memory
+profiles can distinguish true persistent outputs from packed scratch
+slots; set `THVM_JIT_REPLAY_PACK=0` to disable the rewrite while
+bisecting.  On the bounded BS=32 `beautiful_mnist` canary, steady
+replay is about `179ms`; live Metal storage drops to about `3.32GB`,
+and the memory-plan estimate drops to about `1.99GB` peak / `3.56GB`
+total.  The remaining largest buffer is still a `1.31GB`
+multi-consumer conv-backward movement/add producer, so the next gap is
+fusion rather than another custom backend kernel.
+
 ### Changed: include conv tile templates in Metal graph replay
 
 Metal TJit graph replay now binds the small conv2d-flat template

@@ -58,6 +58,7 @@ typedef enum {
 typedef struct {
   JitOpKind kind;
   u8   replay_skip;
+  u8   replay_packed;
   // DISPATCH path:
   u32  kid;
   u32  out_buf_id;     // also doubles as dst-buf for ASSIGN
@@ -297,11 +298,16 @@ static u32 jit_metal_graph_max_dispatches(void) {
   return limit;
 }
 
+static int jit_replay_pack_enabled(void) {
+  char const *e = getenv("THVM_JIT_REPLAY_PACK");
+  return e == NULL || e[0] != '0';
+}
+
 // Export the capture sequence as a flat table for WL-side profiling.
 // Header: {n_ops, row_width}.  Row width is JIT_CAPTURE_EXPORT_ROW_WIDTH:
 // {kind, kid, dispatch_kind, n_inputs, out_buf_id, input0, input1,
 //  program_key, output_numel, n_ops, n_scalar_uops, n_tile_uops,
-//  assign_dst_tid, assign_src_tid, replay_skip}.
+//  assign_dst_tid, assign_src_tid, replay_skip, replay_packed}.
 fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
   if (out == NULL || cap_words < 2) {
     return 0;
@@ -329,6 +335,9 @@ fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
     }
     row[0] = (u64)op->kind;
     row[14] = op->replay_skip;
+    if (row_width >= 16) {
+      row[15] = op->replay_packed;
+    }
     switch (op->kind) {
       case JIT_OP_DISPATCH: {
         row[1] = op->kid;
@@ -378,11 +387,12 @@ fn void jit_capture_record(u32 kid, u32 const *in_buf_ids,
     return;
   }
   JitCaptureOp *op = &c->ops[c->n_ops++];
-  op->kind        = JIT_OP_DISPATCH;
-  op->replay_skip = 0;
-  op->kid         = kid;
-  op->out_buf_id  = out_buf_id;
-  op->n_inputs    = n_inputs;
+  op->kind          = JIT_OP_DISPATCH;
+  op->replay_skip   = 0;
+  op->replay_packed = 0;
+  op->kid           = kid;
+  op->out_buf_id    = out_buf_id;
+  op->n_inputs      = n_inputs;
   op->heap_in_buf_ids = NULL;
   if (n_inputs <= JIT_OP_INLINE_INPUTS) {
     for (u32 i = 0; i < n_inputs; i++) op->in_buf_ids[i] = in_buf_ids[i];
@@ -407,11 +417,12 @@ fn void jit_capture_record_assign(u32 dst_tid, u32 src_tid) {
   JitCapture *c = &JIT_CAPTURES[JIT_ACTIVE_SLOT];
   if (c->n_ops >= JIT_CAPTURE_OP_CAP) return;
   JitCaptureOp *op = &c->ops[c->n_ops++];
-  op->kind           = JIT_OP_ASSIGN;
-  op->replay_skip    = 0;
+  op->kind            = JIT_OP_ASSIGN;
+  op->replay_skip     = 0;
+  op->replay_packed   = 0;
   op->heap_in_buf_ids = NULL;
-  op->assign_dst_tid = dst_tid;
-  op->assign_src_tid = src_tid;
+  op->assign_dst_tid  = dst_tid;
+  op->assign_src_tid  = src_tid;
   jit_capture_retain_tensor_buf(c, dst_tid);
   jit_capture_retain_tensor_buf(c, src_tid);
 }
@@ -755,6 +766,220 @@ static void jit_capture_sink_assigns(JitCapture *c, Term root) {
   }
 }
 
+#ifdef THVM_HAS_METAL
+typedef struct {
+  Backend *backend;
+  u32      buf_id;
+  u64      nbytes;
+  u32      last_use;
+} JitReplaySlot;
+
+static u64 jit_dispatch_output_nbytes(JitCaptureOp const *op) {
+  if (op == NULL || op->kind != JIT_OP_DISPATCH
+      || op->kid == 0 || op->kid >= KERNELS_NEXT) {
+    return 0;
+  }
+  KernelEntry const *ke = &KERNELS[op->kid];
+  if (ke->output_numel == 0 || ke->output_tid == 0
+      || ke->output_tid >= TENS_NEXT) {
+    return 0;
+  }
+  return dtype_storage_bytes(ke->output_dtype, ke->output_numel);
+}
+
+static int jit_capture_op_reads_buf(JitCaptureOp const *op,
+                                    Backend *backend, u32 buf_id) {
+  if (op == NULL || op->replay_skip || backend == NULL || buf_id == 0) {
+    return 0;
+  }
+  switch (op->kind) {
+    case JIT_OP_DISPATCH: {
+      u32 const *ids = op->heap_in_buf_ids != NULL
+                     ? op->heap_in_buf_ids
+                     : op->in_buf_ids;
+      for (u32 i = 0; i < op->n_inputs; i++) {
+        if (jit_dispatch_input_backend(op, i) == backend && ids[i] == buf_id) {
+          return 1;
+        }
+      }
+      return 0;
+    }
+    case JIT_OP_ASSIGN:
+      if (op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT) {
+        TenDesc *td = &TENS[op->assign_src_tid];
+        return td->backend == backend && td->buf_id == buf_id;
+      }
+      return 0;
+  }
+  return 0;
+}
+
+static int jit_capture_op_writes_buf(JitCaptureOp const *op,
+                                     Backend *backend, u32 buf_id) {
+  if (op == NULL || op->replay_skip || backend == NULL || buf_id == 0) {
+    return 0;
+  }
+  switch (op->kind) {
+    case JIT_OP_DISPATCH:
+      return jit_dispatch_output_backend(op) == backend
+          && op->out_buf_id == buf_id;
+    case JIT_OP_ASSIGN:
+      if (op->assign_dst_tid != 0 && op->assign_dst_tid < TENS_NEXT) {
+        TenDesc *td = &TENS[op->assign_dst_tid];
+        return td->backend == backend && td->buf_id == buf_id;
+      }
+      return 0;
+  }
+  return 0;
+}
+
+static void jit_capture_replace_future_dispatch_inputs(JitCapture *c,
+                                                       u32 start,
+                                                       Backend *backend,
+                                                       u32 old_buf_id,
+                                                       u32 new_buf_id) {
+  if (c == NULL || backend == NULL || old_buf_id == 0 || new_buf_id == 0) {
+    return;
+  }
+  for (u32 i = start + 1; i < c->n_ops; i++) {
+    JitCaptureOp *op = &c->ops[i];
+    if (op->replay_skip || op->kind != JIT_OP_DISPATCH) {
+      continue;
+    }
+    u32 *ids = op->heap_in_buf_ids != NULL
+             ? op->heap_in_buf_ids
+             : op->in_buf_ids;
+    for (u32 j = 0; j < op->n_inputs; j++) {
+      if (jit_dispatch_input_backend(op, j) == backend
+          && ids[j] == old_buf_id) {
+        ids[j] = new_buf_id;
+      }
+    }
+  }
+}
+
+static int jit_capture_replay_packable_output(JitCaptureOp const *op,
+                                              Backend **out_backend,
+                                              u64 *out_nbytes) {
+  if (op == NULL || op->kind != JIT_OP_DISPATCH || op->replay_skip
+      || op->kid == 0 || op->kid >= KERNELS_NEXT) {
+    return 0;
+  }
+  if (cg_kernel_dispatch_kind(op->kid) != KDISPATCH_METAL_TILE) {
+    return 0;
+  }
+  KernelEntry const *ke = &KERNELS[op->kid];
+  if (ke->spliced || ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) {
+    return 0;
+  }
+  TenDesc const *td = &TENS[ke->output_tid];
+  Backend *backend = td->backend;
+  if (backend == NULL || backend->id != METAL_BACKEND.id
+      || backend->buf_decref == NULL || td->buf_id != op->out_buf_id) {
+    return 0;
+  }
+  u64 nbytes = jit_dispatch_output_nbytes(op);
+  if (nbytes == 0) {
+    return 0;
+  }
+  if (out_backend != NULL) {
+    *out_backend = backend;
+  }
+  if (out_nbytes != NULL) {
+    *out_nbytes = nbytes;
+  }
+  return 1;
+}
+
+static int jit_capture_replay_lifetime(JitCapture *c, u32 idx,
+                                       Backend *backend, u32 buf_id,
+                                       u32 *last_use) {
+  if (c == NULL || backend == NULL || buf_id == 0 || last_use == NULL) {
+    return 0;
+  }
+  u32 last = idx;
+  for (u32 j = idx + 1; j < c->n_ops; j++) {
+    JitCaptureOp const *op = &c->ops[j];
+    if (op->replay_skip) {
+      continue;
+    }
+    if (op->kind == JIT_OP_ASSIGN
+        && jit_capture_op_reads_buf(op, backend, buf_id)) {
+      return 0;
+    }
+    if (jit_capture_op_writes_buf(op, backend, buf_id)) {
+      return 0;
+    }
+    if (jit_capture_op_reads_buf(op, backend, buf_id)) {
+      last = j;
+    }
+  }
+  if (last == idx) {
+    return 0;
+  }
+  *last_use = last;
+  return 1;
+}
+
+static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
+  if (!jit_replay_pack_enabled() || c == NULL || root != 0
+      || c->n_ops == 0) {
+    return;
+  }
+  JitReplaySlot *slots = (JitReplaySlot *)calloc(
+      c->n_ops, sizeof(JitReplaySlot));
+  if (slots == NULL) {
+    return;
+  }
+  u32 n_slots = 0;
+  for (u32 i = 0; i < c->n_ops; i++) {
+    JitCaptureOp *op = &c->ops[i];
+    Backend *backend = NULL;
+    u64 nbytes = 0;
+    if (!jit_capture_replay_packable_output(op, &backend, &nbytes)) {
+      continue;
+    }
+    u32 last_use = i;
+    if (!jit_capture_replay_lifetime(c, i, backend, op->out_buf_id,
+                                     &last_use)) {
+      continue;
+    }
+
+    u32 slot_idx = n_slots;
+    for (u32 s = 0; s < n_slots; s++) {
+      if (slots[s].backend == backend && slots[s].nbytes == nbytes
+          && slots[s].last_use < i) {
+        slot_idx = s;
+        break;
+      }
+    }
+    if (slot_idx == n_slots) {
+      slots[n_slots].backend  = backend;
+      slots[n_slots].buf_id   = op->out_buf_id;
+      slots[n_slots].nbytes   = nbytes;
+      slots[n_slots].last_use = last_use;
+      n_slots++;
+      continue;
+    }
+
+    u32 old_out = op->out_buf_id;
+    u32 new_out = slots[slot_idx].buf_id;
+    op->out_buf_id = new_out;
+    op->replay_packed = 1;
+    jit_capture_replace_future_dispatch_inputs(c, i, backend,
+                                               old_out, new_out);
+    backend->buf_decref(old_out);
+    slots[slot_idx].last_use = last_use;
+  }
+  free(slots);
+}
+#else
+static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
+  (void)c;
+  (void)root;
+}
+#endif
+
 static void jit_capture_finalize(u32 slot, Term root) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) {
     return;
@@ -775,6 +1000,7 @@ static void jit_capture_finalize(u32 slot, Term root) {
   for (u32 rev = c->n_ops; rev > 0; rev--) {
     JitCaptureOp *op = &c->ops[rev - 1];
     op->replay_skip = 0;
+    op->replay_packed = 0;
     switch (op->kind) {
       case JIT_OP_DISPATCH: {
         Backend *out_backend = jit_dispatch_output_backend(op);
@@ -810,6 +1036,7 @@ static void jit_capture_finalize(u32 slot, Term root) {
   }
 
   jit_capture_sink_assigns(c, root);
+  jit_capture_pack_replay_temporaries(c, root);
 
   jit_capture_release_retained(c);
   for (u32 i = 0; i < c->n_ops; i++) {

@@ -183,23 +183,43 @@ read.  At capture end, the replay sequence is walked backward:
 
 `TJitCaptureSummary` reports `ReplayLiveDispatches` and
 `ReplaySkipped` so benchmark output separates the captured IR size
-from the records actually replayed.
+from the records actually replayed.  It also reports
+`ReplayPackedDispatches`: rootless Metal tile outputs whose replay
+buffer id was rewritten to an earlier same-size temporary slot after
+capture finalization.
 
-The current BS=32 `beautiful_mnist` training replay still retains
-about `5.3GB` of live Metal buffers after this audit.  That is now an
-honest lifetime number rather than a silent replay failure, and it
-means broad autotune sweeps should remain blocked until replay-time
-memory reuse or stronger fusion reduces the live set.
+Replay slot packing is deliberately conservative:
+
+- it runs only for rootless TJit captures;
+- it only packs Metal tile dispatch outputs, not alias or generic
+  Metal JIT routes;
+- it skips outputs whose tensor descriptor was retargeted to a
+  persistent assignment destination;
+- it skips any output read by a later explicit ASSIGN, because ASSIGN
+  records still refer to tensor ids rather than captured buffer ids;
+- it reuses only exact-size slots whose last captured dispatch read is
+  before the candidate producer.
+
+Set `THVM_JIT_REPLAY_PACK=0` to disable this rewrite when bisecting a
+memory or correctness issue.
+
+The current BS=32 `beautiful_mnist` training replay retains about
+`3.3GB` of live Metal buffers after replay slot packing.  That is much
+better than the earlier `5.3GB` audited replay set, but it is still too
+large for broad autotune sweeps.  Use bounded one-step canaries until
+the large conv/backward movement producers are fused or recomputed
+inside their consumers.  The current bounded canary packs `1098`
+dispatch outputs.
 
 `DUMP_MEMORY_PLAN=1` on `wl/Examples/beautiful-mnist/bench-train.wls`
 prints the largest live Metal buffers with producer-kernel metadata.
-The current BS=32 profile is dominated by multi-consumer conv/backward
-movement-and-add intermediates:
+With replay slot packing, the current BS=32 profile is dominated by
+multi-consumer conv/backward movement-and-add intermediates:
 
-- two `327,680,000` element f32 buffers (`1.31GB` each) produced by
-  76-op `RESHAPE/PAD/ADD/EXPAND` graphs and consumed by 8 later
+- one `327,680,000` element f32 buffer (`1.31GB`) produced by a
+  76-op `RESHAPE/PAD/ADD/EXPAND` graph and consumed by 8 later
   kernels;
-- several `37-42M` element f32 buffers (`151-170MB` each) produced by
+- several `37-42M` element f32 buffers (`151-170MB`) produced by
   28-op `RESHAPE/PAD/ADD/EXPAND` graphs and consumed by 4 later
   kernels;
 - a long tail of `10,240,000` element reshape aliases/copies
@@ -213,10 +233,11 @@ That points to two separate memory jobs:
   producer so the huge tensor is never a global buffer.
 - **Replay allocator job:** once a TJit capture is finalized, pack
   live temporary outputs into reusable replay slots by captured op
-  lifetime.  The current memory plan reports about `3.62GB` peak
-  concurrent live bytes versus `5.26GB` total live bytes, so static
-  replay slot packing has roughly `1.6GB` of headroom even before
-  deeper fusion.
+  lifetime.  The first rootless Metal pass reduced the BS=32 memory
+  plan from about `3.62GB` peak / `5.26GB` total live bytes to about
+  `1.99GB` peak / `3.56GB` total live bytes.  The remaining headroom is
+  mostly blocked by true multi-consumer producers rather than simple
+  non-overlapping temporaries.
 
 ## Safety Boundary
 

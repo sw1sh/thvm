@@ -196,18 +196,32 @@ BS=32 thvm train, THVM_TILE=1, THVM_METAL_GRAPH_REPLAY=1:
   warmup replay:        728.2ms
   steady replay:        711.1ms
   live/replay dispatch counts match the non-graph audited run
+
+BS=32 thvm train, after graph replay chunking, safe ASSIGN sinking,
+and rootless replay slot packing:
+  warmup capture:     12417.3ms
+  steady replay:       179.4ms
+  jit-ops=2243, live replay dispatches=2067
+  JitReplayDispatches=2013, JitReplayAssigns=0
+  JitGraphRuns=30, JitGraphDispatches=1969
+  graph_run_count=18, graph_encoded_dispatches=2054
+  replay_packed_dispatches=1098
+  live=3.32GB, retained=3.58GB, freelist=258MB
+  memory_plan peak=1.99GB, total=3.56GB
+  captured replay: 2201 DISPATCH + 42 ASSIGN records,
+                   176 skipped dispatch records
 ```
 
 The replay lifetime audit found that the older `465.6ms` number was
 not a trustworthy parity baseline: captured records could point at
 Metal buffers freed by post-realize rollback, and the plain TJit
 replay path counted backend dispatch failures as if they had run.  The
-current bounded small-batch replay gap is therefore roughly `115x`
-wall time versus tinygrad's `6.2ms` beamed replay.  The opt-in Metal
-ICB replay prototype removes the repeated nil-resource graph rejects
-and gives a small host-side win, but it does not solve the larger
-problem: THVM still preserves gigabytes of backward/update
-intermediates and replays thousands of live dispatch records.
+current bounded small-batch replay gap is roughly `29x` wall time
+versus tinygrad's `6.2ms` beamed replay.  Metal ICB replay and replay
+slot packing moved the gap down from the audited `~115x` baseline, but
+they do not solve the larger problem: THVM still preserves gigabytes
+of backward/update intermediates and encodes about two thousand leaf
+dispatches across 18 graph chunks.
 
 The current IR-level comparison:
 
@@ -215,16 +229,16 @@ The current IR-level comparison:
   submissions backed by an indirect-command-buffer replay.  The graph
   still contains about one hundred leaf kernels, but per-step host
   work is three graph launches.
-- THVM captures the step as a flat sequence of per-kernel dispatches
-  plus explicit optimizer blits.  Capture liveness now skips dead
-  dispatch records and keeps return tensors live, but the live replay
-  set is still about two thousand dispatches split by optimizer
-  assignment barriers.
-- The next Metal parity gap is therefore graph replay over captured
-  `TJit` dispatch runs, not another one-off custom kernel.  The new
-  `TJitCaptureSummary`/`DUMP_JIT_CAPTURE=1` surface is the guardrail:
-  the goal is to reduce graph launches and dispatch runs while keeping
-  the captured leaf-kernel count and memory profile bounded.
+- THVM captures the step as a flat sequence of per-kernel dispatches.
+  Capture liveness skips dead dispatch records, safe rootless
+  assignment copies are sunk into producer kernels, and replay slot
+  packing reuses non-overlapping temporary buffers.  The live replay
+  set is still about two thousand dispatches.
+- The next Metal parity gap is therefore stronger fusion and fewer
+  graph chunks over lowered primitives, not another one-off custom
+  kernel.  The `TJitCaptureSummary`/`DUMP_JIT_CAPTURE=1` surface is
+  the guardrail: the goal is to reduce graph launches, dispatch count,
+  and multi-gigabyte live intermediates together.
 
 Bounded BS=512 tinygrad run without JIT beam:
 
@@ -331,6 +345,31 @@ falling to `metal-jit`; the next useful optimization is to make those
 flattened-coordinate movement/reduce programs tile-lower safely, then
 re-open broader chain fusion.
 
+After enabling Metal graph replay by default, sinking safe rootless
+ASSIGN records into producer kernels, and packing rootless replay
+temporaries by captured lifetime:
+
+```text
+BENCH_MODE=train BS=32:
+  steady_ms_per_step=179.4
+  jit-ops=2243
+  dispatch=metal-tile=1220, none=35, metal-alias=144
+  hot counters: JitReplayCalls=1, JitReplayDispatches=2013,
+                JitReplayAssigns=0, JitGraphRuns=30,
+                JitGraphDispatches=1969
+  graph replay: 18 chunks, 2054 encoded dispatches
+  replay_packed_dispatches=1098
+  metal memory after timed: live=3.32GB, retained=3.58GB,
+                            freelist=258MB
+  memory plan: peak=1.99GB, total=3.56GB
+```
+
+This is the current small-batch training baseline for parity work.  It
+is still far behind tinygrad's `~6.2ms` beamed BS=32 replay because
+the lowered primitive graph is much less fused, but the bottleneck has
+moved from broken replay ownership to visible fusion/memory-plan
+quality.
+
 This is a real improvement over the previous `grad-3` replay
 (`~10.6s`) and removes the worst `PAD`/`SHRINK` materializer from
 the profile, but it is still roughly `35x` behind tinygrad on the
@@ -423,22 +462,22 @@ bounded sample was too small and no candidate clearly beat baseline.
 
 Current work should prioritize these in order:
 
-1. Make early Conv/BN/pool backward replayable for the full
-   beautiful_mnist graph.  The current W1 path is still too slow even
-   at BS=1.
-2. Reduce BS=512 forward replay time.  Current forward is about
-   `300ms`; tinygrad's whole captured train step is about `30-33ms`.
-3. Broaden the generated Conv2D schedule beyond threadgroup size,
+1. Fuse or recompute the huge multi-consumer conv/backward
+   `RESHAPE/PAD/ADD/EXPAND` producers.  The largest remaining live
+   BS=32 Metal buffer is `1.31GB` and feeds 8 consumers.
+2. Reduce graph replay chunk count from 18 toward tinygrad's 3 graph
+   submissions, without regressing the bounded memory profile.
+3. Lower row-wise/group reductions and softmax-like patterns as
+   generated tile kernels instead of scalar reducer loops.
+4. Broaden the generated Conv2D schedule beyond threadgroup size,
    output-per-thread, and reduce-unroll.  Next useful knobs are output
    axis mapping, cooperative reduction shape, local-memory staging, and
    vector width.
-4. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
-   instead of scalar reducer loops.
 5. Reduce first-sample overhead for Metal once steady replay is in the
    right class.
 6. Add Metal `simdgroup_matrix`/MMA variants after reductions and
    local-memory tiling are stable.
-5. Keep improving multi-grad structural sharing.  It is not the top
+7. Keep improving multi-grad structural sharing.  It is not the top
    bottleneck in the latest LeNet measurements, but it will matter once
    larger training loops become kernel-dispatch bound.
 

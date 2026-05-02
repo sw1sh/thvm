@@ -764,6 +764,64 @@ VerificationTest[
     TestID -> "kernel-opts/metal-tjit-sinks-assign-into-producer"
 ]
 
+VerificationTest[
+    (* Rootless replay temporaries with non-overlapping lifetimes can
+       reuse an earlier Metal output slot.  The pack marker is exposed
+       through TJitCaptureOps so memory profiles can tell slot packing
+       apart from ordinary repeated writes to the same persistent
+       destination. *)
+    Module[{oldBackend, oldTile, restore, x, y, one, w, z, f, ops,
+            dispatches, summary, counters, wData, zData},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"],
+            TInit[];
+            x   = TTensorCreate @ NumericArray[N @ Range[4], "Real32"];
+            y   = TTensorCreate @ NumericArray[N @ Range[10, 13], "Real32"];
+            one = TTensorCreate @ NumericArray[ConstantArray[1., 4], "Real32"];
+            w   = TTensorCreate @ NumericArray[ConstantArray[0., 4], "Real32"];
+            z   = TTensorCreate @ NumericArray[ConstantArray[0., 4], "Real32"];
+            f = TJit[Function[{}, Module[{t1, t2, u1, u2},
+                t1 = TRealize[x + one];
+                u1 = TAssign[w, t1 * one];
+                TRealize @ u1;
+                t2 = TRealize[y + one];
+                u2 = TAssign[z, t2 * one];
+                TRealize @ u2;
+                Null
+            ]]];
+            f[];
+            ops = TJitCaptureOps[f];
+            dispatches = Select[ops, #["Kind"] === "DISPATCH" &];
+            summary = TJitCaptureSummary[f];
+            THotCountersReset[];
+            f[];
+            counters = THotCounters[];
+            wData = Round[Normal @ TTensorData[w], 0.001];
+            zData = Round[Normal @ TTensorData[z], 0.001],
+            restore[]
+        ];
+        {Count[Lookup[dispatches, "ReplayPacked", False], True] >= 1,
+         summary["ReplayPackedDispatches"] >= 1,
+         summary["ReplaySkipped"],
+         Lookup[counters, "JitReplayAssigns"],
+         wData,
+         zData}
+    ],
+    {True, True, 2, 0, {2., 3., 4., 5.}, {11., 12., 13., 14.}},
+    TestID -> "kernel-opts/metal-tjit-packs-rootless-temp-slots"
+]
+
 (* === per-program-shape sharing: opt on kid_1 visible on kid_2
        when both kids share the same KProgOp[] via the cache.  This
        is what makes the proposer + auto-bench (next pass) actually

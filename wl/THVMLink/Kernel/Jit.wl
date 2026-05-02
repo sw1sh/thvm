@@ -33,7 +33,7 @@ BeginPackage["THVMLink`"];
 
 TJit::usage        = "TJit[fn] returns a closure that captures fn's kernel-dispatch sequence on first call and replays it on subsequent calls.  Per-call wallclock drops from materialize+dispatch to just dispatch.  HoldFirst.  Recapture by TJitDrop[closure] then re-create.";
 TJitOpCount::usage = "TJitOpCount[closure] returns the number of kernel dispatches captured for the JIT closure (0 before the first call).";
-TJitCaptureOps::usage = "TJitCaptureOps[closure] returns the decoded captured TJit replay sequence as associations.  Dispatch rows include Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, and TileUopCount; assign rows include DstTid and SrcTid.";
+TJitCaptureOps::usage = "TJitCaptureOps[closure] returns the decoded captured TJit replay sequence as associations.  Dispatch rows include Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, TileUopCount, ReplaySkip, and ReplayPacked; assign rows include DstTid and SrcTid.";
 TJitCaptureRuns::usage = "TJitCaptureRuns[closure] groups a captured TJit replay sequence into consecutive dispatch runs split by assign records, with per-run dispatch-kind, program-key, output-size, and lowering summaries.";
 TJitCaptureGraphRuns::usage = "TJitCaptureGraphRuns[closure] groups a captured TJit replay sequence into Metal ICB-eligible replay chunks: live metal-tile dispatches, with metal-alias records consumed but not encoded, split by assign and non-tile dispatch records.";
 TJitCaptureSummary::usage = "TJitCaptureSummary[closure] returns compact counts for a captured TJit replay sequence, including dispatch/assign counts, dispatch-kind counts, consecutive dispatch-run lengths, top program-key counts, and the largest dispatch runs.";
@@ -138,13 +138,15 @@ TJitCaptureOps[TJitClosure[a_Association]] := Module[{
                     "OpCount" -> raw[[base + 10]],
                     "ScalarUopCount" -> raw[[base + 11]],
                     "TileUopCount" -> raw[[base + 12]],
-                    "ReplaySkip" -> (rowWidth >= 15 && raw[[base + 15]] =!= 0)
+                    "ReplaySkip" -> (rowWidth >= 15 && raw[[base + 15]] =!= 0),
+                    "ReplayPacked" -> (rowWidth >= 16 && raw[[base + 16]] =!= 0)
                 |>,
                 <|
                     "Kind" -> "ASSIGN",
                     "DstTid" -> raw[[base + 13]],
                     "SrcTid" -> raw[[base + 14]],
-                    "ReplaySkip" -> (rowWidth >= 15 && raw[[base + 15]] =!= 0)
+                    "ReplaySkip" -> (rowWidth >= 15 && raw[[base + 15]] =!= 0),
+                    "ReplayPacked" -> False
                 |>
             ]
         ],
@@ -274,6 +276,8 @@ TJitCaptureSummary[c_TJitClosure] := Module[{
         "KindCounts" -> Counts[Lookup[ops, "Kind", ""]],
         "DispatchKindCounts" -> Counts[Lookup[dispatches, "DispatchKind", ""]],
         "ReplaySkipped" -> Count[Lookup[ops, "ReplaySkip", False], True],
+        "ReplayPackedDispatches" ->
+            Count[Lookup[dispatches, "ReplayPacked", False], True],
         "ReplayLiveDispatches" -> Length[liveDispatches],
         "DispatchRuns" -> Lookup[runs, "Count", {}],
         "RunCount" -> Length[runs],

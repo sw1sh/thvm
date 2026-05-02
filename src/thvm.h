@@ -1372,7 +1372,7 @@ fn int kernel_should_autotune(struct KernelEntry const *ke);
 // Temporarily suppress TJit capture recording while internal
 // benchmark fires run.  The surrounding user kernel still gets
 // captured normally after autotune finishes.
-#define JIT_CAPTURE_EXPORT_ROW_WIDTH 15
+#define JIT_CAPTURE_EXPORT_ROW_WIDTH 16
 #define JIT_REPLAY_MAX_INPUTS 64
 typedef struct {
   u32 kid;
