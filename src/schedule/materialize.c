@@ -1452,6 +1452,11 @@ fn Term thvm_materialize(Term term) {
   // reduce to a TEN, so the ASSIGN never fires.
   materialize_inner_assigns(term);
 
+  Term simplified = uop_graph_simplify_materialize(term, 0);
+  if (simplified != term) {
+    return thvm_materialize(simplified);
+  }
+
   if (term_ext(term) == UOP_CONST) {
     u32 tid = const_to_tendesc(term_val(term));
     return term_new(0, TAG_TEN, TENS[tid].dtype, tid);

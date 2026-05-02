@@ -57,3 +57,58 @@ fn Term uop_graph_simplify(Term root) {
   u32 n_rules = (u32)(sizeof(rules) / sizeof(rules[0]));
   return uop_graph_rewrite(root, rules, n_rules, NULL);
 }
+
+static int uop_graph_shape_equal(Shape const *a, Shape const *b) {
+  if (a->ndim != b->ndim) {
+    return 0;
+  }
+  for (u32 i = 0; i < a->ndim; i++) {
+    if (a->dims[i] != b->dims[i]) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+fn Term uop_graph_simplify_checked(Term root, u32 env_id) {
+  Term out = uop_graph_simplify(root);
+  if (out == root) {
+    return out;
+  }
+
+  Shape root_shape;
+  Shape out_shape;
+  if (!term_shape_in(root, env_id, &root_shape)
+      || !term_shape_in(out, env_id, &out_shape)
+      || !uop_graph_shape_equal(&root_shape, &out_shape)) {
+    return root;
+  }
+
+  u32 root_dtype;
+  u32 out_dtype;
+  if (!term_dtype_in(root, env_id, &root_dtype)
+      || !term_dtype_in(out, env_id, &out_dtype)
+      || root_dtype != out_dtype) {
+    return root;
+  }
+
+  return out;
+}
+
+static int uop_graph_simplify_materialize_enabled(void) {
+  static int known = 0;
+  static int enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_UOP_GRAPH_SIMPLIFY");
+    enabled       = e != NULL && e[0] == '1';
+    known         = 1;
+  }
+  return enabled;
+}
+
+fn Term uop_graph_simplify_materialize(Term root, u32 env_id) {
+  if (!uop_graph_simplify_materialize_enabled()) {
+    return root;
+  }
+  return uop_graph_simplify_checked(root, env_id);
+}

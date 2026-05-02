@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Added: gate UOp graph simplification by shape and dtype
+
+`uop_graph_simplify_checked` now accepts graph rewrites only when
+shape and dtype inference prove the rewritten term matches the
+original.  The materializer has a default-off
+`THVM_UOP_GRAPH_SIMPLIFY=1` hook for this checked pass, giving us a
+safe place to test symbolic UOp rewrites before they become part of
+normal scheduling.
+
 ### Added: add UOp view helpers and graph simplification
 
 `uop_view` now gives graph rewrite callbacks a stable op/source-slot

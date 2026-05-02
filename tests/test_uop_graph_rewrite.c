@@ -41,6 +41,18 @@ static Term raw_reshape(Term src, u32 ndim, const u32 *dims) {
   return term_new(0, TAG_UOP, UOP_RESHAPE, loc);
 }
 
+static int test_shape_equal(Shape const *a, Shape const *b) {
+  if (a->ndim != b->ndim) {
+    return 0;
+  }
+  for (u32 i = 0; i < a->ndim; i++) {
+    if (a->dims[i] != b->dims[i]) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 int main(void) {
   thvm_init();
 
@@ -125,6 +137,36 @@ int main(void) {
   CHECK_EQ(term_val(heap_read(cloc + 1)), 1);
   CHECK_EQ(term_val(heap_read(cloc + 2)), 4);
   CHECK_EQ(uop_graph_rewrite_stat_hits("movement-chain-collapse"), 1);
+
+  TEST_BEGIN("uop-graph-simplify-checked/accepts-shape-dtype-stable");
+  Term checked_add = uop_graph_simplify_checked(raw_add, 0);
+  CHECK_EQ(checked_add, a);
+  Shape raw_add_shape;
+  Shape checked_add_shape;
+  CHECK(term_shape_in(raw_add, 0, &raw_add_shape));
+  CHECK(term_shape_in(checked_add, 0, &checked_add_shape));
+  CHECK(test_shape_equal(&raw_add_shape, &checked_add_shape));
+  u32 raw_add_dtype;
+  u32 checked_add_dtype;
+  CHECK(term_dtype_in(raw_add, 0, &raw_add_dtype));
+  CHECK(term_dtype_in(checked_add, 0, &checked_add_dtype));
+  CHECK_EQ(raw_add_dtype, checked_add_dtype);
+
+  TEST_BEGIN("uop-graph-simplify-checked/rejects-shape-changing-rule");
+  Term raw_eq = raw_binary(UOP_CMPEQ, a, a);
+  Term eq_unchecked = uop_graph_simplify(raw_eq);
+  CHECK_EQ(term_tag(eq_unchecked), TAG_UOP);
+  CHECK_EQ(term_ext(eq_unchecked), UOP_CONST);
+  Term eq_checked = uop_graph_simplify_checked(raw_eq, 0);
+  CHECK_EQ(eq_checked, raw_eq);
+
+  TEST_BEGIN("uop-graph-simplify-materialize/opt-in-hook");
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "1", 1);
+  Term mat_candidate = raw_binary(UOP_ADD, a, zero);
+  Term mat_simplified = uop_graph_simplify_materialize(mat_candidate, 0);
+  CHECK_EQ(mat_simplified, a);
+  Term mat_out = thvm_materialize(mat_candidate);
+  CHECK_EQ(mat_out, a);
 
   thvm_free();
   TEST_REPORT();

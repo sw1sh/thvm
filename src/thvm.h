@@ -1483,6 +1483,8 @@ fn char const *uop_graph_rewrite_stat_name(u32 i);
 fn u32  uop_graph_rewrite_stat_hits_at(u32 i);
 fn u32  uop_graph_rewrite_stat_hits(char const *name);
 fn Term uop_graph_simplify(Term root);
+fn Term uop_graph_simplify_checked(Term root, u32 env_id);
+fn Term uop_graph_simplify_materialize(Term root, u32 env_id);
 
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is

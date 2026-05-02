@@ -49,14 +49,18 @@ counts during `realize_classify`.
 slices.  `uop_view` gives rewrite callbacks a stable op/source-slot
 view, `uop_graph_rewrite` walks UOp DAGs bottom-up with memoization
 and canonical parent rebuilds, and `uop_graph_simplify` applies the
-first named symbolic rules over that core.  Set `DUMP_UOP_REWRITE=1`
-to print UOp rule hits after a pass.
+first named symbolic rules over that core.  `uop_graph_simplify_checked`
+accepts a rewrite only when shape and dtype inference prove the result
+matches the input.  Set `DUMP_UOP_REWRITE=1` to print UOp rule hits
+after a pass.
 
 This is still smaller than tinygrad's full `UPat` matcher: rules are
 plain C callbacks today, not declarative class/predicate captures.
 That is intentional for the first implementation slice.  It gives
 symbolic, movement, range, and schedule-IR rewrites one reusable
 attachment point without changing current scheduling behavior.
+The materializer has a default-off hook for the checked pass:
+`THVM_UOP_GRAPH_SIMPLIFY=1`.
 
 ## Rule Policy
 
@@ -93,7 +97,7 @@ boundaries.
 | Tinygrad rule family | Main local reference | THVM status |
 | --- | --- | --- |
 | Pattern infrastructure: `UPat`, `PatternMatcher`, `graph_rewrite`, matcher composition, bottom-up walk, rewrite stats | `tinygrad/uop/ops.py`, `tinygrad/uop/upat.py` | Partial. `realize_rewrite.c` names realize-boundary rules; `uop_view` and `uop_graph_rewrite` now provide UOp inspection, bottom-up traversal, memoization, parent rebuilds, replacement callbacks, and hit stats, but not declarative UPat-style captures. |
-| Algebraic/symbolic simplification: constants, identities, commutative canonicalization, div/mod recombine, cast/bitcast folding, boolean/where folding | `tinygrad/uop/symbolic.py` | Partial. Constructor-time rules live in `src/uop/rewrite.c`; `uop_graph_simplify` now reuses the safe unary/binary/movement-chain subset as named graph rules. Big missing piece is index expression simplification. |
+| Algebraic/symbolic simplification: constants, identities, commutative canonicalization, div/mod recombine, cast/bitcast folding, boolean/where folding | `tinygrad/uop/symbolic.py` | Partial. Constructor-time rules live in `src/uop/rewrite.c`; `uop_graph_simplify` now reuses the safe unary/binary/movement-chain subset as named graph rules, and `uop_graph_simplify_checked` gates materializer use on shape/dtype preservation. Big missing piece is index expression simplification. |
 | Valid-mask simplification and `WHERE`/load movement | `pm_simplify_valid`, `pm_move_where_on_load` in `tinygrad/uop/symbolic.py` | Mostly missing. Needed before broad PAD fanout fusion is safe. |
 | Realize-map seeding and rangeify application | `pm_generate_realize_map`, `pm_apply_rangeify` in `tinygrad/schedule/indexing.py` | Partial. `realize_classify.c` seeds boundaries; `rangeify.c` emits scalar graphs, but not through a general rewrite table. |
 | Movement-to-index rewrites | `apply_movement_op`, `pm_mops`, `pm_syntactic_sugar` in `tinygrad/schedule/rangeify.py` | Partial. THVM has edge-local rangeify fixes and view-only movement paths, but lacks a reusable movement rewrite table. |
@@ -127,7 +131,9 @@ goal:
    identities, div/mod simplification, valid-mask simplification, and
    `WHERE`/load movement.  Started with `uop_graph_simplify`, which
    lifts the existing safe constructor-time unary/binary and
-   reshape/expand-chain rules into the graph rewrite pipeline.
+   reshape/expand-chain rules into the graph rewrite pipeline.  A
+   default-off materialize hook (`THVM_UOP_GRAPH_SIMPLIFY=1`) now runs
+   the checked pass only when shape/dtype stay stable.
 3. Express movement lowering as declarative rules:
    `RESHAPE`/`PERMUTE`/`EXPAND`/`PAD`/`SHRINK`/`FLIP` over `INDEX`,
    with PAD becoming a valid mask.
