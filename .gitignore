@@ -15,5 +15,6 @@ wl/Notebooks
 #   ln -s ../TinyHVM TinyHVM
 TinyHVM
 waldmeister
+tilelang
 
 build/
