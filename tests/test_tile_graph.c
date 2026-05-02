@@ -176,6 +176,23 @@ static u32 build_scalar_reduce_max_graph(KernelEntry *ke) {
   return build_scalar_reduce_graph(ke, S_REDUCE_MAX);
 }
 
+static u32 build_scalar_post_reduce_sum_graph(KernelEntry *ke) {
+  CHECK(build_scalar_reduce_sum_graph(ke) != 0);
+  u32 store = 0;
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    if (ke->scalar_uops[i].op == S_STORE) {
+      store = i;
+      break;
+    }
+  }
+  CHECK(store != 0);
+  u32 red = ke->scalar_uops[store].src[1];
+  u32 c_two = rangeify_emit_leaf(ke, S_CONST, DT_FP32, 0x40000000u);
+  u32 scaled = rangeify_emit_binary(ke, S_MUL, DT_FP32, red, c_two);
+  ke->scalar_uops[store].src[1] = scaled;
+  return scaled;
+}
+
 static void set_reduce_axes(KernelEntry *ke, u32 tail_axis_type) {
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
@@ -896,6 +913,76 @@ int main(void) {
   CHECK(cast_out[1] == 0.5f);
   CHECK(cast_out[2] == 16.0f);
   kernel_free_arrays(tk);
+
+  TEST_BEGIN("tile-graph/scalar-reduce-axis-auto-sync-and-proposes-group");
+  CHECK(build_scalar_reduce_sum_graph(tk) != 0);
+  tk->output_shape.ndim = 1;
+  tk->output_shape.dims[0] = 1;
+  tk->axes = &tk->_local_axes;
+  memset(tk->axes, 0, sizeof(KernelAxes));
+  axes_default_for(tk);
+  CHECK_EQ(tk->axes->n_axes, 1u);
+  CHECK_EQ(tk->axes->axis_types[0], (u32)KAX_LOOP);
+  axes_ensure_scalar_reduce(tk);
+  CHECK_EQ(tk->axes->n_axes, 2u);
+  CHECK_EQ(tk->axes->axis_types[1], (u32)KAX_REDUCE);
+  CHECK_EQ(tk->axes->full_shape[1], 4u);
+  CHECK(tile_build_from_scalar(tk));
+  CHECK(tile_collect_plan_info(tk, &info));
+  CHECK_EQ(info.n_axes, 2u);
+  CHECK_EQ(info.axis_types[0], (u32)KAX_LOOP);
+  CHECK_EQ(info.axis_types[1], (u32)KAX_REDUCE);
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_TILE", "1", 1);
+  KOpt red_cands[16];
+  u32 n_red_cands = kernel_opts_propose(tk, red_cands,
+                                        (u32)(sizeof(red_cands)/
+                                              sizeof(*red_cands)));
+  int saw_group4 = 0;
+  for (u32 i = 0; i < n_red_cands; i++) {
+    if (red_cands[i].op == KOP_GROUP && red_cands[i].axis == 1
+        && red_cands[i].arg == 4) {
+      saw_group4 = 1;
+    }
+  }
+  CHECK(saw_group4);
+  unsetenv("THVM_BACKEND");
+  unsetenv("THVM_TILE");
+  kernel_free_arrays(tk);
+  tk->axes = NULL;
+
+  TEST_BEGIN("tile-graph/metal-post-reduce-expression-uses-group-accumulator");
+  CHECK(build_scalar_post_reduce_sum_graph(tk) != 0);
+  tk->output_shape.ndim = 1;
+  tk->output_shape.dims[0] = 1;
+  tk->axes = &tk->_local_axes;
+  memset(tk->axes, 0, sizeof(KernelAxes));
+  axes_default_for(tk);
+  axes_ensure_scalar_reduce(tk);
+  CHECK(tile_build_from_scalar(tk));
+  CHECK(tile_collect_plan_info(tk, &info));
+  CHECK_EQ(info.reduce_tile_id, 0u);
+  CHECK(info.scalar_reduce_id != 0);
+  CHECK(info.scalar_value_id != info.scalar_reduce_id);
+  u32 post_groups_x = 0;
+  u32 post_threads_x = 0;
+  CHECK(!cg_tile_metal_dispatch_shape(tk, &post_groups_x, &post_threads_x));
+  CHECK(cg_emit_tile_metal(tk) == NULL);
+  KOpt post_group4 = { .op = KOP_GROUP, .axis = 1, .arg = 4 };
+  CHECK(kernel_apply_opt(tk, post_group4));
+  CHECK(cg_tile_metal_dispatch_shape(tk, &post_groups_x, &post_threads_x));
+  CHECK_EQ(post_groups_x, 1u);
+  CHECK_EQ(post_threads_x, 4u);
+  char *post_metal_src = cg_emit_tile_metal(tk);
+  CHECK(post_metal_src != NULL);
+  if (post_metal_src != NULL) {
+    CHECK(strstr(post_metal_src, "threadgroup float") != NULL);
+    CHECK(strstr(post_metal_src, "_sh") != NULL);
+    CHECK(strstr(post_metal_src, "* as_type<float>(0x40000000u)") != NULL);
+    free(post_metal_src);
+  }
+  kernel_free_arrays(tk);
+  tk->axes = NULL;
 
   TEST_BEGIN("tile-graph/c-renderer-reduce-axis-jit");
   CHECK(build_scalar_reduce_sum_graph(tk) != 0);

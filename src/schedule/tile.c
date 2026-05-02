@@ -528,6 +528,26 @@ static int tile_collect_mma_info(KernelEntry const *ke, u32 root_id,
   return 1;
 }
 
+static u32 tile_find_nested_scalar_reduce(KernelEntry const *ke,
+                                          u32 scalar_id,
+                                          u32 depth) {
+  if (ke == NULL || ke->scalar_uops == NULL || scalar_id == 0
+      || scalar_id >= ke->n_scalar_uops || depth > ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *u = &ke->scalar_uops[scalar_id];
+  if (u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX) {
+    return scalar_id;
+  }
+  for (u32 i = 0; i < u->src_count && i < SCALAR_MAX_SRC; i++) {
+    u32 hit = tile_find_nested_scalar_reduce(ke, u->src[i], depth + 1);
+    if (hit != 0) {
+      return hit;
+    }
+  }
+  return 0;
+}
+
 fn int tile_validate(KernelEntry const *ke) {
   if (ke == NULL || ke->tile_uops == NULL || ke->n_tile_uops == 0) {
     return 0;
@@ -676,6 +696,12 @@ fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
     ScalarUop const *ru = &ke->scalar_uops[scalar_reduce_id];
     scalar_body_value_id = ru->src[0];
     body_tile_id = body_or_reduce->src[0];
+  } else {
+    scalar_reduce_id = tile_find_nested_scalar_reduce(ke, scalar_value_id, 0);
+    if (scalar_reduce_id != 0) {
+      ScalarUop const *ru = &ke->scalar_uops[scalar_reduce_id];
+      scalar_body_value_id = ru->src[0];
+    }
   }
 
   out->root_id              = ke->tile_root;

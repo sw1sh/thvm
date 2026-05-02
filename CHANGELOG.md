@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Added: scalar reduce axes feed Metal GROUP autotune
+
+Rangeified scalar kernels now append the scalar `S_REDUCE_*` range to
+`KernelAxes` when the legacy KProg program is not a tail-REDUCE.  The
+Metal proposer can now see those non-tail scalar reductions and emit
+`GROUP` candidates for the existing generated `GROUP_REDUCE` tile
+renderer.  The Metal tile renderer also substitutes the generated
+serial or threadgroup reduction accumulator into post-reduce scalar
+expressions after a `GROUP` opt is applied, while the no-opt baseline
+keeps the old Metal route for autotune comparison.
+
 ### Added: scalar-UOp structural CSE before tile planning
 
 Rangeify now runs a structural dedup pass over safe scalar expression

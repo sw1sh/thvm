@@ -218,6 +218,30 @@ graphs and compile inputs, but the steady throughput gap remains:
 generic is still about `66-69ms` versus oracle `~7ms`, so the next
 step is a better generated conv/reduce schedule.
 
+Next iteration started by making that schedule space reachable rather
+than adding custom backend recognizers: rangeified scalar reductions
+now append their `S_REDUCE_*` range into `KernelAxes` even when the
+legacy KProg reduction is not the final op.  The Metal proposer can
+therefore emit `GROUP` candidates for the existing generated
+`GROUP_REDUCE` renderer on movement-heavy scalar/tile reductions.
+Generated Metal tile source now substitutes the threadgroup reduction
+accumulator back into post-reduce scalar expressions after a `GROUP`
+opt, while no-opt reduce-then-ALU kernels keep the old Metal route so
+autotune can compare the cooperative tile candidate against the prior
+baseline.
+
+May 2 follow-up canary after that guard:
+
+- Generic Metal tile, no autotune:
+  `95.0ms / 63.3ms / 67.7ms`.
+- Fire-time autotune with fresh benchmarking (`THVM_AUTOTUNE_RUNS=3`,
+  cache disabled): `2821.0ms / 70.5ms / 72.6ms`.
+
+The new candidates are reachable and correctness holds, but they do
+not yet beat the old route on beautiful-mnist.  The remaining gap is
+still the generated conv/reduce schedule itself, not proposal
+plumbing.
+
 ## Files added
 
 - `src/codegen/axis.c`         -- `KernelAxes` default constructor

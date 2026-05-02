@@ -221,6 +221,9 @@ static RmtAxisMode rmt_axis_mode(CtKernelInfo const *info) {
   u32 n_local  = 0;
   u32 n_group_reduce = 0;
   int flat_ok = 1;
+  int nested_reduce = info->scalar.has_reduce
+                   && info->tile.scalar_reduce_id != 0
+                   && info->tile.reduce_tile_id == 0;
   for (u32 i = 0; i < info->tile.n_axes; i++) {
     if (info->tile.axis_types[i] == KAX_GROUP_REDUCE) {
       n_group_reduce++;
@@ -243,7 +246,7 @@ static RmtAxisMode rmt_axis_mode(CtKernelInfo const *info) {
   if (info->scalar.has_reduce && n_group_reduce == 1 && flat_ok) {
     return RMT_AXIS_GROUP_REDUCE;
   }
-  if (flat_ok) {
+  if (flat_ok && !nested_reduce) {
     return RMT_AXIS_FLAT_GRID;
   }
   return RMT_AXIS_UNSUPPORTED;
@@ -516,7 +519,13 @@ static int rmt_emit_uint_expr(CgBuf *b, KernelEntry const *ke, u32 op_id) {
   }
 }
 
-static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
+static int rmt_emit_value_with_reduce(CgBuf *b, KernelEntry const *ke,
+                                      u32 op_id, u32 active_reduce_id,
+                                      char const *reduce_expr) {
+  if (op_id == active_reduce_id && reduce_expr != NULL) {
+    cg_append(b, "%s", reduce_expr);
+    return 1;
+  }
   ScalarUop const *u = &ke->scalar_uops[op_id];
   switch (u->op) {
     case S_CONST: {
@@ -548,11 +557,13 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
                      : (u->op == S_CMPLT) ? "<"
                      : "==";
       cg_append(b, "(");
-      if (!rmt_emit_value(b, ke, u->src[0])) {
+      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
+                                      active_reduce_id, reduce_expr)) {
         return 0;
       }
       cg_append(b, " %s ", op);
-      if (!rmt_emit_value(b, ke, u->src[1])) {
+      if (!rmt_emit_value_with_reduce(b, ke, u->src[1],
+                                      active_reduce_id, reduce_expr)) {
         return 0;
       }
       if (u->op == S_CMPLT || u->op == S_CMPEQ) {
@@ -564,14 +575,16 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
     }
     case S_NEG:
       cg_append(b, "-(");
-      if (!rmt_emit_value(b, ke, u->src[0])) {
+      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
+                                      active_reduce_id, reduce_expr)) {
         return 0;
       }
       cg_append(b, ")");
       return 1;
     case S_RECIP:
       cg_append(b, "(1.0f / (");
-      if (!rmt_emit_value(b, ke, u->src[0])) {
+      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
+                                      active_reduce_id, reduce_expr)) {
         return 0;
       }
       cg_append(b, "))");
@@ -583,7 +596,8 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
                        : (u->op == S_EXP2) ? "exp2"
                                             : "log2";
       cg_append(b, "%s(", name);
-      if (!rmt_emit_value(b, ke, u->src[0])) {
+      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
+                                      active_reduce_id, reduce_expr)) {
         return 0;
       }
       cg_append(b, ")");
@@ -594,7 +608,8 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
         return 0;
       }
       cg_append(b, "float(");
-      if (!rmt_emit_value(b, ke, u->src[0])) {
+      if (!rmt_emit_value_with_reduce(b, ke, u->src[0],
+                                      active_reduce_id, reduce_expr)) {
         return 0;
       }
       cg_append(b, ")");
@@ -608,11 +623,13 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
         return 0;
       }
       cg_append(b, ") ? (");
-      if (!rmt_emit_value(b, ke, u->src[1])) {
+      if (!rmt_emit_value_with_reduce(b, ke, u->src[1],
+                                      active_reduce_id, reduce_expr)) {
         return 0;
       }
       cg_append(b, ") : (");
-      if (!rmt_emit_value(b, ke, u->src[2])) {
+      if (!rmt_emit_value_with_reduce(b, ke, u->src[2],
+                                      active_reduce_id, reduce_expr)) {
         return 0;
       }
       cg_append(b, "))");
@@ -620,6 +637,10 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
     default:
       return 0;
   }
+}
+
+static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
+  return rmt_emit_value_with_reduce(b, ke, op_id, 0, NULL);
 }
 
 static int rmt_emit_store_value(CgBuf *b, KernelEntry const *ke,
@@ -650,6 +671,8 @@ static int rmt_emit_store_value(CgBuf *b, KernelEntry const *ke,
   if (extent == 0) {
     return 0;
   }
+  char acc_expr[32];
+  snprintf(acc_expr, sizeof(acc_expr), "_acc%u", rid);
   u32 unroll_factor = 1;
   if (ke->axes != NULL) {
     for (u32 i = 0; i < ke->axes->n_applied; i++) {
@@ -687,7 +710,10 @@ static int rmt_emit_store_value(CgBuf *b, KernelEntry const *ke,
   if (!rmt_emit_index_offset(b, ke, st->src[0])) {
     return 0;
   }
-  cg_append(b, "] = _acc%u", rid);
+  cg_append(b, "] = ");
+  if (!rmt_emit_value_with_reduce(b, ke, st->src[1], rid, acc_expr)) {
+    return 0;
+  }
   return 1;
 }
 
@@ -719,6 +745,8 @@ static int rmt_emit_group_reduce_store(CgBuf *b, KernelEntry const *ke,
   if (extent == 0) {
     return 0;
   }
+  char reduce_expr[32];
+  snprintf(reduce_expr, sizeof(reduce_expr), "_sh%u[0]", rid);
 
   cg_append(b, "  threadgroup float _sh%u[%uu];\n", rid, group);
   if (ru->op == S_REDUCE_MAX) {
@@ -764,7 +792,11 @@ static int rmt_emit_group_reduce_store(CgBuf *b, KernelEntry const *ke,
   if (!rmt_emit_index_offset(b, ke, st->src[0])) {
     return 0;
   }
-  cg_append(b, "] = _sh%u[0];\n", rid);
+  cg_append(b, "] = ");
+  if (!rmt_emit_value_with_reduce(b, ke, st->src[1], rid, reduce_expr)) {
+    return 0;
+  }
+  cg_append(b, ";\n");
   cg_append(b, "  }\n");
   return 1;
 }

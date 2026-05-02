@@ -1204,6 +1204,9 @@ fn Term interact_kernel (Term kernel);
 // (caller already configured it).  Called from materialize after
 // kernel program is committed.
 fn void axes_default_for(struct KernelEntry *ke);
+// Supplement default axes with the scalar reduce range after rangeify.
+// This exposes non-tail scalar reductions to tile GROUP / UNROLL opts.
+fn void axes_ensure_scalar_reduce(struct KernelEntry *ke);
 
 // Apply one TOpt to the axis structure: split the indicated axis,
 // mark the new inner axis with the opt's KAX_ type (UPCAST/UNROLL/

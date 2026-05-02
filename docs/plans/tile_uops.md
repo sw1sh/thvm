@@ -36,6 +36,13 @@ that future renderers can lower differently for CPU and Metal.
   sharing and tile planning, deduplicating repeated constants,
   address expressions, loads, casts, and ALU nodes while preserving
   range/store/bufferize identity;
+- rangeified scalar reductions append their `S_REDUCE_*` range to
+  `KernelAxes` even when the original KProg reduction is not the tail
+  op, which makes the existing Metal `GROUP_REDUCE` renderer reachable
+  through normal `GROUP` autotune candidates; generated Metal tile
+  source substitutes the threadgroup accumulator into post-reduce
+  scalar expressions after a `GROUP` opt, while the no-opt baseline
+  can still fall back to the old Metal route for autotune comparison;
 - `TKernelAutotune` keeps the in-process per-program-shape behavior
   and now also persists winning opts under
   `$XDG_CACHE_HOME/thvm/autotune` / `$HOME/.cache/thvm/autotune`

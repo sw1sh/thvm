@@ -25,7 +25,7 @@
 // Reduce-axis size for a tail-REDUCE kernel, or 0 if not reduce-tail
 // (or if shape inference fails).  Mirrors the same calc that
 // axes_default_for / cg_emit do.
-static u32 propose_reduce_axis_size(KernelEntry const *ke) {
+static u32 propose_kprog_reduce_axis_size(KernelEntry const *ke) {
   if (ke->n_ops == 0) return 0;
   KProgOp const *rd = &ke->program[ke->n_ops - 1];
   if (rd->opcode != UOP_REDUCE) return 0;
@@ -34,6 +34,38 @@ static u32 propose_reduce_axis_size(KernelEntry const *ke) {
   else                           src_numel = ke->program[KSRC_INDEX(rd->src[0])].numel;
   u32 out_numel = ke->output_numel ? ke->output_numel : 1;
   return src_numel / out_numel;
+}
+
+static u32 propose_scalar_reduce_axis_size(KernelEntry const *ke) {
+  if (ke == NULL || ke->scalar_uops == NULL) {
+    return 0;
+  }
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    ScalarUop const *u = &ke->scalar_uops[i];
+    if (u->op != S_REDUCE_SUM && u->op != S_REDUCE_MAX) {
+      continue;
+    }
+    if (u->src_count < 2 || u->src[1] == 0
+        || u->src[1] >= ke->n_scalar_uops) {
+      return 0;
+    }
+    ScalarUop const *rng = &ke->scalar_uops[u->src[1]];
+    if (rng->op != S_RANGE) {
+      return 0;
+    }
+    u32 axis_type = (u32)(rng->extra >> 32);
+    u32 extent    = (u32)(rng->extra & 0xFFFFFFFFu);
+    if (axis_type != S_AXIS_REDUCE) {
+      return 0;
+    }
+    return extent;
+  }
+  return 0;
+}
+
+static u32 propose_reduce_axis_size(KernelEntry const *ke) {
+  u32 size = propose_kprog_reduce_axis_size(ke);
+  return size != 0 ? size : propose_scalar_reduce_axis_size(ke);
 }
 
 // Index of the reduce axis in axis_types[] -- the last axis of type

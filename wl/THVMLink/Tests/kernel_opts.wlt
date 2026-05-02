@@ -315,10 +315,14 @@ VerificationTest[
     (* Disk cache: first autotune writes a winner; the second runtime
        session with the same program shape should replay it without
        running benchmark dispatches. *)
-    Module[{oldCache, oldDisable, oldDir, dir, restore, files, before, after},
+    Module[{oldCache, oldDisable, oldDir, oldBackend, oldTile, oldRuns,
+            dir, restore, files, before, after},
         oldCache   = Environment["THVM_AUTOTUNE_CACHE"];
         oldDisable = Environment["THVM_AUTOTUNE_DISABLE_CACHE"];
         oldDir     = Environment["THVM_AUTOTUNE_CACHE_DIR"];
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        oldRuns    = Environment["THVM_AUTOTUNE_RUNS"];
         dir = CreateDirectory @ FileNameJoin[{
             $TemporaryDirectory,
             "thvm-autotune-cache-" <> ToString[$ProcessID] <> "-" <>
@@ -333,12 +337,24 @@ VerificationTest[
                 SetEnvironment["THVM_AUTOTUNE_DISABLE_CACHE" -> ""]];
             If[StringQ[oldDir],
                 SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> oldDir],
-                SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> ""]]
+                SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> ""]];
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]];
+            If[StringQ[oldRuns],
+                SetEnvironment["THVM_AUTOTUNE_RUNS" -> oldRuns],
+                SetEnvironment["THVM_AUTOTUNE_RUNS" -> ""]]
         );
         Internal`WithLocalSettings[
             SetEnvironment["THVM_AUTOTUNE_CACHE" -> "1"];
             SetEnvironment["THVM_AUTOTUNE_DISABLE_CACHE" -> ""];
-            SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> dir],
+            SetEnvironment["THVM_AUTOTUNE_CACHE_DIR" -> dir];
+            SetEnvironment["THVM_BACKEND" -> ""];
+            SetEnvironment["THVM_TILE" -> ""];
+            SetEnvironment["THVM_AUTOTUNE_RUNS" -> ""],
 
             TInit[];
             xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
@@ -392,6 +408,45 @@ VerificationTest[
     AllTrue[TKernelProposed[kid], MatchQ[TOpt["UNROLL", _, _]]],
     True,
     TestID -> "kernel-opts/propose-reduce-no-upcast"
+]
+
+VerificationTest[
+    (* Metal tile scalar reductions can be followed by ALU and still
+       expose GROUP candidates; no-opt keeps the old Metal route so
+       autotune can compare it against GROUP. *)
+    Module[{oldBackend, oldTile, restore, kid, props, plan, beforeKind, afterKind},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"],
+            TInit[];
+            xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
+            TRealize @ TUOpMul[TUOpReduce[xT, 0, "SUM"], TUOpConst[2.0]];
+            kid   = TKernelCount[] - 1;
+            props = TKernelProposed[kid];
+            plan  = TKernelTilePlan[kid];
+            beforeKind = TKernelDispatchKind[kid];
+            TKernelApplyOpt[kid, TOpt["GROUP", 1, 32]];
+            TKernel[kid][];
+            afterKind = TKernelDispatchKind[kid],
+            restore[]
+        ];
+        {MemberQ[props, TOpt["GROUP", 1, 32]],
+         plan["scalar_reduce"] =!= 0,
+         beforeKind === "metal-op",
+         afterKind === "metal-tile"}
+    ],
+    {True, True, True, True},
+    TestID -> "kernel-opts/metal-post-reduce-group-proposal"
 ]
 
 (* === TKernelVariants[kid]: bench-and-report every candidate

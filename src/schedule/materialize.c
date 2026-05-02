@@ -1235,6 +1235,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
     int lowered = rangeify_on && rangeify_try_lower_elementwise(ke);
     if (lowered) {
       rangeify_cse(ke);
+      axes_ensure_scalar_reduce(ke);
     }
     if (!ke->program_shared) {
       KernelAxes *shared_axes = kernel_rangeified_axes_cache_lookup_or_insert(ke);
@@ -1243,6 +1244,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
       }
     }
     if (lowered) {
+      axes_ensure_scalar_reduce(ke);
       tile_sync_from_scalar(ke);
     }
   }
