@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: fold scalar integer expression identities
+
+Rangeify now folds simple scalar integer expression identities while
+emitting `S_I*` nodes: add/sub zero, mul zero/one, div by one, mod by
+one, self-less-than, and constant binary integer expressions.  This
+keeps generated `S_INDEX_E` address trees smaller before CSE/DCE.
+
 ### Added: normalize nested scalar masked values
 
 `emit_iwhere` now flattens `WHERE(mask2, WHERE(mask1, value, zero),

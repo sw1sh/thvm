@@ -176,6 +176,35 @@ int main(void) {
   CHECK_EQ(ke->scalar_uops[ke->scalar_uops[mi_bounded].src[1]].op, S_ISUB);
   rangeify_free(ke);
 
+  TEST_BEGIN("scalar-graph/integer-expression-folds");
+  u32 si_r = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+                                ((u64)S_AXIS_LOOP << 32) | 8u);
+  u32 si_zero = emit_iconst(ke, 0);
+  u32 si_one  = emit_iconst(ke, 1);
+  u32 si_two  = emit_iconst(ke, 2);
+  u32 si_six  = emit_iconst(ke, 6);
+  CHECK_EQ(emit_ibinop(ke, S_IADD, si_r, si_zero), si_r);
+  CHECK_EQ(emit_ibinop(ke, S_IADD, si_zero, si_r), si_r);
+  CHECK_EQ(emit_ibinop(ke, S_ISUB, si_r, si_zero), si_r);
+  CHECK_EQ(emit_ibinop(ke, S_IMUL, si_r, si_one), si_r);
+  CHECK_EQ(emit_ibinop(ke, S_IMUL, si_one, si_r), si_r);
+  CHECK_EQ(emit_ibinop(ke, S_IMUL, si_zero, si_r), si_zero);
+  CHECK_EQ(emit_ibinop(ke, S_IDIV, si_r, si_one), si_r);
+  u32 si_mod_one = emit_ibinop(ke, S_IMOD, si_r, si_one);
+  i64 si_val = -1;
+  CHECK(scalar_iconst_value(ke, si_mod_one, &si_val));
+  CHECK_EQ((u64)si_val, 0);
+  u32 si_const_add = emit_ibinop(ke, S_IADD, si_two, si_six);
+  CHECK(scalar_iconst_value(ke, si_const_add, &si_val));
+  CHECK_EQ((u64)si_val, 8);
+  u32 si_const_lt = emit_ibinop(ke, S_ILT, si_two, si_six);
+  CHECK(scalar_iconst_value(ke, si_const_lt, &si_val));
+  CHECK_EQ((u64)si_val, 1);
+  u32 si_self_lt = emit_ibinop(ke, S_ILT, si_r, si_r);
+  CHECK(scalar_iconst_value(ke, si_self_lt, &si_val));
+  CHECK_EQ((u64)si_val, 0);
+  rangeify_free(ke);
+
   TEST_BEGIN("scalar-graph/opname-helpers-cover-enum");
   // Every enum value should have a non-"?" name.  Belt-and-braces
   // against future additions where someone forgets to extend the

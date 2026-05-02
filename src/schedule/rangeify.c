@@ -444,16 +444,98 @@ static int scalar_iconst_value(KernelEntry const *ke, u32 id, i64 *out) {
 }
 
 static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
+  i64 av = 0;
+  i64 bv = 0;
+  int ac = scalar_iconst_value(ke, a, &av);
+  int bc = scalar_iconst_value(ke, b, &bv);
+  if (ac && bc) {
+    switch (op) {
+      case S_IADD:
+        return emit_iconst(ke, av + bv);
+      case S_ISUB:
+        return emit_iconst(ke, av - bv);
+      case S_IMUL:
+        return emit_iconst(ke, av * bv);
+      case S_IDIV:
+        if (bv != 0) {
+          return emit_iconst(ke, av / bv);
+        }
+        break;
+      case S_IMOD:
+        if (bv != 0) {
+          return emit_iconst(ke, av % bv);
+        }
+        break;
+      case S_ILT:
+        return emit_iconst(ke, av < bv ? 1 : 0);
+      case S_IAND:
+        return emit_iconst(ke, av & bv);
+      default:
+        break;
+    }
+  }
+
+  if (op == S_IADD) {
+    if (ac && av == 0) {
+      return b;
+    }
+    if (bc && bv == 0) {
+      return a;
+    }
+  }
+
+  if (op == S_ISUB) {
+    if (bc && bv == 0) {
+      return a;
+    }
+    if (a == b) {
+      return emit_iconst(ke, 0);
+    }
+  }
+
+  if (op == S_IMUL) {
+    if (ac) {
+      if (av == 0) {
+        return a;
+      }
+      if (av == 1) {
+        return b;
+      }
+    }
+    if (bc) {
+      if (bv == 0) {
+        return b;
+      }
+      if (bv == 1) {
+        return a;
+      }
+    }
+  }
+
+  if (op == S_IDIV) {
+    if (bc && bv == 1) {
+      return a;
+    }
+  }
+
+  if (op == S_IMOD) {
+    if (bc && bv == 1) {
+      return emit_iconst(ke, 0);
+    }
+  }
+
+  if (op == S_ILT && a == b) {
+    return emit_iconst(ke, 0);
+  }
+
   if (op == S_IAND) {
     if (a == b) {
       return a;
     }
-    i64 av = 0;
-    i64 bv = 0;
-    if (scalar_iconst_value(ke, a, &av)) {
+    if (ac) {
       return av == 0 ? a : b;
     }
-    if (scalar_iconst_value(ke, b, &bv)) {
+    if (bc) {
       return bv == 0 ? b : a;
     }
   }
