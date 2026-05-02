@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: specialized Metal paths are diagnostic only
+
+Direct Metal conv2d/GEMV recognizers are now gated behind
+`THVM_METAL_SPECIALIZED=1` and disabled by default.  They remain as
+correctness/performance oracles, but the default path stays on the
+lowered scalar/tile graph so future speedups must come from
+tile-plan recognition, beam search, and autotuning.
+
 ### Added: direct Metal conv2d dispatch
 
 Metal now recognizes the im2col-fused scalar graph produced by

@@ -62,6 +62,11 @@ that future renderers can lower differently for CPU and Metal.
   `thread_position_in_threadgroup`, dispatches
   `GLOBAL x LOCAL` as threadgroups x threads-per-threadgroup, and
   records dispatch kind `"metal-tile"`;
+- Metal also has `THVM_METAL_SPECIALIZED=1` diagnostic direct
+  conv2d/GEMV paths.  These are not the intended architecture and
+  stay off by default; they exist only as correctness/performance
+  oracles while the tile planner learns to rediscover equivalent
+  schedules from lowered scalar/tile primitives;
 - f32/f64 `S_CAST` is generated with per-input and output pointer
   types, so scalar C no longer requires one uniform kernel dtype for
   simple cast chains;
@@ -148,9 +153,13 @@ output axis.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
+2. Move the conv2d/GEMV diagnostic wins into generic tile
+   recognition: detect im2col-like reduce graphs as tile templates,
+   expose schedule choices through `TKernelProposed`, and let
+   `TKernelAutotune` / beam search pick among them.
+3. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
    instead of using only scalar reducer loops.
-3. Generalize `TILE_MMA` target code beyond fixed 8/16/32
+4. Generalize `TILE_MMA` target code beyond fixed 8/16/32
    threadgroup-memory shaders.  The next backend target is Metal
    `simdgroup_multiply_accumulate`; the same generic analysis should
    also be the hook for later attention-pattern discovery rather than

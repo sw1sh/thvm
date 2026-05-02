@@ -749,6 +749,11 @@ static int metal_gemm_tile_index(u32 tile, u32 *idx) {
   }
 }
 
+static int metal_specialized_diagnostics_enabled(void) {
+  char const *e = getenv("THVM_METAL_SPECIALIZED");
+  return e != NULL && e[0] == '1';
+}
+
 static id<MTLComputePipelineState> metal_gemm_pipeline(u32 tile) {
   u32 idx = 0;
   if (!metal_gemm_tile_index(tile, &idx)) {
@@ -1136,14 +1141,15 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
 
-  if (kprog_supported && metal_try_conv2d_flat(ke, in_buf_ids, out_buf_id)) {
-    cg_profile_record(kid, KDISPATCH_METAL_CONV, cg_now_us() - t0);
-    return 0;
-  }
-
-  if (kprog_supported && metal_try_gemv(ke, in_buf_ids, out_buf_id)) {
-    cg_profile_record(kid, KDISPATCH_METAL_GEMV, cg_now_us() - t0);
-    return 0;
+  if (kprog_supported && metal_specialized_diagnostics_enabled()) {
+    if (metal_try_conv2d_flat(ke, in_buf_ids, out_buf_id)) {
+      cg_profile_record(kid, KDISPATCH_METAL_CONV, cg_now_us() - t0);
+      return 0;
+    }
+    if (metal_try_gemv(ke, in_buf_ids, out_buf_id)) {
+      cg_profile_record(kid, KDISPATCH_METAL_GEMV, cg_now_us() - t0);
+      return 0;
+    }
   }
 
   if (kprog_supported && metal_try_gemm(ke, in_buf_ids, out_buf_id)) {

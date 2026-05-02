@@ -105,11 +105,16 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* f32 matrix-vector lowering should bypass the generic scalar
-       Metal renderer once the direct GEMV recognizer sees TMatVec. *)
+    (* f32 matrix-vector diagnostic path is opt-in; the default path
+       should keep using the generic lowered graph. *)
     TInit[]; TReset[];
-    Module[{ctx = TContextNew["metal"], result},
-        If[ ctx === 0, Return[True]];
+    Module[{ctx = TContextNew["metal"], result, oldSpecialized, restore},
+        oldSpecialized = Environment["THVM_METAL_SPECIALIZED"];
+        restore[] := If[StringQ[oldSpecialized],
+            SetEnvironment["THVM_METAL_SPECIALIZED" -> oldSpecialized],
+            SetEnvironment["THVM_METAL_SPECIALIZED" -> ""]];
+        SetEnvironment["THVM_METAL_SPECIALIZED" -> "1"];
+        If[ ctx === 0, restore[]; Return[True]];
         result = TInContext[ctx,
             w = TTensorCreate @ NumericArray[
                 {{1., 2., 3.}, {4., 5., 6.}}, "Real32"];
@@ -120,6 +125,7 @@ VerificationTest[
              TKernelDispatchKind[kid]}
         ];
         TContextDestroy[ctx];
+        restore[];
         result === {{50., 122.}, "metal-gemv"} || ctx === 0
     ],
     True,
@@ -220,10 +226,16 @@ VerificationTest[
 
 VerificationTest[
     (* Conv2D over a produced activation should route through the
-       direct Metal conv shader for the im2col-fused scalar graph. *)
+       opt-in direct Metal conv diagnostic shader for the im2col-fused
+       scalar graph. *)
     TInit[]; TReset[];
-    Module[{ctx = TContextNew["metal"], result},
-        If[ ctx === 0, Return[True]];
+    Module[{ctx = TContextNew["metal"], result, oldSpecialized, restore},
+        oldSpecialized = Environment["THVM_METAL_SPECIALIZED"];
+        restore[] := If[StringQ[oldSpecialized],
+            SetEnvironment["THVM_METAL_SPECIALIZED" -> oldSpecialized],
+            SetEnvironment["THVM_METAL_SPECIALIZED" -> ""]];
+        SetEnvironment["THVM_METAL_SPECIALIZED" -> "1"];
+        If[ ctx === 0, restore[]; Return[True]];
         result = TInContext[ctx,
             x = TTensorCreate @ NumericArray[
                 ConstantArray[1., {2, 6, 6}], "Real32"];
@@ -236,6 +248,7 @@ VerificationTest[
              MemberQ[kinds, "metal-conv"]}
         ];
         TContextDestroy[ctx];
+        restore[];
         result === {ConstantArray[18., {3, 4, 4}], True}
     ],
     True,
