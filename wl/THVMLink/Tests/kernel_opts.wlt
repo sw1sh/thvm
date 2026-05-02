@@ -652,6 +652,28 @@ VerificationTest[
     TestID -> "kernel-opts/tjit-captures-high-input-kernel"
 ]
 
+VerificationTest[
+    (* Capture introspection should expose enough per-dispatch shape
+       metadata to compare THVM replay runs against tinygrad graph
+       batches. *)
+    TInit[];
+    xT = TTensorCreate @ NumericArray[N @ Range[8], "Real32"];
+    f = TJit[Function[{}, TRealize @ TUOpAdd[xT, xT]]];
+    f[];
+    ops = TJitCaptureOps[f];
+    runs = TJitCaptureRuns[f];
+    summary = TJitCaptureSummary[f];
+    {TJitOpCount[f],
+     Length[ops],
+     First[ops]["OutputNumel"],
+     First[ops]["OpCount"] > 0,
+     summary["RunCount"],
+     summary["DispatchRuns"],
+     Length[summary["TopRuns"]]},
+    {1, 1, 8, True, 1, {1}, 1},
+    TestID -> "kernel-opts/tjit-capture-introspection"
+]
+
 (* === per-program-shape sharing: opt on kid_1 visible on kid_2
        when both kids share the same KProgOp[] via the cache.  This
        is what makes the proposer + auto-bench (next pass) actually

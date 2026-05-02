@@ -53,6 +53,19 @@ inputShapes[kid_Integer] := Quiet[
 
 formatMaybeAssoc[a_Association] := If[Length[a] == 0, "{}", formatCounts[a]]
 
+formatRun[row_Association] := StringRiffle[{
+    "start=" <> ToString[row["Start"]],
+    "end=" <> ToString[row["End"]],
+    "count=" <> ToString[row["Count"]],
+    "kinds=" <> formatMaybeAssoc[row["DispatchKindCounts"]],
+    "scalar=" <> ToString[row["ScalarLowered"]],
+    "tile=" <> ToString[row["TileLowered"]],
+    "total_out=" <> ToString[row["TotalOutputNumel"]],
+    "top_keys=" <> formatMaybeAssoc[row["TopProgramKeys"]],
+    "out_numel=" <> formatMaybeAssoc[row["TopOutputNumels"]],
+    "op_counts=" <> formatMaybeAssoc[row["TopOpCounts"]]
+}, " "]
+
 formatMetalMemory[p_Association] := StringRiffle[{
     "live=" <> ToString[p["LiveBytes"]],
     "retained=" <> ToString[p["RetainedBytes"]],
@@ -108,6 +121,7 @@ showFusionGaps = envValue["SHOW_FUSION_GAPS", "0"] === "1" || showProgramProfile
 showHotCounters = envValue["SHOW_HOT_COUNTERS", "0"] === "1";
 dumpTopProgram = envValue["DUMP_TOP_PROGRAM", "0"] === "1";
 dumpTopLowered = envValue["DUMP_TOP_LOWERED", "0"] === "1";
+dumpJitCapture = envValue["DUMP_JIT_CAPTURE", "0"] === "1";
 
 print["beautiful_mnist training benchmark"];
 print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
@@ -126,6 +140,7 @@ print["  BS=", bs,
       "  SHOW_HOT_COUNTERS=", If[showHotCounters, "1", "0"],
       "  DUMP_TOP_PROGRAM=", If[dumpTopProgram, "1", "0"],
       "  DUMP_TOP_LOWERED=", If[dumpTopLowered, "1", "0"],
+      "  DUMP_JIT_CAPTURE=", If[dumpJitCapture, "1", "0"],
       "  PROFILE_TOP=", topCount,
       "  POST_AUTOTUNE=", If[doPostAutotune, "1", "0"]];
 
@@ -237,6 +252,17 @@ If[showMemoryProfile,
     print["metal_memory after_timed:  ", formatMetalMemory[memoryAfterTimed]]];
 If[showHotCounters,
     print["hot_counters timed: ", formatCounts[hotCountersTimed]]];
+If[dumpJitCapture,
+    Module[{summary = TJitCaptureSummary[jittedStep]},
+        print["jit_capture_summary: op_count=", summary["OpCount"],
+              " kinds=", formatMaybeAssoc[summary["KindCounts"]],
+              " dispatch_kinds=", formatMaybeAssoc[summary["DispatchKindCounts"]],
+              " run_count=", summary["RunCount"],
+              " dispatch_runs=", summary["DispatchRuns"],
+              " top_keys=", formatMaybeAssoc[summary["TopProgramKeys"]],
+              " top_out_numel=", formatMaybeAssoc[summary["TopOutputNumels"]]];
+        print["jit_capture_top_runs:"];
+        Do[print["  ", formatRun[row]], {row, summary["TopRuns"]}]]];
 If[showProgramProfile,
     Module[{groups = Take[TProfileProgramGroups[profileTimedDelta], UpTo[topCount]]},
         print["top timed program shapes by total dispatch time:"];

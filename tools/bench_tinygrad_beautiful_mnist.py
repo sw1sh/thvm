@@ -10,6 +10,7 @@ same shape as wl/Examples/beautiful-mnist/bench-train.wls.
 from __future__ import annotations
 
 import collections
+import hashlib
 import os
 import sys
 import time
@@ -40,6 +41,13 @@ def env_int(name: str, default: int) -> int:
   return int(raw) if raw.strip().isdigit() else default
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+  raw = os.environ.get(name, "")
+  if raw == "":
+    return default
+  return raw.lower() not in {"0", "false", "no", "off"}
+
+
 def fmt_ms(seconds: float) -> str:
   return f"{seconds * 1e3:.1f}ms"
 
@@ -58,6 +66,30 @@ def op_name(op) -> str:
   return getattr(op, "name", str(op).split(".")[-1])
 
 
+def short(text: object, limit: int = 96) -> str:
+  s = str(text).replace("\n", "\\n")
+  return s if len(s) <= limit else s[:limit - 3] + "..."
+
+
+def source_hash(src: str) -> str:
+  return hashlib.blake2b(src.encode("utf-8"), digest_size=6).hexdigest()
+
+
+def format_hist(hist: collections.Counter, limit: int = 12) -> str:
+  if not hist:
+    return "{}"
+  parts = [f"{k}={v}" for k, v in hist.most_common(limit)]
+  if len(hist) > limit:
+    parts.append(f"...={sum(hist.values()) - sum(v for _, v in hist.most_common(limit))}")
+  return "{" + ",".join(parts) + "}"
+
+
+def format_estimates(est) -> str:
+  if est is None:
+    return "{}"
+  return f"{{ops={short(est.ops)},lds={short(est.lds)},mem={short(est.mem)}}}"
+
+
 def iter_leaf_calls(linear):
   for call in linear.src:
     ast = call.src[0]
@@ -65,6 +97,130 @@ def iter_leaf_calls(linear):
       yield from ast.src[0].src
     else:
       yield call
+
+
+def call_kind(call) -> str:
+  ast = call.src[0]
+  if ast.op is Ops.CUSTOM_FUNCTION:
+    return f"{op_name(ast.op)}:{ast.arg}"
+  return op_name(ast.op)
+
+
+def program_leaf_summary(call) -> dict:
+  ast = call.src[0]
+  if ast.op is not Ops.PROGRAM:
+    return {
+      "kind": call_kind(call),
+      "name": call_kind(call),
+      "key": call_kind(call),
+      "count": 1,
+      "uops": 0,
+      "source": "",
+      "source_hash": "",
+      "op_hist": collections.Counter(),
+    }
+
+  sink = ast.src[0]
+  linear = ast.src[2] if len(ast.src) > 2 and ast.src[2].op is Ops.LINEAR else None
+  source = ast.src[3].arg if len(ast.src) > 3 and ast.src[3].op is Ops.SOURCE else ""
+  kinfo = sink.arg
+  op_hist = collections.Counter(op_name(u.op) for u in linear.src) if linear is not None else collections.Counter()
+  dtype_hist = collections.Counter(str(u.dtype) for u in linear.src) if linear is not None else collections.Counter()
+  return {
+    "kind": "PROGRAM",
+    "name": ast.arg.name,
+    "key": getattr(ast, "key", source_hash(source)),
+    "function": ast.arg.function_name,
+    "global": ast.arg.global_size,
+    "local": ast.arg.local_size,
+    "vars": tuple(v.expr for v in ast.arg.vars),
+    "globals": ast.arg.globals,
+    "outs": ast.arg.outs,
+    "ins": ast.arg.ins,
+    "uops": len(linear.src) if linear is not None else 0,
+    "axis_types": tuple(op_name(a) for a in getattr(kinfo, "axis_types", ())),
+    "applied_opts": tuple(str(o) for o in getattr(kinfo, "applied_opts", ())),
+    "estimates": getattr(kinfo, "estimates", None),
+    "source": source,
+    "source_hash": source_hash(source) if source else "",
+    "op_hist": op_hist,
+    "dtype_hist": dtype_hist,
+    "linear": linear,
+  }
+
+
+def dump_program_detail(prefix: str, summary: dict, source_lines: int, linear_lines: int) -> None:
+  print(
+    f"{prefix}name={summary['name']} count={summary.get('count', 1)} "
+    f"uops={summary['uops']} global={summary.get('global', ())} "
+    f"local={summary.get('local', None)} outs={summary.get('outs', ())} "
+    f"ins={summary.get('ins', ())} source_hash={summary.get('source_hash', '')}"
+  )
+  print(
+    f"{prefix}  estimates={format_estimates(summary.get('estimates'))} "
+    f"axis_types={summary.get('axis_types', ())} "
+    f"opts={summary.get('applied_opts', ())}"
+  )
+  print(
+    f"{prefix}  ops={format_hist(summary.get('op_hist', collections.Counter()))} "
+    f"dtypes={format_hist(summary.get('dtype_hist', collections.Counter()), 8)}"
+  )
+
+  source = summary.get("source", "")
+  if source_lines > 0 and source:
+    print(f"{prefix}  source_head:")
+    for line in source.splitlines()[:source_lines]:
+      print(f"{prefix}    {short(line, 140)}")
+
+  linear = summary.get("linear")
+  if linear_lines > 0 and linear is not None:
+    print(f"{prefix}  linear_head:")
+    for idx, u in enumerate(linear.src[:linear_lines]):
+      src_ops = tuple(op_name(s.op) for s in u.src)
+      print(
+        f"{prefix}    {idx}: op={op_name(u.op)} dtype={short(u.dtype, 40)} "
+        f"src={src_ops} arg={short(u.arg, 100)}"
+      )
+
+
+def dump_captured_ir(jit: TinyJit, top: int, source_lines: int, linear_lines: int) -> None:
+  cap = jit.captured
+  if cap is None:
+    print("captured_ir=none")
+    return
+
+  print("captured_ir:")
+  print(f"  top_level_calls={len(cap.linear.src)}")
+  for idx, call in enumerate(cap.linear.src):
+    ast = call.src[0]
+    if ast.op is Ops.CUSTOM_FUNCTION and ast.arg == "graph":
+      leaf = list(ast.src[0].src)
+      leaf_names = collections.Counter(program_leaf_summary(c)["name"] for c in leaf)
+      print(
+        f"  graph[{idx}]: leaf_calls={len(leaf)} "
+        f"programs={format_hist(leaf_names, 10)}"
+      )
+    else:
+      print(f"  call[{idx}]: kind={call_kind(call)}")
+
+  grouped: dict[object, dict] = {}
+  for call in iter_leaf_calls(cap.linear):
+    summary = program_leaf_summary(call)
+    key = (
+      summary["kind"],
+      summary["name"],
+      summary.get("global", ()),
+      summary.get("local", None),
+      summary.get("source_hash", ""),
+    )
+    if key not in grouped:
+      grouped[key] = dict(summary, count=0)
+    grouped[key]["count"] += 1
+
+  rows = sorted(grouped.values(), key=lambda x: (-x["count"], -x["uops"], x["name"]))
+  print("  top_leaf_program_shapes:")
+  for i, row in enumerate(rows[:top], 1):
+    dump_program_detail(f"    {i}. ", row, source_lines, linear_lines)
 
 
 def captured_summary(jit: TinyJit) -> tuple[str, str]:
@@ -133,6 +289,10 @@ def main() -> None:
   n_steps = env_int("N_STEPS", 1)
   read_loss = env_int("READ_LOSS", 0) != 0
   sync_step = env_int("SYNC", 1) != 0
+  dump_ir = env_bool("DUMP_IR", False)
+  ir_top = env_int("IR_TOP", 8)
+  source_lines = env_int("SOURCE_LINES", 0)
+  linear_lines = env_int("LINEAR_LINES", 0)
   bench_mode = os.environ.get("BENCH_MODE", "train").lower()
 
   Tensor.manual_seed(env_int("SEED", 42))
@@ -165,7 +325,8 @@ def main() -> None:
   print(f"  tinygrad_root={TINYGRAD_ROOT}")
   print(
     f"  device={Device.DEFAULT} BS={bs} WARMUP_STEPS={warmup_steps} "
-    f"N_STEPS={n_steps} BENCH_MODE={bench_mode} SYNC={1 if sync_step else 0}"
+    f"N_STEPS={n_steps} BENCH_MODE={bench_mode} SYNC={1 if sync_step else 0} "
+    f"DUMP_IR={1 if dump_ir else 0} IR_TOP={ir_top}"
   )
   print(
     f"  JIT={JIT.value} BEAM={BEAM.value} JITBEAM={getenv('JITBEAM', BEAM.value)} "
@@ -213,6 +374,8 @@ def main() -> None:
 
   _, detail = captured_summary(step_fn)
   print(detail)
+  if dump_ir:
+    dump_captured_ir(step_fn, ir_top, source_lines, linear_lines)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,20 @@ dated section.
 
 ## Unreleased
 
+### Added: comparable IR dumps for tinygrad and TJit replay
+
+`tools/bench_tinygrad_beautiful_mnist.py` can now print captured
+tinygrad graph/leaf-program summaries with `DUMP_IR=1`, including
+program shape counts, launch geometry, applied opts, op/dtype
+histograms, and optional source/linear heads.  THVM now exposes
+`TJitCaptureOps`, `TJitCaptureRuns`, and `TJitCaptureSummary`, and
+`wl/Examples/beautiful-mnist/bench-train.wls` prints the captured
+dispatch sequence with `DUMP_JIT_CAPTURE=1`.  The new comparison shows
+the current BS=32 gap as graph replay granularity: tinygrad replays
+three Metal graph submissions over about 110 leaf kernels, while THVM
+still walks thousands of captured dispatch records split by optimizer
+assignments.
+
 ### Added: profile tinygrad beautiful_mnist from THVM
 
 `tools/bench_tinygrad_beautiful_mnist.py` now imports the sibling

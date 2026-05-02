@@ -1368,8 +1368,10 @@ fn int kernel_should_autotune(struct KernelEntry const *ke);
 // Temporarily suppress TJit capture recording while internal
 // benchmark fires run.  The surrounding user kernel still gets
 // captured normally after autotune finishes.
+#define JIT_CAPTURE_EXPORT_ROW_WIDTH 14
 fn void jit_capture_pause(void);
 fn void jit_capture_resume(void);
+fn u32  jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words);
 
 // Time `n_runs` back-to-back fires of `kid`; return min wallclock
 // us.  Used by autotune internally + exposed via LibraryLink for

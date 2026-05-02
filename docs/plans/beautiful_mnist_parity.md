@@ -73,8 +73,37 @@ Current thvm status:
   all-target early-conv backward graph (`3285` kernels, including
   `1048` generated Metal JIT kernels and `48` per-op Metal fallbacks),
   not first-sample overhead.
+- BS=32 Metal+tile training now gives a bounded small-batch comparison
+  against tinygrad JITBEAM: tinygrad captures the step as three Metal
+  graph submissions over about `110` leaf kernels, while THVM captures
+  `2201` dispatches plus `42` assignment records.  The steady wall
+  gap is now mostly replay granularity and fusion count, not custom
+  GEMM recognition.
 
 ## Blockers, in priority order
+
+### M0. TJit graph replay over dispatch runs -- current small-batch gap
+
+`TJitCaptureOps`, `TJitCaptureRuns`, and `TJitCaptureSummary` expose
+the captured replay sequence as dispatch/assignment IR.  On the BS=32
+canary, assignments split the compute into 42 consecutive dispatch
+runs.  Tinygrad's Metal graph backend records comparable leaf kernels
+inside three indirect-command-buffer graph submissions and updates
+inputs between replays.
+
+**Fix sketch:**
+- Add a Metal graph/ICB replay layer under `jit_replay` for consecutive
+  dispatch runs.
+- Treat `JIT_OP_ASSIGN` records as explicit graph barriers or graph
+  blits first; only move them after correctness proves Adam state
+  updates remain ordered.
+- Keep `DUMP_JIT_CAPTURE=1` and the tinygrad `DUMP_IR=1` harness as
+  the comparison guardrail: graph launches should fall before any
+  broad autotune sweep.
+
+**Verify:** BS=32 `BENCH_MODE=train` keeps bounded retained Metal
+memory and reduces host replay time without increasing captured leaf
+dispatch count.
 
 ### M1. Early Conv/BN/Pool backward tile coverage -- blocks training
 

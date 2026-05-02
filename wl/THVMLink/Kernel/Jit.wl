@@ -33,6 +33,9 @@ BeginPackage["THVMLink`"];
 
 TJit::usage        = "TJit[fn] returns a closure that captures fn's kernel-dispatch sequence on first call and replays it on subsequent calls.  Per-call wallclock drops from materialize+dispatch to just dispatch.  HoldFirst.  Recapture by TJitDrop[closure] then re-create.";
 TJitOpCount::usage = "TJitOpCount[closure] returns the number of kernel dispatches captured for the JIT closure (0 before the first call).";
+TJitCaptureOps::usage = "TJitCaptureOps[closure] returns the decoded captured TJit replay sequence as associations.  Dispatch rows include Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, and TileUopCount; assign rows include DstTid and SrcTid.";
+TJitCaptureRuns::usage = "TJitCaptureRuns[closure] groups a captured TJit replay sequence into consecutive dispatch runs split by assign records, with per-run dispatch-kind, program-key, output-size, and lowering summaries.";
+TJitCaptureSummary::usage = "TJitCaptureSummary[closure] returns compact counts for a captured TJit replay sequence, including dispatch/assign counts, dispatch-kind counts, consecutive dispatch-run lengths, top program-key counts, and the largest dispatch runs.";
 TJitDrop::usage    = "TJitDrop[closure] releases the JIT closure's capture slot.  After this, the closure re-captures on its next call.";
 TJitClosure::usage = "TJitClosure[<|...|>] is the wrapped form returned by TJit -- treat as opaque; invoke through the documented surface.";
 
@@ -46,6 +49,7 @@ $jitCaptureBeginFn   := $jitCaptureBeginFn   = load["thvm_wl_jit_capture_begin",
 $jitCaptureEndFn     := $jitCaptureEndFn     = load["thvm_wl_jit_capture_end",      {},        Integer]
 $jitCaptureDropFn    := $jitCaptureDropFn    = load["thvm_wl_jit_capture_drop",     {Integer}, Integer]
 $jitCaptureOpCountFn := $jitCaptureOpCountFn = load["thvm_wl_jit_capture_op_count", {Integer}, Integer]
+$jitCaptureOpsFn     := $jitCaptureOpsFn     = load["thvm_wl_jit_capture_ops",      {Integer}, {Integer, 1}]
 $jitReplayFn         := $jitReplayFn         = load["thvm_wl_jit_replay",           {Integer}, Integer]
 
 (* Side-store of captured slot ids, keyed by the closure's
@@ -104,6 +108,93 @@ TJitClosure[a_Association][args___] := Module[{
 TJitOpCount[TJitClosure[a_Association]] := Module[{rec},
     rec = $tJitState[Hash[a]];
     If[ MissingQ[rec], 0, $jitCaptureOpCountFn[rec["slot"]]]
+]
+
+TJitCaptureOps[TJitClosure[a_Association]] := Module[{
+    rec, raw, n, rowWidth
+},
+    rec = $tJitState[Hash[a]];
+    If[ MissingQ[rec], Return[{}] ];
+    raw = Normal @ $jitCaptureOpsFn[rec["slot"]];
+    If[ Length[raw] < 2, Return[{}] ];
+    n = raw[[1]];
+    rowWidth = raw[[2]];
+    Table[
+        With[{base = 2 + (i - 1) * rowWidth},
+            If[ raw[[base + 1]] === 0,
+                <|
+                    "Kind" -> "DISPATCH",
+                    "Kid" -> raw[[base + 2]],
+                    "DispatchKind" -> decodeDispatchKind[raw[[base + 3]]],
+                    "NInputs" -> raw[[base + 4]],
+                    "OutBuf" -> raw[[base + 5]],
+                    "Input0" -> raw[[base + 6]],
+                    "Input1" -> raw[[base + 7]],
+                    "ProgramKey" -> raw[[base + 8]],
+                    "OutputNumel" -> raw[[base + 9]],
+                    "OpCount" -> raw[[base + 10]],
+                    "ScalarUopCount" -> raw[[base + 11]],
+                    "TileUopCount" -> raw[[base + 12]]
+                |>,
+                <|
+                    "Kind" -> "ASSIGN",
+                    "DstTid" -> raw[[base + 13]],
+                    "SrcTid" -> raw[[base + 14]]
+                |>
+            ]
+        ],
+        {i, n}
+    ]
+]
+
+captureCounts[rows_, key_] := ReverseSort @ Counts[
+    Lookup[rows, key, 0] /. 0 -> Nothing]
+
+TJitCaptureRuns[c_TJitClosure] := Module[{
+    ops = TJitCaptureOps[c], runs = {}, cur = {}, start = 0,
+    flush
+},
+    flush[end_] := If[Length[cur] > 0,
+        AppendTo[runs, <|
+            "Start" -> start,
+            "End" -> end,
+            "Count" -> Length[cur],
+            "DispatchKindCounts" -> Counts[Lookup[cur, "DispatchKind", ""]],
+            "TopProgramKeys" -> Take[captureCounts[cur, "ProgramKey"], UpTo[8]],
+            "TopOutputNumels" -> Take[captureCounts[cur, "OutputNumel"], UpTo[8]],
+            "TopOpCounts" -> Take[captureCounts[cur, "OpCount"], UpTo[8]],
+            "ScalarLowered" -> Count[Lookup[cur, "ScalarUopCount", 0], _?(# > 0 &)],
+            "TileLowered" -> Count[Lookup[cur, "TileUopCount", 0], _?(# > 0 &)],
+            "TotalOutputNumel" -> Total[Lookup[cur, "OutputNumel", 0]]
+        |>];
+        cur = {}];
+    Do[
+        If[ops[[i]]["Kind"] === "DISPATCH",
+            If[Length[cur] === 0, start = i];
+            cur = Append[cur, ops[[i]]],
+            flush[i - 1]
+        ],
+        {i, Length[ops]}];
+    flush[Length[ops]];
+    runs
+]
+
+TJitCaptureSummary[c_TJitClosure] := Module[{
+    ops = TJitCaptureOps[c], dispatches, runs, programCounts
+},
+    dispatches = Select[ops, #["Kind"] === "DISPATCH" &];
+    runs = TJitCaptureRuns[c];
+    programCounts = captureCounts[dispatches, "ProgramKey"];
+    <|
+        "OpCount" -> Length[ops],
+        "KindCounts" -> Counts[Lookup[ops, "Kind", ""]],
+        "DispatchKindCounts" -> Counts[Lookup[dispatches, "DispatchKind", ""]],
+        "DispatchRuns" -> Lookup[runs, "Count", {}],
+        "RunCount" -> Length[runs],
+        "TopProgramKeys" -> Take[programCounts, UpTo[12]],
+        "TopOutputNumels" -> Take[captureCounts[dispatches, "OutputNumel"], UpTo[12]],
+        "TopRuns" -> Take[ReverseSortBy[runs, #["Count"] &], UpTo[8]]
+    |>
 ]
 
 TJitDrop[TJitClosure[a_Association]] := Module[{key = Hash[a], rec},

@@ -307,6 +307,33 @@ EXTERN_C DLLEXPORT int thvm_wl_jit_capture_op_count(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_ops(WolframLibraryData libData,
+                                               mint argc, MArgument *args,
+                                               MArgument res) {
+  (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  u32 n    = jit_capture_op_count(slot);
+  u32 row_width = JIT_CAPTURE_EXPORT_ROW_WIDTH;
+  mint dims[1] = { (mint)(2 + n * row_width) };
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  u64 *tmp = (u64 *)calloc((size_t)dims[0], sizeof(u64));
+  if (tmp == NULL) {
+    dst[0] = 0;
+    dst[1] = row_width;
+    MArgument_setMTensor(res, out);
+    return LIBRARY_NO_ERROR;
+  }
+  u32 written = jit_capture_export_ops(slot, tmp, (u32)dims[0]);
+  for (u32 i = 0; i < (u32)dims[0]; i++) {
+    dst[i] = i < written ? (mint)tmp[i] : 0;
+  }
+  free(tmp);
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_jit_replay(WolframLibraryData libData,
                                           mint argc, MArgument *args,
                                           MArgument res) {

@@ -154,27 +154,55 @@ Safe beamed small-batch run:
 ```bash
 PYTHONPATH=TinyHVM/tinygrad DEVICE=METAL BS=32 WARMUP_STEPS=2 \
 N_STEPS=1 IGNORE_JIT_FIRST_BEAM=1 JITBEAM=1 DEBUG=0 \
+  DUMP_IR=1 IR_TOP=10 \
   python3 tools/bench_tinygrad_beautiful_mnist.py
 ```
 
 ```text
 BS=32 tinygrad train, JITBEAM=1:
-  warmup no-jit:       2452.7ms, kernels=107
-  warmup capture:      2094.4ms, kernels=3
-  steady replay:         14.1ms, kernels=3
+  warmup no-jit:       2374.1ms, kernels=107
+  warmup capture:      2051.1ms, kernels=3
+  steady replay:          6.2ms, kernels=3
   captured_calls=3, captured_leaf_calls=110, graph_calls=3
   mem=9.9MiB
+  graph leaf batches: 32, 64, 14
+  repeated leaf shapes include E_8_8, E_2_8_4, E_2_8_4n1,
+  E_16_4n12, E_32n1, E_32n2, E_4_8, E_2_2_8,
+  plus grouped reductions such as r_64_36_32 and
+  r_32_400_32n1.
 
 BS=32 thvm train, THVM_TILE=1:
-  steady replay:        500.4ms
+  warmup capture:      1949.0ms
+  warmup replay:       1397.2ms
+  steady replay:        465.6ms
   jit-ops=2243, JitReplayDispatches=2201
-  dispatch=metal-tile=1238, none=35, metal-alias=126
-  retained=830.6MB
+  dispatch=metal-tile=1247, none=35, metal-alias=117
+  retained=743.1MB after timed replay
+  captured replay: 2201 DISPATCH + 42 ASSIGN records
+  dispatch routes: metal-tile=2084, metal-alias=117
+  dispatch runs split by ASSIGNs: 42 runs
+  largest runs: 138, 137, 125, 123, 121, 120 dispatches
 ```
 
-That puts the bounded small-batch replay gap at roughly `35x` wall
-time, with THVM replaying about `20x` more leaf dispatch records than
-tinygrad's captured leaf calls.
+That puts the bounded small-batch replay gap at roughly `75x` wall
+time on the latest canary, with THVM replaying about `20x` more leaf
+dispatch records than tinygrad's captured leaf calls.
+
+The current IR-level comparison:
+
+- Tinygrad compiles the stable train step into three Metal graph
+  submissions backed by an indirect-command-buffer replay.  The graph
+  still contains about one hundred leaf kernels, but per-step host
+  work is three graph launches.
+- THVM captures the step as a flat sequence of per-kernel dispatches
+  plus explicit optimizer blits.  Even though the Metal backend batches
+  those encoders into command buffers, replay still walks and encodes
+  every dispatch record on the host.
+- The next Metal parity gap is therefore graph replay over captured
+  `TJit` dispatch runs, not another one-off custom kernel.  The new
+  `TJitCaptureSummary`/`DUMP_JIT_CAPTURE=1` surface is the guardrail:
+  the goal is to reduce graph launches and dispatch runs while keeping
+  the captured leaf-kernel count and memory profile bounded.
 
 Bounded BS=512 tinygrad run without JIT beam:
 

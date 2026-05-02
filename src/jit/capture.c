@@ -151,6 +151,71 @@ fn u32 jit_capture_op_count(u32 slot) {
   return JIT_CAPTURES[slot].n_ops;
 }
 
+// Export the capture sequence as a flat table for WL-side profiling.
+// Header: {n_ops, row_width}.  Row width is JIT_CAPTURE_EXPORT_ROW_WIDTH:
+// {kind, kid, dispatch_kind, n_inputs, out_buf_id, input0, input1,
+//  program_key, output_numel, n_ops, n_scalar_uops, n_tile_uops,
+//  assign_dst_tid, assign_src_tid}.
+fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
+  if (out == NULL || cap_words < 2) {
+    return 0;
+  }
+  out[0] = 0;
+  out[1] = JIT_CAPTURE_EXPORT_ROW_WIDTH;
+  if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) {
+    return 2;
+  }
+  JitCapture *c = &JIT_CAPTURES[slot];
+  if (!c->in_use || c->n_ops == 0) {
+    return 2;
+  }
+
+  u32 row_width = JIT_CAPTURE_EXPORT_ROW_WIDTH;
+  u32 max_ops = (cap_words - 2) / row_width;
+  u32 n = c->n_ops < max_ops ? c->n_ops : max_ops;
+  out[0] = n;
+  out[1] = row_width;
+  for (u32 i = 0; i < n; i++) {
+    JitCaptureOp const *op = &c->ops[i];
+    u64 *row = &out[2 + i * row_width];
+    for (u32 j = 0; j < row_width; j++) {
+      row[j] = 0;
+    }
+    row[0] = (u64)op->kind;
+    switch (op->kind) {
+      case JIT_OP_DISPATCH: {
+        row[1] = op->kid;
+        row[2] = cg_kernel_dispatch_kind(op->kid);
+        row[3] = op->n_inputs;
+        row[4] = op->out_buf_id;
+        u32 const *ids = op->heap_in_buf_ids != NULL
+                       ? op->heap_in_buf_ids
+                       : op->in_buf_ids;
+        row[5] = op->n_inputs > 0 ? ids[0] : 0;
+        row[6] = op->n_inputs > 1 ? ids[1] : 0;
+        if (op->kid > 0 && op->kid < KERNELS_NEXT) {
+          KernelEntry const *ke = &KERNELS[op->kid];
+          row[8]  = ke->output_numel;
+          row[9]  = ke->n_ops;
+          row[10] = ke->n_scalar_uops;
+          row[11] = ke->n_tile_uops;
+          if (ke->program_shared) {
+            row[7] = kernel_program_key(ke->program, ke->n_ops);
+          } else if (ke->axes != NULL && ke->axes != &ke->_local_axes) {
+            row[7] = kernel_rangeified_key(ke);
+          }
+        }
+        break;
+      }
+      case JIT_OP_ASSIGN:
+        row[12] = op->assign_dst_tid;
+        row[13] = op->assign_src_tid;
+        break;
+    }
+  }
+  return 2 + n * row_width;
+}
+
 // Called from kernel_fire_by_id just before the actual dispatch when
 // JIT_ACTIVE_SLOT != 0.  Records the (kid, in_buf_ids, out_buf_id)
 // tuple so jit_replay can re-dispatch the SAME work without a new
