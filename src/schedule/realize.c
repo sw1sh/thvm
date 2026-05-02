@@ -114,6 +114,7 @@ fn Term thvm_realize(Term expr) {
   // once a WL-pinned-Terms side table lets gc_mark_term
   // find pending UOPs without the heap-rooted overlay.
   mark_gc_preserve(res);
+  jit_capture_mark_preserved();
 
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
@@ -228,6 +229,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   // the result CTR so each root's producer chain is preserved.
   u32 cn = term_ctr_n(res);
   for (u32 i = 0; i < cn && i < 256; i++) mark_gc_preserve(term_ctr_at(res, i));
+  jit_capture_mark_preserved();
 
   cpu_buf_pool_rollback_with_preserve(cpu_wm);
   thvm_metal_buf_pool_rollback_with_preserve(metal_wm);

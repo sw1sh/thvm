@@ -288,6 +288,16 @@ EXTERN_C DLLEXPORT int thvm_wl_jit_capture_end(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_end_result(WolframLibraryData libData,
+                                                      mint argc, MArgument *args,
+                                                      MArgument res) {
+  (void)libData; (void)argc;
+  Term root = (Term)MArgument_getInteger(args[0]);
+  jit_capture_end_with_result(root);
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_jit_capture_drop(WolframLibraryData libData,
                                                 mint argc, MArgument *args,
                                                 MArgument res) {

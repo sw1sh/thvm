@@ -166,6 +166,31 @@ the backend therefore checks the output tensor's current buffer before
 touching refcounts.  This is covered by
 `metal-real/alias-reshape-drops-unused-output-immediately`.
 
+## TJit Replay Ownership
+
+TJit capture is also a memory root.  During the first call, every
+recorded dispatch buffer is retained and marked preserved so the
+post-realize rollback cannot free buffers that a future replay will
+read.  At capture end, the replay sequence is walked backward:
+
+- assignment records are always live, because they mutate optimizer
+  state or weights;
+- a dispatch is live only when its output feeds a later live record or
+  the first-call return tensor;
+- dead dispatches are marked `ReplaySkip` and their speculative output
+  buffers are dropped;
+- live buffers remain retained until `TJitDrop` or runtime reset.
+
+`TJitCaptureSummary` reports `ReplayLiveDispatches` and
+`ReplaySkipped` so benchmark output separates the captured IR size
+from the records actually replayed.
+
+The current BS=32 `beautiful_mnist` training replay still retains
+about `5.3GB` of live Metal buffers after this audit.  That is now an
+honest lifetime number rather than a silent replay failure, and it
+means broad autotune sweeps should remain blocked until replay-time
+memory reuse or stronger fusion reduces the live set.
+
 ## Safety Boundary
 
 Current policy:

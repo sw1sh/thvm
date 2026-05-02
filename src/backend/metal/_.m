@@ -548,6 +548,7 @@ static id<MTLComputePipelineState> METAL_CONV2D_PSO;
 // drop the stale PSOs before the MTLLibrary they reference goes
 // away.
 static void metal_jit_cache_reset_impl(void);
+static void metal_graph_cache_reset_impl(void);
 
 static void metal_shutdown(void) {
   metal_dispatch_flush();
@@ -578,6 +579,7 @@ static void metal_shutdown(void) {
   }
   METAL_CONV2D_PSO = nil;
   metal_jit_cache_reset_impl();
+  metal_graph_cache_reset_impl();
   METAL_LIB    = nil;
   METAL_QUEUE  = nil;
   METAL_DEVICE = nil;
@@ -667,8 +669,15 @@ static id<MTLComputePipelineState> metal_jit_build(KernelEntry const *ke, u64 ke
     fprintf(stderr, "thvm: metal_jit -- function 'k' missing in compiled lib\n");
     return nil;
   }
+  MTLComputePipelineDescriptor *desc =
+      [[MTLComputePipelineDescriptor alloc] init];
+  [desc setComputeFunction:mtlFn];
+  [desc setSupportIndirectCommandBuffers:YES];
   id<MTLComputePipelineState> pso =
-      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+      [METAL_DEVICE newComputePipelineStateWithDescriptor:desc
+                                                   options:MTLPipelineOptionNone
+                                                reflection:NULL
+                                                     error:&err];
   if (pso == nil) {
     fprintf(stderr, "thvm: metal_jit -- pipeline-state failed: %s\n",
             err ? [[err localizedDescription] UTF8String] : "(no error)");
@@ -953,8 +962,15 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
     fprintf(stderr, "thvm: metal_tile_jit -- function 'k' missing in compiled lib\n");
     return nil;
   }
+  MTLComputePipelineDescriptor *desc =
+      [[MTLComputePipelineDescriptor alloc] init];
+  [desc setComputeFunction:mtlFn];
+  [desc setSupportIndirectCommandBuffers:YES];
   id<MTLComputePipelineState> pso =
-      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+      [METAL_DEVICE newComputePipelineStateWithDescriptor:desc
+                                                   options:MTLPipelineOptionNone
+                                                reflection:NULL
+                                                     error:&err];
   if (pso == nil) {
     fprintf(stderr, "thvm: metal_tile_jit -- pipeline-state failed: %s\n",
             err ? [[err localizedDescription] UTF8String] : "(no error)");
@@ -968,6 +984,8 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
   return pso;
 }
 
+static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke);
+
 static int metal_tile_jit_encode(KernelEntry *ke,
                                  __unsafe_unretained id<MTLBuffer> *src_bufs,
                                  id<MTLBuffer> outBuf,
@@ -975,14 +993,7 @@ static int metal_tile_jit_encode(KernelEntry *ke,
                                  u32 groups_x,
                                  u32 threads_x) {
   if (groups_x == 0 || threads_x == 0) return 0;
-  u64 key = metal_tile_jit_hash(ke);
-  u32 idx = metal_jit_lookup_idx(key);
-  id<MTLComputePipelineState> pso = nil;
-  if (idx != (u32)-1 && METAL_JIT_CACHE[idx].key == key) {
-    pso = METAL_JIT_PSOS[idx];
-  } else {
-    pso = metal_tile_jit_build(ke, key);
-  }
+  id<MTLComputePipelineState> pso = metal_tile_jit_pipeline(ke);
   if (pso == nil) return 0;
   if ((NSUInteger)threads_x > [pso maxTotalThreadsPerThreadgroup]) {
     return 0;
@@ -1020,6 +1031,289 @@ static int metal_tile_jit_encode(KernelEntry *ke,
   }
   [enc endEncoding];
   return 1;
+}
+
+static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke) {
+  u64 key = metal_tile_jit_hash(ke);
+  u32 idx = metal_jit_lookup_idx(key);
+  if (idx != (u32)-1 && METAL_JIT_CACHE[idx].key == key) {
+    return METAL_JIT_PSOS[idx];
+  }
+  return metal_tile_jit_build(ke, key);
+}
+
+#define METAL_GRAPH_CACHE_CAP 256
+#define METAL_GRAPH_MAX_RESOURCES 8192
+static u64 METAL_GRAPH_KEYS[METAL_GRAPH_CACHE_CAP];
+static id<MTLIndirectCommandBuffer> METAL_GRAPH_ICBS[METAL_GRAPH_CACHE_CAP];
+
+static void metal_graph_cache_reset_impl(void) {
+  for (u32 i = 0; i < METAL_GRAPH_CACHE_CAP; i++) {
+    METAL_GRAPH_KEYS[i] = 0;
+    METAL_GRAPH_ICBS[i] = nil;
+  }
+}
+
+static int metal_graph_trace_level(void) {
+  char const *e = getenv("THVM_METAL_GRAPH_TRACE");
+  if (e == NULL || e[0] == '\0') {
+    return 0;
+  }
+  return atoi(e);
+}
+
+static u64 metal_graph_hash(u32 slot, u32 start_op,
+                            JitReplayDispatch const *ops, u32 n_ops) {
+  u64 h = 0xcbf29ce484222325ULL ^ 0x4D47524150484943ULL;
+  h ^= (u64)slot;     h *= 0x100000001b3ULL;
+  h ^= (u64)start_op; h *= 0x100000001b3ULL;
+  h ^= (u64)n_ops;    h *= 0x100000001b3ULL;
+  for (u32 i = 0; i < n_ops; i++) {
+    JitReplayDispatch const *r = &ops[i];
+    h ^= (u64)r->kid;        h *= 0x100000001b3ULL;
+    h ^= (u64)r->n_inputs;   h *= 0x100000001b3ULL;
+    h ^= (u64)r->out_buf_id; h *= 0x100000001b3ULL;
+    if (r->out_buf_id == 0 || r->out_buf_id >= METAL_BUFS_NEXT) return 0;
+    id<MTLBuffer> out = METAL_BUFS[r->out_buf_id].buf;
+    if (out == nil) return 0;
+    h ^= (u64)(uintptr_t)(__bridge void *)out; h *= 0x100000001b3ULL;
+    for (u32 j = 0; j < r->n_inputs; j++) {
+      u32 bid = r->in_buf_ids[j];
+      if (bid == 0 || bid >= METAL_BUFS_NEXT) return 0;
+      id<MTLBuffer> in = METAL_BUFS[bid].buf;
+      if (in == nil) return 0;
+      h ^= (u64)bid; h *= 0x100000001b3ULL;
+      h ^= (u64)(uintptr_t)(__bridge void *)in; h *= 0x100000001b3ULL;
+    }
+  }
+  return h | (1ULL << 61);
+}
+
+static u32 metal_graph_lookup_idx(u64 key) {
+  u32 h = (u32)(key ^ (key >> 32));
+  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+  for (u32 probe = 0; probe < METAL_GRAPH_CACHE_CAP; probe++) {
+    u32 i = (h + probe) & (METAL_GRAPH_CACHE_CAP - 1);
+    if (METAL_GRAPH_KEYS[i] == key) return i;
+    if (METAL_GRAPH_KEYS[i] == 0) return i;
+  }
+  return (u32)-1;
+}
+
+static int metal_graph_collect_resources(JitReplayDispatch const *ops,
+                                         u32 n_ops,
+                                         __unsafe_unretained id<MTLResource> *out,
+                                         u32 *out_len) {
+  int trace = metal_graph_trace_level();
+  u32 n = 0;
+  for (u32 i = 0; i < n_ops; i++) {
+    JitReplayDispatch const *r = &ops[i];
+    if (r->out_buf_id == 0 || r->out_buf_id >= METAL_BUFS_NEXT) {
+      if (trace) fprintf(stderr, "thvm: metal_graph resource bad out id op=%u\n", i);
+      return 0;
+    }
+    if (METAL_BUFS[r->out_buf_id].buf == nil) {
+      if (trace) fprintf(stderr, "thvm: metal_graph resource nil out op=%u bid=%u\n",
+                         i, r->out_buf_id);
+      return 0;
+    }
+    if (n >= METAL_GRAPH_MAX_RESOURCES) {
+      if (trace) fprintf(stderr, "thvm: metal_graph resource cap out op=%u\n", i);
+      return 0;
+    }
+    out[n++] = METAL_BUFS[r->out_buf_id].buf;
+    for (u32 j = 0; j < r->n_inputs; j++) {
+      u32 bid = r->in_buf_ids[j];
+      if (bid == 0 || bid >= METAL_BUFS_NEXT) {
+        if (trace) fprintf(stderr, "thvm: metal_graph resource bad in op=%u input=%u\n",
+                           i, j);
+        return 0;
+      }
+      if (METAL_BUFS[bid].buf == nil) {
+        if (trace) fprintf(stderr, "thvm: metal_graph resource nil in op=%u input=%u bid=%u\n",
+                           i, j, bid);
+        return 0;
+      }
+      if (n >= METAL_GRAPH_MAX_RESOURCES) {
+        if (trace) fprintf(stderr, "thvm: metal_graph resource cap in op=%u input=%u\n",
+                           i, j);
+        return 0;
+      }
+      out[n++] = METAL_BUFS[bid].buf;
+    }
+  }
+  *out_len = n;
+  return 1;
+}
+
+int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *r) {
+  if (METAL_DEVICE == nil || r == NULL) {
+    return 0;
+  }
+  if (r->kid == 0 || r->kid >= KERNELS_NEXT) {
+    return 0;
+  }
+  KernelEntry *ke = &KERNELS[r->kid];
+  if (ke->n_inputs != r->n_inputs || r->n_inputs > 30) {
+    return 0;
+  }
+  if (r->out_buf_id == 0 || r->out_buf_id >= METAL_BUFS_NEXT) {
+    return 0;
+  }
+  if (METAL_BUFS[r->out_buf_id].buf == nil) {
+    return 0;
+  }
+  for (u32 i = 0; i < r->n_inputs; i++) {
+    u32 bid = r->in_buf_ids[i];
+    if (bid == 0 || bid >= METAL_BUFS_NEXT) {
+      return 0;
+    }
+    if (METAL_BUFS[bid].buf == nil) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static id<MTLIndirectCommandBuffer> metal_graph_build(
+    JitReplayDispatch const *ops, u32 n_ops) {
+  int trace = metal_graph_trace_level();
+  if (trace > 1) {
+    fprintf(stderr, "thvm: metal_graph build begin n=%u\n", n_ops);
+  }
+  MTLIndirectCommandBufferDescriptor *desc =
+      [[MTLIndirectCommandBufferDescriptor alloc] init];
+  [desc setCommandTypes:MTLIndirectCommandTypeConcurrentDispatch];
+  [desc setInheritBuffers:NO];
+  [desc setInheritPipelineState:NO];
+  [desc setMaxKernelBufferBindCount:31];
+  id<MTLIndirectCommandBuffer> icb =
+      [METAL_DEVICE newIndirectCommandBufferWithDescriptor:desc
+                                            maxCommandCount:(NSUInteger)n_ops
+                                                    options:MTLResourceCPUCacheModeDefaultCache];
+  if (icb == nil) {
+    return nil;
+  }
+  if (trace > 1) {
+    fprintf(stderr, "thvm: metal_graph icb allocated\n");
+  }
+  [icb resetWithRange:NSMakeRange(0, (NSUInteger)n_ops)];
+
+  for (u32 i = 0; i < n_ops; i++) {
+    JitReplayDispatch const *r = &ops[i];
+    if (trace > 1) {
+      fprintf(stderr, "thvm: metal_graph command %u kid=%u inputs=%u\n",
+              i, r->kid, r->n_inputs);
+    }
+    if (r->kid == 0 || r->kid >= KERNELS_NEXT) return nil;
+    KernelEntry *ke = &KERNELS[r->kid];
+    if (ke->n_inputs != r->n_inputs || r->n_inputs > 30) return nil;
+    u32 groups_x = 0;
+    u32 threads_x = 0;
+    if (!cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x)) return nil;
+    TileConv2DInfo conv;
+    if (tile_analyze_conv2d_flat(ke, &conv)) return nil;
+    id<MTLComputePipelineState> pso = metal_tile_jit_pipeline(ke);
+    if (pso == nil) return nil;
+    if ((NSUInteger)threads_x > [pso maxTotalThreadsPerThreadgroup]) return nil;
+    if (r->out_buf_id == 0 || r->out_buf_id >= METAL_BUFS_NEXT) return nil;
+    id<MTLBuffer> outBuf = METAL_BUFS[r->out_buf_id].buf;
+    if (outBuf == nil) return nil;
+
+    id<MTLIndirectComputeCommand> cmd = [icb indirectComputeCommandAtIndex:i];
+    if (trace > 1) {
+      fprintf(stderr, "thvm: metal_graph command %u set pso\n", i);
+    }
+    [cmd setComputePipelineState:pso];
+    if (trace > 1) {
+      fprintf(stderr, "thvm: metal_graph command %u set out\n", i);
+    }
+    [cmd setKernelBuffer:outBuf offset:0 atIndex:0];
+    for (u32 j = 0; j < r->n_inputs; j++) {
+      u32 bid = r->in_buf_ids[j];
+      if (bid == 0 || bid >= METAL_BUFS_NEXT) return nil;
+      id<MTLBuffer> inBuf = METAL_BUFS[bid].buf;
+      if (inBuf == nil) return nil;
+      if (trace > 1) {
+        fprintf(stderr, "thvm: metal_graph command %u set in %u\n", i, j);
+      }
+      [cmd setKernelBuffer:inBuf offset:0 atIndex:(1 + j)];
+    }
+    if (trace > 1) {
+      fprintf(stderr, "thvm: metal_graph command %u dispatch\n", i);
+    }
+    [cmd concurrentDispatchThreadgroups:MTLSizeMake((NSUInteger)groups_x, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads_x, 1, 1)];
+    if (trace > 1) {
+      fprintf(stderr, "thvm: metal_graph command %u barrier\n", i);
+    }
+    [cmd setBarrier];
+    if (trace > 1) {
+      fprintf(stderr, "thvm: metal_graph command %u done\n", i);
+    }
+  }
+  return icb;
+}
+
+int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
+                              JitReplayDispatch const *ops, u32 n_ops) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
+  if (ops == NULL || n_ops < 2 || n_ops > 256) return -1;
+  int trace = metal_graph_trace_level();
+  if (trace) {
+    fprintf(stderr, "thvm: metal_graph replay start slot=%u op=%u n=%u\n",
+            slot, start_op, n_ops);
+  }
+  __unsafe_unretained id<MTLResource> resources[METAL_GRAPH_MAX_RESOURCES];
+  u32 resource_count = 0;
+  if (!metal_graph_collect_resources(ops, n_ops, resources, &resource_count)) {
+    return -1;
+  }
+
+  u64 key = metal_graph_hash(slot, start_op, ops, n_ops);
+  if (key == 0) return -1;
+  u32 idx = metal_graph_lookup_idx(key);
+  if (idx == (u32)-1) return -1;
+  id<MTLIndirectCommandBuffer> icb = nil;
+  if (METAL_GRAPH_KEYS[idx] == key) {
+    icb = METAL_GRAPH_ICBS[idx];
+    if (trace) {
+      fprintf(stderr, "thvm: metal_graph cache hit idx=%u resources=%u\n",
+              idx, resource_count);
+    }
+  } else {
+    if (trace) {
+      fprintf(stderr, "thvm: metal_graph build idx=%u resources=%u\n",
+              idx, resource_count);
+    }
+    icb = metal_graph_build(ops, n_ops);
+    if (icb == nil) return -1;
+    METAL_GRAPH_KEYS[idx] = key;
+    METAL_GRAPH_ICBS[idx] = icb;
+  }
+
+  u64 t0 = cg_now_us();
+  id<MTLCommandBuffer> cmd = metal_command_buffer();
+  if (cmd == nil) return -1;
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  if (resource_count > 0) {
+    [enc useResources:resources
+                count:(NSUInteger)resource_count
+                usage:(MTLResourceUsageRead | MTLResourceUsageWrite)];
+  }
+  [enc executeCommandsInBuffer:icb
+                     withRange:NSMakeRange(0, (NSUInteger)n_ops)];
+  [enc endEncoding];
+  metal_submit_if_standalone(cmd);
+  if (trace) {
+    fprintf(stderr, "thvm: metal_graph replay encoded n=%u\n", n_ops);
+  }
+  u64 elapsed = cg_now_us() - t0;
+  u64 per = n_ops == 0 ? elapsed : elapsed / n_ops;
+  for (u32 i = 0; i < n_ops; i++) {
+    cg_profile_record(ops[i].kid, KDISPATCH_METAL_TILE, per);
+  }
+  return 0;
 }
 
 // METAL_PIPELINES_CACHE is the per-(opcode, dtype) pipeline cache;

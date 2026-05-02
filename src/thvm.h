@@ -1368,7 +1368,14 @@ fn int kernel_should_autotune(struct KernelEntry const *ke);
 // Temporarily suppress TJit capture recording while internal
 // benchmark fires run.  The surrounding user kernel still gets
 // captured normally after autotune finishes.
-#define JIT_CAPTURE_EXPORT_ROW_WIDTH 14
+#define JIT_CAPTURE_EXPORT_ROW_WIDTH 15
+#define JIT_REPLAY_MAX_INPUTS 64
+typedef struct {
+  u32 kid;
+  u32 n_inputs;
+  u32 out_buf_id;
+  u32 in_buf_ids[JIT_REPLAY_MAX_INPUTS];
+} JitReplayDispatch;
 fn void jit_capture_pause(void);
 fn void jit_capture_resume(void);
 fn u32  jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words);
@@ -1527,6 +1534,11 @@ void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
 // Metal lands in step 14 behind the same Backend struct.
 extern Backend CPU_BACKEND;
 extern Backend METAL_BACKEND;
+#ifdef THVM_HAS_METAL
+int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *op);
+int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
+                              JitReplayDispatch const *ops, u32 n_ops);
+#endif
 
 fn void cpu_jit_cache_reset(void);
 

@@ -171,7 +171,7 @@ BS=32 tinygrad train, JITBEAM=1:
   plus grouped reductions such as r_64_36_32 and
   r_32_400_32n1.
 
-BS=32 thvm train, THVM_TILE=1:
+BS=32 thvm train, THVM_TILE=1, before replay lifetime audit:
   warmup capture:      1949.0ms
   warmup replay:       1397.2ms
   steady replay:        465.6ms
@@ -182,11 +182,32 @@ BS=32 thvm train, THVM_TILE=1:
   dispatch routes: metal-tile=2084, metal-alias=117
   dispatch runs split by ASSIGNs: 42 runs
   largest runs: 138, 137, 125, 123, 121, 120 dispatches
+
+BS=32 thvm train, THVM_TILE=1, after replay lifetime audit:
+  warmup capture:      1941.7ms
+  warmup replay:        752.8ms
+  steady replay:        751.5ms
+  jit-ops=2243, captured dispatches=2201, live replay dispatches=2067
+  JitReplayDispatches=2067, JitReplayAssigns=42
+  live=5.26GB, retained=6.32GB, freelist=1.06GB
+
+BS=32 thvm train, THVM_TILE=1, THVM_METAL_GRAPH_REPLAY=1:
+  warmup capture:      1903.5ms
+  warmup replay:        728.2ms
+  steady replay:        711.1ms
+  live/replay dispatch counts match the non-graph audited run
 ```
 
-That puts the bounded small-batch replay gap at roughly `75x` wall
-time on the latest canary, with THVM replaying about `20x` more leaf
-dispatch records than tinygrad's captured leaf calls.
+The replay lifetime audit found that the older `465.6ms` number was
+not a trustworthy parity baseline: captured records could point at
+Metal buffers freed by post-realize rollback, and the plain TJit
+replay path counted backend dispatch failures as if they had run.  The
+current bounded small-batch replay gap is therefore roughly `115x`
+wall time versus tinygrad's `6.2ms` beamed replay.  The opt-in Metal
+ICB replay prototype removes the repeated nil-resource graph rejects
+and gives a small host-side win, but it does not solve the larger
+problem: THVM still preserves gigabytes of backward/update
+intermediates and replays thousands of live dispatch records.
 
 The current IR-level comparison:
 
@@ -195,9 +216,10 @@ The current IR-level comparison:
   still contains about one hundred leaf kernels, but per-step host
   work is three graph launches.
 - THVM captures the step as a flat sequence of per-kernel dispatches
-  plus explicit optimizer blits.  Even though the Metal backend batches
-  those encoders into command buffers, replay still walks and encodes
-  every dispatch record on the host.
+  plus explicit optimizer blits.  Capture liveness now skips dead
+  dispatch records and keeps return tensors live, but the live replay
+  set is still about two thousand dispatches split by optimizer
+  assignment barriers.
 - The next Metal parity gap is therefore graph replay over captured
   `TJit` dispatch runs, not another one-off custom kernel.  The new
   `TJitCaptureSummary`/`DUMP_JIT_CAPTURE=1` surface is the guardrail:

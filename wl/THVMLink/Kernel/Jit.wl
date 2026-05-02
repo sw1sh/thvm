@@ -47,6 +47,7 @@ Begin["`Private`"];
    active". *)
 $jitCaptureBeginFn   := $jitCaptureBeginFn   = load["thvm_wl_jit_capture_begin",    {},        Integer]
 $jitCaptureEndFn     := $jitCaptureEndFn     = load["thvm_wl_jit_capture_end",      {},        Integer]
+$jitCaptureEndResultFn := $jitCaptureEndResultFn = load["thvm_wl_jit_capture_end_result", {Integer}, Integer]
 $jitCaptureDropFn    := $jitCaptureDropFn    = load["thvm_wl_jit_capture_drop",     {Integer}, Integer]
 $jitCaptureOpCountFn := $jitCaptureOpCountFn = load["thvm_wl_jit_capture_op_count", {Integer}, Integer]
 $jitCaptureOpsFn     := $jitCaptureOpsFn     = load["thvm_wl_jit_capture_ops",      {Integer}, {Integer, 1}]
@@ -97,7 +98,8 @@ TJitClosure[a_Association][args___] := Module[{
             Internal`WithLocalSettings[
                 Null,
                 fnRes = a["fn"][{args}],
-                $jitCaptureEndFn[]
+                $jitCaptureEndResultFn[
+                    If[MatchQ[fnRes, _TTerm], ttermRaw[fnRes], 0]]
             ];
             $tJitState[key] = <|"slot" -> slot|>;
             fnRes
@@ -134,12 +136,14 @@ TJitCaptureOps[TJitClosure[a_Association]] := Module[{
                     "OutputNumel" -> raw[[base + 9]],
                     "OpCount" -> raw[[base + 10]],
                     "ScalarUopCount" -> raw[[base + 11]],
-                    "TileUopCount" -> raw[[base + 12]]
+                    "TileUopCount" -> raw[[base + 12]],
+                    "ReplaySkip" -> (rowWidth >= 15 && raw[[base + 15]] =!= 0)
                 |>,
                 <|
                     "Kind" -> "ASSIGN",
                     "DstTid" -> raw[[base + 13]],
-                    "SrcTid" -> raw[[base + 14]]
+                    "SrcTid" -> raw[[base + 14]],
+                    "ReplaySkip" -> (rowWidth >= 15 && raw[[base + 15]] =!= 0)
                 |>
             ]
         ],
@@ -180,15 +184,18 @@ TJitCaptureRuns[c_TJitClosure] := Module[{
 ]
 
 TJitCaptureSummary[c_TJitClosure] := Module[{
-    ops = TJitCaptureOps[c], dispatches, runs, programCounts
+    ops = TJitCaptureOps[c], dispatches, runs, programCounts, liveDispatches
 },
     dispatches = Select[ops, #["Kind"] === "DISPATCH" &];
+    liveDispatches = Select[dispatches, !TrueQ[#["ReplaySkip"]] &];
     runs = TJitCaptureRuns[c];
     programCounts = captureCounts[dispatches, "ProgramKey"];
     <|
         "OpCount" -> Length[ops],
         "KindCounts" -> Counts[Lookup[ops, "Kind", ""]],
         "DispatchKindCounts" -> Counts[Lookup[dispatches, "DispatchKind", ""]],
+        "ReplaySkipped" -> Count[Lookup[ops, "ReplaySkip", False], True],
+        "ReplayLiveDispatches" -> Length[liveDispatches],
         "DispatchRuns" -> Lookup[runs, "Count", {}],
         "RunCount" -> Length[runs],
         "TopProgramKeys" -> Take[programCounts, UpTo[12]],

@@ -6,6 +6,23 @@ dated section.
 
 ## Unreleased
 
+### Fixed: make TJit replay own live Metal buffers
+
+TJit capture now retains and preserves backend buffers needed by
+future replay, finalizes the capture with a backward liveness pass,
+and marks dead dispatch records as `ReplaySkip`.  Replay now counts
+only successful backend dispatches, and `TJitCaptureSummary` reports
+live versus skipped dispatch records.  The Metal backend also has an
+opt-in `THVM_METAL_GRAPH_REPLAY=1` ICB replay prototype for consecutive
+`metal-tile` chunks; pipeline states are built with indirect-command
+buffer support and graph capture rejects dead buffers before encoding.
+
+The bounded BS=32 `beautiful_mnist` audit changed the trustworthy
+baseline: non-graph replay is about `751.5ms` with `2067` live
+dispatches and `5.26GB` live Metal storage, while opt-in graph replay
+is about `711.1ms`.  This supersedes the earlier faster number that
+counted backend dispatch failures for freed captured buffers.
+
 ### Added: comparable IR dumps for tinygrad and TJit replay
 
 `tools/bench_tinygrad_beautiful_mnist.py` can now print captured
