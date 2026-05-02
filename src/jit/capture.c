@@ -61,6 +61,7 @@ typedef struct {
   u32  out_buf_id;     // also doubles as dst-buf for ASSIGN
   u32  n_inputs;       // also doubles as src-tid for ASSIGN (in_buf_ids[0])
   u32  in_buf_ids[JIT_OP_INLINE_INPUTS];
+  u32 *heap_in_buf_ids;
   // ASSIGN path:
   u32  assign_dst_tid;
   u32  assign_src_tid;
@@ -78,6 +79,17 @@ static u32 JIT_ACTIVE_SLOT = 0;     // 0 = not capturing; otherwise the
                                     // 1-indexed slot being filled
 static u32 JIT_PAUSE_DEPTH = 0;     // nested suppression for internal
                                     // benchmark fires (autotune, variants)
+
+static void jit_capture_clear_ops(JitCapture *c) {
+  if (c == NULL || c->ops == NULL) {
+    return;
+  }
+  for (u32 i = 0; i < c->n_ops; i++) {
+    free(c->ops[i].heap_in_buf_ids);
+    c->ops[i].heap_in_buf_ids = NULL;
+  }
+  c->n_ops = 0;
+}
 
 fn int jit_is_capturing(void) {
   return JIT_ACTIVE_SLOT != 0 && JIT_PAUSE_DEPTH == 0;
@@ -107,8 +119,8 @@ fn u32 jit_capture_begin(void) {
             JIT_CAPTURE_OP_CAP, sizeof(JitCaptureOp));
         if (JIT_CAPTURES[i].ops == NULL) return 0;
       }
+      jit_capture_clear_ops(&JIT_CAPTURES[i]);
       JIT_CAPTURES[i].in_use   = 1;
-      JIT_CAPTURES[i].n_ops    = 0;
       JIT_ACTIVE_SLOT          = i;
       JIT_PAUSE_DEPTH          = 0;
       return i;
@@ -124,8 +136,8 @@ fn void jit_capture_end(void) {
 
 fn void jit_capture_drop(u32 slot) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) return;
+  jit_capture_clear_ops(&JIT_CAPTURES[slot]);
   JIT_CAPTURES[slot].in_use = 0;
-  JIT_CAPTURES[slot].n_ops  = 0;
   if (JIT_ACTIVE_SLOT == slot) {
     JIT_ACTIVE_SLOT = 0;
     JIT_PAUSE_DEPTH = 0;
@@ -153,18 +165,24 @@ fn void jit_capture_record(u32 kid, u32 const *in_buf_ids,
         JIT_CAPTURE_OP_CAP);
     return;
   }
-  if (n_inputs > JIT_OP_INLINE_INPUTS) {
-    fprintf(stderr,
-        "thvm: jit_capture_record -- kernel kid=%u has %u inputs, cap is %u\n",
-        kid, n_inputs, JIT_OP_INLINE_INPUTS);
-    return;
-  }
   JitCaptureOp *op = &c->ops[c->n_ops++];
   op->kind       = JIT_OP_DISPATCH;
   op->kid        = kid;
   op->out_buf_id = out_buf_id;
   op->n_inputs   = n_inputs;
-  for (u32 i = 0; i < n_inputs; i++) op->in_buf_ids[i] = in_buf_ids[i];
+  op->heap_in_buf_ids = NULL;
+  if (n_inputs <= JIT_OP_INLINE_INPUTS) {
+    for (u32 i = 0; i < n_inputs; i++) op->in_buf_ids[i] = in_buf_ids[i];
+  } else {
+    op->heap_in_buf_ids = (u32 *)malloc((size_t)n_inputs * sizeof(u32));
+    if (op->heap_in_buf_ids == NULL) {
+      c->n_ops--;
+      return;
+    }
+    for (u32 i = 0; i < n_inputs; i++) {
+      op->heap_in_buf_ids[i] = in_buf_ids[i];
+    }
+  }
 }
 
 // Called from interact_assign_with just before the memcpy when
@@ -176,6 +194,7 @@ fn void jit_capture_record_assign(u32 dst_tid, u32 src_tid) {
   if (c->n_ops >= JIT_CAPTURE_OP_CAP) return;
   JitCaptureOp *op = &c->ops[c->n_ops++];
   op->kind           = JIT_OP_ASSIGN;
+  op->heap_in_buf_ids = NULL;
   op->assign_dst_tid = dst_tid;
   op->assign_src_tid = src_tid;
 }
@@ -200,7 +219,10 @@ fn u32 jit_replay(u32 slot) {
         if (ke->spliced)                              continue;
         Backend *b = TENS[ke->output_tid].backend;
         if (b == NULL || b->dispatch_kernel == NULL)  continue;
-        b->dispatch_kernel(ke, op->in_buf_ids, op->out_buf_id);
+        u32 *ids = op->heap_in_buf_ids != NULL
+                 ? op->heap_in_buf_ids
+                 : op->in_buf_ids;
+        b->dispatch_kernel(ke, ids, op->out_buf_id);
         ITRS++;
         break;
       }
@@ -240,8 +262,8 @@ fn u32 jit_replay(u32 slot) {
 // drops captures from a prior session.
 fn void jit_capture_reset_all(void) {
   for (u32 i = 0; i < JIT_CAPTURE_NSLOTS; i++) {
+    jit_capture_clear_ops(&JIT_CAPTURES[i]);
     JIT_CAPTURES[i].in_use = 0;
-    JIT_CAPTURES[i].n_ops  = 0;
   }
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;

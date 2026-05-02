@@ -266,8 +266,98 @@ static void grad_memo_insert(Term child, Term gy, Term target, Term result) {
   // load-bearing for correctness).
 }
 
+#define GRAD_DEP_CAP (1u << 15)
+typedef struct {
+  u32  gen;
+  u64  loc;
+  Term target;
+  u8   result;
+  u8   visiting;
+} GradDepEntry;
+static GradDepEntry GRAD_DEP[GRAD_DEP_CAP];
+
+static inline u32 grad_dep_hash(u64 loc, Term target) {
+  u64 h = loc;
+  h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+  h ^= (u64)target; h *= 0xc4ceb9fe1a85ec53ULL;
+  h ^= h >> 33;
+  return (u32)h & (GRAD_DEP_CAP - 1);
+}
+
+static int grad_term_matches_target(Term t, Term target) {
+  if (target == 0) {
+    return 0;
+  }
+  Term ty = grad_alo_resolve(target);
+  Term tt = grad_alo_resolve(t);
+  if (ty == tt) {
+    return 1;
+  }
+  Term tr = term_resolve(target);
+  Term rr = term_resolve(t);
+  return term_tag(tr) == TAG_TEN && term_tag(rr) == TAG_TEN
+      && term_val(tr) == term_val(rr);
+}
+
+static int grad_depends_on_target(Term t, Term target) {
+  if (target == 0) {
+    return 1;
+  }
+  if (grad_term_matches_target(t, target)) {
+    return 1;
+  }
+  Term r = term_resolve(t);
+  u8 tag = term_tag(r);
+  if (tag == TAG_TEN || tag == TAG_NUM) {
+    return 0;
+  }
+  if (tag != TAG_UOP) {
+    return 1;
+  }
+  u32 op = term_ext(r);
+  if (op == UOP_KERNEL) {
+    u64 loc = term_val(r);
+    u32 kid = (u32)term_val(heap_read(loc + 1));
+    if (kid != 0 && kid < KERNELS_NEXT && KERNELS[kid].source_uop != 0) {
+      return grad_depends_on_target(KERNELS[kid].source_uop, target);
+    }
+    return 1;
+  }
+
+  u64 loc = term_val(r);
+  u32 idx = grad_dep_hash(loc, target);
+  for (u32 probe = 0; probe < GRAD_DEP_CAP; probe++) {
+    GradDepEntry *e = &GRAD_DEP[(idx + probe) & (GRAD_DEP_CAP - 1)];
+    if (e->gen == GRAD_MEMO_GEN && e->loc == loc && e->target == target) {
+      return e->visiting ? 0 : e->result;
+    }
+    if (e->gen != GRAD_MEMO_GEN) {
+      e->gen      = GRAD_MEMO_GEN;
+      e->loc      = loc;
+      e->target   = target;
+      e->visiting = 1;
+      e->result   = 1;
+      u8 ar = uop_arity((u8)op);
+      u8 res = 0;
+      for (u8 i = 0; i < ar; i++) {
+        if (grad_depends_on_target(heap_read(loc + i), target)) {
+          res = 1;
+          break;
+        }
+      }
+      e->visiting = 0;
+      e->result   = res;
+      return res;
+    }
+  }
+  return 1;
+}
+
 static Term grad_bwd_for_child(Term child, Term gy_for_child) {
   Term target = grad_current_target();
+  if (target != 0 && !grad_depends_on_target(child, target)) {
+    return uop_const(DT_FP32, 0);
+  }
   Term cached;
   if (grad_memo_lookup(child, gy_for_child, target, &cached)) return cached;
 

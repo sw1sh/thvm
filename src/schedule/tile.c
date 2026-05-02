@@ -524,13 +524,17 @@ static u32 tile_conv2d_reduce_unroll_from_opts(KernelEntry const *ke,
 static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
                                          TileConv2DInfo *out,
                                          int allow_cin1) {
-  if (ke == NULL || out == NULL || ke->n_inputs != 2 || ke->n_ops == 0
+  if (ke == NULL || out == NULL || ke->n_inputs < 2 || ke->n_ops == 0
       || ke->program == NULL || ke->input_views == NULL) {
     return 0;
   }
-  if (ke->input_dtypes[0] != DT_FP32 || ke->input_dtypes[1] != DT_FP32
-      || ke->output_dtype != DT_FP32) {
+  if (ke->input_dtypes[0] != DT_FP32 || ke->output_dtype != DT_FP32) {
     return 0;
+  }
+  for (u32 i = 1; i < ke->n_inputs; i++) {
+    if (ke->input_dtypes[i] != DT_FP32) {
+      return 0;
+    }
   }
   KProgOp const *last = &ke->program[ke->n_ops - 1];
   if (last->opcode != UOP_REDUCE || last->n_src != 1
@@ -539,40 +543,115 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
   }
 
   View const *wv = &ke->input_views[0];
-  View const *xv = &ke->input_views[1];
-  if (wv->shape.ndim != 3 || xv->shape.ndim != 3
+  if (wv->shape.ndim != 3
       || (ke->output_shape.ndim != 2 && ke->output_shape.ndim != 3)) {
     return 0;
   }
   u32 c_out = wv->shape.dims[0];
   u32 k     = wv->shape.dims[1];
   u32 p     = wv->shape.dims[2];
-  u32 c_in  = xv->shape.dims[0];
-  u32 h     = xv->shape.dims[1];
-  u32 w     = xv->shape.dims[2];
-  if (c_out == 0 || c_in == 0 || k == 0 || p == 0) {
+  u32 batch = 1;
+  u32 c_in = 0, h = 0, w = 0;
+  i32 x_offset = 0;
+  i32 x_stride_b = 0;
+  i32 x_stride0 = 0, x_stride1 = 0, x_stride2 = 0;
+  u32 patch_base = 0, patch_count = 0;
+  if (c_out == 0 || k == 0 || p == 0) {
     return 0;
   }
-  // The fused im2col graph degenerates at c_in==1 in a way this
-  // direct-strided template does not yet prove correct.
-  if (c_in == 1 && !allow_cin1) {
-    return 0;
+  u32 kh = 0, kw = 0, h_out = 0, w_out = 0, spatial_patches = 0;
+  int direct_x = ke->n_inputs == 2;
+  if (direct_x) {
+    View const *xv = &ke->input_views[1];
+    if (xv->shape.ndim != 3 && xv->shape.ndim != 4) {
+      return 0;
+    }
+    if (xv->shape.ndim == 3) {
+      c_in      = xv->shape.dims[0];
+      h         = xv->shape.dims[1];
+      w         = xv->shape.dims[2];
+      x_offset  = xv->offset;
+      x_stride0 = xv->strides[0];
+      x_stride1 = xv->strides[1];
+      x_stride2 = xv->strides[2];
+    } else {
+      batch      = xv->shape.dims[0];
+      c_in       = xv->shape.dims[1];
+      h          = xv->shape.dims[2];
+      w          = xv->shape.dims[3];
+      x_offset   = xv->offset;
+      x_stride_b = xv->strides[0];
+      x_stride0  = xv->strides[1];
+      x_stride1  = xv->strides[2];
+      x_stride2  = xv->strides[3];
+    }
+    if (c_in == 0 || (c_in == 1 && !allow_cin1) || k % c_in != 0) {
+      return 0;
+    }
+    u32 k_spatial = k / c_in;
+    kh = tile_isqrt_exact(k_spatial);
+    if (kh == 0) {
+      return 0;
+    }
+    kw = kh;
+    if (h < kh || w < kw) {
+      return 0;
+    }
+    h_out = h - kh + 1;
+    w_out = w - kw + 1;
+    spatial_patches = h_out * w_out;
+  } else {
+    c_in = 1;
+    kh = tile_isqrt_exact(k);
+    if (kh == 0) {
+      return 0;
+    }
+    kw = kh;
+    patch_base = 1;
+    patch_count = k;
+    if (ke->n_inputs != 1 + patch_count) {
+      return 0;
+    }
+    View const *pv0 = &ke->input_views[patch_base];
+    if (pv0->shape.ndim == 3) {
+      if (pv0->shape.dims[0] != 1) {
+        return 0;
+      }
+      h_out = pv0->shape.dims[1];
+      w_out = pv0->shape.dims[2];
+    } else if (pv0->shape.ndim == 4) {
+      if (pv0->shape.dims[0] != 1) {
+        return 0;
+      }
+      batch = pv0->shape.dims[1];
+      h_out = pv0->shape.dims[2];
+      w_out = pv0->shape.dims[3];
+    } else {
+      return 0;
+    }
+    for (u32 i = 0; i < patch_count; i++) {
+      View const *pv = &ke->input_views[patch_base + i];
+      if (pv->shape.ndim != pv0->shape.ndim) {
+        return 0;
+      }
+      if (pv->shape.ndim == 3) {
+        if (pv->shape.dims[0] != 1 || pv->shape.dims[1] != h_out
+            || pv->shape.dims[2] != w_out) {
+          return 0;
+        }
+      } else if (pv->shape.dims[0] != 1 || pv->shape.dims[1] != batch
+          || pv->shape.dims[2] != h_out || pv->shape.dims[3] != w_out) {
+        return 0;
+      }
+    }
+    h = h_out + kh - 1;
+    w = w_out + kw - 1;
+    spatial_patches = h_out * w_out;
   }
-  if (k % c_in != 0) {
-    return 0;
-  }
-  u32 k_spatial = k / c_in;
-  u32 kh = tile_isqrt_exact(k_spatial);
   if (kh == 0) {
     return 0;
   }
-  u32 kw = kh;
-  if (h < kh || w < kw) {
-    return 0;
-  }
-  u32 h_out = h - kh + 1;
-  u32 w_out = w - kw + 1;
-  if (h_out * w_out != p) {
+  if (batch == 0 || spatial_patches == 0 || batch * spatial_patches != p) {
     return 0;
   }
   int output_flat = ke->output_shape.ndim == 2
@@ -592,7 +671,9 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
   memset(out, 0, sizeof(TileConv2DInfo));
   out->dtype     = DT_FP32;
   out->w_input   = 0;
-  out->x_input   = 1;
+  out->x_input   = direct_x ? 1 : 0;
+  out->patch_input_base  = patch_base;
+  out->patch_input_count = patch_count;
   out->c_out     = c_out;
   out->c_in      = c_in;
   out->h         = h;
@@ -601,14 +682,17 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
   out->kw        = kw;
   out->h_out     = h_out;
   out->w_out     = w_out;
+  out->batch     = batch;
   out->patches   = p;
+  out->spatial_patches = spatial_patches;
   out->w_offset  = wv->offset;
   out->w_stride0 = wv->strides[0];
   out->w_stride1 = wv->strides[1];
-  out->x_offset  = xv->offset;
-  out->x_stride0 = xv->strides[0];
-  out->x_stride1 = xv->strides[1];
-  out->x_stride2 = xv->strides[2];
+  out->x_offset  = x_offset;
+  out->x_stride_b = x_stride_b;
+  out->x_stride0 = x_stride0;
+  out->x_stride1 = x_stride1;
+  out->x_stride2 = x_stride2;
   out->threads   = tile_conv2d_threads_from_opts(ke);
   out->outputs_per_thread = tile_conv2d_outputs_from_opts(ke);
   out->reduce_unroll = tile_conv2d_reduce_unroll_from_opts(ke, k);
@@ -624,7 +708,7 @@ int tile_rejects_conv2d_flat_cin1(KernelEntry const *ke) {
   if (!tile_analyze_conv2d_flat_impl(ke, &conv, 1)) {
     return 0;
   }
-  return conv.c_in == 1;
+  return conv.c_in == 1 && conv.patch_input_count == 0;
 }
 
 static int tile_collect_axis_info(KernelEntry const *ke, u32 axis_id,

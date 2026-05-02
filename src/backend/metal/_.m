@@ -619,12 +619,13 @@ static int metal_tile_jit_encode(KernelEntry *ke,
   TileConv2DInfo conv;
   int is_conv = tile_analyze_conv2d_flat(ke, &conv);
   if (is_conv) {
-    int cfg[16] = {
+    int cfg[19] = {
       (int)conv.c_out, (int)conv.c_in,  (int)conv.h,     (int)conv.w,
       (int)conv.kh,    (int)conv.kw,    (int)conv.h_out, (int)conv.w_out,
-      (int)conv.patches,
+      (int)conv.patches, (int)conv.batch, (int)conv.spatial_patches,
       conv.w_offset, conv.w_stride0, conv.w_stride1,
-      conv.x_offset, conv.x_stride0, conv.x_stride1, conv.x_stride2,
+      conv.x_offset, conv.x_stride_b,
+      conv.x_stride0, conv.x_stride1, conv.x_stride2,
     };
     [enc setBytes:cfg length:sizeof(cfg) atIndex:(1 + ke->n_inputs)];
   }

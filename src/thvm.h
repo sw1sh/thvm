@@ -738,6 +738,8 @@ typedef struct {
   u32 dtype;
   u32 w_input;
   u32 x_input;
+  u32 patch_input_base;
+  u32 patch_input_count;
   u32 c_out;
   u32 c_in;
   u32 h;
@@ -746,11 +748,14 @@ typedef struct {
   u32 kw;
   u32 h_out;
   u32 w_out;
-  u32 patches;
+  u32 batch;
+  u32 patches;         // total output patches = batch * h_out * w_out
+  u32 spatial_patches; // h_out * w_out
   i32 w_offset;
   i32 w_stride0;
   i32 w_stride1;
   i32 x_offset;
+  i32 x_stride_b;
   i32 x_stride0;
   i32 x_stride1;
   i32 x_stride2;

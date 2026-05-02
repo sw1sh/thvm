@@ -47,7 +47,7 @@ The old `Conv2D + ReLU + MaxPool2d` weight-gradient shape bug is fixed
 in the current tree; the minimal repro returns the weight shape
 `{2, 1, 3, 3}`.
 
-### beautiful_mnist Forward
+### beautiful_mnist Forward And Training Loop
 
 The latest canary uses the tinygrad-style `beautiful_mnist` forward
 example with diagnostic backend specializations disabled:
@@ -109,6 +109,54 @@ generic tile, no autotune:                  95.0ms / 10.4ms / 6.6ms
 fire-time autotune, cache disabled:        167.6ms / 5.4ms / 4.4ms
 ```
 
+After switching focus from first-sample overhead to the full
+beautiful_mnist loop, `bench-train.wls` now builds the actual
+tinygrad-style architecture with rank-4 batches:
+
+```bash
+THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0 \
+BENCH_MODE=forward BS=512 WARMUP_STEPS=1 N_STEPS=3 \
+  wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
+```
+
+Current forward-only result after rank-4 Conv2D tile recognition and
+single-channel patch-input tile support:
+
+```text
+BS=1 forward replay:      7.1ms / 6.9ms / 4.6ms
+BS=16 forward replay:    67.6ms / 20.8ms / 16.0ms
+BS=512 forward replay:  314.3ms / 298.8ms / 292.0ms
+```
+
+The same local tinygrad checkout with Metal, BS=512, `TinyJit`, and
+`IGNORE_JIT_FIRST_BEAM=1 TRAIN_BEAM=1 DEBUG=2` shows steady captured
+training batches around `30-33ms` after warmup.  That is the current
+parity target: full BS=512 training-loop replay, not the first
+materialization or the old single-sample forward canary.
+
+Gradient status:
+
+```text
+BENCH_MODE=grad-w5 BS=1: capture 173.9ms, replay 13.6ms
+BENCH_MODE=grad-14 BS=1: capture 110.1ms, replay 13.1ms
+BENCH_MODE=grad-12 BS=1: capture 170.6ms, replay 14.4ms
+BENCH_MODE=grad-9  BS=1: capture 224.8ms, replay 17.6ms
+BENCH_MODE=grad-7  BS=1: capture 319.4ms, replay 163.3ms
+BENCH_MODE=grad-1  BS=1: still too slow to use as a loop canary
+```
+
+Interpretation for the hackathon track:
+
+- First-sample overhead is not the next gating metric.
+- Rank-4 forward now works, but BS=512 forward alone is still about
+  `10x` slower than tinygrad's full captured train step.
+- Target-pruned gradients make final-layer and late-block gradients
+  replayable, but early conv-weight gradients still explode into many
+  generic movement/reduction kernels.
+- The next useful work is backward Conv/BN/pool tile recognition and
+  fusion, plus row-wise/group reductions for the large batch-stat and
+  flatten/linear movement kernels.
+
 Interpretation:
 
 - The old generic Metal tile path was roughly `64-69ms` steady-state
@@ -127,12 +175,10 @@ Interpretation:
 - The old opt-in direct Metal GEMV shader is retired; rank-1
   `TMatVec` stays on the shared `TILE_MMA`/`metal-gemm` route even
   when `THVM_METAL_SPECIALIZED=1` is enabled.
-- The single-channel first Conv2D currently uses the correct Metal
-  fallback instead of generic Metal tile, because the PAD-heavy im2col
-  scalar graph is not yet safe for that renderer.
-- This is not tinygrad parity yet.  First-sample time still includes
-  materialization and dynamic Metal compilation, and the schedule space
-  is still much narrower than tinygrad's search.
+- The single-channel first Conv2D now uses a generated Metal tile
+  patch-input template instead of the generic Metal fallback.
+- This is not tinygrad parity yet.  The schedule space and backward
+  graph lowering are still much narrower than tinygrad's search.
 
 ## Rerun Commands
 
@@ -148,6 +194,9 @@ THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0 \
 THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0 \
 THVM_AUTOTUNE=1 THVM_AUTOTUNE_CACHE=0 \
   wolframscript -f wl/Examples/beautiful-mnist/forward.wls
+THVM_BACKEND=metal THVM_TILE=1 THVM_METAL_SPECIALIZED=0 \
+BENCH_MODE=forward BS=512 WARMUP_STEPS=1 N_STEPS=3 \
+  wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
 
 wolframscript -f wl/Examples/lenet-mnist/train.wls
 THVM_BACKEND=metal THVM_TILE=1 N_STEPS=4 \
@@ -178,15 +227,20 @@ bounded sample was too small and no candidate clearly beat baseline.
 
 Current work should prioritize these in order:
 
-1. Reduce first-sample overhead for Metal: materialization, dynamic MSL
-   compilation, and cache replay behavior.
-2. Broaden the generated Conv2D schedule beyond threadgroup size,
+1. Make early Conv/BN/pool backward replayable for the full
+   beautiful_mnist graph.  The current W1 path is still too slow even
+   at BS=1.
+2. Reduce BS=512 forward replay time.  Current forward is about
+   `300ms`; tinygrad's whole captured train step is about `30-33ms`.
+3. Broaden the generated Conv2D schedule beyond threadgroup size,
    output-per-thread, and reduce-unroll.  Next useful knobs are output
    axis mapping, cooperative reduction shape, local-memory staging, and
    vector width.
-3. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
+4. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
    instead of scalar reducer loops.
-4. Add Metal `simdgroup_matrix`/MMA variants after reductions and
+5. Reduce first-sample overhead for Metal once steady replay is in the
+   right class.
+6. Add Metal `simdgroup_matrix`/MMA variants after reductions and
    local-memory tiling are stable.
 5. Keep improving multi-grad structural sharing.  It is not the top
    bottleneck in the latest LeNet measurements, but it will matter once

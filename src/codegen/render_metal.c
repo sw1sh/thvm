@@ -442,13 +442,14 @@ static char *rmt_emit_conv2d_flat(KernelEntry const *ke,
   cg_append(&b, "#define KH %uu\n", conv->kh);
   cg_append(&b, "#define KW %uu\n", conv->kw);
   cg_append(&b, "#define PATCHES %uu\n", conv->patches);
+  cg_append(&b, "#define SPATCHES %uu\n", conv->spatial_patches);
   cg_append(&b, "#define WOUT %uu\n", conv->w_out);
   cg_append(&b, "#define KRED (CIN * KH * KW)\n\n");
   cg_append(&b, "kernel void k(device float *out [[buffer(0)]],\n");
-  cg_append(&b, "              device const float *in%u [[buffer(%u)]],\n",
-            conv->w_input, conv->w_input + 1);
-  cg_append(&b, "              device const float *in%u [[buffer(%u)]],\n",
-            conv->x_input, conv->x_input + 1);
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    cg_append(&b, "              device const float *in%u [[buffer(%u)]],\n",
+              i, i + 1);
+  }
   cg_append(&b, "              constant int *cfg [[buffer(%u)]],\n",
             ke->n_inputs + 1);
   cg_append(&b, "              uint gid [[thread_position_in_grid]]) {\n");
@@ -460,8 +461,10 @@ static char *rmt_emit_conv2d_flat(KernelEntry const *ke,
   cg_append(&b, "    if (og >= total) return;\n");
   cg_append(&b, "    int co = (int)(og / (uint)PATCHES);\n");
   cg_append(&b, "    int p = (int)(og - (uint)co * (uint)PATCHES);\n");
-  cg_append(&b, "    int ow = p %% WOUT;\n");
-  cg_append(&b, "    int oh = p / WOUT;\n");
+    cg_append(&b, "    int bi = p / SPATCHES;\n");
+    cg_append(&b, "    int sp = p - bi * SPATCHES;\n");
+    cg_append(&b, "    int ow = sp %% WOUT;\n");
+    cg_append(&b, "    int oh = sp / WOUT;\n");
   cg_append(&b, "    float acc = 0.0f;\n");
   if (conv->reduce_unroll > 1) {
     cg_append(&b, "    #pragma clang loop unroll_count(%u)\n",
@@ -471,22 +474,66 @@ static char *rmt_emit_conv2d_flat(KernelEntry const *ke,
     cg_append(&b, "      int qk = q / KW;\n");
     cg_append(&b, "      int ki = qk %% KH;\n");
     cg_append(&b, "      int ci = qk / KH;\n");
-    cg_append(&b, "      int wi = cfg[9] + co * cfg[10] + q * cfg[11];\n");
-    cg_append(&b, "      int xi = cfg[12] + ci * cfg[13] + (oh + ki) * cfg[14]"
-                  " + (ow + kj) * cfg[15];\n");
-    cg_append(&b, "      acc += in%u[wi] * in%u[xi];\n",
-              conv->w_input, conv->x_input);
+    cg_append(&b, "      int wi = cfg[11] + co * cfg[12] + q * cfg[13];\n");
+    if (conv->patch_input_count != 0) {
+      cg_append(&b, "      float xv = 0.0f;\n");
+      cg_append(&b, "      switch (q) {\n");
+      for (u32 pi = 0; pi < conv->patch_input_count; pi++) {
+        u32 slot = conv->patch_input_base + pi;
+        View const *pv = &ke->input_views[slot];
+        i32 psb = 0, psh = 0, psw = 0;
+        if (pv->shape.ndim == 3) {
+          psh = pv->strides[1];
+          psw = pv->strides[2];
+        } else {
+          psb = pv->strides[1];
+          psh = pv->strides[2];
+          psw = pv->strides[3];
+        }
+        cg_append(&b, "        case %u: xv = in%u[%d + bi * %d + oh * %d + ow * %d]; break;\n",
+                  pi, slot, pv->offset, psb, psh, psw);
+      }
+      cg_append(&b, "      }\n");
+      cg_append(&b, "      acc += in%u[wi] * xv;\n", conv->w_input);
+    } else {
+      cg_append(&b, "      int xi = cfg[14] + bi * cfg[15] + ci * cfg[16]"
+                    " + (oh + ki) * cfg[17] + (ow + kj) * cfg[18];\n");
+      cg_append(&b, "      acc += in%u[wi] * in%u[xi];\n",
+                conv->w_input, conv->x_input);
+    }
     cg_append(&b, "    }\n");
   } else {
     cg_append(&b, "    for (int ci = 0; ci < cfg[1]; ci++) {\n");
     cg_append(&b, "      for (int ki = 0; ki < cfg[4]; ki++) {\n");
     cg_append(&b, "        for (int kj = 0; kj < cfg[5]; kj++) {\n");
     cg_append(&b, "          int q = ((ci * cfg[4]) + ki) * cfg[5] + kj;\n");
-    cg_append(&b, "          int wi = cfg[9] + co * cfg[10] + q * cfg[11];\n");
-    cg_append(&b, "          int xi = cfg[12] + ci * cfg[13] + (oh + ki) * cfg[14]"
-                  " + (ow + kj) * cfg[15];\n");
-    cg_append(&b, "          acc += in%u[wi] * in%u[xi];\n",
-              conv->w_input, conv->x_input);
+    cg_append(&b, "          int wi = cfg[11] + co * cfg[12] + q * cfg[13];\n");
+    if (conv->patch_input_count != 0) {
+      cg_append(&b, "          float xv = 0.0f;\n");
+      cg_append(&b, "          switch (q) {\n");
+      for (u32 pi = 0; pi < conv->patch_input_count; pi++) {
+        u32 slot = conv->patch_input_base + pi;
+        View const *pv = &ke->input_views[slot];
+        i32 psb = 0, psh = 0, psw = 0;
+        if (pv->shape.ndim == 3) {
+          psh = pv->strides[1];
+          psw = pv->strides[2];
+        } else {
+          psb = pv->strides[1];
+          psh = pv->strides[2];
+          psw = pv->strides[3];
+        }
+        cg_append(&b, "            case %u: xv = in%u[%d + bi * %d + oh * %d + ow * %d]; break;\n",
+                  pi, slot, pv->offset, psb, psh, psw);
+      }
+      cg_append(&b, "          }\n");
+      cg_append(&b, "          acc += in%u[wi] * xv;\n", conv->w_input);
+    } else {
+      cg_append(&b, "          int xi = cfg[14] + bi * cfg[15] + ci * cfg[16]"
+                    " + (oh + ki) * cfg[17] + (ow + kj) * cfg[18];\n");
+      cg_append(&b, "          acc += in%u[wi] * in%u[xi];\n",
+                conv->w_input, conv->x_input);
+    }
     cg_append(&b, "        }\n");
     cg_append(&b, "      }\n");
     cg_append(&b, "    }\n");

@@ -6,6 +6,45 @@ dated section.
 
 ## Unreleased
 
+### Added: beautiful_mnist full-loop benchmark path
+
+`wl/Examples/beautiful-mnist/bench-train.wls` now builds the full
+tinygrad-style beautiful_mnist architecture with rank-4 batched inputs
+and separates warmup from steady TJit replay timing.  The benchmark can
+run forward-only, a single target gradient, or the full Adam path so the
+training gap is measured at the loop that matters instead of the old
+single-sample forward canary.
+
+### Changed: rank-4 NN lowering for beautiful_mnist
+
+`TConv2D`, `TMaxPool2d`, and batch norm lowering now handle rank-4
+channels-first tensors.  Batched Conv2D lowers to one im2col-shaped
+matmul over `B * Hout * Wout`, rank-4 maxpool preserves the batch axis,
+and `TBatchNormTrain` computes per-channel statistics over batch and
+spatial axes.
+
+### Fixed: target-pruned gradient walks
+
+Target-aware `TGrad` now skips child subgraphs that cannot reach the
+current target tensor.  This avoids walking the whole forward graph for
+final-layer gradients and turns the beautiful_mnist final-linear
+gradient from a >30s first capture into a sub-second capture with
+steady TJit replay.
+
+### Fixed: TJit capture for high-input gradient kernels
+
+TJit capture records now spill large input lists to per-op heap storage
+instead of dropping kernels whose input count exceeds the inline record
+capacity.  This covers movement-heavy gradient kernels with more than
+64 input buffers.
+
+### Added: rank-4 Metal tile Conv2D templates
+
+The generated Metal tile Conv2D recognizer now accepts rank-4
+`{B,C,H,W}` inputs and the single-channel im2col patch-input form used
+by the first beautiful_mnist convolution.  Batched forward replay no
+longer falls back to generic `metal-op` for those convolution kernels.
+
 ### Added: Conv2D tile reduce-unroll candidates
 
 The Metal Conv2D tile template now records a `KOP_UNROLL` factor from

@@ -57,13 +57,15 @@ TTanh::usage            = "TTanh[x] = elementwise tanh, implemented as (u - 1)/(
 TSoftmax::usage         = "TSoftmax[x] = exp(x) / sum(exp(x)) over the last axis.  exp via the EXP2 + log2(e) chain.  Numerically naive (no max-subtract stabilisation) -- input magnitudes >~80 will overflow exp.  Forward only.";
 TLog::usage             = "TLog[x] = elementwise natural log, implemented as LOG2(x) * ln(2) since the runtime has UOP_LOG2 but no UOP_LOG.";
 TCrossEntropyLoss::usage = "TCrossEntropyLoss[pred, target] = -sum(target * log(pred)).  Probability-form categorical cross-entropy.  Both inputs are TTerms with the same shape; target is typically a one-hot vector.  Forward only -- LOG2 has no grad rule yet.";
-TMaxPool2d::usage        = "TMaxPool2d[x] / TMaxPool2d[x, k] runs a non-overlapping kxk max-pool over the trailing two axes of a rank-3 channels-first tensor {C, H, W}.  Default k=2.  Lowered as RESHAPE {C, H, W} -> {C, H/k, k, W/k, k} + two REDUCE_MAX over the inserted k-axes.  H and W must be divisible by k.";
+TMaxPool2d::usage        = "TMaxPool2d[x] / TMaxPool2d[x, k] runs a non-overlapping kxk max-pool over the trailing two axes of a rank-3 {C, H, W} or rank-4 batched {B, C, H, W} channels-first tensor.  Default k=2.";
 TLayerNorm::usage        = "TLayerNorm[x] / TLayerNorm[x, eps] normalises along the last axis: y = (x - mean) / sqrt(var + eps).  Default eps=1e-5.  mean / var are scalar reductions broadcast back via the softmax-style reduce-broadcast pattern; the scheduler's relaxation pass collapses each reduce + its broadcast tail into one kernel where it can.";
 TSoftmaxAxis::usage      = "TSoftmaxAxis[x, axis] = exp(x) / sum(exp(x)) reduced along `axis`.  Generalises TSoftmax (which is hard-coded to axis 0).  The dropped axis is re-introduced as size 1 + EXPAND'd back so the elementwise mul has matching shapes; same softmax-style reduce-broadcast shape.";
 TAttention::usage        = "TAttention[Q, K, V] computes scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.  Q is {seq_q, d_k}; K is {seq_k, d_k}; V is {seq_k, d_v}.  Result is {seq_q, d_v}.  Pure assembly of TMatMul + TSoftmaxAxis + TMatMul; the two matmuls dispatch through cblas_sgemm.";
-TBatchNorm::usage        = "TBatchNorm[x, gamma, beta, mean, var] / TBatchNorm[x, gamma, beta, mean, var, eps] applies the inference-form batch-norm transform: y = gamma * (x - mean) / sqrt(var + eps) + beta along the channel axis.  x is rank-3 {C, H, W} (channels-first); gamma/beta/mean/var are all rank-1 {C}.  Default eps = 1e-5.  The trainer maintains running mean/var with TAssign on the WL side; this op is the pure forward shape used by both train and infer.";
-TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}; output {C_out, H-kh+1, W-kw+1}.  Routes through TConv2DIm2Col (M1).  TConv2DKhKw kept as the kh*kw reference path.";
+TBatchNorm::usage        = "TBatchNorm[x, gamma, beta, mean, var] / TBatchNorm[x, gamma, beta, mean, var, eps] applies the inference-form batch-norm transform: y = gamma * (x - mean) / sqrt(var + eps) + beta along the channel axis.  x is rank-3 {C, H, W} or rank-4 {B, C, H, W}; gamma/beta/mean/var are all rank-1 {C}.  Default eps = 1e-5.";
+TBatchNormTrain::usage   = "TBatchNormTrain[x, gamma, beta] / TBatchNormTrain[x, gamma, beta, eps] computes batch-norm using statistics from x, then applies per-channel gamma/beta.  Supports rank-3 {C,H,W} and rank-4 {B,C,H,W}.";
+TConv2D::usage           = "TConv2D[input, weights, bias] builds a stride-1, no-padding 2-D convolution.  input shape {C_in, H, W} or batched {B, C_in, H, W}; weights {C_out, C_in, kh, kw}; bias {C_out}.  Rank-3 routes through TConv2DIm2Col; rank-4 routes through TConv2DIm2ColBatched.";
 TConv2DIm2Col::usage     = "TConv2DIm2Col[input, weights, bias] is the im2col + matmul lowering of a stride-1, no-padding 2-D convolution.  Same signature/output shape as TConv2D.  Builds the im2col matrix `xCol : {C_in*kh*kw, H_out*W_out}`, then `out = w_flat @ xCol` via TMatMul which dispatches through cblas_sgemm.  TConv2D defaults to this path.";
+TConv2DIm2ColBatched::usage = "TConv2DIm2ColBatched[input, weights, bias] is the rank-4 batched im2col lowering for input {B,C,H,W}.  It builds xCol : {C*kh*kw, B*H_out*W_out}, runs one matmul, then reshapes back to {B,C_out,H_out,W_out}.";
 TConv2DKhKw::usage       = "TConv2DKhKw[input, weights, bias] is the kh*kw partial-sum lowering -- original TConv2D body kept for reference.";
 TGlorot::usage           = "TGlorot[shape] returns a fresh f32 TTerm tensor of the given shape, filled with samples from N(0, sqrt(2 / fan_in)) (Glorot/Xavier-He init).  fan_in = product of all dims after the first.  Suitable for ReLU / linear layer weight init.";
 TZeros::usage            = "TZeros[shape] returns a fresh f32 TTerm tensor of zeros at the given shape.  Convenience for bias init / running-stat init.";
@@ -141,8 +143,17 @@ TCrossEntropyLoss[pred_TTerm, target_TTerm] := - Total[target * Log[pred]]
    which fits the per-op-allocates-a-buffer materializer better.
    Phase 9 follow-up: replace with one im2col + sgemm dispatch. *)
 (* M1: route through im2col + sgemm; TConv2DKhKw keeps the kh*kw path. *)
-TConv2D[input_TTerm, weights_TTerm, bias_TTerm] :=
-    TConv2DIm2Col[input, weights, bias]
+TConv2D[input_TTerm, weights_TTerm, bias_TTerm] := With[{
+    inShape = tUopShape[input]
+},
+    Which[
+        Length[inShape] === 3, TConv2DIm2Col[input, weights, bias],
+        Length[inShape] === 4, TConv2DIm2ColBatched[input, weights, bias],
+        True, Failure["NotImplemented",
+            <|"Message" -> "TConv2D expects rank-3 {C,H,W} or rank-4 {B,C,H,W}",
+              "InputShape" -> inShape|>]
+    ]
+]
 
 TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
     inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut,
@@ -231,6 +242,44 @@ TConv2DIm2Col[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
     outShaped + biasBcast
 ]
 
+TConv2DIm2ColBatched[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
+    inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
+    patches, xPatch, summed, xCol, wFlat, outFlat, outObp, outShaped,
+    biasBcast
+},
+    inShape = tUopShape[input];
+    wShape  = tUopShape[weights];
+    {batch, cIn, h, wd} = inShape;
+    cOut = wShape[[1]];
+    kh   = wShape[[3]];
+    kw   = wShape[[4]];
+    hOut  = h  - kh + 1;
+    wOut  = wd - kw + 1;
+    kSpat = kh * kw;
+    patches = Flatten @ Table[
+        With[{slot = ki * kw + kj},
+            xPatch = TUOpPermute[
+                TUOpShrink[input,
+                    {{0, batch}, {0, cIn}, {ki, ki + hOut}, {kj, kj + wOut}}],
+                {1, 0, 2, 3}];
+            TUOpPad[
+                TUOpReshape[xPatch, {cIn, 1, batch * hOut * wOut}],
+                {{0, 0}, {slot, kSpat - 1 - slot}, {0, 0}}]
+        ],
+        {ki, 0, kh - 1}, {kj, 0, kw - 1}
+    ];
+    summed    = Fold[TUOpAdd, First[patches], Rest[patches]];
+    xCol      = TUOpReshape[summed,  {cIn * kSpat, batch * hOut * wOut}];
+    wFlat     = TUOpReshape[weights, {cOut, cIn * kSpat}];
+    outFlat   = TMatMul[wFlat, xCol];
+    outObp    = TUOpReshape[outFlat, {cOut, batch, hOut, wOut}];
+    outShaped = TUOpPermute[outObp, {1, 0, 2, 3}];
+    biasBcast = TUOpExpand[
+        TUOpReshape[bias, {1, cOut, 1, 1}],
+        {batch, cOut, hOut, wOut}];
+    outShaped + biasBcast
+]
+
 (* === host-side init helpers for example scripts ============== *)
 
 TGlorot[shape_List, dtype_String : "f32"] := With[{
@@ -316,15 +365,33 @@ TLinear[x_TTerm, w_TTerm, b_TTerm] := With[{
    axis 3 in the resulting rank-4 shape, ready for the second reduce). *)
 TMaxPool2d[x_TTerm] := TMaxPool2d[x, 2]
 TMaxPool2d[x_TTerm, k_Integer] := With[{shape = tUopShape[x]},
-    Module[{c, h, w},
-        c = shape[[1]];
-        h = shape[[2]];
-        w = shape[[3]];
-        TUOpReduce[
-            TUOpReduce[
-                TUOpReshape[x, {c, h/k, k, w/k, k}],
-                2, "MAX"],
-            3, "MAX"]
+    Module[{rank, b, c, h, w},
+        rank = Length[shape];
+        Which[
+            rank === 3,
+                c = shape[[1]];
+                h = shape[[2]];
+                w = shape[[3]];
+                TUOpReduce[
+                    TUOpReduce[
+                        TUOpReshape[x, {c, h/k, k, w/k, k}],
+                        2, "MAX"],
+                    3, "MAX"],
+            rank === 4,
+                b = shape[[1]];
+                c = shape[[2]];
+                h = shape[[3]];
+                w = shape[[4]];
+                TUOpReduce[
+                    TUOpReduce[
+                        TUOpReshape[x, {b, c, h/k, k, w/k, k}],
+                        3, "MAX"],
+                    4, "MAX"],
+            True,
+                Failure["NotImplemented",
+                    <|"Message" -> "TMaxPool2d expects rank-3 or rank-4 input",
+                      "InputShape" -> shape|>]
+        ]
     ]
 ]
 
@@ -400,18 +467,76 @@ TBatchNorm[x_TTerm, gamma_TTerm, beta_TTerm, mean_TTerm, var_TTerm] :=
     TBatchNorm[x, gamma, beta, mean, var, 1.0*^-5]
 TBatchNorm[x_TTerm, gamma_TTerm, beta_TTerm, mean_TTerm, var_TTerm,
            eps_?NumericQ] := With[{shape = tUopShape[x]},
-    Module[{c, h, w, scaleC, shiftC, scaleBcast, shiftBcast},
-        c = shape[[1]];
-        h = shape[[2]];
-        w = shape[[3]];
-        (* Per-channel scale + shift collapse to scalar computations
-           over the rank-1 {C} parameter tensors -- Plus / Times /
-           Sqrt UpValues lift the scalar `eps` through liftNumeric. *)
+    Module[{rank, b, c, h, w, scaleC, shiftC, bcastShape, scaleBcast, shiftBcast},
+        rank = Length[shape];
+        If[ rank === 3,
+            c = shape[[1]];
+            h = shape[[2]];
+            w = shape[[3]];
+            bcastShape = {c, 1, 1},
+            If[ rank === 4,
+                b = shape[[1]];
+                c = shape[[2]];
+                h = shape[[3]];
+                w = shape[[4]];
+                bcastShape = {1, c, 1, 1},
+                Return @ Failure["NotImplemented",
+                    <|"Message" -> "TBatchNorm expects rank-3 or rank-4 input",
+                      "InputShape" -> shape|>]
+            ]
+        ];
         scaleC     = gamma / Sqrt[var + eps];
         shiftC     = beta  - mean * scaleC;
-        scaleBcast = TUOpExpand[TUOpReshape[scaleC, {c, 1, 1}], {c, h, w}];
-        shiftBcast = TUOpExpand[TUOpReshape[shiftC, {c, 1, 1}], {c, h, w}];
+        scaleBcast = TUOpExpand[TUOpReshape[scaleC, bcastShape], shape];
+        shiftBcast = TUOpExpand[TUOpReshape[shiftC, bcastShape], shape];
         x * scaleBcast + shiftBcast
+    ]
+]
+
+TBatchNormTrain[x_TTerm, gamma_TTerm, beta_TTerm] :=
+    TBatchNormTrain[x, gamma, beta, 1.0*^-5]
+TBatchNormTrain[x_TTerm, gamma_TTerm, beta_TTerm, eps_?NumericQ] :=
+    With[{shape = tUopShape[x]},
+    Module[{rank, b, c, h, w, reduceCount, bcastShape, mean, centered, var,
+            broadcast},
+        rank = Length[shape];
+        If[ rank === 3,
+            c = shape[[1]];
+            h = shape[[2]];
+            w = shape[[3]];
+            reduceCount = h * w;
+            bcastShape = {c, 1, 1};
+            mean = TUOpReduce[TUOpReduce[x, 2, "SUM"], 1, "SUM"] / reduceCount,
+            If[ rank === 4,
+                b = shape[[1]];
+                c = shape[[2]];
+                h = shape[[3]];
+                w = shape[[4]];
+                reduceCount = b * h * w;
+                bcastShape = {1, c, 1, 1};
+                mean = TUOpReduce[
+                    TUOpReduce[
+                        TUOpReduce[x, 3, "SUM"],
+                        2, "SUM"],
+                    0, "SUM"] / reduceCount,
+                Return @ Failure["NotImplemented",
+                    <|"Message" -> "TBatchNormTrain expects rank-3 or rank-4 input",
+                      "InputShape" -> shape|>]
+            ]
+        ];
+        broadcast[t_] := TUOpExpand[TUOpReshape[t, bcastShape], shape];
+        centered = x - broadcast[mean];
+        var = If[ rank === 3,
+            TUOpReduce[TUOpReduce[centered * centered, 2, "SUM"], 1, "SUM"]
+                / reduceCount,
+            TUOpReduce[
+                TUOpReduce[
+                    TUOpReduce[centered * centered, 3, "SUM"],
+                    2, "SUM"],
+                0, "SUM"] / reduceCount
+        ];
+        centered / Sqrt[broadcast[var] + eps] * broadcast[gamma]
+            + broadcast[beta]
     ]
 ]
 

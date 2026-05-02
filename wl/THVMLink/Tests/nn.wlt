@@ -657,6 +657,66 @@ VerificationTest[
 
 VerificationTest[
     TInit[];
+    xH = N @ {
+        {{{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}, {13, 14, 15, 16}}},
+        {{{2, 1, 0, -1}, {3, 2, 1, 0}, {4, 3, 2, 1}, {5, 4, 3, 2}}}
+    };
+    wH = N @ {
+        {{{1, 0}, {0, 1}}},
+        {{{1, -1}, {1, -1}}}
+    };
+    bH = N @ {0.5, -1.0};
+    xb = TTensorCreate @ NumericArray[xH, "Real32"];
+    w  = TTensorCreate @ NumericArray[wH, "Real32"];
+    b  = TTensorCreate @ NumericArray[bH, "Real32"];
+    yb = Normal @ TTensorData @ TRealize @ TConv2D[xb, w, b];
+    y0 = Normal @ TTensorData @ TRealize @
+        TConv2D[TTensorCreate @ NumericArray[xH[[1]], "Real32"], w, b];
+    y1 = Normal @ TTensorData @ TRealize @
+        TConv2D[TTensorCreate @ NumericArray[xH[[2]], "Real32"], w, b];
+    Max @ Abs @ Flatten[yb - {y0, y1}],
+    _ ? (# < 1.0*^-5 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/conv2d-rank4-batch-matches-rank3-slices"
+]
+
+VerificationTest[
+    TInit[];
+    xH = N @ {
+        {{{1, 5, 2, 4}, {7, 3, 8, 6}, {0, 9, 1, 2}, {4, 6, 3, 5}}},
+        {{{-1, -2, -3, -4}, {4, 3, 2, 1}, {8, 7, 6, 5}, {0, 1, 2, 3}}}
+    };
+    x = TTensorCreate @ NumericArray[xH, "Real32"];
+    y = Normal @ TTensorData @ TRealize @ TMaxPool2d[x, 2];
+    y,
+    N @ {
+        {{{7, 8}, {9, 5}}},
+        {{{4, 2}, {8, 6}}}
+    },
+    TestID -> "nn/maxpool2d-rank4-batch"
+]
+
+VerificationTest[
+    TInit[];
+    xH = N @ {
+        {{{1, 2}, {3, 4}}, {{2, 4}, {6, 8}}},
+        {{{5, 6}, {7, 8}}, {{1, 3}, {5, 7}}}
+    };
+    x = TTensorCreate @ NumericArray[xH, "Real32"];
+    g = TTensorCreate @ NumericArray[{1.0, 1.0}, "Real32"];
+    b = TTensorCreate @ NumericArray[{0.0, 0.0}, "Real32"];
+    y = Normal @ TTensorData @ TRealize @ TBatchNormTrain[x, g, b, 0.0];
+    perChan = Table[Flatten[y[[All, c, All, All]]], {c, 2}];
+    Max @ Abs @ Flatten @ Table[
+        {Mean[perChan[[c]]], Mean[perChan[[c]]^2] - 1.0},
+        {c, 2}],
+    _ ? (# < 1.0*^-4 &),
+    SameTest -> MatchQ,
+    TestID -> "nn/batchnorm-train-rank4-normalizes-channel-stats"
+]
+
+VerificationTest[
+    TInit[];
     logitsH = N @ {{1, 2, 3}, {2, 1, 0}};
     targetsH = N @ {{0, 1, 0}, {1, 0, 0}};
     logits   = TTensorCreate @ NumericArray[logitsH, "Real32"];

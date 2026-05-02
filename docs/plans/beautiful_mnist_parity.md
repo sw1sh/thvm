@@ -19,9 +19,10 @@ training 4 steps:
 LeNet training PASSED
 ```
 
-The next target is `wl/Examples/beautiful-mnist/train.wls`,
-currently a tiny smoke architecture (Conv 1->4 + Pool + FC at
-BS=1).  The full target architecture is:
+The old `wl/Examples/beautiful-mnist/train.wls` is still a tiny smoke
+architecture (Conv 1->4 + Pool + FC at BS=1).  The current parity
+target is `wl/Examples/beautiful-mnist/bench-train.wls`, which builds
+the full architecture:
 
 ```
 Conv 1->32 5  -> ReLU -> Conv 32->32 5 -> ReLU -> BN32
@@ -33,53 +34,57 @@ trained at BS=512 with Adam.  Tinygrad parity = competitive
 per-step training time (~milliseconds-scale per step on Apple
 Silicon) for this exact architecture.
 
+Current measurement discipline: ignore first capture / first sample
+overhead.  Compare steady TJit replay for the full BS=512 training
+loop against tinygrad's captured Metal training step.  On this
+machine, the local tinygrad checkout is around `30-33ms` per steady
+BS=512 training step after warmup.
+
+Current thvm status:
+
+- Rank-4 forward is plumbed through Conv2D, maxpool, and batch norm.
+- Generated Metal tile Conv2D handles rank-4 inputs and the
+  single-channel first-conv patch-input form.
+- BS=512 forward-only replay is roughly `292-314ms`.
+- Final-layer and late-block target gradients replay, but early
+  conv-weight gradients still explode.  `BENCH_MODE=grad-1 BS=1`
+  remains too slow to be a training-loop canary.
+
 ## Blockers, in priority order
 
-### M1. Batched Conv2D (im2col + sgemm) -- blocks BS>1
+### M1. Early Conv/BN/Pool backward tile coverage -- blocks training
 
-`TConv2D` lowers as a kh*kw partial-sum chain with `Fold[Plus]`,
-re-evaluated per batch element.  At BS=512, kernel 1 alone emits
-512 * 25 = 12,800 partials.  Wallclock at BS=512 with the current
-lowering is hundreds of seconds per step.
+Full forward now runs at BS=512, but training is blocked by the
+backward path for early convolution weights.  Target-pruned `TGrad`
+made final-layer and late-block gradients cheap enough to replay; W1
+still walks and lowers a very large movement/reduction graph.
 
 **Fix sketch:**
-- Add `TConv2D` lowering that produces an im2col reshape of the
-  input + a single batched `cblas_sgemm` dispatch.
-- Keep the existing kh*kw lowering as a fallback when the input
-  isn't BLAS-eligible (non-contiguous, unusual dtype, etc.).
-- `cpu_blas_dispatch` already pattern-matches a specific
-  `MUL + REDUCE_SUM` shape; extend it to recognize the im2col
-  pattern.
+- Add tile recognition for Conv2D backward shapes, not just forward
+  im2col-shaped Conv2D.
+- Make BN train backward reductions use generated group/row
+  reductions instead of generic movement-heavy `metal-op` kernels.
+- Keep the benchmark target as steady replay, not first-capture time.
 
-**Verify:** beautiful-mnist train at BS=32 completes one step in
-under a second.
+**Verify:** `BENCH_MODE=grad-1 BS=1` captures in under one second and
+replays in the same class as `grad-7`; then rerun full `BENCH_MODE=train`.
 
-### M2. BatchNorm gradient
+### M2. BS=512 forward replay -- currently ~10x too slow
 
-`TBatchNorm` exists (forward).  The gradient through the
-`(x - mean) / sqrt(var + eps)` chain needs verifying:
-- mean / var reduce + broadcast pattern interacts with the chain
-  rule's REDUCE_SUM adjoints.
-- Need a unit test in `nn.wlt` that grad-checks BN against a
-  finite-difference reference.
+BS=512 forward-only replay is around `300ms`, while tinygrad's whole
+captured train step is around `30-33ms`.  The current profile is
+dominated by large generic movement/reduction kernels around BN,
+flatten/linear, and elementwise tails.
 
-**Verify:** numerical grad-check on BN matches symbolic grad to
-3-4 digits f32 precision.
+**Verify:** `BENCH_MODE=forward BS=512` reaches sub-50ms steady replay
+before spending effort on cold-start improvements.
 
 ### M3. Multi-grad structural sharing -- TGradMany walk-once
 
-Each TGrad on LeNet now allocates ~108K cells.  For
-beautiful-mnist's 8 weights x BS=512, the cumulative per-step
-allocation is ~10M cells -- well under HEAP_CAP/2 (32M) but with
-no sharing across the 8 grad walks.  The structural-template
-fix (cache `interact_grad(uop, target)` -> template parametric
-in `gy`) would cut this 8x.  See `docs/bench/history.md` for the
-current benchmark context and deferred multi-grad sharing note.
-
-**Defer until M1 is in:** measuring shows the chain-rule walk is
-~5% of LeNet wallclock today.  Won't move the needle until the
-forward + Conv backward are kernel-dispatch-bound, not
-chain-rule-bound.
+Target pruning handles independent irrelevant branches, but full
+`TGradMany` still re-lowers target-specific backward graphs.  Once W1
+is replayable, revisit structural templates if all-target capture time
+or kernel count remains high.
 
 ### M4. Refcount-driven buffer free between Adam steps
 
