@@ -18,6 +18,21 @@
 // other against a ~10us-resolution clock.
 #define KAUTOTUNE_N_RUNS 5
 
+static u32 kautotune_n_runs(void) {
+  char const *e = getenv("THVM_AUTOTUNE_RUNS");
+  if (e == NULL || e[0] == '\0') {
+    return KAUTOTUNE_N_RUNS;
+  }
+  int n = atoi(e);
+  if (n <= 0) {
+    return KAUTOTUNE_N_RUNS;
+  }
+  if (n > 1000) {
+    return 1000;
+  }
+  return (u32)n;
+}
+
 // Reset axes->applied_opts[] back to empty.  Recomputes default
 // axis_types/full_shape from the kernel's output_shape + tail
 // REDUCE so subsequent axes_apply_opt sees a clean slate.
@@ -106,7 +121,8 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
   axes_reset_to_default(ke);
   kernel_bench_fire(kid);                         // JIT warm
   out_opts[0] = (KOpt){ KOP_NONE, 0, 0 };
-  out_us  [0] = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
+  u32 n_runs = kautotune_n_runs();
+  out_us  [0] = kernel_bench_us(kid, n_runs);
 
   // Each candidate.
   for (u32 i = 0; i + 1 < n_out; i++) {
@@ -118,7 +134,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
     }
     kernel_bench_fire(kid);
     out_opts[i + 1] = cands[i];
-    out_us  [i + 1] = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
+    out_us  [i + 1] = kernel_bench_us(kid, n_runs);
   }
 
   // Leave at baseline.
@@ -163,14 +179,15 @@ fn int kernel_autotune(u32 kid) {
   // alone -- compile each before timing the bench loop, so the
   // measurements compare hot kernels.
   kernel_bench_fire(kid);
-  u64 best_us = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
+  u32 n_runs = kautotune_n_runs();
+  u64 best_us = kernel_bench_us(kid, n_runs);
   KOpt best_opt = { KOP_NONE, 0, 0 };
 
   for (u32 i = 0; i < n_cand; i++) {
     axes_reset_to_default(ke);
     if (!kernel_apply_tune_candidate(ke, candidates[i])) continue;
     kernel_bench_fire(kid);                     // JIT warm
-    u64 us = kernel_bench_us(kid, KAUTOTUNE_N_RUNS);
+    u64 us = kernel_bench_us(kid, n_runs);
     if (us < best_us) {
       best_us  = us;
       best_opt = candidates[i];

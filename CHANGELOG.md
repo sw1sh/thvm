@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: configurable autotune sample count
+
+`TKernelVariants` and `TKernelAutotune` now respect
+`THVM_AUTOTUNE_RUNS` for the number of timed dispatches per candidate,
+defaulting to the previous five-run min.  The focused Metal GEMM
+autotune example defaults that knob to nine runs so TC tile-size
+comparisons are less sensitive to GPU dispatch jitter.
+
 ### Added: focused Metal GEMM autotune smoke
 
 Added `wl/Examples/metal-gemm-autotune.wls`, a narrow benchmark

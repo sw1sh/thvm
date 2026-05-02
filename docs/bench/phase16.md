@@ -41,6 +41,9 @@ TKernelVariants[kid]                    inspect-only: bench all, leave baseline
 THVM_AUTOTUNE=1                         fire-time trigger -- first dispatch of
                                         each program shape pays the bench
                                         cost; iter 2+ runs the winning variant
+
+THVM_AUTOTUNE_RUNS=N                    timed dispatches per candidate
+                                        (default 5; min wallclock wins)
 ```
 
 All opts pass through C-side `KernelAxes`.  For KProg kernels, axes
@@ -60,7 +63,8 @@ plans build distinct variants.
 | `LOCAL`    | split output axis for tile/Metal local-thread binding | not proposed |
 | `GLOBAL`   | mark a full LOOP axis for tile/Metal grid binding; pairs with `LOCAL` as `GLOBAL x LOCAL` | not proposed |
 | `GROUP` / `GROUPTOP` | split reduce axis to `GROUP_REDUCE` schedule metadata | not proposed |
-| `PADTO` / `NOLOCALS` / `TC` | reserved and rejected until a renderer consumes them | not proposed |
+| `TC`       | Metal GEMM/MMA tile-size metadata for recognized f32 `TILE_MMA` plans | factors {32, 16, 8} on Metal f32 GEMM |
+| `PADTO` / `NOLOCALS` | reserved and rejected until a renderer consumes them | not proposed |
 
 ## Verified end-to-end (smoke)
 
@@ -78,8 +82,9 @@ plans build distinct variants.
   source contains `#pragma clang loop unroll_count(4)`;
   computed value matches baseline to f32 tolerance.
 - `THVM_AUTOTUNE=1` causes first fire of each program shape to
-  dispatch 31 times (1 init + 5 candidates x (1 JIT-warm + 5
-  timed)) instead of 1.  Winner persists in shared axes.
+  dispatch `(1 + candidates * (1 + THVM_AUTOTUNE_RUNS))` times
+  instead of 1; with the default five timed runs and five candidates
+  this is 31 dispatches.  Winner persists in shared axes.
 - `TKernelVariants[kid]` returns 5 entries (1 baseline + 4
   candidates) with measured WallUs each, leaves axes at baseline.
 - Summary boxes render for `TOpt`, `TKernelOpts`, `TKernelVariant`.
@@ -116,6 +121,8 @@ plans build distinct variants.
 - Metal GEMM autotune now has a first real `TC` knob: recognized f32
   GEMM kernels propose 32/16/8 tile sizes, and `metal-gemm` compiles
   one threadgroup-memory shader per selected tile size.
+  `wl/Examples/metal-gemm-autotune.wls` is the focused harness for
+  inspecting these variants without the LeNet graph in the way.
 - Metal fire-time autotune is wired for supported tile kernels:
   `LOCAL` proposals are expanded internally to `LOCAL + GLOBAL`, and
   impossible tile variants with more than 30 input buffers are rejected

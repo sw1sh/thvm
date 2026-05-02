@@ -16,6 +16,8 @@
                         defaults: M=64, K=64, N=64
        THVM_BACKEND     defaulted to metal if unset
        THVM_TILE        defaulted to 1 if unset
+       THVM_AUTOTUNE_RUNS
+                        defaulted to 9 if unset
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
@@ -45,6 +47,8 @@ If[envValue["THVM_BACKEND", ""] === "",
     SetEnvironment["THVM_BACKEND" -> "metal"]];
 If[envValue["THVM_TILE", ""] === "",
     SetEnvironment["THVM_TILE" -> "1"]];
+If[envValue["THVM_AUTOTUNE_RUNS", ""] === "",
+    SetEnvironment["THVM_AUTOTUNE_RUNS" -> "9"]];
 
 m = parseInt["M", 64];
 k = parseInt["K", 64];
@@ -59,7 +63,8 @@ TReset[];
 
 print["Metal GEMM autotune"];
 print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
-      "  THVM_TILE=", envValue["THVM_TILE", "off"]];
+      "  THVM_TILE=", envValue["THVM_TILE", "off"],
+      "  THVM_AUTOTUNE_RUNS=", envValue["THVM_AUTOTUNE_RUNS", "5"]];
 print["  shape: {", m, ", ", k, "} . {", k, ", ", n, "}"];
 
 ctx = TContextNew["metal"];
