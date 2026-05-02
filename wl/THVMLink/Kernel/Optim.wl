@@ -158,11 +158,12 @@ TAdam[loss_TTerm, params_List, mList_List, vList_List, t_Integer,
         beta1  = OptionValue["beta1"],
         beta2  = OptionValue["beta2"],
         eps    = OptionValue["eps"],
-        lrHat, invSqrtB2cor, grads, paramAssigns
+        lrHat, invSqrtB2cor, lossK, grads, paramAssigns
     },
         lrHat        = lr  / (1.0 - beta1^t);
         invSqrtB2cor = 1.0 / Sqrt[1.0 - beta2^t];
-        grads        = TGradMany[loss, params];
+        lossK        = TMaterialize[loss];
+        grads        = TGradMany[lossK, params];
         paramAssigns = Table[
             Block[{
                 wTen = params[[i]], gTen = grads[[i]],

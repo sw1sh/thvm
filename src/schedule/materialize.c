@@ -969,8 +969,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   if (op_is_view_movement(op)) {
     u32 alias_tid = view_resolve(t);
     if (alias_tid != 0) {
-      Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
-      u32 slot = input_slot_dedup(ke, alias_tid, alias_term);
+      u32 slot = input_slot_dedup(ke, alias_tid, t);
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
       return KSRC_AS_INPUT(slot);
     }

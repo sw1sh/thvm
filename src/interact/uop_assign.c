@@ -57,6 +57,7 @@ fn Term interact_assign_with(Term dst, Term src) {
 
   if (dd->backend->buf_copy != NULL
       && dd->backend->buf_copy(dd->buf_id, sd->buf_id, nbytes) == 0) {
+    kernel_fire_gen_bump();
     ITRS++;
     return dst;
   }
@@ -69,6 +70,7 @@ fn Term interact_assign_with(Term dst, Term src) {
   dd->backend->buf_write(dd->buf_id, tmp, nbytes);
   free(tmp);
 
+  kernel_fire_gen_bump();
   ITRS++;
   return dst;
 }

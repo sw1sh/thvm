@@ -57,7 +57,9 @@ fn Term thvm_realize(Term expr) {
   // boundary.  Per-param TAdam ASSIGNs land here.
   if (term_tag(resolved) == TAG_CTR) return thvm_realize_many(resolved);
 
+  grad_memo_begin_realize();
   u32 wm = cpu_buf_pool_begin();
+  kernel_fire_scope_begin();
   backend_dispatch_begin_all();
 
   // realize loop (wnf is the only reducer -- `nf` is the inspector
@@ -98,6 +100,7 @@ fn Term thvm_realize(Term expr) {
   }
 
   backend_dispatch_end_all();
+  kernel_fire_scope_end();
 
   // gc3: tracing-GC preserve.  Composes gc1 + gc2 into
   // mark_gc_preserve(res), which walks the live root set
@@ -179,7 +182,9 @@ fn Term thvm_realize_many(Term ctr_term) {
   u32 n = term_ctr_n(ctr_term);
   if (n == 0) return ctr_term;
 
+  grad_memo_begin_realize();
   u32 wm = cpu_buf_pool_begin();
+  kernel_fire_scope_begin();
   backend_dispatch_begin_all();
   u32 kn_at_call_start = KERNELS_NEXT;
 
@@ -213,6 +218,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   }
 
   backend_dispatch_end_all();
+  kernel_fire_scope_end();
 
   // Preserve mark + GC same as thvm_realize.  Walk every child of
   // the result CTR so each root's producer chain is preserved.

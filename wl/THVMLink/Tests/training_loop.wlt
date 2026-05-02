@@ -170,12 +170,12 @@ VerificationTest[
 
         (* Kernel count grows with n (bound-w emits one KernelEntry per
            iter); the program cache stays bounded -- the per-iter step
-           kernel is structurally identical so it gets one cache entry,
-           plus one for the small scalar-zero CONST kernel.  prog should
-           NOT grow with n. *)
+           kernel is structurally identical and the per-realize grad
+           memo keeps the scalar-zero branch from becoming a second
+           program.  prog should NOT grow with n. *)
         {kernels5, prog5, kernels10, prog10, prog5 === prog10}
     ],
-    {6, 2, 11, 2, True},
+    {5, 1, 10, 1, True},
     TestID -> "training-loop/bound-w-kernel-program-hash-cons"
 ]
 

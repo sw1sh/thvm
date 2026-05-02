@@ -24,9 +24,19 @@
 // of input buffers) start fresh.  Reset on overflow so we never
 // stale-skip after a u32 wrap.
 static u32 KERNEL_FIRE_GEN = 0;
+static u32 KERNEL_FIRE_SCOPE_DEPTH = 0;
 fn void kernel_fire_gen_bump(void) {
   KERNEL_FIRE_GEN++;
   if (KERNEL_FIRE_GEN == 0) KERNEL_FIRE_GEN = 1;   // skip 0 sentinel
+}
+
+fn void kernel_fire_scope_begin(void) {
+  if (KERNEL_FIRE_SCOPE_DEPTH == 0) kernel_fire_gen_bump();
+  KERNEL_FIRE_SCOPE_DEPTH++;
+}
+
+fn void kernel_fire_scope_end(void) {
+  if (KERNEL_FIRE_SCOPE_DEPTH > 0) KERNEL_FIRE_SCOPE_DEPTH--;
 }
 
 fn void kernel_fire_by_id(u32 kid) {
@@ -119,7 +129,9 @@ fn Term interact_kernel(Term kernel) {
   Term outbuf = heap_read(loc + 0);
   Term kidnum = heap_read(loc + 1);
   u32  kid    = (u32)term_val(kidnum);
-  kernel_fire_gen_bump();   // start a fresh per-realize fire memo
+  if (KERNEL_FIRE_SCOPE_DEPTH == 0) {
+    kernel_fire_gen_bump();
+  }
   kernel_fire_by_id(kid);
   return outbuf;
 }

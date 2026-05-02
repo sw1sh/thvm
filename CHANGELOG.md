@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Fixed: materialized beautiful_mnist gradients replay through kernels
+
+`TAdam` now materializes the loss before `TGradMany`, and the C
+gradient path can backprop through materialized `KernelEntry` programs
+for elementwise, movement, and reduction ops.  Per-realize gradient and
+kernel-fire memo scopes now survive the whole training step while
+assignment invalidates fired-kernel memo entries after buffer mutation.
+This turns the early beautiful_mnist W1 gradient from a non-finishing
+capture into a completed Metal replay path and cuts redundant TJit
+kernel replays in the full train loop.
+
 ### Changed: broaden Metal tile rangeify coverage
 
 Rangeify now lowers `PERMUTE` through edge-local coordinate contexts

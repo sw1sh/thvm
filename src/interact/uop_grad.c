@@ -213,13 +213,13 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
 // table caches the BWD result so subsequent visits to the same
 // (child, gy, target) triple share the existing grad cell instead
 // of allocating a fresh one + re-firing the chain rule from scratch.
-// Generation bumps at the OUTERMOST interact_grad entry
-// (GRAD_TARGET_TOP transitions 0->1) so per-realize entries don't
-// stale across separate user TGrad calls.
+// Generation bumps once at thvm_realize entry so entries survive
+// across the child BWD fires that make up one chain-rule walk, but
+// cannot stale across separate user TGrad calls.
 #define GRAD_MEMO_CAP (1u << 14)
 typedef struct { u32 gen; Term child, gy, target, result; } GradMemoEntry;
 static GradMemoEntry GRAD_MEMO[GRAD_MEMO_CAP];
-static u32 GRAD_MEMO_GEN = 0;
+static u32 GRAD_MEMO_GEN = 1;
 
 static inline u32 grad_memo_hash(Term child, Term gy, Term target) {
   u64 h = (u64)child;
@@ -276,6 +276,17 @@ typedef struct {
 } GradDepEntry;
 static GradDepEntry GRAD_DEP[GRAD_DEP_CAP];
 
+fn void grad_memo_begin_realize(void) {
+  GRAD_MEMO_GEN++;
+  if (GRAD_MEMO_GEN == 0) {
+    GRAD_MEMO_GEN = 1;
+    memset(GRAD_MEMO, 0, sizeof(GRAD_MEMO));
+    memset(GRAD_DEP,  0, sizeof(GRAD_DEP));
+  }
+  GRAD_MEMO_HITS   = 0;
+  GRAD_MEMO_MISSES = 0;
+}
+
 static inline u32 grad_dep_hash(u64 loc, Term target) {
   u64 h = loc;
   h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
@@ -319,6 +330,19 @@ static int grad_depends_on_target(Term t, Term target) {
     u64 loc = term_val(r);
     u32 kid = (u32)term_val(heap_read(loc + 1));
     if (kid != 0 && kid < KERNELS_NEXT && KERNELS[kid].source_uop != 0) {
+      KernelEntry *ke = &KERNELS[kid];
+      for (u32 i = 0; i < ke->n_inputs; i++) {
+        Term in = ke->input_terms[i];
+        if (in == 0) {
+          u32 tid = ke->input_tids[i];
+          if (tid != 0 && tid < TENS_NEXT) {
+            in = term_new(0, TAG_TEN, TENS[tid].dtype, tid);
+          }
+        }
+        if (in != 0 && grad_depends_on_target(in, target)) {
+          return 1;
+        }
+      }
       return grad_depends_on_target(KERNELS[kid].source_uop, target);
     }
     return 1;
@@ -389,6 +413,12 @@ static GradPair grad_pair_with_gy(Term child, Term gy_for_child) {
   return p;
 }
 
+static Term grad_accum(Term acc, Term add) {
+  if (add == 0) return acc;
+  if (acc == 0) return add;
+  return uop_binary(UOP_ADD, acc, add);
+}
+
 // Helper: "ones at scalar" cotangent (used by RECIP/EXP2/etc. when
 // they need to thread gy through a chain that doesn't depend on it).
 // Note: in practice gy should always be passed in; this is a
@@ -410,6 +440,322 @@ fn Term grad_half_const(void) {
   u32 bits;
   memcpy(&bits, &half, sizeof bits);
   return uop_const(DT_FP32, bits);
+}
+
+static Term grad_kernel_input_term(KernelEntry *ke, u32 slot) {
+  if (slot >= ke->n_inputs) return 0;
+  if (ke->input_terms[slot] != 0) return ke->input_terms[slot];
+  u32 tid = ke->input_tids[slot];
+  if (tid == 0 || tid >= TENS_NEXT) return 0;
+  return term_new(0, TAG_TEN, TENS[tid].dtype, tid);
+}
+
+static Term grad_kernel_src_term(KernelEntry *ke, Term *vals, u32 raw) {
+  if (KSRC_IS_INPUT(raw)) return grad_kernel_input_term(ke, KSRC_INDEX(raw));
+  u32 idx = KSRC_INDEX(raw);
+  return idx < ke->n_ops ? vals[idx] : 0;
+}
+
+static void grad_kernel_accum_src(KernelEntry *ke, Term *adjs, Term *input_adjs,
+                                  u32 raw, Term g) {
+  if (g == 0) return;
+  if (KSRC_IS_INPUT(raw)) {
+    u32 idx = KSRC_INDEX(raw);
+    if (idx < ke->n_inputs) input_adjs[idx] = grad_accum(input_adjs[idx], g);
+  } else {
+    u32 idx = KSRC_INDEX(raw);
+    if (idx < ke->n_ops) adjs[idx] = grad_accum(adjs[idx], g);
+  }
+}
+
+static int grad_kernel_reduce_axis(Term src, KProgOp const *p, u32 *axis_out) {
+  Shape s;
+  if (!term_shape_in(src, 0, &s) || s.ndim == 0) return 0;
+  u32 inner = p->arg & 0x00FFFFFFu;
+  u32 total = 1;
+  for (u32 i = 0; i < s.ndim; i++) total *= s.dims[i];
+  for (u32 axis = 0; axis < s.ndim; axis++) {
+    u32 axis_inner = 1;
+    for (u32 i = axis + 1; i < s.ndim; i++) axis_inner *= s.dims[i];
+    u32 axis_size = s.dims[axis] ? s.dims[axis] : 1;
+    if (axis_inner == inner && total / axis_size == p->numel) {
+      *axis_out = axis;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void grad_kernel_copy_widths(KProgOp const *p, u32 ndim, u32 *out) {
+  for (u32 i = 0; i < 2 * ndim && i < 2 * MAX_DIM; i++) {
+    out[i] = p->pad_widths[i];
+  }
+}
+
+static Term grad_kernel_forward_op(KernelEntry *ke, Term *vals, u32 idx) {
+  KProgOp const *p = &ke->program[idx];
+  Term a = p->n_src > 0 ? grad_kernel_src_term(ke, vals, p->src[0]) : 0;
+  Term b = p->n_src > 1 ? grad_kernel_src_term(ke, vals, p->src[1]) : 0;
+  switch (p->opcode) {
+    case UOP_CONST:
+      return uop_const(p->dtype, p->arg);
+    case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
+      return (a != 0 && b != 0) ? uop_binary(p->opcode, a, b) : 0;
+    case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2: case UOP_SQRT:
+      return a != 0 ? uop_unary(p->opcode, a) : 0;
+    case UOP_LOAD:
+      return a != 0 ? uop_load(a) : 0;
+    case UOP_REDUCE: {
+      u32 axis = 0;
+      if (a == 0 || !grad_kernel_reduce_axis(a, p, &axis)) return 0;
+      return uop_reduce((p->arg >> 24) & 0xFFu, axis, a);
+    }
+    case UOP_RESHAPE:
+      return (a != 0 && p->out_ndim > 0)
+           ? uop_reshape(a, p->out_ndim, p->out_dims) : 0;
+    case UOP_EXPAND:
+      return (a != 0 && p->out_ndim > 0)
+           ? uop_expand(a, p->out_ndim, p->out_dims) : 0;
+    case UOP_PERMUTE:
+      if (a != 0 && p->out_ndim > 0) {
+        u32 perm[MAX_DIM] = {0};
+        for (u32 d = 0; d < p->out_ndim; d++) perm[d] = p->axis_perm[d];
+        return uop_permute(a, p->out_ndim, perm);
+      }
+      return 0;
+    case UOP_PAD: {
+      if (a == 0 || p->out_ndim == 0) return 0;
+      u32 widths[2 * MAX_DIM] = {0};
+      grad_kernel_copy_widths(p, p->out_ndim, widths);
+      return uop_pad(a, p->out_ndim, widths);
+    }
+    case UOP_SHRINK: {
+      if (a == 0 || p->src0_ndim == 0) return 0;
+      u32 ranges[2 * MAX_DIM] = {0};
+      grad_kernel_copy_widths(p, p->src0_ndim, ranges);
+      return uop_shrink(a, p->src0_ndim, ranges);
+    }
+    case UOP_FLIP:
+      return a != 0 ? uop_flip(a, p->arg) : 0;
+    case UOP_CAST:
+      return a != 0 ? uop_cast(a, p->dtype) : 0;
+    case UOP_BITCAST:
+      return a != 0 ? uop_bitcast(a, p->dtype) : 0;
+    default:
+      return 0;
+  }
+}
+
+static Term grad_kernel_backprop(KernelEntry *ke, Term gy) {
+  if (ke == NULL || ke->n_ops == 0) return 0;
+  Term *vals       = (Term *)calloc(ke->n_ops, sizeof(Term));
+  Term *adjs       = (Term *)calloc(ke->n_ops, sizeof(Term));
+  Term *input_adjs = (Term *)calloc(ke->n_inputs ? ke->n_inputs : 1, sizeof(Term));
+  if (vals == NULL || adjs == NULL || input_adjs == NULL) {
+    free(vals); free(adjs); free(input_adjs);
+    return 0;
+  }
+
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    vals[i] = grad_kernel_forward_op(ke, vals, i);
+    if (vals[i] == 0) {
+      free(vals); free(adjs); free(input_adjs);
+      return 0;
+    }
+  }
+  adjs[ke->n_ops - 1] = gy;
+
+  for (i32 ii = (i32)ke->n_ops - 1; ii >= 0; ii--) {
+    u32 i = (u32)ii;
+    Term g = adjs[i];
+    if (g == 0) continue;
+    KProgOp const *p = &ke->program[i];
+    Term a = p->n_src > 0 ? grad_kernel_src_term(ke, vals, p->src[0]) : 0;
+    Term b = p->n_src > 1 ? grad_kernel_src_term(ke, vals, p->src[1]) : 0;
+
+    switch (p->opcode) {
+      case UOP_ADD:
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0], g);
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[1], g);
+        break;
+      case UOP_MUL:
+        if (b != 0) grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                                          uop_binary(UOP_MUL, b, g));
+        if (a != 0) grad_kernel_accum_src(ke, adjs, input_adjs, p->src[1],
+                                          uop_binary(UOP_MUL, a, g));
+        break;
+      case UOP_NEG:
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                              uop_unary(UOP_NEG, g));
+        break;
+      case UOP_RECIP:
+        if (a != 0) {
+          Term r1 = uop_unary(UOP_RECIP, a);
+          Term r2 = uop_unary(UOP_RECIP, a);
+          Term sq = uop_binary(UOP_MUL, r1, r2);
+          Term ns = uop_unary(UOP_NEG, sq);
+          grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                                uop_binary(UOP_MUL, g, ns));
+        }
+        break;
+      case UOP_EXP2:
+        if (a != 0) {
+          Term ea = uop_unary(UOP_EXP2, a);
+          Term factor = uop_binary(UOP_MUL, ea, grad_ln2_const());
+          grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                                uop_binary(UOP_MUL, g, factor));
+        }
+        break;
+      case UOP_LOG2:
+        if (a != 0) {
+          Term ra = uop_unary(UOP_RECIP, a);
+          Term factor = uop_binary(UOP_MUL, ra, grad_inv_ln2_const());
+          grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                                uop_binary(UOP_MUL, g, factor));
+        }
+        break;
+      case UOP_SQRT:
+        if (a != 0) {
+          Term sa = uop_unary(UOP_SQRT, a);
+          Term inv_sa = uop_unary(UOP_RECIP, sa);
+          Term factor = uop_binary(UOP_MUL, grad_half_const(), inv_sa);
+          grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                                uop_binary(UOP_MUL, g, factor));
+        }
+        break;
+      case UOP_REDUCE: {
+        Shape a_shape;
+        u32 axis = 0;
+        if (a == 0 || !term_shape_in(a, 0, &a_shape) || a_shape.ndim == 0
+            || !grad_kernel_reduce_axis(a, p, &axis)) break;
+        u32 keep_dims[MAX_DIM] = {0};
+        if (a_shape.ndim == 1) {
+          keep_dims[0] = 1;
+        } else {
+          for (u32 d = 0; d < a_shape.ndim; d++)
+            keep_dims[d] = (d == axis) ? 1u : a_shape.dims[d];
+        }
+        Term g_keep = uop_reshape(g, a_shape.ndim, keep_dims);
+        Term g_lift = uop_expand(g_keep, a_shape.ndim, a_shape.dims);
+        u32 kind = (p->arg >> 24) & 0xFFu;
+        if (kind == REDUCE_MAX) {
+          Term mx = uop_reduce(REDUCE_MAX, axis, a);
+          Term mx_keep = uop_reshape(mx, a_shape.ndim, keep_dims);
+          Term mx_lift = uop_expand(mx_keep, a_shape.ndim, a_shape.dims);
+          Term mask = uop_binary(UOP_CMPEQ, a, mx_lift);
+          g_lift = uop_binary(UOP_MUL, mask, g_lift);
+        }
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0], g_lift);
+        break;
+      }
+      case UOP_RESHAPE: {
+        Shape src_shape;
+        if (a != 0 && term_shape_in(a, 0, &src_shape) && src_shape.ndim > 0) {
+          grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                                uop_reshape(g, src_shape.ndim, src_shape.dims));
+        }
+        break;
+      }
+      case UOP_EXPAND: {
+        Shape a_shape;
+        if (a == 0 || !term_shape_in(a, 0, &a_shape) || a_shape.ndim == 0
+            || p->out_ndim < a_shape.ndim) break;
+        u32 pad = p->out_ndim - a_shape.ndim;
+        u32 a_padded[MAX_DIM] = {0};
+        for (u32 d = 0; d < pad; d++) a_padded[d] = 1;
+        for (u32 d = 0; d < a_shape.ndim; d++) a_padded[pad + d] = a_shape.dims[d];
+        Term cur = g;
+        for (i32 axis = (i32)p->out_ndim - 1; axis >= 0; axis--) {
+          if (a_padded[axis] == 1 && p->out_dims[axis] > 1) {
+            cur = uop_reduce(REDUCE_SUM, (u32)axis, cur);
+          }
+        }
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                              uop_reshape(cur, a_shape.ndim, a_shape.dims));
+        break;
+      }
+      case UOP_PERMUTE: {
+        if (p->out_ndim == 0) break;
+        u32 inv[MAX_DIM] = {0};
+        for (u32 d = 0; d < p->out_ndim; d++) inv[p->axis_perm[d]] = d;
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                              uop_permute(g, p->out_ndim, inv));
+        break;
+      }
+      case UOP_PAD: {
+        Shape a_shape;
+        if (a == 0 || !term_shape_in(a, 0, &a_shape) || a_shape.ndim == 0) break;
+        u32 ranges[2 * MAX_DIM] = {0};
+        for (u32 d = 0; d < a_shape.ndim; d++) {
+          ranges[2 * d + 0] = p->pad_widths[2 * d + 0];
+          ranges[2 * d + 1] = p->pad_widths[2 * d + 0] + a_shape.dims[d];
+        }
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                              uop_shrink(g, a_shape.ndim, ranges));
+        break;
+      }
+      case UOP_SHRINK: {
+        Shape a_shape;
+        if (a == 0 || !term_shape_in(a, 0, &a_shape) || a_shape.ndim == 0) break;
+        u32 widths[2 * MAX_DIM] = {0};
+        for (u32 d = 0; d < a_shape.ndim; d++) {
+          u32 b0 = p->pad_widths[2 * d + 0];
+          u32 e0 = p->pad_widths[2 * d + 1];
+          widths[2 * d + 0] = b0;
+          widths[2 * d + 1] = a_shape.dims[d] > e0 ? a_shape.dims[d] - e0 : 0;
+        }
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                              uop_pad(g, a_shape.ndim, widths));
+        break;
+      }
+      case UOP_FLIP:
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                              uop_flip(g, p->arg));
+        break;
+      case UOP_LOAD:
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0], g);
+        break;
+      case UOP_CAST: {
+        u32 src_dtype = DT_FP32;
+        if (a != 0) term_dtype_in(a, 0, &src_dtype);
+        grad_kernel_accum_src(ke, adjs, input_adjs, p->src[0],
+                              uop_cast(g, src_dtype));
+        break;
+      }
+      case UOP_CONST:
+      case UOP_CMPLT:
+      case UOP_CMPEQ:
+      case UOP_BITCAST:
+      default:
+        break;
+    }
+  }
+
+  Term total = 0;
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (input_adjs[i] == 0) continue;
+    Term in = grad_kernel_input_term(ke, i);
+    if (in == 0) continue;
+    total = grad_accum(total, grad_bwd_for_child(in, input_adjs[i]));
+  }
+  free(vals);
+  free(adjs);
+  free(input_adjs);
+  return total != 0 ? total : uop_const(DT_FP32, 0);
+}
+
+static Term grad_kernel_term_from_ten(Term ten) {
+  Term tr = term_resolve(ten);
+  if (term_tag(tr) != TAG_TEN) return 0;
+  u32 tid = (u32)term_val(tr);
+  if (tid == 0 || tid >= TENS_NEXT) return 0;
+  u32 kid = TENS[tid].producer_kid;
+  if (kid == 0 || kid >= KERNELS_NEXT) return 0;
+  u64 loc = heap_alloc(2);
+  heap_set(loc + 0, tr);
+  heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, kid));
+  return term_new(0, TAG_UOP, UOP_KERNEL, loc);
 }
 
 // Inner dispatch: runs the actual chain-rule rewrite.  The outer
@@ -453,6 +799,15 @@ static Term interact_grad_dispatch(Term grad_term) {
       Term tr = term_resolve(target);
       if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(y)) {
         return gy;
+      }
+      Term kterm = grad_kernel_term_from_ten(y);
+      if (kterm != 0) {
+        u32 tid = (u32)term_val(y);
+        u32 kid = tid < TENS_NEXT ? TENS[tid].producer_kid : 0;
+        if (kid != 0 && kid < KERNELS_NEXT) {
+          Term kgrad = grad_kernel_backprop(&KERNELS[kid], gy);
+          if (kgrad != 0) return kgrad;
+        }
       }
       return uop_const(DT_FP32, 0);
     }
@@ -784,6 +1139,10 @@ static Term interact_grad_dispatch(Term grad_term) {
       if (kid == 0 || kid >= KERNELS_NEXT) {
         return grad_zero_at(y);
       }
+      Term kgrad = grad_kernel_backprop(&KERNELS[kid], gy);
+      if (kgrad != 0) {
+        return kgrad;
+      }
       Term src = KERNELS[kid].source_uop;
       if (src == 0) {
         return grad_zero_at(y);
@@ -835,16 +1194,25 @@ static u8 uop_has_active_descendant_memo(Term t);
 // (gen, value).  A stale gen means uncached.  Cap is power-of-two
 // for AND-mask indexing.
 #define UOP_ACT_MEMO_CAP (1u << 14)
-typedef struct { u32 gen; u32 valid_loc; u8 result; u8 visiting; } UopActMemoEntry;
+typedef struct { u32 gen; u64 valid_loc; u8 result; u8 visiting; } UopActMemoEntry;
 static UopActMemoEntry UOP_ACT_MEMO[UOP_ACT_MEMO_CAP];
 static u32 UOP_ACT_MEMO_GEN = 0;
 static u32 UOP_ACT_MEMO_DEPTH = 0;     // re-entrant guard
+static u32 UOP_ACT_SCAN_DEPTH = 0;
 
 static inline u32 uop_act_memo_hash(u64 loc) {
   loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
   loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
   loc ^= loc >> 33;
   return (u32)loc & (UOP_ACT_MEMO_CAP - 1);
+}
+
+static inline void uop_act_memo_next_gen(void) {
+  UOP_ACT_MEMO_GEN++;
+  if (UOP_ACT_MEMO_GEN == 0) {
+    UOP_ACT_MEMO_GEN = 1;
+    memset(UOP_ACT_MEMO, 0, sizeof(UOP_ACT_MEMO));
+  }
 }
 
 // Is `t` a child slot worth driving when we hit a UOP-WHNF
@@ -882,9 +1250,12 @@ static u8 uop_has_active_descendant_memo(Term t) {
   if (op == UOP_KERNEL || op == UOP_ASSIGN) return 0;
   u8 ar = uop_arity((u8)op);
   u64 loc = term_val(t);
-  // Outer entry bumps gen so we don't need to wipe the table.
-  u8 outer = (UOP_ACT_MEMO_DEPTH == 0);
-  if (outer) { UOP_ACT_MEMO_GEN++; }
+  // A uop_next_active_child scan checks sibling slots that often
+  // share deep descendants.  Keep one generation open for that scan
+  // so those descendants are walked once; standalone probes still
+  // get an isolated generation.
+  u8 outer = (UOP_ACT_MEMO_DEPTH == 0 && UOP_ACT_SCAN_DEPTH == 0);
+  if (outer) uop_act_memo_next_gen();
   UOP_ACT_MEMO_DEPTH++;
   // Open-addressed probe; visiting flag breaks self-cycles (rare
   // but possible via shared sub-DAGs).
@@ -892,14 +1263,14 @@ static u8 uop_has_active_descendant_memo(Term t) {
   for (u32 probe = 0; probe < UOP_ACT_MEMO_CAP; probe++) {
     u32 i = (idx + probe) & (UOP_ACT_MEMO_CAP - 1);
     UopActMemoEntry *e = &UOP_ACT_MEMO[i];
-    if (e->gen == UOP_ACT_MEMO_GEN && e->valid_loc == (u32)loc) {
+    if (e->gen == UOP_ACT_MEMO_GEN && e->valid_loc == loc) {
       UOP_ACT_MEMO_DEPTH--;
       if (outer) UOP_ACT_MEMO_DEPTH = 0;
       return e->visiting ? 0 : e->result;
     }
     if (e->gen != UOP_ACT_MEMO_GEN) {
       e->gen       = UOP_ACT_MEMO_GEN;
-      e->valid_loc = (u32)loc;
+      e->valid_loc = loc;
       e->visiting  = 1;
       e->result    = 0;
       u8 res = 0;
@@ -922,9 +1293,18 @@ static u8 uop_has_active_descendant_memo(Term t) {
 // First active-or-active-bearing child slot index in a UOP at or
 // after `start`, or `ar` if none.
 fn u8 uop_next_active_child(u64 uop_loc, u8 ar, u8 start) {
+  u8 outer = (UOP_ACT_SCAN_DEPTH == 0);
+  if (outer) uop_act_memo_next_gen();
+  UOP_ACT_SCAN_DEPTH++;
   for (u8 i = start; i < ar; i++) {
-    if (uop_child_is_active(heap_read(uop_loc + i))) return i;
+    if (uop_child_is_active(heap_read(uop_loc + i))) {
+      UOP_ACT_SCAN_DEPTH--;
+      if (outer) UOP_ACT_SCAN_DEPTH = 0;
+      return i;
+    }
   }
+  UOP_ACT_SCAN_DEPTH--;
+  if (outer) UOP_ACT_SCAN_DEPTH = 0;
   return ar;
 }
 
@@ -933,11 +1313,6 @@ fn Term interact_grad(Term grad_term) {
   Term target = heap_read(term_val(grad_term) + 2);
   u8 pushed = 0;
   if (GRAD_TARGET_TOP < GRAD_TARGET_STACK_CAP) {
-    // Bump the per-realize grad memo generation at the outermost
-    // entry so cached entries from a previous TGrad call don't
-    // stale-hit on this fresh chain rule (Term values can collide
-    // across calls if heap_alloc handed back a recycled loc).
-    if (GRAD_TARGET_TOP == 0) GRAD_MEMO_GEN++;
     GRAD_TARGET_STACK[GRAD_TARGET_TOP++] = target;
     pushed = 1;
   }

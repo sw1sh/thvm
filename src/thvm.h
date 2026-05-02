@@ -1510,6 +1510,9 @@ fn void cpu_jit_cache_reset(void);
 fn void backend_dispatch_begin_all(void);
 fn void backend_dispatch_flush_all(void);
 fn void backend_dispatch_end_all(void);
+fn void kernel_fire_gen_bump(void);
+fn void kernel_fire_scope_begin(void);
+fn void kernel_fire_scope_end(void);
 
 // Allocate a borrowed buffer: we don't own `data`, and on release we
 // call `on_release(handle)` instead of free().  Used by the WL bridge

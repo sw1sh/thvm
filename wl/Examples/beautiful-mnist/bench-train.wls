@@ -140,11 +140,11 @@ trainStep = Switch[benchMode,
     "forward",
         Function[{stepIdx}, TRealize @ forwardLoss[xSlot, tgtSlot]; Null],
     "grad-w5",
-        Function[{stepIdx}, Module[{loss = forwardLoss[xSlot, tgtSlot]},
+        Function[{stepIdx}, Module[{loss = TMaterialize @ forwardLoss[xSlot, tgtSlot]},
             TRealize @ TGrad[loss, W5]; Null]],
     _ /; StringStartsQ[benchMode, "grad-"] && gradIndexFromMode[benchMode] > 0,
         Function[{stepIdx}, Module[{
-            loss = forwardLoss[xSlot, tgtSlot],
+            loss = TMaterialize @ forwardLoss[xSlot, tgtSlot],
             idx = gradIndexFromMode[benchMode]
         },
             TRealize @ TGrad[loss, params[[idx]]]; Null]],
