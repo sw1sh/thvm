@@ -1452,6 +1452,11 @@ fn Term thvm_materialize(Term term) {
   // reduce to a TEN, so the ASSIGN never fires.
   materialize_inner_assigns(term);
 
+  if (term_ext(term) == UOP_CONST) {
+    u32 tid = const_to_tendesc(term_val(term));
+    return term_new(0, TAG_TEN, TENS[tid].dtype, tid);
+  }
+
   // Movement-op root: resolve the chain to an alias TenDesc, then
   // flatten to a contig copy so wnf-side flat reads work.
   if (op_is_view_movement(term_ext(term))) {

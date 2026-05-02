@@ -13,6 +13,14 @@ static u32 alloc_f32_tensor(u32 dim) {
   return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
+static u32 alloc_f32_tensor2(u32 d0, u32 d1) {
+  Shape s = {0};
+  s.ndim    = 2;
+  s.dims[0] = d0;
+  s.dims[1] = d1;
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
+}
+
 int main(void) {
   thvm_init();
 
@@ -74,6 +82,15 @@ int main(void) {
   CHECK_EQ(realize_is_realized(x), 0);   // single consumer, not realized
   CHECK_EQ(realize_is_realized(sq), 1);
 
+  TEST_BEGIN("realize-classify/shared-const-stays-inline");
+  Term two = uop_const(DT_FP32, 0x40000000u);
+  Term c_left = uop_binary(UOP_MUL, a, two);
+  Term c_right = uop_binary(UOP_MUL, b, two);
+  Term c_root = uop_binary(UOP_ADD, c_left, c_right);
+  realize_classify(c_root);
+  CHECK_EQ(realize_consumer_count(two), 2);
+  CHECK_EQ(realize_is_realized(two), 0);
+
   TEST_BEGIN("realize-classify/reduce-always-realizes");
   // (a + b) reduced -- ADD is a single-consumer intermediate
   // BUT REDUCE outputs always realize regardless of consumer
@@ -119,6 +136,39 @@ int main(void) {
   // Root is realized; the chain intermediate is single-consumer.
   CHECK_EQ(realize_is_realized(times_cc), 1);
   CHECK_EQ(realize_consumer_count(aa_plus_bb), 1);
+
+  TEST_BEGIN("realize-classify/metal-large-pure-movement-fanout-recomputes");
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_TILE", "1", 1);
+  setenv("THVM_INLINE_MULTI_CONSUMER_PURE", "1", 1);
+  setenv("THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL", "1", 1);
+  thvm_free();
+  thvm_init();
+  u32 tm = alloc_f32_tensor2(2, 2);
+  Term m = term_new(0, TAG_TEN, DT_FP32, tm);
+  u32 widths[4] = {0, 0, 0, 2};
+  Term pad = uop_pad(m, 2, widths);
+  Term r0 = uop_reduce(REDUCE_SUM, 1, pad);
+  Term r1 = uop_reduce(REDUCE_SUM, 1, uop_binary(UOP_MUL, pad, pad));
+  Term combined = uop_binary(UOP_ADD, r0, r1);
+  realize_classify(combined);
+  CHECK_EQ(realize_consumer_count(pad), 2);
+  CHECK_EQ(realize_is_realized(pad), 0);
+
+  TEST_BEGIN("realize-classify/metal-pure-alu-fanout-still-realizes");
+  u32 tn = alloc_f32_tensor(4);
+  Term n = term_new(0, TAG_TEN, DT_FP32, tn);
+  Term pure = uop_binary(UOP_ADD, n, n);
+  Term pure_left = uop_binary(UOP_MUL, pure, n);
+  Term pure_right = uop_binary(UOP_MUL, pure, pure);
+  Term pure_root = uop_binary(UOP_ADD, pure_left, pure_right);
+  realize_classify(pure_root);
+  CHECK_EQ(realize_consumer_count(pure), 2);
+  CHECK_EQ(realize_is_realized(pure), 1);
+  unsetenv("THVM_BACKEND");
+  unsetenv("THVM_TILE");
+  unsetenv("THVM_INLINE_MULTI_CONSUMER_PURE");
+  unsetenv("THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL");
 
   thvm_free();
   TEST_REPORT();

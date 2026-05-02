@@ -209,6 +209,26 @@ global buffer for an expanded broadcast view when the expanded view is
 at least 8x larger than its source and the source subtree has no
 reduction.  Set `THVM_INLINE_MULTI_CONSUMER_EXPAND=0` to disable it.
 
+Large pure movement/elementwise producer relaxation is an experimental
+fusion probe for Metal tile graphs.  When explicitly enabled, a
+multi-consumer producer can be recomputed inside each consumer instead
+of materialized when:
+
+- its output has at least `THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL`
+  elements, default `65536`;
+- the subtree contains at least one movement op;
+- the subtree contains no reductions or side-effecting ops.
+
+Set `THVM_INLINE_MULTI_CONSUMER_PURE=1` to enable this relaxation.
+It targets im2col-style PAD/RESHAPE/ADD producers where writing a
+large global movement buffer may be worse than duplicating the index
+expression inside the consumers.  It is default-off for now: the broad
+BS=32 beautiful-mnist probe reduced replay dispatch count only
+slightly but produced unsupported fat kernels that fell back to
+`metal-jit`/`metal-op` and caused a large memory regression.  The
+Metal fan-in cap still runs afterward, so over-wide ADD/MUL trees are
+split before codegen hits the direct buffer-argument limit.
+
 After replay slot packing and large multi-consumer `EXPAND`
 relaxation, the current BS=32 `beautiful_mnist` training replay
 retains about `1.69GB` of live Metal buffers.  That is much better than

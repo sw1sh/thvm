@@ -6,6 +6,19 @@ dated section.
 
 ## Unreleased
 
+### Changed: inline constants and gate broad Metal fanout recompute
+
+Shared `UOP_CONST` nodes now stay inline instead of becoming tiny
+multi-consumer materialization boundaries, and a root constant
+materializes directly to a one-element tensor rather than a replay
+kernel.  The broader large multi-consumer movement/ALU recompute rule
+is present as an explicit probe only: set
+`THVM_INLINE_MULTI_CONSUMER_PURE=1` plus optional
+`THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL` to test it.  The first
+BS=32 `beautiful_mnist` probe showed the broad rule reduces dispatch
+count only slightly while creating unsupported fat kernels, so it
+stays default-off.
+
 ### Changed: raise Metal graph replay chunk default
 
 Metal TJit graph replay now defaults to `THVM_METAL_GRAPH_MAX_DISPATCHES=256`

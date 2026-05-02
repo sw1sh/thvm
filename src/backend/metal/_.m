@@ -27,6 +27,7 @@ static id<MTLCommandQueue> METAL_QUEUE  = nil;
 static id<MTLLibrary>      METAL_LIB    = nil;
 static id<MTLCommandBuffer> METAL_BATCH_CMD = nil;
 static u32                  METAL_BATCH_DEPTH = 0;
+static u32                  METAL_ENCODING_DEPTH = 0;
 
 static void metal_buf_decref(u32 buf_id);
 static void metal_buf_free(u32 buf_id);
@@ -306,7 +307,8 @@ static u32 metal_buf_freelist_try_pop(u64 nbytes) {
 static u32 metal_buf_alloc(u64 nbytes) {
   if (METAL_DEVICE == nil) return 0;
   u64 limit = metal_defer_limit_bytes();
-  if (METAL_DEFER_DECREF_LEN > 0
+  if (METAL_ENCODING_DEPTH == 0
+      && METAL_DEFER_DECREF_LEN > 0
       && (limit == 0 || METAL_DEFER_DECREF_BYTES + nbytes > limit)) {
     metal_dispatch_flush();
   }
@@ -396,7 +398,8 @@ static void metal_buf_decref_after_batch(u32 buf_id) {
   METAL_DEFER_DECREF_BYTES += reclaim_bytes;
   metal_record_memory_peak();
   u64 limit = metal_defer_limit_bytes();
-  if (limit == 0 || METAL_DEFER_DECREF_BYTES >= limit) {
+  if (METAL_ENCODING_DEPTH == 0
+      && (limit == 0 || METAL_DEFER_DECREF_BYTES >= limit)) {
     metal_dispatch_flush();
   }
 }
@@ -2054,6 +2057,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // typical size).  ke->n_ops > 0 since we early-bailed when 0.
   u32 inter_buf_ids[ke->n_ops];
   for (u32 i = 0; i < ke->n_ops; i++) inter_buf_ids[i] = 0;
+  METAL_ENCODING_DEPTH++;
   id<MTLCommandBuffer> cmd = metal_command_buffer();
   int rc = 0;
 
@@ -2117,6 +2121,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
   }
+  METAL_ENCODING_DEPTH--;
   if (rc == 0) cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
   return rc;
 }

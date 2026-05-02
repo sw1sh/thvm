@@ -8,7 +8,8 @@
 
 VerificationTest[
     TInit[]; TReset[];
-    TRealize @ TUOpConst[-1.0, "f32"];
+    x = TTensorCreate @ NumericArray[{0.0}, "Real32"];
+    TRealize[x + TUOpConst[-1.0, "f32"]];
     src = TKernelSource[TKernelCount[] - 1, "Metal"];
     StringContainsQ[src, "as_type<float>(0xbf800000u)"]
         && ! StringContainsQ[src, "-1f"],

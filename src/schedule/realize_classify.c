@@ -352,6 +352,25 @@ static int realize_inline_multiconsumer_expand_enabled(void) {
   return e == NULL || e[0] != '0';
 }
 
+static int realize_inline_multiconsumer_pure_enabled(void) {
+  if (!realize_metal_tile_fanin_cap_enabled()) {
+    return 0;
+  }
+  char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_PURE");
+  return e != NULL && e[0] == '1';
+}
+
+static u64 realize_inline_multiconsumer_pure_min_numel(void) {
+  char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL");
+  if (e != NULL && e[0] != '\0') {
+    unsigned long long v = strtoull(e, NULL, 10);
+    if (v > 0) {
+      return (u64)v;
+    }
+  }
+  return 65536;
+}
+
 static void realize_relax_multiconsumer_expands(void) {
   if (!realize_inline_multiconsumer_expand_enabled()) {
     return;
@@ -375,6 +394,91 @@ static void realize_relax_multiconsumer_expands(void) {
       continue;
     }
     if (realize_subtree_has_reduce(src, 0)) {
+      continue;
+    }
+    info->realized = 0;
+  }
+}
+
+static int realize_recompute_pure_op(u8 op) {
+  return op == UOP_CONST || op == UOP_LOAD
+      || op == UOP_CAST  || op == UOP_BITCAST
+      || uop_is_unary_elementwise(op)
+      || uop_is_binary_elementwise(op)
+      || realize_op_is_movement(op);
+}
+
+static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
+                                                 u32 depth,
+                                                 int *has_movement) {
+  if (depth > 96) {
+    return 0;
+  }
+  t = term_resolve(t);
+  u8 tag = term_tag(t);
+  if (tag == TAG_TEN || tag == TAG_VAR) {
+    return 1;
+  }
+  if (tag != TAG_UOP) {
+    return 0;
+  }
+  u8 op = term_ext(t);
+  if (op == UOP_KERNEL) {
+    return 1;
+  }
+  if (!realize_recompute_pure_op(op) || op == UOP_REDUCE) {
+    return 0;
+  }
+  if (realize_op_is_movement(op)) {
+    *has_movement = 1;
+  }
+
+  u64 loc = term_val(t);
+  if (loc != root_loc) {
+    u32 idx = realize_info_find(loc);
+    if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
+      return 1;
+    }
+  }
+
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (!realize_subtree_is_pure_recomputable(heap_read(loc + i),
+                                              root_loc, depth + 1,
+                                              has_movement)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void realize_relax_multiconsumer_pure_recompute(void) {
+  if (!realize_inline_multiconsumer_pure_enabled()) {
+    return;
+  }
+  u64 min_numel = realize_inline_multiconsumer_pure_min_numel();
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (!info->realized || info->consumer_count < 2) {
+      continue;
+    }
+    if (!realize_recompute_pure_op(info->op)) {
+      continue;
+    }
+    Term self = term_new(0, TAG_UOP, info->op, info->loc);
+    Shape out_shape = {0};
+    if (!term_shape_in(self, 0, &out_shape)) {
+      continue;
+    }
+    if (realize_shape_numel(&out_shape) < min_numel) {
+      continue;
+    }
+    int has_movement = 0;
+    if (!realize_subtree_is_pure_recomputable(self, info->loc, 0,
+                                              &has_movement)) {
+      continue;
+    }
+    if (!has_movement) {
       continue;
     }
     info->realized = 0;
@@ -433,6 +537,7 @@ fn void realize_classify(Term root) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->consumer_count >= 2) info->realized = 1;
     if (info->op == UOP_REDUCE)    info->realized = 1;
+    if (info->op == UOP_CONST)     info->realized = 0;
   }
 
   // Adjacent reductions over a contiguous axis span can stay inside
@@ -521,6 +626,7 @@ fn void realize_classify(Term root) {
   }
 
   realize_relax_multiconsumer_expands();
+  realize_relax_multiconsumer_pure_recompute();
   realize_apply_metal_tile_fanin_cap(root);
 }
 
