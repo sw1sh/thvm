@@ -205,6 +205,19 @@ steady generic path remains roughly `64ms` versus `~9ms` for the
 diagnostic oracle, so the next real win is still generated conv/reduce
 schedule quality, not more decision-cache work.
 
+After scalar-UOp structural CSE, the two large conv-like generated tile
+graphs shrink materially:
+
+- first conv reduce graph: `1615 -> 590` scalar nodes;
+- second conv reduce graph: `1415 -> 563` scalar nodes.
+
+The same forward canary measured generic Metal tile at
+`146.2ms / 69.2ms / 66.3ms` and the diagnostic oracle at
+`31.7ms / 6.9ms / 7.0ms`.  This confirms CSE cleans up generated
+graphs and compile inputs, but the steady throughput gap remains:
+generic is still about `66-69ms` versus oracle `~7ms`, so the next
+step is a better generated conv/reduce schedule.
+
 ## Files added
 
 - `src/codegen/axis.c`         -- `KernelAxes` default constructor

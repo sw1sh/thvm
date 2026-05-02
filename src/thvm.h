@@ -1250,6 +1250,10 @@ fn u32  rangeify_emit_unary (struct KernelEntry *ke, u8 op, u32 dtype, u32 a);
 fn u32  rangeify_emit_binary(struct KernelEntry *ke, u8 op, u32 dtype, u32 a, u32 b);
 // Free the per-kernel scalar arena.  Called from kernel_free_arrays.
 fn void rangeify_free(struct KernelEntry *ke);
+// Structural CSE over dedup-safe scalar expression nodes.  Keeps
+// S_RANGE / STORE / BUFFERIZE identity intact, remaps sources, and
+// returns the number of eliminated nodes.
+fn u32  rangeify_cse(struct KernelEntry *ke);
 // Look up a scalar opname / axis-type name as a const C string for
 // introspection / debug printing.
 fn const char *scalar_op_name (u8 op);

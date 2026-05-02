@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Added: scalar-UOp structural CSE before tile planning
+
+Rangeify now runs a structural dedup pass over safe scalar expression
+nodes before schedule-key sharing and TileUop planning.  The pass keeps
+`S_RANGE`, `S_STORE`, and `S_BUFFERIZE` identity intact, remaps sources,
+and deduplicates repeated constants, index expressions, loads, casts,
+and ALU nodes.  On the `beautiful-mnist` forward canary, the two large
+conv-like generated Metal tile graphs shrink from `1615 -> 590` and
+`1415 -> 563` scalar nodes; steady runtime is still dominated by the
+remaining generated conv/reduce schedule quality.
+
 ### Added: persistent autotune cache
 
 `TKernelAutotune` now stores the winning `TOpt` decision on disk under

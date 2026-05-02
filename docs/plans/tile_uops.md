@@ -32,6 +32,10 @@ that future renderers can lower differently for CPU and Metal.
 - tile plans remember the `KernelAxes.version` they were built
   against, and `tile_sync_from_scalar` rebuilds stale plans after
   `TKernelApplyOpt`, autotune resets, or lazy WL introspection;
+- rangeify runs a structural scalar-UOp CSE pass before schedule-key
+  sharing and tile planning, deduplicating repeated constants,
+  address expressions, loads, casts, and ALU nodes while preserving
+  range/store/bufferize identity;
 - `TKernelAutotune` keeps the in-process per-program-shape behavior
   and now also persists winning opts under
   `$XDG_CACHE_HOME/thvm/autotune` / `$HOME/.cache/thvm/autotune`

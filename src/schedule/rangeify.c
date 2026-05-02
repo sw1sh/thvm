@@ -80,6 +80,137 @@ fn void rangeify_free(KernelEntry *ke) {
   ke->scalar_uops_cap  = 0;
 }
 
+static int rangeify_cse_op_dedupable(u8 op) {
+  switch (op) {
+    case S_DEFINE_PARAM:
+    case S_DEFINE_OUTPUT:
+    case S_INDEX:
+    case S_INDEX_E:
+    case S_LOAD:
+    case S_LOAD_RAW:
+    case S_CONST:
+    case S_ADD:
+    case S_MUL:
+    case S_NEG:
+    case S_RECIP:
+    case S_SQRT:
+    case S_EXP2:
+    case S_LOG2:
+    case S_CMPLT:
+    case S_CMPEQ:
+    case S_CAST:
+    case S_ICONST:
+    case S_IADD:
+    case S_ISUB:
+    case S_IMUL:
+    case S_IDIV:
+    case S_IMOD:
+    case S_ILT:
+    case S_IAND:
+    case S_IWHERE:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static u64 rangeify_cse_hash_uop(ScalarUop const *u) {
+  u64 h = 0xcbf29ce484222325ULL;
+  h ^= (u64)u->op;        h *= 0x100000001b3ULL;
+  h ^= (u64)u->src_count; h *= 0x100000001b3ULL;
+  h ^= (u64)u->dtype;     h *= 0x100000001b3ULL;
+  h ^= u->extra;          h *= 0x100000001b3ULL;
+  for (u32 i = 0; i < SCALAR_MAX_SRC; i++) {
+    h ^= (u64)u->src[i];
+    h *= 0x100000001b3ULL;
+  }
+  return h == 0 ? 1 : h;
+}
+
+static int rangeify_cse_uop_equal(ScalarUop const *a, ScalarUop const *b) {
+  return a->op == b->op
+      && a->src_count == b->src_count
+      && a->dtype == b->dtype
+      && a->extra == b->extra
+      && memcmp(a->src, b->src, sizeof(a->src)) == 0;
+}
+
+fn u32 rangeify_cse(KernelEntry *ke) {
+  if (ke == NULL || ke->scalar_uops == NULL || ke->n_scalar_uops <= 2) {
+    return 0;
+  }
+
+  u32 old_n = ke->n_scalar_uops;
+  ScalarUop *old = ke->scalar_uops;
+  ScalarUop *neu = (ScalarUop *)calloc((size_t)old_n, sizeof(ScalarUop));
+  u32 *map = (u32 *)calloc((size_t)old_n, sizeof(u32));
+  if (neu == NULL || map == NULL) {
+    free(neu);
+    free(map);
+    return 0;
+  }
+
+  u32 cap = 1;
+  while (cap < old_n * 2) {
+    cap <<= 1;
+  }
+  u32 *table = (u32 *)calloc((size_t)cap, sizeof(u32));
+  if (table == NULL) {
+    free(neu);
+    free(map);
+    return 0;
+  }
+
+  neu[0] = old[0];
+  map[0] = 0;
+  u32 new_n = 1;
+  u32 removed = 0;
+  for (u32 old_id = 1; old_id < old_n; old_id++) {
+    ScalarUop cand = old[old_id];
+    for (u32 s = 0; s < SCALAR_MAX_SRC; s++) {
+      u32 src = cand.src[s];
+      cand.src[s] = (src > 0 && src < old_id) ? map[src] : src;
+    }
+
+    if (rangeify_cse_op_dedupable(cand.op)) {
+      u64 h = rangeify_cse_hash_uop(&cand);
+      u32 mask = cap - 1;
+      u32 pos = (u32)(h ^ (h >> 32)) & mask;
+      for (u32 probe = 0; probe < cap; probe++) {
+        u32 slot = (pos + probe) & mask;
+        u32 hit = table[slot];
+        if (hit == 0) {
+          u32 id = new_n++;
+          neu[id] = cand;
+          table[slot] = id;
+          map[old_id] = id;
+          break;
+        }
+        if (rangeify_cse_uop_equal(&neu[hit], &cand)) {
+          map[old_id] = hit;
+          removed++;
+          break;
+        }
+      }
+      if (map[old_id] != 0) {
+        continue;
+      }
+    }
+
+    u32 id = new_n++;
+    neu[id] = cand;
+    map[old_id] = id;
+  }
+
+  free(table);
+  free(old);
+  ke->scalar_uops = neu;
+  ke->n_scalar_uops = new_n;
+  ke->scalar_uops_cap = old_n;
+  free(map);
+  return removed;
+}
+
 fn const char *scalar_op_name(u8 op) {
   switch (op) {
     case S_NONE:           return "S_NONE";

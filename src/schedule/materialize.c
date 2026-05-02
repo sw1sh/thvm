@@ -1233,6 +1233,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
     const char *e = getenv("THVM_RANGEIFY");
     int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
     int lowered = rangeify_on && rangeify_try_lower_elementwise(ke);
+    if (lowered) {
+      rangeify_cse(ke);
+    }
     if (!ke->program_shared) {
       KernelAxes *shared_axes = kernel_rangeified_axes_cache_lookup_or_insert(ke);
       if (shared_axes != NULL) {
