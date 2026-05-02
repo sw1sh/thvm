@@ -73,9 +73,23 @@ static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
 
 static u32 JIT_ACTIVE_SLOT = 0;     // 0 = not capturing; otherwise the
                                     // 1-indexed slot being filled
+static u32 JIT_PAUSE_DEPTH = 0;     // nested suppression for internal
+                                    // benchmark fires (autotune, variants)
 
 fn int jit_is_capturing(void) {
-  return JIT_ACTIVE_SLOT != 0;
+  return JIT_ACTIVE_SLOT != 0 && JIT_PAUSE_DEPTH == 0;
+}
+
+fn void jit_capture_pause(void) {
+  if (JIT_ACTIVE_SLOT != 0) {
+    JIT_PAUSE_DEPTH++;
+  }
+}
+
+fn void jit_capture_resume(void) {
+  if (JIT_PAUSE_DEPTH != 0) {
+    JIT_PAUSE_DEPTH--;
+  }
 }
 
 // Allocate a fresh capture slot.  Returns 1-indexed slot id (>=1) or
@@ -93,6 +107,7 @@ fn u32 jit_capture_begin(void) {
       JIT_CAPTURES[i].in_use   = 1;
       JIT_CAPTURES[i].n_ops    = 0;
       JIT_ACTIVE_SLOT          = i;
+      JIT_PAUSE_DEPTH          = 0;
       return i;
     }
   }
@@ -101,12 +116,17 @@ fn u32 jit_capture_begin(void) {
 
 fn void jit_capture_end(void) {
   JIT_ACTIVE_SLOT = 0;
+  JIT_PAUSE_DEPTH = 0;
 }
 
 fn void jit_capture_drop(u32 slot) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) return;
   JIT_CAPTURES[slot].in_use = 0;
   JIT_CAPTURES[slot].n_ops  = 0;
+  if (JIT_ACTIVE_SLOT == slot) {
+    JIT_ACTIVE_SLOT = 0;
+    JIT_PAUSE_DEPTH = 0;
+  }
   // Keep the ops buffer allocated -- the slot can be reused for
   // another capture without re-malloc.
 }
@@ -221,4 +241,5 @@ fn void jit_capture_reset_all(void) {
     JIT_CAPTURES[i].n_ops  = 0;
   }
   JIT_ACTIVE_SLOT = 0;
+  JIT_PAUSE_DEPTH = 0;
 }

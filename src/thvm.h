@@ -1311,6 +1311,12 @@ fn int kernel_autotune(u32 kid);
 // been autotuned yet) AND (proposer has at least one candidate).
 fn int kernel_should_autotune(struct KernelEntry const *ke);
 
+// Temporarily suppress TJit capture recording while internal
+// benchmark fires run.  The surrounding user kernel still gets
+// captured normally after autotune finishes.
+fn void jit_capture_pause(void);
+fn void jit_capture_resume(void);
+
 // Time `n_runs` back-to-back fires of `kid`; return min wallclock
 // us.  Used by autotune internally + exposed via LibraryLink for
 // the WL TKernelVariants surface.

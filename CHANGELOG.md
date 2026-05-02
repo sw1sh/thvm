@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Fixed: autotune benchmark capture pollution
+
+Fire-time autotune now pauses `TJit` capture while it benchmarks
+candidate variants.  The user's actual kernel dispatch is still
+captured after tuning, but the internal warmup/timed benchmark fires
+no longer inflate replay sequences.  This keeps `THVM_AUTOTUNE=1`
+from turning a compact training replay into hundreds or thousands of
+recorded benchmark dispatches.
+
 ### Changed: configurable autotune sample count
 
 `TKernelVariants` and `TKernelAutotune` now respect

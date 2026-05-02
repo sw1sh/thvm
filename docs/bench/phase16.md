@@ -41,6 +41,8 @@ TKernelVariants[kid]                    inspect-only: bench all, leave baseline
 THVM_AUTOTUNE=1                         fire-time trigger -- first dispatch of
                                         each program shape pays the bench
                                         cost; iter 2+ runs the winning variant
+                                        without recording benchmark fires into
+                                        TJit captures
 
 THVM_AUTOTUNE_RUNS=N                    timed dispatches per candidate
                                         (default 5; min wallclock wins)
@@ -84,7 +86,10 @@ plans build distinct variants.
 - `THVM_AUTOTUNE=1` causes first fire of each program shape to
   dispatch `(1 + candidates * (1 + THVM_AUTOTUNE_RUNS))` times
   instead of 1; with the default five timed runs and five candidates
-  this is 31 dispatches.  Winner persists in shared axes.
+  this is 31 dispatches.  Winner persists in shared axes.  If this
+  happens inside a `TJit` capture, those internal benchmark dispatches
+  are suppressed from the capture; replay contains only the user's
+  real kernel sequence.
 - `TKernelVariants[kid]` returns 5 entries (1 baseline + 4
   candidates) with measured WallUs each, leaves axes at baseline.
 - Summary boxes render for `TOpt`, `TKernelOpts`, `TKernelVariant`.

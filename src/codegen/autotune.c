@@ -74,10 +74,12 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
 }
 
 static void kernel_bench_fire(u32 kid) {
+  jit_capture_pause();
   backend_dispatch_flush_all();
   kernel_fire_gen_bump();
   kernel_fire_by_id(kid);
   backend_dispatch_flush_all();
+  jit_capture_resume();
 }
 
 // Time `n_runs` back-to-back fresh-generation fires of `kid`; return
@@ -213,13 +215,8 @@ fn int kernel_autotune(u32 kid) {
 // memoizes; the propose call returns quickly when the kernel
 // shape doesn't trigger any rules.
 static int autotune_env_enabled(void) {
-  static int known = 0, enabled = 0;
-  if (!known) {
-    char const *e = getenv("THVM_AUTOTUNE");
-    enabled = (e != NULL && e[0] == '1');
-    known = 1;
-  }
-  return enabled;
+  char const *e = getenv("THVM_AUTOTUNE");
+  return e != NULL && e[0] == '1';
 }
 
 fn int kernel_should_autotune(KernelEntry const *ke) {

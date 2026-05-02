@@ -412,6 +412,43 @@ VerificationTest[
     TestID -> "kernel-opts/auto-fire-disabled-by-default"
 ]
 
+VerificationTest[
+    (* When fire-time autotune runs during the first TJit capture,
+       its internal benchmark fires must NOT be recorded into the
+       replay sequence.  Only the user's actual reduce dispatch
+       belongs in the capture. *)
+    Module[{oldAuto, oldRuns, oldBackend, restore, f, opCount},
+        oldAuto    = Environment["THVM_AUTOTUNE"];
+        oldRuns    = Environment["THVM_AUTOTUNE_RUNS"];
+        oldBackend = Environment["THVM_BACKEND"];
+        restore[] := (
+            If[StringQ[oldAuto],
+                SetEnvironment["THVM_AUTOTUNE" -> oldAuto],
+                SetEnvironment["THVM_AUTOTUNE" -> ""]];
+            If[StringQ[oldRuns],
+                SetEnvironment["THVM_AUTOTUNE_RUNS" -> oldRuns],
+                SetEnvironment["THVM_AUTOTUNE_RUNS" -> ""]];
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_AUTOTUNE" -> "1"];
+            SetEnvironment["THVM_AUTOTUNE_RUNS" -> "1"];
+            SetEnvironment["THVM_BACKEND" -> ""],
+            TInit[];
+            xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
+            f = TJit[Function[{}, TRealize @ TUOpReduce[xT, 0, "SUM"]]];
+            f[];
+            opCount = TJitOpCount[f],
+            restore[]
+        ];
+        opCount
+    ],
+    1,
+    TestID -> "kernel-opts/tjit-autotune-bench-fires-not-captured"
+]
+
 (* === per-program-shape sharing: opt on kid_1 visible on kid_2
        when both kids share the same KProgOp[] via the cache.  This
        is what makes the proposer + auto-bench (next pass) actually
