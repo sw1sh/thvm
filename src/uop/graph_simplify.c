@@ -48,6 +48,93 @@ static Term uop_graph_simplify_movement_chain(Term t, void *user) {
   return uop_expand(collapsed, ndim, dims);
 }
 
+static int uop_graph_simplify_dims_match_shape(u64 loc,
+                                               u32 ndim,
+                                               Shape const *shape) {
+  if (ndim != shape->ndim || ndim > MAX_DIM) {
+    return 0;
+  }
+  for (u32 i = 0; i < ndim; i++) {
+    u32 dim = (u32)term_val(heap_read(loc + 2 + i));
+    if (dim != shape->dims[i]) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static Term uop_graph_simplify_movement_identity(Term t, void *user) {
+  (void)user;
+  UOpView v;
+  if (!uop_view(t, &v) || !uop_is_movement(v.op)) {
+    return 0;
+  }
+
+  if (v.op == UOP_FLIP) {
+    Term axes = heap_read(v.loc + 1);
+    if (term_tag(axes) == TAG_NUM && term_val(axes) == 0) {
+      return v.src[0];
+    }
+    return 0;
+  }
+
+  Term ndim_term = heap_read(v.loc + 1);
+  if (term_tag(ndim_term) != TAG_NUM) {
+    return 0;
+  }
+  u32 ndim = (u32)term_val(ndim_term);
+  if (ndim > MAX_DIM) {
+    return 0;
+  }
+
+  if (v.op == UOP_PERMUTE) {
+    for (u32 i = 0; i < ndim; i++) {
+      u32 axis = (u32)term_val(heap_read(v.loc + 2 + i));
+      if (axis != i) {
+        return 0;
+      }
+    }
+    return v.src[0];
+  }
+
+  if (v.op == UOP_PAD) {
+    for (u32 i = 0; i < 2 * ndim; i++) {
+      if (term_val(heap_read(v.loc + 2 + i)) != 0) {
+        return 0;
+      }
+    }
+    return v.src[0];
+  }
+
+  Shape src_shape;
+  if (!term_shape_in(v.src[0], 0, &src_shape)) {
+    return 0;
+  }
+
+  if (v.op == UOP_RESHAPE || v.op == UOP_EXPAND) {
+    if (uop_graph_simplify_dims_match_shape(v.loc, ndim, &src_shape)) {
+      return v.src[0];
+    }
+    return 0;
+  }
+
+  if (v.op == UOP_SHRINK) {
+    if (ndim != src_shape.ndim) {
+      return 0;
+    }
+    for (u32 i = 0; i < ndim; i++) {
+      u32 begin = (u32)term_val(heap_read(v.loc + 2 + 2 * i));
+      u32 end   = (u32)term_val(heap_read(v.loc + 3 + 2 * i));
+      if (begin != 0 || end != src_shape.dims[i]) {
+        return 0;
+      }
+    }
+    return v.src[0];
+  }
+
+  return 0;
+}
+
 static Term uop_graph_simplify_cast(Term t, void *user) {
   (void)user;
   UOpView v;
@@ -97,6 +184,7 @@ fn Term uop_graph_simplify(Term root) {
     {"symbolic-unary",          uop_graph_simplify_unary},
     {"symbolic-binary",         uop_graph_simplify_binary},
     {"symbolic-cast",           uop_graph_simplify_cast},
+    {"movement-identity",       uop_graph_simplify_movement_identity},
     {"movement-chain-collapse", uop_graph_simplify_movement_chain},
   };
   u32 n_rules = (u32)(sizeof(rules) / sizeof(rules[0]));

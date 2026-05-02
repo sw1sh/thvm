@@ -100,7 +100,7 @@ boundaries.
 | Algebraic/symbolic simplification: constants, identities, commutative canonicalization, div/mod recombine, cast/bitcast folding, boolean/where folding | `tinygrad/uop/symbolic.py` | Partial. Constructor-time rules live in `src/uop/rewrite.c`; `uop_graph_simplify` now reuses the safe unary/binary/cast/bitcast/movement-chain subset as named graph rules, and `uop_graph_simplify_checked` gates materializer use on shape/dtype preservation. Big missing piece is index expression simplification. |
 | Valid-mask simplification and `WHERE`/load movement | `pm_simplify_valid`, `pm_move_where_on_load` in `tinygrad/uop/symbolic.py` | Mostly missing. Needed before broad PAD fanout fusion is safe. |
 | Realize-map seeding and rangeify application | `pm_generate_realize_map`, `pm_apply_rangeify` in `tinygrad/schedule/indexing.py` | Partial. `realize_classify.c` seeds boundaries; `rangeify.c` emits scalar graphs, but not through a general rewrite table. |
-| Movement-to-index rewrites | `apply_movement_op`, `pm_mops`, `pm_syntactic_sugar` in `tinygrad/schedule/rangeify.py` | Partial. THVM has edge-local rangeify fixes and view-only movement paths, but lacks a reusable movement rewrite table. |
+| Movement-to-index rewrites | `apply_movement_op`, `pm_mops`, `pm_syntactic_sugar` in `tinygrad/schedule/rangeify.py` | Partial. THVM has edge-local rangeify fixes and view-only movement paths; `uop_graph_simplify` now has a reusable `movement-identity` table entry for no-op reshape/expand/permute/pad/shrink/flip. PAD-to-mask and full movement-to-index rules remain missing. |
 | Early schedule cleanup: function/tuple resolution, copy/store hazards, reduce split, movement cleanup | `earliest_rewrites`, `mop_cleanup`, `pm_fold_moved_after` | Partial/ad-hoc. Copy/store hazards and function/multi rules are not the current beautiful-mnist bottleneck. |
 | Bufferize removal and const/noop buffer folding | `pm_const_buffer_folding`, `pm_remove_bufferize`, `remove_bufferize` | Missing as a general rule family. This is one of the main fusion gaps. |
 | Buffer insertion and kernel splitting | `pm_add_buffers`, `pm_add_buffers_local`, `to_define_global`, `split_kernels` | Partial. THVM materializes boundaries directly and emits scalar/tile kernels, but lacks rewriteable `BUFFERIZE`/`INDEX` nodes as first-class schedule IR. |
@@ -136,7 +136,9 @@ goal:
    the checked pass only when shape/dtype stay stable.
 3. Express movement lowering as declarative rules:
    `RESHAPE`/`PERMUTE`/`EXPAND`/`PAD`/`SHRINK`/`FLIP` over `INDEX`,
-   with PAD becoming a valid mask.
+   with PAD becoming a valid mask.  Started with the
+   `movement-identity` rule, which drops no-op movement nodes before
+   they reach rangeify.
 4. Add rewriteable `BUFFERIZE`/`INDEX` schedule IR so bufferize
    insertion/removal is not hard-coded into `realize_classify`.
 5. Port range/reduce simplification and reduce-to-accumulator rules.

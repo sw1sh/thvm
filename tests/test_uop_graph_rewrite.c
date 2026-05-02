@@ -41,10 +41,30 @@ static Term raw_reshape(Term src, u32 ndim, const u32 *dims) {
   return term_new(0, TAG_UOP, UOP_RESHAPE, loc);
 }
 
-static Term raw_castish(u32 opcode, Term src, u32 dtype) {
+static Term raw_dim_movement(u32 opcode, Term src, u32 ndim, const u32 *vals) {
+  u64 loc = heap_alloc(2 + ndim);
+  heap_set(loc + 0, src);
+  heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, ndim));
+  for (u32 i = 0; i < ndim; i++) {
+    heap_set(loc + 2 + i, term_new(0, TAG_NUM, DT_INT32, vals[i]));
+  }
+  return term_new(0, TAG_UOP, opcode, loc);
+}
+
+static Term raw_bounds_movement(u32 opcode, Term src, u32 ndim, const u32 *vals) {
+  u64 loc = heap_alloc(2 + 2 * ndim);
+  heap_set(loc + 0, src);
+  heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, ndim));
+  for (u32 i = 0; i < 2 * ndim; i++) {
+    heap_set(loc + 2 + i, term_new(0, TAG_NUM, DT_INT32, vals[i]));
+  }
+  return term_new(0, TAG_UOP, opcode, loc);
+}
+
+static Term raw_with_num_arg(u32 opcode, Term src, u32 val) {
   u64 loc = heap_alloc(2);
   heap_set(loc + 0, src);
-  heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, dtype));
+  heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, val));
   return term_new(0, TAG_UOP, opcode, loc);
 }
 
@@ -137,24 +157,38 @@ int main(void) {
   u32 dims_outer[1] = {4};
   Term raw_chain = raw_reshape(raw_reshape(a, 2, dims_inner), 1, dims_outer);
   Term chain_out = uop_graph_simplify(raw_chain);
-  CHECK_EQ(term_tag(chain_out), TAG_UOP);
-  CHECK_EQ(term_ext(chain_out), UOP_RESHAPE);
-  u64 cloc = term_val(chain_out);
-  CHECK_EQ(heap_read(cloc + 0), a);
-  CHECK_EQ(term_val(heap_read(cloc + 1)), 1);
-  CHECK_EQ(term_val(heap_read(cloc + 2)), 4);
+  CHECK_EQ(chain_out, a);
   CHECK_EQ(uop_graph_rewrite_stat_hits("movement-chain-collapse"), 1);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-identity"), 1);
+
+  TEST_BEGIN("uop-graph-simplify/drops-identity-movement");
+  u32 dims_a[1] = {4};
+  u32 perm_id[1] = {0};
+  u32 pad_zero[2] = {0, 0};
+  u32 shrink_full[2] = {0, 4};
+  CHECK_EQ(uop_graph_simplify(raw_reshape(a, 1, dims_a)), a);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-identity"), 1);
+  CHECK_EQ(uop_graph_simplify(raw_dim_movement(UOP_EXPAND, a, 1, dims_a)), a);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-identity"), 1);
+  CHECK_EQ(uop_graph_simplify(raw_dim_movement(UOP_PERMUTE, a, 1, perm_id)), a);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-identity"), 1);
+  CHECK_EQ(uop_graph_simplify(raw_bounds_movement(UOP_PAD, a, 1, pad_zero)), a);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-identity"), 1);
+  CHECK_EQ(uop_graph_simplify(raw_bounds_movement(UOP_SHRINK, a, 1, shrink_full)), a);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-identity"), 1);
+  CHECK_EQ(uop_graph_simplify(raw_with_num_arg(UOP_FLIP, a, 0)), a);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-identity"), 1);
 
   TEST_BEGIN("uop-graph-simplify/folds-identity-cast");
-  Term raw_cast = raw_castish(UOP_CAST, a, DT_FP32);
+  Term raw_cast = raw_with_num_arg(UOP_CAST, a, DT_FP32);
   Term cast_out = uop_graph_simplify(raw_cast);
   CHECK_EQ(cast_out, a);
   CHECK_EQ(uop_graph_rewrite_stat_hits("symbolic-cast"), 1);
 
   TEST_BEGIN("uop-graph-simplify/folds-nested-bitcast");
-  Term raw_bitcast = raw_castish(UOP_BITCAST,
-                                 raw_castish(UOP_BITCAST, a, DT_INT32),
-                                 DT_FP32);
+  Term raw_bitcast = raw_with_num_arg(UOP_BITCAST,
+                                      raw_with_num_arg(UOP_BITCAST, a, DT_INT32),
+                                      DT_FP32);
   Term bitcast_out = uop_graph_simplify_checked(raw_bitcast, 0);
   CHECK_EQ(bitcast_out, a);
   CHECK(uop_graph_rewrite_stat_hits("symbolic-cast") >= 1);

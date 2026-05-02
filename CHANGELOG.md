@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: canonicalize identity movement in UOp graph simplification
+
+`uop_graph_simplify` now drops no-op movement nodes for identity
+`RESHAPE`/`EXPAND`, identity `PERMUTE`, zero `PAD`, full-range
+`SHRINK`, and zero-axis `FLIP`.  These folds run as the named
+`movement-identity` rule and are covered by raw-node tests that bypass
+the constructors.
+
 ### Added: fold cast and bitcast through UOp graph simplification
 
 `uop_graph_simplify` now includes a `symbolic-cast` rule for proven
