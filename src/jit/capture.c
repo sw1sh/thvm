@@ -209,6 +209,7 @@ fn u32 jit_replay(u32 slot) {
   JitCapture *c = &JIT_CAPTURES[slot];
   if (!c->in_use)    return 0;
   if (c->n_ops == 0) return 0;
+  HOT_JIT_REPLAY_CALLS++;
   backend_dispatch_begin_all();
   for (u32 i = 0; i < c->n_ops; i++) {
     JitCaptureOp *op = &c->ops[i];
@@ -223,10 +224,13 @@ fn u32 jit_replay(u32 slot) {
                  ? op->heap_in_buf_ids
                  : op->in_buf_ids;
         b->dispatch_kernel(ke, ids, op->out_buf_id);
+        HOT_KERNEL_FIRES++;
+        HOT_JIT_REPLAY_DISPATCHES++;
         ITRS++;
         break;
       }
       case JIT_OP_ASSIGN: {
+        HOT_JIT_REPLAY_ASSIGNS++;
         u32 dst = op->assign_dst_tid, src = op->assign_src_tid;
         if (dst == 0 || dst >= TENS_NEXT) continue;
         if (src == 0 || src >= TENS_NEXT) continue;

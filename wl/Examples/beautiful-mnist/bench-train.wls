@@ -105,6 +105,7 @@ showProfile = envValue["SHOW_PROFILE", "0"] === "1";
 showProgramProfile = envValue["SHOW_PROGRAM_PROFILE", "0"] === "1" || showProfile;
 showMemoryProfile = envValue["SHOW_MEMORY_PROFILE", "1"] === "1";
 showFusionGaps = envValue["SHOW_FUSION_GAPS", "0"] === "1" || showProgramProfile;
+showHotCounters = envValue["SHOW_HOT_COUNTERS", "0"] === "1";
 dumpTopProgram = envValue["DUMP_TOP_PROGRAM", "0"] === "1";
 dumpTopLowered = envValue["DUMP_TOP_LOWERED", "0"] === "1";
 
@@ -122,6 +123,7 @@ print["  BS=", bs,
       "  SHOW_PROGRAM_PROFILE=", If[showProgramProfile, "1", "0"],
       "  SHOW_MEMORY_PROFILE=", If[showMemoryProfile, "1", "0"],
       "  SHOW_FUSION_GAPS=", If[showFusionGaps, "1", "0"],
+      "  SHOW_HOT_COUNTERS=", If[showHotCounters, "1", "0"],
       "  DUMP_TOP_PROGRAM=", If[dumpTopProgram, "1", "0"],
       "  DUMP_TOP_LOWERED=", If[dumpTopLowered, "1", "0"],
       "  PROFILE_TOP=", topCount,
@@ -214,7 +216,9 @@ profileBeforeTimed = If[showProfile || showProgramProfile,
     TProfileAll[],
     <||>];
 memoryBeforeTimed = If[showMemoryProfile, TMetalMemoryProfile[], <||>];
+If[showHotCounters, THotCountersReset[]];
 timedTimes = Table[runStep[warmupSteps + i, "timed"], {i, nSteps}];
+hotCountersTimed = If[showHotCounters, THotCounters[], <||>];
 profileAfterTimed = If[showProfile || showProgramProfile,
     TProfileAll[],
     <||>];
@@ -231,6 +235,8 @@ print["kernels=", TKernelCount[] - 1,
 If[showMemoryProfile,
     print["metal_memory before_timed: ", formatMetalMemory[memoryBeforeTimed]];
     print["metal_memory after_timed:  ", formatMetalMemory[memoryAfterTimed]]];
+If[showHotCounters,
+    print["hot_counters timed: ", formatCounts[hotCountersTimed]]];
 If[showProgramProfile,
     Module[{groups = Take[TProfileProgramGroups[profileTimedDelta], UpTo[topCount]]},
         print["top timed program shapes by total dispatch time:"];

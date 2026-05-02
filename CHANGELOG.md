@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Changed: expose TJit replay counters in benchmark profiles
+
+Hot counters now include TJit replay calls, replayed dispatches, and
+captured tensor assignments.  The `beautiful_mnist` training benchmark
+can print these counters with `SHOW_HOT_COUNTERS=1`, making the
+remaining small-batch gap visible as host replay/dispatch granularity
+after the hot conv-backward path has moved to generated Metal tile
+kernels.
+
 ### Changed: rangeify PAD-adjusted reshape chains into tile graphs
 
 Rangeify now lets rank-mismatched `S_RESHAPE_V` use the edge-local

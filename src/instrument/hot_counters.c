@@ -33,4 +33,7 @@ fn void hot_counters_snapshot(u64 *out) {
   out[7] = HOT_MATERIALIZE_CALLS;
   out[8] = HOT_KERNEL_FIRES;
   out[9] = HOT_GRAD_FIRES;
+  out[10] = HOT_JIT_REPLAY_CALLS;
+  out[11] = HOT_JIT_REPLAY_DISPATCHES;
+  out[12] = HOT_JIT_REPLAY_ASSIGNS;
 }

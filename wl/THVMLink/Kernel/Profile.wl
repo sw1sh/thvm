@@ -206,7 +206,8 @@ $THotCounterNames = {
     "IsRedexCalls",
     "RedexEnumCalls", "RedexEnumCells",
     "WnfCalls", "RealizeCalls", "MaterializeCalls",
-    "KernelFires", "GradFires"};
+    "KernelFires", "GradFires",
+    "JitReplayCalls", "JitReplayDispatches", "JitReplayAssigns"};
 
 THotCounters[] := (ensureInit[];
     AssociationThread[$THotCounterNames, $hotCountersFn[]])
