@@ -914,6 +914,93 @@ static int rngs_ctx_reshape(KernelEntry *ke, KProgOp const *p,
   return 1;
 }
 
+static int rngs_ctx_expand(KernelEntry *ke, KProgOp const *p,
+                           RngsCtx const *out, RngsCtx *in) {
+  if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+      || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+    return 0;
+  }
+  memset(in, 0, sizeof(*in));
+  in->ndim = p->src0_ndim;
+  in->valid_mask = out->valid_mask;
+  for (u32 d = 0; d < p->src0_ndim; d++) {
+    u32 src_dim = p->src0_dims[d];
+    u32 out_dim = p->out_dims[d];
+    in->refs[d] = (src_dim != out_dim) ? emit_iconst(ke, 0)
+                                       : out->refs[d];
+  }
+  return 1;
+}
+
+static int rngs_ctx_shrink(KernelEntry *ke, KProgOp const *p,
+                           RngsCtx const *out, RngsCtx *in) {
+  if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+      || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+    return 0;
+  }
+  memset(in, 0, sizeof(*in));
+  in->ndim = p->src0_ndim;
+  in->valid_mask = out->valid_mask;
+  for (u32 d = 0; d < p->src0_ndim; d++) {
+    u32 ref = out->refs[d];
+    u32 begin = p->pad_widths[2 * d];
+    if (begin != 0) {
+      u32 c = emit_iconst(ke, (i64)begin);
+      ref = emit_ibinop(ke, S_IADD, ref, c);
+    }
+    in->refs[d] = ref;
+  }
+  return 1;
+}
+
+static int rngs_ctx_pad(KernelEntry *ke, KProgOp const *p,
+                        RngsCtx const *out, RngsCtx *in) {
+  if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+      || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+    return 0;
+  }
+  memset(in, 0, sizeof(*in));
+  in->ndim = p->src0_ndim;
+  in->valid_mask = out->valid_mask;
+  for (u32 d = 0; d < p->src0_ndim; d++) {
+    u32 begin   = p->pad_widths[2 * d];
+    u32 src_dim = p->src0_dims[d];
+    u32 ref     = out->refs[d];
+    if (ref == 0) return 0;
+    u32 src_ref = ref;
+    if (begin != 0) {
+      u32 c = emit_iconst(ke, (i64)begin);
+      src_ref = emit_ibinop(ke, S_ISUB, ref, c);
+    }
+    in->refs[d] = src_ref;
+    u32 axis_ok = emit_pad_bounds_mask(ke, ref, begin, src_dim);
+    in->valid_mask = emit_valid_and(ke, in->valid_mask, axis_ok);
+  }
+  return 1;
+}
+
+static int rngs_ctx_flip(KernelEntry *ke, KProgOp const *p,
+                         RngsCtx const *out, RngsCtx *in) {
+  if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
+      || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+    return 0;
+  }
+  memset(in, 0, sizeof(*in));
+  in->ndim = p->src0_ndim;
+  in->valid_mask = out->valid_mask;
+  u32 mask = p->arg & 0xFFu;
+  for (u32 d = 0; d < p->src0_ndim; d++) {
+    u32 ref = out->refs[d];
+    if (mask & (1u << d)) {
+      u32 ext = p->src0_dims[d] > 0 ? p->src0_dims[d] : 1;
+      u32 c = emit_iconst(ke, (i64)(ext - 1));
+      ref = emit_ibinop(ke, S_ISUB, c, ref);
+    }
+    in->refs[d] = ref;
+  }
+  return 1;
+}
+
 static int rngs_ctx_movement_src(KernelEntry *ke, KProgOp const *p,
                                  RngsCtx const *out, RngsCtx *in) {
   memset(in, 0, sizeof(*in));
@@ -922,83 +1009,16 @@ static int rngs_ctx_movement_src(KernelEntry *ke, KProgOp const *p,
     case UOP_LOAD:
     case UOP_BITCAST:
       return 1;
-    case UOP_EXPAND: {
-      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-          || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
-        return 0;
-      }
-      in->ndim = p->src0_ndim;
-      in->valid_mask = out->valid_mask;
-      for (u32 d = 0; d < p->src0_ndim; d++) {
-        u32 src_dim = p->src0_dims[d];
-        u32 out_dim = p->out_dims[d];
-        in->refs[d] = (src_dim != out_dim) ? emit_iconst(ke, 0)
-                                           : out->refs[d];
-      }
-      return 1;
-    }
+    case UOP_EXPAND:
+      return rngs_ctx_expand(ke, p, out, in);
     case UOP_RESHAPE:
       return rngs_ctx_reshape(ke, p, out, in);
-    case UOP_SHRINK: {
-      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-          || out->ndim != p->out_ndim) {
-        return 0;
-      }
-      in->ndim = p->src0_ndim;
-      in->valid_mask = out->valid_mask;
-      for (u32 d = 0; d < p->src0_ndim; d++) {
-        u32 ref = out->refs[d];
-        u32 begin = p->pad_widths[2 * d];
-        if (begin != 0) {
-          u32 c = emit_iconst(ke, (i64)begin);
-          ref = emit_ibinop(ke, S_IADD, ref, c);
-        }
-        in->refs[d] = ref;
-      }
-      return 1;
-    }
-    case UOP_PAD: {
-      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-          || out->ndim != p->out_ndim) {
-        return 0;
-      }
-      in->ndim = p->src0_ndim;
-      in->valid_mask = out->valid_mask;
-      for (u32 d = 0; d < p->src0_ndim; d++) {
-        u32 begin   = p->pad_widths[2 * d];
-        u32 src_dim = p->src0_dims[d];
-        u32 ref     = out->refs[d];
-        if (ref == 0) return 0;
-        u32 src_ref = ref;
-        if (begin != 0) {
-          u32 c = emit_iconst(ke, (i64)begin);
-          src_ref = emit_ibinop(ke, S_ISUB, ref, c);
-        }
-        in->refs[d] = src_ref;
-        u32 axis_ok = emit_pad_bounds_mask(ke, ref, begin, src_dim);
-        in->valid_mask = emit_valid_and(ke, in->valid_mask, axis_ok);
-      }
-      return 1;
-    }
-    case UOP_FLIP: {
-      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-          || out->ndim != p->out_ndim) {
-        return 0;
-      }
-      in->ndim = p->src0_ndim;
-      in->valid_mask = out->valid_mask;
-      u32 mask = p->arg & 0xFFu;
-      for (u32 d = 0; d < p->src0_ndim; d++) {
-        u32 ref = out->refs[d];
-        if (mask & (1u << d)) {
-          u32 ext = p->src0_dims[d] > 0 ? p->src0_dims[d] : 1;
-          u32 c = emit_iconst(ke, (i64)(ext - 1));
-          ref = emit_ibinop(ke, S_ISUB, c, ref);
-        }
-        in->refs[d] = ref;
-      }
-      return 1;
-    }
+    case UOP_SHRINK:
+      return rngs_ctx_shrink(ke, p, out, in);
+    case UOP_PAD:
+      return rngs_ctx_pad(ke, p, out, in);
+    case UOP_FLIP:
+      return rngs_ctx_flip(ke, p, out, in);
     case UOP_PERMUTE: {
       if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
           || out->ndim != p->out_ndim) {

@@ -142,7 +142,9 @@ goal:
    that fold redundant `S_IAND` and constant `S_IWHERE` nodes emitted
    by PAD/RESHAPE mask paths, plus one PAD bounds-mask helper for the
    canonical `lo <= iter < hi` expression.  Nested masked values are
-   flattened into one `S_IWHERE` with a combined mask.
+   flattened into one `S_IWHERE` with a combined mask, and rangeify's
+   movement context transforms now have named helpers for
+   `EXPAND`/`RESHAPE`/`SHRINK`/`PAD`/`FLIP`.
 4. Add rewriteable `BUFFERIZE`/`INDEX` schedule IR so bufferize
    insertion/removal is not hard-coded into `realize_classify`.
 5. Port range/reduce simplification and reduce-to-accumulator rules.

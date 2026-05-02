@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Changed: name movement range-context transforms
+
+Rangeify now routes `EXPAND`, `SHRINK`, `PAD`, and `FLIP` source
+coordinate propagation through named helpers alongside the existing
+`RESHAPE` helper.  This is a no-behavior-change cleanup that gives
+movement-to-index fusion rules clear attachment points.
+
 ### Added: fold scalar integer expression identities
 
 Rangeify now folds simple scalar integer expression identities while
