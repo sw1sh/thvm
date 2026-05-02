@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Changed: inventory tinygrad rewrite rule families
+
+The rewrite-fusion plan now tracks the declarative tinygrad
+`PatternMatcher` families that matter for fusion parity: symbolic
+simplification, valid-mask movement, rangeify, bufferize insertion and
+removal, reduce/range simplification, late load/store lowering,
+GPU-dim lowering, compile/JIT rewrites, and memory planning.  It also
+marks which families THVM already covers and which gaps block
+beautiful-mnist parity.
+
 ### Changed: name realization-boundary fusion rewrites
 
 `realize_classify` now seeds conservative boundaries and then runs a
