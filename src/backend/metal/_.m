@@ -461,7 +461,10 @@ static int metal_jit_encode(KernelEntry *ke,
                             __unsafe_unretained id<MTLBuffer> *src_bufs,
                             id<MTLBuffer> outBuf,
                             id<MTLCommandBuffer> cmd) {
-  if (!cg_supports(ke)) return 0;
+  // Apple Metal exposes buffer indices 0..30 on the devices we target;
+  // index 0 is the output, so direct-pointer generated shaders can
+  // bind at most 30 inputs without argument buffers.
+  if (ke->n_inputs > 30) return 0;
   // Metal MSL emitter is f32-only today; non-F32 kernels fall back
   // to the per-op pipeline path (which has dtype-specific shader
   // variants from Phase I).
@@ -487,6 +490,112 @@ static int metal_jit_encode(KernelEntry *ke,
   [enc dispatchThreads:MTLSizeMake(n, 1, 1)
    threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
   [enc endEncoding];
+  return 1;
+}
+
+static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx);
+
+static int metal_cpu_add_src_value(KernelEntry *ke,
+                                   f32 const **inputs,
+                                   TenDesc const **input_tds,
+                                   f32 const *vals,
+                                   u32 raw,
+                                   u32 i,
+                                   f32 *out) {
+  u32 idx = KSRC_INDEX(raw);
+  if (KSRC_IS_INPUT(raw)) {
+    if (idx >= ke->n_inputs) {
+      return 0;
+    }
+    u32 src_i = ke->input_numels[idx] == 1 ? 0 : i;
+    if (input_tds[idx] != NULL) {
+      src_i = metal_tendesc_strided_index(input_tds[idx], src_i);
+    }
+    *out = inputs[idx][src_i];
+    return 1;
+  }
+  if (idx >= ke->n_ops) {
+    return 0;
+  }
+  *out = vals[idx];
+  return 1;
+}
+
+static int metal_try_cpu_small_add(KernelEntry *ke,
+                                   u32 *in_buf_ids,
+                                   u32 out_buf_id) {
+  if (ke->n_inputs <= 30 || ke->n_ops == 0) {
+    return 0;
+  }
+  if (ke->output_dtype != DT_FP32 || ke->output_numel > 65536) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (ke->input_dtypes[i] != DT_FP32) {
+      return 0;
+    }
+    if (ke->input_numels[i] != 1 && ke->input_numels[i] != ke->output_numel) {
+      return 0;
+    }
+  }
+  for (u32 step = 0; step < ke->n_ops; step++) {
+    KProgOp const *p = &ke->program[step];
+    if (p->numel != ke->output_numel) {
+      return 0;
+    }
+    if (p->opcode == UOP_RESHAPE) {
+      if (p->n_src != 1) {
+        return 0;
+      }
+    } else if (p->opcode == UOP_ADD) {
+      if (p->n_src != 2) {
+        return 0;
+      }
+    } else {
+      return 0;
+    }
+  }
+
+  metal_dispatch_flush();
+  f32 const *inputs[ke->n_inputs ? ke->n_inputs : 1];
+  TenDesc const *input_tds[ke->n_inputs ? ke->n_inputs : 1];
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 ib = in_buf_ids[i];
+    if (ib == 0 || ib >= METAL_BUFS_NEXT || METAL_BUFS[ib].buf == nil) {
+      return 0;
+    }
+    inputs[i] = (f32 const *)[METAL_BUFS[ib].buf contents];
+    u32 tid = ke->input_tids[i];
+    input_tds[i] = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
+  }
+  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT
+      || METAL_BUFS[out_buf_id].buf == nil) {
+    return 0;
+  }
+  f32 *out = (f32 *)[METAL_BUFS[out_buf_id].buf contents];
+  f32 vals[ke->n_ops ? ke->n_ops : 1];
+  for (u32 i = 0; i < ke->output_numel; i++) {
+    for (u32 step = 0; step < ke->n_ops; step++) {
+      KProgOp const *p = &ke->program[step];
+      if (p->opcode == UOP_RESHAPE) {
+        if (!metal_cpu_add_src_value(ke, inputs, input_tds, vals, p->src[0],
+                                     i, &vals[step])) {
+          return 0;
+        }
+      } else {
+        f32 a;
+        f32 b;
+        if (!metal_cpu_add_src_value(ke, inputs, input_tds, vals, p->src[0],
+                                     i, &a)
+            || !metal_cpu_add_src_value(ke, inputs, input_tds, vals,
+                                        p->src[1], i, &b)) {
+          return 0;
+        }
+        vals[step] = a + b;
+      }
+    }
+    out[i] = vals[ke->n_ops - 1];
+  }
   return 1;
 }
 
@@ -1110,6 +1219,32 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   if (kprog_supported && metal_try_gemm(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_METAL_GEMM, cg_now_us() - t0);
     return 0;
+  }
+
+  if (kprog_supported && metal_try_cpu_small_add(ke, in_buf_ids, out_buf_id)) {
+    cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
+    return 0;
+  }
+
+  if (!tile_supported && cg_supports_metal_reduce_expr(ke)) {
+    __unsafe_unretained id<MTLBuffer> raw_src_bufs[ke->n_inputs ? ke->n_inputs : 1];
+    int raw_ok = 1;
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      u32 ib = in_buf_ids[i];
+      if (ib == 0 || ib >= METAL_BUFS_NEXT || METAL_BUFS[ib].buf == nil) {
+        raw_ok = 0;
+        break;
+      }
+      raw_src_bufs[i] = METAL_BUFS[ib].buf;
+    }
+    if (raw_ok) {
+      id<MTLCommandBuffer> jit_cmd = metal_command_buffer();
+      if (metal_jit_encode(ke, raw_src_bufs, outBuf, jit_cmd)) {
+        metal_submit_if_standalone(jit_cmd);
+        cg_profile_record(kid, KDISPATCH_METAL_JIT, cg_now_us() - t0);
+        return 0;
+      }
+    }
   }
 
   // View-aware pre-materialize (the Metal counterpart to

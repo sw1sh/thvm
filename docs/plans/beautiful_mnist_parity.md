@@ -45,12 +45,18 @@ Current thvm status:
 - Rank-4 forward is plumbed through Conv2D, maxpool, and batch norm.
 - Generated Metal tile Conv2D handles rank-4 inputs and the
   single-channel first-conv patch-input form.
-- BS=512 forward-only replay is `60.5ms` without autotune over the
-  measured steady window and `29.7ms` with post-autotune; forward
-  is no longer the main parity blocker.
-- Final-layer and late-block target gradients replay, but early
-  conv-weight gradients still explode.  `BENCH_MODE=grad-1 BS=1`
-  remains too slow to be a training-loop canary.
+- BS=512 forward-only replay is `~66ms` without autotune over the
+  measured steady window and `29.7ms` with post-autotune in the last
+  cached-opt run; forward is no longer the main parity blocker.
+- Generated Metal expression JIT now covers heavy f32
+  movement/ALU backward materializers without preempting tile kernels.
+  This makes BS=512 `grad-7` replay about `127ms` and cuts `grad-3`
+  to about `2.6s`.
+- Full BS=512 Adam replay now completes, but is still `~41-46s`
+  steady versus tinygrad's `30-33ms`.  The gap is the repeated
+  all-target early-conv backward graph (`3285` kernels, including
+  `1048` generated Metal JIT kernels and `48` per-op Metal fallbacks),
+  not first-sample overhead.
 
 ## Blockers, in priority order
 
@@ -68,27 +74,37 @@ still walks and lowers a very large movement/reduction graph.
   reductions instead of generic movement-heavy `metal-op` kernels.
 - Keep the benchmark target as steady replay, not first-capture time.
 
-**Verify:** `BENCH_MODE=grad-1 BS=1` captures in under one second and
-replays in the same class as `grad-7`; then rerun full `BENCH_MODE=train`.
+**Verify:** `BENCH_MODE=grad-1 BS=512` and `BENCH_MODE=grad-3 BS=512`
+drop from seconds to the same class as `grad-7`, then rerun full
+`BENCH_MODE=train`.
 
 ### M2. Full backward tile coverage -- training-loop parity
 
-Forward-only BS=512 replay can now hit `29.7ms` after autotune, but
-training still cannot be compared to tinygrad because early backward
-paths are not replayable.  `BENCH_MODE=grad-7 BS=1` replays at
-`105.6ms` with 127 generic `metal-op` fallbacks; `grad-1` still does
-not complete first capture in a useful time window.
+Forward-only BS=512 replay can hit `29.7ms` after autotune, and full
+training replay now completes, but early backward paths are still far
+too slow.  Current BS=512 single-gradient replays:
 
-**Verify:** `BENCH_MODE=grad-1 BS=1` captures and replays, then
-`BENCH_MODE=train BS=512` reports a steady replay loop without
-generic `metal-op` dominating the profile.
+```text
+grad-1: 4368.0ms
+grad-3: 2578.1ms
+grad-7:  126.9ms
+grad-9:  186.1ms
+```
+
+**Verify:** `BENCH_MODE=train BS=512` reports a steady replay loop in
+the same order of magnitude as tinygrad's `30-33ms`, with the repeated
+early-conv backward program shapes fused or shared instead of emitted
+hundreds of times.
 
 ### M3. Multi-grad structural sharing -- TGradMany walk-once
 
 Target pruning handles independent irrelevant branches, but full
-`TGradMany` still re-lowers target-specific backward graphs.  Once W1
-is replayable, revisit structural templates if all-target capture time
-or kernel count remains high.
+`TGradMany` still re-lowers target-specific backward graphs.  This is
+now on the critical path: full Adam replay emits `3285` kernels even
+though many are repeated early-conv backward shapes.  The next useful
+design is either a structural-template `TGradMany` walk-once pass, or
+producer-consumer fusion that prevents those partial-gradient
+materializers from existing as standalone buffers.
 
 ### M4. Refcount-driven buffer free between Adam steps
 

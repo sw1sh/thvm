@@ -6,6 +6,20 @@ dated section.
 
 ## Unreleased
 
+### Changed: Metal expression JIT for backward movement graphs
+
+Generated Metal source can now inline f32 movement/ALU expression
+graphs, including `PAD`/`SHRINK`/`FLIP` and direct view indexing,
+instead of forcing large backward materializers through the per-op
+Metal fallback.  The dispatcher preserves generated tile kernels as
+the first choice, uses expression JIT for heavy non-reduce movement
+graphs, and avoids direct MSL JIT for more than 30 input buffers
+(Metal's direct buffer-index limit).  On the BS=512
+`beautiful_mnist` benchmark this cuts `grad-3` from roughly `10.6s`
+to `2.6s`, `grad-7` to about `127ms`, and full Adam replay to about
+`41-46s`; the remaining tinygrad gap is repeated early-conv backward
+lowering, not first-sample overhead.
+
 ### Fixed: materialized beautiful_mnist gradients replay through kernels
 
 `TAdam` now materializes the loss before `TGradMany`, and the C

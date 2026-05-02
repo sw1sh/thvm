@@ -373,6 +373,14 @@ static void rc_emit_unary(CgBuf *b, u32 step, u8 opcode,
   cg_append(b, ";\n");
 }
 
+static void rc_emit_alias(CgBuf *b, u32 step, u32 src,
+                          u32 const *in_numels) {
+  const char *T = rc_c_type(b->program_dtype);
+  cg_append(b, "    %s r%u = ", T, step);
+  rc_emit_src_ref(b, src, in_numels);
+  cg_append(b, ";\n");
+}
+
 static const Renderer C_RENDERER = {
   .prologue              = rc_prologue,
   .epilogue              = rc_epilogue,
@@ -383,4 +391,5 @@ static const Renderer C_RENDERER = {
   .emit_const            = rc_emit_const,
   .emit_binary           = rc_emit_binary,
   .emit_unary            = rc_emit_unary,
+  .emit_alias            = rc_emit_alias,
 };

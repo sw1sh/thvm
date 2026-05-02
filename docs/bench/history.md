@@ -163,6 +163,45 @@ BENCH_MODE=grad-7  BS=1 after Metal reshape/permute coverage:
 BENCH_MODE=grad-1  BS=1: still too slow to use as a loop canary
 ```
 
+After adding generated Metal expression JIT for heavy f32
+movement/ALU graphs and keeping tile kernels ahead of reduce-expression
+JIT, the BS=512 steady replay status is:
+
+```text
+BENCH_MODE=forward BS=512:
+  steady_ms_per_step=66.0
+  dispatch=metal-tile=36, none=3
+
+BENCH_MODE=grad-1 BS=512:
+  steady_ms_per_step=4368.0
+  dispatch=metal-tile=171, none=6, metal-jit=137, metal-op=3
+
+BENCH_MODE=grad-3 BS=512:
+  steady_ms_per_step=2578.1
+  dispatch=metal-tile=170, none=6, metal-jit=73, metal-op=3
+
+BENCH_MODE=grad-7 BS=512:
+  steady_ms_per_step=126.9
+  dispatch=metal-tile=73, none=5, metal-jit=25, metal-op=2
+
+BENCH_MODE=grad-9 BS=512:
+  steady_ms_per_step=186.1
+  dispatch=metal-tile=72, none=4, metal-jit=9, metal-op=2
+
+BENCH_MODE=train BS=512:
+  steady_ms_per_step=41315.9
+  dispatch=metal-tile=2138, none=51, metal-jit=1048, metal-op=48
+```
+
+This is a real improvement over the previous `grad-3` replay
+(`~10.6s`) and removes the worst `PAD`/`SHRINK` materializer from
+the profile, but it is still orders of magnitude from tinygrad's
+`30-33ms` full captured train step.  The current full-loop gap is the
+repeated all-target early-conv backward graph: thousands of kernels
+are emitted for one Adam replay, and the slowest kernels are repeated
+movement-heavy partial-gradient materializers over
+`{512,32,20,20}`/pool-shaped inputs.
+
 Interpretation for the hackathon track:
 
 - First-sample overhead is not the next gating metric.

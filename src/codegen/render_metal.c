@@ -45,6 +45,8 @@
 //   - Address-space qualifiers: `device` for r/w, `device const` for inputs.
 //   - INFINITY: MSL provides `INFINITY` via <metal_stdlib>.
 
+#define RM_MAX_MSL_INPUTS 30u
+
 static void rm_emit_src_ref(CgBuf *b, u32 raw, u32 const *in_numels) {
   u32 idx = KSRC_INDEX(raw);
   if (KSRC_IS_INPUT(raw)) {
@@ -176,6 +178,13 @@ static void rm_emit_unary(CgBuf *b, u32 step, u8 opcode,
   cg_append(b, ";\n");
 }
 
+static void rm_emit_alias(CgBuf *b, u32 step, u32 src,
+                          u32 const *in_numels) {
+  cg_append(b, "  float r%u = ", step);
+  rm_emit_src_ref(b, src, in_numels);
+  cg_append(b, ";\n");
+}
+
 static const Renderer METAL_RENDERER = {
   .prologue              = rm_prologue,
   .epilogue              = rm_epilogue,
@@ -186,7 +195,521 @@ static const Renderer METAL_RENDERER = {
   .emit_const            = rm_emit_const,
   .emit_binary           = rm_emit_binary,
   .emit_unary            = rm_emit_unary,
+  .emit_alias            = rm_emit_alias,
 };
+
+static u32 rm_rx_numel(KernelEntry const *ke, u32 raw) {
+  if (KSRC_IS_INPUT(raw)) {
+    u32 idx = KSRC_INDEX(raw);
+    return idx < ke->n_inputs ? ke->input_numels[idx] : 1;
+  }
+  u32 idx = KSRC_INDEX(raw);
+  return idx < ke->n_ops ? ke->program[idx].numel : 1;
+}
+
+static int rm_rx_op_supported(u8 op) {
+  switch (op) {
+    case UOP_CONST:
+    case UOP_ADD:
+    case UOP_MUL:
+    case UOP_NEG:
+    case UOP_RECIP:
+    case UOP_SQRT:
+    case UOP_EXP2:
+    case UOP_LOG2:
+    case UOP_CMPLT:
+    case UOP_CMPEQ:
+    case UOP_RESHAPE:
+    case UOP_EXPAND:
+    case UOP_PERMUTE:
+    case UOP_PAD:
+    case UOP_SHRINK:
+    case UOP_FLIP:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int rm_reduce_expr_supports(KernelEntry const *ke) {
+  if (ke->n_inputs > RM_MAX_MSL_INPUTS
+      || ke->n_ops < 2
+      || cg_program_dtype(ke) != DT_FP32) {
+    return 0;
+  }
+  KProgOp const *last = &ke->program[ke->n_ops - 1];
+  if (last->opcode != UOP_REDUCE || last->n_src != 1) {
+    return 0;
+  }
+  u8 kind = (u8)((last->arg >> 24) & 0xFFu);
+  if (kind != REDUCE_SUM && kind != REDUCE_MAX) {
+    return 0;
+  }
+  for (u32 i = 0; i + 1 < ke->n_ops; i++) {
+    if (!rm_rx_op_supported(ke->program[i].opcode)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int rm_expr_supports(KernelEntry const *ke) {
+  if (ke->n_inputs > RM_MAX_MSL_INPUTS
+      || ke->n_ops == 0
+      || cg_program_dtype(ke) != DT_FP32) {
+    return 0;
+  }
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    if (ke->program[i].opcode == UOP_REDUCE
+        || !rm_rx_op_supported(ke->program[i].opcode)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int rm_expr_auto_worthwhile(KernelEntry const *ke) {
+  if (!rm_expr_supports(ke)) {
+    return 0;
+  }
+  return ke->n_ops >= 16;
+}
+
+static void rm_rx_params(CgBuf *b, u32 n_inputs) {
+  for (u32 i = 0; i < n_inputs; i++) {
+    if (i > 0) {
+      cg_append(b, ", ");
+    }
+    cg_append(b, "device const float *in%u", i);
+  }
+  if (n_inputs > 0) {
+    cg_append(b, ", ");
+  }
+  cg_append(b, "uint i");
+}
+
+static void rm_rx_args(CgBuf *b, u32 n_inputs, char const *idx) {
+  for (u32 i = 0; i < n_inputs; i++) {
+    if (i > 0) {
+      cg_append(b, ", ");
+    }
+    cg_append(b, "in%u", i);
+  }
+  if (n_inputs > 0) {
+    cg_append(b, ", ");
+  }
+  cg_append(b, "%s", idx);
+}
+
+static void rm_rx_src_at(CgBuf *b, KernelEntry const *ke, u32 raw,
+                         char const *idx) {
+  u32 id = KSRC_INDEX(raw);
+  if (KSRC_IS_INPUT(raw)) {
+    if (id >= ke->n_inputs || ke->input_numels[id] == 1) {
+      cg_append(b, "in%u[0]", id);
+    } else if (b->ke != NULL && b->ke->input_views != NULL
+               && id < b->ke->n_inputs) {
+      u32 tid = b->ke->input_tids[id];
+      TenDesc const *td = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
+      if (td != NULL && (!td->view.contiguous || td->view.offset != 0
+                         || td->nviews != 0)) {
+        cg_append(b, "in%u[idx_in%u(%s)]", id, id, idx);
+      } else {
+        cg_append(b, "in%u[%s]", id, idx);
+      }
+    } else {
+      cg_append(b, "in%u[%s]", id, idx);
+    }
+    return;
+  }
+  cg_append(b, "v%u(", id);
+  rm_rx_args(b, ke->n_inputs, idx);
+  cg_append(b, ")");
+}
+
+static void rm_rx_emit_view_index(CgBuf *b, View const *v, char const *var) {
+  int wrote = 0;
+  if (v->offset != 0) {
+    cg_append(b, "%d", (int)v->offset);
+    wrote = 1;
+  }
+  u32 inner = 1;
+  for (i32 axis = (i32)v->shape.ndim - 1; axis >= 0; axis--) {
+    i32 stride = v->strides[axis];
+    u32 dim = v->shape.dims[axis];
+    if (stride != 0 && dim > 1) {
+      if (wrote) {
+        cg_append(b, " + ");
+      }
+      if (inner == 1) {
+        cg_append(b, "%d*(%s %% %u)", (int)stride, var, dim);
+      } else {
+        cg_append(b, "%d*((%s / %u) %% %u)", (int)stride, var, inner, dim);
+      }
+      wrote = 1;
+    }
+    inner *= dim;
+  }
+  if (!wrote) {
+    cg_append(b, "0");
+  }
+}
+
+static void rm_rx_emit_input_helpers(CgBuf *b, KernelEntry const *ke) {
+  if (ke == NULL || ke->input_views == NULL) {
+    return;
+  }
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 tid = ke->input_tids[i];
+    if (tid == 0 || tid >= TENS_NEXT) {
+      continue;
+    }
+    TenDesc const *td = &TENS[tid];
+    if (td->view.contiguous && td->view.offset == 0 && td->nviews == 0) {
+      continue;
+    }
+    cg_append(b, "static inline uint idx_in%u(uint i) {\n", i);
+    cg_append(b, "  uint t = (uint)(");
+    rm_rx_emit_view_index(b, &ke->input_views[i], "i");
+    cg_append(b, ");\n");
+    for (i32 v = (i32)td->nviews - 1; v >= 0; v--) {
+      cg_append(b, "  t = (uint)(");
+      rm_rx_emit_view_index(b, &td->prior_views[v], "t");
+      cg_append(b, ");\n");
+    }
+    cg_append(b, "  return t;\n");
+    cg_append(b, "}\n\n");
+  }
+}
+
+static void rm_rx_src_current(CgBuf *b, KernelEntry const *ke, u32 raw) {
+  if (rm_rx_numel(ke, raw) == 1) {
+    rm_rx_src_at(b, ke, raw, "0");
+  } else {
+    rm_rx_src_at(b, ke, raw, "i");
+  }
+}
+
+static u32 rm_rx_stride_after(KProgOp const *p, u32 axis) {
+  u32 stride = 1;
+  for (u32 i = axis + 1; i < p->src0_ndim; i++) {
+    stride *= p->src0_dims[i];
+  }
+  return stride;
+}
+
+static void rm_rx_expand(CgBuf *b, KernelEntry const *ke, KProgOp const *p) {
+  u32 in_numel = rm_rx_numel(ke, p->src[0]);
+  if (in_numel == 1 || in_numel == p->numel) {
+    cg_append(b, "  return ");
+    rm_rx_src_at(b, ke, p->src[0], in_numel == 1 ? "0" : "i");
+    cg_append(b, ";\n");
+    return;
+  }
+  if (p->out_ndim > 0 && p->src0_ndim == p->out_ndim) {
+    cg_append(b, "  uint oi = i;\n");
+    cg_append(b, "  uint src_idx = 0u;\n");
+    cg_append(b, "  uint src_stride = 1u;\n");
+    for (i32 axis = (i32)p->out_ndim - 1; axis >= 0; axis--) {
+      u32 ax = (u32)axis;
+      cg_append(b, "  { uint c = oi %% %uu; oi /= %uu;",
+                p->out_dims[ax], p->out_dims[ax]);
+      if (p->src0_dims[ax] != 1) {
+        cg_append(b, " src_idx += c * src_stride;");
+      }
+      cg_append(b, " src_stride *= %uu; }\n", p->src0_dims[ax]);
+    }
+    cg_append(b, "  return ");
+    rm_rx_src_at(b, ke, p->src[0], "src_idx");
+    cg_append(b, ";\n");
+    return;
+  }
+  cg_append(b, "  uint src_idx = i %% %uu;\n", in_numel ? in_numel : 1);
+  cg_append(b, "  return ");
+  rm_rx_src_at(b, ke, p->src[0], "src_idx");
+  cg_append(b, ";\n");
+}
+
+static void rm_rx_permute(CgBuf *b, KernelEntry const *ke, KProgOp const *p) {
+  if (p->src0_ndim == 0) {
+    cg_append(b, "  return ");
+    rm_rx_src_at(b, ke, p->src[0], "i");
+    cg_append(b, ";\n");
+    return;
+  }
+  cg_append(b, "  uint tmp = i;\n");
+  cg_append(b, "  uint src_idx = 0u;\n");
+  for (i32 axis = (i32)p->src0_ndim - 1; axis >= 0; axis--) {
+    u32 ax = (u32)axis;
+    u32 stride = rm_rx_stride_after(p, p->axis_perm[ax]);
+    cg_append(b, "  { uint c = tmp %% %uu; tmp /= %uu;",
+              p->out_dims[ax], p->out_dims[ax]);
+    if (stride == 1) {
+      cg_append(b, " src_idx += c; }\n");
+    } else {
+      cg_append(b, " src_idx += c * %uu; }\n", stride);
+    }
+  }
+  cg_append(b, "  return ");
+  rm_rx_src_at(b, ke, p->src[0], "src_idx");
+  cg_append(b, ";\n");
+}
+
+static void rm_rx_pad(CgBuf *b, KernelEntry const *ke, KProgOp const *p) {
+  if (p->src0_ndim == 0) {
+    cg_append(b, "  return ");
+    rm_rx_src_at(b, ke, p->src[0], "i");
+    cg_append(b, ";\n");
+    return;
+  }
+  cg_append(b, "  uint tmp = i;\n");
+  cg_append(b, "  uint src_idx = 0u;\n");
+  cg_append(b, "  uint src_stride = 1u;\n");
+  cg_append(b, "  bool in_pad = false;\n");
+  for (i32 axis = (i32)p->src0_ndim - 1; axis >= 0; axis--) {
+    u32 ax = (u32)axis;
+    u32 begin = p->pad_widths[2 * ax];
+    cg_append(b, "  { uint c = tmp %% %uu; tmp /= %uu;",
+              p->out_dims[ax], p->out_dims[ax]);
+    cg_append(b, " if (c < %uu || c >= %uu) { in_pad = true; }",
+              begin, begin + p->src0_dims[ax]);
+    cg_append(b, " else { src_idx += (c - %uu) * src_stride;", begin);
+    cg_append(b, " src_stride *= %uu; } }\n", p->src0_dims[ax]);
+  }
+  cg_append(b, "  return in_pad ? 0.0f : ");
+  rm_rx_src_at(b, ke, p->src[0], "src_idx");
+  cg_append(b, ";\n");
+}
+
+static void rm_rx_shrink(CgBuf *b, KernelEntry const *ke, KProgOp const *p) {
+  if (p->src0_ndim == 0) {
+    cg_append(b, "  return ");
+    rm_rx_src_at(b, ke, p->src[0], "i");
+    cg_append(b, ";\n");
+    return;
+  }
+  cg_append(b, "  uint tmp = i;\n");
+  cg_append(b, "  uint src_idx = 0u;\n");
+  for (i32 axis = (i32)p->src0_ndim - 1; axis >= 0; axis--) {
+    u32 ax = (u32)axis;
+    u32 stride = rm_rx_stride_after(p, ax);
+    u32 begin = p->pad_widths[2 * ax];
+    cg_append(b, "  { uint c = tmp %% %uu; tmp /= %uu;",
+              p->out_dims[ax], p->out_dims[ax]);
+    if (stride == 1) {
+      cg_append(b, " src_idx += c + %uu; }\n", begin);
+    } else {
+      cg_append(b, " src_idx += (c + %uu) * %uu; }\n", begin, stride);
+    }
+  }
+  cg_append(b, "  return ");
+  rm_rx_src_at(b, ke, p->src[0], "src_idx");
+  cg_append(b, ";\n");
+}
+
+static void rm_rx_flip(CgBuf *b, KernelEntry const *ke, KProgOp const *p) {
+  if (p->src0_ndim == 0 || p->arg == 0) {
+    cg_append(b, "  return ");
+    rm_rx_src_at(b, ke, p->src[0], "i");
+    cg_append(b, ";\n");
+    return;
+  }
+  cg_append(b, "  uint tmp = i;\n");
+  cg_append(b, "  uint src_idx = 0u;\n");
+  cg_append(b, "  uint src_stride = 1u;\n");
+  for (i32 axis = (i32)p->src0_ndim - 1; axis >= 0; axis--) {
+    u32 ax = (u32)axis;
+    cg_append(b, "  { uint c = tmp %% %uu; tmp /= %uu;",
+              p->src0_dims[ax], p->src0_dims[ax]);
+    if ((p->arg & (1u << ax)) != 0) {
+      cg_append(b, " c = %uu - 1u - c;", p->src0_dims[ax]);
+    }
+    cg_append(b, " src_idx += c * src_stride;");
+    cg_append(b, " src_stride *= %uu; }\n", p->src0_dims[ax]);
+  }
+  cg_append(b, "  return ");
+  rm_rx_src_at(b, ke, p->src[0], "src_idx");
+  cg_append(b, ";\n");
+}
+
+static void rm_rx_emit_op(CgBuf *b, KernelEntry const *ke, u32 step) {
+  KProgOp const *p = &ke->program[step];
+  cg_append(b, "static inline float v%u(", step);
+  rm_rx_params(b, ke->n_inputs);
+  cg_append(b, ") {\n");
+  switch (p->opcode) {
+    case UOP_CONST:
+      cg_append(b, "  return ");
+      rm_emit_f32_bits(b, p->arg);
+      cg_append(b, ";\n");
+      break;
+    case UOP_ADD:
+      cg_append(b, "  return ");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, " + ");
+      rm_rx_src_current(b, ke, p->src[1]);
+      cg_append(b, ";\n");
+      break;
+    case UOP_MUL:
+      cg_append(b, "  return ");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, " * ");
+      rm_rx_src_current(b, ke, p->src[1]);
+      cg_append(b, ";\n");
+      break;
+    case UOP_NEG:
+      cg_append(b, "  return -(");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, ");\n");
+      break;
+    case UOP_RECIP:
+      cg_append(b, "  return 1.0f / (");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, ");\n");
+      break;
+    case UOP_SQRT:
+      cg_append(b, "  return sqrt(");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, ");\n");
+      break;
+    case UOP_EXP2:
+      cg_append(b, "  return exp2(");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, ");\n");
+      break;
+    case UOP_LOG2:
+      cg_append(b, "  return log2(");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, ");\n");
+      break;
+    case UOP_CMPLT:
+      cg_append(b, "  return (");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, " < ");
+      rm_rx_src_current(b, ke, p->src[1]);
+      cg_append(b, ") ? 1.0f : 0.0f;\n");
+      break;
+    case UOP_CMPEQ:
+      cg_append(b, "  return (");
+      rm_rx_src_current(b, ke, p->src[0]);
+      cg_append(b, " == ");
+      rm_rx_src_current(b, ke, p->src[1]);
+      cg_append(b, ") ? 1.0f : 0.0f;\n");
+      break;
+    case UOP_RESHAPE:
+      cg_append(b, "  return ");
+      rm_rx_src_at(b, ke, p->src[0], "i");
+      cg_append(b, ";\n");
+      break;
+    case UOP_EXPAND:
+      rm_rx_expand(b, ke, p);
+      break;
+    case UOP_PERMUTE:
+      rm_rx_permute(b, ke, p);
+      break;
+    case UOP_PAD:
+      rm_rx_pad(b, ke, p);
+      break;
+    case UOP_SHRINK:
+      rm_rx_shrink(b, ke, p);
+      break;
+    case UOP_FLIP:
+      rm_rx_flip(b, ke, p);
+      break;
+    default:
+      cg_append(b, "  return 0.0f;\n");
+      break;
+  }
+  cg_append(b, "}\n\n");
+}
+
+static char *rm_reduce_expr_emit(KernelEntry const *ke) {
+  if (!rm_reduce_expr_supports(ke)) {
+    return NULL;
+  }
+  CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
+              .program_dtype = DT_FP32, .ke = ke };
+  if (!b.buf) {
+    return NULL;
+  }
+  KProgOp const *rd = &ke->program[ke->n_ops - 1];
+  u8 kind = (u8)((rd->arg >> 24) & 0xFFu);
+  u32 inner = rd->arg & 0xFFFFFFu;
+  if (inner == 0) {
+    inner = 1;
+  }
+  u32 src_numel = rm_rx_numel(ke, rd->src[0]);
+  u32 out_numel = rd->numel ? rd->numel : 1;
+  u32 axis = out_numel ? src_numel / out_numel : 1;
+  cg_append(&b, "#include <metal_stdlib>\nusing namespace metal;\n\n");
+  rm_rx_emit_input_helpers(&b, ke);
+  for (u32 i = 0; i + 1 < ke->n_ops; i++) {
+    rm_rx_emit_op(&b, ke, i);
+  }
+  cg_append(&b, "kernel void k(device float *out [[buffer(0)]]");
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    cg_append(&b, ",\n              device const float *in%u [[buffer(%u)]]",
+              i, i + 1);
+  }
+  cg_append(&b, ",\n              uint oi [[thread_position_in_grid]],");
+  cg_append(&b, "\n              uint n [[threads_per_grid]]) {\n");
+  cg_append(&b, "  if (oi >= n) return;\n");
+  cg_append(&b, "  uint inner = %uu;\n", inner);
+  cg_append(&b, "  uint axis = %uu;\n", axis ? axis : 1);
+  cg_append(&b, "  uint outer = oi / inner;\n");
+  cg_append(&b, "  uint inner_i = oi %% inner;\n");
+  cg_append(&b, kind == REDUCE_MAX ? "  float acc = -INFINITY;\n"
+                                   : "  float acc = 0.0f;\n");
+  cg_append(&b, "  for (uint k = 0; k < axis; k++) {\n");
+  cg_append(&b, "    uint i = outer * (axis * inner) + k * inner + inner_i;\n");
+  if (kind == REDUCE_MAX) {
+    cg_append(&b, "    float v = ");
+    rm_rx_src_at(&b, ke, rd->src[0], "i");
+    cg_append(&b, ";\n");
+    cg_append(&b, "    if (v > acc) acc = v;\n");
+  } else {
+    cg_append(&b, "    acc += ");
+    rm_rx_src_at(&b, ke, rd->src[0], "i");
+    cg_append(&b, ";\n");
+  }
+  cg_append(&b, "  }\n");
+  cg_append(&b, "  out[oi] = acc;\n");
+  cg_append(&b, "}\n");
+  return b.buf;
+}
+
+static char *rm_expr_emit(KernelEntry const *ke) {
+  if (!rm_expr_supports(ke)) {
+    return NULL;
+  }
+  CgBuf b = { .buf = (char *)malloc(4096), .cap = 4096, .len = 0,
+              .program_dtype = DT_FP32, .ke = ke };
+  if (!b.buf) {
+    return NULL;
+  }
+  cg_append(&b, "#include <metal_stdlib>\nusing namespace metal;\n\n");
+  rm_rx_emit_input_helpers(&b, ke);
+  for (u32 i = 0; i < ke->n_ops; i++) {
+    rm_rx_emit_op(&b, ke, i);
+  }
+  cg_append(&b, "kernel void k(device float *out [[buffer(0)]]");
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    cg_append(&b, ",\n              device const float *in%u [[buffer(%u)]]",
+              i, i + 1);
+  }
+  cg_append(&b, ",\n              uint i [[thread_position_in_grid]],");
+  cg_append(&b, "\n              uint n [[threads_per_grid]]) {\n");
+  cg_append(&b, "  if (i >= n) return;\n");
+  cg_append(&b, "  out[i] = v%u(", ke->n_ops - 1);
+  rm_rx_args(&b, ke->n_inputs, "i");
+  cg_append(&b, ");\n");
+  cg_append(&b, "}\n");
+  return b.buf;
+}
+
+int cg_supports_metal_reduce_expr(KernelEntry const *ke) {
+  return rm_reduce_expr_supports(ke);
+}
 
 // Bridge for tests: render an arbitrary KernelEntry to MSL and return
 // the source.  Lets the WL-side test grid sanity-check that the same
@@ -194,7 +717,23 @@ static const Renderer METAL_RENDERER = {
 // abstraction holds without requiring a Metal-side compile/dispatch
 // path.
 char *cg_emit_metal(KernelEntry const *ke) {
-  return cg_emit(ke, &METAL_RENDERER);
+  if (ke->n_inputs > RM_MAX_MSL_INPUTS) {
+    return NULL;
+  }
+  char *src = cg_emit(ke, &METAL_RENDERER);
+  if (src != NULL) {
+    return src;
+  }
+  char const *expr = getenv("THVM_METAL_EXPR");
+  int force_expr = expr != NULL && expr[0] == '1';
+  int deny_expr  = expr != NULL && expr[0] == '0';
+  if (force_expr || (!deny_expr && rm_expr_auto_worthwhile(ke))) {
+    src = rm_expr_emit(ke);
+    if (src != NULL) {
+      return src;
+    }
+  }
+  return rm_reduce_expr_emit(ke);
 }
 
 static int rmt_dtype_supported(u32 dtype) {

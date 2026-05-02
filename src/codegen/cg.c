@@ -125,6 +125,9 @@ typedef struct Renderer {
   // Unary ALU: `<dtype> r{step} = op(<src>);`
   void (*emit_unary)(CgBuf *b, u32 step, u8 opcode,
                      u32 src, u32 const *in_numels);
+
+  // Alias / movement no-op: `<dtype> r{step} = <src>;`.
+  void (*emit_alias)(CgBuf *b, u32 step, u32 src, u32 const *in_numels);
 } Renderer;
 
 // === supported-op predicate ============================================
@@ -174,9 +177,19 @@ u32 cg_program_dtype(KernelEntry const *ke) {
   return dt;
 }
 
+static u32 cg_src_numel(KernelEntry const *ke, u32 raw) {
+  if (KSRC_IS_INPUT(raw)) {
+    u32 idx = KSRC_INDEX(raw);
+    return idx < ke->n_inputs ? ke->input_numels[idx] : 0;
+  }
+  u32 idx = KSRC_INDEX(raw);
+  return idx < ke->n_ops ? ke->program[idx].numel : 0;
+}
+
 int cg_supports(KernelEntry const *ke) {
   for (u32 i = 0; i < ke->n_ops; i++) {
-    u8 op = ke->program[i].opcode;
+    KProgOp const *p = &ke->program[i];
+    u8 op = p->opcode;
     if (op == UOP_REDUCE) {
       // REDUCE has to be the last op (the "reduce-tail" pattern --
       // outer per-output loop + inner accumulator).  A REDUCE
@@ -194,6 +207,11 @@ int cg_supports(KernelEntry const *ke) {
         case UOP_RECIP: case UOP_SQRT:
         case UOP_EXP2:  case UOP_LOG2:
           break;     // float-only; uniformity check below catches int dtypes
+        case UOP_RESHAPE: {
+          u32 nsrc = p->n_src > 0 ? cg_src_numel(ke, p->src[0]) : 0;
+          if (p->n_src != 1 || p->numel != nsrc) return 0;
+          break;
+        }
         default:
           return 0;
       }
@@ -289,6 +307,9 @@ fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
       case UOP_EXP2: case UOP_LOG2:
         r->emit_unary(&b, step, p->opcode, p->src[0],
                       ke->input_numels);
+        break;
+      case UOP_RESHAPE:
+        r->emit_alias(&b, step, p->src[0], ke->input_numels);
         break;
       default:
         free(b.buf);
