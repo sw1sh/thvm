@@ -74,7 +74,7 @@ void cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us) {
   s->total_us       += elapsed_us;
 }
 
-fn u32 cg_kernel_dispatch_kind(u32 kid) {
+u32 cg_kernel_dispatch_kind(u32 kid) {
   if (kid == 0 || kid >= KPROFILE_CAP) return KDISPATCH_NONE;
   return (u32)K_PROFILE[kid].kind;
 }

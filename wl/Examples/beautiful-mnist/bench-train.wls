@@ -70,6 +70,21 @@ formatRun[row_Association] := StringRiffle[{
     "op_counts=" <> formatMaybeAssoc[row["TopOpCounts"]]
 }, " "]
 
+formatGraphRun[row_Association] := StringRiffle[{
+    "start=" <> ToString[row["Start"]],
+    "end=" <> ToString[row["End"]],
+    "consumed=" <> ToString[row["Consumed"]],
+    "encoded=" <> ToString[row["EncodedDispatches"]],
+    "tile=" <> ToString[row["TileDispatches"]],
+    "jit=" <> ToString[row["JitDispatches"]],
+    "alias=" <> ToString[row["AliasDispatches"]],
+    "blocker=" <> ToString[row["Blocker"]],
+    "total_out=" <> ToString[row["TotalOutputNumel"]],
+    "top_keys=" <> formatMaybeAssoc[row["TopProgramKeys"]],
+    "out_numel=" <> formatMaybeAssoc[row["TopOutputNumels"]],
+    "op_counts=" <> formatMaybeAssoc[row["TopOpCounts"]]
+}, " "]
+
 formatMetalMemory[p_Association] := StringRiffle[{
     "live=" <> ToString[p["LiveBytes"]],
     "retained=" <> ToString[p["RetainedBytes"]],
@@ -266,10 +281,18 @@ If[dumpJitCapture,
               " replay_skipped=", summary["ReplaySkipped"],
               " run_count=", summary["RunCount"],
               " dispatch_runs=", summary["DispatchRuns"],
+              " graph_run_count=", summary["GraphRunCount"],
+              " graph_encoded_dispatches=", summary["GraphEncodedDispatches"],
+              " graph_tile_dispatches=", summary["GraphTileDispatches"],
+              " graph_jit_dispatches=", summary["GraphJitDispatches"],
+              " graph_alias_dispatches=", summary["GraphAliasDispatches"],
+              " graph_blockers=", formatMaybeAssoc[summary["GraphBlockers"]],
               " top_keys=", formatMaybeAssoc[summary["TopProgramKeys"]],
               " top_out_numel=", formatMaybeAssoc[summary["TopOutputNumels"]]];
         print["jit_capture_top_runs:"];
-        Do[print["  ", formatRun[row]], {row, summary["TopRuns"]}]]];
+        Do[print["  ", formatRun[row]], {row, summary["TopRuns"]}];
+        print["jit_capture_top_graph_runs:"];
+        Do[print["  ", formatGraphRun[row]], {row, summary["TopGraphRuns"]}]]];
 If[showProgramProfile,
     Module[{groups = Take[TProfileProgramGroups[profileTimedDelta], UpTo[topCount]]},
         print["top timed program shapes by total dispatch time:"];

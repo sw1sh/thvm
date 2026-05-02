@@ -692,6 +692,17 @@ static id<MTLComputePipelineState> metal_jit_build(KernelEntry const *ke, u64 ke
   return pso;
 }
 
+static id<MTLComputePipelineState> metal_jit_pipeline(KernelEntry *ke) {
+  if (ke->n_inputs > 30) return nil;
+  if (cg_program_dtype(ke) != DT_FP32) return nil;
+  u64 key = metal_jit_hash(ke);
+  u32 idx = metal_jit_lookup_idx(key);
+  if (idx != (u32)-1 && METAL_JIT_CACHE[idx].key == key) {
+    return METAL_JIT_PSOS[idx];
+  }
+  return metal_jit_build(ke, key);
+}
+
 // Encode a single fused-shader dispatch onto `cmd`.  Returns 1 on
 // success (caller commits the cmd buffer), 0 if the kernel can't be
 // JIT-compiled (caller falls back to the per-op interpreter path).
@@ -709,14 +720,7 @@ static int metal_jit_encode(KernelEntry *ke,
   // to the per-op pipeline path (which has dtype-specific shader
   // variants from Phase I).
   if (cg_program_dtype(ke) != DT_FP32) return 0;
-  u64 key = metal_jit_hash(ke);
-  u32 idx = metal_jit_lookup_idx(key);
-  id<MTLComputePipelineState> pso = nil;
-  if (idx != (u32)-1 && METAL_JIT_CACHE[idx].key == key) {
-    pso = METAL_JIT_PSOS[idx];
-  } else {
-    pso = metal_jit_build(ke, key);
-  }
+  id<MTLComputePipelineState> pso = metal_jit_pipeline(ke);
   if (pso == nil) return 0;
   id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
   [enc setComputePipelineState:pso];
@@ -987,6 +991,43 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
 
 static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke);
 
+#define METAL_CONV_CFG_INTS 19
+
+static int metal_tile_jit_uses_conv_cfg(KernelEntry const *ke,
+                                        TileConv2DInfo *out) {
+  if (metal_kernel_has_applied_opt(ke, KOP_GROUP)
+      || metal_kernel_has_applied_opt(ke, KOP_GROUPTOP)) {
+    return 0;
+  }
+  if (!tile_analyze_conv2d_flat(ke, out)) {
+    return 0;
+  }
+  return out->threads > 0 && out->threads <= 256;
+}
+
+static void metal_conv_cfg_fill(TileConv2DInfo const *conv,
+                                int cfg[METAL_CONV_CFG_INTS]) {
+  cfg[0]  = (int)conv->c_out;
+  cfg[1]  = (int)conv->c_in;
+  cfg[2]  = (int)conv->h;
+  cfg[3]  = (int)conv->w;
+  cfg[4]  = (int)conv->kh;
+  cfg[5]  = (int)conv->kw;
+  cfg[6]  = (int)conv->h_out;
+  cfg[7]  = (int)conv->w_out;
+  cfg[8]  = (int)conv->patches;
+  cfg[9]  = (int)conv->batch;
+  cfg[10] = (int)conv->spatial_patches;
+  cfg[11] = conv->w_offset;
+  cfg[12] = conv->w_stride0;
+  cfg[13] = conv->w_stride1;
+  cfg[14] = conv->x_offset;
+  cfg[15] = conv->x_stride_b;
+  cfg[16] = conv->x_stride0;
+  cfg[17] = conv->x_stride1;
+  cfg[18] = conv->x_stride2;
+}
+
 static int metal_tile_jit_encode(KernelEntry *ke,
                                  __unsafe_unretained id<MTLBuffer> *src_bufs,
                                  id<MTLBuffer> outBuf,
@@ -1007,16 +1048,10 @@ static int metal_tile_jit_encode(KernelEntry *ke,
     [enc setBuffer:src_bufs[i] offset:0 atIndex:(1 + i)];
   }
   TileConv2DInfo conv;
-  int is_conv = tile_analyze_conv2d_flat(ke, &conv);
+  int is_conv = metal_tile_jit_uses_conv_cfg(ke, &conv);
   if (is_conv) {
-    int cfg[19] = {
-      (int)conv.c_out, (int)conv.c_in,  (int)conv.h,     (int)conv.w,
-      (int)conv.kh,    (int)conv.kw,    (int)conv.h_out, (int)conv.w_out,
-      (int)conv.patches, (int)conv.batch, (int)conv.spatial_patches,
-      conv.w_offset, conv.w_stride0, conv.w_stride1,
-      conv.x_offset, conv.x_stride_b,
-      conv.x_stride0, conv.x_stride1, conv.x_stride2,
-    };
+    int cfg[METAL_CONV_CFG_INTS];
+    metal_conv_cfg_fill(&conv, cfg);
     [enc setBytes:cfg length:sizeof(cfg) atIndex:(1 + ke->n_inputs)];
   }
   if (is_conv) {
@@ -1047,11 +1082,13 @@ static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke) {
 #define METAL_GRAPH_MAX_RESOURCES 8192
 static u64 METAL_GRAPH_KEYS[METAL_GRAPH_CACHE_CAP];
 static id<MTLIndirectCommandBuffer> METAL_GRAPH_ICBS[METAL_GRAPH_CACHE_CAP];
+static id<MTLBuffer> METAL_GRAPH_CFG_BUFS[METAL_GRAPH_CACHE_CAP];
 
 static void metal_graph_cache_reset_impl(void) {
   for (u32 i = 0; i < METAL_GRAPH_CACHE_CAP; i++) {
     METAL_GRAPH_KEYS[i] = 0;
     METAL_GRAPH_ICBS[i] = nil;
+    METAL_GRAPH_CFG_BUFS[i] = nil;
   }
 }
 
@@ -1071,7 +1108,10 @@ static u64 metal_graph_hash(u32 slot, u32 start_op,
   h ^= (u64)n_ops;    h *= 0x100000001b3ULL;
   for (u32 i = 0; i < n_ops; i++) {
     JitReplayDispatch const *r = &ops[i];
+    if (r->kid == 0 || r->kid >= KERNELS_NEXT) return 0;
+    u32 dispatch_kind = cg_kernel_dispatch_kind(r->kid);
     h ^= (u64)r->kid;        h *= 0x100000001b3ULL;
+    h ^= (u64)dispatch_kind; h *= 0x100000001b3ULL;
     h ^= (u64)r->n_inputs;   h *= 0x100000001b3ULL;
     h ^= (u64)r->out_buf_id; h *= 0x100000001b3ULL;
     if (r->out_buf_id == 0 || r->out_buf_id >= METAL_BUFS_NEXT) return 0;
@@ -1085,6 +1125,16 @@ static u64 metal_graph_hash(u32 slot, u32 start_op,
       if (in == nil) return 0;
       h ^= (u64)bid; h *= 0x100000001b3ULL;
       h ^= (u64)(uintptr_t)(__bridge void *)in; h *= 0x100000001b3ULL;
+    }
+    TileConv2DInfo conv;
+    if (dispatch_kind == KDISPATCH_METAL_TILE
+        && metal_tile_jit_uses_conv_cfg(&KERNELS[r->kid], &conv)) {
+      int cfg[METAL_CONV_CFG_INTS];
+      metal_conv_cfg_fill(&conv, cfg);
+      for (u32 j = 0; j < METAL_CONV_CFG_INTS; j++) {
+        h ^= (u64)(u32)cfg[j];
+        h *= 0x100000001b3ULL;
+      }
     }
   }
   return h | (1ULL << 61);
@@ -1147,6 +1197,25 @@ static int metal_graph_collect_resources(JitReplayDispatch const *ops,
   return 1;
 }
 
+static u32 metal_graph_conv_cfg_count(JitReplayDispatch const *ops,
+                                      u32 n_ops) {
+  u32 n = 0;
+  for (u32 i = 0; i < n_ops; i++) {
+    JitReplayDispatch const *r = &ops[i];
+    if (r->kid == 0 || r->kid >= KERNELS_NEXT) {
+      return 0;
+    }
+    if (cg_kernel_dispatch_kind(r->kid) != KDISPATCH_METAL_TILE) {
+      continue;
+    }
+    TileConv2DInfo conv;
+    if (metal_tile_jit_uses_conv_cfg(&KERNELS[r->kid], &conv)) {
+      n++;
+    }
+  }
+  return n;
+}
+
 int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *r) {
   if (METAL_DEVICE == nil || r == NULL) {
     return 0;
@@ -1156,6 +1225,14 @@ int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *r) {
   }
   KernelEntry *ke = &KERNELS[r->kid];
   if (ke->n_inputs != r->n_inputs || r->n_inputs > 30) {
+    return 0;
+  }
+  u32 dispatch_kind = cg_kernel_dispatch_kind(r->kid);
+  if (dispatch_kind != KDISPATCH_METAL_TILE) {
+    return 0;
+  }
+  TileConv2DInfo conv;
+  if (r->n_inputs >= 30 && metal_tile_jit_uses_conv_cfg(ke, &conv)) {
     return 0;
   }
   if (r->out_buf_id == 0 || r->out_buf_id >= METAL_BUFS_NEXT) {
@@ -1177,11 +1254,28 @@ int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *r) {
 }
 
 static id<MTLIndirectCommandBuffer> metal_graph_build(
-    JitReplayDispatch const *ops, u32 n_ops) {
+    JitReplayDispatch const *ops, u32 n_ops,
+    id<MTLBuffer> *cfg_buf_out) {
   int trace = metal_graph_trace_level();
+  if (cfg_buf_out != NULL) {
+    *cfg_buf_out = nil;
+  }
   if (trace > 1) {
     fprintf(stderr, "thvm: metal_graph build begin n=%u\n", n_ops);
   }
+  u32 conv_cfg_count = metal_graph_conv_cfg_count(ops, n_ops);
+  id<MTLBuffer> cfgBuf = nil;
+  int *cfgs = NULL;
+  if (conv_cfg_count != 0) {
+    cfgBuf = [METAL_DEVICE newBufferWithLength:
+        (NSUInteger)conv_cfg_count * METAL_CONV_CFG_INTS * sizeof(int)
+                                     options:MTLResourceStorageModeShared];
+    if (cfgBuf == nil) {
+      return nil;
+    }
+    cfgs = (int *)[cfgBuf contents];
+  }
+
   MTLIndirectCommandBufferDescriptor *desc =
       [[MTLIndirectCommandBufferDescriptor alloc] init];
   [desc setCommandTypes:MTLIndirectCommandTypeConcurrentDispatch];
@@ -1200,6 +1294,7 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
   }
   [icb resetWithRange:NSMakeRange(0, (NSUInteger)n_ops)];
 
+  u32 conv_cfg_i = 0;
   for (u32 i = 0; i < n_ops; i++) {
     JitReplayDispatch const *r = &ops[i];
     if (trace > 1) {
@@ -1209,16 +1304,17 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
     if (r->kid == 0 || r->kid >= KERNELS_NEXT) return nil;
     KernelEntry *ke = &KERNELS[r->kid];
     if (ke->n_inputs != r->n_inputs || r->n_inputs > 30) return nil;
+    u32 dispatch_kind = cg_kernel_dispatch_kind(r->kid);
+    if (dispatch_kind != KDISPATCH_METAL_TILE) return nil;
     u32 groups_x = 0;
     u32 threads_x = 0;
-    if (!cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x)) return nil;
+    id<MTLComputePipelineState> pso = nil;
     TileConv2DInfo conv;
-    if (!metal_kernel_has_applied_opt(ke, KOP_GROUP)
-        && !metal_kernel_has_applied_opt(ke, KOP_GROUPTOP)
-        && tile_analyze_conv2d_flat(ke, &conv)) {
-      return nil;
-    }
-    id<MTLComputePipelineState> pso = metal_tile_jit_pipeline(ke);
+    int needs_cfg = 0;
+    if (!cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x)) return nil;
+    needs_cfg = metal_tile_jit_uses_conv_cfg(ke, &conv);
+    if (needs_cfg && ke->n_inputs >= 30) return nil;
+    pso = metal_tile_jit_pipeline(ke);
     if (pso == nil) return nil;
     if ((NSUInteger)threads_x > [pso maxTotalThreadsPerThreadgroup]) return nil;
     if (r->out_buf_id == 0 || r->out_buf_id >= METAL_BUFS_NEXT) return nil;
@@ -1244,6 +1340,15 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
       }
       [cmd setKernelBuffer:inBuf offset:0 atIndex:(1 + j)];
     }
+    if (needs_cfg) {
+      if (cfgs == NULL || conv_cfg_i >= conv_cfg_count) return nil;
+      u32 cfg_offset_ints = conv_cfg_i * METAL_CONV_CFG_INTS;
+      metal_conv_cfg_fill(&conv, &cfgs[cfg_offset_ints]);
+      [cmd setKernelBuffer:cfgBuf
+                    offset:(NSUInteger)cfg_offset_ints * sizeof(int)
+                   atIndex:(1 + ke->n_inputs)];
+      conv_cfg_i++;
+    }
     if (trace > 1) {
       fprintf(stderr, "thvm: metal_graph command %u dispatch\n", i);
     }
@@ -1256,6 +1361,9 @@ static id<MTLIndirectCommandBuffer> metal_graph_build(
     if (trace > 1) {
       fprintf(stderr, "thvm: metal_graph command %u done\n", i);
     }
+  }
+  if (cfg_buf_out != NULL) {
+    *cfg_buf_out = cfgBuf;
   }
   return icb;
 }
@@ -1280,8 +1388,10 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
   u32 idx = metal_graph_lookup_idx(key);
   if (idx == (u32)-1) return -1;
   id<MTLIndirectCommandBuffer> icb = nil;
-  if (METAL_GRAPH_KEYS[idx] == key) {
+  id<MTLBuffer> cfgBuf = nil;
+  if (METAL_GRAPH_KEYS[idx] == key && METAL_GRAPH_ICBS[idx] != nil) {
     icb = METAL_GRAPH_ICBS[idx];
+    cfgBuf = METAL_GRAPH_CFG_BUFS[idx];
     if (trace) {
       fprintf(stderr, "thvm: metal_graph cache hit idx=%u resources=%u\n",
               idx, resource_count);
@@ -1291,10 +1401,15 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
       fprintf(stderr, "thvm: metal_graph build idx=%u resources=%u\n",
               idx, resource_count);
     }
-    icb = metal_graph_build(ops, n_ops);
+    icb = metal_graph_build(ops, n_ops, &cfgBuf);
     if (icb == nil) return -1;
     METAL_GRAPH_KEYS[idx] = key;
     METAL_GRAPH_ICBS[idx] = icb;
+    METAL_GRAPH_CFG_BUFS[idx] = cfgBuf;
+  }
+  if (cfgBuf != nil) {
+    if (resource_count >= METAL_GRAPH_MAX_RESOURCES) return -1;
+    resources[resource_count++] = cfgBuf;
   }
 
   u64 t0 = cg_now_us();
@@ -1316,7 +1431,12 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
   u64 elapsed = cg_now_us() - t0;
   u64 per = n_ops == 0 ? elapsed : elapsed / n_ops;
   for (u32 i = 0; i < n_ops; i++) {
-    cg_profile_record(ops[i].kid, KDISPATCH_METAL_TILE, per);
+    u32 dispatch_kind = cg_kernel_dispatch_kind(ops[i].kid);
+    cg_profile_record(ops[i].kid,
+                      dispatch_kind == KDISPATCH_METAL_JIT
+                          ? KDISPATCH_METAL_JIT
+                          : KDISPATCH_METAL_TILE,
+                      per);
   }
   return 0;
 }

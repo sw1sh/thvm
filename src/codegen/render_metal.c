@@ -10,9 +10,8 @@
 //   kernel void k(device float *out                [[buffer(0)]],
 //                 device const float *in0          [[buffer(1)]],
 //                 ...
-//                 uint i                           [[thread_position_in_grid]],
-//                 uint n                           [[threads_per_grid]]) {
-//     if (i >= n) return;
+//                 uint i                           [[thread_position_in_grid]]) {
+//     if (i >= OUT_N) return;
 //     float r0 = in0[i] * in1[i];
 //     ...
 //     out[i] = rN;
@@ -21,7 +20,7 @@
 // Reduce-tail mode (last op is UOP_REDUCE):
 //
 //     ... // same kernel signature; `i` here = output index
-//     if (i >= n) return;
+//     if (i >= OUT_N) return;
 //     uint _outer = i / _inner;
 //     uint _inner_i = i % _inner;
 //     float acc = 0.0f;     // or -INFINITY for MAX
@@ -40,7 +39,9 @@
 // Differences from C99 renderer (render_c.c):
 //   - <metal_stdlib> for intrinsics; no <math.h>.
 //   - No outer for-loop in elementwise mode -- the thread index `i` is
-//     supplied by the dispatcher, one thread per output element.
+//     supplied by the dispatcher.  OUT_N is baked into generated source
+//     so direct dispatchThreads and ICB dispatchThreadgroups share one
+//     bounds check.
 //   - sqrt / exp2 / log2 (no `f` suffix; MSL is C++-templated).
 //   - Address-space qualifiers: `device` for r/w, `device const` for inputs.
 //   - INFINITY: MSL provides `INFINITY` via <metal_stdlib>.
@@ -57,6 +58,14 @@ static void rm_emit_src_ref(CgBuf *b, u32 raw, u32 const *in_numels) {
   }
 }
 
+static u32 rm_output_numel(CgBuf const *b) {
+  if (b != NULL && b->ke != NULL && b->ke->n_ops > 0) {
+    u32 n = b->ke->program[b->ke->n_ops - 1].numel;
+    return n ? n : 1;
+  }
+  return 1;
+}
+
 static void rm_prologue(CgBuf *b, u32 n_inputs) {
   cg_append(b, "#include <metal_stdlib>\nusing namespace metal;\n\n");
   cg_append(b, "kernel void k(device float *out [[buffer(0)]]");
@@ -64,9 +73,8 @@ static void rm_prologue(CgBuf *b, u32 n_inputs) {
     cg_append(b, ",\n              device const float *in%u [[buffer(%u)]]",
               i, i + 1);
   }
-  cg_append(b, ",\n              uint i [[thread_position_in_grid]],");
-  cg_append(b, "\n              uint n [[threads_per_grid]]) {\n");
-  cg_append(b, "  if (i >= n) return;\n");
+  cg_append(b, ",\n              uint i [[thread_position_in_grid]]) {\n");
+  cg_append(b, "  if (i >= %uu) return;\n", rm_output_numel(b));
 }
 
 static void rm_epilogue(CgBuf *b, u32 n_inputs) {
@@ -651,9 +659,8 @@ static char *rm_reduce_expr_emit(KernelEntry const *ke) {
     cg_append(&b, ",\n              device const float *in%u [[buffer(%u)]]",
               i, i + 1);
   }
-  cg_append(&b, ",\n              uint oi [[thread_position_in_grid]],");
-  cg_append(&b, "\n              uint n [[threads_per_grid]]) {\n");
-  cg_append(&b, "  if (oi >= n) return;\n");
+  cg_append(&b, ",\n              uint oi [[thread_position_in_grid]]) {\n");
+  cg_append(&b, "  if (oi >= %uu) return;\n", out_numel);
   cg_append(&b, "  uint inner = %uu;\n", inner);
   cg_append(&b, "  uint axis = %uu;\n", axis ? axis : 1);
   cg_append(&b, "  uint outer = oi / inner;\n");
@@ -697,9 +704,12 @@ static char *rm_expr_emit(KernelEntry const *ke) {
     cg_append(&b, ",\n              device const float *in%u [[buffer(%u)]]",
               i, i + 1);
   }
-  cg_append(&b, ",\n              uint i [[thread_position_in_grid]],");
-  cg_append(&b, "\n              uint n [[threads_per_grid]]) {\n");
-  cg_append(&b, "  if (i >= n) return;\n");
+  u32 out_numel = ke->program[ke->n_ops - 1].numel;
+  if (out_numel == 0) {
+    out_numel = 1;
+  }
+  cg_append(&b, ",\n              uint i [[thread_position_in_grid]]) {\n");
+  cg_append(&b, "  if (i >= %uu) return;\n", out_numel);
   cg_append(&b, "  out[i] = v%u(", ke->n_ops - 1);
   rm_rx_args(&b, ke->n_inputs, "i");
   cg_append(&b, ");\n");

@@ -588,18 +588,6 @@ static void jit_capture_finalize(u32 slot, Term root) {
 }
 
 #ifdef THVM_HAS_METAL
-static int jit_kernel_has_applied_opt(KernelEntry const *ke, u8 op) {
-  if (ke == NULL || ke->axes == NULL) {
-    return 0;
-  }
-  for (u32 i = 0; i < ke->axes->n_applied; i++) {
-    if (ke->axes->applied_opts[i].op == op) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
 static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   if (!jit_metal_graph_replay_enabled()) {
     return 0;
@@ -647,12 +635,6 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
     u32 groups_x = 0;
     u32 threads_x = 0;
     if (!cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x)) {
-      break;
-    }
-    TileConv2DInfo conv;
-    if (!jit_kernel_has_applied_opt(ke, KOP_GROUP)
-        && !jit_kernel_has_applied_opt(ke, KOP_GROUPTOP)
-        && tile_analyze_conv2d_flat(ke, &conv)) {
       break;
     }
 

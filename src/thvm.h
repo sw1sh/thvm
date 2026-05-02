@@ -1532,6 +1532,7 @@ char *cg_emit_tile_metal(KernelEntry const *ke);   // caller frees
 int   cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x, u32 *threads_x);
 u64   cg_now_us(void);
 void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
+u32   cg_kernel_dispatch_kind(u32 kid);
 
 // === backend/ ===
 // CPU backend -- only backend for step 12.  Installed by thvm_init.

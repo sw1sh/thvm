@@ -35,6 +35,7 @@ TJit::usage        = "TJit[fn] returns a closure that captures fn's kernel-dispa
 TJitOpCount::usage = "TJitOpCount[closure] returns the number of kernel dispatches captured for the JIT closure (0 before the first call).";
 TJitCaptureOps::usage = "TJitCaptureOps[closure] returns the decoded captured TJit replay sequence as associations.  Dispatch rows include Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, and TileUopCount; assign rows include DstTid and SrcTid.";
 TJitCaptureRuns::usage = "TJitCaptureRuns[closure] groups a captured TJit replay sequence into consecutive dispatch runs split by assign records, with per-run dispatch-kind, program-key, output-size, and lowering summaries.";
+TJitCaptureGraphRuns::usage = "TJitCaptureGraphRuns[closure] groups a captured TJit replay sequence into Metal ICB-eligible replay chunks: live metal-tile dispatches, with metal-alias records consumed but not encoded, split by assign and non-tile dispatch records.";
 TJitCaptureSummary::usage = "TJitCaptureSummary[closure] returns compact counts for a captured TJit replay sequence, including dispatch/assign counts, dispatch-kind counts, consecutive dispatch-run lengths, top program-key counts, and the largest dispatch runs.";
 TJitDrop::usage    = "TJitDrop[closure] releases the JIT closure's capture slot.  After this, the closure re-captures on its next call.";
 TJitClosure::usage = "TJitClosure[<|...|>] is the wrapped form returned by TJit -- treat as opaque; invoke through the documented surface.";
@@ -183,12 +184,71 @@ TJitCaptureRuns[c_TJitClosure] := Module[{
     runs
 ]
 
+TJitCaptureGraphRuns[c_TJitClosure] := Module[{
+    ops = TJitCaptureOps[c], runs = {}, i = 1, n, j, consumed, aliases,
+    encoded, tileCount, jitCount, blocker, op, kind
+},
+    n = Length[ops];
+    While[i <= n,
+        j = i;
+        consumed = 0;
+        aliases = 0;
+        encoded = {};
+        tileCount = 0;
+        jitCount = 0;
+        blocker = "end";
+        While[j <= n && consumed < 256,
+            op = ops[[j]];
+            If[op["Kind"] =!= "DISPATCH",
+                blocker = "assign";
+                Break[]];
+            If[TrueQ[op["ReplaySkip"]],
+                blocker = "replay-skip";
+                Break[]];
+            kind = op["DispatchKind"];
+            Which[
+                kind === "metal-alias",
+                    aliases++;
+                    consumed++;
+                    j++,
+                kind === "metal-tile",
+                    encoded = Append[encoded, op];
+                    tileCount++;
+                    consumed++;
+                    j++,
+                True,
+                    blocker = kind;
+                    Break[]]];
+        If[Length[encoded] >= 2 && consumed >= 2,
+            AppendTo[runs, <|
+                "Start" -> i,
+                "End" -> i + consumed - 1,
+                "Consumed" -> consumed,
+                "EncodedDispatches" -> Length[encoded],
+                "TileDispatches" -> tileCount,
+                "JitDispatches" -> jitCount,
+                "AliasDispatches" -> aliases,
+                "Blocker" -> blocker,
+                "TopProgramKeys" -> Take[captureCounts[encoded, "ProgramKey"], UpTo[8]],
+                "TopOutputNumels" -> Take[captureCounts[encoded, "OutputNumel"], UpTo[8]],
+                "TopOpCounts" -> Take[captureCounts[encoded, "OpCount"], UpTo[8]],
+                "ScalarLowered" -> Count[Lookup[encoded, "ScalarUopCount", 0], _?(# > 0 &)],
+                "TileLowered" -> Count[Lookup[encoded, "TileUopCount", 0], _?(# > 0 &)],
+                "TotalOutputNumel" -> Total[Lookup[encoded, "OutputNumel", 0]]
+            |>];
+            i += consumed,
+            i++]];
+    runs
+]
+
 TJitCaptureSummary[c_TJitClosure] := Module[{
-    ops = TJitCaptureOps[c], dispatches, runs, programCounts, liveDispatches
+    ops = TJitCaptureOps[c], dispatches, runs, graphRuns, programCounts,
+    liveDispatches
 },
     dispatches = Select[ops, #["Kind"] === "DISPATCH" &];
     liveDispatches = Select[dispatches, !TrueQ[#["ReplaySkip"]] &];
     runs = TJitCaptureRuns[c];
+    graphRuns = TJitCaptureGraphRuns[c];
     programCounts = captureCounts[dispatches, "ProgramKey"];
     <|
         "OpCount" -> Length[ops],
@@ -198,9 +258,18 @@ TJitCaptureSummary[c_TJitClosure] := Module[{
         "ReplayLiveDispatches" -> Length[liveDispatches],
         "DispatchRuns" -> Lookup[runs, "Count", {}],
         "RunCount" -> Length[runs],
+        "GraphRunCount" -> Length[graphRuns],
+        "GraphEncodedDispatches" -> Total[Lookup[graphRuns, "EncodedDispatches", {}]],
+        "GraphTileDispatches" -> Total[Lookup[graphRuns, "TileDispatches", {}]],
+        "GraphJitDispatches" -> Total[Lookup[graphRuns, "JitDispatches", {}]],
+        "GraphAliasDispatches" -> Total[Lookup[graphRuns, "AliasDispatches", {}]],
+        "GraphRunEncodedCounts" -> Lookup[graphRuns, "EncodedDispatches", {}],
+        "GraphRunTileCounts" -> Lookup[graphRuns, "TileDispatches", {}],
+        "GraphBlockers" -> Counts[Lookup[graphRuns, "Blocker", {}]],
         "TopProgramKeys" -> Take[programCounts, UpTo[12]],
         "TopOutputNumels" -> Take[captureCounts[dispatches, "OutputNumel"], UpTo[12]],
-        "TopRuns" -> Take[ReverseSortBy[runs, #["Count"] &], UpTo[8]]
+        "TopRuns" -> Take[ReverseSortBy[runs, #["Count"] &], UpTo[8]],
+        "TopGraphRuns" -> Take[ReverseSortBy[graphRuns, #["EncodedDispatches"] &], UpTo[8]]
     |>
 ]
 

@@ -6,6 +6,18 @@ dated section.
 
 ## Unreleased
 
+### Changed: include conv tile templates in Metal graph replay
+
+Metal TJit graph replay now binds the small conv2d-flat template
+configuration buffer through the indirect-command-buffer path, so
+normal conv tile kernels no longer split replay chunks just because
+they need `cfg`.  The graph cache owns one config buffer per cached
+ICB and includes the config values in the cache key.  Generated
+`metal-jit` shaders now bake their logical output size into MSL, but
+graph replay still treats `metal-jit` as a blocker until command-order
+correctness for producer chains is proven.  `DUMP_JIT_CAPTURE=1` now
+prints the simulated graph chunks and their blockers.
+
 ### Changed: make Metal graph replay the default TJit path
 
 Metal TJit replay now defaults to indirect-command-buffer graph
