@@ -6,6 +6,20 @@ dated section.
 
 ## Unreleased
 
+### Changed: inline large multi-consumer Metal expands
+
+Metal tile scheduling now keeps large multi-consumer `EXPAND` views
+inside their consumers when the expanded view is at least 8x larger
+than its source and the inlined source subtree has no reduction.  The
+existing Metal fan-in cap still splits the graph if duplicated inputs
+would exceed the backend argument budget; set
+`THVM_INLINE_MULTI_CONSUMER_EXPAND=0` to disable the relaxation while
+bisecting.  The `beautiful_mnist` benchmark can now print
+producer/consumer IR for the largest live memory-plan buffers with
+`DUMP_MEMORY_IR=1`.  On the bounded BS=32 canary, this removes the
+`1.31GB` expanded conv-backward buffer and leaves live Metal storage
+around `1.69GB`, with memory-plan peak/total around `627MB` / `1.93GB`.
+
 ### Changed: pack rootless TJit replay temporaries on Metal
 
 Rootless TJit capture finalization now rewrites non-overlapping Metal

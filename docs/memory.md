@@ -203,29 +203,35 @@ Replay slot packing is deliberately conservative:
 Set `THVM_JIT_REPLAY_PACK=0` to disable this rewrite when bisecting a
 memory or correctness issue.
 
-The current BS=32 `beautiful_mnist` training replay retains about
-`3.3GB` of live Metal buffers after replay slot packing.  That is much
-better than the earlier `5.3GB` audited replay set, but it is still too
-large for broad autotune sweeps.  Use bounded one-step canaries until
-the large conv/backward movement producers are fused or recomputed
-inside their consumers.  The current bounded canary packs `1098`
+Large multi-consumer `EXPAND` relaxation is a separate schedule
+classification rule for Metal tile graphs.  It avoids materializing a
+global buffer for an expanded broadcast view when the expanded view is
+at least 8x larger than its source and the source subtree has no
+reduction.  Set `THVM_INLINE_MULTI_CONSUMER_EXPAND=0` to disable it.
+
+After replay slot packing and large multi-consumer `EXPAND`
+relaxation, the current BS=32 `beautiful_mnist` training replay
+retains about `1.69GB` of live Metal buffers.  That is much better than
+the earlier `5.3GB` audited replay set, but it is still too large for
+broad autotune sweeps.  Use bounded one-step canaries until the
+remaining conv/backward movement producers are fused or recomputed
+inside their consumers.  The current bounded canary packs `1109`
 dispatch outputs.
 
 `DUMP_MEMORY_PLAN=1` on `wl/Examples/beautiful-mnist/bench-train.wls`
 prints the largest live Metal buffers with producer-kernel metadata.
-With replay slot packing, the current BS=32 profile is dominated by
-multi-consumer conv/backward movement-and-add intermediates:
+Add `DUMP_MEMORY_IR=1` to include the producer program, scalar/tile
+lowering summaries, and consumer kernel briefs for those top buffers.
+With replay slot packing and large `EXPAND` relaxation, the current
+BS=32 profile is dominated by smaller conv/backward movement
+intermediates:
 
-- one `327,680,000` element f32 buffer (`1.31GB`) produced by a
-  76-op `RESHAPE/PAD/ADD/EXPAND` graph and consumed by 8 later
-  kernels;
-- several `37-42M` element f32 buffers (`151-170MB`) produced by
-  28-op `RESHAPE/PAD/ADD/EXPAND` graphs and consumed by 4 later
-  kernels;
-- a long tail of `10,240,000` element reshape aliases/copies
-  (`40.96MB`) with short lifetimes.
+- one `14,745,600` element f32 buffer (`58.98MB`) produced by a
+  205-op movement/ALU graph and consumed by one later kernel;
+- many `10,240,000` element reshape aliases/copies (`40.96MB`) with
+  short lifetimes.
 
-That points to two separate memory jobs:
+That points to three separate memory jobs:
 
 - **Fusion job:** avoid materializing shared im2col-like
   movement/add producers when consumers can inline the scalar index
@@ -238,6 +244,11 @@ That points to two separate memory jobs:
   `1.99GB` peak / `3.56GB` total live bytes.  The remaining headroom is
   mostly blocked by true multi-consumer producers rather than simple
   non-overlapping temporaries.
+- **Broadcast inlining job:** avoid materializing expanded broadcast
+  views when every consumer can carry the index expression.  The first
+  targeted Metal rule reduced the BS=32 memory plan further to about
+  `627MB` peak / `1.93GB` total live bytes by removing the largest
+  `1.31GB` expanded conv-backward buffer.
 
 ## Safety Boundary
 

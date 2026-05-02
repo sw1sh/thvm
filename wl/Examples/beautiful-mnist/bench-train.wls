@@ -53,6 +53,38 @@ inputShapes[kid_Integer] := Quiet[
 
 formatMaybeAssoc[a_Association] := If[Length[a] == 0, "{}", formatCounts[a]]
 
+formatKernelProgram[kid_Integer] /; kid <= 0 := "{}"
+formatKernelProgram[kid_Integer] := Module[{info = TKernelInfo[kid]},
+    ToString[Lookup[info, "program", {}], InputForm]]
+
+formatKernelLoweredCounts[kid_Integer] /; kid <= 0 :=
+    <|"scalar" -> Missing["NotLowered"], "tile" -> Missing["NotLowered"]|>
+formatKernelLoweredCounts[kid_Integer] := Module[{su, tu},
+    su = TKernelScalarUops[kid];
+    tu = TKernelTileUops[kid];
+    <|"scalar" -> If[Head[su] === Missing, su, Counts[su[[All, "op"]]]],
+      "tile"   -> If[Head[tu] === Missing, tu, Counts[tu[[All, "op"]]]]|>
+]
+
+formatKernelBrief[kid_Integer] /; kid <= 0 := "kid=0"
+formatKernelBrief[kid_Integer] := Module[{info, lowered, program, opCounts, proposed},
+    info = TKernelInfo[kid];
+    program = Lookup[info, "program", {}];
+    opCounts = Counts[Lookup[program, "opcode", {}]];
+    lowered = formatKernelLoweredCounts[kid];
+    proposed = Quiet @ Check[TKernelProposed[kid], $Failed];
+    StringRiffle[{
+        "kid=" <> ToString[kid],
+        "kind=" <> TKernelDispatchKind[kid],
+        "inputs=" <> ToString[TKernelInputs[kid], InputForm],
+        "out=" <> ToString[Lookup[info, "output_numel", 0]],
+        "ops=" <> formatMaybeAssoc[opCounts],
+        "scalar=" <> ToString[lowered["scalar"], InputForm],
+        "tile=" <> ToString[lowered["tile"], InputForm],
+        "proposed=" <> ToString[proposed, InputForm]
+    }, " "]
+]
+
 kernelAxesInfo[kid_Integer] := Quiet @ Check[
     First @ TKernelOpts[kid],
     <|"Applied" -> {}, "AxisTypes" -> {}, "FullShape" -> {}|>]
@@ -147,6 +179,7 @@ dumpTopProgram = envValue["DUMP_TOP_PROGRAM", "0"] === "1";
 dumpTopLowered = envValue["DUMP_TOP_LOWERED", "0"] === "1";
 dumpJitCapture = envValue["DUMP_JIT_CAPTURE", "0"] === "1";
 dumpMemoryPlan = envValue["DUMP_MEMORY_PLAN", "0"] === "1";
+dumpMemoryIR = envValue["DUMP_MEMORY_IR", "0"] === "1";
 
 print["beautiful_mnist training benchmark"];
 print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
@@ -169,6 +202,7 @@ print["  BS=", bs,
       "  DUMP_TOP_LOWERED=", If[dumpTopLowered, "1", "0"],
       "  DUMP_JIT_CAPTURE=", If[dumpJitCapture, "1", "0"],
       "  DUMP_MEMORY_PLAN=", If[dumpMemoryPlan, "1", "0"],
+      "  DUMP_MEMORY_IR=", If[dumpMemoryIR, "1", "0"],
       "  PROFILE_TOP=", topCount,
       "  POST_AUTOTUNE=", If[doPostAutotune, "1", "0"]];
 
@@ -329,7 +363,14 @@ If[dumpMemoryPlan,
                       " consumers=", Length[row["consumer_kids"]],
                       " span=", row["alive_span"],
                       " dtype=", row["dtype"],
-                      " aliases=", ToString[Take[row["alias_tids"], UpTo[4]], InputForm]]
+                      " aliases=", ToString[Take[row["alias_tids"], UpTo[4]], InputForm]];
+                If[dumpMemoryIR,
+                    print["    producer_ir=", formatKernelBrief[kid]];
+                    print["    producer_program=", formatKernelProgram[kid]];
+                    print["    consumer_kids=", ToString[row["consumer_kids"], InputForm]];
+                    Do[
+                        print["    consumer_ir=", formatKernelBrief[ck]],
+                        {ck, Take[row["consumer_kids"], UpTo[topCount]]}]]
             ],
             {row, top}]]];
 If[showProgramProfile,

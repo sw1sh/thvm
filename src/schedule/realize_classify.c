@@ -304,6 +304,83 @@ static int realize_op_is_movement(u8 op) {
       || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
 }
 
+static u64 realize_shape_numel(Shape const *s) {
+  if (s == NULL || s->ndim == 0) {
+    return 0;
+  }
+  u64 n = 1;
+  for (u32 i = 0; i < s->ndim; i++) {
+    n *= s->dims[i];
+  }
+  return n;
+}
+
+static int realize_subtree_has_reduce(Term t, u32 depth) {
+  if (depth > 64) {
+    return 1;
+  }
+  t = term_resolve(t);
+  if (term_tag(t) != TAG_UOP) {
+    return 0;
+  }
+  if (term_ext(t) == UOP_KERNEL) {
+    return 0;
+  }
+  u64 loc = term_val(t);
+  u32 idx = realize_info_find(loc);
+  if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
+    return 0;
+  }
+  u8 op = term_ext(t);
+  if (op == UOP_REDUCE) {
+    return 1;
+  }
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (realize_subtree_has_reduce(heap_read(loc + i), depth + 1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int realize_inline_multiconsumer_expand_enabled(void) {
+  if (!realize_metal_tile_fanin_cap_enabled()) {
+    return 0;
+  }
+  char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_EXPAND");
+  return e == NULL || e[0] != '0';
+}
+
+static void realize_relax_multiconsumer_expands(void) {
+  if (!realize_inline_multiconsumer_expand_enabled()) {
+    return;
+  }
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (!info->realized || info->op != UOP_EXPAND
+        || info->consumer_count < 2) {
+      continue;
+    }
+    Term self = term_new(0, TAG_UOP, UOP_EXPAND, info->loc);
+    Term src  = term_resolve(heap_read(info->loc));
+    Shape out_shape, src_shape;
+    if (!term_shape_in(self, 0, &out_shape)
+        || !term_shape_in(src, 0, &src_shape)) {
+      continue;
+    }
+    u64 out_numel = realize_shape_numel(&out_shape);
+    u64 src_numel = realize_shape_numel(&src_shape);
+    if (src_numel == 0 || out_numel < src_numel * 8) {
+      continue;
+    }
+    if (realize_subtree_has_reduce(src, 0)) {
+      continue;
+    }
+    info->realized = 0;
+  }
+}
+
 static int realize_inline_subtree_has_movement(Term t, u32 depth) {
   if (depth > 64) return 1;
   t = term_resolve(t);
@@ -443,6 +520,7 @@ fn void realize_classify(Term root) {
     }
   }
 
+  realize_relax_multiconsumer_expands();
   realize_apply_metal_tile_fanin_cap(root);
 }
 

@@ -562,6 +562,50 @@ VerificationTest[
     TestID -> "kernel-opts/metal-wide-add-tree-splits-before-arg-limit"
 ]
 
+VerificationTest[
+    (* A large broadcast view with multiple consumers should not be
+       materialized as a global Metal buffer when each consumer can
+       inline the EXPAND address expression. *)
+    Module[{oldBackend, oldTile, oldInline, restore, base, shared,
+            out, data, hasExpandKernel},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        oldInline  = Environment["THVM_INLINE_MULTI_CONSUMER_EXPAND"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]];
+            If[StringQ[oldInline],
+                SetEnvironment["THVM_INLINE_MULTI_CONSUMER_EXPAND" -> oldInline],
+                SetEnvironment["THVM_INLINE_MULTI_CONSUMER_EXPAND" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"];
+            SetEnvironment["THVM_INLINE_MULTI_CONSUMER_EXPAND" -> ""],
+            TInit[];
+            base = TTensorCreate @ NumericArray[N @ Range[4], "Real32"];
+            shared = TUOpExpand[TUOpReshape[base, {1, 4}], {16, 4}];
+            out = TRealize[
+                TUOpReduce[shared, 0, "SUM"] +
+                TUOpReduce[shared * TUOpConst[2.0], 0, "SUM"]];
+            data = Round[Normal @ TTensorData[out], 0.001];
+            hasExpandKernel = AnyTrue[Range[1, TKernelCount[] - 1],
+                Function[kid,
+                    TKernelInfo[kid]["output_numel"] === 64 &&
+                    Counts[TKernelInfo[kid]["program"][[All, "opcode"]]] ===
+                        <|"RESHAPE" -> 1, "EXPAND" -> 1|>]],
+            restore[]
+        ];
+        {data, hasExpandKernel}
+    ],
+    {{48., 96., 144., 192.}, False},
+    TestID -> "kernel-opts/metal-inline-large-multiconsumer-expand"
+]
+
 (* === TKernelVariants[kid]: bench-and-report every candidate
        without committing any opt.  Slot 0 is baseline; rest are
        proposed candidates with measured WallUs. *)
