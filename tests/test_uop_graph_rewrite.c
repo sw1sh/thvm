@@ -41,6 +41,13 @@ static Term raw_reshape(Term src, u32 ndim, const u32 *dims) {
   return term_new(0, TAG_UOP, UOP_RESHAPE, loc);
 }
 
+static Term raw_castish(u32 opcode, Term src, u32 dtype) {
+  u64 loc = heap_alloc(2);
+  heap_set(loc + 0, src);
+  heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, dtype));
+  return term_new(0, TAG_UOP, opcode, loc);
+}
+
 static int test_shape_equal(Shape const *a, Shape const *b) {
   if (a->ndim != b->ndim) {
     return 0;
@@ -137,6 +144,20 @@ int main(void) {
   CHECK_EQ(term_val(heap_read(cloc + 1)), 1);
   CHECK_EQ(term_val(heap_read(cloc + 2)), 4);
   CHECK_EQ(uop_graph_rewrite_stat_hits("movement-chain-collapse"), 1);
+
+  TEST_BEGIN("uop-graph-simplify/folds-identity-cast");
+  Term raw_cast = raw_castish(UOP_CAST, a, DT_FP32);
+  Term cast_out = uop_graph_simplify(raw_cast);
+  CHECK_EQ(cast_out, a);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("symbolic-cast"), 1);
+
+  TEST_BEGIN("uop-graph-simplify/folds-nested-bitcast");
+  Term raw_bitcast = raw_castish(UOP_BITCAST,
+                                 raw_castish(UOP_BITCAST, a, DT_INT32),
+                                 DT_FP32);
+  Term bitcast_out = uop_graph_simplify_checked(raw_bitcast, 0);
+  CHECK_EQ(bitcast_out, a);
+  CHECK(uop_graph_rewrite_stat_hits("symbolic-cast") >= 1);
 
   TEST_BEGIN("uop-graph-simplify-checked/accepts-shape-dtype-stable");
   Term checked_add = uop_graph_simplify_checked(raw_add, 0);

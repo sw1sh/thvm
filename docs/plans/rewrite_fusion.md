@@ -97,7 +97,7 @@ boundaries.
 | Tinygrad rule family | Main local reference | THVM status |
 | --- | --- | --- |
 | Pattern infrastructure: `UPat`, `PatternMatcher`, `graph_rewrite`, matcher composition, bottom-up walk, rewrite stats | `tinygrad/uop/ops.py`, `tinygrad/uop/upat.py` | Partial. `realize_rewrite.c` names realize-boundary rules; `uop_view` and `uop_graph_rewrite` now provide UOp inspection, bottom-up traversal, memoization, parent rebuilds, replacement callbacks, and hit stats, but not declarative UPat-style captures. |
-| Algebraic/symbolic simplification: constants, identities, commutative canonicalization, div/mod recombine, cast/bitcast folding, boolean/where folding | `tinygrad/uop/symbolic.py` | Partial. Constructor-time rules live in `src/uop/rewrite.c`; `uop_graph_simplify` now reuses the safe unary/binary/movement-chain subset as named graph rules, and `uop_graph_simplify_checked` gates materializer use on shape/dtype preservation. Big missing piece is index expression simplification. |
+| Algebraic/symbolic simplification: constants, identities, commutative canonicalization, div/mod recombine, cast/bitcast folding, boolean/where folding | `tinygrad/uop/symbolic.py` | Partial. Constructor-time rules live in `src/uop/rewrite.c`; `uop_graph_simplify` now reuses the safe unary/binary/cast/bitcast/movement-chain subset as named graph rules, and `uop_graph_simplify_checked` gates materializer use on shape/dtype preservation. Big missing piece is index expression simplification. |
 | Valid-mask simplification and `WHERE`/load movement | `pm_simplify_valid`, `pm_move_where_on_load` in `tinygrad/uop/symbolic.py` | Mostly missing. Needed before broad PAD fanout fusion is safe. |
 | Realize-map seeding and rangeify application | `pm_generate_realize_map`, `pm_apply_rangeify` in `tinygrad/schedule/indexing.py` | Partial. `realize_classify.c` seeds boundaries; `rangeify.c` emits scalar graphs, but not through a general rewrite table. |
 | Movement-to-index rewrites | `apply_movement_op`, `pm_mops`, `pm_syntactic_sugar` in `tinygrad/schedule/rangeify.py` | Partial. THVM has edge-local rangeify fixes and view-only movement paths, but lacks a reusable movement rewrite table. |
@@ -130,7 +130,7 @@ goal:
 2. Port the symbolic/index subset needed by rangeify: algebraic
    identities, div/mod simplification, valid-mask simplification, and
    `WHERE`/load movement.  Started with `uop_graph_simplify`, which
-   lifts the existing safe constructor-time unary/binary and
+   lifts the existing safe constructor-time unary/binary/cast and
    reshape/expand-chain rules into the graph rewrite pipeline.  A
    default-off materialize hook (`THVM_UOP_GRAPH_SIMPLIFY=1`) now runs
    the checked pass only when shape/dtype stay stable.

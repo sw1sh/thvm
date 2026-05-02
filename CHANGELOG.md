@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Added: fold cast and bitcast through UOp graph simplification
+
+`uop_graph_simplify` now includes a `symbolic-cast` rule for proven
+identity casts, nested bitcasts, and const bitcasts.  The rule avoids
+recreating equivalent non-hash-consed cast nodes, so it can run safely
+inside the bottom-up graph rewrite loop.
+
 ### Added: gate UOp graph simplification by shape and dtype
 
 `uop_graph_simplify_checked` now accepts graph rewrites only when
