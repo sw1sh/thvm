@@ -1456,6 +1456,21 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 fn Term uop_cast   (Term src, u32 dst_dtype);                    // value-preserving cast
 fn Term uop_bitcast(Term src, u32 dst_dtype);                    // same-itemsize reinterpret
 
+typedef Term (*UOpGraphRewriteFn)(Term t, void *user);
+typedef struct {
+  char const        *name;
+  UOpGraphRewriteFn apply;
+} UOpGraphRewriteRule;
+fn Term uop_graph_rewrite(Term root,
+                          UOpGraphRewriteRule const *rules,
+                          u32 n_rules,
+                          void *user);
+fn void uop_graph_rewrite_stats_clear(void);
+fn u32  uop_graph_rewrite_stats_len(void);
+fn char const *uop_graph_rewrite_stat_name(u32 i);
+fn u32  uop_graph_rewrite_stat_hits_at(u32 i);
+fn u32  uop_graph_rewrite_stat_hits(char const *name);
+
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is
 // the leaf TAG_TEN to differentiate against.  Reduces under TWnf via

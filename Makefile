@@ -18,6 +18,7 @@ TESTS := \
   $(BIN)/test_lam_era \
   $(BIN)/test_tensor \
   $(BIN)/test_uop \
+  $(BIN)/test_uop_graph_rewrite \
   $(BIN)/test_grad \
   $(BIN)/test_ref \
   $(BIN)/test_mat_op2 \

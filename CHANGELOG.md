@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: add a UOp graph rewrite skeleton
+
+`src/uop/graph_rewrite.c` now provides a named bottom-up rewrite pass
+over UOp DAGs with memoization, canonical parent rebuilds, replacement
+callbacks, and hit counters exposed through `DUMP_UOP_REWRITE=1`.  The
+rewrite-fusion plan now records this as the first UOp-level
+implementation slice toward tinygrad-style graph rewrites.
+
 ### Changed: clarify rewrite-fusion as one goal
 
 `docs/plans/rewrite_fusion.md` now frames the work as a single goal:

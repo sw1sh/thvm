@@ -26,10 +26,10 @@ The rewrite pipeline is good enough when it can:
 
 ## Current Slice
 
-`src/schedule/realize_rewrite.c` provides the first rewrite harness.
-It is deliberately scoped to the realize map: `realize_classify`
-still builds `REALIZE_INFO`, but boundary relaxations now run as a
-named rule table with hit counters.
+`src/schedule/realize_rewrite.c` provides the first realize-map
+rewrite harness.  It is deliberately scoped to the realize map:
+`realize_classify` still builds `REALIZE_INFO`, but boundary
+relaxations now run as a named rule table with hit counters.
 
 Current rules:
 
@@ -44,12 +44,17 @@ Current rules:
 Set `DUMP_REWRITE=1` or `DUMP_FUSION_REWRITE=1` to print rule hit
 counts during `realize_classify`.
 
-This is not yet a full tinygrad-style graph substitution framework.
-It is the first safe attachment point because the current
-beautiful-mnist gap is dominated by materialization boundaries and
-kernel count.  The next slice should add the same rule-table shape to
-scalar graph canonicalization, where rules can rewrite movement and
-index expressions before tile legality is checked.
+`src/uop/graph_rewrite.c` is the first UOp-level graph substitution
+skeleton.  It walks UOp DAGs bottom-up with memoization, rebuilds
+changed parents through canonical UOp constructors, applies a named
+replacement-rule table, and records hit counters.  Set
+`DUMP_UOP_REWRITE=1` to print UOp rule hits after a pass.
+
+This is still smaller than tinygrad's full `UPat` matcher: rules are
+plain C callbacks today, not declarative class/predicate captures.
+That is intentional for the first implementation slice.  It gives
+symbolic, movement, range, and schedule-IR rewrites one reusable
+attachment point without changing current scheduling behavior.
 
 ## Rule Policy
 
@@ -85,7 +90,7 @@ boundaries.
 
 | Tinygrad rule family | Main local reference | THVM status |
 | --- | --- | --- |
-| Pattern infrastructure: `UPat`, `PatternMatcher`, `graph_rewrite`, matcher composition, bottom-up walk, rewrite stats | `tinygrad/uop/ops.py`, `tinygrad/uop/upat.py` | Partial. `realize_rewrite.c` is a named rule table over `REALIZE_INFO`, not a general UOp graph matcher yet. |
+| Pattern infrastructure: `UPat`, `PatternMatcher`, `graph_rewrite`, matcher composition, bottom-up walk, rewrite stats | `tinygrad/uop/ops.py`, `tinygrad/uop/upat.py` | Partial. `realize_rewrite.c` names realize-boundary rules; `uop_graph_rewrite` now provides bottom-up UOp traversal, memoization, parent rebuilds, replacement callbacks, and hit stats, but not declarative UPat-style captures. |
 | Algebraic/symbolic simplification: constants, identities, commutative canonicalization, div/mod recombine, cast/bitcast folding, boolean/where folding | `tinygrad/uop/symbolic.py` | Small subset only in `src/uop/rewrite.c`. Big missing piece for index expression simplification. |
 | Valid-mask simplification and `WHERE`/load movement | `pm_simplify_valid`, `pm_move_where_on_load` in `tinygrad/uop/symbolic.py` | Mostly missing. Needed before broad PAD fanout fusion is safe. |
 | Realize-map seeding and rangeify application | `pm_generate_realize_map`, `pm_apply_rangeify` in `tinygrad/schedule/indexing.py` | Partial. `realize_classify.c` seeds boundaries; `rangeify.c` emits scalar graphs, but not through a general rewrite table. |
@@ -113,9 +118,10 @@ and cost/legality checks.
 Implement the missing rewrite families in this order under the single
 goal:
 
-1. General UOp graph rewrite skeleton: op/class predicates, child
-   captures, bottom-up traversal, replacement callback, memo, and
-   rule stats.
+1. General UOp graph rewrite skeleton: bottom-up traversal,
+   replacement callback, memo, and rule stats.  Landed as
+   `uop_graph_rewrite`; op/class predicates and child captures come
+   next as reusable helper APIs over the callback core.
 2. Port the symbolic/index subset needed by rangeify: algebraic
    identities, div/mod simplification, valid-mask simplification, and
    `WHERE`/load movement.
