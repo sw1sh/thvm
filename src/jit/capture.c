@@ -284,7 +284,7 @@ static int jit_metal_graph_replay_enabled(void) {
 
 static u32 jit_metal_graph_max_dispatches(void) {
   static int known = 0;
-  static u32 limit = 128;
+  static u32 limit = 256;
   if (!known) {
     char const *e = getenv("THVM_METAL_GRAPH_MAX_DISPATCHES");
     if (e != NULL && e[0] != '\0') {

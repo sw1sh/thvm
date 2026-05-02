@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Changed: raise Metal graph replay chunk default
+
+Metal TJit graph replay now defaults to `THVM_METAL_GRAPH_MAX_DISPATCHES=256`
+instead of 128, matching the fixed replay record array cap.  The env
+override remains bounded to `2..256`, and the WL
+`TJitCaptureGraphRuns` simulator uses the same default.  On the bounded
+BS=32 `beautiful_mnist` canary after large-EXPAND inlining, the chunk
+count drops from 18 to 9 and steady replay improves to about `172ms`
+with the same `1.69GB` live Metal footprint.
+
 ### Changed: inline large multi-consumer Metal expands
 
 Metal tile scheduling now keeps large multi-consumer `EXPAND` views

@@ -211,13 +211,14 @@ and rootless replay slot packing:
   captured replay: 2201 DISPATCH + 42 ASSIGN records,
                    176 skipped dispatch records
 
-BS=32 thvm train, after large multi-consumer EXPAND inlining:
-  warmup capture:     19728.6ms
-  steady replay:       182.8ms
+BS=32 thvm train, after large multi-consumer EXPAND inlining and
+256-dispatch graph replay chunks:
+  warmup capture:     13733.3ms
+  steady replay:       171.6ms
   jit-ops=2251, live replay dispatches=2076
   JitReplayDispatches=2022, JitReplayAssigns=0
-  JitGraphRuns=30, JitGraphDispatches=1977
-  graph_run_count=18, graph_encoded_dispatches=2062
+  JitGraphRuns=28, JitGraphDispatches=1977
+  graph_run_count=9, graph_encoded_dispatches=2062
   replay_packed_dispatches=1109
   live=1.69GB, retained=1.94GB, freelist=257MB
   memory_plan peak=627MB, total=1.93GB
@@ -229,7 +230,7 @@ The replay lifetime audit found that the older `465.6ms` number was
 not a trustworthy parity baseline: captured records could point at
 Metal buffers freed by post-realize rollback, and the plain TJit
 replay path counted backend dispatch failures as if they had run.  The
-current bounded small-batch replay gap is roughly `30x` wall time
+current bounded small-batch replay gap is roughly `28x` wall time
 versus tinygrad's `6.2ms` beamed replay.  Metal ICB replay and replay
 slot packing moved the gap down from the audited `~115x` baseline, but
 they do not solve the larger problem: THVM still preserves gigabytes
@@ -367,13 +368,13 @@ EXPAND views:
 
 ```text
 BENCH_MODE=train BS=32:
-  steady_ms_per_step=182.8
+  steady_ms_per_step=171.6
   jit-ops=2251
   dispatch=metal-tile=1228, none=35, metal-alias=144
   hot counters: JitReplayCalls=1, JitReplayDispatches=2022,
-                JitReplayAssigns=0, JitGraphRuns=30,
+                JitReplayAssigns=0, JitGraphRuns=28,
                 JitGraphDispatches=1977
-  graph replay: 18 chunks, 2062 encoded dispatches
+  graph replay: 9 chunks, 2062 encoded dispatches
   replay_packed_dispatches=1109
   metal memory after timed: live=1.69GB, retained=1.94GB,
                             freelist=257MB
@@ -482,7 +483,7 @@ Current work should prioritize these in order:
    The former `1.31GB` multi-consumer broadcast buffer is gone; the
    current largest live BS=32 Metal buffer is about `59MB`, produced
    by a 205-op movement/ALU graph.
-2. Reduce graph replay chunk count from 18 toward tinygrad's 3 graph
+2. Reduce graph replay chunk count from 9 toward tinygrad's 3 graph
    submissions, without regressing the bounded memory profile.
 3. Lower row-wise/group reductions and softmax-like patterns as
    generated tile kernels instead of scalar reducer loops.

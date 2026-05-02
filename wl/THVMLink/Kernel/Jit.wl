@@ -158,10 +158,10 @@ captureCounts[rows_, key_] := ReverseSort @ Counts[
     Lookup[rows, key, 0] /. 0 -> Nothing]
 
 jitGraphRunLimit[] := Module[{raw = Environment["THVM_METAL_GRAPH_MAX_DISPATCHES"], n},
-    If[!StringQ[raw] || StringLength[StringTrim[raw]] == 0, Return[128]];
-    If[!StringMatchQ[StringTrim[raw], DigitCharacter ..], Return[128]];
+    If[!StringQ[raw] || StringLength[StringTrim[raw]] == 0, Return[256]];
+    If[!StringMatchQ[StringTrim[raw], DigitCharacter ..], Return[256]];
     n = ToExpression[StringTrim[raw]];
-    If[2 <= n <= 256, n, 128]
+    If[2 <= n <= 256, n, 256]
 ]
 
 TJitCaptureRuns[c_TJitClosure] := Module[{
