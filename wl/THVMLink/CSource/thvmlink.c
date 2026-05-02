@@ -1252,7 +1252,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_flops(WolframLibraryData l, mint a,
 
 // 0=none, 1=blas-dot, 2=blas-gemv, 3=blas-gemm, 4=jit, 5=interpreter,
 // 6=metal-jit, 7=metal-op, 8=tile, 9=metal-tile, 10=metal-gemm,
-// 11=metal-conv.
+// 11=metal-conv, 12=metal-gemv, 13=metal-alias.
 EXTERN_C DLLEXPORT int thvm_wl_kernel_dispatch_kind(WolframLibraryData l, mint a,
                                                     MArgument *args, MArgument res) {
   (void)l;(void)a;

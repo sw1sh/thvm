@@ -14,7 +14,9 @@ prevents TJit replay from repeatedly increfing the already-aliased
 input buffer or freelisting a stale captured output id.  On the
 bounded BS=32 `beautiful_mnist` Metal+tile probe, timed-window live
 Metal storage stays near `20MB` after replay instead of growing to
-about `249MB`, while steady wall time remains about `386ms`.
+about `249MB`, while steady wall time remains about `389ms`.  The
+dispatch profiler now reports these metadata-only routes as
+`metal-alias` instead of `metal-op`.
 
 ### Changed: expose TJit replay counters in benchmark profiles
 

@@ -200,7 +200,7 @@ reshape coverage, and alias-reshape replay refcount cleanup:
 BENCH_MODE=train BS=32:
   steady_ms_per_step=386.5
   jit-ops=4179
-  dispatch=metal-tile=2928, none=51, metal-op=318
+  dispatch=metal-tile=2928, none=51, metal-alias=318
   hot counters: JitReplayCalls=1, JitReplayDispatches=4137,
                 JitReplayAssigns=42
   metal memory after timed: live=20.3MB, retained=851.4MB,

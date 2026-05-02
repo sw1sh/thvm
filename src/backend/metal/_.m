@@ -1481,7 +1481,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   u64 t0  = cg_now_us();
 
   if (kprog_supported && metal_try_alias_reshape(ke, in_buf_ids, out_buf_id)) {
-    cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
+    cg_profile_record(kid, KDISPATCH_METAL_ALIAS, cg_now_us() - t0);
     return 0;
   }
 

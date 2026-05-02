@@ -1508,6 +1508,7 @@ typedef enum {
   KDISPATCH_METAL_GEMM  = 10,  // Metal: direct f32 matmul over unexpanded inputs
   KDISPATCH_METAL_CONV  = 11,  // Metal: direct f32 conv2d over im2col-fused graph
   KDISPATCH_METAL_GEMV  = 12,  // retired; rank-1 matvec routes through METAL_GEMM
+  KDISPATCH_METAL_ALIAS = 13,  // Metal: metadata-only alias, no command encoding
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);

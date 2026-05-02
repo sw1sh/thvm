@@ -818,6 +818,7 @@ int main(void) {
 
     backend_dispatch_begin_all();
     CHECK_EQ(METAL_BACKEND.dispatch_kernel(ke, in_bufs, old_out_buf), 0);
+    CHECK_EQ(cg_kernel_dispatch_kind(kid), (u32)KDISPATCH_METAL_ALIAS);
     CHECK_EQ(TENS[out_tid].buf_id, in_bufs[0]);
     CHECK_EQ(thvm_metal_deferred_len(), 0);
     CHECK_EQ(thvm_metal_deferred_bytes(), 0);
@@ -840,6 +841,7 @@ int main(void) {
     METAL_BACKEND.buf_free(old_out_buf);
     backend_dispatch_begin_all();
     CHECK_EQ(METAL_BACKEND.dispatch_kernel(ke, in_bufs, old_out_buf), 0);
+    CHECK_EQ(cg_kernel_dispatch_kind(kid), (u32)KDISPATCH_METAL_ALIAS);
     backend_dispatch_end_all();
 
     src_nbytes = 0;
