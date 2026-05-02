@@ -279,7 +279,7 @@ $dispatchKindNames = <|
     0 -> "none",        1 -> "blas-dot",   2 -> "blas-gemv", 3 -> "blas-gemm",
     4 -> "jit",         5 -> "interpreter",
     6 -> "metal-jit",   7 -> "metal-op",   8 -> "tile",      9 -> "metal-tile",
-    10 -> "metal-gemm"
+    10 -> "metal-gemm", 11 -> "metal-conv", 12 -> "metal-gemv"
 |>;
 decodeDispatchKind[k_Integer] := Lookup[$dispatchKindNames, k, "unknown"]
 

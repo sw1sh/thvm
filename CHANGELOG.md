@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Added: direct Metal conv2d dispatch
+
+Metal now recognizes the im2col-fused scalar graph produced by
+`TConv2D` over an already-produced activation and dispatches a direct
+f32 convolution shader instead of the generic scalar `metal-op`
+renderer.  This targets the second `beautiful-mnist` convolution,
+which was the dominant steady forward cost.  Metal also recognizes the
+`TMatVec` f32 matrix-vector pattern and routes it through a direct GEMV
+shader for the final `beautiful-mnist` fully-connected layer.
+
 ### Fixed: autotune first-capture producer replay
 
 Fire-time autotune now runs after producer kernels have populated the

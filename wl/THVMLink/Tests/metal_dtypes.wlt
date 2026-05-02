@@ -105,6 +105,28 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* f32 matrix-vector lowering should bypass the generic scalar
+       Metal renderer once the direct GEMV recognizer sees TMatVec. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result},
+        If[ ctx === 0, Return[True]];
+        result = TInContext[ctx,
+            w = TTensorCreate @ NumericArray[
+                {{1., 2., 3.}, {4., 5., 6.}}, "Real32"];
+            x = TTensorCreate @ NumericArray[{7., 8., 9.}, "Real32"];
+            out = TRealize @ TMatVec[w, x];
+            kid = TKernelCount[] - 1;
+            {Round[Normal @ TTensorData[out], 0.001],
+             TKernelDispatchKind[kid]}
+        ];
+        TContextDestroy[ctx];
+        result === {{50., 122.}, "metal-gemv"} || ctx === 0
+    ],
+    True,
+    TestID -> "metal/f32-matvec-direct-gemv"
+]
+
+VerificationTest[
     (* TC opts are metadata for the TILE_MMA-backed Metal GEMM path:
        proposal exposes tile sizes, apply records the selected size,
        and the next same-shape matmul dispatches through metal-gemm. *)
@@ -194,6 +216,30 @@ VerificationTest[
     ],
     True,
     TestID -> "metal/tjit-autotune-captures-producer-chain"
+]
+
+VerificationTest[
+    (* Conv2D over a produced activation should route through the
+       direct Metal conv shader for the im2col-fused scalar graph. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], result},
+        If[ ctx === 0, Return[True]];
+        result = TInContext[ctx,
+            x = TTensorCreate @ NumericArray[
+                ConstantArray[1., {2, 6, 6}], "Real32"];
+            w = TTensorCreate @ NumericArray[
+                ConstantArray[1., {3, 2, 3, 3}], "Real32"];
+            b = TZeros[{3}];
+            out = TRealize @ TConv2D[TReLU[x], w, b];
+            kinds = Table[TKernelDispatchKind[k], {k, 1, TKernelCount[] - 1}];
+            {Round[Normal @ TTensorData[out], 0.001],
+             MemberQ[kinds, "metal-conv"]}
+        ];
+        TContextDestroy[ctx];
+        result === {ConstantArray[18., {3, 4, 4}], True}
+    ],
+    True,
+    TestID -> "metal/f32-conv2d-direct-produced-activation"
 ]
 
 VerificationTest[

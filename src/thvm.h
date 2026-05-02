@@ -1443,6 +1443,8 @@ typedef enum {
   KDISPATCH_CPU_TILE    = 8,   // CPU TileUop path over ScalarUop
   KDISPATCH_METAL_TILE  = 9,   // Metal: TileUop MSL source -> threadgroup dispatch
   KDISPATCH_METAL_GEMM  = 10,  // Metal: direct f32 matmul over unexpanded inputs
+  KDISPATCH_METAL_CONV  = 11,  // Metal: direct f32 conv2d over im2col-fused graph
+  KDISPATCH_METAL_GEMV  = 12,  // Metal: direct f32 matrix-vector product
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);
