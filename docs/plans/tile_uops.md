@@ -49,8 +49,8 @@ that future renderers can lower differently for CPU and Metal.
   runtime template, skips generic input pre-materialization because
   the template consumes the original view strides directly, and
   exposes `LOCAL` threadgroup-size candidates from every loop axis
-  that can legally split plus `UPCAST` output-per-thread candidates
-  through the normal proposer;
+  that can legally split, `UPCAST` output-per-thread candidates, and
+  reduce-axis `UNROLL` candidates through the normal proposer;
 - `TKernelAutotune` keeps the in-process per-program-shape behavior,
   can expand the best single candidates into short opt sequences
   (`THVM_AUTOTUNE_DEPTH`, `THVM_AUTOTUNE_BEAM`), and now also persists
@@ -195,8 +195,8 @@ output axis.
 1. Continue extending the scalar C renderer until the emitted scalar
    graph covers the same correctness surface as the scalar interpreter;
    remaining gaps are narrow/packed dtypes and bitcasts.
-2. Broaden the Conv2D template's schedule space beyond threadgroup size
-   plus output-per-thread.
+2. Broaden the Conv2D template's schedule space beyond threadgroup size,
+   output-per-thread, and reduce-unroll.
 3. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
    instead of using only scalar reducer loops.
 4. Generalize `TILE_MMA` target code beyond fixed 8/16/32

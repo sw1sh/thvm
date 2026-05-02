@@ -756,6 +756,7 @@ typedef struct {
   i32 x_stride2;
   u32 threads;            // Metal SIMT threads per threadgroup; 256 default
   u32 outputs_per_thread; // output elements computed by one Metal thread
+  u32 reduce_unroll;      // unroll factor for the flattened conv reduction
 } TileConv2DInfo;
 
 typedef struct {

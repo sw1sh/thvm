@@ -437,6 +437,13 @@ static char *rmt_emit_conv2d_flat(KernelEntry const *ke,
   cg_append(&b, "#include <metal_stdlib>\nusing namespace metal;\n\n");
   cg_append(&b, "#define OUTS %uu\n\n",
             conv->outputs_per_thread ? conv->outputs_per_thread : 1);
+  cg_append(&b, "#define COUT %uu\n", conv->c_out);
+  cg_append(&b, "#define CIN %uu\n", conv->c_in);
+  cg_append(&b, "#define KH %uu\n", conv->kh);
+  cg_append(&b, "#define KW %uu\n", conv->kw);
+  cg_append(&b, "#define PATCHES %uu\n", conv->patches);
+  cg_append(&b, "#define WOUT %uu\n", conv->w_out);
+  cg_append(&b, "#define KRED (CIN * KH * KW)\n\n");
   cg_append(&b, "kernel void k(device float *out [[buffer(0)]],\n");
   cg_append(&b, "              device const float *in%u [[buffer(%u)]],\n",
             conv->w_input, conv->w_input + 1);
@@ -445,29 +452,45 @@ static char *rmt_emit_conv2d_flat(KernelEntry const *ke,
   cg_append(&b, "              constant int *cfg [[buffer(%u)]],\n",
             ke->n_inputs + 1);
   cg_append(&b, "              uint gid [[thread_position_in_grid]]) {\n");
-  cg_append(&b, "  uint total = (uint)(cfg[0] * cfg[8]);\n");
+  cg_append(&b, "  uint total = (uint)(COUT * PATCHES);\n");
   cg_append(&b, "  uint base = gid * OUTS;\n");
   cg_append(&b, "  if (base >= total) return;\n");
   cg_append(&b, "  for (uint oi = 0; oi < OUTS; oi++) {\n");
   cg_append(&b, "    uint og = base + oi;\n");
   cg_append(&b, "    if (og >= total) return;\n");
-  cg_append(&b, "    int co = (int)(og / (uint)cfg[8]);\n");
-  cg_append(&b, "    int p = (int)(og - (uint)co * (uint)cfg[8]);\n");
-  cg_append(&b, "    int ow = p %% cfg[7];\n");
-  cg_append(&b, "    int oh = p / cfg[7];\n");
+  cg_append(&b, "    int co = (int)(og / (uint)PATCHES);\n");
+  cg_append(&b, "    int p = (int)(og - (uint)co * (uint)PATCHES);\n");
+  cg_append(&b, "    int ow = p %% WOUT;\n");
+  cg_append(&b, "    int oh = p / WOUT;\n");
   cg_append(&b, "    float acc = 0.0f;\n");
-  cg_append(&b, "    for (int ci = 0; ci < cfg[1]; ci++) {\n");
-  cg_append(&b, "      for (int ki = 0; ki < cfg[4]; ki++) {\n");
-  cg_append(&b, "        for (int kj = 0; kj < cfg[5]; kj++) {\n");
-  cg_append(&b, "          int q = ((ci * cfg[4]) + ki) * cfg[5] + kj;\n");
-  cg_append(&b, "          int wi = cfg[9] + co * cfg[10] + q * cfg[11];\n");
-  cg_append(&b, "          int xi = cfg[12] + ci * cfg[13] + (oh + ki) * cfg[14]"
-                " + (ow + kj) * cfg[15];\n");
-  cg_append(&b, "          acc += in%u[wi] * in%u[xi];\n",
-            conv->w_input, conv->x_input);
-  cg_append(&b, "        }\n");
-  cg_append(&b, "      }\n");
-  cg_append(&b, "    }\n");
+  if (conv->reduce_unroll > 1) {
+    cg_append(&b, "    #pragma clang loop unroll_count(%u)\n",
+              conv->reduce_unroll);
+    cg_append(&b, "    for (int q = 0; q < KRED; q++) {\n");
+    cg_append(&b, "      int kj = q %% KW;\n");
+    cg_append(&b, "      int qk = q / KW;\n");
+    cg_append(&b, "      int ki = qk %% KH;\n");
+    cg_append(&b, "      int ci = qk / KH;\n");
+    cg_append(&b, "      int wi = cfg[9] + co * cfg[10] + q * cfg[11];\n");
+    cg_append(&b, "      int xi = cfg[12] + ci * cfg[13] + (oh + ki) * cfg[14]"
+                  " + (ow + kj) * cfg[15];\n");
+    cg_append(&b, "      acc += in%u[wi] * in%u[xi];\n",
+              conv->w_input, conv->x_input);
+    cg_append(&b, "    }\n");
+  } else {
+    cg_append(&b, "    for (int ci = 0; ci < cfg[1]; ci++) {\n");
+    cg_append(&b, "      for (int ki = 0; ki < cfg[4]; ki++) {\n");
+    cg_append(&b, "        for (int kj = 0; kj < cfg[5]; kj++) {\n");
+    cg_append(&b, "          int q = ((ci * cfg[4]) + ki) * cfg[5] + kj;\n");
+    cg_append(&b, "          int wi = cfg[9] + co * cfg[10] + q * cfg[11];\n");
+    cg_append(&b, "          int xi = cfg[12] + ci * cfg[13] + (oh + ki) * cfg[14]"
+                  " + (ow + kj) * cfg[15];\n");
+    cg_append(&b, "          acc += in%u[wi] * in%u[xi];\n",
+              conv->w_input, conv->x_input);
+    cg_append(&b, "        }\n");
+    cg_append(&b, "      }\n");
+    cg_append(&b, "    }\n");
+  }
   cg_append(&b, "    out[og] = acc;\n");
   cg_append(&b, "  }\n");
   cg_append(&b, "}\n");

@@ -505,6 +505,22 @@ static u32 tile_conv2d_outputs_from_opts(KernelEntry const *ke) {
   return outputs;
 }
 
+static u32 tile_conv2d_reduce_unroll_from_opts(KernelEntry const *ke,
+                                               u32 reduce_extent) {
+  u32 unroll = 1;
+  if (ke == NULL || ke->axes == NULL || reduce_extent == 0) {
+    return unroll;
+  }
+  for (u32 i = 0; i < ke->axes->n_applied; i++) {
+    KOpt opt = ke->axes->applied_opts[i];
+    if (opt.op == KOP_UNROLL && opt.arg > 1 && opt.arg <= 16
+        && reduce_extent % opt.arg == 0) {
+      unroll = opt.arg;
+    }
+  }
+  return unroll;
+}
+
 static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
                                          TileConv2DInfo *out,
                                          int allow_cin1) {
@@ -595,6 +611,7 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
   out->x_stride2 = xv->strides[2];
   out->threads   = tile_conv2d_threads_from_opts(ke);
   out->outputs_per_thread = tile_conv2d_outputs_from_opts(ke);
+  out->reduce_unroll = tile_conv2d_reduce_unroll_from_opts(ke, k);
   return 1;
 }
 

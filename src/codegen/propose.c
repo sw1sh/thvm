@@ -17,9 +17,10 @@
 //   to simdgroup MMA variants.
 //
 //   THVM_BACKEND=metal + THVM_TILE=1 + im2col-fused Conv2D template
-//   -> propose LOCAL threadgroup-size factors over a loop axis.  The
-//   generated tile renderer reads the LOCAL factor as its SIMT group
-//   width; the baseline remains 256 threads.
+//   -> propose LOCAL threadgroup-size factors over a loop axis,
+//   UPCAST output-per-thread factors, and UNROLL factors over the
+//   reduce axis.  The generated tile renderer reads those as SIMT
+//   group width, outputs per thread, and reduction unroll count.
 //
 // As more opt classes get codegen support (UPCAST output axes,
 // LOCAL/GLOBAL Metal bindings, GROUP_REDUCE, etc.) they slot in
@@ -140,6 +141,28 @@ static u32 propose_conv2d_upcast_opts(KernelEntry const *ke, KOpt *out,
       n++;
       break;
     }
+  }
+  return n;
+}
+
+static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
+                                      u32 n, u32 cap) {
+  static const u32 unroll_factors[] = {2};
+  u8 axis = propose_reduce_axis_index(ke);
+  if (axis == 0xFF) {
+    return n;
+  }
+  u32 axis_size = ke->axes->full_shape[axis];
+  u32 n_unroll_factors = sizeof(unroll_factors)/sizeof(*unroll_factors);
+  for (u32 i = 0; i < n_unroll_factors && n < cap; i++) {
+    u32 f = unroll_factors[i];
+    if (axis_size < f || axis_size % f != 0) {
+      continue;
+    }
+    out[n].op   = KOP_UNROLL;
+    out[n].axis = axis;
+    out[n].arg  = f;
+    n++;
   }
   return n;
 }
@@ -354,7 +377,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {
       n = propose_conv2d_local_opts(ke, out, n, cap);
-      return propose_conv2d_upcast_opts(ke, out, n, cap);
+      n = propose_conv2d_upcast_opts(ke, out, n, cap);
+      return propose_conv2d_unroll_opts(ke, out, n, cap);
     }
   }
 

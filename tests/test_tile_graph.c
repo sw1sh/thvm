@@ -605,6 +605,7 @@ int main(void) {
   char *conv_src = cg_emit_tile_metal(ke);
   CHECK(conv_src != NULL);
   if (conv_src != NULL) {
+    CHECK(strstr(conv_src, "#define KRED (CIN * KH * KW)") != NULL);
     CHECK(strstr(conv_src, "for (int ci = 0") != NULL);
     CHECK(strstr(conv_src, "constant int *cfg") != NULL);
     CHECK(strstr(conv_src, "acc += in0[wi] * in1[xi]") != NULL);
@@ -625,6 +626,7 @@ int main(void) {
   CHECK(tile_analyze_conv2d_flat(ke, &conv));
   CHECK_EQ(conv.threads, 4u);
   CHECK_EQ(conv.outputs_per_thread, 1u);
+  CHECK_EQ(conv.reduce_unroll, 1u);
   CHECK(cg_tile_metal_dispatch_shape(ke, &conv_groups_x, &conv_threads_x));
   CHECK_EQ(conv_groups_x, 16u);
   CHECK_EQ(conv_threads_x, 4u);
@@ -649,6 +651,26 @@ int main(void) {
   if (conv_src != NULL) {
     CHECK(strstr(conv_src, "#define OUTS 4u") != NULL);
     CHECK(strstr(conv_src, "uint base = gid * OUTS") != NULL);
+    free(conv_src);
+  }
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->n_axes = 3;
+  ke->axes->axis_types[0] = KAX_LOOP;
+  ke->axes->full_shape[0] = 4;
+  ke->axes->axis_types[1] = KAX_LOOP;
+  ke->axes->full_shape[1] = 16;
+  ke->axes->axis_types[2] = KAX_REDUCE;
+  ke->axes->full_shape[2] = 18;
+  ke->axes->version++;
+  KOpt conv_unroll2 = { .op = KOP_UNROLL, .axis = 2, .arg = 2 };
+  CHECK(kernel_apply_opt(ke, conv_unroll2));
+  CHECK(tile_analyze_conv2d_flat(ke, &conv));
+  CHECK_EQ(conv.reduce_unroll, 2u);
+  conv_src = cg_emit_tile_metal(ke);
+  CHECK(conv_src != NULL);
+  if (conv_src != NULL) {
+    CHECK(strstr(conv_src, "#pragma clang loop unroll_count(2)") != NULL);
+    CHECK(strstr(conv_src, "for (int q = 0; q < KRED") != NULL);
     free(conv_src);
   }
   memset(ke->axes, 0, sizeof(KernelAxes));
@@ -694,7 +716,7 @@ int main(void) {
   u32 n_conv_cands = kernel_opts_propose(ke, conv_cands,
                                          (u32)(sizeof(conv_cands)/
                                                sizeof(*conv_cands)));
-  CHECK_EQ(n_conv_cands, 7u);
+  CHECK_EQ(n_conv_cands, 8u);
   CHECK_EQ(conv_cands[0].op, (u32)KOP_LOCAL);
   CHECK_EQ(conv_cands[0].axis, 1u);
   CHECK_EQ(conv_cands[0].arg, 16u);
@@ -716,6 +738,9 @@ int main(void) {
   CHECK_EQ(conv_cands[6].op, (u32)KOP_UPCAST);
   CHECK_EQ(conv_cands[6].axis, 0u);
   CHECK_EQ(conv_cands[6].arg, 2u);
+  CHECK_EQ(conv_cands[7].op, (u32)KOP_UNROLL);
+  CHECK_EQ(conv_cands[7].axis, 2u);
+  CHECK_EQ(conv_cands[7].arg, 2u);
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
   memset(ke->axes, 0, sizeof(KernelAxes));

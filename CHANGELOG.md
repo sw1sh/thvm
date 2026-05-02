@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Added: Conv2D tile reduce-unroll candidates
+
+The Metal Conv2D tile template now records a `KOP_UNROLL` factor from
+the reduction axis and emits a flattened constant-trip reduction loop
+with an optional MSL unroll pragma.  The Conv2D proposer includes
+reduce-axis `UNROLL` candidates alongside `LOCAL` and `UPCAST`, giving
+autotune another lowered schedule knob without adding a backend-private
+kernel recognizer.
+
 ### Removed: diagnostic Metal GEMV shortcut
 
 The old opt-in direct Metal GEMV shader has been removed from dispatch.

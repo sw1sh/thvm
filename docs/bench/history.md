@@ -102,6 +102,13 @@ autotune fresh tmp cache:                  118.6ms / 6.4ms / 5.7ms
 autotune tmp cache replay:                 112.4ms / 4.5ms / 4.6ms
 ```
 
+After adding the conservative Conv2D reduce-unroll candidate:
+
+```text
+generic tile, no autotune:                  95.0ms / 10.4ms / 6.6ms
+fire-time autotune, cache disabled:        167.6ms / 5.4ms / 4.4ms
+```
+
 Interpretation:
 
 - The old generic Metal tile path was roughly `64-69ms` steady-state
@@ -110,9 +117,10 @@ Interpretation:
   `7-10ms`.
 - The shared tile Conv2D template plus pre-materialization fix moved
   the generic path into the same class as the diagnostic oracle.
-- The widened `LOCAL` proposer and `UPCAST` output-per-thread knob give
-  autotune real schedule choices.  The current tuned steady-state is in
-  the `5-7ms` range depending on run noise and selected variants.
+- The widened `LOCAL` proposer, `UPCAST` output-per-thread knob, and
+  reduce-axis `UNROLL` knob give autotune real schedule choices.  The
+  current tuned steady-state is in the `5-7ms` range depending on run
+  noise and selected variants.
 - Tile JIT cache keys now ignore `tile_axes_version`, an internal
   mutation counter, so autotune reset/apply cycles can reuse compiled
   kernels when the generated graph and applied opts are identical.
@@ -172,9 +180,10 @@ Current work should prioritize these in order:
 
 1. Reduce first-sample overhead for Metal: materialization, dynamic MSL
    compilation, and cache replay behavior.
-2. Broaden the generated Conv2D schedule beyond threadgroup size plus
-   output-per-thread.  Next useful knobs are output axis mapping,
-   cooperative reduction shape, local-memory staging, and vector width.
+2. Broaden the generated Conv2D schedule beyond threadgroup size,
+   output-per-thread, and reduce-unroll.  Next useful knobs are output
+   axis mapping, cooperative reduction shape, local-memory staging, and
+   vector width.
 3. Lower `TILE_REDUCE` to target-specific row-wise/group reductions
    instead of scalar reducer loops.
 4. Add Metal `simdgroup_matrix`/MMA variants after reductions and
@@ -413,6 +422,8 @@ Metal improvements in this arc:
   of pre-materializing non-contiguous inputs.
 - Conv2D `LOCAL` proposer scans every splittable loop axis.
 - Conv2D `UPCAST` proposer exposes an output-per-thread knob for the
+  generated Metal tile kernel.
+- Conv2D `UNROLL` proposer exposes a reduce-axis unroll knob for the
   generated Metal tile kernel.
 - Autotune can expand the best single candidates into short opt
   sequences, so Conv2D search can test combinations such as
