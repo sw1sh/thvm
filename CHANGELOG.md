@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Changed: route PAD chains through edge-local index emission
+
+Rangeify now lowers PAD over direct inputs and short scalar/movement
+chains through one edge-local source emitter.  The old special chain
+peeling path is gone, so PAD masking is derived from the consumer
+edge's coordinate context instead of a manually peeled input chain.
+
 ### Changed: name movement range-context transforms
 
 Rangeify now routes `EXPAND`, `SHRINK`, `PAD`, and `FLIP` source

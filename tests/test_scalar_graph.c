@@ -579,6 +579,77 @@ int main(void) {
   CHECK(pad_out[4] == 0.0f);
   rangeify_free(ke);
 
+  TEST_BEGIN("scalar-graph/rangeify-pad-alu-chain-index-mask");
+  kernel_inputs_reserve(ke, 1);
+  kernel_program_reserve(ke, 3);
+  ke->n_inputs        = 1;
+  ke->input_tids[0]   = 0;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_numels[0] = 3;
+  memset(&ke->input_views[0], 0, sizeof(ke->input_views[0]));
+  ke->input_views[0].shape.ndim    = 1;
+  ke->input_views[0].shape.dims[0] = 3;
+  ke->input_views[0].strides[0]    = 1;
+  ke->input_views[0].numel         = 3;
+  ke->input_views[0].contiguous    = 1;
+  ke->output_dtype         = DT_FP32;
+  ke->output_numel         = 5;
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = 5;
+  ke->n_ops = 3;
+  ke->program[0] = (KProgOp){
+    .opcode = UOP_CONST,
+    .dtype  = DT_FP32,
+    .n_src  = 0,
+    .arg    = 0x3F800000u,
+    .numel  = 1,
+  };
+  ke->program[1] = (KProgOp){
+    .opcode = UOP_ADD,
+    .dtype  = DT_FP32,
+    .n_src  = 2,
+    .src    = {KSRC_AS_INPUT(0), 0, 0},
+    .numel  = 3,
+  };
+  ke->program[2] = (KProgOp){
+    .opcode    = UOP_PAD,
+    .dtype     = DT_FP32,
+    .n_src     = 1,
+    .src       = {1, 0, 0},
+    .numel     = 5,
+    .src0_ndim = 1,
+    .out_ndim  = 1,
+  };
+  ke->program[2].src0_dims [0] = 3;
+  ke->program[2].out_dims  [0] = 5;
+  ke->program[2].pad_widths[0] = 1;
+  ke->program[2].pad_widths[1] = 1;
+  CHECK(rangeify_try_lower_elementwise(ke));
+  u32 n_pad_wrappers = 0;
+  u32 n_masked_add   = 0;
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    ScalarUop *su = &ke->scalar_uops[i];
+    if (su->op == S_PAD) {
+      n_pad_wrappers++;
+    }
+    if (su->op == S_IWHERE && su->src[1] != 0
+        && ke->scalar_uops[su->src[1]].op == S_ADD) {
+      n_masked_add++;
+    }
+  }
+  CHECK_EQ(n_pad_wrappers, 0u);
+  CHECK(n_masked_add > 0);
+  CHECK(cg_supports_scalar(ke));
+  f32 pad_alu_in[3]  = {10.0f, 20.0f, 30.0f};
+  f32 pad_alu_out[5] = {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f};
+  run_jit_f32(ke, pad_alu_in, 3, pad_alu_out, 5);
+  CHECK(pad_alu_out[0] == 0.0f);
+  CHECK(pad_alu_out[1] == 11.0f);
+  CHECK(pad_alu_out[2] == 21.0f);
+  CHECK(pad_alu_out[3] == 31.0f);
+  CHECK(pad_alu_out[4] == 0.0f);
+  rangeify_free(ke);
+
   TEST_BEGIN("scalar-graph/c-renderer-flip-jit");
   ke->n_inputs        = 1;
   ke->input_tids[0]   = 0;

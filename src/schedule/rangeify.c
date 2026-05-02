@@ -723,31 +723,6 @@ static int reshape_identity_mod_ones(KProgOp const *p) {
   return 1;
 }
 
-static int reshape_pad_chain_peel_ok(KProgOp const *p) {
-  if (p->opcode != UOP_RESHAPE) {
-    return 0;
-  }
-  if (reshape_identity_mod_ones(p)) {
-    return 1;
-  }
-  if (p->src0_ndim == 0 || p->out_ndim == 0
-      || p->src0_ndim != p->out_ndim) {
-    return 0;
-  }
-  u64 src_numel = 1;
-  u64 out_numel = 1;
-  for (u32 d = 0; d < p->src0_ndim; d++) {
-    src_numel *= p->src0_dims[d];
-  }
-  for (u32 d = 0; d < p->out_ndim; d++) {
-    out_numel *= p->out_dims[d];
-  }
-  if (src_numel != out_numel) {
-    return 0;
-  }
-  return 1;
-}
-
 static u32 scalar_ref_extent(KernelEntry const *ke, u32 ref) {
   if (ke == NULL || ref == 0 || ref >= ke->n_scalar_uops) return 0;
   ScalarUop const *u = &ke->scalar_uops[ref];
@@ -1108,6 +1083,11 @@ static u32 emit_scalar_raw_for_rngs(KernelEntry *ke, u32 raw,
   }
   u32 op_id = KSRC_INDEX(raw);
   return emit_scalar_op_for_rngs(ke, op_id, r, depth + 1);
+}
+
+static u32 emit_pad_source_as_index(KernelEntry *ke, u32 raw,
+                                    RngsCtx const *r) {
+  return emit_scalar_raw_for_rngs(ke, raw, r, 0);
 }
 
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
@@ -2537,84 +2517,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (p->opcode == UOP_PAD) {
         u32 edge = i * MAX_KPROG_SRC + 0;
         if (use_via_rngs[edge]) {
-          u32 ulocal = emit_scalar_raw_for_rngs(ke, raw, &use_rngs[edge], 0);
+          u32 ulocal = emit_pad_source_as_index(ke, raw, &use_rngs[edge]);
           if (ulocal != 0) {
             prog_value[i]  = ulocal;
             via_rngs[i]    = 1;
             use_load[edge] = ulocal;
             continue;
-          }
-        }
-      }
-      // Per-USE PAD identity-pass: when PAD reads a direct INPUT and
-      // the backward walk captured this consumer's rngs (shift +
-      // valid_mask already baked), emit a use-local load via
-      // emit_input_load_for_use.  Each consumer of the same input
-      // gets its own load with addressing reflecting its own chain
-      // transforms -- no first-writer-wins ambiguity, no per-slot
-      // conflict with other consumers.
-      if (p->opcode == UOP_PAD && KSRC_IS_INPUT(raw)) {
-        u32 edge = i * MAX_KPROG_SRC + 0;
-        if (use_via_rngs[edge]) {
-          u32 slot = KSRC_INDEX(raw);
-          u32 ulocal = emit_input_load_for_use(ke, slot,
-                                                &use_rngs[edge], p->dtype);
-          if (ulocal != 0) {
-            prog_value[i]  = ulocal;
-            via_rngs[i]    = 1;
-            use_load[edge] = ulocal;
-            continue;
-          }
-        }
-      }
-      // Per-USE PAD identity-pass for CHAIN sources.  Walk the KProgOp
-      // chain from PAD up to a direct INPUT, accepting scalar-identity
-      // wrappers, SHRINK, and the conservative RESHAPE subset accepted
-      // by reshape_pad_chain_peel_ok().
-      //
-      // KEY: read use_rngs from the op CLOSEST TO INPUT (not PAD's
-      // own edge).  Backward walk records, at each chain edge, the
-      // rngs in THAT consumer's coords.  PAD's edge rngs are in
-      // PAD's source-shape coords; the RESHAPE/etc above transform
-      // them down to INPUT-shape coords, captured at the next edge
-      // up.  emit_input_load_for_use needs INPUT-shape rngs.
-      //
-      // Non-trivial leading-1 RESHAPE chains are deliberately excluded:
-      // LeNet's first conv fanout otherwise mis-addresses its image
-      // patch views and corrupts the softmax output.
-      if (p->opcode == UOP_PAD && !KSRC_IS_INPUT(raw)) {
-        u32 walk = raw;
-        u32 walk_hops = 0;
-        int chain_ok = 1;
-        u32 last_chain_op = (u32)-1;
-        while (!KSRC_IS_INPUT(walk) && walk_hops++ < 16) {
-          u32 prev = KSRC_INDEX(walk);
-          KProgOp *prev_op = &ke->program[prev];
-          int peel_ok = (prev_op->opcode == UOP_LOAD
-                      || prev_op->opcode == UOP_EXPAND
-                      || prev_op->opcode == UOP_SHRINK
-                      || prev_op->opcode == UOP_BITCAST
-                      || reshape_pad_chain_peel_ok(prev_op));
-          if (!peel_ok) {
-            chain_ok = 0;
-            break;
-          }
-          last_chain_op = prev;
-          walk = prev_op->src[0];
-        }
-        if (chain_ok && KSRC_IS_INPUT(walk) && last_chain_op != (u32)-1) {
-          // Use the chain op closest to INPUT for rngs lookup.
-          u32 edge = last_chain_op * MAX_KPROG_SRC + 0;
-          if (use_via_rngs[edge]) {
-            u32 slot = KSRC_INDEX(walk);
-            u32 ulocal = emit_input_load_for_use(ke, slot,
-                                                  &use_rngs[edge], p->dtype);
-            if (ulocal != 0) {
-              prog_value[i]  = ulocal;
-              via_rngs[i]    = 1;
-              use_load[edge] = ulocal;
-              continue;
-            }
           }
         }
       }
