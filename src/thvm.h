@@ -593,17 +593,19 @@ typedef enum {
   // Encoding:
   //   src[0]                       = body (the wrapped expression)
   //   extra[bits 0..7]             = N_out (number of output range refs)
-  //   src[1 .. 1+N_out)            = output range refs (iters drive
-  //                                   flat_idx; typically LOOP type)
+  //   src[1 .. 1+N_out)            = output iter refs (iters drive
+  //                                   flat_idx; typically LOOP type,
+  //                                   but may be an expression)
   //   src[1+N_out .. src_count)    = input range refs (S_RESHAPE_V
   //                                   writes their iters from the
   //                                   flat_idx decomposition; typically
   //                                   VIRT type when ranks differ from
   //                                   the kernel's LOOP nest)
   //
-  // Each range's extent is read from its S_RANGE.extra (low 32 bits),
-  // so this form supports arbitrary u32 extents (legacy S_RESHAPE
-  // packs dims as u8s and is capped at 255 per axis).
+  // Each extent is read from the underlying S_RANGE.extra, or from
+  // S_IMOD(expr, extent) for edge-local refs whose value range is
+  // narrowed by a bounds mask.  This supports arbitrary u32 extents
+  // (legacy S_RESHAPE packs dims as u8s and is capped at 255 per axis).
   // At eval:
   //   flat_idx = sum_d(iter[out_d] * out_stride[d])  -- row-major over output extents
   //   for d in 0..N_in:
@@ -1288,6 +1290,8 @@ fn void rangeify_free(struct KernelEntry *ke);
 // S_RANGE / STORE / BUFFERIZE identity intact, remaps sources, and
 // returns the number of eliminated nodes.
 fn u32  rangeify_cse(struct KernelEntry *ke);
+// Remove scalar nodes not reachable from S_BUFFERIZE roots.
+fn u32  rangeify_dce(struct KernelEntry *ke);
 // Look up a scalar opname / axis-type name as a const C string for
 // introspection / debug printing.
 fn const char *scalar_op_name (u8 op);

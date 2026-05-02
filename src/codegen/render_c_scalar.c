@@ -294,6 +294,15 @@ static u32 cs_iter_ref_extent(KernelEntry const *ke, u32 ref_id) {
       return cs_range_extent(ke, u->src[1]);
     }
   }
+  if (u->op == S_IMOD) {
+    u32 rhs = u->src[1];
+    if (rhs != 0 && rhs < ke->n_scalar_uops
+        && ke->scalar_uops[rhs].op == S_ICONST
+        && ke->scalar_uops[rhs].extra > 0
+        && ke->scalar_uops[rhs].extra <= UINT32_MAX) {
+      return (u32)ke->scalar_uops[rhs].extra;
+    }
+  }
   return 0;
 }
 

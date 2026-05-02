@@ -215,6 +215,33 @@ typedef struct {
 
 static u64 eval_scalar(ScalarCtx *c, u32 op_id);
 
+static u32 eval_iter_ref_extent(ScalarCtx *c, u32 ref_id) {
+  if (ref_id == 0 || ref_id >= c->ke->n_scalar_uops) return 0;
+  ScalarUop const *u = &c->ke->scalar_uops[ref_id];
+  switch (u->op) {
+    case S_RANGE:
+      return (u32)(u->extra & 0xFFFFFFFFu);
+    case S_IADD:
+    case S_ISUB: {
+      u32 a = eval_iter_ref_extent(c, u->src[0]);
+      if (a != 0) return a;
+      return eval_iter_ref_extent(c, u->src[1]);
+    }
+    case S_IMOD: {
+      u32 rhs = u->src[1];
+      if (rhs != 0 && rhs < c->ke->n_scalar_uops
+          && c->ke->scalar_uops[rhs].op == S_ICONST
+          && c->ke->scalar_uops[rhs].extra > 0
+          && c->ke->scalar_uops[rhs].extra <= UINT32_MAX) {
+        return (u32)c->ke->scalar_uops[rhs].extra;
+      }
+      return 0;
+    }
+    default:
+      return 0;
+  }
+}
+
 // Decode S_INDEX: address = offset + sum(range_iter[src[1+d]] * stride[d]).
 // Returns the byte-offset address (input element index, output
 // element index, etc.) plus the slot id in the high 32 bits when
@@ -703,11 +730,9 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       // refs whose iters get written from the decomposition.  N_out
       // lives in extra's low byte.  See thvm.h ScalarOp::S_RESHAPE_V.
       //
-      // Output refs accept ANY iter expression (S_RANGE direct, S_IADD
-      // for shifted iters from a fused SHRINK, etc.).  The expression's
-      // value is read via eval_scalar; the extent is found by walking
-      // to the underlying S_RANGE (for S_IADD/S_ISUB the extent comes
-      // from the operand that's a S_RANGE).
+      // Output refs accept iter expressions.  The expression's value
+      // is read via eval_scalar; its extent is recovered from an
+      // underlying S_RANGE or from S_IMOD(..., extent).
       u32 n_out = (u32)(u->extra & 0xFFu);
       u32 nrest = (u32)u->src_count - 1;
       if (n_out == 0 || n_out > nrest) return 0;
@@ -716,18 +741,8 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
       u64 out_stride = 1;
       for (i32 d = (i32)n_out - 1; d >= 0; d--) {
         u32 ref = u->src[1 + d];
-        ScalarUop const *ru = &c->ke->scalar_uops[ref];
         u32 iter = (u32)eval_scalar(c, ref);
-        // Find the underlying S_RANGE for the extent.  Direct S_RANGE
-        // hits the fast path; S_IADD/S_ISUB walk one operand.
-        u32 ext_op = ref;
-        if (ru->op == S_IADD || ru->op == S_ISUB) {
-          ScalarUop const *a = &c->ke->scalar_uops[ru->src[0]];
-          ScalarUop const *b = &c->ke->scalar_uops[ru->src[1]];
-          ext_op = (a->op == S_RANGE) ? ru->src[0]
-                 : (b->op == S_RANGE) ? ru->src[1] : ref;
-        }
-        u32 ext = (u32)(c->ke->scalar_uops[ext_op].extra & 0xFFFFFFFFu);
+        u32 ext = eval_iter_ref_extent(c, ref);
         flat_idx  += (u64)iter * out_stride;
         out_stride *= (ext != 0 ? ext : 1);
       }

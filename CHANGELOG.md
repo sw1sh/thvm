@@ -6,6 +6,17 @@ dated section.
 
 ## Unreleased
 
+### Changed: rangeify PAD-adjusted reshape chains into tile graphs
+
+Rangeify now lets rank-mismatched `S_RESHAPE_V` use the edge-local
+coordinate context recorded by the backward walk, including explicit
+output extents for PAD-adjusted axes via `S_IMOD(expr, extent)`.
+Scalar DCE now prunes stale movement wrappers before tile/proposal
+analysis.  On the bounded BS=32 `beautiful_mnist` Metal+tile probe,
+the hot `[32,1,12800] -> [32,32,20,20]` conv-backward reshape group
+moves from `not-rangeified`/`metal-jit` to generated `metal-tile`,
+and the timed window reports no `metal-jit` dispatches.
+
 ### Fixed: rollback transient Metal buffers after each realize
 
 Metal buffers allocated after a realize boundary are now rolled back

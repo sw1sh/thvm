@@ -105,6 +105,26 @@ int main(void) {
   CHECK_EQ(ke->scalar_uops[buf].src[0],   sto);
   CHECK_EQ(ke->scalar_uops[buf].src[1],   r0);
 
+  TEST_BEGIN("scalar-graph/dce-drops-unreachable-nodes");
+  rangeify_free(ke);
+  u32 d_r  = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
+              ((u64)S_AXIS_LOOP << 32) | (u64)4u);
+  u32 d_pc = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 dead = rangeify_emit_leaf(ke, S_CONST, DT_FP32, 0x3F800000u);
+  u32 dead_src[2] = {dead, d_r};
+  rangeify_emit(ke, S_SHRINK, DT_FP32, 2, dead_src, 0);
+  u32 live = rangeify_emit_leaf(ke, S_CONST, DT_FP32, 0x40000000u);
+  u32 d_idx = rangeify_emit_binary(ke, S_INDEX, DT_FP32, d_pc, d_r);
+  u32 d_sto = rangeify_emit_binary(ke, S_STORE, DT_FP32, d_idx, live);
+  u32 d_buf_src[2] = {d_sto, d_r};
+  rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, d_buf_src, 0);
+  u32 before_dce = ke->n_scalar_uops;
+  CHECK_EQ(rangeify_dce(ke), 2);
+  CHECK_EQ(ke->n_scalar_uops, before_dce - 2);
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    CHECK(ke->scalar_uops[i].op != S_SHRINK);
+  }
+
   TEST_BEGIN("scalar-graph/free-then-reemit");
   // rangeify_free wipes pointer + counts; subsequent emit should
   // start fresh at slot 1 again.

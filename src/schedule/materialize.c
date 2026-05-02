@@ -1223,6 +1223,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
     int lowered = rangeify_on && rangeify_try_lower_elementwise(ke);
     if (lowered) {
       rangeify_cse(ke);
+      rangeify_dce(ke);
       axes_ensure_scalar_reduce(ke);
     }
     if (!ke->program_shared) {

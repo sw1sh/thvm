@@ -211,6 +211,81 @@ fn u32 rangeify_cse(KernelEntry *ke) {
   return removed;
 }
 
+static void rangeify_dce_mark(KernelEntry const *ke, u32 id, u8 *mark) {
+  if (id == 0 || id >= ke->n_scalar_uops || mark[id]) {
+    return;
+  }
+  mark[id] = 1;
+  ScalarUop const *u = &ke->scalar_uops[id];
+  for (u8 s = 0; s < u->src_count; s++) {
+    rangeify_dce_mark(ke, u->src[s], mark);
+  }
+}
+
+fn u32 rangeify_dce(KernelEntry *ke) {
+  if (ke == NULL || ke->scalar_uops == NULL || ke->n_scalar_uops <= 2) {
+    return 0;
+  }
+  u32 old_n = ke->n_scalar_uops;
+  u8  *mark = (u8  *)calloc((size_t)old_n, sizeof(u8));
+  u32 *map  = (u32 *)calloc((size_t)old_n, sizeof(u32));
+  if (mark == NULL || map == NULL) {
+    free(mark);
+    free(map);
+    return 0;
+  }
+
+  int rooted = 0;
+  for (u32 i = 1; i < old_n; i++) {
+    if (ke->scalar_uops[i].op == S_BUFFERIZE) {
+      rangeify_dce_mark(ke, i, mark);
+      rooted = 1;
+    }
+  }
+  if (!rooted) {
+    rangeify_dce_mark(ke, old_n - 1, mark);
+  }
+
+  ScalarUop *old = ke->scalar_uops;
+  ScalarUop *neu = (ScalarUop *)calloc((size_t)old_n, sizeof(ScalarUop));
+  if (neu == NULL) {
+    free(mark);
+    free(map);
+    return 0;
+  }
+  neu[0] = old[0];
+  map[0] = 0;
+  u32 new_n = 1;
+  for (u32 old_id = 1; old_id < old_n; old_id++) {
+    if (!mark[old_id]) {
+      continue;
+    }
+    map[old_id] = new_n++;
+  }
+  for (u32 old_id = 1; old_id < old_n; old_id++) {
+    u32 new_id = map[old_id];
+    if (new_id == 0) {
+      continue;
+    }
+    ScalarUop cand = old[old_id];
+    for (u32 s = 0; s < SCALAR_MAX_SRC; s++) {
+      u32 src = cand.src[s];
+      if (src != 0 && src < old_n) {
+        cand.src[s] = map[src];
+      }
+    }
+    neu[new_id] = cand;
+  }
+
+  free(old);
+  ke->scalar_uops = neu;
+  ke->n_scalar_uops = new_n;
+  ke->scalar_uops_cap = old_n;
+  free(mark);
+  free(map);
+  return old_n - new_n;
+}
+
 fn const char *scalar_op_name(u8 op) {
   switch (op) {
     case S_NONE:           return "S_NONE";
@@ -540,6 +615,23 @@ static u32 scalar_ref_extent(KernelEntry const *ke, u32 ref) {
     default:
       return 0;
   }
+}
+
+static u32 emit_zero_ref_with_extent(KernelEntry *ke, u32 extent) {
+  if (extent == 0) return 0;
+  u32 z = emit_iconst(ke, 0);
+  u32 c = emit_iconst(ke, (i64)extent);
+  return emit_ibinop(ke, S_IMOD, z, c);
+}
+
+static u32 emit_ref_with_extent(KernelEntry *ke, u32 ref, u32 extent,
+                                int allow_mod) {
+  if (ref == 0 || extent == 0) return 0;
+  u32 got = scalar_ref_extent(ke, ref);
+  if (got == extent) return ref;
+  if (!allow_mod) return 0;
+  u32 c = emit_iconst(ke, (i64)extent);
+  return emit_ibinop(ke, S_IMOD, ref, c);
 }
 
 static u32 emit_flat_from_rngs(KernelEntry *ke, RngsCtx const *r,
@@ -2052,12 +2144,15 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // ranges become fresh PLACEHOLDER/VIRT ranges that the wrap
           // writes from a flat-index roundtrip of selected LOOP iters).
           //
-          // Coverage requires each non-1 axis in out_dims to map to a
-          // unique LOOP axis in os with matching extent, or to the
-          // REDUCE axis when the reshape is inside a reduce body.
-          // The source itself is emitted edge-locally under fresh
-          // input-side VIRT ranges, so it may be a short scalar
-          // subgraph rather than only a direct input load.
+          // Prefer the edge-local rngs recorded by the backward walk:
+          // after a downstream PAD/PERMUTE, rngs[i] is already in this
+          // RESHAPE's output-coordinate space.  Fallback coverage
+          // requires each non-1 axis in out_dims to map to a unique
+          // LOOP axis in os with matching extent, or to the REDUCE
+          // axis when the reshape is inside a reduce body.  The source
+          // itself is emitted edge-locally under fresh input-side VIRT
+          // ranges, so it may be a short scalar subgraph rather than
+          // only a direct input load.
           //
           // The selected LOOP iters drive flat_idx (in the order they
           // appear in out_dims, contributing only for non-1 axes); the
@@ -2073,67 +2168,63 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           int can_use_v = p->src0_ndim <= MAX_DIM
                        && p->out_ndim  <= MAX_DIM
                        && (1 + (u32)p->out_ndim + (u32)p->src0_ndim) <= SCALAR_MAX_SRC;
-          // Match each non-1 out_dim to a unique LOOP axis in os by
-          // extent equality.  Also collect the per-out_dim contribution:
-          //   contrib_iter[d]  -- LOOP range ref to use for out_dim d
-          //                       (0 if axis is size-1, no contribution)
-          // Order matches out_dims so flat_idx accumulates row-major
-          // over the out_dims layout.
-          u32 contrib_iter[MAX_DIM] = {0};
-          u8  os_used[MAX_DIM] = {0};
-          int reduce_used = 0;
+          RngsCtx reshape_out_rngs = rngs[i];
+          int have_edge_out_rngs = reshape_out_rngs.ndim == p->out_ndim;
+          u32 out_refs[MAX_DIM] = {0};
           if (can_use_v) {
-            for (u32 d = 0; d < p->out_ndim; d++) {
-              if (p->out_dims[d] == 1) continue;  // size-1 contributes nothing
-              int matched = 0;
-              for (u32 e = 0; e < os->ndim; e++) {
-                if (os_used[e]) continue;
-                if (os->dims[e] == p->out_dims[d]) {
-                  contrib_iter[d] = loop_ranges[e];
-                  os_used[e] = 1;
-                  matched = 1;
-                  break;
+            if (have_edge_out_rngs) {
+              int allow_mod = reshape_out_rngs.valid_mask != 0;
+              for (u32 d = 0; d < p->out_ndim; d++) {
+                u32 ref = reshape_out_rngs.refs[d];
+                if (ref == 0 && p->out_dims[d] == 1) {
+                  ref = emit_zero_ref_with_extent(ke, 1);
+                } else {
+                  ref = emit_ref_with_extent(ke, ref, p->out_dims[d],
+                                             allow_mod);
                 }
+                if (ref == 0) { can_use_v = 0; break; }
+                out_refs[d] = ref;
               }
-              // Fallback: if no os axis matched, try reduce_range.
-              // Unambiguous only when the extent doesn't ALSO appear in
-              // os.dims (we'd have matched it above).  Used by reduce-
-              // chain RESHAPEs that flatten the reducible region:
-              // [a,b,c] -> [1, a*b*c] when a*b*c == reduce_size.
-              if (!matched && reduce_size != 0 && !reduce_used
-                  && p->out_dims[d] == reduce_size) {
-                contrib_iter[d] = reduce_range;
-                reduce_used = 1;
-                matched = 1;
+            } else {
+              // Match each non-1 out_dim to a unique LOOP axis in os by
+              // extent equality.  Also collect the per-out_dim contribution
+              // in out_refs, ordered like out_dims so flat_idx is row-major.
+              u8  os_used[MAX_DIM] = {0};
+              int reduce_used = 0;
+              for (u32 d = 0; d < p->out_ndim; d++) {
+                if (p->out_dims[d] == 1) {
+                  out_refs[d] = emit_zero_ref_with_extent(ke, 1);
+                  if (out_refs[d] == 0) { can_use_v = 0; break; }
+                  continue;
+                }
+                int matched = 0;
+                for (u32 e = 0; e < os->ndim; e++) {
+                  if (os_used[e]) continue;
+                  if (os->dims[e] == p->out_dims[d]) {
+                    out_refs[d] = loop_ranges[e];
+                    os_used[e] = 1;
+                    matched = 1;
+                    break;
+                  }
+                }
+                // Fallback: if no os axis matched, try reduce_range.
+                // Unambiguous only when the extent doesn't ALSO appear in
+                // os.dims (we'd have matched it above).  Used by reduce-
+                // chain RESHAPEs that flatten the reducible region:
+                // [a,b,c] -> [1, a*b*c] when a*b*c == reduce_size.
+                if (!matched && reduce_size != 0 && !reduce_used
+                    && p->out_dims[d] == reduce_size) {
+                  out_refs[d] = reduce_range;
+                  reduce_used = 1;
+                  matched = 1;
+                }
+                if (!matched) { can_use_v = 0; break; }
               }
-              if (!matched) { can_use_v = 0; break; }
             }
           }
           if (can_use_v) {
             u32 in_ndim = p->src0_ndim;
-            // Build the output-side ref list: one ref per non-1
-            // out_dim, in out_dims order.  size-1 out_dims contribute
-            // nothing (their extent is 1, so the flat_idx contribution
-            // would be 0 anyway).  We also need fresh size-1 VIRT ranges
-            // for those positions so S_RESHAPE_V's flat_idx accumulator
-            // can multiply by the correct out extent.
-            //
-            // Concrete encoding: emit a VIRT range with extent =
-            // out_dims[d] for each axis -- size-1 axes give an extent
-            // that contributes a stride of 1 in the multiplication,
-            // and their iter is forced to 0 by the wrap (since extent=1).
-            u32 out_refs[MAX_DIM] = {0};
             u32 n_out = p->out_ndim;
-            for (u32 d = 0; d < n_out; d++) {
-              if (contrib_iter[d] != 0) {
-                out_refs[d] = contrib_iter[d];
-              } else {
-                // size-1 out_dim: emit a VIRT range with extent 1.
-                u64 r_extra = ((u64)S_AXIS_VIRT << 32) | 1ULL;
-                out_refs[d] = rangeify_emit_leaf(ke, S_RANGE,
-                                                  DT_INT32, r_extra);
-              }
-            }
             // Allocate VIRT ranges sized to src0_dims (input side).
             u32 virt_ranges[MAX_DIM];
             for (u32 d = 0; d < in_ndim; d++) {
@@ -2151,8 +2242,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               }
               RBAIL_MID("RESHAPE-V body emit failed");
             }
+            if (have_edge_out_rngs && reshape_out_rngs.valid_mask != 0) {
+              u32 zero = emit_iconst(ke, 0);
+              u32 wsrc[3] = {reshape_out_rngs.valid_mask, v_body, zero};
+              v_body = rangeify_emit(ke, S_IWHERE, p->dtype, 3, wsrc, 0);
+            }
             // Emit S_RESHAPE_V: src[0] = body, src[1..1+n_out) =
-            // output refs (selected LOOP iters + size-1 VIRT placeholders),
+            // output refs (edge-local refs or selected LOOP/REDUCE refs),
             // src[1+n_out..) = input (VIRT) refs.  extra[byte 0] = n_out.
             u32 src_arr[SCALAR_MAX_SRC] = {v_body};
             for (u32 d = 0; d < n_out;   d++) src_arr[1 + d]              = out_refs[d];
