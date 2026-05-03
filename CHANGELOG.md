@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: trace Metal alias buffers to their origin producer
+
+`TMemoryPlan[]` now records alias-origin fields for each buffer, and
+the beautiful-mnist memory dump follows `metal-alias` reshape chains
+back to the real producer of the bytes.  This makes the top live Metal
+buffer report point at the fusion target instead of only the alias
+reshape wrapper.
+
 ### Changed: keep Metal tile fan-in under a conservative budget
 
 The Metal tile fan-in cap now defaults to 24 inputs, splits through

@@ -348,7 +348,14 @@ If[dumpMemoryPlan,
               " metal_live_bufs=", Length[metalLive]];
         print["top live metal buffers by bytes:"];
         Do[
-            Module[{kid = row["producer_kid"], info, ops},
+            Module[{
+                kid = row["producer_kid"],
+                originKid = Lookup[row, "origin_producer_kid", row["producer_kid"]],
+                originSourceTid = Lookup[row, "origin_source_tid", 0],
+                aliasChain = Lookup[row, "producer_alias_chain", {}],
+                info,
+                ops
+            },
                 info = If[kid > 0, TKernelInfo[kid], <||>];
                 ops = If[KeyExistsQ[info, "program"],
                     Counts[info["program"][[All, "opcode"]]],
@@ -357,6 +364,8 @@ If[dumpMemoryPlan,
                       " bytes=", row["nbytes"],
                       " refs=", row["refcount"],
                       " producer=", kid,
+                      " origin=", originKid,
+                      " origin_src_tid=", originSourceTid,
                       " prod_out=", Lookup[info, "output_numel", 0],
                       " prod_ops=", Lookup[info, "n_ops", 0],
                       " prod_op_hist=", formatMaybeAssoc[ops],
@@ -365,8 +374,13 @@ If[dumpMemoryPlan,
                       " dtype=", row["dtype"],
                       " aliases=", ToString[Take[row["alias_tids"], UpTo[4]], InputForm]];
                 If[dumpMemoryIR,
+                    If[aliasChain =!= {},
+                        print["    alias_chain=", ToString[aliasChain, InputForm]]];
                     print["    producer_ir=", formatKernelBrief[kid]];
                     print["    producer_program=", formatKernelProgram[kid]];
+                    If[originKid =!= kid,
+                        print["    origin_ir=", formatKernelBrief[originKid]];
+                        print["    origin_program=", formatKernelProgram[originKid]]];
                     print["    consumer_kids=", ToString[row["consumer_kids"], InputForm]];
                     Do[
                         print["    consumer_ir=", formatKernelBrief[ck]],

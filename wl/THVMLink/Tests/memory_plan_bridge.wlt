@@ -115,6 +115,22 @@ VerificationTest[
 VerificationTest[
     TInit[];
     TReset[];
+    a    = TTensorCreate @ NumericArray[{1.0, 2.0, 3.0}, "Real32"];
+    b    = TTensorCreate @ NumericArray[{4.0, 5.0, 6.0}, "Real32"];
+    res  = TRealize @ TUOpAdd[a, b];
+    plan = First @ TMemoryPlan[];
+    bufs = plan["Bufs"];
+    {Length[bufs] > 0,
+     AllTrue[bufs, KeyExistsQ[#, "origin_producer_kid"] &],
+     AllTrue[bufs, KeyExistsQ[#, "origin_source_tid"] &],
+     AllTrue[bufs, KeyExistsQ[#, "producer_alias_chain"] &]},
+    {True, True, True, True},
+    TestID -> "memory-plan-bridge/bufs-include-alias-origin-fields"
+]
+
+VerificationTest[
+    TInit[];
+    TReset[];
     Module[{ctx = TContextNew["metal"], ok},
         If[ctx === 0, Return[True]];
         ok = TInContext[ctx,

@@ -244,14 +244,25 @@ outputs.
 prints the largest live Metal buffers with producer-kernel metadata.
 Add `DUMP_MEMORY_IR=1` to include the producer program, scalar/tile
 lowering summaries, and consumer kernel briefs for those top buffers.
+For `metal-alias` reshape outputs the dump now prints both
+`producer` and `origin`: `producer` is the alias dispatch that owns
+the output TenDesc, while `origin` follows the alias chain to the
+first real producer of the bytes.  Use `origin_ir` when choosing the
+next fusion rule; the alias reshape itself does not allocate the large
+buffer.
 With replay slot packing and large `EXPAND` relaxation, the current
 BS=32 profile is dominated by smaller conv/backward movement
 intermediates:
 
-- one `14,745,600` element f32 buffer (`58.98MB`) produced by a
-  205-op movement/ALU graph and consumed by one later kernel;
-- many `10,240,000` element reshape aliases/copies (`40.96MB`) with
-  short lifetimes.
+- many `10,240,000` element f32 buffers (`40.96MB`) whose immediate
+  producer is a one-op `metal-alias` RESHAPE, but whose `origin`
+  producer is a large REDUCE tile kernel.  The common origin shapes
+  are `MUL/PERMUTE/RESHAPE/EXPAND/REDUCE` and
+  `RESHAPE/MUL/EXPAND/ADD/PERMUTE/REDUCE`; each feeds a 24-way
+  PAD/ADD consumer plus a smaller reduce consumer.
+- the only hot untuned tile gap in the bounded BS=32 canary is still
+  the 24-input movement fan-in: `RESHAPE=24, PAD=24, ADD=23`,
+  `out_numel=460800`.
 
 That points to three separate memory jobs:
 
@@ -259,6 +270,12 @@ That points to three separate memory jobs:
   movement/add producers when consumers can inline the scalar index
   expression cheaply enough, or fuse the consumers around the shared
   producer so the huge tensor is never a global buffer.
+  Do not solve this by merely turning same-pass movement wrappers into
+  input-slot aliases: current Metal lowering treats input slots as
+  flat contiguous buffers, and a bounded probe of that approach made
+  the first warmup step stall badly.  The correct fix needs scalar
+  index fusion or a view-aware input contract, not a silent alias
+  substitution.
 - **Replay allocator job:** once a TJit capture is finalized, pack
   live temporary outputs into reusable replay slots by captured op
   lifetime.  The first rootless Metal pass reduced the BS=32 memory
@@ -321,12 +338,14 @@ argument buffers.  With `THVM_BACKEND=metal THVM_TILE=1`,
 trees before materialization.  The default cap is:
 
 ```text
-THVM_METAL_FUSION_MAX_INPUTS=30
+THVM_METAL_FUSION_MAX_INPUTS=24
 ```
 
-Lower it only for focused tests.  Raising it above 30 does not make
-direct Metal buffer binding legal; it should wait for argument-buffer
-support.
+The default is below the hard 30-buffer Metal binding limit because
+real kernels often need extra scalar/tile/runtime buffers after
+classification.  Lower it only for focused tests.  Raising it above 30
+does not make direct Metal buffer binding legal; it should wait for
+argument-buffer support.
 
 Memory diagnostics should be read with fusion diagnostics:
 

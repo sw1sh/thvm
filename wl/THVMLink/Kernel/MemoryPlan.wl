@@ -131,6 +131,39 @@ computeKernelDepths[kernels_, tens_] := Block[{
     Association @ Table[k -> depth[k], {k, nKernels}]
 ]
 
+(* Alias-only Metal reshapes produce a new TenDesc whose buf_id points
+   at the input storage.  For lifecycle accounting the alias kernel is
+   still the immediate producer, but diagnostics need the first
+   non-alias producer so large live buffers point at the real fusion
+   target. *)
+resolveAliasOrigin[kid_Integer, tens_] := Block[{
+    cur = kid,
+    seen = <||>,
+    chain = {},
+    inputs,
+    sourceTid = 0,
+    nextKid,
+    kind
+},
+    While[cur > 0 && ! KeyExistsQ[seen, cur],
+        seen[cur] = True;
+        kind = Quiet @ Check[TKernelDispatchKind[cur], "none"];
+        If[kind =!= "metal-alias", Break[]];
+        inputs = Quiet @ Check[TKernelInputs[cur], {}];
+        If[Length[inputs] =!= 1, Break[]];
+        sourceTid = First[inputs];
+        AppendTo[chain, <|"kid" -> cur, "source_tid" -> sourceTid|>];
+        nextKid = If[1 <= sourceTid <= Length[tens], tens[[sourceTid, 1]], 0];
+        If[nextKid === 0, cur = 0; Break[]];
+        cur = nextKid;
+    ];
+    <|
+        "origin_producer_kid" -> cur,
+        "origin_source_tid"   -> sourceTid,
+        "alias_chain"         -> chain
+    |>
+]
+
 (* === Buf collation ===
    Group TenDescs by (backend_id, buf_id).  For each group:
      producer_kernel = the producer_kid recorded on any of the
@@ -186,6 +219,7 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
             preserved,
             freeable,
             producerKid,
+            origin,
             allConsumerKids,
             allocDepth,
             lastUseDepth,
@@ -212,6 +246,7 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
                (tensor_view_of inherits it).  Take Max so a 0 from
                an external alias doesn't shadow a real producer. *)
             producerKid = Max @ Append[tens[[#, 1]] & /@ tids, 0];
+            origin = resolveAliasOrigin[producerKid, tens];
             allConsumerKids = DeleteDuplicates @ Flatten[
                 Lookup[consumersOf, #, {}] & /@ tids
             ];
@@ -241,6 +276,9 @@ collateBufs[kernels_, tens_, kernelDepths_, cpuBufs_, metalBufs_] := Block[{
                 "dtype"           -> dtypeName[tens[[firstTid, 3]]],
                 "alias_tids"      -> tids,
                 "producer_kid"    -> producerKid,
+                "origin_producer_kid" -> origin["origin_producer_kid"],
+                "origin_source_tid"   -> origin["origin_source_tid"],
+                "producer_alias_chain" -> origin["alias_chain"],
                 "consumer_kids"   -> allConsumerKids,
                 "alloc_depth"     -> allocDepth,
                 "last_use_depth"  -> lastUseDepth,
