@@ -1103,9 +1103,22 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
   return hits;
 }
 
+// Gate the softmax-broadcast-reduce / scalar-tail rules' multi-reduce
+// generalization.  Each REDUCE is checked independently by
+// realize_reduce_consumer_is_broadcast_chain, so removing the
+// "exactly one REDUCE in the graph" restriction is safe per-rule.
+// Default-on; THVM_BUFFERIZE_REDUCE_FUSE_MULTI=0 reverts to the
+// historical single-reduce gate.
+static int realize_reduce_fuse_multi_enabled(void) {
+  char const *e = getenv("THVM_BUFFERIZE_REDUCE_FUSE_MULTI");
+  return e == NULL ? 1 : (e[0] != '0');
+}
+
 static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
   (void)root;
-  if (realize_reduce_count() != 1) return 0;
+  if (!realize_reduce_fuse_multi_enabled() && realize_reduce_count() != 1) {
+    return 0;
+  }
   u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
@@ -1121,7 +1134,9 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
 static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
   if (term_tag(root) != TAG_UOP) return 0;
   if (!realize_rangeify_enabled()) return 0;
-  if (realize_reduce_count() != 1) return 0;
+  if (!realize_reduce_fuse_multi_enabled() && realize_reduce_count() != 1) {
+    return 0;
+  }
   u64 root_loc = term_val(root);
   u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
