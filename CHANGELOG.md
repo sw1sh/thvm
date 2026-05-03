@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: pack replay temporaries into larger dead buffers
+
+The JIT replay slot packer now uses a best-fit policy that can reuse a
+dead larger Metal temporary for a later smaller temporary.  Dispatches
+still write and read by logical tensor size, but the captured replay
+no longer requires exact byte-size matches before reusing a retained
+buffer.
+
 ### Added: bounded profile-driven autotune targets
 
 `TKernelAutotuneTop[...]` tunes only the hottest representative

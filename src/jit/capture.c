@@ -946,11 +946,15 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root) {
     }
 
     u32 slot_idx = n_slots;
+    u64 best_size = UINT64_MAX;
     for (u32 s = 0; s < n_slots; s++) {
-      if (slots[s].backend == backend && slots[s].nbytes == nbytes
-          && slots[s].last_use < i) {
+      if (slots[s].backend != backend || slots[s].nbytes < nbytes
+          || slots[s].last_use >= i) {
+        continue;
+      }
+      if (slots[s].nbytes < best_size) {
         slot_idx = s;
-        break;
+        best_size = slots[s].nbytes;
       }
     }
     if (slot_idx == n_slots) {
