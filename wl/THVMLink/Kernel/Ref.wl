@@ -19,6 +19,9 @@ TDef::usage = "TDef[name, body] registers `body` as a named definition reachable
 TRef::usage = "TRef[name] returns a TTerm wrapping a TAG_REF that lazily unfolds to the body registered under `name`.  Reducing it via TWnf walks one ALO layer per fire (matches HVM4's REF -> ALO unfolding).";
 TDefName::usage = "TDefName[name] returns the integer slot a given string `name` is mapped to (interns it on first use).";
 TDefSlots::usage = "TDefSlots[] returns the current name->slot table as an Association.";
+TDefGet::usage = "TDefGet[name] returns the registered body of a def as a book-heap TTerm, or Missing[\"UnregisteredDef\"] if the slot is empty.  Accepts an integer slot or a string name.";
+TDefExpr::usage = "TDefExpr[name] returns the structural expression of a def's body, walking the BOOK heap (parallel to TTermExpr but for the immutable template).  Like TTermExpr, REF leaves stop expansion so self-referential defs render finitely.";
+TDefTree::usage = "TDefTree[name] = ExpressionTree[TDefExpr[name]] -- a Wolfram Tree of the def body for visual inspection.";
 
 Begin["`Private`"];
 
@@ -54,6 +57,32 @@ TRef[name_] := (
     ensureInit[];
     TTerm[$termNewRefFn[TDefName[name]]]
 )
+
+(* TDefGet[name]: read the registered body Term out of the C-side
+   DEFS table.  Returns a TTerm wrapping a book-heap term (val
+   points into the book heap, so structural traversal must use
+   $bookReadFn -- see TDefExpr / TDefTree) or Missing[..] when
+   the slot was never registered. *)
+TDefGet[name_] := (
+    ensureInit[];
+    With[{raw = $defGetFn[TDefName[name]]},
+        If[ raw === 0,
+            Missing["UnregisteredDef", name],
+            TTerm[raw]
+        ]
+    ]
+)
+
+TDefExpr[name_] := With[{body = TDefGet[name]},
+    If[ Head[body] === TTerm,
+        tTreeWalkWith[$bookReadFn, body, <||>],
+        body
+    ]
+]
+
+TDefTree[name_] := With[{e = TDefExpr[name]},
+    If[ Head[e] === Missing, e, ExpressionTree[e]]
+]
 
 End[];
 

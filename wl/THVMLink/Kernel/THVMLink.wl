@@ -695,7 +695,11 @@ uopCellCount[op_] := Switch[op,
     _,                                                              0
 ]
 
-tTreeWalk[t_, seen_] := Block[{
+(* tTreeWalkWith[reader, t, seen] is the structural decoder; the
+   `reader` function (Integer loc -> raw Term) chooses which cell
+   space to read from -- $heapReadFn for dyn (TTermTree default) or
+   $bookReadFn for book-heap def bodies (TDefTree). *)
+tTreeWalkWith[reader_, t_, seen_] := Block[{
     raw = ttermRaw[t], tag, val, ext, seen2, n
 },
     tag = $termTagFn[raw];
@@ -713,46 +717,58 @@ tTreeWalk[t_, seen_] := Block[{
         (* DP0 / DP1 recurse into the dup body so each projection's
            subtree is visible.  Trees can't share, so the same body
            appears once under each projection. *)
-        $TagDP0, "DP0"[ext, tTreeWalk[$heapReadFn[val], seen]],
-        $TagDP1, "DP1"[ext, tTreeWalk[$heapReadFn[val], seen]],
+        $TagDP0, "DP0"[ext, tTreeWalkWith[reader, reader[val], seen]],
+        $TagDP1, "DP1"[ext, tTreeWalkWith[reader, reader[val], seen]],
         $TagLAM,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
-                "LAM"[tTreeWalk[$heapReadFn[val], seen2]]],
+                "LAM"[tTreeWalkWith[reader, reader[val], seen2]]],
         $TagAPP,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
-                "APP"[tTreeWalk[$heapReadFn[val], seen2],
-                      tTreeWalk[$heapReadFn[val + 1], seen2]]],
+                "APP"[tTreeWalkWith[reader, reader[val], seen2],
+                      tTreeWalkWith[reader, reader[val + 1], seen2]]],
         $TagSUP,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
                 "SUP"[ext,
-                    tTreeWalk[$heapReadFn[val], seen2],
-                    tTreeWalk[$heapReadFn[val + 1], seen2]]],
+                    tTreeWalkWith[reader, reader[val], seen2],
+                    tTreeWalkWith[reader, reader[val + 1], seen2]]],
         $TagDUP,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
-                "DUP"[ext, tTreeWalk[$heapReadFn[val], seen2]]],
+                "DUP"[ext, tTreeWalkWith[reader, reader[val], seen2]]],
         $TagALO,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
                 (* heap[val]   = wrapped term
                    heap[val+1] = state id (atomic, just record it) *)
-                "ALO"[$termValFn[$heapReadFn[val + 1]],
-                      tTreeWalk[$heapReadFn[val], seen2]]],
+                "ALO"[$termValFn[reader[val + 1]],
+                      tTreeWalkWith[reader, reader[val], seen2]]],
         $TagOP2,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
                 "OP2"[Lookup[$op2Names, ext, "?" <> ToString[ext]],
-                      tTreeWalk[$heapReadFn[val + 0], seen2],
-                      tTreeWalk[$heapReadFn[val + 1], seen2]]],
+                      tTreeWalkWith[reader, reader[val + 0], seen2],
+                      tTreeWalkWith[reader, reader[val + 1], seen2]]],
         $TagMAT,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
                 "MAT"[ext,
-                      tTreeWalk[$heapReadFn[val + 0], seen2],
-                      tTreeWalk[$heapReadFn[val + 1], seen2]]],
+                      tTreeWalkWith[reader, reader[val + 0], seen2],
+                      tTreeWalkWith[reader, reader[val + 1], seen2]]],
+        $TagCTR,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                Block[{nn = $termValFn[reader[val]]},
+                    "CTR" @@ Prepend[
+                        Table[
+                            tTreeWalkWith[reader, reader[val + 1 + i], seen2],
+                            {i, 0, nn - 1}
+                        ],
+                        ext
+                    ]
+                ]],
         $TagUOP,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
@@ -764,8 +780,8 @@ tTreeWalk[t_, seen_] := Block[{
                        "TEN"[in2], ...].  Without this the input_tids
                        are invisible (they don't appear in any heap
                        child of the UOP_KERNEL cell). *)
-                    Module[{kid    = $termValFn[$heapReadFn[val + 1]],
-                            outTid = $termValFn[$heapReadFn[val]],
+                    Module[{kid    = $termValFn[reader[val + 1]],
+                            outTid = $termValFn[reader[val]],
                             inTids},
                         inTids = TKernelInputs[kid];
                         "UOP" @@ Join[
@@ -774,13 +790,16 @@ tTreeWalk[t_, seen_] := Block[{
                         ]
                     ],
                     "UOP" @@ Prepend[
-                        Table[tTreeWalk[$heapReadFn[val + i], seen2], {i, 0, n - 1}],
+                        Table[tTreeWalkWith[reader, reader[val + i], seen2], {i, 0, n - 1}],
                         Lookup[$uopNames, ext, "UOP?" <> ToString[ext]]
                     ]
                 ]],
         _, "Unknown"[tag]
     ]
 ]
+
+(* Default tTreeWalk reads from the dynamic heap. *)
+tTreeWalk[t_, seen_] := tTreeWalkWith[$heapReadFn, t, seen]
 
 (* === high-level constructors (all return TTerm) === *)
 
