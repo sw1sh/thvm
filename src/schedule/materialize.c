@@ -2268,6 +2268,28 @@ static Term emit_kernel_for_boundary(u32 bi) {
       rangeify_cse(ke);
       rangeify_dce(ke);
       axes_ensure_scalar_reduce(ke);
+      // Phase 2 scalar-UOp simplification harness.  Default-on; set
+      // THVM_SCALAR_SIMPLIFY=0 to bisect.  The rule list is empty
+      // until later phases drop in divandmod / symbolic rules, so
+      // today this is a no-op aside from a few cycles spent in the
+      // empty driver.
+      const char *ss = getenv("THVM_SCALAR_SIMPLIFY");
+      int simplify_on = (ss == NULL) ? 1 : (ss[0] != '0');
+      if (simplify_on && ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
+        // No rules yet -- harness wired so subsequent phases can plug
+        // tables in without touching materialize.c again.
+        ScalarSimplifyRule const *rules = NULL;
+        u32                      n_rules = 0;
+        if (n_rules > 0) {
+          // Find the BUFFERIZE root (last emitted by rangeify) and
+          // rewrite from there; the driver follows remap chains and
+          // returns the canonical root id.
+          u32 root = ke->n_scalar_uops - 1;
+          (void)scalar_simplify_apply(ke->scalar_uops,
+                                      &ke->n_scalar_uops,
+                                      root, rules, n_rules, NULL);
+        }
+      }
     }
     if (!ke->program_shared) {
       KernelAxes *shared_axes = kernel_rangeified_axes_cache_lookup_or_insert(ke);

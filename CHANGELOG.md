@@ -611,6 +611,21 @@ Tests in `test_bufferize.c` cover default-off, fires-when-enabled
 (stamps `removed_by="remove-by-cost-score"`), and the reduce-gate
 respect; 160/160.
 
+### Added: scalar UOp simplification pass infrastructure
+
+`src/scalar/simplify.c` ships `scalar_simplify_apply` -- a bottom-up
+rewrite driver over the per-kernel `ScalarUop[]` arena.  Mirrors the
+named-rule + per-rule-hit-count shape of `src/uop/graph_rewrite.c`,
+adds `DUMP_SCALAR_SIMPLIFY=1` for the stats dump, and is wired into
+`schedule/materialize.c` (gated by `THVM_SCALAR_SIMPLIFY`, default on)
+between `rangeify_dce` and tile sync.  Phase 2 of the tinygrad
+symbolic/index rule port: this lands the harness only; no rules are
+added yet.  Subsequent phases drop in divandmod / symbolic rule
+tables without further infrastructure changes.
+`tests/test_scalar_simplify.c` exercises the empty-rule-list no-op
+path, a trivial `S_IADD(x, ICONST(0)) -> x` fold to confirm
+fixpoint + remap wiring, and a no-match graph passthrough.
+
 ### Added: Phase 7 bufferize schedule key + aggregates
 
 `schedule/bufferize.c` now provides a deterministic

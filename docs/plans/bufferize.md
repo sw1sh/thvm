@@ -754,6 +754,22 @@ Each step is independent and testable in isolation.  Step 1's
 schema is the prerequisite; without it, every other step would
 need to re-design the storage.
 
+## Scalar UOp Simplification Harness (Phase 2 of tinygrad rule port)
+
+Status: harness landed; rule tables empty.  `src/scalar/simplify.c`
+ships `scalar_simplify_apply` -- a bottom-up rewrite driver over the
+per-kernel ScalarUop[] arena that mirrors the shape of
+`uop_graph_rewrite` (rule struct, named hits, `DUMP_SCALAR_SIMPLIFY=1`
+stats dump).  Materialize calls it after `rangeify_dce` /
+`axes_ensure_scalar_reduce` and before tile sync, gated by
+`THVM_SCALAR_SIMPLIFY` (default on).
+
+The driver is ready for the divandmod / symbolic rule families to be
+ported in subsequent phases without further infrastructure changes.
+`tests/test_scalar_simplify.c` covers empty-rule-list, a trivial
+`S_IADD(x, ICONST(0)) -> x` fold for the harness wiring, and a
+no-match graph passthrough.
+
 ## Current Baseline
 
 Latest bounded Metal/tile beautiful-mnist canary

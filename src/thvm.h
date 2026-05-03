@@ -1838,6 +1838,31 @@ fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);
 fn Term uop_graph_simplify_materialize(Term root, u32 env_id);
 
+// === scalar UOp simplification harness (src/scalar/simplify.c) ===
+// Bottom-up rewrite pass over the per-kernel ScalarUop[] arena.  Phase 2
+// of the tinygrad rule port -- the driver lives here; rules land in
+// later phases (divandmod, symbolic, ...).  Mirrors the
+// `uop_graph_rewrite` shape but operates on flat slot ids rather than
+// heap-resident TAG_UOP DAGs.
+typedef u32 (*ScalarSimplifyFn)(ScalarUop *uops, u32 n_uops, u32 node_id,
+                                void *user);
+typedef struct {
+  char const       *name;
+  // Returns the new node id if a rewrite fires, 0 otherwise.
+  // Implementations may allocate new nodes via the driver-provided
+  // arena (future phases).
+  ScalarSimplifyFn  apply;
+} ScalarSimplifyRule;
+fn u32  scalar_simplify_apply(ScalarUop *uops, u32 *n_uops_inout,
+                              u32 root_id, ScalarSimplifyRule const *rules,
+                              u32 n_rules, void *user);
+fn void scalar_simplify_stats_clear(void);
+fn u32  scalar_simplify_stats_len(void);
+fn char const *scalar_simplify_stat_name(u32 i);
+fn u32  scalar_simplify_stat_hits_at(u32 i);
+fn u32  scalar_simplify_stat_hits(char const *name);
+fn void scalar_simplify_stats_print(void);
+
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is
 // the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
