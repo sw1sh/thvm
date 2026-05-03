@@ -71,6 +71,10 @@ TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls
 $TagAPP::usage = $TagLAM::usage = $TagVAR::usage = $TagERA::usage =
   $TagDP0::usage = $TagDP1::usage = $TagSUP::usage = $TagDUP::usage =
   $TagTEN::usage = $TagUOP::usage = $TagNUM::usage = $TagCTR::usage =
+  $TagREF::usage = $TagALO::usage = $TagOP2::usage = $TagMAT::usage =
+  $TagEQL::usage = $TagAND::usage = $TagOR::usage  = $TagANY::usage =
+  $TagINC::usage = $TagWHEN::usage = $TagFVR::usage = $TagBRI::usage =
+  $TagANN::usage = $TagPRI::usage = $TagDSU::usage = $TagDDU::usage =
     "Tag id; mirrors the corresponding TAG_* in src/thvm.h.";
 
 (* === dtype + opcode constants (mirror src/thvm.h) === *)
