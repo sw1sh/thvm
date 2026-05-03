@@ -97,3 +97,24 @@ VerificationTest[
     },
     TestID -> "reduce/chain-trailing-max-one-kernel"
 ]
+
+VerificationTest[
+    TInit[];
+    data = ArrayReshape[Range[120] * 1.0, {2, 3, 4, 5}];
+    x = TTensorCreate @ NumericArray[data, "Real32"];
+    xp = TUOpReshape[TUOpPermute[x, {1, 0, 2, 3}], {3, 40}];
+    before = TKernelCount[];
+    r = TRealize @ TUOpReduce[xp, 1, "SUM"];
+    after = TKernelCount[];
+    {
+        TTensorShape[r],
+        Normal @ TTensorData[r],
+        after - before
+    },
+    {
+        {3},
+        Table[Total[Flatten[data[[All, c, All, All]]]], {c, 3}],
+        1
+    },
+    TestID -> "reduce/permuted-channel-flatten-sum-one-kernel"
+]

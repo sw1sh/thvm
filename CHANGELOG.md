@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Added: show beautiful-mnist dispatch-count hot shapes
+
+The beautiful-mnist training benchmark now prints top program groups
+by dispatch count in addition to dispatch time and static flops.  Set
+`DUMP_GROUP_CONSUMERS=1` to show direct consumer kernels for those hot
+groups.  The bounded BS=32 Metal profile shows the largest remaining
+kernel-count gap is repeated one-op per-channel reduction chains, not
+unsupported lowering.
+
 ### Changed: keep pure fanout probe away from reduce chains
 
 The opt-in `THVM_INLINE_MULTI_CONSUMER_PURE=1` recompute probe now

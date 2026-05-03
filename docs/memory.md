@@ -363,6 +363,9 @@ Memory diagnostics should be read with fusion diagnostics:
 
 - `TProfileProgramGroups[TProfileDelta[before, after]]` tells which
   repeated program shapes dominate time.
+- The beautiful-mnist benchmark also prints top program groups by
+  dispatch count; use `DUMP_GROUP_CONSUMERS=1` to show direct
+  consumer kernels for those rows.
 - `TProfileFusionGaps[TProfileDelta[before, after]]` filters those
   groups to hot shapes that are not yet tile-tunable.
 - `TKernelScalarUops[kid]` shows whether rangeify fused the boundary.

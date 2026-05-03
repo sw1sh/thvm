@@ -98,6 +98,13 @@ kernelAxesInfo[kid_Integer] := Quiet @ Check[
     First @ TKernelOpts[kid],
     <|"Applied" -> {}, "AxisTypes" -> {}, "FullShape" -> {}|>]
 
+kernelOutputTid[kid_Integer] := Quiet @ Check[TKernelTable[][[kid, 2]], 0]
+
+kernelConsumerKids[kid_Integer] := Module[{tid = kernelOutputTid[kid]},
+    If[tid <= 0, Return[{}]];
+    Select[kernelIds[], MemberQ[TKernelInputs[#], tid] &]
+]
+
 formatRun[row_Association] := StringRiffle[{
     "start=" <> ToString[row["Start"]],
     "end=" <> ToString[row["End"]],
@@ -190,6 +197,7 @@ dumpTopLowered = envValue["DUMP_TOP_LOWERED", "0"] === "1";
 dumpJitCapture = envValue["DUMP_JIT_CAPTURE", "0"] === "1";
 dumpMemoryPlan = envValue["DUMP_MEMORY_PLAN", "0"] === "1";
 dumpMemoryIR = envValue["DUMP_MEMORY_IR", "0"] === "1";
+dumpGroupConsumers = envValue["DUMP_GROUP_CONSUMERS", "0"] === "1";
 
 print["beautiful_mnist training benchmark"];
 print["  THVM_BACKEND=", envValue["THVM_BACKEND", "default-cpu"],
@@ -213,6 +221,7 @@ print["  BS=", bs,
       "  DUMP_JIT_CAPTURE=", If[dumpJitCapture, "1", "0"],
       "  DUMP_MEMORY_PLAN=", If[dumpMemoryPlan, "1", "0"],
       "  DUMP_MEMORY_IR=", If[dumpMemoryIR, "1", "0"],
+      "  DUMP_GROUP_CONSUMERS=", If[dumpGroupConsumers, "1", "0"],
       "  PROFILE_TOP=", topCount,
       "  POST_AUTOTUNE=", If[doPostAutotune, "1", "0"],
       "  POST_AUTOTUNE_KIDS=", ToString[postAutotuneKids, InputForm]];
@@ -460,6 +469,32 @@ If[showProgramProfile,
                   " applied=", ToString[kernelAxesInfo[row["RepKid"]]["Applied"], InputForm],
                   " axes=", ToString[kernelAxesInfo[row["RepKid"]]["AxisTypes"], InputForm],
                   " ops=", formatMaybeAssoc[row["Ops"]]],
+            {row, groups}]];
+    Module[{groups = Take[
+        ReverseSortBy[TProfileProgramGroups[profileTimedDelta], Lookup[#, "DispatchCount", 0] &],
+        UpTo[topCount]]},
+        print["top timed program shapes by dispatch count:"];
+        Do[
+            print["  key=", row["Key"],
+                  " rep_kid=", row["RepKid"],
+                  " kids=", row["KidCount"],
+                  " count=", row["DispatchCount"],
+                  " total_us=", row["TotalUs"],
+                  " avg_us=", NumberForm[row["AvgUs"], {8, 1}],
+                  " kinds=", formatMaybeAssoc[row["DispatchKinds"]],
+                  " n_inputs=", row["InputCount"],
+                  " n_ops=", row["OpCount"],
+                  " out_numel=", row["OutputNumel"],
+                  " total_out=", row["TotalOutputNumel"],
+                  " applied=", ToString[kernelAxesInfo[row["RepKid"]]["Applied"], InputForm],
+                  " axes=", ToString[kernelAxesInfo[row["RepKid"]]["AxisTypes"], InputForm],
+                  " ops=", formatMaybeAssoc[row["Ops"]]];
+            If[dumpGroupConsumers,
+                Module[{consumers = kernelConsumerKids[row["RepKid"]]},
+                    print["    consumers=", ToString[consumers, InputForm]];
+                    Do[
+                        print["    consumer_ir=", formatKernelBrief[ck]],
+                        {ck, Take[consumers, UpTo[topCount]]}]]],
             {row, groups}]]];
 If[showFusionGaps,
     Module[{gaps = Take[TProfileFusionGaps[profileTimedDelta], UpTo[topCount]]},

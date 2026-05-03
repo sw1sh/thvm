@@ -97,6 +97,11 @@ must be guarded by scalar/tile legality, not only by UOp purity.
 - `PAD` -> masked index expression for movement-heavy consumers.
 - `RESHAPE`/`PAD` producer fanout with edge-local range contexts.
 - Reduction-local bufferization rules once `TILE_REDUCE` is stable.
+- Non-contiguous per-channel reduction simplification for
+  batchnorm-style `{B,C,H,W} -> {C}` reductions.  A high-level
+  `PERMUTE`/`RESHAPE` rewrite regressed beautiful-mnist backward into
+  `metal-jit`, so this belongs in range/reduce lowering rather than
+  in `TBatchNormTrain`.
 - Memory-plan rewrites over captured replay slots, sharing the same
   rule-hit diagnostics.
 
