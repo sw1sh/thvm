@@ -1063,12 +1063,65 @@ static u32 realize_remove_by_cost_score_max_consumers(void) {
   return 4;
 }
 
+// Tile-feasibility proxy: estimate the consumer kernel's op count
+// after recomputing this buffer locally.  Each consumer kernel
+// would gain `recompute_ops` ops on every input slot that used the
+// removed buffer; pessimistic upper bound = consumer's existing
+// recompute_ops + this buffer's recompute_ops.  If any consumer's
+// estimated total exceeds the budget, skip.  Default 64 (well
+// above the existing remove-removable-bufferize 32 cap, since
+// that rule's cap is per-buffer not per-consumer).  Override with
+// THVM_BUFFERIZE_REMOVE_SCORE_CONSUMER_OPS_BUDGET.
+static u32 realize_remove_by_cost_score_consumer_budget(void) {
+  char const *e = getenv("THVM_BUFFERIZE_REMOVE_SCORE_CONSUMER_OPS_BUDGET");
+  if (e != NULL && e[0] != '\0') {
+    return (u32)strtoul(e, NULL, 10);
+  }
+  return 64;
+}
+
+static int realize_remove_by_cost_score_consumers_fit_tile(
+    BBufferize const *b, u32 budget) {
+  u64 b_loc = b->loc;
+  u32 b_ops = b->recompute_ops;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    u64 ploc = REALIZE_INFO[i].loc;
+    if (ploc == b_loc) continue;
+    u8  pop  = REALIZE_INFO[i].op;
+    u8  ar   = uop_arity(pop);
+    int hits = 0;
+    for (u8 j = 0; j < ar; j++) {
+      Term c = term_resolve(heap_read(ploc + j));
+      if (term_tag(c) == TAG_UOP && term_val(c) == b_loc) {
+        hits = 1; break;
+      }
+    }
+    if (!hits) continue;
+    // Consumer found.  When the consumer is a realized buffer we
+    // can read its recompute_ops to bound the resulting kernel
+    // size; otherwise the consumer is an intermediate UOp that
+    // gets fused into a deeper realized boundary's program, and
+    // its own ops contribute zero (they were already going to be
+    // there).  Either way, estimated = consumer_ops + b_ops.
+    u32 cidx = bufferize_find_by_loc(ploc);
+    u64 consumer_ops = 0;
+    if (cidx != 0xFFFFFFFFu) {
+      BBufferize const *cb = bufferize_buffer_at(cidx);
+      if (cb != NULL) consumer_ops = (u64)cb->recompute_ops;
+    }
+    u64 estimated = consumer_ops + (u64)b_ops;
+    if (estimated > (u64)budget) return 0;
+  }
+  return 1;
+}
+
 static u32 realize_rule_remove_by_cost_score(Term root) {
   (void)root;
   if (!realize_remove_by_cost_score_enabled()) return 0;
   u64 threshold     = realize_remove_by_cost_score_threshold();
   u32 max_ops       = realize_remove_by_cost_score_max_ops();
   u32 max_consumers = realize_remove_by_cost_score_max_consumers();
+  u32 budget        = realize_remove_by_cost_score_consumer_budget();
   int dump = realize_dump_fusion_candidates_enabled();
   u32 hits = 0;
   // Iterate the bufferize graph directly - this rule is the first
@@ -1120,6 +1173,17 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
                 " threshold=%llu\n",
                 (unsigned long long)b->loc, (unsigned)b->op,
                 (unsigned long long)score, (unsigned long long)threshold);
+      }
+      continue;
+    }
+    if (!realize_remove_by_cost_score_consumers_fit_tile(b, budget)) {
+      if (dump) {
+        fprintf(stderr,
+                "realize_rewrite_skip rule=remove-by-cost-score"
+                " reason=tile-feasibility loc=%llu op=%u ops=%u"
+                " budget=%u\n",
+                (unsigned long long)b->loc, (unsigned)b->op,
+                (unsigned)b->recompute_ops, (unsigned)budget);
       }
       continue;
     }
