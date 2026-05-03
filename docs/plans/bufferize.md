@@ -828,26 +828,53 @@ where divandmod patterns survive past CSE/DCE.
 
 Latest bounded Metal/tile beautiful-mnist canary
 (`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`) after Phase
-1 (broadcast-reduce predicate), the metal-op fallback fix for
-REDUCE-rooted absorbing kernels, AND the FLAT_GRID-with-nested-
-reduce relaxation (`THVM_TILE_NESTED_REDUCE_FLAT_GRID`):
+1, the metal-op fallback fix, the FLAT_GRID-with-nested-reduce
+relaxation (`THVM_TILE_NESTED_REDUCE_FLAT_GRID`), AND the
+`inline-adjacent-reduce-chains` source/movement-gate lift
+(`THVM_BUFFERIZE_LIFT_REDUCE_CHAIN_GATES`):
 
-- timed step: `~32 ms` (vs `694 ms` original reference, -95%; vs
-  `84.9 ms` pre-FLAT_GRID baseline, -62%);
-- kernels: `118` (vs `1330` original reference, -91%);
-- dispatch: `metal-tile=118`, `metal-op=0` (vs `108/10` pre-fix;
-  ALL kernels now through the tile JIT path);
-- peak retained Metal memory: `62 MB` (vs `1881 MB` pre-Phase-1
-  baseline, -97%; vs `171 MB` pre-FLAT_GRID, -64%).
+- timed step: `~20 ms` (vs `694 ms` original reference, -97%);
+- kernels: `72` (vs `1330` original reference, -95%);
+- dispatch: `metal-tile=72`, `metal-op=0` (all kernels on tile);
+- peak retained Metal memory: `58 MB` (vs `1881 MB` pre-Phase-1
+  baseline, -97%).
 
-The structural fix lifted nested-reduce kernels onto tile-JIT.
-The renderer's `rmt_emit_value_with_reduce` was already correct
-for `STORE(idx, MUL(REDUCE_SUM(x), CONST))` shapes -- it wraps the
-reduce loop and substitutes the accumulator into the surrounding
-expression -- but `rmt_axis_mode` rejected the kernel before the
-renderer could emit code.  Removing that gate (with the existing
-renderer doing the right thing) was a 5-line change for a 64%
-wall-time reduction.
+Two structural lifts compounded:
+
+1. **FLAT_GRID nested-reduce lift** (commit 3b11bf6): the
+   renderer's `rmt_emit_value_with_reduce` was already correct
+   for `STORE(idx, MUL(REDUCE_SUM(x), CONST))` shapes (wraps the
+   reduce loop, substitutes the accumulator into the surrounding
+   expression) but `rmt_axis_mode` rejected the kernel before the
+   renderer could emit code.  Removing that gate moved 10 metal-op
+   fallbacks back to tile-JIT, reduced wall time by 64%.
+
+2. **inline-adjacent-reduce-chains source/movement gate lift**
+   (commit 90c89a7): with FLAT_GRID handling nested reduces, the
+   conservative gates that blocked BN-var-style chains
+   (source = `centered*centered`, EXPAND in subtree) became safe
+   to lift.  The fused reduce-chain kernel stays on tile-JIT.
+   Reduced kernel count by 39% (118 -> 72) and wall time by 37%.
+
+Going below 72 kernels needs further structural work:
+
+- **Multi-reduce per kernel**: rangeify's `> 1 reduce` gate at
+  `rangeify_try_lower_elementwise:1410` rejects kernels whose
+  program has more than one REDUCE.  Lifting this lets BN-mean +
+  BN-var fuse into one kernel that produces both outputs from a
+  shared reduce loop nest.  Substantial rangeify refactor
+  (currently `red`, `reduce_kind`, `reduce_size`, etc. are scalar;
+  would need arrays).
+
+- **Cross-shape kernel-merge**: the planner's
+  `merge_shapes_equal` requires identical iter shapes.
+  Compatible-but-not-identical shapes (one is a slice of the
+  other) could merge with a guarded inner loop.
+
+- **Cost-score threshold tuning**: `THVM_BUFFERIZE_REMOVE_SCORE_
+  THRESHOLD=20000` or lower hangs Wolfram on this canary -- the
+  rule cascades into very expensive recompiles.  The default
+  `50000` is the practical lower bound for this workload.
 
 Phase 1 alone closed most of the kernel-count gap.  The chain
 predicate now matches BatchNorm-train / BN-grad shapes via:
