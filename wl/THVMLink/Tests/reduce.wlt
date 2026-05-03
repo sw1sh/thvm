@@ -106,6 +106,30 @@ VerificationTest[
     TInit[];
     data = ArrayReshape[Range[120] * 1.0, {2, 3, 4, 5}];
     x = TTensorCreate @ NumericArray[data, "Real32"];
+    before = TKernelCount[];
+    r = TRealize @ TUOpReduce[TUOpReduce[TUOpReduce[x, 3, "SUM"], 2, "SUM"], 0, "SUM"];
+    after = TKernelCount[];
+    scalar = TKernelScalarUops[before];
+    red = Select[scalar, #["op"] === "S_REDUCE_SUM" &];
+    {
+        TTensorShape[r],
+        Normal @ TTensorData[r],
+        after - before,
+        Length @ First[red]["src"]
+    },
+    {
+        {3},
+        Table[Total[Flatten[data[[All, c, All, All]]]], {c, 3}],
+        1,
+        4
+    },
+    TestID -> "reduce/chain-noncontiguous-channel-sum-one-kernel"
+]
+
+VerificationTest[
+    TInit[];
+    data = ArrayReshape[Range[120] * 1.0, {2, 3, 4, 5}];
+    x = TTensorCreate @ NumericArray[data, "Real32"];
     xp = TUOpReshape[TUOpPermute[x, {1, 0, 2, 3}], {3, 40}];
     before = TKernelCount[];
     r = TRealize @ TUOpReduce[xp, 1, "SUM"];

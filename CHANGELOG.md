@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Changed: fuse non-contiguous channel reduce chains
+
+Reduce-chain collection now allows source-axis gaps when the original
+SUM chain consumes axes from inner to outer.  Rangeify maps those
+preserved source axes directly to explicit scalar reduce ranges, which
+lets `{B,C,H,W} -> {C}` channel reductions lower as one scalar/tile
+kernel.  The bounded BS=32 beautiful-mnist canary dropped from 1388 to
+1386 kernels and from 2118 to 2062 replay dispatches, with memory
+essentially unchanged.
+
 ### Changed: lower multi-range scalar reducers through tile Metal
 
 Tile plans now accept scalar reducers with multiple explicit reduce

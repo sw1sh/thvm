@@ -354,24 +354,20 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
     if (removed[i] < min_axis) min_axis = removed[i];
     if (removed[i] > max_axis) max_axis = removed[i];
   }
-  if (max_axis - min_axis + 1 != n) return 0;
   u8 seen[MAX_DIM] = {0};
   for (u32 i = 0; i < n; i++) {
     if (removed[i] >= MAX_DIM || seen[removed[i]]) return 0;
     seen[removed[i]] = 1;
   }
-  for (u32 axis = min_axis; axis <= max_axis; axis++) {
-    if (!seen[axis]) return 0;
-  }
 
   if (kind == REDUCE_SUM) {
     for (u32 i = 1; i < n; i++) {
-      if (removed[i - 1] != removed[i] + 1) return 0;
+      if (removed[i - 1] <= removed[i]) return 0;
     }
   }
 
   u64 axis_size = 1;
-  for (u32 i = min_axis; i <= max_axis; i++) axis_size *= src_shape.dims[i];
+  for (u32 i = 0; i < n; i++) axis_size *= src_shape.dims[removed[i]];
   u64 inner = 1;
   for (u32 i = max_axis + 1; i < src_shape.ndim; i++) inner *= src_shape.dims[i];
   u64 out_numel = shape_numel_u32(&out_shape);
@@ -397,8 +393,21 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
   for (u32 i = 0; i < out_shape.ndim; i++) {
     out->out_dims[i] = out_shape.dims[i];
   }
+  u32 sorted_axes[MAX_DIM];
   for (u32 i = 0; i < n; i++) {
-    out->reduce_axes[i] = (u8)(min_axis + i);
+    sorted_axes[i] = removed[i];
+  }
+  for (u32 i = 0; i < n; i++) {
+    for (u32 j = i + 1; j < n; j++) {
+      if (sorted_axes[j] < sorted_axes[i]) {
+        u32 tmp = sorted_axes[i];
+        sorted_axes[i] = sorted_axes[j];
+        sorted_axes[j] = tmp;
+      }
+    }
+  }
+  for (u32 i = 0; i < n; i++) {
+    out->reduce_axes[i] = (u8)sorted_axes[i];
   }
   return 1;
 }

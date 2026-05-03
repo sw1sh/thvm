@@ -1428,13 +1428,19 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 c = emit_iconst(ke, (i64)reduce_size);
       reduce_range = emit_ibinop(ke, S_IMOD, reduce_range, c);
     }
-    // Pre-reduce input shape = output_shape ++ {reduce_size}.
-    in_ndim = os->ndim + 1;
-    if (in_ndim > MAX_DIM) RBAIL_MID("reduce in_ndim > MAX_DIM");
-    u32 in_dims[MAX_DIM + 1];
-    for (u32 d = 0; d < os->ndim; d++) in_dims[d] = os->dims[d];
-    in_dims[os->ndim] = reduce_size;
-    row_major_strides(in_dims, in_ndim, in_strides);
+    if (red->n_reduce_axes > 0 && red->src0_ndim > 0
+        && red->src0_ndim <= MAX_DIM) {
+      in_ndim = red->src0_ndim;
+      row_major_strides(red->src0_dims, in_ndim, in_strides);
+    } else {
+      // Pre-reduce input shape = output_shape ++ {reduce_size}.
+      in_ndim = os->ndim + 1;
+      if (in_ndim > MAX_DIM) RBAIL_MID("reduce in_ndim > MAX_DIM");
+      u32 in_dims[MAX_DIM + 1];
+      for (u32 d = 0; d < os->ndim; d++) in_dims[d] = os->dims[d];
+      in_dims[os->ndim] = reduce_size;
+      row_major_strides(in_dims, in_ndim, in_strides);
+    }
   }
 
   // 2. Output buffer + STORE address (uses LOOP ranges only).
@@ -1522,6 +1528,37 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       RngsCtx in_rngs = rngs[i];
       switch (p->opcode) {
         case UOP_REDUCE: {
+          if (p->n_reduce_axes > 0 && p->src0_ndim > 0
+              && p->src0_ndim <= MAX_DIM && p->out_ndim <= MAX_DIM
+              && reduce_n_ranges == p->n_reduce_axes
+              && in_rngs.ndim == p->out_ndim) {
+            RngsCtx src_rngs = {0};
+            src_rngs.ndim = p->src0_ndim;
+            src_rngs.valid_mask = in_rngs.valid_mask;
+            u32 out_d = 0;
+            for (u32 d = 0; d < p->src0_ndim; d++) {
+              u32 reduce_pos = (u32)-1;
+              for (u32 r = 0; r < p->n_reduce_axes; r++) {
+                if (p->reduce_axes[r] == d) {
+                  reduce_pos = r;
+                  break;
+                }
+              }
+              if (reduce_pos != (u32)-1) {
+                src_rngs.refs[d] = reduce_ranges[reduce_pos];
+              } else {
+                if (out_d >= in_rngs.ndim) {
+                  src_rngs.ndim = 0;
+                  break;
+                }
+                src_rngs.refs[d] = in_rngs.refs[out_d++];
+              }
+            }
+            if (src_rngs.ndim != 0 && out_d == in_rngs.ndim) {
+              in_rngs = src_rngs;
+              break;
+            }
+          }
           // REDUCE input shape = output ++ {reduce_size at reduce_axis}.
           // Compute reduce_axis from reduce_inner (product of input
           // dims AFTER the reduce axis): walk body shape from the
@@ -1865,6 +1902,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         if (addr == 0) RBAIL_MID("pre-INDEX-E build_addr failed");
         u32 src[2] = {param, addr};
         idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
+      } else if (red->n_reduce_axes > 1
+                 && input_rngs_pre[i].ndim == v->shape.ndim
+                 && v->shape.ndim > 0) {
+        goto pre_index_rngs_fallback;
       } else if (in_numel == reduce_in_numel
                  && v->shape.ndim == in_ndim) {
         // Partial reduce: input has rank in_ndim (= os->ndim + 1).
