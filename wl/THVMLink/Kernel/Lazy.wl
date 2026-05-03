@@ -102,6 +102,19 @@ tlazyEncode[l_List]    := (ensureInit[];
         TTerm[$termNewCtrFn[$LazyTuple, children]]
     ]
 )
+(* Compound symbolic head: f[a_1, ..., a_n] -> CTR labelled by `f`
+   with the encoded args as children.  Symbol-ctor labels live
+   above the reserved band ($lazyNextSymLabel >= 10001) so they
+   don't clash with the special $LazyCons / $LazyNil / $LazyTuple
+   slots.  A 0-ary symbol falls through to the `tlazyEncode[s_Symbol]`
+   rule above; this clause covers the n>=1 case. *)
+tlazyEncode[expr_] /; Head[expr] =!= TTerm &&
+                     Head[Head[Unevaluated[expr]]] === Symbol :=
+    (ensureInit[];
+     With[{lab    = symLabelFor[ToString[Head[Unevaluated[expr]]]],
+           children = ttermRaw /@ (tlazyEncode /@ List @@ Unevaluated[expr])},
+        TTerm[$termNewCtrFn[lab, children]]
+     ])
 
 TLazyEncode[v_] := tlazyEncode[v]
 
