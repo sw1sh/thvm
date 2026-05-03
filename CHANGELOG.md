@@ -6,6 +6,25 @@ dated section.
 
 ## Unreleased
 
+### Added: pad/perm/flip data on BIndexChainOp
+
+`BIndexChainOp` now carries the op-specific data needed to drive
+`RngsCtx`-style chain replay without consulting the heap:
+`pad_widths[2*MAX_DIM]` for PAD/SHRINK, `axis_perm[MAX_DIM]` for
+PERMUTE, and `flip_mask` for FLIP, alongside the previously-recorded
+`src_dims`/`out_dims`.  `bufferize_record_chain_op` reads each
+op's heap cells directly using the documented layouts in
+`uop/<op>.c` and zeroes the slot first so unused fields stay
+deterministic.
+
+The chain now fully describes every movement op on a producer ->
+consumer edge.  Rangeify's per-USE addressing in
+`rngs_ctx_movement_src` can be rerouted off `KProgOp` once a
+materialize-side hookup populates each kernel's input edge from
+the bufferize graph.  `tests/test_bufferize.c` adds three cases
+(PAD widths {1,2}, PERMUTE perm {1,0}, FLIP mask 0x1) verifying
+the extraction; 193/193.
+
 ### Added: per-op chain data on B_INDEX + identity-reshape elision
 
 `schedule/bufferize.c` now records the source/output dims of each

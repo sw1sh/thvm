@@ -129,20 +129,26 @@ static void bufferize_extend_chain(BIndex *chain, u8 op) {
 }
 
 // Record one movement-op into the chain_ops array, capturing the
-// per-op source and output shapes via term_shape_in so rangeify
-// callers can read the canonical edge transform without walking
-// the heap themselves.  Bails silently if the chain is already
-// full (BUFFERIZE_INDEX_CHAIN_MAX) so deeply-stacked movement
-// chains keep working at the cost of losing trailing detail.
+// per-op source and output shapes via term_shape_in plus the
+// op-specific data (pad widths, axis perm, flip mask) read from the
+// op's heap cells.  Bails silently if the chain is already full
+// (BUFFERIZE_INDEX_CHAIN_MAX) so deeply-stacked movement chains
+// keep working at the cost of losing trailing detail.
+//
+// Heap layouts (see uop/<op>.c):
+//   RESHAPE: [src, NUM(ndim), NUM(d0), ..., NUM(d_n-1)]
+//   EXPAND : same as RESHAPE
+//   PAD    : [src, NUM(ndim), NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]
+//   SHRINK : same as PAD
+//   PERMUTE: [src, NUM(ndim), NUM(p0), ..., NUM(p_n-1)]
+//   FLIP   : [src, NUM(axes_bitmask)]
 static void bufferize_record_chain_op(BIndex *chain, Term op_term, u8 op,
                                       Term src_term) {
   if (!bufferize_op_is_movement(op)) return;
   if (chain->chain_op_count >= BUFFERIZE_INDEX_CHAIN_MAX) return;
   BIndexChainOp *slot = &chain->chain_ops[chain->chain_op_count++];
-  slot->op       = op;
-  slot->src_ndim = 0;
-  slot->out_ndim = 0;
-  slot->_pad     = 0;
+  *slot = (BIndexChainOp){0};
+  slot->op = op;
   Shape s = {0};
   if (term_shape_in(op_term, 0, &s) && s.ndim <= MAX_DIM) {
     slot->out_ndim = (u8)s.ndim;
@@ -152,6 +158,35 @@ static void bufferize_record_chain_op(BIndex *chain, Term op_term, u8 op,
   if (term_shape_in(src_term, 0, &ss) && ss.ndim <= MAX_DIM) {
     slot->src_ndim = (u8)ss.ndim;
     for (u32 d = 0; d < ss.ndim; d++) slot->src_dims[d] = ss.dims[d];
+  }
+  // Op-specific heap reads.
+  u64 op_loc = (term_tag(op_term) == TAG_UOP) ? term_val(op_term) : 0;
+  if (op_loc == 0 && term_tag(op_term) != TAG_UOP) return;
+  if (op == UOP_PAD || op == UOP_SHRINK) {
+    Term n_cell = heap_read(op_loc + 1);
+    u32 n = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 0;
+    if (n > MAX_DIM) n = MAX_DIM;
+    for (u32 d = 0; d < n; d++) {
+      Term b = heap_read(op_loc + 2 + 2 * d + 0);
+      Term e = heap_read(op_loc + 2 + 2 * d + 1);
+      slot->pad_widths[2 * d + 0] =
+          (term_tag(b) == TAG_NUM) ? (u32)term_val(b) : 0;
+      slot->pad_widths[2 * d + 1] =
+          (term_tag(e) == TAG_NUM) ? (u32)term_val(e) : 0;
+    }
+  } else if (op == UOP_PERMUTE) {
+    Term n_cell = heap_read(op_loc + 1);
+    u32 n = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 0;
+    if (n > MAX_DIM) n = MAX_DIM;
+    for (u32 d = 0; d < n; d++) {
+      Term p = heap_read(op_loc + 2 + d);
+      slot->axis_perm[d] =
+          (term_tag(p) == TAG_NUM) ? (u8)(term_val(p) & 0xFFu) : 0;
+    }
+  } else if (op == UOP_FLIP) {
+    Term m = heap_read(op_loc + 1);
+    slot->flip_mask =
+        (term_tag(m) == TAG_NUM) ? (u8)(term_val(m) & 0xFFu) : 0;
   }
 }
 

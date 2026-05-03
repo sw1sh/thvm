@@ -590,6 +590,106 @@ int main(void) {
     CHECK_EQ(found_chain_with_op, 1);
   }
 
+  TEST_BEGIN("bufferize/chain-op-records-pad-widths");
+  // Build a multi-consumer producer that one branch reads through
+  // a PAD.  The chain entry on the padded edge must capture the
+  // begin/end pad widths verbatim.
+  u32 pad_widths[2] = {1, 2};   // begin=1, end=2 on axis 0
+  Term pd_s    = uop_binary(UOP_ADD, a, b);
+  Term pd_lin  = uop_unary(UOP_NEG, pd_s);                // direct edge
+  Term pd_pad  = uop_pad(pd_s, 1, pad_widths);            // padded edge ({6})
+  Term pd_lin_pad = uop_pad(pd_lin, 1, pad_widths);
+  Term pd_root = uop_binary(UOP_ADD, pd_lin_pad, pd_pad);
+  realize_classify(pd_root);
+  u32 pd_s_idx    = bufferize_find_by_loc(term_val(pd_s));
+  u32 pd_root_idx = bufferize_find_by_loc(term_val(pd_root));
+  CHECK(pd_s_idx != 0xFFFFFFFFu);
+  CHECK(pd_root_idx != 0xFFFFFFFFu);
+  if (pd_s_idx != 0xFFFFFFFFu && pd_root_idx != 0xFFFFFFFFu) {
+    u32 pd_s_id    = bufferize_buffer_at(pd_s_idx)->buffer_id;
+    u32 pd_root_id = bufferize_buffer_at(pd_root_idx)->buffer_id;
+    int found_pad_widths = 0;
+    for (u32 i = 0; i < bufferize_index_count(); i++) {
+      BIndex const *e = bufferize_index_at(i);
+      if (e->source_buffer_id != pd_s_id
+          || e->consumer_buffer_id != pd_root_id) continue;
+      for (u32 j = 0; j < e->chain_op_count; j++) {
+        BIndexChainOp const *o = &e->chain_ops[j];
+        if (o->op != UOP_PAD) continue;
+        CHECK_EQ(o->pad_widths[0], 1);
+        CHECK_EQ(o->pad_widths[1], 2);
+        found_pad_widths = 1;
+      }
+    }
+    CHECK_EQ(found_pad_widths, 1);
+  }
+
+  TEST_BEGIN("bufferize/chain-op-records-axis-perm");
+  // Multi-consumer producer with one branch through a PERMUTE.
+  u32 perm[2] = {1, 0};   // transpose
+  u32 dims_2x3[2] = {2, 3};
+  u32 dims_3x2[2] = {3, 2};
+  // Build a fresh shape-{2,3} producer.
+  u32 ta23 = tensor_alloc(CURRENT_BACKEND, (Shape){.ndim=2,.dims={2,3}}, DT_FP32);
+  u32 tb23 = tensor_alloc(CURRENT_BACKEND, (Shape){.ndim=2,.dims={2,3}}, DT_FP32);
+  Term a23 = term_new(0, TAG_TEN, DT_FP32, ta23);
+  Term b23 = term_new(0, TAG_TEN, DT_FP32, tb23);
+  Term pm_s   = uop_binary(UOP_ADD, a23, b23);          // shape {2,3}
+  Term pm_dir = uop_unary(UOP_NEG, pm_s);                // direct edge
+  Term pm_per = uop_permute(pm_s, 2, perm);              // shape {3,2}
+  Term pm_dir_p = uop_permute(pm_dir, 2, perm);          // shape {3,2}
+  Term pm_root = uop_binary(UOP_ADD, pm_dir_p, pm_per);
+  realize_classify(pm_root);
+  (void)dims_2x3; (void)dims_3x2;
+  u32 pm_s_idx    = bufferize_find_by_loc(term_val(pm_s));
+  u32 pm_root_idx = bufferize_find_by_loc(term_val(pm_root));
+  if (pm_s_idx != 0xFFFFFFFFu && pm_root_idx != 0xFFFFFFFFu) {
+    u32 pm_s_id    = bufferize_buffer_at(pm_s_idx)->buffer_id;
+    u32 pm_root_id = bufferize_buffer_at(pm_root_idx)->buffer_id;
+    int found_perm = 0;
+    for (u32 i = 0; i < bufferize_index_count(); i++) {
+      BIndex const *e = bufferize_index_at(i);
+      if (e->source_buffer_id != pm_s_id
+          || e->consumer_buffer_id != pm_root_id) continue;
+      for (u32 j = 0; j < e->chain_op_count; j++) {
+        BIndexChainOp const *o = &e->chain_ops[j];
+        if (o->op != UOP_PERMUTE) continue;
+        CHECK_EQ(o->axis_perm[0], 1);
+        CHECK_EQ(o->axis_perm[1], 0);
+        found_perm = 1;
+      }
+    }
+    CHECK_EQ(found_perm, 1);
+  }
+
+  TEST_BEGIN("bufferize/chain-op-records-flip-mask");
+  // Multi-consumer producer with one branch through a FLIP on axis 0.
+  Term fp_s   = uop_binary(UOP_ADD, a, b);   // shape {3}
+  Term fp_dir = uop_unary(UOP_NEG, fp_s);
+  Term fp_flp = uop_flip(fp_s, 0x1u);        // flip axis 0
+  Term fp_dir_f = uop_flip(fp_dir, 0x1u);
+  Term fp_root = uop_binary(UOP_ADD, fp_dir_f, fp_flp);
+  realize_classify(fp_root);
+  u32 fp_s_idx    = bufferize_find_by_loc(term_val(fp_s));
+  u32 fp_root_idx = bufferize_find_by_loc(term_val(fp_root));
+  if (fp_s_idx != 0xFFFFFFFFu && fp_root_idx != 0xFFFFFFFFu) {
+    u32 fp_s_id    = bufferize_buffer_at(fp_s_idx)->buffer_id;
+    u32 fp_root_id = bufferize_buffer_at(fp_root_idx)->buffer_id;
+    int found_flip = 0;
+    for (u32 i = 0; i < bufferize_index_count(); i++) {
+      BIndex const *e = bufferize_index_at(i);
+      if (e->source_buffer_id != fp_s_id
+          || e->consumer_buffer_id != fp_root_id) continue;
+      for (u32 j = 0; j < e->chain_op_count; j++) {
+        BIndexChainOp const *o = &e->chain_ops[j];
+        if (o->op != UOP_FLIP) continue;
+        CHECK_EQ(o->flip_mask, 0x1u);
+        found_flip = 1;
+      }
+    }
+    CHECK_EQ(found_flip, 1);
+  }
+
   TEST_BEGIN("bufferize/identity-reshape-folded-out-of-chain");
   // RESHAPE to the same shape is an identity and must be elided.
   // Build sh -> RESHAPE({3}) -> NEG; sh -> NEG.  The reshape edge's

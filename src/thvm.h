@@ -1322,9 +1322,11 @@ typedef struct {
   u8  op;                        // UOP_RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP
   u8  src_ndim;
   u8  out_ndim;
-  u8  _pad;
-  u32 src_dims[MAX_DIM];
-  u32 out_dims[MAX_DIM];
+  u8  flip_mask;                 // FLIP only: per-axis bitmask
+  u32 src_dims [MAX_DIM];
+  u32 out_dims [MAX_DIM];
+  u32 pad_widths[2 * MAX_DIM];   // PAD/SHRINK: interleaved {b0,e0,b1,e1,...}
+  u8  axis_perm [MAX_DIM];       // PERMUTE: out axis i comes from src axis_perm[i]
 } BIndexChainOp;
 typedef struct {
   u32 source_buffer_id;       // 1-based id of producer B_BUFFERIZE

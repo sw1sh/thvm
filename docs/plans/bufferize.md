@@ -442,13 +442,15 @@ Tasks:
 - ~~expose an edge query API (`bufferize_edge_summary`) so rangeify
   and materialize can consult B_INDEX directly~~;
 - ~~add focused tests for shared producer with multiple movement views~~;
-- ~~capture per-op source/output dims on each chain entry~~ (RESHAPE
-  / EXPAND / SHRINK shapes recorded; pad widths, axis perms, and
-  flip masks remain heap-only for now);
+- ~~capture per-op source/output dims on each chain entry~~;
+- ~~capture pad widths, axis perms, and flip masks on each chain
+  entry~~ (BIndexChainOp now fully describes each movement op);
 - reroute `RngsCtx` chain construction in `schedule/rangeify.c`
   through `bufferize_edge_summary` so the canonical chain drives
   codegen instead of the heap-walk-derived `KProgOp` chain
-  (pending - depends on the missing pad/perm/flip data above);
+  (pending - all required data is now on BIndex, the remaining
+  work is materialize-side wiring + a kernel-entry per-input-slot
+  link to a bufferize edge);
 - preserve valid masks through `S_IWHERE` from `has_pad` rather than
   rederiving them inside `rngs_ctx_pad` (pending).
 
