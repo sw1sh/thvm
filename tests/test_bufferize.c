@@ -786,6 +786,61 @@ int main(void) {
     CHECK_EQ(bufferize_indexes_for_source(ie_s_id, NULL, 0), n_src);
   }
 
+  TEST_BEGIN("bufferize/kernel-input-source-buffer-id-flows-through");
+  // End-to-end: build a multi-consumer graph, run thvm_materialize,
+  // then read the sink kernel's input slots and verify one of them
+  // carries the source buffer id of the shared producer.  This
+  // exercises the materialize-side wiring that links each kernel
+  // input slot back to its bufferize edge.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  Term ks_a   = uop_binary(UOP_ADD, a, b);
+  Term ks_l   = uop_binary(UOP_MUL, ks_a, c);
+  Term ks_r   = uop_binary(UOP_MUL, ks_a, a);
+  Term ks_t   = uop_binary(UOP_ADD, ks_l, ks_r);
+  Term ks_out = thvm_materialize(ks_t);
+  // Resolve out to its kernel id.
+  CHECK_EQ(term_tag(ks_out), TAG_UOP);
+  CHECK_EQ(term_ext(ks_out), UOP_KERNEL);
+  Term ks_kid_term = heap_read(term_val(ks_out) + 1);
+  CHECK_EQ(term_tag(ks_kid_term), TAG_NUM);
+  u32 ks_kid = (u32)term_val(ks_kid_term);
+  // The sink kernel must have at least one input slot whose source
+  // buffer id matches the bufferize buffer id of the shared producer.
+  u32 ks_a_bidx = bufferize_find_by_loc(term_val(ks_a));
+  CHECK(ks_a_bidx != 0xFFFFFFFFu);
+  if (ks_a_bidx != 0xFFFFFFFFu) {
+    u32 ks_a_id = bufferize_buffer_at(ks_a_bidx)->buffer_id;
+    int found = 0;
+    for (u32 i = 0; i < KERNELS[ks_kid].n_inputs; i++) {
+      if (kernel_entry_input_source_buffer_id(ks_kid, i) == ks_a_id) {
+        found = 1;
+        // Edge summary lookup must succeed and report the same source.
+        BIndex edge;
+        int ok = kernel_entry_input_edge_summary(ks_kid, i, &edge);
+        CHECK_EQ(ok, 1);
+        if (ok) CHECK_EQ(edge.source_buffer_id, ks_a_id);
+      }
+    }
+    CHECK_EQ(found, 1);
+  }
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
+  TEST_BEGIN("bufferize/leaf-input-source-buffer-id-is-zero");
+  // Single-kernel graph with TEN leaves: every input slot's source
+  // buffer id should be 0 (no upstream bufferize boundary).
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  Term lf_inner = uop_binary(UOP_ADD, a, b);
+  Term lf_root  = uop_binary(UOP_MUL, lf_inner, c);
+  Term lf_out   = thvm_materialize(lf_root);
+  CHECK_EQ(term_tag(lf_out), TAG_UOP);
+  CHECK_EQ(term_ext(lf_out), UOP_KERNEL);
+  Term lf_kid_term = heap_read(term_val(lf_out) + 1);
+  u32 lf_kid = (u32)term_val(lf_kid_term);
+  for (u32 i = 0; i < KERNELS[lf_kid].n_inputs; i++) {
+    CHECK_EQ(kernel_entry_input_source_buffer_id(lf_kid, i), 0);
+  }
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
   TEST_BEGIN("bufferize/aggregate-totals-match-per-buffer-sums");
   // Rebuild the multi-consumer graph and verify aggregates equal
   // the sum of per-buffer fields.

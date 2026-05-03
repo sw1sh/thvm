@@ -818,6 +818,15 @@ typedef struct KernelEntry {
   // store the symbolic Term value here.  kernel_fire_by_id resolves
   // each non-zero entry through term_resolve before reading buffers.
   Term     *input_terms;
+  // Phase 2 follow-up (rangeify rerouting prep): per-input-slot
+  // bufferize source-buffer id.  visit() populates this whenever
+  // the input slot was created for another realized boundary, so
+  // rangeify and other consumers can call bufferize_edge_summary
+  // with `(this kernel's loc, source loc)` to read the canonical
+  // edge-local chain instead of recovering it from KProgOp.  0
+  // means "leaf input or unknown source" and the per-USE KProgOp
+  // chain remains the only source of truth for that slot.
+  u32      *input_source_buffer_ids;
 
   u32       output_tid;            // TenDesc id we write to
   u32       output_dtype;
@@ -1429,6 +1438,17 @@ fn u64               bufferize_total_recompute_ops(void);
 // code-emit can iterate boundaries in dependency order.
 fn u32  materialize_boundary_count(void);
 fn u64  materialize_boundary_at(u32 i);
+
+// Phase 2 follow-up: per-input-slot bufferize source id read from a
+// materialized KernelEntry.  Returns the 1-based buffer id stored
+// during visit() (0 when the slot's source is a leaf or was not
+// resolvable to a bufferize buffer).  Pass `kid = 0` to query the
+// default-context kernel pool.  The companion
+// kernel_entry_input_edge_summary pulls the BIndex chain summary
+// for that slot via bufferize_edge_summary, looking up the
+// consumer loc from the kernel's source_uop.
+fn u32  kernel_entry_input_source_buffer_id(u32 kid, u32 slot);
+fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
 
 // Leaf utilities other compilation units (realize_classify,
 // gc_mark, wnf/redex, interact/uop_kernel) reference.

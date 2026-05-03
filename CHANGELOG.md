@@ -6,6 +6,27 @@ dated section.
 
 ## Unreleased
 
+### Added: per-input-slot bufferize source id on KernelEntry
+
+`KernelEntry` gains an `input_source_buffer_ids[]` array sized
+alongside the other per-input arrays.  When `visit()` resolves an
+input slot to another realized boundary, it stores the source's
+1-based bufferize buffer id in this slot; leaf inputs (TENs and
+post-materialize UOP_KERNELs) keep the 0 sentinel.  New public
+accessors `kernel_entry_input_source_buffer_id(kid, slot)` and
+`kernel_entry_input_edge_summary(kid, slot, BIndex *out)` expose
+the wiring; the latter looks the source buffer up by id and calls
+`bufferize_edge_summary(consumer_loc, source_loc)` so rangeify and
+any cross-cutting tooling can read the canonical edge chain
+without walking the heap.
+
+This is the materialize-side hookup the Phase 2 plan called for.
+Behaviour is unchanged - rangeify still drives codegen from
+`KProgOp` - but the per-slot edge data is now reachable, which
+unblocks the rangeify rerouting.  `tests/test_bufferize.c` adds
+two end-to-end cases (multi-consumer source flows through to the
+sink kernel; leaf inputs report 0); 215/215.
+
 ### Changed: identity elision generalised to permute and expand
 
 `bufferize_apply_identity_reshape` now folds out identity PERMUTE

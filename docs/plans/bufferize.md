@@ -443,12 +443,15 @@ Tasks:
 - ~~capture per-op source/output dims on each chain entry~~;
 - ~~capture pad widths, axis perms, and flip masks on each chain
   entry~~ (BIndexChainOp now fully describes each movement op);
+- ~~materialize-side wiring + per-input-slot link to a bufferize
+  edge~~ (`KernelEntry.input_source_buffer_ids[]` + accessors
+  `kernel_entry_input_source_buffer_id` and
+  `kernel_entry_input_edge_summary`);
 - reroute `RngsCtx` chain construction in `schedule/rangeify.c`
   through `bufferize_edge_summary` so the canonical chain drives
   codegen instead of the heap-walk-derived `KProgOp` chain
-  (pending - all required data is now on BIndex, the remaining
-  work is materialize-side wiring + a kernel-entry per-input-slot
-  link to a bufferize edge);
+  (pending - all data plumbing is in place, the remaining work
+  is replacing the per-input addressing logic);
 - preserve valid masks through `S_IWHERE` from `has_pad` rather than
   rederiving them inside `rngs_ctx_pad` (pending).
 
