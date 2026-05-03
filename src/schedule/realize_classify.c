@@ -176,6 +176,73 @@ static u64 realize_unique_uop_parent(u64 child_loc) {
   return found;
 }
 
+// Walk a single chain branch starting from a *given* parent of a
+// reduce (or any other node) and verify it ends in EXPAND through
+// scalar-preserving ops.  Mirrors the historical
+// realize_reduce_consumer_is_broadcast_chain body but starts at
+// `parent` instead of finding it via realize_unique_uop_parent, so
+// the multi-parent rule can call it once per branch.
+static int realize_chain_from_parent_is_broadcast(u64 parent_loc) {
+  u64 cur = parent_loc;
+  for (u32 hops = 0; hops < 8; hops++) {
+    u32 idx = realize_info_find(cur);
+    if (idx == 0xFFFFFFFFu) return 0;
+    u8 pop = REALIZE_INFO[idx].op;
+    if (pop == UOP_EXPAND) return 1;
+    if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
+     || pop == UOP_EXP2 || pop == UOP_LOG2) {
+      u64 next = realize_unique_uop_parent(cur);
+      if (next == 0) return 0;
+      cur = next;
+      continue;
+    }
+    if (pop == UOP_ADD || pop == UOP_MUL) {
+      Term ca = term_resolve(heap_read(cur + 0));
+      Term cb = term_resolve(heap_read(cur + 1));
+      u8 has_const = 0;
+      if (term_tag(ca) == TAG_UOP && term_ext(ca) == UOP_CONST) has_const = 1;
+      if (term_tag(cb) == TAG_UOP && term_ext(cb) == UOP_CONST) has_const = 1;
+      if (!has_const) return 0;
+      u64 next = realize_unique_uop_parent(cur);
+      if (next == 0) return 0;
+      cur = next;
+      continue;
+    }
+    return 0;
+  }
+  return 0;
+}
+
+// Multi-parent variant: returns 1 iff EVERY UOp parent of
+// `reduce_loc` has a chain that ends in EXPAND.  Catches
+// BN-style reduces whose mean is consumed by both a centering
+// branch (REDUCE -> NEG -> ADD -> EXPAND) and a sister branch
+// also feeding an EXPAND (e.g. running-mean update post-grad);
+// fan-out by itself doesn't disqualify when both branches
+// broadcast back.  Returns 0 if any branch breaks the pattern OR
+// if the reduce has zero UOp parents.
+static int realize_reduce_consumer_is_broadcast_chain_all_parents(
+    u64 reduce_loc) {
+  u32 n_parents = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    u64 ploc = REALIZE_INFO[i].loc;
+    if (ploc == reduce_loc) continue;
+    u8  pop  = REALIZE_INFO[i].op;
+    u8  ar   = uop_arity(pop);
+    int hits = 0;
+    for (u8 j = 0; j < ar; j++) {
+      Term c = term_resolve(heap_read(ploc + j));
+      if (term_tag(c) == TAG_UOP && term_val(c) == reduce_loc) {
+        hits = 1; break;
+      }
+    }
+    if (!hits) continue;
+    if (!realize_chain_from_parent_is_broadcast(ploc)) return 0;
+    n_parents++;
+  }
+  return n_parents > 0;
+}
+
 // Walk a REDUCE's consumer chain and return 1 iff every hop is
 // scalar-preserving until we hit an EXPAND (the broadcast back to
 // vector shape).  The chain pattern this matches is the
@@ -1134,16 +1201,33 @@ static int realize_reduce_fuse_multi_enabled(void) {
 // independently and the consumer_count == 1 fast-reject is just
 // an optimisation.  Without it, multi-consumer REDUCEs whose
 // branches all bottom out at the same EXPAND would be considered.
+//
+// Phase 5 follow-up: the multi-parent variant
+// realize_reduce_consumer_is_broadcast_chain_all_parents accepts
+// fan-out reduces (BN-style) when EVERY parent's chain ends in
+// EXPAND.  Default-on; THVM_BUFFERIZE_REDUCE_FANOUT_BROADCAST=0
+// reverts to the unique-parent shortcut.
+static int realize_reduce_fanout_broadcast_enabled(void) {
+  char const *e = getenv("THVM_BUFFERIZE_REDUCE_FANOUT_BROADCAST");
+  return e == NULL ? 1 : (e[0] != '0');
+}
+
 static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
   (void)root;
   if (!realize_reduce_fuse_multi_enabled() && realize_reduce_count() != 1) {
     return 0;
   }
+  int try_multi = realize_reduce_fanout_broadcast_enabled();
   u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->op != UOP_REDUCE)    continue;
-    if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+    int matches =
+        realize_reduce_consumer_is_broadcast_chain(info->loc)
+     || (try_multi
+         && realize_reduce_consumer_is_broadcast_chain_all_parents(
+             info->loc));
+    if (!matches) continue;
     if (info->realized) hits++;
     realize_unmark(info, REALIZE_REASON_INLINE);
   }
