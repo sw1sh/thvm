@@ -1355,16 +1355,22 @@ int main(void) {
   CHECK(cg_emit_tile_metal(&KERNELS[mco_kid]) == NULL);
   CHECK(cg_emit_scalar(&KERNELS[mco_kid]) == NULL);
   CHECK(cg_emit_tile(&KERNELS[mco_kid]) == NULL);
-  // CPU interpreter bails (returns -1) on multi-output kernels too.
-  // Construct a minimal in_buf_ids array and call cpu_interpret;
-  // expect non-zero return.
+  // CPU interpreter (path 6 in cpu_dispatch_kernel) is the ONE
+  // dispatcher that supports multi-output kernels (Step 7 of
+  // multi-output groundwork lifted its guard).  Every other
+  // CPU-side dispatcher entry point still bails.  Construct a
+  // minimal in_buf_ids array and verify the per-path behavior.
   u32 mco_in_bufs[16] = {0};
   for (u32 i = 0; i < KERNELS[mco_kid].n_inputs && i < 16; i++) {
     u32 itid = KERNELS[mco_kid].input_tids[i];
     mco_in_bufs[i] = (itid != 0 && itid < TENS_NEXT) ? TENS[itid].buf_id : 0;
   }
   u32 mco_out_buf = TENS[KERNELS[mco_kid].output_tid].buf_id;
-  CHECK(cpu_interpret(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf) != 0);
+  // cpu_interpret now accepts multi-output kernels.  No KProgOp on
+  // this kernel is marked with store_extra_plus_one > 0, so the
+  // extra output buffer stays uninitialized; we just check the
+  // run succeeds.
+  CHECK_EQ(cpu_interpret(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   CHECK_EQ(cpu_dispatch_scalar(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), -1);
   CHECK_EQ(cpu_dispatch_tile  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   CHECK_EQ(cpu_blas_dispatch  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
@@ -1397,6 +1403,108 @@ int main(void) {
   thvm_materialize(km5_root);
   CHECK_EQ(materialize_kernel_merge_candidate_count(), 0);
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
+  TEST_BEGIN("kernel-merge/spliced-host-produces-both-outputs-via-cpu-interpret");
+  // Step 6 + 7: end-to-end verification.  Two sibling elementwise
+  // boundaries that share an input.  With THVM_KERNEL_MERGE=1, the
+  // planner flags the (host, child) pair, the splice action
+  // appends the child's program to the host's KernelEntry, marks
+  // the child's last KProgOp with store_extra_plus_one = 1, and
+  // registers the child's output as the kernel's first extra
+  // output.  cpu_interpret runs the merged program and the
+  // post-pass copies the marked op's regs[step] into the extra
+  // output's CpuBuf.  The test reads both buffers and asserts the
+  // values match the per-boundary single-output computation.
+  setenv("THVM_KERNEL_MERGE", "1", 1);
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  // Fresh tensors written with known values so we can predict the
+  // output bit-for-bit.  Reuse a/b/c (filled below).
+  u32 mox_a = alloc_f32_tensor(3);
+  u32 mox_b = alloc_f32_tensor(3);
+  u32 mox_c = alloc_f32_tensor(3);
+  f32 mox_a_vals[3] = {1.0f, 2.0f, 3.0f};
+  f32 mox_b_vals[3] = {10.0f, 20.0f, 30.0f};
+  f32 mox_c_vals[3] = {0.5f, 0.25f, 0.125f};
+  CHECK_EQ(cpu_buf_write(TENS[mox_a].buf_id, mox_a_vals, sizeof(mox_a_vals)), 0);
+  CHECK_EQ(cpu_buf_write(TENS[mox_b].buf_id, mox_b_vals, sizeof(mox_b_vals)), 0);
+  CHECK_EQ(cpu_buf_write(TENS[mox_c].buf_id, mox_c_vals, sizeof(mox_c_vals)), 0);
+  Term mox_at = term_new(0, TAG_TEN, DT_FP32, mox_a);
+  Term mox_bt = term_new(0, TAG_TEN, DT_FP32, mox_b);
+  Term mox_ct = term_new(0, TAG_TEN, DT_FP32, mox_c);
+  // Two siblings, each multi-consumer to realize: mox_l = a + b,
+  // mox_r = a * c.  Then sums into a root that consumes each
+  // twice via distinct parents.
+  Term mox_l = uop_binary(UOP_ADD, mox_at, mox_bt);
+  Term mox_r = uop_binary(UOP_MUL, mox_at, mox_ct);
+  Term mox_lhs = uop_binary(UOP_ADD, mox_l, mox_r);
+  Term mox_rhs = uop_binary(UOP_MUL, mox_l, mox_r);
+  Term mox_root = uop_binary(UOP_ADD, mox_lhs, mox_rhs);
+  thvm_materialize(mox_root);
+  // Planner must have flagged the pair.
+  CHECK_EQ(materialize_kernel_merge_candidate_count(), 1);
+  // Find the merged kernel: the host boundary's output_tid is the
+  // primary output (a+b); the kernel's first extra output is
+  // (a*c).  Walk KERNELS to find a kid with n_extra_outputs == 1
+  // AND at least one KProgOp marked with store_extra_plus_one>0
+  // (the splice action's signature).  Earlier tests in this file
+  // leave kids with n_extra_outputs=1 but no store_extra_plus_one
+  // (synthetic extras attached for guard tests); those don't have
+  // the marker.
+  u32 mox_host_kid = 0;
+  for (u32 k = 1; k < KERNELS_NEXT; k++) {
+    if (KERNELS[k].n_extra_outputs != 1) continue;
+    int has_store_extra = 0;
+    for (u32 op = 0; op < KERNELS[k].n_ops; op++) {
+      if (KERNELS[k].program[op].store_extra_plus_one > 0) {
+        has_store_extra = 1; break;
+      }
+    }
+    if (has_store_extra) { mox_host_kid = k; break; }
+  }
+  CHECK(mox_host_kid != 0);
+  if (mox_host_kid != 0) {
+    KernelEntry *mox_ke = &KERNELS[mox_host_kid];
+    CHECK_EQ(kernel_entry_output_count(mox_host_kid), 2);
+    u32 mox_primary_tid = kernel_entry_output_tid_at(mox_host_kid, 0);
+    u32 mox_extra_tid   = kernel_entry_output_tid_at(mox_host_kid, 1);
+    CHECK(mox_primary_tid != 0);
+    CHECK(mox_extra_tid != 0);
+    // Set up in_buf_ids the same way kernel_fire_by_id does.
+    u32 mox_in_bufs[16] = {0};
+    for (u32 i = 0; i < mox_ke->n_inputs && i < 16; i++) {
+      u32 itid = mox_ke->input_tids[i];
+      mox_in_bufs[i] = (itid != 0 && itid < TENS_NEXT) ? TENS[itid].buf_id : 0;
+    }
+    u32 mox_primary_buf = TENS[mox_primary_tid].buf_id;
+    int mox_rc = cpu_interpret(mox_ke, mox_in_bufs, mox_primary_buf);
+    CHECK_EQ(mox_rc, 0);
+    // Verify both buffers.  The host's primary corresponds to one
+    // of the two siblings; we don't know which a priori (planner
+    // picks the lower-index one), so accept either ordering.
+    f32 mox_primary_out[3] = {0};
+    f32 mox_extra_out  [3] = {0};
+    CHECK_EQ(cpu_buf_read(mox_primary_buf, mox_primary_out, sizeof(mox_primary_out)), 0);
+    CHECK_EQ(cpu_buf_read(TENS[mox_extra_tid].buf_id, mox_extra_out, sizeof(mox_extra_out)), 0);
+    f32 mox_expect_lr[3] = {11.0f, 22.0f, 33.0f};   // a + b
+    f32 mox_expect_mr[3] = {0.5f, 0.5f, 0.375f};    // a * c
+    int matched_lr_first = 1;
+    for (u32 i = 0; i < 3; i++) {
+      if (mox_primary_out[i] != mox_expect_lr[i]) { matched_lr_first = 0; break; }
+    }
+    if (matched_lr_first) {
+      for (u32 i = 0; i < 3; i++) {
+        CHECK_EQ(mox_primary_out[i], mox_expect_lr[i]);
+        CHECK_EQ(mox_extra_out  [i], mox_expect_mr[i]);
+      }
+    } else {
+      for (u32 i = 0; i < 3; i++) {
+        CHECK_EQ(mox_primary_out[i], mox_expect_mr[i]);
+        CHECK_EQ(mox_extra_out  [i], mox_expect_lr[i]);
+      }
+    }
+  }
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+  unsetenv("THVM_KERNEL_MERGE");
 
   thvm_free();
   TEST_REPORT();

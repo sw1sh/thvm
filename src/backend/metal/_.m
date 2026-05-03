@@ -776,6 +776,14 @@ static int metal_cpu_add_src_value(KernelEntry *ke,
 static int metal_try_cpu_small_add(KernelEntry *ke,
                                    u32 *in_buf_ids,
                                    u32 out_buf_id) {
+  // Multi-output kernels write to extra output buffers via
+  // KProgOp.store_extra_plus_one; this CPU-side small-add fast path
+  // only writes to out_buf_id (primary), so we'd silently drop the
+  // extra outputs.  Bail and let the per-op encoder (which DOES
+  // honor store_extra_plus_one) run instead.
+  if (cg_kernel_has_extra_outputs(ke)) {
+    return 0;
+  }
   if (ke->n_inputs <= 30 || ke->n_ops == 0) {
     return 0;
   }
@@ -2098,11 +2106,28 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     }
     if (!src_resolve_ok) { rc = -1; break; }
 
-    // Decide where this op writes: last op -> outBuf; else allocate
-    // a fresh intermediate Metal buffer sized for this op's dtype.
+    // Decide where this op writes:
+    //   - last op -> outBuf (legacy primary output);
+    //   - store_extra_plus_one > 0 -> extra output's Metal buffer
+    //     (Step 6 of multi-output groundwork: the merged kernel
+    //     fans the marked mid-program op directly into its
+    //     dedicated extra output buf; safe because the splice
+    //     puts the child boundary's final op last in its own
+    //     subtree, with no downstream KProgOp consuming it);
+    //   - otherwise -> a fresh intermediate Metal buffer sized
+    //     for this op's dtype.
     id<MTLBuffer> dst_buf;
     if (step + 1 == ke->n_ops) {
       dst_buf = outBuf;
+    } else if (p->store_extra_plus_one > 0) {
+      u32 extra_idx = (u32)p->store_extra_plus_one - 1u;
+      if (extra_idx >= (u32)ke->n_extra_outputs) { rc = -1; break; }
+      u32 extra_tid = ke->extra_output_tids[extra_idx];
+      if (extra_tid == 0 || extra_tid >= TENS_NEXT) { rc = -1; break; }
+      u32 extra_buf_id = TENS[extra_tid].buf_id;
+      if (extra_buf_id == 0 || extra_buf_id >= METAL_BUFS_NEXT
+          || METAL_BUFS[extra_buf_id].buf == nil) { rc = -1; break; }
+      dst_buf = METAL_BUFS[extra_buf_id].buf;
     } else {
       u32 dst_numel = p->numel ? p->numel : 1;
       u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(p->dtype, dst_numel));

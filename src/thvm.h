@@ -542,6 +542,17 @@ typedef struct {
   u8    chain_op_idx;
   u8    chain_edge_idx;
   u32   chain_input_slot;
+  // Multi-output kernel splice (Step 6 of multi-output groundwork).
+  // 0 (default, memset(0)-friendly) = "no extra store" -- this op's
+  // value lives in regs[step] only.  Single-output kernels never set
+  // this; cpu_interpret falls back to "last op writes to out_buf_id"
+  // for them so legacy emit paths stay untouched.
+  // 1..N = "this op's value ALSO writes to extra output slot N-1"
+  // (i.e. extra index 0..N-1 as accepted by kernel_entry_set_extra_output).
+  // Set by materialize's splice action when fusing two boundaries
+  // into one multi-output kernel; cpu_interpret reads it post-step
+  // and copies regs[step] into the extra output buffer.
+  u8    store_extra_plus_one;
 } KProgOp;
 
 // === scalar UOp lowering (Phase A of scalar_uops_lowering.md) ===

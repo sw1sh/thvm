@@ -1960,12 +1960,155 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   return VISIT_BAIL;
 }
 
+// === Multi-output kernel splice (Step 6 of multi-output groundwork) ===
+//
+// When THVM_KERNEL_MERGE=1 and the active backend's dispatcher
+// honors KProgOp.store_extra_plus_one (today: CPU's cpu_interpret
+// post-pass and Metal's per-op encoder), emit_kernel_for_boundary
+// calls splice_child_into_host on every host A whose plan flagged
+// a child B with merge_into[B]=A.
+//
+// Sequencing inside A's emit_kernel_for_boundary:
+//   1. Detect a planned merge child B (via find_merge_child).
+//   2. PREMERGE: visit B's term against the SAME (still-empty)
+//      KernelEntry so B's KProgOps land at [0, b_n).  Sharing the
+//      KernelEntry's input_tids[] table means common boundary
+//      inputs dedup automatically across A and B's subgraphs.
+//   3. Mark B's last op (b_n - 1) with store_extra_plus_one = 1,
+//      so cpu_interpret's post-pass / metal_dispatch_kernel's
+//      per-op encoder routes its value to the kernel's first
+//      extra output buffer instead of (or in addition to) the
+//      legacy scratch slot.
+//   4. The caller then visits A's term normally, appending A's
+//      KProgOps at [b_n, total).  The LAST op of the combined
+//      program is A's last op, which the legacy "last op writes
+//      to out_buf_id" cpu_interpret semantics correctly route to
+//      A's primary output tid.
+//   5. Allocate B's output TenDesc on the host backend, register
+//      it via kernel_entry_set_extra_output(slot=1, ...), and
+//      rebind BOUNDARY_TID[B] / BOUNDARY_TERM[B] so downstream
+//      visit() lookups + sink-kernel resolution see the new tid.
+//   6. Set TENS[extra_out_tid].producer_kid = host_kid so
+//      kernel_fire_by_id chases the merged kernel when wnf
+//      consumes B's output.
+//
+// emit_kernel_for_boundary(B) (later in the BOUNDARY_ORDER walk)
+// detects BOUNDARY_TID[B] is already populated and short-circuits
+// via the alias-Term early return at the top of the function.
+//
+// Returns 1 on successful splice, 0 if the splice was skipped or
+// bailed.  When 0, the caller proceeds with A's normal emit and
+// the planner's flag is silently downgraded.
+static int splice_child_into_host_premerge(KernelEntry *ke,
+                                            u32 host_bi,
+                                            u32 child_bi) {
+  (void)host_bi;
+  if (child_bi >= BOUNDARY_ORDER_LEN) return 0;
+  if (ke->n_extra_outputs >= KERNEL_MAX_EXTRA_OUTPUTS) return 0;
+  // Splice runs BEFORE A's visit; ke must be empty of program ops
+  // so B lands at indices [0, b_n).
+  if (ke->n_ops != 0) return 0;
+
+  u64 child_loc = BOUNDARY_ORDER[child_bi];
+  u32 child_ridx = realize_info_find(child_loc);
+  if (child_ridx == 0xFFFFFFFFu) return 0;
+
+  Shape child_shape = {0};
+  u8    child_op    = REALIZE_INFO[child_ridx].op;
+  Term  child_term  = term_new(0, TAG_UOP, child_op, child_loc);
+  if (!term_shape_in(child_term, 0, &child_shape)) return 0;
+  u32 child_dtype = DT_FP32;
+  term_dtype_in(child_term, 0, &child_dtype);
+
+  VisitMemo b_memo = {0};
+  u32 b_result = visit(child_term, ke, child_loc, &b_memo);
+  visit_memo_free(&b_memo);
+  if (b_result == VISIT_BAIL) {
+    ke->n_ops = 0;
+    return 0;
+  }
+  if (ke->n_ops == 0 || KSRC_IS_INPUT(b_result)) {
+    // Degenerate movement-op-alias case (child consumed as a
+    // single input slot).  Bail rather than synthesize a store-
+    // only op; the unmerged emit can still produce a valid kernel
+    // for the child later.
+    ke->n_ops = 0;
+    return 0;
+  }
+
+  u32 b_last_op_idx = KSRC_INDEX(b_result);
+  if (b_last_op_idx >= ke->n_ops) {
+    ke->n_ops = 0;
+    return 0;
+  }
+  ke->program[b_last_op_idx].store_extra_plus_one = 1;
+
+  // Allocate B's output TenDesc on the host backend; register it
+  // as the kernel's first extra output.
+  u32 host_kid = (u32)(ke - KERNELS);
+  u32 child_out_tid = tensor_alloc(CURRENT_BACKEND, child_shape, child_dtype);
+  if (child_out_tid == 0) {
+    ke->n_ops = 0;
+    return 0;
+  }
+  u32 child_numel = TENS[child_out_tid].view.numel;
+  if (!kernel_entry_set_extra_output(host_kid, 1, child_out_tid,
+                                     child_dtype, &child_shape, child_numel)) {
+    tensor_release(child_out_tid);
+    ke->n_ops = 0;
+    return 0;
+  }
+  TENS[child_out_tid].producer_kid = host_kid;
+
+  Term child_alias_term = term_new(0, TAG_TEN, child_dtype, child_out_tid);
+  BOUNDARY_TID [child_bi] = child_out_tid;
+  BOUNDARY_TERM[child_bi] = child_alias_term;
+
+  return 1;
+}
+
+// Find the (single) child boundary B such that BOUNDARY_MERGE_INTO[B]
+// = host_bi, returning B's index or BOUNDARY_MERGE_NONE.  The
+// planner stops at one merge per host (1->1 fusion), so the linear
+// scan is O(N) but typically returns early.
+static u32 find_merge_child(u32 host_bi) {
+  for (u32 b = host_bi + 1; b < BOUNDARY_ORDER_LEN; b++) {
+    if (BOUNDARY_MERGE_INTO[b] == host_bi) return b;
+  }
+  return BOUNDARY_MERGE_NONE;
+}
+
+// Predicate: does the active backend's dispatcher honor
+// kernel_entry_set_extra_output / KProgOp.store_extra_plus_one?
+// As of Step 6+7 (this commit), CPU's cpu_interpret post-pass and
+// Metal's per-op encoder both route the marked KProgOp's value to
+// the extra output buffer.  JIT and tile-JIT paths still bail at
+// cg_kernel_has_extra_outputs guards (those backends would need a
+// per-output JIT signature to land first).  Returning 1 here makes
+// the splice fire on either backend; when it fails to fire (e.g.
+// custom Backend that doesn't yet honor extras), the splice is
+// silently skipped and the kernel stays single-output.
+static int splice_target_backend_supports_multi_output(void) {
+  return CURRENT_BACKEND != NULL;
+}
+
 // Build one kernel rooted at the boundary at index bi.  Returns
 // the emitted UOP_KERNEL term, or 0 on bail.
 static Term emit_kernel_for_boundary(u32 bi) {
   u64 boundary_loc = BOUNDARY_ORDER[bi];
   u32 idx = realize_info_find(boundary_loc);
   if (idx == 0xFFFFFFFFu) return 0;
+
+  // Multi-output kernel splice (Step 6): if this boundary is a
+  // child that an earlier-emitted host already absorbed via
+  // splice_child_into_host, BOUNDARY_TID/BOUNDARY_TERM are already
+  // populated.  Skip emission and re-return the alias Term so the
+  // emit-loop sees a non-zero result and so a sink-as-child case
+  // (the realize root being merged into a sibling) returns the
+  // right surface Term to wnf.
+  if (BOUNDARY_TID[bi] != 0 && BOUNDARY_TERM[bi] != 0) {
+    return BOUNDARY_TERM[bi];
+  }
 
   u8   op        = REALIZE_INFO[idx].op;
   Term root_term = term_new(0, TAG_UOP, op, boundary_loc);
@@ -1992,6 +2135,33 @@ static Term emit_kernel_for_boundary(u32 bi) {
   ke->output_numel  = TENS[out_tid].view.numel;
   ke->source_uop    = root_term;
   TENS[out_tid].producer_kid = kid;
+
+  // Multi-output kernel splice (Step 6 of multi-output groundwork).
+  // PREMERGE: when THVM_KERNEL_MERGE=1 and the planner flagged a
+  // child boundary B with merge_into[B]=bi, visit B's program
+  // FIRST so its KProgOps occupy program indices [0, b_n) -- this
+  // way A's last op stays the LAST op overall and cpu_interpret /
+  // metal_dispatch_kernel's "last op -> primary out_buf_id" path
+  // continues to write A's value to A's tid.  B's last op is
+  // marked with store_extra_plus_one = 1 so the dispatcher's post-
+  // pass / encoder routes B's computed value into the kernel's
+  // first extra output buffer.  Skipped when:
+  //   - THVM_KERNEL_MERGE=0 (default; find_merge_child returns
+  //     NONE),
+  //   - active backend can't dispatch multi-output kernels (today
+  //     CPU + Metal both can; future Backend impls without
+  //     store_extra_plus_one support fall back here),
+  //   - the splice itself bails (visit on B returned VISIT_BAIL,
+  //     cap full, or extra output slot exhausted) -- the kernel
+  //     stays single-output and B emits separately later.
+  int spliced_ok = 0;
+  if (kernel_merge_enabled()
+      && splice_target_backend_supports_multi_output()) {
+    u32 child_bi = find_merge_child(bi);
+    if (child_bi != BOUNDARY_MERGE_NONE) {
+      spliced_ok = splice_child_into_host_premerge(ke, bi, child_bi);
+    }
+  }
 
   VisitMemo memo = {0};
   u32 result = visit(root_term, ke, boundary_loc, &memo);
@@ -2080,7 +2250,17 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // legacy emit path for every kernel.
   // Reads getenv per emit (cheap; ~1us) so test harnesses can flip
   // the flag mid-session without restarting the runtime.
-  {
+  // Multi-output kernels (spliced_ok above) can't go through
+  // rangeify today: rangeify_try_lower_elementwise emits a single
+  // S_BUFFERIZE / S_STORE pair against output slot 0, with no
+  // facility for a second BUFFERIZE rooted at the extra-output
+  // slot.  Skip lowering on those kernels so cpu_dispatch_kernel's
+  // path 5 (scalar-uops) doesn't fire and dispatch falls through
+  // to path 6 (cpu_interpret), which DOES honor
+  // KProgOp.store_extra_plus_one.  Rangeify multi-output is
+  // tracked as a separate follow-up under
+  // docs/plans/rewrite_fusion.md.
+  if (!spliced_ok) {
     const char *e = getenv("THVM_RANGEIFY");
     int rangeify_on = (e == NULL) ? 1 : (e[0] != '0');
     int lowered = rangeify_on && rangeify_try_lower_elementwise(ke);

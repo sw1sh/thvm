@@ -12,16 +12,14 @@
 // Broadcast is handled per-op by inspecting src_numels[].
 
 fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  // Multi-output kernels (n_extra_outputs > 0) need an out_buf_ids[]
-  // array, not a single out_buf_id.  Until step 4+ wires the
-  // multi-output dispatch path, the interpreter refuses to run a
-  // multi-output kernel and returns -1; the caller (cpu_dispatch_kernel)
-  // treats this as a hard error.  Today the path is unreachable
-  // because plan_kernel_merges is gated OFF (THVM_KERNEL_MERGE) and
-  // emit_kernel_for_boundary never produces n_extra_outputs > 0.
-  if (cg_kernel_has_extra_outputs(ke)) {
-    return -1;
-  }
+  // Multi-output kernel support (Step 7 of multi-output groundwork).
+  // Each extra output's value comes from a KProgOp marked with
+  // store_extra_plus_one = N + 1; after the program runs for slot 0
+  // (the legacy primary-output path), a post-loop pass copies
+  // regs[step] from each marked op to the extra output's CpuBuf.
+  // This keeps the legacy single-output write path (last op ->
+  // out_buf_id) untouched -- merged kernels just gain an
+  // additional copy at the tail.
   // Resolve each input buffer's raw pointer once up front.
   // Non-contiguous inputs (sub-item f3c: view-only EXPAND aliases
   // with stride=0 broadcast) get pre-materialized into temp
@@ -186,6 +184,43 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       default:
         rc = -1;
         goto cleanup;
+    }
+  }
+
+  // Multi-output kernel post-pass (Step 7).  Walk the program once
+  // more; for every op flagged with store_extra_plus_one > 0, copy
+  // its computed value into the corresponding extra output's
+  // CpuBuf.  Sourced from regs[step] for mid-program ops; for an
+  // op that happens to also be the LAST step (which wrote directly
+  // to out_buf_id, leaving regs[step] NULL), source from
+  // CPU_BUFS[out_buf_id].data.  The splice action in materialize
+  // currently never marks the last op (B is appended BEFORE A), so
+  // the second branch is defensive coverage.
+  if (rc == 0 && ke->n_extra_outputs > 0) {
+    for (u32 step = 0; step < ke->n_ops; step++) {
+      KProgOp *p = &ke->program[step];
+      if (p->store_extra_plus_one == 0) continue;
+      u32 extra_idx = (u32)p->store_extra_plus_one - 1u;
+      if (extra_idx >= (u32)ke->n_extra_outputs) continue;
+      u32 extra_tid = ke->extra_output_tids[extra_idx];
+      if (extra_tid == 0 || extra_tid >= TENS_NEXT) continue;
+      u32 extra_buf_id = TENS[extra_tid].buf_id;
+      if (extra_buf_id == 0 || extra_buf_id >= CPU_BUFS_NEXT) continue;
+      void *dst = CPU_BUFS[extra_buf_id].data;
+      if (dst == NULL) continue;
+      void *src;
+      if (step + 1 == ke->n_ops) {
+        // Defensive: last op also writes to primary out_buf_id;
+        // copy from there (regs[step] is NULL).
+        if (out_buf_id == 0 || out_buf_id >= CPU_BUFS_NEXT) continue;
+        src = CPU_BUFS[out_buf_id].data;
+      } else {
+        src = regs[step];
+      }
+      if (src == NULL) continue;
+      u32 numel = p->numel ? p->numel : 1;
+      u64 nbytes = dtype_storage_bytes(p->dtype, numel);
+      memcpy(dst, src, (size_t)nbytes);
     }
   }
 
