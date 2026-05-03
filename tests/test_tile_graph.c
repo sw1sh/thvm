@@ -1242,8 +1242,17 @@ int main(void) {
   CHECK(info.scalar_value_id != info.scalar_reduce_id);
   u32 post_groups_x = 0;
   u32 post_threads_x = 0;
+  // Phase 7-structural: nested-reduce kernels are routed through the
+  // FLAT_GRID path by default; the renderer's
+  // `rmt_emit_value_with_reduce` already wraps the reduce loop and
+  // substitutes the accumulator into the surrounding scalar
+  // expression.  Pin the strict pre-fix behavior here for the
+  // dispatch-shape rejection assertion; the GROUP_REDUCE path below
+  // exercises the parallelised variant separately.
+  setenv("THVM_TILE_NESTED_REDUCE_FLAT_GRID", "0", 1);
   CHECK(!cg_tile_metal_dispatch_shape(tk, &post_groups_x, &post_threads_x));
   CHECK(cg_emit_tile_metal(tk) == NULL);
+  unsetenv("THVM_TILE_NESTED_REDUCE_FLAT_GRID");
   KOpt post_group4 = { .op = KOP_GROUP, .axis = 1, .arg = 4 };
   CHECK(kernel_apply_opt(tk, post_group4));
   CHECK(cg_tile_metal_dispatch_shape(tk, &post_groups_x, &post_threads_x));

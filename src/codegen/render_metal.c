@@ -818,7 +818,18 @@ static RmtAxisMode rmt_axis_mode(CtKernelInfo const *info) {
   if (info->scalar.has_reduce && n_group_reduce == 1 && flat_ok) {
     return RMT_AXIS_GROUP_REDUCE;
   }
-  if (flat_ok && !nested_reduce) {
+  // Phase 7-structural: allow FLAT_GRID with a nested scalar reduce.
+  // The renderer's `rmt_emit_value_with_reduce` already handles the
+  // post-reduce substitution by wrapping the reduce loop, caching the
+  // accumulator in a register, and substituting the register for the
+  // reduce node when emitting the surrounding scalar expression.
+  // Nested reduces show up post-Phase-1 when BN-mean / BN-var inlines
+  // into a consumer kernel as `MUL(REDUCE_SUM(x), CONST)` etc.
+  // Default-on; THVM_TILE_NESTED_REDUCE_FLAT_GRID=0 reverts.
+  int allow_nested_flat = 1;
+  char const *e_nest = getenv("THVM_TILE_NESTED_REDUCE_FLAT_GRID");
+  if (e_nest != NULL && e_nest[0] == '0') allow_nested_flat = 0;
+  if (flat_ok && (allow_nested_flat || !nested_reduce)) {
     return RMT_AXIS_FLAT_GRID;
   }
   return RMT_AXIS_UNSUPPORTED;
