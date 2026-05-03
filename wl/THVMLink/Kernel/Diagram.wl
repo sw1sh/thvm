@@ -95,10 +95,11 @@ agentSlotsOf[agents_Association, opcodes_Association] := Catenate[
     KeyValueMap[
         Function[{base, tag},
             With[{
-                n = If[ tag === $TagUOP,
-                        walkArity[Lookup[opcodes, base, 0]],
-                        agentArity[tag]
-                    ]
+                n = Which[
+                    tag === $TagUOP, walkArity[Lookup[opcodes, base, 0]],
+                    tag === $TagCTR, ctrSpan[base],
+                    True,            agentArity[tag]
+                ]
             },
                 Range[base, base + n - 1]
             ]
@@ -132,9 +133,20 @@ principalCellOf[agentBase_Integer, agentTag_Integer,
 
 (* IC arities only.  UOP arity, opcode names, output-shape inference,
    bit decoding, and shape arithmetic come from sibling Uop.wl /
-   Shape.wl which share THVMLink`Private` -- no qualification needed. *)
+   Shape.wl which share THVMLink`Private` -- no qualification needed.
+
+   ALO holds (body, state); MAT holds (scrut, case-tree); OP2 holds
+   (lhs, rhs); CTR has variable arity (heap[val]=NUM(n), heap[val+1..val+n]
+   = children) -- ctrArity[base] reads it from the cell. *)
 agentArity[$TagLAM] = 1; agentArity[$TagDUP] = 1;
 agentArity[$TagAPP] = 2; agentArity[$TagSUP] = 2;
+agentArity[$TagALO] = 2; agentArity[$TagMAT] = 2;
+agentArity[$TagOP2] = 2;
+
+(* CTR's heap layout: arity NUM at base, n children at base+1..base+n.
+   The total span is 1 + n cells.  Used by locOwner to claim every
+   cell that belongs to this CTR. *)
+ctrSpan[base_Integer] := 1 + TTermVal[THeapRead[base]]
 
 (* slotSide: which DC list the agent's slot lives in (top = inputs,
    bottom = outputs).  slotIsDualed: whether that slot's port is
@@ -162,17 +174,29 @@ slotIsDualed[$TagDUP, 0] = False;
 slotSide[$TagUOP, _]    := "Top";
 slotIsDualed[$TagUOP, _] := False;
 
+(* ALO/CTR/MAT/OP2 input slots: all top+plain (sources flow IN from
+   above into the apex-down result triangle).  The wrapped body of an
+   ALO sits at slot 0; its state cell at slot 1 is metadata, not a
+   wire.  CTR's slot 0 holds the arity NUM (also metadata); slots
+   1..n are the data children.  MAT slot 0 = scrut, slot 1 = case
+   tree.  OP2 slot 0 = lhs, slot 1 = rhs. *)
+slotSide[$TagALO, _]    := "Top"; slotIsDualed[$TagALO, _] := False;
+slotSide[$TagCTR, _]    := "Top"; slotIsDualed[$TagCTR, _] := False;
+slotSide[$TagMAT, _]    := "Top"; slotIsDualed[$TagMAT, _] := False;
+slotSide[$TagOP2, _]    := "Top"; slotIsDualed[$TagOP2, _] := False;
+
 (* Find which (base, tag, offset) owns cell at loc, given the
    discovered agents association.  Returns None if loc is not in
    any compound agent's slot range.  UOP arity comes from the
-   opcodes Association. *)
+   opcodes Association; CTR arity from the leading NUM cell. *)
 locOwner[loc_Integer, agents_Association, opcodes_Association] := Catch[
     KeyValueMap[
         Function[{base, tag},
-            With[{n = If[ tag === $TagUOP,
-                          uopArity[Lookup[opcodes, base, 0]],
-                          agentArity[tag]
-                      ]},
+            With[{n = Which[
+                tag === $TagUOP, uopArity[Lookup[opcodes, base, 0]],
+                tag === $TagCTR, ctrSpan[base],
+                True,            agentArity[tag]
+            ]},
                 If[ NumberQ[n] && base <= loc < base + n,
                     Throw[{base, tag, loc - base}]
                 ]
@@ -190,6 +214,13 @@ agentStyle[$TagAPP] := Directive[EdgeForm[White], FaceForm[Darker[StandardBlue, 
 agentStyle[$TagSUP] := Directive[EdgeForm[White], FaceForm[Darker[StandardOrange, 0.45]]]
 agentStyle[$TagDUP] := Directive[EdgeForm[White], FaceForm[Darker[StandardPurple, 0.45]]]
 agentStyle[$TagTEN] := Directive[EdgeForm[White], FaceForm[Darker[StandardCyan,   0.45]]]
+(* Lazy / book / case nodes -- match Style.wl's THeapGraph palette. *)
+agentStyle[$TagREF] := Directive[EdgeForm[White], FaceForm[Darker[StandardYellow, 0.4]]]
+agentStyle[$TagALO] := Directive[EdgeForm[White], FaceForm[Darker[StandardYellow, 0.55]]]
+agentStyle[$TagCTR] := Directive[EdgeForm[White], FaceForm[Darker[StandardRed,    0.45]]]
+agentStyle[$TagMAT] := Directive[EdgeForm[White], FaceForm[Darker[StandardRed,    0.55]]]
+agentStyle[$TagOP2] := Directive[EdgeForm[White], FaceForm[Darker[StandardBlue,   0.55]]]
+agentStyle[$TagNUM] := Directive[EdgeForm[White], FaceForm[GrayLevel[0.5]]]
 (* UOP fill: orange for GRAD (it's the "rewrite" UOP, distinct from
    compute), blue for everything else. *)
 uopStyle[$UopGrad] := Directive[EdgeForm[White], FaceForm[Darker[StandardOrange, 0.35]]]
@@ -205,6 +236,16 @@ agentShape[$TagAPP] := "RoundedTriangle"            (* principal input  *)
 agentShape[$TagSUP] := "RoundedUpsideDownTriangle"  (* principal output *)
 agentShape[$TagUOP] := "RoundedUpsideDownTriangle"  (* principal output *)
 agentShape[$TagTEN] := "RoundedUpsideDownTriangle"  (* leaf output      *)
+(* CTR / ALO / OP2 produce a value (their output flows out the
+   bottom apex into a parent slot); MAT consumes a scrut into its
+   case-tree (apex up; principal input).  REF / NUM are leaves
+   rendered as disks per-reference. *)
+agentShape[$TagCTR] := "RoundedUpsideDownTriangle"
+agentShape[$TagALO] := "RoundedUpsideDownTriangle"
+agentShape[$TagOP2] := "RoundedUpsideDownTriangle"
+agentShape[$TagMAT] := "RoundedUpsideDownTriangle"
+agentShape[$TagREF] := "Disk"
+agentShape[$TagNUM] := "Disk"
 
 (* Multi-line "TAG\n@<base>" or "TAG\n@<base>..<base+arity-1>" label
    matching the heap graph's vertex labels. *)
@@ -461,6 +502,190 @@ agentDiagram[base_Integer, $TagDUP, _, _Association, _Association] := With[{lab 
     ]
 ]
 
+(* === Lazy / book / case agents === *)
+
+(* ALO(body, state): body wire feeds in at the top, principal
+   output flows down into the parent slot.  state is metadata,
+   surfaced in the label. *)
+aloLabelText[base_Integer] := With[{stateCell = THeapRead[base + 1]},
+    Column[{"ALO", "@" <> ToString[base],
+            "s" <> ToString[TTermVal[stateCell]]}, Center, Spacings -> 0]
+]
+
+agentDiagram[base_Integer, $TagALO, principal_, _Association, _Association] :=
+    With[{outWire = If[ principal === None,
+                        "p" <> ToString[base],
+                        wireFor[principal]]},
+        With[{
+            label   = aloLabelText[base],
+            inputs  = {wireFor[base]},
+            outputs = {outWire},
+            shape   = agentShape[$TagALO], style = agentStyle[$TagALO]
+        },
+            Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
+        ]
+    ]
+
+(* CTR with ext = ctrTag.  heap[base] = NUM(arity) (metadata, not a
+   wire); heap[base+1..base+n] = data children.  Each data slot is a
+   top input wire; the principal output goes to the parent slot. *)
+ctrLabelText[base_Integer, ctrTag_Integer] := With[{n = TTermVal[THeapRead[base]]},
+    Column[{"CTR#" <> ToString[ctrTag],
+            "@" <> ToString[base],
+            "n=" <> ToString[n]}, Center, Spacings -> 0]
+]
+
+agentDiagram[base_Integer, $TagCTR, principal_, _Association, _Association] :=
+    Block[{n, ctrTag, outWire, inWires, lab},
+        n       = TTermVal[THeapRead[base]];
+        ctrTag  = ctrTagFor[base];
+        outWire = If[ principal === None, "p" <> ToString[base], wireFor[principal]];
+        inWires = Table[wireFor[base + 1 + i], {i, 0, n - 1}];
+        lab     = ctrLabelText[base, ctrTag];
+        With[{ins = inWires, outs = {outWire},
+              shape = agentShape[$TagCTR], style = agentStyle[$TagCTR]},
+            Diagram[lab, ins, outs, "Shape" -> shape, "Style" -> style]
+        ]
+    ]
+
+(* Read the ext field of any CTR cell whose val == base.  CTR
+   carries its ctor tag in ext on the referencing cell; we only
+   have `base` here, so search the heap for any cell holding
+   TAG_CTR(base).  Fallback to 0 if missing (shouldn't happen if
+   `base` came from agentRule's discovery walk).  Same pattern as
+   dupLabelFor[base] above. *)
+ctrTagFor[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
+    cell = SelectFirst[
+        Range[lo, n - 1],
+        With[{t = THeapRead[#]},
+            TTermTag[t] === $TagCTR && TTermVal[t] === base] &,
+        None
+    ];
+    If[cell === None, 0, TTermExt[THeapRead[cell]]]
+]
+
+(* MAT(scrut, case-tree).  ext carries the matched ctr tag. *)
+matLabelText[base_Integer, ctrTag_Integer] :=
+    Column[{"MAT#" <> ToString[ctrTag],
+            "@" <> ToString[base]}, Center, Spacings -> 0]
+
+heapReadMatCell[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
+    cell = SelectFirst[
+        Range[lo, n - 1],
+        With[{t = THeapRead[#]},
+            TTermTag[t] === $TagMAT && TTermVal[t] === base] &,
+        None
+    ];
+    If[cell === None, 0, TTermExt[THeapRead[cell]]]
+]
+
+agentDiagram[base_Integer, $TagMAT, principal_, _Association, _Association] :=
+    With[{outWire = If[ principal === None,
+                        "p" <> ToString[base],
+                        wireFor[principal]],
+          ctrTag  = heapReadMatCell[base]},
+        With[{
+            label   = matLabelText[base, ctrTag],
+            inputs  = {wireFor[base], wireFor[base + 1]},
+            outputs = {outWire},
+            shape   = agentShape[$TagMAT], style = agentStyle[$TagMAT]
+        },
+            Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
+        ]
+    ]
+
+(* OP2(lhs, rhs) -- ext = op code (+ - * == <). *)
+op2LabelText[base_Integer, opcode_Integer] :=
+    Column[{"OP2 " <> Lookup[$op2Names, opcode, "?" <> ToString[opcode]],
+            "@" <> ToString[base]}, Center, Spacings -> 0]
+
+heapReadOp2Cell[base_Integer] := Block[{lo = THeapBase[], n = THeapPos[], cell},
+    cell = SelectFirst[
+        Range[lo, n - 1],
+        With[{t = THeapRead[#]},
+            TTermTag[t] === $TagOP2 && TTermVal[t] === base] &,
+        None
+    ];
+    If[cell === None, 0, TTermExt[THeapRead[cell]]]
+]
+
+agentDiagram[base_Integer, $TagOP2, principal_, _Association, _Association] :=
+    With[{outWire = If[ principal === None,
+                        "p" <> ToString[base],
+                        wireFor[principal]],
+          opcode  = heapReadOp2Cell[base]},
+        With[{
+            label   = op2LabelText[base, opcode],
+            inputs  = {wireFor[base], wireFor[base + 1]},
+            outputs = {outWire},
+            shape   = agentShape[$TagOP2], style = agentStyle[$TagOP2]
+        },
+            Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
+        ]
+    ]
+
+(* === REF / NUM leaves: rendered per-reference, like CONST.  The
+   leaf cell sits in some parent slot; we render a yellow disk (REF)
+   or gray disk (NUM) bound to the slot's wire so a network of
+   matchings shows the bookref / scalar leaf at the right slot. *)
+
+refLabelText[defId_Integer] := "REF\nd" <> ToString[defId]
+numLabelText[loc_Integer]   := With[{t = THeapRead[loc]},
+    "NUM\n" <> ToString[TTermVal[t]]
+]
+
+leafSideAndPolarity[loc_Integer, agents_Association, opcodes_Association] := Block[{
+    owner, side, dualedQ
+},
+    owner = locOwner[loc, agents, opcodes];
+    If[ owner === None,
+        side = "Bottom"; dualedQ = False
+    ,
+        side = If[ slotSide[owner[[2]], owner[[3]]] === "Top",
+                   "Bottom", "Top" ];
+        dualedQ = slotIsDualed[owner[[2]], owner[[3]]]
+    ];
+    {side, dualedQ}
+]
+
+refLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
+    t, defId, sd, side, dualedQ, name, port, label
+},
+    t       = THeapRead[loc];
+    defId   = TTermExt[t];
+    sd      = leafSideAndPolarity[loc, agents, opcodes];
+    side    = sd[[1]]; dualedQ = sd[[2]];
+    name    = wireFor[loc];
+    port    = If[dualedQ, SuperStar[name], name];
+    label   = refLabelText[defId];
+    With[{
+        ins  = If[side === "Top",    {port}, {}],
+        outs = If[side === "Bottom", {port}, {}]
+    },
+        Diagram[label, ins, outs,
+            "Shape" -> agentShape[$TagREF], "Style" -> agentStyle[$TagREF]
+        ]
+    ]
+]
+
+numLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[{
+    sd, side, dualedQ, name, port, label
+},
+    sd      = leafSideAndPolarity[loc, agents, opcodes];
+    side    = sd[[1]]; dualedQ = sd[[2]];
+    name    = wireFor[loc];
+    port    = If[dualedQ, SuperStar[name], name];
+    label   = numLabelText[loc];
+    With[{
+        ins  = If[side === "Top",    {port}, {}],
+        outs = If[side === "Bottom", {port}, {}]
+    },
+        Diagram[label, ins, outs,
+            "Shape" -> agentShape[$TagNUM], "Style" -> agentStyle[$TagNUM]
+        ]
+    ]
+]
+
 (* ERA has a single port whose side is OPPOSITE of the carrier
    slot (so the wire flows naturally without arrow-flips) and
    whose polarity matches the slot's polarity (so both ends of
@@ -566,7 +791,9 @@ constLeafDiagram[loc_Integer, agents_Association, opcodes_Association] := Block[
 agentRule[t_] := With[{tag = TTermTag[t], val = TTermVal[t]},
     Which[
         tag === $TagLAM || tag === $TagAPP || tag === $TagSUP ||
-        tag === $TagDUP || tag === $TagUOP,
+        tag === $TagDUP || tag === $TagUOP ||
+        tag === $TagALO || tag === $TagCTR ||
+        tag === $TagMAT || tag === $TagOP2,
             val -> tag,
         tag === $TagVAR,
             val -> $TagLAM,
@@ -649,6 +876,35 @@ reachableTenCells[reachOps_Association] :=
 reachableConstCells[reachOps_Association] := reachableSlotCells[reachOps,
     TTermTag[#] === $TagUOP && TTermExt[#] === $UopConst &]
 
+(* Wire-bearing slot offsets per agent tag.  Skips metadata slots:
+   CTR's leading NUM(arity), ALO's trailing NUM(state).  UOP / kernel
+   slots come from walkArity. *)
+wireSlots[base_Integer, $TagLAM] := {0}
+wireSlots[base_Integer, $TagDUP] := {0}
+wireSlots[base_Integer, $TagAPP] := {0, 1}
+wireSlots[base_Integer, $TagSUP] := {0, 1}
+wireSlots[base_Integer, $TagMAT] := {0, 1}
+wireSlots[base_Integer, $TagOP2] := {0, 1}
+wireSlots[base_Integer, $TagALO] := {0}                (* slot 1 = state metadata *)
+wireSlots[base_Integer, $TagCTR] :=
+    Range[1, TTermVal[THeapRead[base]]]                (* skip arity NUM at slot 0 *)
+wireSlots[base_Integer, $TagUOP] := {}                  (* handled via reachOps separately *)
+wireSlots[___] := {}
+
+(* Walk every agent's wire slots across the agents map; for each
+   slot cell that matches `pred`, return the cell loc.  Used to find
+   REF / NUM leaves embedded in lazy-term slots. *)
+agentWireSlotCells[agents_Association, pred_] := Catenate[
+    KeyValueMap[
+        Function[{base, tag},
+            With[{offsets = wireSlots[base, tag]},
+                Select[(base + #) & /@ offsets, pred[THeapRead[#]] &]
+            ]
+        ],
+        agents
+    ]
+]
+
 (* Synthetic TEN leaf for a kernel input tid that has no
    corresponding TAG_TEN cell in any rendered UOP slot.  The wire
    "tenTid<tid>" is the same one the kernel's input port uses, so
@@ -664,7 +920,7 @@ externalKernelInputLeaf[tid_Integer] := Diagram[
 THeapDiagram[t_] := Block[{
     fullAgents, reachOps, allKernels, kernelKids, allInputTids,
     coveredTids, externalInputTids, agents, opcodes, eras, tens,
-    consts, ds, $uopOpcodeContext
+    consts, refs, nums, ds, $uopOpcodeContext
 },
     fullAgents = discoverAgentsHere[{t}];
     reachOps   = reachableUopsHere[{t}];
@@ -693,6 +949,11 @@ THeapDiagram[t_] := Block[{
     eras    = discoverErasHere[];
     tens    = reachableTenCells[reachOps];
     consts  = reachableConstCells[reachOps];
+    (* REF / NUM leaves embedded in wire slots of any rendered IC /
+       CTR / MAT / OP2 / ALO agent.  Per-reference: each occurrence
+       gets its own disk leaf bound to that slot's wire. *)
+    refs    = agentWireSlotCells[agents, TTermTag[#] === $TagREF &];
+    nums    = agentWireSlotCells[agents, TTermTag[#] === $TagNUM &];
     (* Synthetic external-input leaves for kernel input_tids that
        aren't produced by another kernel and aren't sitting in any
        rendered TAG_TEN cell.  These are weights / TTensorCreate
@@ -713,6 +974,8 @@ THeapDiagram[t_] := Block[{
         eraDiagram[#, agents, opcodes]      & /@ eras,
         tenLeafDiagram[#, agents, opcodes]   & /@ tens,
         constLeafDiagram[#, agents, opcodes] & /@ consts,
+        refLeafDiagram[#, agents, opcodes]   & /@ refs,
+        numLeafDiagram[#, agents, opcodes]   & /@ nums,
         externalKernelInputLeaf /@ externalInputTids
     ];
     DiagramNetwork @@ ds
