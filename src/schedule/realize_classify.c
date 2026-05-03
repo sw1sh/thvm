@@ -1060,7 +1060,12 @@ static u32 realize_remove_by_cost_score_max_consumers(void) {
   if (e != NULL && e[0] != '\0') {
     return (u32)strtoul(e, NULL, 10);
   }
-  return 4;
+  // Match remove-removable-bufferize's 8-consumer cap so this rule
+  // doesn't reject candidates that the existing rule would have
+  // accepted on a different gate.  Score's denominator already
+  // penalises high consumer counts (recompute_total =
+  // recompute_ops * consumer_count).
+  return 8;
 }
 
 // Tile-feasibility proxy: estimate the consumer kernel's op count
