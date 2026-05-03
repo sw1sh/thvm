@@ -6,6 +6,27 @@ dated section.
 
 ## Unreleased
 
+### Added: reduce-add-const-distribute uop rule (Phase 5 of tinygrad rule port)
+
+New `uop_graph_simplify_reduce_add_const` rule rewrites
+`REDUCE_SUM(ADD(x, CONST))` into `ADD(REDUCE_SUM(x), CONST * N)`,
+where `N` is the reduced axis extent.  The new constant is computed
+at simplifier time so the post-reduce ADD pays one scalar add
+instead of an axis-sized broadcasted add.  Mirrors tinygrad's
+`reduce-add-distribute` (`tinygrad/codegen/simplify.py`),
+specialised to a CONST sibling so we don't trade one reduce for
+two.
+
+Constraints: only `REDUCE_SUM`, only DT_FP32 (the simplifier
+already has the f32-bits constant-folding helper used elsewhere),
+only when the ADD's other operand is a bare `UOP_CONST`, and the
+axis must be in range of the source shape.
+
+`tests/test_uop_graph_rewrite.c` covers the firing case
+(`REDUCE_SUM(ADD(a, 2.0))` over `{4}` -> `ADD(REDUCE_SUM(a), 8.0)`),
+plus REDUCE_MAX (does not fire) and non-CONST sibling (does not
+fire).
+
 ### Added: reduce-const-mul-distribute uop rule (Phase 5 of tinygrad rule port)
 
 New `uop_graph_simplify_reduce_const_mul` rule rewrites

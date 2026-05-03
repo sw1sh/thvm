@@ -573,6 +573,10 @@ Tasks:
   `REDUCE_SUM(MUL(x, CONST))` -> `MUL(REDUCE_SUM(x), CONST)` lives in
   `uop_graph_simplify` so the constant rides on the post-reduce
   shape~~;
+- ~~tinygrad rule port: `reduce-add-const-distribute` UOp rule --
+  `REDUCE_SUM(ADD(x, CONST))` -> `ADD(REDUCE_SUM(x), CONST * N)`
+  with `N` the reduced axis extent; folds the broadcasted scalar
+  add over the reduce input into one post-reduce scalar add~~;
 - represent accumulator buffers explicitly (planned);
 - fuse reduce chains through `B_STORE` reduce ranges (planned -
   the existing `inline-adjacent-reduce-chains` realize-rule does

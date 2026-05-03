@@ -313,6 +313,68 @@ static Term uop_graph_simplify_reduce_const_mul(Term t, void *user) {
   return uop_binary(UOP_MUL, inner_reduce, c);
 }
 
+// reduce-add-const-distribute: REDUCE_SUM(ADD(x, CONST)) ->
+// ADD(REDUCE_SUM(x), CONST * N) where N is the reduced axis extent.
+// Mirrors tinygrad's reduce-add-distribute pivoted on the
+// `(x + y).reduce` -> `x.reduce + y.reduce` identity, specialised
+// to the case where one operand is a scalar so the new CONST stays
+// rank-{1} and doesn't materialise an extra per-element reduce.
+//
+// Constraints (matching reduce-const-mul-distribute):
+//  - REDUCE kind must be REDUCE_SUM.
+//  - The ADD's other operand must be a bare UOP_CONST (rank-{1}).
+//  - dtype must be FP32 -- this is the only path with a settled
+//    constant-folding helper.  Other dtypes leave the rule unfired.
+//  - The reduced axis extent must be representable in the source
+//    shape; gracefully bail otherwise.
+static Term uop_graph_simplify_reduce_add_const(Term t, void *user) {
+  (void)user;
+  UOpView v;
+  if (!uop_view(t, &v) || v.op != UOP_REDUCE) {
+    return 0;
+  }
+  u32 kind = (u32)term_val(heap_read(v.loc + 1));
+  if (kind != REDUCE_SUM) {
+    return 0;
+  }
+  UOpView add;
+  if (!uop_view(v.src[0], &add) || add.op != UOP_ADD) {
+    return 0;
+  }
+  Term x;
+  Term c;
+  if (term_tag(add.src[1]) == TAG_UOP && term_ext(add.src[1]) == UOP_CONST) {
+    x = add.src[0];
+    c = add.src[1];
+  } else if (term_tag(add.src[0]) == TAG_UOP
+             && term_ext(add.src[0]) == UOP_CONST) {
+    x = add.src[1];
+    c = add.src[0];
+  } else {
+    return 0;
+  }
+
+  f32 c_val;
+  if (!uop_graph_simplify_const_f32(c, &c_val)) {
+    return 0;
+  }
+
+  Shape src_shape;
+  if (!term_shape_in(x, 0, &src_shape)) {
+    return 0;
+  }
+  u32 axis = (u32)term_val(heap_read(v.loc + 2));
+  if (axis >= src_shape.ndim) {
+    return 0;
+  }
+  u32 axis_size = src_shape.dims[axis];
+
+  f32 new_c_val = c_val * (f32)axis_size;
+  Term new_const = uop_const(DT_FP32, f32_bits(new_c_val));
+  Term inner_reduce = uop_reduce(REDUCE_SUM, axis, x);
+  return uop_binary(UOP_ADD, inner_reduce, new_const);
+}
+
 static Term uop_graph_simplify_cast(Term t, void *user) {
   (void)user;
   UOpView v;
@@ -365,6 +427,7 @@ fn Term uop_graph_simplify(Term root) {
     {"commutative-canonicalize", uop_graph_simplify_commutative},
     {"symbolic-reassociate-const", uop_graph_simplify_reassociate_const},
     {"reduce-const-mul-distribute", uop_graph_simplify_reduce_const_mul},
+    {"reduce-add-const-distribute", uop_graph_simplify_reduce_add_const},
     {"movement-identity",       uop_graph_simplify_movement_identity},
     {"movement-chain-collapse", uop_graph_simplify_movement_chain},
   };
