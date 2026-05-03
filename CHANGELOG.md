@@ -6,6 +6,22 @@ dated section.
 
 ## Unreleased
 
+### Added: reduce metadata on BBufferize for Phase 5 rules
+
+Each `BBufferize` whose op is `UOP_REDUCE` now records
+`reduce_kind` (REDUCE_SUM / REDUCE_MAX / ...), `reduce_axis`
+(post-rewrite collapsed axis), and `reduce_axis_size` (extent of
+that axis on the source side).  Non-reduce buffers leave all three
+zero.  `bufferize_compute_costs` reads the heap layout
+`[src, NUM(kind), NUM(axis)]` and consults `term_shape_in` on the
+src for the axis size.  Future Phase 5 reduce-aware rules (group
+reduce, broadcast fusion, accumulator-vs-recompute decisions) can
+read these fields to gate decisions without re-walking the heap.
+
+`tests/test_bufferize.c` adds two cases (SUM along axis 0 of {3}
+records the right kind/axis/extent; non-reduce buffers keep zero
+fields); 263/263.
+
 ### Added: C-side auto-dup primitive + DUP-NOD commute rules
 
 `src/lam/auto_dup.c` ships `lam_seal_ext_with_auto_dup` -- the

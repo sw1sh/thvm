@@ -386,6 +386,33 @@ int main(void) {
   CHECK_EQ(bufferize_removal_score(0), 0);
   CHECK_EQ(bufferize_removal_score(99999u), 0);
 
+  TEST_BEGIN("bufferize/reduce-buffer-records-kind-axis-and-axis-size");
+  // SUM along axis 0 of a {3} input.  reduce_kind = REDUCE_SUM,
+  // reduce_axis = 0, reduce_axis_size = 3.
+  Term rmt_red = uop_reduce(REDUCE_SUM, 0, a);
+  realize_classify(rmt_red);
+  u32 rmt_idx = bufferize_find_by_loc(term_val(rmt_red));
+  CHECK(rmt_idx != 0xFFFFFFFFu);
+  if (rmt_idx != 0xFFFFFFFFu) {
+    BBufferize const *rmt = bufferize_buffer_at(rmt_idx);
+    CHECK_EQ(rmt->op, UOP_REDUCE);
+    CHECK_EQ(rmt->reduce_kind, REDUCE_SUM);
+    CHECK_EQ(rmt->reduce_axis, 0);
+    CHECK_EQ(rmt->reduce_axis_size, 3);
+  }
+
+  TEST_BEGIN("bufferize/non-reduce-buffer-keeps-zero-reduce-fields");
+  // ADD buffer should leave all three fields at zero.
+  Term rmt_add = uop_binary(UOP_ADD, a, b);
+  realize_classify(rmt_add);
+  u32 rmt_add_idx = bufferize_find_by_loc(term_val(rmt_add));
+  if (rmt_add_idx != 0xFFFFFFFFu) {
+    BBufferize const *rmt = bufferize_buffer_at(rmt_add_idx);
+    CHECK_EQ(rmt->reduce_kind, 0);
+    CHECK_EQ(rmt->reduce_axis, 0);
+    CHECK_EQ(rmt->reduce_axis_size, 0);
+  }
+
   TEST_BEGIN("bufferize/reduce-buffer-flags-subtree-has-reduce");
   // A REDUCE buffer's own producer walk hits the REDUCE op at the
   // root, so subtree_has_reduce must be 1.  A pure ALU buffer with

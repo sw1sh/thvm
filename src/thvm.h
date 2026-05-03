@@ -1328,6 +1328,16 @@ typedef struct {
   u64 output_numel;
   u64 recompute_total;
   u8  subtree_has_reduce;
+  // Phase 5 reduce metadata.  Populated only when this buffer's
+  // op is UOP_REDUCE; otherwise all three fields stay 0.
+  //   reduce_kind  : REDUCE_SUM / REDUCE_MAX / ... (the kind cell)
+  //   reduce_axis  : axis being reduced (post-rewrite collapsed)
+  //   reduce_axis_size : extent of that axis on the source side
+  // Future reduce-aware rules consult these to gate accumulator
+  // schedules, broadcast fusion, and group-reduce decisions.
+  u8  reduce_kind;
+  u8  reduce_axis;
+  u32 reduce_axis_size;
   // Phase 6 lifetime fields (populated by bufferize_finalize_stores):
   // lifetime_start is this buffer's topological depth (1 for
   // buffers with no producer-buffer source); lifetime_end is the

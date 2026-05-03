@@ -386,6 +386,28 @@ static void bufferize_compute_costs(void) {
                         : 0;
     u32 mult = b->consumer_count > 0 ? b->consumer_count : 1;
     b->recompute_total = (u64)b->recompute_ops * (u64)mult;
+    // Phase 5: reduce metadata for UOP_REDUCE buffers.  Heap layout
+    // for UOP_REDUCE is [src, NUM(kind), NUM(axis)], and the source
+    // shape gives us the axis extent.
+    b->reduce_kind      = 0;
+    b->reduce_axis      = 0;
+    b->reduce_axis_size = 0;
+    if (b->op == UOP_REDUCE) {
+      Term kind_cell = heap_read(b->loc + 1);
+      Term axis_cell = heap_read(b->loc + 2);
+      if (term_tag(kind_cell) == TAG_NUM) {
+        b->reduce_kind = (u8)(term_val(kind_cell) & 0xFFu);
+      }
+      if (term_tag(axis_cell) == TAG_NUM) {
+        b->reduce_axis = (u8)(term_val(axis_cell) & 0xFFu);
+      }
+      Term src = term_resolve(heap_read(b->loc + 0));
+      Shape src_shape = {0};
+      if (term_shape_in(src, 0, &src_shape)
+          && b->reduce_axis < src_shape.ndim) {
+        b->reduce_axis_size = src_shape.dims[b->reduce_axis];
+      }
+    }
   }
 }
 
