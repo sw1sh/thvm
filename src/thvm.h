@@ -1231,6 +1231,42 @@ fn char const *realize_rewrite_stat_name(u32 i);
 fn u32  realize_rewrite_stat_hits_at(u32 i);
 fn u32  realize_rewrite_stat_hits(char const *name);
 
+// === bufferize schedule IR (Phase 0) ===
+// Explicit B_BUFFERIZE/B_STORE projection of the REALIZE_INFO table,
+// per docs/plans/bufferize.md.  Phase 0 is a non-behavioural mirror:
+// every UOp loc that realize_classify left with `realized=1` becomes
+// one B_BUFFERIZE record with a stable buffer id (1..N) and the
+// reason bits projected from REALIZE_REASON_*.  The realize root
+// becomes a B_STORE pointing at its B_BUFFERIZE.  Later phases will
+// own removal/insertion rules, edge-local indexes, and rangeify.
+//
+// `DUMP_BUFFERIZE=1` prints a one-line summary plus the per-buffer
+// table to stderr after each realize_classify.  No public WL API
+// changes; this is purely a schedule-internal representation.
+#define BUFFERIZE_GRAPH_CAP REALIZE_INFO_CAP
+#define BUFFERIZE_REASON_ROOT        (1u << 0)
+#define BUFFERIZE_REASON_MULTI       (1u << 1)
+#define BUFFERIZE_REASON_REDUCE      (1u << 2)
+#define BUFFERIZE_REASON_BACKEND_CAP (1u << 3)
+typedef struct {
+  u64 loc;            // heap loc of the underlying UOp value
+  u32 buffer_id;      // 1-based stable id within this graph
+  u32 reasons;        // BUFFERIZE_REASON_* mirror of REALIZE_REASON_*
+  u32 consumer_count; // direct UOp consumer count from realize_classify
+  u8  op;             // UOP_* of the value being bufferized
+  u8  is_root;        // 1 iff this buffer is the realize root
+} BBufferize;
+typedef struct {
+  u32 buffer_id;      // destination B_BUFFERIZE id
+  u64 loc;            // heap loc of the stored value
+} BStore;
+fn void              bufferize_build(Term root);
+fn u32               bufferize_buffer_count(void);
+fn BBufferize const *bufferize_buffer_at(u32 i);
+fn u32               bufferize_find_by_loc(u64 loc);
+fn u32               bufferize_store_count(void);
+fn BStore const     *bufferize_store_at(u32 i);
+
 // g2a: after realize_classify populates the boundary set, the
 // scheduler topo-sorts those boundaries by producer-to-consumer
 // depth.  These accessors expose the sorted order so tests / future

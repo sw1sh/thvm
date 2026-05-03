@@ -999,8 +999,11 @@ static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
 fn void realize_classify(Term root) {
   realize_info_clear();
   realize_rewrite_stats_clear();
-  if (term_tag(root) != TAG_UOP) return;
-  if (term_ext(root) == UOP_KERNEL) return;
+  // Always project into the bufferize graph so its state stays in
+  // sync with REALIZE_INFO.  bufferize_build short-circuits on
+  // non-UOp roots after zeroing its own tables.
+  if (term_tag(root) != TAG_UOP) { bufferize_build(root); return; }
+  if (term_ext(root) == UOP_KERNEL) { bufferize_build(root); return; }
 
   // Bitmap sized to HEAP_NEXT (current high-water of the dyn
   // heap) instead of HEAP_CAP -- per-call cost stays
@@ -1042,6 +1045,11 @@ fn void realize_classify(Term root) {
   };
   realize_rewrite_apply(root, rules, (u32)(sizeof(rules) / sizeof(rules[0])));
   realize_rewrite_stats_dump();
+
+  // Phase 0 of docs/plans/bufferize.md: project the final REALIZE_INFO
+  // boundary set into an explicit B_BUFFERIZE/B_STORE graph.  This is
+  // a non-behavioural mirror; materialize.c still reads REALIZE_INFO.
+  bufferize_build(root);
 }
 
 fn u8 realize_is_realized(Term uop_term) {

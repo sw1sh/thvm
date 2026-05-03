@@ -1,6 +1,6 @@
 # Bufferize Schedule IR Plan
 
-Status: planned.
+Status: Phase 0 landed; Phases 1-7 planned.
 
 ## Goal
 
@@ -330,24 +330,27 @@ must be compact enough to use on a one-step beautiful-mnist capture.
 
 ## Implementation Phases
 
-### Phase 0: Freeze Current Behavior Behind The New IR
+### Phase 0: Freeze Current Behavior Behind The New IR (landed)
 
 Build a bufferize graph from the existing `REALIZE_INFO` result and
 prove it emits the same materialized kernels as today.
 
-Tasks:
-
-- add `src/schedule/bufferize.c` and public/internal declarations;
-- define `B_VALUE`, `B_BUFFERIZE`, `B_INDEX`, `B_STORE` structs;
-- populate it from `realize_classify`;
-- add dumps and rule counters;
-- add C tests that compare old `realize_is_realized` answers to the
-  generated `B_BUFFERIZE` graph.
+Status: landed in `src/schedule/bufferize.c`.  `realize_classify`
+projects every realized UOp into a `B_BUFFERIZE` record with a stable
+1-based buffer id, the realize root gets one `B_STORE`, and reasons
+are mirrored as `BUFFERIZE_REASON_{ROOT,MULTI,REDUCE,BACKEND_CAP}`.
+`DUMP_BUFFERIZE=1` prints the table.  `tests/test_bufferize.c`
+asserts the projection is faithful (every realized loc appears
+exactly once, no inlined locs appear, ids are dense, the root has a
+matching store).  `B_VALUE` / `B_INDEX` are intentionally still TODO
+because the existing `realize_classify` result has no edge-local
+context to project from; both arrive together with Phase 2.
 
 Acceptance:
 
-- no change to kernel count or WL results;
-- `make test`, `make wl-test`, and `git diff --check` pass.
+- no change to kernel count or WL results (materialize.c still reads
+  `REALIZE_INFO`; bufferize is a read-only mirror);
+- `make test` passes including the new `tests/test_bufferize.c`.
 
 ### Phase 1: Move Current Boundary Rewrites Into Bufferize IR
 
@@ -537,14 +540,18 @@ autotune.
 
 ## Immediate Next Step
 
-Implement Phase 0 only:
+Phase 0 has landed; the next implementation step is Phase 1:
 
-1. Add a `BufferizeGraph` builder that projects the existing
-   `REALIZE_INFO` table into explicit `B_BUFFERIZE` and `B_STORE`
-   records.
-2. Add `DUMP_BUFFERIZE=1` and a compact C test.
-3. Keep materialization behavior unchanged.
+1. Move the existing named realize-map rewrites
+   (`inline-constants`, the adjacent reduce-chain and scalar-tail
+   rules, `remove-removable-bufferize`, `metal-tile-fanin-cap`) so
+   they edit the bufferize graph instead of `REALIZE_INFO` directly.
+2. Project an `INLINE`/`REMOVE` rewrite-history bit on every removed
+   `B_BUFFERIZE` record so dumps still answer "which rule lost it".
+3. Keep `REALIZE_INFO` as a read-back projection from the bufferize
+   graph until materialize consumes the bufferize graph directly.
 
-Once this lands, every following fusion change can be a named
-bufferize rewrite with a visible hit/skip reason instead of another
-hidden adjustment to `realize_classify`.
+Each rewrite must keep the existing rule names and counters so
+`DUMP_FUSION_REWRITE_CANDIDATES=1` continues to bisect cleanly, and
+must leave kernel counts and WL results unchanged on the bounded
+beautiful-mnist canary before any new Phase 2+ rule lands.

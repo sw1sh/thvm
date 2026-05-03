@@ -6,6 +6,20 @@ dated section.
 
 ## Unreleased
 
+### Added: Phase 0 bufferize schedule graph
+
+`schedule/bufferize.c` projects the final `REALIZE_INFO` boundary set
+into an explicit `B_BUFFERIZE`/`B_STORE` graph after every
+`realize_classify` call.  Each realized UOp gets a stable 1-based
+buffer id, the realize root gets a single store, and reason bits map
+to `BUFFERIZE_REASON_{ROOT,MULTI,REDUCE,BACKEND_CAP}`.  Behaviour is
+unchanged: materialize.c still reads `REALIZE_INFO` directly and the
+new graph is a non-behavioural mirror.  `DUMP_BUFFERIZE=1` prints the
+per-buffer table to stderr.  `tests/test_bufferize.c` checks that the
+projection matches `realize_is_realized` across single-root,
+chain-only, multi-consumer-fanout, non-UOp-root, and reduce cases,
+and that buffer ids are dense.
+
 ### Added: bufferize schedule IR plan
 
 Added `docs/plans/bufferize.md`, a comprehensive plan for a
