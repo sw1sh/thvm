@@ -375,6 +375,83 @@ static Term uop_graph_simplify_reduce_add_const(Term t, void *user) {
   return uop_binary(UOP_ADD, inner_reduce, new_const);
 }
 
+// Helper for collect-mul-add: detects MUL(x, CONST) and returns the
+// operand `x` plus the const value.  Either operand position works
+// (commutative-canonicalize will normally put the CONST on the right,
+// but we accept both for robustness).
+static int uop_graph_simplify_match_x_times_const(Term mul,
+                                                  Term *x_out,
+                                                  f32 *c_out) {
+  UOpView m;
+  if (!uop_view(mul, &m) || m.op != UOP_MUL) {
+    return 0;
+  }
+  if (uop_graph_simplify_const_f32(m.src[1], c_out)) {
+    *x_out = m.src[0];
+    return 1;
+  }
+  if (uop_graph_simplify_const_f32(m.src[0], c_out)) {
+    *x_out = m.src[1];
+    return 1;
+  }
+  return 0;
+}
+
+// collect-mul-add: ADD(MUL(x, c0), MUL(x, c1)) -> MUL(x, c0 + c1)
+//                  ADD(x, MUL(x, c))           -> MUL(x, c + 1)
+//                  ADD(x, x)                   -> MUL(x, 2)
+//
+// Folds linear combinations of the same value into a single MUL.
+// Mirrors tinygrad's collect-mul / collect-add-mul / double-add from
+// `tinygrad/uop/symbolic.py`.  Reduces redundant compute when the
+// same tensor is multiplied by two scalars and added (common in
+// gradient accumulators and in optimizer updates that touch the same
+// parameter twice).
+//
+// Constraints:
+//  - dtype FP32 (matches the existing const-folding helper).
+//  - x is never a UOP_CONST in the matched patterns because the
+//    `symbolic-binary` rule already const-folds such cases earlier.
+static Term uop_graph_simplify_collect_mul_add(Term t, void *user) {
+  (void)user;
+  UOpView v;
+  if (!uop_view(t, &v) || v.op != UOP_ADD) {
+    return 0;
+  }
+
+  // Pattern C: x + x -> x * 2.
+  if (v.src[0] == v.src[1]) {
+    Term two = uop_const(DT_FP32, f32_bits(2.0f));
+    return uop_binary(UOP_MUL, v.src[0], two);
+  }
+
+  // Pattern A: MUL(x, c0) + MUL(x, c1) -> MUL(x, c0 + c1).
+  Term x_a;
+  f32  c0;
+  Term x_b;
+  f32  c1;
+  if (uop_graph_simplify_match_x_times_const(v.src[0], &x_a, &c0)
+   && uop_graph_simplify_match_x_times_const(v.src[1], &x_b, &c1)
+   && x_a == x_b) {
+    Term sum = uop_const(DT_FP32, f32_bits(c0 + c1));
+    return uop_binary(UOP_MUL, x_a, sum);
+  }
+
+  // Pattern B: x + MUL(x, c) -> MUL(x, c + 1).
+  if (uop_graph_simplify_match_x_times_const(v.src[0], &x_a, &c0)
+      && x_a == v.src[1]) {
+    Term coeff = uop_const(DT_FP32, f32_bits(c0 + 1.0f));
+    return uop_binary(UOP_MUL, x_a, coeff);
+  }
+  if (uop_graph_simplify_match_x_times_const(v.src[1], &x_a, &c0)
+      && x_a == v.src[0]) {
+    Term coeff = uop_const(DT_FP32, f32_bits(c0 + 1.0f));
+    return uop_binary(UOP_MUL, x_a, coeff);
+  }
+
+  return 0;
+}
+
 static Term uop_graph_simplify_cast(Term t, void *user) {
   (void)user;
   UOpView v;
@@ -428,6 +505,7 @@ fn Term uop_graph_simplify(Term root) {
     {"symbolic-reassociate-const", uop_graph_simplify_reassociate_const},
     {"reduce-const-mul-distribute", uop_graph_simplify_reduce_const_mul},
     {"reduce-add-const-distribute", uop_graph_simplify_reduce_add_const},
+    {"collect-mul-add",         uop_graph_simplify_collect_mul_add},
     {"movement-identity",       uop_graph_simplify_movement_identity},
     {"movement-chain-collapse", uop_graph_simplify_movement_chain},
   };

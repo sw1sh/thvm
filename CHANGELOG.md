@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: collect-mul-add uop rule (Phase 4 of tinygrad rule port)
+
+New `uop_graph_simplify_collect_mul_add` rule folds linear
+combinations of the same value into a single MUL.  Three patterns,
+all rewritten in one rule:
+
+- `MUL(x, c0) + MUL(x, c1)` -> `MUL(x, c0 + c1)`
+- `x + MUL(x, c)` (either operand order) -> `MUL(x, c + 1)`
+- `x + x` -> `MUL(x, 2)`
+
+Mirrors tinygrad's `collect-mul` / `collect-add-mul` / `double-add`
+from `tinygrad/uop/symbolic.py`.  Reduces redundant compute when the
+same tensor is multiplied by two scalars and added (gradient
+accumulators, optimizer updates that touch the same parameter twice).
+
+Constraints: dtype FP32 (matches the existing const-folding helper).
+The rule lives in the FULL `uop_graph_simplify` rule list, NOT the
+materialize subset, since the rewrite changes graph structure.
+`THVM_UOP_GRAPH_SIMPLIFY=1` opts in.
+
+`tests/test_uop_graph_rewrite.c` covers the three patterns plus a
+distinct-operand negative case.  C suite 274/274 (146/146 in
+test_uop_graph_rewrite).  Canary unchanged at 118 kernels / 84ms
+because beautiful-mnist's training graph doesn't expose these
+patterns at the tensor uop level after Phase 1.
+
 ### Added: reduce-add-const-distribute uop rule (Phase 5 of tinygrad rule port)
 
 New `uop_graph_simplify_reduce_add_const` rule rewrites

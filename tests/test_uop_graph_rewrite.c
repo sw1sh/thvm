@@ -369,6 +369,52 @@ int main(void) {
   CHECK_EQ(term_ext(reduce_add_non_const_out), UOP_REDUCE);
   CHECK_EQ(uop_graph_rewrite_stat_hits("reduce-add-const-distribute"), 0);
 
+  TEST_BEGIN("uop-graph-simplify/collect-mul-add-shared-x");
+  // x*c0 + x*c1 -> x*(c0+c1).  c0=2.0, c1=3.0.
+  Term three_c = uop_const(DT_FP32, f32_bits(3.0f));
+  Term x_times_2 = raw_binary(UOP_MUL, a, two);
+  Term x_times_3 = raw_binary(UOP_MUL, a, three_c);
+  Term sum_two_threes = raw_binary(UOP_ADD, x_times_2, x_times_3);
+  Term collected = uop_graph_simplify(sum_two_threes);
+  CHECK_EQ(term_tag(collected), TAG_UOP);
+  CHECK_EQ(term_ext(collected), UOP_MUL);
+  Term coll_lhs = heap_read(term_val(collected) + 0);
+  Term coll_rhs = heap_read(term_val(collected) + 1);
+  CHECK_EQ(coll_lhs, a);
+  CHECK_EQ(term_tag(coll_rhs), TAG_UOP);
+  CHECK_EQ(term_ext(coll_rhs), UOP_CONST);
+  CHECK_EQ(term_val(heap_read(term_val(coll_rhs))), f32_bits(5.0f));
+  CHECK(uop_graph_rewrite_stat_hits("collect-mul-add") >= 1);
+
+  TEST_BEGIN("uop-graph-simplify/collect-mul-add-x-plus-x");
+  // x + x -> x*2.
+  Term x_plus_x = raw_binary(UOP_ADD, a, a);
+  Term doubled = uop_graph_simplify(x_plus_x);
+  CHECK_EQ(term_tag(doubled), TAG_UOP);
+  CHECK_EQ(term_ext(doubled), UOP_MUL);
+  Term dbl_rhs = heap_read(term_val(doubled) + 1);
+  CHECK_EQ(term_val(heap_read(term_val(dbl_rhs))), f32_bits(2.0f));
+  CHECK(uop_graph_rewrite_stat_hits("collect-mul-add") >= 1);
+
+  TEST_BEGIN("uop-graph-simplify/collect-mul-add-x-plus-x-times-c");
+  // x + x*3 -> x*4.
+  Term x_plus_3x = raw_binary(UOP_ADD, a, x_times_3);
+  Term coalesced = uop_graph_simplify(x_plus_3x);
+  CHECK_EQ(term_tag(coalesced), TAG_UOP);
+  CHECK_EQ(term_ext(coalesced), UOP_MUL);
+  Term co_rhs = heap_read(term_val(coalesced) + 1);
+  CHECK_EQ(term_val(heap_read(term_val(co_rhs))), f32_bits(4.0f));
+  CHECK(uop_graph_rewrite_stat_hits("collect-mul-add") >= 1);
+
+  TEST_BEGIN("uop-graph-simplify/collect-mul-add-distinct-operands-stay");
+  // x*2 + y*3 -> stays (different operands).
+  Term y = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(4));
+  Term y_times_3 = raw_binary(UOP_MUL, y, three_c);
+  Term mixed = raw_binary(UOP_ADD, x_times_2, y_times_3);
+  Term mixed_out = uop_graph_simplify(mixed);
+  CHECK_EQ(term_tag(mixed_out), TAG_UOP);
+  CHECK_EQ(term_ext(mixed_out), UOP_ADD);
+
   TEST_BEGIN("uop-graph-simplify-materialize/opt-in-hook");
   setenv("THVM_UOP_GRAPH_SIMPLIFY", "1", 1);
   Term mat_candidate = raw_binary(UOP_ADD, a, zero);
