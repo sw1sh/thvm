@@ -447,16 +447,19 @@ Tasks:
   edge~~ (`KernelEntry.input_source_buffer_ids[]` + accessors
   `kernel_entry_input_source_buffer_id` and
   `kernel_entry_input_edge_summary`);
-- ~~per-USE `KProgOp.chain_op_idx` field populated during `visit()`~~
-  (landed: `KProgOp.chain_op_idx` + `chain_input_slot` plus
-  `kernel_entry_prog_chain_op` accessor that round-trips a
-  movement-op KProgOp into its `BIndexChainOp`);
+- ~~per-USE `KProgOp.chain_op_idx` field populated during `visit()`~~;
+- ~~per-USE `KProgOp.chain_edge_idx` for multi-path
+  disambiguation~~;
+- ~~identity-aware `prog_chain_propagate` so chain depth stays
+  aligned across `bufferize_apply_identity_reshape` elision~~;
+- ~~kernel-root op gets no BIndex chain entry (math handled by
+  the in-range check)~~;
 - reroute `RngsCtx` chain construction in `schedule/rangeify.c`
   through `kernel_entry_prog_chain_op` so the canonical chain
   drives codegen instead of `KProgOp.src0_dims`/`out_dims`/
-  `pad_widths`/`axis_perm` (pending - all data plumbing now
-  exists, the remaining work is replacing each `rngs_ctx_*` op
-  body with a `BIndexChainOp`-reading variant);
+  `pad_widths`/`axis_perm` (pending - all blockers cleared,
+  remaining work is replacing each `rngs_ctx_*` op body with a
+  `BIndexChainOp`-reading variant);
 - preserve valid masks through `S_IWHERE` from `has_pad` rather than
   rederiving them inside `rngs_ctx_pad` (pending - same per-USE
   prerequisite).

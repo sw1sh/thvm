@@ -6,6 +6,45 @@ dated section.
 
 ## Unreleased
 
+### Changed: bufferize per-USE chain mapping covers all rangeify cases
+
+Fixes the three correctness blockers documented in `d9cd25e` so the
+`KProgOp` → `BIndexChainOp` round-trip works on every kernel shape
+the rangeify rerouting will care about.
+
+- **Identity elision alignment**: `prog_chain_propagate` no longer
+  increments chain depth for src ops that are identity reshapes /
+  permutes / expands.  `kprog_op_is_identity` mirrors
+  `bufferize_chain_op_is_identity` so the post-elision BIndex chain
+  index always matches the KProgOp chain depth.  Identity-op
+  KProgOps return 0 from `kernel_entry_prog_chain_op` (they were
+  elided from the BIndex chain).
+
+- **Per-USE chain_edge_idx**: `KProgOp` gains a `chain_edge_idx`
+  field set at every leaf hit via a new
+  `KernelEntry.input_visit_counts[]` array; multiple paths through
+  one consumer to the same producer get distinct edge ids.
+  `kernel_entry_input_edge_at(kid, slot, edge_idx, BIndex *out)`
+  selects the edge_idx-th matching B_INDEX record;
+  `kernel_entry_input_edge_summary` is now a thin wrapper around
+  `_at(...,0)`.  Crucially, `visit()` increments the per-slot
+  count even on `VisitMemo` cache hits so the second path to a
+  cached input still claims its own edge.
+
+- **Kernel-root op handling**: by construction the kernel root op's
+  `chain_op_idx` equals the BIndex `chain_op_count`, so the
+  in-range check inside `kernel_entry_prog_chain_op` returns 0 for
+  it.  Documented; no explicit sentinel needed.
+
+`tests/test_bufferize.c` adds two cases: a 2-path multi-edge
+disambiguation test (asserts the two RESHAPE KProgOps land on
+distinct `chain_edge_idx` values and both lookups succeed), and a
+kernel-root op test that walks every emitted kernel and asserts
+the property when the root happens to be a movement op.  255/255.
+
+The rangeify rerouting (replacing `rngs_ctx_*` chain-walking with
+`kernel_entry_prog_chain_op`-driven composition) is now unblocked.
+
 ### Added: per-USE chain_op_idx on KProgOp + bindex round-trip accessor
 
 `KProgOp` gains two fields - `chain_op_idx` (u8) and

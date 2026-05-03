@@ -531,7 +531,16 @@ typedef struct {
   // identifies the matching `BIndexChainOp` at index
   // `chain_op_count - 1 - chain_op_idx` (BIndex stores chain ops in
   // consumer-to-source order; KProgOp counts source-to-consumer).
+  //
+  // chain_edge_idx disambiguates among the BIndex records that
+  // share the same (consumer, source) pair when a producer is
+  // reached via multiple distinct paths in one consumer.  Set at
+  // visit() time as `input_visit_counts[slot] - 1` after the leaf
+  // hit, then propagated up like chain_input_slot.  Together
+  // (chain_input_slot, chain_edge_idx, chain_op_idx) name a unique
+  // BIndexChainOp.
   u8    chain_op_idx;
+  u8    chain_edge_idx;
   u32   chain_input_slot;
 } KProgOp;
 
@@ -845,6 +854,11 @@ typedef struct KernelEntry {
   // means "leaf input or unknown source" and the per-USE KProgOp
   // chain remains the only source of truth for that slot.
   u32      *input_source_buffer_ids;
+  // Per-slot visit count - incremented every time visit() resolves
+  // this input.  Used by prog_chain_propagate to set
+  // KProgOp.chain_edge_idx so multiple paths from the same
+  // consumer to the same source pick distinct BIndex records.
+  u32      *input_visit_counts;
 
   u32       output_tid;            // TenDesc id we write to
   u32       output_dtype;
@@ -1467,6 +1481,12 @@ fn u64  materialize_boundary_at(u32 i);
 // consumer loc from the kernel's source_uop.
 fn u32  kernel_entry_input_source_buffer_id(u32 kid, u32 slot);
 fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
+// Per-USE variant: select the `edge_idx`-th BIndex record whose
+// (consumer, source) pair matches the kernel's source_uop and the
+// slot's source buffer.  Returns 1 on success, 0 when there are
+// fewer than `edge_idx + 1` matching records.
+fn int  kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
+                                   BIndex *out);
 
 // Phase 2 follow-up: map a movement-op KProgOp at (kid, prog_idx) to
 // the corresponding BIndexChainOp on the originating B_INDEX edge.

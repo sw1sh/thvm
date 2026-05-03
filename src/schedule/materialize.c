@@ -369,33 +369,47 @@ fn u32 kernel_entry_input_source_buffer_id(u32 kid, u32 slot) {
 }
 
 fn int kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out) {
+  // Convenience wrapper: returns the first matching edge.
+  return kernel_entry_input_edge_at(kid, slot, 0, out);
+}
+
+fn int kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
+                                  BIndex *out) {
   if (kid >= KERNELS_NEXT) return 0;
   KernelEntry const *ke = &KERNELS[kid];
   if (slot >= ke->n_inputs) return 0;
   if (ke->input_source_buffer_ids == NULL) return 0;
   u32 src_id = ke->input_source_buffer_ids[slot];
   if (src_id == 0) return 0;
-  // Consumer loc = this kernel's source UOp loc; bufferize was
-  // built before materialize rewrote heap cells to UOP_KERNEL, so
-  // term_val on source_uop still names the original boundary loc.
   Term src_uop = ke->source_uop;
   if (term_tag(src_uop) != TAG_UOP) return 0;
   u64 consumer_loc = term_val(src_uop);
-  // Get source loc via the bufferize buffer record.  Buffer ids
-  // are 1-based contiguous indices into the bufferize table, so
-  // bufferize_buffer_at(src_id - 1) maps directly.
-  BBufferize const *src_buf = bufferize_buffer_at(src_id - 1);
-  if (src_buf == NULL || src_buf->buffer_id != src_id) {
-    // Fallback scan if the id table reordered (defensive).
-    src_buf = NULL;
-    for (u32 i = 0; i < bufferize_buffer_count(); i++) {
-      BBufferize const *b = bufferize_buffer_at(i);
-      if (b != NULL && b->buffer_id == src_id) { src_buf = b; break; }
+  u32 consumer_idx = bufferize_find_by_loc(consumer_loc);
+  if (consumer_idx == 0xFFFFFFFFu) return 0;
+  BBufferize const *consumer_buf = bufferize_buffer_at(consumer_idx);
+  if (consumer_buf == NULL) return 0;
+  u32 consumer_id = consumer_buf->buffer_id;
+  // Walk all edges and pick the edge_idx-th one whose
+  // (consumer, source) pair matches.
+  u32 seen = 0;
+  for (u32 i = 0; i < bufferize_index_count(); i++) {
+    BIndex const *e = bufferize_index_at(i);
+    if (e == NULL) continue;
+    if (e->consumer_buffer_id != consumer_id) continue;
+    if (e->source_buffer_id != src_id) continue;
+    if (seen == edge_idx) {
+      if (out != NULL) *out = *e;
+      return 1;
     }
-    if (src_buf == NULL) return 0;
+    seen++;
   }
-  return bufferize_edge_summary(consumer_loc, src_buf->loc, out);
+  return 0;
 }
+
+// Forward decl: kprog_op_is_identity sits below
+// op_is_chain_movement in this file.  Both helpers are file-static
+// so the accessor can reference them ahead of their definitions.
+static u8 kprog_op_is_identity(KProgOp const *p);
 
 fn int kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out) {
   if (kid >= KERNELS_NEXT) return 0;
@@ -410,10 +424,19 @@ fn int kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out) {
                   || op == UOP_PERMUTE || op == UOP_SHRINK
                   || op == UOP_FLIP    || op == UOP_PAD);
   if (!is_movement) return 0;
+  // Identity movement ops are elided from the BIndex chain (see
+  // bufferize_apply_identity_reshape) so their lookup must miss
+  // even though chain_op_idx might fall in range.
+  if (kprog_op_is_identity(p)) return 0;
+
+  // Per-USE: pick the chain_edge_idx-th BIndex record for this
+  // (kernel, source) pair so multiple paths to the same source
+  // resolve to distinct chain entries.
   if (p->chain_input_slot == 0xFFFFFFFFu) return 0;
   if (p->chain_input_slot >= ke->n_inputs) return 0;
   BIndex edge;
-  if (!kernel_entry_input_edge_summary(kid, p->chain_input_slot, &edge)) {
+  if (!kernel_entry_input_edge_at(kid, p->chain_input_slot,
+                                  (u32)p->chain_edge_idx, &edge)) {
     return 0;
   }
   if (edge.chain_op_count == 0) return 0;
@@ -847,34 +870,76 @@ static u8 op_is_chain_movement(u8 op) {
   return op_is_view_movement(op) || op == UOP_PAD;
 }
 
-// Phase 2 follow-up: propagate chain_op_idx + chain_input_slot from
-// a single src ksrc reference to a freshly-zeroed KProgOp `p`.  The
-// caller has already populated `opcode` so the helper can decide
-// whether p itself contributes to the chain depth.  See KProgOp
-// definition in thvm.h for the chain semantics.
+// Identity check that mirrors bufferize_chain_op_is_identity in
+// schedule/bufferize.c.  Used by prog_chain_propagate to skip src
+// ops that bufferize_apply_identity_reshape elided from the
+// B_INDEX chain so KProgOp chain depth stays aligned with the
+// post-elision BIndex chain length.  Identity covers RESHAPE/EXPAND
+// with src_dims == out_dims and PERMUTE with axis_perm[i] == i.
+static u8 kprog_op_is_identity(KProgOp const *p) {
+  if (p->src0_ndim == 0) return 0;
+  if (p->opcode == UOP_RESHAPE || p->opcode == UOP_EXPAND) {
+    if (p->src0_ndim != p->out_ndim) return 0;
+    for (u32 d = 0; d < p->src0_ndim; d++) {
+      if (p->src0_dims[d] != p->out_dims[d]) return 0;
+    }
+    return 1;
+  }
+  if (p->opcode == UOP_PERMUTE) {
+    if (p->src0_ndim != p->out_ndim) return 0;
+    for (u32 d = 0; d < p->src0_ndim; d++) {
+      if (p->axis_perm[d] != d) return 0;
+    }
+    return 1;
+  }
+  return 0;
+}
+
+// Phase 2 follow-up: propagate chain_op_idx + chain_input_slot +
+// chain_edge_idx from a single src ksrc reference to a freshly-
+// zeroed KProgOp `p`.  See KProgOp definition in thvm.h for the
+// chain semantics.
+//
+// Movement src that is also an identity is invisible to the
+// bufferize chain (bufferize_apply_identity_reshape elides it), so
+// we treat it as non-movement here to keep chain_op_idx aligned
+// with B_INDEX chain entries.
+//
+// chain_edge_idx is taken from `ke->input_visit_counts[slot] - 1`
+// when src is a fresh INPUT leaf, then propagated unchanged through
+// every parent in the chain.
 static void prog_chain_propagate(KernelEntry *ke, KProgOp *p, u32 src_idx) {
   if (KSRC_IS_INPUT(src_idx)) {
+    u32 slot = KSRC_INDEX(src_idx);
     p->chain_op_idx     = 0;
-    p->chain_input_slot = KSRC_INDEX(src_idx);
+    p->chain_input_slot = slot;
+    u32 count = (ke->input_visit_counts != NULL && slot < ke->n_inputs)
+                  ? ke->input_visit_counts[slot] : 0;
+    if (count == 0) count = 1;          // defensive: at least one visit
+    p->chain_edge_idx = (count - 1) > 255u ? 255u : (u8)(count - 1);
     return;
   }
   u32 si = KSRC_INDEX(src_idx);
   if (si >= ke->n_ops) {
     p->chain_op_idx     = 0;
     p->chain_input_slot = 0xFFFFFFFFu;
+    p->chain_edge_idx   = 0;
     return;
   }
   KProgOp const *src_p = &ke->program[si];
   if (src_p->chain_input_slot == 0xFFFFFFFFu) {
     p->chain_op_idx     = 0;
     p->chain_input_slot = 0xFFFFFFFFu;
+    p->chain_edge_idx   = 0;
     return;
   }
-  u32 depth = (u32)src_p->chain_op_idx
-              + (op_is_chain_movement(src_p->opcode) ? 1u : 0u);
+  int src_counts =
+      op_is_chain_movement(src_p->opcode) && !kprog_op_is_identity(src_p);
+  u32 depth = (u32)src_p->chain_op_idx + (src_counts ? 1u : 0u);
   if (depth > 255u) depth = 255u;
   p->chain_op_idx     = (u8)depth;
   p->chain_input_slot = src_p->chain_input_slot;
+  p->chain_edge_idx   = src_p->chain_edge_idx;
 }
 
 // For chain-breaking ops (binary, REDUCE, etc.) - explicitly mark
@@ -883,6 +948,7 @@ static void prog_chain_propagate(KernelEntry *ke, KProgOp *p, u32 src_idx) {
 static void prog_chain_break(KProgOp *p) {
   p->chain_op_idx     = 0;
   p->chain_input_slot = 0xFFFFFFFFu;
+  p->chain_edge_idx   = 0;
 }
 
 // Flatten a non-contig TenDesc into a fresh contiguous copy via
@@ -1068,6 +1134,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     u32 tid  = (u32)term_val(t);
     u32 slot = input_slot_dedup(ke, tid, t);
     if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
+    if (ke->input_visit_counts != NULL) ke->input_visit_counts[slot]++;
     return KSRC_AS_INPUT(slot);
   }
   // Shape-annotated TVAR: bound by a TLamShape whose annotation
@@ -1087,6 +1154,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       for (u32 i = 0; i < s.ndim; i++) numel *= s.dims[i];
       u32 slot = input_slot_dedup_var(ke, t, DT_FP32, numel);
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
+      if (ke->input_visit_counts != NULL) ke->input_visit_counts[slot]++;
       return KSRC_AS_INPUT(slot);
     }
     return VISIT_BAIL;          // no shape annotation -- can't compile
@@ -1097,6 +1165,15 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   u64 loc = term_val(t);
   u32 memo_ref = visit_memo_lookup(memo, loc);
   if (memo_ref != VISIT_BAIL) {
+    // If the memo cached an input slot, bump the per-slot visit
+    // counter so each path through this UOp loc still gets its own
+    // chain_edge_idx.  Without this, two distinct movement chains
+    // that both bottom out at the same boundary would receive the
+    // same chain_edge_idx and pick the same BIndex record.
+    if (KSRC_IS_INPUT(memo_ref) && ke->input_visit_counts != NULL) {
+      u32 slot = KSRC_INDEX(memo_ref);
+      if (slot < ke->n_inputs) ke->input_visit_counts[slot]++;
+    }
     return memo_ref;
   }
 
@@ -1109,6 +1186,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     // No bufferize source id: UOP_KERNEL is post-materialize and
     // the bufferize graph operates on pre-kernel locs, so we leave
     // this slot's source_buffer_id at 0 (the leaf-input sentinel).
+    if (ke->input_visit_counts != NULL) ke->input_visit_counts[slot]++;
     u32 ref = KSRC_AS_INPUT(slot);
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -1139,6 +1217,16 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
           ke->input_source_buffer_ids[slot] = src_buf->buffer_id;
         }
       }
+      // Increment the per-slot visit counter so the next
+      // prog_chain_propagate call (for whatever movement op sits
+      // immediately above this leaf) gets a unique chain_edge_idx.
+      // Note: visit_memo_store below caches the ksrc_idx at this
+      // loc, so a subsequent visit() to the SAME boundary loc via
+      // a different path won't reach this code; the memo cache is
+      // an artifact of the current dedup model and a known
+      // limitation for the multi-path case.  See the
+      // bufferize.md plan for the per-USE rerouting follow-up.
+      if (ke->input_visit_counts != NULL) ke->input_visit_counts[slot]++;
       u32 ref = KSRC_AS_INPUT(slot);
       visit_memo_store(memo, loc, ref);
       return ref;

@@ -28,6 +28,8 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
   ke->input_views  = (View *)realloc(ke->input_views,  (size_t)new_cap * sizeof(View));
   ke->input_source_buffer_ids = (u32 *)realloc(
       ke->input_source_buffer_ids, (size_t)new_cap * sizeof(u32));
+  ke->input_visit_counts = (u32 *)realloc(
+      ke->input_visit_counts, (size_t)new_cap * sizeof(u32));
   // Zero new tail so unused slots stay clean (matters for input_tids=0
   // sentinel and input_terms=0 sentinel).
   for (u32 i = ke->inputs_cap; i < new_cap; i++) {
@@ -36,6 +38,7 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
     ke->input_numels[i] = 0;
     ke->input_terms [i] = 0;
     ke->input_source_buffer_ids[i] = 0;
+    ke->input_visit_counts[i]      = 0;
     memset(&ke->input_views[i], 0, sizeof(View));
   }
   ke->inputs_cap = new_cap;
@@ -86,6 +89,7 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->input_terms);  ke->input_terms  = NULL;
   free(ke->input_views);  ke->input_views  = NULL;
   free(ke->input_source_buffer_ids); ke->input_source_buffer_ids = NULL;
+  free(ke->input_visit_counts);      ke->input_visit_counts      = NULL;
   if (!ke->program_shared) free(ke->program);
   ke->program        = NULL;
   ke->program_shared = 0;
