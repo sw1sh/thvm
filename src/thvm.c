@@ -348,6 +348,12 @@ fn Term cnf(Term term);
 // through SUP branches in a term.  Calls cnf() at each step.
 #include "eval/collapse.c"
 
+// === term/eq.c ===
+// Structural term equality for pattern-matching consumers.
+// Loaded after cnf/ since the reducing wrapper drives both sides
+// through cnf first.
+#include "term/eq.c"
+
 // === term/prims_core.c ===
 // Core THVM_PRIM_* primitives (SEQ + LOG).  Has to live below wnf/
 // because the prim functions call wnf() to drive their first arg.

@@ -2401,6 +2401,33 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ddu(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// Structural equality (no reduction): 1 if a and b decode to the
+// same tree shape modulo VAR alpha-aliasing, 0 otherwise.  Use
+// thvm_wl_term_eq for the reducing variant.
+EXTERN_C DLLEXPORT int thvm_wl_term_eq_struct(WolframLibraryData libData,
+                                              mint argc, MArgument *args,
+                                              MArgument res) {
+  (void)libData; (void)argc;
+  Term a = (Term)MArgument_getInteger(args[0]);
+  Term b = (Term)MArgument_getInteger(args[1]);
+  MArgument_setInteger(res, (mint)term_eq_struct(a, b));
+  return LIBRARY_NO_ERROR;
+}
+
+// Reducing equality: cnf both sides, then structural.  Returns 1 /
+// 0.  The result is well-defined only when both terms cnf to a
+// SUP-free / CNF shape; if cnf returns a SUP at the root, the
+// caller should collapse explicitly first.
+EXTERN_C DLLEXPORT int thvm_wl_term_eq(WolframLibraryData libData,
+                                       mint argc, MArgument *args,
+                                       MArgument res) {
+  (void)libData; (void)argc;
+  Term a = (Term)MArgument_getInteger(args[0]);
+  Term b = (Term)MArgument_getInteger(args[1]);
+  MArgument_setInteger(res, (mint)term_eq_cnf(a, b));
+  return LIBRARY_NO_ERROR;
+}
+
 // === book heap / defs / ALO state I/O ===
 //
 // Used by Heap.wl HeapSnapshot / HeapInitialize to bundle DEFS,

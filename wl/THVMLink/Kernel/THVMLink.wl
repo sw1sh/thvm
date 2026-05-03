@@ -63,6 +63,8 @@ TApp::usage       = "TApp[fun, arg] constructs an application.";
 TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
 TDsu::usage       = "TDsu[label, a, b] constructs a dynamic-label SUP (HVM4 DSU): the label is a TTerm reduced strict-left at wnf time, after which DSU collapses to SUP^n / ERA / nested-SUP based on what the label resolved to.  Useful for pattern compilers that need a fresh label per match instance.";
 TDdu::usage       = "TDdu[label, val, body] constructs a dynamic-label DUP (HVM4 DDU): same shape as TDsu but on the DUP side.  body must be a 2-arg LAM-pair; once label resolves to NUM(n), the DDU reduces to body(X0, X1) where X0/X1 are projections of DUP^n on val.";
+TTermEq::usage    = "TTermEq[a, b] returns True if `a` and `b` cnf-reduce to structurally equal terms (modulo VAR alpha-aliasing), False otherwise.  Drives both sides through cnf so DP-rooted projections fire and SUP heads lift.  Use TTermEqStruct for the no-reduction variant on already-CNF'd terms.";
+TTermEqStruct::usage = "TTermEqStruct[a, b] returns True if `a` and `b` are structurally equal without further reduction.  Compares tag/ext/val and recurses on children; same-loc compounds are trivially equal.  Cheap when callers already have CNF terms; for general use prefer TTermEq.";
 TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
 
 (* === tag constants (mirror src/thvm.h) === *)
@@ -174,7 +176,9 @@ $TagAPP = 0; $TagLAM = 1; $TagVAR = 2; $TagERA = 3;
 $TagDP0 = 4; $TagDP1 = 5; $TagSUP = 6; $TagDUP = 7;
 $TagTEN = 8; $TagUOP = 9; $TagNUM = 10;
 $TagREF = 11; $TagALO = 12; $TagOP2 = 13; $TagMAT = 14;
-$TagCTR = 20;
+$TagEQL = 15; $TagAND = 16; $TagOR  = 17; $TagANY = 18;
+$TagINC = 19; $TagCTR = 20; $TagWHEN = 21; $TagFVR = 22;
+$TagBRI = 23; $TagANN = 24; $TagPRI = 25;
 $TagDSU = 29; $TagDDU = 30;
 
 (* DUP-cell flavor flag: TAG_DP{0,1} with this bit set on ext is a
@@ -187,7 +191,9 @@ $tagNames = <|
     4  -> "DP0", 5  -> "DP1", 6  -> "SUP",  7  -> "DUP",
     8  -> "TEN", 9  -> "UOP", 10 -> "NUM",
     11 -> "REF", 12 -> "ALO", 13 -> "OP2",  14 -> "MAT",
-    20 -> "CTR",
+    15 -> "EQL", 16 -> "AND", 17 -> "OR",   18 -> "ANY",
+    19 -> "INC", 20 -> "CTR", 21 -> "WHEN", 22 -> "FVR",
+    23 -> "BRI", 24 -> "ANN", 25 -> "PRI",
     29 -> "DSU", 30 -> "DDU"
 |>;
 
@@ -269,6 +275,8 @@ $resetFn     := $resetFn     = load["thvm_wl_reset",      {},                   
 $termNewFn   := $termNewFn   = load["thvm_wl_term_new",   {Integer, Integer, Integer, Integer}, Integer];
 $termNewDsuFn := $termNewDsuFn = load["thvm_wl_term_new_dsu", {Integer, Integer, Integer}, Integer];
 $termNewDduFn := $termNewDduFn = load["thvm_wl_term_new_ddu", {Integer, Integer, Integer}, Integer];
+$termEqStructFn := $termEqStructFn = load["thvm_wl_term_eq_struct", {Integer, Integer}, Integer];
+$termEqFn       := $termEqFn       = load["thvm_wl_term_eq",        {Integer, Integer}, Integer];
 $lamSealExtFn := $lamSealExtFn = load["thvm_wl_lam_seal_ext", {Integer, Integer},      Integer];
 $termTagFn   := $termTagFn   = load["thvm_wl_term_tag",   {Integer},                Integer];
 $termExtFn   := $termExtFn   = load["thvm_wl_term_ext",   {Integer},                Integer];
@@ -854,6 +862,19 @@ TDdu[label_TTerm, val_TTerm, body_TTerm] := (
     ensureInit[];
     TTerm[$termNewDduFn[ttermRaw[label], ttermRaw[val], ttermRaw[body]]]
 )
+
+(* Term equality.  Both variants treat raw-Integer arguments as
+   already-packed Term values (so callers can compose with
+   ttermRaw without an extra TTerm wrapper). *)
+TTermEq[a_TTerm, b_TTerm] :=
+    (ensureInit[]; $termEqFn[ttermRaw[a], ttermRaw[b]] === 1)
+TTermEq[a_Integer, b_Integer] :=
+    (ensureInit[]; $termEqFn[a, b] === 1)
+
+TTermEqStruct[a_TTerm, b_TTerm] :=
+    (ensureInit[]; $termEqStructFn[ttermRaw[a], ttermRaw[b]] === 1)
+TTermEqStruct[a_Integer, b_Integer] :=
+    (ensureInit[]; $termEqStructFn[a, b] === 1)
 
 (* TLam is JIT-aware by default: when the body is a UOP graph
    (compute) and the argument carries a shape (TEN), the APP-LAM
