@@ -1080,6 +1080,34 @@ static u32 realize_remove_by_cost_score_consumer_budget(void) {
   return 64;
 }
 
+// Walk up from `loc` through unrealized parents until we hit a
+// realized boundary; return that boundary's recompute_ops (the
+// kernel program size that would absorb b's recompute).  Bounds
+// recursion to depth 32 - bigger chains are pathological - and
+// returns 0 (defensive) when no realized ancestor is found.
+// Across multiple paths to different realized ancestors, returns
+// the MAX (the worst-case kernel that would absorb the recompute).
+static u32 realize_realized_ancestor_recompute_ops(u64 loc, u32 depth) {
+  if (depth > 32) return 0;
+  u32 max_ops = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    u64 ploc = REALIZE_INFO[i].loc;
+    if (ploc == loc) continue;
+    if (!realize_parent_uses_child(ploc, loc)) continue;
+    if (REALIZE_INFO[i].realized) {
+      u32 bidx = bufferize_find_by_loc(ploc);
+      u32 ops = (bidx != 0xFFFFFFFFu)
+                  ? bufferize_buffer_at(bidx)->recompute_ops
+                  : 0;
+      if (ops > max_ops) max_ops = ops;
+    } else {
+      u32 up_ops = realize_realized_ancestor_recompute_ops(ploc, depth + 1);
+      if (up_ops > max_ops) max_ops = up_ops;
+    }
+  }
+  return max_ops;
+}
+
 static int realize_remove_by_cost_score_consumers_fit_tile(
     BBufferize const *b, u32 budget) {
   u64 b_loc = b->loc;
@@ -1097,17 +1125,17 @@ static int realize_remove_by_cost_score_consumers_fit_tile(
       }
     }
     if (!hits) continue;
-    // Consumer found.  When the consumer is a realized buffer we
-    // can read its recompute_ops to bound the resulting kernel
-    // size; otherwise the consumer is an intermediate UOp that
-    // gets fused into a deeper realized boundary's program, and
-    // its own ops contribute zero (they were already going to be
-    // there).  Either way, estimated = consumer_ops + b_ops.
+    // Consumer found.  If the consumer itself is a realized
+    // buffer, use its recompute_ops directly.  Otherwise walk up
+    // to find the eventual realized ancestor whose kernel program
+    // would absorb the recompute (bounded recursion).
     u32 cidx = bufferize_find_by_loc(ploc);
     u64 consumer_ops = 0;
     if (cidx != 0xFFFFFFFFu) {
       BBufferize const *cb = bufferize_buffer_at(cidx);
       if (cb != NULL) consumer_ops = (u64)cb->recompute_ops;
+    } else {
+      consumer_ops = (u64)realize_realized_ancestor_recompute_ops(ploc, 0);
     }
     u64 estimated = consumer_ops + (u64)b_ops;
     if (estimated > (u64)budget) return 0;
