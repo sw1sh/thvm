@@ -6,6 +6,26 @@ dated section.
 
 ## Unreleased
 
+### Changed: Phase 1 bufferize graph records named-rule history
+
+`schedule/bufferize.c` now seeds the bufferize graph from
+`REALIZE_INFO` between the ROOT/MULTI/REDUCE seeding pass and
+`realize_rewrite_apply`, then stays live across the rewrite phase.
+`realize_rewrite_apply` stamps each rule name as the current rule
+before its `apply` callback runs; `realize_mark` and
+`realize_unmark` forward into `bufferize_realize_with_reason` and
+`bufferize_unrealize`, which set `added_by` / `removed_by` from that
+pointer.  `BBufferize` gains `realized`, `removed_by`, and `added_by`
+fields; new accessors `bufferize_realized_count` and
+`bufferize_current_rule` are exposed alongside the existing API.
+Materialize.c still consumes `REALIZE_INFO` directly, so kernel
+counts and WL results are unchanged; the bufferize graph is now the
+record of which named rule decided each boundary.
+`tests/test_bufferize.c` adds an `inline-constants` removal case
+that asserts `removed_by == "inline-constants"` and that
+`bufferize_buffer_count` exceeds `bufferize_realized_count` once a
+seeded buffer is removed.
+
 ### Added: Phase 0 bufferize schedule graph
 
 `schedule/bufferize.c` projects the final `REALIZE_INFO` boundary set

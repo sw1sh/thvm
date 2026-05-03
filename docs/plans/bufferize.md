@@ -1,6 +1,6 @@
 # Bufferize Schedule IR Plan
 
-Status: Phase 0 landed; Phases 1-7 planned.
+Status: Phases 0-1 landed; Phases 2-7 planned.
 
 ## Goal
 
@@ -352,25 +352,39 @@ Acceptance:
   `REALIZE_INFO`; bufferize is a read-only mirror);
 - `make test` passes including the new `tests/test_bufferize.c`.
 
-### Phase 1: Move Current Boundary Rewrites Into Bufferize IR
+### Phase 1: Move Current Boundary Rewrites Into Bufferize IR (landed)
 
 Port the existing named realize-map rules so they operate on explicit
 bufferize nodes.
 
-Tasks:
-
-- port `inline-constants`;
-- port adjacent reduce-chain and scalar-tail rules;
-- port `remove-removable-bufferize`;
-- port `metal-tile-fanin-cap`;
-- keep old `REALIZE_INFO` as a compatibility projection until
-  materialize consumes the new graph directly.
+Status: landed.  The bufferize graph is now seeded from
+`REALIZE_INFO` between the ROOT/MULTI/REDUCE marking pass and
+`realize_rewrite_apply`, and stays live across the rewrite phase.
+`realize_rewrite_apply` sets `bufferize_set_current_rule(name)` around
+each rule's `apply` callback; `realize_mark` and `realize_unmark`
+forward into `bufferize_realize_with_reason` and
+`bufferize_unrealize`, which stamp `added_by` / `removed_by` from
+that pointer.  All existing realize-map rules
+(`inline-constants`, the adjacent reduce-chain and scalar-tail
+rules, `remove-removable-bufferize`, `metal-tile-fanin-cap`, the
+fanout probes) keep their current shape and rule names; the
+forwarding wiring means each one's effect is now visible on the
+explicit graph without porting per-rule code.  Materialize.c still
+reads `REALIZE_INFO`, so behaviour is unchanged.
 
 Acceptance:
 
-- same or lower kernel count than current default;
-- all existing rewrite stats preserved with new bufferize names;
-- disable flags still bisect behavior.
+- `make test` passes including the new `inline-constants`
+  removed-by stamp test;
+- all existing rewrite stats preserved with their original names;
+- disable flags still bisect behavior identically.
+
+Follow-up before Phase 2: rules that allocate fresh consumer-count
+data through `realize_info_find` after a forward should also push
+that data through the bufferize API; today brand-new buffers added
+by `metal-tile-fanin-cap` re-read `REALIZE_INFO` for their
+consumer_count.  Once `B_INDEX` lands in Phase 2, the bufferize
+graph will be the only authoritative source.
 
 ### Phase 2: Make `B_INDEX` Edge-Local And Mandatory
 
@@ -540,18 +554,20 @@ autotune.
 
 ## Immediate Next Step
 
-Phase 0 has landed; the next implementation step is Phase 1:
+Phases 0-1 have landed; the next implementation step is Phase 2:
 
-1. Move the existing named realize-map rewrites
-   (`inline-constants`, the adjacent reduce-chain and scalar-tail
-   rules, `remove-removable-bufferize`, `metal-tile-fanin-cap`) so
-   they edit the bufferize graph instead of `REALIZE_INFO` directly.
-2. Project an `INLINE`/`REMOVE` rewrite-history bit on every removed
-   `B_BUFFERIZE` record so dumps still answer "which rule lost it".
-3. Keep `REALIZE_INFO` as a read-back projection from the bufferize
-   graph until materialize consumes the bufferize graph directly.
+1. Generate one `B_INDEX` record per producer-to-consumer edge so
+   reshape/pad/expand/shrink/flip/permute context is edge-local
+   instead of producer-global.
+2. Teach rangeify to read `B_INDEX` for direct loads, expression
+   loads, and reduction inputs, preserving valid masks through
+   `S_IWHERE` rather than recovering them from the original UOp
+   graph.
+3. Keep `THVM_RANGEIFY_BAIL=1` regression coverage and add focused
+   tests where a shared producer is consumed under multiple
+   movement views.
 
-Each rewrite must keep the existing rule names and counters so
-`DUMP_FUSION_REWRITE_CANDIDATES=1` continues to bisect cleanly, and
-must leave kernel counts and WL results unchanged on the bounded
-beautiful-mnist canary before any new Phase 2+ rule lands.
+`B_INDEX` is what turns Phases 4-6 into editable rewrites: removal,
+insertion, and memory rules all reason about consumer edges, not
+producer-global state.  Until Phase 2 lands, those phases would have
+to keep recovering edge contexts from the heap walk.

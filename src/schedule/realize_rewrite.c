@@ -86,7 +86,13 @@ static void realize_rewrite_apply(Term root,
                                   RealizeRewriteRule const *rules,
                                   u32 n_rules) {
   for (u32 i = 0; i < n_rules; i++) {
+    // Stamp the current rule name so realize_mark / realize_unmark
+    // can attribute their bufferize-graph effects to it.  Phase 1 of
+    // docs/plans/bufferize.md - the rule's hit count and the
+    // removed_by/added_by stamps must agree.
+    bufferize_set_current_rule(rules[i].name);
     u32 hits = rules[i].apply != NULL ? rules[i].apply(root) : 0;
+    bufferize_set_current_rule(NULL);
     realize_rewrite_stats_record(rules[i].name, hits);
   }
 }

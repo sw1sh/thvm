@@ -17,16 +17,18 @@ static u32 alloc_f32_tensor(u32 dim) {
   return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
-// Walk the bufferize graph and the realize table together; every
-// realized REALIZE_INFO entry must appear exactly once with matching
-// op/consumer count, and no inlined entry may appear.
+// Walk the bufferize graph and the realize table together.  Every
+// realized REALIZE_INFO entry must appear in the graph with
+// realized=1; an unrealized entry that is in the graph must have
+// realized=0 and a removed_by stamp.  bufferize_realized_count must
+// equal the number of realized REALIZE_INFO entries.
 static void check_graph_matches_realize_info(void) {
   u32 realized = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo const *info = &REALIZE_INFO[i];
+    u32 idx = bufferize_find_by_loc(info->loc);
     if (info->realized) {
       realized++;
-      u32 idx = bufferize_find_by_loc(info->loc);
       CHECK(idx != 0xFFFFFFFFu);
       if (idx == 0xFFFFFFFFu) continue;
       BBufferize const *b = bufferize_buffer_at(idx);
@@ -35,11 +37,14 @@ static void check_graph_matches_realize_info(void) {
       CHECK_EQ(b->op, info->op);
       CHECK_EQ(b->consumer_count, info->consumer_count);
       CHECK_EQ(b->buffer_id, idx + 1);
-    } else {
-      CHECK_EQ(bufferize_find_by_loc(info->loc), 0xFFFFFFFFu);
+      CHECK_EQ(b->realized, 1);
+    } else if (idx != 0xFFFFFFFFu) {
+      BBufferize const *b = bufferize_buffer_at(idx);
+      CHECK_EQ(b->realized, 0);
+      CHECK(b->removed_by != NULL);
     }
   }
-  CHECK_EQ(bufferize_buffer_count(), realized);
+  CHECK_EQ(bufferize_realized_count(), realized);
 }
 
 int main(void) {
@@ -142,6 +147,53 @@ int main(void) {
     CHECK(rb->reasons & BUFFERIZE_REASON_ROOT);
   }
   check_graph_matches_realize_info();
+
+  TEST_BEGIN("bufferize/inline-constants-stamps-removed-by");
+  // A multi-consumer CONST gets MULTI seeded and then unmarked by
+  // the inline-constants rule.  After classify the bufferize graph
+  // must keep the CONST as a record with realized=0 and
+  // removed_by="inline-constants".
+  Term k  = uop_const(DT_FP32, 0x3F800000u);   // 1.0f
+  Term ka = uop_binary(UOP_ADD, k, a);
+  Term kb = uop_binary(UOP_ADD, k, b);
+  Term kr = uop_binary(UOP_ADD, ka, kb);
+  realize_classify(kr);
+  u32 k_idx = bufferize_find_by_loc(term_val(k));
+  CHECK(k_idx != 0xFFFFFFFFu);
+  if (k_idx != 0xFFFFFFFFu) {
+    BBufferize const *kb2 = bufferize_buffer_at(k_idx);
+    CHECK_EQ(kb2->realized, 0);
+    CHECK(kb2->removed_by != NULL);
+    if (kb2->removed_by != NULL) {
+      CHECK_EQ(strcmp(kb2->removed_by, "inline-constants"), 0);
+    }
+    CHECK(kb2->reasons & BUFFERIZE_REASON_MULTI);
+  }
+  // Total buffer count includes the removed const; realized count
+  // does not.  And the realized count must equal the live boundary
+  // set seen by realize_is_realized.
+  u32 live = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    if (REALIZE_INFO[i].realized) live++;
+  }
+  CHECK_EQ(bufferize_realized_count(), live);
+  CHECK(bufferize_buffer_count() > bufferize_realized_count());
+
+  TEST_BEGIN("bufferize/realized-count-matches-realize-info");
+  // Build a small reduce graph and confirm realized_count tracks
+  // REALIZE_INFO across the whole rewrite pass.
+  Term red2 = uop_reduce(REDUCE_SUM, 0, a);
+  realize_classify(red2);
+  u32 live2 = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    if (REALIZE_INFO[i].realized) live2++;
+  }
+  CHECK_EQ(bufferize_realized_count(), live2);
+
+  TEST_BEGIN("bufferize/current-rule-resets-after-apply");
+  // Outside realize_rewrite_apply the current rule pointer is NULL
+  // again.  Otherwise downstream callers would see a stale rule.
+  CHECK_EQ(bufferize_current_rule(), (char const *)NULL);
 
   thvm_free();
   TEST_REPORT();

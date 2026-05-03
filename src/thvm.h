@@ -1231,37 +1231,59 @@ fn char const *realize_rewrite_stat_name(u32 i);
 fn u32  realize_rewrite_stat_hits_at(u32 i);
 fn u32  realize_rewrite_stat_hits(char const *name);
 
-// === bufferize schedule IR (Phase 0) ===
-// Explicit B_BUFFERIZE/B_STORE projection of the REALIZE_INFO table,
-// per docs/plans/bufferize.md.  Phase 0 is a non-behavioural mirror:
-// every UOp loc that realize_classify left with `realized=1` becomes
-// one B_BUFFERIZE record with a stable buffer id (1..N) and the
-// reason bits projected from REALIZE_REASON_*.  The realize root
-// becomes a B_STORE pointing at its B_BUFFERIZE.  Later phases will
-// own removal/insertion rules, edge-local indexes, and rangeify.
+// === bufferize schedule IR (Phase 0 + Phase 1) ===
+// Explicit B_BUFFERIZE/B_STORE projection of REALIZE_INFO, per
+// docs/plans/bufferize.md.  Phase 0 was a post-rewrite mirror; Phase 1
+// makes the graph live during the rewrite pass and stamps every named
+// realize-map rule onto the buffer it touched, so the graph answers
+// not only "which UOps materialize" but also "which rule decided".
 //
-// `DUMP_BUFFERIZE=1` prints a one-line summary plus the per-buffer
-// table to stderr after each realize_classify.  No public WL API
-// changes; this is purely a schedule-internal representation.
+// Lifecycle inside one realize_classify call:
+//   1. realize_walk_rec + ROOT/MULTI/REDUCE seeding populates
+//      REALIZE_INFO.
+//   2. bufferize_seed_from_realize_info snapshots every realized loc
+//      into BBufferize records with realized=1, removed_by=NULL,
+//      added_by=NULL, and assigns dense 1-based buffer ids.
+//   3. realize_rewrite_apply runs each named rule with
+//      bufferize_set_current_rule(name) wrapping the call.  When a
+//      rule mutates REALIZE_INFO via realize_mark/realize_unmark, the
+//      same change is forwarded to bufferize_realize_with_reason /
+//      bufferize_unrealize, which stamps added_by / removed_by from
+//      the current rule pointer.
+//   4. bufferize_finalize_stores adds one B_STORE for the realize
+//      root (Phase 2+ will add per-kernel stores).
+//
+// Materialize.c still consumes REALIZE_INFO; the bufferize graph is
+// the read/write canonical state and REALIZE_INFO is the projection.
+// `DUMP_BUFFERIZE=1` prints the per-buffer table after each pass.
 #define BUFFERIZE_GRAPH_CAP REALIZE_INFO_CAP
 #define BUFFERIZE_REASON_ROOT        (1u << 0)
 #define BUFFERIZE_REASON_MULTI       (1u << 1)
 #define BUFFERIZE_REASON_REDUCE      (1u << 2)
 #define BUFFERIZE_REASON_BACKEND_CAP (1u << 3)
 typedef struct {
-  u64 loc;            // heap loc of the underlying UOp value
-  u32 buffer_id;      // 1-based stable id within this graph
-  u32 reasons;        // BUFFERIZE_REASON_* mirror of REALIZE_REASON_*
-  u32 consumer_count; // direct UOp consumer count from realize_classify
-  u8  op;             // UOP_* of the value being bufferized
-  u8  is_root;        // 1 iff this buffer is the realize root
+  u64 loc;             // heap loc of the underlying UOp value
+  u32 buffer_id;       // 1-based stable id within this graph
+  u32 reasons;         // BUFFERIZE_REASON_* mirror of REALIZE_REASON_*
+  u32 consumer_count;  // direct UOp consumer count from realize_classify
+  u8  op;              // UOP_* of the value being bufferized
+  u8  is_root;         // 1 iff this buffer is the realize root
+  u8  realized;        // 1 = currently realized, 0 = removed by a rule
+  char const *removed_by; // name of the rule that cleared realized; NULL otherwise
+  char const *added_by;   // name of the rule that introduced this buffer; NULL if seeded
 } BBufferize;
 typedef struct {
   u32 buffer_id;      // destination B_BUFFERIZE id
   u64 loc;            // heap loc of the stored value
 } BStore;
-fn void              bufferize_build(Term root);
+fn void              bufferize_seed_from_realize_info(Term root);
+fn void              bufferize_finalize_stores(Term root);
+fn void              bufferize_set_current_rule(char const *name);
+fn char const       *bufferize_current_rule(void);
+fn void              bufferize_unrealize(u64 loc);
+fn void              bufferize_realize_with_reason(u64 loc, u8 op, u32 reason);
 fn u32               bufferize_buffer_count(void);
+fn u32               bufferize_realized_count(void);
 fn BBufferize const *bufferize_buffer_at(u32 i);
 fn u32               bufferize_find_by_loc(u64 loc);
 fn u32               bufferize_store_count(void);

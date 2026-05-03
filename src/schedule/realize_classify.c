@@ -97,6 +97,12 @@ static void realize_mark(UOpInfo *info, u32 reason) {
   }
   info->realized = 1;
   info->reasons |= reason;
+  // Forward to the bufferize graph so rule-driven boundary additions
+  // (e.g. metal-tile-fanin-cap promoting a child) get a B_BUFFERIZE
+  // record stamped with the current rule.  bufferize_realize_with_reason
+  // is a no-op until bufferize_seed_from_realize_info has run, so the
+  // initial ROOT/MULTI/REDUCE seed pass does not double-mutate.
+  bufferize_realize_with_reason(info->loc, info->op, reason);
 }
 
 static void realize_unmark(UOpInfo *info, u32 reason) {
@@ -105,6 +111,9 @@ static void realize_unmark(UOpInfo *info, u32 reason) {
   }
   info->realized = 0;
   info->reasons |= reason;
+  // Mirror the unmark into the bufferize graph and stamp removed_by
+  // with whichever rule realize_rewrite_apply has flagged as current.
+  bufferize_unrealize(info->loc);
 }
 
 static void realize_walk_rec(Term t, u8 *visited) {
@@ -999,11 +1008,19 @@ static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
 fn void realize_classify(Term root) {
   realize_info_clear();
   realize_rewrite_stats_clear();
-  // Always project into the bufferize graph so its state stays in
-  // sync with REALIZE_INFO.  bufferize_build short-circuits on
-  // non-UOp roots after zeroing its own tables.
-  if (term_tag(root) != TAG_UOP) { bufferize_build(root); return; }
-  if (term_ext(root) == UOP_KERNEL) { bufferize_build(root); return; }
+  // Always touch the bufferize graph so its state stays in sync with
+  // REALIZE_INFO.  Both seed/finalize short-circuit on non-UOp roots
+  // after zeroing their own tables.
+  if (term_tag(root) != TAG_UOP) {
+    bufferize_seed_from_realize_info(root);
+    bufferize_finalize_stores(root);
+    return;
+  }
+  if (term_ext(root) == UOP_KERNEL) {
+    bufferize_seed_from_realize_info(root);
+    bufferize_finalize_stores(root);
+    return;
+  }
 
   // Bitmap sized to HEAP_NEXT (current high-water of the dyn
   // heap) instead of HEAP_CAP -- per-call cost stays
@@ -1043,13 +1060,16 @@ fn void realize_classify(Term root) {
     {"inline-pure-fanout-probe",      realize_rule_inline_pure_fanout_probe},
     {"metal-tile-fanin-cap",          realize_rule_metal_tile_fanin_cap},
   };
+  // Phase 1: snapshot the seeded REALIZE_INFO into the bufferize
+  // graph, then run the named rewrite rules.  realize_mark and
+  // realize_unmark forward into bufferize_realize_with_reason and
+  // bufferize_unrealize so each rule's effect is recorded as
+  // added_by/removed_by on the explicit graph.  Finalize the store
+  // table after rewrites land.
+  bufferize_seed_from_realize_info(root);
   realize_rewrite_apply(root, rules, (u32)(sizeof(rules) / sizeof(rules[0])));
   realize_rewrite_stats_dump();
-
-  // Phase 0 of docs/plans/bufferize.md: project the final REALIZE_INFO
-  // boundary set into an explicit B_BUFFERIZE/B_STORE graph.  This is
-  // a non-behavioural mirror; materialize.c still reads REALIZE_INFO.
-  bufferize_build(root);
+  bufferize_finalize_stores(root);
 }
 
 fn u8 realize_is_realized(Term uop_term) {
