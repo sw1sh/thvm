@@ -161,7 +161,7 @@ jitGraphRunLimit[] := Module[{raw = Environment["THVM_METAL_GRAPH_MAX_DISPATCHES
     If[!StringQ[raw] || StringLength[StringTrim[raw]] == 0, Return[256]];
     If[!StringMatchQ[StringTrim[raw], DigitCharacter ..], Return[256]];
     n = ToExpression[StringTrim[raw]];
-    If[2 <= n <= 256, n, 256]
+    If[2 <= n <= 512, n, 256]
 ]
 
 TJitCaptureRuns[c_TJitClosure] := Module[{

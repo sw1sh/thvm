@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Changed: allow larger Metal graph replay chunks
+
+Metal graph replay now accepts `THVM_METAL_GRAPH_MAX_DISPATCHES` up to
+512 dispatches per encoded run, up from 256.  This lets large captured
+training steps replay in fewer command batches without changing kernel
+fusion or scheduling semantics.
+
 ### Changed: pack replay temporaries into larger dead buffers
 
 The JIT replay slot packer now uses a best-fit policy that can reuse a

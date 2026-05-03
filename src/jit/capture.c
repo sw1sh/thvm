@@ -289,7 +289,7 @@ static u32 jit_metal_graph_max_dispatches(void) {
     char const *e = getenv("THVM_METAL_GRAPH_MAX_DISPATCHES");
     if (e != NULL && e[0] != '\0') {
       u64 v = strtoull(e, NULL, 10);
-      if (v >= 2 && v <= 256) {
+      if (v >= 2 && v <= 512) {
         limit = (u32)v;
       }
     }
@@ -1075,7 +1075,7 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   if (start >= c->n_ops || c->ops[start].kind != JIT_OP_DISPATCH) {
     return 0;
   }
-  JitReplayDispatch recs[256];
+  JitReplayDispatch recs[512];
   u32 limit = jit_metal_graph_max_dispatches();
   u32 n = 0;
   u32 consumed = 0;
