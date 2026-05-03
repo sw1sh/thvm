@@ -1,15 +1,16 @@
-(* subexprs.wlt -- VerificationTest specs for TLazySubexprs +
+(* subexprs.wlt -- VerificationTest specs for TTermSubexprs +
    TSubexprAt + TDefGet / TDefExpr / TDefTree.
 
-   See wl/THVMLink/Kernel/Lazy.wl (subexprChildren / TLazySubexprs /
-   TSubexprAt) and wl/THVMLink/Kernel/Ref.wl (TDefGet / TDefExpr /
-   TDefTree). *)
+   See wl/THVMLink/Kernel/THVMLink.wl (TTermSubexprs / TSubexprAt
+   alongside TTermExpr / TTermTree) and wl/THVMLink/Kernel/Ref.wl
+   (TDefGet / TDefExpr / TDefTree).  TTermSubexprs returns a List
+   of `path -> TTerm` rules; sibling output to TTermExpr/TTermTree. *)
 
-(* === TLazySubexprs: pre-order DFS over heap structure ============== *)
+(* === TTermSubexprs: pre-order DFS over heap structure ============== *)
 
 VerificationTest[
     Block[{t = TNum[7], pairs},
-        pairs = TLazySubexprs[t];
+        pairs = TTermSubexprs[t];
         Length[pairs]],
     1,
     TestID -> "Subexprs/atom-yields-one-pair"
@@ -17,7 +18,7 @@ VerificationTest[
 
 VerificationTest[
     Block[{t = TNum[7], pairs},
-        pairs = TLazySubexprs[t];
+        pairs = TTermSubexprs[t];
         First[pairs][[1]]],
     {},
     TestID -> "Subexprs/atom-root-path-empty"
@@ -25,7 +26,7 @@ VerificationTest[
 
 VerificationTest[
     Block[{t = TOp2["+", TNum[1], TNum[2]], pairs},
-        pairs = TLazySubexprs[t];
+        pairs = TTermSubexprs[t];
         Length[pairs]],
     3,
     TestID -> "Subexprs/op2-yields-three"
@@ -33,7 +34,7 @@ VerificationTest[
 
 VerificationTest[
     Block[{t = TOp2["+", TNum[1], TNum[2]], pairs},
-        pairs = TLazySubexprs[t];
+        pairs = TTermSubexprs[t];
         First /@ pairs],
     {{}, {0}, {1}},
     TestID -> "Subexprs/op2-paths-pre-order"
@@ -43,7 +44,7 @@ VerificationTest[
     Block[{a = TLazyEncode[a], b = TLazyEncode[b], c = TLazyEncode[c],
            t, pairs},
         t     = TOp2["*", TOp2["+", a, b], c];
-        pairs = TLazySubexprs[t];
+        pairs = TTermSubexprs[t];
         First /@ pairs],
     {{}, {0}, {0, 0}, {0, 1}, {1}},
     TestID -> "Subexprs/nested-op2-paths"
@@ -51,7 +52,7 @@ VerificationTest[
 
 VerificationTest[
     Block[{t = TLazyEncode[{a, b, c}], pairs},
-        pairs = TLazySubexprs[t];
+        pairs = TTermSubexprs[t];
         Length[pairs]],
     4,                          (* Tuple-CTR + 3 leaves *)
     TestID -> "Subexprs/tuple-ctr-yields-1+arity"
@@ -59,10 +60,29 @@ VerificationTest[
 
 VerificationTest[
     Block[{t = TLazyEncode[{a, b, c}], pairs},
-        pairs = TLazySubexprs[t];
+        pairs = TTermSubexprs[t];
         First /@ pairs],
     {{}, {1}, {2}, {3}},
     TestID -> "Subexprs/ctr-paths-skip-arity-slot-0"
+]
+
+(* === Rule shape: {path -> TTerm, ...} ============================= *)
+
+VerificationTest[
+    Block[{t = TOp2["+", TNum[1], TNum[2]], pairs},
+        pairs = TTermSubexprs[t];
+        And @@ (Head[#] === Rule & /@ pairs)],
+    True,
+    TestID -> "Subexprs/entries-are-Rules"
+]
+
+VerificationTest[
+    Block[{t = TOp2["+", TNum[1], TNum[2]], pairs, lookup},
+        pairs  = TTermSubexprs[t];
+        lookup = Association[pairs];
+        TTermVal /@ {lookup[{0}], lookup[{1}]}],
+    {1, 2},
+    TestID -> "Subexprs/Association-lookup-by-path"
 ]
 
 (* === TSubexprAt: random-access path navigation ===================== *)

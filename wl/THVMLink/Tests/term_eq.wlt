@@ -1,7 +1,7 @@
-(* term_eq.wlt -- VerificationTest specs for TTermEq / TTermEqStruct.
+(* term_eq.wlt -- VerificationTest specs for TTermEq / TTermSame.
 
    TTermEq:        cnf-reduce both sides, then structural compare.
-   TTermEqStruct:  no reduction; raw structural compare.
+   TTermSame:  no reduction; raw structural compare.
 
    Used by pattern compilers to verify repeat-binder patterns
    like `f[x_, x_]`.  See src/term/eq.c. *)
@@ -9,25 +9,25 @@
 (* === atoms: NUM-NUM, ERA-ERA, etc. ================================= *)
 
 VerificationTest[
-    TTermEqStruct[TNum[5], TNum[5]],
+    TTermSame[TNum[5], TNum[5]],
     True,
     TestID -> "TermEq/struct-num-eq"
 ]
 
 VerificationTest[
-    TTermEqStruct[TNum[5], TNum[6]],
+    TTermSame[TNum[5], TNum[6]],
     False,
     TestID -> "TermEq/struct-num-neq"
 ]
 
 VerificationTest[
-    TTermEqStruct[TEra[], TEra[]],
+    TTermSame[TEra[], TEra[]],
     True,
     TestID -> "TermEq/struct-era-era"
 ]
 
 VerificationTest[
-    TTermEqStruct[TNum[0], TEra[]],
+    TTermSame[TNum[0], TEra[]],
     False,
     TestID -> "TermEq/struct-num-vs-era"
 ]
@@ -56,7 +56,7 @@ VerificationTest[
 (* === structural compare DOES NOT reduce ============================ *)
 
 VerificationTest[
-    TTermEqStruct[TOp2["+", TNum[2], TNum[3]], TNum[5]],
+    TTermSame[TOp2["+", TNum[2], TNum[3]], TNum[5]],
     False,
     TestID -> "TermEq/struct-op2-vs-num-no-reduction"
 ]
@@ -64,37 +64,37 @@ VerificationTest[
 (* === CTRs: same ctor + same arity + same children ================== *)
 
 VerificationTest[
-    TTermEqStruct[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2, 3}]],
+    TTermSame[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2, 3}]],
     True,
     TestID -> "TermEq/struct-tuple-ctr-equal"
 ]
 
 VerificationTest[
-    TTermEqStruct[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2, 4}]],
+    TTermSame[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2, 4}]],
     False,
     TestID -> "TermEq/struct-tuple-ctr-different-leaf"
 ]
 
 VerificationTest[
-    TTermEqStruct[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2}]],
+    TTermSame[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2}]],
     False,
     TestID -> "TermEq/struct-tuple-ctr-different-arity"
 ]
 
 VerificationTest[
-    TTermEqStruct[TLazyEncode[a], TLazyEncode[a]],
+    TTermSame[TLazyEncode[a], TLazyEncode[a]],
     True,
     TestID -> "TermEq/struct-symbol-ctr-equal"
 ]
 
 VerificationTest[
-    TTermEqStruct[TLazyEncode[a], TLazyEncode[b]],
+    TTermSame[TLazyEncode[a], TLazyEncode[b]],
     False,
     TestID -> "TermEq/struct-different-symbols"
 ]
 
 VerificationTest[
-    TTermEqStruct[TLazyEncode[{a, {b, c}, 3}],
+    TTermSame[TLazyEncode[{a, {b, c}, 3}],
                   TLazyEncode[{a, {b, c}, 3}]],
     True,
     TestID -> "TermEq/struct-nested-equal"
@@ -103,14 +103,14 @@ VerificationTest[
 (* === DSU/DDU shapes compare structurally ========================== *)
 
 VerificationTest[
-    TTermEqStruct[TDsu[TNum[5], TNum[1], TNum[2]],
+    TTermSame[TDsu[TNum[5], TNum[1], TNum[2]],
                   TDsu[TNum[5], TNum[1], TNum[2]]],
     True,
     TestID -> "TermEq/struct-dsu-equal"
 ]
 
 VerificationTest[
-    TTermEqStruct[TDsu[TNum[5], TNum[1], TNum[2]],
+    TTermSame[TDsu[TNum[5], TNum[1], TNum[2]],
                   TDsu[TNum[7], TNum[1], TNum[2]]],
     False,
     TestID -> "TermEq/struct-dsu-different-label"
@@ -148,7 +148,7 @@ VerificationTest[
            b = TOp2["+", TNum[2], TNum[1]]},
         (* 1+2 = 2+1 = 3 by cnf reduction.  Structural without
            reduction would say different argument order. *)
-        {TTermEq[a, b], TTermEqStruct[a, b]}],
+        {TTermEq[a, b], TTermSame[a, b]}],
     {True, False},
     TestID -> "TermEq/cnf-vs-struct-disagreement"
 ]

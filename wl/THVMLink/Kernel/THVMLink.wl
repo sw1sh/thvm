@@ -52,6 +52,8 @@ TReduce::usage    = "TReduce[term] reduces `term` to WNF in-place and returns `t
 TItrs::usage      = "TItrs[] returns the cumulative interaction count.";
 TTermExpr::usage  = "TTermExpr[term] walks the heap from `term` and returns a nested expression whose heads are tag-name strings (\"LAM\", \"APP\", \"SUP\", \"DUP\", \"DP0\", \"DP1\", \"VAR\", \"ERA\").  Useful for snapshotting / diffing pre and post TWnf states by direct equality (===).";
 TTermTree::usage  = "TTermTree[term] = ExpressionTree[TTermExpr[term]] -- the same structure rendered as a Wolfram Tree object for visual inspection.";
+TTermSubexprs::usage = "TTermSubexprs[term] returns a List of `path -> TTerm` rules covering every position reachable from `term`, pre-order DFS.  Path is a List of integer heap offsets (root has empty path).  Sibling of TTermExpr/TTermTree: same traversal, different output shape -- pairs path-locators with the live subterms so callers can substitute or compare at specific positions.";
+TSubexprAt::usage = "TSubexprAt[term, path] navigates `term` along `path` (a List of integer offsets) and returns the subterm as a TTerm.  Returns Missing[\"OutOfBounds\", path] when the route doesn't fit the term shape.";
 
 (* === high-level constructors === *)
 TFreshLabel::usage = "TFreshLabel[] returns the next integer from a monotonic SUP/DUP label counter, then bumps it.  Reset by TReset[].";
@@ -63,8 +65,8 @@ TApp::usage       = "TApp[fun, arg] constructs an application.";
 TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
 TDsu::usage       = "TDsu[label, a, b] constructs a dynamic-label SUP (HVM4 DSU): the label is a TTerm reduced strict-left at wnf time, after which DSU collapses to SUP^n / ERA / nested-SUP based on what the label resolved to.  Useful for pattern compilers that need a fresh label per match instance.";
 TDdu::usage       = "TDdu[label, val, body] constructs a dynamic-label DUP (HVM4 DDU): same shape as TDsu but on the DUP side.  body must be a 2-arg LAM-pair; once label resolves to NUM(n), the DDU reduces to body(X0, X1) where X0/X1 are projections of DUP^n on val.";
-TTermEq::usage    = "TTermEq[a, b] returns True if `a` and `b` cnf-reduce to structurally equal terms (modulo VAR alpha-aliasing), False otherwise.  Drives both sides through cnf so DP-rooted projections fire and SUP heads lift.  Use TTermEqStruct for the no-reduction variant on already-CNF'd terms.";
-TTermEqStruct::usage = "TTermEqStruct[a, b] returns True if `a` and `b` are structurally equal without further reduction.  Compares tag/ext/val and recurses on children; same-loc compounds are trivially equal.  Cheap when callers already have CNF terms; for general use prefer TTermEq.";
+TTermEq::usage    = "TTermEq[a, b] returns True if `a` and `b` cnf-reduce to structurally equal terms (modulo VAR alpha-aliasing), False otherwise.  Drives both sides through cnf so DP-rooted projections fire and SUP heads lift.  Use TTermSame for the no-reduction variant on already-CNF'd terms.";
+TTermSame::usage = "TTermSame[a, b] returns True if `a` and `b` are structurally equal without further reduction.  Compares tag/ext/val and recurses on children; same-loc compounds are trivially equal.  Cheap when callers already have CNF terms; for general use prefer TTermEq.";
 TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
 
 (* === tag constants (mirror src/thvm.h) === *)
@@ -693,6 +695,75 @@ TItrs[]          := (ensureInit[]; $itrsFn[])
 TTermExpr[t_] := tTreeWalk[t, <||>]
 TTermTree[t_] := ExpressionTree[TTermExpr[t]]
 
+(* === Subexpression traversal ====================================
+   Sibling of TTermExpr/TTermTree: same per-tag arity logic, but
+   the output is a flat List of (path -> TTerm) rules covering every
+   reachable position.  Pattern.wl uses this to walk a term and try
+   a rule at every subexpression; users can navigate to a specific
+   position with TSubexprAt[t, path]. *)
+
+(* (offset, child-raw) pairs for a heap term's structural children.
+   Per-tag arities cover LAM/DUP/DP*/ALO (1), APP/SUP/OP2/MAT/EQL/
+   AND/OR/WHEN/ANN/BRI (2), DSU/DDU (3), CTR (variable from leading
+   NUM(arity)), UOP (uopArity[opcode]), and atoms (0).  The "offset"
+   returned is the path-segment integer used by TSubexprAt to
+   navigate; CTR data starts at offset 1 (the arity NUM at +0 is
+   metadata). *)
+subexprChildren[raw_Integer] := Block[{
+    tag = $termTagFn[raw], val = $termValFn[raw], ext = $termExtFn[raw], n
+},
+    Switch[ tag,
+        $TagLAM | $TagDUP | $TagDP0 | $TagDP1 | $TagALO,
+            {{0, $heapReadFn[val]}},
+        $TagAPP | $TagSUP,
+            {{0, $heapReadFn[val]}, {1, $heapReadFn[val + 1]}},
+        $TagOP2 | $TagEQL | $TagAND | $TagOR | $TagWHEN | $TagANN | $TagMAT | $TagBRI,
+            {{0, $heapReadFn[val]}, {1, $heapReadFn[val + 1]}},
+        $TagDSU | $TagDDU,
+            {{0, $heapReadFn[val + 0]},
+             {1, $heapReadFn[val + 1]},
+             {2, $heapReadFn[val + 2]}},
+        $TagCTR,
+            (n = $termValFn[$heapReadFn[val]];
+             Table[{i, $heapReadFn[val + i]}, {i, 1, n}]),
+        $TagUOP,
+            With[{ar = uopArity[ext]},
+                Table[{i, $heapReadFn[val + i]}, {i, 0, ar - 1}]],
+        _, {}
+    ]
+]
+
+walkSubexprsRaw[raw_Integer, path_List] := Block[{
+    children = subexprChildren[raw]
+},
+    Prepend[
+        Catenate[
+            (walkSubexprsRaw[#[[2]], Append[path, #[[1]]]] & /@ children)
+        ],
+        path -> raw
+    ]
+]
+
+TTermSubexprs[t_TTerm] := (
+    ensureInit[];
+    (#[[1]] -> TTerm[#[[2]]]) & /@ walkSubexprsRaw[ttermRaw[t], {}]
+)
+
+TSubexprAt[t_TTerm, path_List] := Block[{
+    raw = ttermRaw[t], k, ch
+},
+    Catch[
+        Do[
+            ch = subexprChildren[raw];
+            k  = SelectFirst[ch, First[#] === offset &, None];
+            If[ k === None, Throw[Missing["OutOfBounds", path]]];
+            raw = k[[2]],
+            {offset, path}
+        ];
+        TTerm[raw]
+    ]
+]
+
 (* How many heap cells does a UOP store?  Mirrors the data-arity
    used in src/book/from_dynamic.c (NOT uop_arity, which counts
    compute operands -- e.g. CONST has arity 0 but stores 1 cell). *)
@@ -875,9 +946,9 @@ TTermEq[a_TTerm, b_TTerm] :=
 TTermEq[a_Integer, b_Integer] :=
     (ensureInit[]; $termEqFn[a, b] === 1)
 
-TTermEqStruct[a_TTerm, b_TTerm] :=
+TTermSame[a_TTerm, b_TTerm] :=
     (ensureInit[]; $termEqStructFn[ttermRaw[a], ttermRaw[b]] === 1)
-TTermEqStruct[a_Integer, b_Integer] :=
+TTermSame[a_Integer, b_Integer] :=
     (ensureInit[]; $termEqStructFn[a, b] === 1)
 
 (* TLam is JIT-aware by default: when the body is a UOP graph

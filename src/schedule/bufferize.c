@@ -895,12 +895,14 @@ fn u64 bufferize_removal_score(u32 buffer_id) {
                   | BUFFERIZE_REASON_BACKEND_CAP)) {
     return 0;
   }
-  // Phase 5 reduce-aware gate: a buffer whose recompute path
-  // crosses a REDUCE is too expensive to remove with the simple
-  // recompute heuristic.  Future reduce-aware rules may relax this
-  // when they can fold the reduce into the consumer (e.g. local
-  // group reduce).
-  if (b->subtree_has_reduce) return 0;
+  // Phase 5 reduce-aware gate: was conservative because pre-FLAT_GRID
+  // lift, kernels with nested reduces fell off the tile-JIT path onto
+  // the per-op metal-op encoder, regressing wall time.  Commit 3b11bf6
+  // lifted that path; consumers absorbing a reduce now stay on tile-JIT.
+  // THVM_BUFFERIZE_REMOVE_SCORE_LIFT_REDUCE_GATE=0 reverts.
+  char const *e_red = getenv("THVM_BUFFERIZE_REMOVE_SCORE_LIFT_REDUCE_GATE");
+  int lift_reduce = (e_red == NULL) || (e_red[0] != '0');
+  if (b->subtree_has_reduce && !lift_reduce) return 0;
   if (b->output_numel == 0) return 0;
   u64 denom = b->recompute_total > 0 ? b->recompute_total : 1;
   return b->output_numel / denom;

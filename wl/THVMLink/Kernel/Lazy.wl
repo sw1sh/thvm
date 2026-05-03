@@ -48,8 +48,6 @@ TLazyTake::usage    = "TLazyTake[s, n] returns a TTerm representing the first n 
 TLazyToList::usage  = "TLazyToList[s] forces every element and returns a WL List.  Will hang if the stream is infinite.";
 TLazyMap::usage     = "TLazyMap[f, s] = f /@ TLazyToList[s].  Forces the full stream; not lazy on its output.";
 TLazyFold::usage    = "TLazyFold[f, x, s] = Fold[f, x, TLazyToList[s]].  Forces the full stream.";
-TLazySubexprs::usage = "TLazySubexprs[t] returns a WL List of {path, subterm} pairs covering every position in `t`, pre-order DFS.  `path` is a list of integer offsets from `t` to the subterm (root has empty path); `subterm` is a TTerm.  Pattern.wl uses this to walk a term and try a rule at every subexpression.  The list is built eagerly; for big inputs prefer the underlying `subexprChildren` walker plus your own iteration.";
-TSubexprAt::usage    = "TSubexprAt[t, path] navigates `t` along `path` (a List of integer offsets) and returns the subterm as a TTerm.  Returns Missing[\"OutOfBounds\"] when the path doesn't fit the term.";
 
 TLazyEncode::usage  = "TLazyEncode[v] encodes a WL value into a TTerm.";
 TLazyDecode::usage  = "TLazyDecode[t] decodes a TTerm back to a WL value.";
@@ -707,87 +705,6 @@ TLazyToList[t_TTerm] := Block[{out = {}, cur = t, step},
 
 TLazyMap[f_, t_TTerm]      := Map[f, TLazyToList[t]]
 TLazyFold[f_, x_, t_TTerm] := Fold[f, x, TLazyToList[t]]
-
-(* === subexpression traversal ===
-
-   subexprChildren[raw] returns the list of (offset, child-raw)
-   pairs that describe the structural children of a heap term.
-   Used both by TLazySubexprs (pre-order DFS yielding {path,
-   subterm} pairs) and by TSubexprAt (random-access navigation
-   along an explicit path).
-
-   Per-tag arities:
-     LAM, ALO, DP0, DP1, DUP        -- 1 child  (body / wrapped)
-     APP, SUP, OP2, MAT, EQL, AND,  -- 2 children
-       OR, WHEN, ANN, BRI
-     DSU, DDU                        -- 3 children
-     CTR                             -- variable; NUM(arity) at +0
-                                        is metadata (skip), data
-                                        children at +1..+n
-     UOP                             -- arity from uopArity[opcode]
-     VAR, REF, NUM, ERA, TEN, ANY,   -- 0 children (leaves)
-       FVR, PRI
-
-   The "offset" returned is the path-segment integer used by
-   TSubexprAt to navigate; children of LAM are at offset 0, APP's
-   f at 0 / x at 1, CTR's first data child at 1 (mirroring the
-   heap layout), etc. *)
-
-subexprChildren[raw_Integer] := Block[{
-    tag = $termTagFn[raw], val = $termValFn[raw], ext = $termExtFn[raw],
-    n
-},
-    Switch[ tag,
-        $TagLAM | $TagDUP | $TagDP0 | $TagDP1 | $TagALO,
-            {{0, $heapReadFn[val]}},
-        $TagAPP | $TagSUP,
-            {{0, $heapReadFn[val]}, {1, $heapReadFn[val + 1]}},
-        $TagOP2 | $TagEQL | $TagAND | $TagOR | $TagWHEN | $TagANN | $TagMAT | $TagBRI,
-            {{0, $heapReadFn[val]}, {1, $heapReadFn[val + 1]}},
-        $TagDSU | $TagDDU,
-            {{0, $heapReadFn[val + 0]},
-             {1, $heapReadFn[val + 1]},
-             {2, $heapReadFn[val + 2]}},
-        $TagCTR,
-            (n = $termValFn[$heapReadFn[val]];
-             Table[{i, $heapReadFn[val + i]}, {i, 1, n}]),
-        $TagUOP,
-            With[{ar = uopArity[ext]},
-                Table[{i, $heapReadFn[val + i]}, {i, 0, ar - 1}]],
-        _, {}
-    ]
-]
-
-walkSubexprsRaw[raw_Integer, path_List] := Block[{
-    children = subexprChildren[raw]
-},
-    Prepend[
-        Catenate[
-            (walkSubexprsRaw[#[[2]], Append[path, #[[1]]]] & /@ children)
-        ],
-        {path, raw}
-    ]
-]
-
-TLazySubexprs[t_TTerm] := (
-    ensureInit[];
-    {#[[1]], TTerm[#[[2]]]} & /@ walkSubexprsRaw[ttermRaw[t], {}]
-)
-
-TSubexprAt[t_TTerm, path_List] := Block[{
-    raw = ttermRaw[t], k, ch
-},
-    Catch[
-        Do[
-            ch = subexprChildren[raw];
-            k  = SelectFirst[ch, First[#] === offset &, None];
-            If[ k === None, Throw[Missing["OutOfBounds", path]]];
-            raw = k[[2]],
-            {offset, path}
-        ];
-        TTerm[raw]
-    ]
-]
 
 End[];
 EndPackage[];
