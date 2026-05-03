@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: Phase 6 bufferize lifetime + output-bytes data
+
+`schedule/bufferize.c` now computes per-`B_BUFFERIZE`
+`lifetime_start` / `lifetime_end` and `output_bytes` after the
+B_INDEX edge table is built.  Lifetime depths come from a
+recursive walk over the B_INDEX edges
+(`depth = max(depth[source]) + 1`, leaves get depth 1); a
+buffer's lifetime_end is the max depth among its consumer
+buffers, falling back to its own depth when there is no
+consumer.  output_bytes uses `term_dtype_in` + `dtype_itemsize`,
+giving memory planners byte-accurate per-buffer footprints.
+`bufferize_buffer_lifetime(buffer_id, *start, *end)` exposes the
+data; `DUMP_BUFFERIZE` extends the cost line with
+`bytes=<n> lifetime=<start>..<end>`.  Materialize.c's existing
+BOUNDARY_DEPTH/BOUNDARY_LAST_USE memory planner is unchanged -
+the bufferize lifetimes are computed from the bufferize edge
+graph independently and serve as the canonical record future
+memory rules will read.  `tests/test_bufferize.c` adds three
+cases (leaf depth, root depth + lifetime end, output_bytes
+matches numel * itemsize, lifetime accessor input validation);
+144/144.
+
 ### Added: Phase 5 reduce-aware cost gate
 
 `schedule/bufferize.c` now tracks per-`B_BUFFERIZE`

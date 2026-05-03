@@ -1287,6 +1287,16 @@ typedef struct {
   u64 output_numel;
   u64 recompute_total;
   u8  subtree_has_reduce;
+  // Phase 6 lifetime fields (populated by bufferize_finalize_stores):
+  // lifetime_start is this buffer's topological depth (1 for
+  // buffers with no producer-buffer source); lifetime_end is the
+  // max depth among its consumer buffers (== lifetime_start for
+  // buffers with no consumer, e.g. the realize root).  output_bytes
+  // is `output_numel * dtype_itemsize(dtype)`; 0 when the dtype
+  // could not be resolved.
+  u32 lifetime_start;
+  u32 lifetime_end;
+  u64 output_bytes;
 } BBufferize;
 typedef struct {
   u32 buffer_id;      // destination B_BUFFERIZE id
@@ -1353,6 +1363,15 @@ fn u32               bufferize_index_rule_hits(char const *name);
 // Returns 0 for unknown buffer ids and for buffers whose score was
 // not computed (non-realized or no shape).
 fn u64               bufferize_removal_score(u32 buffer_id);
+
+// Phase 6: lifetime accessors for memory-planning callers.  Returns
+// 1 on success and writes the start/end topological depths through
+// the out pointers; returns 0 for unknown or non-realized buffers
+// and leaves the outputs unchanged.  Depth 1 is the leaf-most
+// buffer (no producer source); higher depth = later in execution.
+fn int               bufferize_buffer_lifetime(u32 buffer_id,
+                                               u32 *lifetime_start,
+                                               u32 *lifetime_end);
 
 // g2a: after realize_classify populates the boundary set, the
 // scheduler topo-sorts those boundaries by producer-to-consumer

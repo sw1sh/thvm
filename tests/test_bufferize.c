@@ -412,6 +412,55 @@ int main(void) {
     if (bm->realized) CHECK_EQ(bm->subtree_has_reduce, 0);
   }
 
+  TEST_BEGIN("bufferize/lifetime-leaf-buffer-has-depth-1");
+  // The shared/root multi-consumer graph: shared has no producer
+  // buffer (its sources are TENs), so depth=1; root depends on
+  // shared, so depth=2; root has no consumer so its lifetime_end
+  // equals lifetime_start.
+  Term lf_s = uop_binary(UOP_ADD, a, b);
+  Term lf_l = uop_binary(UOP_MUL, lf_s, c);
+  Term lf_r = uop_binary(UOP_MUL, lf_s, a);
+  Term lf_t = uop_binary(UOP_ADD, lf_l, lf_r);
+  realize_classify(lf_t);
+  u32 lf_s_idx = bufferize_find_by_loc(term_val(lf_s));
+  u32 lf_t_idx = bufferize_find_by_loc(term_val(lf_t));
+  CHECK(lf_s_idx != 0xFFFFFFFFu);
+  CHECK(lf_t_idx != 0xFFFFFFFFu);
+  if (lf_s_idx != 0xFFFFFFFFu && lf_t_idx != 0xFFFFFFFFu) {
+    BBufferize const *bs = bufferize_buffer_at(lf_s_idx);
+    BBufferize const *bt = bufferize_buffer_at(lf_t_idx);
+    if (bs->realized && bt->realized) {
+      CHECK_EQ(bs->lifetime_start, 1);
+      CHECK_EQ(bt->lifetime_start, 2);
+      // Shared lives from depth 1 to depth 2 (consumed by root).
+      CHECK_EQ(bs->lifetime_end, 2);
+      // Root has no consumer so its lifetime_end == lifetime_start.
+      CHECK_EQ(bt->lifetime_end, bt->lifetime_start);
+    }
+  }
+
+  TEST_BEGIN("bufferize/output-bytes-matches-numel-times-itemsize");
+  // shape {3} float32 = 12 bytes per realized buffer in the chain.
+  if (lf_s_idx != 0xFFFFFFFFu) {
+    BBufferize const *bs = bufferize_buffer_at(lf_s_idx);
+    if (bs->realized) {
+      CHECK_EQ(bs->output_numel, 3);
+      CHECK_EQ(bs->output_bytes, 3 * sizeof(float));
+    }
+  }
+
+  TEST_BEGIN("bufferize/lifetime-accessor-rejects-bad-id");
+  u32 ls = 0, le = 0;
+  CHECK_EQ(bufferize_buffer_lifetime(0, &ls, &le), 0);
+  CHECK_EQ(bufferize_buffer_lifetime(99999u, &ls, &le), 0);
+  // Both pointers may be NULL.
+  if (lf_s_idx != 0xFFFFFFFFu) {
+    BBufferize const *bs = bufferize_buffer_at(lf_s_idx);
+    if (bs->realized) {
+      CHECK_EQ(bufferize_buffer_lifetime(bs->buffer_id, NULL, NULL), 1);
+    }
+  }
+
   TEST_BEGIN("bufferize/reduce-buffer-blocks-removal-score");
   // Build a graph where a REDUCE result is one of two consumers of
   // a multi-consumer producer.  The REDUCE buffer (root) gates on

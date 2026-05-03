@@ -236,6 +236,9 @@ static void bufferize_compute_costs(void) {
       b->output_numel       = 0;
       b->recompute_total    = 0;
       b->subtree_has_reduce = 0;
+      b->lifetime_start     = 0;
+      b->lifetime_end       = 0;
+      b->output_bytes       = 0;
       continue;
     }
     u8 has_red = 0;
@@ -247,8 +250,69 @@ static void bufferize_compute_costs(void) {
     b->output_numel = term_shape_in(self, 0, &sh)
                         ? bufferize_shape_numel(&sh)
                         : 0;
+    u32 dt = 0;
+    b->output_bytes = (term_dtype_in(self, 0, &dt) && b->output_numel > 0)
+                        ? b->output_numel * (u64)dtype_itemsize(dt)
+                        : 0;
     u32 mult = b->consumer_count > 0 ? b->consumer_count : 1;
     b->recompute_total = (u64)b->recompute_ops * (u64)mult;
+  }
+}
+
+// Phase 6: per-buffer topological depth from B_INDEX edges.
+// depth[i] = max(depth[s] for s in incoming sources) + 1; depth=1
+// for buffers with no source-buffer edges (leaves).  Memoised via
+// `visited[]`; bufferize is small (<= BUFFERIZE_GRAPH_CAP) so
+// recursion depth is bounded by the buffer count.
+static u32 BUFFERIZE_DEPTHS [BUFFERIZE_GRAPH_CAP];
+static u8  BUFFERIZE_VISITED[BUFFERIZE_GRAPH_CAP];
+
+static u32 bufferize_buffer_depth_rec(u32 idx) {
+  if (idx >= BUFFERIZE_BUFS_LEN) return 0;
+  if (BUFFERIZE_VISITED[idx]) return BUFFERIZE_DEPTHS[idx];
+  BUFFERIZE_VISITED[idx] = 1;
+  BUFFERIZE_DEPTHS [idx] = 1;     // cycle guard / default leaf depth
+  if (!BUFFERIZE_BUFS[idx].realized) return BUFFERIZE_DEPTHS[idx];
+  u32 cid = BUFFERIZE_BUFS[idx].buffer_id;
+  u32 max_d = 0;
+  for (u32 e = 0; e < BUFFERIZE_INDEXES_LEN; e++) {
+    BIndex const *be = &BUFFERIZE_INDEXES[e];
+    if (be->consumer_buffer_id != cid) continue;
+    if (be->source_buffer_id == 0) continue;
+    u32 sidx = be->source_buffer_id - 1;
+    u32 sd = bufferize_buffer_depth_rec(sidx);
+    if (sd > max_d) max_d = sd;
+  }
+  BUFFERIZE_DEPTHS[idx] = max_d + 1;
+  return BUFFERIZE_DEPTHS[idx];
+}
+
+static void bufferize_compute_lifetimes(void) {
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BUFFERIZE_VISITED[i] = 0;
+    BUFFERIZE_DEPTHS [i] = 0;
+  }
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    if (!BUFFERIZE_BUFS[i].realized) continue;
+    bufferize_buffer_depth_rec(i);
+  }
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BBufferize *b = &BUFFERIZE_BUFS[i];
+    if (!b->realized) continue;
+    b->lifetime_start = BUFFERIZE_DEPTHS[i];
+    u32 last = BUFFERIZE_DEPTHS[i];
+    u32 sid  = b->buffer_id;
+    for (u32 e = 0; e < BUFFERIZE_INDEXES_LEN; e++) {
+      BIndex const *be = &BUFFERIZE_INDEXES[e];
+      if (be->source_buffer_id != sid) continue;
+      if (be->consumer_buffer_id == 0) continue;
+      u32 cidx = be->consumer_buffer_id - 1;
+      if (cidx < BUFFERIZE_BUFS_LEN
+          && BUFFERIZE_DEPTHS[cidx] > last) {
+        last = BUFFERIZE_DEPTHS[cidx];
+      }
+    }
+    b->lifetime_end = last;
   }
 }
 
@@ -329,11 +393,15 @@ static void bufferize_dump(Term root) {
     BBufferize const *b = &BUFFERIZE_BUFS[i];
     if (!b->realized) continue;
     fprintf(stderr,
-            "  bufferize_cost id=%u ops=%u numel=%llu recompute_total=%llu%s\n",
+            "  bufferize_cost id=%u ops=%u numel=%llu bytes=%llu"
+            " recompute_total=%llu lifetime=%u..%u%s\n",
             (unsigned)b->buffer_id,
             (unsigned)b->recompute_ops,
             (unsigned long long)b->output_numel,
+            (unsigned long long)b->output_bytes,
             (unsigned long long)b->recompute_total,
+            (unsigned)b->lifetime_start,
+            (unsigned)b->lifetime_end,
             b->subtree_has_reduce ? " has_reduce" : "");
   }
 }
@@ -393,6 +461,7 @@ fn void bufferize_finalize_stores(Term root) {
   bufferize_build_indexes();
   bufferize_update_index_rule_stats();
   bufferize_compute_costs();
+  bufferize_compute_lifetimes();
 
   bufferize_dump(root);
   bufferize_dump_candidates();
@@ -548,6 +617,17 @@ fn u32 bufferize_index_rule_hits(char const *name) {
     }
   }
   return 0;
+}
+
+fn int bufferize_buffer_lifetime(u32 buffer_id,
+                                 u32 *lifetime_start,
+                                 u32 *lifetime_end) {
+  if (buffer_id == 0 || buffer_id > BUFFERIZE_BUFS_LEN) return 0;
+  BBufferize const *b = &BUFFERIZE_BUFS[buffer_id - 1];
+  if (!b->realized) return 0;
+  if (lifetime_start != NULL) *lifetime_start = b->lifetime_start;
+  if (lifetime_end   != NULL) *lifetime_end   = b->lifetime_end;
+  return 1;
 }
 
 fn u64 bufferize_removal_score(u32 buffer_id) {

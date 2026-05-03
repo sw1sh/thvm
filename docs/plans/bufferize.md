@@ -1,13 +1,15 @@
 # Bufferize Schedule IR Plan
 
-Status: Phases 0-5 landed at the data-layer level.  Phase 2 has the
+Status: Phases 0-6 landed at the data-layer level.  Phase 2 has the
 data layer + edge query API; Phase 4 has the cost-model fields and
-candidate dump; Phase 5 has the reduce-aware cost gate.  Phases 6-7
-planned.  Outstanding follow-ups: rangeify rerouting through
-`B_INDEX` (Phase 2), edge transforms beyond accounting (Phase 3),
-named removal rules on the bufferize graph (Phase 4), and
-accumulator/group-reduce schedules (Phase 5); all tracked in the
-per-phase sections below.
+candidate dump; Phase 5 has the reduce-aware cost gate; Phase 6 has
+per-buffer lifetimes and output_bytes.  Phase 7 planned.
+Outstanding follow-ups: rangeify rerouting through `B_INDEX`
+(Phase 2), edge transforms beyond accounting (Phase 3), named
+removal rules on the bufferize graph (Phase 4), accumulator/
+group-reduce schedules (Phase 5), and rerouting Metal allocation
+through bufferize lifetimes (Phase 6); all tracked in the per-phase
+sections below.
 
 ## Goal
 
@@ -551,20 +553,42 @@ Acceptance (accumulator schedules, pending):
 - Metal tile remains the dispatch path, not `metal-jit`;
 - local/group reduce options are visible to autotune.
 
-### Phase 6: Memory Planning Over Bufferize IR
+### Phase 6: Memory Planning Over Bufferize IR (data layer landed)
 
 Make memory planning consume schedule graph lifetimes instead of only
 captured replay side effects.
 
+Status: data-layer lifetime tracking landed.  Each realized
+B_BUFFERIZE now carries `lifetime_start` and `lifetime_end`
+(topological depths from the B_INDEX edge graph) plus
+`output_bytes` (`output_numel * dtype_itemsize`).
+`bufferize_buffer_lifetime(buffer_id, *start, *end)` exposes the
+data and `DUMP_BUFFERIZE` shows `lifetime=<start>..<end>`
+alongside the cost lines.  Metal allocation still consumes
+materialize.c's BOUNDARY_DEPTH / BOUNDARY_LAST_USE; the bufferize
+lifetimes are computed independently and serve as the canonical
+record future memory-planning rules will read.
+
 Tasks:
 
-- compute first/last use from `B_STORE` and replay graph;
-- choose alias/reuse/recompute candidates before Metal allocation;
-- preserve all outputs in a replay batch boundary;
-- add memory pressure skip reasons to bufferize rewrites;
-- keep broad sweeps disabled until bounded memory canaries are stable.
+- ~~compute first/last use from `B_STORE` and replay graph~~ (done
+  for the bufferize-graph side; the replay-graph reconciliation
+  comes when materialize switches over);
+- choose alias/reuse/recompute candidates before Metal allocation
+  (planned - extends the existing kernel_alloc / kernel_gc code
+  with bufferize-lifetime queries);
+- preserve all outputs in a replay batch boundary (planned);
+- add memory pressure skip reasons to bufferize rewrites (planned -
+  adds a `BUFFERIZE_REASON_MEMORY_SPLIT` and a per-buffer
+  `memory_pressure_blocks_removal` flag);
+- keep broad sweeps disabled until bounded memory canaries are
+  stable.
 
-Acceptance:
+Acceptance (data layer):
+
+- `make test` passes including the lifetime + output_bytes cases.
+
+Acceptance (Metal allocation, pending):
 
 - beautiful-mnist one-step retained memory moves toward tinygrad scale;
 - no 100 GB pressure failure under bounded canaries;
