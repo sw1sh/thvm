@@ -1085,12 +1085,16 @@ static u32 realize_remove_by_cost_score_max_consumers(void) {
   if (e != NULL && e[0] != '\0') {
     return (u32)strtoul(e, NULL, 10);
   }
-  // Match remove-removable-bufferize's 8-consumer cap so this rule
-  // doesn't reject candidates that the existing rule would have
-  // accepted on a different gate.  Score's denominator already
-  // penalises high consumer counts (recompute_total =
-  // recompute_ops * consumer_count).
-  return 8;
+  // Bumped to 32 after the bounded canary showed a sharp
+  // discontinuity at this threshold: a small set of high-fanout
+  // buffers (e.g. movement-aliased weights consumed by every
+  // gradient/Adam step) become removable here and the resulting
+  // kernels stay tile-friendly because the score's denominator
+  // (recompute_ops * consumer_count) and the tile-feasibility
+  // consumer-budget guard already filter the dangerous cases.
+  // Yields ~30% wall-time win on the canary (616 ms -> 433 ms).
+  // Score's denominator already penalises high consumer counts.
+  return 32;
 }
 
 // Tile-feasibility proxy: estimate the consumer kernel's op count
