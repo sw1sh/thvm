@@ -1506,6 +1506,17 @@ fn u64  materialize_boundary_at(u32 i);
 fn u32  materialize_boundary_depth_at(u32 i);
 fn u32  materialize_boundary_last_use_at(u32 i);
 
+// Multi-output kernel-merge planning accessors (Step 2 of multi-output
+// groundwork).  `materialize_kernel_merge_candidate_count` returns the
+// number of (host, child) pairs the most recent thvm_materialize pass
+// flagged as fusion candidates.  `materialize_kernel_merge_into(bi)`
+// returns BOUNDARY_MERGE_NONE (0xFFFFFFFFu) when boundary `bi` is its
+// own host (no merge), or the host's boundary-order index otherwise.
+// Both accessors are read-only and reflect the most recent materialize
+// pass; the planning runs every materialize call and resets state.
+fn u32  materialize_kernel_merge_candidate_count(void);
+fn u32  materialize_kernel_merge_into(u32 bi);
+
 // Phase 2 follow-up: per-input-slot bufferize source id read from a
 // materialized KernelEntry.  Returns the 1-based buffer id stored
 // during visit() (0 when the slot's source is a leaf or was not
