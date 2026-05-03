@@ -1308,6 +1308,28 @@ int main(void) {
   CHECK_EQ(materialize_kernel_merge_candidate_count(), 0);
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
+  TEST_BEGIN("multi-output/schedule-key-discriminates-output-bytes");
+  // Step 5 of multi-output kernel groundwork: bufferize_schedule_key
+  // hashes per-output bytes (and dtype-derived fields) so two
+  // schedules with the same realized boundary set but different
+  // output topologies cache separately.  Construct two graphs whose
+  // realized boundaries differ in dtype (-> output_bytes) and check
+  // the key flips.  Use UOP_CAST to introduce the dtype variance
+  // without changing the boundary structure.
+  u32 mskl_t_f32 = alloc_f32_tensor(3);
+  Term mskl_tf  = term_new(0, TAG_TEN, DT_FP32, mskl_t_f32);
+  Term mskl = uop_binary(UOP_ADD, mskl_tf, mskl_tf);
+  realize_classify(mskl);
+  u64 mskl_key = bufferize_schedule_key();
+  CHECK(mskl_key != 0);
+  // Same shape with a CAST inserted so the boundary's output_bytes
+  // (dtype size * numel) differs from the f32 version.
+  Term mskl_cast = uop_cast(mskl, DT_FP64);
+  realize_classify(mskl_cast);
+  u64 mskl_key2 = bufferize_schedule_key();
+  CHECK(mskl_key2 != 0);
+  CHECK(mskl_key2 != mskl_key);
+
   TEST_BEGIN("multi-output/codegen-bails-on-extra-output");
   // Step 3 guard: every renderer entry point must bail (NULL / 0)
   // when the kernel reports n_extra_outputs > 0, so a future merge

@@ -815,6 +815,24 @@ fn u64 bufferize_schedule_key(void) {
           ^ ((u64)b->recompute_ops  << 24)
           ^ ((u64)b->output_numel   << 40);
     h = (h ^ v) * prime;
+    // Step 5 of multi-output kernel groundwork: per-output fields
+    // that distinguish merged-vs-unmerged schedules even when the
+    // realized boundary set is identical.  Output bytes folds dtype
+    // size into the key (numel alone collapses fp16 vs fp32 over
+    // the same shape).  Lifetime widens the key so a schedule that
+    // moves a buffer's last-use to a later stage (because of a
+    // multi-output merge keeping it alive longer) gets a different
+    // hash.  Reduce metadata + subtree_has_reduce ensure two
+    // schedules whose reduce structure differs (and whose autotune
+    // plans must therefore differ) cache separately.
+    u64 v2 = (u64)b->output_bytes
+           ^ ((u64)b->lifetime_start    << 32)
+           ^ ((u64)b->lifetime_end      << 40)
+           ^ ((u64)b->subtree_has_reduce << 48)
+           ^ ((u64)b->reduce_kind       << 56)
+           ^ ((u64)b->reduce_axis       << 60)
+           ^ ((u64)b->reduce_axis_size  << 16);
+    h = (h ^ v2) * prime;
   }
   for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
     BIndex const *e = &BUFFERIZE_INDEXES[i];
