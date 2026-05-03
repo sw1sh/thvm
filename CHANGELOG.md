@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: split movement-wrapped wide Metal tile graphs
+
+The Metal tile fan-in cap now treats movement wrappers as legal split
+points when an already-realized boundary exceeds the direct Metal
+buffer-argument limit.  This keeps wide ADD/MUL trees hidden behind
+RESHAPE/PAD-style wrappers from falling through to the per-op Metal
+interpreter.
+
 ### Changed: route PAD chains through edge-local index emission
 
 Rangeify now lowers PAD over direct inputs and short scalar/movement

@@ -563,6 +563,51 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* The fan-in cap also has to split movement-wrapped ADD trees.
+       beautiful-mnist Adam updates can put RESHAPE wrappers between
+       the oversized ADD subtree and the realized boundary; splitting
+       only ADD/MUL children leaves a >30-input tile graph that falls
+       through to metal-op. *)
+    Module[{oldBackend, oldTile, oldCap, restore, xs, ys, out, rows, kinds},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        oldCap     = Environment["THVM_METAL_FUSION_MAX_INPUTS"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]];
+            If[StringQ[oldCap],
+                SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> oldCap],
+                SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"];
+            SetEnvironment["THVM_METAL_FUSION_MAX_INPUTS" -> "30"],
+            TInit[];
+            xs = Table[
+                TTensorCreate @ NumericArray[
+                    ConstantArray[N[i], {2, 2}], "Real32"],
+                {i, 34}];
+            ys = TUOpReshape[#, {4}] & /@ xs;
+            out = TRealize @ Fold[TUOpAdd, First[ys], Rest[ys]];
+            rows = TKernelTable[];
+            kinds = Table[TKernelDispatchKind[k], {k, 1, TKernelCount[] - 1}],
+            restore[]
+        ];
+        {Length[rows] >= 2,
+         Max[rows[[All, 1]]] <= 30,
+         FreeQ[kinds, "metal-op"],
+         Round[Normal @ TTensorData[out], 0.001]}
+    ],
+    {True, True, True, ConstantArray[595., 4]},
+    TestID -> "kernel-opts/metal-movement-wrapped-wide-add-splits"
+]
+
+VerificationTest[
     (* A large broadcast view with multiple consumers should not be
        materialized as a global Metal buffer when each consumer can
        inline the EXPAND address expression. *)

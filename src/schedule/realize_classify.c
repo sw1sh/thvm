@@ -233,7 +233,9 @@ static u32 realize_metal_tile_fanin_cap(void) {
 }
 
 static int realize_fanin_split_child_op(u8 op) {
-  return op == UOP_ADD || op == UOP_MUL;
+  return op == UOP_ADD || op == UOP_MUL
+      || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
+      || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
 }
 
 static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,

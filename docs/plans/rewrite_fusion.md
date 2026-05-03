@@ -41,6 +41,11 @@ Current rules:
 - `inline-pure-fanout-probe`
 - `metal-tile-fanin-cap`
 
+`metal-tile-fanin-cap` splits oversized Metal tile boundaries through
+ADD/MUL and movement-wrapper children, so wide elementwise updates
+hidden behind `RESHAPE`/`PAD`-style views stay below the direct Metal
+buffer argument limit.
+
 Set `DUMP_REWRITE=1` or `DUMP_FUSION_REWRITE=1` to print rule hit
 counts during `realize_classify`.
 
