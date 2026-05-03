@@ -527,13 +527,15 @@ Tasks:
 - remove pure single-use buffers (planned);
 - remove small pure multi-consumer buffers by recompute - first
   bufferize-graph-driven rule landed as `remove-by-cost-score`,
-  gated by `THVM_BUFFERIZE_REMOVE_BY_SCORE` (default OFF).  The
-  rule iterates `bufferize_buffer_at`, reads
+  default-ON with conservative threshold (1000 bytes per recompute
+  op) and op-budget caps matching `remove-removable-bufferize`.
+  Set `THVM_BUFFERIZE_REMOVE_BY_SCORE=0` to disable.  The rule
+  iterates `bufferize_buffer_at`, reads
   `bufferize_removal_score`, and calls `realize_unmark` only to
-  project the decision back for materialize.  Existing
-  `remove-removable-bufferize` and the others stay the default
-  writers; once the bounded canary soaks the new rule, it will
-  flip to default ON.
+  project the decision back for materialize.  Coexists with the
+  existing `remove-removable-bufferize` realize-rule (different
+  threshold semantics: this one rewards memory-savings ratio
+  rather than absolute op count).
 
 Acceptance (data layer):
 

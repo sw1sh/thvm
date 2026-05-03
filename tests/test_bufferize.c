@@ -486,13 +486,12 @@ int main(void) {
   u64 key3 = bufferize_schedule_key();
   CHECK(key3 != key1);
 
-  TEST_BEGIN("bufferize/remove-by-cost-score-default-off");
-  // Without THVM_BUFFERIZE_REMOVE_BY_SCORE, the rule must not fire
-  // even on a high-score multi-consumer buffer.  Build the same
-  // shared/root graph used elsewhere; without metal-tile env
-  // remove-removable-bufferize is also disabled, so shared stays
-  // realized.
+  TEST_BEGIN("bufferize/remove-by-cost-score-default-threshold-respected");
+  // Default is now ON with a high threshold (1000).  A small
+  // shared buffer (score = 3 / 2 = 1) should not fire.  shared
+  // stays realized; rule hits stay zero.
   unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
+  unsetenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
   Term ds   = uop_binary(UOP_ADD, a, b);
   Term ds_l = uop_binary(UOP_MUL, ds, c);
   Term ds_r = uop_binary(UOP_MUL, ds, a);

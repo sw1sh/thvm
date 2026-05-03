@@ -942,15 +942,16 @@ static int realize_rangeify_enabled(void) {
 // hard caps on op count and consumer count to keep recompute
 // budgets bounded.
 //
-// Gated by `THVM_BUFFERIZE_REMOVE_BY_SCORE`; default is OFF so the
-// existing realize-map rules stay the only writers and the bounded
-// canary stays unchanged until the rule has had real-world soak
-// time.  Override `THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD` (default
-// 100), `THVM_BUFFERIZE_REMOVE_SCORE_MAX_OPS` (default 64),
-// `THVM_BUFFERIZE_REMOVE_SCORE_MAX_CONSUMERS` (default 4) to tune.
+// Default-on with conservative tunables: only fires for buffers
+// whose memory-bytes-per-recompute-op ratio is large (threshold
+// 1000) and whose recompute work fits inside the existing
+// remove-removable-bufferize op budget (32 ops, 4 consumers).  Set
+// `THVM_BUFFERIZE_REMOVE_BY_SCORE=0` to disable; tunables
+// `_THRESHOLD`, `_MAX_OPS`, `_MAX_CONSUMERS` override the defaults.
 static int realize_remove_by_cost_score_enabled(void) {
   char const *e = getenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
-  return e != NULL && e[0] == '1';
+  if (e == NULL) return 1;
+  return e[0] != '0';
 }
 
 static u64 realize_remove_by_cost_score_threshold(void) {
@@ -958,7 +959,7 @@ static u64 realize_remove_by_cost_score_threshold(void) {
   if (e != NULL && e[0] != '\0') {
     return strtoull(e, NULL, 10);
   }
-  return 100;
+  return 1000;
 }
 
 static u32 realize_remove_by_cost_score_max_ops(void) {
@@ -966,7 +967,7 @@ static u32 realize_remove_by_cost_score_max_ops(void) {
   if (e != NULL && e[0] != '\0') {
     return (u32)strtoul(e, NULL, 10);
   }
-  return 64;
+  return 32;
 }
 
 static u32 realize_remove_by_cost_score_max_consumers(void) {
@@ -983,6 +984,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
   u64 threshold     = realize_remove_by_cost_score_threshold();
   u32 max_ops       = realize_remove_by_cost_score_max_ops();
   u32 max_consumers = realize_remove_by_cost_score_max_consumers();
+  int dump = realize_dump_fusion_candidates_enabled();
   u32 hits = 0;
   // Iterate the bufferize graph directly - this rule is the first
   // one in the codebase that reads BBufferize records as the
@@ -995,13 +997,59 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
     if (b->reasons & (BUFFERIZE_REASON_ROOT
                     | BUFFERIZE_REASON_REDUCE
                     | BUFFERIZE_REASON_BACKEND_CAP)) continue;
-    if (b->subtree_has_reduce) continue;
-    if (b->recompute_ops > max_ops) continue;
-    if (b->consumer_count > max_consumers) continue;
+    if (b->subtree_has_reduce) {
+      if (dump) {
+        fprintf(stderr,
+                "realize_rewrite_skip rule=remove-by-cost-score"
+                " reason=subtree-reduce loc=%llu op=%u\n",
+                (unsigned long long)b->loc, (unsigned)b->op);
+      }
+      continue;
+    }
+    if (b->recompute_ops > max_ops) {
+      if (dump) {
+        fprintf(stderr,
+                "realize_rewrite_skip rule=remove-by-cost-score"
+                " reason=op-budget loc=%llu op=%u ops=%u cap=%u\n",
+                (unsigned long long)b->loc, (unsigned)b->op,
+                (unsigned)b->recompute_ops, (unsigned)max_ops);
+      }
+      continue;
+    }
+    if (b->consumer_count > max_consumers) {
+      if (dump) {
+        fprintf(stderr,
+                "realize_rewrite_skip rule=remove-by-cost-score"
+                " reason=consumer-cap loc=%llu op=%u consumers=%u cap=%u\n",
+                (unsigned long long)b->loc, (unsigned)b->op,
+                (unsigned)b->consumer_count, (unsigned)max_consumers);
+      }
+      continue;
+    }
     u64 score = bufferize_removal_score(b->buffer_id);
-    if (score < threshold) continue;
+    if (score < threshold) {
+      if (dump) {
+        fprintf(stderr,
+                "realize_rewrite_skip rule=remove-by-cost-score"
+                " reason=score-threshold loc=%llu op=%u score=%llu"
+                " threshold=%llu\n",
+                (unsigned long long)b->loc, (unsigned)b->op,
+                (unsigned long long)score, (unsigned long long)threshold);
+      }
+      continue;
+    }
     u32 ridx = realize_info_find(b->loc);
     if (ridx == 0xFFFFFFFFu) continue;
+    if (dump) {
+      fprintf(stderr,
+              "realize_rewrite_hit rule=remove-by-cost-score"
+              " loc=%llu op=%u ops=%u consumers=%u numel=%llu score=%llu\n",
+              (unsigned long long)b->loc, (unsigned)b->op,
+              (unsigned)b->recompute_ops,
+              (unsigned)b->consumer_count,
+              (unsigned long long)b->output_numel,
+              (unsigned long long)score);
+    }
     realize_unmark(&REALIZE_INFO[ridx], REALIZE_REASON_INLINE);
     hits++;
   }

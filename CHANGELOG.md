@@ -6,6 +6,22 @@ dated section.
 
 ## Unreleased
 
+### Changed: remove-by-cost-score rule now default-on
+
+`realize_rule_remove_by_cost_score` flipped from default-OFF to
+default-ON with a conservative threshold (1000 bytes per recompute
+op) and matching op-budget caps (32 ops, 4 consumers).
+`THVM_BUFFERIZE_REMOVE_BY_SCORE=0` opts out; `_THRESHOLD`,
+`_MAX_OPS`, `_MAX_CONSUMERS` override defaults.
+
+This is the first bufferize-graph-driven removal rule that runs
+out of the box.  In practice it only fires on buffers whose
+output is large relative to their recompute cost - graphs with
+small shared producers (score < 1000) keep their existing
+behaviour.  The bounded canary will see kernel-count drops on
+large-tensor multi-consumer graphs without changing small-shape
+test outcomes.  Test suite stays at 255/255.
+
 ### Changed: rangeify reads movement-chain shapes from BIndexChainOp
 
 `schedule/rangeify.c`'s `rngs_ctx_reshape`, `rngs_ctx_expand`,
