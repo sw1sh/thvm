@@ -77,6 +77,16 @@ attachment point without changing current scheduling behavior.
 The materializer has a default-off hook for the checked pass:
 `THVM_UOP_GRAPH_SIMPLIFY=1`.
 
+Scalar reduction nodes now allow multiple explicit REDUCE/UNROLL
+ranges in `S_REDUCE_* src[1..]`, and the CPU scalar interpreter plus
+C scalar renderer execute them as nested loops.  This is the first
+runtime prerequisite for tinygrad-style range simplification: a
+non-contiguous tensor reduction can keep its separate index axes
+instead of being flattened into one opaque reducer.  Rangeify,
+tile UOps, and Metal still need to emit and lower those multi-range
+reducers before batchnorm-style `{B,C,H,W} -> {C}` chains can collapse
+in beautiful-mnist.
+
 ## Rule Policy
 
 A fusion rule must prove both:
@@ -124,7 +134,7 @@ boundaries.
 | Early schedule cleanup: function/tuple resolution, copy/store hazards, reduce split, movement cleanup | `earliest_rewrites`, `mop_cleanup`, `pm_fold_moved_after` | Partial/ad-hoc. Copy/store hazards and function/multi rules are not the current beautiful-mnist bottleneck. |
 | Bufferize removal and const/noop buffer folding | `pm_const_buffer_folding`, `pm_remove_bufferize`, `remove_bufferize` | Missing as a general rule family. This is one of the main fusion gaps. |
 | Buffer insertion and kernel splitting | `pm_add_buffers`, `pm_add_buffers_local`, `to_define_global`, `split_kernels` | Partial. THVM materializes boundaries directly and emits scalar/tile kernels, but lacks rewriteable `BUFFERIZE`/`INDEX` nodes as first-class schedule IR. |
-| Range simplification and reduce collapse | `pm_flatten_range`, `pm_simplify_ranges`, `pm_split_ranges`, `pm_reduce_simplify`, `pm_load_collapse` in `tinygrad/codegen/simplify.py` | Mostly missing. Critical for reducing movement-heavy backward kernels. |
+| Range simplification and reduce collapse | `pm_flatten_range`, `pm_simplify_ranges`, `pm_split_ranges`, `pm_reduce_simplify`, `pm_load_collapse` in `tinygrad/codegen/simplify.py` | Started. Scalar `S_REDUCE_*` can now carry multiple explicit reduce ranges and CPU scalar/C JIT can execute them. Rangeify, tile UOps, and Metal still mostly assume one reducer range. |
 | Upcast/unroll expansion and group-reduce local buffering | `pm_pre_expander`, `expander`, `pm_group_for_reduce` in `tinygrad/codegen/late/expander.py` | Partial. THVM tile UOps have `UPCAST`/`UNROLL`; `LOCAL`/`GROUP_REDUCE` support is still incomplete. |
 | Load/store folding, devectorization, reduce-to-accumulator, add-loads | `load_store_folding`, `correct_load_store`, `devectorize`, `pm_reduce`, `pm_add_loads` in `tinygrad/codegen/late/devectorizer.py` | Partial. THVM scalar/tile renderers cover only part of this surface. |
 | GPU dimension lowering | `pm_add_gpudims` in `tinygrad/codegen/gpudims.py` | Partial. Metal tile renderer maps some `GLOBAL`/`LOCAL` axes, but full grouped dimension rewrite is not there. |
@@ -170,6 +180,9 @@ goal:
 4. Add rewriteable `BUFFERIZE`/`INDEX` schedule IR so bufferize
    insertion/removal is not hard-coded into `realize_classify`.
 5. Port range/reduce simplification and reduce-to-accumulator rules.
+   Started by making scalar reducers multi-range at the CPU
+   interpreter/C-renderer level; next is rangeify metadata that emits
+   explicit reduce axes for non-contiguous reductions.
 6. Finish tile legality for `LOCAL`, `GROUP_REDUCE`, load/store
    folding, and GPU-dim lowering.
 7. Wire beam/autotune and replay memory planning as rewrite passes

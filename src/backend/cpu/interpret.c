@@ -198,9 +198,9 @@ cleanup:
 //
 // The dispatcher iterates LOOP-typed ranges in their canonical
 // row-major order, sets the per-range iter values, then evaluates
-// the kernel's S_STORE op at each iteration.  REDUCE-typed ranges
-// are nested INSIDE the eval (S_REDUCE_SUM/_MAX op opens an inner
-// loop, mutates its range's iter, accumulates).
+// the kernel's S_STORE op at each iteration.  REDUCE-typed ranges are
+// nested INSIDE the eval (S_REDUCE_SUM/_MAX opens inner loops over
+// src[1..], mutates each range's iter, accumulates).
 //
 // f32 only for now; bit-cast through u32 stored in the low 32 bits
 // of the returned u64.
@@ -544,22 +544,56 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
     }
     case S_REDUCE_SUM:
     case S_REDUCE_MAX: {
-      u32 rng_id = u->src[1];
-      ScalarUop const *r = &c->ke->scalar_uops[rng_id];
-      u32 extent = (u32)(r->extra & 0xFFFFFFFFu);
-      u32 saved  = c->range_iter[rng_id];
+      u32 n_ranges = (u->src_count > 1) ? (u32)u->src_count - 1 : 0;
+      u32 range_ids[SCALAR_MAX_SRC];
+      u32 extents  [SCALAR_MAX_SRC];
+      u32 saved    [SCALAR_MAX_SRC];
+      u32 iters    [SCALAR_MAX_SRC];
+      int empty = 0;
+      for (u32 d = 0; d < n_ranges; d++) {
+        u32 rng_id = u->src[1 + d];
+        ScalarUop const *r = &c->ke->scalar_uops[rng_id];
+        range_ids[d] = rng_id;
+        extents  [d] = (u32)(r->extra & 0xFFFFFFFFu);
+        saved    [d] = c->range_iter[rng_id];
+        iters    [d] = 0;
+        if (extents[d] == 0) {
+          empty = 1;
+        }
+      }
       // Type-specific accumulator.  Iterate inside dtype branch.
 #define REDUCE_BODY(T, init_max, init_sum, cmpgt)                              \
       do {                                                                     \
         T acc = (u->op == S_REDUCE_MAX) ? (T)(init_max) : (T)(init_sum);       \
-        for (u32 ri = 0; ri < extent; ri++) {                                  \
-          c->range_iter[rng_id] = ri;                                          \
+        if (n_ranges == 0) {                                                    \
           u64 b = eval_scalar(c, u->src[0]);                                   \
           T v; memcpy(&v, &b, sizeof(T));                                      \
-          if (u->op == S_REDUCE_MAX) acc = cmpgt(v, acc) ? v : acc;            \
-          else                       acc = (T)(acc + v);                       \
+          acc = v;                                                             \
+        } else if (!empty) {                                                    \
+          int done = 0;                                                        \
+          while (!done) {                                                      \
+            for (u32 d = 0; d < n_ranges; d++) {                               \
+              c->range_iter[range_ids[d]] = iters[d];                          \
+            }                                                                  \
+            u64 b = eval_scalar(c, u->src[0]);                                 \
+            T v; memcpy(&v, &b, sizeof(T));                                    \
+            if (u->op == S_REDUCE_MAX) acc = cmpgt(v, acc) ? v : acc;          \
+            else                       acc = (T)(acc + v);                     \
+            for (i32 d = (i32)n_ranges - 1; d >= 0; d--) {                     \
+              iters[d]++;                                                      \
+              if (iters[d] < extents[d]) {                                     \
+                break;                                                         \
+              }                                                                \
+              iters[d] = 0;                                                    \
+              if (d == 0) {                                                    \
+                done = 1;                                                      \
+              }                                                                \
+            }                                                                  \
+          }                                                                    \
         }                                                                      \
-        c->range_iter[rng_id] = saved;                                         \
+        for (u32 d = 0; d < n_ranges; d++) {                                   \
+          c->range_iter[range_ids[d]] = saved[d];                              \
+        }                                                                      \
         u64 _r = 0; memcpy(&_r, &acc, sizeof(T));                              \
         return _r;                                                             \
       } while (0)
@@ -586,7 +620,9 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
         case DT_INT4:   REDUCE_BODY(i32, -8,         0,   BINOP_LT_FLIP);
         case DT_UINT4:  REDUCE_BODY(u32, 0,          0,   BINOP_LT_FLIP);
         default:
-          c->range_iter[rng_id] = saved;
+          for (u32 d = 0; d < n_ranges; d++) {
+            c->range_iter[range_ids[d]] = saved[d];
+          }
           return 0;
       }
 #undef REDUCE_BODY

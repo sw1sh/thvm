@@ -8,7 +8,8 @@
 //   - Elementwise: S_BUFFERIZE / S_STORE / S_INDEX / S_LOAD /
 //     S_LOAD_RAW (pass-through) / S_CONST / S_ADD / S_MUL / S_NEG /
 //     S_RECIP / S_SQRT / S_EXP2 / S_LOG2 / S_CMPLT / S_CMPEQ.
-//   - Reductions: S_REDUCE_SUM / S_REDUCE_MAX over one REDUCE range.
+//   - Reductions: S_REDUCE_SUM / S_REDUCE_MAX over explicit REDUCE
+//     ranges in src[1..].
 //   - One LOOP nest at the BUFFERIZE root (rank 1..MAX_DIM).
 //   - f32 / f64 only.
 //   - Expression indexes: S_INDEX_E plus S_ICONST / S_IADD /
@@ -137,6 +138,23 @@ static int cs_collect_kernel_info(KernelEntry const *ke, CsKernelInfo *out) {
     }
     if (u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX) {
       out->has_reduce = 1;
+      if (u->src_count < 2) {
+        return 0;
+      }
+      for (u32 d = 1; d < u->src_count; d++) {
+        u32 rng_id = u->src[d];
+        if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
+          return 0;
+        }
+        ScalarUop const *r = &ke->scalar_uops[rng_id];
+        if (r->op != S_RANGE) {
+          return 0;
+        }
+        u32 axis_type = (u32)((r->extra >> 32) & 0xFFFFFFFFu);
+        if (axis_type != S_AXIS_REDUCE && axis_type != S_AXIS_UNROLL) {
+          return 0;
+        }
+      }
     }
   }
   out->output_dtype = ke->output_dtype;
@@ -401,24 +419,29 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
     }
     case S_REDUCE_SUM:
     case S_REDUCE_MAX: {
-      u32 rng_id = u->src[1];
-      if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
+      if (u->src_count < 2) {
         return 0;
       }
-      ScalarUop const *r = &ke->scalar_uops[rng_id];
-      if (r->op != S_RANGE) {
-        return 0;
-      }
-      u32 axis_type = (u32)((r->extra >> 32) & 0xFFFFFFFFu);
-      if (axis_type != S_AXIS_REDUCE && axis_type != S_AXIS_UNROLL) {
-        return 0;
-      }
-      u32 extent = (u32)(r->extra & 0xFFFFFFFFu);
       const char *T = cs_dtype_to_c(u->dtype);
       const char *init = (u->op == S_REDUCE_MAX) ? "-INFINITY" : "0";
       cg_append(b, "({ %s _acc%u = (%s)%s; ", T, op_id, T, init);
-      cg_append(b, "for (unsigned _v%u = 0; _v%u < %uu; _v%u++) { ",
-                rng_id, rng_id, extent, rng_id);
+      for (u32 d = 1; d < u->src_count; d++) {
+        u32 rng_id = u->src[d];
+        if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
+          return 0;
+        }
+        ScalarUop const *r = &ke->scalar_uops[rng_id];
+        if (r->op != S_RANGE) {
+          return 0;
+        }
+        u32 axis_type = (u32)((r->extra >> 32) & 0xFFFFFFFFu);
+        if (axis_type != S_AXIS_REDUCE && axis_type != S_AXIS_UNROLL) {
+          return 0;
+        }
+        u32 extent = (u32)(r->extra & 0xFFFFFFFFu);
+        cg_append(b, "for (unsigned _v%u = 0; _v%u < %uu; _v%u++) { ",
+                  rng_id, rng_id, extent, rng_id);
+      }
       cg_append(b, "%s _rv%u = ", T, op_id);
       if (!cs_emit_value(b, ke, u->src[0])) {
         return 0;
@@ -430,7 +453,10 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
       } else {
         cg_append(b, "_acc%u += _rv%u; ", op_id, op_id);
       }
-      cg_append(b, "} _acc%u; })", op_id);
+      for (u32 d = 1; d < u->src_count; d++) {
+        cg_append(b, "} ");
+      }
+      cg_append(b, "_acc%u; })", op_id);
       return 1;
     }
     case S_CAST: {

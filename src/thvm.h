@@ -549,7 +549,10 @@ typedef enum {
   // ALU (mirror tinygrad's GroupOp.ALU subset we'll lower to first).
   S_ADD, S_MUL, S_NEG, S_RECIP, S_EXP2, S_LOG2, S_SQRT,
   S_CMPLT, S_CMPEQ,
-  // Reductions.  src[0] = body inside the REDUCE-typed RANGE.
+  // Reductions.  src[0] = body; src[1..] = REDUCE/UNROLL ranges
+  // nested around that body.  Multiple explicit ranges let a later
+  // lowering represent non-contiguous tensor reductions without
+  // flattening away the index structure.
   S_REDUCE_SUM, S_REDUCE_MAX,
   // Type conversion.  src[0] = source value; dispatcher reads the
   // source op's dtype, decodes, converts to u->dtype, re-encodes.

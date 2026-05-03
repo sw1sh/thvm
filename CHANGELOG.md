@@ -6,6 +6,13 @@ dated section.
 
 ## Unreleased
 
+### Changed: allow scalar reducers to carry multiple ranges
+
+`S_REDUCE_SUM` and `S_REDUCE_MAX` now accept explicit reducer ranges in
+`src[1..]`, and the CPU scalar interpreter plus C scalar renderer
+execute them as nested loops.  This is the first runtime slice needed
+for tinygrad-style range simplification of non-contiguous reductions.
+
 ### Added: show beautiful-mnist dispatch-count hot shapes
 
 The beautiful-mnist training benchmark now prints top program groups
