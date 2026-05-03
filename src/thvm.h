@@ -1373,6 +1373,23 @@ fn int               bufferize_buffer_lifetime(u32 buffer_id,
                                                u32 *lifetime_start,
                                                u32 *lifetime_end);
 
+// Phase 7: deterministic schedule key over the post-rewrite
+// bufferize graph.  Hash mixes each realized buffer's
+// (op, reasons, recompute_ops, output_numel) and each B_INDEX
+// (source, consumer, chain flags) -- fields that depend on the
+// schedule shape but not on heap locs, so the key stays stable
+// across runs that produce the same schedule.  Autotune uses this
+// to look up cached decisions per (graph, schedule) pair.
+fn u64               bufferize_schedule_key(void);
+// Phase 7 aggregates: sum of output_bytes across realized buffers,
+// max lifetime_end (the highest topological depth reached), and
+// sum of recompute_ops across realized buffers.  These give
+// autotune one-number summaries to pre-filter schedule candidates
+// before the full per-buffer cost walk.
+fn u64               bufferize_total_realized_bytes(void);
+fn u32               bufferize_max_lifetime_depth(void);
+fn u64               bufferize_total_recompute_ops(void);
+
 // g2a: after realize_classify populates the boundary set, the
 // scheduler topo-sorts those boundaries by producer-to-consumer
 // depth.  These accessors expose the sorted order so tests / future

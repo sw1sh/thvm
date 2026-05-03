@@ -630,6 +630,66 @@ fn int bufferize_buffer_lifetime(u32 buffer_id,
   return 1;
 }
 
+// Phase 7: deterministic schedule key + aggregates.
+fn u64 bufferize_schedule_key(void) {
+  u64 h = 0xcbf29ce484222325ULL;
+  u64 const prime = 0x100000001b3ULL;
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BBufferize const *b = &BUFFERIZE_BUFS[i];
+    if (!b->realized) continue;
+    u64 v = (u64)b->op
+          ^ ((u64)b->reasons        <<  8)
+          ^ ((u64)b->recompute_ops  << 24)
+          ^ ((u64)b->output_numel   << 40);
+    h = (h ^ v) * prime;
+  }
+  for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
+    BIndex const *e = &BUFFERIZE_INDEXES[i];
+    u64 flags = (u64)e->has_reshape
+              | ((u64)e->has_permute << 1)
+              | ((u64)e->has_expand  << 2)
+              | ((u64)e->has_pad     << 3)
+              | ((u64)e->has_shrink  << 4)
+              | ((u64)e->has_flip    << 5);
+    u64 v = (u64)e->source_buffer_id
+          ^ ((u64)e->consumer_buffer_id << 16)
+          ^ ((u64)e->movement_chain_len << 32)
+          ^ (flags << 48);
+    h = (h ^ v) * prime;
+  }
+  return h;
+}
+
+fn u64 bufferize_total_realized_bytes(void) {
+  u64 total = 0;
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BBufferize const *b = &BUFFERIZE_BUFS[i];
+    if (!b->realized) continue;
+    total += b->output_bytes;
+  }
+  return total;
+}
+
+fn u32 bufferize_max_lifetime_depth(void) {
+  u32 m = 0;
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BBufferize const *b = &BUFFERIZE_BUFS[i];
+    if (!b->realized) continue;
+    if (b->lifetime_end > m) m = b->lifetime_end;
+  }
+  return m;
+}
+
+fn u64 bufferize_total_recompute_ops(void) {
+  u64 total = 0;
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BBufferize const *b = &BUFFERIZE_BUFS[i];
+    if (!b->realized) continue;
+    total += b->recompute_ops;
+  }
+  return total;
+}
+
 fn u64 bufferize_removal_score(u32 buffer_id) {
   // 1-based ids; index = id - 1.
   if (buffer_id == 0 || buffer_id > BUFFERIZE_BUFS_LEN) return 0;

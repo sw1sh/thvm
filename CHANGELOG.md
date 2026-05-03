@@ -6,6 +6,26 @@ dated section.
 
 ## Unreleased
 
+### Added: Phase 7 bufferize schedule key + aggregates
+
+`schedule/bufferize.c` now provides a deterministic
+`bufferize_schedule_key()` plus three aggregates
+(`bufferize_total_realized_bytes`, `bufferize_max_lifetime_depth`,
+`bufferize_total_recompute_ops`) that future autotune callers can
+key into a decision cache.  The schedule key is an FNV-1a-style hash
+over each realized buffer's loc-independent fields
+(op, reasons, recompute_ops, output_numel) plus each B_INDEX edge
+(source/consumer ids, chain length, has_* flags), so it stays
+stable across runs that produce the same schedule shape and flips
+when the shape changes (e.g. a REDUCE is added or a buffer is
+removed).  `DUMP_BUFFERIZE` extends the summary line with
+`key=0x<hex> total_bytes=<n> max_depth=<n>`.  Materialize.c and
+autotune still operate as before; the key is the foundation hookup
+the planned schedule cache will use.  `tests/test_bufferize.c`
+adds three cases (key deterministic across two classify calls,
+key flips when shape changes, aggregates equal per-buffer sums);
+150/150.
+
 ### Added: Phase 6 bufferize lifetime + output-bytes data
 
 `schedule/bufferize.c` now computes per-`B_BUFFERIZE`

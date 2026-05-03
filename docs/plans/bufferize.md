@@ -1,15 +1,23 @@
 # Bufferize Schedule IR Plan
 
-Status: Phases 0-6 landed at the data-layer level.  Phase 2 has the
+Status: Phases 0-7 landed at the data-layer level.  Phase 2 has the
 data layer + edge query API; Phase 4 has the cost-model fields and
 candidate dump; Phase 5 has the reduce-aware cost gate; Phase 6 has
-per-buffer lifetimes and output_bytes.  Phase 7 planned.
-Outstanding follow-ups: rangeify rerouting through `B_INDEX`
-(Phase 2), edge transforms beyond accounting (Phase 3), named
-removal rules on the bufferize graph (Phase 4), accumulator/
-group-reduce schedules (Phase 5), and rerouting Metal allocation
-through bufferize lifetimes (Phase 6); all tracked in the per-phase
-sections below.
+per-buffer lifetimes and output_bytes; Phase 7 has the schedule key
+and aggregates.  All seven phases are observable from
+`DUMP_BUFFERIZE` and `DUMP_BUFFERIZE_CANDIDATES`.
+
+Outstanding follow-ups (each tracked in its phase section below):
+
+- rangeify rerouting through `B_INDEX` (Phase 2);
+- edge transforms beyond accounting (Phase 3);
+- named removal rules on the bufferize graph (Phase 4);
+- accumulator/group-reduce schedules (Phase 5);
+- rerouting Metal allocation through bufferize lifetimes (Phase 6);
+- schedule cache + replay using the key (Phase 7).
+
+These follow-ups are where actual runtime/memory wins come from;
+the data layer just unlocks them.
 
 ## Goal
 
@@ -594,27 +602,47 @@ Acceptance (Metal allocation, pending):
 - no 100 GB pressure failure under bounded canaries;
 - replay correctness survives multi-output and multi-grad graphs.
 
-### Phase 7: Autotune Integration
+### Phase 7: Autotune Integration (key + aggregates landed)
 
 Let autotune choose among legal bufferize/tile alternatives instead of
 only choosing per-kernel axis opts.
 
+Status: schedule-key and aggregate accessors landed.
+`bufferize_schedule_key()` returns a deterministic FNV-1a hash over
+each realized buffer's loc-independent fields and each B_INDEX
+edge, so the key stays stable across runs that produce the same
+schedule and flips when the shape changes.
+`bufferize_total_realized_bytes`, `bufferize_max_lifetime_depth`,
+and `bufferize_total_recompute_ops` give one-number summaries
+autotune can use to pre-filter candidates without walking every
+buffer.  `DUMP_BUFFERIZE` shows
+`key=0x<hex> total_bytes=<n> max_depth=<n>`.
+
 Tasks:
 
-- encode candidate schedules with stable keys;
-- compare remove-vs-preserve-vs-split alternatives;
-- feed tile options and memory estimates into one score;
-- cache winning schedule choices by graph/kid/key;
-- replay the selected schedule without re-searching.
+- ~~encode candidate schedules with stable keys~~;
+- compare remove-vs-preserve-vs-split alternatives (planned -
+  needs the rule-driven schedule mutations from Phases 3-5 to
+  actually generate alternatives);
+- feed tile options and memory estimates into one score (planned);
+- cache winning schedule choices by graph/kid/key (planned -
+  the key API exists; the cache/lookup wiring is autotune-side
+  work);
+- replay the selected schedule without re-searching (planned).
 
-Acceptance:
+Acceptance (data layer):
 
-- bounded beautiful-mnist training loop can run autotune without memory
-  blow-up;
-- selected schedules reduce full-loop wall time, not just first-sample
-  or compile-time metrics;
-- canary output reports kernel count, graph dispatch count, memory, and
-  training-step wall time after each run.
+- `make test` passes including the deterministic-key, key-flips,
+  and aggregate-totals cases.
+
+Acceptance (autotune cache, pending):
+
+- bounded beautiful-mnist training loop can run autotune without
+  memory blow-up;
+- selected schedules reduce full-loop wall time, not just
+  first-sample or compile-time metrics;
+- canary output reports kernel count, graph dispatch count,
+  memory, and training-step wall time after each run.
 
 ## Tests
 

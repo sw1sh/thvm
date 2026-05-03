@@ -461,6 +461,55 @@ int main(void) {
     }
   }
 
+  TEST_BEGIN("bufferize/schedule-key-deterministic");
+  // Two classify runs over the same graph shape must produce the
+  // same schedule key.  Build the graph twice and capture each key.
+  Term sk1_s = uop_binary(UOP_ADD, a, b);
+  Term sk1_l = uop_binary(UOP_MUL, sk1_s, c);
+  Term sk1_r = uop_binary(UOP_MUL, sk1_s, a);
+  Term sk1_t = uop_binary(UOP_ADD, sk1_l, sk1_r);
+  realize_classify(sk1_t);
+  u64 key1 = bufferize_schedule_key();
+  // Reclassify the SAME root - terms are hash-consed so we get the
+  // same UOps and the same key.
+  realize_classify(sk1_t);
+  u64 key2 = bufferize_schedule_key();
+  CHECK_EQ(key1, key2);
+  CHECK(key1 != 0);
+
+  TEST_BEGIN("bufferize/schedule-key-changes-with-shape");
+  // A different graph shape must produce a different key.  Adding a
+  // REDUCE seeds a new buffer and changes recompute_ops on the
+  // root, so the key flips.
+  Term sk2 = uop_reduce(REDUCE_SUM, 0, a);
+  realize_classify(sk2);
+  u64 key3 = bufferize_schedule_key();
+  CHECK(key3 != key1);
+
+  TEST_BEGIN("bufferize/aggregate-totals-match-per-buffer-sums");
+  // Rebuild the multi-consumer graph and verify aggregates equal
+  // the sum of per-buffer fields.
+  Term ag_s = uop_binary(UOP_ADD, a, b);
+  Term ag_l = uop_binary(UOP_MUL, ag_s, c);
+  Term ag_r = uop_binary(UOP_MUL, ag_s, a);
+  Term ag_t = uop_binary(UOP_ADD, ag_l, ag_r);
+  realize_classify(ag_t);
+  u64 expected_bytes = 0;
+  u64 expected_ops = 0;
+  u32 expected_max_depth = 0;
+  for (u32 i = 0; i < bufferize_buffer_count(); i++) {
+    BBufferize const *b = bufferize_buffer_at(i);
+    if (!b->realized) continue;
+    expected_bytes += b->output_bytes;
+    expected_ops += b->recompute_ops;
+    if (b->lifetime_end > expected_max_depth) {
+      expected_max_depth = b->lifetime_end;
+    }
+  }
+  CHECK_EQ(bufferize_total_realized_bytes(), expected_bytes);
+  CHECK_EQ(bufferize_total_recompute_ops(), expected_ops);
+  CHECK_EQ(bufferize_max_lifetime_depth(), expected_max_depth);
+
   TEST_BEGIN("bufferize/reduce-buffer-blocks-removal-score");
   // Build a graph where a REDUCE result is one of two consumers of
   // a multi-consumer producer.  The REDUCE buffer (root) gates on

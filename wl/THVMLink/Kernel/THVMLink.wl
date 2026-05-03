@@ -65,7 +65,7 @@ TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls
 (* === tag constants (mirror src/thvm.h) === *)
 $TagAPP::usage = $TagLAM::usage = $TagVAR::usage = $TagERA::usage =
   $TagDP0::usage = $TagDP1::usage = $TagSUP::usage = $TagDUP::usage =
-  $TagTEN::usage = $TagUOP::usage = $TagNUM::usage =
+  $TagTEN::usage = $TagUOP::usage = $TagNUM::usage = $TagCTR::usage =
     "Tag id; mirrors the corresponding TAG_* in src/thvm.h.";
 
 (* === dtype + opcode constants (mirror src/thvm.h) === *)
@@ -171,6 +171,7 @@ $TagAPP = 0; $TagLAM = 1; $TagVAR = 2; $TagERA = 3;
 $TagDP0 = 4; $TagDP1 = 5; $TagSUP = 6; $TagDUP = 7;
 $TagTEN = 8; $TagUOP = 9; $TagNUM = 10;
 $TagREF = 11; $TagALO = 12; $TagOP2 = 13; $TagMAT = 14;
+$TagCTR = 20;
 
 (* DUP-cell flavor flag: TAG_DP{0,1} with this bit set on ext is a
    grad-flavored projection (DP0=FWD passthrough, DP1=BWD chain rule).
@@ -181,7 +182,8 @@ $tagNames = <|
     0  -> "APP", 1  -> "LAM", 2  -> "VAR",  3  -> "ERA",
     4  -> "DP0", 5  -> "DP1", 6  -> "SUP",  7  -> "DUP",
     8  -> "TEN", 9  -> "UOP", 10 -> "NUM",
-    11 -> "REF", 12 -> "ALO", 13 -> "OP2",  14 -> "MAT"
+    11 -> "REF", 12 -> "ALO", 13 -> "OP2",  14 -> "MAT",
+    20 -> "CTR"
 |>;
 
 $op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<" |>;
