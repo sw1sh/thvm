@@ -185,7 +185,11 @@ static void bufferize_build_indexes(void) {
 // at TEN/VAR leaves, and at any non-pure op.  Const and load are
 // counted as zero-cost; other UOps each cost 1.  The walk is bounded
 // by depth so pathological graphs cannot blow up the estimate.
-static u32 bufferize_count_recompute_ops(u64 loc, u64 self_loc, u32 depth) {
+// Phase 5: also reports whether the subtree contained a REDUCE via
+// the `*has_reduce` out-param, so reduce-aware rules can gate
+// recompute removal.
+static u32 bufferize_count_recompute_ops(u64 loc, u64 self_loc, u32 depth,
+                                         u8 *has_reduce) {
   if (depth > 64) return 0;
   if (loc >= HEAP_NEXT) return 0;
   u32 ridx = realize_info_find(loc);
@@ -196,7 +200,10 @@ static u32 bufferize_count_recompute_ops(u64 loc, u64 self_loc, u32 depth) {
     u32 bidx = bufferize_find_by_loc(loc);
     if (bidx != 0xFFFFFFFFu && BUFFERIZE_BUFS[bidx].realized) return 0;
   }
-  if (op == UOP_REDUCE) return 1;     // count the reduce, don't descend
+  if (op == UOP_REDUCE) {
+    if (has_reduce != NULL) *has_reduce = 1;
+    return 1;     // count the reduce, don't descend
+  }
   u32 self_cost = (op == UOP_CONST || op == UOP_LOAD) ? 0 : 1;
   u8 ar = uop_arity(op);
   u32 total = self_cost;
@@ -205,7 +212,7 @@ static u32 bufferize_count_recompute_ops(u64 loc, u64 self_loc, u32 depth) {
     if (term_tag(child) != TAG_UOP) continue;
     if (term_ext(child) == UOP_KERNEL) continue;
     total += bufferize_count_recompute_ops(term_val(child), self_loc,
-                                           depth + 1);
+                                           depth + 1, has_reduce);
   }
   return total;
 }
@@ -217,19 +224,24 @@ static u64 bufferize_shape_numel(Shape const *s) {
   return n;
 }
 
-// Populate the recompute_ops / output_numel / recompute_total cost
-// fields for every realized B_BUFFERIZE.  Runs once per
-// bufferize_finalize_stores after the index table has settled.
+// Populate the recompute_ops / output_numel / recompute_total /
+// subtree_has_reduce cost fields for every realized B_BUFFERIZE.
+// Runs once per bufferize_finalize_stores after the index table
+// has settled.
 static void bufferize_compute_costs(void) {
   for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
     BBufferize *b = &BUFFERIZE_BUFS[i];
     if (!b->realized) {
-      b->recompute_ops   = 0;
-      b->output_numel    = 0;
-      b->recompute_total = 0;
+      b->recompute_ops      = 0;
+      b->output_numel       = 0;
+      b->recompute_total    = 0;
+      b->subtree_has_reduce = 0;
       continue;
     }
-    b->recompute_ops = bufferize_count_recompute_ops(b->loc, b->loc, 0);
+    u8 has_red = 0;
+    b->recompute_ops = bufferize_count_recompute_ops(b->loc, b->loc, 0,
+                                                     &has_red);
+    b->subtree_has_reduce = has_red;
     Term self = term_new(0, TAG_UOP, b->op, b->loc);
     Shape sh = {0};
     b->output_numel = term_shape_in(self, 0, &sh)
@@ -317,11 +329,12 @@ static void bufferize_dump(Term root) {
     BBufferize const *b = &BUFFERIZE_BUFS[i];
     if (!b->realized) continue;
     fprintf(stderr,
-            "  bufferize_cost id=%u ops=%u numel=%llu recompute_total=%llu\n",
+            "  bufferize_cost id=%u ops=%u numel=%llu recompute_total=%llu%s\n",
             (unsigned)b->buffer_id,
             (unsigned)b->recompute_ops,
             (unsigned long long)b->output_numel,
-            (unsigned long long)b->recompute_total);
+            (unsigned long long)b->recompute_total,
+            b->subtree_has_reduce ? " has_reduce" : "");
   }
 }
 
@@ -551,6 +564,12 @@ fn u64 bufferize_removal_score(u32 buffer_id) {
                   | BUFFERIZE_REASON_BACKEND_CAP)) {
     return 0;
   }
+  // Phase 5 reduce-aware gate: a buffer whose recompute path
+  // crosses a REDUCE is too expensive to remove with the simple
+  // recompute heuristic.  Future reduce-aware rules may relax this
+  // when they can fold the reduce into the consumer (e.g. local
+  // group reduce).
+  if (b->subtree_has_reduce) return 0;
   if (b->output_numel == 0) return 0;
   u64 denom = b->recompute_total > 0 ? b->recompute_total : 1;
   return b->output_numel / denom;

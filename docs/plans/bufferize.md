@@ -1,10 +1,13 @@
 # Bufferize Schedule IR Plan
 
-Status: Phases 0-4 landed.  Phase 2 has the data layer + edge query
-API; Phase 4 has the cost-model fields and candidate dump.  Phases
-5-7 planned.  Outstanding follow-ups: rangeify rerouting through
-`B_INDEX` (Phase 2 follow-up) and edge transforms beyond accounting
-(Phase 3 follow-up); both are tracked in the per-phase sections.
+Status: Phases 0-5 landed at the data-layer level.  Phase 2 has the
+data layer + edge query API; Phase 4 has the cost-model fields and
+candidate dump; Phase 5 has the reduce-aware cost gate.  Phases 6-7
+planned.  Outstanding follow-ups: rangeify rerouting through
+`B_INDEX` (Phase 2), edge transforms beyond accounting (Phase 3),
+named removal rules on the bufferize graph (Phase 4), and
+accumulator/group-reduce schedules (Phase 5); all tracked in the
+per-phase sections below.
 
 ## Goal
 
@@ -506,21 +509,42 @@ Acceptance (removal rules, pending):
 - retained/live Metal memory does not grow;
 - performance is not slower by more than noise on the bounded canary.
 
-### Phase 5: Reduce-Aware Bufferize
+### Phase 5: Reduce-Aware Bufferize (cost gate landed)
 
 Handle reductions as accumulator schedules, not unconditional
 materialization points.
 
+Status: data-layer reduce gate landed.  `BBufferize.subtree_has_reduce`
+is set during cost computation when the producer-subtree walk hits
+a REDUCE; `bufferize_removal_score` returns 0 for any buffer with
+that flag set, on top of the existing reason gates.  This blocks
+the simple recompute heuristic from removing buffers whose
+recompute path crosses a reduce.  Future reduce-aware rules can
+relax this when they can fold the reduce into the consumer (local
+group reduce, broadcast fusion).
+
 Tasks:
 
-- represent accumulator buffers explicitly;
-- fuse reduce chains through `B_STORE` reduce ranges;
-- add `TILE_REDUCE` legalization over explicit reduce metadata;
-- introduce local/group-reduce axes before MMA work;
+- ~~track reduce presence in the cost model so simple recompute
+  removals do not propose reduce-bearing candidates~~;
+- represent accumulator buffers explicitly (planned);
+- fuse reduce chains through `B_STORE` reduce ranges (planned -
+  the existing `inline-adjacent-reduce-chains` realize-rule does
+  this; the bufferize-graph version needs explicit reduce-axis
+  metadata on `B_STORE`);
+- add `TILE_REDUCE` legalization over explicit reduce metadata
+  (planned);
+- introduce local/group-reduce axes before MMA work (planned);
 - implement reduce-broadcast fusion for batchnorm and softmax-like
-  patterns.
+  patterns (planned - the existing
+  `inline-softmax-broadcast-reduce` realize-rule covers some
+  cases; the bufferize-graph version generalises it).
 
-Acceptance:
+Acceptance (cost gate):
+
+- `make test` passes including the reduce-aware cost-gate cases.
+
+Acceptance (accumulator schedules, pending):
 
 - batchnorm channel reductions and beautiful-mnist backward reduce
   patterns stop dominating kernel count;

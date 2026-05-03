@@ -1279,9 +1279,14 @@ typedef struct {
   // recompute_total is recompute_ops * max(consumer_count, 1) -- a
   // first-cut estimate of the work multiplier if this buffer were
   // removed and every consumer recomputed it independently.
+  // Phase 5: subtree_has_reduce is 1 iff the producer subtree
+  // contains a REDUCE (the buffer's own op being REDUCE counts);
+  // future reduce-aware rules use it to gate recompute removals
+  // because reductions amplify recompute cost.
   u32 recompute_ops;
   u64 output_numel;
   u64 recompute_total;
+  u8  subtree_has_reduce;
 } BBufferize;
 typedef struct {
   u32 buffer_id;      // destination B_BUFFERIZE id

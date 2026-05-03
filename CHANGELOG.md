@@ -6,6 +6,26 @@ dated section.
 
 ## Unreleased
 
+### Added: Phase 5 reduce-aware cost gate
+
+`schedule/bufferize.c` now tracks per-`B_BUFFERIZE`
+`subtree_has_reduce`: 1 iff the producer-subtree walk hit a REDUCE
+(the buffer's own op being REDUCE counts).  The recompute walk
+already stopped at REDUCEs to bound estimate cost; Phase 5 surfaces
+that signal as data so downstream rules can act on it.
+`bufferize_removal_score` now returns 0 whenever
+`subtree_has_reduce` is set, on top of the existing
+ROOT/REDUCE/BACKEND_CAP gates.  Buffers whose subtree ends at
+another realized buffer keep `subtree_has_reduce=0` even when a
+reduce is upstream (the cost is amortised behind the other buffer),
+which mirrors how rangeify already treats those boundaries.
+`DUMP_BUFFERIZE=1` annotates `bufferize_cost` lines with
+`has_reduce` when the flag is set.  `tests/test_bufferize.c` adds
+two cases (reduce buffer flagged; reduce-amortised consumer not
+flagged); 133/133.  No removal rules change behavior; the data
+layer is ready for the planned reduce-broadcast and accumulator
+rules.
+
 ### Added: Phase 4 bufferize cost model + removal-candidate dump
 
 `schedule/bufferize.c` now computes per-`B_BUFFERIZE` cost-model

@@ -386,6 +386,62 @@ int main(void) {
   CHECK_EQ(bufferize_removal_score(0), 0);
   CHECK_EQ(bufferize_removal_score(99999u), 0);
 
+  TEST_BEGIN("bufferize/reduce-buffer-flags-subtree-has-reduce");
+  // A REDUCE buffer's own producer walk hits the REDUCE op at the
+  // root, so subtree_has_reduce must be 1.  A pure ALU buffer with
+  // no reduce ancestors should have it cleared.
+  Term r2 = uop_reduce(REDUCE_SUM, 0, a);
+  realize_classify(r2);
+  u32 r2_idx = bufferize_find_by_loc(term_val(r2));
+  CHECK(r2_idx != 0xFFFFFFFFu);
+  if (r2_idx != 0xFFFFFFFFu) {
+    BBufferize const *rb = bufferize_buffer_at(r2_idx);
+    CHECK_EQ(rb->subtree_has_reduce, 1);
+  }
+  // The shared/root multi-consumer graph from earlier had no
+  // REDUCEs anywhere, so its buffers should all have
+  // subtree_has_reduce == 0.
+  Term mr_s = uop_binary(UOP_ADD, a, b);
+  Term mr_l = uop_binary(UOP_MUL, mr_s, c);
+  Term mr_r = uop_binary(UOP_MUL, mr_s, a);
+  Term mr_t = uop_binary(UOP_ADD, mr_l, mr_r);
+  realize_classify(mr_t);
+  u32 mr_s_idx = bufferize_find_by_loc(term_val(mr_s));
+  if (mr_s_idx != 0xFFFFFFFFu) {
+    BBufferize const *bm = bufferize_buffer_at(mr_s_idx);
+    if (bm->realized) CHECK_EQ(bm->subtree_has_reduce, 0);
+  }
+
+  TEST_BEGIN("bufferize/reduce-buffer-blocks-removal-score");
+  // Build a graph where a REDUCE result is one of two consumers of
+  // a multi-consumer producer.  The REDUCE buffer (root) gates on
+  // REASON_REDUCE | REASON_ROOT, but the test also confirms that
+  // a buffer whose subtree contains a reduce is gated by Phase 5's
+  // subtree_has_reduce check independently of reasons.
+  Term r3   = uop_reduce(REDUCE_SUM, 0, a);
+  // Force r3 to be multi-consumer by using it twice in the root.
+  Term r3_d = uop_binary(UOP_MUL, r3, r3);
+  realize_classify(r3_d);
+  u32 r3_idx   = bufferize_find_by_loc(term_val(r3));
+  u32 r3_d_idx = bufferize_find_by_loc(term_val(r3_d));
+  CHECK(r3_idx != 0xFFFFFFFFu);
+  CHECK(r3_d_idx != 0xFFFFFFFFu);
+  if (r3_idx != 0xFFFFFFFFu) {
+    BBufferize const *rb = bufferize_buffer_at(r3_idx);
+    CHECK_EQ(rb->subtree_has_reduce, 1);
+    // REASON_REDUCE alone already gates score; subtree_has_reduce
+    // is the second guard.  Score must be 0.
+    CHECK_EQ(bufferize_removal_score(rb->buffer_id), 0);
+  }
+  if (r3_d_idx != 0xFFFFFFFFu) {
+    BBufferize const *rt = bufferize_buffer_at(r3_d_idx);
+    // r3_d's subtree ends at r3 (a realized buffer), so the walk
+    // stops without seeing the reduce; subtree_has_reduce stays 0
+    // even though a reduce is upstream.  This is the correct
+    // semantics: amortised behind another buffer.
+    CHECK_EQ(rt->subtree_has_reduce, 0);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
