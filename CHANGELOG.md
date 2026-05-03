@@ -6,6 +6,51 @@ dated section.
 
 ## Unreleased
 
+### Added: Levy-optimal Phase 3 -- conditional DP-head cnf-drives in wnf strict frames
+
+Targeted Phase 3 hookups: where `wnf`'s apply-phase strict frames
+need a NUM / CTR / LAM head to dispatch but the head turns out to
+be a Levy-opaque plain DP, drive it through `cnf` first.  This
+covers:
+
+- `OP2` and `F_OP2_NUM` apply frames: a DP head is cnf'd so
+  `DUP-NUM` / `DUP-SUP` fire before the strict numeric dispatch.
+  Required for non-recursive auto-dup tests
+  (`auto-dup/three-uses-x-plus-x-plus-x`, `auto-dup/five-uses`)
+  and any `OP2(DP0(NUM), ...)` pattern from auto-dup chains.
+- `APP-MAT` arg-force: when `wnf(arg)` returns a DP head, call
+  `cnf` once to surface the underlying CTR / NUM.  Conditional
+  rather than unconditional cnf so non-DP heads stay on the cheap
+  `wnf` path (full cnf would descend into compound children and
+  pay for SUP-lift even when there's no SUP).
+- `tests/test_auto_dup.c` adds an
+  `auto-dup/recursive-body-bails-conservatively` regression test
+  documenting that the `TAG_REF` / `TAG_ALO` bail in
+  `auto_dup_collect` is intentional under the current build.
+
+Other strict frames (EQL, AND, OR, WHEN, ANN, F_EQL_R, plain APP)
+were tried and rolled back: full cnf-on-DP-head at every apply
+frame slowed `lazy.wlt`'s `TLazyTake[TLazyRange[10^6], 5]` to
+several minutes.  The conservative pattern -- cnf only at the
+strict frames where a NUM / CTR head is structurally required --
+keeps lazy.wlt at its baseline runtime while the C suite stays at
+274/274 + 21 auto-dup + 27 cnf cases.
+
+WL test verification: lazy.wlt 41/41, atp.wlt 28/28, aot.wlt
+31/31, core.wlt 32/32 all green after this commit.
+
+### Deferred: Levy-optimal Phase 4 (recursive auto-dup) -- analysis memo
+
+`docs/plans/levy_optimal_progress.md` documents the Phase 4
+blocker discovered during this arc: lifting the
+`TAG_REF` / `TAG_ALO` bail in `auto_dup_collect` causes heap
+exhaustion / native crashes on `TLazyPermutations[Range[20]]`-
+class workloads even after Phase 1+2.  The remaining gap is
+memoised dup-body sharing across recursive invocations
+(HVM4-style); the existing `alo_dup_share` covers REF unfold but
+not per-call auto-dup chains.  Until that lands, recursive
+non-linear bodies continue to require manual `TDup`.
+
 ### Added: Levy-optimal sharing -- Phases 1+2 (opaque DPs in wnf, cnf readback)
 
 Plain (non-grad) `TAG_DP0` / `TAG_DP1` projections are now

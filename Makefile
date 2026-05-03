@@ -49,6 +49,7 @@ TESTS := \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \
   $(BIN)/test_cnf \
+  $(BIN)/test_auto_dup \
   $(BIN)/test_eql \
   $(BIN)/test_dup_num \
   $(BIN)/test_and_or \

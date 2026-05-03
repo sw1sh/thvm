@@ -373,17 +373,20 @@ apply:
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             u64  mat_loc = term_val(whnf);
             u32  match   = term_ext(whnf);
-            // Drive arg through cnf so a DP-wrapped CTR / NUM at the
-            // head fires its dup interaction (Levy-opaque under wnf
-            // alone since the Phase 1+2 readback split).  cnf falls
-            // back to plain wnf for atoms / non-DP heads, so the cost
-            // is the same on the common path.
             // Sync WNF_S_POS with our local s_pos before reentering
             // wnf: the outer (this) call has already pushed APP frames
             // onto the shared stack.  Without the sync the inner wnf
             // would start at a stale base and overwrite our frames.
+            // Drive a Levy-opaque DP head through cnf so DUP-CTR /
+            // DUP-NUM fire before the case-tree dispatches; for non-DP
+            // heads, plain wnf is enough and cheaper than a full cnf
+            // walk (which would descend into compound children and
+            // pay for SUP-lift even when there's no SUP).
             WNF_S_POS = s_pos;
-            Term arg_w   = cnf(arg);
+            Term arg_w   = wnf(arg);
+            if (term_tag(arg_w) == TAG_DP0 || term_tag(arg_w) == TAG_DP1) {
+              arg_w = cnf(arg_w);
+            }
             s_pos = WNF_S_POS;
             ITRS++;
             if (term_tag(arg_w) == TAG_NUM &&
@@ -487,6 +490,13 @@ apply:
         // y.  If x didn't reach NUM, OP2 is stuck.
         u64 loc = term_val(frame);
         u32 op  = term_ext(frame);
+        // Drive a Levy-opaque DP through cnf so DUP-NUM / DUP-SUP fire
+        // before dispatching this strict frame (Phase 1+2 readback).
+        if (term_tag(whnf) == TAG_DP0 || term_tag(whnf) == TAG_DP1) {
+          WNF_S_POS = s_pos;
+          whnf = cnf(whnf);
+          s_pos = WNF_S_POS;
+        }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           Term y = heap_read(loc + 1);
@@ -529,6 +539,11 @@ apply:
         u32 op    = packed_ext & 0xFF;
         u32 dtype = (packed_ext >> 8) & 0xFF;
         u32 xv    = (u32)term_val(frame);
+        if (term_tag(whnf) == TAG_DP0 || term_tag(whnf) == TAG_DP1) {
+          WNF_S_POS = s_pos;
+          whnf = cnf(whnf);
+          s_pos = WNF_S_POS;
+        }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
