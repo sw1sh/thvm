@@ -6,6 +6,38 @@ dated section.
 
 ## Unreleased
 
+### Added: Lazy.wl IC-native lazy streams + Lazy/Patterns plan
+
+`wl/THVMLink/Kernel/Lazy.wl` provides WL-side lazy streams whose
+laziness comes from IC reduction, not from WL-side thunking:
+
+- `TLazyRange` is TDef-driven (recursive `TLam` / `TIfZero` /
+  `TOp2` body); construction allocates ~30 cells regardless of
+  size, forcing one element fires only the interactions needed
+  to expose the next Cons cell.  `TLazyTake[TLazyRange[10^6], 5]`
+  runs in O(5).
+- `TLazyTake[s, n]` is itself lazy: returns an unforced
+  APP-APP-REF redex via a TDef-based `take` body that walks the
+  source via `TMatCtr[$LazyCons, ...]`.
+- `TLazyPermutations` (Knuth-L lex order via `chooseEach`),
+  `TLazySplits`, `TLazyTuples`, `TLazySubsets` build Cons-list
+  outputs through specialized recursive TDefs.  No closure-LAM
+  helpers, so passive-CTR multi-read stays safe under thvm's
+  current interaction set.
+- Consumer combinators (`TLazyFirst` / `TLazyRest` / `TLazyTake` /
+  `TLazyToList` / `TLazyMap` / `TLazyFold`) walk the heap via
+  `TWnf`, decoding NUM and CTR cells back to WL values.
+
+`wl/THVMLink/Tests/lazy.wlt` covers round-trip + the big-N
+laziness contracts (`TLazyTake[TLazyPermutations[Range[20]], 5]`
+returns 5 lex-ordered perms in milliseconds; subsets, splits,
+and tuples each have a take-K-of-large-input test).  41/41 tests
+pass.
+
+`docs/plans/lazy_patterns.md` describes the broader Wolfram/Lazy
++ Wolfram/Patterns realization on top of thvm and the
+SUP/collapse + linearity strategy that drives the design.
+
 ### Changed: remove-by-cost-score rule now default-on
 
 `realize_rule_remove_by_cost_score` flipped from default-OFF to
