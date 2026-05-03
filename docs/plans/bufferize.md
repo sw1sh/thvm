@@ -765,21 +765,64 @@ Each step is independent and testable in isolation.  Step 1's
 schema is the prerequisite; without it, every other step would
 need to re-design the storage.
 
-## Scalar UOp Simplification Harness (Phase 2 of tinygrad rule port)
+## Scalar UOp Simplification Harness (Phases 2-3 of tinygrad rule port)
 
-Status: harness landed; rule tables empty.  `src/scalar/simplify.c`
-ships `scalar_simplify_apply` -- a bottom-up rewrite driver over the
-per-kernel ScalarUop[] arena that mirrors the shape of
-`uop_graph_rewrite` (rule struct, named hits, `DUMP_SCALAR_SIMPLIFY=1`
-stats dump).  Materialize calls it after `rangeify_dce` /
-`axes_ensure_scalar_reduce` and before tile sync, gated by
-`THVM_SCALAR_SIMPLIFY` (default on).
+Status: harness landed (Phase 2); Phase 3 lands the first divandmod
+rules.  `src/scalar/simplify.c` ships `scalar_simplify_apply` -- a
+bottom-up rewrite driver over the per-kernel ScalarUop[] arena that
+mirrors the shape of `uop_graph_rewrite` (rule struct, named hits,
+`DUMP_SCALAR_SIMPLIFY=1` stats dump).  Materialize calls it after
+`rangeify_dce` / `axes_ensure_scalar_reduce` and before tile sync,
+gated by `THVM_SCALAR_SIMPLIFY` (default on).
 
-The driver is ready for the divandmod / symbolic rule families to be
-ported in subsequent phases without further infrastructure changes.
-`tests/test_scalar_simplify.c` covers empty-rule-list, a trivial
-`S_IADD(x, ICONST(0)) -> x` fold for the harness wiring, and a
-no-match graph passthrough.
+Rules receive `ScalarUop **` and `u32 *` arena handles plus a
+`KernelEntry *` user pointer so they can allocate replacement nodes
+via `rangeify_emit_*`; the driver re-reads the arena head after each
+rule call to follow the realloc.
+
+### Phase 3: divandmod rules (port of tinygrad/uop/divandmod.py)
+
+Landed (in `scalar_simplify_divandmod_rules`):
+
+- `nested-div-mod`: `(x % (k*c)) // c` -> `(x // c) % k`
+  (divandmod.py:26-27, IDIV branch).  Collapses cascaded mod/div
+  expressions that arise from reshape o stride composition.
+- `nested-div-mod-mod`: `(x % (k*c)) % c` -> `x % c`
+  (divandmod.py:26-27, MOD branch).  Same pattern, MOD outer.
+- `add-div-split`: `(x + c) // d` -> `(x + (c % d)) // d + (c // d)`
+  when `c >= d`, x non-negative, d > 0 (divandmod.py:112-113).
+  Hoists the integer part of c so a downstream constant-folder can
+  merge it with sibling constants.
+
+Conditions on numerator non-negativity are answered by the
+structural `simplify_value_nonneg` estimator (S_RANGE iters,
+non-negative S_ICONSTs, and IADD/IMUL/IDIV/IMOD compositions thereof
+with positive-constant denominators).
+
+TODO (in priority order, mirroring `divandmod.py`):
+
+- `factor-remainder` (divandmod.py:91-104): `(d*x + y) // d`
+  -> `x + (y // d)` when y, x non-negative.
+- `gcd-remainder` (divandmod.py:58-63): factor common gcd from
+  numerator and denominator.
+- `fast-inline-div` (divandmod.py:108-109): `(x // c + a) // d`
+  -> `(x + a*c) // (c*d)`.
+- `mod-flip`, `mod-flip-div`, `neg-div-flip` (divandmod.py:110,
+  121-122): sign-flip rewrites for x.vmax <= 0 / d.vmax < 0.
+- `fold-divmod-general` (divandmod.py:8-104): the slow-path
+  polynomial decomposition (`cancel_divmod`, congruence folding,
+  nest-by-factor).  Requires a richer value-range estimator.
+
+`tests/test_scalar_simplify.c` covers each landed rule with both
+a positive (firing) and negative (skipped because guard fails)
+case, and a structural-shape assertion on the rewritten graph.
+
+Canary impact (`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`,
+beautiful-mnist train): rules wired but 0 hits across 94 kernels --
+post-Phase-1 beautiful-mnist's index expressions don't surface
+nested-mod patterns at the scalar layer.  The rules are foundation
+for harder workloads (deeper reshape chains, non-elementwise convs)
+where divandmod patterns survive past CSE/DCE.
 
 ## Current Baseline
 

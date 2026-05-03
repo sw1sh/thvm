@@ -46,6 +46,38 @@ deliberately skips it for now.
 `tests/test_uop_graph_rewrite.c` covers RHS-CONST, LHS-CONST,
 REDUCE_MAX (does not fire), and non-CONST sibling (does not fire).
 
+### Added: scalar simplify -- divandmod rules (Phase 3, tinygrad rule port)
+
+`src/scalar/simplify.c` ports the high-leverage truncating-divmod
+rules from `tinygrad/uop/divandmod.py` into the per-kernel
+ScalarUop[] arena rewrite pass:
+
+- `nested-div-mod`: `(x % (k*c)) // c` -> `(x // c) % k`
+  (collapses cascaded mod/div from reshape o stride composition);
+- `nested-div-mod-mod`: `(x % (k*c)) % c` -> `x % c`;
+- `add-div-split`: `(x + c) // d` -> `(x + (c % d)) // d + (c // d)`
+  when `c >= d`, x non-negative, d > 0 (hoists the integer part of
+  c so a downstream constant-folder can merge it with siblings).
+
+Rules pattern-match on the ScalarUop graph and emit replacement
+nodes via `rangeify_emit_*`.  Numerator non-negativity is answered
+structurally over S_RANGE iters and IADD/IMUL compositions; positive
+denominators are required as literal S_ICONSTs.
+
+The harness API was extended minimally to support node allocation:
+`ScalarSimplifyFn` now takes `ScalarUop **` and `u32 *` so rules can
+grow the arena and the driver re-reads the head pointer after each
+rule call.  `tests/test_scalar_simplify.c` adds 5 focused tests
+(positive + negative cases per rule) and exercises the structural
+shape of each rewrite.
+
+Canary (`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`,
+beautiful-mnist train): rules wired but 0 hits across 94 kernels --
+post-Phase-1 beautiful-mnist doesn't expose nested-mod patterns at
+the scalar layer.  Foundation for harder workloads where deeper
+reshape chains and non-elementwise convs leave divmod expressions
+past CSE/DCE.  C suite 274/274 (8/8 in test_scalar_simplify).
+
 ### Changed: Levy-optimal Phase 4 -- auto-dup default-on for recursive non-linear lambdas
 
 `auto_dup_collect`'s `TAG_REF` / `TAG_ALO` early-return is replaced
