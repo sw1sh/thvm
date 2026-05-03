@@ -882,6 +882,31 @@ The 27 metal-op fallbacks split into two failure modes:
   view shape compatibility issue that needs a real rangeify fix
   rather than a planner gate.
 
+**Phase 7 producer-consumer fusion -- low leverage on this canary.**
+A diagnostic pass (now reverted) counted producer->consumer pairs
+where boundary B's UOp subgraph reaches boundary A's loc, both
+elementwise, op-budget OK.  Result on the post-Phase-1 graph:
+**3 candidate pairs total** across all `thvm_materialize` calls
+in a training step.  Implementing the splice would cut at most ~3
+kernels for a substantial multi-day refactor.  The candidates are
+absent because:
+
+- Pure-elementwise pairs are already inlined by
+  `remove-removable-bufferize` (single-use producers fuse into the
+  consumer).
+- Multi-use pairs typically have a REDUCE or movement op between
+  them, which breaks both the elementwise predicate and the
+  same-iter-shape predicate.
+- The 27-fold sibling fusion path (`THVM_KERNEL_MERGE=1`) already
+  catches the same-input fan-out case from a different angle.
+
+A more leveraged variant would be **cross-reduce fusion** -- a
+multi-output kernel that emits both A's reduced output AND B's
+post-broadcast output in one dispatch.  That requires extending
+the splice to handle differing iter shapes (a kernel with two
+loop nests), which is structural work substantially beyond the
+scope of "more rules".
+
 Where the next measurable wins live:
 
 - **Tile-feasibility cost model** (Phase 4 follow-up): predict
