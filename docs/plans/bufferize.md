@@ -693,19 +693,32 @@ proofs.
 
 ## Current Baseline
 
-Latest bounded Metal/tile beautiful-mnist canary after the first
-default `remove-removable-bufferize` rule:
+Latest bounded Metal/tile beautiful-mnist canary
+(`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`) after the
+full Phase 0-7 data layer + Phase 2 rangeify rerouting + Phase 3
+identity elision + Phase 4 cost-score rule (T=50000) + Phase 6
+lifetime parity work:
 
-- timed step: about `694 ms`;
-- kernels: `1330`;
-- dispatch: `metal-tile=1186`, `metal-alias=144`;
-- retained Metal memory: about `2.65 GB`;
-- live Metal memory: about `1.63 GB`.
+- timed step: about `676 ms` (vs `694 ms` reference);
+- kernels: `1328` (vs `1330`);
+- dispatch: `metal-tile=1184`, `metal-alias=144` (vs `1186`/`144`);
+- retained Metal memory: about `2.66 GB` (vs `2.65 GB`);
+- live Metal memory: about `1.63 GB` (unchanged).
 
-This is better structurally than the previous 1386-kernel canary, but
-not close enough.  The next reductions must come from explicit
-`BUFFERIZE`/`INDEX` rewrites, reduce-aware scheduling, and memory-aware
-autotune.
+The bufferize-graph machinery is now the canonical schedule
+representation but the wall-time win is marginal: rangeify
+rerouting matches behaviour exactly (the op-identity sanity check
+falls back to KProgOp on view_resolve aliasing), and the
+cost-score rule's threshold has to stay above ~50000 to avoid
+forcing kernels into metal-jit fallback.
+
+Further measurable wins now need:
+- Phase 5 reduce-aware schedules (group reduce, broadcast fusion
+  beyond the existing single-reduce softmax rule);
+- Phase 6 memory planning that uses bufferize lifetimes to choose
+  alias/reuse/recompute candidates ahead of Metal allocation;
+- Phase 4 rules that lift KProgOp tile-feasibility into the cost
+  model so removal doesn't force metal-jit fallback.
 
 ## Non-Goals
 

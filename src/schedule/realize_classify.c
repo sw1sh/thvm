@@ -942,12 +942,17 @@ static int realize_rangeify_enabled(void) {
 // hard caps on op count and consumer count to keep recompute
 // budgets bounded.
 //
-// Default-on with conservative tunables: only fires for buffers
-// whose memory-bytes-per-recompute-op ratio is large (threshold
-// 1000) and whose recompute work fits inside the existing
-// remove-removable-bufferize op budget (32 ops, 4 consumers).  Set
-// `THVM_BUFFERIZE_REMOVE_BY_SCORE=0` to disable; tunables
-// `_THRESHOLD`, `_MAX_OPS`, `_MAX_CONSUMERS` override the defaults.
+// Default-on with a conservative threshold tuned by the bounded
+// beautiful-mnist canary.  Lower thresholds remove more buffers
+// but force kernels with bigger recompute fan-in into metal-jit
+// fallback (the tile path bails on programs with too many ops),
+// which costs more wall time than the kernel-count savings buy
+// back.  THRESHOLD=50000 is the lowest value that still lands the
+// canary's metal-tile dispatch count at the no-rule baseline; it
+// only fires for buffers where memory savings dominate recompute
+// cost by 50000:1.  Set `THVM_BUFFERIZE_REMOVE_BY_SCORE=0` to
+// disable; tunables `_THRESHOLD`, `_MAX_OPS`, `_MAX_CONSUMERS`
+// override the defaults for measurement work.
 static int realize_remove_by_cost_score_enabled(void) {
   char const *e = getenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
   if (e == NULL) return 1;
@@ -959,7 +964,7 @@ static u64 realize_remove_by_cost_score_threshold(void) {
   if (e != NULL && e[0] != '\0') {
     return strtoull(e, NULL, 10);
   }
-  return 1000;
+  return 50000;
 }
 
 static u32 realize_remove_by_cost_score_max_ops(void) {

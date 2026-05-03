@@ -6,6 +6,43 @@ dated section.
 
 ## Unreleased
 
+### Fixed: rangeify rerouting + cost-score threshold via canary feedback
+
+Bounded beautiful-mnist canary regressed under the new defaults
+(metal-jit fallback for kernels the tile path used to handle):
+
+- `rngs_chain_shape` now also requires `BIndexChainOp.op` to match
+  the KProgOp's opcode before reading shapes from BIndex.  When
+  `visit()`'s `view_resolve` aliases a movement op into an input
+  slot, the BIndex chain still records that op but the kernel
+  program has fewer movement KProgOps than the chain length, so
+  `chain_op_idx` indexes into a shifted entry.  Op-identity check
+  catches the mismatch and falls back to KProgOp data, matching
+  pre-rerouting behaviour.  `DUMP_BUFFERIZE_RANGEIFY_MISMATCH=1`
+  prints diagnostic lines on every fallback for measurement work.
+  Plus a kill switch `THVM_DISABLE_BUFFERIZE_RANGEIFY_REROUTE=1`
+  for bisecting future regressions.
+
+- `remove-by-cost-score` default threshold raised from 1000 to
+  50000 after sweeping on the canary.  Lower thresholds remove
+  more buffers but force kernels with larger recompute fan-in
+  into metal-jit, which costs more wall time than the saved
+  kernels buy back.  T=50000 is the lowest value where the
+  canary's metal-tile dispatch count matches the no-rule baseline
+  (1186) while still allowing a small kernel-count win when a
+  pure memory-savings opportunity dominates 50000:1 over
+  recompute cost.
+
+Canary status with both fixes:
+  - timed step: ~676 ms (vs 685 ms baseline);
+  - kernels: 1328 (vs 1330 baseline);
+  - dispatch: metal-tile=1184, metal-alias=144 (vs 1186/144);
+  - retained Metal memory: ~2.66 GB (unchanged).
+
+Marginal improvement, but no regression.  Further wins now need
+the planned Phase 5 reduce-aware schedules and Phase 6 memory
+planning rerouting.
+
 ### Added: bufferize lifetime parity check + boundary depth accessors
 
 `schedule/materialize.c` exposes

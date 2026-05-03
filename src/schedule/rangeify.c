@@ -962,24 +962,73 @@ typedef struct {
   int        from_bindex;   // 1 if data came from BIndexChainOp
 } ChainShape;
 
+static int rngs_bindex_reroute_disabled(void) {
+  // Kill switch for the BIndex-driven chain reroute: setting
+  // THVM_DISABLE_BUFFERIZE_RANGEIFY_REROUTE=1 forces rangeify to
+  // read shapes from KProgOp like it did before fb5dbda.  Useful
+  // for bisecting any beautiful-mnist regression.
+  char const *e = getenv("THVM_DISABLE_BUFFERIZE_RANGEIFY_REROUTE");
+  return e != NULL && e[0] == '1';
+}
+
 static ChainShape rngs_chain_shape(KernelEntry *ke, KProgOp const *p,
                                    BIndexChainOp *scratch) {
   ChainShape s = {0};
   u32 kid = (u32)(ke - KERNELS);
   u32 prog_idx = (u32)(p - ke->program);
-  if (kernel_entry_prog_chain_op(kid, prog_idx, scratch)) {
-    s.src_dims    = scratch->src_dims;
-    s.out_dims    = scratch->out_dims;
-    s.src_ndim    = scratch->src_ndim;
-    s.out_ndim    = scratch->out_ndim;
-    s.from_bindex = 1;
-  } else {
-    s.src_dims    = p->src0_dims;
-    s.out_dims    = p->out_dims;
-    s.src_ndim    = p->src0_ndim;
-    s.out_ndim    = p->out_ndim;
-    s.from_bindex = 0;
+  if (!rngs_bindex_reroute_disabled()
+      && kernel_entry_prog_chain_op(kid, prog_idx, scratch)) {
+    // Sanity check: BIndex chain entry must match this KProgOp's
+    // op AND shapes.  Mismatches happen when visit()'s view_resolve
+    // aliased an upstream movement op into an input slot - the
+    // bufferize chain still records that op, but the kernel program
+    // has fewer movement KProgOps than the chain length, so
+    // chain_op_idx points at a different chain entry than expected.
+    // Falling back to KProgOp data is always safe.
+    int agrees = (scratch->op == p->opcode
+               && scratch->src_ndim == p->src0_ndim
+               && scratch->out_ndim == p->out_ndim);
+    if (agrees) {
+      for (u32 d = 0; d < p->src0_ndim && agrees; d++) {
+        if (scratch->src_dims[d] != p->src0_dims[d]) agrees = 0;
+      }
+      for (u32 d = 0; d < p->out_ndim && agrees; d++) {
+        if (scratch->out_dims[d] != p->out_dims[d]) agrees = 0;
+      }
+    }
+    if (agrees) {
+      s.src_dims    = scratch->src_dims;
+      s.out_dims    = scratch->out_dims;
+      s.src_ndim    = scratch->src_ndim;
+      s.out_ndim    = scratch->out_ndim;
+      s.from_bindex = 1;
+      return s;
+    }
+    char const *e = getenv("DUMP_BUFFERIZE_RANGEIFY_MISMATCH");
+    if (e != NULL && e[0] == '1') {
+      BIndex edge;
+      u32 ec = 0;
+      if (kernel_entry_input_edge_at(kid, p->chain_input_slot,
+                                     (u32)p->chain_edge_idx, &edge)) {
+        ec = edge.chain_op_count;
+      }
+      fprintf(stderr,
+              "rangeify_chain_mismatch kid=%u prog=%u op=%u"
+              " kprog(src=%u out=%u) bindex(src=%u out=%u op=%u"
+              " edge=%u op_idx=%u chain_op_count=%u)\n",
+              (unsigned)kid, (unsigned)prog_idx, (unsigned)p->opcode,
+              (unsigned)p->src0_ndim, (unsigned)p->out_ndim,
+              (unsigned)scratch->src_ndim, (unsigned)scratch->out_ndim,
+              (unsigned)scratch->op,
+              (unsigned)p->chain_edge_idx, (unsigned)p->chain_op_idx,
+              (unsigned)ec);
+    }
   }
+  s.src_dims    = p->src0_dims;
+  s.out_dims    = p->out_dims;
+  s.src_ndim    = p->src0_ndim;
+  s.out_ndim    = p->out_ndim;
+  s.from_bindex = 0;
   return s;
 }
 
