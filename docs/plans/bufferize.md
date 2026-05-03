@@ -696,29 +696,67 @@ proofs.
 Latest bounded Metal/tile beautiful-mnist canary
 (`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`) after the
 full Phase 0-7 data layer + Phase 2 rangeify rerouting + Phase 3
-identity elision + Phase 4 cost-score rule (T=50000) + Phase 6
-lifetime parity work:
+identity elision + Phase 4 cost-score rule (T=50000) + Phase 5
+multi-reduce gate lift + Phase 6 lifetime parity work:
 
-- timed step: about `676 ms` (vs `694 ms` reference);
-- kernels: `1328` (vs `1330`);
-- dispatch: `metal-tile=1184`, `metal-alias=144` (vs `1186`/`144`);
-- retained Metal memory: about `2.66 GB` (vs `2.65 GB`);
+- timed step: about `683 ms` (vs `694 ms` reference);
+- kernels: `1327` (vs `1330`);
+- dispatch: `metal-tile=1182`, `metal-alias=144`, `metal-op=1`
+  (vs `1186`/`144`/0);
+- retained Metal memory: about `2.65 GB` (unchanged);
 - live Metal memory: about `1.63 GB` (unchanged).
 
 The bufferize-graph machinery is now the canonical schedule
-representation but the wall-time win is marginal: rangeify
-rerouting matches behaviour exactly (the op-identity sanity check
-falls back to KProgOp on view_resolve aliasing), and the
-cost-score rule's threshold has to stay above ~50000 to avoid
-forcing kernels into metal-jit fallback.
+representation, but the wall-time win on this canary is
+**marginal-to-noise**.  Rule-firing telemetry from the canary
+(`DUMP_REWRITE=1`) shows the rules added by the bufferize plan
+rarely fire on beautiful-mnist:
 
-Further measurable wins now need:
-- Phase 5 reduce-aware schedules (group reduce, broadcast fusion
-  beyond the existing single-reduce softmax rule);
-- Phase 6 memory planning that uses bufferize lifetimes to choose
-  alias/reuse/recompute candidates ahead of Metal allocation;
-- Phase 4 rules that lift KProgOp tile-feasibility into the cost
-  model so removal doesn't force metal-jit fallback.
+- `remove-by-cost-score`: 0 hits at T=50000.  Lower thresholds
+  fire more but force kernels into metal-jit fallback (slower
+  net wall time).  The cost-score rule needs a tile-feasibility
+  guard - some way to predict "would this removal push the
+  consumer kernel past the tile path's op budget" - before it
+  can safely lower its threshold.
+- `inline-softmax-broadcast-reduce`: 0 hits even with the
+  multi-reduce gate lifted.  Beautiful-mnist's REDUCEs are
+  Adam-moment / BatchNorm shapes that don't match the strict
+  scalar-preserving-unary-chain-ending-in-EXPAND pattern.
+- `inline-reduce-scalar-tail`: 0 hits.
+
+The realize-rules that DO fire are the pre-bufferize ones
+(`remove-removable-bufferize`, `inline-constants`,
+`inline-large-expand-fanout`).  The plan moved every realize
+decision onto the bufferize graph and made it observable, but
+it didn't make the existing rule set fire more often.
+
+Where the next measurable wins live:
+
+- **Tile-feasibility cost model** (Phase 4 follow-up): predict
+  whether a removal would force metal-jit fallback before
+  firing.  Without this, lowering the cost-score threshold
+  always trades kernel-count savings for slower net dispatch.
+- **Generalised broadcast-reduce chain** (Phase 5): the chain
+  predicate accepts only NEG/RECIP/SQRT/EXP2/LOG2; widening to
+  cover the BatchNorm/Adam patterns would catch the REDUCEs
+  that currently materialise on every step.
+- **Group-reduce + accumulator schedules** (Phase 5): the
+  TILE_REDUCE path already supports group axes; the bufferize
+  plan would feed it richer reduce metadata so autotune can
+  pick group sizes per-shape.
+- **Memory-planning rerouting** (Phase 6): bufferize lifetimes
+  match `BOUNDARY_LAST_USE` exactly (proven by the parity
+  test); future rules that consult the canonical bufferize
+  graph for alias / reuse / recompute decisions can run as
+  bufferize-graph rewrites instead of materialize-time fixups.
+- **Schedule cache** (Phase 7): `bufferize_schedule_key()`
+  returns a stable hash; an in-memory cache keyed by it would
+  let autotune reuse winning decisions across repeated train
+  steps without re-searching.
+
+These are all real work, not paraphrases of the plan; each
+requires designing new infrastructure on top of the canonical
+bufferize graph rather than another data-layer addition.
 
 ## Non-Goals
 
