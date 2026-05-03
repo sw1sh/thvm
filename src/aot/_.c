@@ -73,11 +73,13 @@ static inline void aot_push_app_arg(Term *stack, u32 *sp, u32 base, Term arg) {
   stack[(*sp)++] = term_new(0, TAG_APP, 0, loc);
 }
 
-// Force a term to head form by re-entering the wnf interpreter.
-// Used to drive an AOT function's input args to a CTR/NUM head
-// before the case-tree dispatch switches on tag.
+// Force a term to head form before an AOT case-tree dispatches on
+// tag.  Calls cnf rather than plain wnf so a DP-wrapped CTR/NUM at
+// the head fires its dup interaction (Levy-opaque under wnf alone
+// since the Phase 1+2 readback split).  For non-DP heads cnf falls
+// back to plain wnf, so the cost is identical on the common path.
 static inline Term aot_force(Term t) {
-  return wnf(t);
+  return cnf(t);
 }
 
 // Build a CTR with `n` children (children passed via varargs is

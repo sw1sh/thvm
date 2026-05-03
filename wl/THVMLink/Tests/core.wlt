@@ -247,20 +247,24 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* DUP-SUP same label: !&7{x0,x1} = &7{ERA,LAM}; dp0 -> ERA. *)
+    (* DUP-SUP same label: !&7{x0,x1} = &7{ERA,LAM}; dp0 -> ERA.
+       Plain DPs are Levy-opaque under TWnf since the Phase 1+2
+       readback split: TCnf is the user-facing path that fires
+       the dup interaction. *)
     (TReset[]; TDup[7, TSup[7, TEra[], TLam[var, var]],
-        {dp0, dp1} |-> TTagName[TTermTag[TWnf[dp0]]]
+        {dp0, dp1} |-> TTagName[TTermTag[TCnf[dp0]]]
     ]),
     "ERA",
-    TestID -> "TWnf on dp0 of same-label DUP-SUP picks the left branch"
+    TestID -> "TCnf on dp0 of same-label DUP-SUP picks the left branch"
 ]
 
 VerificationTest[
     (* DUP-LAM: cloning the identity lambda then applying one copy to
-       ERA should produce ERA. *)
+       ERA should produce ERA.  TCnf drives the dup interaction; TWnf
+       alone would leave the DP at the root unfired (Levy-opaque). *)
     (TReset[];
      TDup[TLam[var, var],
-        {f0, f1} |-> TTagName[TTermTag[TWnf[TApp[f0, TEra[]]]]]]),
+        {f0, f1} |-> TTagName[TTermTag[TCnf[TApp[f0, TEra[]]]]]]),
     "ERA",
     TestID -> "DUP-LAM clones a lambda end-to-end"
 ]
@@ -299,7 +303,8 @@ VerificationTest[
 
 VerificationTest[
     (* Church 2 applied to identity and ERA: church2 f x = f (f x).
-       Exercises APP-LAM + DUP-LAM together. *)
+       Exercises APP-LAM + DUP-LAM together.  Use TCnf to drive the
+       Levy-opaque DP through its readback. *)
     (TReset[]; Block[{
         church2 = TLam[s,
             TDup[s, {s0, s1} |->
@@ -308,7 +313,7 @@ VerificationTest[
         x       = TEra[],
         out
      },
-        out = TWnf[TApp[TApp[church2, f], x]];
+        out = TCnf[TApp[TApp[church2, f], x]];
         TTagName[TTermTag[out]]]),
     "ERA",
     TestID -> "Church 2 applied to id and ERA reduces to ERA"

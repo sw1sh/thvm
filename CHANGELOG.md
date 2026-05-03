@@ -6,6 +6,54 @@ dated section.
 
 ## Unreleased
 
+### Added: Levy-optimal sharing -- Phases 1+2 (opaque DPs in wnf, cnf readback)
+
+Plain (non-grad) `TAG_DP0` / `TAG_DP1` projections are now
+Levy-opaque under `wnf` (`src/wnf/_.c`): entering them no longer
+pushes a DP frame nor fires DUP-XXX.  The duplication shifts to a
+new collapsed-normal-form readback layer, `cnf_at`
+(`src/cnf/_.c`), which reduces a term to WHNF then walks its
+compound nodes lifting the first SUP child to the top.  When the
+walker reaches a DP, it cnf's the cell, dispatches the matching
+`interact_dup_*`, and recurses on the result -- so DUP-SUP /
+DUP-LAM / DUP-CTR / DUP-NUM / ... all fire during readback rather
+than during head-form reduction.  Mirrors HVM4's cnf design,
+stripped of the parallel `CnfPool` / `wspq` (single-threaded
+slice).
+
+A second new file, `src/eval/collapse.c`, runs `eval_collapse`:
+priority-FIFO enumeration of every pure leaf reachable through
+SUP branches in a term, calling `cnf` at each step.  INC reduces
+the key (higher priority); SUP increases it.
+
+Shallow `thvm_collapse` and `thvm_collapse_ordered` switched to
+`cnf` so their walks resolve DP-headed children.  `interact_app`'s
+APP-MAT path also calls `cnf(arg)` so a DP-wrapped CTR/NUM fires
+DUP-CTR / DUP-NUM before the case-tree dispatch.  Hand-coded AOT
+programs (`src/aot/programs/*.c`) thread `cnf` via the
+`aot_force` helper so AOT case trees see a CTR/NUM head instead
+of a stuck DP.
+
+The WL bridge gains `TCnf` (`thvm_wl_cnf`) and `TNf` now post-
+processes its `nf` result through `cnf` so user-visible terms are
+DP-free.  `TWnf` and `TStep` stay head-only per the plan.
+
+Existing C dup tests (`test_dup_sup`, `test_dup_lam`, `test_dup_num`,
+`test_any`, `test_era`, `test_lam_era`, `test_app_sup`,
+`test_sup_cps`, `test_sup_rewrite`, `test_icc`) migrate from `wnf`
+to `cnf` where they verified eager-DUP semantics.  `test_lam_era`
+adjusts ITRS expectations to reflect cnf's fully-resolving walk
+(DUP-LAM + DUP-NUM rather than just DUP-LAM).  New focused
+fixtures land in `tests/test_cnf.c`: lift-at-top, ERA propagation,
+same-label DUP-SUP annihilation, different-label cross product,
+APP-LAM-through-SUP, and SUP-stream collapse.  C suite stays at
+274/274 + 14 new cnf cases; `lazy.wlt` 41/41; `core.wlt`,
+`atp.wlt`, `aot.wlt` all green after migrating three TWnf-of-DP
+test bodies in core.wlt to TCnf.
+
+Plan: [docs/plans/levy_optimal.md](docs/plans/levy_optimal.md).
+Phases 3-4 follow as separate commits.
+
 ### Changed: Generalised broadcast-reduce predicate (Phase 1 of tinygrad rule port)
 
 `realize_rule_inline_softmax_broadcast_reduce` now matches the chain

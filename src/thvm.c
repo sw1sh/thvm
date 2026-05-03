@@ -290,6 +290,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // declares wnf so aot_force can call it (resolved at link time
 // since we're a single TU).
 fn Term wnf(Term term);
+fn Term cnf(Term term);
 #include "aot/_.c"
 // Function-pointer ABI for runtime-loadable AOT dylibs.  Loaded
 // after aot/_.c so it can reference aot_register / aot_pop_app_arg
@@ -325,6 +326,19 @@ fn Term wnf(Term term);
 #include "wnf/_.c"
 #include "wnf/redex.c"
 #include "wnf/nf.c"
+
+// === cnf/ ===
+// CNF (collapsed normal form) readback.  Depends on wnf() and on
+// the dup-* interaction rules; loaded right after wnf/ so the
+// dispatch helpers (interact_dup_sup / dup_lam / dup_ctr / ...)
+// are visible.  Plain DPs are Levy-opaque under wnf; cnf is the
+// readback layer where their duplication actually fires.
+#include "cnf/_.c"
+
+// === eval/ ===
+// Single-threaded collapse: enumerate every pure leaf reachable
+// through SUP branches in a term.  Calls cnf() at each step.
+#include "eval/collapse.c"
 
 // === term/prims_core.c ===
 // Core THVM_PRIM_* primitives (SEQ + LOG).  Has to live below wnf/

@@ -18,7 +18,9 @@ typedef struct {
 static u64 collapse_walk_pri(Term t, CollapseLeafPri *buf, u64 cap,
                              u64 count, u32 pri) {
   if (count >= cap) return count;
-  Term w = wnf(t);
+  // cnf rather than plain wnf so DP-headed children get driven through
+  // their dup interactions during readback (see src/cnf/_.c).
+  Term w = cnf(t);
   switch (term_tag(w)) {
     case TAG_SUP: {
       u64  loc = term_val(w);

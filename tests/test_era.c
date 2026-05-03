@@ -29,7 +29,9 @@ int main(void) {
     u64  dup_loc = heap_alloc(1);
     heap_set(dup_loc, era);
     Term dp0 = term_new(0, TAG_DP0, 7, dup_loc);
-    Term out = wnf(dp0);
+    // Plain DPs are Levy-opaque under wnf; cnf is the readback layer
+    // that fires DUP-ERA.
+    Term out = cnf(dp0);
     CHECK_EQ(term_tag(out), TAG_ERA);
   }
 

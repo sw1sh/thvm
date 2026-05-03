@@ -15,7 +15,7 @@ int main(void) {
     heap_set(dup, n);
     Term dp0 = term_new(0, TAG_DP0, 7, dup);
     u64  itrs_before = ITRS;
-    Term out = wnf(dp0);
+    Term out = cnf(dp0);
     CHECK_EQ(term_tag(out), TAG_NUM);
     CHECK_EQ(term_val(out), 42);
     CHECK_EQ(ITRS - itrs_before, 1);
@@ -31,8 +31,8 @@ int main(void) {
     Term dp0 = term_new(0, TAG_DP0, 7, dup);
     Term dp1 = term_new(0, TAG_DP1, 7, dup);
     u64  itrs_before = ITRS;
-    Term r0 = wnf(dp0);
-    Term r1 = wnf(dp1);
+    Term r0 = cnf(dp0);
+    Term r1 = cnf(dp1);
     CHECK_EQ(term_tag(r0), TAG_NUM);
     CHECK_EQ(term_val(r0), 99);
     CHECK_EQ(term_tag(r1), TAG_NUM);

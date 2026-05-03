@@ -83,14 +83,25 @@ enter:
         next = heap_read(loc + 0);
         goto enter;
       }
-      Term cell = heap_take(loc);
+      // Plain (non-grad) DP projections are Levy-opaque WHNF roots:
+      // wnf neither pushes a DP frame nor fires DUP-XXX.  The actual
+      // duplication is performed by cnf_at (src/cnf/_.c), which lifts
+      // SUPs through the structure on demand at readback time.  This
+      // mirrors HVM4's BJ0/BJ1 treatment and breaks the
+      // recursive-multiplicative blowup that fires per-call dup chains
+      // through dup_app/dup_op2/dup_mat commutes.
+      //
+      // A SUB-bit cell still represents an already-resolved projection
+      // (an earlier cnf step heap_subst_cop'd the inactive side); we
+      // follow the chain so consumers see the final value rather than
+      // a stale DP wrapper.
+      Term cell = heap_read(loc);
       if (term_sub_get(cell)) {
         next = term_sub_set(cell, 0);
         goto enter;
       }
-      stack[s_pos++] = next;
-      next = cell;
-      goto enter;
+      whnf = next;
+      goto apply;
     }
     case TAG_APP: {
       u64  loc = term_val(next);
@@ -362,13 +373,17 @@ apply:
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             u64  mat_loc = term_val(whnf);
             u32  match   = term_ext(whnf);
-            // Sync WNF_S_POS with our local s_pos before reentering wnf:
-            // the outer (this) call has already pushed APP frames onto
-            // the shared stack.  Without the sync the inner wnf would
-            // start at a stale base and overwrite our frames.  Same
-            // pattern as the UOP_ASSIGN path above.
+            // Drive arg through cnf so a DP-wrapped CTR / NUM at the
+            // head fires its dup interaction (Levy-opaque under wnf
+            // alone since the Phase 1+2 readback split).  cnf falls
+            // back to plain wnf for atoms / non-DP heads, so the cost
+            // is the same on the common path.
+            // Sync WNF_S_POS with our local s_pos before reentering
+            // wnf: the outer (this) call has already pushed APP frames
+            // onto the shared stack.  Without the sync the inner wnf
+            // would start at a stale base and overwrite our frames.
             WNF_S_POS = s_pos;
-            Term arg_w   = wnf(arg);
+            Term arg_w   = cnf(arg);
             s_pos = WNF_S_POS;
             ITRS++;
             if (term_tag(arg_w) == TAG_NUM &&
@@ -436,12 +451,11 @@ apply:
       }
       case TAG_DP0:
       case TAG_DP1: {
-        // Grad-flavored DP1 frame (pushed in enter when we encountered
-        // TAG_DP1 + DUP_GRAD_FLAG): whnf is now the resolved cell[0]
-        // (= y in head form).  Re-stash it back so interact_grad
-        // sees the resolved value, then dispatch the chain rule.
-        // Grad-flag DP0 never gets pushed (FWD passthrough is
-        // immediate in enter), so we only handle DP1 here.
+        // Only grad-flavored DP1 frames reach apply: enter pushes them
+        // for the BWD path and dispatches the chain rule here.  Plain
+        // (non-grad) DP projections are Levy-opaque WHNF roots and
+        // never push a frame -- their duplication happens during cnf
+        // readback (src/cnf/_.c), not during wnf.
         if (term_tag(frame) == TAG_DP1 && (term_ext(frame) & DUP_GRAD_FLAG)) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           u64 gloc = term_val(frame);
@@ -458,98 +472,13 @@ apply:
           next = g;
           goto enter;
         }
-        u8  side = (term_tag(frame) == TAG_DP0) ? 0 : 1;
-        u64 loc  = term_val(frame);
-        u32 lab  = term_ext(frame);
-        switch (term_tag(whnf)) {
-          case TAG_SUP: {
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            next = interact_dup_sup(lab, loc, side, whnf);
-            goto enter;
-          }
-          case TAG_ERA: {
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            whnf = interact_dup_era(side, loc, whnf);
-            continue;
-          }
-          case TAG_LAM: {
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            next = interact_dup_lam(lab, loc, side, whnf);
-            goto enter;
-          }
-          case TAG_BRI: {
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            next = interact_dup_bri(lab, loc, side, whnf);
-            goto enter;
-          }
-          case TAG_NUM: {
-            // NUM is atomic: copy the Term value into both projections.
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            whnf = interact_dup_num(side, loc, whnf);
-            continue;
-          }
-          case TAG_ANY: {
-            // ANY is atomic: copy into both projections.
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            whnf = interact_dup_any(side, loc, whnf);
-            continue;
-          }
-          case TAG_TEN: {
-            // TEN is atomic (just a tid handle): copy into both.
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            whnf = interact_dup_ten(side, loc, whnf);
-            continue;
-          }
-          case TAG_CTR: {
-            // DUP-CTR commute: rebuild #K{...} on both projection sides
-            // with each child wrapped in a fresh DUP.  Same shape as
-            // HVM4's generic DUP-NOD specialised to TAG_CTR.
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            next = interact_dup_ctr(lab, loc, side, whnf);
-            goto enter;
-          }
-          case TAG_UOP: {
-            // DUP-UOP commute: structurally replicate the UOP at both
-            // projection sides, pushing DUPs into the compute slots.
-            // Returns 0 when the UOP is "active" (KERNEL/GRAD/FWD/
-            // ASSIGN) or otherwise unsupported -- in that case stay
-            // stuck so the UOP gets a chance to evolve via its own
-            // interaction first (chain rule emits SUPs, etc.).
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            Term r = interact_dup_uop(lab, loc, side, whnf);
-            if (r == 0) {
-              // Stuck: restore body, return DP frame as WHNF.
-              heap_set(loc, whnf);
-              whnf = frame;
-              continue;
-            }
-            whnf = r;
-            continue;
-          }
-          case TAG_APP: {
-            // DUP-APP commute: distribute through the application.
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            next = interact_dup_app(lab, loc, side, whnf);
-            goto enter;
-          }
-          case TAG_OP2: {
-            // DUP-OP2 commute: distribute through the binary op.
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            next = interact_dup_op2(lab, loc, side, whnf);
-            goto enter;
-          }
-          case TAG_MAT: {
-            // DUP-MAT commute: distribute through the numeric switch.
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            next = interact_dup_mat(lab, loc, side, whnf);
-            goto enter;
-          }
-          default: {
-            heap_set(loc, whnf);
-            whnf = frame;
-            continue;
-          }
-        }
+        // Defensive: a non-grad DP frame on the stack would be a bug
+        // (enter no longer pushes them), but keep the stuck-rebuild so
+        // a stale snapshot resumes safely.
+        u64 loc = term_val(frame);
+        heap_set(loc, whnf);
+        whnf = frame;
+        continue;
       }
       case TAG_OP2: {
         // OP2 frame: x reduced to whnf.  If x is NUM and y is also

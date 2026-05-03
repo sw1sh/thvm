@@ -2000,6 +2000,20 @@ fn Term nf(Term root);
 // WNF_LAST_STACK / WNF_LAST_STACK_LEN live in TContext now -- macros
 // at the bottom of this file resolve them.
 
+// === cnf/ ===
+// Collapsed normal form: reduces to WHNF then lifts the first SUP
+// to the top, recursively.  Plain DPs are Levy-opaque under wnf
+// (they sit as WHNF roots); cnf is the readback layer where their
+// duplication actually fires.  See src/cnf/_.c.
+fn Term cnf(Term term);
+fn Term cnf_at(Term term, u32 depth);
+
+// === eval/ ===
+// Single-threaded SUP-tree enumeration on top of cnf.  Walks every
+// branch FIFO ordered by INC priority and writes pure leaves into
+// `out`.  Returns the count actually written, capped at `cap`.
+fn u64 eval_collapse(Term term, Term *out, u64 cap);
+
 // === collapse/ ===
 // Enumerate the SUP-tree of a term.  Walks via WNF; on TAG_SUP at the
 // head, recurses into both branches; TAG_ERA branches are dropped.

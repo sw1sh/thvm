@@ -128,8 +128,10 @@ int main(void) {
     Term dp0 = term_new(0, TAG_DP0, 7, dup_loc);
     Term dp1 = term_new(0, TAG_DP1, 7, dup_loc);
 
-    Term r0 = wnf(dp0);
-    Term r1 = wnf(dp1);
+    // Plain DPs are Levy-opaque under wnf; cnf is the readback that
+    // fires DUP-BRI (commute).
+    Term r0 = cnf(dp0);
+    Term r1 = cnf(dp1);
     CHECK_EQ(term_tag(r0), TAG_BRI);
     CHECK_EQ(term_tag(r1), TAG_BRI);
   }
