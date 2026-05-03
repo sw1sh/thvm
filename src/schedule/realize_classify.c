@@ -851,9 +851,33 @@ static u32 realize_rule_inline_reduce_fanout(Term root) {
   return hits;
 }
 
+// Phase 5/3 follow-up: the historical producer_has_movement gates
+// blocked any movement-bearing buffer from being recomputed when
+// its consumer is (or reaches) a REDUCE.  The conservative stance
+// existed (commit 699f822 "fix: guard pure fanout probe from
+// reduce chains") because relaxations at that time created
+// unsupported fat reduce kernels - i.e. tile-render bailing,
+// metal-jit fallback, slower wall time.
+//
+// Phase 2's per-USE BIndex chain (chain_op_idx + chain_input_slot
+// + chain_edge_idx + BIndexChainOp data) plus rangeify's reroute
+// through `kernel_entry_prog_chain_op` gives the codegen path
+// enough information to compose movement chains correctly even
+// when the consumer kernel absorbs a recomputed movement+reduce.
+// The bounded canary now produces 0 metal-jit fallbacks with the
+// gate lifted.
+//
+// Default-on; set THVM_BUFFERIZE_LIFT_MOVEMENT_REDUCE_GATE=0 to
+// restore the conservative pre-Phase-2 behaviour for bisecting.
+static int realize_lift_movement_reduce_gate_enabled(void) {
+  char const *e = getenv("THVM_BUFFERIZE_LIFT_MOVEMENT_REDUCE_GATE");
+  return e == NULL ? 1 : (e[0] != '0');
+}
+
 static int realize_removable_bufferize_consumers_ok(u64 loc,
                                                     int producer_has_movement,
                                                     u32 max_consumers) {
+  int gate_lifted = realize_lift_movement_reduce_gate_enabled();
   u32 consumers = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     u64 ploc = REALIZE_INFO[i].loc;
@@ -871,7 +895,7 @@ static int realize_removable_bufferize_consumers_ok(u64 loc,
 
     u8 pop = REALIZE_INFO[i].op;
     if (pop == UOP_REDUCE) {
-      if (producer_has_movement) {
+      if (producer_has_movement && !gate_lifted) {
         return 0;
       }
       continue;
@@ -879,7 +903,8 @@ static int realize_removable_bufferize_consumers_ok(u64 loc,
     if (!realize_recompute_pure_op(pop)) {
       return 0;
     }
-    if (producer_has_movement && realize_parent_chain_reaches_reduce(ploc, 0)) {
+    if (producer_has_movement && !gate_lifted
+        && realize_parent_chain_reaches_reduce(ploc, 0)) {
       return 0;
     }
   }

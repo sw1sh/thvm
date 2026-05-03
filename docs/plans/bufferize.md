@@ -697,14 +697,16 @@ Latest bounded Metal/tile beautiful-mnist canary
 (`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`) after the
 full Phase 0-7 data layer + Phase 2 rangeify rerouting + Phase 3
 identity elision + Phase 4 cost-score rule (T=50000) + Phase 5
-multi-reduce gate lift + Phase 6 lifetime parity work:
+multi-reduce gate lift + Phase 6 lifetime parity + Phase 5
+movement-reduce gate lift (Phase 2 unblocked it):
 
-- timed step: about `683 ms` (vs `694 ms` reference);
-- kernels: `1327` (vs `1330`);
-- dispatch: `metal-tile=1182`, `metal-alias=144`, `metal-op=1`
-  (vs `1186`/`144`/0);
-- retained Metal memory: about `2.65 GB` (unchanged);
-- live Metal memory: about `1.63 GB` (unchanged).
+- timed step: about `616 ms` (vs `694 ms` reference, -11%);
+- kernels: `1214` (vs `1330`, -8.7%);
+- dispatch: `metal-tile=1069`, `metal-alias=144`, `metal-op=1`
+  (vs `1186`/`144`/0, no metal-jit fallback);
+- retained Metal memory: about `2.66 GB` (similar);
+- live Metal memory: about `1.62 GB` (slight drop);
+- peak live Metal: about `3.48 GB` (vs `3.55 GB`, -2%).
 
 The bufferize-graph machinery is now the canonical schedule
 representation, but the wall-time win on this canary is

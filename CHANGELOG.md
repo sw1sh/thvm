@@ -6,6 +6,42 @@ dated section.
 
 ## Unreleased
 
+### Changed: lift movement-reduce gate on remove-removable-bufferize
+
+`realize_removable_bufferize_consumers_ok` historically rejected
+movement-bearing producers feeding any reduce-chain consumer
+(commit `699f822`).  The conservative stance was added because
+relaxations at that time created "unsupported fat reduce kernels"
+- i.e. tile-render bailed and the path went to metal-jit.
+
+Phase 2's per-USE BIndex chain (chain_op_idx, chain_input_slot,
+chain_edge_idx, BIndexChainOp data) plus rangeify's rerouting
+through `kernel_entry_prog_chain_op` gives the codegen path
+enough information to compose movement chains correctly even
+when the consumer kernel absorbs a recomputed movement+reduce.
+
+The bounded canary now passes with 0 metal-jit fallbacks AND the
+gate lifted, so we default-lift it.  Setting
+`THVM_BUFFERIZE_LIFT_MOVEMENT_REDUCE_GATE=0` restores the
+pre-Phase-2 conservative behaviour for bisection.  The
+historical regression test that pinned the conservative
+behaviour is updated to reflect the new default.
+
+Canary delta on bounded beautiful-mnist:
+  - timed step: 616 ms (vs 685 ms post-Phase-2 baseline, -10%);
+  - kernels: 1214 (vs 1327, -8.5%);
+  - dispatch: metal-tile=1069, metal-alias=144, metal-op=1
+    (vs 1182/144/1, no metal-jit);
+  - peak live Metal: ~3.48 GB (vs 3.55, -2%);
+  - retained Metal: ~2.66 GB (unchanged).
+
+This is the first measurable wall-time win the bufferize plan
+delivered on the canary.  The chain of changes that unblocked
+it: BIndex per-edge data -> per-USE chain mapping -> blockers
+cleared -> rangeify reroute -> op-identity guard -> THIS lift.
+255/255 + full suite green.  WL beautiful_mnist.wlt and
+bn_grad.wlt pass cleanly with the lift.
+
 ### Changed: auto-dup default-on for non-recursive LAMs
 
 `thvm_wl_lam_seal_ext` now routes through

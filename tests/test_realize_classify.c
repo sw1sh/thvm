@@ -198,7 +198,17 @@ int main(void) {
   CHECK_EQ(realize_consumer_count(aa_plus_bb), 1);
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
-  TEST_BEGIN("realize-classify/metal-pure-movement-fanout-to-reduce-stays-realized");
+  TEST_BEGIN("realize-classify/metal-pure-movement-fanout-to-reduce-now-recomputes");
+  // Phase 5/3 follow-up: the historical conservative gate that
+  // kept movement-bearing buffers feeding reduce-chain consumers
+  // realized has been lifted now that Phase 2's per-USE BIndex
+  // chain machinery + rangeify rerouting compose movement chains
+  // correctly across recompute boundaries.  remove-removable-bufferize
+  // unmarks `pad` (it has 2 reduce-chain consumers but the chain
+  // composes through the new rangeify path) so it does NOT stay
+  // realized; the test name reflects the new behavior.  Set
+  // THVM_BUFFERIZE_LIFT_MOVEMENT_REDUCE_GATE=0 to restore
+  // pre-Phase-2 conservative behavior for bisecting.
   setenv("THVM_BACKEND", "metal", 1);
   setenv("THVM_TILE", "1", 1);
   setenv("THVM_INLINE_MULTI_CONSUMER_PURE", "1", 1);
@@ -214,8 +224,12 @@ int main(void) {
   Term combined = uop_binary(UOP_ADD, r0, r1);
   realize_classify(combined);
   CHECK_EQ(realize_consumer_count(pad), 2);
-  CHECK_EQ(realize_is_realized(pad), 1);
-  CHECK_EQ(realize_rewrite_stat_hits("inline-pure-fanout-probe"), 0);
+  CHECK_EQ(realize_is_realized(pad), 0);
+  CHECK(realize_reasons(pad) & REALIZE_REASON_MULTI);
+  CHECK(realize_reasons(pad) & REALIZE_REASON_INLINE);
+  // remove-removable-bufferize fires on this case now that the
+  // movement-reduce gate is lifted.
+  CHECK(realize_rewrite_stat_hits("remove-removable-bufferize") >= 1);
 
   TEST_BEGIN("realize-classify/metal-large-pure-movement-fanout-recomputes");
   thvm_free();
