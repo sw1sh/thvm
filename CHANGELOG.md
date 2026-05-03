@@ -6,6 +6,25 @@ dated section.
 
 ## Unreleased
 
+### Added: reduce-const-mul-distribute uop rule (Phase 5 of tinygrad rule port)
+
+New `uop_graph_simplify_reduce_const_mul` rule rewrites
+`REDUCE_SUM(MUL(x, CONST))` into `MUL(REDUCE_SUM(x), CONST)`, hoisting
+a scalar multiplier out of a sum-reduce so the post-reduce shape
+carries the MUL.  Mirrors tinygrad's `reduce-mul-chain` from
+`tinygrad/uop/symbolic.py`.
+
+Constraints: only `REDUCE_SUM` (REDUCE_MAX would mis-handle negative
+constants), and only when the MUL's other operand is a bare
+`UOP_CONST` (the simplifier already folds wrapper-of-CONST patterns
+upstream).  Lives next to the other symbolic rules in
+`uop/graph_simplify.c` so it's part of `uop_graph_simplify` /
+`uop_graph_simplify_checked`; the materialize-pass subset
+deliberately skips it for now.
+
+`tests/test_uop_graph_rewrite.c` covers RHS-CONST, LHS-CONST,
+REDUCE_MAX (does not fire), and non-CONST sibling (does not fire).
+
 ### Changed: Levy-optimal Phase 4 -- auto-dup default-on for recursive non-linear lambdas
 
 `auto_dup_collect`'s `TAG_REF` / `TAG_ALO` early-return is replaced

@@ -270,6 +270,49 @@ static Term uop_graph_simplify_movement_identity(Term t, void *user) {
   return 0;
 }
 
+// reduce-const-mul-distribute: REDUCE_SUM(MUL(x, CONST)) ->
+// MUL(REDUCE_SUM(x), CONST).  Hoists a scalar multiplier out of a
+// SUM-reduce so the post-reduce shape carries the MUL.  Tinygrad's
+// equivalent lives in symbolic.py (reduce-mul-chain).
+//
+// Constraints:
+//  - REDUCE kind must be REDUCE_SUM.  REDUCE_MAX(MUL(x, c)) is not
+//    equal to MUL(REDUCE_MAX(x), c) when c < 0.
+//  - The MUL's other operand must be a bare UOP_CONST.  Broadcast-
+//    of-CONST wrappers (EXPAND/RESHAPE) are intentionally not handled
+//    here; the simplifier folds those upstream when they're identity,
+//    and a non-identity broadcast would change the post-reduce shape.
+static Term uop_graph_simplify_reduce_const_mul(Term t, void *user) {
+  (void)user;
+  UOpView v;
+  if (!uop_view(t, &v) || v.op != UOP_REDUCE) {
+    return 0;
+  }
+  u32 kind = (u32)term_val(heap_read(v.loc + 1));
+  if (kind != REDUCE_SUM) {
+    return 0;
+  }
+  UOpView mul;
+  if (!uop_view(v.src[0], &mul) || mul.op != UOP_MUL) {
+    return 0;
+  }
+  Term x;
+  Term c;
+  if (term_tag(mul.src[1]) == TAG_UOP && term_ext(mul.src[1]) == UOP_CONST) {
+    x = mul.src[0];
+    c = mul.src[1];
+  } else if (term_tag(mul.src[0]) == TAG_UOP
+             && term_ext(mul.src[0]) == UOP_CONST) {
+    x = mul.src[1];
+    c = mul.src[0];
+  } else {
+    return 0;
+  }
+  u32 axis = (u32)term_val(heap_read(v.loc + 2));
+  Term inner_reduce = uop_reduce(REDUCE_SUM, axis, x);
+  return uop_binary(UOP_MUL, inner_reduce, c);
+}
+
 static Term uop_graph_simplify_cast(Term t, void *user) {
   (void)user;
   UOpView v;
@@ -321,6 +364,7 @@ fn Term uop_graph_simplify(Term root) {
     {"symbolic-cast",           uop_graph_simplify_cast},
     {"commutative-canonicalize", uop_graph_simplify_commutative},
     {"symbolic-reassociate-const", uop_graph_simplify_reassociate_const},
+    {"reduce-const-mul-distribute", uop_graph_simplify_reduce_const_mul},
     {"movement-identity",       uop_graph_simplify_movement_identity},
     {"movement-chain-collapse", uop_graph_simplify_movement_chain},
   };
