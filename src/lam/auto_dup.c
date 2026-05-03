@@ -85,19 +85,19 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
       continue;
     }
 
-    // TAG_REF / TAG_ALO are closed wrt our local lam_loc, but their
-    // PRESENCE in the body means the body is recursive (or refers to
-    // an external def).  Even after Phase 1+2 (DPs opaque in wnf),
-    // each recursive invocation still creates fresh DUP cells whose
-    // duplication during cnf readback creates fresh DPs around CTR
-    // children -- a recursive list-walking lambda still blows up
-    // exponentially under cnf-driven duplication.  True Levy-optimal
-    // sharing (memoised dup-bodies across recursive calls) is needed
-    // for this to be efficient; until then, keep bailing on TAG_REF /
-    // TAG_ALO presence and require manual TDup for recursive bodies.
-    // See docs/plans/levy_optimal_progress.md for the analysis.
+    // TAG_REF / TAG_ALO are closed wrt our local lam_loc by
+    // definition: a REF points at a book def whose binders are its
+    // own, and an ALO is a suspended realize-template that closes
+    // over its state_id, not our caller's lam.  Neither subtree can
+    // contain a VAR(lam_loc) cell -- so we treat them as opaque
+    // leaves in the walk.  Under Phase 1+2 (DPs opaque in wnf,
+    // duplication driven by cnf readback) recursive non-linear
+    // bodies handle their own per-call duplication correctly: each
+    // recursive invocation alo-realizes a fresh dyn DUP chain whose
+    // sibling DP0/DP1 cells share a body via alo_dup_share, and cnf
+    // fires DUP-XXX on demand without compounding across calls.
     if (tag == TAG_REF || tag == TAG_ALO) {
-      return LAM_AUTODUP_BAIL;
+      continue;
     }
 
     // UOP_KERNEL has side-table inputs (KernelEntry.input_terms) we

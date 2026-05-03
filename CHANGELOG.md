@@ -6,6 +6,42 @@ dated section.
 
 ## Unreleased
 
+### Changed: Levy-optimal Phase 4 -- auto-dup default-on for recursive non-linear lambdas
+
+`auto_dup_collect`'s `TAG_REF` / `TAG_ALO` early-return is replaced
+with a `continue` -- the walker now treats those subtrees as
+opaque leaves rather than bailing the whole body.  Sound because
+both tags are closed wrt our local `lam_loc` (a REF points at a
+book def whose binders are its own; an ALO closes over its
+`state_id`, not the caller's lam), so neither subtree can contain
+`TAG_VAR(lam_loc)` -- the walker correctly sees zero VAR uses
+inside a REF/ALO and skips ahead.
+
+Under Phase 1+2 (plain DPs opaque under `wnf`, duplication driven
+by `cnf` readback), recursive non-linear bodies now handle their
+own per-call duplication correctly.  Each recursive invocation
+`alo_realize`s a fresh dyn DUP chain whose sibling DP0/DP1 cells
+share a body via `alo_dup_share` (`src/alo/realize.c`), and `cnf`
+fires DUP-XXX on demand at readback without compounding across
+calls.
+
+WL `Lazy.wl`'s recursive helpers (`defConcat`, `defPrependEach`,
+`defChooseEach`, `defPermsLex`, `defSplits`, `defTuples`,
+`defSubsets`, `defPrependHToFirst`) no longer require manual
+`TDup` instrumentation: every non-linear binder gets an auto-dup
+chain at construction.  Verified end-to-end:
+`TLazyPermutations[Range[100]]` returns 100-element perms in lex
+order under `TLazyTake[..., 5]`; `TLazySplits`, `TLazySubsets`,
+`TLazyTuples` all enumerate without manual TDups.
+
+`tests/test_auto_dup.c` flips its prior
+`auto-dup/recursive-body-bails-conservatively` regression to
+`auto-dup/recursive-body-builds-dup-chain`: a body with a
+`TAG_REF`-bearing recursive call and 4 VAR uses now gets a 3-DUP
+chain inserted.  C suite 274/274 + 27 cnf + 21 auto-dup;
+`lazy.wlt` 41/41, `atp.wlt` 28/28, `aot.wlt` 31/31, `core.wlt`
+32/32, `grad.wlt` 62/62.
+
 ### Added: Levy-optimal Phase 3 -- conditional DP-head cnf-drives in wnf strict frames
 
 Targeted Phase 3 hookups: where `wnf`'s apply-phase strict frames

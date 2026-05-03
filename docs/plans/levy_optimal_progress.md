@@ -1,7 +1,7 @@
 # Levy-optimal port progress
 
-Status: Phase 1 + Phase 2 + Phase 3 landed.  Phase 4 deferred -- see
-"Phase 4 blocker" below.
+Status: Phases 1-4 landed (single-threaded slice).  Phase 5 (parallel
+CNF) explicitly out of scope.
 
 ## What landed (commit f0d3c52)
 
@@ -40,49 +40,41 @@ Status: Phase 1 + Phase 2 + Phase 3 landed.  Phase 4 deferred -- see
     Cons cells from auto-dup'd recursive bodies get resolved
     during decode.
 
-## Phase 4 blocker: recursive auto-dup blows up under cnf
+## Phase 4: lift the REF/ALO bail in `auto_dup_collect`
 
-The Phase 4 goal -- drop the `TAG_REF` / `TAG_ALO` bail in
-`auto_dup_collect` so auto-dup fires for recursive bodies too --
-remains unsafe.  Lifting the bail and re-running the WL test suite
-hits two problems:
+Replaced the early-return on `TAG_REF` / `TAG_ALO` with `continue`,
+so the walker treats those subtrees as opaque leaves.  This is
+sound because both tags are closed wrt our local `lam_loc`: a REF
+cell points at a book def (its binders are its own), and an ALO
+cell is a suspended realize-template that closes over its
+`state_id`, not the caller's lam.  Neither subtree can possibly
+contain a `TAG_VAR(lam_loc)` cell.
 
-1. **Heap exhaustion** on `TLazyPermutations[Range[20]]`: each
-   recursive call of `lazyPermsLex` creates fresh DUP cells around
-   its non-linear binders.  When `cnf` drives those DPs at MAT
-   dispatch, `interact_dup_ctr` commutes the dup through the list
-   CTR by wrapping each child cell in a fresh DUP.  The next
-   recursive call's auto-dup chain layers on top.  After ~5
-   recursive levels the heap fills up.
+Under Phase 1+2, recursive non-linear bodies handle their own
+per-call duplication correctly: each recursive invocation
+`alo_realize`s a fresh dyn DUP chain whose sibling DP0/DP1 cells
+share a body via `alo_dup_share` (`src/alo/realize.c`), and `cnf`
+fires DUP-XXX on demand at readback time without compounding
+across calls.  The early Phase 4 attempt that triggered heap
+exhaustion / SIGSEGV was caused by removing the bail entirely so
+the walker recursed into REF/ALO cells and dereferenced their
+`val` as a dyn-heap loc -- but those vals are book locs / book
+templates, not dyn locs.  Treating them as leaves avoids the
+false recursion; the walk converges immediately.
 
-2. **Native crash** (signal 11) on `TLazyPermutations[{a, b, c}]`
-   when the auto-dup'd recursive body reduces enough levels to
-   walk through `term_clone`-style siblings whose dup cell was
-   already heap_subst_cop'd by a sibling projection.
-
-The traditional cure is **Levy-optimal sharing with memoised
-dup-bodies across recursive calls**: when two recursive invocations
-construct a DUP wrapping the same heap-loc body, share the same
-cell so DUP-XXX fires once instead of N times.  Our existing
-`alo_dup_share` mechanism provides this for `alo_realize` (REF
-unfold) but doesn't apply to per-call auto-dup chains constructed
-by `lam_seal_ext_with_auto_dup`.  Bridging the two -- key the
-auto-dup chain on the def-id + binder + arg -- is a separate
-substantial piece of work.
-
-Until that lands, the bail in `auto_dup_collect` stays:
-
-```c
-if (tag == TAG_REF || tag == TAG_ALO) {
-  return LAM_AUTODUP_BAIL;
-}
-```
-
-`tests/test_auto_dup.c` carries a regression test
-(`auto-dup/recursive-body-bails-conservatively`) that confirms the
-walker bails on a `TAG_REF`-bearing body so recursive non-linear
-lambdas continue to require manual `TDup`.  All 21 auto-dup tests
-green; full C suite 274/274 + 27 cnf cases.
+Verified end-to-end:
+- `tests/test_auto_dup.c`: new
+  `auto-dup/recursive-body-builds-dup-chain` confirms a recursive
+  body with a `TAG_REF` rec-call gets a 3-DUP chain inserted for
+  4 VAR uses.
+- WL: `TLazyPermutations[Range[100]]` take 5 returns five 100-element
+  permutations; `TLazySplits[Range[5]]` take 6 returns all six
+  splits; `TLazySubsets[{a,b,c,d}]` take 8 enumerates first eight
+  subsets; `TLazyTuples` works.  None of the recursive-body
+  helpers in `Lazy.wl` need manual `TDup` anymore.
+- C suite: 274/274 + 27 cnf + 21 auto-dup.
+- `lazy.wlt` 41/41, `atp.wlt` 28/28, `aot.wlt` 31/31, `core.wlt`
+  32/32, `grad.wlt` 62/62.
 
 ## Phase 5: parallel CNF (not started)
 

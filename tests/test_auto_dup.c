@@ -133,21 +133,14 @@ int main(void) {
     CHECK_EQ(term_val(r5), 15);  // 5 * 3
   }
 
-  // === Recursive non-linear bodies remain stuck (Phase 4 deferred) ==
-  // Phase 1+2 of the Levy-optimal port made plain DPs opaque under
-  // wnf and shifted DUP-XXX firing to cnf readback, but recursive
-  // lambdas still create fresh DUP cells per invocation.  When cnf
-  // drives those at readback, a list-walking recursion still blows
-  // up: each DUP-CTR commute wraps every CTR child in a fresh DUP,
-  // which on the next recursive call multiplies again.  True
-  // Levy-optimal sharing requires memoised dup-bodies across
-  // recursive calls, which is not yet implemented.  Until then, the
-  // walker bails on TAG_REF / TAG_ALO presence, falling back to
-  // plain lam_seal_ext.  This regression test confirms that the
-  // bail still fires (auto-dup leaves the body untouched) so users
-  // who write recursive non-linear lambdas continue to need manual
-  // TDup as before.
-  TEST_BEGIN("auto-dup/recursive-body-bails-conservatively");
+  // === Recursive non-linear bodies (Phase 4) ===========================
+  // Under Phase 1+2 (DPs opaque in wnf, duplication driven by cnf
+  // readback), the auto-dup walker can safely treat TAG_REF / TAG_ALO
+  // as opaque leaves: a REF/ALO subtree is closed wrt our local
+  // lam_loc by definition (its binders are its own).  The walker
+  // counts only the VAR(lam_loc) cells visible to the body.  This
+  // case has 4 such cells, so we expect a 3-DUP chain inserted.
+  TEST_BEGIN("auto-dup/recursive-body-builds-dup-chain");
   {
     u32 def_id = 0xAB;
     u64  lam_loc = heap_alloc(1);
@@ -166,11 +159,13 @@ int main(void) {
     u32 ext = lam_seal_ext_with_auto_dup(lam_loc, 0);
     Term lam = term_new(0, TAG_LAM, ext, lam_loc);
     CHECK_EQ(term_tag(lam), TAG_LAM);
-    // Bailed: ERA_MASK should be off (binder is referenced) and the
-    // body root is unchanged (no auto-dup chain inserted).
+    // 4 VAR uses -> ERA_MASK off, no bail, body's structure is
+    // preserved (the DUP chain is inserted at the VAR cells, not at
+    // the body root), and the original VAR cells have been rewritten
+    // to DP0/DP1 projections.
     CHECK_EQ(ext & LAM_ERA_MASK, 0);
     Term root = heap_read(lam_loc);
-    CHECK_EQ(term_tag(root), TAG_OP2);   // outer + still OP2
+    CHECK_EQ(term_tag(root), TAG_OP2);
   }
 
   thvm_free();
