@@ -734,8 +734,20 @@ Where the next measurable wins live:
 
 - **Tile-feasibility cost model** (Phase 4 follow-up): predict
   whether a removal would force metal-jit fallback before
-  firing.  Without this, lowering the cost-score threshold
-  always trades kernel-count savings for slower net dispatch.
+  firing.  A first-cut consumer-budget guard landed in
+  `realize_remove_by_cost_score_consumers_fit_tile` (it walks
+  parent chains up to the realized ancestor whose kernel would
+  absorb the recompute and rejects when projected ops exceed
+  budget).  The heuristic doesn't bite on beautiful-mnist
+  because tile-feasibility actually depends on op shape /
+  types / broadcast patterns, not just op count.  A precise
+  predictor needs codegen→bufferize feedback: when materialize
+  emits a kernel and chooses tile vs jit, propagate that
+  decision back into the bufferize cost model so future passes
+  can see "this kernel program shape was tile-supported" and
+  generalize.  Without that, the rule's threshold has to stay
+  conservative (T=50000 default) and the guard is mostly
+  defensive scaffolding.
 - **Generalised broadcast-reduce chain** (Phase 5): the chain
   predicate accepts only NEG/RECIP/SQRT/EXP2/LOG2; widening to
   cover the BatchNorm/Adam patterns would catch the REDUCEs
