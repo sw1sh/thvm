@@ -14,6 +14,14 @@ later axis that a factor can divide.  This makes movement-heavy
 beautiful-mnist fan-in kernels with shapes like `{1, 25, 18432}`
 visible to autotune.
 
+### Added: bounded beautiful-mnist post-autotune targets
+
+The beautiful-mnist training benchmark now accepts
+`POST_AUTOTUNE_KIDS=1,2,...` to tune an explicit list of kernel ids
+after warmup and before the timed window.  This gives us a safe
+single-kernel autotune path while broad sweeps remain blocked by
+memory/fusion work.
+
 ### Changed: trace Metal alias buffers to their origin producer
 
 `TMemoryPlan[]` now records alias-origin fields for each buffer, and

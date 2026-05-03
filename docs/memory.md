@@ -396,6 +396,22 @@ SHOW_MEMORY_PROFILE=1 SHOW_PROGRAM_PROFILE=1 SHOW_FUSION_GAPS=1 \
 wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
 ```
 
+To tune only a known hot kernel without running a broad sweep, pass a
+comma-separated kid list:
+
+```bash
+POST_AUTOTUNE_KIDS=1 \
+BS=32 WARMUP_STEPS=1 N_STEPS=1 \
+THVM_BACKEND=metal THVM_TILE=1 \
+wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
+```
+
+In the current bounded profile, kid 1 is the former 24-way
+movement-fan-in gap.  `TKernelVariants[1]` shows `LOCAL(axis=2,
+factor=64)` improving that kernel from about `328us` to `275us`, but
+full-loop time remains around `800ms` because the replay still fires
+about `2118` dispatch records.
+
 Read the two benchmark memory lines:
 
 ```text

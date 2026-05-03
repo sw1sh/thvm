@@ -36,6 +36,15 @@ parseInt[name_String, default_Integer] := Module[{
 },
     If[StringMatchQ[raw, DigitCharacter ..], ToExpression[raw], default]]
 
+parseIntList[name_String] := Module[{
+    raw = StringTrim @ envValue[name, ""],
+    parts
+},
+    If[raw === "", Return[{}]];
+    parts = StringTrim /@ StringSplit[raw, {",", ";", " "}];
+    ToExpression /@ Select[parts, StringMatchQ[#, DigitCharacter ..] &]
+]
+
 formatCounts[a_Association] := StringRiffle[
     KeyValueMap[ToString[#1] <> "=" <> ToString[#2] &, a],
     ", "]
@@ -169,6 +178,7 @@ bs = parseInt["BS", 512];
 warmupSteps = parseInt["WARMUP_STEPS", 1];
 nSteps = parseInt["N_STEPS", 3];
 doPostAutotune = envValue["POST_AUTOTUNE", "0"] === "1";
+postAutotuneKids = parseIntList["POST_AUTOTUNE_KIDS"];
 benchMode = ToLowerCase @ envValue["BENCH_MODE", "train"];
 showProfile = envValue["SHOW_PROFILE", "0"] === "1";
 showProgramProfile = envValue["SHOW_PROGRAM_PROFILE", "0"] === "1" || showProfile;
@@ -204,7 +214,8 @@ print["  BS=", bs,
       "  DUMP_MEMORY_PLAN=", If[dumpMemoryPlan, "1", "0"],
       "  DUMP_MEMORY_IR=", If[dumpMemoryIR, "1", "0"],
       "  PROFILE_TOP=", topCount,
-      "  POST_AUTOTUNE=", If[doPostAutotune, "1", "0"]];
+      "  POST_AUTOTUNE=", If[doPostAutotune, "1", "0"],
+      "  POST_AUTOTUNE_KIDS=", ToString[postAutotuneKids, InputForm]];
 
 W1 = randTensor[{32, 1, 5, 5}];   b1 = zerosTensor[{32}];
 W2 = randTensor[{32, 32, 5, 5}];  b2 = zerosTensor[{32}];
@@ -288,6 +299,15 @@ If[doPostAutotune,
         tuned = TKernelAutotuneUnique[];
         print["post-autotune kernels=", Length[tuned],
               " wall=", NumberForm[(AbsoluteTime[] - t0) * 1000.0, {8, 1}], "ms"]]]
+
+If[postAutotuneKids =!= {},
+    Module[{t0 = AbsoluteTime[], tuned},
+        tuned = Association @ Table[
+            kid -> TKernelAutotune[kid],
+            {kid, Select[postAutotuneKids, 1 <= # < TKernelCount[] &]}];
+        print["post-autotune-kids count=", Length[tuned],
+              " wall=", NumberForm[(AbsoluteTime[] - t0) * 1000.0, {8, 1}], "ms",
+              " result=", ToString[tuned, InputForm]]]]
 
 profileBeforeTimed = If[showProfile || showProgramProfile,
     TProfileAll[],
