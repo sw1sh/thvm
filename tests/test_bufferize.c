@@ -195,6 +195,90 @@ int main(void) {
   // again.  Otherwise downstream callers would see a stale rule.
   CHECK_EQ(bufferize_current_rule(), (char const *)NULL);
 
+  TEST_BEGIN("bufferize/edges-multi-consumer-no-movement");
+  // shared = a + b; left = shared * c; right = shared * a;
+  // root = left + right.  The shared buffer feeds the root through
+  // two independent paths, neither of which goes through a movement
+  // op, so the index table should record two source=shared,
+  // consumer=root edges with chain_len=0.
+  Term sh   = uop_binary(UOP_ADD, a, b);
+  Term lf   = uop_binary(UOP_MUL, sh, c);
+  Term rt   = uop_binary(UOP_MUL, sh, a);
+  Term tot  = uop_binary(UOP_ADD, lf, rt);
+  realize_classify(tot);
+  u32 sh_idx = bufferize_find_by_loc(term_val(sh));
+  u32 tot_idx = bufferize_find_by_loc(term_val(tot));
+  CHECK(sh_idx != 0xFFFFFFFFu);
+  CHECK(tot_idx != 0xFFFFFFFFu);
+  if (sh_idx != 0xFFFFFFFFu && tot_idx != 0xFFFFFFFFu) {
+    u32 sh_id  = bufferize_buffer_at(sh_idx)->buffer_id;
+    u32 tot_id = bufferize_buffer_at(tot_idx)->buffer_id;
+    u32 edges = 0;
+    for (u32 i = 0; i < bufferize_index_count(); i++) {
+      BIndex const *e = bufferize_index_at(i);
+      if (e->source_buffer_id == sh_id && e->consumer_buffer_id == tot_id) {
+        edges++;
+        CHECK_EQ(e->movement_chain_len, 0);
+        CHECK_EQ(e->has_reshape, 0);
+        CHECK_EQ(e->has_permute, 0);
+      }
+    }
+    CHECK_EQ(edges, 2);
+  }
+
+  TEST_BEGIN("bufferize/edges-record-reshape-on-movement-chain");
+  // sh2 = a + b (shape {3}) is consumed twice: once directly by a
+  // NEG (no movement on that edge) and once through a RESHAPE to
+  // {3,1}.  The two parents make sh2 multi-consumer and therefore a
+  // realized buffer.  Combining both branches into a {3,1} root
+  // gives us one edge with has_reshape=1 from the movement path
+  // and one with chain_len=0 from the direct path.
+  u32 dims31[2] = {3, 1};
+  Term sh2        = uop_binary(UOP_ADD, a, b);
+  Term branch_lin = uop_unary(UOP_NEG, sh2);
+  Term branch_rs  = uop_reshape(sh2, 2, dims31);
+  Term branch_lin_rs = uop_reshape(branch_lin, 2, dims31);
+  Term root3      = uop_binary(UOP_ADD, branch_lin_rs, branch_rs);
+  realize_classify(root3);
+  u32 sh2_idx   = bufferize_find_by_loc(term_val(sh2));
+  u32 root3_idx = bufferize_find_by_loc(term_val(root3));
+  CHECK(sh2_idx != 0xFFFFFFFFu);
+  CHECK(root3_idx != 0xFFFFFFFFu);
+  if (sh2_idx != 0xFFFFFFFFu && root3_idx != 0xFFFFFFFFu) {
+    u32 sh2_id   = bufferize_buffer_at(sh2_idx)->buffer_id;
+    u32 root3_id = bufferize_buffer_at(root3_idx)->buffer_id;
+    u32 edges = 0;
+    u32 with_reshape = 0;
+    for (u32 i = 0; i < bufferize_index_count(); i++) {
+      BIndex const *e = bufferize_index_at(i);
+      if (e->source_buffer_id == sh2_id
+          && e->consumer_buffer_id == root3_id) {
+        edges++;
+        if (e->has_reshape) with_reshape++;
+      }
+    }
+    CHECK_EQ(edges, 2);
+    CHECK(with_reshape >= 1);
+  }
+
+  TEST_BEGIN("bufferize/indexes-for-consumer-helper");
+  // bufferize_indexes_for_consumer should return the same set of
+  // indices as a manual scan.  Use the shared/root3 graph above.
+  u32 buf[16];
+  u32 n = bufferize_indexes_for_consumer(
+      bufferize_buffer_at(root3_idx)->buffer_id, buf, 16);
+  CHECK(n >= 1);
+  for (u32 i = 0; i < n; i++) {
+    BIndex const *e = bufferize_index_at(buf[i]);
+    CHECK(e != NULL);
+    CHECK_EQ(e->consumer_buffer_id,
+             bufferize_buffer_at(root3_idx)->buffer_id);
+  }
+  // Calling with cap=0 still returns the count.
+  u32 n0 = bufferize_indexes_for_consumer(
+      bufferize_buffer_at(root3_idx)->buffer_id, NULL, 0);
+  CHECK_EQ(n0, n);
+
   thvm_free();
   TEST_REPORT();
 }

@@ -6,6 +6,25 @@ dated section.
 
 ## Unreleased
 
+### Added: Phase 2 bufferize edge index records
+
+`schedule/bufferize.c` now emits one `B_INDEX` record per
+producer-buffer to consumer-buffer edge after every
+`realize_classify` pass.  Each record carries the source and
+consumer 1-based ids plus a movement-chain summary
+(`movement_chain_len` and `has_reshape`/`has_permute`/`has_expand`/
+`has_pad`/`has_shrink`/`has_flip` flags) describing the movement
+ops sitting on that edge in the consumer's compute tree.  Walks
+descend through unrealized (rule-removed) buffers transparently so
+edges remain anchored to the post-rewrite realized set.  New
+accessors `bufferize_index_count`, `bufferize_index_at`, and
+`bufferize_indexes_for_consumer` expose the table; `DUMP_BUFFERIZE=1`
+prints each edge with its chain summary.  `tests/test_bufferize.c`
+adds three cases (multi-consumer no-movement, multi-consumer with
+RESHAPE on one branch, indexes-for-consumer helper); 98/98 pass.
+Rangeify still recovers edge contexts from the heap walk - that
+hookup is the planned Phase 2 follow-up.
+
 ### Changed: Phase 1 bufferize graph records named-rule history
 
 `schedule/bufferize.c` now seeds the bufferize graph from

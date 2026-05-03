@@ -1276,6 +1276,24 @@ typedef struct {
   u32 buffer_id;      // destination B_BUFFERIZE id
   u64 loc;            // heap loc of the stored value
 } BStore;
+// B_INDEX records one producer-buffer to consumer-buffer edge with
+// the movement-op chain that sits between them in the consumer's
+// compute tree.  Phase 2 stops at producer buffers and skips leaf
+// (TEN/VAR) inputs; later phases will add leaf edges and the full
+// edge-local index expression / valid mask once rangeify consumes
+// them.  has_* flags are independent: a chain can have multiple
+// movement ops of different kinds.
+typedef struct {
+  u32 source_buffer_id;       // 1-based id of producer B_BUFFERIZE
+  u32 consumer_buffer_id;     // 1-based id of consumer B_BUFFERIZE
+  u8  movement_chain_len;     // total movement ops on the edge (>= sum of has_* flags only when no op repeats)
+  u8  has_pad;
+  u8  has_reshape;
+  u8  has_permute;
+  u8  has_expand;
+  u8  has_shrink;
+  u8  has_flip;
+} BIndex;
 fn void              bufferize_seed_from_realize_info(Term root);
 fn void              bufferize_finalize_stores(Term root);
 fn void              bufferize_set_current_rule(char const *name);
@@ -1288,6 +1306,13 @@ fn BBufferize const *bufferize_buffer_at(u32 i);
 fn u32               bufferize_find_by_loc(u64 loc);
 fn u32               bufferize_store_count(void);
 fn BStore const     *bufferize_store_at(u32 i);
+fn u32               bufferize_index_count(void);
+fn BIndex const     *bufferize_index_at(u32 i);
+// Fill `out` with the indices of every B_INDEX whose
+// consumer_buffer_id matches `consumer_buffer_id`.  Returns the
+// number written (capped at `cap`).  Pass cap=0 to just count.
+fn u32               bufferize_indexes_for_consumer(u32 consumer_buffer_id,
+                                                    u32 *out, u32 cap);
 
 // g2a: after realize_classify populates the boundary set, the
 // scheduler topo-sorts those boundaries by producer-to-consumer

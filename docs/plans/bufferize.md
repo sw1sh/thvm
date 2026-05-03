@@ -1,6 +1,7 @@
 # Bufferize Schedule IR Plan
 
-Status: Phases 0-1 landed; Phases 2-7 planned.
+Status: Phases 0-1 landed; Phase 2 data layer landed (rangeify
+hookup pending); Phases 3-7 planned.
 
 ## Goal
 
@@ -390,15 +391,39 @@ graph will be the only authoritative source.
 
 Stop relying on producer-global movement context for consumer loads.
 
+Status: data layer landed.  `bufferize_finalize_stores` now builds
+one `B_INDEX` per producer-buffer to consumer-buffer edge, walking
+each consumer's compute tree, descending transparently through
+unrealized (rule-removed) buffers, and stopping at every realized
+producer.  Each record carries `movement_chain_len` plus
+`has_reshape`/`has_permute`/`has_expand`/`has_pad`/`has_shrink`/
+`has_flip` flags so different consumers of the same producer get
+distinct edge entries with their own movement contexts.
+`tests/test_bufferize.c` covers a multi-consumer no-movement case,
+a RESHAPE-on-one-branch case, and the
+`bufferize_indexes_for_consumer` helper.
+
 Tasks:
 
-- generate one `B_INDEX` for every producer-to-consumer edge;
-- encode reshape/pad/expand/shrink/flip/permutation context on the edge;
+- ~~generate one `B_INDEX` for every producer-to-consumer edge~~;
+- ~~encode reshape/pad/expand/shrink/flip/permutation context on the edge~~;
 - make rangeify consume `B_INDEX` for direct loads and expression loads;
 - preserve valid masks through `S_IWHERE`;
 - add focused tests for shared producer with multiple movement views.
 
-Acceptance:
+Phase 2 follow-up (rangeify hookup): rangeify currently still
+recovers edge contexts from the heap walk in
+`schedule/rangeify.c`.  That code needs to read `B_INDEX` records
+directly so a shared producer consumed under different movement
+views gets the correct edge-local index expression.  Until that
+lands, the graph data is informational only; cost-model and
+removal rules in Phases 4+ can already use it.
+
+Acceptance (data layer):
+
+- `make test` passes including the three new edge-table cases.
+
+Acceptance (rangeify hookup, pending):
 
 - current `rangeify_gaps.wlt`, `grad.wlt`, and `nn.wlt` still pass with
   `THVM_RANGEIFY_BAIL=1`;
@@ -554,20 +579,21 @@ autotune.
 
 ## Immediate Next Step
 
-Phases 0-1 have landed; the next implementation step is Phase 2:
+Phases 0-1 and the Phase 2 data layer have landed.  The next work
+is the Phase 2 rangeify hookup:
 
-1. Generate one `B_INDEX` record per producer-to-consumer edge so
-   reshape/pad/expand/shrink/flip/permute context is edge-local
-   instead of producer-global.
-2. Teach rangeify to read `B_INDEX` for direct loads, expression
-   loads, and reduction inputs, preserving valid masks through
-   `S_IWHERE` rather than recovering them from the original UOp
-   graph.
-3. Keep `THVM_RANGEIFY_BAIL=1` regression coverage and add focused
-   tests where a shared producer is consumed under multiple
-   movement views.
+1. Replace `schedule/rangeify.c`'s producer-global movement-context
+   recovery with reads off the new `B_INDEX` table, so a shared
+   producer consumed under different movement views emits the
+   right edge-local index expression for each consumer.
+2. Preserve valid masks through `S_IWHERE` from the edge's
+   `has_pad` flag (and a future `pad_widths` field) instead of
+   walking the source UOp graph.
+3. Keep `THVM_RANGEIFY_BAIL=1` regression coverage in
+   `rangeify_gaps.wlt`, `grad.wlt`, and `nn.wlt`; add focused
+   no-bail tests that exercise the shared-producer-multiple-views
+   case end-to-end.
 
-`B_INDEX` is what turns Phases 4-6 into editable rewrites: removal,
-insertion, and memory rules all reason about consumer edges, not
-producer-global state.  Until Phase 2 lands, those phases would have
-to keep recovering edge contexts from the heap walk.
+After the rangeify hookup, Phase 3's named edge rewrites
+(`index-pad-mask`, `index-reshape`, etc.) become single-rule
+edits to `B_INDEX` records.

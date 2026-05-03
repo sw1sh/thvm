@@ -19,6 +19,11 @@ static u32        BUFFERIZE_BUFS_LEN = 0;
 static BStore BUFFERIZE_STORES[BUFFERIZE_STORE_CAP];
 static u32    BUFFERIZE_STORES_LEN = 0;
 
+#define BUFFERIZE_INDEX_CAP REALIZE_INFO_CAP
+#define BUFFERIZE_EDGE_DEPTH_CAP 96
+static BIndex BUFFERIZE_INDEXES[BUFFERIZE_INDEX_CAP];
+static u32    BUFFERIZE_INDEXES_LEN = 0;
+
 // realize_rewrite_apply sets this around each rule->apply call so
 // realize_mark/realize_unmark can stamp the rule that decided.
 // NULL means "outside any named rule" (seeding, post-pass cleanup).
@@ -40,6 +45,72 @@ static u32 bufferize_project_reasons(u32 r) {
 static int bufferize_dump_enabled(void) {
   char const *e = getenv("DUMP_BUFFERIZE");
   return e != NULL && e[0] == '1';
+}
+
+static u8 bufferize_op_is_movement(u8 op) {
+  return op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
+      || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
+}
+
+static void bufferize_extend_chain(BIndex *chain, u8 op) {
+  if (!bufferize_op_is_movement(op)) return;
+  chain->movement_chain_len++;
+  if (op == UOP_RESHAPE) chain->has_reshape = 1;
+  if (op == UOP_PERMUTE) chain->has_permute = 1;
+  if (op == UOP_EXPAND)  chain->has_expand  = 1;
+  if (op == UOP_PAD)     chain->has_pad     = 1;
+  if (op == UOP_SHRINK)  chain->has_shrink  = 1;
+  if (op == UOP_FLIP)    chain->has_flip    = 1;
+}
+
+static void bufferize_emit_edge(u32 source_id, u32 consumer_id,
+                                BIndex const *chain) {
+  if (BUFFERIZE_INDEXES_LEN >= BUFFERIZE_INDEX_CAP) return;
+  BIndex *out = &BUFFERIZE_INDEXES[BUFFERIZE_INDEXES_LEN++];
+  *out = *chain;
+  out->source_buffer_id   = source_id;
+  out->consumer_buffer_id = consumer_id;
+}
+
+// Walk the consumer's compute tree starting at `loc`, descending
+// through non-boundary UOps and accumulating movement-op context on
+// the way down.  Whenever we hit another *realized* B_BUFFERIZE we
+// emit one B_INDEX and stop descending; an unrealized buffer (one
+// that a rule recomputed) is transparent and we keep walking past
+// it as if it were any other UOp.
+static void bufferize_walk_edge(u64 loc, u32 consumer_id,
+                                BIndex const *chain_in, u8 depth) {
+  if (depth > BUFFERIZE_EDGE_DEPTH_CAP) return;
+  if (loc >= HEAP_NEXT) return;
+  u32 idx = realize_info_find(loc);
+  if (idx == 0xFFFFFFFFu) return;
+  u8 op = REALIZE_INFO[idx].op;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    Term child = term_resolve(heap_read(loc + i));
+    if (term_tag(child) != TAG_UOP) continue;       // skip TEN/VAR leaves
+    if (term_ext(child) == UOP_KERNEL) continue;    // already realized opaquely
+    u64 cloc = term_val(child);
+    u32 cbidx = bufferize_find_by_loc(cloc);
+    if (cbidx != 0xFFFFFFFFu && BUFFERIZE_BUFS[cbidx].realized) {
+      bufferize_emit_edge(BUFFERIZE_BUFS[cbidx].buffer_id, consumer_id,
+                          chain_in);
+      continue;
+    }
+    BIndex chain_out = *chain_in;
+    bufferize_extend_chain(&chain_out, term_ext(child));
+    bufferize_walk_edge(cloc, consumer_id, &chain_out, depth + 1);
+  }
+}
+
+static void bufferize_build_indexes(void) {
+  BUFFERIZE_INDEXES_LEN = 0;
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BBufferize const *b = &BUFFERIZE_BUFS[i];
+    if (!b->realized) continue;
+    BIndex chain = {0};
+    bufferize_walk_edge(b->loc, b->buffer_id, &chain, 0);
+  }
 }
 
 static void bufferize_dump(Term root) {
@@ -74,11 +145,26 @@ static void bufferize_dump(Term root) {
             (unsigned)s->buffer_id,
             (unsigned long long)s->loc);
   }
+  for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
+    BIndex const *e = &BUFFERIZE_INDEXES[i];
+    fprintf(stderr,
+            "  index source=%u consumer=%u chain_len=%u%s%s%s%s%s%s\n",
+            (unsigned)e->source_buffer_id,
+            (unsigned)e->consumer_buffer_id,
+            (unsigned)e->movement_chain_len,
+            e->has_reshape ? " reshape" : "",
+            e->has_permute ? " permute" : "",
+            e->has_expand  ? " expand"  : "",
+            e->has_pad     ? " pad"     : "",
+            e->has_shrink  ? " shrink"  : "",
+            e->has_flip    ? " flip"    : "");
+  }
 }
 
 fn void bufferize_seed_from_realize_info(Term root) {
   BUFFERIZE_BUFS_LEN     = 0;
   BUFFERIZE_STORES_LEN   = 0;
+  BUFFERIZE_INDEXES_LEN  = 0;
   BUFFERIZE_CURRENT_RULE = NULL;
 
   // Non-UOp roots are not schedulable; leave the graph empty.
@@ -122,6 +208,12 @@ fn void bufferize_finalize_stores(Term root) {
     s->buffer_id = BUFFERIZE_BUFS[idx].buffer_id;
     s->loc       = root_loc;
   }
+
+  // Build the producer-buffer to consumer-buffer edge table once the
+  // realized set has settled; this is the seed for Phase 4+ removal
+  // and Phase 5 reduce rules and the data rangeify will eventually
+  // consume in Phase 2's rangeify follow-up.
+  bufferize_build_indexes();
 
   bufferize_dump(root);
 }
@@ -216,4 +308,24 @@ fn u32 bufferize_store_count(void) {
 fn BStore const *bufferize_store_at(u32 i) {
   if (i >= BUFFERIZE_STORES_LEN) return NULL;
   return &BUFFERIZE_STORES[i];
+}
+
+fn u32 bufferize_index_count(void) {
+  return BUFFERIZE_INDEXES_LEN;
+}
+
+fn BIndex const *bufferize_index_at(u32 i) {
+  if (i >= BUFFERIZE_INDEXES_LEN) return NULL;
+  return &BUFFERIZE_INDEXES[i];
+}
+
+fn u32 bufferize_indexes_for_consumer(u32 consumer_buffer_id,
+                                      u32 *out, u32 cap) {
+  u32 n = 0;
+  for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
+    if (BUFFERIZE_INDEXES[i].consumer_buffer_id != consumer_buffer_id) continue;
+    if (out != NULL && n < cap) out[n] = i;
+    n++;
+  }
+  return n;
 }
