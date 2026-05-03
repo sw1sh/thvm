@@ -436,6 +436,13 @@ fn void bufferize_seed_from_realize_info(Term root) {
     b->added_by       = NULL;
     BUFFERIZE_BUFS_LEN++;
   }
+
+  // Phase 4 follow-up: compute the cost-model fields immediately so
+  // rules running inside realize_rewrite_apply can read
+  // bufferize_removal_score on the seed-time realized set.
+  // bufferize_finalize_stores recomputes after rules so the dump
+  // and post-rule callers see the final state.
+  bufferize_compute_costs();
 }
 
 fn void bufferize_finalize_stores(Term root) {

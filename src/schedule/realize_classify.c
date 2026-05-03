@@ -931,6 +931,83 @@ static int realize_rangeify_enabled(void) {
   return e == NULL ? 1 : (e[0] != '0');
 }
 
+// Phase 4 follow-up: a bufferize-graph-driven removal rule.
+//
+// Iterates the bufferize graph (not REALIZE_INFO), reads the
+// cost-model score that bufferize_seed_from_realize_info computed,
+// and unmarks any MULTI-only buffer whose
+// `output_numel / max(recompute_total, 1)` exceeds the threshold.
+// Backend-cap, root, reduce, and reduce-subtree gates already live
+// inside bufferize_removal_score so the rule body just enforces
+// hard caps on op count and consumer count to keep recompute
+// budgets bounded.
+//
+// Gated by `THVM_BUFFERIZE_REMOVE_BY_SCORE`; default is OFF so the
+// existing realize-map rules stay the only writers and the bounded
+// canary stays unchanged until the rule has had real-world soak
+// time.  Override `THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD` (default
+// 100), `THVM_BUFFERIZE_REMOVE_SCORE_MAX_OPS` (default 64),
+// `THVM_BUFFERIZE_REMOVE_SCORE_MAX_CONSUMERS` (default 4) to tune.
+static int realize_remove_by_cost_score_enabled(void) {
+  char const *e = getenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
+  return e != NULL && e[0] == '1';
+}
+
+static u64 realize_remove_by_cost_score_threshold(void) {
+  char const *e = getenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
+  if (e != NULL && e[0] != '\0') {
+    return strtoull(e, NULL, 10);
+  }
+  return 100;
+}
+
+static u32 realize_remove_by_cost_score_max_ops(void) {
+  char const *e = getenv("THVM_BUFFERIZE_REMOVE_SCORE_MAX_OPS");
+  if (e != NULL && e[0] != '\0') {
+    return (u32)strtoul(e, NULL, 10);
+  }
+  return 64;
+}
+
+static u32 realize_remove_by_cost_score_max_consumers(void) {
+  char const *e = getenv("THVM_BUFFERIZE_REMOVE_SCORE_MAX_CONSUMERS");
+  if (e != NULL && e[0] != '\0') {
+    return (u32)strtoul(e, NULL, 10);
+  }
+  return 4;
+}
+
+static u32 realize_rule_remove_by_cost_score(Term root) {
+  (void)root;
+  if (!realize_remove_by_cost_score_enabled()) return 0;
+  u64 threshold     = realize_remove_by_cost_score_threshold();
+  u32 max_ops       = realize_remove_by_cost_score_max_ops();
+  u32 max_consumers = realize_remove_by_cost_score_max_consumers();
+  u32 hits = 0;
+  // Iterate the bufferize graph directly - this rule is the first
+  // one in the codebase that reads BBufferize records as the
+  // canonical schedule state and only touches REALIZE_INFO to
+  // project the removal back for materialize.c.
+  for (u32 i = 0; i < bufferize_buffer_count(); i++) {
+    BBufferize const *b = bufferize_buffer_at(i);
+    if (b == NULL || !b->realized) continue;
+    if (!(b->reasons & BUFFERIZE_REASON_MULTI)) continue;
+    if (b->reasons & (BUFFERIZE_REASON_ROOT
+                    | BUFFERIZE_REASON_REDUCE
+                    | BUFFERIZE_REASON_BACKEND_CAP)) continue;
+    if (b->subtree_has_reduce) continue;
+    if (b->recompute_ops > max_ops) continue;
+    if (b->consumer_count > max_consumers) continue;
+    u64 score = bufferize_removal_score(b->buffer_id);
+    if (score < threshold) continue;
+    u32 ridx = realize_info_find(b->loc);
+    if (ridx == 0xFFFFFFFFu) continue;
+    realize_unmark(&REALIZE_INFO[ridx], REALIZE_REASON_INLINE);
+    hits++;
+  }
+  return hits;
+}
+
 static u32 realize_rule_inline_constants(Term root) {
   (void)root;
   u32 hits = 0;
@@ -1057,6 +1134,7 @@ fn void realize_classify(Term root) {
     {"inline-large-expand-fanout",    realize_rule_inline_large_expand_fanout},
     {"inline-reduce-fanout",          realize_rule_inline_reduce_fanout},
     {"remove-removable-bufferize",    realize_rule_remove_removable_bufferize},
+    {"remove-by-cost-score",          realize_rule_remove_by_cost_score},
     {"inline-pure-fanout-probe",      realize_rule_inline_pure_fanout_probe},
     {"metal-tile-fanin-cap",          realize_rule_metal_tile_fanin_cap},
   };

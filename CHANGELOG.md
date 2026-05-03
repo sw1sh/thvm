@@ -6,6 +6,32 @@ dated section.
 
 ## Unreleased
 
+### Added: bufferize-graph removal rule using cost-model score
+
+`schedule/realize_classify.c` gains
+`realize_rule_remove_by_cost_score`, the first realize-map rule
+that iterates the bufferize graph as canonical state and reads
+`bufferize_removal_score` (Phase 4 cost model + Phase 5 reduce
+gate) to decide whether to unmark a multi-consumer buffer.  The
+rule looks up `REALIZE_INFO` only to call `realize_unmark`, which
+forwards to the bufferize graph; mirror state stays consistent.
+Hard caps on op count (default 64) and consumer count (default 4)
+keep recompute budgets bounded; reduce-bearing buffers are skipped
+via `subtree_has_reduce` and `BUFFERIZE_REASON_REDUCE`.
+
+`bufferize_seed_from_realize_info` now invokes
+`bufferize_compute_costs` immediately so rules running inside
+`realize_rewrite_apply` can read score data on the seed-time
+realized set; `bufferize_finalize_stores` recomputes after rules.
+
+The rule is gated by `THVM_BUFFERIZE_REMOVE_BY_SCORE` and is OFF
+by default to keep the bounded canary unchanged until the rule
+soaks; tunables `THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD` (default
+100), `_MAX_OPS` (64), and `_MAX_CONSUMERS` (4) override the gates.
+Tests in `test_bufferize.c` cover default-off, fires-when-enabled
+(stamps `removed_by="remove-by-cost-score"`), and the reduce-gate
+respect; 160/160.
+
 ### Added: Phase 7 bufferize schedule key + aggregates
 
 `schedule/bufferize.c` now provides a deterministic

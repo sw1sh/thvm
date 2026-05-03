@@ -486,6 +486,73 @@ int main(void) {
   u64 key3 = bufferize_schedule_key();
   CHECK(key3 != key1);
 
+  TEST_BEGIN("bufferize/remove-by-cost-score-default-off");
+  // Without THVM_BUFFERIZE_REMOVE_BY_SCORE, the rule must not fire
+  // even on a high-score multi-consumer buffer.  Build the same
+  // shared/root graph used elsewhere; without metal-tile env
+  // remove-removable-bufferize is also disabled, so shared stays
+  // realized.
+  unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
+  Term ds   = uop_binary(UOP_ADD, a, b);
+  Term ds_l = uop_binary(UOP_MUL, ds, c);
+  Term ds_r = uop_binary(UOP_MUL, ds, a);
+  Term ds_t = uop_binary(UOP_ADD, ds_l, ds_r);
+  realize_classify(ds_t);
+  u32 ds_idx = bufferize_find_by_loc(term_val(ds));
+  CHECK(ds_idx != 0xFFFFFFFFu);
+  if (ds_idx != 0xFFFFFFFFu) {
+    BBufferize const *bd = bufferize_buffer_at(ds_idx);
+    CHECK_EQ(bd->realized, 1);
+    CHECK_EQ(realize_rewrite_stat_hits("remove-by-cost-score"), 0);
+  }
+
+  TEST_BEGIN("bufferize/remove-by-cost-score-fires-when-enabled");
+  // Enable the rule with threshold 1 so any positive score qualifies.
+  // The shared buffer in the multi-consumer graph has score >= 1
+  // (output_numel=3, recompute_total=1*2=2, score=1) so it gets
+  // removed and stamped with removed_by="remove-by-cost-score".
+  setenv("THVM_BUFFERIZE_REMOVE_BY_SCORE", "1", 1);
+  setenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD", "1", 1);
+  Term es   = uop_binary(UOP_ADD, a, b);
+  Term es_l = uop_binary(UOP_MUL, es, c);
+  Term es_r = uop_binary(UOP_MUL, es, a);
+  Term es_t = uop_binary(UOP_ADD, es_l, es_r);
+  realize_classify(es_t);
+  u32 es_idx = bufferize_find_by_loc(term_val(es));
+  CHECK(es_idx != 0xFFFFFFFFu);
+  if (es_idx != 0xFFFFFFFFu) {
+    BBufferize const *be = bufferize_buffer_at(es_idx);
+    CHECK_EQ(be->realized, 0);
+    CHECK(be->removed_by != NULL);
+    if (be->removed_by != NULL) {
+      CHECK_EQ(strcmp(be->removed_by, "remove-by-cost-score"), 0);
+    }
+  }
+  CHECK(realize_rewrite_stat_hits("remove-by-cost-score") >= 1);
+  unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
+  unsetenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
+
+  TEST_BEGIN("bufferize/remove-by-cost-score-respects-reduce-gate");
+  // A buffer whose subtree contains a REDUCE must not be removed
+  // even when the rule is enabled and threshold is low.
+  setenv("THVM_BUFFERIZE_REMOVE_BY_SCORE", "1", 1);
+  setenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD", "1", 1);
+  // Build a multi-consumer REDUCE: rd has 2 consumers, but its
+  // subtree contains the REDUCE itself so the rule must skip it.
+  Term rd  = uop_reduce(REDUCE_SUM, 0, a);
+  Term rd_d = uop_binary(UOP_MUL, rd, rd);
+  realize_classify(rd_d);
+  u32 rd_idx = bufferize_find_by_loc(term_val(rd));
+  CHECK(rd_idx != 0xFFFFFFFFu);
+  if (rd_idx != 0xFFFFFFFFu) {
+    BBufferize const *brd = bufferize_buffer_at(rd_idx);
+    // rd is REASON_REDUCE so the gate hits even before
+    // subtree_has_reduce; either way the rule does not remove it.
+    CHECK_EQ(brd->realized, 1);
+  }
+  unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
+  unsetenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
+
   TEST_BEGIN("bufferize/aggregate-totals-match-per-buffer-sums");
   // Rebuild the multi-consumer graph and verify aggregates equal
   // the sum of per-buffer fields.
