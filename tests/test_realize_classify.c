@@ -153,7 +153,7 @@ int main(void) {
   CHECK_EQ(realize_is_realized(times_cc), 1);
   CHECK_EQ(realize_consumer_count(aa_plus_bb), 1);
 
-  TEST_BEGIN("realize-classify/metal-large-pure-movement-fanout-recomputes");
+  TEST_BEGIN("realize-classify/metal-pure-movement-fanout-to-reduce-stays-realized");
   setenv("THVM_BACKEND", "metal", 1);
   setenv("THVM_TILE", "1", 1);
   setenv("THVM_INLINE_MULTI_CONSUMER_PURE", "1", 1);
@@ -169,7 +169,22 @@ int main(void) {
   Term combined = uop_binary(UOP_ADD, r0, r1);
   realize_classify(combined);
   CHECK_EQ(realize_consumer_count(pad), 2);
-  CHECK_EQ(realize_is_realized(pad), 0);
+  CHECK_EQ(realize_is_realized(pad), 1);
+  CHECK_EQ(realize_rewrite_stat_hits("inline-pure-fanout-probe"), 0);
+
+  TEST_BEGIN("realize-classify/metal-large-pure-movement-fanout-recomputes");
+  thvm_free();
+  thvm_init();
+  u32 tq = alloc_f32_tensor2(2, 2);
+  Term q = term_new(0, TAG_TEN, DT_FP32, tq);
+  u32 qwidths[4] = {0, 0, 0, 2};
+  Term qpad = uop_pad(q, 2, qwidths);
+  Term qleft = uop_unary(UOP_NEG, qpad);
+  Term qright = uop_binary(UOP_MUL, qpad, qpad);
+  Term qroot = uop_binary(UOP_ADD, qleft, qright);
+  realize_classify(qroot);
+  CHECK_EQ(realize_consumer_count(qpad), 2);
+  CHECK_EQ(realize_is_realized(qpad), 0);
   CHECK_EQ(realize_rewrite_stat_hits("inline-pure-fanout-probe"), 1);
 
   TEST_BEGIN("realize-classify/metal-pure-alu-fanout-still-realizes");

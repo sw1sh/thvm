@@ -336,6 +336,14 @@ tinygrad-style approach: keep fusion decisions as explicit rewrite
 rules with legality/cost guards, rather than as untracked classifier
 branches or backend-specific custom kernels.
 
+The broad pure fanout probe is still default-off.  When enabled with
+`THVM_INLINE_MULTI_CONSUMER_PURE=1`, it now refuses producers that
+feed any reduce-reachable consumer chain, because BS=32
+`beautiful_mnist` showed those relaxations merge movement fanout into
+fat reduce kernels that fall back to `metal-jit`.  Use
+`DUMP_FUSION_REWRITE_CANDIDATES=1` to print accepted and rejected
+`inline-pure-fanout-probe` candidates during focused classifier work.
+
 Metal direct MSL kernels can bind at most 30 input buffers without
 argument buffers.  With `THVM_BACKEND=metal THVM_TILE=1`,
 `realize_classify` therefore splits over-wide ADD/MUL expression

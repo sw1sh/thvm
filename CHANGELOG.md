@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Changed: keep pure fanout probe away from reduce chains
+
+The opt-in `THVM_INLINE_MULTI_CONSUMER_PURE=1` recompute probe now
+refuses movement/ALU fanout producers that feed any reduce-reachable
+consumer chain.  A BS=32 `beautiful_mnist` canary showed those
+relaxations created unsupported fat reduce kernels; with the guard,
+the probe returns to the no-`metal-jit` baseline unless a producer is
+proven outside reduction chains.  `DUMP_FUSION_REWRITE_CANDIDATES=1`
+prints the accepted and rejected candidates for this rule.
+
 ### Changed: propose Metal LOCAL opts on splittable inner axes
 
 Elementwise Metal tile proposal now skips leading unit or otherwise

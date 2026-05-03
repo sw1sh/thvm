@@ -383,6 +383,11 @@ static u64 realize_inline_multiconsumer_pure_min_numel(void) {
   return 65536;
 }
 
+static int realize_dump_fusion_candidates_enabled(void) {
+  char const *e = getenv("DUMP_FUSION_REWRITE_CANDIDATES");
+  return e != NULL && e[0] == '1';
+}
+
 static u32 realize_rule_inline_large_expand_fanout(Term root) {
   (void)root;
   if (!realize_inline_multiconsumer_expand_enabled()) {
@@ -468,6 +473,38 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
   return 1;
 }
 
+static int realize_parent_chain_reaches_reduce(u64 child_loc, u32 depth) {
+  if (depth > 32) {
+    return 1;
+  }
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    u64 ploc = REALIZE_INFO[i].loc;
+    if (ploc == child_loc) {
+      continue;
+    }
+    u8 pop = REALIZE_INFO[i].op;
+    u8 ar  = uop_arity(pop);
+    int hit = 0;
+    for (u8 j = 0; j < ar; j++) {
+      Term c = term_resolve(heap_read(ploc + j));
+      if (term_tag(c) == TAG_UOP && term_val(c) == child_loc) {
+        hit = 1;
+        break;
+      }
+    }
+    if (!hit) {
+      continue;
+    }
+    if (pop == UOP_REDUCE) {
+      return 1;
+    }
+    if (realize_parent_chain_reaches_reduce(ploc, depth + 1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static u32 realize_rule_inline_pure_fanout_probe(Term root) {
   (void)root;
   if (!realize_inline_multiconsumer_pure_enabled()) {
@@ -498,6 +535,28 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
     }
     if (!has_movement) {
       continue;
+    }
+    if (realize_parent_chain_reaches_reduce(info->loc, 0)) {
+      if (realize_dump_fusion_candidates_enabled()) {
+        fprintf(stderr,
+                "realize_rewrite_skip rule=inline-pure-fanout-probe"
+                " reason=reduce-parent loc=%llu op=%u numel=%llu"
+                " consumers=%u\n",
+                (unsigned long long)info->loc,
+                (unsigned)info->op,
+                (unsigned long long)realize_shape_numel(&out_shape),
+                (unsigned)info->consumer_count);
+      }
+      continue;
+    }
+    if (realize_dump_fusion_candidates_enabled()) {
+      fprintf(stderr,
+              "realize_rewrite_hit rule=inline-pure-fanout-probe"
+              " loc=%llu op=%u numel=%llu consumers=%u\n",
+              (unsigned long long)info->loc,
+              (unsigned)info->op,
+              (unsigned long long)realize_shape_numel(&out_shape),
+              (unsigned)info->consumer_count);
     }
     hits++;
     info->realized = 0;
