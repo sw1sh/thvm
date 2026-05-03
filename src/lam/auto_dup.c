@@ -85,18 +85,19 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
       continue;
     }
 
-    // TAG_REF / TAG_ALO are closed wrt our local lam_loc, but their
-    // PRESENCE in the body means the body is recursive (or refers to
-    // an external def).  Inserting a DUP chain in a recursive body
-    // causes exponential nesting per recursive invocation -- each
-    // call creates fresh chain cells, which then chain through
-    // dup_app/dup_op2/dup_mat commute when the arg flows through
-    // OP2/MAT/APP.  The fix is Levy-optimal sharing (CNF readback);
-    // until that lands, refuse to auto-dup recursive bodies and
-    // require manual TDup.  Bailing here causes
-    // lam_seal_ext_with_auto_dup to fall back to plain lam_seal_ext.
+    // TAG_REF / TAG_ALO are closed wrt our local lam_loc by
+    // definition: a REF points at a book def whose binders are its
+    // own, and an ALO is a suspended realize-template that closes
+    // over its state_id, not our caller's lam.  Neither subtree can
+    // contain a VAR(lam_loc) cell -- so we treat them as opaque
+    // leaves in the walk.  Under Phase 1+2 (DPs opaque in wnf,
+    // duplication driven by cnf readback) recursive non-linear
+    // bodies handle their own per-call duplication correctly: each
+    // recursive invocation alo-realizes a fresh dyn DUP chain whose
+    // sibling DP0/DP1 cells share a body via alo_dup_share, and cnf
+    // fires DUP-XXX on demand without compounding across calls.
     if (tag == TAG_REF || tag == TAG_ALO) {
-      return LAM_AUTODUP_BAIL;
+      continue;
     }
 
     // UOP_KERNEL has side-table inputs (KernelEntry.input_terms) we

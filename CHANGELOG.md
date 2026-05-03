@@ -6,6 +6,135 @@ dated section.
 
 ## Unreleased
 
+### Changed: Levy-optimal Phase 4 -- auto-dup default-on for recursive non-linear lambdas
+
+`auto_dup_collect`'s `TAG_REF` / `TAG_ALO` early-return is replaced
+with a `continue` -- the walker now treats those subtrees as
+opaque leaves rather than bailing the whole body.  Sound because
+both tags are closed wrt our local `lam_loc` (a REF points at a
+book def whose binders are its own; an ALO closes over its
+`state_id`, not the caller's lam), so neither subtree can contain
+`TAG_VAR(lam_loc)` -- the walker correctly sees zero VAR uses
+inside a REF/ALO and skips ahead.
+
+Under Phase 1+2 (plain DPs opaque under `wnf`, duplication driven
+by `cnf` readback), recursive non-linear bodies now handle their
+own per-call duplication correctly.  Each recursive invocation
+`alo_realize`s a fresh dyn DUP chain whose sibling DP0/DP1 cells
+share a body via `alo_dup_share` (`src/alo/realize.c`), and `cnf`
+fires DUP-XXX on demand at readback without compounding across
+calls.
+
+WL `Lazy.wl`'s recursive helpers (`defConcat`, `defPrependEach`,
+`defChooseEach`, `defPermsLex`, `defSplits`, `defTuples`,
+`defSubsets`, `defPrependHToFirst`) no longer require manual
+`TDup` instrumentation: every non-linear binder gets an auto-dup
+chain at construction.  Verified end-to-end:
+`TLazyPermutations[Range[100]]` returns 100-element perms in lex
+order under `TLazyTake[..., 5]`; `TLazySplits`, `TLazySubsets`,
+`TLazyTuples` all enumerate without manual TDups.
+
+`tests/test_auto_dup.c` flips its prior
+`auto-dup/recursive-body-bails-conservatively` regression to
+`auto-dup/recursive-body-builds-dup-chain`: a body with a
+`TAG_REF`-bearing recursive call and 4 VAR uses now gets a 3-DUP
+chain inserted.  C suite 274/274 + 27 cnf + 21 auto-dup;
+`lazy.wlt` 41/41, `atp.wlt` 28/28, `aot.wlt` 31/31, `core.wlt`
+32/32, `grad.wlt` 62/62.
+
+### Added: Levy-optimal Phase 3 -- conditional DP-head cnf-drives in wnf strict frames
+
+Targeted Phase 3 hookups: where `wnf`'s apply-phase strict frames
+need a NUM / CTR / LAM head to dispatch but the head turns out to
+be a Levy-opaque plain DP, drive it through `cnf` first.  This
+covers:
+
+- `OP2` and `F_OP2_NUM` apply frames: a DP head is cnf'd so
+  `DUP-NUM` / `DUP-SUP` fire before the strict numeric dispatch.
+  Required for non-recursive auto-dup tests
+  (`auto-dup/three-uses-x-plus-x-plus-x`, `auto-dup/five-uses`)
+  and any `OP2(DP0(NUM), ...)` pattern from auto-dup chains.
+- `APP-MAT` arg-force: when `wnf(arg)` returns a DP head, call
+  `cnf` once to surface the underlying CTR / NUM.  Conditional
+  rather than unconditional cnf so non-DP heads stay on the cheap
+  `wnf` path (full cnf would descend into compound children and
+  pay for SUP-lift even when there's no SUP).
+- `tests/test_auto_dup.c` adds an
+  `auto-dup/recursive-body-bails-conservatively` regression test
+  documenting that the `TAG_REF` / `TAG_ALO` bail in
+  `auto_dup_collect` is intentional under the current build.
+
+Other strict frames (EQL, AND, OR, WHEN, ANN, F_EQL_R, plain APP)
+were tried and rolled back: full cnf-on-DP-head at every apply
+frame slowed `lazy.wlt`'s `TLazyTake[TLazyRange[10^6], 5]` to
+several minutes.  The conservative pattern -- cnf only at the
+strict frames where a NUM / CTR head is structurally required --
+keeps lazy.wlt at its baseline runtime while the C suite stays at
+274/274 + 21 auto-dup + 27 cnf cases.
+
+WL test verification: lazy.wlt 41/41, atp.wlt 28/28, aot.wlt
+31/31, core.wlt 32/32 all green after this commit.
+
+### Deferred: Levy-optimal Phase 4 (recursive auto-dup) -- analysis memo
+
+`docs/plans/levy_optimal_progress.md` documents the Phase 4
+blocker discovered during this arc: lifting the
+`TAG_REF` / `TAG_ALO` bail in `auto_dup_collect` causes heap
+exhaustion / native crashes on `TLazyPermutations[Range[20]]`-
+class workloads even after Phase 1+2.  The remaining gap is
+memoised dup-body sharing across recursive invocations
+(HVM4-style); the existing `alo_dup_share` covers REF unfold but
+not per-call auto-dup chains.  Until that lands, recursive
+non-linear bodies continue to require manual `TDup`.
+
+### Added: Levy-optimal sharing -- Phases 1+2 (opaque DPs in wnf, cnf readback)
+
+Plain (non-grad) `TAG_DP0` / `TAG_DP1` projections are now
+Levy-opaque under `wnf` (`src/wnf/_.c`): entering them no longer
+pushes a DP frame nor fires DUP-XXX.  The duplication shifts to a
+new collapsed-normal-form readback layer, `cnf_at`
+(`src/cnf/_.c`), which reduces a term to WHNF then walks its
+compound nodes lifting the first SUP child to the top.  When the
+walker reaches a DP, it cnf's the cell, dispatches the matching
+`interact_dup_*`, and recurses on the result -- so DUP-SUP /
+DUP-LAM / DUP-CTR / DUP-NUM / ... all fire during readback rather
+than during head-form reduction.  Mirrors HVM4's cnf design,
+stripped of the parallel `CnfPool` / `wspq` (single-threaded
+slice).
+
+A second new file, `src/eval/collapse.c`, runs `eval_collapse`:
+priority-FIFO enumeration of every pure leaf reachable through
+SUP branches in a term, calling `cnf` at each step.  INC reduces
+the key (higher priority); SUP increases it.
+
+Shallow `thvm_collapse` and `thvm_collapse_ordered` switched to
+`cnf` so their walks resolve DP-headed children.  `interact_app`'s
+APP-MAT path also calls `cnf(arg)` so a DP-wrapped CTR/NUM fires
+DUP-CTR / DUP-NUM before the case-tree dispatch.  Hand-coded AOT
+programs (`src/aot/programs/*.c`) thread `cnf` via the
+`aot_force` helper so AOT case trees see a CTR/NUM head instead
+of a stuck DP.
+
+The WL bridge gains `TCnf` (`thvm_wl_cnf`) and `TNf` now post-
+processes its `nf` result through `cnf` so user-visible terms are
+DP-free.  `TWnf` and `TStep` stay head-only per the plan.
+
+Existing C dup tests (`test_dup_sup`, `test_dup_lam`, `test_dup_num`,
+`test_any`, `test_era`, `test_lam_era`, `test_app_sup`,
+`test_sup_cps`, `test_sup_rewrite`, `test_icc`) migrate from `wnf`
+to `cnf` where they verified eager-DUP semantics.  `test_lam_era`
+adjusts ITRS expectations to reflect cnf's fully-resolving walk
+(DUP-LAM + DUP-NUM rather than just DUP-LAM).  New focused
+fixtures land in `tests/test_cnf.c`: lift-at-top, ERA propagation,
+same-label DUP-SUP annihilation, different-label cross product,
+APP-LAM-through-SUP, and SUP-stream collapse.  C suite stays at
+274/274 + 14 new cnf cases; `lazy.wlt` 41/41; `core.wlt`,
+`atp.wlt`, `aot.wlt` all green after migrating three TWnf-of-DP
+test bodies in core.wlt to TCnf.
+
+Plan: [docs/plans/levy_optimal.md](docs/plans/levy_optimal.md).
+Phases 3-4 follow as separate commits.
+
 ### Changed: Generalised broadcast-reduce predicate (Phase 1 of tinygrad rule port)
 
 `realize_rule_inline_softmax_broadcast_reduce` now matches the chain

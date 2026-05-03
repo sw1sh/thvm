@@ -417,7 +417,25 @@ EXTERN_C DLLEXPORT int thvm_wl_nf(WolframLibraryData libData, mint argc,
                                   MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   Term t = (Term)MArgument_getInteger(args[0]);
+  // Drive nf first so heap-resident UOps / GRADs / kernels fire, then
+  // run cnf at the surviving root so any DP wrappers left at the head
+  // (Levy-opaque under wnf since the Phase 1+2 readback split) get
+  // resolved before the user observes the term.
   Term r = nf(t);
+  r = cnf(r);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_wl_cnf -- collapsed-normal-form readback exposed to WL as TCnf.
+// Lifts SUPs to the top recursively; fires plain DUP-XXX during the
+// walk.  Useful when callers want a DP-free reading of a term without
+// the heap-wide nf sweep.
+EXTERN_C DLLEXPORT int thvm_wl_cnf(WolframLibraryData libData, mint argc,
+                                   MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term t = (Term)MArgument_getInteger(args[0]);
+  Term r = cnf(t);
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }

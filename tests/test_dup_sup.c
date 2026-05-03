@@ -8,6 +8,11 @@
 //                                  ! &L{B0,B1} = b
 //                                  x0 <- &R{A0, B0}
 //                                  x1 <- &R{A1, B1}
+//
+// Plain (non-grad) DP projections are Levy-opaque under wnf since
+// the Levy-optimal port: the DUP-XXX firings happen during cnf
+// readback (src/cnf/_.c).  These tests therefore drive their inputs
+// through cnf rather than wnf.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -31,7 +36,7 @@ int main(void) {
     u64  dup = build_dup(sup);
     Term dp0 = term_new(0, TAG_DP0, 7, dup);
     u64  itrs_before = ITRS;
-    Term out = wnf(dp0);
+    Term out = cnf(dp0);
     CHECK_EQ(term_tag(out), TAG_ERA);
     CHECK_EQ(ITRS - itrs_before, 1);  // one DUP-SUP firing
   }
@@ -46,8 +51,8 @@ int main(void) {
     u64  dup = build_dup(sup);
     Term dp0 = term_new(0, TAG_DP0, 7, dup);
     Term dp1 = term_new(0, TAG_DP1, 7, dup);
-    (void)wnf(dp0);
-    Term out = wnf(dp1);
+    (void)cnf(dp0);
+    Term out = cnf(dp1);
     CHECK_EQ(term_tag(out), TAG_LAM);
   }
 
@@ -61,7 +66,7 @@ int main(void) {
     u64  dup  = build_dup(sup);
     Term dp0  = term_new(0, TAG_DP0, 7, dup);
     u64  itrs_before = ITRS;
-    Term out  = wnf(dp0);
+    Term out  = cnf(dp0);
     CHECK_EQ(term_tag(out), TAG_SUP);
     CHECK_EQ(term_ext(out), 8);  // outer label preserved from R-SUP
     CHECK_EQ(ITRS - itrs_before, 1);  // single DUP-SUP commute
@@ -76,10 +81,10 @@ int main(void) {
     Term sup  = build_sup(8, era1, era2);
     u64  dup  = build_dup(sup);
     Term dp0  = term_new(0, TAG_DP0, 7, dup);
-    Term out  = wnf(dp0);
+    Term out  = cnf(dp0);
     u64  out_loc = term_val(out);
-    Term l    = wnf(heap_read(out_loc + 0));
-    Term r    = wnf(heap_read(out_loc + 1));
+    Term l    = cnf(heap_read(out_loc + 0));
+    Term r    = cnf(heap_read(out_loc + 1));
     CHECK_EQ(term_tag(l), TAG_ERA);
     CHECK_EQ(term_tag(r), TAG_ERA);
   }
@@ -96,8 +101,8 @@ int main(void) {
     Term dp0  = term_new(0, TAG_DP0, 7, dup);
     Term dp1  = term_new(0, TAG_DP1, 7, dup);
     u64  itrs_before = ITRS;
-    Term out0 = wnf(dp0);
-    Term out1 = wnf(dp1);
+    Term out0 = cnf(dp0);
+    Term out1 = cnf(dp1);
     CHECK_EQ(term_tag(out0), TAG_SUP);
     CHECK_EQ(term_ext(out0), 8);
     CHECK_EQ(term_tag(out1), TAG_SUP);

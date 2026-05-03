@@ -25,18 +25,23 @@ int main(void) {
     Term dp0     = term_new(0, TAG_DP0, 9, dup_loc);
 
     u64  itrs_before = ITRS;
-    Term out         = wnf(dp0);
+    // Plain DPs are Levy-opaque under wnf; cnf is the readback layer
+    // that fires DUP-LAM.  cnf is fully-resolving, so the inner
+    // DP0(VAR(orig_lam_loc)) chain that DUP-LAM creates also resolves
+    // -- the orig_lam_loc cell holds a SUB-flagged SUP from the
+    // heap_subst_var call inside interact_dup_lam, so the inner DP-SUP
+    // same-label annihilation fires automatically.  Two ITRS total:
+    // DUP-LAM + DUP-SUP (annihilate).
+    Term out         = cnf(dp0);
     CHECK_EQ(term_tag(out), TAG_LAM);
-    CHECK_EQ(ITRS - itrs_before, 1);  // exactly one DUP-LAM firing
+    CHECK_EQ(ITRS - itrs_before, 2);
 
-    // The new LAM's body cell holds DP0(val=shared, lab) -- the body
-    // term is itself duplicated so DP1 (the inactive projection)
-    // shares it.  Verifying the structural invariant: body's tag is
-    // DP0 with the same dup label.
+    // The new LAM's body cell, fully CNF'd, holds VAR(new_binder).
+    // (The intermediate DP0 wrapper was resolved during cnf readback.)
     u64  new_lam_loc  = term_val(out);
     Term new_lam_body = heap_read(new_lam_loc);
-    CHECK_EQ(term_tag(new_lam_body), TAG_DP0);
-    CHECK_EQ(term_ext(new_lam_body), 9);
+    CHECK_EQ(term_tag(new_lam_body), TAG_VAR);
+    CHECK_EQ(term_val(new_lam_body), new_lam_loc);
   }
 
   TEST_BEGIN("dup-lam/applying-cloned-identity-yields-input");
@@ -57,7 +62,9 @@ int main(void) {
     heap_set(app_loc + 1, era);
     Term app     = term_new(0, TAG_APP, 0, app_loc);
 
-    Term out = wnf(app);
+    // The APP head is a DP0 (Levy-opaque under wnf).  cnf realizes
+    // the APP-LAM after firing the DUP-LAM during readback.
+    Term out = cnf(app);
     CHECK_EQ(term_tag(out), TAG_ERA);
   }
 

@@ -175,8 +175,10 @@ int main(void) {
     Term out = wnf(app);
     CHECK_EQ(term_tag(out), TAG_SUP);
     CHECK_EQ(term_ext(out), 9u);
-    Term out_l = wnf(heap_read(term_val(out) + 0));
-    Term out_r = wnf(heap_read(term_val(out) + 1));
+    // SUP children carry DP-wrapped values (Levy-opaque under wnf);
+    // cnf is the readback that resolves them.
+    Term out_l = cnf(heap_read(term_val(out) + 0));
+    Term out_r = cnf(heap_read(term_val(out) + 1));
     CHECK_EQ(term_tag(out_l), TAG_NUM);
     CHECK_EQ((u32)term_val(out_l), 11u);
     CHECK_EQ(term_tag(out_r), TAG_NUM);

@@ -57,8 +57,11 @@ int main(void) {
     Term out = wnf(app);
     CHECK_EQ(term_tag(out), TAG_SUP);
     CHECK_EQ(term_ext(out), 7u);
-    Term lhs = wnf(heap_read(term_val(out) + 0));
-    Term rhs = wnf(heap_read(term_val(out) + 1));
+    // SUP children carry DP-wrapped values from APP-SUP's arg-share;
+    // cnf is the readback that drives them through DUP-XXX (Levy-
+    // opaque under wnf since the Phase 1 + 2 split).
+    Term lhs = cnf(heap_read(term_val(out) + 0));
+    Term rhs = cnf(heap_read(term_val(out) + 1));
     CHECK_EQ(term_tag(lhs), TAG_NUM);
     CHECK_EQ((u32)term_val(lhs), 99u);
     CHECK_EQ(term_tag(rhs), TAG_NUM);
@@ -92,8 +95,8 @@ int main(void) {
 
     Term out = wnf(app);
     CHECK_EQ(term_tag(out), TAG_SUP);
-    Term lhs = wnf(heap_read(term_val(out) + 0));
-    Term rhs = wnf(heap_read(term_val(out) + 1));
+    Term lhs = cnf(heap_read(term_val(out) + 0));
+    Term rhs = cnf(heap_read(term_val(out) + 1));
     CHECK_EQ(term_tag(lhs), TAG_NUM);
     CHECK_EQ((u32)term_val(lhs), 42u);
     CHECK_EQ(term_tag(rhs), TAG_ERA);
@@ -113,8 +116,8 @@ int main(void) {
 
     Term out = wnf(app);
     CHECK_EQ(term_tag(out), TAG_SUP);
-    Term lhs = wnf(heap_read(term_val(out) + 0));
-    Term rhs = wnf(heap_read(term_val(out) + 1));
+    Term lhs = cnf(heap_read(term_val(out) + 0));
+    Term rhs = cnf(heap_read(term_val(out) + 1));
     CHECK_EQ(term_tag(lhs), TAG_ERA);
     CHECK_EQ(term_tag(rhs), TAG_ERA);
   }

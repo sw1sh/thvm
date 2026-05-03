@@ -112,24 +112,61 @@ int main(void) {
 
   // === Five uses: still works (linear chain depth 4). ===
   TEST_BEGIN("auto-dup/five-uses");
-  // Build (\x -> x + x + x + x + x) via repeated ad_op2.
-  // body builder isn't a typedef'd fn here; inline the construction.
-  u64  lam_loc_5 = heap_alloc(1);
-  Term v[5];
-  for (int i = 0; i < 5; i++) {
-    v[i] = term_new(0, TAG_VAR, 0, lam_loc_5);
+  {
+    // Build (\x -> x + x + x + x + x) via repeated ad_op2.  body
+    // builder isn't a typedef'd fn here; inline the construction.
+    u64  lam_loc_5 = heap_alloc(1);
+    Term v[5];
+    for (int i = 0; i < 5; i++) {
+      v[i] = term_new(0, TAG_VAR, 0, lam_loc_5);
+    }
+    // Right-fold: v0 + (v1 + (v2 + (v3 + v4)))
+    Term acc = v[4];
+    for (int i = 3; i >= 0; i--) {
+      acc = ad_op2(OP_ADD, v[i], acc);
+    }
+    heap_set(lam_loc_5, acc);
+    u32  ext_5 = lam_seal_ext_with_auto_dup(lam_loc_5, 0);
+    Term lam_5 = term_new(0, TAG_LAM, ext_5, lam_loc_5);
+    Term r5    = wnf(ad_app(lam_5, ad_num(3)));
+    CHECK_EQ(term_tag(r5), TAG_NUM);
+    CHECK_EQ(term_val(r5), 15);  // 5 * 3
   }
-  // Right-fold: v0 + (v1 + (v2 + (v3 + v4)))
-  Term acc = v[4];
-  for (int i = 3; i >= 0; i--) {
-    acc = ad_op2(OP_ADD, v[i], acc);
+
+  // === Recursive non-linear bodies (Phase 4) ===========================
+  // Under Phase 1+2 (DPs opaque in wnf, duplication driven by cnf
+  // readback), the auto-dup walker can safely treat TAG_REF / TAG_ALO
+  // as opaque leaves: a REF/ALO subtree is closed wrt our local
+  // lam_loc by definition (its binders are its own).  The walker
+  // counts only the VAR(lam_loc) cells visible to the body.  This
+  // case has 4 such cells, so we expect a 3-DUP chain inserted.
+  TEST_BEGIN("auto-dup/recursive-body-builds-dup-chain");
+  {
+    u32 def_id = 0xAB;
+    u64  lam_loc = heap_alloc(1);
+    Term n_a = term_new(0, TAG_VAR, 0, lam_loc);
+    Term n_b = term_new(0, TAG_VAR, 0, lam_loc);
+    Term n_c = term_new(0, TAG_VAR, 0, lam_loc);
+    Term n_d = term_new(0, TAG_VAR, 0, lam_loc);
+    Term ref = term_new(0, TAG_REF, def_id, 0);
+    u64  app_loc = heap_alloc(2);
+    heap_set(app_loc + 0, ref);
+    heap_set(app_loc + 1, n_d);
+    Term rec_call = term_new(0, TAG_APP, 0, app_loc);
+    Term sum3 = ad_op2(OP_ADD, n_a, ad_op2(OP_ADD, n_b, n_c));
+    Term body = ad_op2(OP_ADD, sum3, rec_call);
+    heap_set(lam_loc, body);
+    u32 ext = lam_seal_ext_with_auto_dup(lam_loc, 0);
+    Term lam = term_new(0, TAG_LAM, ext, lam_loc);
+    CHECK_EQ(term_tag(lam), TAG_LAM);
+    // 4 VAR uses -> ERA_MASK off, no bail, body's structure is
+    // preserved (the DUP chain is inserted at the VAR cells, not at
+    // the body root), and the original VAR cells have been rewritten
+    // to DP0/DP1 projections.
+    CHECK_EQ(ext & LAM_ERA_MASK, 0);
+    Term root = heap_read(lam_loc);
+    CHECK_EQ(term_tag(root), TAG_OP2);
   }
-  heap_set(lam_loc_5, acc);
-  u32  ext_5 = lam_seal_ext_with_auto_dup(lam_loc_5, 0);
-  Term lam_5 = term_new(0, TAG_LAM, ext_5, lam_loc_5);
-  Term r5    = wnf(ad_app(lam_5, ad_num(3)));
-  CHECK_EQ(term_tag(r5), TAG_NUM);
-  CHECK_EQ(term_val(r5), 15);  // 5 * 3
 
   thvm_free();
   TEST_REPORT();

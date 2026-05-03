@@ -95,12 +95,15 @@ int main(void) {
     heap_set(dup_loc, k42);
     Term dp0     = term_new(0, TAG_DP0, 13, dup_loc);
 
-    // Fire the DUP-LAM by entering DP0; the WHNF result is the new
-    // LAM that DP0 was rewritten to.  Inspect it directly before any
-    // beta strips it.
+    // Fire the DUP-LAM by cnf'ing DP0; the result is the new LAM that
+    // DP0 was rewritten to.  Plain DPs are Levy-opaque under wnf, so
+    // cnf is the readback layer that fires the dup interactions.
+    // cnf is fully-resolving: after DUP-LAM (1 itr), it walks the new
+    // LAM's body, which holds DP0_lab(NUM(7)), and fires DUP-NUM
+    // (1 itr) -- 2 total.
     u64  before = ITRS;
-    Term new_lam = wnf(dp0);
-    CHECK_EQ(ITRS - before, 1);
+    Term new_lam = cnf(dp0);
+    CHECK_EQ(ITRS - before, 2);
     CHECK_EQ(term_tag(new_lam), TAG_LAM);
     CHECK(term_ext(new_lam) & LAM_ERA_MASK);
 
@@ -109,7 +112,7 @@ int main(void) {
     // shared dup-cell, which on the active side resolves to NUM(7).
     Term era     = term_new(0, TAG_ERA, 0, 0);
     Term app     = build_app(new_lam, era);
-    Term out     = wnf(app);
+    Term out     = cnf(app);
     CHECK_EQ(term_tag(out), TAG_NUM);
     CHECK_EQ(term_val(out), 7);
   }
