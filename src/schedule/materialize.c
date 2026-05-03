@@ -59,6 +59,50 @@ static u32 BOUNDARY_LAST_USE [REALIZE_INFO_CAP];
 
 #define VISIT_BAIL 0xDEADBEEFu
 
+typedef struct {
+  u64 *locs;
+  u32 *refs;
+  u32  len;
+  u32  cap;
+} VisitMemo;
+
+static void visit_memo_free(VisitMemo *m) {
+  if (m == NULL) return;
+  free(m->locs);
+  free(m->refs);
+  m->locs = NULL;
+  m->refs = NULL;
+  m->len  = 0;
+  m->cap  = 0;
+}
+
+static u32 visit_memo_lookup(VisitMemo *m, u64 loc) {
+  if (m == NULL) return VISIT_BAIL;
+  for (u32 i = 0; i < m->len; i++) {
+    if (m->locs[i] == loc) return m->refs[i];
+  }
+  return VISIT_BAIL;
+}
+
+static void visit_memo_store(VisitMemo *m, u64 loc, u32 ref) {
+  if (m == NULL || ref == VISIT_BAIL) return;
+  for (u32 i = 0; i < m->len; i++) {
+    if (m->locs[i] == loc) {
+      m->refs[i] = ref;
+      return;
+    }
+  }
+  if (m->len >= m->cap) {
+    u32 new_cap = m->cap == 0 ? 64 : m->cap * 2;
+    m->locs = (u64 *)realloc(m->locs, (size_t)new_cap * sizeof(u64));
+    m->refs = (u32 *)realloc(m->refs, (size_t)new_cap * sizeof(u32));
+    m->cap  = new_cap;
+  }
+  m->locs[m->len] = loc;
+  m->refs[m->len] = ref;
+  m->len++;
+}
+
 // === per-realize memory planner =====================================
 //
 // Phase 8 of the tinygrad-parity arc.  After topo_sort + last_use
@@ -804,9 +848,48 @@ static u32 src_numel(KernelEntry *ke, u32 src_idx) {
                                  : ke->program[src_idx].numel;
 }
 
+static int materialize_dump_big_input_source_enabled(void) {
+  char const *e = getenv("DUMP_BIG_INPUT_SOURCE");
+  return e != NULL && e[0] == '1';
+}
+
+static void materialize_dump_source_child(Term child, u32 depth) {
+  child = term_resolve(child);
+  for (u32 i = 0; i < depth; i++) fprintf(stderr, "  ");
+  if (term_tag(child) != TAG_UOP) {
+    fprintf(stderr, "leaf tag=%u ext=%u val=%llu\n",
+            term_tag(child), term_ext(child),
+            (unsigned long long)term_val(child));
+    return;
+  }
+  u64 loc = term_val(child);
+  u32 idx = realize_info_find(loc);
+  fprintf(stderr, "uop op=%u loc=%llu realized=%u consumers=%u\n",
+          term_ext(child), (unsigned long long)loc,
+          idx == 0xFFFFFFFFu ? 0 : REALIZE_INFO[idx].realized,
+          idx == 0xFFFFFFFFu ? 0 : REALIZE_INFO[idx].consumer_count);
+  if (depth >= 2 || term_ext(child) == UOP_KERNEL) return;
+  u8 ar = uop_arity(term_ext(child));
+  for (u8 i = 0; i < ar; i++) {
+    materialize_dump_source_child(heap_read(loc + i), depth + 1);
+  }
+}
+
+static void materialize_dump_big_input_source(KernelEntry *ke,
+                                              u64 boundary_loc) {
+  if (!materialize_dump_big_input_source_enabled()) return;
+  if (ke == NULL || ke->n_inputs <= 30) return;
+  fprintf(stderr,
+          "big_input_source kid=%u n_inputs=%u n_ops=%u out=%u source_op=%u loc=%llu\n",
+          (u32)(ke - KERNELS), ke->n_inputs, ke->n_ops,
+          ke->output_numel, term_ext(ke->source_uop),
+          (unsigned long long)boundary_loc);
+  materialize_dump_source_child(ke->source_uop, 0);
+}
+
 // Recursive visit.  Returns a program-index (0..n_ops-1) or
 // VISIT_BAIL on any unsupported op.
-static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
+static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   // Resolve VAR (SUB-bit) + ALO (one-layer force) chains so a body
   // post-APP-LAM-beta exposes its bound argument's TEN/UOP rather
   // than the bare VAR cell that visit() would otherwise bail on.
@@ -852,6 +935,10 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
 
   u8  op  = term_ext(t);
   u64 loc = term_val(t);
+  u32 memo_ref = visit_memo_lookup(memo, loc);
+  if (memo_ref != VISIT_BAIL) {
+    return memo_ref;
+  }
 
   if (op == UOP_KERNEL) {
     Term outbuf = heap_read(loc);
@@ -859,7 +946,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     u32 tid  = (u32)term_val(outbuf);
     u32 slot = input_slot_dedup(ke, tid, t);
     if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
-    return KSRC_AS_INPUT(slot);
+    u32 ref = KSRC_AS_INPUT(slot);
+    visit_memo_store(memo, loc, ref);
+    return ref;
   }
 
   // Boundary that isn't this kernel's root: become an input.  The
@@ -873,7 +962,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
       if (tid == 0) return VISIT_BAIL;
       u32 slot = input_slot_dedup(ke, tid, boundary_term);
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
-      return KSRC_AS_INPUT(slot);
+      u32 ref = KSRC_AS_INPUT(slot);
+      visit_memo_store(memo, loc, ref);
+      return ref;
     }
   }
 
@@ -887,11 +978,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     p->arg    = (u32)term_val(num);
     p->n_src  = 0;
     p->numel  = 1;
-    return ke->n_ops - 1;
+    u32 ref = ke->n_ops - 1;
+    visit_memo_store(memo, loc, ref);
+    return ref;
   }
 
   if (uop_is_unary_elementwise(op) || op == UOP_LOAD) {
-    u32 src_idx = visit(heap_read(loc), ke, root_loc);
+    u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
     kernel_program_reserve(ke, ke->n_ops + 1);
     KProgOp *p = &ke->program[ke->n_ops++];
@@ -901,11 +994,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     p->numel  = src_numel(ke, src_idx);
     p->n_src  = 1;
     p->src[0] = src_idx;
-    return ke->n_ops - 1;
+    u32 ref = ke->n_ops - 1;
+    visit_memo_store(memo, loc, ref);
+    return ref;
   }
 
   if (op == UOP_CAST || op == UOP_BITCAST) {
-    u32 src_idx = visit(heap_read(loc), ke, root_loc);
+    u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
     Term num = heap_read(loc + 1);
     if (term_tag(num) != TAG_NUM) return VISIT_BAIL;
@@ -921,13 +1016,15 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     p->numel  = src_numel(ke, src_idx);
     p->n_src  = 1;
     p->src[0] = src_idx;
-    return ke->n_ops - 1;
+    u32 ref = ke->n_ops - 1;
+    visit_memo_store(memo, loc, ref);
+    return ref;
   }
 
   if (uop_is_binary_elementwise(op)) {
-    u32 li = visit(heap_read(loc + 0), ke, root_loc);
+    u32 li = visit(heap_read(loc + 0), ke, root_loc, memo);
     if (li == VISIT_BAIL) return VISIT_BAIL;
-    u32 ri = visit(heap_read(loc + 1), ke, root_loc);
+    u32 ri = visit(heap_read(loc + 1), ke, root_loc, memo);
     if (ri == VISIT_BAIL) return VISIT_BAIL;
     kernel_program_reserve(ke, ke->n_ops + 1);
     KProgOp *p = &ke->program[ke->n_ops++];
@@ -939,7 +1036,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     p->n_src  = 2;
     p->src[0] = li;
     p->src[1] = ri;
-    return ke->n_ops - 1;
+    u32 ref = ke->n_ops - 1;
+    visit_memo_store(memo, loc, ref);
+    return ref;
   }
 
   // GRAD is a stop point in materialize -- the architecture is
@@ -960,11 +1059,13 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     if (alias_tid != 0) {
       u32 slot = input_slot_dedup(ke, alias_tid, t);
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
-      return KSRC_AS_INPUT(slot);
+      u32 ref = KSRC_AS_INPUT(slot);
+      visit_memo_store(memo, loc, ref);
+      return ref;
     }
     // Fallback: emit as a kernel op.  Recurse into source, look up
     // shapes, populate the metadata cpu_op_<op> + Metal shaders need.
-    u32 src_idx = visit(heap_read(loc), ke, root_loc);
+    u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
     kernel_program_reserve(ke, ke->n_ops + 1);
     Shape src_shape = {0};
@@ -1006,7 +1107,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
       Term mask_num = heap_read(loc + 1);
       if (term_tag(mask_num) == TAG_NUM) p->arg = (u32)term_val(mask_num);
     }
-    return ke->n_ops - 1;
+    u32 ref = ke->n_ops - 1;
+    visit_memo_store(memo, loc, ref);
+    return ref;
   }
 
   // PAD as a kernel emit (g2c2): allocate a fresh buf, run
@@ -1014,7 +1117,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
   // can't be a view-only alias because reading bytes outside the
   // alloc is UB even when calloc'd.
   if (op == UOP_PAD) {
-    u32 src_idx = visit(heap_read(loc), ke, root_loc);
+    u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
     kernel_program_reserve(ke, ke->n_ops + 1);
     // Source shape: from the PAD's source term (TenDesc lookup).
@@ -1046,7 +1149,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
       p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
       p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
     }
-    return ke->n_ops - 1;
+    u32 ref = ke->n_ops - 1;
+    visit_memo_store(memo, loc, ref);
+    return ref;
   }
 
   // REDUCE -- as the kernel root (tail-fuse) or as an intermediate
@@ -1072,7 +1177,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
           if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
         }
       }
-      u32 src_idx = visit(rc.src, ke, root_loc);
+      u32 src_idx = visit(rc.src, ke, root_loc, memo);
       if (src_idx == VISIT_BAIL) return VISIT_BAIL;
       for (u32 i = 0; i < ke->n_ops; i++) {
         if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
@@ -1086,7 +1191,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
       p->numel  = rc.out_numel;
       p->n_src  = 1;
       p->src[0] = src_idx;
-      return ke->n_ops - 1;
+      u32 ref = ke->n_ops - 1;
+      visit_memo_store(memo, loc, ref);
+      return ref;
     }
 
   single_reduce_emit:
@@ -1096,7 +1203,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
         if (ke->program[i].opcode == UOP_REDUCE) return VISIT_BAIL;
       }
     }
-    u32 src_idx = visit(heap_read(loc), ke, root_loc);
+    u32 src_idx = visit(heap_read(loc), ke, root_loc, memo);
     if (src_idx == VISIT_BAIL) return VISIT_BAIL;
     kernel_program_reserve(ke, ke->n_ops + 1);
     u32 kind = (u32)term_val(heap_read(loc + 1));
@@ -1129,7 +1236,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc) {
     p->numel  = reduce_numel;
     p->n_src  = 1;
     p->src[0] = src_idx;
-    return ke->n_ops - 1;
+    u32 ref = ke->n_ops - 1;
+    visit_memo_store(memo, loc, ref);
+    return ref;
   }
 
   return VISIT_BAIL;
@@ -1168,7 +1277,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
   ke->source_uop    = root_term;
   TENS[out_tid].producer_kid = kid;
 
-  u32 result = visit(root_term, ke, boundary_loc);
+  VisitMemo memo = {0};
+  u32 result = visit(root_term, ke, boundary_loc, &memo);
+  visit_memo_free(&memo);
   if (result == VISIT_BAIL) {
     kernel_dealloc_last(kid);
     TENS[out_tid].producer_kid = 0;
@@ -1197,6 +1308,8 @@ static Term emit_kernel_for_boundary(u32 bi) {
       return alias_term;
     }
   }
+
+  materialize_dump_big_input_source(ke, boundary_loc);
 
   // Hash-cons the KProgOp[] against the kernel-program cache.
   // Two boundaries with bit-for-bit identical programs (opcode +

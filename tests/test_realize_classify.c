@@ -21,6 +21,20 @@ static u32 alloc_f32_tensor2(u32 d0, u32 d1) {
   return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
+static Term reshape1(Term x, u32 n) {
+  u32 dims[1] = {n};
+  return uop_reshape(x, 1, dims);
+}
+
+static Term wide_reshape_add_tree(Term *xs, u32 n, u32 numel) {
+  Term acc = xs[0];
+  for (u32 i = 1; i < n; i++) {
+    Term item = (i & 1u) ? reshape1(xs[i], numel) : xs[i];
+    acc = uop_binary(UOP_ADD, acc, item);
+  }
+  return acc;
+}
+
 int main(void) {
   thvm_init();
 
@@ -173,6 +187,38 @@ int main(void) {
   unsetenv("THVM_TILE");
   unsetenv("THVM_INLINE_MULTI_CONSUMER_PURE");
   unsetenv("THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL");
+
+  TEST_BEGIN("realize-classify/metal-fanin-cap-splits-wide-mul-parent");
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_TILE", "1", 1);
+  setenv("THVM_METAL_FUSION_MAX_INPUTS", "24", 1);
+  thvm_free();
+  thvm_init();
+  Term xs[34];
+  for (u32 i = 0; i < 34; i++) {
+    xs[i] = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(32));
+  }
+  Term tree_a = wide_reshape_add_tree(&xs[0], 16, 32);
+  Term prod   = uop_binary(UOP_MUL, tree_a, tree_a);
+  Term scale  = uop_const(DT_FP32, 0x3DCCCCCDu);
+  Term left_m = uop_binary(UOP_MUL, prod, scale);
+  Term right_m = uop_binary(UOP_MUL, xs[32], xs[33]);
+  Term wide_root = uop_binary(UOP_ADD, left_m, right_m);
+  realize_classify(wide_root);
+  CHECK(realize_rewrite_stat_hits("metal-tile-fanin-cap") >= 1);
+  CHECK(realize_is_realized(tree_a) || realize_is_realized(left_m)
+      || realize_is_realized(prod));
+
+  TEST_BEGIN("realize-classify/metal-fanin-cap-splits-unary-wrapper");
+  Term tree_c = wide_reshape_add_tree(&xs[0], 16, 32);
+  Term wide_neg = uop_unary(UOP_NEG, uop_binary(UOP_MUL, tree_c, tree_c));
+  Term wide_unary_root = uop_binary(UOP_ADD, wide_neg, right_m);
+  realize_classify(wide_unary_root);
+  CHECK(realize_rewrite_stat_hits("metal-tile-fanin-cap") >= 1);
+  CHECK(realize_is_realized(wide_neg) || realize_is_realized(tree_c));
+  unsetenv("THVM_BACKEND");
+  unsetenv("THVM_TILE");
+  unsetenv("THVM_METAL_FUSION_MAX_INPUTS");
 
   thvm_free();
   TEST_REPORT();

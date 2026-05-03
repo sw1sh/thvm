@@ -16,6 +16,11 @@ static u32 alloc_f32_tensor(u32 dim) {
   return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
+static Term kernel_id_from_term(Term t) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_KERNEL) return 0;
+  return heap_read(term_val(t) + 1);
+}
+
 int main(void) {
   thvm_init();
 
@@ -71,6 +76,28 @@ int main(void) {
   CHECK_EQ(materialize_boundary_count(), 2u);
   CHECK_EQ(materialize_boundary_at(0), term_val(inner_red));
   CHECK_EQ(materialize_boundary_at(1), term_val(outer_red));
+
+  TEST_BEGIN("materialize-v2/repeated-inline-uop-lowers-once");
+  thvm_free();
+  thvm_init();
+  u32 te0 = alloc_f32_tensor(4), te1 = alloc_f32_tensor(4);
+  u32 te2 = alloc_f32_tensor(4), te3 = alloc_f32_tensor(4);
+  Term e0 = term_new(0, TAG_TEN, DT_FP32, te0);
+  Term e1 = term_new(0, TAG_TEN, DT_FP32, te1);
+  Term e2 = term_new(0, TAG_TEN, DT_FP32, te2);
+  Term e3 = term_new(0, TAG_TEN, DT_FP32, te3);
+  Term sum01 = uop_binary(UOP_ADD, e0, e1);
+  Term sum23 = uop_binary(UOP_ADD, e2, e3);
+  Term tree = uop_binary(UOP_ADD, sum01, sum23);
+  Term square = uop_binary(UOP_MUL, tree, tree);
+  Term out = thvm_materialize(square);
+  Term kid_term = kernel_id_from_term(out);
+  CHECK_EQ(term_tag(kid_term), TAG_NUM);
+  u32 kid = (u32)term_val(kid_term);
+  CHECK_EQ(KERNELS[kid].n_inputs, 4u);
+  CHECK_EQ(KERNELS[kid].n_ops, 4u);
+  CHECK_EQ(KERNELS[kid].program[3].opcode, UOP_MUL);
+  CHECK_EQ(KERNELS[kid].program[3].src[0], KERNELS[kid].program[3].src[1]);
 
   thvm_free();
   TEST_REPORT();

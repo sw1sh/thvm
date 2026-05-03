@@ -229,11 +229,12 @@ static u32 realize_metal_tile_fanin_cap(void) {
       return (u32)v;
     }
   }
-  return 30;
+  return 24;
 }
 
 static int realize_fanin_split_child_op(u8 op) {
-  return op == UOP_ADD || op == UOP_MUL
+  return uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
+      || op == UOP_CAST    || op == UOP_BITCAST
       || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
       || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
 }

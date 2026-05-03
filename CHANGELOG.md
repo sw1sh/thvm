@@ -6,6 +6,15 @@ dated section.
 
 ## Unreleased
 
+### Changed: keep Metal tile fan-in under a conservative budget
+
+The Metal tile fan-in cap now defaults to 24 inputs, splits through
+pure elementwise/cast/view wrappers, and has a `DUMP_BIG_INPUT_SOURCE=1`
+debug dump for oversized source UOp roots.  The materializer also
+memoizes repeated UOp locs while lowering one boundary, so shared
+inline subgraphs become one KProg SSA value instead of duplicated
+program ops.
+
 ### Changed: split movement-wrapped wide Metal tile graphs
 
 The Metal tile fan-in cap now treats movement wrappers as legal split

@@ -42,12 +42,22 @@ Current rules:
 - `metal-tile-fanin-cap`
 
 `metal-tile-fanin-cap` splits oversized Metal tile boundaries through
-ADD/MUL and movement-wrapper children, so wide elementwise updates
-hidden behind `RESHAPE`/`PAD`-style views stay below the direct Metal
-buffer argument limit.
+pure elementwise, cast/bitcast, and movement-wrapper children, so wide
+updates hidden behind scalar/view wrappers stay below the direct Metal
+buffer argument limit.  The default budget is 24 inputs; this leaves
+headroom below the 30-input direct Metal path and avoids fusing the
+largest movement-heavy conv/backward trees into slow oversized tile
+kernels.  Set `THVM_METAL_FUSION_MAX_INPUTS=N` to override it.
 
 Set `DUMP_REWRITE=1` or `DUMP_FUSION_REWRITE=1` to print rule hit
-counts during `realize_classify`.
+counts during `realize_classify`.  Set `DUMP_BIG_INPUT_SOURCE=1` to
+dump source UOp roots for any emitted kernel that still exceeds the
+direct Metal input budget.
+
+The materializer now also memoizes UOp locs during one boundary's
+`visit()` pass.  Repeated shared inline subgraphs become one KProg SSA
+value instead of duplicated program ops, matching the realize map's
+heap-loc dedup model.
 
 `src/uop/view.c`, `src/uop/graph_rewrite.c`, and
 `src/uop/graph_simplify.c` are the first UOp-level graph substitution

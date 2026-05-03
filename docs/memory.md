@@ -229,14 +229,16 @@ slightly but produced unsupported fat kernels that fell back to
 Metal fan-in cap still runs afterward, so over-wide ADD/MUL trees are
 split before codegen hits the direct buffer-argument limit.
 
-After replay slot packing and large multi-consumer `EXPAND`
-relaxation, the current BS=32 `beautiful_mnist` training replay
-retains about `1.69GB` of live Metal buffers.  That is much better than
-the earlier `5.3GB` audited replay set, but it is still too large for
-broad autotune sweeps.  Use bounded one-step canaries until the
-remaining conv/backward movement producers are fused or recomputed
-inside their consumers.  The current bounded canary packs `1109`
-dispatch outputs.
+After replay slot packing, large multi-consumer `EXPAND` relaxation,
+and the conservative Metal fan-in cap, the current BS=32
+`beautiful_mnist` training replay retains about `1.63GB` of live Metal
+buffers and no longer falls back to `metal-op` for the two 34-input
+gradient-accumulation kernels.  That is much better than the earlier
+`5.3GB` audited replay set, but it is still too large for broad
+autotune sweeps.  Use bounded one-step canaries until the remaining
+conv/backward movement producers are fused or recomputed inside their
+consumers.  The current bounded canary packs about `1112` dispatch
+outputs.
 
 `DUMP_MEMORY_PLAN=1` on `wl/Examples/beautiful-mnist/bench-train.wls`
 prints the largest live Metal buffers with producer-kernel metadata.
