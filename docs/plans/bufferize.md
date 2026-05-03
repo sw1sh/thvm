@@ -450,10 +450,18 @@ Tasks:
 - reroute `RngsCtx` chain construction in `schedule/rangeify.c`
   through `bufferize_edge_summary` so the canonical chain drives
   codegen instead of the heap-walk-derived `KProgOp` chain
-  (pending - all data plumbing is in place, the remaining work
-  is replacing the per-input addressing logic);
+  (pending - the per-slot link covers the simple case of a
+  single edge per input, but a producer reached via two distinct
+  movement chains in one consumer dedups into a single input slot
+  while emitting two `BIndex` records.  Per-USE rerouting needs
+  a `KProgOp.chain_op_idx` field populated during `visit()` so each
+  movement-op KProgOp can name its corresponding `BIndexChainOp`,
+  then a parallel BIndex-driven version of `rngs_ctx_movement_src`
+  to consume the data.  Both pieces are tracked as separate
+  follow-up work);
 - preserve valid masks through `S_IWHERE` from `has_pad` rather than
-  rederiving them inside `rngs_ctx_pad` (pending).
+  rederiving them inside `rngs_ctx_pad` (pending - same per-USE
+  prerequisite).
 
 Until the rerouting lands, the graph data is informational and
 queryable; rangeify's existing per-USE addressing already produces
