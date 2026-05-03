@@ -6,6 +6,31 @@ dated section.
 
 ## Unreleased
 
+### Changed: rangeify reads movement-chain shapes from BIndexChainOp
+
+`schedule/rangeify.c`'s `rngs_ctx_reshape`, `rngs_ctx_expand`,
+`rngs_ctx_shrink`, `rngs_ctx_pad`, `rngs_ctx_flip`, and the
+PERMUTE arm of `rngs_ctx_movement_src` now read shapes, pad
+widths, axis perms, and flip masks from `BIndexChainOp` when the
+movement-op KProgOp has a valid bufferize edge.  A small
+`ChainShape` helper (`rngs_chain_shape`) calls
+`kernel_entry_prog_chain_op` to obtain the canonical edge entry
+and exposes `from_bindex` plus pointer-typed `src_dims`/`out_dims`;
+op-specific data (`pad_widths`, `axis_perm`, `flip_mask`) is
+pulled from the `BIndexChainOp` scratch when `from_bindex` is
+set, preserving exact behaviour when it isn't.
+
+This is the actual Phase 2 follow-up the plan called for: the
+canonical bufferize edge graph now drives codegen for every
+movement op whose KProgOp has a single-leaf chain and a
+non-broken `chain_input_slot`.  Kernel-root ops, identity ops,
+multi-source ops, and ops on leaf-input slots (no bufferize
+source) still fall back to `KProgOp` data unchanged.  Test suite
+stays at 255/255 in `tests/test_bufferize.c` plus all other tests
+green; behaviour is identical because BIndex chain data is
+sourced from the same heap shapes that materialize already
+populated.
+
 ### Changed: bufferize per-USE chain mapping covers all rangeify cases
 
 Fixes the three correctness blockers documented in `d9cd25e` so the

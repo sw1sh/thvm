@@ -948,17 +948,54 @@ fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
   return load;
 }
 
+// Resolve the chain dims to use for a movement-op KProgOp, preferring
+// the bufferize-graph BIndexChainOp when one is available and falling
+// back to KProgOp's own metadata.  Both representations carry the
+// same per-axis dims for movement ops; pulling them through a single
+// helper makes rangeify's chain composition canonical-edge-driven for
+// every kernel where the input slot has a bufferize source.
+typedef struct {
+  u32 const *src_dims;
+  u32 const *out_dims;
+  u8         src_ndim;
+  u8         out_ndim;
+  int        from_bindex;   // 1 if data came from BIndexChainOp
+} ChainShape;
+
+static ChainShape rngs_chain_shape(KernelEntry *ke, KProgOp const *p,
+                                   BIndexChainOp *scratch) {
+  ChainShape s = {0};
+  u32 kid = (u32)(ke - KERNELS);
+  u32 prog_idx = (u32)(p - ke->program);
+  if (kernel_entry_prog_chain_op(kid, prog_idx, scratch)) {
+    s.src_dims    = scratch->src_dims;
+    s.out_dims    = scratch->out_dims;
+    s.src_ndim    = scratch->src_ndim;
+    s.out_ndim    = scratch->out_ndim;
+    s.from_bindex = 1;
+  } else {
+    s.src_dims    = p->src0_dims;
+    s.out_dims    = p->out_dims;
+    s.src_ndim    = p->src0_ndim;
+    s.out_ndim    = p->out_ndim;
+    s.from_bindex = 0;
+  }
+  return s;
+}
+
 static int rngs_ctx_reshape(KernelEntry *ke, KProgOp const *p,
                             RngsCtx const *out, RngsCtx *in) {
-  if (p->src0_ndim == 0 || p->out_ndim == 0
-      || p->src0_ndim > MAX_DIM || p->out_ndim > MAX_DIM
-      || out->ndim != p->out_ndim) {
+  BIndexChainOp scratch;
+  ChainShape sh = rngs_chain_shape(ke, p, &scratch);
+  if (sh.src_ndim == 0 || sh.out_ndim == 0
+      || sh.src_ndim > MAX_DIM || sh.out_ndim > MAX_DIM
+      || out->ndim != sh.out_ndim) {
     return 0;
   }
   u32 out_strides[MAX_DIM];
-  row_major_strides(p->out_dims, p->out_ndim, out_strides);
+  row_major_strides(sh.out_dims, sh.out_ndim, out_strides);
   u32 flat = 0;
-  for (u32 d = 0; d < p->out_ndim; d++) {
+  for (u32 d = 0; d < sh.out_ndim; d++) {
     u32 t = out->refs[d];
     if (t == 0) return 0;
     if (out_strides[d] != 1) {
@@ -969,18 +1006,18 @@ static int rngs_ctx_reshape(KernelEntry *ke, KProgOp const *p,
   }
   if (flat == 0) flat = emit_iconst(ke, 0);
   u32 in_strides[MAX_DIM];
-  row_major_strides(p->src0_dims, p->src0_ndim, in_strides);
+  row_major_strides(sh.src_dims, sh.src_ndim, in_strides);
   memset(in, 0, sizeof(*in));
-  in->ndim = p->src0_ndim;
+  in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
-  for (u32 d = 0; d < p->src0_ndim; d++) {
+  for (u32 d = 0; d < sh.src_ndim; d++) {
     u32 coord = flat;
     if (in_strides[d] != 1) {
       u32 c = emit_iconst(ke, (i64)in_strides[d]);
       coord = emit_ibinop(ke, S_IDIV, coord, c);
     }
     if (d != 0) {
-      u32 dc = emit_iconst(ke, (i64)p->src0_dims[d]);
+      u32 dc = emit_iconst(ke, (i64)sh.src_dims[d]);
       coord = emit_ibinop(ke, S_IMOD, coord, dc);
     }
     in->refs[d] = coord;
@@ -990,16 +1027,18 @@ static int rngs_ctx_reshape(KernelEntry *ke, KProgOp const *p,
 
 static int rngs_ctx_expand(KernelEntry *ke, KProgOp const *p,
                            RngsCtx const *out, RngsCtx *in) {
-  if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-      || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+  BIndexChainOp scratch;
+  ChainShape sh = rngs_chain_shape(ke, p, &scratch);
+  if (sh.out_ndim == 0 || sh.out_ndim > MAX_DIM
+      || sh.src_ndim > MAX_DIM || out->ndim != sh.out_ndim) {
     return 0;
   }
   memset(in, 0, sizeof(*in));
-  in->ndim = p->src0_ndim;
+  in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
-  for (u32 d = 0; d < p->src0_ndim; d++) {
-    u32 src_dim = p->src0_dims[d];
-    u32 out_dim = p->out_dims[d];
+  for (u32 d = 0; d < sh.src_ndim; d++) {
+    u32 src_dim = sh.src_dims[d];
+    u32 out_dim = sh.out_dims[d];
     in->refs[d] = (src_dim != out_dim) ? emit_iconst(ke, 0)
                                        : out->refs[d];
   }
@@ -1008,16 +1047,23 @@ static int rngs_ctx_expand(KernelEntry *ke, KProgOp const *p,
 
 static int rngs_ctx_shrink(KernelEntry *ke, KProgOp const *p,
                            RngsCtx const *out, RngsCtx *in) {
-  if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-      || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+  BIndexChainOp scratch;
+  ChainShape sh = rngs_chain_shape(ke, p, &scratch);
+  if (sh.out_ndim == 0 || sh.out_ndim > MAX_DIM
+      || sh.src_ndim > MAX_DIM || out->ndim != sh.out_ndim) {
     return 0;
   }
+  // Pad widths: BIndexChainOp stores u32 widths so SHRINK begin
+  // overruns of u8 don't truncate; KProgOp uses u8.  Read from
+  // whichever is the live source.
   memset(in, 0, sizeof(*in));
-  in->ndim = p->src0_ndim;
+  in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
-  for (u32 d = 0; d < p->src0_ndim; d++) {
+  for (u32 d = 0; d < sh.src_ndim; d++) {
     u32 ref = out->refs[d];
-    u32 begin = p->pad_widths[2 * d];
+    u32 begin = sh.from_bindex
+                  ? scratch.pad_widths[2 * d]
+                  : (u32)p->pad_widths[2 * d];
     if (begin != 0) {
       u32 c = emit_iconst(ke, (i64)begin);
       ref = emit_ibinop(ke, S_IADD, ref, c);
@@ -1029,16 +1075,20 @@ static int rngs_ctx_shrink(KernelEntry *ke, KProgOp const *p,
 
 static int rngs_ctx_pad(KernelEntry *ke, KProgOp const *p,
                         RngsCtx const *out, RngsCtx *in) {
-  if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-      || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+  BIndexChainOp scratch;
+  ChainShape sh = rngs_chain_shape(ke, p, &scratch);
+  if (sh.out_ndim == 0 || sh.out_ndim > MAX_DIM
+      || sh.src_ndim > MAX_DIM || out->ndim != sh.out_ndim) {
     return 0;
   }
   memset(in, 0, sizeof(*in));
-  in->ndim = p->src0_ndim;
+  in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
-  for (u32 d = 0; d < p->src0_ndim; d++) {
-    u32 begin   = p->pad_widths[2 * d];
-    u32 src_dim = p->src0_dims[d];
+  for (u32 d = 0; d < sh.src_ndim; d++) {
+    u32 begin = sh.from_bindex
+                  ? scratch.pad_widths[2 * d]
+                  : (u32)p->pad_widths[2 * d];
+    u32 src_dim = sh.src_dims[d];
     u32 ref     = out->refs[d];
     if (ref == 0) return 0;
     u32 src_ref = ref;
@@ -1055,18 +1105,22 @@ static int rngs_ctx_pad(KernelEntry *ke, KProgOp const *p,
 
 static int rngs_ctx_flip(KernelEntry *ke, KProgOp const *p,
                          RngsCtx const *out, RngsCtx *in) {
-  if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-      || p->src0_ndim > MAX_DIM || out->ndim != p->out_ndim) {
+  BIndexChainOp scratch;
+  ChainShape sh = rngs_chain_shape(ke, p, &scratch);
+  if (sh.out_ndim == 0 || sh.out_ndim > MAX_DIM
+      || sh.src_ndim > MAX_DIM || out->ndim != sh.out_ndim) {
     return 0;
   }
   memset(in, 0, sizeof(*in));
-  in->ndim = p->src0_ndim;
+  in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
-  u32 mask = p->arg & 0xFFu;
-  for (u32 d = 0; d < p->src0_ndim; d++) {
+  // FLIP mask: BIndexChainOp records the per-axis bitmask in
+  // flip_mask; KProgOp keeps it in `arg`.
+  u32 mask = sh.from_bindex ? (u32)scratch.flip_mask : (p->arg & 0xFFu);
+  for (u32 d = 0; d < sh.src_ndim; d++) {
     u32 ref = out->refs[d];
     if (mask & (1u << d)) {
-      u32 ext = p->src0_dims[d] > 0 ? p->src0_dims[d] : 1;
+      u32 ext = sh.src_dims[d] > 0 ? sh.src_dims[d] : 1;
       u32 c = emit_iconst(ke, (i64)(ext - 1));
       ref = emit_ibinop(ke, S_ISUB, c, ref);
     }
@@ -1094,15 +1148,21 @@ static int rngs_ctx_movement_src(KernelEntry *ke, KProgOp const *p,
     case UOP_FLIP:
       return rngs_ctx_flip(ke, p, out, in);
     case UOP_PERMUTE: {
-      if (p->out_ndim == 0 || p->out_ndim > MAX_DIM
-          || out->ndim != p->out_ndim) {
+      BIndexChainOp scratch;
+      ChainShape sh = rngs_chain_shape(ke, p, &scratch);
+      if (sh.out_ndim == 0 || sh.out_ndim > MAX_DIM
+          || out->ndim != sh.out_ndim) {
         return 0;
       }
       memset(in, 0, sizeof(*in));
-      in->ndim = p->out_ndim;
+      in->ndim = sh.out_ndim;
       in->valid_mask = out->valid_mask;
-      for (u32 d = 0; d < p->out_ndim; d++) {
-        u8 src_axis = p->axis_perm[d];
+      // axis_perm comes from BIndexChainOp when available (u8[MAX_DIM]
+      // in both representations).
+      u8 const *axis_perm = sh.from_bindex ? scratch.axis_perm
+                                           : p->axis_perm;
+      for (u32 d = 0; d < sh.out_ndim; d++) {
+        u8 src_axis = axis_perm[d];
         if (src_axis >= MAX_DIM) {
           return 0;
         }

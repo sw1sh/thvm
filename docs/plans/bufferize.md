@@ -454,12 +454,13 @@ Tasks:
   aligned across `bufferize_apply_identity_reshape` elision~~;
 - ~~kernel-root op gets no BIndex chain entry (math handled by
   the in-range check)~~;
-- reroute `RngsCtx` chain construction in `schedule/rangeify.c`
+- ~~reroute `RngsCtx` chain construction in `schedule/rangeify.c`
   through `kernel_entry_prog_chain_op` so the canonical chain
   drives codegen instead of `KProgOp.src0_dims`/`out_dims`/
-  `pad_widths`/`axis_perm` (pending - all blockers cleared,
-  remaining work is replacing each `rngs_ctx_*` op body with a
-  `BIndexChainOp`-reading variant);
+  `pad_widths`/`axis_perm`~~ (landed: all six `rngs_ctx_*`
+  movement composers go through a `rngs_chain_shape` helper that
+  prefers `BIndexChainOp` when the slot has a single-leaf chain
+  with a non-broken `chain_input_slot`);
 - preserve valid masks through `S_IWHERE` from `has_pad` rather than
   rederiving them inside `rngs_ctx_pad` (pending - same per-USE
   prerequisite).
