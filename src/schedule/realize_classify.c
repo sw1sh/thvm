@@ -152,6 +152,30 @@ static void realize_walk_rec(Term t, u8 *visited) {
   }
 }
 
+static int realize_dump_fusion_candidates_enabled(void);
+
+// Walk through layout-only wrappers (EXPAND/RESHAPE/PERMUTE) and
+// CAST/BITCAST to bottom out at a UOP_CONST.  Used by the
+// broadcast-reduce predicate to recognize ALU patterns where a scalar
+// constant has been broadcast to match the post-reduce shape - e.g.
+// `mean = reduce / N` lowers to `MUL(reduce, EXPAND(CONST(1/N)))` via
+// the WL Times / liftNumeric / broadcastScalar pipeline in Tensor.wl.
+// Recursion is bounded by the heap; in practice the wrapper depth is 1-2.
+static int realize_term_is_broadcast_of_const(Term t, u32 depth) {
+  if (depth > 8) return 0;
+  t = term_resolve(t);
+  if (term_tag(t) != TAG_UOP) return 0;
+  u8 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_CONST) return 1;
+  if (op == UOP_EXPAND || op == UOP_RESHAPE || op == UOP_PERMUTE
+   || op == UOP_CAST   || op == UOP_BITCAST) {
+    Term src = term_resolve(heap_read(loc));
+    return realize_term_is_broadcast_of_const(src, depth + 1);
+  }
+  return 0;
+}
+
 // Walk the heap looking for the unique UOp parent of `child_loc`.
 // Returns the parent's loc, or 0 if there are zero or 2+ parents.
 // Used by the softmax-relaxation pass to confirm the consumer chain.
@@ -179,68 +203,98 @@ static u64 realize_unique_uop_parent(u64 child_loc) {
 // Walk a single chain branch starting from a *given* parent of a
 // reduce (or any other node) and verify it ends in EXPAND through
 // scalar-preserving ops.  Mirrors the historical
-// realize_reduce_consumer_is_broadcast_chain body but starts at
-// `parent` instead of finding it via realize_unique_uop_parent, so
-// the multi-parent rule can call it once per branch.
-static int realize_chain_from_parent_is_broadcast(u64 parent_loc) {
-  u64 cur = parent_loc;
-  for (u32 hops = 0; hops < 8; hops++) {
-    u32 idx = realize_info_find(cur);
-    if (idx == 0xFFFFFFFFu) return 0;
-    u8 pop = REALIZE_INFO[idx].op;
-    if (pop == UOP_EXPAND) return 1;
-    if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
-     || pop == UOP_EXP2 || pop == UOP_LOG2) {
-      u64 next = realize_unique_uop_parent(cur);
-      if (next == 0) return 0;
-      cur = next;
-      continue;
-    }
-    if (pop == UOP_ADD || pop == UOP_MUL) {
-      Term ca = term_resolve(heap_read(cur + 0));
-      Term cb = term_resolve(heap_read(cur + 1));
-      u8 has_const = 0;
-      if (term_tag(ca) == TAG_UOP && term_ext(ca) == UOP_CONST) has_const = 1;
-      if (term_tag(cb) == TAG_UOP && term_ext(cb) == UOP_CONST) has_const = 1;
-      if (!has_const) return 0;
-      u64 next = realize_unique_uop_parent(cur);
-      if (next == 0) return 0;
-      cur = next;
-      continue;
-    }
-    return 0;
+// Test whether the op at `cur` is a scalar-preserving chain hop -
+// either a unary scalar function, a layout-only movement op (RESHAPE/
+// PERMUTE), or an ALU op whose other operand is a (possibly broadcast)
+// constant.  `cur` is the loc of the current node; the predicate must
+// inspect the node's children for the ALU case.
+static int realize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
+  if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
+   || pop == UOP_EXP2 || pop == UOP_LOG2
+   || pop == UOP_RESHAPE || pop == UOP_PERMUTE) {
+    return 1;
+  }
+  if (pop == UOP_ADD || pop == UOP_MUL) {
+    Term ca = term_resolve(heap_read(cur + 0));
+    Term cb = term_resolve(heap_read(cur + 1));
+    if (realize_term_is_broadcast_of_const(ca, 0)) return 1;
+    if (realize_term_is_broadcast_of_const(cb, 0)) return 1;
   }
   return 0;
 }
 
-// Multi-parent variant: returns 1 iff EVERY UOp parent of
-// `reduce_loc` has a chain that ends in EXPAND.  Catches
-// BN-style reduces whose mean is consumed by both a centering
-// branch (REDUCE -> NEG -> ADD -> EXPAND) and a sister branch
-// also feeding an EXPAND (e.g. running-mean update post-grad);
-// fan-out by itself doesn't disqualify when both branches
-// broadcast back.  Returns 0 if any branch breaks the pattern OR
-// if the reduce has zero UOp parents.
-static int realize_reduce_consumer_is_broadcast_chain_all_parents(
-    u64 reduce_loc) {
+// Returns 1 iff every UOp parent of child_loc has a chain that
+// bottoms out at EXPAND through scalar-preserving hops.  Used both
+// at the top of the predicate (when the reduce itself has fan-out)
+// and at intermediate hops (when an internal node like the BN-mean
+// MUL is shared between forward and backward branches).
+static int realize_chain_walk_all_parents_is_broadcast(
+    u64 child_loc, u32 hops_left);
+
+// Walk a single chain starting from `parent_loc` and confirm it
+// bottoms out at EXPAND.  When the current node is multi-consumer,
+// recursively confirm every parent branch ends at EXPAND.  Bounded
+// by `hops_left` to avoid pathological recursion.
+static int realize_chain_walk_is_broadcast(u64 parent_loc, u32 hops_left) {
+  u64 cur = parent_loc;
+  while (hops_left > 0) {
+    u32 idx = realize_info_find(cur);
+    if (idx == 0xFFFFFFFFu) return 0;
+    u8 pop = REALIZE_INFO[idx].op;
+    if (pop == UOP_EXPAND) return 1;
+    if (!realize_chain_hop_is_scalar_preserving(cur, pop)) return 0;
+    u64 next = realize_unique_uop_parent(cur);
+    if (next == 0) {
+      // Multi-consumer intermediate: descend into every parent.
+      // Each parent's chain must independently end at EXPAND.
+      return realize_chain_walk_all_parents_is_broadcast(cur, hops_left - 1);
+    }
+    cur = next;
+    hops_left--;
+  }
+  return 0;
+}
+
+static int realize_chain_walk_all_parents_is_broadcast(
+    u64 child_loc, u32 hops_left) {
+  if (hops_left == 0) return 0;
   u32 n_parents = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     u64 ploc = REALIZE_INFO[i].loc;
-    if (ploc == reduce_loc) continue;
+    if (ploc == child_loc) continue;
     u8  pop  = REALIZE_INFO[i].op;
     u8  ar   = uop_arity(pop);
     int hits = 0;
     for (u8 j = 0; j < ar; j++) {
       Term c = term_resolve(heap_read(ploc + j));
-      if (term_tag(c) == TAG_UOP && term_val(c) == reduce_loc) {
+      if (term_tag(c) == TAG_UOP && term_val(c) == child_loc) {
         hits = 1; break;
       }
     }
     if (!hits) continue;
-    if (!realize_chain_from_parent_is_broadcast(ploc)) return 0;
+    if (!realize_chain_walk_is_broadcast(ploc, hops_left)) return 0;
     n_parents++;
   }
   return n_parents > 0;
+}
+
+// realize_reduce_consumer_is_broadcast_chain body but starts at
+// `parent` instead of finding it via realize_unique_uop_parent, so
+// the multi-parent rule can call it once per branch.
+//
+// Scalar-preserving chain ops:
+// - UNARY scalar fns: NEG/RECIP/SQRT/EXP2/LOG2 - same value, same shape.
+// - BINARY ALU with broadcast-of-CONST sibling: ADD/MUL where the
+//   other operand is a CONST or `EXPAND(CONST)` keeps the post-reduce
+//   shape.  The WL Times UpValue lowers `t / N` to `MUL(t, EXPAND(CONST))`,
+//   so the wrapper-walk via realize_term_is_broadcast_of_const is what
+//   catches BatchNorm-style mean / variance reductions.
+// - Pure movement: RESHAPE/PERMUTE do not change scalar values; they only
+//   relayout the producer's output.  Critical for BatchNorm-style chains:
+//   `REDUCE_SUM -> MUL(EXPAND(CONST 1/N)) -> RESHAPE({1,C,1,1}) -> EXPAND({B,C,H,W})`
+//   where the RESHAPE prepares the broadcast axes before the EXPAND.
+static int realize_chain_from_parent_is_broadcast(u64 parent_loc) {
+  return realize_chain_walk_is_broadcast(parent_loc, 8);
 }
 
 // Walk a REDUCE's consumer chain and return 1 iff every hop is
@@ -248,37 +302,14 @@ static int realize_reduce_consumer_is_broadcast_chain_all_parents(
 // vector shape).  The chain pattern this matches is the
 // TSoftmax / "normalize by sum" idiom plus the BatchNorm
 // mean -> (... - mean) -> EXPAND idiom:
-//     REDUCE -> {NEG|RECIP|SQRT|EXP2|LOG2}? -> {ADD|MUL}*(CONST sib) ->
-//     EXPAND
-// `binary with CONST sibling` keeps the post-reduce shape the same,
-// so propagating through it is still scalar-preserving.
+//     REDUCE -> {NEG|RECIP|SQRT|EXP2|LOG2|RESHAPE|PERMUTE}* ->
+//     {ADD|MUL}*(broadcast-of-CONST sib) -> EXPAND
+// Multi-consumer intermediates are handled by branching the chain
+// check across all parents - every branch must independently end at
+// EXPAND.  This is what unblocks BN-mean (forward+backward share the
+// {C}-shape mean, both reach EXPAND through different RESHAPE branches).
 static int realize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
-  u64 cur = reduce_loc;
-  for (u32 hops = 0; hops < 8; hops++) {     // bounded -- pathological chain bails
-    u64 parent = realize_unique_uop_parent(cur);
-    if (parent == 0) return 0;
-    u32 idx = realize_info_find(parent);
-    if (idx == 0xFFFFFFFFu) return 0;
-    u8 pop = REALIZE_INFO[idx].op;
-    if (pop == UOP_EXPAND) return 1;          // success: chain bottoms out at broadcast
-    if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
-     || pop == UOP_EXP2 || pop == UOP_LOG2) {
-      cur = parent;
-      continue;
-    }
-    if (pop == UOP_ADD || pop == UOP_MUL) {
-      Term ca = term_resolve(heap_read(parent + 0));
-      Term cb = term_resolve(heap_read(parent + 1));
-      u8 has_const = 0;
-      if (term_tag(ca) == TAG_UOP && term_ext(ca) == UOP_CONST) has_const = 1;
-      if (term_tag(cb) == TAG_UOP && term_ext(cb) == UOP_CONST) has_const = 1;
-      if (!has_const) return 0;
-      cur = parent;
-      continue;
-    }
-    return 0;     // any other op (movement-other, REDUCE) breaks the pattern
-  }
-  return 0;
+  return realize_chain_walk_all_parents_is_broadcast(reduce_loc, 8);
 }
 
 // Phase C-2 relaxation: a REDUCE whose single consumer is an ALU
@@ -1327,33 +1358,16 @@ static int realize_reduce_fuse_multi_enabled(void) {
 // independently and the consumer_count == 1 fast-reject is just
 // an optimisation.  Without it, multi-consumer REDUCEs whose
 // branches all bottom out at the same EXPAND would be considered.
-//
-// Phase 5 follow-up: the multi-parent variant
-// realize_reduce_consumer_is_broadcast_chain_all_parents accepts
-// fan-out reduces (BN-style) when EVERY parent's chain ends in
-// EXPAND.  Default-on; THVM_BUFFERIZE_REDUCE_FANOUT_BROADCAST=0
-// reverts to the unique-parent shortcut.
-static int realize_reduce_fanout_broadcast_enabled(void) {
-  char const *e = getenv("THVM_BUFFERIZE_REDUCE_FANOUT_BROADCAST");
-  return e == NULL ? 1 : (e[0] != '0');
-}
-
 static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
   (void)root;
   if (!realize_reduce_fuse_multi_enabled() && realize_reduce_count() != 1) {
     return 0;
   }
-  int try_multi = realize_reduce_fanout_broadcast_enabled();
   u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->op != UOP_REDUCE)    continue;
-    int matches =
-        realize_reduce_consumer_is_broadcast_chain(info->loc)
-     || (try_multi
-         && realize_reduce_consumer_is_broadcast_chain_all_parents(
-             info->loc));
-    if (!matches) continue;
+    if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
     if (info->realized) hits++;
     realize_unmark(info, REALIZE_REASON_INLINE);
   }

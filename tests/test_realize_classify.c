@@ -308,6 +308,62 @@ int main(void) {
   unsetenv("THVM_TILE");
   unsetenv("THVM_METAL_FUSION_MAX_INPUTS");
 
+  TEST_BEGIN("realize-classify/broadcast-reduce-bn-mean-chain-inlines");
+  // Phase-1 of tinygrad rule port: the broadcast-reduce predicate
+  // must accept the BatchNorm-mean chain shape produced by WL's
+  // `reduce / N` lowering:
+  //
+  //   REDUCE_SUM -> MUL(reduce, EXPAND(CONST 1/N))
+  //              -> RESHAPE({1, C, 1, 1})
+  //              -> EXPAND({B, C, H, W})
+  //
+  // The MUL's other operand is `EXPAND(CONST)` (not a bare CONST)
+  // because liftNumeric/broadcastScalar wraps the literal scalar.
+  // RESHAPE+PERMUTE must be valid chain hops.  Without these
+  // relaxations every BN reduce stays realized and the canary kernel
+  // count stays at the unfused 1070+.
+  thvm_free();
+  thvm_init();
+  u32 t_bn = alloc_f32_tensor2(2, 4);     // {B*H*W, C} flattened source
+  Term bn_x  = term_new(0, TAG_TEN, DT_FP32, t_bn);
+  Term bn_r  = uop_reduce(REDUCE_SUM, 0, bn_x);    // shape {4}
+  Term bn_inv_n = uop_const(DT_FP32, 0x3F000000u); // 0.5 (just any scalar)
+  u32 bn_inv_dims[1] = {4};
+  Term bn_inv_b = uop_expand(bn_inv_n, 1, bn_inv_dims);
+  Term bn_mean  = uop_binary(UOP_MUL, bn_r, bn_inv_b);   // {4}
+  u32 bn_rs_dims[2] = {1, 4};
+  Term bn_rs    = uop_reshape(bn_mean, 2, bn_rs_dims);   // {1, 4}
+  u32 bn_ex_dims[2] = {2, 4};
+  Term bn_ex    = uop_expand(bn_rs, 2, bn_ex_dims);      // {2, 4}
+  Term bn_root  = uop_binary(UOP_ADD, bn_x, bn_ex);
+  realize_classify(bn_root);
+  // The reduce should be inlined by inline-softmax-broadcast-reduce.
+  CHECK_EQ(realize_is_realized(bn_r), 0);
+  CHECK(realize_reasons(bn_r) & REALIZE_REASON_INLINE);
+  CHECK(realize_rewrite_stat_hits("inline-softmax-broadcast-reduce") >= 1);
+
+  TEST_BEGIN("realize-classify/broadcast-reduce-rejects-non-broadcast-tail");
+  // Negative test: REDUCE whose parent ALU has a NON-CONST sibling
+  // (here `nb_x` itself, broadcast back to the reduce shape via a
+  // separate REDUCE chain) breaks the predicate.  Without a CONST
+  // sibling the post-reduce-shape invariant doesn't hold and the
+  // chain must NOT inline.
+  thvm_free();
+  thvm_init();
+  u32 t_nb = alloc_f32_tensor2(4, 8);
+  Term nb_x = term_new(0, TAG_TEN, DT_FP32, t_nb);
+  Term nb_r = uop_reduce(REDUCE_SUM, 0, nb_x);  // shape {8}
+  // Sibling is a scalar tensor of unrelated shape, NOT a const wrapper.
+  u32 t_sib = alloc_f32_tensor(8);
+  Term nb_sib = term_new(0, TAG_TEN, DT_FP32, t_sib);
+  Term nb_alu = uop_binary(UOP_MUL, nb_r, nb_sib);  // sibling is TEN, not CONST
+  u32 nb_ex_dims[2] = {4, 8};
+  Term nb_root = uop_expand(uop_reshape(nb_alu, 2,
+                                        (u32[]){1, 8}),
+                            2, nb_ex_dims);
+  realize_classify(nb_root);
+  CHECK_EQ(realize_is_realized(nb_r), 1);    // no broadcast-of-CONST sibling
+
   thvm_free();
   TEST_REPORT();
 }

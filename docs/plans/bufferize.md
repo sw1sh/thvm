@@ -757,43 +757,49 @@ need to re-design the storage.
 ## Current Baseline
 
 Latest bounded Metal/tile beautiful-mnist canary
-(`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`) after the
-full Phase 0-7 data layer + Phase 2 rangeify rerouting + Phase 3
-identity elision + Phase 4 cost-score rule (T=50000) + Phase 5
-multi-reduce gate lift + Phase 6 lifetime parity + Phase 5
-movement-reduce gate lift (Phase 2 unblocked it):
+(`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`) after Phase
+1 of the tinygrad rule port (broadcast-reduce predicate
+generalisation) on top of the existing Phase 0-7 data layer:
 
-- timed step: about `616 ms` (vs `694 ms` reference, -11%);
-- kernels: `1214` (vs `1330`, -8.7%);
-- dispatch: `metal-tile=1069`, `metal-alias=144`, `metal-op=1`
-  (vs `1186`/`144`/0, no metal-jit fallback);
-- retained Metal memory: about `2.66 GB` (similar);
-- live Metal memory: about `1.62 GB` (slight drop);
-- peak live Metal: about `3.48 GB` (vs `3.55 GB`, -2%).
+- timed step: `168.4 ms` (vs `694 ms` original reference, -75.7%;
+  vs `428 ms` pre-Phase-1 baseline, -60.7%);
+- kernels: `113` (vs `1330` original reference, -91.5%; vs `1070`
+  pre-Phase-1 baseline, -89.4%);
+- dispatch: `metal-tile=86`, `metal-op=27` (the 27 metal-op
+  fallbacks are merged kernels that exceed the tile-jit per-op
+  budget and route to the per-op encoder);
+- peak retained Metal memory: `392 MB` (vs `1881 MB` pre-Phase-1
+  baseline, -79.2%).
 
-The bufferize-graph machinery is now the canonical schedule
-representation, but the wall-time win on this canary is
-**marginal-to-noise**.  Rule-firing telemetry from the canary
-(`DUMP_REWRITE=1`) shows the rules added by the bufferize plan
-rarely fire on beautiful-mnist:
+Phase 1 alone closed most of the kernel-count gap.  The chain
+predicate now matches BatchNorm-train / BN-grad shapes via:
 
-- `remove-by-cost-score`: 0 hits at T=50000.  Lower thresholds
-  fire more but force kernels into metal-jit fallback (slower
-  net wall time).  The cost-score rule needs a tile-feasibility
-  guard - some way to predict "would this removal push the
-  consumer kernel past the tile path's op budget" - before it
-  can safely lower its threshold.
-- `inline-softmax-broadcast-reduce`: 0 hits even with the
-  multi-reduce gate lifted.  Beautiful-mnist's REDUCEs are
-  Adam-moment / BatchNorm shapes that don't match the strict
-  scalar-preserving-unary-chain-ending-in-EXPAND pattern.
-- `inline-reduce-scalar-tail`: 0 hits.
+- `realize_term_is_broadcast_of_const` walks through
+  `EXPAND/RESHAPE/PERMUTE/CAST/BITCAST` to bottom out at a CONST
+  (so the WL `t / N` lowering's `MUL(t, EXPAND(CONST))` form is
+  recognised as having a const sibling);
+- RESHAPE/PERMUTE are valid scalar-preserving chain hops;
+- multi-consumer intermediates fan the chain check to every
+  parent (entry-point predicate is now always multi-parent and
+  strictly subsumes the legacy unique-parent walk).
 
-The realize-rules that DO fire are the pre-bufferize ones
-(`remove-removable-bufferize`, `inline-constants`,
-`inline-large-expand-fanout`).  The plan moved every realize
-decision onto the bufferize graph and made it observable, but
-it didn't make the existing rule set fire more often.
+Per-rule telemetry on the post-Phase-1 canary
+(`DUMP_REWRITE=1`):
+
+- `inline-softmax-broadcast-reduce`: 27 hits per training-graph
+  classify (vs 0 pre-Phase-1) - this is the single rule that
+  drove the kernel-count drop;
+- `inline-reduce-scalar-tail`: now occasionally fires (loss reduce);
+- `inline-adjacent-reduce-chains`: occasionally fires (4 hits
+  observed in one classify - the 3-axis BN reduce);
+- `remove-by-cost-score`: still infrequent without
+  tile-feasibility feedback, but fires 1-16x in some classifies
+  now that the realize-rule order leaves more candidates eligible.
+
+The 27 metal-op fallbacks are the next item in line.  Each is a
+fused BN-style kernel whose merged scalar program exceeds the
+tile-jit op budget; lifting them back onto tile-jit would cut
+~60 ms off the wall time.
 
 Where the next measurable wins live:
 

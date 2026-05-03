@@ -6,6 +6,63 @@ dated section.
 
 ## Unreleased
 
+### Changed: Generalised broadcast-reduce predicate (Phase 1 of tinygrad rule port)
+
+`realize_rule_inline_softmax_broadcast_reduce` now matches the chain
+shapes that BatchNorm-train, BatchNorm-grad, and softmax actually
+produce in WL.  Previously the predicate required a strict
+`REDUCE -> {NEG|RECIP|SQRT|EXP2|LOG2}? -> {ADD|MUL}*(CONST sib) ->
+EXPAND` chain with unique parents at every hop, which fired 0 times
+on the bounded beautiful-mnist canary because:
+
+1. The WL `Times` UpValue lowers `t / N` to
+   `MUL(t, EXPAND(CONST 1/N))`, not `MUL(t, CONST)`, so the
+   const-sibling check missed every `reduce / N` divide.
+2. RESHAPE/PERMUTE were not allowed as chain hops, but
+   `mean.expand(targetShape)` actually goes through
+   `EXPAND(RESHAPE(mean, {1,C,1,1}), {B,C,H,W})` to insert the
+   broadcast axes.
+3. `realize_unique_uop_parent` returned 0 at the first
+   multi-consumer intermediate, but BN's mean is consumed by both
+   the forward centering branch and a backward branch.
+
+Three matching relaxations:
+
+- New helper `realize_term_is_broadcast_of_const` walks through
+  `EXPAND/RESHAPE/PERMUTE/CAST/BITCAST` wrappers to bottom out at
+  a UOP_CONST.  The ALU sibling check uses this instead of bare
+  CONST.
+- RESHAPE and PERMUTE are added to the scalar-preserving chain
+  ops list (next to NEG/RECIP/SQRT/EXP2/LOG2).
+- `realize_chain_walk_is_broadcast` falls back to a
+  multi-parent walk via `realize_chain_walk_all_parents_is_broadcast`
+  whenever it hits a multi-consumer intermediate; every parent's
+  sub-chain must independently bottom at EXPAND.  The entry-point
+  predicate `realize_reduce_consumer_is_broadcast_chain` now
+  always uses the multi-parent walk, which strictly subsumes the
+  old unique-parent walk and the legacy `_all_parents` rule that
+  has been removed.
+
+**Canary impact** (BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6
+THVM_BACKEND=metal THVM_TILE=1):
+
+- kernels: 1070 -> 113 (-89.4%)
+- timed-step wall: 428.5 ms -> 168.4 ms (-60.7%)
+- peak retained Metal memory: 1881 MB -> 392 MB (-79.2%)
+- inline-softmax-broadcast-reduce hits per realize cycle: 0 -> up
+  to 5; 27 reduce buffers inlined per training graph
+
+The dispatch breakdown shifts from `metal-tile=1069 / metal-op=1`
+to `metal-tile=86 / metal-op=27`.  The 27 metal-op fallbacks are
+the merged kernels that exceed the tile-jit per-op budget; they
+still beat the unfused dispatch by a factor of 2-3 in wall time.
+Lifting the tile-jit budget for these is a follow-up tracked
+under the Phase 4 tile-feasibility cost-model work.
+
+Tests: `tests/test_realize_classify.c` adds two focused cases -
+the BN-mean chain shape inlines, and a non-broadcast tail
+(reduce -&gt; MUL with a TENSOR sibling) stays realized.
+
 ### Added: Multi-output kernel-merge action (step 6)
 
 Builds on the step 1-5 scaffolding (commits `0bca111` `8924705`
