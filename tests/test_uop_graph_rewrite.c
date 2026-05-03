@@ -289,6 +289,86 @@ int main(void) {
   Term eq_checked = uop_graph_simplify_checked(raw_eq, 0);
   CHECK_EQ(eq_checked, raw_eq);
 
+  TEST_BEGIN("uop-graph-simplify/reduce-const-mul-distributes-rhs");
+  Term mul_const_rhs = raw_binary(UOP_MUL, a, two);
+  Term reduce_mul_rhs = uop_reduce(REDUCE_SUM, 0, mul_const_rhs);
+  Term reduce_mul_rhs_out = uop_graph_simplify(reduce_mul_rhs);
+  CHECK_EQ(term_tag(reduce_mul_rhs_out), TAG_UOP);
+  CHECK_EQ(term_ext(reduce_mul_rhs_out), UOP_MUL);
+  Term mul_lhs = heap_read(term_val(reduce_mul_rhs_out) + 0);
+  Term mul_rhs = heap_read(term_val(reduce_mul_rhs_out) + 1);
+  CHECK_EQ(term_tag(mul_lhs), TAG_UOP);
+  CHECK_EQ(term_ext(mul_lhs), UOP_REDUCE);
+  CHECK_EQ(heap_read(term_val(mul_lhs)), a);
+  CHECK_EQ(mul_rhs, two);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("reduce-const-mul-distribute"), 1);
+
+  TEST_BEGIN("uop-graph-simplify/reduce-const-mul-distributes-lhs");
+  Term mul_const_lhs = raw_binary(UOP_MUL, two, a);
+  Term reduce_mul_lhs = uop_reduce(REDUCE_SUM, 0, mul_const_lhs);
+  Term reduce_mul_lhs_out = uop_graph_simplify(reduce_mul_lhs);
+  CHECK_EQ(term_tag(reduce_mul_lhs_out), TAG_UOP);
+  CHECK_EQ(term_ext(reduce_mul_lhs_out), UOP_MUL);
+  Term lhs2 = heap_read(term_val(reduce_mul_lhs_out) + 0);
+  Term rhs2 = heap_read(term_val(reduce_mul_lhs_out) + 1);
+  CHECK_EQ(term_tag(lhs2), TAG_UOP);
+  CHECK_EQ(term_ext(lhs2), UOP_REDUCE);
+  CHECK_EQ(heap_read(term_val(lhs2)), a);
+  CHECK_EQ(rhs2, two);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("reduce-const-mul-distribute"), 1);
+
+  TEST_BEGIN("uop-graph-simplify/reduce-max-mul-const-stays");
+  Term mul_for_max = raw_binary(UOP_MUL, a, two);
+  Term reduce_max_mul = uop_reduce(REDUCE_MAX, 0, mul_for_max);
+  Term reduce_max_mul_out = uop_graph_simplify(reduce_max_mul);
+  CHECK_EQ(term_tag(reduce_max_mul_out), TAG_UOP);
+  CHECK_EQ(term_ext(reduce_max_mul_out), UOP_REDUCE);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("reduce-const-mul-distribute"), 0);
+
+  TEST_BEGIN("uop-graph-simplify/reduce-mul-non-const-stays");
+  u32 td = alloc_f32_tensor(4);
+  Term d = term_new(0, TAG_TEN, DT_FP32, td);
+  Term mul_non_const = raw_binary(UOP_MUL, a, d);
+  Term reduce_mul_non_const = uop_reduce(REDUCE_SUM, 0, mul_non_const);
+  Term reduce_mul_non_const_out = uop_graph_simplify(reduce_mul_non_const);
+  CHECK_EQ(term_tag(reduce_mul_non_const_out), TAG_UOP);
+  CHECK_EQ(term_ext(reduce_mul_non_const_out), UOP_REDUCE);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("reduce-const-mul-distribute"), 0);
+
+  TEST_BEGIN("uop-graph-simplify/reduce-add-const-distributes");
+  Term add_const = raw_binary(UOP_ADD, a, two);
+  Term reduce_add_const = uop_reduce(REDUCE_SUM, 0, add_const);
+  Term reduce_add_const_out = uop_graph_simplify(reduce_add_const);
+  CHECK_EQ(term_tag(reduce_add_const_out), TAG_UOP);
+  CHECK_EQ(term_ext(reduce_add_const_out), UOP_ADD);
+  Term add_lhs = heap_read(term_val(reduce_add_const_out) + 0);
+  Term add_rhs = heap_read(term_val(reduce_add_const_out) + 1);
+  CHECK_EQ(term_tag(add_lhs), TAG_UOP);
+  CHECK_EQ(term_ext(add_lhs), UOP_REDUCE);
+  CHECK_EQ(heap_read(term_val(add_lhs)), a);
+  // a has shape {4}, so 2.0 * 4 = 8.0.
+  CHECK_EQ(term_tag(add_rhs), TAG_UOP);
+  CHECK_EQ(term_ext(add_rhs), UOP_CONST);
+  CHECK_EQ(term_val(heap_read(term_val(add_rhs))), f32_bits(8.0f));
+  CHECK_EQ(uop_graph_rewrite_stat_hits("reduce-add-const-distribute"), 1);
+
+  TEST_BEGIN("uop-graph-simplify/reduce-max-add-const-stays");
+  Term add_for_max = raw_binary(UOP_ADD, a, two);
+  Term reduce_max_add = uop_reduce(REDUCE_MAX, 0, add_for_max);
+  Term reduce_max_add_out = uop_graph_simplify(reduce_max_add);
+  CHECK_EQ(term_tag(reduce_max_add_out), TAG_UOP);
+  CHECK_EQ(term_ext(reduce_max_add_out), UOP_REDUCE);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("reduce-add-const-distribute"), 0);
+
+  TEST_BEGIN("uop-graph-simplify/reduce-add-non-const-stays");
+  Term te2 = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(4));
+  Term add_non_const = raw_binary(UOP_ADD, a, te2);
+  Term reduce_add_non_const = uop_reduce(REDUCE_SUM, 0, add_non_const);
+  Term reduce_add_non_const_out = uop_graph_simplify(reduce_add_non_const);
+  CHECK_EQ(term_tag(reduce_add_non_const_out), TAG_UOP);
+  CHECK_EQ(term_ext(reduce_add_non_const_out), UOP_REDUCE);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("reduce-add-const-distribute"), 0);
+
   TEST_BEGIN("uop-graph-simplify-materialize/opt-in-hook");
   setenv("THVM_UOP_GRAPH_SIMPLIFY", "1", 1);
   Term mat_candidate = raw_binary(UOP_ADD, a, zero);

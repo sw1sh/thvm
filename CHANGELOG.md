@@ -6,6 +6,46 @@ dated section.
 
 ## Unreleased
 
+### Added: reduce-add-const-distribute uop rule (Phase 5 of tinygrad rule port)
+
+New `uop_graph_simplify_reduce_add_const` rule rewrites
+`REDUCE_SUM(ADD(x, CONST))` into `ADD(REDUCE_SUM(x), CONST * N)`,
+where `N` is the reduced axis extent.  The new constant is computed
+at simplifier time so the post-reduce ADD pays one scalar add
+instead of an axis-sized broadcasted add.  Mirrors tinygrad's
+`reduce-add-distribute` (`tinygrad/codegen/simplify.py`),
+specialised to a CONST sibling so we don't trade one reduce for
+two.
+
+Constraints: only `REDUCE_SUM`, only DT_FP32 (the simplifier
+already has the f32-bits constant-folding helper used elsewhere),
+only when the ADD's other operand is a bare `UOP_CONST`, and the
+axis must be in range of the source shape.
+
+`tests/test_uop_graph_rewrite.c` covers the firing case
+(`REDUCE_SUM(ADD(a, 2.0))` over `{4}` -> `ADD(REDUCE_SUM(a), 8.0)`),
+plus REDUCE_MAX (does not fire) and non-CONST sibling (does not
+fire).
+
+### Added: reduce-const-mul-distribute uop rule (Phase 5 of tinygrad rule port)
+
+New `uop_graph_simplify_reduce_const_mul` rule rewrites
+`REDUCE_SUM(MUL(x, CONST))` into `MUL(REDUCE_SUM(x), CONST)`, hoisting
+a scalar multiplier out of a sum-reduce so the post-reduce shape
+carries the MUL.  Mirrors tinygrad's `reduce-mul-chain` from
+`tinygrad/uop/symbolic.py`.
+
+Constraints: only `REDUCE_SUM` (REDUCE_MAX would mis-handle negative
+constants), and only when the MUL's other operand is a bare
+`UOP_CONST` (the simplifier already folds wrapper-of-CONST patterns
+upstream).  Lives next to the other symbolic rules in
+`uop/graph_simplify.c` so it's part of `uop_graph_simplify` /
+`uop_graph_simplify_checked`; the materialize-pass subset
+deliberately skips it for now.
+
+`tests/test_uop_graph_rewrite.c` covers RHS-CONST, LHS-CONST,
+REDUCE_MAX (does not fire), and non-CONST sibling (does not fire).
+
 ### Changed: Levy-optimal Phase 4 -- auto-dup default-on for recursive non-linear lambdas
 
 `auto_dup_collect`'s `TAG_REF` / `TAG_ALO` early-return is replaced

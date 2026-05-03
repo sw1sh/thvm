@@ -566,6 +566,17 @@ Tasks:
 
 - ~~track reduce presence in the cost model so simple recompute
   removals do not propose reduce-bearing candidates~~;
+- ~~tinygrad rule port: generalised broadcast-reduce predicate
+  (Phase 1 of port -- `realize_rule_inline_softmax_broadcast_reduce`
+  now matches BatchNorm/softmax chains)~~;
+- ~~tinygrad rule port: `reduce-const-mul-distribute` UOp rule --
+  `REDUCE_SUM(MUL(x, CONST))` -> `MUL(REDUCE_SUM(x), CONST)` lives in
+  `uop_graph_simplify` so the constant rides on the post-reduce
+  shape~~;
+- ~~tinygrad rule port: `reduce-add-const-distribute` UOp rule --
+  `REDUCE_SUM(ADD(x, CONST))` -> `ADD(REDUCE_SUM(x), CONST * N)`
+  with `N` the reduced axis extent; folds the broadcasted scalar
+  add over the reduce input into one post-reduce scalar add~~;
 - represent accumulator buffers explicitly (planned);
 - fuse reduce chains through `B_STORE` reduce ranges (planned -
   the existing `inline-adjacent-reduce-chains` realize-rule does
