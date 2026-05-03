@@ -1061,6 +1061,44 @@ int main(void) {
   CHECK_EQ(found_binary, 1);
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
+  TEST_BEGIN("bufferize/lifetimes-match-materialize-boundary-depths");
+  // Phase 6 sanity check: the lifetime_start / lifetime_end values
+  // bufferize computed at realize_classify time should agree with
+  // BOUNDARY_DEPTH / BOUNDARY_LAST_USE that materialize computes
+  // during topo_sort.  Build a multi-kernel graph, materialize, then
+  // walk every boundary and assert parity.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  Term lm_a   = uop_binary(UOP_ADD, a, b);
+  Term lm_l1  = uop_binary(UOP_MUL, lm_a, c);
+  Term lm_r1  = uop_binary(UOP_MUL, lm_a, a);
+  Term lm_p1  = uop_binary(UOP_ADD, lm_l1, lm_r1);
+  Term lm_l2  = uop_binary(UOP_MUL, lm_p1, c);
+  Term lm_r2  = uop_binary(UOP_MUL, lm_p1, b);
+  Term lm_t   = uop_binary(UOP_ADD, lm_l2, lm_r2);
+  thvm_materialize(lm_t);
+  CHECK(materialize_boundary_count() >= 1);
+  for (u32 bi = 0; bi < materialize_boundary_count(); bi++) {
+    u64 loc = materialize_boundary_at(bi);
+    u32 mat_depth = materialize_boundary_depth_at(bi);
+    u32 mat_last  = materialize_boundary_last_use_at(bi);
+    u32 bidx = bufferize_find_by_loc(loc);
+    if (bidx == 0xFFFFFFFFu) continue;   // bufferize buffer was inlined post-mat
+    BBufferize const *bb = bufferize_buffer_at(bidx);
+    if (!bb->realized) continue;
+    // depth parity: both compute "max of producer depths + 1".
+    CHECK_EQ(bb->lifetime_start, mat_depth);
+    // last_use parity: bufferize tracks the max consumer depth;
+    // materialize tracks the same but expressed at the consumer's
+    // BOUNDARY_DEPTH.  For the realize root (no consumers), both
+    // collapse to its own depth.  When materialize hasn't recorded
+    // a last_use (BOUNDARY_LAST_USE stays 0 for terminal nodes),
+    // bufferize uses its own depth as the floor; equality may
+    // require taking max with lifetime_start.
+    u32 mat_last_normalised = mat_last > 0 ? mat_last : mat_depth;
+    CHECK_EQ(bb->lifetime_end, mat_last_normalised);
+  }
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
   TEST_BEGIN("bufferize/leaf-input-source-buffer-id-is-zero");
   // Single-kernel graph with TEN leaves: every input slot's source
   // buffer id should be 0 (no upstream bufferize boundary).

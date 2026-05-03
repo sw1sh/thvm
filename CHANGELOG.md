@@ -6,6 +6,30 @@ dated section.
 
 ## Unreleased
 
+### Added: bufferize lifetime parity check + boundary depth accessors
+
+`schedule/materialize.c` exposes
+`materialize_boundary_depth_at(i)` and
+`materialize_boundary_last_use_at(i)` so callers can read the
+per-boundary topological depth + last-use values that
+`topo_sort_boundaries` computed.  A new `tests/test_bufferize.c`
+case materialises a 3-boundary graph and asserts that
+`bb->lifetime_start` / `bb->lifetime_end` (computed by bufferize
+at realize_classify time from B_INDEX edges) agree with these
+materialize-side values for every boundary loc.
+
+### Fixed: loc-zero sentinel in materialize last-use walker
+
+`boundary_last_use_descend` previously bailed on `from_loc == 0`,
+treating heap loc 0 as a sentinel.  Heap loc 0 is a valid
+allocation and the bug silently dropped last-use updates for any
+boundary that happened to land at the start of the heap (rare in
+production where realize_classify sees deeply-allocated graphs,
+but easy to hit in heap-clean tests).  Switching to a pure
+`from_loc >= HEAP_NEXT` bound makes last-use values track all
+realized boundaries; the new lifetime-parity test caught it.
+Same class of bug fixed earlier in bufferize.
+
 ### Added: reduce metadata on BBufferize for Phase 5 rules
 
 Each `BBufferize` whose op is `UOP_REDUCE` now records

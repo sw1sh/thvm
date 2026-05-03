@@ -1480,6 +1480,15 @@ fn u64               bufferize_total_recompute_ops(void);
 // code-emit can iterate boundaries in dependency order.
 fn u32  materialize_boundary_count(void);
 fn u64  materialize_boundary_at(u32 i);
+// Depth + last-use lookup for the i-th boundary in BOUNDARY_ORDER.
+// Returns 0 when the boundary index is out of range.  Phase 6
+// validation: these should agree with bufferize's lifetime_start
+// and lifetime_end for the same loc, since both are computed from
+// the same edge structure (just at different times in the
+// pipeline).  Memory planning will eventually consume the
+// bufferize lifetimes once the parity is established.
+fn u32  materialize_boundary_depth_at(u32 i);
+fn u32  materialize_boundary_last_use_at(u32 i);
 
 // Phase 2 follow-up: per-input-slot bufferize source id read from a
 // materialized KernelEntry.  Returns the 1-based buffer id stored

@@ -256,7 +256,11 @@ static u32 boundary_depth_rec(u64 loc) {
 // child's, see boundary_depth_rec where non-realized just inherits).
 static void boundary_last_use_descend(u64 from_loc, u32 visiting_depth,
                                       u8 *visited) {
-  if (from_loc == 0 || from_loc >= HEAP_NEXT) return;
+  // Heap loc 0 is a valid allocation; only HEAP_NEXT bounds gates
+  // the read.  (Earlier code treated 0 as a sentinel which silently
+  // dropped last-use updates for the first-allocated boundary in
+  // any heap-clean tests.)
+  if (from_loc >= HEAP_NEXT) return;
   if (visited[from_loc]) return;
   visited[from_loc] = 1;
   u32 idx = realize_info_find(from_loc);
@@ -357,6 +361,20 @@ static void topo_sort_boundaries(Term root) {
 
 fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
 fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN ? BOUNDARY_ORDER[i] : 0; }
+
+fn u32 materialize_boundary_depth_at(u32 i) {
+  if (i >= BOUNDARY_ORDER_LEN) return 0;
+  u32 ridx = realize_info_find(BOUNDARY_ORDER[i]);
+  if (ridx == 0xFFFFFFFFu) return 0;
+  return BOUNDARY_DEPTH[ridx];
+}
+
+fn u32 materialize_boundary_last_use_at(u32 i) {
+  if (i >= BOUNDARY_ORDER_LEN) return 0;
+  u32 ridx = realize_info_find(BOUNDARY_ORDER[i]);
+  if (ridx == 0xFFFFFFFFu) return 0;
+  return BOUNDARY_LAST_USE[ridx];
+}
 
 // Phase 2 follow-up accessors: read the per-input-slot bufferize
 // source id and look up the BIndex chain summary for the
