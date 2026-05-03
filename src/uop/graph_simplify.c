@@ -24,28 +24,106 @@ static Term uop_graph_simplify_movement_chain(Term t, void *user) {
   if (!uop_view(t, &v)) {
     return 0;
   }
-  if (v.op != UOP_RESHAPE && v.op != UOP_EXPAND) {
-    return 0;
-  }
 
-  Term collapsed = uop_rewrite_movement_src(v.op, v.src[0]);
-  if (collapsed == 0) {
-    return 0;
+  if (v.op == UOP_FLIP) {
+    if (term_tag(v.src[0]) != TAG_UOP || term_ext(v.src[0]) != UOP_FLIP) {
+      return 0;
+    }
+    u64 inner_loc = term_val(v.src[0]);
+    Term outer_axes = heap_read(v.loc + 1);
+    Term inner_axes = heap_read(inner_loc + 1);
+    if (term_tag(outer_axes) != TAG_NUM || term_tag(inner_axes) != TAG_NUM) {
+      return 0;
+    }
+    u32 axes = (u32)term_val(outer_axes) ^ (u32)term_val(inner_axes);
+    Term inner_src = heap_read(inner_loc);
+    return axes == 0 ? inner_src : uop_flip(inner_src, axes);
   }
 
   u32 ndim = (u32)term_val(heap_read(v.loc + 1));
   if (ndim > MAX_DIM) {
     return 0;
   }
-  u32 dims[MAX_DIM];
-  for (u32 i = 0; i < ndim; i++) {
-    dims[i] = (u32)term_val(heap_read(v.loc + 2 + i));
+
+  if (v.op == UOP_RESHAPE || v.op == UOP_EXPAND) {
+    Term collapsed = uop_rewrite_movement_src(v.op, v.src[0]);
+    if (collapsed == 0) {
+      return 0;
+    }
+    u32 dims[MAX_DIM];
+    for (u32 i = 0; i < ndim; i++) {
+      dims[i] = (u32)term_val(heap_read(v.loc + 2 + i));
+    }
+
+    if (v.op == UOP_RESHAPE) {
+      return uop_reshape(collapsed, ndim, dims);
+    }
+    return uop_expand(collapsed, ndim, dims);
   }
 
-  if (v.op == UOP_RESHAPE) {
-    return uop_reshape(collapsed, ndim, dims);
+  if (v.op == UOP_PAD) {
+    if (term_tag(v.src[0]) != TAG_UOP || term_ext(v.src[0]) != UOP_PAD) {
+      return 0;
+    }
+    u64 inner_loc = term_val(v.src[0]);
+    Term inner_ndim = heap_read(inner_loc + 1);
+    if (term_tag(inner_ndim) != TAG_NUM || term_val(inner_ndim) != ndim) {
+      return 0;
+    }
+    u32 widths[2 * MAX_DIM];
+    for (u32 i = 0; i < 2 * ndim; i++) {
+      widths[i] = (u32)term_val(heap_read(inner_loc + 2 + i))
+                + (u32)term_val(heap_read(v.loc + 2 + i));
+    }
+    return uop_pad(heap_read(inner_loc), ndim, widths);
   }
-  return uop_expand(collapsed, ndim, dims);
+
+  if (v.op == UOP_SHRINK) {
+    if (term_tag(v.src[0]) != TAG_UOP || term_ext(v.src[0]) != UOP_SHRINK) {
+      return 0;
+    }
+    u64 inner_loc = term_val(v.src[0]);
+    Term inner_ndim = heap_read(inner_loc + 1);
+    if (term_tag(inner_ndim) != TAG_NUM || term_val(inner_ndim) != ndim) {
+      return 0;
+    }
+    u32 bounds[2 * MAX_DIM];
+    for (u32 i = 0; i < ndim; i++) {
+      u32 inner_begin = (u32)term_val(heap_read(inner_loc + 2 + 2 * i));
+      u32 outer_begin = (u32)term_val(heap_read(v.loc + 2 + 2 * i));
+      u32 outer_end   = (u32)term_val(heap_read(v.loc + 3 + 2 * i));
+      bounds[2 * i]     = inner_begin + outer_begin;
+      bounds[2 * i + 1] = inner_begin + outer_end;
+    }
+    return uop_shrink(heap_read(inner_loc), ndim, bounds);
+  }
+
+  return 0;
+}
+
+static int uop_graph_simplify_commutative_op(u8 op) {
+  return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPEQ;
+}
+
+static int uop_graph_simplify_sort_after(Term a, Term b) {
+  int a_const = term_tag(a) == TAG_UOP && term_ext(a) == UOP_CONST;
+  int b_const = term_tag(b) == TAG_UOP && term_ext(b) == UOP_CONST;
+  if (a_const != b_const) {
+    return a_const;
+  }
+  return a > b;
+}
+
+static Term uop_graph_simplify_commutative(Term t, void *user) {
+  (void)user;
+  UOpView v;
+  if (!uop_view(t, &v) || !uop_graph_simplify_commutative_op(v.op)) {
+    return 0;
+  }
+  if (!uop_graph_simplify_sort_after(v.src[0], v.src[1])) {
+    return 0;
+  }
+  return uop_binary(v.op, v.src[1], v.src[0]);
 }
 
 static int uop_graph_simplify_dims_match_shape(u64 loc,
@@ -184,6 +262,7 @@ fn Term uop_graph_simplify(Term root) {
     {"symbolic-unary",          uop_graph_simplify_unary},
     {"symbolic-binary",         uop_graph_simplify_binary},
     {"symbolic-cast",           uop_graph_simplify_cast},
+    {"commutative-canonicalize", uop_graph_simplify_commutative},
     {"movement-identity",       uop_graph_simplify_movement_identity},
     {"movement-chain-collapse", uop_graph_simplify_movement_chain},
   };

@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: port first tinygrad-style movement graph rewrites
+
+`uop_graph_simplify` now canonicalizes commutative elementwise
+operands and composes adjacent `PAD`, `SHRINK`, and `FLIP` movement
+chains before rangeify sees them.  This extends the tinygrad-style
+rewrite surface beyond identities while keeping the materializer hook
+shape/dtype checked.
+
 ### Changed: allow larger Metal graph replay chunks
 
 Metal graph replay now accepts `THVM_METAL_GRAPH_MAX_DISPATCHES` up to

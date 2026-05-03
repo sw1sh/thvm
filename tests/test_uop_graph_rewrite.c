@@ -179,6 +179,65 @@ int main(void) {
   CHECK_EQ(uop_graph_simplify(raw_with_num_arg(UOP_FLIP, a, 0)), a);
   CHECK_EQ(uop_graph_rewrite_stat_hits("movement-identity"), 1);
 
+  TEST_BEGIN("uop-graph-simplify/canonicalizes-commutative-operands");
+  Term two = uop_const(DT_FP32, f32_bits(2.0f));
+  Term raw_mul_const_left = raw_binary(UOP_MUL, two, a);
+  Term mul_const_right = uop_graph_simplify(raw_mul_const_left);
+  CHECK_EQ(term_tag(mul_const_right), TAG_UOP);
+  CHECK_EQ(term_ext(mul_const_right), UOP_MUL);
+  CHECK_EQ(heap_read(term_val(mul_const_right) + 0), a);
+  CHECK_EQ(heap_read(term_val(mul_const_right) + 1), two);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("commutative-canonicalize"), 1);
+
+  TEST_BEGIN("uop-graph-simplify/composes-pad-shrink-flip");
+  u32 pad_inner[4] = {1, 2, 0, 3};
+  u32 pad_outer[4] = {4, 5, 6, 7};
+  Term pad_chain = raw_bounds_movement(
+      UOP_PAD,
+      raw_bounds_movement(UOP_PAD, a, 2, pad_inner),
+      2,
+      pad_outer);
+  Term pad_folded = uop_graph_simplify(pad_chain);
+  CHECK_EQ(term_tag(pad_folded), TAG_UOP);
+  CHECK_EQ(term_ext(pad_folded), UOP_PAD);
+  CHECK_EQ(heap_read(term_val(pad_folded)), a);
+  CHECK_EQ(term_val(heap_read(term_val(pad_folded) + 2)), 5);
+  CHECK_EQ(term_val(heap_read(term_val(pad_folded) + 3)), 7);
+  CHECK_EQ(term_val(heap_read(term_val(pad_folded) + 4)), 6);
+  CHECK_EQ(term_val(heap_read(term_val(pad_folded) + 5)), 10);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-chain-collapse"), 1);
+
+  u32 shrink_inner[4] = {2, 8, 1, 7};
+  u32 shrink_outer[4] = {1, 4, 2, 5};
+  Term shrink_chain = raw_bounds_movement(
+      UOP_SHRINK,
+      raw_bounds_movement(UOP_SHRINK, a, 2, shrink_inner),
+      2,
+      shrink_outer);
+  Term shrink_folded = uop_graph_simplify(shrink_chain);
+  CHECK_EQ(term_tag(shrink_folded), TAG_UOP);
+  CHECK_EQ(term_ext(shrink_folded), UOP_SHRINK);
+  CHECK_EQ(heap_read(term_val(shrink_folded)), a);
+  CHECK_EQ(term_val(heap_read(term_val(shrink_folded) + 2)), 3);
+  CHECK_EQ(term_val(heap_read(term_val(shrink_folded) + 3)), 6);
+  CHECK_EQ(term_val(heap_read(term_val(shrink_folded) + 4)), 3);
+  CHECK_EQ(term_val(heap_read(term_val(shrink_folded) + 5)), 6);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("movement-chain-collapse"), 1);
+
+  Term flip_chain = raw_with_num_arg(
+      UOP_FLIP,
+      raw_with_num_arg(UOP_FLIP, a, 3),
+      2);
+  Term flip_folded = uop_graph_simplify(flip_chain);
+  CHECK_EQ(term_tag(flip_folded), TAG_UOP);
+  CHECK_EQ(term_ext(flip_folded), UOP_FLIP);
+  CHECK_EQ(heap_read(term_val(flip_folded)), a);
+  CHECK_EQ(term_val(heap_read(term_val(flip_folded) + 1)), 1);
+  CHECK_EQ(uop_graph_simplify(raw_with_num_arg(
+      UOP_FLIP,
+      raw_with_num_arg(UOP_FLIP, a, 3),
+      3)), a);
+
   TEST_BEGIN("uop-graph-simplify/folds-identity-cast");
   Term raw_cast = raw_with_num_arg(UOP_CAST, a, DT_FP32);
   Term cast_out = uop_graph_simplify(raw_cast);
