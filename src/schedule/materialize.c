@@ -397,6 +397,34 @@ fn int kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out) {
   return bufferize_edge_summary(consumer_loc, src_buf->loc, out);
 }
 
+fn int kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out) {
+  if (kid >= KERNELS_NEXT) return 0;
+  KernelEntry const *ke = &KERNELS[kid];
+  if (prog_idx >= ke->n_ops) return 0;
+  KProgOp const *p = &ke->program[prog_idx];
+  // Only movement ops have a meaningful BIndex chain entry.
+  // Inline the chain-movement check so the accessor can live before
+  // the materialize-internal op_is_chain_movement helper.
+  u8 op = p->opcode;
+  int is_movement = (op == UOP_RESHAPE || op == UOP_EXPAND
+                  || op == UOP_PERMUTE || op == UOP_SHRINK
+                  || op == UOP_FLIP    || op == UOP_PAD);
+  if (!is_movement) return 0;
+  if (p->chain_input_slot == 0xFFFFFFFFu) return 0;
+  if (p->chain_input_slot >= ke->n_inputs) return 0;
+  BIndex edge;
+  if (!kernel_entry_input_edge_summary(kid, p->chain_input_slot, &edge)) {
+    return 0;
+  }
+  if (edge.chain_op_count == 0) return 0;
+  if ((u32)p->chain_op_idx >= edge.chain_op_count) return 0;
+  // KProgOp counts source-to-consumer (0 = bottom of chain), BIndex
+  // stores consumer-to-source (0 = top of chain).
+  u32 b_idx = edge.chain_op_count - 1u - (u32)p->chain_op_idx;
+  if (out != NULL) *out = edge.chain_ops[b_idx];
+  return 1;
+}
+
 // Phase 2 follow-up diagnostic: print the bufferize edge summary
 // for every input slot of every emitted kernel.  Gated by
 // DUMP_BUFFERIZE_KERNEL_EDGES=1 so it stays silent in normal use.
@@ -814,6 +842,49 @@ static u8 op_is_view_movement(u8 op) {
       || op == UOP_SHRINK  || op == UOP_FLIP;
 }
 
+// True for any movement op the bufferize chain tracks.
+static u8 op_is_chain_movement(u8 op) {
+  return op_is_view_movement(op) || op == UOP_PAD;
+}
+
+// Phase 2 follow-up: propagate chain_op_idx + chain_input_slot from
+// a single src ksrc reference to a freshly-zeroed KProgOp `p`.  The
+// caller has already populated `opcode` so the helper can decide
+// whether p itself contributes to the chain depth.  See KProgOp
+// definition in thvm.h for the chain semantics.
+static void prog_chain_propagate(KernelEntry *ke, KProgOp *p, u32 src_idx) {
+  if (KSRC_IS_INPUT(src_idx)) {
+    p->chain_op_idx     = 0;
+    p->chain_input_slot = KSRC_INDEX(src_idx);
+    return;
+  }
+  u32 si = KSRC_INDEX(src_idx);
+  if (si >= ke->n_ops) {
+    p->chain_op_idx     = 0;
+    p->chain_input_slot = 0xFFFFFFFFu;
+    return;
+  }
+  KProgOp const *src_p = &ke->program[si];
+  if (src_p->chain_input_slot == 0xFFFFFFFFu) {
+    p->chain_op_idx     = 0;
+    p->chain_input_slot = 0xFFFFFFFFu;
+    return;
+  }
+  u32 depth = (u32)src_p->chain_op_idx
+              + (op_is_chain_movement(src_p->opcode) ? 1u : 0u);
+  if (depth > 255u) depth = 255u;
+  p->chain_op_idx     = (u8)depth;
+  p->chain_input_slot = src_p->chain_input_slot;
+}
+
+// For chain-breaking ops (binary, REDUCE, etc.) - explicitly mark
+// the chain as broken.  The 0xFFFFFFFF sentinel matches the default
+// when no source has been visited yet.
+static void prog_chain_break(KProgOp *p) {
+  p->chain_op_idx     = 0;
+  p->chain_input_slot = 0xFFFFFFFFu;
+}
+
 // Flatten a non-contig TenDesc into a fresh contiguous copy via
 // view_strided_index.  Used by thvm_materialize when the root is a
 // movement-op chain that resolves to a view alias the caller will
@@ -1084,6 +1155,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     p->arg    = (u32)term_val(num);
     p->n_src  = 0;
     p->numel  = 1;
+    prog_chain_break(p);                  // CONST has no src chain
     u32 ref = ke->n_ops - 1;
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -1100,6 +1172,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     p->numel  = src_numel(ke, src_idx);
     p->n_src  = 1;
     p->src[0] = src_idx;
+    prog_chain_propagate(ke, p, src_idx); // unary passthrough
     u32 ref = ke->n_ops - 1;
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -1122,6 +1195,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     p->numel  = src_numel(ke, src_idx);
     p->n_src  = 1;
     p->src[0] = src_idx;
+    prog_chain_propagate(ke, p, src_idx); // CAST/BITCAST passthrough
     u32 ref = ke->n_ops - 1;
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -1142,6 +1216,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     p->n_src  = 2;
     p->src[0] = li;
     p->src[1] = ri;
+    prog_chain_break(p);                  // binary: chain has two paths, breaks
     u32 ref = ke->n_ops - 1;
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -1213,6 +1288,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       Term mask_num = heap_read(loc + 1);
       if (term_tag(mask_num) == TAG_NUM) p->arg = (u32)term_val(mask_num);
     }
+    prog_chain_propagate(ke, p, src_idx);   // movement op (view-path)
     u32 ref = ke->n_ops - 1;
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -1255,6 +1331,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       p->pad_widths[2 * i + 0] = (u8)(b & 0xFF);
       p->pad_widths[2 * i + 1] = (u8)(e & 0xFF);
     }
+    prog_chain_propagate(ke, p, src_idx);   // PAD movement op
     u32 ref = ke->n_ops - 1;
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -1309,6 +1386,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       for (u32 i = 0; i < rc.n_reduce_axes && i < MAX_DIM; i++) {
         p->reduce_axes[i] = rc.reduce_axes[i];
       }
+      prog_chain_break(p);                  // REDUCE breaks the chain
       u32 ref = ke->n_ops - 1;
       visit_memo_store(memo, loc, ref);
       return ref;
@@ -1369,6 +1447,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
         }
       }
     }
+    prog_chain_break(p);                    // REDUCE breaks the chain
     u32 ref = ke->n_ops - 1;
     visit_memo_store(memo, loc, ref);
     return ref;

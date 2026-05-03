@@ -447,18 +447,16 @@ Tasks:
   edge~~ (`KernelEntry.input_source_buffer_ids[]` + accessors
   `kernel_entry_input_source_buffer_id` and
   `kernel_entry_input_edge_summary`);
+- ~~per-USE `KProgOp.chain_op_idx` field populated during `visit()`~~
+  (landed: `KProgOp.chain_op_idx` + `chain_input_slot` plus
+  `kernel_entry_prog_chain_op` accessor that round-trips a
+  movement-op KProgOp into its `BIndexChainOp`);
 - reroute `RngsCtx` chain construction in `schedule/rangeify.c`
-  through `bufferize_edge_summary` so the canonical chain drives
-  codegen instead of the heap-walk-derived `KProgOp` chain
-  (pending - the per-slot link covers the simple case of a
-  single edge per input, but a producer reached via two distinct
-  movement chains in one consumer dedups into a single input slot
-  while emitting two `BIndex` records.  Per-USE rerouting needs
-  a `KProgOp.chain_op_idx` field populated during `visit()` so each
-  movement-op KProgOp can name its corresponding `BIndexChainOp`,
-  then a parallel BIndex-driven version of `rngs_ctx_movement_src`
-  to consume the data.  Both pieces are tracked as separate
-  follow-up work);
+  through `kernel_entry_prog_chain_op` so the canonical chain
+  drives codegen instead of `KProgOp.src0_dims`/`out_dims`/
+  `pad_widths`/`axis_perm` (pending - all data plumbing now
+  exists, the remaining work is replacing each `rngs_ctx_*` op
+  body with a `BIndexChainOp`-reading variant);
 - preserve valid masks through `S_IWHERE` from `has_pad` rather than
   rederiving them inside `rngs_ctx_pad` (pending - same per-USE
   prerequisite).

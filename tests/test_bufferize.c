@@ -881,6 +881,78 @@ int main(void) {
   }
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
+  TEST_BEGIN("bufferize/kprog-chain-op-maps-to-bindex-entry");
+  // Materialize a graph with a movement chain and verify that for
+  // each movement-op KProgOp, kernel_entry_prog_chain_op returns
+  // the BIndexChainOp whose dims match the KProgOp's own metadata.
+  // This is the foundation check the rangeify rerouting will rely
+  // on: chain_op_idx + chain_input_slot consistently round-trip
+  // through the bufferize edge table.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  u32 dims31_chain[2] = {3, 1};
+  Term cm_s    = uop_binary(UOP_ADD, a, b);             // {3}
+  Term cm_dir  = uop_unary(UOP_NEG, cm_s);
+  Term cm_rs   = uop_reshape(cm_s, 2, dims31_chain);    // {3,1}
+  Term cm_dir_rs = uop_reshape(cm_dir, 2, dims31_chain);
+  Term cm_root = uop_binary(UOP_ADD, cm_dir_rs, cm_rs);
+  u32 cm_kernels_before = KERNELS_NEXT;
+  Term cm_out = thvm_materialize(cm_root);
+  CHECK_EQ(term_tag(cm_out), TAG_UOP);
+  CHECK_EQ(term_ext(cm_out), UOP_KERNEL);
+  Term cm_kid_term = heap_read(term_val(cm_out) + 1);
+  CHECK_EQ(term_tag(cm_kid_term), TAG_NUM);
+  u32 cm_kid = (u32)term_val(cm_kid_term);
+  CHECK(cm_kernels_before <= cm_kid);
+  // Walk the program: every movement-op KProgOp with a non-broken
+  // chain must map to a BIndexChainOp whose op + dims agree.
+  KernelEntry const *cm_ke = &KERNELS[cm_kid];
+  u32 movement_ops_seen = 0;
+  for (u32 i = 0; i < cm_ke->n_ops; i++) {
+    KProgOp const *p = &cm_ke->program[i];
+    if (p->opcode != UOP_RESHAPE && p->opcode != UOP_PAD
+        && p->opcode != UOP_PERMUTE && p->opcode != UOP_EXPAND
+        && p->opcode != UOP_SHRINK && p->opcode != UOP_FLIP) continue;
+    if (p->chain_input_slot == 0xFFFFFFFFu) continue;
+    BIndexChainOp chain_op;
+    int ok = kernel_entry_prog_chain_op(cm_kid, i, &chain_op);
+    CHECK_EQ(ok, 1);
+    if (!ok) continue;
+    movement_ops_seen++;
+    CHECK_EQ(chain_op.op, p->opcode);
+    // Source / output dims must match what the KProgOp recorded.
+    CHECK_EQ(chain_op.src_ndim, p->src0_ndim);
+    CHECK_EQ(chain_op.out_ndim, p->out_ndim);
+    for (u32 d = 0; d < p->src0_ndim && d < MAX_DIM; d++) {
+      CHECK_EQ(chain_op.src_dims[d], p->src0_dims[d]);
+    }
+    for (u32 d = 0; d < p->out_ndim && d < MAX_DIM; d++) {
+      CHECK_EQ(chain_op.out_dims[d], p->out_dims[d]);
+    }
+  }
+  CHECK(movement_ops_seen >= 1);
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
+  TEST_BEGIN("bufferize/binary-op-breaks-kprog-chain");
+  // A binary op should leave chain_input_slot == 0xFFFFFFFF on the
+  // resulting KProgOp (it has 2 srcs leading to 2 different leaves
+  // so the chain can't be a single path).  Build a + b as the root
+  // of a kernel and check the binary KProgOp's chain field.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  Term br_root = uop_binary(UOP_ADD, a, b);
+  Term br_out  = thvm_materialize(br_root);
+  Term br_kid_term = heap_read(term_val(br_out) + 1);
+  u32  br_kid  = (u32)term_val(br_kid_term);
+  KernelEntry const *br_ke = &KERNELS[br_kid];
+  int found_binary = 0;
+  for (u32 i = 0; i < br_ke->n_ops; i++) {
+    KProgOp const *p = &br_ke->program[i];
+    if (p->n_src != 2) continue;
+    found_binary = 1;
+    CHECK_EQ(p->chain_input_slot, 0xFFFFFFFFu);
+  }
+  CHECK_EQ(found_binary, 1);
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
   TEST_BEGIN("bufferize/leaf-input-source-buffer-id-is-zero");
   // Single-kernel graph with TEN leaves: every input slot's source
   // buffer id should be 0 (no upstream bufferize boundary).

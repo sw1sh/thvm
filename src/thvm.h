@@ -515,6 +515,24 @@ typedef struct {
                                    //   source axes fused into this op.
   u8    reduce_axes[MAX_DIM];      // REDUCE only: original source axis
                                    //   ids, in source-axis order.
+  // Phase 2 follow-up: per-USE bufferize chain linkage so future
+  // rangeify rerouting can map each movement-op KProgOp back to a
+  // BIndexChainOp on the originating B_INDEX edge.
+  //
+  // chain_op_idx counts movement ops in this op's src subtree along
+  // the single-src path to a leaf input (0 for the bottom-most
+  // movement op, +1 per movement op stacked on top, propagating
+  // through unary non-movement ops).
+  //
+  // chain_input_slot names the kernel input slot the chain ends at
+  // (0xFFFFFFFF when the chain breaks at a binary op or otherwise
+  // can't be resolved to a single leaf input).  Pairing
+  // (chain_input_slot, chain_op_idx) with the input slot's BIndex
+  // identifies the matching `BIndexChainOp` at index
+  // `chain_op_count - 1 - chain_op_idx` (BIndex stores chain ops in
+  // consumer-to-source order; KProgOp counts source-to-consumer).
+  u8    chain_op_idx;
+  u32   chain_input_slot;
 } KProgOp;
 
 // === scalar UOp lowering (Phase A of scalar_uops_lowering.md) ===
@@ -1449,6 +1467,21 @@ fn u64  materialize_boundary_at(u32 i);
 // consumer loc from the kernel's source_uop.
 fn u32  kernel_entry_input_source_buffer_id(u32 kid, u32 slot);
 fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
+
+// Phase 2 follow-up: map a movement-op KProgOp at (kid, prog_idx) to
+// the corresponding BIndexChainOp on the originating B_INDEX edge.
+// Returns 1 and copies the chain entry into *out when:
+//   - prog_idx is in range,
+//   - the KProgOp's chain_input_slot is a valid input slot,
+//   - that slot has a B_INDEX with chain_op_count covering
+//     chain_op_idx + 1.
+// Returns 0 in every other case (chain breaks, leaf input, missing
+// edge data) and leaves *out unchanged.  When this returns 1 the
+// out fields fully describe the movement transform that the
+// matching KProgOp implements.  Future rangeify rerouting will
+// consume this in place of the per-KProgOp src0_dims/out_dims/
+// pad_widths/axis_perm fields.
+fn int  kernel_entry_prog_chain_op(u32 kid, u32 prog_idx, BIndexChainOp *out);
 
 // Leaf utilities other compilation units (realize_classify,
 // gc_mark, wnf/redex, interact/uop_kernel) reference.

@@ -6,6 +6,33 @@ dated section.
 
 ## Unreleased
 
+### Added: per-USE chain_op_idx on KProgOp + bindex round-trip accessor
+
+`KProgOp` gains two fields - `chain_op_idx` (u8) and
+`chain_input_slot` (u32) - that link each movement-op KProgOp back
+to a specific entry on the originating B_INDEX chain.  visit()
+populates them during kernel emission via two helpers,
+`prog_chain_propagate` for single-src ops and `prog_chain_break`
+for binary ops, REDUCE, and CONST.  Movement ops add 1 to the
+src's chain depth; non-movement single-src ops (NEG, CAST, LOAD)
+pass the depth through unchanged so a chain like
+`RESHAPE(NEG(PAD(input)))` still maps cleanly.
+
+`kernel_entry_prog_chain_op(kid, prog_idx, BIndexChainOp *out)`
+returns the chain entry that corresponds to a movement-op KProgOp
+by computing `chain_op_count - 1 - chain_op_idx` (KProgOp counts
+source-to-consumer; B_INDEX stores consumer-to-source).  This is
+the foundation accessor the rangeify rerouting will consume in
+place of `KProgOp.src0_dims`/`out_dims`/`pad_widths`/`axis_perm`.
+
+`tests/test_bufferize.c` adds two cases:
+- A movement chain that materialises the round-trip: every
+  movement-op KProgOp's BIndexChainOp matches its src/out dims.
+- Binary ops break the chain (chain_input_slot stays 0xFFFFFFFF).
+
+251/251.  No codegen changes; the wiring just makes the
+canonical edge data reachable per-op.
+
 ### Added: DUMP_BUFFERIZE_KERNEL_EDGES + multi-kernel wiring test
 
 `schedule/materialize.c` gains a per-pass diagnostic
