@@ -6,6 +6,45 @@ dated section.
 
 ## Unreleased
 
+### Fixed: lift FLAT_GRID dispatch for nested scalar reduces
+
+The metal renderer's `rmt_emit_value_with_reduce` already handles
+the post-reduce substitution (wraps the reduce loop, caches the
+accumulator in a register, substitutes the register for the reduce
+node when emitting the surrounding scalar expression).  But
+`rmt_axis_mode` rejected nested-reduce kernels outright via
+`flat_ok && !nested_reduce`, forcing them onto the per-op
+`metal-op` encoder.  Lifting that gate routes them through the
+tile-JIT path.
+
+These are the BN-mean / BN-var (and grad-side analogues) inlined
+by Phase 1's broadcast-reduce predicate generalisation.  After
+inlining, the consumer kernel's program is
+`STORE(idx, MUL(REDUCE_SUM(x), EXPAND(CONST)))` or similar -- the
+reduce isn't the top-level stored value, so the strict gate
+rejected them despite the renderer being able to emit valid code.
+
+Bounded beautiful-mnist canary
+(`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`):
+
+- timed step: `~32 ms` (vs `~86 ms` pre-fix, -63%);
+- metal-op fallbacks: `0` (vs `10` pre-fix);
+- metal-tile dispatches: `118` (vs `108` pre-fix; all kernels
+  through the tile JIT);
+- peak retained Metal memory: `62 MB` (vs `171 MB` pre-fix, -64%).
+
+Default-on; `THVM_TILE_NESTED_REDUCE_FLAT_GRID=0` reverts.
+
+`tests/test_tile_graph.c` -- the post-reduce-expression test
+pinned the strict gate; updated to setenv around the rejection
+assertion and unsetenv before the GROUP_REDUCE assertion below.
+
+Cumulative session totals (vs original baseline):
+
+- kernels: `1330 -> 118` (-91%)
+- timed step: `694 ms -> 32 ms` (-95%)
+- peak retained Metal memory: `~3.5 GB -> 62 MB` (-98%)
+
 ### Added: collect-mul-add uop rule (Phase 4 of tinygrad rule port)
 
 New `uop_graph_simplify_collect_mul_add` rule folds linear

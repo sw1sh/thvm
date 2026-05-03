@@ -828,20 +828,26 @@ where divandmod patterns survive past CSE/DCE.
 
 Latest bounded Metal/tile beautiful-mnist canary
 (`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`) after Phase
-1 of the tinygrad rule port (broadcast-reduce predicate
-generalisation) plus the metal-op fallback fix for REDUCE-rooted
-absorbing kernels (`THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP`):
+1 (broadcast-reduce predicate), the metal-op fallback fix for
+REDUCE-rooted absorbing kernels, AND the FLAT_GRID-with-nested-
+reduce relaxation (`THVM_TILE_NESTED_REDUCE_FLAT_GRID`):
 
-- timed step: `84.9 ms` (vs `694 ms` original reference, -87.8%;
-  vs `168.4 ms` pre-fix Phase-1 baseline, -49.6%);
-- kernels: `118` (vs `1330` original reference, -91.1%; vs `113`
-  pre-fix Phase-1 baseline, +5 -- the absorbing-REDUCE gate keeps
-  five extra BN REDUCEs realized);
-- dispatch: `metal-tile=108`, `metal-op=10` (vs `86/27` pre-fix);
-  the remaining 10 metal-op fallbacks bail rangeify on
-  `pre-reduce dim mismatch` rather than the `> 1 reduce` envelope;
-- peak retained Metal memory: `171 MB` (vs `1881 MB` pre-Phase-1
-  baseline, -90.9%; vs `392 MB` pre-fix, -56.4%).
+- timed step: `~32 ms` (vs `694 ms` original reference, -95%; vs
+  `84.9 ms` pre-FLAT_GRID baseline, -62%);
+- kernels: `118` (vs `1330` original reference, -91%);
+- dispatch: `metal-tile=118`, `metal-op=0` (vs `108/10` pre-fix;
+  ALL kernels now through the tile JIT path);
+- peak retained Metal memory: `62 MB` (vs `1881 MB` pre-Phase-1
+  baseline, -97%; vs `171 MB` pre-FLAT_GRID, -64%).
+
+The structural fix lifted nested-reduce kernels onto tile-JIT.
+The renderer's `rmt_emit_value_with_reduce` was already correct
+for `STORE(idx, MUL(REDUCE_SUM(x), CONST))` shapes -- it wraps the
+reduce loop and substitutes the accumulator into the surrounding
+expression -- but `rmt_axis_mode` rejected the kernel before the
+renderer could emit code.  Removing that gate (with the existing
+renderer doing the right thing) was a 5-line change for a 64%
+wall-time reduction.
 
 Phase 1 alone closed most of the kernel-count gap.  The chain
 predicate now matches BatchNorm-train / BN-grad shapes via:
