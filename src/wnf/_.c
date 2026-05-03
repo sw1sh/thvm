@@ -526,6 +526,24 @@ apply:
             whnf = r;
             continue;
           }
+          case TAG_APP: {
+            // DUP-APP commute: distribute through the application.
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_app(lab, loc, side, whnf);
+            goto enter;
+          }
+          case TAG_OP2: {
+            // DUP-OP2 commute: distribute through the binary op.
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_op2(lab, loc, side, whnf);
+            goto enter;
+          }
+          case TAG_MAT: {
+            // DUP-MAT commute: distribute through the numeric switch.
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_mat(lab, loc, side, whnf);
+            goto enter;
+          }
           default: {
             heap_set(loc, whnf);
             whnf = frame;

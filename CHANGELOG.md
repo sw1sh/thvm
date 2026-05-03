@@ -6,6 +6,38 @@ dated section.
 
 ## Unreleased
 
+### Added: C-side auto-dup primitive + DUP-NOD commute rules
+
+`src/lam/auto_dup.c` ships `lam_seal_ext_with_auto_dup` -- the
+C-side mirror of HVM4's parse-time `auto_dup.c`, adapted to
+thvm's loc-indexed VARs.  It walks the freshly-installed LAM
+body, counts `VAR(lam_loc)` cells, and for `n > 1` rewrites them
+in place to a left-leaning DUP chain so the binder is duplicated
+at fire time.  Fresh DUP labels live in the `[0x10000, 0x1FFFF]`
+band, clear of the `DUP_GRAD_FLAG` bit and WL's `TFreshLabel`
+low range.  Walker is conservative: skips `TAG_REF` / `TAG_ALO`
+(closed wrt local lam_loc) and bails on `UOP_KERNEL` whose
+inputs live in a side table.
+
+`src/interact/dup_app.c`, `dup_op2.c`, `dup_mat.c` cover the
+structural commute when a DUP projection meets an APP / OP2 /
+MAT during reduction -- modeled on HVM4's generic `wnf_dup_nod`
+(`TinyHVM/HVM4/clang/wnf/dup_nod.c`).  Wired into `wnf`'s
+DP-frame apply switch alongside the existing dup_ctr / dup_lam /
+dup_num / dup_uop cases.  Each fire allocates 6 cells (2 fresh
+node layouts + 2 shared dup-body cells).
+
+`tests/test_auto_dup.c` exercises the round trip with
+`λx. x + x` and 3-/5-use bodies under NUM args; 18/18 sub-checks.
+
+The WL bridge (`thvm_wl_lam_seal_ext`) stays on plain
+`lam_seal_ext` -- not on the auto-dup variant -- until either
+Levy-optimal sharing lands or auto-dup becomes selective.  Naive
+structural DUP commute through deep recursive bodies (Lazy.wl's
+splits TDef) blows up exponentially without optimality.  Callers
+that want auto-dup explicitly call `lam_seal_ext_with_auto_dup`
+from C; tests/test_auto_dup.c is the canonical example.
+
 ### Added: Lazy.wl IC-native lazy streams + Lazy/Patterns plan
 
 `wl/THVMLink/Kernel/Lazy.wl` provides WL-side lazy streams whose

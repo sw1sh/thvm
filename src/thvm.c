@@ -95,6 +95,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // construction sites to set LAM_ERA_MASK on unused-binder lambdas.
 #include "lam/shape.c"
 #include "lam/body_uses_var.c"
+#include "lam/auto_dup.c"
 
 // === book/ ===
 // from_dynamic depends on heap/, book/alloc, book/set; included after them.
@@ -259,6 +260,9 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/dup_ten.c"
 #include "interact/dup_uop.c"
 #include "interact/dup_ctr.c"
+#include "interact/dup_app.c"
+#include "interact/dup_op2.c"
+#include "interact/dup_mat.c"
 #include "interact/app_bri.c"
 #include "interact/app_pri.c"
 #include "interact/app_sup.c"

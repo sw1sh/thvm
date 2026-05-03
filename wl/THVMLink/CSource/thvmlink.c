@@ -123,10 +123,27 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
-// Compute the LAM ext (with LAM_ERA_MASK or'd in iff lam_body_uses_var
-// proves the binder is unused) for a freshly-constructed LAM whose
-// body has been installed at HEAP[lam_loc].  Called from WL's TLam
-// helper after THeapSet[loc, body], before packTerm seals the LAM.
+// Compute the LAM ext for a freshly-constructed LAM whose body has
+// been installed at HEAP[lam_loc].  Called from WL's TLam helper
+// after THeapSet[loc, body], before packTerm seals the LAM.
+//
+// Today this calls `lam_seal_ext` which only sets LAM_ERA_MASK on
+// 0-use binders; non-linear bodies get NO automatic DUP chain.
+//
+// IC-native auto-dup is implemented in src/lam/auto_dup.c
+// (`lam_seal_ext_with_auto_dup`) and tested by tests/test_auto_dup.c
+// for simple atomic non-linear use (x+x with NUM args, etc.).  The
+// generic DUP-NOD commute rules for APP / OP2 / MAT live in
+// src/interact/dup_{app,op2,mat}.c, so the runtime can structurally
+// distribute DUPs through compound nodes.
+//
+// Wiring auto-dup as the WL default is gated on Levy-optimal sharing
+// (or a selective skip for atomic non-linear binders): naive
+// structural DUP commute through deep recursive bodies (Lazy.wl's
+// splits TDef) blows up exponentially without optimality.  Until
+// then, Lazy.wl uses linearity-friendly specialized helpers and
+// callers that want auto-dup explicitly call
+// `lam_seal_ext_with_auto_dup` from C.
 EXTERN_C DLLEXPORT int thvm_wl_lam_seal_ext(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {
   (void)libData; (void)argc;
