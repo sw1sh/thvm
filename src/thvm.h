@@ -167,7 +167,27 @@ typedef u64 Term;
 #define TAG_F_EQL_R     27
 #define TAG_F_UOP_CHILD 28
 
-#define TAG_COUNT 29
+// === Dynamic-label SUP / DUP (HVM4 DSU / DDU) ===
+// DSU(lab_term, a, b): like SUP{a,b} but the label is a *term* that
+// must be reduced first.  Once the label resolves to NUM(n), DSU
+// becomes SUP^n{a,b}.  Other resolutions: ERA -> ERA, SUP -> nested
+// SUP via cross-product on (a, b).
+//   val = heap loc; heap[val..val+2] = [lab_term, a, b]
+// DDU(lab_term, val, body): dual of DSU; once label resolves to
+// NUM(n), DDU becomes DUP^n{x0,x1}=val with body applied to (x0,x1).
+//   val = heap loc; heap[val..val+2] = [lab_term, value, body]
+#define TAG_DSU         29
+#define TAG_DDU         30
+
+// Frames pushed when wnf descends into a DSU's / DDU's label cell.
+//   TAG_F_DSU_LAB ext = 0  val = DSU heap loc; on resume, label's WHNF
+//                          is on top of stack -- dispatch into the
+//                          DSU-{NUM,ERA,SUP,...} rule.
+//   TAG_F_DDU_LAB ext = 0  val = DDU heap loc; symmetric.
+#define TAG_F_DSU_LAB   31
+#define TAG_F_DDU_LAB   32
+
+#define TAG_COUNT 33
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0

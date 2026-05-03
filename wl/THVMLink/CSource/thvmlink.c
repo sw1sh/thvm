@@ -2376,6 +2376,31 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_mat(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// Dynamic-label SUP / DUP constructors.  The label is a *Term* (the
+// caller already packed it via TVarFor / TNum / etc) so DSU/DDU can
+// be built around any computed label term.
+EXTERN_C DLLEXPORT int thvm_wl_term_new_dsu(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term lab = (Term)MArgument_getInteger(args[0]);
+  Term a   = (Term)MArgument_getInteger(args[1]);
+  Term b   = (Term)MArgument_getInteger(args[2]);
+  Term r   = term_new_dsu(lab, a, b);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_term_new_ddu(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term lab = (Term)MArgument_getInteger(args[0]);
+  Term v   = (Term)MArgument_getInteger(args[1]);
+  Term bod = (Term)MArgument_getInteger(args[2]);
+  Term r   = term_new_ddu(lab, v, bod);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 // === book heap / defs / ALO state I/O ===
 //
 // Used by Heap.wl HeapSnapshot / HeapInitialize to bundle DEFS,

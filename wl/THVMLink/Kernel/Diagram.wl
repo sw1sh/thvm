@@ -142,6 +142,7 @@ agentArity[$TagLAM] = 1; agentArity[$TagDUP] = 1;
 agentArity[$TagAPP] = 2; agentArity[$TagSUP] = 2;
 agentArity[$TagALO] = 2; agentArity[$TagMAT] = 2;
 agentArity[$TagOP2] = 2;
+agentArity[$TagDSU] = 3; agentArity[$TagDDU] = 3;
 
 (* CTR's heap layout: arity NUM at base, n children at base+1..base+n.
    The total span is 1 + n cells.  Used by locOwner to claim every
@@ -184,6 +185,8 @@ slotSide[$TagALO, _]    := "Top"; slotIsDualed[$TagALO, _] := False;
 slotSide[$TagCTR, _]    := "Top"; slotIsDualed[$TagCTR, _] := False;
 slotSide[$TagMAT, _]    := "Top"; slotIsDualed[$TagMAT, _] := False;
 slotSide[$TagOP2, _]    := "Top"; slotIsDualed[$TagOP2, _] := False;
+slotSide[$TagDSU, _]    := "Top"; slotIsDualed[$TagDSU, _] := False;
+slotSide[$TagDDU, _]    := "Top"; slotIsDualed[$TagDDU, _] := False;
 
 (* Find which (base, tag, offset) owns cell at loc, given the
    discovered agents association.  Returns None if loc is not in
@@ -221,6 +224,8 @@ agentStyle[$TagCTR] := Directive[EdgeForm[White], FaceForm[Darker[StandardRed,  
 agentStyle[$TagMAT] := Directive[EdgeForm[White], FaceForm[Darker[StandardRed,    0.55]]]
 agentStyle[$TagOP2] := Directive[EdgeForm[White], FaceForm[Darker[StandardBlue,   0.55]]]
 agentStyle[$TagNUM] := Directive[EdgeForm[White], FaceForm[GrayLevel[0.5]]]
+agentStyle[$TagDSU] := Directive[EdgeForm[White], FaceForm[Darker[StandardOrange, 0.65]]]
+agentStyle[$TagDDU] := Directive[EdgeForm[White], FaceForm[Darker[StandardPurple, 0.65]]]
 (* UOP fill: orange for GRAD (it's the "rewrite" UOP, distinct from
    compute), blue for everything else. *)
 uopStyle[$UopGrad] := Directive[EdgeForm[White], FaceForm[Darker[StandardOrange, 0.35]]]
@@ -246,6 +251,11 @@ agentShape[$TagOP2] := "RoundedUpsideDownTriangle"
 agentShape[$TagMAT] := "RoundedUpsideDownTriangle"
 agentShape[$TagREF] := "Disk"
 agentShape[$TagNUM] := "Disk"
+(* DSU produces a SUP-like value (apex-down output); DDU consumes
+   like DUP (apex-up principal input).  Both have the label as an
+   extra strict input slot. *)
+agentShape[$TagDSU] := "RoundedUpsideDownTriangle"
+agentShape[$TagDDU] := "RoundedTriangle"
 
 (* Multi-line "TAG\n@<base>" or "TAG\n@<base>..<base+arity-1>" label
    matching the heap graph's vertex labels. *)
@@ -624,6 +634,40 @@ agentDiagram[base_Integer, $TagOP2, principal_, _Association, _Association] :=
         ]
     ]
 
+(* DSU(lab, a, b) -- dynamic-label SUP.  Three top inputs (label
+   strict, a, b); principal output flows to whatever cell holds
+   this DSU.  Label as the leftmost slot reads naturally as "the
+   thing being computed first". *)
+agentDiagram[base_Integer, $TagDSU, principal_, _Association, _Association] :=
+    With[{outWire = If[ principal === None,
+                        "p" <> ToString[base],
+                        wireFor[principal]]},
+        With[{
+            label   = Column[{"DSU", "@" <> ToString[base]}, Center, Spacings -> 0],
+            inputs  = {wireFor[base], wireFor[base + 1], wireFor[base + 2]},
+            outputs = {outWire},
+            shape   = agentShape[$TagDSU], style = agentStyle[$TagDSU]
+        },
+            Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
+        ]
+    ]
+
+(* DDU(lab, val, body) -- dynamic-label DUP.  Same shape as DSU
+   but on the DUP side; principal incoming at the apex. *)
+agentDiagram[base_Integer, $TagDDU, principal_, _Association, _Association] :=
+    With[{outWire = If[ principal === None,
+                        "p" <> ToString[base],
+                        wireFor[principal]]},
+        With[{
+            label   = Column[{"DDU", "@" <> ToString[base]}, Center, Spacings -> 0],
+            inputs  = {wireFor[base], wireFor[base + 1], wireFor[base + 2]},
+            outputs = {outWire},
+            shape   = agentShape[$TagDDU], style = agentStyle[$TagDDU]
+        },
+            Diagram[label, inputs, outputs, "Shape" -> shape, "Style" -> style]
+        ]
+    ]
+
 (* === REF / NUM leaves: rendered per-reference, like CONST.  The
    leaf cell sits in some parent slot; we render a yellow disk (REF)
    or gray disk (NUM) bound to the slot's wire so a network of
@@ -793,7 +837,8 @@ agentRule[t_] := With[{tag = TTermTag[t], val = TTermVal[t]},
         tag === $TagLAM || tag === $TagAPP || tag === $TagSUP ||
         tag === $TagDUP || tag === $TagUOP ||
         tag === $TagALO || tag === $TagCTR ||
-        tag === $TagMAT || tag === $TagOP2,
+        tag === $TagMAT || tag === $TagOP2 ||
+        tag === $TagDSU || tag === $TagDDU,
             val -> tag,
         tag === $TagVAR,
             val -> $TagLAM,
@@ -888,6 +933,8 @@ wireSlots[base_Integer, $TagOP2] := {0, 1}
 wireSlots[base_Integer, $TagALO] := {0}                (* slot 1 = state metadata *)
 wireSlots[base_Integer, $TagCTR] :=
     Range[1, TTermVal[THeapRead[base]]]                (* skip arity NUM at slot 0 *)
+wireSlots[base_Integer, $TagDSU] := {0, 1, 2}          (* lab, a, b *)
+wireSlots[base_Integer, $TagDDU] := {0, 1, 2}          (* lab, val, body *)
 wireSlots[base_Integer, $TagUOP] := {}                  (* handled via reachOps separately *)
 wireSlots[___] := {}
 

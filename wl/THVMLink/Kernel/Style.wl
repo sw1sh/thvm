@@ -87,7 +87,12 @@ $nodeStyle = <|
     "ALO"         -> styleEntry["TriangleDown", Darker[StandardYellow, 0.15]],
     "CTR"         -> styleEntry["TriangleDown", StandardRed],
     "MAT"         -> styleEntry["TriangleUp",   StandardRed],
-    "OP2"         -> styleEntry["Rect",         StandardBlue]
+    "OP2"         -> styleEntry["Rect",         StandardBlue],
+    (* Dynamic-label SUP / DUP (HVM4 DSU / DDU) -- same shapes as
+       SUP / DUP, darker shade marks them as the strict-on-label
+       variant. *)
+    "DSU"         -> styleEntry["TriangleUp",   Darker[StandardOrange, 0.25]],
+    "DDU"         -> styleEntry["TriangleDown", Darker[StandardPurple, 0.25]]
 |>;
 
 (* Lookup with a sensible fallback so a new tag accidentally

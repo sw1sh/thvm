@@ -55,6 +55,8 @@ op2VertexId[base_Integer] := "p" <> ToString[base]
 aloVertexId[base_Integer] := "o" <> ToString[base]
 refVertexId[defId_Integer] := "r" <> ToString[defId]
 numVertexId[loc_Integer]  := "n" <> ToString[loc]
+dsuVertexId[base_Integer] := "y" <> ToString[base]   (* dyn SUP *)
+dduVertexId[base_Integer] := "z" <> ToString[base]   (* dyn DUP *)
 
 (* === IC port specs (offset, port name) === *)
 icPorts[$TagLAM] := {{0, "body"}}
@@ -77,6 +79,12 @@ op2Ports[] := {{0, "L"}, {1, "R"}}
 (* ALO ports: heap[val] = wrapped book-template term;
    heap[val+1] = NUM(state_id) -- atomic, surfaced in the label. *)
 aloPorts[] := {{0, "body"}}
+
+(* DSU ports: heap[val+0] = label term, heap[val+1] = a, +2 = b. *)
+dsuPorts[] := {{0, "lab"}, {1, "a"}, {2, "b"}}
+
+(* DDU ports: heap[val+0] = label term, heap[val+1] = value, +2 = body. *)
+dduPorts[] := {{0, "lab"}, {1, "v"}, {2, "bod"}}
 
 (* === discovery ===
    Walks every heap cell + each seed term once; categorizes each
@@ -109,6 +117,10 @@ agentFromTerm[term_] := With[{tag = TTermTag[term]},
             matVertexId[TTermVal[term]] -> <|"tag" -> $TagMAT, "ext" -> TTermExt[term]|>,
         $TagOP2,
             op2VertexId[TTermVal[term]] -> <|"tag" -> $TagOP2, "opcode" -> TTermExt[term]|>,
+        $TagDSU,
+            dsuVertexId[TTermVal[term]] -> <|"tag" -> $TagDSU|>,
+        $TagDDU,
+            dduVertexId[TTermVal[term]] -> <|"tag" -> $TagDDU|>,
         _,
             Nothing
     ]
@@ -149,6 +161,8 @@ childVertexId[loc_Integer] :=
             $TagCTR,                               ctrVertexId[val],
             $TagMAT,                               matVertexId[val],
             $TagOP2,                               op2VertexId[val],
+            $TagDSU,                               dsuVertexId[val],
+            $TagDDU,                               dduVertexId[val],
             $TagNUM,                               numVertexId[loc],
             _, Nothing
         ]
@@ -254,6 +268,22 @@ aloEdgeRecords[base_Integer] := With[{parentVid = aloVertexId[base]},
     {genericPortRecord[parentVid, base, 0, "body"]}
 ]
 
+dsuEdgeRecords[base_Integer] := With[{parentVid = dsuVertexId[base]},
+    {
+        genericPortRecord[parentVid, base, 0, "lab"],
+        genericPortRecord[parentVid, base, 1, "a"],
+        genericPortRecord[parentVid, base, 2, "b"]
+    }
+]
+
+dduEdgeRecords[base_Integer] := With[{parentVid = dduVertexId[base]},
+    {
+        genericPortRecord[parentVid, base, 0, "lab"],
+        genericPortRecord[parentVid, base, 1, "v"],
+        genericPortRecord[parentVid, base, 2, "bod"]
+    }
+]
+
 (* dispatch *)
 agentEdgeRecords[vid_String, info_Association] := Switch[info["tag"],
     $TagLAM | $TagAPP | $TagSUP | $TagDUP,
@@ -264,6 +294,8 @@ agentEdgeRecords[vid_String, info_Association] := Switch[info["tag"],
     $TagMAT, matEdgeRecords[ToExpression[StringDrop[vid, 1]]],
     $TagOP2, op2EdgeRecords[ToExpression[StringDrop[vid, 1]]],
     $TagALO, aloEdgeRecords[ToExpression[StringDrop[vid, 1]]],
+    $TagDSU, dsuEdgeRecords[ToExpression[StringDrop[vid, 1]]],
+    $TagDDU, dduEdgeRecords[ToExpression[StringDrop[vid, 1]]],
     _, {}
 ]
 
@@ -350,6 +382,8 @@ vertexCategory[vid_String, info_Association] := Switch[info["tag"],
     $TagCTR, "CTR",
     $TagMAT, "MAT",
     $TagOP2, "OP2",
+    $TagDSU, "DSU",
+    $TagDDU, "DDU",
     $TagNUM, "NUM",
     _, "UOP"
 ]
@@ -393,6 +427,8 @@ vertexLabel[vid_String, info_Association] := Switch[info["tag"],
     $TagCTR, ctrLabel[ToExpression[StringDrop[vid, 1]], info["ext"]],
     $TagMAT, matLabel[ToExpression[StringDrop[vid, 1]], info["ext"]],
     $TagOP2, op2Label[ToExpression[StringDrop[vid, 1]], info["opcode"]],
+    $TagDSU, Column[{"DSU", "@" <> ToString[ToExpression[StringDrop[vid, 1]]]}, Center, Spacings -> 0],
+    $TagDDU, Column[{"DDU", "@" <> ToString[ToExpression[StringDrop[vid, 1]]]}, Center, Spacings -> 0],
     $TagNUM, numLabel[ToExpression[StringDrop[vid, 1]]],
     _, ""
 ]

@@ -32,7 +32,11 @@ int main(void) {
   CHECK(TAG_F_OP2_NUM   == 26);
   CHECK(TAG_F_EQL_R     == 27);
   CHECK(TAG_F_UOP_CHILD == 28);
-  CHECK(TAG_COUNT == 29);
+  CHECK(TAG_DSU         == 29);
+  CHECK(TAG_DDU         == 30);
+  CHECK(TAG_F_DSU_LAB   == 31);
+  CHECK(TAG_F_DDU_LAB   == 32);
+  CHECK(TAG_COUNT == 33);
 
   TEST_BEGIN("term/TAG_TEN-roundtrip");
   Term t = term_new(0, TAG_TEN, DT_FP32, 42);

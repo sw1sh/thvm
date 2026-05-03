@@ -308,6 +308,24 @@ enter:
       next = heap_read(loc + 1);
       goto enter;
     }
+    case TAG_DSU: {
+      // Dynamic-label SUP: strict on the label term.  Push DSU frame
+      // (the frame IS the DSU itself, since its loc is in val and we
+      // know to descend into label at +0), descend into label.
+      if (BUDGET_HIT) BAIL_AT(next);
+      u64 loc = term_val(next);
+      stack[s_pos++] = next;
+      next = heap_read(loc + 0);
+      goto enter;
+    }
+    case TAG_DDU: {
+      // Dynamic-label DUP: same shape as DSU -- strict on label.
+      if (BUDGET_HIT) BAIL_AT(next);
+      u64 loc = term_val(next);
+      stack[s_pos++] = next;
+      next = heap_read(loc + 0);
+      goto enter;
+    }
     case TAG_LAM:
     case TAG_ERA:
     case TAG_SUP:
@@ -480,6 +498,68 @@ apply:
         // a stale snapshot resumes safely.
         u64 loc = term_val(frame);
         heap_set(loc, whnf);
+        whnf = frame;
+        continue;
+      }
+      case TAG_DSU: {
+        // DSU frame: label reduced to whnf.  Dispatch:
+        //   NUM(n) -> SUP^n{a, b}  (DSU-NUM)
+        //   ERA    -> ERA          (DSU-ERA)
+        //   SUP    -> nested SUP via cross-product on cloned (a,b)
+        //                          (DSU-SUP)
+        //   DP0/DP1 -> drive through cnf so any DUP-XXX fires first
+        //   else   -> stuck: write whnf back to label slot; return frame
+        u64 loc = term_val(frame);
+        if (term_tag(whnf) == TAG_DP0 || term_tag(whnf) == TAG_DP1) {
+          WNF_S_POS = s_pos;
+          whnf = cnf(whnf);
+          s_pos = WNF_S_POS;
+        }
+        if (term_tag(whnf) == TAG_NUM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          next = interact_dsu_num(loc, whnf);
+          goto enter;
+        }
+        if (term_tag(whnf) == TAG_ERA) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          whnf = interact_dsu_era();
+          continue;
+        }
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          next = interact_dsu_sup(loc, whnf);
+          goto enter;
+        }
+        // Label stuck: rebuild DSU with reduced label.
+        heap_set(loc + 0, whnf);
+        whnf = frame;
+        continue;
+      }
+      case TAG_DDU: {
+        // DDU frame: label reduced to whnf.  Same dispatch shape as
+        // DSU but with the DDU rules.
+        u64 loc = term_val(frame);
+        if (term_tag(whnf) == TAG_DP0 || term_tag(whnf) == TAG_DP1) {
+          WNF_S_POS = s_pos;
+          whnf = cnf(whnf);
+          s_pos = WNF_S_POS;
+        }
+        if (term_tag(whnf) == TAG_NUM) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          next = interact_ddu_num(loc, whnf);
+          goto enter;
+        }
+        if (term_tag(whnf) == TAG_ERA) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          whnf = interact_ddu_era();
+          continue;
+        }
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          next = interact_ddu_sup(loc, whnf);
+          goto enter;
+        }
+        heap_set(loc + 0, whnf);
         whnf = frame;
         continue;
       }
@@ -870,9 +950,11 @@ bail:
       heap_set(term_val(frame), whnf);
       whnf = frame;
     } else if (ftag == TAG_OP2 || ftag == TAG_EQL || ftag == TAG_AND
-               || ftag == TAG_OR  || ftag == TAG_WHEN) {
+               || ftag == TAG_OR  || ftag == TAG_WHEN
+               || ftag == TAG_DSU || ftag == TAG_DDU) {
       // Strict-eval frames: store the in-flight WHNF back at slot 0
       // so subsequent wnf re-entry sees the partially-reduced state.
+      // DSU/DDU strict slot is the label term at +0; same shape.
       heap_set(term_val(frame) + 0, whnf);
       whnf = frame;
     } else if (ftag == TAG_ANN) {

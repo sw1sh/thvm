@@ -59,6 +59,8 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "term/new_bri.c"
 #include "term/new_ann.c"
 #include "term/new_pri.c"
+#include "term/new_dsu.c"
+#include "term/new_ddu.c"
 
 // === dtype/ ===
 // dtype info table + element-size primitives + integer-kernel macros.
@@ -278,6 +280,12 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "interact/uop_grad.c"
 #include "interact/uop_kernel.c"
 #include "interact/uop_assign.c"
+#include "interact/dsu_num.c"
+#include "interact/dsu_era.c"
+#include "interact/dsu_sup.c"
+#include "interact/ddu_num.c"
+#include "interact/ddu_era.c"
+#include "interact/ddu_sup.c"
 
 // codegen/autotune.c needs kernel_fire_by_id (uop_kernel.c) so it
 // lives down here, AFTER the interact pass.  Bench-and-pick the

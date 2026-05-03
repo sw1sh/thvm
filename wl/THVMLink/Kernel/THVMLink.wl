@@ -61,6 +61,8 @@ TLam::usage       = "TLam[x, body] constructs a lambda; HoldAll, so `x` is the b
 TLamShape::usage  = "TLamShape[shape_List, x, body] constructs a lambda whose bound variable carries an explicit shape annotation in the lam_shape side table.  Useful when the body needs to materialize BEFORE any TApp (e.g. for inspection / direct TMaterialize on the body); for the common case TLam alone is enough since the JIT path infers the shape from the first applied argument.";
 TApp::usage       = "TApp[fun, arg] constructs an application.";
 TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
+TDsu::usage       = "TDsu[label, a, b] constructs a dynamic-label SUP (HVM4 DSU): the label is a TTerm reduced strict-left at wnf time, after which DSU collapses to SUP^n / ERA / nested-SUP based on what the label resolved to.  Useful for pattern compilers that need a fresh label per match instance.";
+TDdu::usage       = "TDdu[label, val, body] constructs a dynamic-label DUP (HVM4 DDU): same shape as TDsu but on the DUP side.  body must be a 2-arg LAM-pair; once label resolves to NUM(n), the DDU reduces to body(X0, X1) where X0/X1 are projections of DUP^n on val.";
 TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
 
 (* === tag constants (mirror src/thvm.h) === *)
@@ -173,6 +175,7 @@ $TagDP0 = 4; $TagDP1 = 5; $TagSUP = 6; $TagDUP = 7;
 $TagTEN = 8; $TagUOP = 9; $TagNUM = 10;
 $TagREF = 11; $TagALO = 12; $TagOP2 = 13; $TagMAT = 14;
 $TagCTR = 20;
+$TagDSU = 29; $TagDDU = 30;
 
 (* DUP-cell flavor flag: TAG_DP{0,1} with this bit set on ext is a
    grad-flavored projection (DP0=FWD passthrough, DP1=BWD chain rule).
@@ -184,7 +187,8 @@ $tagNames = <|
     4  -> "DP0", 5  -> "DP1", 6  -> "SUP",  7  -> "DUP",
     8  -> "TEN", 9  -> "UOP", 10 -> "NUM",
     11 -> "REF", 12 -> "ALO", 13 -> "OP2",  14 -> "MAT",
-    20 -> "CTR"
+    20 -> "CTR",
+    29 -> "DSU", 30 -> "DDU"
 |>;
 
 $op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<" |>;
@@ -263,6 +267,8 @@ $freeFn      := $freeFn      = load["thvm_wl_free",       {},                   
 $resetFn     := $resetFn     = load["thvm_wl_reset",      {},                       Integer];
 
 $termNewFn   := $termNewFn   = load["thvm_wl_term_new",   {Integer, Integer, Integer, Integer}, Integer];
+$termNewDsuFn := $termNewDsuFn = load["thvm_wl_term_new_dsu", {Integer, Integer, Integer}, Integer];
+$termNewDduFn := $termNewDduFn = load["thvm_wl_term_new_ddu", {Integer, Integer, Integer}, Integer];
 $lamSealExtFn := $lamSealExtFn = load["thvm_wl_lam_seal_ext", {Integer, Integer},      Integer];
 $termTagFn   := $termTagFn   = load["thvm_wl_term_tag",   {Integer},                Integer];
 $termExtFn   := $termExtFn   = load["thvm_wl_term_ext",   {Integer},                Integer];
@@ -769,6 +775,20 @@ tTreeWalkWith[reader_, t_, seen_] := Block[{
                         ext
                     ]
                 ]],
+        $TagDSU,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                "DSU"[
+                    tTreeWalkWith[reader, reader[val + 0], seen2],   (* label *)
+                    tTreeWalkWith[reader, reader[val + 1], seen2],   (* a *)
+                    tTreeWalkWith[reader, reader[val + 2], seen2]]], (* b *)
+        $TagDDU,
+            If[ KeyExistsQ[seen, val], "Cycle"[val],
+                seen2 = Append[seen, val -> True];
+                "DDU"[
+                    tTreeWalkWith[reader, reader[val + 0], seen2],   (* label *)
+                    tTreeWalkWith[reader, reader[val + 1], seen2],   (* value *)
+                    tTreeWalkWith[reader, reader[val + 2], seen2]]], (* body *)
         $TagUOP,
             If[ KeyExistsQ[seen, val], "Cycle"[val],
                 seen2 = Append[seen, val -> True];
@@ -818,6 +838,22 @@ TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg]
 
 TSup[a_, b_]                          := TSup[TFreshLabel[], a, b]
 TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]
+
+(* Dynamic-label SUP / DUP (HVM4 DSU / DDU).  The label is a Term
+   that wnf reduces strict-left before dispatching the matching
+   DSU-{NUM,ERA,SUP} / DDU-{NUM,ERA,SUP} interaction.  Use cases:
+   pattern compilers that need a fresh label per match instance,
+   rules-applying-rules where label allocation must come from the
+   computation rather than be statically pre-assigned, label-as-term
+   constructions for ATP-style enumeration. *)
+TDsu[label_TTerm, a_TTerm, b_TTerm] := (
+    ensureInit[];
+    TTerm[$termNewDsuFn[ttermRaw[label], ttermRaw[a], ttermRaw[b]]]
+)
+TDdu[label_TTerm, val_TTerm, body_TTerm] := (
+    ensureInit[];
+    TTerm[$termNewDduFn[ttermRaw[label], ttermRaw[val], ttermRaw[body]]]
+)
 
 (* TLam is JIT-aware by default: when the body is a UOP graph
    (compute) and the argument carries a shape (TEN), the APP-LAM

@@ -71,7 +71,8 @@ TESTS := \
   $(BIN)/test_kbo_pri \
   $(BIN)/test_rewrite_pri \
   $(BIN)/test_sup_rewrite \
-  $(BIN)/test_lpo
+  $(BIN)/test_lpo \
+  $(BIN)/test_dyn_lab
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
