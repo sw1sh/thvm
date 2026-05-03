@@ -6,6 +6,58 @@ dated section.
 
 ## Unreleased
 
+### Added: Multi-output kernel-merge action (step 6)
+
+Builds on the step 1-5 scaffolding (commits `0bca111` `8924705`
+`e59a23a` `68946d0` `0bd92c7`).  Step 6 lands the actual merge
+action plus the runtime support so `THVM_KERNEL_MERGE=1`
+collapses sibling elementwise boundaries into single multi-output
+kernels.
+
+- **Splice (`src/schedule/materialize.c`)**:
+  `splice_child_into_host_premerge` runs at the top of the host's
+  `emit_kernel_for_boundary`, BEFORE `visit()` builds the host's
+  own program.  Visiting B's term first appends B's KProgOps at
+  `[0, b_n)`; A's normal `visit()` appends its program at
+  `[b_n, total)`.  The LAST op of the merged program is A's last
+  op, so the legacy "last op writes to `out_buf_id`" semantics
+  keep routing A's value to its primary `output_tid`.  B's last
+  op is marked with `KProgOp.store_extra_plus_one = 1` (new u8
+  field); the dispatcher reads this marker to fan B's value into
+  the kernel's first extra output buffer.
+- **Runtime support (CPU)**: `cpu_interpret`'s multi-output guard
+  is lifted.  After the program runs, a post-pass walks the
+  program and copies `regs[step]` for every op with
+  `store_extra_plus_one > 0` into `TENS[extra].buf_id`'s CpuBuf.
+- **Runtime support (Metal)**: `metal_dispatch_kernel`'s per-op
+  encoder routes the marked op's `dst_buf` directly to the extra
+  output's `MTLBuffer` (no inter_buf allocation; safe because the
+  splice puts B's final op last in its own subtree, with no
+  downstream KProgOp consuming it).  `metal_try_cpu_small_add`
+  now bails on multi-output kernels (it only writes to
+  `out_buf_id`, would silently drop extras).  The
+  `metal_jit_encode` and `metal_tile_jit_encode` guards from step
+  3 stay in place; merged kernels re-route through the per-op
+  encoder fallback (slower than tile-JIT but correct).
+
+Bounded canary (BS=32 WARMUP=1 N_STEPS=1 POST_AUTOTUNE_TOP=6
+`THVM_BACKEND=metal` `THVM_TILE=1`):
+- `THVM_KERNEL_MERGE=0`: 1070 kernels, 428.8ms,
+  `metal-tile=1069 metal-op=1`.
+- `THVM_KERNEL_MERGE=1`: **1050 kernels (-20)**, 447.8ms (+19ms),
+  `metal-tile=1029 metal-op=21`.  The 20-kernel drop matches the
+  planner's 20-candidate count exactly.  Wall-time regression
+  comes from merged kernels re-routing from `metal-tile` to
+  `metal-op`; lifting that requires per-output Metal buffer
+  binding (separate follow-up).
+
+WL tests (`beautiful_mnist.wlt` + `bn_grad.wlt` +
+`conv_im2col.wlt`): 11/11 green at both `THVM_KERNEL_MERGE=0` and
+`THVM_KERNEL_MERGE=1`.
+
+329/329 in `test_bufferize.c` (was 309 after step 5).  Full
+suite green (0 failures).
+
 ### Added: Multi-output kernel infrastructure steps 2-5
 
 Builds on the step-1 schema landed in commit `0bca111`.  Lands the
