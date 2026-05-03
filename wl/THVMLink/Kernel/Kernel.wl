@@ -89,6 +89,8 @@ TKernelAutotuneAll::usage = "TKernelAutotuneAll[] runs TKernelAutotune on every 
 
 TKernelAutotuneUnique::usage = "TKernelAutotuneUnique[] groups live kernels with proposer candidates by nonzero TKernelProgramKey and runs TKernelAutotune on one representative per shared schedule shape.  Zero-key kernels are tuned individually because they do not share a KernelAxes slot.  Returns an Association mapping representative kid -> TKernelOpts.";
 
+TKernelAutotuneTop::usage = "TKernelAutotuneTop[n] tunes at most n representative kernels from the current TProfileAll[] snapshot, ordered by static Flops.  TKernelAutotuneTop[profile, n, metric] uses an explicit TProfileAll[]/TProfileDelta[] snapshot and metric \"Flops\", \"TotalUs\", or \"DispatchCount\".  Only groups with TKernelProposed candidates are tuned, so this is the bounded alternative to TKernelAutotuneUnique[] for memory-sensitive training-loop canaries.";
+
 (* === C-side kernel side-table accessors ===
    Live here (rather than MemoryPlan.wl) because they're the core
    kernel-introspection bridge -- every consumer that walks
@@ -519,6 +521,30 @@ TKernelAutotuneUnique[] := (ensureInit[];
             If[TKernelProgramKey[First[#]] === 0, #, {First[#]}] & /@ groups
         ];
         Association @ Table[k -> TKernelAutotune[k], {k, reps}]
+    ])
+
+tKernelAutotuneTopMetric[row_Association, metric_String] := Switch[metric,
+    "TotalUs",       Lookup[row, "TotalUs", 0],
+    "DispatchCount", Lookup[row, "DispatchCount", 0],
+    "Flops",         Lookup[row, "Flops", 0],
+    _,               Lookup[row, "Flops", 0]]
+
+TKernelAutotuneTop[n_Integer] := TKernelAutotuneTop[TProfileAll[], n, "Flops"]
+TKernelAutotuneTop[n_Integer, metric_String] :=
+    TKernelAutotuneTop[TProfileAll[], n, metric]
+TKernelAutotuneTop[profile_Association, n_Integer, metric_String : "Flops"] :=
+    (ensureInit[];
+     Module[{limit, groups, reps},
+        limit = Max[0, n];
+        groups = ReverseSortBy[
+            TProfileProgramGroups[profile],
+            tKernelAutotuneTopMetric[#, metric] &];
+        reps = DeleteDuplicates @ Cases[
+            groups,
+            row_ /; Length[Quiet @ Check[TKernelProposed[row["RepKid"]], {}]] > 0
+                :> row["RepKid"]];
+        Association @ Table[k -> TKernelAutotune[k],
+            {k, Take[reps, UpTo[limit]]}]
     ])
 
 (* Inspect-only sibling of TKernelAutotune: bench the no-opt

@@ -988,6 +988,20 @@ VerificationTest[
     TestID -> "kernel-opts/autotune-unique-dedupes-program-shapes"
 ]
 
+VerificationTest[
+    TInit[];
+    xT = TTensorCreate @ N @ Range[16];
+    TRealize @ TUOpReduce[xT, 0, "SUM"];
+    kid = TKernelCount[] - 1;
+    profile = TProfileAll[];
+    res = TKernelAutotuneTop[profile, 1, "Flops"];
+    {AssociationQ[res],
+     Keys[res],
+     Length[First[TKernelOpts[kid]]["Applied"]] >= 0},
+    {True, {kid}, True},
+    TestID -> "kernel-opts/autotune-top-bounds-profile-reps"
+]
+
 (* === applied_opts log: chronological list of TOpt actions === *)
 
 VerificationTest[

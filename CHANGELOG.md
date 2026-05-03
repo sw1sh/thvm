@@ -6,6 +6,16 @@ dated section.
 
 ## Unreleased
 
+### Added: bounded profile-driven autotune targets
+
+`TKernelAutotuneTop[...]` tunes only the hottest representative
+program shapes from a `TProfileAll[]` or `TProfileDelta[]` snapshot,
+ordered by flops, dispatch time, or dispatch count.  The
+beautiful-mnist benchmark exposes this as `POST_AUTOTUNE_TOP=N` with
+`POST_AUTOTUNE_METRIC`, giving a bounded alternative to full
+`TKernelAutotuneUnique[]` sweeps while Metal memory planning is still
+being tightened.
+
 ### Changed: fuse non-contiguous channel reduce chains
 
 Reduce-chain collection now allows source-axis gaps when the original

@@ -186,6 +186,8 @@ warmupSteps = parseInt["WARMUP_STEPS", 1];
 nSteps = parseInt["N_STEPS", 3];
 doPostAutotune = envValue["POST_AUTOTUNE", "0"] === "1";
 postAutotuneKids = parseIntList["POST_AUTOTUNE_KIDS"];
+postAutotuneTop = parseInt["POST_AUTOTUNE_TOP", 0];
+postAutotuneMetric = envValue["POST_AUTOTUNE_METRIC", "Flops"];
 benchMode = ToLowerCase @ envValue["BENCH_MODE", "train"];
 showProfile = envValue["SHOW_PROFILE", "0"] === "1";
 showProgramProfile = envValue["SHOW_PROGRAM_PROFILE", "0"] === "1" || showProfile;
@@ -224,6 +226,8 @@ print["  BS=", bs,
       "  DUMP_GROUP_CONSUMERS=", If[dumpGroupConsumers, "1", "0"],
       "  PROFILE_TOP=", topCount,
       "  POST_AUTOTUNE=", If[doPostAutotune, "1", "0"],
+      "  POST_AUTOTUNE_TOP=", postAutotuneTop,
+      "  POST_AUTOTUNE_METRIC=", postAutotuneMetric,
       "  POST_AUTOTUNE_KIDS=", ToString[postAutotuneKids, InputForm]];
 
 W1 = randTensor[{32, 1, 5, 5}];   b1 = zerosTensor[{32}];
@@ -308,6 +312,15 @@ If[doPostAutotune,
         tuned = TKernelAutotuneUnique[];
         print["post-autotune kernels=", Length[tuned],
               " wall=", NumberForm[(AbsoluteTime[] - t0) * 1000.0, {8, 1}], "ms"]]]
+
+If[postAutotuneTop > 0,
+    Module[{t0 = AbsoluteTime[], tuned, profile},
+        profile = TProfileAll[];
+        tuned = TKernelAutotuneTop[profile, postAutotuneTop, postAutotuneMetric];
+        print["post-autotune-top count=", Length[tuned],
+              " metric=", postAutotuneMetric,
+              " wall=", NumberForm[(AbsoluteTime[] - t0) * 1000.0, {8, 1}], "ms",
+              " result=", ToString[tuned, InputForm]]]]
 
 If[postAutotuneKids =!= {},
     Module[{t0 = AbsoluteTime[], tuned},
