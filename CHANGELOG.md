@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: preserve fused reduce-chain axes in rangeify
+
+Materialized fused reduce chains now retain their original source
+reduce axes, and rangeify emits those as multiple explicit scalar
+reduce ranges while keeping a flat address expression for existing
+index lowering.  Direct `S_INDEX` emission now rejects non-range
+expression refs so expression coordinates go through `S_INDEX_E`.
+
 ### Changed: allow scalar reducers to carry multiple ranges
 
 `S_REDUCE_SUM` and `S_REDUCE_MAX` now accept explicit reducer ranges in

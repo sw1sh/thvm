@@ -279,6 +279,12 @@ typedef struct {
   u32  inner;
   u32  axis_size;
   u32  out_numel;
+  u8   src_ndim;
+  u8   out_ndim;
+  u8   n_reduce_axes;
+  u32  src_dims[MAX_DIM];
+  u32  out_dims[MAX_DIM];
+  u8   reduce_axes[MAX_DIM];
 } ReduceChainInfo;
 
 static u32 shape_numel_u32(Shape const *s) {
@@ -382,5 +388,17 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
   out->inner      = (u32)inner;
   out->axis_size  = (u32)axis_size;
   out->out_numel  = (u32)out_numel;
+  out->src_ndim   = (u8)src_shape.ndim;
+  out->out_ndim   = (u8)out_shape.ndim;
+  out->n_reduce_axes = (u8)n;
+  for (u32 i = 0; i < src_shape.ndim; i++) {
+    out->src_dims[i] = src_shape.dims[i];
+  }
+  for (u32 i = 0; i < out_shape.ndim; i++) {
+    out->out_dims[i] = out_shape.dims[i];
+  }
+  for (u32 i = 0; i < n; i++) {
+    out->reduce_axes[i] = (u8)(min_axis + i);
+  }
   return 1;
 }

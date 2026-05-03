@@ -394,6 +394,16 @@ static u32 emit_index_chain(KernelEntry *ke, u32 dtype, u32 buf_id,
                             u32 const *range_ids, u32 const *strides,
                             u32 ndim, u32 offset) {
   if (ndim > MAX_DIM) return 0;
+  for (u32 d = 0; d < ndim; d++) {
+    if (strides[d] == 0) {
+      continue;
+    }
+    u32 ref = range_ids[d];
+    if (ref == 0 || ref >= ke->n_scalar_uops
+        || ke->scalar_uops[ref].op != S_RANGE) {
+      return 0;
+    }
+  }
   if (ndim == 0) {
     u32 src[1] = {buf_id};
     u64 packed = pack_index_extra(NULL, 0, offset);
@@ -1236,6 +1246,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   u32      reduce_kind = 0;
   u32      reduce_size = 0;
   u32      reduce_inner = 0;
+  u32      reduce_n_ranges = 0;
+  u32      reduce_extents[MAX_DIM] = {0};
   KProgOp *red         = NULL;
   if (has_reduce) {
     red                = &ke->program[reduce_pos];
@@ -1257,6 +1269,32 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     reduce_size = src_numel / red->numel;
     if (reduce_size * red->numel != src_numel) return 0;
     if (reduce_size == 0 || reduce_size > 0xFFFFu) return 0;
+    if (red->n_reduce_axes > 0 && red->n_reduce_axes <= MAX_DIM
+        && red->src0_ndim > 0 && red->src0_ndim <= MAX_DIM) {
+      u64 meta_size = 1;
+      int meta_ok = 1;
+      for (u32 d = 0; d < red->n_reduce_axes; d++) {
+        u32 axis = red->reduce_axes[d];
+        if (axis >= red->src0_ndim) {
+          meta_ok = 0;
+          break;
+        }
+        u32 extent = red->src0_dims[axis];
+        if (extent == 0) {
+          meta_ok = 0;
+          break;
+        }
+        reduce_extents[d] = extent;
+        meta_size *= extent;
+      }
+      if (meta_ok && meta_size == reduce_size) {
+        reduce_n_ranges = red->n_reduce_axes;
+      }
+    }
+    if (reduce_n_ranges == 0) {
+      reduce_n_ranges = 1;
+      reduce_extents[0] = reduce_size;
+    }
   }
 
   u32 onum            = ke->output_numel;
@@ -1371,12 +1409,25 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // REDUCE range (Phase C): an additional inner-most range with
   // axis_type=REDUCE.  Only present when the kernel ends in
   // UOP_REDUCE.
+  u32 reduce_ranges[MAX_DIM] = {0};
   u32 reduce_range = 0;
   u32 in_ndim      = os->ndim;
   u32 in_strides[MAX_DIM + 1];
   if (has_reduce) {
-    u64 extra = ((u64)S_AXIS_REDUCE << 32) | (u64)reduce_size;
-    reduce_range = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+    for (u32 d = 0; d < reduce_n_ranges; d++) {
+      u64 extra = ((u64)S_AXIS_REDUCE << 32) | (u64)reduce_extents[d];
+      reduce_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+    }
+    reduce_range = reduce_ranges[0];
+    for (u32 d = 1; d < reduce_n_ranges; d++) {
+      u32 c = emit_iconst(ke, (i64)reduce_extents[d]);
+      u32 scaled = emit_ibinop(ke, S_IMUL, reduce_range, c);
+      reduce_range = emit_ibinop(ke, S_IADD, scaled, reduce_ranges[d]);
+    }
+    if (reduce_n_ranges > 1) {
+      u32 c = emit_iconst(ke, (i64)reduce_size);
+      reduce_range = emit_ibinop(ke, S_IMOD, reduce_range, c);
+    }
     // Pre-reduce input shape = output_shape ++ {reduce_size}.
     in_ndim = os->ndim + 1;
     if (in_ndim > MAX_DIM) RBAIL_MID("reduce in_ndim > MAX_DIM");
@@ -2882,9 +2933,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       u32 body = KSRC_IS_INPUT(raw) ? input_load_pre[KSRC_INDEX(raw)]
                                     : prog_value[KSRC_INDEX(raw)];
       if (body == 0) RBAIL_MID("REDUCE body 0");
-      u32 src[2] = {body, reduce_range};
+      u32 src[SCALAR_MAX_SRC] = {body};
+      for (u32 d = 0; d < reduce_n_ranges && 1 + d < SCALAR_MAX_SRC; d++) {
+        src[1 + d] = reduce_ranges[d];
+      }
       u8  sop    = (reduce_kind == REDUCE_MAX) ? S_REDUCE_MAX : S_REDUCE_SUM;
-      prog_value[i] = rangeify_emit(ke, sop, dtype, 2, src, 0);
+      prog_value[i] = rangeify_emit(ke, sop, dtype,
+                                    (u8)(1 + reduce_n_ranges), src, 0);
       continue;
     }
     // Resolve up to 2 sources, picking the scope-appropriate input load.

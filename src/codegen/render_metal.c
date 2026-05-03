@@ -886,6 +886,10 @@ static int rmt_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
     if (!rmt_scalar_op_supported(u)) {
       return 0;
     }
+    if ((u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX)
+        && u->src_count != 2) {
+      return 0;
+    }
     if (cs_op_carries_kernel_dtype(u) && !rmt_dtype_supported(u->dtype)) {
       return 0;
     }

@@ -65,15 +65,19 @@ VerificationTest[
     before = TKernelCount[];
     r = TRealize @ TUOpReduce[TUOpReduce[x, 2, "SUM"], 1, "SUM"];
     after = TKernelCount[];
+    scalar = TKernelScalarUops[before];
+    red = Select[scalar, #["op"] === "S_REDUCE_SUM" &];
     {
         TTensorShape[r],
         Normal @ TTensorData[r],
-        after - before
+        after - before,
+        Length @ First[red]["src"]
     },
     {
         {2},
         Table[Total[Flatten[data[[c]]]], {c, 2}],
-        1
+        1,
+        3
     },
     TestID -> "reduce/chain-trailing-sum-one-kernel"
 ]

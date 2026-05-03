@@ -511,6 +511,10 @@ typedef struct {
   u8    axis_perm [MAX_DIM];       // PERMUTE only: out_axis i comes from
                                    //   src axis axis_perm[i].  u8 fits
                                    //   since MAX_DIM=8.
+  u8    n_reduce_axes;             // REDUCE only: number of original
+                                   //   source axes fused into this op.
+  u8    reduce_axes[MAX_DIM];      // REDUCE only: original source axis
+                                   //   ids, in source-axis order.
 } KProgOp;
 
 // === scalar UOp lowering (Phase A of scalar_uops_lowering.md) ===

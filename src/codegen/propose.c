@@ -308,6 +308,9 @@ static int propose_metal_tile_scalar_reduce_kernel(KernelEntry const *ke) {
       return 0;
     }
     if (u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX) {
+      if (u->src_count != 2) {
+        return 0;
+      }
       has_reduce = 1;
     }
   }

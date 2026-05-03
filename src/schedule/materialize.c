@@ -1191,6 +1191,18 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       p->numel  = rc.out_numel;
       p->n_src  = 1;
       p->src[0] = src_idx;
+      p->src0_ndim      = rc.src_ndim;
+      p->out_ndim       = rc.out_ndim;
+      p->n_reduce_axes  = rc.n_reduce_axes;
+      for (u32 i = 0; i < rc.src_ndim && i < MAX_DIM; i++) {
+        p->src0_dims[i] = rc.src_dims[i];
+      }
+      for (u32 i = 0; i < rc.out_ndim && i < MAX_DIM; i++) {
+        p->out_dims[i] = rc.out_dims[i];
+      }
+      for (u32 i = 0; i < rc.n_reduce_axes && i < MAX_DIM; i++) {
+        p->reduce_axes[i] = rc.reduce_axes[i];
+      }
       u32 ref = ke->n_ops - 1;
       visit_memo_store(memo, loc, ref);
       return ref;
@@ -1236,6 +1248,21 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     p->numel  = reduce_numel;
     p->n_src  = 1;
     p->src[0] = src_idx;
+    if (src_shape.ndim > 0 && src_shape.ndim <= MAX_DIM) {
+      p->src0_ndim     = (u8)src_shape.ndim;
+      p->n_reduce_axes = 1;
+      p->reduce_axes[0] = (u8)(axis & 0xFFu);
+      for (u32 i = 0; i < src_shape.ndim; i++) {
+        p->src0_dims[i] = src_shape.dims[i];
+      }
+      Shape out_shape = {0};
+      if (term_shape_in(t, 0, &out_shape)) {
+        p->out_ndim = (u8)out_shape.ndim;
+        for (u32 i = 0; i < out_shape.ndim && i < MAX_DIM; i++) {
+          p->out_dims[i] = out_shape.dims[i];
+        }
+      }
+    }
     u32 ref = ke->n_ops - 1;
     visit_memo_store(memo, loc, ref);
     return ref;
