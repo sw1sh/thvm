@@ -1,8 +1,10 @@
 # Bufferize Schedule IR Plan
 
-Status: Phases 0-3 landed (Phase 2 has the data layer + edge query
-API; full rangeify rerouting through `B_INDEX` is the remaining
-follow-up).  Phases 4-7 planned.
+Status: Phases 0-4 landed.  Phase 2 has the data layer + edge query
+API; Phase 4 has the cost-model fields and candidate dump.  Phases
+5-7 planned.  Outstanding follow-ups: rangeify rerouting through
+`B_INDEX` (Phase 2 follow-up) and edge transforms beyond accounting
+(Phase 3 follow-up); both are tracked in the per-phase sections.
 
 ## Goal
 
@@ -463,22 +465,41 @@ Acceptance:
 - no new `metal-jit` fallbacks in beautiful-mnist;
 - scalar interpreter and C scalar renderer agree on movement tests.
 
-### Phase 4: First-Class Bufferize Removal
+### Phase 4: First-Class Bufferize Removal (cost-model layer landed)
 
 Implement tinygrad-style `INDEX(BUFFERIZE(x)) -> INDEX(x)` rewrites
 under legality gates.
 
+Status: cost-model fields and the candidate dump have landed.
+`schedule/bufferize.c` populates `recompute_ops`, `output_numel`,
+and `recompute_total` per realized buffer, and
+`bufferize_removal_score(buffer_id)` returns a first-cut score
+(`output_numel / max(recompute_total, 1)`) that is zero for ROOT,
+REDUCE, and BACKEND_CAP buffers.  `DUMP_BUFFERIZE_CANDIDATES=1`
+prints the top 20 candidates sorted by score.  No removal rules
+change behavior yet - the cost model is informational - but the
+data is now what future rules will read.
+
 Tasks:
 
-- remove const/noop view buffers;
-- remove pure single-use buffers;
-- remove small pure multi-consumer buffers by recompute;
-- add cost model inputs: op count, bytes, consumers, reduce depth,
-  backend input count, local memory;
-- add candidate dump sorted by potential kernel-count reduction and
-  memory impact.
+- ~~add cost model inputs: op count, bytes, consumers, reduce
+  depth, backend input count, local memory~~ (op count, bytes via
+  numel, consumers, recompute_total all done; reduce depth and
+  backend input count remain);
+- ~~add candidate dump sorted by potential kernel-count reduction
+  and memory impact~~;
+- remove const/noop view buffers (planned - extends the existing
+  `inline-constants` realize-rule into a bufferize-graph rule);
+- remove pure single-use buffers (planned);
+- remove small pure multi-consumer buffers by recompute (planned -
+  extends `remove-removable-bufferize` once the cost model has
+  the missing reduce-depth and backend-input-count fields).
 
-Acceptance:
+Acceptance (data layer):
+
+- `make test` passes including the new cost-model cases.
+
+Acceptance (removal rules, pending):
 
 - one-step beautiful-mnist kernel count drops materially from the
   current 1330-kernel canary;

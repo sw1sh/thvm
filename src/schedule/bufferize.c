@@ -64,6 +64,54 @@ static int bufferize_dump_enabled(void) {
   return e != NULL && e[0] == '1';
 }
 
+static int bufferize_dump_candidates_enabled(void) {
+  char const *e = getenv("DUMP_BUFFERIZE_CANDIDATES");
+  return e != NULL && e[0] == '1';
+}
+
+#define BUFFERIZE_CANDIDATE_TOP 20
+
+// Print the top removal candidates sorted by descending
+// bufferize_removal_score.  Phase 4: this is the user-visible
+// surface that drives manual / autotune decisions, and the
+// telemetry future cost-model rules will read.  Selection sort over
+// at most BUFFERIZE_CANDIDATE_TOP keeps the dump O(N * top).
+static void bufferize_dump_candidates(void) {
+  if (!bufferize_dump_candidates_enabled()) return;
+  u32 n = BUFFERIZE_BUFS_LEN < BUFFERIZE_CANDIDATE_TOP
+            ? BUFFERIZE_BUFS_LEN
+            : BUFFERIZE_CANDIDATE_TOP;
+  u32 picked[BUFFERIZE_CANDIDATE_TOP];
+  for (u32 k = 0; k < n; k++) picked[k] = 0;
+  u32 picked_n = 0;
+  for (u32 k = 0; k < n; k++) {
+    u32 best_idx = 0xFFFFFFFFu;
+    u64 best_sc  = 0;
+    for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+      // Skip already-picked indices.
+      int seen = 0;
+      for (u32 j = 0; j < picked_n; j++) if (picked[j] == i + 1) { seen = 1; break; }
+      if (seen) continue;
+      u64 sc = bufferize_removal_score(i + 1);
+      if (sc > best_sc) { best_sc = sc; best_idx = i; }
+    }
+    if (best_idx == 0xFFFFFFFFu || best_sc == 0) break;
+    picked[picked_n++] = best_idx + 1;
+    BBufferize const *b = &BUFFERIZE_BUFS[best_idx];
+    fprintf(stderr,
+            "bufferize_candidate rank=%u id=%u op=%u consumers=%u"
+            " ops=%u numel=%llu recompute_total=%llu score=%llu\n",
+            (unsigned)(k + 1),
+            (unsigned)b->buffer_id,
+            (unsigned)b->op,
+            (unsigned)b->consumer_count,
+            (unsigned)b->recompute_ops,
+            (unsigned long long)b->output_numel,
+            (unsigned long long)b->recompute_total,
+            (unsigned long long)best_sc);
+  }
+}
+
 static u8 bufferize_op_is_movement(u8 op) {
   return op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
       || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
@@ -127,6 +175,68 @@ static void bufferize_build_indexes(void) {
     if (!b->realized) continue;
     BIndex chain = {0};
     bufferize_walk_edge(b->loc, b->buffer_id, &chain, 0);
+  }
+}
+
+// Phase 4: count UOps in the producer subtree of `loc` for use as a
+// recompute-cost estimate.  Stops at any other realized buffer
+// (those would still cache the recomputed value), at REDUCE
+// (recompute crosses a fusion boundary we can't cheaply replicate),
+// at TEN/VAR leaves, and at any non-pure op.  Const and load are
+// counted as zero-cost; other UOps each cost 1.  The walk is bounded
+// by depth so pathological graphs cannot blow up the estimate.
+static u32 bufferize_count_recompute_ops(u64 loc, u64 self_loc, u32 depth) {
+  if (depth > 64) return 0;
+  if (loc >= HEAP_NEXT) return 0;
+  u32 ridx = realize_info_find(loc);
+  if (ridx == 0xFFFFFFFFu) return 0;
+  u8 op = REALIZE_INFO[ridx].op;
+  // Stop at other realized buffers - their cost is amortised.
+  if (loc != self_loc) {
+    u32 bidx = bufferize_find_by_loc(loc);
+    if (bidx != 0xFFFFFFFFu && BUFFERIZE_BUFS[bidx].realized) return 0;
+  }
+  if (op == UOP_REDUCE) return 1;     // count the reduce, don't descend
+  u32 self_cost = (op == UOP_CONST || op == UOP_LOAD) ? 0 : 1;
+  u8 ar = uop_arity(op);
+  u32 total = self_cost;
+  for (u8 i = 0; i < ar; i++) {
+    Term child = term_resolve(heap_read(loc + i));
+    if (term_tag(child) != TAG_UOP) continue;
+    if (term_ext(child) == UOP_KERNEL) continue;
+    total += bufferize_count_recompute_ops(term_val(child), self_loc,
+                                           depth + 1);
+  }
+  return total;
+}
+
+static u64 bufferize_shape_numel(Shape const *s) {
+  if (s == NULL || s->ndim == 0) return 0;
+  u64 n = 1;
+  for (u32 i = 0; i < s->ndim; i++) n *= s->dims[i];
+  return n;
+}
+
+// Populate the recompute_ops / output_numel / recompute_total cost
+// fields for every realized B_BUFFERIZE.  Runs once per
+// bufferize_finalize_stores after the index table has settled.
+static void bufferize_compute_costs(void) {
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BBufferize *b = &BUFFERIZE_BUFS[i];
+    if (!b->realized) {
+      b->recompute_ops   = 0;
+      b->output_numel    = 0;
+      b->recompute_total = 0;
+      continue;
+    }
+    b->recompute_ops = bufferize_count_recompute_ops(b->loc, b->loc, 0);
+    Term self = term_new(0, TAG_UOP, b->op, b->loc);
+    Shape sh = {0};
+    b->output_numel = term_shape_in(self, 0, &sh)
+                        ? bufferize_shape_numel(&sh)
+                        : 0;
+    u32 mult = b->consumer_count > 0 ? b->consumer_count : 1;
+    b->recompute_total = (u64)b->recompute_ops * (u64)mult;
   }
 }
 
@@ -203,6 +313,16 @@ static void bufferize_dump(Term root) {
             BUFFERIZE_INDEX_RULES[i].name,
             (unsigned)hits);
   }
+  for (u32 i = 0; i < BUFFERIZE_BUFS_LEN; i++) {
+    BBufferize const *b = &BUFFERIZE_BUFS[i];
+    if (!b->realized) continue;
+    fprintf(stderr,
+            "  bufferize_cost id=%u ops=%u numel=%llu recompute_total=%llu\n",
+            (unsigned)b->buffer_id,
+            (unsigned)b->recompute_ops,
+            (unsigned long long)b->output_numel,
+            (unsigned long long)b->recompute_total);
+  }
 }
 
 fn void bufferize_seed_from_realize_info(Term root) {
@@ -259,8 +379,10 @@ fn void bufferize_finalize_stores(Term root) {
   // consume in Phase 2's rangeify follow-up.
   bufferize_build_indexes();
   bufferize_update_index_rule_stats();
+  bufferize_compute_costs();
 
   bufferize_dump(root);
+  bufferize_dump_candidates();
 }
 
 fn void bufferize_set_current_rule(char const *name) {
@@ -413,4 +535,23 @@ fn u32 bufferize_index_rule_hits(char const *name) {
     }
   }
   return 0;
+}
+
+fn u64 bufferize_removal_score(u32 buffer_id) {
+  // 1-based ids; index = id - 1.
+  if (buffer_id == 0 || buffer_id > BUFFERIZE_BUFS_LEN) return 0;
+  BBufferize const *b = &BUFFERIZE_BUFS[buffer_id - 1];
+  if (!b->realized) return 0;
+  // Reason gates: only buffers seeded purely for MULTI (or unmarked
+  // outright) are removal candidates.  ROOT is the realize output;
+  // REDUCE has accumulator semantics that need explicit handling;
+  // BACKEND_CAP was added to satisfy a hardware limit.
+  if (b->reasons & (BUFFERIZE_REASON_ROOT
+                  | BUFFERIZE_REASON_REDUCE
+                  | BUFFERIZE_REASON_BACKEND_CAP)) {
+    return 0;
+  }
+  if (b->output_numel == 0) return 0;
+  u64 denom = b->recompute_total > 0 ? b->recompute_total : 1;
+  return b->output_numel / denom;
 }

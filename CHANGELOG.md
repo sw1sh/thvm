@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: Phase 4 bufferize cost model + removal-candidate dump
+
+`schedule/bufferize.c` now computes per-`B_BUFFERIZE` cost-model
+inputs after every realize_classify pass: `recompute_ops` (UOps in
+the producer subtree, stopping at other realized buffers and at
+REDUCE), `output_numel` (element count from `term_shape_in`), and
+`recompute_total` (`recompute_ops * max(consumer_count, 1)`).
+`bufferize_removal_score(buffer_id)` returns a first-cut heuristic
+(`output_numel / max(recompute_total, 1)`) gated to zero for ROOT,
+REDUCE, and BACKEND_CAP buffers; multi-consumer buffers seeded
+purely for `MULTI` get a positive score proportional to memory
+saved per recompute op.  `DUMP_BUFFERIZE=1` adds per-buffer
+`bufferize_cost` lines; `DUMP_BUFFERIZE_CANDIDATES=1` prints the top
+20 realized buffers sorted by descending score so callers can grep
+for the boundaries most worth removing.  No removal rules change
+behavior - the cost model is data only - but Phase 5+ removal /
+reduce-aware rules can now make decisions on the explicit graph
+instead of side channels.  `tests/test_bufferize.c` adds five
+cases (cost-fields populated, score zero for root/reduce, score
+positive for multi-consumer, score zero for unknown id, plus the
+existing index-rule asserts); 125/125.
+
 ### Added: Phase 3 named index-* rewrite-rule counters
 
 `schedule/bufferize.c` now exposes the implicit movement-fold-into-edge

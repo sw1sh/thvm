@@ -1271,6 +1271,17 @@ typedef struct {
   u8  realized;        // 1 = currently realized, 0 = removed by a rule
   char const *removed_by; // name of the rule that cleared realized; NULL otherwise
   char const *added_by;   // name of the rule that introduced this buffer; NULL if seeded
+  // Phase 4 cost-model inputs (populated by bufferize_finalize_stores).
+  // recompute_ops counts the pure UOps in this buffer's producer
+  // subtree (constants and loads excluded; reduces stop the walk).
+  // output_numel is the element count of the buffer's value shape;
+  // 0 means "shape was unavailable at compute time".
+  // recompute_total is recompute_ops * max(consumer_count, 1) -- a
+  // first-cut estimate of the work multiplier if this buffer were
+  // removed and every consumer recomputed it independently.
+  u32 recompute_ops;
+  u64 output_numel;
+  u64 recompute_total;
 } BBufferize;
 typedef struct {
   u32 buffer_id;      // destination B_BUFFERIZE id
@@ -1330,6 +1341,13 @@ fn u32               bufferize_index_rule_count(void);
 fn char const       *bufferize_index_rule_name(u32 i);
 fn u32               bufferize_index_rule_hits_at(u32 i);
 fn u32               bufferize_index_rule_hits(char const *name);
+
+// Phase 4: removal-candidate score.  Higher score = more attractive
+// removal (single-use, small recompute budget).  The score is a
+// first-cut heuristic; future cost-model rules will refine it.
+// Returns 0 for unknown buffer ids and for buffers whose score was
+// not computed (non-realized or no shape).
+fn u64               bufferize_removal_score(u32 buffer_id);
 
 // g2a: after realize_classify populates the boundary set, the
 // scheduler topo-sorts those boundaries by producer-to-consumer

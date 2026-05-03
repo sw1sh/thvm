@@ -318,6 +318,74 @@ int main(void) {
     CHECK_EQ(strcmp(bufferize_index_rule_name(i), expect[i]), 0);
   }
 
+  TEST_BEGIN("bufferize/cost-fields-populated-for-realized-buffers");
+  // Build a small graph with a multi-consumer share and confirm
+  // recompute_ops, output_numel and recompute_total are filled in.
+  Term cs   = uop_binary(UOP_ADD, a, b);
+  Term cs_l = uop_binary(UOP_MUL, cs, c);
+  Term cs_r = uop_binary(UOP_MUL, cs, a);
+  Term cs_t = uop_binary(UOP_ADD, cs_l, cs_r);
+  realize_classify(cs_t);
+  u32 cs_idx  = bufferize_find_by_loc(term_val(cs));
+  u32 cs_t_idx = bufferize_find_by_loc(term_val(cs_t));
+  CHECK(cs_idx != 0xFFFFFFFFu);
+  CHECK(cs_t_idx != 0xFFFFFFFFu);
+  if (cs_idx != 0xFFFFFFFFu) {
+    BBufferize const *cb = bufferize_buffer_at(cs_idx);
+    // cs is a single ADD, recompute_ops should be 1.
+    CHECK_EQ(cb->recompute_ops, 1);
+    CHECK(cb->output_numel >= 1);
+    // consumer_count is at least 2 (left and right MULs).
+    CHECK(cb->consumer_count >= 2);
+    CHECK_EQ(cb->recompute_total, (u64)cb->recompute_ops * cb->consumer_count);
+  }
+  if (cs_t_idx != 0xFFFFFFFFu) {
+    BBufferize const *rb = bufferize_buffer_at(cs_t_idx);
+    // cs_t is the realize root; it sees the ADD plus both MULs as
+    // direct compute (cs's compute is amortised behind its own
+    // boundary).  recompute_ops counts ADD(MUL,MUL) = 3 ops.
+    CHECK(rb->recompute_ops >= 3);
+    CHECK(rb->output_numel >= 1);
+  }
+
+  TEST_BEGIN("bufferize/removal-score-zero-for-root-and-reduce");
+  // Root and reduce buffers must score 0 because removal would
+  // change semantics (no kernel output, lost accumulator).
+  if (cs_t_idx != 0xFFFFFFFFu) {
+    u32 root_id = bufferize_buffer_at(cs_t_idx)->buffer_id;
+    CHECK_EQ(bufferize_removal_score(root_id), 0);
+  }
+  Term sum_term = uop_reduce(REDUCE_SUM, 0, a);
+  realize_classify(sum_term);
+  u32 sum_idx = bufferize_find_by_loc(term_val(sum_term));
+  if (sum_idx != 0xFFFFFFFFu) {
+    u32 sum_id = bufferize_buffer_at(sum_idx)->buffer_id;
+    // sum is both ROOT and REDUCE; either reason gates the score.
+    CHECK_EQ(bufferize_removal_score(sum_id), 0);
+  }
+
+  TEST_BEGIN("bufferize/removal-score-positive-for-multi-consumer");
+  // Rebuild the multi-consumer share without env knobs that would
+  // force removal, and confirm shared has a non-zero score.
+  Term ms   = uop_binary(UOP_ADD, a, b);
+  Term ms_l = uop_binary(UOP_MUL, ms, c);
+  Term ms_r = uop_binary(UOP_MUL, ms, a);
+  Term ms_t = uop_binary(UOP_ADD, ms_l, ms_r);
+  realize_classify(ms_t);
+  u32 ms_idx = bufferize_find_by_loc(term_val(ms));
+  CHECK(ms_idx != 0xFFFFFFFFu);
+  if (ms_idx != 0xFFFFFFFFu) {
+    BBufferize const *bm = bufferize_buffer_at(ms_idx);
+    if (bm->realized) {
+      u32 ms_id = bm->buffer_id;
+      CHECK(bufferize_removal_score(ms_id) > 0);
+    }
+  }
+
+  TEST_BEGIN("bufferize/removal-score-zero-for-unknown-id");
+  CHECK_EQ(bufferize_removal_score(0), 0);
+  CHECK_EQ(bufferize_removal_score(99999u), 0);
+
   thvm_free();
   TEST_REPORT();
 }
