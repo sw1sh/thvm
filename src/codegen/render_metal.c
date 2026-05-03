@@ -886,10 +886,6 @@ static int rmt_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
     if (!rmt_scalar_op_supported(u)) {
       return 0;
     }
-    if ((u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX)
-        && u->src_count != 2) {
-      return 0;
-    }
     if (cs_op_carries_kernel_dtype(u) && !rmt_dtype_supported(u->dtype)) {
       return 0;
     }
@@ -1602,6 +1598,48 @@ static int rmt_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
   return rmt_emit_value_with_reduce(b, ke, op_id, 0, NULL);
 }
 
+static int rmt_collect_reduce_ranges(KernelEntry const *ke,
+                                     ScalarUop const *ru,
+                                     u32 *range_ids,
+                                     u32 *extents,
+                                     u32 *n_ranges,
+                                     u64 *total_extent) {
+  if ((ru->op != S_REDUCE_SUM && ru->op != S_REDUCE_MAX)
+      || ru->src_count < 2) {
+    return 0;
+  }
+  u32 n = (u32)ru->src_count - 1;
+  if (n == 0 || n > SCALAR_MAX_SRC - 1) {
+    return 0;
+  }
+  u64 total = 1;
+  for (u32 d = 0; d < n; d++) {
+    u32 rng_id = ru->src[1 + d];
+    if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
+      return 0;
+    }
+    ScalarUop const *rng = &ke->scalar_uops[rng_id];
+    if (rng->op != S_RANGE) {
+      return 0;
+    }
+    u32 axis_type = (u32)((rng->extra >> 32) & 0xFFFFFFFFu);
+    u32 extent    = (u32)(rng->extra & 0xFFFFFFFFu);
+    if ((axis_type != S_AXIS_REDUCE && axis_type != S_AXIS_UNROLL)
+        || extent == 0) {
+      return 0;
+    }
+    range_ids[d] = rng_id;
+    extents[d] = extent;
+    total *= extent;
+    if (total > UINT32_MAX) {
+      return 0;
+    }
+  }
+  *n_ranges = n;
+  *total_extent = total;
+  return 1;
+}
+
 static int rmt_emit_store_value(CgBuf *b, KernelEntry const *ke,
                                 CtKernelInfo const *info) {
   ScalarUop const *st = &ke->scalar_uops[info->scalar.store_id];
@@ -1614,29 +1652,22 @@ static int rmt_emit_store_value(CgBuf *b, KernelEntry const *ke,
     return 0;
   }
   ScalarUop const *ru = &ke->scalar_uops[rid];
-  if ((ru->op != S_REDUCE_SUM && ru->op != S_REDUCE_MAX)
-      || ru->src_count < 2) {
+  u32 range_ids[SCALAR_MAX_SRC] = {0};
+  u32 extents  [SCALAR_MAX_SRC] = {0};
+  u32 n_ranges = 0;
+  u64 total_extent = 0;
+  if (!rmt_collect_reduce_ranges(ke, ru, range_ids, extents,
+                                 &n_ranges, &total_extent)) {
     return 0;
   }
-  u32 rng_id = ru->src[1];
-  if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
-    return 0;
-  }
-  ScalarUop const *rng = &ke->scalar_uops[rng_id];
-  if (rng->op != S_RANGE) {
-    return 0;
-  }
-  u32 extent = (u32)(rng->extra & 0xFFFFFFFFu);
-  if (extent == 0) {
-    return 0;
-  }
+  (void)total_extent;
   char acc_expr[32];
   snprintf(acc_expr, sizeof(acc_expr), "_acc%u", rid);
   u32 unroll_factor = 1;
-  if (ke->axes != NULL) {
+  if (n_ranges == 1 && ke->axes != NULL) {
     for (u32 i = 0; i < ke->axes->n_applied; i++) {
       KOpt o = ke->axes->applied_opts[i];
-      if (o.op == KOP_UNROLL && o.arg > 1 && extent % o.arg == 0) {
+      if (o.op == KOP_UNROLL && o.arg > 1 && extents[0] % o.arg == 0) {
         unroll_factor = o.arg;
       }
     }
@@ -1650,21 +1681,45 @@ static int rmt_emit_store_value(CgBuf *b, KernelEntry const *ke,
     cg_append(b, "  #pragma clang loop unroll_count(%u)\n",
               unroll_factor);
   }
-  cg_append(b, "  for (uint _rk%u = 0u; _rk%u < %uu; _rk%u++) {\n",
-            rid, rid, extent, rid);
-  cg_append(b, "    uint _v%u = _rk%u;\n", rng_id, rid);
-  cg_append(b, "    float _rv%u = ", rid);
+  for (u32 d = 0; d < n_ranges; d++) {
+    cg_append(b, "  ");
+    for (u32 indent = 0; indent < d; indent++) {
+      cg_append(b, "  ");
+    }
+    cg_append(b, "for (uint _rk%u_%u = 0u; _rk%u_%u < %uu; _rk%u_%u++) {\n",
+              rid, d, rid, d, extents[d], rid, d);
+    cg_append(b, "  ");
+    for (u32 indent = 0; indent < d + 1; indent++) {
+      cg_append(b, "  ");
+    }
+    cg_append(b, "uint _v%u = _rk%u_%u;\n", range_ids[d], rid, d);
+  }
+  cg_append(b, "  ");
+  for (u32 indent = 0; indent < n_ranges; indent++) {
+    cg_append(b, "  ");
+  }
+  cg_append(b, "float _rv%u = ", rid);
   if (!rmt_emit_value(b, ke, ru->src[0])) {
     return 0;
   }
   cg_append(b, ";\n");
+  cg_append(b, "  ");
+  for (u32 indent = 0; indent < n_ranges; indent++) {
+    cg_append(b, "  ");
+  }
   if (ru->op == S_REDUCE_MAX) {
-    cg_append(b, "    if (_rv%u > _acc%u) { _acc%u = _rv%u; }\n",
+    cg_append(b, "if (_rv%u > _acc%u) { _acc%u = _rv%u; }\n",
               rid, rid, rid, rid);
   } else {
-    cg_append(b, "    _acc%u += _rv%u;\n", rid, rid);
+    cg_append(b, "_acc%u += _rv%u;\n", rid, rid);
   }
-  cg_append(b, "  }\n");
+  for (i32 d = (i32)n_ranges - 1; d >= 0; d--) {
+    cg_append(b, "  ");
+    for (u32 indent = 0; indent < (u32)d; indent++) {
+      cg_append(b, "  ");
+    }
+    cg_append(b, "}\n");
+  }
   cg_append(b, "  out[");
   if (!rmt_emit_index_offset(b, ke, st->src[0])) {
     return 0;
@@ -1688,20 +1743,12 @@ static int rmt_emit_group_reduce_store(CgBuf *b, KernelEntry const *ke,
     return 0;
   }
   ScalarUop const *ru = &ke->scalar_uops[rid];
-  if ((ru->op != S_REDUCE_SUM && ru->op != S_REDUCE_MAX)
-      || ru->src_count < 2) {
-    return 0;
-  }
-  u32 rng_id = ru->src[1];
-  if (rng_id == 0 || rng_id >= ke->n_scalar_uops) {
-    return 0;
-  }
-  ScalarUop const *rng = &ke->scalar_uops[rng_id];
-  if (rng->op != S_RANGE) {
-    return 0;
-  }
-  u32 extent = (u32)(rng->extra & 0xFFFFFFFFu);
-  if (extent == 0) {
+  u32 range_ids[SCALAR_MAX_SRC] = {0};
+  u32 extents  [SCALAR_MAX_SRC] = {0};
+  u32 n_ranges = 0;
+  u64 total_extent = 0;
+  if (!rmt_collect_reduce_ranges(ke, ru, range_ids, extents,
+                                 &n_ranges, &total_extent)) {
     return 0;
   }
   char reduce_expr[32];
@@ -1714,8 +1761,15 @@ static int rmt_emit_group_reduce_store(CgBuf *b, KernelEntry const *ke,
     cg_append(b, "  float _acc%u = 0.0f;\n", rid);
   }
   cg_append(b, "  for (uint _rk%u = _ltid; _rk%u < %uu; _rk%u += %uu) {\n",
-            rid, rid, extent, rid, group);
-  cg_append(b, "    uint _v%u = _rk%u;\n", rng_id, rid);
+            rid, rid, (u32)total_extent, rid, group);
+  cg_append(b, "    uint _rtmp%u = _rk%u;\n", rid, rid);
+  for (i32 d = (i32)n_ranges - 1; d >= 0; d--) {
+    cg_append(b, "    uint _v%u = _rtmp%u %% %uu;\n",
+              range_ids[d], rid, extents[d]);
+    if (d > 0) {
+      cg_append(b, "    _rtmp%u /= %uu;\n", rid, extents[d]);
+    }
+  }
   cg_append(b, "    float _rv%u = ", rid);
   if (!rmt_emit_value(b, ke, ru->src[0])) {
     return 0;

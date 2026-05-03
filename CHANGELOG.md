@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: lower multi-range scalar reducers through tile Metal
+
+Tile plans now accept scalar reducers with multiple explicit reduce
+ranges.  The generated Metal tile path emits nested per-range loops
+for flat reducers and decomposes cooperative group-reduce indices back
+to each scalar range.  A tile graph test covers a 2x3 scalar reducer
+through source generation and CPU tile JIT execution.
+
 ### Changed: preserve fused reduce-chain axes in rangeify
 
 Materialized fused reduce chains now retain their original source

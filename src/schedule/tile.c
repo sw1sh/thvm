@@ -847,7 +847,7 @@ fn int tile_validate(KernelEntry const *ke) {
     }
     ScalarUop const *ru = &ke->scalar_uops[scalar_reduce];
     if ((ru->op != S_REDUCE_SUM && ru->op != S_REDUCE_MAX)
-        || ru->src_count != 2 || ru->src[0] == 0
+        || ru->src_count < 2 || ru->src[0] == 0
         || ru->src[0] >= ke->n_scalar_uops) {
       return 0;
     }
@@ -1080,7 +1080,7 @@ fn int tile_build_from_scalar(KernelEntry *ke) {
   int has_reduce = 0;
   if (ke->scalar_uops[scalar_value].op == S_REDUCE_SUM
       || ke->scalar_uops[scalar_value].op == S_REDUCE_MAX) {
-    if (ke->scalar_uops[scalar_value].src_count != 2
+    if (ke->scalar_uops[scalar_value].src_count < 2
         || ke->scalar_uops[scalar_value].src[0] == 0
         || ke->scalar_uops[scalar_value].src[0] >= ke->n_scalar_uops) {
       return 0;
