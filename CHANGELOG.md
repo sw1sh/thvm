@@ -78,6 +78,38 @@ the scalar layer.  Foundation for harder workloads where deeper
 reshape chains and non-elementwise convs leave divmod expressions
 past CSE/DCE.  C suite 274/274 (8/8 in test_scalar_simplify).
 
+### Fixed: lift metal-op fallback for fused BN-style kernels with REDUCE-rooted consumers
+
+Phase 1 of the tinygrad rule port (broadcast-reduce inlining) collapsed
+the bounded beautiful-mnist canary from 1070 to 113 kernels but left 27
+of those falling back to the per-op metal encoder.  Diagnosis:
+`inline-softmax-broadcast-reduce` was unmarking BN-mean / BN-var REDUCEs
+whose absorbing kernel root was itself a REDUCE (the chain
+`REDUCE -> EXPAND -> ... -> outer REDUCE` shows up where a BN feeds
+directly into a downstream maxpool/grad reduce).  The inlined kernel
+program then carries two REDUCE ops; `rangeify_try_lower_elementwise`
+bails ("> 1 reduce") and dispatch falls off the tile-jit path onto the
+slower per-op encoder.
+
+Fix in `realize_classify.c`: a new `realize_absorbing_boundary` helper
+walks up the unique-parent chain past the broadcast hops to the first
+realized ancestor.  When that ancestor's op is `UOP_REDUCE` the rule
+keeps this REDUCE realized so the consumer kernel stays inside
+rangeify's single-reduce envelope.  Default-on with
+`THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP=0` for bisection.
+
+Bounded beautiful-mnist canary
+(`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`):
+
+- timed step: `84.9 ms` (vs `168.4 ms` pre-fix, -49.6%);
+- kernels: `118` (vs `113` pre-fix; the 5 newly preserved BN
+  REDUCEs each emit their own kernel rather than absorbing into a
+  REDUCE-rooted consumer);
+- dispatch: `metal-tile=108, metal-op=10` (vs `86/27` pre-fix; the
+  10 remaining metal-op kernels bail rangeify on
+  `pre-reduce dim mismatch`, a separate failure mode);
+- peak retained Metal memory: `171 MB` (vs `392 MB` pre-fix, -56.4%).
+
 ### Changed: Levy-optimal Phase 4 -- auto-dup default-on for recursive non-linear lambdas
 
 `auto_dup_collect`'s `TAG_REF` / `TAG_ALO` early-return is replaced

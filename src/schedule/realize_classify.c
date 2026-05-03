@@ -1062,6 +1062,37 @@ static u32 realize_reduce_count(void) {
   return n;
 }
 
+// Walk up from `start_loc` through unique-parent ops (movement,
+// scalar-preserving elementwise, etc.) until we hit the first
+// REALIZED ancestor in REALIZE_INFO.  Returns that ancestor's
+// loc -- the "absorbing boundary" that owns the kernel which would
+// receive `start_loc`'s inlined KProgOp graph.  Returns 0 if the
+// walk loses uniqueness (multi-parent intermediate, no parent
+// found in REALIZE_INFO) before finding one.  Bounded by
+// `hops_left` to avoid pathological recursion.
+//
+// Purpose: rangeify_try_lower_elementwise rejects kernels with > 1
+// REDUCE op.  When inline-softmax-broadcast-reduce unmarks a REDUCE
+// whose absorbing kernel root is ITSELF a REDUCE (e.g. a BN-mean
+// chain folding into a downstream maxpool/grad reduce), the merged
+// kernel ends up with 2 REDUCE ops and bails out of rangeify,
+// dispatching via the slower per-op metal encoder instead of the
+// tile-jit path.  Returning the absorbing boundary's op lets the
+// rule gate inlining on the consumer being a non-REDUCE root.
+static u64 realize_absorbing_boundary(u64 start_loc, u32 hops_left) {
+  u64 cur = start_loc;
+  while (hops_left > 0) {
+    u64 next = realize_unique_uop_parent(cur);
+    if (next == 0) return 0;
+    u32 idx = realize_info_find(next);
+    if (idx == 0xFFFFFFFFu) return 0;
+    if (REALIZE_INFO[idx].realized) return next;
+    cur = next;
+    hops_left--;
+  }
+  return 0;
+}
+
 static int realize_rangeify_enabled(void) {
   char const *e = getenv("THVM_RANGEIFY");
   return e == NULL ? 1 : (e[0] != '0');
@@ -1351,6 +1382,19 @@ static int realize_reduce_fuse_multi_enabled(void) {
   return e == NULL ? 1 : (e[0] != '0');
 }
 
+// Tile-feasibility predicate for the multi-reduce-fuse generalization:
+// rangeify_try_lower_elementwise bails when a kernel program carries
+// > 1 REDUCE op, and the rangeify-less fallback dispatches to the
+// per-op metal encoder (~2-3x slower than the tile-jit path on
+// beautiful-mnist-shape kernels).  Default-on; the env var is provided
+// for bisection.  When 0, the rule falls back to the historical
+// behaviour of inlining every legal candidate regardless of whether
+// the absorbing kernel root is also a REDUCE.
+static int realize_softmax_reduce_tile_cap_enabled(void) {
+  char const *e = getenv("THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP");
+  return e == NULL ? 1 : (e[0] != '0');
+}
+
 // realize_unique_uop_parent returns the SOLE parent of `loc` or 0
 // if zero/multiple.  realize_reduce_consumer_is_broadcast_chain
 // already requires the chain to have a unique parent at every hop,
@@ -1358,16 +1402,46 @@ static int realize_reduce_fuse_multi_enabled(void) {
 // independently and the consumer_count == 1 fast-reject is just
 // an optimisation.  Without it, multi-consumer REDUCEs whose
 // branches all bottom out at the same EXPAND would be considered.
+
 static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
   (void)root;
   if (!realize_reduce_fuse_multi_enabled() && realize_reduce_count() != 1) {
     return 0;
   }
+  int tile_cap_on = realize_softmax_reduce_tile_cap_enabled();
   u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->op != UOP_REDUCE)    continue;
     if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+    if (tile_cap_on) {
+      // Tile-feasibility gate: the materializer's "single REDUCE
+      // per kernel" rule lets the kernel ROOT be a REDUCE
+      // unconditionally, but bails any non-root REDUCE encountered
+      // during visit().  When the absorbing kernel root for THIS
+      // REDUCE is itself a REDUCE (BN-mean -> EXPAND -> ... ->
+      // outer REDUCE), inlining produces a kernel program with
+      // two REDUCE ops; rangeify_try_lower_elementwise then bails
+      // ("> 1 reduce") and dispatch falls off the tile-jit path
+      // onto the per-op metal encoder.  Keep this REDUCE realized
+      // when the absorbing root is itself a REDUCE so the
+      // resulting kernels stay tile-feasible.
+      u64 abs_loc = realize_absorbing_boundary(info->loc, 16);
+      if (abs_loc != 0) {
+        u32 abs_idx = realize_info_find(abs_loc);
+        if (abs_idx != 0xFFFFFFFFu
+            && REALIZE_INFO[abs_idx].op == UOP_REDUCE) {
+          if (getenv("THVM_DUMP_SOFTMAX_REDUCE_CAP")) {
+            fprintf(stderr,
+                    "softmax-reduce-cap: kept realized loc=%llu"
+                    " abs=%llu (REDUCE root)\n",
+                    (unsigned long long)info->loc,
+                    (unsigned long long)abs_loc);
+          }
+          continue;
+        }
+      }
+    }
     if (info->realized) hits++;
     realize_unmark(info, REALIZE_REASON_INLINE);
   }

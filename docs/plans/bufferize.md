@@ -829,17 +829,19 @@ where divandmod patterns survive past CSE/DCE.
 Latest bounded Metal/tile beautiful-mnist canary
 (`BS=32 WARMUP_STEPS=1 N_STEPS=1 POST_AUTOTUNE_TOP=6`) after Phase
 1 of the tinygrad rule port (broadcast-reduce predicate
-generalisation) on top of the existing Phase 0-7 data layer:
+generalisation) plus the metal-op fallback fix for REDUCE-rooted
+absorbing kernels (`THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP`):
 
-- timed step: `168.4 ms` (vs `694 ms` original reference, -75.7%;
-  vs `428 ms` pre-Phase-1 baseline, -60.7%);
-- kernels: `113` (vs `1330` original reference, -91.5%; vs `1070`
-  pre-Phase-1 baseline, -89.4%);
-- dispatch: `metal-tile=86`, `metal-op=27` (the 27 metal-op
-  fallbacks are merged kernels that exceed the tile-jit per-op
-  budget and route to the per-op encoder);
-- peak retained Metal memory: `392 MB` (vs `1881 MB` pre-Phase-1
-  baseline, -79.2%).
+- timed step: `84.9 ms` (vs `694 ms` original reference, -87.8%;
+  vs `168.4 ms` pre-fix Phase-1 baseline, -49.6%);
+- kernels: `118` (vs `1330` original reference, -91.1%; vs `113`
+  pre-fix Phase-1 baseline, +5 -- the absorbing-REDUCE gate keeps
+  five extra BN REDUCEs realized);
+- dispatch: `metal-tile=108`, `metal-op=10` (vs `86/27` pre-fix);
+  the remaining 10 metal-op fallbacks bail rangeify on
+  `pre-reduce dim mismatch` rather than the `> 1 reduce` envelope;
+- peak retained Metal memory: `171 MB` (vs `1881 MB` pre-Phase-1
+  baseline, -90.9%; vs `392 MB` pre-fix, -56.4%).
 
 Phase 1 alone closed most of the kernel-count gap.  The chain
 predicate now matches BatchNorm-train / BN-grad shapes via:
@@ -866,10 +868,19 @@ Per-rule telemetry on the post-Phase-1 canary
   tile-feasibility feedback, but fires 1-16x in some classifies
   now that the realize-rule order leaves more candidates eligible.
 
-The 27 metal-op fallbacks are the next item in line.  Each is a
-fused BN-style kernel whose merged scalar program exceeds the
-tile-jit op budget; lifting them back onto tile-jit would cut
-~60 ms off the wall time.
+The 27 metal-op fallbacks split into two failure modes:
+
+- 17 of them were merged kernels whose root was already a REDUCE
+  (BN-mean / BN-var chains folding into a downstream maxpool/grad
+  reduce) - inlining produced a 2-REDUCE program that
+  `rangeify_try_lower_elementwise` rejected ("> 1 reduce").
+  `realize_softmax_reduce_tile_cap` (default-on) now keeps these
+  REDUCEs realized so the consumer kernel stays inside rangeify's
+  single-reduce envelope.
+- 10 still fall back, all bailing rangeify with
+  `pre-reduce dim mismatch (non-broadcast)` -- a separate stride-
+  view shape compatibility issue that needs a real rangeify fix
+  rather than a planner gate.
 
 Where the next measurable wins live:
 
