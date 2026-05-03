@@ -453,6 +453,50 @@ static int scalar_iconst_value(KernelEntry const *ke, u32 id, i64 *out) {
   return 1;
 }
 
+static int scalar_op_at(KernelEntry const *ke, u32 id, u8 op,
+                        ScalarUop const **out) {
+  if (ke == NULL || id == 0 || id >= ke->n_scalar_uops) {
+    return 0;
+  }
+  ScalarUop const *u = &ke->scalar_uops[id];
+  if (u->op != op) {
+    return 0;
+  }
+  if (out != NULL) {
+    *out = u;
+  }
+  return 1;
+}
+
+static int scalar_binary_const_side(KernelEntry const *ke,
+                                    ScalarUop const *u,
+                                    u32 *var_src,
+                                    i64 *const_val) {
+  if (ke == NULL || u == NULL || u->src_count != 2) {
+    return 0;
+  }
+  i64 v = 0;
+  if (scalar_iconst_value(ke, u->src[1], &v)) {
+    if (var_src != NULL) {
+      *var_src = u->src[0];
+    }
+    if (const_val != NULL) {
+      *const_val = v;
+    }
+    return 1;
+  }
+  if (scalar_iconst_value(ke, u->src[0], &v)) {
+    if (var_src != NULL) {
+      *var_src = u->src[1];
+    }
+    if (const_val != NULL) {
+      *const_val = v;
+    }
+    return 1;
+  }
+  return 0;
+}
+
 static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
   i64 av = 0;
   i64 bv = 0;
@@ -482,6 +526,51 @@ static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
         return emit_iconst(ke, av & bv);
       default:
         break;
+    }
+  }
+
+  if ((op == S_IADD || op == S_IMUL || op == S_IAND) && ac && !bc) {
+    return emit_ibinop(ke, op, b, a);
+  }
+
+  if ((op == S_IADD || op == S_ISUB || op == S_IMUL || op == S_IDIV)
+      && bc) {
+    ScalarUop const *inner = NULL;
+    u32 inner_var = 0;
+    i64 inner_const = 0;
+    if (op == S_IADD && scalar_op_at(ke, a, S_IADD, &inner)
+        && scalar_binary_const_side(ke, inner, &inner_var, &inner_const)) {
+      return emit_ibinop(ke, S_IADD, inner_var,
+                         emit_iconst(ke, inner_const + bv));
+    }
+    if (op == S_IADD && scalar_op_at(ke, a, S_ISUB, &inner)
+        && inner->src_count == 2
+        && scalar_iconst_value(ke, inner->src[1], &inner_const)) {
+      return emit_ibinop(ke, S_IADD, inner->src[0],
+                         emit_iconst(ke, bv - inner_const));
+    }
+    if (op == S_ISUB && scalar_op_at(ke, a, S_IADD, &inner)
+        && scalar_binary_const_side(ke, inner, &inner_var, &inner_const)) {
+      return emit_ibinop(ke, S_IADD, inner_var,
+                         emit_iconst(ke, inner_const - bv));
+    }
+    if (op == S_ISUB && scalar_op_at(ke, a, S_ISUB, &inner)
+        && inner->src_count == 2
+        && scalar_iconst_value(ke, inner->src[1], &inner_const)) {
+      return emit_ibinop(ke, S_IADD, inner->src[0],
+                         emit_iconst(ke, -(inner_const + bv)));
+    }
+    if (op == S_IMUL && scalar_op_at(ke, a, S_IMUL, &inner)
+        && scalar_binary_const_side(ke, inner, &inner_var, &inner_const)) {
+      return emit_ibinop(ke, S_IMUL, inner_var,
+                         emit_iconst(ke, inner_const * bv));
+    }
+    if (op == S_IDIV && bv != 0 && scalar_op_at(ke, a, S_IDIV, &inner)
+        && inner->src_count == 2
+        && scalar_iconst_value(ke, inner->src[1], &inner_const)
+        && inner_const != 0) {
+      return emit_ibinop(ke, S_IDIV, inner->src[0],
+                         emit_iconst(ke, inner_const * bv));
     }
   }
 

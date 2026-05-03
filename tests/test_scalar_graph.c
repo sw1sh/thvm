@@ -214,6 +214,7 @@ int main(void) {
   u32 si_zero = emit_iconst(ke, 0);
   u32 si_one  = emit_iconst(ke, 1);
   u32 si_two  = emit_iconst(ke, 2);
+  u32 si_three = emit_iconst(ke, 3);
   u32 si_six  = emit_iconst(ke, 6);
   CHECK_EQ(emit_ibinop(ke, S_IADD, si_r, si_zero), si_r);
   CHECK_EQ(emit_ibinop(ke, S_IADD, si_zero, si_r), si_r);
@@ -235,6 +236,31 @@ int main(void) {
   u32 si_self_lt = emit_ibinop(ke, S_ILT, si_r, si_r);
   CHECK(scalar_iconst_value(ke, si_self_lt, &si_val));
   CHECK_EQ((u64)si_val, 0);
+  u32 si_add_two = emit_ibinop(ke, S_IADD, si_r, si_two);
+  u32 si_add_five = emit_ibinop(ke, S_IADD, si_add_two, si_three);
+  CHECK_EQ(ke->scalar_uops[si_add_five].op, S_IADD);
+  CHECK_EQ(ke->scalar_uops[si_add_five].src[0], si_r);
+  CHECK(scalar_iconst_value(ke, ke->scalar_uops[si_add_five].src[1],
+                            &si_val));
+  CHECK_EQ((u64)si_val, 5);
+  u32 si_add_const_left = emit_ibinop(ke, S_IADD, si_two, si_r);
+  CHECK_EQ(ke->scalar_uops[si_add_const_left].op, S_IADD);
+  CHECK_EQ(ke->scalar_uops[si_add_const_left].src[0], si_r);
+  CHECK_EQ(ke->scalar_uops[si_add_const_left].src[1], si_two);
+  u32 si_mul_two = emit_ibinop(ke, S_IMUL, si_r, si_two);
+  u32 si_mul_six = emit_ibinop(ke, S_IMUL, si_mul_two, si_three);
+  CHECK_EQ(ke->scalar_uops[si_mul_six].op, S_IMUL);
+  CHECK_EQ(ke->scalar_uops[si_mul_six].src[0], si_r);
+  CHECK(scalar_iconst_value(ke, ke->scalar_uops[si_mul_six].src[1],
+                            &si_val));
+  CHECK_EQ((u64)si_val, 6);
+  u32 si_div_two = emit_ibinop(ke, S_IDIV, si_r, si_two);
+  u32 si_div_six = emit_ibinop(ke, S_IDIV, si_div_two, si_three);
+  CHECK_EQ(ke->scalar_uops[si_div_six].op, S_IDIV);
+  CHECK_EQ(ke->scalar_uops[si_div_six].src[0], si_r);
+  CHECK(scalar_iconst_value(ke, ke->scalar_uops[si_div_six].src[1],
+                            &si_val));
+  CHECK_EQ((u64)si_val, 6);
   rangeify_free(ke);
 
   TEST_BEGIN("scalar-graph/opname-helpers-cover-enum");

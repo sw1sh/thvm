@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: reassociate scalar index expressions during rangeify
+
+Rangeify's integer expression emitter now canonicalizes commutative
+constant operands and folds nested constant offsets, scales, and
+integer divides.  This ports another slice of tinygrad's symbolic
+range/index cleanup so movement-to-index lowering emits smaller
+`S_INDEX_E` address graphs.
+
 ### Changed: port first tinygrad-style movement graph rewrites
 
 `uop_graph_simplify` now canonicalizes commutative elementwise
