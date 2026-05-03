@@ -1,35 +1,57 @@
-(* pattern.wlt -- VerificationTest specs for Pattern.wl v0.
+(* pattern.wlt -- VerificationTest specs for Pattern.wl v0
+   (Match-object shape, tracking Wolfram`Patterns`).
 
-   First slice: WL-pattern-shaped matching against TTerm values.
-   Single-valued bindings, leftmost-only replacement.  Multi-valued
-   matching (Orderless / sequence patterns) and IC-native compilation
-   to SUP-of-bindings streams are follow-ups. *)
+   Match objects:
+     TMatch[m]           wrapper
+     TMatchSum[m1, ...]  alternatives  (lazy OR; empty = no match)
+     TMatchProduct[...]  conjunction  (head + per-arg children)
+     TMatchPart[part, HoldPattern[p], submatch]
+     TMatchValues[v, ...] leaf TTerms
 
-(* === Blank: matches anything, no bindings ========================= *)
+   Accessors:
+     TMatchBindings[m]   -> List of binding-Associations
+     TMatchApply[rhs, m] -> List of substituted TTerms
+     TMatchParts[m]      -> List of path->TTerm Associations *)
+
+(* === TMatchObjectQ ================================================ *)
 
 VerificationTest[
-    TPMatch[TNum[7], _],
-    <||>,
+    TMatchObjectQ @ TMatch[TMatchValues[TNum[7]]],
+    True,
+    TestID -> "Pattern/MatchObjectQ-TMatch"
+]
+
+VerificationTest[
+    TMatchObjectQ @ TMatchSum[],
+    True,
+    TestID -> "Pattern/MatchObjectQ-empty-Sum"
+]
+
+VerificationTest[
+    TMatchObjectQ @ {TNum[1], TNum[2]},
+    False,
+    TestID -> "Pattern/MatchObjectQ-list-rejects"
+]
+
+(* === Blank: matches anything; no name binding ===================== *)
+
+VerificationTest[
+    Head @ TPatternMatch[TNum[7], _],
+    TMatch,
     TestID -> "Pattern/blank-matches-anything"
 ]
 
 VerificationTest[
-    TPMatch[TLazyEncode[a], _],
-    <||>,
-    TestID -> "Pattern/blank-matches-symbol-ctr"
-]
-
-VerificationTest[
-    TPMatchQ[TNum[42], _],
-    True,
-    TestID -> "Pattern/MatchQ-blank-true"
+    TMatchBindings @ TPatternMatch[TNum[7], _],
+    {<||>},
+    TestID -> "Pattern/blank-yields-empty-bindings"
 ]
 
 (* === Named blank: x_ binds the matched term ======================= *)
 
 VerificationTest[
-    With[{m = TPMatch[TNum[5], x_]},
-        TTermVal[m[x]]],
+    With[{bs = TMatchBindings @ TPatternMatch[TNum[5], x_]},
+        TTermVal[bs[[1, Key[x]]]]],
     5,
     TestID -> "Pattern/named-blank-binds"
 ]
@@ -37,166 +59,160 @@ VerificationTest[
 (* === Numeric literal pattern ====================================== *)
 
 VerificationTest[
-    TPMatchQ[TNum[3], 3],
-    True,
+    TMatchBindings @ TPatternMatch[TNum[3], 3],
+    {<||>},
     TestID -> "Pattern/integer-literal-match"
 ]
 
 VerificationTest[
-    TPMatchQ[TNum[3], 4],
-    False,
-    TestID -> "Pattern/integer-literal-mismatch"
+    TPatternMatch[TNum[3], 4],
+    TMatchSum[],
+    TestID -> "Pattern/integer-literal-mismatch-empty-Sum"
 ]
 
 (* === TTerm literal: TTermSame ==================================== *)
 
 VerificationTest[
     Block[{a = TLazyEncode[{1, 2, 3}], b = TLazyEncode[{1, 2, 3}]},
-        TPMatchQ[a, b]],
-    True,
+        TMatchBindings @ TPatternMatch[a, b]],
+    {<||>},
     TestID -> "Pattern/TTerm-literal-match"
 ]
 
 VerificationTest[
-    TPMatchQ[TLazyEncode[{1, 2}], TLazyEncode[{1, 3}]],
-    False,
+    TPatternMatch[TLazyEncode[{1, 2}], TLazyEncode[{1, 3}]],
+    TMatchSum[],
     TestID -> "Pattern/TTerm-literal-mismatch"
 ]
 
 (* === Compound pattern: head[args__] decomposes a CTR ============== *)
-(* TLazyEncode[g[x, y, z]] yields a CTR with the symbol-`g` ctor tag. *)
 
 VerificationTest[
-    With[{t = TLazyEncode[g[a, b]],
-          m = TPMatch[TLazyEncode[g[a, b]], g[x_, y_]]},
-        {TTermSame[m[x], TLazyEncode[a]],
-         TTermSame[m[y], TLazyEncode[b]]}],
+    Block[{m, bs, dx, dy},
+        m  = TPatternMatch[TLazyEncode[g[a, b]], g[x_, y_]];
+        bs = TMatchBindings[m];
+        dx = bs[[1, Key[x]]];
+        dy = bs[[1, Key[y]]];
+        {TTermSame[dx, TLazyEncode[a]],
+         TTermSame[dy, TLazyEncode[b]]}],
     {True, True},
     TestID -> "Pattern/compound-CTR-bindings"
 ]
 
 VerificationTest[
-    TPMatchQ[TLazyEncode[g[a, b]], h[x_, y_]],
-    False,
+    TPatternMatch[TLazyEncode[g[a, b]], h[x_, y_]],
+    TMatchSum[],
     TestID -> "Pattern/compound-CTR-wrong-head"
 ]
 
 VerificationTest[
-    TPMatchQ[TLazyEncode[g[a, b, c]], g[x_, y_]],
-    False,
+    TPatternMatch[TLazyEncode[g[a, b, c]], g[x_, y_]],
+    TMatchSum[],
     TestID -> "Pattern/compound-CTR-wrong-arity"
 ]
 
 (* === Repeat-binder pattern: f[x_, x_] requires both children
-   to be TTermEq.  Cnf-reducing equality kicks in: if the children
-   are 2+3 and 5, they should still match. *)
+   to be TTermEq.  Mismatch drops the outcome from TMatchBindings. *)
 
 VerificationTest[
-    TPMatchQ[
+    Length @ TMatchBindings @ TPatternMatch[
         TLazyEncode[g[a, a]],
         g[x_, x_]],
-    True,
-    TestID -> "Pattern/repeat-binder-equal"
+    1,
+    TestID -> "Pattern/repeat-binder-equal-yields-binding"
 ]
 
 VerificationTest[
-    TPMatchQ[
+    TMatchBindings @ TPatternMatch[
         TLazyEncode[g[a, b]],
         g[x_, x_]],
-    False,
-    TestID -> "Pattern/repeat-binder-different"
+    {},
+    TestID -> "Pattern/repeat-binder-different-no-bindings"
 ]
 
 (* === Mixed: literal in one slot, binder in another =============== *)
 
 VerificationTest[
-    With[{m = TPMatch[TLazyEncode[g[a, b]], g[a, x_]]},
-        TTermSame[m[x], TLazyEncode[b]]],
+    With[{bs = TMatchBindings @ TPatternMatch[TLazyEncode[g[a, b]],
+                                              g[a, x_]]},
+        TTermSame[bs[[1, Key[x]]], TLazyEncode[b]]],
     True,
     TestID -> "Pattern/literal-and-binder-mixed"
 ]
 
 VerificationTest[
-    TPMatchQ[TLazyEncode[g[a, b]], g[c, x_]],
-    False,
+    TPatternMatch[TLazyEncode[g[a, b]], g[c, x_]],
+    TMatchSum[],
     TestID -> "Pattern/literal-mismatch-rejects"
 ]
 
 (* === Nested compound: g[h[x_], y_] =============================== *)
 
 VerificationTest[
-    With[{t = TLazyEncode[g[h[a], b]],
-          m = TPMatch[TLazyEncode[g[h[a], b]], g[h[x_], y_]]},
-        {TTermSame[m[x], TLazyEncode[a]],
-         TTermSame[m[y], TLazyEncode[b]]}],
+    With[{bs = TMatchBindings @ TPatternMatch[
+                  TLazyEncode[g[h[a], b]],
+                  g[h[x_], y_]]},
+        {TTermSame[bs[[1, Key[x]]], TLazyEncode[a]],
+         TTermSame[bs[[1, Key[y]]], TLazyEncode[b]]}],
     {True, True},
     TestID -> "Pattern/nested-compound-bindings"
 ]
 
-(* === Substitution: TPSubstitute fills RHS from bindings ========== *)
+(* === HeadBlank: x_g matches only g-shaped TTerms =================== *)
 
 VerificationTest[
-    TLazyDecode @ TPSubstitute[<|x -> TLazyEncode[42]|>, x],
-    42,
-    TestID -> "Pattern/substitute-bound-symbol"
-]
-
-VerificationTest[
-    TLazyDecode @ TPSubstitute[<|x -> TLazyEncode[a]|>, g[x, x]],
-    g[a, a],
-    TestID -> "Pattern/substitute-into-compound"
-]
-
-(* === TPReplace: rewrite at root if pattern matches =============== *)
-
-VerificationTest[
-    TLazyDecode @ TPReplace[
-        TLazyEncode[g[a, b]],
-        g[x_, y_] -> h[y, x]],
-    h[b, a],
-    TestID -> "Pattern/replace-swap-args"
-]
-
-VerificationTest[
-    TLazyDecode @ TPReplace[
-        TLazyEncode[g[a, b]],
-        f[x_] -> q[x]],
-    g[a, b],                       (* no match: returns original *)
-    TestID -> "Pattern/replace-no-match-passthrough"
-]
-
-(* === TPReplaceList: enumerate matches at every position ========== *)
-
-VerificationTest[
-    Length @ TPReplaceList[
-        TLazyEncode[g[h[a], h[b]]],
-        h[x_] -> q[x]],
-    2,
-    TestID -> "Pattern/replace-list-finds-two"
-]
-
-VerificationTest[
-    Sort[TLazyDecode /@ (Last /@ TPReplaceList[
-        TLazyEncode[g[h[a], h[b]]],
-        h[x_] -> q[x]])],
-    Sort @ {q[a], q[b]},
-    TestID -> "Pattern/replace-list-substituted-payloads"
-]
-
-(* === HeadBlank: x_Cons matches only Cons-shaped TTerms =========== *)
-(* Lazy.wl exposes Cons via $LazyCons; we need a registered symbol
-   "Cons" via symLabelFor to make this clickable from WL.  Use g
-   directly here -- TLazyEncode[g[...]] registers symbol "g" via
-   symLabelFor on first use. *)
-
-VerificationTest[
-    TPMatchQ[TLazyEncode[g[a]], _g],
-    True,
+    TMatchBindings @ TPatternMatch[TLazyEncode[g[a]], _g],
+    {<||>},
     TestID -> "Pattern/HeadBlank-matches-registered-ctor"
 ]
 
 VerificationTest[
-    TPMatchQ[TLazyEncode[g[a]], _h],
-    False,
+    TPatternMatch[TLazyEncode[g[a]], _h],
+    TMatchSum[],
     TestID -> "Pattern/HeadBlank-wrong-ctor"
+]
+
+(* === TMatchApply: substitute RHS per outcome ====================== *)
+
+VerificationTest[
+    Block[{m = TPatternMatch[TLazyEncode[g[a, b]], g[x_, y_]],
+           outs},
+        outs = TMatchApply[h[y, x], m];
+        {Length[outs], TLazyDecode @ outs[[1]]}],
+    {1, h[b, a]},
+    TestID -> "Pattern/MatchApply-swap-args"
+]
+
+VerificationTest[
+    Block[{m = TPatternMatch[TLazyEncode[g[a, b]], f[x_]]},
+        TMatchApply[q[x], m]],
+    {},
+    TestID -> "Pattern/MatchApply-no-match-yields-empty"
+]
+
+VerificationTest[
+    Block[{m = TPatternMatch[TLazyEncode[g[a]], g[x_]]},
+        TLazyDecode @ TMatchApply[g[x, x], m][[1]]],
+    g[a, a],
+    TestID -> "Pattern/MatchApply-substitute-into-compound"
+]
+
+(* === TMatchParts: enumerate path-keyed captures =================== *)
+
+VerificationTest[
+    Block[{m = TPatternMatch[TLazyEncode[g[a, b]], g[x_, y_]],
+           parts},
+        parts = TMatchParts[m];
+        Sort @ Keys @ parts[[1]]],
+    Sort @ {{1}, {2}},
+    TestID -> "Pattern/MatchParts-yields-leaf-paths"
+]
+
+VerificationTest[
+    Block[{m = TPatternMatch[TLazyEncode[g[a, b]], g[x_, y_]],
+           parts},
+        parts = TMatchParts[m];
+        TLazyDecode /@ {parts[[1, Key[{1}]]], parts[[1, Key[{2}]]]}],
+    {a, b},
+    TestID -> "Pattern/MatchParts-leaf-values-decode"
 ]
