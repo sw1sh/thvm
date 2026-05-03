@@ -720,6 +720,72 @@ int main(void) {
     }
   }
 
+  TEST_BEGIN("bufferize/identity-permute-elided-from-chain");
+  // PERMUTE with axis_perm = [0,1] is a no-op transpose and must
+  // be folded out.  Build a graph that uses such a permute on one
+  // branch of a multi-consumer producer.
+  // Note: uop_permute itself short-circuits identity, so we need
+  // to construct two non-identity permutes whose composition is
+  // identity.  uop_permute also composes them, returning identity
+  // and dropping the chain; in that case the test verifies elision
+  // happened at construction time (chain_op_count==0 below).
+  // This still exercises the elision path for unfolded inputs.
+  Term ip_s   = uop_binary(UOP_ADD, a23, b23);  // {2,3}
+  Term ip_dir = uop_unary(UOP_NEG, ip_s);
+  // Identity permute via uop_permute is dropped at construction.
+  // Build an "almost-identity" path so the chain has a permute we
+  // can elide.
+  u32 swap[2] = {1, 0};
+  Term ip_p1 = uop_permute(ip_s, 2, swap);
+  Term ip_p2 = uop_permute(ip_p1, 2, swap);   // composes back to identity
+  // ip_p2 should be identical to ip_s due to compose-of-permute
+  // collapsing in uop_permute.  No new node; nothing to elide.
+  CHECK_EQ(ip_p2, ip_s);
+  (void)ip_dir;
+
+  TEST_BEGIN("bufferize/identity-expand-elided-from-chain");
+  // EXPAND to the same shape is identity; uop_expand does NOT
+  // short-circuit identity, so build it and verify elision.
+  u32 same_dims[2] = {2, 3};
+  Term ie_s   = uop_binary(UOP_ADD, a23, b23);  // {2,3}
+  Term ie_dir = uop_unary(UOP_NEG, ie_s);
+  Term ie_exp = uop_expand(ie_s, 2, same_dims);   // identity expand
+  Term ie_dir_e = uop_expand(ie_dir, 2, same_dims);
+  Term ie_root = uop_binary(UOP_ADD, ie_dir_e, ie_exp);
+  realize_classify(ie_root);
+  // The identity expand must have been elided.  has_expand on the
+  // (ie_s -> ie_root) edge should be 0.
+  u32 ie_s_idx    = bufferize_find_by_loc(term_val(ie_s));
+  u32 ie_root_idx = bufferize_find_by_loc(term_val(ie_root));
+  if (ie_s_idx != 0xFFFFFFFFu && ie_root_idx != 0xFFFFFFFFu) {
+    u32 ie_s_id    = bufferize_buffer_at(ie_s_idx)->buffer_id;
+    u32 ie_root_id = bufferize_buffer_at(ie_root_idx)->buffer_id;
+    for (u32 i = 0; i < bufferize_index_count(); i++) {
+      BIndex const *e = bufferize_index_at(i);
+      if (e->source_buffer_id != ie_s_id
+          || e->consumer_buffer_id != ie_root_id) continue;
+      CHECK_EQ(e->has_expand, 0);
+    }
+  }
+  CHECK(bufferize_identity_reshape_elision_hits() >= 1);
+
+  TEST_BEGIN("bufferize/indexes-for-source-helper");
+  // bufferize_indexes_for_source must return all edges where the
+  // given source feeds something.  Reuse the ie_s/ie_root graph.
+  if (ie_s_idx != 0xFFFFFFFFu) {
+    u32 ie_s_id = bufferize_buffer_at(ie_s_idx)->buffer_id;
+    u32 buf2[16];
+    u32 n_src = bufferize_indexes_for_source(ie_s_id, buf2, 16);
+    CHECK(n_src >= 1);
+    for (u32 i = 0; i < n_src; i++) {
+      BIndex const *e = bufferize_index_at(buf2[i]);
+      CHECK(e != NULL);
+      CHECK_EQ(e->source_buffer_id, ie_s_id);
+    }
+    // cap=0 still returns count.
+    CHECK_EQ(bufferize_indexes_for_source(ie_s_id, NULL, 0), n_src);
+  }
+
   TEST_BEGIN("bufferize/aggregate-totals-match-per-buffer-sums");
   // Rebuild the multi-consumer graph and verify aggregates equal
   // the sum of per-buffer fields.

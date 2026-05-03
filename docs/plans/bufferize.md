@@ -228,11 +228,9 @@ comes from moving boundaries to good positions, not just deleting them.
 
 These rewrite consumer edges, not producers globally.
 
-- `index-reshape` (landed accounting + identity-reshape elision
-  is the first real edge transform; counted via
-  `bufferize_identity_reshape_elision_hits`)
-- `index-permute` (landed accounting)
-- `index-expand` (landed accounting)
+- `index-reshape` (landed accounting + identity-reshape elision)
+- `index-permute` (landed accounting + identity-permute elision)
+- `index-expand` (landed accounting + identity-expand elision)
 - `index-pad-mask` (landed accounting)
 - `index-shrink` (landed accounting)
 - `index-flip` (landed accounting)

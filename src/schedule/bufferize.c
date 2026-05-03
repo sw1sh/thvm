@@ -245,45 +245,64 @@ static void bufferize_build_indexes(void) {
   }
 }
 
-// Phase 3 edge transform: detect identity reshapes
-// (src_ndim == out_ndim and src_dims == out_dims) in each chain
-// and elide them.  Updates movement_chain_len and has_reshape per
-// edge so downstream cost-model and index-rule callers see only
-// the meaningful transforms.  Returns the number of identities
-// elided across all edges.
+// Phase 3 edge transform: detect identity movement ops in each
+// chain and elide them.
+//   identity reshape: src_ndim == out_ndim and src_dims == out_dims
+//   identity permute: axis_perm[i] == i for every i
+//   identity expand : src_ndim == out_ndim and src_dims == out_dims
+// Updates movement_chain_len and clears the matching has_* flag
+// when no surviving op of that kind remains.  Returns the number of
+// identities elided across all edges.
+static u8 bufferize_chain_op_is_identity(BIndexChainOp const *o) {
+  if (o->src_ndim == 0) return 0;
+  if (o->op == UOP_RESHAPE || o->op == UOP_EXPAND) {
+    if (o->src_ndim != o->out_ndim) return 0;
+    for (u32 d = 0; d < o->src_ndim; d++) {
+      if (o->src_dims[d] != o->out_dims[d]) return 0;
+    }
+    return 1;
+  }
+  if (o->op == UOP_PERMUTE) {
+    if (o->src_ndim != o->out_ndim) return 0;
+    for (u32 d = 0; d < o->src_ndim; d++) {
+      if (o->axis_perm[d] != d) return 0;
+    }
+    return 1;
+  }
+  return 0;
+}
+
 static u32 bufferize_apply_identity_reshape(void) {
   u32 hits = 0;
   for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
     BIndex *e = &BUFFERIZE_INDEXES[i];
     u32 keep = 0;
     int still_has_reshape = 0;
+    int still_has_permute = 0;
+    int still_has_expand  = 0;
     for (u32 j = 0; j < e->chain_op_count; j++) {
       BIndexChainOp const *o = &e->chain_ops[j];
-      int identity = 0;
-      if (o->op == UOP_RESHAPE
-          && o->src_ndim == o->out_ndim
-          && o->src_ndim != 0) {
-        identity = 1;
-        for (u32 d = 0; d < o->src_ndim; d++) {
-          if (o->src_dims[d] != o->out_dims[d]) { identity = 0; break; }
-        }
-      }
-      if (identity) {
+      if (bufferize_chain_op_is_identity(o)) {
         hits++;
         if (e->movement_chain_len > 0) e->movement_chain_len--;
         continue;
       }
       if (o->op == UOP_RESHAPE) still_has_reshape = 1;
+      if (o->op == UOP_PERMUTE) still_has_permute = 1;
+      if (o->op == UOP_EXPAND)  still_has_expand  = 1;
       e->chain_ops[keep++] = *o;
     }
     e->chain_op_count = (u8)keep;
     if (!still_has_reshape) e->has_reshape = 0;
+    if (!still_has_permute) e->has_permute = 0;
+    if (!still_has_expand)  e->has_expand  = 0;
   }
   return hits;
 }
 
-// Counter for identity-reshape elisions, surfaced through the
-// existing index_rule API so dumps can show a single "rule" line.
+// Counter for identity-op elisions across reshape/permute/expand,
+// surfaced through bufferize_identity_reshape_elision_hits for
+// continuity (the name predates the broader scope).
 static u32 BUFFERIZE_IDENTITY_RESHAPE_HITS = 0;
 fn u32 bufferize_identity_reshape_elision_hits(void) {
   return BUFFERIZE_IDENTITY_RESHAPE_HITS;
@@ -694,6 +713,17 @@ fn u32 bufferize_indexes_for_consumer(u32 consumer_buffer_id,
   u32 n = 0;
   for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
     if (BUFFERIZE_INDEXES[i].consumer_buffer_id != consumer_buffer_id) continue;
+    if (out != NULL && n < cap) out[n] = i;
+    n++;
+  }
+  return n;
+}
+
+fn u32 bufferize_indexes_for_source(u32 source_buffer_id,
+                                    u32 *out, u32 cap) {
+  u32 n = 0;
+  for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
+    if (BUFFERIZE_INDEXES[i].source_buffer_id != source_buffer_id) continue;
     if (out != NULL && n < cap) out[n] = i;
     n++;
   }

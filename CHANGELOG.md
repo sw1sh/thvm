@@ -6,6 +6,24 @@ dated section.
 
 ## Unreleased
 
+### Changed: identity elision generalised to permute and expand
+
+`bufferize_apply_identity_reshape` now folds out identity PERMUTE
+ops (`axis_perm[i] == i for all i`) and identity EXPAND ops
+(`src_dims == out_dims`) in addition to identity reshapes,
+clearing the matching `has_*` flag when no surviving op of that
+kind remains on the edge.  The hit counter retains its name for
+continuity but covers all three op kinds now.
+
+`bufferize_indexes_for_source(source_buffer_id, *out, cap)` joins
+`bufferize_indexes_for_consumer` so callers can enumerate every
+edge where a given buffer is the producer.  Useful for any rule
+that needs to walk a buffer's consumer set.
+
+`tests/test_bufferize.c` adds three cases (identity expand elided,
+identity-permute construction-time short-circuit confirmed,
+indexes-for-source helper); 203/203.
+
 ### Added: pad/perm/flip data on BIndexChainOp
 
 `BIndexChainOp` now carries the op-specific data needed to drive

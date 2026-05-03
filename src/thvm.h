@@ -1360,6 +1360,11 @@ fn BIndex const     *bufferize_index_at(u32 i);
 // number written (capped at `cap`).  Pass cap=0 to just count.
 fn u32               bufferize_indexes_for_consumer(u32 consumer_buffer_id,
                                                     u32 *out, u32 cap);
+// Symmetric to bufferize_indexes_for_consumer: enumerate every
+// B_INDEX edge whose source_buffer_id matches `source_buffer_id`,
+// returning the count and writing up to `cap` indices into `out`.
+fn u32               bufferize_indexes_for_source(u32 source_buffer_id,
+                                                  u32 *out, u32 cap);
 // Phase 2 hookup: look up the first B_INDEX edge for the
 // (consumer_loc -> source_loc) pair and copy its chain summary into
 // `out`.  Returns 1 if an edge was found, 0 otherwise.  Both locs
