@@ -6,6 +6,27 @@ dated section.
 
 ## Unreleased
 
+### Changed: auto-dup default-on for non-recursive LAMs
+
+`thvm_wl_lam_seal_ext` now routes through
+`lam_seal_ext_with_auto_dup`, so every WL `TLam` with a non-linear
+binder gets a DUP chain inserted in C at construction.  Recursive
+bodies (those containing `TAG_REF` or `TAG_ALO`) bail out of
+auto-dup conservatively and fall back to plain `lam_seal_ext`,
+since naive structural DUP commute through a recursive call site
+creates O(2^d) chain nesting per recursive invocation -- proper
+fix is Levy-optimal sharing (CNF readback), tracked but not
+implemented.  Meanwhile, recursive non-linear bodies must dup
+their binders manually with `TDup`.
+
+The DUP-NOD commute rules (`dup_app` / `dup_op2` / `dup_mat`,
+shipped in the previous entry) cover the projections that the
+auto-dup chain produces, so non-recursive bodies with arbitrary
+APP / OP2 / MAT structure reduce correctly.
+
+`tests/test_auto_dup.c` and `wl/THVMLink/Tests/lazy.wlt` both
+green; full C suite stays at 274/274.
+
 ### Fixed: rangeify rerouting + cost-score threshold via canary feedback
 
 Bounded beautiful-mnist canary regressed under the new defaults

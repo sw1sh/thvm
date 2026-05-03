@@ -149,7 +149,7 @@ EXTERN_C DLLEXPORT int thvm_wl_lam_seal_ext(WolframLibraryData libData, mint arg
   (void)libData; (void)argc;
   u64 lam_loc  = (u64)MArgument_getInteger(args[0]);
   u32 base_ext = (u32)MArgument_getInteger(args[1]);
-  u32 sealed   = lam_seal_ext(lam_loc, base_ext);
+  u32 sealed   = lam_seal_ext_with_auto_dup(lam_loc, base_ext);
   MArgument_setInteger(res, (mint)sealed);
   return LIBRARY_NO_ERROR;
 }
