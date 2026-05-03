@@ -483,6 +483,41 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* Movement-heavy kernels can have leading unit axes and non-
+       divisible middle axes.  The proposer should skip those and
+       offer LOCAL candidates on a later splittable loop axis. *)
+    Module[{oldBackend, oldTile, restore, kid, props},
+        oldBackend = Environment["THVM_BACKEND"];
+        oldTile    = Environment["THVM_TILE"];
+        restore[] := (
+            If[StringQ[oldBackend],
+                SetEnvironment["THVM_BACKEND" -> oldBackend],
+                SetEnvironment["THVM_BACKEND" -> ""]];
+            If[StringQ[oldTile],
+                SetEnvironment["THVM_TILE" -> oldTile],
+                SetEnvironment["THVM_TILE" -> ""]]
+        );
+        Internal`WithLocalSettings[
+            SetEnvironment["THVM_BACKEND" -> "metal"];
+            SetEnvironment["THVM_TILE" -> "1"],
+            TInit[];
+            a = TTensorCreate @ NumericArray[
+                ConstantArray[1., {1, 25, 32}], "Real32"];
+            b = TTensorCreate @ NumericArray[
+                ConstantArray[2., {1, 25, 32}], "Real32"];
+            TRealize[a + b];
+            kid = TKernelCount[] - 1;
+            props = TKernelProposed[kid],
+            restore[]
+        ];
+        Take[props, UpTo[3]]
+    ],
+    {TOpt["LOCAL", 2, 32], TOpt["LOCAL", 2, 16],
+     TOpt["LOCAL", 2, 8]},
+    TestID -> "kernel-opts/metal-local-proposal-skips-unsplittable-axes"
+]
+
+VerificationTest[
     (* A LOCAL/GLOBAL split on one output axis must not make remaining
        serial LOOP axes fall back to the per-program Metal JIT.  This
        shape mirrors the beautiful_mnist elementwise kernels that carry

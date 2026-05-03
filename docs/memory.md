@@ -260,9 +260,13 @@ intermediates:
   are `MUL/PERMUTE/RESHAPE/EXPAND/REDUCE` and
   `RESHAPE/MUL/EXPAND/ADD/PERMUTE/REDUCE`; each feeds a 24-way
   PAD/ADD consumer plus a smaller reduce consumer.
-- the only hot untuned tile gap in the bounded BS=32 canary is still
-  the 24-input movement fan-in: `RESHAPE=24, PAD=24, ADD=23`,
-  `out_numel=460800`.
+- the former hot untuned tile gap was the 24-input movement fan-in:
+  `RESHAPE=24, PAD=24, ADD=23`, `out_numel=460800`, with default
+  axes `{LOOP, LOOP, LOOP}` and shape `{1, 25, 18432}`.  The proposer
+  now skips the unsplittable leading axes and offers `LOCAL`
+  candidates on the inner loop axis, so the bounded BS=32 profile no
+  longer reports timed fusion gaps.  This makes the shape autotunable;
+  it does not by itself reduce dispatch count or live bytes.
 
 That points to three separate memory jobs:
 

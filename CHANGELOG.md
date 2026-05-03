@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Changed: propose Metal LOCAL opts on splittable inner axes
+
+Elementwise Metal tile proposal now skips leading unit or otherwise
+unsplittable LOOP axes and proposes `LOCAL` candidates on the first
+later axis that a factor can divide.  This makes movement-heavy
+beautiful-mnist fan-in kernels with shapes like `{1, 25, 18432}`
+visible to autotune.
+
 ### Changed: trace Metal alias buffers to their origin producer
 
 `TMemoryPlan[]` now records alias-origin fields for each buffer, and

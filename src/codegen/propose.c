@@ -84,15 +84,21 @@ static u8 propose_reduce_axis_index(KernelEntry const *ke) {
   return 0xFF;
 }
 
-// First LOOP-typed axis at or after `start`, or 0xFF if none.  Used
-// to find an output axis to UPCAST.  We pick the FIRST LOOP because
-// for elementwise kernels the output is flattened into one loop
-// today; later passes that emit a structured nest will want a more
-// nuanced choice (innermost LOOP, hardware vector width, etc.).
-static u8 propose_first_loop_axis(KernelEntry const *ke, u8 start) {
+// First LOOP-typed axis at or after `start` that can be split by
+// `factor`, or 0xFF if none.  Leading unit/broadcast axes are common
+// in movement-heavy graphs; picking axis 0 unconditionally makes those
+// kernels look untunable even when an inner axis has plenty of work.
+static u8 propose_loop_axis_for_factor(KernelEntry const *ke, u8 start,
+                                       u32 factor) {
   if (ke->axes == NULL) return 0xFF;
   for (u8 i = start; i < ke->axes->n_axes; i++) {
-    if (ke->axes->axis_types[i] == KAX_LOOP) return i;
+    if (ke->axes->axis_types[i] != KAX_LOOP) {
+      continue;
+    }
+    u32 axis_size = ke->axes->full_shape[i];
+    if (factor <= axis_size && axis_size % factor == 0) {
+      return i;
+    }
   }
   return 0xFF;
 }
@@ -447,40 +453,35 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     }
   }
 
-  // Elementwise UPCAST candidates: {2, 4, 8, 16} where the selected
-  // LOOP axis is divisible.  Targets the first LOOP axis (rank-1 kernels and
-  // tinygrad-style flattened outputs both have only one LOOP axis;
-  // multi-axis kernels will benefit from a smarter pick once the
-  // structured nest renderer arrives).  Skipped for reduce-tail
-  // kernels because UPCAST on a reduce kernel would cross the
-  // reduce-axis boundary.
+  // Elementwise output-axis candidates.  Pick the first LOOP axis
+  // that each factor can actually split, not just axis 0.  This keeps
+  // leading-size-1 movement views from hiding large inner loops from
+  // the Metal LOCAL/GLOBAL autotune path.
   if (axis_size == 0 && ke->output_numel > 0) {
-    u8 loop_axis = propose_first_loop_axis(ke, 0);
-    if (loop_axis != 0xFF) {
-      u32 loop_axis_size = ke->axes->full_shape[loop_axis];
-      if (propose_metal_tile_kernel(ke)) {
-        static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
-        u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
-        for (u32 i = 0; i < n_local_factors; i++) {
-          u32 f = local_factors[i];
-          if (loop_axis_size % f != 0 || f > loop_axis_size) continue;
-          if (n >= cap) break;
-          out[n].op   = KOP_LOCAL;
-          out[n].axis = loop_axis;
-          out[n].arg  = f;
-          n++;
-        }
+    if (propose_metal_tile_kernel(ke)) {
+      static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
+      u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
+      for (u32 i = 0; i < n_local_factors; i++) {
+        u32 f = local_factors[i];
+        u8 loop_axis = propose_loop_axis_for_factor(ke, 0, f);
+        if (loop_axis == 0xFF) continue;
+        if (n >= cap) break;
+        out[n].op   = KOP_LOCAL;
+        out[n].axis = loop_axis;
+        out[n].arg  = f;
+        n++;
       }
-      if (!propose_metal_backend_enabled()) {
-        for (u32 i = 0; i < n_factors; i++) {
-          u32 f = split_factors[i];
-          if (loop_axis_size % f != 0) continue;
-          if (n >= cap) break;
-          out[n].op   = KOP_UPCAST;
-          out[n].axis = loop_axis;
-          out[n].arg  = f;
-          n++;
-        }
+    }
+    if (!propose_metal_backend_enabled()) {
+      for (u32 i = 0; i < n_factors; i++) {
+        u32 f = split_factors[i];
+        u8 loop_axis = propose_loop_axis_for_factor(ke, 0, f);
+        if (loop_axis == 0xFF) continue;
+        if (n >= cap) break;
+        out[n].op   = KOP_UPCAST;
+        out[n].axis = loop_axis;
+        out[n].arg  = f;
+        n++;
       }
     }
   }
