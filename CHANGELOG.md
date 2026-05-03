@@ -6,6 +6,14 @@ dated section.
 
 ## Unreleased
 
+### Added: opt-in reduce fanout buffer-removal rule
+
+The realize-map rewrite table now has `inline-reduce-fanout`, guarded
+by `THVM_INLINE_REDUCE_FANOUT=1`.  It removes a materialized REDUCE
+boundary only when all direct consumers are pure non-reduce consumers
+and no parent chain reaches another reduce, giving us a measured
+`pm_remove_bufferize`-style recompute rule without making it default.
+
 ### Changed: reassociate scalar index expressions during rangeify
 
 Rangeify's integer expression emitter now canonicalizes commutative

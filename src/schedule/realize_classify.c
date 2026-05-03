@@ -372,8 +372,29 @@ static int realize_inline_multiconsumer_pure_enabled(void) {
   return e != NULL && e[0] == '1';
 }
 
+static int realize_rangeify_enabled(void);
+
+static int realize_inline_reduce_fanout_enabled(void) {
+  if (!realize_metal_tile_fanin_cap_enabled() || !realize_rangeify_enabled()) {
+    return 0;
+  }
+  char const *e = getenv("THVM_INLINE_REDUCE_FANOUT");
+  return e != NULL && e[0] == '1';
+}
+
 static u64 realize_inline_multiconsumer_pure_min_numel(void) {
   char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL");
+  if (e != NULL && e[0] != '\0') {
+    unsigned long long v = strtoull(e, NULL, 10);
+    if (v > 0) {
+      return (u64)v;
+    }
+  }
+  return 65536;
+}
+
+static u64 realize_inline_reduce_fanout_min_numel(void) {
+  char const *e = getenv("THVM_INLINE_REDUCE_FANOUT_MIN_NUMEL");
   if (e != NULL && e[0] != '\0') {
     unsigned long long v = strtoull(e, NULL, 10);
     if (v > 0) {
@@ -564,6 +585,67 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
   return hits;
 }
 
+static int realize_reduce_fanout_consumers_ok(u64 reduce_loc) {
+  u32 consumers = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    u64 ploc = REALIZE_INFO[i].loc;
+    if (ploc == reduce_loc) {
+      continue;
+    }
+    u8 pop = REALIZE_INFO[i].op;
+    u8 ar  = uop_arity(pop);
+    int hit = 0;
+    for (u8 j = 0; j < ar; j++) {
+      Term c = term_resolve(heap_read(ploc + j));
+      if (term_tag(c) == TAG_UOP && term_val(c) == reduce_loc) {
+        hit = 1;
+        break;
+      }
+    }
+    if (!hit) {
+      continue;
+    }
+    consumers++;
+    if (pop == UOP_REDUCE || !realize_recompute_pure_op(pop)) {
+      return 0;
+    }
+    if (realize_parent_chain_reaches_reduce(ploc, 0)) {
+      return 0;
+    }
+  }
+  return consumers >= 2;
+}
+
+static u32 realize_rule_inline_reduce_fanout(Term root) {
+  (void)root;
+  if (!realize_inline_reduce_fanout_enabled()) {
+    return 0;
+  }
+  u64 min_numel = realize_inline_reduce_fanout_min_numel();
+  u32 hits = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    UOpInfo *info = &REALIZE_INFO[i];
+    if (!info->realized || info->op != UOP_REDUCE
+        || info->consumer_count < 2) {
+      continue;
+    }
+    Term self = term_new(0, TAG_UOP, info->op, info->loc);
+    Shape out_shape = {0};
+    if (!term_shape_in(self, 0, &out_shape)) {
+      continue;
+    }
+    if (realize_shape_numel(&out_shape) < min_numel) {
+      continue;
+    }
+    if (!realize_reduce_fanout_consumers_ok(info->loc)) {
+      continue;
+    }
+    hits++;
+    info->realized = 0;
+  }
+  return hits;
+}
+
 static int realize_inline_subtree_has_movement(Term t, u32 depth) {
   if (depth > 64) return 1;
   t = term_resolve(t);
@@ -711,6 +793,7 @@ fn void realize_classify(Term root) {
     {"inline-softmax-broadcast-reduce", realize_rule_inline_softmax_broadcast_reduce},
     {"inline-reduce-scalar-tail",     realize_rule_inline_reduce_scalar_tail},
     {"inline-large-expand-fanout",    realize_rule_inline_large_expand_fanout},
+    {"inline-reduce-fanout",          realize_rule_inline_reduce_fanout},
     {"inline-pure-fanout-probe",      realize_rule_inline_pure_fanout_probe},
     {"metal-tile-fanin-cap",          realize_rule_metal_tile_fanin_cap},
   };

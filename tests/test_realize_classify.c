@@ -128,6 +128,43 @@ int main(void) {
   CHECK_EQ(realize_is_realized(reduced2), 1);   // mid-graph REDUCE
   CHECK_EQ(realize_is_realized(out), 1);
 
+  TEST_BEGIN("realize-classify/metal-reduce-fanout-inline-opt-in");
+  setenv("THVM_BACKEND", "metal", 1);
+  setenv("THVM_TILE", "1", 1);
+  setenv("THVM_INLINE_REDUCE_FANOUT", "1", 1);
+  setenv("THVM_INLINE_REDUCE_FANOUT_MIN_NUMEL", "1", 1);
+  thvm_free();
+  thvm_init();
+  u32 trf = alloc_f32_tensor2(2, 2);
+  Term rf = term_new(0, TAG_TEN, DT_FP32, trf);
+  Term rf_reduce = uop_reduce(REDUCE_SUM, 1, rf);
+  Term rf_left = uop_unary(UOP_NEG, rf_reduce);
+  Term rf_right = uop_binary(UOP_MUL, rf_reduce, rf_reduce);
+  Term rf_root = uop_binary(UOP_ADD, rf_left, rf_right);
+  realize_classify(rf_root);
+  CHECK_EQ(realize_consumer_count(rf_reduce), 2);
+  CHECK_EQ(realize_is_realized(rf_reduce), 0);
+  CHECK_EQ(realize_rewrite_stat_hits("inline-reduce-fanout"), 1);
+
+  TEST_BEGIN("realize-classify/metal-reduce-fanout-keeps-reduce-parent");
+  thvm_free();
+  thvm_init();
+  u32 trp = alloc_f32_tensor2(2, 2);
+  Term rp = term_new(0, TAG_TEN, DT_FP32, trp);
+  Term rp_reduce = uop_reduce(REDUCE_SUM, 1, rp);
+  Term rp_left = uop_unary(UOP_NEG, rp_reduce);
+  Term rp_right = uop_binary(UOP_MUL, rp_reduce, rp_reduce);
+  Term rp_sum = uop_binary(UOP_ADD, rp_left, rp_right);
+  Term rp_root = uop_reduce(REDUCE_SUM, 0, rp_sum);
+  realize_classify(rp_root);
+  CHECK_EQ(realize_consumer_count(rp_reduce), 2);
+  CHECK_EQ(realize_is_realized(rp_reduce), 1);
+  CHECK_EQ(realize_rewrite_stat_hits("inline-reduce-fanout"), 0);
+  unsetenv("THVM_BACKEND");
+  unsetenv("THVM_TILE");
+  unsetenv("THVM_INLINE_REDUCE_FANOUT");
+  unsetenv("THVM_INLINE_REDUCE_FANOUT_MIN_NUMEL");
+
   TEST_BEGIN("realize-classify/non-uop-leaves-are-not-realized");
   // TAG_TEN leaves should never appear in the table.
   CHECK_EQ(realize_is_realized(a), 0);
