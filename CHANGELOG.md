@@ -6,6 +6,50 @@ dated section.
 
 ## Unreleased
 
+### Added: Multi-output kernel infrastructure steps 2-5
+
+Builds on the step-1 schema landed in commit `0bca111`.  Lands the
+planning, codegen guards, dispatch guards, and autotune-key
+extension that a future merge-action commit needs to flip
+`THVM_KERNEL_MERGE=1` from probe to live emission.
+
+- **Step 2 (planning)**: `plan_kernel_merges` walks `BOUNDARY_ORDER`
+  pairwise after `topo_sort_boundaries` and marks
+  `BOUNDARY_MERGE_INTO[child] = host` for every pair that satisfies
+  the predicate (both pure-elementwise, identical iter shape,
+  no data-flow dep, non-empty input overlap, merged op-count <= 64).
+  Action gated behind `THVM_KERNEL_MERGE=1` (default OFF).  Probe
+  diagnostics on `DUMP_KERNEL_MERGE=1`.  Public accessors
+  `materialize_kernel_merge_candidate_count` and
+  `materialize_kernel_merge_into`.  20 candidate pairs flagged on
+  the bounded canary.
+- **Step 3 (codegen guards)**: `cg_kernel_has_extra_outputs` plus
+  early-bail in every renderer entry point (`cg_supports`,
+  `cg_emit_metal`, `cg_emit_tile_metal`, `cg_supports_metal_reduce_expr`,
+  `cg_supports_scalar`, `cg_emit_scalar`, `cg_supports_tile`,
+  `cg_emit_tile`).  When the planner's action ships, multi-output
+  kernels initially fall back to the interpreter rather than emit
+  wrong code through single-output JIT signatures.
+- **Step 4 (dispatch guards)**: same guard added to
+  `cpu_interpret`, `cpu_dispatch_scalar`, `cpu_dispatch_tile`,
+  `cpu_blas_dispatch`, `metal_jit_encode`, `metal_tile_jit_encode`.
+  JIT capture's `jit_capture_retain_dispatch_bufs` now iterates
+  `kernel_entry_output_count` instead of reading `ke->output_tid`
+  alone.
+- **Step 5 (autotune key)**: `bufferize_schedule_key` folds in
+  per-buffer `output_bytes`, `lifetime_start`, `lifetime_end`,
+  `subtree_has_reduce`, `reduce_kind`, `reduce_axis`,
+  `reduce_axis_size` so multi-output schedules with different
+  output topologies get distinct keys.
+
+Bounded canary baseline (BS=32 WARMUP=1 N_STEPS=1
+POST_AUTOTUNE_TOP=6 metal+tile): 1070 kernels, ~430ms,
+`metal-tile=1069` `metal-op=1`, 0 metal-jit fallback.  Identical
+to the post-step-1 baseline; the merge action remains gated OFF.
+
+312/312 in `test_bufferize.c` (was 286 before step 1, +26 over
+steps 1-5), full suite green.
+
 ### Added: KernelEntry multi-output schema (groundwork for tinygrad-style fusion)
 
 `KernelEntry` gains `n_extra_outputs` plus
