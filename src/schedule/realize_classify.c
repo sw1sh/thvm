@@ -1341,8 +1341,24 @@ static u32 realize_rule_inline_constants(Term root) {
   return hits;
 }
 
+// Lift the source-is-direct + has-movement gates for adjacent-reduce
+// chain inlining.  Phase 7 follow-up: the FLAT_GRID-with-nested-reduce
+// relaxation (commit 3b11bf6) means the resulting bigger reduce-bearing
+// kernel can route through the tile-JIT path.  Earlier lift attempts
+// regressed because the merged kernel fell off tile and onto metal-op,
+// negating the kernel-count win with per-op encoder overhead.  With
+// the FLAT_GRID lift in place, those merged kernels stay on tile-JIT
+// and the inlining is a clean win.
+// THVM_BUFFERIZE_LIFT_REDUCE_CHAIN_GATES=0 reverts to the conservative
+// gates for bisection.
+static int realize_lift_reduce_chain_gates(void) {
+  char const *e = getenv("THVM_BUFFERIZE_LIFT_REDUCE_CHAIN_GATES");
+  return e == NULL ? 1 : (e[0] != '0');
+}
+
 static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
   (void)root;
+  int lift = realize_lift_reduce_chain_gates();
   u32 hits = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
@@ -1350,8 +1366,8 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
     ReduceChainInfo rc;
     Term root_term = term_new(0, TAG_UOP, UOP_REDUCE, info->loc);
     if (!reduce_chain_collect(root_term, &rc)) continue;
-    if (!realize_reduce_chain_source_is_direct(rc.src)) continue;
-    if (realize_inline_subtree_has_movement(rc.src, 0)) continue;
+    if (!lift && !realize_reduce_chain_source_is_direct(rc.src)) continue;
+    if (!lift && realize_inline_subtree_has_movement(rc.src, 0)) continue;
     int ok = 1;
     for (u32 j = 1; j < rc.n_reduces; j++) {
       u32 cidx = realize_info_find(rc.locs[j]);
