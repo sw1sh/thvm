@@ -1,7 +1,8 @@
 # Bufferize Schedule IR Plan
 
-Status: Phases 0-1 landed; Phase 2 data layer landed (rangeify
-hookup pending); Phases 3-7 planned.
+Status: Phases 0-3 landed (Phase 2 has the data layer + edge query
+API; full rangeify rerouting through `B_INDEX` is the remaining
+follow-up).  Phases 4-7 planned.
 
 ## Goal
 
@@ -208,18 +209,29 @@ renderable.
 These rules are as important as removal.  Tinygrad-style fusion quality
 comes from moving boundaries to good positions, not just deleting them.
 
-### Movement-To-Index Rules
+### Movement-To-Index Rules (Phase 3 - landed as accounting layer)
 
 These rewrite consumer edges, not producers globally.
 
-- `index-reshape`
-- `index-permute`
-- `index-expand`
-- `index-pad-mask`
-- `index-shrink`
-- `index-flip`
-- `index-contiguous-collapse`
-- `index-load-mask-to-valid`
+- `index-reshape` (landed - hits per B_INDEX with `has_reshape`)
+- `index-permute` (landed)
+- `index-expand` (landed)
+- `index-pad-mask` (landed)
+- `index-shrink` (landed)
+- `index-flip` (landed)
+- `index-contiguous-collapse` (planned)
+- `index-load-mask-to-valid` (planned)
+
+The first six rules now exist as named accounting rules in
+`schedule/bufferize.c`: each one increments its hit count for every
+B_INDEX edge carrying the matching `has_*` flag, and
+`DUMP_BUFFERIZE=1` prints non-zero rule lines as `index_rule <name>
+hits=<n>`.  Rangeify still owns the underlying movement-to-index
+codegen via `RngsCtx`; the named rules make those decisions visible
+and bisectable in dumps without changing kernel output.  Future
+work: turn each rule into an actual edge-rewriting transform
+(folding adjacent identity reshapes, normalising padded masks, etc.)
+once the rangeify rerouting from the Phase 2 follow-up lands.
 
 `PAD` must become an index transform plus valid mask, not a separate
 buffer unless a later legality rule proves materialization is cheaper.
@@ -407,23 +419,27 @@ Tasks:
 
 - ~~generate one `B_INDEX` for every producer-to-consumer edge~~;
 - ~~encode reshape/pad/expand/shrink/flip/permutation context on the edge~~;
-- make rangeify consume `B_INDEX` for direct loads and expression loads;
-- preserve valid masks through `S_IWHERE`;
-- add focused tests for shared producer with multiple movement views.
+- ~~expose an edge query API (`bufferize_edge_summary`) so rangeify
+  and materialize can consult B_INDEX directly~~;
+- ~~add focused tests for shared producer with multiple movement views~~;
+- reroute `RngsCtx` chain construction in `schedule/rangeify.c`
+  through `bufferize_edge_summary` so the canonical chain summary
+  drives codegen instead of the heap-walk-derived `KProgOp` chain
+  (pending);
+- preserve valid masks through `S_IWHERE` from `has_pad` rather than
+  rederiving them inside `rngs_ctx_pad` (pending).
 
-Phase 2 follow-up (rangeify hookup): rangeify currently still
-recovers edge contexts from the heap walk in
-`schedule/rangeify.c`.  That code needs to read `B_INDEX` records
-directly so a shared producer consumed under different movement
-views gets the correct edge-local index expression.  Until that
-lands, the graph data is informational only; cost-model and
-removal rules in Phases 4+ can already use it.
+Until the rerouting lands, the graph data is informational and
+queryable; rangeify's existing per-USE addressing already produces
+correct edge-local code via `KProgOp`.  Cost-model and removal
+rules in Phases 4+ can already act on the data.
 
-Acceptance (data layer):
+Acceptance (data layer + query API):
 
-- `make test` passes including the three new edge-table cases.
+- `make test` passes including the new edge-table and
+  edge-summary cases.
 
-Acceptance (rangeify hookup, pending):
+Acceptance (rangeify rerouting, pending):
 
 - current `rangeify_gaps.wlt`, `grad.wlt`, and `nn.wlt` still pass with
   `THVM_RANGEIFY_BAIL=1`;
@@ -579,21 +595,27 @@ autotune.
 
 ## Immediate Next Step
 
-Phases 0-1 and the Phase 2 data layer have landed.  The next work
-is the Phase 2 rangeify hookup:
+Phases 0-3 have landed (with the Phase 2 rangeify rerouting
+deferred and the index-* rules tracked as accounting only).  The
+next concrete work is the Phase 2 rangeify rerouting:
 
-1. Replace `schedule/rangeify.c`'s producer-global movement-context
-   recovery with reads off the new `B_INDEX` table, so a shared
-   producer consumed under different movement views emits the
-   right edge-local index expression for each consumer.
-2. Preserve valid masks through `S_IWHERE` from the edge's
-   `has_pad` flag (and a future `pad_widths` field) instead of
-   walking the source UOp graph.
-3. Keep `THVM_RANGEIFY_BAIL=1` regression coverage in
+1. Add per-op data to `BIndex` (or a sibling `BIndexChain` table)
+   so a record carries enough information to drive `RngsCtx`
+   construction: per-axis dims for reshape, pad widths, axis
+   permutations, flip masks.  Today only the boolean flags are
+   stored.
+2. Reroute `schedule/rangeify.c`'s `RngsCtx`/`KProgOp` chain walk
+   so it reads from the bufferize edge table when one is
+   available, and falls back to the heap walk otherwise.
+3. Once rerouting is stable, turn each `index-*` rule into an
+   actual edge transform (e.g. fold identity reshapes, collapse
+   adjacent permutes, lift PAD masks to valid_masks) instead of a
+   pure accounting rule.
+4. Keep `THVM_RANGEIFY_BAIL=1` regression coverage in
    `rangeify_gaps.wlt`, `grad.wlt`, and `nn.wlt`; add focused
-   no-bail tests that exercise the shared-producer-multiple-views
-   case end-to-end.
+   no-bail tests for the shared-producer-multiple-views case
+   end-to-end.
 
-After the rangeify hookup, Phase 3's named edge rewrites
-(`index-pad-mask`, `index-reshape`, etc.) become single-rule
-edits to `B_INDEX` records.
+After this, Phase 4 (first-class bufferize removal with cost model)
+becomes a clean per-edge analysis on the bufferize graph rather
+than a side channel into `REALIZE_INFO`.

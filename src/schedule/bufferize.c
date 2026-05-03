@@ -24,6 +24,23 @@ static u32    BUFFERIZE_STORES_LEN = 0;
 static BIndex BUFFERIZE_INDEXES[BUFFERIZE_INDEX_CAP];
 static u32    BUFFERIZE_INDEXES_LEN = 0;
 
+// Phase 3: one entry per named index rewrite rule, hit count
+// recomputed from the BUFFERIZE_INDEXES table after every
+// realize_classify pass.  Order is fixed so callers can address by
+// index.  Names mirror the plan's index-* family.
+typedef struct {
+  char const *name;
+  u32         hits;
+} BIndexRule;
+static BIndexRule BUFFERIZE_INDEX_RULES[6] = {
+  {"index-reshape",  0},
+  {"index-permute",  0},
+  {"index-expand",   0},
+  {"index-pad-mask", 0},
+  {"index-shrink",   0},
+  {"index-flip",     0},
+};
+
 // realize_rewrite_apply sets this around each rule->apply call so
 // realize_mark/realize_unmark can stamp the rule that decided.
 // NULL means "outside any named rule" (seeding, post-pass cleanup).
@@ -113,6 +130,25 @@ static void bufferize_build_indexes(void) {
   }
 }
 
+// Phase 3: recompute hit counts for the named index-* rules from
+// the freshly-built B_INDEX table.  Each edge carrying a movement
+// flag counts as one hit for the corresponding rule, mirroring how
+// realize_rewrite_apply tracks hits for boundary rules.  This makes
+// the implicit rangeify movement-folding visible as named rules in
+// DUMP_BUFFERIZE without changing codegen behavior.
+static void bufferize_update_index_rule_stats(void) {
+  for (u32 i = 0; i < 6; i++) BUFFERIZE_INDEX_RULES[i].hits = 0;
+  for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
+    BIndex const *e = &BUFFERIZE_INDEXES[i];
+    if (e->has_reshape) BUFFERIZE_INDEX_RULES[0].hits++;
+    if (e->has_permute) BUFFERIZE_INDEX_RULES[1].hits++;
+    if (e->has_expand)  BUFFERIZE_INDEX_RULES[2].hits++;
+    if (e->has_pad)     BUFFERIZE_INDEX_RULES[3].hits++;
+    if (e->has_shrink)  BUFFERIZE_INDEX_RULES[4].hits++;
+    if (e->has_flip)    BUFFERIZE_INDEX_RULES[5].hits++;
+  }
+}
+
 static void bufferize_dump(Term root) {
   if (!bufferize_dump_enabled()) return;
   fprintf(stderr,
@@ -158,6 +194,14 @@ static void bufferize_dump(Term root) {
             e->has_pad     ? " pad"     : "",
             e->has_shrink  ? " shrink"  : "",
             e->has_flip    ? " flip"    : "");
+  }
+  for (u32 i = 0; i < bufferize_index_rule_count(); i++) {
+    u32 hits = BUFFERIZE_INDEX_RULES[i].hits;
+    if (hits == 0) continue;
+    fprintf(stderr,
+            "  index_rule %s hits=%u\n",
+            BUFFERIZE_INDEX_RULES[i].name,
+            (unsigned)hits);
   }
 }
 
@@ -214,6 +258,7 @@ fn void bufferize_finalize_stores(Term root) {
   // and Phase 5 reduce rules and the data rangeify will eventually
   // consume in Phase 2's rangeify follow-up.
   bufferize_build_indexes();
+  bufferize_update_index_rule_stats();
 
   bufferize_dump(root);
 }
@@ -328,4 +373,44 @@ fn u32 bufferize_indexes_for_consumer(u32 consumer_buffer_id,
     n++;
   }
   return n;
+}
+
+fn int bufferize_edge_summary(u64 consumer_loc, u64 source_loc, BIndex *out) {
+  u32 cidx = bufferize_find_by_loc(consumer_loc);
+  u32 sidx = bufferize_find_by_loc(source_loc);
+  if (cidx == 0xFFFFFFFFu || sidx == 0xFFFFFFFFu) return 0;
+  u32 cid = BUFFERIZE_BUFS[cidx].buffer_id;
+  u32 sid = BUFFERIZE_BUFS[sidx].buffer_id;
+  for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
+    BIndex const *e = &BUFFERIZE_INDEXES[i];
+    if (e->consumer_buffer_id == cid && e->source_buffer_id == sid) {
+      if (out != NULL) *out = *e;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+fn u32 bufferize_index_rule_count(void) {
+  return (u32)(sizeof(BUFFERIZE_INDEX_RULES) / sizeof(BUFFERIZE_INDEX_RULES[0]));
+}
+
+fn char const *bufferize_index_rule_name(u32 i) {
+  if (i >= bufferize_index_rule_count()) return "";
+  return BUFFERIZE_INDEX_RULES[i].name;
+}
+
+fn u32 bufferize_index_rule_hits_at(u32 i) {
+  if (i >= bufferize_index_rule_count()) return 0;
+  return BUFFERIZE_INDEX_RULES[i].hits;
+}
+
+fn u32 bufferize_index_rule_hits(char const *name) {
+  if (name == NULL) return 0;
+  for (u32 i = 0; i < bufferize_index_rule_count(); i++) {
+    if (strcmp(BUFFERIZE_INDEX_RULES[i].name, name) == 0) {
+      return BUFFERIZE_INDEX_RULES[i].hits;
+    }
+  }
+  return 0;
 }

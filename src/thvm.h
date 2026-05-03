@@ -1313,6 +1313,23 @@ fn BIndex const     *bufferize_index_at(u32 i);
 // number written (capped at `cap`).  Pass cap=0 to just count.
 fn u32               bufferize_indexes_for_consumer(u32 consumer_buffer_id,
                                                     u32 *out, u32 cap);
+// Phase 2 hookup: look up the first B_INDEX edge for the
+// (consumer_loc -> source_loc) pair and copy its chain summary into
+// `out`.  Returns 1 if an edge was found, 0 otherwise.  Both locs
+// must be heap locs of B_BUFFERIZEs.  Future rangeify and
+// materialize callers can use this to consult the canonical
+// edge-local context instead of recovering it from the heap walk.
+fn int               bufferize_edge_summary(u64 consumer_loc, u64 source_loc,
+                                            BIndex *out);
+// Phase 3: named edge rewrite rules.  Each kind of movement op
+// becomes one rule that "fires" once per B_INDEX edge carrying
+// that op flag.  Hit counts are populated by bufferize_finalize_stores
+// and surfaced through these accessors so DUMP_BUFFERIZE can show
+// "index-reshape hits=N" alongside the realize-rule stats.
+fn u32               bufferize_index_rule_count(void);
+fn char const       *bufferize_index_rule_name(u32 i);
+fn u32               bufferize_index_rule_hits_at(u32 i);
+fn u32               bufferize_index_rule_hits(char const *name);
 
 // g2a: after realize_classify populates the boundary set, the
 // scheduler topo-sorts those boundaries by producer-to-consumer

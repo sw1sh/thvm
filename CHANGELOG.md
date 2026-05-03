@@ -6,6 +6,33 @@ dated section.
 
 ## Unreleased
 
+### Added: Phase 3 named index-* rewrite-rule counters
+
+`schedule/bufferize.c` now exposes the implicit movement-fold-into-edge
+decisions as a fixed table of named rules
+(`index-reshape`, `index-permute`, `index-expand`, `index-pad-mask`,
+`index-shrink`, `index-flip`).  After every `bufferize_build_indexes`,
+each rule's hit count is set to the number of B_INDEX edges carrying
+the matching `has_*` flag.  New accessors
+`bufferize_index_rule_count`, `bufferize_index_rule_name`,
+`bufferize_index_rule_hits_at`, and `bufferize_index_rule_hits` mirror
+the realize-rewrite stats API; `DUMP_BUFFERIZE=1` prints non-zero
+rule lines as `index_rule <name> hits=<n>`.  Rangeify still owns the
+underlying movement-to-index codegen via `RngsCtx`/`KProgOp`; the
+named rules make those decisions visible and bisectable in dumps
+without changing kernel output.
+
+### Added: Phase 2 bufferize-graph edge query API
+
+`bufferize_edge_summary(consumer_loc, source_loc, BIndex *out)` looks
+up the first B_INDEX edge for a (consumer_loc -> source_loc) pair and
+copies its chain summary into `out`.  This is the foundation hookup
+the Phase 2 plan called for: future rangeify and materialize callers
+can consult the canonical edge-local context through this API instead
+of recovering it from the heap walk.  The full rangeify integration
+(rerouting `RngsCtx` chain construction through B_INDEX) is still
+deferred and tracked in `docs/plans/bufferize.md`.
+
 ### Added: Phase 2 bufferize edge index records
 
 `schedule/bufferize.c` now emits one `B_INDEX` record per

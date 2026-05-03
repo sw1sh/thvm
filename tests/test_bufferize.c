@@ -279,6 +279,45 @@ int main(void) {
       bufferize_buffer_at(root3_idx)->buffer_id, NULL, 0);
   CHECK_EQ(n0, n);
 
+  TEST_BEGIN("bufferize/edge-summary-finds-the-right-edge");
+  // The Phase 2 hookup query: ask for the (root3 <- sh2) edge by
+  // loc and confirm we get a chain summary back.  Both buffers are
+  // realized so the lookup should succeed.
+  BIndex sum;
+  int ok = bufferize_edge_summary(term_val(root3), term_val(sh2), &sum);
+  CHECK_EQ(ok, 1);
+  if (ok) {
+    CHECK_EQ(sum.consumer_buffer_id,
+             bufferize_buffer_at(root3_idx)->buffer_id);
+    CHECK_EQ(sum.source_buffer_id,
+             bufferize_buffer_at(sh2_idx)->buffer_id);
+  }
+  // A non-existent edge returns 0 and does not write to out.
+  int ok_miss = bufferize_edge_summary(term_val(root3), 0xDEADBEEFu, &sum);
+  CHECK_EQ(ok_miss, 0);
+
+  TEST_BEGIN("bufferize/index-rule-counters-reflect-edges");
+  // Phase 3: every B_INDEX edge with has_reshape=1 should
+  // contribute one hit to the index-reshape rule.  The sh2/root3
+  // graph from above had 2 edges, both with reshape, so the
+  // counter must be at least 2.
+  u32 reshape_hits = bufferize_index_rule_hits("index-reshape");
+  CHECK(reshape_hits >= 2);
+  // No padding in the test graphs so far.
+  CHECK_EQ(bufferize_index_rule_hits("index-pad-mask"), 0);
+
+  TEST_BEGIN("bufferize/index-rule-table-is-stable");
+  // The named-rule table is a fixed list; rule names match the
+  // plan's index-* family verbatim so external tooling can grep
+  // them out of DUMP_BUFFERIZE.
+  CHECK_EQ(bufferize_index_rule_count(), 6);
+  char const *expect[6] = {
+      "index-reshape", "index-permute", "index-expand",
+      "index-pad-mask", "index-shrink", "index-flip"};
+  for (u32 i = 0; i < 6; i++) {
+    CHECK_EQ(strcmp(bufferize_index_rule_name(i), expect[i]), 0);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
