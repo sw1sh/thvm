@@ -6,6 +6,30 @@ dated section.
 
 ## Unreleased
 
+### Added: per-op chain data on B_INDEX + identity-reshape elision
+
+`schedule/bufferize.c` now records the source/output dims of each
+movement op on a `B_INDEX` chain via a new `BIndexChainOp` array
+(up to `BUFFERIZE_INDEX_CHAIN_MAX = 8` entries per edge).  The
+extraction calls `term_shape_in` for both the op term and its
+src term so chain consumers can read the canonical edge transform
+without walking the heap.  Pad widths, axis permutations, and flip
+masks are deferred (rangeify still recovers those via its existing
+KProgOp walk for now).
+
+A first real Phase 3 edge transform also lands:
+`bufferize_apply_identity_reshape` runs after
+`bufferize_build_indexes` and elides any chain entry whose op is
+`UOP_RESHAPE` with `src_dims == out_dims`, decrementing
+`movement_chain_len` and clearing `has_reshape` when no surviving
+reshape remains on the edge.  The hit count is exposed via
+`bufferize_identity_reshape_elision_hits()`.  This is the first
+time a Phase 3 rule does work beyond accounting.
+
+`tests/test_bufferize.c` adds two cases (chain ops record
+src/out dims for a {3} -> {3,1} reshape; identity reshape on a
+multi-consumer chain is elided and clears `has_reshape`); 178/178.
+
 ### Added: bufferize-graph removal rule using cost-model score
 
 `schedule/realize_classify.c` gains

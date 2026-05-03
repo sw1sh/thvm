@@ -553,6 +553,73 @@ int main(void) {
   unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
   unsetenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
 
+  TEST_BEGIN("bufferize/chain-ops-record-source-and-output-dims");
+  // Build the same shared/root reshape graph as the movement
+  // edge test and verify the chain_ops carry the source dims
+  // ({3}) and out dims ({3,1}) for the RESHAPE we descended through.
+  u32 cd31[2] = {3, 1};
+  Term cs2        = uop_binary(UOP_ADD, a, b);
+  Term cs2_lin    = uop_unary(UOP_NEG, cs2);
+  Term cs2_rsh    = uop_reshape(cs2, 2, cd31);
+  Term cs2_lin_rs = uop_reshape(cs2_lin, 2, cd31);
+  Term cs2_root   = uop_binary(UOP_ADD, cs2_lin_rs, cs2_rsh);
+  realize_classify(cs2_root);
+  u32 cs2_idx     = bufferize_find_by_loc(term_val(cs2));
+  u32 cs2_root_idx = bufferize_find_by_loc(term_val(cs2_root));
+  CHECK(cs2_idx != 0xFFFFFFFFu);
+  CHECK(cs2_root_idx != 0xFFFFFFFFu);
+  if (cs2_idx != 0xFFFFFFFFu && cs2_root_idx != 0xFFFFFFFFu) {
+    u32 cs2_id      = bufferize_buffer_at(cs2_idx)->buffer_id;
+    u32 cs2_root_id = bufferize_buffer_at(cs2_root_idx)->buffer_id;
+    int found_chain_with_op = 0;
+    for (u32 i = 0; i < bufferize_index_count(); i++) {
+      BIndex const *e = bufferize_index_at(i);
+      if (e->source_buffer_id != cs2_id) continue;
+      if (e->consumer_buffer_id != cs2_root_id) continue;
+      if (e->chain_op_count == 0) continue;
+      found_chain_with_op = 1;
+      // The chain entry must be a RESHAPE from {3} to {3,1}.
+      BIndexChainOp const *o = &e->chain_ops[0];
+      CHECK_EQ(o->op, UOP_RESHAPE);
+      CHECK_EQ(o->src_ndim, 1);
+      CHECK_EQ(o->src_dims[0], 3);
+      CHECK_EQ(o->out_ndim, 2);
+      CHECK_EQ(o->out_dims[0], 3);
+      CHECK_EQ(o->out_dims[1], 1);
+    }
+    CHECK_EQ(found_chain_with_op, 1);
+  }
+
+  TEST_BEGIN("bufferize/identity-reshape-folded-out-of-chain");
+  // RESHAPE to the same shape is an identity and must be elided.
+  // Build sh -> RESHAPE({3}) -> NEG; sh -> NEG.  The reshape edge's
+  // chain_op_count drops to 0 and has_reshape gets cleared because
+  // no other reshape op survives.
+  u32 cd3[1] = {3};
+  Term ir_s    = uop_binary(UOP_ADD, a, b);
+  Term ir_lin  = uop_unary(UOP_NEG, ir_s);
+  Term ir_rsh  = uop_reshape(ir_s, 1, cd3);  // identity reshape
+  Term ir_neg  = uop_unary(UOP_NEG, ir_rsh);
+  Term ir_root = uop_binary(UOP_ADD, ir_lin, ir_neg);
+  realize_classify(ir_root);
+  // The identity reshape elision counter should fire at least once.
+  CHECK(bufferize_identity_reshape_elision_hits() >= 1);
+  u32 ir_s_idx    = bufferize_find_by_loc(term_val(ir_s));
+  u32 ir_root_idx = bufferize_find_by_loc(term_val(ir_root));
+  if (ir_s_idx != 0xFFFFFFFFu && ir_root_idx != 0xFFFFFFFFu) {
+    u32 ir_s_id    = bufferize_buffer_at(ir_s_idx)->buffer_id;
+    u32 ir_root_id = bufferize_buffer_at(ir_root_idx)->buffer_id;
+    // No edge from ir_s to ir_root should still claim has_reshape
+    // because the only reshape on the chain was the identity that
+    // we just elided.
+    for (u32 i = 0; i < bufferize_index_count(); i++) {
+      BIndex const *e = bufferize_index_at(i);
+      if (e->source_buffer_id != ir_s_id) continue;
+      if (e->consumer_buffer_id != ir_root_id) continue;
+      CHECK_EQ(e->has_reshape, 0);
+    }
+  }
+
   TEST_BEGIN("bufferize/aggregate-totals-match-per-buffer-sums");
   // Rebuild the multi-consumer graph and verify aggregates equal
   // the sum of per-buffer fields.

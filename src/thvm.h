@@ -1309,6 +1309,23 @@ typedef struct {
 // edge-local index expression / valid mask once rangeify consumes
 // them.  has_* flags are independent: a chain can have multiple
 // movement ops of different kinds.
+//
+// Phase 2 follow-up: each chain entry now carries enough per-op
+// data (op, src_dims, out_dims) for rangeify to drive RngsCtx
+// from the bufferize edge graph.  Pad widths, axis permutations,
+// and flip masks are deferred to a later iteration; for now their
+// values live only in the originating UOp heap cells and rangeify
+// continues to recover them via its existing KProgOp walk for
+// those op kinds.
+#define BUFFERIZE_INDEX_CHAIN_MAX 8
+typedef struct {
+  u8  op;                        // UOP_RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP
+  u8  src_ndim;
+  u8  out_ndim;
+  u8  _pad;
+  u32 src_dims[MAX_DIM];
+  u32 out_dims[MAX_DIM];
+} BIndexChainOp;
 typedef struct {
   u32 source_buffer_id;       // 1-based id of producer B_BUFFERIZE
   u32 consumer_buffer_id;     // 1-based id of consumer B_BUFFERIZE
@@ -1319,6 +1336,8 @@ typedef struct {
   u8  has_expand;
   u8  has_shrink;
   u8  has_flip;
+  u8  chain_op_count;         // length of chain_ops below
+  BIndexChainOp chain_ops[BUFFERIZE_INDEX_CHAIN_MAX];
 } BIndex;
 fn void              bufferize_seed_from_realize_info(Term root);
 fn void              bufferize_finalize_stores(Term root);
@@ -1356,6 +1375,13 @@ fn u32               bufferize_index_rule_count(void);
 fn char const       *bufferize_index_rule_name(u32 i);
 fn u32               bufferize_index_rule_hits_at(u32 i);
 fn u32               bufferize_index_rule_hits(char const *name);
+// Phase 3 edge transform: number of identity reshape ops elided
+// from B_INDEX chains during the most recent realize_classify
+// pass.  Each elision drops one chain entry whose
+// src_dims == out_dims and decrements the edge's
+// movement_chain_len; future transforms can read this counter to
+// gauge how much trivial folding the bufferize graph absorbed.
+fn u32               bufferize_identity_reshape_elision_hits(void);
 
 // Phase 4: removal-candidate score.  Higher score = more attractive
 // removal (single-use, small recompute budget).  The score is a

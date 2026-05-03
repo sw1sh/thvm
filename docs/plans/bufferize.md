@@ -228,25 +228,30 @@ comes from moving boundaries to good positions, not just deleting them.
 
 These rewrite consumer edges, not producers globally.
 
-- `index-reshape` (landed - hits per B_INDEX with `has_reshape`)
-- `index-permute` (landed)
-- `index-expand` (landed)
-- `index-pad-mask` (landed)
-- `index-shrink` (landed)
-- `index-flip` (landed)
+- `index-reshape` (landed accounting + identity-reshape elision
+  is the first real edge transform; counted via
+  `bufferize_identity_reshape_elision_hits`)
+- `index-permute` (landed accounting)
+- `index-expand` (landed accounting)
+- `index-pad-mask` (landed accounting)
+- `index-shrink` (landed accounting)
+- `index-flip` (landed accounting)
 - `index-contiguous-collapse` (planned)
 - `index-load-mask-to-valid` (planned)
 
-The first six rules now exist as named accounting rules in
-`schedule/bufferize.c`: each one increments its hit count for every
-B_INDEX edge carrying the matching `has_*` flag, and
-`DUMP_BUFFERIZE=1` prints non-zero rule lines as `index_rule <name>
-hits=<n>`.  Rangeify still owns the underlying movement-to-index
-codegen via `RngsCtx`; the named rules make those decisions visible
-and bisectable in dumps without changing kernel output.  Future
-work: turn each rule into an actual edge-rewriting transform
-(folding adjacent identity reshapes, normalising padded masks, etc.)
-once the rangeify rerouting from the Phase 2 follow-up lands.
+The first six rules exist as named accounting rules; each one
+increments its hit count for every B_INDEX edge carrying the
+matching `has_*` flag, and `DUMP_BUFFERIZE=1` prints non-zero
+rule lines as `index_rule <name> hits=<n>`.  Identity-reshape
+elision is the first one that actually transforms an edge: the
+`bufferize_apply_identity_reshape` pass runs after edge construction
+and drops chain entries whose `src_dims == out_dims`, decrementing
+`movement_chain_len` and clearing `has_reshape` when no surviving
+reshape op remains on the edge.  Rangeify still owns the
+underlying movement-to-index codegen via `RngsCtx` for non-identity
+chains; future transforms will collapse adjacent permutes, fold
+expand-of-broadcast, and lift PAD masks once the per-op pad/perm
+data is captured on `BIndexChainOp`.
 
 `PAD` must become an index transform plus valid mask, not a separate
 buffer unless a later legality rule proves materialization is cheaper.
@@ -437,10 +442,13 @@ Tasks:
 - ~~expose an edge query API (`bufferize_edge_summary`) so rangeify
   and materialize can consult B_INDEX directly~~;
 - ~~add focused tests for shared producer with multiple movement views~~;
+- ~~capture per-op source/output dims on each chain entry~~ (RESHAPE
+  / EXPAND / SHRINK shapes recorded; pad widths, axis perms, and
+  flip masks remain heap-only for now);
 - reroute `RngsCtx` chain construction in `schedule/rangeify.c`
-  through `bufferize_edge_summary` so the canonical chain summary
-  drives codegen instead of the heap-walk-derived `KProgOp` chain
-  (pending);
+  through `bufferize_edge_summary` so the canonical chain drives
+  codegen instead of the heap-walk-derived `KProgOp` chain
+  (pending - depends on the missing pad/perm/flip data above);
 - preserve valid masks through `S_IWHERE` from `has_pad` rather than
   rederiving them inside `rngs_ctx_pad` (pending).
 

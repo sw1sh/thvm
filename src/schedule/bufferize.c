@@ -128,6 +128,33 @@ static void bufferize_extend_chain(BIndex *chain, u8 op) {
   if (op == UOP_FLIP)    chain->has_flip    = 1;
 }
 
+// Record one movement-op into the chain_ops array, capturing the
+// per-op source and output shapes via term_shape_in so rangeify
+// callers can read the canonical edge transform without walking
+// the heap themselves.  Bails silently if the chain is already
+// full (BUFFERIZE_INDEX_CHAIN_MAX) so deeply-stacked movement
+// chains keep working at the cost of losing trailing detail.
+static void bufferize_record_chain_op(BIndex *chain, Term op_term, u8 op,
+                                      Term src_term) {
+  if (!bufferize_op_is_movement(op)) return;
+  if (chain->chain_op_count >= BUFFERIZE_INDEX_CHAIN_MAX) return;
+  BIndexChainOp *slot = &chain->chain_ops[chain->chain_op_count++];
+  slot->op       = op;
+  slot->src_ndim = 0;
+  slot->out_ndim = 0;
+  slot->_pad     = 0;
+  Shape s = {0};
+  if (term_shape_in(op_term, 0, &s) && s.ndim <= MAX_DIM) {
+    slot->out_ndim = (u8)s.ndim;
+    for (u32 d = 0; d < s.ndim; d++) slot->out_dims[d] = s.dims[d];
+  }
+  Shape ss = {0};
+  if (term_shape_in(src_term, 0, &ss) && ss.ndim <= MAX_DIM) {
+    slot->src_ndim = (u8)ss.ndim;
+    for (u32 d = 0; d < ss.ndim; d++) slot->src_dims[d] = ss.dims[d];
+  }
+}
+
 static void bufferize_emit_edge(u32 source_id, u32 consumer_id,
                                 BIndex const *chain) {
   if (BUFFERIZE_INDEXES_LEN >= BUFFERIZE_INDEX_CAP) return;
@@ -163,7 +190,12 @@ static void bufferize_walk_edge(u64 loc, u32 consumer_id,
       continue;
     }
     BIndex chain_out = *chain_in;
-    bufferize_extend_chain(&chain_out, term_ext(child));
+    u8 cop = term_ext(child);
+    bufferize_extend_chain(&chain_out, cop);
+    if (bufferize_op_is_movement(cop)) {
+      Term src_term = term_resolve(heap_read(cloc + 0));
+      bufferize_record_chain_op(&chain_out, child, cop, src_term);
+    }
     bufferize_walk_edge(cloc, consumer_id, &chain_out, depth + 1);
   }
 }
@@ -176,6 +208,50 @@ static void bufferize_build_indexes(void) {
     BIndex chain = {0};
     bufferize_walk_edge(b->loc, b->buffer_id, &chain, 0);
   }
+}
+
+// Phase 3 edge transform: detect identity reshapes
+// (src_ndim == out_ndim and src_dims == out_dims) in each chain
+// and elide them.  Updates movement_chain_len and has_reshape per
+// edge so downstream cost-model and index-rule callers see only
+// the meaningful transforms.  Returns the number of identities
+// elided across all edges.
+static u32 bufferize_apply_identity_reshape(void) {
+  u32 hits = 0;
+  for (u32 i = 0; i < BUFFERIZE_INDEXES_LEN; i++) {
+    BIndex *e = &BUFFERIZE_INDEXES[i];
+    u32 keep = 0;
+    int still_has_reshape = 0;
+    for (u32 j = 0; j < e->chain_op_count; j++) {
+      BIndexChainOp const *o = &e->chain_ops[j];
+      int identity = 0;
+      if (o->op == UOP_RESHAPE
+          && o->src_ndim == o->out_ndim
+          && o->src_ndim != 0) {
+        identity = 1;
+        for (u32 d = 0; d < o->src_ndim; d++) {
+          if (o->src_dims[d] != o->out_dims[d]) { identity = 0; break; }
+        }
+      }
+      if (identity) {
+        hits++;
+        if (e->movement_chain_len > 0) e->movement_chain_len--;
+        continue;
+      }
+      if (o->op == UOP_RESHAPE) still_has_reshape = 1;
+      e->chain_ops[keep++] = *o;
+    }
+    e->chain_op_count = (u8)keep;
+    if (!still_has_reshape) e->has_reshape = 0;
+  }
+  return hits;
+}
+
+// Counter for identity-reshape elisions, surfaced through the
+// existing index_rule API so dumps can show a single "rule" line.
+static u32 BUFFERIZE_IDENTITY_RESHAPE_HITS = 0;
+fn u32 bufferize_identity_reshape_elision_hits(void) {
+  return BUFFERIZE_IDENTITY_RESHAPE_HITS;
 }
 
 // Phase 4: count UOps in the producer subtree of `loc` for use as a
@@ -466,6 +542,9 @@ fn void bufferize_finalize_stores(Term root) {
   // and Phase 5 reduce rules and the data rangeify will eventually
   // consume in Phase 2's rangeify follow-up.
   bufferize_build_indexes();
+  // Phase 3 transform: collapse identity reshapes before stats so
+  // index-reshape hit counts reflect only meaningful folds.
+  BUFFERIZE_IDENTITY_RESHAPE_HITS = bufferize_apply_identity_reshape();
   bufferize_update_index_rule_stats();
   bufferize_compute_costs();
   bufferize_compute_lifetimes();
