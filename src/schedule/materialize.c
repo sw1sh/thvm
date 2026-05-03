@@ -381,14 +381,69 @@ fn int kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out) {
   Term src_uop = ke->source_uop;
   if (term_tag(src_uop) != TAG_UOP) return 0;
   u64 consumer_loc = term_val(src_uop);
-  // Get source loc via the bufferize buffer record.
-  BBufferize const *src_buf = NULL;
-  for (u32 i = 0; i < bufferize_buffer_count(); i++) {
-    BBufferize const *b = bufferize_buffer_at(i);
-    if (b != NULL && b->buffer_id == src_id) { src_buf = b; break; }
+  // Get source loc via the bufferize buffer record.  Buffer ids
+  // are 1-based contiguous indices into the bufferize table, so
+  // bufferize_buffer_at(src_id - 1) maps directly.
+  BBufferize const *src_buf = bufferize_buffer_at(src_id - 1);
+  if (src_buf == NULL || src_buf->buffer_id != src_id) {
+    // Fallback scan if the id table reordered (defensive).
+    src_buf = NULL;
+    for (u32 i = 0; i < bufferize_buffer_count(); i++) {
+      BBufferize const *b = bufferize_buffer_at(i);
+      if (b != NULL && b->buffer_id == src_id) { src_buf = b; break; }
+    }
+    if (src_buf == NULL) return 0;
   }
-  if (src_buf == NULL) return 0;
   return bufferize_edge_summary(consumer_loc, src_buf->loc, out);
+}
+
+// Phase 2 follow-up diagnostic: print the bufferize edge summary
+// for every input slot of every emitted kernel.  Gated by
+// DUMP_BUFFERIZE_KERNEL_EDGES=1 so it stays silent in normal use.
+// Useful for verifying the input_source_buffer_ids wiring against
+// the bufferize edge table during ground-truth regression work.
+static int materialize_dump_kernel_edges_enabled(void) {
+  char const *e = getenv("DUMP_BUFFERIZE_KERNEL_EDGES");
+  return e != NULL && e[0] == '1';
+}
+
+static void materialize_dump_kernel_edges(u32 kernels_start) {
+  if (!materialize_dump_kernel_edges_enabled()) return;
+  for (u32 kid = kernels_start; kid < KERNELS_NEXT; kid++) {
+    KernelEntry const *ke = &KERNELS[kid];
+    fprintf(stderr,
+            "kernel_edges kid=%u inputs=%u source_uop=%llu\n",
+            (unsigned)kid,
+            (unsigned)ke->n_inputs,
+            (unsigned long long)(term_tag(ke->source_uop) == TAG_UOP
+                                   ? term_val(ke->source_uop) : 0));
+    for (u32 slot = 0; slot < ke->n_inputs; slot++) {
+      u32 src_id = kernel_entry_input_source_buffer_id(kid, slot);
+      if (src_id == 0) {
+        fprintf(stderr, "  slot=%u source=leaf tid=%u\n",
+                (unsigned)slot, (unsigned)ke->input_tids[slot]);
+        continue;
+      }
+      BIndex edge;
+      if (!kernel_entry_input_edge_summary(kid, slot, &edge)) {
+        fprintf(stderr, "  slot=%u source_buffer=%u (no edge summary)\n",
+                (unsigned)slot, (unsigned)src_id);
+        continue;
+      }
+      fprintf(stderr,
+              "  slot=%u source_buffer=%u chain_len=%u ops=%u%s%s%s%s%s%s\n",
+              (unsigned)slot,
+              (unsigned)src_id,
+              (unsigned)edge.movement_chain_len,
+              (unsigned)edge.chain_op_count,
+              edge.has_reshape ? " reshape" : "",
+              edge.has_permute ? " permute" : "",
+              edge.has_expand  ? " expand"  : "",
+              edge.has_pad     ? " pad"     : "",
+              edge.has_shrink  ? " shrink"  : "",
+              edge.has_flip    ? " flip"    : "");
+    }
+  }
 }
 
 // === view-only path for movement ops (g2c1) ===
@@ -1702,5 +1757,9 @@ fn Term thvm_materialize(Term term) {
   // from them (the chain rule's freshly-emitted UOPs may still
   // reference those tids).
   mem_plan_drain_freelist();
+  // Phase 2 follow-up diagnostic: print per-kernel input edge data
+  // for every kernel emitted in this pass.  No-op unless
+  // DUMP_BUFFERIZE_KERNEL_EDGES=1.
+  materialize_dump_kernel_edges(kernels_at_start);
   return sink_kernel != 0 ? sink_kernel : term;
 }

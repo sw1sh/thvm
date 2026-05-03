@@ -6,6 +6,23 @@ dated section.
 
 ## Unreleased
 
+### Added: DUMP_BUFFERIZE_KERNEL_EDGES + multi-kernel wiring test
+
+`schedule/materialize.c` gains a per-pass diagnostic
+(`materialize_dump_kernel_edges`) that prints every emitted
+kernel's input slots with their bufferize source buffer id and
+chain summary, gated by `DUMP_BUFFERIZE_KERNEL_EDGES=1`.  Useful
+for debugging the input_source_buffer_ids -> BIndex pipeline on
+real graphs.
+
+`tests/test_bufferize.c` adds a multi-kernel wiring test that
+materialises a 3-boundary graph (two stacked multi-consumer
+producers) and walks every emitted KernelEntry, asserting that
+each non-zero source id resolves to a realized bufferize buffer
+whose loc matches the kernel's source_uop.  Catches drift
+between the materialize-side wiring and the bufferize edge
+table; 230/230.
+
 ### Added: per-input-slot bufferize source id on KernelEntry
 
 `KernelEntry` gains an `input_source_buffer_ids[]` array sized

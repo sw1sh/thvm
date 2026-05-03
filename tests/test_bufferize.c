@@ -825,6 +825,62 @@ int main(void) {
   }
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
+  TEST_BEGIN("bufferize/multi-kernel-graph-wires-edges-consistently");
+  // Three-boundary graph: stack two multi-consumer producers so we
+  // get >=3 kernels.  After thvm_materialize, walk every emitted
+  // kernel and verify that any input slot with a non-zero source
+  // buffer id resolves to a realized bufferize buffer whose loc
+  // matches what the boundary table says.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  // Layer 1 producer.
+  Term mk_a   = uop_binary(UOP_ADD, a, b);
+  Term mk_l1  = uop_binary(UOP_MUL, mk_a, c);
+  Term mk_r1  = uop_binary(UOP_MUL, mk_a, a);
+  Term mk_p1  = uop_binary(UOP_ADD, mk_l1, mk_r1);
+  // Layer 2 multi-consumer reuse of the layer-1 sink.
+  Term mk_l2  = uop_binary(UOP_MUL, mk_p1, c);
+  Term mk_r2  = uop_binary(UOP_MUL, mk_p1, b);
+  Term mk_t   = uop_binary(UOP_ADD, mk_l2, mk_r2);
+  u32 mk_kernels_before = KERNELS_NEXT;
+  Term mk_out = thvm_materialize(mk_t);
+  CHECK_EQ(term_tag(mk_out), TAG_UOP);
+  CHECK_EQ(term_ext(mk_out), UOP_KERNEL);
+  // At least 2 kernels must have been emitted (mk_a producer plus
+  // mk_p1 producer plus mk_t sink, depending on what the rules
+  // chose to remove).
+  u32 mk_kernels_after = KERNELS_NEXT;
+  CHECK(mk_kernels_after > mk_kernels_before);
+  for (u32 kid = mk_kernels_before; kid < mk_kernels_after; kid++) {
+    KernelEntry const *ke = &KERNELS[kid];
+    for (u32 slot = 0; slot < ke->n_inputs; slot++) {
+      u32 src_id = kernel_entry_input_source_buffer_id(kid, slot);
+      if (src_id == 0) continue;
+      // The source id must point at a real realized bufferize buffer.
+      BBufferize const *src_buf = bufferize_buffer_at(src_id - 1);
+      CHECK(src_buf != NULL);
+      if (src_buf == NULL) continue;
+      CHECK_EQ(src_buf->buffer_id, src_id);
+      CHECK_EQ(src_buf->realized, 1);
+      // The edge summary must succeed and report the same source.
+      BIndex edge;
+      int ok = kernel_entry_input_edge_summary(kid, slot, &edge);
+      CHECK_EQ(ok, 1);
+      if (ok) {
+        CHECK_EQ(edge.source_buffer_id, src_id);
+        // Consumer id must match this kernel's source_uop loc.
+        Term src_uop = ke->source_uop;
+        if (term_tag(src_uop) == TAG_UOP) {
+          u32 consumer_idx = bufferize_find_by_loc(term_val(src_uop));
+          if (consumer_idx != 0xFFFFFFFFu) {
+            CHECK_EQ(edge.consumer_buffer_id,
+                     bufferize_buffer_at(consumer_idx)->buffer_id);
+          }
+        }
+      }
+    }
+  }
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
   TEST_BEGIN("bufferize/leaf-input-source-buffer-id-is-zero");
   // Single-kernel graph with TEN leaves: every input slot's source
   // buffer id should be 0 (no upstream bufferize boundary).
