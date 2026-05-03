@@ -178,10 +178,13 @@ static u64 realize_unique_uop_parent(u64 child_loc) {
 
 // Walk a REDUCE's consumer chain and return 1 iff every hop is
 // scalar-preserving until we hit an EXPAND (the broadcast back to
-// vector shape).  The chain pattern this matches is exactly:
-//     REDUCE -> {RECIP|NEG|SQRT|EXP2|LOG2|...} -> EXPAND
-// which is what TSoftmax + the "normalize by sum" idiom produce.
-// CONST + binary ops where both srcs are scalars also pass.
+// vector shape).  The chain pattern this matches is the
+// TSoftmax / "normalize by sum" idiom plus the BatchNorm
+// mean -> (... - mean) -> EXPAND idiom:
+//     REDUCE -> {NEG|RECIP|SQRT|EXP2|LOG2}? -> {ADD|MUL}*(CONST sib) ->
+//     EXPAND
+// `binary with CONST sibling` keeps the post-reduce shape the same,
+// so propagating through it is still scalar-preserving.
 static int realize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
   u64 cur = reduce_loc;
   for (u32 hops = 0; hops < 8; hops++) {     // bounded -- pathological chain bails
@@ -196,7 +199,17 @@ static int realize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
       cur = parent;
       continue;
     }
-    return 0;     // any other op (binary, movement-other, REDUCE) breaks the pattern
+    if (pop == UOP_ADD || pop == UOP_MUL) {
+      Term ca = term_resolve(heap_read(parent + 0));
+      Term cb = term_resolve(heap_read(parent + 1));
+      u8 has_const = 0;
+      if (term_tag(ca) == TAG_UOP && term_ext(ca) == UOP_CONST) has_const = 1;
+      if (term_tag(cb) == TAG_UOP && term_ext(cb) == UOP_CONST) has_const = 1;
+      if (!has_const) return 0;
+      cur = parent;
+      continue;
+    }
+    return 0;     // any other op (movement-other, REDUCE) breaks the pattern
   }
   return 0;
 }
@@ -1114,6 +1127,13 @@ static int realize_reduce_fuse_multi_enabled(void) {
   return e == NULL ? 1 : (e[0] != '0');
 }
 
+// realize_unique_uop_parent returns the SOLE parent of `loc` or 0
+// if zero/multiple.  realize_reduce_consumer_is_broadcast_chain
+// already requires the chain to have a unique parent at every hop,
+// so a REDUCE with consumer_count > 1 fails the chain check
+// independently and the consumer_count == 1 fast-reject is just
+// an optimisation.  Without it, multi-consumer REDUCEs whose
+// branches all bottom out at the same EXPAND would be considered.
 static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
   (void)root;
   if (!realize_reduce_fuse_multi_enabled() && realize_reduce_count() != 1) {
@@ -1123,7 +1143,6 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->op != UOP_REDUCE)    continue;
-    if (info->consumer_count != 1) continue;
     if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
     if (info->realized) hits++;
     realize_unmark(info, REALIZE_REASON_INLINE);
