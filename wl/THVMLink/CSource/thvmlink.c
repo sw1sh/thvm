@@ -512,6 +512,53 @@ EXTERN_C DLLEXPORT int thvm_wl_interact(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// === step session ===
+// Persistent across calls.  TStepBegin / TStep / TStepFresh /
+// TStepEnd let the WL stepper amortise the heap scan over many
+// fires.  thvm_wl_step_begin runs one full enumerate to seed the
+// initial redex set; thvm_wl_step_fire does parent-slot patching
+// via the inverse index in O(uses-of-redex); thvm_wl_step_fresh
+// returns redex-status flips since the previous call.
+
+EXTERN_C DLLEXPORT int thvm_wl_step_begin(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  MTensor t = MArgument_getMTensor(args[0]);
+  mint n    = libData->MTensor_getFlattenedLength(t);
+  mint *src = libData->MTensor_getIntegerData(t);
+  Term roots[64];
+  u32  n_roots = (n > 64) ? 64 : (u32)n;
+  for (u32 i = 0; i < n_roots; i++) roots[i] = (Term)src[i];
+  u32 seed = redex_step_attach(roots, n_roots);
+  MArgument_setInteger(res, (mint)seed);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_step_fire(WolframLibraryData libData, mint argc,
+                                         MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term redex = (Term)MArgument_getInteger(args[0]);
+  Term r = redex_step_fire(redex);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_step_fresh(WolframLibraryData libData, mint argc,
+                                          MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  REDEX_BUF_N = redex_step_drain_fresh(REDEX_BUF, REDEX_BUF_CAP);
+  MArgument_setInteger(res, (mint)REDEX_BUF_N);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_step_end(WolframLibraryData libData, mint argc,
+                                        MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  redex_step_detach();
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
 // === tensors ===
 // TTensor constructors, inspection, refcount hooks.  Shapes and data
 // arrive as Integer / Real arrays; we pack into Shape / dtype bits

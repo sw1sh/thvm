@@ -2530,6 +2530,19 @@ fn u32  lam_shape_count(void);
 fn void redex_worklist_attach(Term *buf, u32 *n_ptr, u32 cap);
 fn void redex_worklist_detach(void);
 
+// Step session: persistent across calls so the WL stepper doesn't
+// re-scan HEAP_NEXT on every TInteract.  attach() walks roots+heap
+// once, builds a Term -> heap-loc inverse index plus a parent map,
+// and returns the initial redex count.  step_fire() fires one redex
+// using the inverse index for parent-slot patching.  drain_fresh()
+// returns redex-status flips since the previous drain (post \ pre).
+// detach() releases all session memory and restores legacy linear-
+// scan paths.
+fn u32  redex_step_attach(Term *roots, u32 n_roots);
+fn Term redex_step_fire(Term redex);
+fn u32  redex_step_drain_fresh(Term *out, u32 cap);
+fn void redex_step_detach(void);
+
 // === runtime lifecycle ===
 void thvm_init(void);
 void thvm_free(void);

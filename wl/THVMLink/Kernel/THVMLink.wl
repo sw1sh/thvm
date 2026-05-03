@@ -298,6 +298,10 @@ $stackGetFn     := $stackGetFn     = load["thvm_wl_stack_get",      {Integer},  
 $redexSnapFn    := $redexSnapFn    = load["thvm_wl_redex_snapshot", {{Integer, 1}},     Integer];
 $redexGetFn     := $redexGetFn     = load["thvm_wl_redex_get",      {Integer},          Integer];
 $interactFn     := $interactFn     = load["thvm_wl_interact",       {Integer},          Integer];
+$stepBeginFn    := $stepBeginFn    = load["thvm_wl_step_begin",     {{Integer, 1}},     Integer];
+$stepFireFn     := $stepFireFn     = load["thvm_wl_step_fire",      {Integer},          Integer];
+$stepFreshFn    := $stepFreshFn    = load["thvm_wl_step_fresh",     {},                 Integer];
+$stepEndFn      := $stepEndFn      = load["thvm_wl_step_end",       {},                 Integer];
 $itrsFn         := $itrsFn         = load["thvm_wl_itrs",           {},                 Integer];
 $hotCountersFn      := $hotCountersFn      = load["thvm_wl_hot_counters",       {}, {Integer, 1}];
 $hotCountersResetFn := $hotCountersResetFn = load["thvm_wl_hot_counters_reset", {}, Integer];
@@ -600,24 +604,53 @@ TRedexes[roots___] := (ensureInit[];
    on success, or Failure["NotARedex", ...] if `redex` isn't
    reducible right now.  Pass `root` (the caller's outer term) so
    the "fresh" diff sees status flips on cells reachable from root
-   but not stored anywhere in the heap. *)
+   but not stored anywhere in the heap.
+
+   Internally drives the C-side step session: each call attaches
+   (one heap walk to build the inverse-index + parent map), fires
+   in O(uses-of-redex), drains the fresh set, then detaches.  Wrap
+   in TStepBegin / TStepEnd to amortise the attach over many fires. *)
+$stepSessionActive = False;
+
 TInteract[redex_TTerm, roots___] := withTermCtx[redex, Module[{
-    redexRaw, rootRaws, pre, result, post, fresh
+    redexRaw, rootRaws, result, freshN, owned
 },
     ensureInit[];
     redexRaw = ttermRaw[redex];
     rootRaws = ttermRaw /@ Flatten[{roots}];
-    pre = snapshotRedexes[Join[{redexRaw}, rootRaws]];
-    result = $interactFn[redexRaw];
+    owned = !TrueQ[$stepSessionActive];
+    If[ owned, $stepBeginFn[Join[{redexRaw}, rootRaws]] ];
+    result = $stepFireFn[redexRaw];
     If[ result === 0,
+        If[ owned, $stepEndFn[] ];
         Return @ Failure["NotARedex",
             <| "Message" -> "TInteract: cell is not a redex right now",
                "redex"   -> redex |>]
     ];
-    post  = snapshotRedexes[Join[{result}, rootRaws]];
-    fresh = TTerm /@ Complement[post, pre];
-    <| "result" -> TTerm[result], "fresh" -> fresh |>
+    freshN = $stepFreshFn[];
+    Module[{ res = <| "result" -> TTerm[result],
+                      "fresh"  -> TTerm /@ Table[$redexGetFn[i], {i, 0, freshN - 1}] |> },
+        If[ owned, $stepEndFn[] ];
+        res
+    ]
 ]]
+
+(* TStepBegin[roots] / TStepEnd[] -- amortise the attach over many
+   TInteract calls.  Recommended for long stepping sessions where
+   HEAP_NEXT is large; without these wrappers, every TInteract pays
+   one attach (a single linear heap walk to build the inverse
+   index).  Within a session, each TInteract is O(local). *)
+TStepBegin[roots___] := (ensureInit[];
+    $stepBeginFn[ttermRaw /@ Flatten[{roots}]];
+    $stepSessionActive = True;
+)
+
+TStepEnd[] := (
+    If[ TrueQ[$stepSessionActive],
+        $stepEndFn[];
+        $stepSessionActive = False;
+    ]
+)
 
 (* TReduce reduces `t` to WNF in-place and returns the original root.
    Pairs with THeapGraph[t] / TTermTree[t] when you want the

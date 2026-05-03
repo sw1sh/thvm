@@ -22,7 +22,21 @@
 //                        "fresh" return.
 //
 // Cost is O(HEAP_NEXT) per scan -- linear over the live heap.  For
-// the inspector workflow this is fine.
+// the legacy direct-fire path this is fine.
+//
+// === step session (incremental WL stepper) =======================
+// The WL stepper opens a `redex_step_*` session that holds a
+// persistent inverse index (Term -> heap-locs) plus a per-loc
+// parent map.  Inside a session:
+//   * heap_replace patches via the inverse index in O(uses-of-old)
+//     instead of O(HEAP_NEXT).
+//   * Parent-promotion redexes (a parent slot was patched, the
+//     parent term's redex status flipped) are surfaced via the
+//     parent map without re-enumerating the heap.
+//   * The "fresh" diff TInteract returns is computed locally as
+//     the worklist contents minus the pre-set, dropping the two
+//     full enumerates per step.
+// Sessionless callers (nf, direct redex_fire) keep the linear scan.
 
 fn u8 is_redex(Term t) {
   HOT_IS_REDEX_CALLS++;
@@ -99,13 +113,222 @@ fn u8 is_redex(Term t) {
   }
 }
 
+// How many heap cells does a compound term own?  Atoms and known-
+// non-compound tags return 0 (no recursion).  Mirrors the layout
+// arities used by alo/realize.c and book/from_dynamic.c, but
+// includes UOP variants.
+static u32 term_arity(Term t) {
+  u8 tag = term_tag(t);
+  switch (tag) {
+    case TAG_LAM: return 1;
+    case TAG_APP: return 2;
+    case TAG_SUP: return 2;
+    case TAG_DUP: return 1;
+    case TAG_OP2: return 2;
+    case TAG_MAT: return 2;
+    case TAG_ALO: return 2;
+    case TAG_DP0: case TAG_DP1: return 1;
+    case TAG_UOP: {
+      u8 op = term_ext(t);
+      if (op == UOP_KERNEL) return 2;
+      if (op == UOP_ASSIGN) return 2;
+      return uop_arity(op);
+    }
+    default: return 0;
+  }
+}
+
+// Step session: persistent across calls so the WL stepper doesn't
+// pay an O(HEAP_NEXT) scan on every TInteract.  The session owns
+// three side tables, all indexed by loc 0..STEP_SIDE_CAP:
+//
+//   STEP_USE_NEXT[L]  = next loc holding the same Term as L, or
+//                       STEP_NIL.  Buckets keyed by Term in
+//                       STEP_USE_HEAD give the first loc.
+//   STEP_PARENT[L]    = the Term whose val owns slot L (so we can
+//                       check is_redex on it after heap_replace
+//                       patches L).  0 if no parent recorded.
+//   STEP_PRE[T]       = open-addressed hash set of "redexes the
+//                       caller already saw" -- the pre-fire active
+//                       set.  Drained-fresh = pushed - pre.
+//
+// All built once on attach by walking roots+heap; heap_replace
+// (when a session is attached) does O(uses-of-old) work via the
+// use-list and pushes parent terms whose redex-status flips.
+//
+// Sessionless callers (legacy nf, direct TInteract without
+// step_attach) keep the linear scan -- zero overhead when off.
+
+#define STEP_NIL ((u64)-1)
+
+static u8     STEP_ACTIVE        = 0;
+static Term  *STEP_USE_HEAD      = 0;   // hash-bucket head loc per Term, STEP_NIL = empty
+static Term  *STEP_USE_KEY       = 0;   // bucket keys (Term values)
+static u32    STEP_USE_HEAD_CAP  = 0;   // power of two
+static u64   *STEP_USE_NEXT      = 0;
+static Term  *STEP_PARENT        = 0;
+static u64    STEP_SIDE_CAP      = 0;
+static Term  *STEP_PRE           = 0;
+static u32    STEP_PRE_CAP       = 0;
+static Term  *STEP_FRESH_BUF     = 0;
+static u32    STEP_FRESH_N       = 0;
+static u32    STEP_FRESH_CAP     = 0;
+static Term  *STEP_FRESH_SEEN    = 0;   // dedup hash for pushes this session
+
+static inline u32 step_hash(Term t, u32 cap_mask) {
+  u64 h = (u64)t;
+  h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+  h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+  h ^= h >> 33;
+  return (u32)h & cap_mask;
+}
+
+// Lookup-or-insert in the use-head table.  Returns the slot index
+// (caller reads STEP_USE_HEAD[i] for the current head, writes back).
+static u32 step_use_head_slot(Term t) {
+  u32 mask = STEP_USE_HEAD_CAP - 1;
+  u32 h = step_hash(t, mask);
+  for (u32 probe = 0; probe < STEP_USE_HEAD_CAP; probe++) {
+    u32 i = (h + probe) & mask;
+    if (STEP_USE_KEY[i] == 0) {
+      STEP_USE_KEY[i]  = t;
+      STEP_USE_HEAD[i] = STEP_NIL;
+      return i;
+    }
+    if (STEP_USE_KEY[i] == t) return i;
+  }
+  return 0;   // table saturated -- caller falls back to linear scan
+}
+
+// Pre-set membership.
+static u8 step_pre_contains(Term t) {
+  if (STEP_PRE_CAP == 0) return 0;
+  u32 mask = STEP_PRE_CAP - 1;
+  u32 h = step_hash(t, mask);
+  for (u32 probe = 0; probe < STEP_PRE_CAP; probe++) {
+    u32 i = (h + probe) & mask;
+    if (STEP_PRE[i] == 0) return 0;
+    if (STEP_PRE[i] == t) return 1;
+  }
+  return 0;
+}
+
+static void step_pre_insert(Term t) {
+  if (STEP_PRE_CAP == 0) return;
+  u32 mask = STEP_PRE_CAP - 1;
+  u32 h = step_hash(t, mask);
+  for (u32 probe = 0; probe < STEP_PRE_CAP; probe++) {
+    u32 i = (h + probe) & mask;
+    if (STEP_PRE[i] == 0) { STEP_PRE[i] = t; return; }
+    if (STEP_PRE[i] == t) return;
+  }
+}
+
+// Push to fresh worklist with dedup.  Filters out terms already in
+// the pre-set so callers see only the symmetric diff.
+static void step_fresh_push(Term t) {
+  if (!STEP_ACTIVE || t == 0) return;
+  if (!is_redex(t)) return;
+  if (step_pre_contains(t)) return;
+  u32 mask = STEP_FRESH_CAP - 1;
+  u32 h = step_hash(t, mask);
+  for (u32 probe = 0; probe < STEP_FRESH_CAP; probe++) {
+    u32 i = (h + probe) & mask;
+    if (STEP_FRESH_SEEN[i] == 0) {
+      STEP_FRESH_SEEN[i] = t;
+      if (STEP_FRESH_N < STEP_FRESH_CAP) STEP_FRESH_BUF[STEP_FRESH_N++] = t;
+      return;
+    }
+    if (STEP_FRESH_SEEN[i] == t) return;
+  }
+}
+
+// Grow the per-loc side arrays so STEP_PARENT[loc] / STEP_USE_NEXT[loc]
+// are valid for `loc < new_cap`.
+static void step_side_grow(u64 new_cap) {
+  if (new_cap <= STEP_SIDE_CAP) return;
+  // Round up to a power of two and double from current to amortise.
+  u64 cap = STEP_SIDE_CAP ? STEP_SIDE_CAP * 2 : 4096;
+  while (cap < new_cap) cap *= 2;
+  STEP_USE_NEXT = (u64 *) realloc(STEP_USE_NEXT, cap * sizeof(u64));
+  STEP_PARENT   = (Term *)realloc(STEP_PARENT,   cap * sizeof(Term));
+  for (u64 i = STEP_SIDE_CAP; i < cap; i++) {
+    STEP_USE_NEXT[i] = STEP_NIL;
+    STEP_PARENT[i]   = 0;
+  }
+  STEP_SIDE_CAP = cap;
+}
+
+// Record that cell at loc holds Term t.  Inserts into the use-list
+// at the head (LIFO).  Idempotent within a session: callers that
+// re-insert a (loc, t) pair link an extra node, which is harmless --
+// heap_replace will overwrite the cell on the first match and the
+// stale chain entry becomes a no-op.
+static void step_use_insert(u64 loc, Term t) {
+  if (!STEP_ACTIVE || t == 0) return;
+  if (loc >= STEP_SIDE_CAP) step_side_grow(loc + 1);
+  u32 i = step_use_head_slot(t);
+  STEP_USE_NEXT[loc] = STEP_USE_HEAD[i];
+  STEP_USE_HEAD[i]   = (Term)loc;
+}
+
+static inline void step_parent_set(u64 loc, Term parent) {
+  if (!STEP_ACTIVE) return;
+  if (loc >= STEP_SIDE_CAP) step_side_grow(loc + 1);
+  STEP_PARENT[loc] = parent;
+}
+
 // Patch every heap cell that still holds `old` to hold `new`.  The
 // IC interactions logically substitute the redex's incoming wire
 // with the result; in heap terms that means any parent slot whose
 // content equals the redex term gets replaced by the result.
+//
+// Two paths:
+//   * Step session attached -> O(uses-of-old) via the use-list.
+//     Each patched cell's parent term is checked for redex
+//     promotion and pushed to the fresh worklist.
+//   * No session -> linear scan over HEAP_NEXT (legacy semantics
+//     the inspector + nf rely on for parent-slot patching when
+//     no inverse index exists).
 static void heap_replace(Term old, Term new_) {
   if (old == new_) return;
   HOT_HEAP_REPLACE_CALLS++;
+  if (STEP_ACTIVE) {
+    u32 mask = STEP_USE_HEAD_CAP - 1;
+    u32 h = step_hash(old, mask);
+    u32 slot = (u32)-1;
+    for (u32 probe = 0; probe < STEP_USE_HEAD_CAP; probe++) {
+      u32 i = (h + probe) & mask;
+      if (STEP_USE_KEY[i] == 0) break;
+      if (STEP_USE_KEY[i] == old) { slot = i; break; }
+    }
+    if (slot != (u32)-1) {
+      u64 cur = STEP_USE_HEAD[slot];
+      // Walk + patch + chain transfer onto `new_`'s bucket.
+      u32 new_slot = step_use_head_slot(new_);
+      while (cur != STEP_NIL) {
+        u64 next = STEP_USE_NEXT[cur];
+        if (heap_read(cur) == old) {
+          heap_set(cur, new_);
+          // Transfer this loc onto new_'s use-list so future
+          // heap_replace(new_, ...) calls find it.
+          STEP_USE_NEXT[cur] = STEP_USE_HEAD[new_slot];
+          STEP_USE_HEAD[new_slot] = (Term)cur;
+          // Parent-promotion: if the owning term is now a redex,
+          // surface it.
+          if (cur < STEP_SIDE_CAP) {
+            Term parent = STEP_PARENT[cur];
+            if (parent != 0) step_fresh_push(parent);
+          }
+        }
+        // else: stale chain entry from a prior swap; skip.
+        HOT_HEAP_REPLACE_CELLS++;
+        cur = next;
+      }
+      STEP_USE_HEAD[slot] = STEP_NIL;
+    }
+    return;
+  }
   HOT_HEAP_REPLACE_CELLS += HEAP_NEXT;
   for (u64 i = 0; i < HEAP_NEXT; i++) {
     if (heap_read(i) == old) heap_set(i, new_);
@@ -381,6 +604,39 @@ fn Term redex_fire(Term redex) {
       nf_work_push(heap_read(i));
     }
   }
+  // Step session: index newly allocated cells (so future
+  // heap_replace finds them) and surface any locally-fresh redex
+  // to the fresh-worklist.  Parent recovery for new cells: for
+  // every term `t` written into [hb, HEAP_NEXT), find which
+  // owning Term in [hb, HEAP_NEXT) has val pointing here.  We
+  // do this by sweeping the new cells once and recording each
+  // arity-bearing term's child slots as parented by it.
+  if (STEP_ACTIVE) {
+    if (result != 0) step_fresh_push(result);
+    for (u64 i = hb_at_fire; i < HEAP_NEXT; i++) {
+      step_use_insert(i, heap_read(i));
+    }
+    // Second pass: any compound term that lives in [hb, HEAP_NEXT)
+    // owns a slot range.  Walk the result + new cells' contents to
+    // find such terms and stamp parent ownership.
+    if (result != 0) {
+      u32 ar = term_arity(result);
+      if (ar > 0) {
+        u64 base = term_val(result);
+        for (u32 k = 0; k < ar; k++) step_parent_set(base + k, result);
+      }
+    }
+    for (u64 i = hb_at_fire; i < HEAP_NEXT; i++) {
+      Term t = heap_read(i);
+      u32 ar = term_arity(t);
+      if (ar == 0) continue;
+      u64 base = term_val(t);
+      for (u32 k = 0; k < ar; k++) step_parent_set(base + k, t);
+    }
+    for (u64 i = hb_at_fire; i < HEAP_NEXT; i++) {
+      step_fresh_push(heap_read(i));
+    }
+  }
   return result;
 }
 
@@ -421,31 +677,6 @@ static void redex_collect_one(Term t, Term *out, u32 cap, u32 *count) {
   if (!redex_dedup_insert(t)) return;
   if (*count < cap) out[*count] = t;
   (*count)++;
-}
-
-// How many heap cells does a compound term own?  Atoms and known-
-// non-compound tags return 0 (no recursion).  Mirrors the layout
-// arities used by alo/realize.c and book/from_dynamic.c, but
-// includes UOP variants.
-static u32 term_arity(Term t) {
-  u8 tag = term_tag(t);
-  switch (tag) {
-    case TAG_LAM: return 1;
-    case TAG_APP: return 2;
-    case TAG_SUP: return 2;
-    case TAG_DUP: return 1;
-    case TAG_OP2: return 2;
-    case TAG_MAT: return 2;
-    case TAG_ALO: return 2;
-    case TAG_DP0: case TAG_DP1: return 1;
-    case TAG_UOP: {
-      u8 op = term_ext(t);
-      if (op == UOP_KERNEL) return 2;
-      if (op == UOP_ASSIGN) return 2;
-      return uop_arity(op);
-    }
-    default: return 0;
-  }
 }
 
 // DFS walk from each root, collecting redex Terms into `out`.  Also
@@ -513,4 +744,132 @@ fn u32 redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap) {
     redex_collect_one(heap_read(i), out, cap, &count);
   }
   return count;
+}
+
+// === step session API =============================================
+// `redex_step_attach(roots, n_roots)` walks the heap+roots once,
+// builds a Term -> heap-loc inverse index plus a loc -> parent-Term
+// map, and seeds the pre-set with whatever is currently a redex.
+// Subsequent `redex_step_fire(t)` calls do their parent-slot
+// patching via the inverse index in O(uses-of-t) and surface any
+// redex-status flips into a fresh-worklist drained by
+// `redex_step_drain_fresh`.  Detach restores the legacy linear-
+// scan paths.
+//
+// Memory: O(reachable cells) in three side arrays sized to the
+// current HEAP_NEXT, plus two open-addressed hash tables for
+// Term-keyed lookup.  All released on detach.
+//
+// Limitation: GC moves heap locs, so a session must not span a
+// gc_collect call.  In practice the WL stepper holds a session
+// only while inside one TInteract step, so this is fine.
+
+#define STEP_HEAD_CAP_DEFAULT (1u << 14)
+#define STEP_PRE_CAP_DEFAULT  (1u << 14)
+#define STEP_FRESH_CAP_DEFAULT (1u << 12)
+
+fn u32 redex_step_attach(Term *roots, u32 n_roots) {
+  if (STEP_ACTIVE) return 0;
+  STEP_ACTIVE = 1;
+  // Allocate side tables up front; heap may grow during fires.
+  u64 base_cap = HEAP_NEXT > 4096 ? HEAP_NEXT : 4096;
+  STEP_SIDE_CAP = base_cap;
+  STEP_USE_NEXT = (u64 *) malloc(base_cap * sizeof(u64));
+  STEP_PARENT   = (Term *)calloc(base_cap, sizeof(Term));
+  for (u64 i = 0; i < base_cap; i++) STEP_USE_NEXT[i] = STEP_NIL;
+
+  STEP_USE_HEAD_CAP = STEP_HEAD_CAP_DEFAULT;
+  STEP_USE_HEAD = (Term *)malloc(STEP_USE_HEAD_CAP * sizeof(Term));
+  STEP_USE_KEY  = (Term *)calloc(STEP_USE_HEAD_CAP, sizeof(Term));
+  for (u32 i = 0; i < STEP_USE_HEAD_CAP; i++) STEP_USE_HEAD[i] = STEP_NIL;
+
+  STEP_PRE_CAP = STEP_PRE_CAP_DEFAULT;
+  STEP_PRE = (Term *)calloc(STEP_PRE_CAP, sizeof(Term));
+
+  STEP_FRESH_CAP   = STEP_FRESH_CAP_DEFAULT;
+  STEP_FRESH_BUF   = (Term *)malloc(STEP_FRESH_CAP * sizeof(Term));
+  STEP_FRESH_SEEN  = (Term *)calloc(STEP_FRESH_CAP, sizeof(Term));
+  STEP_FRESH_N     = 0;
+
+  // Walk every live heap cell once: index its content + record
+  // parent ownership (if its content is a compound term whose
+  // owned-slot range is also in-heap, those slots get parented).
+  for (u64 i = 0; i < HEAP_NEXT; i++) {
+    Term t = heap_read(i);
+    if (t == 0) continue;
+    step_use_insert(i, t);
+    u32 ar = term_arity(t);
+    if (ar == 0) continue;
+    u64 base = term_val(t);
+    for (u32 k = 0; k < ar; k++) step_parent_set(base + k, t);
+  }
+
+  // Roots may be off-heap (caller holds the Term directly), so the
+  // heap walk above won't have stamped them as parents of their
+  // owned slots.  Do that here so a heap_replace patch on a root's
+  // child slot can promote the root.
+  for (u32 r = 0; r < n_roots; r++) {
+    Term t = roots[r];
+    u32 ar = term_arity(t);
+    if (ar == 0) continue;
+    u64 base = term_val(t);
+    for (u32 k = 0; k < ar; k++) {
+      // Don't clobber an existing parent: if this root's child slot
+      // is also reachable through a heap-stored term, the heap
+      // version is just as valid.
+      if (base + k < STEP_SIDE_CAP && STEP_PARENT[base + k] == 0) {
+        step_parent_set(base + k, t);
+      } else if (base + k >= STEP_SIDE_CAP) {
+        step_parent_set(base + k, t);
+      }
+    }
+  }
+
+  // Seed the pre-set + return the initial redex count via the
+  // existing enumerate path (also walks caller roots that may not
+  // live in any heap cell).
+  static Term seed_buf[8192];
+  u32 n = redex_enumerate(roots, n_roots, seed_buf, 8192);
+  for (u32 i = 0; i < n; i++) step_pre_insert(seed_buf[i]);
+  return n;
+}
+
+fn Term redex_step_fire(Term redex) {
+  if (!STEP_ACTIVE) return redex_fire(redex);
+  // Whatever the caller asks to fire is by definition something
+  // they already saw -- belongs in the pre-set even if attach
+  // missed it (e.g. a redex held off-heap in caller-land).
+  step_pre_insert(redex);
+  Term r = redex_fire(redex);
+  return r;
+}
+
+fn u32 redex_step_drain_fresh(Term *out, u32 cap) {
+  if (!STEP_ACTIVE) return 0;
+  u32 n = STEP_FRESH_N;
+  if (n > cap) n = cap;
+  for (u32 i = 0; i < n; i++) out[i] = STEP_FRESH_BUF[i];
+  // Whatever we're returning to the caller, they now know about,
+  // so move it from "fresh" into "pre" before clearing.
+  for (u32 i = 0; i < STEP_FRESH_N; i++) step_pre_insert(STEP_FRESH_BUF[i]);
+  STEP_FRESH_N = 0;
+  memset(STEP_FRESH_SEEN, 0, STEP_FRESH_CAP * sizeof(Term));
+  return n;
+}
+
+fn void redex_step_detach(void) {
+  if (!STEP_ACTIVE) return;
+  STEP_ACTIVE = 0;
+  free(STEP_USE_HEAD);   STEP_USE_HEAD = 0;
+  free(STEP_USE_KEY);    STEP_USE_KEY  = 0;
+  free(STEP_USE_NEXT);   STEP_USE_NEXT = 0;
+  free(STEP_PARENT);     STEP_PARENT   = 0;
+  free(STEP_PRE);        STEP_PRE      = 0;
+  free(STEP_FRESH_BUF);  STEP_FRESH_BUF = 0;
+  free(STEP_FRESH_SEEN); STEP_FRESH_SEEN = 0;
+  STEP_USE_HEAD_CAP = 0;
+  STEP_SIDE_CAP     = 0;
+  STEP_PRE_CAP      = 0;
+  STEP_FRESH_CAP    = 0;
+  STEP_FRESH_N      = 0;
 }
