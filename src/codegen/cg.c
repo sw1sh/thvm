@@ -191,7 +191,8 @@ static u32 cg_src_numel(KernelEntry const *ke, u32 raw) {
 // Callers (renderers + dispatchers) bail when this returns 1 until
 // per-output emit + dispatch paths land.  See
 // docs/plans/bufferize.md "Multi-output kernel infrastructure".
-fn int cg_kernel_has_extra_outputs(KernelEntry const *ke) {
+// Externally visible (no `fn`) so the Metal .m TU can call it.
+int cg_kernel_has_extra_outputs(KernelEntry const *ke) {
   return ke != NULL && ke->n_extra_outputs > 0;
 }
 

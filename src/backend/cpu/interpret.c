@@ -12,6 +12,16 @@
 // Broadcast is handled per-op by inspecting src_numels[].
 
 fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  // Multi-output kernels (n_extra_outputs > 0) need an out_buf_ids[]
+  // array, not a single out_buf_id.  Until step 4+ wires the
+  // multi-output dispatch path, the interpreter refuses to run a
+  // multi-output kernel and returns -1; the caller (cpu_dispatch_kernel)
+  // treats this as a hard error.  Today the path is unreachable
+  // because plan_kernel_merges is gated OFF (THVM_KERNEL_MERGE) and
+  // emit_kernel_for_boundary never produces n_extra_outputs > 0.
+  if (cg_kernel_has_extra_outputs(ke)) {
+    return -1;
+  }
   // Resolve each input buffer's raw pointer once up front.
   // Non-contiguous inputs (sub-item f3c: view-only EXPAND aliases
   // with stride=0 broadcast) get pre-materialized into temp
@@ -921,6 +931,7 @@ static u64 eval_scalar(ScalarCtx *c, u32 op_id) {
 
 
 fn int cpu_dispatch_scalar(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (cg_kernel_has_extra_outputs(ke)) return -1;
   if (ke->scalar_uops == NULL || ke->n_scalar_uops < 2) return -1;
   // Find the S_BUFFERIZE root.  Its src[0] is the kernel's S_STORE.
   u32 buf_id = 0;
@@ -1027,6 +1038,9 @@ static int cpu_tile_axis_is_output(u32 axis_type) {
 }
 
 fn int cpu_dispatch_tile(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (cg_kernel_has_extra_outputs(ke)) {
+    return 0;
+  }
   if (!cpu_tile_enabled()) {
     return 0;
   }

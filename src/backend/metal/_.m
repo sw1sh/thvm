@@ -719,6 +719,11 @@ static int metal_jit_encode(KernelEntry *ke,
   // index 0 is the output, so direct-pointer generated shaders can
   // bind at most 30 inputs without argument buffers.
   if (ke->n_inputs > 30) return 0;
+  // Multi-output kernels need N output buffers bound to indices
+  // 0..N-1 (and inputs shifted to N..N+n_inputs-1).  Until step 4+
+  // wires the multi-output dispatch, refuse to encode and let the
+  // caller fall back to per-op shaders.
+  if (cg_kernel_has_extra_outputs(ke)) return 0;
   // Metal MSL emitter is f32-only today; non-F32 kernels fall back
   // to the per-op pipeline path (which has dtype-specific shader
   // variants from Phase I).
@@ -1038,6 +1043,10 @@ static int metal_tile_jit_encode(KernelEntry *ke,
                                  u32 groups_x,
                                  u32 threads_x) {
   if (groups_x == 0 || threads_x == 0) return 0;
+  // Multi-output kernels need N output buffers bound to indices
+  // 0..N-1; the tile encoder binds a single outBuf at index 0.
+  // Bail until step 4+ wires the multi-output dispatch.
+  if (cg_kernel_has_extra_outputs(ke)) return 0;
   id<MTLComputePipelineState> pso = metal_tile_jit_pipeline(ke);
   if (pso == nil) return 0;
   if ((NSUInteger)threads_x > [pso maxTotalThreadsPerThreadgroup]) {

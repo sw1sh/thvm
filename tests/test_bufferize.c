@@ -1333,6 +1333,19 @@ int main(void) {
   CHECK(cg_emit_tile_metal(&KERNELS[mco_kid]) == NULL);
   CHECK(cg_emit_scalar(&KERNELS[mco_kid]) == NULL);
   CHECK(cg_emit_tile(&KERNELS[mco_kid]) == NULL);
+  // CPU interpreter bails (returns -1) on multi-output kernels too.
+  // Construct a minimal in_buf_ids array and call cpu_interpret;
+  // expect non-zero return.
+  u32 mco_in_bufs[16] = {0};
+  for (u32 i = 0; i < KERNELS[mco_kid].n_inputs && i < 16; i++) {
+    u32 itid = KERNELS[mco_kid].input_tids[i];
+    mco_in_bufs[i] = (itid != 0 && itid < TENS_NEXT) ? TENS[itid].buf_id : 0;
+  }
+  u32 mco_out_buf = TENS[KERNELS[mco_kid].output_tid].buf_id;
+  CHECK(cpu_interpret(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf) != 0);
+  CHECK_EQ(cpu_dispatch_scalar(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), -1);
+  CHECK_EQ(cpu_dispatch_tile  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
+  CHECK_EQ(cpu_blas_dispatch  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   // Clear the synthetic output so the kernel is single-output again
   // (otherwise the subsequent test's thvm_materialize will see a
   // multi-output kernel mid-pipeline; we don't want to leak this

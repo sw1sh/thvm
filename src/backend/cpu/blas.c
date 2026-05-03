@@ -227,6 +227,10 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 // / BLAS_GEMM) so the profiler can record the route, or 0 on no-match
 // (caller falls through to JIT / interpreter).
 fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  // BLAS routines write a single output (sgemm/sgemv/sdot all
+  // expect one C buffer).  Multi-output kernels must skip BLAS
+  // until the dispatch wiring lands.
+  if (cg_kernel_has_extra_outputs(ke)) return 0;
   if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
   if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
   if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;

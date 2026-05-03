@@ -1907,7 +1907,8 @@ int   cg_supports(KernelEntry const *ke);
 // until the per-output emit / dispatch wiring lands; the runtime
 // then falls back to the interpreter (which itself bails on
 // multi-output today, see backend/cpu/interpret.c).
-fn int  cg_kernel_has_extra_outputs(KernelEntry const *ke);
+// External linkage (not `fn`) so the Metal .m TU can call it.
+int   cg_kernel_has_extra_outputs(KernelEntry const *ke);
 u32   cg_program_dtype(KernelEntry const *ke);   // DT_COUNT on mixed
 char *cg_emit_metal(KernelEntry const *ke);   // caller frees
 int   cg_supports_metal_reduce_expr(KernelEntry const *ke);
