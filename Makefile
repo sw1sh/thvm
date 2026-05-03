@@ -24,6 +24,7 @@ TESTS := \
   $(BIN)/test_mat_op2 \
   $(BIN)/test_wnf_n \
   $(BIN)/test_redex \
+  $(BIN)/test_step_incremental \
   $(BIN)/test_metal_stub \
   $(BIN)/test_expand_axis \
   $(BIN)/test_view_strided \
