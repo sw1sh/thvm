@@ -187,7 +187,7 @@ nSteps = parseInt["N_STEPS", 3];
 doPostAutotune = envValue["POST_AUTOTUNE", "0"] === "1";
 postAutotuneKids = parseIntList["POST_AUTOTUNE_KIDS"];
 postAutotuneTop = parseInt["POST_AUTOTUNE_TOP", 0];
-postAutotuneMetric = envValue["POST_AUTOTUNE_METRIC", "Flops"];
+postAutotuneMetric = envValue["POST_AUTOTUNE_METRIC", "ReduceFlops"];
 benchMode = ToLowerCase @ envValue["BENCH_MODE", "train"];
 showProfile = envValue["SHOW_PROFILE", "0"] === "1";
 showProgramProfile = envValue["SHOW_PROGRAM_PROFILE", "0"] === "1" || showProfile;

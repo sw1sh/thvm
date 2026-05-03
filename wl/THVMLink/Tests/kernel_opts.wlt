@@ -994,7 +994,7 @@ VerificationTest[
     TRealize @ TUOpReduce[xT, 0, "SUM"];
     kid = TKernelCount[] - 1;
     profile = TProfileAll[];
-    res = TKernelAutotuneTop[profile, 1, "Flops"];
+    res = TKernelAutotuneTop[profile, 1, "ReduceFlops"];
     {AssociationQ[res],
      Keys[res],
      Length[First[TKernelOpts[kid]]["Applied"]] >= 0},
