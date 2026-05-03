@@ -6,6 +6,28 @@ dated section.
 
 ## Unreleased
 
+### Added: KernelEntry multi-output schema (groundwork for tinygrad-style fusion)
+
+`KernelEntry` gains `n_extra_outputs` plus
+`extra_output_{tids,dtypes,shapes,numels}[KERNEL_MAX_EXTRA_OUTPUTS=7]`.
+Output index 0 still reads from the legacy `output_tid` family
+so existing single-output code is unchanged; indices
+`1..n_extra_outputs` come from the extras arrays.
+
+Public accessors `kernel_entry_output_count`,
+`kernel_entry_output_tid_at`, `kernel_entry_output_dtype_at`,
+`kernel_entry_output_numel_at`, `kernel_entry_output_shape_at`,
+and `kernel_entry_set_extra_output` give every consumer (codegen,
+dispatch, autotune, JIT capture) one canonical access path.
+
+This is step 1 of the multi-output kernel work the plan calls for
+(see `docs/plans/bufferize.md` "Multi-output kernel infrastructure").
+Subsequent steps - kernel-merging pass, codegen rendering with N
+outputs, multi-buffer dispatch, autotune integration - land
+independently on this foundation.  Tests verify the legacy
+single-output path is unchanged and the new accessors round-trip
+correctly; 286/286 in `test_bufferize.c`, full suite green.
+
 ### Changed: lift movement-reduce gate on remove-removable-bufferize
 
 `realize_removable_bufferize_consumers_ok` historically rejected

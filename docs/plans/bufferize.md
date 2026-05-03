@@ -691,6 +691,69 @@ Add tests in this order:
 Do not run broad autotune sweeps until Phase 6 has bounded memory
 proofs.
 
+## Multi-output kernel infrastructure (Phase 5+ groundwork)
+
+The bigger algorithmic gap to tinygrad-level fusion is that
+tinygrad's beautiful-mnist JITs to ~3 megakernels per training
+step (forward+loss, backward, optimizer); each megakernel writes
+many output buffers from a single fused loop.  thvm's
+`KernelEntry` has historically held a single `output_tid`, so
+even after all the bufferize-graph rewrites here every realize
+boundary lands in its own kernel — currently 1070 dispatches
+per step.
+
+Closing this gap requires multi-output kernels.  The work splits
+into independent landings:
+
+1. **Schema (landed)**.  `KernelEntry` gains
+   `n_extra_outputs` plus `extra_output_{tids,dtypes,shapes,
+   numels}[KERNEL_MAX_EXTRA_OUTPUTS]`.  Output index 0 stays on
+   the legacy `output_tid` family for backward compatibility;
+   indices `1..n_extra_outputs` come from the extras arrays.
+   Public accessors `kernel_entry_output_count`,
+   `kernel_entry_output_tid_at`, `kernel_entry_output_dtype_at`,
+   `kernel_entry_output_numel_at`, `kernel_entry_output_shape_at`,
+   and `kernel_entry_set_extra_output` give every consumer
+   (codegen, dispatch, autotune, JIT capture) a single canonical
+   access path.  Existing single-output code unchanged - new
+   tests in `test_bufferize.c` confirm `n_outputs == 1` and that
+   `set_extra_output(slot=0)` is rejected.
+
+2. **Materialize-side kernel-merging pass (planned)**.  After
+   `topo_sort_boundaries` builds `BOUNDARY_ORDER`, scan for
+   pairs of boundaries that share:
+   - identical iter shape (same output rank+dims),
+   - identical input set (or near-identical, modulo dedup),
+   - no data-flow dependency (neither reads the other),
+   - both pure-elementwise or pure-elementwise-with-tail-reduce,
+     so the fused program stays tile-feasible.
+   Merge the two `KProgOp` programs by remapping the second
+   kernel's output slots into `n_extra_outputs` of the first,
+   then drop the second from `BOUNDARY_ORDER`.
+
+3. **Codegen rendering (planned)**.  `render_metal_tile`,
+   `render_c`, and `render_c_scalar` need to emit kernels with N
+   output buffer arguments and N store statements.  The
+   ScalarUop graph already has `S_DEFINE_OUTPUT` and `S_STORE`
+   per output; rangeify just needs to emit them per-output.
+
+4. **Dispatch (planned)**.  `metal_tile_jit_encode` and
+   `metal_jit_encode` need to bind N output buffers; the CPU
+   interpreter needs to set up N output pointer args.  JIT
+   capture's per-op output tracking already iterates `output_tid`
+   — bumping to `kernel_entry_output_count` is the surface
+   change.
+
+5. **Autotune (planned)**.  Multi-output kernels widen the
+   schedule space; `bufferize_schedule_key` already covers
+   reasons + chain summaries, but per-output reasons / sizes
+   should hash into the key so autotune treats fused vs unfused
+   schedules as distinct.
+
+Each step is independent and testable in isolation.  Step 1's
+schema is the prerequisite; without it, every other step would
+need to re-design the storage.
+
 ## Current Baseline
 
 Latest bounded Metal/tile beautiful-mnist canary

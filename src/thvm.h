@@ -860,10 +860,26 @@ typedef struct KernelEntry {
   // consumer to the same source pick distinct BIndex records.
   u32      *input_visit_counts;
 
-  u32       output_tid;            // TenDesc id we write to
+  u32       output_tid;            // TenDesc id we write to (slot 0)
   u32       output_dtype;
   Shape     output_shape;
   u32       output_numel;
+  // Multi-output kernel infrastructure (Phase 5+ groundwork).
+  // n_extra_outputs == 0 for the legacy single-output path; output
+  // index 0 maps to output_tid above, indices 1..n_extra_outputs
+  // map to the extras arrays below.  Total outputs in the kernel
+  // = 1 + n_extra_outputs.  The infrastructure that actually
+  // emits multi-output kernels (visit() + codegen + dispatch) is
+  // not yet in place; this schema reserves the slots so future
+  // commits can land each layer independently.  See
+  // KERNEL_MAX_EXTRA_OUTPUTS for the cap (sized small to keep
+  // KernelEntry compact; bump if real workloads need more).
+  u8        n_extra_outputs;
+#define KERNEL_MAX_EXTRA_OUTPUTS 7
+  u32       extra_output_tids   [KERNEL_MAX_EXTRA_OUTPUTS];
+  u32       extra_output_dtypes [KERNEL_MAX_EXTRA_OUTPUTS];
+  Shape     extra_output_shapes [KERNEL_MAX_EXTRA_OUTPUTS];
+  u32       extra_output_numels [KERNEL_MAX_EXTRA_OUTPUTS];
 
   // Program: dynamically grown.  ops_cap is the allocated length;
   // n_ops is the count actually used.  Use kernel_program_reserve()
@@ -1499,6 +1515,22 @@ fn u32  materialize_boundary_last_use_at(u32 i);
 // for that slot via bufferize_edge_summary, looking up the
 // consumer loc from the kernel's source_uop.
 fn u32  kernel_entry_input_source_buffer_id(u32 kid, u32 slot);
+// Multi-output kernel accessors (Phase 5+ groundwork).  Output
+// index 0 reads from the legacy `output_tid` family, indices
+// 1..n_extra_outputs from the extras arrays.  `kernel_entry_output_count`
+// returns 1 + n_extra_outputs.  Returns 0 / sentinels for invalid
+// (kid, idx) pairs.  Callers that emit multi-output programs should
+// populate via `kernel_entry_set_extra_output(kid, idx, tid, dtype,
+// shape, numel)` so future codegen passes have a single canonical
+// access path.
+fn u32  kernel_entry_output_count(u32 kid);
+fn u32  kernel_entry_output_tid_at(u32 kid, u32 idx);
+fn u32  kernel_entry_output_dtype_at(u32 kid, u32 idx);
+fn u32  kernel_entry_output_numel_at(u32 kid, u32 idx);
+fn int  kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out);
+fn int  kernel_entry_set_extra_output(u32 kid, u32 idx,
+                                       u32 tid, u32 dtype,
+                                       Shape const *shape, u32 numel);
 fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
 // Per-USE variant: select the `edge_idx`-th BIndex record whose
 // (consumer, source) pair matches the kernel's source_uop and the

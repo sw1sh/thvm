@@ -362,6 +362,68 @@ static void topo_sort_boundaries(Term root) {
 fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
 fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN ? BOUNDARY_ORDER[i] : 0; }
 
+// Multi-output kernel accessors.  Output index 0 reads the legacy
+// single-output fields; 1..n_extra_outputs from extras arrays.
+fn u32 kernel_entry_output_count(u32 kid) {
+  if (kid >= KERNELS_NEXT) return 0;
+  return 1u + (u32)KERNELS[kid].n_extra_outputs;
+}
+
+fn u32 kernel_entry_output_tid_at(u32 kid, u32 idx) {
+  if (kid >= KERNELS_NEXT) return 0;
+  KernelEntry const *ke = &KERNELS[kid];
+  if (idx == 0) return ke->output_tid;
+  u32 ei = idx - 1;
+  if (ei >= ke->n_extra_outputs) return 0;
+  return ke->extra_output_tids[ei];
+}
+
+fn u32 kernel_entry_output_dtype_at(u32 kid, u32 idx) {
+  if (kid >= KERNELS_NEXT) return 0;
+  KernelEntry const *ke = &KERNELS[kid];
+  if (idx == 0) return ke->output_dtype;
+  u32 ei = idx - 1;
+  if (ei >= ke->n_extra_outputs) return 0;
+  return ke->extra_output_dtypes[ei];
+}
+
+fn u32 kernel_entry_output_numel_at(u32 kid, u32 idx) {
+  if (kid >= KERNELS_NEXT) return 0;
+  KernelEntry const *ke = &KERNELS[kid];
+  if (idx == 0) return ke->output_numel;
+  u32 ei = idx - 1;
+  if (ei >= ke->n_extra_outputs) return 0;
+  return ke->extra_output_numels[ei];
+}
+
+fn int kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out) {
+  if (kid >= KERNELS_NEXT || out == NULL) return 0;
+  KernelEntry const *ke = &KERNELS[kid];
+  if (idx == 0) { *out = ke->output_shape; return 1; }
+  u32 ei = idx - 1;
+  if (ei >= ke->n_extra_outputs) return 0;
+  *out = ke->extra_output_shapes[ei];
+  return 1;
+}
+
+fn int kernel_entry_set_extra_output(u32 kid, u32 idx,
+                                     u32 tid, u32 dtype,
+                                     Shape const *shape, u32 numel) {
+  if (kid >= KERNELS_NEXT || shape == NULL) return 0;
+  if (idx == 0) return 0;     // slot 0 is the legacy output_tid path
+  u32 ei = idx - 1;
+  if (ei >= KERNEL_MAX_EXTRA_OUTPUTS) return 0;
+  KernelEntry *ke = &KERNELS[kid];
+  ke->extra_output_tids   [ei] = tid;
+  ke->extra_output_dtypes [ei] = dtype;
+  ke->extra_output_shapes [ei] = *shape;
+  ke->extra_output_numels [ei] = numel;
+  if (ei + 1 > (u32)ke->n_extra_outputs) {
+    ke->n_extra_outputs = (u8)(ei + 1);
+  }
+  return 1;
+}
+
 fn u32 materialize_boundary_depth_at(u32 i) {
   if (i >= BOUNDARY_ORDER_LEN) return 0;
   u32 ridx = realize_info_find(BOUNDARY_ORDER[i]);

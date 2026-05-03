@@ -1169,6 +1169,57 @@ int main(void) {
     CHECK_EQ(rt->subtree_has_reduce, 0);
   }
 
+  TEST_BEGIN("multi-output/single-output-kernel-reads-as-output-0");
+  // Phase 5+ multi-output kernel groundwork: every existing
+  // kernel reports n_outputs=1 and accessors return the legacy
+  // output_tid family.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  Term mo_a   = uop_binary(UOP_ADD, a, b);
+  Term mo_out = thvm_materialize(mo_a);
+  Term mo_kid_term = heap_read(term_val(mo_out) + 1);
+  u32 mo_kid = (u32)term_val(mo_kid_term);
+  CHECK_EQ(kernel_entry_output_count(mo_kid), 1);
+  CHECK(kernel_entry_output_tid_at(mo_kid, 0) != 0);
+  CHECK_EQ(kernel_entry_output_tid_at(mo_kid, 0),
+           KERNELS[mo_kid].output_tid);
+  // Out-of-range slot returns 0.
+  CHECK_EQ(kernel_entry_output_tid_at(mo_kid, 1), 0);
+  CHECK_EQ(kernel_entry_output_dtype_at(mo_kid, 1), 0);
+  Shape mo_sh;
+  CHECK_EQ(kernel_entry_output_shape_at(mo_kid, 1, &mo_sh), 0);
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
+  TEST_BEGIN("multi-output/set-extra-output-grows-output-count");
+  // Construct an extra output by hand: simulate a future
+  // multi-output codegen pass writing tid into slot 1.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  Term so_a   = uop_binary(UOP_ADD, a, b);
+  Term so_out = thvm_materialize(so_a);
+  u32 so_kid  = (u32)term_val(heap_read(term_val(so_out) + 1));
+  Shape so_shape = {.ndim = 1, .dims = {3}};
+  u32 so_extra_tid = tensor_alloc(CURRENT_BACKEND, so_shape, DT_FP32);
+  int set_ok = kernel_entry_set_extra_output(so_kid, 1,
+                                             so_extra_tid, DT_FP32,
+                                             &so_shape, 3);
+  CHECK_EQ(set_ok, 1);
+  CHECK_EQ(kernel_entry_output_count(so_kid), 2);
+  CHECK_EQ(kernel_entry_output_tid_at(so_kid, 1), so_extra_tid);
+  CHECK_EQ(kernel_entry_output_dtype_at(so_kid, 1), DT_FP32);
+  CHECK_EQ(kernel_entry_output_numel_at(so_kid, 1), 3);
+  Shape readback;
+  CHECK_EQ(kernel_entry_output_shape_at(so_kid, 1, &readback), 1);
+  CHECK_EQ(readback.ndim, 1);
+  CHECK_EQ(readback.dims[0], 3);
+  // set_extra_output for slot 0 must reject (legacy slot).
+  CHECK_EQ(kernel_entry_set_extra_output(so_kid, 0, so_extra_tid,
+                                         DT_FP32, &so_shape, 3), 0);
+  // Past KERNEL_MAX_EXTRA_OUTPUTS rejects.
+  CHECK_EQ(kernel_entry_set_extra_output(so_kid,
+                                         1 + KERNEL_MAX_EXTRA_OUTPUTS,
+                                         so_extra_tid, DT_FP32,
+                                         &so_shape, 3), 0);
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
   thvm_free();
   TEST_REPORT();
 }
