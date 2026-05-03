@@ -1901,6 +1901,13 @@ typedef enum {
 } KDispatchKind;
 
 int   cg_supports(KernelEntry const *ke);
+// Multi-output kernel guard (Step 3): returns 1 iff the kernel
+// writes more than one output buffer (i.e. n_extra_outputs > 0).
+// Renderer entry points and dispatch paths bail when this returns 1
+// until the per-output emit / dispatch wiring lands; the runtime
+// then falls back to the interpreter (which itself bails on
+// multi-output today, see backend/cpu/interpret.c).
+fn int  cg_kernel_has_extra_outputs(KernelEntry const *ke);
 u32   cg_program_dtype(KernelEntry const *ke);   // DT_COUNT on mixed
 char *cg_emit_metal(KernelEntry const *ke);   // caller frees
 int   cg_supports_metal_reduce_expr(KernelEntry const *ke);

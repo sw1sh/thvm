@@ -186,7 +186,21 @@ static u32 cg_src_numel(KernelEntry const *ke, u32 raw) {
   return idx < ke->n_ops ? ke->program[idx].numel : 0;
 }
 
+// Multi-output kernel guard (Step 3 of multi-output groundwork).
+// Returns 1 iff the kernel writes more than one output buffer.
+// Callers (renderers + dispatchers) bail when this returns 1 until
+// per-output emit + dispatch paths land.  See
+// docs/plans/bufferize.md "Multi-output kernel infrastructure".
+fn int cg_kernel_has_extra_outputs(KernelEntry const *ke) {
+  return ke != NULL && ke->n_extra_outputs > 0;
+}
+
 int cg_supports(KernelEntry const *ke) {
+  // Multi-output programs aren't supported by the legacy KProgOp[]
+  // renderer.  The merge planner (step 2) is gated OFF by default,
+  // so this only fires when THVM_KERNEL_MERGE=1 is set without the
+  // matching codegen + dispatch rollout.  Falls back to interpreter.
+  if (cg_kernel_has_extra_outputs(ke)) return 0;
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp const *p = &ke->program[i];
     u8 op = p->opcode;

@@ -185,6 +185,11 @@ static int cs_collect_kernel_info(KernelEntry const *ke, CsKernelInfo *out) {
 
 // Predicate: can this kernel be JIT-rendered via cg_emit_scalar?
 fn int cg_supports_scalar(KernelEntry const *ke) {
+  // Multi-output kernels need an N-output JIT signature
+  // (`void k(void *const *outs_v, ...)`) which the scalar renderer
+  // doesn't emit yet.  Bail until step 4 wires the multi-output
+  // dispatch path.
+  if (cg_kernel_has_extra_outputs(ke)) return 0;
   CsKernelInfo info;
   return cs_collect_kernel_info(ke, &info);
 }
@@ -759,6 +764,10 @@ static int cs_emit_value(CgBuf *b, KernelEntry const *ke, u32 op_id) {
 // on emit failure.  The C function signature matches render_c.c so
 // cpu_jit_dispatch can call into it via the same CpuJitFn typedef.
 fn char *cg_emit_scalar(KernelEntry const *ke) {
+  // Multi-output kernels need an N-output JIT signature; the scalar
+  // renderer emits a single `void *out_v` parameter.  Bail until
+  // step 4 wires the multi-output dispatch.
+  if (cg_kernel_has_extra_outputs(ke)) return NULL;
   CsKernelInfo info;
   if (!cs_collect_kernel_info(ke, &info)) return NULL;
 
@@ -889,11 +898,19 @@ static int ct_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
 }
 
 fn int cg_supports_tile(KernelEntry const *ke) {
+  // Multi-output kernels need an N-output JIT signature; the tile
+  // renderer emits a single `void *out_v` parameter.  Bail until
+  // step 4 wires the multi-output dispatch.
+  if (cg_kernel_has_extra_outputs(ke)) return 0;
   CtKernelInfo info;
   return ct_collect_kernel_info(ke, &info);
 }
 
 fn char *cg_emit_tile(KernelEntry const *ke) {
+  // Multi-output kernels need an N-output JIT signature; the tile
+  // renderer emits a single `void *out_v` parameter.  Bail until
+  // step 4 wires the multi-output dispatch.
+  if (cg_kernel_has_extra_outputs(ke)) return NULL;
   CtKernelInfo info;
   if (!ct_collect_kernel_info(ke, &info)) {
     return NULL;

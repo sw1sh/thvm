@@ -1308,6 +1308,38 @@ int main(void) {
   CHECK_EQ(materialize_kernel_merge_candidate_count(), 0);
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
+  TEST_BEGIN("multi-output/codegen-bails-on-extra-output");
+  // Step 3 guard: every renderer entry point must bail (NULL / 0)
+  // when the kernel reports n_extra_outputs > 0, so a future merge
+  // landing without matching codegen falls back to the interpreter
+  // instead of silently dropping outputs.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  Term mco_a   = uop_binary(UOP_ADD, a, b);
+  Term mco_out = thvm_materialize(mco_a);
+  u32 mco_kid = (u32)term_val(heap_read(term_val(mco_out) + 1));
+  CHECK_EQ(cg_kernel_has_extra_outputs(&KERNELS[mco_kid]), 0);
+  // Inject a synthetic extra output on the kernel and re-check.
+  Shape mco_sh = {.ndim = 1, .dims = {3}};
+  u32 mco_extra_tid = tensor_alloc(CURRENT_BACKEND, mco_sh, DT_FP32);
+  CHECK_EQ(kernel_entry_set_extra_output(mco_kid, 1, mco_extra_tid,
+                                         DT_FP32, &mco_sh, 3), 1);
+  CHECK_EQ(cg_kernel_has_extra_outputs(&KERNELS[mco_kid]), 1);
+  // Each renderer entry point bails.
+  CHECK_EQ(cg_supports(&KERNELS[mco_kid]), 0);
+  CHECK_EQ(cg_supports_scalar(&KERNELS[mco_kid]), 0);
+  CHECK_EQ(cg_supports_tile(&KERNELS[mco_kid]), 0);
+  CHECK_EQ(cg_supports_metal_reduce_expr(&KERNELS[mco_kid]), 0);
+  CHECK(cg_emit_metal(&KERNELS[mco_kid]) == NULL);
+  CHECK(cg_emit_tile_metal(&KERNELS[mco_kid]) == NULL);
+  CHECK(cg_emit_scalar(&KERNELS[mco_kid]) == NULL);
+  CHECK(cg_emit_tile(&KERNELS[mco_kid]) == NULL);
+  // Clear the synthetic output so the kernel is single-output again
+  // (otherwise the subsequent test's thvm_materialize will see a
+  // multi-output kernel mid-pipeline; we don't want to leak this
+  // state across tests).
+  KERNELS[mco_kid].n_extra_outputs = 0;
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
+
   TEST_BEGIN("kernel-merge/disjoint-input-sets-not-flagged");
   // Two ADDs with completely disjoint inputs: merging them just
   // doubles the kernel's input pressure without sharing any reads.

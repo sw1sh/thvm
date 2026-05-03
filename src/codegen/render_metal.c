@@ -718,6 +718,10 @@ static char *rm_expr_emit(KernelEntry const *ke) {
 }
 
 int cg_supports_metal_reduce_expr(KernelEntry const *ke) {
+  // Multi-output kernels need an N-output Metal kernel signature;
+  // the reduce-expr renderer emits a single `device float *out`.
+  // Bail until step 4 wires the multi-output dispatch.
+  if (cg_kernel_has_extra_outputs(ke)) return 0;
   return rm_reduce_expr_supports(ke);
 }
 
@@ -728,6 +732,12 @@ int cg_supports_metal_reduce_expr(KernelEntry const *ke) {
 // path.
 char *cg_emit_metal(KernelEntry const *ke) {
   if (ke->n_inputs > RM_MAX_MSL_INPUTS) {
+    return NULL;
+  }
+  // Multi-output kernels are not yet renderable through this path
+  // (single `device float *out` argument).  Bail until step 4 wires
+  // the multi-output dispatch.
+  if (cg_kernel_has_extra_outputs(ke)) {
     return NULL;
   }
   char *src = cg_emit(ke, &METAL_RENDERER);
@@ -1815,6 +1825,12 @@ static int rmt_emit_group_reduce_store(CgBuf *b, KernelEntry const *ke,
 }
 
 char *cg_emit_tile_metal(KernelEntry const *ke) {
+  // Multi-output kernels are not yet renderable through the tile
+  // metal path (single `device float *out` arg + single S_STORE).
+  // Bail until step 4 wires the multi-output dispatch.
+  if (cg_kernel_has_extra_outputs(ke)) {
+    return NULL;
+  }
   TileConv2DInfo conv;
   if (rmt_collect_conv2d_info(ke, &conv)) {
     return rmt_emit_conv2d_flat(ke, &conv);
