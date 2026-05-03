@@ -81,7 +81,13 @@ $nodeStyle = <|
     "KERNEL"      -> styleEntry["Rect",         StandardOrange],
     (* Tensor handles *)
     "TEN"         -> styleEntry["Rect",         StandardCyan],
-    "ExternalTEN" -> styleEntry["Rect",         Darker[StandardCyan, 0.2]]
+    "ExternalTEN" -> styleEntry["Rect",         Darker[StandardCyan, 0.2]],
+    (* Lazy / book / case nodes *)
+    "REF"         -> styleEntry["Disk",         StandardYellow],
+    "ALO"         -> styleEntry["TriangleDown", Darker[StandardYellow, 0.15]],
+    "CTR"         -> styleEntry["TriangleDown", StandardRed],
+    "MAT"         -> styleEntry["TriangleUp",   StandardRed],
+    "OP2"         -> styleEntry["Rect",         StandardBlue]
 |>;
 
 (* Lookup with a sensible fallback so a new tag accidentally

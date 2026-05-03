@@ -49,12 +49,34 @@ eraVertexId[loc_Integer]  := "e" <> ToString[loc]
 uopVertexId[loc_Integer]  := "u" <> ToString[loc]
 kerVertexId[loc_Integer]  := "k" <> ToString[loc]
 tenVertexId[id_Integer]   := "t" <> ToString[id]
+ctrVertexId[base_Integer] := "c" <> ToString[base]
+matVertexId[base_Integer] := "m" <> ToString[base]
+op2VertexId[base_Integer] := "p" <> ToString[base]
+aloVertexId[base_Integer] := "o" <> ToString[base]
+refVertexId[defId_Integer] := "r" <> ToString[defId]
+numVertexId[loc_Integer]  := "n" <> ToString[loc]
 
 (* === IC port specs (offset, port name) === *)
 icPorts[$TagLAM] := {{0, "body"}}
 icPorts[$TagAPP] := {{0, "f"}, {1, "x"}}
 icPorts[$TagSUP] := {{0, "L"}, {1, "R"}}
 icPorts[$TagDUP] := {{0, "body"}}
+
+(* CTR ports: heap[val] = NUM(arity), heap[val+1..val+n] = children.
+   Variable arity, computed from the NUM cell at val. *)
+ctrPorts[base_Integer] := With[{n = TTermVal[THeapRead[base]]},
+    Table[{i, "c" <> ToString[i - 1]}, {i, n}]
+]
+
+(* MAT ports: heap[val+0] = scrutinee, heap[val+1] = case-tree LAM. *)
+matPorts[] := {{0, "s"}, {1, "k"}}
+
+(* OP2 ports: heap[val+0] = lhs, heap[val+1] = rhs. *)
+op2Ports[] := {{0, "L"}, {1, "R"}}
+
+(* ALO ports: heap[val] = wrapped book-template term;
+   heap[val+1] = NUM(state_id) -- atomic, surfaced in the label. *)
+aloPorts[] := {{0, "body"}}
 
 (* === discovery ===
    Walks every heap cell + each seed term once; categorizes each
@@ -77,6 +99,16 @@ agentFromTerm[term_] := With[{tag = TTermTag[term]},
                 uopVertexId[TTermVal[term]] -> <|"tag" -> $TagUOP, "opcode" -> TTermExt[term]|>],
         $TagTEN,
             tenVertexId[TTermVal[term]] -> <|"tag" -> $TagTEN, "dtype" -> TTermExt[term]|>,
+        $TagREF,
+            refVertexId[TTermExt[term]] -> <|"tag" -> $TagREF, "defId" -> TTermExt[term]|>,
+        $TagALO,
+            aloVertexId[TTermVal[term]] -> <|"tag" -> $TagALO|>,
+        $TagCTR,
+            ctrVertexId[TTermVal[term]] -> <|"tag" -> $TagCTR, "ext" -> TTermExt[term]|>,
+        $TagMAT,
+            matVertexId[TTermVal[term]] -> <|"tag" -> $TagMAT, "ext" -> TTermExt[term]|>,
+        $TagOP2,
+            op2VertexId[TTermVal[term]] -> <|"tag" -> $TagOP2, "opcode" -> TTermExt[term]|>,
         _,
             Nothing
     ]
@@ -98,23 +130,41 @@ discoverEras[] := Block[{lo = THeapBase[], n = THeapPos[]},
    pairs.  Edge labels (port names, src offsets) get rendered only
    if the caller asks via "ShowEdgeLabels" -> True. *)
 
-icPortRecord[base_Integer, offset_Integer, port_String] :=
-    Block[{loc = base + offset, t, tag, val},
-        t   = THeapRead[loc];
-        tag = TTermTag[t];
-        val = TTermVal[t];
+(* Resolve any cell at `loc` to its source vertex id (or Nothing if
+   the cell is something we don't render -- which today is just raw
+   TAG_NUM children we'd rather surface via the parent's label). *)
+childVertexId[loc_Integer] :=
+    Block[{t = THeapRead[loc], tag, val, ext},
+        tag = TTermTag[t]; val = TTermVal[t]; ext = TTermExt[t];
         Switch[tag,
-            $TagLAM | $TagAPP | $TagSUP | $TagDUP,
-                {icVertexId[val], icVertexId[base], port},
-            $TagVAR,
-                {icVertexId[val], icVertexId[base], port <> " var"},
-            $TagDP0,
-                {icVertexId[val], icVertexId[base], port <> " dp0"},
-            $TagDP1,
-                {icVertexId[val], icVertexId[base], port <> " dp1"},
-            $TagERA,
-                {eraVertexId[loc], icVertexId[base], port},
+            $TagLAM | $TagAPP | $TagSUP | $TagDUP, icVertexId[val],
+            $TagVAR,                               icVertexId[val],
+            $TagDP0 | $TagDP1,                     icVertexId[val],
+            $TagERA,                               eraVertexId[loc],
+            $TagUOP,
+                If[ ext === $UopKernel, kerVertexId[val], uopVertexId[val]],
+            $TagTEN,                               tenVertexId[val],
+            $TagREF,                               refVertexId[ext],
+            $TagALO,                               aloVertexId[val],
+            $TagCTR,                               ctrVertexId[val],
+            $TagMAT,                               matVertexId[val],
+            $TagOP2,                               op2VertexId[val],
+            $TagNUM,                               numVertexId[loc],
             _, Nothing
+        ]
+    ]
+
+icPortRecord[base_Integer, offset_Integer, port_String] :=
+    Block[{loc = base + offset, t = THeapRead[base + offset], tag, src},
+        tag = TTermTag[t];
+        src = childVertexId[loc];
+        If[ src === Nothing, Nothing,
+            {src, icVertexId[base],
+             port <> Switch[tag,
+                 $TagVAR, " var",
+                 $TagDP0, " dp0",
+                 $TagDP1, " dp1",
+                 _, ""]}
         ]
     ]
 
@@ -169,12 +219,51 @@ kernelEdgeRecords[loc_Integer] := Block[{
 
 uopEdgeRecords[loc_Integer, $UopKernel] := kernelEdgeRecords[loc]
 
+(* Generic edge record for a fixed-arity parent at `base` whose
+   children sit at base + offset.  Targets the parent's `vid`. *)
+genericPortRecord[parentVid_String, base_Integer, offset_Integer, port_String] :=
+    Block[{src = childVertexId[base + offset]},
+        If[ src === Nothing, Nothing, {src, parentVid, port}]
+    ]
+
+ctrEdgeRecords[base_Integer] := Block[{
+    parentVid = ctrVertexId[base],
+    n         = TTermVal[THeapRead[base]]
+},
+    Table[
+        genericPortRecord[parentVid, base, i, "c" <> ToString[i - 1]],
+        {i, n}
+    ]
+]
+
+matEdgeRecords[base_Integer] := With[{parentVid = matVertexId[base]},
+    {
+        genericPortRecord[parentVid, base, 0, "scrut"],
+        genericPortRecord[parentVid, base, 1, "case"]
+    }
+]
+
+op2EdgeRecords[base_Integer] := With[{parentVid = op2VertexId[base]},
+    {
+        genericPortRecord[parentVid, base, 0, "L"],
+        genericPortRecord[parentVid, base, 1, "R"]
+    }
+]
+
+aloEdgeRecords[base_Integer] := With[{parentVid = aloVertexId[base]},
+    {genericPortRecord[parentVid, base, 0, "body"]}
+]
+
 (* dispatch *)
 agentEdgeRecords[vid_String, info_Association] := Switch[info["tag"],
     $TagLAM | $TagAPP | $TagSUP | $TagDUP,
         icEdgeRecords[ToExpression[StringDrop[vid, 1]], info["tag"]],
     $TagUOP,
         uopEdgeRecords[ToExpression[StringDrop[vid, 1]], info["opcode"]],
+    $TagCTR, ctrEdgeRecords[ToExpression[StringDrop[vid, 1]]],
+    $TagMAT, matEdgeRecords[ToExpression[StringDrop[vid, 1]]],
+    $TagOP2, op2EdgeRecords[ToExpression[StringDrop[vid, 1]]],
+    $TagALO, aloEdgeRecords[ToExpression[StringDrop[vid, 1]]],
     _, {}
 ]
 
@@ -256,8 +345,41 @@ vertexCategory[vid_String, info_Association] := Switch[info["tag"],
     $TagTEN,
         With[{id = ToExpression[StringDrop[vid, 1]]},
             If[ MemberQ[$externalTids, id], "ExternalTEN", "TEN"]],
+    $TagREF, "REF",
+    $TagALO, "ALO",
+    $TagCTR, "CTR",
+    $TagMAT, "MAT",
+    $TagOP2, "OP2",
+    $TagNUM, "NUM",
     _, "UOP"
 ]
+
+(* Label helpers for the new tag types. *)
+ctrLabel[base_Integer, ctrTag_Integer] :=
+    Column[{"CTR#" <> ToString[ctrTag],
+            "@" <> ToString[base]}, Center, Spacings -> 0]
+
+matLabel[base_Integer, ctrTag_Integer] :=
+    Column[{"MAT#" <> ToString[ctrTag],
+            "@" <> ToString[base]}, Center, Spacings -> 0]
+
+op2Label[base_Integer, opcode_Integer] :=
+    Column[{"OP2 " <> Lookup[$op2Names, opcode, "?" <> ToString[opcode]],
+            "@" <> ToString[base]}, Center, Spacings -> 0]
+
+aloLabel[base_Integer] :=
+    Block[{stateCell = THeapRead[base + 1]},
+        Column[{"ALO",
+                "s" <> ToString[TTermVal[stateCell]] <> "@" <> ToString[base]},
+            Center, Spacings -> 0]
+    ]
+
+refLabel[defId_Integer] := "REF\nd" <> ToString[defId]
+
+numLabel[loc_Integer] :=
+    Block[{t = THeapRead[loc]},
+        ToString[TTermVal[t]]
+    ]
 
 vertexLabel[vid_String, info_Association] := Switch[info["tag"],
     $TagLAM | $TagAPP | $TagSUP | $TagDUP,
@@ -266,6 +388,12 @@ vertexLabel[vid_String, info_Association] := Switch[info["tag"],
         uopLabel[ToExpression[StringDrop[vid, 1]], info["opcode"]],
     $TagTEN,
         tenLabel[ToExpression[StringDrop[vid, 1]], info["dtype"]],
+    $TagREF, refLabel[info["defId"]],
+    $TagALO, aloLabel[ToExpression[StringDrop[vid, 1]]],
+    $TagCTR, ctrLabel[ToExpression[StringDrop[vid, 1]], info["ext"]],
+    $TagMAT, matLabel[ToExpression[StringDrop[vid, 1]], info["ext"]],
+    $TagOP2, op2Label[ToExpression[StringDrop[vid, 1]], info["opcode"]],
+    $TagNUM, numLabel[ToExpression[StringDrop[vid, 1]]],
     _, ""
 ]
 
@@ -312,12 +440,20 @@ buildHeapGraph[agents_Association, userOpts : OptionsPattern[THeapGraph]] := Blo
 
     subVertices = Flatten[KeyValueMap[subVerticesForAgent, agents]];
 
-    (* Build a (vid -> info) map that includes the synthesized
-       TEN vertices we just added via edge endpoints. *)
+    (* Build a (vid -> info) map that includes any synthesized
+       vertices added via edge endpoints (TEN handles whose
+       TAG_TEN cell isn't in the walked heap, NUM children of
+       compound parents, etc).  Prefix dispatches to the appropriate
+       tag stub. *)
     Module[{augmented = agents},
         Do[
-            If[ ! KeyExistsQ[augmented, v] && StringStartsQ[v, "t"],
-                augmented[v] = <|"tag" -> $TagTEN, "dtype" -> 0|>],
+            If[ ! KeyExistsQ[augmented, v],
+                Switch[StringTake[v, 1],
+                    "t", augmented[v] = <|"tag" -> $TagTEN, "dtype" -> 0|>,
+                    "n", augmented[v] = <|"tag" -> $TagNUM|>,
+                    "r", augmented[v] = <|"tag" -> $TagREF,
+                                          "defId" -> ToExpression[StringDrop[v, 1]]|>,
+                    _, Null]],
             {v, vertices}
         ];
         vshapes = Join[

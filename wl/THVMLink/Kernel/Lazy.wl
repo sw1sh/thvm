@@ -116,7 +116,10 @@ tlazyDecodeRaw[raw_Integer] := With[{tag = $termTagFn[raw]},
         $TagERA, Missing["EmptyStream"],
         $TagCTR, tlazyDecodeCtr[raw],
         _,
-            With[{forced = ttermRaw[TWnf[TTerm[raw]]]},
+            (* TCnf (Levy-optimal cnf readback) so DP-rooted Cons cells
+               from auto-dup'd recursive bodies fire their DUP-XXX at
+               readback and resolve to a CTR head. *)
+            With[{forced = ttermRaw[TCnf[TTerm[raw]]]},
                 If[ forced === raw,
                     TTerm[raw],
                     tlazyDecodeRaw[forced]
@@ -160,7 +163,7 @@ tlazyConsToList[raw_Integer] := Block[{
     While[ True,
         tag = $termTagFn[cur];
         If[ tag =!= $TagCTR && tag =!= $TagERA,
-            forced = ttermRaw[TWnf[TTerm[cur]]];
+            forced = ttermRaw[TCnf[TTerm[cur]]];
             If[ forced === cur, Break[]];
             cur = forced;
             tag = $termTagFn[cur]
@@ -638,11 +641,13 @@ TLazySubsets[xs_List] := (
 
 (* === consumer combinators (force via TWnf, walk heap shape) === *)
 
-(* lazyStep[t]: force one layer of t with TWnf and return either
+(* lazyStep[t]: force one layer of t with TCnf (Levy-optimal cnf
+   readback so DP-rooted cells from auto-dup'd recursive bodies
+   resolve to a CTR/SUP head) and return either
        {decodedHead, restTerm}  on a Cons cell or a SUP head
        Missing["EmptyStream"]   on Nil / ERA
        Missing["NotAStream"]    on a non-stream root *)
-lazyStep[t_TTerm] := lazyStepForced @ TWnf[t]
+lazyStep[t_TTerm] := lazyStepForced @ TCnf[t]
 
 lazyStepForced[forced_TTerm] := With[{
     raw = ttermRaw[forced], tag = TTermTag[forced]
@@ -674,8 +679,9 @@ lazyStepForced[forced_TTerm] := With[{
 
 (* The head of a Cons / first child of a SUP is typically a TAG_ALO
    (lazy book term wrapper) until something forces it.  Decode by
-   first running TWnf to realize, then walking the post-WHNF shape. *)
-decodeForced[raw_Integer] := tlazyDecodeRaw[ttermRaw @ TWnf[TTerm[raw]]]
+   first running TCnf to realize-and-resolve through any DP heads,
+   then walking the post-WHNF shape. *)
+decodeForced[raw_Integer] := tlazyDecodeRaw[ttermRaw @ TCnf[TTerm[raw]]]
 
 TLazyFirst[t_TTerm] := Replace[lazyStep[t], {
     {h_, _}        :> h,
