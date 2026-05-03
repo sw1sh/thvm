@@ -225,6 +225,12 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "uop/graph_rewrite.c"
 #include "uop/graph_simplify.c"
 
+// === scalar/ ===
+// Per-kernel ScalarUop[] simplification harness (Phase 2 of the
+// tinygrad symbolic/index rule port).  Runs over rangeify's flat
+// slot-id arena; rules land in subsequent phases.
+#include "scalar/simplify.c"
+
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.
 // Produces the scheduled DAG of UOP_KERNEL terms that
