@@ -1206,9 +1206,15 @@ fn Term term_resolve(Term t);
 // kernel boundaries (root + multi-consumer + REDUCE) in REALIZE_INFO.
 // materialize.c reads the table directly to topo-sort and emit.
 #define REALIZE_INFO_CAP 16384
+#define REALIZE_REASON_ROOT        (1u << 0)
+#define REALIZE_REASON_MULTI       (1u << 1)
+#define REALIZE_REASON_REDUCE      (1u << 2)
+#define REALIZE_REASON_INLINE      (1u << 3)
+#define REALIZE_REASON_FANIN_CAP   (1u << 4)
 typedef struct {
   u64 loc;
   u32 consumer_count;
+  u32 reasons;
   u8  op;
   u8  realized;
 } UOpInfo;
@@ -1218,6 +1224,7 @@ fn u32  realize_info_find(u64 loc);
 fn void realize_classify(Term root);
 fn u8   realize_is_realized(Term uop_term);
 fn u32  realize_consumer_count(Term uop_term);
+fn u32  realize_reasons(Term uop_term);
 fn void realize_rewrite_stats_clear(void);
 fn u32  realize_rewrite_stats_len(void);
 fn char const *realize_rewrite_stat_name(u32 i);

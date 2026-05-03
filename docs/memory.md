@@ -209,17 +209,28 @@ global buffer for an expanded broadcast view when the expanded view is
 at least 8x larger than its source and the source subtree has no
 reduction.  Set `THVM_INLINE_MULTI_CONSUMER_EXPAND=0` to disable it.
 
-Large pure movement/elementwise producer relaxation is an experimental
-fusion probe for Metal tile graphs.  When explicitly enabled, a
-multi-consumer producer can be recomputed inside each consumer instead
-of materialized when:
+Removable-bufferize relaxation is now the default Metal tile policy
+for small pure multi-consumer producers.  `realize_classify` still
+seeds the multi-consumer boundary, but the named
+`remove-removable-bufferize` rewrite clears it when the producer
+subtree is pure, reduction-free, within the op/consumer budget, and
+its consumers remain legal for rangeify/tile lowering.  Set
+`THVM_REMOVE_REMOVABLE_BUFFERIZE=0` to disable it while bisecting.
+The default cost guards are `THVM_REMOVE_BUFFERIZE_MAX_OPS=32` and
+`THVM_REMOVE_BUFFERIZE_MAX_CONSUMERS=8`.
+
+Large pure movement/elementwise producer relaxation remains as an
+experimental extra probe for Metal tile graphs.  When explicitly
+enabled, a multi-consumer producer can be recomputed inside each
+consumer instead of materialized when:
 
 - its output has at least `THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL`
   elements, default `65536`;
 - the subtree contains at least one movement op;
 - the subtree contains no reductions or side-effecting ops.
 
-Set `THVM_INLINE_MULTI_CONSUMER_PURE=1` to enable this relaxation.
+Set `THVM_INLINE_MULTI_CONSUMER_PURE=1` to enable this extra
+relaxation.
 It targets im2col-style PAD/RESHAPE/ADD producers where writing a
 large global movement buffer may be worse than duplicating the index
 expression inside the consumers.  It is default-off for now: the broad
@@ -329,20 +340,22 @@ Boundary fusion policy now runs through a named realize-map rewrite
 harness in `src/schedule/realize_rewrite.c`.  `realize_classify`
 seeds conservative boundaries, then applies rules such as
 `inline-constants`, `inline-large-expand-fanout`,
-`inline-pure-fanout-probe`, and `metal-tile-fanin-cap`.  Set
+`remove-removable-bufferize`, `inline-pure-fanout-probe`, and
+`metal-tile-fanin-cap`.  Set
 `DUMP_REWRITE=1` or `DUMP_FUSION_REWRITE=1` to print the rule hit
 summary for a materialization.  This is the first slice of the
 tinygrad-style approach: keep fusion decisions as explicit rewrite
 rules with legality/cost guards, rather than as untracked classifier
 branches or backend-specific custom kernels.
 
-The broad pure fanout probe is still default-off.  When enabled with
-`THVM_INLINE_MULTI_CONSUMER_PURE=1`, it now refuses producers that
-feed any reduce-reachable consumer chain, because BS=32
-`beautiful_mnist` showed those relaxations merge movement fanout into
-fat reduce kernels that fall back to `metal-jit`.  Use
-`DUMP_FUSION_REWRITE_CANDIDATES=1` to print accepted and rejected
-`inline-pure-fanout-probe` candidates during focused classifier work.
+The broad pure fanout probe is still default-off.  The default
+`remove-removable-bufferize` rule covers small pure fanout first; the
+probe remains useful for explicitly testing larger movement-heavy
+fanout.  It refuses producers that feed any reduce-reachable consumer
+chain, because BS=32 `beautiful_mnist` showed those relaxations merge
+movement fanout into fat reduce kernels that fall back to `metal-jit`.
+Use `DUMP_FUSION_REWRITE_CANDIDATES=1` to print accepted and rejected
+fusion candidates during focused classifier work.
 
 Metal direct MSL kernels can bind at most 30 input buffers without
 argument buffers.  With `THVM_BACKEND=metal THVM_TILE=1`,

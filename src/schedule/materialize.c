@@ -864,10 +864,11 @@ static void materialize_dump_source_child(Term child, u32 depth) {
   }
   u64 loc = term_val(child);
   u32 idx = realize_info_find(loc);
-  fprintf(stderr, "uop op=%u loc=%llu realized=%u consumers=%u\n",
+  fprintf(stderr, "uop op=%u loc=%llu realized=%u consumers=%u reasons=0x%x\n",
           term_ext(child), (unsigned long long)loc,
           idx == 0xFFFFFFFFu ? 0 : REALIZE_INFO[idx].realized,
-          idx == 0xFFFFFFFFu ? 0 : REALIZE_INFO[idx].consumer_count);
+          idx == 0xFFFFFFFFu ? 0 : REALIZE_INFO[idx].consumer_count,
+          idx == 0xFFFFFFFFu ? 0 : REALIZE_INFO[idx].reasons);
   if (depth >= 2 || term_ext(child) == UOP_KERNEL) return;
   u8 ar = uop_arity(term_ext(child));
   for (u8 i = 0; i < ar; i++) {

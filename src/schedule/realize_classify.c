@@ -2,12 +2,17 @@
 //                                must "realize" into a backing
 //                                buffer (a tinygrad CONTIGUOUS).
 //
-// A UOp realizes when ANY of:
+// A UOp is first seeded as a boundary when ANY of:
 //   (a) it is the root the caller asked for,
 //   (b) it has 2+ distinct UOp parents (multi-consumer),
 //   (c) it is a REDUCE (REDUCE outputs always escape into a
 //       buffer; one reduce per kernel),
 //   (d) it is a movement op whose source can't be aliased.
+//
+// Named realize-map rewrites then clear boundaries that are legal to
+// recompute or inline.  This deliberately mirrors tinygrad's
+// BUFFERIZE/INDEX schedule-rewrite model: seed conservatively, then
+// remove bufferization with explicit legality/cost rules.
 //
 // Output: a small table indexed by the UOp's heap loc; the
 // selective materializer consults realize_is_realized to decide
@@ -79,10 +84,27 @@ static u32 realize_info_get_or_add(u64 loc, u8 op) {
   idx = REALIZE_INFO_LEN++;
   REALIZE_INFO[idx].loc            = loc;
   REALIZE_INFO[idx].consumer_count = 0;
+  REALIZE_INFO[idx].reasons        = 0;
   REALIZE_INFO[idx].op             = op;
   REALIZE_INFO[idx].realized       = 0;
   realize_info_hash_insert(loc, idx);
   return idx;
+}
+
+static void realize_mark(UOpInfo *info, u32 reason) {
+  if (info == NULL) {
+    return;
+  }
+  info->realized = 1;
+  info->reasons |= reason;
+}
+
+static void realize_unmark(UOpInfo *info, u32 reason) {
+  if (info == NULL) {
+    return;
+  }
+  info->realized = 0;
+  info->reasons |= reason;
 }
 
 static void realize_walk_rec(Term t, u8 *visited) {
@@ -290,7 +312,7 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
     if (best == 0xFF) break;
     UOpInfo *child_info = &REALIZE_INFO[child_idx[best]];
     if (!child_info->realized && hits != NULL) (*hits)++;
-    child_info->realized = 1;
+    realize_mark(child_info, REALIZE_REASON_FANIN_CAP);
     total = total - child_count[best] + 1;
     child_count[best] = 1;
   }
@@ -382,6 +404,14 @@ static int realize_inline_reduce_fanout_enabled(void) {
   return e != NULL && e[0] == '1';
 }
 
+static int realize_remove_removable_bufferize_enabled(void) {
+  if (!realize_metal_tile_fanin_cap_enabled() || !realize_rangeify_enabled()) {
+    return 0;
+  }
+  char const *e = getenv("THVM_REMOVE_REMOVABLE_BUFFERIZE");
+  return e == NULL || e[0] != '0';
+}
+
 static u64 realize_inline_multiconsumer_pure_min_numel(void) {
   char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL");
   if (e != NULL && e[0] != '\0') {
@@ -402,6 +432,28 @@ static u64 realize_inline_reduce_fanout_min_numel(void) {
     }
   }
   return 65536;
+}
+
+static u32 realize_remove_removable_bufferize_max_ops(void) {
+  char const *e = getenv("THVM_REMOVE_BUFFERIZE_MAX_OPS");
+  if (e != NULL && e[0] != '\0') {
+    unsigned long v = strtoul(e, NULL, 10);
+    if (v >= 1 && v <= 1024) {
+      return (u32)v;
+    }
+  }
+  return 32;
+}
+
+static u32 realize_remove_removable_bufferize_max_consumers(void) {
+  char const *e = getenv("THVM_REMOVE_BUFFERIZE_MAX_CONSUMERS");
+  if (e != NULL && e[0] != '\0') {
+    unsigned long v = strtoul(e, NULL, 10);
+    if (v >= 2 && v <= 64) {
+      return (u32)v;
+    }
+  }
+  return 8;
 }
 
 static int realize_dump_fusion_candidates_enabled(void) {
@@ -437,7 +489,7 @@ static u32 realize_rule_inline_large_expand_fanout(Term root) {
       continue;
     }
     hits++;
-    info->realized = 0;
+    realize_unmark(info, REALIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -494,6 +546,79 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
   return 1;
 }
 
+static int realize_parent_uses_child(u64 parent_loc, u64 child_loc) {
+  u32 pidx = realize_info_find(parent_loc);
+  if (pidx == 0xFFFFFFFFu) {
+    return 0;
+  }
+  u8 ar = uop_arity(REALIZE_INFO[pidx].op);
+  for (u8 j = 0; j < ar; j++) {
+    Term c = term_resolve(heap_read(parent_loc + j));
+    if (term_tag(c) == TAG_UOP && term_val(c) == child_loc) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+typedef struct {
+  u32 ops;
+  u32 inputs;
+  int has_movement;
+} RealizeRecomputeStats;
+
+static int realize_subtree_recompute_stats(Term t,
+                                           u64 root_loc,
+                                           u32 depth,
+                                           RealizeRecomputeStats *stats) {
+  if (depth > 96 || stats == NULL) {
+    return 0;
+  }
+  t = term_resolve(t);
+  u8 tag = term_tag(t);
+  if (tag == TAG_TEN || tag == TAG_VAR) {
+    stats->inputs++;
+    return 1;
+  }
+  if (tag != TAG_UOP) {
+    return 0;
+  }
+  u8 op = term_ext(t);
+  if (op == UOP_KERNEL) {
+    stats->inputs++;
+    return 1;
+  }
+  if (op == UOP_REDUCE || !realize_recompute_pure_op(op)) {
+    return 0;
+  }
+
+  u64 loc = term_val(t);
+  if (loc != root_loc) {
+    u32 idx = realize_info_find(loc);
+    if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
+      stats->inputs++;
+      return 1;
+    }
+  }
+
+  if (realize_op_is_movement(op)) {
+    stats->has_movement = 1;
+  }
+  if (op != UOP_CONST && op != UOP_LOAD) {
+    stats->ops++;
+  }
+
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (!realize_subtree_recompute_stats(heap_read(loc + i),
+                                         root_loc, depth + 1,
+                                         stats)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int realize_parent_chain_reaches_reduce(u64 child_loc, u32 depth) {
   if (depth > 32) {
     return 1;
@@ -504,16 +629,7 @@ static int realize_parent_chain_reaches_reduce(u64 child_loc, u32 depth) {
       continue;
     }
     u8 pop = REALIZE_INFO[i].op;
-    u8 ar  = uop_arity(pop);
-    int hit = 0;
-    for (u8 j = 0; j < ar; j++) {
-      Term c = term_resolve(heap_read(ploc + j));
-      if (term_tag(c) == TAG_UOP && term_val(c) == child_loc) {
-        hit = 1;
-        break;
-      }
-    }
-    if (!hit) {
+    if (!realize_parent_uses_child(ploc, child_loc)) {
       continue;
     }
     if (pop == UOP_REDUCE) {
@@ -580,7 +696,7 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
               (unsigned)info->consumer_count);
     }
     hits++;
-    info->realized = 0;
+    realize_unmark(info, REALIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -641,7 +757,125 @@ static u32 realize_rule_inline_reduce_fanout(Term root) {
       continue;
     }
     hits++;
-    info->realized = 0;
+    realize_unmark(info, REALIZE_REASON_INLINE);
+  }
+  return hits;
+}
+
+static int realize_removable_bufferize_consumers_ok(u64 loc,
+                                                    int producer_has_movement,
+                                                    u32 max_consumers) {
+  u32 consumers = 0;
+  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+    u64 ploc = REALIZE_INFO[i].loc;
+    if (ploc == loc) {
+      continue;
+    }
+    if (!realize_parent_uses_child(ploc, loc)) {
+      continue;
+    }
+
+    consumers++;
+    if (consumers > max_consumers) {
+      return 0;
+    }
+
+    u8 pop = REALIZE_INFO[i].op;
+    if (pop == UOP_REDUCE) {
+      if (producer_has_movement) {
+        return 0;
+      }
+      continue;
+    }
+    if (!realize_recompute_pure_op(pop)) {
+      return 0;
+    }
+    if (producer_has_movement && realize_parent_chain_reaches_reduce(ploc, 0)) {
+      return 0;
+    }
+  }
+  return consumers >= 2;
+}
+
+static u32 realize_rule_remove_removable_bufferize(Term root) {
+  (void)root;
+  if (!realize_remove_removable_bufferize_enabled()) {
+    return 0;
+  }
+
+  u32 hits = 0;
+  u32 max_ops = realize_remove_removable_bufferize_max_ops();
+  u32 max_consumers = realize_remove_removable_bufferize_max_consumers();
+  for (u32 pass = 0; pass < 8; pass++) {
+    u32 pass_hits = 0;
+    for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
+      UOpInfo *info = &REALIZE_INFO[i];
+      if (!info->realized || info->consumer_count < 2) {
+        continue;
+      }
+      if ((info->reasons & REALIZE_REASON_MULTI) == 0) {
+        continue;
+      }
+      if ((info->reasons & (REALIZE_REASON_ROOT | REALIZE_REASON_REDUCE
+                          | REALIZE_REASON_FANIN_CAP)) != 0) {
+        continue;
+      }
+      if (!realize_recompute_pure_op(info->op) || info->op == UOP_REDUCE) {
+        continue;
+      }
+
+      Term self = term_new(0, TAG_UOP, info->op, info->loc);
+      RealizeRecomputeStats stats;
+      memset(&stats, 0, sizeof(stats));
+      if (!realize_subtree_recompute_stats(self, info->loc, 0, &stats)) {
+        continue;
+      }
+      if (stats.ops > max_ops) {
+        if (realize_dump_fusion_candidates_enabled()) {
+          fprintf(stderr,
+                  "realize_rewrite_skip rule=remove-removable-bufferize"
+                  " reason=op-budget loc=%llu op=%u ops=%u consumers=%u\n",
+                  (unsigned long long)info->loc,
+                  (unsigned)info->op,
+                  (unsigned)stats.ops,
+                  (unsigned)info->consumer_count);
+        }
+        continue;
+      }
+      if (!realize_removable_bufferize_consumers_ok(info->loc,
+                                                    stats.has_movement,
+                                                    max_consumers)) {
+        if (realize_dump_fusion_candidates_enabled()) {
+          fprintf(stderr,
+                  "realize_rewrite_skip rule=remove-removable-bufferize"
+                  " reason=consumer-legality loc=%llu op=%u ops=%u"
+                  " movement=%u consumers=%u\n",
+                  (unsigned long long)info->loc,
+                  (unsigned)info->op,
+                  (unsigned)stats.ops,
+                  (unsigned)stats.has_movement,
+                  (unsigned)info->consumer_count);
+        }
+        continue;
+      }
+
+      if (realize_dump_fusion_candidates_enabled()) {
+        fprintf(stderr,
+                "realize_rewrite_hit rule=remove-removable-bufferize"
+                " loc=%llu op=%u ops=%u movement=%u consumers=%u\n",
+                (unsigned long long)info->loc,
+                (unsigned)info->op,
+                (unsigned)stats.ops,
+                (unsigned)stats.has_movement,
+                (unsigned)info->consumer_count);
+      }
+      realize_unmark(info, REALIZE_REASON_INLINE);
+      pass_hits++;
+    }
+    hits += pass_hits;
+    if (pass_hits == 0) {
+      break;
+    }
   }
   return hits;
 }
@@ -695,7 +929,7 @@ static u32 realize_rule_inline_constants(Term root) {
     UOpInfo *info = &REALIZE_INFO[i];
     if (info->op != UOP_CONST) continue;
     if (info->realized) hits++;
-    info->realized = 0;
+    realize_unmark(info, REALIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -724,7 +958,7 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
       u32 cidx = realize_info_find(rc.locs[j]);
       if (cidx == 0xFFFFFFFFu) continue;
       if (REALIZE_INFO[cidx].realized) hits++;
-      REALIZE_INFO[cidx].realized = 0;
+      realize_unmark(&REALIZE_INFO[cidx], REALIZE_REASON_INLINE);
     }
   }
   return hits;
@@ -740,7 +974,7 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
     if (info->consumer_count != 1) continue;
     if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
     if (info->realized) hits++;
-    info->realized = 0;
+    realize_unmark(info, REALIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -757,7 +991,7 @@ static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
     if (info->consumer_count != 1) continue;
     if (!realize_reduce_consumer_is_scalar_tail(info->loc, root_loc)) continue;
     if (info->realized) hits++;
-    info->realized = 0;
+    realize_unmark(info, REALIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -779,13 +1013,21 @@ fn void realize_classify(Term root) {
 
   // Rule (a): the root itself realizes.
   u32 root_idx = realize_info_find(term_val(root));
-  if (root_idx != 0xFFFFFFFFu) REALIZE_INFO[root_idx].realized = 1;
+  if (root_idx != 0xFFFFFFFFu) {
+    realize_mark(&REALIZE_INFO[root_idx], REALIZE_REASON_ROOT);
+  }
 
-  // Rules (b) + (c): multi-consumer or REDUCE.
+  // Rules (b) + (c): multi-consumer or REDUCE.  Later named rules
+  // can clear the final `realized` bit while preserving these
+  // reason bits for diagnostics and tests.
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     UOpInfo *info = &REALIZE_INFO[i];
-    if (info->consumer_count >= 2) info->realized = 1;
-    if (info->op == UOP_REDUCE)    info->realized = 1;
+    if (info->consumer_count >= 2) {
+      realize_mark(info, REALIZE_REASON_MULTI);
+    }
+    if (info->op == UOP_REDUCE) {
+      realize_mark(info, REALIZE_REASON_REDUCE);
+    }
   }
   RealizeRewriteRule rules[] = {
     {"inline-constants",              realize_rule_inline_constants},
@@ -794,6 +1036,7 @@ fn void realize_classify(Term root) {
     {"inline-reduce-scalar-tail",     realize_rule_inline_reduce_scalar_tail},
     {"inline-large-expand-fanout",    realize_rule_inline_large_expand_fanout},
     {"inline-reduce-fanout",          realize_rule_inline_reduce_fanout},
+    {"remove-removable-bufferize",    realize_rule_remove_removable_bufferize},
     {"inline-pure-fanout-probe",      realize_rule_inline_pure_fanout_probe},
     {"metal-tile-fanin-cap",          realize_rule_metal_tile_fanin_cap},
   };
@@ -814,4 +1057,15 @@ fn u32 realize_consumer_count(Term uop_term) {
   u32 idx = realize_info_find(term_val(uop_term));
   if (idx == 0xFFFFFFFFu) return 0;
   return REALIZE_INFO[idx].consumer_count;
+}
+
+fn u32 realize_reasons(Term uop_term) {
+  if (term_tag(uop_term) != TAG_UOP) {
+    return 0;
+  }
+  u32 idx = realize_info_find(term_val(uop_term));
+  if (idx == 0xFFFFFFFFu) {
+    return 0;
+  }
+  return REALIZE_INFO[idx].reasons;
 }

@@ -57,6 +57,10 @@ until that step lands.
   rewrite-driven fusion plan.  Documents the named realize-map rewrite
   harness and the path from boundary rewrites to scalar/tile
   canonicalization.
+- [plans/bufferize.md](plans/bufferize.md): comprehensive plan for
+  first-class `BUFFERIZE`/`INDEX` schedule IR, edge-local movement
+  contexts, bufferize rewrites, memory planning, and autotune
+  integration.
 - [bench/history.md](bench/history.md): consolidated benchmark
   history and current canaries for training, GPT-2, Metal, tile, and
   autotune work.

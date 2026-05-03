@@ -189,6 +189,21 @@ int main(void) {
   CHECK_EQ(heap_read(term_val(mul_const_right) + 1), two);
   CHECK_EQ(uop_graph_rewrite_stat_hits("commutative-canonicalize"), 1);
 
+  TEST_BEGIN("uop-graph-simplify/reassociates-constant-operands");
+  Term three = uop_const(DT_FP32, f32_bits(3.0f));
+  Term nested_add = raw_binary(UOP_ADD,
+                               raw_binary(UOP_ADD, a, two),
+                               three);
+  Term reassoc = uop_graph_simplify(nested_add);
+  CHECK_EQ(term_tag(reassoc), TAG_UOP);
+  CHECK_EQ(term_ext(reassoc), UOP_ADD);
+  CHECK_EQ(heap_read(term_val(reassoc) + 0), a);
+  Term five = heap_read(term_val(reassoc) + 1);
+  CHECK_EQ(term_tag(five), TAG_UOP);
+  CHECK_EQ(term_ext(five), UOP_CONST);
+  CHECK_EQ(term_val(heap_read(term_val(five))), f32_bits(5.0f));
+  CHECK_EQ(uop_graph_rewrite_stat_hits("symbolic-reassociate-const"), 1);
+
   TEST_BEGIN("uop-graph-simplify/composes-pad-shrink-flip");
   u32 pad_inner[4] = {1, 2, 0, 3};
   u32 pad_outer[4] = {4, 5, 6, 7};

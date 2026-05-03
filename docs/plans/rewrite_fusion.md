@@ -26,6 +26,11 @@ The rewrite pipeline is good enough when it can:
 
 ## Current Slice
 
+The next structural step is tracked in
+[bufferize.md](bufferize.md): a first-class `BUFFERIZE`/`INDEX`
+schedule IR that turns the current realize map into explicit,
+rewriteable boundary and edge nodes.
+
 `src/schedule/realize_rewrite.c` provides the first realize-map
 rewrite harness.  It is deliberately scoped to the realize map:
 `realize_classify` still builds `REALIZE_INFO`, but boundary
@@ -38,6 +43,7 @@ Current rules:
 - `inline-softmax-broadcast-reduce`
 - `inline-reduce-scalar-tail`
 - `inline-large-expand-fanout`
+- `remove-removable-bufferize`
 - `inline-pure-fanout-probe`
 - `metal-tile-fanin-cap`
 
@@ -74,8 +80,19 @@ plain C callbacks today, not declarative class/predicate captures.
 That is intentional for the first implementation slice.  It gives
 symbolic, movement, range, and schedule-IR rewrites one reusable
 attachment point without changing current scheduling behavior.
-The materializer has a default-off hook for the checked pass:
-`THVM_UOP_GRAPH_SIMPLIFY=1`.
+The materializer hook for the checked pass remains opt-in:
+`THVM_UOP_GRAPH_SIMPLIFY=1`.  The explicit `uop_graph_simplify` pass
+has symbolic, commutative, and movement rules, but the traversal can
+resolve/rebuild through substitution context, so it is not yet safe
+as a transparent default pre-pass for higher-order adjoints and
+rangeify edge contexts.
+
+`REALIZE_INFO` now records boundary reason bits in addition to the
+final realized flag.  `realize_classify` seeds root, multi-consumer,
+and reduce reasons, then rewrite rules mark inlined or fan-in-cap
+changes.  This makes the current map closer to a rewriteable
+`BUFFERIZE` schedule IR: tests and debug dumps can distinguish "why
+this was a boundary" from "whether it survived rewrite".
 
 Scalar reduction nodes now allow multiple explicit REDUCE/UNROLL
 ranges in `S_REDUCE_* src[1..]`, and the CPU scalar interpreter plus
@@ -99,11 +116,15 @@ A fusion rule must prove both:
 - backend legality: the resulting scalar or tile graph can be rendered
   and replayed without falling back to generic per-op paths.
 
-The default-off `inline-pure-fanout-probe` is the cautionary example:
+`remove-removable-bufferize` is the first default bufferize-removal
+rule.  It clears small pure multi-consumer boundaries for Metal tile
+graphs when the producer is reduction-free, within a bounded
+recompute budget, and its consumers remain rangeify/tile legal.  The
+default-off `inline-pure-fanout-probe` remains the cautionary example:
 duplicating a large pure movement/ALU producer can reduce nominal
 dispatch count, but if the fused consumers become unsupported fat
-kernels, memory and wall time regress.  Future broad recompute rules
-must be guarded by scalar/tile legality, not only by UOp purity.
+kernels, memory and wall time regress.  Broad recompute rules must be
+guarded by scalar/tile legality, not only by UOp purity.
 
 ## Next Rules To Move Here
 
@@ -132,10 +153,10 @@ boundaries.
 | Pattern infrastructure: `UPat`, `PatternMatcher`, `graph_rewrite`, matcher composition, bottom-up walk, rewrite stats | `tinygrad/uop/ops.py`, `tinygrad/uop/upat.py` | Partial. `realize_rewrite.c` names realize-boundary rules; `uop_view` and `uop_graph_rewrite` now provide UOp inspection, bottom-up traversal, memoization, parent rebuilds, replacement callbacks, and hit stats, but not declarative UPat-style captures. |
 | Algebraic/symbolic simplification: constants, identities, commutative canonicalization, div/mod recombine, cast/bitcast folding, boolean/where folding | `tinygrad/uop/symbolic.py` | Partial. Constructor-time rules live in `src/uop/rewrite.c`; `uop_graph_simplify` now reuses the safe unary/binary/cast/bitcast/movement-chain subset as named graph rules, `uop_graph_simplify_checked` gates materializer use on shape/dtype preservation, and rangeify folds common scalar integer address-expression identities. Big missing piece is broader index expression canonicalization. |
 | Valid-mask simplification and `WHERE`/load movement | `pm_simplify_valid`, `pm_move_where_on_load` in `tinygrad/uop/symbolic.py` | Partial. Rangeify now folds `S_IAND` identity masks, constant-condition `S_IWHERE`, and nested `WHERE(mask, WHERE(mask, value, zero), zero)` through shared emit helpers; PAD lowering sites share one canonical bounds-mask helper. General `WHERE`/load movement into pointer/index form is still missing. |
-| Realize-map seeding and rangeify application | `pm_generate_realize_map`, `pm_apply_rangeify` in `tinygrad/schedule/indexing.py` | Partial. `realize_classify.c` seeds boundaries; `rangeify.c` emits scalar graphs, but not through a general rewrite table. |
+| Realize-map seeding and rangeify application | `pm_generate_realize_map`, `pm_apply_rangeify` in `tinygrad/schedule/indexing.py` | Partial. `realize_classify.c` now records root/multi/reduce boundary reasons and rewrites the final boundary map with named rules, including default `remove-removable-bufferize`; `rangeify.c` emits scalar graphs, but not through a general rewrite table. |
 | Movement-to-index rewrites | `apply_movement_op`, `pm_mops`, `pm_syntactic_sugar` in `tinygrad/schedule/rangeify.py` | Partial. THVM has edge-local rangeify fixes and view-only movement paths; `uop_graph_simplify` now has a reusable `movement-identity` table entry for no-op reshape/expand/permute/pad/shrink/flip. PAD-to-mask and full movement-to-index rules remain missing. |
 | Early schedule cleanup: function/tuple resolution, copy/store hazards, reduce split, movement cleanup | `earliest_rewrites`, `mop_cleanup`, `pm_fold_moved_after` | Partial/ad-hoc. Copy/store hazards and function/multi rules are not the current beautiful-mnist bottleneck. |
-| Bufferize removal and const/noop buffer folding | `pm_const_buffer_folding`, `pm_remove_bufferize`, `remove_bufferize` | Missing as a general rule family. This is one of the main fusion gaps. |
+| Bufferize removal and const/noop buffer folding | `pm_const_buffer_folding`, `pm_remove_bufferize`, `remove_bufferize` | Started. `inline-constants` folds constant buffer boundaries and `remove-removable-bufferize` clears small pure multi-consumer boundaries under legality/cost guards. General `INDEX(BUFFERIZE(...))` rewrite rules remain missing. |
 | Buffer insertion and kernel splitting | `pm_add_buffers`, `pm_add_buffers_local`, `to_define_global`, `split_kernels` | Partial. THVM materializes boundaries directly and emits scalar/tile kernels, but lacks rewriteable `BUFFERIZE`/`INDEX` nodes as first-class schedule IR. |
 | Range simplification and reduce collapse | `pm_flatten_range`, `pm_simplify_ranges`, `pm_split_ranges`, `pm_reduce_simplify`, `pm_load_collapse` in `tinygrad/codegen/simplify.py` | Started. Scalar `S_REDUCE_*` can now carry multiple explicit reduce ranges, CPU scalar/C JIT can execute them, rangeify emits them for fused contiguous and non-contiguous channel reduce chains, and Metal tile flat-grid lowering renders them. Local/group reduction scheduling over those axes is still shallow. |
 | Upcast/unroll expansion and group-reduce local buffering | `pm_pre_expander`, `expander`, `pm_group_for_reduce` in `tinygrad/codegen/late/expander.py` | Partial. THVM tile UOps have `UPCAST`/`UNROLL`; `LOCAL`/`GROUP_REDUCE` support is still incomplete. |
@@ -165,7 +186,7 @@ goal:
    `WHERE`/load movement.  Started with `uop_graph_simplify`, which
    lifts the existing safe constructor-time unary/binary/cast and
    reshape/expand-chain rules into the graph rewrite pipeline.  A
-   default-off materialize hook (`THVM_UOP_GRAPH_SIMPLIFY=1`) now runs
+   default-off materialize hook (`THVM_UOP_GRAPH_SIMPLIFY=1`) can run
    the checked pass only when shape/dtype stay stable.
 3. Express movement lowering as declarative rules:
    `RESHAPE`/`PERMUTE`/`EXPAND`/`PAD`/`SHRINK`/`FLIP` over `INDEX`,
@@ -182,6 +203,9 @@ goal:
    PAD-to-index path instead of the older chain-peeling fallback.
 4. Add rewriteable `BUFFERIZE`/`INDEX` schedule IR so bufferize
    insertion/removal is not hard-coded into `realize_classify`.
+   Started by adding boundary reason bits and the default
+   `remove-removable-bufferize` map rewrite; the missing part is
+   first-class `INDEX(BUFFERIZE(...))` nodes over rangeified edges.
 5. Port range/reduce simplification and reduce-to-accumulator rules.
    Started by making scalar reducers multi-range at the CPU
    interpreter/C-renderer level and carrying fused chain axes into

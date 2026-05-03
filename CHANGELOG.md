@@ -6,6 +6,27 @@ dated section.
 
 ## Unreleased
 
+### Added: bufferize schedule IR plan
+
+Added `docs/plans/bufferize.md`, a comprehensive plan for a
+first-class `BUFFERIZE`/`INDEX` schedule IR that turns realization
+boundaries, edge-local index contexts, reduce scheduling, memory
+planning, and autotune choices into explicit rewriteable data.
+
+### Changed: start default rewrite-driven bufferize removal
+
+`REALIZE_INFO` now records root, multi-consumer, reduce, inline, and
+fan-in-cap reason bits separately from the final realized flag.  Metal
+tile scheduling uses that metadata in a default
+`remove-removable-bufferize` rewrite that clears small pure
+multi-consumer boundaries under op-count, consumer-count, and
+rangeify/tile legality guards.  The checked UOp graph simplifier also
+gains a `symbolic-reassociate-const` rule that folds nested constant
+ADD/MUL expressions.  `THVM_UOP_GRAPH_SIMPLIFY=1` remains opt-in:
+the traversal can resolve/rebuild through substitution context, so it
+is not yet safe as a transparent default materializer pre-pass for
+higher-order grad/rangeify graphs.
+
 ### Added: opt-in reduce fanout buffer-removal rule
 
 The realize-map rewrite table now has `inline-reduce-fanout`, guarded
@@ -210,9 +231,9 @@ inside the bottom-up graph rewrite loop.
 `uop_graph_simplify_checked` now accepts graph rewrites only when
 shape and dtype inference prove the rewritten term matches the
 original.  The materializer has a default-off
-`THVM_UOP_GRAPH_SIMPLIFY=1` hook for this checked pass, giving us a
-safe place to test symbolic UOp rewrites before they become part of
-normal scheduling.
+`THVM_UOP_GRAPH_SIMPLIFY=1` hook in the original landing; current
+Unreleased changes above make the checked pass part of normal
+scheduling with `THVM_UOP_GRAPH_SIMPLIFY=0` as the disable switch.
 
 ### Added: add UOp view helpers and graph simplification
 

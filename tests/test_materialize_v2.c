@@ -22,6 +22,7 @@ static Term kernel_id_from_term(Term t) {
 }
 
 int main(void) {
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
   thvm_init();
 
   // Shared-subexpression case: s = a + b appears as the source of

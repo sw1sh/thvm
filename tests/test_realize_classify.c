@@ -48,6 +48,7 @@ int main(void) {
   realize_classify(add);
   CHECK_EQ(realize_is_realized(add), 1);
   CHECK_EQ(realize_consumer_count(add), 0);
+  CHECK(realize_reasons(add) & REALIZE_REASON_ROOT);
 
   TEST_BEGIN("realize-classify/chain-only-root-realized");
   // (a + b) * c -- linear chain, single consumer at each step.
@@ -78,6 +79,7 @@ int main(void) {
   realize_classify(root);
   CHECK_EQ(realize_consumer_count(shared), 2);
   CHECK_EQ(realize_is_realized(shared), 1);
+  CHECK(realize_reasons(shared) & REALIZE_REASON_MULTI);
   // The single-consumer intermediates (left, right) are NOT
   // realized.
   CHECK_EQ(realize_is_realized(left), 0);
@@ -104,6 +106,8 @@ int main(void) {
   realize_classify(c_root);
   CHECK_EQ(realize_consumer_count(two), 2);
   CHECK_EQ(realize_is_realized(two), 0);
+  CHECK(realize_reasons(two) & REALIZE_REASON_MULTI);
+  CHECK(realize_reasons(two) & REALIZE_REASON_INLINE);
   CHECK_EQ(realize_rewrite_stat_hits("inline-constants"), 1);
   CHECK(realize_rewrite_stats_len() >= 1);
 
@@ -116,6 +120,8 @@ int main(void) {
   realize_classify(reduced);
   CHECK_EQ(realize_is_realized(tmp), 0);     // ADD not REDUCE, single consumer
   CHECK_EQ(realize_is_realized(reduced), 1); // REDUCE always realizes
+  CHECK(realize_reasons(reduced) & REALIZE_REASON_ROOT);
+  CHECK(realize_reasons(reduced) & REALIZE_REASON_REDUCE);
 
   TEST_BEGIN("realize-classify/reduce-mid-graph-realizes");
   // ((a + b) reduced) * c -- the REDUCE is in the middle,
@@ -185,10 +191,12 @@ int main(void) {
   Term cc = term_new(0, TAG_TEN, DT_FP32, tc2);
   Term aa_plus_bb = uop_binary(UOP_ADD, aa, bb);
   Term times_cc   = uop_binary(UOP_MUL, aa_plus_bb, cc);
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
   thvm_materialize(times_cc);
   // Root is realized; the chain intermediate is single-consumer.
   CHECK_EQ(realize_is_realized(times_cc), 1);
   CHECK_EQ(realize_consumer_count(aa_plus_bb), 1);
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
   TEST_BEGIN("realize-classify/metal-pure-movement-fanout-to-reduce-stays-realized");
   setenv("THVM_BACKEND", "metal", 1);
@@ -222,9 +230,9 @@ int main(void) {
   realize_classify(qroot);
   CHECK_EQ(realize_consumer_count(qpad), 2);
   CHECK_EQ(realize_is_realized(qpad), 0);
-  CHECK_EQ(realize_rewrite_stat_hits("inline-pure-fanout-probe"), 1);
+  CHECK_EQ(realize_rewrite_stat_hits("remove-removable-bufferize"), 1);
 
-  TEST_BEGIN("realize-classify/metal-pure-alu-fanout-still-realizes");
+  TEST_BEGIN("realize-classify/metal-removable-bufferize-inlines-pure-alu-fanout");
   u32 tn = alloc_f32_tensor(4);
   Term n = term_new(0, TAG_TEN, DT_FP32, tn);
   Term pure = uop_binary(UOP_ADD, n, n);
@@ -233,8 +241,22 @@ int main(void) {
   Term pure_root = uop_binary(UOP_ADD, pure_left, pure_right);
   realize_classify(pure_root);
   CHECK_EQ(realize_consumer_count(pure), 2);
-  CHECK_EQ(realize_is_realized(pure), 1);
-  CHECK_EQ(realize_rewrite_stat_hits("inline-pure-fanout-probe"), 0);
+  CHECK_EQ(realize_is_realized(pure), 0);
+  CHECK(realize_reasons(pure) & REALIZE_REASON_MULTI);
+  CHECK(realize_reasons(pure) & REALIZE_REASON_INLINE);
+  CHECK_EQ(realize_rewrite_stat_hits("remove-removable-bufferize"), 1);
+
+  TEST_BEGIN("realize-classify/metal-removable-bufferize-disable-keeps-fanout");
+  setenv("THVM_REMOVE_REMOVABLE_BUFFERIZE", "0", 1);
+  Term keep = uop_binary(UOP_ADD, n, n);
+  Term keep_left = uop_binary(UOP_MUL, keep, n);
+  Term keep_right = uop_binary(UOP_ADD, keep, keep);
+  Term keep_root = uop_binary(UOP_ADD, keep_left, keep_right);
+  realize_classify(keep_root);
+  CHECK_EQ(realize_consumer_count(keep), 2);
+  CHECK_EQ(realize_is_realized(keep), 1);
+  CHECK_EQ(realize_rewrite_stat_hits("remove-removable-bufferize"), 0);
+  unsetenv("THVM_REMOVE_REMOVABLE_BUFFERIZE");
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
   unsetenv("THVM_INLINE_MULTI_CONSUMER_PURE");

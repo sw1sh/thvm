@@ -126,6 +126,63 @@ static Term uop_graph_simplify_commutative(Term t, void *user) {
   return uop_binary(v.op, v.src[1], v.src[0]);
 }
 
+static int uop_graph_simplify_const_f32(Term t, f32 *out) {
+  if (out == NULL || term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) {
+    return 0;
+  }
+  Term num = heap_read(term_val(t));
+  if (term_tag(num) != TAG_NUM || term_ext(num) != DT_FP32) {
+    return 0;
+  }
+  u32 bits = (u32)term_val(num);
+  memcpy(out, &bits, sizeof(*out));
+  return 1;
+}
+
+static int uop_graph_simplify_split_const(Term a,
+                                           Term b,
+                                           Term *expr,
+                                           f32 *c) {
+  if (uop_graph_simplify_const_f32(a, c)) {
+    *expr = b;
+    return 1;
+  }
+  if (uop_graph_simplify_const_f32(b, c)) {
+    *expr = a;
+    return 1;
+  }
+  return 0;
+}
+
+static Term uop_graph_simplify_reassociate_const(Term t, void *user) {
+  (void)user;
+  UOpView v;
+  if (!uop_view(t, &v) || (v.op != UOP_ADD && v.op != UOP_MUL)) {
+    return 0;
+  }
+
+  Term outer_expr = 0;
+  f32 outer_const = 0.0f;
+  if (!uop_graph_simplify_split_const(v.src[0], v.src[1],
+                                      &outer_expr, &outer_const)) {
+    return 0;
+  }
+  UOpView inner;
+  if (!uop_view(outer_expr, &inner) || inner.op != v.op) {
+    return 0;
+  }
+  Term inner_expr = 0;
+  f32 inner_const = 0.0f;
+  if (!uop_graph_simplify_split_const(inner.src[0], inner.src[1],
+                                      &inner_expr, &inner_const)) {
+    return 0;
+  }
+
+  f32 folded = v.op == UOP_ADD ? inner_const + outer_const
+                               : inner_const * outer_const;
+  return uop_binary(v.op, inner_expr, uop_const(DT_FP32, f32_bits(folded)));
+}
+
 static int uop_graph_simplify_dims_match_shape(u64 loc,
                                                u32 ndim,
                                                Shape const *shape) {
@@ -263,8 +320,20 @@ fn Term uop_graph_simplify(Term root) {
     {"symbolic-binary",         uop_graph_simplify_binary},
     {"symbolic-cast",           uop_graph_simplify_cast},
     {"commutative-canonicalize", uop_graph_simplify_commutative},
+    {"symbolic-reassociate-const", uop_graph_simplify_reassociate_const},
     {"movement-identity",       uop_graph_simplify_movement_identity},
     {"movement-chain-collapse", uop_graph_simplify_movement_chain},
+  };
+  u32 n_rules = (u32)(sizeof(rules) / sizeof(rules[0]));
+  return uop_graph_rewrite(root, rules, n_rules, NULL);
+}
+
+static Term uop_graph_simplify_materialize_subset(Term root) {
+  UOpGraphRewriteRule rules[] = {
+    {"symbolic-unary",          uop_graph_simplify_unary},
+    {"symbolic-binary",         uop_graph_simplify_binary},
+    {"symbolic-cast",           uop_graph_simplify_cast},
+    {"symbolic-reassociate-const", uop_graph_simplify_reassociate_const},
   };
   u32 n_rules = (u32)(sizeof(rules) / sizeof(rules[0]));
   return uop_graph_rewrite(root, rules, n_rules, NULL);
@@ -307,6 +376,31 @@ fn Term uop_graph_simplify_checked(Term root, u32 env_id) {
   return out;
 }
 
+static Term uop_graph_simplify_materialize_checked(Term root, u32 env_id) {
+  Term out = uop_graph_simplify_materialize_subset(root);
+  if (out == root) {
+    return out;
+  }
+
+  Shape root_shape;
+  Shape out_shape;
+  if (!term_shape_in(root, env_id, &root_shape)
+      || !term_shape_in(out, env_id, &out_shape)
+      || !uop_graph_shape_equal(&root_shape, &out_shape)) {
+    return root;
+  }
+
+  u32 root_dtype;
+  u32 out_dtype;
+  if (!term_dtype_in(root, env_id, &root_dtype)
+      || !term_dtype_in(out, env_id, &out_dtype)
+      || root_dtype != out_dtype) {
+    return root;
+  }
+
+  return out;
+}
+
 static int uop_graph_simplify_materialize_enabled(void) {
   static int known = 0;
   static int enabled = 0;
@@ -322,5 +416,5 @@ fn Term uop_graph_simplify_materialize(Term root, u32 env_id) {
   if (!uop_graph_simplify_materialize_enabled()) {
     return root;
   }
-  return uop_graph_simplify_checked(root, env_id);
+  return uop_graph_simplify_materialize_checked(root, env_id);
 }
