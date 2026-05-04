@@ -48,6 +48,7 @@ TESTS := \
   $(BIN)/test_bufferize_classify \
   $(BIN)/test_bufferize \
   $(BIN)/test_scalar_graph \
+  $(BIN)/test_tile_axis_info \
   $(BIN)/test_tile_graph \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \

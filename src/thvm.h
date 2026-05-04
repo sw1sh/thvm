@@ -799,9 +799,51 @@ typedef struct {
 // may instead seed a TILE_MMA root for recognized matmul programs.
 // Dispatch consumes tile_uops only on opt-in tile paths; default
 // execution still follows the scalar/KProgOp routes.
+// Phase D1: TILE_AXIS carries memory-scope + vector-width annotations
+// in addition to the legacy (kax_type, extent) packing.  Both are
+// zero-valued today (= use the existing default behavior); D2/D3
+// callers populate them when emitting threadgroup/shared-memory
+// reductions and vectorized loads.  Helper accessors below.
+//
+// Bit layout in TileUop.extra:
+//   bits  0..31  extent
+//   bits 32..47  kax_type           (KAX_LOOP, KAX_REDUCE, ...)
+//   bits 48..55  memory_scope       (0=global default; future shared/local/register)
+//   bits 56..63  vector_width       (0=scalar default; future 2/4/8)
+//
+// Reading kax_type as `(extra >> 32)` (the legacy pattern in
+// schedule/tile.c) yields a value with kax_type in low 16 bits and
+// memory_scope/vector_width in higher bytes -- so an exact equality
+// check against KAX_LOOP only works while the new fields are 0.
+// Use tile_axis_unpack to read the full info; the legacy reads are
+// migrated to it in this commit so future non-zero values don't
+// silently break them.
+typedef struct {
+  u32 kax_type;
+  u32 extent;
+  u32 memory_scope;
+  u32 vector_width;
+} TileAxisInfo;
+
+static inline u64 tile_axis_pack(TileAxisInfo info) {
+  return ((u64)info.extent       & 0xFFFFFFFFu)
+       | (((u64)info.kax_type     & 0xFFFFu)        << 32)
+       | (((u64)info.memory_scope & 0xFFu)          << 48)
+       | (((u64)info.vector_width & 0xFFu)          << 56);
+}
+
+static inline TileAxisInfo tile_axis_unpack(u64 extra) {
+  TileAxisInfo info;
+  info.extent       = (u32)(extra & 0xFFFFFFFFu);
+  info.kax_type     = (u32)((extra >> 32) & 0xFFFFu);
+  info.memory_scope = (u32)((extra >> 48) & 0xFFu);
+  info.vector_width = (u32)((extra >> 56) & 0xFFu);
+  return info;
+}
+
 typedef enum {
   TILE_NONE = 0,
-  TILE_AXIS,        // extra = (KAX_* << 32) | extent
+  TILE_AXIS,        // extra = tile_axis_pack(kax_type, extent, memory_scope, vector_width)
   TILE_SCALAR_BODY, // extra = ScalarUop id of value expression
   TILE_LOOP_NEST,   // src[0] = TILE_STORE body, src[1..] = TILE_AXIS nodes
   TILE_LOCAL_ALLOC, // future: threadgroup/local memory allocation

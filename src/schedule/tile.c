@@ -717,17 +717,16 @@ static int tile_collect_axis_info(KernelEntry const *ke, u32 axis_id,
     return 0;
   }
   TileUop const *axis = &ke->tile_uops[axis_id];
-  u32 type = (u32)(axis->extra >> 32);
-  u32 size = (u32)(axis->extra & 0xFFFFFFFFu);
+  TileAxisInfo info = tile_axis_unpack(axis->extra);
   if (axis->op != TILE_AXIS || axis->src_count != 0
-      || !tile_axis_type_ok(type) || size == 0) {
+      || !tile_axis_type_ok(info.kax_type) || info.extent == 0) {
     return 0;
   }
   if (axis_type != NULL) {
-    *axis_type = type;
+    *axis_type = info.kax_type;
   }
   if (extent != NULL) {
-    *extent = size;
+    *extent = info.extent;
   }
   return 1;
 }
@@ -915,9 +914,10 @@ fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
     for (u32 i = 0; i < out->n_axes; i++) {
       u32 axis_id = root->src[i];
       TileUop const *axis = &ke->tile_uops[axis_id];
+      TileAxisInfo info = tile_axis_unpack(axis->extra);
       out->axis_ids    [i] = axis_id;
-      out->axis_types  [i] = (u32)(axis->extra >> 32);
-      out->axis_extents[i] = (u32)(axis->extra & 0xFFFFFFFFu);
+      out->axis_types  [i] = info.kax_type;
+      out->axis_extents[i] = info.extent;
     }
     return 1;
   }
@@ -962,9 +962,10 @@ fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
   for (u32 i = 0; i < out->n_axes; i++) {
     u32 axis_id = root->src[1 + i];
     TileUop const *axis = &ke->tile_uops[axis_id];
+    TileAxisInfo info = tile_axis_unpack(axis->extra);
     out->axis_ids    [i] = axis_id;
-    out->axis_types  [i] = (u32)(axis->extra >> 32);
-    out->axis_extents[i] = (u32)(axis->extra & 0xFFFFFFFFu);
+    out->axis_types  [i] = info.kax_type;
+    out->axis_extents[i] = info.extent;
   }
   return 1;
 }
@@ -980,12 +981,12 @@ static int tile_build_mma_from_gemm(KernelEntry *ke,
   tile_free(ke);
 
   u32 axes[3];
-  axes[0] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64,
-                           ((u64)KAX_LOOP << 32) | (u64)keep.M);
-  axes[1] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64,
-                           ((u64)KAX_LOOP << 32) | (u64)keep.N);
-  axes[2] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64,
-                           ((u64)KAX_REDUCE << 32) | (u64)keep.K);
+  TileAxisInfo m_info = { KAX_LOOP,   keep.M, 0, 0 };
+  TileAxisInfo n_info = { KAX_LOOP,   keep.N, 0, 0 };
+  TileAxisInfo k_info = { KAX_REDUCE, keep.K, 0, 0 };
+  axes[0] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(m_info));
+  axes[1] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(n_info));
+  axes[2] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(k_info));
   ke->tile_root = tile_emit(ke, TILE_MMA, keep.dtype, 3, axes,
                             tile_mma_pack(keep.a_input, keep.b_input,
                                           keep.flags));
@@ -1021,10 +1022,13 @@ static u32 tile_emit_axes_from_kernel_axes(KernelEntry *ke, u32 *out, u32 cap) {
   }
 
   for (u32 i = 0; i < ke->axes->n_axes; i++) {
-    u32 axis_type = ke->axes->axis_types[i];
-    u32 extent    = ke->axes->full_shape[i];
-    u64 extra     = ((u64)axis_type << 32) | (u64)extent;
-    out[i] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, extra);
+    TileAxisInfo info = {
+      .kax_type     = ke->axes->axis_types[i],
+      .extent       = ke->axes->full_shape[i],
+      .memory_scope = 0,
+      .vector_width = 0,
+    };
+    out[i] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(info));
   }
   return ke->axes->n_axes;
 }
@@ -1051,9 +1055,13 @@ static u32 tile_emit_axes_from_scalar_root(KernelEntry *ke, u32 root,
     }
     u32 scalar_axis = (u32)((r->extra >> 32) & 0xFFFFFFFFu);
     u32 extent      = (u32)(r->extra & 0xFFFFFFFFu);
-    u32 axis_type   = tile_axis_from_scalar_axis(scalar_axis);
-    u64 extra       = ((u64)axis_type << 32) | (u64)extent;
-    out[i] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, extra);
+    TileAxisInfo info = {
+      .kax_type     = tile_axis_from_scalar_axis(scalar_axis),
+      .extent       = extent,
+      .memory_scope = 0,
+      .vector_width = 0,
+    };
+    out[i] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(info));
   }
   return n_axes;
 }
