@@ -313,7 +313,35 @@ int             dtype_is_packed   (u32 dt);
                              //   Bit-level reinterpret; src and dst must
                              //   share itemsize.  tinygrad's Ops.BITCAST
                              //   -- backward returns CONST(0).
-#define UOP_COUNT       25
+// === Symbolic INDEX layer (Phase B0; mirrors ScalarUop S_* expression ops) ===
+// These opcodes give the UOp DAG a symbolic-address representation so
+// movement-to-INDEX rewrites (Phase B1) can land at the UOp layer
+// instead of inside rangeify.c.  The shape mirrors S_RANGE / S_INDEX_E /
+// S_I{ADD,SUB,MUL,DIV,MOD,LT,AND,WHERE} one-for-one; rangeify (Phase B3)
+// will consume these directly and emit the matching scalar form.
+#define UOP_RANGE       25   // heap = [NUM(axis_type), NUM(extent)]; ext = axis_id.
+                             //   Symbolic axis-iter leaf.  axis_type uses
+                             //   the same encoding as S_AXIS_LOOP/REDUCE/
+                             //   UNROLL/GLOBAL/VIRT so the lowering keeps
+                             //   semantic alignment.
+#define UOP_INDEX_E     26   // heap = [buffer_src, addr_expr]; symbolic INDEX.
+                             //   buffer_src is a UOp tensor source; addr_expr
+                             //   is a tree of UOP_I*/UOP_RANGE giving the
+                             //   element offset.  Mirrors S_INDEX_E.
+#define UOP_IADD        27   // heap = [a, b]; signed integer add.
+#define UOP_ISUB        28   // heap = [a, b]; signed integer subtract.
+#define UOP_IMUL        29   // heap = [a, b]; signed integer multiply.
+#define UOP_IDIV        30   // heap = [a, b]; truncating signed divide.
+#define UOP_IMOD        31   // heap = [a, b]; signed modulo.
+#define UOP_ILT         32   // heap = [a, b]; less-than -> 0/1.
+#define UOP_IAND        33   // heap = [a, b]; bitwise AND (boolean conjunction on 0/1).
+#define UOP_IWHERE      34   // heap = [cond, then_v, else_v]; ternary select.
+#define UOP_INVALID     35   // heap = [NUM(0)]; sentinel for PAD masking.
+                             //   `IWHERE(in_bounds, load(...), INVALID)` is
+                             //   the canonical PAD lowering; downstream
+                             //   simplifier folds `LOAD(INVALID)` to the
+                             //   reduce identity.
+#define UOP_COUNT       36
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -1822,6 +1850,15 @@ fn Term uop_shrink (Term src, u32 ndim, const u32 *begin_end);
 fn Term uop_flip   (Term src, u32 axes_bitmask);
 fn Term uop_cast   (Term src, u32 dst_dtype);                    // value-preserving cast
 fn Term uop_bitcast(Term src, u32 dst_dtype);                    // same-itemsize reinterpret
+
+// === Symbolic INDEX layer (Phase B0) ===
+// Constructors for UOP_RANGE / UOP_INDEX_E / UOP_I* / UOP_IWHERE / UOP_INVALID.
+// Hash-cons via uop_mov_cache like the movement opcodes.
+fn Term uop_range    (u32 axis_id, u32 axis_type, u32 extent);
+fn Term uop_index_e  (Term buffer, Term addr);
+fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND
+fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
+fn Term uop_invalid  (void);
 
 typedef struct {
   Term term;
