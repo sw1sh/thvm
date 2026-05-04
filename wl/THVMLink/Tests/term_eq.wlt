@@ -64,38 +64,38 @@ VerificationTest[
 (* === CTRs: same ctor + same arity + same children ================== *)
 
 VerificationTest[
-    TTermSame[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2, 3}]],
+    TTermSame[ToTTerm[{1, 2, 3}], ToTTerm[{1, 2, 3}]],
     True,
     TestID -> "TermEq/struct-tuple-ctr-equal"
 ]
 
 VerificationTest[
-    TTermSame[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2, 4}]],
+    TTermSame[ToTTerm[{1, 2, 3}], ToTTerm[{1, 2, 4}]],
     False,
     TestID -> "TermEq/struct-tuple-ctr-different-leaf"
 ]
 
 VerificationTest[
-    TTermSame[TLazyEncode[{1, 2, 3}], TLazyEncode[{1, 2}]],
+    TTermSame[ToTTerm[{1, 2, 3}], ToTTerm[{1, 2}]],
     False,
     TestID -> "TermEq/struct-tuple-ctr-different-arity"
 ]
 
 VerificationTest[
-    TTermSame[TLazyEncode[a], TLazyEncode[a]],
+    TTermSame[ToTTerm[a], ToTTerm[a]],
     True,
     TestID -> "TermEq/struct-symbol-ctr-equal"
 ]
 
 VerificationTest[
-    TTermSame[TLazyEncode[a], TLazyEncode[b]],
+    TTermSame[ToTTerm[a], ToTTerm[b]],
     False,
     TestID -> "TermEq/struct-different-symbols"
 ]
 
 VerificationTest[
-    TTermSame[TLazyEncode[{a, {b, c}, 3}],
-                  TLazyEncode[{a, {b, c}, 3}]],
+    TTermSame[ToTTerm[{a, {b, c}, 3}],
+                  ToTTerm[{a, {b, c}, 3}]],
     True,
     TestID -> "TermEq/struct-nested-equal"
 ]
@@ -128,7 +128,7 @@ VerificationTest[
 (* === self-equality of arbitrary lazy-encoded value ================ *)
 
 VerificationTest[
-    Block[{t = TLazyEncode[{1, {a, b}, {{c}}}]},
+    Block[{t = ToTTerm[{1, {a, b}, {{c}}}]},
         TTermEq[t, t]],
     True,
     TestID -> "TermEq/self-equal-nested"
@@ -137,7 +137,7 @@ VerificationTest[
 (* === reflexivity / symmetry checks ================================ *)
 
 VerificationTest[
-    Block[{a = TLazyEncode[{1, 2}], b = TLazyEncode[{1, 2}]},
+    Block[{a = ToTTerm[{1, 2}], b = ToTTerm[{1, 2}]},
         TTermEq[a, b] === TTermEq[b, a]],
     True,
     TestID -> "TermEq/symmetry"

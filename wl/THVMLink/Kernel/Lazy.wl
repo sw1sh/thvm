@@ -46,18 +46,26 @@ TLazyFirst::usage   = "TLazyFirst[s] forces the head of a stream via TWnf and re
 TLazyRest::usage    = "TLazyRest[s] forces the head and returns the (still unforced) tail TTerm.";
 TLazyTake::usage    = "TLazyTake[s, n] returns a TTerm representing the first n elements of `s` as a lazy Cons chain.  The result is itself lazy: it stays an unforced APP-APP-REF redex until something walks it.  Built on a TDef-based `take` body so the n elements are produced one at a time by IC reduction.  Use TLazyToList[TLazyTake[s, n]] to force into a WL List.";
 TLazyToList::usage  = "TLazyToList[s] forces every element and returns a WL List.  Will hang if the stream is infinite.";
-TLazyMap::usage     = "TLazyMap[f, s] = f /@ TLazyToList[s].  Forces the full stream; not lazy on its output.";
-TLazyFold::usage    = "TLazyFold[f, x, s] = Fold[f, x, TLazyToList[s]].  Forces the full stream.";
+TLazyMap::usage      = "TLazyMap[f, s] returns a lazy Cons-stream whose i-th element is `f` applied to the i-th element of `s`.  IC-native via a recursive `lazyMap` TDef -- forcing one element of the result fires exactly the interactions for that step.  `f` is a TTerm (typically TLam).";
+TLazySelect::usage   = "TLazySelect[s, p] returns a lazy Cons-stream of those elements `h` of `s` for which `TApp[p, h]` reduces to a NUM with non-zero value.  IC-native.";
+TLazySelectFirst::usage = "TLazySelectFirst[s, p] forces `s` one Cons at a time and returns the first head whose `p[h]` reduces to non-zero NUM, decoded via FromTTerm.  Returns Missing[\"NotFound\"] on stream end.";
+TLazyCatenate::usage = "TLazyCatenate[ss] flattens a lazy Cons-stream of Cons-streams into a single lazy stream.  IC-native, built on TLazyConcat.";
+TLazyCases::usage    = "TLazyCases[s, pattern] forces `s` and returns a WL List of {element-TTerm, bindings} for each Cons head matching the held WL `pattern` (Pattern.wl).  Bindings is an Association of binder name -> TTerm.  Stream input stays lazy; output is eager.";
+TLazyChoice::usage   = "TLazyChoice[xs_List] returns a fresh SUP-stream over the encoded elements of `xs`: ERA on the empty list, the bare element on a singleton, &L{x1, &L{x2, ...}} otherwise.  Shared label so downstream DUP-SUP annihilations are clean.";
+TLazyFold::usage     = "TLazyFold[f, x, s] = Fold[f, x, TLazyToList[s]].  Forces the full stream.";
 
-TLazyEncode::usage  = "TLazyEncode[v] encodes a WL value into a TTerm.";
-TLazyDecode::usage  = "TLazyDecode[t] decodes a TTerm back to a WL value.";
+(* WL <-> TTerm coercion is now in Expr.wl as ToTTerm / FromTTerm.
+   The private workhorses tlazyEncode / tlazyDecode stay here so
+   the lazy combinators below can keep using them directly. *)
 
 (* Forward-declare symbols owned by sibling files (Ref.wl, Switch.wl)
    so bare references inside Begin[`Private`] resolve to THVMLink`X
    instead of phantom THVMLink`Private`X.  Lazy.wl is parsed before
    Ref.wl and Switch.wl in alphabetical order, so the public names
    don't yet exist when this file's body runs. *)
-{TDef, TRef, TIfZero, TOp2, TNum, TMatCtr};
+{TDef, TRef, TIfZero, TOp2, TNum, TMatCtr, TPatternMatch, TMatchBindings,
+ TMatch, TMatchSum, TMatchProduct, TMatchPart, TMatchValues,
+ ToTTerm, FromTTerm, TFreshLabel, TSup, TEra};
 
 Begin["`Private`"];
 
@@ -116,7 +124,8 @@ tlazyEncode[expr_] /; Head[expr] =!= TTerm &&
         TTerm[$termNewCtrFn[lab, children]]
      ])
 
-TLazyEncode[v_] := tlazyEncode[v]
+(* tlazyEncode itself stays a private workhorse; the public
+   coercion ToTTerm[v] in Expr.wl forwards to it. *)
 
 (* === decode === *)
 
@@ -196,7 +205,7 @@ tlazyConsToList[raw_Integer] := Block[{
     out
 ]
 
-TLazyDecode[t_] := tlazyDecode[t]
+(* tlazyDecode stays a private workhorse; FromTTerm forwards. *)
 
 (* === heap cell builders === *)
 
@@ -600,6 +609,27 @@ defPrependHToFirstEach[] := Module[{h, ss, s, rs, ig},
     ]
 ]
 
+(* lazyMap = λf. λs.  match s with
+                          Cons(h, t) -> Cons(f h, lazyMap f t)
+                          Nil        -> Nil                     *)
+defLazyMap[] := Module[{f, s, h, t, ig},
+    TDef["$THVMLink__lazyMap",
+        TLam[f, TLam[s,
+            TApp[
+                TMatCtr[$LazyCons,
+                    TLam[h, TLam[t,
+                        consTerm[
+                            TApp[f, h],
+                            TApp[TApp[TRef["$THVMLink__lazyMap"], f], t]]
+                    ]],
+                    TLam[ig, nilTerm[]]
+                ],
+                s
+            ]
+        ]]
+    ]
+]
+
 registerLazyHelpers[] := If[ ! TrueQ[$LazyHelpersRegistered],
     defConcat[];
     defPrependEach[];
@@ -611,6 +641,7 @@ registerLazyHelpers[] := If[ ! TrueQ[$LazyHelpersRegistered],
     defSplits[];
     defPrependHToFirst[];
     defPrependHToFirstEach[];
+    defLazyMap[];
     $LazyHelpersRegistered = True
 ]
 
@@ -716,7 +747,168 @@ TLazyToList[t_TTerm] := Block[{out = {}, cur = t, step},
     out
 ]
 
-TLazyMap[f_, t_TTerm]      := Map[f, TLazyToList[t]]
+(* === lazy stream combinators (IC-native via TDef) ================
+   TLazyMap / TLazySelect / TLazyCatenate construct APP chains over
+   their registered TDefs.  The result stays unforced until something
+   walks it (TLazyToList, TLazyTake, TLazySelectFirst, ...).  The
+   function arg `f` for TLazyMap / pred `p` for TLazySelect is itself
+   a TTerm (typically a TLam).
+*)
+
+TLazyMap[f_TTerm, s_TTerm] := (
+    registerLazyHelpers[];
+    (* Wrap `f` in a fresh TDef so each Cons step's APP-LAM gets a
+       fresh dyn copy of the LAM body via alo_realize.  Without this,
+       reusing the same TLam across calls (or across the recursive
+       per-element apps) would consume its LAM cell on first APP-LAM
+       and leave subsequent applications to misbehave. *)
+    With[{predRef = registerLazyPred[f]},
+        TApp[TApp[TRef["$THVMLink__lazyMap"], predRef], s]
+    ]
+)
+
+(* TLazySelect / TLazyCatenate -- WL-side eager walkers in this slice.
+   The IC-native TDef versions ran into a runaway when cnf had to drive
+   the predicate at every Cons step (the predicate's auto-dup'd binder
+   leaves an APP-headed-by-DP arg under MAT, and broadening the cnf-drive
+   in APP-MAT to handle that triggered exponential allocations on
+   recursive calls).  WL-side walking is correct + fast on small streams;
+   the IC-native lazy versions can replace these once the cnf-drive
+   bookkeeping is sorted.  The result is rebuilt as a fresh Cons-list
+   TTerm so downstream consumers (TLazyTake, FromTTerm, TLazyToList)
+   see a normal lazy stream shape.
+
+   IMPORTANT: applying the same TLam predicate multiple times from
+   WL would consume the LAM after the first APP-LAM (linear use in
+   IC).  Register the predicate as a TDef once, then issue
+   APP[TRef[predName], h_i] -- alo_realize unfolds a fresh dyn copy
+   per call, so each application sees an intact LAM body. *)
+
+(* Cache a TLam as a uniquely-named TDef and return TRef[name] so
+   we can apply it many times.  Name is keyed on the TLam's raw bits
+   so identical-but-separately-built TLams reuse one slot.  The
+   unique prefix avoids collisions with user-side def names. *)
+$lazyPredCounter = 0;
+registerLazyPred[p_TTerm] := Module[{name},
+    name = "$THVMLink__lazyPred_" <> ToString[$lazyPredCounter];
+    $lazyPredCounter += 1;
+    TDef[name, p];
+    TRef[name]
+]
+
+TLazySelect[s_TTerm, p_TTerm] := Module[{predRef, raws},
+    predRef = registerLazyPred[p];
+    raws    = consListAsRawTerms[s];
+    encodeAsConsListOfTerms @ Select[raws,
+        With[{r = TWnf @ TApp[predRef, TTerm[#]]},
+             TTermTag[r] === $TagNUM && TTermVal[r] =!= 0] &
+    ]
+]
+
+TLazyCatenate[ss_TTerm] := encodeAsConsListOfTerms @ Catenate[
+    consListAsRawTerms /@ (TTerm /@ consListAsRawTerms[ss])
+]
+
+(* Helper: walk a Cons-list TTerm forcing each Cons cell, return a List
+   of raw-Integer Term values for the elements.  Stops at Nil / ERA. *)
+consListAsRawTerms[s_TTerm] := Block[{cur = ttermRaw[s], out = {}, tag, label, forced, h},
+    While[ True,
+        forced = ttermRaw @ TCnf[TTerm[cur]];
+        tag    = $termTagFn[forced];
+        If[ tag === $TagERA, Break[]];
+        If[ tag =!= $TagCTR, Break[]];
+        label = $termExtFn[forced];
+        Which[
+            label === $LazyNil,  Break[],
+            label === $LazyCons,
+                AppendTo[out, $termCtrAtFn[forced, 0]];
+                cur = $termCtrAtFn[forced, 1],
+            True, Break[]
+        ]
+    ];
+    out
+]
+
+(* Helper: build a fresh Cons-list TTerm from a List of raw-Integer
+   element Terms (as returned by consListAsRawTerms). *)
+encodeAsConsListOfTerms[raws_List] := Fold[
+    consTerm[TTerm[#2], #1] &,
+    nilTerm[],
+    Reverse[raws]
+]
+
+(* TLazySelectFirst[s, p]: walk the stream one Cons at a time,
+   apply `p` to each head via TApp+TWnf, return the FIRST head whose
+   result reduces to a non-zero NUM, decoded via FromTTerm.
+   Returns Missing["NotFound"] when the stream is exhausted.  Lazy
+   on input (only forces as far as the first hit), eager on output. *)
+TLazySelectFirst[s_TTerm, p_TTerm] := Block[{
+    predRef = registerLazyPred[p],
+    cur = ttermRaw[s], forced, tag, label, headRaw, predResult
+},
+    While[ True,
+        forced = ttermRaw @ TCnf[TTerm[cur]];
+        tag    = $termTagFn[forced];
+        If[ tag === $TagERA, Return[Missing["NotFound"]]];
+        If[ tag =!= $TagCTR, Return[Missing["NotFound"]]];
+        label = $termExtFn[forced];
+        If[ label === $LazyNil, Return[Missing["NotFound"]]];
+        If[ label =!= $LazyCons, Return[Missing["NotFound"]]];
+        headRaw    = $termCtrAtFn[forced, 0];
+        predResult = TWnf @ TApp[predRef, TTerm[headRaw]];
+        If[ TTermTag[predResult] === $TagNUM &&
+            TTermVal[predResult] =!= 0,
+            Return[ FromTTerm @ TTerm[headRaw] ]
+        ];
+        cur = $termCtrAtFn[forced, 1]
+    ]
+]
+
+(* TLazyCases[s, pat]: walk the stream eagerly, run TPatternMatch on
+   each Cons head against the held WL `pattern`, return a WL List of
+   {head-TTerm, bindings} for every match.  Multi-match patterns
+   (when supported in Pattern.wl) yield multiple entries per head. *)
+SetAttributes[TLazyCases, HoldRest]
+TLazyCases[s_TTerm, pat_] := Block[{
+    raws = consListAsRawTerms[s], h, m, out = {}
+},
+    Do[
+        h = TTerm[r];
+        (* With[{p = pat}, ...] syntactically substitutes the held
+           pat into the body, so TPatternMatch's HoldRest sees the
+           pattern literal (not the symbol `pat`). *)
+        With[{p = pat},
+            m = TPatternMatch[h, p];
+            If[ Head[m] === TMatch,
+                With[{bs = TMatchBindings[m]},
+                    Do[ AppendTo[out, {h, b}], {b, bs} ]
+                ]
+            ]
+        ],
+        {r, raws}
+    ];
+    out
+]
+
+(* TLazyChoice[xs_List]: build a SUP-stream over xs, encoded as
+   nested SUPs at a fresh label.  Empty list -> ERA; one element ->
+   that element verbatim; multiple -> &L{x1, &L{x2, ..., &L{xN-1,xN}}}.
+   The shared label means downstream DUP-SUP commutes annihilate
+   pairwise -- ideal for "pick one of these" choice points. *)
+TLazyChoice[xs_List] := (
+    ensureInit[];
+    Module[{lab = TFreshLabel[], encoded},
+        encoded = ToTTerm /@ xs;
+        Switch[Length[encoded],
+            0, TEra[],
+            1, encoded[[1]],
+            _, Fold[TSup[lab, #2, #1] &,
+                    Last[encoded],
+                    Reverse[Most[encoded]]]
+        ]
+    ]
+)
+
 TLazyFold[f_, x_, t_TTerm] := Fold[f, x, TLazyToList[t]]
 
 End[];

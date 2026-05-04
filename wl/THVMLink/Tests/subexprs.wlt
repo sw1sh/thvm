@@ -41,7 +41,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Block[{a = TLazyEncode[a], b = TLazyEncode[b], c = TLazyEncode[c],
+    Block[{a = ToTTerm[a], b = ToTTerm[b], c = ToTTerm[c],
            t, pairs},
         t     = TOp2["*", TOp2["+", a, b], c];
         pairs = TTermSubexprs[t];
@@ -51,7 +51,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Block[{t = TLazyEncode[{a, b, c}], pairs},
+    Block[{t = ToTTerm[{a, b, c}], pairs},
         pairs = TTermSubexprs[t];
         Length[pairs]],
     4,                          (* Tuple-CTR + 3 leaves *)
@@ -59,7 +59,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Block[{t = TLazyEncode[{a, b, c}], pairs},
+    Block[{t = ToTTerm[{a, b, c}], pairs},
         pairs = TTermSubexprs[t];
         First /@ pairs],
     {{}, {1}, {2}, {3}},
@@ -116,7 +116,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Block[{a = TLazyEncode[a], b = TLazyEncode[b], c = TLazyEncode[c],
+    Block[{a = ToTTerm[a], b = ToTTerm[b], c = ToTTerm[c],
            t, sub},
         t   = TOp2["*", TOp2["+", a, b], c];
         sub = TSubexprAt[t, {0, 0}];
@@ -126,7 +126,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    Block[{t = TLazyEncode[{a, b, c}]},
+    Block[{t = ToTTerm[{a, b, c}]},
         Sort @ Table[TTermExpr @ TSubexprAt[t, {i}], {i, 1, 3}]],
     Sort @ {"CTR"[10001], "CTR"[10002], "CTR"[10003]},
     TestID -> "SubexprAt/ctr-children-via-offset"

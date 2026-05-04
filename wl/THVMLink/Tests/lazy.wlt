@@ -22,31 +22,31 @@ VerificationTest[
 (* === encode / decode round-trip === *)
 
 VerificationTest[
-    TLazyDecode @ TLazyEncode[42],
+    FromTTerm @ ToTTerm[42],
     42,
     TestID -> "Lazy/encode/integer-roundtrip"
 ]
 
 VerificationTest[
-    TLazyDecode @ TLazyEncode[a],
+    FromTTerm @ ToTTerm[a],
     a,
     TestID -> "Lazy/encode/symbol-roundtrip"
 ]
 
 VerificationTest[
-    TLazyDecode @ TLazyEncode[{1, 2, 3}],
+    FromTTerm @ ToTTerm[{1, 2, 3}],
     {1, 2, 3},
     TestID -> "Lazy/encode/integer-list-roundtrip"
 ]
 
 VerificationTest[
-    TLazyDecode @ TLazyEncode[{a, b, c}],
+    FromTTerm @ ToTTerm[{a, b, c}],
     {a, b, c},
     TestID -> "Lazy/encode/symbol-list-roundtrip"
 ]
 
 VerificationTest[
-    TLazyDecode @ TLazyEncode[{1, {a, b}, 3}],
+    FromTTerm @ ToTTerm[{1, {a, b}, 3}],
     {1, {a, b}, 3},
     TestID -> "Lazy/encode/nested-list-roundtrip"
 ]

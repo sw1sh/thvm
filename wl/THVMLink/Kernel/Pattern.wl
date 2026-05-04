@@ -46,7 +46,7 @@ TMatchApply::usage     = "TMatchApply[rhs, match] returns a List of TTerms produ
 TMatchParts::usage     = "TMatchParts[match] returns a List of Associations mapping each path (List of integer offsets) to the TTerm captured at that position.  Useful for path-keyed inspection of where each subterm came from.";
 
 (* Forward refs to private symbols owned by sibling files. *)
-{TLazyEncode, TSubexprAt, TTermSubexprs, TTermSame, TTermEq};
+{ToTTerm, TSubexprAt, TTermSubexprs, TTermSame, TTermEq};
 
 Begin["`Private`"];
 
