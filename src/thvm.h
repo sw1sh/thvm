@@ -799,6 +799,15 @@ typedef struct {
 // may instead seed a TILE_MMA root for recognized matmul programs.
 // Dispatch consumes tile_uops only on opt-in tile paths; default
 // execution still follows the scalar/KProgOp routes.
+// Phase D1: memory scope constants.  Used by TILE_AXIS.memory_scope,
+// TILE_LOCAL_ALLOC.scope, and TILE_BARRIER.scope.  Default 0 = global
+// (device memory) so legacy zero-valued packings still mean
+// "no special placement".
+#define TILE_MEM_GLOBAL    0   // device memory (default)
+#define TILE_MEM_SHARED    1   // threadgroup-shared (Metal: `threadgroup`)
+#define TILE_MEM_LOCAL     2   // per-thread (Metal: `thread`)
+#define TILE_MEM_REGISTER  3   // explicit register
+
 // Phase D1: TILE_AXIS carries memory-scope + vector-width annotations
 // in addition to the legacy (kax_type, extent) packing.  Both are
 // zero-valued today (= use the existing default behavior); D2/D3
@@ -1761,6 +1770,8 @@ fn void tile_reserve(struct KernelEntry *ke, u32 needed);
 fn u32  tile_emit(struct KernelEntry *ke, u8 op, u32 dtype,
                   u8 src_count, const u32 *src, u64 extra);
 fn u32  tile_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
+fn u32  tile_emit_alloc(struct KernelEntry *ke, u32 dtype, u32 scope, u32 n_elements);
+fn u32  tile_emit_barrier(struct KernelEntry *ke, u32 scope);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

@@ -58,6 +58,39 @@ fn u32 tile_emit_leaf(KernelEntry *ke, u8 op, u32 dtype, u64 extra) {
   return tile_emit(ke, op, dtype, 0, NULL, extra);
 }
 
+// Phase D2: TILE_LOCAL_ALLOC -- threadgroup/local memory allocation.
+// extra = (scope << 32) | n_elements; dtype carries the element type.
+// D3's reduce-broadcast lowering builds these for the cooperative-
+// reduce accumulator buffer.  Render emits Metal `threadgroup` /
+// `thread` storage qualifiers based on `scope`.
+fn u32 tile_emit_alloc(KernelEntry *ke, u32 dtype, u32 scope, u32 n_elements) {
+  u64 extra = ((u64)scope << 32) | (u64)n_elements;
+  return tile_emit_leaf(ke, TILE_LOCAL_ALLOC, dtype, extra);
+}
+
+// Phase D2: TILE_BARRIER -- threadgroup synchronization point.
+// extra = scope (TILE_MEM_*).  D3 emits one before any cross-thread
+// read of a shared accumulator.  Render emits Metal
+// `threadgroup_barrier(mem_flags::mem_threadgroup)` (or simdgroup
+// flavor if scope indicates so).
+fn u32 tile_emit_barrier(KernelEntry *ke, u32 scope) {
+  return tile_emit_leaf(ke, TILE_BARRIER, DT_BOOL, (u64)scope);
+}
+
+// Read TILE_LOCAL_ALLOC's (scope, n_elements) -- mirrors
+// tile_axis_unpack but for the alloc's two-field packing.
+typedef struct {
+  u32 scope;
+  u32 n_elements;
+} TileAllocInfo;
+
+static inline TileAllocInfo tile_alloc_unpack(u64 extra) {
+  TileAllocInfo info;
+  info.n_elements = (u32)(extra & 0xFFFFFFFFu);
+  info.scope      = (u32)((extra >> 32) & 0xFFu);
+  return info;
+}
+
 fn void tile_free(KernelEntry *ke) {
   if (ke->tile_uops != NULL) {
     free(ke->tile_uops);
