@@ -364,26 +364,36 @@ step is dominated by GPU kernel time and Metal encoder dispatch.
 
 | Framework | BS=512 ms/step | × thvm | Notes |
 |-----------|---------------:|-------:|-------|
-| **PyTorch MPS (eager)**     |   **9.7** |  1745× | `torch.device('mps')`, `nn.Adam`, `nn.CrossEntropyLoss` |
-| **PyTorch MPS (compile)**   |  11.3 |  1496× | `@torch.compile`; slight regression vs eager (compile boundary cost) |
-| **MLX (eager)**             |  22.9 |   738× | `mlx.optimizers.Adam`, `nn.value_and_grad`, NHWC layout |
-| **tinygrad METAL (TinyJit)**|  47.0 |   359× | `TinyJit`-decorated `train_step`, default heuristic axes |
-| **thvm METAL (chain on)**   | **16898**  |   1× | tile-jit + chain-reduce (default-on); kid=7 metal-jit dominates |
-| thvm METAL (chain off, baseline) | 17027 | 1.01× | env `THVM_RANGEIFY_NO_MULTI_REDUCE=1`; chain-reduce work invisible at BS=512 |
+| **PyTorch MPS (eager)**     |   **9.7** |  173× | `torch.device('mps')`, `nn.Adam`, `nn.CrossEntropyLoss` |
+| **PyTorch MPS (compile)**   |  11.3 |  148× | `@torch.compile`; slight regression vs eager |
+| **MLX (eager)**             |  22.9 |   73× | `mlx.optimizers.Adam`, `nn.value_and_grad`, NHWC layout |
+| **tinygrad METAL (TinyJit)**|  47.0 |   36× | `TinyJit`-decorated `train_step`, default heuristic axes |
+| **thvm METAL** (post-`cbc77d2`, 2026-05-05) | **1676** | 1× | u64 numel fix lifted kid=7 to metal-tile (10.6x speedup over the pre-fix 17786ms) |
+| thvm METAL (pre-fix, 2026-05-04) | 17786 | 10.6× | u32 numel overflow on kid=7 EXPAND output (5.24e9 elements -> 947912704); rangeify rejected on divisibility, fell to metal-jit |
 
 JITBEAM (tinygrad's BEAM autotune) was attempted but doesn't
 converge in <10 min on this model; numbers reported are default
 heuristic JIT only.
 
-**Where the BS=512 wall hides for thvm**: a single
-`metal-jit`-classified kernel (kid=7) eats **15.5 s of the 16.9 s
+**Where the BS=512 wall hid (pre-`cbc77d2`)**: a single
+`metal-jit`-classified kernel (kid=7) ate **15.5 s of the 16.9 s
 step**.  It's the conv-1 backward dInput convolution, expressed as
-a 29-op KProgOp program with a 947 M-element EXPAND-MUL-REDUCE
-pattern (im2col-style materialization).  The kernel never reaches
-rangeify (`status=not-rangeified`); realize_classify routes it to
-the `metal-jit` path which currently emits a single dispatch with
-LOOP-only axes over 947 M iters.  At ~4 GFLOP/s effective vs the
-M3 Max's >5 TFLOP/s peak, the kernel runs ~1000× under hardware.
+a 29-op KProgOp program with a 5.24 BILLION-element EXPAND-MUL-REDUCE
+pattern (im2col-style materialization).  The kernel never reached
+rangeify because `KProgOp.numel` was u32, and 5,242,880,000 mod 2^32
+= 947,912,704 -- the rangeify reduce-shape divisibility check
+correctly rejected the resulting non-integer ratio (947,912,704 /
+1,184,890 = 800.000595).  The fallback path went through `metal-jit`
+which currently emits a single dispatch with LOOP-only axes; at ~4
+GFLOP/s effective vs M3 Max's >5 TFLOP/s peak, that path ran ~1000×
+under hardware.
+
+**Fix (`cbc77d2`)**: widen `KProgOp.numel`, `src_numel()`,
+`shape_numel_u32()`, `ReduceChainInfo.out_numel`, and the local
+multiplications in materialize.c (movement-op, PAD, binary-op,
+reduce emit paths) plus rangeify.c's local `src_numel` /
+`reduce_size` from u32 to u64.  After the fix kid=7 lowers to
+metal-tile cleanly.  BS=512 wall: 17786ms -> 1676ms (-90.6%).
 
 The chain-reduce work landed earlier today (commits `9fc4b16` ..
 `48420ce`, see [docs/plans/multi_reduce_refactor.md]) lifts kid=6 /
