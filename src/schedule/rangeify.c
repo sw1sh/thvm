@@ -1544,20 +1544,21 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     reduce_inner       =   red->arg        & 0x00FFFFFFu;
     // inner>1 enabled (F-? -- view-aware pre-INDEX absorbed
     // broadcast strides; reduce_axis-search picks the right axis).
-    if (red->n_src    != 1) return 0;
+    if (red->n_src    != 1) RBAIL_PRE("reduce 0 n_src != 1");
     u32 src_numel;
     if (KSRC_IS_INPUT(red->src[0])) {
       u32 in_slot = KSRC_INDEX(red->src[0]);
       src_numel   = ke->input_numels[in_slot];
     } else {
       u32 src_idx = KSRC_INDEX(red->src[0]);
-      if (src_idx >= ke->n_ops) return 0;
+      if (src_idx >= ke->n_ops) RBAIL_PRE("reduce 0 src_idx OOR");
       src_numel = ke->program[src_idx].numel;
     }
-    if (src_numel == 0 || src_numel < red->numel) return 0;
+    if (src_numel == 0 || src_numel < red->numel) RBAIL_PRE("reduce 0 src_numel underflow");
     reduce_size = src_numel / red->numel;
-    if (reduce_size * red->numel != src_numel) return 0;
-    if (reduce_size == 0 || reduce_size > 0xFFFFu) return 0;
+    if (reduce_size * red->numel != src_numel) RBAIL_PRE("reduce 0 src_numel not divisible");
+    if (reduce_size == 0) RBAIL_PRE("reduce 0 size 0");
+    if (reduce_size > 0xFFFFu) RBAIL_PRE("reduce 0 size > 65535");
     if (red->n_reduce_axes > 0 && red->n_reduce_axes <= MAX_DIM
         && red->src0_ndim > 0 && red->src0_ndim <= MAX_DIM) {
       u64 meta_size = 1;
@@ -1604,20 +1605,21 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // input-scope tracking off reduce_meta[r].
   for (u32 r = 1; r < n_reduces; r++) {
     KProgOp *redr = &ke->program[reduce_positions[r]];
-    if (redr->n_src != 1) return 0;
+    if (redr->n_src != 1) RBAIL_PRE("reduce r n_src != 1");
     u32 src_numel_r;
     if (KSRC_IS_INPUT(redr->src[0])) {
       u32 in_slot = KSRC_INDEX(redr->src[0]);
       src_numel_r = ke->input_numels[in_slot];
     } else {
       u32 src_idx = KSRC_INDEX(redr->src[0]);
-      if (src_idx >= ke->n_ops) return 0;
+      if (src_idx >= ke->n_ops) RBAIL_PRE("reduce r src_idx OOR");
       src_numel_r = ke->program[src_idx].numel;
     }
-    if (src_numel_r == 0 || src_numel_r < redr->numel) return 0;
+    if (src_numel_r == 0 || src_numel_r < redr->numel) RBAIL_PRE("reduce r src_numel underflow");
     u32 size_r = src_numel_r / redr->numel;
-    if (size_r * redr->numel != src_numel_r) return 0;
-    if (size_r == 0 || size_r > 0xFFFFu) return 0;
+    if (size_r * redr->numel != src_numel_r) RBAIL_PRE("reduce r src_numel not divisible");
+    if (size_r == 0) RBAIL_PRE("reduce r size 0");
+    if (size_r > 0xFFFFu) RBAIL_PRE("reduce r size > 65535");
     u32 n_ranges_r = 0;
     u32 extents_r[MAX_DIM] = {0};
     if (redr->n_reduce_axes > 0 && redr->n_reduce_axes <= MAX_DIM
