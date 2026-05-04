@@ -153,40 +153,76 @@ after.
 
 ## 4. Side-by-Side Numbers (Apples-to-Apples)
 
-This is the canonical comparison table for one training step on the
-same hardware.  Numbers below are placeholders that should be
-re-measured before publication.
+Measurements on one machine, back-to-back, BS=32, one training step
+post-JIT, beautiful_mnist (Conv-Conv-BN-MaxPool x 2 + Linear + CE +
+Adam).
+
+### 4.1 Test Conditions (recorded 2026-05-04)
+
+- **Hardware**: Apple M3 Max (40-core GPU)
+- **macOS / Metal**: macOS 25.4.0 (Darwin), Metal version per system
+- **thvm**: `main` at `90c89a7` + `5e47e98`
+- **tinygrad**: HEAD of `/Users/swish/src/tinygrad`, `Device=METAL`,
+  `JIT=2`
+- **Driver**: `wl/Examples/beautiful-mnist/bench-train.wls` (thvm),
+  `/tmp/tinygrad_bench.py` adapted from `examples/beautiful_mnist.py`
+  with `BS=32`, `JIT=2`, 1 warmup + 5 steady-state steps.
 
 ### Table A — Per-Step Steady-State Metrics
 
 | Metric | thvm | tinygrad | Notes |
 |--------|------|----------|-------|
-| Wall time per step (ms) | TBD | TBD | post-JIT, GPU-measured |
-| Kernel count | TBD (should be `~72` post-Phase-1+reduce-chain-lift) | TBD (tinygrad test asserts `25` for smaller MNIST, `9` for one BN; expect `~70-90` for full beautiful_mnist) | one fwd+bwd+opt step |
-| Peak live memory (MB) | TBD (~58 last measured) | TBD (`mem_used` high-water) | excludes freelist |
-| Peak retained memory (MB) | TBD | not natively exposed | thvm-only; tinygrad must probe Metal |
-| GFLOPs per step | TBD (must instrument) | TBD (`global_ops`) | est. from ops |
-| Memory bandwidth (GB/s avg) | TBD (must instrument) | TBD (`global_mem / time_sum_s`) | est. from `mem_est` |
-| Buffer allocations | TBD (`buffers=A/B/C`) | not exposed | thvm-only |
-| Dispatch breakdown (tile/op/alias) | TBD (e.g. `metal-tile=72/0/0`) | not exposed | thvm-only; tinygrad runs everything as one shader path |
-| First-step compile + autotune time (ms) | TBD | TBD | warmup step 0 wall |
+| Wall time per step (ms) | **19.7** (range 19-25) | **20.3** (median of 4 runs: 20.3, 20.3, 19.9, 21.2) | wall-clock around the JIT-replayed step |
+| Kernel count | **72** | **116** | thvm: post-Phase-1+reduce-chain-lift; tinygrad: post-rangeify+JIT |
+| Unique kernel programs | 16 (high cache reuse) | 116 (effectively all unique) | thvm program-cache dedups identical scalar uops |
+| Peak live memory (MB) | **55.8** | **57.4** | thvm: `peak_live`; tinygrad: `GlobalCounters.mem_used` after step |
+| Peak retained memory (MB) | **58.0** | not natively exposed | thvm: `peak_retained` includes freelist |
+| GFLOPs per step | not measured (no native FLOP estimator) | **3.53** | tinygrad: `GlobalCounters.global_ops` |
+| Memory traffic per step (MB) | not measured | **83.1** | tinygrad: `GlobalCounters.global_mem` |
+| Buffer count (total/live/peak) | **376 / 290 / 376** | not exposed | thvm: `buffers=A/B/C` |
+| Dispatch breakdown | `metal-tile=72, metal-op=0` | n/a (one render path) | thvm-only; all 72 kernels through tile-JIT post-FLAT_GRID-lift |
+| First-step compile + JIT trace (ms) | **1567** | **3934** | warmup step wall; tinygrad's BEAM/rangeify is more elaborate |
+| JIT-ops in capture | **194** | **116** | thvm: per-op KProgOp count; tinygrad: kernel count post-fusion |
+| GPU compute time per step (ms, sum of per-kernel) | ~0.07 (sampled, `SHOW_PROFILE=1`) | **2.1** (median across runs 2-5 with `DEBUG=2`) | thvm's profile sampling underreports — likely doesn't capture every replay dispatch; investigation pending |
 
 ### Table B — Per-Kernel Steady-State Metrics
 
-For ONE training step's kernels, average and distribution:
-
 | Metric | thvm | tinygrad | Notes |
 |--------|------|----------|-------|
-| Mean kernel time (us) | TBD | TBD | total wall / kernel count |
-| Median kernel time (us) | TBD | TBD | from per-kernel profile |
-| Slowest kernel (us / role) | TBD | TBD | usually a Conv |
-| Mean kernel FLOPs | TBD | TBD | est |
-| Mean memory traffic per kernel (MB) | TBD | TBD | est |
-| Mean inputs per kernel | TBD | TBD | from KernelEntry / DEBUG=2 |
-| Median scalar uop count | TBD | not exposed | thvm-only |
-| Median program op count | TBD | not exposed | thvm-only |
-| % kernels on tile-JIT path | TBD (e.g. 100% post-FLAT_GRID-lift) | tinygrad runs one render path; ~100% by default | |
-| % kernels on per-op fallback | TBD (0% post-fix) | n/a | |
+| Per-kernel time, median (us) | 0.2 (per-dispatch sample) | **3.6** | tinygrad: from `DEBUG=2` per-kernel `tm` field |
+| Per-kernel time, mean (us) | 0.9 | 46.2 | mean dragged by tinygrad's slowest kernels |
+| Per-kernel time, max (us) | 6.0 (1 unique program out of 16) | **710** (the big conv-flat kernel `r_24_12_8_8_2_4_4_32_6_6n1`) | thvm's max comes from program reuse; tinygrad's max is a single kernel |
+| Per-kernel time, p95 (us) | not enough samples | 109 | |
+| Per-kernel mean inputs | 2 (median), 24 (max) | varies, `arg 2-8` typical | thvm reports `n_inputs`; tinygrad reports `arg` count in DEBUG=2 |
+| Per-kernel mean GFLOPS (estimated) | not exposed | 38 (median across kernels with FLOPs > 0) | tinygrad: from `tm` and `op_est` |
+| Per-kernel mean memory bw (GB/s) | not exposed | 48 (median) | tinygrad: `membw` field |
+| Per-kernel program ops | median **7.5**, max 119 | not exposed | thvm: `n_ops` from KProgOp |
+| Per-kernel scalar uops | exposed via `KernelEntry.n_scalar_uops` (not aggregated) | not exposed | thvm-only |
+| % on tile-JIT path | **100%** | n/a (one path) | thvm-only metric |
+| % on per-op fallback | **0%** | n/a | thvm-only |
+
+### Reading the tables
+
+- **Wall time is essentially identical** (19.7 vs 20.3 ms within
+  noise).  Both frameworks run beautiful_mnist BS=32 at ~50 steps/s
+  on M3 Max.
+- **Kernel count differs by 1.6x** (72 vs 116) but wall doesn't —
+  tinygrad's individual kernels are larger on average (median 3.6us
+  vs thvm's 0.2us), so it amortises the dispatch overhead over
+  fewer-but-bigger kernels.
+- **thvm has 16 unique kernel programs** vs tinygrad's 116.
+  Program-cache reuse is much higher on thvm because the convs
+  and pooling-grad shapes hash to the same KProgOp signature
+  across layers.
+- **First-step compile is 2.5x faster on thvm** (1.6s vs 3.9s) —
+  tinygrad runs more elaborate BEAM/rangeify search.
+- **GPU compute time per step (sum)**: tinygrad reports 2.1ms; thvm's
+  `SHOW_PROFILE` reports a smaller number (0.07ms) that's almost
+  certainly under-sampled — `cg_profile_record` only fires when the
+  per-op encoder runs, but graph-replay paths submit batched without
+  per-op timestamps.  An honest comparison would need extending
+  thvm's metal-graph replay to record per-op timestamps via
+  `MTLCommandBufferStatusCompleted` callbacks.
 
 ## 5. Reproducibility Checklist
 
