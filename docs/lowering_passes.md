@@ -431,3 +431,175 @@ this gap is the active work in `docs/plans/bufferize.md` Phase 3 and
 - `docs/plans/tile_uops.md` — TileUop data-layer contract.
 - `docs/plans/rangeify_apply_movement_op_progress.md` — port log of
   tinygrad's `apply_movement_op`-style INDEX rewrites.
+
+---
+
+## Ideal pipeline (forward-looking)
+
+The pipeline above is what's in the tree today.  It works but carries
+a lot of structural cruft: three parallel IRs (KProgOp[], ScalarUop[],
+TileUop[]), a side-channel KernelAxes, six runtime dispatch paths,
+two boundary-tracking arrays, and movement ops that exist as both
+heap UOps AND KProgOps AND consumed-edge metadata on B_INDEX.
+
+What tinygrad and tilelang teach is that **a single DAG IR with
+movement-as-index and axes-as-leaves** removes most of the bookkeeping.
+This is the target architecture; everything else is migration cost.
+
+### Target shape
+
+```
+   user / WL
+      |
+      v
+   UOp graph                                   <- ONE IR, end to end.
+      |   pure-functional, hash-consed.        every value, address,
+      |                                        axis, store, reduce
+      |                                        is a UOp leaf or node.
+      |
+      |  pass 1: simplify                      tinygrad-style PatternMatcher.
+      |     algebraic, movement-to-INDEX,      after this pass NO
+      |     axis-aware folds, dtype norm.      MOVEMENT OP REMAINS:
+      |     PERMUTE/RESHAPE/EXPAND/PAD/        every PERMUTE has been
+      |     SHRINK/FLIP rewrite to INDEX       absorbed into the
+      |     expressions on RANGE leaves.       consumer's INDEX address;
+      |                                        every PAD into a WHERE.
+      |
+      |  pass 2: schedule                      one rule family.
+      |     insert BUFFERIZE/STORE at the      seed conservatively
+      |     chosen kernel boundaries.          (root + multi-consumer +
+      |     boundaries are UOp nodes IN THE    REDUCE), then named
+      |     SAME GRAPH, not a side-channel.    cost-model rewrites
+      |                                        promote/demote.
+      |
+      |  pass 3: axes                          per-kernel rewrite.
+      |     for each BUFFERIZE'd kernel,       cost-modeled choice
+      |     rewrite each RANGE leaf's          per axis (FLAT_GRID /
+      |     axis_type field via a single       LOCAL_GLOBAL /
+      |     pattern-matcher pass.              GROUP_REDUCE / ...).
+      |                                        autotune == search over
+      |                                        this rewrite.
+      |
+      |  pass 4: render                        pretty-printer.
+      |     emit MSL / C / CUDA from the       no decisions left;
+      |     fully-axis-typed UOp graph.        every backend is a
+      |                                        backend-specific
+      |                                        rendering of the
+      |                                        same IR.
+      v
+   one dispatch path                           one MTLComputePipelineState
+                                               per kernel; ICB replay
+                                               amortises encoder cost.
+```
+
+### What each existing pass collapses into
+
+| Today | Ideal | Why it merges |
+|---|---|---|
+| `uop_graph_simplify` | pass 1 (simplify) | Already a PatternMatcher; just becomes part of the bigger rewrite set. |
+| `bufferize_classify` walk + seeding | pass 2 (schedule) | The walker is just "find ROOT/MULTI/REDUCE patterns and insert BUFFERIZE nodes" — that's a rewrite, not a separate pass. |
+| `bufferize_rewrite_apply` named rules | pass 2 (schedule) | Same rule family, no separate driver. |
+| `topo_sort_boundaries` + `plan_kernel_merges` | gone (or pass 2) | Topo order falls out of the DAG; multi-output is just a BUFFERIZE node with multiple STORE children. |
+| `visit()` UOp -> KProgOp[] | gone | KProgOp[] disappears.  The "kernel program" is the subgraph between two BUFFERIZE nodes. |
+| `axes_default_for` + `propose.c` + `apply_opt.c` | pass 3 (axes) | All become rewrites on RANGE leaves: defaults are seed rules, autotune is BEAM search over the rewrite set. |
+| `rangeify_try_lower_elementwise` | pass 1 (simplify) | The "movement-to-INDEX absorption" is an algebraic rewrite. The current rangeify is an entire 3000-line file because it operates on TWO IRs (KProgOp -> ScalarUop); with one IR it's just rewrite rules. |
+| `tile_build_from_scalar` | gone | TileUop is a structural view of ScalarUop; with one IR there's no view to build. The "loop nest" is just RANGE leaves consumed by reductions and stores. |
+| `cg_emit` + `cg_emit_metal` + `metal_tile_jit_encode` + `metal_jit_encode` + `cg_supports_metal_reduce_expr` + `metal_try_*` specialisations | pass 4 (render) | All collapse into one renderer that walks the final UOp graph. Specialisations (conv2d, gemm) are pattern-matched in pass 1 and rewritten to canonical "fused matmul/conv" UOp shapes; renderer emits the same template for everyone. |
+
+### Concrete deletion list
+
+What disappears from `src/`:
+
+- `schedule/rangeify.c` (3.2k lines): **delete**. Movement-to-INDEX rules become entries in `simplify`. Range/index/load emission becomes structural — no separate ScalarUop IR to lower into.
+- `schedule/tile.c`: **delete**. TileUop layer is purely structural and adds no scheduling decisions today.
+- `schedule/kernel_program_cache.c`: **delete**. With UOp hash-consing already in `uop/*` files, kernel programs are subgraphs and dedup naturally.
+- `codegen/render_c_scalar.c`: **delete** (only the C scalar renderer; the C and Metal renderers stay).
+- `codegen/axis.c` + `codegen/apply_opt.c` + `codegen/propose.c`: **collapse** into `simplify_axes.c` (pass 3), one file with ~200 lines of pattern rewrites.
+- The `KProgOp` struct in `thvm.h` (~80 lines) plus everything that consumes it (`backend/cpu/op/*.c` opcode interpreters, `backend/cpu/jit.c`, the `cg_supports*` family in `codegen/cg.c`): **delete**. CPU dispatch routes through the same renderer (emit C, clang-JIT, run).
+- The dispatch ladder in `backend/metal/_.m` (alias / conv / gemm / op / tile / jit): **collapse** to one path. Specialisations move into pass-1 rewrites that produce specialised UOp shapes; renderer emits one MSL function per kernel.
+- `BUFFERIZE_NODES[]` vs `BUFFERIZE_BUFS[]` storage split (Step 6 of the realize_classify retirement that was deferred): **collapse**, since "the graph" IS the storage.
+
+What stays:
+
+- `src/uop/*.c` — UOp constructors. Already the right shape.
+- `src/jit/capture.c` + `src/jit/replay.c` — ICB capture/replay. Backend infrastructure, not lowering.
+- `src/schedule/realize.c` — one-shot WNF + materialize wrapper. Becomes a thin caller of `simplify+schedule+axes+render`.
+- `src/schedule/kernel_alloc.c` + `kernel_gc.c` — Metal buffer allocation + lifetime. Backend infrastructure.
+- `src/schedule/bufferize.c` — keep AS the one-IR primitives (B_BUFFERIZE / B_STORE / B_INDEX become first-class UOps). The graph operations stay; the SECONDARY storage goes away.
+- `src/codegen/render_metal.c` — keep, simplified to a fully axis-typed renderer.
+
+Net: the `src/schedule/` directory drops from 16 files to ~6.  The
+`src/codegen/` directory drops from 9 files to ~4.  Total ~5k lines
+deleted from compile-pipeline code.
+
+### Key tinygrad insights
+
+1. **Movement ops are NOT data**.  PERMUTE / RESHAPE / EXPAND / PAD /
+   SHRINK / FLIP are NEVER materialised as buffers OR as KProgOps.
+   They rewrite the consumer's INDEX expression.  An EXPAND with
+   src `[1, N]` and out `[M, N]` becomes `INDEX(src, [m * 0 + n * 1])`
+   — `m * 0` is the broadcast.  No materialisation, no copies.
+
+2. **Boundaries are nodes, not flags**.  `BUFFERIZE(value)` is a UOp
+   that means "this value gets a backing buffer".  The schedule pass
+   inserts and removes BUFFERIZE nodes; everything downstream just
+   walks the graph.  No separate `realized` bit on a side-channel
+   table.
+
+3. **One dispatch path**.  Tinygrad doesn't have "metal-op fallback"
+   or "metal-jit fallback".  Every kernel goes through `linearize`
+   (the rangeify analogue) and the renderer.  Specialised shapes
+   (conv2d_flat, gemm) are detected as PATTERNS and rewritten to
+   canonical forms; the renderer emits one MSL function for every
+   kernel.
+
+4. **Autotune is rewrite search**.  BEAM proposes axis-type rewrites
+   on the same UOp graph and runs the result.  No `apply_opt`
+   mutation of side state, no `KernelAxes.applied_opts[]` log to
+   replay.  The chosen axis-type configuration IS the lowered graph.
+
+### Key tilelang insights
+
+1. **Schedule is in the IR**.  TileLang's tile-IR has axis types
+   (parallel / unroll / vectorise / shared-memory / register) AS
+   IR-level annotations on loop nodes.  Lowering = walk the IR and
+   emit code that respects the annotations.  No "axes_default_for
+   side-table".
+
+2. **Pattern-matched specialisations**.  `T.gemm`, `T.copy`,
+   `T.reduce` etc. are FUNCTIONS in the source language that the
+   compiler matches and lowers to specialised tile-IR.  The user
+   writes high-level operations; the compiler produces dense
+   patterns.  In thvm-speak: `tile_analyze_conv2d_flat` becomes a
+   pattern in pass 1, not a runtime check in dispatch.
+
+3. **Backend-aware rewrites**.  TileLang has separate rewrite passes
+   per backend (CUDA / HIP / Metal) that lower the same tile-IR
+   differently — not separate IRs, separate **rewrites on one IR**.
+   Mirrors what pass 4 should look like.
+
+### Migration order
+
+The realize_classify retirement (commits `0fafd96` .. `e8d6815`,
+`7ee461f`) showed the rename phase is straightforward.  The
+storage / IR fold is the actual work:
+
+1. **Phase 0** (in tree, partial): bufferize-IR data layer.
+   `B_BUFFERIZE` / `B_INDEX` / `B_STORE` exist as records.
+   `docs/plans/bufferize.md` Phases 0-7 cover this.
+2. **Phase 1** (next, ~2 weeks): movement-to-INDEX rewrites land as
+   pass-1 rules.  Bufferize Phase 3 in the plan doc.  Consumers stop
+   reading `KProgOp.pad_widths` / `axis_perm` / etc.; rangeify reads
+   B_INDEX edges directly.
+3. **Phase 2** (~3 weeks): collapse `KProgOp`.  visit() becomes a
+   walker that produces UOps directly (the simplify + schedule
+   passes operate on this output).  Backend dispatch routes through
+   one path.  Specialised paths become pattern rewrites.
+4. **Phase 3** (~2 weeks): collapse `KernelAxes` side channel.
+   `RANGE.axis_type` is the only axis state.  Autotune (BEAM)
+   becomes a rewrite-search.
+5. **Phase 4**: delete the dead code paths, single-renderer.
+
+Total: 6-8 weeks of focused work, gated on each phase's `make test`
+green.  Result: one IR end-to-end, ~5k lines deleted, one dispatch
+path, faster compile + cleaner extension surface for Phase 5+ wins.
