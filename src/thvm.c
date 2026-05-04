@@ -244,7 +244,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "schedule/kernel_program_cache.c"
 #include "schedule/uop_meta.c"
 #include "schedule/consumer_count.c"
-#include "schedule/realize_rewrite.c"
+#include "schedule/bufferize_rewrite.c"
 #include "schedule/bufferize.c"
 #include "schedule/bufferize_classify.c"
 #include "schedule/materialize.c"

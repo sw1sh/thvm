@@ -108,8 +108,8 @@ int main(void) {
   CHECK_EQ(bufferize_is_realized(two), 0);
   CHECK(bufferize_reasons(two) & BUFFERIZE_REASON_MULTI);
   CHECK(bufferize_reasons(two) & BUFFERIZE_REASON_INLINE);
-  CHECK_EQ(realize_rewrite_stat_hits("inline-constants"), 1);
-  CHECK(realize_rewrite_stats_len() >= 1);
+  CHECK_EQ(bufferize_rewrite_stat_hits("inline-constants"), 1);
+  CHECK(bufferize_rewrite_stats_len() >= 1);
 
   TEST_BEGIN("realize-classify/reduce-always-realizes");
   // (a + b) reduced -- ADD is a single-consumer intermediate
@@ -150,7 +150,7 @@ int main(void) {
   bufferize_classify(rf_root);
   CHECK_EQ(bufferize_consumer_count(rf_reduce), 2);
   CHECK_EQ(bufferize_is_realized(rf_reduce), 0);
-  CHECK_EQ(realize_rewrite_stat_hits("inline-reduce-fanout"), 1);
+  CHECK_EQ(bufferize_rewrite_stat_hits("inline-reduce-fanout"), 1);
 
   TEST_BEGIN("realize-classify/metal-reduce-fanout-keeps-reduce-parent");
   thvm_free();
@@ -165,7 +165,7 @@ int main(void) {
   bufferize_classify(rp_root);
   CHECK_EQ(bufferize_consumer_count(rp_reduce), 2);
   CHECK_EQ(bufferize_is_realized(rp_reduce), 1);
-  CHECK_EQ(realize_rewrite_stat_hits("inline-reduce-fanout"), 0);
+  CHECK_EQ(bufferize_rewrite_stat_hits("inline-reduce-fanout"), 0);
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
   unsetenv("THVM_INLINE_REDUCE_FANOUT");
@@ -229,7 +229,7 @@ int main(void) {
   CHECK(bufferize_reasons(pad) & BUFFERIZE_REASON_INLINE);
   // remove-removable-bufferize fires on this case now that the
   // movement-reduce gate is lifted.
-  CHECK(realize_rewrite_stat_hits("remove-removable-bufferize") >= 1);
+  CHECK(bufferize_rewrite_stat_hits("remove-removable-bufferize") >= 1);
 
   TEST_BEGIN("realize-classify/metal-large-pure-movement-fanout-recomputes");
   thvm_free();
@@ -244,7 +244,7 @@ int main(void) {
   bufferize_classify(qroot);
   CHECK_EQ(bufferize_consumer_count(qpad), 2);
   CHECK_EQ(bufferize_is_realized(qpad), 0);
-  CHECK_EQ(realize_rewrite_stat_hits("remove-removable-bufferize"), 1);
+  CHECK_EQ(bufferize_rewrite_stat_hits("remove-removable-bufferize"), 1);
 
   TEST_BEGIN("realize-classify/metal-removable-bufferize-inlines-pure-alu-fanout");
   u32 tn = alloc_f32_tensor(4);
@@ -258,7 +258,7 @@ int main(void) {
   CHECK_EQ(bufferize_is_realized(pure), 0);
   CHECK(bufferize_reasons(pure) & BUFFERIZE_REASON_MULTI);
   CHECK(bufferize_reasons(pure) & BUFFERIZE_REASON_INLINE);
-  CHECK_EQ(realize_rewrite_stat_hits("remove-removable-bufferize"), 1);
+  CHECK_EQ(bufferize_rewrite_stat_hits("remove-removable-bufferize"), 1);
 
   TEST_BEGIN("realize-classify/metal-removable-bufferize-disable-keeps-fanout");
   setenv("THVM_REMOVE_REMOVABLE_BUFFERIZE", "0", 1);
@@ -269,7 +269,7 @@ int main(void) {
   bufferize_classify(keep_root);
   CHECK_EQ(bufferize_consumer_count(keep), 2);
   CHECK_EQ(bufferize_is_realized(keep), 1);
-  CHECK_EQ(realize_rewrite_stat_hits("remove-removable-bufferize"), 0);
+  CHECK_EQ(bufferize_rewrite_stat_hits("remove-removable-bufferize"), 0);
   unsetenv("THVM_REMOVE_REMOVABLE_BUFFERIZE");
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
@@ -293,7 +293,7 @@ int main(void) {
   Term right_m = uop_binary(UOP_MUL, xs[32], xs[33]);
   Term wide_root = uop_binary(UOP_ADD, left_m, right_m);
   bufferize_classify(wide_root);
-  CHECK(realize_rewrite_stat_hits("metal-tile-fanin-cap") >= 1);
+  CHECK(bufferize_rewrite_stat_hits("metal-tile-fanin-cap") >= 1);
   CHECK(bufferize_is_realized(tree_a) || bufferize_is_realized(left_m)
       || bufferize_is_realized(prod));
 
@@ -302,7 +302,7 @@ int main(void) {
   Term wide_neg = uop_unary(UOP_NEG, uop_binary(UOP_MUL, tree_c, tree_c));
   Term wide_unary_root = uop_binary(UOP_ADD, wide_neg, right_m);
   bufferize_classify(wide_unary_root);
-  CHECK(realize_rewrite_stat_hits("metal-tile-fanin-cap") >= 1);
+  CHECK(bufferize_rewrite_stat_hits("metal-tile-fanin-cap") >= 1);
   CHECK(bufferize_is_realized(wide_neg) || bufferize_is_realized(tree_c));
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
@@ -340,7 +340,7 @@ int main(void) {
   // The reduce should be inlined by inline-softmax-broadcast-reduce.
   CHECK_EQ(bufferize_is_realized(bn_r), 0);
   CHECK(bufferize_reasons(bn_r) & BUFFERIZE_REASON_INLINE);
-  CHECK(realize_rewrite_stat_hits("inline-softmax-broadcast-reduce") >= 1);
+  CHECK(bufferize_rewrite_stat_hits("inline-softmax-broadcast-reduce") >= 1);
 
   TEST_BEGIN("realize-classify/broadcast-reduce-rejects-non-broadcast-tail");
   // Negative test: REDUCE whose parent ALU has a NON-CONST sibling

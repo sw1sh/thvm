@@ -24,11 +24,11 @@ typedef struct {
 static RealizeRewriteStat REALIZE_REWRITE_STATS[REALIZE_REWRITE_STATS_CAP];
 static u32                REALIZE_REWRITE_STATS_LEN = 0;
 
-fn void realize_rewrite_stats_clear(void) {
+fn void bufferize_rewrite_stats_clear(void) {
   REALIZE_REWRITE_STATS_LEN = 0;
 }
 
-static void realize_rewrite_stats_record(char const *name, u32 hits) {
+static void bufferize_rewrite_stats_record(char const *name, u32 hits) {
   if (name == NULL) return;
   for (u32 i = 0; i < REALIZE_REWRITE_STATS_LEN; i++) {
     if (strcmp(REALIZE_REWRITE_STATS[i].name, name) == 0) {
@@ -42,19 +42,19 @@ static void realize_rewrite_stats_record(char const *name, u32 hits) {
   REALIZE_REWRITE_STATS_LEN++;
 }
 
-fn u32 realize_rewrite_stats_len(void) {
+fn u32 bufferize_rewrite_stats_len(void) {
   return REALIZE_REWRITE_STATS_LEN;
 }
 
-fn char const *realize_rewrite_stat_name(u32 i) {
+fn char const *bufferize_rewrite_stat_name(u32 i) {
   return i < REALIZE_REWRITE_STATS_LEN ? REALIZE_REWRITE_STATS[i].name : "";
 }
 
-fn u32 realize_rewrite_stat_hits_at(u32 i) {
+fn u32 bufferize_rewrite_stat_hits_at(u32 i) {
   return i < REALIZE_REWRITE_STATS_LEN ? REALIZE_REWRITE_STATS[i].hits : 0;
 }
 
-fn u32 realize_rewrite_stat_hits(char const *name) {
+fn u32 bufferize_rewrite_stat_hits(char const *name) {
   if (name == NULL) return 0;
   for (u32 i = 0; i < REALIZE_REWRITE_STATS_LEN; i++) {
     if (strcmp(REALIZE_REWRITE_STATS[i].name, name) == 0) {
@@ -64,16 +64,16 @@ fn u32 realize_rewrite_stat_hits(char const *name) {
   return 0;
 }
 
-static int realize_rewrite_dump_enabled(void) {
+static int bufferize_rewrite_dump_enabled(void) {
   char const *e = getenv("DUMP_REWRITE");
   if (e != NULL && e[0] == '1') return 1;
   e = getenv("DUMP_FUSION_REWRITE");
   return e != NULL && e[0] == '1';
 }
 
-static void realize_rewrite_stats_dump(void) {
-  if (!realize_rewrite_dump_enabled()) return;
-  fprintf(stderr, "realize_rewrite_summary rules=%u\n",
+static void bufferize_rewrite_stats_dump(void) {
+  if (!bufferize_rewrite_dump_enabled()) return;
+  fprintf(stderr, "bufferize_rewrite_summary rules=%u\n",
           REALIZE_REWRITE_STATS_LEN);
   for (u32 i = 0; i < REALIZE_REWRITE_STATS_LEN; i++) {
     fprintf(stderr, "  %s hits=%u\n",
@@ -82,7 +82,7 @@ static void realize_rewrite_stats_dump(void) {
   }
 }
 
-static void realize_rewrite_apply(Term root,
+static void bufferize_rewrite_apply(Term root,
                                   RealizeRewriteRule const *rules,
                                   u32 n_rules) {
   for (u32 i = 0; i < n_rules; i++) {
@@ -93,6 +93,6 @@ static void realize_rewrite_apply(Term root,
     bufferize_set_current_rule(rules[i].name);
     u32 hits = rules[i].apply != NULL ? rules[i].apply(root) : 0;
     bufferize_set_current_rule(NULL);
-    realize_rewrite_stats_record(rules[i].name, hits);
+    bufferize_rewrite_stats_record(rules[i].name, hits);
   }
 }

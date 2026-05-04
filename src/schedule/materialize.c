@@ -238,7 +238,7 @@ static void mem_plan_push_dead(u32 current_depth) {
 // === topo-sort over realize boundaries (g2a) ===
 
 static u32 boundary_depth_rec(u64 loc) {
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return 0;
   if (BOUNDARY_DEPTH[idx] != BOUNDARY_DEPTH_INVALID) return BOUNDARY_DEPTH[idx];
   BOUNDARY_DEPTH[idx] = 0;            // cycle guard
@@ -287,7 +287,7 @@ static void boundary_last_use_descend(u64 from_loc, u32 visiting_depth,
   if (from_loc >= HEAP_NEXT) return;
   if (visited[from_loc]) return;
   visited[from_loc] = 1;
-  u32 idx = realize_info_find(from_loc);
+  u32 idx = bufferize_info_find(from_loc);
   if (idx == 0xFFFFFFFFu) return;
   if (REALIZE_INFO[idx].realized) {
     if (visiting_depth > BOUNDARY_LAST_USE[idx]) {
@@ -427,7 +427,7 @@ static int kernel_merge_dump_enabled(void) {
 // return 0.  CONST/LOAD also return 0 (those are leaves, not fusable
 // hosts in the merge sense).
 static u8 merge_boundary_is_elementwise(u64 loc) {
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return 0;
   u8 op = REALIZE_INFO[idx].op;
   return uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op);
@@ -447,7 +447,7 @@ static u8 merge_subtree_reaches_loc(u64 from_loc, u64 target_loc,
   if (from_loc >= HEAP_NEXT) return 0;
   if (visited[from_loc]) return 0;
   visited[from_loc] = 1;
-  u32 idx = realize_info_find(from_loc);
+  u32 idx = bufferize_info_find(from_loc);
   if (idx == 0xFFFFFFFFu) return 0;
   // Stop at any realized boundary that isn't the starting one;
   // its children are reached via the kernel's input slots, not
@@ -460,7 +460,7 @@ static u8 merge_subtree_reaches_loc(u64 from_loc, u64 target_loc,
     if (term_tag(child) != TAG_UOP) continue;
     if (term_ext(child) == UOP_KERNEL) continue;
     u64 cloc = term_val(child);
-    u32 cidx = realize_info_find(cloc);
+    u32 cidx = bufferize_info_find(cloc);
     if (cidx != 0xFFFFFFFFu && REALIZE_INFO[cidx].realized
         && cloc != target_loc) {
       // Boundary -- stop walking; if it's the target, we'd have
@@ -483,7 +483,7 @@ static u32 merge_collect_input_tids(u64 from_loc, u32 *out_tids, u32 cap,
   if (from_loc >= HEAP_NEXT) return 0;
   if (visited[from_loc]) return 0;
   visited[from_loc] = 1;
-  u32 idx = realize_info_find(from_loc);
+  u32 idx = bufferize_info_find(from_loc);
   if (idx == 0xFFFFFFFFu) return 0;
   u8 ar = uop_arity(REALIZE_INFO[idx].op);
   u32 n = 0;
@@ -516,7 +516,7 @@ static u32 merge_collect_input_tids(u64 from_loc, u32 *out_tids, u32 cap,
       continue;
     }
     u64 cloc = term_val(child);
-    u32 cidx = realize_info_find(cloc);
+    u32 cidx = bufferize_info_find(cloc);
     if (cidx != 0xFFFFFFFFu && REALIZE_INFO[cidx].realized) {
       // Realized boundary: it produces a TenDesc the consumer kernel
       // reads.  We can't pull that tid out of REALIZE_INFO yet (the
@@ -556,7 +556,7 @@ static u32 merge_input_overlap(u32 const *a, u32 na,
 // Get the boundary's output Shape via term_shape_in on the UOP_<op>
 // term we'd construct from REALIZE_INFO.  Returns 1 on success.
 static int merge_boundary_shape(u64 loc, Shape *out) {
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return 0;
   Term t = term_new(0, TAG_UOP, REALIZE_INFO[idx].op, loc);
   return term_shape_in(t, 0, out);
@@ -584,7 +584,7 @@ static u32 merge_op_count_estimate(u64 from_loc, u8 *visited) {
   if (from_loc >= HEAP_NEXT) return 0;
   if (visited[from_loc]) return 0;
   visited[from_loc] = 1;
-  u32 idx = realize_info_find(from_loc);
+  u32 idx = bufferize_info_find(from_loc);
   if (idx == 0xFFFFFFFFu) return 0;
   u8 ar = uop_arity(REALIZE_INFO[idx].op);
   u32 n = 1;     // self
@@ -593,7 +593,7 @@ static u32 merge_op_count_estimate(u64 from_loc, u8 *visited) {
     if (term_tag(child) != TAG_UOP) continue;
     if (term_ext(child) == UOP_KERNEL) continue;
     u64 cloc = term_val(child);
-    u32 cidx = realize_info_find(cloc);
+    u32 cidx = bufferize_info_find(cloc);
     if (cidx != 0xFFFFFFFFu && REALIZE_INFO[cidx].realized) continue;
     n += merge_op_count_estimate(cloc, visited);
   }
@@ -762,14 +762,14 @@ fn int kernel_entry_set_extra_output(u32 kid, u32 idx,
 
 fn u32 materialize_boundary_depth_at(u32 i) {
   if (i >= BOUNDARY_ORDER_LEN) return 0;
-  u32 ridx = realize_info_find(BOUNDARY_ORDER[i]);
+  u32 ridx = bufferize_info_find(BOUNDARY_ORDER[i]);
   if (ridx == 0xFFFFFFFFu) return 0;
   return BOUNDARY_DEPTH[ridx];
 }
 
 fn u32 materialize_boundary_last_use_at(u32 i) {
   if (i >= BOUNDARY_ORDER_LEN) return 0;
-  u32 ridx = realize_info_find(BOUNDARY_ORDER[i]);
+  u32 ridx = bufferize_info_find(BOUNDARY_ORDER[i]);
   if (ridx == 0xFFFFFFFFu) return 0;
   return BOUNDARY_LAST_USE[ridx];
 }
@@ -1504,7 +1504,7 @@ static void materialize_dump_source_child(Term child, u32 depth) {
     return;
   }
   u64 loc = term_val(child);
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   fprintf(stderr, "uop op=%u loc=%llu realized=%u consumers=%u reasons=0x%x\n",
           term_ext(child), (unsigned long long)loc,
           idx == 0xFFFFFFFFu ? 0 : REALIZE_INFO[idx].realized,
@@ -1852,7 +1852,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     if (reduce_chain_collect(t, &rc)) {
       int chain_inlined = 1;
       for (u32 j = 1; j < rc.n_reduces; j++) {
-        u32 cidx = realize_info_find(rc.locs[j]);
+        u32 cidx = bufferize_info_find(rc.locs[j]);
         if (cidx != 0xFFFFFFFFu && REALIZE_INFO[cidx].realized) {
           chain_inlined = 0;
           break;
@@ -2010,7 +2010,7 @@ static int splice_child_into_host_premerge(KernelEntry *ke,
   if (ke->n_ops != 0) return 0;
 
   u64 child_loc = BOUNDARY_ORDER[child_bi];
-  u32 child_ridx = realize_info_find(child_loc);
+  u32 child_ridx = bufferize_info_find(child_loc);
   if (child_ridx == 0xFFFFFFFFu) return 0;
 
   Shape child_shape = {0};
@@ -2096,7 +2096,7 @@ static int splice_target_backend_supports_multi_output(void) {
 // the emitted UOP_KERNEL term, or 0 on bail.
 static Term emit_kernel_for_boundary(u32 bi) {
   u64 boundary_loc = BOUNDARY_ORDER[bi];
-  u32 idx = realize_info_find(boundary_loc);
+  u32 idx = bufferize_info_find(boundary_loc);
   if (idx == 0xFFFFFFFFu) return 0;
 
   // Multi-output kernel splice (Step 6): if this boundary is a

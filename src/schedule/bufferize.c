@@ -5,7 +5,7 @@
 // realize-map rule that mutates REALIZE_INFO via realize_mark or
 // realize_unmark is forwarded into bufferize_realize_with_reason or
 // bufferize_unrealize, which stamps added_by / removed_by from the
-// current rule pointer set by realize_rewrite_apply.
+// current rule pointer set by bufferize_rewrite_apply.
 //
 // Materialize.c still reads REALIZE_INFO directly, so the kernel
 // schedule is unchanged.  The bufferize graph is the canonical
@@ -41,7 +41,7 @@ static BIndexRule BUFFERIZE_INDEX_RULES[6] = {
   {"index-flip",     0},
 };
 
-// realize_rewrite_apply sets this around each rule->apply call so
+// bufferize_rewrite_apply sets this around each rule->apply call so
 // realize_mark/realize_unmark can stamp the rule that decided.
 // NULL means "outside any named rule" (seeding, post-pass cleanup).
 static char const *BUFFERIZE_CURRENT_RULE = NULL;
@@ -209,7 +209,7 @@ static void bufferize_walk_edge(u64 loc, u32 consumer_id,
                                 BIndex const *chain_in, u8 depth) {
   if (depth > BUFFERIZE_EDGE_DEPTH_CAP) return;
   if (loc >= HEAP_NEXT) return;
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return;
   u8 op = REALIZE_INFO[idx].op;
   u8 ar = uop_arity(op);
@@ -322,7 +322,7 @@ static u32 bufferize_count_recompute_ops(u64 loc, u64 self_loc, u32 depth,
                                          u8 *has_reduce) {
   if (depth > 64) return 0;
   if (loc >= HEAP_NEXT) return 0;
-  u32 ridx = realize_info_find(loc);
+  u32 ridx = bufferize_info_find(loc);
   if (ridx == 0xFFFFFFFFu) return 0;
   u8 op = REALIZE_INFO[ridx].op;
   // Stop at other realized buffers - their cost is amortised.
@@ -471,7 +471,7 @@ static void bufferize_compute_lifetimes(void) {
 // Phase 3: recompute hit counts for the named index-* rules from
 // the freshly-built B_INDEX table.  Each edge carrying a movement
 // flag counts as one hit for the corresponding rule, mirroring how
-// realize_rewrite_apply tracks hits for boundary rules.  This makes
+// bufferize_rewrite_apply tracks hits for boundary rules.  This makes
 // the implicit rangeify movement-folding visible as named rules in
 // DUMP_BUFFERIZE without changing codegen behavior.
 static void bufferize_update_index_rule_stats(void) {
@@ -590,7 +590,7 @@ fn void bufferize_seed_from_realize_info(Term root) {
   }
 
   // Phase 4 follow-up: compute the cost-model fields immediately so
-  // rules running inside realize_rewrite_apply can read
+  // rules running inside bufferize_rewrite_apply can read
   // bufferize_removal_score on the seed-time realized set.
   // bufferize_finalize_stores recomputes after rules so the dump
   // and post-rule callers see the final state.
@@ -638,7 +638,7 @@ fn char const *bufferize_current_rule(void) {
 }
 
 fn void bufferize_unrealize(u64 loc) {
-  // Forwarders only take effect inside realize_rewrite_apply, which
+  // Forwarders only take effect inside bufferize_rewrite_apply, which
   // sets the current-rule pointer.  Calls outside that window
   // (e.g. the ROOT/MULTI/REDUCE seeding pass that runs before the
   // graph has been (re)snapshotted) would otherwise mutate stale
@@ -672,7 +672,7 @@ fn void bufferize_realize_with_reason(u64 loc, u8 op, u32 reason) {
   // current example).  Look up consumer_count from REALIZE_INFO so
   // the bufferize record stays consistent with the projection.
   if (BUFFERIZE_BUFS_LEN >= BUFFERIZE_GRAPH_CAP) return;
-  u32 ri = realize_info_find(loc);
+  u32 ri = bufferize_info_find(loc);
   u32 cc = (ri != 0xFFFFFFFFu) ? REALIZE_INFO[ri].consumer_count : 0;
   u32 rb = (ri != 0xFFFFFFFFu) ? REALIZE_INFO[ri].reasons        : reason;
   BBufferize *b = &BUFFERIZE_BUFS[BUFFERIZE_BUFS_LEN];

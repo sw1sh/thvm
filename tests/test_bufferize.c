@@ -191,7 +191,7 @@ int main(void) {
   CHECK_EQ(bufferize_realized_count(), live2);
 
   TEST_BEGIN("bufferize/current-rule-resets-after-apply");
-  // Outside realize_rewrite_apply the current rule pointer is NULL
+  // Outside bufferize_rewrite_apply the current rule pointer is NULL
   // again.  Otherwise downstream callers would see a stale rule.
   CHECK_EQ(bufferize_current_rule(), (char const *)NULL);
 
@@ -529,7 +529,7 @@ int main(void) {
   if (ds_idx != 0xFFFFFFFFu) {
     BBufferize const *bd = bufferize_buffer_at(ds_idx);
     CHECK_EQ(bd->realized, 1);
-    CHECK_EQ(realize_rewrite_stat_hits("remove-by-cost-score"), 0);
+    CHECK_EQ(bufferize_rewrite_stat_hits("remove-by-cost-score"), 0);
   }
 
   TEST_BEGIN("bufferize/remove-by-cost-score-fires-when-enabled");
@@ -554,7 +554,7 @@ int main(void) {
       CHECK_EQ(strcmp(be->removed_by, "remove-by-cost-score"), 0);
     }
   }
-  CHECK(realize_rewrite_stat_hits("remove-by-cost-score") >= 1);
+  CHECK(bufferize_rewrite_stat_hits("remove-by-cost-score") >= 1);
   unsetenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
   unsetenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
 

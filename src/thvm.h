@@ -1303,17 +1303,17 @@ typedef struct {
 } UOpInfo;
 extern UOpInfo REALIZE_INFO[REALIZE_INFO_CAP];
 extern u32     REALIZE_INFO_LEN;
-fn u32  realize_info_find(u64 loc);
+fn u32  bufferize_info_find(u64 loc);
 // (realize_classify retired; use bufferize_classify -- declared
 // below near the bufferize API.)
 fn u8   bufferize_is_realized(Term uop_term);
 fn u32  bufferize_consumer_count(Term uop_term);
 fn u32  bufferize_reasons(Term uop_term);
-fn void realize_rewrite_stats_clear(void);
-fn u32  realize_rewrite_stats_len(void);
-fn char const *realize_rewrite_stat_name(u32 i);
-fn u32  realize_rewrite_stat_hits_at(u32 i);
-fn u32  realize_rewrite_stat_hits(char const *name);
+fn void bufferize_rewrite_stats_clear(void);
+fn u32  bufferize_rewrite_stats_len(void);
+fn char const *bufferize_rewrite_stat_name(u32 i);
+fn u32  bufferize_rewrite_stat_hits_at(u32 i);
+fn u32  bufferize_rewrite_stat_hits(char const *name);
 
 // === bufferize schedule IR (Phase 0 + Phase 1) ===
 // Explicit B_BUFFERIZE/B_STORE projection of REALIZE_INFO, per
@@ -1328,7 +1328,7 @@ fn u32  realize_rewrite_stat_hits(char const *name);
 //   2. bufferize_seed_from_realize_info snapshots every realized loc
 //      into BBufferize records with realized=1, removed_by=NULL,
 //      added_by=NULL, and assigns dense 1-based buffer ids.
-//   3. realize_rewrite_apply runs each named rule with
+//   3. bufferize_rewrite_apply runs each named rule with
 //      bufferize_set_current_rule(name) wrapping the call.  When a
 //      rule mutates REALIZE_INFO via realize_mark/realize_unmark, the
 //      same change is forwarded to bufferize_realize_with_reason /

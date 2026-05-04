@@ -32,7 +32,7 @@ UOpInfo REALIZE_INFO    [REALIZE_INFO_CAP];
 u32     REALIZE_INFO_LEN = 0;
 
 // Open-addressed hash table mapping loc -> REALIZE_INFO index.
-// Without this, realize_info_find did a linear scan of REALIZE_INFO,
+// Without this, bufferize_info_find did a linear scan of REALIZE_INFO,
 // which made realize_classify O(N^2) for the N UOPs in a recursive
 // training-loop graph and the dominant cost of long bound-w realizes.
 // Cap is the next power of two >= REALIZE_INFO_CAP for cheap masking.
@@ -47,13 +47,13 @@ static inline u32 realize_info_hash(u64 loc) {
   return (u32)loc & (REALIZE_INFO_HASH_CAP - 1);
 }
 
-fn void realize_info_clear(void) {
+fn void bufferize_info_clear(void) {
   REALIZE_INFO_LEN = 0;
   for (u32 i = 0; i < REALIZE_INFO_HASH_CAP; i++)
     REALIZE_INFO_HASH[i] = REALIZE_INFO_HASH_EMPTY;
 }
 
-fn u32 realize_info_find(u64 loc) {
+fn u32 bufferize_info_find(u64 loc) {
   u32 h = realize_info_hash(loc);
   for (u32 probe = 0; probe < REALIZE_INFO_HASH_CAP; probe++) {
     u32 i = (h + probe) & (REALIZE_INFO_HASH_CAP - 1);
@@ -78,7 +78,7 @@ static void realize_info_hash_insert(u64 loc, u32 idx) {
 }
 
 static u32 realize_info_get_or_add(u64 loc, u8 op) {
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   if (idx != 0xFFFFFFFFu) return idx;
   if (REALIZE_INFO_LEN >= REALIZE_INFO_CAP) return 0xFFFFFFFFu;
   idx = REALIZE_INFO_LEN++;
@@ -112,7 +112,7 @@ static void realize_unmark(UOpInfo *info, u32 reason) {
   info->realized = 0;
   info->reasons |= reason;
   // Mirror the unmark into the bufferize graph and stamp removed_by
-  // with whichever rule realize_rewrite_apply has flagged as current.
+  // with whichever rule bufferize_rewrite_apply has flagged as current.
   bufferize_unrealize(info->loc);
 }
 
@@ -238,7 +238,7 @@ static int realize_chain_walk_all_parents_is_broadcast(
 static int realize_chain_walk_is_broadcast(u64 parent_loc, u32 hops_left) {
   u64 cur = parent_loc;
   while (hops_left > 0) {
-    u32 idx = realize_info_find(cur);
+    u32 idx = bufferize_info_find(cur);
     if (idx == 0xFFFFFFFFu) return 0;
     u8 pop = REALIZE_INFO[idx].op;
     if (pop == UOP_EXPAND) return 1;
@@ -328,7 +328,7 @@ static int realize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc) 
     if (cur == root_loc) return 1;   // chain reaches the realize root
     u64 parent = realize_unique_uop_parent(cur);
     if (parent == 0) return 0;
-    u32 idx = realize_info_find(parent);
+    u32 idx = bufferize_info_find(parent);
     if (idx == 0xFFFFFFFFu) return 0;
     u8 pop = REALIZE_INFO[idx].op;
     // Scalar-preserving unary ops keep the post-reduce shape.
@@ -397,7 +397,7 @@ static u32 realize_fanin_term_count(Term t, u64 boundary_root,
 static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
                                    u32 cap, u32 *hits) {
   if (loc >= HEAP_NEXT) return 1;
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return 1;
   UOpInfo *info = &REALIZE_INFO[idx];
   if (loc != boundary_root && info->realized) return 1;
@@ -414,7 +414,7 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
                                               cap, hits);
     total += child_count[i];
     if (term_tag(child) == TAG_UOP && term_ext(child) != UOP_KERNEL) {
-      child_idx[i] = realize_info_find(term_val(child));
+      child_idx[i] = bufferize_info_find(term_val(child));
     }
   }
 
@@ -481,7 +481,7 @@ static int realize_subtree_has_reduce(Term t, u32 depth) {
     return 0;
   }
   u64 loc = term_val(t);
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
     return 0;
   }
@@ -649,7 +649,7 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
 
   u64 loc = term_val(t);
   if (loc != root_loc) {
-    u32 idx = realize_info_find(loc);
+    u32 idx = bufferize_info_find(loc);
     if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
       return 1;
     }
@@ -667,7 +667,7 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
 }
 
 static int realize_parent_uses_child(u64 parent_loc, u64 child_loc) {
-  u32 pidx = realize_info_find(parent_loc);
+  u32 pidx = bufferize_info_find(parent_loc);
   if (pidx == 0xFFFFFFFFu) {
     return 0;
   }
@@ -714,7 +714,7 @@ static int realize_subtree_recompute_stats(Term t,
 
   u64 loc = term_val(t);
   if (loc != root_loc) {
-    u32 idx = realize_info_find(loc);
+    u32 idx = bufferize_info_find(loc);
     if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
       stats->inputs++;
       return 1;
@@ -796,7 +796,7 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
     if (realize_parent_chain_reaches_reduce(info->loc, 0)) {
       if (realize_dump_fusion_candidates_enabled()) {
         fprintf(stderr,
-                "realize_rewrite_skip rule=inline-pure-fanout-probe"
+                "bufferize_rewrite_skip rule=inline-pure-fanout-probe"
                 " reason=reduce-parent loc=%llu op=%u numel=%llu"
                 " consumers=%u\n",
                 (unsigned long long)info->loc,
@@ -808,7 +808,7 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
     }
     if (realize_dump_fusion_candidates_enabled()) {
       fprintf(stderr,
-              "realize_rewrite_hit rule=inline-pure-fanout-probe"
+              "bufferize_rewrite_hit rule=inline-pure-fanout-probe"
               " loc=%llu op=%u numel=%llu consumers=%u\n",
               (unsigned long long)info->loc,
               (unsigned)info->op,
@@ -978,7 +978,7 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
       if (stats.ops > max_ops) {
         if (realize_dump_fusion_candidates_enabled()) {
           fprintf(stderr,
-                  "realize_rewrite_skip rule=remove-removable-bufferize"
+                  "bufferize_rewrite_skip rule=remove-removable-bufferize"
                   " reason=op-budget loc=%llu op=%u ops=%u consumers=%u\n",
                   (unsigned long long)info->loc,
                   (unsigned)info->op,
@@ -992,7 +992,7 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
                                                     max_consumers)) {
         if (realize_dump_fusion_candidates_enabled()) {
           fprintf(stderr,
-                  "realize_rewrite_skip rule=remove-removable-bufferize"
+                  "bufferize_rewrite_skip rule=remove-removable-bufferize"
                   " reason=consumer-legality loc=%llu op=%u ops=%u"
                   " movement=%u consumers=%u\n",
                   (unsigned long long)info->loc,
@@ -1006,7 +1006,7 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
 
       if (realize_dump_fusion_candidates_enabled()) {
         fprintf(stderr,
-                "realize_rewrite_hit rule=remove-removable-bufferize"
+                "bufferize_rewrite_hit rule=remove-removable-bufferize"
                 " loc=%llu op=%u ops=%u movement=%u consumers=%u\n",
                 (unsigned long long)info->loc,
                 (unsigned)info->op,
@@ -1031,7 +1031,7 @@ static int realize_inline_subtree_has_movement(Term t, u32 depth) {
   if (term_tag(t) != TAG_UOP) return 0;
   if (term_ext(t) == UOP_KERNEL) return 0;
   u64 loc = term_val(t);
-  u32 idx = realize_info_find(loc);
+  u32 idx = bufferize_info_find(loc);
   if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) return 0;
   u8 op = term_ext(t);
   if (realize_op_is_movement(op)) return 1;
@@ -1050,7 +1050,7 @@ static int realize_reduce_chain_source_is_direct(Term t) {
   if (term_tag(t) == TAG_TEN || term_tag(t) == TAG_VAR) return 1;
   if (term_tag(t) != TAG_UOP) return 0;
   if (term_ext(t) == UOP_KERNEL) return 1;
-  u32 idx = realize_info_find(term_val(t));
+  u32 idx = bufferize_info_find(term_val(t));
   return idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized;
 }
 
@@ -1084,7 +1084,7 @@ static u64 realize_absorbing_boundary(u64 start_loc, u32 hops_left) {
   while (hops_left > 0) {
     u64 next = realize_unique_uop_parent(cur);
     if (next == 0) return 0;
-    u32 idx = realize_info_find(next);
+    u32 idx = bufferize_info_find(next);
     if (idx == 0xFFFFFFFFu) return 0;
     if (REALIZE_INFO[idx].realized) return next;
     cur = next;
@@ -1262,7 +1262,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
     if (b->subtree_has_reduce) {
       if (dump) {
         fprintf(stderr,
-                "realize_rewrite_skip rule=remove-by-cost-score"
+                "bufferize_rewrite_skip rule=remove-by-cost-score"
                 " reason=subtree-reduce loc=%llu op=%u\n",
                 (unsigned long long)b->loc, (unsigned)b->op);
       }
@@ -1271,7 +1271,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
     if (b->recompute_ops > max_ops) {
       if (dump) {
         fprintf(stderr,
-                "realize_rewrite_skip rule=remove-by-cost-score"
+                "bufferize_rewrite_skip rule=remove-by-cost-score"
                 " reason=op-budget loc=%llu op=%u ops=%u cap=%u\n",
                 (unsigned long long)b->loc, (unsigned)b->op,
                 (unsigned)b->recompute_ops, (unsigned)max_ops);
@@ -1281,7 +1281,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
     if (b->consumer_count > max_consumers) {
       if (dump) {
         fprintf(stderr,
-                "realize_rewrite_skip rule=remove-by-cost-score"
+                "bufferize_rewrite_skip rule=remove-by-cost-score"
                 " reason=consumer-cap loc=%llu op=%u consumers=%u cap=%u\n",
                 (unsigned long long)b->loc, (unsigned)b->op,
                 (unsigned)b->consumer_count, (unsigned)max_consumers);
@@ -1292,7 +1292,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
     if (score < threshold) {
       if (dump) {
         fprintf(stderr,
-                "realize_rewrite_skip rule=remove-by-cost-score"
+                "bufferize_rewrite_skip rule=remove-by-cost-score"
                 " reason=score-threshold loc=%llu op=%u score=%llu"
                 " threshold=%llu\n",
                 (unsigned long long)b->loc, (unsigned)b->op,
@@ -1303,7 +1303,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
     if (!realize_remove_by_cost_score_consumers_fit_tile(b, budget)) {
       if (dump) {
         fprintf(stderr,
-                "realize_rewrite_skip rule=remove-by-cost-score"
+                "bufferize_rewrite_skip rule=remove-by-cost-score"
                 " reason=tile-feasibility loc=%llu op=%u ops=%u"
                 " budget=%u\n",
                 (unsigned long long)b->loc, (unsigned)b->op,
@@ -1311,11 +1311,11 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
       }
       continue;
     }
-    u32 ridx = realize_info_find(b->loc);
+    u32 ridx = bufferize_info_find(b->loc);
     if (ridx == 0xFFFFFFFFu) continue;
     if (dump) {
       fprintf(stderr,
-              "realize_rewrite_hit rule=remove-by-cost-score"
+              "bufferize_rewrite_hit rule=remove-by-cost-score"
               " loc=%llu op=%u ops=%u consumers=%u numel=%llu score=%llu\n",
               (unsigned long long)b->loc, (unsigned)b->op,
               (unsigned)b->recompute_ops,
@@ -1373,7 +1373,7 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
     if (!lift && realize_inline_subtree_has_movement(rc.src, 0)) continue;
     int ok = 1;
     for (u32 j = 1; j < rc.n_reduces; j++) {
-      u32 cidx = realize_info_find(rc.locs[j]);
+      u32 cidx = bufferize_info_find(rc.locs[j]);
       if (cidx == 0xFFFFFFFFu || REALIZE_INFO[cidx].consumer_count != 1) {
         ok = 0;
         break;
@@ -1381,7 +1381,7 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
     }
     if (!ok) continue;
     for (u32 j = 1; j < rc.n_reduces; j++) {
-      u32 cidx = realize_info_find(rc.locs[j]);
+      u32 cidx = bufferize_info_find(rc.locs[j]);
       if (cidx == 0xFFFFFFFFu) continue;
       if (REALIZE_INFO[cidx].realized) hits++;
       realize_unmark(&REALIZE_INFO[cidx], BUFFERIZE_REASON_INLINE);
@@ -1447,7 +1447,7 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
       // resulting kernels stay tile-feasible.
       u64 abs_loc = realize_absorbing_boundary(info->loc, 16);
       if (abs_loc != 0) {
-        u32 abs_idx = realize_info_find(abs_loc);
+        u32 abs_idx = bufferize_info_find(abs_loc);
         if (abs_idx != 0xFFFFFFFFu
             && REALIZE_INFO[abs_idx].op == UOP_REDUCE) {
           if (getenv("THVM_DUMP_SOFTMAX_REDUCE_CAP")) {
@@ -1487,8 +1487,8 @@ static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
 }
 
 fn void bufferize_classify(Term root) {
-  realize_info_clear();
-  realize_rewrite_stats_clear();
+  bufferize_info_clear();
+  bufferize_rewrite_stats_clear();
   // Always touch the bufferize graph so its state stays in sync with
   // REALIZE_INFO.  Both seed/finalize short-circuit on non-UOp roots
   // after zeroing their own tables.
@@ -1513,7 +1513,7 @@ fn void bufferize_classify(Term root) {
   free(visited);
 
   // Rule (a): the root itself realizes.
-  u32 root_idx = realize_info_find(term_val(root));
+  u32 root_idx = bufferize_info_find(term_val(root));
   if (root_idx != 0xFFFFFFFFu) {
     realize_mark(&REALIZE_INFO[root_idx], BUFFERIZE_REASON_ROOT);
   }
@@ -1549,22 +1549,22 @@ fn void bufferize_classify(Term root) {
   // added_by/removed_by on the explicit graph.  Finalize the store
   // table after rewrites land.
   bufferize_seed_from_realize_info(root);
-  realize_rewrite_apply(root, rules, (u32)(sizeof(rules) / sizeof(rules[0])));
-  realize_rewrite_stats_dump();
+  bufferize_rewrite_apply(root, rules, (u32)(sizeof(rules) / sizeof(rules[0])));
+  bufferize_rewrite_stats_dump();
   bufferize_finalize_stores(root);
 }
 
 fn u8 bufferize_is_realized(Term uop_term) {
   if (term_tag(uop_term) != TAG_UOP) return 0;
   if (term_ext(uop_term) == UOP_KERNEL) return 1;   // already realized
-  u32 idx = realize_info_find(term_val(uop_term));
+  u32 idx = bufferize_info_find(term_val(uop_term));
   if (idx == 0xFFFFFFFFu) return 0;
   return REALIZE_INFO[idx].realized;
 }
 
 fn u32 bufferize_consumer_count(Term uop_term) {
   if (term_tag(uop_term) != TAG_UOP) return 0;
-  u32 idx = realize_info_find(term_val(uop_term));
+  u32 idx = bufferize_info_find(term_val(uop_term));
   if (idx == 0xFFFFFFFFu) return 0;
   return REALIZE_INFO[idx].consumer_count;
 }
@@ -1573,7 +1573,7 @@ fn u32 bufferize_reasons(Term uop_term) {
   if (term_tag(uop_term) != TAG_UOP) {
     return 0;
   }
-  u32 idx = realize_info_find(term_val(uop_term));
+  u32 idx = bufferize_info_find(term_val(uop_term));
   if (idx == 0xFFFFFFFFu) {
     return 0;
   }
