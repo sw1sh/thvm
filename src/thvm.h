@@ -1747,6 +1747,17 @@ fn u32  rangeify_emit_unary (struct KernelEntry *ke, u8 op, u32 dtype, u32 a);
 fn u32  rangeify_emit_binary(struct KernelEntry *ke, u8 op, u32 dtype, u32 a, u32 b);
 // Free the per-kernel scalar arena.  Called from kernel_free_arrays.
 fn void rangeify_free(struct KernelEntry *ke);
+
+// === UOp -> ScalarUop translator (Phase B3 wedge) ===
+// Translate a UOp INDEX-expression Term into the equivalent ScalarUop
+// slot id in `ke`'s arena.  Caller provides a UopRangeMap[] table
+// mapping UOP_RANGE Terms to existing S_RANGE slot ids.
+typedef struct {
+  Term axis_uop;
+  u32  scalar_id;
+} UopRangeMap;
+fn u32  uop_to_scalar(struct KernelEntry *ke, Term t,
+                      UopRangeMap const *ranges, u32 n_ranges);
 // Structural CSE over dedup-safe scalar expression nodes.  Keeps
 // S_RANGE / STORE / BUFFERIZE identity intact, remaps sources, and
 // returns the number of eliminated nodes.
