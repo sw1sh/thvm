@@ -138,3 +138,59 @@ test` green:
   a `n_reduces == 1` exit from rangeify and let those kernels fall
   through to per-op metal-op (existing behavior).  Don't try to
   cover the general case in this refactor.
+
+## Diagnostic finding (after step 2-lite, commit 7c52f89)
+
+Empirical pattern at BS=128 on the canary's two metal-op fallbacks
+(kid=6, kid=9): the reduces are NOT parallel-with-shared-axes.
+They fail the `multi-reduce source/axes differ` compat check --
+each reduce has its own source operand and reduce-axis layout.
+This is the **chain-reduce pattern**: reduce 1 produces an
+intermediate that feeds reduce 2's body via post-process ops.
+
+Concretely the per-thread emission for chain reduces needs:
+
+```
+for each output position:
+  acc1 = 0
+  for each reduce_1 axis:                   # inner loop 1
+    acc1 += compute_body_1(input)
+  intermediate = post_process_1(acc1)
+  acc2 = 0
+  for each reduce_2 axis:                   # inner loop 2
+    acc2 += compute_body_2(intermediate, input)
+  result = post_process_2(acc2)
+  store(result)
+```
+
+Two SEQUENTIAL inner loops per thread, not one shared one.
+
+The rangeify per-thread emission (around `rangeify.c:3185`) walks
+the program once with categorical pre / reduce / post scopes
+demarcated by the SINGLE `reduce_pos`.  To support chain reduces,
+each `UOP_REDUCE` becomes its own scope boundary; the program
+walks N+1 phases (pre-1, reduce-1, mid-1-2, reduce-2, post-2).
+Variables like `prog_value[]` get repopulated per reduce-scope.
+
+This is the actual architectural lift for this canary's BS=128
+slowdown.  Step 4 of the plan above needs to be expanded to:
+
+  4a. Generalise the categorical scope variables (`pre`, `post`,
+      `prog_value[i]`'s scope-aware indexing) to N reduces.
+  4b. Emit N sequential inner reduce loops in the per-thread
+      kernel body.  Each reduce loop has its own accumulator
+      register; the value flows through subsequent ops to feed
+      the next reduce or the final store.
+  4c. Tile build_from_scalar wraps each reduce in its own
+      TILE_REDUCE; the TILE_LOOP_NEST has all of them as direct
+      children of the TILE_STORE chain (sequential, not nested).
+  4d. Renderer's rmt_emit_value_with_reduce already handles a
+      single nested reduce; extend to walk N reduces in sequence.
+
+This is multi-day and the most invasive piece of the multi-reduce
+refactor.  The shared-source compat check from step 2-lite
+remains useful for the much-simpler parallel case if it surfaces
+in other workloads (BN forward training-time mean+var when those
+both reduce x over the same axes -- doesn't seem to occur in the
+beautiful-mnist canary because of how realize-classify schedules
+those reduces into separate kernels).
