@@ -130,7 +130,12 @@ test` green:
   metric: kid=6 / kid=9 lift to metal-tile, total wall drops to
   ~150ms).
 
-## Status (2026-05-04 -- chain-reduce activated)
+## Status (2026-05-04 -- chain-reduce default-on)
+
+**Chain-reduce body emit is default-on.**  `THVM_RANGEIFY_NO_MULTI_REDUCE=1`
+opts back to per-op encoder fallback for any kernel with > 1 UOP_REDUCE.
+
+## Status (2026-05-04 -- chain-reduce activated under env)
 
 **Chain-reduce body emit is live** under `THVM_RANGEIFY_MULTI_REDUCE=1`.
 Per-region input scope tracking, per-reduce range emission, and per-
@@ -183,6 +188,8 @@ implemented")` at the start of body emit.
 | `3e7d172` | Per-region pre-scope LOAD emit (D-2.2) | Loop the LOAD emission per reduce r |
 | `1f21958` | Per-region rngs/load consumers (D-2.3) | All 4 sites read by `region[i]` |
 | `0e1efae` | Lift compat check + body-emit guard (D-3) | **Chain-reduce live** under env |
+| `6f75947` | Plan doc: chain-reduce activation results | Documentation |
+| `ae37753` | Default-on chain-reduce (step G) | `THVM_RANGEIFY_NO_MULTI_REDUCE=1` opt-out |
 
 **What's still pending for chain-reduce activation:**
 
