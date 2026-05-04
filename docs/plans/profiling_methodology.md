@@ -161,12 +161,14 @@ Adam).
 
 - **Hardware**: Apple M3 Max (40-core GPU)
 - **macOS / Metal**: macOS 25.4.0 (Darwin), Metal version per system
-- **thvm**: `main` at `90c89a7` + `5e47e98`
+- **thvm**: `main` at `7f9ecbe` (per-op timestamp landed) +
+  `d954d3b` (reduce-chain-gate-lift default OFF after BS-scaling
+  bug)
 - **tinygrad**: HEAD of `/Users/swish/src/tinygrad`, `Device=METAL`,
   `JIT=2`
 - **Driver**: `wl/Examples/beautiful-mnist/bench-train.wls` (thvm),
   `/tmp/tinygrad_bench.py` adapted from `examples/beautiful_mnist.py`
-  with `BS=32`, `JIT=2`, 1 warmup + 5 steady-state steps.
+  with `JIT=2`, 1 warmup + 4-5 steady-state steps.
 
 ### Table A — Per-Step Steady-State Metrics
 
@@ -201,6 +203,78 @@ Adam).
 | % on tile-JIT path | **100%** | n/a (one path) | thvm-only metric |
 | % on per-op fallback | **0%** | n/a | thvm-only |
 
+### 4.2 Batch-Size Sweep — Steady-State Wall Time
+
+Same model, same Metal queue, no autotune (`POST_AUTOTUNE_TOP=0` for
+thvm; tinygrad uses default heuristic axes; both use `JIT=2`/replay).
+
+| BS | thvm wall (ms) | thvm kernels | thvm peak retained (MB) | tinygrad wall (ms, median of 4) | tinygrad kernels | tinygrad mem_used after step (MB) |
+|----|----------------|--------------|-------------------------|---------------------------------|------------------|------------------------------------|
+| 32 | **31.0** | 118 | 62 | **20.3** | 116 | 57 |
+| 64 | **426.9** | 116 | 1006 | n/a (not measured) | n/a | n/a |
+| 128 | **733.7** | 115 | 1267 | **10.2** | 126 | 97 |
+| 256 | **1531.7** | 112 | 1769 | n/a | n/a | n/a |
+| 512 | **16308.1** | 75 | 2498 | **28.3** | 128 | 200 |
+
+Three things this exposes:
+
+1. **Tinygrad's wall is roughly flat across BS** (10-28ms range);
+   thvm's wall scales near-linearly with BS, then super-linearly at
+   the high end (BS=512 is 530x BS=32, vs tinygrad's BS=512 only
+   1.4x BS=32).
+
+2. **Kernel count is similar** (75-128 across both frameworks at all
+   batch sizes); the gap is **per-kernel performance**, not
+   schedule-level fusion.
+
+3. **thvm's peak memory grows quasi-linearly** with BS (62 -> 2498
+   MB = 40x for 16x BS); tinygrad's `mem_used` grows much more
+   slowly (57 -> 200 MB = 3.5x), suggesting better in-kernel buffer
+   reuse / activation recompute.
+
+**Root cause of the per-kernel gap**: thvm's default kernel axes
+are LOOP-only.  Without GLOBAL/LOCAL parallelism assignments
+(provided by autotune via `KOpt`), each kernel dispatches a single
+threadgroup running output-axis loops sequentially.  At BS=32 the
+output is small enough that the FLAT_GRID dispatch (post-Phase-7)
+gets reasonable parallelism, but at BS=512 the output is 16x larger
+and the per-kernel sequential walk dominates.
+
+Tinygrad's rangeify/codegen assigns GPU dimensions during
+linearization based on output shape -- no autotune required.  A
+similar baseline-axis assignment in thvm would close most of the
+high-BS gap.  Currently `POST_AUTOTUNE_TOP=6` only autotunes 6 of
+the 75-118 kernels; the rest stay at default LOOP-only.
+
+### 4.3 Per-Op GPU Timestamp Profile (thvm)
+
+Setting `THVM_METAL_PROFILE_PEROP=1` replaces the batched ICB
+execute with per-op encoder dispatches; each cmd buffer commits +
+`waitUntilCompleted`, then `cmd.GPUEndTime - cmd.GPUStartTime`
+gives true per-kernel GPU time.  Cost: ~3.4x wall-time inflation
+on BS=32 (31 -> 106 ms) due to per-op CPU/GPU sync.
+
+Per-kernel distribution at BS=32 (top 5 by GPU time):
+
+| rep_kid | role | avg_us | flops (est) | n_inputs | n_ops | axes |
+|---------|------|--------|-------------|----------|-------|------|
+| 5 | conv-bwd reduce | **1949** | 5990M | 3 | 9 | LOOP,LOOP,REDUCE |
+| 4 | conv-fwd accum | 412 | 2120M | 1 | 119 | LOOP,LOOP,LOOP |
+| 16 | conv-bwd reduce | 160 | 812M | 2 | 48 | LOOP,LOOP,REDUCE |
+| 13 | conv-bwd reduce | 124 | 722M | 2 | 48 | LOOP,LOOP,REDUCE |
+| 11 | BN bwd combo | 96 | 26M | 6 | 11 | 5xLOOP,REDUCE |
+
+The slowest kernel (1949 µs) is **63% of total GPU time** in this
+step.  This concentration (top-5 = ~85% of total) is exactly the
+shape autotune would target -- which is why
+`POST_AUTOTUNE_TOP=6`'s 6-kernel cap aligns with the canary
+defaults.
+
+Without `THVM_METAL_PROFILE_PEROP`, the same kernel reports
+`avg_us=6` because the batched ICB dispatch divides total elapsed
+across all ops uniformly -- misleading for hot-kernel
+identification.
+
 ### Reading the tables
 
 - **Wall time is essentially identical** (19.7 vs 20.3 ms within
@@ -217,12 +291,12 @@ Adam).
 - **First-step compile is 2.5x faster on thvm** (1.6s vs 3.9s) —
   tinygrad runs more elaborate BEAM/rangeify search.
 - **GPU compute time per step (sum)**: tinygrad reports 2.1ms; thvm's
-  `SHOW_PROFILE` reports a smaller number (0.07ms) that's almost
-  certainly under-sampled — `cg_profile_record` only fires when the
-  per-op encoder runs, but graph-replay paths submit batched without
-  per-op timestamps.  An honest comparison would need extending
-  thvm's metal-graph replay to record per-op timestamps via
-  `MTLCommandBufferStatusCompleted` callbacks.
+  default `SHOW_PROFILE` reports a smaller number (0.07ms) that
+  was under-sampled because `cg_profile_record` recorded the same
+  averaged value (`elapsed/n_ops`) for every op in a batched ICB
+  replay.  Setting `THVM_METAL_PROFILE_PEROP=1` (commit `7f9ecbe`)
+  replaces the batched dispatch with per-op encoders that capture
+  true GPU timestamps.  See §4.3.
 
 ## 5. Reproducibility Checklist
 
