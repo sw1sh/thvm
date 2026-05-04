@@ -6,6 +6,92 @@ dated section.
 
 ## Unreleased
 
+### Refactored: realize_classify retired -- bufferize is the schedule layer
+
+The `realize_classify` schedule layer is gone.  Every public symbol,
+file, internal helper, REASON macro, and storage variable is now
+namespaced `bufferize_*` / `BUFFERIZE_*`.  Future schedule patches
+naturally land in `bufferize_*.c` because that's the only namespace
+that exists.
+
+Migration commits (no behaviour change throughout, 274/274):
+
+  - `0fafd96` `realize_classify` symbol removed; `bufferize_classify`
+    is the public entry; materialize.c + tests switched.
+  - `6242afa` File `src/schedule/realize_classify.c` ->
+    `bufferize_classify.c`; public symbols `realize_is_realized`,
+    `realize_consumer_count`, `realize_reasons` -> `bufferize_*`;
+    `REALIZE_REASON_*` consolidated into `BUFFERIZE_REASON_*` (with
+    `INLINE`/`FANIN_CAP` folded in).
+  - `27ee7d3` File `src/schedule/realize_rewrite.c` ->
+    `bufferize_rewrite.c`; `realize_rewrite_*` -> `bufferize_rewrite_*`;
+    diagnostic strings `"realize_rewrite_*"` -> `"bufferize_rewrite_*"`.
+  - `77a1bdb` Storage names `REALIZE_INFO[]` -> `BUFFERIZE_NODES[]`,
+    `realize_walk_rec` -> `bufferize_walk_rec`, `realize_mark` ->
+    `bufferize_node_mark`, etc.  Stale comments updated.
+  - `e8d6815` All file-private static helpers renamed
+    (`realize_rule_*` -> `bufferize_rule_*`, `realize_chain_*` ->
+    `bufferize_chain_*`, etc., 10 named rules + ~50 helpers).
+    Two collisions disambiguated as `classify_*` (op_is_movement,
+    shape_numel) where bufferize.c already owns those names.
+  - `7ee461f` Plan doc records the retirement and the deferred
+    Step 6 (UOpInfo / BBufferize storage fold).
+
+The Step 6 storage fold was attempted: `typedef BBufferize UOpInfo`
++ `#define BUFFERIZE_BUFS BUFFERIZE_NODES`.  Reverted because the
+compact-buffer-id contract (1..N realized) that tests + edge-table
+consumers depend on requires a separate compact-id assignment in
+the unified array.  The fold is gated on Phase 3 movement-to-INDEX
+rules needing direct access to walker-only entries.
+
+### Added: chain-reduce body emit in rangeify (BS=128 4.5x speedup)
+
+`rangeify_try_lower_elementwise` now lowers KProgOp programs with
+multiple `UOP_REDUCE` ops (chain reduces, e.g. BN-backward
+dgamma+dbeta + downstream residual chains).  Default-on; opt-out
+via `THVM_RANGEIFY_NO_MULTI_REDUCE=1`.
+
+Architecture: each reduce gets its own `reduce_meta[r]` record
+(kind/size/inner/n_ranges/extents); per-region input-load tables
+key off a `region[i]` array; backward walk + body emit use
+`reduce_ranges_per_reduce[r]` instead of the old single-reduce
+scalars.  `emit_scalar_op_for_rngs` substitutes a previous reduce's
+already-emitted scalar value when its recursive rngs walk crosses
+one (the kid=9 RESHAPE-V case).
+
+Canary numbers (beautiful-mnist train, BS=128 WARMUP=3 N=10):
+
+  THVM_RANGEIFY_NO_MULTI_REDUCE=1 (opt-out): 681 ms / step
+  default (chain on, prog_value plumbing):  149.8 ms / step  (-78%, 4.5x)
+
+BS=32 unchanged (31.4 -> 31.6 ms).  274/274 tests pass.
+
+Commits: `9fc4b16` .. `48420ce` (rangeify steps C, D-pre, D-1,
+D-2.1, D-2.2, D-2.3, D-3, G + prog_value plumbing).
+
+### Added: BS=512 cross-framework benchmark (apples-to-apples table)
+
+`bench/{bench_tinygrad,bench_torch,bench_mlx}.py` mirror tinygrad's
+`examples/beautiful_mnist.py` architecture (same model, MNIST data,
+Adam) with WARMUP=5 / STEPS=20 timed window and a sync boundary.
+Results documented in `docs/plans/profiling_methodology.md` §4.6.
+
+| Framework | BS=512 ms/step | x thvm |
+|---|--:|--:|
+| PyTorch MPS (eager)        |  9.7  | 1745x |
+| PyTorch MPS (compile)      | 11.3  | 1496x |
+| MLX (eager)                | 22.9  |  738x |
+| tinygrad METAL (TinyJit)   | 47.0  |  359x |
+| **thvm METAL** (chain on)  | 17786 |   1x  |
+
+The 17.8 s thvm step is dominated by a `metal-jit`-classified
+kernel (kid=7, conv-1 backward dInput, 29 ops, 947 M-element
+EXPAND-MUL-REDUCE intermediate) that takes 15.5 s alone.  Lifting
+it requires bufferize Phase 3 movement-to-INDEX rewrite rules so
+the EXPAND/PAD/SHRINK chain is absorbed into INDEX expressions
+instead of materialising; tracked as the high-leverage architectural
+follow-up.
+
 ### Fixed: lift FLAT_GRID dispatch for nested scalar reduces
 
 The metal renderer's `rmt_emit_value_with_reduce` already handles
