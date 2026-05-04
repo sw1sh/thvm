@@ -1422,8 +1422,39 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           RBAIL_PRE("> RANGEIFY_MAX_REDUCES reduce ops");
         }
         reduce_positions[n_reduces++] = i;
-        if (reduce_pos != -1) RBAIL_PRE("> 1 reduce");
-        reduce_pos = (int)i;
+        if (reduce_pos != -1) {
+          // Multi-reduce experimental: gated by env var until the
+          // tile + render layers handle N accumulators correctly.
+          // When the gate's lifted, additional reduces are tracked
+          // in reduce_positions[] but the existing single-reduce
+          // metadata block downstream still uses the FIRST reduce's
+          // op for its scalar fields -- correct shape if all reduces
+          // share source + axes, undefined otherwise.
+          if (getenv("THVM_RANGEIFY_MULTI_REDUCE") == NULL) {
+            RBAIL_PRE("> 1 reduce");
+          }
+          // Validate compatibility with the canonical reduce: same
+          // source operand and same reduce-axis layout.  Anything
+          // else falls back to per-op encoder.
+          KProgOp *p0 = &ke->program[reduce_pos];
+          if (p->src[0] != p0->src[0]
+              || p->n_reduce_axes != p0->n_reduce_axes
+              || p->src0_ndim != p0->src0_ndim) {
+            RBAIL_PRE("multi-reduce source/axes differ");
+          }
+          for (u32 d = 0; d < p->n_reduce_axes; d++) {
+            if (p->reduce_axes[d] != p0->reduce_axes[d]) {
+              RBAIL_PRE("multi-reduce axes differ");
+            }
+          }
+          for (u32 d = 0; d < p->src0_ndim; d++) {
+            if (p->src0_dims[d] != p0->src0_dims[d]) {
+              RBAIL_PRE("multi-reduce src0_dims differ");
+            }
+          }
+        } else {
+          reduce_pos = (int)i;
+        }
         break;
       default:
         if (getenv("THVM_RANGEIFY_BAIL")) {
