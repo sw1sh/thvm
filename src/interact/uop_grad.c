@@ -61,6 +61,10 @@ fn Term expand_to_target(Term src, Term target_term) {
   return uop_expand(src, s.ndim, s.dims);
 }
 
+// Forward decl: grad_target_dtype reads the target stack defined
+// alongside grad_current_target below.
+fn u32 grad_target_dtype(void);
+
 // Scalar zero for a non-differentiable branch (CMPLT/CMPEQ,
 // CONST/LOAD/ASSIGN, unknown KERNEL).  Returns numel-1 CONST(0)
 // rather than EXPAND'd-to-y's-shape zero -- the chain rule's outer
@@ -71,9 +75,11 @@ fn Term expand_to_target(Term src, Term target_term) {
 // shape, producing a wrong-shaped gradient at the leaf.  Mirrors
 // the scalar-zero convention used at non-target TEN leaves
 // (grad_leaf_sup) and at the dispatch's TEN-leaf mismatch path.
+// Dtype tracks the target so the zero buffer's itemsize matches the
+// kernel that ADDs / MULs it.
 fn Term grad_zero_at(Term y) {
   (void)y;
-  return uop_const(DT_FP32, 0);
+  return uop_const(grad_target_dtype(), 0);
 }
 
 // Allocate a 3-slot grad cell with cell[0] = child, cell[1] = 0
@@ -99,6 +105,20 @@ static inline Term grad_current_target(void) {
   return GRAD_TARGET_TOP > 0
        ? GRAD_TARGET_STACK[GRAD_TARGET_TOP - 1]
        : 0;
+}
+
+// Pick the dtype to materialize chain-rule scalars at.  Returns the
+// current target's dtype (term_dtype_in walks the graph) so scalar
+// zeros and bookkeeping consts (ln2, half, ...) line up with the
+// kernel that consumes them.  Defaulting to DT_FP32 here used to
+// bit-misalign under f64 / f16 / bf16: cpu_op_add on a numel-1
+// broadcast f32 zero against an f64 src reads 8 bytes from a 4-byte
+// const buffer.
+fn u32 grad_target_dtype(void) {
+  Term target = grad_current_target();
+  u32  dt     = DT_FP32;
+  if (target != 0) term_dtype_in(target, 0, &dt);
+  return dt;
 }
 typedef struct { Term fwd; Term bwd; u64 loc; } GradPair;
 static u64 grad_cell_alloc(Term child) {
@@ -183,11 +203,13 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
     if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(ten_r)) {
       return gy_for_leaf;
     }
-    return uop_const(DT_FP32, 0);          // mismatch -> scalar zero
+    return uop_const(grad_target_dtype(), 0);   // mismatch -> scalar zero
   }
   u32 tid = (u32)term_val(ten_r);
+  u32 leaf_dt = DT_FP32;
+  term_dtype_in(ten_r, 0, &leaf_dt);
   u64 sloc = heap_alloc(2);
-  heap_set(sloc + 0, uop_const(DT_FP32, 0));
+  heap_set(sloc + 0, uop_const(leaf_dt, 0));
   heap_set(sloc + 1, gy_for_leaf);
   return term_new(0, TAG_SUP, tid, sloc);
 }
@@ -380,7 +402,7 @@ static int grad_depends_on_target(Term t, Term target) {
 static Term grad_bwd_for_child(Term child, Term gy_for_child) {
   Term target = grad_current_target();
   if (target != 0 && !grad_depends_on_target(child, target)) {
-    return uop_const(DT_FP32, 0);
+    return uop_const(grad_target_dtype(), 0);
   }
   Term cached;
   if (grad_memo_lookup(child, gy_for_child, target, &cached)) return cached;
@@ -423,23 +445,27 @@ static Term grad_accum(Term acc, Term add) {
 // they need to thread gy through a chain that doesn't depend on it).
 // Note: in practice gy should always be passed in; this is a
 // fallback for cases where the chain rule needs a fresh constant.
+//
+// Dtype passes through grad_target_dtype() so the resulting CONST
+// materializes at the dtype the kernel reads (const_to_tendesc
+// promotes the f32 bits to the target float at materialize time).
 fn Term grad_ln2_const(void) {
   f32 ln2 = 0.6931471805599453f;
   u32 bits;
   memcpy(&bits, &ln2, sizeof bits);
-  return uop_const(DT_FP32, bits);
+  return uop_const(grad_target_dtype(), bits);
 }
 fn Term grad_inv_ln2_const(void) {
   f32 inv = 1.4426950408889634f;
   u32 bits;
   memcpy(&bits, &inv, sizeof bits);
-  return uop_const(DT_FP32, bits);
+  return uop_const(grad_target_dtype(), bits);
 }
 fn Term grad_half_const(void) {
   f32 half = 0.5f;
   u32 bits;
   memcpy(&bits, &half, sizeof bits);
-  return uop_const(DT_FP32, bits);
+  return uop_const(grad_target_dtype(), bits);
 }
 
 static Term grad_kernel_input_term(KernelEntry *ke, u32 slot) {
@@ -742,7 +768,7 @@ static Term grad_kernel_backprop(KernelEntry *ke, Term gy) {
   free(vals);
   free(adjs);
   free(input_adjs);
-  return total != 0 ? total : uop_const(DT_FP32, 0);
+  return total != 0 ? total : uop_const(grad_target_dtype(), 0);
 }
 
 static Term grad_kernel_term_from_ten(Term ten) {
@@ -809,18 +835,20 @@ static Term interact_grad_dispatch(Term grad_term) {
           if (kgrad != 0) return kgrad;
         }
       }
-      return uop_const(DT_FP32, 0);
+      return uop_const(grad_target_dtype(), 0);
     }
     u32 tid = (u32)term_val(y);
+    u32 leaf_dt = DT_FP32;
+    term_dtype_in(y, 0, &leaf_dt);
     u64 sloc = heap_alloc(2);
-    heap_set(sloc + 0, uop_const(DT_FP32, 0));   // scalar 0, broadcasts in any ADD/MUL
+    heap_set(sloc + 0, uop_const(leaf_dt, 0));   // scalar 0, broadcasts in any ADD/MUL
     heap_set(sloc + 1, gy);
     return term_new(0, TAG_SUP, tid, sloc);
   }
 
   // NUM: constant input -- no leaf contribution; cotangent dies.
   if (y_tag == TAG_NUM) {
-    return uop_const(DT_FP32, 0);
+    return uop_const(grad_target_dtype(), 0);
   }
 
   if (y_tag != TAG_UOP) return grad_term;
@@ -1346,7 +1374,9 @@ fn Term interact_grad(Term grad_term) {
           }
         }
         if (mismatch) {
-          Term zero    = uop_const(DT_FP32, 0);
+          u32 dt = DT_FP32;
+          term_dtype_in(target, 0, &dt);
+          Term zero    = uop_const(dt, 0);
           Term zero_lf = uop_expand(zero, tshape.ndim, tshape.dims);
           r = uop_binary(UOP_ADD, r, zero_lf);
         }

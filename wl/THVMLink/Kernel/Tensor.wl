@@ -83,12 +83,43 @@ tensorTermQ[_]       := False
 liftNumeric[n_ ? NumericQ, dtype_String] := TUOpConst[n, dtype]
 liftNumeric[t_TTerm,       _]            := t
 
-(* Pick a dtype to broadcast into.  If any side is a TAG_TEN or
-   TAG_UOP with a dtype, use that; else default to f32. *)
-inheritDType[t_TTerm] := With[{tag = $termTagFn[ttermRaw[t]]},
+(* Pick a dtype to broadcast into.  Mirrors C-side term_dtype_in
+   (src/schedule/uop_meta.c): TEN reads the TenDesc dtype; UOP
+   walks the graph (CONST holds dtype on its NUM cell, CAST/BITCAST
+   on the NUM at loc+1, every other elementwise/movement/reduce op
+   inherits from src[0]).  TAG_DP0/DP1 with DUP_GRAD_FLAG (a
+   TUOpGradWithTarget chain-rule projection) inherits from y at
+   heap[loc].  Used by gradOnesSeed and the Plus/Times/Less
+   UpValues so a right-hand-side scalar lifts to the surrounding
+   tensor's dtype instead of defaulting to f32 (which silently
+   bit-misinterprets under f64 / f16 / bf16 kernels). *)
+inheritDType[t_TTerm] := Module[{raw, tag, val, ext},
+    raw = ttermRaw[t];
+    tag = $termTagFn[raw];
     Switch[tag,
-        $TagTEN, dtypeName[$termExtFn[ttermRaw[t]]],
-        _,       "f32"
+        $TagTEN,
+            dtypeName[$termExtFn[raw]],
+        $TagUOP,
+            val = $termValFn[raw];
+            ext = $termExtFn[raw];
+            Switch[ext,
+                $UopKernel,
+                    inheritDType[TTerm[$heapReadFn[val]]],
+                $UopConst,
+                    dtypeName[$termExtFn[$heapReadFn[val]]],
+                $UopCast | $UopBitcast,
+                    dtypeName[$termValFn[$heapReadFn[val + 1]]],
+                $UopAdd  | $UopMul   | $UopCmplt | $UopCmpeq |
+                $UopNeg  | $UopRecip | $UopExp2  | $UopLog2  | $UopSqrt |
+                $UopReshape | $UopPermute | $UopExpand | $UopPad |
+                $UopShrink  | $UopFlip    | $UopReduce |
+                $UopLoad    | $UopAssign,
+                    inheritDType[TTerm[$heapReadFn[val]]],
+                _, "f32"
+            ],
+        $TagDP0 | $TagDP1 /; BitAnd[$termExtFn[raw], $DupGradFlag] =!= 0,
+            inheritDType[TTerm[$heapReadFn[$termValFn[raw]]]],
+        _, "f32"
     ]
 ]
 inheritDType[_] := "f32"
@@ -243,10 +274,14 @@ TAssign[dst_, src_] := (ensureInit[];
 uopLeafTids[t_TTerm] := (ensureInit[]; Normal @ $uopLeafTidsFn[ttermRaw[t]])
 uopLeafTids[_]       := {}
 
-(* Default cotangent seed for TGrad: ones at y's shape.  CONST is a
-   scalar (shape {1}); EXPAND lifts it to y.shape when y is non-scalar. *)
+(* Default cotangent seed for TGrad: ones at y's shape and dtype.
+   CONST is a scalar (shape {1}); EXPAND lifts it to y.shape when
+   y is non-scalar.  Dtype matches y's so f64 / f16 / bf16 kernels
+   read the seed buffer with the right itemsize -- defaulting to
+   f32 here used to bit-misinterpret under f64 (giving e-314
+   garbage from the chain rule's gy * src multiply). *)
 gradOnesSeed[y_TTerm] := Module[{shape = tUopShape[y], one},
-    one = TUOpConst[1.0];
+    one = TUOpConst[1.0, inheritDType[y]];
     If[ ListQ[shape] && Length[shape] > 0 && shape =!= {1},
         TUOpExpand[one, shape],
         one

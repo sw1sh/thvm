@@ -266,6 +266,15 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       return term_dtype_in(src0, env_id, out);
     }
   }
+  // TUOpGradWithTarget chain-rule projection: cell is [y, gy, target];
+  // the gradient result has y's dtype (= gy's dtype = leaf's dtype).
+  // Without this branch, materialize falls through to DT_FP32 here and
+  // higher-order TGrad on non-f32 inputs lands at the wrong dtype.
+  if ((tag == TAG_DP0 || tag == TAG_DP1)
+      && (term_ext(t) & DUP_GRAD_FLAG) != 0) {
+    Term y = heap_read(term_val(t));
+    return term_dtype_in(y, env_id, out);
+  }
   *out = DT_FP32; return 1;
 }
 
