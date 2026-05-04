@@ -41,6 +41,51 @@ static Term uop_iconst(i64 v) {
   return uop_const(DT_INT32, (u32)(i32)v);
 }
 
+// Recognise `c * x` (UOP_IMUL with one ICONST operand).  Returns 1
+// on match; *c_out is the constant, *x_out is the other operand.
+// Either operand of the IMUL can be the constant; we canonicalise
+// here.
+static int uop_match_const_mul(Term t, i64 *c_out, Term *x_out) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IMUL) return 0;
+  Term a = heap_read(term_val(t) + 0);
+  Term b = heap_read(term_val(t) + 1);
+  i64 v;
+  if (uop_iconst_value(a, &v)) { *c_out = v; *x_out = b; return 1; }
+  if (uop_iconst_value(b, &v)) { *c_out = v; *x_out = a; return 1; }
+  return 0;
+}
+
+// "Bounded" check: is `y` provably in [0, bound)?  RANGE leaves
+// have a known extent; ICONST in range qualifies; everything else
+// fails (the simplifier stays conservative).
+static int uop_term_strictly_below(Term y, i64 bound) {
+  if (bound <= 0) return 0;
+  u32 ext;
+  if (uop_range_extent(y, &ext)) return (i64)ext <= bound;
+  i64 v;
+  if (uop_iconst_value(y, &v)) return v >= 0 && v < bound;
+  return 0;
+}
+
+// Recognise `(c * x) + y` shape on a numerator.  Returns 1 on match;
+// *c_out, *x_out, *y_out filled in.  *y_out may be 0 if the shape is
+// the simpler `c * x` (no addend).  Either operand of the IADD may
+// hold the IMUL.
+static int uop_match_affine_numerator(Term n, i64 *c_out, Term *x_out,
+                                      Term *y_out) {
+  // Plain `c * x` -- treat y as 0.
+  if (uop_match_const_mul(n, c_out, x_out)) {
+    *y_out = 0;
+    return 1;
+  }
+  if (term_tag(n) != TAG_UOP || term_ext(n) != UOP_IADD) return 0;
+  Term a = heap_read(term_val(n) + 0);
+  Term b = heap_read(term_val(n) + 1);
+  if (uop_match_const_mul(a, c_out, x_out)) { *y_out = b; return 1; }
+  if (uop_match_const_mul(b, c_out, x_out)) { *y_out = a; return 1; }
+  return 0;
+}
+
 // === Binary integer simplifier ===
 
 fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
@@ -86,6 +131,15 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       if (b_const && bv == 1) return a;
       if (a_const && av == 0) return uop_iconst(0);
       if (a == b && b_const && bv != 0) return uop_iconst(1);
+      // RESHAPE-roundtrip fold: `(c*x + y) / c` -> `x` when y in [0, c).
+      // Also handles the bare `(c*x) / c` -> x case (y = 0 implicit).
+      if (b_const && bv > 0) {
+        i64 c;
+        Term x, y;
+        if (uop_match_affine_numerator(a, &c, &x, &y) && c == bv) {
+          if (y == 0 || uop_term_strictly_below(y, c)) return x;
+        }
+      }
       break;
     case UOP_IMOD:
       if (b_const && bv == 1) return uop_iconst(0);
@@ -95,6 +149,17 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       if (b_const && bv > 0) {
         u32 ext;
         if (uop_range_extent(a, &ext) && (i64)ext <= bv) return a;
+      }
+      // RESHAPE-roundtrip fold: `(c*x + y) % c` -> y when y in [0, c).
+      // For the bare `(c*x) % c` shape (y implicit), result is 0.
+      if (b_const && bv > 0) {
+        i64 c;
+        Term x, y;
+        if (uop_match_affine_numerator(a, &c, &x, &y) && c == bv) {
+          (void)x;
+          if (y == 0)                                  return uop_iconst(0);
+          if (uop_term_strictly_below(y, c))           return y;
+        }
       }
       break;
     case UOP_ILT:

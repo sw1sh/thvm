@@ -137,6 +137,46 @@ int main(void) {
   Term w = uop_iwhere(cond, r, r2);
   CHECK_EQ(term_ext(w), UOP_IWHERE);
 
+  // === divandmod identity folds: (c*x + y) // c -> x ; (c*x + y) % c -> y ===
+  TEST_BEGIN("simplify/divmod-affine-c-mul-x-divides-back-to-x");
+  // c=3, x=r2 (extent 100), y=0: (3*r2)/3 -> r2.
+  Term three = uop_const(DT_INT32, 3);
+  Term mul3 = uop_int_binary(UOP_IMUL, r2, three);
+  CHECK_EQ(uop_int_binary(UOP_IDIV, mul3, three), r2);
+
+  TEST_BEGIN("simplify/divmod-affine-c-mul-x-mod-c-zero");
+  // (3*r2) % 3 -> 0.
+  Term mod3 = uop_int_binary(UOP_IMOD, mul3, three);
+  CHECK_EQ(term_ext(mod3), UOP_CONST);
+
+  TEST_BEGIN("simplify/divmod-affine-c-mul-x-plus-y-div-c-x");
+  // (3*r2 + r) / 3 -> r2 when r.extent (8) > 3 -- BUT r.extent=8>3,
+  // so y is not in [0, 3).  Skip the fold.  Verify it stays IDIV.
+  Term mix = uop_int_binary(UOP_IADD, mul3, r);
+  Term div_skip = uop_int_binary(UOP_IDIV, mix, three);
+  CHECK_EQ(term_ext(div_skip), UOP_IDIV);
+
+  TEST_BEGIN("simplify/divmod-affine-c-mul-x-plus-y-divides-when-y-in-range");
+  // (3*r2 + ya) / 3 -> r2 when ya in [0, 3).  Use a RANGE with extent 3.
+  Term ya = uop_range(99, S_AXIS_LOOP, 3);
+  Term mix3 = uop_int_binary(UOP_IADD, mul3, ya);
+  CHECK_EQ(uop_int_binary(UOP_IDIV, mix3, three), r2);
+  // (3*r2 + ya) % 3 -> ya.
+  CHECK_EQ(uop_int_binary(UOP_IMOD, mix3, three), ya);
+
+  TEST_BEGIN("simplify/divmod-affine-roundtrip-end-to-end");
+  // Resolve a 1D->1D identity-via-flat reshape: ndim=2, dims=[2,3].
+  // resolve builds: flat = i0*3 + i1; in_iters[0] = flat / 3,
+  // in_iters[1] = flat % 3 (for the 2-axis output side; 1-axis input
+  // bottom).  We test the fold path directly here: with i0 ext>=, i1 ext=3,
+  // (i0*3 + i1) / 3 -> i0 and (i0*3 + i1) % 3 -> i1.
+  Term i0 = uop_range(200, S_AXIS_LOOP, 2);
+  Term i1 = uop_range(201, S_AXIS_LOOP, 3);
+  Term reshape_flat = uop_int_binary(UOP_IADD,
+                       uop_int_binary(UOP_IMUL, i0, three), i1);
+  CHECK_EQ(uop_int_binary(UOP_IDIV, reshape_flat, three), i0);
+  CHECK_EQ(uop_int_binary(UOP_IMOD, reshape_flat, three), i1);
+
   // === Composition: PAD-style mask collapses to true ===
   TEST_BEGIN("simplify/pad-style-mask-folds-when-iter-fully-in-bounds");
   // (r < 10) & (1 - (r < 0)).  r has extent 8.  (r < 10) -> 1, (r < 0) -> 0,

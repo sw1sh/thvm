@@ -192,6 +192,30 @@ int main(void) {
   CHECK_EQ(term_ext(fl_lhs), UOP_CONST);
   CHECK_EQ(heap_read(term_val(fl_resolved[0]) + 1), fl_iter);
 
+  // === Identity RESHAPE round-trip via simplifier (B2 collapses) ===
+  TEST_BEGIN("movement-index/identity-reshape-collapses-flat-decompose");
+  // src shape [2, 3]; reshape to [2, 3] (identity).  Resolver builds
+  // flat = i0*3 + i1 then in_iters = decompose; with the B2 fold
+  // `(c*x + y) / c -> x` and `(c*x + y) % c -> y` the in_iters
+  // reduce back to the original (i0, i1).
+  u32 rt_dims[2] = {2, 3};
+  Term src_rt = make_tensor(2, rt_dims);
+  Term rt = uop_reshape(src_rt, 2, rt_dims);
+  Term rt_iters[MAX_DIM] = {
+    uop_range(300, S_AXIS_LOOP, 2),
+    uop_range(301, S_AXIS_LOOP, 3),
+  };
+  Term rt_resolved[MAX_DIM] = {rt_iters[0], rt_iters[1]};
+  u32 rt_ndim = 2;
+  Term rt_mask = 0;
+  Term rt_bottom = uop_resolve_movement_chain(rt, rt_resolved, &rt_ndim, &rt_mask);
+  CHECK_EQ(rt_bottom, src_rt);
+  CHECK_EQ(rt_ndim, 2);
+  // Both iters simplify back to their RANGE leaves -- no IDIV / IMOD
+  // nodes survive the fold.
+  CHECK_EQ(rt_resolved[0], rt_iters[0]);
+  CHECK_EQ(rt_resolved[1], rt_iters[1]);
+
   // === Chain integration ===
   TEST_BEGIN("movement-index/chain-shrink-then-permute");
   // src shape [10, 20]; shrink to [4..8, 0..15] -> [4, 15];
