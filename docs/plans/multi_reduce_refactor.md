@@ -130,6 +130,61 @@ test` green:
   metric: kid=6 / kid=9 lift to metal-tile, total wall drops to
   ~150ms).
 
+## Status (2026-05-03)
+
+**Groundwork landed.** All commits below kept `make test` at 274/274
+and left BS=128 / BS=32 canary behavior unchanged (chain reduces
+still bail to per-op encoder).  The seam between "rangeify accepts a
+chain-reduce program" and "rangeify can emit it correctly" is now
+made explicit by an `RBAIL_MID("chain-reduce body emit not yet
+implemented")` at the start of body emit.
+
+| Commit | What | Why |
+|---|---|---|
+| `4f77983` | Retire `KDISPATCH_METAL_GEMV` slot | Side cleanup |
+| `6536143` | Collect `reduce_positions[]` array | Step 1 of original plan |
+| `7c52f89` | Env-gated multi-reduce gate + parallel-reduce compat check | Step 2 of original plan |
+| `e53730e` | Diagnostic doc: empirical chain-reduce pattern | (added detour) |
+| `576d9a7` | `ReduceMeta reduce_meta[r]` struct + `[0]` populated | Original step 1 (struct form) |
+| `7562e44` | Verified BS=128 chain-reduce shapes (KProgOp dump) | Empirical evidence |
+| `9fc4b16` | Per-region `region[i]` array, replace `pre = (i <= reduce_pos)` | Per-region scope groundwork |
+| `63f7038` | Populate `reduce_meta[1..N-1]` for chain reduces | Per-reduce metadata |
+| `3dc58fa` | `reduce_ranges_per_reduce[r][d]` + per-reduce REDUCE-op emit | Per-reduce range data |
+| `de5e4a2` | Body-emit `RBAIL_MID` guard for `n_reduces > 1` | Architectural seam |
+
+**What's still pending for chain-reduce activation:**
+
+### Step D-2 — per-region input scope tables
+
+Today: `input_used_pre[slot]` / `input_used_post[slot]` (and the
+parallel `input_load_*`, `input_rngs_*`, `via_rngs_*`).
+Needed: `input_used_in_region[r][slot]` for r in `[0..N]` (where
+region N is post-all-reduces).  The forward-walk input load emission
+needs to emit one LOAD per (input slot, region used) pair, with the
+LOAD address parameterised by the reduce ranges of that specific
+region.  Today's address logic (≈150 lines of branch ladder per input
+slot) needs to be extracted into a helper that takes the region
+index as a parameter.
+
+### Step D-3 — lift gate compat check
+
+Once D-2 lands, the gate's `multi-reduce source/axes differ` bail
+becomes too restrictive: chain reduces are exactly what we want to
+accept.  Replace with:
+
+- Sanity-check each reduce's metadata (already done in D-pre).
+- Always accept any `n_reduces <= RANGEIFY_MAX_REDUCES`.
+- Body emit decides feasibility per shape.
+
+### Step E/F/G — tile + render + flip default
+
+Same as the original plan, but now keyed off the per-region/per-
+reduce data structures rather than the single-reduce scalars.
+Renderer's `rmt_emit_value_with_reduce` needs N accumulators with
+sequential inner loops (the actually-correct chain-reduce shape).
+`tile_build_from_scalar` must wrap N TILE_REDUCEs at the same
+TILE_LOOP_NEST level (sequential, not nested).
+
 ## Risk / Bail Conditions
 
 - If Commit 3's gate relaxation surfaces multi-reduce kernels with
