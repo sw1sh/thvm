@@ -1744,6 +1744,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // (scalar broadcast, same-shape, partial-reduce, full-reduce-
   // rank-1) and bail individually if no branch matches.
 
+  // Chain-reduce body emit not yet implemented: even though
+  // reduce_meta[r] / region[i] / reduce_ranges_per_reduce[r] are
+  // populated correctly, the per-region input scope tracking is still
+  // single-reduce (input_used_pre/post key off region == 0 vs else),
+  // so for n_reduces > 1 the input loads in regions 1..N-1 would be
+  // incorrectly addressed.  Bail to per-op encoder here -- subsequent
+  // commits add per-region input-load tables and remove this guard.
+  // This bail closes the previously-broken THVM_RANGEIFY_MULTI_REDUCE
+  // path which silently accepted parallel reduces with the same hole.
+  if (n_reduces > 1) RBAIL_MID("chain-reduce body emit not yet implemented");
+
   // Start fresh -- emit_kernel_for_boundary may have run rangeify on
   // a previous attempt that bailed mid-way.
   rangeify_free(ke);
