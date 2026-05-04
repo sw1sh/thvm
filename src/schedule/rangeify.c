@@ -1239,26 +1239,50 @@ static u32 scalar_op_for_kprog(u8 op) {
   }
 }
 
+// prog_value, when non-NULL, points at the forward-emit pass's
+// per-op scalar register table.  emit_scalar_op_for_rngs uses it
+// to short-circuit any UOP_REDUCE (and other already-collapsed
+// values) it encounters in a recursive walk -- the reduce result
+// is per-LOOP-iter (collapsed across REDUCE / VIRT iters), so it
+// can be substituted as a constant rather than re-emitted.  This
+// is essential for chain-reduce kernels where a RESHAPE-V's body
+// subgraph contains a previous reduce's output: re-evaluating it
+// in VIRT-range space is impossible.  Pass NULL when prog_value
+// isn't yet available (early walks before forward emit starts).
 static u32 emit_scalar_raw_for_rngs(KernelEntry *ke, u32 raw,
-                                    RngsCtx const *r, u32 depth);
+                                    RngsCtx const *r, u32 depth,
+                                    u32 const *prog_value);
 
 static u32 emit_scalar_op_for_rngs(KernelEntry *ke, u32 op_id,
-                                   RngsCtx const *r, u32 depth) {
+                                   RngsCtx const *r, u32 depth,
+                                   u32 const *prog_value) {
   if (ke == NULL || op_id >= ke->n_ops || depth > 64) return 0;
   KProgOp const *p = &ke->program[op_id];
   if (r->valid_mask != 0) {
     RngsCtx clean = *r;
     clean.valid_mask = 0;
-    u32 body = emit_scalar_op_for_rngs(ke, op_id, &clean, depth + 1);
+    u32 body = emit_scalar_op_for_rngs(ke, op_id, &clean, depth + 1, prog_value);
     if (body == 0) return 0;
     u32 zero = emit_iconst(ke, 0);
     return emit_iwhere(ke, p->dtype, r->valid_mask, body, zero);
+  }
+  // Substitute already-emitted reduce results.  A UOP_REDUCE's
+  // value is per-LOOP-iter only (collapsed across reduce iters),
+  // so the value computed in the main forward pass is the right
+  // scalar regardless of the rngs context the recursive walk is
+  // currently in.  Without this short-circuit a chain-reduce
+  // RESHAPE-V whose body subgraph crosses an earlier reduce can't
+  // be lowered (the recursive walk has no way to "re-evaluate" a
+  // reduce in a different iter scope).
+  if (p->opcode == UOP_REDUCE && prog_value != NULL
+      && prog_value[op_id] != 0) {
+    return prog_value[op_id];
   }
   if (p->opcode == UOP_CONST) {
     return rangeify_emit_leaf(ke, S_CONST, p->dtype, (u64)p->arg);
   }
   if (p->opcode == UOP_CAST) {
-    u32 v = emit_scalar_raw_for_rngs(ke, p->src[0], r, depth + 1);
+    u32 v = emit_scalar_raw_for_rngs(ke, p->src[0], r, depth + 1, prog_value);
     return v == 0 ? 0 : rangeify_emit_unary(ke, S_CAST, p->dtype, v);
   }
   if (p->opcode == UOP_LOAD || p->opcode == UOP_EXPAND
@@ -1269,13 +1293,13 @@ static u32 emit_scalar_op_for_rngs(KernelEntry *ke, u32 op_id,
     if (p->n_src < 1) return 0;
     RngsCtx src_rngs;
     if (!rngs_ctx_movement_src(ke, p, r, &src_rngs)) return 0;
-    return emit_scalar_raw_for_rngs(ke, p->src[0], &src_rngs, depth + 1);
+    return emit_scalar_raw_for_rngs(ke, p->src[0], &src_rngs, depth + 1, prog_value);
   }
   u32 sop = scalar_op_for_kprog(p->opcode);
   if (sop == S_NONE || p->n_src == 0 || p->n_src > 2) return 0;
   u32 src_v[2] = {0, 0};
   for (u8 s = 0; s < p->n_src; s++) {
-    src_v[s] = emit_scalar_raw_for_rngs(ke, p->src[s], r, depth + 1);
+    src_v[s] = emit_scalar_raw_for_rngs(ke, p->src[s], r, depth + 1, prog_value);
     if (src_v[s] == 0) return 0;
   }
   if (p->n_src == 1) return rangeify_emit_unary(ke, sop, p->dtype, src_v[0]);
@@ -1283,19 +1307,21 @@ static u32 emit_scalar_op_for_rngs(KernelEntry *ke, u32 op_id,
 }
 
 static u32 emit_scalar_raw_for_rngs(KernelEntry *ke, u32 raw,
-                                    RngsCtx const *r, u32 depth) {
+                                    RngsCtx const *r, u32 depth,
+                                    u32 const *prog_value) {
   if (KSRC_IS_INPUT(raw)) {
     u32 slot = KSRC_INDEX(raw);
     if (slot >= ke->n_inputs) return 0;
     return emit_input_load_for_use(ke, slot, r, ke->input_dtypes[slot]);
   }
   u32 op_id = KSRC_INDEX(raw);
-  return emit_scalar_op_for_rngs(ke, op_id, r, depth + 1);
+  return emit_scalar_op_for_rngs(ke, op_id, r, depth + 1, prog_value);
 }
 
 static u32 emit_pad_source_as_index(KernelEntry *ke, u32 raw,
-                                    RngsCtx const *r) {
-  return emit_scalar_raw_for_rngs(ke, raw, r, 0);
+                                    RngsCtx const *r,
+                                    u32 const *prog_value) {
+  return emit_scalar_raw_for_rngs(ke, raw, r, 0, prog_value);
 }
 
 // === Phase B: rangeify a pure-elementwise KProgOp[] into ScalarUop[] ===
@@ -2796,7 +2822,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             RngsCtx body_rngs = {0};
             body_rngs.ndim = in_ndim;
             for (u32 d = 0; d < in_ndim; d++) body_rngs.refs[d] = virt_ranges[d];
-            u32 v_body = emit_scalar_raw_for_rngs(ke, raw, &body_rngs, 0);
+            u32 v_body = emit_scalar_raw_for_rngs(ke, raw, &body_rngs, 0, prog_value);
             if (v_body == 0) can_use_v = 0;
             if (!can_use_v) {
               if (getenv("THVM_RANGEIFY_BAIL")) {
@@ -2874,7 +2900,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         RBAIL_MID("PERMUTE rng transform");
       }
       u32 raw = p->src[0];
-      u32 v = emit_scalar_raw_for_rngs(ke, raw, &src_rngs, 0);
+      u32 v = emit_scalar_raw_for_rngs(ke, raw, &src_rngs, 0, prog_value);
       if (v == 0) RBAIL_MID("PERMUTE src 0");
       prog_value[i] = v;
       via_rngs[i] = 1;
@@ -2938,7 +2964,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (p->opcode == UOP_PAD) {
         u32 edge = i * MAX_KPROG_SRC + 0;
         if (use_via_rngs[edge]) {
-          u32 ulocal = emit_pad_source_as_index(ke, raw, &use_rngs[edge]);
+          u32 ulocal = emit_pad_source_as_index(ke, raw, &use_rngs[edge], prog_value);
           if (ulocal != 0) {
             prog_value[i]  = ulocal;
             via_rngs[i]    = 1;
