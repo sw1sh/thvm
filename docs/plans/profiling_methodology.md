@@ -275,6 +275,77 @@ Without `THVM_METAL_PROFILE_PEROP`, the same kernel reports
 across all ops uniformly -- misleading for hot-kernel
 identification.
 
+### 4.4 Per-Op Profile at BS=128 (Where The Wall Time Hides)
+
+Profile-perop on BS=128 reveals an **84% wall-time concentration in
+two metal-op fallback kernels**:
+
+| rep_kid | role | dispatch | avg_us | × dispatches | total / step |
+|---------|------|----------|--------|--------------|--------------|
+| 9  | BN-grad combo (2 reduces) | metal-op  | **38436** | 9 | **346 ms** |
+| 6  | BN-grad combo (2 reduces) | metal-op  | **25421** | 9 | **229 ms** |
+| 4  | conv-fwd accum             | metal-tile| 1571      | 9 | 14 ms  |
+| 5  | conv-bwd reduce             | metal-tile| 14035     | 1 | 14 ms  |
+| 13 | conv-bwd reduce             | metal-tile| 520       | 9 | 5 ms   |
+| 11 | conv-bwd reduce             | metal-tile| 451       | 9 | 4 ms   |
+| _other 109 kernels_ |             | metal-tile| ~10-100   | 9-17 | ~75 ms |
+| **total** | | | | | **~687 ms** |
+
+Both 38ms / 25ms kernels have `REDUCE=2` in their KProgOp programs.
+They originate from the BN-backward path's `dgamma + dbeta` fused
+boundary -- two reduces (sum of dy*x_normed, sum of dy) over the
+same batch+spatial axes from shared inputs.
+
+**The `> 1 reduce` gate at `rangeify_try_lower_elementwise:1410`
+forces these onto the per-op encoder.**  The per-op path materializes
+N intermediate buffers (one per KProgOp) and dispatches each
+encoder separately, all reading/writing memory rather than holding
+intermediates in registers.  At BS=128 with output_numel ~ 819K and
+22 ops per kernel, that's ~22 MB-traffic round trips per dispatch
+× 9 dispatches × 2 such kernels = ~400 MB of avoidable memory
+traffic per step.
+
+### 4.5 Shape-Aware Default Axes — Tried, Doesn't Help This Workload
+
+Tested an `axes_default_for` extension (`THVM_AXIS_DEFAULT_SHAPE_AWARE=1`)
+that splits the trailing reduce axis into `outer LOOP / GROUP_REDUCE`
+when the axis size exceeds a threshold (default 64) and is divisible
+by a power-of-2 in [4, 256].  Hypothesis: kernels with big reduce
+axes would benefit from threadgroup-cooperative reduction instead
+of per-thread sequential reduce.
+
+A/B sweep (no autotune):
+
+| BS | default axes | shape-aware ON | delta |
+|----|--------------|----------------|-------|
+| 32 | 31 ms | 87 ms | **-180%** (regression) |
+| 64 | 414 ms | 552 ms | -33% |
+| 128 | 718 ms | 690 ms | +4% (within noise) |
+
+Why it regresses small batches: for kernels with axis_size in
+[64..256], the new GROUP_REDUCE assignment adds threadgroup
+synchronization overhead that exceeds the savings.  The reduce loop
+of 64-256 elements runs faster sequentially per thread than via
+threadgroup-shared accumulator + barrier.
+
+Why it doesn't help BS=128: the wall-time bottleneck is the two
+metal-op fallback kernels (84% of wall), which don't go through
+tile-jit at all; their dispatch path doesn't consume `axis_types`.
+
+**Conclusion**: shape-aware default axes need a precise cost model
+(not a flat threshold) before they can be a default-on optimization.
+Reverted; the canary stays at the LOOP-only default.
+
+The real high-leverage architectural piece is **multi-reduce-per-kernel
+support in `rangeify_try_lower_elementwise`** -- lifting the
+`> 1 reduce` gate so kid=6 / kid=9 route through tile-jit instead of
+falling onto the per-op encoder.  The rangeify code currently has
+~87 references to single-reduce metadata variables (`reduce_pos`,
+`reduce_kind`, `reduce_size`, `reduce_inner`, `reduce_n_ranges`,
+`reduce_extents`); a clean lift would convert these to arrays-per-reduce.
+That's a multi-day refactor and the next architectural piece for the
+high-BS gap.
+
 ### Reading the tables
 
 - **Wall time is essentially identical** (19.7 vs 20.3 ms within
