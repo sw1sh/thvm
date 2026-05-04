@@ -6,6 +6,46 @@ dated section.
 
 ## Unreleased
 
+### Fixed: u32 numel overflow on conv-bwd shapes (BS=512 10.6x speedup)
+
+`KProgOp.numel` was u32 across `src/thvm.h` and the materialize +
+rangeify chain.  Kernel programs with intermediates exceeding 2^32
+elements (e.g. BS=512 conv-1 backward dInput at shape
+`[32, 800, 204800]` = 5.24 billion elements) silently overflowed
+during shape-product accumulation; 5,242,880,000 mod 2^32 =
+947,912,704.  The rangeify reduce-shape divisibility guard
+correctly rejected the resulting non-integer ratio (947,912,704 /
+1,184,890 = 800.000595, remainder 704), and the kernel fell to
+`metal-jit`'s single-encoder slow path -- consuming **15.5 s of
+the 17.8 s** BS=512 step.
+
+`cbc77d2` widens `KProgOp.numel`, `src_numel()`,
+`ReduceChainInfo.out_numel`, `shape_numel_u32()` (kept the name to
+minimise diff), and the local accumulators / typed locals in
+`schedule/materialize.c` and `schedule/rangeify.c` from u32 to u64.
+Post-fix the conv-bwd kernel lowers cleanly through rangeify into
+`metal-tile`.
+
+Canary numbers (beautiful-mnist train, WARMUP=3 N=5):
+
+  BS=512 pre-fix:   17786 ms / step  (kid=7 metal-jit dominated)
+  BS=512 post-fix:   1676 ms / step  -- 10.6x speedup
+
+  BS=128 pre-fix:    149.8 ms        (no regression)
+  BS=128 post-fix:   149.1 ms
+
+vs. cross-framework baseline (BS=512):
+
+  PyTorch MPS eager:  9.7 ms   -- thvm now 173x off (was 1834x)
+  MLX (eager):       22.9 ms   -- thvm now  73x off (was  776x)
+  tinygrad TinyJit:  47.0 ms   -- thvm now  36x off (was  378x)
+
+274/274 pass.  The remaining gap at BS=512 is dominated by kid=8 /
+kid=11 (BN-grad chain reduces with `reduce_size = 204800` exceeding
+the 65535 rangeify cap); lifting them needs shape-aware default
+axes with GROUP_REDUCE assignment (still pending; documented in
+profiling_methodology.md §4.5).
+
 ### Diagnostic: BS=512 rangeify bail trace (commit `35f7ef5`)
 
 After converting silent `return 0` sites in
