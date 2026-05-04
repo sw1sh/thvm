@@ -346,6 +346,65 @@ falling onto the per-op encoder.  The rangeify code currently has
 That's a multi-day refactor and the next architectural piece for the
 high-BS gap.
 
+### 4.6 BS=512 Cross-Framework Apples-to-Apples (2026-05-04)
+
+Same model, same machine (M3 Max), Metal backend everywhere, four
+frameworks, identical 13-layer architecture (`Conv 1->32 5, ReLU,
+Conv 32->32 5, ReLU, BN32, MaxPool, Conv 32->64 3, ReLU,
+Conv 64->64 3, ReLU, BN64, MaxPool, Flatten, Linear 576->10`),
+loss = sparse categorical cross-entropy, optimizer = Adam (default
+hparams), real MNIST data.
+
+**Methodology**: WARMUP=5 steps (capture JIT / autotune), then
+STEPS=20 timed steps with one `synchronize()` boundary at each end;
+report `(t_end - t_start) / STEPS`.  Python `for` loop overhead is
+amortised across 20 steps; framework-side JIT replay (tinygrad
+`TinyJit`, thvm `cg_jit_capture`) means the steady-state time per
+step is dominated by GPU kernel time and Metal encoder dispatch.
+
+| Framework | BS=512 ms/step | × thvm | Notes |
+|-----------|---------------:|-------:|-------|
+| **PyTorch MPS (eager)**     |   **9.7** |  1745× | `torch.device('mps')`, `nn.Adam`, `nn.CrossEntropyLoss` |
+| **PyTorch MPS (compile)**   |  11.3 |  1496× | `@torch.compile`; slight regression vs eager (compile boundary cost) |
+| **MLX (eager)**             |  22.9 |   738× | `mlx.optimizers.Adam`, `nn.value_and_grad`, NHWC layout |
+| **tinygrad METAL (TinyJit)**|  47.0 |   359× | `TinyJit`-decorated `train_step`, default heuristic axes |
+| **thvm METAL (chain on)**   | **16898**  |   1× | tile-jit + chain-reduce (default-on); kid=7 metal-jit dominates |
+| thvm METAL (chain off, baseline) | 17027 | 1.01× | env `THVM_RANGEIFY_NO_MULTI_REDUCE=1`; chain-reduce work invisible at BS=512 |
+
+JITBEAM (tinygrad's BEAM autotune) was attempted but doesn't
+converge in <10 min on this model; numbers reported are default
+heuristic JIT only.
+
+**Where the BS=512 wall hides for thvm**: a single
+`metal-jit`-classified kernel (kid=7) eats **15.5 s of the 16.9 s
+step**.  It's the conv-1 backward dInput convolution, expressed as
+a 29-op KProgOp program with a 947 M-element EXPAND-MUL-REDUCE
+pattern (im2col-style materialization).  The kernel never reaches
+rangeify (`status=not-rangeified`); realize_classify routes it to
+the `metal-jit` path which currently emits a single dispatch with
+LOOP-only axes over 947 M iters.  At ~4 GFLOP/s effective vs the
+M3 Max's >5 TFLOP/s peak, the kernel runs ~1000× under hardware.
+
+The chain-reduce work landed earlier today (commits `9fc4b16` ..
+`48420ce`, see [docs/plans/multi_reduce_refactor.md]) lifts kid=6 /
+kid=9 chain reduces to fast paths, but those are the BN-backward
+fused kernels — they exist at every BS and contribute meaningful
+wins at BS=128 (681 ms → 187 ms, -73%).  At BS=512 their absolute
+contribution (~150 ms / step total) is dwarfed by kid=7's 15.5 s.
+
+**Closing the BS=512 gap** therefore requires either:
+
+1. Lift kid=7 (and similar conv-backward dInput patterns) out of
+   `metal-jit` and into rangeify+tile-jit so it gets GLOBAL/LOCAL
+   axis assignments.  The KProgOp shape is unusual (~9.5e8 element
+   intermediate) which probably trips a numel/dim guard somewhere
+   in classify or rangeify; tracing the bail is the first step.
+2. Or have the `metal-jit` path itself compute parallelism axes
+   from the output shape rather than emitting a single thread.
+
+This section measures both, but the immediate bottleneck is
+clearly (1).
+
 ### Reading the tables
 
 - **Wall time is essentially identical** (19.7 vs 20.3 ms within
