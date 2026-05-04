@@ -2236,21 +2236,46 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     u32 in_numel = ke->input_numels[i];
     u32 param    = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)i);
 
-    // Pre-scope LOAD: how we index inside the reduce body depends
-    // on the relationship between input shape and (output_shape +
-    // reduce_size).  Three cases handled today:
+    // Pre-scope LOAD (per region r in [0..n_reduces)): how we index
+    // inside reduce r's body depends on the relationship between the
+    // input shape and (output_shape + reduce_meta[r].size).  Three
+    // structural cases handled today (each branch keys off the per-r
+    // shadow vars below):
     //  1. in_numel == 1 -> scalar broadcast (no ranges).
     //  2. in_numel == onum (full-reduce-with-broadcast-back, the
     //     softmax pattern): input shape == output shape.  The
-    //     reduce body indexes by the REDUCE range alone (the
-    //     LOOP range is the OUTER position; we sum across the
-    //     full input).  Post-reduce reads use the LOOP range.
-    //     Only valid when red->numel == 1 (fully reduced) AND
-    //     reduce_size == in_numel.
-    //  3. in_numel == reduce_in_numel != onum (partial reduce
-    //     where output has >=1 LOOP dim and reduce axis is the
-    //     trailing dim): index by (LOOP, REDUCE) ranges.
-    if (input_used_pre[i]) {
+    //     reduce body indexes by the REDUCE range alone.
+    //  3. in_numel == reduce_in_numel_r != onum (partial reduce):
+    //     index by (LOOP, REDUCE-r) ranges.
+    // For chain reduces (n_reduces > 1) this loop runs N times, one
+    // LOAD per region; for single-reduce (n_reduces == 1) it runs
+    // exactly once with shadow vars equal to the legacy outer-scope
+    // values, so input_load_in_region[0][i] mirrors input_load_pre[i].
+    for (u32 r = 0; r < n_reduces; r++) {
+      if (!input_used_in_region[r][i]) continue;
+
+      KProgOp *red_r            = reduce_meta[r].op;
+      u32      reduce_size_r    = reduce_meta[r].size;
+      u32      reduce_inner_r   = reduce_meta[r].inner;
+      u32      reduce_range_r   = reduce_range_per_reduce[r];
+      u32     *reduce_extents_r = reduce_meta[r].extents;
+      u32      in_ndim_r;
+      u32      in_strides_r[MAX_DIM + 1];
+      if (red_r->n_reduce_axes > 0 && red_r->src0_ndim > 0
+          && red_r->src0_ndim <= MAX_DIM) {
+        in_ndim_r = red_r->src0_ndim;
+        row_major_strides(red_r->src0_dims, in_ndim_r, in_strides_r);
+      } else {
+        in_ndim_r = os->ndim + 1;
+        if (in_ndim_r > MAX_DIM) RBAIL_MID("reduce in_ndim_r > MAX_DIM");
+        u32 in_dims[MAX_DIM + 1];
+        for (u32 d = 0; d < os->ndim; d++) in_dims[d] = os->dims[d];
+        in_dims[os->ndim] = reduce_size_r;
+        row_major_strides(in_dims, in_ndim_r, in_strides_r);
+      }
+      u32 reduce_in_numel_r = red_r->numel * reduce_size_r;
+      (void)reduce_extents_r;     // touched only by E/F when emitted
+
       View const *v = &ke->input_views[i];
       u32 in_off   = (u32)v->offset;
       u32 idx;
@@ -2259,42 +2284,23 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u64 packed = pack_index_extra(NULL, 0, in_off);
         if (packed == UINT64_MAX) RBAIL_MID("pre-INDEX scalar offset > u16");
         idx = rangeify_emit(ke, S_INDEX, dtype, 1, src, packed);
-      } else if (in_numel == onum && red->numel == 1
-                 && in_numel == reduce_size) {
-        u32 r_ids[1]    = {reduce_range};
+      } else if (in_numel == onum && red_r->numel == 1
+                 && in_numel == reduce_size_r) {
+        u32 r_ids[1]    = {reduce_range_r};
         u32 r_strides[1] = {1};
         idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
                                        1, in_off);
-      } else if (in_numel == reduce_size && v->shape.ndim == 1) {
-        // Per-reduce-iter rank-1 broadcast.  Input depends only on
-        // the REDUCE iter (invariant across LOOP iters); the address
-        // is reduce_iter * stride[0] + offset.  Covers both the
-        // full-reduce case (red->numel == 1) and partial-reduce
-        // (red->numel > 1) with a per-reduce-element constant input
-        // -- common in BN gradient backward chains.
-        u32 r_ids[1]    = {reduce_range};
+      } else if (in_numel == reduce_size_r && v->shape.ndim == 1) {
+        u32 r_ids[1]    = {reduce_range_r};
         u32 r_strides[1] = {(u32)v->strides[0]};
         idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
                                        1, in_off);
-      } else if (in_numel == reduce_size && reduce_inner == 1) {
-        // Generalization of the rank-1 case above: same per-reduce-
-        // iter pattern but the input view has rank > 1 with all-but-
-        // one axes of size 1 (e.g. shape=[1,1,reduce_size]).  The
-        // input is contiguous from offset (reduce-trailing layout),
-        // so reduce_iter * 1 + offset gives the right address.
-        u32 r_ids[1]    = {reduce_range};
+      } else if (in_numel == reduce_size_r && reduce_inner_r == 1) {
+        u32 r_ids[1]    = {reduce_range_r};
         u32 r_strides[1] = {1};
         idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
                                        1, in_off);
-      } else if (in_numel == reduce_size && v->shape.ndim <= MAX_DIM) {
-        // General "input depends only on reduce iter" case (any rank,
-        // contig OR non-contig).  Builds the address as a symbolic
-        // expression from reduce_iter via per-axis DIV/MOD/MUL using
-        // the view's actual strides.  Replaces the rank-1 stride-aware
-        // branch above (now redundant) and the prior S_RESHAPE_V wrap
-        // for non-contig views with a direct S_INDEX_E emission.
-        // Mirrors tinygrad's rangeify, which builds index expressions
-        // as symbolic UOps over RANGE atoms (apply_movement_op).
+      } else if (in_numel == reduce_size_r && v->shape.ndim <= MAX_DIM) {
         u32 v_ndim = v->shape.ndim;
         u32 dims_u32[MAX_DIM];
         u32 strides_u32[MAX_DIM];
@@ -2303,71 +2309,40 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           dims_u32   [d] = v->shape.dims[d];
           strides_u32[d] = (u32)v->strides[d];
         }
-        u32 addr = build_addr_from_flat_iter(ke, reduce_range,
+        u32 addr = build_addr_from_flat_iter(ke, reduce_range_r,
                                               dims_u32, strides_u32,
                                               v_ndim, in_off);
         if (addr == 0) RBAIL_MID("pre-INDEX-E build_addr failed");
         u32 src[2] = {param, addr};
         idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
-      } else if (red->n_reduce_axes > 1
-                 && input_rngs_pre[i].ndim == v->shape.ndim
+      } else if (red_r->n_reduce_axes > 1
+                 && input_rngs_in_region[r][i].ndim == v->shape.ndim
                  && v->shape.ndim > 0) {
         goto pre_index_rngs_fallback;
-      } else if (in_numel == reduce_in_numel
-                 && v->shape.ndim == in_ndim) {
-        // Partial reduce: input has rank in_ndim (= os->ndim + 1).
-        // Includes the trivial reduce_size==1 case where the
-        // reduce axis is size 1 -- still need view-aware INDEX
-        // because the input view may be broadcast (stride==0
-        // axes from chain-rule grad expansion).
-        // Partial reduce.  Input rank = output rank + 1; the reduce
-        // axis sits at position `reduce_axis` inferred from
-        // `reduce_inner`:
-        //   inner = product(input.dims[reduce_axis + 1 ..])
-        // so walking from the back of the input shape, the smallest
-        // suffix product matching inner identifies the position.
-        // For inner == 1 the reduce axis is trailing (Phase C-1
-        // case); for inner > 1 it sits in the middle (Conv2D-
-        // backward over batch, etc.).
-        if (v->shape.ndim != in_ndim) RBAIL_MID("pre-reduce input ndim != in_ndim");
-        // Find the largest k in [0, in_ndim) with
-        //   product(dims[k+1 .. in_ndim-1]) == reduce_inner.
-        // For inner=1 -> k = in_ndim - 1 (trailing axis); for inner
-        // = dims[last] -> k = in_ndim - 2; etc.  Walk k from
-        // in_ndim-1 downward, comparing the running suffix product
-        // BEFORE multiplying dims[k] in.
+      } else if (in_numel == reduce_in_numel_r
+                 && v->shape.ndim == in_ndim_r) {
+        if (v->shape.ndim != in_ndim_r) RBAIL_MID("pre-reduce input ndim_r != in_ndim_r");
         u32 reduce_axis = (u32)-1;
         {
-          u32 partial = 1;     // = product(dims[in_ndim ..]) = 1
-          for (i32 k = (i32)in_ndim - 1; k >= 0; k--) {
-            if (partial == reduce_inner) { reduce_axis = (u32)k; break; }
+          u32 partial = 1;
+          for (i32 k = (i32)in_ndim_r - 1; k >= 0; k--) {
+            if (partial == reduce_inner_r) { reduce_axis = (u32)k; break; }
             partial *= v->shape.dims[k];
           }
         }
-        if (reduce_axis >= in_ndim) RBAIL_MID("reduce_axis search exhausted");
-        // Build r_ids in INPUT-axis order: input axis -> range id.
-        // input axes [0..reduce_axis-1] come from output axes
-        // [0..reduce_axis-1]; input axis reduce_axis is the REDUCE
-        // range; input axes [reduce_axis+1..] come from output axes
-        // [reduce_axis..].
+        if (reduce_axis >= in_ndim_r) RBAIL_MID("reduce_axis search exhausted");
         u32 r_ids    [MAX_DIM + 1]; u32 r_strides[MAX_DIM + 1];
-        for (u32 d = 0; d < in_ndim; d++) {
+        for (u32 d = 0; d < in_ndim_r; d++) {
           if (d < reduce_axis) {
             r_ids[d] = loop_ranges[d];
           } else if (d == reduce_axis) {
-            r_ids[d] = reduce_range;
+            r_ids[d] = reduce_range_r;
           } else {
-            // d > reduce_axis: maps to output axis d-1.
             r_ids[d] = loop_ranges[d - 1];
           }
-          // Sanity: dim mismatch with non-broadcast stride bails.
-          // Exception: a size-1 axis is an implicit broadcast (iter
-          // always 0 on that axis from the input's perspective).
-          // Force stride to 0 there to make the LOOP iter address
-          // collapse to offset+0 regardless of the LOOP's extent.
           u32 expected_dim;
           if (d < reduce_axis)       expected_dim = os->dims[d];
-          else if (d == reduce_axis) expected_dim = reduce_size;
+          else if (d == reduce_axis) expected_dim = reduce_size_r;
           else                       expected_dim = os->dims[d - 1];
           if (v->shape.dims[d] == 1 && expected_dim != 1) {
             r_strides[d] = 0;
@@ -2378,25 +2353,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           r_strides[d] = (u32)v->strides[d];
         }
-        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides, in_ndim, in_off);
-      } else if (in_numel == reduce_in_numel && reduce_inner == 1) {
-        // Flat-buffer alias of the reduce-input shape: same total
-        // numel, lower rank view, contiguous, reduce axis trailing.
-        // Walk all (LOOP, REDUCE) iters in canonical row-major over
-        // (output_shape ++ reduce_size).  Common when the partial-
-        // reduce input is a flatten of the per-output strip.
+        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides, in_ndim_r, in_off);
+      } else if (in_numel == reduce_in_numel_r && reduce_inner_r == 1) {
         u32 r_ids[MAX_DIM + 1];
         for (u32 d = 0; d < os->ndim; d++) r_ids[d] = loop_ranges[d];
-        r_ids[os->ndim] = reduce_range;
-        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, in_strides,
-                                       in_ndim, in_off);
+        r_ids[os->ndim] = reduce_range_r;
+        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, in_strides_r,
+                                       in_ndim_r, in_off);
       } else if (v->shape.ndim == os->ndim) {
-        // Same rank as output (Phase F-fix): walk the View's strides
-        // directly, mirroring the post-scope branch.  Inputs that are
-        // broadcast (stride==0) or transposed need view-aware strides
-        // -- the canonical loop_strides would silently mis-address.
-        // PAD/SHRINK consumers do their own iter shift + bounds gate,
-        // so a size mismatch on those inputs is intentional.
         int shape_mismatch = 0;
         for (u32 d = 0; d < os->ndim; d++) {
           if (v->shape.dims[d] != os->dims[d] && v->strides[d] != 0
@@ -2405,17 +2369,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             break;
           }
         }
-        // Try the rngs-based fallback when shape mismatches.  Raw
-        // S_RANGE refs must be extent-compatible with v.shape per
-        // axis; expression refs (S_IDIV/S_IMOD/etc.) are accepted only
-        // through the S_INDEX_E fallback below, because the expression
-        // itself encodes the consumer edge's coordinate transform.
-        if (shape_mismatch && input_rngs_pre[i].ndim == v->shape.ndim
+        if (shape_mismatch && input_rngs_in_region[r][i].ndim == v->shape.ndim
             && v->shape.ndim > 0) {
           int ext_ok = 1;
           for (u32 d = 0; d < v->shape.ndim; d++) {
             if (v->strides[d] == 0) continue;
-            u32 ref = input_rngs_pre[i].refs[d];
+            u32 ref = input_rngs_in_region[r][i].refs[d];
             if (ref == 0) { ext_ok = 0; break; }
             ScalarUop const *ru = &ke->scalar_uops[ref];
             if (ru->op != S_RANGE) continue;
@@ -2426,7 +2385,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
         if (shape_mismatch) {
           if (getenv("THVM_RANGEIFY_BAIL")) {
-            fprintf(stderr, "  pre-INDEX-mismatch: i=%u v.shape=[", i);
+            fprintf(stderr, "  pre-INDEX-mismatch: i=%u r=%u v.shape=[", i, r);
             for (u32 d = 0; d < v->shape.ndim; d++)
               fprintf(stderr, "%u%s", v->shape.dims[d], d+1==v->shape.ndim?"":",");
             fprintf(stderr, "] v.strides=[");
@@ -2436,14 +2395,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             for (u32 d = 0; d < os->ndim; d++)
               fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
             fprintf(stderr, "] rngs.ndim=%u rngs.refs=[",
-                    input_rngs_pre[i].ndim);
-            for (u32 d = 0; d < input_rngs_pre[i].ndim; d++) {
-              u32 ref = input_rngs_pre[i].refs[d];
+                    input_rngs_in_region[r][i].ndim);
+            for (u32 d = 0; d < input_rngs_in_region[r][i].ndim; d++) {
+              u32 ref = input_rngs_in_region[r][i].refs[d];
               if (ref == 0) { fprintf(stderr, "(none)"); }
               else fprintf(stderr, "%s/extra=%lu",
                            scalar_op_name(ke->scalar_uops[ref].op),
                            (unsigned long)(ke->scalar_uops[ref].extra & 0xFFFFFFFFu));
-              if (d+1 < input_rngs_pre[i].ndim) fprintf(stderr, ",");
+              if (d+1 < input_rngs_in_region[r][i].ndim) fprintf(stderr, ",");
             }
             fprintf(stderr, "]\n");
           }
@@ -2455,22 +2414,16 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
         idx = emit_index_chain_or_expr(ke, dtype, param, loop_ranges, strides_u32,
                                        os->ndim, in_off);
-      } else if (input_rngs_pre[i].ndim == v->shape.ndim
+      } else if (input_rngs_in_region[r][i].ndim == v->shape.ndim
                  && v->shape.ndim > 0) {
        pre_index_rngs_fallback:
-        via_rngs_pre[i] = 1;
-        // RNGS-BASED FALLBACK (Phase 3 of apply_movement_op port).
-        // The backward walk computed input_rngs_pre[i] = per-axis iter
-        // expressions for this input read inside the reduce body.
-        // Build addr = sum(rngs[d] * v.strides[d]) + offset directly
-        // via S_INDEX_E.  Handles arbitrary chain shapes that the
-        // per-pattern branches above don't recognize.
-        RngsCtx const *r = &input_rngs_pre[i];
+        via_rngs_in_region[r][i] = 1;
+        RngsCtx const *rc = &input_rngs_in_region[r][i];
         u32 acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
-        for (u32 d = 0; d < r->ndim; d++) {
-          if (v->strides[d] < 0) { acc = 0; break; }  // bail
-          if (v->strides[d] == 0) continue;  // broadcast axis
-          u32 t = r->refs[d];
+        for (u32 d = 0; d < rc->ndim; d++) {
+          if (v->strides[d] < 0) { acc = 0; break; }
+          if (v->strides[d] == 0) continue;
+          u32 t = rc->refs[d];
           if (v->strides[d] != 1) {
             u32 c = emit_iconst(ke, (i64)v->strides[d]);
             t = emit_ibinop(ke, S_IMUL, t, c);
@@ -2481,27 +2434,22 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 src[2] = {param, acc};
         idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
       } else {
-        // No supported pre-INDEX shape branch matched.  Bailing
-        // here is safer than emitting wrong addresses with
-        // canonical loop_strides.
         if (getenv("THVM_RANGEIFY_BAIL")) {
-          fprintf(stderr, "  pre-INDEX-detail: i=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim=%u red->numel=%u reduce_size=%u reduce_in_numel=%u reduce_inner=%u rngs.ndim=%u\n",
-                  i, in_numel, onum, v->shape.ndim, os->ndim,
-                  in_ndim, has_reduce ? red->numel : 0,
-                  has_reduce ? reduce_size : 0, reduce_in_numel,
-                  has_reduce ? reduce_inner : 0,
-                  input_rngs_pre[i].ndim);
+          fprintf(stderr, "  pre-INDEX-detail: i=%u r=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim_r=%u red_r->numel=%u reduce_size_r=%u reduce_in_numel_r=%u reduce_inner_r=%u rngs.ndim=%u\n",
+                  i, r, in_numel, onum, v->shape.ndim, os->ndim,
+                  in_ndim_r, red_r->numel, reduce_size_r,
+                  reduce_in_numel_r, reduce_inner_r,
+                  input_rngs_in_region[r][i].ndim);
         }
         RBAIL_MID("pre-INDEX no branch matched");
       }
       if (idx == 0) RBAIL_MID("pre-INDEX emit failed");
-      // Wrap with valid_mask if PAD chain produced one.
       u32 load = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
-      if (input_rngs_pre[i].valid_mask != 0) {
+      if (input_rngs_in_region[r][i].valid_mask != 0) {
         u32 zero = emit_iconst(ke, 0);
-        load = emit_iwhere(ke, dtype, input_rngs_pre[i].valid_mask, load, zero);
+        load = emit_iwhere(ke, dtype, input_rngs_in_region[r][i].valid_mask, load, zero);
       }
-      input_load_pre[i] = load;
+      input_load_in_region[r][i] = load;
     }
 
     // Post-scope LOAD: per-LOOP-element read.  Stride encoding
