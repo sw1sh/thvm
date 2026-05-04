@@ -1463,7 +1463,25 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         RBAIL_PRE("unsupported opcode");
     }
   }
-  (void)reduce_positions; (void)n_reduces;     // step C wires through emit
+  // region[i] = which reduce's body op i belongs to.
+  //   region[i] = count of r in [0, n_reduces) with reduce_positions[r] < i.
+  //   So i in [0, reduce_positions[0]] -> region 0 (in reduce 0's body, or IS
+  //   reduce 0); i in (reduce_positions[r-1], reduce_positions[r]] -> region r
+  //   (post-reduce-r-1, in reduce r's body); i > reduce_positions[N-1] ->
+  //   region N (post-all-reduces).  For single-reduce kernels (n_reduces==1)
+  //   this collapses to {0 = "in reduce body or IS reduce", 1 = "post-reduce"},
+  //   exactly matching the prior `pre = (i <= reduce_pos)` boolean.
+  // Chain-reduce groundwork: subsequent steps key per-reduce ranges and input
+  // loads off region[i] instead of the single reduce_pos.
+  u32 region_n_ops = ke->n_ops ? ke->n_ops : 1;
+  u32 region[region_n_ops];
+  for (u32 i = 0; i < region_n_ops; i++) {
+    u32 r = 0;
+    for (u32 k = 0; k < n_reduces; k++) {
+      if (reduce_positions[k] < i) r++;
+    }
+    region[i] = r;
+  }
   // Phase D: input views can be non-contig (view.strides encode the
   // access pattern; 0 strides == broadcast, used heavily by chain-
   // rule grad expansion).  Phase F-1 lifts the non-zero-offset
@@ -1643,7 +1661,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   if (has_reduce) {
     for (u32 j = 0; j < ke->n_ops; j++) {
       KProgOp *p = &ke->program[j];
-      int pre = ((int)j <= reduce_pos);
+      int pre = (region[j] == 0);
       for (u8 s = 0; s < p->n_src; s++) {
         u32 raw = p->src[s];
         if (KSRC_IS_INPUT(raw)) {
@@ -2074,7 +2092,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 raw = p->src[s];
         if (KSRC_IS_INPUT(raw)) {
           u32 slot = KSRC_INDEX(raw);
-          int pre_scope = (has_reduce && (int)i <= reduce_pos);
+          int pre_scope = (has_reduce && region[i] == 0);
           RngsCtx *target = pre_scope ? &input_rngs_pre [slot]
                                        : &input_rngs_post[slot];
           if (target->ndim == 0) *target = in_rngs;
@@ -2562,7 +2580,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
-    int pre    = (has_reduce && (int)i <= reduce_pos);
+    int pre    = (has_reduce && region[i] == 0);
     u32 *input_load = pre ? input_load_pre : input_load_post;
     if (p->opcode == UOP_CONST) {
       prog_value[i] = rangeify_emit_leaf(ke, S_CONST, dtype, (u64)p->arg);
