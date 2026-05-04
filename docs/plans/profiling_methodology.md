@@ -405,6 +405,47 @@ contribution (~150 ms / step total) is dwarfed by kid=7's 15.5 s.
 This section measures both, but the immediate bottleneck is
 clearly (1).
 
+#### Bail trace (commit `35f7ef5`)
+
+After converting silent `return 0` sites in `rangeify_try_lower_elementwise`
+to RBAIL_PRE messages, the BS=512 bail set is:
+
+| kid | n_ops | onum | rangeify bail |
+|---|---|---|---|
+| 7  | 29 | 6553600 | `reduce 0 src_numel not divisible` |
+| 8  | 13 | 327680  | `reduce 0 size > 65535` |
+| 11 | 22 | 3276800 | `reduce 0 size > 65535` |
+
+kid=7's bail is shape-specific: its conv-bwd dInput program ends
+with `[27] EXPAND[25] -> 947912704` followed by `[28] MUL[0,26] ->
+947912704` and `[29] REDUCE[27] arg=204800 -> 1184890`.  The ratio
+947912704 / 1184890 = 800.000595 isn't integer.  This is either a
+numel-computation off-by-704 (the EXPAND's reported numel doesn't
+match its src_dims/out_dims product) or a shape mismatch between
+[27] EXPAND and [28] MUL that the divisibility guard catches.
+Lifting the guard alone would emit incorrect addresses; needs a
+real fix in the kernel-program build path or the numel reporting.
+
+kid=8 / kid=11 are BN-grad chain reduces (2 reduces) with
+`reduce_size = 204800` exceeding the 65535 cap.  Lifting the cap
+without GROUP_REDUCE axis assignment regresses BS=512 +47% (per
+[docs/plans/multi_reduce_refactor.md] -- the per-thread sequential
+reduce in tile-jit is much slower than the metal-op encoder's
+parallel reduce dispatch for huge reduce_size).  The proper lift
+requires shape-aware default axes that assign GROUP_REDUCE for
+reduce_size > some_threshold (the §4.5 work, gated on a precise
+cost model).
+
+Phase 3 movement-to-INDEX rewrite rules (bufferize.md) operate on
+B_INDEX edges *between* bufferize buffers, so they don't directly
+affect kid=7's intra-kernel EXPAND.  They unblock different
+fusion patterns.  For BS=512 specifically, the leverage is in:
+
+- (b1) shape-aware default axes -> lifts kid=8 / kid=11.
+- (b2) fixing kid=7's numel reporting -> lifts kid=7.
+
+Both are real architectural pieces, neither is whack-a-mole.
+
 ### Reading the tables
 
 - **Wall time is essentially identical** (19.7 vs 20.3 ms within
