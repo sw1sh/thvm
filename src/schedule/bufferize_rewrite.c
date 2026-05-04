@@ -86,7 +86,7 @@ static void bufferize_rewrite_apply(Term root,
                                   RealizeRewriteRule const *rules,
                                   u32 n_rules) {
   for (u32 i = 0; i < n_rules; i++) {
-    // Stamp the current rule name so realize_mark / realize_unmark
+    // Stamp the current rule name so bufferize_node_mark / bufferize_node_unmark
     // can attribute their bufferize-graph effects to it.  Phase 1 of
     // docs/plans/bufferize.md - the rule's hit count and the
     // removed_by/added_by stamps must agree.

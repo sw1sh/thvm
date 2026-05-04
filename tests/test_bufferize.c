@@ -18,14 +18,14 @@ static u32 alloc_f32_tensor(u32 dim) {
 }
 
 // Walk the bufferize graph and the realize table together.  Every
-// realized REALIZE_INFO entry must appear in the graph with
+// realized BUFFERIZE_NODES entry must appear in the graph with
 // realized=1; an unrealized entry that is in the graph must have
 // realized=0 and a removed_by stamp.  bufferize_realized_count must
-// equal the number of realized REALIZE_INFO entries.
+// equal the number of realized BUFFERIZE_NODES entries.
 static void check_graph_matches_realize_info(void) {
   u32 realized = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo const *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo const *info = &BUFFERIZE_NODES[i];
     u32 idx = bufferize_find_by_loc(info->loc);
     if (info->realized) {
       realized++;
@@ -104,7 +104,7 @@ int main(void) {
   bufferize_classify(root);
   // shared may or may not survive the remove-removable-bufferize
   // pass depending on env; either way, the graph must mirror
-  // REALIZE_INFO exactly.
+  // BUFFERIZE_NODES exactly.
   check_graph_matches_realize_info();
   // The root buffer must always exist with the ROOT reason.
   u32 root_idx = bufferize_find_by_loc(term_val(root));
@@ -173,20 +173,20 @@ int main(void) {
   // does not.  And the realized count must equal the live boundary
   // set seen by bufferize_is_realized.
   u32 live = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    if (REALIZE_INFO[i].realized) live++;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (BUFFERIZE_NODES[i].realized) live++;
   }
   CHECK_EQ(bufferize_realized_count(), live);
   CHECK(bufferize_buffer_count() > bufferize_realized_count());
 
   TEST_BEGIN("bufferize/realized-count-matches-realize-info");
   // Build a small reduce graph and confirm realized_count tracks
-  // REALIZE_INFO across the whole rewrite pass.
+  // BUFFERIZE_NODES across the whole rewrite pass.
   Term red2 = uop_reduce(REDUCE_SUM, 0, a);
   bufferize_classify(red2);
   u32 live2 = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    if (REALIZE_INFO[i].realized) live2++;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (BUFFERIZE_NODES[i].realized) live2++;
   }
   CHECK_EQ(bufferize_realized_count(), live2);
 

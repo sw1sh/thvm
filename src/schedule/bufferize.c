@@ -1,13 +1,13 @@
 // schedule/bufferize.c - Phase 0 + Phase 1 of docs/plans/bufferize.md.
 //
-// Phase 0 was a post-rewrite mirror of REALIZE_INFO.  Phase 1 makes
+// Phase 0 was a post-rewrite mirror of BUFFERIZE_NODES.  Phase 1 makes
 // the bufferize graph live during the rewrite pass: every named
-// realize-map rule that mutates REALIZE_INFO via realize_mark or
-// realize_unmark is forwarded into bufferize_realize_with_reason or
+// realize-map rule that mutates BUFFERIZE_NODES via bufferize_node_mark or
+// bufferize_node_unmark is forwarded into bufferize_realize_with_reason or
 // bufferize_unrealize, which stamps added_by / removed_by from the
 // current rule pointer set by bufferize_rewrite_apply.
 //
-// Materialize.c still reads REALIZE_INFO directly, so the kernel
+// Materialize.c still reads BUFFERIZE_NODES directly, so the kernel
 // schedule is unchanged.  The bufferize graph is the canonical
 // rule-history record; future phases will let materialize consume it
 // directly and let new rules edit only the graph.
@@ -19,7 +19,7 @@ static u32        BUFFERIZE_BUFS_LEN = 0;
 static BStore BUFFERIZE_STORES[BUFFERIZE_STORE_CAP];
 static u32    BUFFERIZE_STORES_LEN = 0;
 
-#define BUFFERIZE_INDEX_CAP REALIZE_INFO_CAP
+#define BUFFERIZE_INDEX_CAP BUFFERIZE_NODES_CAP
 #define BUFFERIZE_EDGE_DEPTH_CAP 96
 static BIndex BUFFERIZE_INDEXES[BUFFERIZE_INDEX_CAP];
 static u32    BUFFERIZE_INDEXES_LEN = 0;
@@ -42,11 +42,11 @@ static BIndexRule BUFFERIZE_INDEX_RULES[6] = {
 };
 
 // bufferize_rewrite_apply sets this around each rule->apply call so
-// realize_mark/realize_unmark can stamp the rule that decided.
+// bufferize_node_mark/bufferize_node_unmark can stamp the rule that decided.
 // NULL means "outside any named rule" (seeding, post-pass cleanup).
 static char const *BUFFERIZE_CURRENT_RULE = NULL;
 
-// Reason mirror: only the bits already on REALIZE_INFO map across.
+// Reason mirror: only the bits already on BUFFERIZE_NODES map across.
 // Phase 1 still uses inline BUFFERIZE_REASON_INLINE to mark "a rule
 // touched this", but the bufferize graph records the rule by name
 // directly via removed_by, so we do not project INLINE.
@@ -211,7 +211,7 @@ static void bufferize_walk_edge(u64 loc, u32 consumer_id,
   if (loc >= HEAP_NEXT) return;
   u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return;
-  u8 op = REALIZE_INFO[idx].op;
+  u8 op = BUFFERIZE_NODES[idx].op;
   u8 ar = uop_arity(op);
   for (u8 i = 0; i < ar; i++) {
     Term child = term_resolve(heap_read(loc + i));
@@ -324,7 +324,7 @@ static u32 bufferize_count_recompute_ops(u64 loc, u64 self_loc, u32 depth,
   if (loc >= HEAP_NEXT) return 0;
   u32 ridx = bufferize_info_find(loc);
   if (ridx == 0xFFFFFFFFu) return 0;
-  u8 op = REALIZE_INFO[ridx].op;
+  u8 op = BUFFERIZE_NODES[ridx].op;
   // Stop at other realized buffers - their cost is amortised.
   if (loc != self_loc) {
     u32 bidx = bufferize_find_by_loc(loc);
@@ -558,7 +558,7 @@ static void bufferize_dump(Term root) {
   }
 }
 
-fn void bufferize_seed_from_realize_info(Term root) {
+fn void bufferize_seed_from_nodes(Term root) {
   BUFFERIZE_BUFS_LEN     = 0;
   BUFFERIZE_STORES_LEN   = 0;
   BUFFERIZE_INDEXES_LEN  = 0;
@@ -569,12 +569,12 @@ fn void bufferize_seed_from_realize_info(Term root) {
   if (term_ext(root) == UOP_KERNEL) return;
   u64 root_loc = term_val(root);
 
-  // Snapshot every realized REALIZE_INFO entry as a bufferize node
+  // Snapshot every realized BUFFERIZE_NODES entry as a bufferize node
   // with realized=1, removed_by=added_by=NULL.  Insertion order in
-  // REALIZE_INFO is the walk order, so buffer ids stay deterministic.
-  for (u32 i = 0; i < REALIZE_INFO_LEN
+  // BUFFERIZE_NODES is the walk order, so buffer ids stay deterministic.
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN
                   && BUFFERIZE_BUFS_LEN < BUFFERIZE_GRAPH_CAP; i++) {
-    UOpInfo const *info = &REALIZE_INFO[i];
+    UOpInfo const *info = &BUFFERIZE_NODES[i];
     if (!info->realized) continue;
     BBufferize *b = &BUFFERIZE_BUFS[BUFFERIZE_BUFS_LEN];
     b->loc            = info->loc;
@@ -669,12 +669,12 @@ fn void bufferize_realize_with_reason(u64 loc, u8 op, u32 reason) {
     return;
   }
   // Brand-new buffer introduced by a rule (fanin-cap is the only
-  // current example).  Look up consumer_count from REALIZE_INFO so
+  // current example).  Look up consumer_count from BUFFERIZE_NODES so
   // the bufferize record stays consistent with the projection.
   if (BUFFERIZE_BUFS_LEN >= BUFFERIZE_GRAPH_CAP) return;
   u32 ri = bufferize_info_find(loc);
-  u32 cc = (ri != 0xFFFFFFFFu) ? REALIZE_INFO[ri].consumer_count : 0;
-  u32 rb = (ri != 0xFFFFFFFFu) ? REALIZE_INFO[ri].reasons        : reason;
+  u32 cc = (ri != 0xFFFFFFFFu) ? BUFFERIZE_NODES[ri].consumer_count : 0;
+  u32 rb = (ri != 0xFFFFFFFFu) ? BUFFERIZE_NODES[ri].reasons        : reason;
   BBufferize *b = &BUFFERIZE_BUFS[BUFFERIZE_BUFS_LEN];
   b->loc            = loc;
   b->buffer_id      = BUFFERIZE_BUFS_LEN + 1;

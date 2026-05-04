@@ -25,51 +25,51 @@
 // parent (e.g., MUL[x, x]) counts as ONE consumer of x, since
 // the materializer dedups.
 
-// REALIZE_INFO_CAP + UOpInfo struct + REALIZE_INFO/REALIZE_INFO_LEN
+// BUFFERIZE_NODES_CAP + UOpInfo struct + BUFFERIZE_NODES/BUFFERIZE_NODES_LEN
 // declared in thvm.h so materialize.c can iterate the table.
 
-UOpInfo REALIZE_INFO    [REALIZE_INFO_CAP];
-u32     REALIZE_INFO_LEN = 0;
+UOpInfo BUFFERIZE_NODES    [BUFFERIZE_NODES_CAP];
+u32     BUFFERIZE_NODES_LEN = 0;
 
-// Open-addressed hash table mapping loc -> REALIZE_INFO index.
-// Without this, bufferize_info_find did a linear scan of REALIZE_INFO,
+// Open-addressed hash table mapping loc -> BUFFERIZE_NODES index.
+// Without this, bufferize_info_find did a linear scan of BUFFERIZE_NODES,
 // which made realize_classify O(N^2) for the N UOPs in a recursive
 // training-loop graph and the dominant cost of long bound-w realizes.
-// Cap is the next power of two >= REALIZE_INFO_CAP for cheap masking.
-#define REALIZE_INFO_HASH_CAP (1u << 16)   // 64K slots, REALIZE_INFO_CAP = 16K
-#define REALIZE_INFO_HASH_EMPTY 0xFFFFFFFFu
-static u32 REALIZE_INFO_HASH[REALIZE_INFO_HASH_CAP];
+// Cap is the next power of two >= BUFFERIZE_NODES_CAP for cheap masking.
+#define BUFFERIZE_NODES_HASH_CAP (1u << 16)   // 64K slots, BUFFERIZE_NODES_CAP = 16K
+#define BUFFERIZE_NODES_HASH_EMPTY 0xFFFFFFFFu
+static u32 BUFFERIZE_NODES_HASH[BUFFERIZE_NODES_HASH_CAP];
 
-static inline u32 realize_info_hash(u64 loc) {
+static inline u32 bufferize_node_hash(u64 loc) {
   loc ^= loc >> 33; loc *= 0xff51afd7ed558ccdULL;
   loc ^= loc >> 33; loc *= 0xc4ceb9fe1a85ec53ULL;
   loc ^= loc >> 33;
-  return (u32)loc & (REALIZE_INFO_HASH_CAP - 1);
+  return (u32)loc & (BUFFERIZE_NODES_HASH_CAP - 1);
 }
 
 fn void bufferize_info_clear(void) {
-  REALIZE_INFO_LEN = 0;
-  for (u32 i = 0; i < REALIZE_INFO_HASH_CAP; i++)
-    REALIZE_INFO_HASH[i] = REALIZE_INFO_HASH_EMPTY;
+  BUFFERIZE_NODES_LEN = 0;
+  for (u32 i = 0; i < BUFFERIZE_NODES_HASH_CAP; i++)
+    BUFFERIZE_NODES_HASH[i] = BUFFERIZE_NODES_HASH_EMPTY;
 }
 
 fn u32 bufferize_info_find(u64 loc) {
-  u32 h = realize_info_hash(loc);
-  for (u32 probe = 0; probe < REALIZE_INFO_HASH_CAP; probe++) {
-    u32 i = (h + probe) & (REALIZE_INFO_HASH_CAP - 1);
-    u32 idx = REALIZE_INFO_HASH[i];
-    if (idx == REALIZE_INFO_HASH_EMPTY) return 0xFFFFFFFFu;
-    if (REALIZE_INFO[idx].loc == loc) return idx;
+  u32 h = bufferize_node_hash(loc);
+  for (u32 probe = 0; probe < BUFFERIZE_NODES_HASH_CAP; probe++) {
+    u32 i = (h + probe) & (BUFFERIZE_NODES_HASH_CAP - 1);
+    u32 idx = BUFFERIZE_NODES_HASH[i];
+    if (idx == BUFFERIZE_NODES_HASH_EMPTY) return 0xFFFFFFFFu;
+    if (BUFFERIZE_NODES[idx].loc == loc) return idx;
   }
   return 0xFFFFFFFFu;
 }
 
-static void realize_info_hash_insert(u64 loc, u32 idx) {
-  u32 h = realize_info_hash(loc);
-  for (u32 probe = 0; probe < REALIZE_INFO_HASH_CAP; probe++) {
-    u32 i = (h + probe) & (REALIZE_INFO_HASH_CAP - 1);
-    if (REALIZE_INFO_HASH[i] == REALIZE_INFO_HASH_EMPTY) {
-      REALIZE_INFO_HASH[i] = idx;
+static void bufferize_node_hash_insert(u64 loc, u32 idx) {
+  u32 h = bufferize_node_hash(loc);
+  for (u32 probe = 0; probe < BUFFERIZE_NODES_HASH_CAP; probe++) {
+    u32 i = (h + probe) & (BUFFERIZE_NODES_HASH_CAP - 1);
+    if (BUFFERIZE_NODES_HASH[i] == BUFFERIZE_NODES_HASH_EMPTY) {
+      BUFFERIZE_NODES_HASH[i] = idx;
       return;
     }
   }
@@ -77,21 +77,21 @@ static void realize_info_hash_insert(u64 loc, u32 idx) {
   // miss but caller has the linear cap to fall back to.
 }
 
-static u32 realize_info_get_or_add(u64 loc, u8 op) {
+static u32 bufferize_node_get_or_add(u64 loc, u8 op) {
   u32 idx = bufferize_info_find(loc);
   if (idx != 0xFFFFFFFFu) return idx;
-  if (REALIZE_INFO_LEN >= REALIZE_INFO_CAP) return 0xFFFFFFFFu;
-  idx = REALIZE_INFO_LEN++;
-  REALIZE_INFO[idx].loc            = loc;
-  REALIZE_INFO[idx].consumer_count = 0;
-  REALIZE_INFO[idx].reasons        = 0;
-  REALIZE_INFO[idx].op             = op;
-  REALIZE_INFO[idx].realized       = 0;
-  realize_info_hash_insert(loc, idx);
+  if (BUFFERIZE_NODES_LEN >= BUFFERIZE_NODES_CAP) return 0xFFFFFFFFu;
+  idx = BUFFERIZE_NODES_LEN++;
+  BUFFERIZE_NODES[idx].loc            = loc;
+  BUFFERIZE_NODES[idx].consumer_count = 0;
+  BUFFERIZE_NODES[idx].reasons        = 0;
+  BUFFERIZE_NODES[idx].op             = op;
+  BUFFERIZE_NODES[idx].realized       = 0;
+  bufferize_node_hash_insert(loc, idx);
   return idx;
 }
 
-static void realize_mark(UOpInfo *info, u32 reason) {
+static void bufferize_node_mark(UOpInfo *info, u32 reason) {
   if (info == NULL) {
     return;
   }
@@ -100,12 +100,12 @@ static void realize_mark(UOpInfo *info, u32 reason) {
   // Forward to the bufferize graph so rule-driven boundary additions
   // (e.g. metal-tile-fanin-cap promoting a child) get a B_BUFFERIZE
   // record stamped with the current rule.  bufferize_realize_with_reason
-  // is a no-op until bufferize_seed_from_realize_info has run, so the
+  // is a no-op until bufferize_seed_from_nodes has run, so the
   // initial ROOT/MULTI/REDUCE seed pass does not double-mutate.
   bufferize_realize_with_reason(info->loc, info->op, reason);
 }
 
-static void realize_unmark(UOpInfo *info, u32 reason) {
+static void bufferize_node_unmark(UOpInfo *info, u32 reason) {
   if (info == NULL) {
     return;
   }
@@ -116,7 +116,7 @@ static void realize_unmark(UOpInfo *info, u32 reason) {
   bufferize_unrealize(info->loc);
 }
 
-static void realize_walk_rec(Term t, u8 *visited) {
+static void bufferize_walk_rec(Term t, u8 *visited) {
   if (term_tag(t) != TAG_UOP) return;
   u8 op = term_ext(t);
   if (op == UOP_KERNEL) return;     // already kernelized, opaque
@@ -125,7 +125,7 @@ static void realize_walk_rec(Term t, u8 *visited) {
   if (visited[loc]) return;
   visited[loc] = 1;
 
-  realize_info_get_or_add(loc, op);
+  bufferize_node_get_or_add(loc, op);
 
   u8 ar = uop_arity(op);
   // Dedup children by loc -- repeated refs (MUL[x, x]) count as
@@ -146,9 +146,9 @@ static void realize_walk_rec(Term t, u8 *visited) {
     if (dup) continue;
     seen[n_seen++] = cloc;
 
-    u32 cidx = realize_info_get_or_add(cloc, term_ext(child));
-    if (cidx != 0xFFFFFFFFu) REALIZE_INFO[cidx].consumer_count++;
-    realize_walk_rec(child, visited);
+    u32 cidx = bufferize_node_get_or_add(cloc, term_ext(child));
+    if (cidx != 0xFFFFFFFFu) BUFFERIZE_NODES[cidx].consumer_count++;
+    bufferize_walk_rec(child, visited);
   }
 }
 
@@ -181,9 +181,9 @@ static int realize_term_is_broadcast_of_const(Term t, u32 depth) {
 // Used by the softmax-relaxation pass to confirm the consumer chain.
 static u64 realize_unique_uop_parent(u64 child_loc) {
   u64 found = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    u64 ploc = REALIZE_INFO[i].loc;
-    u8  pop  = REALIZE_INFO[i].op;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    u64 ploc = BUFFERIZE_NODES[i].loc;
+    u8  pop  = BUFFERIZE_NODES[i].op;
     if (ploc == child_loc) continue;
     u8 ar = uop_arity(pop);
     int hits = 0;
@@ -240,7 +240,7 @@ static int realize_chain_walk_is_broadcast(u64 parent_loc, u32 hops_left) {
   while (hops_left > 0) {
     u32 idx = bufferize_info_find(cur);
     if (idx == 0xFFFFFFFFu) return 0;
-    u8 pop = REALIZE_INFO[idx].op;
+    u8 pop = BUFFERIZE_NODES[idx].op;
     if (pop == UOP_EXPAND) return 1;
     if (!realize_chain_hop_is_scalar_preserving(cur, pop)) return 0;
     u64 next = realize_unique_uop_parent(cur);
@@ -259,10 +259,10 @@ static int realize_chain_walk_all_parents_is_broadcast(
     u64 child_loc, u32 hops_left) {
   if (hops_left == 0) return 0;
   u32 n_parents = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    u64 ploc = REALIZE_INFO[i].loc;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    u64 ploc = BUFFERIZE_NODES[i].loc;
     if (ploc == child_loc) continue;
-    u8  pop  = REALIZE_INFO[i].op;
+    u8  pop  = BUFFERIZE_NODES[i].op;
     u8  ar   = uop_arity(pop);
     int hits = 0;
     for (u8 j = 0; j < ar; j++) {
@@ -330,7 +330,7 @@ static int realize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc) 
     if (parent == 0) return 0;
     u32 idx = bufferize_info_find(parent);
     if (idx == 0xFFFFFFFFu) return 0;
-    u8 pop = REALIZE_INFO[idx].op;
+    u8 pop = BUFFERIZE_NODES[idx].op;
     // Scalar-preserving unary ops keep the post-reduce shape.
     if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
      || pop == UOP_EXP2 || pop == UOP_LOG2) {
@@ -399,7 +399,7 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
   if (loc >= HEAP_NEXT) return 1;
   u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return 1;
-  UOpInfo *info = &REALIZE_INFO[idx];
+  UOpInfo *info = &BUFFERIZE_NODES[idx];
   if (loc != boundary_root && info->realized) return 1;
   if (info->op == UOP_CONST) return 0;
 
@@ -425,14 +425,14 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
       u32 cidx = child_idx[i];
       if (cidx == 0xFFFFFFFFu) continue;
       if (child_count[i] <= best_size) continue;
-      if (!realize_fanin_split_child_op(REALIZE_INFO[cidx].op)) continue;
+      if (!realize_fanin_split_child_op(BUFFERIZE_NODES[cidx].op)) continue;
       best      = i;
       best_size = child_count[i];
     }
     if (best == 0xFF) break;
-    UOpInfo *child_info = &REALIZE_INFO[child_idx[best]];
+    UOpInfo *child_info = &BUFFERIZE_NODES[child_idx[best]];
     if (!child_info->realized && hits != NULL) (*hits)++;
-    realize_mark(child_info, BUFFERIZE_REASON_FANIN_CAP);
+    bufferize_node_mark(child_info, BUFFERIZE_REASON_FANIN_CAP);
     total = total - child_count[best] + 1;
     child_count[best] = 1;
   }
@@ -445,9 +445,9 @@ static u32 realize_rule_metal_tile_fanin_cap(Term root) {
 
   u32 cap = realize_metal_tile_fanin_cap();
   u32 hits = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    if (!REALIZE_INFO[i].realized) continue;
-    realize_fanin_uop_count(REALIZE_INFO[i].loc, REALIZE_INFO[i].loc,
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (!BUFFERIZE_NODES[i].realized) continue;
+    realize_fanin_uop_count(BUFFERIZE_NODES[i].loc, BUFFERIZE_NODES[i].loc,
                             cap, &hits);
   }
   return hits;
@@ -482,7 +482,7 @@ static int realize_subtree_has_reduce(Term t, u32 depth) {
   }
   u64 loc = term_val(t);
   u32 idx = bufferize_info_find(loc);
-  if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
+  if (idx != 0xFFFFFFFFu && BUFFERIZE_NODES[idx].realized) {
     return 0;
   }
   u8 op = term_ext(t);
@@ -587,8 +587,8 @@ static u32 realize_rule_inline_large_expand_fanout(Term root) {
     return 0;
   }
   u32 hits = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
     if (!info->realized || info->op != UOP_EXPAND
         || info->consumer_count < 2) {
       continue;
@@ -609,7 +609,7 @@ static u32 realize_rule_inline_large_expand_fanout(Term root) {
       continue;
     }
     hits++;
-    realize_unmark(info, BUFFERIZE_REASON_INLINE);
+    bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -650,7 +650,7 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
   u64 loc = term_val(t);
   if (loc != root_loc) {
     u32 idx = bufferize_info_find(loc);
-    if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
+    if (idx != 0xFFFFFFFFu && BUFFERIZE_NODES[idx].realized) {
       return 1;
     }
   }
@@ -671,7 +671,7 @@ static int realize_parent_uses_child(u64 parent_loc, u64 child_loc) {
   if (pidx == 0xFFFFFFFFu) {
     return 0;
   }
-  u8 ar = uop_arity(REALIZE_INFO[pidx].op);
+  u8 ar = uop_arity(BUFFERIZE_NODES[pidx].op);
   for (u8 j = 0; j < ar; j++) {
     Term c = term_resolve(heap_read(parent_loc + j));
     if (term_tag(c) == TAG_UOP && term_val(c) == child_loc) {
@@ -715,7 +715,7 @@ static int realize_subtree_recompute_stats(Term t,
   u64 loc = term_val(t);
   if (loc != root_loc) {
     u32 idx = bufferize_info_find(loc);
-    if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) {
+    if (idx != 0xFFFFFFFFu && BUFFERIZE_NODES[idx].realized) {
       stats->inputs++;
       return 1;
     }
@@ -743,12 +743,12 @@ static int realize_parent_chain_reaches_reduce(u64 child_loc, u32 depth) {
   if (depth > 32) {
     return 1;
   }
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    u64 ploc = REALIZE_INFO[i].loc;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    u64 ploc = BUFFERIZE_NODES[i].loc;
     if (ploc == child_loc) {
       continue;
     }
-    u8 pop = REALIZE_INFO[i].op;
+    u8 pop = BUFFERIZE_NODES[i].op;
     if (!realize_parent_uses_child(ploc, child_loc)) {
       continue;
     }
@@ -769,8 +769,8 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
   }
   u64 min_numel = realize_inline_multiconsumer_pure_min_numel();
   u32 hits = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
     if (!info->realized || info->consumer_count < 2) {
       continue;
     }
@@ -816,19 +816,19 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
               (unsigned)info->consumer_count);
     }
     hits++;
-    realize_unmark(info, BUFFERIZE_REASON_INLINE);
+    bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
   }
   return hits;
 }
 
 static int realize_reduce_fanout_consumers_ok(u64 reduce_loc) {
   u32 consumers = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    u64 ploc = REALIZE_INFO[i].loc;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    u64 ploc = BUFFERIZE_NODES[i].loc;
     if (ploc == reduce_loc) {
       continue;
     }
-    u8 pop = REALIZE_INFO[i].op;
+    u8 pop = BUFFERIZE_NODES[i].op;
     u8 ar  = uop_arity(pop);
     int hit = 0;
     for (u8 j = 0; j < ar; j++) {
@@ -859,8 +859,8 @@ static u32 realize_rule_inline_reduce_fanout(Term root) {
   }
   u64 min_numel = realize_inline_reduce_fanout_min_numel();
   u32 hits = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
     if (!info->realized || info->op != UOP_REDUCE
         || info->consumer_count < 2) {
       continue;
@@ -877,7 +877,7 @@ static u32 realize_rule_inline_reduce_fanout(Term root) {
       continue;
     }
     hits++;
-    realize_unmark(info, BUFFERIZE_REASON_INLINE);
+    bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -905,13 +905,13 @@ static int realize_lift_movement_reduce_gate_enabled(void) {
   return e == NULL ? 1 : (e[0] != '0');
 }
 
-static int realize_removable_bufferize_consumers_ok(u64 loc,
+static int bufferize_removable_consumers_ok(u64 loc,
                                                     int producer_has_movement,
                                                     u32 max_consumers) {
   int gate_lifted = realize_lift_movement_reduce_gate_enabled();
   u32 consumers = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    u64 ploc = REALIZE_INFO[i].loc;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    u64 ploc = BUFFERIZE_NODES[i].loc;
     if (ploc == loc) {
       continue;
     }
@@ -924,7 +924,7 @@ static int realize_removable_bufferize_consumers_ok(u64 loc,
       return 0;
     }
 
-    u8 pop = REALIZE_INFO[i].op;
+    u8 pop = BUFFERIZE_NODES[i].op;
     if (pop == UOP_REDUCE) {
       if (producer_has_movement && !gate_lifted) {
         return 0;
@@ -953,8 +953,8 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
   u32 max_consumers = realize_remove_removable_bufferize_max_consumers();
   for (u32 pass = 0; pass < 8; pass++) {
     u32 pass_hits = 0;
-    for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-      UOpInfo *info = &REALIZE_INFO[i];
+    for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+      UOpInfo *info = &BUFFERIZE_NODES[i];
       if (!info->realized || info->consumer_count < 2) {
         continue;
       }
@@ -987,7 +987,7 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
         }
         continue;
       }
-      if (!realize_removable_bufferize_consumers_ok(info->loc,
+      if (!bufferize_removable_consumers_ok(info->loc,
                                                     stats.has_movement,
                                                     max_consumers)) {
         if (realize_dump_fusion_candidates_enabled()) {
@@ -1014,7 +1014,7 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
                 (unsigned)stats.has_movement,
                 (unsigned)info->consumer_count);
       }
-      realize_unmark(info, BUFFERIZE_REASON_INLINE);
+      bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
       pass_hits++;
     }
     hits += pass_hits;
@@ -1032,7 +1032,7 @@ static int realize_inline_subtree_has_movement(Term t, u32 depth) {
   if (term_ext(t) == UOP_KERNEL) return 0;
   u64 loc = term_val(t);
   u32 idx = bufferize_info_find(loc);
-  if (idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized) return 0;
+  if (idx != 0xFFFFFFFFu && BUFFERIZE_NODES[idx].realized) return 0;
   u8 op = term_ext(t);
   if (realize_op_is_movement(op)) return 1;
   if (op == UOP_REDUCE) return 1;
@@ -1051,24 +1051,24 @@ static int realize_reduce_chain_source_is_direct(Term t) {
   if (term_tag(t) != TAG_UOP) return 0;
   if (term_ext(t) == UOP_KERNEL) return 1;
   u32 idx = bufferize_info_find(term_val(t));
-  return idx != 0xFFFFFFFFu && REALIZE_INFO[idx].realized;
+  return idx != 0xFFFFFFFFu && BUFFERIZE_NODES[idx].realized;
 }
 
 static u32 realize_reduce_count(void) {
   u32 n = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    if (REALIZE_INFO[i].op == UOP_REDUCE) n++;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (BUFFERIZE_NODES[i].op == UOP_REDUCE) n++;
   }
   return n;
 }
 
 // Walk up from `start_loc` through unique-parent ops (movement,
 // scalar-preserving elementwise, etc.) until we hit the first
-// REALIZED ancestor in REALIZE_INFO.  Returns that ancestor's
+// REALIZED ancestor in BUFFERIZE_NODES.  Returns that ancestor's
 // loc -- the "absorbing boundary" that owns the kernel which would
 // receive `start_loc`'s inlined KProgOp graph.  Returns 0 if the
 // walk loses uniqueness (multi-parent intermediate, no parent
-// found in REALIZE_INFO) before finding one.  Bounded by
+// found in BUFFERIZE_NODES) before finding one.  Bounded by
 // `hops_left` to avoid pathological recursion.
 //
 // Purpose: rangeify_try_lower_elementwise rejects kernels with > 1
@@ -1086,7 +1086,7 @@ static u64 realize_absorbing_boundary(u64 start_loc, u32 hops_left) {
     if (next == 0) return 0;
     u32 idx = bufferize_info_find(next);
     if (idx == 0xFFFFFFFFu) return 0;
-    if (REALIZE_INFO[idx].realized) return next;
+    if (BUFFERIZE_NODES[idx].realized) return next;
     cur = next;
     hops_left--;
   }
@@ -1100,8 +1100,8 @@ static int realize_rangeify_enabled(void) {
 
 // Phase 4 follow-up: a bufferize-graph-driven removal rule.
 //
-// Iterates the bufferize graph (not REALIZE_INFO), reads the
-// cost-model score that bufferize_seed_from_realize_info computed,
+// Iterates the bufferize graph (not BUFFERIZE_NODES), reads the
+// cost-model score that bufferize_seed_from_nodes computed,
 // and unmarks any MULTI-only buffer whose
 // `output_numel / max(recompute_total, 1)` exceeds the threshold.
 // Backend-cap, root, reduce, and reduce-subtree gates already live
@@ -1186,11 +1186,11 @@ static u32 realize_remove_by_cost_score_consumer_budget(void) {
 static u32 realize_realized_ancestor_recompute_ops(u64 loc, u32 depth) {
   if (depth > 32) return 0;
   u32 max_ops = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    u64 ploc = REALIZE_INFO[i].loc;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    u64 ploc = BUFFERIZE_NODES[i].loc;
     if (ploc == loc) continue;
     if (!realize_parent_uses_child(ploc, loc)) continue;
-    if (REALIZE_INFO[i].realized) {
+    if (BUFFERIZE_NODES[i].realized) {
       u32 bidx = bufferize_find_by_loc(ploc);
       u32 ops = (bidx != 0xFFFFFFFFu)
                   ? bufferize_buffer_at(bidx)->recompute_ops
@@ -1208,10 +1208,10 @@ static int realize_remove_by_cost_score_consumers_fit_tile(
     BBufferize const *b, u32 budget) {
   u64 b_loc = b->loc;
   u32 b_ops = b->recompute_ops;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    u64 ploc = REALIZE_INFO[i].loc;
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    u64 ploc = BUFFERIZE_NODES[i].loc;
     if (ploc == b_loc) continue;
-    u8  pop  = REALIZE_INFO[i].op;
+    u8  pop  = BUFFERIZE_NODES[i].op;
     u8  ar   = uop_arity(pop);
     int hits = 0;
     for (u8 j = 0; j < ar; j++) {
@@ -1250,7 +1250,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
   u32 hits = 0;
   // Iterate the bufferize graph directly - this rule is the first
   // one in the codebase that reads BBufferize records as the
-  // canonical schedule state and only touches REALIZE_INFO to
+  // canonical schedule state and only touches BUFFERIZE_NODES to
   // project the removal back for materialize.c.
   for (u32 i = 0; i < bufferize_buffer_count(); i++) {
     BBufferize const *b = bufferize_buffer_at(i);
@@ -1323,7 +1323,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
               (unsigned long long)b->output_numel,
               (unsigned long long)score);
     }
-    realize_unmark(&REALIZE_INFO[ridx], BUFFERIZE_REASON_INLINE);
+    bufferize_node_unmark(&BUFFERIZE_NODES[ridx], BUFFERIZE_REASON_INLINE);
     hits++;
   }
   return hits;
@@ -1332,11 +1332,11 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
 static u32 realize_rule_inline_constants(Term root) {
   (void)root;
   u32 hits = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->op != UOP_CONST) continue;
     if (info->realized) hits++;
-    realize_unmark(info, BUFFERIZE_REASON_INLINE);
+    bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -1363,8 +1363,8 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
   (void)root;
   int lift = realize_lift_reduce_chain_gates();
   u32 hits = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->op != UOP_REDUCE) continue;
     ReduceChainInfo rc;
     Term root_term = term_new(0, TAG_UOP, UOP_REDUCE, info->loc);
@@ -1374,7 +1374,7 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
     int ok = 1;
     for (u32 j = 1; j < rc.n_reduces; j++) {
       u32 cidx = bufferize_info_find(rc.locs[j]);
-      if (cidx == 0xFFFFFFFFu || REALIZE_INFO[cidx].consumer_count != 1) {
+      if (cidx == 0xFFFFFFFFu || BUFFERIZE_NODES[cidx].consumer_count != 1) {
         ok = 0;
         break;
       }
@@ -1383,8 +1383,8 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
     for (u32 j = 1; j < rc.n_reduces; j++) {
       u32 cidx = bufferize_info_find(rc.locs[j]);
       if (cidx == 0xFFFFFFFFu) continue;
-      if (REALIZE_INFO[cidx].realized) hits++;
-      realize_unmark(&REALIZE_INFO[cidx], BUFFERIZE_REASON_INLINE);
+      if (BUFFERIZE_NODES[cidx].realized) hits++;
+      bufferize_node_unmark(&BUFFERIZE_NODES[cidx], BUFFERIZE_REASON_INLINE);
     }
   }
   return hits;
@@ -1429,8 +1429,8 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
   }
   int tile_cap_on = realize_softmax_reduce_tile_cap_enabled();
   u32 hits = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->op != UOP_REDUCE)    continue;
     if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
     if (tile_cap_on) {
@@ -1449,7 +1449,7 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
       if (abs_loc != 0) {
         u32 abs_idx = bufferize_info_find(abs_loc);
         if (abs_idx != 0xFFFFFFFFu
-            && REALIZE_INFO[abs_idx].op == UOP_REDUCE) {
+            && BUFFERIZE_NODES[abs_idx].op == UOP_REDUCE) {
           if (getenv("THVM_DUMP_SOFTMAX_REDUCE_CAP")) {
             fprintf(stderr,
                     "softmax-reduce-cap: kept realized loc=%llu"
@@ -1462,7 +1462,7 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
       }
     }
     if (info->realized) hits++;
-    realize_unmark(info, BUFFERIZE_REASON_INLINE);
+    bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -1475,13 +1475,13 @@ static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
   }
   u64 root_loc = term_val(root);
   u32 hits = 0;
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->op != UOP_REDUCE)    continue;
     if (info->consumer_count != 1) continue;
     if (!realize_reduce_consumer_is_scalar_tail(info->loc, root_loc)) continue;
     if (info->realized) hits++;
-    realize_unmark(info, BUFFERIZE_REASON_INLINE);
+    bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
   }
   return hits;
 }
@@ -1490,15 +1490,15 @@ fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   bufferize_rewrite_stats_clear();
   // Always touch the bufferize graph so its state stays in sync with
-  // REALIZE_INFO.  Both seed/finalize short-circuit on non-UOp roots
+  // BUFFERIZE_NODES.  Both seed/finalize short-circuit on non-UOp roots
   // after zeroing their own tables.
   if (term_tag(root) != TAG_UOP) {
-    bufferize_seed_from_realize_info(root);
+    bufferize_seed_from_nodes(root);
     bufferize_finalize_stores(root);
     return;
   }
   if (term_ext(root) == UOP_KERNEL) {
-    bufferize_seed_from_realize_info(root);
+    bufferize_seed_from_nodes(root);
     bufferize_finalize_stores(root);
     return;
   }
@@ -1509,25 +1509,25 @@ fn void bufferize_classify(Term root) {
   u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
   u8 *visited = (u8 *)calloc(cap, 1);
   if (visited == NULL) return;
-  realize_walk_rec(root, visited);
+  bufferize_walk_rec(root, visited);
   free(visited);
 
   // Rule (a): the root itself realizes.
   u32 root_idx = bufferize_info_find(term_val(root));
   if (root_idx != 0xFFFFFFFFu) {
-    realize_mark(&REALIZE_INFO[root_idx], BUFFERIZE_REASON_ROOT);
+    bufferize_node_mark(&BUFFERIZE_NODES[root_idx], BUFFERIZE_REASON_ROOT);
   }
 
   // Rules (b) + (c): multi-consumer or REDUCE.  Later named rules
   // can clear the final `realized` bit while preserving these
   // reason bits for diagnostics and tests.
-  for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
-    UOpInfo *info = &REALIZE_INFO[i];
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->consumer_count >= 2) {
-      realize_mark(info, BUFFERIZE_REASON_MULTI);
+      bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
     }
     if (info->op == UOP_REDUCE) {
-      realize_mark(info, BUFFERIZE_REASON_REDUCE);
+      bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
     }
   }
   RealizeRewriteRule rules[] = {
@@ -1542,13 +1542,13 @@ fn void bufferize_classify(Term root) {
     {"inline-pure-fanout-probe",      realize_rule_inline_pure_fanout_probe},
     {"metal-tile-fanin-cap",          realize_rule_metal_tile_fanin_cap},
   };
-  // Phase 1: snapshot the seeded REALIZE_INFO into the bufferize
-  // graph, then run the named rewrite rules.  realize_mark and
-  // realize_unmark forward into bufferize_realize_with_reason and
+  // Phase 1: snapshot the seeded BUFFERIZE_NODES into the bufferize
+  // graph, then run the named rewrite rules.  bufferize_node_mark and
+  // bufferize_node_unmark forward into bufferize_realize_with_reason and
   // bufferize_unrealize so each rule's effect is recorded as
   // added_by/removed_by on the explicit graph.  Finalize the store
   // table after rewrites land.
-  bufferize_seed_from_realize_info(root);
+  bufferize_seed_from_nodes(root);
   bufferize_rewrite_apply(root, rules, (u32)(sizeof(rules) / sizeof(rules[0])));
   bufferize_rewrite_stats_dump();
   bufferize_finalize_stores(root);
@@ -1559,14 +1559,14 @@ fn u8 bufferize_is_realized(Term uop_term) {
   if (term_ext(uop_term) == UOP_KERNEL) return 1;   // already realized
   u32 idx = bufferize_info_find(term_val(uop_term));
   if (idx == 0xFFFFFFFFu) return 0;
-  return REALIZE_INFO[idx].realized;
+  return BUFFERIZE_NODES[idx].realized;
 }
 
 fn u32 bufferize_consumer_count(Term uop_term) {
   if (term_tag(uop_term) != TAG_UOP) return 0;
   u32 idx = bufferize_info_find(term_val(uop_term));
   if (idx == 0xFFFFFFFFu) return 0;
-  return REALIZE_INFO[idx].consumer_count;
+  return BUFFERIZE_NODES[idx].consumer_count;
 }
 
 fn u32 bufferize_reasons(Term uop_term) {
@@ -1577,5 +1577,5 @@ fn u32 bufferize_reasons(Term uop_term) {
   if (idx == 0xFFFFFFFFu) {
     return 0;
   }
-  return REALIZE_INFO[idx].reasons;
+  return BUFFERIZE_NODES[idx].reasons;
 }

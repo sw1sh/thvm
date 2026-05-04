@@ -1290,10 +1290,13 @@ fn Term term_ctr_at  (Term ctr_term, u32 i);
 fn Term term_resolve(Term t);
 
 // === schedule ===
-// realize_classify walks the UOp DAG rooted at `root` and marks
-// kernel boundaries (root + multi-consumer + REDUCE) in REALIZE_INFO.
-// materialize.c reads the table directly to topo-sort and emit.
-#define REALIZE_INFO_CAP 16384
+// bufferize_classify walks the UOp DAG rooted at `root`, marks
+// kernel boundaries (root + multi-consumer + REDUCE), runs the named
+// realize-rewrite rules, and finalises the bufferize graph.
+// UOpInfo / BUFFERIZE_NODES is the dense per-walked-UOp table that
+// the classifier populates; materialize.c still walks it directly
+// (Phase 3 of docs/plans/bufferize.md will fold it into BBufferize).
+#define BUFFERIZE_NODES_CAP 16384
 typedef struct {
   u64 loc;
   u32 consumer_count;
@@ -1301,11 +1304,9 @@ typedef struct {
   u8  op;
   u8  realized;
 } UOpInfo;
-extern UOpInfo REALIZE_INFO[REALIZE_INFO_CAP];
-extern u32     REALIZE_INFO_LEN;
+extern UOpInfo BUFFERIZE_NODES[BUFFERIZE_NODES_CAP];
+extern u32     BUFFERIZE_NODES_LEN;
 fn u32  bufferize_info_find(u64 loc);
-// (realize_classify retired; use bufferize_classify -- declared
-// below near the bufferize API.)
 fn u8   bufferize_is_realized(Term uop_term);
 fn u32  bufferize_consumer_count(Term uop_term);
 fn u32  bufferize_reasons(Term uop_term);
@@ -1315,32 +1316,13 @@ fn char const *bufferize_rewrite_stat_name(u32 i);
 fn u32  bufferize_rewrite_stat_hits_at(u32 i);
 fn u32  bufferize_rewrite_stat_hits(char const *name);
 
-// === bufferize schedule IR (Phase 0 + Phase 1) ===
-// Explicit B_BUFFERIZE/B_STORE projection of REALIZE_INFO, per
-// docs/plans/bufferize.md.  Phase 0 was a post-rewrite mirror; Phase 1
-// makes the graph live during the rewrite pass and stamps every named
-// realize-map rule onto the buffer it touched, so the graph answers
-// not only "which UOps materialize" but also "which rule decided".
-//
-// Lifecycle inside one realize_classify call:
-//   1. realize_walk_rec + ROOT/MULTI/REDUCE seeding populates
-//      REALIZE_INFO.
-//   2. bufferize_seed_from_realize_info snapshots every realized loc
-//      into BBufferize records with realized=1, removed_by=NULL,
-//      added_by=NULL, and assigns dense 1-based buffer ids.
-//   3. bufferize_rewrite_apply runs each named rule with
-//      bufferize_set_current_rule(name) wrapping the call.  When a
-//      rule mutates REALIZE_INFO via realize_mark/realize_unmark, the
-//      same change is forwarded to bufferize_realize_with_reason /
-//      bufferize_unrealize, which stamps added_by / removed_by from
-//      the current rule pointer.
-//   4. bufferize_finalize_stores adds one B_STORE for the realize
-//      root (Phase 2+ will add per-kernel stores).
-//
-// Materialize.c still consumes REALIZE_INFO; the bufferize graph is
-// the read/write canonical state and REALIZE_INFO is the projection.
+// === bufferize schedule IR ===
+// Explicit B_BUFFERIZE/B_STORE/B_INDEX graph that future phases of
+// docs/plans/bufferize.md make authoritative.  Today the graph is
+// seeded from BUFFERIZE_NODES, mirrored through every named rule's
+// mark/unmark, and finalised with one B_STORE for the realize root.
 // `DUMP_BUFFERIZE=1` prints the per-buffer table after each pass.
-#define BUFFERIZE_GRAPH_CAP REALIZE_INFO_CAP
+#define BUFFERIZE_GRAPH_CAP BUFFERIZE_NODES_CAP
 #define BUFFERIZE_REASON_ROOT        (1u << 0)
 #define BUFFERIZE_REASON_MULTI       (1u << 1)
 #define BUFFERIZE_REASON_REDUCE      (1u << 2)
@@ -1444,7 +1426,7 @@ typedef struct {
 // (B_BUFFERIZE + B_INDEX + B_STORE).  Replaces realize_classify; the
 // old name is retained as a 1-line forward in realize_classify.c.
 fn void              bufferize_classify(Term root);
-fn void              bufferize_seed_from_realize_info(Term root);
+fn void              bufferize_seed_from_nodes(Term root);
 fn void              bufferize_finalize_stores(Term root);
 fn void              bufferize_set_current_rule(char const *name);
 fn char const       *bufferize_current_rule(void);
