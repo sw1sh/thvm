@@ -1422,21 +1422,15 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           RBAIL_PRE("> RANGEIFY_MAX_REDUCES reduce ops");
         }
         reduce_positions[n_reduces++] = i;
-        if (reduce_pos == -1) {
-          reduce_pos = (int)i;
-        } else if (getenv("THVM_RANGEIFY_MULTI_REDUCE") == NULL) {
-          // Multi-reduce path is experimental: gated by env var until
-          // tile + render layers handle N accumulators sequentially
-          // (chain-reduce shape).  Per-reduce metadata (reduce_meta[r])
-          // and per-region input loads are wired through, so under the
-          // env each additional reduce gets its own range/size/inner
-          // and its body's input addressing is region-correct.
-          RBAIL_PRE("> 1 reduce");
+        if (reduce_pos == -1) reduce_pos = (int)i;
+        // Multi-reduce: per-region addressing in body emit handles
+        // parallel-shared-axes AND chain-reduce shapes uniformly via
+        // reduce_meta[r] + region[i].  Default-on as of step G; set
+        // THVM_RANGEIFY_NO_MULTI_REDUCE=1 to opt out and force per-op
+        // encoder fallback for any kernel with > 1 UOP_REDUCE.
+        if (n_reduces > 1 && getenv("THVM_RANGEIFY_NO_MULTI_REDUCE") != NULL) {
+          RBAIL_PRE("> 1 reduce (THVM_RANGEIFY_NO_MULTI_REDUCE)");
         }
-        // No compat check on additional reduces: per-region addressing
-        // handles parallel-shared-axes AND chain-reduce shapes.  The
-        // tile + render layers must still consume the multi-reduce
-        // ScalarUop graph correctly (steps E/F).
         break;
       default:
         if (getenv("THVM_RANGEIFY_BAIL")) {
