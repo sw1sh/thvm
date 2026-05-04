@@ -2200,9 +2200,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         u32 raw = p->src[s];
         if (KSRC_IS_INPUT(raw)) {
           u32 slot = KSRC_INDEX(raw);
-          int pre_scope = (has_reduce && region[i] == 0);
-          RngsCtx *target = pre_scope ? &input_rngs_pre [slot]
-                                       : &input_rngs_post[slot];
+          // Per-region rngs targeting: ops in reduce r's body record
+          // their iter expressions into input_rngs_in_region[r][slot].
+          // For non-reduce kernels there is no "in-reduce-body" scope,
+          // so rngs land in the post-region slot.
+          u32 r_idx = has_reduce ? region[i] : post_region;
+          RngsCtx *target = &input_rngs_in_region[r_idx][slot];
           if (target->ndim == 0) *target = in_rngs;
           // Per-USE: always record this consumer's rngs into the
           // (consumer, src_index) edge slot.  No first-writer-wins.
@@ -2618,26 +2621,32 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     }
   }
 
-  // 4. ALU lowering: one S_X per KProgOp.  An op at position
-  // <= reduce_pos uses input_load_pre[] for its input refs; at
-  // position > reduce_pos uses input_load_post[].  The REDUCE op
-  // itself sits at reduce_pos (pre-scope ref to body input).
+  // 4. ALU lowering: one S_X per KProgOp.  An op in region r uses
+  // input_load_in_region[r][] for its input refs.  For chain reduces
+  // each region r in [0..n_reduces) has its own LOAD addresses
+  // parameterised by reduce_meta[r].size/inner/range.  Region
+  // n_reduces (or post_region for non-reduce kernels) covers post-
+  // all-reduces ops which use LOOP-only addressing.
   // UOP_EXPAND lowers as identity -- broadcast is implicit at the
   // per-LOOP-element scalar level.
   u32 prog_value[nops_local];
   u8  via_rngs[nops_local];
   for (u32 i = 0; i < nops_local; i++) { prog_value[i] = 0; via_rngs[i] = 0; }
-  // Helper for checking via_rngs from a src ref.
-  #define SRC_VIA_RNGS(raw, pre_scope) \
+  // Helper for checking via_rngs from a src ref keyed off the
+  // consumer op's region.  The macro takes a region index r so
+  // callers picking the right consumer scope works for both
+  // single-reduce and chain-reduce.
+  #define SRC_VIA_RNGS(raw, r_idx) \
     (KSRC_IS_INPUT(raw) \
-      ? ((pre_scope) ? via_rngs_pre [KSRC_INDEX(raw)] \
-                     : via_rngs_post[KSRC_INDEX(raw)]) \
+      ? via_rngs_in_region[r_idx][KSRC_INDEX(raw)] \
       : via_rngs[KSRC_INDEX(raw)])
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     u32 dtype  = p->dtype;
+    u32 r_idx  = has_reduce ? region[i] : post_region;
     int pre    = (has_reduce && region[i] == 0);
-    u32 *input_load = pre ? input_load_pre : input_load_post;
+    u32 *input_load = input_load_in_region[r_idx];
+    (void)pre;     // legacy alias retained for a few residual readers below
     if (p->opcode == UOP_CONST) {
       prog_value[i] = rangeify_emit_leaf(ke, S_CONST, dtype, (u64)p->arg);
       continue;
@@ -2694,7 +2703,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (v == 0) RBAIL_MID("RESHAPE src 0");
       // Identity-pass when source is via_rngs: rngs already baked in
       // the chain's RESHAPE transform via flat-roundtrip.
-      if (SRC_VIA_RNGS(raw, pre)) {
+      if (SRC_VIA_RNGS(raw, r_idx)) {
         prog_value[i] = v;
         via_rngs[i] = 1;
         continue;
@@ -2950,7 +2959,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (ndim > 4) RBAIL_MID("SHRINK/PAD ndim > 4");
       // When source value's via_rngs flag is set, SHRINK's iter shift
       // is already baked into the load address by the backward walk.
-      if (p->opcode == UOP_SHRINK && SRC_VIA_RNGS(raw, pre)) {
+      if (p->opcode == UOP_SHRINK && SRC_VIA_RNGS(raw, r_idx)) {
         prog_value[i] = v;
         via_rngs[i] = 1;
         continue;
@@ -3328,9 +3337,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       // Per-reduce ranges/kind sourced from reduce_meta[region[i]] so a
       // chain reduce's emission picks up its own axes/extents (single-
       // reduce kernels have region[reduce_pos]==0, identical behavior).
-      u32 r_idx = region[i];
+      // Reduce r's body source is loaded inside reduce r's body, so
+      // pick from the per-region input_load table at the reduce's own
+      // region (the outer r_idx == region[i] for UOP_REDUCE ops; for
+      // single-reduce kernels this resolves to region 0, equivalent
+      // to the legacy input_load_pre alias).
       u32 raw = p->src[0];
-      u32 body = KSRC_IS_INPUT(raw) ? input_load_pre[KSRC_INDEX(raw)]
+      u32 body = KSRC_IS_INPUT(raw) ? input_load_in_region[r_idx][KSRC_INDEX(raw)]
                                     : prog_value[KSRC_INDEX(raw)];
       if (body == 0) RBAIL_MID("REDUCE body 0");
       u32 nr = reduce_meta[r_idx].n_ranges;
@@ -3354,7 +3367,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       } else {
         src_v[s] = prog_value[KSRC_INDEX(raw)];
       }
-      if (!SRC_VIA_RNGS(raw, pre)) all_via_rngs = 0;
+      if (!SRC_VIA_RNGS(raw, r_idx)) all_via_rngs = 0;
     }
     u8 sop;
     switch (p->opcode) {
