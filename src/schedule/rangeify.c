@@ -1422,39 +1422,21 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           RBAIL_PRE("> RANGEIFY_MAX_REDUCES reduce ops");
         }
         reduce_positions[n_reduces++] = i;
-        if (reduce_pos != -1) {
-          // Multi-reduce experimental: gated by env var until the
-          // tile + render layers handle N accumulators correctly.
-          // When the gate's lifted, additional reduces are tracked
-          // in reduce_positions[] but the existing single-reduce
-          // metadata block downstream still uses the FIRST reduce's
-          // op for its scalar fields -- correct shape if all reduces
-          // share source + axes, undefined otherwise.
-          if (getenv("THVM_RANGEIFY_MULTI_REDUCE") == NULL) {
-            RBAIL_PRE("> 1 reduce");
-          }
-          // Validate compatibility with the canonical reduce: same
-          // source operand and same reduce-axis layout.  Anything
-          // else falls back to per-op encoder.
-          KProgOp *p0 = &ke->program[reduce_pos];
-          if (p->src[0] != p0->src[0]
-              || p->n_reduce_axes != p0->n_reduce_axes
-              || p->src0_ndim != p0->src0_ndim) {
-            RBAIL_PRE("multi-reduce source/axes differ");
-          }
-          for (u32 d = 0; d < p->n_reduce_axes; d++) {
-            if (p->reduce_axes[d] != p0->reduce_axes[d]) {
-              RBAIL_PRE("multi-reduce axes differ");
-            }
-          }
-          for (u32 d = 0; d < p->src0_ndim; d++) {
-            if (p->src0_dims[d] != p0->src0_dims[d]) {
-              RBAIL_PRE("multi-reduce src0_dims differ");
-            }
-          }
-        } else {
+        if (reduce_pos == -1) {
           reduce_pos = (int)i;
+        } else if (getenv("THVM_RANGEIFY_MULTI_REDUCE") == NULL) {
+          // Multi-reduce path is experimental: gated by env var until
+          // tile + render layers handle N accumulators sequentially
+          // (chain-reduce shape).  Per-reduce metadata (reduce_meta[r])
+          // and per-region input loads are wired through, so under the
+          // env each additional reduce gets its own range/size/inner
+          // and its body's input addressing is region-correct.
+          RBAIL_PRE("> 1 reduce");
         }
+        // No compat check on additional reduces: per-region addressing
+        // handles parallel-shared-axes AND chain-reduce shapes.  The
+        // tile + render layers must still consume the multi-reduce
+        // ScalarUop graph correctly (steps E/F).
         break;
       default:
         if (getenv("THVM_RANGEIFY_BAIL")) {
@@ -1758,17 +1740,6 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // branches handle whatever shape the input view actually has
   // (scalar broadcast, same-shape, partial-reduce, full-reduce-
   // rank-1) and bail individually if no branch matches.
-
-  // Chain-reduce body emit not yet implemented: even though
-  // reduce_meta[r] / region[i] / reduce_ranges_per_reduce[r] are
-  // populated correctly, the per-region input scope tracking is still
-  // single-reduce (input_used_pre/post key off region == 0 vs else),
-  // so for n_reduces > 1 the input loads in regions 1..N-1 would be
-  // incorrectly addressed.  Bail to per-op encoder here -- subsequent
-  // commits add per-region input-load tables and remove this guard.
-  // This bail closes the previously-broken THVM_RANGEIFY_MULTI_REDUCE
-  // path which silently accepted parallel reduces with the same hole.
-  if (n_reduces > 1) RBAIL_MID("chain-reduce body emit not yet implemented");
 
   // Start fresh -- emit_kernel_for_boundary may have run rangeify on
   // a previous attempt that bailed mid-way.
