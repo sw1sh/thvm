@@ -1432,6 +1432,45 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
     resources[resource_count++] = cfgBuf;
   }
 
+  // Per-op GPU-timestamp profiling.  When THVM_METAL_PROFILE_PEROP=1,
+  // replace the single batched ICB execution with N per-op encoder
+  // dispatches; each cmd buffer commits + waits, then we read
+  // cmd.GPUEndTime - cmd.GPUStartTime for true per-kernel GPU time.
+  // Costs ~5-10x more dispatch overhead than the batched path -- only
+  // for explicit profile runs.  Without this, all kernels'
+  // cg_profile_record entries get the same averaged value
+  // (elapsed/n_ops), which is misleading for per-kernel rankings.
+  char const *e_perop = getenv("THVM_METAL_PROFILE_PEROP");
+  if (e_perop != NULL && e_perop[0] == '1') {
+    for (u32 i = 0; i < n_ops; i++) {
+      id<MTLCommandBuffer> cmd_i = [METAL_QUEUE commandBuffer];
+      if (cmd_i == nil) return -1;
+      id<MTLComputeCommandEncoder> enc_i = [cmd_i computeCommandEncoder];
+      if (resource_count > 0) {
+        [enc_i useResources:resources
+                      count:(NSUInteger)resource_count
+                      usage:(MTLResourceUsageRead | MTLResourceUsageWrite)];
+      }
+      [enc_i executeCommandsInBuffer:icb
+                           withRange:NSMakeRange((NSUInteger)i, (NSUInteger)1)];
+      [enc_i endEncoding];
+      [cmd_i commit];
+      [cmd_i waitUntilCompleted];
+      double gpu_seconds = cmd_i.GPUEndTime - cmd_i.GPUStartTime;
+      u64 gpu_us = gpu_seconds > 0.0 ? (u64)(gpu_seconds * 1e6) : 0;
+      u32 dispatch_kind = cg_kernel_dispatch_kind(ops[i].kid);
+      cg_profile_record(ops[i].kid,
+                        dispatch_kind == KDISPATCH_METAL_JIT
+                            ? KDISPATCH_METAL_JIT
+                            : KDISPATCH_METAL_TILE,
+                        gpu_us);
+    }
+    if (trace) {
+      fprintf(stderr, "thvm: metal_graph replay perop n=%u\n", n_ops);
+    }
+    return 0;
+  }
+
   u64 t0 = cg_now_us();
   id<MTLCommandBuffer> cmd = metal_command_buffer();
   if (cmd == nil) return -1;
