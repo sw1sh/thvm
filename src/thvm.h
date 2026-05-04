@@ -1860,6 +1860,15 @@ fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IM
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
 
+// === Per-USE movement-chain resolver (Phase B1) ===
+// Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
+// outside-in, transforming `iters[ndim_io]` to the iter context the
+// bottom buffer expects.  Returns the bottom term (non-movement).
+// Returns 0 on shape mismatch so callers can bail.  Per-USE caller
+// (rangeify, Phase B3) builds the final UOP_INDEX_E from the
+// resolved iters + bottom buffer shape.
+fn Term uop_resolve_movement_chain(Term src, Term *iters, u32 *ndim_io);
+
 typedef struct {
   Term term;
   u8   op;

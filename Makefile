@@ -19,6 +19,7 @@ TESTS := \
   $(BIN)/test_tensor \
   $(BIN)/test_uop \
   $(BIN)/test_uop_index \
+  $(BIN)/test_uop_movement_index \
   $(BIN)/test_uop_graph_rewrite \
   $(BIN)/test_scalar_simplify \
   $(BIN)/test_grad \
