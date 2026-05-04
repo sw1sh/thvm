@@ -1594,7 +1594,58 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       reduce_meta[0].extents[d] = reduce_extents[d];
     }
   }
-  (void)reduce_meta;     // step C switches single-reduce reads here
+  // Chain-reduce groundwork (step D-pre): populate reduce_meta[1..N-1]
+  // for each additional UOP_REDUCE in the program.  Body emit does not
+  // yet consume these -- the gate's compat check still bails chain
+  // reduces with differing source/axes -- so this is data-only.
+  // Subsequent steps will key the per-reduce range emission and
+  // input-scope tracking off reduce_meta[r].
+  for (u32 r = 1; r < n_reduces; r++) {
+    KProgOp *redr = &ke->program[reduce_positions[r]];
+    if (redr->n_src != 1) return 0;
+    u32 src_numel_r;
+    if (KSRC_IS_INPUT(redr->src[0])) {
+      u32 in_slot = KSRC_INDEX(redr->src[0]);
+      src_numel_r = ke->input_numels[in_slot];
+    } else {
+      u32 src_idx = KSRC_INDEX(redr->src[0]);
+      if (src_idx >= ke->n_ops) return 0;
+      src_numel_r = ke->program[src_idx].numel;
+    }
+    if (src_numel_r == 0 || src_numel_r < redr->numel) return 0;
+    u32 size_r = src_numel_r / redr->numel;
+    if (size_r * redr->numel != src_numel_r) return 0;
+    if (size_r == 0 || size_r > 0xFFFFu) return 0;
+    u32 n_ranges_r = 0;
+    u32 extents_r[MAX_DIM] = {0};
+    if (redr->n_reduce_axes > 0 && redr->n_reduce_axes <= MAX_DIM
+        && redr->src0_ndim > 0 && redr->src0_ndim <= MAX_DIM) {
+      u64 meta_size = 1;
+      int meta_ok = 1;
+      for (u32 d = 0; d < redr->n_reduce_axes; d++) {
+        u32 axis = redr->reduce_axes[d];
+        if (axis >= redr->src0_ndim) { meta_ok = 0; break; }
+        u32 extent = redr->src0_dims[axis];
+        if (extent == 0) { meta_ok = 0; break; }
+        extents_r[d] = extent;
+        meta_size *= extent;
+      }
+      if (meta_ok && meta_size == size_r) n_ranges_r = redr->n_reduce_axes;
+    }
+    if (n_ranges_r == 0) {
+      n_ranges_r = 1;
+      extents_r[0] = size_r;
+    }
+    reduce_meta[r].op       = redr;
+    reduce_meta[r].kind     = (redr->arg >> 24) & 0xFFu;
+    reduce_meta[r].inner    =  redr->arg        & 0x00FFFFFFu;
+    reduce_meta[r].size     = size_r;
+    reduce_meta[r].n_ranges = n_ranges_r;
+    for (u32 d = 0; d < n_ranges_r && d < MAX_DIM; d++) {
+      reduce_meta[r].extents[d] = extents_r[d];
+    }
+  }
+  (void)reduce_meta;     // step D-1 switches per-reduce ranges to read here
 
   u32 onum            = ke->output_numel;
   u32 reduce_in_numel = has_reduce ? (red->numel * reduce_size) : 0;
