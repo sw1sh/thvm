@@ -1463,8 +1463,7 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         RBAIL_PRE("unsupported opcode");
     }
   }
-  (void)reduce_positions;     // referenced in subsequent commits
-  (void)n_reduces;
+  (void)reduce_positions; (void)n_reduces;     // step C wires through emit
   // Phase D: input views can be non-contig (view.strides encode the
   // access pattern; 0 strides == broadcast, used heavily by chain-
   // rule grad expansion).  Phase F-1 lifts the non-zero-offset
@@ -1495,6 +1494,30 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   u32      reduce_n_ranges = 0;
   u32      reduce_extents[MAX_DIM] = {0};
   KProgOp *red         = NULL;
+  // Per-region reduce metadata (chain-reduce groundwork).  reduce_meta[r]
+  // holds the metadata for the r-th REDUCE in program order; the
+  // existing single-reduce scalars above mirror reduce_meta[0] so the
+  // existing per-thread emission path continues to work unchanged.
+  // Populated below once the existing single-reduce block has run.
+  // Step C will switch the body emit to read from reduce_meta[] and
+  // step D extends to N reduces.
+  typedef struct {
+    KProgOp *op;
+    u32      kind;
+    u32      size;
+    u32      inner;
+    u32      n_ranges;
+    u32      extents[MAX_DIM];
+  } ReduceMeta;
+  ReduceMeta reduce_meta[RANGEIFY_MAX_REDUCES];
+  for (u32 r = 0; r < RANGEIFY_MAX_REDUCES; r++) {
+    reduce_meta[r].op = NULL;
+    reduce_meta[r].kind = 0;
+    reduce_meta[r].size = 0;
+    reduce_meta[r].inner = 0;
+    reduce_meta[r].n_ranges = 0;
+    for (u32 d = 0; d < MAX_DIM; d++) reduce_meta[r].extents[d] = 0;
+  }
   if (has_reduce) {
     red                = &ke->program[reduce_pos];
     reduce_kind        =  (red->arg >> 24) & 0xFFu;
@@ -1541,7 +1564,19 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       reduce_n_ranges = 1;
       reduce_extents[0] = reduce_size;
     }
+    // Mirror into reduce_meta[0].  Step C switches single-reduce reads
+    // to consume reduce_meta[0]; for now both shapes are populated and
+    // the meta entry is unused (silenced via the sink at bottom).
+    reduce_meta[0].op       = red;
+    reduce_meta[0].kind     = reduce_kind;
+    reduce_meta[0].size     = reduce_size;
+    reduce_meta[0].inner    = reduce_inner;
+    reduce_meta[0].n_ranges = reduce_n_ranges;
+    for (u32 d = 0; d < reduce_n_ranges && d < MAX_DIM; d++) {
+      reduce_meta[0].extents[d] = reduce_extents[d];
+    }
   }
+  (void)reduce_meta;     // step C switches single-reduce reads here
 
   u32 onum            = ke->output_numel;
   u32 reduce_in_numel = has_reduce ? (red->numel * reduce_size) : 0;
