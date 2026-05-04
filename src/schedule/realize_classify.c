@@ -1342,18 +1342,21 @@ static u32 realize_rule_inline_constants(Term root) {
 }
 
 // Lift the source-is-direct + has-movement gates for adjacent-reduce
-// chain inlining.  Phase 7 follow-up: the FLAT_GRID-with-nested-reduce
-// relaxation (commit 3b11bf6) means the resulting bigger reduce-bearing
-// kernel can route through the tile-JIT path.  Earlier lift attempts
-// regressed because the merged kernel fell off tile and onto metal-op,
-// negating the kernel-count win with per-op encoder overhead.  With
-// the FLAT_GRID lift in place, those merged kernels stay on tile-JIT
-// and the inlining is a clean win.
-// THVM_BUFFERIZE_LIFT_REDUCE_CHAIN_GATES=0 reverts to the conservative
-// gates for bisection.
+// chain inlining.  At BS=32 the lift gives -39% kernels (118 -> 72)
+// and -37% wall time on the bounded beautiful-mnist canary because
+// the FLAT_GRID-with-nested-reduce relaxation (commit 3b11bf6) keeps
+// the merged reduce-bearing kernel on tile-JIT.
+//
+// KNOWN ISSUE: at BS >= 64 the lifted gates trigger a warmup-compile
+// blow-up -- the rule fires on candidates whose recompute subtrees
+// grow super-linearly with BS, and the compile pass never returns.
+// BS=64..512 with gate OFF complete normally; with gate ON they
+// timeout >5min during the first compile.  Default OFF until the
+// source-subtree size is bounded; THVM_BUFFERIZE_LIFT_REDUCE_CHAIN_GATES=1
+// opts in for the BS=32 win.
 static int realize_lift_reduce_chain_gates(void) {
   char const *e = getenv("THVM_BUFFERIZE_LIFT_REDUCE_CHAIN_GATES");
-  return e == NULL ? 1 : (e[0] != '0');
+  return e != NULL && e[0] == '1';
 }
 
 static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
