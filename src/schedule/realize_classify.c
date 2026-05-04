@@ -1486,7 +1486,7 @@ static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
   return hits;
 }
 
-fn void realize_classify(Term root) {
+fn void bufferize_classify(Term root) {
   realize_info_clear();
   realize_rewrite_stats_clear();
   // Always touch the bufferize graph so its state stays in sync with

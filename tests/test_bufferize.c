@@ -58,7 +58,7 @@ int main(void) {
   Term a = term_new(0, TAG_TEN, DT_FP32, ta);
   Term b = term_new(0, TAG_TEN, DT_FP32, tb);
   Term add = uop_binary(UOP_ADD, a, b);
-  realize_classify(add);
+  bufferize_classify(add);
   CHECK_EQ(bufferize_buffer_count(), 1);
   CHECK_EQ(bufferize_store_count(), 1);
   BBufferize const *bf = bufferize_buffer_at(0);
@@ -80,7 +80,7 @@ int main(void) {
   Term c = term_new(0, TAG_TEN, DT_FP32, tc);
   Term add2 = uop_binary(UOP_ADD, a, b);
   Term mul2 = uop_binary(UOP_MUL, add2, c);
-  realize_classify(mul2);
+  bufferize_classify(mul2);
   CHECK_EQ(bufferize_buffer_count(), 1);
   CHECK_EQ(bufferize_store_count(), 1);
   CHECK_EQ(bufferize_find_by_loc(term_val(add2)), 0xFFFFFFFFu);
@@ -101,7 +101,7 @@ int main(void) {
   Term left   = uop_binary(UOP_MUL, shared, c);
   Term right  = uop_binary(UOP_MUL, shared, a);
   Term root   = uop_binary(UOP_ADD, left, right);
-  realize_classify(root);
+  bufferize_classify(root);
   // shared may or may not survive the remove-removable-bufferize
   // pass depending on env; either way, the graph must mirror
   // REALIZE_INFO exactly.
@@ -130,7 +130,7 @@ int main(void) {
 
   TEST_BEGIN("bufferize/non-uop-root-empty-graph");
   // Building from a non-UOp root yields an empty graph and no store.
-  realize_classify(a);   // a is a TAG_TEN, classify bails early
+  bufferize_classify(a);   // a is a TAG_TEN, classify bails early
   CHECK_EQ(bufferize_buffer_count(), 0);
   CHECK_EQ(bufferize_store_count(), 0);
 
@@ -138,7 +138,7 @@ int main(void) {
   // REDUCE always seeds REALIZE_REASON_REDUCE, which projects to
   // BUFFERIZE_REASON_REDUCE.  Build SUM(a) and check the bit.
   Term red = uop_reduce(REDUCE_SUM, 0, a);
-  realize_classify(red);
+  bufferize_classify(red);
   u32 red_idx = bufferize_find_by_loc(term_val(red));
   CHECK(red_idx != 0xFFFFFFFFu);
   if (red_idx != 0xFFFFFFFFu) {
@@ -157,7 +157,7 @@ int main(void) {
   Term ka = uop_binary(UOP_ADD, k, a);
   Term kb = uop_binary(UOP_ADD, k, b);
   Term kr = uop_binary(UOP_ADD, ka, kb);
-  realize_classify(kr);
+  bufferize_classify(kr);
   u32 k_idx = bufferize_find_by_loc(term_val(k));
   CHECK(k_idx != 0xFFFFFFFFu);
   if (k_idx != 0xFFFFFFFFu) {
@@ -183,7 +183,7 @@ int main(void) {
   // Build a small reduce graph and confirm realized_count tracks
   // REALIZE_INFO across the whole rewrite pass.
   Term red2 = uop_reduce(REDUCE_SUM, 0, a);
-  realize_classify(red2);
+  bufferize_classify(red2);
   u32 live2 = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     if (REALIZE_INFO[i].realized) live2++;
@@ -205,7 +205,7 @@ int main(void) {
   Term lf   = uop_binary(UOP_MUL, sh, c);
   Term rt   = uop_binary(UOP_MUL, sh, a);
   Term tot  = uop_binary(UOP_ADD, lf, rt);
-  realize_classify(tot);
+  bufferize_classify(tot);
   u32 sh_idx = bufferize_find_by_loc(term_val(sh));
   u32 tot_idx = bufferize_find_by_loc(term_val(tot));
   CHECK(sh_idx != 0xFFFFFFFFu);
@@ -239,7 +239,7 @@ int main(void) {
   Term branch_rs  = uop_reshape(sh2, 2, dims31);
   Term branch_lin_rs = uop_reshape(branch_lin, 2, dims31);
   Term root3      = uop_binary(UOP_ADD, branch_lin_rs, branch_rs);
-  realize_classify(root3);
+  bufferize_classify(root3);
   u32 sh2_idx   = bufferize_find_by_loc(term_val(sh2));
   u32 root3_idx = bufferize_find_by_loc(term_val(root3));
   CHECK(sh2_idx != 0xFFFFFFFFu);
@@ -325,7 +325,7 @@ int main(void) {
   Term cs_l = uop_binary(UOP_MUL, cs, c);
   Term cs_r = uop_binary(UOP_MUL, cs, a);
   Term cs_t = uop_binary(UOP_ADD, cs_l, cs_r);
-  realize_classify(cs_t);
+  bufferize_classify(cs_t);
   u32 cs_idx  = bufferize_find_by_loc(term_val(cs));
   u32 cs_t_idx = bufferize_find_by_loc(term_val(cs_t));
   CHECK(cs_idx != 0xFFFFFFFFu);
@@ -356,7 +356,7 @@ int main(void) {
     CHECK_EQ(bufferize_removal_score(root_id), 0);
   }
   Term sum_term = uop_reduce(REDUCE_SUM, 0, a);
-  realize_classify(sum_term);
+  bufferize_classify(sum_term);
   u32 sum_idx = bufferize_find_by_loc(term_val(sum_term));
   if (sum_idx != 0xFFFFFFFFu) {
     u32 sum_id = bufferize_buffer_at(sum_idx)->buffer_id;
@@ -371,7 +371,7 @@ int main(void) {
   Term ms_l = uop_binary(UOP_MUL, ms, c);
   Term ms_r = uop_binary(UOP_MUL, ms, a);
   Term ms_t = uop_binary(UOP_ADD, ms_l, ms_r);
-  realize_classify(ms_t);
+  bufferize_classify(ms_t);
   u32 ms_idx = bufferize_find_by_loc(term_val(ms));
   CHECK(ms_idx != 0xFFFFFFFFu);
   if (ms_idx != 0xFFFFFFFFu) {
@@ -390,7 +390,7 @@ int main(void) {
   // SUM along axis 0 of a {3} input.  reduce_kind = REDUCE_SUM,
   // reduce_axis = 0, reduce_axis_size = 3.
   Term rmt_red = uop_reduce(REDUCE_SUM, 0, a);
-  realize_classify(rmt_red);
+  bufferize_classify(rmt_red);
   u32 rmt_idx = bufferize_find_by_loc(term_val(rmt_red));
   CHECK(rmt_idx != 0xFFFFFFFFu);
   if (rmt_idx != 0xFFFFFFFFu) {
@@ -404,7 +404,7 @@ int main(void) {
   TEST_BEGIN("bufferize/non-reduce-buffer-keeps-zero-reduce-fields");
   // ADD buffer should leave all three fields at zero.
   Term rmt_add = uop_binary(UOP_ADD, a, b);
-  realize_classify(rmt_add);
+  bufferize_classify(rmt_add);
   u32 rmt_add_idx = bufferize_find_by_loc(term_val(rmt_add));
   if (rmt_add_idx != 0xFFFFFFFFu) {
     BBufferize const *rmt = bufferize_buffer_at(rmt_add_idx);
@@ -418,7 +418,7 @@ int main(void) {
   // root, so subtree_has_reduce must be 1.  A pure ALU buffer with
   // no reduce ancestors should have it cleared.
   Term r2 = uop_reduce(REDUCE_SUM, 0, a);
-  realize_classify(r2);
+  bufferize_classify(r2);
   u32 r2_idx = bufferize_find_by_loc(term_val(r2));
   CHECK(r2_idx != 0xFFFFFFFFu);
   if (r2_idx != 0xFFFFFFFFu) {
@@ -432,7 +432,7 @@ int main(void) {
   Term mr_l = uop_binary(UOP_MUL, mr_s, c);
   Term mr_r = uop_binary(UOP_MUL, mr_s, a);
   Term mr_t = uop_binary(UOP_ADD, mr_l, mr_r);
-  realize_classify(mr_t);
+  bufferize_classify(mr_t);
   u32 mr_s_idx = bufferize_find_by_loc(term_val(mr_s));
   if (mr_s_idx != 0xFFFFFFFFu) {
     BBufferize const *bm = bufferize_buffer_at(mr_s_idx);
@@ -448,7 +448,7 @@ int main(void) {
   Term lf_l = uop_binary(UOP_MUL, lf_s, c);
   Term lf_r = uop_binary(UOP_MUL, lf_s, a);
   Term lf_t = uop_binary(UOP_ADD, lf_l, lf_r);
-  realize_classify(lf_t);
+  bufferize_classify(lf_t);
   u32 lf_s_idx = bufferize_find_by_loc(term_val(lf_s));
   u32 lf_t_idx = bufferize_find_by_loc(term_val(lf_t));
   CHECK(lf_s_idx != 0xFFFFFFFFu);
@@ -495,11 +495,11 @@ int main(void) {
   Term sk1_l = uop_binary(UOP_MUL, sk1_s, c);
   Term sk1_r = uop_binary(UOP_MUL, sk1_s, a);
   Term sk1_t = uop_binary(UOP_ADD, sk1_l, sk1_r);
-  realize_classify(sk1_t);
+  bufferize_classify(sk1_t);
   u64 key1 = bufferize_schedule_key();
   // Reclassify the SAME root - terms are hash-consed so we get the
   // same UOps and the same key.
-  realize_classify(sk1_t);
+  bufferize_classify(sk1_t);
   u64 key2 = bufferize_schedule_key();
   CHECK_EQ(key1, key2);
   CHECK(key1 != 0);
@@ -509,7 +509,7 @@ int main(void) {
   // REDUCE seeds a new buffer and changes recompute_ops on the
   // root, so the key flips.
   Term sk2 = uop_reduce(REDUCE_SUM, 0, a);
-  realize_classify(sk2);
+  bufferize_classify(sk2);
   u64 key3 = bufferize_schedule_key();
   CHECK(key3 != key1);
 
@@ -523,7 +523,7 @@ int main(void) {
   Term ds_l = uop_binary(UOP_MUL, ds, c);
   Term ds_r = uop_binary(UOP_MUL, ds, a);
   Term ds_t = uop_binary(UOP_ADD, ds_l, ds_r);
-  realize_classify(ds_t);
+  bufferize_classify(ds_t);
   u32 ds_idx = bufferize_find_by_loc(term_val(ds));
   CHECK(ds_idx != 0xFFFFFFFFu);
   if (ds_idx != 0xFFFFFFFFu) {
@@ -543,7 +543,7 @@ int main(void) {
   Term es_l = uop_binary(UOP_MUL, es, c);
   Term es_r = uop_binary(UOP_MUL, es, a);
   Term es_t = uop_binary(UOP_ADD, es_l, es_r);
-  realize_classify(es_t);
+  bufferize_classify(es_t);
   u32 es_idx = bufferize_find_by_loc(term_val(es));
   CHECK(es_idx != 0xFFFFFFFFu);
   if (es_idx != 0xFFFFFFFFu) {
@@ -567,7 +567,7 @@ int main(void) {
   // subtree contains the REDUCE itself so the rule must skip it.
   Term rd  = uop_reduce(REDUCE_SUM, 0, a);
   Term rd_d = uop_binary(UOP_MUL, rd, rd);
-  realize_classify(rd_d);
+  bufferize_classify(rd_d);
   u32 rd_idx = bufferize_find_by_loc(term_val(rd));
   CHECK(rd_idx != 0xFFFFFFFFu);
   if (rd_idx != 0xFFFFFFFFu) {
@@ -589,7 +589,7 @@ int main(void) {
   Term cs2_rsh    = uop_reshape(cs2, 2, cd31);
   Term cs2_lin_rs = uop_reshape(cs2_lin, 2, cd31);
   Term cs2_root   = uop_binary(UOP_ADD, cs2_lin_rs, cs2_rsh);
-  realize_classify(cs2_root);
+  bufferize_classify(cs2_root);
   u32 cs2_idx     = bufferize_find_by_loc(term_val(cs2));
   u32 cs2_root_idx = bufferize_find_by_loc(term_val(cs2_root));
   CHECK(cs2_idx != 0xFFFFFFFFu);
@@ -626,7 +626,7 @@ int main(void) {
   Term pd_pad  = uop_pad(pd_s, 1, pad_widths);            // padded edge ({6})
   Term pd_lin_pad = uop_pad(pd_lin, 1, pad_widths);
   Term pd_root = uop_binary(UOP_ADD, pd_lin_pad, pd_pad);
-  realize_classify(pd_root);
+  bufferize_classify(pd_root);
   u32 pd_s_idx    = bufferize_find_by_loc(term_val(pd_s));
   u32 pd_root_idx = bufferize_find_by_loc(term_val(pd_root));
   CHECK(pd_s_idx != 0xFFFFFFFFu);
@@ -665,7 +665,7 @@ int main(void) {
   Term pm_per = uop_permute(pm_s, 2, perm);              // shape {3,2}
   Term pm_dir_p = uop_permute(pm_dir, 2, perm);          // shape {3,2}
   Term pm_root = uop_binary(UOP_ADD, pm_dir_p, pm_per);
-  realize_classify(pm_root);
+  bufferize_classify(pm_root);
   (void)dims_2x3; (void)dims_3x2;
   u32 pm_s_idx    = bufferize_find_by_loc(term_val(pm_s));
   u32 pm_root_idx = bufferize_find_by_loc(term_val(pm_root));
@@ -695,7 +695,7 @@ int main(void) {
   Term fp_flp = uop_flip(fp_s, 0x1u);        // flip axis 0
   Term fp_dir_f = uop_flip(fp_dir, 0x1u);
   Term fp_root = uop_binary(UOP_ADD, fp_dir_f, fp_flp);
-  realize_classify(fp_root);
+  bufferize_classify(fp_root);
   u32 fp_s_idx    = bufferize_find_by_loc(term_val(fp_s));
   u32 fp_root_idx = bufferize_find_by_loc(term_val(fp_root));
   if (fp_s_idx != 0xFFFFFFFFu && fp_root_idx != 0xFFFFFFFFu) {
@@ -727,7 +727,7 @@ int main(void) {
   Term ir_rsh  = uop_reshape(ir_s, 1, cd3);  // identity reshape
   Term ir_neg  = uop_unary(UOP_NEG, ir_rsh);
   Term ir_root = uop_binary(UOP_ADD, ir_lin, ir_neg);
-  realize_classify(ir_root);
+  bufferize_classify(ir_root);
   // The identity reshape elision counter should fire at least once.
   CHECK(bufferize_identity_reshape_elision_hits() >= 1);
   u32 ir_s_idx    = bufferize_find_by_loc(term_val(ir_s));
@@ -778,7 +778,7 @@ int main(void) {
   Term ie_exp = uop_expand(ie_s, 2, same_dims);   // identity expand
   Term ie_dir_e = uop_expand(ie_dir, 2, same_dims);
   Term ie_root = uop_binary(UOP_ADD, ie_dir_e, ie_exp);
-  realize_classify(ie_root);
+  bufferize_classify(ie_root);
   // The identity expand must have been elided.  has_expand on the
   // (ie_s -> ie_root) edge should be 0.
   u32 ie_s_idx    = bufferize_find_by_loc(term_val(ie_s));
@@ -1122,7 +1122,7 @@ int main(void) {
   Term ag_l = uop_binary(UOP_MUL, ag_s, c);
   Term ag_r = uop_binary(UOP_MUL, ag_s, a);
   Term ag_t = uop_binary(UOP_ADD, ag_l, ag_r);
-  realize_classify(ag_t);
+  bufferize_classify(ag_t);
   u64 expected_bytes = 0;
   u64 expected_ops = 0;
   u32 expected_max_depth = 0;
@@ -1148,7 +1148,7 @@ int main(void) {
   Term r3   = uop_reduce(REDUCE_SUM, 0, a);
   // Force r3 to be multi-consumer by using it twice in the root.
   Term r3_d = uop_binary(UOP_MUL, r3, r3);
-  realize_classify(r3_d);
+  bufferize_classify(r3_d);
   u32 r3_idx   = bufferize_find_by_loc(term_val(r3));
   u32 r3_d_idx = bufferize_find_by_loc(term_val(r3_d));
   CHECK(r3_idx != 0xFFFFFFFFu);
@@ -1319,13 +1319,13 @@ int main(void) {
   u32 mskl_t_f32 = alloc_f32_tensor(3);
   Term mskl_tf  = term_new(0, TAG_TEN, DT_FP32, mskl_t_f32);
   Term mskl = uop_binary(UOP_ADD, mskl_tf, mskl_tf);
-  realize_classify(mskl);
+  bufferize_classify(mskl);
   u64 mskl_key = bufferize_schedule_key();
   CHECK(mskl_key != 0);
   // Same shape with a CAST inserted so the boundary's output_bytes
   // (dtype size * numel) differs from the f32 version.
   Term mskl_cast = uop_cast(mskl, DT_FP64);
-  realize_classify(mskl_cast);
+  bufferize_classify(mskl_cast);
   u64 mskl_key2 = bufferize_schedule_key();
   CHECK(mskl_key2 != 0);
   CHECK(mskl_key2 != mskl_key);

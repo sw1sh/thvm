@@ -1309,7 +1309,8 @@ typedef struct {
 extern UOpInfo REALIZE_INFO[REALIZE_INFO_CAP];
 extern u32     REALIZE_INFO_LEN;
 fn u32  realize_info_find(u64 loc);
-fn void realize_classify(Term root);
+// (realize_classify retired; use bufferize_classify -- declared
+// below near the bufferize API.)
 fn u8   realize_is_realized(Term uop_term);
 fn u32  realize_consumer_count(Term uop_term);
 fn u32  realize_reasons(Term uop_term);
@@ -1439,6 +1440,12 @@ typedef struct {
   u8  chain_op_count;         // length of chain_ops below
   BIndexChainOp chain_ops[BUFFERIZE_INDEX_CHAIN_MAX];
 } BIndex;
+// bufferize_classify is the public schedule entry point.  Walks the
+// UOp DAG rooted at `root`, marks ROOT/MULTI/REDUCE boundaries, runs
+// the named realize-rewrite rules, and finalises the bufferize graph
+// (B_BUFFERIZE + B_INDEX + B_STORE).  Replaces realize_classify; the
+// old name is retained as a 1-line forward in realize_classify.c.
+fn void              bufferize_classify(Term root);
 fn void              bufferize_seed_from_realize_info(Term root);
 fn void              bufferize_finalize_stores(Term root);
 fn void              bufferize_set_current_rule(char const *name);

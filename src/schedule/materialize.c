@@ -2504,7 +2504,7 @@ fn Term thvm_materialize(Term term) {
     }
   }
 
-  realize_classify(term);
+  bufferize_classify(term);
   topo_sort_boundaries(term);
   plan_kernel_merges();
   mem_plan_reset();

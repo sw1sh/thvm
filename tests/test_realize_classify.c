@@ -45,7 +45,7 @@ int main(void) {
   Term a = term_new(0, TAG_TEN, DT_FP32, ta);
   Term b = term_new(0, TAG_TEN, DT_FP32, tb);
   Term add = uop_binary(UOP_ADD, a, b);
-  realize_classify(add);
+  bufferize_classify(add);
   CHECK_EQ(realize_is_realized(add), 1);
   CHECK_EQ(realize_consumer_count(add), 0);
   CHECK(realize_reasons(add) & REALIZE_REASON_ROOT);
@@ -58,7 +58,7 @@ int main(void) {
   Term c = term_new(0, TAG_TEN, DT_FP32, tc);
   Term add2 = uop_binary(UOP_ADD, a, b);
   Term mul2 = uop_binary(UOP_MUL, add2, c);
-  realize_classify(mul2);
+  bufferize_classify(mul2);
   CHECK_EQ(realize_consumer_count(add2), 1);
   CHECK_EQ(realize_is_realized(add2), 0);
   CHECK_EQ(realize_is_realized(mul2), 1);
@@ -76,7 +76,7 @@ int main(void) {
   Term left   = uop_binary(UOP_MUL, shared, c);
   Term right  = uop_binary(UOP_MUL, shared, a);
   Term root   = uop_binary(UOP_ADD, left, right);
-  realize_classify(root);
+  bufferize_classify(root);
   CHECK_EQ(realize_consumer_count(shared), 2);
   CHECK_EQ(realize_is_realized(shared), 1);
   CHECK(realize_reasons(shared) & REALIZE_REASON_MULTI);
@@ -93,7 +93,7 @@ int main(void) {
   // dedups identical inputs into one slot).
   Term x   = uop_binary(UOP_ADD, a, b);
   Term sq  = uop_binary(UOP_MUL, x, x);
-  realize_classify(sq);
+  bufferize_classify(sq);
   CHECK_EQ(realize_consumer_count(x), 1);
   CHECK_EQ(realize_is_realized(x), 0);   // single consumer, not realized
   CHECK_EQ(realize_is_realized(sq), 1);
@@ -103,7 +103,7 @@ int main(void) {
   Term c_left = uop_binary(UOP_MUL, a, two);
   Term c_right = uop_binary(UOP_MUL, b, two);
   Term c_root = uop_binary(UOP_ADD, c_left, c_right);
-  realize_classify(c_root);
+  bufferize_classify(c_root);
   CHECK_EQ(realize_consumer_count(two), 2);
   CHECK_EQ(realize_is_realized(two), 0);
   CHECK(realize_reasons(two) & REALIZE_REASON_MULTI);
@@ -117,7 +117,7 @@ int main(void) {
   // count.
   Term tmp     = uop_binary(UOP_ADD, a, b);
   Term reduced = uop_reduce(REDUCE_SUM, 0, tmp);
-  realize_classify(reduced);
+  bufferize_classify(reduced);
   CHECK_EQ(realize_is_realized(tmp), 0);     // ADD not REDUCE, single consumer
   CHECK_EQ(realize_is_realized(reduced), 1); // REDUCE always realizes
   CHECK(realize_reasons(reduced) & REALIZE_REASON_ROOT);
@@ -129,7 +129,7 @@ int main(void) {
   Term tmp2     = uop_binary(UOP_ADD, a, b);
   Term reduced2 = uop_reduce(REDUCE_SUM, 0, tmp2);
   Term out      = uop_binary(UOP_MUL, reduced2, c);
-  realize_classify(out);
+  bufferize_classify(out);
   CHECK_EQ(realize_is_realized(tmp2), 0);
   CHECK_EQ(realize_is_realized(reduced2), 1);   // mid-graph REDUCE
   CHECK_EQ(realize_is_realized(out), 1);
@@ -147,7 +147,7 @@ int main(void) {
   Term rf_left = uop_unary(UOP_NEG, rf_reduce);
   Term rf_right = uop_binary(UOP_MUL, rf_reduce, rf_reduce);
   Term rf_root = uop_binary(UOP_ADD, rf_left, rf_right);
-  realize_classify(rf_root);
+  bufferize_classify(rf_root);
   CHECK_EQ(realize_consumer_count(rf_reduce), 2);
   CHECK_EQ(realize_is_realized(rf_reduce), 0);
   CHECK_EQ(realize_rewrite_stat_hits("inline-reduce-fanout"), 1);
@@ -162,7 +162,7 @@ int main(void) {
   Term rp_right = uop_binary(UOP_MUL, rp_reduce, rp_reduce);
   Term rp_sum = uop_binary(UOP_ADD, rp_left, rp_right);
   Term rp_root = uop_reduce(REDUCE_SUM, 0, rp_sum);
-  realize_classify(rp_root);
+  bufferize_classify(rp_root);
   CHECK_EQ(realize_consumer_count(rp_reduce), 2);
   CHECK_EQ(realize_is_realized(rp_reduce), 1);
   CHECK_EQ(realize_rewrite_stat_hits("inline-reduce-fanout"), 0);
@@ -222,7 +222,7 @@ int main(void) {
   Term r0 = uop_reduce(REDUCE_SUM, 1, pad);
   Term r1 = uop_reduce(REDUCE_SUM, 1, uop_binary(UOP_MUL, pad, pad));
   Term combined = uop_binary(UOP_ADD, r0, r1);
-  realize_classify(combined);
+  bufferize_classify(combined);
   CHECK_EQ(realize_consumer_count(pad), 2);
   CHECK_EQ(realize_is_realized(pad), 0);
   CHECK(realize_reasons(pad) & REALIZE_REASON_MULTI);
@@ -241,7 +241,7 @@ int main(void) {
   Term qleft = uop_unary(UOP_NEG, qpad);
   Term qright = uop_binary(UOP_MUL, qpad, qpad);
   Term qroot = uop_binary(UOP_ADD, qleft, qright);
-  realize_classify(qroot);
+  bufferize_classify(qroot);
   CHECK_EQ(realize_consumer_count(qpad), 2);
   CHECK_EQ(realize_is_realized(qpad), 0);
   CHECK_EQ(realize_rewrite_stat_hits("remove-removable-bufferize"), 1);
@@ -253,7 +253,7 @@ int main(void) {
   Term pure_left = uop_binary(UOP_MUL, pure, n);
   Term pure_right = uop_binary(UOP_MUL, pure, pure);
   Term pure_root = uop_binary(UOP_ADD, pure_left, pure_right);
-  realize_classify(pure_root);
+  bufferize_classify(pure_root);
   CHECK_EQ(realize_consumer_count(pure), 2);
   CHECK_EQ(realize_is_realized(pure), 0);
   CHECK(realize_reasons(pure) & REALIZE_REASON_MULTI);
@@ -266,7 +266,7 @@ int main(void) {
   Term keep_left = uop_binary(UOP_MUL, keep, n);
   Term keep_right = uop_binary(UOP_ADD, keep, keep);
   Term keep_root = uop_binary(UOP_ADD, keep_left, keep_right);
-  realize_classify(keep_root);
+  bufferize_classify(keep_root);
   CHECK_EQ(realize_consumer_count(keep), 2);
   CHECK_EQ(realize_is_realized(keep), 1);
   CHECK_EQ(realize_rewrite_stat_hits("remove-removable-bufferize"), 0);
@@ -292,7 +292,7 @@ int main(void) {
   Term left_m = uop_binary(UOP_MUL, prod, scale);
   Term right_m = uop_binary(UOP_MUL, xs[32], xs[33]);
   Term wide_root = uop_binary(UOP_ADD, left_m, right_m);
-  realize_classify(wide_root);
+  bufferize_classify(wide_root);
   CHECK(realize_rewrite_stat_hits("metal-tile-fanin-cap") >= 1);
   CHECK(realize_is_realized(tree_a) || realize_is_realized(left_m)
       || realize_is_realized(prod));
@@ -301,7 +301,7 @@ int main(void) {
   Term tree_c = wide_reshape_add_tree(&xs[0], 16, 32);
   Term wide_neg = uop_unary(UOP_NEG, uop_binary(UOP_MUL, tree_c, tree_c));
   Term wide_unary_root = uop_binary(UOP_ADD, wide_neg, right_m);
-  realize_classify(wide_unary_root);
+  bufferize_classify(wide_unary_root);
   CHECK(realize_rewrite_stat_hits("metal-tile-fanin-cap") >= 1);
   CHECK(realize_is_realized(wide_neg) || realize_is_realized(tree_c));
   unsetenv("THVM_BACKEND");
@@ -336,7 +336,7 @@ int main(void) {
   u32 bn_ex_dims[2] = {2, 4};
   Term bn_ex    = uop_expand(bn_rs, 2, bn_ex_dims);      // {2, 4}
   Term bn_root  = uop_binary(UOP_ADD, bn_x, bn_ex);
-  realize_classify(bn_root);
+  bufferize_classify(bn_root);
   // The reduce should be inlined by inline-softmax-broadcast-reduce.
   CHECK_EQ(realize_is_realized(bn_r), 0);
   CHECK(realize_reasons(bn_r) & REALIZE_REASON_INLINE);
@@ -361,7 +361,7 @@ int main(void) {
   Term nb_root = uop_expand(uop_reshape(nb_alu, 2,
                                         (u32[]){1, 8}),
                             2, nb_ex_dims);
-  realize_classify(nb_root);
+  bufferize_classify(nb_root);
   CHECK_EQ(realize_is_realized(nb_r), 1);    // no broadcast-of-CONST sibling
 
   thvm_free();
