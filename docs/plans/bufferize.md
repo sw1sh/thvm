@@ -1,11 +1,28 @@
 # Bufferize Schedule IR Plan
 
-Status: Phases 0-7 landed at the data-layer level.  Phase 2 has the
-data layer + edge query API; Phase 4 has the cost-model fields and
-candidate dump; Phase 5 has the reduce-aware cost gate; Phase 6 has
-per-buffer lifetimes and output_bytes; Phase 7 has the schedule key
-and aggregates.  All seven phases are observable from
-`DUMP_BUFFERIZE` and `DUMP_BUFFERIZE_CANDIDATES`.
+Status: the realize_classify schedule layer is retired
+(commits 0fafd96..e8d6815, 2026-05-04): every public symbol, file,
+internal helper, REASON macro, and storage variable is now under
+the `bufferize_*` / `BUFFERIZE_*` namespace.  Phases 0-7 landed at
+the data-layer level.  Phase 2 has the data layer + edge query API;
+Phase 4 has the cost-model fields and candidate dump; Phase 5 has
+the reduce-aware cost gate; Phase 6 has per-buffer lifetimes and
+output_bytes; Phase 7 has the schedule key and aggregates.  All
+seven phases are observable from `DUMP_BUFFERIZE` and
+`DUMP_BUFFERIZE_CANDIDATES`.
+
+Storage today still has two arrays -- `BUFFERIZE_NODES[]` (per-walked
+UOp, declared in bufferize_classify.c) and `BUFFERIZE_BUFS[]`
+(realized + unmarked-by-rule subset, declared in bufferize.c) -- with
+compact 1-based `buffer_id`s on the latter.  An attempt at folding
+the two into one BBufferize-typed array via `BUFFERIZE_BUFS ==
+BUFFERIZE_NODES` was tried and reverted: the compact-buffer-id
+contract that tests + edge-table consumers depend on requires
+either (a) a separate compact-id assignment in the unified array,
+or (b) updating every consumer to accept sparse ids.  Option (a) is
+the right move once Phase 3 movement-to-INDEX rules need direct
+access to walker-only entries; until then the dual-storage cost is
+1.3 MB of zeroed BBufferize fields and the seed-time memcpy.
 
 Outstanding follow-ups (each tracked in its phase section below):
 
@@ -27,7 +44,7 @@ materialization boundaries explicit, rewriteable, inspectable, and
 autotunable, so Metal beautiful-mnist can converge toward tinygrad-like
 fusion and memory behavior without relying on custom backend kernels.
 
-The current `REALIZE_INFO` table is useful but too implicit: it records
+The current `BUFFERIZE_NODES` table is useful but too implicit: it records
 which UOp heap locations survive as buffers, while rangeify and
 materialize still infer consumer edge contexts from the original graph.
 The new IR must preserve the useful conservative seeding model while
@@ -64,7 +81,7 @@ internal refactor.
 
 The initial C representation can be structs rather than new heap tags.
 The important requirement is that dumps and tests see one explicit graph
-instead of recovering schedule state indirectly from `REALIZE_INFO`.
+instead of recovering schedule state indirectly from `BUFFERIZE_NODES`.
 
 ### `B_VALUE`
 
@@ -129,7 +146,7 @@ Fields:
   threadgroup size, graph replay compatibility.
 
 `B_STORE` is what rangeify should lower, not an arbitrary high-level UOp
-root plus side-channel `REALIZE_INFO`.
+root plus side-channel `BUFFERIZE_NODES`.
 
 ## Boundary Reasons
 
@@ -177,7 +194,7 @@ These add initial `B_BUFFERIZE` nodes.
 - `seed-rangeify-gap-buffer`
 - `seed-tile-gap-buffer`
 
-The first implementation can mirror the current `realize_classify`
+The first implementation can mirror the current `bufferize_classify`
 result exactly.  Behavior changes should come only after the generated
 bufferize graph is dumpable.
 
@@ -363,10 +380,10 @@ must be compact enough to use on a one-step beautiful-mnist capture.
 
 ### Phase 0: Freeze Current Behavior Behind The New IR (landed)
 
-Build a bufferize graph from the existing `REALIZE_INFO` result and
+Build a bufferize graph from the existing `BUFFERIZE_NODES` result and
 prove it emits the same materialized kernels as today.
 
-Status: landed in `src/schedule/bufferize.c`.  `realize_classify`
+Status: landed in `src/schedule/bufferize.c`.  `bufferize_classify`
 projects every realized UOp into a `B_BUFFERIZE` record with a stable
 1-based buffer id, the realize root gets one `B_STORE`, and reasons
 are mirrored as `BUFFERIZE_REASON_{ROOT,MULTI,REDUCE,BACKEND_CAP}`.
@@ -374,13 +391,13 @@ are mirrored as `BUFFERIZE_REASON_{ROOT,MULTI,REDUCE,BACKEND_CAP}`.
 asserts the projection is faithful (every realized loc appears
 exactly once, no inlined locs appear, ids are dense, the root has a
 matching store).  `B_VALUE` / `B_INDEX` are intentionally still TODO
-because the existing `realize_classify` result has no edge-local
+because the existing `bufferize_classify` result has no edge-local
 context to project from; both arrive together with Phase 2.
 
 Acceptance:
 
 - no change to kernel count or WL results (materialize.c still reads
-  `REALIZE_INFO`; bufferize is a read-only mirror);
+  `BUFFERIZE_NODES`; bufferize is a read-only mirror);
 - `make test` passes including the new `tests/test_bufferize.c`.
 
 ### Phase 1: Move Current Boundary Rewrites Into Bufferize IR (landed)
@@ -389,9 +406,9 @@ Port the existing named realize-map rules so they operate on explicit
 bufferize nodes.
 
 Status: landed.  The bufferize graph is now seeded from
-`REALIZE_INFO` between the ROOT/MULTI/REDUCE marking pass and
-`realize_rewrite_apply`, and stays live across the rewrite phase.
-`realize_rewrite_apply` sets `bufferize_set_current_rule(name)` around
+`BUFFERIZE_NODES` between the ROOT/MULTI/REDUCE marking pass and
+`bufferize_rewrite_apply`, and stays live across the rewrite phase.
+`bufferize_rewrite_apply` sets `bufferize_set_current_rule(name)` around
 each rule's `apply` callback; `realize_mark` and `realize_unmark`
 forward into `bufferize_realize_with_reason` and
 `bufferize_unrealize`, which stamp `added_by` / `removed_by` from
@@ -401,7 +418,7 @@ rules, `remove-removable-bufferize`, `metal-tile-fanin-cap`, the
 fanout probes) keep their current shape and rule names; the
 forwarding wiring means each one's effect is now visible on the
 explicit graph without porting per-rule code.  Materialize.c still
-reads `REALIZE_INFO`, so behaviour is unchanged.
+reads `BUFFERIZE_NODES`, so behaviour is unchanged.
 
 Acceptance:
 
@@ -413,7 +430,7 @@ Acceptance:
 Follow-up before Phase 2: rules that allocate fresh consumer-count
 data through `realize_info_find` after a forward should also push
 that data through the bufferize API; today brand-new buffers added
-by `metal-tile-fanin-cap` re-read `REALIZE_INFO` for their
+by `metal-tile-fanin-cap` re-read `BUFFERIZE_NODES` for their
 consumer_count.  Once `B_INDEX` lands in Phase 2, the bufferize
 graph will be the only authoritative source.
 
@@ -1017,4 +1034,4 @@ next concrete work is the Phase 2 rangeify rerouting:
 
 After this, Phase 4 (first-class bufferize removal with cost model)
 becomes a clean per-edge analysis on the bufferize graph rather
-than a side channel into `REALIZE_INFO`.
+than a side channel into `BUFFERIZE_NODES`.
