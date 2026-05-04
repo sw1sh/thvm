@@ -797,6 +797,135 @@ Implementation: pass-1 pattern that converts `LOAD(const_buf, [0])`
 into `CONST(literal)` when the buffer's contents are known at
 compile time.  Renderer emits the literal directly.  ~80 lines.
 
+### From the source (tinygrad + tilelang)
+
+After reading the actual source of `tinygrad/schedule/rangeify.py`,
+`tinygrad/schedule/indexing.py`, `tinygrad/codegen/simplify.py`,
+`tinygrad/codegen/late/linearizer.py`, `tinygrad/codegen/opt/{heuristic,
+postrange}.py`, and `tilelang/src/transform/*.cc`, the architecture
+is even tighter than I'd described.  Five concrete mechanisms I'd
+underspecified:
+
+**(a) `apply_movement_op` is 12 lines.**  It's a `match` on
+`Ops.{SHRINK, PERMUTE, FLIP, EXPAND, PAD, RESHAPE}` that REWRITES
+the consumer's RANGE-leaf list:
+
+```python
+case Ops.SHRINK:  rngs = tuple(a+ss for a,(ss,_) in zip(rngs, arg))
+case Ops.PERMUTE: rngs = tuple(rngs[p] for p in argsort(arg))
+case Ops.FLIP:    rngs = tuple((s-1)-a if f else a for ...)
+case Ops.EXPAND:  rngs = tuple(a if in_sh == out_sh else a.const_like(0) ...)
+case Ops.PAD:     rngs = tuple(... ((r >= s) & (r < sh+s)).where(r-s, INVALID))
+case Ops.RESHAPE: rngs = _apply_reshape(in_shape, out_shape, sink_of(rngs))
+```
+
+That's the entire movement-to-INDEX core.  Compare to thvm's 3.2 KLOC
+`rangeify.c`.  The size difference isn't algorithmic complexity —
+it's that thvm bridges TWO IRs (KProgOp → ScalarUop) and reimplements
+each movement op's address arithmetic per-IR.  With one IR + symbolic
+INDEX expressions, the rewrite is a 12-line dispatch.
+
+**(b) PAD becomes WHERE + INVALID, not zeroed data.**  Specifically:
+
+```
+PAD([0,K,0]) ↦ ((r >= K) & (r < shape+K)).where(load(r-K), INVALID)
+```
+
+The `INVALID` sentinel propagates through downstream INDEX/LOAD; a
+late pass folds `LOAD(INVALID)` to `0` (or the reduce identity for
+in-reduce paths).  This is what makes PAD free at consumer time — no
+zero-fill kernel, no buffer materialization, just a guarded LOAD.
+
+The current thvm rangeify has explicit `emit_pad_bounds_mask` +
+`emit_valid_and` + `emit_iwhere` doing the same conceptual thing,
+but the WHERE+INVALID UOp gives the simplifier a chance to ELIMINATE
+the guard when symbolic bounds prove it always-valid.  thvm's masks
+stay as runtime `S_IAND` chains.
+
+**(c) The symbolic simplifier (`pm_simplify_valid`) is the critical
+companion to (b).**  Without it, every movement-as-INDEX produces a
+giant nested AST of `+`/`*`/`//`/`%`/`<`/`>=`/`&` operations that the
+MSL compiler can't optimise.  Tinygrad's symbolic.py has rules like:
+
+- `r % N` where `r ∈ [0, N)` → `r`
+- `(r // M) * M + (r % M)` → `r`
+- `(r >= 0) & (r < r.upper_bound)` → `True`  (folds bound checks)
+- `c * (a + b)` → `c*a + c*b` (only if it reduces div/mod count)
+- WHERE on always-true → src
+
+These are GENERIC algebraic identities over RANGE leaves.  thvm has
+`scalar_simplify_divandmod_rules` but the range-bound-aware folds
+aren't there yet — the current absorbed-but-unsimplified addresses
+are why lifting the `> 65535` reduce_size cap regresses (see
+`docs/plans/multi_reduce_refactor.md`'s cap-lift note).
+
+**(d) Reduce-collapse is generic algebraic, not handcoded patterns.**
+tinygrad's `pm_reduce_collapse` has rules like:
+
+- `REDUCE_ADD(x * y, axis)` → `REDUCE_ADD(x, axis) * y` if `y` is
+  range-axis-independent.
+- `REDUCE_ADD((r < cut).where(0, val), r)` → `((r.size-cut).max(0).
+  min(r.size)).cast(val.dtype) * val` if `val` is range-independent.
+- `REDUCE_ADD(x + y, r)` → `REDUCE_ADD(x, r) + REDUCE_ADD(y, r)`.
+- `REDUCE_ADD(x * gate.cast(bool).cast())` → `gate.where(x, 0)`.
+
+These are SYMBOLIC ALGEBRA rules that compose freely.  Compare to
+thvm's `inline-softmax-broadcast-reduce` rule which is one specific
+PATTERN (BatchNorm + softmax) — same mechanism reimplemented per-
+shape rather than as one rewrite engine.  Migration: collapse the
+named realize-rule families into pattern-matcher rewrites.
+
+**(e) tilelang has many more transform passes than I'd named.**
+The `src/transform/` directory has 40+ passes; the structurally
+important ones beyond the obvious lower/render are:
+
+- `layout_inference.cc` — propagate buffer layouts (row-major,
+  col-major, swizzled, fragment-shape) through the IR; matrix
+  transposes "fall out" as layout decisions, not data movement.
+- `inject_pipeline.cc` — software-pipeline annotated loops:
+  generates the producer/consumer split + double-buffered shared-
+  memory loads.  Without this pass `T.pipelined` is just metadata.
+- `multi_version_buffer_rewriter.cc` — N-buffer (typically double-
+  buffer) shared-memory allocations; required by pipelining.
+- `producer_consumer_ws.cc` — split warps into producer (loads) and
+  consumer (compute) groups for Hopper-class matmul throughput.
+- `storage_rewrite.cc` — promote/demote allocations between global
+  / shared / register based on use analysis.
+- `thread_storage_sync.cc` — insert `__syncthreads()` /
+  `simdgroup_barrier` between conflicting reads/writes.
+- `legalize_vectorized_loop.cc` — convert `T.vectorize` annotations
+  into actual `vload4`/`vload8` ops.
+- `lower_hopper_intrin.cc`, `lower_blackwell_2sm.cc` — backend-
+  specific lowerings for `wgmma`, TMA, cluster operations.
+
+The lesson: a real Tile IR for a high-performance compiler is not
+ONE pass producing one TILE_LOOP_NEST — it's ~10 passes each of
+which rewrites one aspect (layout / pipelining / multi-buffer /
+warp-split / sync / vectorisation / backend-intrin).  Phase D of
+the migration order (~2 weeks in my prior estimate) was way too
+optimistic.  A "tilelang-grade" Tile IR layer is ~3 months of
+focused work and is what closes the gap to peak hardware
+utilisation on matmul / attention.
+
+**(f) `hand_coded_optimizations` is what runs when BEAM doesn't.**
+tinygrad's `codegen/opt/heuristic.py` has 200+ lines of hand-tuned
+defaults: TC for single-reduce-axis matmul, MATVEC blocking for
+narrow reduces, GROUP for medium reduces, UPCAST for masked axes,
+sticky upcast accumulation when the output_shape product is large.
+It's the FALLBACK heuristic when BEAM hasn't searched a kernel.
+
+The architectural lesson: BEAM is a SEARCH over the same axis-
+rewrite primitives the heuristic uses; the heuristic is just a
+quick path that picks one good point in the search space.  Without
+the heuristic, every kernel needs BEAM (slow); with both, BEAM
+caches the wins and the heuristic handles cold paths in ~100µs.
+
+thvm's `propose.c` has the proposers but no fallback heuristic that
+runs by default.  When `POST_AUTOTUNE_TOP=0` (default), kernels
+just stay at LOOP-only — that's the §4.2 finding in
+`profiling_methodology.md`.  Adding a `hand_coded_optimizations`
+analogue is its own win, separate from BEAM.
+
 ### Insights I previously glossed over
 
 A first draft of this section had three bullets per system; the
