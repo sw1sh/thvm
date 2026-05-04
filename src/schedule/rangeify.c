@@ -1545,7 +1545,11 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     // inner>1 enabled (F-? -- view-aware pre-INDEX absorbed
     // broadcast strides; reduce_axis-search picks the right axis).
     if (red->n_src    != 1) RBAIL_PRE("reduce 0 n_src != 1");
-    u32 src_numel;
+    // src_numel + reduce_size are u64 because KProgOp.numel is now u64
+    // (post-Phase-3-conv-bwd-dInput fix; shapes that exceed 2^32 now
+    // store correctly).  Truncating to u32 here would re-introduce
+    // the divisibility mismatch the widening was meant to fix.
+    u64 src_numel;
     if (KSRC_IS_INPUT(red->src[0])) {
       u32 in_slot = KSRC_INDEX(red->src[0]);
       src_numel   = ke->input_numels[in_slot];
@@ -1555,10 +1559,33 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       src_numel = ke->program[src_idx].numel;
     }
     if (src_numel == 0 || src_numel < red->numel) RBAIL_PRE("reduce 0 src_numel underflow");
-    reduce_size = src_numel / red->numel;
-    if (reduce_size * red->numel != src_numel) RBAIL_PRE("reduce 0 src_numel not divisible");
-    if (reduce_size == 0) RBAIL_PRE("reduce 0 size 0");
-    if (reduce_size > 0xFFFFu) RBAIL_PRE("reduce 0 size > 65535");
+    u64 reduce_size_u64 = src_numel / red->numel;
+    if (reduce_size_u64 * red->numel != src_numel) {
+      if (getenv("THVM_RANGEIFY_BAIL")) {
+        fprintf(stderr,
+                "  reduce 0 divisibility: src_numel=%llu red->numel=%llu "
+                "reduce_size=%llu remainder=%llu src0_ndim=%u src0_dims=[",
+                (unsigned long long)src_numel,
+                (unsigned long long)red->numel,
+                (unsigned long long)reduce_size_u64,
+                (unsigned long long)(src_numel - reduce_size_u64 * red->numel),
+                red->src0_ndim);
+        for (u32 d = 0; d < red->src0_ndim; d++) {
+          fprintf(stderr, "%u%s", red->src0_dims[d],
+                  d + 1 == red->src0_ndim ? "" : ",");
+        }
+        fprintf(stderr, "] reduce_axes=[");
+        for (u32 d = 0; d < red->n_reduce_axes; d++) {
+          fprintf(stderr, "%u%s", red->reduce_axes[d],
+                  d + 1 == red->n_reduce_axes ? "" : ",");
+        }
+        fprintf(stderr, "]\n");
+      }
+      RBAIL_PRE("reduce 0 src_numel not divisible");
+    }
+    if (reduce_size_u64 == 0) RBAIL_PRE("reduce 0 size 0");
+    if (reduce_size_u64 > 0xFFFFu) RBAIL_PRE("reduce 0 size > 65535");
+    reduce_size = (u32)reduce_size_u64;     // safe: bounded above
     if (red->n_reduce_axes > 0 && red->n_reduce_axes <= MAX_DIM
         && red->src0_ndim > 0 && red->src0_ndim <= MAX_DIM) {
       u64 meta_size = 1;

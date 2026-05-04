@@ -1484,7 +1484,7 @@ static u32 src_dtype(KernelEntry *ke, u32 src_idx) {
   return KSRC_IS_INPUT(src_idx) ? ke->input_dtypes[KSRC_INDEX(src_idx)]
                                  : ke->program[src_idx].dtype;
 }
-static u32 src_numel(KernelEntry *ke, u32 src_idx) {
+static u64 src_numel(KernelEntry *ke, u32 src_idx) {
   return KSRC_IS_INPUT(src_idx) ? ke->input_numels[KSRC_INDEX(src_idx)]
                                  : ke->program[src_idx].numel;
 }
@@ -1714,7 +1714,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
     p->opcode = (u8)op;
-    u32 ln = src_numel(ke, li), rn = src_numel(ke, ri);
+    u64 ln = src_numel(ke, li), rn = src_numel(ke, ri);
     p->numel  = (ln >= rn) ? ln : rn;
     p->dtype  = src_dtype(ke, li);
     p->n_src  = 2;
@@ -1757,8 +1757,10 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     if (!term_shape_in(heap_read(loc), 0, &src_shape)) return VISIT_BAIL;
     Shape out_shape = {0};
     if (!term_shape_in(t, 0, &out_shape)) return VISIT_BAIL;
-    u32 out_numel = 1;
-    for (u32 i = 0; i < out_shape.ndim; i++) out_numel *= out_shape.dims[i];
+    // KProgOp.numel is u64 (so big conv-bwd-dInput shapes don't overflow);
+    // accumulate in u64 too so the multiply can't lose high bits.
+    u64 out_numel = 1;
+    for (u32 i = 0; i < out_shape.ndim; i++) out_numel *= (u64)out_shape.dims[i];
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
     p->opcode    = op;
@@ -1811,12 +1813,12 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     if (!term_shape_in(heap_read(loc), 0, &src_shape)) return VISIT_BAIL;
     // Output shape: src.dim[i] + b_i + e_i per axis.
     Shape out_shape = src_shape;
-    u32   out_numel = 1;
+    u64   out_numel = 1;
     for (u32 i = 0; i < src_shape.ndim; i++) {
       u32 b = (u32)term_val(heap_read(loc + 2 + 2 * i));
       u32 e = (u32)term_val(heap_read(loc + 3 + 2 * i));
       out_shape.dims[i] = src_shape.dims[i] + b + e;
-      out_numel        *= out_shape.dims[i];
+      out_numel        *= (u64)out_shape.dims[i];
     }
     KProgOp *p = &ke->program[ke->n_ops++];
     memset(p, 0, sizeof(*p));
@@ -1915,7 +1917,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     // axis IS innermost.  Compute inner from the source shape.
     Shape src_shape = {0};
     u32 inner = 1;
-    u32 src_numel_total = src_numel(ke, src_idx);
+    u64 src_numel_total = src_numel(ke, src_idx);
     if (term_shape_in(heap_read(loc), 0, &src_shape)) {
       for (u32 i = axis + 1; i < src_shape.ndim; i++) inner *= src_shape.dims[i];
     }
@@ -1923,7 +1925,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     // output): src_numel / axis_size.  axis_size = src_shape.dims[axis]
     // when shape is known; otherwise fall back to the kernel's
     // output_numel (root-REDUCE case).
-    u32 reduce_numel = ke->output_numel;
+    u64 reduce_numel = ke->output_numel;
     if (src_shape.ndim > axis) {
       u32 axis_size = src_shape.dims[axis] ? src_shape.dims[axis] : 1;
       reduce_numel = src_numel_total / axis_size;

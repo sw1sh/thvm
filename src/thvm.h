@@ -517,7 +517,15 @@ typedef struct {
                                    //   0 = unknown / unused
   u32   src[MAX_UOP_SRC];          // KSRC_AS_INPUT(n) or program index
   u32   arg;                       // CONST bits, REDUCE kind+axis, ...
-  u32   numel;                     // output numel (for broadcast detection)
+  u64   numel;                     // output numel (for broadcast detection).
+                                   // Widened from u32 to u64 so kernel
+                                   // shapes whose product exceeds 2^32
+                                   // (e.g. BS=512 conv-bwd dInput at
+                                   // [32,800,204800] = 5.24e9 elements)
+                                   // store the correct count instead of
+                                   // overflowing (5.24e9 mod 2^32 =
+                                   // 947912704), which broke the reduce-
+                                   // shape divisibility check in rangeify.
   u32   src0_dims[MAX_DIM];        // per-axis dims of source slot 0
                                    // (only meaningful when src0_ndim > 0;
                                    // used by axis-aware EXPAND in v1, can

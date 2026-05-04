@@ -287,7 +287,7 @@ typedef struct {
   u32  axis_end;
   u32  inner;
   u32  axis_size;
-  u32  out_numel;
+  u64  out_numel;
   u8   src_ndim;
   u8   out_ndim;
   u8   n_reduce_axes;
@@ -296,10 +296,15 @@ typedef struct {
   u8   reduce_axes[MAX_DIM];
 } ReduceChainInfo;
 
-static u32 shape_numel_u32(Shape const *s) {
+// Returns u64 so shapes whose product exceeds 2^32 (e.g. BS=512
+// conv-bwd dInput at [32,800,204800] = 5.24e9 elements) don't get
+// truncated.  The cast-to-u32 it formerly performed silently
+// overflowed; callers now read u64 and gate u32-typed downstream
+// fields explicitly.
+static u64 shape_numel_u32(Shape const *s) {
   u64 n = 1;
-  for (u32 i = 0; i < s->ndim; i++) n *= s->dims[i];
-  return (u32)n;
+  for (u32 i = 0; i < s->ndim; i++) n *= (u64)s->dims[i];
+  return n;
 }
 
 // Collapses a chain of same-kind reductions into the equivalent
@@ -392,7 +397,7 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
   out->axis_end   = max_axis + 1;
   out->inner      = (u32)inner;
   out->axis_size  = (u32)axis_size;
-  out->out_numel  = (u32)out_numel;
+  out->out_numel  = out_numel;
   out->src_ndim   = (u8)src_shape.ndim;
   out->out_ndim   = (u8)out_shape.ndim;
   out->n_reduce_axes = (u8)n;
