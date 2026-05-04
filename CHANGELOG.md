@@ -6,6 +6,30 @@ dated section.
 
 ## Unreleased
 
+### Diagnostic: BS=512 rangeify bail trace (commit `35f7ef5`)
+
+After converting silent `return 0` sites in
+`rangeify_try_lower_elementwise` to RBAIL_PRE messages, the BS=512
+canary's three rangeify-bailing kernels are visible in the trace:
+
+  kid=7  (29 ops, conv-bwd dInput): "reduce 0 src_numel not divisible"
+  kid=8  (13 ops, BN-grad chain):   "reduce 0 size > 65535"
+  kid=11 (22 ops, BN-grad chain):   "reduce 0 size > 65535"
+
+Documented (`91d1720`) the leverage analysis: Phase 3 movement-to-
+INDEX rules operate on B_INDEX edges *between* bufferize buffers,
+not on intra-kernel programs, so they don't directly affect kid=7's
+EXPAND-MUL-REDUCE pattern.  Closing the BS=512 gap needs:
+
+  (b1) shape-aware default axes lifting `> 65535` cap with
+       GROUP_REDUCE assignment for big reduce_size; targets
+       kid=8 / kid=11.
+  (b2) fixing kid=7's numel computation for the EXPAND output
+       (947912704 vs expected ~947912000, off by 704); the
+       divisibility guard rightly catches it, fix is upstream.
+
+Both are real architectural follow-ups, neither is whack-a-mole.
+
 ### Refactored: realize_classify retired -- bufferize is the schedule layer
 
 The `realize_classify` schedule layer is gone.  Every public symbol,
