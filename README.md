@@ -84,6 +84,15 @@ and full training pipelines:
 - `beautiful-mnist/` - tinygrad-style 32->64 conv arch (forward only)
 - `mlp-mnist/`       - dense MLP forward
 - `_bench/`          - per-step wall-time + memory baselines
+
+Cross-framework benchmarks live at the repo root in `bench/`:
+
+- `bench/bench_tinygrad.py` - tinygrad TinyJit beautiful_mnist train step
+- `bench/bench_torch.py`    - PyTorch MPS equivalent (eager + torch.compile)
+- `bench/bench_mlx.py`      - MLX equivalent
+
+See `bench/README.md` for invocation; results in
+`docs/plans/profiling_methodology.md` §4.6.
 - IC primitives: `church-1/`, `dup-sup-annihilate/`, `era-app/`,
   `id-app-era/`, `identity/`, `k-combinator/`, `nested-apps/`,
   `sup-of-eras/`
