@@ -130,6 +130,34 @@ test` green:
   metric: kid=6 / kid=9 lift to metal-tile, total wall drops to
   ~150ms).
 
+## Status (2026-05-04 -- chain-reduce activated)
+
+**Chain-reduce body emit is live** under `THVM_RANGEIFY_MULTI_REDUCE=1`.
+Per-region input scope tracking, per-reduce range emission, and per-
+region LOAD addressing are wired through.  The gate's compat check
+and the body-emit guard are both lifted (only the env-gated `> 1
+reduce` PRE-bail remains so default behavior is unchanged).
+
+Canary numbers (BS=128 beautiful-mnist train, WARMUP=1 N_STEPS=1):
+
+| Setting | Warmup | Timed step | Notes |
+|---|---|---|---|
+| chain off (baseline) | 1801ms | 681ms | kid=6 metal-op 266ms, kid=9 metal-op 353ms |
+| chain on | 1561ms | 553ms | kid=6 metal-op 7ms (38x faster), kid=9 still 419ms (RESHAPE-V bail) |
+
+BS=32 unchanged (31.3ms vs 31.4ms; no chain-reduce kernels at this BS).
+
+The 19% wall-time improvement comes from kid=6 (13 ops, 2 chain
+reduces) getting handled by rangeify -- it gains tile-jit autotune
+options (TOpt[GROUP,3,20] etc.) and runs ~38x faster despite still
+being categorised under the metal-op dispatch label.
+
+**Remaining bail** at BS=128: kid=9 (22 ops, 2 chain reduces, output
+numel 819200) bails mid-emit at `RESHAPE-V body emit failed` (in
+`emit_scalar_raw_for_rngs` for the chain-2-with-RESHAPE-V shape).
+Independent from the chain-reduce work; tracked as separate
+RESHAPE-V follow-up.
+
 ## Status (2026-05-03)
 
 **Groundwork landed.** All commits below kept `make test` at 274/274
@@ -151,6 +179,10 @@ implemented")` at the start of body emit.
 | `63f7038` | Populate `reduce_meta[1..N-1]` for chain reduces | Per-reduce metadata |
 | `3dc58fa` | `reduce_ranges_per_reduce[r][d]` + per-reduce REDUCE-op emit | Per-reduce range data |
 | `de5e4a2` | Body-emit `RBAIL_MID` guard for `n_reduces > 1` | Architectural seam |
+| `a5b70ed` | Per-region input scope tables (D-2.1) | 2D `input_*_in_region[r][slot]` w/ legacy aliases |
+| `3e7d172` | Per-region pre-scope LOAD emit (D-2.2) | Loop the LOAD emission per reduce r |
+| `1f21958` | Per-region rngs/load consumers (D-2.3) | All 4 sites read by `region[i]` |
+| `0e1efae` | Lift compat check + body-emit guard (D-3) | **Chain-reduce live** under env |
 
 **What's still pending for chain-reduce activation:**
 
