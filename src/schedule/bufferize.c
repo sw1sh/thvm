@@ -26,7 +26,7 @@ static u32    BUFFERIZE_INDEXES_LEN = 0;
 
 // Phase 3: one entry per named index rewrite rule, hit count
 // recomputed from the BUFFERIZE_INDEXES table after every
-// realize_classify pass.  Order is fixed so callers can address by
+// bufferize_classify pass.  Order is fixed so callers can address by
 // index.  Names mirror the plan's index-* family.
 typedef struct {
   char const *name;
@@ -642,7 +642,7 @@ fn void bufferize_unrealize(u64 loc) {
   // sets the current-rule pointer.  Calls outside that window
   // (e.g. the ROOT/MULTI/REDUCE seeding pass that runs before the
   // graph has been (re)snapshotted) would otherwise mutate stale
-  // state from a previous realize_classify.
+  // state from a previous bufferize_classify.
   if (BUFFERIZE_CURRENT_RULE == NULL) return;
   u32 idx = bufferize_find_by_loc(loc);
   if (idx == 0xFFFFFFFFu) return;

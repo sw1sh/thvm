@@ -2,9 +2,9 @@
 // pipeline depends on: per-op arity, elementwise predicates, and
 // best-effort shape/dtype inference.
 //
-// Pulled out of materialize.c so realize_classify and consumer_count
+// Pulled out of materialize.c so bufferize_classify and consumer_count
 // (which use uop_arity) can be included BEFORE materialize.c -- which
-// in turn calls realize_classify to build the boundary set before
+// in turn calls bufferize_classify to build the boundary set before
 // emitting kernels.
 
 fn u8 uop_arity(u8 op) {

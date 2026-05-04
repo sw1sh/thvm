@@ -1,6 +1,8 @@
-// schedule/realize_classify.c - decide which UOPs in a graph
-//                                must "realize" into a backing
-//                                buffer (a tinygrad CONTIGUOUS).
+// schedule/bufferize_classify.c - decide which UOPs in a graph
+//                                  must "realize" into a backing
+//                                  buffer (a tinygrad CONTIGUOUS).
+//                                  This is the seed/walk pass of
+//                                  the bufferize schedule IR.
 //
 // A UOp is first seeded as a boundary when ANY of:
 //   (a) it is the root the caller asked for,
@@ -33,7 +35,7 @@ u32     BUFFERIZE_NODES_LEN = 0;
 
 // Open-addressed hash table mapping loc -> BUFFERIZE_NODES index.
 // Without this, bufferize_info_find did a linear scan of BUFFERIZE_NODES,
-// which made realize_classify O(N^2) for the N UOPs in a recursive
+// which made bufferize_classify O(N^2) for the N UOPs in a recursive
 // training-loop graph and the dominant cost of long bound-w realizes.
 // Cap is the next power of two >= BUFFERIZE_NODES_CAP for cheap masking.
 #define BUFFERIZE_NODES_HASH_CAP (1u << 16)   // 64K slots, BUFFERIZE_NODES_CAP = 16K
@@ -152,7 +154,7 @@ static void bufferize_walk_rec(Term t, u8 *visited) {
   }
 }
 
-static int realize_dump_fusion_candidates_enabled(void);
+static int bufferize_dump_fusion_candidates_enabled(void);
 
 // Walk through layout-only wrappers (EXPAND/RESHAPE/PERMUTE) and
 // CAST/BITCAST to bottom out at a UOP_CONST.  Used by the
@@ -161,7 +163,7 @@ static int realize_dump_fusion_candidates_enabled(void);
 // `mean = reduce / N` lowers to `MUL(reduce, EXPAND(CONST(1/N)))` via
 // the WL Times / liftNumeric / broadcastScalar pipeline in Tensor.wl.
 // Recursion is bounded by the heap; in practice the wrapper depth is 1-2.
-static int realize_term_is_broadcast_of_const(Term t, u32 depth) {
+static int bufferize_term_is_broadcast_of_const(Term t, u32 depth) {
   if (depth > 8) return 0;
   t = term_resolve(t);
   if (term_tag(t) != TAG_UOP) return 0;
@@ -171,7 +173,7 @@ static int realize_term_is_broadcast_of_const(Term t, u32 depth) {
   if (op == UOP_EXPAND || op == UOP_RESHAPE || op == UOP_PERMUTE
    || op == UOP_CAST   || op == UOP_BITCAST) {
     Term src = term_resolve(heap_read(loc));
-    return realize_term_is_broadcast_of_const(src, depth + 1);
+    return bufferize_term_is_broadcast_of_const(src, depth + 1);
   }
   return 0;
 }
@@ -179,7 +181,7 @@ static int realize_term_is_broadcast_of_const(Term t, u32 depth) {
 // Walk the heap looking for the unique UOp parent of `child_loc`.
 // Returns the parent's loc, or 0 if there are zero or 2+ parents.
 // Used by the softmax-relaxation pass to confirm the consumer chain.
-static u64 realize_unique_uop_parent(u64 child_loc) {
+static u64 bufferize_unique_uop_parent(u64 child_loc) {
   u64 found = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     u64 ploc = BUFFERIZE_NODES[i].loc;
@@ -208,7 +210,7 @@ static u64 realize_unique_uop_parent(u64 child_loc) {
 // PERMUTE), or an ALU op whose other operand is a (possibly broadcast)
 // constant.  `cur` is the loc of the current node; the predicate must
 // inspect the node's children for the ALU case.
-static int realize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
+static int bufferize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
   if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
    || pop == UOP_EXP2 || pop == UOP_LOG2
    || pop == UOP_RESHAPE || pop == UOP_PERMUTE) {
@@ -217,8 +219,8 @@ static int realize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
   if (pop == UOP_ADD || pop == UOP_MUL) {
     Term ca = term_resolve(heap_read(cur + 0));
     Term cb = term_resolve(heap_read(cur + 1));
-    if (realize_term_is_broadcast_of_const(ca, 0)) return 1;
-    if (realize_term_is_broadcast_of_const(cb, 0)) return 1;
+    if (bufferize_term_is_broadcast_of_const(ca, 0)) return 1;
+    if (bufferize_term_is_broadcast_of_const(cb, 0)) return 1;
   }
   return 0;
 }
@@ -228,26 +230,26 @@ static int realize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
 // at the top of the predicate (when the reduce itself has fan-out)
 // and at intermediate hops (when an internal node like the BN-mean
 // MUL is shared between forward and backward branches).
-static int realize_chain_walk_all_parents_is_broadcast(
+static int bufferize_chain_walk_all_parents_is_broadcast(
     u64 child_loc, u32 hops_left);
 
 // Walk a single chain starting from `parent_loc` and confirm it
 // bottoms out at EXPAND.  When the current node is multi-consumer,
 // recursively confirm every parent branch ends at EXPAND.  Bounded
 // by `hops_left` to avoid pathological recursion.
-static int realize_chain_walk_is_broadcast(u64 parent_loc, u32 hops_left) {
+static int bufferize_chain_walk_is_broadcast(u64 parent_loc, u32 hops_left) {
   u64 cur = parent_loc;
   while (hops_left > 0) {
     u32 idx = bufferize_info_find(cur);
     if (idx == 0xFFFFFFFFu) return 0;
     u8 pop = BUFFERIZE_NODES[idx].op;
     if (pop == UOP_EXPAND) return 1;
-    if (!realize_chain_hop_is_scalar_preserving(cur, pop)) return 0;
-    u64 next = realize_unique_uop_parent(cur);
+    if (!bufferize_chain_hop_is_scalar_preserving(cur, pop)) return 0;
+    u64 next = bufferize_unique_uop_parent(cur);
     if (next == 0) {
       // Multi-consumer intermediate: descend into every parent.
       // Each parent's chain must independently end at EXPAND.
-      return realize_chain_walk_all_parents_is_broadcast(cur, hops_left - 1);
+      return bufferize_chain_walk_all_parents_is_broadcast(cur, hops_left - 1);
     }
     cur = next;
     hops_left--;
@@ -255,7 +257,7 @@ static int realize_chain_walk_is_broadcast(u64 parent_loc, u32 hops_left) {
   return 0;
 }
 
-static int realize_chain_walk_all_parents_is_broadcast(
+static int bufferize_chain_walk_all_parents_is_broadcast(
     u64 child_loc, u32 hops_left) {
   if (hops_left == 0) return 0;
   u32 n_parents = 0;
@@ -272,14 +274,14 @@ static int realize_chain_walk_all_parents_is_broadcast(
       }
     }
     if (!hits) continue;
-    if (!realize_chain_walk_is_broadcast(ploc, hops_left)) return 0;
+    if (!bufferize_chain_walk_is_broadcast(ploc, hops_left)) return 0;
     n_parents++;
   }
   return n_parents > 0;
 }
 
-// realize_reduce_consumer_is_broadcast_chain body but starts at
-// `parent` instead of finding it via realize_unique_uop_parent, so
+// bufferize_reduce_consumer_is_broadcast_chain body but starts at
+// `parent` instead of finding it via bufferize_unique_uop_parent, so
 // the multi-parent rule can call it once per branch.
 //
 // Scalar-preserving chain ops:
@@ -287,14 +289,14 @@ static int realize_chain_walk_all_parents_is_broadcast(
 // - BINARY ALU with broadcast-of-CONST sibling: ADD/MUL where the
 //   other operand is a CONST or `EXPAND(CONST)` keeps the post-reduce
 //   shape.  The WL Times UpValue lowers `t / N` to `MUL(t, EXPAND(CONST))`,
-//   so the wrapper-walk via realize_term_is_broadcast_of_const is what
+//   so the wrapper-walk via bufferize_term_is_broadcast_of_const is what
 //   catches BatchNorm-style mean / variance reductions.
 // - Pure movement: RESHAPE/PERMUTE do not change scalar values; they only
 //   relayout the producer's output.  Critical for BatchNorm-style chains:
 //   `REDUCE_SUM -> MUL(EXPAND(CONST 1/N)) -> RESHAPE({1,C,1,1}) -> EXPAND({B,C,H,W})`
 //   where the RESHAPE prepares the broadcast axes before the EXPAND.
-static int realize_chain_from_parent_is_broadcast(u64 parent_loc) {
-  return realize_chain_walk_is_broadcast(parent_loc, 8);
+static int bufferize_chain_from_parent_is_broadcast(u64 parent_loc) {
+  return bufferize_chain_walk_is_broadcast(parent_loc, 8);
 }
 
 // Walk a REDUCE's consumer chain and return 1 iff every hop is
@@ -308,8 +310,8 @@ static int realize_chain_from_parent_is_broadcast(u64 parent_loc) {
 // check across all parents - every branch must independently end at
 // EXPAND.  This is what unblocks BN-mean (forward+backward share the
 // {C}-shape mean, both reach EXPAND through different RESHAPE branches).
-static int realize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
-  return realize_chain_walk_all_parents_is_broadcast(reduce_loc, 8);
+static int bufferize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
+  return bufferize_chain_walk_all_parents_is_broadcast(reduce_loc, 8);
 }
 
 // Phase C-2 relaxation: a REDUCE whose single consumer is an ALU
@@ -322,11 +324,11 @@ static int realize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
 // here the chain ends at the realize root, not at a broadcast.
 // Returns 1 only when the consumer chain reaches the realize root
 // (so the whole computation collapses into one kernel).
-static int realize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc) {
+static int bufferize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc) {
   u64 cur = reduce_loc;
   for (u32 hops = 0; hops < 8; hops++) {
     if (cur == root_loc) return 1;   // chain reaches the realize root
-    u64 parent = realize_unique_uop_parent(cur);
+    u64 parent = bufferize_unique_uop_parent(cur);
     if (parent == 0) return 0;
     u32 idx = bufferize_info_find(parent);
     if (idx == 0xFFFFFFFFu) return 0;
@@ -356,14 +358,14 @@ static int realize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc) 
   return 0;
 }
 
-static int realize_metal_tile_fanin_cap_enabled(void) {
+static int bufferize_metal_tile_fanin_cap_enabled(void) {
   char const *backend = getenv("THVM_BACKEND");
   char const *tile    = getenv("THVM_TILE");
   return backend != NULL && strcmp(backend, "metal") == 0
       && tile != NULL && tile[0] == '1';
 }
 
-static u32 realize_metal_tile_fanin_cap(void) {
+static u32 bufferize_metal_tile_fanin_cap(void) {
   char const *e = getenv("THVM_METAL_FUSION_MAX_INPUTS");
   if (e != NULL && e[0] != '\0') {
     unsigned long v = strtoul(e, NULL, 10);
@@ -374,27 +376,27 @@ static u32 realize_metal_tile_fanin_cap(void) {
   return 24;
 }
 
-static int realize_fanin_split_child_op(u8 op) {
+static int bufferize_fanin_split_child_op(u8 op) {
   return uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
       || op == UOP_CAST    || op == UOP_BITCAST
       || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
       || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
 }
 
-static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
+static u32 bufferize_fanin_uop_count(u64 loc, u64 boundary_root,
                                    u32 cap, u32 *hits);
 
-static u32 realize_fanin_term_count(Term t, u64 boundary_root,
+static u32 bufferize_fanin_term_count(Term t, u64 boundary_root,
                                     u32 cap, u32 *hits) {
   t = term_resolve(t);
   if (term_tag(t) == TAG_TEN) return 1;
   if (term_tag(t) == TAG_VAR) return 1;
   if (term_tag(t) != TAG_UOP) return 0;
   if (term_ext(t) == UOP_KERNEL) return 1;
-  return realize_fanin_uop_count(term_val(t), boundary_root, cap, hits);
+  return bufferize_fanin_uop_count(term_val(t), boundary_root, cap, hits);
 }
 
-static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
+static u32 bufferize_fanin_uop_count(u64 loc, u64 boundary_root,
                                    u32 cap, u32 *hits) {
   if (loc >= HEAP_NEXT) return 1;
   u32 idx = bufferize_info_find(loc);
@@ -410,7 +412,7 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
   for (u8 i = 0; i < ar; i++) {
     child_idx[i] = 0xFFFFFFFFu;
     Term child = term_resolve(heap_read(loc + i));
-    child_count[i] = realize_fanin_term_count(child, boundary_root,
+    child_count[i] = bufferize_fanin_term_count(child, boundary_root,
                                               cap, hits);
     total += child_count[i];
     if (term_tag(child) == TAG_UOP && term_ext(child) != UOP_KERNEL) {
@@ -425,7 +427,7 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
       u32 cidx = child_idx[i];
       if (cidx == 0xFFFFFFFFu) continue;
       if (child_count[i] <= best_size) continue;
-      if (!realize_fanin_split_child_op(BUFFERIZE_NODES[cidx].op)) continue;
+      if (!bufferize_fanin_split_child_op(BUFFERIZE_NODES[cidx].op)) continue;
       best      = i;
       best_size = child_count[i];
     }
@@ -439,26 +441,26 @@ static u32 realize_fanin_uop_count(u64 loc, u64 boundary_root,
   return total;
 }
 
-static u32 realize_rule_metal_tile_fanin_cap(Term root) {
-  if (!realize_metal_tile_fanin_cap_enabled()) return 0;
+static u32 bufferize_rule_metal_tile_fanin_cap(Term root) {
+  if (!bufferize_metal_tile_fanin_cap_enabled()) return 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) == UOP_KERNEL) return 0;
 
-  u32 cap = realize_metal_tile_fanin_cap();
+  u32 cap = bufferize_metal_tile_fanin_cap();
   u32 hits = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     if (!BUFFERIZE_NODES[i].realized) continue;
-    realize_fanin_uop_count(BUFFERIZE_NODES[i].loc, BUFFERIZE_NODES[i].loc,
+    bufferize_fanin_uop_count(BUFFERIZE_NODES[i].loc, BUFFERIZE_NODES[i].loc,
                             cap, &hits);
   }
   return hits;
 }
 
-static int realize_op_is_movement(u8 op) {
+static int classify_op_is_movement(u8 op) {
   return op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
       || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP;
 }
 
-static u64 realize_shape_numel(Shape const *s) {
+static u64 classify_shape_numel(Shape const *s) {
   if (s == NULL || s->ndim == 0) {
     return 0;
   }
@@ -469,7 +471,7 @@ static u64 realize_shape_numel(Shape const *s) {
   return n;
 }
 
-static int realize_subtree_has_reduce(Term t, u32 depth) {
+static int bufferize_subtree_has_reduce(Term t, u32 depth) {
   if (depth > 64) {
     return 1;
   }
@@ -491,48 +493,48 @@ static int realize_subtree_has_reduce(Term t, u32 depth) {
   }
   u8 ar = uop_arity(op);
   for (u8 i = 0; i < ar; i++) {
-    if (realize_subtree_has_reduce(heap_read(loc + i), depth + 1)) {
+    if (bufferize_subtree_has_reduce(heap_read(loc + i), depth + 1)) {
       return 1;
     }
   }
   return 0;
 }
 
-static int realize_inline_multiconsumer_expand_enabled(void) {
-  if (!realize_metal_tile_fanin_cap_enabled()) {
+static int bufferize_inline_multiconsumer_expand_enabled(void) {
+  if (!bufferize_metal_tile_fanin_cap_enabled()) {
     return 0;
   }
   char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_EXPAND");
   return e == NULL || e[0] != '0';
 }
 
-static int realize_inline_multiconsumer_pure_enabled(void) {
-  if (!realize_metal_tile_fanin_cap_enabled()) {
+static int bufferize_inline_multiconsumer_pure_enabled(void) {
+  if (!bufferize_metal_tile_fanin_cap_enabled()) {
     return 0;
   }
   char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_PURE");
   return e != NULL && e[0] == '1';
 }
 
-static int realize_rangeify_enabled(void);
+static int bufferize_rangeify_enabled(void);
 
-static int realize_inline_reduce_fanout_enabled(void) {
-  if (!realize_metal_tile_fanin_cap_enabled() || !realize_rangeify_enabled()) {
+static int bufferize_inline_reduce_fanout_enabled(void) {
+  if (!bufferize_metal_tile_fanin_cap_enabled() || !bufferize_rangeify_enabled()) {
     return 0;
   }
   char const *e = getenv("THVM_INLINE_REDUCE_FANOUT");
   return e != NULL && e[0] == '1';
 }
 
-static int realize_remove_removable_bufferize_enabled(void) {
-  if (!realize_metal_tile_fanin_cap_enabled() || !realize_rangeify_enabled()) {
+static int bufferize_remove_removable_bufferize_enabled(void) {
+  if (!bufferize_metal_tile_fanin_cap_enabled() || !bufferize_rangeify_enabled()) {
     return 0;
   }
   char const *e = getenv("THVM_REMOVE_REMOVABLE_BUFFERIZE");
   return e == NULL || e[0] != '0';
 }
 
-static u64 realize_inline_multiconsumer_pure_min_numel(void) {
+static u64 bufferize_inline_multiconsumer_pure_min_numel(void) {
   char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_PURE_MIN_NUMEL");
   if (e != NULL && e[0] != '\0') {
     unsigned long long v = strtoull(e, NULL, 10);
@@ -543,7 +545,7 @@ static u64 realize_inline_multiconsumer_pure_min_numel(void) {
   return 65536;
 }
 
-static u64 realize_inline_reduce_fanout_min_numel(void) {
+static u64 bufferize_inline_reduce_fanout_min_numel(void) {
   char const *e = getenv("THVM_INLINE_REDUCE_FANOUT_MIN_NUMEL");
   if (e != NULL && e[0] != '\0') {
     unsigned long long v = strtoull(e, NULL, 10);
@@ -554,7 +556,7 @@ static u64 realize_inline_reduce_fanout_min_numel(void) {
   return 65536;
 }
 
-static u32 realize_remove_removable_bufferize_max_ops(void) {
+static u32 bufferize_remove_removable_bufferize_max_ops(void) {
   char const *e = getenv("THVM_REMOVE_BUFFERIZE_MAX_OPS");
   if (e != NULL && e[0] != '\0') {
     unsigned long v = strtoul(e, NULL, 10);
@@ -565,7 +567,7 @@ static u32 realize_remove_removable_bufferize_max_ops(void) {
   return 32;
 }
 
-static u32 realize_remove_removable_bufferize_max_consumers(void) {
+static u32 bufferize_remove_removable_bufferize_max_consumers(void) {
   char const *e = getenv("THVM_REMOVE_BUFFERIZE_MAX_CONSUMERS");
   if (e != NULL && e[0] != '\0') {
     unsigned long v = strtoul(e, NULL, 10);
@@ -576,14 +578,14 @@ static u32 realize_remove_removable_bufferize_max_consumers(void) {
   return 8;
 }
 
-static int realize_dump_fusion_candidates_enabled(void) {
+static int bufferize_dump_fusion_candidates_enabled(void) {
   char const *e = getenv("DUMP_FUSION_REWRITE_CANDIDATES");
   return e != NULL && e[0] == '1';
 }
 
-static u32 realize_rule_inline_large_expand_fanout(Term root) {
+static u32 bufferize_rule_inline_large_expand_fanout(Term root) {
   (void)root;
-  if (!realize_inline_multiconsumer_expand_enabled()) {
+  if (!bufferize_inline_multiconsumer_expand_enabled()) {
     return 0;
   }
   u32 hits = 0;
@@ -600,12 +602,12 @@ static u32 realize_rule_inline_large_expand_fanout(Term root) {
         || !term_shape_in(src, 0, &src_shape)) {
       continue;
     }
-    u64 out_numel = realize_shape_numel(&out_shape);
-    u64 src_numel = realize_shape_numel(&src_shape);
+    u64 out_numel = classify_shape_numel(&out_shape);
+    u64 src_numel = classify_shape_numel(&src_shape);
     if (src_numel == 0 || out_numel < src_numel * 8) {
       continue;
     }
-    if (realize_subtree_has_reduce(src, 0)) {
+    if (bufferize_subtree_has_reduce(src, 0)) {
       continue;
     }
     hits++;
@@ -614,15 +616,15 @@ static u32 realize_rule_inline_large_expand_fanout(Term root) {
   return hits;
 }
 
-static int realize_recompute_pure_op(u8 op) {
+static int bufferize_recompute_pure_op(u8 op) {
   return op == UOP_CONST || op == UOP_LOAD
       || op == UOP_CAST  || op == UOP_BITCAST
       || uop_is_unary_elementwise(op)
       || uop_is_binary_elementwise(op)
-      || realize_op_is_movement(op);
+      || classify_op_is_movement(op);
 }
 
-static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
+static int bufferize_subtree_is_pure_recomputable(Term t, u64 root_loc,
                                                  u32 depth,
                                                  int *has_movement) {
   if (depth > 96) {
@@ -640,10 +642,10 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
   if (op == UOP_KERNEL) {
     return 1;
   }
-  if (!realize_recompute_pure_op(op) || op == UOP_REDUCE) {
+  if (!bufferize_recompute_pure_op(op) || op == UOP_REDUCE) {
     return 0;
   }
-  if (realize_op_is_movement(op)) {
+  if (classify_op_is_movement(op)) {
     *has_movement = 1;
   }
 
@@ -657,7 +659,7 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
 
   u8 ar = uop_arity(op);
   for (u8 i = 0; i < ar; i++) {
-    if (!realize_subtree_is_pure_recomputable(heap_read(loc + i),
+    if (!bufferize_subtree_is_pure_recomputable(heap_read(loc + i),
                                               root_loc, depth + 1,
                                               has_movement)) {
       return 0;
@@ -666,7 +668,7 @@ static int realize_subtree_is_pure_recomputable(Term t, u64 root_loc,
   return 1;
 }
 
-static int realize_parent_uses_child(u64 parent_loc, u64 child_loc) {
+static int bufferize_parent_uses_child(u64 parent_loc, u64 child_loc) {
   u32 pidx = bufferize_info_find(parent_loc);
   if (pidx == 0xFFFFFFFFu) {
     return 0;
@@ -687,7 +689,7 @@ typedef struct {
   int has_movement;
 } RealizeRecomputeStats;
 
-static int realize_subtree_recompute_stats(Term t,
+static int bufferize_subtree_recompute_stats(Term t,
                                            u64 root_loc,
                                            u32 depth,
                                            RealizeRecomputeStats *stats) {
@@ -708,7 +710,7 @@ static int realize_subtree_recompute_stats(Term t,
     stats->inputs++;
     return 1;
   }
-  if (op == UOP_REDUCE || !realize_recompute_pure_op(op)) {
+  if (op == UOP_REDUCE || !bufferize_recompute_pure_op(op)) {
     return 0;
   }
 
@@ -721,7 +723,7 @@ static int realize_subtree_recompute_stats(Term t,
     }
   }
 
-  if (realize_op_is_movement(op)) {
+  if (classify_op_is_movement(op)) {
     stats->has_movement = 1;
   }
   if (op != UOP_CONST && op != UOP_LOAD) {
@@ -730,7 +732,7 @@ static int realize_subtree_recompute_stats(Term t,
 
   u8 ar = uop_arity(op);
   for (u8 i = 0; i < ar; i++) {
-    if (!realize_subtree_recompute_stats(heap_read(loc + i),
+    if (!bufferize_subtree_recompute_stats(heap_read(loc + i),
                                          root_loc, depth + 1,
                                          stats)) {
       return 0;
@@ -739,7 +741,7 @@ static int realize_subtree_recompute_stats(Term t,
   return 1;
 }
 
-static int realize_parent_chain_reaches_reduce(u64 child_loc, u32 depth) {
+static int bufferize_parent_chain_reaches_reduce(u64 child_loc, u32 depth) {
   if (depth > 32) {
     return 1;
   }
@@ -749,32 +751,32 @@ static int realize_parent_chain_reaches_reduce(u64 child_loc, u32 depth) {
       continue;
     }
     u8 pop = BUFFERIZE_NODES[i].op;
-    if (!realize_parent_uses_child(ploc, child_loc)) {
+    if (!bufferize_parent_uses_child(ploc, child_loc)) {
       continue;
     }
     if (pop == UOP_REDUCE) {
       return 1;
     }
-    if (realize_parent_chain_reaches_reduce(ploc, depth + 1)) {
+    if (bufferize_parent_chain_reaches_reduce(ploc, depth + 1)) {
       return 1;
     }
   }
   return 0;
 }
 
-static u32 realize_rule_inline_pure_fanout_probe(Term root) {
+static u32 bufferize_rule_inline_pure_fanout_probe(Term root) {
   (void)root;
-  if (!realize_inline_multiconsumer_pure_enabled()) {
+  if (!bufferize_inline_multiconsumer_pure_enabled()) {
     return 0;
   }
-  u64 min_numel = realize_inline_multiconsumer_pure_min_numel();
+  u64 min_numel = bufferize_inline_multiconsumer_pure_min_numel();
   u32 hits = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
     if (!info->realized || info->consumer_count < 2) {
       continue;
     }
-    if (!realize_recompute_pure_op(info->op)) {
+    if (!bufferize_recompute_pure_op(info->op)) {
       continue;
     }
     Term self = term_new(0, TAG_UOP, info->op, info->loc);
@@ -782,37 +784,37 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
     if (!term_shape_in(self, 0, &out_shape)) {
       continue;
     }
-    if (realize_shape_numel(&out_shape) < min_numel) {
+    if (classify_shape_numel(&out_shape) < min_numel) {
       continue;
     }
     int has_movement = 0;
-    if (!realize_subtree_is_pure_recomputable(self, info->loc, 0,
+    if (!bufferize_subtree_is_pure_recomputable(self, info->loc, 0,
                                               &has_movement)) {
       continue;
     }
     if (!has_movement) {
       continue;
     }
-    if (realize_parent_chain_reaches_reduce(info->loc, 0)) {
-      if (realize_dump_fusion_candidates_enabled()) {
+    if (bufferize_parent_chain_reaches_reduce(info->loc, 0)) {
+      if (bufferize_dump_fusion_candidates_enabled()) {
         fprintf(stderr,
                 "bufferize_rewrite_skip rule=inline-pure-fanout-probe"
                 " reason=reduce-parent loc=%llu op=%u numel=%llu"
                 " consumers=%u\n",
                 (unsigned long long)info->loc,
                 (unsigned)info->op,
-                (unsigned long long)realize_shape_numel(&out_shape),
+                (unsigned long long)classify_shape_numel(&out_shape),
                 (unsigned)info->consumer_count);
       }
       continue;
     }
-    if (realize_dump_fusion_candidates_enabled()) {
+    if (bufferize_dump_fusion_candidates_enabled()) {
       fprintf(stderr,
               "bufferize_rewrite_hit rule=inline-pure-fanout-probe"
               " loc=%llu op=%u numel=%llu consumers=%u\n",
               (unsigned long long)info->loc,
               (unsigned)info->op,
-              (unsigned long long)realize_shape_numel(&out_shape),
+              (unsigned long long)classify_shape_numel(&out_shape),
               (unsigned)info->consumer_count);
     }
     hits++;
@@ -821,7 +823,7 @@ static u32 realize_rule_inline_pure_fanout_probe(Term root) {
   return hits;
 }
 
-static int realize_reduce_fanout_consumers_ok(u64 reduce_loc) {
+static int bufferize_reduce_fanout_consumers_ok(u64 reduce_loc) {
   u32 consumers = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     u64 ploc = BUFFERIZE_NODES[i].loc;
@@ -842,22 +844,22 @@ static int realize_reduce_fanout_consumers_ok(u64 reduce_loc) {
       continue;
     }
     consumers++;
-    if (pop == UOP_REDUCE || !realize_recompute_pure_op(pop)) {
+    if (pop == UOP_REDUCE || !bufferize_recompute_pure_op(pop)) {
       return 0;
     }
-    if (realize_parent_chain_reaches_reduce(ploc, 0)) {
+    if (bufferize_parent_chain_reaches_reduce(ploc, 0)) {
       return 0;
     }
   }
   return consumers >= 2;
 }
 
-static u32 realize_rule_inline_reduce_fanout(Term root) {
+static u32 bufferize_rule_inline_reduce_fanout(Term root) {
   (void)root;
-  if (!realize_inline_reduce_fanout_enabled()) {
+  if (!bufferize_inline_reduce_fanout_enabled()) {
     return 0;
   }
-  u64 min_numel = realize_inline_reduce_fanout_min_numel();
+  u64 min_numel = bufferize_inline_reduce_fanout_min_numel();
   u32 hits = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
@@ -870,10 +872,10 @@ static u32 realize_rule_inline_reduce_fanout(Term root) {
     if (!term_shape_in(self, 0, &out_shape)) {
       continue;
     }
-    if (realize_shape_numel(&out_shape) < min_numel) {
+    if (classify_shape_numel(&out_shape) < min_numel) {
       continue;
     }
-    if (!realize_reduce_fanout_consumers_ok(info->loc)) {
+    if (!bufferize_reduce_fanout_consumers_ok(info->loc)) {
       continue;
     }
     hits++;
@@ -900,7 +902,7 @@ static u32 realize_rule_inline_reduce_fanout(Term root) {
 //
 // Default-on; set THVM_BUFFERIZE_LIFT_MOVEMENT_REDUCE_GATE=0 to
 // restore the conservative pre-Phase-2 behaviour for bisecting.
-static int realize_lift_movement_reduce_gate_enabled(void) {
+static int bufferize_lift_movement_reduce_gate_enabled(void) {
   char const *e = getenv("THVM_BUFFERIZE_LIFT_MOVEMENT_REDUCE_GATE");
   return e == NULL ? 1 : (e[0] != '0');
 }
@@ -908,14 +910,14 @@ static int realize_lift_movement_reduce_gate_enabled(void) {
 static int bufferize_removable_consumers_ok(u64 loc,
                                                     int producer_has_movement,
                                                     u32 max_consumers) {
-  int gate_lifted = realize_lift_movement_reduce_gate_enabled();
+  int gate_lifted = bufferize_lift_movement_reduce_gate_enabled();
   u32 consumers = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     u64 ploc = BUFFERIZE_NODES[i].loc;
     if (ploc == loc) {
       continue;
     }
-    if (!realize_parent_uses_child(ploc, loc)) {
+    if (!bufferize_parent_uses_child(ploc, loc)) {
       continue;
     }
 
@@ -931,26 +933,26 @@ static int bufferize_removable_consumers_ok(u64 loc,
       }
       continue;
     }
-    if (!realize_recompute_pure_op(pop)) {
+    if (!bufferize_recompute_pure_op(pop)) {
       return 0;
     }
     if (producer_has_movement && !gate_lifted
-        && realize_parent_chain_reaches_reduce(ploc, 0)) {
+        && bufferize_parent_chain_reaches_reduce(ploc, 0)) {
       return 0;
     }
   }
   return consumers >= 2;
 }
 
-static u32 realize_rule_remove_removable_bufferize(Term root) {
+static u32 bufferize_rule_remove_removable_bufferize(Term root) {
   (void)root;
-  if (!realize_remove_removable_bufferize_enabled()) {
+  if (!bufferize_remove_removable_bufferize_enabled()) {
     return 0;
   }
 
   u32 hits = 0;
-  u32 max_ops = realize_remove_removable_bufferize_max_ops();
-  u32 max_consumers = realize_remove_removable_bufferize_max_consumers();
+  u32 max_ops = bufferize_remove_removable_bufferize_max_ops();
+  u32 max_consumers = bufferize_remove_removable_bufferize_max_consumers();
   for (u32 pass = 0; pass < 8; pass++) {
     u32 pass_hits = 0;
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
@@ -965,18 +967,18 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
                           | BUFFERIZE_REASON_FANIN_CAP)) != 0) {
         continue;
       }
-      if (!realize_recompute_pure_op(info->op) || info->op == UOP_REDUCE) {
+      if (!bufferize_recompute_pure_op(info->op) || info->op == UOP_REDUCE) {
         continue;
       }
 
       Term self = term_new(0, TAG_UOP, info->op, info->loc);
       RealizeRecomputeStats stats;
       memset(&stats, 0, sizeof(stats));
-      if (!realize_subtree_recompute_stats(self, info->loc, 0, &stats)) {
+      if (!bufferize_subtree_recompute_stats(self, info->loc, 0, &stats)) {
         continue;
       }
       if (stats.ops > max_ops) {
-        if (realize_dump_fusion_candidates_enabled()) {
+        if (bufferize_dump_fusion_candidates_enabled()) {
           fprintf(stderr,
                   "bufferize_rewrite_skip rule=remove-removable-bufferize"
                   " reason=op-budget loc=%llu op=%u ops=%u consumers=%u\n",
@@ -990,7 +992,7 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
       if (!bufferize_removable_consumers_ok(info->loc,
                                                     stats.has_movement,
                                                     max_consumers)) {
-        if (realize_dump_fusion_candidates_enabled()) {
+        if (bufferize_dump_fusion_candidates_enabled()) {
           fprintf(stderr,
                   "bufferize_rewrite_skip rule=remove-removable-bufferize"
                   " reason=consumer-legality loc=%llu op=%u ops=%u"
@@ -1004,7 +1006,7 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
         continue;
       }
 
-      if (realize_dump_fusion_candidates_enabled()) {
+      if (bufferize_dump_fusion_candidates_enabled()) {
         fprintf(stderr,
                 "bufferize_rewrite_hit rule=remove-removable-bufferize"
                 " loc=%llu op=%u ops=%u movement=%u consumers=%u\n",
@@ -1025,7 +1027,7 @@ static u32 realize_rule_remove_removable_bufferize(Term root) {
   return hits;
 }
 
-static int realize_inline_subtree_has_movement(Term t, u32 depth) {
+static int bufferize_inline_subtree_has_movement(Term t, u32 depth) {
   if (depth > 64) return 1;
   t = term_resolve(t);
   if (term_tag(t) != TAG_UOP) return 0;
@@ -1034,18 +1036,18 @@ static int realize_inline_subtree_has_movement(Term t, u32 depth) {
   u32 idx = bufferize_info_find(loc);
   if (idx != 0xFFFFFFFFu && BUFFERIZE_NODES[idx].realized) return 0;
   u8 op = term_ext(t);
-  if (realize_op_is_movement(op)) return 1;
+  if (classify_op_is_movement(op)) return 1;
   if (op == UOP_REDUCE) return 1;
   u8 ar = uop_arity(op);
   for (u8 i = 0; i < ar; i++) {
-    if (realize_inline_subtree_has_movement(heap_read(loc + i), depth + 1)) {
+    if (bufferize_inline_subtree_has_movement(heap_read(loc + i), depth + 1)) {
       return 1;
     }
   }
   return 0;
 }
 
-static int realize_reduce_chain_source_is_direct(Term t) {
+static int bufferize_reduce_chain_source_is_direct(Term t) {
   t = term_resolve(t);
   if (term_tag(t) == TAG_TEN || term_tag(t) == TAG_VAR) return 1;
   if (term_tag(t) != TAG_UOP) return 0;
@@ -1054,7 +1056,7 @@ static int realize_reduce_chain_source_is_direct(Term t) {
   return idx != 0xFFFFFFFFu && BUFFERIZE_NODES[idx].realized;
 }
 
-static u32 realize_reduce_count(void) {
+static u32 bufferize_reduce_count(void) {
   u32 n = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     if (BUFFERIZE_NODES[i].op == UOP_REDUCE) n++;
@@ -1079,10 +1081,10 @@ static u32 realize_reduce_count(void) {
 // dispatching via the slower per-op metal encoder instead of the
 // tile-jit path.  Returning the absorbing boundary's op lets the
 // rule gate inlining on the consumer being a non-REDUCE root.
-static u64 realize_absorbing_boundary(u64 start_loc, u32 hops_left) {
+static u64 bufferize_absorbing_boundary(u64 start_loc, u32 hops_left) {
   u64 cur = start_loc;
   while (hops_left > 0) {
-    u64 next = realize_unique_uop_parent(cur);
+    u64 next = bufferize_unique_uop_parent(cur);
     if (next == 0) return 0;
     u32 idx = bufferize_info_find(next);
     if (idx == 0xFFFFFFFFu) return 0;
@@ -1093,7 +1095,7 @@ static u64 realize_absorbing_boundary(u64 start_loc, u32 hops_left) {
   return 0;
 }
 
-static int realize_rangeify_enabled(void) {
+static int bufferize_rangeify_enabled(void) {
   char const *e = getenv("THVM_RANGEIFY");
   return e == NULL ? 1 : (e[0] != '0');
 }
@@ -1120,13 +1122,13 @@ static int realize_rangeify_enabled(void) {
 // cost by 50000:1.  Set `THVM_BUFFERIZE_REMOVE_BY_SCORE=0` to
 // disable; tunables `_THRESHOLD`, `_MAX_OPS`, `_MAX_CONSUMERS`
 // override the defaults for measurement work.
-static int realize_remove_by_cost_score_enabled(void) {
+static int bufferize_remove_by_cost_score_enabled(void) {
   char const *e = getenv("THVM_BUFFERIZE_REMOVE_BY_SCORE");
   if (e == NULL) return 1;
   return e[0] != '0';
 }
 
-static u64 realize_remove_by_cost_score_threshold(void) {
+static u64 bufferize_remove_by_cost_score_threshold(void) {
   char const *e = getenv("THVM_BUFFERIZE_REMOVE_SCORE_THRESHOLD");
   if (e != NULL && e[0] != '\0') {
     return strtoull(e, NULL, 10);
@@ -1134,7 +1136,7 @@ static u64 realize_remove_by_cost_score_threshold(void) {
   return 50000;
 }
 
-static u32 realize_remove_by_cost_score_max_ops(void) {
+static u32 bufferize_remove_by_cost_score_max_ops(void) {
   char const *e = getenv("THVM_BUFFERIZE_REMOVE_SCORE_MAX_OPS");
   if (e != NULL && e[0] != '\0') {
     return (u32)strtoul(e, NULL, 10);
@@ -1142,7 +1144,7 @@ static u32 realize_remove_by_cost_score_max_ops(void) {
   return 32;
 }
 
-static u32 realize_remove_by_cost_score_max_consumers(void) {
+static u32 bufferize_remove_by_cost_score_max_consumers(void) {
   char const *e = getenv("THVM_BUFFERIZE_REMOVE_SCORE_MAX_CONSUMERS");
   if (e != NULL && e[0] != '\0') {
     return (u32)strtoul(e, NULL, 10);
@@ -1168,7 +1170,7 @@ static u32 realize_remove_by_cost_score_max_consumers(void) {
 // above the existing remove-removable-bufferize 32 cap, since
 // that rule's cap is per-buffer not per-consumer).  Override with
 // THVM_BUFFERIZE_REMOVE_SCORE_CONSUMER_OPS_BUDGET.
-static u32 realize_remove_by_cost_score_consumer_budget(void) {
+static u32 bufferize_remove_by_cost_score_consumer_budget(void) {
   char const *e = getenv("THVM_BUFFERIZE_REMOVE_SCORE_CONSUMER_OPS_BUDGET");
   if (e != NULL && e[0] != '\0') {
     return (u32)strtoul(e, NULL, 10);
@@ -1183,13 +1185,13 @@ static u32 realize_remove_by_cost_score_consumer_budget(void) {
 // returns 0 (defensive) when no realized ancestor is found.
 // Across multiple paths to different realized ancestors, returns
 // the MAX (the worst-case kernel that would absorb the recompute).
-static u32 realize_realized_ancestor_recompute_ops(u64 loc, u32 depth) {
+static u32 bufferize_realized_ancestor_recompute_ops(u64 loc, u32 depth) {
   if (depth > 32) return 0;
   u32 max_ops = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     u64 ploc = BUFFERIZE_NODES[i].loc;
     if (ploc == loc) continue;
-    if (!realize_parent_uses_child(ploc, loc)) continue;
+    if (!bufferize_parent_uses_child(ploc, loc)) continue;
     if (BUFFERIZE_NODES[i].realized) {
       u32 bidx = bufferize_find_by_loc(ploc);
       u32 ops = (bidx != 0xFFFFFFFFu)
@@ -1197,14 +1199,14 @@ static u32 realize_realized_ancestor_recompute_ops(u64 loc, u32 depth) {
                   : 0;
       if (ops > max_ops) max_ops = ops;
     } else {
-      u32 up_ops = realize_realized_ancestor_recompute_ops(ploc, depth + 1);
+      u32 up_ops = bufferize_realized_ancestor_recompute_ops(ploc, depth + 1);
       if (up_ops > max_ops) max_ops = up_ops;
     }
   }
   return max_ops;
 }
 
-static int realize_remove_by_cost_score_consumers_fit_tile(
+static int bufferize_remove_by_cost_score_consumers_fit_tile(
     BBufferize const *b, u32 budget) {
   u64 b_loc = b->loc;
   u32 b_ops = b->recompute_ops;
@@ -1231,7 +1233,7 @@ static int realize_remove_by_cost_score_consumers_fit_tile(
       BBufferize const *cb = bufferize_buffer_at(cidx);
       if (cb != NULL) consumer_ops = (u64)cb->recompute_ops;
     } else {
-      consumer_ops = (u64)realize_realized_ancestor_recompute_ops(ploc, 0);
+      consumer_ops = (u64)bufferize_realized_ancestor_recompute_ops(ploc, 0);
     }
     u64 estimated = consumer_ops + (u64)b_ops;
     if (estimated > (u64)budget) return 0;
@@ -1239,14 +1241,14 @@ static int realize_remove_by_cost_score_consumers_fit_tile(
   return 1;
 }
 
-static u32 realize_rule_remove_by_cost_score(Term root) {
+static u32 bufferize_rule_remove_by_cost_score(Term root) {
   (void)root;
-  if (!realize_remove_by_cost_score_enabled()) return 0;
-  u64 threshold     = realize_remove_by_cost_score_threshold();
-  u32 max_ops       = realize_remove_by_cost_score_max_ops();
-  u32 max_consumers = realize_remove_by_cost_score_max_consumers();
-  u32 budget        = realize_remove_by_cost_score_consumer_budget();
-  int dump = realize_dump_fusion_candidates_enabled();
+  if (!bufferize_remove_by_cost_score_enabled()) return 0;
+  u64 threshold     = bufferize_remove_by_cost_score_threshold();
+  u32 max_ops       = bufferize_remove_by_cost_score_max_ops();
+  u32 max_consumers = bufferize_remove_by_cost_score_max_consumers();
+  u32 budget        = bufferize_remove_by_cost_score_consumer_budget();
+  int dump = bufferize_dump_fusion_candidates_enabled();
   u32 hits = 0;
   // Iterate the bufferize graph directly - this rule is the first
   // one in the codebase that reads BBufferize records as the
@@ -1300,7 +1302,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
       }
       continue;
     }
-    if (!realize_remove_by_cost_score_consumers_fit_tile(b, budget)) {
+    if (!bufferize_remove_by_cost_score_consumers_fit_tile(b, budget)) {
       if (dump) {
         fprintf(stderr,
                 "bufferize_rewrite_skip rule=remove-by-cost-score"
@@ -1329,7 +1331,7 @@ static u32 realize_rule_remove_by_cost_score(Term root) {
   return hits;
 }
 
-static u32 realize_rule_inline_constants(Term root) {
+static u32 bufferize_rule_inline_constants(Term root) {
   (void)root;
   u32 hits = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
@@ -1354,14 +1356,14 @@ static u32 realize_rule_inline_constants(Term root) {
 // timeout >5min during the first compile.  Default OFF until the
 // source-subtree size is bounded; THVM_BUFFERIZE_LIFT_REDUCE_CHAIN_GATES=1
 // opts in for the BS=32 win.
-static int realize_lift_reduce_chain_gates(void) {
+static int bufferize_lift_reduce_chain_gates(void) {
   char const *e = getenv("THVM_BUFFERIZE_LIFT_REDUCE_CHAIN_GATES");
   return e != NULL && e[0] == '1';
 }
 
-static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
+static u32 bufferize_rule_inline_adjacent_reduce_chains(Term root) {
   (void)root;
-  int lift = realize_lift_reduce_chain_gates();
+  int lift = bufferize_lift_reduce_chain_gates();
   u32 hits = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
@@ -1369,8 +1371,8 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
     ReduceChainInfo rc;
     Term root_term = term_new(0, TAG_UOP, UOP_REDUCE, info->loc);
     if (!reduce_chain_collect(root_term, &rc)) continue;
-    if (!lift && !realize_reduce_chain_source_is_direct(rc.src)) continue;
-    if (!lift && realize_inline_subtree_has_movement(rc.src, 0)) continue;
+    if (!lift && !bufferize_reduce_chain_source_is_direct(rc.src)) continue;
+    if (!lift && bufferize_inline_subtree_has_movement(rc.src, 0)) continue;
     int ok = 1;
     for (u32 j = 1; j < rc.n_reduces; j++) {
       u32 cidx = bufferize_info_find(rc.locs[j]);
@@ -1392,11 +1394,11 @@ static u32 realize_rule_inline_adjacent_reduce_chains(Term root) {
 
 // Gate the softmax-broadcast-reduce / scalar-tail rules' multi-reduce
 // generalization.  Each REDUCE is checked independently by
-// realize_reduce_consumer_is_broadcast_chain, so removing the
+// bufferize_reduce_consumer_is_broadcast_chain, so removing the
 // "exactly one REDUCE in the graph" restriction is safe per-rule.
 // Default-on; THVM_BUFFERIZE_REDUCE_FUSE_MULTI=0 reverts to the
 // historical single-reduce gate.
-static int realize_reduce_fuse_multi_enabled(void) {
+static int bufferize_reduce_fuse_multi_enabled(void) {
   char const *e = getenv("THVM_BUFFERIZE_REDUCE_FUSE_MULTI");
   return e == NULL ? 1 : (e[0] != '0');
 }
@@ -1409,30 +1411,30 @@ static int realize_reduce_fuse_multi_enabled(void) {
 // for bisection.  When 0, the rule falls back to the historical
 // behaviour of inlining every legal candidate regardless of whether
 // the absorbing kernel root is also a REDUCE.
-static int realize_softmax_reduce_tile_cap_enabled(void) {
+static int bufferize_softmax_reduce_tile_cap_enabled(void) {
   char const *e = getenv("THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP");
   return e == NULL ? 1 : (e[0] != '0');
 }
 
-// realize_unique_uop_parent returns the SOLE parent of `loc` or 0
-// if zero/multiple.  realize_reduce_consumer_is_broadcast_chain
+// bufferize_unique_uop_parent returns the SOLE parent of `loc` or 0
+// if zero/multiple.  bufferize_reduce_consumer_is_broadcast_chain
 // already requires the chain to have a unique parent at every hop,
 // so a REDUCE with consumer_count > 1 fails the chain check
 // independently and the consumer_count == 1 fast-reject is just
 // an optimisation.  Without it, multi-consumer REDUCEs whose
 // branches all bottom out at the same EXPAND would be considered.
 
-static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
+static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
   (void)root;
-  if (!realize_reduce_fuse_multi_enabled() && realize_reduce_count() != 1) {
+  if (!bufferize_reduce_fuse_multi_enabled() && bufferize_reduce_count() != 1) {
     return 0;
   }
-  int tile_cap_on = realize_softmax_reduce_tile_cap_enabled();
+  int tile_cap_on = bufferize_softmax_reduce_tile_cap_enabled();
   u32 hits = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->op != UOP_REDUCE)    continue;
-    if (!realize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+    if (!bufferize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
     if (tile_cap_on) {
       // Tile-feasibility gate: the materializer's "single REDUCE
       // per kernel" rule lets the kernel ROOT be a REDUCE
@@ -1445,7 +1447,7 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
       // onto the per-op metal encoder.  Keep this REDUCE realized
       // when the absorbing root is itself a REDUCE so the
       // resulting kernels stay tile-feasible.
-      u64 abs_loc = realize_absorbing_boundary(info->loc, 16);
+      u64 abs_loc = bufferize_absorbing_boundary(info->loc, 16);
       if (abs_loc != 0) {
         u32 abs_idx = bufferize_info_find(abs_loc);
         if (abs_idx != 0xFFFFFFFFu
@@ -1467,10 +1469,10 @@ static u32 realize_rule_inline_softmax_broadcast_reduce(Term root) {
   return hits;
 }
 
-static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
+static u32 bufferize_rule_inline_reduce_scalar_tail(Term root) {
   if (term_tag(root) != TAG_UOP) return 0;
-  if (!realize_rangeify_enabled()) return 0;
-  if (!realize_reduce_fuse_multi_enabled() && realize_reduce_count() != 1) {
+  if (!bufferize_rangeify_enabled()) return 0;
+  if (!bufferize_reduce_fuse_multi_enabled() && bufferize_reduce_count() != 1) {
     return 0;
   }
   u64 root_loc = term_val(root);
@@ -1479,7 +1481,7 @@ static u32 realize_rule_inline_reduce_scalar_tail(Term root) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->op != UOP_REDUCE)    continue;
     if (info->consumer_count != 1) continue;
-    if (!realize_reduce_consumer_is_scalar_tail(info->loc, root_loc)) continue;
+    if (!bufferize_reduce_consumer_is_scalar_tail(info->loc, root_loc)) continue;
     if (info->realized) hits++;
     bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
   }
@@ -1531,16 +1533,16 @@ fn void bufferize_classify(Term root) {
     }
   }
   RealizeRewriteRule rules[] = {
-    {"inline-constants",              realize_rule_inline_constants},
-    {"inline-adjacent-reduce-chains", realize_rule_inline_adjacent_reduce_chains},
-    {"inline-softmax-broadcast-reduce", realize_rule_inline_softmax_broadcast_reduce},
-    {"inline-reduce-scalar-tail",     realize_rule_inline_reduce_scalar_tail},
-    {"inline-large-expand-fanout",    realize_rule_inline_large_expand_fanout},
-    {"inline-reduce-fanout",          realize_rule_inline_reduce_fanout},
-    {"remove-removable-bufferize",    realize_rule_remove_removable_bufferize},
-    {"remove-by-cost-score",          realize_rule_remove_by_cost_score},
-    {"inline-pure-fanout-probe",      realize_rule_inline_pure_fanout_probe},
-    {"metal-tile-fanin-cap",          realize_rule_metal_tile_fanin_cap},
+    {"inline-constants",              bufferize_rule_inline_constants},
+    {"inline-adjacent-reduce-chains", bufferize_rule_inline_adjacent_reduce_chains},
+    {"inline-softmax-broadcast-reduce", bufferize_rule_inline_softmax_broadcast_reduce},
+    {"inline-reduce-scalar-tail",     bufferize_rule_inline_reduce_scalar_tail},
+    {"inline-large-expand-fanout",    bufferize_rule_inline_large_expand_fanout},
+    {"inline-reduce-fanout",          bufferize_rule_inline_reduce_fanout},
+    {"remove-removable-bufferize",    bufferize_rule_remove_removable_bufferize},
+    {"remove-by-cost-score",          bufferize_rule_remove_by_cost_score},
+    {"inline-pure-fanout-probe",      bufferize_rule_inline_pure_fanout_probe},
+    {"metal-tile-fanin-cap",          bufferize_rule_metal_tile_fanin_cap},
   };
   // Phase 1: snapshot the seeded BUFFERIZE_NODES into the bufferize
   // graph, then run the named rewrite rules.  bufferize_node_mark and

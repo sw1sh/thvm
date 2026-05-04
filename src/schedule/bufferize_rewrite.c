@@ -1,8 +1,8 @@
-// schedule/realize_rewrite.c - tinygrad-style rewrite harness for
+// schedule/bufferize_rewrite.c - tinygrad-style rewrite harness for
 // realization-boundary decisions.
 //
 // The first scheduling rewrite surface is the realize map:
-// `realize_classify` seeds conservative BUFFERIZE-like boundaries,
+// `bufferize_classify` seeds conservative BUFFERIZE-like boundaries,
 // then named rules rewrite those boundary bits under explicit
 // legality/cost guards.  This keeps fusion policy inspectable and
 // gives later scalar/tile graph rewrites the same rule-table shape.

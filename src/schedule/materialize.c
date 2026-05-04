@@ -1,6 +1,6 @@
 // schedule/materialize.c - tinygrad-style scheduler.
 //
-// g2a: realize_classify + topo_sort_boundaries populate
+// g2a: bufferize_classify + topo_sort_boundaries populate
 // BOUNDARY_ORDER (kernel emit order).
 // g2b: build_kernel emits one KernelEntry per boundary by visiting
 //      its UOp subgraph and inlining every non-boundary upstream
