@@ -1701,29 +1701,44 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   //   - position >  reduce_pos: ref is post-reduce (scalar or
   //     per-element).
   u32 nin_local = ke->n_inputs ? ke->n_inputs : 1;
-  u8 input_used_pre [nin_local];
-  u8 input_used_post[nin_local];
-  u8 input_via_padshrink[nin_local];
-  for (u32 i = 0; i < nin_local; i++) {
-    input_used_pre [i] = 0;
-    input_used_post[i] = 0;
-    input_via_padshrink[i] = 0;
+  // Per-region input scope (chain-reduce step D-2): track which region
+  // each input is used in.  Region r in [0..n_reduces) means inside
+  // reduce r's body; region n_reduces means post-all-reduces (or, for
+  // non-reduce kernels, region 0 is the single region).  The legacy
+  // pre/post aliases below are pointers into the 2D table so the rest
+  // of the body emit pass keeps working unchanged for single-reduce
+  // (n_reduces <= 1).
+  u32 max_regions = RANGEIFY_MAX_REDUCES + 1;
+  u8 input_used_in_region[max_regions][nin_local];
+  for (u32 r = 0; r < max_regions; r++) {
+    for (u32 i = 0; i < nin_local; i++) input_used_in_region[r][i] = 0;
   }
+  // post_region is the region for "post-all-reduces" loads (LOOP-only
+  // addressing).  For chain reduces it is n_reduces (the slot one past
+  // the last reduce's body).  For non-reduce kernels we still need pre
+  // and post to be DISTINCT regions so the legacy pre/post aliases
+  // remain independent arrays -- otherwise non-reduce inputs (which
+  // belong in post-scope) would also light up the pre-scope LOAD path
+  // and crash on red==NULL.
+  u32 post_region = n_reduces ? n_reduces : 1;
+  u8 *input_used_pre  = input_used_in_region[0];
+  u8 *input_used_post = input_used_in_region[post_region];
+  u8 input_via_padshrink[nin_local];
+  for (u32 i = 0; i < nin_local; i++) input_via_padshrink[i] = 0;
   if (has_reduce) {
     for (u32 j = 0; j < ke->n_ops; j++) {
       KProgOp *p = &ke->program[j];
-      int pre = (region[j] == 0);
+      u32 r = region[j];
       for (u8 s = 0; s < p->n_src; s++) {
         u32 raw = p->src[s];
         if (KSRC_IS_INPUT(raw)) {
           u32 slot = KSRC_INDEX(raw);
-          if (pre)  input_used_pre [slot] = 1;
-          else      input_used_post[slot] = 1;
+          input_used_in_region[r][slot] = 1;
         }
       }
     }
   } else {
-    for (u32 i = 0; i < ke->n_inputs; i++) input_used_post[i] = 1;
+    for (u32 i = 0; i < ke->n_inputs; i++) input_used_in_region[post_region][i] = 1;
   }
   for (u32 j = 0; j < ke->n_ops; j++) {
     KProgOp *p = &ke->program[j];
@@ -1838,16 +1853,20 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   //                         position > reduce_pos.
   // For inputs used in only one scope, the unused slot stays 0.
   // For non-REDUCE kernels, input_load_post is always populated.
-  u32 input_load_pre [nin_local];
-  u32 input_load_post[nin_local];
-  u8  via_rngs_pre   [nin_local];
-  u8  via_rngs_post  [nin_local];
-  for (u32 i = 0; i < nin_local; i++) {
-    input_load_pre [i] = 0;
-    input_load_post[i] = 0;
-    via_rngs_pre   [i] = 0;
-    via_rngs_post  [i] = 0;
+  // Per-region load tables (chain-reduce step D-2).  See
+  // input_used_in_region above for region semantics.
+  u32 input_load_in_region[max_regions][nin_local];
+  u8  via_rngs_in_region  [max_regions][nin_local];
+  for (u32 r = 0; r < max_regions; r++) {
+    for (u32 i = 0; i < nin_local; i++) {
+      input_load_in_region[r][i] = 0;
+      via_rngs_in_region  [r][i] = 0;
+    }
   }
+  u32 *input_load_pre  = input_load_in_region[0];
+  u32 *input_load_post = input_load_in_region[post_region];
+  u8  *via_rngs_pre    = via_rngs_in_region  [0];
+  u8  *via_rngs_post   = via_rngs_in_region  [post_region];
 
   // === BACKWARD WALK: compute rngs[i] per op + per-input-slot rngs.
   // Mirrors tinygrad's rangeify (indexing.py:148+).  Each op tells
@@ -1868,16 +1887,18 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     rngs[i].ndim = 0; rngs[i].valid_mask = 0;
     for (u32 d = 0; d < MAX_DIM; d++) rngs[i].refs[d] = 0;
   }
-  RngsCtx input_rngs_pre [nin_local];
-  RngsCtx input_rngs_post[nin_local];
-  for (u32 i = 0; i < nin_local; i++) {
-    input_rngs_pre [i].ndim = 0; input_rngs_pre [i].valid_mask = 0;
-    input_rngs_post[i].ndim = 0; input_rngs_post[i].valid_mask = 0;
-    for (u32 d = 0; d < MAX_DIM; d++) {
-      input_rngs_pre [i].refs[d] = 0;
-      input_rngs_post[i].refs[d] = 0;
+  // Per-region input rngs (chain-reduce step D-2).  See
+  // input_used_in_region above for region semantics.
+  RngsCtx input_rngs_in_region[max_regions][nin_local];
+  for (u32 r = 0; r < max_regions; r++) {
+    for (u32 i = 0; i < nin_local; i++) {
+      input_rngs_in_region[r][i].ndim = 0;
+      input_rngs_in_region[r][i].valid_mask = 0;
+      for (u32 d = 0; d < MAX_DIM; d++) input_rngs_in_region[r][i].refs[d] = 0;
     }
   }
+  RngsCtx *input_rngs_pre  = input_rngs_in_region[0];
+  RngsCtx *input_rngs_post = input_rngs_in_region[post_region];
   // Per-USE rngs (per (consumer_op_id, src_index) edge).  The
   // per-slot tables above are first-writer-wins, which is wrong when
   // multiple consumers see the same input through different chain
