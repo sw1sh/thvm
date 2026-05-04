@@ -1867,7 +1867,14 @@ fn Term uop_invalid  (void);
 // Returns 0 on shape mismatch so callers can bail.  Per-USE caller
 // (rangeify, Phase B3) builds the final UOP_INDEX_E from the
 // resolved iters + bottom buffer shape.
-fn Term uop_resolve_movement_chain(Term src, Term *iters, u32 *ndim_io);
+//
+// `valid_mask_io` accumulates PAD bounds-check expressions (IAND'd
+// per-axis ILT's).  Initialise *valid_mask_io = 0 = "no constraint";
+// after resolution, the caller wraps the LOAD in
+// IWHERE(*valid_mask_io, LOAD, INVALID).  Pass NULL to disallow PAD
+// (helper bails when it hits one).
+fn Term uop_resolve_movement_chain(Term src, Term *iters, u32 *ndim_io,
+                                   Term *valid_mask_io);
 
 typedef struct {
   Term term;
