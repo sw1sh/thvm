@@ -194,3 +194,57 @@ in other workloads (BN forward training-time mean+var when those
 both reduce x over the same axes -- doesn't seem to occur in the
 beautiful-mnist canary because of how realize-classify schedules
 those reduces into separate kernels).
+
+## Verified shapes at BS=128 (2026-05-03 dump)
+
+The two metal-op fallbacks are confirmed BN-backward residual chains.
+Dumped via [/tmp/dump_multi_reduce.wls] against the canary at BS=128
+WARMUP=1 N_STEPS=1.
+
+**kid=6** (13 ops, 2 REDUCEs):
+
+```
+[1-5]  pre = RESHAPE/PERMUTE/ADD/CMPLT/MUL → KOp[4] (numel=1638400, relu mask × dy)
+[6]    REDUCE KOp[4]            arg=1            → numel=32   (reduce 1: dbeta)
+[7-9]  post1 = MUL × KIn[3], RESHAPE, EXPAND     → numel=1638400
+[10]   MUL KOp[8] × KIn[4]                       → numel=1638400
+[11]   ADD KOp[9] + KOp[4]      ← residual: combines post-1 broadcast with PRE-reduce-1 KOp[4]
+[12]   MUL KOp[10] × KOp[10]                     → numel=1638400
+[13]   REDUCE KOp[11]           arg=1            → numel=81920 (reduce 2: 1-axis factor 20)
+```
+
+**kid=9** (22 ops, 2 REDUCEs):
+
+```
+[1-11] pre = compute relu mask × scaled-dy → KOp[10] (numel=1638400)
+[12]   REDUCE KOp[10]           arg=1            → numel=32   (reduce 1)
+[13-15] post1 = MUL × KIn[1], RESHAPE, EXPAND    → numel=1638400
+[16]   MUL KOp[14] × KIn[6]                      → numel=1638400
+[17]   ADD KOp[15] + KOp[10]    ← residual: post-1 + PRE-reduce-1 KOp[10]
+[18-21] further muls with running 1/sqrt etc.
+[22]   REDUCE KOp[20]           arg=16777236     → numel=819200 (reduce 2: 1-axis factor 2)
+```
+
+Two structural features both kernels share:
+
+1. **Reduce 2's body subgraph reads reduce 1's output** (via
+   [9]→broadcast→[10]→[11] in kid=6, [15]→[17]→[18]→[19]→[20] in kid=9).
+   Pure chain dependency — reduce 1 must complete before reduce 2's
+   inner loop body can be evaluated.
+2. **Reduce 2's body also reuses the pre-reduce-1 source** (KOp[4] in
+   kid=6, KOp[10] in kid=9) via a residual ADD with the post-reduce-1
+   broadcast.  The per-thread emission must therefore re-load (or
+   recompute) the pre-reduce-1 expression in reduce 2's inner loop.
+
+That second property is what makes the simple "shared inner loop"
+approach impossible for these kernels.  Reduce 1 collapses many axes
+(NCHW→C, factor 51200) while reduce 2 collapses only one (factor 20
+or factor 2).  The reduce loops aren't even over the same axis-shape,
+so they can't be merged.  Sequential inner loops with the pre-reduce
+expressions re-loaded in reduce 2's body is the only correct shape.
+
+Implication for step 4: the ScalarUop-level body emit needs a
+"region map" -- for each KProgOp index, which reduce-region does it
+belong to (pre-1, in-reduce-1, mid-1-2, in-reduce-2, post-2).  The
+existing `int pre = (has_reduce && (int)i <= reduce_pos)` boolean
+becomes a `region[i] ∈ {0..2N}` array.
