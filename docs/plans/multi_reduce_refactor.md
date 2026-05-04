@@ -130,6 +130,26 @@ test` green:
   metric: kid=6 / kid=9 lift to metal-tile, total wall drops to
   ~150ms).
 
+## Status (2026-05-04 -- kid=9 RESHAPE-V also lifted)
+
+`emit_scalar_op_for_rngs` now substitutes a previous reduce's already-
+emitted value (from the forward pass's `prog_value` table) instead of
+trying to recursively re-emit it in a non-reduce-iter rngs context.
+This was the only blocker for kid=9 (22-op chain reduce) which kept
+bailing at "RESHAPE-V body emit failed".
+
+Final canary numbers (BS=128 beautiful-mnist train, WARMUP=1 N_STEPS=1):
+
+| Setting | Wall | Note |
+|---|---|---|
+| `THVM_RANGEIFY_NO_MULTI_REDUCE=1` | 682ms | session-start baseline |
+| default (chain on, prog_value plumbing) | **187ms** | **-73% / 3.7x** |
+
+  kid=9: 419ms → 22ms (~19x faster, was 22-op chain reduce)
+  kid=6: 7ms → 14.5ms (small regression w/ more autotune options)
+
+BS=32 unchanged (31.4 → 31.6ms, noise).
+
 ## Status (2026-05-04 -- chain-reduce default-on)
 
 **Chain-reduce body emit is default-on.**  `THVM_RANGEIFY_NO_MULTI_REDUCE=1`
@@ -190,6 +210,7 @@ implemented")` at the start of body emit.
 | `0e1efae` | Lift compat check + body-emit guard (D-3) | **Chain-reduce live** under env |
 | `6f75947` | Plan doc: chain-reduce activation results | Documentation |
 | `ae37753` | Default-on chain-reduce (step G) | `THVM_RANGEIFY_NO_MULTI_REDUCE=1` opt-out |
+| `48420ce` | `prog_value` plumbing in `emit_scalar_*_for_rngs` | **kid=9 lifts**, BS=128 187ms |
 
 **What's still pending for chain-reduce activation:**
 
