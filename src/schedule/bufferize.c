@@ -47,15 +47,15 @@ static BIndexRule BUFFERIZE_INDEX_RULES[6] = {
 static char const *BUFFERIZE_CURRENT_RULE = NULL;
 
 // Reason mirror: only the bits already on REALIZE_INFO map across.
-// Phase 1 still uses inline REALIZE_REASON_INLINE to mark "a rule
+// Phase 1 still uses inline BUFFERIZE_REASON_INLINE to mark "a rule
 // touched this", but the bufferize graph records the rule by name
 // directly via removed_by, so we do not project INLINE.
 static u32 bufferize_project_reasons(u32 r) {
   u32 out = 0;
-  if (r & REALIZE_REASON_ROOT)      out |= BUFFERIZE_REASON_ROOT;
-  if (r & REALIZE_REASON_MULTI)     out |= BUFFERIZE_REASON_MULTI;
-  if (r & REALIZE_REASON_REDUCE)    out |= BUFFERIZE_REASON_REDUCE;
-  if (r & REALIZE_REASON_FANIN_CAP) out |= BUFFERIZE_REASON_BACKEND_CAP;
+  if (r & BUFFERIZE_REASON_ROOT)      out |= BUFFERIZE_REASON_ROOT;
+  if (r & BUFFERIZE_REASON_MULTI)     out |= BUFFERIZE_REASON_MULTI;
+  if (r & BUFFERIZE_REASON_REDUCE)    out |= BUFFERIZE_REASON_REDUCE;
+  if (r & BUFFERIZE_REASON_FANIN_CAP) out |= BUFFERIZE_REASON_BACKEND_CAP;
   return out;
 }
 

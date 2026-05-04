@@ -246,7 +246,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "schedule/consumer_count.c"
 #include "schedule/realize_rewrite.c"
 #include "schedule/bufferize.c"
-#include "schedule/realize_classify.c"
+#include "schedule/bufferize_classify.c"
 #include "schedule/materialize.c"
 
 // === jit/ ===

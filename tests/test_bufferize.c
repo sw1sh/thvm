@@ -135,7 +135,7 @@ int main(void) {
   CHECK_EQ(bufferize_store_count(), 0);
 
   TEST_BEGIN("bufferize/reduce-projects-reduce-reason");
-  // REDUCE always seeds REALIZE_REASON_REDUCE, which projects to
+  // REDUCE always seeds BUFFERIZE_REASON_REDUCE, which projects to
   // BUFFERIZE_REASON_REDUCE.  Build SUM(a) and check the bit.
   Term red = uop_reduce(REDUCE_SUM, 0, a);
   bufferize_classify(red);
@@ -171,7 +171,7 @@ int main(void) {
   }
   // Total buffer count includes the removed const; realized count
   // does not.  And the realized count must equal the live boundary
-  // set seen by realize_is_realized.
+  // set seen by bufferize_is_realized.
   u32 live = 0;
   for (u32 i = 0; i < REALIZE_INFO_LEN; i++) {
     if (REALIZE_INFO[i].realized) live++;

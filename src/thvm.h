@@ -1294,11 +1294,6 @@ fn Term term_resolve(Term t);
 // kernel boundaries (root + multi-consumer + REDUCE) in REALIZE_INFO.
 // materialize.c reads the table directly to topo-sort and emit.
 #define REALIZE_INFO_CAP 16384
-#define REALIZE_REASON_ROOT        (1u << 0)
-#define REALIZE_REASON_MULTI       (1u << 1)
-#define REALIZE_REASON_REDUCE      (1u << 2)
-#define REALIZE_REASON_INLINE      (1u << 3)
-#define REALIZE_REASON_FANIN_CAP   (1u << 4)
 typedef struct {
   u64 loc;
   u32 consumer_count;
@@ -1311,9 +1306,9 @@ extern u32     REALIZE_INFO_LEN;
 fn u32  realize_info_find(u64 loc);
 // (realize_classify retired; use bufferize_classify -- declared
 // below near the bufferize API.)
-fn u8   realize_is_realized(Term uop_term);
-fn u32  realize_consumer_count(Term uop_term);
-fn u32  realize_reasons(Term uop_term);
+fn u8   bufferize_is_realized(Term uop_term);
+fn u32  bufferize_consumer_count(Term uop_term);
+fn u32  bufferize_reasons(Term uop_term);
 fn void realize_rewrite_stats_clear(void);
 fn u32  realize_rewrite_stats_len(void);
 fn char const *realize_rewrite_stat_name(u32 i);
@@ -1350,11 +1345,14 @@ fn u32  realize_rewrite_stat_hits(char const *name);
 #define BUFFERIZE_REASON_MULTI       (1u << 1)
 #define BUFFERIZE_REASON_REDUCE      (1u << 2)
 #define BUFFERIZE_REASON_BACKEND_CAP (1u << 3)
+// Legacy realize-rule reasons folded into the bufferize namespace.
+#define BUFFERIZE_REASON_INLINE      (1u << 4)
+#define BUFFERIZE_REASON_FANIN_CAP   (1u << 5)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value
   u32 buffer_id;       // 1-based stable id within this graph
-  u32 reasons;         // BUFFERIZE_REASON_* mirror of REALIZE_REASON_*
-  u32 consumer_count;  // direct UOp consumer count from realize_classify
+  u32 reasons;         // BUFFERIZE_REASON_*
+  u32 consumer_count;  // direct UOp consumer count
   u8  op;              // UOP_* of the value being bufferized
   u8  is_root;         // 1 iff this buffer is the realize root
   u8  realized;        // 1 = currently realized, 0 = removed by a rule

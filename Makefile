@@ -42,7 +42,7 @@ TESTS := \
   $(BIN)/test_gc_roots \
   $(BIN)/test_gc_mark_term \
   $(BIN)/test_extern_pin \
-  $(BIN)/test_realize_classify \
+  $(BIN)/test_bufferize_classify \
   $(BIN)/test_bufferize \
   $(BIN)/test_scalar_graph \
   $(BIN)/test_tile_graph \
