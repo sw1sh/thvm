@@ -224,6 +224,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "uop/load.c"
 #include "uop/cast.c"
 #include "uop/bitcast.c"
+#include "uop/index_simplify.c"
 #include "uop/index.c"
 #include "uop/movement_index.c"
 #include "uop/view.c"

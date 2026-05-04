@@ -54,11 +54,13 @@ fn Term uop_index_e(Term buffer, Term addr) {
 
 // === UOP_I{ADD,SUB,MUL,DIV,MOD,LT,AND}: integer binary ===
 //
-// Hash-cons-only constructor that does NOT call uop_rewrite_binary
-// (whose rules are float-specific).  Phase B2's index_simplify.c
-// owns integer-side folds.
+// Phase B2's `uop_simplify_int_binary` runs first to fold identity /
+// annihilator / constant cases.  Hash-cons applies to the unfolded
+// form so distinct shape-different chains still dedup at construction.
 
 fn Term uop_int_binary(u32 opcode, Term a, Term b) {
+  Term folded = uop_simplify_int_binary(opcode, a, b);
+  if (folded != 0) return folded;
   u32 args[4] = { (u32)a, (u32)(a >> 32), (u32)b, (u32)(b >> 32) };
   u64 key = uop_mov_hash(opcode, 0, args, 4);
   Term hit = uop_mov_lookup(key);
@@ -76,6 +78,8 @@ fn Term uop_int_binary(u32 opcode, Term a, Term b) {
 // Heap layout: [cond, then_v, else_v].
 
 fn Term uop_iwhere(Term cond, Term then_v, Term else_v) {
+  Term folded = uop_simplify_iwhere(cond, then_v, else_v);
+  if (folded != 0) return folded;
   u32 args[6] = { (u32)cond,   (u32)(cond   >> 32),
                   (u32)then_v, (u32)(then_v >> 32),
                   (u32)else_v, (u32)(else_v >> 32) };
