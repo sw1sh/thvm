@@ -688,6 +688,115 @@ reduction.
    differently — not separate IRs, separate **rewrites on one IR**.
    Mirrors what pass 5 (render) should look like.
 
+### Deeper architectural insights (final audit)
+
+Beyond the per-IR mechanisms, there are six architectural choices
+the tinygrad/tilelang ecosystem has settled on that thvm hasn't fully
+internalised yet.  These are second-order from "ideal pipeline" but
+each is a meaningful perf and complexity lever.
+
+**1. Backend-agnostic Tile IR + per-backend renderer.**
+Today thvm has `backend/cpu/op/*.c` (24 hand-written CPU op
+interpreters: `add.c`, `mul.c`, `reduce.c`, `pad.c`, ...) AND
+`codegen/render_metal.c` (Metal MSL renderer).  These are TWO
+implementations of the same compute semantics.  Bug fixes have to
+land twice; backend-specific quirks leak everywhere.
+
+The right shape: ONE Tile IR.  CPU dispatch becomes "render to C,
+clang-JIT, run" — same Tile IR walked by a `render_c.c` instead of
+`render_metal.c`.  Per-op CPU interpreters delete entirely (~3k
+lines).  Adding a new backend (CUDA / HIP / Vulkan) is then ~500
+lines of new renderer, not a parallel `backend/cuda/op/*.c` family.
+
+**2. Shape-folding (contiguous axis collapse).**
+`Shape [2, 3, 4]` with strides `[12, 4, 1]` is bit-identical to
+`Shape [24]` with stride `[1]`.  A pre-vectorisation pass folds
+consecutive contiguous axes into one.  Without this:
+
+  - Every axis becomes a separate loop, killing vectorisation.
+  - The trailing axis used for `vload4`/`vload8` is too small.
+  - Memory bandwidth on stride-1 access tops out at ~1/4 peak.
+
+Tinygrad's `simplify_movement` runs this fold; thvm's
+`uop_graph_simplify` doesn't yet.  Adding it is ~150 lines.
+
+**3. Layout inference.**
+Conv2d on M3 Max wants `NHWC` for stride-1 channel access; matmul
+wants `NK + KM` (k as inner).  Picking the right layout at COMPILE
+time (and inserting PERMUTE only at the kernel-input boundary) is
+the single biggest lever for conv/matmul throughput after MMA.
+
+Tinygrad's BEAM includes layout-permute as a search dimension;
+tilelang exposes `T.transform` for explicit layout rewrites.  thvm
+keeps the user-supplied layout (NCHW everywhere from WL); the
+`PERMUTE` ops in conv-bwd's KProgOp programs ARE thvm's layout
+machinery, but they materialise instead of getting absorbed.  Once
+movement-to-INDEX lands (Phase B), layout becomes a free rewrite at
+the UOp DAG level.
+
+**4. Explicit fusion criteria, not just boundary marking.**
+"Boundaries are nodes" is half the schedule story.  The OTHER half
+is: WHICH ops fuse into one kernel?  Tinygrad's criteria:
+
+  - At most ONE reduce per kernel (relaxed: chain reduces fuse if
+    the second reduce's inputs include the first reduce's output —
+    thvm's chain-reduce work covers this).
+  - No elementwise-after-reduce-then-broadcast unless the broadcast
+    is to the reduce's input shape (BN-grad pattern).
+  - Producer numel ≤ consumer numel (avoid materialising larger
+    intermediate than the consumer reads).
+  - Movement-only chains absorb into the consumer (free).
+  - User-realized roots split.
+
+thvm has `inline-constants`, `inline-softmax-broadcast-reduce`,
+`inline-large-expand-fanout`, etc. — these are FUSION rules but each
+is an ad-hoc pattern, not the same uniform criteria tinygrad uses.
+The bufferize-graph removal-rule layer (Phase 4 of bufferize.md) is
+the right home for a CONSOLIDATED fusion-criteria predicate.
+
+**5. Reduce-broadcast fusion at the codegen layer.**
+The `reduce → broadcast back → elementwise` pattern (BN forward,
+softmax, layernorm) wants ONE kernel that:
+
+  - reads the input once,
+  - computes the reduce into a shared-memory accumulator,
+  - barriers,
+  - broadcasts the reduce result inline,
+  - emits the elementwise output.
+
+That's a SINGLE kernel with TWO loop-nests (reduce, then
+broadcast-elementwise) sharing the input.  thvm fuses this at the
+schedule layer (`inline-softmax-broadcast-reduce` rule keeps them
+in one KernelEntry) but the codegen-layer EMISSION emits it as two
+sequential loop nests within one kernel — without explicit
+shared-memory accumulator + barrier.  At small reduce-sizes the
+register-tier substitution works, but for BS=512 BN-grad with
+reduce_size=204800, shared-mem with threadgroup-cooperative reduce
+is the only path to good throughput.
+
+This is `TILE_REDUCE → TILE_ALLOC(scope=shared) → TILE_BARRIER →
+TILE_LOAD(shared) → TILE_SCALAR_BODY` as Tile-IR.  Pattern
+matcher in pass 1 detects the reduce-broadcast shape; pass 3
+lowers to this Tile-IR template.
+
+**6. Const inlining at codegen.**
+Today thvm passes runtime constants as kernel inputs (a
+`MTLBuffer` with one f32).  Each kernel binds the buffer, the
+shader reads `params[k]` per thread.  Tinygrad inlines literals
+into the MSL source: `mul(x, 2.0f)` becomes a literal `2.0f` in
+the shader, no buffer bind.  Wins:
+
+  - One fewer buffer per kernel → smaller `MTLArgumentTable`,
+    fewer `setBuffer:` calls.
+  - The shader compiler can constant-fold (`mul by 1.0` → identity).
+  - Encoder-side: ~50ns saved per `setBuffer:` × N kernels × M
+    dispatches per step.  At 100 kernels × 10 dispatches that's
+    50µs/step recovered.
+
+Implementation: pass-1 pattern that converts `LOAD(const_buf, [0])`
+into `CONST(literal)` when the buffer's contents are known at
+compile time.  Renderer emits the literal directly.  ~80 lines.
+
 ### Insights I previously glossed over
 
 A first draft of this section had three bullets per system; the
