@@ -1395,7 +1395,18 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // Phase B/C/D supported opcodes: elementwise + (one) REDUCE +
   // movement ops whose input coordinates are derived by the backward
   // range walk below.
+  //
+  // Multi-reduce refactor (docs/plans/multi_reduce_refactor.md): the
+  // gate at "if reduce_pos != -1" rejects programs with > 1 REDUCE
+  // op, which forces BN-grad fused kernels onto the per-op encoder
+  // and dominates BS=128 wall time.  Step 1 of the refactor: collect
+  // all UOP_REDUCE positions into a fixed-size array so subsequent
+  // steps can emit per-reduce metadata.  The gate stays at
+  // n_reduces > 1 for now; behaviour is unchanged.
+#define RANGEIFY_MAX_REDUCES 4
   int reduce_pos = -1;
+  u32 reduce_positions[RANGEIFY_MAX_REDUCES] = {0};
+  u32 n_reduces = 0;
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp *p = &ke->program[i];
     switch (p->opcode) {
@@ -1407,6 +1418,10 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       case UOP_SHRINK: case UOP_PAD: case UOP_FLIP: case UOP_PERMUTE:
         break;
       case UOP_REDUCE:
+        if (n_reduces >= RANGEIFY_MAX_REDUCES) {
+          RBAIL_PRE("> RANGEIFY_MAX_REDUCES reduce ops");
+        }
+        reduce_positions[n_reduces++] = i;
         if (reduce_pos != -1) RBAIL_PRE("> 1 reduce");
         reduce_pos = (int)i;
         break;
@@ -1417,6 +1432,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         RBAIL_PRE("unsupported opcode");
     }
   }
+  (void)reduce_positions;     // referenced in subsequent commits
+  (void)n_reduces;
   // Phase D: input views can be non-contig (view.strides encode the
   // access pattern; 0 strides == broadcast, used heavily by chain-
   // rule grad expansion).  Phase F-1 lifts the non-zero-offset
