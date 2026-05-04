@@ -1759,25 +1759,42 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // REDUCE range (Phase C): an additional inner-most range with
   // axis_type=REDUCE.  Only present when the kernel ends in
   // UOP_REDUCE.
+  // Chain-reduce groundwork (step D-1): per-reduce range arrays.  For
+  // single-reduce, only [0] is populated and aliases the legacy
+  // reduce_ranges[]/reduce_range.  For chain-reduce, each reduce r in
+  // [0..n_reduces) gets its own range leafs + flattened combined index.
+  u32 reduce_ranges_per_reduce[RANGEIFY_MAX_REDUCES][MAX_DIM] = {{0}};
+  u32 reduce_range_per_reduce [RANGEIFY_MAX_REDUCES] = {0};
   u32 reduce_ranges[MAX_DIM] = {0};
   u32 reduce_range = 0;
   u32 in_ndim      = os->ndim;
   u32 in_strides[MAX_DIM + 1];
   if (has_reduce) {
-    for (u32 d = 0; d < reduce_n_ranges; d++) {
-      u64 extra = ((u64)S_AXIS_REDUCE << 32) | (u64)reduce_extents[d];
-      reduce_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+    for (u32 r = 0; r < n_reduces; r++) {
+      u32 nr = reduce_meta[r].n_ranges;
+      for (u32 d = 0; d < nr; d++) {
+        u64 extra = ((u64)S_AXIS_REDUCE << 32) | (u64)reduce_meta[r].extents[d];
+        reduce_ranges_per_reduce[r][d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+      }
+      u32 combined = reduce_ranges_per_reduce[r][0];
+      for (u32 d = 1; d < nr; d++) {
+        u32 c = emit_iconst(ke, (i64)reduce_meta[r].extents[d]);
+        u32 scaled = emit_ibinop(ke, S_IMUL, combined, c);
+        combined = emit_ibinop(ke, S_IADD, scaled, reduce_ranges_per_reduce[r][d]);
+      }
+      if (nr > 1) {
+        u32 c = emit_iconst(ke, (i64)reduce_meta[r].size);
+        combined = emit_ibinop(ke, S_IMOD, combined, c);
+      }
+      reduce_range_per_reduce[r] = combined;
     }
-    reduce_range = reduce_ranges[0];
-    for (u32 d = 1; d < reduce_n_ranges; d++) {
-      u32 c = emit_iconst(ke, (i64)reduce_extents[d]);
-      u32 scaled = emit_ibinop(ke, S_IMUL, reduce_range, c);
-      reduce_range = emit_ibinop(ke, S_IADD, scaled, reduce_ranges[d]);
+    // Legacy aliases (reduce 0 only) used by the rest of the body emit
+    // pass that still assumes single reduce.  Subsequent steps phase
+    // these out in favour of reduce_ranges_per_reduce[region[i]].
+    for (u32 d = 0; d < reduce_meta[0].n_ranges; d++) {
+      reduce_ranges[d] = reduce_ranges_per_reduce[0][d];
     }
-    if (reduce_n_ranges > 1) {
-      u32 c = emit_iconst(ke, (i64)reduce_size);
-      reduce_range = emit_ibinop(ke, S_IMOD, reduce_range, c);
-    }
+    reduce_range = reduce_range_per_reduce[0];
     if (red->n_reduce_axes > 0 && red->src0_ndim > 0
         && red->src0_ndim <= MAX_DIM) {
       in_ndim = red->src0_ndim;
@@ -1878,24 +1895,32 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       RngsCtx in_rngs = rngs[i];
       switch (p->opcode) {
         case UOP_REDUCE: {
+          // Per-reduce dispatch: select this reduce's range/inner from
+          // reduce_meta[region[i]].  For single-reduce kernels region
+          // is 0 at i == reduce_pos so behavior is identical to the
+          // legacy reduce_n_ranges/reduce_ranges/reduce_range/inner.
+          u32 r_idx = region[i];
+          u32 r_n_ranges = reduce_meta[r_idx].n_ranges;
+          u32 r_inner    = reduce_meta[r_idx].inner;
+          u32 r_combined = reduce_range_per_reduce[r_idx];
           if (p->n_reduce_axes > 0 && p->src0_ndim > 0
               && p->src0_ndim <= MAX_DIM && p->out_ndim <= MAX_DIM
-              && reduce_n_ranges == p->n_reduce_axes
+              && r_n_ranges == p->n_reduce_axes
               && in_rngs.ndim == p->out_ndim) {
             RngsCtx src_rngs = {0};
             src_rngs.ndim = p->src0_ndim;
             src_rngs.valid_mask = in_rngs.valid_mask;
             u32 out_d = 0;
             for (u32 d = 0; d < p->src0_ndim; d++) {
-              u32 reduce_pos = (u32)-1;
+              u32 reduce_pos_axis = (u32)-1;
               for (u32 r = 0; r < p->n_reduce_axes; r++) {
                 if (p->reduce_axes[r] == d) {
-                  reduce_pos = r;
+                  reduce_pos_axis = r;
                   break;
                 }
               }
-              if (reduce_pos != (u32)-1) {
-                src_rngs.refs[d] = reduce_ranges[reduce_pos];
+              if (reduce_pos_axis != (u32)-1) {
+                src_rngs.refs[d] = reduce_ranges_per_reduce[r_idx][reduce_pos_axis];
               } else {
                 if (out_d >= in_rngs.ndim) {
                   src_rngs.ndim = 0;
@@ -1922,17 +1947,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             u32 r_axis = (u32)-1;
             u32 partial = 1;
             for (i32 k = (i32)os->ndim; k >= 0; k--) {
-              if (partial == reduce_inner) { r_axis = (u32)k; break; }
+              if (partial == r_inner) { r_axis = (u32)k; break; }
               if (k > 0) partial *= os->dims[k - 1];
             }
             if (r_axis > os->ndim || in_rngs.ndim != os->ndim) {
-              in_rngs.refs[in_rngs.ndim++] = reduce_range;
+              in_rngs.refs[in_rngs.ndim++] = r_combined;
               break;
             }
             for (i32 d = (i32)in_rngs.ndim; d > (i32)r_axis; d--) {
               in_rngs.refs[d] = in_rngs.refs[d - 1];
             }
-            in_rngs.refs[r_axis] = reduce_range;
+            in_rngs.refs[r_axis] = r_combined;
             in_rngs.ndim++;
             break;
           }
@@ -1940,20 +1965,20 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           {
             u32 partial = 1;
             for (i32 k = (i32)body_ndim - 1; k >= 0; k--) {
-              if (partial == reduce_inner) { r_axis = (u32)k; break; }
+              if (partial == r_inner) { r_axis = (u32)k; break; }
               partial *= p->src0_dims[k];
             }
           }
           if (r_axis >= body_ndim) {
             // Couldn't infer; append as fallback.
-            in_rngs.refs[in_rngs.ndim++] = reduce_range;
+            in_rngs.refs[in_rngs.ndim++] = r_combined;
             break;
           }
           // Insert reduce_range at r_axis, shifting later refs right.
           for (i32 d = (i32)in_rngs.ndim; d > (i32)r_axis; d--) {
             in_rngs.refs[d] = in_rngs.refs[d - 1];
           }
-          in_rngs.refs[r_axis] = reduce_range;
+          in_rngs.refs[r_axis] = r_combined;
           in_rngs.ndim++;
           break;
         }
@@ -3320,17 +3345,22 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     if (p->opcode == UOP_REDUCE) {
       // src[0] body: either an input load or a previous prog op.
       // Sourced from pre-scope (the body sits inside the reduce loop).
+      // Per-reduce ranges/kind sourced from reduce_meta[region[i]] so a
+      // chain reduce's emission picks up its own axes/extents (single-
+      // reduce kernels have region[reduce_pos]==0, identical behavior).
+      u32 r_idx = region[i];
       u32 raw = p->src[0];
       u32 body = KSRC_IS_INPUT(raw) ? input_load_pre[KSRC_INDEX(raw)]
                                     : prog_value[KSRC_INDEX(raw)];
       if (body == 0) RBAIL_MID("REDUCE body 0");
+      u32 nr = reduce_meta[r_idx].n_ranges;
       u32 src[SCALAR_MAX_SRC] = {body};
-      for (u32 d = 0; d < reduce_n_ranges && 1 + d < SCALAR_MAX_SRC; d++) {
-        src[1 + d] = reduce_ranges[d];
+      for (u32 d = 0; d < nr && 1 + d < SCALAR_MAX_SRC; d++) {
+        src[1 + d] = reduce_ranges_per_reduce[r_idx][d];
       }
-      u8  sop    = (reduce_kind == REDUCE_MAX) ? S_REDUCE_MAX : S_REDUCE_SUM;
+      u8  sop    = (reduce_meta[r_idx].kind == REDUCE_MAX) ? S_REDUCE_MAX : S_REDUCE_SUM;
       prog_value[i] = rangeify_emit(ke, sop, dtype,
-                                    (u8)(1 + reduce_n_ranges), src, 0);
+                                    (u8)(1 + nr), src, 0);
       continue;
     }
     // Resolve up to 2 sources, picking the scope-appropriate input load.
