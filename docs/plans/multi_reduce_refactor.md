@@ -117,6 +117,19 @@ test` green:
 - `realize_classify` -> bufferize migration is the larger Phase
   5+ work tracked in [docs/plans/bufferize.md]; mention it in the
   "Future Work" section.
+- `reduce_size > 0xFFFFu` silent-bail at rangeify.c:1560 was
+  examined and lifting attempted (2026-05-04).  Net regression:
+  BS=512 17786ms -> 26067ms (+47%) with high variance.  Root cause:
+  for `reduce_size >= 200K` the per-thread sequential reduce in
+  tile-jit is slower than the metal-op encoder's parallel reduce
+  dispatch.  Lifting the cap WITHOUT assigning GROUP_REDUCE axes
+  for large reduces is a mistake.  The cap is structurally
+  protective and stays at 65535 until shape-aware default axes
+  with a precise cost model lands (§4.5 of profiling_methodology.md
+  records the earlier failed attempt).  Note also: the bail was
+  silent (`return 0` without RBAIL_PRE), making it invisible to
+  THVM_RANGEIFY_BAIL traces; that's a documentation problem
+  separate from whether the cap is right.
 
 ## Testing
 
