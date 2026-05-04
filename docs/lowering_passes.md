@@ -600,23 +600,49 @@ reduction.
    src `[1, N]` and out `[M, N]` becomes `INDEX(src, [m * 0 + n * 1])`
    — `m * 0` is the broadcast.  No materialisation, no copies.
 
-2. **Boundaries are nodes, not flags**.  `BUFFERIZE(value)` is a UOp
+2. **ShapeTracker = stack of Views**.  The mechanism behind (1).
+   Each tensor has a `ShapeTracker` that's a STACK of `View` records;
+   each movement op pushes a new View on top.  At consumer time, the
+   stack is COMPRESSED into a single symbolic INDEX expression.
+   Reshape-of-permute-of-reshape doesn't allocate intermediate
+   buffers — the View stack composes the address arithmetic.  thvm's
+   `View` struct is per-tensor (one View, not a stack); the stack
+   form is what makes complex movement chains free.
+
+3. **Symbolic INDEX simplifier**.  After movement-as-INDEX, indices
+   are symbolic expressions over RANGE leaves: `+`, `*`, `//`, `%`.
+   A constant-folder + range-aware simplifier collapses common
+   patterns: `x % N` where `x < N` → `x`; `(x // M) * M + (x % M)`
+   → `x`; stride-0 axes drop out.  Without this simplifier the
+   addresses computed at every iteration are gigantic ASTs that
+   the MSL compiler can't optimise.  thvm has `scalar_simplify_*`
+   but the ranges-aware folds aren't yet there.
+
+4. **Boundaries are nodes, not flags**.  `BUFFERIZE(value)` is a UOp
    that means "this value gets a backing buffer".  The schedule pass
    inserts and removes BUFFERIZE nodes; everything downstream just
    walks the graph.  No separate `realized` bit on a side-channel
    table.
 
-3. **One dispatch path**.  Tinygrad doesn't have "metal-op fallback"
+5. **One dispatch path**.  Tinygrad doesn't have "metal-op fallback"
    or "metal-jit fallback".  Every kernel goes through `linearize`
    (the rangeify analogue) and the renderer.  Specialised shapes
    (conv2d_flat, gemm) are detected as PATTERNS and rewritten to
    canonical forms; the renderer emits one MSL function for every
    kernel.
 
-4. **Autotune is rewrite search**.  BEAM proposes axis-type rewrites
+6. **Autotune is rewrite search**.  BEAM proposes axis-type rewrites
    on the same UOp graph and runs the result.  No `apply_opt`
    mutation of side state, no `KernelAxes.applied_opts[]` log to
    replay.  The chosen axis-type configuration IS the lowered graph.
+
+7. **PatternMatcher as universal rewrite engine**.  Every pass —
+   simplify, schedule, linearize, even the renderer's per-target
+   dialect adjustments — is a `PatternMatcher` of `UPat` trees and
+   their replacements.  ONE engine, hundreds of rules.  Easy to
+   extend, easy to test (each rule has a tiny unit test).  thvm has
+   `realize_rewrite.c` for one rule family and ad-hoc switches for
+   the rest; consolidating onto a single matcher is its own win.
 
 ### Key tilelang insights
 
@@ -626,17 +652,65 @@ reduction.
    emit code that respects the annotations.  No "axes_default_for
    side-table".
 
-2. **Pattern-matched specialisations**.  `T.gemm`, `T.copy`,
-   `T.reduce` etc. are FUNCTIONS in the source language that the
-   compiler matches and lowers to specialised tile-IR.  The user
-   writes high-level operations; the compiler produces dense
-   patterns.  In thvm-speak: `tile_analyze_conv2d_flat` becomes a
-   pattern in pass 1, not a runtime check in dispatch.
+2. **Memory hierarchy is THE perf story**.  For matmul, conv,
+   attention — the perf gap to peak isn't in arithmetic, it's in
+   memory placement.  Tilelang carries `T.alloc_buffer(scope=...)`
+   where scope ∈ `{global, shared, local, register}` AS IR
+   constructs.  Without this, the renderer can't emit shared-memory
+   tiling, and matmul caps at memory bandwidth (~1/100th of peak
+   on M3 Max).  thvm's Tile IR needs `TILE_ALLOC(scope, shape)` and
+   `TILE_BARRIER` nodes for this to be expressible.
 
-3. **Backend-aware rewrites**.  TileLang has separate rewrite passes
+3. **Software pipelining via `T.pipelined`**.  Annotates a loop with
+   "overlap memory + compute across iterations" — the compiler
+   inserts double-buffered shared-mem loads.  Critical on Ampere /
+   Hopper / M3 Max for matmul throughput.  Generates the
+   producer/consumer split + async copy.  Currently invisible to
+   thvm's pipeline.
+
+4. **Async copy for tensor cores**.  TMA on Hopper, `cp.async` on
+   Ampere, M3-style copy primitives.  Tilelang exposes `T.copy`
+   and `T.gemm`, the compiler lowers to backend-specific async
+   primitives.  In thvm-speak: `TILE_COPY(src, dst, scope)` and
+   `TILE_GEMM(A_frag, B_frag, C_frag)` as Tile-IR nodes; backend
+   renderer emits `metal::simdgroup_matrix` ops on Apple Silicon.
+
+5. **Pattern-matched specialisations**.  `T.gemm`, `T.copy`,
+   `T.reduce` etc. are FUNCTIONS in the source language that the
+   compiler matches and lowers to specialised tile-IR.  In
+   thvm-speak: `tile_analyze_conv2d_flat` becomes a pattern in
+   pass 1 that produces a `TILE_CONV2D` / `TILE_GEMM` Tile-IR node,
+   not a runtime check in dispatch.  The renderer has ONE template
+   per Tile-IR shape.
+
+6. **Backend-aware rewrites**.  TileLang has separate rewrite passes
    per backend (CUDA / HIP / Metal) that lower the same tile-IR
    differently — not separate IRs, separate **rewrites on one IR**.
-   Mirrors what pass 4 should look like.
+   Mirrors what pass 5 (render) should look like.
+
+### Insights I previously glossed over
+
+A first draft of this section had three bullets per system; the
+current six + six is the audit.  The big things I missed initially:
+
+- **ShapeTracker stack-of-views** — said "movement-as-INDEX" without
+  explaining the mechanism (compose Views into one symbolic
+  expression at consumer time).
+- **Symbolic index simplifier** — necessary complement to (1); without
+  it the absorbed INDEX expressions are huge ASTs that hurt codegen.
+- **Memory hierarchy explicit in IR** — THE perf story for matmul
+  / conv / attention.  Tilelang's biggest contribution.
+- **Software pipelining** — required for matmul throughput on
+  modern GPUs; tilelang exposes it as `T.pipelined`.
+- **Async copy / MMA fragments** — `T.copy` + `T.gemm` produce
+  cp.async / TMA / simdgroup_matrix at codegen time.
+- **Pattern matcher uniformity** — every rewrite is the same engine,
+  not ad-hoc switches.
+
+These insights change what the Tile IR needs to carry: not just
+loop nests + axis types, but explicit memory scopes, MMA fragments,
+async copies, and pipelining annotations.  Phase D of the migration
+order grows in scope accordingly.
 
 ### Migration order
 
