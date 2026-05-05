@@ -87,6 +87,31 @@ int main(void) {
   CHECK(contains(buf3, "/* TILE_STORE S17 */"));
 
   tile_free(ke);
+
+  TEST_BEGIN("tile-render-msl/load-from-input-buf");
+  // TILE_INPUT_BUF + TILE_LOAD render as `in<slot>[/*addr*/]`.
+  TileAxisInfo a_only = { KAX_LOOP, 4, TILE_MEM_GLOBAL, 0 };
+  u32 ax_only = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a_only));
+  u32 in_buf = tile_emit_input_buf(ke, DT_FP32, /*slot=*/2);
+  u32 in_addr = tile_emit_leaf(ke, TILE_SCALAR_BODY, DT_INT64, 5);
+  u32 in_load = tile_emit_load(ke, DT_FP32, in_buf, in_addr);
+  u32 in_post = tile_emit_leaf(ke, TILE_SCALAR_BODY, DT_FP32, 99);
+  u32 in_stmts[2] = { in_load, in_post };
+  u32 in_block = tile_emit_block(ke, DT_FP32, in_stmts, 2);
+  u32 in_store_src[1] = { in_block };
+  u32 in_store = tile_emit(ke, TILE_STORE, DT_FP32, 1, in_store_src, 21);
+  u32 in_lnest_src[2] = { in_store, ax_only };
+  ke->tile_root = tile_emit(ke, TILE_LOOP_NEST, DT_FP32, 2, in_lnest_src, 0);
+
+  char buf4[2048];
+  fp = fmemopen(buf4, sizeof(buf4), "w");
+  CHECK(fp != NULL);
+  tile_render_msl_skeleton(ke, fp);
+  fclose(fp);
+  CHECK(contains(buf4, "in2[/*addr*/]"));
+  CHECK(contains(buf4, "TILE_LOAD from input 2"));
+
+  tile_free(ke);
   thvm_free();
   TEST_REPORT();
 }
