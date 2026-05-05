@@ -1909,6 +1909,40 @@ static void cg_shadow_lift_metal(KernelEntry const *ke) {
   kernel_lift_count_compile(WEXITSTATUS(rc) == 0);
 }
 
+// Phase F primary-path flip experiment: when THVM_RENDER_VIA_UOP=1,
+// render through kernel_lift_to_uop + cg_render_uop_kernel, fall back
+// to the existing path if the lift fails.  Gated off by default while
+// we A/B benchmark on real workloads.  Returns NULL when this path
+// declines (caller continues with the existing render).
+static char *cg_emit_via_uop(KernelEntry const *ke) {
+  static int via_uop_inited = 0;
+  static int via_uop_on     = 0;
+  if (!via_uop_inited) {
+    char const *e = getenv("THVM_RENDER_VIA_UOP");
+    via_uop_on    = (e != NULL && e[0] == '1');
+    via_uop_inited = 1;
+  }
+  if (!via_uop_on) return NULL;
+  KernelUopLift lift = {0};
+  if (!kernel_lift_to_uop(ke, &lift)) return NULL;
+  // Render to a malloc'd string, matching cg_emit_tile_metal's
+  // contract.  Use kernel name "k" so MTLLibrary lookup behaves like
+  // the existing path.
+  char buf[16384];
+  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  if (fp == NULL) return NULL;
+  cg_render_uop_kernel(lift.store_root, "k", lift.out_buf,
+                       lift.in_bufs, lift.n_inputs, fp);
+  long n = ftell(fp);
+  fclose(fp);
+  if (n <= 0) return NULL;
+  char *out = (char *)malloc((size_t)n + 1);
+  if (out == NULL) return NULL;
+  memcpy(out, buf, (size_t)n);
+  out[n] = '\0';
+  return out;
+}
+
 char *cg_emit_tile_metal(KernelEntry const *ke) {
   // Multi-output kernels are not yet renderable through the tile
   // metal path (single `device float *out` arg + single S_STORE).
@@ -1917,6 +1951,9 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
     return NULL;
   }
   cg_shadow_lift_metal(ke);
+  // Phase F flip: when env-gated, prefer the UOp-DAG renderer.
+  char *via_uop = cg_emit_via_uop(ke);
+  if (via_uop != NULL) return via_uop;
   TileConv2DInfo conv;
   if (rmt_collect_conv2d_info(ke, &conv)) {
     return rmt_emit_conv2d_flat(ke, &conv);
