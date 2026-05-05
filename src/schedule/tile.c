@@ -1496,6 +1496,11 @@ fn int tile_sync_from_scalar(KernelEntry *ke) {
   }
   TileGemmInfo gemm;
   int wants_mma = tile_analyze_gemm(ke, NULL, &gemm);
+  // Phase F prep: DUMP_TILE_IR=1 prints the tile-IR after each
+  // sync.  Useful for debugging D3/D4 lowering and the eventual
+  // renderer rewrite.
+  int dump_after = getenv("DUMP_TILE_IR") != NULL;
+  (void)dump_after;
   u32 axes_version = ke->axes != NULL ? ke->axes->version : 0;
   if (ke->tile_uops != NULL && ke->tile_axes_version == axes_version
       && tile_validate(ke)) {
@@ -1504,12 +1509,18 @@ fn int tile_sync_from_scalar(KernelEntry *ke) {
     }
   }
   if (wants_mma) {
-    return tile_build_mma_from_gemm(ke, &gemm);
+    int mma_ok = tile_build_mma_from_gemm(ke, &gemm);
+    if (mma_ok && dump_after) tile_dump(ke, stderr);
+    return mma_ok;
   }
   if (ke->scalar_uops == NULL) {
     return 0;
   }
-  return tile_build_from_scalar(ke);
+  int ok = tile_build_from_scalar(ke);
+  if (ok && dump_after) {
+    tile_dump(ke, stderr);
+  }
+  return ok;
 }
 
 int tile_collect_mma_plan(KernelEntry *ke, TileGemmInfo *out) {
