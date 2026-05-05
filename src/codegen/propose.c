@@ -113,16 +113,14 @@ static u32 propose_conv2d_local_opts(KernelEntry const *ke, KOpt *out,
                                      u32 n, u32 cap) {
   static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
   u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
+  u32 n_axes = tile_anno_axis_count_or_kernelaxes(ke);
   for (u32 i = 0; i < n_local_factors && n < cap; i++) {
     u32 f = local_factors[i];
-    for (u8 axis = 0; axis < ke->axes->n_axes; axis++) {
-      if (ke->axes->axis_types[axis] != KAX_LOOP) {
-        continue;
-      }
-      u32 axis_size = ke->axes->full_shape[axis];
-      if (axis_size < f || axis_size % f != 0) {
-        continue;
-      }
+    for (u8 axis = 0; axis < n_axes; axis++) {
+      TileAxisInfo info;
+      if (!tile_anno_axis_or_kernelaxes(ke, axis, &info)) continue;
+      if (info.kax_type != KAX_LOOP) continue;
+      if (info.extent < f || info.extent % f != 0) continue;
       out[n].op   = KOP_LOCAL;
       out[n].axis = axis;
       out[n].arg  = f;
@@ -137,16 +135,14 @@ static u32 propose_conv2d_upcast_opts(KernelEntry const *ke, KOpt *out,
                                       u32 n, u32 cap) {
   static const u32 upcast_factors[] = {8, 4, 2};
   u32 n_upcast_factors = sizeof(upcast_factors)/sizeof(*upcast_factors);
+  u32 n_axes = tile_anno_axis_count_or_kernelaxes(ke);
   for (u32 i = 0; i < n_upcast_factors && n < cap; i++) {
     u32 f = upcast_factors[i];
-    for (u8 axis = 0; axis < ke->axes->n_axes; axis++) {
-      if (ke->axes->axis_types[axis] != KAX_LOOP) {
-        continue;
-      }
-      u32 axis_size = ke->axes->full_shape[axis];
-      if (axis_size < f || axis_size % f != 0) {
-        continue;
-      }
+    for (u8 axis = 0; axis < n_axes; axis++) {
+      TileAxisInfo info;
+      if (!tile_anno_axis_or_kernelaxes(ke, axis, &info)) continue;
+      if (info.kax_type != KAX_LOOP) continue;
+      if (info.extent < f || info.extent % f != 0) continue;
       out[n].op   = KOP_UPCAST;
       out[n].axis = axis;
       out[n].arg  = f;
@@ -164,7 +160,9 @@ static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
   if (axis == 0xFF) {
     return n;
   }
-  u32 axis_size = ke->axes->full_shape[axis];
+  TileAxisInfo info;
+  if (!tile_anno_axis_or_kernelaxes(ke, axis, &info)) return n;
+  u32 axis_size = info.extent;
   u32 n_unroll_factors = sizeof(unroll_factors)/sizeof(*unroll_factors);
   for (u32 i = 0; i < n_unroll_factors && n < cap; i++) {
     u32 f = unroll_factors[i];
@@ -374,8 +372,11 @@ static int propose_metal_tile_kernel(KernelEntry const *ke) {
     return 0;
   }
   int has_loop = 0;
-  for (u8 i = 0; i < ke->axes->n_axes; i++) {
-    if (ke->axes->axis_types[i] == KAX_LOOP) {
+  u32 n_axes_p = tile_anno_axis_count_or_kernelaxes(ke);
+  for (u8 i = 0; i < n_axes_p; i++) {
+    TileAxisInfo info;
+    if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) continue;
+    if (info.kax_type == KAX_LOOP) {
       has_loop = 1;
       break;
     }
@@ -430,7 +431,10 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {
       u8  red_axis = propose_reduce_axis_index(ke);
-      u32 red_size = red_axis == 0xFF ? 0 : ke->axes->full_shape[red_axis];
+      TileAxisInfo red_info;
+      u32 red_size = (red_axis != 0xFF
+                      && tile_anno_axis_or_kernelaxes(ke, red_axis, &red_info))
+                       ? red_info.extent : 0;
       n = propose_conv2d_local_opts(ke, out, n, cap);
       n = propose_conv2d_upcast_opts(ke, out, n, cap);
       n = propose_group_reduce_opts(ke, out, n, cap, red_axis, red_size);
@@ -443,8 +447,10 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // separately).  Larger factors first so wins compose if the
   // autotune later supports composite proposals.
   u8  axis_idx  = propose_reduce_axis_index(ke);
+  TileAxisInfo axis_info;
   u32 axis_size = axis_idx == 0xFF ? propose_reduce_axis_size(ke)
-                                   : ke->axes->full_shape[axis_idx];
+                                   : (tile_anno_axis_or_kernelaxes(ke, axis_idx,
+                                        &axis_info) ? axis_info.extent : 0);
   if (axis_size > 0 && axis_idx != 0xFF
       && propose_metal_reduce_unroll_kernel(ke)) {
     n = propose_group_reduce_opts(ke, out, n, cap, axis_idx, axis_size);
