@@ -86,6 +86,31 @@ used to carry:
   unavailable.  When the renderer rewrite proper flips render_metal
   to call render_uop, every scheduled kernel flows through this
   validator.
+- **Phase C wedge** (`b583321`, `4a36637`): kernel_lift_to_uop
+  bridges ScalarUop[] arena to UOp DAG.  Takes a fully-scheduled
+  kernel and builds the equivalent UOp DAG on the heap, returning
+  a UOP_STORE root + UOP_BUFFER terms suitable for direct feed
+  into cg_render_uop_kernel.  Coverage: S_CONST/LOAD/INDEX/ADD/MUL/
+  NEG/RECIP/EXP2/LOG2/SQRT/CMPLT/CMPEQ/CAST/REDUCE_SUM-MAX/STORE/
+  BUFFERIZE/RANGE plus the existing scalar_to_uop path for S_I*
+  index expressions.  Inferred input/output buffer shapes from
+  S_INDEX usage when TenDesc unset; reads td->view.shape when
+  present.  3 fixtures (const-fill, elementwise add+mul, reduce-
+  sum) lift end-to-end and compile cleanly through xcrun metal.
+
+  Also: UOP_BUFFER grows an `instance` field for slot disambig --
+  uop_buffer_inst(scope, dtype, ndim, dims, inst) hash-conses by
+  all 5 fields so two kernel inputs with identical (scope, dtype,
+  ndim, dims) but different slot ids stay distinct UOp Terms.
+
+  Closes the end-to-end loop:
+    ScalarUop arena -> kernel_lift_to_uop -> UOp DAG
+                                                |
+                                                v
+                                    cg_render_uop_kernel
+                                                |
+                                                v
+                                       xcrun metal -c (validates)
 
 Test suite: 274/274 binary tests still pass; ~210 new assertions
 across the four new test files (`test_uop_buffer` 31, `test_uop_
