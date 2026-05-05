@@ -251,6 +251,44 @@ int main(void) {
   CHECK(contains(bufrs, "_acc1 = _acc1 + buf"));
   CHECK(contains(bufrs, "] = _acc1;"));
 
+  TEST_BEGIN("render-uop/tc-pattern-match-emits-marker");
+  // Build matmul shape: STORE(C, m*N+n,
+  //   OPT(REDUCE(MUL(A[m*K+k], B[k*N+n]), SUM, k), TC, 0)).
+  u32 dimsAB[1] = { 1024 };
+  Term A = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsAB);
+  Term B = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsAB);
+  Term in_ab[2] = { A, B };
+  // Output dims (M, N) and reduce dim K.
+  Term r_m = uop_range(0, 0 /*LOOP*/, 16);
+  Term r_n = uop_range(1, 0, 16);
+  Term r_k = uop_range(2, 1 /*REDUCE*/, 8);
+  Term k16_tc = uop_const(DT_INT32, 16);
+  Term k8_tc  = uop_const(DT_INT32, 8);
+  // A[m*K + k]
+  Term mK    = uop_int_binary(UOP_IMUL, r_m, k8_tc);
+  Term addrA = uop_int_binary(UOP_IADD, mK, r_k);
+  Term ldA   = uop_index_e(A, addrA);
+  // B[k*N + n]
+  Term kN    = uop_int_binary(UOP_IMUL, r_k, k16_tc);
+  Term addrB = uop_int_binary(UOP_IADD, kN, r_n);
+  Term ldB   = uop_index_e(B, addrB);
+  // MUL + REDUCE(SUM, k_axis=2)
+  Term mul_tc = uop_binary(UOP_MUL, ldA, ldB);
+  Term redM  = uop_reduce(REDUCE_SUM, /*axis=*/2, mul_tc);
+  Term tc_v  = uop_opt(redM, UOP_OPT_TC, 0);
+  // C[m*N + n]
+  Term mN    = uop_int_binary(UOP_IMUL, r_m, k16_tc);
+  Term addrC = uop_int_binary(UOP_IADD, mN, r_n);
+  Term st_tc = uop_store(out, addrC, tc_v);
+  char buftc[2048];
+  fp = fmemopen(buftc, sizeof(buftc), "w");
+  cg_render_uop_kernel(st_tc, "k_gemm", out, in_ab, 2, fp);
+  fclose(fp);
+  CHECK(contains(buftc, "/* TC tensor-core matmul"));
+  // Falls through to F1e accumulator emission for the body.
+  CHECK(contains(buftc, "float _acc2 = 0.0f"));
+  CHECK(contains(buftc, "_acc2 = _acc2 + ("));
+
   TEST_BEGIN("render-uop/reduce-max-uses-fmax");
   Term ld_max_in = uop_index_e(in0, r_red_ax);
   Term red_max = uop_reduce(REDUCE_MAX, /*axis=*/1, ld_max_in);

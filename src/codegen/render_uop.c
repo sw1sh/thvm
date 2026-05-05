@@ -322,6 +322,36 @@ static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
   }
 }
 
+// Recognise the canonical matmul shape:
+//   STORE(C, addr_C, OPT(REDUCE(MUL(INDEX_E(A,_), INDEX_E(B,_)),
+//                              SUM, k_axis), TC, _))
+// The OPT wrapper marks the reduction as a tensor-core target.  The
+// detection is structural; if the shape matches, returns 1 and fills
+// `*out_red_value` with the inner REDUCE term so the caller can fall
+// back to F1e's accumulator path while wrapping with TC markers.
+// (F2b: emit a real simdgroup_matrix template instead of falling
+// back.)
+static int rmu_detect_matmul_tc(Term store, Term *out_red_value) {
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  Term value = heap_read(term_val(store) + 2);
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_OPT) return 0;
+  if (uop_opt_kind(value) != UOP_OPT_TC) return 0;
+  Term inner = uop_opt_target(value);
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_REDUCE) return 0;
+  u64 rloc = term_val(inner);
+  u32 kind = term_val(heap_read(rloc + 1));
+  if (kind != REDUCE_SUM) return 0;
+  Term mul = heap_read(rloc + 0);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term lhs = heap_read(term_val(mul) + 0);
+  Term rhs = heap_read(term_val(mul) + 1);
+  // LHS / RHS must be INDEX_E reads (or wrapped in identity / load).
+  if (term_tag(lhs) != TAG_UOP || term_ext(lhs) != UOP_INDEX_E) return 0;
+  if (term_tag(rhs) != TAG_UOP || term_ext(rhs) != UOP_INDEX_E) return 0;
+  if (out_red_value != NULL) *out_red_value = inner;
+  return 1;
+}
+
 // Filter the collected ranges, splitting them into output ranges
 // (axis_id != reduce_axis) and the reduce range (axis_id == reduce_axis,
 // at most one).  Used by the REDUCE-as-store-value shape so the
@@ -374,10 +404,24 @@ static void rmu_emit_reduce_init(u32 kind, FILE *fp) {
 // Hoists an accumulator outside the reduce-axis loop and references it
 // in the store statement.  Returns 1 if the shape matched and was
 // emitted; 0 if the caller should fall back to the generic path.
+//
+// When the value is wrapped in OPT(REDUCE(...), TC, _) AND the shape
+// matches the matmul pattern, prefixes the emission with a
+// /* TC tensor-core matmul */ marker so the eventual F2b
+// simdgroup_matrix template can be swapped in via pattern-match.
 static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   u64 sloc = term_val(store);
   Term value = heap_read(sloc + 2);
+  // F2: peel one layer of OPT(_, TC) when matmul-shaped.  Continue the
+  // generic accumulator emission below for now; F2b emits a specialised
+  // simdgroup_matrix template instead.
+  Term tc_red = 0;
+  if (rmu_detect_matmul_tc(store, &tc_red)) {
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("/* TC tensor-core matmul (F2 stub; specialised template lands in F2b) */\n", fp);
+    value = tc_red;
+  }
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
   Term buf  = heap_read(sloc + 0);
   Term addr = heap_read(sloc + 1);
