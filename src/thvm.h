@@ -1828,6 +1828,12 @@ fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
 fn u32  tile_anno_axis_count(struct KernelEntry const *ke);
 fn int  tile_anno_axis_at(struct KernelEntry const *ke, u32 d,
                           TileAxisInfo *out);
+// Migration helpers that fall back to KernelAxes when tile_uops
+// isn't populated.  Used by Phase E migrations of code that runs
+// before tile_sync_from_scalar (autotune, propose).
+fn int  tile_anno_axis_or_kernelaxes(struct KernelEntry const *ke, u32 d,
+                                     TileAxisInfo *out);
+fn u32  tile_anno_axis_count_or_kernelaxes(struct KernelEntry const *ke);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);
