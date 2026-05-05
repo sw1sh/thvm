@@ -80,13 +80,23 @@ flickering-watching-gem.md`, the foundation for the 3-IR
 - **D4 main** (`be93640`): TILE_CONV2D specialised compute node
   + tile_build_conv2d_from_info builder, parallel to TILE_MMA.
   Renderer (Phase F) is the first consumer.
-- **Phase F prep** (`28bb3dc`, `3f380b4`, `5b3af38`):
+- **Phase F prep** (`28bb3dc`, `3f380b4`, `5b3af38`, `8c8fbb0`,
+  `4e057cf`, `db7f8de`):
   tile_render_msl_skeleton walks tile_uops and emits pseudo-MSL
   with axis loops, alloc decls, barriers, and store comments.
   TILE_INPUT_BUF leaf node carries kernel input slot ids;
   TILE_LOAD reads from either TILE_LOCAL_ALLOC (shared) or
-  TILE_INPUT_BUF (global).  tile_reject_reason diagnostic
-  pinpoints the first structural failure in a tile_uops graph.
+  TILE_INPUT_BUF (global).  TILE_OUTPUT_BUF leaf carries kernel
+  output slot ids (parallel to TILE_INPUT_BUF).
+  tile_reject_reason diagnostic pinpoints the first structural
+  failure in a tile_uops graph.
+  tile_compute_dispatch_shape walks tile_root's TILE_AXIS children
+  and computes (groups, threads) directly from kax_type + extent
+  -- the seam Phase F's renderer rewrite uses to flip the
+  dispatch path.  Env-gated parity check
+  (THVM_DISPATCH_SHAPE_PARITY=1) inside cg_tile_metal_dispatch_shape
+  validates shadow agreement against the existing CtKernelInfo
+  path; zero mismatches across the full 274-test suite.
   Foundation for Phase F's render_metal.c rewrite.
 - **Phase E structural mutator** (`09af9da`, `92f66f9`,
   `402058e`, `efa381a`, `0218ceb`, `0a3defa`):
