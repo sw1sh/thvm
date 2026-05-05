@@ -18,18 +18,18 @@ fn void axes_default_for(KernelEntry *ke) {
     return;
   }
 
-  KernelAxes *ax = ke->axes;
+  // Phase E migration: route writes through tile_anno_axis_append.
+  // The helper bumps version + handles bounds.  Each call appends
+  // exactly one axis; LOOP per output dim then optional trailing
+  // REDUCE.
   u32 nd = ke->output_shape.ndim;
   if (nd > MAX_AXES - 1) {
     nd = MAX_AXES - 1;
   }
-
   for (u32 i = 0; i < nd; i++) {
-    ax->axis_types[i] = KAX_LOOP;
-    ax->full_shape[i] = ke->output_shape.dims[i];
+    TileAxisInfo info = { KAX_LOOP, ke->output_shape.dims[i], 0, 0 };
+    (void)tile_anno_axis_append(ke, info);
   }
-  ax->n_axes = (u8)nd;
-
   // Trailing REDUCE: append axis sized at the ratio between the
   // tail-REDUCE op's source numel and the kernel output numel.
   // Mirrors WL Kernel.wl `defaultFullShape`'s redOp.numel/outNumel.
@@ -43,15 +43,8 @@ fn void axes_default_for(KernelEntry *ke) {
     }
     u32 out_numel = ke->output_numel ? ke->output_numel : 1;
     u32 axis_size = src_numel / out_numel;
-    if (ax->n_axes < MAX_AXES) {
-      ax->axis_types[ax->n_axes] = KAX_REDUCE;
-      ax->full_shape[ax->n_axes] = axis_size;
-      ax->n_axes++;
-    }
-  }
-  ax->version++;
-  if (ax->version == 0) {
-    ax->version = 1;
+    TileAxisInfo info = { KAX_REDUCE, axis_size, 0, 0 };
+    (void)tile_anno_axis_append(ke, info);
   }
 }
 
