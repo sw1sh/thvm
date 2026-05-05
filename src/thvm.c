@@ -248,6 +248,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // interact_kernel fires bottom-up.
 #include "schedule/rangeify.c"
 #include "schedule/uop_to_scalar.c"
+#include "schedule/kernel_lift.c"
 #include "schedule/tile.c"
 #include "schedule/kernel_alloc.c"
 #include "schedule/kernel_program_cache.c"

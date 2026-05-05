@@ -2098,11 +2098,19 @@ fn Term uop_invalid  (void);
 // and lets D'1 land without consumer rewrites.
 fn Term uop_buffer(u32 scope, u32 dtype, u32 ndim, const u32 *dims);
 
+// Variant with `instance` disambiguator.  Two UOP_BUFFER terms with
+// the same (scope, dtype, ndim, dims) but different instance fields
+// hash-cons to distinct Terms.  Used to keep kernel-arg buffers
+// distinguishable when slots happen to share shape.
+fn Term uop_buffer_inst(u32 scope, u32 dtype, u32 ndim, const u32 *dims,
+                        u32 instance);
+
 // Read accessors for UOP_BUFFER fields (returns 0 on tag mismatch).
 fn u32  uop_buffer_scope(Term t);
 fn u32  uop_buffer_dtype(Term t);
 fn u32  uop_buffer_ndim (Term t);
 fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
+fn u32  uop_buffer_instance(Term t);
 
 // === Store + After (Phase D'2) ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
@@ -2132,6 +2140,26 @@ fn Term uop_opt(Term target, u32 kind, u32 factor);
 fn Term uop_opt_target(Term t);   // 0 on tag mismatch
 fn u32  uop_opt_kind  (Term t);
 fn u32  uop_opt_factor(Term t);
+
+// === Kernel lift to UOp DAG (Phase C wedge) ===
+// Translate a fully-scheduled kernel's ScalarUop arena to a UOp DAG
+// root suitable for cg_render_uop_kernel.  Bridges the migration
+// period between today's scalar_uops[] and Phase C's compute_root.
+//
+// KERNEL_LIFT_MAX_INPUT bounds the in_bufs[] inline array for stack
+// safety -- KERNEL_MAX_INPUT (1M) is a sanity cap, not a typical
+// fan-in.  Real workloads max out at ~30 inputs (Conv2D fuses
+// kh*kw input/weight tids per kernel).
+#define KERNEL_LIFT_MAX_INPUT 64
+typedef struct {
+  Term store_root;
+  Term out_buf;
+  Term in_bufs[KERNEL_LIFT_MAX_INPUT];
+  u32  n_inputs;
+} KernelUopLift;
+
+fn int kernel_lift_to_uop(struct KernelEntry const *ke,
+                          KernelUopLift *out);
 
 // === UOp DAG renderer (Phase F0) ===
 // Walks the UOp DAG rooted at `root` and emits pseudo-MSL.  Replaces
