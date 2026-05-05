@@ -400,26 +400,144 @@ static void rmu_emit_reduce_init(u32 kind, FILE *fp) {
   else                    fputs("0.0f", fp);
 }
 
+// Phase F2b: specialised simdgroup_matrix MSL template for the matmul
+// pattern.  Called when rmu_detect_matmul_tc fires.  Emits an 8x8
+// simdgroup_matrix-tiled K-loop: load A and B subblocks, multiply-
+// accumulate into C, store final C.  Falls back to the generic
+// accumulator path when the address shapes don't yield clean ptr+offset
+// (e.g. non-contiguous strides) -- gives Phase F2 incremental coverage
+// without requiring a perfect detector.
+static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
+                              u32 depth) {
+  // Extract inner pieces validated by rmu_detect_matmul_tc.
+  u64 sloc = term_val(store);
+  Term addr_c = heap_read(sloc + 1);
+  Term buf_c  = heap_read(sloc + 0);
+  u64 rloc      = term_val(tc_red);
+  u32 red_axis  = term_val(heap_read(rloc + 2));
+  Term mul      = heap_read(rloc + 0);
+  Term lhs      = heap_read(term_val(mul) + 0);
+  Term rhs      = heap_read(term_val(mul) + 1);
+  Term buf_a    = heap_read(term_val(lhs) + 0);
+  Term addr_a   = heap_read(term_val(lhs) + 1);
+  Term buf_b    = heap_read(term_val(rhs) + 0);
+  Term addr_b   = heap_read(term_val(rhs) + 1);
+
+  // Find the K-axis extent by scanning addr_a and addr_b for the
+  // RANGE leaf with axis_id == red_axis.
+  Term ranges[MAX_DIM];
+  u32  n_r = 0;
+  rmu_collect_ranges(addr_a, ranges, &n_r);
+  rmu_collect_ranges(addr_b, ranges, &n_r);
+  u32 k_extent = 0;
+  for (u32 i = 0; i < n_r; i++) {
+    if (term_val(heap_read(term_val(ranges[i]) + 0)) == red_axis) {
+      k_extent = term_val(heap_read(term_val(ranges[i]) + 2));
+      break;
+    }
+  }
+  if (k_extent == 0 || (k_extent % 8) != 0) {
+    // Tile size mismatch -- fall back to the generic accumulator path.
+    return 0;
+  }
+
+  // Emit output-range loops.  Reuse the F1e structure but simplified
+  // (no UNROLL pragmas yet for TC; F2c can layer those).
+  Term out_ranges[MAX_DIM];
+  u32  out_kinds[MAX_DIM]   = {0};
+  u32  out_factors[MAX_DIM] = {0};
+  u32  opt_kinds[MAX_DIM]   = {0};
+  u32  opt_factors[MAX_DIM] = {0};
+  Term combined[MAX_DIM];
+  u32  n_combined = 0;
+  rmu_collect_ranges_with_opts(addr_c, combined, opt_kinds, opt_factors, &n_combined);
+  // Don't include red_src ranges in outer loops -- the K range is
+  // consumed by the simdgroup loop.
+  u32 n_out = 0;
+  for (u32 i = 0; i < n_combined; i++) {
+    u32 axis_id = term_val(heap_read(term_val(combined[i]) + 0));
+    if (axis_id == red_axis) continue;
+    out_ranges [n_out] = combined  [i];
+    out_kinds  [n_out] = opt_kinds  [i];
+    out_factors[n_out] = opt_factors[i];
+    n_out++;
+  }
+
+  u32 body_depth = depth;
+  int needs_close[MAX_DIM] = {0};
+  for (u32 i = 0; i < n_out; i++) {
+    Term r = out_ranges[i];
+    u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
+                  ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
+    int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type);
+    rmu_emit_range_open(r, fp, body_depth, out_kinds[i]);
+    if (!threadbound) { needs_close[i] = 1; body_depth++; }
+  }
+
+  // Emit the simdgroup template body.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("/* TC simdgroup_matrix matmul */\n", fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("simdgroup_matrix<float, 8, 8> _a_mat;\n", fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("simdgroup_matrix<float, 8, 8> _b_mat;\n", fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("simdgroup_matrix<float, 8, 8> _c_mat = simdgroup_matrix<float, 8, 8>(0);\n", fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+          red_axis, red_axis, k_extent, red_axis);
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  fprintf(fp, "simdgroup_load(_a_mat, &buf%llu[",
+          (unsigned long long)term_val(buf_a));
+  rmu_emit_term(addr_a, fp);
+  fputs("]);\n", fp);
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  fprintf(fp, "simdgroup_load(_b_mat, &buf%llu[",
+          (unsigned long long)term_val(buf_b));
+  rmu_emit_term(addr_b, fp);
+  fputs("]);\n", fp);
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  fputs("simdgroup_multiply_accumulate(_c_mat, _a_mat, _b_mat, _c_mat);\n", fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("}\n", fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "simdgroup_store(_c_mat, &buf%llu[",
+          (unsigned long long)term_val(buf_c));
+  rmu_emit_term(addr_c, fp);
+  fputs("]);\n", fp);
+
+  // Close output loops.
+  for (i32 i = (i32)n_out - 1; i >= 0; i--) {
+    if (!needs_close[i]) continue;
+    body_depth--;
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
+  (void)out_factors;
+  return 1;
+}
+
 // REDUCE-shaped emission: STORE(buf, addr, REDUCE(src, kind, axis)).
 // Hoists an accumulator outside the reduce-axis loop and references it
 // in the store statement.  Returns 1 if the shape matched and was
 // emitted; 0 if the caller should fall back to the generic path.
 //
 // When the value is wrapped in OPT(REDUCE(...), TC, _) AND the shape
-// matches the matmul pattern, prefixes the emission with a
-// /* TC tensor-core matmul */ marker so the eventual F2b
-// simdgroup_matrix template can be swapped in via pattern-match.
+// matches the matmul pattern, dispatches to the F2b simdgroup_matrix
+// template; falls back to the generic accumulator path when tile sizes
+// don't fit (e.g. K extent not divisible by 8).
 static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   u64 sloc = term_val(store);
   Term value = heap_read(sloc + 2);
-  // F2: peel one layer of OPT(_, TC) when matmul-shaped.  Continue the
-  // generic accumulator emission below for now; F2b emits a specialised
-  // simdgroup_matrix template instead.
+  // F2b: dispatch to simdgroup_matrix template when matmul-shaped AND
+  // tile dims fit; falls back to F1e accumulator otherwise.
   Term tc_red = 0;
   if (rmu_detect_matmul_tc(store, &tc_red)) {
+    if (rmu_emit_matmul_tc(store, tc_red, fp, depth)) return 1;
+    // Fall through to accumulator path.
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fputs("/* TC tensor-core matmul (F2 stub; specialised template lands in F2b) */\n", fp);
+    fputs("/* TC tile mismatch: falling back to scalar accumulator */\n", fp);
     value = tc_red;
   }
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;

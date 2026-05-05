@@ -251,21 +251,23 @@ int main(void) {
   CHECK(contains(bufrs, "_acc1 = _acc1 + buf"));
   CHECK(contains(bufrs, "] = _acc1;"));
 
-  TEST_BEGIN("render-uop/tc-pattern-match-emits-marker");
+  TEST_BEGIN("render-uop/tc-pattern-match-emits-simdgroup");
   // Build matmul shape: STORE(C, m*N+n,
   //   OPT(REDUCE(MUL(A[m*K+k], B[k*N+n]), SUM, k), TC, 0)).
-  u32 dimsAB[1] = { 1024 };
-  Term A = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsAB);
-  Term B = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsAB);
+  // K extent = 32 (divisible by 8) -> simdgroup template fires.
+  u32 dimsA[1] = { 16*32 };
+  u32 dimsB[1] = { 32*16 };
+  Term A = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsA);
+  Term B = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsB);
   Term in_ab[2] = { A, B };
   // Output dims (M, N) and reduce dim K.
   Term r_m = uop_range(0, 0 /*LOOP*/, 16);
   Term r_n = uop_range(1, 0, 16);
-  Term r_k = uop_range(2, 1 /*REDUCE*/, 8);
+  Term r_k = uop_range(2, 1 /*REDUCE*/, 32);
   Term k16_tc = uop_const(DT_INT32, 16);
-  Term k8_tc  = uop_const(DT_INT32, 8);
+  Term k32_tc = uop_const(DT_INT32, 32);
   // A[m*K + k]
-  Term mK    = uop_int_binary(UOP_IMUL, r_m, k8_tc);
+  Term mK    = uop_int_binary(UOP_IMUL, r_m, k32_tc);
   Term addrA = uop_int_binary(UOP_IADD, mK, r_k);
   Term ldA   = uop_index_e(A, addrA);
   // B[k*N + n]
@@ -284,10 +286,38 @@ int main(void) {
   fp = fmemopen(buftc, sizeof(buftc), "w");
   cg_render_uop_kernel(st_tc, "k_gemm", out, in_ab, 2, fp);
   fclose(fp);
-  CHECK(contains(buftc, "/* TC tensor-core matmul"));
-  // Falls through to F1e accumulator emission for the body.
-  CHECK(contains(buftc, "float _acc2 = 0.0f"));
-  CHECK(contains(buftc, "_acc2 = _acc2 + ("));
+  CHECK(contains(buftc, "/* TC simdgroup_matrix matmul"));
+  CHECK(contains(buftc, "simdgroup_matrix<float, 8, 8> _a_mat"));
+  CHECK(contains(buftc, "simdgroup_matrix<float, 8, 8> _b_mat"));
+  CHECK(contains(buftc, "simdgroup_matrix<float, 8, 8> _c_mat"));
+  CHECK(contains(buftc, "simdgroup_load(_a_mat"));
+  CHECK(contains(buftc, "simdgroup_load(_b_mat"));
+  CHECK(contains(buftc, "simdgroup_multiply_accumulate(_c_mat"));
+  CHECK(contains(buftc, "simdgroup_store(_c_mat"));
+  CHECK(contains(buftc, "for (uint a2 = 0; a2 < 32; a2 += 8)"));
+  // Outer loops over M, N still emitted.
+  CHECK(contains(buftc, "for (uint a0 = 0; a0 < 16"));
+  CHECK(contains(buftc, "for (uint a1 = 0; a1 < 16"));
+
+  TEST_BEGIN("render-uop/tc-non-multiple-of-8-falls-back");
+  // K extent = 7 (not divisible by 8) -> F2b skips, F1e accumulator.
+  Term r_k_bad = uop_range(3, 1, 7);
+  Term mK_bad    = uop_int_binary(UOP_IMUL, r_m, uop_const(DT_INT32, 7));
+  Term addrA_bad = uop_int_binary(UOP_IADD, mK_bad, r_k_bad);
+  Term ldA_bad   = uop_index_e(A, addrA_bad);
+  Term kN_bad    = uop_int_binary(UOP_IMUL, r_k_bad, k16_tc);
+  Term addrB_bad = uop_int_binary(UOP_IADD, kN_bad, r_n);
+  Term ldB_bad   = uop_index_e(B, addrB_bad);
+  Term mul_bad   = uop_binary(UOP_MUL, ldA_bad, ldB_bad);
+  Term red_bad   = uop_reduce(REDUCE_SUM, /*axis=*/3, mul_bad);
+  Term tc_bad    = uop_opt(red_bad, UOP_OPT_TC, 0);
+  Term st_bad    = uop_store(out, addrC, tc_bad);
+  char buftc2[2048];
+  fp = fmemopen(buftc2, sizeof(buftc2), "w");
+  cg_render_uop_kernel(st_bad, "k_gemm_bad", out, in_ab, 2, fp);
+  fclose(fp);
+  CHECK(contains(buftc2, "/* TC tile mismatch"));
+  CHECK(contains(buftc2, "_acc3 = _acc3 + ("));
 
   TEST_BEGIN("render-uop/reduce-max-uses-fmax");
   Term ld_max_in = uop_index_e(in0, r_red_ax);
