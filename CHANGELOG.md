@@ -68,10 +68,24 @@ used to carry:
   + `+` combine; REDUCE_MAX uses -INFINITY init + `fmax` combine.
 - **F2 stub** (`cf8f97f`): structural pattern-match for
   STORE(C, _, OPT(REDUCE(MUL(INDEX_E(A,_), INDEX_E(B,_)), SUM, k),
-  TC, _)) -- the canonical matmul shape.  Emits a `/* TC tensor-
-  core matmul */` marker prefix, falls through to F1e's accumulator
-  emission.  F2b is the seam where the simdgroup_matrix MSL template
-  swaps in via the same shape detection.
+  TC, _)) -- the canonical matmul shape.
+- **F2b** (`5648d4b`): real simdgroup_matrix MSL template.  When TC
+  shape detected AND K extent divisible by 8 (simdgroup tile size),
+  emits the full kernel with simdgroup_matrix<float, 8, 8> decls,
+  simdgroup_load A/B, simdgroup_multiply_accumulate, simdgroup_store
+  C.  K extracted from RANGE leaf matching reduce_axis.  Tile-size
+  mismatch falls back to F1e accumulator with a /* TC tile mismatch */
+  marker.  Concrete demonstration that GEMM lives as canonical UOp
+  shape + OPT(_, TC) annotation, not as a dedicated opcode.
+- **F3** (`c6872ec`): xcrun metal compilation parity test.  Each
+  rendered kernel (const-fill, elementwise, reduce-sum, matmul)
+  shells out to `xcrun metal -c -o /dev/null`; non-zero exit fails
+  the test.  All 4 fixtures compile cleanly on the host.  Catches
+  structural bugs (unbalanced braces, undefined builtins, type
+  mismatches) that string-grep tests miss.  Skipped when Xcode
+  unavailable.  When the renderer rewrite proper flips render_metal
+  to call render_uop, every scheduled kernel flows through this
+  validator.
 
 Test suite: 274/274 binary tests still pass; ~210 new assertions
 across the four new test files (`test_uop_buffer` 31, `test_uop_
