@@ -174,6 +174,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "codegen/render_c.c"
 #include "codegen/render_c_scalar.c"
 #include "codegen/render_metal.c"
+#include "codegen/render_uop.c"
 // CPU dispatch: interpreter + BLAS pattern dispatch + clang-JIT.
 // cpu_dispatch_kernel composes the three (BLAS first, then JIT, then
 // interpreter); each records its route via cg_profile_record.

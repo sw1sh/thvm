@@ -52,6 +52,7 @@ TESTS := \
   $(BIN)/test_uop_buffer \
   $(BIN)/test_uop_store_after \
   $(BIN)/test_uop_opt \
+  $(BIN)/test_render_uop \
   $(BIN)/test_tile_axis_info \
   $(BIN)/test_tile_alloc_barrier \
   $(BIN)/test_tile_dispatch_shape \

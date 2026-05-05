@@ -2133,6 +2133,18 @@ fn Term uop_opt_target(Term t);   // 0 on tag mismatch
 fn u32  uop_opt_kind  (Term t);
 fn u32  uop_opt_factor(Term t);
 
+// === UOp DAG renderer (Phase F0) ===
+// Walks the UOp DAG rooted at `root` and emits pseudo-MSL.  Replaces
+// the in-tree TileUop[] skeleton renderer (deleted in Phase G).
+//
+// `root` is typically a UOP_STORE (single-store kernel) or a chain
+// of UOP_AFTER nodes (multi-store kernel).  `out_buf` and `in_bufs`
+// provide the kernel's buffer-binding contract; the renderer types
+// them using uop_buffer_dtype.
+fn void cg_render_uop_kernel(Term root, const char *kernel_name,
+                             Term out_buf, Term const *in_bufs,
+                             u32 n_inputs, FILE *fp);
+
 // === Per-USE movement-chain resolver (Phase B1) ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
 // outside-in, transforming `iters[ndim_io]` to the iter context the
