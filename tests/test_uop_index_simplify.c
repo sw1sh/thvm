@@ -164,6 +164,36 @@ int main(void) {
   // (3*r2 + ya) % 3 -> ya.
   CHECK_EQ(uop_int_binary(UOP_IMOD, mix3, three), ya);
 
+  // === Affine normalization (B2 rest) ===
+  TEST_BEGIN("simplify/affine-c1x-plus-c2x-collapses");
+  // (3*r) + (5*r) -> 8*r
+  Term r3 = uop_int_binary(UOP_IMUL, r, three);
+  Term five = uop_const(DT_INT32, 5);
+  Term r5 = uop_int_binary(UOP_IMUL, r, five);
+  Term sum_collapsed = uop_int_binary(UOP_IADD, r3, r5);
+  CHECK_EQ(term_ext(sum_collapsed), UOP_IMUL);
+  CHECK_EQ(heap_read(term_val(sum_collapsed) + 0), r);
+
+  TEST_BEGIN("simplify/affine-x-plus-cx-collapses");
+  // r + (3*r) -> 4*r
+  Term plus_self = uop_int_binary(UOP_IADD, r, r3);
+  CHECK_EQ(term_ext(plus_self), UOP_IMUL);
+  CHECK_EQ(heap_read(term_val(plus_self) + 0), r);
+  Term coef = heap_read(term_val(plus_self) + 1);
+  CHECK_EQ(term_ext(coef), UOP_CONST);
+
+  TEST_BEGIN("simplify/affine-cx-plus-x-collapses-also");
+  // (3*r) + r -> 4*r
+  Term plus_self_rev = uop_int_binary(UOP_IADD, r3, r);
+  CHECK_EQ(term_ext(plus_self_rev), UOP_IMUL);
+  CHECK_EQ(heap_read(term_val(plus_self_rev) + 0), r);
+
+  TEST_BEGIN("simplify/affine-skips-different-vars");
+  // (3*r) + (5*r2) doesn't collapse; r != r2.
+  Term r2_5 = uop_int_binary(UOP_IMUL, r2, five);
+  Term mixed = uop_int_binary(UOP_IADD, r3, r2_5);
+  CHECK_EQ(term_ext(mixed), UOP_IADD);
+
   TEST_BEGIN("simplify/divmod-affine-roundtrip-end-to-end");
   // Resolve a 1D->1D identity-via-flat reshape: ndim=2, dims=[2,3].
   // resolve builds: flat = i0*3 + i1; in_iters[0] = flat / 3,

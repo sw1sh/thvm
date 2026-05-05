@@ -116,6 +116,25 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
     case UOP_IADD:
       if (a_const && av == 0) return b;
       if (b_const && bv == 0) return a;
+      // Affine normalization: (c1*x) + (c2*x) -> (c1+c2)*x.
+      // Mirrors emit_ibinop's IADD-of-IADD-with-const collapse on
+      // the scalar side; brings the UOp simplifier to parity.
+      {
+        i64 c1, c2;
+        Term x1, x2;
+        if (uop_match_const_mul(a, &c1, &x1)
+            && uop_match_const_mul(b, &c2, &x2)
+            && x1 == x2) {
+          return uop_int_binary(UOP_IMUL, x1, uop_iconst(c1 + c2));
+        }
+        // x + (c*x) -> (c+1)*x  (and the reverse)
+        if (uop_match_const_mul(b, &c1, &x1) && a == x1) {
+          return uop_int_binary(UOP_IMUL, x1, uop_iconst(c1 + 1));
+        }
+        if (uop_match_const_mul(a, &c1, &x1) && b == x1) {
+          return uop_int_binary(UOP_IMUL, x1, uop_iconst(c1 + 1));
+        }
+      }
       break;
     case UOP_ISUB:
       if (b_const && bv == 0) return a;
