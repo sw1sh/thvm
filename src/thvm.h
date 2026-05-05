@@ -609,6 +609,16 @@ typedef struct {
   // into one multi-output kernel; cpu_interpret reads it post-step
   // and copies regs[step] into the extra output buffer.
   u8    store_extra_plus_one;
+  // Phase B3: back-pointer to the originating UOp DAG Term.  Set by
+  // visit() in materialize.c at the moment each KProgOp slot is
+  // emitted; consumed by rangeify when calling
+  // `uop_resolve_movement_chain` so the per-USE INDEX resolver can
+  // walk the original UOp chain instead of the per-op
+  // src0_dims/out_dims/pad_widths/axis_perm metadata.  Goes away in
+  // Phase C along with the rest of KProgOp -- this is transitional
+  // plumbing.  Default 0 = "not populated" (fail gracefully -- caller
+  // bails to the legacy rngs_ctx_* path).
+  Term  source_uop;
 } KProgOp;
 
 // === scalar UOp lowering (Phase A of scalar_uops_lowering.md) ===
