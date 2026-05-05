@@ -908,43 +908,47 @@ static u32         RANGEIFY_UOP_RANGE_MAP_LEN;
 
 static u32 emit_flat_from_rngs(KernelEntry *ke, RngsCtx const *r,
                                u32 const *extents) {
-  // Phase B3: prefer the UOp-driven assembly when all uop_refs are
-  // populated; fall back to the legacy scalar path otherwise.
-  int uop_ok = 1;
-  for (u32 d = 0; d < r->ndim; d++) {
-    if (r->uop_refs[d] == 0) { uop_ok = 0; break; }
+  // Phase B3: UOp-driven flat assembly.  Per-axis iter comes from
+  // uop_refs when populated, else lifted via scalar_to_uop from
+  // refs.  Falls back to legacy scalar emit below when any axis
+  // can't be resolved to UOp form.
+  Term acc_uop = 0;
+  u32  stride  = 1;
+  int  uop_ok  = 1;
+  for (i32 d = (i32)r->ndim - 1; d >= 0; d--) {
+    Term tu = r->uop_refs[d];
+    if (tu == 0) {
+      tu = scalar_to_uop(ke, r->refs[d], RANGEIFY_UOP_RANGE_MAP,
+                         RANGEIFY_UOP_RANGE_MAP_LEN);
+    }
+    if (tu == 0) { uop_ok = 0; break; }
+    if (stride != 1) {
+      tu = uop_int_binary(UOP_IMUL, tu, uop_const(DT_INT32, stride));
+    }
+    acc_uop = (acc_uop == 0) ? tu
+                             : uop_int_binary(UOP_IADD, tu, acc_uop);
+    stride *= extents[d] != 0 ? extents[d] : 1;
   }
   if (uop_ok) {
-    Term acc_uop = 0;
-    u32  stride  = 1;
-    for (i32 d = (i32)r->ndim - 1; d >= 0; d--) {
-      Term tu = r->uop_refs[d];
-      if (stride != 1) {
-        tu = uop_int_binary(UOP_IMUL, tu, uop_const(DT_INT32, stride));
-      }
-      acc_uop = (acc_uop == 0) ? tu
-                               : uop_int_binary(UOP_IADD, tu, acc_uop);
-      stride *= extents[d] != 0 ? extents[d] : 1;
-    }
     if (acc_uop == 0) acc_uop = uop_const(DT_INT32, 0);
     u32 via_uop = uop_to_scalar(ke, acc_uop, RANGEIFY_UOP_RANGE_MAP,
                                 RANGEIFY_UOP_RANGE_MAP_LEN);
     if (via_uop != 0) return via_uop;
   }
-  u32 acc = 0;
-  u32 stride = 1;
+  u32 acc_legacy = 0;
+  u32 stride_legacy = 1;
   for (i32 d = (i32)r->ndim - 1; d >= 0; d--) {
     u32 ref = r->refs[d];
     if (ref == 0) return 0;
     u32 t = ref;
-    if (stride != 1) {
-      u32 c = emit_iconst(ke, (i64)stride);
+    if (stride_legacy != 1) {
+      u32 c = emit_iconst(ke, (i64)stride_legacy);
       t = emit_ibinop(ke, S_IMUL, t, c);
     }
-    acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, t, acc);
-    stride *= extents[d] != 0 ? extents[d] : 1;
+    acc_legacy = (acc_legacy == 0) ? t : emit_ibinop(ke, S_IADD, t, acc_legacy);
+    stride_legacy *= extents[d] != 0 ? extents[d] : 1;
   }
-  return acc != 0 ? acc : emit_iconst(ke, 0);
+  return acc_legacy != 0 ? acc_legacy : emit_iconst(ke, 0);
 }
 
 // Emit a use-local input load: S_INDEX_E(param, addr_expr) + S_LOAD
@@ -963,36 +967,39 @@ fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
   u32 param  = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)slot);
   u32 acc    = 0;
   if (r->ndim == v->shape.ndim) {
-    // Phase B3: UOp-driven address build.  When all uop_refs are
-    // populated and translation succeeds, the address comes from
-    // uop_refs[d] * stride[d] + offset assembled via the simplifier-
-    // aware uop_int_binary, then translated to scalar via the file-
-    // scope range map.  The legacy scalar emit below stays as the
-    // fallback for cases where uop_refs aren't populated or
-    // translation fails.
+    // Phase B3: UOp-driven address build.  Each axis's iter is taken
+    // from r->uop_refs[d] when populated; otherwise scalar_to_uop
+    // rebuilds it from r->refs[d] (covers secondary RngsCtx-build
+    // sites that haven't yet populated uop_refs in parallel).  When
+    // every axis resolves, the address `sum_d (iter * stride) +
+    // offset` is assembled via simplifier-aware uop_int_binary then
+    // translated to scalar via the file-scope range map.  The legacy
+    // scalar emit below stays as the fallback when an axis can't be
+    // lifted to UOp form (e.g. a non-int scalar leaf the inverse
+    // translator doesn't recognise).
     Term acc_uop = (in_off != 0) ? uop_const(DT_INT32, in_off) : 0;
     int  uop_ok  = 1;
     for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
-      if (r->uop_refs[d] == 0) { uop_ok = 0; break; }
+      if (v->strides[d] < 0) { uop_ok = 0; break; }
+      if (v->strides[d] == 0) continue;
+      Term tu = r->uop_refs[d];
+      if (tu == 0) {
+        tu = scalar_to_uop(ke, r->refs[d], RANGEIFY_UOP_RANGE_MAP,
+                           RANGEIFY_UOP_RANGE_MAP_LEN);
+      }
+      if (tu == 0) { uop_ok = 0; break; }
+      if (v->strides[d] != 1) {
+        tu = uop_int_binary(UOP_IMUL, tu,
+                            uop_const(DT_INT32, (u32)v->strides[d]));
+      }
+      acc_uop = (acc_uop == 0) ? tu
+                               : uop_int_binary(UOP_IADD, acc_uop, tu);
     }
     if (uop_ok) {
-      for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
-        if (v->strides[d] < 0) { uop_ok = 0; break; }
-        if (v->strides[d] == 0) continue;
-        Term tu = r->uop_refs[d];
-        if (v->strides[d] != 1) {
-          tu = uop_int_binary(UOP_IMUL, tu,
-                              uop_const(DT_INT32, (u32)v->strides[d]));
-        }
-        acc_uop = (acc_uop == 0) ? tu
-                                 : uop_int_binary(UOP_IADD, acc_uop, tu);
-      }
-      if (uop_ok) {
-        if (acc_uop == 0) acc_uop = uop_const(DT_INT32, 0);
-        u32 acc_via_uop = uop_to_scalar(ke, acc_uop, RANGEIFY_UOP_RANGE_MAP,
-                                        RANGEIFY_UOP_RANGE_MAP_LEN);
-        if (acc_via_uop != 0) acc = acc_via_uop;
-      }
+      if (acc_uop == 0) acc_uop = uop_const(DT_INT32, 0);
+      u32 acc_via_uop = uop_to_scalar(ke, acc_uop, RANGEIFY_UOP_RANGE_MAP,
+                                      RANGEIFY_UOP_RANGE_MAP_LEN);
+      if (acc_via_uop != 0) acc = acc_via_uop;
     }
     if (acc == 0) {
       // Legacy scalar emit -- runs when uop translation isn't usable
