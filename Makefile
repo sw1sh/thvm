@@ -49,6 +49,7 @@ TESTS := \
   $(BIN)/test_bufferize \
   $(BIN)/test_scalar_graph \
   $(BIN)/test_uop_to_scalar \
+  $(BIN)/test_uop_buffer \
   $(BIN)/test_tile_axis_info \
   $(BIN)/test_tile_alloc_barrier \
   $(BIN)/test_tile_dispatch_shape \

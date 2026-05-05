@@ -341,7 +341,22 @@ int             dtype_is_packed   (u32 dt);
                              //   the canonical PAD lowering; downstream
                              //   simplifier folds `LOAD(INVALID)` to the
                              //   reduce identity.
-#define UOP_COUNT       36
+// === Buffer / scope layer (Phase D'1; mirrors tinygrad's Ops.BUFFER) ===
+// Per the TileLang correspondence in the migration plan: UOP_BUFFER is the
+// explicit buffer-leaf opcode that replaces today's implicit-via-UOP_LOAD
+// buffer reference.  Scope distinguishes device-global storage from
+// threadgroup-shared and per-thread register fragments.  T.Tensor argument
+// becomes BUFFER(GLOBAL); T.alloc_shared becomes BUFFER(LOCAL);
+// T.alloc_fragment becomes BUFFER(REG).  No consumer yet -- D'2 wires
+// UOP_STORE/UOP_AFTER, F0 wires the renderer.
+#define UOP_SCOPE_GLOBAL  0   // device memory (T.Tensor argument; default)
+#define UOP_SCOPE_LOCAL   1   // threadgroup-shared (T.alloc_shared)
+#define UOP_SCOPE_REG     2   // per-thread register fragment (T.alloc_fragment)
+#define UOP_BUFFER      36   // heap = [NUM(scope), NUM(dtype), NUM(ndim),
+                             //         NUM(d0), ..., NUM(d_{ndim-1})];
+                             //   ext = UOP_BUFFER opcode.  Hash-cons by
+                             //   (scope, dtype, ndim, dims).
+#define UOP_COUNT       37
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -2043,6 +2058,20 @@ fn Term uop_index_e  (Term buffer, Term addr);
 fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
+
+// === Buffer leaf (Phase D'1) ===
+// Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
+// `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
+// uop_mov_cache: identical (scope, dtype, ndim, dims) tuples share heap
+// loc.  Defaults: scope=GLOBAL captures today's implicit-buffer behavior
+// and lets D'1 land without consumer rewrites.
+fn Term uop_buffer(u32 scope, u32 dtype, u32 ndim, const u32 *dims);
+
+// Read accessors for UOP_BUFFER fields (returns 0 on tag mismatch).
+fn u32  uop_buffer_scope(Term t);
+fn u32  uop_buffer_dtype(Term t);
+fn u32  uop_buffer_ndim (Term t);
+fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
 
 // === Per-USE movement-chain resolver (Phase B1) ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
