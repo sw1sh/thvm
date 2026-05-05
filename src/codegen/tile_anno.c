@@ -137,6 +137,34 @@ int tile_anno_apply_opt(KernelEntry *ke, KOpt opt) {
   return kernel_apply_opt(ke, opt);
 }
 
+// Phase E writer-side: split an axis at position d into
+// (outer at d, inner at d+1).  outer keeps its current type with
+// size = orig_size / factor; inner takes new_inner_type with size =
+// factor.  Today writes ke->axes via the existing axes_apply_opt
+// machinery (encoded as a KOP_LOCAL/UPCAST/UNROLL/GROUP/GROUPTOP);
+// when Phase F flips, this becomes the canonical TILE_AXIS array
+// reshape primitive.
+//
+// Returns 1 on success, 0 if d is out of range, factor doesn't
+// divide axis_size, or the array is full.
+int tile_anno_apply_split(KernelEntry *ke, u32 d, u32 factor,
+                          u32 new_inner_type) {
+  if (ke == NULL || factor == 0) return 0;
+  // Map new_inner_type back to a KOpt op so we can route through
+  // axes_apply_opt for now.  Phase F replaces this with direct
+  // TILE_AXIS array surgery.
+  u8 op;
+  switch (new_inner_type) {
+    case KAX_LOCAL:        op = KOP_LOCAL;    break;
+    case KAX_UPCAST:       op = KOP_UPCAST;   break;
+    case KAX_UNROLL:       op = KOP_UNROLL;   break;
+    case KAX_GROUP_REDUCE: op = KOP_GROUP;    break;
+    default: return 0;  // Unsupported split target; caller bails.
+  }
+  KOpt opt = { op, (u8)d, factor };
+  return tile_anno_apply_opt(ke, opt);
+}
+
 // Append a new axis at the end.  Today writes through KernelAxes
 // (the existing source-of-truth); when Phase F flips, this writes
 // to TILE_AXIS directly.  Returns 1 on success, 0 if the axis array
