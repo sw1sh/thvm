@@ -80,12 +80,25 @@ flickering-watching-gem.md`, the foundation for the 3-IR
 - **D4 main** (`be93640`): TILE_CONV2D specialised compute node
   + tile_build_conv2d_from_info builder, parallel to TILE_MMA.
   Renderer (Phase F) is the first consumer.
-- **Phase F prep** (`28bb3dc`): tile_render_msl_skeleton walks
-  tile_uops and emits pseudo-MSL with axis loops, alloc decls,
-  barriers, and store comments.  Verifies the IR carries enough
-  info for a real renderer; tests cover LOOP_NEST + canonical
-  reduce-broadcast block.  Foundation for Phase F's render_metal.c
-  rewrite.
+- **Phase F prep** (`28bb3dc`, `3f380b4`): tile_render_msl_skeleton
+  walks tile_uops and emits pseudo-MSL with axis loops, alloc
+  decls, barriers, and store comments.  TILE_INPUT_BUF leaf node
+  carries kernel input slot ids; TILE_LOAD reads from either
+  TILE_LOCAL_ALLOC (shared) or TILE_INPUT_BUF (global).  Foundation
+  for Phase F's render_metal.c rewrite.
+- **Phase E writer-side** (`9b401ea`, `9290e5d`, `138eb57`):
+  `tile_anno_apply_opt(ke, opt)` is the canonical opt-application
+  entry point (today wraps kernel_apply_opt).  WL bridge migrated.
+  `tile_anno_axis_set(ke, d, info)` writes a single TileAxisInfo
+  to both KernelAxes and TILE_AXIS in sync.
+  `tile_anno_axes_match(ke)` consistency check between the two
+  backing stores.
+- **B2 polish continuing** (`d364b73`, `0654204`, `33177cd`,
+  `e5132bf`, `22c7767`, `e577591`, `d7e87e4`, `5012310`):
+  affine normalization, divmod recombination, gcd-aware IDIV,
+  outer-of-inner const collapses (IADD/ISUB/IMUL), nested div-mod
+  + mod-mod, add-div-split with non-negative estimator.  All
+  tinygrad divandmod.py rules ported.
 - **Phase E hash consolidation** (`29f4814`): pulls the shared
   per-axis FNV-1a loop from kernel_program_cache.c and autotune.c
   into `tile_anno_hash_axes`.  ~20 lines deleted; hash output
