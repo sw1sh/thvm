@@ -123,6 +123,113 @@ fn void tile_free(KernelEntry *ke) {
   ke->tile_axes_version = 0;
 }
 
+// Phase F prep: tile-IR pretty-printer.  `tile_dump(ke, fp)` walks
+// the tile_uops graph from ke->tile_root and prints a nested
+// representation with indentation.  Axis nodes show kax_type +
+// extent + memory_scope + vector_width; alloc nodes show scope +
+// n_elements; barriers show scope; scalar bodies show the
+// referenced ScalarUop slot id.  Used by `DUMP_TILE_IR=1` env-gate
+// in materialize.c (wired below) and as the foundation Phase F's
+// Metal renderer walks.
+
+static void tile_dump_indent(FILE *fp, u32 depth) {
+  for (u32 i = 0; i < depth; i++) fputs("  ", fp);
+}
+
+fn void tile_dump_node(KernelEntry const *ke, u32 id, FILE *fp, u32 depth);
+
+fn void tile_dump_node(KernelEntry const *ke, u32 id, FILE *fp, u32 depth) {
+  if (ke == NULL || ke->tile_uops == NULL || id == 0
+      || id >= ke->n_tile_uops || depth > 32) {
+    tile_dump_indent(fp, depth);
+    fprintf(fp, "TILE_? id=%u\n", id);
+    return;
+  }
+  TileUop const *u = &ke->tile_uops[id];
+  tile_dump_indent(fp, depth);
+  switch (u->op) {
+    case TILE_AXIS: {
+      TileAxisInfo info = tile_axis_unpack(u->extra);
+      fprintf(fp, "TILE_AXIS<%s ext=%u", tile_axis_name(info.kax_type),
+              info.extent);
+      if (info.memory_scope != 0) fprintf(fp, " scope=%u", info.memory_scope);
+      if (info.vector_width != 0) fprintf(fp, " vw=%u", info.vector_width);
+      fprintf(fp, ">\n");
+      return;
+    }
+    case TILE_LOCAL_ALLOC: {
+      TileAllocInfo info = tile_alloc_unpack(u->extra);
+      fprintf(fp, "TILE_LOCAL_ALLOC<scope=%u n=%u dtype=%u>\n",
+              info.scope, info.n_elements, u->dtype);
+      return;
+    }
+    case TILE_BARRIER:
+      fprintf(fp, "TILE_BARRIER<scope=%u>\n", (u32)u->extra);
+      return;
+    case TILE_SCALAR_BODY:
+      fprintf(fp, "TILE_SCALAR_BODY S%u dtype=%u\n", (u32)u->extra, u->dtype);
+      return;
+    case TILE_REDUCE:
+      fprintf(fp, "TILE_REDUCE S%u dtype=%u\n", (u32)u->extra, u->dtype);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_dump_node(ke, u->src[s], fp, depth + 1);
+      }
+      return;
+    case TILE_LOAD:
+      fprintf(fp, "TILE_LOAD dtype=%u\n", u->dtype);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_dump_node(ke, u->src[s], fp, depth + 1);
+      }
+      return;
+    case TILE_STORE:
+      fprintf(fp, "TILE_STORE S%u dtype=%u\n", (u32)u->extra, u->dtype);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_dump_node(ke, u->src[s], fp, depth + 1);
+      }
+      return;
+    case TILE_BLOCK:
+      fprintf(fp, "TILE_BLOCK n_stmts=%u\n", u->src_count);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_dump_node(ke, u->src[s], fp, depth + 1);
+      }
+      return;
+    case TILE_LOOP_NEST:
+      fprintf(fp, "TILE_LOOP_NEST dtype=%u\n", u->dtype);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_dump_node(ke, u->src[s], fp, depth + 1);
+      }
+      return;
+    case TILE_MMA:
+      fprintf(fp, "TILE_MMA extra=0x%llx dtype=%u\n",
+              (unsigned long long)u->extra, u->dtype);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_dump_node(ke, u->src[s], fp, depth + 1);
+      }
+      return;
+    case TILE_CONV2D:
+      fprintf(fp, "TILE_CONV2D extra=0x%llx dtype=%u\n",
+              (unsigned long long)u->extra, u->dtype);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_dump_node(ke, u->src[s], fp, depth + 1);
+      }
+      return;
+    default:
+      fprintf(fp, "TILE_? op=%u src_count=%u\n", u->op, u->src_count);
+      return;
+  }
+}
+
+fn void tile_dump(KernelEntry const *ke, FILE *fp) {
+  if (fp == NULL) fp = stderr;
+  if (ke == NULL || ke->tile_uops == NULL) {
+    fprintf(fp, "tile_dump: <empty>\n");
+    return;
+  }
+  fprintf(fp, "tile_dump: n_tile_uops=%u root=%u\n",
+          ke->n_tile_uops, ke->tile_root);
+  tile_dump_node(ke, ke->tile_root, fp, 1);
+}
+
 fn const char *tile_op_name(u8 op) {
   switch (op) {
     case TILE_NONE:        return "TILE_NONE";

@@ -1817,6 +1817,9 @@ fn u32  tile_lower_reduce_broadcast(struct KernelEntry *ke,
                                     u32 reduce_groups);
 fn int  tile_build_conv2d_from_info(struct KernelEntry *ke,
                                     TileConv2DInfo const *conv);
+fn void tile_dump_node(struct KernelEntry const *ke, u32 id,
+                       FILE *fp, u32 depth);
+fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
 
 // Phase E scaffolding: axis-info read helpers that go through TILE_AXIS
 // (instead of KernelAxes side channel).  As consumers migrate, these
