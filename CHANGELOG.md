@@ -110,6 +110,27 @@ used to carry:
   gemm shapes that bypass the lifter today via specialised render
   paths.  Binary suite 274/274 green throughout.
 
+- **Phase F renderer parity** (`1af69b8`, `7de2e7a`, `f109ca8`):
+  GEMM-shape lifter for kernels without scalar arena (synthesises
+  the canonical OPT(REDUCE(MUL(LOAD,LOAD), SUM, k), TC, _) UOp DAG
+  from TileGemmInfo).
+  Hoist nested UOP_REDUCE: when REDUCE appears in an expression
+  context (e.g. MUL(REDUCE(...), CONST)), the renderer now pre-
+  walks the value tree, emits accumulator init + reduce-axis loop
+  + combine before the store, and the term emitter substitutes
+  _acc<axis> in the expression.  Fixes the prior /*uop17*/ dead
+  emission for kernels where REDUCE wasn't the direct STORE value.
+  Plus dtype fallback (unknown dtype -> "float" instead of "?")
+  and n_inputs > 30 reject (Metal buffer-attribute cap).
+  THVM_DUMP_LIFT_COMPILE_FAIL=1 saves failing MSL to
+  /tmp/thvm_shadow_last_fail.metal for inspection.
+
+  Final test_tile_graph coverage: attempts=13 successes=9
+  compiles=9 compile_fails=0.  Every kernel the lifter accepts
+  renders to MSL that xcrun metal accepts (100% compile parity).
+  The 4 unhandled are 3 conv2d shapes + 1 kernel with > 30 inputs
+  (hardware cap).
+
 - **Phase C wedge** (`b583321`, `4a36637`): kernel_lift_to_uop
   bridges ScalarUop[] arena to UOp DAG.  Takes a fully-scheduled
   kernel and builds the equivalent UOp DAG on the heap, returning
