@@ -431,7 +431,7 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
   if (opt.op != KOP_LOCAL) {
     return tile_anno_apply_opt(ke, opt);
   }
-  if (!axes_apply_opt(ke->axes, opt)) {
+  if (!tile_anno_apply_opt(ke, opt)) {
     return 0;
   }
   TileAxisInfo info;
@@ -445,7 +445,7 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
     .axis = opt.axis,
     .arg  = info.extent,
   };
-  return axes_apply_opt(ke->axes, global);
+  return tile_anno_apply_opt(ke, global);
 }
 
 static void kernel_bench_fire(u32 kid);
