@@ -2008,6 +2008,19 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       for (u32 d = 0; d < nr; d++) {
         u64 extra = ((u64)S_AXIS_REDUCE << 32) | (u64)reduce_meta[r].extents[d];
         reduce_ranges_per_reduce[r][d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+        // Phase B3: register the reduce range in the UOp range map so
+        // uop_to_scalar can translate any uop_refs that bottom out at
+        // this REDUCE leaf.  axis_id pattern: high bit set + (r * MAX_DIM
+        // + d) so reduce ranges have a distinct namespace from loop ranges.
+        if (RANGEIFY_UOP_RANGE_MAP_LEN < 2 * MAX_DIM) {
+          u32 axis_id = 0x80000000u | (r * MAX_DIM + d);
+          Term ur = uop_range(axis_id, S_AXIS_REDUCE,
+                              reduce_meta[r].extents[d]);
+          RANGEIFY_UOP_RANGE_MAP[RANGEIFY_UOP_RANGE_MAP_LEN].axis_uop  = ur;
+          RANGEIFY_UOP_RANGE_MAP[RANGEIFY_UOP_RANGE_MAP_LEN].scalar_id =
+            reduce_ranges_per_reduce[r][d];
+          RANGEIFY_UOP_RANGE_MAP_LEN++;
+        }
       }
       u32 combined = reduce_ranges_per_reduce[r][0];
       for (u32 d = 1; d < nr; d++) {
