@@ -69,6 +69,26 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   parallel with the scalar emit.  PERMUTE per-USE walk wires
   through.  PAD also accumulates UOP_IAND'd ILT bounds-checks
   into uop_valid_mask.
+- **D3 main** (`69a0bf4`, `33120dd`): reduce-broadcast analyzer
+  + lowering.  `tile_analyze_reduce_broadcast` detects kernels
+  with REDUCE -> non-store-direct consumer (BN-grad / softmax
+  shape).  `tile_lower_reduce_broadcast` builds the canonical
+  TILE_BLOCK preamble: alloc / reduce-into / barrier / load /
+  body.  Wired into tile_build_from_scalar under
+  THVM_TILE_REDUCE_BROADCAST=1; default off until the renderer
+  reads TILE_BLOCK (Phase F).
+- **D4 main** (`be93640`): TILE_CONV2D specialised compute node
+  + tile_build_conv2d_from_info builder, parallel to TILE_MMA.
+  Renderer (Phase F) is the first consumer.
+- **Phase E scaffold** (committed): tile_anno_axis_count +
+  tile_anno_axis_at helpers in new codegen/tile_anno.c.  Read
+  axis info via TILE_AXIS instead of KernelAxes side channel;
+  consumers migrate gradually, KernelAxes deletes once all 157
+  reads go through tile_anno_*.
+- **Misc B2 follow-up** (`39e2239`): IWHERE-of-IWHERE collapse
+  fold in uop_simplify_iwhere; mirrors emit_iwhere's nested-fold
+  in rangeify.
+
 - **B3 main proper** (`5f9eb07`, `354b8eb`, `697543d`,
   `a74937a`, `1f9ab18`): LOAD-site swap.
   emit_input_load_for_use and emit_flat_from_rngs prefer the UOp-
