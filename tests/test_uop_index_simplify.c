@@ -284,6 +284,22 @@ int main(void) {
   Term div_2_b = uop_int_binary(UOP_IDIV, mod_7, two);
   CHECK_EQ(term_ext(div_2_b), UOP_IDIV);  // not folded
 
+  TEST_BEGIN("simplify/nested-mod-mod");
+  // (r2 % 6) % 2 -> r2 % 2 (since 2 | 6).
+  Term mod6_b = uop_int_binary(UOP_IMOD, r2, six_b);
+  Term mod_2 = uop_int_binary(UOP_IMOD, mod6_b, two);
+  CHECK_EQ(term_ext(mod_2), UOP_IMOD);
+  CHECK_EQ(heap_read(term_val(mod_2) + 0), r2);
+  Term mod_2_const = heap_read(term_val(mod_2) + 1);
+  CHECK_EQ(term_ext(mod_2_const), UOP_CONST);
+
+  TEST_BEGIN("simplify/nested-mod-mod-skips-non-multiple");
+  // (r2 % 7) % 2 doesn't simplify.
+  Term mod_7_2 = uop_int_binary(UOP_IMOD, mod_7, two);
+  CHECK_EQ(term_ext(mod_7_2), UOP_IMOD);
+  // Make sure it's the OUTER mod, not folded into r2.
+  CHECK_EQ(heap_read(term_val(mod_7_2) + 0), mod_7);
+
   TEST_BEGIN("simplify/divmod-affine-roundtrip-end-to-end");
   // Resolve a 1D->1D identity-via-flat reshape: ndim=2, dims=[2,3].
   // resolve builds: flat = i0*3 + i1; in_iters[0] = flat / 3,

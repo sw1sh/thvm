@@ -291,6 +291,17 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           if (uop_term_strictly_below(y, c))           return y;
         }
       }
+      // Nested mod-mod: (r % (k*c)) % c -> r % c when c | (k*c).
+      // Mirrors tinygrad's divandmod.py:26-27 MOD branch.
+      if (b_const && bv > 0
+          && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IMOD) {
+        Term mod_a = heap_read(term_val(a) + 0);
+        Term mod_b = heap_read(term_val(a) + 1);
+        i64 kc;
+        if (uop_iconst_value(mod_b, &kc) && kc > 0 && kc % bv == 0) {
+          return uop_int_binary(UOP_IMOD, mod_a, uop_iconst(bv));
+        }
+      }
       break;
     case UOP_ILT:
       if (a == b) return uop_iconst(0);
