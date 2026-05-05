@@ -429,7 +429,7 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
     return 0;
   }
   if (opt.op != KOP_LOCAL) {
-    return kernel_apply_opt(ke, opt);
+    return tile_anno_apply_opt(ke, opt);
   }
   if (!axes_apply_opt(ke->axes, opt)) {
     return 0;

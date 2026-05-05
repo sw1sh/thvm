@@ -1852,6 +1852,9 @@ KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
 // Hash all per-axis (kax_type, extent) into the running FNV-1a state.
 // Used by cache-key generation (kernel_program_cache.c, autotune.c).
 u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
+// Phase E writer-side facade: thin wrapper over kernel_apply_opt.
+// Phase F's source-of-truth flip switches this to mutate TILE_AXIS.
+int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

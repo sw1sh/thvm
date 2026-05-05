@@ -123,3 +123,16 @@ u64 tile_anno_hash_axes(KernelEntry const *ke, u64 h) {
   }
   return h;
 }
+
+// Phase E writer-side facade: route axis-mutating opt application
+// through the tile_anno API.  Today this is a thin wrapper over
+// kernel_apply_opt (which mutates ke->axes); when Phase F flips
+// the source-of-truth, the wrapper switches to mutating TILE_AXIS
+// directly + bumping tile_axes_version.  Migrating callers to this
+// helper now means Phase F's flip is a one-file change.
+//
+// Returns 1 on success (the opt was applied), 0 on failure (invalid
+// opt for this kernel, axis out of range, etc.).
+int tile_anno_apply_opt(KernelEntry *ke, KOpt opt) {
+  return kernel_apply_opt(ke, opt);
+}

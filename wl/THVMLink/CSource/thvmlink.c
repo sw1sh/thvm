@@ -1492,7 +1492,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
     return LIBRARY_NO_ERROR;
   }
   KOpt opt = { (u8)op, (u8)axis, arg };
-  int ok = kernel_apply_opt(&KERNELS[kid], opt);
+  int ok = tile_anno_apply_opt(&KERNELS[kid], opt);
   if (ok) {
     tile_sync_from_scalar(&KERNELS[kid]);
   }
