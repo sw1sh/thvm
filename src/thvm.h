@@ -1806,6 +1806,10 @@ fn u32  tile_emit_barrier(struct KernelEntry *ke, u32 scope);
 fn u32  tile_emit_load(struct KernelEntry *ke, u32 dtype, u32 alloc_id, u32 addr_id);
 fn u32  tile_emit_block(struct KernelEntry *ke, u32 dtype,
                         u32 const *stmts, u8 n_stmts);
+fn u32  tile_analyze_reduce_broadcast(struct KernelEntry const *ke);
+fn u32  tile_lower_reduce_broadcast(struct KernelEntry *ke,
+                                    u32 reduce_scalar_id,
+                                    u32 reduce_groups);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

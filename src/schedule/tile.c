@@ -1121,6 +1121,103 @@ static u32 tile_emit_axes_from_scalar_root(KernelEntry *ke, u32 root,
   return n_axes;
 }
 
+// Phase D3: detect the reduce-broadcast pattern in a kernel's scalar
+// program.  A kernel is reduce-broadcast if it has at least one
+// S_REDUCE_SUM/MAX whose result feeds a non-store-direct consumer
+// (i.e. it's read by another scalar op, not just stored to output).
+// This is the BN-grad / softmax / layernorm shape that wants a
+// cooperative-reduce shared-memory accumulator.
+//
+// Returns the S_REDUCE_* slot id when the pattern matches, or 0 when
+// the kernel is plain reduce-then-store / no reduce / multi-reduce.
+fn u32 tile_analyze_reduce_broadcast(KernelEntry const *ke) {
+  if (ke == NULL || ke->scalar_uops == NULL) return 0;
+  u32 reduce_id = 0;
+  u32 reduce_count = 0;
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    ScalarUop const *u = &ke->scalar_uops[i];
+    if (u->op == S_REDUCE_SUM || u->op == S_REDUCE_MAX) {
+      reduce_id = i;
+      reduce_count++;
+    }
+  }
+  if (reduce_count != 1) return 0;
+  // Walk the scalar arena looking for consumers of `reduce_id`.  If
+  // any of them is NOT an S_STORE, this is a broadcast pattern.
+  int has_non_store_consumer = 0;
+  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
+    ScalarUop const *u = &ke->scalar_uops[i];
+    for (u8 s = 0; s < u->src_count; s++) {
+      if (u->src[s] == reduce_id && u->op != S_STORE) {
+        has_non_store_consumer = 1;
+        break;
+      }
+    }
+    if (has_non_store_consumer) break;
+  }
+  return has_non_store_consumer ? reduce_id : 0;
+}
+
+// Phase D3: build the canonical reduce-broadcast tile-IR shape:
+//
+//   TILE_LOOP_NEST(
+//     TILE_STORE(
+//       TILE_BLOCK(
+//         TILE_LOCAL_ALLOC(scope=SHARED, n_groups),
+//         TILE_REDUCE(... -> writes alloc),
+//         TILE_BARRIER(SHARED),
+//         TILE_LOAD(alloc, addr),
+//         TILE_SCALAR_BODY(post-reduce expression)
+//       )
+//     ),
+//     TILE_AXIS, TILE_AXIS, ...
+//   )
+//
+// `reduce_scalar_id` is the S_REDUCE_* slot returned by
+// tile_analyze_reduce_broadcast.  The lowering wires the scalar
+// reduce body into TILE_REDUCE and the post-reduce scalar tail
+// into TILE_SCALAR_BODY.  No renderer reads this yet; Phase F's
+// render_metal.c rewrite is the first consumer.  Returns 0 on
+// failure (caller falls back to tile_build_from_scalar's default
+// shape).
+fn u32 tile_lower_reduce_broadcast(KernelEntry *ke, u32 reduce_scalar_id,
+                                   u32 reduce_groups) {
+  if (ke == NULL || reduce_scalar_id == 0
+      || reduce_scalar_id >= ke->n_scalar_uops) return 0;
+  ScalarUop const *red = &ke->scalar_uops[reduce_scalar_id];
+  if (red->op != S_REDUCE_SUM && red->op != S_REDUCE_MAX) return 0;
+  u32 store_id = tile_find_scalar_bufferize(ke);
+  if (store_id == 0) return 0;
+  ScalarUop const *bs = &ke->scalar_uops[store_id];
+  if (bs->src_count == 0) return 0;
+  u32 scalar_store_id = bs->src[0];
+  ScalarUop const *st = &ke->scalar_uops[scalar_store_id];
+  if (st->op != S_STORE || st->src_count < 2) return 0;
+  u32 post_reduce_value = st->src[1];   // the body expression
+
+  // Build the 5-step block.
+  u32 alloc   = tile_emit_alloc(ke, red->dtype, TILE_MEM_SHARED, reduce_groups);
+  u32 redbody = tile_emit_leaf(ke, TILE_SCALAR_BODY, red->dtype,
+                               (u64)red->src[0]);
+  u32 reduce_into = tile_emit(ke, TILE_REDUCE, red->dtype, 1, &redbody,
+                              (u64)reduce_scalar_id);
+  u32 barr    = tile_emit_barrier(ke, TILE_MEM_SHARED);
+  // The load address into the shared alloc is just the threadgroup
+  // index (axis_id 0 by convention; renderer maps).  Future: use the
+  // reduce-axis range as the address for the broadcast-back.
+  u32 zero_addr = tile_emit_leaf(ke, TILE_SCALAR_BODY, DT_INT64, 0);
+  u32 load    = tile_emit_load(ke, red->dtype, alloc, zero_addr);
+  u32 post    = tile_emit_leaf(ke, TILE_SCALAR_BODY, red->dtype,
+                               (u64)post_reduce_value);
+
+  u32 stmts[5] = { alloc, reduce_into, barr, load, post };
+  u32 block   = tile_emit_block(ke, red->dtype, stmts, 5);
+
+  u32 tile_store = tile_emit(ke, TILE_STORE, red->dtype, 1, &block,
+                             (u64)scalar_store_id);
+  return tile_store;
+}
+
 fn int tile_build_from_scalar(KernelEntry *ke) {
   u32 root = tile_find_scalar_bufferize(ke);
   if (root == 0) {
