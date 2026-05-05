@@ -253,6 +253,20 @@ int main(void) {
   Term mul_const = heap_read(term_val(r2_times_15) + 1);
   CHECK_EQ(term_ext(mul_const), UOP_CONST);
 
+  TEST_BEGIN("simplify/isub-of-iadd-collapses");
+  // (r2 + 8) - 3 -> r2 + 5.
+  Term r2_plus_8b = uop_int_binary(UOP_IADD, r2, ate);
+  Term sub_iadd = uop_int_binary(UOP_ISUB, r2_plus_8b, three);
+  CHECK_EQ(term_ext(sub_iadd), UOP_IADD);
+  CHECK_EQ(heap_read(term_val(sub_iadd) + 0), r2);
+
+  TEST_BEGIN("simplify/isub-of-isub-collapses");
+  // (r2 - 3) - 5 -> r2 - 8.
+  Term r2_minus_3_b = uop_int_binary(UOP_ISUB, r2, three);
+  Term sub_isub = uop_int_binary(UOP_ISUB, r2_minus_3_b, five);
+  CHECK_EQ(term_ext(sub_isub), UOP_ISUB);
+  CHECK_EQ(heap_read(term_val(sub_isub) + 0), r2);
+
   TEST_BEGIN("simplify/divmod-affine-roundtrip-end-to-end");
   // Resolve a 1D->1D identity-via-flat reshape: ndim=2, dims=[2,3].
   // resolve builds: flat = i0*3 + i1; in_iters[0] = flat / 3,

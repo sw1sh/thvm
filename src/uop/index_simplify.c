@@ -193,6 +193,30 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
     case UOP_ISUB:
       if (b_const && bv == 0) return a;
       if (a == b)             return uop_iconst(0);
+      // (x + c1) - c2 -> x + (c1 - c2)  --  ISUB-of-IADD-with-const
+      // (x - c1) - c2 -> x - (c1 + c2)  --  ISUB-of-ISUB-with-const
+      if (b_const && term_tag(a) == TAG_UOP) {
+        u32 inner_op = term_ext(a);
+        if (inner_op == UOP_IADD) {
+          Term lhs = heap_read(term_val(a) + 0);
+          Term rhs = heap_read(term_val(a) + 1);
+          i64 inner_c;
+          if (uop_iconst_value(rhs, &inner_c)) {
+            return uop_int_binary(UOP_IADD, lhs, uop_iconst(inner_c - bv));
+          }
+          if (uop_iconst_value(lhs, &inner_c)) {
+            return uop_int_binary(UOP_IADD, rhs, uop_iconst(inner_c - bv));
+          }
+        }
+        if (inner_op == UOP_ISUB) {
+          Term lhs = heap_read(term_val(a) + 0);
+          Term rhs = heap_read(term_val(a) + 1);
+          i64 inner_c;
+          if (uop_iconst_value(rhs, &inner_c)) {
+            return uop_int_binary(UOP_ISUB, lhs, uop_iconst(inner_c + bv));
+          }
+        }
+      }
       break;
     case UOP_IMUL:
       if (a_const && av == 0) return uop_iconst(0);
