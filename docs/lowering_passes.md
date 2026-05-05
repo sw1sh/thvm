@@ -989,3 +989,52 @@ IR / target source), 1 dispatch path, ~3.2k lines deleted, faster
 compile, autotune lives at the right layer (Tile IR), and a clean
 extension surface for the actual perf wins (memory hierarchy,
 vectorisation, MMA).
+
+### Migration status (snapshot)
+
+What's landed (cumulative across recent sessions):
+
+- **Phase B0-B2** (UOp INDEX layer): UOP_RANGE / UOP_INDEX_E /
+  UOP_I*/IWHERE/INVALID opcodes.  Symbolic INDEX simplifier with
+  range-bound-aware folds, divandmod recombination, gcd-aware
+  divisor cancellation, IADD/ISUB/IMUL outer-of-inner const
+  collapses, IWHERE-of-IWHERE collapse, nested div-mod / mod-mod,
+  add-div-split with non-negative estimator.  All tinygrad
+  divandmod.py rules ported.
+- **Phase B1**: `uop_resolve_movement_chain` ports tinygrad's
+  apply_movement_op for all 6 movement ops.
+- **Phase B3**: scalar_to_uop / uop_to_scalar translators.
+  `RngsCtx` carries parallel UOp Term iters across all 6
+  rngs_ctx_* movement composers.  LOAD-site address build prefers
+  the UOp path with scalar_to_uop fallback.  Scalar simplifier
+  rangeify emit_ibinop has range-bound-aware folds at parity with
+  the UOp simplifier.
+- **Phase D1-D2**: TILE_AXIS metadata struct (memory_scope +
+  vector_width).  TILE_LOCAL_ALLOC, TILE_BARRIER, TILE_LOAD,
+  TILE_BLOCK, TILE_INPUT_BUF constructors.
+- **Phase D3-D4**: tile_analyze_reduce_broadcast +
+  tile_lower_reduce_broadcast wired into tile_build_from_scalar
+  under THVM_TILE_REDUCE_BROADCAST=1.  TILE_CONV2D specialised
+  compute node + builder.
+- **Phase E**: codegen/tile_anno.c facade with read API
+  (axis_count + axis_at + axis_or_kernelaxes + applied_opts*),
+  hash helper (tile_anno_hash_axes), and write API
+  (apply_opt + apply_split + apply_record_opt + axis_set +
+  axis_append + axes_match).  All ke->axes->axis_types[] /
+  full_shape[] / applied_opts[] reads outside the bridge converter
+  and structural mutators go through the facade.  Stronger
+  staleness check (versions+count match) prevents stale TILE_AXIS
+  reads.
+- **Phase F prep**: tile_dump pretty-printer + DUMP_TILE_IR
+  env-gate.  tile_render_msl_skeleton emits pseudo-MSL for the
+  full reduce-broadcast block shape.  tile_reject_reason
+  diagnostic.
+
+What's deferred (each multi-week structural):
+
+- **Phase F renderer rewrite**: render_metal.c (1963 lines)
+  consuming tile_uops directly.  Dispatch ladder collapse (7
+  paths -> 1).
+- **Phase C KProgOp deletion**: KernelEntry.compute_root replaces
+  KernelEntry.program; KProgOp metadata fields disappear.
+- **Phase G dead-code deletion**: gated on F + C.
