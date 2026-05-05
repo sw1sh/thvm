@@ -77,6 +77,17 @@ fn u32 tile_emit_barrier(KernelEntry *ke, u32 scope) {
   return tile_emit_leaf(ke, TILE_BARRIER, DT_BOOL, (u64)scope);
 }
 
+// Phase D2: TILE_LOAD -- read N consecutive elements from a
+// TILE_LOCAL_ALLOC (or other addressable scope) at `addr`.
+// src[0] = alloc_id (the TILE_LOCAL_ALLOC node), src[1] = addr
+// expression (typically a TILE_SCALAR_BODY wrapping a ScalarUop
+// integer expression).  The dtype matches the alloc's element type.
+// extra is reserved for future vectorisation hints (D3 ignores it).
+fn u32 tile_emit_load(KernelEntry *ke, u32 dtype, u32 alloc_id, u32 addr_id) {
+  u32 src[2] = { alloc_id, addr_id };
+  return tile_emit(ke, TILE_LOAD, dtype, 2, src, 0);
+}
+
 // Read TILE_LOCAL_ALLOC's (scope, n_elements) -- mirrors
 // tile_axis_unpack but for the alloc's two-field packing.
 typedef struct {

@@ -1783,6 +1783,7 @@ fn u32  tile_emit(struct KernelEntry *ke, u8 op, u32 dtype,
 fn u32  tile_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
 fn u32  tile_emit_alloc(struct KernelEntry *ke, u32 dtype, u32 scope, u32 n_elements);
 fn u32  tile_emit_barrier(struct KernelEntry *ke, u32 scope);
+fn u32  tile_emit_load(struct KernelEntry *ke, u32 dtype, u32 alloc_id, u32 addr_id);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

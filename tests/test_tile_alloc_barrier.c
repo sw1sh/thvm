@@ -53,6 +53,25 @@ int main(void) {
   TEST_BEGIN("tile-op-name/covers-new-nodes");
   CHECK_EQ(strcmp(tile_op_name(TILE_LOCAL_ALLOC), "TILE_LOCAL_ALLOC"), 0);
   CHECK_EQ(strcmp(tile_op_name(TILE_BARRIER), "TILE_BARRIER"), 0);
+  CHECK_EQ(strcmp(tile_op_name(TILE_LOAD), "TILE_LOAD"), 0);
+
+  TEST_BEGIN("tile-load/heap-layout");
+  // Build a TILE_LOAD reading from the TILE_LOCAL_ALLOC at `a`.
+  // For the addr we just stash a TILE_SCALAR_BODY wrapping a fake
+  // scalar id (no real scalar arena set up) -- the constructor
+  // doesn't validate src targets, only that src_count is right.
+  u32 addr = tile_emit_leaf(&ke, TILE_SCALAR_BODY, DT_INT64, 42);
+  u32 ld   = tile_emit_load(&ke, DT_FP32, a, addr);
+  CHECK(ld > 0);
+  CHECK_EQ(ke.tile_uops[ld].op, TILE_LOAD);
+  CHECK_EQ(ke.tile_uops[ld].dtype, DT_FP32);
+  CHECK_EQ(ke.tile_uops[ld].src_count, 2);
+  CHECK_EQ(ke.tile_uops[ld].src[0], a);
+  CHECK_EQ(ke.tile_uops[ld].src[1], addr);
+
+  TEST_BEGIN("tile-load/distinct-from-alloc-and-barrier");
+  CHECK(ld != a);
+  CHECK(ld != b);
 
   tile_free(&ke);
   thvm_free();
