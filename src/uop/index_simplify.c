@@ -189,6 +189,18 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           if (y == 0 || uop_term_strictly_below(y, c)) return x;
         }
       }
+      // GCD-aware: (k*c1) // (k*c2) -> c1 // c2 when k>0.  Plays
+      // out as `(c*x) // (c*y) = x/y` when both numerator and
+      // denominator factor through the same constant.
+      if (a_const && b_const) break;  // caught by the constant fold above
+      if (b_const && bv > 0) {
+        i64 c1;
+        Term xnum;
+        if (uop_match_const_mul(a, &c1, &xnum) && c1 > 0 && bv % c1 == 0) {
+          // (c1 * xnum) // bv -> xnum // (bv / c1)
+          return uop_int_binary(UOP_IDIV, xnum, uop_iconst(bv / c1));
+        }
+      }
       break;
     case UOP_IMOD:
       if (b_const && bv == 1) return uop_iconst(0);

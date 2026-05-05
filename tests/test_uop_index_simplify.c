@@ -210,6 +210,24 @@ int main(void) {
   Term not_recombined = uop_int_binary(UOP_IADD, div7_mul7, mod11);
   CHECK_EQ(term_ext(not_recombined), UOP_IADD);
 
+  TEST_BEGIN("simplify/idiv-gcd-aware-c-mul-x-div-c-times-y");
+  // (3 * r2) // 6 -> r2 // 2 (gcd factors out the common 3).
+  Term r2_times_3 = uop_int_binary(UOP_IMUL, r2, three);
+  Term six = uop_const(DT_INT32, 6);
+  Term gcd_div = uop_int_binary(UOP_IDIV, r2_times_3, six);
+  CHECK_EQ(term_ext(gcd_div), UOP_IDIV);
+  CHECK_EQ(heap_read(term_val(gcd_div) + 0), r2);
+  Term gcd_div_b = heap_read(term_val(gcd_div) + 1);
+  CHECK_EQ(term_ext(gcd_div_b), UOP_CONST);
+
+  TEST_BEGIN("simplify/idiv-gcd-aware-skips-non-divisible");
+  // (3 * r2) // 7 doesn't simplify (7 % 3 != 0).
+  Term seven_b = uop_const(DT_INT32, 7);
+  Term not_gcd = uop_int_binary(UOP_IDIV, r2_times_3, seven_b);
+  CHECK_EQ(term_ext(not_gcd), UOP_IDIV);
+  // Should NOT have rewritten the LHS (no fold should fire).
+  CHECK_EQ(heap_read(term_val(not_gcd) + 0), r2_times_3);
+
   TEST_BEGIN("simplify/divmod-affine-roundtrip-end-to-end");
   // Resolve a 1D->1D identity-via-flat reshape: ndim=2, dims=[2,3].
   // resolve builds: flat = i0*3 + i1; in_iters[0] = flat / 3,
