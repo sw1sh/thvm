@@ -112,6 +112,38 @@ int main(void) {
   CHECK(contains(buf4, "TILE_LOAD from input 2"));
 
   tile_free(ke);
+
+  TEST_BEGIN("tile-render-msl/kernel-signature-from-metadata");
+  // Phase F prep: the rendered signature reads ke->n_inputs +
+  // ke->input_dtypes + ke->output_dtype to emit a real Metal kernel
+  // arg list with `out [[ buffer(0) ]]` followed by `inN [[ buffer(1+N) ]]`.
+  ke->output_dtype = DT_FP32;
+  u32 dts[3] = { DT_FP32, DT_FP16, DT_INT32 };
+  ke->input_dtypes = dts;
+  ke->n_inputs     = 3;
+  TileAxisInfo a_sig = { KAX_LOOP, 4, TILE_MEM_GLOBAL, 0 };
+  u32 ax_sig = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a_sig));
+  u32 sig_body = tile_emit_leaf(ke, TILE_SCALAR_BODY, DT_FP32, 1);
+  u32 sig_store_src[1] = { sig_body };
+  u32 sig_store = tile_emit(ke, TILE_STORE, DT_FP32, 1, sig_store_src, 1);
+  u32 sig_lnest_src[2] = { sig_store, ax_sig };
+  ke->tile_root = tile_emit(ke, TILE_LOOP_NEST, DT_FP32, 2, sig_lnest_src, 0);
+
+  char buf5[2048];
+  fp = fmemopen(buf5, sizeof(buf5), "w");
+  CHECK(fp != NULL);
+  tile_render_msl_skeleton(ke, fp);
+  fclose(fp);
+  CHECK(contains(buf5, "#include <metal_stdlib>"));
+  CHECK(contains(buf5, "device float *out [[ buffer(0) ]]"));
+  CHECK(contains(buf5, "device const float *in0 [[ buffer(1) ]]"));
+  CHECK(contains(buf5, "device const half *in1 [[ buffer(2) ]]"));
+  CHECK(contains(buf5, "device const int *in2 [[ buffer(3) ]]"));
+  CHECK(contains(buf5, "thread_position_in_grid"));
+
+  ke->n_inputs = 0;
+  ke->input_dtypes = NULL;
+  tile_free(ke);
   thvm_free();
   TEST_REPORT();
 }

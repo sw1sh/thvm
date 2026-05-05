@@ -410,6 +410,19 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
   }
 }
 
+// Map a thvm dtype to its MSL scalar type name.  Stays conservative:
+// types Phase F's renderer does not yet emit code for return "?".
+static const char *tile_msl_type_name(u32 dtype) {
+  switch (dtype) {
+    case DT_FP32:  return "float";
+    case DT_FP16:  return "half";
+    case DT_INT32: return "int";
+    case DT_INT64: return "long";
+    case DT_UINT8: return "uchar";
+    default:       return "?";
+  }
+}
+
 fn void tile_render_msl_skeleton(KernelEntry const *ke, FILE *fp) {
   if (fp == NULL) fp = stderr;
   if (ke == NULL || ke->tile_uops == NULL || ke->tile_root == 0) {
@@ -417,7 +430,23 @@ fn void tile_render_msl_skeleton(KernelEntry const *ke, FILE *fp) {
     return;
   }
   fputs("// === tile_render_msl_skeleton ===\n", fp);
-  fputs("kernel void tile_kernel(/* ... */) {\n", fp);
+  fputs("#include <metal_stdlib>\n", fp);
+  fputs("using namespace metal;\n\n", fp);
+  // Kernel signature derived from KernelEntry metadata.  Output goes
+  // to buffer(0); each input goes to buffer(1+i).  Phase F's renderer
+  // proper will switch to emitting TILE_INPUT_BUF / TILE_OUTPUT_BUF
+  // leaves and reading the buffer arg list from those.
+  fputs("kernel void tile_kernel(\n", fp);
+  fprintf(fp, "    device %s *out [[ buffer(0) ]]",
+          tile_msl_type_name(ke->output_dtype));
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 dt = (ke->input_dtypes != NULL) ? ke->input_dtypes[i] : DT_FP32;
+    fprintf(fp, ",\n    device const %s *in%u [[ buffer(%u) ]]",
+            tile_msl_type_name(dt), i, i + 1);
+  }
+  fputs(",\n    uint tid [[ thread_position_in_grid ]],\n", fp);
+  fputs("    uint tg [[ threadgroup_position_in_grid ]],\n", fp);
+  fputs("    uint tt [[ thread_position_in_threadgroup ]]) {\n", fp);
   tile_render_msl_node(ke, ke->tile_root, fp, 1);
   fputs("}\n", fp);
 }
