@@ -286,9 +286,11 @@ fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
     // divide axis_size (axes_apply_opt already validated this) but
     // we re-check defensively.
     u32 unroll_factor = 1;
-    if (ke->axes != NULL) {
-      for (u32 i = 0; i < ke->axes->n_applied; i++) {
-        KOpt o = ke->axes->applied_opts[i];
+    {
+      u32 n_app = tile_anno_applied_opts_count(ke);
+      KOpt const *opts = tile_anno_applied_opts(ke);
+      for (u32 i = 0; i < n_app; i++) {
+        KOpt o = opts[i];
         if (o.op == KOP_UNROLL && axis_size % o.arg == 0) unroll_factor = o.arg;
       }
     }
@@ -298,9 +300,11 @@ fn char *cg_emit(KernelEntry const *ke, Renderer const *r) {
     // output_numel wins.  Same shape as UNROLL: the renderer
     // emits a pragma above the per-output loop.
     u32 upcast_factor = 1;
-    if (ke->axes != NULL) {
-      for (u32 i = 0; i < ke->axes->n_applied; i++) {
-        KOpt o = ke->axes->applied_opts[i];
+    {
+      u32 n_app = tile_anno_applied_opts_count(ke);
+      KOpt const *opts = tile_anno_applied_opts(ke);
+      for (u32 i = 0; i < n_app; i++) {
+        KOpt o = opts[i];
         if (o.op == KOP_UPCAST && ke->output_numel % o.arg == 0) upcast_factor = o.arg;
       }
     }

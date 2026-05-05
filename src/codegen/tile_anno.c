@@ -84,3 +84,18 @@ fn u32 tile_anno_axis_count_or_kernelaxes(KernelEntry const *ke) {
   if (ke == NULL || ke->axes == NULL) return 0;
   return ke->axes->n_axes;
 }
+
+// applied_opts facade: today these read from KernelAxes.applied_opts[]
+// with no Tile-IR equivalent.  When Phase E grows TILE_OPT (or similar)
+// nodes that record autotune mutations at the Tile-IR layer, the
+// helper switches over.  For now the facade lets every consumer go
+// through the same call site so the migration drops in cleanly later.
+fn u32 tile_anno_applied_opts_count(KernelEntry const *ke) {
+  if (ke == NULL || ke->axes == NULL) return 0;
+  return ke->axes->n_applied;
+}
+
+fn KOpt const *tile_anno_applied_opts(KernelEntry const *ke) {
+  if (ke == NULL || ke->axes == NULL) return NULL;
+  return ke->axes->applied_opts;
+}
