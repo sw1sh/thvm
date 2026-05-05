@@ -230,6 +230,156 @@ fn void tile_dump(KernelEntry const *ke, FILE *fp) {
   tile_dump_node(ke, ke->tile_root, fp, 1);
 }
 
+// Phase F prep: emit MSL skeleton from tile_uops.  Produces a
+// pseudo-MSL kernel with axis loops, alloc declarations, barriers,
+// and store statements -- enough structure to verify the IR carries
+// what a real renderer needs.  Doesn't substitute scalar bodies;
+// emits placeholder `/* scalar S<id> */` for those.  Future Phase F
+// work expands the placeholders into actual MSL via the existing
+// rmt_emit_value helpers.
+
+static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
+                                 u32 depth);
+
+static void tile_render_msl_indent(FILE *fp, u32 depth) {
+  for (u32 i = 0; i < depth; i++) fputs("  ", fp);
+}
+
+static void tile_render_msl_axis(KernelEntry const *ke, u32 id, FILE *fp,
+                                 u32 depth, u32 axis_idx) {
+  TileUop const *u = &ke->tile_uops[id];
+  TileAxisInfo info = tile_axis_unpack(u->extra);
+  tile_render_msl_indent(fp, depth);
+  switch (info.kax_type) {
+    case KAX_LOOP:
+      fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) {\n",
+              axis_idx, axis_idx, info.extent, axis_idx);
+      break;
+    case KAX_REDUCE:
+      fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) /*reduce*/ {\n",
+              axis_idx, axis_idx, info.extent, axis_idx);
+      break;
+    case KAX_GLOBAL:
+      fprintf(fp, "uint a%u = threadgroup_position_in_grid; /*global*/\n",
+              axis_idx);
+      break;
+    case KAX_LOCAL:
+      fprintf(fp, "uint a%u = thread_position_in_threadgroup; /*local*/\n",
+              axis_idx);
+      break;
+    case KAX_GROUP_REDUCE:
+      fprintf(fp, "uint a%u = thread_position_in_threadgroup; /*group_reduce ext=%u*/\n",
+              axis_idx, info.extent);
+      break;
+    default:
+      fprintf(fp, "uint a%u = 0; /*kax=%u ext=%u*/\n",
+              axis_idx, info.kax_type, info.extent);
+      break;
+  }
+}
+
+static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
+                                 u32 depth) {
+  if (id == 0 || id >= ke->n_tile_uops) return;
+  TileUop const *u = &ke->tile_uops[id];
+  switch (u->op) {
+    case TILE_LOOP_NEST: {
+      // src[0] = body, src[1..] = axes.
+      for (u8 s = 1; s < u->src_count; s++) {
+        tile_render_msl_axis(ke, u->src[s], fp, depth, s - 1);
+      }
+      tile_render_msl_node(ke, u->src[0], fp, depth + 1);
+      // Close LOOP/REDUCE braces.
+      for (u8 s = 1; s < u->src_count; s++) {
+        TileUop const *axis = &ke->tile_uops[u->src[s]];
+        TileAxisInfo info = tile_axis_unpack(axis->extra);
+        if (info.kax_type == KAX_LOOP || info.kax_type == KAX_REDUCE) {
+          tile_render_msl_indent(fp, depth);
+          fputs("}\n", fp);
+        }
+      }
+      return;
+    }
+    case TILE_STORE: {
+      tile_render_msl_indent(fp, depth);
+      fprintf(fp, "/* TILE_STORE S%u */\n", (u32)u->extra);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_render_msl_node(ke, u->src[s], fp, depth);
+      }
+      return;
+    }
+    case TILE_BLOCK: {
+      tile_render_msl_indent(fp, depth);
+      fputs("/* TILE_BLOCK begin */\n", fp);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_render_msl_node(ke, u->src[s], fp, depth);
+      }
+      tile_render_msl_indent(fp, depth);
+      fputs("/* TILE_BLOCK end */\n", fp);
+      return;
+    }
+    case TILE_LOCAL_ALLOC: {
+      TileAllocInfo info = tile_alloc_unpack(u->extra);
+      tile_render_msl_indent(fp, depth);
+      fprintf(fp, "threadgroup float _alloc%u[%u]; /*scope=%u*/\n",
+              id, info.n_elements, info.scope);
+      return;
+    }
+    case TILE_BARRIER:
+      tile_render_msl_indent(fp, depth);
+      fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+      return;
+    case TILE_REDUCE: {
+      tile_render_msl_indent(fp, depth);
+      fprintf(fp, "float _acc = 0.0f; /* TILE_REDUCE S%u */\n",
+              (u32)u->extra);
+      for (u8 s = 0; s < u->src_count; s++) {
+        tile_render_msl_node(ke, u->src[s], fp, depth);
+      }
+      return;
+    }
+    case TILE_LOAD:
+      tile_render_msl_indent(fp, depth);
+      fprintf(fp, "float _v = _alloc%u[/*addr*/]; /* TILE_LOAD */\n",
+              u->src[0]);
+      return;
+    case TILE_SCALAR_BODY:
+      tile_render_msl_indent(fp, depth);
+      fprintf(fp, "/* scalar body S%u */\n", (u32)u->extra);
+      return;
+    case TILE_MMA:
+      tile_render_msl_indent(fp, depth);
+      fputs("/* TILE_MMA: simdgroup_matrix... */\n", fp);
+      return;
+    case TILE_CONV2D:
+      tile_render_msl_indent(fp, depth);
+      fputs("/* TILE_CONV2D: conv2d_flat shader template */\n", fp);
+      return;
+    case TILE_AXIS:
+      // Standalone TILE_AXIS at non-loop-nest position; shouldn't
+      // happen but emit as comment.
+      tile_render_msl_indent(fp, depth);
+      fputs("/* unexpected TILE_AXIS */\n", fp);
+      return;
+    default:
+      tile_render_msl_indent(fp, depth);
+      fprintf(fp, "/* unknown TILE_? op=%u */\n", u->op);
+      return;
+  }
+}
+
+fn void tile_render_msl_skeleton(KernelEntry const *ke, FILE *fp) {
+  if (fp == NULL) fp = stderr;
+  if (ke == NULL || ke->tile_uops == NULL || ke->tile_root == 0) {
+    fputs("// tile_render_msl_skeleton: <empty>\n", fp);
+    return;
+  }
+  fputs("// === tile_render_msl_skeleton ===\n", fp);
+  fputs("kernel void tile_kernel(/* ... */) {\n", fp);
+  tile_render_msl_node(ke, ke->tile_root, fp, 1);
+  fputs("}\n", fp);
+}
+
 fn const char *tile_op_name(u8 op) {
   switch (op) {
     case TILE_NONE:        return "TILE_NONE";

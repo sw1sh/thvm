@@ -54,6 +54,7 @@ TESTS := \
   $(BIN)/test_tile_reduce_broadcast \
   $(BIN)/test_tile_anno \
   $(BIN)/test_tile_dump \
+  $(BIN)/test_tile_render_msl \
   $(BIN)/test_tile_graph \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \

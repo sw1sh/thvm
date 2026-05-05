@@ -1821,6 +1821,15 @@ fn void tile_dump_node(struct KernelEntry const *ke, u32 id,
                        FILE *fp, u32 depth);
 fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
 
+// Phase F prep: emit a pseudo-MSL skeleton from the tile_uops graph.
+// Walks TILE_LOOP_NEST -> TILE_STORE -> TILE_BLOCK -> TILE_REDUCE/
+// TILE_LOAD/TILE_BARRIER/TILE_LOCAL_ALLOC/TILE_SCALAR_BODY/TILE_AXIS
+// and emits opening loop braces, alloc declarations, barrier calls,
+// and placeholder scalar bodies.  Verifies the IR carries enough
+// info for a real renderer; doesn't substitute scalar bodies (that's
+// the existing rmt_emit_value).
+fn void tile_render_msl_skeleton(struct KernelEntry const *ke, FILE *fp);
+
 // Phase E scaffolding: axis-info read helpers that go through TILE_AXIS
 // (instead of KernelAxes side channel).  As consumers migrate, these
 // become the single read path; KernelAxes deletes once the migration
