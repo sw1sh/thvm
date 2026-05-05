@@ -80,6 +80,17 @@ flickering-watching-gem.md`, the foundation for the 3-IR
 - **D4 main** (`be93640`): TILE_CONV2D specialised compute node
   + tile_build_conv2d_from_info builder, parallel to TILE_MMA.
   Renderer (Phase F) is the first consumer.
+- **Phase F prep** (`28bb3dc`): tile_render_msl_skeleton walks
+  tile_uops and emits pseudo-MSL with axis loops, alloc decls,
+  barriers, and store comments.  Verifies the IR carries enough
+  info for a real renderer; tests cover LOOP_NEST + canonical
+  reduce-broadcast block.  Foundation for Phase F's render_metal.c
+  rewrite.
+- **Phase E hash consolidation** (`29f4814`): pulls the shared
+  per-axis FNV-1a loop from kernel_program_cache.c and autotune.c
+  into `tile_anno_hash_axes`.  ~20 lines deleted; hash output
+  bit-identical.
+
 - **Phase E read-side migration** (committed): codegen/tile_anno.c
   + ~10 commits migrating consumers.  All read sites for
   `ke->axes->axis_types[]` / `full_shape[]` and `applied_opts[]`
