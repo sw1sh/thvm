@@ -908,6 +908,29 @@ static u32         RANGEIFY_UOP_RANGE_MAP_LEN;
 
 static u32 emit_flat_from_rngs(KernelEntry *ke, RngsCtx const *r,
                                u32 const *extents) {
+  // Phase B3: prefer the UOp-driven assembly when all uop_refs are
+  // populated; fall back to the legacy scalar path otherwise.
+  int uop_ok = 1;
+  for (u32 d = 0; d < r->ndim; d++) {
+    if (r->uop_refs[d] == 0) { uop_ok = 0; break; }
+  }
+  if (uop_ok) {
+    Term acc_uop = 0;
+    u32  stride  = 1;
+    for (i32 d = (i32)r->ndim - 1; d >= 0; d--) {
+      Term tu = r->uop_refs[d];
+      if (stride != 1) {
+        tu = uop_int_binary(UOP_IMUL, tu, uop_const(DT_INT32, stride));
+      }
+      acc_uop = (acc_uop == 0) ? tu
+                               : uop_int_binary(UOP_IADD, tu, acc_uop);
+      stride *= extents[d] != 0 ? extents[d] : 1;
+    }
+    if (acc_uop == 0) acc_uop = uop_const(DT_INT32, 0);
+    u32 via_uop = uop_to_scalar(ke, acc_uop, RANGEIFY_UOP_RANGE_MAP,
+                                RANGEIFY_UOP_RANGE_MAP_LEN);
+    if (via_uop != 0) return via_uop;
+  }
   u32 acc = 0;
   u32 stride = 1;
   for (i32 d = (i32)r->ndim - 1; d >= 0; d--) {
