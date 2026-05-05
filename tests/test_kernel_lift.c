@@ -176,6 +176,43 @@ int main(void) {
   CHECK(contains(buf3, "= _acc1;"));
   if (xcrun_metal_available()) CHECK_EQ(compile_through_metal(buf3), 0);
 
+  TEST_BEGIN("kernel-lift/flip-axis-rewrites-iter");
+  // STORE(INDEX(OUT, r), FLIP(LOAD(IN[r]), bitmask=1)) -- when axis 0
+  // is flipped, the load reads in0[(extent-1)-r] instead of in0[r].
+  kid = kernel_alloc();
+  ke = &KERNELS[kid];
+  ke->output_dtype = DT_FP32;
+  kernel_inputs_reserve(ke, 1);
+  ke->n_inputs = 1;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_tids[0]   = 0;
+
+  u32 rf      = emit_range_axis(ke, 0 /*LOOP*/, 16);
+  u32 in_pf   = rangeify_emit_leaf(ke, S_DEFINE_PARAM, DT_FP32, 0);
+  u32 out_df  = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 idx_in_f[2] = { in_pf, rf };
+  u32 idx_in_fid  = rangeify_emit(ke, S_INDEX, DT_FP32, 2, idx_in_f, 0);
+  u32 ld_f    = rangeify_emit(ke, S_LOAD, DT_FP32, 1, &idx_in_fid, 0);
+  u32 flip_s[2] = { ld_f, rf };
+  u32 flip    = rangeify_emit(ke, S_FLIP, DT_FP32, 2, flip_s, /*mask=*/1);
+  u32 idx_out_f[2] = { out_df, rf };
+  u32 idx_out_fid  = rangeify_emit(ke, S_INDEX, DT_FP32, 2, idx_out_f, 0);
+  u32 st_f_s[2] = { idx_out_fid, flip };
+  u32 st_f    = rangeify_emit(ke, S_STORE, DT_FP32, 2, st_f_s, 0);
+  u32 buf_f_s[2] = { st_f, rf };
+  rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_f_s, 0);
+
+  KernelUopLift lift_f = {0};
+  CHECK_EQ(kernel_lift_to_uop(ke, &lift_f), 1);
+  char buf_flip[2048];
+  fp = fmemopen(buf_flip, sizeof(buf_flip), "w");
+  cg_render_uop_kernel(lift_f.store_root, "k_flip", lift_f.out_buf,
+                       lift_f.in_bufs, lift_f.n_inputs, fp);
+  fclose(fp);
+  // The flipped read uses (extent-1 - a0) = (15 - a0).
+  CHECK(contains(buf_flip, "(15 - a0)"));
+  CHECK(contains(buf_flip, "out[a0]"));
+
   thvm_free();
   TEST_REPORT();
 }

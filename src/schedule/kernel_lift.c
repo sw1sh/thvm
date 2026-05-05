@@ -173,7 +173,7 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       u32 bits = (u32)u->extra;
       return uop_const(u->dtype, bits);
     }
-    case S_LOAD: {
+    case S_LOAD: case S_LOAD_RAW: {
       if (u->src_count != 1) return 0;
       Term buf = 0;
       Term addr = lift_scalar_index(ke, u->src[0], ranges, n_ranges,
@@ -228,6 +228,40 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // defined: emit the corresponding UOP_RANGE.  Used for
       // index-like scalar values feeding into another expression.
       return lift_lookup_range(ranges, n_ranges, sid);
+    case S_FLIP: {
+      // src[0] = body, src[1..n] = LOOP ranges to potentially flip;
+      // extra is a u8 bitmask, bit d set => replace iter with
+      // (extent - 1 - iter) for axis d when evaluating the body.
+      // Implemented by rebuilding the LiftRangeMap for the body so
+      // matching range lookups return the flipped UOp expression.
+      if (u->src_count < 2) return 0;
+      u32 mask = (u32)u->extra;
+      u32 ndim = (u32)u->src_count - 1;
+      if (ndim > MAX_DIM) return 0;
+      LiftRangeMap flipped[MAX_DIM];
+      u32 n_flipped = 0;
+      // Copy + override ranges that are in the flip bitmask.
+      for (u32 i = 0; i < n_ranges; i++) {
+        flipped[n_flipped++] = ranges[i];
+      }
+      for (u32 d = 0; d < ndim; d++) {
+        if ((mask & (1u << d)) == 0) continue;
+        u32 r_sid = u->src[1 + d];
+        // Find the range in `flipped[]` and rewrite its axis_uop to
+        // (extent - 1 - axis_uop).
+        for (u32 i = 0; i < n_flipped; i++) {
+          if (flipped[i].scalar_id != r_sid) continue;
+          Term r = flipped[i].axis_uop;
+          u32 ext = term_val(heap_read(term_val(r) + 2));
+          if (ext == 0) return 0;
+          Term ext_m1 = uop_const(DT_INT32, ext - 1);
+          flipped[i].axis_uop = uop_int_binary(UOP_ISUB, ext_m1, r);
+          break;
+        }
+      }
+      return lift_scalar_value(ke, u->src[0], flipped, n_flipped,
+                               out_buf, in_bufs, n_inputs);
+    }
     case S_ICONST: case S_IADD: case S_ISUB: case S_IMUL:
     case S_IDIV: case S_IMOD: case S_ILT: case S_IAND:
     case S_IWHERE:
