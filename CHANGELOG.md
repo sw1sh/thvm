@@ -6,6 +6,60 @@ dated section.
 
 ## Unreleased
 
+### Plan revision: 2 IRs, not 3 (2026-05-05)
+
+After ingesting tinygrad's TileLang correspondence + Fragment ↔
+Ops.MULTI analogy, the migration plan flips: the right shape is
+**2 IRs (UOp DAG / target source)**, not 3.  Tile-level concepts
+(buffer scope, axis types, ordering, GEMM/Conv) inhabit the same
+UOp DAG via a small set of additional opcodes plus annotations.
+The TileUop[] array joins KProgOp[] / ScalarUop[] / KernelAxes on
+the **deletion** list -- not the growth list as the prior plan
+assumed.  Plan file (`~/.claude/plans/flickering-watching-gem.md`)
+revised end-to-end.
+
+### Added: Phase D' wedge -- UOp DAG opcodes for tile-level concepts (4 commits)
+
+Per the revised plan, four new UOp opcodes that subsume what TileUop[]
+used to carry:
+
+- **D'1** (`98e70f3`): `UOP_BUFFER(scope, dtype, ndim, dims)` --
+  explicit buffer leaf with TileLang scope vocabulary
+  (UOP_SCOPE_GLOBAL/LOCAL/REG; T.Tensor / T.alloc_shared /
+  T.alloc_fragment).  Hash-cons via uop_mov_cache.  31 tests.
+- **D'2** (`10fc336`): `UOP_STORE(buf, addr, value)` symmetric
+  counterpart to UOP_INDEX_E + `UOP_AFTER(node, after_node)`
+  ordering annotation.  T.copy = STORE+AFTER; T.async_copy = STORE
+  + AFTER + Linear.  Backends emit barrier when AFTER crosses
+  LOCAL <-> GLOBAL.  29 tests including the canonical reduce-
+  broadcast cross-scope shape.
+- **D'4** (`fab92f9`): `UOP_OPT(target, kind, factor)` annotation --
+  attaches UNROLL/UPCAST/TC/LOCAL/GROUP_REDUCE directives to a
+  target node.  Mirrors TileLang OptOp; the renderer pattern-matches
+  (UOp shape, OPT kind) so GEMM/conv2d/FlashAttention live as
+  canonical shape + annotation, not as separate opcodes.  26 tests.
+- **F0** (`b3bf88f`): `cg_render_uop_kernel` UOp-DAG renderer
+  skeleton in [src/codegen/render_uop.c](src/codegen/render_uop.c).
+  Walks UOp DAG rooted at a UOP_STORE / UOP_AFTER chain and emits
+  pseudo-MSL.  Replaces the in-tree TileUop[] skeleton renderer
+  (now slated for deletion).  Covers kernel signature, buffer
+  typing, address arithmetic (UOP_RANGE/I*/IWHERE), AFTER barrier
+  insertion, and the empty-kernel edge case.  22 tests.
+
+Test suite: 274/274 binary tests still pass; 108 new assertions
+across the four new test files (`test_uop_buffer`,
+`test_uop_store_after`, `test_uop_opt`, `test_render_uop`).
+
+What's deferred from the previous in-tree TileUop[] work:
+
+- The TileUop[] structure (`src/schedule/tile.c`, `src/codegen/tile_anno.c`,
+  `tests/test_tile_*.c`) remains in tree; **delete** in Phase G after
+  the renderer rewrite proper (F1+) flips render_metal's primary path.
+- Phase F1+: extend render_uop with full UOP_REDUCE init/accum/finalize,
+  full elementwise coverage (UOP_ADD/MUL/CMPLT/CMPEQ/etc. -- previously
+  ScalarUop S_*), pattern-matchers for GEMM/conv2d via UOP_OPT(_, TC).
+- Phase B3-finish, Phase C, Phase G all gated on F1+ landing.
+
 ### Added: ideal-pipeline migration B0-D2 + B3 wedge (8 commits)
 
 Per `docs/lowering_passes.md` "Ideal pipeline" + `~/.claude/plans/
