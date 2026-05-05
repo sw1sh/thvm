@@ -6,6 +6,63 @@ dated section.
 
 ## Unreleased
 
+### Added: ideal-pipeline migration B0-D2 + B3 wedge (8 commits)
+
+Per `docs/lowering_passes.md` "Ideal pipeline" + `~/.claude/plans/
+flickering-watching-gem.md`, the foundation for the 3-IR
+(UOp DAG / Tile IR / target source) migration is in place:
+
+- **B0** (`12f2d94`): UOp-level INDEX layer.  New opcodes
+  `UOP_RANGE`, `UOP_INDEX_E`, `UOP_I{ADD,SUB,MUL,DIV,MOD,LT,AND}`,
+  `UOP_IWHERE`, `UOP_INVALID`.  Mirror ScalarUop S_* one-for-one;
+  hash-cons via uop_mov_cache.
+- **B1** (`87d5317`, `d7016d3`): per-USE movement-chain resolver
+  `uop_resolve_movement_chain(src, iters, ndim, valid_mask)`.
+  Walks UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP outside-in,
+  transforming the consumer's iter context.  Ports tinygrad's
+  apply_movement_op (indexing.py:128-145) at the UOp layer; same
+  semantics as rangeify's rngs_ctx_*.
+- **B2** (`1531cb3`, `96e39ed`): symbolic INDEX simplifier.  Wired
+  into `uop_int_binary` and `uop_iwhere` constructors.  Folds:
+  identity / annihilator / self-cancel; range-bound-aware
+  `r%N -> r` and `r<N -> 1` when RANGE.extent <= N;
+  divandmod identity `(c*x + y) / c -> x` and `(c*x + y) % c ->
+  y` when y in [0, c).  End-to-end RESHAPE round-trip collapses
+  to the original iters with no IDIV/IMOD survivors.
+- **D1** (`9ee729b`): TILE_AXIS carries `memory_scope` + `vector_width`.
+  Bit layout: `extent[0..32]|kax_type[32..48]|memory_scope[48..56]|
+  vector_width[56..64]`.  All 4 read/emit sites in tile.c migrated
+  to TileAxisInfo helpers; defaults are 0 so render unchanged.
+- **D2** (`a46e110`, `d9c1771`): `TILE_LOCAL_ALLOC` + `TILE_BARRIER` +
+  `TILE_LOAD` constructors with memory-scope encoding
+  (TILE_MEM_GLOBAL/SHARED/LOCAL/REGISTER).  No producer/renderer
+  reads them yet; D3 is the first user.
+- **B3 wedge** (`6cc8fe3`): `uop_to_scalar(ke, term, ranges,
+  n_ranges)` translates UOp INDEX expressions to ScalarUop slot ids
+  in a kernel arena.  Bridge for B3 main rerouting.
+- **B3 simplifier alignment** (`90f00a1`): range-bound-aware folds
+  added to rangeify's `emit_ibinop` -- same fold quality as the
+  UOp-layer simplifier.  Existing rangeify benefits TODAY (PAD
+  bound-check folds when iter-extent matches src-dim); B3 main's
+  rerouting will get identical simplification through the same path.
+
+Test suite grew from 67 to 70 binaries with ~150 new INDEX/
+movement-resolver/simplifier assertions.  All 274/274 binary tests
+pass; no canary regressions.
+
+What's deferred (each requires structural decisions):
+
+- **B3 main**: rangeify rerouting (replace rngs_ctx_* with
+  uop_resolve_movement_chain + uop_to_scalar).  The simplifier
+  alignment in `90f00a1` already gives functional parity; B3
+  main is structural prep for Phase C's KProgOp removal.
+- **D3 / D4**: reduce-broadcast lowering + TILE_GEMM/CONV2D pattern
+  matchers.  Both require TILE_LOOP_NEST reshape (preamble slots
+  for alloc/barrier) which is best designed alongside the renderer
+  changes that consume them (Phase F).
+- **C / E / F / G**: KProgOp collapse, KernelAxes collapse,
+  dispatch-ladder collapse, dead-code deletion.  Each multi-week.
+
 ### Fixed: u32 numel overflow on conv-bwd shapes (BS=512 10.6x speedup)
 
 `KProgOp.numel` was u32 across `src/thvm.h` and the materialize +
