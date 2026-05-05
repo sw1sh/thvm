@@ -445,10 +445,31 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
       tile_render_msl_indent(fp, depth);
       fprintf(fp, "/* TILE_OUTPUT_BUF slot=%u */\n", (u32)u->extra);
       return;
-    case TILE_SCALAR_BODY:
+    case TILE_SCALAR_BODY: {
       tile_render_msl_indent(fp, depth);
-      fprintf(fp, "/* scalar body S%u */\n", (u32)u->extra);
+      // For trivial scalar leaves (S_CONST / S_ICONST), emit the
+      // literal value directly so the rendered body reflects what
+      // the kernel actually computes.  Phase F's renderer proper
+      // will walk every ScalarUop op (S_LOAD, S_BINARY, ...) via
+      // the existing rmt_emit_value emitter.
+      u32 sid = (u32)u->extra;
+      if (ke->scalar_uops != NULL && sid != 0
+          && sid < ke->n_scalar_uops) {
+        ScalarUop const *s = &ke->scalar_uops[sid];
+        if (s->op == S_CONST) {
+          union { u32 b; float f; } pun = { .b = (u32)s->extra };
+          fprintf(fp, "float s%u = %ff; /* S_CONST */\n", sid, pun.f);
+          return;
+        }
+        if (s->op == S_ICONST) {
+          fprintf(fp, "int s%u = %d; /* S_ICONST */\n", sid,
+                  (int)(i64)s->extra);
+          return;
+        }
+      }
+      fprintf(fp, "/* scalar body S%u */\n", sid);
       return;
+    }
     case TILE_MMA:
       tile_render_msl_indent(fp, depth);
       fputs("/* TILE_MMA: simdgroup_matrix... */\n", fp);

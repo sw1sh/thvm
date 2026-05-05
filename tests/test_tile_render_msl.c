@@ -146,6 +146,36 @@ int main(void) {
   ke->n_inputs = 0;
   ke->input_dtypes = NULL;
   tile_free(ke);
+
+  TEST_BEGIN("tile-render-msl/scalar-const-rendered-as-literal");
+  // Phase F prep: TILE_SCALAR_BODY referencing S_CONST renders the
+  // float literal directly; TILE_SCALAR_BODY referencing S_ICONST
+  // renders the int literal.
+  u32 c_pi    = rangeify_emit_leaf(ke, S_CONST,  DT_FP32, 0x40490FDBu); // ~3.14159
+  u32 c_seven = rangeify_emit_leaf(ke, S_ICONST, DT_INT64, 7);
+  u32 body_pi    = tile_emit_leaf(ke, TILE_SCALAR_BODY, DT_FP32, c_pi);
+  u32 body_seven = tile_emit_leaf(ke, TILE_SCALAR_BODY, DT_INT64, c_seven);
+  TileAxisInfo a_lit = { KAX_LOOP, 4, TILE_MEM_GLOBAL, 0 };
+  u32 ax_lit = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a_lit));
+  u32 lit_stmts[2] = { body_pi, body_seven };
+  u32 lit_block = tile_emit_block(ke, DT_FP32, lit_stmts, 2);
+  u32 lit_store_src[1] = { lit_block };
+  u32 lit_store = tile_emit(ke, TILE_STORE, DT_FP32, 1, lit_store_src, 1);
+  u32 lit_lnest_src[2] = { lit_store, ax_lit };
+  ke->tile_root = tile_emit(ke, TILE_LOOP_NEST, DT_FP32, 2, lit_lnest_src, 0);
+
+  char buf6[2048];
+  fp = fmemopen(buf6, sizeof(buf6), "w");
+  CHECK(fp != NULL);
+  tile_render_msl_skeleton(ke, fp);
+  fclose(fp);
+  CHECK(contains(buf6, "/* S_CONST */"));
+  CHECK(contains(buf6, "/* S_ICONST */"));
+  CHECK(contains(buf6, "int s"));     // S_ICONST literal decl
+  CHECK(contains(buf6, " = 7;"));     // 7 from S_ICONST
+  CHECK(contains(buf6, "float s"));   // S_CONST literal decl
+
+  tile_free(ke);
   thvm_free();
   TEST_REPORT();
 }
