@@ -50,9 +50,18 @@ fn int tile_anno_axis_at(KernelEntry const *ke, u32 d, TileAxisInfo *out) {
 // last tile_build (apply_opt-driven autotune mutates ke->axes
 // in place), tile_uops carries STALE axis info.  Prefer ke->axes
 // in that case so consumers see the current state.
+//
+// Two-part check: (1) versions must match, and (2) axis counts must
+// match too.  The count check catches version-counter collisions
+// across test setups (memset zeroes version, then version++ can
+// land on a value that was previously assigned to tile_axes_version
+// via a different axes shape).
 static int tile_anno_tile_uops_fresh(KernelEntry const *ke) {
   if (ke == NULL || ke->axes == NULL) return 1;  // no axes to compare
-  return ke->tile_axes_version == ke->axes->version;
+  if (ke->tile_axes_version != ke->axes->version) return 0;
+  u32 tile_n = tile_anno_axis_count(ke);
+  if (tile_n == 0) return 0;
+  return tile_n == ke->axes->n_axes;
 }
 
 fn int tile_anno_axis_or_kernelaxes(KernelEntry const *ke, u32 d,

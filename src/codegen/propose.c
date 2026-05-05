@@ -74,12 +74,19 @@ static u32 propose_reduce_axis_size(KernelEntry const *ke) {
   return size != 0 ? size : propose_scalar_reduce_axis_size(ke);
 }
 
-// Index of the reduce axis in axis_types[] -- the last axis of type
-// KAX_REDUCE.  Returns 0xFF if none (caller checks `< n_axes`).
+// Index of the reduce axis -- the last axis of type KAX_REDUCE.
+// Returns 0xFF if none (caller checks `< n_axes`).
+// Phase E migration: reads via tile_anno_axis_or_kernelaxes so
+// it works whether tile_uops is fresh, stale, or absent.
 static u8 propose_reduce_axis_index(KernelEntry const *ke) {
-  if (ke->axes == NULL) return 0xFF;
-  for (i32 i = (i32)ke->axes->n_axes - 1; i >= 0; i--) {
-    if (ke->axes->axis_types[i] == KAX_REDUCE) return (u8)i;
+  u32 n = tile_anno_axis_count_or_kernelaxes(ke);
+  if (n == 0) return 0xFF;
+  for (i32 i = (i32)n - 1; i >= 0; i--) {
+    TileAxisInfo info;
+    if (tile_anno_axis_or_kernelaxes(ke, (u32)i, &info)
+        && info.kax_type == KAX_REDUCE) {
+      return (u8)i;
+    }
   }
   return 0xFF;
 }
@@ -90,13 +97,12 @@ static u8 propose_reduce_axis_index(KernelEntry const *ke) {
 // kernels look untunable even when an inner axis has plenty of work.
 static u8 propose_loop_axis_for_factor(KernelEntry const *ke, u8 start,
                                        u32 factor) {
-  if (ke->axes == NULL) return 0xFF;
-  for (u8 i = start; i < ke->axes->n_axes; i++) {
-    if (ke->axes->axis_types[i] != KAX_LOOP) {
-      continue;
-    }
-    u32 axis_size = ke->axes->full_shape[i];
-    if (factor <= axis_size && axis_size % factor == 0) {
+  u32 n = tile_anno_axis_count_or_kernelaxes(ke);
+  for (u8 i = start; i < n; i++) {
+    TileAxisInfo info;
+    if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) continue;
+    if (info.kax_type != KAX_LOOP) continue;
+    if (factor <= info.extent && info.extent % factor == 0) {
       return i;
     }
   }
