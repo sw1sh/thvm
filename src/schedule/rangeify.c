@@ -942,8 +942,18 @@ static u32 emit_addr_from_rngs_uop_preferred(KernelEntry *ke,
     if (via_uop != 0) return via_uop;
   }
   // Legacy scalar fallback.  Stays as the safety net for paths the
-  // UOp side can't yet handle (some PAD-mask shapes whose body-emit
-  // path elsewhere depends on the legacy scalar slot ids).
+  // UOp side can't yet handle (e.g. ScalarUop arena entries that
+  // scalar_to_uop's translator doesn't recognize -- S_RESHAPE_V
+  // wrappers, complex composite expressions).  With the simplifier
+  // at parity, this fallback fires for ~unsupported subtree shapes
+  // only.  THVM_RANGEIFY_UOP_FALLBACK_DUMP=1 prints a one-liner per
+  // fallback hit so we can quantify the gap.
+  static u64 RANGEIFY_UOP_FALLBACK_HITS = 0;
+  RANGEIFY_UOP_FALLBACK_HITS++;
+  if (getenv("THVM_RANGEIFY_UOP_FALLBACK_DUMP")) {
+    fprintf(stderr, "rangeify uop-addr fallback hit #%llu (use_ndim=%u uop_ok=%d)\n",
+            (unsigned long long)RANGEIFY_UOP_FALLBACK_HITS, use_ndim, uop_ok);
+  }
   u32 acc = (in_off != 0) ? emit_iconst(ke, (i64)in_off) : 0;
   for (u32 d = 0; d < use_ndim; d++) {
     if (v_strides[d] == 0) continue;
