@@ -356,7 +356,20 @@ int             dtype_is_packed   (u32 dt);
                              //         NUM(d0), ..., NUM(d_{ndim-1})];
                              //   ext = UOP_BUFFER opcode.  Hash-cons by
                              //   (scope, dtype, ndim, dims).
-#define UOP_COUNT       37
+#define UOP_STORE       37   // heap = [buf, addr, value];
+                             //   Symmetric counterpart to UOP_INDEX_E.
+                             //   Writes `value` to `buf` at the symbolic
+                             //   address `addr` (a tree of UOP_RANGE/I*
+                             //   like INDEX_E's addr_expr).  Phase D'2.
+#define UOP_AFTER       38   // heap = [node, after_node];
+                             //   Ordering annotation between sibling
+                             //   side-effects (UOP_STOREs).  Backend
+                             //   emits a barrier when AFTER crosses a
+                             //   scope boundary (LOCAL <-> GLOBAL) or a
+                             //   warp shuffle when crossing REG.  T.copy
+                             //   = STORE+AFTER; T.async_copy = STORE +
+                             //   AFTER + Linear ordering.  Phase D'2.
+#define UOP_COUNT       39
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -2072,6 +2085,25 @@ fn u32  uop_buffer_scope(Term t);
 fn u32  uop_buffer_dtype(Term t);
 fn u32  uop_buffer_ndim (Term t);
 fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
+
+// === Store + After (Phase D'2) ===
+// UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
+// `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).
+fn Term uop_store(Term buf, Term addr, Term value);
+
+// Read accessors.
+fn Term uop_store_buf  (Term t);   // 0 on tag mismatch
+fn Term uop_store_addr (Term t);
+fn Term uop_store_value(Term t);
+
+// UOP_AFTER expresses ordering between sibling side-effects.  `node`
+// happens after `after_node`.  Backends emit a barrier when this
+// crosses a scope boundary, or a warp shuffle when crossing REG.
+// Hash-cons by (node, after_node).
+fn Term uop_after(Term node, Term after_node);
+
+fn Term uop_after_node      (Term t);
+fn Term uop_after_after_node(Term t);
 
 // === Per-USE movement-chain resolver (Phase B1) ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
