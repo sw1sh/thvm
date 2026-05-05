@@ -369,7 +369,25 @@ int             dtype_is_packed   (u32 dt);
                              //   warp shuffle when crossing REG.  T.copy
                              //   = STORE+AFTER; T.async_copy = STORE +
                              //   AFTER + Linear ordering.  Phase D'2.
-#define UOP_COUNT       39
+// === Opt annotation kinds (Phase D'4) ===
+// Mirrors TileLang's OptOp directives.  Renderer pattern-matches
+// (target, kind) to emit the appropriate code: UNROLL unrolls a
+// RANGE k-loop; UPCAST unrolls an output dimension; TC selects a
+// tensor-core path for matmul; LOCAL binds to thread-position;
+// GROUP_REDUCE splits a REDUCE into threadgroup-cooperative chunks.
+#define UOP_OPT_UNROLL        0
+#define UOP_OPT_UPCAST        1
+#define UOP_OPT_TC            2   // tensor core (T.gemm / T.wgmma_gemm)
+#define UOP_OPT_LOCAL         3   // bind to thread position
+#define UOP_OPT_GROUP_REDUCE  4
+#define UOP_OPT          39  // heap = [target, NUM(kind), NUM(factor)];
+                             //   Annotation node attaching an optimisation
+                             //   directive to `target`.  factor=0 when the
+                             //   directive carries no scalar (TC, LOCAL).
+                             //   The renderer walks UOp shape + OptOp
+                             //   annotations to fire specialised templates.
+                             //   Phase D'4.
+#define UOP_COUNT       40
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
@@ -2104,6 +2122,16 @@ fn Term uop_after(Term node, Term after_node);
 
 fn Term uop_after_node      (Term t);
 fn Term uop_after_after_node(Term t);
+
+// === Opt annotation (Phase D'4) ===
+// Attach an optimisation directive (UOP_OPT_UNROLL, UPCAST, TC,
+// LOCAL, GROUP_REDUCE) to `target`.  `factor` is 0 when the kind
+// carries no scalar (TC, LOCAL).  Hash-cons by (target, kind, factor).
+fn Term uop_opt(Term target, u32 kind, u32 factor);
+
+fn Term uop_opt_target(Term t);   // 0 on tag mismatch
+fn u32  uop_opt_kind  (Term t);
+fn u32  uop_opt_factor(Term t);
 
 // === Per-USE movement-chain resolver (Phase B1) ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
