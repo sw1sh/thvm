@@ -193,6 +193,36 @@ int tile_anno_axis_append(KernelEntry *ke, TileAxisInfo info) {
   return 1;
 }
 
+// Insert a new axis BEFORE position d (i.e. existing axes at d..n-1
+// shift right by one; the new axis takes slot d).  When tile_uops
+// is also populated, mirrors the insertion at the TILE_AXIS array
+// level too.  Returns 1 on success, 0 if d is out of range or
+// either backing store is full.
+//
+// This is the structural primitive that Phase F's source-of-truth
+// flip needs: axes_apply_opt's split logic reduces to (a) read the
+// existing axis at d, (b) shrink it (extent /= factor), (c) insert
+// a new axis at d+1 with the inner type and size = factor.
+int tile_anno_axis_insert(KernelEntry *ke, u32 d, TileAxisInfo info) {
+  if (ke == NULL || ke->axes == NULL) return 0;
+  if (d > ke->axes->n_axes) return 0;
+  if (ke->axes->n_axes >= MAX_AXES) return 0;
+  // Shift right.
+  for (i32 i = (i32)ke->axes->n_axes; i > (i32)d; i--) {
+    ke->axes->axis_types[i] = ke->axes->axis_types[i - 1];
+    ke->axes->full_shape[i] = ke->axes->full_shape[i - 1];
+  }
+  ke->axes->axis_types[d] = info.kax_type;
+  ke->axes->full_shape[d] = info.extent;
+  ke->axes->n_axes++;
+  ke->axes->version++;
+  if (ke->axes->version == 0) ke->axes->version = 1;
+  // (When Phase F flips, the TILE_AXIS array surgery happens here:
+  //  shift root->src[d+1..] right, allocate a new TILE_AXIS leaf,
+  //  patch root->src[d+1] to point at it, bump src_count.)
+  return 1;
+}
+
 // Sanity check: returns 1 iff KernelAxes and TILE_AXIS agree on
 // axis count + per-axis (kax_type, extent).  Useful for debugging
 // the migration -- if this ever returns 0, tile_uops is stale and
