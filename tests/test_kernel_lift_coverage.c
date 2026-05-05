@@ -48,16 +48,32 @@ int main(void) {
   CHECK(attempts_after > attempts_before);
   if (src != NULL) free(src);
 
-  TEST_BEGIN("lift-coverage/counter-reset-clears");
-  kernel_lift_counters_reset();
-  CHECK_EQ(kernel_lift_attempts (), 0u);
-  CHECK_EQ(kernel_lift_successes(), 0u);
-  CHECK_EQ(kernel_lift_compiles (), 0u);
-  CHECK_EQ(kernel_lift_compile_fails(), 0u);
+  TEST_BEGIN("lift-coverage/const-fill-lift-success");
+  // Build a const-fill kernel (the simplest shape) and confirm the
+  // shadow lifter succeeds on it.
+  kid = kernel_alloc();
+  ke = &KERNELS[kid];
+  ke->output_dtype = DT_FP32;
+  u64 r0      = (u64)0;
+  r0          = ((u64)0 << 32) | 32;  // axis_type=LOOP, extent=32
+  u32 r0_sid  = rangeify_emit_leaf(ke, S_RANGE, DT_INT64, r0);
+  u32 outdef  = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 idxs[2] = { outdef, r0_sid };
+  u32 idx     = rangeify_emit(ke, S_INDEX, DT_FP32, 2, idxs, 0);
+  u32 c1f     = rangeify_emit_leaf(ke, S_CONST, DT_FP32, 0x3F800000u);
+  u32 sts[2]  = { idx, c1f };
+  u32 store   = rangeify_emit(ke, S_STORE, DT_FP32, 2, sts, 0);
+  u32 bufs[2] = { store, r0_sid };
+  rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, bufs, 0);
+
+  u64 succ_before = kernel_lift_successes();
+  src = cg_emit_tile_metal(ke);
+  if (src != NULL) free(src);
+  CHECK(kernel_lift_successes() > succ_before);
 
   TEST_BEGIN("lift-coverage/diagnostic-stderr-dump");
-  // Print final counts for human inspection -- no assertion here,
-  // just the coverage signal.
+  // Print cumulative counts for human inspection -- no assertion
+  // here, just the coverage signal.  Run BEFORE the counter reset.
   fprintf(stderr,
           "kernel_lift coverage: attempts=%llu successes=%llu "
           "compiles=%llu compile_fails=%llu\n",
@@ -65,7 +81,15 @@ int main(void) {
           (unsigned long long)kernel_lift_successes(),
           (unsigned long long)kernel_lift_compiles(),
           (unsigned long long)kernel_lift_compile_fails());
-  CHECK(1);
+  CHECK(kernel_lift_attempts() > 0u);
+  CHECK(kernel_lift_successes() > 0u);
+
+  TEST_BEGIN("lift-coverage/counter-reset-clears");
+  kernel_lift_counters_reset();
+  CHECK_EQ(kernel_lift_attempts (), 0u);
+  CHECK_EQ(kernel_lift_successes(), 0u);
+  CHECK_EQ(kernel_lift_compiles (), 0u);
+  CHECK_EQ(kernel_lift_compile_fails(), 0u);
 
   thvm_free();
   TEST_REPORT();
