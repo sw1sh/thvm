@@ -60,6 +60,17 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   TILE_LOOP_NEST.  No producer reads it yet -- the lowering
   function lands when concrete BN-grad scalar shapes drive the
   design.
+- **B3 main wedge** (`4a8f8b7`): RngsCtx grows
+  `Term uop_refs[MAX_DIM]` + `uop_valid_mask`.  Kernel-emit
+  prologue seeds `uop_loop_ranges[d] = uop_range(d, S_AXIS_LOOP,
+  os->dims[d])` alongside the scalar `loop_ranges[d]`.  All 6
+  rngs_ctx_* movement composers (PERMUTE/EXPAND/SHRINK/PAD/FLIP/
+  RESHAPE) mirror their iter transformation on uop_refs in
+  parallel with the scalar emit.  PERMUTE per-USE walk wires
+  through.  PAD also accumulates UOP_IAND'd ILT bounds-checks
+  into uop_valid_mask.  No behavior change today (scalar path
+  drives execution); structural readiness for the eventual
+  rngs_ctx_* deletion in B3 main proper.
 
 Test suite grew from 67 to 70 binaries with ~200 new INDEX/
 movement-resolver/simplifier/tile-IR assertions.  All 274/274
