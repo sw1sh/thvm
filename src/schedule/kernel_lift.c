@@ -613,14 +613,96 @@ static void lift_reject_log(KernelEntry const *ke, u32 sid,
 // Find the BUFFERIZE root in scalar_uops and lift the whole kernel
 // program to a UOp DAG.  Fills `out` with the rendered-ready
 // store_root + buffer terms.
+// Synthesize the canonical matmul UOp DAG from a TileGemmInfo.
+// Mirrors what F2b's rmu_detect_matmul_tc pattern recognises:
+//   STORE(C, m*N+n, OPT(REDUCE(MUL(A[m*K+k], B[k*N+n]), SUM, k), TC, _))
+// Used when the scheduling pipeline goes through the dedicated GEMM
+// path (no scalar_uops arena) so the lifter can still produce a valid
+// UOp DAG for the renderer.
+static int kernel_lift_from_gemm(KernelEntry const *ke, KernelUopLift *out) {
+  TileGemmInfo gemm = {0};
+  if (!tile_collect_mma_plan((KernelEntry *)ke, &gemm)) return 0;
+  if (gemm.M == 0 || gemm.N == 0 || gemm.K == 0) return 0;
+  if (gemm.a_input >= ke->n_inputs || gemm.b_input >= ke->n_inputs) return 0;
+
+  // Three buffers with distinct shapes (no hash-cons collision).
+  u32 dims_a[2] = { gemm.M, gemm.K };
+  u32 dims_b[2] = { gemm.K, gemm.N };
+  u32 dims_c[2] = { gemm.M, gemm.N };
+  u32 a_dtype = (ke->input_dtypes != NULL) ? ke->input_dtypes[gemm.a_input] : DT_FP32;
+  u32 b_dtype = (ke->input_dtypes != NULL) ? ke->input_dtypes[gemm.b_input] : DT_FP32;
+  Term A   = uop_buffer_inst(UOP_SCOPE_GLOBAL, a_dtype, 2, dims_a,
+                             gemm.a_input + 1);
+  Term B   = uop_buffer_inst(UOP_SCOPE_GLOBAL, b_dtype, 2, dims_b,
+                             gemm.b_input + 1);
+  Term C   = uop_buffer_inst(UOP_SCOPE_GLOBAL, ke->output_dtype, 2,
+                             dims_c, 0);
+
+  // Range axes: M (output 0), N (output 1), K (reduce axis 2).
+  Term r_m = uop_range(0, 0 /*LOOP*/,   gemm.M);
+  Term r_n = uop_range(1, 0 /*LOOP*/,   gemm.N);
+  Term r_k = uop_range(2, 1 /*REDUCE*/, gemm.K);
+
+  // A[m * K + k]  (or [m, k]; row-major linearisation).
+  Term mK    = uop_int_binary(UOP_IMUL, r_m, uop_const(DT_INT32, gemm.K));
+  Term addrA = uop_int_binary(UOP_IADD, mK, r_k);
+  Term ldA   = uop_index_e(A, addrA);
+  // B[k * N + n]
+  Term kN    = uop_int_binary(UOP_IMUL, r_k, uop_const(DT_INT32, gemm.N));
+  Term addrB = uop_int_binary(UOP_IADD, kN, r_n);
+  Term ldB   = uop_index_e(B, addrB);
+  // OPT(REDUCE(MUL(A,B), SUM, k_axis=2), TC, 0)
+  Term mul   = uop_binary(UOP_MUL, ldA, ldB);
+  Term red   = uop_reduce(REDUCE_SUM, /*axis=*/2, mul);
+  Term tc_v  = uop_opt(red, UOP_OPT_TC, 0);
+  // C[m * N + n]
+  Term mN    = uop_int_binary(UOP_IMUL, r_m, uop_const(DT_INT32, gemm.N));
+  Term addrC = uop_int_binary(UOP_IADD, mN, r_n);
+  Term store = uop_store(C, addrC, tc_v);
+
+  // Populate KernelUopLift.  Inputs go in slot order even when
+  // a_input / b_input aren't 0/1 (the renderer's buffer-name map
+  // honours the order we register).
+  out->n_inputs = ke->n_inputs;
+  if (out->n_inputs > KERNEL_LIFT_MAX_INPUT) return 0;
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (i == gemm.a_input)      out->in_bufs[i] = A;
+    else if (i == gemm.b_input) out->in_bufs[i] = B;
+    else                        out->in_bufs[i] = lift_input_buffer(ke, i);
+  }
+  out->out_buf    = C;
+  out->store_root = store;
+  return 1;
+}
+
 fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
-  if (ke == NULL || ke->scalar_uops == NULL || out == NULL) return 0;
+  if (ke == NULL || out == NULL) return 0;
+  // Empty / GEMM-only kernel: try the gemm-shape lifter.  The dedicated
+  // GEMM path bypasses rangeify, so scalar_uops is NULL and the
+  // ScalarUop walker below would reject.
+  if (ke->scalar_uops == NULL) {
+    if (kernel_lift_from_gemm(ke, out)) return 1;
+    static int reject_log_inited = 0;
+    static int reject_log_on     = 0;
+    if (!reject_log_inited) {
+      char const *e = getenv("THVM_DUMP_LIFT_REJECT");
+      reject_log_on    = (e != NULL && e[0] == '1');
+      reject_log_inited = 1;
+    }
+    if (reject_log_on) {
+      fprintf(stderr,
+              "lift reject: entry/no-scalar-arena n_inputs=%u "
+              "n_ops=%u n_tile_uops=%u\n",
+              ke->n_inputs, ke->n_ops, ke->n_tile_uops);
+    }
+    return 0;
+  }
   // Find the BUFFERIZE root.
   u32 buf_sid = 0;
   for (u32 i = 1; i < ke->n_scalar_uops; i++) {
     if (ke->scalar_uops[i].op == S_BUFFERIZE) { buf_sid = i; break; }
   }
-  if (buf_sid == 0) return 0;
+  if (buf_sid == 0) { lift_reject_log(ke, 0, "entry/no-bufferize-root"); return 0; }
   ScalarUop const *bu = &ke->scalar_uops[buf_sid];
   if (bu->src_count < 1) return 0;
 
