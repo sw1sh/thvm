@@ -1902,9 +1902,33 @@ static void cg_shadow_lift_metal(KernelEntry const *ke) {
   fputs(buf, out);
   fclose(out);
   char cmd[256];
+  // When THVM_DUMP_LIFT_COMPILE_FAIL=1, leave the failing .metal file
+  // in /tmp and dump the compiler stderr so we can see what's wrong.
+  static int dump_fail_inited = 0;
+  static int dump_fail_on     = 0;
+  if (!dump_fail_inited) {
+    char const *e = getenv("THVM_DUMP_LIFT_COMPILE_FAIL");
+    dump_fail_on    = (e != NULL && e[0] == '1');
+    dump_fail_inited = 1;
+  }
   snprintf(cmd, sizeof(cmd),
            "xcrun metal -x metal -c %s -o /dev/null 2>/dev/null", path);
   int rc = system(cmd);
+  if (WEXITSTATUS(rc) != 0 && dump_fail_on) {
+    // Copy to a stable path that survives the subsequent unlink so a
+    // follow-up shell can inspect the final failing rendering.
+    char saved[64];
+    snprintf(saved, sizeof(saved), "/tmp/thvm_shadow_last_fail.metal");
+    char cp_cmd[256];
+    snprintf(cp_cmd, sizeof(cp_cmd), "cp %s %s", path, saved);
+    system(cp_cmd);
+    fprintf(stderr, "=== compile-fail (saved as %s): ", saved);
+    char err_cmd[256];
+    snprintf(err_cmd, sizeof(err_cmd),
+             "xcrun metal -x metal -c %s -o /dev/null 2>&1 | head -5",
+             path);
+    system(err_cmd);
+  }
   unlink(path);
   kernel_lift_count_compile(WEXITSTATUS(rc) == 0);
 }
