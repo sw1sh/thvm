@@ -45,10 +45,25 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   UOp-layer simplifier.  Existing rangeify benefits TODAY (PAD
   bound-check folds when iter-extent matches src-dim); B3 main's
   rerouting will get identical simplification through the same path.
+- **B3 prep** (`c45efc8`): KProgOp grows a `Term source_uop`
+  back-pointer to its originating UOp DAG node.  Populated by
+  visit() at all 8 KProgOp emit sites in materialize.c.  Enables
+  Phase B3 main's `uop_resolve_movement_chain` calls (rangeify
+  reads movement metadata from the heap instead of from
+  KProgOp.{src0_dims, out_dims, pad_widths, axis_perm}); those
+  per-op fields disappear in Phase C.
+- **D3 prep** (`39397a0`): TILE_BLOCK -- ordered statement
+  container for the reduce-broadcast preamble.  Phase D3's
+  lowering will emit `TILE_BLOCK(alloc, reduce_into_alloc, barrier,
+  load, post_reduce_body)` to give cooperative-reduce a place to
+  stage its shared accumulator + barrier without reshaping
+  TILE_LOOP_NEST.  No producer reads it yet -- the lowering
+  function lands when concrete BN-grad scalar shapes drive the
+  design.
 
-Test suite grew from 67 to 70 binaries with ~150 new INDEX/
-movement-resolver/simplifier assertions.  All 274/274 binary tests
-pass; no canary regressions.
+Test suite grew from 67 to 70 binaries with ~200 new INDEX/
+movement-resolver/simplifier/tile-IR assertions.  All 274/274
+binary tests pass; no canary regressions.
 
 What's deferred (each requires structural decisions):
 
