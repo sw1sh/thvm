@@ -69,6 +69,11 @@ fn void kernel_lift_count_compile (int ok) {
 
 // KernelUopLift is declared in thvm.h.
 
+// Reject diagnostic forward declaration: when env-gated, prints the
+// first ScalarUop the lifter doesn't handle.  Defined below.
+static void lift_reject_log(KernelEntry const *ke, u32 sid,
+                            const char *where);
+
 // Build per-axis-id maps from BUFFERIZE's range slots.  axis_id is
 // the position in BUFFERIZE.src[1..n] (0-based).
 typedef struct {
@@ -101,28 +106,59 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
                               LiftRangeMap const *ranges, u32 n_ranges,
                               Term out_buf, Term const *in_bufs,
                               u32 n_inputs, Term *out_buf_term) {
-  if (sid == 0 || sid >= ke->n_scalar_uops) return 0;
+  if (sid == 0 || sid >= ke->n_scalar_uops) {
+    lift_reject_log(ke, sid, "index/sid-oor");
+    return 0;
+  }
   ScalarUop const *u = &ke->scalar_uops[sid];
-  if (u->op != S_INDEX || u->src_count < 1) return 0;
+  if ((u->op != S_INDEX && u->op != S_INDEX_E) || u->src_count < 1) {
+    lift_reject_log(ke, sid, "index/not-S_INDEX-or-INDEX_E");
+    return 0;
+  }
   u32 buf_sid = u->src[0];
   ScalarUop const *bu = &ke->scalar_uops[buf_sid];
   Term buf = 0;
   if (bu->op == S_DEFINE_PARAM) {
     u32 slot = (u32)bu->extra;
-    if (slot >= n_inputs) return 0;
+    if (slot >= n_inputs) { lift_reject_log(ke, buf_sid, "index/slot-oor"); return 0; }
     buf = in_bufs[slot];
   } else if (bu->op == S_DEFINE_OUTPUT) {
     buf = out_buf;
   } else {
+    lift_reject_log(ke, buf_sid, "index/buf-not-DEFINE");
     return 0;
   }
   if (out_buf_term != NULL) *out_buf_term = buf;
+
+  // S_INDEX_E carries the addr expression directly in src[1] -- no
+  // need to linearise from per-axis ranges.  Lift via scalar_to_uop
+  // (handles S_IADD / S_IMUL / S_RANGE / etc.) and return.
+  if (u->op == S_INDEX_E) {
+    if (u->src_count < 2) {
+      lift_reject_log(ke, sid, "index_e/no-addr");
+      return 0;
+    }
+    UopRangeMap srm[MAX_DIM];
+    u32 n = (n_ranges < MAX_DIM) ? n_ranges : MAX_DIM;
+    for (u32 i = 0; i < n; i++) {
+      srm[i].scalar_id = ranges[i].scalar_id;
+      srm[i].axis_uop  = ranges[i].axis_uop;
+    }
+    Term addr = scalar_to_uop((KernelEntry *)ke, u->src[1], srm, n);
+    if (addr == 0) lift_reject_log(ke, u->src[1], "index_e/addr-lift-fail");
+    return addr;
+  }
 
   // Walk the RANGE srcs and emit `sum(r_i * stride_i)`.  Strides come
   // from the buffer's shape (row-major).  For now we use uop_buffer
   // dims as the shape -- this matches the lifter's UOP_BUFFER setup.
   u32 ndim = uop_buffer_ndim(buf);
-  if (ndim == 0 || ndim != (u32)u->src_count - 1) return 0;
+  if (ndim == 0 || ndim != (u32)u->src_count - 1) {
+    fprintf(stderr,
+            "lift reject: index/ndim-mismatch buf_ndim=%u src_count=%u\n",
+            ndim, u->src_count);
+    return 0;
+  }
   Term acc = 0;
   for (u32 d = 0; d < ndim; d++) {
     u32 r_sid = u->src[1 + d];
@@ -223,11 +259,14 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       if (src == 0) return 0;
       return uop_cast(src, u->dtype);
     }
-    case S_RANGE:
+    case S_RANGE: {
       // Bare RANGE in a value position would be unusual but well-
       // defined: emit the corresponding UOP_RANGE.  Used for
       // index-like scalar values feeding into another expression.
-      return lift_lookup_range(ranges, n_ranges, sid);
+      Term r = lift_lookup_range(ranges, n_ranges, sid);
+      if (r == 0) lift_reject_log(ke, sid, "value/range-not-mapped");
+      return r;
+    }
     case S_SHRINK: {
       // src[0] = body, src[1..n] = ranges; extra packs per-axis u16
       // begin offsets (4 axes at 16 bits each).  Lifter rewrites the
@@ -437,6 +476,7 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
         return scalar_to_uop(ke, sid, srm, n);
       }
     default:
+      lift_reject_log(ke, sid, "value/unknown-op");
       return 0;
   }
 }
@@ -547,6 +587,29 @@ static Term lift_output_buffer(KernelEntry const *ke,
   return uop_buffer_inst(UOP_SCOPE_GLOBAL, ke->output_dtype, n, dims, 0);
 }
 
+// Reject diagnostic: when env-gated, print the first ScalarUop the
+// lifter doesn't handle.  Helps prioritise which shapes B3-finish
+// targets next.
+static void lift_reject_log(KernelEntry const *ke, u32 sid,
+                            const char *where) {
+  static int reject_log_inited = 0;
+  static int reject_log_on     = 0;
+  if (!reject_log_inited) {
+    char const *e = getenv("THVM_DUMP_LIFT_REJECT");
+    reject_log_on    = (e != NULL && e[0] == '1');
+    reject_log_inited = 1;
+  }
+  if (!reject_log_on) return;
+  if (sid == 0 || sid >= ke->n_scalar_uops) {
+    fprintf(stderr, "lift reject: %s sid=%u (out of range)\n", where, sid);
+    return;
+  }
+  ScalarUop const *u = &ke->scalar_uops[sid];
+  fprintf(stderr,
+          "lift reject: %s op=%s(%u) src_count=%u dtype=%u\n",
+          where, scalar_op_name(u->op), u->op, u->src_count, u->dtype);
+}
+
 // Find the BUFFERIZE root in scalar_uops and lift the whole kernel
 // program to a UOp DAG.  Fills `out` with the rendered-ready
 // store_root + buffer terms.
@@ -561,20 +624,42 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   ScalarUop const *bu = &ke->scalar_uops[buf_sid];
   if (bu->src_count < 1) return 0;
 
-  // Build LiftRangeMap from BUFFERIZE.src[1..].
-  u32 n_ranges = (u32)bu->src_count - 1;
-  if (n_ranges > MAX_DIM) return 0;
-  LiftRangeMap ranges[MAX_DIM];
-  for (u32 i = 0; i < n_ranges; i++) {
+  // Build LiftRangeMap from BUFFERIZE.src[1..n] (axis-id ordering)
+  // PLUS every other S_RANGE leaf in the arena (per-USE ranges that
+  // appear inside S_INDEX_E without being on the BUFFERIZE boundary).
+  // The first n_buf entries get axis_ids matching BUFFERIZE order; the
+  // rest get axis_ids continuing past n_buf.
+  u32 n_buf = (u32)bu->src_count - 1;
+  if (n_buf > MAX_DIM) return 0;
+  LiftRangeMap ranges[MAX_DIM * 2];
+  u32 n_ranges = 0;
+  for (u32 i = 0; i < n_buf; i++) {
     u32 r_sid = bu->src[1 + i];
     if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
     ScalarUop const *ru = &ke->scalar_uops[r_sid];
     if (ru->op != S_RANGE) return 0;
     u32 axis_type = (u32)(ru->extra >> 32) & 0xFFu;
     u32 extent    = (u32)(ru->extra & 0xFFFFFFFFu);
-    ranges[i].axis_id   = i;
-    ranges[i].scalar_id = r_sid;
-    ranges[i].axis_uop  = uop_range(i, axis_type, extent);
+    ranges[n_ranges].axis_id   = n_ranges;
+    ranges[n_ranges].scalar_id = r_sid;
+    ranges[n_ranges].axis_uop  = uop_range(n_ranges, axis_type, extent);
+    n_ranges++;
+  }
+  // Per-USE auxiliary S_RANGE leaves (not in BUFFERIZE) -- find by
+  // sweeping the arena.  Skip dups.
+  for (u32 i = 1; i < ke->n_scalar_uops && n_ranges < MAX_DIM * 2; i++) {
+    if (ke->scalar_uops[i].op != S_RANGE) continue;
+    int seen = 0;
+    for (u32 j = 0; j < n_ranges; j++) {
+      if (ranges[j].scalar_id == i) { seen = 1; break; }
+    }
+    if (seen) continue;
+    u32 axis_type = (u32)(ke->scalar_uops[i].extra >> 32) & 0xFFu;
+    u32 extent    = (u32)(ke->scalar_uops[i].extra & 0xFFFFFFFFu);
+    ranges[n_ranges].axis_id   = n_ranges;
+    ranges[n_ranges].scalar_id = i;
+    ranges[n_ranges].axis_uop  = uop_range(n_ranges, axis_type, extent);
+    n_ranges++;
   }
 
   // Build buffers.
