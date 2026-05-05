@@ -88,6 +88,16 @@ fn u32 tile_emit_load(KernelEntry *ke, u32 dtype, u32 alloc_id, u32 addr_id) {
   return tile_emit(ke, TILE_LOAD, dtype, 2, src, 0);
 }
 
+// Phase D3: TILE_BLOCK -- ordered statement sequence.  src[0..n-1]
+// are executed in order; the block's value is the LAST entry.  The
+// canonical reduce-broadcast pattern emits:
+//   TILE_BLOCK(alloc, reduce_into_alloc, barrier, load, body)
+// `dtype` must match the last entry's dtype (the block's "value").
+fn u32 tile_emit_block(KernelEntry *ke, u32 dtype,
+                       u32 const *stmts, u8 n_stmts) {
+  return tile_emit(ke, TILE_BLOCK, dtype, n_stmts, stmts, 0);
+}
+
 // Read TILE_LOCAL_ALLOC's (scope, n_elements) -- mirrors
 // tile_axis_unpack but for the alloc's two-field packing.
 typedef struct {
@@ -125,6 +135,7 @@ fn const char *tile_op_name(u8 op) {
     case TILE_BARRIER:     return "TILE_BARRIER";
     case TILE_REDUCE:      return "TILE_REDUCE";
     case TILE_MMA:         return "TILE_MMA";
+    case TILE_BLOCK:       return "TILE_BLOCK";
     default:               return "TILE_?";
   }
 }

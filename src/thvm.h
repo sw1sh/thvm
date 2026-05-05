@@ -871,6 +871,12 @@ typedef enum {
   TILE_BARRIER,     // future: target barrier between tile stages
   TILE_REDUCE,      // src[0] = TILE_SCALAR_BODY, extra = scalar S_REDUCE_* id
   TILE_MMA,         // src = M/N/K TILE_AXIS nodes, extra = input slots + flags
+  TILE_BLOCK,       // ordered list: src[0..src_count-1] are executed in order;
+                    // the block's value is the LAST src's value (typically a
+                    // TILE_LOAD or TILE_SCALAR_BODY).  Phase D3 uses this to
+                    // hold the canonical reduce-broadcast preamble:
+                    //   TILE_BLOCK(alloc, reduce-into-alloc, barrier, load,
+                    //              post-reduce body)
   TILE__COUNT
 } TileOp;
 
@@ -1794,6 +1800,8 @@ fn u32  tile_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
 fn u32  tile_emit_alloc(struct KernelEntry *ke, u32 dtype, u32 scope, u32 n_elements);
 fn u32  tile_emit_barrier(struct KernelEntry *ke, u32 scope);
 fn u32  tile_emit_load(struct KernelEntry *ke, u32 dtype, u32 alloc_id, u32 addr_id);
+fn u32  tile_emit_block(struct KernelEntry *ke, u32 dtype,
+                        u32 const *stmts, u8 n_stmts);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

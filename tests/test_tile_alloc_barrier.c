@@ -73,6 +73,51 @@ int main(void) {
   CHECK(ld != a);
   CHECK(ld != b);
 
+  // === TILE_BLOCK + canonical reduce-broadcast shape (D3) ===
+  TEST_BEGIN("tile-block/heap-layout");
+  // Build a synthetic 4-step block: alloc, body1, barrier, load.
+  // The block's value is the LAST stmt (the load).
+  u32 body1 = tile_emit_leaf(&ke, TILE_SCALAR_BODY, DT_FP32, 7);
+  u32 stmts4[4] = { a, body1, b, ld };
+  u32 blk = tile_emit_block(&ke, DT_FP32, stmts4, 4);
+  CHECK(blk > 0);
+  CHECK_EQ(ke.tile_uops[blk].op, TILE_BLOCK);
+  CHECK_EQ(ke.tile_uops[blk].src_count, 4);
+  CHECK_EQ(ke.tile_uops[blk].src[0], a);
+  CHECK_EQ(ke.tile_uops[blk].src[1], body1);
+  CHECK_EQ(ke.tile_uops[blk].src[2], b);
+  CHECK_EQ(ke.tile_uops[blk].src[3], ld);
+
+  TEST_BEGIN("tile-block/canonical-reduce-broadcast-shape");
+  // The full pattern Phase D3 emits for BN-grad-style reduce-broadcast:
+  //   TILE_BLOCK(
+  //     TILE_LOCAL_ALLOC(SHARED, reduce_groups),
+  //     TILE_REDUCE(... write into alloc),
+  //     TILE_BARRIER(SHARED),
+  //     TILE_LOAD(alloc, addr),
+  //     TILE_SCALAR_BODY(post-reduce expression)
+  //   )
+  // Ensure the IR can hold all five and order is preserved.
+  u32 alloc_rb = tile_emit_alloc(&ke, DT_FP32, TILE_MEM_SHARED, 32);
+  u32 reduce_body = tile_emit_leaf(&ke, TILE_SCALAR_BODY, DT_FP32, 100);
+  u32 reduce_into = tile_emit(&ke, TILE_REDUCE, DT_FP32, 1, &reduce_body, 0);
+  u32 barr = tile_emit_barrier(&ke, TILE_MEM_SHARED);
+  u32 load_addr_rb = tile_emit_leaf(&ke, TILE_SCALAR_BODY, DT_INT64, 200);
+  u32 load_rb  = tile_emit_load(&ke, DT_FP32, alloc_rb, load_addr_rb);
+  u32 post     = tile_emit_leaf(&ke, TILE_SCALAR_BODY, DT_FP32, 300);
+  u32 stmts5[5] = { alloc_rb, reduce_into, barr, load_rb, post };
+  u32 rb_block = tile_emit_block(&ke, DT_FP32, stmts5, 5);
+  CHECK_EQ(ke.tile_uops[rb_block].op, TILE_BLOCK);
+  CHECK_EQ(ke.tile_uops[rb_block].src_count, 5);
+  CHECK_EQ(ke.tile_uops[rb_block].src[0], alloc_rb);
+  CHECK_EQ(ke.tile_uops[rb_block].src[1], reduce_into);
+  CHECK_EQ(ke.tile_uops[rb_block].src[2], barr);
+  CHECK_EQ(ke.tile_uops[rb_block].src[3], load_rb);
+  CHECK_EQ(ke.tile_uops[rb_block].src[4], post);
+
+  TEST_BEGIN("tile-op-name/covers-block");
+  CHECK_EQ(strcmp(tile_op_name(TILE_BLOCK), "TILE_BLOCK"), 0);
+
   tile_free(&ke);
   thvm_free();
   TEST_REPORT();
