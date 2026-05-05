@@ -906,6 +906,57 @@ static u32 emit_ref_with_extent(KernelEntry *ke, u32 ref, u32 extent,
 static UopRangeMap RANGEIFY_UOP_RANGE_MAP[2 * MAX_DIM];
 static u32         RANGEIFY_UOP_RANGE_MAP_LEN;
 
+// Build `sum_d (r->refs[d] * v_strides[d]) + in_off` preferring the
+// UOp DAG layer (uop_int_binary + uop_to_scalar) when iters can be
+// lifted, falling back to scalar emit_ibinop otherwise.  Returns 0
+// only on a hard fault (negative stride); a successful build never
+// returns 0 (uses ICONST(0) for empty sum).
+static u32 emit_addr_from_rngs_uop_preferred(KernelEntry *ke,
+                                             RngsCtx const *r,
+                                             i32 const *v_strides,
+                                             u32 v_ndim,
+                                             u32 in_off) {
+  u32 use_ndim = (r->ndim < v_ndim) ? r->ndim : v_ndim;
+  Term acc_uop = (in_off != 0) ? uop_const(DT_INT32, in_off) : 0;
+  int  uop_ok  = 1;
+  for (u32 d = 0; d < use_ndim; d++) {
+    if (v_strides[d] < 0) return 0;
+    if (v_strides[d] == 0) continue;
+    Term tu = r->uop_refs[d];
+    if (tu == 0) {
+      tu = scalar_to_uop(ke, r->refs[d], RANGEIFY_UOP_RANGE_MAP,
+                         RANGEIFY_UOP_RANGE_MAP_LEN);
+    }
+    if (tu == 0) { uop_ok = 0; break; }
+    if (v_strides[d] != 1) {
+      tu = uop_int_binary(UOP_IMUL, tu,
+                          uop_const(DT_INT32, (u32)v_strides[d]));
+    }
+    acc_uop = (acc_uop == 0) ? tu
+                             : uop_int_binary(UOP_IADD, acc_uop, tu);
+  }
+  if (uop_ok) {
+    if (acc_uop == 0) acc_uop = uop_const(DT_INT32, 0);
+    u32 via_uop = uop_to_scalar(ke, acc_uop, RANGEIFY_UOP_RANGE_MAP,
+                                RANGEIFY_UOP_RANGE_MAP_LEN);
+    if (via_uop != 0) return via_uop;
+  }
+  // Legacy scalar fallback.
+  u32 acc = (in_off != 0) ? emit_iconst(ke, (i64)in_off) : 0;
+  for (u32 d = 0; d < use_ndim; d++) {
+    if (v_strides[d] == 0) continue;
+    u32 t = r->refs[d];
+    if (t == 0) return 0;
+    if (v_strides[d] != 1) {
+      u32 c = emit_iconst(ke, (i64)v_strides[d]);
+      t = emit_ibinop(ke, S_IMUL, t, c);
+    }
+    acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+  }
+  if (acc == 0) acc = emit_iconst(ke, 0);
+  return acc;
+}
+
 static u32 emit_flat_from_rngs(KernelEntry *ke, RngsCtx const *r,
                                u32 const *extents) {
   // Phase B3: UOp-driven flat assembly.  Per-axis iter comes from
@@ -967,58 +1018,9 @@ fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
   u32 param  = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)slot);
   u32 acc    = 0;
   if (r->ndim == v->shape.ndim) {
-    // Phase B3: UOp-driven address build.  Each axis's iter is taken
-    // from r->uop_refs[d] when populated; otherwise scalar_to_uop
-    // rebuilds it from r->refs[d] (covers secondary RngsCtx-build
-    // sites that haven't yet populated uop_refs in parallel).  When
-    // every axis resolves, the address `sum_d (iter * stride) +
-    // offset` is assembled via simplifier-aware uop_int_binary then
-    // translated to scalar via the file-scope range map.  The legacy
-    // scalar emit below stays as the fallback when an axis can't be
-    // lifted to UOp form (e.g. a non-int scalar leaf the inverse
-    // translator doesn't recognise).
-    Term acc_uop = (in_off != 0) ? uop_const(DT_INT32, in_off) : 0;
-    int  uop_ok  = 1;
-    for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
-      if (v->strides[d] < 0) { uop_ok = 0; break; }
-      if (v->strides[d] == 0) continue;
-      Term tu = r->uop_refs[d];
-      if (tu == 0) {
-        tu = scalar_to_uop(ke, r->refs[d], RANGEIFY_UOP_RANGE_MAP,
-                           RANGEIFY_UOP_RANGE_MAP_LEN);
-      }
-      if (tu == 0) { uop_ok = 0; break; }
-      if (v->strides[d] != 1) {
-        tu = uop_int_binary(UOP_IMUL, tu,
-                            uop_const(DT_INT32, (u32)v->strides[d]));
-      }
-      acc_uop = (acc_uop == 0) ? tu
-                               : uop_int_binary(UOP_IADD, acc_uop, tu);
-    }
-    if (uop_ok) {
-      if (acc_uop == 0) acc_uop = uop_const(DT_INT32, 0);
-      u32 acc_via_uop = uop_to_scalar(ke, acc_uop, RANGEIFY_UOP_RANGE_MAP,
-                                      RANGEIFY_UOP_RANGE_MAP_LEN);
-      if (acc_via_uop != 0) acc = acc_via_uop;
-    }
-    if (acc == 0) {
-      // Legacy scalar emit -- runs when uop translation isn't usable
-      // (uop_refs missing, range map miss, etc.).  Will be deleted
-      // once all callers populate uop_refs end-to-end.
-      acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
-      for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
-        if (v->strides[d] < 0) return 0;
-        if (v->strides[d] == 0) continue;
-        u32 t = r->refs[d];
-        if (t == 0) return 0;
-        if (v->strides[d] != 1) {
-          u32 c = emit_iconst(ke, (i64)v->strides[d]);
-          t = emit_ibinop(ke, S_IMUL, t, c);
-        }
-        acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
-      }
-      if (acc == 0) acc = emit_iconst(ke, 0);
-    }
+    acc = emit_addr_from_rngs_uop_preferred(ke, r, v->strides,
+                                            v->shape.ndim, in_off);
+    if (acc == 0) return 0;  // negative-stride bail
   } else if (r->ndim > 0 && r->ndim <= MAX_DIM
              && v->shape.ndim > 0 && v->shape.ndim <= MAX_DIM) {
     u32 extents[MAX_DIM];
@@ -2649,18 +2651,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
        pre_index_rngs_fallback:
         via_rngs_in_region[r][i] = 1;
         RngsCtx const *rc = &input_rngs_in_region[r][i];
-        u32 acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
-        for (u32 d = 0; d < rc->ndim; d++) {
-          if (v->strides[d] < 0) { acc = 0; break; }
-          if (v->strides[d] == 0) continue;
-          u32 t = rc->refs[d];
-          if (v->strides[d] != 1) {
-            u32 c = emit_iconst(ke, (i64)v->strides[d]);
-            t = emit_ibinop(ke, S_IMUL, t, c);
-          }
-          acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+        u32 acc = emit_addr_from_rngs_uop_preferred(ke, rc, v->strides,
+                                                   v->shape.ndim, in_off);
+        if (acc == 0) {
+          // Negative-stride bail (helper returns 0 only on hard fault).
+          // Fall through to the existing failure path below.
+          RBAIL_MID("pre-INDEX rngs negative stride");
         }
-        if (acc == 0) acc = emit_iconst(ke, 0);
         u32 src[2] = {param, acc};
         idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
       } else {
@@ -2767,22 +2764,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // os.shape incompatible by direct prefix/suffix matching.
           via_rngs_post[i] = 1;
           RngsCtx const *r = &input_rngs_post[i];
-          u32 acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
-          int bailed = 0;
-          for (u32 d = 0; d < r->ndim; d++) {
-            if (v->strides[d] < 0) { bailed = 1; break; }
-            if (v->strides[d] == 0) continue;
-            u32 t = r->refs[d];
-            if (v->strides[d] != 1) {
-              u32 c = emit_iconst(ke, (i64)v->strides[d]);
-              t = emit_ibinop(ke, S_IMUL, t, c);
-            }
-            acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
-          }
-          if (bailed) {
-            RBAIL_MID("post-INDEX rngs negative stride");
-          }
-          if (acc == 0) acc = emit_iconst(ke, 0);
+          u32 acc = emit_addr_from_rngs_uop_preferred(ke, r, v->strides,
+                                                     v->shape.ndim, in_off);
+          if (acc == 0) RBAIL_MID("post-INDEX rngs negative stride");
           u32 src[2] = {param, acc};
           idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
         } else {
@@ -2804,22 +2788,9 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // to match by prefix/suffix rank.
         via_rngs_post[i] = 1;
         RngsCtx const *r = &input_rngs_post[i];
-        u32 acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
-        int bailed = 0;
-        for (u32 d = 0; d < r->ndim; d++) {
-          if (v->strides[d] < 0) { bailed = 1; break; }
-          if (v->strides[d] == 0) continue;
-          u32 t = r->refs[d];
-          if (v->strides[d] != 1) {
-            u32 c = emit_iconst(ke, (i64)v->strides[d]);
-            t = emit_ibinop(ke, S_IMUL, t, c);
-          }
-          acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
-        }
-        if (bailed) {
-          RBAIL_MID("post-INDEX rngs negative stride");
-        }
-        if (acc == 0) acc = emit_iconst(ke, 0);
+        u32 acc = emit_addr_from_rngs_uop_preferred(ke, r, v->strides,
+                                                   v->shape.ndim, in_off);
+        if (acc == 0) RBAIL_MID("post-INDEX rngs negative stride");
         u32 src[2] = {param, acc};
         idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
       } else {
