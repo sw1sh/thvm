@@ -516,6 +516,19 @@ void thvm_init(void) {
 }
 
 void thvm_free(void) {
+  // Phase F shadow lifter coverage dump.  Env-gated so the noise
+  // doesn't pollute normal test output; turn on with
+  // THVM_DUMP_LIFT_COVERAGE=1 to see how many cg_emit_tile_metal
+  // calls the lifter handled in this run.
+  if (getenv("THVM_DUMP_LIFT_COVERAGE")) {
+    fprintf(stderr,
+            "thvm: kernel_lift coverage -- attempts=%llu successes=%llu"
+            " compiles=%llu compile_fails=%llu\n",
+            (unsigned long long)kernel_lift_attempts(),
+            (unsigned long long)kernel_lift_successes(),
+            (unsigned long long)kernel_lift_compiles(),
+            (unsigned long long)kernel_lift_compile_fails());
+  }
   if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
   // Wipe every file-static cache / side table that thvm_init seeds.
   // These hold Terms / heap pointers; once the heap below is freed,
