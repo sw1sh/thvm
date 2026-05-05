@@ -113,18 +113,6 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
   return 1;
 }
 
-static int axes_record_metadata_opt(KernelAxes *ax, KOpt opt) {
-  if (ax == NULL || ax->n_applied >= MAX_OPTS) {
-    return 0;
-  }
-  ax->applied_opts[ax->n_applied++] = opt;
-  ax->version++;
-  if (ax->version == 0) {
-    ax->version = 1;
-  }
-  return 1;
-}
-
 fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (ke == NULL || ke->axes == NULL) {
     return 0;
@@ -140,5 +128,5 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (!tile_analyze_gemm(ke, NULL, &gemm) || gemm.dtype != DT_FP32) {
     return 0;
   }
-  return axes_record_metadata_opt(ke->axes, opt);
+  return tile_anno_record_opt(ke, opt);
 }

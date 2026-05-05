@@ -1868,6 +1868,8 @@ int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
 // new_inner_type (KAX_LOCAL/UPCAST/UNROLL/GROUP_REDUCE).
 int        tile_anno_apply_split(struct KernelEntry *ke, u32 d,
                                  u32 factor, u32 new_inner_type);
+// Record an opt as applied without changing axis structure (KOP_TC).
+int        tile_anno_record_opt(struct KernelEntry *ke, KOpt opt);
 // Direct per-axis write.  Updates both KernelAxes and TILE_AXIS
 // (when present) so memory_scope + vector_width can be set without
 // going through KOpt machinery.

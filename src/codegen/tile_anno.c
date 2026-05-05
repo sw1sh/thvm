@@ -137,6 +137,19 @@ int tile_anno_apply_opt(KernelEntry *ke, KOpt opt) {
   return kernel_apply_opt(ke, opt);
 }
 
+// Record an opt as applied without mutating axis structure.  Used
+// for metadata-only opts (KOP_TC) that downstream consumers read
+// from applied_opts but that don't change axis types/extents.
+// Returns 1 on success, 0 if applied_opts is full.
+int tile_anno_record_opt(KernelEntry *ke, KOpt opt) {
+  if (ke == NULL || ke->axes == NULL) return 0;
+  if (ke->axes->n_applied >= MAX_OPTS) return 0;
+  ke->axes->applied_opts[ke->axes->n_applied++] = opt;
+  ke->axes->version++;
+  if (ke->axes->version == 0) ke->axes->version = 1;
+  return 1;
+}
+
 // Phase E writer-side: split an axis at position d into
 // (outer at d, inner at d+1).  outer keeps its current type with
 // size = orig_size / factor; inner takes new_inner_type with size =
