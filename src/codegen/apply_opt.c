@@ -132,7 +132,8 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (opt.op != KOP_TC) {
     return axes_apply_opt(ke->axes, opt);
   }
-  if (opt.axis >= ke->axes->n_axes || !tile_mma_size_supported(opt.arg)) {
+  if (opt.axis >= tile_anno_axis_count_or_kernelaxes(ke)
+      || !tile_mma_size_supported(opt.arg)) {
     return 0;
   }
   TileGemmInfo gemm;
