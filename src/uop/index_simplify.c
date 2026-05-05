@@ -203,5 +203,19 @@ fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
     return cv != 0 ? then_v : else_v;
   }
   if (then_v == else_v) return then_v;
+  // IWHERE-of-IWHERE collapse: when the then-branch is itself an
+  // IWHERE that shares the same else-branch (the canonical PAD-mask
+  // shape: IWHERE(c1, IWHERE(c2, val, INVALID), INVALID)), combine
+  // the conditions via IAND.  Mirrors emit_iwhere's nested-fold in
+  // schedule/rangeify.c.
+  if (term_tag(then_v) == TAG_UOP && term_ext(then_v) == UOP_IWHERE) {
+    Term inner_cond = heap_read(term_val(then_v) + 0);
+    Term inner_then = heap_read(term_val(then_v) + 1);
+    Term inner_else = heap_read(term_val(then_v) + 2);
+    if (inner_else == else_v) {
+      Term combined = uop_int_binary(UOP_IAND, cond, inner_cond);
+      return uop_iwhere(combined, inner_then, else_v);
+    }
+  }
   return 0;
 }
