@@ -1849,6 +1849,13 @@ fn void tile_render_msl_skeleton(struct KernelEntry const *ke, FILE *fp);
 // the tile-render path, or "ok" if the structure is valid.
 fn const char *tile_reject_reason(struct KernelEntry const *ke);
 
+// Phase F prep: tile-IR-native dispatch shape.  Walks tile_root's
+// TILE_AXIS children and computes (groups, threads) directly from
+// kax_type + extent, without going through KernelAxes.  Returns 1 on
+// success; 0 if no tile_root, malformed axes, or GROUP_REDUCE > 256.
+fn int tile_compute_dispatch_shape(struct KernelEntry const *ke,
+                                   u32 *groups_out, u32 *threads_out);
+
 // Phase E scaffolding: axis-info read helpers that go through TILE_AXIS
 // (instead of KernelAxes side channel).  As consumers migrate, these
 // become the single read path; KernelAxes deletes once the migration

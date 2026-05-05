@@ -473,6 +473,90 @@ fn const char *tile_op_name(u8 op) {
   }
 }
 
+// Phase F prep: tile-IR-native dispatch shape derivation.  Walks the
+// tile_root's TILE_AXIS children and computes (groups, threads) the
+// same way render_metal's CtKernelInfo path does -- but reads kax_type
+// + extent directly from TILE_AXIS instead of going through the
+// KernelAxes side channel.  Returns 1 on success, 0 if the kernel
+// can't be dispatched as tile-only (no axes, overflow, or
+// GROUP_REDUCE > 256).
+//
+// Three modes mirror rmt_axis_mode():
+//   LOCAL_GLOBAL: at least one KAX_LOCAL + at least one KAX_GLOBAL
+//                 -> groups = product(non-LOCAL extents)
+//                    threads = LOCAL extent
+//   GROUP_REDUCE: at least one KAX_GROUP_REDUCE
+//                 -> groups = product(non-GROUP_REDUCE extents)
+//                    threads = GROUP_REDUCE extent
+//   FLAT_GRID:    everything else (typically all KAX_LOOP)
+//                 -> total = product(extents); threads = min(256, total);
+//                    groups = ceil(total / threads)
+//
+// No consumer yet -- the renderer rewrite (Phase F proper) will swap
+// cg_tile_metal_dispatch_shape's CtKernelInfo path to call this.
+fn int tile_compute_dispatch_shape(KernelEntry const *ke, u32 *groups_out,
+                                   u32 *threads_out) {
+  if (ke == NULL || ke->tile_uops == NULL || ke->tile_root == 0) {
+    return 0;
+  }
+  if (ke->tile_root >= ke->n_tile_uops) {
+    return 0;
+  }
+  TileUop const *root = &ke->tile_uops[ke->tile_root];
+  if (root->op != TILE_LOOP_NEST || root->src_count < 2) {
+    return 0;
+  }
+
+  u32 has_local = 0, has_global = 0, has_group_reduce = 0;
+  u32 local_extent = 1, group_reduce_extent = 1;
+  u64 group_total = 1, total = 1;
+  for (u8 s = 1; s < root->src_count; s++) {
+    u32 ax_id = root->src[s];
+    if (ax_id >= ke->n_tile_uops
+        || ke->tile_uops[ax_id].op != TILE_AXIS) {
+      return 0;
+    }
+    TileAxisInfo info = tile_axis_unpack(ke->tile_uops[ax_id].extra);
+    if (info.extent == 0) return 0;
+    total *= (u64)info.extent;
+    if (info.kax_type == KAX_LOCAL) {
+      has_local = 1;
+      local_extent = info.extent;
+    } else if (info.kax_type == KAX_GLOBAL) {
+      has_global = 1;
+      group_total *= (u64)info.extent;
+    } else if (info.kax_type == KAX_GROUP_REDUCE) {
+      has_group_reduce = 1;
+      group_reduce_extent = info.extent;
+    } else {
+      group_total *= (u64)info.extent;
+    }
+  }
+  if (total == 0 || total > 0xFFFFFFFFu) return 0;
+
+  u32 groups = 1, threads = 1;
+  if (has_group_reduce) {
+    if (group_reduce_extent == 0 || group_reduce_extent > 256) {
+      return 0;
+    }
+    if (group_total > 0xFFFFFFFFu) return 0;
+    groups  = (u32)group_total;
+    threads = group_reduce_extent;
+  } else if (has_local && has_global) {
+    if (group_total == 0 || group_total > 0xFFFFFFFFu) return 0;
+    groups  = (u32)group_total;
+    threads = local_extent;
+  } else {
+    threads = total < 256 ? (u32)total : 256u;
+    groups  = (u32)((total + (u64)threads - 1) / (u64)threads);
+  }
+  if (groups == 0 || threads == 0) return 0;
+
+  if (groups_out  != NULL) *groups_out  = groups;
+  if (threads_out != NULL) *threads_out = threads;
+  return 1;
+}
+
 fn const char *tile_axis_name(u32 axis_type) {
   switch (axis_type) {
     case KAX_LOOP:         return "LOOP";
