@@ -81,9 +81,16 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   + tile_build_conv2d_from_info builder, parallel to TILE_MMA.
   Renderer (Phase F) is the first consumer.
 - **Phase F prep** (`28bb3dc`, `3f380b4`, `5b3af38`, `8c8fbb0`,
-  `4e057cf`, `db7f8de`):
-  tile_render_msl_skeleton walks tile_uops and emits pseudo-MSL
-  with axis loops, alloc decls, barriers, and store comments.
+  `4e057cf`, `db7f8de`, `068e3d0`, `097d1e8`, `68cc344`, `85be4c4`):
+  tile_render_msl_skeleton walks tile_uops and emits incrementally-
+  more-functional pseudo-MSL.  Latest additions: real kernel
+  signature with `out [[ buffer(0) ]]` and `inN [[ buffer(1+N) ]]`
+  arg list (typed via tile_msl_type_name); TILE_LOAD address
+  rendered as `s<id>` from the addr's TILE_SCALAR_BODY; TILE_STORE
+  rendered as `out[_idx] = s<id>`; row-major `_idx` linearization
+  computed from output axes (LOOP/UPCAST/LOCAL/GLOBAL with stride
+  product of later extents).  Closer each commit to compilable MSL
+  output.
   TILE_INPUT_BUF leaf node carries kernel input slot ids;
   TILE_LOAD reads from either TILE_LOCAL_ALLOC (shared) or
   TILE_INPUT_BUF (global).  TILE_OUTPUT_BUF leaf carries kernel
