@@ -249,6 +249,53 @@ int main(void) {
   fclose(fp);
   CHECK(contains(buf_shr, "(a0 + 4)"));
 
+  TEST_BEGIN("kernel-lift/reshape-v-decomposes-flat-idx");
+  // STORE(INDEX(OUT, r0, r1), RESHAPE_V(LOAD(IN[r_in]), N_out=2))
+  // 2D output (r0:4 x r1:4) reshapes a 1D input range r_in:16.
+  // Lifter computes flat_idx = r0*4 + r1, then r_in = flat_idx.
+  kid = kernel_alloc();
+  ke = &KERNELS[kid];
+  ke->output_dtype = DT_FP32;
+  kernel_inputs_reserve(ke, 1);
+  ke->n_inputs = 1;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_tids[0]   = 0;
+
+  u32 r0v = emit_range_axis(ke, 0 /*LOOP*/, 4);
+  u32 r1v = emit_range_axis(ke, 0 /*LOOP*/, 4);
+  u32 r_in = emit_range_axis(ke, 0 /*LOOP*/, 16);
+
+  u32 in_pv  = rangeify_emit_leaf(ke, S_DEFINE_PARAM, DT_FP32, 0);
+  u32 out_dv = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+
+  u32 idx_in_v[2] = { in_pv, r_in };
+  u32 idx_in_vid  = rangeify_emit(ke, S_INDEX, DT_FP32, 2, idx_in_v, 0);
+  u32 ld_v   = rangeify_emit(ke, S_LOAD, DT_FP32, 1, &idx_in_vid, 0);
+  // RESHAPE_V: src[0]=ld, src[1..3]=out iters (r0v, r1v),
+  //             src[3..]=in iters (r_in); extra=N_out=2
+  u32 rv_s[4] = { ld_v, r0v, r1v, r_in };
+  u32 rv     = rangeify_emit(ke, S_RESHAPE_V, DT_FP32, 4, rv_s, /*N_out=*/2);
+
+  u32 idx_out_v[3] = { out_dv, r0v, r1v };
+  u32 idx_out_vid  = rangeify_emit(ke, S_INDEX, DT_FP32, 3, idx_out_v, 0);
+  u32 st_v_s[2] = { idx_out_vid, rv };
+  u32 st_v   = rangeify_emit(ke, S_STORE, DT_FP32, 2, st_v_s, 0);
+  u32 buf_v_s[3] = { st_v, r0v, r1v };
+  rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 3, buf_v_s, 0);
+
+  KernelUopLift lift_v = {0};
+  CHECK_EQ(kernel_lift_to_uop(ke, &lift_v), 1);
+  char buf_rv[2048];
+  fp = fmemopen(buf_rv, sizeof(buf_rv), "w");
+  cg_render_uop_kernel(lift_v.store_root, "k_resh", lift_v.out_buf,
+                       lift_v.in_bufs, lift_v.n_inputs, fp);
+  fclose(fp);
+  // The flat_idx is (a0 * 4 + a1); the input range gets that mod 16
+  // (which simplifier may reduce since the value is already in [0,16)).
+  CHECK(contains(buf_rv, "(a0 * 4)"));
+  CHECK(contains(buf_rv, "for (uint a0 = 0; a0 < 4"));
+  CHECK(contains(buf_rv, "for (uint a1 = 0; a1 < 4"));
+
   thvm_free();
   TEST_REPORT();
 }
