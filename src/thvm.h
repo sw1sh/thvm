@@ -1835,6 +1835,10 @@ fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
 // the existing rmt_emit_value).
 fn void tile_render_msl_skeleton(struct KernelEntry const *ke, FILE *fp);
 
+// Diagnostic: returns a static string explaining why `ke` would fail
+// the tile-render path, or "ok" if the structure is valid.
+fn const char *tile_reject_reason(struct KernelEntry const *ke);
+
 // Phase E scaffolding: axis-info read helpers that go through TILE_AXIS
 // (instead of KernelAxes side channel).  As consumers migrate, these
 // become the single read path; KernelAxes deletes once the migration
