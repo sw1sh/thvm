@@ -80,13 +80,23 @@ flickering-watching-gem.md`, the foundation for the 3-IR
 - **D4 main** (`be93640`): TILE_CONV2D specialised compute node
   + tile_build_conv2d_from_info builder, parallel to TILE_MMA.
   Renderer (Phase F) is the first consumer.
-- **Phase E scaffold** (committed): tile_anno_axis_count +
-  tile_anno_axis_at helpers in new codegen/tile_anno.c.  Read
-  axis info via TILE_AXIS instead of KernelAxes side channel;
-  consumers migrate gradually, KernelAxes deletes once all 157
-  reads go through tile_anno_*.  Migration helper variants with
-  KernelAxes fallback land too (`tile_anno_axis_or_kernelaxes`)
-  for callers that run before tile_uops is built.
+- **Phase E read-side migration** (committed): codegen/tile_anno.c
+  + 7 commits migrating consumers.  All read sites for
+  `ke->axes->axis_types[]` and `ke->axes->full_shape[]` outside
+  the source-converter (tile_emit_axes_from_kernel_axes) and
+  mutator writes (axis.c) now read via tile_anno_axis_or_kernelaxes:
+    - propose.c (axis-counter, conv2d local/upcast/unroll opts,
+      reduce-tail axis_size, metal_tile_kernel LOOP-presence,
+      branch guards on n_axes)
+    - apply_opt.c (KOP_TC opt axis check)
+    - autotune.c (kernel_apply_local_with_implicit_global +
+      bench hash function)
+    - kernel_program_cache.c (cache hash + compare)
+  Stronger staleness check (versions match AND axis-count matches)
+  in tile_anno_tile_uops_fresh prevents stale TILE_AXIS reads when
+  ke->axes is mutated post-tile_build.  Phase F's renderer rewrite
+  (still pending) folds in the bridge converter; axis.c writer
+  migration is gated on tile_uops being a writable representation.
 - **Phase F prep** (`bf247f2`, `4de9b64`): tile-IR pretty-printer
   `tile_dump(ke, fp)` walks the tile_uops graph with indented
   output decoding TileAxisInfo / TileAllocInfo metadata.
