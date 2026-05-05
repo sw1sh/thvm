@@ -365,15 +365,25 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
     case TILE_LOAD: {
       tile_render_msl_indent(fp, depth);
       // src[0] is either TILE_LOCAL_ALLOC or TILE_INPUT_BUF.
+      // src[1] is the address (typically a TILE_SCALAR_BODY).
       u32 src0 = u->src[0];
+      u32 src1 = (u->src_count > 1) ? u->src[1] : 0;
+      char addr_buf[32];
+      if (src1 != 0 && src1 < ke->n_tile_uops
+          && ke->tile_uops[src1].op == TILE_SCALAR_BODY) {
+        snprintf(addr_buf, sizeof(addr_buf), "s%u",
+                 (u32)ke->tile_uops[src1].extra);
+      } else {
+        snprintf(addr_buf, sizeof(addr_buf), "/*addr*/");
+      }
       if (src0 < ke->n_tile_uops
           && ke->tile_uops[src0].op == TILE_INPUT_BUF) {
         u32 slot = (u32)ke->tile_uops[src0].extra;
-        fprintf(fp, "float _v = in%u[/*addr*/]; /* TILE_LOAD from input %u */\n",
-                slot, slot);
+        fprintf(fp, "float _v = in%u[%s]; /* TILE_LOAD from input %u */\n",
+                slot, addr_buf, slot);
       } else {
-        fprintf(fp, "float _v = _alloc%u[/*addr*/]; /* TILE_LOAD */\n",
-                src0);
+        fprintf(fp, "float _v = _alloc%u[%s]; /* TILE_LOAD */\n",
+                src0, addr_buf);
       }
       return;
     }

@@ -108,7 +108,7 @@ int main(void) {
   CHECK(fp != NULL);
   tile_render_msl_skeleton(ke, fp);
   fclose(fp);
-  CHECK(contains(buf4, "in2[/*addr*/]"));
+  CHECK(contains(buf4, "in2[s5]"));
   CHECK(contains(buf4, "TILE_LOAD from input 2"));
 
   tile_free(ke);
