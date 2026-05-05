@@ -71,6 +71,23 @@ int main(void) {
   // axes_match returns 1 when at least one of the two sides is absent.
   CHECK_EQ(tile_anno_axes_match(ke), 1);
 
+  TEST_BEGIN("tile-anno/apply-split-maps-to-kop");
+  // tile_anno_apply_split should fail with no axes set up; this just
+  // exercises the dispatch table for known new_inner_type values.
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_LOCAL), 0);  // no axes
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_UPCAST), 0);
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_UNROLL), 0);
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_GROUP_REDUCE), 0);
+
+  TEST_BEGIN("tile-anno/apply-split-rejects-unsupported-target");
+  // KAX_REDUCE / KAX_LOOP aren't valid split targets (no inner-axis
+  // type semantics).  Helper bails before consulting axes.
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_REDUCE), 0);
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_LOOP), 0);
+
+  TEST_BEGIN("tile-anno/apply-split-rejects-zero-factor");
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 0, KAX_LOCAL), 0);
+
   tile_free(ke);
   thvm_free();
   TEST_REPORT();
