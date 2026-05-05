@@ -84,7 +84,22 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   tile_anno_axis_at helpers in new codegen/tile_anno.c.  Read
   axis info via TILE_AXIS instead of KernelAxes side channel;
   consumers migrate gradually, KernelAxes deletes once all 157
-  reads go through tile_anno_*.
+  reads go through tile_anno_*.  Migration helper variants with
+  KernelAxes fallback land too (`tile_anno_axis_or_kernelaxes`)
+  for callers that run before tile_uops is built.
+- **Phase F prep** (`bf247f2`, `4de9b64`): tile-IR pretty-printer
+  `tile_dump(ke, fp)` walks the tile_uops graph with indented
+  output decoding TileAxisInfo / TileAllocInfo metadata.
+  `DUMP_TILE_IR=1` env-gate wired into tile_sync_from_scalar.
+  Foundation Phase F's renderer walks; D3/D4 work also benefits
+  from being able to inspect emitted IR.
+- **Misc B2 polish**: affine normalization (`(c1*x) + (c2*x) ->
+  (c1+c2)*x` in `d364b73`), divmod recombination
+  (`(r//M)*M + (r%M) -> r` in `0654204`), gcd-aware IDIV fold
+  (`(c*x) // bv -> x // (bv/c)` when c|bv in `33177cd`), outer-
+  of-inner-with-const collapses (IADD/ISUB/IMUL in `e5132bf`).
+  Brings uop_int_binary to feature parity with rangeify's
+  scalar emit_ibinop on simplification rules.
 - **Misc B2 follow-up** (`39e2239`): IWHERE-of-IWHERE collapse
   fold in uop_simplify_iwhere; mirrors emit_iwhere's nested-fold
   in rangeify.
