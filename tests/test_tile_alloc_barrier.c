@@ -139,6 +139,26 @@ int main(void) {
   TEST_BEGIN("tile-op-name/covers-input-buf");
   CHECK_EQ(strcmp(tile_op_name(TILE_INPUT_BUF), "TILE_INPUT_BUF"), 0);
 
+  TEST_BEGIN("tile-output-buf/heap-layout");
+  // Phase F: TILE_OUTPUT_BUF leaf carrying output slot id.
+  u32 out_buf = tile_emit_output_buf(&ke, DT_FP32, /*slot=*/0);
+  CHECK(out_buf > 0);
+  CHECK_EQ(ke.tile_uops[out_buf].op, TILE_OUTPUT_BUF);
+  CHECK_EQ(ke.tile_uops[out_buf].dtype, DT_FP32);
+  CHECK_EQ((u32)ke.tile_uops[out_buf].extra, 0u);
+  CHECK_EQ(ke.tile_uops[out_buf].src_count, 0);
+
+  TEST_BEGIN("tile-output-buf/extra-slot-distinct");
+  u32 out_extra1 = tile_emit_output_buf(&ke, DT_FP32, 1);
+  u32 out_extra2 = tile_emit_output_buf(&ke, DT_FP32, 2);
+  CHECK(out_extra1 != out_buf);
+  CHECK(out_extra2 != out_extra1);
+  CHECK_EQ((u32)ke.tile_uops[out_extra1].extra, 1u);
+  CHECK_EQ((u32)ke.tile_uops[out_extra2].extra, 2u);
+
+  TEST_BEGIN("tile-op-name/covers-output-buf");
+  CHECK_EQ(strcmp(tile_op_name(TILE_OUTPUT_BUF), "TILE_OUTPUT_BUF"), 0);
+
   tile_free(&ke);
   thvm_free();
   TEST_REPORT();

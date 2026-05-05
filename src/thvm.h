@@ -886,6 +886,10 @@ typedef enum {
                     // input slot id; dtype carries the element type.
                     // Used as src[0] of TILE_LOAD for global-memory
                     // reads (parallel to TILE_LOCAL_ALLOC for shared).
+  TILE_OUTPUT_BUF,  // Phase F: kernel output buffer reference.  extra =
+                    // output slot id (0 = primary, 1..n = extras for
+                    // multi-output kernels).  Used by future TILE_STORE
+                    // shapes that need explicit output binding.
   TILE__COUNT
 } TileOp;
 
@@ -1821,6 +1825,7 @@ fn u32  tile_emit_load(struct KernelEntry *ke, u32 dtype, u32 alloc_id, u32 addr
 fn u32  tile_emit_block(struct KernelEntry *ke, u32 dtype,
                         u32 const *stmts, u8 n_stmts);
 fn u32  tile_emit_input_buf(struct KernelEntry *ke, u32 dtype, u32 input_slot);
+fn u32  tile_emit_output_buf(struct KernelEntry *ke, u32 dtype, u32 output_slot);
 fn u32  tile_analyze_reduce_broadcast(struct KernelEntry const *ke);
 fn u32  tile_lower_reduce_broadcast(struct KernelEntry *ke,
                                     u32 reduce_scalar_id,

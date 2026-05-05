@@ -105,6 +105,15 @@ fn u32 tile_emit_input_buf(KernelEntry *ke, u32 dtype, u32 input_slot) {
   return tile_emit_leaf(ke, TILE_INPUT_BUF, dtype, (u64)input_slot);
 }
 
+// Phase F: TILE_OUTPUT_BUF -- kernel output buffer reference.
+// extra = output slot id (0 = primary; 1..n = extras for
+// multi-output kernels).  Future TILE_STORE shapes that need
+// explicit output binding (e.g. multi-output BN-grad fused
+// kernels) reference this leaf.
+fn u32 tile_emit_output_buf(KernelEntry *ke, u32 dtype, u32 output_slot) {
+  return tile_emit_leaf(ke, TILE_OUTPUT_BUF, dtype, (u64)output_slot);
+}
+
 // Read TILE_LOCAL_ALLOC's (scope, n_elements) -- mirrors
 // tile_axis_unpack but for the alloc's two-field packing.
 typedef struct {
@@ -222,6 +231,10 @@ fn void tile_dump_node(KernelEntry const *ke, u32 id, FILE *fp, u32 depth) {
       return;
     case TILE_INPUT_BUF:
       fprintf(fp, "TILE_INPUT_BUF<slot=%u dtype=%u>\n",
+              (u32)u->extra, u->dtype);
+      return;
+    case TILE_OUTPUT_BUF:
+      fprintf(fp, "TILE_OUTPUT_BUF<slot=%u dtype=%u>\n",
               (u32)u->extra, u->dtype);
       return;
     default:
@@ -368,6 +381,10 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
       tile_render_msl_indent(fp, depth);
       fprintf(fp, "/* TILE_INPUT_BUF slot=%u */\n", (u32)u->extra);
       return;
+    case TILE_OUTPUT_BUF:
+      tile_render_msl_indent(fp, depth);
+      fprintf(fp, "/* TILE_OUTPUT_BUF slot=%u */\n", (u32)u->extra);
+      return;
     case TILE_SCALAR_BODY:
       tile_render_msl_indent(fp, depth);
       fprintf(fp, "/* scalar body S%u */\n", (u32)u->extra);
@@ -451,6 +468,7 @@ fn const char *tile_op_name(u8 op) {
     case TILE_BLOCK:       return "TILE_BLOCK";
     case TILE_CONV2D:      return "TILE_CONV2D";
     case TILE_INPUT_BUF:   return "TILE_INPUT_BUF";
+    case TILE_OUTPUT_BUF:  return "TILE_OUTPUT_BUF";
     default:               return "TILE_?";
   }
 }
