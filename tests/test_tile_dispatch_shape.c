@@ -101,6 +101,28 @@ int main(void) {
   build_loop_nest(&ke, store, axes_zero, 1);
   CHECK_EQ(tile_compute_dispatch_shape(&ke, &g, &t), 0);
 
+  TEST_BEGIN("tile-dispatch-shape/reduce-axes-skip-grid");
+  // KAX_REDUCE / KAX_UNROLL axes are in-kernel reductions; they
+  // should NOT contribute to the dispatch grid.  LOOP=8 + REDUCE=16
+  // -> total=8 (just LOOP), threads=8, groups=1.
+  u32 ax_lp = emit_axis(&ke, KAX_LOOP, 8);
+  u32 ax_rd = emit_axis(&ke, KAX_REDUCE, 16);
+  u32 axes_red[2] = { ax_lp, ax_rd };
+  build_loop_nest(&ke, store, axes_red, 2);
+  CHECK_EQ(tile_compute_dispatch_shape(&ke, &g, &t), 1);
+  CHECK_EQ(t, 8u);
+  CHECK_EQ(g, 1u);
+
+  TEST_BEGIN("tile-dispatch-shape/upcast-axes-counted");
+  // KAX_UPCAST contributes to dispatch grid (it's an output axis).
+  u32 ax_lp2u = emit_axis(&ke, KAX_LOOP, 4);
+  u32 ax_up   = emit_axis(&ke, KAX_UPCAST, 4);
+  u32 axes_lpup[2] = { ax_lp2u, ax_up };
+  build_loop_nest(&ke, store, axes_lpup, 2);
+  CHECK_EQ(tile_compute_dispatch_shape(&ke, &g, &t), 1);
+  CHECK_EQ(t, 16u);  // 4 * 4
+  CHECK_EQ(g, 1u);
+
   TEST_BEGIN("tile-dispatch-shape/non-loop-nest-root-rejects");
   // tile_root pointing at TILE_STORE rather than TILE_LOOP_NEST.
   ke.tile_root = store;

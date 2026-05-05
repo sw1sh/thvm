@@ -1015,6 +1015,30 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   if (groups == 0 || threads == 0) {
     return 0;
   }
+  // Phase F prep: optional parity check against the tile-IR-native
+  // tile_compute_dispatch_shape walker.  Gated by env var so the
+  // shadow comparison only runs when explicitly requested
+  // (THVM_DISPATCH_SHAPE_PARITY=1); reports disagreements to stderr
+  // without aborting.  Used to validate the renderer rewrite seam
+  // before flipping the dispatch path.
+  static int dispatch_parity_inited = 0;
+  static int dispatch_parity_on     = 0;
+  if (!dispatch_parity_inited) {
+    char const *e = getenv("THVM_DISPATCH_SHAPE_PARITY");
+    dispatch_parity_on    = (e != NULL && e[0] == '1');
+    dispatch_parity_inited = 1;
+  }
+  if (dispatch_parity_on) {
+    u32 tg = 0, tt = 0;
+    if (tile_compute_dispatch_shape(ke, &tg, &tt)) {
+      if (tg != groups || tt != threads) {
+        fprintf(stderr,
+                "thvm: dispatch_shape_parity mismatch -- "
+                "ct=(g=%u,t=%u) tile=(g=%u,t=%u)\n",
+                groups, threads, tg, tt);
+      }
+    }
+  }
   if (groups_x != NULL) {
     *groups_x = groups;
   }

@@ -518,19 +518,24 @@ fn int tile_compute_dispatch_shape(KernelEntry const *ke, u32 *groups_out,
     }
     TileAxisInfo info = tile_axis_unpack(ke->tile_uops[ax_id].extra);
     if (info.extent == 0) return 0;
-    total *= (u64)info.extent;
     if (info.kax_type == KAX_LOCAL) {
       has_local = 1;
       local_extent = info.extent;
+      total *= (u64)info.extent;
     } else if (info.kax_type == KAX_GLOBAL) {
       has_global = 1;
       group_total *= (u64)info.extent;
+      total *= (u64)info.extent;
     } else if (info.kax_type == KAX_GROUP_REDUCE) {
       has_group_reduce = 1;
       group_reduce_extent = info.extent;
-    } else {
+    } else if (info.kax_type == KAX_LOOP || info.kax_type == KAX_UPCAST) {
+      // Output axes contribute to dispatch grid.
       group_total *= (u64)info.extent;
+      total *= (u64)info.extent;
     }
+    // KAX_REDUCE / KAX_UNROLL: in-kernel sequential reduction, do not
+    // contribute to dispatch grid (matches ct_axis_is_output filter).
   }
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
 
