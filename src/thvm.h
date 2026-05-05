@@ -1875,6 +1875,9 @@ int        tile_anno_apply_split(struct KernelEntry *ke, u32 d,
                                  u32 factor, u32 new_inner_type);
 // Record an opt as applied without changing axis structure (KOP_TC).
 int        tile_anno_record_opt(struct KernelEntry *ke, KOpt opt);
+// Reset axes to the default LOOP/REDUCE shape (autotune between-
+// candidates baseline; preserves autotuned + version).
+void       tile_anno_axes_reset(struct KernelEntry *ke);
 // Direct per-axis write.  Updates both KernelAxes and TILE_AXIS
 // (when present) so memory_scope + vector_width can be set without
 // going through KOpt machinery.

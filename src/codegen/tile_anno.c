@@ -150,6 +150,22 @@ int tile_anno_record_opt(KernelEntry *ke, KOpt opt) {
   return 1;
 }
 
+// Reset the axes back to the default LOOP/REDUCE shape (used between
+// autotune bench candidates so each candidate starts from a fresh
+// baseline).  Preserves the autotuned flag and the version counter
+// so cache freshness checks see the mutation.  Phase F flip switches
+// this to also clear/rebuild TILE_AXIS.
+void tile_anno_axes_reset(KernelEntry *ke) {
+  if (ke == NULL || ke->axes == NULL) return;
+  u8  autotuned = ke->axes->autotuned;
+  u32 version   = ke->axes->version;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes->autotuned = autotuned;
+  ke->axes->version   = version;
+  axes_default_for(ke);
+  axes_ensure_scalar_reduce(ke);
+}
+
 // Phase E writer-side: split an axis at position d into
 // (outer at d, inner at d+1).  outer keeps its current type with
 // size = orig_size / factor; inner takes new_inner_type with size =

@@ -412,16 +412,9 @@ static void kautotune_cache_store(char const *path, u64 key, u32 backend_id,
 // doesn't re-fire while we're benching variants of an already-
 // tuned kernel.
 static void axes_reset_to_default(KernelEntry *ke) {
-  if (ke->axes == NULL) {
-    return;
-  }
-  u8 autotuned = ke->axes->autotuned;
-  u32 version  = ke->axes->version;
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->autotuned = autotuned;
-  ke->axes->version   = version;
-  axes_default_for(ke);
-  axes_ensure_scalar_reduce(ke);
+  // Phase E: route through tile_anno_axes_reset so the reset stays
+  // consistent if the structure changes (e.g. tile_uops also rebuild).
+  tile_anno_axes_reset(ke);
 }
 
 static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
