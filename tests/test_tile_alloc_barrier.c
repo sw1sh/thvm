@@ -118,6 +118,27 @@ int main(void) {
   TEST_BEGIN("tile-op-name/covers-block");
   CHECK_EQ(strcmp(tile_op_name(TILE_BLOCK), "TILE_BLOCK"), 0);
 
+  TEST_BEGIN("tile-input-buf/heap-layout");
+  // Phase F: TILE_INPUT_BUF leaf carrying input slot id.
+  u32 in_buf = tile_emit_input_buf(&ke, DT_FP32, /*slot=*/3);
+  CHECK(in_buf > 0);
+  CHECK_EQ(ke.tile_uops[in_buf].op, TILE_INPUT_BUF);
+  CHECK_EQ(ke.tile_uops[in_buf].dtype, DT_FP32);
+  CHECK_EQ((u32)ke.tile_uops[in_buf].extra, 3u);
+  CHECK_EQ(ke.tile_uops[in_buf].src_count, 0);
+
+  TEST_BEGIN("tile-load/from-input-buf");
+  // TILE_LOAD can read from a TILE_INPUT_BUF (global memory) just
+  // like it reads from a TILE_LOCAL_ALLOC (shared memory).
+  u32 addr2 = tile_emit_leaf(&ke, TILE_SCALAR_BODY, DT_INT64, 99);
+  u32 ld_input = tile_emit_load(&ke, DT_FP32, in_buf, addr2);
+  CHECK(ld_input > 0);
+  CHECK_EQ(ke.tile_uops[ld_input].op, TILE_LOAD);
+  CHECK_EQ(ke.tile_uops[ld_input].src[0], in_buf);
+
+  TEST_BEGIN("tile-op-name/covers-input-buf");
+  CHECK_EQ(strcmp(tile_op_name(TILE_INPUT_BUF), "TILE_INPUT_BUF"), 0);
+
   tile_free(&ke);
   thvm_free();
   TEST_REPORT();

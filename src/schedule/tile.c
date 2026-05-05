@@ -98,6 +98,13 @@ fn u32 tile_emit_block(KernelEntry *ke, u32 dtype,
   return tile_emit(ke, TILE_BLOCK, dtype, n_stmts, stmts, 0);
 }
 
+// Phase F: TILE_INPUT_BUF -- kernel input buffer reference.
+// extra = input slot id (the index into ke->input_tids[] etc.).
+// Used as src[0] of TILE_LOAD for loads from global memory.
+fn u32 tile_emit_input_buf(KernelEntry *ke, u32 dtype, u32 input_slot) {
+  return tile_emit_leaf(ke, TILE_INPUT_BUF, dtype, (u64)input_slot);
+}
+
 // Read TILE_LOCAL_ALLOC's (scope, n_elements) -- mirrors
 // tile_axis_unpack but for the alloc's two-field packing.
 typedef struct {
@@ -212,6 +219,10 @@ fn void tile_dump_node(KernelEntry const *ke, u32 id, FILE *fp, u32 depth) {
       for (u8 s = 0; s < u->src_count; s++) {
         tile_dump_node(ke, u->src[s], fp, depth + 1);
       }
+      return;
+    case TILE_INPUT_BUF:
+      fprintf(fp, "TILE_INPUT_BUF<slot=%u dtype=%u>\n",
+              (u32)u->extra, u->dtype);
       return;
     default:
       fprintf(fp, "TILE_? op=%u src_count=%u\n", u->op, u->src_count);
@@ -338,10 +349,24 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
       }
       return;
     }
-    case TILE_LOAD:
+    case TILE_LOAD: {
       tile_render_msl_indent(fp, depth);
-      fprintf(fp, "float _v = _alloc%u[/*addr*/]; /* TILE_LOAD */\n",
-              u->src[0]);
+      // src[0] is either TILE_LOCAL_ALLOC or TILE_INPUT_BUF.
+      u32 src0 = u->src[0];
+      if (src0 < ke->n_tile_uops
+          && ke->tile_uops[src0].op == TILE_INPUT_BUF) {
+        u32 slot = (u32)ke->tile_uops[src0].extra;
+        fprintf(fp, "float _v = in%u[/*addr*/]; /* TILE_LOAD from input %u */\n",
+                slot, slot);
+      } else {
+        fprintf(fp, "float _v = _alloc%u[/*addr*/]; /* TILE_LOAD */\n",
+                src0);
+      }
+      return;
+    }
+    case TILE_INPUT_BUF:
+      tile_render_msl_indent(fp, depth);
+      fprintf(fp, "/* TILE_INPUT_BUF slot=%u */\n", (u32)u->extra);
       return;
     case TILE_SCALAR_BODY:
       tile_render_msl_indent(fp, depth);
@@ -394,6 +419,7 @@ fn const char *tile_op_name(u8 op) {
     case TILE_MMA:         return "TILE_MMA";
     case TILE_BLOCK:       return "TILE_BLOCK";
     case TILE_CONV2D:      return "TILE_CONV2D";
+    case TILE_INPUT_BUF:   return "TILE_INPUT_BUF";
     default:               return "TILE_?";
   }
 }
