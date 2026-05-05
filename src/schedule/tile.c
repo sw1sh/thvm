@@ -312,6 +312,39 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
       for (u8 s = 1; s < u->src_count; s++) {
         tile_render_msl_axis(ke, u->src[s], fp, depth, s - 1);
       }
+      // Emit the row-major output index from the output axes.  Walks
+      // axes left-to-right; each output axis (LOOP/UPCAST/LOCAL/GLOBAL)
+      // contributes `a<i> * stride` where stride is the product of
+      // later output axes' extents.  Reduce/Unroll axes are skipped
+      // (they're in-kernel reductions that don't index output).
+      u32 out_axis_idxs[MAX_AXES];
+      u32 out_axis_extents[MAX_AXES];
+      u32 n_out = 0;
+      for (u8 s = 1; s < u->src_count; s++) {
+        TileUop const *axis = &ke->tile_uops[u->src[s]];
+        TileAxisInfo info = tile_axis_unpack(axis->extra);
+        if (info.kax_type == KAX_LOOP || info.kax_type == KAX_UPCAST
+            || info.kax_type == KAX_LOCAL || info.kax_type == KAX_GLOBAL) {
+          out_axis_idxs[n_out]    = (u32)(s - 1);
+          out_axis_extents[n_out] = info.extent;
+          n_out++;
+        }
+      }
+      if (n_out > 0) {
+        tile_render_msl_indent(fp, depth + 1);
+        fputs("uint _idx = ", fp);
+        for (u32 i = 0; i < n_out; i++) {
+          if (i > 0) fputs(" + ", fp);
+          u32 stride = 1;
+          for (u32 j = i + 1; j < n_out; j++) stride *= out_axis_extents[j];
+          if (stride == 1) {
+            fprintf(fp, "a%u", out_axis_idxs[i]);
+          } else {
+            fprintf(fp, "a%u * %u", out_axis_idxs[i], stride);
+          }
+        }
+        fputs(";\n", fp);
+      }
       tile_render_msl_node(ke, u->src[0], fp, depth + 1);
       // Close LOOP/REDUCE braces.
       for (u8 s = 1; s < u->src_count; s++) {
@@ -341,10 +374,10 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
       if (v_src != 0 && v_src < ke->n_tile_uops
           && ke->tile_uops[v_src].op == TILE_SCALAR_BODY) {
         // Single scalar body store; emit a literal scalar reference.
-        fprintf(fp, "out[tid] = s%u; /* TILE_STORE S%u */\n",
+        fprintf(fp, "out[_idx] = s%u; /* TILE_STORE S%u */\n",
                 (u32)ke->tile_uops[v_src].extra, (u32)u->extra);
       } else {
-        fprintf(fp, "out[tid] = %s; /* TILE_STORE S%u */\n",
+        fprintf(fp, "out[_idx] = %s; /* TILE_STORE S%u */\n",
                 value_expr, (u32)u->extra);
       }
       return;

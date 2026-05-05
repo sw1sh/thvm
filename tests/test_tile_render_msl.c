@@ -45,7 +45,8 @@ int main(void) {
   CHECK(contains(buf2, "for (uint a0 = 0; a0 < 4"));
   CHECK(contains(buf2, "for (uint a1 = 0; a1 < 8"));
   CHECK(contains(buf2, "/*reduce*/"));
-  CHECK(contains(buf2, "out[tid] = s7; /* TILE_STORE S1 */"));
+  CHECK(contains(buf2, "out[_idx] = s7; /* TILE_STORE S1 */"));
+  CHECK(contains(buf2, "uint _idx = a0;"));
   CHECK(contains(buf2, "/* scalar body S7 */"));
 
   tile_free(ke);
@@ -84,7 +85,7 @@ int main(void) {
   CHECK(contains(buf3, "/* TILE_LOAD */"));
   CHECK(contains(buf3, "/* scalar body S300 */"));
   CHECK(contains(buf3, "/* TILE_BLOCK end */"));
-  CHECK(contains(buf3, "out[tid] ="));
+  CHECK(contains(buf3, "out[_idx] ="));
   CHECK(contains(buf3, "/* TILE_STORE S17 */"));
 
   tile_free(ke);
