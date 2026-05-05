@@ -137,6 +137,21 @@ int tile_anno_apply_opt(KernelEntry *ke, KOpt opt) {
   return kernel_apply_opt(ke, opt);
 }
 
+// Append a new axis at the end.  Today writes through KernelAxes
+// (the existing source-of-truth); when Phase F flips, this writes
+// to TILE_AXIS directly.  Returns 1 on success, 0 if the axis array
+// is full.
+int tile_anno_axis_append(KernelEntry *ke, TileAxisInfo info) {
+  if (ke == NULL || ke->axes == NULL) return 0;
+  if (ke->axes->n_axes >= MAX_AXES) return 0;
+  u32 d = ke->axes->n_axes++;
+  ke->axes->axis_types[d] = info.kax_type;
+  ke->axes->full_shape[d] = info.extent;
+  ke->axes->version++;
+  if (ke->axes->version == 0) ke->axes->version = 1;
+  return 1;
+}
+
 // Sanity check: returns 1 iff KernelAxes and TILE_AXIS agree on
 // axis count + per-axis (kax_type, extent).  Useful for debugging
 // the migration -- if this ever returns 0, tile_uops is stale and

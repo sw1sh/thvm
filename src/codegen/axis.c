@@ -109,11 +109,9 @@ fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   if (extent == 0 || ke->axes->n_axes >= MAX_AXES) {
     return;
   }
-  u32 axis = ke->axes->n_axes++;
-  ke->axes->axis_types[axis] = KAX_REDUCE;
-  ke->axes->full_shape[axis] = extent;
-  ke->axes->version++;
-  if (ke->axes->version == 0) {
-    ke->axes->version = 1;
-  }
+  // Phase E writer migration: route through tile_anno_axis_append.
+  // Today the helper writes ke->axes; when Phase F flips, it writes
+  // TILE_AXIS directly and bumps tile_axes_version.
+  TileAxisInfo info = { KAX_REDUCE, extent, 0, 0 };
+  (void)tile_anno_axis_append(ke, info);
 }

@@ -1869,6 +1869,8 @@ int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
 // going through KOpt machinery.
 int        tile_anno_axis_set(struct KernelEntry *ke, u32 d,
                               TileAxisInfo info);
+// Append a new axis at the end (n_axes++, write info, bump version).
+int        tile_anno_axis_append(struct KernelEntry *ke, TileAxisInfo info);
 // Sanity check: KernelAxes vs TILE_AXIS agree on axis count +
 // per-axis (kax_type, extent).  1 = agree (or one of them absent).
 int        tile_anno_axes_match(struct KernelEntry const *ke);
