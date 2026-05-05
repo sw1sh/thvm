@@ -86,13 +86,19 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   carries kernel input slot ids; TILE_LOAD reads from either
   TILE_LOCAL_ALLOC (shared) or TILE_INPUT_BUF (global).  Foundation
   for Phase F's render_metal.c rewrite.
-- **Phase E writer-side** (`9b401ea`, `9290e5d`, `138eb57`):
+- **Phase E writer-side** (`9b401ea`, `9290e5d`, `138eb57`,
+  `0306038`, `8b48266`):
   `tile_anno_apply_opt(ke, opt)` is the canonical opt-application
   entry point (today wraps kernel_apply_opt).  WL bridge migrated.
   `tile_anno_axis_set(ke, d, info)` writes a single TileAxisInfo
   to both KernelAxes and TILE_AXIS in sync.
+  `tile_anno_axis_append(ke, info)` appends a new axis at the end.
   `tile_anno_axes_match(ke)` consistency check between the two
   backing stores.
+  `axes_default_for` and `axes_ensure_scalar_reduce` migrated to
+  use tile_anno_axis_append; all axis-shape writes in axis.c go
+  through the facade.  `cpu/jit.c` hash + `tile_reject_reason`
+  diagnostic also landed.
 - **B2 polish continuing** (`d364b73`, `0654204`, `33177cd`,
   `e5132bf`, `22c7767`, `e577591`, `d7e87e4`, `5012310`):
   affine normalization, divmod recombination, gcd-aware IDIV,
