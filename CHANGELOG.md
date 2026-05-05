@@ -45,10 +45,32 @@ used to carry:
   (now slated for deletion).  Covers kernel signature, buffer
   typing, address arithmetic (UOP_RANGE/I*/IWHERE), AFTER barrier
   insertion, and the empty-kernel edge case.  22 tests.
+- **F1a** (`b8772d4`): elementwise float ops -- UOP_ADD/MUL/CMPLT/
+  CMPEQ/NEG/RECIP/EXP2/LOG2/SQRT/CAST/BITCAST.  Each emits the
+  appropriate MSL infix / prefix / builtin form.
+- **F1b** (`f7af0be`): range-loop wrapping -- emit_store collects
+  UOP_RANGE leaves from addr+value, wraps the store in nested
+  for-loops over each range (REDUCE-typed axes get /*reduce*/
+  marker).
+- **F1c** (`3639486`): OPT(_, UNROLL, factor) pattern-match -- emits
+  `#pragma unroll(N)` (or bare `#pragma unroll` when factor=0) above
+  the for-loop.  First concrete demonstration of the
+  shape+annotation specialisation pattern that replaces dedicated
+  GEMM/conv2d opcodes.
+- **F1d** (`09b65fd`): OPT(_, LOCAL/UPCAST) + legacy KAX_GLOBAL --
+  LOCAL binds axis to thread_position_in_threadgroup (`uint aN =
+  tt;`); GLOBAL to threadgroup_position_in_grid (`uint aN = tg;`);
+  UPCAST emits #pragma unroll like UNROLL.  Per-range needs_close[]
+  tracking ensures thread-bound axes don't trigger stray `}`.
+- **F1e** (`549ac2f`): UOP_REDUCE init/accum/finalize -- canonical
+  STORE(buf, addr, REDUCE(src, kind, axis)) shape hoists an
+  accumulator outside the reduce loop.  REDUCE_SUM uses 0.0f init
+  + `+` combine; REDUCE_MAX uses -INFINITY init + `fmax` combine.
 
-Test suite: 274/274 binary tests still pass; 108 new assertions
+Test suite: 274/274 binary tests still pass; ~200 new assertions
 across the four new test files (`test_uop_buffer`,
-`test_uop_store_after`, `test_uop_opt`, `test_render_uop`).
+`test_uop_store_after`, `test_uop_opt`, `test_render_uop` --
+test_render_uop alone now has 51 cases covering every shape).
 
 What's deferred from the previous in-tree TileUop[] work:
 
