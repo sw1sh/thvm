@@ -812,6 +812,16 @@ typedef struct {
   u32 valid_mask;  // 0 = always valid; else op_id of S_IAND'd S_ILTs
                    // forming a 0/1 bounds-check that gates the load
                    // through S_IWHERE.
+  // Phase B3: parallel UOp Terms for each axis.  When non-zero,
+  // uop_refs[d] is the UOp DAG iter (UOP_RANGE / UOP_I*) that
+  // matches the scalar slot id in refs[d].  Populated alongside
+  // refs at the kernel-emit prologue (loop_ranges + uop_loop_ranges)
+  // and propagated through rngs_ctx_*; consumed by the
+  // uop_resolve_movement_chain path when KProgOp.source_uop is set.
+  // 0 entries mean "not populated" -- callers fall back to the
+  // legacy refs-only path.
+  Term uop_refs[MAX_DIM];
+  Term uop_valid_mask;
 } RngsCtx;
 
 #define MAX_KPROG_SRC 4
@@ -1065,33 +1075,60 @@ static int rngs_ctx_reshape(KernelEntry *ke, KProgOp const *p,
   }
   u32 out_strides[MAX_DIM];
   row_major_strides(sh.out_dims, sh.out_ndim, out_strides);
-  u32 flat = 0;
+  u32  flat     = 0;
+  Term flat_uop = 0;
+  // Whether all out->uop_refs are populated; if so we mirror at the
+  // UOp layer too.
+  int  uop_ok   = 1;
+  for (u32 d = 0; d < sh.out_ndim; d++) {
+    if (out->uop_refs[d] == 0) { uop_ok = 0; break; }
+  }
   for (u32 d = 0; d < sh.out_ndim; d++) {
     u32 t = out->refs[d];
     if (t == 0) return 0;
+    Term tu = out->uop_refs[d];
     if (out_strides[d] != 1) {
       u32 c = emit_iconst(ke, (i64)out_strides[d]);
       t = emit_ibinop(ke, S_IMUL, t, c);
+      if (uop_ok) {
+        tu = uop_int_binary(UOP_IMUL, tu,
+                            uop_const(DT_INT32, out_strides[d]));
+      }
     }
-    flat = (flat == 0) ? t : emit_ibinop(ke, S_IADD, flat, t);
+    flat     = (flat == 0)     ? t  : emit_ibinop(ke, S_IADD, flat, t);
+    if (uop_ok) {
+      flat_uop = (flat_uop == 0) ? tu : uop_int_binary(UOP_IADD, flat_uop, tu);
+    }
   }
-  if (flat == 0) flat = emit_iconst(ke, 0);
+  if (flat == 0)               flat     = emit_iconst(ke, 0);
+  if (uop_ok && flat_uop == 0) flat_uop = uop_const(DT_INT32, 0);
   u32 in_strides[MAX_DIM];
   row_major_strides(sh.src_dims, sh.src_ndim, in_strides);
   memset(in, 0, sizeof(*in));
   in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
+  in->uop_valid_mask = out->uop_valid_mask;
   for (u32 d = 0; d < sh.src_ndim; d++) {
-    u32 coord = flat;
+    u32  coord     = flat;
+    Term coord_uop = flat_uop;
     if (in_strides[d] != 1) {
       u32 c = emit_iconst(ke, (i64)in_strides[d]);
       coord = emit_ibinop(ke, S_IDIV, coord, c);
+      if (uop_ok) {
+        coord_uop = uop_int_binary(UOP_IDIV, coord_uop,
+                                   uop_const(DT_INT32, in_strides[d]));
+      }
     }
     if (d != 0) {
       u32 dc = emit_iconst(ke, (i64)sh.src_dims[d]);
       coord = emit_ibinop(ke, S_IMOD, coord, dc);
+      if (uop_ok) {
+        coord_uop = uop_int_binary(UOP_IMOD, coord_uop,
+                                   uop_const(DT_INT32, sh.src_dims[d]));
+      }
     }
-    in->refs[d] = coord;
+    in->refs[d]     = coord;
+    in->uop_refs[d] = uop_ok ? coord_uop : 0;
   }
   return 1;
 }
@@ -1107,11 +1144,14 @@ static int rngs_ctx_expand(KernelEntry *ke, KProgOp const *p,
   memset(in, 0, sizeof(*in));
   in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
+  in->uop_valid_mask = out->uop_valid_mask;
+  Term zero_uop = uop_const(DT_INT32, 0);
   for (u32 d = 0; d < sh.src_ndim; d++) {
     u32 src_dim = sh.src_dims[d];
     u32 out_dim = sh.out_dims[d];
-    in->refs[d] = (src_dim != out_dim) ? emit_iconst(ke, 0)
-                                       : out->refs[d];
+    int broadcast = (src_dim != out_dim);
+    in->refs[d]     = broadcast ? emit_iconst(ke, 0)   : out->refs[d];
+    in->uop_refs[d] = broadcast ? zero_uop             : out->uop_refs[d];
   }
   return 1;
 }
@@ -1130,16 +1170,23 @@ static int rngs_ctx_shrink(KernelEntry *ke, KProgOp const *p,
   memset(in, 0, sizeof(*in));
   in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
+  in->uop_valid_mask = out->uop_valid_mask;
   for (u32 d = 0; d < sh.src_ndim; d++) {
     u32 ref = out->refs[d];
     u32 begin = sh.from_bindex
                   ? scratch.pad_widths[2 * d]
                   : (u32)p->pad_widths[2 * d];
+    Term uop_ref = out->uop_refs[d];
     if (begin != 0) {
       u32 c = emit_iconst(ke, (i64)begin);
       ref = emit_ibinop(ke, S_IADD, ref, c);
+      if (uop_ref != 0) {
+        uop_ref = uop_int_binary(UOP_IADD, uop_ref,
+                                 uop_const(DT_INT32, begin));
+      }
     }
-    in->refs[d] = ref;
+    in->refs[d]     = ref;
+    in->uop_refs[d] = uop_ref;
   }
   return 1;
 }
@@ -1155,21 +1202,45 @@ static int rngs_ctx_pad(KernelEntry *ke, KProgOp const *p,
   memset(in, 0, sizeof(*in));
   in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
+  in->uop_valid_mask = out->uop_valid_mask;
   for (u32 d = 0; d < sh.src_ndim; d++) {
     u32 begin = sh.from_bindex
                   ? scratch.pad_widths[2 * d]
                   : (u32)p->pad_widths[2 * d];
     u32 src_dim = sh.src_dims[d];
     u32 ref     = out->refs[d];
+    Term uop_ref = out->uop_refs[d];
     if (ref == 0) return 0;
     u32 src_ref = ref;
+    Term uop_src = uop_ref;
     if (begin != 0) {
       u32 c = emit_iconst(ke, (i64)begin);
       src_ref = emit_ibinop(ke, S_ISUB, ref, c);
+      if (uop_ref != 0) {
+        uop_src = uop_int_binary(UOP_ISUB, uop_ref,
+                                 uop_const(DT_INT32, begin));
+      }
     }
-    in->refs[d] = src_ref;
+    in->refs[d]     = src_ref;
+    in->uop_refs[d] = uop_src;
     u32 axis_ok = emit_pad_bounds_mask(ke, ref, begin, src_dim);
     in->valid_mask = emit_valid_and(ke, in->valid_mask, axis_ok);
+    // Mirror the bounds-check expression at the UOp layer.  Same
+    // shape as emit_pad_bounds_mask:
+    //   axis_ok = (ref < begin + src_dim) AND (1 - (ref < begin))
+    if (uop_ref != 0) {
+      Term hi  = uop_const(DT_INT32, begin + src_dim);
+      Term ok  = uop_int_binary(UOP_ILT, uop_ref, hi);
+      if (begin > 0) {
+        Term lo    = uop_const(DT_INT32, begin);
+        Term lt_lo = uop_int_binary(UOP_ILT, uop_ref, lo);
+        Term ge_lo = uop_int_binary(UOP_ISUB, uop_const(DT_INT32, 1), lt_lo);
+        ok = uop_int_binary(UOP_IAND, ok, ge_lo);
+      }
+      in->uop_valid_mask = (in->uop_valid_mask == 0)
+                              ? ok
+                              : uop_int_binary(UOP_IAND, in->uop_valid_mask, ok);
+    }
   }
   return 1;
 }
@@ -1185,17 +1256,24 @@ static int rngs_ctx_flip(KernelEntry *ke, KProgOp const *p,
   memset(in, 0, sizeof(*in));
   in->ndim = sh.src_ndim;
   in->valid_mask = out->valid_mask;
+  in->uop_valid_mask = out->uop_valid_mask;
   // FLIP mask: BIndexChainOp records the per-axis bitmask in
   // flip_mask; KProgOp keeps it in `arg`.
   u32 mask = sh.from_bindex ? (u32)scratch.flip_mask : (p->arg & 0xFFu);
   for (u32 d = 0; d < sh.src_ndim; d++) {
     u32 ref = out->refs[d];
+    Term uop_ref = out->uop_refs[d];
     if (mask & (1u << d)) {
       u32 ext = sh.src_dims[d] > 0 ? sh.src_dims[d] : 1;
       u32 c = emit_iconst(ke, (i64)(ext - 1));
       ref = emit_ibinop(ke, S_ISUB, c, ref);
+      if (uop_ref != 0) {
+        uop_ref = uop_int_binary(UOP_ISUB, uop_const(DT_INT32, ext - 1),
+                                 uop_ref);
+      }
     }
-    in->refs[d] = ref;
+    in->refs[d]     = ref;
+    in->uop_refs[d] = uop_ref;
   }
   return 1;
 }
@@ -1228,6 +1306,7 @@ static int rngs_ctx_movement_src(KernelEntry *ke, KProgOp const *p,
       memset(in, 0, sizeof(*in));
       in->ndim = sh.out_ndim;
       in->valid_mask = out->valid_mask;
+      in->uop_valid_mask = out->uop_valid_mask;
       // axis_perm comes from BIndexChainOp when available (u8[MAX_DIM]
       // in both representations).
       u8 const *axis_perm = sh.from_bindex ? scratch.axis_perm
@@ -1237,7 +1316,8 @@ static int rngs_ctx_movement_src(KernelEntry *ke, KProgOp const *p,
         if (src_axis >= MAX_DIM) {
           return 0;
         }
-        in->refs[src_axis] = out->refs[d];
+        in->refs[src_axis]     = out->refs[d];
+        in->uop_refs[src_axis] = out->uop_refs[d];
       }
       return 1;
     }
@@ -1819,10 +1899,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // 1. LOOP ranges: one S_RANGE per output dim, axis_type LOOP.
   u32 loop_ranges[MAX_DIM];
   u32 loop_strides[MAX_DIM];
+  // Phase B3: build the UOp-DAG mirror of each loop axis so RngsCtx
+  // can carry uop_refs in parallel with the scalar refs.
+  Term uop_loop_ranges[MAX_DIM] = {0};
   row_major_strides(os->dims, os->ndim, loop_strides);
   for (u32 d = 0; d < os->ndim; d++) {
     u64 extra = ((u64)S_AXIS_LOOP << 32) | (u64)os->dims[d];
     loop_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
+    uop_loop_ranges[d] = uop_range(d, S_AXIS_LOOP, os->dims[d]);
   }
   // REDUCE range (Phase C): an additional inner-most range with
   // axis_type=REDUCE.  Only present when the kernel ends in
@@ -2943,7 +3027,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (out_rngs.ndim == 0) {
         out_rngs.ndim = os->ndim;
         for (u32 d = 0; d < os->ndim; d++) {
-          out_rngs.refs[d] = loop_ranges[d];
+          out_rngs.refs[d]     = loop_ranges[d];
+          out_rngs.uop_refs[d] = uop_loop_ranges[d];
         }
       }
       RngsCtx src_rngs = {0};
