@@ -2249,6 +2249,11 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             if (begin == 0) continue;
             u32 c = emit_iconst(ke, (i64)begin);
             in_rngs.refs[d] = emit_ibinop(ke, S_IADD, in_rngs.refs[d], c);
+            if (in_rngs.uop_refs[d] != 0) {
+              in_rngs.uop_refs[d] = uop_int_binary(UOP_IADD,
+                                                  in_rngs.uop_refs[d],
+                                                  uop_const(DT_INT32, begin));
+            }
           }
           break;
         }
@@ -2259,14 +2264,23 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             u32 ext = p->src0_ndim > d ? p->src0_dims[d] : 1;
             u32 c = emit_iconst(ke, (i64)(ext - 1));
             in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, c, in_rngs.refs[d]);
+            if (in_rngs.uop_refs[d] != 0) {
+              in_rngs.uop_refs[d] = uop_int_binary(UOP_ISUB,
+                                                  uop_const(DT_INT32, ext - 1),
+                                                  in_rngs.uop_refs[d]);
+            }
           }
           break;
         }
         case UOP_EXPAND: {
+          Term zero_uop = uop_const(DT_INT32, 0);
           for (u32 d = 0; d < p->out_ndim && d < in_rngs.ndim; d++) {
             u32 src_dim = p->src0_ndim > d ? p->src0_dims[d] : 1;
             u32 out_dim = p->out_dims[d];
-            if (src_dim != out_dim) in_rngs.refs[d] = emit_iconst(ke, 0);
+            if (src_dim != out_dim) {
+              in_rngs.refs[d]     = emit_iconst(ke, 0);
+              in_rngs.uop_refs[d] = zero_uop;
+            }
           }
           break;
         }
@@ -2275,11 +2289,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
               || in_rngs.ndim != p->out_ndim) break;
           RngsCtx new_rngs = {0};
           new_rngs.ndim = p->out_ndim;
-          new_rngs.valid_mask = in_rngs.valid_mask;
+          new_rngs.valid_mask     = in_rngs.valid_mask;
+          new_rngs.uop_valid_mask = in_rngs.uop_valid_mask;
           for (u32 d = 0; d < p->out_ndim; d++) {
             u8 src_axis = p->axis_perm[d];
             if (src_axis >= MAX_DIM) { new_rngs.ndim = 0; break; }
-            new_rngs.refs[src_axis] = in_rngs.refs[d];
+            new_rngs.refs[src_axis]     = in_rngs.refs[d];
+            new_rngs.uop_refs[src_axis] = in_rngs.uop_refs[d];
           }
           if (new_rngs.ndim != 0) in_rngs = new_rngs;
           break;
@@ -2309,22 +2325,54 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           u32 flat = emit_flat_from_rngs(ke, &in_rngs, ctx_dims);
           if (flat == 0) flat = emit_iconst(ke, 0);
+          // Mirror flat at UOp layer too, when all uop_refs are
+          // populated.  Mirrors emit_flat_from_rngs internal logic.
+          Term flat_uop = 0;
+          int  uop_ok   = 1;
+          for (u32 d = 0; d < in_rngs.ndim; d++) {
+            if (in_rngs.uop_refs[d] == 0) { uop_ok = 0; break; }
+          }
+          if (uop_ok) {
+            u32 stride_uop = 1;
+            for (i32 d = (i32)in_rngs.ndim - 1; d >= 0; d--) {
+              Term tu = in_rngs.uop_refs[d];
+              if (stride_uop != 1) {
+                tu = uop_int_binary(UOP_IMUL, tu,
+                                    uop_const(DT_INT32, stride_uop));
+              }
+              flat_uop = (flat_uop == 0) ? tu
+                                         : uop_int_binary(UOP_IADD, tu, flat_uop);
+              stride_uop *= ctx_dims[d] != 0 ? ctx_dims[d] : 1;
+            }
+            if (flat_uop == 0) flat_uop = uop_const(DT_INT32, 0);
+          }
           u32 a_strides[MAX_DIM];
           row_major_strides(p->src0_dims, p->src0_ndim, a_strides);
           RngsCtx new_rngs = {0};
           new_rngs.ndim = p->src0_ndim;
-          new_rngs.valid_mask = in_rngs.valid_mask;
+          new_rngs.valid_mask     = in_rngs.valid_mask;
+          new_rngs.uop_valid_mask = in_rngs.uop_valid_mask;
           for (u32 d = 0; d < p->src0_ndim; d++) {
             u32 coord = flat;
+            Term coord_uop = flat_uop;
             if (a_strides[d] != 1) {
               u32 c = emit_iconst(ke, (i64)a_strides[d]);
               coord = emit_ibinop(ke, S_IDIV, coord, c);
+              if (uop_ok) {
+                coord_uop = uop_int_binary(UOP_IDIV, coord_uop,
+                                           uop_const(DT_INT32, a_strides[d]));
+              }
             }
             if (d != 0) {
               u32 dc = emit_iconst(ke, (i64)p->src0_dims[d]);
               coord = emit_ibinop(ke, S_IMOD, coord, dc);
+              if (uop_ok) {
+                coord_uop = uop_int_binary(UOP_IMOD, coord_uop,
+                                           uop_const(DT_INT32, p->src0_dims[d]));
+              }
             }
-            new_rngs.refs[d] = coord;
+            new_rngs.refs[d]     = coord;
+            new_rngs.uop_refs[d] = uop_ok ? coord_uop : 0;
           }
           in_rngs = new_rngs;
           break;
@@ -2413,13 +2461,35 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             u32 begin   = p->pad_widths[2 * d];
             u32 src_dim = p->src0_dims[d];
             if (begin == 0 && src_dim == p->out_dims[d]) continue;
-            u32 orig_ref = in_rngs.refs[d];
+            u32  orig_ref     = in_rngs.refs[d];
+            Term orig_uop_ref = in_rngs.uop_refs[d];
             if (begin > 0) {
               u32 c = emit_iconst(ke, (i64)begin);
               in_rngs.refs[d] = emit_ibinop(ke, S_ISUB, orig_ref, c);
+              if (orig_uop_ref != 0) {
+                in_rngs.uop_refs[d] = uop_int_binary(UOP_ISUB, orig_uop_ref,
+                                                    uop_const(DT_INT32, begin));
+              }
             }
             u32 axis_ok = emit_pad_bounds_mask(ke, orig_ref, begin, src_dim);
             in_rngs.valid_mask = emit_valid_and(ke, in_rngs.valid_mask, axis_ok);
+            // Mirror the bounds-check at the UOp layer.
+            if (orig_uop_ref != 0) {
+              Term hi  = uop_const(DT_INT32, begin + src_dim);
+              Term ok  = uop_int_binary(UOP_ILT, orig_uop_ref, hi);
+              if (begin > 0) {
+                Term lo    = uop_const(DT_INT32, begin);
+                Term lt_lo = uop_int_binary(UOP_ILT, orig_uop_ref, lo);
+                Term ge_lo = uop_int_binary(UOP_ISUB,
+                                            uop_const(DT_INT32, 1), lt_lo);
+                ok = uop_int_binary(UOP_IAND, ok, ge_lo);
+              }
+              in_rngs.uop_valid_mask = (in_rngs.uop_valid_mask == 0)
+                                          ? ok
+                                          : uop_int_binary(UOP_IAND,
+                                                          in_rngs.uop_valid_mask,
+                                                          ok);
+            }
           }
           break;
         }
