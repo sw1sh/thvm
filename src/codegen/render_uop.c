@@ -91,6 +91,62 @@ static void rmu_emit_term(Term t, FILE *fp) {
       fputs(")", fp);
       return;
     }
+    // Float elementwise binary ops.  Same parenthesised shape as
+    // the int binaries; renderer emits MSL infix operators.
+    case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ: {
+      const char *infix = (op == UOP_ADD)   ? "+"
+                        : (op == UOP_MUL)   ? "*"
+                        : (op == UOP_CMPLT) ? "<"
+                        :                     "==";
+      Term a = heap_read(loc + 0);
+      Term b = heap_read(loc + 1);
+      fputs("(", fp);
+      rmu_emit_term(a, fp);
+      fprintf(fp, " %s ", infix);
+      rmu_emit_term(b, fp);
+      fputs(")", fp);
+      return;
+    }
+    // Float elementwise unary ops.  RECIP -> 1.0f/x, EXP2 / LOG2 /
+    // SQRT use MSL builtins.  NEG via prefix `-`.
+    case UOP_NEG: {
+      fputs("(-", fp);
+      rmu_emit_term(heap_read(loc + 0), fp);
+      fputs(")", fp);
+      return;
+    }
+    case UOP_RECIP: {
+      fputs("(1.0f/", fp);
+      rmu_emit_term(heap_read(loc + 0), fp);
+      fputs(")", fp);
+      return;
+    }
+    case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: {
+      const char *fn_name = (op == UOP_EXP2) ? "exp2"
+                          : (op == UOP_LOG2) ? "log2"
+                          :                    "sqrt";
+      fprintf(fp, "%s(", fn_name);
+      rmu_emit_term(heap_read(loc + 0), fp);
+      fputs(")", fp);
+      return;
+    }
+    case UOP_CAST: case UOP_BITCAST: {
+      // heap = [src, NUM(dst_dtype)].
+      Term src      = heap_read(loc + 0);
+      u32  dst_dt   = term_val(heap_read(loc + 1));
+      const char *fn_name = (op == UOP_CAST) ? "" : "as_type";
+      if (op == UOP_BITCAST) {
+        fprintf(fp, "as_type<%s>(", rmu_msl_type_name(dst_dt));
+        rmu_emit_term(src, fp);
+        fputs(")", fp);
+      } else {
+        fprintf(fp, "((%s)", rmu_msl_type_name(dst_dt));
+        rmu_emit_term(src, fp);
+        fputs(")", fp);
+      }
+      (void)fn_name;
+      return;
+    }
     case UOP_IWHERE: {
       Term cond = heap_read(loc + 0);
       Term tv   = heap_read(loc + 1);

@@ -115,6 +115,64 @@ int main(void) {
   fclose(fp);
   CHECK(contains(buf7, "device half *buf"));
 
+  TEST_BEGIN("render-uop/elementwise-add-mul");
+  // STORE(out, addr, ADD(LOAD(in0, addr), MUL(LOAD(in1, addr), CONST(2)))).
+  Term ld0_ew = uop_index_e(in0, r);
+  Term load1 = uop_index_e(in1, r);
+  Term two   = uop_const(DT_FP32, 0x40000000u); // 2.0f
+  Term mul_v = uop_binary(UOP_MUL, load1, two);
+  Term sum_v = uop_binary(UOP_ADD, ld0_ew, mul_v);
+  Term st_ew = uop_store(out, r, sum_v);
+  char buf8[2048];
+  fp = fmemopen(buf8, sizeof(buf8), "w");
+  cg_render_uop_kernel(st_ew, "k_ew", out, in_bufs, 2, fp);
+  fclose(fp);
+  CHECK(contains(buf8, " + ("));
+  CHECK(contains(buf8, " * 2.000000f"));
+
+  TEST_BEGIN("render-uop/unary-neg-recip-sqrt");
+  Term load_a = uop_index_e(in0, r);
+  Term neg_v  = uop_unary(UOP_NEG,   load_a);
+  Term rec_v  = uop_unary(UOP_RECIP, load_a);
+  Term sq_v   = uop_unary(UOP_SQRT,  load_a);
+  Term sum1   = uop_binary(UOP_ADD, neg_v, rec_v);
+  Term sum2   = uop_binary(UOP_ADD, sum1, sq_v);
+  Term st_un  = uop_store(out, r, sum2);
+  char buf9[2048];
+  fp = fmemopen(buf9, sizeof(buf9), "w");
+  cg_render_uop_kernel(st_un, "k_un", out, in_bufs, 2, fp);
+  fclose(fp);
+  CHECK(contains(buf9, "(-buf"));        // NEG
+  CHECK(contains(buf9, "(1.0f/buf"));    // RECIP
+  CHECK(contains(buf9, "sqrt(buf"));     // SQRT builtin
+
+  TEST_BEGIN("render-uop/exp2-log2-builtins");
+  Term ex_v  = uop_unary(UOP_EXP2, load_a);
+  Term lg_v  = uop_unary(UOP_LOG2, load_a);
+  Term elw   = uop_binary(UOP_ADD, ex_v, lg_v);
+  Term st_el = uop_store(out, r, elw);
+  char buf10[2048];
+  fp = fmemopen(buf10, sizeof(buf10), "w");
+  cg_render_uop_kernel(st_el, "k_el", out, in_bufs, 2, fp);
+  fclose(fp);
+  CHECK(contains(buf10, "exp2(buf"));
+  CHECK(contains(buf10, "log2(buf"));
+
+  TEST_BEGIN("render-uop/cmplt-cmpeq-comparison");
+  Term lt    = uop_binary(UOP_CMPLT, load_a, two);
+  Term eq    = uop_binary(UOP_CMPEQ, load_a, two);
+  Term st_lt = uop_store(out, r, lt);
+  Term st_eq = uop_store(out, r, eq);
+  char buf11[2048];
+  fp = fmemopen(buf11, sizeof(buf11), "w");
+  cg_render_uop_kernel(st_lt, "k_lt", out, in_bufs, 2, fp);
+  fclose(fp);
+  CHECK(contains(buf11, " < 2.000000f"));
+  fp = fmemopen(buf11, sizeof(buf11), "w");
+  cg_render_uop_kernel(st_eq, "k_eq", out, in_bufs, 2, fp);
+  fclose(fp);
+  CHECK(contains(buf11, " == 2.000000f"));
+
   thvm_free();
   TEST_REPORT();
 }
