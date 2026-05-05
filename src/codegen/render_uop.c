@@ -24,6 +24,41 @@
 
 static void rmu_emit_term(Term t, FILE *fp);
 
+// Buffer name map: cg_render_uop_kernel populates this with the
+// kernel's output buffer (Term -> "out") and inputs (Term -> "in0",
+// "in1", ...).  Inner functions emit buffer references via
+// rmu_buf_name(t) instead of `buf<heap_loc>`.  Static global is fine
+// because the renderer isn't re-entrant in practice; cleared at start
+// of each render to defend against stale state.
+#define RMU_BUF_MAX 32
+static struct { Term term; char name[16]; } RMU_BUF_NAMES[RMU_BUF_MAX];
+static u32 RMU_BUF_NAMES_N;
+
+static void rmu_buf_names_reset(void) {
+  RMU_BUF_NAMES_N = 0;
+}
+
+static void rmu_buf_names_set(Term t, const char *name) {
+  if (RMU_BUF_NAMES_N >= RMU_BUF_MAX) return;
+  RMU_BUF_NAMES[RMU_BUF_NAMES_N].term = t;
+  snprintf(RMU_BUF_NAMES[RMU_BUF_NAMES_N].name,
+           sizeof(RMU_BUF_NAMES[0].name), "%s", name);
+  RMU_BUF_NAMES_N++;
+}
+
+// Returns the symbolic name for buffer `t`, or a `buf<loc>` fallback
+// when no map entry exists (synthetic kernels in unit tests, or
+// future paths).
+static const char *rmu_buf_name(Term t) {
+  for (u32 i = 0; i < RMU_BUF_NAMES_N; i++) {
+    if (RMU_BUF_NAMES[i].term == t) return RMU_BUF_NAMES[i].name;
+  }
+  static char fallback[24];
+  snprintf(fallback, sizeof(fallback), "buf%llu",
+           (unsigned long long)term_val(t));
+  return fallback;
+}
+
 static const char *rmu_msl_type_name(u32 dtype) {
   switch (dtype) {
     case DT_FP32:  return "float";
@@ -170,15 +205,13 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // as the identifier.  F0+ wires names through a BUFFER->id
       // table so kernel args / local allocs resolve to `inN` /
       // `_alloc<id>` consistently.
-      fprintf(fp, "buf%llu[", (unsigned long long)term_val(buf));
+      fprintf(fp, "%s[", rmu_buf_name(buf));
       rmu_emit_term(addr, fp);
       fputs("]", fp);
       return;
     }
     case UOP_BUFFER:
-      // A bare BUFFER reference -- the renderer normally goes
-      // through INDEX_E, but emit the name for diagnostic dumps.
-      fprintf(fp, "buf%llu", (unsigned long long)loc);
+      fputs(rmu_buf_name(t), fp);
       return;
     case UOP_OPT: {
       // Annotation: render the target, ignore the directive in F0
@@ -487,13 +520,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
           red_axis, red_axis, k_extent, red_axis);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
-  fprintf(fp, "simdgroup_load(_a_mat, &buf%llu[",
-          (unsigned long long)term_val(buf_a));
+  fprintf(fp, "simdgroup_load(_a_mat, &%s[", rmu_buf_name(buf_a));
   rmu_emit_term(addr_a, fp);
   fputs("]);\n", fp);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
-  fprintf(fp, "simdgroup_load(_b_mat, &buf%llu[",
-          (unsigned long long)term_val(buf_b));
+  fprintf(fp, "simdgroup_load(_b_mat, &%s[", rmu_buf_name(buf_b));
   rmu_emit_term(addr_b, fp);
   fputs("]);\n", fp);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
@@ -501,8 +532,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("}\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "simdgroup_store(_c_mat, &buf%llu[",
-          (unsigned long long)term_val(buf_c));
+  fprintf(fp, "simdgroup_store(_c_mat, &%s[", rmu_buf_name(buf_c));
   rmu_emit_term(addr_c, fp);
   fputs("]);\n", fp);
 
@@ -615,7 +645,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   fputs("}\n", fp);
   // Final store.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "buf%llu[", (unsigned long long)term_val(buf));
+  fprintf(fp, "%s[", rmu_buf_name(buf));
   rmu_emit_term(addr, fp);
   fprintf(fp, "] = %s;\n", acc_name);
   // Close output loops.
@@ -673,7 +703,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     }
   }
   for (u32 i = 0; i < body_depth; i++) fputs("  ", fp);
-  fprintf(fp, "buf%llu[", (unsigned long long)term_val(buf));
+  fprintf(fp, "%s[", rmu_buf_name(buf));
   rmu_emit_term(addr, fp);
   fputs("] = ", fp);
   rmu_emit_term(value, fp);
@@ -724,21 +754,29 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
                              u32 n_inputs, FILE *fp) {
   if (fp == NULL) fp = stderr;
   if (kernel_name == NULL) kernel_name = "uop_kernel";
+  // Populate buffer-name map: out_buf -> "out", in_bufs[i] -> "inN".
+  rmu_buf_names_reset();
+  rmu_buf_names_set(out_buf, "out");
+  for (u32 i = 0; i < n_inputs; i++) {
+    char name[16];
+    snprintf(name, sizeof(name), "in%u", i);
+    rmu_buf_names_set(in_bufs[i], name);
+  }
   fputs("#include <metal_stdlib>\n", fp);
   fputs("using namespace metal;\n\n", fp);
   fprintf(fp, "kernel void %s(\n", kernel_name);
   // Output goes to buffer(0); each input goes to buffer(1+i).
   u32 out_dtype = uop_buffer_dtype(out_buf);
-  fprintf(fp, "    device %s *buf%llu [[ buffer(0) ]]",
-          rmu_msl_type_name(out_dtype),
-          (unsigned long long)term_val(out_buf));
+  fprintf(fp, "    device %s *out [[ buffer(0) ]]",
+          rmu_msl_type_name(out_dtype));
   for (u32 i = 0; i < n_inputs; i++) {
     u32 dt = uop_buffer_dtype(in_bufs[i]);
-    fprintf(fp, ",\n    device const %s *buf%llu [[ buffer(%u) ]]",
-            rmu_msl_type_name(dt),
-            (unsigned long long)term_val(in_bufs[i]), i + 1);
+    fprintf(fp, ",\n    device const %s *in%u [[ buffer(%u) ]]",
+            rmu_msl_type_name(dt), i, i + 1);
   }
-  fputs(",\n    uint tid [[ thread_position_in_grid ]]) {\n", fp);
+  fputs(",\n    uint tid [[ thread_position_in_grid ]],\n", fp);
+  fputs("    uint tg [[ threadgroup_position_in_grid ]],\n", fp);
+  fputs("    uint tt [[ thread_position_in_threadgroup ]]) {\n", fp);
   // Body.  In F0 we just dispatch on the root op and emit the
   // contained store (or AFTER chain).  Range-loop wrapping happens
   // when the root is wrapped in a RANGE chain (future work).

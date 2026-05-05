@@ -37,17 +37,20 @@ int main(void) {
   fclose(fp);
   CHECK(contains(buf2, "#include <metal_stdlib>"));
   CHECK(contains(buf2, "kernel void fill"));
-  CHECK(contains(buf2, "device float *buf"));
+  CHECK(contains(buf2, "device float *out"));
   CHECK(contains(buf2, "[[ buffer(0) ]]"));
   CHECK(contains(buf2, "thread_position_in_grid"));
   CHECK(contains(buf2, "= 1.000000f;"));    // CONST literal
   CHECK(contains(buf2, "[a0]"));            // RANGE addr
 
   TEST_BEGIN("render-uop/multi-input-signature");
-  // Output + 2 inputs.
-  u32 dims_in[1] = { 32 };
-  Term in0 = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in);
-  Term in1 = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP16, 1, dims_in);
+  // Output + 2 inputs.  Use distinct shapes so each hash-cons to a
+  // unique heap loc (otherwise output and in0 can collide on (scope,
+  // dtype, ndim, dims) and confuse the buffer-name map).
+  u32 dims_in0[1] = { 64 };
+  u32 dims_in1[1] = { 128 };
+  Term in0 = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in0);
+  Term in1 = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP16, 1, dims_in1);
   Term in_bufs[2] = { in0, in1 };
   Term load0 = uop_index_e(in0, r);
   Term st_load = uop_store(out, r, load0);
@@ -55,9 +58,9 @@ int main(void) {
   fp = fmemopen(buf3, sizeof(buf3), "w");
   cg_render_uop_kernel(st_load, "copy", out, in_bufs, 2, fp);
   fclose(fp);
-  CHECK(contains(buf3, "device const float *buf"));
+  CHECK(contains(buf3, "device const float *in0"));
   CHECK(contains(buf3, "[[ buffer(1) ]]"));
-  CHECK(contains(buf3, "device const half *buf"));
+  CHECK(contains(buf3, "device const half *in1"));
   CHECK(contains(buf3, "[[ buffer(2) ]]"));
 
   TEST_BEGIN("render-uop/index-arithmetic-emits");
@@ -113,7 +116,7 @@ int main(void) {
   fp = fmemopen(buf7, sizeof(buf7), "w");
   cg_render_uop_kernel(st16, "k_h", out16, NULL, 0, fp);
   fclose(fp);
-  CHECK(contains(buf7, "device half *buf"));
+  CHECK(contains(buf7, "device half *out"));
 
   TEST_BEGIN("render-uop/elementwise-add-mul");
   // STORE(out, addr, ADD(LOAD(in0, addr), MUL(LOAD(in1, addr), CONST(2)))).
@@ -142,9 +145,9 @@ int main(void) {
   fp = fmemopen(buf9, sizeof(buf9), "w");
   cg_render_uop_kernel(st_un, "k_un", out, in_bufs, 2, fp);
   fclose(fp);
-  CHECK(contains(buf9, "(-buf"));        // NEG
-  CHECK(contains(buf9, "(1.0f/buf"));    // RECIP
-  CHECK(contains(buf9, "sqrt(buf"));     // SQRT builtin
+  CHECK(contains(buf9, "(-in0"));        // NEG
+  CHECK(contains(buf9, "(1.0f/in0"));    // RECIP
+  CHECK(contains(buf9, "sqrt(in0"));     // SQRT builtin
 
   TEST_BEGIN("render-uop/exp2-log2-builtins");
   Term ex_v  = uop_unary(UOP_EXP2, load_a);
@@ -155,8 +158,8 @@ int main(void) {
   fp = fmemopen(buf10, sizeof(buf10), "w");
   cg_render_uop_kernel(st_el, "k_el", out, in_bufs, 2, fp);
   fclose(fp);
-  CHECK(contains(buf10, "exp2(buf"));
-  CHECK(contains(buf10, "log2(buf"));
+  CHECK(contains(buf10, "exp2(in0"));
+  CHECK(contains(buf10, "log2(in0"));
 
   TEST_BEGIN("render-uop/range-wraps-store-in-for-loops");
   // Single-axis kernel: STORE(out, RANGE(0), CONST) emits one for-loop.
@@ -248,7 +251,7 @@ int main(void) {
   CHECK(contains(bufrs, "for (uint a0 = 0; a0 < 32"));
   CHECK(contains(bufrs, "float _acc1 = 0.0f"));
   CHECK(contains(bufrs, "for (uint a1 = 0; a1 < 16"));
-  CHECK(contains(bufrs, "_acc1 = _acc1 + buf"));
+  CHECK(contains(bufrs, "_acc1 = _acc1 + in0"));
   CHECK(contains(bufrs, "] = _acc1;"));
 
   TEST_BEGIN("render-uop/tc-pattern-match-emits-simdgroup");
