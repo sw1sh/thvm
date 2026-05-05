@@ -1,3 +1,37 @@
+// Phase F shadow-render counters.  Instrument every cg_emit_tile_metal
+// call: try kernel_lift_to_uop alongside the existing path and report
+// what fraction of real workload kernels the lifter covers.  Read
+// via kernel_lift_attempts() / kernel_lift_successes() / etc.
+//
+// Counters are global (single-threaded scheduling).  Reset by
+// thvm_init / thvm_free.
+static u64 KERNEL_LIFT_ATTEMPTS;
+static u64 KERNEL_LIFT_SUCCESSES;
+static u64 KERNEL_LIFT_COMPILES;       // shadow-rendered MSL also compiled
+static u64 KERNEL_LIFT_COMPILE_FAILS;
+
+fn u64 kernel_lift_attempts(void)        { return KERNEL_LIFT_ATTEMPTS; }
+fn u64 kernel_lift_successes(void)       { return KERNEL_LIFT_SUCCESSES; }
+fn u64 kernel_lift_compiles(void)        { return KERNEL_LIFT_COMPILES; }
+fn u64 kernel_lift_compile_fails(void)   { return KERNEL_LIFT_COMPILE_FAILS; }
+
+fn void kernel_lift_counters_reset(void) {
+  KERNEL_LIFT_ATTEMPTS = 0;
+  KERNEL_LIFT_SUCCESSES = 0;
+  KERNEL_LIFT_COMPILES = 0;
+  KERNEL_LIFT_COMPILE_FAILS = 0;
+}
+
+// Increment helpers for callers in earlier translation units (codegen/
+// render_metal.c is #include'd before this file; they can't reach the
+// static globals directly).
+fn void kernel_lift_count_attempt (void) { KERNEL_LIFT_ATTEMPTS++; }
+fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
+fn void kernel_lift_count_compile (int ok) {
+  if (ok) KERNEL_LIFT_COMPILES++;
+  else    KERNEL_LIFT_COMPILE_FAILS++;
+}
+
 // schedule/kernel_lift.c - lift a scheduled kernel's ScalarUop arena
 // to a UOp DAG root suitable for cg_render_uop_kernel (Phase C wedge).
 //

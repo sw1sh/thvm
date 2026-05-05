@@ -1863,6 +1863,52 @@ static int rmt_emit_group_reduce_store(CgBuf *b, KernelEntry const *ke,
   return 1;
 }
 
+// Phase F shadow lift: try kernel_lift_to_uop alongside the existing
+// render path so we can quantify lifter coverage on real workloads
+// without changing dispatch.  Increments KERNEL_LIFT_ATTEMPTS for
+// every call; KERNEL_LIFT_SUCCESSES when the lifter returns 1; and
+// (when env-gated) KERNEL_LIFT_COMPILES / FAILS by rendering through
+// cg_render_uop_kernel and shelling out to xcrun metal.  Returns
+// nothing -- the existing render path is unchanged.
+static void cg_shadow_lift_metal(KernelEntry const *ke) {
+  KernelUopLift lift = {0};
+  kernel_lift_count_attempt();
+  if (!kernel_lift_to_uop(ke, &lift)) return;
+  kernel_lift_count_success();
+  static int shadow_compile_inited = 0;
+  static int shadow_compile_on     = 0;
+  if (!shadow_compile_inited) {
+    char const *e = getenv("THVM_RENDER_UOP_SHADOW_COMPILE");
+    shadow_compile_on    = (e != NULL && e[0] == '1');
+    shadow_compile_inited = 1;
+  }
+  if (!shadow_compile_on) return;
+  char buf[16384];
+  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  if (fp == NULL) return;
+  cg_render_uop_kernel(lift.store_root, "shadow", lift.out_buf,
+                       lift.in_bufs, lift.n_inputs, fp);
+  fclose(fp);
+  // Write to a temp file and shell out to xcrun metal.  Slow but
+  // gives concrete signal on rendered-MSL compilability for real
+  // kernels.  Caller gates via THVM_RENDER_UOP_SHADOW_COMPILE=1.
+  extern int system(const char *);
+  extern int unlink(const char *);
+  extern int getpid(void);
+  char path[64];
+  snprintf(path, sizeof(path), "/tmp/thvm_shadow_%d.metal", getpid());
+  FILE *out = fopen(path, "w");
+  if (out == NULL) return;
+  fputs(buf, out);
+  fclose(out);
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd),
+           "xcrun metal -x metal -c %s -o /dev/null 2>/dev/null", path);
+  int rc = system(cmd);
+  unlink(path);
+  kernel_lift_count_compile(WEXITSTATUS(rc) == 0);
+}
+
 char *cg_emit_tile_metal(KernelEntry const *ke) {
   // Multi-output kernels are not yet renderable through the tile
   // metal path (single `device float *out` arg + single S_STORE).
@@ -1870,6 +1916,7 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
   if (cg_kernel_has_extra_outputs(ke)) {
     return NULL;
   }
+  cg_shadow_lift_metal(ke);
   TileConv2DInfo conv;
   if (rmt_collect_conv2d_info(ke, &conv)) {
     return rmt_emit_conv2d_flat(ke, &conv);

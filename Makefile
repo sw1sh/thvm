@@ -55,6 +55,7 @@ TESTS := \
   $(BIN)/test_render_uop \
   $(BIN)/test_render_uop_metal \
   $(BIN)/test_kernel_lift \
+  $(BIN)/test_kernel_lift_coverage \
   $(BIN)/test_tile_axis_info \
   $(BIN)/test_tile_alloc_barrier \
   $(BIN)/test_tile_dispatch_shape \
