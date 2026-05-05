@@ -1849,6 +1849,9 @@ fn u32  tile_anno_axis_count_or_kernelaxes(struct KernelEntry const *ke);
 // External linkage (no `fn`) so backend_metal.o can call these.
 u32        tile_anno_applied_opts_count(struct KernelEntry const *ke);
 KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
+// Hash all per-axis (kax_type, extent) into the running FNV-1a state.
+// Used by cache-key generation (kernel_program_cache.c, autotune.c).
+u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

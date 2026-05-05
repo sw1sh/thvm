@@ -189,20 +189,8 @@ static u64 kautotune_cache_key(KernelEntry const *ke, KOpt const *candidates,
     h = kautotune_hash_bytes(h, ke->output_shape.dims,
                              (size_t)ke->output_shape.ndim * sizeof(u32));
     if (ke->axes != NULL) {
-      // Phase E: hash via tile_anno (kax_type + extent).  Same
-      // shape as kernel_program_cache.c's hash.  memory_scope and
-      // vector_width are not yet hashed -- they'll join when the
-      // autotune side cache gains TileAxisInfo storage.
-      u32 n_axes_h = tile_anno_axis_count_or_kernelaxes(ke);
-      h = kautotune_hash_u64(h, n_axes_h);
-      for (u32 i = 0; i < n_axes_h; i++) {
-        TileAxisInfo info;
-        if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) {
-          info.kax_type = 0; info.extent = 0;
-        }
-        h = kautotune_hash_u64(h, (u64)info.kax_type);
-        h = kautotune_hash_u64(h, (u64)info.extent);
-      }
+      // Phase E: hash via tile_anno's shared axes-hash helper.
+      h = tile_anno_hash_axes(ke, h);
     }
   }
 

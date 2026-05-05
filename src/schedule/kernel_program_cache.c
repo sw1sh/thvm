@@ -114,20 +114,8 @@ fn u64 kernel_rangeified_key(KernelEntry const *ke) {
     h = kp_hash_u64(h, 2);
     h = kp_hash_u64(h, (u64)term_tag(ke->source_uop));
     h = kp_hash_u64(h, (u64)term_ext(ke->source_uop));
-    // Phase E: hash via tile_anno when tile_uops is fresh, else
-    // fall back to KernelAxes.  The compare side stores the same
-    // (kax_type, extent) arrays in s->axes, so as long as the hash
-    // is symmetric with the stored format the cache stays consistent.
-    u32 n_axes_h = tile_anno_axis_count_or_kernelaxes(ke);
-    h = kp_hash_u64(h, (u64)n_axes_h);
-    for (u32 i = 0; i < n_axes_h; i++) {
-      TileAxisInfo info;
-      if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) {
-        info.kax_type = 0; info.extent = 0;
-      }
-      h = kp_hash_u64(h, (u64)info.kax_type);
-      h = kp_hash_u64(h, (u64)info.extent);
-    }
+    // Phase E: hash axis info via tile_anno's shared helper.
+    h = tile_anno_hash_axes(ke, h);
   } else {
     return 0;
   }

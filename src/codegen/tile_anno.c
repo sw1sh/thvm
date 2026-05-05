@@ -101,3 +101,25 @@ KOpt const *tile_anno_applied_opts(KernelEntry const *ke) {
   if (ke == NULL || ke->axes == NULL) return NULL;
   return ke->axes->applied_opts;
 }
+
+// Hash all per-axis (kax_type, extent) pairs into the running FNV-1a
+// state and return the updated hash.  Used by kernel_program_cache.c
+// and autotune.c to produce cache keys that include axis structure.
+// Memory_scope and vector_width are NOT included today; they'll join
+// when the cache slot format expands to TileAxisInfo arrays.
+u64 tile_anno_hash_axes(KernelEntry const *ke, u64 h) {
+  u32 n = tile_anno_axis_count_or_kernelaxes(ke);
+  h ^= (u64)n;
+  h *= 0x100000001b3ULL;
+  for (u32 i = 0; i < n; i++) {
+    TileAxisInfo info;
+    if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) {
+      info.kax_type = 0; info.extent = 0;
+    }
+    h ^= (u64)info.kax_type;
+    h *= 0x100000001b3ULL;
+    h ^= (u64)info.extent;
+    h *= 0x100000001b3ULL;
+  }
+  return h;
+}
