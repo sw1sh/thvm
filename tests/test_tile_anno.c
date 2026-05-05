@@ -48,6 +48,25 @@ int main(void) {
   CHECK_EQ(tile_anno_axis_at(ke, 2, &info), 0);
   CHECK_EQ(tile_anno_axis_at(ke, 100, &info), 0);
 
+  TEST_BEGIN("tile-anno/axis-set-writes-tile-axis");
+  // tile_anno_axis_set should mutate the TILE_AXIS at position d
+  // even when KernelAxes isn't populated.  Verify by reading back
+  // through tile_anno_axis_at.
+  TileAxisInfo updated = { KAX_REDUCE, 16, TILE_MEM_SHARED, 8 };
+  // tile_axes_version starts at 0; ke->axes is NULL in this test.
+  // tile_anno_axis_set should still update TILE_AXIS for d=0.
+  // (KernelAxes side is a no-op since ke->axes == NULL.)
+  CHECK_EQ(tile_anno_axis_set(ke, 0, updated), 1);
+  TileAxisInfo got;
+  CHECK_EQ(tile_anno_axis_at(ke, 0, &got), 1);
+  CHECK_EQ(got.kax_type, KAX_REDUCE);
+  CHECK_EQ(got.extent, 16u);
+  CHECK_EQ(got.memory_scope, TILE_MEM_SHARED);
+  CHECK_EQ(got.vector_width, 8u);
+
+  TEST_BEGIN("tile-anno/axis-set-out-of-range-bails");
+  CHECK_EQ(tile_anno_axis_set(ke, 99, updated), 0);
+
   tile_free(ke);
   thvm_free();
   TEST_REPORT();

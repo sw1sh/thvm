@@ -136,3 +136,45 @@ u64 tile_anno_hash_axes(KernelEntry const *ke, u64 h) {
 int tile_anno_apply_opt(KernelEntry *ke, KOpt opt) {
   return kernel_apply_opt(ke, opt);
 }
+
+// Direct per-axis write.  Updates both KernelAxes (legacy backing
+// store) AND TILE_AXIS (when tile_uops is fresh) with the new
+// TileAxisInfo.  Used by future code paths that want to set
+// memory_scope or vector_width on an existing axis without going
+// through the KOpt machinery.  Returns 1 on success, 0 if `d` is
+// out of range or both backing stores are missing.
+int tile_anno_axis_set(KernelEntry *ke, u32 d, TileAxisInfo info) {
+  if (ke == NULL) return 0;
+  int wrote = 0;
+  // Update KernelAxes (the existing source of truth) when present.
+  if (ke->axes != NULL && d < ke->axes->n_axes) {
+    ke->axes->axis_types[d] = info.kax_type;
+    ke->axes->full_shape[d] = info.extent;
+    ke->axes->version++;
+    if (ke->axes->version == 0) ke->axes->version = 1;
+    wrote = 1;
+  }
+  // Mirror to TILE_AXIS when tile_uops is populated and the axis
+  // exists.  This catches the memory_scope + vector_width fields
+  // that KernelAxes doesn't carry.
+  if (ke->tile_uops != NULL && ke->tile_root != 0
+      && ke->tile_root < ke->n_tile_uops) {
+    TileUop *root = &ke->tile_uops[ke->tile_root];
+    if (root->op == TILE_LOOP_NEST && (u32)d + 1 < (u32)root->src_count) {
+      u32 axis_id = root->src[1 + d];
+      if (axis_id != 0 && axis_id < ke->n_tile_uops) {
+        TileUop *axis = &ke->tile_uops[axis_id];
+        if (axis->op == TILE_AXIS) {
+          axis->extra = tile_axis_pack(info);
+          // Keep tile_axes_version in sync so the freshness check
+          // in tile_anno_tile_uops_fresh sees the post-write version.
+          if (ke->axes != NULL) {
+            ke->tile_axes_version = ke->axes->version;
+          }
+          wrote = 1;
+        }
+      }
+    }
+  }
+  return wrote;
+}

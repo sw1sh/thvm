@@ -1855,6 +1855,11 @@ u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
 // Phase E writer-side facade: thin wrapper over kernel_apply_opt.
 // Phase F's source-of-truth flip switches this to mutate TILE_AXIS.
 int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
+// Direct per-axis write.  Updates both KernelAxes and TILE_AXIS
+// (when present) so memory_scope + vector_width can be set without
+// going through KOpt machinery.
+int        tile_anno_axis_set(struct KernelEntry *ke, u32 d,
+                              TileAxisInfo info);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);
