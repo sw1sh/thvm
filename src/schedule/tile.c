@@ -322,11 +322,10 @@ static u64 tile_mma_pack(u32 a_input, u32 b_input, u32 flags) {
 
 static u32 tile_mma_size_from_opts(KernelEntry const *ke) {
   u32 tile = 16;
-  if (ke == NULL || ke->axes == NULL) {
-    return tile;
-  }
-  for (u32 i = 0; i < ke->axes->n_applied; i++) {
-    KOpt opt = ke->axes->applied_opts[i];
+  u32 n_app = tile_anno_applied_opts_count(ke);
+  KOpt const *opts = tile_anno_applied_opts(ke);
+  for (u32 i = 0; i < n_app; i++) {
+    KOpt opt = opts[i];
     if (opt.op == KOP_TC && tile_mma_size_supported(opt.arg)) {
       tile = opt.arg;
     }
@@ -642,11 +641,10 @@ static u32 tile_isqrt_exact(u32 x) {
 
 static u32 tile_conv2d_threads_from_opts(KernelEntry const *ke) {
   u32 threads = 256;
-  if (ke == NULL || ke->axes == NULL) {
-    return threads;
-  }
-  for (u32 i = 0; i < ke->axes->n_applied; i++) {
-    KOpt opt = ke->axes->applied_opts[i];
+  u32 n_app = tile_anno_applied_opts_count(ke);
+  KOpt const *opts = tile_anno_applied_opts(ke);
+  for (u32 i = 0; i < n_app; i++) {
+    KOpt opt = opts[i];
     if (opt.op == KOP_LOCAL && opt.arg > 0 && opt.arg <= 256) {
       threads = opt.arg;
     }
@@ -656,11 +654,10 @@ static u32 tile_conv2d_threads_from_opts(KernelEntry const *ke) {
 
 static u32 tile_conv2d_outputs_from_opts(KernelEntry const *ke) {
   u32 outputs = 1;
-  if (ke == NULL || ke->axes == NULL) {
-    return outputs;
-  }
-  for (u32 i = 0; i < ke->axes->n_applied; i++) {
-    KOpt opt = ke->axes->applied_opts[i];
+  u32 n_app = tile_anno_applied_opts_count(ke);
+  KOpt const *opts = tile_anno_applied_opts(ke);
+  for (u32 i = 0; i < n_app; i++) {
+    KOpt opt = opts[i];
     if (opt.op == KOP_UPCAST && opt.arg > 0 && opt.arg <= 16) {
       outputs = opt.arg;
     }
@@ -671,11 +668,11 @@ static u32 tile_conv2d_outputs_from_opts(KernelEntry const *ke) {
 static u32 tile_conv2d_reduce_unroll_from_opts(KernelEntry const *ke,
                                                u32 reduce_extent) {
   u32 unroll = 1;
-  if (ke == NULL || ke->axes == NULL || reduce_extent == 0) {
-    return unroll;
-  }
-  for (u32 i = 0; i < ke->axes->n_applied; i++) {
-    KOpt opt = ke->axes->applied_opts[i];
+  if (reduce_extent == 0) return unroll;
+  u32 n_app = tile_anno_applied_opts_count(ke);
+  KOpt const *opts = tile_anno_applied_opts(ke);
+  for (u32 i = 0; i < n_app; i++) {
+    KOpt opt = opts[i];
     if (opt.op == KOP_UNROLL && opt.arg > 1 && opt.arg <= 16
         && reduce_extent % opt.arg == 0) {
       unroll = opt.arg;

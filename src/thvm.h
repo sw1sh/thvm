@@ -1837,8 +1837,9 @@ fn u32  tile_anno_axis_count_or_kernelaxes(struct KernelEntry const *ke);
 
 // applied_opts facade.  Today reads from KernelAxes.applied_opts;
 // future work moves these into Tile-IR mutation records.
-fn u32        tile_anno_applied_opts_count(struct KernelEntry const *ke);
-fn KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
+// External linkage (no `fn`) so backend_metal.o can call these.
+u32        tile_anno_applied_opts_count(struct KernelEntry const *ke);
+KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

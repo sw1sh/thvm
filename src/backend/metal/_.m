@@ -952,12 +952,14 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   h ^= (u64)ke->n_inputs;          h *= 0x100000001b3ULL;
   h ^= (u64)ke->output_dtype;      h *= 0x100000001b3ULL;
   h ^= (u64)ke->output_numel;      h *= 0x100000001b3ULL;
-  if (ke->axes != NULL) {
-    h ^= (u64)ke->axes->n_applied; h *= 0x100000001b3ULL;
-    u8 const *opts = (u8 const *)ke->axes->applied_opts;
-    size_t total = (size_t)ke->axes->n_applied * sizeof(KOpt);
-    for (size_t i = 0; i < total; i++) {
-      h ^= (u64)opts[i]; h *= 0x100000001b3ULL;
+  {
+    u32 n_app = tile_anno_applied_opts_count(ke);
+    h ^= (u64)n_app; h *= 0x100000001b3ULL;
+    KOpt const *opts_arr = tile_anno_applied_opts(ke);
+    u8   const *opts_b   = (u8 const *)opts_arr;
+    size_t total = (size_t)n_app * sizeof(KOpt);
+    for (size_t i = 0; opts_arr != NULL && i < total; i++) {
+      h ^= (u64)opts_b[i]; h *= 0x100000001b3ULL;
     }
   }
   return h | (1ULL << 62);
@@ -1669,11 +1671,10 @@ static int metal_cpu_small_add_enabled(void) {
 }
 
 static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
-  if (ke == NULL || ke->axes == NULL) {
-    return 0;
-  }
-  for (u32 i = 0; i < ke->axes->n_applied; i++) {
-    if (ke->axes->applied_opts[i].op == op) {
+  u32 n_app = tile_anno_applied_opts_count(ke);
+  KOpt const *opts = tile_anno_applied_opts(ke);
+  for (u32 i = 0; i < n_app; i++) {
+    if (opts[i].op == op) {
       return 1;
     }
   }
