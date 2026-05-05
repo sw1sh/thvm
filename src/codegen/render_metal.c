@@ -1873,6 +1873,9 @@ static int rmt_emit_group_reduce_store(CgBuf *b, KernelEntry const *ke,
 static void cg_shadow_lift_metal(KernelEntry const *ke) {
   KernelUopLift lift = {0};
   kernel_lift_count_attempt();
+  // Metal hardware caps buffer attributes at index 30; kernels with
+  // > 30 inputs can't be rendered through buffer-arg signatures.
+  if (ke->n_inputs > 30) return;
   if (!kernel_lift_to_uop(ke, &lift)) return;
   kernel_lift_count_success();
   static int shadow_compile_inited = 0;
@@ -1947,6 +1950,9 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
     via_uop_inited = 1;
   }
   if (!via_uop_on) return NULL;
+  // Metal hardware caps buffer attributes at index 30 (31 slots total
+  // including output).  Reject kernels with too many inputs.
+  if (ke->n_inputs > 30) return NULL;
   KernelUopLift lift = {0};
   if (!kernel_lift_to_uop(ke, &lift)) return NULL;
   // Render to a malloc'd string, matching cg_emit_tile_metal's

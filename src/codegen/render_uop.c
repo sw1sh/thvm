@@ -66,7 +66,7 @@ static const char *rmu_msl_type_name(u32 dtype) {
     case DT_INT32: return "int";
     case DT_INT64: return "long";
     case DT_UINT8: return "uchar";
-    default:       return "?";
+    default:       return "float";  // safe fallback for the renderer
   }
 }
 
@@ -219,6 +219,16 @@ static void rmu_emit_term(Term t, FILE *fp) {
       rmu_emit_term(heap_read(loc + 0), fp);
       return;
     }
+    case UOP_REDUCE: {
+      // When REDUCE appears in an expression context (not directly as
+      // STORE.value), the caller has hoisted an accumulator outside.
+      // We emit the placeholder name `_acc<axis>`; the caller emits
+      // the init / reduce-axis loop / combine code before the
+      // expression and just substitutes here.
+      u32 axis = term_val(heap_read(loc + 2));
+      fprintf(fp, "_acc%u", axis);
+      return;
+    }
     default:
       fprintf(fp, "/*uop%u*/", op);
       return;
@@ -292,6 +302,47 @@ static void rmu_collect_ranges_rec(Term t, Term *ranges,
     case UOP_CAST: case UOP_BITCAST:
       rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
                              opt_factors, n_out, 0, 0);
+      return;
+    default:
+      return;
+  }
+}
+
+// Walk a term tree collecting UOP_REDUCE nodes for hoisting.  Each
+// REDUCE produces a separate accumulator.  Up to MAX_DIM reduces.
+static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
+  if (term_tag(t) != TAG_UOP) return;
+  if (*n_out >= MAX_DIM) return;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_REDUCE) {
+    // Dedup by REDUCE term identity.
+    for (u32 i = 0; i < *n_out; i++) {
+      if (reduces[i] == t) return;
+    }
+    reduces[*n_out] = t;
+    (*n_out)++;
+    // Don't recurse into the body -- the outer accumulator handles it.
+    return;
+  }
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
+      rmu_collect_reduces(heap_read(loc + 1), reduces, n_out);
+      return;
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_OPT:
+      rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
+      return;
+    case UOP_IWHERE:
+      rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
+      rmu_collect_reduces(heap_read(loc + 1), reduces, n_out);
+      rmu_collect_reduces(heap_read(loc + 2), reduces, n_out);
       return;
     default:
       return;
@@ -700,6 +751,47 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     if (!threadbound) {
       needs_close[i] = 1;
       body_depth++;
+    }
+  }
+  // Hoist any UOP_REDUCE nested inside the value expression: emit
+  // accumulator init + reduce-axis loop + combine BEFORE the store
+  // statement.  The term emitter substitutes _acc<axis> in the
+  // expression itself.  Walks the value tree (not addr) since
+  // reductions only ever appear in value position.
+  Term reduces[MAX_DIM];
+  u32  n_reduces = 0;
+  rmu_collect_reduces(value, reduces, &n_reduces);
+  for (u32 i = 0; i < n_reduces; i++) {
+    Term red = reduces[i];
+    u64 rloc = term_val(red);
+    u32 r_kind = term_val(heap_read(rloc + 1));
+    u32 r_axis = term_val(heap_read(rloc + 2));
+    Term r_src = heap_read(rloc + 0);
+    char acc_name[32];
+    snprintf(acc_name, sizeof(acc_name), "_acc%u", r_axis);
+    // Find the reduce-axis range leaf in the body and emit a loop.
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fprintf(fp, "float %s = ", acc_name);
+    rmu_emit_reduce_init(r_kind, fp);
+    fputs(";\n", fp);
+    // Reduce loop opener: find the matching RANGE and emit its for.
+    Term reduce_ranges[MAX_DIM];
+    u32  reduce_kinds[MAX_DIM] = {0};
+    u32  reduce_factors[MAX_DIM] = {0};
+    u32  n_red_ranges = 0;
+    rmu_collect_ranges_with_opts(r_src, reduce_ranges, reduce_kinds,
+                                 reduce_factors, &n_red_ranges);
+    Term reduce_range_term = 0;
+    for (u32 j = 0; j < n_red_ranges; j++) {
+      u32 axis = term_val(heap_read(term_val(reduce_ranges[j]) + 0));
+      if (axis == r_axis) { reduce_range_term = reduce_ranges[j]; break; }
+    }
+    if (reduce_range_term != 0) {
+      rmu_emit_range_open(reduce_range_term, fp, body_depth, 0);
+      for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+      rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
     }
   }
   for (u32 i = 0; i < body_depth; i++) fputs("  ", fp);
