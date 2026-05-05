@@ -81,22 +81,30 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   + tile_build_conv2d_from_info builder, parallel to TILE_MMA.
   Renderer (Phase F) is the first consumer.
 - **Phase E read-side migration** (committed): codegen/tile_anno.c
-  + 7 commits migrating consumers.  All read sites for
-  `ke->axes->axis_types[]` and `ke->axes->full_shape[]` outside
-  the source-converter (tile_emit_axes_from_kernel_axes) and
-  mutator writes (axis.c) now read via tile_anno_axis_or_kernelaxes:
-    - propose.c (axis-counter, conv2d local/upcast/unroll opts,
-      reduce-tail axis_size, metal_tile_kernel LOOP-presence,
-      branch guards on n_axes)
-    - apply_opt.c (KOP_TC opt axis check)
-    - autotune.c (kernel_apply_local_with_implicit_global +
-      bench hash function)
-    - kernel_program_cache.c (cache hash + compare)
+  + ~10 commits migrating consumers.  All read sites for
+  `ke->axes->axis_types[]` / `full_shape[]` and `applied_opts[]`
+  outside the source-converter and mutators now read via the
+  tile_anno facade:
+    - axis info (axis_types, full_shape):
+      propose.c (6 sites), apply_opt.c (1), autotune.c (2),
+      kernel_program_cache.c (hash + compare).
+    - applied_opts (autotune mutation log):
+      cg.c (UNROLL/UPCAST factor extract), render_metal.c
+      (conv2d GROUP early-exit + reduce-tail UNROLL),
+      tile.c (4 GEMM/conv2d opt-from-opts helpers),
+      backend/metal/_.m (dispatch hash + has-applied-opt).
   Stronger staleness check (versions match AND axis-count matches)
-  in tile_anno_tile_uops_fresh prevents stale TILE_AXIS reads when
-  ke->axes is mutated post-tile_build.  Phase F's renderer rewrite
-  (still pending) folds in the bridge converter; axis.c writer
-  migration is gated on tile_uops being a writable representation.
+  prevents stale TILE_AXIS reads when ke->axes is mutated
+  post-tile_build.  External linkage on
+  tile_anno_applied_opts_count / tile_anno_applied_opts so
+  backend_metal.o (separate TU) can link against them.
+
+  Remaining KernelAxes reads (~5 sites): the bridge converter
+  tile_emit_axes_from_kernel_axes, struct existence guards
+  (`ke->axes != NULL`), mutator writes in axis.c, applied_opts
+  writes in apply_opt.c, and the autotuned flag.  These need
+  Phase F's renderer rewrite + a Tile-IR-native mutation
+  representation to migrate.
 - **Phase F prep** (`bf247f2`, `4de9b64`): tile-IR pretty-printer
   `tile_dump(ke, fp)` walks the tile_uops graph with indented
   output decoding TileAxisInfo / TileAllocInfo metadata.
