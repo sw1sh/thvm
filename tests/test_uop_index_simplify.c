@@ -228,6 +228,31 @@ int main(void) {
   // Should NOT have rewritten the LHS (no fold should fire).
   CHECK_EQ(heap_read(term_val(not_gcd) + 0), r2_times_3);
 
+  TEST_BEGIN("simplify/iadd-of-iadd-collapses-consts");
+  // (r2 + 3) + 5 -> r2 + 8.
+  Term r2_plus_3 = uop_int_binary(UOP_IADD, r2, three);
+  Term r2_plus_8 = uop_int_binary(UOP_IADD, r2_plus_3, five);
+  CHECK_EQ(term_ext(r2_plus_8), UOP_IADD);
+  CHECK_EQ(heap_read(term_val(r2_plus_8) + 0), r2);
+  Term plus_const = heap_read(term_val(r2_plus_8) + 1);
+  CHECK_EQ(term_ext(plus_const), UOP_CONST);
+
+  TEST_BEGIN("simplify/iadd-of-isub-collapses");
+  // (r2 - 3) + 8 -> r2 + 5.
+  Term ate = uop_const(DT_INT32, 8);
+  Term r2_minus_3 = uop_int_binary(UOP_ISUB, r2, three);
+  Term net5 = uop_int_binary(UOP_IADD, r2_minus_3, ate);
+  CHECK_EQ(term_ext(net5), UOP_IADD);
+  CHECK_EQ(heap_read(term_val(net5) + 0), r2);
+
+  TEST_BEGIN("simplify/imul-of-imul-collapses-consts");
+  // (r2 * 3) * 5 -> r2 * 15.
+  Term r2_times_15 = uop_int_binary(UOP_IMUL, r2_times_3, five);
+  CHECK_EQ(term_ext(r2_times_15), UOP_IMUL);
+  CHECK_EQ(heap_read(term_val(r2_times_15) + 0), r2);
+  Term mul_const = heap_read(term_val(r2_times_15) + 1);
+  CHECK_EQ(term_ext(mul_const), UOP_CONST);
+
   TEST_BEGIN("simplify/divmod-affine-roundtrip-end-to-end");
   // Resolve a 1D->1D identity-via-flat reshape: ndim=2, dims=[2,3].
   // resolve builds: flat = i0*3 + i1; in_iters[0] = flat / 3,

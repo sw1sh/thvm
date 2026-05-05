@@ -116,6 +116,30 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
     case UOP_IADD:
       if (a_const && av == 0) return b;
       if (b_const && bv == 0) return a;
+      // (x + c1) + c2 -> x + (c1+c2)  --  the IADD-of-IADD collapse.
+      // (x - c1) + c2 -> x + (c2-c1)  --  IADD-of-ISUB.
+      if (b_const && term_tag(a) == TAG_UOP) {
+        u32 inner_op = term_ext(a);
+        if (inner_op == UOP_IADD) {
+          Term lhs = heap_read(term_val(a) + 0);
+          Term rhs = heap_read(term_val(a) + 1);
+          i64 inner_c;
+          if (uop_iconst_value(rhs, &inner_c)) {
+            return uop_int_binary(UOP_IADD, lhs, uop_iconst(inner_c + bv));
+          }
+          if (uop_iconst_value(lhs, &inner_c)) {
+            return uop_int_binary(UOP_IADD, rhs, uop_iconst(inner_c + bv));
+          }
+        }
+        if (inner_op == UOP_ISUB) {
+          Term lhs = heap_read(term_val(a) + 0);
+          Term rhs = heap_read(term_val(a) + 1);
+          i64 inner_c;
+          if (uop_iconst_value(rhs, &inner_c)) {
+            return uop_int_binary(UOP_IADD, lhs, uop_iconst(bv - inner_c));
+          }
+        }
+      }
       // Affine normalization: (c1*x) + (c2*x) -> (c1+c2)*x.
       // Mirrors emit_ibinop's IADD-of-IADD-with-const collapse on
       // the scalar side; brings the UOp simplifier to parity.
@@ -175,6 +199,13 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       if (b_const && bv == 0) return uop_iconst(0);
       if (a_const && av == 1) return b;
       if (b_const && bv == 1) return a;
+      // (x * c1) * c2 -> x * (c1 * c2).
+      if (b_const && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IMUL) {
+        i64 inner_c; Term xnum;
+        if (uop_match_const_mul(a, &inner_c, &xnum)) {
+          return uop_int_binary(UOP_IMUL, xnum, uop_iconst(inner_c * bv));
+        }
+      }
       break;
     case UOP_IDIV:
       if (b_const && bv == 1) return a;
