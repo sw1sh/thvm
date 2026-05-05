@@ -411,7 +411,7 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   u32 n_factors = sizeof(split_factors)/sizeof(*split_factors);
 
   if (propose_metal_backend_enabled() && ke->axes != NULL
-      && ke->axes->n_axes > 0) {
+      && tile_anno_axis_count_or_kernelaxes(ke) > 0) {
     TileGemmInfo gemm;
     if (tile_analyze_gemm(ke, NULL, &gemm) && gemm.dtype == DT_FP32) {
       static const u32 tc_tiles[] = {32, 16, 8};
@@ -427,7 +427,7 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   }
 
   if (propose_metal_tile_enabled() && ke->axes != NULL
-      && ke->axes->n_axes > 0) {
+      && tile_anno_axis_count_or_kernelaxes(ke) > 0) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {
       u8  red_axis = propose_reduce_axis_index(ke);
