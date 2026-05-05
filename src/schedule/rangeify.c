@@ -906,6 +906,17 @@ static u32 emit_ref_with_extent(KernelEntry *ke, u32 ref, u32 extent,
 static UopRangeMap RANGEIFY_UOP_RANGE_MAP[2 * MAX_DIM];
 static u32         RANGEIFY_UOP_RANGE_MAP_LEN;
 
+// Phase B3 instrumentation: counters for the address-build path
+// taken in emit_addr_from_rngs_uop_preferred.  HITS = UOp path
+// produced an address; FALLBACK = legacy scalar emit path took
+// over.  Ratio reveals how often the UOp path is actually used vs
+// how often scalar_to_uop or another bail forces fallback.
+static u64 RANGEIFY_UOP_PATH_HITS;
+static u64 RANGEIFY_UOP_FALLBACK_HITS;
+
+fn u64 rangeify_uop_path_hits(void)     { return RANGEIFY_UOP_PATH_HITS; }
+fn u64 rangeify_uop_fallback_hits(void) { return RANGEIFY_UOP_FALLBACK_HITS; }
+
 // Build `sum_d (r->refs[d] * v_strides[d]) + in_off` preferring the
 // UOp DAG layer (uop_int_binary + uop_to_scalar) when iters can be
 // lifted, falling back to scalar emit_ibinop otherwise.  Returns 0
@@ -939,7 +950,10 @@ static u32 emit_addr_from_rngs_uop_preferred(KernelEntry *ke,
     if (acc_uop == 0) acc_uop = uop_const(DT_INT32, 0);
     u32 via_uop = uop_to_scalar(ke, acc_uop, RANGEIFY_UOP_RANGE_MAP,
                                 RANGEIFY_UOP_RANGE_MAP_LEN);
-    if (via_uop != 0) return via_uop;
+    if (via_uop != 0) {
+      RANGEIFY_UOP_PATH_HITS++;
+      return via_uop;
+    }
   }
   // Legacy scalar fallback.  Stays as the safety net for paths the
   // UOp side can't yet handle (e.g. ScalarUop arena entries that
@@ -948,7 +962,6 @@ static u32 emit_addr_from_rngs_uop_preferred(KernelEntry *ke,
   // at parity, this fallback fires for ~unsupported subtree shapes
   // only.  THVM_RANGEIFY_UOP_FALLBACK_DUMP=1 prints a one-liner per
   // fallback hit so we can quantify the gap.
-  static u64 RANGEIFY_UOP_FALLBACK_HITS = 0;
   RANGEIFY_UOP_FALLBACK_HITS++;
   if (getenv("THVM_RANGEIFY_UOP_FALLBACK_DUMP")) {
     fprintf(stderr, "rangeify uop-addr fallback hit #%llu (use_ndim=%u uop_ok=%d)\n",

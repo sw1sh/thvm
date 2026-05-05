@@ -1773,6 +1773,11 @@ fn u32  rangeify_emit_binary(struct KernelEntry *ke, u8 op, u32 dtype, u32 a, u3
 // Free the per-kernel scalar arena.  Called from kernel_free_arrays.
 fn void rangeify_free(struct KernelEntry *ke);
 
+// Phase B3 instrumentation: per-process counters for the address-
+// build paths in emit_addr_from_rngs_uop_preferred.
+fn u64 rangeify_uop_path_hits(void);
+fn u64 rangeify_uop_fallback_hits(void);
+
 // === UOp -> ScalarUop translator (Phase B3 wedge) ===
 // Translate a UOp INDEX-expression Term into the equivalent ScalarUop
 // slot id in `ke`'s arena.  Caller provides a UopRangeMap[] table
