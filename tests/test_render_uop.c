@@ -232,6 +232,36 @@ int main(void) {
   CHECK(contains(bufuc, "#pragma unroll(4)"));
   CHECK(contains(bufuc, "for (uint a1 = 0; a1 < 4"));
 
+  TEST_BEGIN("render-uop/reduce-sum-as-store-value");
+  // STORE(out, RANGE(0), REDUCE(LOAD(in0, RANGE(1)), SUM, axis=1))
+  // Output axis 0 wraps a SUM reduction over axis 1.  Renderer hoists
+  // an accumulator outside the reduce loop, references it in the store.
+  Term r_out = uop_range(0, 0 /*LOOP*/, 32);
+  Term r_red_ax = uop_range(1, 1 /*REDUCE*/, 16);
+  Term ld_red_in = uop_index_e(in0, r_red_ax);
+  Term red_sum  = uop_reduce(REDUCE_SUM, /*axis=*/1, ld_red_in);
+  Term st_red_sum = uop_store(out, r_out, red_sum);
+  char bufrs[2048];
+  fp = fmemopen(bufrs, sizeof(bufrs), "w");
+  cg_render_uop_kernel(st_red_sum, "k_sum", out, in_bufs, 2, fp);
+  fclose(fp);
+  CHECK(contains(bufrs, "for (uint a0 = 0; a0 < 32"));
+  CHECK(contains(bufrs, "float _acc1 = 0.0f"));
+  CHECK(contains(bufrs, "for (uint a1 = 0; a1 < 16"));
+  CHECK(contains(bufrs, "_acc1 = _acc1 + buf"));
+  CHECK(contains(bufrs, "] = _acc1;"));
+
+  TEST_BEGIN("render-uop/reduce-max-uses-fmax");
+  Term ld_max_in = uop_index_e(in0, r_red_ax);
+  Term red_max = uop_reduce(REDUCE_MAX, /*axis=*/1, ld_max_in);
+  Term st_red_max = uop_store(out, r_out, red_max);
+  char bufrm[2048];
+  fp = fmemopen(bufrm, sizeof(bufrm), "w");
+  cg_render_uop_kernel(st_red_max, "k_max", out, in_bufs, 2, fp);
+  fclose(fp);
+  CHECK(contains(bufrm, "= -INFINITY"));
+  CHECK(contains(bufrm, "fmax(_acc1, "));
+
   TEST_BEGIN("render-uop/legacy-kax-global-emits-tg");
   // Direct axis_type=5 (legacy KAX_GLOBAL) without OPT also emits tg.
   Term r_gl  = uop_range(2, 5 /*GLOBAL*/, 32);

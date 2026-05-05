@@ -322,12 +322,159 @@ static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
   }
 }
 
+// Filter the collected ranges, splitting them into output ranges
+// (axis_id != reduce_axis) and the reduce range (axis_id == reduce_axis,
+// at most one).  Used by the REDUCE-as-store-value shape so the
+// renderer can emit output loops outside, accumulator+inner loop
+// inside.  Returns the index of the reduce range in the input array,
+// or n_ranges if not found.
+static u32 rmu_split_reduce(Term *ranges, u32 *opt_kinds,
+                            u32 *opt_factors, u32 n_ranges,
+                            u32 reduce_axis,
+                            Term *out_ranges, u32 *out_kinds,
+                            u32 *out_factors, u32 *n_out) {
+  u32 reduce_idx = n_ranges;
+  *n_out = 0;
+  for (u32 i = 0; i < n_ranges; i++) {
+    u32 axis_id = term_val(heap_read(term_val(ranges[i]) + 0));
+    if (axis_id == reduce_axis) {
+      reduce_idx = i;
+      continue;
+    }
+    out_ranges  [*n_out] = ranges[i];
+    out_kinds   [*n_out] = opt_kinds[i];
+    out_factors [*n_out] = opt_factors[i];
+    (*n_out)++;
+  }
+  return reduce_idx;
+}
+
+// Emit `<acc> = <combine(kind, acc, src)>;` per the REDUCE kind.
+static void rmu_emit_reduce_combine(const char *acc_name, u32 kind,
+                                    Term src, FILE *fp) {
+  if (kind == REDUCE_MAX) {
+    fprintf(fp, "%s = fmax(%s, ", acc_name, acc_name);
+    rmu_emit_term(src, fp);
+    fputs(");\n", fp);
+  } else {
+    // SUM (default).
+    fprintf(fp, "%s = %s + ", acc_name, acc_name);
+    rmu_emit_term(src, fp);
+    fputs(";\n", fp);
+  }
+}
+
+// Emit init expression for a REDUCE kind: 0.0f for SUM, -INFINITY for MAX.
+static void rmu_emit_reduce_init(u32 kind, FILE *fp) {
+  if (kind == REDUCE_MAX) fputs("-INFINITY", fp);
+  else                    fputs("0.0f", fp);
+}
+
+// REDUCE-shaped emission: STORE(buf, addr, REDUCE(src, kind, axis)).
+// Hoists an accumulator outside the reduce-axis loop and references it
+// in the store statement.  Returns 1 if the shape matched and was
+// emitted; 0 if the caller should fall back to the generic path.
+static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  u64 sloc = term_val(store);
+  Term value = heap_read(sloc + 2);
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
+  Term buf  = heap_read(sloc + 0);
+  Term addr = heap_read(sloc + 1);
+  u64 rloc      = term_val(value);
+  Term red_src  = heap_read(rloc + 0);
+  u32  red_kind = term_val(heap_read(rloc + 1));
+  u32  red_axis = term_val(heap_read(rloc + 2));
+
+  // Collect ranges from addr + red_src; split into output vs reduce.
+  Term ranges[MAX_DIM];
+  u32  opt_kinds[MAX_DIM]   = {0};
+  u32  opt_factors[MAX_DIM] = {0};
+  u32  n_ranges = 0;
+  rmu_collect_ranges_with_opts(addr,    ranges, opt_kinds, opt_factors, &n_ranges);
+  rmu_collect_ranges_with_opts(red_src, ranges, opt_kinds, opt_factors, &n_ranges);
+
+  Term out_ranges[MAX_DIM];
+  u32  out_kinds[MAX_DIM]   = {0};
+  u32  out_factors[MAX_DIM] = {0};
+  u32  n_out = 0;
+  u32 reduce_idx = rmu_split_reduce(ranges, opt_kinds, opt_factors,
+                                    n_ranges, red_axis,
+                                    out_ranges, out_kinds, out_factors, &n_out);
+  if (reduce_idx == n_ranges) {
+    // No reduce range in the body -- nothing to accumulate over.
+    return 0;
+  }
+
+  // Emit output ranges (outer loops).
+  u32 body_depth = depth;
+  int needs_close[MAX_DIM] = {0};
+  for (u32 i = 0; i < n_out; i++) {
+    Term r = out_ranges[i];
+    u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
+                  ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
+    int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type);
+    if (out_kinds[i] == UOP_OPT_UNROLL || out_kinds[i] == UOP_OPT_UPCAST) {
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+      if (out_factors[i] > 0) {
+        fprintf(fp, "#pragma unroll(%u)\n", out_factors[i]);
+      } else {
+        fputs("#pragma unroll\n", fp);
+      }
+    }
+    rmu_emit_range_open(r, fp, body_depth, out_kinds[i]);
+    if (!threadbound) {
+      needs_close[i] = 1;
+      body_depth++;
+    }
+  }
+  // Emit accumulator decl using the reduce_axis as the unique id.
+  char acc_name[32];
+  snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "float %s = ", acc_name);
+  rmu_emit_reduce_init(red_kind, fp);
+  fputs(";\n", fp);
+  // Reduce-axis loop.
+  Term red_range = ranges[reduce_idx];
+  u32  red_kind_opt   = opt_kinds  [reduce_idx];
+  u32  red_factor_opt = opt_factors[reduce_idx];
+  if (red_kind_opt == UOP_OPT_UNROLL) {
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    if (red_factor_opt > 0) fprintf(fp, "#pragma unroll(%u)\n", red_factor_opt);
+    else                    fputs("#pragma unroll\n", fp);
+  }
+  rmu_emit_range_open(red_range, fp, body_depth, red_kind_opt);
+  // Combine inside the reduce loop.
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  rmu_emit_reduce_combine(acc_name, red_kind, red_src, fp);
+  // Close reduce loop.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("}\n", fp);
+  // Final store.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "buf%llu[", (unsigned long long)term_val(buf));
+  rmu_emit_term(addr, fp);
+  fprintf(fp, "] = %s;\n", acc_name);
+  // Close output loops.
+  for (i32 i = (i32)n_out - 1; i >= 0; i--) {
+    if (!needs_close[i]) continue;
+    body_depth--;
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
+  return 1;
+}
+
 // Emit a single UOP_STORE statement, wrapping with for-loops over
 // every UOP_RANGE that appears in the addr/value tree.  When a range
 // was wrapped in UOP_OPT(_, UNROLL, factor), emit `#pragma unroll(N)`
 // above the for-loop.  UPCAST/LOCAL/etc. handling lands in F1d+.
 static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return;
+  // Try the REDUCE-shape specialisation first.  Falls through to the
+  // generic path when value isn't a UOP_REDUCE or shape doesn't match.
+  if (rmu_emit_store_reduce(store, fp, depth)) return;
   u64 loc = term_val(store);
   Term buf   = heap_read(loc + 0);
   Term addr  = heap_read(loc + 1);
