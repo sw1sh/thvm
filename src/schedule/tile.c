@@ -325,10 +325,27 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
       return;
     }
     case TILE_STORE: {
-      tile_render_msl_indent(fp, depth);
-      fprintf(fp, "/* TILE_STORE S%u */\n", (u32)u->extra);
+      // Render the value-producing src first (so any inner emits land
+      // before the store statement).
       for (u8 s = 0; s < u->src_count; s++) {
         tile_render_msl_node(ke, u->src[s], fp, depth);
+      }
+      tile_render_msl_indent(fp, depth);
+      // The kernel's primary output goes to buffer(0) as `out`.  The
+      // address is computed elsewhere (LOOP_NEST iters); for now use
+      // a flat tid as the index, mirroring the FLAT_GRID dispatch
+      // shape.  Phase F's renderer proper will emit a fully indexed
+      // store using the LOOP_NEST iter walk.
+      u32 v_src = (u->src_count > 0) ? u->src[0] : 0;
+      const char *value_expr = "_v"; // last TILE_LOAD/TILE_REDUCE leaves _v in scope
+      if (v_src != 0 && v_src < ke->n_tile_uops
+          && ke->tile_uops[v_src].op == TILE_SCALAR_BODY) {
+        // Single scalar body store; emit a literal scalar reference.
+        fprintf(fp, "out[tid] = s%u; /* TILE_STORE S%u */\n",
+                (u32)ke->tile_uops[v_src].extra, (u32)u->extra);
+      } else {
+        fprintf(fp, "out[tid] = %s; /* TILE_STORE S%u */\n",
+                value_expr, (u32)u->extra);
       }
       return;
     }
