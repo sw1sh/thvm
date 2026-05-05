@@ -68,9 +68,25 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   RESHAPE) mirror their iter transformation on uop_refs in
   parallel with the scalar emit.  PERMUTE per-USE walk wires
   through.  PAD also accumulates UOP_IAND'd ILT bounds-checks
-  into uop_valid_mask.  No behavior change today (scalar path
-  drives execution); structural readiness for the eventual
-  rngs_ctx_* deletion in B3 main proper.
+  into uop_valid_mask.
+- **B3 main proper** (`5f9eb07`, `354b8eb`, `697543d`,
+  `a74937a`, `1f9ab18`): LOAD-site swap.
+  emit_input_load_for_use and emit_flat_from_rngs prefer the UOp-
+  driven address build over the legacy scalar emit:
+  - File-scope RANGEIFY_UOP_RANGE_MAP populated with both LOOP
+    and REDUCE ranges so uop_to_scalar can translate every
+    iter-tree branch.
+  - When uop_refs[d] is populated, build acc_uop directly.
+  - When uop_refs[d] is 0, lift via scalar_to_uop -- the inverse
+    translator that walks a ScalarUop arena slot and rebuilds the
+    equivalent UOp Term.  Covers secondary RngsCtx-build sites
+    (chain-reduce per-region emit) without forcing each one to
+    populate uop_refs in parallel.
+  - Legacy scalar emit stays as the fallback for unsupported
+    subtrees (S_RESHAPE_V wrappers, etc.).
+  The UOp path is now active on every per-USE LOAD where the iter
+  tree can be lifted; behavior unchanged because both paths share
+  the same fold rules (90f00a1 alignment).
 
 Test suite grew from 67 to 70 binaries with ~200 new INDEX/
 movement-resolver/simplifier/tile-IR assertions.  All 274/274
