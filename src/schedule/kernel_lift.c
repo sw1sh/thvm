@@ -228,6 +228,81 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // defined: emit the corresponding UOP_RANGE.  Used for
       // index-like scalar values feeding into another expression.
       return lift_lookup_range(ranges, n_ranges, sid);
+    case S_SHRINK: {
+      // src[0] = body, src[1..n] = ranges; extra packs per-axis u16
+      // begin offsets (4 axes at 16 bits each).  Lifter rewrites the
+      // matching axis_uop entries to UOP_IADD(original, begin) so
+      // body LOADs read the shifted source.
+      if (u->src_count < 2) return 0;
+      u32 ndim = (u32)u->src_count - 1;
+      if (ndim > 4) return 0;
+      LiftRangeMap shifted[MAX_DIM];
+      u32 n_sh = n_ranges;
+      for (u32 i = 0; i < n_ranges; i++) shifted[i] = ranges[i];
+      for (u32 d = 0; d < ndim; d++) {
+        u32 begin = (u32)((u->extra >> (16 * d)) & 0xFFFFu);
+        if (begin == 0) continue;
+        u32 r_sid = u->src[1 + d];
+        for (u32 i = 0; i < n_sh; i++) {
+          if (shifted[i].scalar_id != r_sid) continue;
+          Term r = shifted[i].axis_uop;
+          shifted[i].axis_uop = uop_int_binary(UOP_IADD, r,
+                                               uop_const(DT_INT32, begin));
+          break;
+        }
+      }
+      return lift_scalar_value(ke, u->src[0], shifted, n_sh,
+                               out_buf, in_bufs, n_inputs);
+    }
+    case S_PAD: {
+      // src[0] = body, src[1..n] = ranges; extra packs (begin u8,
+      // src_dim u8) per axis (4 axes).  Lifter rewrites axis_uop to
+      // UOP_ISUB(original, begin) so body LOADs read the shifted
+      // source, AND wraps the body's value in UOP_IWHERE guarded
+      // against shifted_iter ∈ [0, src_dim).  Out-of-range reads
+      // yield UOP_INVALID (renderer emits 0 / reduce identity).
+      if (u->src_count < 2) return 0;
+      u32 ndim = (u32)u->src_count - 1;
+      if (ndim > 4) return 0;
+      LiftRangeMap shifted[MAX_DIM];
+      u32 n_sh = n_ranges;
+      for (u32 i = 0; i < n_ranges; i++) shifted[i] = ranges[i];
+      Term cond_acc = 0;
+      for (u32 d = 0; d < ndim; d++) {
+        u32 begin   = (u32)((u->extra >> (16 * d)) & 0xFFu);
+        u32 src_dim = (u32)((u->extra >> (16 * d + 8)) & 0xFFu);
+        u32 r_sid = u->src[1 + d];
+        for (u32 i = 0; i < n_sh; i++) {
+          if (shifted[i].scalar_id != r_sid) continue;
+          Term r = shifted[i].axis_uop;
+          Term shifted_iter = (begin == 0) ? r
+                            : uop_int_binary(UOP_ISUB, r,
+                                             uop_const(DT_INT32, begin));
+          shifted[i].axis_uop = shifted_iter;
+          // (shifted >= 0): for non-negative iters (our RANGE leaves
+          // are bounded [0, ext)), this is equivalent to (iter >= begin).
+          // We encode as (shifted >= 0) which equals (begin <= iter)
+          // -> simplify to (iter >= begin) -> we use UOP_ILT inverted.
+          // For simplicity emit (shifted < src_dim) AND (begin <= iter).
+          Term lo = uop_int_binary(UOP_ILT,
+                                   uop_const(DT_INT32, begin - 1),
+                                   r);  // begin-1 < iter == iter >= begin
+          if (begin == 0) lo = uop_const(DT_INT32, 1);
+          Term hi = uop_int_binary(UOP_ILT, shifted_iter,
+                                   uop_const(DT_INT32, src_dim));
+          Term axis_in = uop_int_binary(UOP_IAND, lo, hi);
+          cond_acc = (cond_acc == 0) ? axis_in
+                                     : uop_int_binary(UOP_IAND,
+                                                      cond_acc, axis_in);
+          break;
+        }
+      }
+      Term body = lift_scalar_value(ke, u->src[0], shifted, n_sh,
+                                    out_buf, in_bufs, n_inputs);
+      if (body == 0) return 0;
+      if (cond_acc == 0) return body;
+      return uop_iwhere(cond_acc, body, uop_invalid());
+    }
     case S_FLIP: {
       // src[0] = body, src[1..n] = LOOP ranges to potentially flip;
       // extra is a u8 bitmask, bit d set => replace iter with

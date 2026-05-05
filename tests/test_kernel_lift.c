@@ -213,6 +213,42 @@ int main(void) {
   CHECK(contains(buf_flip, "(15 - a0)"));
   CHECK(contains(buf_flip, "out[a0]"));
 
+  TEST_BEGIN("kernel-lift/shrink-shifts-iter");
+  // STORE(INDEX(OUT, r), SHRINK(LOAD(IN[r]), begin=4)) -- the load
+  // reads in0[r + 4], not in0[r].
+  kid = kernel_alloc();
+  ke = &KERNELS[kid];
+  ke->output_dtype = DT_FP32;
+  kernel_inputs_reserve(ke, 1);
+  ke->n_inputs = 1;
+  ke->input_dtypes[0] = DT_FP32;
+  ke->input_tids[0]   = 0;
+
+  u32 rs       = emit_range_axis(ke, 0 /*LOOP*/, 8);
+  u32 in_ps    = rangeify_emit_leaf(ke, S_DEFINE_PARAM, DT_FP32, 0);
+  u32 out_ds   = rangeify_emit_leaf(ke, S_DEFINE_OUTPUT, DT_FP32, 0);
+  u32 idx_in_s2[2] = { in_ps, rs };
+  u32 idx_in_sid   = rangeify_emit(ke, S_INDEX, DT_FP32, 2, idx_in_s2, 0);
+  u32 ld_s     = rangeify_emit(ke, S_LOAD, DT_FP32, 1, &idx_in_sid, 0);
+  // SHRINK with begin=4 (packed at bits 0..15 of extra).
+  u32 shr_s[2] = { ld_s, rs };
+  u32 shr      = rangeify_emit(ke, S_SHRINK, DT_FP32, 2, shr_s, /*extra=*/4);
+  u32 idx_out_s2[2] = { out_ds, rs };
+  u32 idx_out_sid   = rangeify_emit(ke, S_INDEX, DT_FP32, 2, idx_out_s2, 0);
+  u32 st_s2[2] = { idx_out_sid, shr };
+  u32 st_sid   = rangeify_emit(ke, S_STORE, DT_FP32, 2, st_s2, 0);
+  u32 buf_s2[2] = { st_sid, rs };
+  rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, buf_s2, 0);
+
+  KernelUopLift lift_s = {0};
+  CHECK_EQ(kernel_lift_to_uop(ke, &lift_s), 1);
+  char buf_shr[2048];
+  fp = fmemopen(buf_shr, sizeof(buf_shr), "w");
+  cg_render_uop_kernel(lift_s.store_root, "k_shrink", lift_s.out_buf,
+                       lift_s.in_bufs, lift_s.n_inputs, fp);
+  fclose(fp);
+  CHECK(contains(buf_shr, "(a0 + 4)"));
+
   thvm_free();
   TEST_REPORT();
 }
