@@ -889,6 +889,17 @@ fn int tile_validate(KernelEntry const *ke) {
     return 0;
   }
   TileUop const *body = &ke->tile_uops[body_id];
+  // Phase D3: TILE_BLOCK preamble for reduce-broadcast lowering.
+  // Block contract: 5 entries -- alloc / reduce / barrier / load /
+  // scalar_body.  Validator just checks the structural shape; the
+  // renderer (Phase F) will type-check each entry's contents.
+  if (body->op == TILE_BLOCK) {
+    if (body->src_count == 0) return 0;
+    for (u8 s = 0; s < body->src_count; s++) {
+      if (!tile_id_ok(ke, body->src[s])) return 0;
+    }
+    return 1;
+  }
   if (body->op == TILE_REDUCE) {
     reduce_id = body_id;
     if (body->src_count != 1) {
@@ -1225,6 +1236,40 @@ fn int tile_build_from_scalar(KernelEntry *ke) {
   }
   if (ke->scalar_uops[root].src_count == 0) {
     return 0;
+  }
+
+  // Phase D3: opt-in path -- when THVM_TILE_REDUCE_BROADCAST=1 and
+  // the analyzer matches, build the explicit reduce-broadcast shape
+  // (TILE_BLOCK preamble) instead of the default wrap.  Renderer
+  // doesn't yet read TILE_BLOCK (Phase F work), so this stays opt-in
+  // until F lands.  Gated env-var lets D3 ship and be exercised by
+  // unit tests without breaking the existing dispatch path.
+  if (getenv("THVM_TILE_REDUCE_BROADCAST")) {
+    u32 reduce_id = tile_analyze_reduce_broadcast(ke);
+    if (reduce_id != 0) {
+      tile_free(ke);
+      u32 store = tile_lower_reduce_broadcast(ke, reduce_id, /*groups=*/32);
+      if (store != 0) {
+        u32 axes[MAX_AXES];
+        u32 n_axes = tile_emit_axes_from_kernel_axes(ke, axes, MAX_AXES);
+        if (n_axes == 0) n_axes = tile_emit_axes_from_scalar_root(ke, root,
+                                                                  axes,
+                                                                  MAX_AXES);
+        if (n_axes != 0) {
+          u32 src[TILE_MAX_SRC] = {store};
+          for (u32 i = 0; i < n_axes; i++) src[1 + i] = axes[i];
+          ke->tile_root = tile_emit(ke, TILE_LOOP_NEST,
+                                    ke->scalar_uops[root].dtype,
+                                    (u8)(1 + n_axes), src, 0);
+          if (tile_validate(ke)) {
+            ke->tile_axes_version = ke->axes != NULL ? ke->axes->version : 0;
+            return 1;
+          }
+        }
+        tile_free(ke);
+      }
+      // Fall through to default lowering on any failure.
+    }
   }
   u32 scalar_store = ke->scalar_uops[root].src[0];
   if (scalar_store == 0 || scalar_store >= ke->n_scalar_uops
