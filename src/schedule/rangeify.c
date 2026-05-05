@@ -497,6 +497,8 @@ static int scalar_binary_const_side(KernelEntry const *ke,
   return 0;
 }
 
+static u32 scalar_ref_extent(KernelEntry const *ke, u32 ref);
+
 static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
   i64 av = 0;
   i64 bv = 0;
@@ -621,10 +623,30 @@ static u32 emit_ibinop(KernelEntry *ke, u8 op, u32 a, u32 b) {
     if (bc && bv == 1) {
       return emit_iconst(ke, 0);
     }
+    // Range-bound-aware: if `a` is a S_RANGE with extent <= bv, then
+    // a % bv == a (the iter never reaches bv).  Mirrors the fold in
+    // uop/index_simplify.c so the new B3 path and the legacy
+    // rangeify path get identical simplification.
+    if (bc && bv > 0 && a != 0 && a < ke->n_scalar_uops
+        && ke->scalar_uops[a].op == S_RANGE) {
+      u32 ext = scalar_ref_extent(ke, a);
+      if (ext != 0 && (i64)ext <= bv) return a;
+    }
   }
 
-  if (op == S_ILT && a == b) {
-    return emit_iconst(ke, 0);
+  if (op == S_ILT) {
+    if (a == b) {
+      return emit_iconst(ke, 0);
+    }
+    // Range-bound-aware folds for ILT:
+    //   - S_RANGE.extent <= bv  -> always true  (a < bv when a < extent <= bv)
+    //   - bv <= 0               -> always false (a is non-negative iter)
+    if (bc && a != 0 && a < ke->n_scalar_uops
+        && ke->scalar_uops[a].op == S_RANGE) {
+      u32 ext = scalar_ref_extent(ke, a);
+      if (ext != 0 && bv > 0 && (i64)ext <= bv) return emit_iconst(ke, 1);
+      if (bv <= 0)                              return emit_iconst(ke, 0);
+    }
   }
 
   if (op == S_IAND) {

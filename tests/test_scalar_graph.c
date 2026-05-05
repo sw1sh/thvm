@@ -199,13 +199,19 @@ int main(void) {
   CHECK_EQ(ke->scalar_uops[ke->scalar_uops[mi_flat].src[0]].op, S_IAND);
   CHECK_EQ(ke->scalar_uops[mi_flat].src[1], mi_yes);
   CHECK_EQ(ke->scalar_uops[mi_flat].src[2], mi_no);
+  // emit_pad_bounds_mask: with the range-bound-aware fold in
+  // emit_ibinop (Phase B2), a RANGE-extent-le-bound check folds to 1.
+  // mi_mask has extent 4; (mi_mask < 0 + 4) is statically true.
   u32 mi_hi_only = emit_pad_bounds_mask(ke, mi_mask, 0, 4);
-  CHECK_EQ(ke->scalar_uops[mi_hi_only].op, S_ILT);
-  CHECK_EQ(ke->scalar_uops[mi_hi_only].src[0], mi_mask);
+  CHECK_EQ(ke->scalar_uops[mi_hi_only].op, S_ICONST);
+  CHECK_EQ((i64)ke->scalar_uops[mi_hi_only].extra, 1);
+  // begin=1, src_dim=3 -> ILT(mask, 4) AND (1 - ILT(mask, 1)).
+  // ILT(mask, 4) folds to 1 (extent 4 <= 4), 1 AND x = x, so the
+  // remaining shape is the lower-bound test (1 - ILT(mask, 1)) which
+  // doesn't fold further.
   u32 mi_bounded = emit_pad_bounds_mask(ke, mi_mask, 1, 3);
-  CHECK_EQ(ke->scalar_uops[mi_bounded].op, S_IAND);
-  CHECK_EQ(ke->scalar_uops[ke->scalar_uops[mi_bounded].src[0]].op, S_ILT);
-  CHECK_EQ(ke->scalar_uops[ke->scalar_uops[mi_bounded].src[1]].op, S_ISUB);
+  CHECK_EQ(ke->scalar_uops[mi_bounded].op, S_ISUB);
+  CHECK_EQ(ke->scalar_uops[ke->scalar_uops[mi_bounded].src[1]].op, S_ILT);
   rangeify_free(ke);
 
   TEST_BEGIN("scalar-graph/integer-expression-folds");
