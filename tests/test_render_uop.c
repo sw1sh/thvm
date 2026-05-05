@@ -208,6 +208,40 @@ int main(void) {
   fclose(fp);
   CHECK(contains(bufun2, "#pragma unroll\n"));
 
+  TEST_BEGIN("render-uop/local-bind-via-opt-emits-tt");
+  // OPT(RANGE(LOOP, 64), LOCAL, 0) -> `uint a0 = tt;` (no for-loop).
+  Term r_lc  = uop_range(0, 0 /*LOOP*/, 64);
+  Term lc_op = uop_opt(r_lc, UOP_OPT_LOCAL, 0);
+  Term st_lc = uop_store(out, lc_op, one);
+  char buflc[2048];
+  fp = fmemopen(buflc, sizeof(buflc), "w");
+  cg_render_uop_kernel(st_lc, "k_local", out, NULL, 0, fp);
+  fclose(fp);
+  CHECK(contains(buflc, "uint a0 = tt"));
+  // No for-loop wrapping the local-bound axis.
+  CHECK(!contains(buflc, "for (uint a0 ="));
+
+  TEST_BEGIN("render-uop/upcast-emits-pragma-unroll");
+  Term r_uc  = uop_range(1, 0 /*LOOP*/, 4);
+  Term uc_op = uop_opt(r_uc, UOP_OPT_UPCAST, 4);
+  Term st_uc = uop_store(out, uc_op, one);
+  char bufuc[2048];
+  fp = fmemopen(bufuc, sizeof(bufuc), "w");
+  cg_render_uop_kernel(st_uc, "k_upcast", out, NULL, 0, fp);
+  fclose(fp);
+  CHECK(contains(bufuc, "#pragma unroll(4)"));
+  CHECK(contains(bufuc, "for (uint a1 = 0; a1 < 4"));
+
+  TEST_BEGIN("render-uop/legacy-kax-global-emits-tg");
+  // Direct axis_type=5 (legacy KAX_GLOBAL) without OPT also emits tg.
+  Term r_gl  = uop_range(2, 5 /*GLOBAL*/, 32);
+  Term st_gl = uop_store(out, r_gl, one);
+  char bufgl[2048];
+  fp = fmemopen(bufgl, sizeof(bufgl), "w");
+  cg_render_uop_kernel(st_gl, "k_global", out, NULL, 0, fp);
+  fclose(fp);
+  CHECK(contains(bufgl, "uint a2 = tg"));
+
   TEST_BEGIN("render-uop/reduce-axis-marked");
   // RANGE with axis_type=1 (REDUCE) emits /*reduce*/ comment.
   Term r_red   = uop_range(2, 1 /*REDUCE*/, 16);

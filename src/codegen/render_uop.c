@@ -280,17 +280,39 @@ static void rmu_collect_ranges_with_opts(Term t, Term *ranges,
                          0, 0);
 }
 
+// Returns 1 if `kind`/`axis_type` indicates the axis binds directly to
+// a thread/group position (no for-loop emitted).  These paths emit a
+// `uint aN = tt;` or `uint aN = tg;` declaration instead.
+static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
+  return (opt_kind == UOP_OPT_LOCAL)
+      || axis_type == 4  /* legacy KAX_LOCAL  */
+      || axis_type == 5  /* legacy KAX_GLOBAL */;
+}
+
 // Emit a for-loop opener for a UOP_RANGE leaf at the given depth.
-// axis_type 0 = LOOP, 1 = REDUCE (uses /*reduce*/ comment).  Other
-// types (LOCAL/GLOBAL/UNROLL/UPCAST/GROUP_REDUCE) bind to thread or
-// group positions and don't open a sequential loop -- handled later.
-static void rmu_emit_range_open(Term r, FILE *fp, u32 depth) {
+// `opt_kind` / `opt_factor` are the OPT annotation (0 if none).  Three
+// patterns:
+//   LOCAL  -> `uint aN = tt; /* local */`   (thread-position bind)
+//   GLOBAL -> `uint aN = tg; /* global */`  (group-position bind)
+//   else   -> `for (uint aN = 0; aN < ext; aN++)` with optional /*reduce*/
+//             marker when axis_type == REDUCE.
+static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
+                                u32 opt_kind) {
   if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return;
   u64 loc = term_val(r);
   u32 axis_id   = term_val(heap_read(loc + 0));
   u32 axis_type = term_val(heap_read(loc + 1));
   u32 extent    = term_val(heap_read(loc + 2));
   for (u32 i = 0; i < depth; i++) fputs("  ", fp);
+  // LOCAL via OPT annotation OR via axis_type == 4 (legacy KAX_LOCAL).
+  if (opt_kind == UOP_OPT_LOCAL || axis_type == 4) {
+    fprintf(fp, "uint a%u = tt; /* local ext=%u */\n", axis_id, extent);
+    return;
+  }
+  if (axis_type == 5 /* legacy KAX_GLOBAL */) {
+    fprintf(fp, "uint a%u = tg; /* global ext=%u */\n", axis_id, extent);
+    return;
+  }
   if (axis_type == 1 /*REDUCE*/) {
     fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) /*reduce*/ {\n",
             axis_id, axis_id, extent, axis_id);
@@ -318,26 +340,40 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   rmu_collect_ranges_with_opts(addr,  ranges, opt_kinds, opt_factors, &n_ranges);
   rmu_collect_ranges_with_opts(value, ranges, opt_kinds, opt_factors, &n_ranges);
 
+  // Track the body indent and which ranges produced an open brace
+  // (thread-bound axes don't, so we mustn't emit a matching close).
+  u32 body_depth = depth;
+  int needs_close[MAX_DIM] = {0};
   for (u32 i = 0; i < n_ranges; i++) {
-    if (opt_kinds[i] == UOP_OPT_UNROLL) {
-      for (u32 d = 0; d < depth + i; d++) fputs("  ", fp);
+    Term r = ranges[i];
+    u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
+                  ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
+    int threadbound = rmu_axis_is_threadbound(opt_kinds[i], axis_type);
+    if (opt_kinds[i] == UOP_OPT_UNROLL || opt_kinds[i] == UOP_OPT_UPCAST) {
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
       if (opt_factors[i] > 0) {
         fprintf(fp, "#pragma unroll(%u)\n", opt_factors[i]);
       } else {
         fputs("#pragma unroll\n", fp);
       }
     }
-    rmu_emit_range_open(ranges[i], fp, depth + i);
+    rmu_emit_range_open(r, fp, body_depth, opt_kinds[i]);
+    if (!threadbound) {
+      needs_close[i] = 1;
+      body_depth++;
+    }
   }
-  for (u32 i = 0; i < depth + n_ranges; i++) fputs("  ", fp);
+  for (u32 i = 0; i < body_depth; i++) fputs("  ", fp);
   fprintf(fp, "buf%llu[", (unsigned long long)term_val(buf));
   rmu_emit_term(addr, fp);
   fputs("] = ", fp);
   rmu_emit_term(value, fp);
   fputs(";\n", fp);
-  // Close braces (innermost first).
-  for (u32 i = n_ranges; i > 0; i--) {
-    for (u32 d = 0; d < depth + i - 1; d++) fputs("  ", fp);
+  // Close braces (innermost first), only for ranges that opened one.
+  for (i32 i = (i32)n_ranges - 1; i >= 0; i--) {
+    if (!needs_close[i]) continue;
+    body_depth--;
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     fputs("}\n", fp);
   }
 }
