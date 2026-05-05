@@ -92,15 +92,16 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
   for (size_t i = 0; i < total; i++) {
     h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
   }
-  // Fold KernelAxes.applied_opts[] into the key so two kernels with
-  // identical KProgOp[] but different opts get distinct .dylibs.
-  // axis_types[] / full_shape[] are derived from applied_opts +
-  // output_shape so applied_opts alone is sufficient.
-  if (ke->axes != NULL) {
-    KernelAxes const *ax = ke->axes;
-    h ^= (u64)ax->n_applied; h *= 0x100000001b3ULL;
-    for (u32 i = 0; i < ax->n_applied; i++) {
-      KOpt o = ax->applied_opts[i];
+  // Fold applied_opts into the key via tile_anno facade so two
+  // kernels with identical KProgOp[] but different opts get
+  // distinct .dylibs.  axis_types[] / full_shape[] are derived from
+  // applied_opts + output_shape so applied_opts alone is sufficient.
+  {
+    u32 n_app = tile_anno_applied_opts_count(ke);
+    KOpt const *opts = tile_anno_applied_opts(ke);
+    h ^= (u64)n_app; h *= 0x100000001b3ULL;
+    for (u32 i = 0; opts != NULL && i < n_app; i++) {
+      KOpt o = opts[i];
       h ^= (u64)o.op;   h *= 0x100000001b3ULL;
       h ^= (u64)o.axis; h *= 0x100000001b3ULL;
       h ^= (u64)o.arg;  h *= 0x100000001b3ULL;
