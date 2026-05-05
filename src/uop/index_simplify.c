@@ -67,6 +67,36 @@ static int uop_term_strictly_below(Term y, i64 bound) {
   return 0;
 }
 
+// Conservative non-negative estimator over UOp index expressions.
+// Returns 1 only when the value is provably >= 0 by structure.
+// Mirrors scalar/simplify.c's simplify_value_nonneg.
+static int uop_term_nonneg(Term t) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_RANGE:  return 1;  // iters in [0, extent)
+    case UOP_CONST:  {
+      i64 v;
+      return uop_iconst_value(t, &v) && v >= 0;
+    }
+    case UOP_IADD:
+    case UOP_IMUL: {
+      Term a = heap_read(term_val(t) + 0);
+      Term b = heap_read(term_val(t) + 1);
+      return uop_term_nonneg(a) && uop_term_nonneg(b);
+    }
+    case UOP_IDIV:
+    case UOP_IMOD: {
+      Term a = heap_read(term_val(t) + 0);
+      Term b = heap_read(term_val(t) + 1);
+      i64 dv;
+      if (!uop_iconst_value(b, &dv) || dv <= 0) return 0;
+      return uop_term_nonneg(a);
+    }
+    default: return 0;
+  }
+}
+
 // Recognise `(c * x) + y` shape on a numerator.  Returns 1 on match;
 // *c_out, *x_out, *y_out filled in.  *y_out may be 0 if the shape is
 // the simpler `c * x` (no addend).  Either operand of the IADD may
@@ -268,6 +298,29 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           i64 k = kc / bv;
           Term inner_div = uop_int_binary(UOP_IDIV, mod_a, uop_iconst(bv));
           return uop_int_binary(UOP_IMOD, inner_div, uop_iconst(k));
+        }
+      }
+      // add-div-split: (x + c) // d -> (x + c%d) // d + c/d when c >= d
+      // and x >= 0.  Hoists the integer part of c so a downstream
+      // const-folder can merge it with sibling constants.  Mirrors
+      // tinygrad's divandmod.py:112-113 / scalar simplify rule
+      // rule_add_div_split.
+      if (b_const && bv > 0
+          && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IADD) {
+        Term lhs = heap_read(term_val(a) + 0);
+        Term rhs = heap_read(term_val(a) + 1);
+        Term var_t = 0; i64 c = 0;
+        if (uop_iconst_value(rhs, &c) && c >= bv && uop_term_nonneg(lhs)) {
+          var_t = lhs;
+        } else if (uop_iconst_value(lhs, &c) && c >= bv && uop_term_nonneg(rhs)) {
+          var_t = rhs;
+        }
+        if (var_t != 0) {
+          i64 c_mod_d = c % bv;
+          i64 c_div_d = c / bv;
+          Term inner = uop_int_binary(UOP_IADD, var_t, uop_iconst(c_mod_d));
+          Term inner_div = uop_int_binary(UOP_IDIV, inner, uop_iconst(bv));
+          return uop_int_binary(UOP_IADD, inner_div, uop_iconst(c_div_d));
         }
       }
       break;

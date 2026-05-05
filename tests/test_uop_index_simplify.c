@@ -300,6 +300,26 @@ int main(void) {
   // Make sure it's the OUTER mod, not folded into r2.
   CHECK_EQ(heap_read(term_val(mod_7_2) + 0), mod_7);
 
+  TEST_BEGIN("simplify/add-div-split");
+  // (r + 8) // 3 -> (r + 2) // 3 + 2 (since 8 = 2*3 + 2, and r >= 0).
+  // r is RANGE so non-negative.  c=8, d=3, c/d=2, c%d=2.
+  Term split = uop_int_binary(UOP_IDIV,
+                  uop_int_binary(UOP_IADD, r, uop_const(DT_INT32, 8)),
+                  uop_const(DT_INT32, 3));
+  // Expected outer shape: IADD(IDIV(...), 2).
+  CHECK_EQ(term_ext(split), UOP_IADD);
+  Term split_lhs = heap_read(term_val(split) + 0);
+  Term split_rhs = heap_read(term_val(split) + 1);
+  CHECK_EQ(term_ext(split_lhs), UOP_IDIV);
+  CHECK_EQ(term_ext(split_rhs), UOP_CONST);
+
+  TEST_BEGIN("simplify/add-div-split-skips-c-less-than-d");
+  // (r + 2) // 3 -- c < d, doesn't split.
+  Term no_split = uop_int_binary(UOP_IDIV,
+                     uop_int_binary(UOP_IADD, r, two),
+                     uop_const(DT_INT32, 3));
+  CHECK_EQ(term_ext(no_split), UOP_IDIV);  // unchanged
+
   TEST_BEGIN("simplify/divmod-affine-roundtrip-end-to-end");
   // Resolve a 1D->1D identity-via-flat reshape: ndim=2, dims=[2,3].
   // resolve builds: flat = i0*3 + i1; in_iters[0] = flat / 3,
