@@ -66,11 +66,16 @@ used to carry:
   STORE(buf, addr, REDUCE(src, kind, axis)) shape hoists an
   accumulator outside the reduce loop.  REDUCE_SUM uses 0.0f init
   + `+` combine; REDUCE_MAX uses -INFINITY init + `fmax` combine.
+- **F2 stub** (`cf8f97f`): structural pattern-match for
+  STORE(C, _, OPT(REDUCE(MUL(INDEX_E(A,_), INDEX_E(B,_)), SUM, k),
+  TC, _)) -- the canonical matmul shape.  Emits a `/* TC tensor-
+  core matmul */` marker prefix, falls through to F1e's accumulator
+  emission.  F2b is the seam where the simdgroup_matrix MSL template
+  swaps in via the same shape detection.
 
-Test suite: 274/274 binary tests still pass; ~200 new assertions
-across the four new test files (`test_uop_buffer`,
-`test_uop_store_after`, `test_uop_opt`, `test_render_uop` --
-test_render_uop alone now has 51 cases covering every shape).
+Test suite: 274/274 binary tests still pass; ~210 new assertions
+across the four new test files (`test_uop_buffer` 31, `test_uop_
+store_after` 29, `test_uop_opt` 26, `test_render_uop` 54).
 
 What's deferred from the previous in-tree TileUop[] work:
 
