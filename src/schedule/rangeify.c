@@ -898,6 +898,14 @@ static u32 emit_ref_with_extent(KernelEntry *ke, u32 ref, u32 extent,
   return emit_ibinop(ke, S_IMOD, ref, c);
 }
 
+// Phase B3: file-scope range map populated by rangeify_try_lower_elementwise.
+// emit_input_load_for_use consults it to translate uop_refs into scalar
+// slot ids via uop_to_scalar.  Goes away in Phase C with the rest of
+// rangeify.  Only valid during one rangeify_try_lower_elementwise call;
+// cleared at the start of each invocation.
+static UopRangeMap RANGEIFY_UOP_RANGE_MAP[2 * MAX_DIM];
+static u32         RANGEIFY_UOP_RANGE_MAP_LEN;
+
 static u32 emit_flat_from_rngs(KernelEntry *ke, RngsCtx const *r,
                                u32 const *extents) {
   u32 acc = 0;
@@ -932,19 +940,55 @@ fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
   u32 param  = rangeify_emit_leaf(ke, S_DEFINE_PARAM, dtype, (u64)slot);
   u32 acc    = 0;
   if (r->ndim == v->shape.ndim) {
-    acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
+    // Phase B3: UOp-driven address build.  When all uop_refs are
+    // populated and translation succeeds, the address comes from
+    // uop_refs[d] * stride[d] + offset assembled via the simplifier-
+    // aware uop_int_binary, then translated to scalar via the file-
+    // scope range map.  The legacy scalar emit below stays as the
+    // fallback for cases where uop_refs aren't populated or
+    // translation fails.
+    Term acc_uop = (in_off != 0) ? uop_const(DT_INT32, in_off) : 0;
+    int  uop_ok  = 1;
     for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
-      if (v->strides[d] < 0) return 0;
-      if (v->strides[d] == 0) continue;
-      u32 t = r->refs[d];
-      if (t == 0) return 0;
-      if (v->strides[d] != 1) {
-        u32 c = emit_iconst(ke, (i64)v->strides[d]);
-        t = emit_ibinop(ke, S_IMUL, t, c);
-      }
-      acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+      if (r->uop_refs[d] == 0) { uop_ok = 0; break; }
     }
-    if (acc == 0) acc = emit_iconst(ke, 0);
+    if (uop_ok) {
+      for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
+        if (v->strides[d] < 0) { uop_ok = 0; break; }
+        if (v->strides[d] == 0) continue;
+        Term tu = r->uop_refs[d];
+        if (v->strides[d] != 1) {
+          tu = uop_int_binary(UOP_IMUL, tu,
+                              uop_const(DT_INT32, (u32)v->strides[d]));
+        }
+        acc_uop = (acc_uop == 0) ? tu
+                                 : uop_int_binary(UOP_IADD, acc_uop, tu);
+      }
+      if (uop_ok) {
+        if (acc_uop == 0) acc_uop = uop_const(DT_INT32, 0);
+        u32 acc_via_uop = uop_to_scalar(ke, acc_uop, RANGEIFY_UOP_RANGE_MAP,
+                                        RANGEIFY_UOP_RANGE_MAP_LEN);
+        if (acc_via_uop != 0) acc = acc_via_uop;
+      }
+    }
+    if (acc == 0) {
+      // Legacy scalar emit -- runs when uop translation isn't usable
+      // (uop_refs missing, range map miss, etc.).  Will be deleted
+      // once all callers populate uop_refs end-to-end.
+      acc = in_off ? emit_iconst(ke, (i64)in_off) : 0;
+      for (u32 d = 0; d < r->ndim && d < v->shape.ndim; d++) {
+        if (v->strides[d] < 0) return 0;
+        if (v->strides[d] == 0) continue;
+        u32 t = r->refs[d];
+        if (t == 0) return 0;
+        if (v->strides[d] != 1) {
+          u32 c = emit_iconst(ke, (i64)v->strides[d]);
+          t = emit_ibinop(ke, S_IMUL, t, c);
+        }
+        acc = (acc == 0) ? t : emit_ibinop(ke, S_IADD, acc, t);
+      }
+      if (acc == 0) acc = emit_iconst(ke, 0);
+    }
   } else if (r->ndim > 0 && r->ndim <= MAX_DIM
              && v->shape.ndim > 0 && v->shape.ndim <= MAX_DIM) {
     u32 extents[MAX_DIM];
@@ -973,9 +1017,19 @@ fn u32 emit_input_load_for_use(KernelEntry *ke, u32 slot, RngsCtx const *r,
   u32 src[2] = {param, acc};
   u32 idx    = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
   u32 load   = rangeify_emit_unary(ke, S_LOAD, dtype, idx);
-  if (r->valid_mask != 0) {
+  // Phase B3: prefer the UOp-derived valid mask when populated; falls
+  // back to the legacy scalar mask.  Same simplifier-fold quality on
+  // both sides (post-90f00a1) so this is a structural swap, not a
+  // correctness change.
+  u32 mask = 0;
+  if (r->uop_valid_mask != 0) {
+    mask = uop_to_scalar(ke, r->uop_valid_mask, RANGEIFY_UOP_RANGE_MAP,
+                         RANGEIFY_UOP_RANGE_MAP_LEN);
+  }
+  if (mask == 0) mask = r->valid_mask;
+  if (mask != 0) {
     u32 zero = emit_iconst(ke, 0);
-    load = emit_iwhere(ke, dtype, r->valid_mask, load, zero);
+    load = emit_iwhere(ke, dtype, mask, load, zero);
   }
   return load;
 }
@@ -1903,10 +1957,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // can carry uop_refs in parallel with the scalar refs.
   Term uop_loop_ranges[MAX_DIM] = {0};
   row_major_strides(os->dims, os->ndim, loop_strides);
+  RANGEIFY_UOP_RANGE_MAP_LEN = 0;
   for (u32 d = 0; d < os->ndim; d++) {
     u64 extra = ((u64)S_AXIS_LOOP << 32) | (u64)os->dims[d];
     loop_ranges[d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
     uop_loop_ranges[d] = uop_range(d, S_AXIS_LOOP, os->dims[d]);
+    RANGEIFY_UOP_RANGE_MAP[RANGEIFY_UOP_RANGE_MAP_LEN].axis_uop  = uop_loop_ranges[d];
+    RANGEIFY_UOP_RANGE_MAP[RANGEIFY_UOP_RANGE_MAP_LEN].scalar_id = loop_ranges[d];
+    RANGEIFY_UOP_RANGE_MAP_LEN++;
   }
   // REDUCE range (Phase C): an additional inner-most range with
   // axis_type=REDUCE.  Only present when the kernel ends in
