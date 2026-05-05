@@ -88,12 +88,17 @@ flickering-watching-gem.md`, the foundation for the 3-IR
   TILE_INPUT_BUF (global).  tile_reject_reason diagnostic
   pinpoints the first structural failure in a tile_uops graph.
   Foundation for Phase F's render_metal.c rewrite.
-- **Phase E structural mutator** (`09af9da`):
+- **Phase E structural mutator** (`09af9da`, `92f66f9`,
+  `402058e`, `efa381a`, `0218ceb`, `0a3defa`):
   tile_anno_apply_split as the canonical "split an axis" primitive
   through the tile_anno facade.  Today routes through KOpt+
   kernel_apply_opt; Phase F flip turns it into direct TILE_AXIS
-  array surgery.  Sets up callsite migration for the autotune
-  split proposers.
+  array surgery.  tile_anno_axis_insert is the structural primitive
+  axes_apply_opt's split logic reduces to.  tile_anno_record_opt
+  for KOP_TC; tile_anno_axes_reset for autotune between-candidate
+  baseline.  autotune.c LOCAL+GLOBAL pairing migrated to the
+  facade.  Counters (rangeify_uop_path_hits +
+  rangeify_uop_fallback_hits) instrument the address-build paths.
 - **Phase E writer-side** (`9b401ea`, `9290e5d`, `138eb57`,
   `0306038`, `8b48266`):
   `tile_anno_apply_opt(ke, opt)` is the canonical opt-application
