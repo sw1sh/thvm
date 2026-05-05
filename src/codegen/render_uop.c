@@ -193,12 +193,20 @@ static void rmu_emit_term(Term t, FILE *fp) {
 }
 
 // Walk a term tree collecting unique UOP_RANGE leaves in encounter
-// order.  Used by rmu_emit_store to wrap the store body in for-loops
-// over every range that appears in the addr / value expressions.
+// order, plus optional UOP_OPT annotations attached to each range.
+// Used by rmu_emit_store to wrap the store body in for-loops over
+// every range that appears in the addr / value expressions.
 //
 // Up to MAX_DIM ranges per kernel; duplicates skipped (same axis_id
-// only emits one for-loop).
-static void rmu_collect_ranges(Term t, Term *ranges, u32 *n_out) {
+// only emits one for-loop).  When a range is encountered via a
+// wrapping OPT(range, kind, factor) we record (kind, factor) into
+// `opt_kinds[]` / `opt_factors[]` so emit_range_open can fire the
+// matching pragma (UNROLL/UPCAST).  No-OPT ranges record kind=0 /
+// factor=0 (UNROLL with factor=0 is a no-op).
+static void rmu_collect_ranges_rec(Term t, Term *ranges,
+                                   u32 *opt_kinds, u32 *opt_factors,
+                                   u32 *n_out,
+                                   u32 inherit_kind, u32 inherit_factor) {
   if (term_tag(t) != TAG_UOP) return;
   if (*n_out >= MAX_DIM) return;
   u32 op = term_ext(t);
@@ -209,39 +217,67 @@ static void rmu_collect_ranges(Term t, Term *ranges, u32 *n_out) {
       u32 existing = term_val(heap_read(term_val(ranges[i]) + 0));
       if (existing == axis_id) return;
     }
-    ranges[*n_out] = t;
+    ranges     [*n_out] = t;
+    opt_kinds  [*n_out] = inherit_kind;
+    opt_factors[*n_out] = inherit_factor;
     (*n_out)++;
     return;
   }
-  // Recurse into children.  Heap layout depends on opcode; for the
-  // shapes we care about (binary / unary / ternary / index_e / store),
-  // children live at slot 0 / 0..1 / 0..2.
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
-      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
-      rmu_collect_ranges(heap_read(loc + 1), ranges, n_out);
+      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
+                             opt_factors, n_out, 0, 0);
+      rmu_collect_ranges_rec(heap_read(loc + 1), ranges, opt_kinds,
+                             opt_factors, n_out, 0, 0);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2:  case UOP_SQRT:
-      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
+      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
+                             opt_factors, n_out, 0, 0);
       return;
     case UOP_IWHERE:
-      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
-      rmu_collect_ranges(heap_read(loc + 1), ranges, n_out);
-      rmu_collect_ranges(heap_read(loc + 2), ranges, n_out);
+      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
+                             opt_factors, n_out, 0, 0);
+      rmu_collect_ranges_rec(heap_read(loc + 1), ranges, opt_kinds,
+                             opt_factors, n_out, 0, 0);
+      rmu_collect_ranges_rec(heap_read(loc + 2), ranges, opt_kinds,
+                             opt_factors, n_out, 0, 0);
       return;
-    case UOP_OPT:
-      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
+    case UOP_OPT: {
+      // OPT(target, kind, factor): inherit annotation into the
+      // recursed target's collection.  Stacked OPTs accumulate the
+      // outermost kind (last-wins for now).
+      u32 kind   = term_val(heap_read(loc + 1));
+      u32 factor = term_val(heap_read(loc + 2));
+      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
+                             opt_factors, n_out, kind, factor);
       return;
+    }
     case UOP_CAST: case UOP_BITCAST:
-      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
+      rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
+                             opt_factors, n_out, 0, 0);
       return;
     default:
       return;
   }
+}
+
+static void rmu_collect_ranges(Term t, Term *ranges, u32 *n_out) {
+  u32 dummy_kinds[MAX_DIM]   = {0};
+  u32 dummy_factors[MAX_DIM] = {0};
+  rmu_collect_ranges_rec(t, ranges, dummy_kinds, dummy_factors, n_out,
+                         0, 0);
+}
+
+static void rmu_collect_ranges_with_opts(Term t, Term *ranges,
+                                         u32 *opt_kinds,
+                                         u32 *opt_factors,
+                                         u32 *n_out) {
+  rmu_collect_ranges_rec(t, ranges, opt_kinds, opt_factors, n_out,
+                         0, 0);
 }
 
 // Emit a for-loop opener for a UOP_RANGE leaf at the given depth.
@@ -265,8 +301,9 @@ static void rmu_emit_range_open(Term r, FILE *fp, u32 depth) {
 }
 
 // Emit a single UOP_STORE statement, wrapping with for-loops over
-// every UOP_RANGE that appears in the addr/value tree.  The store
-// body lives at depth + n_ranges.
+// every UOP_RANGE that appears in the addr/value tree.  When a range
+// was wrapped in UOP_OPT(_, UNROLL, factor), emit `#pragma unroll(N)`
+// above the for-loop.  UPCAST/LOCAL/etc. handling lands in F1d+.
 static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return;
   u64 loc = term_val(store);
@@ -275,11 +312,21 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   Term value = heap_read(loc + 2);
 
   Term ranges[MAX_DIM];
+  u32  opt_kinds[MAX_DIM]   = {0};
+  u32  opt_factors[MAX_DIM] = {0};
   u32  n_ranges = 0;
-  rmu_collect_ranges(addr,  ranges, &n_ranges);
-  rmu_collect_ranges(value, ranges, &n_ranges);
+  rmu_collect_ranges_with_opts(addr,  ranges, opt_kinds, opt_factors, &n_ranges);
+  rmu_collect_ranges_with_opts(value, ranges, opt_kinds, opt_factors, &n_ranges);
 
   for (u32 i = 0; i < n_ranges; i++) {
+    if (opt_kinds[i] == UOP_OPT_UNROLL) {
+      for (u32 d = 0; d < depth + i; d++) fputs("  ", fp);
+      if (opt_factors[i] > 0) {
+        fprintf(fp, "#pragma unroll(%u)\n", opt_factors[i]);
+      } else {
+        fputs("#pragma unroll\n", fp);
+      }
+    }
     rmu_emit_range_open(ranges[i], fp, depth + i);
   }
   for (u32 i = 0; i < depth + n_ranges; i++) fputs("  ", fp);

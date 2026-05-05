@@ -184,6 +184,30 @@ int main(void) {
   CHECK(contains(bufrw2, "for (uint a0 = 0; a0 < 4"));
   CHECK(contains(bufrw2, "for (uint a1 = 0; a1 < 8"));
 
+  TEST_BEGIN("render-uop/unroll-pragma-on-opt-annotated-range");
+  // STORE(out, OPT(RANGE(0, REDUCE, 16), UNROLL, 4), CONST) emits
+  // `#pragma unroll(4)` above the corresponding for-loop.
+  Term r_un  = uop_range(0, 1 /*REDUCE*/, 16);
+  Term r_op  = uop_opt(r_un, UOP_OPT_UNROLL, 4);
+  Term st_un_loop = uop_store(out, r_op, one);
+  char bufun[2048];
+  fp = fmemopen(bufun, sizeof(bufun), "w");
+  cg_render_uop_kernel(st_un_loop, "k_unroll", out, NULL, 0, fp);
+  fclose(fp);
+  CHECK(contains(bufun, "#pragma unroll(4)"));
+  CHECK(contains(bufun, "for (uint a0 = 0; a0 < 16"));
+
+  TEST_BEGIN("render-uop/unroll-pragma-zero-factor-bare-pragma");
+  // factor=0 emits bare `#pragma unroll` (full unroll).
+  Term r_un2 = uop_range(1, 0 /*LOOP*/, 8);
+  Term r_op2 = uop_opt(r_un2, UOP_OPT_UNROLL, 0);
+  Term st_un2 = uop_store(out, r_op2, one);
+  char bufun2[2048];
+  fp = fmemopen(bufun2, sizeof(bufun2), "w");
+  cg_render_uop_kernel(st_un2, "k_unroll0", out, NULL, 0, fp);
+  fclose(fp);
+  CHECK(contains(bufun2, "#pragma unroll\n"));
+
   TEST_BEGIN("render-uop/reduce-axis-marked");
   // RANGE with axis_type=1 (REDUCE) emits /*reduce*/ comment.
   Term r_red   = uop_range(2, 1 /*REDUCE*/, 16);
