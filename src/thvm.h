@@ -1865,6 +1865,9 @@ int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
 // going through KOpt machinery.
 int        tile_anno_axis_set(struct KernelEntry *ke, u32 d,
                               TileAxisInfo info);
+// Sanity check: KernelAxes vs TILE_AXIS agree on axis count +
+// per-axis (kax_type, extent).  1 = agree (or one of them absent).
+int        tile_anno_axes_match(struct KernelEntry const *ke);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

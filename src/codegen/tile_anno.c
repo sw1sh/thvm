@@ -137,6 +137,24 @@ int tile_anno_apply_opt(KernelEntry *ke, KOpt opt) {
   return kernel_apply_opt(ke, opt);
 }
 
+// Sanity check: returns 1 iff KernelAxes and TILE_AXIS agree on
+// axis count + per-axis (kax_type, extent).  Useful for debugging
+// the migration -- if this ever returns 0, tile_uops is stale and
+// the freshness check should bail.
+int tile_anno_axes_match(KernelEntry const *ke) {
+  if (ke == NULL || ke->axes == NULL || ke->tile_uops == NULL) return 1;
+  u32 ka_n = ke->axes->n_axes;
+  u32 tile_n = tile_anno_axis_count(ke);
+  if (ka_n != tile_n) return 0;
+  for (u32 i = 0; i < ka_n; i++) {
+    TileAxisInfo info;
+    if (!tile_anno_axis_at(ke, i, &info)) return 0;
+    if (info.kax_type != ke->axes->axis_types[i]) return 0;
+    if (info.extent != ke->axes->full_shape[i]) return 0;
+  }
+  return 1;
+}
+
 // Direct per-axis write.  Updates both KernelAxes (legacy backing
 // store) AND TILE_AXIS (when tile_uops is fresh) with the new
 // TileAxisInfo.  Used by future code paths that want to set

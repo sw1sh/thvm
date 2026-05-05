@@ -67,6 +67,10 @@ int main(void) {
   TEST_BEGIN("tile-anno/axis-set-out-of-range-bails");
   CHECK_EQ(tile_anno_axis_set(ke, 99, updated), 0);
 
+  TEST_BEGIN("tile-anno/axes-match-trivial-cases");
+  // axes_match returns 1 when at least one of the two sides is absent.
+  CHECK_EQ(tile_anno_axes_match(ke), 1);
+
   tile_free(ke);
   thvm_free();
   TEST_REPORT();
