@@ -114,11 +114,20 @@ fn u64 kernel_rangeified_key(KernelEntry const *ke) {
     h = kp_hash_u64(h, 2);
     h = kp_hash_u64(h, (u64)term_tag(ke->source_uop));
     h = kp_hash_u64(h, (u64)term_ext(ke->source_uop));
-    h = kp_hash_u64(h, (u64)ke->axes->n_axes);
-    h = kp_hash_bytes(h, ke->axes->axis_types,
-                      (size_t)ke->axes->n_axes * sizeof(u8));
-    h = kp_hash_bytes(h, ke->axes->full_shape,
-                      (size_t)ke->axes->n_axes * sizeof(u32));
+    // Phase E: hash via tile_anno when tile_uops is fresh, else
+    // fall back to KernelAxes.  The compare side stores the same
+    // (kax_type, extent) arrays in s->axes, so as long as the hash
+    // is symmetric with the stored format the cache stays consistent.
+    u32 n_axes_h = tile_anno_axis_count_or_kernelaxes(ke);
+    h = kp_hash_u64(h, (u64)n_axes_h);
+    for (u32 i = 0; i < n_axes_h; i++) {
+      TileAxisInfo info;
+      if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) {
+        info.kax_type = 0; info.extent = 0;
+      }
+      h = kp_hash_u64(h, (u64)info.kax_type);
+      h = kp_hash_u64(h, (u64)info.extent);
+    }
   } else {
     return 0;
   }
@@ -266,12 +275,17 @@ static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
     if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
       return 0;
     }
-    if (ke->axes == NULL || s->axes.n_axes != ke->axes->n_axes
-        || memcmp(s->axes.axis_types, ke->axes->axis_types,
-                  (size_t)s->axes.n_axes * sizeof(u8)) != 0
-        || memcmp(s->axes.full_shape, ke->axes->full_shape,
-                  (size_t)s->axes.n_axes * sizeof(u32)) != 0) {
-      return 0;
+    if (ke->axes == NULL) return 0;
+    // Phase E: compare via tile_anno on the live side; stored side
+    // s->axes still holds the byte arrays.  Symmetric with the hash
+    // above (only kax_type + extent participate).
+    u32 n_axes_c = tile_anno_axis_count_or_kernelaxes(ke);
+    if (s->axes.n_axes != n_axes_c) return 0;
+    for (u32 i = 0; i < n_axes_c; i++) {
+      TileAxisInfo info;
+      if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) return 0;
+      if ((u32)s->axes.axis_types[i] != info.kax_type) return 0;
+      if (s->axes.full_shape [i] != info.extent)       return 0;
     }
   }
   if (s->n_inputs > 0) {
