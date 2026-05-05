@@ -303,6 +303,91 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       if (cond_acc == 0) return body;
       return uop_iwhere(cond_acc, body, uop_invalid());
     }
+    case S_RESHAPE_V: {
+      // src[0]=body; extra[0..7]=N_out; src[1..1+N_out]=output iter
+      // refs; src[1+N_out..]=input range refs.  Body evaluates with
+      // input iters set to (flat_idx / in_stride[d]) % in_extent[d]
+      // where flat_idx = sum(out_iter[d] * out_stride[d]) and strides
+      // are row-major over the respective extents.
+      if (u->src_count < 2) return 0;
+      u32 n_out = (u32)(u->extra & 0xFFu);
+      u32 n_in  = (u32)u->src_count - 1 - n_out;
+      if (n_out == 0 || n_in == 0 || n_out > MAX_DIM || n_in > MAX_DIM)
+        return 0;
+      // Read output iters (lift each via the existing range/expr path)
+      // and their extents.
+      Term out_iter[MAX_DIM];
+      u32  out_ext [MAX_DIM];
+      for (u32 d = 0; d < n_out; d++) {
+        u32 r_sid = u->src[1 + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op == S_RANGE) {
+          out_iter[d] = lift_lookup_range(ranges, n_ranges, r_sid);
+          out_ext [d] = (u32)(ru->extra & 0xFFFFFFFFu);
+        } else {
+          // expression-as-iter (e.g. S_IMOD); lift via scalar_to_uop
+          out_iter[d] = lift_scalar_value(ke, r_sid, ranges, n_ranges,
+                                          out_buf, in_bufs, n_inputs);
+          out_ext [d] = 0;  // unknown extent for expressions
+        }
+        if (out_iter[d] == 0) return 0;
+      }
+      // Compute flat_idx = sum(out_iter[d] * out_stride[d]).
+      Term flat = 0;
+      for (u32 d = 0; d < n_out; d++) {
+        u32 stride = 1;
+        for (u32 e = d + 1; e < n_out; e++) stride *= out_ext[e];
+        Term term = (stride == 1) ? out_iter[d]
+                  : uop_int_binary(UOP_IMUL, out_iter[d],
+                                   uop_const(DT_INT32, stride));
+        flat = (flat == 0) ? term : uop_int_binary(UOP_IADD, flat, term);
+      }
+      if (flat == 0) flat = uop_const(DT_INT32, 0);
+      // Decompose flat_idx into input iters and substitute into the
+      // range map.
+      u32 in_ext[MAX_DIM];
+      u32 in_sid[MAX_DIM];
+      for (u32 d = 0; d < n_in; d++) {
+        u32 r_sid = u->src[1 + n_out + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op != S_RANGE) return 0;
+        in_sid[d] = r_sid;
+        in_ext[d] = (u32)(ru->extra & 0xFFFFFFFFu);
+        if (in_ext[d] == 0) return 0;
+      }
+      LiftRangeMap reshaped[MAX_DIM];
+      u32 n_re = n_ranges;
+      for (u32 i = 0; i < n_ranges; i++) reshaped[i] = ranges[i];
+      // Append/override the n_in input ranges with derived iters.
+      for (u32 d = 0; d < n_in; d++) {
+        u32 stride = 1;
+        for (u32 e = d + 1; e < n_in; e++) stride *= in_ext[e];
+        Term iter_d = (stride == 1) ? flat
+                    : uop_int_binary(UOP_IDIV, flat,
+                                     uop_const(DT_INT32, stride));
+        iter_d = uop_int_binary(UOP_IMOD, iter_d,
+                                uop_const(DT_INT32, in_ext[d]));
+        // Find the range entry to override.
+        int found = 0;
+        for (u32 i = 0; i < n_re; i++) {
+          if (reshaped[i].scalar_id == in_sid[d]) {
+            reshaped[i].axis_uop = iter_d;
+            found = 1;
+            break;
+          }
+        }
+        if (!found && n_re < MAX_DIM) {
+          reshaped[n_re].axis_id   = n_re;
+          reshaped[n_re].scalar_id = in_sid[d];
+          reshaped[n_re].axis_uop  = iter_d;
+          n_re++;
+        }
+      }
+      return lift_scalar_value(ke, u->src[0], reshaped, n_re,
+                               out_buf, in_bufs, n_inputs);
+    }
     case S_FLIP: {
       // src[0] = body, src[1..n] = LOOP ranges to potentially flip;
       // extra is a u8 bitmask, bit d set => replace iter with
