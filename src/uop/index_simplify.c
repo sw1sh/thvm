@@ -134,6 +134,36 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         if (uop_match_const_mul(a, &c1, &x1) && b == x1) {
           return uop_int_binary(UOP_IMUL, x1, uop_iconst(c1 + 1));
         }
+        // Divmod recombination: (r // M) * M + (r % M) -> r.
+        // Either operand of the IADD can be the IMUL.  Helps
+        // RESHAPE-roundtrip chains where the consumer's flat-
+        // decompose-recompose composes back to the source iter.
+        Term mul_term, mod_term;
+        if (uop_match_const_mul(a, &c1, &x1)
+            && term_tag(b) == TAG_UOP && term_ext(b) == UOP_IMOD) {
+          mul_term = a; mod_term = b; (void)mul_term;
+        } else if (uop_match_const_mul(b, &c1, &x1)
+                   && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IMOD) {
+          mul_term = b; mod_term = a; (void)mul_term;
+        } else {
+          mod_term = 0;
+        }
+        if (mod_term != 0) {
+          // Verify x1 = (orig // c1) and mod_term = orig % c1 share `orig`.
+          Term mod_a = heap_read(term_val(mod_term) + 0);
+          Term mod_b = heap_read(term_val(mod_term) + 1);
+          i64 mod_c;
+          if (uop_iconst_value(mod_b, &mod_c) && mod_c == c1
+              && term_tag(x1) == TAG_UOP && term_ext(x1) == UOP_IDIV) {
+            Term div_a = heap_read(term_val(x1) + 0);
+            Term div_b = heap_read(term_val(x1) + 1);
+            i64 div_c;
+            if (uop_iconst_value(div_b, &div_c) && div_c == c1
+                && div_a == mod_a) {
+              return mod_a;
+            }
+          }
+        }
       }
       break;
     case UOP_ISUB:

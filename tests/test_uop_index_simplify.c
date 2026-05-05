@@ -194,6 +194,22 @@ int main(void) {
   Term mixed = uop_int_binary(UOP_IADD, r3, r2_5);
   CHECK_EQ(term_ext(mixed), UOP_IADD);
 
+  TEST_BEGIN("simplify/divmod-recombination-collapses");
+  // (r2 // 7) * 7 + (r2 % 7) -> r2.
+  Term seven = uop_const(DT_INT32, 7);
+  Term div7  = uop_int_binary(UOP_IDIV, r2, seven);
+  Term div7_mul7 = uop_int_binary(UOP_IMUL, div7, seven);
+  Term mod7  = uop_int_binary(UOP_IMOD, r2, seven);
+  Term recombined = uop_int_binary(UOP_IADD, div7_mul7, mod7);
+  CHECK_EQ(recombined, r2);
+
+  TEST_BEGIN("simplify/divmod-recombination-skips-different-divisors");
+  // (r2 // 7) * 7 + (r2 % 11) doesn't collapse; divisors differ.
+  Term eleven = uop_const(DT_INT32, 11);
+  Term mod11 = uop_int_binary(UOP_IMOD, r2, eleven);
+  Term not_recombined = uop_int_binary(UOP_IADD, div7_mul7, mod11);
+  CHECK_EQ(term_ext(not_recombined), UOP_IADD);
+
   TEST_BEGIN("simplify/divmod-affine-roundtrip-end-to-end");
   // Resolve a 1D->1D identity-via-flat reshape: ndim=2, dims=[2,3].
   // resolve builds: flat = i0*3 + i1; in_iters[0] = flat / 3,
