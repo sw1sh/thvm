@@ -877,6 +877,11 @@ typedef enum {
                     // hold the canonical reduce-broadcast preamble:
                     //   TILE_BLOCK(alloc, reduce-into-alloc, barrier, load,
                     //              post-reduce body)
+  TILE_CONV2D,      // Phase D4: specialised conv2d-flat node.  Mirrors
+                    // TILE_MMA: src = output / weights / input TILE_AXIS
+                    // descriptors, extra packs (input_slot, weight_slot,
+                    // bias_slot, k_h, k_w, stride_h, stride_w, ...).
+                    // Renderer emits the conv2d_flat MSL kernel template.
   TILE__COUNT
 } TileOp;
 
@@ -1810,6 +1815,8 @@ fn u32  tile_analyze_reduce_broadcast(struct KernelEntry const *ke);
 fn u32  tile_lower_reduce_broadcast(struct KernelEntry *ke,
                                     u32 reduce_scalar_id,
                                     u32 reduce_groups);
+fn int  tile_build_conv2d_from_info(struct KernelEntry *ke,
+                                    TileConv2DInfo const *conv);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

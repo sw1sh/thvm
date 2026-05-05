@@ -136,6 +136,7 @@ fn const char *tile_op_name(u8 op) {
     case TILE_REDUCE:      return "TILE_REDUCE";
     case TILE_MMA:         return "TILE_MMA";
     case TILE_BLOCK:       return "TILE_BLOCK";
+    case TILE_CONV2D:      return "TILE_CONV2D";
     default:               return "TILE_?";
   }
 }
@@ -758,6 +759,44 @@ int tile_analyze_conv2d_flat(KernelEntry const *ke, TileConv2DInfo *out) {
   return tile_analyze_conv2d_flat_impl(ke, out, 0);
 }
 
+// Phase D4: build a TILE_CONV2D root from an analyzed TileConv2DInfo.
+// Emits 4 TILE_AXIS leaves for the conv shape (batch, h_out, w_out,
+// c_out) plus a TILE_AXIS for the reduce-axis (k_h * k_w * c_in).
+// extra encodes input/weight/bias slot ids in the high bits.
+//
+// Mirrors tile_build_mma_from_gemm's structure.  The renderer (Phase F)
+// will read this when it lands; for now it's IR-only and reachable
+// only via direct call.
+fn int tile_build_conv2d_from_info(KernelEntry *ke, TileConv2DInfo const *conv) {
+  if (ke == NULL || conv == NULL || conv->h_out == 0 || conv->w_out == 0
+      || conv->batch == 0) {
+    return 0;
+  }
+  TileConv2DInfo keep = *conv;
+  tile_free(ke);
+  TileAxisInfo a_batch = { KAX_LOOP, keep.batch,    0, 0 };
+  TileAxisInfo a_hout  = { KAX_LOOP, keep.h_out,    0, 0 };
+  TileAxisInfo a_wout  = { KAX_LOOP, keep.w_out,    0, 0 };
+  TileAxisInfo a_red   = { KAX_REDUCE, keep.reduce_unroll != 0
+                                          ? keep.reduce_unroll : 1, 0, 0 };
+  u32 axes[4];
+  axes[0] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a_batch));
+  axes[1] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a_hout));
+  axes[2] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a_wout));
+  axes[3] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a_red));
+  // Extra packs threads + outputs_per_thread for the renderer's tile
+  // dispatch shape.  Detailed slot encoding lands when render_metal
+  // (Phase F) reads this node.
+  u64 extra = ((u64)keep.threads << 32) | (u64)keep.outputs_per_thread;
+  ke->tile_root = tile_emit(ke, TILE_CONV2D, DT_FP32, 4, axes, extra);
+  if (!tile_validate(ke)) {
+    tile_free(ke);
+    return 0;
+  }
+  ke->tile_axes_version = ke->axes != NULL ? ke->axes->version : 0;
+  return 1;
+}
+
 int tile_rejects_conv2d_flat_cin1(KernelEntry const *ke) {
   TileConv2DInfo conv;
   if (!tile_analyze_conv2d_flat_impl(ke, &conv, 1)) {
@@ -860,6 +899,17 @@ fn int tile_validate(KernelEntry const *ke) {
   if (root->op == TILE_MMA) {
     TileGemmInfo gemm;
     return tile_collect_mma_info(ke, ke->tile_root, &gemm);
+  }
+  // Phase D4: TILE_CONV2D structural check.  Expects 4 TILE_AXIS
+  // children (batch, h_out, w_out, reduce).  Renderer (Phase F)
+  // will type-check the conv shape against scalar program contents.
+  if (root->op == TILE_CONV2D) {
+    if (root->src_count != 4) return 0;
+    for (u8 s = 0; s < 4; s++) {
+      if (!tile_id_ok(ke, root->src[s])) return 0;
+      if (ke->tile_uops[root->src[s]].op != TILE_AXIS) return 0;
+    }
+    return 1;
   }
   if (root->op != TILE_LOOP_NEST || root->src_count < 2
       || root->src_count > TILE_MAX_SRC) {
