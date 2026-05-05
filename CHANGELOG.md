@@ -86,6 +86,30 @@ used to carry:
   unavailable.  When the renderer rewrite proper flips render_metal
   to call render_uop, every scheduled kernel flows through this
   validator.
+- **Phase F shadow lifter + primary swap** (`668ed9b`, `0bd5c2e`,
+  `759c77c`, `4f36cb0`, `afa759c`, `5909fd5`, `742a4e7`, `ab250cf`,
+  `20b9e4e`): instrument every cg_emit_tile_metal call to also try
+  kernel_lift_to_uop and track success/fail counts.  Counters
+  exposed via thvm.h (kernel_lift_attempts/successes/compiles/
+  compile_fails).  THVM_RENDER_VIA_UOP=1 swaps the primary render
+  path (off by default; flipping requires execution-parity validation).
+  THVM_DUMP_LIFT_COVERAGE=1 prints stats at thvm_free.
+  THVM_DUMP_LIFT_REJECT=1 prints which ScalarUop the lifter rejects.
+
+  Lifter coverage extended for: S_LOAD_RAW, S_FLIP (axis flip via
+  UOP_ISUB(extent-1, iter)), S_SHRINK (begin shift via UOP_IADD),
+  S_PAD (shift + UOP_IWHERE bounds-check guard with UOP_INVALID
+  outside-of-range fallback), S_RESHAPE_V (factor decomposition --
+  flat_idx = sum(out_iter * out_stride), input iter = (flat_idx /
+  in_stride) % in_extent), S_INDEX_E (symbolic-addr form -- lift
+  via scalar_to_uop directly), and auxiliary S_RANGE leaves outside
+  the BUFFERIZE boundary.
+
+  Concrete coverage signal: test_tile_graph went from 38% (5/13
+  attempts succeed) to 77% (10/13).  The remaining 3 are conv2d /
+  gemm shapes that bypass the lifter today via specialised render
+  paths.  Binary suite 274/274 green throughout.
+
 - **Phase C wedge** (`b583321`, `4a36637`): kernel_lift_to_uop
   bridges ScalarUop[] arena to UOp DAG.  Takes a fully-scheduled
   kernel and builds the equivalent UOp DAG on the heap, returning
