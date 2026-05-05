@@ -437,14 +437,16 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
   if (!axes_apply_opt(ke->axes, opt)) {
     return 0;
   }
-  if (opt.axis >= ke->axes->n_axes
-      || ke->axes->axis_types[opt.axis] != KAX_LOOP) {
+  TileAxisInfo info;
+  if (opt.axis >= tile_anno_axis_count_or_kernelaxes(ke)
+      || !tile_anno_axis_or_kernelaxes(ke, opt.axis, &info)
+      || info.kax_type != KAX_LOOP) {
     return 0;
   }
   KOpt global = {
     .op   = KOP_GLOBAL,
     .axis = opt.axis,
-    .arg  = ke->axes->full_shape[opt.axis],
+    .arg  = info.extent,
   };
   return axes_apply_opt(ke->axes, global);
 }

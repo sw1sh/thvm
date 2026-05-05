@@ -942,8 +942,8 @@ static u32 emit_addr_from_rngs_uop_preferred(KernelEntry *ke,
     if (via_uop != 0) return via_uop;
   }
   // Legacy scalar fallback.  Stays as the safety net for paths the
-  // UOp side can't yet handle (some PAD-mask shapes emit_iwhere
-  // collapses differently from the UOp simplifier).
+  // UOp side can't yet handle (some PAD-mask shapes whose body-emit
+  // path elsewhere depends on the legacy scalar slot ids).
   u32 acc = (in_off != 0) ? emit_iconst(ke, (i64)in_off) : 0;
   for (u32 d = 0; d < use_ndim; d++) {
     if (v_strides[d] == 0) continue;
