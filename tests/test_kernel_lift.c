@@ -7,9 +7,29 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include <unistd.h>
 
 static int contains(const char *haystack, const char *needle) {
   return strstr(haystack, needle) != NULL;
+}
+
+static int xcrun_metal_available(void) {
+  return system("xcrun -f metal >/dev/null 2>&1") == 0;
+}
+
+static int compile_through_metal(const char *msl_text) {
+  char path[64];
+  snprintf(path, sizeof(path), "/tmp/thvm_lift_%d.metal", getpid());
+  FILE *fp = fopen(path, "w");
+  if (fp == NULL) return -1;
+  fputs(msl_text, fp);
+  fclose(fp);
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd),
+           "xcrun metal -x metal -c %s -o /dev/null 2>/dev/null", path);
+  int rc = system(cmd);
+  unlink(path);
+  return WEXITSTATUS(rc);
 }
 
 static u32 emit_range_axis(KernelEntry *ke, u32 axis_type, u32 extent) {
@@ -56,6 +76,7 @@ int main(void) {
   CHECK(contains(buf, "kernel void k_const"));
   CHECK(contains(buf, "for (uint a0 = 0; a0 < 32"));
   CHECK(contains(buf, "out[a0] = 1.000000f"));
+  if (xcrun_metal_available()) CHECK_EQ(compile_through_metal(buf), 0);
 
   TEST_BEGIN("kernel-lift/elementwise-add-mul-kernel");
   // Reset kernel; rebuild a more complex shape.
@@ -111,6 +132,7 @@ int main(void) {
   CHECK(contains(buf2, "in1[a0]"));
   CHECK(contains(buf2, "* 2.000000f"));
   CHECK(contains(buf2, " + "));
+  if (xcrun_metal_available()) CHECK_EQ(compile_through_metal(buf2), 0);
 
   TEST_BEGIN("kernel-lift/reduce-sum-kernel");
   // STORE(INDEX(OUT, r_out), REDUCE_SUM(LOAD(in0[r_out, r_red]), r_red))
@@ -152,6 +174,7 @@ int main(void) {
   CHECK(contains(buf3, "float _acc1 = 0.0f"));
   CHECK(contains(buf3, "for (uint a1 = 0; a1 < 16"));
   CHECK(contains(buf3, "= _acc1;"));
+  if (xcrun_metal_available()) CHECK_EQ(compile_through_metal(buf3), 0);
 
   thvm_free();
   TEST_REPORT();
