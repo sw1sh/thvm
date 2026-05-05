@@ -1774,6 +1774,10 @@ typedef struct {
 } UopRangeMap;
 fn u32  uop_to_scalar(struct KernelEntry *ke, Term t,
                       UopRangeMap const *ranges, u32 n_ranges);
+// Inverse: rebuild the UOp Term equivalent of a ScalarUop arena slot.
+// Returns 0 on unsupported subtree.
+fn Term scalar_to_uop(struct KernelEntry const *ke, u32 scalar_id,
+                      UopRangeMap const *ranges, u32 n_ranges);
 // Structural CSE over dedup-safe scalar expression nodes.  Keeps
 // S_RANGE / STORE / BUFFERIZE identity intact, remaps sources, and
 // returns the number of eliminated nodes.

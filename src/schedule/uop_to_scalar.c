@@ -82,3 +82,55 @@ fn u32 uop_to_scalar(KernelEntry *ke, Term t,
     default: return 0;
   }
 }
+
+// Inverse: walk a ScalarUop arena slot and rebuild the equivalent
+// UOp Term.  The map maps S_RANGE slot ids to UOP_RANGE Terms.  Used
+// by rangeify when it directly assigns r->refs[d] = some_scalar_id
+// and needs to populate r->uop_refs[d] in parallel.
+//
+// Returns 0 on unsupported subtree (caller leaves uop_refs[d] = 0,
+// LOAD path falls back to legacy scalar emit).
+static u8 scalar_to_uop_op(u8 sop) {
+  switch (sop) {
+    case S_IADD:  return UOP_IADD;
+    case S_ISUB:  return UOP_ISUB;
+    case S_IMUL:  return UOP_IMUL;
+    case S_IDIV:  return UOP_IDIV;
+    case S_IMOD:  return UOP_IMOD;
+    case S_ILT:   return UOP_ILT;
+    case S_IAND:  return UOP_IAND;
+    default:      return 0;
+  }
+}
+
+fn Term scalar_to_uop(KernelEntry const *ke, u32 scalar_id,
+                      UopRangeMap const *ranges, u32 n_ranges) {
+  if (ke == NULL || scalar_id == 0 || scalar_id >= ke->n_scalar_uops) return 0;
+  ScalarUop const *u = &ke->scalar_uops[scalar_id];
+  if (u->op == S_RANGE) {
+    for (u32 i = 0; i < n_ranges; i++) {
+      if (ranges[i].scalar_id == scalar_id) return ranges[i].axis_uop;
+    }
+    return 0;
+  }
+  if (u->op == S_ICONST) {
+    i64 v = (i64)u->extra;
+    if (v < INT32_MIN || v > INT32_MAX) return 0;
+    return uop_const(DT_INT32, (u32)(i32)v);
+  }
+  u8 op = scalar_to_uop_op(u->op);
+  if (op != 0 && u->src_count == 2) {
+    Term a = scalar_to_uop(ke, u->src[0], ranges, n_ranges);
+    Term b = scalar_to_uop(ke, u->src[1], ranges, n_ranges);
+    if (a == 0 || b == 0) return 0;
+    return uop_int_binary(op, a, b);
+  }
+  if (u->op == S_IWHERE && u->src_count == 3) {
+    Term c = scalar_to_uop(ke, u->src[0], ranges, n_ranges);
+    Term y = scalar_to_uop(ke, u->src[1], ranges, n_ranges);
+    Term n = scalar_to_uop(ke, u->src[2], ranges, n_ranges);
+    if (c == 0 || y == 0 || n == 0) return 0;
+    return uop_iwhere(c, y, n);
+  }
+  return 0;
+}
