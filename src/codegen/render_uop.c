@@ -192,10 +192,62 @@ static void rmu_emit_term(Term t, FILE *fp) {
   }
 }
 
-// Walk a UOP_RANGE leaf and emit an MSL for-loop opener.  Closes are
-// emitted by the caller after the loop body.  axis_type 0 = LOOP, 1
-// = REDUCE (uses /*reduce*/ comment), other types bind to thread/group
-// positions and don't open a loop.
+// Walk a term tree collecting unique UOP_RANGE leaves in encounter
+// order.  Used by rmu_emit_store to wrap the store body in for-loops
+// over every range that appears in the addr / value expressions.
+//
+// Up to MAX_DIM ranges per kernel; duplicates skipped (same axis_id
+// only emits one for-loop).
+static void rmu_collect_ranges(Term t, Term *ranges, u32 *n_out) {
+  if (term_tag(t) != TAG_UOP) return;
+  if (*n_out >= MAX_DIM) return;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    u32 axis_id = term_val(heap_read(loc + 0));
+    for (u32 i = 0; i < *n_out; i++) {
+      u32 existing = term_val(heap_read(term_val(ranges[i]) + 0));
+      if (existing == axis_id) return;
+    }
+    ranges[*n_out] = t;
+    (*n_out)++;
+    return;
+  }
+  // Recurse into children.  Heap layout depends on opcode; for the
+  // shapes we care about (binary / unary / ternary / index_e / store),
+  // children live at slot 0 / 0..1 / 0..2.
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
+      rmu_collect_ranges(heap_read(loc + 1), ranges, n_out);
+      return;
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
+      return;
+    case UOP_IWHERE:
+      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
+      rmu_collect_ranges(heap_read(loc + 1), ranges, n_out);
+      rmu_collect_ranges(heap_read(loc + 2), ranges, n_out);
+      return;
+    case UOP_OPT:
+      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
+      return;
+    case UOP_CAST: case UOP_BITCAST:
+      rmu_collect_ranges(heap_read(loc + 0), ranges, n_out);
+      return;
+    default:
+      return;
+  }
+}
+
+// Emit a for-loop opener for a UOP_RANGE leaf at the given depth.
+// axis_type 0 = LOOP, 1 = REDUCE (uses /*reduce*/ comment).  Other
+// types (LOCAL/GLOBAL/UNROLL/UPCAST/GROUP_REDUCE) bind to thread or
+// group positions and don't open a sequential loop -- handled later.
 static void rmu_emit_range_open(Term r, FILE *fp, u32 depth) {
   if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return;
   u64 loc = term_val(r);
@@ -212,19 +264,35 @@ static void rmu_emit_range_open(Term r, FILE *fp, u32 depth) {
   }
 }
 
-// Emit a single UOP_STORE statement: `<buf>[<addr>] = <value>;`
+// Emit a single UOP_STORE statement, wrapping with for-loops over
+// every UOP_RANGE that appears in the addr/value tree.  The store
+// body lives at depth + n_ranges.
 static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return;
   u64 loc = term_val(store);
   Term buf   = heap_read(loc + 0);
   Term addr  = heap_read(loc + 1);
   Term value = heap_read(loc + 2);
-  for (u32 i = 0; i < depth; i++) fputs("  ", fp);
+
+  Term ranges[MAX_DIM];
+  u32  n_ranges = 0;
+  rmu_collect_ranges(addr,  ranges, &n_ranges);
+  rmu_collect_ranges(value, ranges, &n_ranges);
+
+  for (u32 i = 0; i < n_ranges; i++) {
+    rmu_emit_range_open(ranges[i], fp, depth + i);
+  }
+  for (u32 i = 0; i < depth + n_ranges; i++) fputs("  ", fp);
   fprintf(fp, "buf%llu[", (unsigned long long)term_val(buf));
   rmu_emit_term(addr, fp);
   fputs("] = ", fp);
   rmu_emit_term(value, fp);
   fputs(";\n", fp);
+  // Close braces (innermost first).
+  for (u32 i = n_ranges; i > 0; i--) {
+    for (u32 d = 0; d < depth + i - 1; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
 }
 
 // Walk an AFTER chain bottom-up, emitting each store followed by a

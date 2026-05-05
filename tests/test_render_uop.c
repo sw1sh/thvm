@@ -158,6 +158,43 @@ int main(void) {
   CHECK(contains(buf10, "exp2(buf"));
   CHECK(contains(buf10, "log2(buf"));
 
+  TEST_BEGIN("render-uop/range-wraps-store-in-for-loops");
+  // Single-axis kernel: STORE(out, RANGE(0), CONST) emits one for-loop.
+  Term r1ax    = uop_range(0, 0, 32);
+  Term st_1ax  = uop_store(out, r1ax, one);
+  char bufrw1[2048];
+  fp = fmemopen(bufrw1, sizeof(bufrw1), "w");
+  cg_render_uop_kernel(st_1ax, "k_1ax", out, NULL, 0, fp);
+  fclose(fp);
+  CHECK(contains(bufrw1, "for (uint a0 = 0; a0 < 32"));
+  CHECK(contains(bufrw1, "}\n}"));   // closing brace + kernel close
+
+  TEST_BEGIN("render-uop/two-range-axes-nested-loops");
+  // STORE(out, RANGE(0)*8 + RANGE(1), CONST) emits two nested loops.
+  Term r2_0 = uop_range(0, 0, 4);
+  Term r2_1 = uop_range(1, 0, 8);
+  Term k8   = uop_const(DT_INT32, 8);
+  Term mul2 = uop_int_binary(UOP_IMUL, r2_0, k8);
+  Term add2 = uop_int_binary(UOP_IADD, mul2, r2_1);
+  Term st_2 = uop_store(out, add2, one);
+  char bufrw2[2048];
+  fp = fmemopen(bufrw2, sizeof(bufrw2), "w");
+  cg_render_uop_kernel(st_2, "k_2ax", out, NULL, 0, fp);
+  fclose(fp);
+  CHECK(contains(bufrw2, "for (uint a0 = 0; a0 < 4"));
+  CHECK(contains(bufrw2, "for (uint a1 = 0; a1 < 8"));
+
+  TEST_BEGIN("render-uop/reduce-axis-marked");
+  // RANGE with axis_type=1 (REDUCE) emits /*reduce*/ comment.
+  Term r_red   = uop_range(2, 1 /*REDUCE*/, 16);
+  Term ld_red  = uop_index_e(in0, r_red);
+  Term st_red  = uop_store(out, r_red, ld_red);
+  char bufred[2048];
+  fp = fmemopen(bufred, sizeof(bufred), "w");
+  cg_render_uop_kernel(st_red, "k_red2", out, in_bufs, 2, fp);
+  fclose(fp);
+  CHECK(contains(bufred, "/*reduce*/"));
+
   TEST_BEGIN("render-uop/cmplt-cmpeq-comparison");
   Term lt    = uop_binary(UOP_CMPLT, load_a, two);
   Term eq    = uop_binary(UOP_CMPEQ, load_a, two);
