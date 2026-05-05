@@ -52,6 +52,7 @@ TESTS := \
   $(BIN)/test_tile_axis_info \
   $(BIN)/test_tile_alloc_barrier \
   $(BIN)/test_tile_reduce_broadcast \
+  $(BIN)/test_tile_anno \
   $(BIN)/test_tile_graph \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \

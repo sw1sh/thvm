@@ -1817,6 +1817,14 @@ fn u32  tile_lower_reduce_broadcast(struct KernelEntry *ke,
                                     u32 reduce_groups);
 fn int  tile_build_conv2d_from_info(struct KernelEntry *ke,
                                     TileConv2DInfo const *conv);
+
+// Phase E scaffolding: axis-info read helpers that go through TILE_AXIS
+// (instead of KernelAxes side channel).  As consumers migrate, these
+// become the single read path; KernelAxes deletes once the migration
+// completes.
+fn u32  tile_anno_axis_count(struct KernelEntry const *ke);
+fn int  tile_anno_axis_at(struct KernelEntry const *ke, u32 d,
+                          TileAxisInfo *out);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

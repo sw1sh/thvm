@@ -168,6 +168,7 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "codegen/axis.c"
 #include "codegen/apply_opt.c"
 #include "codegen/propose.c"
+#include "codegen/tile_anno.c"
 #include "codegen/cg.c"
 #include "codegen/profile.c"
 #include "codegen/render_c.c"
