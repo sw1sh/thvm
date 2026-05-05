@@ -80,12 +80,20 @@ flickering-watching-gem.md`, the foundation for the 3-IR
 - **D4 main** (`be93640`): TILE_CONV2D specialised compute node
   + tile_build_conv2d_from_info builder, parallel to TILE_MMA.
   Renderer (Phase F) is the first consumer.
-- **Phase F prep** (`28bb3dc`, `3f380b4`): tile_render_msl_skeleton
-  walks tile_uops and emits pseudo-MSL with axis loops, alloc
-  decls, barriers, and store comments.  TILE_INPUT_BUF leaf node
-  carries kernel input slot ids; TILE_LOAD reads from either
-  TILE_LOCAL_ALLOC (shared) or TILE_INPUT_BUF (global).  Foundation
-  for Phase F's render_metal.c rewrite.
+- **Phase F prep** (`28bb3dc`, `3f380b4`, `5b3af38`):
+  tile_render_msl_skeleton walks tile_uops and emits pseudo-MSL
+  with axis loops, alloc decls, barriers, and store comments.
+  TILE_INPUT_BUF leaf node carries kernel input slot ids;
+  TILE_LOAD reads from either TILE_LOCAL_ALLOC (shared) or
+  TILE_INPUT_BUF (global).  tile_reject_reason diagnostic
+  pinpoints the first structural failure in a tile_uops graph.
+  Foundation for Phase F's render_metal.c rewrite.
+- **Phase E structural mutator** (`09af9da`):
+  tile_anno_apply_split as the canonical "split an axis" primitive
+  through the tile_anno facade.  Today routes through KOpt+
+  kernel_apply_opt; Phase F flip turns it into direct TILE_AXIS
+  array surgery.  Sets up callsite migration for the autotune
+  split proposers.
 - **Phase E writer-side** (`9b401ea`, `9290e5d`, `138eb57`,
   `0306038`, `8b48266`):
   `tile_anno_apply_opt(ke, opt)` is the canonical opt-application
