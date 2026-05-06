@@ -77,6 +77,25 @@ int main(void) {
   CHECK_EQ(term_tag(result), (u64)TAG_NUM);
   CHECK_EQ(term_val(result), (u64)300);
 
+  // Iter LL: unbound TVar in body -> emit failure.  Build a def
+  // whose body references a TVar bound to a heap loc that ISN'T
+  // a peeled LAM binder -- the emit can't resolve it and should
+  // bail with a useful reason (rather than silently returning 0).
+  TEST_BEGIN("unbound TVar -> compile_and_run returns 0");
+  u64 unbound_loc = book_alloc(1);
+  Term unbound_var = term_new(0, TAG_VAR, 0, unbound_loc);
+  // Body is just TVar(unbound_loc), no TLam wrapping -> argc=0,
+  // bind table empty -> lookup fails -> emit fails.
+  u32 def_id_unbound = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id_unbound = i; break; }
+  }
+  DEFS[def_id_unbound] = unbound_var;
+  result = thvm_aot_metal_compile_and_run(
+      "broken", def_id_unbound, NULL, 0,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(result, (Term)0);
+
   // Iter KK: 0-arg def edge case.  `const42 = TNum[42]` -- no
   // TLam wrapping; body is just NUM(42).  Emit produces a kernel
   // with argc=0 and the value-fallback path wraps NUM(42).

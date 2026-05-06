@@ -169,7 +169,14 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
         u64 loc = term_val(t);
         const char *bound = aot_msl_bind_lookup(bind, loc);
         if (!bound) {
-          snprintf(out, 80, "0u /* unbound */");
+          // Iter LL: signal failure -- silent fallthrough to "0u"
+          // produced wrong-but-running kernels.
+          aot_msl_emit_fail(
+              "TVar(loc=%llu) has no binding -- def shape uses a "
+              "free var the emit can't resolve",
+              (unsigned long long)loc);
+          snprintf(out, 80, "0u /* unbound TVar(loc=%llu) */",
+                   (unsigned long long)loc);
           return out;
         }
         snprintf(out, 80, "uint(msl_term_val(%s))", bound);
