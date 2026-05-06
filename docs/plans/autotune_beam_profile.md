@@ -134,7 +134,19 @@ file, commits, and stops.
   speedup is essentially noise (1.01x).  thvm's autotune
   surface here is essentially "what tile size for the
   pre-built GEMM template" -- there's nothing to learn.
-- [ ] tinygrad: `bench/autotune-ladder/matmul128.py` BEAM=4.
+- [x] (2026-05-06) tinygrad: `bench/autotune-ladder/matmul128.py`
+  BEAM=4.
+
+  | mode      | warmup_us | steady_us | speedup |
+  |-----------|----------:|----------:|--------:|
+  | NOOPT=1   | 33953     | 915       | 1.00x   |
+  | BEAM=4    |   788     | 773       | **1.18x** |
+
+  Tinygrad NOOPT cold compile is 34 ms -- a real GEMM kernel
+  needs much more codegen than ADD.  After BEAM landed an opt
+  sequence the warmup drops to 788 us (close to steady).  1.18x
+  speedup is similar to thvm's 1.01x: both autotune surfaces
+  find this matmul size already close to optimum on Metal.
 - [ ] Compare.
 
 ### Level 3 -- softmax (N=512)
