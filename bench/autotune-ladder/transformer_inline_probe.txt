@@ -1,0 +1,28 @@
+## Transformer block with THVM_INLINE_MULTI_CONSUMER_PURE=1 THVM_INLINE_REDUCE_FANOUT=1
+
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+
+transformer_block kernel_count: 17
+dispatch_kinds: {{metal-tile, 16}, {metal-op, 1}}
+kid 1 kind=metal-tile baseline=1107.us best=1049.us  opt=TOpt[GROUP, 2, 4]  applied={TOpt[GROUP, 2, 2]}
+kid 3 kind=metal-tile baseline=1901.us best=1882.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 2]}
+kid 4 kind=metal-tile baseline=1919.us best=1881.us  opt=TOpt[UNROLL, 2, 8]  applied={TOpt[UNROLL, 2, 2]}
+kid 5 kind=metal-tile baseline=1948.us best=1890.us  opt=TOpt[UNROLL, 2, 16]  applied={TOpt[UNROLL, 2, 2]}
+kid 6 kind=metal-tile baseline=1652.us best=813.us  opt=TOpt[GROUP, 2, 16]  applied={TOpt[GROUP, 2, 16]}
+kid 7 kind=metal-tile baseline=213.us best=143.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 32], TOpt[GLOBAL, 0, 1]}
+kid 8 kind=metal-tile baseline=215.us best=172.us  opt=TOpt[UNROLL, 1, 2]  applied={TOpt[UNROLL, 1, 16]}
+kid 9 kind=metal-tile baseline=1097.us best=1101.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 2]}
+kid 10 kind=metal-tile baseline=1288.us best=1287.us  opt=TOpt[UNROLL, 2, 16]  applied={TOpt[UNROLL, 2, 16]}
+kid 11 kind=metal-tile baseline=221.us best=164.us  opt=TOpt[LOCAL, 0, 32]  applied={TOpt[LOCAL, 0, 32], TOpt[GLOBAL, 0, 1]}
+kid 12 kind=metal-tile baseline=1051.us best=1032.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 4]}
+kid 13 kind=metal-tile baseline=190.us best=180.us  opt=TOpt[GROUP, 1, 64]  applied={TOpt[GROUP, 1, 32]}
+kid 14 kind=metal-tile baseline=13999.us best=13935.us  opt=TOpt[UNROLL, 2, 8]  applied={}
+kid 15 kind=metal-tile baseline=429.us best=182.us  opt=TOpt[LOCAL, 1, 64]  applied={TOpt[LOCAL, 1, 256], TOpt[GLOBAL, 1, 1]}
+kid 16 kind=metal-tile baseline=8118.us best=8078.us  opt=TOpt[UNROLL, 2, 2]  applied={}
+kid 17 kind=metal-tile baseline=241.us best=169.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 32], TOpt[GLOBAL, 0, 1]}
+totals_baseline_us: 35589.
+totals_best_us: 33958.
+totals_speedup: 1.04803
+kernels_with_proposals: 16
+kernels_with_applied: 14
+thvm: metal_jit stats -- hits=1550 misses=224 bypass=0 compile_us=22035

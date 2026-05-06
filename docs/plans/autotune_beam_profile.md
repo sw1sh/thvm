@@ -3080,3 +3080,47 @@ on conv-net workloads before considering default-on.
   the existing experimental rules, with NO kernel-count
   regression.  Strong case for default-on, modulo a transformer
   probe to confirm the third workload class.
+
+### Level 23c: probe inline rules on transformer block
+
+Last safety check before flipping defaults.  Transformer is
+matmul-heavy (8 matmuls + LN + FFN) and combines all the
+patterns the rules might affect.
+
+- [x] (2026-05-06) Re-run
+  `bench/autotune-ladder/transformer_block.wls` with
+  `THVM_INLINE_MULTI_CONSUMER_PURE=1` AND
+  `THVM_INLINE_REDUCE_FANOUT=1` set.
+
+  | metric             | post-L22 | + inline rules |
+  |--------------------|---------:|---------------:|
+  | kernel_count       |       17 |             17 |
+  | dispatch_kinds     |1op+16t   |        1op+16t |
+  | totals_baseline_us |    35342 |          35589 |
+  | totals_best_us     |    34019 |          33958 |
+  | totals_speedup     |    1.04x |          1.05x |
+
+  **Neutral**: 0.2% noise on best wall.  Transformer's wall
+  is dominated by FFN matmul kids (kid 14 = 13935us, kid 16
+  = 8078us) which the inline rules don't affect.
+
+  **Three-workload safety check complete**:
+
+  | net         | default best | + inline | wall ratio |
+  |-------------|-------------:|---------:|-----------:|
+  | MLP4        |         2257 |     1823 |     1.24x  |
+  | LeNet       |         4479 |     3590 |     1.25x  |
+  | Transformer |        34019 |    33958 |     1.00x  |
+
+  No regression on any workload class.  Strong case for
+  flipping the defaults.
+
+  Next iteration's task: flip the defaults at
+  [src/schedule/bufferize_classify.c:515](../../src/schedule/bufferize_classify.c#L515)
+  (`bufferize_inline_multiconsumer_pure_enabled`) and L525
+  (`bufferize_inline_reduce_fanout_enabled`) from
+  `e != NULL && e[0] == '1'` to `e == NULL || e[0] != '0'`
+  (the same pattern `bufferize_remove_removable_bufferize_enabled`
+  uses for default-on).  Make test 274/274 must stay green.
+  Re-bench MLP4 / LeNet / transformer with NO env knobs to
+  confirm the wall wins persist.
