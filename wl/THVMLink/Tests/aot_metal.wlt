@@ -251,6 +251,55 @@ VerificationTest[
     TestID -> "Metal: pair(7, 35) full content round-trip via TBookRead"
 ]
 
+(* === iter MM: cross-backend equivalence === *)
+
+(* Same def, same input, two backends -> same result.  Catches
+   regressions where one path drifts from the other. *)
+VerificationTest[
+    TInit[];
+    TDef["add2", TLam[a, TLam[b, TOp2["+", a, b]]]];
+    Module[{metalR, cpuR},
+      metalR = TTermVal @ TAOTRun["add2", {TNum[7], TNum[11]},
+                                  Method -> "Metal"];
+      cpuR   = TTermVal @ TAOTRun["add2", {TNum[7], TNum[11]},
+                                  Method -> "CPU"];
+      {metalR, cpuR, metalR === cpuR}
+    ],
+    {18, 18, True},
+    TestID -> "Equivalence: add2(7,11) Metal == CPU"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["mul_then_add",
+      TLam[a, TLam[b, TLam[c, TOp2["+", TOp2["*", a, b], c]]]]];
+    Module[{metalR, cpuR},
+      metalR = TTermVal @ TAOTRun["mul_then_add",
+                  {TNum[5], TNum[6], TNum[7]}, Method -> "Metal"];
+      cpuR   = TTermVal @ TAOTRun["mul_then_add",
+                  {TNum[5], TNum[6], TNum[7]}, Method -> "CPU"];
+      {metalR, cpuR, metalR === cpuR}
+    ],
+    {37, 37, True},
+    TestID -> "Equivalence: mul_then_add(5,6,7) Metal == CPU"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["classify",
+      TLam[n, TMatChain[<|0 -> TNum[42], 1 -> TNum[99], 2 -> TNum[7]|>,
+                         TNum[0]][n]]];
+    Module[{metals, cpus},
+      metals = TTermVal /@ (TAOTRun["classify", {TNum[#]},
+                              Method -> "Metal"] & /@ {0, 1, 2, 99});
+      cpus   = TTermVal /@ (TAOTRun["classify", {TNum[#]},
+                              Method -> "CPU"]   & /@ {0, 1, 2, 99});
+      {metals, cpus, metals === cpus}
+    ],
+    {{42, 99, 7, 0}, {42, 99, 7, 0}, True},
+    TestID -> "Equivalence: classify(0,1,2,99) Metal == CPU"
+]
+
 (* === Method dispatcher rejects unknown spec === *)
 
 VerificationTest[
