@@ -208,6 +208,21 @@ static u64 bufferize_unique_uop_parent(u64 child_loc) {
   return found;
 }
 
+// Shared UPat: {UOP_ADD, UOP_MUL}(?0, ?1) -- "ALU with two children",
+// both captured.  Used by the chain-walker hop predicates that need
+// to test the sibling against a const-y wrapper (broadcast-of-CONST
+// vs plain CONST -- both callers have their own predicate on the
+// captured operands).  op_alt encodes the disjunction so the same
+// pattern catches ADD and MUL in one match call.
+static u8 const bufferize_upat_alu2_alt[] = {UOP_ADD, UOP_MUL, 0};
+static UPat const bufferize_upat_alu2_children[2] = {
+  {0, 0xFF, 0, 0, NULL, NULL},
+  {0, 0xFF, 0, 1, NULL, NULL},
+};
+static UPat const bufferize_upat_alu2 = {
+  0, 2, 0, -1, bufferize_upat_alu2_children, bufferize_upat_alu2_alt
+};
+
 // Walk a single chain branch starting from a *given* parent of a
 // reduce (or any other node) and verify it ends in EXPAND through
 // scalar-preserving ops.  Mirrors the historical
@@ -222,11 +237,11 @@ static int bufferize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
    || pop == UOP_RESHAPE || pop == UOP_PERMUTE) {
     return 1;
   }
-  if (pop == UOP_ADD || pop == UOP_MUL) {
-    Term ca = term_resolve(heap_read(cur + 0));
-    Term cb = term_resolve(heap_read(cur + 1));
-    if (bufferize_term_is_broadcast_of_const(ca, 0)) return 1;
-    if (bufferize_term_is_broadcast_of_const(cb, 0)) return 1;
+  Term parent_term = term_new(0, TAG_UOP, pop, cur);
+  Term bindings[UPAT_NUM_BINDINGS] = {0};
+  if (upat_match(&bufferize_upat_alu2, parent_term, bindings)) {
+    if (bufferize_term_is_broadcast_of_const(bindings[0], 0)) return 1;
+    if (bufferize_term_is_broadcast_of_const(bindings[1], 0)) return 1;
   }
   return 0;
 }
@@ -348,11 +363,12 @@ static int bufferize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc
     // Binary ops where the OTHER child is a scalar (CONST or
     // numel-1 EXPAND) also keep the post-reduce shape.  We approx
     // by allowing ADD/MUL when the parent has a CONST sibling.
-    if (pop == UOP_ADD || pop == UOP_MUL) {
-      // Check if any child is CONST.
-      Term ca = term_resolve(heap_read(parent + 0));
-      Term cb = term_resolve(heap_read(parent + 1));
-      u8 has_const = 0;
+    Term parent_term = term_new(0, TAG_UOP, pop, parent);
+    Term bindings[UPAT_NUM_BINDINGS] = {0};
+    if (upat_match(&bufferize_upat_alu2, parent_term, bindings)) {
+      int has_const = 0;
+      Term ca = bindings[0];
+      Term cb = bindings[1];
       if (term_tag(ca) == TAG_UOP && term_ext(ca) == UOP_CONST) has_const = 1;
       if (term_tag(cb) == TAG_UOP && term_ext(cb) == UOP_CONST) has_const = 1;
       if (!has_const) return 0;

@@ -4449,10 +4449,17 @@ task.  Break it down:
       (op_alt zero-inits to NULL).  Smoke test extended (30/30,
       was 22/22): one pattern matches both UOP_ADD and UOP_MUL,
       rejects out-of-set ops (UOP_NEG) and rejects leaves.
-    - [ ] Port the "ALU with CONST-sibling" subpattern to a UPat
-      helper using `op_alt = {ADD, MUL, 0}` and bind both children;
-      reuse across `bufferize_reduce_consumer_is_scalar_tail` and
-      `bufferize_chain_walk_is_broadcast`.
+    - [x] (2026-05-07) Port the "ALU with CONST-sibling" subpattern
+      to a UPat helper using `op_alt = {ADD, MUL, 0}` and bind both
+      children; reuse across `bufferize_reduce_consumer_is_scalar_tail`
+      and `bufferize_chain_hop_is_scalar_preserving`.  Shared
+      `bufferize_upat_alu2` (file scope) does the structural match
+      via op_alt; each call site keeps its own const-y predicate
+      on the captured operands (broadcast-of-const for the chain
+      walker, plain CONST for the scalar-tail walker).  First UPat
+      consumer using `op_alt`.  `make test` clean; two_linears
+      dispatch unchanged ({metal-gemm:1, metal-tile:2}, kid 1 still
+      metal-gemm 178us baseline -> 154us best with TC).
     - [ ] Port the scalar-preserving-unary chain hop (`{NEG,
       RECIP, SQRT, EXP2, LOG2}`) to UPat using `op_alt`.
     - [ ] Port the movement-passthrough chain hop (`{RESHAPE,
