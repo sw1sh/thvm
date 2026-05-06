@@ -1569,6 +1569,32 @@ fn void bufferize_classify(Term root) {
       }
     }
   }
+  // Matmul-input-protect: walk upstream one hop from each matmul
+  // reduce's MUL operands.  When an input is an elementwise op
+  // (ADD/SUB/MUL/etc) that would otherwise get inlined into the
+  // matmul kernel, mark it realized so it becomes its own boundary
+  // and visit() routes it as input.  Without this, materialize's
+  // visit() absorbs upstream bias-add chains into the matmul kernel,
+  // bloating n_ops/n_inputs past the strict tile_analyze_gemm gates
+  // and forcing the slow metal-tile dispatch.
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
+    if (!(info->reasons & BUFFERIZE_REASON_MATMUL)) continue;
+    Term mul = term_resolve(heap_read(info->loc + 0));
+    if (term_tag(mul) != TAG_UOP) continue;
+    if (term_ext(mul) != UOP_MUL) continue;
+    u64 mul_loc = term_val(mul);
+    for (u32 a = 0; a < 2; a++) {
+      Term arg = term_resolve(heap_read(mul_loc + a));
+      if (term_tag(arg) != TAG_UOP) continue;
+      u8 arg_op = term_ext(arg);
+      if (arg_op != UOP_ADD && arg_op != UOP_MUL) continue;
+      u32 arg_idx = bufferize_info_find(term_val(arg));
+      if (arg_idx == 0xFFFFFFFFu) continue;
+      bufferize_node_mark(&BUFFERIZE_NODES[arg_idx],
+                          BUFFERIZE_REASON_MATMUL);
+    }
+  }
   RealizeRewriteRule rules[] = {
     {"inline-constants",              bufferize_rule_inline_constants},
     {"inline-adjacent-reduce-chains", bufferize_rule_inline_adjacent_reduce_chains},

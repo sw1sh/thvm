@@ -4120,8 +4120,31 @@ Hypotheses:
     realizable op), mark that ADD as realized (protected) so
     it becomes its own boundary.
 
-  - [ ] Sketch a "matmul-input-protect" rule: walk upstream
-    from each matmul reduce, find any ADD/elementwise on the
-    direct input path, and mark them realized.  Try it on
+  - [x] (2026-05-06) Sketch a "matmul-input-protect" rule:
+    walk upstream from each matmul reduce, find any ADD/
+    elementwise on the direct input path, and mark them
+    realized.  Try it on two_linears.
+
+    Landed in src/schedule/bufferize_classify.c right after
+    the seed loop.  For each REDUCE with REASON_MATMUL, walk
+    one hop down to MUL, then to MUL's args; if any arg is
+    UOP_ADD or UOP_MUL, mark it REASON_MATMUL too.
+
+    make test 274/274 stays green.
+
+    Re-bench result: **no change.**  kid 2 still 8572us.
+    The one-hop walk doesn't cross movement ops (EXPAND/
+    RESHAPE) that sit between MUL and the bias-add ADD in
+    the matmul's broadcast-recipe shape.
+
+    The actual chain is likely:
+      MATMUL_REDUCE -> MUL -> EXPAND(input) -> ADD(bias)
+                          -> RESHAPE(W2) -> TEN
+
+    My check sees UOP_EXPAND (not ADD/MUL) and stops.
+
+  - [ ] Extend the upstream walk to traverse movement ops
+    (EXPAND/RESHAPE/PERMUTE) until reaching an arith op
+    (ADD/MUL).  Then mark THAT as realized.  Try again on
     two_linears.
 
