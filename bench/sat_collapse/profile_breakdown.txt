@@ -1,0 +1,10 @@
+v= 2  c= 4
+  Z   build=     1.88ms  kernel=   880.79ms  collapse=     0.58ms   sat= True  (n= 4 )
+  Z+1 build=     1.85ms  kernel=   117.54ms  collapse=    26.26ms   sat= True  (n= 128 )
+  CPU total=     2.81ms   sat= False  (n= 5 )
+  WL  total=     0.11ms   sat= True
+v= 3  c= 6
+  Z   build=     3.06ms  kernel=   157.48ms  collapse=     0.09ms   sat= True  (n= 8 )
+  Z+1 build=     2.99ms  kernel=   198.30ms  collapse=     1.71ms   sat= True  (n= 256 )
+  CPU total=     3.00ms   sat= False  (n= 7 )
+  WL  total=     0.07ms   sat= True

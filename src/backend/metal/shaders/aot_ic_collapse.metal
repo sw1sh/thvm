@@ -85,6 +85,28 @@ static inline void aot_heap_store(device Term *heap, ulong loc, Term v) {
 static inline ulong aot_book_alloc(device atomic_uint *book_next, uint n) {
   return ulong(atomic_fetch_add_explicit(book_next, n, memory_order_relaxed));
 }
+// Iter Z+2 plan (TODO -- not implemented in this revision):
+//
+// SUB-bit writes through subst_var / subst_cop race across the N
+// parallel threads of kernel-2 (Apple GPU has no 64-bit device
+// atomics).  Two paths to a fix:
+//
+//   (a) Per-thread book-heap arenas.  Each thread bumps its own
+//       book_next within a private slice.  Subst writes that target
+//       the thread's slice are safe (private); writes to shared
+//       cells (anything in iter Z's allocation range) get skipped.
+//       Requires plumbing slice_base/end through every IC call.
+//
+//   (b) 32-bit slot atomics.  Re-encode the heap as device
+//       atomic_uint *, two slots per Term.  SUB-bit lives on the
+//       upper slot; compare-exchange before writing the lower
+//       resolves the race.  Apple GPU supports atomic_uint CAS.
+//       Requires touching every Term read/write call site.
+//
+// Both are bigger than this revision; they belong in iter Z+2
+// proper.  Today's path keeps the original (racy) semantics so
+// the iter Z+1 functionality stays intact while we profile and
+// design.
 static inline void aot_subst_var(device Term *heap, ulong loc, Term v) {
   aot_heap_store(heap, loc, v | SUB_BIT);
 }
