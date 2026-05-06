@@ -284,6 +284,75 @@ int main(void) {
   CHECK_EQ(term_val(p_a), (u64)100);
   CHECK_EQ(term_val(p_b), (u64)200);
 
+  // Iter K: multi-arg MAT-chain.  select(idx, a, b) =
+  //   match idx { 0 -> a; 1 -> b; _ -> 0 }
+  // Body shape: App(MAT[0, [TVar(a), MAT[1, [TVar(b), TNum(0)]]]],
+  //                   TVar(idx)).
+  TEST_BEGIN("multi-arg MAT-chain: select(idx, a, b)");
+  u64 sel_idx_loc = book_alloc(1);
+  u64 sel_a_loc   = book_alloc(1);
+  u64 sel_b_loc   = book_alloc(1);
+  u64 mat1_kc = book_alloc(2);
+  book_set(mat1_kc + 0, term_new(0, TAG_VAR, 0, sel_b_loc));   // handler 1 -> b
+  book_set(mat1_kc + 1, term_new(0, TAG_NUM, 0, 0));            // default -> 0
+  Term mat1_kk = term_new(0, TAG_MAT, 1, mat1_kc);
+  u64 mat0_kc = book_alloc(2);
+  book_set(mat0_kc + 0, term_new(0, TAG_VAR, 0, sel_a_loc));   // handler 0 -> a
+  book_set(mat0_kc + 1, mat1_kk);                              // fallback -> mat1
+  Term mat0_kk = term_new(0, TAG_MAT, 0, mat0_kc);
+  u64 sel_app_loc = book_alloc(2);
+  book_set(sel_app_loc + 0, mat0_kk);
+  book_set(sel_app_loc + 1, term_new(0, TAG_VAR, 0, sel_idx_loc));
+  Term sel_app = term_new(0, TAG_APP, 0, sel_app_loc);
+  // Body wraps in 3 LAMs (idx, a, b).
+  book_set(sel_b_loc, sel_app);
+  Term sel_lam_b = term_new(0, TAG_LAM, 0, sel_b_loc);
+  book_set(sel_a_loc, sel_lam_b);
+  Term sel_lam_a = term_new(0, TAG_LAM, 0, sel_a_loc);
+  book_set(sel_idx_loc, sel_lam_a);
+  Term sel = term_new(0, TAG_LAM, 0, sel_idx_loc);
+  u32 def_id8 = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id8 = i; break; }
+  }
+  DEFS[def_id8] = sel;
+
+  // select(0, 11, 22) -> 11
+  Term sa1[3] = {
+    term_new(0, TAG_NUM, 0, 0),
+    term_new(0, TAG_NUM, 0, 11),
+    term_new(0, TAG_NUM, 0, 22),
+  };
+  result = thvm_aot_metal_compile_and_run(
+      "select", def_id8, sa1, 3,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)11);
+
+  // select(1, 11, 22) -> 22
+  Term sa2[3] = {
+    term_new(0, TAG_NUM, 0, 1),
+    term_new(0, TAG_NUM, 0, 11),
+    term_new(0, TAG_NUM, 0, 22),
+  };
+  result = thvm_aot_metal_compile_and_run(
+      "select", def_id8, sa2, 3,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)22);
+
+  // select(99, 11, 22) -> 0 (default arm)
+  Term sa3[3] = {
+    term_new(0, TAG_NUM, 0, 99),
+    term_new(0, TAG_NUM, 0, 11),
+    term_new(0, TAG_NUM, 0, 22),
+  };
+  result = thvm_aot_metal_compile_and_run(
+      "select", def_id8, sa3, 3,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)0);
+
   thvm_free();
   TEST_REPORT();
 }
