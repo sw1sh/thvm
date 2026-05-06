@@ -1158,3 +1158,45 @@ shape changes (1x28x28 -> 32x1x28x28).
   multi-step changes outside a 5-min iteration.  Empty
   capture saved as `lenet_bs32.txt` (evidence of the
   no-lowering symptom).
+
+### Level 8: MLP2 with Tanh activation
+
+Level 4 (MLP2) used `Ramp` (= ReLU clamp).  Switching to
+`Tanh` is a single-char variant that tests whether the
++2 kernel leak in MLP2 is activation-specific (different
+ops near the LinearLayer boundary may bufferize differently).
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mlp2_tanh.wls`
+  -- copy of `mlp2.wls` with `ElementwiseLayer[Ramp]`
+  replaced by `ElementwiseLayer[Tanh]`.  Save stdout to
+  `bench/autotune-ladder/mlp2_tanh.txt`.  Inline kernel_count,
+  dispatch_kinds, totals_baseline_us, totals_best_us,
+  totals_speedup, kernels_with_proposals, jit compile_us.
+  Compare to mlp2.txt (Ramp) -- a kernel_count delta would
+  pinpoint activation-specific bufferize behaviour; equality
+  would confirm the leak is independent of the activation.
+
+  **Kernel structure is identical** to MLP2 (Ramp).
+
+  | metric             | Ramp (MLP2) | Tanh (MLP2) |
+  |--------------------|------------:|------------:|
+  | kernel_count       |           7 |           7 |
+  | dispatch_kinds     |1g+6t        |1g+6t        |
+  | totals_baseline_us |        1376 |        1487 |
+  | totals_best_us     |        1340 |        1269 |
+  | totals_speedup     |       1.04x |       1.17x |
+  | kernels_with_appl. |           6 |           2 |
+
+  **Conclusion: the +2 kernel leak vs tinygrad's 5 is
+  activation-independent.**  The bufferize boundary lives at
+  the LinearLayer output (matrix-multiply boundary), not at
+  the activation.  This narrows the structural-fusion target:
+  the fix needs to fuse `LinearLayer + Activation` into one
+  kernel by *not bufferizing the matmul output*, regardless
+  of the activation chosen.  Same structural change targets
+  Ramp, Tanh, Sigmoid, GELU, etc.
+
+  Per-kernel autotune wins also vary by activation (1.04x ->
+  1.17x), suggesting Tanh's per-element cost surfaces more
+  autotune leverage than Ramp's clamp -- but that's a
+  secondary observation; the leak-count is the headline.
