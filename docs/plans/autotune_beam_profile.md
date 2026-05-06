@@ -199,6 +199,68 @@ coefficients.
   -> thvm attention ~= 13 kernels (5 leak + 8 tg) if the
   same pattern holds.  TBD until thvm-side bench lands.
 
+### Level 19: tinygrad transformer block
+
+Full GPT-2-style transformer block: self-attention + residual
++ LayerNorm + FFN (Linear -> GELU -> Linear) + residual +
+LayerNorm.  Same config as Level 18 (seq=32, d_model=64,
+n_heads=4).
+
+Naive prediction by extrapolating from Level 18 (attention
+= 8) plus FFN structure:
+  - Attention: 8 kernels
+  - Residual + LayerNorm 1: ~3-4 (LN reduce/normalize/affine
+    + add)
+  - FFN: 2 matmuls + GELU = ~3
+  - Residual + LayerNorm 2: ~3-4
+Total: ~17-19 kernels per block.
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/transformer_block.py` -- single
+  transformer block forward on a (32, 64) input.  Bench
+  NOOPT and BEAM=4.  Save stdout to
+  `bench/autotune-ladder/transformer_block.tinygrad.txt`.
+  Inline kernel count, speedup, and a provisional structural
+  decomposition.
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |    10050 | 10017 |
+  | kernel_count / 50 rep |      700 |   700 |
+  | kernels per forward   |       14 |    14 |
+  | speedup_to_beam4      |          | 1.003x|
+
+  **Tinygrad transformer block = 14 kernels** (vs attention
+  alone at 8).  +6 for FFN + 2 residual-LayerNorm pairs.
+
+  Provisional decomposition (14 = 8 attn + 6 rest):
+
+  | n | likely contents                       |
+  |--:|---------------------------------------|
+  | 8 | self-attention (per Level 18)         |
+  | 1 | LayerNorm 1 (reduce + normalize fuse) |
+  | 1 | residual-add 1                        |
+  | 1 | FFN fc1 (Linear + GELU fused)         |
+  | 1 | FFN fc2 (Linear)                      |
+  | 1 | LayerNorm 2                           |
+  | 1 | residual-add 2                        |
+  |=14|                                       |
+
+  Each LayerNorm fuses to a single kernel (reduce + normalize
+  + affine all in one), and residual adds fuse with the
+  preceding op.  GELU fuses with fc1.  Speedup baseline -> beam4
+  = 1.003x (flat -- the same per-kernel saturation seen on
+  MLP shapes).
+
+  thvm side: per the user (2026-05-06), `AttentionLayer`
+  with options exists on the WL side (in
+  `~/src/Wolfram/neuralnetworks` + MLXLink submodule), and
+  TFromNet *should* support it.  Earlier "blocked on TLam
+  API" assessment was wrong; the path forward is via
+  `AttentionLayer` and `LayerNormalizationLayer`/`ThreadingLayer`
+  combinations in NetChain.  Subsequent thvm-side benches:
+  start with `AttentionLayer` and grow.
+
 ## Discipline (lessons from the prior cron run)
 
 - **Never start a new bench while another is running.** The Metal
