@@ -220,6 +220,17 @@ static UPat const bufferize_upat_scalar_unary = {
   0, 1, 0, -1, NULL, bufferize_upat_scalar_unary_alt
 };
 
+// Shared UPat: movement-passthrough (RESHAPE/PERMUTE) -- layout-only
+// movement ops that keep the scalar value at every coordinate.
+// Used by chain-walker hop predicates as a TERMINAL "yes, this hop
+// is shape-passthrough" check.
+static u8 const bufferize_upat_movement_passthrough_alt[] = {
+  UOP_RESHAPE, UOP_PERMUTE, 0
+};
+static UPat const bufferize_upat_movement_passthrough = {
+  0, 1, 0, -1, NULL, bufferize_upat_movement_passthrough_alt
+};
+
 // Shared UPat: {UOP_ADD, UOP_MUL}(?0, ?1) -- "ALU with two children",
 // both captured.  Used by the chain-walker hop predicates that need
 // to test the sibling against a const-y wrapper (broadcast-of-CONST
@@ -246,7 +257,7 @@ static UPat const bufferize_upat_alu2 = {
 static int bufferize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
   Term cur_term = term_new(0, TAG_UOP, pop, cur);
   if (upat_match(&bufferize_upat_scalar_unary, cur_term, NULL)) return 1;
-  if (pop == UOP_RESHAPE || pop == UOP_PERMUTE) return 1;
+  if (upat_match(&bufferize_upat_movement_passthrough, cur_term, NULL)) return 1;
   Term bindings[UPAT_NUM_BINDINGS] = {0};
   if (upat_match(&bufferize_upat_alu2, cur_term, bindings)) {
     if (bufferize_term_is_broadcast_of_const(bindings[0], 0)) return 1;

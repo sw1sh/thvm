@@ -4469,6 +4469,16 @@ task.  Break it down:
       clean; two_linears dispatch unchanged ({metal-gemm:1,
       metal-tile:2}, kid 1 metal-gemm 185us baseline -> 153us
       best with TOpt[TC,0,16]).
-    - [ ] Port the movement-passthrough chain hop (`{RESHAPE,
-      PERMUTE}`) to UPat using `op_alt`.
+    - [x] (2026-05-07) Port the movement-passthrough chain hop
+      (`{RESHAPE, PERMUTE}`) to UPat using `op_alt`.  Shared
+      `bufferize_upat_movement_passthrough` (file scope) replaces
+      the OR in `bufferize_chain_hop_is_scalar_preserving`.  The
+      function is now three lines: try the unary-set UPat, the
+      movement-set UPat, the ALU2 UPat -- each shape is named.
+      `make test` clean; two_linears dispatch unchanged
+      ({metal-gemm:1, metal-tile:2}, kid 1 metal-gemm 184us
+      baseline -> 159us best with TOpt[TC,0,16]).
+      Closes the chain-hop UPat decomposition; remaining inline-*
+      work is in the rule top-level loops which are single-op
+      gates that don't benefit from UPat.
 
