@@ -221,16 +221,11 @@ verification).
 ## Comparison with Metal
 
 The Metal backend at [src/backend/metal/_.m](../src/backend/metal/_.m)
-runs the KProgOp codegen pipeline (`cg_emit_metal`) and, when
-`THVM_TILE=1`, can run the TileUop MSL path (`cg_emit_tile_metal`) for
-f32 `LOCAL`/`GLOBAL` elementwise plans.  `cpu_dispatch_kernel`
-delegates to a
-`cpu_jit_dispatch` helper that owns the JIT decision; if the JIT
-bails the dispatcher falls through to a separate `cpu_interpret`.
-`metal_dispatch_kernel` inlines the same decision in its own body:
-it tries `metal_tile_jit_encode` when tile dispatch is enabled, then
-`metal_jit_encode`, then on miss falls through to a per-op interpreter
-loop that's also inlined in the same function.
+emits MSL through `cg_emit_tile_metal`, which lifts every kernel
+shape (matmul, conv2d_flat, elementwise, reduce, movement-fused)
+to UOp DAG via `kernel_lift_to_uop` and renders through
+`cg_render_uop_kernel`.  See `docs/lowering_passes.md` for the
+pipeline.
 
 The two dispatchers do the same thing logically; only the CPU side
 has been factored into separate translation units. This is
