@@ -643,10 +643,42 @@ need a new path.
 
 ### TConv2D fusion follow-on
 
-- [ ] Test path (a): rewrite `TConv2DKhKw` to use index-mapping
-  movement variants (`TUOpShrinkV` / `TUOpPadV` if they exist;
-  otherwise build the address arithmetic explicitly).  Run the
-  conv2d ladder bench and check whether the dispatch shifts
-  from `2 metal-op + 1 metal-tile` to `≤1 metal-tile` (single
-  fused kernel).  If movement-as-INDEX folds correctly the
-  whole conv2d should emerge as 1 KernelEntry.
+- [~] (2026-05-06) Test path (a): rewrite `TConv2DKhKw` to use
+  index-mapping movement variants.
+
+  **Blocked**: `TUOpShrinkV` / `TUOpPadV` don't exist on the WL
+  side -- searched [wl/THVMLink/Kernel/](../../wl/THVMLink/Kernel/),
+  no hits.  thvm only has `TUOpShrink` / `TUOpPad` (shape-changing
+  Movement ops that bufferize splits on).  Building V-variants
+  is real work: each needs a WL constructor + a C-side handler
+  in rangeify that maps the movement to an INDEX expression
+  instead of a fresh KernelEntry.
+
+  thvm already has the C infrastructure for movement-as-INDEX
+  in [src/uop/movement_index.c](../../src/uop/movement_index.c)
+  -- it just doesn't wire from the WL `TUOpShrink` callsites
+  to that path.  The wiring is non-trivial: rangeify decides
+  whether to bufferize at each Movement boundary based on the
+  number of consumers + output shape; SHRINK inside `Fold[Plus,
+  ...]` over 25 partials hits whatever heuristic causes
+  bufferize to fragment.
+
+  Two smaller wedges to try before tackling V-variant
+  constructors:
+  - Run `THVM_DUMP_RANGEIFY_BAIL=1` on the conv2d probe to see
+    which rangeify rule causes the bufferize split.  If it's a
+    single threshold (e.g. "consumers > N -> bufferize"), bumping
+    or skipping it for movement-only chains might collapse the
+    25 partials.
+  - Profile thvm's existing `movement_index.c` against the
+    conv2d shape: if `uop_resolve_movement_chain` already
+    handles 25-deep SHRINK chains, the gap is in
+    bufferize_classify's decision, not the rewrite itself.
+
+### Smaller wedge: which rangeify rule splits the conv2d kh*kw chain?
+
+- [ ] Run the conv2d probe under `THVM_DUMP_RANGEIFY_BAIL=1`
+  and capture the bail reasons.  Save to
+  `bench/autotune-ladder/conv2d_rangeify_bail.txt`.  Goal:
+  identify the specific bail reason that fragments the
+  `Fold[Plus, partials]` chain.
