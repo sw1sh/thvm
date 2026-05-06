@@ -3042,3 +3042,41 @@ Read-only investigation; no code changes.
   `THVM_INLINE_REDUCE_FANOUT=1`) ON.  Probe the safety
   envelope on other levels (LeNet, transformer) before
   flipping the default.
+
+### Level 23b: probe inline rules on LeNet (conv-net)
+
+MLP4 saw 1.24x wall win.  Verify the rules don't regress
+on conv-net workloads before considering default-on.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/lenet.wls`
+  with `THVM_INLINE_MULTI_CONSUMER_PURE=1` AND
+  `THVM_INLINE_REDUCE_FANOUT=1` set.
+
+  | metric             | pre-L22 | post-L22 | + inline rules |
+  |--------------------|--------:|---------:|---------------:|
+  | kernel_count       |      19 |       19 |             19 |
+  | dispatch_kinds     |9op+10t  |9op+10t   |        9op+10t |
+  | totals_baseline_us |    4350 |     5367 |           4333 |
+  | totals_best_us     |    3464 |     4479 |           3590 |
+  | totals_speedup     |   1.26x |    1.20x |          1.21x |
+
+  **No regression on conv-net.**  Kernel count and dispatch
+  identical across all three configurations.  Inline rules
+  recover the post-Level-22 wall regression (4479 -> 3590us,
+  -20%) and bring LeNet back to ~pre-Level-22 best (3464us
+  vs 3590us, within 4% noise).
+
+  Per-kernel wall improvements span the metal-op AND metal-tile
+  dispatch.  No re-fragmentation or new metal-op outliers.
+
+  **Combined evidence** (MLP4 + LeNet):
+
+  | net    | default best | with inline | wall ratio |
+  |--------|-------------:|------------:|-----------:|
+  | MLP4   |        2257  |        1823 |     1.24x  |
+  | LeNet  |        4479  |        3590 |     1.25x  |
+
+  Both feed-forward families gain ~1.24x wall from enabling
+  the existing experimental rules, with NO kernel-count
+  regression.  Strong case for default-on, modulo a transformer
+  probe to confirm the third workload class.
