@@ -147,6 +147,69 @@ int main(void) {
     CHECK_EQ(term_val(result), (u64)expected[i]);
   }
 
+  // Iter G: REF inlining.  Build double_add(x, y) = add2(x, y) * 2,
+  // where the inner App(App(REF[add2], x), y) is a cross-def call.
+  // The Metal emitter inlines add2's body at the call site.
+  TEST_BEGIN("REF inlining: double_add(3,4) -> 14 on GPU");
+  // double_add: TLam[x, TLam[y, TOp2(MUL, App(App(REF[add2], x), y), NUM(2))]]
+  // The first def_id assigned by def_register was 0 for add2 -- we need its id.
+  // Look it up by walking DEFS.
+  u32 add2_id = 0;  // matches build_add2 / def_register("add2", ...) call earlier
+  Term ref_add2     = term_new(0, TAG_REF, add2_id, 0);
+  u64  app_inner_loc = book_alloc(2);   // [REF[add2], TVar(x)]
+  u64  app_outer_loc = book_alloc(2);   // [App(REF, x), TVar(y)]
+  u64  op2_dd_loc    = book_alloc(2);   // [App(App(REF,x),y), NUM(2)]
+  u64  dd_lam_y_loc  = book_alloc(1);
+  u64  dd_lam_x_loc  = book_alloc(1);
+  book_set(app_inner_loc + 0, ref_add2);
+  book_set(app_inner_loc + 1, term_new(0, TAG_VAR, 0, dd_lam_x_loc));
+  Term app_inner = term_new(0, TAG_APP, 0, app_inner_loc);
+  book_set(app_outer_loc + 0, app_inner);
+  book_set(app_outer_loc + 1, term_new(0, TAG_VAR, 0, dd_lam_y_loc));
+  Term app_outer = term_new(0, TAG_APP, 0, app_outer_loc);
+  book_set(op2_dd_loc + 0, app_outer);
+  book_set(op2_dd_loc + 1, term_new(0, TAG_NUM, 0, 2));
+  Term op2_dd = term_new(0, TAG_OP2, OP_MUL, op2_dd_loc);
+  book_set(dd_lam_y_loc, op2_dd);
+  Term dd_lam_y = term_new(0, TAG_LAM, 0, dd_lam_y_loc);
+  book_set(dd_lam_x_loc, dd_lam_y);
+  Term double_add = term_new(0, TAG_LAM, 0, dd_lam_x_loc);
+  u32 def_id4 = def_register("double_add", double_add);
+
+  Term args_dd[2] = {
+    term_new(0, TAG_NUM, 0, 3),
+    term_new(0, TAG_NUM, 0, 4),
+  };
+  result = thvm_aot_metal_compile_and_run(
+      "double_add", def_id4, args_dd, 2,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)14);  // (3+4) * 2
+
+  // Recursion: a self-referential def -- emit must fail (return 0).
+  TEST_BEGIN("REF self-recursion is refused (compile_and_run -> 0)");
+  // recur(x) = recur(x)  -- never terminates, but emit alone should bail.
+  u64  rec_app_loc = book_alloc(2);
+  u64  rec_lam_loc = book_alloc(1);
+  // Reserve def_id5 first so the REF can target it.
+  u32  def_id5 = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id5 = i; break; }
+  }
+  book_set(rec_app_loc + 0, term_new(0, TAG_REF, def_id5, 0));
+  book_set(rec_app_loc + 1, term_new(0, TAG_VAR, 0, rec_lam_loc));
+  Term rec_app = term_new(0, TAG_APP, 0, rec_app_loc);
+  book_set(rec_lam_loc, rec_app);
+  Term recur = term_new(0, TAG_LAM, 0, rec_lam_loc);
+  DEFS[def_id5] = recur;
+
+  Term args_r[1] = { term_new(0, TAG_NUM, 0, 0) };
+  result = thvm_aot_metal_compile_and_run(
+      "recur", def_id5, args_r, 1,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  // 0 = compile_and_run failure sentinel (emit returned NULL).
+  CHECK_EQ(result, (Term)0);
+
   thvm_free();
   TEST_REPORT();
 }

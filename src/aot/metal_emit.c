@@ -52,6 +52,14 @@ static const char *aot_msl_bind_lookup(AotMslBindings *b, u64 loc) {
 // Per-emit fresh counter.  Reset at the top of thvm_aot_metal_emit.
 static u32 g_msl_fresh = 0;
 
+// Iter G: REF-call inlining context.  Set at the top of
+// thvm_aot_metal_emit so the TAG_APP case can detect recursion
+// (callee_id == self_id -> bail).  emit_failed flips to 1 on any
+// unsupported shape inside a recursive emit; the top-level entry
+// frees the buffer and returns NULL when set.
+static u32 g_msl_self_def_id = 0;
+static int g_msl_emit_failed = 0;
+
 // Recursively emit MSL for a value expression, returning a C-string
 // MSL expression that evaluates to a `uint` (the folded NUM payload).
 // For nested OP2s we materialize each sub-fold into a `uint v_K = ...`
@@ -104,6 +112,77 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
           aot_emit_fmt(b, "  uint %s = (%s) %s (%s);\n",
                        out, xv, opc, yv);
         }
+        return out;
+      }
+      case TAG_APP: {
+        // Iter G: cross-def static call.  Walk APP spine inward to
+        // collect args + find the function head.  Shape:
+        //   App(App(...App(REF, a_n-1), ...), a_1), a_0)
+        // (innermost APP is the outermost call: it carries arg 0).
+        Term call_args[8];
+        u32  n_call_args = 0;
+        Term cursor = t;
+        while (term_tag(cursor) == TAG_APP && n_call_args < 8) {
+          u64 al = term_val(cursor);
+          call_args[n_call_args++] = book_read(al + 1);  // arg
+          cursor = book_read(al + 0);                    // function
+        }
+        // Reverse so call_args[0] is the first call arg.
+        for (u32 i = 0; i < n_call_args / 2; i++) {
+          Term tmp = call_args[i];
+          call_args[i] = call_args[n_call_args - 1 - i];
+          call_args[n_call_args - 1 - i] = tmp;
+        }
+        if (term_tag(cursor) != TAG_REF) {
+          g_msl_emit_failed = 1;
+          snprintf(out, 80, "0u /* APP head not REF (tag=%u) */",
+                   term_tag(cursor));
+          return out;
+        }
+        u32 callee_id = term_ext(cursor);
+        if (callee_id == g_msl_self_def_id) {
+          g_msl_emit_failed = 1;
+          snprintf(out, 80, "0u /* recursive REF -- not supported */");
+          return out;
+        }
+        if (callee_id >= DEFS_CAP || DEFS[callee_id] == 0) {
+          g_msl_emit_failed = 1;
+          snprintf(out, 80, "0u /* REF id %u out of range */", callee_id);
+          return out;
+        }
+        // Materialize each call arg as a Term, bind callee LAM[K] -> term name.
+        u32 saved_n = bind->n;
+        Term callee_cursor = DEFS[callee_id];
+        u32 callee_arity = 0;
+        char term_names[8][24];
+        while (term_tag(callee_cursor) == TAG_LAM
+               && callee_arity < n_call_args) {
+          const char *uv = aot_msl_emit_uint(b, call_args[callee_arity], bind);
+          u32 idx = g_msl_fresh++;
+          snprintf(term_names[callee_arity], sizeof term_names[0],
+                   "vt_%u", idx);
+          aot_emit_fmt(b,
+            "  Term %s = msl_term_new(TAG_NUM, 0, ulong(%s));\n",
+            term_names[callee_arity], uv);
+          u64 lam_loc = term_val(callee_cursor);
+          aot_msl_bind_push(bind, lam_loc, term_names[callee_arity]);
+          callee_cursor = book_read(lam_loc);
+          callee_arity++;
+        }
+        if (callee_arity != n_call_args) {
+          g_msl_emit_failed = 1;
+          bind->n = saved_n;
+          snprintf(out, 80,
+                   "0u /* arity mismatch: %u call args vs %u callee LAMs */",
+                   n_call_args, callee_arity);
+          return out;
+        }
+        // Recursively emit the callee body with bindings in place.
+        // The result is a uint expression we can pass back to the
+        // caller's evaluator (TOp2, MAT, etc.) directly.
+        const char *result_expr = aot_msl_emit_uint(b, callee_cursor, bind);
+        bind->n = saved_n;
+        snprintf(out, 80, "%s", result_expr);
         return out;
       }
       default: {
@@ -176,6 +255,8 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         name, def_id, argc, name);
 
     g_msl_fresh = 0;
+    g_msl_self_def_id = def_id;
+    g_msl_emit_failed = 0;
 
     // Iter F: detect App(MAT-chain, TVar) shape -- numeric switch
     // dispatch.  After TLam-peel, the body might be
@@ -230,6 +311,14 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
             "  result[0] = msl_term_new(TAG_NUM, 0, ulong(%s));\n"
             "}\n",
             rv);
+    }
+
+    if (g_msl_emit_failed) {
+        // Iter G: an unsupported shape (recursion, partial app, etc.)
+        // tripped the failure flag during recursive emit.  Discard the
+        // partial source so the caller can fall back / report failure.
+        free(b.buf);
+        return NULL;
     }
 
     return b.buf;
