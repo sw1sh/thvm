@@ -500,8 +500,36 @@ buffer scalar shape, the fix should have shifted them too.
   blocking the lift.  That's what the cron should pick up next.
 
 ### Diagnose conv2d metal-op lift rejects
-- [ ] Run conv2d (1x32x28x28, 5x5, 32) under
-  `THVM_DUMP_LIFT_REJECT=1` and capture the unique reject
-  reasons + inner-srcs context.  Save to
-  `bench/autotune-ladder/conv2d_lift_reject.txt`.  Goal: identify
-  the next scalar shape to lift onto the tile path.
+- [x] (2026-05-06) Run conv2d under
+  `THVM_DUMP_LIFT_REJECT=1` and capture rejects.  Saved to
+  `bench/autotune-ladder/conv2d_lift_reject.txt`.
+
+  **One reject category**, 2 occurrences:
+
+      lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71
+
+  Different shape from softmax / LeNet S_INDEX rejects.  This
+  is the **no-scalar-arena** path: the kernel has no ScalarUop
+  arena at all -- it's emitted by a specialised pass (the
+  conv2d-flat synthesised dispatch with 24 patch inputs from
+  the 5x5 kh*kw decomposition).  `kernel_lift_to_uop` falls
+  through `kernel_lift_from_gemm` and `kernel_lift_from_conv2d`
+  (both reject this shape), then logs the entry/no-scalar-arena
+  reject.
+
+  So conv2d's metal-op outliers are NOT a missing
+  `lift_scalar_index` branch -- they're a missing entry-point
+  in `kernel_lift_from_conv2d`.  The 24-input shape (kh*kw =
+  25 ≈ 24 patch tensors + 1 weights = wait that's 25 + 1 + bias
+  = 26... need to inspect the actual ke->n_inputs decomposition)
+  is what blocks.
+
+### Extend kernel_lift_from_conv2d for the 24-input patch shape
+
+- [ ] Inspect `kernel_lift_from_conv2d` in
+  `src/schedule/kernel_lift.c` and identify the n_inputs branch
+  that rejects the 24-input shape.  Sketch what would have to
+  change to accept it (probably a new conv2d_im2col synthesised
+  shape with patch_input_count==24 instead of the rank-3 path
+  the existing lifter expects).  Document findings in this file
+  before any code change.

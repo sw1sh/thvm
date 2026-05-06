@@ -1,0 +1,4 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
