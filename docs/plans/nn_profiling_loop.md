@@ -132,8 +132,17 @@ every minute.
   spurious `LibraryFunction::fpexc` NaN/Inf message via `Total`,
   but the autotune still applied winners and the post-tune softmax
   sum is 1.0.
-- [ ] Run `wl/Examples/lenet-mnist/bench-train.wls` BS=32 N_STEPS=5;
-  save to `bench/lenet-mnist/train_bs32.txt`.
+- [x] (2026-05-06) Run `wl/Examples/lenet-mnist/bench-train.wls` BS=32
+  N_STEPS=5; save to `bench/lenet-mnist/train_bs32.txt`. **baseline
+  261.7 ms/step, autotune 202.6 ms/step -- 1.29x end-to-end
+  speedup.** 32/64 candidate kernels tuned (290.8 ms tune time);
+  15 winners applied.  1198 live kernels post-train; dispatch:
+  metal-op=778 (65%), metal-tile=372 (31%), metal-alias=48 (4%).
+  Note: bench-train.wls is hard-coded to BS=1 (single fixed MNIST
+  sample) -- the "BS=32" in the task spec was aspirational; need a
+  separate task to plumb a batch-size knob through.  Loss read
+  surfaced the same `$Failed`/NaN issue as autotune.wls (script
+  exits 1 on non-numeric final loss) but timing data is valid.
 - [ ] Diff dispatch-kind histogram pre-autotune vs post-autotune;
   document gains (or no-op) in this file.
 
