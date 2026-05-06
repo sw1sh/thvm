@@ -13,7 +13,7 @@ discussion in [docs/plans/autotune_beam_profile.md](../../docs/plans/autotune_be
 | 2     | matmul (M=N=K=128)             |            1 |            211 |        1.01x |                1 |                773 |            1.18x | **thvm** (3.7x)   |
 | 3     | softmax (N=512)                |            3 |            558 |        1.12x |                3 |               1141 |            1.09x | **thvm** (2.0x)   |
 | 4     | MLP2 (784 -> 128 -> 10)        |            7 |           1420 |        1.13x |                5 |               2499 |            1.09x | **thvm** (1.8x)   |
-| 5     | conv2d (1x32x28x28, 5x5, 32)   |            3 |           2264 |        1.58x |                1 |               1604 |            0.99x | **tinygrad** (-29%)|
+| 5     | conv2d (1x32x28x28, 5x5, 32)   |            3 |           3507 |        1.27x |                1 |               1604 |            0.99x | **tinygrad** (-54%)|
 
 ## Notes on apples-to-oranges
 
@@ -45,13 +45,18 @@ At MLP2 + conv2d, thvm dispatches 2 extra kernels per forward. Suspected leak si
 
 ### Autotune is on the wrong unit
 
-Conv2d is the cleanest illustration. thvm's autotune extracts **1.58x** from its 3-kernel chain — the biggest win in the ladder. Tinygrad's BEAM=4 finds **0.99x** because the default-heuristic kernel is already at its local optimum. Yet **tinygrad's untuned single kernel (1604 us) beats thvm's tuned 3-kernel chain (2264 us) by 41%**.
+Conv2d is the cleanest illustration. thvm's autotune extracts **1.27x** from its 3-kernel chain (1.36x on the im2col reduce alone after the rangeify u8-RESHAPE-V fix landed 2026-05-06). Tinygrad's BEAM=4 finds **0.99x** because the default-heuristic kernel is already at its local optimum. Yet **tinygrad's untuned single kernel (1604 us) beats thvm's tuned 3-kernel chain (3507 us) by ~54%**.
 
-Per-kernel tuning saturates around 1.5–2.0x; fusing N kernels into 1 unlocks an N-fold dispatch-overhead win independent of tuning. **Structural fusion has higher leverage than autotune**, especially at compute-heavy shapes like conv2d.
+Per-kernel tuning saturates around 1.3–2.0x; fusing N kernels into 1 unlocks an N-fold dispatch-overhead win independent of tuning. **Structural fusion has higher leverage than autotune**, especially at compute-heavy shapes like conv2d.
+
+(Earlier table revisions reported thvm conv2d best as 2264 us; that
+sum filtered to kernels with autotune proposals and silently
+omitted the kid-1 metal-op, which always ran at ~1690 us.  The
+3507 us figure is the honest sum across all three kernels.)
 
 ## Next focus
 
-The level where thvm falls furthest behind tinygrad in absolute wall is **level 5 (conv2d, -29%)**. The mechanism is structural fusion, not autotune. Concrete leverage points, ordered by ROI:
+The level where thvm falls furthest behind tinygrad in absolute wall is **level 5 (conv2d, -54%)**. The mechanism is structural fusion, not autotune. Concrete leverage points, ordered by ROI:
 
 1. **Fuse the conv2d patch-sum + reduce + bias-broadcast chain** into one kernel on the metal-tile path. Targets the biggest absolute gap (level 5). Expected win: ≥30% on conv-heavy workloads (LeNet, beautiful_mnist).
 2. **Lift the softmax tail (metal-op outlier)** through `kernel_lift_to_uop`. Targets level 3 / 4. Expected win: 10–20% on softmax-tail kernels via reduce-broadcast collapse.

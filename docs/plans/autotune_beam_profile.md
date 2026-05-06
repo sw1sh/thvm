@@ -712,8 +712,44 @@ need a new path.
 
 ### Same-rank RESHAPE > u8 fallback to V
 
-- [ ] In `rangeify.c` at the `RESHAPE out_dim > u8` bail (line
-  3175), change the bail to a fallback that emits `S_RESHAPE_V`
-  with the same shape information.  Validate via the conv2d
-  probe: dispatch should shift from `2 metal-op + 1 metal-tile`
-  to fewer metal-op kernels.  make test 274/274 must stay green.
+- [x] (2026-05-06) In `rangeify.c` at the `RESHAPE out_dim > u8`
+  bail (line 3175), change the bail to a fallback that emits
+  `S_RESHAPE_V` with the same shape information.  Validate via
+  the conv2d probe: dispatch should shift from `2 metal-op + 1
+  metal-tile` to fewer metal-op kernels.  make test 274/274 must
+  stay green.
+
+  **Landed**: edit forces the rank-mismatch V-emission whenever
+  `src0_dims[d]` or `out_dims[d]` overflows u8, even when ranks
+  match.  make test stays 274/274 green.
+
+  **Outcome differs from hypothesis**: dispatch shape did NOT
+  change.  Conv2d still emits 3 kernels (2 metal-op + 1
+  metal-tile).  The win came from a different mechanism --
+  one of the metal-op kernels (kid 1) was previously rejecting
+  autotune proposals; after the V-emission gives its bufferize
+  region a clean shape, autotune now finds wins on it.
+
+  Conv2d ladder probe (`bench/autotune-ladder/conv2d.txt`):
+
+  | metric                  | pre-fix | post-fix |
+  |-------------------------|--------:|---------:|
+  | kernel_count            |       3 |        3 |
+  | kernels_with_proposals  |       2 |        3 |
+  | kid 1 baseline (us)     |  ~1690* |     1690 |
+  | kid 1 best (us)         |   ~1690 |     1247 |
+  | kid 2 baseline (us)     |    2444 |     2020 |
+  | kid 2 best (us)         |    1966 |     1959 |
+  | kid 3 baseline (us)     |     747 |      744 |
+  | kid 3 best (us)         |     296 |      301 |
+  | wall best (sum-3) (us)  |   ~3952 |     3507 |
+
+  \* kid 1 was previously skipped by the bench filter
+  `If[ props =!= {}]`.  Estimated wall improvement ~1.13x.
+
+  This unblocks per-kid-1 autotune (1.36x on a previously
+  untunable shape) but **does NOT close the structural-fusion
+  gap** vs tinygrad (1604us, 1 kernel).  The N-fold dispatch
+  win still requires fusing kid 1 + kid 2 + kid 3 into one
+  kernel -- an operation only Phase D'+F of [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md)
+  delivers.  Per-kernel autotune saturated as predicted.

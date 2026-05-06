@@ -3027,9 +3027,24 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         // Mismatch cases (either side different from os->ndim) need
         // synthetic iter dims -- deferred to a future S_RESHAPE
         // generalization.
+        // Force the S_RESHAPE_V emission whenever any dim overflows
+        // the legacy u8-packed encoding.  Without this the same-rank
+        // path below would bail (e.g. conv2d xCol with cIn*kh*kw=800
+        // > 255), fragmenting the bufferize region.
+        int reshape_dim_overflow_u8 = 0;
+        for (u32 d = 0; d < p->src0_ndim; d++) {
+          if (p->src0_dims[d] > 0xFFu) { reshape_dim_overflow_u8 = 1; break; }
+        }
+        if (!reshape_dim_overflow_u8) {
+          for (u32 d = 0; d < p->out_ndim; d++) {
+            if (p->out_dims[d] > 0xFFu) { reshape_dim_overflow_u8 = 1; break; }
+          }
+        }
         if (p->src0_ndim > 4 || p->out_ndim > 4
-            || p->src0_ndim != os->ndim || p->out_ndim != os->ndim) {
-          // Rank-mismatch RESHAPE.  Try the S_RESHAPE_V split-src form
+            || p->src0_ndim != os->ndim || p->out_ndim != os->ndim
+            || reshape_dim_overflow_u8) {
+          // Rank-mismatch RESHAPE OR same-rank with dim > u8.  Try the
+          // S_RESHAPE_V split-src form
           // (mirrors tinygrad's apply_movement_op for RESHAPE -- input
           // ranges become fresh PLACEHOLDER/VIRT ranges that the wrap
           // writes from a flat-index roundtrip of selected LOOP iters).
