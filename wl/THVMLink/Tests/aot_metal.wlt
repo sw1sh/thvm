@@ -300,6 +300,23 @@ VerificationTest[
     TestID -> "Equivalence: classify(0,1,2,99) Metal == CPU"
 ]
 
+(* iter PP: CTR-returning equivalence -- same def, both backends should
+   produce a CTR Term with the same {tag, ext} (the val differs because
+   Metal allocates in BOOK_HEAP and CPU allocates in HEAP, but the
+   structural identity matches). *)
+VerificationTest[
+    TInit[];
+    TDef["wrap1", TLam[x, TCtr[1, x]]];
+    Module[{metalR, cpuR},
+      metalR = TAOTRun["wrap1", {TNum[42]}, Method -> "Metal"];
+      cpuR   = TAOTRun["wrap1", {TNum[42]}, Method -> "CPU"];
+      {{TTermTag[metalR], TTermExt[metalR]},
+       {TTermTag[cpuR],   TTermExt[cpuR]}}
+    ],
+    {{$TagCTR, 1}, {$TagCTR, 1}},
+    TestID -> "Equivalence: wrap1(42) tag/label Metal == CPU"
+]
+
 (* === Method dispatcher rejects unknown spec === *)
 
 VerificationTest[
