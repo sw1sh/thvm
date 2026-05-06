@@ -6,6 +6,33 @@ dated section.
 
 ## Unreleased
 
+### Phase 7 iter S blocker: kernel `heap` buffer is BOOK_HEAP only (2026-05-06)
+
+Extending wl/THVMLink/Tests/aot_metal.wlt to cover iter L (CTR
+destructure in MAT arms) end-to-end via WL exposed an architectural
+gap: the Metal kernel's `device Term *heap` buffer is zero-copy
+bound to `BOOK_HEAP`, but WL `TCtr[label, ...]` allocates in the
+DYNAMIC HEAP (via term_new_ctr -> heap_alloc).  When the kernel
+reads `heap[scrutinee_val + 1]` to destructure a WL-built CTR, it
+indexes into BOOK_HEAP at the wrong offset and returns zeros.
+
+The C test in tests/test_aot_metal_run.c covers the matched-arm
+path correctly because it builds inputs via book_alloc/book_set.
+Only the default-arm path (no destructure -> no heap deref) round-
+trips cleanly through WL today.
+
+Fix candidates (deferred):
+  * Pass dyn_heap to the kernel as a second buffer; choose by val
+    range OR add a runtime "which heap" tag bit.
+  * Marshal call-time CTR Terms into book_heap before dispatch
+    (requires deep-copy of nested CTRs).
+  * Teach WL to allocate CTR inputs in book_heap directly via a
+    new TBookCtr helper.
+
+iter S landed the WL e2e tests for what works (REF inlining,
+default-arm fallback); the matched-CTR test stays in C only until
+a fix iter picks one of the candidates above.
+
 ### Phase 7 iter M scaffold: wnf macro-shim header + blocker inventory (2026-05-06)
 
 src/aot/wnf_metal_shim.h is the starting macro layer for porting

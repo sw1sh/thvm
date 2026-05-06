@@ -94,6 +94,53 @@ VerificationTest[
     TestID -> "CPU pool: add2 NumThreads -> 1, 2, 4, 8"
 ]
 
+(* === iter G: REF inlining (cross-def static call) === *)
+
+VerificationTest[
+    TInit[];
+    TDef["add2",       TLam[a, TLam[b, TOp2["+", a, b]]]];
+    TDef["double_add", TLam[x, TLam[y,
+      TOp2["*", TApp[TApp[TRef["add2"], x], y], TNum[2]]]]];
+    TTermVal @ TAOTRun["double_add", {TNum[3], TNum[4]},
+                       Method -> "Metal"],
+    14,   (* (3 + 4) * 2 -- add2 inlined at the call site *)
+    TestID -> "Metal: REF inlining double_add(3,4) = (a+b)*2 = 14"
+]
+
+(* === iter L: CTR destructure in MAT arm ===
+
+   The matched-arm case (CTR{2, [NUM(7), NUM(35)]} -> 42) needs the
+   input CTR's children to be reachable by the kernel via the `heap`
+   MTLBuffer.  Today that buffer is zero-copy bound to BOOK_HEAP, but
+   WL's TCtr[label, ...] allocates in the DYNAMIC HEAP (via
+   term_new_ctr -> heap_alloc).  When the kernel reads
+   `heap[scrutinee_val + 1]` it actually indexes into book_heap at the
+   wrong offset, returning zeros.
+
+   Fix candidates (deferred -- separate iter):
+     * pass dyn_heap to the kernel as a second buffer; choose by val
+       range or via a new WL helper that allocates in book_heap
+     * marshal call-time CTRs into book_heap before dispatch
+     * teach WL to allocate certain inputs in book_heap directly
+
+   The C test in tests/test_aot_metal_run.c covers the matched-arm
+   path correctly because it builds the input CTR via book_alloc /
+   book_set.  Only the default-arm path round-trips cleanly through
+   WL (no destructure -> no heap deref).
+*)
+
+VerificationTest[
+    TInit[];
+    TDef["pair_sum",
+      TLam[p, TMatChain[
+        <|2 -> TLam[x, TLam[y, TOp2["+", x, y]]]|>,
+        TNum[0]][p]]];
+    TTermVal @ TAOTRun["pair_sum", {TCtr[99, TNum[1]]},
+                       Method -> "Metal"],
+    0,   (* label 99 doesn't match -- default arm fires *)
+    TestID -> "Metal: pair_sum(CTR{99, [NUM(1)]}) -> default 0 (no destructure)"
+]
+
 (* === Method dispatcher rejects unknown spec === *)
 
 VerificationTest[
