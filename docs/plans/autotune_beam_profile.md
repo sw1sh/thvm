@@ -3006,3 +3006,39 @@ Read-only investigation; no code changes.
   graph rewrite collapses Linear+Activation's effective
   consumer count to >= 2.  Single env-flagged bench, no
   code change.  Queued for next iteration.
+
+### Level 23a: probe existing experimental inline rules
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/mlp4.wls`
+  with `THVM_INLINE_MULTI_CONSUMER_PURE=1` AND
+  `THVM_INLINE_REDUCE_FANOUT=1` set.  Save stdout to
+  `bench/autotune-ladder/mlp4_inline_probe.txt`.
+
+  | metric             | default | with inline | delta |
+  |--------------------|--------:|------------:|------:|
+  | kernel_count       |      11 |          11 |    0  |
+  | dispatch_kinds     |  1g+10t |     1g+10t  |  same |
+  | totals_baseline_us |    2892 |        2021 | -30%  |
+  | totals_best_us     |    2257 |        1823 | -19%  |
+  | totals_speedup     |   1.28x |       1.11x |       |
+
+  **Mixed result**: kernel_count unchanged (still 11, leak
+  +4 vs tinygrad's 7 unchanged), but per-kernel wall
+  improved by ~30% on baseline / 19% on best.  Net wall
+  speedup over default-env is **1.24x** (2257 / 1823).
+
+  Specific kid-1 (metal-gemm) baseline dropped 479us -> 345us:
+  the inline rules collapse some fanin with the matmul,
+  reducing the matmul kernel's effective work but not its
+  count in the kernel graph.
+
+  **Conclusion**: enabling these rules is a real-wall win
+  (1.24x on MLP4) but doesn't close the kernel-count leak.
+  The +1-per-Linear leak persists -- the new rule
+  `inline-reduce-pure-fanout` is still needed for that.
+
+  But: since this gives a 1.24x wall win for free, consider
+  defaulting `THVM_INLINE_MULTI_CONSUMER_PURE=1` (and/or
+  `THVM_INLINE_REDUCE_FANOUT=1`) ON.  Probe the safety
+  envelope on other levels (LeNet, transformer) before
+  flipping the default.

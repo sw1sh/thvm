@@ -1,0 +1,22 @@
+## MLP4 with THVM_INLINE_MULTI_CONSUMER_PURE=1 THVM_INLINE_REDUCE_FANOUT=1
+
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+mlp4 kernel_count: 11
+dispatch_kinds: {{metal-gemm, 1}, {metal-tile, 10}}
+kid 1 kind=metal-gemm baseline=345.us best=348.us  opt=TOpt[TC, 0, 16]  applied={TOpt[TC, 0, 16]}
+kid 2 kind=metal-tile baseline=142.us best=117.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 32], TOpt[GLOBAL, 0, 4]}
+kid 3 kind=metal-tile baseline=335.us best=221.us  opt=TOpt[GROUP, 1, 128]  applied={TOpt[GROUP, 1, 64]}
+kid 4 kind=metal-tile baseline=156.us best=144.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 16]}
+kid 5 kind=metal-tile baseline=196.us best=170.us  opt=TOpt[GROUP, 1, 32]  applied={TOpt[GROUP, 1, 32]}
+kid 6 kind=metal-tile baseline=144.us best=127.us  opt=TOpt[LOCAL, 0, 8]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 16]}
+kid 7 kind=metal-tile baseline=150.us best=140.us  opt=TOpt[GROUP, 1, 32]  applied={TOpt[GROUP, 1, 32]}
+kid 8 kind=metal-tile baseline=142.us best=144.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
+kid 9 kind=metal-tile baseline=145.us best=142.us  opt=TOpt[GROUP, 1, 10]  applied={TOpt[UNROLL, 1, 2]}
+kid 10 kind=metal-tile baseline=133.us best=134.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
+kid 11 kind=metal-tile baseline=133.us best=136.us  opt=TOpt[GROUP, 1, 2]  applied={TOpt[GROUP, 1, 2]}
+totals_baseline_us: 2021.
+totals_best_us: 1823.
+totals_speedup: 1.10861
+kernels_with_proposals: 11
+kernels_with_applied: 11
+thvm: metal_jit stats -- hits=682 misses=120 bypass=0 compile_us=114380
