@@ -939,9 +939,19 @@ every minute.
   bisect among the recent commits.
 
 ### Autotune cache-thrash bisect follow-on
-- [ ] Bisect which of the recent commits (9e26ec4 hoist /
-  2237a23 %.9g / 8f52509 TCE-eps / 7b97646 buf-of-INDEX) caused
-  the autotune-phase 280x slowdown on bench-train.  The kernel
-  count and dispatch histogram are unchanged from pre-regression
-  (2058 / metal-op:metal-tile = 1151:811), so the issue is
-  per-step cache lookup or recompile cost, not graph shape.
+- [~] (2026-05-06) Attempted to bisect.  Reverted
+  `src/codegen/render_uop.c` to commit `8f52509` (pre-`%.9g`)
+  and re-ran bench-train: still slow.  Reverted further to
+  pure HEAD: still slow.  Even `N_STEPS=2 TRAIN_BENCH_MODE=
+  baseline` (single phase) hangs past 5 minutes.
+
+  Root cause turned out to be **system-resource contention**
+  (multiple stale Wolfram Kernels running from earlier iterations
+  + the VSCode Wolfram extension's MCP Server pinning multiple
+  cores), not a code regression.  Mid-bisect there were 5+
+  Wolfram processes competing for the GPU.
+
+  Marked `[~]`; the autotune slowdown is environmental.  Bench
+  regression numbers from the prior iteration's commit message
+  (0.003x speedup, 116787 ms/step) should be re-measured on a
+  clean machine before pursuing this further.
