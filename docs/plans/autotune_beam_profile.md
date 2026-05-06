@@ -1500,3 +1500,34 @@ Predictions for K=2, L=1: thvm=15, tinygrad=8, leak=+7.
   Pool = 2x2, single-sample input, Ramp activations).
   Generalisation to BatchNorm, residual skip connections,
   attention, and batch>1 is untested.
+
+### Level 13: MLP2 + BatchNorm -- does the formula extend?
+
+The K,L formula assumes each layer is "linear-like" (1 matmul
++ 1 activation in tinygrad terms).  BatchNorm has a richer
+shape: reduce(mean+var) + broadcast(normalize) + affine.
+Probe: MLP2 + BN between Linear and Ramp.
+
+If BN is "+1 linear-block-equivalent": predicted thvm = 7 + 2 = 9.
+If BN fragments more (reduce + normalize separately): could
+be 7 + 4 or higher.
+
+- [~] (2026-05-06) Write `bench/autotune-ladder/mlp2_bn.wls`
+  -- MLP2 with `BatchNormalizationLayer[]` inserted between
+  `LinearLayer[128]` and `ElementwiseLayer[Ramp]`.  Save
+  stdout to `bench/autotune-ladder/mlp2_bn.txt`.  Inline
+  kernel_count, dispatch_kinds, totals_baseline_us,
+  totals_best_us, totals_speedup, kernels_with_proposals,
+  jit compile_us.  Compare to MLP2 (7 kernels) -- the delta
+  exposes how BN bufferizes in thvm.
+
+  **Skipped: `TFromNet` doesn't support
+  `BatchNormalizationLayer`**.  Same failure mode as the
+  batch=32 case (Level 7) -- the script ran cleanly but
+  `TRealize @ TFromNet[net, x]` returned without lowering
+  any kernels: `kernel_count = 0`, no error.
+
+  Empty capture saved as `mlp2_bn.txt` (evidence).  Adding
+  BN coverage to `TFromNet` is a multi-step WL+C change
+  outside a 5-min iteration -- belongs to the surface-area
+  expansion track, not the autotune-ladder.
