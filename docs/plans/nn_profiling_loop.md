@@ -207,7 +207,18 @@ every minute.
   which is correct since every output cell is written by exactly
   one thread.  No `UOP_OPT` wrap needed -- LOCAL flows through the
   axis_type encoding alone.
-- [ ] Same for `GLOBAL` — confirm `tg` bind.
+- [x] (2026-05-06) Same for `GLOBAL` -- confirm `tg` bind.
+  Applied LOCAL[0, 4] then GLOBAL[0, 4] to a 16-element TUOpAdd
+  kernel.  Rendered MSL:
+  ```msl
+  uint a0 = tg; /* global ext=4 */
+  uint a1 = tt; /* local ext=4 */
+  out[((a0 * 4) + a1)] = (in0[((a0 * 4) + a1)] + in1[((a0 * 4) + a1)]);
+  ```
+  Outer GLOBAL bound to `threadgroup_position_in_grid`, inner LOCAL
+  to `thread_position_in_threadgroup`; no for-loop -- fully
+  parallelised across 4 groups x 4 threads = 16 threads, one per
+  output element.
 
 ### Cross-framework comparison
 - [ ] Run tinygrad's `examples/beautiful_mnist.py` BS=32 N_STEPS=1 on
