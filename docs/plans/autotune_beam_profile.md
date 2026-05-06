@@ -3739,3 +3739,47 @@ The new rule needs to:
 
   Helper is defensive -- costs nothing if not matching.
   Worst case: it's correctness-preserving.
+
+### Level 36: instrument bufferize_uop_is_matmul to see if it fires
+
+The defensive guard didn't change dispatch (Level 35).  Two
+hypotheses:
+1. The matmul reduce IS in BUFFERIZE_NODES but a different
+   inline-* rule un-marks it (8 other unmark sites).
+2. The matmul reduce is NOT in BUFFERIZE_NODES (fused at a
+   different stage before bufferize seed).
+
+Instrument the helper to distinguish: print stderr when it's
+called and what it returns.  If it never fires for transformer
+matmul-shape reduces, hypothesis 2.  If it fires and returns
+1 but dispatch doesn't change, hypothesis 1.
+
+- [x] (2026-05-06) Add stderr trace to
+  `bufferize_uop_is_matmul` (gated by
+  `THVM_DUMP_MATMUL_DETECT=1`) showing each call's
+  reduce_loc and result.  Run transformer bench with the
+  flag.  Inline a count of matches vs misses.
+
+  Result: 13 calls.  Of those:
+  - **6 returned 1 (matmul detected)**: Q/K/V/O projections,
+    Q@K^T, attn@V (the attention-internal matmuls).
+  - 3 returned 0 because src0_op=10 (UOP_MUL) but
+    distinct=0 (same source for both operands -- variance-
+    style reductions like `sum(x*x)`).
+  - 2 returned 0 because src0_op != UOP_MUL (op=9 or 13 --
+    softmax tail / max reduce).
+  - 2 missing in count (rules called helper twice on some
+    reduces).
+
+  **The helper fires and detects matmuls correctly.**  But
+  Level 35 saw no dispatch change.  Hypothesis 1 confirmed:
+  the matmul reduce gets un-marked by a different inline-*
+  rule (not `inline_reduce_scalar_tail`).  Of the 8 other
+  unmark sites in bufferize_classify.c (L614, 821, 882,
+  1019, 1328, 1341, 1389, 1467), one is the actual culprit.
+
+  Next iteration: extend the matmul-protect guard to ALL 9
+  unmark sites and re-bench.  If still no change, the
+  problem is elsewhere (e.g., the matmul reduce isn't a
+  separate kernel-graph node and the fusion happens
+  somewhere besides the bufferize layer).

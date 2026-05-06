@@ -1477,12 +1477,23 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
 // (40x wall gap on transformer FFN kids 14/16).
 static int bufferize_uop_is_matmul(u64 reduce_loc) {
   Term mul = term_resolve(heap_read(reduce_loc + 0));
-  if (term_tag(mul) != TAG_UOP) return 0;
-  if (term_ext(mul) != UOP_MUL) return 0;
-  u64 mul_loc = term_val(mul);
-  Term a = term_resolve(heap_read(mul_loc + 0));
-  Term b = term_resolve(heap_read(mul_loc + 1));
-  return term_val(a) != term_val(b);
+  int is_mul = (term_tag(mul) == TAG_UOP) && (term_ext(mul) == UOP_MUL);
+  int distinct = 0;
+  if (is_mul) {
+    u64 mul_loc = term_val(mul);
+    Term a = term_resolve(heap_read(mul_loc + 0));
+    Term b = term_resolve(heap_read(mul_loc + 1));
+    distinct = (term_val(a) != term_val(b));
+  }
+  char const *e = getenv("THVM_DUMP_MATMUL_DETECT");
+  if (e != NULL && e[0] == '1') {
+    fprintf(stderr,
+            "matmul-detect: reduce_loc=%llu src0_op=%u is_mul=%d distinct=%d -> %d\n",
+            (unsigned long long)reduce_loc,
+            (unsigned)(term_tag(mul) == TAG_UOP ? term_ext(mul) : 0xFF),
+            is_mul, distinct, is_mul && distinct);
+  }
+  return is_mul && distinct;
 }
 
 static u32 bufferize_rule_inline_reduce_scalar_tail(Term root) {
