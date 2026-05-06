@@ -4214,3 +4214,53 @@ rules to understand the architectural framework.
     current logic.  Sketch a `buffer_in_reduce` check that
     mirrors tinygrad's L269-277 pattern.
 
+### Level 44: tinygrad UOp/rewrite engine refresher
+
+User direction: also refresh on tinygrad's UOp/rewrite
+infrastructure (not just rangeify rules).
+
+- [x] (2026-05-06) Read tinygrad/uop/ops.py:1078-1503.
+
+  Engine pieces:
+
+  - **UOp**: immutable hash-consed (op, dtype, src, arg) node.
+  - **UPat**: declarative pattern.  `UPat(Ops.X, src=(...))`
+    matches a node whose op is X and whose src matches the
+    nested pattern.  Bindings via `name=`.  Helpers like
+    `UPat.var(...)`, `UPat.cvar(...)`, `.f(op)`, `.cast()`,
+    `.reduce()`, `.alu()` build complex patterns concisely.
+  - **PatternMatcher**: list of (UPat, callable) pairs.
+    Callable returns replacement UOp or None.  Fast
+    dispatch via `pdict` keyed by top-level op + a
+    `early_reject` set of expected child-ops.
+  - **`+`**: composes PatternMatchers.
+    `pm_const_folding + PatternMatcher([(UPat..., lambda)])`.
+    Cached.
+  - **graph_rewrite(sink, pm)**: walks DAG, applies pm
+    iteratively (top-down or bottom-up) until fixpoint.
+
+  Architectural lesson vs thvm:
+  - tinygrad: declarative + composable + pure.
+  - thvm: imperative `BUFFERIZE_NODES[]` array, named rules
+    with shared stateful mutation, ordering-dependent.
+
+  Practical implication: thvm can't natively express
+  "rewrite this UPat to that" in one line.  Each rule has
+  to walk BUFFERIZE_NODES manually.  Porting tinygrad's
+  `buffer_in_reduce` check into thvm means writing the
+  toposort + gate logic by hand inside
+  `bufferize_rule_remove_removable_bufferize`, not adding
+  a single declarative pattern.
+
+  Long term, thvm could benefit from a UPat-style pattern
+  layer over UOp DAGs — but that's a bigger refactor.  For
+  the immediate fix, the porting recipe is:
+  1. In `bufferize_rule_remove_removable_bufferize`'s body
+     loop, add a toposort walk of the candidate's subtree.
+  2. Track accessed_buffers + reduces.
+  3. If a reduce in the walk touches a buffer, refuse to
+     remove (keep `realized=1`, don't unmark).
+
+  Next iteration sketches the C-side `buffer_in_reduce`
+  helper.
+
