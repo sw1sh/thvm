@@ -664,8 +664,34 @@ every minute.
   same-rank passthrough).
 
 ### partial-axis SHRINK lift implementation
-- [ ] Implement the partial-axis SHRINK lift design above:
-  recursively lift inner S_INDEX, append outer ranges with the
-  correct strides.  Smoke-test on LeNet forward (expect ~67% tile
-  coverage) AND bench-train (must not abort).  Verify softmax
-  numerics on forward match the legacy path within 1e-5.
+- [~] (2026-05-06) Attempted the axis-append lift: inner ranges -> 
+  dims [0, n_inner) with row-major strides, outer ranges -> dims
+  [n_inner, ndim).  bench-train completed without abort and
+  forward dispatch shifted from 60/40 to **47/53** metal-op/tile
+  (35/40 of 75) -- 10 more kernels lifted than the same-rank-only
+  pass.  But LeNet forward sample 3 produced **NaN** in the
+  rendered softmax: `confidence=Round[$Failed, 0.001]`.
+  Reverted; the simple row-major-stride composition assumed each
+  range spans its corresponding buffer dim, which doesn't hold
+  when rangeify emits partial ranges (movement-op residue).
+
+  Concrete failure: for the LeNet shape with buffer dims
+  `[50, 4, 4, 2]` (numel 1600), the rejected ranges had inner
+  src_count=4 and outer extent=2.  My code linearised assuming
+  inner ranges had extents [50, 4, 4] and outer had extent 2 --
+  but at least one inner range likely had a smaller extent (a
+  SHRINK-style sub-range), so the address arithmetic addressed
+  the wrong cells.
+
+  Direction: instead of blind row-major composition, audit the
+  inner/outer range extents at lift time and bail when any range
+  doesn't span its dim.  That's a bookkeeping fix, not a
+  structural one.
+
+### axis-append revisit
+- [ ] Re-attempt the axis-append lift with extent validation:
+  for each (range, dim) pair in the composed access, require
+  `range.extent == buf.dims[dim]`.  Reject otherwise.  Smoke-test
+  bench-train AND forward; verify forward sample 3 no longer
+  NaNs and that the metal-tile share grows above the same-rank-
+  only baseline (currently 30 of 75).

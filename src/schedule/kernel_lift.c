@@ -196,6 +196,15 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
   // access we can't lift safely (tested via lenet-mnist/bench-
   // train.wls; mismatched extents triggered SIGABRT on the
   // backward path).
+  // Axis-append composition was attempted but produced wrong
+  // numerics on LeNet forward (sample 3 NaN'd).  The simple
+  // row-major-stride composition over inner+outer ranges doesn't
+  // hold when the inner / outer ranges have extents that don't
+  // span their corresponding buffer dims (rangeify produces partial
+  // ranges as movement-op residue).  Reverted; needs a more
+  // careful design that takes range extents and movement semantics
+  // into account.  See nn_profiling_loop.md axis-append-revisit
+  // task.
   if (outer_rank == 1 && ndim > 1) {
     u32 r_sid = u->src[1];
     if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
