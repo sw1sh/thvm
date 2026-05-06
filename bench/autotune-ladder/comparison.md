@@ -14,6 +14,7 @@ discussion in [docs/plans/autotune_beam_profile.md](../../docs/plans/autotune_be
 | 3     | softmax (N=512)                |            3 |            471 |        1.16x |                3 |               1141 |            1.09x | **thvm** (2.4x)   |
 | 4     | MLP2 (784 -> 128 -> 10)        |            7 |           1340 |        1.08x |                5 |               2499 |            1.09x | **thvm** (1.9x)   |
 | 5     | conv2d (1x32x28x28, 5x5, 32)   |            3 |           3507 |        1.27x |                1 |               1604 |            0.99x | **tinygrad** (-54%)|
+| 6     | LeNet forward (1x28x28 -> 10)  |           19 |           3464 |        1.26x |               10 |               8487 |            1.06x | n/a (asymmetric*) |
 
 ## Notes on apples-to-oranges
 
@@ -21,6 +22,7 @@ discussion in [docs/plans/autotune_beam_profile.md](../../docs/plans/autotune_be
 - tinygrad "best" is the wall time of one Python `realize()` call (50-rep average), includes Python + dispatch overhead (~300 us per call).
 - For levels 1-4, thvm's absolute "wins" are partly a measurement-mode artefact: TKernelBenchUs benches the kernel direct; tinygrad pays Python wrapper cost.
 - Level 5 is the cleanest comparison because both frameworks hit a real GPU ceiling and the gap is 41% in tinygrad's favour despite the Python overhead.
+- \* Level 6 wall is asymmetric: thvm's 3464us is sum-of-per-kernel TKernelBenchUs (GPU-only), tinygrad's 8487us is wall over 50 realize() calls including Python + dispatch (~300us per call).  The apples-to-apples Level 6 signal is the kernel count (thvm 19, tinygrad 10 -- a +9 leak), not the us.
 
 ## Findings
 
@@ -37,6 +39,7 @@ Both frameworks extract roughly 1.0–1.6x from per-kernel tuning, with thvm sli
 | 3     |            3 |                3 |    0   |
 | 4     |            7 |                5 | **+2** |
 | 5     |            3 |                1 | **+2** |
+| 6     |           19 |               10 | **+9** |
 
 At MLP2 + conv2d, thvm dispatches 2 extra kernels per forward. Suspected leak sites:
 - **Softmax tail**: WAS an unfused metal-op outlier (kid 6 in MLP2, kid 2 in softmax). LANDED 2026-05-06 via the singleton-broadcast lift fast path ([src/schedule/kernel_lift.c:242](../../src/schedule/kernel_lift.c#L242)): both outliers now lift to metal-tile. Softmax saw a real ~16% wall win; MLP2's wall stayed flat (the per-op fallback was already fast on that shape).

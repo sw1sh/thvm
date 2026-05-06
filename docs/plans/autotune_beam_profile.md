@@ -1105,3 +1105,24 @@ and capture wall + tinygrad's kernel_count.
   on thvm -- consistent with the synthetic-ladder finding that
   per-kernel tuning is at parity and structural fusion is the
   dominant lever.
+
+### Add Level 6 row to comparison.md headline table
+
+Level 6 (LeNet forward) has both thvm and tinygrad numbers
+but `bench/autotune-ladder/comparison.md` only has rows for
+levels 1-5.  Pure docs sync from already-captured data.
+
+- [x] (2026-05-06) Append a Level 6 row to the headline
+  table in `bench/autotune-ladder/comparison.md`, including
+  the apples-to-oranges caveat (thvm best is sum-of-per-kernel
+  GPU-only, tinygrad steady_us includes Python overhead).
+  Update the "thvm leaks kernels at every level" sub-table
+  to add Level 6 (+9 leak).
+
+  Headline table gains a row 6: thvm 19 kernels @ 3464us /
+  1.26x vs tinygrad 10 @ 8487us / 1.06x; absolute winner
+  marked "n/a (asymmetric)" with a footnote pointing to the
+  GPU-only-vs-Python-wall mismatch.  Sub-table gains a row
+  with **+9 excess** kernels -- the largest gap in the
+  ladder, dominated by conv2d 3-into-1 (4 of the 9) plus
+  softmax / pool / flatten / linear-activation residue.
