@@ -881,20 +881,156 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // appear inside S_INDEX_E without being on the BUFFERIZE boundary).
   // The first n_buf entries get axis_ids matching BUFFERIZE order; the
   // rest get axis_ids continuing past n_buf.
+  //
+  // When ke->axes carries autotune-applied opts (UPCAST/UNROLL/LOCAL/
+  // GROUP/GROUPTOP/GLOBAL/SWAP), each BUFFERIZE range's axis_uop is
+  // replaced by a linearised expression over the post-mutation axes.
+  // Splitting axis a with arg L into (outer of size N/L, inner of size L)
+  // produces axis_uop_a = outer * L + inner where outer/inner are new
+  // UOP_RANGE leaves with the appropriate axis_types.  The renderer
+  // walks the addr/value tree and emits one for-loop / thread bind per
+  // discovered UOP_RANGE leaf, so split semantics flow through to MSL.
   u32 n_buf = (u32)bu->src_count - 1;
   if (n_buf > MAX_DIM) return 0;
   LiftRangeMap ranges[MAX_DIM * 2];
   u32 n_ranges = 0;
+  // Working list of "current axes" after applied-opt replay.  Each
+  // entry contributes `axis_uop * factor` to its origin BUFFERIZE
+  // range's linearised expression.  Initially: one entry per
+  // BUFFERIZE range with factor=1 and axis_type/extent from S_RANGE.
+  typedef struct {
+    u32 axis_type;
+    u32 extent;
+    u32 origin;       // index into BUFFERIZE.src[1..n_buf]
+    u32 factor;       // multiplier in linearisation
+  } SplitAxis;
+  SplitAxis cur[MAX_AXES];
+  u32 n_cur = 0;
+  u32 r_sids[MAX_DIM];
   for (u32 i = 0; i < n_buf; i++) {
     u32 r_sid = bu->src[1 + i];
     if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
     ScalarUop const *ru = &ke->scalar_uops[r_sid];
     if (ru->op != S_RANGE) return 0;
-    u32 axis_type = (u32)(ru->extra >> 32) & 0xFFu;
-    u32 extent    = (u32)(ru->extra & 0xFFFFFFFFu);
+    r_sids[i] = r_sid;
+    cur[n_cur].axis_type = (u32)(ru->extra >> 32) & 0xFFu;
+    cur[n_cur].extent    = (u32)(ru->extra & 0xFFFFFFFFu);
+    cur[n_cur].origin    = i;
+    cur[n_cur].factor    = 1;
+    n_cur++;
+  }
+  // Replay applied_opts when present.  Pre-mutated axes (test seam:
+  // direct assignment to ke->axes->axis_types/full_shape with no
+  // applied_opts log) are honoured when n_buf == 1: distribute axes
+  // across the single origin in declaration order.
+  //
+  // Skip replay for reduce kernels: REDUCE / GROUP_REDUCE axes target
+  // per-USE ranges that aren't in BUFFERIZE.src, and the S_REDUCE_SUM
+  // lifter requires a single UOP_RANGE for the reduce axis -- splitting
+  // would produce a compound expression it can't decode.  Reduce-
+  // dimension autotune effects flow through a different path.
+  KernelAxes const *kax = ke->axes;
+  u32 n_applied = (kax != NULL) ? (u32)kax->n_applied : 0;
+  int has_reduce_axis = 0;
+  if (kax != NULL) {
+    for (u32 a = 0; a < kax->n_axes; a++) {
+      if (kax->axis_types[a] == KAX_REDUCE
+          || kax->axis_types[a] == KAX_GROUP_REDUCE) {
+        has_reduce_axis = 1;
+        break;
+      }
+    }
+  }
+  if (has_reduce_axis) {
+    n_applied = 0;
+    kax = NULL;
+  }
+  if (n_applied > 0) {
+    KOpt const *opts = kax->applied_opts;
+    for (u32 oi = 0; oi < n_applied; oi++) {
+      KOpt o = opts[oi];
+      if (o.axis >= n_cur) return 0;
+      u8 op = o.op;
+      if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
+          || op == KOP_GROUP || op == KOP_GROUPTOP) {
+        if (o.arg == 0 || cur[o.axis].extent % o.arg != 0) return 0;
+        if (n_cur >= MAX_AXES) return 0;
+        // Shift right.
+        for (u32 j = n_cur; j > (u32)o.axis + 1; j--) cur[j] = cur[j - 1];
+        u32 outer_extent = cur[o.axis].extent / o.arg;
+        u32 inner_extent = o.arg;
+        u8  inner_kax    = (op == KOP_UPCAST)   ? KAX_UPCAST
+                         : (op == KOP_UNROLL)   ? KAX_UNROLL
+                         : (op == KOP_LOCAL)    ? KAX_LOCAL
+                         : KAX_GROUP_REDUCE;
+        u32 origin = cur[o.axis].origin;
+        u32 factor = cur[o.axis].factor;
+        // Outer keeps original axis_type, inner takes the opt's type.
+        cur[o.axis].extent = outer_extent;
+        cur[o.axis].factor = factor * inner_extent;
+        cur[o.axis + 1].axis_type = inner_kax;
+        cur[o.axis + 1].extent    = inner_extent;
+        cur[o.axis + 1].origin    = origin;
+        cur[o.axis + 1].factor    = factor;
+        n_cur++;
+      } else if (op == KOP_GLOBAL) {
+        if (cur[o.axis].axis_type != KAX_LOOP || o.arg != cur[o.axis].extent) {
+          return 0;
+        }
+        cur[o.axis].axis_type = KAX_GLOBAL;
+      } else if (op == KOP_SWAP) {
+        if ((u32)o.arg >= n_cur) return 0;
+        SplitAxis t = cur[o.axis];
+        cur[o.axis] = cur[o.arg];
+        cur[o.arg]  = t;
+      } else if (op == KOP_TC) {
+        // Tensor-core opt is metadata-only; pattern-matched in render.
+      } else {
+        return 0;
+      }
+    }
+  } else if (kax != NULL && kax->n_axes > n_buf && n_buf == 1) {
+    // Test seam: ke->axes was hand-mutated without going through
+    // axes_apply_opt.  Honour the assigned axis structure when there's
+    // a single origin to map to.  Replace cur[0] with kax->n_axes
+    // entries, all origin=0, factors picked so the linearisation
+    // matches row-major across the assigned axes.
+    if (kax->n_axes > MAX_AXES) return 0;
+    u32 product = 1;
+    for (u32 a = 0; a < kax->n_axes; a++) product *= kax->full_shape[a];
+    if (product != cur[0].extent) return 0;
+    n_cur = 0;
+    u32 inner_prod = 1;
+    for (u32 a = kax->n_axes; a > 0; a--) {
+      u32 idx = a - 1;
+      cur[idx].axis_type = kax->axis_types[idx];
+      cur[idx].extent    = kax->full_shape[idx];
+      cur[idx].origin    = 0;
+      cur[idx].factor    = inner_prod;
+      inner_prod *= kax->full_shape[idx];
+    }
+    n_cur = kax->n_axes;
+  }
+  // Allocate UOP_RANGE leaves for each post-replay axis and compose
+  // per-origin linearised expressions in row-major order (left-to-right
+  // axes are outermost; accumulating from the left).
+  Term origin_expr[MAX_DIM] = {0};
+  for (u32 a = 0; a < n_cur; a++) {
+    Term r = uop_range(a, cur[a].axis_type, cur[a].extent);
+    Term term = (cur[a].factor == 1)
+              ? r
+              : uop_int_binary(UOP_IMUL, r,
+                               uop_const(DT_INT32, cur[a].factor));
+    u32 origin = cur[a].origin;
+    origin_expr[origin] = (origin_expr[origin] == 0)
+        ? term
+        : uop_int_binary(UOP_IADD, origin_expr[origin], term);
+  }
+  for (u32 i = 0; i < n_buf; i++) {
+    if (origin_expr[i] == 0) origin_expr[i] = uop_const(DT_INT32, 0);
     ranges[n_ranges].axis_id   = n_ranges;
-    ranges[n_ranges].scalar_id = r_sid;
-    ranges[n_ranges].axis_uop  = uop_range(n_ranges, axis_type, extent);
+    ranges[n_ranges].scalar_id = r_sids[i];
+    ranges[n_ranges].axis_uop  = origin_expr[i];
     n_ranges++;
   }
   // Per-USE auxiliary S_RANGE leaves (not in BUFFERIZE) -- find by

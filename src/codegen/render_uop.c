@@ -243,9 +243,10 @@ static void rmu_emit_term(Term t, FILE *fp) {
 // Up to MAX_DIM ranges per kernel; duplicates skipped (same axis_id
 // only emits one for-loop).  When a range is encountered via a
 // wrapping OPT(range, kind, factor) we record (kind, factor) into
-// `opt_kinds[]` / `opt_factors[]` so emit_range_open can fire the
-// matching pragma (UNROLL/UPCAST).  No-OPT ranges record kind=0 /
-// factor=0 (UNROLL with factor=0 is a no-op).
+// `opt_kinds[]` / `opt_factors[]`.  RMU_NO_OPT marks "no OPT wrap"
+// distinctly from "OPT(_, UNROLL, _)" since UOP_OPT_UNROLL == 0
+// would otherwise collide with the zero-init default.
+#define RMU_NO_OPT 0xFFu
 static void rmu_collect_ranges_rec(Term t, Term *ranges,
                                    u32 *opt_kinds, u32 *opt_factors,
                                    u32 *n_out,
@@ -272,22 +273,22 @@ static void rmu_collect_ranges_rec(Term t, Term *ranges,
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, 0, 0);
+                             opt_factors, n_out, RMU_NO_OPT, 0);
       rmu_collect_ranges_rec(heap_read(loc + 1), ranges, opt_kinds,
-                             opt_factors, n_out, 0, 0);
+                             opt_factors, n_out, RMU_NO_OPT, 0);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2:  case UOP_SQRT:
       rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, 0, 0);
+                             opt_factors, n_out, RMU_NO_OPT, 0);
       return;
     case UOP_IWHERE:
       rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, 0, 0);
+                             opt_factors, n_out, RMU_NO_OPT, 0);
       rmu_collect_ranges_rec(heap_read(loc + 1), ranges, opt_kinds,
-                             opt_factors, n_out, 0, 0);
+                             opt_factors, n_out, RMU_NO_OPT, 0);
       rmu_collect_ranges_rec(heap_read(loc + 2), ranges, opt_kinds,
-                             opt_factors, n_out, 0, 0);
+                             opt_factors, n_out, RMU_NO_OPT, 0);
       return;
     case UOP_OPT: {
       // OPT(target, kind, factor): inherit annotation into the
@@ -301,7 +302,7 @@ static void rmu_collect_ranges_rec(Term t, Term *ranges,
     }
     case UOP_CAST: case UOP_BITCAST:
       rmu_collect_ranges_rec(heap_read(loc + 0), ranges, opt_kinds,
-                             opt_factors, n_out, 0, 0);
+                             opt_factors, n_out, RMU_NO_OPT, 0);
       return;
     default:
       return;
@@ -361,7 +362,7 @@ static void rmu_collect_ranges_with_opts(Term t, Term *ranges,
                                          u32 *opt_factors,
                                          u32 *n_out) {
   rmu_collect_ranges_rec(t, ranges, opt_kinds, opt_factors, n_out,
-                         0, 0);
+                         RMU_NO_OPT, 0);
 }
 
 // Returns 1 if `kind`/`axis_type` indicates the axis binds directly to
@@ -656,7 +657,10 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
                   ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
     int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type);
-    if (out_kinds[i] == UOP_OPT_UNROLL || out_kinds[i] == UOP_OPT_UPCAST) {
+    if (out_kinds[i] != RMU_NO_OPT
+        && (out_kinds[i] == UOP_OPT_UNROLL
+            || out_kinds[i] == UOP_OPT_UPCAST)
+        && !threadbound) {
       for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
       if (out_factors[i] > 0) {
         fprintf(fp, "#pragma unroll(%u)\n", out_factors[i]);
@@ -681,7 +685,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   Term red_range = ranges[reduce_idx];
   u32  red_kind_opt   = opt_kinds  [reduce_idx];
   u32  red_factor_opt = opt_factors[reduce_idx];
-  if (red_kind_opt == UOP_OPT_UNROLL) {
+  if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_UNROLL) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     if (red_factor_opt > 0) fprintf(fp, "#pragma unroll(%u)\n", red_factor_opt);
     else                    fputs("#pragma unroll\n", fp);
@@ -738,7 +742,10 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
                   ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
     int threadbound = rmu_axis_is_threadbound(opt_kinds[i], axis_type);
-    if (opt_kinds[i] == UOP_OPT_UNROLL || opt_kinds[i] == UOP_OPT_UPCAST) {
+    if (opt_kinds[i] != RMU_NO_OPT
+        && (opt_kinds[i] == UOP_OPT_UNROLL
+            || opt_kinds[i] == UOP_OPT_UPCAST)
+        && !threadbound) {
       for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
       if (opt_factors[i] > 0) {
         fprintf(fp, "#pragma unroll(%u)\n", opt_factors[i]);

@@ -978,6 +978,10 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
   if (lib == nil) {
     fprintf(stderr, "thvm: metal_tile_jit -- compile failed: %s\n",
             err ? [[err localizedDescription] UTF8String] : "(no error)");
+    if (getenv("THVM_DUMP_TILE_JIT_SRC")) {
+      fprintf(stderr, "---- failing source ----\n%s\n----\n",
+              [srcStr UTF8String]);
+    }
     return nil;
   }
   id<MTLFunction> mtlFn = [lib newFunctionWithName:@"k"];
