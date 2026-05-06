@@ -1,12 +1,14 @@
-## post-Level-22 patch
+## post-default-on (Level 24, commit 9e25f48)
 
-lift rejects: 0 (was 532)
-
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
 layernorm kernel_count: 2
 dispatch_kinds: {{metal-tile, 1}, {metal-op, 1}}
-kid 1 kind=metal-tile baseline=1763.us best=1047.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[UNROLL, 2, 4]}
-totals_baseline_us: 1763.
-totals_best_us: 1047.
-totals_speedup: 1.68386
+kid 1 kind=metal-tile baseline=3972.us best=3133.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 8]}
+totals_baseline_us: 3972.
+totals_best_us: 3133.
+totals_speedup: 1.26779
 kernels_with_proposals: 1
 kernels_with_applied: 1
+thvm: metal_jit stats -- hits=113 misses=20 bypass=0 compile_us=58865

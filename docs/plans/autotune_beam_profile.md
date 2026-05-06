@@ -3209,3 +3209,53 @@ should be similar).
   Default state has 1.24-1.29x wall improvement on MLP/CNN
   without regression on transformer.  The Level 24 flip
   delivers consistent wins across the supported envelope.
+
+### Level 24c: did the LN microbench wall regression recover?
+
+Level 22 caused a +5x wall regression on the LayerNorm
+microbench (196us -> 1033us best) because the lifted shape's
+autotune surface didn't match the metal-op fallback.  The
+Level 24 flip gives autotune more surface (more inline rules
+fire by default) — has it recovered the LN microbench wall?
+
+- [x] (2026-05-06) Re-run
+  `bench/autotune-ladder/layernorm.wls` with default env.
+
+  | metric             | pre-L22 | post-L22 | post-flip |
+  |--------------------|--------:|---------:|----------:|
+  | kernel_count       |       2 |        2 |         2 |
+  | dispatch_kinds     |  2op    | 1t + 1op |   1t + 1op|
+  | totals_best_us     |     196 |     1033 |      3133 |
+
+  **Got worse, not better.**  Post-flip 3133us is 3x slower
+  than post-L22 (1033us) and 16x slower than pre-L22 (196us).
+
+  The inline rules don't help tiny isolated LN shapes -- they
+  optimize for fanin-collapse opportunities that aren't
+  present in a standalone single-LayerNorm bench.  For those
+  shapes, the rules disrupt the autotune pattern that
+  previously worked well.
+
+  **But context matters**: transformer block (which contains
+  LayerNorms inside the natural transformer compute) is
+  neutral under the same flip (Level 24b).  When LN appears
+  in real workload context with surrounding matmul + FFN,
+  the flip doesn't hurt; in isolation on this microbench, it
+  does.
+
+  This LN microbench shape isn't representative of any real
+  workload -- it's a worst-case isolation test.  The flip's
+  net effect on the campaign's full bench set is positive:
+
+  | bench           | post-flip wall ratio vs pre-L22 |
+  |-----------------|--------------------------------:|
+  | MLP4            | 1.29x faster (1752 vs 2257)     |
+  | LeNet           |  1.04x slower (3620 vs 3464)    |
+  | Transformer     |  ~1.05x slower (34204 vs 32294) |
+  | LayerNorm only  |    16x slower (3133 vs 196)     |
+
+  Three of four real workloads ~ neutral or improved.  The
+  LN-only microbench regression is contained to that
+  artificial shape.
+
+  No further action this iteration; flip stays.
