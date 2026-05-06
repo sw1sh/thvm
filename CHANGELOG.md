@@ -6,6 +6,31 @@ dated section.
 
 ## Unreleased
 
+### Phase 7 iter J blocker: dylib worker TLS (2026-05-06)
+
+Attempted to wire `Method -> {"CPU", "NumThreads" -> n}` through the
+existing `aot_run_parallel` path via a new `aot_program_<name>_run_pooled`
+entry point.  Compile pipeline + WL bridge (thvm_wl_aot_run4_pooled,
+$aotRun4PooledFn, aotCpuRunImpl threading) all worked; n=1 short-circuits
+to serial cleanly.
+
+`n>1` SEGVs.  Root cause: `CURRENT_WNF_STATE` is `_Thread_local` and the
+dylib's TU has its own slot.  The run entry sets it on the calling
+thread, but the workers spawned via `pthread_create` inside the dylib's
+`aot_run_parallel` see `CURRENT_WNF_STATE == NULL` -- any subsequent
+`wnf` / `cnf` / `aot_force` call on a worker dereferences a null
+`WNF_STACK` macro and crashes.
+
+The in-tree `test_bend_tree_sum` works because the AOT'd tree-sum body
+doesn't trigger any `wnf` re-entry, but realistic AOT'd bodies (force on
+MAT scrutinee, REF unfold, ALO realize) need the per-worker
+`WnfThreadState` set.
+
+Fix sketch: add per-worker TLS init in `aot_worker_main` -- allocate a
+per-worker `WnfThreadState` (small struct: `Term *stack` + `u32 s_pos`)
+on the worker thread's stack/heap and `CURRENT_WNF_STATE = &it`.  Mirror
+the pattern in `src/wnf/pool.c:443`.  Reverted iter J for now; deferred.
+
 ### Plan revision: 2 IRs, not 3 (2026-05-05)
 
 After ingesting tinygrad's TileLang correspondence + Fragment ↔
