@@ -745,3 +745,39 @@ every minute.
   - `forward.wls` with SeedRandom[7]: all 5 samples produce
     sane predictions (sample 5 even predicts correctly!).
   - make test 274/274; nn.wlt 52/52; core.wlt 32/32.
+
+### Re-bench LeNet train with stable softmax + buf-of-INDEX
+- [x] (2026-05-06) Re-run `wl/Examples/lenet-mnist/bench-train.wls`
+  N_STEPS=5 with the current state.  Saved to
+  `bench/lenet-mnist/train_stable_softmax.txt`.  **Slower than
+  pre-stable-softmax**:
+
+  | run                               | ms/step | speedup | kernels | metal-op | metal-tile |
+  |-----------------------------------|--------:|--------:|--------:|---------:|-----------:|
+  | original                          |     262 |  1.29x  |    1198 |      778 |        372 |
+  | + buf-of-INDEX same-rank          |     192 |  1.07x  |    1198 |      752 |        398 |
+  | + stable softmax (HEAD)           |     315 |  0.789x |    2058 |     1151 |        811 |
+
+  The stable softmax adds a MAX reduce + broadcast that nearly
+  doubles the kernel count (1198 -> 2058).  The autotune pass
+  *slowed down* the run (autotune speedup 0.789x).  Likely cause:
+  the extra reduce kernels + broadcast pattern aren't fused by
+  the scheduler's relaxation pass, and autotune's per-kernel
+  bench probes amplified that overhead.
+
+  Loss is still `$Failed` -- TCrossEntropyLoss applies `Log[pred]`
+  which underflows to `-inf` when softmax peaks too sharply
+  (probability ~0 for non-winning class).
+
+### Stable softmax kernel-count regression follow-on
+- [ ] Investigate why the stable softmax adds ~860 kernels
+  (1198 -> 2058) instead of fusing the max-reduce into the
+  surrounding chain.  The rangeify relaxation pass should
+  collapse adjacent reduce + broadcast into one kernel; check
+  whether `THVM_DUMP_RANGEIFY_BAIL=1` flags new bail reasons.
+
+### Loss numerical stabilisation follow-on
+- [ ] Add a small epsilon clamp in TCrossEntropyLoss
+  (`Log[pred + eps]` or equivalent log-sum-exp) so cross-entropy
+  doesn't underflow on sharply-peaked softmax.  Verify
+  bench-train returns numeric losses.
