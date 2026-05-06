@@ -354,6 +354,14 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
         return out;
       }
       default: {
+        // Iter UU: any tag we don't have a value-fold case for
+        // (TPri / TSup / TUOp / TAlo / TBri / TInc / ...) signals
+        // an emit failure with the offending tag.  Silent 0u
+        // returns produced wrong-but-running kernels.
+        aot_msl_emit_fail(
+            "unsupported tag %u in value position -- def shape "
+            "isn't yet supported by the Metal emit",
+            tag);
         snprintf(out, 80, "0u /* unsupported tag %u */", tag);
         return out;
       }

@@ -121,6 +121,21 @@ int main(void) {
   CHECK_EQ(term_val(BOOK_HEAP[inner_loc + 1]), (u64)13);
   CHECK_EQ(term_val(BOOK_HEAP[inner_loc + 2]), (u64)13);
 
+  // Iter UU: unsupported tag in value position -> explicit emit
+  // failure.  TAG_ANY (wildcard) has no value-fold semantics; the
+  // emit's default case should bail with a reason.
+  TEST_BEGIN("unsupported tag (TAG_ANY) -> compile_and_run returns 0");
+  Term any_body = term_new(0, TAG_ANY, 0, 0);
+  u32 def_id_any = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id_any = i; break; }
+  }
+  DEFS[def_id_any] = any_body;
+  result = thvm_aot_metal_compile_and_run(
+      "any_def", def_id_any, NULL, 0,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(result, (Term)0);
+
   // Iter LL: unbound TVar in body -> emit failure.  Build a def
   // whose body references a TVar bound to a heap loc that ISN'T
   // a peeled LAM binder -- the emit can't resolve it and should
