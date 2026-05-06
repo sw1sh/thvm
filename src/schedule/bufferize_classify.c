@@ -208,6 +208,18 @@ static u64 bufferize_unique_uop_parent(u64 child_loc) {
   return found;
 }
 
+// Shared UPat: scalar-preserving unary (1-arity op in the {NEG,
+// RECIP, SQRT, EXP2, LOG2} set).  Used by every chain-walker hop
+// predicate that asks "does this hop keep the post-reduce shape?".
+// No bindings, no nested src; structural test is the op-set match
+// alone.
+static u8 const bufferize_upat_scalar_unary_alt[] = {
+  UOP_NEG, UOP_RECIP, UOP_SQRT, UOP_EXP2, UOP_LOG2, 0
+};
+static UPat const bufferize_upat_scalar_unary = {
+  0, 1, 0, -1, NULL, bufferize_upat_scalar_unary_alt
+};
+
 // Shared UPat: {UOP_ADD, UOP_MUL}(?0, ?1) -- "ALU with two children",
 // both captured.  Used by the chain-walker hop predicates that need
 // to test the sibling against a const-y wrapper (broadcast-of-CONST
@@ -232,14 +244,11 @@ static UPat const bufferize_upat_alu2 = {
 // constant.  `cur` is the loc of the current node; the predicate must
 // inspect the node's children for the ALU case.
 static int bufferize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
-  if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
-   || pop == UOP_EXP2 || pop == UOP_LOG2
-   || pop == UOP_RESHAPE || pop == UOP_PERMUTE) {
-    return 1;
-  }
-  Term parent_term = term_new(0, TAG_UOP, pop, cur);
+  Term cur_term = term_new(0, TAG_UOP, pop, cur);
+  if (upat_match(&bufferize_upat_scalar_unary, cur_term, NULL)) return 1;
+  if (pop == UOP_RESHAPE || pop == UOP_PERMUTE) return 1;
   Term bindings[UPAT_NUM_BINDINGS] = {0};
-  if (upat_match(&bufferize_upat_alu2, parent_term, bindings)) {
+  if (upat_match(&bufferize_upat_alu2, cur_term, bindings)) {
     if (bufferize_term_is_broadcast_of_const(bindings[0], 0)) return 1;
     if (bufferize_term_is_broadcast_of_const(bindings[1], 0)) return 1;
   }
@@ -355,15 +364,14 @@ static int bufferize_reduce_consumer_is_scalar_tail(u64 reduce_loc, u64 root_loc
     if (idx == 0xFFFFFFFFu) return 0;
     u8 pop = BUFFERIZE_NODES[idx].op;
     // Scalar-preserving unary ops keep the post-reduce shape.
-    if (pop == UOP_NEG || pop == UOP_RECIP || pop == UOP_SQRT
-     || pop == UOP_EXP2 || pop == UOP_LOG2) {
+    Term parent_term = term_new(0, TAG_UOP, pop, parent);
+    if (upat_match(&bufferize_upat_scalar_unary, parent_term, NULL)) {
       cur = parent;
       continue;
     }
     // Binary ops where the OTHER child is a scalar (CONST or
     // numel-1 EXPAND) also keep the post-reduce shape.  We approx
     // by allowing ADD/MUL when the parent has a CONST sibling.
-    Term parent_term = term_new(0, TAG_UOP, pop, parent);
     Term bindings[UPAT_NUM_BINDINGS] = {0};
     if (upat_match(&bufferize_upat_alu2, parent_term, bindings)) {
       int has_const = 0;

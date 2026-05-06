@@ -4460,8 +4460,15 @@ task.  Break it down:
       consumer using `op_alt`.  `make test` clean; two_linears
       dispatch unchanged ({metal-gemm:1, metal-tile:2}, kid 1 still
       metal-gemm 178us baseline -> 154us best with TC).
-    - [ ] Port the scalar-preserving-unary chain hop (`{NEG,
-      RECIP, SQRT, EXP2, LOG2}`) to UPat using `op_alt`.
+    - [x] (2026-05-07) Port the scalar-preserving-unary chain hop
+      (`{NEG, RECIP, SQRT, EXP2, LOG2}`) to UPat using `op_alt`.
+      Shared `bufferize_upat_scalar_unary` (file scope) replaces
+      the 5-clause OR in both `bufferize_chain_hop_is_scalar_preserving`
+      and `bufferize_reduce_consumer_is_scalar_tail`.  Set lives in
+      one place; future additions only edit one array.  `make test`
+      clean; two_linears dispatch unchanged ({metal-gemm:1,
+      metal-tile:2}, kid 1 metal-gemm 185us baseline -> 153us
+      best with TOpt[TC,0,16]).
     - [ ] Port the movement-passthrough chain hop (`{RESHAPE,
       PERMUTE}`) to UPat using `op_alt`.
 
