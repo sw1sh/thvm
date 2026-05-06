@@ -3398,3 +3398,53 @@ the standalone fc1.
   Concrete fix lives in the metal dispatch / shape-recognise
   logic, not in autotune or bufferize.  Fits a small code
   iteration once the right code site is found.
+
+### Level 29: locate the gemm-vs-tile dispatch decision
+
+The matmul kid 14 in transformer block dispatches as
+metal-tile (13907us) instead of metal-gemm (which would
+route through the TC tensor-core path, ~177us).  Find the
+code site that makes this decision so a future iteration
+can adjust the criteria.
+
+- [x] (2026-05-06) Read-only investigation in
+  `src/codegen/render_metal.c` and `src/backend/metal/_.m`
+  to locate the function that decides "this kernel is a
+  gemm" vs "this kernel is generic tile".
+
+  Function chain:
+  - `metal_dispatch_kernel` ([src/backend/metal/_.m:2020](../../src/backend/metal/_.m#L2020))
+    -> tries `metal_try_gemm` first
+  - `metal_try_gemm` ([src/backend/metal/_.m:1958](../../src/backend/metal/_.m#L1958))
+    -> requires `tile_collect_mma_plan` to succeed
+  - `tile_collect_mma_plan` ([src/schedule/tile.c:1947](../../src/schedule/tile.c#L1947))
+    -> requires `tile_collect_plan_info` to set
+       `plan.mma_tile_id != 0`
+  - `tile_collect_plan_info` ([src/schedule/tile.c:1538](../../src/schedule/tile.c#L1538))
+    -> the gate is at L1548:
+
+          if (root->op == TILE_MMA) {
+            // gemm path
+          }
+
+  **The kernel's tile_root must have `op == TILE_MMA`** for
+  metal_try_gemm to take the gemm path.
+
+  Standalone fc1 (kid 1 in matmul_ffn): metal-gemm dispatched
+  -> root op is TILE_MMA in standalone.
+  Transformer kid 14 (FFN fc1): metal-tile dispatched
+  -> root op is NOT TILE_MMA in context.
+
+  Likely cause: in transformer context, the matmul is fused
+  with surrounding compute (LN1 input + Ramp output + maybe
+  residual-add) at the tile-IR level, producing a different
+  tile_root op than TILE_MMA.  Need to instrument
+  `tile_root` op for kid 14 in transformer to confirm.
+
+  Concrete next-step probe: dump `ke->tile_uops[ke->tile_root]
+  .op` for each kid in the transformer block.  If kid 14 is
+  not TILE_MMA, the fix is in tile-IR construction
+  (preserve TILE_MMA at root when matmul is the dominant
+  reduce, even with surrounding fusion) -- a focused tile-IR
+  change.  If kid 14 IS TILE_MMA but later checks fail, the
+  fix is in those later checks.
