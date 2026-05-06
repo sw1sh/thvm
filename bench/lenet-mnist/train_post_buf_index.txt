@@ -1,0 +1,50 @@
+LeNet training benchmark
+  THVM_BACKEND=metal  THVM_TILE=1
+  TRAIN_BENCH_MODE=both  N_STEPS=5  WARMUP_STEPS=1  MAX_TUNE_KERNELS=32
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+
+=== baseline ===
+fixed MNIST label: 4
+warmup steps: 1  timed steps: 5
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=3 src_count=3
+lift reject: index/ndim-mismatch buf_ndim=3 src_count=3
+lift reject: index/ndim-mismatch buf_ndim=3 src_count=3
+lift reject: index/ndim-mismatch buf_ndim=3 src_count=3
+lift reject: index/ndim-mismatch buf_ndim=3 src_count=3
+lift reject: index/ndim-mismatch buf_ndim=3 src_count=3
+lift reject: index/ndim-mismatch buf_ndim=3 src_count=3
+lift reject: index/ndim-mismatch buf_ndim=3 src_count=3
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+
+wl: kernel killed by signal 6 (Abort)

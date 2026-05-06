@@ -581,3 +581,25 @@ every minute.
   through to a faster per-op metallib path.  Steady-state still
   wins because the rendered tile kernels amortise compile cost
   across calls.
+
+### Bench-train re-run with buf-of-INDEX see-through
+- [~] (2026-05-06) Re-run `wl/Examples/lenet-mnist/bench-train.wls`
+  N_STEPS=5 now that 67% of kernels use the tile path (was 40%).
+  Saved partial output to
+  `bench/lenet-mnist/train_post_buf_index.txt`.  **Blocked**: the
+  bench-train run aborts with `kernel killed by signal 6`
+  (SIGABRT) during the baseline phase.  Verified the abort is
+  caused by the buf-of-INDEX see-through commit (`7b97646`) by
+  checking out the prior commit (`901e474`) and confirming
+  bench-train completes there (1198 kernels, 1.03x autotune
+  speedup).  make test 274/274 still passes; the abort only fires
+  on shapes the C-side tests don't exercise.
+
+### Bench-train regression follow-on
+- [ ] Identify which kernel shape under
+  `lenet-mnist/bench-train.wls` triggers the SIGABRT after the
+  buf-of-INDEX see-through.  Hypothesis: the flat-index special
+  case (outer rank 1, buf rank > 1) emits a UOP_INDEX_E with a
+  range whose stride doesn't match the buffer's row-major layout,
+  causing an OOB read in the renderer or runtime.  Reproduce in
+  isolation, fix, re-enable bench-train.
