@@ -157,9 +157,32 @@ Hot-path benchmark (M3 Max, after caches warm):
 
 Dominated by Metal kernel launch + readback; the actual fold is a
 handful of nanoseconds.  Consider Metal when you have many
-independent reductions to dispatch in batches (see
-`aot_eval_op2_fold_batch` in `src/backend/metal/shaders/aot_eval.metal`),
-not when you're spinning a tight reduce-tiny-thing loop.
+independent reductions to dispatch in batches (see "Batch dispatch"
+below), not when you're spinning a tight reduce-tiny-thing loop.
+
+CPU baseline for the same OP2(NUM,NUM) fold via `wnf` (no kernel
+launch): ~0.26 us / call -- ~1000x faster than Metal for tiny defs.
+
+## Batch dispatch
+
+When you have N independent OP2 redexes queued up, fire them in a
+SINGLE Metal dispatch via the iter B-2 batch kernel
+(`aot_eval_op2_fold_batch`):
+
+```wolfram
+(* Build N OP2(NUM,NUM) cells in book_heap (rootLocs each point at one). *)
+results = TAOTBatchOp2Fold[rootLocs];   (* one dispatch, N folds *)
+```
+
+Bench numbers (M3 Max) for 256 OP2 ADD redexes:
+- Sequential: 256 separate dispatches = ~43 ms (~169 us/call)
+- Batch:      1 dispatch handles all 256 = ~187 us (~0.7 us/call)
+- **Speedup: ~231x**
+
+The batch path is the dominant win for Metal AOT.  Build OP2 cells
+in book_heap (so the kernel's `heap` MTLBuffer can deref them) via
+the private bridges -- see `wl/THVMLink/Tests/aot_metal.wlt`'s
+TAOTBatchOp2Fold test for a worked example.
 
 ## Source layout
 
@@ -168,8 +191,8 @@ not when you're spinning a tight reduce-tiny-thing loop.
 | `src/aot/metal_emit.c`                            | MSL emitter                         |
 | `src/backend/metal/shaders/aot_eval.metal`        | Hand-written MSL primitives         |
 | `src/backend/metal/_.m` (Phase 7 sections)        | Host dispatch + PSO cache           |
-| `wl/THVMLink/CSource/thvmlink.c` (`thvm_wl_aot_metal_run_n`) | LibraryLink bridge      |
-| `wl/THVMLink/Kernel/AOT.wl` (`aotMetalRunImpl`)   | WL Method dispatcher                |
+| `wl/THVMLink/CSource/thvmlink.c` (`thvm_wl_aot_metal_run_n`, `thvm_wl_aot_metal_op2_fold_batch`) | LibraryLink bridges |
+| `wl/THVMLink/Kernel/AOT.wl` (`aotMetalRunImpl`, `TAOTBatchOp2Fold`) | WL Method dispatcher + batch surface |
 | `tests/test_aot_metal_run.c`                      | C-level e2e tests                   |
 | `wl/THVMLink/Tests/aot_metal.wlt`                 | WL e2e regression suite             |
 | `src/aot/wnf_metal_shim.h`                        | Iter M scaffold for wnf port (deferred) |
@@ -183,6 +206,11 @@ not when you're spinning a tight reduce-tiny-thing loop.
 | done       | T    | TBookCtr for Metal-AOT-friendly CTR inputs     |
 | done       | X    | Persistent metallib disk cache                 |
 | done       | Y    | Variadic args (lift 4-arg cap)                 |
+| done       | HH+II| Preserve TNum dtype through emit               |
+| done       | LL   | Unbound TVar -> explicit emit failure          |
+| done       | OO   | Nested CTR construction                        |
+| done       | QQ   | WL surface for batch OP2 fold dispatcher       |
+| done       | RR   | Batch-vs-sequential perf bench (~231x speedup) |
 | scaffolded | M    | Full wnf() macro-shim port (HVM4 CUDA pattern) |
 | pending    | -    | Auto-marshal HEAP CTRs to book_heap            |
 | pending    | -    | TUOp body emit (bridge to tensor backend)      |
