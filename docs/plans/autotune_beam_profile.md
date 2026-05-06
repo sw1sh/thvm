@@ -4401,8 +4401,27 @@ task.  Break it down:
   `make test` clean.  Next: re-express matmul-input-protect as a
   UPatRule and measure the predicted ~40x transformer wall delta.
 
-- [ ] Once the framework is in tree, re-express the
+- [/] Once the framework is in tree, re-express the
   bufferize rules and the matmul-input-protect logic as
   declarative patterns.  This is what enables the
   `buffer_in_reduce` check to be one-line.
+
+  Sub-tasks:
+  - [x] (2026-05-07) Port `bufferize_uop_is_matmul` recognizer to
+    UPat.  The structural part (UOP_MUL with 2 children) now goes
+    through `upat_match`; distinctness check (A != B) stays as a
+    post-match guard so the THVM_DUMP_MATMUL_DETECT diagnostic
+    keeps its prior structure.  `make test` clean; two_linears
+    bench confirms kid 1 still fires metal-gemm (166us baseline
+    -> 157us best, dispatch_kinds: {metal-gemm:1, metal-tile:2}).
+    First UPat consumer in a real (non-test) code path.
+  - [ ] Port the matmul-input-protect marker (the upstream-walk
+    over BUFFERIZE_NODES at bufferize_classify.c L1572-1597) to
+    a UPat-driven walker that captures the matmul shape + walks
+    one hop up to mark elementwise inputs.  Side-effect-on-match
+    is the API shape needed; the smoke-test bridge already returns
+    same-term to mean "no rewrite".
+  - [ ] Port the inline-* rules (`inline_reduce_scalar_tail`,
+    `inline_movement_chain`, etc) to UPat.  These are the rules
+    that today drive `bufferize_node_unmark`.
 

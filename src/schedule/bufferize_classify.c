@@ -1480,17 +1480,22 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
 // matmul kernel stays bufferized as a clean 2-input/2-op kernel that
 // tile_analyze_gemm accepts (-> metal-gemm dispatch with TC).
 // Diagnosed in Levels 27-34 of docs/plans/autotune_beam_profile.md
-// (40x wall gap on transformer FFN kids 14/16).
+// (40x wall gap on transformer FFN kids 14/16).  The structural part
+// (UOP_MUL with 2 children) goes through the declarative UPat layer;
+// the distinctness check remains a post-match guard so the
+// diagnostic can keep its prior structure.
 static int bufferize_uop_is_matmul(u64 reduce_loc) {
+  static UPat const upat_mul_children[2] = {
+    {0, 0xFF, 0, 0, NULL},
+    {0, 0xFF, 0, 1, NULL},
+  };
+  static UPat const upat_mul = {UOP_MUL, 2, 0, -1, upat_mul_children};
+
   Term mul = term_resolve(heap_read(reduce_loc + 0));
-  int is_mul = (term_tag(mul) == TAG_UOP) && (term_ext(mul) == UOP_MUL);
-  int distinct = 0;
-  if (is_mul) {
-    u64 mul_loc = term_val(mul);
-    Term a = term_resolve(heap_read(mul_loc + 0));
-    Term b = term_resolve(heap_read(mul_loc + 1));
-    distinct = (term_val(a) != term_val(b));
-  }
+  Term bindings[UPAT_NUM_BINDINGS] = {0};
+  int is_mul   = upat_match(&upat_mul, mul, bindings);
+  int distinct = is_mul && (term_val(bindings[0]) != term_val(bindings[1]));
+
   char const *e = getenv("THVM_DUMP_MATMUL_DETECT");
   if (e != NULL && e[0] == '1') {
     fprintf(stderr,
