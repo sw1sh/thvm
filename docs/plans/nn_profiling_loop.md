@@ -191,8 +191,22 @@ every minute.
   `UOP_RANGE` in `uop_opt(...)` when `opt_kind != NO_OPT`.
   Post-fix MSL emits `#pragma unroll(4)` between the outer and
   inner `for` loops.  make test 274/274 unchanged.
-- [ ] Same for `LOCAL` — confirm the rendered MSL binds the inner
-  axis to `tt` and the outer loop covers `N/L` iterations.
+- [x] (2026-05-06) Same for `LOCAL` -- confirm the rendered MSL binds
+  the inner axis to `tt` and the outer loop covers `N/L`
+  iterations.  `TUOpAdd[a, b]` (16-element) +
+  `TOpt["LOCAL", 0, 4]` produces:
+  ```msl
+  for (uint a0 = 0; a0 < 4; a0++) {
+    uint a1 = tt; /* local ext=4 */
+    out[((a0 * 4) + a1)] = (in0[((a0 * 4) + a1)] + in1[((a0 * 4) + a1)]);
+  }
+  ```
+  Outer = `LOOP(N/L=4)` for-loop; inner = `LOCAL(L=4)` bound to
+  `thread_position_in_threadgroup`.  Each thread covers a strided
+  slice (thread `t` writes indices `4*0+t, 4*1+t, 4*2+t, 4*3+t`),
+  which is correct since every output cell is written by exactly
+  one thread.  No `UOP_OPT` wrap needed -- LOCAL flows through the
+  axis_type encoding alone.
 - [ ] Same for `GLOBAL` — confirm `tg` bind.
 
 ### Cross-framework comparison
