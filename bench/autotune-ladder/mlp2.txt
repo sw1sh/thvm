@@ -7,11 +7,11 @@ lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
 lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
 mlp2 kernel_count: 7
 dispatch_kinds: {{metal-gemm, 1}, {metal-tile, 5}, {metal-op, 1}}
-kid 1 kind=metal-gemm baseline=480.us best=440.us  opt=TOpt[TC, 0, 16]  applied={TOpt[TC, 0, 16]}
-kid 2 kind=metal-tile baseline=203.us best=152.us  opt=TOpt[LOCAL, 0, 16]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 64]}
-kid 3 kind=metal-tile baseline=279.us best=203.us  opt=TOpt[UNROLL, 1, 16]  applied={TOpt[GROUP, 1, 64]}
-kid 4 kind=metal-tile baseline=155.us best=149.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
-kid 5 kind=metal-tile baseline=154.us best=148.us  opt=TOpt[GROUP, 1, 2]  applied={}
+kid 1 kind=metal-gemm baseline=465.us best=458.us  opt=TOpt[TC, 0, 8]  applied={TOpt[TC, 0, 8]}
+kid 2 kind=metal-tile baseline=146.us best=128.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 128], TOpt[GLOBAL, 0, 1]}
+kid 3 kind=metal-tile baseline=190.us best=155.us  opt=TOpt[GROUP, 1, 128]  applied={TOpt[GROUP, 1, 32]}
+kid 4 kind=metal-tile baseline=140.us best=143.us  opt=TOpt[LOCAL, 0, 2]  applied={}
+kid 5 kind=metal-tile baseline=141.us best=139.us  opt=TOpt[GROUP, 1, 10]  applied={TOpt[GROUP, 1, 10]}
 lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
 lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
 lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
@@ -108,11 +108,11 @@ lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
 lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
 lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
 lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
-kid 6 kind=metal-op baseline=194.us best=185.us  opt=TOpt[LOCAL, 0, 2]  applied={}
-kid 7 kind=metal-tile baseline=144.us best=143.us  opt=TOpt[GROUP, 1, 10]  applied={TOpt[GROUP, 1, 10]}
-totals_baseline_us: 1609.
-totals_best_us: 1420.
-totals_speedup: 1.1331
+kid 6 kind=metal-op baseline=161.us best=165.us  opt=TOpt[LOCAL, 0, 2]  applied={}
+kid 7 kind=metal-tile baseline=133.us best=135.us  opt=TOpt[GROUP, 1, 2]  applied={TOpt[GROUP, 1, 10]}
+totals_baseline_us: 1376.
+totals_best_us: 1323.
+totals_speedup: 1.04006
 kernels_with_proposals: 7
 kernels_with_applied: 5
-thvm: metal_jit stats -- hits=311 misses=54 bypass=0 compile_us=152632
+thvm: metal_jit stats -- hits=311 misses=54 bypass=0 compile_us=5340

@@ -753,3 +753,43 @@ need a new path.
   win still requires fusing kid 1 + kid 2 + kid 3 into one
   kernel -- an operation only Phase D'+F of [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md)
   delivers.  Per-kernel autotune saturated as predicted.
+
+### Did the rangeify u8-fix transfer to MLP2?
+
+Conv2d gained from the same-rank-RESHAPE-V fallback because
+its xCol cIn\*kh\*kw=800 dim overflows u8.  MLP2 has the
+ladder's other +2-kernel leak (7 thvm vs 5 tinygrad), with
+shapes 784 -> 128 -> 10.  The flatten/Linear path may emit
+RESHAPEs with dims > 255 (784, 128) that previously bailed.
+Re-bench level 4 to see if the fix transferred.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/mlp2.wls`
+  post-fix and diff against the pre-fix capture.  Save to
+  mlp2.txt; report kernel_count, dispatch_kinds,
+  kernels_with_proposals, totals_baseline_us, totals_best_us,
+  totals_speedup.  Compare to pre-fix (7 kernels,
+  totals_best=1448us per the ladder snapshot) and note whether
+  the +2 leak collapsed.
+
+  | metric                 | pre-fix | post-fix |
+  |------------------------|--------:|---------:|
+  | kernel_count           |       7 |        7 |
+  | dispatch_kinds         |1g+5t+1o |  1g+5t+1o|
+  | kernels_with_proposals |       7 |        7 |
+  | totals_baseline_us     |    1609 |     1376 |
+  | totals_best_us         |    1420 |     1323 |
+  | totals_speedup         |   1.13x |    1.04x |
+  | jit compile_us         |  152632 |     5340 |
+
+  **The +2 kernel leak did NOT collapse** -- still 7 kernels
+  vs tinygrad's 5.  The u8-RESHAPE-V fix was conv2d-specific;
+  MLP2's bufferize boundaries are driven by a different
+  mechanism (suspected: softmax tail metal-op + LinearLayer/
+  activation boundary, per the ladder synthesis).  Wall best
+  shifted ~7% (1420 -> 1323us) but that's likely noise / warm
+  module cache (jit compile_us collapsed 152632 -> 5340 across
+  the cold/warm boundary).  Per-kernel autotune speedup
+  *dropped* 1.13x -> 1.04x because the baselines moved closer
+  to best on a warmer cache.  **Conclusion: closing the MLP2
+  leak needs the softmax-tail / LinearLayer-fusion work, not
+  more rangeify rules.**
