@@ -3539,3 +3539,64 @@ specific gate fails.
   shape.
 
   make test 274/274 stays green.
+
+### Level 32: per-gate diagnostic in tile_analyze_gemm
+
+The current `THVM_DUMP_GEMM_REJECT` only fires after
+`tile_analyze_gemm` returns 0.  We don't know WHICH of the
+~6 internal gates rejected.  For the n_ops=2 cases it could
+be `tile_gemm_uniform_dtype`, `tile_gemm_op_is_mul_inputs`,
+`tile_gemm_op_is_reduce_sum_of`, or shape-divisibility
+(M, N, K computed wrong).  Knowing exactly which gate fires
+guides the relaxation.
+
+- [x] (2026-05-06) Add per-gate stderr prints (gated by
+  `THVM_DUMP_GEMM_REJECT=1`) inside `tile_analyze_gemm` at
+  [src/schedule/tile.c:998](../../src/schedule/tile.c#L998).
+  Each `return 0` early-exit gets a tag like
+  "gate=non-fp32" / "gate=n_ops!=2" / "gate=mul-not-inputs"
+  / etc.  Build, make test, re-run transformer, inline the
+  distinct gates that reject.
+
+  Distinct rejecting gates in transformer block:
+
+  | count | gate                  |
+  |------:|-----------------------|
+  |  2535 | `n_inputs != 2`       |
+  |   671 | `n_ops != 2`          |
+
+  **The dominant blocker is n_inputs != 2.**  Kids 14/16
+  (FFN matmul with n_inputs=4 or 7) hit this gate because
+  the matmul has more than 2 input buffers in context: the
+  bias is a 3rd input, fused LN scale/shift may add more,
+  fused residual input adds yet another.
+
+  The relaxation needs:
+  1. Allow `n_inputs > 2` and detect the gemm sub-program's
+     2 input buffers among the kernel's larger input set.
+  2. Allow `n_ops > 2` and find the (mul, reduce-sum) pair
+     within the program (existing requires it at indices 0/1).
+
+  Both relaxations are straightforward C-side changes.  The
+  harder question is: once detected, can `tile_build_mma_from_gemm`
+  produce a working tile-IR that includes the trailing/prologue
+  ops?  Currently it `tile_free`s and rebuilds from scratch
+  with just gemm info, dropping the fused ops.
+
+  Architectural options for next iteration:
+  (a) Build TILE_BLOCK around TILE_MMA holding the
+      pre/postamble ops -- requires renderer support for
+      MMA-inside-block.
+  (b) Split the kernel before tile-IR -- adds back kernels
+      we just fused (regressing kernel-count gains).
+  (c) Bypass: when relaxed gemm detected, skip
+      `tile_build_mma_from_gemm` and let the existing
+      generic tile path handle it but with TILE_MMA hint
+      that the dispatcher uses.
+
+  Option (a) is the right shape but unclear if the renderer
+  already supports it.  Option (c) requires architectural
+  thought about how the dispatcher uses tile-IR shape.
+
+  This is the genuine next-iteration architectural decision
+  point.

@@ -998,25 +998,36 @@ static int tile_analyze_expanded_gemv(KernelEntry const *ke,
 int tile_analyze_gemm(KernelEntry const *ke,
                       u32 const *input_storage_numels,
                       TileGemmInfo *out) {
+  #define TGEMM_REJECT(reason) do { \
+    char const *_e = getenv("THVM_DUMP_GEMM_REJECT"); \
+    if (_e != NULL && _e[0] == '1') { \
+      fprintf(stderr, "tile_analyze_gemm: reject gate=%s\n", reason); \
+    } \
+  } while (0)
   if (ke == NULL || out == NULL || ke->program == NULL
       || ke->n_inputs != 2) {
+    TGEMM_REJECT("n_inputs!=2");
     return 0;
   }
   memset(out, 0, sizeof(TileGemmInfo));
   u32 dtype = 0;
   if (!tile_gemm_uniform_dtype(ke, &dtype)) {
+    TGEMM_REJECT("non-uniform-dtype");
     return 0;
   }
   if (tile_analyze_expanded_gemv(ke, input_storage_numels, dtype, out)) {
     return 1;
   }
   if (ke->n_ops != 2) {
+    TGEMM_REJECT("n_ops!=2");
     return 0;
   }
   if (!tile_gemm_op_is_mul_inputs(&ke->program[0])) {
+    TGEMM_REJECT("op0-not-mul-inputs");
     return 0;
   }
   if (!tile_gemm_op_is_reduce_sum_of(&ke->program[1], 0)) {
+    TGEMM_REJECT("op1-not-reduce-sum");
     return 0;
   }
 
