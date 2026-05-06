@@ -407,3 +407,41 @@ LinearLayer(784->128) -> ReLU -> LinearLayer(128->10) -> softmax.
 
   Per-kernel autotune extension is low-ROI until 1, 2, 3 land;
   the kernels we tune today are too small.
+
+### Lift the softmax tail (highest-ROI single fix)
+
+The softmax chain (level 3) emits 3 kernels: max-reduce,
+centred-exp, sum-reduce-divide.  In MLP2 (level 4) the same
+pattern surfaces -- kid 6 lands on metal-op (the unfused
+outlier).  The metal-op kernel is the divide-after-sum that
+the rangeify reduce-broadcast collapse can't fold because
+`kernel_lift_to_uop` rejects its scalar shape.
+
+- [x] (2026-05-06) Run a softmax(N=512) bench under
+  `THVM_DUMP_LIFT_REJECT=1` and capture the exact reject reason
+  for the metal-op outlier.  Saved to
+  `bench/autotune-ladder/softmax_lift_reject.txt`.
+
+  **One reject category**, 4 occurrences:
+
+      lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+
+  Translation: outer S_INDEX has `src_count == 1` (just the
+  buffer, no range srcs); the buffer has rank 1.  Semantically
+  this is a **scalar read from a singleton {1}-shape buffer** --
+  the result of a reduce broadcast back into the per-element
+  divide.  `lift_scalar_index` walks ranges and bails because
+  `ndim != outer_rank`.
+
+  Different shape from the LeNet S_INDEX-of-S_INDEX rejects.
+  Simpler fix: special-case `outer_rank == 0 && ndim == 1` ->
+  return `uop_const(DT_INT32, 0)` (address always 0; the {1}
+  buffer has a single element at offset 0).
+
+### Softmax-tail lift fix
+- [ ] Add the singleton-buffer special case to
+  `lift_scalar_index`: when the outer S_INDEX has zero ranges
+  and the buffer has rank 1, emit `uop_const(DT_INT32, 0)` as
+  the address.  Smoke-test softmax(N=512) and re-run the
+  ladder to confirm kid 2 (softmax) and kid 6 (MLP2) drop
+  off the metal-op fallback.

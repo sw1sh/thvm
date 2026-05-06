@@ -1,0 +1,6 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
