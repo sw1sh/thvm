@@ -2943,3 +2943,66 @@ Read-only investigation; no code changes.
   `bufferize_rule_inline_reduce_fanout`), copy its shape,
   and adapt it to the "pure-fanout" specialisation that
   matches Linear+activation.
+
+### Level 23 prep: read existing inline-reduce-fanout rule
+
+- [x] (2026-05-06) Read `bufferize_rule_inline_reduce_fanout`
+  and the related rules in `src/schedule/bufferize_classify.c`.
+  Inline the function signature, the match conditions, and
+  what bufferize markers it removes.
+
+  Function at [src/schedule/bufferize_classify.c:857](../../src/schedule/bufferize_classify.c#L857):
+
+      static u32 bufferize_rule_inline_reduce_fanout(Term root) {
+        if (!bufferize_inline_reduce_fanout_enabled()) return 0;
+        u64 min_numel = bufferize_inline_reduce_fanout_min_numel();
+        u32 hits = 0;
+        for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+          UOpInfo *info = &BUFFERIZE_NODES[i];
+          if (!info->realized
+              || info->op != UOP_REDUCE
+              || info->consumer_count < 2) continue;
+          ... shape + numel + consumer-ok checks ...
+          bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
+          hits++;
+        }
+        return hits;
+      }
+
+  Match conditions: `realized + UOP_REDUCE + consumer_count
+  >= 2`.  Action: `bufferize_node_unmark(info,
+  REASON_INLINE)`.
+
+  **Why Linear-output -> elementwise doesn't match**:
+  matmul-output has consumer_count = 1 (the next op),
+  but this rule requires `>= 2` (line 867).  Different shape.
+
+  Also: this rule is **env-gated off by default** at L525-526
+  (`return e != NULL && e[0] == '1';`).  It only fires when
+  `THVM_INLINE_REDUCE_FANOUT=1` is set.
+
+  Same gating pattern on `bufferize_inline_multiconsumer_pure`
+  at L515-516 (`THVM_INLINE_MULTI_CONSUMER_PURE`).
+
+  The new rule needed for the Linear-output leak:
+
+      static u32 bufferize_rule_inline_reduce_pure_fanout(Term root) {
+        if (!enabled) return 0;
+        for each REDUCE node with consumer_count == 1
+            and that one consumer being elementwise-pure:
+          unmark BUFFERIZE_REASON_INLINE.
+      }
+
+  Smaller match (single pure consumer) than the existing
+  fanout rule.  Specialisation: `consumer_count == 1` AND
+  consumer op is in the elementwise-pure set (UOP_ADD/MUL/
+  SUB/etc., excluding REDUCE/MOVEMENT).
+
+  **Smaller wedge**: before writing a new rule, first probe
+  whether enabling the existing experimental rules
+  (`THVM_INLINE_MULTI_CONSUMER_PURE=1` /
+  `THVM_INLINE_REDUCE_FANOUT=1`) reduces the MLP leak.
+  Possible they already cover the right shape after a
+  graph rewrite collapses Linear+Activation's effective
+  consumer count to >= 2.  Single env-flagged bench, no
+  code change.  Queued for next iteration.
