@@ -1,0 +1,38 @@
+MLP2 (level 4) -- THVM_RANGEIFY_BAIL=1 capture, 2026-05-06.
+
+Env: THVM_BACKEND=metal THVM_TILE=1 THVM_KGC=0
+     THVM_METAL_JIT_STATS=1 THVM_RANGEIFY_BAIL=1
+Cmd:  wolframscript -f bench/autotune-ladder/mlp2.wls
+
+Result lines (all bail / reject / dispatch markers, sorted unique):
+
+    dispatch_kinds: {{metal-gemm, 1}, {metal-tile, 5}, {metal-op, 1}}
+    lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+    mlp2 kernel_count: 7
+
+Distinct "rangeify bail (...)" lines: 0.
+
+Key finding: zero rangeify bails on MLP2.  Rangeify is NOT
+fragmenting the graph here -- bufferize_classify is.  The +2
+kernel leak vs tinygrad (7 vs 5) is therefore a bufferize-
+boundary decision, not a rangeify-lowering failure.
+
+The single "lift reject" line is a kernel_lift_to_uop reject
+(post-rangeify) and corresponds to the metal-op kid (kid 6 in
+mlp2.txt) that the tile renderer cannot handle, falling back
+to the per-op metal-op dispatch.  Shape: 1-d buffer with a
+single source (probably the softmax-tail elementwise) hitting
+the kernel-lift index/ndim mismatch guard.
+
+Contrast with conv2d (`conv2d_rangeify_bail.txt`):
+- conv2d: 1 distinct rangeify bail
+    "rangeify bail (mid-emit): RESHAPE out_dim > u8 (n_ops=71 onum=460800)"
+- MLP2: 0 rangeify bails.
+
+So the MLP2 leak is mechanism-distinct from conv2d's.  Closing
+it requires either:
+  (a) a bufferize_classify rule that keeps the softmax-tail /
+      LinearLayer-activation chain in the same kernel, or
+  (b) a kernel_lift_to_uop relaxation for buf_ndim=1 single-src
+      shapes so the trailing kernel collapses into the previous
+      tile kernel.

@@ -793,3 +793,32 @@ Re-bench level 4 to see if the fix transferred.
   to best on a warmer cache.  **Conclusion: closing the MLP2
   leak needs the softmax-tail / LinearLayer-fusion work, not
   more rangeify rules.**
+
+### Which boundaries fragment MLP2?
+
+We know MLP2's +2-kernel leak isn't u8-overflow.  Capture the
+`THVM_RANGEIFY_BAIL=1` reasons (mirrors what we did for conv2d
+in `conv2d_rangeify_bail.txt`) so the structural-fusion work
+points at concrete shapes rather than guessed mechanisms.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/mlp2.wls`
+  with `THVM_RANGEIFY_BAIL=1` and save filtered bail lines to
+  `bench/autotune-ladder/mlp2_rangeify_bail.txt`.  Inline a
+  one-table summary of the distinct bail reasons + counts,
+  and contrast against conv2d's bail (RESHAPE out_dim > u8).
+
+  | level | rangeify bails | kernel_lift rejects | mechanism             |
+  |-------|---------------:|--------------------:|-----------------------|
+  | conv2d|       1 (u8)   |              many   | rangeify cap          |
+  | mlp2  |              0 |  1 (buf_ndim=1)     | bufferize / lift      |
+
+  **MLP2 has zero rangeify bails.**  The +2 kernel leak is not
+  a rangeify-lowering failure -- it's a bufferize_classify
+  boundary decision plus one kernel_lift_to_uop reject
+  (`index/ndim-mismatch buf_ndim=1 src_count=1`) that drops
+  the trailing softmax-tail kid into the per-op metal-op
+  dispatch (kid 6 in `mlp2.txt`).  Closing the leak therefore
+  needs either a bufferize rule that keeps the softmax-tail /
+  LinearLayer-activation chain in the same kernel, or a
+  kernel_lift_to_uop relaxation for `buf_ndim=1` single-src
+  shapes.  Both belong to the structural-fusion campaign.
