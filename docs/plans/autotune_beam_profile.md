@@ -4867,3 +4867,48 @@ analysis (rangeify-style), path A might be cheaper.
   52's relaxed analyzer becomes redundant (existing strict
   analyzer fires).  Default-on, no env-gate needed.
 
+### Level 54: view_resolve stops at realized boundaries (LANDED)
+
+- [x] (2026-05-07) Implemented at `src/schedule/materialize.c:1259-1276`
+  -- before recursing into a UOp's source, check
+  `boundary_index_for_loc(loc)`; if the UOp is a realized boundary
+  with non-zero `BOUNDARY_TID`, return that tid as the View base.
+  Guarded by op-not-movement so EXPAND/RESHAPE etc. continue
+  composing onto the boundary's view.
+
+  **The 40x in-context matmul regression is dead.**  Transformer
+  block:
+
+  | metric                 | Level 47 | Level 48 | Level 54 |
+  |------------------------|---------:|---------:|---------:|
+  | total wall (us)        |    35302 |    28062 |     8365 |
+  | wall vs Level 47       |     1.0x |    0.79x |    0.24x |
+  | kid 14 (atten scores)  |    13935 |     1288 |      139 |
+  | kid 19 (FFN fc1)       |     8081 |     7330 |      150 |
+  | kid 22 (FFN fc2)       |    -- (no kid 22 pre-split) |     7181 |      179 |
+  | dispatch metal-gemm    |        0 |        0 |        8 |
+  | dispatch metal-tile    |       17 |       21 |       13 |
+
+  Every dispatched matmul kid (4/5/6/14/19/22 plus 2 more) now
+  routes through metal-gemm-with-TC at TOpt[TC, 0, 16].  Kid 14
+  went from 13935us (Level 27 baseline) to 139us = **100x
+  improvement on the original bottleneck**, beating the original
+  standalone-fc1 reference of 353us by 2.5x.
+
+  **Tinygrad comparison**: BEAM=4 transformer steady-state is
+  10018us.  Thvm baseline 8365us, autotune 6977us.  Thvm is
+  **1.20x to 1.43x faster than tinygrad**.
+
+  Surgical tests touched: test_metal_real (274/274 after fixing
+  a behavior-change false-fail), test_tile_graph (636/636),
+  test_materialize_v2 (15/15), test_bufferize (320/320 after
+  loosening the `reshape_count == 2` assertion which was
+  asserting on pre-fold behavior; now accepts 1 or 2 because
+  view-folding is the optimization we want),
+  test_bufferize_classify, test_scalar_graph, test_metal_real,
+  test_kernel_fire_gen, test_expand_axis -- all green.
+
+  This closes the autotune campaign's headline objective.  The
+  remaining gap to ideal (e.g. tinygrad MAX of 6.4ms with TC
+  arch-best) is autotune-search depth, not structural.
+

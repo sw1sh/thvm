@@ -1226,6 +1226,7 @@ static u32 const_to_tendesc(u64 const_loc) {
 // materialized to a 1-element TenDesc, or a recursive view chain
 // rooted at one).  Backend must be view-aware -- otherwise returns
 // 0 so caller falls through.
+static u32 boundary_index_for_loc(u64 loc);   // forward decl (Level 54)
 static u32 view_resolve(Term t) {
   if (CURRENT_BACKEND == NULL || !CURRENT_BACKEND->view_aware) return 0;
   u8 tag = term_tag(t);
@@ -1255,6 +1256,25 @@ static u32 view_resolve(Term t) {
   // EXPAND(CONST(0|1)) -> target.shape; without this branch the
   // grad chain stalls as a UOP that never fires.
   if (op == UOP_CONST) return const_to_tendesc(loc);
+
+  // Level 54: realized bufferize boundary acts as a TAG_TEN base
+  // case for the chain walker.  Without this, view_resolve walks
+  // past a boundary into its compute chain (e.g.
+  // EXPAND(RESHAPE(LN1_ADD)) -> recurse into LN1's ADD/MUL chain)
+  // until view_apply_* fails on the first non-movement op,
+  // forcing EXPAND+RESHAPE to fall back to kernel-op emit (the
+  // n_ops=4 [RESHAPE,EXPAND,MUL,REDUCE] shape that broke
+  // tile_gemm_views_ok in Levels 51-53).  Apply ONLY for
+  // non-movement ops -- movement ops must keep recursing so
+  // view_apply_* composes the chain into the boundary's view.
+  if (op != UOP_RESHAPE && op != UOP_EXPAND && op != UOP_PERMUTE
+      && op != UOP_SHRINK && op != UOP_FLIP && op != UOP_PAD) {
+    u32 bi = boundary_index_for_loc(loc);
+    if (bi != 0xFFFFFFFFu) {
+      u32 boundary_tid = BOUNDARY_TID[bi];
+      if (boundary_tid != 0) return boundary_tid;
+    }
+  }
 
   // Source recurses (could be another movement op chain or CONST).
   u32 src_tid = view_resolve(heap_read(loc));
