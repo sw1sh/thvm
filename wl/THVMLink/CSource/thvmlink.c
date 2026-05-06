@@ -2273,6 +2273,52 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_metal_run4(
   return LIBRARY_NO_ERROR;
 }
 
+// Phase 7 iter QQ: WL surface for the OP2 batch dispatcher.  Args:
+//   [root_locs_mtensor (Integer rank-1 of book_heap locs of OP2 cells)]
+// Returns: Integer rank-1 MTensor of N result Terms.
+extern int thvm_aot_metal_op2_fold_batch(Term *book_heap, u64 book_cells,
+                                          u64 *root_locs, u32 n_roots,
+                                          Term *result_out);
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_metal_op2_fold_batch(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  MTensor in_t = MArgument_getMTensor(args[0]);
+  mint n = libData->MTensor_getFlattenedLength(in_t);
+  if (n < 0 || n > 65536) return LIBRARY_FUNCTION_ERROR;
+  const mint *in_data = libData->MTensor_getIntegerData(in_t);
+
+  // Marshal root_locs (mint -> u64) and allocate result buffer.
+  u64 *root_locs = (u64 *)malloc((size_t)n * sizeof(u64));
+  Term *results  = (Term *)malloc((size_t)n * sizeof(Term));
+  if (root_locs == NULL || results == NULL) {
+    free(root_locs); free(results);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  for (mint i = 0; i < n; i++) root_locs[i] = (u64)in_data[i];
+
+  int rc = thvm_aot_metal_op2_fold_batch(
+      BOOK_HEAP, BOOK_CAP, root_locs, (u32)n, results);
+  if (rc != 0) {
+    free(root_locs); free(results);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+
+  // Pack results into an output MTensor.
+  MTensor out_t;
+  mint dims[1] = { n };
+  if (libData->MTensor_new(MType_Integer, 1, dims, &out_t) != 0) {
+    free(root_locs); free(results);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  mint *out_data = libData->MTensor_getIntegerData(out_t);
+  for (mint i = 0; i < n; i++) out_data[i] = (mint)results[i];
+
+  free(root_locs); free(results);
+  MArgument_setMTensor(res, out_t);
+  return LIBRARY_NO_ERROR;
+}
+
 // Phase 7 iter Y: variable-arity Metal AOT run.  Args:
 //   [def_id, name, args_mtensor (Integer rank-1)]
 // args_mtensor carries the Term values packed as int64s.  No upper

@@ -317,6 +317,49 @@ VerificationTest[
     TestID -> "Equivalence: wrap1(42) tag/label Metal == CPU"
 ]
 
+(* === iter QQ: WL surface for the batch OP2 fold dispatcher ===
+
+   The kernel side (aot_eval_op2_fold_batch) launches one thread per
+   OP2 redex, all in a single dispatch.  WL helper TAOTBatchOp2Fold
+   takes a list of book_heap locs (each pointing at an OP2(NUM,NUM)
+   cell) and returns the folded NUM TTerms.
+
+   Build the OP2 cells directly in book_heap via the private bridges
+   so the kernel's `heap` MTLBuffer can deref them. *)
+VerificationTest[
+    TInit[];
+    Module[{bookAlloc, bookSet, termNewRaw, ttermRawFn, opCodes,
+            locs, results},
+      bookAlloc  = Symbol["THVMLink`Private`$bookAllocFn"];
+      bookSet    = Symbol["THVMLink`Private`$bookSetFn"];
+      termNewRaw = Symbol["THVMLink`Private`$termNewFn"];
+      (* ttermRaw lives in THVMLink`Private`; the wlt runs at global
+         scope so we have to fetch it by qualified name. *)
+      ttermRawFn = Symbol["THVMLink`Private`ttermRaw"];
+      opCodes    = {0, 1, 2, 3, 4};   (* ADD, SUB, MUL, EQ, LT *)
+      locs = Table[
+        Module[{argLoc, rootLoc, opTerm},
+          argLoc  = bookAlloc[2];
+          rootLoc = bookAlloc[1];
+          bookSet[argLoc,     ttermRawFn @ TNum[i]];
+          bookSet[argLoc + 1, ttermRawFn @ TNum[i + 1]];
+          (* OP2 Term: tag=13 (OP2), ext=opcode, val=argLoc *)
+          opTerm = termNewRaw[0, $TagOP2, opCodes[[i + 1]], argLoc];
+          bookSet[rootLoc, opTerm];
+          rootLoc
+        ],
+        {i, 0, 4}];
+      results = TAOTBatchOp2Fold[locs];
+      TTermVal /@ results
+    ],
+    (* 0+1=1, 1-2 wraps as u32 to 4294967295 (i=1: SUB takes args[i]
+       and args[i+1] = NUM(1), NUM(2)), 2*3=6, 3==4 -> 0, 4<5 -> 1.
+       Note: i loop is 0..4, so for op i=1 (SUB), inputs are NUM(1)
+       and NUM(2), and so on. *)
+    {1, 4294967295, 6, 0, 1},
+    TestID -> "Metal: batch OP2 fold across 5 redexes (ADD,SUB,MUL,EQ,LT)"
+]
+
 (* === Method dispatcher rejects unknown spec === *)
 
 VerificationTest[

@@ -56,6 +56,15 @@ TAOTPath::usage =
   "TAOTPath[name] returns the dylib path stashed by TAOTCompile[name], \
 or Missing[\"NotCompiled\"] if the def has never been TAOTCompile'd.";
 
+TAOTBatchOp2Fold::usage =
+  "TAOTBatchOp2Fold[root_locs] dispatches the iter B-2 batch kernel \
+(aot_eval_op2_fold_batch) over a list of book_heap locs, each pointing \
+at an OP2(NUM,NUM) cell.  Returns a list of N folded NUM Terms (as \
+TTerms).  Amortizes Metal kernel-launch overhead across N redexes -- \
+useful when you have many independent OP2 folds queued up.  Pre-built \
+the OP2 cells via TBookAlloc/TBookSet first; the kernel reads from \
+book_heap directly.";
+
 Begin["`Private`"];
 
 (* Lazy-loaded library functions (matches the pattern used by every
@@ -190,6 +199,20 @@ $aotMetalRunNFn := $aotMetalRunNFn = load[
     "thvm_wl_aot_metal_run_n",
     {Integer, "UTF8String", {Integer, 1}},
     Integer];
+
+$aotMetalBatchOp2Fn := $aotMetalBatchOp2Fn = load[
+    "thvm_wl_aot_metal_op2_fold_batch",
+    {{Integer, 1}}, {Integer, 1}];
+
+(* Phase 7 iter QQ: WL surface for the batch dispatcher.  Caller
+   supplies a list of book_heap locs (Integers), each pointing at an
+   OP2(NUM,NUM) cell.  Returns a list of folded NUM TTerms. *)
+TAOTBatchOp2Fold[rootLocs_List] := Module[{raws},
+  ensureInit[];
+  raws = $aotMetalBatchOp2Fn[
+    Developer`ToPackedArray[rootLocs, Integer]];
+  Symbol["THVMLink`TTerm"] /@ raws
+]
 
 aotMetalRunImpl[name_String, args_List] := Module[{raws},
   raws = toRawArg /@ args;
