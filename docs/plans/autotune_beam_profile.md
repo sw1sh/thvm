@@ -176,7 +176,24 @@ file, commits, and stops.
 
 `out = exp(x - max(x)) / sum(exp(x - max(x)))`, rank-1 N=512.
 
-- [ ] thvm: `bench/autotune-ladder/softmax.wls`.
+- [x] (2026-05-06) thvm: `bench/autotune-ladder/softmax.wls`.
+
+  TSoftmax(N=512) decomposes into 3 kernels (max-reduce +
+  exp/centred chain + sum-reduce-divide).  Per-kernel autotune:
+
+  | kid | kind        | baseline | best | opt              | applied                   |
+  |-----|-------------|---------:|-----:|------------------|---------------------------|
+  | 2   | metal-op    | 212 us   | 154  | LOCAL[0,32]      | LOCAL[0,32] + GLOBAL[0,16]|
+  | 3   | metal-tile  | 236 us   | 231  | UNROLL[1,16]     | GROUP[1,4]                |
+
+  Totals: **baseline 624 us, best 558 us, speedup 1.12x.**
+  Both kernels with proposals got applied winners.  Note kid 3
+  is on the metal-tile path -- the autotune surface here is the
+  one we built; kid 2 is on metal-op (unfused reduce / broadcast
+  outliers don't yet lift through `kernel_lift_to_uop`).
+
+  jit_misses=48, jit_bypass=0, jit_compile_us=121548 (cold).
+  Cache fits cleanly inside the 256-slot cap.
 - [ ] tinygrad: `bench/autotune-ladder/softmax.py` BEAM=4.
 - [ ] Compare.
 
