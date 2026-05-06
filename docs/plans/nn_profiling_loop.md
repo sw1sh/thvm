@@ -112,8 +112,12 @@ every minute.
   green.
 
 ### LeNet-MNIST baseline
-- [ ] Run `wl/Examples/lenet-mnist/forward.wls`; capture as
-  `bench/lenet-mnist/forward.txt`.
+- [x] (2026-05-06) Run `wl/Examples/lenet-mnist/forward.wls`; capture
+  as `bench/lenet-mnist/forward.txt`.  **warmup 185.6 ms, steady
+  18.5 ms (avg/4), 75 kernels, dispatch: metal-op=45 (60%),
+  metal-tile=30 (40%).** Notable: more than half the kernels still
+  fall back through the per-op interpreter path (probably conv2d /
+  reshape / specialised layers that don't yet fit the tile path).
 - [ ] Run `wl/Examples/lenet-mnist/autotune.wls` with
   `MAX_TUNE_KERNELS=All`; capture autotune coverage + winners. Save
   to `bench/lenet-mnist/autotune.txt`.

@@ -1,0 +1,7 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+warmup_ms: 185.646
+steady_ms_avg4: 18.4563
+kernel_count: 75
+dispatch_kind_histogram:
+  metal-op: 45
+  metal-tile: 30
