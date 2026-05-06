@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>   // iter X: stat() for persistent metallib disk cache
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -2465,24 +2466,32 @@ aot_metal_pso_get(uint64_t hash, const char *name, const char *src) {
   snprintf(lib_path, sizeof lib_path,
            "/tmp/thvm_aot_metal_%016llx.metallib", hash);
 
-  FILE *f = fopen(src_path, "w");
-  if (!f) {
-    fprintf(stderr, "thvm aot-metal: cannot write %s\n", src_path);
-    return nil;
-  }
-  fputs(src, f);
-  fclose(f);
+  // Phase 7 iter X: persistent disk cache.  If the metallib for this
+  // content hash already exists from a prior session, skip the slow
+  // xcrun metal/metallib invocation (~3 sec uncached) and go straight
+  // to load.  In-memory PSO cache (the early return above) handles
+  // same-session repeat calls; this handles fresh-session repeats.
+  struct stat lib_stat;
+  if (stat(lib_path, &lib_stat) != 0 || lib_stat.st_size == 0) {
+    FILE *f = fopen(src_path, "w");
+    if (!f) {
+      fprintf(stderr, "thvm aot-metal: cannot write %s\n", src_path);
+      return nil;
+    }
+    fputs(src, f);
+    fclose(f);
 
-  char cmd[1024];
-  snprintf(cmd, sizeof cmd,
-    "xcrun -sdk macosx metal -c %s -o %s 2>&1 && "
-    "xcrun -sdk macosx metallib %s -o %s 2>&1",
-    src_path, air_path, air_path, lib_path);
-  int rc = system(cmd);
-  if (rc != 0) {
-    fprintf(stderr, "thvm aot-metal: xcrun metal/metallib failed (rc=%d) for %s\n",
-            rc, src_path);
-    return nil;
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd,
+      "xcrun -sdk macosx metal -c %s -o %s 2>&1 && "
+      "xcrun -sdk macosx metallib %s -o %s 2>&1",
+      src_path, air_path, air_path, lib_path);
+    int rc = system(cmd);
+    if (rc != 0) {
+      fprintf(stderr, "thvm aot-metal: xcrun metal/metallib failed (rc=%d) for %s\n",
+              rc, src_path);
+      return nil;
+    }
   }
 
   NSError *err = nil;
