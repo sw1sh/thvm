@@ -1003,3 +1003,51 @@ sync from already-committed bench files.
   kernel_lift.c:242; the LinearLayer-activation bullet calls
   out the still-open MLP2 leak; the conv2d bullet notes the
   singleton fix didn't transfer (different shape).
+
+### Level 6: LeNet forward (real network)
+
+The synthetic-shape ladder (levels 1-5) is saturated.  The
+natural extension is real networks where the wins compose:
+the singleton-broadcast (per-softmax) and u8-RESHAPE-V (per-
+conv2d) fixes both fire, plus pool/flatten boundaries that
+synthetic levels don't exercise.  LeNet is the smallest
+realistic conv-net (matches `wl/Examples/lenet-mnist/`).
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/lenet.wls` --
+  forward-only on a single MNIST sample, using `NetChain`
+  with two conv blocks (conv 5x5 + Ramp + 2x2 pool), Flatten,
+  two Linear layers with Ramp, and a final Linear+Softmax.
+  Match the per-kernel reporting style of `mlp2.wls`.  Save
+  stdout to `bench/autotune-ladder/lenet.txt`.  Inline
+  kernel_count, dispatch_kinds, totals_baseline_us,
+  totals_best_us, totals_speedup, kernels_with_proposals,
+  jit compile_us, and how many metal-op outliers remain
+  (post the singleton + u8-RESHAPE-V fixes).
+
+  **LeNet forward (1x28x28 -> 10):**
+
+  | metric                  | value             |
+  |-------------------------|-------------------|
+  | kernel_count            | 19                |
+  | dispatch_kinds          | {op:9, tile:10}   |
+  | kernels_with_proposals  | 18                |
+  | kernels_with_applied    | 13                |
+  | totals_baseline_us      | 4350              |
+  | totals_best_us          | 3464              |
+  | totals_speedup          | 1.26x             |
+  | jit compile_us          | 158140 (cold)     |
+
+  **9 metal-op outliers remain** even after the campaign's
+  fixes.  Decomposition (most-likely):
+  - 2 conv layers x 3 kernels each = 6 (matches Level 5's
+    `{metal-op:2, metal-tile:1}` shape per conv);
+  - 3 more metal-ops are pool / flatten / softmax-tail
+    residue.
+
+  Per-kernel autotune extracts 1.26x on LeNet -- consistent
+  with the per-kernel autotune ceiling on the synthetic
+  ladder (1.0x-1.6x).  The structural-fusion gap remains
+  the dominant lever: 19 kernels / forward where tinygrad
+  would run roughly 7-9 (1 per conv-block + linear chains).
+  Closing the conv2d 3-into-1 fusion (Phase D'+F) directly
+  drops 4 kernels off this number.
