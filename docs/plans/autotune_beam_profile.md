@@ -600,10 +600,53 @@ TConv2D lowered to a single fused kernel with W and X both as
 inputs (matching tinygrad's structure), the lifter wouldn't
 need a new path.
 
-- [ ] Inspect `TConv2D` / `TConv2DKhKw` in
-  [wl/THVMLink/Kernel/NN.wl](../../wl/THVMLink/Kernel/NN.wl) to
-  understand why the kh*kw lowering produces 24 separate
-  kernels each of which is a single SHRINK + LOAD + partial-
-  sum.  Sketch what would need to change to keep the kh*kw
-  partials inside one bufferize boundary so the whole thing
-  emerges as 1 KernelEntry.
+- [x] (2026-05-06) Inspect `TConv2DKhKw` and `TConv2DIm2Col` in
+  NN.wl.
+
+  **Both lowerings unroll into kh*kw partials**:
+
+  - `TConv2DKhKw`: builds `partials = Flatten @ Table[...]` (25
+    entries for 5x5 kernel), each `TUOpReduce[xB * wB, 1, "SUM"]`
+    of a SHRINKED + EXPAND'd slice.  Then
+    `Fold[Plus, First[partials], Rest[partials]]` reduces.
+  - `TConv2DIm2Col`: builds the im2col matrix by also iterating
+    25 (ki, kj) slices, SHRINK'ing each + PAD'ing into the
+    kh*kw-axis slot of a zero tensor + summing.  Then one
+    matmul.
+
+  Both produce ~25 SHRINK + binary-op chains that bufferize
+  fragments.  The 24-input rejecting kernel is **one slice of
+  the Fold[Plus, ...]** accumulator: 24 of 25 partials get
+  summed into a running total in one KernelEntry, with the
+  first partial seeded into the accumulator separately.
+
+  **Root cause**: rangeify / bufferize splits the SHRINK + ADD
+  partials chain at SHRINK boundaries because each SHRINK
+  produces a "bufferable" intermediate (it emits a Movement op
+  whose result rangeify wants to materialise).  Tinygrad's
+  scheduler keeps the SHRINK chain inside a single kernel via
+  its movement-op-as-INDEX rewrite (the same pattern thvm has
+  partially implemented in `src/uop/movement_index.c`).
+
+  **Fix direction**: ensure SHRINK / PAD inside `TConv2DKhKw`
+  doesn't trigger bufferize.  Either:
+  (a) Use `TUOpShrinkV` / `TUOpPadV` (the index-mapping
+      variants) instead of the existing `TUOpShrink` / `TUOpPad`
+      so movement ops fold into INDEX expressions, not
+      bufferize boundaries.
+  (b) Or extend `bufferize_classify` to keep SHRINK chains
+      INSIDE the surrounding REDUCE+ADD region instead of
+      splitting at each SHRINK.
+
+  Path (a) is a smaller WL-side change; path (b) is more
+  general but a deeper refactor.
+
+### TConv2D fusion follow-on
+
+- [ ] Test path (a): rewrite `TConv2DKhKw` to use index-mapping
+  movement variants (`TUOpShrinkV` / `TUOpPadV` if they exist;
+  otherwise build the address arithmetic explicitly).  Run the
+  conv2d ladder bench and check whether the dispatch shifts
+  from `2 metal-op + 1 metal-tile` to `≤1 metal-tile` (single
+  fused kernel).  If movement-as-INDEX folds correctly the
+  whole conv2d should emerge as 1 KernelEntry.
