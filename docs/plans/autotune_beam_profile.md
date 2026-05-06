@@ -330,7 +330,23 @@ LinearLayer(784->128) -> ReLU -> LinearLayer(128->10) -> softmax.
   just polishing.
 
   jit_misses=11, jit_bypass=0, jit_compile_us=117752 cold.
-- [ ] tinygrad: `bench/autotune-ladder/conv2d.py` BEAM=4.
+- [x] (2026-05-06) tinygrad: `bench/autotune-ladder/conv2d.py`
+  BEAM=4.
+
+  | mode      | warmup_us | steady_us | speedup | kernels/iter |
+  |-----------|----------:|----------:|--------:|-------------:|
+  | NOOPT=1   | 86887     | 1592      | 1.00x   | 1            |
+  | BEAM=4    |  2990     | 1604      | **0.99x** | 1            |
+
+  Tinygrad fuses the entire conv2d into **1 kernel per call**
+  (vs thvm's 3).  BEAM=4 finds NO improvement -- the default
+  heuristic kernel is already at its local optimum.  NOOPT cold
+  compile is 87 ms (vs 3 ms BEAM warmup, since BEAM caches).
+
+  Absolute steady at 1592 us beats thvm's tuned 3-kernel chain
+  at 2264 us.  This is the level where the structural fusion gap
+  is most visible: thvm spends 2x the work because it dispatches
+  3 kernels for what tinygrad does in 1.
 - [ ] Compare.
 
 ### Cross-level synthesis
