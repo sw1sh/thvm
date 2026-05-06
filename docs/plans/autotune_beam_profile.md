@@ -2880,3 +2880,66 @@ forward pass.  Re-bench to find out.
   but does NOT touch conv-net workloads (CNN-style nets like
   LeNet).  Conv 3-into-1 fusion (Phase D'+F) remains the
   bigger lever for the conv side.
+
+### Level 23: locate the matmul-output bufferize seam
+
+The +1 per LinearLayer leak (MLP-N) comes from bufferize
+deciding to fragment the kernel graph at the matmul output.
+Find that decision site: which file/function chooses to
+bufferize when a LinearLayer's output flows into an
+elementwise op (Ramp / Tanh / SoftmaxLayer / next Linear)?
+
+Read-only investigation; no code changes.
+
+- [x] (2026-05-06) Find the bufferize_classify (or equivalent)
+  decision site that fragments after a matmul.  Inline the
+  file/line and the conditions that trigger fragmentation.
+  Document whether the decision is a (a) global heuristic,
+  (b) op-specific list, or (c) shape-specific threshold.
+
+  **Finding**: bufferize seed logic at
+  [src/schedule/bufferize_classify.c:1525-1534](../../src/schedule/bufferize_classify.c#L1525)
+  marks nodes:
+
+      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+        UOpInfo *info = &BUFFERIZE_NODES[i];
+        if (info->consumer_count >= 2) {
+          bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+        }
+        if (info->op == UOP_REDUCE) {
+          bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+        }
+      }
+
+  Matmul lowers to UOP_REDUCE (sum-reduce of elementwise-mul),
+  so every matmul output gets REASON_REDUCE marked, which
+  triggers bufferize.  This is the +1 leak per LinearLayer
+  in MLP-N.
+
+  The rewrite-rule pass at L1535-1546 runs several
+  `inline-reduce-*` rules that try to REMOVE this bufferize:
+
+  - `inline-adjacent-reduce-chains`
+  - `inline-softmax-broadcast-reduce`
+  - `inline-reduce-scalar-tail`
+  - `inline-reduce-fanout`
+
+  The Linear-output -> elementwise (Ramp / Tanh / next
+  Linear) case must not be matching any of these rules, so
+  the bufferize stays and we get the +1 leak.
+
+  Decision shape: **(b) op-specific list**.  REDUCE always
+  bufferizes; specific patterns get inlined back.
+
+  Wedge: add a new rewrite rule like
+  `inline-reduce-pure-fanout` that removes the bufferize
+  when the reduce has a single elementwise-pure consumer.
+  That should close the +1-per-Linear leak in MLP-N
+  uniformly.
+
+  Single-rule addition; size is comparable to other
+  `bufferize_rule_inline_*` helpers.  Next iteration's
+  task: read one of the existing rules' code (e.g.
+  `bufferize_rule_inline_reduce_fanout`), copy its shape,
+  and adapt it to the "pure-fanout" specialisation that
+  matches Linear+activation.
