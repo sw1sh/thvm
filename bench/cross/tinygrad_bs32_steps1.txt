@@ -1,0 +1,7 @@
+  0%|                                                     | 0/1 [00:00<?, ?it/s]loss:   2.58 test_accuracy:   nan%: 100%|█████████| 1/1 [00:03<00:00,  0.31it/s]loss:   2.58 test_accuracy:   nan%: 100%|█████████| 1/1 [00:03<00:00,  0.31it/s]
+PYTHONPATH=. BS=32 STEPS=1 DEV=METAL python3 examples/beautiful_mnist.py  3.17s user 0.09s system 93% cpu 3.464 total
+  0%|                                                     | 0/2 [00:00<?, ?it/s]loss:   2.70 test_accuracy:   nan%:  50%|████▌    | 1/2 [00:02<00:02,  0.33it/s]loss:   2.21 test_accuracy:   nan%: 100%|█████████| 2/2 [00:04<00:00,  0.45it/s]loss:   2.21 test_accuracy:   nan%: 100%|█████████| 2/2 [00:04<00:00,  0.45it/s]
+PYTHONPATH=. BS=32 STEPS=2 DEV=METAL python3 examples/beautiful_mnist.py  4.58s user 0.07s system 98% cpu 4.713 total
+---steps=5---
+  0%|                                                     | 0/5 [00:00<?, ?it/s]loss:   2.64 test_accuracy:   nan%:  20%|█▊       | 1/5 [00:02<00:11,  0.33it/s]loss:   2.30 test_accuracy:   nan%:  40%|███▌     | 2/5 [00:04<00:06,  0.46it/s]loss:   1.74 test_accuracy:   nan%:  60%|█████▍   | 3/5 [00:04<00:02,  0.68it/s]loss:   1.58 test_accuracy:   nan%:  80%|███████▏ | 4/5 [00:04<00:01,  0.91it/s]loss:   1.33 test_accuracy:   nan%: 100%|█████████| 5/5 [00:04<00:00,  1.13it/s]loss:   1.33 test_accuracy:   nan%: 100%|█████████| 5/5 [00:04<00:00,  1.13it/s]
+PYTHONPATH=. BS=32 STEPS=5 DEV=METAL python3 examples/beautiful_mnist.py  4.57s user 0.07s system 97% cpu 4.739 total

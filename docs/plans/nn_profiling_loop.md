@@ -221,9 +221,25 @@ every minute.
   output element.
 
 ### Cross-framework comparison
-- [ ] Run tinygrad's `examples/beautiful_mnist.py` BS=32 N_STEPS=1 on
-  the same hardware; capture wall + Metal kernel count. Cross-
-  reference docs/plans/profiling_methodology.md §4.6 numbers.
+- [x] (2026-05-06) Run tinygrad's `examples/beautiful_mnist.py`
+  BS=32 N_STEPS=1 on the same hardware; capture wall + Metal kernel
+  count. Cross-reference docs/plans/profiling_methodology.md §4.6
+  numbers.  Saved to
+  `bench/cross/tinygrad_bs32_steps1.txt`.
+
+  | tinygrad DEV=METAL BS=32 | wall   | per-step amortised |
+  |--------------------------|--------|--------------------|
+  | STEPS=1                  | 3.46 s | 3.46 s (JIT)       |
+  | STEPS=2                  | 4.71 s | ~1.25 s/step delta |
+  | STEPS=5                  | 4.74 s | ~320 ms/step delta |
+
+  Apples-to-apples comparison against thvm is not yet possible:
+  thvm has no beautiful_mnist-equivalent script (closest is
+  lenet-mnist/bench-train.wls, BS=1, NetModel["LeNet"] not the
+  beautiful_mnist Conv2d/BN stack), so the headline numbers can't
+  be lined up directly.  Recorded as the baseline; need a separate
+  task to port `beautiful_mnist`'s exact architecture (per
+  docs/plans/profiling_methodology.md §1.1) to thvm and benchmark.
 
 ### Phase G follow-on
 - [ ] Once elementwise autotune effects show measurable wins, design
