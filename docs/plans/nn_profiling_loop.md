@@ -118,9 +118,20 @@ every minute.
   metal-tile=30 (40%).** Notable: more than half the kernels still
   fall back through the per-op interpreter path (probably conv2d /
   reshape / specialised layers that don't yet fit the tile path).
-- [ ] Run `wl/Examples/lenet-mnist/autotune.wls` with
+- [x] (2026-05-06) Run `wl/Examples/lenet-mnist/autotune.wls` with
   `MAX_TUNE_KERNELS=All`; capture autotune coverage + winners. Save
-  to `bench/lenet-mnist/autotune.txt`.
+  to `bench/lenet-mnist/autotune.txt`.  **Autotune covered 13 of 15
+  live kernels with proposals; 11 had applied winners.** Notable
+  speedups in the bench probe: kid 3 LOCAL[1,8] 779us -> 458us
+  (1.7x); kid 4 UNROLL[4,2] 228us -> 179us (1.27x).  Applied opts
+  span LOCAL+GLOBAL splits (kids 3/6/8/12), UNROLL (4/5/7/9/10),
+  GROUP (2/15).  Pre-autotune dispatch metal-op=9, metal-tile=6;
+  post-autotune metal-op=18, metal-tile=12 (live kernel count
+  doubled because the post-tune forward pass kernelised both pre-
+  and post-opt versions in cache).  Baseline forward emitted a
+  spurious `LibraryFunction::fpexc` NaN/Inf message via `Total`,
+  but the autotune still applied winners and the post-tune softmax
+  sum is 1.0.
 - [ ] Run `wl/Examples/lenet-mnist/bench-train.wls` BS=32 N_STEPS=5;
   save to `bench/lenet-mnist/train_bs32.txt`.
 - [ ] Diff dispatch-kind histogram pre-autotune vs post-autotune;
