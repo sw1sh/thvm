@@ -262,7 +262,21 @@ LinearLayer(784->128) -> ReLU -> LinearLayer(128->10) -> softmax.
   Cache fits cleanly.  71% of kernels (5/7) are on the new
   metal-tile path -- the metal-op outlier (kid 6) is the same
   unfused softmax-tail pattern from level 3.
-- [ ] tinygrad: `bench/autotune-ladder/mlp2.py` BEAM=4.
+- [x] (2026-05-06) tinygrad: `bench/autotune-ladder/mlp2.py`
+  BEAM=4.
+
+  | mode      | warmup_us | steady_us | speedup | kernels/iter |
+  |-----------|----------:|----------:|--------:|-------------:|
+  | NOOPT=1   | 167088    | 2729      | 1.00x   | 5            |
+  | BEAM=4    |   5276    | 2499      | **1.09x** | 5            |
+
+  Tinygrad emits **5 kernels per forward** vs thvm's 7 -- 28%
+  better structural fusion at the scheduler level.  NOOPT cold
+  compile is 167 ms (BEAM warmup is 5.3 ms because BEAM caches
+  kernels across the 3 warmup iters).  BEAM=4 finds 1.09x --
+  again close to thvm's 1.13x relative gain, but tinygrad starts
+  from a smaller kernel-count budget so the absolute work is
+  less.
 - [ ] Compare.
 
 ### Level 5 -- single conv2d (1x32x28x28 input, 5x5 kernel, 32 channels)

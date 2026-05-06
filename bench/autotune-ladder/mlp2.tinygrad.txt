@@ -1,0 +1,9 @@
+baseline_warmup_us:  167087.7
+baseline_steady_us:  2728.8
+baseline_kernel_count_post: 250
+baseline_global_ops_post:   22633700
+beam4_warmup_us:  5276.4
+beam4_steady_us:  2499.0
+beam4_kernel_count_post: 250
+beam4_global_ops_post:   22633700
+speedup_baseline_to_beam4: 1.092x
