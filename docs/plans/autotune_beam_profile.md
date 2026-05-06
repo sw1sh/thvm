@@ -3648,3 +3648,65 @@ fix.  Read-only investigation.
 
   Next iteration: sketch the new bufferize rule's match
   condition.
+
+### Level 34: sketch the gemm-friendly bufferize rule
+
+The new rule needs to:
+1. Detect "this UOP_REDUCE is a matmul" at bufferize time
+   (kernel program isn't constructed yet at this stage).
+2. Mark the matmul output as bufferized (REASON_INLINE off,
+   so it stays realized as a separate kernel).
+
+- [x] (2026-05-06) Read existing seed pattern at
+  [src/schedule/bufferize_classify.c:1525-1534](../../src/schedule/bufferize_classify.c#L1525)
+  and the `bufferize_recompute_pure_op` predicate.  Find
+  the equivalent of "matmul detection at UOP level".
+
+  **No matmul-detector helper exists at UOP level**.  The
+  existing tile_analyze_gemm operates on `ke->program` (post-
+  schedule), not the UOp DAG.  A new helper is needed.
+
+  Existing seed logic:
+
+      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+        UOpInfo *info = &BUFFERIZE_NODES[i];
+        if (info->consumer_count >= 2)
+          mark(info, REASON_MULTI);
+        if (info->op == UOP_REDUCE)
+          mark(info, REASON_REDUCE);
+      }
+
+  Then inline-* rules UN-mark some REDUCEs via
+  `unmark(info, REASON_INLINE)`.  After Level 24's flip,
+  inline-multiconsumer-pure + inline-reduce-fanout are
+  default-on -- they may be un-marking matmul reduces that
+  would otherwise stay bufferized.
+
+  **Approach (inverse-direction rule)**: protect matmul-shape
+  REDUCEs from being un-marked.
+
+  New helper sketch (~10 lines):
+
+      static int bufferize_uop_is_matmul(u64 reduce_loc) {
+        // Pattern: UOP_REDUCE(SUM, UOP_MUL(A, B)) where
+        // A, B resolve to distinct buffer leaves.
+        Term mul = term_resolve(heap_read(reduce_loc + 0));
+        if (term_tag(mul) != TAG_UOP) return 0;
+        if (term_ext(mul) != UOP_MUL) return 0;
+        u64 mul_loc = term_val(mul);
+        Term a = term_resolve(heap_read(mul_loc + 0));
+        Term b = term_resolve(heap_read(mul_loc + 1));
+        return term_val(a) != term_val(b);
+      }
+
+  Each inline-* rule then guards its unmark with:
+
+      if (bufferize_uop_is_matmul(info->loc)) continue;
+
+  Focused C-side change.  Smaller risk than rewriting
+  tile_analyze_gemm because it only AFFECTS the inline rules
+  -- matmul kernels stay bufferized, gemm dispatch path
+  fires.
+
+  Next iteration: write the helper + guards, build, make
+  test, re-bench transformer for the wall improvement.
