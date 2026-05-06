@@ -4572,3 +4572,52 @@ one REDUCE = matmul candidates) and pattern-match the fused shapes.
   n_inputs=1 -- a 2-operand matmul where one operand was const-
   folded.  Worth a separate look (rare but easy to relax).
 
+### Level 48: multi-hop matmul-input-protect through movement ops
+
+The Level 47 op-trail confirmed that matmul inputs arrive wrapped
+in RESHAPE/EXPAND, hiding ADD/MUL parents from the one-hop
+matmul-input-protect rule.  Extend the walker to skip movement
+ops (RESHAPE/EXPAND/PERMUTE/SHRINK/PAD/FLIP) and mark the first
+elementwise (ADD/MUL) op encountered.
+
+- [x] (2026-05-07) Add a shared `bufferize_upat_movement_any`
+  (op_alt covering all 6 movement ops).  Modify the
+  matmul-input-protect loop to walk through movement-any matches
+  before testing for ADD/MUL.  Bound the walk depth (8 hops, same
+  as existing chain walkers).
+
+  Headline: `bench/autotune-ladder/transformer_multihop_protect.txt`
+
+  | metric                 | Level 47 | Level 48 | delta    |
+  |------------------------|---------:|---------:|---------:|
+  | total wall (us)        |    35302 |    28062 |  -20.5%  |
+  | kid 14 (FFN fc1)       |    13935 |     1288 |  -90.8%  |
+  | kid 16 (FFN fc2)       |     8081 |     1069 |  -86.8%  |
+  | kernel count           |       17 |       23 |    +6    |
+  | dispatch metal-gemm    |        0 |        0 |    --    |
+  | dispatch metal-tile    |       17 |       21 |    +4    |
+  | dispatch metal-op      |        0 |        2 |    +2    |
+  | reject n_ops!=2        |      671 |     2610 |  +1939   |
+  | reject n_inputs!=2     |     2535 |     1527 |  -1008   |
+
+  **The 40x in-context regression is gone.**  Kid 14 went from
+  13935us to 1288us (10.8x improvement).  Total transformer wall
+  dropped 20.5%.  The improvement comes from SIMPLER kernels --
+  the bias-add and LN-broadcast paths that previously got
+  absorbed into the matmul kernel are now split into 6 separate
+  boundaries, leaving a clean MUL+REDUCE matmul that still
+  dispatches as metal-tile but runs ~11x faster than the bloated
+  baseline.
+
+  Notable: zero kernels dispatched via metal-gemm.  Even the
+  clean matmul kernels are still rejecting tile_analyze_gemm at
+  some other gate (the n_ops!=2 reject count went UP from 671 to
+  2610, with 232 new op0-not-mul-inputs rejects).  Investigation
+  worth pursuing: why does the post-split clean matmul kernel
+  still not pass tile_analyze_gemm and dispatch via metal-gemm
+  with TC?  Even on metal-tile, the matmul went from 13935us to
+  1288us; the additional metal-gemm-with-TC routing might bring
+  another 5-10x on top.  Subject for a future probe.
+
+  `make test` clean.
+

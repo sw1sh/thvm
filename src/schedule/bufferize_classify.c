@@ -231,6 +231,20 @@ static UPat const bufferize_upat_movement_passthrough = {
   0, 1, 0, -1, NULL, bufferize_upat_movement_passthrough_alt
 };
 
+// Shared UPat: any movement op (the full set including value-
+// preserving and value-shaping ops).  Used to walk THROUGH the LN
+// broadcast layout (EXPAND(RESHAPE(...))) when looking upstream for
+// the elementwise op that should be split off the matmul kernel.
+// Each of these 6 ops stores its source at heap[loc + 0], so the
+// walker can step `arg = heap_read(term_val(arg))` regardless of
+// which movement op matched.
+static u8 const bufferize_upat_movement_any_alt[] = {
+  UOP_RESHAPE, UOP_PERMUTE, UOP_EXPAND, UOP_PAD, UOP_SHRINK, UOP_FLIP, 0
+};
+static UPat const bufferize_upat_movement_any = {
+  0, 1, 0, -1, NULL, bufferize_upat_movement_any_alt
+};
+
 // Shared UPat: {UOP_ADD, UOP_MUL}(?0, ?1) -- "ALU with two children",
 // both captured.  Used by the chain-walker hop predicates that need
 // to test the sibling against a const-y wrapper (broadcast-of-CONST
@@ -1634,6 +1648,20 @@ fn void bufferize_classify(Term root) {
     if (!upat_match(&bufferize_upat_mul, mul, bindings)) continue;
     for (u32 a = 0; a < 2; a++) {
       Term arg = bindings[a];
+      // Walk past movement ops (RESHAPE/EXPAND/PERMUTE/SHRINK/PAD/
+      // FLIP) to find the underlying elementwise parent.  Without
+      // this, an LN-style `EXPAND(RESHAPE(ADD(...)))` operand hides
+      // the ADD from the protect pass; the ADD then gets absorbed
+      // into the matmul kernel and inflates n_inputs past the
+      // tile_analyze_gemm gate (Level 47 transformer kid 14
+      // diagnosis).  Each movement op stores src at heap[loc+0]
+      // so the step is uniform.  Bounded by 8 hops to match the
+      // existing chain walker.
+      for (u32 hops = 0; hops < 8; hops++) {
+        if (term_tag(arg) != TAG_UOP) break;
+        if (!upat_match(&bufferize_upat_movement_any, arg, NULL)) break;
+        arg = term_resolve(heap_read(term_val(arg) + 0));
+      }
       if (term_tag(arg) != TAG_UOP) continue;
       u8 arg_op = term_ext(arg);
       if (arg_op != UOP_ADD && arg_op != UOP_MUL) continue;

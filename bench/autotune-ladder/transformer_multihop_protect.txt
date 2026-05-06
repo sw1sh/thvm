@@ -1,0 +1,47 @@
+# Level 48: matmul-input-protect with multi-hop walk through movement ops
+
+# Headline (transformer_block.wls):
+# Total wall:    35302us (Level 47 baseline)  ->  28062us (Level 48)  =  -20.5%
+# Speedup:                            x1.039  ->          x1.043 (autotune)
+
+# Per-kid wall on the matmul kernels:
+#   kid 14 (FFN fc1):   13935us  ->   1288us   =  -90.8% (10.8x faster)
+#   kid 16 (FFN fc2):    8081us  ->   1069us   =  -86.8% ( 7.6x faster)
+
+# Kernel count: 17  ->  23 kernels (6 elementwise boundaries split off
+# the matmul kernels as a result of the multi-hop walk).
+
+# Dispatch (kid kinds) post-fix:
+dispatch_kinds: {{metal-tile, 21}, {metal-op, 2}}
+kid 1 kind=metal-tile baseline=1065.us best=1060.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 2]}  variants=11
+kid 2 kind=metal-tile baseline=1078.us best=1067.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 2]}  variants=11
+kid 4 kind=metal-tile baseline=1286.us best=1282.us  opt=TOpt[UNROLL, 2, 16]  applied={}  variants=11
+kid 5 kind=metal-tile baseline=1269.us best=1270.us  opt=TOpt[UNROLL, 2, 16]  applied={}  variants=11
+kid 6 kind=metal-tile baseline=1283.us best=1285.us  opt=TOpt[UNROLL, 2, 4]  applied={}  variants=11
+kid 7 kind=metal-tile baseline=210.us best=148.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 8]}  variants=7
+kid 8 kind=metal-tile baseline=222.us best=148.us  opt=TOpt[LOCAL, 0, 8]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 8]}  variants=7
+kid 9 kind=metal-tile baseline=222.us best=155.us  opt=TOpt[LOCAL, 0, 16]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 8]}  variants=7
+kid 10 kind=metal-tile baseline=860.us best=703.us  opt=TOpt[GROUP, 2, 16]  applied={TOpt[GROUP, 2, 16]}  variants=11
+kid 11 kind=metal-tile baseline=213.us best=149.us  opt=TOpt[LOCAL, 0, 16]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 8]}  variants=6
+kid 12 kind=metal-tile baseline=419.us best=427.us  opt=TOpt[GROUP, 2, 8]  applied={TOpt[GROUP, 2, 8]}  variants=10
+kid 13 kind=metal-tile baseline=683.us best=679.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 16]}  variants=10
+kid 14 kind=metal-tile baseline=1288.us best=1285.us  opt=TOpt[UNROLL, 2, 2]  applied={}  variants=11
+kid 15 kind=metal-tile baseline=212.us best=157.us  opt=TOpt[LOCAL, 1, 64]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 2]}  variants=7
+kid 16 kind=metal-tile baseline=1069.us best=1058.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 2]}  variants=11
+kid 17 kind=metal-tile baseline=1106.us best=1064.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 2]}  variants=11
+kid 19 kind=metal-tile baseline=7330.us best=7306.us  opt=TOpt[UNROLL, 2, 2]  applied={TOpt[UNROLL, 2, 2]}  variants=11
+kid 20 kind=metal-tile baseline=418.us best=168.us  opt=TOpt[LOCAL, 1, 64]  applied={TOpt[LOCAL, 1, 128], TOpt[GLOBAL, 1, 2]}  variants=9
+kid 21 kind=metal-tile baseline=422.us best=160.us  opt=TOpt[LOCAL, 1, 128]  applied={TOpt[LOCAL, 1, 256], TOpt[GLOBAL, 1, 1]}  variants=9
+kid 22 kind=metal-tile baseline=7181.us best=7174.us  opt=TOpt[UNROLL, 2, 16]  applied={TOpt[UNROLL, 2, 8]}  variants=13
+kid 23 kind=metal-tile baseline=226.us best=159.us  opt=TOpt[LOCAL, 0, 16]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 2]}  variants=7
+totals_baseline_us: 28062.
+totals_best_us: 26904.
+totals_speedup: 1.04304
+
+# tile_analyze_gemm reject gates (vs Level 46/47):
+#   n_ops != 2:           2610  (was  671)
+#   n_inputs != 2:        1527  (was 2535)  -- 1008 fewer (40% reduction)
+#   op0-not-mul-inputs:    232  (new)
+# Some matmul kernels still dispatch as metal-tile rather than metal-gemm
+# (none of the 23 kids took metal-gemm in this run); the metal-tile path
+# is now much faster because the kernels are simpler post-split.
