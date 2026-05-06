@@ -491,9 +491,13 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
                     const char *fv = aot_msl_emit_uint(&b, mc, &bind);
                     aot_emit_fmt(&b, "  else result_val = %s;\n", fv);
                 }
+                // Iter HH: preserve input dtype on result.  Mirrors
+                // the C runtime's NUM ops (ADD/SUB/MUL keep LHS dtype).
                 aot_emit_fmt(&b,
-                    "  result[0] = msl_term_new(TAG_NUM, 0, ulong(result_val));\n"
-                    "}\n");
+                    "  result[0] = msl_term_new(TAG_NUM,"
+                    " %s, ulong(result_val));\n"
+                    "}\n",
+                    argc > 0 ? "msl_term_ext(args[0])" : "0u");
                 emitted_mat = 1;
             }
         }
@@ -538,10 +542,13 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
 
     if (!emitted_mat && !emitted_ctr) {
         // Plain value-expression body: emit directly + wrap as NUM.
+        // Iter HH: preserve input dtype on result.
         const char *rv = aot_msl_emit_uint(&b, cursor, &bind);
         aot_emit_fmt(&b,
-            "  result[0] = msl_term_new(TAG_NUM, 0, ulong(%s));\n"
+            "  result[0] = msl_term_new(TAG_NUM,"
+            " %s, ulong(%s));\n"
             "}\n",
+            argc > 0 ? "msl_term_ext(args[0])" : "0u",
             rv);
     }
 
