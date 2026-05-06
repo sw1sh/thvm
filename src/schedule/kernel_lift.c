@@ -112,6 +112,33 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     buf = in_bufs[slot];
   } else if (bu->op == S_DEFINE_OUTPUT) {
     buf = out_buf;
+  } else if (bu->op == S_INDEX && bu->src_count >= 1) {
+    // Buf-of-INDEX: the outer S_INDEX wraps an inner S_INDEX that
+    // references the same underlying tensor.  Rangeify produces
+    // this shape as pad/shrink/permute residue -- two layered
+    // S_INDEX nodes addressing the same DEFINE_*  buffer with
+    // different iteration ranges.  See-through: use the inner's
+    // DEFINE_*  as the underlying buffer; the outer's ranges (this
+    // node's src[1..]) drive the address linearisation.
+    u32 inner_buf_sid = bu->src[0];
+    if (inner_buf_sid == 0 || inner_buf_sid >= ke->n_scalar_uops) {
+      lift_reject_log(ke, buf_sid, "index/buf-of-INDEX/inner-oor");
+      return 0;
+    }
+    ScalarUop const *ibu = &ke->scalar_uops[inner_buf_sid];
+    if (ibu->op == S_DEFINE_PARAM) {
+      u32 slot = (u32)ibu->extra;
+      if (slot >= n_inputs) {
+        lift_reject_log(ke, inner_buf_sid, "index/buf-of-INDEX/slot-oor");
+        return 0;
+      }
+      buf = in_bufs[slot];
+    } else if (ibu->op == S_DEFINE_OUTPUT) {
+      buf = out_buf;
+    } else {
+      lift_reject_log(ke, inner_buf_sid, "index/buf-of-INDEX/nested");
+      return 0;
+    }
   } else {
     lift_reject_log(ke, buf_sid, "index/buf-not-DEFINE");
     // Extra context for the buf-of-INDEX pattern: print the inner
@@ -159,7 +186,22 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
   // from the buffer's shape (row-major).  For now we use uop_buffer
   // dims as the shape -- this matches the lifter's UOP_BUFFER setup.
   u32 ndim = uop_buffer_ndim(buf);
-  if (ndim == 0 || ndim != (u32)u->src_count - 1) {
+  u32 outer_rank = (u32)u->src_count - 1;
+  // Flat-index special case: outer S_INDEX has a single range and
+  // the underlying buffer has rank > 1 (typically the rangeify
+  // pad/shrink residue feeding through a buf-of-INDEX).  Treat the
+  // single outer range as a row-major linear offset into the
+  // buffer.
+  if (outer_rank == 1 && ndim > 1) {
+    u32 r_sid = u->src[1];
+    Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
+    if (r_uop == 0) {
+      lift_reject_log(ke, r_sid, "index/flat-range-not-mapped");
+      return 0;
+    }
+    return r_uop;
+  }
+  if (ndim == 0 || ndim != outer_rank) {
     fprintf(stderr,
             "lift reject: index/ndim-mismatch buf_ndim=%u src_count=%u\n",
             ndim, u->src_count);

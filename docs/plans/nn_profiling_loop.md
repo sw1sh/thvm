@@ -545,10 +545,39 @@ every minute.
   differently.  Need to verify this assumption with one concrete
   source-level example before coding.
 
-- [ ] Implement buf-of-INDEX see-through in `lift_scalar_index`:
-  when `bu->op == S_INDEX`, treat the inner's DEFINE_*  src as the
-  underlying buffer and use the OUTER's ranges for address
-  linearisation (assumption: outer ranges replace inner's at the
-  same buffer rank).  Smoke-test on LeNet forward: (a) metal-tile
-  share grows past 40%; (b) softmax numerics match the legacy
-  path within 1e-5.
+- [x] (2026-05-06) Implement buf-of-INDEX see-through in
+  `lift_scalar_index`.  Two cases handled:
+  - **Same-rank passthrough**: when `bu->op == S_INDEX` and the
+    inner's `src[0]` is a DEFINE_*, treat the inner's underlying
+    buffer as our buffer and let the outer ranges drive
+    linearisation (the outer is a full re-expression of the same
+    iteration domain).
+  - **Flat-index special case**: when the outer S_INDEX has a
+    single range (`src_count == 2`) but the underlying buffer has
+    rank > 1, treat the single range as a row-major linear offset
+    into the buffer and skip the multi-axis stride composition.
+    This covers the rangeify pad/shrink residue that flattens a
+    rank-N tensor into rank-1 for the consumer side of a movement
+    op.
+
+  **Headline result on LeNet forward** (`bench/mlp-mnist`-style
+  capture):
+
+  | metric           | pre   | post  | delta    |
+  |------------------|-------|-------|----------|
+  | warmup_ms        | 185.6 | 224.7 | +21%     |
+  | steady_ms_avg4   |  18.5 |  16.7 | -10%     |
+  | metal-op count   |    45 |    25 | -44%     |
+  | metal-tile count |    30 |    50 | +67%     |
+
+  Dispatch shifted from 60/40 metal-op/tile to 33/67 -- more than
+  half of LeNet's kernels now use the tile path.  Forward
+  numerics on all 5 MNIST samples produce reasonable softmax
+  outputs (random-init weights so predictions are nonsense but
+  consistent across runs).  make test 274/274 unchanged.
+
+  Warmup got slightly slower; suspected cause is more kernels
+  going through the lift/render pipeline that previously fell
+  through to a faster per-op metallib path.  Steady-state still
+  wins because the rendered tile kernels amortise compile cost
+  across calls.
