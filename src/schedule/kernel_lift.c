@@ -187,13 +187,33 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
   // dims as the shape -- this matches the lifter's UOP_BUFFER setup.
   u32 ndim = uop_buffer_ndim(buf);
   u32 outer_rank = (u32)u->src_count - 1;
-  // Flat-index special case: outer S_INDEX has a single range and
-  // the underlying buffer has rank > 1 (typically the rangeify
-  // pad/shrink residue feeding through a buf-of-INDEX).  Treat the
-  // single outer range as a row-major linear offset into the
-  // buffer.
+  // Flat-index special case: outer S_INDEX has a single range whose
+  // extent equals the buffer's total numel (flat row-major linear
+  // offset).  This handles the rangeify pad/shrink residue feeding
+  // through a buf-of-INDEX where the outer access flattens the
+  // buffer to rank-1.  Reject if the range extent doesn't match
+  // total numel -- that's a partial-axis SHRINK or non-contiguous
+  // access we can't lift safely (tested via lenet-mnist/bench-
+  // train.wls; mismatched extents triggered SIGABRT on the
+  // backward path).
   if (outer_rank == 1 && ndim > 1) {
     u32 r_sid = u->src[1];
+    if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+      lift_reject_log(ke, r_sid, "index/flat-range-oor");
+      return 0;
+    }
+    ScalarUop const *ru = &ke->scalar_uops[r_sid];
+    if (ru->op != S_RANGE) {
+      lift_reject_log(ke, r_sid, "index/flat-range-not-RANGE");
+      return 0;
+    }
+    u32 range_extent = (u32)(ru->extra & 0xFFFFFFFFu);
+    u32 total_numel = 1;
+    for (u32 d = 0; d < ndim; d++) total_numel *= uop_buffer_dim(buf, d);
+    if (range_extent != total_numel) {
+      lift_reject_log(ke, r_sid, "index/flat-range-extent-mismatch");
+      return 0;
+    }
     Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
     if (r_uop == 0) {
       lift_reject_log(ke, r_sid, "index/flat-range-not-mapped");

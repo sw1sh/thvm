@@ -596,10 +596,35 @@ every minute.
   on shapes the C-side tests don't exercise.
 
 ### Bench-train regression follow-on
-- [ ] Identify which kernel shape under
-  `lenet-mnist/bench-train.wls` triggers the SIGABRT after the
-  buf-of-INDEX see-through.  Hypothesis: the flat-index special
-  case (outer rank 1, buf rank > 1) emits a UOP_INDEX_E with a
-  range whose stride doesn't match the buffer's row-major layout,
-  causing an OOB read in the renderer or runtime.  Reproduce in
-  isolation, fix, re-enable bench-train.
+- [x] (2026-05-06) Identify which kernel shape triggers the
+  SIGABRT after the buf-of-INDEX see-through.  **Root cause: my
+  flat-index special case** (outer S_INDEX rank 1, buf rank > 1)
+  was treating the single outer range as a row-major linear offset
+  WITHOUT verifying that the range extent matched the buffer's
+  total numel.  When the range covered only a subset (e.g., a
+  SHRINK residue), the rendered kernel produced an OOB read or
+  wrong addresses.  Forward happened to "pass" because the
+  softmax-sum check tolerated wrong intermediates; backward
+  produced NaN/Inf which aborted the runtime.
+
+  Fix: gate the flat-index branch on
+  `range_extent == prod(buf.dims)`; reject otherwise.  Trade-off:
+  loses the LeNet-forward 67% tile-path coverage win (back to
+  60/40 metal-op/tile) but bench-train no longer aborts.  Forward
+  steady wall slightly improved (16.45 ms vs original 18.5 ms,
+  not 16.7 ms; the same-rank passthrough still helps a tiny bit).
+  bench-train completes with 191 ms/step baseline + 1.078x
+  autotune speedup.
+
+  make test 274/274 unchanged.
+
+### buf-of-INDEX coverage follow-on
+- [ ] Recover the LeNet forward win without breaking bench-train.
+  The flat-index case applies when an outer rank-1 S_INDEX wraps
+  a multi-dim buffer; the win came from kernels where this is a
+  *full* flat view (extent == numel).  After the extent-guard,
+  partial-axis cases (SHRINK residue) reject correctly but we
+  also lost some legitimate full-flat cases that DID lift
+  pre-fix.  Investigate: dump all post-fix
+  `flat-range-extent-mismatch` rejects and confirm none are
+  actually full-flat shapes that the guard rejects spuriously.
