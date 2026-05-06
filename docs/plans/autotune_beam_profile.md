@@ -868,3 +868,35 @@ kernel_lift-relaxation from real shape data, not guesses.
   half of MLP2's +2 leak.  Code change is small (~3 lines);
   belongs to the structural-fusion campaign, queued as the
   next concrete code task there.
+
+### Land the singleton-broadcast lift fast path
+
+- [x] (2026-05-06) Add a singleton-broadcast fast-path right
+  before [src/schedule/kernel_lift.c:242](../../src/schedule/kernel_lift.c#L242)
+  that returns `uop_const(DT_INT32, 0)` when
+  `u->src_count == 1 && ndim == 1 && uop_buffer_dim(buf, 0) == 1`.
+  Also extend the ndim-mismatch dump (gated by
+  `THVM_DUMP_LIFT_REJECT=1`) to print `outer_rank` and the
+  buffer dims, so future rejects on this path are
+  diagnosable without re-reading source.
+
+  **Outcome**: MLP2's metal-op outlier (kid 6) is gone --
+  `dispatch_kinds` shifted from `{{metal-gemm, 1}, {metal-tile, 5},
+  {metal-op, 1}}` to `{{metal-gemm, 1}, {metal-tile, 6}}`.
+  All 7 kernels now lift to tile-rendered MSL.  Lift rejects
+  on MLP2 dropped 100 -> 0.  kernel_count is unchanged at 7
+  (the +2 leak vs tinygrad's 5 is still the bufferize-boundary
+  half), but the lift-reject half is closed.
+
+  | metric                 | pre-singleton | post-singleton |
+  |------------------------|--------------:|---------------:|
+  | dispatch metal-op      |             1 |              0 |
+  | dispatch metal-tile    |             5 |              6 |
+  | lift rejects (count)   |           100 |              0 |
+  | kernels_with_applied   |             5 |              6 |
+  | totals_best_us         |          1323 |           1340 |
+
+  Wall best is essentially flat (1323 vs 1340us) -- the metal-op
+  fallback was already running fast on this shape; the structural
+  win is correctness/uniformity, not raw GPU time.  make test
+  274/274 stays green.

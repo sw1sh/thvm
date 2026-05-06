@@ -239,10 +239,27 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     }
     return r_uop;
   }
+  // Singleton-broadcast fast path: a 1-d buffer of size 1 indexed
+  // with no per-dim range refs (src_count=1).  The offset is
+  // unambiguously 0 -- this is the softmax-tail / reduce-broadcast
+  // pattern (max/sum reduce produces shape [1] which is then
+  // broadcast across an outer feature loop).  Diagnosed via MLP2's
+  // mlp2_lift_reject.txt (singleton-broadcast at outer_rank>=0).
+  if (u->src_count == 1 && ndim == 1 && uop_buffer_dim(buf, 0) == 1) {
+    return uop_const(DT_INT32, 0);
+  }
   if (ndim == 0 || ndim != outer_rank) {
     fprintf(stderr,
             "lift reject: index/ndim-mismatch buf_ndim=%u src_count=%u\n",
             ndim, u->src_count);
+    char const *e = getenv("THVM_DUMP_LIFT_REJECT");
+    if (e != NULL && e[0] == '1') {
+      fprintf(stderr, "  ndim-mismatch: outer_rank=%u dims=[", outer_rank);
+      for (u32 d = 0; d < ndim; d++) {
+        fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(buf, d));
+      }
+      fputs("]\n", stderr);
+    }
     return 0;
   }
   Term acc = 0;
