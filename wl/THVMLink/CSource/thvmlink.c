@@ -2273,6 +2273,41 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_metal_run4(
   return LIBRARY_NO_ERROR;
 }
 
+// Phase 7 iter Y: variable-arity Metal AOT run.  Args:
+//   [def_id, name, args_mtensor (Integer rank-1)]
+// args_mtensor carries the Term values packed as int64s.  No upper
+// bound on length beyond what AotMaxBufferLength allows the kernel
+// to bind.  Replaces thvm_wl_aot_metal_run4 once the WL side
+// switches over.
+EXTERN_C DLLEXPORT int thvm_wl_aot_metal_run_n(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  u32 def_id = (u32)MArgument_getInteger(args[0]);
+  const char *name = MArgument_getUTF8String(args[1]);
+  MTensor t = MArgument_getMTensor(args[2]);
+  mint n    = libData->MTensor_getFlattenedLength(t);
+  if (n < 0 || n > 64) {
+    if (libData->UTF8String_disown != NULL) {
+      libData->UTF8String_disown((char *)name);
+    }
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  const mint *data = libData->MTensor_getIntegerData(t);
+  Term targs[64];
+  for (mint i = 0; i < n; i++) targs[i] = (Term)data[i];
+
+  u64 book_next_state = BOOK_NEXT;
+  Term result = thvm_aot_metal_compile_and_run(
+      name, def_id, targs, (u32)n,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  BOOK_NEXT = book_next_state;
+  if (libData != NULL && libData->UTF8String_disown != NULL) {
+    libData->UTF8String_disown((char *)name);
+  }
+  MArgument_setInteger(res, (mint)result);
+  return LIBRARY_NO_ERROR;
+}
+
 // === PRI-WL callback dispatch =============================================
 // THVM_PRIM_PRI fires inside wnf, deep in C-side recursion.  Two paths:
 //

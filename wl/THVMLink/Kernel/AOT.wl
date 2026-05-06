@@ -182,12 +182,19 @@ $aotMetalRun4Fn := $aotMetalRun4Fn = load[
     {Integer, "UTF8String", Integer, Integer, Integer, Integer},
     Integer];
 
-aotMetalRunImpl[name_String, args_List] := Module[{slots, raws},
-  raws  = toRawArg /@ args;
-  slots = PadRight[raws, 4, 0];
+(* iter Y: variable-arity dispatch.  Replaces the 4-slot bridge so
+   defs with >4 args can run via Method -> "Metal".  Args are packed
+   into an Integer rank-1 MTensor and the kernel binds args[0..n-1]
+   directly. *)
+$aotMetalRunNFn := $aotMetalRunNFn = load[
+    "thvm_wl_aot_metal_run_n",
+    {Integer, "UTF8String", {Integer, 1}},
+    Integer];
+
+aotMetalRunImpl[name_String, args_List] := Module[{raws},
+  raws = toRawArg /@ args;
   Symbol["THVMLink`TTerm"][
-    $aotMetalRun4Fn[Symbol["THVMLink`TDefName"][name], name,
-                    slots[[1]], slots[[2]], slots[[3]], slots[[4]]]]
+    $aotMetalRunNFn[Symbol["THVMLink`TDefName"][name], name, raws]]
 ]
 aotMetalRunImpl[name_String, input_TTerm]   := aotMetalRunImpl[name, {input}]
 aotMetalRunImpl[name_String, input_Integer] := aotMetalRunImpl[name,
