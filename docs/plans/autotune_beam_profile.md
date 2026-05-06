@@ -3911,3 +3911,37 @@ strategy is invalidated.
   This is the focused testbed.  Subsequent iterations bench
   against two_linears.wls (3 kernels, fast iteration) instead
   of the full transformer (17 kernels, slow iteration).
+
+### Level 40: gemm-reject signatures on two_linears
+
+- [x] (2026-05-06) Run two_linears.wls with
+  `THVM_DUMP_GEMM_REJECT=1` and inline distinct rejection
+  signatures.
+
+  Counts:
+    n_inputs!=2:                            332 hits
+    n_ops!=2:                               182 hits
+    root op=3, n_ops=5, n_inputs=3:         160 (kid 2 sig)
+    root op=3, n_ops=1, n_inputs=2:          85 (kid 3 sig)
+
+  **kid 2** (8580us) has n_ops=5, n_inputs=3.  The 5 ops are
+  bias_1 + matmul_2 + bias_2 + (output bufferize/etc); the
+  3 inputs are (kid_1_output, W2, b2).  **kid 1's bias-add
+  got swept into kid 2** along with the entire second Linear
+  layer.
+
+  kid 1 passes the gemm gate (n_inputs=2: x + W1).  Its
+  matmul got separated from its bias because the matmul is
+  the FIRST op in the kernel chain.  But the bias-add then
+  becomes the start of kid 2, not the end of kid 1.
+
+  Pattern: after the first gemm completes, rangeify sweeps
+  all downstream ops (elementwise + matmul + ...) into one
+  big kernel.  The next gemm gets buried inside.
+
+  **Lever**: rangeify needs to start a new kernel boundary
+  BEFORE a downstream matmul-shape REDUCE rather than
+  absorbing it.
+
+  Next iteration: locate rangeify's kernel-extension
+  decision and find where it absorbs the matmul reduce.
