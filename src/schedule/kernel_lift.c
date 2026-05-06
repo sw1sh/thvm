@@ -700,17 +700,18 @@ static int kernel_lift_from_gemm(KernelEntry const *ke, KernelUopLift *out) {
 //     out[r_out] = acc
 //
 // Multi-input "patch_input_count" cases (im2col split into multiple
-// input buffers via a switch on q) are not yet handled; lifter
-// returns 0 for those so the dedicated rmt_emit_conv2d_flat keeps
-// running.
+// input buffers via a switch on q) are handled below with a nested
+// UOP_IWHERE chain selecting which input slot to read based on q.
 static int kernel_lift_from_conv2d(KernelEntry const *ke,
                                    KernelUopLift *out) {
   TileConv2DInfo conv;
   if (!tile_analyze_conv2d_flat(ke, &conv)) return 0;
-  if (conv.patch_input_count != 0) return 0;  // multi-input X path
   if (conv.batch == 0 || conv.h_out == 0 || conv.w_out == 0) return 0;
   if (conv.spatial_patches == 0) return 0;
-  if (conv.w_input >= ke->n_inputs || conv.x_input >= ke->n_inputs) return 0;
+  if (conv.w_input >= ke->n_inputs) return 0;
+  if (conv.patch_input_count == 0 && conv.x_input >= ke->n_inputs) return 0;
+  if (conv.patch_input_count != 0
+      && (u64)conv.patch_input_base + conv.patch_input_count > ke->n_inputs) return 0;
   if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) return 0;
 
   // Buffers.  Conv2d output is [c_out, patches].
@@ -718,9 +719,12 @@ static int kernel_lift_from_conv2d(KernelEntry const *ke,
   u32 dims_x[1] = { 1024 };  // shape unused; lifter walks affine addr
   u32 dims_o[1] = { conv.c_out * conv.patches };
   u32 w_dt = (ke->input_dtypes != NULL) ? ke->input_dtypes[conv.w_input] : DT_FP32;
-  u32 x_dt = (ke->input_dtypes != NULL) ? ke->input_dtypes[conv.x_input] : DT_FP32;
+  u32 x_dt = (conv.x_input < ke->n_inputs && ke->input_dtypes != NULL)
+             ? ke->input_dtypes[conv.x_input] : DT_FP32;
   Term W = uop_buffer_inst(UOP_SCOPE_GLOBAL, w_dt, 2, dims_w, conv.w_input + 1);
-  Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, x_dt, 1, dims_x, conv.x_input + 1);
+  Term X = (conv.patch_input_count == 0)
+           ? uop_buffer_inst(UOP_SCOPE_GLOBAL, x_dt, 1, dims_x, conv.x_input + 1)
+           : 0;  // multi-input path doesn't use a single X buffer
   Term C = uop_buffer_inst(UOP_SCOPE_GLOBAL, ke->output_dtype, 1, dims_o, 0);
 
   u32 patches = conv.patches;
@@ -760,24 +764,66 @@ static int kernel_lift_from_conv2d(KernelEntry const *ke,
   Term wi      = uop_int_binary(UOP_IADD, k_w_off, wi_sum);
   Term ldW     = uop_index_e(W, wi);
 
-  // xi = x_offset + bi * x_stride_b + ci * x_stride2
-  //              + (oh + kh_v) * x_stride0 + (ow + kw_v) * x_stride1
-  Term k_x_off = uop_const(DT_INT32, (u32)conv.x_offset);
-  Term k_xsb   = uop_const(DT_INT32, (u32)conv.x_stride_b);
-  Term k_xs0   = uop_const(DT_INT32, (u32)conv.x_stride0);
-  Term k_xs1   = uop_const(DT_INT32, (u32)conv.x_stride1);
-  Term k_xs2   = uop_const(DT_INT32, (u32)conv.x_stride2);
-  Term xi_b    = uop_int_binary(UOP_IMUL, bi, k_xsb);
-  Term xi_ci   = uop_int_binary(UOP_IMUL, ci, k_xs2);
-  Term oh_kh   = uop_int_binary(UOP_IADD, oh, kh_v);
-  Term xi_h    = uop_int_binary(UOP_IMUL, oh_kh, k_xs0);
-  Term ow_kw   = uop_int_binary(UOP_IADD, ow, kw_v);
-  Term xi_w    = uop_int_binary(UOP_IMUL, ow_kw, k_xs1);
-  Term xi_sum1 = uop_int_binary(UOP_IADD, xi_b, xi_ci);
-  Term xi_sum2 = uop_int_binary(UOP_IADD, xi_h, xi_w);
-  Term xi_sum  = uop_int_binary(UOP_IADD, xi_sum1, xi_sum2);
-  Term xi      = uop_int_binary(UOP_IADD, k_x_off, xi_sum);
-  Term ldX     = uop_index_e(X, xi);
+  Term ldX = 0;
+  if (conv.patch_input_count == 0) {
+    // Single X buffer: xi = x_offset + bi * x_stride_b + ci * x_stride2
+    //                          + (oh + kh_v) * x_stride0
+    //                          + (ow + kw_v) * x_stride1
+    Term k_x_off = uop_const(DT_INT32, (u32)conv.x_offset);
+    Term k_xsb   = uop_const(DT_INT32, (u32)conv.x_stride_b);
+    Term k_xs0   = uop_const(DT_INT32, (u32)conv.x_stride0);
+    Term k_xs1   = uop_const(DT_INT32, (u32)conv.x_stride1);
+    Term k_xs2   = uop_const(DT_INT32, (u32)conv.x_stride2);
+    Term xi_b    = uop_int_binary(UOP_IMUL, bi, k_xsb);
+    Term xi_ci   = uop_int_binary(UOP_IMUL, ci, k_xs2);
+    Term oh_kh   = uop_int_binary(UOP_IADD, oh, kh_v);
+    Term xi_h    = uop_int_binary(UOP_IMUL, oh_kh, k_xs0);
+    Term ow_kw   = uop_int_binary(UOP_IADD, ow, kw_v);
+    Term xi_w    = uop_int_binary(UOP_IMUL, ow_kw, k_xs1);
+    Term xi_sum1 = uop_int_binary(UOP_IADD, xi_b, xi_ci);
+    Term xi_sum2 = uop_int_binary(UOP_IADD, xi_h, xi_w);
+    Term xi_sum  = uop_int_binary(UOP_IADD, xi_sum1, xi_sum2);
+    Term xi      = uop_int_binary(UOP_IADD, k_x_off, xi_sum);
+    ldX          = uop_index_e(X, xi);
+  } else {
+    // Multi-input X via switch on q: xv = (q < 1) ? load_pi0 :
+    //                                     (q < 2) ? load_pi1 : ...
+    // Each pi has its own input slot + per-axis strides; address is
+    // `pv->offset + bi * psb + oh * psh + ow * psw` (no ci/kh/kw --
+    // those are encoded statically by which pi the q lands in).
+    if (ke->input_views == NULL) return 0;
+    // Build bottom-up so the chain is right-leaning.
+    ldX = uop_const(x_dt, 0);  // default for q out of range
+    for (u32 pi = conv.patch_input_count; pi > 0; pi--) {
+      u32 idx = pi - 1;
+      u32 slot = conv.patch_input_base + idx;
+      View const *pv = &ke->input_views[slot];
+      i32 psb = 0, psh = 0, psw = 0;
+      if (pv->shape.ndim == 3) { psh = pv->strides[1]; psw = pv->strides[2]; }
+      else                     { psb = pv->strides[1]; psh = pv->strides[2];
+                                 psw = pv->strides[3]; }
+      u32 dt_pi = (ke->input_dtypes != NULL) ? ke->input_dtypes[slot] : DT_FP32;
+      u32 dims_pi[1] = { 1024 };
+      Term Xpi  = uop_buffer_inst(UOP_SCOPE_GLOBAL, dt_pi, 1, dims_pi,
+                                  slot + 1);
+      Term k_off = uop_const(DT_INT32, (u32)pv->offset);
+      Term k_psb = uop_const(DT_INT32, (u32)psb);
+      Term k_psh = uop_const(DT_INT32, (u32)psh);
+      Term k_psw = uop_const(DT_INT32, (u32)psw);
+      Term a_b = uop_int_binary(UOP_IMUL, bi, k_psb);
+      Term a_h = uop_int_binary(UOP_IMUL, oh, k_psh);
+      Term a_w = uop_int_binary(UOP_IMUL, ow, k_psw);
+      Term a_bh = uop_int_binary(UOP_IADD, a_b, a_h);
+      Term a_bhw = uop_int_binary(UOP_IADD, a_bh, a_w);
+      Term addr_pi = uop_int_binary(UOP_IADD, k_off, a_bhw);
+      Term ld_pi   = uop_index_e(Xpi, addr_pi);
+      // cond: q < (idx + 1)  (i.e. q matches case `idx` in the
+      // bottom-up chain we're building).
+      Term k_idxp1 = uop_const(DT_INT32, idx + 1);
+      Term cond    = uop_int_binary(UOP_ILT, r_q, k_idxp1);
+      ldX = uop_iwhere(cond, ld_pi, ldX);
+    }
+  }
 
   // MUL + REDUCE_SUM_q(W * X)
   Term mul   = uop_binary(UOP_MUL, ldW, ldX);
@@ -787,9 +833,23 @@ static int kernel_lift_from_conv2d(KernelEntry const *ke,
 
   out->n_inputs = ke->n_inputs;
   for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (i == conv.w_input)      out->in_bufs[i] = W;
-    else if (i == conv.x_input) out->in_bufs[i] = X;
-    else                        out->in_bufs[i] = lift_input_buffer(ke, i);
+    if (i == conv.w_input) {
+      out->in_bufs[i] = W;
+    } else if (conv.patch_input_count == 0 && i == conv.x_input) {
+      out->in_bufs[i] = X;
+    } else if (conv.patch_input_count != 0
+               && i >= conv.patch_input_base
+               && i < conv.patch_input_base + conv.patch_input_count) {
+      // Re-construct the same Xpi the load chain referenced, so
+      // rmu_buf_name's lookup hits the correct entry.
+      View const *pv = (ke->input_views != NULL) ? &ke->input_views[i] : NULL;
+      u32 dt_pi = (ke->input_dtypes != NULL) ? ke->input_dtypes[i] : DT_FP32;
+      u32 dims_pi[1] = { (pv != NULL) ? (pv->numel ? pv->numel : 1024u) : 1024u };
+      out->in_bufs[i] = uop_buffer_inst(UOP_SCOPE_GLOBAL, dt_pi, 1,
+                                        dims_pi, i + 1);
+    } else {
+      out->in_bufs[i] = lift_input_buffer(ke, i);
+    }
   }
   out->out_buf    = C;
   out->store_root = store;
