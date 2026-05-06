@@ -57,8 +57,28 @@ static u32 g_msl_fresh = 0;
 // (callee_id == self_id -> bail).  emit_failed flips to 1 on any
 // unsupported shape inside a recursive emit; the top-level entry
 // frees the buffer and returns NULL when set.
-static u32 g_msl_self_def_id = 0;
-static int g_msl_emit_failed = 0;
+//
+// Iter W: g_msl_emit_failure_reason carries a brief description so
+// the host (compile_and_run in _.m) can print a useful diagnostic
+// instead of just "emit failed for def_id N".
+static u32  g_msl_self_def_id = 0;
+static int  g_msl_emit_failed = 0;
+static char g_msl_emit_failure_reason[256] = {0};
+
+// Public accessor so the dual-TU Metal backend can read the latest
+// failure reason after thvm_aot_metal_emit returns NULL.
+const char *thvm_aot_metal_emit_failure_reason(void) {
+    return g_msl_emit_failure_reason;
+}
+
+static void aot_msl_emit_fail(const char *fmt, ...) {
+    g_msl_emit_failed = 1;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_msl_emit_failure_reason,
+              sizeof g_msl_emit_failure_reason, fmt, ap);
+    va_end(ap);
+}
 
 // Iter V: DUP memo -- per-emit map from dup_loc -> emitted uint var
 // name.  When a LAM binder is used multiple times, WL's auto_dup
@@ -222,19 +242,22 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
           call_args[n_call_args - 1 - i] = tmp;
         }
         if (term_tag(cursor) != TAG_REF) {
-          g_msl_emit_failed = 1;
+          aot_msl_emit_fail("APP head is tag=%u (expected TAG_REF)",
+                            term_tag(cursor));
           snprintf(out, 80, "0u /* APP head not REF (tag=%u) */",
                    term_tag(cursor));
           return out;
         }
         u32 callee_id = term_ext(cursor);
         if (callee_id == g_msl_self_def_id) {
-          g_msl_emit_failed = 1;
+          aot_msl_emit_fail("recursive REF (def_id %u calls itself)"
+                            " -- Metal emit doesn't support recursion",
+                            callee_id);
           snprintf(out, 80, "0u /* recursive REF -- not supported */");
           return out;
         }
         if (callee_id >= DEFS_CAP || DEFS[callee_id] == 0) {
-          g_msl_emit_failed = 1;
+          aot_msl_emit_fail("REF id %u out of range or unset", callee_id);
           snprintf(out, 80, "0u /* REF id %u out of range */", callee_id);
           return out;
         }
@@ -258,7 +281,10 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
           callee_arity++;
         }
         if (callee_arity != n_call_args) {
-          g_msl_emit_failed = 1;
+          aot_msl_emit_fail(
+              "REF call arity mismatch: %u call args vs %u callee LAMs"
+              " (callee def_id %u)",
+              n_call_args, callee_arity, callee_id);
           bind->n = saved_n;
           snprintf(out, 80,
                    "0u /* arity mismatch: %u call args vs %u callee LAMs */",
@@ -363,6 +389,7 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     g_msl_fresh = 0;
     g_msl_self_def_id = def_id;
     g_msl_emit_failed = 0;
+    g_msl_emit_failure_reason[0] = '\0';
     g_msl_dup_n = 0;   // iter V: reset dup memo for this emit
 
     // Iter F + L: detect App(MAT-chain, TVar) shape.  After TLam-peel

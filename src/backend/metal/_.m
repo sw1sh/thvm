@@ -2528,7 +2528,17 @@ Term thvm_aot_metal_compile_and_run(const char *name, u32 def_id,
   }
   char *src = thvm_aot_metal_emit(def_id, name);
   if (!src) {
-    fprintf(stderr, "thvm aot-metal: emit failed for def_id %u\n", def_id);
+    extern const char *thvm_aot_metal_emit_failure_reason(void);
+    const char *why = thvm_aot_metal_emit_failure_reason();
+    if (why != NULL && why[0] != '\0') {
+      fprintf(stderr,
+              "thvm aot-metal: emit failed for def_id %u (\"%s\"): %s\n",
+              def_id, name, why);
+    } else {
+      fprintf(stderr,
+              "thvm aot-metal: emit failed for def_id %u (\"%s\")\n",
+              def_id, name);
+    }
     return 0;
   }
   uint64_t hash = aot_metal_fnv1a(src);
