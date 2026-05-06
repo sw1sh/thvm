@@ -450,6 +450,35 @@ int main(void) {
   CHECK_EQ(term_tag(result), (u64)TAG_NUM);
   CHECK_EQ(term_val(result), (u64)169);
 
+  // Iter Z: hot-path microbench.  After PSO + metallib disk caches
+  // are warm, a single add2(a,b) Metal dispatch should be on the
+  // order of a few hundred microseconds (kernel launch + readback
+  // dominate; the actual fold is ~5 ns).  CHECK ensures we don't
+  // silently regress to seconds (which would mean the cache broke
+  // and we're recompiling per call).
+  TEST_BEGIN("Metal hot-path: 100 add2 calls under 200 ms");
+  Term bargs[2] = {
+    term_new(0, TAG_NUM, 0, 7),
+    term_new(0, TAG_NUM, 0, 11),
+  };
+  // Warm-up (already JIT-compiled earlier in this test, but make
+  // sure the PSO is in cache for the timed loop).
+  (void)thvm_aot_metal_compile_and_run(
+      "add2", 0, bargs, 2,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  u64 t0 = cg_now_us();
+  for (u32 i = 0; i < 100; i++) {
+    Term r = thvm_aot_metal_compile_and_run(
+        "add2", 0, bargs, 2,
+        BOOK_HEAP, BOOK_CAP, &book_next_state);
+    (void)r;
+  }
+  u64 dt = cg_now_us() - t0;
+  fprintf(stderr, "  bench: 100 add2 Metal calls in %llu us"
+          " (avg %llu us/call)\n",
+          (unsigned long long)dt, (unsigned long long)(dt / 100));
+  CHECK(dt < 200000);   // 200 ms cap; typical run is ~50 ms total
+
   thvm_free();
   TEST_REPORT();
 }
