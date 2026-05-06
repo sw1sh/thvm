@@ -4984,3 +4984,27 @@ keep splitting.
   Surgical tests green: test_tile_graph (636/636), test_bufferize
   (320/320), test_bufferize_classify (62/62).
 
+### Level 57: remove Level 52 dead scaffold
+
+Level 52 added `tile_analyze_gemm_movement_prefix` (gated by
+`THVM_GEMM_RELAX_MOVEMENT=1`) as a fallback for matmul kernels
+with movement-prefix shapes.  Level 54 made `view_resolve` fold
+those movement chains into the input View at materialize time,
+collapsing kernel programs to n_ops=2 [MUL, REDUCE] -- which the
+existing strict `tile_analyze_gemm` already accepts.
+
+A/B test on transformer confirms the scaffold is dead: with and
+without `THVM_GEMM_RELAX_MOVEMENT=1` the dispatch_kinds are
+identical (`{metal-tile:10, metal-op:2, metal-gemm:6}`).  Wall
+times differ only by run-to-run noise.
+
+- [x] (2026-05-07) Removed `tile_analyze_gemm_movement_prefix` and
+  `tile_gemm_resolve_input_via_movement` (no other call sites),
+  the `THVM_GEMM_RELAX_MOVEMENT` env gate, the
+  `THVM_DUMP_GEMM_RELAX` diagnostic, and the call site before
+  the strict `n_ops != 2` gate.  Net delete ~75 lines.
+
+  test_tile_graph 636/636 green; transformer dispatch unchanged
+  (`{metal-tile:10, metal-op:2, metal-gemm:6}`) and wall stays
+  at 7597us (within noise of the Level 56 7633us).
+
