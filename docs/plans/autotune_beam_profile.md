@@ -2431,3 +2431,59 @@ feeding the same tensor 3 times.
   CatenateLayer pattern.  Subsequent levels: probe with
   AttentionLayer + projections, then CatenateLayer multi-head
   (post Phase 13).
+
+### Level 18c: thvm AttentionLayer with Q/K/V/O projections
+
+Tinygrad self-attention (Level 18) = 8 kernels (Q/K/V/O
+projections + Q@K^T + softmax + attn@V).  thvm identity
+attention (Level 18b) = 4 kernels.  Adding 4 LinearLayer
+projections to thvm: predicted 8 (if fuse aggressively, like
+tinygrad) or 12 (if per-Linear +2 cost from MLPN holds).
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/attention_proj.wls` -- NetGraph:
+  input X -> 3 Linear projections (Q/K/V) ->
+  AttentionLayer["Dot"] -> output Linear projection.  Save
+  stdout to `bench/autotune-ladder/attention_proj.txt`.
+  Inline kernel_count, dispatch_kinds, totals_baseline_us,
+  totals_best_us, totals_speedup.  Compare to thvm identity
+  attention (4) and tinygrad attention (8).
+
+  | metric             | identity | with_proj | tg_full |
+  |--------------------|---------:|----------:|--------:|
+  | kernel_count       |        4 |         9 |       8 |
+  | dispatch_kinds     | 1g+3t    | 3g+6t     |    n/a  |
+  | totals_baseline_us |     2866 |      5795 |    4488 |
+  | totals_best_us     |     1851 |      4118 |    4623 |
+  | totals_speedup     |    1.55x |     1.41x |   0.97x |
+
+  **Headline**: thvm attention + Q/K/V/O projections = 9
+  kernels.  Cross-framework leak vs tinygrad's 8 = **+1
+  only** -- not +5 that the per-Linear MLP rule (+2 per
+  LinearLayer) would predict.
+
+  Projections fuse much more aggressively when their output
+  goes directly into AttentionLayer's Q/K/V ports (no
+  intermediate bufferize).  The per-LinearLayer-output-
+  bufferize boundary only fragments at standalone-Linear
+  boundaries; AttentionLayer's input ports absorb the
+  matmul output.
+
+  **Attention is roughly at parity** -- thvm runs the same
+  attention compute in 9 kernels vs tinygrad's 8, vs MLP's
+  2x slope (thvm 7 vs tg 5 for MLP2).  This was unexpected
+  given the MLP scaling and is a meaningful contrast: the
+  thvm AttentionLayer handler in
+  [wl/THVMLink/Kernel/NN.wl:1017](../../wl/THVMLink/Kernel/NN.wl#L1017)
+  appears to lower into a tighter graph than NetChain's
+  per-Linear bufferize fragmentation.
+
+  Autotune speedup 1.41x -- second-highest non-elementwise
+  speedup in the campaign (after identity attention 1.55x).
+  Attention-shape kernels surface real autotune leverage on
+  thvm; tinygrad found 0.97x (autotune flat).
+
+  **thvm has an autotune advantage on attention shapes**
+  (1.41x vs tinygrad's 0.97x).  This is the first network
+  type in the campaign where thvm's autotune meaningfully
+  outperforms tinygrad's BEAM=4 search on the same shape.
