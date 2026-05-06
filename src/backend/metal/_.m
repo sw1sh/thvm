@@ -135,6 +135,15 @@ static void metal_submit_if_standalone(id<MTLCommandBuffer> cmd) {
   [cmd waitUntilCompleted];
 }
 
+// Forward decls for the JIT counters: definitions live inside the
+// METAL_JIT_CACHE block further down, but metal_init / metal_shutdown
+// (defined just below) need to read and reset them.
+static u64 METAL_JIT_BUILD_HITS;
+static u64 METAL_JIT_BUILD_MISSES;
+static u64 METAL_JIT_BUILD_BYPASS;
+static u64 METAL_JIT_BUILD_COMPILE_US;
+fn void thvm_metal_jit_counters_reset(void);
+
 static int metal_init(void) {
   METAL_DEVICE = MTLCreateSystemDefaultDevice();
   if (METAL_DEVICE == nil) {
@@ -169,6 +178,7 @@ static int metal_init(void) {
   METAL_BATCH_CMD    = nil;
   METAL_BATCH_DEPTH  = 0;
   METAL_DEFER_DECREF_LEN = 0;
+  thvm_metal_jit_counters_reset();
   METAL_DEFER_DECREF_BYTES = 0;
   METAL_PEAK_LIVE_BYTES = 0;
   METAL_PEAK_RETAINED_BYTES = 0;
@@ -565,6 +575,18 @@ static void metal_graph_cache_reset_impl(void);
 
 static void metal_shutdown(void) {
   metal_dispatch_flush();
+  // JIT counters: opt-in dump on shutdown so bench scripts can see
+  // how much of a run's wall time was spent in MTLLibrary compiles
+  // vs cache hits.  Read-only -- counters are reset by
+  // metal_init below.
+  if (getenv("THVM_METAL_JIT_STATS")) {
+    fprintf(stderr,
+            "thvm: metal_jit stats -- hits=%llu misses=%llu bypass=%llu compile_us=%llu\n",
+            (unsigned long long)METAL_JIT_BUILD_HITS,
+            (unsigned long long)METAL_JIT_BUILD_MISSES,
+            (unsigned long long)METAL_JIT_BUILD_BYPASS,
+            (unsigned long long)METAL_JIT_BUILD_COMPILE_US);
+  }
   METAL_BATCH_DEPTH = 0;
   METAL_FREELIST_LEN = 0;
   METAL_DEFER_DECREF_LEN = 0;
@@ -632,6 +654,22 @@ typedef struct {
 } MetalJitSlot;
 static MetalJitSlot                METAL_JIT_CACHE[METAL_JIT_CACHE_CAP];
 static id<MTLComputePipelineState> METAL_JIT_PSOS [METAL_JIT_CACHE_CAP];
+
+// Per-process counters for the JIT pipeline.  Storage is forward-
+// declared near metal_init; helpers are defined here so they're
+// in scope alongside the cache they instrument.  Counts include
+// both metal_jit_build (KProgOp-flat path) and metal_tile_jit_build
+// (UOp-DAG renderer path).
+fn u64 thvm_metal_jit_build_hits     (void) { return METAL_JIT_BUILD_HITS;       }
+fn u64 thvm_metal_jit_build_misses   (void) { return METAL_JIT_BUILD_MISSES;     }
+fn u64 thvm_metal_jit_build_bypass   (void) { return METAL_JIT_BUILD_BYPASS;     }
+fn u64 thvm_metal_jit_build_compile_us(void){ return METAL_JIT_BUILD_COMPILE_US; }
+fn void thvm_metal_jit_counters_reset(void) {
+  METAL_JIT_BUILD_HITS        = 0;
+  METAL_JIT_BUILD_MISSES      = 0;
+  METAL_JIT_BUILD_BYPASS      = 0;
+  METAL_JIT_BUILD_COMPILE_US  = 0;
+}
 
 // Forward-declared as metal_jit_cache_reset_impl above; called from
 // metal_shutdown so the next metal_init starts with a clean slate.
@@ -988,6 +1026,7 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
   if (src == NULL) return nil;
   NSString *srcStr = [NSString stringWithUTF8String:src];
   free(src);
+  u64 t0 = cg_now_us();
   NSError *err = nil;
   id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
                                                   options:nil
@@ -1020,10 +1059,14 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
             err ? [[err localizedDescription] UTF8String] : "(no error)");
     return nil;
   }
+  METAL_JIT_BUILD_COMPILE_US += cg_now_us() - t0;
   u32 idx = metal_jit_lookup_idx(key);
   if (idx != (u32)-1) {
     METAL_JIT_CACHE[idx].key = key;
     METAL_JIT_PSOS [idx]     = pso;
+    METAL_JIT_BUILD_MISSES++;
+  } else {
+    METAL_JIT_BUILD_BYPASS++;
   }
   return pso;
 }
@@ -1116,6 +1159,7 @@ static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke) {
   u64 key = metal_tile_jit_hash(ke);
   u32 idx = metal_jit_lookup_idx(key);
   if (idx != (u32)-1 && METAL_JIT_CACHE[idx].key == key) {
+    METAL_JIT_BUILD_HITS++;
     return METAL_JIT_PSOS[idx];
   }
   return metal_tile_jit_build(ke, key);
