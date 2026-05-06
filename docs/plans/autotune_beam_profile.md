@@ -4415,12 +4415,16 @@ task.  Break it down:
     bench confirms kid 1 still fires metal-gemm (166us baseline
     -> 157us best, dispatch_kinds: {metal-gemm:1, metal-tile:2}).
     First UPat consumer in a real (non-test) code path.
-  - [ ] Port the matmul-input-protect marker (the upstream-walk
-    over BUFFERIZE_NODES at bufferize_classify.c L1572-1597) to
-    a UPat-driven walker that captures the matmul shape + walks
-    one hop up to mark elementwise inputs.  Side-effect-on-match
-    is the API shape needed; the smoke-test bridge already returns
-    same-term to mean "no rewrite".
+  - [x] (2026-05-07) Port the matmul-input-protect marker (the
+    upstream-walk over BUFFERIZE_NODES at bufferize_classify.c
+    L1572-1597) to a UPat-driven walker.  Structural recognition
+    (UOP_MUL with 2 children captured at slots 0/1) goes through
+    `upat_match` reusing the shared `bufferize_upat_mul` table;
+    the ADD-or-MUL gate + side-effect mark on BUFFERIZE_NODES
+    stay imperative because they touch the side channel rather
+    than the heap DAG.  `make test` clean; two_linears confirms
+    dispatch unchanged: `{metal-gemm:1, metal-tile:2}`, kid 1 =
+    metal-gemm 147us baseline -> 153us best with TOpt[TC,0,8].
   - [ ] Port the inline-* rules (`inline_reduce_scalar_tail`,
     `inline_movement_chain`, etc) to UPat.  These are the rules
     that today drive `bufferize_node_unmark`.

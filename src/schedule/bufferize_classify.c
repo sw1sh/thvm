@@ -1475,6 +1475,17 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
   return hits;
 }
 
+// Shared UPat: UOP_MUL(?0, ?1) -- both operands captured.  Used by
+// the matmul recognizer (distinctness check on bindings) and by the
+// matmul-input-protect marker (gate-and-mark on bindings).
+static UPat const bufferize_upat_mul_children[2] = {
+  {0, 0xFF, 0, 0, NULL},
+  {0, 0xFF, 0, 1, NULL},
+};
+static UPat const bufferize_upat_mul = {
+  UOP_MUL, 2, 0, -1, bufferize_upat_mul_children
+};
+
 // Detect UOP_REDUCE(SUM, UOP_MUL(A, B)) with A != B -- matmul-shape
 // reduce.  Used to protect matmul outputs from inline-* rules so the
 // matmul kernel stays bufferized as a clean 2-input/2-op kernel that
@@ -1485,15 +1496,9 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
 // the distinctness check remains a post-match guard so the
 // diagnostic can keep its prior structure.
 static int bufferize_uop_is_matmul(u64 reduce_loc) {
-  static UPat const upat_mul_children[2] = {
-    {0, 0xFF, 0, 0, NULL},
-    {0, 0xFF, 0, 1, NULL},
-  };
-  static UPat const upat_mul = {UOP_MUL, 2, 0, -1, upat_mul_children};
-
   Term mul = term_resolve(heap_read(reduce_loc + 0));
   Term bindings[UPAT_NUM_BINDINGS] = {0};
-  int is_mul   = upat_match(&upat_mul, mul, bindings);
+  int is_mul   = upat_match(&bufferize_upat_mul, mul, bindings);
   int distinct = is_mul && (term_val(bindings[0]) != term_val(bindings[1]));
 
   char const *e = getenv("THVM_DUMP_MATMUL_DETECT");
@@ -1581,16 +1586,19 @@ fn void bufferize_classify(Term root) {
   // and visit() routes it as input.  Without this, materialize's
   // visit() absorbs upstream bias-add chains into the matmul kernel,
   // bloating n_ops/n_inputs past the strict tile_analyze_gemm gates
-  // and forcing the slow metal-tile dispatch.
+  // and forcing the slow metal-tile dispatch.  Structural recognition
+  // (UOP_MUL with 2 children, captured at slots 0/1) goes through
+  // upat_match; the ADD-or-MUL gate + side-effect marking on
+  // BUFFERIZE_NODES stay imperative because they touch the side
+  // channel rather than the heap DAG.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
     if (!(info->reasons & BUFFERIZE_REASON_MATMUL)) continue;
     Term mul = term_resolve(heap_read(info->loc + 0));
-    if (term_tag(mul) != TAG_UOP) continue;
-    if (term_ext(mul) != UOP_MUL) continue;
-    u64 mul_loc = term_val(mul);
+    Term bindings[UPAT_NUM_BINDINGS] = {0};
+    if (!upat_match(&bufferize_upat_mul, mul, bindings)) continue;
     for (u32 a = 0; a < 2; a++) {
-      Term arg = term_resolve(heap_read(mul_loc + a));
+      Term arg = bindings[a];
       if (term_tag(arg) != TAG_UOP) continue;
       u8 arg_op = term_ext(arg);
       if (arg_op != UOP_ADD && arg_op != UOP_MUL) continue;
