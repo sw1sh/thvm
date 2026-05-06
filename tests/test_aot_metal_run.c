@@ -210,6 +210,80 @@ int main(void) {
   // 0 = compile_and_run failure sentinel (emit returned NULL).
   CHECK_EQ(result, (Term)0);
 
+  // Iter H: CTR construction.  wrap(x) = TCtr[1, x] -- a single-child
+  // CTR cell built on the GPU via aot_book_alloc + heap_set.
+  TEST_BEGIN("CTR build: wrap(x) = TCtr[1, x] returns TAG_CTR");
+  // Body shape: TCtr label=1 with 1 child = TVar(wrap_x_loc).
+  // Heap: ctr_loc = [NUM(1), TVar(wrap_x_loc)]; root = TAG_CTR.
+  // Build the def: TLam[x, TCtr[1, x]].
+  u64 wrap_x_loc = book_alloc(1);
+  u64 wrap_ctr_loc = book_alloc(2);
+  book_set(wrap_ctr_loc + 0, term_new(0, TAG_NUM, DT_INT32, 1));
+  book_set(wrap_ctr_loc + 1, term_new(0, TAG_VAR, 0, wrap_x_loc));
+  Term wrap_ctr = term_new(0, TAG_CTR, /*label=*/1, wrap_ctr_loc);
+  book_set(wrap_x_loc, wrap_ctr);
+  Term wrap = term_new(0, TAG_LAM, 0, wrap_x_loc);
+  u32  def_id6 = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id6 = i; break; }
+  }
+  DEFS[def_id6] = wrap;
+
+  Term args_w[1] = { term_new(0, TAG_NUM, 0, 42) };
+  u64 next_before_wrap = book_next_state;
+  result = thvm_aot_metal_compile_and_run(
+      "wrap", def_id6, args_w, 1,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_CTR);
+  CHECK_EQ(term_ext(result), (u64)1);  // label
+  // GPU allocated 2 cells (1 + 1 child).
+  CHECK_EQ(book_next_state, next_before_wrap + 2);
+  u64 r_loc = term_val(result);
+  Term n_cell = BOOK_HEAP[r_loc + 0];
+  Term c0     = BOOK_HEAP[r_loc + 1];
+  CHECK_EQ(term_tag(n_cell), (u64)TAG_NUM);
+  CHECK_EQ(term_val(n_cell), (u64)1);     // arity
+  CHECK_EQ(term_tag(c0), (u64)TAG_NUM);
+  CHECK_EQ(term_val(c0), (u64)42);         // the bound x
+
+  // Pair builder: pair(x, y) = TCtr[2, x, y] -- arity 2.
+  TEST_BEGIN("CTR build arity 2: pair(x, y) = TCtr[2, x, y]");
+  u64 pair_x_loc = book_alloc(1);
+  u64 pair_y_loc = book_alloc(1);
+  u64 pair_ctr_loc = book_alloc(3);
+  book_set(pair_ctr_loc + 0, term_new(0, TAG_NUM, DT_INT32, 2));
+  book_set(pair_ctr_loc + 1, term_new(0, TAG_VAR, 0, pair_x_loc));
+  book_set(pair_ctr_loc + 2, term_new(0, TAG_VAR, 0, pair_y_loc));
+  Term pair_ctr = term_new(0, TAG_CTR, /*label=*/2, pair_ctr_loc);
+  book_set(pair_y_loc, pair_ctr);
+  Term pair_lam_y = term_new(0, TAG_LAM, 0, pair_y_loc);
+  book_set(pair_x_loc, pair_lam_y);
+  Term pair = term_new(0, TAG_LAM, 0, pair_x_loc);
+  u32  def_id7 = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id7 = i; break; }
+  }
+  DEFS[def_id7] = pair;
+
+  Term args_p[2] = {
+    term_new(0, TAG_NUM, 0, 100),
+    term_new(0, TAG_NUM, 0, 200),
+  };
+  u64 next_before_pair = book_next_state;
+  result = thvm_aot_metal_compile_and_run(
+      "pair", def_id7, args_p, 2,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_CTR);
+  CHECK_EQ(term_ext(result), (u64)2);
+  CHECK_EQ(book_next_state, next_before_pair + 3);
+  u64 p_loc = term_val(result);
+  Term p_n = BOOK_HEAP[p_loc + 0];
+  Term p_a = BOOK_HEAP[p_loc + 1];
+  Term p_b = BOOK_HEAP[p_loc + 2];
+  CHECK_EQ(term_val(p_n), (u64)2);
+  CHECK_EQ(term_val(p_a), (u64)100);
+  CHECK_EQ(term_val(p_b), (u64)200);
+
   thvm_free();
   TEST_REPORT();
 }
