@@ -77,6 +77,22 @@ int main(void) {
   CHECK_EQ(term_tag(result), (u64)TAG_NUM);
   CHECK_EQ(term_val(result), (u64)300);
 
+  // Iter JJ: dtype preservation regression test.  Inputs carry
+  // DT_INT32 (ext=5); iter HH made the kernel preserve LHS dtype
+  // on result, so the output should be NUM(7, ext=DT_INT32) -- not
+  // NUM(7, ext=DT_BOOL) like before the fix.
+  TEST_BEGIN("dtype preservation: NUM(i32, i32) -> NUM(i32)");
+  Term i32_args[2] = {
+    term_new(0, TAG_NUM, DT_INT32, 3),
+    term_new(0, TAG_NUM, DT_INT32, 4),
+  };
+  result = thvm_aot_metal_compile_and_run(
+      "add2", def_id, i32_args, 2,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)7);
+  CHECK_EQ(term_ext(result), (u64)DT_INT32);   // dtype preserved
+
   // Compile + run a different def shape: nested OP2.
   // mul_then_add(a, b, c) = (a * b) + c
   TEST_BEGIN("(a*b)+c on GPU returns 5*6+7 = 37");
