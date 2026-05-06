@@ -212,6 +212,41 @@ used to carry:
   as a fallback for the multi-input X path; once that lifts too,
   every legacy MSL emission path becomes dead code.
 
+- **Phase F multi-input conv2d** (`23d333e`): closes the last
+  legacy-renderer fallback.  When TileConv2DInfo.patch_input_count
+  > 0 (im2col split across multiple input slots), the lifter
+  emits a nested UOP_IWHERE chain selecting the right slot based
+  on q (the reduce iter).  Each pi reads its own input buffer
+  with per-axis (psb, psh, psw) strides from ke->input_views.
+  KernelUopLift.in_bufs[] populates each patch slot with the
+  matching uop_buffer_inst so name lookup resolves correctly.
+
+  Validation: 100/100 WL tests across 10 files (conv_im2col,
+  cmpeq, cast, reduce, bn_grad, grad_edge, assign, bitcast, flip,
+  core), 274/274 binary tests in both default-on and
+  THVM_RENDER_VIA_UOP=0 modes.
+
+  rmt_emit_conv2d_flat is now reachable only as a last-resort
+  fallback (malformed conv shape, missing metadata).  All real
+  conv2d workloads flow through the UOp-DAG renderer.
+
+### Phase F campaign: complete
+
+The 2-IR migration to George's TileLang vision is structurally
+landed.  Pipeline:
+
+  KernelEntry (from bufferize boundaries via materialize)
+       ↓ kernel_lift_to_uop  (covers EVERY kernel shape)
+  UOp DAG (Term)
+       ↓ cg_render_uop_kernel  (DEFAULT path)
+  MSL source
+       ↓ Metal dispatch  (validated on real workloads)
+
+Phase G can now begin: delete the legacy ScalarUop renderer +
+ScalarUop arena + tile.c TileUop[] + most of rangeify.c +
+render_c_scalar.c, gated only on dropping THVM_RENDER_VIA_UOP=0
+support (the regression-bisection fallback).
+
 - **Phase C wedge** (`b583321`, `4a36637`): kernel_lift_to_uop
   bridges ScalarUop[] arena to UOp DAG.  Takes a fully-scheduled
   kernel and builds the equivalent UOp DAG on the heap, returning
