@@ -903,7 +903,10 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     u32 extent;
     u32 origin;       // index into BUFFERIZE.src[1..n_buf]
     u32 factor;       // multiplier in linearisation
+    u32 opt_kind;     // UOP_OPT_* or 0xFFu (no opt wrap)
+    u32 opt_factor;   // factor argument carried into UOP_OPT
   } SplitAxis;
+  #define SPLIT_AXIS_NO_OPT 0xFFu
   SplitAxis cur[MAX_AXES];
   u32 n_cur = 0;
   u32 r_sids[MAX_DIM];
@@ -913,10 +916,12 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     ScalarUop const *ru = &ke->scalar_uops[r_sid];
     if (ru->op != S_RANGE) return 0;
     r_sids[i] = r_sid;
-    cur[n_cur].axis_type = (u32)(ru->extra >> 32) & 0xFFu;
-    cur[n_cur].extent    = (u32)(ru->extra & 0xFFFFFFFFu);
-    cur[n_cur].origin    = i;
-    cur[n_cur].factor    = 1;
+    cur[n_cur].axis_type  = (u32)(ru->extra >> 32) & 0xFFu;
+    cur[n_cur].extent     = (u32)(ru->extra & 0xFFFFFFFFu);
+    cur[n_cur].origin     = i;
+    cur[n_cur].factor     = 1;
+    cur[n_cur].opt_kind   = SPLIT_AXIS_NO_OPT;
+    cur[n_cur].opt_factor = 0;
     n_cur++;
   }
   // Replay applied_opts when present.  Pre-mutated axes (test seam:
@@ -972,6 +977,17 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
         cur[o.axis + 1].extent    = inner_extent;
         cur[o.axis + 1].origin    = origin;
         cur[o.axis + 1].factor    = factor;
+        // For UPCAST/UNROLL the renderer's `#pragma unroll(N)` fires
+        // only when the inner UOP_RANGE is wrapped in a UOP_OPT
+        // annotation; the axis_type alone isn't enough.  LOCAL /
+        // GROUP / GROUPTOP rely on axis_type for the renderer's
+        // thread-bind / accumulator paths.
+        cur[o.axis + 1].opt_kind   = (op == KOP_UPCAST) ? UOP_OPT_UPCAST
+                                   : (op == KOP_UNROLL) ? UOP_OPT_UNROLL
+                                   :                      SPLIT_AXIS_NO_OPT;
+        cur[o.axis + 1].opt_factor = (op == KOP_UPCAST || op == KOP_UNROLL)
+                                   ? inner_extent
+                                   : 0;
         n_cur++;
       } else if (op == KOP_GLOBAL) {
         if (cur[o.axis].axis_type != KAX_LOOP || o.arg != cur[o.axis].extent) {
@@ -1003,10 +1019,12 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     u32 inner_prod = 1;
     for (u32 a = kax->n_axes; a > 0; a--) {
       u32 idx = a - 1;
-      cur[idx].axis_type = kax->axis_types[idx];
-      cur[idx].extent    = kax->full_shape[idx];
-      cur[idx].origin    = 0;
-      cur[idx].factor    = inner_prod;
+      cur[idx].axis_type  = kax->axis_types[idx];
+      cur[idx].extent     = kax->full_shape[idx];
+      cur[idx].origin     = 0;
+      cur[idx].factor     = inner_prod;
+      cur[idx].opt_kind   = SPLIT_AXIS_NO_OPT;
+      cur[idx].opt_factor = 0;
       inner_prod *= kax->full_shape[idx];
     }
     n_cur = kax->n_axes;
@@ -1017,6 +1035,9 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   Term origin_expr[MAX_DIM] = {0};
   for (u32 a = 0; a < n_cur; a++) {
     Term r = uop_range(a, cur[a].axis_type, cur[a].extent);
+    if (cur[a].opt_kind != SPLIT_AXIS_NO_OPT) {
+      r = uop_opt(r, cur[a].opt_kind, cur[a].opt_factor);
+    }
     Term term = (cur[a].factor == 1)
               ? r
               : uop_int_binary(UOP_IMUL, r,

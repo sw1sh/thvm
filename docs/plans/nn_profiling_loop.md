@@ -175,10 +175,22 @@ every minute.
   dispatches still on metal-op.
 
 ### Autotune-via-UOP_OPT verification
-- [ ] Pick one elementwise kernel in lenet-mnist that proposes
-  UPCAST. Apply manually via `TKernelApplyOpt`. Dump rendered MSL
-  with `THVM_DUMP_TILE_JIT_SRC=1` and confirm `#pragma unroll(N)`
-  fires correctly above the inner for-loop.
+- [x] (2026-05-06) Pick one elementwise kernel that proposes UPCAST
+  and confirm `#pragma unroll(N)` fires above the inner for-loop.
+  Used a synthetic 16-element `TUOpAdd` -> `TKernelApplyOpt
+  [TOpt["UPCAST", 0, 4]]` and dumped the rendered MSL via
+  `TKernelSource[kid, "Metal"]`.  Initial render showed the split
+  outer/inner loops but **no pragma** -- the renderer's pragma
+  emission gates on `UOP_OPT_UPCAST` annotations, and
+  `kernel_lift_to_uop` only set `axis_type=KAX_UPCAST` on the
+  inner range without wrapping it in `UOP_OPT`.  Fix landed in
+  [src/schedule/kernel_lift.c](../../src/schedule/kernel_lift.c):
+  `SplitAxis` gains `opt_kind`/`opt_factor` fields; UPCAST and
+  UNROLL splits set `opt_kind=UOP_OPT_UPCAST/UNROLL`,
+  `opt_factor=arg`; the per-axis allocator wraps the
+  `UOP_RANGE` in `uop_opt(...)` when `opt_kind != NO_OPT`.
+  Post-fix MSL emits `#pragma unroll(4)` between the outer and
+  inner `for` loops.  make test 274/274 unchanged.
 - [ ] Same for `LOCAL` — confirm the rendered MSL binds the inner
   axis to `tt` and the outer loop covers `N/L` iterations.
 - [ ] Same for `GLOBAL` — confirm `tg` bind.
