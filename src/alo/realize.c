@@ -160,10 +160,10 @@ Term alo_realize(Term book_term, u32 state_id) {
       // handle them (each instance gets its own grad cell, as today).
       if (ext & DUP_GRAD_FLAG) goto default_node;
 
-      // Plain dup projection: share the new dyn dup-body loc with
-      // the OTHER projection (DP0 vs DP1) of the same book dup.
-      // Without sharing, each projection allocates its own body and
-      // each fires DUP-NOD, doubling the interaction count vs HVM4.
+      // Plain dup projection should not appear in book templates after
+      // the BJ rewrite landed (clone_to_book_rec emits BJ for plain
+      // DPs).  Defensive fall-through for back-compat with templates
+      // that pre-date the rewrite: same dup_share semantics, emit DP.
       u64 new_loc;
       if (!dup_share_lookup(state_id, val, &new_loc)) {
         new_loc = heap_alloc(1);
@@ -172,6 +172,23 @@ Term alo_realize(Term book_term, u32 state_id) {
         dup_share_push(state_id, val, new_loc);
       }
       return term_new(0, tag, ext, new_loc);
+    }
+
+    case TAG_BJ0:
+    case TAG_BJ1: {
+      // Book-time projection -> fresh dyn DP.  Shared dup cell: both
+      // BJ0 and BJ1 of the same book BJ map to the SAME freshly
+      // allocated dyn dup-body so their DP0/DP1 siblings fire one
+      // DUP-XXX between them (heap_subst_cop substitutes the dual).
+      u64 new_loc;
+      if (!dup_share_lookup(state_id, val, &new_loc)) {
+        new_loc = heap_alloc(1);
+        Term body = book_read(val);
+        heap_set(new_loc, alo_suspend_child(body, state_id));
+        dup_share_push(state_id, val, new_loc);
+      }
+      u8 dp_tag = (tag == TAG_BJ0) ? TAG_DP0 : TAG_DP1;
+      return term_new(0, dp_tag, ext, new_loc);
     }
 
     case TAG_CTR: {

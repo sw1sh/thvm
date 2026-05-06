@@ -55,7 +55,57 @@ Until then, collapse-based SAT can use:
 ## Roadmap
 
 - [x] `TCollapse` WL bridge over `thvm_collapse` C walker.
-- [x] Correctness baseline + benchmark vs `SatisfiabilityInstances`.
-- [ ] Diagnose / fix `OP2[SUP^a, SUP^b]` cnf blowup.  Add `interact_op2_sup`?
-- [ ] Re-implement SAT via SUP-distribution; benchmark.
-- [ ] Compile formula evaluator as a `TDef`, `TAOTRun[..., Method -> "Metal"]` for batched per-assignment evaluation on GPU.
+- [x] Correctness baseline (`baseline.wls`) + benchmark vs `SatisfiabilityInstances`.
+- [x] Scout Victor Taelin's gist; reorient on Church-encoded booleans.
+- [x] `v1_church.wls` -- sat-check via SUP-distribution.  Correct on
+      6 manual + 4 small benched CNFs (up to V=4 / C=5).
+- [x] **Land HVM4-style DP/BJ split** (option (2) from
+      `CNF_DIVERGENCE.md`).  Plain DPs fire DUP-XXX eagerly at wnf;
+      book templates carry BJ; alo_realize unfolds BJ -> fresh dyn DP.
+      Removes the cnf_dp stuck-on-APP-of-DP wall.  v1 now correct
+      through V=9 / C=15 (was V=4 / C=5).
+- [ ] Add the collapser tree (Col_i wrappers + `Join`) to extract
+      satisfying assignments, not just a sat boolean.
+- [ ] Bench at scale: 30+ vars where Victor reports order-of-magnitude
+      speedup vs Rust brute via subformula sharing.
+- [x] **`v2_kernel_graph.wls`** -- compute-graph codegen + Metal
+      rendering (NOT the TAOTRun AOT path).  Each var's column is
+      a `[2^V]` constant tensor; the formula is a UOP graph
+      (Add/Mul/Neg) over those tensors; TRealize materializes into
+      UOP_KERNELs that the Metal backend renders.  Correct through
+      V=20.  Trails WL CDCL by 8-600x (V=6..20) because each
+      elementwise op currently dispatches as its own Metal launch
+      -- needs kernel fusion across Add/Mul/Neg chains to close the
+      gap (autotune-ladder territory).
+- [ ] (Aside) The actual `TAOTRun + Method -> "Metal"` path is
+      structurally wrong for batched SAT: `src/aot/metal_emit.c`
+      compiles a TDef body of TNum/TOp2/TMat over N scalar args
+      into one MSL kernel returning one scalar Term per launch, so
+      brute force would pay 2^V launches at ~190us each.  Right
+      tool for batching MANY *independent* scalar redexes (as in
+      `TAOTBatchOp2Fold`) -- wrong tool for vectorising one program
+      across an assignment matrix.
+- [ ] (Tangential) `interact_op2_sup` rule for numeric search problems
+      (Pythagorean triples, subset sum, ...).  Off the SAT critical path.
+
+## v1 limit (resolved)
+
+The `cnf_dp` wall described below was the symptom of an architectural
+divergence from HVM4 (`CNF_DIVERGENCE.md`).  Resolved by landing the
+DP/BJ split: plain DPs fire eagerly at wnf, book templates carry BJ,
+alo_realize unfolds BJ -> fresh dyn DP per realize.  v1 now correct
+through V=9 / C=15.
+
+The original symptom for reference: when SUP-typed variables get used
+many times across clauses (= the formula tree has many APP applications
+at the var), auto-dup wraps each use in a DP^L_internal projection.
+After APP-SUP commute fires across these, leaves used to shape like
+
+    APP[APP[... APP[DP0[lab, APP[DP0[lab', APP[..., LAM[...]]], ...]],
+                    LAM[...]] ...], NUM(1)], NUM(0)
+
+with `cnf_dp` bailing on `default: heap_set(loc, body_cnf); return dp;`
+when body cnf'd to another APP-of-DP chain.  HVM4 never hit this
+because plain DPs fired at wnf before cnf saw them; the BJ tag was
+HVM4's escape valve for book-time projections that needed to stay
+opaque under wnf+cnf.  We now match that split.

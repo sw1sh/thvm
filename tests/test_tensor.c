@@ -36,7 +36,9 @@ int main(void) {
   CHECK(TAG_DDU         == 30);
   CHECK(TAG_F_DSU_LAB   == 31);
   CHECK(TAG_F_DDU_LAB   == 32);
-  CHECK(TAG_COUNT == 33);
+  CHECK(TAG_BJ0         == 33);
+  CHECK(TAG_BJ1         == 34);
+  CHECK(TAG_COUNT == 35);
 
   TEST_BEGIN("term/TAG_TEN-roundtrip");
   Term t = term_new(0, TAG_TEN, DT_FP32, 42);

@@ -147,3 +147,25 @@ Start with (1) -- it's local, fixable, and either resolves the SAT
 solver immediately or surfaces a deeper case that motivates (2) or
 (3).  If (1) loops or doesn't progress on the actual stuck shape,
 escalate to (2) or (3).
+
+## Resolution
+
+Landed (2): TAG_BJ0/TAG_BJ1 added alongside TAG_DP0/TAG_DP1.
+
+- Phase A: BJ tags treated as Levy-opaque under wnf and cnf
+  (no DUP-XXX dispatch).  No-op until something emits them.
+- Phase B: plain TAG_DP0/TAG_DP1 fire DUP-XXX eagerly at wnf -- the
+  apply phase dispatches DUP-{SUP, ERA, LAM, BRI, NUM, ANY, TEN,
+  CTR, UOP} on the body's WHNF tag, mirroring HVM4's
+  clang/wnf/_.c.  cnf_dp stays as a fallback for SUP-lifted
+  bodies that wnf didn't surface.
+- Phase C: clone_to_book_rec rewrites plain DP -> BJ on book copy;
+  alo_realize unfolds book BJ -> fresh dyn DP per realize call.
+  Each book template instance gets its own dyn dup-cell
+  (shared across DP0/DP1 via alo_dup_share), so recursive bodies
+  stay bounded.
+
+SAT v1 now correct through V=9 / C=15.  Full Lazy.wl recursive
+helpers (perms / splits / tuples / subsets) keep their pre-existing
+heap envelope (perm6=720 OK, perm7+ blows the 134M-cell GC space --
+same as Phase 1+2 baseline; not a regression).

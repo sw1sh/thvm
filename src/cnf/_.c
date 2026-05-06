@@ -268,6 +268,14 @@ fn Term cnf_at(Term term, u32 depth) {
       if (term_ext(term) & DUP_GRAD_FLAG) return term;
       return cnf_dp(term, depth);
     }
+    case TAG_BJ0:
+    case TAG_BJ1: {
+      // Book-time projection (HVM4 BJ).  Levy-opaque under cnf -- never
+      // fires DUP-XXX in place; the duplication unfolds when alo_realize
+      // copies the book template into a dyn-heap term and rewrites BJ
+      // back to plain DP at the binding site.  Pass through unchanged.
+      return term;
+    }
     case TAG_LAM: {
       return cnf_lam(term, depth);
     }

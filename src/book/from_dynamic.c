@@ -113,6 +113,33 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
       return term_new(0, TAG_CTR, ext, b);
     }
 
+    case TAG_DP0:
+    case TAG_DP1: {
+      // Grad-flavored projections share a 3-cell grad cell -- copy
+      // verbatim through the default path so each lambda instance
+      // gets a fresh grad cell with its own y/gy/target slots.
+      if (ext & DUP_GRAD_FLAG) {
+        u32 ar = dyn_arity(tag, ext, val);
+        u64 b = remap_lookup_or_alloc(map, map_pos, val, ar);
+        for (u32 i = 0; i < ar; i++) {
+          Term child = heap_read(val + i);
+          book_set(b + i, clone_to_book_rec(child, map, map_pos));
+        }
+        return term_new(0, tag, ext, b);
+      }
+      // Plain projection: rewrite DP -> BJ on the book copy so the
+      // template is Levy-opaque under wnf and cnf.  alo_realize
+      // unfolds BJ -> fresh DP per realize call (each book template
+      // instance gets its own dyn dup cell shared across DP0/DP1
+      // projections via alo_dup_share).  Mirrors HVM4's DP0/DP1 vs
+      // BJ0/BJ1 split (TinyHVM/HVM4/clang/cnf/_.c).
+      u64 b = remap_lookup_or_alloc(map, map_pos, val, 1);
+      Term body = heap_read(val);
+      book_set(b, clone_to_book_rec(body, map, map_pos));
+      u8 bj_tag = (tag == TAG_DP0) ? TAG_BJ0 : TAG_BJ1;
+      return term_new(0, bj_tag, ext, b);
+    }
+
     case TAG_LAM: {
       u64 b = remap_lookup_or_alloc(map, map_pos, val, 1);
       Term body = heap_read(val);

@@ -1,4 +1,4 @@
-PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
+PacletDirectoryLoad[FileNameJoin[{Directory[], "wl"}]];
 Needs["THVMLink`"];
 TInitContext[];
 print[a___] := WriteString["stdout", StringRiffle[ToString /@ {a}, " "], "\n"];

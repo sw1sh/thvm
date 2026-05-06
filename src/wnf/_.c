@@ -86,19 +86,31 @@ enter:
         next = heap_read(loc + 0);
         goto enter;
       }
-      // Plain (non-grad) DP projections are Levy-opaque WHNF roots:
-      // wnf neither pushes a DP frame nor fires DUP-XXX.  The actual
-      // duplication is performed by cnf_at (src/cnf/_.c), which lifts
-      // SUPs through the structure on demand at readback time.  This
-      // mirrors HVM4's BJ0/BJ1 treatment and breaks the
-      // recursive-multiplicative blowup that fires per-call dup chains
-      // through dup_app/dup_op2/dup_mat commutes.
+      // Plain (non-grad) DP projection: HVM4-style dynamic projection.
+      // Push the DP frame and descend into the cell body so the apply
+      // phase can fire DUP-XXX (DUP-LAM, DUP-SUP, DUP-NUM, DUP-CTR, ...)
+      // as soon as the body reaches WHNF.  Levy-opaque book-time
+      // projection is TAG_BJ0/BJ1 below.
       //
-      // A SUB-bit cell still represents an already-resolved projection
-      // (an earlier cnf step heap_subst_cop'd the inactive side); we
-      // follow the chain so consumers see the final value rather than
-      // a stale DP wrapper.  Acquire-load matches heap_subst_var's
-      // release-store on the writer side.
+      // SUB-bit shortcut: an earlier sibling fire already resolved this
+      // projection; follow the SUB chain.  Acquire-load matches
+      // heap_subst_var's release-store on the writer side.
+      Term cell = heap_read_acq(loc);
+      if (term_sub_get(cell)) {
+        next = term_sub_set(cell, 0);
+        goto enter;
+      }
+      stack[s_pos++] = next;
+      next = cell;
+      goto enter;
+    }
+    case TAG_BJ0:
+    case TAG_BJ1: {
+      // Book-time projection (HVM4 BJ).  Levy-opaque under wnf -- we
+      // never fire DUP-XXX in place; alo_realize is what unfolds these
+      // into fresh dyn-heap DP cells when their body is sub'd into a
+      // book copy.  Identical SUB-chain follow as the DP arm above.
+      u64  loc  = term_val(next);
       Term cell = heap_read_acq(loc);
       if (term_sub_get(cell)) {
         next = term_sub_set(cell, 0);
@@ -455,11 +467,7 @@ apply:
       }
       case TAG_DP0:
       case TAG_DP1: {
-        // Only grad-flavored DP1 frames reach apply: enter pushes them
-        // for the BWD path and dispatches the chain rule here.  Plain
-        // (non-grad) DP projections are Levy-opaque WHNF roots and
-        // never push a frame -- their duplication happens during cnf
-        // readback (src/cnf/_.c), not during wnf.
+        // Grad-flavored DP1 frame: BWD chain-rule dispatch.
         if (term_tag(frame) == TAG_DP1 && (term_ext(frame) & DUP_GRAD_FLAG)) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           u64 gloc = term_val(frame);
@@ -476,13 +484,74 @@ apply:
           next = g;
           goto enter;
         }
-        // Defensive: a non-grad DP frame on the stack would be a bug
-        // (enter no longer pushes them), but keep the stuck-rebuild so
-        // a stale snapshot resumes safely.
-        u64 loc = term_val(frame);
-        heap_set(loc, whnf);
-        whnf = frame;
-        continue;
+        // Plain (non-grad) DP frame: HVM4-style dynamic projection
+        // dispatch on body's WHNF tag.  Mirrors redex.c's DP firing.
+        u64 loc  = term_val(frame);
+        u32 lab  = term_ext(frame);
+        u8  side = (term_tag(frame) == TAG_DP0) ? 0 : 1;
+        switch (term_tag(whnf)) {
+          case TAG_SUP: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_sup(lab, loc, side, whnf);
+            goto enter;
+          }
+          case TAG_ERA: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            whnf = interact_dup_era(side, loc, whnf);
+            continue;
+          }
+          case TAG_LAM: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_lam(lab, loc, side, whnf);
+            goto enter;
+          }
+          case TAG_BRI: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_bri(lab, loc, side, whnf);
+            goto enter;
+          }
+          case TAG_NUM: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            whnf = interact_dup_num(side, loc, whnf);
+            continue;
+          }
+          case TAG_ANY: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            whnf = interact_dup_any(side, loc, whnf);
+            continue;
+          }
+          case TAG_TEN: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            whnf = interact_dup_ten(side, loc, whnf);
+            continue;
+          }
+          case TAG_CTR: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = interact_dup_ctr(lab, loc, side, whnf);
+            goto enter;
+          }
+          case TAG_UOP: {
+            Term r = interact_dup_uop(lab, loc, side, whnf);
+            if (r == 0) {
+              // Active UOP (KERNEL/ASSIGN) -- can't commute yet.  Restore
+              // body to its slot and propagate the DP up as WHNF.
+              heap_set(loc, whnf);
+              whnf = frame;
+              continue;
+            }
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+            next = r;
+            goto enter;
+          }
+          default: {
+            // Body cnfs to a non-dispatchable tag (REF/ALO/VAR/INC/
+            // another DP/BJ).  Restore body and propagate the DP root
+            // as WHNF.  Outer consumers (cnf, etc.) will retry.
+            heap_set(loc, whnf);
+            whnf = frame;
+            continue;
+          }
+        }
       }
       case TAG_DSU: {
         // DSU frame: label reduced to whnf.  Dispatch:
