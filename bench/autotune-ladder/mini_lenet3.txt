@@ -1,0 +1,27 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+mini_lenet3 kernel_count: 17
+dispatch_kinds: {{metal-op, 10}, {metal-tile, 7}}
+kid 1 kind=metal-op baseline=826.us best=807.us  opt=TOpt[LOCAL, 2, 8]  applied={}
+kid 2 kind=metal-op baseline=274.us best=279.us  opt=TOpt[GROUP, 2, 25]  applied={}
+kid 3 kind=metal-tile baseline=544.us best=222.us  opt=TOpt[LOCAL, 1, 8]  applied={TOpt[LOCAL, 1, 8], TOpt[GLOBAL, 1, 3]}
+kid 4 kind=metal-op baseline=222.us best=209.us  opt=TOpt[UNROLL, 4, 2]  applied={}
+kid 5 kind=metal-op baseline=188.us best=191.us  opt=TOpt[GROUP, 3, 2]  applied={}
+kid 6 kind=metal-op baseline=1039.us best=1023.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 2, 16], TOpt[GLOBAL, 2, 4]}
+kid 7 kind=metal-op baseline=382.us best=361.us  opt=TOpt[GROUP, 2, 2]  applied={}
+kid 8 kind=metal-tile baseline=312.us best=201.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 4]}
+kid 9 kind=metal-op baseline=211.us best=205.us  opt=TOpt[UNROLL, 4, 2]  applied={}
+kid 10 kind=metal-op baseline=181.us best=179.us  opt=TOpt[GROUP, 3, 2]  applied={TOpt[GROUP, 3, 2]}
+kid 11 kind=metal-op baseline=540.us best=539.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 2]}
+kid 12 kind=metal-tile baseline=192.us best=154.us  opt=TOpt[LOCAL, 0, 8]  applied={TOpt[LOCAL, 0, 8], TOpt[GLOBAL, 0, 4]}
+kid 14 kind=metal-tile baseline=169.us best=157.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
+kid 15 kind=metal-tile baseline=153.us best=160.us  opt=TOpt[UNROLL, 1, 2]  applied={}
+kid 16 kind=metal-tile baseline=165.us best=165.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
+kid 17 kind=metal-tile baseline=162.us best=154.us  opt=TOpt[GROUP, 1, 10]  applied={TOpt[GROUP, 1, 10]}
+totals_baseline_us: 5560.
+totals_best_us: 5006.
+totals_speedup: 1.11067
+kernels_with_proposals: 16
+kernels_with_applied: 9
+thvm: metal_jit stats -- hits=284 misses=47 bypass=0 compile_us=95931

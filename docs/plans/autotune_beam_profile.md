@@ -1631,3 +1631,74 @@ independently of LeNet's mixed K=2 L=3.
   autotune leverage than pure-MLP shapes on both frameworks,
   matching the symmetric observation on thvm's side
   (mini_lenet 1.17x, LeNet 1.26x).
+
+### Level 14: 3-conv stress -- K=3 untested
+
+K-scaling validated at K=0/1/2.  Stress-test K=3 to check
+whether the formula extrapolates or breaks at deeper conv
+stacks.  Need a 3-conv net that fits 28x28 input through
+three 5x5+pool stages (28 -> 24 -> 12 -> 8 -> 4 -> 0 -- the
+third pool would shrink below kernel size).  Solution: use
+3x3 convs after the first 5x5, or skip pooling on the third
+conv-block, or pad the input.
+
+Simplest: replace third conv-block's pool with bare conv.
+After two 5x5+pool: 28 -> 24 -> 12 -> 8 -> 4 (16 channels at
+4x4).  Third 3x3 conv on 4x4 yields 2x2 (skip pool).  Predicted
+counts assume same 5-per-conv-block cost regardless of size;
+this may be optimistic.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mini_lenet3.wls`
+  -- 3-conv-blocks (first two with 5x5+pool, third with 3x3
+  no-pool) + flatten + 1 linear + softmax on a single MNIST
+  sample.  Save stdout to
+  `bench/autotune-ladder/mini_lenet3.txt`.  Inline
+  kernel_count, dispatch_kinds, totals_baseline_us,
+  totals_best_us, totals_speedup, kernels_with_proposals,
+  jit compile_us.  Compare to mini_lenet2 (15 kernels): a +5
+  delta confirms K-scaling at K=3.
+
+  **Result: 17 kernels (predicted 20, off by 3).**
+
+  | metric             | mini_lenet2 | mini_lenet3 |
+  |--------------------|------------:|------------:|
+  | conv-blocks        |           2 |           3 |
+  | kernel_count       |          15 |          17 |
+  | dispatch_kinds     |  9op+6t     |  10op+7t    |
+  | totals_best_us     |        3649 |        5006 |
+  | totals_speedup     |       1.09x |       1.11x |
+
+  Delta = +2 kernels, not the +5 predicted by `5K+2L+3` for
+  a "full" K=3.  The third conv-block here is **3x3 with NO
+  pool** (4x4 -> 2x2 stride-2 pool would yield 1x1, so I
+  dropped pool); the formula's "+5 per conv-block" assumed
+  the 5x5 + pool shape.
+
+  **Regime boundary discovered**: the formula `thvm = 5K +
+  2L + 3` is regime-specific.  It assumes:
+  - Conv kernel size 5x5
+  - Followed by 2x2 pool
+  - Followed by Ramp activation
+
+  Removing the pool collapses ~3 kernels off the per-block
+  cost (full-block 5 -> partial-block 2).  The "+1 per
+  pool" intuition (mini_lenet 5 = single-conv 3 + Ramp 1 +
+  Pool 1) was wrong; the true breakdown is closer to
+  Conv (3) + Pool-and-its-attendant-bufferize (2)
+  = 5 per full block.  Without pool, only the conv
+  emits, and the Ramp fuses cheaply.
+
+  This is a useful **negative result**: the predictive model
+  needs a per-pool-block term to generalise.  Updated formula
+  candidates to fit if more variation is benched:
+  `thvm = 3*Kconv + 2*Kpool + 2*L + 3` (additive in conv+pool)
+  could explain mini_lenet3's 17 = 3*3 + 2*2 + 2*1 + 3 = 18
+  -- still off by 1.  Likely the 3x3 conv has slightly
+  different fragmentation than 5x5; precise modelling needs
+  a separate axis for kernel size.
+
+  Conclusion: the campaign's tight `5K+2L+3` model holds
+  inside the {conv 5x5, pool 2x2, Ramp, single-sample}
+  envelope.  Outside that envelope, per-block costs vary;
+  predicting from formula breaks down.  Future structural-
+  fusion work needs to handle these variations explicitly.
