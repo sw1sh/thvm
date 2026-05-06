@@ -147,7 +147,30 @@ file, commits, and stops.
   sequence the warmup drops to 788 us (close to steady).  1.18x
   speedup is similar to thvm's 1.01x: both autotune surfaces
   find this matmul size already close to optimum on Metal.
-- [ ] Compare.
+- [x] (2026-05-06) Compare.
+
+  | metric              | thvm                | tinygrad           |
+  |---------------------|---------------------|--------------------|
+  | dispatch path       | metal-gemm (MPS)    | tinygrad GEMM      |
+  | baseline (us)       | 214                 | 915                |
+  | best (us)           | 211 (TC[0,16])      | 773 (BEAM=4)       |
+  | speedup             | **1.01x**           | **1.18x**          |
+  | variants tried      | 4 (1 + 3 TC sizes)  | (BEAM=4 hill-climb)|
+  | warmup cold (ms)    | n/a (no JIT)        | 33.95              |
+
+  Both autotune surfaces are essentially flat on 128x128 fp32
+  matmul.  Absolute timing favours thvm (211 vs 773 us) because
+  thvm's metal-gemm path goes straight to
+  MPSMatrixMultiplication while tinygrad codegens its own GEMM.
+  But the *autotune-relative* speedup ratio favours tinygrad
+  slightly (1.18x vs 1.01x) -- BEAM at least found a small
+  structural improvement; thvm's TC tile sweep didn't.
+
+  **Open question for level 3+:** at what kernel shape does
+  thvm's autotune surface (LOCAL/GLOBAL/UPCAST/UNROLL/GROUP +
+  GROUPTOP + TC) start to compose meaningfully?  Softmax has a
+  reduce-broadcast pattern -- closer to the elementwise case,
+  with a real opt surface.
 
 ### Level 3 -- softmax (N=512)
 
