@@ -2652,3 +2652,56 @@ as Level 19 (seq=32, d_model=64, n_heads=4).
   prediction: 34 (no cross-block fusion) or fewer if
   ThreadingLayer between residuals fuses across blocks.
   Wall prediction: ~64500us (2 * Level 19's 32294).
+
+### Level 21 prep: capture LayerNorm reject dims
+
+Per user "patch the leak obviously", the smallest concrete
+code wedge is the LayerNorm `src_count=3` lift relaxation
+diagnosed at Level 18d.  Before patching kernel_lift.c, need
+the actual buf-dim values from the reject.  The dump
+extension at [src/schedule/kernel_lift.c:255](../../src/schedule/kernel_lift.c#L255)
+already prints `outer_rank=K dims=[...]` when
+`THVM_DUMP_LIFT_REJECT=1` is set; the Level 18d run didn't
+set the flag.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/layernorm.wls`
+  with `THVM_DUMP_LIFT_REJECT=1` and capture the distinct
+  dim-array signatures.  Save filtered output to
+  `bench/autotune-ladder/layernorm_reject_dims.txt`.  Inline
+  the distinct (outer_rank, dims) tuples and reason about
+  whether a `dim[0]==1` guard relaxation suffices, or whether
+  the lift needs proper "broadcast over outer iters" logic.
+
+  | reject signature                              | meaning                  |
+  |-----------------------------------------------|--------------------------|
+  | `index/ndim-mismatch buf_ndim=1 src_count=3`  | 1-d buf, outer_rank=2    |
+  | `  ndim-mismatch: outer_rank=2 dims=[32]`     | buf is 1-d shape [32]    |
+  | `entry/no-scalar-arena n_inputs=5 n_ops=15`   | one kid bails entry-side |
+
+  **The dim is 32 (seq_len), not 1.** The `dim[0]==1`
+  guard wouldn't fire on this case -- it's not a scalar-
+  broadcast pattern; it's a **broadcast-over-outer-iter**
+  pattern (1-d buffer of shape [seq_len], accessed in
+  [seq, features] outer loop, with the features iter being
+  the broadcast axis).
+
+  Lift logic: the existing loop at
+  [src/schedule/kernel_lift.c:266](../../src/schedule/kernel_lift.c#L266)
+  iterates `src[1..ndim]` to compute the offset; with ndim=1
+  it would just use `src[1]` and ignore `src[2..]`.  Relaxing
+  the guard from `ndim != outer_rank` to `ndim > outer_rank`
+  would fall through to the loop, which produces a correct
+  offset **iff** rangeify orders `src[1]` as the iter aligned
+  with the buf's only dim.
+
+  **Safety risk**: rangeify's iter-ordering invariant is
+  documented at L199-207 as "wrong numerics on LeNet
+  forward (sample 3 NaN'd)" for the prior axis-append
+  composition.  A blind guard relaxation could re-introduce
+  that bug.
+
+  Safer wedge: extend the guard for the specific
+  (ndim=1, dim[0]>1, src_count >= ndim+1) case ONLY when we
+  can verify src[1] aligns with the buf's dim (e.g. by
+  comparing the range's extent to dim[0]).  That's the
+  next iteration's task.

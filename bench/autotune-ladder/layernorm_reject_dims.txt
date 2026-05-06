@@ -1,0 +1,3 @@
+  ndim-mismatch: outer_rank=2 dims=[32]
+lift reject: entry/no-scalar-arena n_inputs=5 n_ops=15 n_tile_uops=0
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=3
