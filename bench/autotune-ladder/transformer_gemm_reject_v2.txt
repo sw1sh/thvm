@@ -1,0 +1,5 @@
+2535 tile_analyze_gemm: reject gate=n_inputs!=2
+ 671 tile_analyze_gemm: reject gate=n_ops!=2
+kid 14 + 16 lines:
+kid 14 kind=metal-tile baseline=13935.us best=13928.us  opt=TOpt[UNROLL, 2, 2]  applied={TOpt[UNROLL, 2, 16]}  variants=11
+kid 16 kind=metal-tile baseline=8081.us best=8081.us  opt=TOpt[UNROLL, 2, 16]  applied={TOpt[UNROLL, 2, 8]}  variants=13

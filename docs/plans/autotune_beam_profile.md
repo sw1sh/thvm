@@ -4482,3 +4482,42 @@ task.  Break it down:
       work is in the rule top-level loops which are single-op
       gates that don't benefit from UPat.
 
+### Level 46: re-run gemm-reject diagnostic on transformer (post-UPat)
+
+Levels 27-34 captured (n_ops, n_inputs) signatures for transformer
+block on 2026-05-06.  Multiple UPat-based refactors of the
+bufferize/chain-walker code have landed since (commits 07c6002,
+4f965e6, 077f19f, 5c4a67a, 27c4b49, c6d16e7).  All claim "no
+semantic change"; confirm by re-running THVM_DUMP_GEMM_REJECT=1
+on `bench/autotune-ladder/transformer_block.wls` and comparing
+the rejected (n_ops, n_inputs) histogram against Level 31's
+table.  No code change in this iteration; pure observation gate.
+
+- [x] (2026-05-07) Re-run transformer block with
+  THVM_DUMP_GEMM_REJECT=1, save filtered output to
+  `bench/autotune-ladder/transformer_gemm_reject_v2.txt`, inline
+  the (n_ops, n_inputs) histogram and confirm parity (or surface
+  drift) vs Level 31.
+
+  | count | gate                  | Level 31 | Level 46 |
+  |------:|-----------------------|---------:|---------:|
+  |  2535 | `n_inputs != 2`       |     2535 |     2535 |
+  |   671 | `n_ops != 2`          |      671 |      671 |
+
+  **Bit-for-bit parity.**  All UPat refactors (commits 07c6002,
+  4f965e6, 077f19f, 5c4a67a, 27c4b49, c6d16e7) are pure
+  refactors with no semantic drift -- matmul-input-protect and
+  chain-hop predicates behave identically to the imperative
+  baseline.  Kid 14 still 13935us; kid 16 still 8081us; the
+  40x in-context regression is unchanged because the underlying
+  bottleneck (`n_inputs != 2` dominates 2535/3206 = 79% of
+  rejects) is the SAME structural issue Level 31 diagnosed.
+
+  Real fix still on the architectural decision board: option (a)
+  TILE_BLOCK-around-TILE_MMA blocked on Phase F renderer rewrite;
+  option (b) split the matmul kernel from its bias-add fusion at
+  bufferize time -- a focused rule that re-introduces a boundary
+  between matmul-output and any consumer that would push
+  n_inputs past 2.  The matmul-input-protect rule is the
+  upstream-walker counterpart; we need its DOWNSTREAM dual.
+
