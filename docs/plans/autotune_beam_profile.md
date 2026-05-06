@@ -113,10 +113,27 @@ itself).
    outliers collapse to metal-tile dispatch.  Softmax level 3
    gained 1.18x wall (558 -> 471us); MLP2 dispatch went from
    `{gemm:1, tile:5, op:1}` to `{gemm:1, tile:6}`.
+3. **Broadcast-over-outer-iter lift fast path**
+   ([commit 62bfcca](../../62bfcca)): extends the lift to
+   handle `ndim < outer_rank` when src ranges align with
+   buf dims.  Lift rejects on LayerNorm 532 -> 0; transformer
+   block 1064 -> 0.  Closes the lift-reject fragility class
+   without changing kernel count.
+4. **Default-on inline-multiconsumer-pure +
+   inline-reduce-fanout** ([commit 9e25f48](../../9e25f48)):
+   flip the gates in bufferize_classify.c from `e[0] == '1'`
+   to `e == NULL || e[0] != '0'`.  Validated by the
+   three-workload safety check.  MLP4 best wall 2257us -> 1752us
+   (1.29x), LeNet 4479us -> 3620us (1.24x), transformer
+   neutral.
 
-Both wins inform the structural-fusion work but don't close
-the leak structurally; the kernel-count gap remains as
-diagnosed in this campaign.
+Wins 1+2 land structural-correctness improvements (lift
+rejects closed, more shapes autotunable).  Wins 3+4 deliver
+real wall-time speedups (1.24-1.29x on MLP/CNN, neutral on
+transformer).  The kernel-count "leak" framing is unchanged
+by these patches -- closing it requires Linear-output-bufferize
+fusion (Phase D'+F territory) and Conv 3-into-1 fusion
+(also Phase D'+F).
 
 ### Trail of receipts
 
@@ -3259,3 +3276,23 @@ fire by default) — has it recovered the LN microbench wall?
   artificial shape.
 
   No further action this iteration; flip stays.
+
+### Level 25: refresh the campaign summary
+
+The summary at the top of this plan was last updated before
+Levels 18-24 (attention, transformer, lift relaxation,
+default-on flip).  Bring it up to date.
+
+- [x] (2026-05-06) Update the "Code wins shipped during the
+  campaign" section in the campaign summary at the top of
+  the plan.  Add Level 22 (broadcast-over-outer-iter lift
+  fast path) and Level 24 (default-on inline-multiconsumer-
+  pure + inline-reduce-fanout) with their commit hashes and
+  observed wall impacts.
+
+  Section now lists 4 wins (was 2): rangeify u8-RESHAPE-V
+  (commit 69215a5), singleton-broadcast lift (6a8586e),
+  broadcast-over-outer-iter lift (62bfcca), default-on
+  inline rules (9e25f48).  Wins 3+4 are real wall-time
+  speedups (1.24-1.29x on MLP/CNN); wins 1+2 are structural-
+  correctness fixes.
