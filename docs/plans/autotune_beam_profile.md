@@ -1531,3 +1531,50 @@ be 7 + 4 or higher.
   BN coverage to `TFromNet` is a multi-step WL+C change
   outside a 5-min iteration -- belongs to the surface-area
   expansion track, not the autotune-ladder.
+
+### Level 11 cross-framework: tinygrad MLP4
+
+The thvm side of MLP4 (Level 11) measured 11 kernels and
+validated `thvm = 5K + 2L + 3` at L=4.  Tinygrad-side
+prediction by `tinygrad = 2K + L + 3` is **7 kernels**
+(vs MLP2=5, MLP3=6).  Single-shot verification of the
+tinygrad-side L scaling.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mlp4.py` --
+  4-layer MLP forward (784 -> 128 -> 64 -> 32 -> 10),
+  structured to match `mlp4.wls`.  Bench NOOPT and BEAM=4.
+  Save stdout to `bench/autotune-ladder/mlp4.tinygrad.txt`.
+  Inline baseline_us, beam4_us, speedup, kernels per forward.
+  Verify the prediction (tinygrad MLP4 = 7 kernels).
+
+  **Prediction held: tinygrad MLP4 = 7 kernels.**
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |     4200 |  4275 |
+  | kernel_count / 50 rep |      350 |   350 |
+  | kernels per forward   |        7 |     7 |
+  | speedup_to_beam4      |          | 0.982x|
+
+  L-scaling on tinygrad now confirmed across **three** data
+  points: MLP2=5, MLP3=6, MLP4=7.  Each added L costs +1
+  kernel on tinygrad (vs +2 on thvm).  Slope ratio 2:1 is
+  the per-LinearLayer-Activation leak signature; the +3
+  baseline constant is identical on both sides.
+
+  Speedup baseline -> beam4 = 0.982x (slightly slower, i.e.
+  autotune found nothing useful) -- same pattern as MLP3
+  (1.056x).  On tinygrad's MLP forward, BEAM=4 is at the
+  per-kernel autotune ceiling.
+
+  Cross-framework leak validation now anchored at:
+
+  | depth | thvm | tinygrad | leak |
+  |-------|-----:|---------:|-----:|
+  | MLP2  |    7 |        5 |  +2  |
+  | MLP3  |    9 |        6 |  +3  |
+  | MLP4  |   11 |        7 |  +4  |
+
+  Both sides scale linearly in L; their slopes differ by 1.
+  The `+1 leak per LinearLayer-Activation boundary` claim
+  holds across all measured depths.
