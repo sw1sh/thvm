@@ -86,6 +86,15 @@ tUopShape[t_TTerm] := Module[{raw, tag, val, ext},
     ext = $termExtFn[raw];
     Switch[tag,
         $TagTEN, tenShapeOf[val],
+        (* TAG_VAR: bound by an enclosing TLam.  Read the lam_shape
+           side table via the runtime's term_shape_in (which knows
+           how to follow VAR -> SUB -> shape annotation).  Returns
+           {} when the lam wasn't shape-annotated; surface that as
+           $Failed so callers can react. *)
+        $TagVAR,
+            With[{s = Quiet @ Check[Normal @ $termShapeInFn[raw], $Failed]},
+                If[ s === {} || !ListQ[s] || !VectorQ[s, IntegerQ], $Failed, s]
+            ],
         $TagUOP,
             Switch[ext,
                 $UopKernel,

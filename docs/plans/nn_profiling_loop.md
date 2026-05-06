@@ -101,13 +101,15 @@ every minute.
     forward.
 
 ### TFromNet[net] follow-on
-- [ ] NetChain + multi-rank input via `TFromNet[net]` still hits
-  `cfta: Argument {$Failed} at position 2` because `tUopShape[VAR]`
-  in [Shape.wl](../../wl/THVMLink/Kernel/Shape.wl) doesn't have a
-  `TAG_VAR` case and falls through to `$Failed`, which then poisons
-  `TUOpReshape[x, {Times @@ $Failed}]` inside FlattenLayer.  Fix:
-  add a TAG_VAR case to `tUopShape` that reads the lam_shape side
-  table via `$termShapeInFn` (the C-level `term_shape_in`).
+- [x] (2026-05-06) NetChain + multi-rank input via `TFromNet[net]`
+  works.  Added a TAG_VAR case to `tUopShape` in
+  [Shape.wl](../../wl/THVMLink/Kernel/Shape.wl) that reads the
+  lam_shape side table via `$termShapeInFn`.  FlattenLayer (and
+  every layer-helper that calls tUopShape on a possibly-VAR input)
+  now sees the right shape.  Verified: `TFromNet[net] -> TApp -> TRealize`
+  on the MLP-MNIST 2-layer NetChain matches `TFromNet[net, x] ->
+  TRealize` to FP roundoff (max abs diff ~3e-8).  make test 274/274
+  green.
 
 ### LeNet-MNIST baseline
 - [ ] Run `wl/Examples/lenet-mnist/forward.wls`; capture as
