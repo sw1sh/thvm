@@ -936,3 +936,46 @@ collapses.
   The singleton-broadcast fast path is genuinely useful on
   softmax because the post-fix tile path autotunes a faster
   kid 2 than the per-op fallback ran at.
+
+### Did the singleton-broadcast fix transfer to conv2d (level 5)?
+
+Conv2d (level 5) is the worst absolute gap on the ladder
+(-54% vs tinygrad), and after the rangeify u8-RESHAPE-V fix
+still has 2 metal-op kids out of 3.  If either is the
+singleton-broadcast pattern (e.g. bias-broadcast scalar) the
+new fast path should collapse it.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/conv2d.wls`
+  post singleton-broadcast fix and diff against the post-
+  u8-RESHAPE-V capture.  Save to conv2d.txt; report
+  kernel_count, dispatch_kinds, totals_baseline_us,
+  totals_best_us, totals_speedup, and whether either metal-op
+  kid collapsed.
+
+  **Singleton fix did NOT transfer to conv2d**.  Dispatch
+  unchanged at `{{metal-op, 2}, {metal-tile, 1}}`.
+
+  | metric                 | post-u8 | post-u8+singleton |
+  |------------------------|--------:|------------------:|
+  | kernel_count           |       3 |                 3 |
+  | dispatch_kinds         |2op+1t   |       2op+1t      |
+  | kid 1 dispatch         |metal-op |       metal-op    |
+  | kid 1 best (us)        |    1247 |              1249 |
+  | kid 2 dispatch         |metal-op |       metal-op    |
+  | kid 2 best (us)        |    1959 |              1939 |
+  | kid 3 dispatch         |metal-tile|     metal-tile   |
+  | kid 3 best (us)        |     301 |               285 |
+  | totals_best_us         |    3507 |              3473 |
+  | totals_speedup         |   1.27x |             1.40x |
+
+  The 2 metal-op kids are im2col patch-sum + reduce shapes,
+  not singleton-broadcasts -- they have multi-element 1-d
+  outputs (cIn\*kh\*kw=800, etc.) so the
+  `uop_buffer_dim(buf, 0) == 1` guard correctly excludes them.
+  Conv2d's gap vs tinygrad (-54%) remains and is squarely in
+  the structural-fusion campaign (Phase D'+F of the ideal
+  pipeline plan), not in autotune or lift relaxations.
+
+  totals_speedup shifting 1.27x -> 1.40x is autotune variance
+  on the metal-op kid-1 baseline (2020 -> 2121us baseline
+  re-measurement); kid-1 best stayed flat.
