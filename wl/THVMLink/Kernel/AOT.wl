@@ -70,6 +70,10 @@ $aotRunFn     := $aotRunFn     = load["thvm_wl_aot_run",
 $aotRun4Fn    := $aotRun4Fn    = load["thvm_wl_aot_run4",
     {"UTF8String", "UTF8String", Integer, Integer, Integer, Integer},
     Integer]
+$aotRun4PooledFn := $aotRun4PooledFn = load["thvm_wl_aot_run4_pooled",
+    {"UTF8String", "UTF8String", Integer,
+     Integer, Integer, Integer, Integer},
+    Integer]
 
 (* Path map populated by TAOTCompile so TAOTRun knows which dylib to
    dlopen for a given name.  Per-session; not persisted. *)
@@ -200,15 +204,35 @@ TAOTRun[name_String, args_, Method -> spec_] := Module[{head},
 ]
 
 (* Method -> "CPU" / {"CPU", "NumThreads" -> n}: auto-compile via
-   TAOTCompile if not yet compiled, then dispatch through the
-   existing CPU/dlopen path.  NumThreads option not yet wired -- the
-   pool dispatch (Phase 1's wnf_pool) needs an additional bridge fn. *)
-aotCpuRunImpl[name_String, args_, spec_] := Module[{path},
+   TAOTCompile if not yet compiled, then dispatch.
+
+   Bare "CPU" or n=1: serial dispatch via existing TAOTRun[name, args].
+
+   {"CPU", "NumThreads" -> n} with n>1: parallel dispatch through
+   thvm_wl_aot_run4_pooled, which dlopens the dylib's
+   aot_program_<name>_run_pooled entry and calls aot_run_parallel
+   (Phase 1's work-stealing pool).  iter Q wired per-worker
+   CURRENT_WNF_STATE in aot_worker_main so spawned pthreads no
+   longer SEGV on wnf re-entry. *)
+aotCpuRunImpl[name_String, args_, spec_] := Module[
+    {path, raws, slots, threads},
   path = TAOTPath[name];
   If[ MissingQ[path], path = TAOTCompile[name]];
   If[ path === $Failed || MissingQ[path],
     Message[TAOTRun::method, spec]; Return[$Failed]];
-  TAOTRun[name, args]   (* dispatch via existing CPU path *)
+  threads = Replace[spec,
+    { _String                            -> 1,
+      { _String, OrderlessPatternSequence["NumThreads" -> n_Integer, ___] } :> n,
+      _                                  -> 1
+    }];
+  If[ threads <= 1,
+    TAOTRun[name, args],
+    raws  = toRawArg /@ args;
+    slots = PadRight[raws, 4, 0];
+    Symbol["THVMLink`TTerm"][
+      $aotRun4PooledFn[path, name, threads,
+                       slots[[1]], slots[[2]], slots[[3]], slots[[4]]]]
+  ]
 ]
 
 End[];

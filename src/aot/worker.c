@@ -415,6 +415,26 @@ static void *aot_worker_main(void *arg_) {
   AotRun *run = arg->run;
   u32 tid = arg->tid;
 
+  // Phase 7 iter Q: per-worker WNF state.  Each pthread spawned by
+  // aot_run_parallel needs its own CURRENT_WNF_STATE so any wnf /
+  // cnf / aot_force call inside an AOT body (e.g., MAT scrutinee
+  // force, ALO realize, REF unfold) doesn't dereference a NULL TLS
+  // slot.  Mirrors src/wnf/pool.c:443's per-worker binding pattern.
+  //
+  // tid==0 is the calling thread (which already had CURRENT_WNF_STATE
+  // set by the dylib run entry); we still save+restore so spawned
+  // workers and the calling thread observe symmetric setup.  The
+  // local stack is malloc'd with WNF_CAP entries (matching the
+  // ctx->wnf_state.stack alloc in thvm_init).
+  WnfThreadState saved_state = { NULL, 0 };
+  WnfThreadState *prev_state_ptr = CURRENT_WNF_STATE;
+  Term *worker_stack = (Term *)malloc(WNF_CAP * sizeof(Term));
+  if (worker_stack != NULL) {
+    saved_state.stack = worker_stack;
+    saved_state.s_pos = 0;
+    CURRENT_WNF_STATE = &saved_state;
+  }
+
   // Per-worker output staging.  Stack-allocated so it lives on the
   // worker's own thread stack -- no contention, naturally NUMA-local
   // to the running core.  See WorkerOut comment for sizing rationale.
@@ -478,6 +498,11 @@ static void *aot_worker_main(void *arg_) {
     }
     aot_barrier_wait(&run->barrier);
   }
+  // Restore CURRENT_WNF_STATE to whatever the calling thread had
+  // before this worker ran (for tid==0 that's the run-entry binding
+  // to host_ctx->wnf_state; for spawned workers it was NULL).
+  CURRENT_WNF_STATE = prev_state_ptr;
+  if (worker_stack != NULL) free(worker_stack);
   return NULL;
 }
 

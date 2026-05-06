@@ -2181,6 +2181,35 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_pri(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// Phase 7 iter J + Q: parallel-pool variant.  Args:
+//   [path, name, n_threads, arg0, arg1, arg2, arg3]
+// Dispatches the AOT'd def through aot_run_parallel with n_threads
+// workers via the dylib's pooled run entry.  iter Q's per-worker
+// CURRENT_WNF_STATE init in aot_worker_main makes spawned pthreads
+// safe for AOT bodies that re-enter wnf.
+EXTERN_C DLLEXPORT int thvm_wl_aot_run4_pooled(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
+  (void)argc;
+  const char *path = MArgument_getUTF8String(args[0]);
+  const char *nm   = MArgument_getUTF8String(args[1]);
+  u32 n_threads = (u32)MArgument_getInteger(args[2]);
+  u64 in0 = (u64)MArgument_getInteger(args[3]);
+  u64 in1 = (u64)MArgument_getInteger(args[4]);
+  u64 in2 = (u64)MArgument_getInteger(args[5]);
+  u64 in3 = (u64)MArgument_getInteger(args[6]);
+
+  u64 result = thvm_aot_load_and_run4_pooled(path, nm, n_threads,
+                                              in0, in1, in2, in3);
+
+  if (libData != NULL && libData->UTF8String_disown != NULL) {
+    libData->UTF8String_disown((char *)path);
+    libData->UTF8String_disown((char *)nm);
+  }
+  MArgument_setInteger(res, (mint)result);
+  return LIBRARY_NO_ERROR;
+}
+
 // Phase 7 iter E: AOT-on-Metal end-to-end via WL.
 // Args: [def_id, name, arg0, arg1, arg2, arg3].  Unused arg slots
 // (beyond the def's TLam-peel arity) are ignored by the emitted

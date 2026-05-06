@@ -163,7 +163,26 @@ static char *aot_wrap_emit_for_dylib(const char *emit_src,
     "                                (Term)in0, (Term)in1, (Term)in2, (Term)in3);\n"
     "  Term r = aot_run_serial(&p, root);\n"
     "  return (u64)r;\n"
+    "}\n"
+    "\n"
+    "// Phase 7 iter J: parallel variant -- runs the AOT'd def via the\n"
+    "// work-stealing pool with n_threads workers.  n_threads <= 1\n"
+    "// short-circuits to aot_run_serial inside aot_run_parallel.\n"
+    "// iter Q wired per-worker CURRENT_WNF_STATE in aot_worker_main\n"
+    "// so spawned pthreads no longer SEGV on wnf re-entry.\n"
+    "u64 aot_program_%s_run_pooled(void *host_ctx, u32 n_threads,\n"
+    "                              u64 in0, u64 in1, u64 in2, u64 in3) {\n"
+    "  CURRENT_CTX = (TContext *)host_ctx;\n"
+    "  CURRENT_WNF_STATE = &CURRENT_CTX->wnf_state;\n"
+    "  thvm_register_core_prims();\n"
+    "  AotProgram p;\n"
+    "  aot_program_%s_register(&p);\n"
+    "  AotTask root = aot_make_task(FN_%s, AOT_RET_ROOT,\n"
+    "                                (Term)in0, (Term)in1, (Term)in2, (Term)in3);\n"
+    "  Term r = aot_run_parallel(&p, root, n_threads);\n"
+    "  return (u64)r;\n"
     "}\n",
+    name, name, name,
     name, name, name);
 
   if (m < 0 || (size_t)m >= cap - pos) { free(out); return NULL; }
@@ -306,6 +325,33 @@ fn u64 thvm_aot_load_and_run4(const char *dylib_path, const char *name,
 fn u64 thvm_aot_load_and_run(const char *dylib_path, const char *name,
                               u64 input) {
   return thvm_aot_load_and_run4(dylib_path, name, input, 0, 0, 0);
+}
+
+// Phase 7 iter J + Q: parallel variant -- dlopens the dylib's
+// pooled run entry and dispatches with n_threads workers via
+// aot_run_parallel.  n_threads <= 1 short-circuits to serial.
+fn u64 thvm_aot_load_and_run4_pooled(const char *dylib_path,
+                                      const char *name,
+                                      u32 n_threads,
+                                      u64 in0, u64 in1, u64 in2, u64 in3) {
+  if (!dylib_path || !name) return 0;
+  void *h = dlopen(dylib_path, RTLD_NOW | RTLD_LOCAL);
+  if (!h) {
+    fprintf(stderr, "thvm_aot_load_and_run_pooled: dlopen %s failed: %s\n",
+            dylib_path, dlerror());
+    return 0;
+  }
+  char sym[256];
+  snprintf(sym, sizeof sym, "aot_program_%s_run_pooled", name);
+  typedef u64 (*RunPooledFn)(void *, u32, u64, u64, u64, u64);
+  RunPooledFn run = (RunPooledFn)dlsym(h, sym);
+  if (!run) {
+    fprintf(stderr, "thvm_aot_load_and_run_pooled: dlsym %s failed: %s\n",
+            sym, dlerror());
+    dlclose(h);
+    return 0;
+  }
+  return run((void *)CURRENT_CTX, n_threads, in0, in1, in2, in3);
 }
 
 #endif  // THVM_AOT_BUILD_INCLUDED
