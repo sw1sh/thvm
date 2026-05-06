@@ -1998,3 +1998,45 @@ Probe directly to disambiguate.
   ops.  MLP-N's leak is exactly this Linear-output-bufferize
   per layer (tinygrad fuses the matmul with the subsequent
   op, eliminating the bufferize).
+
+### Level 17 cross-framework: tinygrad MLP1
+
+Verify the formula at L=1 on tinygrad.  Predicted by
+`tinygrad = L + K + 3 (sm)`: 1 + 0 + 3 = 4 kernels.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mlp1.py` --
+  single Linear[10] + softmax on a 784-dim input, structured
+  to match `mlp1.wls`.  Bench NOOPT and BEAM=4.  Save stdout
+  to `bench/autotune-ladder/mlp1.tinygrad.txt`.  Inline
+  baseline_us, beam4_us, speedup, kernels per forward.
+  Verify the prediction (tinygrad MLP1 = 4 kernels).
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |     1735 |  1705 |
+  | kernel_count / 50 rep |      200 |   200 |
+  | kernels per forward   |        4 |     4 |
+  | speedup_to_beam4      |          | 1.018x|
+
+  **Prediction held: tinygrad MLP1 = 4 kernels.**
+
+  Cross-framework L-scaling now anchored at four data
+  points each:
+
+  | depth | thvm | tinygrad | leak |
+  |-------|-----:|---------:|-----:|
+  | MLP1  |    5 |        4 |  +1  |
+  | MLP2  |    7 |        5 |  +2  |
+  | MLP3  |    9 |        6 |  +3  |
+  | MLP4  |   11 |        7 |  +4  |
+
+  Both slopes linear (thvm +2, tg +1) at L=1..4; leak slope
+  +1 per added LinearLayer.  No saturation, no offset, no
+  surprise.
+
+  The campaign now has eight cross-framework data points
+  spanning L=1..4 (4 MLPs) and K=0,1,2 (mini_lenet,
+  mini_lenet2, LeNet) with full per-element decomposition
+  matching every observation.  The model is precise, complete
+  for the tested envelope, and ready to inform structural-
+  fusion work in [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md).
