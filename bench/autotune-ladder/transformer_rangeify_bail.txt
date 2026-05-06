@@ -1,0 +1,4 @@
+## Level 38: rangeify bail on transformer block
+
+distinct bail signatures:
+rangeify bail (mid-emit): RESHAPE shape-change ndim cap or != os->ndim (n_ops=17 onum=131072)

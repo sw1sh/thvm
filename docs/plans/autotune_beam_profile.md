@@ -3831,3 +3831,34 @@ set.  Single change-point catches all rules.
   no-op when matmul protection isn't needed, correct when it
   is, doesn't break anything (274/274 green).  Useful
   scaffolding for the eventual rangeify-side fix.
+
+### Level 38: probe rangeify on the transformer matmul boundary
+
+- [x] (2026-05-06) Run transformer_block.wls with
+  `THVM_RANGEIFY_BAIL=1` and capture distinct bail
+  signatures.  Save filtered output to
+  `bench/autotune-ladder/transformer_rangeify_bail.txt`.
+
+  Distinct bail signatures: **only 1**.
+
+      rangeify bail (mid-emit): RESHAPE shape-change ndim cap
+      or != os->ndim (n_ops=17 onum=131072)
+
+  The `n_ops=17` matches kid 16 (FFN fc2, 8090us).  This is
+  the same RESHAPE-bail family the conv2d Level 5 fix
+  addressed (commit 69215a5), but a slightly different case
+  ("ndim cap or != os->ndim", not just "out_dim > u8").
+
+  But kid 14 (n_ops=11, 13935us) **doesn't bail**.  Rangeify
+  successfully fuses matmul+bias into one kernel program for
+  kid 14 -- and that's the actual 40x problem.
+
+  **Conclusion**: kid 14's gap isn't from rangeify bails;
+  it's from rangeify successfully extending the kernel
+  beyond the matmul reduce.  The lever lives in rangeify's
+  kernel-extension decision logic, not in bails.
+
+  Next iteration: locate rangeify's kernel-extension code
+  (e.g., the function that decides "include this op in the
+  current kernel vs start a new kernel") and look for the
+  point where it absorbs an upstream matmul-output.
