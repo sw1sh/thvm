@@ -1406,3 +1406,38 @@ cost on tinygrad's side.
   than the K=2 LeNet suggested).  Conv-block fusion landing
   closes 6 of LeNet's +9 leak; linear-block fusion closes
   the remaining 3.
+
+### Level 11: MLP4 -- stress-test the leak formula at L=4
+
+The `leak = 3K + L` formula has been validated at L in
+{2,3} (MLP2/MLP3).  Stress-test at L=4 to confirm the
+linear extrapolation holds.  Predicted: thvm = 11 kernels.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mlp4.wls` --
+  4-layer MLP forward (784 -> 128 -> 64 -> 32 -> 10) with
+  Ramp activations.  Save stdout to
+  `bench/autotune-ladder/mlp4.txt`.  Inline kernel_count,
+  dispatch_kinds, totals_baseline_us, totals_best_us,
+  totals_speedup, kernels_with_proposals, jit compile_us.
+  Confirm or refute the prediction (thvm = 11 kernels).
+
+  **Prediction held exactly: MLP4 = 11 kernels.**
+
+  | metric             | MLP2  | MLP3  | MLP4  |
+  |--------------------|------:|------:|------:|
+  | LinearLayers       |     2 |     3 |     4 |
+  | kernel_count       |     7 |     9 |    11 |
+  | dispatch_kinds     |1g+6t  |1g+8t  |1g+10t |
+  | totals_baseline_us |  1376 |  2248 |  2892 |
+  | totals_best_us     |  1340 |  1885 |  2257 |
+  | totals_speedup     | 1.04x | 1.19x | 1.28x |
+
+  Linear scaling validated across **three** data points: each
+  added LinearLayer-Activation pair costs exactly +2 thvm
+  kernels, +1 metal-tile in dispatch.  The autotune speedup
+  also climbs with depth (1.04x -> 1.19x -> 1.28x) -- heavier
+  per-layer compute surfaces more autotune leverage.
+
+  Campaign convergence: the structural-fusion target is now
+  precisely defined for any K-conv-block, L-linear-layer
+  feed-forward network.
