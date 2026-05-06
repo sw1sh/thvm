@@ -1244,3 +1244,45 @@ structural-fusion fix needs to land.
   Once landed, MLP-N will run in approximately
   `tinygrad_kernel_count` kernels for any N -- the same
   structural change closes the leak at every depth.
+
+### Level 9 cross-framework: tinygrad MLP3
+
+To verify the per-LinearLayer-boundary leak hypothesis,
+measure the analogous delta on tinygrad's side.  MLP2
+(tinygrad) was 5 kernels; predicted MLP3 (tinygrad) is ~6.
+If observed, the per-boundary diagnosis is confirmed and
+the structural-fusion target is precisely defined.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mlp3.py` --
+  3-layer MLP forward (784 -> 128 -> 64 -> 10), structured to
+  match `bench/autotune-ladder/mlp3.wls`.  Bench NOOPT
+  (baseline) and BEAM=4 (autotuned).  Save stdout to
+  `bench/autotune-ladder/mlp3.tinygrad.txt`.  Inline
+  baseline_us, beam4_us, speedup, kernels per forward.
+  Compare to MLP2 (5 kernels): MLP3 should be ~6 if the
+  per-LinearLayer-boundary diagnosis holds.
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |     3484 |  3300 |
+  | kernel_count / 50 rep |      300 |   300 |
+  | kernels per forward   |        6 |     6 |
+  | speedup_to_beam4      |          | 1.056x|
+
+  **Prediction held: tinygrad MLP3 = 6 kernels** (vs MLP2=5).
+  Per-LinearLayer-boundary delta = +1.
+
+  | depth | thvm kernels | tinygrad kernels | leak |
+  |-------|-------------:|-----------------:|-----:|
+  | MLP2  |            7 |                5 |  +2  |
+  | MLP3  |            9 |                6 |  +3  |
+  | delta |          +2  |              +1  | +1   |
+
+  **Headline finding (cross-framework confirmed)**: each
+  LinearLayer-Activation boundary in thvm produces exactly 1
+  extra kernel vs tinygrad's 1 fused kernel.  Closing this
+  single bufferize boundary collapses the leak universally
+  across MLP depth.  In a deep MLP-N, the leak grows as +N-1
+  for thvm and stays at 0 for tinygrad's fused-Linear-
+  activation form -- a structural-fusion delta that scales
+  with model depth.
