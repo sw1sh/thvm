@@ -4143,8 +4143,74 @@ Hypotheses:
 
     My check sees UOP_EXPAND (not ADD/MUL) and stops.
 
-  - [ ] Extend the upstream walk to traverse movement ops
-    (EXPAND/RESHAPE/PERMUTE) until reaching an arith op
-    (ADD/MUL).  Then mark THAT as realized.  Try again on
-    two_linears.
+  - [~] (2026-05-06) Extend the upstream walk to traverse
+    movement ops.  **Stopped: needs tinygrad architectural
+    refresher first** (per user 2026-05-06).  Iterating on
+    thvm-side hand-rolled fixes was wobbling.
+
+### Level 43: tinygrad architecture refresher
+
+User direction: stop pattern-matching thvm bug-by-bug, refresh
+on tinygrad's rangeify pattern matcher and simplification
+rules to understand the architectural framework.
+
+- [x] (2026-05-06) Read
+  `/Users/swish/src/tinygrad/tinygrad/schedule/rangeify.py`.
+
+  **Key architectural differences vs thvm**:
+
+  - tinygrad uses **declarative `UPat` patterns + lambda
+    rewrite functions** composed into `PatternMatcher`
+    collections.  thvm uses imperative `BUFFERIZE_NODES[]`
+    array + named rule functions.
+
+  - tinygrad's `graph_rewrite` iteratively applies pattern
+    matchers to the UOp DAG until fixpoint.  thvm runs
+    rules once in a list.
+
+  - **tinygrad `pm_remove_bufferize` cost function**
+    (rangeify.py:235-299) is the analog to thvm's
+    `bufferize_rule_remove_removable_bufferize`.  But
+    tinygrad's gets the matmul-input case RIGHT via these
+    explicit checks:
+
+        # if it's user contiguous, we never remove it
+        if src.op in ALWAYS_RUN_OPS or not buf.arg.removable: return None
+
+        # if generated from > 3 buffers, don't remove
+        if len(accessed_buffers) > 3 and not (PCONTIG > 2): return None
+
+        # if any reduces access a buffer, DON'T REMOVE
+        if buffer_in_reduce:
+            return None  # keep the bufferize
+
+  The `buffer_in_reduce` check (L269-277) is **exactly** the
+  matmul-input-protect logic I've been hand-rolling.
+  Tinygrad detects "if I remove this bufferize, a downstream
+  reduce will absorb its buffer into a multi-buffer kernel"
+  and KEEPS the bufferize.
+
+  - **`pm_limit_bufs`** (rangeify.py:353-374): explicit
+    device-cap rule — when a kernel's buffer count exceeds
+    `MAX_KERNEL_BUFFERS`, INSERT a bufferize on inputs.  No
+    thvm equivalent; thvm has no per-kernel buffer cap.
+
+  **Conclusion**: my ad-hoc matmul-input-protect approach
+  was reinventing tinygrad's `buffer_in_reduce` check
+  poorly.  Right move: port the cost function shape into
+  thvm's `bufferize_rule_remove_removable_bufferize`:
+
+  1. Walk the bufferize candidate's subtree (toposort+gate).
+  2. Detect `accessed_buffers` and `reduces` along the walk.
+  3. If a REDUCE touches a buffer (matmul-input case),
+     refuse to remove the bufferize.
+
+  This replaces the layered-hypothesis investigation with
+  one focused port from tinygrad.  Single iteration to
+  sketch + land.
+
+  - [ ] Locate `bufferize_rule_remove_removable_bufferize`
+    in src/schedule/bufferize_classify.c and read its
+    current logic.  Sketch a `buffer_in_reduce` check that
+    mirrors tinygrad's L269-277 pattern.
 
