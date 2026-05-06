@@ -8,6 +8,125 @@ Each iteration of the cron loop picks the first unchecked item, runs
 the bench (or implements one small change), captures numbers in this
 file, commits, and stops.
 
+## Campaign summary (2026-05-06)
+
+After 17 levels and ~25 cross-framework benches, the campaign has
+converged on a precise empirical model for kernel-count behaviour
+on feed-forward MLP/CNN networks.
+
+### Predictive formulas (single-sample, conv 5x5, pool 2x2, Ramp)
+
+    thvm     (with softmax) = 2L + 3*Kconv + 2*Kpool + 3
+    tinygrad (with softmax) = L  +   Kconv +   Kpool + 3
+    leak     (with softmax) = L  + 2*Kconv +   Kpool
+
+K = number of conv-blocks, L = number of LinearLayers.  Inside
+the {Kconv = Kpool = K} regime the thvm formula simplifies to
+`5K + 2L + 3`; this is the form that fits the bulk of the
+benches.  Without softmax the +3 constants drop on both sides.
+
+### Per-element kernel cost (cross-framework)
+
+| element                | thvm | tinygrad | leak |
+|------------------------|-----:|---------:|-----:|
+| LinearLayer (matmul)   |    1 |        1 |   0  |
+| Linear-output-bufferize|   +1 |       +0 |  +1  |
+| Ramp activation        |   +0 |       +0 |   0  |
+| Pool (2x2 stride 2)    |   +2 |       +1 |  +1  |
+| Conv (5x5)             |    3 |        1 |  +2  |
+| Softmax (per net)      |   +3 |       +3 |   0  |
+| Conv 3x3 + no-pool     |  ~+2 |   (untested) | ?  |
+
+Ramp fuses for free with its predecessor on both sides; the
+per-Linear leak is exactly the bufferize boundary tinygrad
+fuses into the next op.
+
+### Cross-framework anchor points (8 nets)
+
+| net          |  K  |  L  | thvm | tinygrad | leak |
+|--------------|----:|----:|-----:|---------:|-----:|
+| MLP1         |   0 |   1 |    5 |        4 |  +1  |
+| MLP2         |   0 |   2 |    7 |        5 |  +2  |
+| MLP3         |   0 |   3 |    9 |        6 |  +3  |
+| MLP4         |   0 |   4 |   11 |        7 |  +4  |
+| mini-LeNet   |   1 |   1 |   10 |        6 |  +4  |
+| mini_lenet2  |   2 |   1 |   15 |        8 |  +7  |
+| LeNet        |   2 |   3 |   19 |       10 |  +9  |
+
+Every observation matches the formula exactly (no fitting
+residuals; coefficients integer).  Out-of-regime points
+(mini_lenet3 with mixed conv sizes, no-pool/no-softmax
+variants) decompose cleanly via the per-element table.
+
+### Structural-fusion priority (highest leverage first)
+
+1. **Conv 3-into-1** (im2col + reduce + bias fusion):
+   +2 leak per Conv-Ramp block.  Closes the conv-net leak
+   driver.  Tracked in [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md)
+   as Phase D'+F.
+2. **Pool fusion** (fuse pool with predecessor):
+   +1 leak per pool-block.  Half of conv-net's per-pool leak.
+3. **Linear-output-bufferize fusion** (don't bufferize the
+   matmul output): +1 leak per LinearLayer.  Closes the
+   entire MLP leak.
+
+Closing 1 + 2 collapses the conv-net structural gap; closing
+3 collapses the MLP gap.  All three together reach tinygrad
+parity on the tested envelope.
+
+### Per-kernel autotune is at parity (1.0x - 1.6x both ways)
+
+| level shape         | thvm speedup | tinygrad speedup |
+|---------------------|-------------:|-----------------:|
+| Elementwise add     |        2.05x |            1.23x |
+| Matmul 128          |        1.01x |            1.18x |
+| Softmax (N=512)     |        1.16x |            1.09x |
+| MLP2 / MLP3 / MLP4  |  1.04 / 1.19 / 1.28x | ~1.00x / ~1.06 / ~0.98x |
+| mini-LeNet / LeNet  |  1.17 / 1.26x| ~1.00x / 1.06x |
+
+Autotune saturates around 1.3-2x.  Structural fusion has
+much higher leverage on real-network workloads.
+
+### Regime envelope
+
+The model is precise inside:
+- Conv kernel size 5x5
+- Pool 2x2 stride 2
+- Ramp / Tanh / Sigmoid activations (any of these fuse)
+- Single-sample input (batch=1)
+- Standard MLP / CNN feed-forward
+
+Outside this envelope (mini_lenet3 with 3x3 conv + no-pool),
+per-element costs vary -- the formula needs an explicit
+per-conv-size term to extrapolate cleanly.  Untested:
+BatchNorm, residual skip connections, attention, batch>1
+(all blocked by the WL TFromNet surface area, not by autotune
+itself).
+
+### Code wins shipped during the campaign
+
+1. **rangeify same-rank-RESHAPE-V fallback**
+   ([commit 69215a5](../../69215a5)): conv2d xCol cIn\*kh\*kw=800 dim
+   no longer bails the rangeify u8-cap; +1.13x conv2d wall.
+2. **Singleton-broadcast lift fast path**
+   ([commit 6a8586e](../../6a8586e)): softmax-tail metal-op
+   outliers collapse to metal-tile dispatch.  Softmax level 3
+   gained 1.18x wall (558 -> 471us); MLP2 dispatch went from
+   `{gemm:1, tile:5, op:1}` to `{gemm:1, tile:6}`.
+
+Both wins inform the structural-fusion work but don't close
+the leak structurally; the kernel-count gap remains as
+diagnosed in this campaign.
+
+### Trail of receipts
+
+The rest of this document is the per-level evidence: 17+
+benches tracking the path from initial diagnosis to the
+formula above.  Each level has its own bench script in
+[bench/autotune-ladder/](../../bench/autotune-ladder/).
+The cross-level synthesis is in
+[bench/autotune-ladder/comparison.md](../../bench/autotune-ladder/comparison.md).
+
 ## Discipline (lessons from the prior cron run)
 
 - **Never start a new bench while another is running.** The Metal
@@ -2040,3 +2159,22 @@ Verify the formula at L=1 on tinygrad.  Predicted by
   matching every observation.  The model is precise, complete
   for the tested envelope, and ready to inform structural-
   fusion work in [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md).
+
+### Campaign summary
+
+The plan grew level by level across 17+ benches.  This
+section is the headline -- the rest of the plan is the
+trail of receipts.
+
+- [x] (2026-05-06) Add a "Campaign summary" section at the
+  top of the plan (or as a separate index file) consolidating:
+  the predictive formulas, the anchor data points, the
+  structural-fusion priority, and the regime envelope.
+
+  Section landed at the top of this file (above the per-level
+  detail).  Captures the predictive formulas, per-element
+  kernel-cost table, 8-net cross-framework anchor table,
+  structural-fusion priority list, autotune speedup parity,
+  regime envelope, and code wins shipped.  A reader entering
+  the plan now sees the conclusions before scrolling through
+  the per-level evidence.
