@@ -1981,9 +1981,17 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
     return NULL;
   }
   cg_shadow_lift_metal(ke);
-  // Phase F flip: when env-gated, prefer the UOp-DAG renderer.
-  char *via_uop = cg_emit_via_uop(ke);
-  if (via_uop != NULL) return via_uop;
+  // Conv2D kernels keep the specialised dedicated template (the
+  // lifter doesn't yet decode im2col addressing).  Skip the via-UOp
+  // attempt so they always go through rmt_emit_conv2d_flat below.
+  TileConv2DInfo conv_pre;
+  int is_conv2d = rmt_collect_conv2d_info(ke, &conv_pre);
+  // Phase F flip: when env-gated, prefer the UOp-DAG renderer for
+  // non-conv2d kernels.
+  if (!is_conv2d) {
+    char *via_uop = cg_emit_via_uop(ke);
+    if (via_uop != NULL) return via_uop;
+  }
   TileConv2DInfo conv;
   if (rmt_collect_conv2d_info(ke, &conv)) {
     return rmt_emit_conv2d_flat(ke, &conv);
