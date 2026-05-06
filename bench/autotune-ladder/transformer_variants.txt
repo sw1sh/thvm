@@ -1,0 +1,21 @@
+## Level 28: variant counts in transformer context
+
+kid 1 kind=metal-tile baseline=1063.us best=1037.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 2]}  variants=11
+kid 3 kind=metal-tile baseline=1882.us best=1871.us  opt=TOpt[UNROLL, 2, 2]  applied={}  variants=11
+kid 4 kind=metal-tile baseline=1884.us best=1871.us  opt=TOpt[UNROLL, 2, 16]  applied={}  variants=11
+kid 5 kind=metal-tile baseline=1885.us best=1870.us  opt=TOpt[UNROLL, 2, 2]  applied={}  variants=11
+kid 6 kind=metal-tile baseline=1609.us best=797.us  opt=TOpt[GROUP, 2, 16]  applied={TOpt[GROUP, 2, 16]}  variants=11
+kid 7 kind=metal-tile baseline=191.us best=148.us  opt=TOpt[LOCAL, 0, 8]  applied={TOpt[LOCAL, 0, 8], TOpt[GLOBAL, 0, 4]}  variants=6
+kid 8 kind=metal-tile baseline=176.us best=163.us  opt=TOpt[GROUP, 1, 32]  applied={}  variants=10
+kid 9 kind=metal-tile baseline=1082.us best=1085.us  opt=TOpt[UNROLL, 2, 2]  applied={}  variants=10
+kid 10 kind=metal-tile baseline=1294.us best=1294.us  opt=TOpt[UNROLL, 2, 2]  applied={TOpt[UNROLL, 2, 16]}  variants=11
+kid 11 kind=metal-tile baseline=231.us best=174.us  opt=TOpt[LOCAL, 0, 8]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 8]}  variants=7
+kid 12 kind=metal-tile baseline=1061.us best=1031.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 4]}  variants=11
+kid 13 kind=metal-tile baseline=185.us best=177.us  opt=TOpt[GROUP, 1, 64]  applied={TOpt[GROUP, 1, 64]}  variants=11
+kid 14 kind=metal-tile baseline=13915.us best=13907.us  opt=TOpt[UNROLL, 2, 8]  applied={TOpt[UNROLL, 2, 2]}  variants=11
+kid 15 kind=metal-tile baseline=412.us best=173.us  opt=TOpt[LOCAL, 1, 128]  applied={TOpt[LOCAL, 1, 256], TOpt[GLOBAL, 1, 1]}  variants=9
+kid 16 kind=metal-tile baseline=8073.us best=8113.us  opt=TOpt[UNROLL, 2, 16]  applied={}  variants=13
+kid 17 kind=metal-tile baseline=227.us best=154.us  opt=TOpt[LOCAL, 0, 32]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 8]}  variants=7
+totals_baseline_us: 35170.
+totals_best_us: 33865.
+totals_speedup: 1.03854

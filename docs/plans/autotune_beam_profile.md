@@ -3348,3 +3348,53 @@ If so, the rule may just need its enable gate flipped.
   The autotune-ladder campaign closes here for code wedges:
   the remaining leaks need structural-fusion infrastructure
   changes that don't fit a 5-min iteration.
+
+### Level 27: standalone-vs-context matmul (40x gap)
+
+Standalone fc1 matmul (NetMapOperator[LinearLayer[256]] on
+{32,64}) ran totals_best 353us.  Same-shape kid 14 in
+transformer block ran 13935us with autotune unable to beat
+baseline.  **40x slower in context.**
+
+Hypotheses:
+1. Bufferized input from LN1 forces device-memory re-read
+   that the standalone bench skips.
+2. Autotune variant count per kid differs in context.
+3. Buffer-binding / dispatch overhead from larger surrounding
+   kernel set.
+
+### Level 28: variants count for transformer kid 14
+
+The transformer kid 14 was reported with `applied={}`; the
+campaign earlier saw it had ~one tested variant.  Standalone
+matmul tile-kid had `variants=9` -- 9 candidates tried.
+Compare TKernelVariants for the in-transformer kid 14 vs
+the standalone fc1.
+
+- [x] (2026-05-06) Re-run
+  `bench/autotune-ladder/transformer_block.wls` and modify
+  the print to show `Length[TKernelVariants[k]]` for each
+  kid.  Save filtered output to
+  `bench/autotune-ladder/transformer_variants.txt`.
+
+  All transformer kids tried 6-13 variants -- variant count
+  is NOT the bottleneck.  Kid 14 (FFN fc1, 13907us best) had
+  11 variants; kid 16 (fc2, 8113us) had 13.
+
+  **Real difference vs standalone**:
+
+  |                    | standalone fc1     | in-transformer kid 14 |
+  |--------------------|--------------------|-----------------------|
+  | dispatch           | metal-gemm + tile  | metal-tile ONLY       |
+  | best wall          | 353us (177 + 176)  | 13907us               |
+  | TC (tensor-core)   | proposed (kid 1)   | NOT proposed          |
+
+  **The matmul gets routed to the slow metal-tile path in
+  transformer context**, not the fast metal-gemm-with-TC
+  path.  Dispatch decision is too conservative when the
+  matmul's input comes from another kernel (LN1) instead of
+  an external tensor.
+
+  Concrete fix lives in the metal dispatch / shape-recognise
+  logic, not in autotune or bufferize.  Fits a small code
+  iteration once the right code site is found.

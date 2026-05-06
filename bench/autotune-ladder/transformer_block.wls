@@ -81,7 +81,8 @@ Do[
                   " baseline=", N @ baseRow["WallUs"], "us",
                   " best=", N @ bestRow["WallUs"], "us",
                   "  opt=", bestRow["Opt"],
-                  "  applied=", optsApplied];
+                  "  applied=", optsApplied,
+                  "  variants=", Length[variants]];
             totals["baseline_us"] += baseRow["WallUs"];
             totals["best_us"] += bestRow["WallUs"];
             totals["n_with_proposals"] += 1;
