@@ -113,7 +113,27 @@ file, commits, and stops.
 
 `C = A @ B`, fp32, 128x128 matrices.
 
-- [ ] thvm: `bench/autotune-ladder/matmul128.wls`.
+- [x] (2026-05-06) thvm: `bench/autotune-ladder/matmul128.wls`.
+
+  | metric           | value                       |
+  |------------------|-----------------------------|
+  | dispatch_pre     | **metal-gemm**              |
+  | baseline_us      | 214                         |
+  | best_variant_us  | 211 (TOpt[TC, 0, 16])       |
+  | speedup          | **1.01x**                   |
+  | applied          | TC[0, 16]                   |
+  | variants_tried   | 4 (1 baseline + 3 TC sizes) |
+  | jit_misses       | 0                           |
+  | jit_bypass       | 0                           |
+  | jit_compile_us   | 0                           |
+
+  Matmul routes through `metal-gemm` (dedicated GEMM dispatch
+  via cblas/MPSMatrixMultiplication), **not** `metal-tile`.
+  No JIT kernel emitted -- so jit stats are all zero.  Autotune
+  proposals are limited to TC tile sizes (32/16/8), and the
+  speedup is essentially noise (1.01x).  thvm's autotune
+  surface here is essentially "what tile size for the
+  pre-built GEMM template" -- there's nothing to learn.
 - [ ] tinygrad: `bench/autotune-ladder/matmul128.py` BEAM=4.
 - [ ] Compare.
 

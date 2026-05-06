@@ -1,0 +1,13 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+kid: 1
+dispatch_pre: metal-gemm
+proposals: {TOpt[TC, 0, 32], TOpt[TC, 0, 16], TOpt[TC, 0, 8]}
+variants_tried: 4
+baseline_us: 214.
+best_variant_us: 211.  opt=TOpt[TC, 0, 16]
+applied: {TOpt[TC, 0, 16]}
+dispatch_post: metal-gemm
+speedup_baseline_to_best: 1.01422
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
