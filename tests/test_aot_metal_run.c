@@ -121,6 +121,31 @@ int main(void) {
   CHECK_EQ(term_val(BOOK_HEAP[inner_loc + 1]), (u64)13);
   CHECK_EQ(term_val(BOOK_HEAP[inner_loc + 2]), (u64)13);
 
+  // Iter VV: arity-0 CTR construction edge case.  TCtr[label, no
+  // children] -- should allocate 1 cell (just the n_cell) and
+  // return TAG_CTR with label.
+  TEST_BEGIN("arity-0 CTR: nil = TCtr[7]");
+  u64 nil_ctr_loc = book_alloc(1);
+  book_set(nil_ctr_loc + 0, term_new(0, TAG_NUM, DT_INT32, 0));
+  Term nil_body = term_new(0, TAG_CTR, /*label=*/7, nil_ctr_loc);
+  u32 def_id_nil = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id_nil = i; break; }
+  }
+  DEFS[def_id_nil] = nil_body;
+
+  u64 next_before_nil = book_next_state;
+  result = thvm_aot_metal_compile_and_run(
+      "nil", def_id_nil, NULL, 0,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_CTR);
+  CHECK_EQ(term_ext(result), (u64)7);
+  CHECK_EQ(book_next_state, next_before_nil + 1);   // 1 + 0 children
+  u64 nil_loc = term_val(result);
+  Term nil_n_cell = BOOK_HEAP[nil_loc];
+  CHECK_EQ(term_tag(nil_n_cell), (u64)TAG_NUM);
+  CHECK_EQ(term_val(nil_n_cell), (u64)0);
+
   // Iter UU: unsupported tag in value position -> explicit emit
   // failure.  TAG_ANY (wildcard) has no value-fold semantics; the
   // emit's default case should bail with a reason.
