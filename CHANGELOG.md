@@ -159,6 +159,34 @@ used to carry:
   - Conv2d shape lifter to retire the dedicated path entirely
     (or accept coexistence indefinitely).
 
+- **Phase F default-on flip** (`4a6d4d4`, `97d86ec`):
+  test_tile_graph's 24 legacy-MSL string-match assertions gated
+  through a LEGACY_MSL_CHECK macro that runs only when
+  THVM_RENDER_VIA_UOP=0 forces the legacy renderer.  Behavior
+  assertions (output buffers, dispatch shape) keep CHECK / CHECK_EQ.
+
+  After all gates passed: `cg_emit_via_uop` flipped default to ON.
+  Set THVM_RENDER_VIA_UOP=0 to force the legacy ScalarUop renderer
+  for regression bisection.  The dtype_*.wlt SIGABRT is pre-existing
+  (fires regardless of env) so doesn't gate the flip.
+
+  Final state:
+    Default (via_uop ON):       274/274 binary tests, 37/37 WL tests
+    THVM_RENDER_VIA_UOP=0:      274/274 binary tests (legacy path)
+
+  The keystone Phase F flip is complete.  All non-conv2d kernels
+  scheduled by the system now flow through:
+    rangeify -> ScalarUop arena -> kernel_lift_to_uop -> UOp DAG ->
+    cg_render_uop_kernel -> MSL -> Metal dispatch.
+
+  Conv2D kernels continue using the dedicated rmt_emit_conv2d_flat
+  template (lifter doesn't decode im2col yet).
+
+  The legacy ScalarUop renderer + ScalarUop arena + rangeify.c +
+  tile.c + render_c_scalar.c become candidates for Phase G
+  deletion once the conv2d path is also lifted (or the dedicated
+  path is moved into render_uop's pattern matcher).
+
 - **Phase C wedge** (`b583321`, `4a36637`): kernel_lift_to_uop
   bridges ScalarUop[] arena to UOp DAG.  Takes a fully-scheduled
   kernel and builds the equivalent UOp DAG on the heap, returning
