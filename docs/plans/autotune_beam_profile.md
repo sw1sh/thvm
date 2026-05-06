@@ -1200,3 +1200,47 @@ ops near the LinearLayer boundary may bufferize differently).
   1.17x), suggesting Tanh's per-element cost surfaces more
   autotune leverage than Ramp's clamp -- but that's a
   secondary observation; the leak-count is the headline.
+
+### Level 9: 3-layer MLP -- does the leak scale with LinearLayer count?
+
+Level 4/8 (MLP2: 2 LinearLayers) leaks +2 kernels vs
+tinygrad's 5.  If the leak is **per-LinearLayer-boundary**,
+MLP3 (3 LinearLayers) should leak ~+3 or +4.  If it's a
+**fixed overhead** (e.g. softmax-tail residue), MLP3 leaks
+the same +2.  Distinguishing these guides where the
+structural-fusion fix needs to land.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mlp3.wls` --
+  3-layer MLP forward (784 -> 128 -> 64 -> 10) with Ramp
+  activations.  Save stdout to
+  `bench/autotune-ladder/mlp3.txt`.  Inline kernel_count,
+  dispatch_kinds, totals_baseline_us, totals_best_us,
+  totals_speedup, kernels_with_proposals, jit compile_us.
+  Compare delta from MLP2 (7 kernels): a delta of 0-1
+  suggests fixed-overhead leak; 2+ suggests per-LinearLayer-
+  boundary scaling.
+
+  | metric             |    MLP2 |    MLP3 | delta |
+  |--------------------|--------:|--------:|------:|
+  | LinearLayers       |       2 |       3 |   +1  |
+  | kernel_count       |       7 |       9 |   +2  |
+  | dispatch_kinds     |1g+6t    |1g+8t    |  +2t  |
+  | totals_baseline_us |    1376 |    2248 |       |
+  | totals_best_us     |    1340 |    1885 |       |
+  | totals_speedup     |   1.04x |   1.19x |       |
+
+  **Headline: +2 kernels per added LinearLayer + Activation.**
+  The leak is per-boundary, not a fixed overhead.
+
+  Combined with Level 8's activation-independence finding,
+  this gives a precise diagnosis: each `LinearLayer + Activation`
+  pair bufferizes the matmul output, producing 2 thvm kernels
+  where tinygrad produces 1.  In a deep MLP (e.g. 8 LinearLayers)
+  the leak would be approximately +8, not +2-3.
+
+  The structural-fusion target sharpens further: the fix
+  needs to **make the matmul output flow directly into the
+  activation kernel**, eliminating the intermediate buffer.
+  Once landed, MLP-N will run in approximately
+  `tinygrad_kernel_count` kernels for any N -- the same
+  structural change closes the leak at every depth.
