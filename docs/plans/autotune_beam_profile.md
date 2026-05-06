@@ -439,9 +439,29 @@ the rangeify reduce-broadcast collapse can't fold because
   buffer has a single element at offset 0).
 
 ### Softmax-tail lift fix
-- [ ] Add the singleton-buffer special case to
-  `lift_scalar_index`: when the outer S_INDEX has zero ranges
-  and the buffer has rank 1, emit `uop_const(DT_INT32, 0)` as
-  the address.  Smoke-test softmax(N=512) and re-run the
-  ladder to confirm kid 2 (softmax) and kid 6 (MLP2) drop
-  off the metal-op fallback.
+- [x] (2026-05-06) Add the singleton-buffer special case to
+  `lift_scalar_index`.
+
+  Added a one-line branch: `outer_rank == 0 && ndim == 1 &&
+  uop_buffer_dim(buf, 0) == 1 -> return uop_const(DT_INT32, 0)`.
+  The {1}-buffer has its only element at offset 0, and a
+  zero-range S_INDEX is the scalar read.
+
+  **Effect**: the metal-op outlier disappears on both softmax
+  and MLP2.  Re-bench:
+
+  | level | metric         | pre-fix             | post-fix         |
+  |-------|----------------|---------------------|------------------|
+  | 3 softmax | dispatch    | 2 tile + 1 metal-op | **3 tile**       |
+  | 3 softmax | baseline    | 624 us              | 617 us           |
+  | 3 softmax | best        | 558 us              | **457 us**       |
+  | 3 softmax | speedup     | 1.12x               | **1.35x**        |
+  | 4 MLP2    | dispatch    | 6 tile + 1 metal-op + 1 gemm | **6 tile + 1 gemm** |
+  | 4 MLP2    | baseline    | 1609 us             | 1448 us          |
+  | 4 MLP2    | best        | 1420 us             | **1383 us**      |
+
+  18% absolute drop on softmax (558 -> 457 us best) and 10%
+  drop on MLP2 baseline -- the metal-tile dispatch is faster
+  per call than the metal-op fallback even before autotune.
+
+  make test 274/274 unchanged.
