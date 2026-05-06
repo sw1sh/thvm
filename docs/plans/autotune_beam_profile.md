@@ -277,7 +277,33 @@ LinearLayer(784->128) -> ReLU -> LinearLayer(128->10) -> softmax.
   again close to thvm's 1.13x relative gain, but tinygrad starts
   from a smaller kernel-count budget so the absolute work is
   less.
-- [ ] Compare.
+- [x] (2026-05-06) Compare.
+
+  | metric                | thvm                | tinygrad           |
+  |-----------------------|---------------------|--------------------|
+  | kernels per forward   | **7**               | **5**              |
+  | baseline (us)         | 1609 (per-kern sum) | 2729 (call wall)   |
+  | best (us)             | 1420                | 2499               |
+  | speedup               | **1.13x**           | **1.09x**          |
+
+  **Structural finding (the headline of this level).** Tinygrad's
+  scheduler fuses 2 more layer-pairs' worth of work per forward
+  -- 5 kernels vs 7.  Both autotune surfaces extract ~10%
+  per-kernel; the absolute speedup ratio between the two is
+  similar (1.13 ≈ 1.09).
+
+  Where does thvm leak 2 extra kernels?
+  - Softmax tail (kid 6 metal-op) -- the unfused outlier
+    documented in level 3.
+  - One additional kernel on the LinearLayer chain --
+    bufferize boundary between matmul + activation that
+    tinygrad fuses through.
+
+  Next-tier work for thvm is **structural fusion** (collapse
+  the metal-op outliers, fuse activation into linear, fuse
+  the centred-exp into the max-reduce kernel), not tighter
+  autotune.  Per-kernel tuning is already at parity (~10% wins)
+  but the unit on which we tune is too small.
 
 ### Level 5 -- single conv2d (1x32x28x28 input, 5x5 kernel, 32 channels)
 
