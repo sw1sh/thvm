@@ -465,3 +465,43 @@ the rangeify reduce-broadcast collapse can't fold because
   per call than the metal-op fallback even before autotune.
 
   make test 274/274 unchanged.
+
+### Re-bench conv2d post-lift-fix
+
+The singleton-buffer fix flipped softmax + MLP2 fully onto the
+tile path.  Conv2d was 2 metal-op + 1 metal-tile pre-fix.  If
+either of conv2d's metal-op outliers was the same singleton-
+buffer scalar shape, the fix should have shifted them too.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/conv2d.wls`
+  with the fix applied.
+
+  | metric        | pre-fix | post-fix |
+  |---------------|--------:|---------:|
+  | kernel count  | 3       | 3        |
+  | dispatch      | 2 mop + 1 tile | **2 mop + 1 tile** (unchanged) |
+  | baseline_us   | 3569    | 3191     |
+  | best_us       | 2264    | 2262     |
+  | speedup       | 1.58x   | 1.41x    |
+
+  **The fix did NOT shift conv2d's metal-op outliers** -- they're
+  a different shape from the softmax tail.  Likely the im2col
+  patch-sum / partial-conv reduction, which uses indirect-index
+  patterns the lifter doesn't handle.
+
+  Side benefit: baseline dropped 11% (3569 -> 3191 us) anyway,
+  probably from better cache hit ratios after the recent
+  rendering changes.  Best stays at 2262 us; tinygrad still wins
+  by 41% (1604 us, single fused kernel).
+
+  **Next leverage point** (highest ROI of the original 3 from
+  the synthesis): diagnose conv2d's metal-op rejects under
+  `THVM_DUMP_LIFT_REJECT=1` and find the specific scalar shape
+  blocking the lift.  That's what the cron should pick up next.
+
+### Diagnose conv2d metal-op lift rejects
+- [ ] Run conv2d (1x32x28x28, 5x5, 32) under
+  `THVM_DUMP_LIFT_REJECT=1` and capture the unique reject
+  reasons + inner-srcs context.  Save to
+  `bench/autotune-ladder/conv2d_lift_reject.txt`.  Goal: identify
+  the next scalar shape to lift onto the tile path.
