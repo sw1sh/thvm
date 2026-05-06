@@ -689,9 +689,29 @@ every minute.
   structural one.
 
 ### axis-append revisit
-- [ ] Re-attempt the axis-append lift with extent validation:
-  for each (range, dim) pair in the composed access, require
-  `range.extent == buf.dims[dim]`.  Reject otherwise.  Smoke-test
-  bench-train AND forward; verify forward sample 3 no longer
-  NaNs and that the metal-tile share grows above the same-rank-
-  only baseline (currently 30 of 75).
+- [~] (2026-05-06) Re-attempted the axis-append lift with extent
+  validation per (range, dim) pair.  Result: forward still
+  produced NaN even when extents matched; `make test 274/274`
+  still passed because no C-side test exercises the failing
+  shape.  Reverted again; the structural model
+  (inner ranges drive dims [0..n_inner), outer drive
+  [n_inner..ndim)) is still wrong.
+
+  Aside: forward.wls itself is unstable on the current main --
+  re-running on HEAD with no changes produces samples 3-5 NaN'ing
+  with `confidence=Round[$Failed, 0.001]`.  Different `true`
+  labels across runs implies NetInitialize uses a non-fixed seed;
+  some random-weight LeNets produce numerically degenerate
+  softmax (no max-subtract stabilisation).  This noise made the
+  axis-append validation inconclusive -- I can't tell if my
+  lift_scalar_index changes introduce NaN or it's just the
+  random-seed variance.  Need a fixed-seed forward test before
+  trying axis-append again.
+
+### forward.wls determinism follow-on
+- [ ] Add `SeedRandom[<fixed>]` before `NetInitialize` in
+  [forward.wls](../../wl/Examples/lenet-mnist/forward.wls) so
+  the random LeNet weights are reproducible across runs.
+  Without this, every iteration of axis-append (or any
+  numerics-affecting change) is muddled by the underlying
+  random-seed noise.
