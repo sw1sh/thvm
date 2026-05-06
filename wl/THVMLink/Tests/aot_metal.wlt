@@ -169,6 +169,36 @@ VerificationTest[
     TestID -> "Metal: fst_pair(TBookCtr{2, ...}) returns first child"
 ]
 
+(* === iter V: TAG_DUP support (multi-use binder) === *)
+
+(* TLam[x, x*x]: WL's auto_dup rewrites the multi-use TVar(x) into a
+   chain of DP0/DP1 cells; the Metal emit memos dup_loc -> uint var
+   so both projections share one computation. *)
+VerificationTest[
+    TInit[];
+    TDef["square", TLam[x, TOp2["*", x, x]]];
+    TTermVal /@ (TAOTRun["square", {TNum[#]}, Method -> "Metal"] & /@
+                  {3, 5, 12, 100}),
+    {9, 25, 144, 10000},
+    TestID -> "Metal: square(x) = x*x via auto-dup'd binder"
+]
+
+(* === iter Y: variable-arity dispatch (>4 args) === *)
+
+VerificationTest[
+    TInit[];
+    TDef["sum5", TLam[a, TLam[b, TLam[c, TLam[d, TLam[e,
+      TOp2["+", a, TOp2["+", b, TOp2["+", c, TOp2["+", d, e]]]]]]]]]];
+    TTermVal /@ {
+      TAOTRun["sum5", {TNum[1], TNum[2], TNum[3], TNum[4], TNum[5]},
+              Method -> "Metal"],
+      TAOTRun["sum5", {TNum[10], TNum[20], TNum[30], TNum[40], TNum[50]},
+              Method -> "Metal"]
+    },
+    {15, 150},
+    TestID -> "Metal: sum5(a,b,c,d,e) -- 5 args via run_n bridge"
+]
+
 (* === Method dispatcher rejects unknown spec === *)
 
 VerificationTest[
