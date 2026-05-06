@@ -1,0 +1,11 @@
+
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (35 functions)
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (35 functions)
+v   c   build  kernel  collapse(threads)   total   WL ms    sat (C/D)  agree?
+------------------------------------------------------------------------------------
+2    4       1.75ms      81.98ms       1.78ms  (n= 128  num= 22  stk= 106  iter-cap= 0  stk-cap= 0  era= 0 )  total=   85.51ms   WL=    0.04ms    False / True    MISMATCH   stuck-tags= <|0 -> 94, 1 -> 8, 6 -> 4|>
+3    6       2.72ms       1.57ms       2.90ms  (n= 256  num= 29  stk= 227  iter-cap= 0  stk-cap= 0  era= 0 )  total=    7.20ms   WL=    0.04ms    True / True    OK   stuck-tags= <|0 -> 219, 6 -> 8|>
+4    8       3.51ms       1.64ms       5.98ms  (n= 512  num= 32  stk= 480  iter-cap= 0  stk-cap= 0  era= 0 )  total=   11.12ms   WL=    0.06ms    False / True    MISMATCH   stuck-tags= <|0 -> 450, 3 -> 30|>
+5    10      4.63ms       1.76ms       8.25ms  (n= 1024  num= 32  stk= 992  iter-cap= 0  stk-cap= 0  era= 0 )  total=   14.64ms   WL=    0.08ms    False / True    MISMATCH   stuck-tags= <|0 -> 781, 3 -> 191, 6 -> 20|>
+6    12      5.47ms       2.03ms      10.80ms  (n= 2048  num= 9  stk= 2039  iter-cap= 0  stk-cap= 0  era= 0 )  total=   18.30ms   WL=    0.06ms    True / True    OK   stuck-tags= <|0 -> 1438, 3 -> 579, 6 -> 22|>
+7    14      6.85ms       1.85ms      16.06ms  (n= 4096  num= 32  stk= 4064  iter-cap= 0  stk-cap= 0  era= 0 )  total=   24.76ms   WL=    0.08ms    False / True    MISMATCH   stuck-tags= <|6 -> 56, 0 -> 2557, 3 -> 1448, 30 -> 1, 104 -> 1, 37 -> 1|>

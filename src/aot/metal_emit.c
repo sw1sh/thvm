@@ -24,7 +24,7 @@ typedef struct {
     char arg_var[24];
 } AotMslBinding;
 
-#define AOT_MSL_BIND_CAP 256
+#define AOT_MSL_BIND_CAP 8192
 
 typedef struct {
     AotMslBinding entries[AOT_MSL_BIND_CAP];
@@ -125,7 +125,7 @@ typedef struct {
     u64  dup_loc;
     char loc_var[24];
 } AotMslDupTermEntry;
-#define AOT_MSL_DUP_TERM_CAP 64
+#define AOT_MSL_DUP_TERM_CAP 1024
 static AotMslDupTermEntry g_msl_dup_term_memo[AOT_MSL_DUP_TERM_CAP];
 static u32                g_msl_dup_term_n = 0;
 
@@ -254,7 +254,7 @@ Term thvm_aot_migrate_book_to_dyn(Term root) {
 // Bounded walk: tracks a small visited-base set to avoid pathological
 // recursion via shared sub-terms (rare in book templates but cheap to
 // guard against).
-#define AOT_MSL_NEEDS_IC_VISITED_CAP 256
+#define AOT_MSL_NEEDS_IC_VISITED_CAP 8192
 static int aot_msl_needs_ic_walk(Term t,
                                   u64 *visited, u32 *visited_n) {
     u8  tag = term_tag(t);
@@ -295,9 +295,14 @@ static int aot_msl_needs_ic_walk(Term t,
 }
 
 static int aot_msl_body_needs_ic(Term body) {
-    u64 visited[AOT_MSL_NEEDS_IC_VISITED_CAP];
+    /* Heap-allocate visited cache so 8K * sizeof(u64) = 64 KiB doesn't
+       blow the stack on dispatchers that already have a deep frame. */
+    u64 *visited = (u64 *)malloc(AOT_MSL_NEEDS_IC_VISITED_CAP * sizeof(u64));
+    if (visited == NULL) return 0;
     u32 visited_n = 0;
-    return aot_msl_needs_ic_walk(body, visited, &visited_n);
+    int r = aot_msl_needs_ic_walk(body, visited, &visited_n);
+    free(visited);
+    return r;
 }
 
 // Iter H helper: emit a Term-valued MSL expression for use in

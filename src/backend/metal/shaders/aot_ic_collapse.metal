@@ -171,8 +171,8 @@ static Term aot_dup_era(uint side, ulong loc, Term era, device Term *heap) {
 // Per-thread wnf state machine.  Drives `term` to WHNF; returns the
 // resolved Term.  Iteration cap protects against runaway / unintended
 // loops; stack overflow returns a sentinel (TAG_ERA with ext=0xFFFFF).
-constant uint AOT_COLLAPSE_STACK_CAP = 256u;
-constant uint AOT_COLLAPSE_ITER_CAP  = 65536u;
+constant uint AOT_COLLAPSE_STACK_CAP = 1024u;
+constant uint AOT_COLLAPSE_ITER_CAP  = (1u << 20);
 
 static Term aot_wnf_thread(Term term,
     device Term *heap, device atomic_uint *book_next)
