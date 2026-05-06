@@ -47,9 +47,23 @@ every minute.
   performance numbers are still valid for forward+backward
   throughput. Lift-reject diagnostics fire on per-output-grad
   reductions (not currently lifted by `kernel_lift_to_uop`).
-- [ ] Use `TFromNet[net]` (no input arg) to rewrite `forward.wls` so
-  it hands a `TLam` to `TRealize` directly; verify numerics match
-  the existing pipeline.
+- [~] (2026-05-06) Use `TFromNet[net]` (no input arg) to rewrite
+  `forward.wls` so it hands a `TLam` to `TRealize` directly; verify
+  numerics match the existing pipeline. **Blocked**: the
+  `TApp[lam, ten]` path is broken on main -- `lam_shape.wlt`
+  tests `tlam-jit-on-first-apply` and `tlam-shape-inferred-from-arg`
+  both fail with `Missing[NotATensor, UOP]`.  The issue is upstream
+  of NN.wl; needs a separate fix in the APP-LAM JIT path before the
+  TFromNet[net] form can be exercised end-to-end.
+
+### TLam regression fix (blocking the previous task)
+- [ ] Investigate why `TApp[TLam[w, TUOpAdd[w, w]], ten]` materializes
+  to `Missing[NotATensor, UOP]` instead of running the JIT-rendered
+  kernel.  Reproducer:
+  `Module[{lam, ten, res}, lam = TLam[w, TUOpAdd[w, w]];
+   ten = TTensorCreate @ NumericArray[{1.,2.,3.}, "Real32"];
+   res = TWnf[TApp[lam, ten]]; Normal @ TTensorData @ res]`.
+  Probably a regression in app_lam.c or materialize.c from Phase G.
 
 ### LeNet-MNIST baseline
 - [ ] Run `wl/Examples/lenet-mnist/forward.wls`; capture as
