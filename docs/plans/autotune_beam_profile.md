@@ -3296,3 +3296,55 @@ default-on flip).  Bring it up to date.
   inline rules (9e25f48).  Wins 3+4 are real wall-time
   speedups (1.24-1.29x on MLP/CNN); wins 1+2 are structural-
   correctness fixes.
+
+### Level 26 prep: does `inline-pure-fanout-probe` already cover single-consumer?
+
+Before writing a new `inline-reduce-pure-fanout` rule for
+the +1-per-Linear leak (consumer_count == 1 case), check
+whether the existing `bufferize_rule_inline_pure_fanout_probe`
+(at L1544 in the rules list) already handles this shape.
+If so, the rule may just need its enable gate flipped.
+
+- [x] (2026-05-06) Read
+  `bufferize_rule_inline_pure_fanout_probe` and its enable
+  gate.  Inline the function shape, the match conditions,
+  and whether it's currently default-on or default-off.
+
+  Function at [src/schedule/bufferize_classify.c:767](../../src/schedule/bufferize_classify.c#L767).
+  Match conditions:
+
+      if (!bufferize_inline_multiconsumer_pure_enabled())
+          return 0;
+      ...
+      if (!info->realized || info->consumer_count < 2) continue;
+      if (!bufferize_recompute_pure_op(info->op)) continue;
+
+  Two filters that exclude the Linear-output case:
+
+  1. **`consumer_count >= 2`** (L776) -- Linear-output has
+     consumer_count == 1.
+  2. **`bufferize_recompute_pure_op(info->op)`** (L779) --
+     UOP_REDUCE is NOT pure-recomputable (matmul-output
+     fails this gate).
+
+  Enable gate: shares
+  `bufferize_inline_multiconsumer_pure_enabled` with
+  `bufferize_rule_inline_multiconsumer_pure`.  Default-on
+  post commit 9e25f48.  Already enabled in HEAD.
+
+  **Conclusion**: enabling existing rules doesn't help the
+  +1-per-Linear leak.  Closing it requires a new rule with
+  new semantics:
+  - `consumer_count == 1`
+  - `op == UOP_REDUCE` (matmul-output specifically)
+  - Single consumer is elementwise-pure
+
+  Plus runtime support for the fused kernel shape (recompute
+  UOP_REDUCE inside the consumer's kernel).  This is "fuse
+  matmul into next op" -- the core of tinygrad's approach
+  -- and requires both a new bufferize rule AND runtime
+  changes.  Phase D'+F territory, multi-week.
+
+  The autotune-ladder campaign closes here for code wedges:
+  the remaining leaks need structural-fusion infrastructure
+  changes that don't fit a 5-min iteration.
