@@ -3912,6 +3912,7 @@ strategy is invalidated.
   against two_linears.wls (3 kernels, fast iteration) instead
   of the full transformer (17 kernels, slow iteration).
 
+<<<<<<< Updated upstream
 ### Level 40: gemm-reject signatures on two_linears
 
 - [x] (2026-05-06) Run two_linears.wls with
@@ -3993,3 +3994,72 @@ strategy is invalidated.
   (vs current 8580us).
 
   Next iteration lands the fix.
+=======
+### Level 40: gemm-reject diagnostic on two_linears
+
+Run two_linears.wls with `THVM_DUMP_GEMM_REJECT=1` to see
+exact rejection signatures for each kernel.  Compare kid 1
+(passes gemm) and kid 2 (rejects).
+
+- [x] (2026-05-06) Run two_linears.wls with the diagnostic
+  env and inline the rejection signatures.  The signatures
+  should illuminate why kid 2's bias didn't get separated.
+
+  Distinct gemm-reject signatures in two_linears:
+
+      tile_analyze_gemm: reject gate=n_inputs!=2  (332 hits)
+      tile_analyze_gemm: reject gate=n_ops!=2     (182 hits)
+      tile-plan: root op=3 n_ops=5 n_inputs=3     (160 unique)
+      tile-plan: root op=3 n_ops=1 n_inputs=2     (85)
+
+  - **kid 2** (the slow 8580us kernel): `n_ops=5 n_inputs=3`.
+    5 ops = bias_1 + matmul_2 + bias_2 + maybe output ops;
+    3 inputs = (kid_1_output, W2, b2).  **kid_1's bias got
+    swept into kid 2 along with the second matmul.**
+  - kid 3 (158us trailing): `n_ops=1 n_inputs=2`.  Tiny tail
+    op that fails for some other gate.
+
+  **kid 1 PASSES the gemm gate**, so its kernel has
+  `n_inputs=2` -- meaning the FIRST Linear's matmul (x @ W1)
+  got separated from its bias.  But kid 1's bias-add got
+  fused INTO kid 2 along with kid 2's full Linear.
+
+  This means rangeify is doing this fusion: after the first
+  gemm finishes, sweep all downstream elementwise + matmul
+  into one big kernel.  The next gemm is INSIDE that fused
+  kernel and can't be separated.
+
+  **Lever**: rangeify needs to recognize "this kernel
+  contains a matmul-shape REDUCE inside" and start a new
+  kernel before that REDUCE.  Either:
+  (a) Rangeify-side: when extending a kernel, check if the
+      next op is a matmul-output-feeding-op chain and bail.
+  (b) Bufferize-side: realize matmul reduces transitively
+      (which we tried but didn't propagate to rangeify).
+  (c) Insert an explicit boundary op between matmul-output
+      and downstream consumers.
+
+  Next iteration: read rangeify's kernel-boundary decision
+  to see where the "extend or split" choice lives.
+>>>>>>> Stashed changes
+
+### Level 42: materialize fix didn't help -- matmul not in BOUNDARY_ORDER
+
+Landed the j=0 chain-check fix and re-benched two_linears.
+No change: kid 2 still 8568us.  Reverted.
+
+materialize.c:1614 ALREADY has a check that routes non-root
+boundaries as inputs.  But for matmul-loc,
+`boundary_index_for_loc(matmul_loc)` returns INVALID -- the
+matmul reduce is NOT in BOUNDARY_ORDER even though
+BUFFERIZE_REASON_MATMUL protects realized=1.
+
+Hypotheses:
+  (a) matmul reduce not in BUFFERIZE_NODES at all
+  (b) helper misses it on this shape
+  (c) topo_sort_boundaries filters further
+
+- [ ] Instrument topo_sort_boundaries to dump (loc, op) for
+  each addition to BOUNDARY_ORDER.  Run two_linears,
+  confirm matmul reduce loc insertion.  Determines which
+  hypothesis to chase.
