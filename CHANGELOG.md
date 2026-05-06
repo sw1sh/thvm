@@ -187,6 +187,31 @@ used to carry:
   deletion once the conv2d path is also lifted (or the dedicated
   path is moved into render_uop's pattern matcher).
 
+- **Phase F conv2d coverage** (`7249401`): kernel_lift_from_conv2d
+  closes the conv2d gap.  Synthesises the canonical conv2d_flat
+  UOp DAG from TileConv2DInfo with full affine address arithmetic:
+  output ranges (c_out, patches) decomposed via IDIV/IMOD into
+  (co, bi, oh, ow); reduce range (KRED = c_in * kh * kw)
+  decomposed into (ci, kh_v, kw_v); W and X loads use the static
+  strides from TileConv2DInfo.
+
+  cg_emit_tile_metal drops the conv2d short-circuit -- ALL kernel
+  shapes (matmul/conv2d/elementwise/reduce) now flow through the
+  UOp-DAG renderer first.  Falls back to legacy only when the
+  lifter declines (e.g. multi-input X "patch_input_count" cases).
+
+  Coverage: test_tile_graph now reports
+  attempts=11 successes=11 compiles=11 (100%).
+
+  WL execution validation across 10 test files:
+    conv_im2col.wlt 6/6, cmpeq 3/3, cast 15/15, reduce 8/8,
+    bn_grad 3/3, grad_edge 11/11, assign 6/6, bitcast 11/11,
+    flip 5/5, core 32/32 -- 100/100 PASS.
+
+  The dedicated rmt_emit_conv2d_flat template is now reached only
+  as a fallback for the multi-input X path; once that lifts too,
+  every legacy MSL emission path becomes dead code.
+
 - **Phase C wedge** (`b583321`, `4a36637`): kernel_lift_to_uop
   bridges ScalarUop[] arena to UOp DAG.  Takes a fully-scheduled
   kernel and builds the equivalent UOp DAG on the heap, returning
