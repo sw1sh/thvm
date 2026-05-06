@@ -6,6 +6,36 @@ dated section.
 
 ## Unreleased
 
+### Phase 7 iter M scaffold: wnf macro-shim header + blocker inventory (2026-05-06)
+
+src/aot/wnf_metal_shim.h is the starting macro layer for porting
+src/wnf/_.c (and its many dependencies) under MSL via the same
+trick HVM4 uses for its CUDA backend: define `fn` as `inline`,
+remap `__atomic_*` to MSL's `atomic_*_explicit`, no-op `getenv` /
+`fprintf`, etc.
+
+Inventoried 7 deeper blockers in the header that must be addressed
+across multiple follow-up iters:
+
+  1. RECURSION -- MSL forbids; wnf is iterative but interaction
+     rules in src/redex/ may recurse via aot_force.
+  2. FUNCTION POINTERS -- wnf_pool's WnfFireFn callback; needs
+     `[[visible]]` indirect dispatch.
+  3. PER-THREAD STATE -- `_Thread_local CURRENT_WNF_STATE` has no
+     MSL equivalent; need per-thread WnfThreadState array indexed
+     by tid.
+  4. PTHREAD POOL -- replace src/wnf/pool.c with kernel-launch
+     parallelism (one thread per redex shard).
+  5. MALLOC / FREE -- DFS_STACK / STEP_USE_NEXT / seed buffer all
+     malloc'd; replace with bump allocations sized at launch.
+  6. STRING I/O / DEBUG -- fprintf/getenv stubbed; debug paths
+     compile to no-ops.
+  7. CONTEXT GLOBALS -- HEAP/DEFS/etc. accessed via CURRENT_CTX;
+     MSL kernels need explicit parameters.
+
+Each blocker becomes a Phase 7 iter (M.1 .. M.N) with its own entry.
+This iter just lands the scaffold + roadmap.
+
 ### Phase 7 iter J blocker: dylib worker TLS (2026-05-06)
 
 Attempted to wire `Method -> {"CPU", "NumThreads" -> n}` through the
