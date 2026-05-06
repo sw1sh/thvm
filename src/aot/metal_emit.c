@@ -138,6 +138,48 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
             return out;
         }
     }
+    if (tag == TAG_CTR) {
+        // Iter OO: nested CTR -- allocate child cell sequence on the
+        // GPU heap, materialize each grandchild via the same emit_term
+        // path (recursing into deeper nesting), return a Term-valued
+        // local that holds the new TAG_CTR.
+        u32  label  = term_ext(t);
+        u64  ctr_loc = term_val(t);
+        Term n_cell  = book_read(ctr_loc);
+        u32  n       = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 0;
+        if (n > 8) {
+            aot_msl_emit_fail("nested CTR arity %u exceeds 8 cap", n);
+            snprintf(out, 96, "0u /* nested CTR arity too large */");
+            return out;
+        }
+        // Materialize each grandchild first (their emit may use the
+        // same ring slots, so copy each result into a local before
+        // emitting the next).
+        char child_exprs[8][96];
+        for (u32 i = 0; i < n; i++) {
+            Term child = book_read(ctr_loc + 1 + i);
+            const char *ce = aot_msl_emit_term(b, child, bind);
+            snprintf(child_exprs[i], sizeof child_exprs[0], "%s", ce);
+        }
+        u32 idx = g_msl_fresh++;
+        char ctr_var[24], loc_var[24];
+        snprintf(loc_var, sizeof loc_var, "ctr_loc_%u", idx);
+        snprintf(ctr_var, sizeof ctr_var, "ctr_%u",     idx);
+        aot_emit_fmt(b,
+            "  ulong %s = aot_book_alloc(book_next, %uu);\n"
+            "  heap[%s + 0] = msl_term_new(TAG_NUM, DT_INT32, ulong(%uu));\n",
+            loc_var, 1u + n, loc_var, n);
+        for (u32 i = 0; i < n; i++) {
+            aot_emit_fmt(b,
+                "  heap[%s + %uu] = %s;\n",
+                loc_var, i + 1, child_exprs[i]);
+        }
+        aot_emit_fmt(b,
+            "  Term %s = msl_term_new(TAG_CTR, %uu, %s);\n",
+            ctr_var, label, loc_var);
+        snprintf(out, 96, "%s", ctr_var);
+        return out;
+    }
     // Generic path: emit as uint (NUM payload), wrap as Term.
     // Iter II: preserve TNum's literal dtype on the wrap; for non-TNum
     // (e.g., TOp2 fold), default to 0u (caller's responsibility to

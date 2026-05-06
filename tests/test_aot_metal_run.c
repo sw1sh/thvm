@@ -77,6 +77,50 @@ int main(void) {
   CHECK_EQ(term_tag(result), (u64)TAG_NUM);
   CHECK_EQ(term_val(result), (u64)300);
 
+  // Iter OO: nested CTR construction.  wrap_pair(x) = TCtr[1, TCtr[2, x, x]]
+  // -- a CTR whose only child is itself a CTR.  Verify the kernel
+  // allocates BOTH cells on book_heap and the outer CTR's child slot
+  // points at the inner CTR's loc.
+  TEST_BEGIN("nested CTR: wrap_pair(x) = TCtr[1, TCtr[2, x, x]]");
+  // Build the inner TCtr[2, TVar(x), TVar(x)] (uses iter V's auto-dup
+  // semantics manually since the C-side test bypasses WL auto_dup).
+  u64 wp_x_loc = book_alloc(1);
+  u64 wp_inner_ctr_loc = book_alloc(3);
+  book_set(wp_inner_ctr_loc + 0, term_new(0, TAG_NUM, DT_INT32, 2));
+  book_set(wp_inner_ctr_loc + 1, term_new(0, TAG_VAR, 0, wp_x_loc));
+  book_set(wp_inner_ctr_loc + 2, term_new(0, TAG_VAR, 0, wp_x_loc));
+  Term wp_inner_ctr = term_new(0, TAG_CTR, /*label=*/2, wp_inner_ctr_loc);
+  // Outer TCtr[1, inner]
+  u64 wp_outer_ctr_loc = book_alloc(2);
+  book_set(wp_outer_ctr_loc + 0, term_new(0, TAG_NUM, DT_INT32, 1));
+  book_set(wp_outer_ctr_loc + 1, wp_inner_ctr);
+  Term wp_outer_ctr = term_new(0, TAG_CTR, /*label=*/1, wp_outer_ctr_loc);
+  book_set(wp_x_loc, wp_outer_ctr);
+  Term wrap_pair = term_new(0, TAG_LAM, 0, wp_x_loc);
+  u32 def_id_wp = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id_wp = i; break; }
+  }
+  DEFS[def_id_wp] = wrap_pair;
+
+  Term wp_args[1] = { term_new(0, TAG_NUM, 0, 13) };
+  result = thvm_aot_metal_compile_and_run(
+      "wrap_pair", def_id_wp, wp_args, 1,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_CTR);
+  CHECK_EQ(term_ext(result), (u64)1);   // outer label
+  // Read outer: heap[outer + 0] = NUM(1), heap[outer + 1] = inner CTR.
+  u64 outer_loc = term_val(result);
+  CHECK_EQ(term_val(BOOK_HEAP[outer_loc]), (u64)1);   // arity 1
+  Term inner = BOOK_HEAP[outer_loc + 1];
+  CHECK_EQ(term_tag(inner), (u64)TAG_CTR);
+  CHECK_EQ(term_ext(inner), (u64)2);   // inner label
+  // Inner: heap[inner + 0] = NUM(2), [inner+1] = NUM(13), [inner+2] = NUM(13).
+  u64 inner_loc = term_val(inner);
+  CHECK_EQ(term_val(BOOK_HEAP[inner_loc]),     (u64)2);
+  CHECK_EQ(term_val(BOOK_HEAP[inner_loc + 1]), (u64)13);
+  CHECK_EQ(term_val(BOOK_HEAP[inner_loc + 2]), (u64)13);
+
   // Iter LL: unbound TVar in body -> emit failure.  Build a def
   // whose body references a TVar bound to a heap loc that ISN'T
   // a peeled LAM binder -- the emit can't resolve it and should
