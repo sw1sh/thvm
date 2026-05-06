@@ -858,14 +858,39 @@ every minute.
   make test 274/274 unchanged.
 
 ### Runtime broadcast-from-{1} bug follow-on
-- [ ] Fix the runtime's elementwise broadcast for `{N} OP {1}`
-  shape pairs.  Currently produces `{result_0, junk, junk, ...}`
-  -- the first slot is correct but subsequent slots read out-of-
-  bounds zeros.  Reproducer:
-  `TUOpAdd[TTensorCreate[NumericArray[{1.,2.,3.},"Real32"]],
-   TUOpConst[10.]]` should give `{11,12,13}` but gives `{11,2,3}`.
-  Likely root cause: the lifter / renderer emits a fixed stride
-  for the {1}-shape buffer instead of stride=0 for broadcast.
+- [x] (2026-05-06) Investigated.  **The bug is more specific
+  than "broadcast from {1}"**: `TUOpAdd[tensor, TUOpConst[c]]`
+  works correctly for `c >= 1e-5` and silently drops the constant
+  for `c <= 1e-6`.  Bracketed via a sweep:
+
+  | eps      | result of `{0., 0.5, 1.} + eps` |
+  |----------|---------------------------------|
+  | 10       | {10., 10.5, 11.}                |
+  | 1        | {1., 1.5, 2.}                   |
+  | 1e-1     | {0.1, 0.6, 1.1}                 |
+  | 1e-2     | {0.01, 0.51, 1.01}              |
+  | 1e-3     | {0.001, 0.501, 1.001}           |
+  | 1e-4     | {0.0001, 0.5001, 1.0001}        |
+  | 1e-5     | {1e-5, 0.50001, 1.00001}        |
+  | 1e-6     | {0., 0.5, 1.} **(eps dropped)** |
+  | 1e-7     | {0., 0.5, 1.} **(eps dropped)** |
+
+  fp32 ULP at 0.5 is ~3e-8 so 1e-6 should be representable.
+  Result is exact original tensor, not "first slot correct rest
+  zero".  Likely a constant-propagation / fold pass that
+  treats small TUOpConst values as no-ops.  Smoking-gun
+  hypothesis: `cg_emit_const` or graph-simplify rule for
+  `add(t, const(c))` checks `|c| < threshold` and folds to `t`.
+
+### Constant-fold-threshold bug follow-on
+- [ ] Locate the rule in
+  [src/uop/graph_simplify.c](../../src/uop/graph_simplify.c) or
+  [src/codegen/render_uop.c](../../src/codegen/render_uop.c) (or
+  rangeify) that drops `TUOpAdd[t, TUOpConst[c]]` when `|c|` is
+  below ~1e-5, and either remove the threshold check or raise
+  it to 0 (no-op only on exact zero).  Verify with the eps sweep
+  above: `TUOpAdd[{0,0.5,1}, TUOpConst[1e-7]]` should produce
+  `{1e-7, 0.5+1e-7, 1+1e-7}`.
 
 ### Bench-train timed loss NaN follow-on
 - [ ] Investigate why bench-train's *timed* losses are `$Failed`
