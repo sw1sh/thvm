@@ -1,17 +1,15 @@
-// uop/store.c - construct UOP_STORE and UOP_AFTER (Phase D'2).
+// uop/store.c - construct UOP_STORE and UOP_AFTER.
 //
 // UOP_STORE is the symmetric counterpart to UOP_INDEX_E: where INDEX_E
 // reads `buf[addr]`, STORE writes `value` to `buf[addr]`.  Both share
 // the symbolic-address tree shape (UOP_RANGE / UOP_I* / UOP_IWHERE).
 //
 // UOP_AFTER is an ordering annotation: `AFTER(node, after_node)` means
-// `node` is sequenced after `after_node`.  T.copy = STORE + AFTER;
-// T.async_copy = STORE + AFTER + Linear ordering (the Linear bit is a
-// future flag).  Backends emit a barrier when AFTER crosses a scope
-// boundary (LOCAL/GLOBAL) and a warp shuffle when crossing REG.
+// `node` is sequenced after `after_node`.  Backends emit a barrier
+// when AFTER crosses a scope boundary (LOCAL/GLOBAL) and a warp
+// shuffle when crossing REG.
 //
-// Both opcodes hash-cons via uop_mov_cache.  No consumer in this
-// commit -- the renderer rewrite (F0) is the first reader.
+// Both opcodes hash-cons via uop_mov_cache.
 
 fn Term uop_store(Term buf, Term addr, Term value) {
   u32 args[6] = { (u32)buf,   (u32)(buf   >> 32),

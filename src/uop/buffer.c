@@ -1,13 +1,11 @@
-// uop/buffer.c - construct a UOP_BUFFER leaf (Phase D'1).
+// uop/buffer.c - construct a UOP_BUFFER leaf.
 //
 // Heap layout: [NUM(scope), NUM(dtype), NUM(ndim), NUM(d0), ...,
 //               NUM(d_{ndim-1})].
 //
-// Scope (UOP_SCOPE_GLOBAL/LOCAL/REG) carries the storage tier per the
-// TileLang correspondence in the migration plan: GLOBAL = T.Tensor
-// argument (device memory), LOCAL = T.alloc_shared (threadgroup-shared),
-// REG = T.alloc_fragment (per-thread register fragment).  D'2 wires
-// UOP_STORE/UOP_AFTER to read these.  F0 wires the renderer.
+// Scope (UOP_SCOPE_GLOBAL/LOCAL/REG) carries the storage tier:
+// GLOBAL = device memory (kernel argument), LOCAL = threadgroup-shared,
+// REG = per-thread register fragment.
 //
 // Hash-cons via uop_mov_cache: (scope, dtype, ndim, dims) round-trip
 // to one heap loc.  Repeated `uop_buffer(GLOBAL, DT_FP32, 1, &n)` calls

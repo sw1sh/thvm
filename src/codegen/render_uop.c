@@ -1,26 +1,26 @@
-// codegen/render_uop.c - UOp DAG renderer skeleton (Phase F0).
+// codegen/render_uop.c - UOp DAG renderer.
 //
-// Walks the UOp DAG rooted at a kernel-output store and emits
-// pseudo-MSL.  Replaces the in-tree TileUop[] skeleton renderer
-// (deleted in Phase G).  This is the seed Phase F's renderer rewrite
-// proper grows into; today it covers a small set of UOp shapes:
+// Walks the UOp DAG rooted at a kernel-output store and emits MSL.
+// Coverage:
 //
 //   UOP_BUFFER         -- kernel arg or local alloc
 //   UOP_INDEX_E        -- buf[addr]
 //   UOP_STORE          -- buf[addr] = value;
 //   UOP_AFTER          -- threadgroup_barrier when cross-scope
 //   UOP_RANGE          -- for-loop or thread-position bind
-//   UOP_OPT            -- annotation on target
+//   UOP_OPT            -- annotation on target (UNROLL/UPCAST/TC/...)
 //   UOP_CONST/ICONST   -- literal value
 //   UOP_IADD/IMUL/etc. -- symbolic int expressions
+//   UOP_ADD/MUL/NEG/...  -- float elementwise + transcendentals
+//   UOP_REDUCE         -- hoisted accumulator (init/accum/finalize)
+//   UOP_CAST/BITCAST   -- type conversion
+//   UOP_IWHERE         -- ternary
 //
-// Future extensions: UOP_REDUCE (init/accum/finalize), full UOP_*
-// elementwise (S_LOAD / S_ADD / S_MUL / etc. now lifted to UOps),
-// UOP_OPT pattern-match for GEMM / conv2d templates.
-//
-// No consumer wires this in yet -- it's a structural seam tested in
-// isolation.  When the renderer rewrite proper lands, render_metal's
-// CtKernelInfo path swaps to call into this walker.
+// Pattern-matches for specialised templates:
+//   OPT(REDUCE(MUL(LOAD,LOAD), SUM, k), TC, _) with K%8==0
+//     -> 8x8 simdgroup_matrix<float, 8, 8> template.
+//   OPT(_, UNROLL/UPCAST, factor) -> #pragma unroll(N).
+//   OPT(_, LOCAL, _) -> bind to thread_position_in_threadgroup.
 
 static void rmu_emit_term(Term t, FILE *fp);
 
@@ -484,13 +484,12 @@ static void rmu_emit_reduce_init(u32 kind, FILE *fp) {
   else                    fputs("0.0f", fp);
 }
 
-// Phase F2b: specialised simdgroup_matrix MSL template for the matmul
-// pattern.  Called when rmu_detect_matmul_tc fires.  Emits an 8x8
+// Specialised simdgroup_matrix MSL template for the matmul pattern.
+// Called when rmu_detect_matmul_tc fires.  Emits an 8x8
 // simdgroup_matrix-tiled K-loop: load A and B subblocks, multiply-
 // accumulate into C, store final C.  Falls back to the generic
-// accumulator path when the address shapes don't yield clean ptr+offset
-// (e.g. non-contiguous strides) -- gives Phase F2 incremental coverage
-// without requiring a perfect detector.
+// accumulator path when the address shapes don't yield clean
+// ptr+offset (e.g. non-contiguous strides).
 static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
                               u32 depth) {
   // Extract inner pieces validated by rmu_detect_matmul_tc.

@@ -1,4 +1,4 @@
-// uop/movement_index.c - per-USE movement-chain INDEX resolver (Phase B1).
+// uop/movement_index.c - per-USE movement-chain INDEX resolver.
 //
 // `uop_resolve_movement_chain` walks a movement-op chain outside-in,
 // transforming the consumer's iter context to the iter context the
@@ -6,11 +6,10 @@
 // (indexing.py:128-145): each movement op's effect on a consumer's
 // iters is a small, local rewrite.
 //
-// Architectural choice (per the migration plan): movement ops STAY
-// in the UOp DAG.  This helper is called per-USE during lowering
-// (Phase B3 wires it into rangeify) so each consumer sees its own
-// resolved INDEX expression.  Eager DAG-layer rewriting would split
-// buffer materializations the schedule wants to keep.
+// Movement ops stay in the UOp DAG.  This helper is called per-USE
+// during lowering so each consumer sees its own resolved INDEX
+// expression.  Eager DAG-layer rewriting would split buffer
+// materializations the schedule wants to keep.
 //
 // Caller contract:
 //   - Pass `src` = the term seen at the consumer's input slot

@@ -1,5 +1,5 @@
 // uop/index_simplify.c - constructor-time simplifier for the symbolic
-// INDEX layer (Phase B2).
+// INDEX layer.
 //
 // Folds applied in `uop_int_binary` and `uop_iwhere` before hash-cons.
 // Without these, the resolver builds giant ASTs of identity ops

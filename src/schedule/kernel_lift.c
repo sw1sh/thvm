@@ -1,8 +1,5 @@
-// Phase F shadow-render counters.  Instrument every cg_emit_tile_metal
-// call: try kernel_lift_to_uop alongside the existing path and report
-// what fraction of real workload kernels the lifter covers.  Read
-// via kernel_lift_attempts() / kernel_lift_successes() / etc.
-//
+// Coverage counters for kernel_lift_to_uop.  Read via
+// kernel_lift_attempts() / kernel_lift_successes() / etc.
 // Counters are global (single-threaded scheduling).  Reset by
 // thvm_init / thvm_free.
 static u64 KERNEL_LIFT_ATTEMPTS;
@@ -33,19 +30,11 @@ fn void kernel_lift_count_compile (int ok) {
 }
 
 // schedule/kernel_lift.c - lift a scheduled kernel's ScalarUop arena
-// to a UOp DAG root suitable for cg_render_uop_kernel (Phase C wedge).
+// to a UOp DAG root suitable for cg_render_uop_kernel.
 //
-// The migration plan calls for KernelEntry.program / scalar_uops[] to
-// disappear in Phase C, replaced by a direct UOp DAG reference.
-// kernel_lift_to_uop is the bridge: it takes a fully-scheduled kernel
-// and builds the equivalent UOp DAG on the heap, returning a UOP_STORE
-// root + UOP_BUFFER terms for output and inputs.
-//
-// Once the renderer rewrite proper flips render_metal to consume UOp
-// DAG, every kernel scheduled by the system flows through this lifter
-// (during the Phase C migration period).  After Phase C lands and
-// scalar_uops[] disappears, this file deletes -- the kernel is born
-// as a UOp DAG, no lifting required.
+// kernel_lift_to_uop takes a fully-scheduled kernel and builds the
+// equivalent UOp DAG on the heap, returning a UOP_STORE root +
+// UOP_BUFFER terms for output and inputs.
 //
 // Coverage:
 //   S_CONST                  -> UOP_CONST
@@ -63,9 +52,8 @@ fn void kernel_lift_count_compile (int ok) {
 //   S_RANGE                  -> UOP_RANGE (via UopRangeMap)
 //   S_ICONST / S_I*          -> existing scalar_to_uop path
 //
-// Returns 0 on unsupported shape (S_RESHAPE_V wrappers, S_PAD/SHRINK,
-// etc. -- the lifter stays strict so unsupported subtrees fall back
-// to the legacy renderer until Phase B3-finish removes them).
+// Returns 0 on unsupported shape; the renderer's caller falls back
+// per its own contract.
 
 // KernelUopLift is declared in thvm.h.
 

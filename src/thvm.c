@@ -516,10 +516,9 @@ void thvm_init(void) {
 }
 
 void thvm_free(void) {
-  // Phase F shadow lifter coverage dump.  Env-gated so the noise
-  // doesn't pollute normal test output; turn on with
-  // THVM_DUMP_LIFT_COVERAGE=1 to see how many cg_emit_tile_metal
-  // calls the lifter handled in this run.
+  // Lifter coverage dump.  Env-gated so the noise doesn't pollute
+  // normal test output; turn on with THVM_DUMP_LIFT_COVERAGE=1 to
+  // see how many cg_emit_tile_metal calls the lifter handled.
   if (getenv("THVM_DUMP_LIFT_COVERAGE")) {
     fprintf(stderr,
             "thvm: kernel_lift coverage -- attempts=%llu successes=%llu"

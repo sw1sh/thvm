@@ -200,10 +200,9 @@ typedef u64 Term;
 //
 // Mirrors tinygrad's full dtype set (TinyHVM/tinygrad/tinygrad/dtype.py:
 // 130-146) plus packed int4/uint4 for modern quantization.  Enum
-// values are stable; new dtypes append at the bottom.  Phase A
-// reserves every slot but only wires DT_FP32 and DT_INT32; subsequent
-// phases activate the remaining rows.  See src/dtype/info.c for the
-// metadata table (itemsize / kind / signed-ness / canonical name).
+// values are stable; new dtypes append at the bottom.  Reserved
+// slots have itemsize=0 in src/dtype/info.c -- the call site aborts
+// loudly so missing rows surface during incremental rollout.
 //
 // IDs intentionally fit a 6-bit ext field; static-asserted in
 // src/dtype/info.c.
@@ -313,12 +312,11 @@ int             dtype_is_packed   (u32 dt);
                              //   Bit-level reinterpret; src and dst must
                              //   share itemsize.  tinygrad's Ops.BITCAST
                              //   -- backward returns CONST(0).
-// === Symbolic INDEX layer (Phase B0; mirrors ScalarUop S_* expression ops) ===
-// These opcodes give the UOp DAG a symbolic-address representation so
-// movement-to-INDEX rewrites (Phase B1) can land at the UOp layer
-// instead of inside rangeify.c.  The shape mirrors S_RANGE / S_INDEX_E /
-// S_I{ADD,SUB,MUL,DIV,MOD,LT,AND,WHERE} one-for-one; rangeify (Phase B3)
-// will consume these directly and emit the matching scalar form.
+// === Symbolic INDEX layer ===
+// These opcodes give the UOp DAG a symbolic-address representation
+// (per-axis ranges, integer arithmetic, conditional WHERE, INVALID
+// sentinel for PAD masks, INDEX_E nodes pairing a buffer with a
+// symbolic offset expression).
 #define UOP_RANGE       25   // heap = [NUM(axis_type), NUM(extent)]; ext = axis_id.
                              //   Symbolic axis-iter leaf.  axis_type uses
                              //   the same encoding as S_AXIS_LOOP/REDUCE/
@@ -341,14 +339,12 @@ int             dtype_is_packed   (u32 dt);
                              //   the canonical PAD lowering; downstream
                              //   simplifier folds `LOAD(INVALID)` to the
                              //   reduce identity.
-// === Buffer / scope layer (Phase D'1; mirrors tinygrad's Ops.BUFFER) ===
-// Per the TileLang correspondence in the migration plan: UOP_BUFFER is the
-// explicit buffer-leaf opcode that replaces today's implicit-via-UOP_LOAD
-// buffer reference.  Scope distinguishes device-global storage from
-// threadgroup-shared and per-thread register fragments.  T.Tensor argument
-// becomes BUFFER(GLOBAL); T.alloc_shared becomes BUFFER(LOCAL);
-// T.alloc_fragment becomes BUFFER(REG).  No consumer yet -- D'2 wires
-// UOP_STORE/UOP_AFTER, F0 wires the renderer.
+// === Buffer / scope layer (mirrors tinygrad's Ops.BUFFER) ===
+// UOP_BUFFER is the explicit buffer-leaf opcode.  Scope
+// distinguishes device-global storage from threadgroup-shared and
+// per-thread register fragments.  T.Tensor argument becomes
+// BUFFER(GLOBAL); T.alloc_shared becomes BUFFER(LOCAL);
+// T.alloc_fragment becomes BUFFER(REG).
 #define UOP_SCOPE_GLOBAL  0   // device memory (T.Tensor argument; default)
 #define UOP_SCOPE_LOCAL   1   // threadgroup-shared (T.alloc_shared)
 #define UOP_SCOPE_REG     2   // per-thread register fragment (T.alloc_fragment)
@@ -360,7 +356,7 @@ int             dtype_is_packed   (u32 dt);
                              //   Symmetric counterpart to UOP_INDEX_E.
                              //   Writes `value` to `buf` at the symbolic
                              //   address `addr` (a tree of UOP_RANGE/I*
-                             //   like INDEX_E's addr_expr).  Phase D'2.
+                             //   like INDEX_E's addr_expr).
 #define UOP_AFTER       38   // heap = [node, after_node];
                              //   Ordering annotation between sibling
                              //   side-effects (UOP_STOREs).  Backend
@@ -368,8 +364,8 @@ int             dtype_is_packed   (u32 dt);
                              //   scope boundary (LOCAL <-> GLOBAL) or a
                              //   warp shuffle when crossing REG.  T.copy
                              //   = STORE+AFTER; T.async_copy = STORE +
-                             //   AFTER + Linear ordering.  Phase D'2.
-// === Opt annotation kinds (Phase D'4) ===
+                             //   AFTER + Linear ordering.
+// === Opt annotation kinds ===
 // Mirrors TileLang's OptOp directives.  Renderer pattern-matches
 // (target, kind) to emit the appropriate code: UNROLL unrolls a
 // RANGE k-loop; UPCAST unrolls an output dimension; TC selects a
@@ -386,7 +382,6 @@ int             dtype_is_packed   (u32 dt);
                              //   directive carries no scalar (TC, LOCAL).
                              //   The renderer walks UOp shape + OptOp
                              //   annotations to fire specialised templates.
-                             //   Phase D'4.
 #define UOP_COUNT       40
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
@@ -617,9 +612,8 @@ typedef struct {
                                    //   source axes fused into this op.
   u8    reduce_axes[MAX_DIM];      // REDUCE only: original source axis
                                    //   ids, in source-axis order.
-  // Phase 2 follow-up: per-USE bufferize chain linkage so future
-  // rangeify rerouting can map each movement-op KProgOp back to a
-  // BIndexChainOp on the originating B_INDEX edge.
+  // Per-USE bufferize chain linkage: maps each movement-op KProgOp
+  // back to a BIndexChainOp on the originating B_INDEX edge.
   //
   // chain_op_idx counts movement ops in this op's src subtree along
   // the single-src path to a leaf input (0 for the bottom-most
@@ -655,19 +649,15 @@ typedef struct {
   // into one multi-output kernel; cpu_interpret reads it post-step
   // and copies regs[step] into the extra output buffer.
   u8    store_extra_plus_one;
-  // Phase B3: back-pointer to the originating UOp DAG Term.  Set by
-  // visit() in materialize.c at the moment each KProgOp slot is
-  // emitted; consumed by rangeify when calling
-  // `uop_resolve_movement_chain` so the per-USE INDEX resolver can
-  // walk the original UOp chain instead of the per-op
-  // src0_dims/out_dims/pad_widths/axis_perm metadata.  Goes away in
-  // Phase C along with the rest of KProgOp -- this is transitional
-  // plumbing.  Default 0 = "not populated" (fail gracefully -- caller
-  // bails to the legacy rngs_ctx_* path).
+  // Back-pointer to the originating UOp DAG Term.  Set by visit()
+  // in materialize.c at the moment each KProgOp slot is emitted;
+  // consumed by rangeify when calling `uop_resolve_movement_chain`
+  // so the per-USE INDEX resolver can walk the original UOp chain
+  // instead of the per-op metadata.  Default 0 = "not populated".
   Term  source_uop;
 } KProgOp;
 
-// === scalar UOp lowering (Phase A of scalar_uops_lowering.md) ===
+// === scalar UOp lowering ===
 // Tinygrad-style scalar-level UOps for the new schedule lowering
 // pass.  Each ScalarUop is one node in a per-kernel scalar-level
 // dataflow graph: explicit RANGE iterators, INDEX pointer arith,
@@ -688,7 +678,7 @@ typedef enum {
   // Loop iterators + memory addressing.
   S_RANGE,         // extra = (axis_type << 32) | extent
                    //   axis_type: 0 = LOOP (default), 1 = REDUCE,
-                   //              2 = UNROLL (Phase F), 3 = GLOBAL (Phase F)
+                   //              2 = UNROLL (fallback prep), 3 = GLOBAL (fallback prep)
                    //   src: none (RANGE is a leaf).
   S_DEFINE_PARAM,  // extra = input slot index into ke->input_*.  Leaf
                    //   that names a buffer pointer for INDEX/LOAD/STORE.
@@ -855,7 +845,7 @@ typedef struct {
 // may instead seed a TILE_MMA root for recognized matmul programs.
 // Dispatch consumes tile_uops only on opt-in tile paths; default
 // execution still follows the scalar/KProgOp routes.
-// Phase D1: memory scope constants.  Used by TILE_AXIS.memory_scope,
+// Memory memory scope constants.  Used by TILE_AXIS.memory_scope,
 // TILE_LOCAL_ALLOC.scope, and TILE_BARRIER.scope.  Default 0 = global
 // (device memory) so legacy zero-valued packings still mean
 // "no special placement".
@@ -864,7 +854,7 @@ typedef struct {
 #define TILE_MEM_LOCAL     2   // per-thread (Metal: `thread`)
 #define TILE_MEM_REGISTER  3   // explicit register
 
-// Phase D1: TILE_AXIS carries memory-scope + vector-width annotations
+// Memory TILE_AXIS carries memory-scope + vector-width annotations
 // in addition to the legacy (kax_type, extent) packing.  Both are
 // zero-valued today (= use the existing default behavior); D2/D3
 // callers populate them when emitting threadgroup/shared-memory
@@ -919,20 +909,20 @@ typedef enum {
   TILE_MMA,         // src = M/N/K TILE_AXIS nodes, extra = input slots + flags
   TILE_BLOCK,       // ordered list: src[0..src_count-1] are executed in order;
                     // the block's value is the LAST src's value (typically a
-                    // TILE_LOAD or TILE_SCALAR_BODY).  Phase D3 uses this to
+                    // TILE_LOAD or TILE_SCALAR_BODY).  The reduce-broadcast lowering uses this to
                     // hold the canonical reduce-broadcast preamble:
                     //   TILE_BLOCK(alloc, reduce-into-alloc, barrier, load,
                     //              post-reduce body)
-  TILE_CONV2D,      // Phase D4: specialised conv2d-flat node.  Mirrors
+  TILE_CONV2D,      // Specialised compute -- specialised conv2d-flat node.  Mirrors
                     // TILE_MMA: src = output / weights / input TILE_AXIS
                     // descriptors, extra packs (input_slot, weight_slot,
                     // bias_slot, k_h, k_w, stride_h, stride_w, ...).
                     // Renderer emits the conv2d_flat MSL kernel template.
-  TILE_INPUT_BUF,   // Phase F: kernel input buffer reference.  extra =
+  TILE_INPUT_BUF,   // Renderer prep: kernel input buffer reference.  extra =
                     // input slot id; dtype carries the element type.
                     // Used as src[0] of TILE_LOAD for global-memory
                     // reads (parallel to TILE_LOCAL_ALLOC for shared).
-  TILE_OUTPUT_BUF,  // Phase F: kernel output buffer reference.  extra =
+  TILE_OUTPUT_BUF,  // Renderer prep: kernel output buffer reference.  extra =
                     // output slot id (0 = primary, 1..n = extras for
                     // multi-output kernels).  Used by future TILE_STORE
                     // shapes that need explicit output binding.
@@ -1038,7 +1028,7 @@ typedef struct KernelEntry {
   // store the symbolic Term value here.  kernel_fire_by_id resolves
   // each non-zero entry through term_resolve before reading buffers.
   Term     *input_terms;
-  // Phase 2 follow-up (rangeify rerouting prep): per-input-slot
+  // per-input-slot
   // bufferize source-buffer id.  visit() populates this whenever
   // the input slot was created for another realized boundary, so
   // rangeify and other consumers can call bufferize_edge_summary
@@ -1057,7 +1047,7 @@ typedef struct KernelEntry {
   u32       output_dtype;
   Shape     output_shape;
   u32       output_numel;
-  // Multi-output kernel infrastructure (Phase 5+ groundwork).
+  // Multi-output kernel infrastructure ().
   // n_extra_outputs == 0 for the legacy single-output path; output
   // index 0 maps to output_tid above, indices 1..n_extra_outputs
   // map to the extras arrays below.  Total outputs in the kernel
@@ -1119,7 +1109,7 @@ typedef struct KernelEntry {
                                    // Bumped per top-level interact_kernel.
   void     *compiled;              // backend-specific; NULL for interpreter
 
-  // Axis-typed scheduling plan.  Phase 16 per-program-shape
+  // Axis-typed scheduling plan.  Per-program-shape
   // sharing: `axes` is a POINTER, normally aimed at the
   // KernelAxes embedded in this kernel's kernel_program_cache
   // slot so every kid with the same KProgOp[] sees the same opts.
@@ -1133,7 +1123,7 @@ typedef struct KernelEntry {
   KernelAxes  *axes;
   KernelAxes   _local_axes;
 
-  // Scalar-UOp lowering snapshot (Phase A of scalar_uops_lowering.md).
+  // Scalar-UOp lowering snapshot.
   // NULL when the kernel was emitted via the legacy per-tensor-UOp
   // visit() path; non-NULL when rangeify lowered it.  Slot 0 is the
   // S_NONE sentinel; live ops occupy [1, n_scalar_uops).
@@ -1457,7 +1447,7 @@ fn Term term_resolve(Term t);
 // realize-rewrite rules, and finalises the bufferize graph.
 // UOpInfo / BUFFERIZE_NODES is the dense per-walked-UOp table that
 // the classifier populates; materialize.c still walks it directly
-// (Phase 3 of docs/plans/bufferize.md will fold it into BBufferize).
+// 
 #define BUFFERIZE_NODES_CAP 16384
 typedef struct {
   u64 loc;
@@ -1502,7 +1492,7 @@ typedef struct {
   u8  realized;        // 1 = currently realized, 0 = removed by a rule
   char const *removed_by; // name of the rule that cleared realized; NULL otherwise
   char const *added_by;   // name of the rule that introduced this buffer; NULL if seeded
-  // Phase 4 cost-model inputs (populated by bufferize_finalize_stores).
+  // Cost-model inputs (populated by bufferize_finalize_stores).
   // recompute_ops counts the pure UOps in this buffer's producer
   // subtree (constants and loads excluded; reduces stop the walk).
   // output_numel is the element count of the buffer's value shape;
@@ -1510,7 +1500,7 @@ typedef struct {
   // recompute_total is recompute_ops * max(consumer_count, 1) -- a
   // first-cut estimate of the work multiplier if this buffer were
   // removed and every consumer recomputed it independently.
-  // Phase 5: subtree_has_reduce is 1 iff the producer subtree
+  // subtree_has_reduce is 1 iff the producer subtree
   // contains a REDUCE (the buffer's own op being REDUCE counts);
   // future reduce-aware rules use it to gate recompute removals
   // because reductions amplify recompute cost.
@@ -1518,7 +1508,7 @@ typedef struct {
   u64 output_numel;
   u64 recompute_total;
   u8  subtree_has_reduce;
-  // Phase 5 reduce metadata.  Populated only when this buffer's
+  // Reduce metadata.  Populated only when this buffer's
   // op is UOP_REDUCE; otherwise all three fields stay 0.
   //   reduce_kind  : REDUCE_SUM / REDUCE_MAX / ... (the kind cell)
   //   reduce_axis  : axis being reduced (post-rewrite collapsed)
@@ -1528,7 +1518,7 @@ typedef struct {
   u8  reduce_kind;
   u8  reduce_axis;
   u32 reduce_axis_size;
-  // Phase 6 lifetime fields (populated by bufferize_finalize_stores):
+  // Lifetime fields (populated by bufferize_finalize_stores):
   // lifetime_start is this buffer's topological depth (1 for
   // buffers with no producer-buffer source); lifetime_end is the
   // max depth among its consumer buffers (== lifetime_start for
@@ -1545,13 +1535,13 @@ typedef struct {
 } BStore;
 // B_INDEX records one producer-buffer to consumer-buffer edge with
 // the movement-op chain that sits between them in the consumer's
-// compute tree.  Phase 2 stops at producer buffers and skips leaf
+// compute tree.  Stops at producer buffers and skips leaf
 // (TEN/VAR) inputs; later phases will add leaf edges and the full
 // edge-local index expression / valid mask once rangeify consumes
 // them.  has_* flags are independent: a chain can have multiple
 // movement ops of different kinds.
 //
-// Phase 2 follow-up: each chain entry now carries enough per-op
+// Each chain entry now carries enough per-op
 // data (op, src_dims, out_dims) for rangeify to drive RngsCtx
 // from the bufferize edge graph.  Pad widths, axis permutations,
 // and flip masks are deferred to a later iteration; for now their
@@ -1612,7 +1602,7 @@ fn u32               bufferize_indexes_for_consumer(u32 consumer_buffer_id,
 // returning the count and writing up to `cap` indices into `out`.
 fn u32               bufferize_indexes_for_source(u32 source_buffer_id,
                                                   u32 *out, u32 cap);
-// Phase 2 hookup: look up the first B_INDEX edge for the
+// Look up the first B_INDEX edge for the
 // (consumer_loc -> source_loc) pair and copy its chain summary into
 // `out`.  Returns 1 if an edge was found, 0 otherwise.  Both locs
 // must be heap locs of B_BUFFERIZEs.  Future rangeify and
@@ -1620,7 +1610,7 @@ fn u32               bufferize_indexes_for_source(u32 source_buffer_id,
 // edge-local context instead of recovering it from the heap walk.
 fn int               bufferize_edge_summary(u64 consumer_loc, u64 source_loc,
                                             BIndex *out);
-// Phase 3: named edge rewrite rules.  Each kind of movement op
+// Named edge rewrite rules.  Each kind of movement op
 // becomes one rule that "fires" once per B_INDEX edge carrying
 // that op flag.  Hit counts are populated by bufferize_finalize_stores
 // and surfaced through these accessors so DUMP_BUFFERIZE can show
@@ -1629,7 +1619,7 @@ fn u32               bufferize_index_rule_count(void);
 fn char const       *bufferize_index_rule_name(u32 i);
 fn u32               bufferize_index_rule_hits_at(u32 i);
 fn u32               bufferize_index_rule_hits(char const *name);
-// Phase 3 edge transform: number of identity reshape ops elided
+// Edge transform: number of identity reshape ops elided
 // from B_INDEX chains during the most recent realize_classify
 // pass.  Each elision drops one chain entry whose
 // src_dims == out_dims and decrements the edge's
@@ -1637,14 +1627,14 @@ fn u32               bufferize_index_rule_hits(char const *name);
 // gauge how much trivial folding the bufferize graph absorbed.
 fn u32               bufferize_identity_reshape_elision_hits(void);
 
-// Phase 4: removal-candidate score.  Higher score = more attractive
+// Removal-candidate score.  Higher score = more attractive
 // removal (single-use, small recompute budget).  The score is a
 // first-cut heuristic; future cost-model rules will refine it.
 // Returns 0 for unknown buffer ids and for buffers whose score was
 // not computed (non-realized or no shape).
 fn u64               bufferize_removal_score(u32 buffer_id);
 
-// Phase 6: lifetime accessors for memory-planning callers.  Returns
+// Lifetime accessors for memory-planning callers.  Returns
 // 1 on success and writes the start/end topological depths through
 // the out pointers; returns 0 for unknown or non-realized buffers
 // and leaves the outputs unchanged.  Depth 1 is the leaf-most
@@ -1653,7 +1643,7 @@ fn int               bufferize_buffer_lifetime(u32 buffer_id,
                                                u32 *lifetime_start,
                                                u32 *lifetime_end);
 
-// Phase 7: deterministic schedule key over the post-rewrite
+// Deterministic schedule key over the post-rewrite
 // bufferize graph.  Hash mixes each realized buffer's
 // (op, reasons, recompute_ops, output_numel) and each B_INDEX
 // (source, consumer, chain flags) -- fields that depend on the
@@ -1661,7 +1651,7 @@ fn int               bufferize_buffer_lifetime(u32 buffer_id,
 // across runs that produce the same schedule.  Autotune uses this
 // to look up cached decisions per (graph, schedule) pair.
 fn u64               bufferize_schedule_key(void);
-// Phase 7 aggregates: sum of output_bytes across realized buffers,
+// Aggregates: sum of output_bytes across realized buffers,
 // max lifetime_end (the highest topological depth reached), and
 // sum of recompute_ops across realized buffers.  These give
 // autotune one-number summaries to pre-filter schedule candidates
@@ -1677,7 +1667,7 @@ fn u64               bufferize_total_recompute_ops(void);
 fn u32  materialize_boundary_count(void);
 fn u64  materialize_boundary_at(u32 i);
 // Depth + last-use lookup for the i-th boundary in BOUNDARY_ORDER.
-// Returns 0 when the boundary index is out of range.  Phase 6
+// Returns 0 when the boundary index is out of range.
 // validation: these should agree with bufferize's lifetime_start
 // and lifetime_end for the same loc, since both are computed from
 // the same edge structure (just at different times in the
@@ -1697,7 +1687,7 @@ fn u32  materialize_boundary_last_use_at(u32 i);
 fn u32  materialize_kernel_merge_candidate_count(void);
 fn u32  materialize_kernel_merge_into(u32 bi);
 
-// Phase 2 follow-up: per-input-slot bufferize source id read from a
+// Per-input-slot bufferize source id read from a
 // materialized KernelEntry.  Returns the 1-based buffer id stored
 // during visit() (0 when the slot's source is a leaf or was not
 // resolvable to a bufferize buffer).  Pass `kid = 0` to query the
@@ -1706,7 +1696,7 @@ fn u32  materialize_kernel_merge_into(u32 bi);
 // for that slot via bufferize_edge_summary, looking up the
 // consumer loc from the kernel's source_uop.
 fn u32  kernel_entry_input_source_buffer_id(u32 kid, u32 slot);
-// Multi-output kernel accessors (Phase 5+ groundwork).  Output
+// Multi-output kernel accessors ().  Output
 // index 0 reads from the legacy `output_tid` family, indices
 // 1..n_extra_outputs from the extras arrays.  `kernel_entry_output_count`
 // returns 1 + n_extra_outputs.  Returns 0 / sentinels for invalid
@@ -1730,7 +1720,7 @@ fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
 fn int  kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
                                    BIndex *out);
 
-// Phase 2 follow-up: map a movement-op KProgOp at (kid, prog_idx) to
+// Map a movement-op KProgOp at (kid, prog_idx) to
 // the corresponding BIndexChainOp on the originating B_INDEX edge.
 // Returns 1 and copies the chain entry into *out when:
 //   - prog_idx is in range,
@@ -1823,12 +1813,12 @@ fn u32  rangeify_emit_binary(struct KernelEntry *ke, u8 op, u32 dtype, u32 a, u3
 // Free the per-kernel scalar arena.  Called from kernel_free_arrays.
 fn void rangeify_free(struct KernelEntry *ke);
 
-// Phase B3 instrumentation: per-process counters for the address-
+// Instrumentation: per-process counters for the address-
 // build paths in emit_addr_from_rngs_uop_preferred.
 fn u64 rangeify_uop_path_hits(void);
 fn u64 rangeify_uop_fallback_hits(void);
 
-// === UOp -> ScalarUop translator (Phase B3 wedge) ===
+// === UOp -> ScalarUop translator ===
 // Translate a UOp INDEX-expression Term into the equivalent ScalarUop
 // slot id in `ke`'s arena.  Caller provides a UopRangeMap[] table
 // mapping UOP_RANGE Terms to existing S_RANGE slot ids.
@@ -1852,7 +1842,7 @@ fn u32  rangeify_dce(struct KernelEntry *ke);
 // introspection / debug printing.
 fn const char *scalar_op_name (u8 op);
 fn const char *scalar_axis_name(u32 axis_type);
-// Phase B: try to lower a fully-emitted KernelEntry's KProgOp[] to
+// Try to lower a fully-emitted KernelEntry's KProgOp[] to
 // the scalar form.  Returns 1 on success (ke->scalar_uops populated;
 // caller can dispatch through the scalar path) and 0 on bail.
 fn int  rangeify_try_lower_elementwise(struct KernelEntry *ke);
@@ -1882,7 +1872,7 @@ fn void tile_dump_node(struct KernelEntry const *ke, u32 id,
                        FILE *fp, u32 depth);
 fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
 
-// Phase F prep: emit a pseudo-MSL skeleton from the tile_uops graph.
+// Emit a pseudo-MSL skeleton from the tile_uops graph.
 // Walks TILE_LOOP_NEST -> TILE_STORE -> TILE_BLOCK -> TILE_REDUCE/
 // TILE_LOAD/TILE_BARRIER/TILE_LOCAL_ALLOC/TILE_SCALAR_BODY/TILE_AXIS
 // and emits opening loop braces, alloc declarations, barrier calls,
@@ -1895,14 +1885,14 @@ fn void tile_render_msl_skeleton(struct KernelEntry const *ke, FILE *fp);
 // the tile-render path, or "ok" if the structure is valid.
 fn const char *tile_reject_reason(struct KernelEntry const *ke);
 
-// Phase F prep: tile-IR-native dispatch shape.  Walks tile_root's
+// Tile-IR-native dispatch shape.  Walks tile_root's
 // TILE_AXIS children and computes (groups, threads) directly from
 // kax_type + extent, without going through KernelAxes.  Returns 1 on
 // success; 0 if no tile_root, malformed axes, or GROUP_REDUCE > 256.
 fn int tile_compute_dispatch_shape(struct KernelEntry const *ke,
                                    u32 *groups_out, u32 *threads_out);
 
-// Phase E scaffolding: axis-info read helpers that go through TILE_AXIS
+// Annotation scaffolding: axis-info read helpers that go through TILE_AXIS
 // (instead of KernelAxes side channel).  As consumers migrate, these
 // become the single read path; KernelAxes deletes once the migration
 // completes.
@@ -1910,7 +1900,7 @@ fn u32  tile_anno_axis_count(struct KernelEntry const *ke);
 fn int  tile_anno_axis_at(struct KernelEntry const *ke, u32 d,
                           TileAxisInfo *out);
 // Migration helpers that fall back to KernelAxes when tile_uops
-// isn't populated.  Used by Phase E migrations of code that runs
+// isn't populated.  Used by migrations of code that runs
 // before tile_sync_from_scalar (autotune, propose).
 fn int  tile_anno_axis_or_kernelaxes(struct KernelEntry const *ke, u32 d,
                                      TileAxisInfo *out);
@@ -1924,8 +1914,8 @@ KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
 // Hash all per-axis (kax_type, extent) into the running FNV-1a state.
 // Used by cache-key generation (kernel_program_cache.c, autotune.c).
 u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
-// Phase E writer-side facade: thin wrapper over kernel_apply_opt.
-// Phase F's source-of-truth flip switches this to mutate TILE_AXIS.
+// Writer-side facade: thin wrapper over kernel_apply_opt.
+// Source-of-truth flip switches this to mutate TILE_AXIS.
 int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
 // Split an axis at position d into (outer, inner) where inner takes
 // new_inner_type (KAX_LOCAL/UPCAST/UNROLL/GROUP_REDUCE).
@@ -2081,7 +2071,7 @@ fn Term uop_flip   (Term src, u32 axes_bitmask);
 fn Term uop_cast   (Term src, u32 dst_dtype);                    // value-preserving cast
 fn Term uop_bitcast(Term src, u32 dst_dtype);                    // same-itemsize reinterpret
 
-// === Symbolic INDEX layer (Phase B0) ===
+// === Symbolic INDEX layer ===
 // Constructors for UOP_RANGE / UOP_INDEX_E / UOP_I* / UOP_IWHERE / UOP_INVALID.
 // Hash-cons via uop_mov_cache like the movement opcodes.
 fn Term uop_range    (u32 axis_id, u32 axis_type, u32 extent);
@@ -2090,7 +2080,7 @@ fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IM
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
 
-// === Buffer leaf (Phase D'1) ===
+// === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
 // uop_mov_cache: identical (scope, dtype, ndim, dims) tuples share heap
@@ -2112,7 +2102,7 @@ fn u32  uop_buffer_ndim (Term t);
 fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
 fn u32  uop_buffer_instance(Term t);
 
-// === Store + After (Phase D'2) ===
+// === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
 // `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).
 fn Term uop_store(Term buf, Term addr, Term value);
@@ -2131,7 +2121,7 @@ fn Term uop_after(Term node, Term after_node);
 fn Term uop_after_node      (Term t);
 fn Term uop_after_after_node(Term t);
 
-// === Opt annotation (Phase D'4) ===
+// === Opt annotation ===
 // Attach an optimisation directive (UOP_OPT_UNROLL, UPCAST, TC,
 // LOCAL, GROUP_REDUCE) to `target`.  `factor` is 0 when the kind
 // carries no scalar (TC, LOCAL).  Hash-cons by (target, kind, factor).
@@ -2141,10 +2131,10 @@ fn Term uop_opt_target(Term t);   // 0 on tag mismatch
 fn u32  uop_opt_kind  (Term t);
 fn u32  uop_opt_factor(Term t);
 
-// === Kernel lift to UOp DAG (Phase C wedge) ===
+// === Kernel lift to UOp DAG ===
 // Translate a fully-scheduled kernel's ScalarUop arena to a UOp DAG
 // root suitable for cg_render_uop_kernel.  Bridges the migration
-// period between today's scalar_uops[] and Phase C's compute_root.
+// bridge between scalar_uops[] and the renderer.
 //
 // KERNEL_LIFT_MAX_INPUT bounds the in_bufs[] inline array for stack
 // safety -- KERNEL_MAX_INPUT (1M) is a sanity cap, not a typical
@@ -2161,8 +2151,8 @@ typedef struct {
 fn int kernel_lift_to_uop(struct KernelEntry const *ke,
                           KernelUopLift *out);
 
-// Phase F shadow-render counters.  Track how many scheduled kernels
-// lift cleanly to UOp DAG (concrete signal for the Phase F primary-
+// Shadow-render counters.  Track how many scheduled kernels
+// lift cleanly to UOp DAG 
 // path flip readiness).  Reset by thvm_init / thvm_free.
 fn u64  kernel_lift_attempts(void);
 fn u64  kernel_lift_successes(void);
@@ -2173,9 +2163,9 @@ fn void kernel_lift_count_attempt(void);
 fn void kernel_lift_count_success(void);
 fn void kernel_lift_count_compile(int ok);
 
-// === UOp DAG renderer (Phase F0) ===
+// === UOp DAG renderer ===
 // Walks the UOp DAG rooted at `root` and emits pseudo-MSL.  Replaces
-// the in-tree TileUop[] skeleton renderer (deleted in Phase G).
+// the kernel-output store walker.
 //
 // `root` is typically a UOP_STORE (single-store kernel) or a chain
 // of UOP_AFTER nodes (multi-store kernel).  `out_buf` and `in_bufs`
@@ -2185,12 +2175,12 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
                              Term out_buf, Term const *in_bufs,
                              u32 n_inputs, FILE *fp);
 
-// === Per-USE movement-chain resolver (Phase B1) ===
+// === Per-USE movement-chain resolver ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
 // outside-in, transforming `iters[ndim_io]` to the iter context the
 // bottom buffer expects.  Returns the bottom term (non-movement).
 // Returns 0 on shape mismatch so callers can bail.  Per-USE caller
-// (rangeify, Phase B3) builds the final UOP_INDEX_E from the
+// builds the final UOP_INDEX_E from the
 // resolved iters + bottom buffer shape.
 //
 // `valid_mask_io` accumulates PAD bounds-check expressions (IAND'd
@@ -2232,8 +2222,8 @@ fn Term uop_graph_simplify_checked(Term root, u32 env_id);
 fn Term uop_graph_simplify_materialize(Term root, u32 env_id);
 
 // === scalar UOp simplification harness (src/scalar/simplify.c) ===
-// Bottom-up rewrite pass over the per-kernel ScalarUop[] arena.  Phase 2
-// of the tinygrad rule port -- the driver lives here; Phase 3 lands the
+// Bottom-up rewrite pass over the per-kernel ScalarUop[] arena.   
+// of the tinygrad rule port; the driver lives here.  The
 // divandmod rules.  Mirrors the `uop_graph_rewrite` shape but operates
 // on flat slot ids rather than heap-resident TAG_UOP DAGs.
 //
@@ -2258,7 +2248,7 @@ fn char const *scalar_simplify_stat_name(u32 i);
 fn u32  scalar_simplify_stat_hits_at(u32 i);
 fn u32  scalar_simplify_stat_hits(char const *name);
 fn void scalar_simplify_stats_print(void);
-// Phase 3 divandmod rule table (port of tinygrad/uop/divandmod.py).
+// Divandmod rule table (port of tinygrad/uop/divandmod.py).
 // Pass `user = ke` to `scalar_simplify_apply` so rules can allocate
 // new arena nodes via rangeify_emit_*.
 fn ScalarSimplifyRule const *scalar_simplify_divandmod_rules(u32 *n_out);
@@ -3126,7 +3116,7 @@ fn KProgOp *kernel_program_cache_lookup(KProgOp const *prog, u32 n_ops,
 fn KProgOp *kernel_program_cache_insert(KProgOp const *prog, u32 n_ops);
 fn u32      kernel_program_cache_size(void);
 
-// Slot-bearing variants used by Phase 16 per-program-shape opt
+// Slot-bearing variants used by Per-shape per-program-shape opt
 // sharing: materialize parks `&slot->axes` into KernelEntry.axes
 // so every kid emitted with the same KProgOp[] reads/writes the
 // same KernelAxes.  Apply once -> propagates to all sharing kids;

@@ -9,8 +9,8 @@
 //     wide as max(src, dst) and same kind family
 //   CAST(CONST(bits, src_dt), dst_dt) -> CONST(reinterpreted_bits, dst_dt)
 //
-// More aggressive folds land in src/uop/rewrite_cast.c (Phase E
-// follow-up); the constructor itself stays small.
+// More aggressive folds may land in src/uop/rewrite_cast.c later;
+// the constructor itself stays small.
 
 fn Term uop_cast(Term src, u32 dst_dtype) {
   // Identity: cast to the term's existing dtype is a no-op.

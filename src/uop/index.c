@@ -1,18 +1,15 @@
-// uop/index.c - constructors for the symbolic INDEX layer (Phase B0).
+// uop/index.c - constructors for the symbolic INDEX layer.
 //
 // These give the UOp DAG a representation for symbolic addresses
 // (per-axis ranges, integer arithmetic, conditional WHERE, INVALID
 // sentinel for PAD masks, and INDEX_E nodes that pair a buffer with
-// a symbolic offset expression).  The opcodes mirror the ScalarUop
-// S_* layer one-for-one so rangeify (Phase B3) can consume the UOp
-// graph directly and emit the matching scalar form without translating
-// across IR boundaries.
+// a symbolic offset expression).
 //
 // All constructors hash-cons via uop_mov_cache so identical
-// subexpressions share heap loc.  Movement-to-INDEX rules (Phase B1)
-// build large symbolic trees that recur across consumers; sharing
-// keeps the DAG compact and lets the symbolic simplifier (Phase B2)
-// rewrite once per shape.
+// subexpressions share heap loc.  Movement-to-INDEX rules build
+// large symbolic trees that recur across consumers; sharing keeps
+// the DAG compact and lets the symbolic simplifier rewrite once
+// per shape.
 
 // === UOP_RANGE: axis-iter leaf ===
 //
@@ -54,7 +51,7 @@ fn Term uop_index_e(Term buffer, Term addr) {
 
 // === UOP_I{ADD,SUB,MUL,DIV,MOD,LT,AND}: integer binary ===
 //
-// Phase B2's `uop_simplify_int_binary` runs first to fold identity /
+// `uop_simplify_int_binary` runs first to fold identity /
 // annihilator / constant cases.  Hash-cons applies to the unfolded
 // form so distinct shape-different chains still dedup at construction.
 
