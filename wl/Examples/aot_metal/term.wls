@@ -1,0 +1,93 @@
+#!/usr/bin/env wolframscript
+(* term.wls -- AOT-on-Metal walk-through.
+
+   Run via:  wolframscript -f wl/Examples/aot_metal/term.wls
+
+   Demonstrates the three Method backends end-to-end: define a few
+   functions, run each via Metal, single-thread CPU, and worker-pool
+   CPU.  Verify they all produce the same answer.  Time the hot
+   path so users can see where Metal wins (or loses).
+
+   This file is illustrative -- the wlt regression suite at
+   wl/THVMLink/Tests/aot_metal.wlt is the source of truth for
+   correctness.  See docs/aot_metal.md for the manual.
+*)
+
+PacletDirectoryLoad["wl/THVMLink"];
+Get["THVMLink`"];
+
+print[args___] := WriteString["stdout", Row[{args}], "\n"];
+println[]      := WriteString["stdout", "\n"];
+formatUs[t_]   := ToString[N[t*1000000, 4]] <> "us";
+
+TInit[];
+
+(* === Define some functions === *)
+
+print["Defining add2, mul_then_add, classify..."];
+TDef["add2",         TLam[a, TLam[b, TOp2["+", a, b]]]];
+TDef["mul_then_add", TLam[a, TLam[b, TLam[c,
+  TOp2["+", TOp2["*", a, b], c]]]]];
+TDef["classify",     TLam[n, TMatChain[
+  <|0 -> TNum[42], 1 -> TNum[99], 2 -> TNum[7]|>,
+  TNum[0]][n]]];
+println[];
+
+(* === Cross-backend evaluation === *)
+
+print["=== add2(7, 11) ==="];
+print["  Metal:                          ",
+  TTermVal @ TAOTRun["add2", {TNum[7], TNum[11]},
+                     Method -> "Metal"]];
+print["  CPU (single-thread):            ",
+  TTermVal @ TAOTRun["add2", {TNum[7], TNum[11]},
+                     Method -> "CPU"]];
+print["  CPU pool (NumThreads -> 4):     ",
+  TTermVal @ TAOTRun["add2", {TNum[7], TNum[11]},
+                     Method -> {"CPU", "NumThreads" -> 4}]];
+println[];
+
+print["=== mul_then_add(5, 6, 7) === (= 5*6+7 = 37)"];
+print["  Metal:                          ",
+  TTermVal @ TAOTRun["mul_then_add", {TNum[5], TNum[6], TNum[7]},
+                     Method -> "Metal"]];
+print["  CPU:                            ",
+  TTermVal @ TAOTRun["mul_then_add", {TNum[5], TNum[6], TNum[7]},
+                     Method -> "CPU"]];
+println[];
+
+print["=== classify(0..2, 99) ==="];
+Do[
+  print["  classify(", k, ")  Metal -> ",
+        TTermVal @ TAOTRun["classify", {TNum[k]},
+                           Method -> "Metal"],
+        "  CPU -> ",
+        TTermVal @ TAOTRun["classify", {TNum[k]},
+                           Method -> "CPU"]],
+  {k, {0, 1, 2, 99}}];
+println[];
+
+(* === Hot-path timing comparison === *)
+
+print["=== Hot-path timing (100 runs, caches warm) ==="];
+metalArgs = {TNum[7], TNum[11]};
+
+(* Warm caches *)
+Do[ TAOTRun["add2", metalArgs, Method -> "Metal"], {3} ];
+Do[ TAOTRun["add2", metalArgs, Method -> "CPU"],   {3} ];
+
+tMetal = First @ AbsoluteTiming[
+    Do[ TAOTRun["add2", metalArgs, Method -> "Metal"], {100} ];];
+tCpu   = First @ AbsoluteTiming[
+    Do[ TAOTRun["add2", metalArgs, Method -> "CPU"],   {100} ];];
+
+print["  100x add2 via Metal:  ", formatUs[tMetal],
+      "  (avg ", formatUs[tMetal/100], "/call)"];
+print["  100x add2 via CPU:    ", formatUs[tCpu],
+      "  (avg ", formatUs[tCpu/100], "/call)"];
+print["  Metal/CPU ratio:      ~", N[tMetal/tCpu, 3], "x"];
+println[];
+
+print["For tiny defs Metal is dominated by ~190 us kernel-launch"];
+print["overhead.  GPU wins when you batch many independent reductions"];
+print["per launch -- see aot_eval_op2_fold_batch in the C tests."];
