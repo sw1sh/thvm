@@ -40,7 +40,7 @@
 
 BeginPackage["THVMLink`"];
 
-TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.";
+TFromNet::usage         = "TFromNet[net, x] converts a Wolfram NeuralNetworks layer (or NetChain / NetGraph) into a TTerm UOp graph rooted at the input TTerm `x`.  The net must be initialised so its weights are concrete arrays.\n\nTFromNet[net] (no input arg) infers the input shape from the net's InputPorts and returns a TLam whose bound variable carries that shape annotation.  The result is a TTerm of TAG=LAM that can be TApp'd to a tensor or driven through TRealize/TGrad/etc.";
 TFromLayer::usage       = "TFromLayer[layer, x] is the single-layer form of TFromNet.";
 TLayerWeights::usage    = "TLayerWeights[layer] returns the NumericArrays of every learnable parameter a layer carries (Weights, Biases, ...), in the layer-specific declaration order.";
 TLayerToTensors::usage  = "TLayerToTensors[layer] is the same as TLayerWeights but each NumericArray is wrapped in a fresh TTensorCreate handle so it can feed back into a UOp graph.";
@@ -1048,8 +1048,37 @@ TFromNet[chain_NetChain, x_TTerm] := Fold[
 
 TFromNet[layer_, x_TTerm] := TFromLayer[layer, x]
 
+(* netInputShape[net]: returns the input port shape as a List of
+   integers, or $Failed if the net has zero or multiple input ports
+   or the port shape is symbolic / unspecified.  LinearLayer's
+   "Input -> 4" reports as the bare integer 4; wrap as {4}. *)
+netInputShape[net_] := Module[{ports, raw},
+    ports = Quiet @ Information[net, "InputPorts"];
+    If[!AssociationQ[ports] || Length[ports] =!= 1, Return[$Failed]];
+    raw = First[Values[ports]];
+    Which[
+        IntegerQ[raw],            {raw},
+        VectorQ[raw, IntegerQ],   List @@ raw,
+        True,                      $Failed
+    ]
+]
+
+(* TFromNet[net]: no input argument -- builds a TLam whose bound
+   variable carries the net's input shape, body = TFromNet[net, x].
+   Returns $Failed (with TFromNet::noinput) if the input shape can't
+   be inferred.  TLamShape is HoldAll, so we substitute the shape
+   list in via With so the `_List` pattern matches before the body
+   captures `x`. *)
+TFromNet[net_] := With[{shape = netInputShape[net]},
+    If[shape === $Failed,
+        Message[TFromNet::noinput, net]; $Failed,
+        Module[{x}, TLamShape[shape, x, TFromNet[net, x]]]
+    ]
+]
+
 TFromNet::eltunsupported = "ElementwiseLayer with function `1` has no UOp equivalent yet (interact_grad would need a corresponding grad rule).";
 TFromNet::convtbd        = "ConvolutionLayer conversion not yet implemented (`1`).  Step 14 task: needs movement-op support in materialize/interpret + the matching grad rules.";
+TFromNet::noinput        = "TFromNet[`1`]: cannot infer input shape from the net's InputPorts.  Provide an explicit input via TFromNet[net, x] or supply a net with a single concrete-shape input port.";
 
 End[];
 
