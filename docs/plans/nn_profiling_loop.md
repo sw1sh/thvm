@@ -294,12 +294,19 @@ every minute.
 
   **Implementation order**:
 
-- [ ] Phase 1: lift the `has_reduce_axis` short-circuit in
-  `kernel_lift_to_uop` for *non-split* reduce kernels (n_applied=0,
-  n_axes==n_buf).  This is just removing the `kax = NULL` line
-  in the simple case; the existing lifter already produces a single
-  RANGE per reduce axis correctly.  Smoke-test with a TUOpReduce
-  kernel under THVM_TILE=1; should not regress make test.
+- [x] (2026-05-06) Phase 1: lift the `has_reduce_axis` short-circuit
+  in `kernel_lift_to_uop` for *non-split* reduce kernels.
+  Investigated and **the existing guard is already correct** for
+  non-applied-opt reduce kernels: when `n_applied=0`, branch 1
+  (replay loop) is a no-op anyway, and the `kax = NULL` line only
+  prevents branch 2 (test-seam) from misfiring.  For a reduce
+  kernel with `n_axes=2 (LOOP+REDUCE)` and `n_buf=1`, the test-seam
+  would otherwise treat both axes as contributing to origin 0,
+  producing a broken address.  Smoke-test: `TUOpReduce[Range[12], 0,
+  "SUM"]` under `THVM_BACKEND=metal THVM_TILE=1` produces the
+  correct `78.0` result via metal-tile dispatch with a clean
+  rendered MSL (single accumulator, single reduce-axis for-loop).
+  No code change needed; the guard already does what Phase 1 wants.
 - [ ] Phase 2: extend `SplitAxis` to track whether an axis is a
   reduce axis (carry KAX_REDUCE through the replay).  When a
   GROUP/GROUPTOP split fires on a REDUCE axis, mark the inner
