@@ -4811,3 +4811,59 @@ produces correct results before flipping default.
   scaffold for the next step; helper is currently a no-op without
   the matching view migration.
 
+### Level 53: locate the View construction for standalone fc1
+
+To choose between path A (shader rewrite) and path B (view
+migration), first understand how the WORKING case (standalone
+fc1 matmul) ends up with a 3D `[M, K, N]` View with stride-0
+broadcast.  If the construction is generic, path B is a 5-line
+view-wrapping change at visit().  If it requires whole-graph
+analysis (rangeify-style), path A might be cheaper.
+
+- [x] (2026-05-07) Read-only investigation: traced `visit()`
+  movement-op handling at `src/schedule/materialize.c:1754-1766`
+  and `view_resolve()` at `src/schedule/materialize.c:1229`.
+
+  The fold-into-view path:
+
+      // visit() at L1758-1766
+      if (op_is_view_movement(op)) {
+        u32 alias_tid = view_resolve(t);
+        if (alias_tid != 0) {
+          // SUCCESS: register input slot with composed View
+          u32 slot = input_slot_dedup(ke, alias_tid, t);
+          return KSRC_AS_INPUT(slot);
+        }
+        // FALLBACK: emit as kernel op (RESHAPE/EXPAND in program)
+      }
+
+  `view_resolve` (L1229) walks a chain bottoming out at TAG_TEN.
+  Each hop applies `view_apply_*` to compose the strides into a
+  single View.  Standalone fc1 succeeds because its input arrives
+  via `EXPAND(input_TenDesc)` -- one hop, base case TAG_TEN.
+
+  In-transformer kid 19 fails because the chain is
+  `EXPAND(RESHAPE(LN1_realized_uop))`.  view_resolve recurses into
+  `LN1_realized_uop` -- a TAG_UOP that's NOT a movement op (it's
+  an ADD or MUL from the bias-add/scale chain).  view_resolve
+  doesn't know about `BUFFERIZE_BUFS`/realized boundaries, so it
+  KEEPS recursing through the LN compute chain.  Eventually it
+  hits an ADD/MUL it can't view_apply_* and returns 0.  visit()
+  falls back to emitting RESHAPE+EXPAND as kernel program ops.
+
+  **Root cause + Level 54 fix shape**: extend `view_resolve` to
+  treat realized boundaries as base cases.  Before recursing into
+  a UOp's source, check whether `bufferize_info_find(loc)` returns
+  a node with `realized=1` -- if so, look up its TenDesc via
+  `BUFFERIZE_BUFS` and return that tid (treating it as
+  TAG_TEN-equivalent).  ~5-10 lines of code; preserves correctness
+  because the boundary IS the materialized buffer the view_apply
+  chain will read from.
+
+  Once that lands, the matmul-input-protect-extracted boundaries
+  fold their RESHAPE/EXPAND wrappers into the kernel's input View.
+  Kernel program collapses to MUL+REDUCE (n_ops=2).
+  `tile_gemm_views_ok` accepts the 3D pre-broadcast View.  Level
+  52's relaxed analyzer becomes redundant (existing strict
+  analyzer fires).  Default-on, no env-gate needed.
+
