@@ -77,6 +77,23 @@ int main(void) {
   CHECK_EQ(term_tag(result), (u64)TAG_NUM);
   CHECK_EQ(term_val(result), (u64)300);
 
+  // Iter KK: 0-arg def edge case.  `const42 = TNum[42]` -- no
+  // TLam wrapping; body is just NUM(42).  Emit produces a kernel
+  // with argc=0 and the value-fallback path wraps NUM(42).
+  TEST_BEGIN("0-arg def: const42() returns NUM(42) on Metal");
+  Term const42 = term_new(0, TAG_NUM, DT_INT32, 42);
+  u32  def_id_c = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id_c = i; break; }
+  }
+  DEFS[def_id_c] = const42;
+
+  result = thvm_aot_metal_compile_and_run(
+      "const42", def_id_c, NULL, 0,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)42);
+
   // Iter JJ: dtype preservation regression test.  Inputs carry
   // DT_INT32 (ext=5); iter HH made the kernel preserve LHS dtype
   // on result, so the output should be NUM(7, ext=DT_INT32) -- not
