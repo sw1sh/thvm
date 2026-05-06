@@ -756,163 +756,6 @@ char *cg_emit_metal(KernelEntry const *ke) {
   return rm_reduce_expr_emit(ke);
 }
 
-static int rmt_dtype_supported(u32 dtype) {
-  return dtype == DT_FP32;
-}
-
-typedef enum {
-  RMT_AXIS_UNSUPPORTED = 0,
-  RMT_AXIS_FLAT_GRID,
-  RMT_AXIS_LOCAL_GLOBAL,
-  RMT_AXIS_GROUP_REDUCE,
-} RmtAxisMode;
-
-static u64 rmt_axis_numel(CtKernelInfo const *info) {
-  u64 n = 1;
-  for (u32 i = 0; i < info->n_axes; i++) {
-    n *= info->axis_extents[i];
-  }
-  return n;
-}
-
-static RmtAxisMode rmt_axis_mode(CtKernelInfo const *info) {
-  u32 n_global = 0;
-  u32 n_local  = 0;
-  u32 n_group_reduce = 0;
-  int flat_ok = 1;
-  int nested_reduce = info->scalar.has_reduce
-                   && info->tile.scalar_reduce_id != 0
-                   && info->tile.reduce_tile_id == 0;
-  for (u32 i = 0; i < info->tile.n_axes; i++) {
-    if (info->tile.axis_types[i] == KAX_GROUP_REDUCE) {
-      n_group_reduce++;
-    }
-  }
-  for (u32 i = 0; i < info->n_axes; i++) {
-    if (info->axis_types[i] == KAX_GLOBAL) {
-      n_global++;
-    } else if (info->axis_types[i] == KAX_LOCAL) {
-      n_local++;
-    }
-    if (info->axis_types[i] != KAX_LOOP
-        && info->axis_types[i] != KAX_UPCAST) {
-      flat_ok = 0;
-    }
-  }
-  int local_global_ok = !info->scalar.has_reduce
-                     && n_global == 1
-                     && n_local == 1;
-  if (local_global_ok) {
-    for (u32 i = 0; i < info->n_axes; i++) {
-      u8 ty = info->axis_types[i];
-      if (ty != KAX_GLOBAL && ty != KAX_LOCAL
-          && ty != KAX_LOOP && ty != KAX_UPCAST) {
-        local_global_ok = 0;
-        break;
-      }
-    }
-  }
-  if (local_global_ok) {
-    return RMT_AXIS_LOCAL_GLOBAL;
-  }
-  if (info->scalar.has_reduce && n_group_reduce == 1 && flat_ok) {
-    return RMT_AXIS_GROUP_REDUCE;
-  }
-  // Phase 7-structural: allow FLAT_GRID with a nested scalar reduce.
-  // The renderer's `rmt_emit_value_with_reduce` already handles the
-  // post-reduce substitution by wrapping the reduce loop, caching the
-  // accumulator in a register, and substituting the register for the
-  // reduce node when emitting the surrounding scalar expression.
-  // Nested reduces show up post-Phase-1 when BN-mean / BN-var inlines
-  // into a consumer kernel as `MUL(REDUCE_SUM(x), CONST)` etc.
-  // Default-on; THVM_TILE_NESTED_REDUCE_FLAT_GRID=0 reverts.
-  int allow_nested_flat = 1;
-  char const *e_nest = getenv("THVM_TILE_NESTED_REDUCE_FLAT_GRID");
-  if (e_nest != NULL && e_nest[0] == '0') allow_nested_flat = 0;
-  if (flat_ok && (allow_nested_flat || !nested_reduce)) {
-    return RMT_AXIS_FLAT_GRID;
-  }
-  return RMT_AXIS_UNSUPPORTED;
-}
-
-static u32 rmt_group_reduce_extent(CtKernelInfo const *info) {
-  for (u32 i = 0; i < info->tile.n_axes; i++) {
-    if (info->tile.axis_types[i] == KAX_GROUP_REDUCE) {
-      return info->tile.axis_extents[i];
-    }
-  }
-  return 0;
-}
-
-static int rmt_scalar_op_supported(ScalarUop const *u) {
-  switch (u->op) {
-    case S_NONE:
-    case S_RANGE:
-    case S_DEFINE_PARAM:
-    case S_DEFINE_OUTPUT:
-    case S_INDEX:
-    case S_INDEX_E:
-    case S_LOAD:
-    case S_STORE:
-    case S_BUFFERIZE:
-    case S_ADD:
-    case S_MUL:
-    case S_NEG:
-    case S_RECIP:
-    case S_SQRT:
-    case S_EXP2:
-    case S_LOG2:
-    case S_CMPLT:
-    case S_CMPEQ:
-    case S_REDUCE_SUM:
-    case S_REDUCE_MAX:
-    case S_CAST:
-    case S_RESHAPE_V:
-    case S_CONST:
-    case S_ICONST:
-    case S_IADD:
-    case S_ISUB:
-    case S_IMUL:
-    case S_IDIV:
-    case S_IMOD:
-    case S_ILT:
-    case S_IAND:
-    case S_IWHERE:
-      return 1;
-    default:
-      return 0;
-  }
-}
-
-static int rmt_collect_kernel_info(KernelEntry const *ke, CtKernelInfo *out) {
-  if (ke->n_inputs > 30) {
-    return 0;
-  }
-  if (!ct_collect_kernel_info(ke, out)) {
-    return 0;
-  }
-  if (rmt_axis_mode(out) == RMT_AXIS_UNSUPPORTED) {
-    return 0;
-  }
-  if (!rmt_dtype_supported(ke->output_dtype)) {
-    return 0;
-  }
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (!rmt_dtype_supported(ke->input_dtypes[i])) {
-      return 0;
-    }
-  }
-  for (u32 i = 1; i < ke->n_scalar_uops; i++) {
-    ScalarUop const *u = &ke->scalar_uops[i];
-    if (!rmt_scalar_op_supported(u)) {
-      return 0;
-    }
-    if (cs_op_carries_kernel_dtype(u) && !rmt_dtype_supported(u->dtype)) {
-      return 0;
-    }
-  }
-  return 1;
-}
 
 static int rmt_collect_conv2d_info(KernelEntry const *ke,
                                    TileConv2DInfo *out) {
@@ -946,106 +789,32 @@ static int rmt_kprog_has_opcode(KernelEntry const *ke, u8 opcode) {
 
 int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
                                  u32 *threads_x) {
-  if (ke == NULL) {
-    return 0;
-  }
+  if (ke == NULL) return 0;
+  // Metal hardware caps buffer attributes at index 30; reject
+  // kernels that won't render (matches the renderer's reject).
+  if (ke->n_inputs > 30) return 0;
+  // Conv2D flat: dispatch (c_out * patches / outputs_per_thread)
+  // total threads divided into `threads` per group.
   TileConv2DInfo conv;
   if (rmt_collect_conv2d_info(ke, &conv)) {
     u64 total = (u64)conv.c_out * (u64)conv.patches;
-    if (total == 0 || total > 0xFFFFFFFFu) {
-      return 0;
-    }
+    if (total == 0 || total > 0xFFFFFFFFu) return 0;
     u32 outputs = conv.outputs_per_thread ? conv.outputs_per_thread : 1;
     u64 threads_total = (total + (u64)outputs - 1) / (u64)outputs;
     u32 threads = conv.threads;
     u32 groups  = (u32)((threads_total + (u64)threads - 1) / (u64)threads);
-    if (groups_x != NULL) {
-      *groups_x = groups;
-    }
-    if (threads_x != NULL) {
-      *threads_x = threads;
-    }
-    return groups != 0;
+    if (groups == 0) return 0;
+    if (groups_x  != NULL) *groups_x  = groups;
+    if (threads_x != NULL) *threads_x = threads;
+    return 1;
   }
-  if (tile_rejects_conv2d_flat_cin1(ke)) {
-    return 0;
-  }
-  if (!tile_sync_from_scalar(ke)) {
-    return 0;
-  }
-  CtKernelInfo info;
-  if (!rmt_collect_kernel_info(ke, &info)) {
-    return 0;
-  }
-  RmtAxisMode mode = rmt_axis_mode(&info);
-  u32 groups  = 1;
-  u32 threads = 1;
-  if (mode == RMT_AXIS_LOCAL_GLOBAL) {
-    u64 group_total = 1;
-    threads = 0;
-    for (u32 i = 0; i < info.n_axes; i++) {
-      if (info.axis_types[i] == KAX_GLOBAL) {
-        group_total *= info.axis_extents[i];
-      } else if (info.axis_types[i] == KAX_LOCAL) {
-        threads = info.axis_extents[i];
-      } else {
-        group_total *= info.axis_extents[i];
-      }
-    }
-    if (group_total == 0 || group_total > 0xFFFFFFFFu) {
-      return 0;
-    }
-    groups = (u32)group_total;
-  } else if (mode == RMT_AXIS_FLAT_GRID) {
-    u64 total = rmt_axis_numel(&info);
-    if (total == 0 || total > 0xFFFFFFFFu) {
-      return 0;
-    }
-    threads = total < 256 ? (u32)total : 256u;
-    groups  = (u32)((total + (u64)threads - 1) / (u64)threads);
-  } else if (mode == RMT_AXIS_GROUP_REDUCE) {
-    u64 total = rmt_axis_numel(&info);
-    u32 group = rmt_group_reduce_extent(&info);
-    if (total == 0 || total > 0xFFFFFFFFu || group == 0 || group > 256) {
-      return 0;
-    }
-    groups  = (u32)total;
-    threads = group;
-  }
-  if (groups == 0 || threads == 0) {
-    return 0;
-  }
-  // Phase F prep: optional parity check against the tile-IR-native
-  // tile_compute_dispatch_shape walker.  Gated by env var so the
-  // shadow comparison only runs when explicitly requested
-  // (THVM_DISPATCH_SHAPE_PARITY=1); reports disagreements to stderr
-  // without aborting.  Used to validate the renderer rewrite seam
-  // before flipping the dispatch path.
-  static int dispatch_parity_inited = 0;
-  static int dispatch_parity_on     = 0;
-  if (!dispatch_parity_inited) {
-    char const *e = getenv("THVM_DISPATCH_SHAPE_PARITY");
-    dispatch_parity_on    = (e != NULL && e[0] == '1');
-    dispatch_parity_inited = 1;
-  }
-  if (dispatch_parity_on) {
-    u32 tg = 0, tt = 0;
-    if (tile_compute_dispatch_shape(ke, &tg, &tt)) {
-      if (tg != groups || tt != threads) {
-        fprintf(stderr,
-                "thvm: dispatch_shape_parity mismatch -- "
-                "ct=(g=%u,t=%u) tile=(g=%u,t=%u)\n",
-                groups, threads, tg, tt);
-      }
-    }
-  }
-  if (groups_x != NULL) {
-    *groups_x = groups;
-  }
-  if (threads_x != NULL) {
-    *threads_x = threads;
-  }
-  return 1;
+  if (tile_rejects_conv2d_flat_cin1(ke)) return 0;
+  // Generic path: walk the tile_uops graph (built from the kernel's
+  // axis structure) and compute (groups, threads).  Handles
+  // FLAT_GRID / LOCAL_GLOBAL / GROUP_REDUCE modes from KAX_* axis
+  // types directly.
+  if (!tile_sync_from_scalar(ke)) return 0;
+  return tile_compute_dispatch_shape(ke, groups_x, threads_x);
 }
 
 
