@@ -3945,3 +3945,51 @@ strategy is invalidated.
 
   Next iteration: locate rangeify's kernel-extension
   decision and find where it absorbs the matmul reduce.
+
+### Level 41: locate rangeify's kernel-boundary decision
+
+- [x] (2026-05-06) Read-only investigation in
+  src/schedule/rangeify.c (and materialize.c, the actual
+  scheduler).  Find the function that decides "extend the
+  current kernel by absorbing op X" vs "start a new kernel
+  at op X".
+
+  **Bug found at [src/schedule/materialize.c:1862-1868](../../src/schedule/materialize.c#L1862)**:
+
+      int chain_inlined = 1;
+      for (u32 j = 1; j < rc.n_reduces; j++) {  // starts at j=1!
+        u32 cidx = bufferize_info_find(rc.locs[j]);
+        if (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized) {
+          chain_inlined = 0;
+          break;
+        }
+      }
+
+  The realized-check skips `rc.locs[0]` (j starts at 1).  For
+  a single-reduce chain (`rc.n_reduces == 1`), the loop never
+  runs.  `chain_inlined` stays 1, the reduce gets inlined
+  into the downstream kernel regardless of its realized bit.
+
+  **This is why BUFFERIZE_REASON_MATMUL protection (Level 37)
+  had no effect**: the matmul's REDUCE was correctly marked
+  realized in BUFFERIZE_NODES, but materialize ignored that
+  for single-reduce chains.
+
+  **Fix**: change `for (u32 j = 1; ...)` to `for (u32 j = 0;
+  ...)` so the first reduce's realized bit is checked too.
+  Or add explicit check before the loop:
+
+      if (rc.n_reduces >= 1) {
+        u32 cidx0 = bufferize_info_find(rc.locs[0]);
+        if (cidx0 != 0xFFFFFFFFu &&
+            BUFFERIZE_NODES[cidx0].realized && loc != root_loc) {
+          chain_inlined = 0;
+        }
+      }
+
+  Single-line change.  make test gate + re-bench two_linears.
+  Predicted: kid 2 splits into 2 kernels (matmul-2 separately
+  with metal-gemm dispatch + bias-add tail), wall ~700us
+  (vs current 8580us).
+
+  Next iteration lands the fix.
