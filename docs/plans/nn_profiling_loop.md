@@ -143,8 +143,36 @@ every minute.
   separate task to plumb a batch-size knob through.  Loss read
   surfaced the same `$Failed`/NaN issue as autotune.wls (script
   exits 1 on non-numeric final loss) but timing data is valid.
-- [ ] Diff dispatch-kind histogram pre-autotune vs post-autotune;
-  document gains (or no-op) in this file.
+- [x] (2026-05-06) Diff dispatch-kind histogram pre-autotune vs
+  post-autotune; document gains (or no-op) in this file.
+
+  **Forward-only (autotune.wls):**
+  | phase | total | metal-op | metal-tile |
+  |-------|-------|----------|------------|
+  | pre   | 15    | 9 (60%)  | 6 (40%)    |
+  | post  | 30    | 18 (60%) | 12 (40%)   |
+
+  Counts double because the post-tune forward kernelises both pre-
+  and post-opt cache entries.  **Proportions are identical** --
+  autotune doesn't move kernels off the per-op fallback onto the
+  tile path; it tunes whatever's already on each path.
+
+  **Train (bench-train.wls):** 1198 kernels, dispatch metal-op=778
+  (65%) / metal-tile=372 (31%) / metal-alias=48 (4%).  The 1.29x
+  end-to-end speedup comes from the metal-tile fraction (winners
+  like kid 3 LOCAL[1,8] 1.7x; kid 4 UNROLL[4,2] 1.27x).
+  metal-op kernels (conv2d / reshape / specialised) get autotune
+  effects through a different path -- the per-op interpreter walks
+  KProgOp[] without going through `kernel_lift_to_uop`, so
+  UPCAST/UNROLL/LOCAL on those kernels lands via the legacy
+  KernelAxes-driven dispatch.
+
+  Conclusion: the new autotune-via-UOP_OPT bridge in
+  `kernel_lift_to_uop` carries the LOCAL/GLOBAL/UPCAST/UNROLL
+  effects on the metal-tile path correctly (kid 3 evidence).
+  Lifting the conv2d / reshape kernels onto the tile path is the
+  next leverage point for further speedup -- they're the 65% of
+  dispatches still on metal-op.
 
 ### Autotune-via-UOP_OPT verification
 - [ ] Pick one elementwise kernel in lenet-mnist that proposes
