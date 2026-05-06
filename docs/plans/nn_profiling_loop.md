@@ -496,3 +496,31 @@ every minute.
   `lift_scalar_index` to accept a buffer-side intermediate (a
   buf-of-INDEX value), and audit the conv2d-flat path for the
   24-input case.
+
+### Lift-reject deep dive
+- [x] (2026-05-06) Enrich the `index/buf-not-DEFINE` reject
+  diagnostic to print the actual ScalarUop opcode at `bu->op`.
+  **Already done** -- inspecting `lift_reject_log` shows it's
+  called with `buf_sid` (the buffer-side scalar id), not the outer
+  S_INDEX sid, so the printed `op=S_INDEX(4)` IS the buffer side's
+  opcode.  S_INDEX's enum value in [src/thvm.h](../../src/thvm.h)
+  is 4 (after S_NONE=0, S_RANGE=1, S_DEFINE_PARAM=2,
+  S_DEFINE_OUTPUT=3, S_INDEX=4), confirming **the buffer side is
+  itself an S_INDEX**.
+
+  Conclusion: the LeNet rank-3 access pattern is `S_INDEX[
+  S_INDEX[buf, r1', r2', r3'], r1, r2, r3]` -- a re-indexing of an
+  earlier indexed access (movement-op residue: SHRINK/PAD/PERMUTE
+  composed onto an existing tensor view).  `lift_scalar_index`
+  could see-through the inner S_INDEX by composing the address
+  expressions before falling back to the strict
+  S_DEFINE_PARAM/S_DEFINE_OUTPUT check; that's the buf-of-INDEX
+  lift extension.
+
+### Lift extension follow-on
+- [ ] Implement buf-of-INDEX see-through in `lift_scalar_index`:
+  when `bu->op == S_INDEX`, recurse into `bu->src[0]` and combine
+  the inner+outer address expressions using the inner ranges'
+  semantic position.  Phase-gate behind a smoke test that runs
+  LeNet forward and verifies (a) the metal-tile share grows
+  beyond 40% and (b) numerics match the legacy path.
