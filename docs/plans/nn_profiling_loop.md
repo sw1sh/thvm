@@ -57,13 +57,37 @@ every minute.
   TFromNet[net] form can be exercised end-to-end.
 
 ### TLam regression fix (blocking the previous task)
-- [ ] Investigate why `TApp[TLam[w, TUOpAdd[w, w]], ten]` materializes
-  to `Missing[NotATensor, UOP]` instead of running the JIT-rendered
-  kernel.  Reproducer:
-  `Module[{lam, ten, res}, lam = TLam[w, TUOpAdd[w, w]];
-   ten = TTensorCreate @ NumericArray[{1.,2.,3.}, "Real32"];
-   res = TWnf[TApp[lam, ten]]; Normal @ TTensorData @ res]`.
-  Probably a regression in app_lam.c or materialize.c from Phase G.
+- [x] (2026-05-06) Investigate why `TApp[TLam[w, TUOpAdd[w, w]], ten]`
+  materializes to `Missing[NotATensor, UOP]` instead of running the
+  JIT-rendered kernel.  **Root cause located** in
+  `interact_app_lam`/`thvm_materialize` interaction:
+  - Step trace via `TStep`: `APP[LAM[UOP[ADD, DP1, DP0]], TEN[1]]
+    → UOP[ADD, DP1[65536, VAR[0]], DP0[65536, VAR[0]]]` after one
+    APP-LAM step.  Subsequent steps do NOT progress.  The VAR is
+    SUB'd to TEN by `heap_subst_var(loc, arg)` but the DP0/DP1 over
+    that VAR don't fire to produce the two tensor copies.
+  - `TMaterialize[app]` returns `APP[LAM[TEN[1]], TEN[1]]` --
+    materialize was called on the body
+    `UOP[ADD, DP1[65536, VAR[0]], DP0[65536, VAR[0]]]` BEFORE the
+    VAR was SUB'd, producing a degenerate TEN[1] (no input slot
+    bound) instead of a UOP_KERNEL with a TVAR input.
+  - Regression is older than Phase G: the same failure reproduces
+    on commit 0fa9d8e (pre-Phase-G).  Likely from earlier in the
+    bufferize / kernel-program-cache rework -- needs a wider
+    `git bisect` window to localise.
+
+### TLam regression follow-on tasks
+- [ ] Bisect `lam_shape.wlt` `tlam-jit-on-first-apply` failure
+  back to the commit that broke it; once located, design a fix in
+  `interact_app_lam` so the materialize step produces a UOP_KERNEL
+  with the bound VAR as a symbolic input slot.
+- [ ] Decide whether the fix should live in `interact_app_lam`
+  (materialize the body BEFORE/AFTER the substitution) or in
+  `thvm_materialize` (treat unbound TVAR as a symbolic input). The
+  comment at `app_lam.c:64-67` says materialize must see the
+  shape annotation in the side table, which is set just above the
+  call -- so the order is correct.  The bug is in materialize's
+  handling of TVAR or in the DP0/DP1 reduction path post-SUB.
 
 ### LeNet-MNIST baseline
 - [ ] Run `wl/Examples/lenet-mnist/forward.wls`; capture as
