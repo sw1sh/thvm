@@ -709,9 +709,27 @@ every minute.
   trying axis-append again.
 
 ### forward.wls determinism follow-on
-- [ ] Add `SeedRandom[<fixed>]` before `NetInitialize` in
-  [forward.wls](../../wl/Examples/lenet-mnist/forward.wls) so
-  the random LeNet weights are reproducible across runs.
-  Without this, every iteration of axis-append (or any
-  numerics-affecting change) is muddled by the underlying
-  random-seed noise.
+- [x] (2026-05-06) Add `SeedRandom[<fixed>]` before
+  `NetInitialize` in
+  [forward.wls](../../wl/Examples/lenet-mnist/forward.wls).
+  Now picks `SeedRandom[7]` so weight init is reproducible.
+  Two-run smoke shows identical output on consecutive runs.
+
+  **Caveat**: even with the seed pinned, this LeNet random-init
+  produces NaN softmax on most samples (no max-subtract
+  stabilisation in the bare softmax helper).  That's an
+  orthogonal issue; the script is now at least *deterministic*
+  in its NaN behaviour, so future numerics-affecting changes can
+  be diffed against a stable baseline.
+
+### forward.wls softmax stabilisation follow-on
+- [ ] Add max-subtract to the softmax used in `forward.wls`
+  (or its underlying TSoftmax helper) so random-weight LeNets
+  don't NaN at every run.  Two paths:
+  (a) Patch TSoftmax to do `exp(x - max(x))` before normalising;
+      generalises to all callers.
+  (b) Add a `TSoftmaxStable` variant and have `TFromNet[..,
+      SoftmaxLayer]` route to it; leaves TSoftmax as a "fast
+      naive" version for callers who know inputs are bounded.
+  Verify forward.wls + autotune.wls + bench-train.wls all
+  produce numeric losses post-fix.

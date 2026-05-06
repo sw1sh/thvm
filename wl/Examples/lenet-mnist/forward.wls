@@ -23,6 +23,13 @@ Get["wl/Examples/_lib/Mnist.wl"];
 debugPrint[args___] := WriteString["stdout", StringJoin @@ Map[ToString, {args}], "\n"]
 
 TInit[];
+(* Fixed seed so forward output is reproducible across runs.
+   NetInitialize is non-deterministic by default; some random
+   weight inits push softmax into the no-max-subtract overflow
+   regime and produce NaN, making this script useless as a
+   numerics smoke-test or as a baseline against which lift /
+   render changes can be compared. *)
+SeedRandom[7];
 (* NetModel["LeNet"] returns the canonical LeCun architecture
    with un-initialized weights (the local Mathematica paclet
    version mismatch surfaces them as `Automatic` symbol-shapes).
