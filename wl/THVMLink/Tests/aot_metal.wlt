@@ -369,3 +369,129 @@ VerificationTest[
     $Failed,
     TestID -> "Method -> unknown spec returns $Failed"
 ]
+
+(* === iter Z: Church-encoded IC bodies (SUP / nested LAM) ===
+
+   The IC-construction emit_term cases + GPU-side wnf state machine
+   handle TDef bodies that contain TAG_SUP / TAG_LAM / TAG_DP / TAG_BJ
+   beyond the existing scalar-fold path.  Kernel allocates compound
+   cells in BOOK_HEAP via aot_book_alloc, performs IC interactions
+   (app_lam, app_sup, dup_sup, dup_lam, dup_num, dup_era), returns a
+   root Term whose subtree the host migrates book->dyn before
+   TCollapse walks the SUP-tree of leaves.  Mirrors the v1_church.wls
+   CPU path. *)
+
+(* Test: closed body containing a SUP at the head -- kernel builds
+   the SUP cell, returns its root.  No IC reduction needed. *)
+VerificationTest[
+    TInit[];
+    TDef["sup_const", TLam[ig, TSup[1, TNum[7], TNum[42]]]];
+    Sort[FromTTerm /@ TCollapse[
+        TAOTRun["sup_const", {TNum[0]}, Method -> "Metal"]]],
+    {7, 42},
+    TestID -> "Metal Z: SUP^1{NUM(7), NUM(42)} root + CPU collapse"
+]
+
+(* Test: Church-encoded boolToNum applied to SUP^1{T, F} reduces on
+   GPU to a SUP^1{NUM(1)-tree, NUM(0)-tree}; CPU collapse yields {1,0}. *)
+VerificationTest[
+    TInit[];
+    With[{
+        T  = TLam[t1, TLam[f1, t1]],
+        F  = TLam[t2, TLam[f2, f2]]
+    },
+        TDef["bool_to_num_sup",
+            TLam[ig,
+                TApp[TApp[TSup[1, T, F], TNum[1]], TNum[0]]
+            ]
+        ]
+    ];
+    Sort[FromTTerm /@ TCollapse[
+        TAOTRun["bool_to_num_sup", {TNum[0]}, Method -> "Metal"]]],
+    {0, 1},
+    TestID -> "Metal Z: boolToNum[SUP^1{T, F}] -> {0, 1}"
+]
+
+(* Test: Church AND of two distinct-label SUP-typed variables.  After
+   APP-SUP commutes the result has a SUP-tree of NUM leaves; the
+   short-circuit means FALSE branches don't expand the second var. *)
+VerificationTest[
+    TInit[];
+    With[{
+        Tx = TLam[t3, TLam[f3, t3]], Fx = TLam[t4, TLam[f4, f4]],
+        Ty = TLam[t5, TLam[f5, t5]], Fy = TLam[t6, TLam[f6, f6]]
+    },
+        TDef["sat_and_2",
+            TLam[ig,
+                TApp[TApp[
+                    (* Church AND: (a (\x.x) (\y.F) b) *)
+                    TApp[TApp[TApp[
+                        TSup[1, Tx, Fx],
+                        TLam[u1, u1]],
+                        TLam[u2, TLam[t7, TLam[f7, f7]]]],
+                        TSup[2, Ty, Fy]
+                    ],
+                    TNum[1]
+                ], TNum[0]]
+            ]
+        ]
+    ];
+    MemberQ[FromTTerm /@ TCollapse[
+        TAOTRun["sat_and_2", {TNum[0]}, Method -> "Metal"]], 1],
+    True,
+    TestID -> "Metal Z: SUP^1{T,F} AND SUP^2{T,F} has a 1 leaf (sat)"
+]
+
+(* === iter Z+1: parallel cnf+collapse shader =================================
+   TAOTIcCollapse dispatches the static aot_ic_collapse PSO with grid =
+   2^depth over a BOOK_HEAP-rooted SUP-tree (the kernel-1 result of an
+   iter-Z TDef, captured pre-migration via THVM_AOT_METAL_KEEP_BOOK=1).
+   Each thread decodes its tid into a binary path through the SUP-tree
+   and drives its leaf to WHNF on-thread via per-thread IC inlines. *)
+
+VerificationTest[
+    SetEnvironment["THVM_AOT_METAL_KEEP_BOOK" -> "1"];
+    TInit[];
+    With[{
+        T  = TLam[t1, TLam[f1, t1]],
+        F  = TLam[t2, TLam[f2, f2]]
+    },
+        TDef["bool_to_num_collapse",
+            TLam[ig,
+                TApp[TApp[TSup[1, T, F], TNum[1]], TNum[0]]
+            ]
+        ]
+    ];
+    Sort[FromTTerm /@ TAOTIcCollapse[
+        TAOTRun["bool_to_num_collapse", {TNum[0]}, Method -> "Metal"],
+        1]],
+    {0, 1},
+    TestID -> "Metal Z+1: boolToNum[SUP^1{T,F}] via parallel collapse"
+]
+
+VerificationTest[
+    SetEnvironment["THVM_AOT_METAL_KEEP_BOOK" -> "1"];
+    TInit[];
+    With[{
+        Tx = TLam[t3, TLam[f3, t3]], Fx = TLam[t4, TLam[f4, f4]],
+        Ty = TLam[t5, TLam[f5, t5]], Fy = TLam[t6, TLam[f6, f6]]
+    },
+        TDef["sat_and_2_collapse",
+            TLam[ig,
+                TApp[TApp[
+                    TApp[TApp[TApp[
+                        TSup[1, Tx, Fx],
+                        TLam[u1, u1]],
+                        TLam[u2, TLam[t7, TLam[f7, f7]]]],
+                        TSup[2, Ty, Fy]
+                    ],
+                    TNum[1]
+                ], TNum[0]]
+            ]
+        ]
+    ];
+    MemberQ[FromTTerm /@ TAOTIcCollapse[
+        TAOTRun["sat_and_2_collapse", {TNum[0]}, Method -> "Metal"], 2], 1],
+    True,
+    TestID -> "Metal Z+1: SUP^1{T,F} AND SUP^2{T,F} parallel sat-check"
+]

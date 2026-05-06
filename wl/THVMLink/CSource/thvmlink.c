@@ -2386,6 +2386,50 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_metal_run_n(
   return LIBRARY_NO_ERROR;
 }
 
+// === Iter Z+1: parallel cnf+collapse via aot_ic_collapse.metal ==========
+//
+// Walks the SUP-tree-rooted Term left in BOOK_HEAP by an iter-Z
+// kernel, dispatches the static aot_ic_collapse PSO with grid =
+// 2^depth, returns the per-leaf-path Term vector to WL.
+//
+// Args (mint Integer):
+//   args[0] : root Term (the iter-Z output, BOOK_HEAP-rooted)
+//   args[1] : depth (uint, must be <= 30)
+// Returns: MTensor of mint Term values, length 2^depth.
+
+extern u64 thvm_aot_metal_ic_collapse(
+    Term root, u32 depth,
+    Term *book_heap, u64 book_cells,
+    u64 *book_next_inout,
+    Term *out, u64 out_cap);
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_ic_collapse(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  Term root = (Term)MArgument_getInteger(args[0]);
+  u32  depth = (u32)MArgument_getInteger(args[1]);
+  if (depth > 30) return LIBRARY_FUNCTION_ERROR;
+  u64 n = 1ULL << depth;
+  Term *out = (Term *)malloc(n * sizeof(Term));
+  if (out == NULL) return LIBRARY_FUNCTION_ERROR;
+  u64 book_next_state = BOOK_NEXT;
+  u64 nout = thvm_aot_metal_ic_collapse(
+      root, depth, BOOK_HEAP, BOOK_CAP, &book_next_state,
+      out, n);
+  BOOK_NEXT = book_next_state;
+  if (nout == 0) { free(out); return LIBRARY_FUNCTION_ERROR; }
+
+  MTensor t;
+  mint dims[1] = { (mint)nout };
+  int err = libData->MTensor_new(MType_Integer, 1, dims, &t);
+  if (err != LIBRARY_NO_ERROR) { free(out); return err; }
+  mint *dst = libData->MTensor_getIntegerData(t);
+  for (u64 i = 0; i < nout; i++) dst[i] = (mint)out[i];
+  free(out);
+  MArgument_setMTensor(res, t);
+  return LIBRARY_NO_ERROR;
+}
+
 // === PRI-WL callback dispatch =============================================
 // THVM_PRIM_PRI fires inside wnf, deep in C-side recursion.  Two paths:
 //

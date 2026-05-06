@@ -2696,7 +2696,142 @@ Term thvm_aot_metal_compile_and_run(const char *name, u32 def_id,
   uint32_t out_u32;
   memcpy(&out_u32, [bookNextBuf contents], sizeof(uint32_t));
   *book_next_inout = (u64)out_u32;
+  // Iter Z: kernel allocates compound-term cells in BOOK_HEAP via
+  // aot_book_alloc.  Host runtime cnf/collapse walk HEAP (dyn heap),
+  // so by default we migrate book->dyn before returning.  Atoms
+  // (NUM/TEN/REF/ERA) pass through unchanged so the iter-D scalar-fold
+  // shape stays zero-overhead.
+  //
+  // Env opt-out THVM_AOT_METAL_KEEP_BOOK=1 returns the book-rooted Term
+  // verbatim so the iter Z+1 parallel collapse shader can walk it
+  // directly.  Test/integration uses this gate to chain the two
+  // kernels without bouncing through dyn heap.
+  extern Term thvm_aot_migrate_book_to_dyn(Term root);
+  uint8_t result_tag = (uint8_t)((result >> 56) & 0x7F);
+  // Re-check env every call -- cached static would mean a later
+  // SetEnvironment["THVM_AOT_METAL_KEEP_BOOK" -> "1"] inside the same
+  // process (e.g., a TestReport mid-suite) wouldn't take effect.
+  const char *keep_book_env = getenv("THVM_AOT_METAL_KEEP_BOOK");
+  int keep_book = (keep_book_env != NULL && keep_book_env[0] == '1');
+  if (!keep_book &&
+      result_tag != 10 /* TAG_NUM */ && result_tag != 8 /* TAG_TEN */ &&
+      result_tag != 11 /* TAG_REF */ && result_tag != 3 /* TAG_ERA */) {
+    result = thvm_aot_migrate_book_to_dyn(result);
+  }
   return result;
+}
+
+// === Iter Z+1: parallel cnf+collapse shader dispatch ============
+//
+// Walks the iter-Z output (a SUP-tree-rooted Term in BOOK_HEAP) by
+// dispatching the static aot_ic_collapse PSO with grid = 2^depth.
+// Each thread decodes tid into a binary path through the SUP-tree
+// and drives its leaf to WHNF on-thread.  Returns leaves vector.
+//
+// `depth` is supplied by the caller after a host-side traversal of
+// the SUP-tree (cheap: O(N) reads from book_heap to count SUP nodes).
+// The host walks once to find max depth, then dispatches grid=2^depth.
+// Threads whose tid bits select an ERA-pruned branch return ERA.
+
+static id<MTLComputePipelineState> AOT_IC_COLLAPSE_PSO = nil;
+
+static id<MTLComputePipelineState> aot_ic_collapse_pso(void) {
+  if (AOT_IC_COLLAPSE_PSO != nil) return AOT_IC_COLLAPSE_PSO;
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) {
+    if (metal_init() != 0) return nil;
+  }
+  // Load from the project's default.metallib, which already contains
+  // aot_ic_collapse via the Makefile's wildcard shader compile.
+  NSError *err = nil;
+  NSURL *libURL = [NSURL fileURLWithPath:
+      [NSString stringWithUTF8String:THVM_METAL_METALLIB]];
+  id<MTLLibrary> lib =
+      [METAL_DEVICE newLibraryWithURL:libURL error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm aot-ic-collapse: load %s failed: %s\n",
+            THVM_METAL_METALLIB,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn =
+      [lib newFunctionWithName:@"aot_ic_collapse"];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm aot-ic-collapse: function 'aot_ic_collapse' missing\n");
+    return nil;
+  }
+  AOT_IC_COLLAPSE_PSO =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (AOT_IC_COLLAPSE_PSO == nil) {
+    fprintf(stderr, "thvm aot-ic-collapse: pso failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  return AOT_IC_COLLAPSE_PSO;
+}
+
+// Returns N filled into out[0..N-1] (caller owns the buffer, must be
+// >= 2^depth Terms).  Returns 0 on dispatch failure.
+u64 thvm_aot_metal_ic_collapse(Term root, u32 depth,
+                                Term *book_heap, u64 book_cells,
+                                u64 *book_next_inout,
+                                Term *out, u64 out_cap) {
+  id<MTLComputePipelineState> pso = aot_ic_collapse_pso();
+  if (pso == nil) return 0;
+  if (depth > 30) {
+    fprintf(stderr, "thvm aot-ic-collapse: depth %u exceeds 30 (>1B threads)\n",
+            depth);
+    return 0;
+  }
+  u64 n = 1ULL << depth;
+  if (n > out_cap) {
+    fprintf(stderr, "thvm aot-ic-collapse: n=%llu exceeds out_cap=%llu\n",
+            (unsigned long long)n, (unsigned long long)out_cap);
+    return 0;
+  }
+
+  if (*book_next_inout >> 32) {
+    fprintf(stderr, "thvm aot-ic-collapse: book_next exceeds 32-bit range\n");
+    return 0;
+  }
+  uint32_t book_next_u32 = (uint32_t)*book_next_inout;
+
+  id<MTLBuffer> heapBuf =
+      aot_metal_heap_buf(book_heap, book_cells);
+  id<MTLBuffer> resultBuf =
+      [METAL_DEVICE newBufferWithLength:(NSUInteger)(n * sizeof(Term))
+                                options:MTLResourceStorageModeShared];
+  id<MTLBuffer> bookNextBuf =
+      [METAL_DEVICE newBufferWithBytes:&book_next_u32
+                                length:sizeof(uint32_t)
+                               options:MTLResourceStorageModeShared];
+
+  uint64_t root_u64 = (uint64_t)root;
+
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:heapBuf     offset:0 atIndex:0];
+  [enc setBytes:&root_u64    length:sizeof(uint64_t) atIndex:1];
+  [enc setBuffer:resultBuf   offset:0 atIndex:2];
+  [enc setBuffer:bookNextBuf offset:0 atIndex:3];
+  [enc setBytes:&depth       length:sizeof(uint32_t) atIndex:4];
+  // Threadgroup size: cap at 256 or n (whichever is smaller); Apple
+  // GPU's max threads/threadgroup is 1024 but 256 is a sensible
+  // default for thread-private-heavy kernels (our wnf stack is 256
+  // Terms per thread = 2 KiB, well under the 32 KiB private budget).
+  NSUInteger tg = (NSUInteger)((n < 256) ? n : 256);
+  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  uint32_t out_u32;
+  memcpy(&out_u32, [bookNextBuf contents], sizeof(uint32_t));
+  *book_next_inout = (u64)out_u32;
+
+  memcpy(out, [resultBuf contents], (size_t)(n * sizeof(Term)));
+  return n;
 }
 
 Backend METAL_BACKEND = {

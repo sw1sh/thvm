@@ -24,7 +24,7 @@ typedef struct {
     char arg_var[24];
 } AotMslBinding;
 
-#define AOT_MSL_BIND_CAP 16
+#define AOT_MSL_BIND_CAP 256
 
 typedef struct {
     AotMslBinding entries[AOT_MSL_BIND_CAP];
@@ -113,9 +113,192 @@ static void aot_msl_dup_push(u64 dup_loc, const char *uint_var) {
     g_msl_dup_n++;
 }
 
+// Iter Z: parallel Term-memo for DP0/DP1 with SUP/LAM bodies (the
+// auto-dup uint memo above is only sound for NUM-typed bodies where
+// both projections observe the same scalar).  In the IC-construction
+// path used by Church-bool TDefs, both DP0 and DP1 of the same source
+// dup_loc must point at the SAME freshly-allocated GPU dup-body loc
+// so DUP-SUP annihilation fires at runtime.  Key: source book dup_loc;
+// value: name of the `ulong dup_loc_K` MSL local holding the GPU-side
+// body cell.  Reset alongside g_msl_dup_n at top of thvm_aot_metal_emit.
+typedef struct {
+    u64  dup_loc;
+    char loc_var[24];
+} AotMslDupTermEntry;
+#define AOT_MSL_DUP_TERM_CAP 64
+static AotMslDupTermEntry g_msl_dup_term_memo[AOT_MSL_DUP_TERM_CAP];
+static u32                g_msl_dup_term_n = 0;
+
+static const char *aot_msl_dup_term_lookup(u64 dup_loc) {
+    for (u32 i = 0; i < g_msl_dup_term_n; i++) {
+        if (g_msl_dup_term_memo[i].dup_loc == dup_loc)
+            return g_msl_dup_term_memo[i].loc_var;
+    }
+    return NULL;
+}
+
+static void aot_msl_dup_term_push(u64 dup_loc, const char *loc_var) {
+    if (g_msl_dup_term_n >= AOT_MSL_DUP_TERM_CAP) return;
+    g_msl_dup_term_memo[g_msl_dup_term_n].dup_loc = dup_loc;
+    snprintf(g_msl_dup_term_memo[g_msl_dup_term_n].loc_var,
+             sizeof g_msl_dup_term_memo[g_msl_dup_term_n].loc_var,
+             "%s", loc_var);
+    g_msl_dup_term_n++;
+}
+
 // Forward decls for the term/uint emit pair.
 static const char *aot_msl_emit_uint(AotEmit *b, Term t,
                                      AotMslBindings *bind);
+
+// Iter Z: book->dyn migration for AOT-Metal results.
+//
+// The kernel's IC reducer allocates compound terms in BOOK_HEAP via
+// aot_book_alloc.  Host runtime cnf/collapse walk HEAP (the dyn
+// heap), so the result Term needs to be relocated before WL can
+// consume it via TCnf/TCollapse.  Mirrors the shape of alo_realize
+// for the closed-term case: walk the book-heap subtree from the
+// root, allocate equivalents in dyn heap, return a dyn-pointing
+// Term.  Memo by source book_loc to handle shared subterms (e.g.,
+// auto_dup'd dup-body cells where DP0 and DP1 reference the same
+// loc).
+//
+// Iter Z+1's parallel collapse shader reads BOOK_HEAP directly and
+// makes this migration unnecessary; for the single-thread bringup
+// it's the cleanest way to bridge the two heap arenas.
+
+#define AOT_MIGRATE_VISITED_CAP 4096
+typedef struct {
+    u64 book_loc;
+    u64 dyn_loc;
+} AotMigrateMemo;
+
+static u32 aot_migrate_arity(u8 tag) {
+    switch (tag) {
+        case TAG_LAM: return 1;
+        case TAG_APP: return 2;
+        case TAG_SUP: return 2;
+        case TAG_DUP: return 1;
+        case TAG_OP2: return 2;
+        case TAG_MAT: return 2;
+        case TAG_DP0: case TAG_DP1: case TAG_BJ0: case TAG_BJ1: return 1;
+        default: return 0;
+    }
+}
+
+static Term aot_migrate_book_to_dyn_rec(Term t,
+        AotMigrateMemo *memo, u32 *memo_n) {
+    u8  tag = term_tag(t);
+    u32 ext = term_ext(t);
+    u64 val = term_val(t);
+    if (term_sub_get(t)) {
+        return aot_migrate_book_to_dyn_rec(term_sub_set(t, 0), memo, memo_n);
+    }
+    if (tag == TAG_NUM || tag == TAG_TEN || tag == TAG_ERA ||
+        tag == TAG_REF || tag == TAG_ANY ||
+        tag == TAG_FVR || tag == TAG_PRI) return t;
+    if (tag == TAG_VAR) {
+        // Translate VAR's binder loc through the memo so it points
+        // at the migrated LAM's dyn-heap cell.
+        for (u32 i = 0; i < *memo_n; i++) {
+            if (memo[i].book_loc == val) {
+                return term_new(0, TAG_VAR, ext, memo[i].dyn_loc);
+            }
+        }
+        // Unmemoized binder -- the LAM hasn't been visited yet (forward
+        // reference, e.g. body before LAM in walk).  Allocate a placeholder
+        // LAM cell and memo it; the LAM case will reuse the memoed dyn_loc
+        // when it's emitted.  The LAM-case visitor sees an existing memo,
+        // skips alloc, and writes its body into the placeholder.
+        if (*memo_n >= AOT_MIGRATE_VISITED_CAP) return t;
+        u64 dyn_loc = heap_alloc(1);
+        memo[*memo_n].book_loc = val;
+        memo[*memo_n].dyn_loc  = dyn_loc;
+        (*memo_n)++;
+        return term_new(0, TAG_VAR, ext, dyn_loc);
+    }
+    u32 arity = aot_migrate_arity(tag);
+    if (arity == 0) return t;
+    for (u32 i = 0; i < *memo_n; i++) {
+        if (memo[i].book_loc == val) {
+            return term_new(0, tag, ext, memo[i].dyn_loc);
+        }
+    }
+    if (*memo_n >= AOT_MIGRATE_VISITED_CAP) return t;
+    u64 dyn_loc = heap_alloc(arity);
+    memo[*memo_n].book_loc = val;
+    memo[*memo_n].dyn_loc  = dyn_loc;
+    (*memo_n)++;
+    for (u32 i = 0; i < arity; i++) {
+        Term child = book_read(val + i);
+        heap_set(dyn_loc + i,
+                 aot_migrate_book_to_dyn_rec(child, memo, memo_n));
+    }
+    return term_new(0, tag, ext, dyn_loc);
+}
+
+// External linkage so backend/metal/_.m can call this from a
+// separate TU.  Iter Z+1 collapses this into the parallel readback
+// shader.
+Term thvm_aot_migrate_book_to_dyn(Term root) {
+    AotMigrateMemo memo[AOT_MIGRATE_VISITED_CAP];
+    u32 memo_n = 0;
+    return aot_migrate_book_to_dyn_rec(root, memo, &memo_n);
+}
+
+// Iter Z: does this body need the IC-construction + GPU-side wnf
+// state machine?  Returns 1 if any TAG_SUP appears at any depth, or
+// any TAG_LAM appears (i.e., a Church value sitting inside the body
+// rather than the outer-peeled binder structure).  The existing
+// scalar/MAT/CTR fast paths handle everything else.
+//
+// Bounded walk: tracks a small visited-base set to avoid pathological
+// recursion via shared sub-terms (rare in book templates but cheap to
+// guard against).
+#define AOT_MSL_NEEDS_IC_VISITED_CAP 256
+static int aot_msl_needs_ic_walk(Term t,
+                                  u64 *visited, u32 *visited_n) {
+    u8  tag = term_tag(t);
+    if (tag == TAG_SUP || tag == TAG_LAM ||
+        tag == TAG_BJ0 || tag == TAG_BJ1) return 1;
+    u64 val = term_val(t);
+    // Dedup by base loc to bound work.
+    if (tag == TAG_APP || tag == TAG_DP0 || tag == TAG_DP1 ||
+        tag == TAG_CTR) {
+        for (u32 i = 0; i < *visited_n; i++) {
+            if (visited[i] == val) return 0;
+        }
+        if (*visited_n >= AOT_MSL_NEEDS_IC_VISITED_CAP) return 0;
+        visited[(*visited_n)++] = val;
+    }
+    if (tag == TAG_APP) {
+        return aot_msl_needs_ic_walk(book_read(val + 0), visited, visited_n) ||
+               aot_msl_needs_ic_walk(book_read(val + 1), visited, visited_n);
+    }
+    if (tag == TAG_DP0 || tag == TAG_DP1) {
+        // DP whose body is non-NUM forces the IC path.  NUM body
+        // (auto-dup of NUM-binder) is handled by the existing memo.
+        Term body = book_read(val);
+        if (term_tag(body) == TAG_NUM) return 0;
+        return aot_msl_needs_ic_walk(body, visited, visited_n);
+    }
+    if (tag == TAG_CTR) {
+        Term n_cell = book_read(val);
+        if (term_tag(n_cell) != TAG_NUM) return 0;
+        u32 n = (u32)term_val(n_cell);
+        for (u32 i = 0; i < n; i++) {
+            if (aot_msl_needs_ic_walk(book_read(val + 1 + i),
+                                       visited, visited_n)) return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static int aot_msl_body_needs_ic(Term body) {
+    u64 visited[AOT_MSL_NEEDS_IC_VISITED_CAP];
+    u32 visited_n = 0;
+    return aot_msl_needs_ic_walk(body, visited, &visited_n);
+}
 
 // Iter H helper: emit a Term-valued MSL expression for use in
 // value-position contexts (e.g., CTR child slots).  Falls through
@@ -133,11 +316,153 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         u64 loc = term_val(t);
         const char *bound = aot_msl_bind_lookup(bind, loc);
         if (bound) {
-            // Binding name is a Term-typed local (args[K] or vt_K).
+            // Binding name is a Term-typed local (args[K] or var_K).
             snprintf(out, 96, "%s", bound);
             return out;
         }
     }
+
+    // Iter Z: IC-construction path for Church-encoded bodies.  Each
+    // case allocates the GPU-heap cells, recursively emits children,
+    // and returns a Term-typed local.  Mirrors alo_realize's per-tag
+    // shape (src/alo/realize.c).
+    if (tag == TAG_LAM) {
+        u32  lam_ext = term_ext(t);
+        u64  src_loc = term_val(t);
+        u32  idx     = g_msl_fresh++;
+        char loc_var[24], var_var[24], lam_var[24];
+        snprintf(loc_var, sizeof loc_var, "lam_loc_%u", idx);
+        snprintf(var_var, sizeof var_var, "var_%u",     idx);
+        snprintf(lam_var, sizeof lam_var, "lam_%u",     idx);
+        // Allocate body cell + introduce VAR(loc_var) binding for the
+        // body's TVar(src_loc) references.  The VAR resolves through
+        // heap[loc_var]: initially holds the body Term (pre-APP-LAM);
+        // after aot_app_lam fires it holds arg | SUB_BIT.
+        aot_emit_fmt(b,
+            "  ulong %s = aot_book_alloc(book_next, 1u);\n"
+            "  Term  %s = msl_term_new(TAG_VAR, 0u, %s);\n",
+            loc_var, var_var, loc_var);
+        aot_msl_bind_push(bind, src_loc, var_var);
+        Term body = book_read(src_loc);
+        const char *bt = aot_msl_emit_term(b, body, bind);
+        char body_local[96];
+        snprintf(body_local, sizeof body_local, "%s", bt);
+        aot_emit_fmt(b,
+            "  heap[%s] = %s;\n"
+            "  Term %s = msl_term_new(TAG_LAM, %uu, %s);\n",
+            loc_var, body_local, lam_var, lam_ext, loc_var);
+        snprintf(out, 96, "%s", lam_var);
+        return out;
+    }
+    if (tag == TAG_APP) {
+        u64  src_loc = term_val(t);
+        u32  idx     = g_msl_fresh++;
+        char loc_var[24], app_var[24], f_local[96], a_local[96];
+        snprintf(loc_var, sizeof loc_var, "app_loc_%u", idx);
+        snprintf(app_var, sizeof app_var, "app_%u",     idx);
+        // Materialize children before allocation so deeper allocs
+        // don't interleave with our cell layout (mirrors CTR pattern).
+        Term f = book_read(src_loc + 0);
+        Term a = book_read(src_loc + 1);
+        const char *fe = aot_msl_emit_term(b, f, bind);
+        snprintf(f_local, sizeof f_local, "%s", fe);
+        const char *ae = aot_msl_emit_term(b, a, bind);
+        snprintf(a_local, sizeof a_local, "%s", ae);
+        aot_emit_fmt(b,
+            "  ulong %s = aot_book_alloc(book_next, 2u);\n"
+            "  heap[%s + 0] = %s;\n"
+            "  heap[%s + 1] = %s;\n"
+            "  Term %s = msl_term_new(TAG_APP, 0u, %s);\n",
+            loc_var, loc_var, f_local, loc_var, a_local, app_var, loc_var);
+        snprintf(out, 96, "%s", app_var);
+        return out;
+    }
+    if (tag == TAG_SUP) {
+        u32  label   = term_ext(t);
+        u64  src_loc = term_val(t);
+        u32  idx     = g_msl_fresh++;
+        char loc_var[24], sup_var[24], a_local[96], b_local[96];
+        snprintf(loc_var, sizeof loc_var, "sup_loc_%u", idx);
+        snprintf(sup_var, sizeof sup_var, "sup_%u",     idx);
+        Term ca = book_read(src_loc + 0);
+        Term cb = book_read(src_loc + 1);
+        const char *ae = aot_msl_emit_term(b, ca, bind);
+        snprintf(a_local, sizeof a_local, "%s", ae);
+        const char *be = aot_msl_emit_term(b, cb, bind);
+        snprintf(b_local, sizeof b_local, "%s", be);
+        aot_emit_fmt(b,
+            "  ulong %s = aot_book_alloc(book_next, 2u);\n"
+            "  heap[%s + 0] = %s;\n"
+            "  heap[%s + 1] = %s;\n"
+            "  Term %s = msl_term_new(TAG_SUP, %uu, %s);\n",
+            loc_var, loc_var, a_local, loc_var, b_local,
+            sup_var, label, loc_var);
+        snprintf(out, 96, "%s", sup_var);
+        return out;
+    }
+    if (tag == TAG_DP0 || tag == TAG_DP1 ||
+        tag == TAG_BJ0 || tag == TAG_BJ1) {
+        u32  label   = term_ext(t);
+        u64  src_loc = term_val(t);
+        u8   side    = (tag == TAG_DP0 || tag == TAG_BJ0) ? 0 : 1;
+        // Memo: both DP0 and DP1 (or BJ0/BJ1) of the same source dup
+        // share one fresh GPU dup-body cell.  Without sharing,
+        // DUP-SUP annihilation at runtime mis-fires.
+        const char *memo_loc = aot_msl_dup_term_lookup(src_loc);
+        char loc_var[24];
+        if (memo_loc != NULL) {
+            snprintf(loc_var, sizeof loc_var, "%s", memo_loc);
+        } else {
+            u32 idx = g_msl_fresh++;
+            snprintf(loc_var, sizeof loc_var, "dup_loc_%u", idx);
+            Term body = book_read(src_loc);
+            const char *be = aot_msl_emit_term(b, body, bind);
+            char body_local[96];
+            snprintf(body_local, sizeof body_local, "%s", be);
+            aot_emit_fmt(b,
+                "  ulong %s = aot_book_alloc(book_next, 1u);\n"
+                "  heap[%s] = %s;\n",
+                loc_var, loc_var, body_local);
+            aot_msl_dup_term_push(src_loc, loc_var);
+        }
+        u32  dp_idx = g_msl_fresh++;
+        char dp_var[24];
+        snprintf(dp_var, sizeof dp_var, "dp_%u", dp_idx);
+        // BJ tags become DP at GPU construction time -- we're emitting
+        // dyn-equivalent state directly (alo_realize would do the same
+        // BJ->DP unfold on a CPU realize).
+        aot_emit_fmt(b,
+            "  Term %s = msl_term_new(%s, %uu, %s);\n",
+            dp_var,
+            (side == 0) ? "TAG_DP0" : "TAG_DP1",
+            label, loc_var);
+        snprintf(out, 96, "%s", dp_var);
+        return out;
+    }
+    if (tag == TAG_REF) {
+        // Inline the def's body directly -- equivalent to alo_realize
+        // for the closed-term case.  Each TAG_REF use gets its own
+        // copy of the LAM tree (no per-call sharing via alo_dup_share,
+        // but correct for Church-bool SAT where T_/F_ are tiny).  Bail
+        // on recursive REFs (which would loop forever in this inliner).
+        u32 ref_id = term_ext(t);
+        if (ref_id >= DEFS_CAP || ref_id == g_msl_self_def_id) {
+            aot_msl_emit_fail("recursive or out-of-range REF id %u in IC body", ref_id);
+            snprintf(out, 96, "0u /* recursive REF */");
+            return out;
+        }
+        Term ref_body = DEFS[ref_id];
+        if (ref_body == 0) {
+            aot_msl_emit_fail("undefined REF id %u in IC body", ref_id);
+            snprintf(out, 96, "0u /* undefined REF */");
+            return out;
+        }
+        // Recurse on the def's body.  The returned MSL local is a Term.
+        const char *bt = aot_msl_emit_term(b, ref_body, bind);
+        snprintf(out, 96, "%s", bt);
+        return out;
+    }
+
     if (tag == TAG_CTR) {
         // Iter OO: nested CTR -- allocate child cell sequence on the
         // GPU heap, materialize each grandchild via the same emit_term
@@ -225,8 +550,11 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
         return out;
       }
       case TAG_DP0:
-      case TAG_DP1: {
+      case TAG_DP1:
+      case TAG_BJ0:
+      case TAG_BJ1: {
         // Iter V: auto-dup of multi-use binders.  Both DP0 and DP1
+        // (or BJ0/BJ1, after Phase C's BJ rewrite at clone_to_book)
         // of the same dup_loc reference the SAME body; we emit the
         // body's uint value once and memo the var name so the
         // sibling projection reuses it.  Equivalent to firing
@@ -431,9 +759,23 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         "#define TAG_MASK   0x7FUL\n"
         "#define EXT_MASK   0x3FFFFUL\n"
         "#define VAL_MASK   0x3FFFFFFFFFUL\n"
+        "#define TAG_APP    0u\n"
+        "#define TAG_LAM    1u\n"
+        "#define TAG_VAR    2u\n"
+        "#define TAG_ERA    3u\n"
+        "#define TAG_DP0    4u\n"
+        "#define TAG_DP1    5u\n"
+        "#define TAG_SUP    6u\n"
         "#define TAG_NUM    10u\n"
+        "#define TAG_REF    11u\n"
         "#define TAG_CTR    20u\n"
+        "#define TAG_BJ0    33u\n"
+        "#define TAG_BJ1    34u\n"
         "#define DT_INT32   5u\n"
+        "#define SUB_SHIFT  63\n"
+        "#define SUB_BIT    (1ULL << 63)\n"
+        "#define LAM_ERA_MASK   (1u << 17)\n"
+        "#define DUP_LABEL_MASK 0x1FFFFu\n"
         "\n",
         name, def_id, argc);
     aot_emit_str(&b,
@@ -442,6 +784,13 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         "static inline uint  msl_term_ext(Term t) {\n"
         "  return uint((t >> EXT_SHIFT) & EXT_MASK);\n"
         "}\n"
+        "static inline uint  msl_term_tag(Term t) {\n"
+        "  return uint((t >> TAG_SHIFT) & TAG_MASK);\n"
+        "}\n"
+        "static inline uint  msl_sub_get(Term t) {\n"
+        "  return uint((t >> SUB_SHIFT) & 1u);\n"
+        "}\n"
+        "static inline Term  msl_sub_clr(Term t) { return t & ~SUB_BIT; }\n"
         "static inline Term  msl_term_new(uint tag, uint ext, ulong val) {\n"
         "  return ((ulong(tag) & TAG_MASK) << TAG_SHIFT)\n"
         "       | ((ulong(ext) & EXT_MASK) << EXT_SHIFT)\n"
@@ -451,6 +800,100 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         "    device atomic_uint *book_next, uint n) {\n"
         "  return ulong(atomic_fetch_add_explicit(book_next, n,\n"
         "                                          memory_order_relaxed));\n"
+        "}\n"
+        "// Single-thread grid: plain stores OK; SUB-bit substitution\n"
+        "// just writes the marked Term.  Mirrors src/heap/subst_var.c\n"
+        "// + src/heap/subst_cop.c on the CPU side.\n"
+        "static inline void aot_subst_var(device Term *heap, ulong loc, Term v) {\n"
+        "  heap[loc] = v | SUB_BIT;\n"
+        "}\n"
+        "static inline Term aot_subst_cop(uint side, ulong loc,\n"
+        "    Term r0, Term r1, device Term *heap) {\n"
+        "  if (side == 0u) { aot_subst_var(heap, loc, r1); return r0; }\n"
+        "  aot_subst_var(heap, loc, r0); return r1;\n"
+        "}\n"
+        "\n"
+        "// === IC interaction inlines (mirror src/interact/*.c) ===\n"
+        "// Single-thread grid; no atomics required for correctness.\n"
+        "\n"
+        "// app_lam (src/interact/app_lam.c): LAM_ERA_MASK fast path\n"
+        "// skips the binder substitution.  No JIT shape annotation.\n"
+        "static Term aot_app_lam(Term lam, Term arg, device Term *heap) {\n"
+        "  uint  lam_ext = msl_term_ext(lam);\n"
+        "  ulong loc     = msl_term_val(lam);\n"
+        "  Term  body    = heap[loc];\n"
+        "  if ((lam_ext & LAM_ERA_MASK) == 0u) aot_subst_var(heap, loc, arg);\n"
+        "  return body;\n"
+        "}\n"
+        "\n"
+        "// app_sup (src/interact/app_sup.c): 7-cell allocation.\n"
+        "static Term aot_app_sup(Term sup, Term arg,\n"
+        "    device Term *heap, device atomic_uint *book_next) {\n"
+        "  ulong sup_loc = msl_term_val(sup);\n"
+        "  uint  lab     = msl_term_ext(sup);\n"
+        "  Term f = heap[sup_loc + 0];\n"
+        "  Term g = heap[sup_loc + 1];\n"
+        "  ulong c = aot_book_alloc(book_next, 7u);\n"
+        "  heap[c + 0] = arg;\n"
+        "  heap[c + 1] = f;\n"
+        "  heap[c + 2] = msl_term_new(TAG_DP0, lab, c + 0);\n"
+        "  heap[c + 3] = g;\n"
+        "  heap[c + 4] = msl_term_new(TAG_DP1, lab, c + 0);\n"
+        "  heap[c + 5] = msl_term_new(TAG_APP, 0u, c + 1);\n"
+        "  heap[c + 6] = msl_term_new(TAG_APP, 0u, c + 3);\n"
+        "  return msl_term_new(TAG_SUP, lab, c + 5);\n"
+        "}\n"
+        "\n"
+        "// dup_sup (src/interact/dup_sup.c): annihilate vs commute.\n"
+        "static Term aot_dup_sup(uint lab, ulong loc, uint side, Term sup,\n"
+        "    device Term *heap, device atomic_uint *book_next) {\n"
+        "  ulong sup_loc = msl_term_val(sup);\n"
+        "  uint  sup_lab = msl_term_ext(sup);\n"
+        "  if (lab == sup_lab) {\n"
+        "    Term tm0 = heap[sup_loc + 0];\n"
+        "    Term tm1 = heap[sup_loc + 1];\n"
+        "    return aot_subst_cop(side, loc, tm0, tm1, heap);\n"
+        "  }\n"
+        "  Term a = heap[sup_loc + 0];\n"
+        "  Term b = heap[sup_loc + 1];\n"
+        "  ulong c = aot_book_alloc(book_next, 6u);\n"
+        "  heap[c + 0] = a;\n"
+        "  heap[c + 1] = b;\n"
+        "  heap[c + 2] = msl_term_new(TAG_DP0, lab, c + 0);\n"
+        "  heap[c + 3] = msl_term_new(TAG_DP0, lab, c + 1);\n"
+        "  heap[c + 4] = msl_term_new(TAG_DP1, lab, c + 0);\n"
+        "  heap[c + 5] = msl_term_new(TAG_DP1, lab, c + 1);\n"
+        "  Term x0 = msl_term_new(TAG_SUP, sup_lab, c + 2);\n"
+        "  Term x1 = msl_term_new(TAG_SUP, sup_lab, c + 4);\n"
+        "  return aot_subst_cop(side, loc, x0, x1, heap);\n"
+        "}\n"
+        "\n"
+        "// dup_lam (src/interact/dup_lam.c): 5-cell allocation;\n"
+        "// LAM_ERA_MASK fast path skips the binder subst_var.\n"
+        "static Term aot_dup_lam(uint lab, ulong loc, uint side, Term lam,\n"
+        "    device Term *heap, device atomic_uint *book_next) {\n"
+        "  uint  lam_ext = msl_term_ext(lam);\n"
+        "  ulong lam_loc = msl_term_val(lam);\n"
+        "  Term  body    = heap[lam_loc];\n"
+        "  ulong a = aot_book_alloc(book_next, 5u);\n"
+        "  heap[a + 4] = body;\n"
+        "  heap[a + 0] = msl_term_new(TAG_DP0, lab, a + 4);\n"
+        "  heap[a + 1] = msl_term_new(TAG_DP1, lab, a + 4);\n"
+        "  heap[a + 2] = msl_term_new(TAG_VAR, 0u, a + 0);\n"
+        "  heap[a + 3] = msl_term_new(TAG_VAR, 0u, a + 1);\n"
+        "  Term sup = msl_term_new(TAG_SUP, lab,     a + 2);\n"
+        "  Term l0  = msl_term_new(TAG_LAM, lam_ext, a + 0);\n"
+        "  Term l1  = msl_term_new(TAG_LAM, lam_ext, a + 1);\n"
+        "  if ((lam_ext & LAM_ERA_MASK) == 0u) aot_subst_var(heap, lam_loc, sup);\n"
+        "  return aot_subst_cop(side, loc, l0, l1, heap);\n"
+        "}\n"
+        "\n"
+        "// dup_num / dup_era: zero-alloc; both projections see same atom.\n"
+        "static Term aot_dup_num(uint side, ulong loc, Term num, device Term *heap) {\n"
+        "  return aot_subst_cop(side, loc, num, num, heap);\n"
+        "}\n"
+        "static Term aot_dup_era(uint side, ulong loc, Term era, device Term *heap) {\n"
+        "  return aot_subst_cop(side, loc, era, era, heap);\n"
         "}\n"
         "\n");
     aot_emit_fmt(&b,
@@ -470,6 +913,132 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     g_msl_emit_failed = 0;
     g_msl_emit_failure_reason[0] = '\0';
     g_msl_dup_n = 0;   // iter V: reset dup memo for this emit
+    g_msl_dup_term_n = 0; // iter Z: reset Term-memo for IC construction
+
+    // Iter Z: Church-style bodies (containing TAG_SUP / TAG_LAM /
+    // TAG_BJ at any depth, or TAG_DP whose body isn't NUM) need the
+    // GPU-side wnf state machine + IC-interaction inlines.  Construct
+    // the term tree on the shared book heap, then drive wnf to WHNF
+    // and write the root Term to result[0].
+    int emitted_ic = 0;
+    if (aot_msl_body_needs_ic(cursor)) {
+        const char *root_var = aot_msl_emit_term(&b, cursor, &bind);
+        // Stack cap chosen to fit Apple GPU thread-private memory
+        // budget at 8 bytes per Term (4096 * 8 = 32 KiB).  Iter cap
+        // bounds runaway loops; future iter can grow / make data-driven.
+        const u32 stack_cap = 4096u;
+        const u32 iter_cap  = 1u << 20;
+        aot_emit_str(&b,
+            "  // === Iter Z: GPU-side wnf state machine ===\n");
+        aot_emit_fmt(&b,
+            "  thread Term  ic_stk[%uu];\n"
+            "  uint  ic_spos  = 0u;\n"
+            "  Term  next     = %s;\n"
+            "  Term  whnf     = 0u;\n"
+            "  uint  state    = 0u;\n"
+            "  uint  ic_iters = 0u;\n",
+            stack_cap, root_var);
+        aot_emit_fmt(&b,
+            "  while (state != 2u && ic_iters < %uu) {\n"
+            "    ic_iters++;\n",
+            iter_cap);
+        // ENTER phase
+        aot_emit_str(&b,
+            "    if (state == 0u) {\n"
+            "      uint t = msl_term_tag(next);\n"
+            "      if (t == TAG_VAR) {\n"
+            "        ulong loc = msl_term_val(next);\n"
+            "        Term  cell = heap[loc];\n"
+            "        if (msl_sub_get(cell)) { next = msl_sub_clr(cell); continue; }\n"
+            "        whnf = next; state = 1u; continue;\n"
+            "      }\n");
+        aot_emit_fmt(&b,
+            "      if (t == TAG_DP0 || t == TAG_DP1) {\n"
+            "        ulong loc = msl_term_val(next);\n"
+            "        Term  cell = heap[loc];\n"
+            "        if (msl_sub_get(cell)) { next = msl_sub_clr(cell); continue; }\n"
+            "        if (ic_spos >= %uu) {\n"
+            "          result[0] = msl_term_new(TAG_ERA, 0xFFFFFu, 0u); return;\n"
+            "        }\n"
+            "        ic_stk[ic_spos++] = next;\n"
+            "        next = cell; continue;\n"
+            "      }\n",
+            stack_cap);
+        aot_emit_fmt(&b,
+            "      if (t == TAG_APP) {\n"
+            "        ulong loc = msl_term_val(next);\n"
+            "        if (ic_spos >= %uu) {\n"
+            "          result[0] = msl_term_new(TAG_ERA, 0xFFFFFu, 0u); return;\n"
+            "        }\n"
+            "        ic_stk[ic_spos++] = next;\n"
+            "        next = heap[loc]; continue;\n"
+            "      }\n",
+            stack_cap);
+        aot_emit_str(&b,
+            "      // LAM / SUP / ERA / NUM / REF / CTR: WHNF root.\n"
+            "      whnf = next; state = 1u; continue;\n"
+            "    } else {\n");
+        // APPLY phase
+        aot_emit_str(&b,
+            "      if (ic_spos == 0u) { state = 2u; continue; }\n"
+            "      Term  frame = ic_stk[--ic_spos];\n"
+            "      uint  ft    = msl_term_tag(frame);\n");
+        aot_emit_str(&b,
+            "      if (ft == TAG_APP) {\n"
+            "        ulong app_loc = msl_term_val(frame);\n"
+            "        Term  arg     = heap[app_loc + 1];\n"
+            "        uint  wt = msl_term_tag(whnf);\n"
+            "        if (wt == TAG_LAM) {\n"
+            "          next = aot_app_lam(whnf, arg, heap);\n"
+            "          state = 0u; continue;\n"
+            "        }\n"
+            "        if (wt == TAG_SUP) {\n"
+            "          next = aot_app_sup(whnf, arg, heap, book_next);\n"
+            "          state = 0u; continue;\n"
+            "        }\n"
+            "        if (wt == TAG_ERA) {\n"
+            "          whnf = msl_term_new(TAG_ERA, 0u, 0u); continue;\n"
+            "        }\n"
+            "        heap[app_loc + 0] = whnf;\n"
+            "        whnf = frame; continue;\n"
+            "      }\n");
+        aot_emit_str(&b,
+            "      if (ft == TAG_DP0 || ft == TAG_DP1) {\n"
+            "        ulong loc  = msl_term_val(frame);\n"
+            "        uint  lab  = msl_term_ext(frame);\n"
+            "        uint  side = (ft == TAG_DP0) ? 0u : 1u;\n"
+            "        uint  wt   = msl_term_tag(whnf);\n"
+            "        if (wt == TAG_SUP) {\n"
+            "          next = aot_dup_sup(lab, loc, side, whnf, heap, book_next);\n"
+            "          state = 0u; continue;\n"
+            "        }\n"
+            "        if (wt == TAG_LAM) {\n"
+            "          next = aot_dup_lam(lab, loc, side, whnf, heap, book_next);\n"
+            "          state = 0u; continue;\n"
+            "        }\n"
+            "        if (wt == TAG_NUM) {\n"
+            "          whnf = aot_dup_num(side, loc, whnf, heap); continue;\n"
+            "        }\n"
+            "        if (wt == TAG_ERA) {\n"
+            "          whnf = aot_dup_era(side, loc, whnf, heap); continue;\n"
+            "        }\n"
+            "        heap[loc] = whnf;\n"
+            "        whnf = frame; continue;\n"
+            "      }\n");
+        aot_emit_str(&b,
+            "      whnf = frame; continue;\n"
+            "    }\n"   /* close else (APPLY) */
+            "  }\n"     /* close while */);
+        aot_emit_fmt(&b,
+            "  if (ic_iters >= %uu) {\n"
+            "    result[0] = msl_term_new(TAG_ERA, 0xFFFFEu, 0u);\n"
+            "  } else {\n"
+            "    result[0] = whnf;\n"
+            "  }\n"
+            "}\n",
+            iter_cap);
+        emitted_ic = 1;
+    }
 
     // Iter F + L: detect App(MAT-chain, TVar) shape.  After TLam-peel
     // the body might be:
@@ -485,7 +1054,7 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     //       }
     // Mixed-shape chains are allowed (e.g., 0 -> NUM(42), #1 x -> x).
     int emitted_mat = 0;
-    if (term_tag(cursor) == TAG_APP) {
+    if (!emitted_ic && term_tag(cursor) == TAG_APP) {
         u64  app_loc  = term_val(cursor);
         Term mat_head = book_read(app_loc + 0);
         Term arg      = book_read(app_loc + 1);
@@ -583,7 +1152,7 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     }
 
     int emitted_ctr = 0;
-    if (!emitted_mat && term_tag(cursor) == TAG_CTR) {
+    if (!emitted_ic && !emitted_mat && term_tag(cursor) == TAG_CTR) {
         // Iter H: build a fresh CTR cell on the GPU heap.  Layout:
         //   heap[loc]      = NUM(n) with DT_INT32 ext
         //   heap[loc+1..n] = children (each as a Term)
@@ -619,7 +1188,7 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         }
     }
 
-    if (!emitted_mat && !emitted_ctr) {
+    if (!emitted_ic && !emitted_mat && !emitted_ctr) {
         // Plain value-expression body: emit directly + wrap as NUM.
         // Iter HH: preserve input dtype on result.
         const char *rv = aot_msl_emit_uint(&b, cursor, &bind);
@@ -635,6 +1204,15 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         // Iter G: an unsupported shape (recursion, partial app, etc.)
         // tripped the failure flag during recursive emit.  Discard the
         // partial source so the caller can fall back / report failure.
+        // Iter Z: when env THVM_AOT_METAL_DUMP=1 also print the partial
+        // source so failures during the IC path are diagnosable.
+        const char *e = getenv("THVM_AOT_METAL_DUMP");
+        if (e != NULL && e[0] == '1' && b.buf != NULL) {
+            fprintf(stderr,
+                "// === thvm aot-metal: PARTIAL emit (FAILED) for \"%s\" ===\n%s"
+                "// === end PARTIAL \"%s\" reason=\"%s\" ===\n",
+                name, b.buf, name, g_msl_emit_failure_reason);
+        }
         free(b.buf);
         return NULL;
     }

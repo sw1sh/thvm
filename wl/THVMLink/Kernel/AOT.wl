@@ -56,6 +56,16 @@ TAOTPath::usage =
   "TAOTPath[name] returns the dylib path stashed by TAOTCompile[name], \
 or Missing[\"NotCompiled\"] if the def has never been TAOTCompile'd.";
 
+TAOTIcCollapse::usage =
+  "TAOTIcCollapse[term_TTerm, depth_Integer] dispatches the static \
+aot_ic_collapse PSO with grid = 2^depth over a BOOK_HEAP-rooted \
+SUP-tree at `term` (e.g., the result of TAOTRun[..., Method -> \"Metal\"] \
+with THVM_AOT_METAL_KEEP_BOOK=1 set).  Each thread decodes its tid \
+into a binary path through the SUP-tree, drives the final leaf to \
+WHNF on-thread via per-thread IC interaction inlines, and writes the \
+resulting Term to result[tid].  Returns a List of TTerm leaves of \
+length 2^depth (filter ERA sentinels via TTermTag).  Iter Z+1.";
+
 TAOTBatchOp2Fold::usage =
   "TAOTBatchOp2Fold[root_locs] dispatches the iter B-2 batch kernel \
 (aot_eval_op2_fold_batch) over a list of book_heap locs, each pointing \
@@ -203,6 +213,23 @@ $aotMetalRunNFn := $aotMetalRunNFn = load[
 $aotMetalBatchOp2Fn := $aotMetalBatchOp2Fn = load[
     "thvm_wl_aot_metal_op2_fold_batch",
     {{Integer, 1}}, {Integer, 1}];
+
+(* iter Z+1: parallel cnf+collapse on a BOOK_HEAP-rooted SUP-tree,
+   dispatched via the static aot_ic_collapse PSO with grid = 2^depth.
+   Caller gives the kernel-1 result Term + an estimated SUP-tree
+   depth (max 30); each thread walks one leaf path and drives it to
+   WHNF on-thread.  Returns a list of leaf TTerms (length 2^depth);
+   ERA-pruned paths come back as TAG_ERA terms which the caller can
+   filter. *)
+$aotIcCollapseFn := $aotIcCollapseFn = load[
+    "thvm_wl_aot_ic_collapse",
+    {Integer, Integer}, {Integer, 1}];
+
+TAOTIcCollapse[t_TTerm, depth_Integer] := Module[{raws},
+    ensureInit[];
+    raws = $aotIcCollapseFn[Symbol["THVMLink`Private`ttermRaw"][t], depth];
+    Symbol["THVMLink`TTerm"] /@ raws
+];
 
 (* Phase 7 iter QQ: WL surface for the batch dispatcher.  Caller
    supplies a list of book_heap locs (Integers), each pointing at an
