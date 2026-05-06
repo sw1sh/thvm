@@ -1,0 +1,12 @@
+## Level 39: 2 sequential LinearLayers -- 48x gap reproducer
+
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+two_linears kernel_count: 3
+dispatch_kinds: {{metal-gemm, 1}, {metal-tile, 2}}
+kid 1 kind=metal-gemm baseline=179.us best=179.us  opt=TOpt[TC, 0, 8]  applied={TOpt[TC, 0, 16]}
+kid 2 kind=metal-tile baseline=8580.us best=8581.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 2]}
+kid 3 kind=metal-tile baseline=254.us best=158.us  opt=TOpt[LOCAL, 0, 32]  applied={TOpt[LOCAL, 0, 8], TOpt[GLOBAL, 0, 4]}
+totals_baseline_us: 9013.
+totals_best_us: 8918.
+totals_speedup: 1.01065
+thvm: metal_jit stats -- hits=205 misses=37 bypass=0 compile_us=211744

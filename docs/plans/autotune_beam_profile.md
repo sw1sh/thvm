@@ -3862,3 +3862,52 @@ set.  Single change-point catches all rules.
   (e.g., the function that decides "include this op in the
   current kernel vs start a new kernel") and look for the
   point where it absorbs an upstream matmul-output.
+
+### Level 39: empirical split test -- matmul+bias as separate steps
+
+Before diving into rangeify code, validate the split-strategy
+hypothesis: would isolating the matmul from the bias-add
+actually deliver the predicted 40x win?
+
+The standalone matmul (Level 27, no bias) ran totals_best 353us.
+If matmul+bias-as-separate-step also runs ~350us + small
+bias-add cost (~50us), the split strategy is worth the C-side
+work.  If it ALSO runs slow (because rangeify still fuses
+across the natural NetChain boundary), the entire split-
+strategy is invalidated.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/two_linears.wls`
+  -- two sequential Linear layers (256, 64) on (32, 64)
+  input, no activation between.
+
+  | kid | dispatch    | best wall | role                       |
+  |----:|-------------|----------:|----------------------------|
+  |   1 | metal-gemm  |     179us | first Linear (external in) |
+  |   2 | metal-tile  |    8580us | second Linear (kid1 output)|
+  |   3 | metal-tile  |     158us | trailing                   |
+
+  **Smallest reproducer of the 40x gap.**  The moment a
+  Linear's input comes from another kernel's output, it
+  drops off the gemm path and runs ~48x slower (8580us vs
+  179us for the same shape).
+
+  This invalidates the "natural NetChain boundaries preserve
+  gemm" hypothesis.  Even with no activation between
+  Linears, the second one fails gemm dispatch because its
+  input is a bufferized intermediate from the first
+  Linear, not an external Tensor input.
+
+  **The actual gate failure** (per Level 31's per-gate
+  diagnostic) is `n_inputs != 2`: kid 2's kernel has
+  n_inputs=3 (matmul-input from kid 1 + matmul-weight +
+  bias).
+
+  **Next focused investigation**: why does the first Linear's
+  kernel have n_inputs=2 (clean gemm) but the second has
+  n_inputs=3?  Both are LinearLayer[N] with bias.  Looking
+  at kid 1's structure must show how the bias-add is
+  separated; kid 2 fails to do the same separation.
+
+  This is the focused testbed.  Subsequent iterations bench
+  against two_linears.wls (3 kernels, fast iteration) instead
+  of the full transformer (17 kernels, slow iteration).
