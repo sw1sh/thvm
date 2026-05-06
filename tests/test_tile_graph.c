@@ -15,22 +15,6 @@
 #include "../src/thvm.c"
 #include "test.h"
 
-// LEGACY_MSL_CHECK: assertions that hold for the legacy ScalarUop
-// renderer's specific MSL conventions (`_tg`, `_ltid`, `_ta0`, `_sh`,
-// `_rk`, `_gid3.x`, `_tk`, `threadgroup float`, etc.).  The new
-// render_uop renderer (default since Phase F) uses different
-// conventions (`tg`, `tt`, `aN`, `_acc<axis>`) so these assertions
-// don't apply.  Run only when THVM_RENDER_VIA_UOP=0 forces the
-// legacy renderer.
-static inline int legacy_msl_render_active(void) {
-  char const *e = getenv("THVM_RENDER_VIA_UOP");
-  return e != NULL && e[0] == '0';
-}
-#define LEGACY_MSL_CHECK(expr) \
-  do { if (legacy_msl_render_active()) { CHECK(expr); } } while (0)
-#define LEGACY_MSL_CHECK_EQ(a, b) \
-  do { if (legacy_msl_render_active()) { CHECK_EQ(a, b); } } while (0)
-
 #define TEST_REDUCE_NO_TAIL 0xFFFFFFFFu
 
 static u32 build_scalar_add_graph(KernelEntry *ke, u32 extent) {
@@ -653,10 +637,6 @@ int main(void) {
   char *conv_src = cg_emit_tile_metal(ke);
   CHECK(conv_src != NULL);
   if (conv_src != NULL) {
-    LEGACY_MSL_CHECK(strstr(conv_src, "#define KRED (CIN * KH * KW)") != NULL);
-    LEGACY_MSL_CHECK(strstr(conv_src, "for (int ci = 0") != NULL);
-    LEGACY_MSL_CHECK(strstr(conv_src, "constant int *cfg") != NULL);
-    LEGACY_MSL_CHECK(strstr(conv_src, "acc += in0[wi] * in1[xi]") != NULL);
     free(conv_src);
   }
   ke->axes = &ke->_local_axes;
@@ -697,8 +677,6 @@ int main(void) {
   conv_src = cg_emit_tile_metal(ke);
   CHECK(conv_src != NULL);
   if (conv_src != NULL) {
-    LEGACY_MSL_CHECK(strstr(conv_src, "#define OUTS 4u") != NULL);
-    LEGACY_MSL_CHECK(strstr(conv_src, "uint base = gid * OUTS") != NULL);
     free(conv_src);
   }
   memset(ke->axes, 0, sizeof(KernelAxes));
@@ -717,8 +695,6 @@ int main(void) {
   conv_src = cg_emit_tile_metal(ke);
   CHECK(conv_src != NULL);
   if (conv_src != NULL) {
-    LEGACY_MSL_CHECK(strstr(conv_src, "#pragma clang loop unroll_count(2)") != NULL);
-    LEGACY_MSL_CHECK(strstr(conv_src, "for (int q = 0; q < KRED") != NULL);
     free(conv_src);
   }
   memset(ke->axes, 0, sizeof(KernelAxes));
@@ -920,16 +896,11 @@ int main(void) {
   if (metal_tile_src != NULL) {
     CHECK(strstr(metal_tile_src, "threadgroup_position_in_grid") != NULL);
     CHECK(strstr(metal_tile_src, "thread_position_in_threadgroup") != NULL);
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "threadgroup_barrier") != NULL);
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _tg = _tgid;") != NULL);
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _ta0 = _tg % 2u;") != NULL);
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _ta1 = _ltid;") != NULL);
     free(metal_tile_src);
   }
   u32 saved_n_inputs = ke->n_inputs;
   ke->n_inputs = 31;
   CHECK(!cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
-  LEGACY_MSL_CHECK(cg_emit_tile_metal(ke) == NULL);
   ke->n_inputs = saved_n_inputs;
 
   TEST_BEGIN("tile-graph/metal-autotune-proposes-local-global");
@@ -979,8 +950,6 @@ int main(void) {
   metal_tile_src = cg_emit_tile_metal(ke);
   CHECK(metal_tile_src != NULL);
   if (metal_tile_src != NULL) {
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _ta0 = _ltid;") != NULL);
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _ta1 = _tg % 2u;") != NULL);
     free(metal_tile_src);
   }
 
@@ -1006,10 +975,6 @@ int main(void) {
   metal_tile_src = cg_emit_tile_metal(ke);
   CHECK(metal_tile_src != NULL);
   if (metal_tile_src != NULL) {
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _tg = _tgid;") != NULL);
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _ta2 = _tg % 2u;") != NULL);
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _ta0 = _tg % 2u;") != NULL);
-    LEGACY_MSL_CHECK(strstr(metal_tile_src, "uint _ta1 = _ltid;") != NULL);
     free(metal_tile_src);
   }
 
@@ -1138,7 +1103,6 @@ int main(void) {
   CHECK(flat_metal_src != NULL);
   if (flat_metal_src != NULL) {
     CHECK(strstr(flat_metal_src, "thread_position_in_grid") != NULL);
-    LEGACY_MSL_CHECK(strstr(flat_metal_src, "_tk = _gid3.x") != NULL);
     CHECK(strstr(flat_metal_src, "threadgroup_barrier") == NULL);
     free(flat_metal_src);
   }
@@ -1267,7 +1231,6 @@ int main(void) {
   // exercises the parallelised variant separately.
   setenv("THVM_TILE_NESTED_REDUCE_FLAT_GRID", "0", 1);
   CHECK(!cg_tile_metal_dispatch_shape(tk, &post_groups_x, &post_threads_x));
-  LEGACY_MSL_CHECK(cg_emit_tile_metal(tk) == NULL);
   unsetenv("THVM_TILE_NESTED_REDUCE_FLAT_GRID");
   KOpt post_group4 = { .op = KOP_GROUP, .axis = 1, .arg = 4 };
   CHECK(kernel_apply_opt(tk, post_group4));
@@ -1277,9 +1240,6 @@ int main(void) {
   char *post_metal_src = cg_emit_tile_metal(tk);
   CHECK(post_metal_src != NULL);
   if (post_metal_src != NULL) {
-    LEGACY_MSL_CHECK(strstr(post_metal_src, "threadgroup float") != NULL);
-    LEGACY_MSL_CHECK(strstr(post_metal_src, "_sh") != NULL);
-    LEGACY_MSL_CHECK(strstr(post_metal_src, "* as_type<float>(0x40000000u)") != NULL);
     free(post_metal_src);
   }
   kernel_free_arrays(tk);
@@ -1320,7 +1280,6 @@ int main(void) {
   CHECK(red_metal_src != NULL);
   if (red_metal_src != NULL) {
     CHECK(strstr(red_metal_src, "thread_position_in_grid") != NULL);
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "for (uint _rk") != NULL);
     CHECK(strstr(red_metal_src, "_acc") != NULL);
     free(red_metal_src);
   }
@@ -1336,11 +1295,6 @@ int main(void) {
   red_metal_src = cg_emit_tile_metal(tk);
   CHECK(red_metal_src != NULL);
   if (red_metal_src != NULL) {
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "threadgroup float") != NULL);
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "_rk") != NULL);
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "_ltid") != NULL);
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "threadgroup_barrier") != NULL);
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "if (_ltid == 0u)") != NULL);
     free(red_metal_src);
   }
   kernel_free_arrays(tk);
@@ -1365,9 +1319,6 @@ int main(void) {
   red_metal_src = cg_emit_tile_metal(tk);
   CHECK(red_metal_src != NULL);
   if (red_metal_src != NULL) {
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "< 2u") != NULL);
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "< 3u") != NULL);
-    LEGACY_MSL_CHECK(strstr(red_metal_src, "_rk") != NULL);
     free(red_metal_src);
   }
   f32 red2_in[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};

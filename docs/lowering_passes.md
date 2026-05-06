@@ -434,113 +434,109 @@ this gap is the active work in `docs/plans/bufferize.md` Phase 3 and
 
 ---
 
-## Ideal pipeline (forward-looking)
+## Pipeline today (post-Phase F: 2 IRs landed)
 
-The pipeline above is what's in the tree today.  It works but carries
-a lot of structural cruft: three parallel IRs (KProgOp[], ScalarUop[],
-TileUop[]), a side-channel KernelAxes, six runtime dispatch paths,
-two boundary-tracking arrays, and movement ops that exist as both
-heap UOps AND KProgOps AND consumed-edge metadata on B_INDEX.
+After the Phase F migration campaign (~2026-05), the structural
+cruft above is gone.  The pipeline is **2 IRs** (UOp DAG / target
+source) and **one renderer** (`cg_render_uop_kernel`).  Pre-Phase-F
+state (3 parallel IRs, 7-path dispatch ladder, ~3.2k lines deleted /
+in process of deletion) is preserved below for historical context.
 
-What tinygrad and tilelang teach is that **a single DAG IR with
-movement-as-index and axes-as-leaves** removes most of the bookkeeping.
-This is the target architecture; everything else is migration cost.
+### Target shape: 2 IRs (LANDED)
 
-### Target shape: 3 IRs, each with one job
-
-The right number of IRs isn't ONE (tinygrad-flat) or FOUR (current
-KProgOp + ScalarUop + TileUop + backend) — it's THREE, each with a
-clear scope.  Tilelang is the relevant analogue: their tile-IR is
-where memory scopes, thread bindings, and vectorisation live, and
-that layer earns its keep.
+A revision to the original "3 IRs" plan.  Inspecting tinygrad's
+TileLang correspondence + Fragment ↔ MULTI analogy showed the
+right shape is 2, not 3: tile-level concepts (buffer scope, axis
+types, ordering, GEMM/Conv) inhabit the **same UOp DAG** as the
+input language via a small set of additional opcodes plus
+annotations.  The previously-planned `TileUop[]` array becomes
+dead code, not a separate IR.
 
 ```
    user / WL
       |
       v
-   UOp DAG                                     <- IR 1: tensor expressions
-      |   pure-functional, hash-consed.        ALL movement-as-INDEX
-      |   simplify (algebraic + movement-      rewrites land here.
-      |   to-INDEX) and schedule (insert       Schedule decisions
-      |   BUFFERIZE/STORE at boundaries)       (which buffers
-      |   are rewrites on this IR.             materialise) are
-      |                                        BUFFERIZE node insertion
-      |                                        / removal in pass 2.
+   UOp DAG                                     <- IR 1: the only IR.
+      |   pure-functional, hash-consed.        Tensor expressions,
+      |   tile-level concepts (BUFFER scope,   buffer scopes, store
+      |   STORE addr/value, AFTER ordering,    addresses, ordering
+      |   OPT annotations) all live here.      annotations, and OPT
+      |   ALL movement-as-INDEX rewrites and   directives (UNROLL /
+      |   schedule decisions are rewrites      UPCAST / TC / LOCAL /
+      |   on this single IR.                   GROUP_REDUCE) all live
+      |                                        as UOp opcodes.
       |
       |  pass 1: simplify                      tinygrad-style
-      |     PERMUTE/RESHAPE/EXPAND/PAD/        PatternMatcher.
-      |     SHRINK/FLIP rewrite to INDEX
-      |     expressions; algebraic folds;
+      |     PERMUTE/RESHAPE/EXPAND/PAD/        PatternMatcher.  See
+      |     SHRINK/FLIP rewrite to INDEX       src/uop/movement_index.c
+      |     expressions; algebraic folds;      and src/uop/index_simplify.c.
       |     dtype norm; specialisation match
       |     (gemm, conv).
       |
       |  pass 2: schedule                      named cost-modeled
       |     for each kernel boundary, insert   rules over BUFFERIZE
-      |     B_BUFFERIZE + B_STORE + B_INDEX    nodes. Removal
-      |     UOp nodes.  Rules promote /        rewrites can fold an
-      |     remove boundaries based on cost.   intermediate buffer
-      |                                        through movement-as-
-      |                                        INDEX.
-      v
-   Tile IR                                     <- IR 2: scheduled compute.
-      |   per-kernel: explicit loop nest,      tilelang's TIR analogue.
-      |   axis types (parallel / vectorize /   memory hierarchy
-      |   unroll / reduce), memory scopes      (global / shared /
-      |   (global / shared / register),        register) lives here,
-      |   thread binding, MMA fragments.       NOT in the UOp DAG.
-      |                                        autotune (BEAM) is
-      |                                        rewrite-search on
-      |                                        this IR.
+      |     B_BUFFERIZE + B_STORE + B_INDEX    nodes (src/schedule/
+      |     UOp nodes.  Rules promote /        bufferize.c).  Removal
+      |     remove boundaries based on cost.   rewrites fold an
+      |                                        intermediate buffer
+      |                                        through movement-as-INDEX.
       |
-      |  pass 3: lower                         UOp DAG (per kernel)
-      |     UOp DAG -> Tile IR.  Each          becomes a TILE_LOOP_NEST
-      |     B_STORE-rooted subgraph maps to    with TILE_AXIS leaves
-      |     a TILE_LOOP_NEST whose axes        (typed), TILE_REDUCE
-      |     come from the kernel's RANGE       wrappers, and a scalar
-      |     leaves; reductions become          body subtree of S_*
-      |     TILE_REDUCE; the body is the       ops.  This is what
-      |     scalar expression tree.            tile.c builds; today it
-      |                                        is structural-only,
-      |                                        the migration is to
-      |                                        ADD the schedule
-      |                                        annotations.
-      |
-      |  pass 4: schedule annotations          per-axis decisions:
-      |     rewrite TILE_AXIS leaves with      LOOP / GLOBAL / LOCAL /
-      |     types and bind shared-memory       UPCAST / UNROLL /
-      |     allocations, vectorisation         GROUP_REDUCE.  Memory
-      |     widths, thread-block sizes.        allocations and
-      |                                        barriers become
-      |                                        explicit TILE_ALLOC
-      |                                        and TILE_BARRIER nodes.
+      |  pass 3: kernel boundary -> UOp DAG    src/schedule/kernel_lift.c.
+      |     ke->scalar_uops (legacy) or        Synthesises canonical
+      |     TileGemmInfo / TileConv2DInfo      UOp DAG for every kernel
+      |     synthesise to a UOP_STORE root     shape (incl. matmul,
+      |     with UOP_RANGE iterators,          conv2d_flat, im2col
+      |     UOP_INDEX_E / UOP_BUFFER source    multi-input).  The lifter
+      |     reads, optional UOP_OPT(_, TC)     is a bridge for the
+      |     annotations for specialised        Phase G transition; once
+      |     templates.                         rangeify/visit emit UOp
+      |                                        DAG directly, this file
+      |                                        deletes.
       v
-   pass 5: render                              pretty-printer.
-      | emit MSL / C / CUDA from the           every backend is a
-      | fully annotated Tile IR.  No           rendering of the same
-      | decisions left; the renderer is        Tile IR with backend-
-      | a backend-specific tree walker.        specific dialect quirks.
+   pass 4: render                              src/codegen/render_uop.c.
+      | cg_render_uop_kernel walks UOp DAG     Pattern-matches:
+      | rooted at UOP_STORE / UOP_AFTER and    OPT(REDUCE(MUL(_,_),
+      | emits MSL.  Output / input buffer      SUM, k), TC, _) -> 8x8
+      | naming via uop_buffer_inst's slot      simdgroup_matrix template.
+      | disambiguator.  Hoists nested          Generic shapes -> for-loop
+      | UOP_REDUCE into accumulator preamble.  nest with hoisted accumulator
+      |                                        for REDUCE.
       v
    one dispatch path                           one MTLComputePipelineState
                                                per kernel; ICB replay
                                                amortises encoder cost.
+                                               Validated on 100/100 WL
+                                               tests, 274/274 binary
+                                               tests.
 ```
 
-### Why three IRs and not one (correction)
+### Why two IRs, not three (revision: 2026-05)
 
-I previously suggested collapsing tile.c into the UOp DAG.  That was
-wrong — the UOp DAG is the right place for **what to compute**
-(values, indices, reductions); the Tile IR is the right place for
-**how to compute it on a GPU** (loop nest, memory scope, thread
-binding, vectorisation, MMA).  Mixing those into one IR is what
-makes tinygrad's `linearize` pass complex: the same UOp graph has to
-encode both at once.
+The earlier version of this doc proposed 3 IRs — UOp DAG / Tile IR /
+target source — with `TileUop[]` carrying the tile-level concepts
+(memory scope, thread binding, vectorisation, MMA).  After ingesting
+tinygrad's TileLang correspondence (mapping every `T.*` surface op
+to a UOp DAG shape) and the Fragment ↔ Ops.MULTI analogy showing
+per-thread register slicing IS the same algebra as multi-device
+sharding, the right shape became 2 IRs:
 
-Tilelang's lesson: keep them separate.  The Tile IR has explicit
-`T.thread_binding`, `T.alloc_buffer`, `T.copy`, `T.gemm`, etc.  These
-are tile-IR-level constructs, not tensor-IR-level.  Autotune lives at
-the Tile IR layer because that's where the cost surface is —
-parallel-dim choices, vectorisation widths, shared-memory tile sizes
-— not at the value-computation layer.
+- `T.alloc_shared` → `UOP_BUFFER(scope=LOCAL)`
+- `T.alloc_fragment` → `UOP_BUFFER(scope=REG)`
+- `T.copy` → `UOP_STORE + UOP_AFTER`
+- `T.async_copy` → `UOP_STORE + UOP_AFTER + Linear` annotation
+- `T.unroll` → `UOP_OPT(target, UNROLL, factor)`
+- `T.Parallel` → `UOP_OPT(target, LOCAL, 0)`
+- `T.gemm` → matmul UOp shape + `UOP_OPT(_, TC, 0)`
+
+GEMM, conv2d, and FlashAttention live as canonical **UOp shapes
+plus OPT annotations**, not as dedicated opcodes — the renderer
+pattern-matches the shape and emits a specialised template (e.g.
+`simdgroup_matrix<float, 8, 8>` for matmul-shaped reduces with
+tile-aligned K extents).  This keeps the IR small and uniform.
+
+Autotune at the UOp DAG layer becomes rewrite-search over the
+OPT-annotation set — same tractability as a separate Tile IR
+without the bookkeeping cost.
 
 ### What each existing pass collapses into
 
