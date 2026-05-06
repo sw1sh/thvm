@@ -2550,6 +2550,24 @@ Term thvm_aot_metal_compile_and_run(const char *name, u32 def_id,
     }
     return 0;
   }
+  // Phase 7 iter AA: env-gated MSL source dump.  THVM_AOT_METAL_DUMP=1
+  // prints the emitted source to stderr; useful for inspecting what
+  // the Metal AOT actually generates for a given def shape.
+  {
+    static int dump_inited = 0;
+    static int dump_on     = 0;
+    if (!dump_inited) {
+      const char *e = getenv("THVM_AOT_METAL_DUMP");
+      dump_on = (e != NULL && e[0] == '1');
+      dump_inited = 1;
+    }
+    if (dump_on) {
+      fprintf(stderr,
+        "// === thvm aot-metal: emitted MSL for \"%s\" ===\n%s"
+        "// === end emit \"%s\" ===\n",
+        name, src, name);
+    }
+  }
   uint64_t hash = aot_metal_fnv1a(src);
   id<MTLComputePipelineState> pso = aot_metal_pso_get(hash, name, src);
   free(src);
