@@ -230,6 +230,37 @@ used to carry:
   fallback (malformed conv shape, missing metadata).  All real
   conv2d workloads flow through the UOp-DAG renderer.
 
+### Phase G cleanup (`0fa9d8e`, `e1a7d8a`, `ed91fa3`, `152e6c2`, ...)
+
+Roll-up of the legacy-deletion campaign:
+
+- `cg_emit_tile_metal` collapses to `cg_emit_via_uop`; `cg_emit_metal`
+  forwards to it too.  `THVM_RENDER_VIA_UOP=0` env support dropped.
+- ~960 lines of legacy MSL emission deleted (rmt_emit_value /
+  index_offset / value_with_reduce / store_value / group_reduce_store
+  / conv2d_flat / index_param_slot, plus the entire KProgOp-renderer
+  machinery: METAL_RENDERER dispatch table + rm_emit_* helpers + 
+  rm_expr_emit + rm_reduce_expr_emit).
+- `cg_tile_metal_dispatch_shape` switches from CtKernelInfo to
+  `tile_compute_dispatch_shape` (walks tile_uops axes); deletes
+  rmt_collect_kernel_info / rmt_axis_mode / rmt_axis_numel /
+  rmt_group_reduce_extent / rmt_dtype_supported / RmtAxisMode enum.
+- 30 `LEGACY_MSL_CHECK` legacy-format string-match assertions
+  stripped from test_tile_graph.c.
+- `docs/lowering_passes.md` rewritten forward-only (1036 -> 190
+  lines), `docs/cpu.md` updated.  `docs/plans/tile_uops.md` and
+  `docs/plans/scalar_uops_lowering.md` shrunk to single-paragraph
+  pointers at the new architecture.
+- Phase / migration / legacy references stripped from comments
+  across src/thvm.h, src/uop/*.c, src/codegen/render_*.c,
+  src/schedule/kernel_lift.c.
+- 274/274 binary tests + 100/100 WL workloads remain green.
+
+Survivors (still in-tree, still load-bearing, mechanical to retire):
+`tile.c` / `tile_anno.c` / `rangeify.c` / `render_c_scalar.c` /
+ScalarUop[] arena.  Each waits on its consumer (autotune /
+materialize / cpu_jit) flipping to the UOp-DAG pipeline.
+
 ### Phase G first cut (`0fa9d8e`, `e1a7d8a`)
 
 - `cg_emit_tile_metal` collapses to `cg_emit_via_uop`.
