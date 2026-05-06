@@ -4082,7 +4082,46 @@ Hypotheses:
   Maybe one of the boundaries hits a different dispatch
   path while a different boundary becomes the slow kid.
 
-  - [ ] Cross-reference the 3 boundary locs (22, 57, 68) to
-    the 3 dispatched kids by adding loc to the per-kernel
-    dispatch print.  Determines which boundary is the slow
-    kernel.
+  - [x] (2026-05-06) Cross-reference the 3 boundary locs to
+    the 3 dispatched kids.  By boundary-emit ordering, kid N
+    = boundary idx N-1:
+
+      kid 1 = idx 0 (loc 22, REDUCE/MATMUL) -> gemm 179us
+      kid 2 = idx 1 (loc 57, REDUCE/MATMUL) -> tile 8580us
+      kid 3 = idx 2 (loc 68, root op=9)     -> tile 158us
+
+    **kid 2 is the matmul-2 reduce boundary** -- correct
+    boundary, but its kernel program is built with 5 ops
+    because visit() inlines the bias-add UPSTREAM of
+    matmul-2's reduce (kid 0's bias-add output is matmul-2's
+    input).  The bias-add is elementwise+single-consumer so
+    it's not a boundary, and visit() absorbs it into kid 2's
+    program along with the matmul.
+
+    Kid 2's likely program:
+      ADD (kid0_out + b1)         <- inlined bias-add
+      EXPAND/RESHAPE              <- broadcast movement
+      MUL (with W2)               <- matmul-2 body
+      REDUCE                      <- matmul-2 reduce (root)
+
+    n_ops=5 (movement + ADD + EXPAND + MUL + REDUCE) and
+    n_inputs=3 (kid0_out, b1, W2).  Fails tile_analyze_gemm's
+    n_inputs==2 + n_ops==2 gates.
+
+    **The bias-add upstream of matmul-2 is the fusion
+    lever.**  To get kid 2 onto the gemm path, the bias-add
+    must become its own boundary (kernel).
+
+    Trade-off: +1 kernel for separating bias-add but +40x
+    wall on the matmul.  Wall improvement dominates.
+
+    Fix idea: in bufferize_classify, when a UOP_REDUCE is
+    matmul-shape AND its input chain has an ADD (or any
+    realizable op), mark that ADD as realized (protected) so
+    it becomes its own boundary.
+
+  - [ ] Sketch a "matmul-input-protect" rule: walk upstream
+    from each matmul reduce, find any ADD/elementwise on the
+    direct input path, and mark them realized.  Try it on
+    two_linears.
+
