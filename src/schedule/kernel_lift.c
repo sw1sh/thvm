@@ -977,17 +977,28 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
         cur[o.axis + 1].extent    = inner_extent;
         cur[o.axis + 1].origin    = origin;
         cur[o.axis + 1].factor    = factor;
-        // For UPCAST/UNROLL the renderer's `#pragma unroll(N)` fires
-        // only when the inner UOP_RANGE is wrapped in a UOP_OPT
-        // annotation; the axis_type alone isn't enough.  LOCAL /
-        // GROUP / GROUPTOP rely on axis_type for the renderer's
-        // thread-bind / accumulator paths.
-        cur[o.axis + 1].opt_kind   = (op == KOP_UPCAST) ? UOP_OPT_UPCAST
-                                   : (op == KOP_UNROLL) ? UOP_OPT_UNROLL
-                                   :                      SPLIT_AXIS_NO_OPT;
-        cur[o.axis + 1].opt_factor = (op == KOP_UPCAST || op == KOP_UNROLL)
-                                   ? inner_extent
-                                   : 0;
+        // OPT-annotation stamping for the inner range:
+        //   UPCAST / UNROLL  -> renderer fires `#pragma unroll(N)` above
+        //                       the inner for-loop.
+        //   GROUP / GROUPTOP -> renderer recognises a threadgroup-
+        //                       shared-accumulator pattern (Phase 3
+        //                       follow-on) and emits the cooperative
+        //                       reduce shape.  Stamping the OPT here
+        //                       is harmless until the renderer learns
+        //                       to consume it; the existing scalar
+        //                       accumulator path ignores unfamiliar
+        //                       opt kinds.
+        //   LOCAL            -> axis_type=KAX_LOCAL alone drives the
+        //                       `tt`/`tg` thread bind in the renderer.
+        cur[o.axis + 1].opt_kind   =
+            (op == KOP_UPCAST)                          ? UOP_OPT_UPCAST
+          : (op == KOP_UNROLL)                          ? UOP_OPT_UNROLL
+          : (op == KOP_GROUP || op == KOP_GROUPTOP)     ? UOP_OPT_GROUP_REDUCE
+          :                                               SPLIT_AXIS_NO_OPT;
+        cur[o.axis + 1].opt_factor =
+            (op == KOP_UPCAST || op == KOP_UNROLL
+             || op == KOP_GROUP || op == KOP_GROUPTOP)  ? inner_extent
+          :                                               0;
         n_cur++;
       } else if (op == KOP_GLOBAL) {
         if (cur[o.axis].axis_type != KAX_LOOP || o.arg != cur[o.axis].extent) {

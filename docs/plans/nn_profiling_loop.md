@@ -307,11 +307,23 @@ every minute.
   correct `78.0` result via metal-tile dispatch with a clean
   rendered MSL (single accumulator, single reduce-axis for-loop).
   No code change needed; the guard already does what Phase 1 wants.
-- [ ] Phase 2: extend `SplitAxis` to track whether an axis is a
-  reduce axis (carry KAX_REDUCE through the replay).  When a
-  GROUP/GROUPTOP split fires on a REDUCE axis, mark the inner
-  axis `opt_kind = UOP_OPT_GROUP_REDUCE` (introducing this opcode
-  if it doesn't exist).
+- [x] (2026-05-06) Phase 2: extend `SplitAxis` to track whether an
+  axis is a reduce axis (carry KAX_REDUCE through the replay).
+  When a GROUP/GROUPTOP split fires on a REDUCE axis, mark the
+  inner axis `opt_kind = UOP_OPT_GROUP_REDUCE`.  The opcode already
+  exists (`#define UOP_OPT_GROUP_REDUCE 4` in
+  [src/thvm.h](../../src/thvm.h)).  Updated the OPT stamping in
+  `kernel_lift.c` so KOP_GROUP/KOP_GROUPTOP splits set
+  `opt_kind=UOP_OPT_GROUP_REDUCE`, `opt_factor=arg`.  Stamping is
+  harmless until Phase 3 wires the renderer to consume it (the
+  existing scalar-accum path ignores unfamiliar OPT kinds).
+  make test 274/274 unchanged.
+
+  Note: the replay loop still doesn't reach reduce axes because
+  the `has_reduce_axis` short-circuit zeros `n_applied` and `cur[]`
+  only contains `n_buf` (BUFFERIZE) entries -- the REDUCE axis is
+  per-USE.  Phase 4 lifts the short-circuit and extends `cur[]` to
+  include per-USE ranges.
 - [ ] Phase 3: extend `rmu_emit_store_reduce` in
   `src/codegen/render_uop.c` to detect a GROUP_REDUCE-annotated
   reduce range and emit the threadgroup-shared accumulator
