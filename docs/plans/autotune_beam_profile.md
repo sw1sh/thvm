@@ -261,6 +261,62 @@ Total: ~17-19 kernels per block.
   combinations in NetChain.  Subsequent thvm-side benches:
   start with `AttentionLayer` and grow.
 
+### Level 18 thvm: probe AttentionLayer support
+
+The user pointed at AttentionLayer + neuralnetworks +
+MLXLink as the WL surface for transformer-family
+benchmarks.  Whether TFromNet currently lowers
+NetChain[{AttentionLayer[...]}] is unverified -- BN was
+silently rejected (Level 13).  Probe with the simplest
+possible AttentionLayer net.
+
+- [~] (2026-05-06) Write `bench/autotune-ladder/attention.wls`
+  -- a NetChain wrapping a single `AttentionLayer` matched to
+  Level 18's tinygrad config (seq_len=32, d_model=64,
+  n_heads=4, d_head=16).  Save stdout to
+  `bench/autotune-ladder/attention.txt`.  Verify TFromNet
+  lowers it (kernel_count > 0); if so capture the
+  kernel-count + dispatch decomposition; if not, mark `[~]`
+  with the same diagnosis pattern as Level 13 (BN).
+
+  **Skipped: AttentionLayer is partial in TFromNet, NetChain
+  wrapping is the wrong approach.**
+
+  thvm's WL side does have an AttentionLayer handler at
+  [wl/THVMLink/Kernel/NN.wl:1017](../../wl/THVMLink/Kernel/NN.wl#L1017):
+
+      fromLayer[AttentionLayer, _, qkv_List] /; Length[qkv] === 3 := ...
+      fromLayer[AttentionLayer, _, _] :=
+          <|"Message" -> "AttentionLayer expects {Q, K, V} TTerm
+                          triple via NetGraph multi-input dispatch"|>
+
+  So AttentionLayer requires a NetGraph (not NetChain) with
+  explicit Q/K/V input ports, providing 3 TTerm sources.
+
+  But there's a deeper limitation per `wl/Examples/gpt2/inference.wls:32-37`:
+
+      The attention sub-NetGraph (12-head AttentionLayer +
+      CatenateLayer + per-head NetMapOperator[LinearLayer])
+      does NOT yet convert: per-head input wiring through
+      CatenateLayer needs ordered-multi-input edge tracking
+      that the LayersGraph property flattens away.  Documented
+      in docs/bench/history.md as the Phase 13 follow-up.
+
+  So thvm's AttentionLayer support is **single-head with
+  explicit Q/K/V** only.  Multi-head via CatenateLayer (the
+  natural transformer pattern) is a known follow-up.
+
+  This bench needs:
+  1. A working single-head AttentionLayer + explicit Q/K/V
+     NetGraph (small probe; not blocked).
+  2. A Phase 13 implementation (CatenateLayer multi-input
+     edge tracking) before the multi-head bench is feasible.
+
+  Saved attention.wls + attention.txt as evidence of the
+  initial NetChain-rejection symptom.  The probe re-frames
+  next iteration as "single-head NetGraph" (still under the
+  AttentionLayer envelope, just multi-input wired).
+
 ## Discipline (lessons from the prior cron run)
 
 - **Never start a new bench while another is running.** The Metal

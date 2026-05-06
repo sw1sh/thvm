@@ -1,0 +1,16 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+
+AttentionLayer::netmissio: Net specified for the scoring net (argument 1) is missing required input port Query.
+
+NetChain::netinvnodes: $Failed is not a layer, a net, or a valid specification for one.
+
+NetInitialize::arg1: First argument to NetInitialize should be a net or list of nets.
+attention kernel_count: 0
+dispatch_kinds: {}
+totals_baseline_us: 0.
+totals_best_us: 0.
+kernels_with_proposals: 0
+kernels_with_applied: 0
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
