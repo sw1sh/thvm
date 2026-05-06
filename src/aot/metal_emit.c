@@ -139,8 +139,13 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         }
     }
     // Generic path: emit as uint (NUM payload), wrap as Term.
+    // Iter II: preserve TNum's literal dtype on the wrap; for non-TNum
+    // (e.g., TOp2 fold), default to 0u (caller's responsibility to
+    // know the result dtype, mirroring iter HH).
+    u32 dtype_ext = (tag == TAG_NUM) ? term_ext(t) : 0u;
     const char *uv = aot_msl_emit_uint(b, t, bind);
-    snprintf(out, 96, "msl_term_new(TAG_NUM, 0, ulong(%s))", uv);
+    snprintf(out, 96, "msl_term_new(TAG_NUM, %uu, ulong(%s))",
+             dtype_ext, uv);
     return out;
 }
 
