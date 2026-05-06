@@ -619,12 +619,28 @@ every minute.
   make test 274/274 unchanged.
 
 ### buf-of-INDEX coverage follow-on
-- [ ] Recover the LeNet forward win without breaking bench-train.
-  The flat-index case applies when an outer rank-1 S_INDEX wraps
-  a multi-dim buffer; the win came from kernels where this is a
-  *full* flat view (extent == numel).  After the extent-guard,
-  partial-axis cases (SHRINK residue) reject correctly but we
-  also lost some legitimate full-flat cases that DID lift
-  pre-fix.  Investigate: dump all post-fix
-  `flat-range-extent-mismatch` rejects and confirm none are
-  actually full-flat shapes that the guard rejects spuriously.
+- [x] (2026-05-06) Investigate post-fix
+  `flat-range-extent-mismatch` rejects.  Enriched the diagnostic
+  to dump `range=N numel=M dims=[...]` for each reject.  All four
+  unique rejects on LeNet forward have **`range=2`** while
+  buffer numels are 800/1600/2880/5760 (dims like [50,4,4,2],
+  [20,12,12,2]).  None are full-flat -- the outer rank-1 range
+  iterates only 2 specific slices into a much larger
+  multi-dim buffer.  The previous 67% tile-path "coverage" was
+  illusory: my pre-fix flat-index produced wrong addresses for
+  these partial-axis cases; forward masked it via softmax-sum
+  tolerance, backward NaN'd.
+
+  Conclusion: the extent-guard is correct.  Recovering these
+  shapes onto the tile path requires a smarter lift that knows
+  WHICH axis the outer range corresponds to and emits the right
+  per-axis stride -- effectively a partial-axis SHRINK lift.
+  That's a larger design task (separate follow-on).
+
+- [ ] Design a partial-axis SHRINK lift: when an outer rank-1
+  S_INDEX wraps an inner DEFINE_*  with N axes, identify which
+  axis the outer range maps to (by matching range_extent against
+  buffer.dims[i]) and emit `r_uop * stride[i]` as the address.
+  When the range matches no single axis, fall back to the
+  current reject behaviour.  Smoke-test on LeNet forward to
+  confirm the 4 rejected shapes lift correctly with this rule.

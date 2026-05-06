@@ -212,6 +212,15 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     for (u32 d = 0; d < ndim; d++) total_numel *= uop_buffer_dim(buf, d);
     if (range_extent != total_numel) {
       lift_reject_log(ke, r_sid, "index/flat-range-extent-mismatch");
+      char const *e = getenv("THVM_DUMP_LIFT_REJECT");
+      if (e != NULL && e[0] == '1') {
+        fprintf(stderr, "  flat-extent: range=%u numel=%u dims=[",
+                range_extent, total_numel);
+        for (u32 d = 0; d < ndim; d++) {
+          fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(buf, d));
+        }
+        fputs("]\n", stderr);
+      }
       return 0;
     }
     Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
