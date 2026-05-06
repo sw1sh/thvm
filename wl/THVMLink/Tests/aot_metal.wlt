@@ -213,6 +213,21 @@ VerificationTest[
     TestID -> "Metal: wrap1(x) returns TAG_CTR with label=1"
 ]
 
+(* iter FF: TBookRead lets WL inspect kernel-built CTR cells.
+   Verify the children are what we passed in. *)
+VerificationTest[
+    TInit[];
+    TDef["wrap1", TLam[x, TCtr[1, x]]];
+    Module[{r, loc},
+      r   = TAOTRun["wrap1", {TNum[42]}, Method -> "Metal"];
+      loc = TTermVal[r];
+      {TTermVal @ TBookRead[loc],         (* n_cell: NUM(1) *)
+       TTermVal @ TBookRead[loc + 1]}     (* child[0]: NUM(42) *)
+    ],
+    {1, 42},
+    TestID -> "Metal: wrap1(42) child round-trip via TBookRead"
+]
+
 VerificationTest[
     TInit[];
     TDef["pair", TLam[a, TLam[b, TCtr[2, a, b]]]];
@@ -220,6 +235,20 @@ VerificationTest[
       {TTermTag[r], TTermExt[r]}],
     {$TagCTR, 2},
     TestID -> "Metal: pair(a, b) returns TAG_CTR with label=2"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["pair", TLam[a, TLam[b, TCtr[2, a, b]]]];
+    Module[{r, loc},
+      r   = TAOTRun["pair", {TNum[7], TNum[35]}, Method -> "Metal"];
+      loc = TTermVal[r];
+      {TTermVal @ TBookRead[loc],
+       TTermVal @ TBookRead[loc + 1],
+       TTermVal @ TBookRead[loc + 2]}
+    ],
+    {2, 7, 35},
+    TestID -> "Metal: pair(7, 35) full content round-trip via TBookRead"
 ]
 
 (* === Method dispatcher rejects unknown spec === *)

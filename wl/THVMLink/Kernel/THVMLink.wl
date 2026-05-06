@@ -30,6 +30,7 @@ THeapPos::usage   = "THeapPos[] returns the next free heap location (the upper b
 THeapBase::usage  = "THeapBase[] returns the lower bound of the active heap region.  Equal to 0 in pre-Cheney layouts and after thvm_init; equal to gc_from_start() once the GC has swapped semi-spaces, so heap iterators should walk [THeapBase[], THeapPos[]) to cover live cells.";
 THeapAlloc::usage = "THeapAlloc[size] reserves `size` consecutive cells; returns the base loc.";
 THeapRead::usage  = "THeapRead[loc] returns the Term at heap[loc].";
+TBookRead::usage  = "TBookRead[loc] returns the Term at book_heap[loc].  Useful for inspecting CTR cells allocated via TBookCtr or built by the Metal AOT kernel (which writes into book_heap via aot_book_alloc).";
 THeapSet::usage   = "THeapSet[loc, term] writes `term` to heap[loc].";
 TGCCollect::usage = "TGCCollect[] runs a Cheney semi-space collection of the dyn heap; returns the new HEAP_NEXT (live cell count).";
 TGCCount::usage   = "TGCCount[] returns the number of GC cycles since thvm_init.";
@@ -566,6 +567,8 @@ THeapPos[]                       := (ensureInit[]; $heapPosFn[])
 THeapBase[]                      := (ensureInit[]; $heapBaseFn[])
 THeapAlloc[size_Integer]         := (ensureInit[]; $heapAllocFn[size])
 THeapRead[loc_Integer]           := (ensureInit[]; TTerm[$heapReadFn[loc]])
+TBookRead[loc_Integer]           := (ensureInit[];
+    TTerm[Symbol["THVMLink`Private`$bookReadFn"][loc]])
 THeapSet[loc_Integer, t_]        := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
 TGCCollect[]                     := (ensureInit[]; $gcCollectFn[])
 TGCCount[]                       := (ensureInit[]; $gcCountFn[])
