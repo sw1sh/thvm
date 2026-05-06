@@ -1827,3 +1827,61 @@ fuses (leak = +2 thvm vs +0 tg).
   Closing 1+2 closes the entire conv-net structural gap;
   closing 3 closes the entire MLP gap.  All three together
   reach tinygrad parity on the K,L envelope tested.
+
+### Level 16: Decompose the +3 baseline -- isolate softmax cost
+
+The "+3 baseline" in `thvm = 5K + 2L + 3` includes input
+bufferize + softmax tail.  How much of that is softmax?
+
+Probe: MLP2 without softmax (Linear[10] as final output).
+Predicted: `5*0 + 2*2 + 3 - softmax_kernels = 7 - softmax`.
+If softmax costs +3 thvm kernels (per Level 3 finding: 3
+kernels for softmax(N=512)), predicted result is 4.  If
+softmax fuses into the final Linear, predicted is 7.
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/mlp2_nosoftmax.wls` -- copy of
+  `mlp2.wls` with `SoftmaxLayer[]` removed (final layer is
+  Linear[10]).  Save stdout to
+  `bench/autotune-ladder/mlp2_nosoftmax.txt`.  Inline
+  kernel_count, dispatch_kinds, totals_baseline_us,
+  totals_best_us, totals_speedup.  Compare to MLP2 (7
+  kernels) -- delta IS softmax's per-net thvm cost.
+
+  | metric             | MLP2_nosoftmax | MLP2 |
+  |--------------------|---------------:|-----:|
+  | kernel_count       |              4 |    7 |
+  | dispatch_kinds     |1g+3t           |1g+6t |
+  | totals_best_us     |            891 | 1340 |
+  | totals_speedup     |          1.02x |1.04x |
+
+  **Softmax cost = +3 kernels per net** (not per layer).
+  Matches Level 3 standalone softmax (3 kernels) exactly --
+  softmax bufferizes as a self-contained 3-kernel chain
+  (max-reduce + sum-reduce + broadcast-divide) regardless
+  of context.
+
+  **Critical re-decomposition**: the "+3 baseline" in
+  `thvm = 5K + 2L + 3` was **entirely softmax**, not input-
+  bufferize overhead.  Without softmax there's no fixed
+  overhead; the formula collapses cleanly:
+
+      thvm (with softmax)    = 2L + 3*Kconv + 2*Kpool + 3
+      thvm (without softmax) = 2L + 3*Kconv + 2*Kpool
+
+  Verifies: MLP2 no-softmax (L=2, K=0) = 2*2 + 0 + 0 = 4 ✓.
+  Earlier MLP-N nets all had softmax; the "+3 constant" was
+  hiding a single per-net softmax cost.
+
+  **Updated structural-fusion priority** (incl. softmax):
+  1. Conv 3-into-1: +2 leak per Conv-Ramp block
+  2. Softmax 3-into-1: **+? leak per net** (tinygrad-side
+     unmeasured) -- previously assumed identical 3 between
+     frameworks, but per Level 3 tinygrad softmax = 3
+     kernels too, so leak = 0.  **Softmax is at parity.**
+  3. Pool fusion: +1 leak per pool-block
+  4. Linear+Activation fusion: +1 leak per linear-block
+
+  So softmax doesn't actually contribute to the leak, only
+  to the absolute count.  The leak formula `3K + L` stands
+  unchanged; the constant +3 cancels cross-framework.
