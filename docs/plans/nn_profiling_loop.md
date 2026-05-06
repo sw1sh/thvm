@@ -831,7 +831,45 @@ every minute.
   forward.wls 5/5 sane predictions).  make test 274/274 unchanged.
 
 ### Loss numerical stabilisation follow-on
-- [ ] Add a small epsilon clamp in TCrossEntropyLoss
-  (`Log[pred + eps]` or equivalent log-sum-exp) so cross-entropy
-  doesn't underflow on sharply-peaked softmax.  Verify
-  bench-train returns numeric losses.
+- [x] (2026-05-06) Add a small epsilon clamp in TCrossEntropyLoss.
+  Patched `TCrossEntropyLoss[pred, target]` to:
+  ```
+  -Total[target * Log[pred + epsTen]]
+  ```
+  where `epsTen = TTensorCreate @ NumericArray[ConstantArray[1e-7,
+  shape], "Real32"]`.  Verification:
+  - peaked-correct softmax (0.99999 dominant): loss = 9.9e-6
+    (was `$Failed`).
+  - wrong-class softmax: loss = 16.1181 (= -log(1e-7)).
+  - bench-train baseline warmup loss = 16.1181 (finite!); autotune
+    warmup loss = 2.3026 (~-log(0.1), uniform softmax).
+
+  **Caveat**: bench-train's *timed* losses are still `$Failed`
+  past warmup -- the SGD update path produces NaN gradients
+  (likely a separate softmax-gradient stability issue in TGrad).
+
+  Implementation note worth documenting separately: the obvious
+  approach `Log[pred + TUOpConst[1e-7]]` failed because the
+  runtime's broadcast-from-{1} operation drops the addend on all
+  but the first slot.  Same bug afflicted `TOnes[N] *
+  TUOpConst[eps]`.  Worked around by building a {N}-shape eps
+  tensor on the host so the add is shape-matched.
+
+  make test 274/274 unchanged.
+
+### Runtime broadcast-from-{1} bug follow-on
+- [ ] Fix the runtime's elementwise broadcast for `{N} OP {1}`
+  shape pairs.  Currently produces `{result_0, junk, junk, ...}`
+  -- the first slot is correct but subsequent slots read out-of-
+  bounds zeros.  Reproducer:
+  `TUOpAdd[TTensorCreate[NumericArray[{1.,2.,3.},"Real32"]],
+   TUOpConst[10.]]` should give `{11,12,13}` but gives `{11,2,3}`.
+  Likely root cause: the lifter / renderer emits a fixed stride
+  for the {1}-shape buffer instead of stride=0 for broadcast.
+
+### Bench-train timed loss NaN follow-on
+- [ ] Investigate why bench-train's *timed* losses are `$Failed`
+  past the warmup step (which produces a finite 16.1181 / 2.3026
+  loss).  Hypothesis: the SGD update applies a NaN gradient
+  produced by softmax-gradient instability (no max-subtract in
+  the TGrad chain rule for softmax/log).

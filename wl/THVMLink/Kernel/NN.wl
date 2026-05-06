@@ -130,7 +130,25 @@ TSoftmax[x_TTerm] := Module[{m, xc, e, s},
 (* CrossEntropy probabilities form: target is a probability
    distribution (typically one-hot), pred is the model's predicted
    distribution.  Loss = -sum_i target_i * log(pred_i). *)
-TCrossEntropyLoss[pred_TTerm, target_TTerm] := - Total[target * Log[pred]]
+(* Cross-entropy with eps clamp: when softmax peaks sharply, the
+   non-winning class probabilities round to zero and Log[0] -> -inf.
+   Adding a small eps before the log keeps the loss finite without
+   meaningfully changing the gradient on well-behaved distributions.
+   Standard in all production training pipelines.
+
+   Implementation note: TUOpConst is {1}-shaped and the runtime's
+   broadcast-from-{1} elementwise add/mul was observed to drop the
+   addend on all but the first slot (also broken for TOnes[N] *
+   TUOpConst[eps]).  Workaround: build a same-shape eps tensor on
+   the host and pass via TTensorCreate, so the add is {N}+{N} with
+   no broadcast. *)
+TCrossEntropyLoss[pred_TTerm, target_TTerm] := With[{shape = tUopShape[pred]},
+    Module[{epsTen},
+        epsTen = TTensorCreate @ NumericArray[
+            ConstantArray[1.*^-7, shape], "Real32"];
+        - Total[target * Log[pred + epsTen]]
+    ]
+]
 
 (* TConv2D[input, weights, bias] -- stride-1, no-padding 2-D
    convolution, lowered into a chain of kh*kw partial sums:
