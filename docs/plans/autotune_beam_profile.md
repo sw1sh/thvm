@@ -979,3 +979,27 @@ new fast path should collapse it.
   totals_speedup shifting 1.27x -> 1.40x is autotune variance
   on the metal-op kid-1 baseline (2020 -> 2121us baseline
   re-measurement); kid-1 best stayed flat.
+
+### Sync comparison.md headline table with post-fix numbers
+
+Conv2d and softmax rows of `comparison.md` were updated as
+the campaign landed, but MLP2 (level 4) still shows pre-fix
+numbers and the per-kernel-leak section still cites the pre-
+singleton-fix dispatch.  No new measurements -- pure docs
+sync from already-committed bench files.
+
+- [x] (2026-05-06) Refresh the headline table in
+  `bench/autotune-ladder/comparison.md` to show post-fix MLP2
+  numbers (kernel_count, thvm best, thvm speedup, absolute
+  winner gap), and update the "thvm leaks kernels at every
+  level" sub-table to reflect that softmax dropped from 1
+  metal-op outlier to 0 (still 3 kernels = tinygrad parity)
+  and MLP2's dispatch is now `{gemm:1, tile:6}` instead of
+  `{gemm:1, tile:5, op:1}`.
+
+  MLP2 row updated: best 1420 -> 1340us, speedup 1.13x ->
+  1.08x, absolute winner widens 1.8x -> 1.9x.  The "softmax
+  tail" leak-site bullet is now a "LANDED" note pointing at
+  kernel_lift.c:242; the LinearLayer-activation bullet calls
+  out the still-open MLP2 leak; the conv2d bullet notes the
+  singleton fix didn't transfer (different shape).

@@ -12,7 +12,7 @@ discussion in [docs/plans/autotune_beam_profile.md](../../docs/plans/autotune_be
 | 1     | elementwise add (N=1024)       |            1 |            146 |        2.05x |                1 |                391 |            1.23x | **thvm** (2.7x)   |
 | 2     | matmul (M=N=K=128)             |            1 |            211 |        1.01x |                1 |                773 |            1.18x | **thvm** (3.7x)   |
 | 3     | softmax (N=512)                |            3 |            471 |        1.16x |                3 |               1141 |            1.09x | **thvm** (2.4x)   |
-| 4     | MLP2 (784 -> 128 -> 10)        |            7 |           1420 |        1.13x |                5 |               2499 |            1.09x | **thvm** (1.8x)   |
+| 4     | MLP2 (784 -> 128 -> 10)        |            7 |           1340 |        1.08x |                5 |               2499 |            1.09x | **thvm** (1.9x)   |
 | 5     | conv2d (1x32x28x28, 5x5, 32)   |            3 |           3507 |        1.27x |                1 |               1604 |            0.99x | **tinygrad** (-54%)|
 
 ## Notes on apples-to-oranges
@@ -39,9 +39,9 @@ Both frameworks extract roughly 1.0–1.6x from per-kernel tuning, with thvm sli
 | 5     |            3 |                1 | **+2** |
 
 At MLP2 + conv2d, thvm dispatches 2 extra kernels per forward. Suspected leak sites:
-- **Softmax tail**: an unfused metal-op outlier (kid 6 in MLP2, kid 2 in softmax) that doesn't lift through `kernel_lift_to_uop` and breaks the reduce-broadcast collapse.
-- **LinearLayer + activation boundary**: tinygrad fuses the matmul + activation; thvm bufferizes between them.
-- **Conv2D im2col + reduce + bias chain**: tinygrad emits 1 kernel; thvm emits 3 (im2col patch-sum, matmul-style reduce, bias-broadcast).
+- **Softmax tail**: WAS an unfused metal-op outlier (kid 6 in MLP2, kid 2 in softmax). LANDED 2026-05-06 via the singleton-broadcast lift fast path ([src/schedule/kernel_lift.c:242](../../src/schedule/kernel_lift.c#L242)): both outliers now lift to metal-tile. Softmax saw a real ~16% wall win; MLP2's wall stayed flat (the per-op fallback was already fast on that shape).
+- **LinearLayer + activation boundary**: tinygrad fuses the matmul + activation; thvm bufferizes between them. Still open; this is the remaining MLP2 leak (the dispatch is now `{gemm:1, tile:6}` -- no more outlier, but kernel_count is still 7 vs tinygrad's 5).
+- **Conv2D im2col + reduce + bias chain**: tinygrad emits 1 kernel; thvm emits 3 (im2col patch-sum, matmul-style reduce, bias-broadcast). The singleton fix did NOT transfer here -- the 2 metal-op kids have multi-element 1-d outputs (cIn\*kh\*kw=800), correctly excluded by the `dim[0]==1` guard. Structural fusion is the remaining handle.
 
 ### Autotune is on the wrong unit
 
