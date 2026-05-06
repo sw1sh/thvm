@@ -653,10 +653,10 @@ int main(void) {
   char *conv_src = cg_emit_tile_metal(ke);
   CHECK(conv_src != NULL);
   if (conv_src != NULL) {
-    CHECK(strstr(conv_src, "#define KRED (CIN * KH * KW)") != NULL);
-    CHECK(strstr(conv_src, "for (int ci = 0") != NULL);
-    CHECK(strstr(conv_src, "constant int *cfg") != NULL);
-    CHECK(strstr(conv_src, "acc += in0[wi] * in1[xi]") != NULL);
+    LEGACY_MSL_CHECK(strstr(conv_src, "#define KRED (CIN * KH * KW)") != NULL);
+    LEGACY_MSL_CHECK(strstr(conv_src, "for (int ci = 0") != NULL);
+    LEGACY_MSL_CHECK(strstr(conv_src, "constant int *cfg") != NULL);
+    LEGACY_MSL_CHECK(strstr(conv_src, "acc += in0[wi] * in1[xi]") != NULL);
     free(conv_src);
   }
   ke->axes = &ke->_local_axes;
@@ -697,8 +697,8 @@ int main(void) {
   conv_src = cg_emit_tile_metal(ke);
   CHECK(conv_src != NULL);
   if (conv_src != NULL) {
-    CHECK(strstr(conv_src, "#define OUTS 4u") != NULL);
-    CHECK(strstr(conv_src, "uint base = gid * OUTS") != NULL);
+    LEGACY_MSL_CHECK(strstr(conv_src, "#define OUTS 4u") != NULL);
+    LEGACY_MSL_CHECK(strstr(conv_src, "uint base = gid * OUTS") != NULL);
     free(conv_src);
   }
   memset(ke->axes, 0, sizeof(KernelAxes));
@@ -717,8 +717,8 @@ int main(void) {
   conv_src = cg_emit_tile_metal(ke);
   CHECK(conv_src != NULL);
   if (conv_src != NULL) {
-    CHECK(strstr(conv_src, "#pragma clang loop unroll_count(2)") != NULL);
-    CHECK(strstr(conv_src, "for (int q = 0; q < KRED") != NULL);
+    LEGACY_MSL_CHECK(strstr(conv_src, "#pragma clang loop unroll_count(2)") != NULL);
+    LEGACY_MSL_CHECK(strstr(conv_src, "for (int q = 0; q < KRED") != NULL);
     free(conv_src);
   }
   memset(ke->axes, 0, sizeof(KernelAxes));

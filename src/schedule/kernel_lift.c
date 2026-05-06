@@ -675,6 +675,127 @@ static int kernel_lift_from_gemm(KernelEntry const *ke, KernelUopLift *out) {
   return 1;
 }
 
+// Synthesize the conv2d_flat UOp DAG from a TileConv2DInfo.  Mirrors
+// what rmt_emit_conv2d_flat produces but as UOp DAG so the renderer
+// rewrite path can take over.  Layout:
+//
+//   for r_out in [0, c_out * patches):
+//     co     = r_out / patches
+//     patch  = r_out % patches
+//     bi     = patch / spatial_patches
+//     sp     = patch % spatial_patches
+//     ow     = sp % w_out
+//     oh     = sp / w_out
+//     acc    = 0
+//     for q in [0, KRED) where KRED = c_in * kh * kw:
+//       kw_v = q % kw
+//       qk   = q / kw
+//       kh_v = qk % kh
+//       ci   = qk / kh
+//       wi   = w_offset + co * w_stride0 + q * w_stride1
+//       xi   = x_offset + bi * x_stride_b + ci * x_stride2
+//                       + (oh + kh_v) * x_stride0
+//                       + (ow + kw_v) * x_stride1
+//       acc += W[wi] * X[xi]
+//     out[r_out] = acc
+//
+// Multi-input "patch_input_count" cases (im2col split into multiple
+// input buffers via a switch on q) are not yet handled; lifter
+// returns 0 for those so the dedicated rmt_emit_conv2d_flat keeps
+// running.
+static int kernel_lift_from_conv2d(KernelEntry const *ke,
+                                   KernelUopLift *out) {
+  TileConv2DInfo conv;
+  if (!tile_analyze_conv2d_flat(ke, &conv)) return 0;
+  if (conv.patch_input_count != 0) return 0;  // multi-input X path
+  if (conv.batch == 0 || conv.h_out == 0 || conv.w_out == 0) return 0;
+  if (conv.spatial_patches == 0) return 0;
+  if (conv.w_input >= ke->n_inputs || conv.x_input >= ke->n_inputs) return 0;
+  if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) return 0;
+
+  // Buffers.  Conv2d output is [c_out, patches].
+  u32 dims_w[2] = { conv.c_out, conv.c_in * conv.kh * conv.kw };
+  u32 dims_x[1] = { 1024 };  // shape unused; lifter walks affine addr
+  u32 dims_o[1] = { conv.c_out * conv.patches };
+  u32 w_dt = (ke->input_dtypes != NULL) ? ke->input_dtypes[conv.w_input] : DT_FP32;
+  u32 x_dt = (ke->input_dtypes != NULL) ? ke->input_dtypes[conv.x_input] : DT_FP32;
+  Term W = uop_buffer_inst(UOP_SCOPE_GLOBAL, w_dt, 2, dims_w, conv.w_input + 1);
+  Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, x_dt, 1, dims_x, conv.x_input + 1);
+  Term C = uop_buffer_inst(UOP_SCOPE_GLOBAL, ke->output_dtype, 1, dims_o, 0);
+
+  u32 patches = conv.patches;
+  u32 KRED    = conv.c_in * conv.kh * conv.kw;
+  if (KRED == 0) return 0;
+
+  // Range axes.
+  Term r_out = uop_range(0, 0 /*LOOP*/,   conv.c_out * patches);
+  Term r_q   = uop_range(1, 1 /*REDUCE*/, KRED);
+
+  // Decompose r_out -> (co, patch) and patch -> (bi, oh, ow).
+  Term k_patches = uop_const(DT_INT32, patches);
+  Term k_spatial = uop_const(DT_INT32, conv.spatial_patches);
+  Term k_w_out   = uop_const(DT_INT32, conv.w_out);
+  Term co     = uop_int_binary(UOP_IDIV, r_out, k_patches);
+  Term patch  = uop_int_binary(UOP_IMOD, r_out, k_patches);
+  Term bi     = uop_int_binary(UOP_IDIV, patch, k_spatial);
+  Term sp     = uop_int_binary(UOP_IMOD, patch, k_spatial);
+  Term ow     = uop_int_binary(UOP_IMOD, sp, k_w_out);
+  Term oh     = uop_int_binary(UOP_IDIV, sp, k_w_out);
+
+  // Decompose r_q -> (ci, kh_v, kw_v).
+  Term k_kw   = uop_const(DT_INT32, conv.kw);
+  Term k_kh   = uop_const(DT_INT32, conv.kh);
+  Term kw_v   = uop_int_binary(UOP_IMOD, r_q, k_kw);
+  Term qk     = uop_int_binary(UOP_IDIV, r_q, k_kw);
+  Term kh_v   = uop_int_binary(UOP_IMOD, qk, k_kh);
+  Term ci     = uop_int_binary(UOP_IDIV, qk, k_kh);
+
+  // wi = w_offset + co * w_stride0 + q * w_stride1
+  Term k_w_off = uop_const(DT_INT32, (u32)conv.w_offset);
+  Term k_ws0   = uop_const(DT_INT32, (u32)conv.w_stride0);
+  Term k_ws1   = uop_const(DT_INT32, (u32)conv.w_stride1);
+  Term wi_co   = uop_int_binary(UOP_IMUL, co, k_ws0);
+  Term wi_q    = uop_int_binary(UOP_IMUL, r_q, k_ws1);
+  Term wi_sum  = uop_int_binary(UOP_IADD, wi_co, wi_q);
+  Term wi      = uop_int_binary(UOP_IADD, k_w_off, wi_sum);
+  Term ldW     = uop_index_e(W, wi);
+
+  // xi = x_offset + bi * x_stride_b + ci * x_stride2
+  //              + (oh + kh_v) * x_stride0 + (ow + kw_v) * x_stride1
+  Term k_x_off = uop_const(DT_INT32, (u32)conv.x_offset);
+  Term k_xsb   = uop_const(DT_INT32, (u32)conv.x_stride_b);
+  Term k_xs0   = uop_const(DT_INT32, (u32)conv.x_stride0);
+  Term k_xs1   = uop_const(DT_INT32, (u32)conv.x_stride1);
+  Term k_xs2   = uop_const(DT_INT32, (u32)conv.x_stride2);
+  Term xi_b    = uop_int_binary(UOP_IMUL, bi, k_xsb);
+  Term xi_ci   = uop_int_binary(UOP_IMUL, ci, k_xs2);
+  Term oh_kh   = uop_int_binary(UOP_IADD, oh, kh_v);
+  Term xi_h    = uop_int_binary(UOP_IMUL, oh_kh, k_xs0);
+  Term ow_kw   = uop_int_binary(UOP_IADD, ow, kw_v);
+  Term xi_w    = uop_int_binary(UOP_IMUL, ow_kw, k_xs1);
+  Term xi_sum1 = uop_int_binary(UOP_IADD, xi_b, xi_ci);
+  Term xi_sum2 = uop_int_binary(UOP_IADD, xi_h, xi_w);
+  Term xi_sum  = uop_int_binary(UOP_IADD, xi_sum1, xi_sum2);
+  Term xi      = uop_int_binary(UOP_IADD, k_x_off, xi_sum);
+  Term ldX     = uop_index_e(X, xi);
+
+  // MUL + REDUCE_SUM_q(W * X)
+  Term mul   = uop_binary(UOP_MUL, ldW, ldX);
+  Term red   = uop_reduce(REDUCE_SUM, /*axis=*/1, mul);
+
+  Term store = uop_store(C, r_out, red);
+
+  out->n_inputs = ke->n_inputs;
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    if (i == conv.w_input)      out->in_bufs[i] = W;
+    else if (i == conv.x_input) out->in_bufs[i] = X;
+    else                        out->in_bufs[i] = lift_input_buffer(ke, i);
+  }
+  out->out_buf    = C;
+  out->store_root = store;
+  return 1;
+}
+
 fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   if (ke == NULL || out == NULL) return 0;
   // Empty / GEMM-only kernel: try the gemm-shape lifter.  The dedicated
@@ -682,6 +803,7 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // ScalarUop walker below would reject.
   if (ke->scalar_uops == NULL) {
     if (kernel_lift_from_gemm(ke, out)) return 1;
+    if (kernel_lift_from_conv2d(ke, out)) return 1;
     static int reject_log_inited = 0;
     static int reject_log_on     = 0;
     if (!reject_log_inited) {
