@@ -1885,3 +1885,52 @@ softmax fuses into the final Linear, predicted is 7.
   So softmax doesn't actually contribute to the leak, only
   to the absolute count.  The leak formula `3K + L` stands
   unchanged; the constant +3 cancels cross-framework.
+
+### Level 16 cross-framework: tinygrad MLP2 no-softmax
+
+The "softmax cancels" claim assumes tinygrad softmax also
+costs +3 (verified standalone in Level 3).  Direct probe:
+tinygrad MLP2 without softmax should be 5-3 = 2 kernels.
+If observed = 2, softmax-cancels claim is verified
+empirically; if not, the leak formula needs revision.
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/mlp2_nosoftmax.py` -- copy of
+  `mlp2.py` with the trailing `.softmax()` removed.  Save
+  stdout to `bench/autotune-ladder/mlp2_nosoftmax.tinygrad.txt`.
+  Inline baseline_us, beam4_us, speedup, kernels per forward.
+  Verify the prediction (tinygrad MLP2 no-softmax = 2 kernels).
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |     1623 |  1636 |
+  | kernel_count / 50 rep |      100 |   100 |
+  | kernels per forward   |        2 |     2 |
+  | speedup_to_beam4      |          | 0.992x|
+
+  **Prediction held: tinygrad MLP2 no-softmax = 2 kernels.**
+
+  Cross-framework no-softmax comparison:
+
+  | net              | thvm | tinygrad | leak |
+  |------------------|-----:|---------:|-----:|
+  | MLP2             |    7 |        5 |  +2  |
+  | MLP2 no-softmax  |    4 |        2 |  +2  |
+  | delta from sm    |   -3 |       -3 |   0  |
+
+  **Softmax cancels in the leak, empirically confirmed**:
+  removing softmax drops both frameworks by exactly 3 kernels,
+  preserving the +2 leak.  This validates the claim that the
+  leak formula `3K + L` is independent of softmax presence.
+
+  Final cross-framework formulas:
+
+      thvm     (without softmax) = 2L + 3*Kconv + 2*Kpool
+      tinygrad (without softmax) = L  +   Kconv +   Kpool
+      leak     (any)             = L  + 2*Kconv +   Kpool
+                                 ~  L  + 3*K (when Kconv=Kpool=K)
+
+  The campaign has now produced a fully decomposed,
+  cross-framework, empirically validated kernel-count model
+  for feed-forward MLP/CNN networks in the {conv 5x5, pool
+  2x2, Ramp, single-sample} envelope.
