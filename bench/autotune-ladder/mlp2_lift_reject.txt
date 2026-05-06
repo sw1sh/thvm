@@ -1,0 +1,59 @@
+MLP2 (level 4) -- THVM_DUMP_LIFT_REJECT=1 capture, 2026-05-06.
+
+Env: THVM_BACKEND=metal THVM_TILE=1 THVM_KGC=0
+     THVM_METAL_JIT_STATS=1 THVM_DUMP_LIFT_REJECT=1
+Cmd:  wolframscript -f bench/autotune-ladder/mlp2.wls
+Workload: NetChain[{Linear[128], Tanh, Linear[10], Softmax}]
+          on a single sample, x : RandomReal[{-1,1}, 784].
+
+Distinct lift reject signatures: 1.
+Total reject lines: 100.
+
+    lift reject: index/ndim-mismatch buf_ndim=1 src_count=1   (x100)
+
+(The 100 repeats are autotune variants attempting to lift the
+same single rejecting kid; the underlying shape is one kernel.)
+
+The `THVM_DUMP_LIFT_REJECT=1` flag adds extra context only on
+the entry / no-scalar-arena / flat-range-extent reject paths
+([src/schedule/kernel_lift.c](../../src/schedule/kernel_lift.c#L148),
+L224, L696, L968).  It does NOT extend the
+`index/ndim-mismatch` path (L242) -- so this capture has only
+the bare reject line, but the call-site context tells us
+everything:
+
+    [src/schedule/kernel_lift.c#L242]
+    if (ndim == 0 || ndim != outer_rank) {
+      fprintf(stderr,
+              "lift reject: index/ndim-mismatch buf_ndim=%u src_count=%u\n",
+              ndim, u->src_count);
+      return 0;
+    }
+
+`buf_ndim=1, src_count=1` means an `S_INDEX(buf)` UOp with
+exactly one src (the buffer ref) -- no per-dim range refs at
+`u->src[1+d]`.  Combined with `ndim != outer_rank`, this is
+"access a 1-d buffer inside an outer-rank>1 loop nest with no
+explicit dim refs" -- the **singleton-broadcast** pattern.
+
+There is already a singleton fast-path at L150-152:
+
+    if (outer_rank == 0 && ndim == 1 && uop_buffer_dim(buf, 0) == 1) {
+      return uop_const(DT_INT32, 0);
+    }
+
+But it's gated to `outer_rank == 0`, so it doesn't catch the
+softmax-tail case where the 1-d singleton sum/max buffer is
+broadcast across an outer feature loop (`outer_rank >= 1`).
+
+For MLP2 with batch=1 the softmax tail produces shape [1] for
+both `max` and `sum`, then broadcasts each across [10] features.
+That's exactly the (outer_rank>=1, buf_ndim=1, dim[0]=1,
+src_count=1) shape that the current guard rejects.
+
+Concrete next step (structural-fusion campaign, not this bench
+iteration): extend the singleton-broadcast fast path at L150
+to fire whenever `ndim == 1 && uop_buffer_dim(buf, 0) == 1 &&
+src_count == 1`, regardless of outer_rank.  That should let
+kid 6 lift, collapse the per-op metal-op into a tile kernel,
+and close half of the +2 leak.

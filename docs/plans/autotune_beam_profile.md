@@ -822,3 +822,49 @@ points at concrete shapes rather than guessed mechanisms.
   LinearLayer-activation chain in the same kernel, or a
   kernel_lift_to_uop relaxation for `buf_ndim=1` single-src
   shapes.  Both belong to the structural-fusion campaign.
+
+### What does the MLP2 lift-rejecting kid actually compute?
+
+We know one `kernel_lift_to_uop` reject is leaking the
+softmax-tail kernel into the per-op metal-op dispatch.  Get
+the concrete KProgOp histogram + input layouts for that kid
+so the structural-fusion work picks (a) bufferize-rule vs (b)
+kernel_lift-relaxation from real shape data, not guesses.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/mlp2.wls`
+  with `THVM_DUMP_LIFT_REJECT=1` and capture the layout dump
+  + KProgOp histogram for the rejecting kernel(s) to
+  `bench/autotune-ladder/mlp2_lift_reject.txt`.  Inline the
+  distinct reject signatures (input rank/dims, op histogram)
+  in this task entry.
+
+  Distinct reject signatures: **1**.  Total reject lines: 100
+  (the 100 repeats are autotune variants on the same kid).
+
+      lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+
+  The dump flag does NOT extend the `index/ndim-mismatch`
+  path at [src/schedule/kernel_lift.c:242](../../src/schedule/kernel_lift.c#L242),
+  so no input_views/KProgOp histogram is printed -- but
+  `buf_ndim=1, src_count=1` decodes uniquely: `S_INDEX(buf)`
+  with no per-dim range refs, against a 1-d buffer.  That's
+  the **singleton-broadcast** pattern.
+
+  Workload: `NetChain[{Linear[128], Tanh, Linear[10], Softmax}]`
+  on a single sample (batch=1).  The softmax tail produces
+  shape [1] for both `max` and `sum`, then broadcasts each
+  across [10] features -- exactly (outer_rank>=1, buf_ndim=1,
+  dim[0]=1, src_count=1).  An existing fast-path at L150
+  handles this for `outer_rank==0` only:
+
+      if (outer_rank == 0 && ndim == 1 && uop_buffer_dim(buf, 0) == 1) {
+        return uop_const(DT_INT32, 0);
+      }
+
+  **Concrete handle (b)**: relax that guard to fire whenever
+  `ndim == 1 && uop_buffer_dim(buf, 0) == 1 && src_count == 1`,
+  regardless of outer_rank.  That should let kid 6 lift,
+  collapse the per-op metal-op into a tile kernel, and close
+  half of MLP2's +2 leak.  Code change is small (~3 lines);
+  belongs to the structural-fusion campaign, queued as the
+  next concrete code task there.
