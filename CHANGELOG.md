@@ -230,6 +230,27 @@ used to carry:
   fallback (malformed conv shape, missing metadata).  All real
   conv2d workloads flow through the UOp-DAG renderer.
 
+### Phase G first cut (`0fa9d8e`, `e1a7d8a`)
+
+- `cg_emit_tile_metal` collapses to `cg_emit_via_uop`.
+  `THVM_RENDER_VIA_UOP=0` env support dropped.  ~800 lines of
+  legacy MSL emission deleted (rmt_emit_value + rmt_emit_index_offset
+  + rmt_emit_value_with_reduce + rmt_emit_store_value +
+  rmt_emit_group_reduce_store + rmt_emit_conv2d_flat +
+  rmt_index_param_slot).
+- 30 `LEGACY_MSL_CHECK` legacy-format string-match assertions
+  stripped from test_tile_graph.c.
+- `docs/lowering_passes.md` rewritten forward-only (1036 -> 190
+  lines), `docs/cpu.md` updated, `docs/plans/tile_uops.md` and
+  `docs/plans/scalar_uops_lowering.md` shrunk to single-paragraph
+  pointers at the new architecture.
+- 274/274 binary tests + 100/100 WL workloads remain green.
+
+The remaining legacy code (`tile.c` / `tile_anno.c` / `rangeify.c` /
+ScalarUop[] / `render_c_scalar.c`) stays in-tree until autotune
+(apply_opt / propose / axis) and the cpu_jit C renderer also flip
+to the UOp-DAG pipeline.  Each is now mechanical work.
+
 ### Phase F campaign: complete
 
 The 2-IR migration to George's TileLang vision is structurally
