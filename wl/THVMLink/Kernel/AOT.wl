@@ -194,9 +194,21 @@ TAOTRun[name_String, args_, Method -> spec_] := Module[{head},
   head = Switch[spec, _String, spec, {_String, ___}, First[spec], _, None];
   Switch[head,
     "Metal", aotMetalRunImpl[name, args],
-    "CPU",   TAOTRun[name, args],   (* fall through to existing CPU impl *)
+    "CPU",   aotCpuRunImpl[name, args, spec],
     _,       Message[TAOTRun::method, spec]; $Failed
   ]
+]
+
+(* Method -> "CPU" / {"CPU", "NumThreads" -> n}: auto-compile via
+   TAOTCompile if not yet compiled, then dispatch through the
+   existing CPU/dlopen path.  NumThreads option not yet wired -- the
+   pool dispatch (Phase 1's wnf_pool) needs an additional bridge fn. *)
+aotCpuRunImpl[name_String, args_, spec_] := Module[{path},
+  path = TAOTPath[name];
+  If[ MissingQ[path], path = TAOTCompile[name]];
+  If[ path === $Failed || MissingQ[path],
+    Message[TAOTRun::method, spec]; Return[$Failed]];
+  TAOTRun[name, args]   (* dispatch via existing CPU path *)
 ]
 
 End[];
