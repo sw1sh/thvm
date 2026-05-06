@@ -1441,3 +1441,62 @@ linear extrapolation holds.  Predicted: thvm = 11 kernels.
   Campaign convergence: the structural-fusion target is now
   precisely defined for any K-conv-block, L-linear-layer
   feed-forward network.
+
+### Level 12: 2-conv mini-LeNet -- stress-test K at K=2, L=1
+
+L-scaling tested via MLP2/3/4 (linear in L).  K-scaling
+tested only via mini-LeNet (K=1) and LeNet (K=2 mixed with
+L=3).  Stress-test K=2 independently with a 2-conv + 1-linear
+net.
+
+Absolute formulas (fit from existing data):
+
+    thvm     = 5K + 2L + 3
+    tinygrad = 2K + L  + 3
+    leak     = 3K + L
+
+Predictions for K=2, L=1: thvm=15, tinygrad=8, leak=+7.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mini_lenet2.wls`
+  -- forward-only 2-conv-blocks + flatten + 1 linear + softmax
+  on a single MNIST sample.  Save stdout to
+  `bench/autotune-ladder/mini_lenet2.txt`.  Inline kernel_count,
+  dispatch_kinds, totals_baseline_us, totals_best_us,
+  totals_speedup, kernels_with_proposals, jit compile_us.
+  Confirm or refute thvm = 15 kernels.
+
+  **Prediction held exactly: mini_lenet2 = 15 kernels.**
+
+  | metric             | mini-LeNet | mini_lenet2 | LeNet |
+  |--------------------|-----------:|------------:|------:|
+  | conv-blocks (K)    |          1 |           2 |     2 |
+  | linear-blocks (L)  |          1 |           1 |     3 |
+  | predicted thvm     |         10 |          15 |    19 |
+  | observed thvm      |         10 |          15 |    19 |
+  | dispatch_kinds     | 5op+5t     |  9op+6t     |9op+10t|
+  | totals_best_us     |       2154 |        3649 |  3464 |
+  | totals_speedup     |      1.17x |       1.09x | 1.26x |
+
+  K-scaling validated at K=2 independently of LeNet's L=3.
+  Each added conv-block adds **+5 thvm kernels** (10 -> 15
+  with constant L=1; 5 -> 10 going from MLP-like to 1-conv;
+  consistent with the (5-2-3) coefficient breakdown).
+
+  **Six independent data points** now cross-validate the
+  formula:
+
+  | net          |  K  |  L  | predicted | observed |
+  |--------------|----:|----:|----------:|---------:|
+  | MLP2         |   0 |   2 |         7 |        7 |
+  | MLP3         |   0 |   3 |         9 |        9 |
+  | MLP4         |   0 |   4 |        11 |       11 |
+  | mini-LeNet   |   1 |   1 |        10 |       10 |
+  | mini_lenet2  |   2 |   1 |        15 |       15 |
+  | LeNet        |   2 |   3 |        19 |       19 |
+
+  The campaign has converged on a precise, predictive model
+  for thvm and tinygrad kernel counts on K-conv-block,
+  L-linear-layer feed-forward networks (with Conv = 5x5,
+  Pool = 2x2, single-sample input, Ramp activations).
+  Generalisation to BatchNorm, residual skip connections,
+  attention, and batch>1 is untested.

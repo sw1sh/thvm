@@ -1,0 +1,25 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+mini_lenet2 kernel_count: 15
+dispatch_kinds: {{metal-op, 9}, {metal-tile, 6}}
+kid 1 kind=metal-op baseline=534.us best=536.us  opt=TOpt[LOCAL, 2, 32]  applied={TOpt[LOCAL, 2, 64], TOpt[GLOBAL, 2, 9]}
+kid 2 kind=metal-op baseline=225.us best=225.us  opt=TOpt[GROUP, 2, 25]  applied={}
+kid 3 kind=metal-tile baseline=348.us best=185.us  opt=TOpt[LOCAL, 1, 8]  applied={TOpt[LOCAL, 1, 8], TOpt[GLOBAL, 1, 3]}
+kid 4 kind=metal-op baseline=190.us best=187.us  opt=TOpt[UNROLL, 4, 2]  applied={TOpt[GROUP, 4, 2]}
+kid 5 kind=metal-op baseline=162.us best=157.us  opt=TOpt[GROUP, 3, 2]  applied={}
+kid 6 kind=metal-op baseline=768.us best=766.us  opt=TOpt[LOCAL, 2, 8]  applied={}
+kid 7 kind=metal-op baseline=362.us best=360.us  opt=TOpt[GROUP, 2, 150]  applied={TOpt[GROUP, 2, 150]}
+kid 8 kind=metal-tile baseline=285.us best=179.us  opt=TOpt[LOCAL, 0, 8]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 1]}
+kid 9 kind=metal-op baseline=216.us best=207.us  opt=TOpt[UNROLL, 4, 2]  applied={}
+kid 10 kind=metal-op baseline=173.us best=176.us  opt=TOpt[GROUP, 3, 2]  applied={TOpt[GROUP, 3, 2]}
+kid 12 kind=metal-tile baseline=185.us best=177.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
+kid 13 kind=metal-tile baseline=173.us best=163.us  opt=TOpt[GROUP, 1, 10]  applied={}
+kid 14 kind=metal-tile baseline=176.us best=168.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
+kid 15 kind=metal-tile baseline=166.us best=163.us  opt=TOpt[UNROLL, 1, 2]  applied={TOpt[GROUP, 1, 10]}
+totals_baseline_us: 3963.
+totals_best_us: 3649.
+totals_speedup: 1.08605
+kernels_with_proposals: 14
+kernels_with_applied: 9
+thvm: metal_jit stats -- hits=222 misses=36 bypass=0 compile_us=6886
