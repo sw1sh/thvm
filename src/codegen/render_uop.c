@@ -598,6 +598,109 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   return 1;
 }
 
+// GROUP_REDUCE-shaped emission: parallel cooperative reduce using a
+// threadgroup-shared accumulator + barrier + per-thread serial walk
+// + final single-thread combine.  Fires when the reduce range was
+// stamped with UOP_OPT_GROUP_REDUCE by the lifter (Phase 4 follow-on).
+//
+// Shape:
+//   threadgroup float _accN[L];
+//   _accN[tt] = init;
+//   threadgroup_barrier(...);
+//   for (uint k = tt; k < red_extent; k += L) _accN[tt] = combine(_accN[tt], body(k));
+//   threadgroup_barrier(...);
+//   if (tt == 0) {
+//     float total = init;
+//     for (uint i = 0; i < L; i++) total = combine(total, _accN[i]);
+//     out[addr] = total;
+//   }
+//
+// Caller passes the open output-axis loop nest in `n_out` /
+// `needs_close[]` so this function can close them in the same order
+// as the scalar path.
+static int rmu_emit_group_reduce(Term buf, Term addr,
+                                 Term red_range, Term red_src,
+                                 u32 red_kind, u32 red_axis,
+                                 u32 group_extent,
+                                 FILE *fp, u32 body_depth,
+                                 u32 n_out, int const *needs_close) {
+  if (group_extent == 0) return 0;
+  if (term_tag(red_range) != TAG_UOP || term_ext(red_range) != UOP_RANGE) {
+    return 0;
+  }
+  u32 red_extent = term_val(heap_read(term_val(red_range) + 2));
+  char acc_name[32];
+  snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
+  // Shared-mem accumulator declaration.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "threadgroup float %s[%u];\n", acc_name, group_extent);
+  // Per-thread init.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "%s[tt] = ", acc_name);
+  rmu_emit_reduce_init(red_kind, fp);
+  fputs(";\n", fp);
+  // Pre-loop barrier so every thread sees a clean slot.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+  // Per-thread strided walk over the reduce extent.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "for (uint a%u = tt; a%u < %u; a%u += %u) {\n",
+          red_axis, red_axis, red_extent, red_axis, group_extent);
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  fprintf(fp, "%s[tt] = ", acc_name);
+  // Use the existing combine helper but supply the shared-slot lhs.
+  // rmu_emit_reduce_combine writes "_accN = _accN OP rhs;" -- we want
+  // "_accN[tt] = _accN[tt] OP rhs;" so render the rhs alone here.
+  fprintf(fp, "%s[tt]", acc_name);
+  if (red_kind == REDUCE_SUM)      fputs(" + ", fp);
+  else if (red_kind == REDUCE_MAX) fputs(" > ", fp);   // placeholder
+  else                              fputs(" + ", fp);
+  rmu_emit_term(red_src, fp);
+  if (red_kind == REDUCE_MAX) {
+    // max via ternary so the line stays a single statement.
+    fprintf(fp, " ? %s[tt] : ", acc_name);
+    rmu_emit_term(red_src, fp);
+  }
+  fputs(";\n", fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("}\n", fp);
+  // Post-loop barrier.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("threadgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
+  // Final combine + store on a single thread.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("if (tt == 0) {\n", fp);
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  fputs("float _total = ", fp);
+  rmu_emit_reduce_init(red_kind, fp);
+  fputs(";\n", fp);
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  fprintf(fp, "for (uint _i = 0; _i < %u; _i++) {\n", group_extent);
+  for (u32 d = 0; d < body_depth + 2; d++) fputs("  ", fp);
+  if (red_kind == REDUCE_SUM) {
+    fprintf(fp, "_total = _total + %s[_i];\n", acc_name);
+  } else {
+    fprintf(fp, "_total = (_total > %s[_i]) ? _total : %s[_i];\n",
+            acc_name, acc_name);
+  }
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  fputs("}\n", fp);
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  fprintf(fp, "%s[", rmu_buf_name(buf));
+  rmu_emit_term(addr, fp);
+  fputs("] = _total;\n", fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("}\n", fp);
+  // Close any open output-axis loops opened by the caller.
+  for (i32 i = (i32)n_out - 1; i >= 0; i--) {
+    if (!needs_close[i]) continue;
+    body_depth--;
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
+  return 1;
+}
+
 // REDUCE-shaped emission: STORE(buf, addr, REDUCE(src, kind, axis)).
 // Hoists an accumulator outside the reduce-axis loop and references it
 // in the store statement.  Returns 1 if the shape matched and was
@@ -685,10 +788,27 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   Term red_range = ranges[reduce_idx];
   u32  red_kind_opt   = opt_kinds  [reduce_idx];
   u32  red_factor_opt = opt_factors[reduce_idx];
+  // GROUP_REDUCE annotation seam: when the reduce range carries
+  // UOP_OPT(_, GROUP_REDUCE, L), the autotuner intends to
+  // parallelise the reduction across L cooperating threads with a
+  // threadgroup-shared accumulator + barrier + final reduce.  The
+  // emitted shape is documented in
+  // docs/plans/nn_profiling_loop.md (shape iii).  The lifter
+  // currently never produces this shape (the has_reduce_axis short-
+  // circuit prevents the replay from reaching reduce axes; Phase 4
+  // lifts that), so this branch is unreachable in production today
+  // but ready for the lifter to flip on.  Detection: red_kind_opt ==
+  // UOP_OPT_GROUP_REDUCE on the reduce-axis range.
+  (void)red_factor_opt;  // consumed once Phase 4 wires it
   if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_UNROLL) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     if (red_factor_opt > 0) fprintf(fp, "#pragma unroll(%u)\n", red_factor_opt);
     else                    fputs("#pragma unroll\n", fp);
+  }
+  if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_GROUP_REDUCE) {
+    return rmu_emit_group_reduce(buf, addr, red_range, red_src,
+                                 red_kind, red_axis, red_factor_opt,
+                                 fp, body_depth, n_out, needs_close);
   }
   rmu_emit_range_open(red_range, fp, body_depth, red_kind_opt);
   // Combine inside the reduce loop.

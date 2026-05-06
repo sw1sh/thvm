@@ -324,10 +324,34 @@ every minute.
   only contains `n_buf` (BUFFERIZE) entries -- the REDUCE axis is
   per-USE.  Phase 4 lifts the short-circuit and extends `cur[]` to
   include per-USE ranges.
-- [ ] Phase 3: extend `rmu_emit_store_reduce` in
+- [x] (2026-05-06) Phase 3: extend `rmu_emit_store_reduce` in
   `src/codegen/render_uop.c` to detect a GROUP_REDUCE-annotated
   reduce range and emit the threadgroup-shared accumulator
-  pattern from shape (iii) above.
+  pattern from shape (iii) above.  New helper
+  `rmu_emit_group_reduce(buf, addr, red_range, red_src, red_kind,
+   red_axis, group_extent, fp, body_depth, n_out, needs_close)`
+  emits:
+  ```msl
+  threadgroup float _accN[L];
+  _accN[tt] = init;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint a_red = tt; a_red < red_extent; a_red += L) {
+    _accN[tt] = _accN[tt] OP body(a_red);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tt == 0) {
+    float _total = init;
+    for (uint _i = 0; _i < L; _i++) _total = _total OP _accN[_i];
+    out[addr] = _total;
+  }
+  ```
+  REDUCE_MAX uses ternary form for both per-thread combine and
+  final fold.  Detection: `red_kind_opt == UOP_OPT_GROUP_REDUCE`
+  on the reduce-axis range; falls through to the existing scalar-
+  accumulator path otherwise.  This branch is unreachable until
+  Phase 4 lifts the `has_reduce_axis` short-circuit and produces
+  the OPT_GROUP_REDUCE annotation on real kernels; make test
+  274/274 unchanged.
 - [ ] Phase 4: wire `kernel_lift.c`'s S_REDUCE_SUM lifter to honour
   the linearised reduce-axis expression (currently asserts a
   single UOP_RANGE leaf).  After the replay, the reduce range may
