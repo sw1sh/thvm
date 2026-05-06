@@ -194,7 +194,19 @@ file, commits, and stops.
 
   jit_misses=48, jit_bypass=0, jit_compile_us=121548 (cold).
   Cache fits cleanly inside the 256-slot cap.
-- [ ] tinygrad: `bench/autotune-ladder/softmax.py` BEAM=4.
+- [x] (2026-05-06) tinygrad: `bench/autotune-ladder/softmax.py`
+  BEAM=4.
+
+  | mode      | warmup_us | steady_us | speedup |
+  |-----------|----------:|----------:|--------:|
+  | NOOPT=1   | 21832     | 1245      | 1.00x   |
+  | BEAM=4    |  1354     | 1141      | **1.09x** |
+
+  Tinygrad also decomposes softmax into 3 kernels per iter
+  (kernel_count=150 = 3 * 50 reps), matching thvm.  BEAM=4 finds
+  a 1.09x win -- close to thvm's 1.12x.  Both autotune surfaces
+  agree this kernel chain is mostly memory-bound and there's
+  little to extract.
 - [ ] Compare.
 
 ### Level 4 -- 2-layer MLP forward
