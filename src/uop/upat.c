@@ -4,22 +4,22 @@
 // bindings.  Each UPat node captures op / src-count / dtype /
 // optional binding-slot; nested UPats describe child structure.
 //
-// Adapter: a UPatRule compiles into a UOpGraphRewriteFn (existing
-// thvm harness) by wrapping the matcher + the user's rewrite
-// function.  See docs/plans/autotune_beam_profile.md Level 45.
-//
-// Smoke-test scope: structural matching only.  No pdict
-// fast-dispatch yet (every rule is checked against every visited
-// node); that's an optimization for after the first port lands.
+// Adapter (uop_pattern_rewrite): wraps a UPatRule[] table into the
+// existing uop_graph_rewrite engine.  The adapter rule walks the
+// rule list per node, invoking each rewrite fn whose pattern
+// matches; the first non-NULL result wins.  No pdict fast-dispatch
+// yet (every rule is checked against every visited node); that's an
+// optimization for after the first port lands.
 
 fn int upat_match(UPat const *pat, Term t, Term *bindings) {
   if (pat == NULL) return 0;
 
   // "any" op (0) accepts any UOp tag; otherwise op must match.
   if (term_tag(t) != TAG_UOP) {
-    // Allow any op pattern to match a non-UOp leaf only when
-    // there's no nested src constraint (leaf wildcards).
-    if (pat->op == 0 && pat->nsrc == 0) {
+    // A non-UOp leaf has zero children, so leaf-wildcards require
+    // op=0 plus nsrc in {0, 0xFF/any}.  A specific op (>0) cannot
+    // match a leaf, and a specific arity (>=1) demands children.
+    if (pat->op == 0 && (pat->nsrc == 0 || pat->nsrc == 0xFF)) {
       if (pat->bind >= 0 && pat->bind < UPAT_NUM_BINDINGS) {
         bindings[pat->bind] = t;
       }
@@ -48,4 +48,38 @@ fn int upat_match(UPat const *pat, Term t, Term *bindings) {
     bindings[pat->bind] = t;
   }
   return 1;
+}
+
+// Bridge to uop_graph_rewrite.  One UOpGraphRewriteRule wraps the
+// whole UPatRule[] list; per-rule stats are pushed manually inside
+// the bridge so we can keep a single registered rule and still see
+// hit counters.
+typedef struct {
+  UPatRule const *rules;
+  u32             n_rules;
+  void           *user;
+} UPatBridgeCtx;
+
+static Term upat_bridge_apply(Term t, void *user) {
+  UPatBridgeCtx *ctx = (UPatBridgeCtx *)user;
+  for (u32 i = 0; i < ctx->n_rules; i++) {
+    UPatRule const *r = &ctx->rules[i];
+    if (r->pat == NULL || r->rewrite == NULL) continue;
+    Term bindings[UPAT_NUM_BINDINGS] = {0};
+    if (!upat_match(r->pat, t, bindings)) continue;
+    Term out = r->rewrite(bindings, ctx->user);
+    if (out != 0 && out != t) {
+      return out;
+    }
+  }
+  return 0;
+}
+
+fn Term uop_pattern_rewrite(Term root,
+                            UPatRule const *rules,
+                            u32 n_rules,
+                            void *user) {
+  UPatBridgeCtx ctx = {rules, n_rules, user};
+  UOpGraphRewriteRule bridge = {"upat-bridge", upat_bridge_apply};
+  return uop_graph_rewrite(root, &bridge, 1, &ctx);
 }

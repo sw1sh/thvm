@@ -4380,10 +4380,26 @@ task.  Break it down:
 
   This is the design contract.  Implementation lands next.
 
-- [ ] After the API sketch lands, implement a minimal core
+- [x] After the API sketch lands, implement a minimal core
   (UPat + PatternMatcher + graph_rewrite) and one trivial
   rewrite as the smoke test.  Target: replace one existing
   imperative rule with the declarative form.
+
+  Landed: `src/uop/upat.c` now exports `upat_match` (recursive
+  structural matcher) and `uop_pattern_rewrite` (adapter that
+  wraps a `UPatRule[]` table into one `UOpGraphRewriteRule`
+  registered with the existing `uop_graph_rewrite` engine).
+  `tests/test_uop_upat.c` (22/22 checks) drives:
+    1. matcher accepts/rejects expected shapes (op + arity gates,
+       bindings populate, leaf wildcards work for any-op + any-nsrc);
+    2. UOP_NEG(?x) -> x rule expressed declaratively + driven through
+       `uop_pattern_rewrite`, matching the imperative `strip_neg`
+       baseline in test_uop_graph_rewrite.c;
+    3. two-rule table where the first rule rejects and the second
+       fires (ADD(?a,?b) where a==b -> a*2), exercising the rule-
+       iteration path of the bridge.
+  `make test` clean.  Next: re-express matmul-input-protect as a
+  UPatRule and measure the predicted ~40x transformer wall delta.
 
 - [ ] Once the framework is in tree, re-express the
   bufferize rules and the matmul-input-protect logic as
