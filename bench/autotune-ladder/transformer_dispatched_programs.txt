@@ -1,0 +1,15 @@
+ 157   dispatch-kid kid=22 n_inputs=2 n_ops=4 ops=[3,5,10,17]
+ 133   dispatch-kid kid=4 n_inputs=2 n_ops=4 ops=[3,5,10,17]
+ 133   dispatch-kid kid=2 n_inputs=3 n_ops=9 ops=[10,17,10,3,5,9,15,12,10]
+ 133   dispatch-kid kid=19 n_inputs=2 n_ops=4 ops=[3,5,10,17]
+ 133   dispatch-kid kid=16 n_inputs=3 n_ops=6 ops=[17,10,3,5,10,9]
+ 133   dispatch-kid kid=10 n_inputs=2 n_ops=7 ops=[3,5,4,3,5,10,17]
+ 133   dispatch-kid kid=1 n_inputs=3 n_ops=6 ops=[17,10,3,5,10,9]
+ 121   dispatch-kid kid=13 n_inputs=2 n_ops=6 ops=[3,5,3,5,10,17]
+ 121   dispatch-kid kid=12 n_inputs=1 n_ops=5 ops=[17,3,12,5,10]
+  67   dispatch-kid kid=6 n_inputs=2 n_ops=4 ops=[3,5,10,17]
+  67   dispatch-kid kid=5 n_inputs=2 n_ops=4 ops=[3,5,10,17]
+  67   dispatch-kid kid=17 n_inputs=3 n_ops=9 ops=[10,17,10,3,5,9,15,12,10]
+  67   dispatch-kid kid=14 n_inputs=2 n_ops=4 ops=[3,5,10,17]
+
+# Decoded: 3=RESHAPE 4=PERMUTE 5=EXPAND 9=ADD 10=MUL 12=RECIP 15=SQRT 16=CMPLT 17=REDUCE

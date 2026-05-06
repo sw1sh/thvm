@@ -2036,6 +2036,30 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
 
+  // THVM_DUMP_KID_PROGRAM=1 prints the program op-list of every
+  // dispatched kernel that contains a REDUCE.  Mirrors the
+  // tile_analyze_gemm reject-ops diagnostic but for the dispatched
+  // (post-rejection) side: we get to see kid 14 / kid 16's actual
+  // program shape so the matmul-shape relaxation in tile_analyze_gemm
+  // can target the right pattern.  Level 50.
+  {
+    char const *_e = getenv("THVM_DUMP_KID_PROGRAM");
+    if (_e != NULL && _e[0] == '1' && ke != NULL && ke->program != NULL) {
+      int has_reduce = 0;
+      for (u32 i = 0; i < ke->n_ops; i++) {
+        if (ke->program[i].opcode == UOP_REDUCE) { has_reduce = 1; break; }
+      }
+      if (has_reduce) {
+        fprintf(stderr, "  dispatch-kid kid=%u n_inputs=%u n_ops=%u ops=[",
+                kid, ke->n_inputs, ke->n_ops);
+        for (u32 i = 0; i < ke->n_ops; i++) {
+          fprintf(stderr, "%s%u", i ? "," : "", (unsigned)ke->program[i].opcode);
+        }
+        fprintf(stderr, "]\n");
+      }
+    }
+  }
+
   if (kprog_supported && metal_try_alias_reshape(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_METAL_ALIAS, cg_now_us() - t0);
     return 0;

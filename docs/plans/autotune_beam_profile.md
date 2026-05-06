@@ -4663,3 +4663,49 @@ specific shape kid 14's matmul kernel has now.
   in `tile_analyze_gemm`; if it works, kid 14 might drop another
   5-10x by routing through metal-gemm-with-TC.
 
+### Level 50: dump dispatched-kernel programs
+
+Before relaxing `tile_analyze_gemm`, confirm what kid 14's
+program ACTUALLY looks like at dispatch time.  The reject-ops
+diagnostic from Level 49 shows shapes that were CONSIDERED but
+rejected; we need the same data for kernels that DID dispatch
+(metal-tile, metal-op).  Then we can map the 1316-hits pattern
+to specific kid ids and confirm the relaxation target.
+
+- [x] (2026-05-07) Add THVM_DUMP_KID_PROGRAM=1 in
+  `metal_dispatch_kernel`; prints each dispatched kernel's
+  program op-list (filtered to REDUCE-containing kernels) at
+  dispatch time.  `make test` clean.  Re-run transformer_block,
+  save to `bench/autotune-ladder/transformer_dispatched_programs.txt`.
+
+  Per-kid dispatched program shapes (for kids that contain a
+  REDUCE; same opcode legend as Level 49):
+
+  | hits | kid | n_in | n_op | ops decoded                      |
+  |-----:|----:|-----:|-----:|----------------------------------|
+  |  157 |  22 |    2 |    4 | RESHAPE,EXPAND,MUL,REDUCE        |
+  |  133 |   4 |    2 |    4 | RESHAPE,EXPAND,MUL,REDUCE        |
+  |  133 |  19 |    2 |    4 | RESHAPE,EXPAND,MUL,REDUCE        |
+  |  133 |  10 |    2 |    7 | RESHAPE,EXPAND,PERMUTE,RESHAPE,EXPAND,MUL,REDUCE |
+  |  121 |  13 |    2 |    6 | RESHAPE,EXPAND,RESHAPE,EXPAND,MUL,REDUCE |
+  |  121 |  12 |    1 |    5 | REDUCE,RESHAPE,RECIP,EXPAND,MUL  |
+  |   67 |   5 |    2 |    4 | RESHAPE,EXPAND,MUL,REDUCE        |
+  |   67 |   6 |    2 |    4 | RESHAPE,EXPAND,MUL,REDUCE        |
+  |   67 |  14 |    2 |    4 | RESHAPE,EXPAND,MUL,REDUCE        |
+
+  **Six dispatched kids (4, 5, 6, 14, 19, 22) all carry the
+  identical post-Level-48 matmul shape `[RESHAPE, EXPAND, MUL,
+  REDUCE]` (n_inputs=2, n_ops=4)** -- the multi-hop matmul-input-
+  protect cleanly extracted them.  Kids 10 and 13 are similar
+  matmul shapes with extra movement layers.  Kid 14 (the original
+  bottleneck, now 1288us on metal-tile) is exactly this shape.
+
+  This confirms the Level 50 relaxation target: a single shape
+  pattern (movement-prefix + MUL + REDUCE) covers all dispatched
+  matmul kernels.  The relaxation is straightforward; the gating
+  question is whether metal-gemm rendering can handle stride-aware
+  loads on the input buffers (the existing
+  `tile_analyze_expanded_gemv` shows precedent for n_ops=3 with
+  EXPAND prefix on one operand, so the infrastructure is partial).
+  Subject for the next iteration after this probe data lands.
+
