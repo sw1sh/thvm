@@ -62,7 +62,7 @@ variants) decompose cleanly via the per-element table.
 
 1. **Conv 3-into-1** (im2col + reduce + bias fusion):
    +2 leak per Conv-Ramp block.  Closes the conv-net leak
-   driver.  Tracked in [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md)
+   driver.  Tracked in [docs/plans/rewrite_fusion.md](rewrite_fusion.md)
    as Phase D'+F.
 2. **Pool fusion** (fuse pool with predecessor):
    +1 leak per pool-block.  Half of conv-net's per-pool leak.
@@ -126,6 +126,33 @@ formula above.  Each level has its own bench script in
 [bench/autotune-ladder/](../../bench/autotune-ladder/).
 The cross-level synthesis is in
 [bench/autotune-ladder/comparison.md](../../bench/autotune-ladder/comparison.md).
+
+### Next directive (2026-05-06): attention / Transformer / GPT-2
+
+User redirected the campaign to extend ladder coverage into
+attention, Transformer block, and GPT-2 forward passes,
+seeking tinygrad parity or better.  All three are blocked
+on the WL surface (NetChain has no MultiheadAttention /
+LayerNorm / residual primitives), so subsequent levels need
+either:
+  (a) TLam-level definitions of attention/transformer/gpt-2,
+      bypassing NetChain, or
+  (b) WL surface expansion to cover the missing primitives.
+
+(a) is the closer path; tinygrad has `examples/transformer.py`
+and `examples/gpt2.py` to mirror.  Subsequent iterations
+should queue:
+
+- Level 18: tinygrad attention bench (baseline + BEAM=4)
+- Level 19: tinygrad transformer-block bench
+- Level 20: tinygrad GPT-2 forward bench
+- Level 21+: thvm side via TLam (gated on TLam attention API)
+
+The MLP/CNN-side formula derived above won't directly predict
+attention kernel counts -- attention has matmul + softmax-on-
+intermediate + matmul (a different bufferize pattern); fresh
+benches will need to derive the attention-specific leak
+coefficients.
 
 ## Discipline (lessons from the prior cron run)
 
@@ -870,7 +897,7 @@ need a new path.
   untunable shape) but **does NOT close the structural-fusion
   gap** vs tinygrad (1604us, 1 kernel).  The N-fold dispatch
   win still requires fusing kid 1 + kid 2 + kid 3 into one
-  kernel -- an operation only Phase D'+F of [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md)
+  kernel -- an operation only Phase D'+F of [docs/plans/rewrite_fusion.md](rewrite_fusion.md)
   delivers.  Per-kernel autotune saturated as predicted.
 
 ### Did the rangeify u8-fix transfer to MLP2?
@@ -1462,7 +1489,7 @@ Level 6's 2-block count exposes the per-conv-block delta.
 
   Conv-block fusion has 4x the leverage of linear-block fusion
   on conv-net workloads.  This sharpens the priority list
-  in [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md):
+  in [docs/plans/rewrite_fusion.md](rewrite_fusion.md):
   Conv2d 3-into-1 (Phase D'+F) + conv-elementwise / pool-
   elementwise fusion is the highest-ROI structural change for
   real conv-net kernels.
@@ -2158,7 +2185,7 @@ Verify the formula at L=1 on tinygrad.  Predicted by
   mini_lenet2, LeNet) with full per-element decomposition
   matching every observation.  The model is precise, complete
   for the tested envelope, and ready to inform structural-
-  fusion work in [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md).
+  fusion work in [docs/plans/rewrite_fusion.md](rewrite_fusion.md).
 
 ### Campaign summary
 
