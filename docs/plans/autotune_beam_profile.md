@@ -3495,3 +3495,47 @@ TKernelTileRootOp accessor).
   make test 274/274 stays green with the diagnostic added.
   Diagnostic compiles into the binary by default but is
   silent unless THVM_DUMP_GEMM_REJECT=1.
+
+### Level 31: verify n_ops / n_inputs for kid 14
+
+Before patching `tile_analyze_gemm`, confirm the diagnosis.
+The previous iteration claimed kid 14 likely has `n_ops > 2`
+(matmul fuses with bias-add).  Extend the diagnostic to
+also dump `ke->n_ops` and `ke->n_inputs` so we know which
+specific gate fails.
+
+- [x] (2026-05-06) Extend the `THVM_DUMP_GEMM_REJECT`
+  diagnostic at [src/schedule/tile.c:1568](../../src/schedule/tile.c#L1568)
+  (currently prints root op only) to also print `ke->n_ops`
+  and `ke->n_inputs`.  Build, make test 274/274, re-run
+  transformer with `THVM_DUMP_GEMM_REJECT=1`, and inline the
+  distinct signatures.
+
+  Distinct rejected (n_ops, n_inputs) signatures in transformer:
+
+  | n_ops | n_inputs | likely kernel                |
+  |------:|---------:|------------------------------|
+  |     1 |      1-2 | small elementwise            |
+  |     2 |      1-3 | fails non-gate check         |
+  |     4 |        2 | medium fused                 |
+  |     6 |        3 | medium fused                 |
+  |     9 |        4 | medium fused                 |
+  |    11 |        4 | heavy (kid 14? FFN fc1)      |
+  |    17 |        7 | heavy (kid 16? FFN fc2)      |
+
+  **Confirmed**: kids 14/16 have n_ops=11 and 17, far above
+  the strict `n_ops == 2` gate at L1013.  Even the `n_ops=2,
+  n_inputs=2` rejects exist -- those fail other gates
+  (`tile_gemm_op_is_mul_inputs` or `tile_gemm_op_is_reduce_sum_of`).
+
+  The fix has to detect a "gemm sub-program" embedded in a
+  larger fused kernel: walk `ke->program` looking for a
+  consecutive (mul-of-inputs, reduce-sum) pair anywhere in
+  the program list, regardless of trailing bias-add /
+  prologue ops.  That sub-program is the gemm; the rest can
+  feed in or out.
+
+  Next iteration: write the relaxed detector or sketch its
+  shape.
+
+  make test 274/274 stays green.

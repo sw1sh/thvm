@@ -1565,14 +1565,16 @@ fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
     }
     return 1;
   }
-  // Diagnostic: print root op when the MMA path is skipped.
-  // Gated by THVM_DUMP_GEMM_REJECT=1.
+  // Diagnostic: print root op + n_ops + n_inputs when the
+  // MMA path is skipped.  Gated by THVM_DUMP_GEMM_REJECT=1.
   {
     char const *e = getenv("THVM_DUMP_GEMM_REJECT");
     if (e != NULL && e[0] == '1') {
       fprintf(stderr,
-              "tile-plan: root op=%u (not TILE_MMA), gemm dispatch skipped\n",
-              (unsigned)root->op);
+              "tile-plan: root op=%u (not TILE_MMA) n_ops=%u n_inputs=%u\n",
+              (unsigned)root->op,
+              (unsigned)ke->n_ops,
+              (unsigned)ke->n_inputs);
     }
   }
 
