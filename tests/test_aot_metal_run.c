@@ -479,6 +479,28 @@ int main(void) {
           (unsigned long long)dt, (unsigned long long)(dt / 100));
   CHECK(dt < 200000);   // 200 ms cap; typical run is ~50 ms total
 
+  // Iter GG: CPU baseline -- same OP2(NUM, NUM) fold via wnf, no
+  // kernel launch.  Demonstrates the GPU-dispatch overhead vs the
+  // intrinsic cost of the actual computation.  No CHECK, just
+  // informational; numbers shift across machines.
+  TEST_BEGIN("CPU baseline: 100 OP2(NUM,NUM) folds via wnf");
+  u64 t1 = cg_now_us();
+  for (u32 i = 0; i < 100; i++) {
+    u64 op_loc = heap_alloc(2);
+    heap_set(op_loc + 0, term_new(0, TAG_NUM, 0, 7));
+    heap_set(op_loc + 1, term_new(0, TAG_NUM, 0, 11));
+    Term op = term_new(0, TAG_OP2, OP_ADD, op_loc);
+    Term r  = wnf(op);
+    (void)r;
+  }
+  u64 dt_cpu = cg_now_us() - t1;
+  fprintf(stderr,
+    "  bench: 100 OP2 folds via wnf in %llu us (avg %llu us/call); "
+    "Metal/CPU ratio ~%llux\n",
+    (unsigned long long)dt_cpu,
+    (unsigned long long)(dt_cpu / 100),
+    (unsigned long long)(dt_cpu == 0 ? 0 : dt / dt_cpu));
+
   thvm_free();
   TEST_REPORT();
 }
