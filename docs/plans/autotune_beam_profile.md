@@ -1702,3 +1702,76 @@ this may be optimistic.
   envelope.  Outside that envelope, per-block costs vary;
   predicting from formula breaks down.  Future structural-
   fusion work needs to handle these variations explicitly.
+
+### Level 15: Isolate Pool's kernel cost
+
+mini_lenet3 suggested pool bundles 2-3 kernels.  Direct probe:
+mini-LeNet without pool (Conv 5x5 + Ramp + Flatten + Linear
++ Softmax).  Subtract from with-pool's 10 kernels to isolate
+the per-pool cost.
+
+Predicted: if pool=+2, no-pool variant = 8 kernels.  If
+pool=+3, no-pool variant = 7 kernels.  Conv output for a
+5x5 conv on 28x28 is 24x24x6 = 3456 features; Linear[3456,10]
+is large but valid.
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/mini_lenet_nopool.wls` -- forward-
+  only Conv5x5+Ramp+Flatten+Linear+Softmax on a single MNIST
+  sample.  Save stdout to
+  `bench/autotune-ladder/mini_lenet_nopool.txt`.  Inline
+  kernel_count, dispatch_kinds, totals_baseline_us,
+  totals_best_us, totals_speedup, kernels_with_proposals.
+  Compare to mini-LeNet (10 kernels) -- the delta IS the
+  pool's per-block bufferize cost.
+
+  | metric             | nopool | mini-LeNet | delta |
+  |--------------------|-------:|-----------:|------:|
+  | conv-blocks        |      1 |          1 |       |
+  | pool-blocks        |      0 |          1 |   +1  |
+  | kernel_count       |      8 |         10 |   +2  |
+  | dispatch_kinds     | 3op+5t |     5op+5t |       |
+  | totals_best_us     |   1831 |       2154 |       |
+  | totals_speedup     |  1.24x |      1.17x |       |
+
+  **Pool costs exactly +2 kernels per block.**
+
+  Refined cost decomposition:
+
+  | block-element            | kernels |
+  |--------------------------|--------:|
+  | Conv (5x5) + Ramp        |       3 |
+  | Pool (2x2 stride 2)      |      +2 |
+  | Linear + Activation      |      +2 |
+  | Baseline (input+softmax) |       3 |
+
+  Ramp fuses for free with Conv (no extra kernel).  Pool is
+  the most expensive single op in the conv-block (+2), tied
+  with Linear+Activation.
+
+  Updated coarse formula: `thvm = 3*Kconv + 2*Kpool + 2*L + 3`.
+  Verifies against mini_lenet3 (K=3 conv but only 2 pools):
+  3*3 + 2*2 + 2 + 3 = **18**, observed 17.  1-kernel off,
+  plausibly from the 3x3 vs 5x5 kernel-size difference (the
+  smaller patch may collapse a kernel).
+
+  Inside the {conv 5x5, pool 2x2, Ramp, single-sample}
+  envelope, Kconv=Kpool=K so the formula reduces to
+  `5K + 2L + 3` exactly.  Outside, the more precise
+  decomposition holds.
+
+  **Refined structural-fusion priority** (using leverage
+  per kernel saved, with tinygrad as the parity target):
+  - **Pool fusion**: pool currently +2 thvm, +1 tinygrad
+    (estimated -- not directly measured; tinygrad's max_pool
+    typically fuses with the preceding op).  Closing this
+    is +1 leak per pool-block.
+  - **Linear+Activation fusion**: +1 leak per linear-block
+    (per Level 9).
+  - **Conv 3-into-1**: +2 leak per conv-block (the im2col +
+    reduce + bias chain).
+
+  Conv-block fusion is still the highest single leverage
+  point (~2 leak per block); Pool and Linear are tied at +1
+  per boundary.  All three structural fixes target tinygrad
+  parity.
