@@ -914,8 +914,34 @@ every minute.
   fp32 constants -- previously silently broken.
 
 ### Bench-train timed loss NaN follow-on
-- [ ] Investigate why bench-train's *timed* losses are `$Failed`
-  past the warmup step (which produces a finite 16.1181 / 2.3026
-  loss).  Hypothesis: the SGD update applies a NaN gradient
-  produced by softmax-gradient instability (no max-subtract in
-  the TGrad chain rule for softmax/log).
+- [~] (2026-05-06) Investigated.  Re-ran bench-train post the
+  rendering fixes (hoist + %.9g + TCE eps).  baseline phase
+  produces a finite first loss (2.3026 = uniform softmax) and
+  NaN losses on subsequent steps -- consistent with the SGD
+  update propagating a NaN gradient.  But re-bench surfaced a
+  **bigger regression**: autotune phase now takes 116 seconds
+  per step (was 315 ms post-stable-softmax, 192 ms before).
+  speedup baseline/autotune = 0.003x -- catastrophically worse.
+
+  Bench numbers post the recent commits:
+  | phase    | ms/step | kernels |
+  |----------|---------|---------|
+  | baseline |     309 |    2058 |
+  | autotune |  116787 |    2058 |
+
+  Same kernel count as before, so it's not a new structural
+  regression -- it's per-step dispatch cost.  Hypothesis: one of
+  the recent commits (hoist / %.9g / TCE eps) changed kernel
+  rendering enough that the kernel-program-cache key no longer
+  matches across autotune iterations, forcing a recompile per
+  dispatch.  The N_STEPS=2 case is fast (281 ms/step), suggesting
+  it's a cumulative cache-thrash issue.  Marked [~]; needs
+  bisect among the recent commits.
+
+### Autotune cache-thrash bisect follow-on
+- [ ] Bisect which of the recent commits (9e26ec4 hoist /
+  2237a23 %.9g / 8f52509 TCE-eps / 7b97646 buf-of-INDEX) caused
+  the autotune-phase 280x slowdown on bench-train.  The kernel
+  count and dispatch histogram are unchanged from pre-regression
+  (2058 / metal-op:metal-tile = 1151:811), so the issue is
+  per-step cache lookup or recompile cost, not graph shape.
