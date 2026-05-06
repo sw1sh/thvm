@@ -3124,3 +3124,31 @@ patterns the rules might affect.
   uses for default-on).  Make test 274/274 must stay green.
   Re-bench MLP4 / LeNet / transformer with NO env knobs to
   confirm the wall wins persist.
+
+### Level 24: flip inline-rule defaults to ON
+
+- [x] (2026-05-06) Flip the defaults at
+  `bufferize_classify.c:516` and `:526` from
+  `e != NULL && e[0] == '1'` to `e == NULL || e[0] != '0'`.
+  Make test 274/274 stays green.  Re-bench MLP4 with no env
+  knobs.
+
+  | metric             | pre-flip | post-flip |
+  |--------------------|---------:|----------:|
+  | kernel_count       |       11 |        11 |
+  | dispatch_kinds     |   1g+10t |    1g+10t |
+  | totals_baseline_us |     2892 |      2011 |
+  | totals_best_us     |     2257 |      1752 |
+  | totals_speedup     |    1.28x |     1.15x |
+  | wall ratio         |       1x |  **1.29x faster** |
+
+  **Wins are live without env knobs.**  MLP4 best wall went
+  2257us -> 1752us (-22%).  Kernel count and dispatch
+  unchanged.
+
+  make test 274/274 green.
+
+  Pending re-benches (next iterations): LeNet + transformer
+  with no env knobs to confirm the +1.25x and +0% wall
+  patterns from the env-flagged probe persist with defaults
+  flipped.

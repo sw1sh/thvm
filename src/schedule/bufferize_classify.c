@@ -513,7 +513,7 @@ static int bufferize_inline_multiconsumer_pure_enabled(void) {
     return 0;
   }
   char const *e = getenv("THVM_INLINE_MULTI_CONSUMER_PURE");
-  return e != NULL && e[0] == '1';
+  return e == NULL || e[0] != '0';
 }
 
 static int bufferize_rangeify_enabled(void);
@@ -523,7 +523,7 @@ static int bufferize_inline_reduce_fanout_enabled(void) {
     return 0;
   }
   char const *e = getenv("THVM_INLINE_REDUCE_FANOUT");
-  return e != NULL && e[0] == '1';
+  return e == NULL || e[0] != '0';
 }
 
 static int bufferize_remove_removable_bufferize_enabled(void) {
