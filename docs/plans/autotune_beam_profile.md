@@ -4059,7 +4059,30 @@ Hypotheses:
   (b) helper misses it on this shape
   (c) topo_sort_boundaries filters further
 
-- [ ] Instrument topo_sort_boundaries to dump (loc, op) for
-  each addition to BOUNDARY_ORDER.  Run two_linears,
-  confirm matmul reduce loc insertion.  Determines which
-  hypothesis to chase.
+- [x] (2026-05-06) Instrument topo_sort_boundaries to dump
+  (loc, op) for each addition to BOUNDARY_ORDER.  Run
+  two_linears.
+
+  | idx | loc | op       | reasons                |
+  |----:|----:|----------|------------------------|
+  |   0 |  22 | 17 REDUCE| 0x44 = REDUCE | MATMUL |
+  |   1 |  57 | 17 REDUCE| 0x44 = REDUCE | MATMUL |
+  |   2 |  68 | 9        | 0x1 = ROOT             |
+
+  **Both matmul reduces ARE in BOUNDARY_ORDER** with
+  REASON_MATMUL set.  Hypotheses (a)/(b) refuted.  The
+  bufferize protection IS working.
+
+  But kid 2 has n_ops=5 and dispatches as metal-tile despite
+  its boundary root being a clean matmul reduce (op=17).
+  Hypothesis (c) variant: materialize is inlining extra ops
+  INTO kid 2 even though the root is a clean reduce.
+
+  Or: the kid 2 numbering doesn't correspond to idx=1.
+  Maybe one of the boundaries hits a different dispatch
+  path while a different boundary becomes the slow kid.
+
+  - [ ] Cross-reference the 3 boundary locs (22, 57, 68) to
+    the 3 dispatched kids by adding loc to the per-kernel
+    dispatch print.  Determines which boundary is the slow
+    kernel.

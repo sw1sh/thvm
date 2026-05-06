@@ -380,6 +380,18 @@ static void topo_sort_boundaries(Term root) {
     u32 idx = BOUNDARY_ORDER_LEN++;
     BOUNDARY_ORDER[idx] = items[i].loc;
     boundary_hash_insert(items[i].loc, idx);
+    {
+      char const *e = getenv("THVM_DUMP_BOUNDARY_ORDER");
+      if (e != NULL && e[0] == '1') {
+        u32 binfo = bufferize_info_find(items[i].loc);
+        u8 op = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].op : 0xFF;
+        u32 reasons = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].reasons : 0;
+        fprintf(stderr,
+                "boundary-order: idx=%u loc=%llu op=%u reasons=0x%x\n",
+                idx, (unsigned long long)items[i].loc,
+                (unsigned)op, reasons);
+      }
+    }
   }
 }
 
