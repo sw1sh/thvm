@@ -199,6 +199,29 @@ VerificationTest[
     TestID -> "Metal: sum5(a,b,c,d,e) -- 5 args via run_n bridge"
 ]
 
+(* === iter H: kernel-built CTR result === *)
+
+(* TLam[x, TCtr[1, x]] -- kernel allocates a single-child CTR cell on
+   book_heap via aot_book_alloc, returns a TAG_CTR Term.  Verify tag
+   and label round-trip through the WL surface. *)
+VerificationTest[
+    TInit[];
+    TDef["wrap1", TLam[x, TCtr[1, x]]];
+    With[{r = TAOTRun["wrap1", {TNum[42]}, Method -> "Metal"]},
+      {TTermTag[r], TTermExt[r]}],
+    {$TagCTR, 1},
+    TestID -> "Metal: wrap1(x) returns TAG_CTR with label=1"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["pair", TLam[a, TLam[b, TCtr[2, a, b]]]];
+    With[{r = TAOTRun["pair", {TNum[7], TNum[35]}, Method -> "Metal"]},
+      {TTermTag[r], TTermExt[r]}],
+    {$TagCTR, 2},
+    TestID -> "Metal: pair(a, b) returns TAG_CTR with label=2"
+]
+
 (* === Method dispatcher rejects unknown spec === *)
 
 VerificationTest[
