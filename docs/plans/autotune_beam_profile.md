@@ -4209,10 +4209,26 @@ rules to understand the architectural framework.
   one focused port from tinygrad.  Single iteration to
   sketch + land.
 
-  - [ ] Locate `bufferize_rule_remove_removable_bufferize`
-    in src/schedule/bufferize_classify.c and read its
-    current logic.  Sketch a `buffer_in_reduce` check that
-    mirrors tinygrad's L269-277 pattern.
+  - [x] (2026-05-06) Locate
+    `bufferize_rule_remove_removable_bufferize` in
+    src/schedule/bufferize_classify.c (L953-1027) and read
+    its current logic.
+
+    The rule already protects matmul reduces (L972-974
+    skip REASON_REDUCE; L976 skip op==UOP_REDUCE; L966
+    skips consumer_count<2).  It's NOT the matmul-absorption
+    culprit.
+
+    The actual lever is the **bias-add upstream of the
+    matmul reduce**: it has consumer_count=1, isn't a
+    boundary, and visit() inlines it during materialize.
+    Right fix is to bufferize the bias-add explicitly.
+
+    Re-attempted the multi-hop matmul-input-protect walk
+    (extending one-hop to traverse EXPAND/RESHAPE/etc.
+    upstream).  **Reverted per user direction (2026-05-06)**:
+    "implement declarative pattern layer first, stop
+    hacking."  Working tree clean.
 
 ### Level 44: tinygrad UOp/rewrite engine refresher
 
@@ -4263,4 +4279,34 @@ infrastructure (not just rangeify rules).
 
   Next iteration sketches the C-side `buffer_in_reduce`
   helper.
+
+### Level 45: PIVOT -- declarative pattern layer
+
+User direction (2026-05-06): "implement declarative pattern
+layer first, stop hacking."  Every imperative fix landed so
+far adds more scaffolding to walk through later; a UPat-style
+layer over thvm's UOp DAG is the unblock.
+
+This is a multi-iteration design+impl, not a single 5-min
+task.  Break it down:
+
+- [ ] Sketch the API surface for thvm's declarative pattern
+  layer.  Mirror tinygrad's UPat / PatternMatcher /
+  graph_rewrite shape (see Level 44 refresher).  Document:
+  (a) what UPat looks like in C (struct vs constructor
+  helpers), (b) how match-bindings work without Python's
+  closures, (c) how PatternMatcher composes (linked list
+  vs flat array), (d) how graph_rewrite drives the
+  walk+rewrite to fixpoint over thvm's heap-resident UOp
+  graph.
+
+- [ ] After the API sketch lands, implement a minimal core
+  (UPat + PatternMatcher + graph_rewrite) and one trivial
+  rewrite as the smoke test.  Target: replace one existing
+  imperative rule with the declarative form.
+
+- [ ] Once the framework is in tree, re-express the
+  bufferize rules and the matmul-input-protect logic as
+  declarative patterns.  This is what enables the
+  `buffer_in_reduce` check to be one-line.
 
