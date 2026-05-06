@@ -1936,17 +1936,20 @@ static void cg_shadow_lift_metal(KernelEntry const *ke) {
   kernel_lift_count_compile(WEXITSTATUS(rc) == 0);
 }
 
-// Phase F primary-path flip experiment: when THVM_RENDER_VIA_UOP=1,
-// render through kernel_lift_to_uop + cg_render_uop_kernel, fall back
-// to the existing path if the lift fails.  Gated off by default while
-// we A/B benchmark on real workloads.  Returns NULL when this path
-// declines (caller continues with the existing render).
+// Phase F primary-path flip: render through kernel_lift_to_uop +
+// cg_render_uop_kernel for non-conv2d kernels.  Falls back to the
+// existing CtKernelInfo path when the lift declines.  Default ON
+// after execution-parity validation across cmpeq/cast/reduce/bitcast/
+// bn_grad/grad_edge/assign WL workloads (46/46 PASS).
+//
+// Set THVM_RENDER_VIA_UOP=0 to force the legacy renderer (e.g. for
+// regression bisection on dispatch-kind histograms or A/B benchmarks).
 static char *cg_emit_via_uop(KernelEntry const *ke) {
   static int via_uop_inited = 0;
-  static int via_uop_on     = 0;
+  static int via_uop_on     = 1;  // default on
   if (!via_uop_inited) {
     char const *e = getenv("THVM_RENDER_VIA_UOP");
-    via_uop_on    = (e != NULL && e[0] == '1');
+    if (e != NULL && e[0] == '0') via_uop_on = 0;
     via_uop_inited = 1;
   }
   if (!via_uop_on) return NULL;

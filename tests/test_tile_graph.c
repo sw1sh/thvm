@@ -17,15 +17,19 @@
 
 // LEGACY_MSL_CHECK: assertions that hold for the legacy ScalarUop
 // renderer's specific MSL conventions (`_tg`, `_ltid`, `_ta0`, `_sh`,
-// `_rk`, `_gid3.x`, `_tk`, `threadgroup float`, etc.).  When
-// THVM_RENDER_VIA_UOP=1 swaps the renderer to cg_render_uop_kernel,
-// the emitted MSL uses different conventions (`tg`, `tt`, `aN`,
-// `_acc<axis>`) so these assertions don't apply.  Skip them when
-// the env is set.
+// `_rk`, `_gid3.x`, `_tk`, `threadgroup float`, etc.).  The new
+// render_uop renderer (default since Phase F) uses different
+// conventions (`tg`, `tt`, `aN`, `_acc<axis>`) so these assertions
+// don't apply.  Run only when THVM_RENDER_VIA_UOP=0 forces the
+// legacy renderer.
+static inline int legacy_msl_render_active(void) {
+  char const *e = getenv("THVM_RENDER_VIA_UOP");
+  return e != NULL && e[0] == '0';
+}
 #define LEGACY_MSL_CHECK(expr) \
-  do { if (getenv("THVM_RENDER_VIA_UOP") == NULL) { CHECK(expr); } } while (0)
+  do { if (legacy_msl_render_active()) { CHECK(expr); } } while (0)
 #define LEGACY_MSL_CHECK_EQ(a, b) \
-  do { if (getenv("THVM_RENDER_VIA_UOP") == NULL) { CHECK_EQ(a, b); } } while (0)
+  do { if (legacy_msl_render_active()) { CHECK_EQ(a, b); } } while (0)
 
 #define TEST_REDUCE_NO_TAIL 0xFFFFFFFFu
 
