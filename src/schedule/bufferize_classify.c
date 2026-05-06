@@ -111,10 +111,16 @@ static void bufferize_node_unmark(UOpInfo *info, u32 reason) {
   if (info == NULL) {
     return;
   }
+  // Matmul reduces stay realized: we want them as their own kernel so
+  // tile_analyze_gemm passes (clean 2-input/2-op program) and dispatch
+  // routes through metal-gemm-with-TC instead of metal-tile (~40x).
+  // Diagnosed in Levels 27-36 of docs/plans/autotune_beam_profile.md.
+  if (info->reasons & BUFFERIZE_REASON_MATMUL) {
+    info->reasons |= reason;
+    return;
+  }
   info->realized = 0;
   info->reasons |= reason;
-  // Mirror the unmark into the bufferize graph and stamp removed_by
-  // with whichever rule bufferize_rewrite_apply has flagged as current.
   bufferize_unrealize(info->loc);
 }
 
@@ -1558,6 +1564,9 @@ fn void bufferize_classify(Term root) {
     }
     if (info->op == UOP_REDUCE) {
       bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
+      if (bufferize_uop_is_matmul(info->loc)) {
+        bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
+      }
     }
   }
   RealizeRewriteRule rules[] = {

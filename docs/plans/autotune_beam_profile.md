@@ -3783,3 +3783,51 @@ matmul-shape reduces, hypothesis 2.  If it fires and returns
   problem is elsewhere (e.g., the matmul reduce isn't a
   separate kernel-graph node and the fusion happens
   somewhere besides the bufferize layer).
+
+### Level 37: matmul-protect at bufferize_node_unmark (single point)
+
+Smarter than guarding 9 sites: add a `BUFFERIZE_REASON_MATMUL`
+bit, mark matmul reduces in the seed loop, and refuse to
+clear `realized` in `bufferize_node_unmark` when the bit is
+set.  Single change-point catches all rules.
+
+- [x] (2026-05-06) Add `BUFFERIZE_REASON_MATMUL (1u << 6)`
+  to thvm.h.  In `bufferize_node_unmark` (L110), refuse to
+  clear realized if reasons & MATMUL.  In the seed loop
+  (L1531), mark UOP_REDUCE nodes with REASON_MATMUL when
+  `bufferize_uop_is_matmul` returns 1.
+
+  make test 274/274 stays green.
+
+  **Result: still no dispatch change.**  Transformer
+  kernel_count 17, dispatch {tile:16, op:1}, kid 14 = 13962us,
+  kid 16 = 8134us.  All same as before.
+
+  This is a meaningful negative result: **the matmul+bias
+  fusion that produces kid 14's heavy n_ops=11 kernel is NOT
+  happening at the bufferize layer.**  Even with matmul reduce
+  protected as realized in BUFFERIZE_NODES, kernel
+  construction (rangeify or downstream) still produces a
+  fused kernel.
+
+  Possible root cause: rangeify recombines across bufferize
+  boundaries when consecutive realized nodes have compatible
+  iteration domains, or kernel construction has its own
+  fusion logic.
+
+  This is a multi-iteration investigation:
+  1. Run with `THVM_RANGEIFY_BAIL=1` to see what rangeify
+     does at the matmul-output boundary.
+  2. Inspect rangeify's kernel-extension logic (a kernel
+     that absorbs an upstream realized buffer can recombine).
+  3. May need to land a "rangeify won't extend a kernel
+     across a matmul-output boundary" rule.
+
+  The "small bufferize fix" hypothesis is invalidated.  The
+  fix lives in rangeify or kernel construction, which is a
+  thicker layer to modify.
+
+  Helper + reason bit + unmark guard land as defensive code:
+  no-op when matmul protection isn't needed, correct when it
+  is, doesn't break anything (274/274 green).  Useful
+  scaffolding for the eventual rangeify-side fix.

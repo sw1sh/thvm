@@ -188,7 +188,19 @@ typedef u64 Term;
 #define TAG_F_DSU_LAB   31
 #define TAG_F_DDU_LAB   32
 
-#define TAG_COUNT 33
+// === Book-time projections (HVM4 BJ0 / BJ1) ===
+// Mirror of TAG_DP0/DP1 but Levy-opaque under BOTH wnf and cnf -- they
+// never fire DUP-XXX in place.  Inserted by parse-time auto-dup into
+// book templates; alo_realize unfolds them into fresh dyn-heap
+// TAG_DP0/TAG_DP1 cells per book copy via alo_dup_share so recursive
+// bodies stay bounded.
+//
+// Field layout matches TAG_DP0/TAG_DP1 (val = dup loc, ext = label).
+// DUP_GRAD_FLAG never appears on a BJ -- those stay on plain DPs.
+#define TAG_BJ0         33
+#define TAG_BJ1         34
+
+#define TAG_COUNT 35
 
 // === OP2 opcodes (TAG_OP2 ext field) ===
 #define OP_ADD  0
@@ -1515,6 +1527,7 @@ fn u32  bufferize_rewrite_stat_hits(char const *name);
 // Legacy realize-rule reasons folded into the bufferize namespace.
 #define BUFFERIZE_REASON_INLINE      (1u << 4)
 #define BUFFERIZE_REASON_FANIN_CAP   (1u << 5)
+#define BUFFERIZE_REASON_MATMUL      (1u << 6)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value
   u32 buffer_id;       // 1-based stable id within this graph
