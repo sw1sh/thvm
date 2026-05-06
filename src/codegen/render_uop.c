@@ -777,6 +777,18 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
       body_depth++;
     }
   }
+  // GROUP_REDUCE detection has to fire BEFORE we declare the scalar
+  // accumulator -- otherwise the rendered MSL would have both decls
+  // and the threadgroup-shared `_acc[L]` collides with the prior
+  // `float _acc;`.
+  Term red_range = ranges[reduce_idx];
+  u32  red_kind_opt   = opt_kinds  [reduce_idx];
+  u32  red_factor_opt = opt_factors[reduce_idx];
+  if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_GROUP_REDUCE) {
+    return rmu_emit_group_reduce(buf, addr, red_range, red_src,
+                                 red_kind, red_axis, red_factor_opt,
+                                 fp, body_depth, n_out, needs_close);
+  }
   // Emit accumulator decl using the reduce_axis as the unique id.
   char acc_name[32];
   snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
@@ -785,30 +797,10 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   rmu_emit_reduce_init(red_kind, fp);
   fputs(";\n", fp);
   // Reduce-axis loop.
-  Term red_range = ranges[reduce_idx];
-  u32  red_kind_opt   = opt_kinds  [reduce_idx];
-  u32  red_factor_opt = opt_factors[reduce_idx];
-  // GROUP_REDUCE annotation seam: when the reduce range carries
-  // UOP_OPT(_, GROUP_REDUCE, L), the autotuner intends to
-  // parallelise the reduction across L cooperating threads with a
-  // threadgroup-shared accumulator + barrier + final reduce.  The
-  // emitted shape is documented in
-  // docs/plans/nn_profiling_loop.md (shape iii).  The lifter
-  // currently never produces this shape (the has_reduce_axis short-
-  // circuit prevents the replay from reaching reduce axes; Phase 4
-  // lifts that), so this branch is unreachable in production today
-  // but ready for the lifter to flip on.  Detection: red_kind_opt ==
-  // UOP_OPT_GROUP_REDUCE on the reduce-axis range.
-  (void)red_factor_opt;  // consumed once Phase 4 wires it
   if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_UNROLL) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     if (red_factor_opt > 0) fprintf(fp, "#pragma unroll(%u)\n", red_factor_opt);
     else                    fputs("#pragma unroll\n", fp);
-  }
-  if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_GROUP_REDUCE) {
-    return rmu_emit_group_reduce(buf, addr, red_range, red_src,
-                                 red_kind, red_axis, red_factor_opt,
-                                 fp, body_depth, n_out, needs_close);
   }
   rmu_emit_range_open(red_range, fp, body_depth, red_kind_opt);
   // Combine inside the reduce loop.

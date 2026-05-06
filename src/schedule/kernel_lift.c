@@ -236,7 +236,19 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       if (u->src_count < 2) return 0;
       Term r_uop = lift_lookup_range(ranges, n_ranges, u->src[1]);
       if (r_uop == 0) return 0;
-      u32 axis_id = term_val(heap_read(term_val(r_uop) + 0));
+      // See-through UOP_OPT(target=range, ...) to find the inner
+      // UOP_RANGE: per-USE ranges may be wrapped in
+      // UOP_OPT_GROUP_REDUCE for autotune-driven cooperative
+      // reduction.  The renderer reads the OPT annotation while
+      // the UOP_REDUCE references the underlying axis_id.
+      Term inner = r_uop;
+      if (term_tag(inner) == TAG_UOP && term_ext(inner) == UOP_OPT) {
+        inner = uop_opt_target(inner);
+      }
+      if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_RANGE) {
+        return 0;
+      }
+      u32 axis_id = term_val(heap_read(term_val(inner) + 0));
       u32 kind = (u->op == S_REDUCE_SUM) ? REDUCE_SUM : REDUCE_MAX;
       return uop_reduce(kind, axis_id, body);
     }
@@ -1067,6 +1079,17 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   }
   // Per-USE auxiliary S_RANGE leaves (not in BUFFERIZE) -- find by
   // sweeping the arena.  Skip dups.
+  //
+  // When `ke->axes` has applied opts targeting per-USE axes
+  // (typically KOP_GROUP / KOP_GROUPTOP on a REDUCE axis), wrap
+  // the corresponding UOP_RANGE in `UOP_OPT(_, GROUP_REDUCE,
+  // arg)` so the renderer (rmu_emit_store_reduce) emits the
+  // threadgroup-shared cooperative reduce shape.  Per-USE ranges
+  // appear in declaration order in the scalar arena and are
+  // assumed to map 1:1 to ke->axes axis_types[n_buf..n_axes) in
+  // the same order -- this matches how rangeify emits them.
+  KernelAxes const *orig_kax = ke->axes;
+  u32 per_use_idx = 0;
   for (u32 i = 1; i < ke->n_scalar_uops && n_ranges < MAX_DIM * 2; i++) {
     if (ke->scalar_uops[i].op != S_RANGE) continue;
     int seen = 0;
@@ -1076,9 +1099,27 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     if (seen) continue;
     u32 axis_type = (u32)(ke->scalar_uops[i].extra >> 32) & 0xFFu;
     u32 extent    = (u32)(ke->scalar_uops[i].extra & 0xFFFFFFFFu);
+    Term r = uop_range(n_ranges, axis_type, extent);
+    // Map this per-USE range to its position in ke->axes:
+    // axes index = n_buf + per_use_idx (per-USE entries follow
+    // BUFFERIZE entries in axes_default_for / autotune layout).
+    u32 axes_idx = n_buf + per_use_idx;
+    per_use_idx++;
+    if (orig_kax != NULL && axes_idx < orig_kax->n_axes) {
+      for (u32 oi = 0; oi < (u32)orig_kax->n_applied; oi++) {
+        KOpt const *o = &orig_kax->applied_opts[oi];
+        if (o->axis == (u8)axes_idx
+            && (o->op == KOP_GROUP || o->op == KOP_GROUPTOP)
+            && o->arg > 0
+            && extent % o->arg == 0) {
+          r = uop_opt(r, UOP_OPT_GROUP_REDUCE, o->arg);
+          break;
+        }
+      }
+    }
     ranges[n_ranges].axis_id   = n_ranges;
     ranges[n_ranges].scalar_id = i;
-    ranges[n_ranges].axis_uop  = uop_range(n_ranges, axis_type, extent);
+    ranges[n_ranges].axis_uop  = r;
     n_ranges++;
   }
 

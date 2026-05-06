@@ -352,9 +352,44 @@ every minute.
   Phase 4 lifts the `has_reduce_axis` short-circuit and produces
   the OPT_GROUP_REDUCE annotation on real kernels; make test
   274/274 unchanged.
-- [ ] Phase 4: wire `kernel_lift.c`'s S_REDUCE_SUM lifter to honour
-  the linearised reduce-axis expression (currently asserts a
-  single UOP_RANGE leaf).  After the replay, the reduce range may
-  be a UOP_IADD-of-RANGEs; lift needs to extract the *outer*
-  axis_id for the UOP_REDUCE node and let the renderer pick up
-  the inner from the OPT annotation.
+- [x] (2026-05-06) Phase 4: wire `kernel_lift.c`'s S_REDUCE_SUM
+  lifter to honour the GROUP_REDUCE-annotated reduce-axis range.
+  Implemented as Phase 4a (per-USE OPT_GROUP_REDUCE wrapping +
+  S_REDUCE_SUM see-through):
+  - Per-USE auxiliary scan in `kernel_lift_to_uop` now maps each
+    per-USE S_RANGE to its position in `ke->axes` (axes_idx =
+    n_buf + per_use_seq).  When `applied_opts[]` has a
+    KOP_GROUP/KOP_GROUPTOP targeting that axes_idx with arg
+    dividing the extent, wrap the UOP_RANGE in
+    `uop_opt(_, UOP_OPT_GROUP_REDUCE, arg)`.
+  - S_REDUCE_SUM/MAX lifter now sees-through `UOP_OPT(target=range,
+    ...)` via `uop_opt_target` to extract the inner axis_id for
+    the UOP_REDUCE node.  Renderer picks up the OPT annotation
+    from the range expression.
+  - Fixed an ordering bug in `rmu_emit_store_reduce` -- the
+    GROUP_REDUCE detection had to fire **before** the scalar
+    `_accN` accumulator decl to avoid a duplicate-declaration
+    compile error.
+
+  End-to-end verification: `TUOpReduce[Range[12], 0, "SUM"]`
+  + `TKernelApplyOpt[kid, TOpt["GROUP", 1, 4]]` renders the
+  cooperative shape (threadgroup `_acc1[4]`, per-thread strided
+  walk over 0..12 step 4, two barriers, single-thread final
+  fold) and produces the correct `78.0` result.
+
+  make test 274/274 unchanged.
+
+### Phase 4 follow-on
+- [ ] Drop the `has_reduce_axis` short-circuit in
+  `kernel_lift_to_uop` once the replay loop's `cur[]` is extended
+  to include per-USE reduce ranges as full SplitAxis entries (so
+  the replay can split a REDUCE axis into outer + inner like a
+  LOOP axis).  The Phase 4a wrap landed via the per-USE auxiliary
+  scan which only handles the unsplit-but-annotated shape; full
+  axis splits need the cur[] extension.
+- [ ] Bench an end-to-end win: pick a kernel from
+  `lenet-mnist/autotune.wls` whose autotuner picked KOP_GROUP on
+  a reduce axis (e.g. kid 2 GROUP[axis=2, arg=25] from the
+  earlier capture) and confirm the GROUP_REDUCE rendered MSL
+  beats the scalar accumulator path.  Capture wall-time numbers
+  in this file.
