@@ -188,7 +188,20 @@ static void auto_dup_lam_at(u64 lam_loc, u64 *var_locs, u32 n) {
 // uses, leaves a single use untouched, builds a DUP chain for n > 1.
 // On walker bail, falls back to plain lam_seal_ext (which keeps the
 // ERA_MASK semantics).
+//
+// UOP-graph bodies skip auto-dup entirely: when the LAM body is a
+// compute UOP (not yet a UOP_KERNEL), interact_app_lam materialises
+// the body into a UOP_KERNEL whose input-slot indirection naturally
+// handles multiple reads of the same input tensor.  An auto-dup chain
+// over the binder VAR would inject DP0/DP1 nodes that materialise
+// can't see through, leaving a degenerate kernel that ignores the
+// argument.  Body-uses-var still applies for the LAM_ERA_MASK case
+// (no uses) but DUP construction is skipped.
 fn u32 lam_seal_ext_with_auto_dup(u64 lam_loc, u32 base_ext) {
+  Term body_t = heap_read(lam_loc);
+  if (term_tag(body_t) == TAG_UOP && term_ext(body_t) != UOP_KERNEL) {
+    return lam_seal_ext(lam_loc, base_ext);
+  }
   u64 var_locs[LAM_AUTODUP_MAX_USES];
   u32 n = auto_dup_collect(lam_loc, var_locs, LAM_AUTODUP_MAX_USES);
 

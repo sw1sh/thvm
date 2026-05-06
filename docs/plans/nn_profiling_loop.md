@@ -89,18 +89,25 @@ every minute.
   the unbound VAR and collapses to a degenerate TEN[1] without an
   input slot.  Bisect range: 4646189 (good) -> 397464e2 (first bad)
   -> main HEAD (still bad), 8 steps via `git bisect run`.
-- [ ] Design a fix.  Two paths:
-  (a) Skip auto-dup when the LAM body is a UOP graph: materialize
-      already handles multi-use inputs via the kernel's input slot
-      indirection (one TVAR(loc) -> N reads inside the rendered
-      MSL), so the LAM-level DUP chain is redundant and actively
-      breaks materialize.  Easiest fix; touches
-      `lam_seal_ext_with_auto_dup` to bail when body is TAG_UOP.
-  (b) Teach `thvm_materialize` to see-through DP0/DP1 over a
-      single VAR and treat them as one input slot.  More general
-      but invasive -- DP0/DP1 are heap-cell reads with side
-      effects, so "see-through" requires reading the dup'd cell
-      without firing the dup interaction.
+- [x] (2026-05-06) Design + implement a fix.  **Path (a) landed in
+  `lam_seal_ext_with_auto_dup`**: skip auto-dup when the LAM body is
+  a non-KERNEL TAG_UOP.  Materialise's kernel input-slot indirection
+  handles multiple reads of the bound VAR naturally; the LAM-level
+  DUP chain was redundant and actively broke materialise.
+  - `lam_shape.wlt` 10/10 green (was 8/10).
+  - `make test` 274/274 still green.
+  - LinearLayer round-trip via `TFromNet[net]` -> `TApp[lam, x]` ->
+    `TRealize` produces correct numerics matching native Wolfram
+    forward.
+
+### TFromNet[net] follow-on
+- [ ] NetChain + multi-rank input via `TFromNet[net]` still hits
+  `cfta: Argument {$Failed} at position 2` because `tUopShape[VAR]`
+  in [Shape.wl](../../wl/THVMLink/Kernel/Shape.wl) doesn't have a
+  `TAG_VAR` case and falls through to `$Failed`, which then poisons
+  `TUOpReshape[x, {Times @@ $Failed}]` inside FlattenLayer.  Fix:
+  add a TAG_VAR case to `tUopShape` that reads the lam_shape side
+  table via `$termShapeInFn` (the C-level `term_shape_in`).
 
 ### LeNet-MNIST baseline
 - [ ] Run `wl/Examples/lenet-mnist/forward.wls`; capture as
