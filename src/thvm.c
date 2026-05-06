@@ -270,6 +270,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/opt.c"
 #include "uop/view.c"
 #include "uop/graph_rewrite.c"
+#include "uop/upat.c"
 #include "uop/graph_simplify.c"
 
 // === scalar/ ===
