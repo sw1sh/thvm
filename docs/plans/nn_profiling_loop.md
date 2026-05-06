@@ -30,9 +30,13 @@ every minute.
   [src/schedule/kernel_lift.c](../../src/schedule/kernel_lift.c).
 
 ### MLP-MNIST baseline
-- [ ] Run `wl/Examples/mlp-mnist/forward.wls` under
+- [x] (2026-05-06) Run `wl/Examples/mlp-mnist/forward.wls` under
   `THVM_BACKEND=metal THVM_TILE=1`; capture wall time, kernel count,
   dispatch-kind histogram. Save to `bench/mlp-mnist/forward.txt`.
+  **warmup 10.5 ms, steady 8.0 ms (avg/5), 30 kernels, dispatch:
+  metal-tile=24, metal-gemm=6.** (forward.wls itself fails the
+  cross-entropy positive-loss assertion on this batch, but the
+  forward pipeline produces a correct softmax; tracked separately.)
 - [ ] Run `wl/Examples/mlp-mnist/train.wls` for `N_STEPS=10` BS=32 and
   capture wall + per-step stats. Save to
   `bench/mlp-mnist/train_bs32.txt`.
