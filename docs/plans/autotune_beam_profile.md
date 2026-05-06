@@ -3600,3 +3600,51 @@ guides the relaxation.
 
   This is the genuine next-iteration architectural decision
   point.
+
+### Level 33: does TILE_BLOCK-around-TILE_MMA already work?
+
+Option (a) requires the renderer/dispatcher to handle a
+TILE_BLOCK that wraps a TILE_MMA with pre/postamble ops.  If
+that pattern already exists somewhere (e.g., the reduce-
+broadcast lowering used TILE_BLOCK), option (a) is the cheap
+fix.  Read-only investigation.
+
+- [x] (2026-05-06) Search src/codegen and src/backend/metal
+  for any rendering/dispatch path that handles TILE_BLOCK
+  wrapping TILE_MMA.  Document whether it exists, and if
+  so, what the surrounding pattern looks like.
+
+  **TILE_BLOCK exists but is not rendered.**  Comment at
+  [src/schedule/tile.c:1844-1846](../../src/schedule/tile.c#L1844):
+
+      Renderer doesn't yet read TILE_BLOCK (Phase F work),
+      so this stays opt-in until F lands.
+
+  TILE_BLOCK construction is gated by
+  `THVM_TILE_REDUCE_BROADCAST=1`; the IR exists but no
+  codegen consumes it.  Option (a) is blocked on Phase F
+  renderer rewrite.
+
+  **Architectural decision shifts to option (b)**: split
+  the matmul kernel from trailing fused ops (bias-add etc.)
+  in bufferize before tile-IR construction.  The matmul
+  becomes a clean 2-input/2-op kernel that
+  `tile_analyze_gemm` accepts.
+
+  Trade-off: splitting adds back 1 kernel per matmul
+  (matmul-bias fusion saved), but routes the matmul through
+  metal-gemm instead of metal-tile -- an estimated 40x wall
+  win on the matmul kernel.  Net: even with +1 kernel count
+  regression, the wall improvement dominates by orders of
+  magnitude on transformer-style workloads.
+
+  The fix lives in `src/schedule/bufferize_classify.c`: add
+  a rule that re-introduces a bufferize boundary between
+  matmul-output (UOP_REDUCE) and any non-bias-broadcast
+  consumer when the matmul shape matches "gemm-tile would
+  fire if the kernel were clean."  More targeted than the
+  existing inline-* rules, opposite direction (un-inline a
+  fusion to enable a faster dispatch path).
+
+  Next iteration: sketch the new bufferize rule's match
+  condition.
