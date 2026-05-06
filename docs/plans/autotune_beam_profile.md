@@ -4290,15 +4290,95 @@ layer over thvm's UOp DAG is the unblock.
 This is a multi-iteration design+impl, not a single 5-min
 task.  Break it down:
 
-- [ ] Sketch the API surface for thvm's declarative pattern
-  layer.  Mirror tinygrad's UPat / PatternMatcher /
-  graph_rewrite shape (see Level 44 refresher).  Document:
-  (a) what UPat looks like in C (struct vs constructor
-  helpers), (b) how match-bindings work without Python's
-  closures, (c) how PatternMatcher composes (linked list
-  vs flat array), (d) how graph_rewrite drives the
-  walk+rewrite to fixpoint over thvm's heap-resident UOp
-  graph.
+- [x] (2026-05-06) Sketch the API surface for thvm's
+  declarative pattern layer.  Mirror tinygrad's UPat /
+  PatternMatcher / graph_rewrite shape.
+
+  **API sketch** (target: `src/uop/upat.h` + `src/uop/upat.c`):
+
+  ```c
+  // (a) UPat: declarative pattern (heap-allocated tree).
+  // op == 0 means "any op"; nsrc == 0xFF means "any src count".
+  // binding >= 0 captures the matched Term into bindings[binding].
+  // src is a pointer to nsrc UPat nodes (NULL when nsrc==0).
+  typedef struct UPat {
+    u8 op;
+    u8 nsrc;
+    u8 dtype;        // 0 = any
+    i8 binding;      // -1 = no capture
+    struct UPat const *src;
+  } UPat;
+
+  // Constructor helpers (compose patterns concisely):
+  UPat upat_op(u8 op);                                   // UPat{op, 0, 0, -1, NULL}
+  UPat upat_var(i8 binding);                             // any op, capture
+  UPat upat_op_src(u8 op, u8 nsrc, UPat const *src);     // op + children
+  UPat upat_op_named(u8 op, i8 binding);                 // capture by op
+  // Macro-style: UPAT_REDUCE(SRC=mul_pat, BIND=0)
+
+  // (b) Bindings -- by INDEX, not name.  Rules declare a
+  // small fixed-size array Term bindings[N]; UPat.binding is
+  // the slot to fill on match.  Tinygrad uses Python kwargs
+  // (name="x"); we use positional ints.
+
+  // (c) PatternMatcher: flat array dispatched by top-level op.
+  typedef Term (*RewriteFn)(Term const *bindings, void *ctx);
+  typedef struct {
+    UPat   const *pat;
+    RewriteFn     fn;
+  } UPatRule;
+  typedef struct {
+    UPatRule const *rules;
+    u32             n_rules;
+    // pdict[op] -> sublist of rules whose pat->op matches (fast dispatch).
+    // Built lazily on first use; flat indices into rules[].
+    u16 pdict_offsets[256];   // start in pdict_indices for op
+    u16 pdict_lens   [256];
+    u16 const *pdict_indices; // packed rule indices
+  } UPatMatcher;
+
+  // Composition: build static-data PatternMatchers, then
+  // pm_compose(out, a, b) writes a flat concatenation into out.
+  void upat_matcher_compose(UPatMatcher *out,
+                            UPatMatcher const *a,
+                            UPatMatcher const *b);
+
+  // (d) graph_rewrite: walk the heap subgraph, apply rules
+  // until fixpoint.  Uses thvm's existing heap_read +
+  // term_resolve + SUB-bit substitution to replace nodes.
+  //
+  // Implementation per-node:
+  //   1. Read current node's op via term_ext.
+  //   2. For each rule in pdict[op], match against the
+  //      pattern with a fresh Term bindings[N] array.
+  //   3. If match succeeds, call fn(bindings, ctx).
+  //   4. If fn returns nonzero, install replacement via
+  //      heap rewrite (the existing graph_rewrite pass in
+  //      src/uop/graph_simplify.c already does this for
+  //      hand-written rules; the new layer reuses that
+  //      replacement machinery).
+  //
+  // Walk order: bottom-up by default (matches tinygrad's
+  // default).  Optional top-down for rules that need to
+  // see parent context.
+  Term upat_graph_rewrite(Term sink, UPatMatcher const *pm,
+                          void *ctx);
+  ```
+
+  Notes:
+  - Bindings by index keeps the API C-compatible without
+    closures.  Tinygrad's `name=` becomes `BINDING_X = 0`
+    constants in the rule's local scope.
+  - Static data: `UPat`s and `UPatRule[]`s declared at file
+    scope, no allocation.
+  - pdict: built lazily on first call to graph_rewrite (or
+    explicitly via `upat_matcher_finalize`).
+  - Reuse thvm's existing heap rewrite primitives
+    (`heap_read`, `term_resolve`, SUB-bit substitution).
+    The new layer is a thin matcher + dispatcher on top of
+    machinery that already exists in src/uop/graph_simplify.c.
+
+  This is the design contract.  Implementation lands next.
 
 - [ ] After the API sketch lands, implement a minimal core
   (UPat + PatternMatcher + graph_rewrite) and one trivial
