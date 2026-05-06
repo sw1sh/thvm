@@ -77,7 +77,37 @@ file, commits, and stops.
   kernel direct without the WL/Python wrapper; the absolute
   numbers can't be lined up directly.  See the comparison row
   below for the framework-relative speedups.
-- [ ] Compare: log thvm best vs tinygrad best in this file.
+- [x] (2026-05-06) Compare: log thvm best vs tinygrad best.
+
+  | metric                    | thvm                | tinygrad           |
+  |---------------------------|---------------------|--------------------|
+  | baseline                  | 300 us (no opts)    | 479 us (NOOPT=1)   |
+  | best                      | 146 us (LOCAL[16])  | 391 us (BEAM=4)    |
+  | speedup                   | **2.05x**           | 1.23x              |
+  | variants explored         | 9 (1 + 8 LOCAL)     | (BEAM=4 hill-climb)|
+  | search wall (cold)        | ~177 ms compile     | (not measured)     |
+
+  **Caveat: not directly comparable.** tinygrad's per-iter wall
+  is dominated by Python `realize()` overhead (~300 us); thvm's
+  `TKernelBenchUs` benches the kernel direct.  The fair metric
+  is the *framework-relative* speedup ratio: thvm's autotune
+  more than doubles its baseline; tinygrad's BEAM extracts a
+  modest 23%.
+
+  Two reasons thvm's relative win is larger:
+  1. thvm baseline is naive single-thread (no LOCAL/GLOBAL
+     binding by default); tinygrad's NOOPT=1 baseline is still
+     reasonably parallel via tinygrad's default heuristics.
+  2. thvm's proposer for elementwise rank-1 sweeps every divisor
+     of N (8 LOCAL widths from 2..256) -- exhaustive; tinygrad's
+     BEAM=4 explores 4 frontier candidates per step in a hill-
+     climb.  At trivial sizes thvm finds the local optimum
+     faster.
+
+  Open question: at larger N or higher rank, does thvm's
+  exhaustive sweep keep up with BEAM's structural opt
+  composition (UPCAST + LOCAL + UNROLL chained)?  Levels 2-5
+  will tell.
 
 ### Level 2 -- matmul (M=N=K=128)
 
