@@ -3172,3 +3172,40 @@ patterns the rules might affect.
   baseline (3464us).
 
   Default-on flip is working as intended on conv-net workloads.
+
+### Level 24b: confirm transformer behavior after flip
+
+Last of the three workload-class confirmations.  Expected:
+neutral wall (env-flagged probe found 0.2% noise; post-flip
+should be similar).
+
+- [x] (2026-05-06) Re-run
+  `bench/autotune-ladder/transformer_block.wls` with default
+  env.  Save stdout to
+  `bench/autotune-ladder/transformer_block.txt`.
+
+  | metric             | post-L22 | env-flagged | post-flip |
+  |--------------------|---------:|------------:|----------:|
+  | kernel_count       |       17 |          17 |        17 |
+  | dispatch_kinds     |1op+16t   |1op+16t      |   1op+16t |
+  | totals_baseline_us |    35342 |       35589 |     35865 |
+  | totals_best_us     |    34019 |       33958 |     34204 |
+  | totals_speedup     |    1.04x |       1.05x |     1.05x |
+
+  **Neutral as predicted.**  All three configurations within
+  1% of each other on best wall (34019 / 33958 / 34204).
+  Transformer's wall is dominated by FFN matmul kids that
+  the inline rules don't touch; behaviour identical
+  post-flip.
+
+  **Three-workload confirmation complete**:
+
+  | net         | post-L22 | post-flip | wall ratio |
+  |-------------|---------:|----------:|-----------:|
+  | MLP4        |    2257  |     1752  |     1.29x  |
+  | LeNet       |    4479  |     3620  |     1.24x  |
+  | Transformer |   34019  |    34204  |  ~1.00x    |
+
+  Default state has 1.24-1.29x wall improvement on MLP/CNN
+  without regression on transformer.  The Level 24 flip
+  delivers consistent wins across the supported envelope.

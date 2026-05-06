@@ -1,33 +1,28 @@
-## post-Level-22 patch (commit 62bfcca)
+## post-default-on (Level 24, commit 9e25f48)
 
-lift rejects: 0 (was 1064)
-
-thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
 thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
-thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
 
-Function::slot: #_ (in Times[#_..] & ) should contain a non-negative integer or string.
 transformer_block kernel_count: 17
 dispatch_kinds: {{metal-tile, 16}, {metal-op, 1}}
-kid 1 kind=metal-tile baseline=1063.us best=1051.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 2]}
-kid 3 kind=metal-tile baseline=1907.us best=1879.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 2]}
-kid 4 kind=metal-tile baseline=1872.us best=1911.us  opt=TOpt[UNROLL, 2, 16]  applied={TOpt[UNROLL, 2, 2]}
-kid 5 kind=metal-tile baseline=1913.us best=1884.us  opt=TOpt[UNROLL, 2, 2]  applied={TOpt[UNROLL, 2, 2]}
-kid 6 kind=metal-tile baseline=1617.us best=826.us  opt=TOpt[GROUP, 2, 16]  applied={TOpt[GROUP, 2, 16]}
-kid 7 kind=metal-tile baseline=203.us best=160.us  opt=TOpt[LOCAL, 0, 8]  applied={TOpt[LOCAL, 0, 8], TOpt[GLOBAL, 0, 4]}
-kid 8 kind=metal-tile baseline=168.us best=170.us  opt=TOpt[UNROLL, 1, 4]  applied={TOpt[UNROLL, 1, 8]}
-kid 9 kind=metal-tile baseline=1113.us best=1092.us  opt=TOpt[UNROLL, 2, 2]  applied={TOpt[UNROLL, 2, 8]}
-kid 10 kind=metal-tile baseline=1297.us best=1291.us  opt=TOpt[UNROLL, 2, 8]  applied={}
-kid 11 kind=metal-tile baseline=234.us best=160.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 2]}
-kid 12 kind=metal-tile baseline=1052.us best=1040.us  opt=TOpt[GROUP, 2, 4]  applied={TOpt[GROUP, 2, 2]}
-kid 13 kind=metal-tile baseline=214.us best=188.us  opt=TOpt[UNROLL, 1, 2]  applied={TOpt[GROUP, 1, 64]}
-kid 14 kind=metal-tile baseline=13974.us best=13931.us  opt=TOpt[UNROLL, 2, 8]  applied={TOpt[UNROLL, 2, 2]}
-kid 15 kind=metal-tile baseline=404.us best=182.us  opt=TOpt[LOCAL, 1, 256]  applied={TOpt[LOCAL, 1, 128], TOpt[GLOBAL, 1, 2]}
-kid 16 kind=metal-tile baseline=8091.us best=8104.us  opt=TOpt[UNROLL, 2, 4]  applied={}
-kid 17 kind=metal-tile baseline=220.us best=150.us  opt=TOpt[LOCAL, 0, 32]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 2]}
-totals_baseline_us: 35342.
-totals_best_us: 34019.
-totals_speedup: 1.03889
+kid 1 kind=metal-tile baseline=1089.us best=1055.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 16]}
+kid 3 kind=metal-tile baseline=1893.us best=1879.us  opt=TOpt[UNROLL, 2, 4]  applied={}
+kid 4 kind=metal-tile baseline=1900.us best=1907.us  opt=TOpt[UNROLL, 2, 8]  applied={}
+kid 5 kind=metal-tile baseline=1925.us best=1917.us  opt=TOpt[UNROLL, 2, 16]  applied={}
+kid 6 kind=metal-tile baseline=1650.us best=832.us  opt=TOpt[GROUP, 2, 32]  applied={TOpt[GROUP, 2, 16]}
+kid 7 kind=metal-tile baseline=331.us best=213.us  opt=TOpt[LOCAL, 0, 16]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 16]}
+kid 8 kind=metal-tile baseline=221.us best=212.us  opt=TOpt[GROUP, 1, 32]  applied={TOpt[UNROLL, 1, 8]}
+kid 9 kind=metal-tile baseline=1323.us best=1099.us  opt=TOpt[UNROLL, 2, 8]  applied={TOpt[UNROLL, 2, 16]}
+kid 10 kind=metal-tile baseline=1302.us best=1329.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 2]}
+kid 11 kind=metal-tile baseline=244.us best=160.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 2]}
+kid 12 kind=metal-tile baseline=1051.us best=1032.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 2]}
+kid 13 kind=metal-tile baseline=209.us best=180.us  opt=TOpt[GROUP, 1, 64]  applied={TOpt[UNROLL, 1, 4]}
+kid 14 kind=metal-tile baseline=13923.us best=13920.us  opt=TOpt[UNROLL, 2, 4]  applied={}
+kid 15 kind=metal-tile baseline=483.us best=195.us  opt=TOpt[LOCAL, 1, 256]  applied={TOpt[LOCAL, 1, 128], TOpt[GLOBAL, 1, 2]}
+kid 16 kind=metal-tile baseline=8089.us best=8106.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 4]}
+kid 17 kind=metal-tile baseline=232.us best=168.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 2]}
+totals_baseline_us: 35865.
+totals_best_us: 34204.
+totals_speedup: 1.04856
 kernels_with_proposals: 16
-kernels_with_applied: 14
-thvm: metal_jit stats -- hits=1549 misses=225 bypass=0 compile_us=21436
+kernels_with_applied: 12
+thvm: metal_jit stats -- hits=1549 misses=225 bypass=0 compile_us=29804
