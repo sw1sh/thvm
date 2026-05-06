@@ -4753,3 +4753,61 @@ REDUCE ops lets us derive sizes.
   (10.018 ms steady state -> we'd be ~14.8 ms = 1.5x slower vs
   current 2.8x).
 
+### Level 52: tile_analyze_gemm relaxation for movement-prefix matmul
+
+The dispatched matmul kids all have shape `[movement, ..., MUL, REDUCE]`.
+Add a relaxed analyzer that:
+- Locates MUL at program[n_ops-2] and REDUCE_SUM at program[n_ops-1]
+- Walks each MUL operand through movement-only program slots back
+  to a kernel input slot (KSRC_INPUT)
+- Sets `a_input`, `b_input` from the resolved input slots
+- Derives M, N, K from REDUCE.arg (inner=N), REDUCE.numel (M*N),
+  MUL.numel (M*N*K)
+
+Gate the new path by `THVM_GEMM_RELAX_MOVEMENT=1` so the default
+behavior (and `make test` semantics) stay unchanged; we observe
+the env-on behavior on transformer to validate the relaxation
+produces correct results before flipping default.
+
+- [x] (2026-05-07) Added `tile_analyze_gemm_movement_prefix`
+  (gated by THVM_GEMM_RELAX_MOVEMENT=1) and wired before the
+  strict n_ops!=2 gate.  Also added THVM_DUMP_GEMM_RELAX=1 trace
+  so we can see when the helper fires + whether downstream
+  validation accepts it.  `test_tile_graph` (the only test that
+  exercises `tile_analyze_gemm`) stays 636/636 green with env off
+  -- relaxation is dormant by default.
+
+  Run on transformer_block with env=1:
+  - Helper fires correctly: 1855 calls across the 5 distinct
+    matmul shapes (n_ops 4/6/7 with M/N/K matching Level 51 sizes).
+  - **All 1855 calls FAIL at `tile_gemm_candidate_ok` /
+    `tile_gemm_views_ok`** -- the views helper requires the input
+    views to be 3D `[M, K, N]` with specific stride patterns, but
+    post-Level-48 the inputs are 2D `[M, K]` (broadcast happens in
+    the kernel program via RESHAPE+EXPAND, not in the input view).
+  - dispatch_kinds unchanged: `{metal-tile:21, metal-op:2}`, wall
+    unchanged within noise (28234us vs 28062us baseline).
+
+  **Real blocker found**: the post-split kernels have the
+  broadcast INSIDE the program, not in the View metadata.
+  `tile_gemm_views_ok` was designed for the standalone-fc1 shape
+  where the input arrives pre-broadcast as a 3D View with stride
+  0 on one axis.  Two paths forward, both architectural:
+
+  - Path A: extend metal-gemm to read 2D buffers + apply the
+    in-kernel RESHAPE+EXPAND as stride-aware loads.  Touches the
+    metal-gemm shader template.
+  - Path B: migrate the RESHAPE+EXPAND from kernel program INTO
+    the input View at `materialize/visit()` time, so kernel sees
+    a 3D pre-broadcast input.  The matmul-input-protect already
+    extracts a clean boundary; we just need visit() to wrap the
+    boundary's view with the broadcast.
+
+  Path B looks cheaper (no shader change, view-only), but
+  requires understanding visit()'s view-construction.  Subject for
+  Level 53 architectural decision.
+
+  Relaxation infrastructure stays in tree (env-gated) as a
+  scaffold for the next step; helper is currently a no-op without
+  the matching view migration.
+

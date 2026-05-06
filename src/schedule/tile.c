@@ -995,6 +995,82 @@ static int tile_analyze_expanded_gemv(KernelEntry const *ke,
   return 1;
 }
 
+// Resolve a KProgOp src slot to a kernel input index by walking
+// through movement-only program slots.  Returns -1 if the source
+// can't be resolved (program ref to a non-movement op, or a chain
+// that doesn't bottom out at a kernel input).  Bounded by a small
+// hop count to avoid pathological recursion.
+static int tile_gemm_resolve_input_via_movement(KernelEntry const *ke,
+                                                u32 src) {
+  for (u32 hops = 0; hops < 8; hops++) {
+    if (KSRC_IS_INPUT(src)) {
+      u32 idx = KSRC_INDEX(src);
+      return idx < ke->n_inputs ? (int)idx : -1;
+    }
+    u32 step = KSRC_INDEX(src);
+    if (step >= ke->n_ops) return -1;
+    KProgOp const *p = &ke->program[step];
+    if (!uop_is_movement(p->opcode)) return -1;
+    if (p->n_src < 1) return -1;
+    src = p->src[0];
+  }
+  return -1;
+}
+
+// Relaxed gemm pattern: program tail is [MUL, REDUCE_SUM(MUL)] and
+// the leading ops are all uop_is_movement.  Each MUL operand
+// resolves through the movement chain to a distinct kernel input.
+// Gated by THVM_GEMM_RELAX_MOVEMENT=1 because the metal-gemm shader
+// path may not yet handle stride-aware loads on movement-wrapped
+// inputs; flipping default-on requires correctness validation.
+// Diagnosed in Level 51 (kid 19 = 32x256x64 FFN fc1 wall=7330us
+// vs standalone 353us = 20.7x in-context slowdown).
+static int tile_analyze_gemm_movement_prefix(KernelEntry const *ke,
+                                             u32 const *input_storage_numels,
+                                             u32 dtype, TileGemmInfo *out) {
+  char const *e = getenv("THVM_GEMM_RELAX_MOVEMENT");
+  if (e == NULL || e[0] != '1') return 0;
+  if (ke->n_inputs != 2 || ke->n_ops < 3) return 0;
+
+  u32 mul_idx = ke->n_ops - 2;
+  u32 red_idx = ke->n_ops - 1;
+  KProgOp const *mul = &ke->program[mul_idx];
+  KProgOp const *red = &ke->program[red_idx];
+  if (mul->opcode != UOP_MUL || mul->n_src != 2) return 0;
+  if (!tile_gemm_op_is_reduce_sum_of(red, mul_idx)) return 0;
+
+  // All program slots before MUL must be movement ops.
+  for (u32 i = 0; i < mul_idx; i++) {
+    if (!uop_is_movement(ke->program[i].opcode)) return 0;
+  }
+
+  int aidx = tile_gemm_resolve_input_via_movement(ke, mul->src[0]);
+  int bidx = tile_gemm_resolve_input_via_movement(ke, mul->src[1]);
+  if (aidx < 0 || bidx < 0 || aidx == bidx) return 0;
+
+  u32 inner = TILE_REDUCE_INNER(red->arg);
+  u64 n_mul = mul->numel;
+  u64 n_out = red->numel;
+  if (inner == 0 || n_out == 0 || n_mul == 0) return 0;
+  if (n_mul % n_out != 0 || n_out % inner != 0) return 0;
+  u32 N = inner;
+  u32 K = (u32)(n_mul / n_out);
+  u32 M = (u32)(n_out / N);
+  if (M == 0 || N == 0 || K == 0) return 0;
+
+  int ok = tile_gemm_candidate_ok(ke, input_storage_numels, (u32)aidx, (u32)bidx,
+                                  M, N, K, out)
+        || tile_gemm_candidate_ok(ke, input_storage_numels, (u32)bidx, (u32)aidx,
+                                  M, N, K, out);
+  char const *_d = getenv("THVM_DUMP_GEMM_RELAX");
+  if (_d != NULL && _d[0] == '1') {
+    fprintf(stderr, "  gemm-relax-mp: n_ops=%u M=%u N=%u K=%u aidx=%d bidx=%d -> %s\n",
+            ke->n_ops, M, N, K, aidx, bidx, ok ? "PASS" : "FAIL-candidate-ok");
+  }
+  if (ok) out->dtype = dtype;
+  return ok;
+}
+
 int tile_analyze_gemm(KernelEntry const *ke,
                       u32 const *input_storage_numels,
                       TileGemmInfo *out) {
@@ -1037,6 +1113,10 @@ int tile_analyze_gemm(KernelEntry const *ke,
     return 0;
   }
   if (tile_analyze_expanded_gemv(ke, input_storage_numels, dtype, out)) {
+    return 1;
+  }
+  // Level 52: relaxed movement-prefix gemm (env-gated).
+  if (tile_analyze_gemm_movement_prefix(ke, input_storage_numels, dtype, out)) {
     return 1;
   }
   if (ke->n_ops != 2) {
