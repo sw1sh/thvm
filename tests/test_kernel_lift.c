@@ -75,7 +75,7 @@ int main(void) {
   fclose(fp);
   CHECK(contains(buf, "kernel void k_const"));
   CHECK(contains(buf, "for (uint a0 = 0; a0 < 32"));
-  CHECK(contains(buf, "out[a0] = 1.000000f"));
+  CHECK(contains(buf, "out[a0] = 1.0f"));
   if (xcrun_metal_available()) CHECK_EQ(compile_through_metal(buf), 0);
 
   TEST_BEGIN("kernel-lift/elementwise-add-mul-kernel");
@@ -130,7 +130,7 @@ int main(void) {
   CHECK(contains(buf2, "for (uint a0 = 0; a0 < 16"));
   CHECK(contains(buf2, "in0[a0]"));
   CHECK(contains(buf2, "in1[a0]"));
-  CHECK(contains(buf2, "* 2.000000f"));
+  CHECK(contains(buf2, "* 2.0f"));
   CHECK(contains(buf2, " + "));
   if (xcrun_metal_available()) CHECK_EQ(compile_through_metal(buf2), 0);
 

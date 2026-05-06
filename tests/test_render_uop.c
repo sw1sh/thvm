@@ -40,7 +40,7 @@ int main(void) {
   CHECK(contains(buf2, "device float *out"));
   CHECK(contains(buf2, "[[ buffer(0) ]]"));
   CHECK(contains(buf2, "thread_position_in_grid"));
-  CHECK(contains(buf2, "= 1.000000f;"));    // CONST literal
+  CHECK(contains(buf2, "= 1.0f;"));    // CONST literal
   CHECK(contains(buf2, "[a0]"));            // RANGE addr
 
   TEST_BEGIN("render-uop/multi-input-signature");
@@ -131,7 +131,7 @@ int main(void) {
   cg_render_uop_kernel(st_ew, "k_ew", out, in_bufs, 2, fp);
   fclose(fp);
   CHECK(contains(buf8, " + ("));
-  CHECK(contains(buf8, " * 2.000000f"));
+  CHECK(contains(buf8, " * 2.0f"));
 
   TEST_BEGIN("render-uop/unary-neg-recip-sqrt");
   Term load_a = uop_index_e(in0, r);
@@ -363,11 +363,11 @@ int main(void) {
   fp = fmemopen(buf11, sizeof(buf11), "w");
   cg_render_uop_kernel(st_lt, "k_lt", out, in_bufs, 2, fp);
   fclose(fp);
-  CHECK(contains(buf11, " < 2.000000f"));
+  CHECK(contains(buf11, " < 2.0f"));
   fp = fmemopen(buf11, sizeof(buf11), "w");
   cg_render_uop_kernel(st_eq, "k_eq", out, in_bufs, 2, fp);
   fclose(fp);
-  CHECK(contains(buf11, " == 2.000000f"));
+  CHECK(contains(buf11, " == 2.0f"));
 
   thvm_free();
   TEST_REPORT();

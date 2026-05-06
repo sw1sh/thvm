@@ -883,14 +883,35 @@ every minute.
   `add(t, const(c))` checks `|c| < threshold` and folds to `t`.
 
 ### Constant-fold-threshold bug follow-on
-- [ ] Locate the rule in
-  [src/uop/graph_simplify.c](../../src/uop/graph_simplify.c) or
-  [src/codegen/render_uop.c](../../src/codegen/render_uop.c) (or
-  rangeify) that drops `TUOpAdd[t, TUOpConst[c]]` when `|c|` is
-  below ~1e-5, and either remove the threshold check or raise
-  it to 0 (no-op only on exact zero).  Verify with the eps sweep
-  above: `TUOpAdd[{0,0.5,1}, TUOpConst[1e-7]]` should produce
-  `{1e-7, 0.5+1e-7, 1+1e-7}`.
+- [x] (2026-05-06) Locate and fix.  Root cause was NOT a
+  threshold check anywhere in the simplifier -- it was the
+  **renderer's printf format**: `rmu_emit_term` used `"%ff"`
+  which defaults to 6 decimal places, so `1e-7` rendered as
+  `"0.000000f"` (truncated to literal zero) in the Metal
+  source.  At runtime the rendered MSL did `0 + in0[a0]` for
+  every slot, masquerading as a "broadcast bug".
+
+  Fix: render fp32 constants via `%.9g` (9 sig figs round-trips
+  fp32 exactly), with a `.0` suffix when %g produces a whole
+  number (so `2` doesn't become `2f` -- invalid C/MSL).
+  Updated 4 test assertions that pinned the old `1.000000f` /
+  `2.000000f` literals.
+
+  Verification:
+  - eps sweep `{0, 0.5, 1} + TUOpConst[eps]` for eps in
+    `{1e-3, 1e-5, 1e-7, 1e-9}`: slot 0 always gets eps;
+    slots 1 and 2 stay at 0.5/1.0 due to fp32 ULP at those
+    magnitudes (ULP ~3e-8 at 0.5; eps below ULP rounds away
+    -- correct fp32 behaviour).
+  - TCrossEntropyLoss simplified back to the natural form
+    `-Total[target * Log[pred + TUOpConst[1e-7]]]` (no
+    host-side eps tensor needed); produces 9.9e-6 for peaked-
+    correct softmax and 16.12 for wrong-class.
+
+  make test 274/274; nn.wlt 52/52.
+
+  This fix also lights up any other site that emitted small
+  fp32 constants -- previously silently broken.
 
 ### Bench-train timed loss NaN follow-on
 - [ ] Investigate why bench-train's *timed* losses are `$Failed`
