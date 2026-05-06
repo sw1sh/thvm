@@ -770,11 +770,42 @@ every minute.
   (probability ~0 for non-winning class).
 
 ### Stable softmax kernel-count regression follow-on
-- [ ] Investigate why the stable softmax adds ~860 kernels
-  (1198 -> 2058) instead of fusing the max-reduce into the
-  surrounding chain.  The rangeify relaxation pass should
-  collapse adjacent reduce + broadcast into one kernel; check
-  whether `THVM_DUMP_RANGEIFY_BAIL=1` flags new bail reasons.
+- [x] (2026-05-06) Investigate why the stable softmax adds ~860
+  kernels.  Probed a single 10-element softmax: **3 kernels**
+  emitted (was 1 for the naive form).  Inspected each:
+
+  - **kid 1** (metal-tile): `for (a1=0..10) _acc=fmax(_acc, in0[a1]); out[0]=_acc;`
+    -- the max-reduce.
+  - **kid 2** (metal-op): empty MSL source (`""`).  Likely an
+    alias / reshape / expand of the {1}-shaped max into broadcast
+    form; surfaced as a no-op in the lift path.
+  - **kid 3** (metal-tile): combined exp + sum-reduce + divide.
+    Body: `for (a0=0..10) { for (a1=0..10) _acc1 += in0[a1]; out[a0] = in0[a0]*(1/_acc1); }`.
+    Computes the full sum 10 times (once per output element)
+    instead of hoisting -- but the sum-reduce + per-element
+    divide IS in one kernel.
+
+  The fusion already partially works (kid 3 fuses 3 ops).  The
+  problems are:
+    1. Max-reduce stays separate (no fusion with surrounding
+       chain).
+    2. Bridge kernel kid 2 is wasteful (empty source).
+    3. kid 3's sum is recomputed per output position instead of
+       hoisted outside the output loop.
+
+  860 extra kernels in bench-train = ~430 softmax sites x 2 extra
+  kernels each (or, since LeNet has only one softmax in forward
+  but bench-train does 5 fwd+bwd steps with autotune, it's the
+  cumulative overhead).  The biggest single fix: hoist sum-reduce
+  in kid 3 so it computes once per kernel call.
+
+### Stable softmax sub-fixes
+- [ ] Hoist the SUM accumulator in `rmu_emit_store_reduce`
+  (or wherever the renderer emits the broadcast-of-reduce
+  pattern) so `for (a0) { for (a1) _acc += ... } out[a0] =
+  in0[a0]*(1/_acc)` becomes
+  `for (a1) _acc += ...; for (a0) out[a0] = in0[a0]*(1/_acc)`.
+  Saves N redundant sum-reduces per softmax.
 
 ### Loss numerical stabilisation follow-on
 - [ ] Add a small epsilon clamp in TCrossEntropyLoss
