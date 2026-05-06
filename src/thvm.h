@@ -2260,17 +2260,25 @@ typedef struct {
 // compiles into a UOpGraphRewriteFn that does the pattern match
 // then calls the user-provided rewrite fn.
 //
-// op    : expected op, or 0 (UOP_NONE) for "any op"
-// nsrc  : expected src count, or 0xFF for "any"
-// dtype : expected dtype, or 0 for "any"
-// bind  : index into the rule's Term bindings[N] array, or -1
-// src   : pointer to nsrc UPat children (NULL if nsrc == 0)
+// op     : expected op, or 0 (UOP_NONE) for "any op"
+// nsrc   : expected src count, or 0xFF for "any"
+// dtype  : expected dtype, or 0 for "any"
+// bind   : index into the rule's Term bindings[N] array, or -1
+// src    : pointer to nsrc UPat children (NULL if nsrc == 0)
+// op_alt : NULL, or pointer to a 0-terminated u8 array of
+//          acceptable opcodes; when non-NULL, t_op must appear in
+//          the array and `op` is ignored.  Lets one pattern match
+//          a small set, e.g. {UOP_ADD, UOP_MUL, 0} for the recurring
+//          "ALU with const sibling" subpatterns in bufferize chain
+//          walkers.  Existing 5-field static initializers stay
+//          source-compatible (op_alt zero-inits to NULL).
 typedef struct UPat {
   u8                op;
   u8                nsrc;
   u8                dtype;
   i8                bind;
   struct UPat const *src;
+  u8 const         *op_alt;
 } UPat;
 
 #define UPAT_NUM_BINDINGS 8

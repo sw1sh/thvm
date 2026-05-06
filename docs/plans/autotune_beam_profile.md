@@ -4425,7 +4425,36 @@ task.  Break it down:
     than the heap DAG.  `make test` clean; two_linears confirms
     dispatch unchanged: `{metal-gemm:1, metal-tile:2}`, kid 1 =
     metal-gemm 147us baseline -> 153us best with TOpt[TC,0,8].
-  - [ ] Port the inline-* rules (`inline_reduce_scalar_tail`,
+  - [/] Port the inline-* rules (`inline_reduce_scalar_tail`,
     `inline_movement_chain`, etc) to UPat.  These are the rules
     that today drive `bufferize_node_unmark`.
+
+    Sub-tasks (decomposed after survey):
+    - [x] (2026-05-07) Survey the inline-* rules to identify which
+      benefit from UPat.  Finding: each rule's TOP-LEVEL structural
+      check is a single-field op gate (`info->op != X`) -- UPat
+      doesn't beat that.  The real UPat opportunity sits inside
+      the chain walkers (`bufferize_chain_walk_is_broadcast`,
+      `bufferize_reduce_consumer_is_scalar_tail`) where each hop
+      has nested structure ("ALU with broadcast-of-CONST sibling",
+      "scalar-preserving unary or RESHAPE/PERMUTE", "EXPAND of
+      reduce-output").  Recurring "{ADD,MUL} with const sibling"
+      subpattern requires op-set matching (disjunction over
+      opcodes); current UPat matched only one literal op.
+    - [x] (2026-05-07) Extend UPat with `op_alt` field
+      (NULL-or-pointer-to-zero-terminated-u8-array) so one pattern
+      can match a small opcode set.  When `op_alt` is non-NULL,
+      `pat->op` is ignored and `t_op` must appear in the array.
+      Existing 5-field static initializers stay source-compatible
+      (op_alt zero-inits to NULL).  Smoke test extended (30/30,
+      was 22/22): one pattern matches both UOP_ADD and UOP_MUL,
+      rejects out-of-set ops (UOP_NEG) and rejects leaves.
+    - [ ] Port the "ALU with CONST-sibling" subpattern to a UPat
+      helper using `op_alt = {ADD, MUL, 0}` and bind both children;
+      reuse across `bufferize_reduce_consumer_is_scalar_tail` and
+      `bufferize_chain_walk_is_broadcast`.
+    - [ ] Port the scalar-preserving-unary chain hop (`{NEG,
+      RECIP, SQRT, EXP2, LOG2}`) to UPat using `op_alt`.
+    - [ ] Port the movement-passthrough chain hop (`{RESHAPE,
+      PERMUTE}`) to UPat using `op_alt`.
 

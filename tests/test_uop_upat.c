@@ -118,6 +118,31 @@ int main(void) {
   CHECK_EQ(heap_read(term_val(unchanged) + 0), a);
   CHECK_EQ(heap_read(term_val(unchanged) + 1), b);
 
+  // --- (4) op_alt: one pattern matches a small opcode set --------
+  TEST_BEGIN("upat/op-alt-matches-add-or-mul");
+  static u8 const alu_alt[] = {UOP_ADD, UOP_MUL, 0};
+  static UPat const pat_alu = {
+    0, 2, 0, -1, pat_add_children, alu_alt
+  };
+  Term bindings_add[UPAT_NUM_BINDINGS] = {0};
+  CHECK(upat_match(&pat_alu, mul_ab, bindings_add));
+  CHECK_EQ(bindings_add[0], a);
+  CHECK_EQ(bindings_add[1], b);
+  Term bindings_mul[UPAT_NUM_BINDINGS] = {0};
+  CHECK(upat_match(&pat_alu, a_plus_b, bindings_mul));
+  CHECK_EQ(bindings_mul[0], a);
+  CHECK_EQ(bindings_mul[1], b);
+
+  TEST_BEGIN("upat/op-alt-rejects-out-of-set");
+  // UOP_NEG is not in {ADD, MUL}; pat_alu must reject neg_a.
+  Term neg_arity_check[UPAT_NUM_BINDINGS] = {0};
+  CHECK(!upat_match(&pat_alu, neg_a, neg_arity_check));
+
+  TEST_BEGIN("upat/op-alt-rejects-leaf");
+  // op_alt requires a UOp tag; a leaf tensor has no opcode.
+  Term leaf_check[UPAT_NUM_BINDINGS] = {0};
+  CHECK(!upat_match(&pat_alu, a, leaf_check));
+
   thvm_free();
   TEST_REPORT();
 }
