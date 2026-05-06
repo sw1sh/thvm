@@ -1126,3 +1126,35 @@ levels 1-5.  Pure docs sync from already-captured data.
   with **+9 excess** kernels -- the largest gap in the
   ladder, dominated by conv2d 3-into-1 (4 of the 9) plus
   softmax / pool / flatten / linear-activation residue.
+
+### Level 7: LeNet forward at batch=32
+
+Level 6 was batch=1.  Real workloads run batch>1; the
+batch dimension stresses broadcast / reduce shapes that
+batch=1 collapses.  Same LeNet structure; only the input
+shape changes (1x28x28 -> 32x1x28x28).
+
+- [~] (2026-05-06) Write `bench/autotune-ladder/lenet_bs32.wls`
+  -- forward-only LeNet on a 32-sample batch, structured like
+  `lenet.wls`.  Save stdout to
+  `bench/autotune-ladder/lenet_bs32.txt`.  Inline kernel_count,
+  dispatch_kinds, totals_baseline_us, totals_best_us,
+  totals_speedup, kernels_with_proposals, jit compile_us,
+  and how many metal-op outliers remain.
+
+  **Skipped: `TFromNet` doesn't natively batch.**  Wrote the
+  script with input `{32, 1, 28, 28}` against a NetChain
+  declared with `"Input" -> {1, 28, 28}`; the call returned
+  silently with `kernel_count = 0` (no kernels lowered).
+  The existing `wl/Examples/lenet-mnist/forward.wls` confirms
+  the convention: it loops one sample at a time
+  (`x = TTensorCreate @ NumericArray[imgs[[i]], "Real32"]`),
+  with no precedent for batched `TFromNet` in this codebase.
+
+  Batched-LeNet bench needs either (a) a TLam-level forward
+  that takes a batched input directly (bypassing NetChain's
+  per-sample shape inference), or (b) a NetChain
+  reformulation that accepts `{32, 1, 28, 28}`.  Both are
+  multi-step changes outside a 5-min iteration.  Empty
+  capture saved as `lenet_bs32.txt` (evidence of the
+  no-lowering symptom).
