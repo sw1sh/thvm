@@ -39,9 +39,28 @@ file, commits, and stops.
 
 `out = a + b`, two rank-1 inputs of length 1024.
 
-- [ ] thvm: write `bench/autotune-ladder/elementwise_add.wls` that
-  builds the kernel, runs `TKernelAutotune` with all proposals,
-  reports baseline + best wall_us + applied opt + JIT stats.
+- [x] (2026-05-06) thvm: write
+  `bench/autotune-ladder/elementwise_add.wls` that builds the
+  kernel, runs `TKernelAutotune` with all proposals, reports
+  baseline + best wall_us + applied opt + JIT stats.
+
+  | metric           | value                          |
+  |------------------|--------------------------------|
+  | baseline_us      | 300                            |
+  | best_variant_us  | 146 (LOCAL[0, 16])             |
+  | speedup          | **2.05x**                      |
+  | applied          | LOCAL[0, 64] + GLOBAL[0, 16]   |
+  | variants_tried   | 9 (1 baseline + 8 LOCAL)       |
+  | jit_compile_us   | 2487 (warm); 176904 (cold)     |
+  | jit_misses       | 17                             |
+  | jit_bypass       | 0                              |
+
+  Notable: autotune picked LOCAL=64 + GLOBAL=16, not the
+  best-bench LOCAL=16 -- the proposer adds a GLOBAL split
+  separately.  The applied combo is what gets cached.  No bypass,
+  so 8-way LOCAL sweep + final variant fits within the 256-slot
+  cache.  Cold compile is 71x the warm compile (177 ms vs 2.5 ms)
+  -- newLibraryWithSource cost amortises after the first hit.
 - [ ] tinygrad: write `bench/autotune-ladder/elementwise_add.py`
   that builds `Tensor([1024]) + Tensor([1024])`, runs `BEAM=4`,
   captures the kernel time + the kernel selected.

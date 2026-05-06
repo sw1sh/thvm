@@ -1,0 +1,13 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+kid: 1
+dispatch_pre: metal-tile
+proposals: {TOpt[LOCAL, 0, 256], TOpt[LOCAL, 0, 128], TOpt[LOCAL, 0, 64], TOpt[LOCAL, 0, 32], TOpt[LOCAL, 0, 16], TOpt[LOCAL, 0, 8], TOpt[LOCAL, 0, 4], TOpt[LOCAL, 0, 2]}
+variants_tried: 9
+baseline_us: 300.
+best_variant_us: 146.  opt=TOpt[LOCAL, 0, 16]
+applied: {TOpt[LOCAL, 0, 64], TOpt[GLOBAL, 0, 16]}
+dispatch_post: metal-tile
+speedup_baseline_to_best: 2.05479
+thvm: metal_jit stats -- hits=92 misses=17 bypass=0 compile_us=2487
