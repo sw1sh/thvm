@@ -2613,3 +2613,42 @@ Tinygrad transformer block = 14, so thvm leak ~+3 to +5.
   matmuls); these don't autotune well (1.0x best/baseline).
   The matmul-shape autotune surface needs work for transformer
   loads -- a code-side follow-up beyond the ladder bench.
+
+### Level 20: tinygrad 2-block transformer
+
+Depth-scaling probe at the transformer level.  Stack 2
+transformer blocks; if the leak is per-block, observed
+kernel count = 2 * 14 = 28 (or close to it).  Same config
+as Level 19 (seq=32, d_model=64, n_heads=4).
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/transformer2.py` -- 2 stacked
+  transformer blocks on tinygrad.  Bench NOOPT and BEAM=4.
+  Save stdout to
+  `bench/autotune-ladder/transformer2.tinygrad.txt`.  Inline
+  baseline_us, beam4_us, speedup, kernels per forward.
+  Compare to Level 19 (1-block = 14): a 2x kernel scaling
+  confirms per-block linearity.
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |    17787 | 17778 |
+  | kernel_count / 50 rep |     1400 |  1400 |
+  | kernels per forward   |       28 |    28 |
+  | speedup_to_beam4      |          | 1.001x|
+
+  **Per-block linearity confirmed: 28 = 2 * 14 exactly.**
+  Each transformer block adds exactly 14 kernels on tinygrad.
+  Wall is also linear (~2 * 10017us = 17778us).
+
+  Tinygrad's transformer leak is purely additive across
+  depth -- no global fusion benefit from stacking; each block
+  is its own fused unit.  This is the cleanest scaling we've
+  seen: tinygrad's BEAM saturated at the per-kernel ceiling
+  (1.001x), and depth scaling is exactly 14*N for N blocks.
+
+  Predicted thvm 2-block transformer: 17 (Level 19) * 2 - X,
+  where X is any cross-block fusion thvm achieves.  Naive
+  prediction: 34 (no cross-block fusion) or fewer if
+  ThreadingLayer between residuals fuses across blocks.
+  Wall prediction: ~64500us (2 * Level 19's 32294).
