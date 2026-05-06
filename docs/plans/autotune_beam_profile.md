@@ -207,7 +207,32 @@ file, commits, and stops.
   a 1.09x win -- close to thvm's 1.12x.  Both autotune surfaces
   agree this kernel chain is mostly memory-bound and there's
   little to extract.
-- [ ] Compare.
+- [x] (2026-05-06) Compare.
+
+  | metric              | thvm                | tinygrad           |
+  |---------------------|---------------------|--------------------|
+  | kernels per softmax | 3                   | 3                  |
+  | baseline (us)       | 624 (sum of 3)      | 1245 (per call)    |
+  | best (us)           | 558                 | 1141               |
+  | speedup             | **1.12x**           | **1.09x**          |
+
+  **Convergent finding.**  Both frameworks decompose softmax
+  into the same 3-kernel structural shape (max-reduce + centred-
+  exp + sum-reduce-divide), and both autotune surfaces find
+  ~10% wins.  The chain is memory-bound (mostly a few load /
+  reduce / store passes); per-kernel rewriting can only do so
+  much.
+
+  Absolute numbers don't line up: thvm's 624/558 us is a sum of
+  per-kernel benches (TKernelBenchUs at 100 reps each), tinygrad's
+  1245/1141 us is the wall-time of one softmax() call including
+  Python overhead and 3 sequential kernel dispatches.  Both
+  bracket the same physical work.
+
+  **Implication for thvm**: the unfused metal-op outlier (kid 2)
+  on softmax is the biggest target -- if it lifted onto metal-
+  tile, the whole chain might fuse via reduce-broadcast collapse
+  in rangeify and shrink to 1-2 kernels.
 
 ### Level 4 -- 2-layer MLP forward
 
