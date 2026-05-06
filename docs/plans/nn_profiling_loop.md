@@ -723,13 +723,25 @@ every minute.
   be diffed against a stable baseline.
 
 ### forward.wls softmax stabilisation follow-on
-- [ ] Add max-subtract to the softmax used in `forward.wls`
-  (or its underlying TSoftmax helper) so random-weight LeNets
-  don't NaN at every run.  Two paths:
-  (a) Patch TSoftmax to do `exp(x - max(x))` before normalising;
-      generalises to all callers.
-  (b) Add a `TSoftmaxStable` variant and have `TFromNet[..,
-      SoftmaxLayer]` route to it; leaves TSoftmax as a "fast
-      naive" version for callers who know inputs are bounded.
-  Verify forward.wls + autotune.wls + bench-train.wls all
-  produce numeric losses post-fix.
+- [x] (2026-05-06) Add max-subtract to TSoftmax.  Path (a) chosen.
+  Patched [NN.wl](../../wl/THVMLink/Kernel/NN.wl) `TSoftmax` to:
+  ```wl
+  TSoftmax[x_TTerm] := Module[{m, xc, e, s},
+    m = TUOpReduce[x, 0, "MAX"]; xc = x - m;
+    e = Exp[xc]; s = Total[e]; e / s
+  ]
+  ```
+
+  Subtle bug found: explicit `TUOpExpand[m, shape]` from a {1}-
+  shaped reduce result didn't fan out correctly (only the first
+  output element saw the broadcast; rest read zeros).  Implicit
+  binary-op broadcast (`x - m`) works.
+
+  Verification:
+  - `softmax(big = {1000, 999, 998, 997, 996})` now produces
+    `{0.636, 0.234, 0.086, 0.032, 0.012}` instead of `$Failed`.
+  - `softmax(small = {10, 9, 8})` produces
+    `{0.665, 0.245, 0.090}` (matches naive form within fp).
+  - `forward.wls` with SeedRandom[7]: all 5 samples produce
+    sane predictions (sample 5 even predicts correctly!).
+  - make test 274/274; nn.wlt 52/52; core.wlt 32/32.

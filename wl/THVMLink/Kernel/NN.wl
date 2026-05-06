@@ -112,8 +112,19 @@ TLog[x_TTerm] := Log[x]
    the explicit EXPAND the chain rule for MUL has no notion of the
    implicit broadcast and drops the cross-coupling term in
        d(CE)/dz = probs - target. *)
-TSoftmax[x_TTerm] := With[{e = Exp[x], shape = tUopShape[x]},
-    e * TUOpExpand[1 / Total[e], shape]
+(* Stable softmax: subtract max(x) before exp so EXP overflow is
+   bounded.  For numerically well-behaved inputs this is identical
+   to the naive form; for random-init networks (LeNet) it
+   prevents NaN at every forward call.  Uses implicit broadcast
+   from {1}-shaped reduce results onto the input shape; explicit
+   TUOpExpand from a {1} source was observed not to fan out
+   correctly. *)
+TSoftmax[x_TTerm] := Module[{m, xc, e, s},
+    m  = TUOpReduce[x, 0, "MAX"];
+    xc = x - m;
+    e  = Exp[xc];
+    s  = Total[e];
+    e / s
 ]
 
 (* CrossEntropy probabilities form: target is a probability
