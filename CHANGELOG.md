@@ -131,6 +131,34 @@ used to carry:
   The 4 unhandled are 3 conv2d shapes + 1 kernel with > 30 inputs
   (hardware cap).
 
+- **Phase F execution parity** (`4b1a62c`): conv2d kernels skip
+  the via-UOp swap (keep specialised rmt_emit_conv2d_flat
+  template; the lifter doesn't yet decode im2col addressing).
+  With THVM_RENDER_VIA_UOP=1 + the conv2d skip, end-to-end
+  WL execution parity verified on a representative subset:
+
+    cmpeq.wlt:    3/3
+    cast.wlt:    15/15
+    reduce.wlt:   8/8
+    bitcast.wlt: 11/11
+    bn_grad.wlt:  3/3
+    grad_edge.wlt: 11/11
+    assign.wlt:   6/6
+    TOTAL:       46/46 PASS
+
+  Real kernel dispatch through the new UOp-DAG renderer produces
+  numerically-correct outputs for elementwise, reduce, bn-grad
+  chain-reduce, assign-in-place, dtype cast / bitcast, and
+  gradient edge cases.
+
+  Gates remaining before flipping default-on:
+  - The 24 string-match assertions in test_tile_graph that check
+    legacy MSL conventions need updating (test changes only).
+  - SIGABRT on full WL suite -- likely narrow-FP / int dtype edge
+    case in dtype_*.wlt tests; needs diagnosis.
+  - Conv2d shape lifter to retire the dedicated path entirely
+    (or accept coexistence indefinitely).
+
 - **Phase C wedge** (`b583321`, `4a36637`): kernel_lift_to_uop
   bridges ScalarUop[] arena to UOp DAG.  Takes a fully-scheduled
   kernel and builds the equivalent UOp DAG on the heap, returning
