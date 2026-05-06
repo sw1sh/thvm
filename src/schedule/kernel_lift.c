@@ -114,6 +114,24 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     buf = out_buf;
   } else {
     lift_reject_log(ke, buf_sid, "index/buf-not-DEFINE");
+    // Extra context for the buf-of-INDEX pattern: print the inner
+    // ScalarUop's src list so we can see what the layered access
+    // looks like.  Gated by the same env knob as the main reject
+    // log.
+    char const *e = getenv("THVM_DUMP_LIFT_REJECT");
+    if (e != NULL && e[0] == '1' && bu->src_count > 0) {
+      fprintf(stderr, "  inner srcs:");
+      for (u32 i = 0; i < bu->src_count && i < 8; i++) {
+        u32 isid = bu->src[i];
+        if (isid > 0 && isid < ke->n_scalar_uops) {
+          fprintf(stderr, " [%u]=%s",
+                  i, scalar_op_name(ke->scalar_uops[isid].op));
+        } else {
+          fprintf(stderr, " [%u]=oor", i);
+        }
+      }
+      fputc('\n', stderr);
+    }
     return 0;
   }
   if (out_buf_term != NULL) *out_buf_term = buf;

@@ -518,9 +518,37 @@ every minute.
   lift extension.
 
 ### Lift extension follow-on
+- [x] (2026-05-06) Diagnose the buf-of-INDEX inner-shape on LeNet.
+  Enriched `lift_reject_log` to also dump the inner ScalarUop's
+  src list when the buffer side isn't a DEFINE_*.  Re-running
+  LeNet forward with `THVM_DUMP_LIFT_REJECT=1` shows every reject
+  has the **same clean inner shape**:
+
+  ```
+  inner srcs: [0]=S_DEFINE_OUTPUT [1]=S_RANGE [2]=S_RANGE [3]=S_RANGE
+  inner srcs: [0]=S_DEFINE_PARAM  [1]=S_RANGE [2]=S_RANGE [3]=S_RANGE
+  ```
+
+  The OUTER S_INDEX (4 srcs: 1 buf + 3 ranges) wraps an INNER
+  S_INDEX whose buffer is already DEFINE_*  with three ranges
+  matching the same buffer's rank.  This is rangeify's
+  pad/shrink/permute residue: two layered S_INDEX nodes refer
+  to the same underlying buffer, with the outer ranges
+  re-expressing the access in a different iteration order.
+
+  Design implication: lift_scalar_index can see-through the
+  inner S_INDEX by treating it as pure address composition --
+  the underlying buffer is the inner's DEFINE_*  src; the outer's
+  3 ranges replace the inner's 3 ranges at the SAME buffer rank.
+  In the simplest case, outer's ranges directly substitute for
+  inner's: the ranges bind to the same axes but iterate
+  differently.  Need to verify this assumption with one concrete
+  source-level example before coding.
+
 - [ ] Implement buf-of-INDEX see-through in `lift_scalar_index`:
-  when `bu->op == S_INDEX`, recurse into `bu->src[0]` and combine
-  the inner+outer address expressions using the inner ranges'
-  semantic position.  Phase-gate behind a smoke test that runs
-  LeNet forward and verifies (a) the metal-tile share grows
-  beyond 40% and (b) numerics match the legacy path.
+  when `bu->op == S_INDEX`, treat the inner's DEFINE_*  src as the
+  underlying buffer and use the OUTER's ranges for address
+  linearisation (assumption: outer ranges replace inner's at the
+  same buffer rank).  Smoke-test on LeNet forward: (a) metal-tile
+  share grows past 40%; (b) softmax numerics match the legacy
+  path within 1e-5.
