@@ -379,8 +379,31 @@ LinearLayer(784->128) -> ReLU -> LinearLayer(128->10) -> softmax.
 
 ### Cross-level synthesis
 
-- [ ] Build a single-table comparison across all 5 levels: thvm
-  best vs tinygrad best, plus thvm autotune-bench-time vs tinygrad
-  BEAM-search-time.  Save to
-  `bench/autotune-ladder/comparison.md`.  Identify the level
-  where thvm falls furthest behind tinygrad as the next focus.
+- [x] (2026-05-06) Build a single-table comparison across all 5
+  levels.  Saved to
+  [bench/autotune-ladder/comparison.md](../../bench/autotune-ladder/comparison.md).
+
+  | level | shape          | thvm best | thvm   | tinygrad best | tinygrad | absolute winner   |
+  |-------|----------------|----------:|-------:|--------------:|---------:|-------------------|
+  | 1     | elem add 1024  |    146 us |  2.05x |        391 us |    1.23x | thvm   (2.7x)     |
+  | 2     | matmul 128     |    211 us |  1.01x |        773 us |    1.18x | thvm   (3.7x)     |
+  | 3     | softmax 512    |    558 us |  1.12x |       1141 us |    1.09x | thvm   (2.0x)     |
+  | 4     | MLP2           |   1420 us |  1.13x |       2499 us |    1.09x | thvm   (1.8x)     |
+  | 5     | conv2d 28x28   |   2264 us |  1.58x |       1604 us |    0.99x | tinygrad (-29%)   |
+
+  **Key findings**: per-kernel autotune is at parity (both
+  extract 1.0-1.6x); thvm leaks +2 kernels per forward at MLP2
+  and conv2d; **conv2d is where thvm falls furthest behind**
+  in absolute wall (-29%, despite tuning extracting the biggest
+  relative win 1.58x), and the mechanism is **structural
+  fusion**, not autotune.
+
+  Top 3 leverage points (ordered by ROI):
+  1. Fuse the conv2d patch-sum + reduce + bias-broadcast chain
+     into 1 kernel on the metal-tile path.
+  2. Lift the softmax tail (metal-op outlier) through
+     `kernel_lift_to_uop` to enable reduce-broadcast collapse.
+  3. Fuse LinearLayer + activation boundary.
+
+  Per-kernel autotune extension is low-ROI until 1, 2, 3 land;
+  the kernels we tune today are too small.
