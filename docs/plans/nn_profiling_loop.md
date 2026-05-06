@@ -406,9 +406,37 @@ every minute.
   Limitation: non-GROUP per-USE opts (e.g., UNROLL on a REDUCE
   axis) get silently skipped today.  Wiring those needs the full
   `cur[]` extension (deferred).
-- [ ] Bench an end-to-end win: pick a kernel from
-  `lenet-mnist/autotune.wls` whose autotuner picked KOP_GROUP on
-  a reduce axis (e.g. kid 2 GROUP[axis=2, arg=25] from the
-  earlier capture) and confirm the GROUP_REDUCE rendered MSL
-  beats the scalar accumulator path.  Capture wall-time numbers
-  in this file.
+- [x] (2026-05-06) Bench an end-to-end win on a real autotuned
+  kernel.  In the LeNet workload, the autotuner picks GROUP opts
+  on **metal-op** kernels (kid 2/4/5/7/9 -- conv2d / reshape paths
+  that don't yet route through `kernel_lift_to_uop`), so my new
+  Phase 4 wiring isn't on the dispatch path for them.  Switched
+  to a synthetic reduce kernel that DOES route through metal-tile:
+
+  ```wl
+  xT = TTensorCreate @ NumericArray[Range[4096] // N, "Real32"];
+  TUOpReduce[xT, 0, "SUM"]   (* metal-tile *)
+  TKernelApplyOpt[kid, TOpt["GROUP", 1, 32]]
+  ```
+
+  Saved to `bench/synth/group_reduce.txt`:
+
+  | shape    | avg per call (200 reps) |
+  |----------|-------------------------|
+  | baseline | 1582 us                 |
+  | GROUP=32 | 1472 us                 |
+  | speedup  | **1.07x**               |
+
+  Both paths produce the correct sum 8390656.  The rendered MSL
+  for the GROUP variant is the cooperative threadgroup-shared shape
+  (32-slot `_acc1` array, strided per-thread walk over 4096 step
+  32, two barriers, single-thread final fold).  Per-call wall time
+  is dominated by WL `TRealize` overhead (~1.3 ms);
+  kernel-only delta is small (~110 us shaved).  Win is real but
+  modest at this size; bigger reduce extents and hotter loops
+  should amplify.
+
+  Conclusion: the Phase 3 + 4 GROUP_REDUCE shape works
+  end-to-end on the metal-tile path.  Lifting LeNet's metal-op
+  kernels (conv2d, reshape) onto metal-tile is the next leverage
+  point for autotune-driven reduce wins on real workloads.

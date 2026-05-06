@@ -1,0 +1,10 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+kid=1 kind=metal-tile
+baseline_us_avg200: 0.00158168 e6
+axes post: <|Kid -> 1, AxisTypes -> {LOOP, REDUCE, GROUP_REDUCE}, FullShape -> {1, 128, 32}, Applied -> {TOpt[GROUP, 1, 32]}|>
+group_us_avg200: 0.00147198 e6
+speedup: 1.07452
+baseline_sum=          6
+8.39066 10 group_sum=          6
+8.39066 10
+expected = 8390656
