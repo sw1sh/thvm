@@ -2550,3 +2550,66 @@ bench.
   lift to metal-tile, eliminating the +1 leak vs tinygrad.
   Belongs to the structural-fusion / kernel-lift relaxation
   track.
+
+### Level 19 thvm: full transformer block
+
+AttentionLayer (Level 18b/c) and NormalizationLayer (Level
+18d) both lower via TFromNet.  Build the full transformer
+block: input -> LN1 -> attention(+QKV/O proj) -> residual ->
+LN2 -> FFN(Linear+Ramp+Linear) -> residual.  Mirrors
+tinygrad's Level 19 (14 kernels).
+
+Predicted thvm by adding component costs:
+  9 (attn+proj from 18c)
+  + 2 (LN1) + 2 (LN2) = 4
+  + 2 + 2 (FFN: 2 LinearLayers each costing 2)
+  + 0-2 (residuals; ThreadingLayer may fuse)
+  = ~17-19 kernels.
+
+Tinygrad transformer block = 14, so thvm leak ~+3 to +5.
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/transformer_block.wls` -- NetGraph:
+  input -> LN1 -> attention(+Q/K/V/O proj) -> residual1
+  (ThreadingLayer[Plus]) -> LN2 -> FFN(Linear -> Ramp ->
+  Linear) -> residual2.  Save stdout to
+  `bench/autotune-ladder/transformer_block.txt`.
+
+  | metric             | thvm  | tinygrad |
+  |--------------------|------:|---------:|
+  | kernel_count       |    17 |       14 |
+  | dispatch_kinds     |3op+14t|     n/a  |
+  | totals_baseline_us | 33640 |    10050 |
+  | totals_best_us     | 32294 |    10017 |
+  | totals_speedup     |  1.04x|    1.003x|
+
+  **Headline: thvm transformer block = 17, leak = +3.**
+  Right at the low end of the 17-19 prediction.
+
+  Decomposition delta (vs tinygrad's 14 = 8 attn + 6 rest):
+  - thvm attention+proj (Level 18c) = 9 (+1 vs tg's 8)
+  - 2 LayerNorms x 2 = 4 (+2 vs tg's 2)
+  - FFN Linear+Ramp+Linear = 4 (+2 vs tg's 2: GELU/Ramp +
+    fc1 don't fuse on thvm)
+  - Residuals = 0 (ThreadingLayer fuses on both sides)
+
+  The +3 leak decomposes as **+1 (attn projections) +2 (2 x
+  LayerNorm)**.  Closing the LN reduce-broadcast lift (per
+  the new `src_count=3` lift-reject signature in Level 18d)
+  would close 2 of 3 leak kernels here.
+
+  **Per-kernel wall gap is bigger than kernel-count gap**.
+
+  - kernel ratio:   thvm/tg = 17/14   = 1.21x more kernels
+  - wall ratio:     thvm/tg = 32294/10017 = 3.22x slower
+
+  For MLPs/CNNs, kernel-count and wall correlated; the
+  transformer's larger FFN matmuls (hidden=256) expose that
+  thvm's per-kernel wall is ~2-3x slower than tinygrad on
+  the matmul-heavy shapes.
+
+  Specific high-cost kids: kid 14 = 13984us, kid 16 = 8090us
+  (both metal-tile, likely the FFN's 64*32x256 and 256x64
+  matmuls); these don't autotune well (1.0x best/baseline).
+  The matmul-shape autotune surface needs work for transformer
+  loads -- a code-side follow-up beyond the ladder bench.
