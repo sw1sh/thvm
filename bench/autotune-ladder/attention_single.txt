@@ -1,0 +1,15 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+attention_single kernel_count: 4
+dispatch_kinds: {{metal-gemm, 1}, {metal-tile, 3}}
+kid 1 kind=metal-gemm baseline=205.us best=187.us  opt=TOpt[TC, 0, 16]  applied={TOpt[TC, 0, 16]}
+kid 2 kind=metal-tile baseline=284.us best=165.us  opt=TOpt[LOCAL, 0, 32]  applied={TOpt[LOCAL, 0, 8], TOpt[GLOBAL, 0, 4]}
+kid 3 kind=metal-tile baseline=234.us best=217.us  opt=TOpt[UNROLL, 1, 16]  applied={TOpt[UNROLL, 1, 16]}
+kid 4 kind=metal-tile baseline=2143.us best=1282.us  opt=TOpt[UNROLL, 2, 4]  applied={TOpt[UNROLL, 2, 8]}
+totals_baseline_us: 2866.
+totals_best_us: 1851.
+totals_speedup: 1.54835
+kernels_with_proposals: 4
+kernels_with_applied: 4
+thvm: metal_jit stats -- hits=266 misses=49 bypass=0 compile_us=228104

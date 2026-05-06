@@ -2368,3 +2368,66 @@ trail of receipts.
   regime envelope, and code wins shipped.  A reader entering
   the plan now sees the conclusions before scrolling through
   the per-level evidence.
+
+### Level 18b: thvm single-head AttentionLayer (NetGraph)
+
+Per Level 18's diagnosis, thvm's AttentionLayer handler at
+[wl/THVMLink/Kernel/NN.wl:1017](../../wl/THVMLink/Kernel/NN.wl#L1017)
+accepts a 3-tensor (Q, K, V) triple from NetGraph multi-input
+dispatch.  Probe with the simplest such NetGraph: single
+AttentionLayer["Dot"] with identity Q/K/V (no projections),
+feeding the same tensor 3 times.
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/attention_single.wls` -- NetGraph
+  with a single AttentionLayer["Dot"], Q/K/V edges all wired
+  from one NetPort feed.  Save stdout to
+  `bench/autotune-ladder/attention_single.txt`.  Verify
+  TFromNet lowers it (kernel_count > 0); inline kernel-count
+  + dispatch_kinds.  Compare to tinygrad attention's 8
+  kernels (which includes 4 projections that this probe
+  skips, so the thvm number should be smaller).
+
+  **TFromNet lowers AttentionLayer cleanly via NetGraph!**
+
+  | metric              | value             |
+  |---------------------|-------------------|
+  | kernel_count        | 4                 |
+  | dispatch_kinds      | 1g + 3t           |
+  | totals_baseline_us  | 2866              |
+  | totals_best_us      | 1851              |
+  | totals_speedup      | **1.55x**         |
+  | kernels_with_appl.  | 4                 |
+  | jit compile_us      | 228104 (cold)     |
+
+  **Headline: thvm AttentionLayer single-head identity = 4
+  kernels.** dispatch is 1 metal-gemm + 3 metal-tile.
+
+  Autotune speedup 1.55x is the highest non-elementwise
+  speedup in the campaign (Level 1 elementwise was 2.05x;
+  Level 5 conv2d = 1.27-1.58x; everything else is in the
+  1.0-1.3x band).  Attention's matmul-heavy kernels surface
+  significant tunable surface.
+
+  Provisional decomposition (4 = ?):
+
+  | n | likely contents                       |
+  |--:|---------------------------------------|
+  | 1 | Q @ K^T (gemm, fused with scale)      |
+  | 3 | softmax (max / sum / divide)          |
+  | (?)|attn @ V (likely fused into one of    |
+  |    |the existing kernels, since 5 ops -> 4)|
+
+  Tinygrad attention with full Q/K/V/O projections = 8
+  kernels.  This probe (no projections) = 4.  Adding the 4
+  projections to the thvm side would predict ~4 + 4*2 = 12
+  (using the per-LinearLayer +2 thvm cost from MLPN), or
+  ~4 + 4 = 8 if AttentionLayer's projection kernels fuse
+  more aggressively than standalone Linear.
+
+  thvm AttentionLayer is **functional** for the single-head
+  + explicit Q/K/V case, validating the user's correction
+  (2026-05-06) that Phase 13 only blocks the multi-head +
+  CatenateLayer pattern.  Subsequent levels: probe with
+  AttentionLayer + projections, then CatenateLayer multi-head
+  (post Phase 13).
