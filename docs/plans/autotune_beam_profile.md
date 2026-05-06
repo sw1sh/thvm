@@ -309,7 +309,27 @@ LinearLayer(784->128) -> ReLU -> LinearLayer(128->10) -> softmax.
 
 `out = conv2d(x, w, b)` matching LeNet's first conv shape.
 
-- [ ] thvm: `bench/autotune-ladder/conv2d.wls`.
+- [x] (2026-05-06) thvm: `bench/autotune-ladder/conv2d.wls`.
+
+  Conv2D(1x32x28x28, 5x5 kernel, 32 c_out) emits 3 kernels:
+
+  | kid | kind        | baseline | best | opt              | applied                      |
+  |-----|-------------|---------:|-----:|------------------|------------------------------|
+  | 2   | metal-op    | 2847 us  | 1969 | UNROLL[2,4]      | UNROLL[2,2]                  |
+  | 3   | metal-tile  | 722 us   | 295  | LOCAL[0,16]      | LOCAL[0,16] + GLOBAL[0,2]    |
+
+  Totals: **baseline 3569 us, best 2264 us, speedup 1.58x.**
+  Both proposing kernels got applied winners.
+
+  **This is the biggest thvm autotune speedup in the ladder so
+  far** (1.58x vs the 1.01-1.13x at simpler kernels).  Conv2D
+  has real autotune surface: the kh*kw inner-loop UNROLL fits
+  the metal-op patch-sum kernel; the output-axis LOCAL+GLOBAL
+  split saturates GPU threads on the metal-tile reduce.  At this
+  shape thvm's per-kernel tuning is doing meaningful work, not
+  just polishing.
+
+  jit_misses=11, jit_bypass=0, jit_compile_us=117752 cold.
 - [ ] tinygrad: `bench/autotune-ladder/conv2d.py` BEAM=4.
 - [ ] Compare.
 
