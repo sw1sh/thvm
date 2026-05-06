@@ -637,10 +637,35 @@ every minute.
   per-axis stride -- effectively a partial-axis SHRINK lift.
   That's a larger design task (separate follow-on).
 
-- [ ] Design a partial-axis SHRINK lift: when an outer rank-1
-  S_INDEX wraps an inner DEFINE_*  with N axes, identify which
-  axis the outer range maps to (by matching range_extent against
-  buffer.dims[i]) and emit `r_uop * stride[i]` as the address.
-  When the range matches no single axis, fall back to the
-  current reject behaviour.  Smoke-test on LeNet forward to
-  confirm the 4 rejected shapes lift correctly with this rule.
+- [x] (2026-05-06) Design a partial-axis SHRINK lift.
+  **Refined model**: re-reading the rejects, the OUTER rank-1
+  S_INDEX is **appending an axis** to the INNER's rank-N access,
+  not flattening.  Concrete example from LeNet:
+  - Buffer dims `[50, 4, 4, 2]` (numel 1600).
+  - Inner: `S_INDEX[DEFINE_*, r1, r2, r3]` -- rank-3 access into
+    the first 3 axes.
+  - Outer: `S_INDEX[inner, r_outer]` where r_outer has extent=2,
+    matching `dims[3]=2`.
+
+  The combined access is rank-4: row-major address is
+  `r1*32 + r2*8 + r3*2 + r_outer*1` (strides come from buffer
+  dims).
+
+  **Lift design**: in `lift_scalar_index`, when `bu->op == S_INDEX`,
+  treat the inner+outer pair as a single rank-(N_inner + 1) access:
+  1. Recursively lift the inner S_INDEX to get its address
+     expression `inner_addr` and underlying buffer.
+  2. The outer's range corresponds to a NEW axis appended after
+     the inner's axes.  Its stride is the product of buffer dims
+     past `N_inner` (typically 1 if N_inner == ndim - 1).
+  3. Combined address = `inner_addr + r_outer * stride_outer`.
+
+  Generalises naturally to multi-axis outer S_INDEX (current
+  same-rank passthrough).
+
+### partial-axis SHRINK lift implementation
+- [ ] Implement the partial-axis SHRINK lift design above:
+  recursively lift inner S_INDEX, append outer ranges with the
+  correct strides.  Smoke-test on LeNet forward (expect ~67% tile
+  coverage) AND bench-train (must not abort).  Verify softmax
+  numerics on forward match the legacy path within 1e-5.
