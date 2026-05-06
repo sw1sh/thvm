@@ -4621,3 +4621,45 @@ elementwise (ADD/MUL) op encountered.
 
   `make test` clean.
 
+### Level 49: extend reject-ops diagnostic to cover all gates
+
+THVM_DUMP_GEMM_REJECT_OPS=1 currently only dumps op-trails for
+the `n_inputs!=2` reject path.  After Level 48, the dominant
+reject is `n_ops!=2` (2610 hits) which we have NO op-trail
+visibility on.  Extend the diagnostic so the n_ops!=2 and
+op0-not-mul-inputs rejects also print their program for
+REDUCE-containing kernels.  Re-run transformer; identify which
+specific shape kid 14's matmul kernel has now.
+
+- [x] (2026-05-07) Move the THVM_DUMP_GEMM_REJECT_OPS dump into
+  the TGEMM_REJECT macro so every gate fires it.  `make test`
+  clean.  Re-run transformer block, save to
+  `bench/autotune-ladder/transformer_gemm_reject_all_gates.txt`.
+
+  Top REDUCE-containing reject signatures (decoded):
+
+  | hits | gate              | n_in | n_op | ops decoded |
+  |-----:|-------------------|-----:|-----:|-------------|
+  | 1316 | n_ops!=2          |    2 |    4 | RESHAPE,EXPAND,MUL,REDUCE |
+  |  564 | n_inputs!=2       |    3 |    6 | REDUCE,MUL,RESHAPE,EXPAND,MUL,ADD |
+  |  422 | n_inputs!=2       |    3 |    9 | MUL,REDUCE,...,SQRT,RECIP,MUL |
+  |  282 | n_ops!=2          |    2 |    7 | RESHAPE,EXPAND,PERMUTE,RESHAPE,EXPAND,MUL,REDUCE |
+  |  257 | n_ops!=2          |    2 |    6 | RESHAPE,EXPAND,RESHAPE,EXPAND,MUL,REDUCE |
+  |  257 | n_inputs!=2       |    1 |    5 | REDUCE,RESHAPE,RECIP,EXPAND,MUL |
+
+  **Smoking gun**: 1316 hits with `RESHAPE,EXPAND,MUL,REDUCE` --
+  exactly 2 inputs (matmul-input-protect cleanly extracted the
+  bias-add boundary), but the kernel program has 4 ops because
+  the LN-broadcast layout (RESHAPE+EXPAND wrapping the matmul's
+  input) sits between the protected boundary and the matmul's
+  MUL.  `tile_analyze_gemm` requires `n_ops == 2` LITERALLY
+  (MUL + REDUCE only), so the matmul still drops to metal-tile.
+
+  **Concrete next-step probe (Level 50)**: relax
+  `tile_analyze_gemm` to accept `n_ops > 2` when the leading ops
+  are all movement (RESHAPE/EXPAND/PERMUTE/SHRINK/PAD/FLIP) and
+  the FINAL two ops are still MUL-of-(input-or-shaped-input) +
+  REDUCE-sum-of-prev.  This is a single-kernel structural change
+  in `tile_analyze_gemm`; if it works, kid 14 might drop another
+  5-10x by routing through metal-gemm-with-TC.
+

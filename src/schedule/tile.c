@@ -998,37 +998,36 @@ static int tile_analyze_expanded_gemv(KernelEntry const *ke,
 int tile_analyze_gemm(KernelEntry const *ke,
                       u32 const *input_storage_numels,
                       TileGemmInfo *out) {
+  // TGEMM_REJECT: log a one-line "reject gate=..." (THVM_DUMP_GEMM_REJECT)
+  // and, if THVM_DUMP_GEMM_REJECT_OPS=1 AND the kernel has a REDUCE in
+  // its program, also dump the per-op opcode list tagged with the
+  // rejecting gate.  Inlining the op-trail in the macro means every
+  // gate (n_inputs!=2, n_ops!=2, op0-not-mul-inputs, ...) emits the
+  // diagnostic, not just the entry-block n_inputs check.
   #define TGEMM_REJECT(reason) do { \
     char const *_e = getenv("THVM_DUMP_GEMM_REJECT"); \
     if (_e != NULL && _e[0] == '1') { \
       fprintf(stderr, "tile_analyze_gemm: reject gate=%s\n", reason); \
     } \
+    char const *_eop = getenv("THVM_DUMP_GEMM_REJECT_OPS"); \
+    if (_eop != NULL && _eop[0] == '1' && ke != NULL && ke->program != NULL) { \
+      int _has_reduce = 0; \
+      for (u32 _i = 0; _i < ke->n_ops; _i++) { \
+        if (ke->program[_i].opcode == UOP_REDUCE) { _has_reduce = 1; break; } \
+      } \
+      if (_has_reduce) { \
+        fprintf(stderr, "  reject-ops gate=%s n_inputs=%u n_ops=%u ops=[", \
+                reason, ke->n_inputs, ke->n_ops); \
+        for (u32 _i = 0; _i < ke->n_ops; _i++) { \
+          fprintf(stderr, "%s%u", _i ? "," : "", (unsigned)ke->program[_i].opcode); \
+        } \
+        fprintf(stderr, "]\n"); \
+      } \
+    } \
   } while (0)
   if (ke == NULL || out == NULL || ke->program == NULL
       || ke->n_inputs != 2) {
     TGEMM_REJECT("n_inputs!=2");
-    // Optional follow-up dump: list the kernel's program opcodes
-    // when it both holds at least one REDUCE and was rejected for
-    // n_inputs!=2 -- these are the matmul-fused-with-surrounding
-    // kernels (kid 14 / kid 16 in transformer block).  Knowing the
-    // op trail tells us which fused ops to split off in a
-    // downstream-protect rule.  Gated by THVM_DUMP_GEMM_REJECT_OPS=1
-    // so it doesn't drown the histogram diagnostic.
-    char const *eop = getenv("THVM_DUMP_GEMM_REJECT_OPS");
-    if (eop != NULL && eop[0] == '1' && ke != NULL && ke->program != NULL) {
-      int has_reduce = 0;
-      for (u32 i = 0; i < ke->n_ops; i++) {
-        if (ke->program[i].opcode == UOP_REDUCE) { has_reduce = 1; break; }
-      }
-      if (has_reduce) {
-        fprintf(stderr, "  reject-ops n_inputs=%u n_ops=%u ops=[",
-                ke->n_inputs, ke->n_ops);
-        for (u32 i = 0; i < ke->n_ops; i++) {
-          fprintf(stderr, "%s%u", i ? "," : "", (unsigned)ke->program[i].opcode);
-        }
-        fprintf(stderr, "]\n");
-      }
-    }
     return 0;
   }
   memset(out, 0, sizeof(TileGemmInfo));

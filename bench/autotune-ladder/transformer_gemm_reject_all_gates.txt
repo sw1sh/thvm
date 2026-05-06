@@ -1,0 +1,8 @@
+1316   reject-ops gate=n_ops!=2 n_inputs=2 n_ops=4 ops=[3,5,10,17]
+ 564   reject-ops gate=n_inputs!=2 n_inputs=3 n_ops=6 ops=[17,10,3,5,10,9]
+ 422   reject-ops gate=n_inputs!=2 n_inputs=3 n_ops=9 ops=[10,17,10,3,5,9,15,12,10]
+ 282   reject-ops gate=n_ops!=2 n_inputs=2 n_ops=7 ops=[3,5,4,3,5,10,17]
+ 257   reject-ops gate=n_ops!=2 n_inputs=2 n_ops=6 ops=[3,5,3,5,10,17]
+ 257   reject-ops gate=n_inputs!=2 n_inputs=1 n_ops=5 ops=[17,3,12,5,10]
+
+# Decoded: 3=RESHAPE 4=PERMUTE 5=EXPAND 9=ADD 10=MUL 12=RECIP 15=SQRT 16=CMPLT 17=REDUCE
