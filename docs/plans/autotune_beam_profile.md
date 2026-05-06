@@ -2837,3 +2837,46 @@ autotune leverage on the larger ones).
   workloads, but the kernel-count "leak" framing under-
   represented the structural-correctness value of this
   patch.
+
+### Level 22 verify: re-bench LeNet post-patch
+
+LeNet (Level 6) had 9 metal-op kernels pre-patch.  Some
+might lift to metal-tile under the broadcast-over-outer-iter
+fast path -- that would let autotune cover more of the
+forward pass.  Re-bench to find out.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/lenet.wls`
+  with the Level 22 lift fast path active.  Save stdout to
+  `bench/autotune-ladder/lenet.txt`.
+
+  | metric             | pre-patch | post-patch |
+  |--------------------|----------:|-----------:|
+  | kernel_count       |        19 |         19 |
+  | dispatch_kinds     | 9op + 10t | 9op + 10t  |
+  | lift rejects       |     ~many |          0 |
+  | totals_baseline_us |      4350 |       5367 |
+  | totals_best_us     |      3464 |       4479 |
+  | totals_speedup     |     1.26x |      1.20x |
+
+  **Patch did NOT shift LeNet dispatch.**  The 9 metal-op
+  kernels are still metal-op -- they're conv-related shapes
+  (im2col + reduce + bias chain), not the LayerNorm
+  `src_count=3, ndim<outer_rank` pattern the patch targets.
+
+  Wall regressed (3464 -> 4479us, +29%) and baseline also
+  shifted (4350 -> 5367us, +23%).  Autotune speedup ratio
+  similar (1.26x -> 1.20x).  Likely autotune-variance /
+  system-noise rather than a patch-induced regression
+  (dispatch is identical so per-kid wall shouldn't change).
+  Kid-by-kid comparison would confirm; deferred.
+
+  Lift rejects went to 0 -- a few previously-rejecting
+  patterns (probably 1-d singleton + softmax-tail-residue)
+  now lift cleanly, but the conv-block rejects are still
+  rejecting through other code sites.
+
+  **Conclusion**: Level 22's broadcast-over-outer-iter fast
+  path helps LayerNorm-bearing networks (transformer)
+  but does NOT touch conv-net workloads (CNN-style nets like
+  LeNet).  Conv 3-into-1 fusion (Phase D'+F) remains the
+  bigger lever for the conv side.
