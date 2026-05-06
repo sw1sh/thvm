@@ -2487,3 +2487,66 @@ tinygrad) or 12 (if per-Linear +2 cost from MLPN holds).
   (1.41x vs tinygrad's 0.97x).  This is the first network
   type in the campaign where thvm's autotune meaningfully
   outperforms tinygrad's BEAM=4 search on the same shape.
+
+### Level 18d: probe LayerNormalizationLayer support
+
+Before building the full transformer block on thvm, probe
+whether TFromNet supports `LayerNormalizationLayer`.  Same
+risk pattern as BatchNormalizationLayer (Level 13) which
+silently rejected: would tank a more elaborate transformer
+bench.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/layernorm.wls`
+  -- single `NormalizationLayer[]` in a NetChain (WL doesn't
+  have `LayerNormalizationLayer`; `NormalizationLayer`
+  covers the layer-norm flavour).  Save stdout to
+  `bench/autotune-ladder/layernorm.txt`.
+
+  | metric             | value         |
+  |--------------------|---------------|
+  | kernel_count       | 2             |
+  | dispatch_kinds     | 2 metal-op    |
+  | totals_best_us     | 196           |
+  | totals_speedup     | 1.05x         |
+
+  **thvm NormalizationLayer = 2 kernels** (both metal-op).
+  Tinygrad LayerNorm in transformer block (Level 19) = 1
+  kernel; **LN leak = +1**.
+
+  Both kernels dispatch as metal-op (not metal-tile),
+  matching the softmax-tail / kernel_lift_to_uop reject
+  pattern from earlier levels: a reduce-broadcast shape that
+  doesn't lift through the tile path, falling back to per-op
+  metal-op.
+
+  Predicted thvm transformer block = 9 (attn+proj) +
+  2*2 (LN x2) + 2*2 (FFN linears) + 2 (residuals fuse?)
+  = ~17-19 kernels.  Tinygrad transformer block = 14, so
+  thvm-side leak ~+3 to +5 -- structural-fusion target on
+  the LN reduce-broadcast and any residual-add boundaries.
+
+  Notable contrast: BatchNormalizationLayer (Level 13)
+  silently rejected via TFromNet with `kernel_count=0`;
+  NormalizationLayer is actually supported and lowers to
+  2 kernels.  TFromNet has differential surface coverage on
+  layer normalization variants.
+
+  **New lift-reject signature surfaced**:
+
+      lift reject: index/ndim-mismatch buf_ndim=1 src_count=3
+      (532 occurrences -- one underlying kid x autotune
+       variants)
+
+  Distinct from MLP2's `src_count=1` softmax-tail reject
+  (closed by Level 18b's singleton-broadcast fast path at
+  kernel_lift.c:242).  The `src_count=3` shape is LayerNorm's
+  reduce-broadcast: the buffer carries 3 source refs (mean,
+  var, scale/shift) feeding an `S_INDEX` whose ndim doesn't
+  match the surrounding outer-rank.
+
+  Follow-on opportunity: extend the singleton-broadcast lift
+  fast path to cover `buf_ndim=1, src_count=N>1, dim[0]=1`
+  variants -- that should let LayerNorm's reduce-broadcast
+  lift to metal-tile, eliminating the +1 leak vs tinygrad.
+  Belongs to the structural-fusion / kernel-lift relaxation
+  track.
