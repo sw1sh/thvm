@@ -900,3 +900,39 @@ kernel_lift-relaxation from real shape data, not guesses.
   fallback was already running fast on this shape; the structural
   win is correctness/uniformity, not raw GPU time.  make test
   274/274 stays green.
+
+### Did the singleton-broadcast fix transfer to softmax (level 3)?
+
+`comparison.md` noted "softmax tail: an unfused metal-op
+outlier (kid 6 in MLP2, kid 2 in softmax) that doesn't lift
+through kernel_lift_to_uop".  The MLP2 outlier collapsed
+post-fix.  Re-bench level 3 to see if softmax's kid 2 also
+collapses.
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/softmax.wls`
+  post-fix and diff against the pre-fix capture.  Save to
+  softmax.txt; report kernel_count, dispatch_kinds,
+  kernels_with_proposals, totals_baseline_us, totals_best_us,
+  totals_speedup, and whether the pre-fix metal-op outlier
+  collapsed.
+
+  **Fix transferred cleanly** -- the metal-op outlier (kid 2)
+  collapsed to metal-tile.  All 3 softmax kernels now lift.
+
+  | metric                 | pre-fix | post-fix |
+  |------------------------|--------:|---------:|
+  | kernel_count           |       3 |        3 |
+  | dispatch_kinds         |2t+1op   |   3t     |
+  | lift rejects           |     >0  |        0 |
+  | kid 2 dispatch         |metal-op |metal-tile|
+  | kid 2 best (us)        |     154 |      129 |
+  | totals_baseline_us     |     624 |      546 |
+  | totals_best_us         |     558 |      471 |
+  | totals_speedup         |   1.12x |    1.16x |
+  | kernels_with_applied   |       3 |        3 |
+
+  Real wall-time win this time (unlike MLP2 where the metal-op
+  fallback was already fast): 558 -> 471us, ~16% improvement.
+  The singleton-broadcast fast path is genuinely useful on
+  softmax because the post-fix tile path autotunes a faster
+  kid 2 than the per-op fallback ran at.
