@@ -180,6 +180,14 @@ static int metal_init(void) {
 // it can iterate METAL_BUFS to release outstanding buffers.
 static void metal_shutdown(void);
 
+// Iter BB: file-scope cache for the AOT-on-Metal book_heap MTLBuffer
+// wrapper.  Tentative-definitions here so metal_shutdown (above its
+// helper) can reference them; the helper aot_metal_heap_buf is
+// defined alongside the kernel dispatch code further down.
+static id<MTLBuffer> AOT_METAL_HEAP_BUF = nil;
+static Term         *AOT_METAL_HEAP_PTR = NULL;
+static u64           AOT_METAL_HEAP_LEN = 0;
+
 // Buffer table: parallel to TenDesc.buf_id.  buf_id 0 is reserved
 // ("no buffer").  ARC owns each MTLBuffer via the strong reference
 // in METAL_BUFS[].  Refcounts are tracked separately so that
@@ -585,6 +593,14 @@ static void metal_shutdown(void) {
   METAL_CONV2D_PSO = nil;
   metal_jit_cache_reset_impl();
   metal_graph_cache_reset_impl();
+  // Phase 7 iter BB: drop the cached AOT book_heap MTLBuffer wrapper
+  // before the host frees the underlying book_heap pages on
+  // thvm_free.  The cached buffer's MTLBuffer object outlives the
+  // backing memory otherwise -- harmless under ARC's lazy release
+  // unless someone reuses it post-shutdown.
+  AOT_METAL_HEAP_BUF = nil;
+  AOT_METAL_HEAP_PTR = NULL;
+  AOT_METAL_HEAP_LEN = 0;
   METAL_LIB    = nil;
   METAL_QUEUE  = nil;
   METAL_DEVICE = nil;
@@ -2205,6 +2221,34 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   return rc;
 }
 
+// === AOT-on-Metal: cached book_heap MTLBuffer wrapper ================
+//
+// Phase 7 iter BB: book_heap is a fixed pointer for the lifetime of
+// the host's TContext.  Each AOT-on-Metal call wrapped it via
+// newBufferWithBytesNoCopy, paying the page-table-setup cost.  Cache
+// the resulting MTLBuffer and re-use across calls; invalidate if the
+// (pointer, length) pair changes (e.g., after thvm_free + thvm_init).
+// Globals AOT_METAL_HEAP_{BUF,PTR,LEN} are forward-declared near
+// metal_shutdown -- it nils them on shutdown to drop ARC's strong
+// ref before the host frees book_heap's backing pages.
+
+static id<MTLBuffer> aot_metal_heap_buf(Term *book_heap, u64 book_cells) {
+  u64 len = book_cells * sizeof(Term);
+  if (AOT_METAL_HEAP_BUF != nil
+      && AOT_METAL_HEAP_PTR == book_heap
+      && AOT_METAL_HEAP_LEN == len) {
+    return AOT_METAL_HEAP_BUF;
+  }
+  AOT_METAL_HEAP_BUF =
+      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
+                                      length:len
+                                     options:MTLResourceStorageModeShared
+                                 deallocator:nil];
+  AOT_METAL_HEAP_PTR = book_heap;
+  AOT_METAL_HEAP_LEN = len;
+  return AOT_METAL_HEAP_BUF;
+}
+
 // === AOT-on-Metal Phase 7 iter A ====================================
 //
 // Smallest end-to-end slice: dispatch the `aot_eval_op2_fold` MSL
@@ -2244,10 +2288,7 @@ Term thvm_aot_metal_op2_fold(Term *book_heap, u64 book_cells, u64 root_loc) {
   // GPU reads CPU's heap pages with no intermediate marshaling.
   // Length must be a page multiple; BOOK_CAP * 8 = 2 MiB = 128 pages.
   id<MTLBuffer> heapBuf =
-      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
-                                      length:book_cells * sizeof(Term)
-                                     options:MTLResourceStorageModeShared
-                                 deallocator:nil];
+      aot_metal_heap_buf(book_heap, book_cells);
   id<MTLBuffer> resultBuf =
       [METAL_DEVICE newBufferWithLength:sizeof(Term)
                                 options:MTLResourceStorageModeShared];
@@ -2300,10 +2341,7 @@ Term thvm_aot_metal_mat_app(Term *book_heap, u64 book_cells,
     }
   }
   id<MTLBuffer> heapBuf =
-      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
-                                      length:book_cells * sizeof(Term)
-                                     options:MTLResourceStorageModeShared
-                                 deallocator:nil];
+      aot_metal_heap_buf(book_heap, book_cells);
   id<MTLBuffer> resultBuf =
       [METAL_DEVICE newBufferWithLength:sizeof(Term)
                                 options:MTLResourceStorageModeShared];
@@ -2376,10 +2414,7 @@ int thvm_aot_metal_op2_fold_batch(Term *book_heap, u64 book_cells,
     }
   }
   id<MTLBuffer> heapBuf =
-      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
-                                      length:book_cells * sizeof(Term)
-                                     options:MTLResourceStorageModeShared
-                                 deallocator:nil];
+      aot_metal_heap_buf(book_heap, book_cells);
   id<MTLBuffer> rootsBuf =
       [METAL_DEVICE newBufferWithBytes:root_locs
                                 length:n_roots * sizeof(uint64_t)
@@ -2581,10 +2616,7 @@ Term thvm_aot_metal_compile_and_run(const char *name, u32 def_id,
   uint32_t book_next_u32 = (uint32_t)*book_next_inout;
 
   id<MTLBuffer> heapBuf =
-      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
-                                      length:book_cells * sizeof(Term)
-                                     options:MTLResourceStorageModeShared
-                                 deallocator:nil];
+      aot_metal_heap_buf(book_heap, book_cells);
   id<MTLBuffer> argsBuf = nil;
   if (n_args > 0) {
     argsBuf = [METAL_DEVICE newBufferWithBytes:args
