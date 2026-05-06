@@ -1578,3 +1578,56 @@ tinygrad-side L scaling.
   Both sides scale linearly in L; their slopes differ by 1.
   The `+1 leak per LinearLayer-Activation boundary` claim
   holds across all measured depths.
+
+### Level 12 cross-framework: tinygrad mini_lenet2
+
+The thvm side of mini_lenet2 (Level 12, K=2 L=1) measured
+15 kernels.  Tinygrad-side prediction by `tinygrad = 2K + L + 3`
+is **8 kernels**.  Verify K-scaling on tinygrad's side
+independently of LeNet's mixed K=2 L=3.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mini_lenet2.py`
+  -- 2-conv + flatten + 1 linear + softmax forward on a
+  single MNIST sample, structured to match `mini_lenet2.wls`.
+  Bench NOOPT and BEAM=4.  Save stdout to
+  `bench/autotune-ladder/mini_lenet2.tinygrad.txt`.  Inline
+  baseline_us, beam4_us, speedup, kernels per forward.
+  Verify the prediction (tinygrad mini_lenet2 = 8 kernels).
+
+  **Prediction held: tinygrad mini_lenet2 = 8 kernels.**
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |     7458 |  6810 |
+  | kernel_count / 50 rep |      400 |   400 |
+  | kernels per forward   |        8 |     8 |
+  | speedup_to_beam4      |          | 1.095x|
+
+  K-scaling validated on tinygrad at K=2 independently of
+  LeNet's mixed K=2 L=3 case.  Combined with mini-LeNet
+  (K=1 L=1 = 6), each added conv-block costs +2 kernels on
+  tinygrad (vs +5 on thvm; per-conv-block leak = +3).
+
+  Cross-framework anchor table is now complete on K=0..2 and
+  L=1..4 corners:
+
+  | net          |  K  |  L  | thvm | tinygrad | leak |
+  |--------------|----:|----:|-----:|---------:|-----:|
+  | MLP2         |   0 |   2 |    7 |        5 |  +2  |
+  | MLP3         |   0 |   3 |    9 |        6 |  +3  |
+  | MLP4         |   0 |   4 |   11 |        7 |  +4  |
+  | mini-LeNet   |   1 |   1 |   10 |        6 |  +4  |
+  | mini_lenet2  |   2 |   1 |   15 |        8 |  +7  |
+  | LeNet        |   2 |   3 |   19 |       10 |  +9  |
+
+  Six independent points cross-anchor `thvm = 5K + 2L + 3`,
+  `tinygrad = 2K + L + 3`, and `leak = 3K + L`.  The
+  structural-fusion target is now fully characterised for
+  feed-forward MLP/CNN nets in this regime.
+
+  Per-kernel autotune speedup on tinygrad mini_lenet2 (1.095x)
+  is the highest seen on any tinygrad ladder bench except
+  Level 1 elementwise-add (1.23x).  Conv kernels offer more
+  autotune leverage than pure-MLP shapes on both frameworks,
+  matching the symmetric observation on thvm's side
+  (mini_lenet 1.17x, LeNet 1.26x).

@@ -1,0 +1,64 @@
+"""Level 12 -- 2-conv mini-LeNet (1 linear) on tinygrad.
+
+Mirrors bench/autotune-ladder/mini_lenet2.wls.  Verifies
+K-scaling at K=2 independently of LeNet's mixed K=2,L=3.
+Predicted: 8 kernels per `tinygrad = 2K + L + 3`.
+
+Run:
+    cd /Users/swish/src/tinygrad
+    PYTHONPATH=. DEV=METAL python3 /Users/swish/src/thvm/bench/autotune-ladder/mini_lenet2.py
+"""
+import os, sys, time
+
+os.environ.setdefault("DEV", "METAL")
+sys.path.insert(0, "/Users/swish/src/tinygrad")
+
+from tinygrad import Tensor, GlobalCounters, dtypes, nn
+
+
+class MiniLeNet2:
+  def __init__(self):
+    self.c1 = nn.Conv2d(1, 6, 5)
+    self.c2 = nn.Conv2d(6, 16, 5)
+    # After two conv-pool blocks: 28 -> 24 -> 12 -> 8 -> 4.
+    # 16 channels * 4 * 4 = 256 features.
+    self.l1 = nn.Linear(16 * 4 * 4, 10)
+
+  def __call__(self, x):
+    x = self.c1(x).relu().max_pool2d(kernel_size=(2, 2))
+    x = self.c2(x).relu().max_pool2d(kernel_size=(2, 2))
+    x = x.flatten(0)
+    return self.l1(x).softmax()
+
+
+def bench_with(env_overrides, label):
+  for k, v in env_overrides.items():
+    os.environ[k] = str(v)
+  net = MiniLeNet2()
+  x = Tensor.rand(1, 1, 28, 28, dtype=dtypes.float32).realize()
+
+  GlobalCounters.reset()
+  t0 = time.perf_counter_ns()
+  for _ in range(3):
+    net(x).realize()
+  t1 = time.perf_counter_ns()
+  warmup_us = (t1 - t0) / 3 / 1000
+
+  GlobalCounters.reset()
+  t0 = time.perf_counter_ns()
+  for _ in range(50):
+    net(x).realize()
+  t1 = time.perf_counter_ns()
+  steady_us = (t1 - t0) / 50 / 1000
+
+  print(f"{label}_warmup_us:  {warmup_us:.1f}")
+  print(f"{label}_steady_us:  {steady_us:.1f}")
+  print(f"{label}_kernel_count_post: {GlobalCounters.kernel_count}")
+  print(f"{label}_global_ops_post:   {GlobalCounters.global_ops}")
+  return steady_us
+
+
+baseline_us = bench_with({"NOOPT": "1", "BEAM": "0"}, "baseline")
+beam_us     = bench_with({"NOOPT": "0", "BEAM": "4"}, "beam4")
+
+print(f"speedup_baseline_to_beam4: {baseline_us / beam_us:.3f}x")
