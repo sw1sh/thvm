@@ -2705,3 +2705,35 @@ set the flag.
   can verify src[1] aligns with the buf's dim (e.g. by
   comparing the range's extent to dim[0]).  That's the
   next iteration's task.
+
+### Level 21: LayerNorm lift relaxation -- wrong target
+
+- [~] (2026-05-06) Land the lift relaxation on
+  kernel_lift.c:248 to close the LayerNorm src_count=3
+  reject identified in Level 21 prep.
+
+  **Aborted: targeting dead code.**  Wrote a patch that
+  added an `extents_align` check using `ke->scalar_uops[r_sid]`,
+  built clean (make test 274/274 green), and the dispatch
+  shifted as predicted: lift rejects 1064 -> 0, kernels
+  migrated from metal-op to metal-tile.  But the patch
+  reads `ScalarUop`, which is being phased out (per user
+  guidance 2026-05-06).  Don't extend dead-code paths.
+
+  Transient bench results (not reproducible against HEAD,
+  for record only): with the rejected patch applied,
+  transformer block dispatch was {tile:16, op:1} (vs HEAD's
+  {op:3, tile:14}); kernel_count unchanged at 17; wall
+  regressed ~5% because the metal-tile path's autotune
+  surface didn't match the metal-op fallback's speed on
+  LayerNorm's reduce-broadcast shape.
+
+  The lift relaxation needs to target the live path (UOp
+  DAG / S_INDEX_E in [src/schedule/uop_to_scalar.c](../../src/schedule/uop_to_scalar.c)
+  or the equivalent in src/uop/) rather than the
+  ScalarUop-driven `scalar_to_uop` lift.  Re-frames as a
+  follow-up that needs an architecture pass to identify
+  the equivalent live-code reject site.
+
+  Patch attempt is preserved in git's reflog if needed;
+  HEAD does not contain it.
