@@ -1,0 +1,46 @@
+# Level 55: lenet.wls post-Level-54 vs pre-Level-54 baseline.
+#
+# Pre-Level-54 (lenet.txt):
+#   kernel_count: 19
+#   dispatch_kinds: {{metal-op, 9}, {metal-tile, 10}}
+#   totals_baseline_us: 4341    totals_best_us: 3620   speedup: 1.20x
+#
+# Post-Level-54 (this run):
+#   kernel_count: 23
+#   dispatch_kinds: {{metal-op, 8}, {metal-gemm, 5}, {metal-tile, 10}}
+#   totals_baseline_us: 5570    totals_best_us: 4607   speedup: 1.21x
+#
+# +4 kernels, total wall +28%.  Five linear layers now dispatch via
+# metal-gemm-with-TC, but lenet's fc matmuls are small (e.g. 400x120,
+# 120x84, 84x10).  Per-kernel launch overhead (~150-200us each) on the
+# new split kernels exceeds the metal-gemm wins on these small shapes.
+#
+# Per-kid wall times below.
+lenet kernel_count: 23
+dispatch_kinds: {{metal-op, 8}, {metal-gemm, 5}, {metal-tile, 10}}
+kid 1 kind=metal-op baseline=1091.us best=767.us  opt=TOpt[LOCAL, 2, 8]  applied={TOpt[LOCAL, 2, 2], TOpt[GLOBAL, 2, 288]}
+kid 2 kind=metal-op baseline=210.us best=204.us  opt=TOpt[LOCAL, 2, 32]  applied={TOpt[LOCAL, 2, 64], TOpt[GLOBAL, 2, 9]}
+kid 3 kind=metal-gemm baseline=199.us best=194.us  opt=TOpt[TC, 0, 8]  applied={TOpt[TC, 0, 16]}
+kid 4 kind=metal-tile baseline=555.us best=186.us  opt=TOpt[LOCAL, 1, 8]  applied={TOpt[LOCAL, 1, 8], TOpt[GLOBAL, 1, 3]}
+kid 5 kind=metal-op baseline=182.us best=184.us  opt=TOpt[UNROLL, 4, 2]  applied={TOpt[UNROLL, 4, 2]}
+kid 6 kind=metal-op baseline=154.us best=152.us  opt=TOpt[GROUP, 3, 2]  applied={}
+kid 7 kind=metal-op baseline=549.us best=500.us  opt=TOpt[LOCAL, 2, 4]  applied={TOpt[LOCAL, 2, 32], TOpt[GLOBAL, 2, 2]}
+kid 8 kind=metal-op baseline=169.us best=162.us  opt=TOpt[LOCAL, 2, 16]  applied={TOpt[LOCAL, 2, 4], TOpt[GLOBAL, 2, 16]}
+kid 9 kind=metal-gemm baseline=177.us best=163.us  opt=TOpt[TC, 0, 16]  applied={}
+kid 10 kind=metal-tile baseline=195.us best=144.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 8], TOpt[GLOBAL, 0, 2]}
+kid 11 kind=metal-op baseline=160.us best=148.us  opt=TOpt[GROUP, 4, 2]  applied={}
+kid 12 kind=metal-op baseline=146.us best=146.us  opt=TOpt[UNROLL, 3, 2]  applied={}
+kid 13 kind=metal-gemm baseline=186.us best=184.us  opt=TOpt[TC, 0, 16]  applied={}
+kid 14 kind=metal-tile baseline=150.us best=137.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 30]}
+kid 15 kind=metal-tile baseline=153.us best=138.us  opt=TOpt[LOCAL, 0, 8]  applied={}
+kid 16 kind=metal-gemm baseline=220.us best=208.us  opt=TOpt[TC, 0, 16]  applied={}
+kid 17 kind=metal-tile baseline=178.us best=137.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 42]}
+kid 18 kind=metal-tile baseline=150.us best=141.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 42]}
+kid 19 kind=metal-gemm baseline=159.us best=155.us  opt=TOpt[TC, 0, 8]  applied={}
+kid 20 kind=metal-tile baseline=146.us best=148.us  opt=TOpt[LOCAL, 0, 2]  applied={}
+kid 21 kind=metal-tile baseline=146.us best=117.us  opt=TOpt[UNROLL, 1, 2]  applied={TOpt[UNROLL, 1, 2]}
+kid 22 kind=metal-tile baseline=147.us best=142.us  opt=TOpt[LOCAL, 0, 2]  applied={}
+kid 23 kind=metal-tile baseline=148.us best=150.us  opt=TOpt[GROUP, 1, 2]  applied={}
+totals_baseline_us: 5570.
+totals_best_us: 4607.
+totals_speedup: 1.20903

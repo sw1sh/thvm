@@ -4912,3 +4912,52 @@ analysis (rangeify-style), path A might be cheaper.
   remaining gap to ideal (e.g. tinygrad MAX of 6.4ms with TC
   arch-best) is autotune-search depth, not structural.
 
+### Level 55: cross-workload Level 54 validation
+
+The view_resolve fix is deep -- any kernel whose input traverses
+a movement chain across a realized boundary changes shape.
+Validate that the win generalizes (and that nothing regresses)
+on workloads beyond transformer.  Run `lenet.wls` (CNN
+matmul-heavy) and another representative bench and compare to
+their pre-Level-54 baselines.
+
+- [x] (2026-05-07) Re-ran `lenet.wls` with Level 54.  Saved to
+  `bench/autotune-ladder/lenet_post_l54.txt`.
+
+  | metric          | pre-L54 | post-L54 | delta  |
+  |-----------------|--------:|---------:|-------:|
+  | kernel_count    |      19 |       23 |     +4 |
+  | total wall (us) |    4341 |     5570 | +28.3% |
+  | metal-gemm      |       0 |        5 |     +5 |
+  | metal-op        |       9 |        8 |     -1 |
+  | metal-tile      |      10 |       10 |     -- |
+
+  **REGRESSION on lenet.**  The Level 48 multi-hop matmul-input-
+  protect splits 4 elementwise boundaries off the matmul kernels.
+  For transformer's big matmuls (M=32, N=256, K=64), the
+  metal-gemm-with-TC dispatch beats the launch overhead by 100x.
+  For lenet's small fc layers (400x120, 120x84, 84x10), the
+  metal-gemm wins are modest while each new kernel adds ~150-200us
+  of launch overhead -- 4 extra kernels = ~800us = the entire
+  regression.
+
+  Trade-off: matmul-input-protect helps big-matmul workloads
+  decisively but hurts small-matmul workloads.  Need a SIZE GATE.
+
+### Level 56: gate matmul-input-protect by output size
+
+Add an output-size threshold below which the multi-hop matmul-
+input-protect doesn't fire.  Heuristic candidate: `M * N >= 4096`
+(matches kid 14's smallest = 32*64 = 2048; standalone fc1 = 32*256
+= 8192).  Below threshold, fall back to absorbing the bias-add
+into the matmul kernel and dispatch via metal-tile (the pre-Level-48
+behavior, ~150us per kernel for 32x64 matmuls).  Above threshold,
+keep splitting.
+
+- [ ] Add a threshold to `bufferize_classify`'s matmul-detect.
+  Compute `M * N` from the REDUCE shape (if available at
+  bufferize time -- might need to derive from UOP DAG instead of
+  BUFFERIZE_NODES).  Default threshold from environment env
+  THVM_MATMUL_PROTECT_MIN_OUT_NUMEL=4096.  Re-run lenet AND
+  transformer; both should be in their best state simultaneously.
+
