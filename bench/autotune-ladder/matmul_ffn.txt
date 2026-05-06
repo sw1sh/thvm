@@ -1,0 +1,11 @@
+## Level 27: standalone FFN matmul probe
+
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+matmul_ffn kernel_count: 2
+dispatch_kinds: {{metal-gemm, 1}, {metal-tile, 1}}
+kid 1 kind=metal-gemm baseline=172.us best=177.us  opt=TOpt[TC, 0, 16]  applied={}  variants=4
+kid 2 kind=metal-tile baseline=540.us best=176.us  opt=TOpt[LOCAL, 1, 128]  applied={TOpt[LOCAL, 1, 256], TOpt[GLOBAL, 1, 1]}  variants=9
+totals_baseline_us: 712.
+totals_best_us: 353.
+totals_speedup: 2.017
+thvm: metal_jit stats -- hits=92 misses=17 bypass=0 compile_us=1149
