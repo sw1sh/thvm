@@ -2786,3 +2786,54 @@ on it.  Read-only investigation; no code changes.
   Re-queue Level 22: re-apply the lift relaxation, this time
   acknowledging the patch lands on the live path that the
   metal renderer actually uses.
+
+### Level 22: re-bench transformer block post-patch
+
+Patch landed at commit 62bfcca.  Verified locally:
+LayerNorm dispatch shifted, rejects 0, per-kernel autotune
+1.05x -> 1.68x on the LN shape.  Re-measure transformer
+block where 2 LNs compound (predicted: dispatch shifts to
+mostly metal-tile, kernel_count likely unchanged at 17,
+wall maybe regression on small kernels but compounded
+autotune leverage on the larger ones).
+
+- [x] (2026-05-06) Re-run
+  `bench/autotune-ladder/transformer_block.wls` with the
+  broadcast-over-outer-iter lift fast path active.  Save
+  stdout to `bench/autotune-ladder/transformer_block.txt`.
+
+  | metric             | pre-patch | post-patch |
+  |--------------------|----------:|-----------:|
+  | kernel_count       |        17 |         17 |
+  | dispatch_kinds     | 3op + 14t | 1op + 16t  |
+  | lift rejects       |      1064 |          0 |
+  | totals_baseline_us |     33640 |      35342 |
+  | totals_best_us     |     32294 |      34019 |
+  | totals_speedup     |     1.04x |      1.04x |
+
+  **Patch effect**: dispatch shifted as predicted (2 more
+  kernels on metal-tile path), lift rejects collapsed to 0,
+  kernel_count unchanged at 17.  Wall regressed +5% on
+  total best.  The bigger picture: the high-cost FFN matmul
+  kids (kid 14 = 13931us, kid 16 = 8104us) are unchanged --
+  these dominate the wall and don't autotune well, regardless
+  of which dispatch the small kernels use.
+
+  **Honest summary of Level 22**: the patch is a structural
+  correctness win (no fragile fallback, more shapes
+  autotune-tunable, lift rejects 0).  But it does NOT close
+  the kernel-count leak vs tinygrad (17 vs 14) and slightly
+  regresses wall on this microbench because the lifted
+  shapes' autotune surface doesn't yet match the metal-op
+  fallback's speed for LayerNorm reduce-broadcast.
+
+  The headline kernel-count leak still requires either:
+  (a) Linear-output-bufferize fusion (closes the +1 per
+      Linear leak, the biggest pattern remaining), or
+  (b) Conv 3-into-1 fusion (Phase D'+F, multi-week).
+
+  Level 22 closes a fragility class (lift rejects), not a
+  leak class.  Both improvements compound for real
+  workloads, but the kernel-count "leak" framing under-
+  represented the structural-correctness value of this
+  patch.
