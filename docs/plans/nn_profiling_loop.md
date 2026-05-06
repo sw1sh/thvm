@@ -380,13 +380,32 @@ every minute.
   make test 274/274 unchanged.
 
 ### Phase 4 follow-on
-- [ ] Drop the `has_reduce_axis` short-circuit in
-  `kernel_lift_to_uop` once the replay loop's `cur[]` is extended
-  to include per-USE reduce ranges as full SplitAxis entries (so
-  the replay can split a REDUCE axis into outer + inner like a
-  LOOP axis).  The Phase 4a wrap landed via the per-USE auxiliary
-  scan which only handles the unsplit-but-annotated shape; full
-  axis splits need the cur[] extension.
+- [x] (2026-05-06) Drop the `has_reduce_axis` short-circuit in
+  `kernel_lift_to_uop`.  Did **not** fully extend `cur[]` to track
+  per-USE reduce ranges (that's a deeper refactor); instead split
+  the responsibilities:
+  - **Replay loop** now does `if (o.axis >= n_cur) continue;`
+    instead of `return 0`.  Per-USE axes don't live in cur[]
+    (which only tracks BUFFERIZE-derived axes and their splits),
+    so any opt with `axis >= n_cur` is by construction a per-USE
+    opt that the per-USE scan handles.
+  - **Per-USE auxiliary scan** (Phase 4a) wraps GROUP/GROUPTOP
+    annotations on per-USE reduce ranges.
+  - **Test-seam** (`n_axes > n_buf, n_buf == 1`) still bails on
+    reduce-tail kernels via a new `kax_for_test_seam` proxy --
+    the linearisation across LOOP + REDUCE into a single origin
+    would otherwise be wrong.
+
+  Result: replay loop and per-USE scan now run for ALL kernels
+  (including reduce); only the test-seam stays guarded.  GROUP/
+  GROUPTOP per-USE wrap (Phase 4a end-to-end test:
+  `TUOpReduce[Range[12], 0, "SUM"] + TOpt["GROUP", 1, 4]`)
+  continues to render the threadgroup-shared shape and produces
+  the correct `78.0`.  make test 274/274 unchanged.
+
+  Limitation: non-GROUP per-USE opts (e.g., UNROLL on a REDUCE
+  axis) get silently skipped today.  Wiring those needs the full
+  `cur[]` extension (deferred).
 - [ ] Bench an end-to-end win: pick a kernel from
   `lenet-mnist/autotune.wls` whose autotuner picked KOP_GROUP on
   a reduce axis (e.g. kid 2 GROUP[axis=2, arg=25] from the

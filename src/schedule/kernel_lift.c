@@ -948,6 +948,25 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // dimension autotune effects flow through a different path.
   KernelAxes const *kax = ke->axes;
   u32 n_applied = (kax != NULL) ? (u32)kax->n_applied : 0;
+  // The previous `has_reduce_axis` short-circuit zeroed both
+  // n_applied and kax for any kernel touching a reduce dimension --
+  // overly conservative.  Now per-USE handling is split across:
+  //
+  //   1. The replay loop below: skips opts targeting per-USE axes
+  //      via `if (o.axis >= n_cur) continue;`.  Per-USE axes don't
+  //      live in cur[] (which only tracks BUFFERIZE-derived axes
+  //      and their splits), so any opt with axis >= n_cur is by
+  //      construction a per-USE opt deferred to step 2.
+  //
+  //   2. The per-USE auxiliary scan further down: walks
+  //      ke->scalar_uops, finds each per-USE S_RANGE, and wraps it
+  //      in UOP_OPT_GROUP_REDUCE when applied_opts has a matching
+  //      KOP_GROUP/KOP_GROUPTOP.
+  //
+  //   3. Test-seam (n_axes > n_buf, n_buf == 1) still bails on
+  //      reduce-tail axes because the linearisation across LOOP +
+  //      REDUCE into a single origin would be wrong.  Detected via
+  //      the axis_types[] scan below.
   int has_reduce_axis = 0;
   if (kax != NULL) {
     for (u32 a = 0; a < kax->n_axes; a++) {
@@ -958,15 +977,16 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
       }
     }
   }
-  if (has_reduce_axis) {
-    n_applied = 0;
-    kax = NULL;
-  }
+  // Test-seam guard: only kill kax for the test-seam branch when
+  // reduce axes are present (and only when the test-seam would
+  // otherwise fire).  The replay loop and per-USE scan stay live.
+  KernelAxes const *kax_for_test_seam =
+      (has_reduce_axis) ? NULL : kax;
   if (n_applied > 0) {
     KOpt const *opts = kax->applied_opts;
     for (u32 oi = 0; oi < n_applied; oi++) {
       KOpt o = opts[oi];
-      if (o.axis >= n_cur) return 0;
+      if (o.axis >= n_cur) continue;  // per-USE; handled below
       u8 op = o.op;
       if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
           || op == KOP_GROUP || op == KOP_GROUPTOP) {
@@ -1028,7 +1048,9 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
         return 0;
       }
     }
-  } else if (kax != NULL && kax->n_axes > n_buf && n_buf == 1) {
+  } else if (kax_for_test_seam != NULL
+             && kax_for_test_seam->n_axes > n_buf && n_buf == 1) {
+    kax = kax_for_test_seam;
     // Test seam: ke->axes was hand-mutated without going through
     // axes_apply_opt.  Honour the assigned axis structure when there's
     // a single origin to map to.  Replace cur[0] with kax->n_axes
