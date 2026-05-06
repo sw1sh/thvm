@@ -248,6 +248,37 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
   if (u->src_count == 1 && ndim == 1 && uop_buffer_dim(buf, 0) == 1) {
     return uop_const(DT_INT32, 0);
   }
+  // Broadcast-over-outer-iter fast path: a buf with ndim < outer_rank
+  // and src refs src[1..ndim] aligned with the buf's dims (rangeify
+  // supplied src[ndim+1..outer_rank] as extra outer iters that this
+  // buf doesn't index -- they're broadcast axes).  Safe iff each
+  // src[1+d] is an S_RANGE whose extent matches dim[d]; that aligns
+  // with the rangeify ordering invariant the L199-207 axis-append
+  // composition violated.  Diagnosed via LayerNorm's src_count=3
+  // reject (Level 18d / Level 21 prep): buf=[seq_len=32],
+  // outer_rank=2 ([seq, features]).  When the alignment holds, fall
+  // through to the existing offset-computation loop using only
+  // src[1..ndim]; the extras are dropped.
+  if (ndim >= 1 && ndim < outer_rank) {
+    int extents_align = 1;
+    for (u32 d = 0; d < ndim; d++) {
+      u32 r_sid = u->src[1 + d];
+      if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+        extents_align = 0; break;
+      }
+      ScalarUop const *ru = &ke->scalar_uops[r_sid];
+      if (ru->op != S_RANGE) { extents_align = 0; break; }
+      u32 range_extent = (u32)(ru->extra & 0xFFFFFFFFu);
+      if (range_extent != uop_buffer_dim(buf, d)) {
+        extents_align = 0; break;
+      }
+    }
+    if (extents_align) {
+      // Fall through to the offset-computation loop below.
+      goto compute_offset;
+    }
+    // Otherwise reject below as the strict ndim-mismatch case.
+  }
   if (ndim == 0 || ndim != outer_rank) {
     fprintf(stderr,
             "lift reject: index/ndim-mismatch buf_ndim=%u src_count=%u\n",
@@ -262,6 +293,7 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     }
     return 0;
   }
+compute_offset:;
   Term acc = 0;
   for (u32 d = 0; d < ndim; d++) {
     u32 r_sid = u->src[1 + d];

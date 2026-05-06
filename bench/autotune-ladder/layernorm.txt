@@ -1,19 +1,12 @@
-## layernorm.txt diagnostic
+## post-Level-22 patch
 
-distinct lift-reject signatures (sorted unique):
-lift reject: index/ndim-mismatch buf_ndim=1 src_count=3
+lift rejects: 0 (was 532)
 
-total lift-reject lines: 532
-
-thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
-thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
-thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
 layernorm kernel_count: 2
-dispatch_kinds: {{metal-op, 2}}
-kid 1 kind=metal-op baseline=206.us best=196.us  opt=TOpt[GROUP, 2, 32]  applied={TOpt[UNROLL, 2, 16]}
-totals_baseline_us: 206.
-totals_best_us: 196.
-totals_speedup: 1.05102
+dispatch_kinds: {{metal-tile, 1}, {metal-op, 1}}
+kid 1 kind=metal-tile baseline=1763.us best=1047.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[UNROLL, 2, 4]}
+totals_baseline_us: 1763.
+totals_best_us: 1047.
+totals_speedup: 1.68386
 kernels_with_proposals: 1
 kernels_with_applied: 1
-thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
