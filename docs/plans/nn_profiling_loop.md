@@ -77,17 +77,30 @@ every minute.
     `git bisect` window to localise.
 
 ### TLam regression follow-on tasks
-- [ ] Bisect `lam_shape.wlt` `tlam-jit-on-first-apply` failure
-  back to the commit that broke it; once located, design a fix in
-  `interact_app_lam` so the materialize step produces a UOP_KERNEL
-  with the bound VAR as a symbolic input slot.
-- [ ] Decide whether the fix should live in `interact_app_lam`
-  (materialize the body BEFORE/AFTER the substitution) or in
-  `thvm_materialize` (treat unbound TVAR as a symbolic input). The
-  comment at `app_lam.c:64-67` says materialize must see the
-  shape annotation in the side table, which is set just above the
-  call -- so the order is correct.  The bug is in materialize's
-  handling of TVAR or in the DP0/DP1 reduction path post-SUB.
+- [x] (2026-05-06) Bisect `lam_shape.wlt` `tlam-jit-on-first-apply`
+  failure back to the commit that broke it. **First-bad commit:
+  `397464e2` "feat: enable auto-dup default-on for non-recursive
+  LAMs"** (2026-05-03).  The commit wires
+  `thvm_wl_lam_seal_ext` to `lam_seal_ext_with_auto_dup`, so every
+  TLam with a non-linear binder gets a DUP chain inserted at C
+  construction time -- producing the
+  `LAM[UOP[ADD, DP1[65536, VAR[0]], DP0[65536, VAR[0]]]]` shape
+  observed in the step trace.  Materialize then sees DP0/DP1 over
+  the unbound VAR and collapses to a degenerate TEN[1] without an
+  input slot.  Bisect range: 4646189 (good) -> 397464e2 (first bad)
+  -> main HEAD (still bad), 8 steps via `git bisect run`.
+- [ ] Design a fix.  Two paths:
+  (a) Skip auto-dup when the LAM body is a UOP graph: materialize
+      already handles multi-use inputs via the kernel's input slot
+      indirection (one TVAR(loc) -> N reads inside the rendered
+      MSL), so the LAM-level DUP chain is redundant and actively
+      breaks materialize.  Easiest fix; touches
+      `lam_seal_ext_with_auto_dup` to bail when body is TAG_UOP.
+  (b) Teach `thvm_materialize` to see-through DP0/DP1 over a
+      single VAR and treat them as one input slot.  More general
+      but invasive -- DP0/DP1 are heap-cell reads with side
+      effects, so "see-through" requires reading the dup'd cell
+      without firing the dup interaction.
 
 ### LeNet-MNIST baseline
 - [ ] Run `wl/Examples/lenet-mnist/forward.wls`; capture as
