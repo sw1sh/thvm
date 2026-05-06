@@ -154,6 +154,51 @@ intermediate + matmul (a different bufferize pattern); fresh
 benches will need to derive the attention-specific leak
 coefficients.
 
+### Level 18: tinygrad self-attention
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/attention.py`
+  -- single multi-head self-attention forward on a (32, 64)
+  input.  Config: seq_len=32, d_model=64, n_heads=4, d_head=16.
+  Bench NOOPT and BEAM=4.  Save stdout to
+  `bench/autotune-ladder/attention.tinygrad.txt`.
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |     4488 |  4623 |
+  | kernel_count / 50 rep |      400 |   400 |
+  | kernels per forward   |        8 |     8 |
+  | speedup_to_beam4      |          | 0.971x|
+
+  **Tinygrad self-attention = 8 kernels** per forward,
+  matching a naive (5 matmuls + 3 softmax) decomposition.
+  Autotune speedup 0.971x -- essentially flat, same
+  saturation seen on MLP shapes.
+
+  Provisional structure:
+
+  | n | likely contents                |
+  |--:|--------------------------------|
+  | 1 | Q projection                   |
+  | 1 | K projection                   |
+  | 1 | V projection                   |
+  | 1 | Q @ K^T (scores)               |
+  | 3 | softmax (max / sum / divide)   |
+  | 1 | attn @ V                       |
+  | 1 | O projection                   |
+  |=8 |                                |
+
+  Tinygrad fuses Linear-output with its scale/broadcast
+  successor (so the `* (1/sqrt(d_head))` doesn't add a
+  kernel).  The 3-kernel softmax matches Level 3 / Level 16
+  standalone behaviour.
+
+  thvm side is pending the TLam attention API (NetChain
+  doesn't expose MultiheadAttention).  Predicted thvm
+  attention by extrapolating the MLP formula's "+1 leak per
+  matmul-output bufferize": +5 matmul-bufferize leaks
+  -> thvm attention ~= 13 kernels (5 leak + 8 tg) if the
+  same pattern holds.  TBD until thvm-side bench lands.
+
 ## Discipline (lessons from the prior cron run)
 
 - **Never start a new bench while another is running.** The Metal
