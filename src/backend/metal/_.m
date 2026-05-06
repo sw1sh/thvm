@@ -2617,15 +2617,6 @@ Term thvm_aot_metal_compile_and_run(const char *name, u32 def_id,
 
   id<MTLBuffer> heapBuf =
       aot_metal_heap_buf(book_heap, book_cells);
-  id<MTLBuffer> argsBuf = nil;
-  if (n_args > 0) {
-    argsBuf = [METAL_DEVICE newBufferWithBytes:args
-                                        length:n_args * sizeof(Term)
-                                       options:MTLResourceStorageModeShared];
-  } else {
-    argsBuf = [METAL_DEVICE newBufferWithLength:sizeof(Term)
-                                        options:MTLResourceStorageModeShared];
-  }
   id<MTLBuffer> resultBuf =
       [METAL_DEVICE newBufferWithLength:sizeof(Term)
                                 options:MTLResourceStorageModeShared];
@@ -2638,7 +2629,16 @@ Term thvm_aot_metal_compile_and_run(const char *name, u32 def_id,
   id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
   [enc setComputePipelineState:pso];
   [enc setBuffer:heapBuf     offset:0 atIndex:0];
-  [enc setBuffer:argsBuf     offset:0 atIndex:1];
+  // Iter WW: args is read-only by the kernel + small (<= 64*8 bytes
+  // per iter Y), so use setBytes instead of allocating an MTLBuffer.
+  // Saves the alloc + ARC-release per call.  For n_args == 0 still
+  // bind a placeholder so the kernel parameter slot is valid.
+  if (n_args > 0) {
+    [enc setBytes:args length:n_args * sizeof(Term) atIndex:1];
+  } else {
+    uint64_t placeholder = 0;
+    [enc setBytes:&placeholder length:sizeof(placeholder) atIndex:1];
+  }
   [enc setBuffer:resultBuf   offset:0 atIndex:2];
   [enc setBuffer:bookNextBuf offset:0 atIndex:3];
   [enc dispatchThreads:MTLSizeMake(1, 1, 1)
