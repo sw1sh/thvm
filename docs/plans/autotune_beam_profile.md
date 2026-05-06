@@ -238,7 +238,30 @@ file, commits, and stops.
 
 LinearLayer(784->128) -> ReLU -> LinearLayer(128->10) -> softmax.
 
-- [ ] thvm: `bench/autotune-ladder/mlp2.wls`.
+- [x] (2026-05-06) thvm: `bench/autotune-ladder/mlp2.wls`.
+
+  MLP2(784->128->10) emits 7 kernels (1 metal-gemm + 5 metal-tile
+  + 1 metal-op).  Per-kernel autotune:
+
+  | kid | kind        | baseline | best | opt              | applied                   |
+  |-----|-------------|---------:|-----:|------------------|---------------------------|
+  | 1   | metal-gemm  | 480 us   | 440  | TC[0,16]         | TC[0,16]                  |
+  | 2   | metal-tile  | 203 us   | 152  | LOCAL[0,16]      | LOCAL[0,2] + GLOBAL[0,64] |
+  | 3   | metal-tile  | 279 us   | 203  | UNROLL[1,16]     | GROUP[1,64]               |
+  | 4   | metal-tile  | 155 us   | 149  | LOCAL[0,2]       | LOCAL[0,2] + GLOBAL[0,5]  |
+  | 5   | metal-tile  | 154 us   | 148  | GROUP[1,2]       | (none)                    |
+  | 6   | metal-op    | 194 us   | 185  | LOCAL[0,2]       | (none)                    |
+  | 7   | metal-tile  | 144 us   | 143  | GROUP[1,10]      | GROUP[1,10]               |
+
+  Totals: **baseline 1609 us, best 1420 us, speedup 1.13x.**
+  5 of 7 kernels got applied winners.  The biggest per-kernel
+  wins are kid 2 and kid 3 (the LinearLayer reduce-broadcast
+  composite kernels) at 1.34x and 1.37x respectively.
+
+  jit_misses=54, jit_bypass=0, jit_compile_us=152632 (cold).
+  Cache fits cleanly.  71% of kernels (5/7) are on the new
+  metal-tile path -- the metal-op outlier (kid 6) is the same
+  unfused softmax-tail pattern from level 3.
 - [ ] tinygrad: `bench/autotune-ladder/mlp2.py` BEAM=4.
 - [ ] Compare.
 

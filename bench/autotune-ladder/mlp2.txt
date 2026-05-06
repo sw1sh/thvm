@@ -1,0 +1,118 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+mlp2 kernel_count: 7
+dispatch_kinds: {{metal-gemm, 1}, {metal-tile, 5}, {metal-op, 1}}
+kid 1 kind=metal-gemm baseline=480.us best=440.us  opt=TOpt[TC, 0, 16]  applied={TOpt[TC, 0, 16]}
+kid 2 kind=metal-tile baseline=203.us best=152.us  opt=TOpt[LOCAL, 0, 16]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 64]}
+kid 3 kind=metal-tile baseline=279.us best=203.us  opt=TOpt[UNROLL, 1, 16]  applied={TOpt[GROUP, 1, 64]}
+kid 4 kind=metal-tile baseline=155.us best=149.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
+kid 5 kind=metal-tile baseline=154.us best=148.us  opt=TOpt[GROUP, 1, 2]  applied={}
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+lift reject: index/ndim-mismatch buf_ndim=1 src_count=1
+kid 6 kind=metal-op baseline=194.us best=185.us  opt=TOpt[LOCAL, 0, 2]  applied={}
+kid 7 kind=metal-tile baseline=144.us best=143.us  opt=TOpt[GROUP, 1, 10]  applied={TOpt[GROUP, 1, 10]}
+totals_baseline_us: 1609.
+totals_best_us: 1420.
+totals_speedup: 1.1331
+kernels_with_proposals: 7
+kernels_with_applied: 5
+thvm: metal_jit stats -- hits=311 misses=54 bypass=0 compile_us=152632
