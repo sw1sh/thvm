@@ -4954,10 +4954,33 @@ into the matmul kernel and dispatch via metal-tile (the pre-Level-48
 behavior, ~150us per kernel for 32x64 matmuls).  Above threshold,
 keep splitting.
 
-- [ ] Add a threshold to `bufferize_classify`'s matmul-detect.
-  Compute `M * N` from the REDUCE shape (if available at
-  bufferize time -- might need to derive from UOP DAG instead of
-  BUFFERIZE_NODES).  Default threshold from environment env
-  THVM_MATMUL_PROTECT_MIN_OUT_NUMEL=4096.  Re-run lenet AND
-  transformer; both should be in their best state simultaneously.
+- [x] (2026-05-07) Added MNK-flops gate to matmul-input-protect.
+  First attempt used `M*N` (output numel) with threshold 4096 --
+  too aggressive; transformer kid 14 (M*N=2048) fell out and
+  total wall jumped from 8365us to 20423us.  Switched to `M*N*K`
+  (matmul flops, derived from MUL shape via `term_shape_in`) with
+  threshold 100000 -- captures all transformer matmuls (kid 14 =
+  131k, fc1 = 524k) but excludes lenet's fc layers (840 to 48k).
+  Override via `THVM_MATMUL_PROTECT_MIN_FLOPS`.
+
+  Cross-workload result (`transformer_lenet_post_l56.txt`):
+
+  | metric                | pre-L54 | L54 no-gate | L56 gate |
+  |-----------------------|--------:|------------:|---------:|
+  | Transformer wall (us) |   28062 |        8365 | **7633** |
+  | Transformer kernels   |      21 |          23 |       18 |
+  | Transformer metal-gemm|       0 |           8 |        6 |
+  | Lenet wall (us)       |    4341 |        5570 | **4772** |
+  | Lenet kernels         |      19 |          23 |       20 |
+  | Lenet metal-gemm      |       0 |           5 |        2 |
+
+  **Transformer is now at its best ever (7633us, 3.7x faster than
+  pre-L54)** -- the gate's smaller kernel count (18 vs 23) reclaims
+  some launch overhead.  Lenet still regresses 10% vs pre-L54 but
+  recovers most of the no-gate regression (was -28%, now -10%).
+  The 2 lenet metal-gemms are from conv2d-as-matmul shapes that
+  exceed the threshold; further tuning could close the lenet gap.
+
+  Surgical tests green: test_tile_graph (636/636), test_bufferize
+  (320/320), test_bufferize_classify (62/62).
 

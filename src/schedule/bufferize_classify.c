@@ -1640,9 +1640,37 @@ fn void bufferize_classify(Term root) {
   // upat_match; the ADD-or-MUL gate + side-effect marking on
   // BUFFERIZE_NODES stay imperative because they touch the side
   // channel rather than the heap DAG.
+  //
+  // SIZE GATE (Level 56): the protect pays off only when the
+  // resulting matmul is big enough to amortize the launch overhead
+  // of the +1 split-off elementwise kernel (~150-200us metal-gemm
+  // launch on M3 Max).  Use the MUL's shape numel = M*N*K (matmul
+  // flops) as the gate -- not the REDUCE output (M*N) -- because
+  // it captures the actual GEMM work that metal-gemm-with-TC
+  // accelerates.  Transformer kids 4/5/6/14 are 32*64*64 = 131k;
+  // kid 19 is 32*64*256 = 524k.  Lenet's fc layers are
+  // 1*120*400 = 48k (fc1), 1*84*120 = 10k (fc2), 1*10*84 = 840
+  // (fc3).  Threshold 100000 keeps all transformer matmuls but
+  // excludes lenet's tiny fc layers.
+  // Override via THVM_MATMUL_PROTECT_MIN_FLOPS.
+  u64 protect_min_flops = 100000;
+  {
+    char const *e = getenv("THVM_MATMUL_PROTECT_MIN_FLOPS");
+    if (e != NULL) protect_min_flops = (u64)strtoull(e, NULL, 10);
+  }
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
     if (!(info->reasons & BUFFERIZE_REASON_MATMUL)) continue;
+    {
+      // The MUL is heap[reduce_loc + 0]; its shape numel = M*N*K.
+      Term mul_term = term_resolve(heap_read(info->loc + 0));
+      Shape s; u64 mul_numel = 0;
+      if (term_shape_in(mul_term, 0, &s)) {
+        mul_numel = 1;
+        for (u32 d = 0; d < s.ndim; d++) mul_numel *= s.dims[d];
+      }
+      if (mul_numel < protect_min_flops) continue;
+    }
     Term mul = term_resolve(heap_read(info->loc + 0));
     Term bindings[UPAT_NUM_BINDINGS] = {0};
     if (!upat_match(&bufferize_upat_mul, mul, bindings)) continue;
