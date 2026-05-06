@@ -2055,6 +2055,19 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
         for (u32 i = 0; i < ke->n_ops; i++) {
           fprintf(stderr, "%s%u", i ? "," : "", (unsigned)ke->program[i].opcode);
         }
+        // For sizing the matmul relaxation: append per-op numel and
+        // arg (the latter encodes REDUCE inner = arg & 0xFFFFFF, kind
+        // = (arg>>24)&0xFF).  Reader derives M*N from REDUCE.numel,
+        // N from inner, K from MUL.numel/REDUCE.numel.
+        fprintf(stderr, "] numel=[");
+        for (u32 i = 0; i < ke->n_ops; i++) {
+          fprintf(stderr, "%s%llu", i ? "," : "",
+                  (unsigned long long)ke->program[i].numel);
+        }
+        fprintf(stderr, "] arg=[");
+        for (u32 i = 0; i < ke->n_ops; i++) {
+          fprintf(stderr, "%s%u", i ? "," : "", (unsigned)ke->program[i].arg);
+        }
         fprintf(stderr, "]\n");
       }
     }

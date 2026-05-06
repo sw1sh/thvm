@@ -4709,3 +4709,47 @@ to specific kid ids and confirm the relaxation target.
   EXPAND prefix on one operand, so the infrastructure is partial).
   Subject for the next iteration after this probe data lands.
 
+### Level 51: dump per-kid M/N/K dimensions
+
+Before attempting the tile_analyze_gemm relaxation, capture each
+dispatched matmul-shape kernel's M/N/K so we know which subset is
+GEMV (N=1, easy extension of existing helper) vs full GEMM
+(needs full path).  The existing dump prints opcodes but not
+dimensions; extending it with program[].numel for the MUL and
+REDUCE ops lets us derive sizes.
+
+- [x] (2026-05-07) Extend THVM_DUMP_KID_PROGRAM to also print
+  per-op `numel` and `arg` (REDUCE arg encodes inner=arg&0xFFFFFF).
+  `make test` clean.  Re-run transformer; save to
+  `bench/autotune-ladder/transformer_dispatched_sizes.txt`.
+
+  Decoded matmul shapes (M*N = REDUCE.numel; N = REDUCE.arg & 0xFFFFFF;
+  M = M*N/N; K = MUL.numel / REDUCE.numel):
+
+  | kid | M  |  N  |  K  | wall (us) | role                     |
+  |----:|---:|----:|----:|----------:|--------------------------|
+  |  14 | 32 |  64 |  64 |     1288  | attention QK^T / scores  |
+  |  19 | 32 | 256 |  64 |     7330  | **FFN fc1 (DIM->4*DIM)** |
+  |  22 | 32 |  64 | 256 |     7181  | **FFN fc2 (4*DIM->DIM)** |
+  |   4 | 32 |  64 |  64 |     1286  | Q-projection             |
+  |   5 | 32 |  64 |  64 |     1269  | K-projection             |
+  |   6 | 32 |  64 |  64 |     1283  | V-projection             |
+
+  **Key finding**: kid 19 (FFN fc1, M=32 N=256 K=64) runs 7330us
+  in-transformer.  The standalone fc1 with same shape ran 353us
+  (Level 27 baseline) -- still **20.7x slower in-context**.  The
+  matmul-input-protect already extracted clean inputs (n_inputs=2,
+  n_ops=4); the gap is purely the metal-tile-vs-metal-gemm
+  dispatch decision.
+
+  All matmul kids have N >> 1 -- they are full GEMMs, not GEMVs.
+  `tile_analyze_expanded_gemv` (the existing n_ops=3 helper)
+  won't help; the relaxation in Level 52 needs to handle full
+  GEMM with movement-prefix.
+
+  Potential savings if metal-gemm-with-TC dispatch unlocked:
+  `(7330 - 353) + (7181 - ~1000) ≈ 13.2 ms`, ~47% of the 28.062 ms
+  total transformer wall.  Would close most of the gap to tinygrad
+  (10.018 ms steady state -> we'd be ~14.8 ms = 1.5x slower vs
+  current 2.8x).
+

@@ -1,0 +1,22 @@
+  dispatch-kid kid=1 n_inputs=3 n_ops=6 ops=[17,10,3,5,10,9] numel=[32,32,32,2048,2048,2048] arg=[1,0,0,0,0,0]
+  dispatch-kid kid=10 n_inputs=2 n_ops=7 ops=[3,5,4,3,5,10,17] numel=[2048,65536,2048,2048,65536,65536,1024] arg=[0,0,0,0,0,0,32]
+  dispatch-kid kid=12 n_inputs=1 n_ops=5 ops=[17,3,12,5,10] numel=[32,32,32,1024,1024] arg=[1,0,0,0,0]
+  dispatch-kid kid=13 n_inputs=2 n_ops=6 ops=[3,5,3,5,10,17] numel=[1024,65536,2048,65536,65536,2048] arg=[0,0,0,0,0,64]
+  dispatch-kid kid=14 n_inputs=2 n_ops=4 ops=[3,5,10,17] numel=[2048,131072,131072,2048] arg=[0,0,0,64]
+  dispatch-kid kid=16 n_inputs=3 n_ops=6 ops=[17,10,3,5,10,9] numel=[32,32,32,2048,2048,2048] arg=[1,0,0,0,0,0]
+  dispatch-kid kid=17 n_inputs=3 n_ops=9 ops=[10,17,10,3,5,9,15,12,10] numel=[2048,32,32,32,2048,2048,2048,2048,2048] arg=[0,1,0,0,0,0,0,0,0]
+  dispatch-kid kid=19 n_inputs=2 n_ops=4 ops=[3,5,10,17] numel=[2048,524288,524288,8192] arg=[0,0,0,256]
+  dispatch-kid kid=2 n_inputs=3 n_ops=9 ops=[10,17,10,3,5,9,15,12,10] numel=[2048,32,32,32,2048,2048,2048,2048,2048] arg=[0,1,0,0,0,0,0,0,0]
+  dispatch-kid kid=22 n_inputs=2 n_ops=4 ops=[3,5,10,17] numel=[8192,524288,524288,2048] arg=[0,0,0,64]
+  dispatch-kid kid=4 n_inputs=2 n_ops=4 ops=[3,5,10,17] numel=[2048,131072,131072,2048] arg=[0,0,0,64]
+  dispatch-kid kid=5 n_inputs=2 n_ops=4 ops=[3,5,10,17] numel=[2048,131072,131072,2048] arg=[0,0,0,64]
+  dispatch-kid kid=6 n_inputs=2 n_ops=4 ops=[3,5,10,17] numel=[2048,131072,131072,2048] arg=[0,0,0,64]
+
+# Decoded matmul shapes (M*N from REDUCE.numel, N=inner=arg&0xFFFFFF, M=M*N/N, K=MUL.numel/REDUCE.numel):
+#   kid 14: M=32 N=64  K=64   (attention head?)        wall=1288us
+#   kid 19: M=32 N=256 K=64   (FFN fc1: BS*S x H -> 4H) wall=7330us
+#   kid 22: M=32 N=64  K=256  (FFN fc2: BS*S x 4H -> H) wall=7181us
+#   kids 4,5,6: M=32 N=64 K=64 (Q/K/V projections)
+# Standalone fc1 wall = 353us (Level 27 baseline) -> in-context kid 19 = 20.7x slower
+# All are GEMM (N>1, never GEMV); tile_analyze_expanded_gemv won't help.
+# Decoded ops: 3=RESHAPE 5=EXPAND 9=ADD 10=MUL 12=RECIP 15=SQRT 17=REDUCE
