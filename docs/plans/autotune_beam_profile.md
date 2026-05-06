@@ -526,10 +526,38 @@ buffer scalar shape, the fix should have shifted them too.
 
 ### Extend kernel_lift_from_conv2d for the 24-input patch shape
 
-- [ ] Inspect `kernel_lift_from_conv2d` in
-  `src/schedule/kernel_lift.c` and identify the n_inputs branch
-  that rejects the 24-input shape.  Sketch what would have to
-  change to accept it (probably a new conv2d_im2col synthesised
-  shape with patch_input_count==24 instead of the rank-3 path
-  the existing lifter expects).  Document findings in this file
-  before any code change.
+- [x] (2026-05-06) Inspect `kernel_lift_from_conv2d` and identify
+  the n_inputs branch that rejects the 24-input shape.
+
+  `kernel_lift_from_conv2d` calls `tile_analyze_conv2d_flat`
+  which has **two accept paths**:
+
+  1. **direct_x**: `ke->n_inputs == 2` (1 weight + 1 X buffer,
+     rank-3 or rank-4 input).  Used when c_in*kh*kw fits the
+     standard im2col flatten.
+  2. **patch path**: `c_in == 1`, `ke->n_inputs == 1 +
+     kh*kw` (1 weight + kh*kw separate patch tensors).
+
+  My probe kernel has c_in=32, kh=kw=5, so `n_inputs=24` doesn't
+  match either:
+    - Not direct_x (n_inputs ≠ 2).
+    - Not patch path (c_in ≠ 1).
+
+  The 24 number is suspicious -- kh*kw = 25, not 24.  One of:
+    - 1 weight + 23 patches (off-by-one in some lowering)
+    - Bias added as extra input (1 W + 22 patches + 1 B = 24)
+    - The conv lowering uses kh*kw - 1 patches + 1 partial sum
+
+  Need to dump `ke->input_views` for the rejected kernel to
+  understand the actual layout.  **Lift extension is non-
+  trivial**: requires a third path in `tile_analyze_conv2d_flat`
+  for `c_in > 1` AND multi-input, which means modeling each
+  patch's view + stride differently from the existing two paths.
+
+### Inspect the 24-input KernelEntry layout
+- [ ] Add a diagnostic dump in `kernel_lift_from_conv2d`'s reject
+  log that, when `THVM_DUMP_LIFT_REJECT=1` and `ke->n_inputs ==
+  24` and `ke->scalar_uops == NULL`, prints
+  `ke->input_views[0..n_inputs)` shapes and the kProgOp opcode
+  histogram.  Goal: figure out whether this is a c_in>1
+  multi-patch shape or something else entirely.
