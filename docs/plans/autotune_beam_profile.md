@@ -3448,3 +3448,50 @@ can adjust the criteria.
   reduce, even with surrounding fusion) -- a focused tile-IR
   change.  If kid 14 IS TILE_MMA but later checks fail, the
   fix is in those later checks.
+
+### Level 30: dump tile_root op for transformer kids
+
+Add diagnostic output to print `tile_root.op` for each kid
+in the transformer block bench, then re-run.  Confirms or
+refutes "kid 14 root is not TILE_MMA".  Read the existing
+WL-side TKernel* API for an existing way to query this; if
+none exists, mark `[~]` with the path forward (add a
+TKernelTileRootOp accessor).
+
+- [x] (2026-05-06) Search `wl/THVMLink/Kernel/` for existing
+  `TKernelTileRoot` / `TileRootOp` accessors.  None exist.
+  Added a stderr diagnostic gated by `THVM_DUMP_GEMM_REJECT=1`
+  at [src/schedule/tile.c:1568](../../src/schedule/tile.c#L1568) that
+  prints the root op when the MMA path is skipped.
+
+  **Result**: every gemm-rejected kernel in transformer block
+  prints `tile-plan: root op=3 (not TILE_MMA)`.  op=3 =
+  TILE_LOOP_NEST.  The tile-IR construction is setting the
+  generic loop-nest root for kid 14 / kid 16 etc. instead of
+  TILE_MMA.
+
+  Walking back: [tile_analyze_gemm at src/schedule/tile.c:998](../../src/schedule/tile.c#L998)
+  decides whether to construct a TILE_MMA root.  Strict
+  conditions:
+  - L1002: `ke->n_inputs == 2`
+  - L1013: `ke->n_ops == 2`
+  - L1016: program[0] is "mul of inputs"
+  - L1019: program[1] is "reduce-sum of program[0]"
+
+  Standalone fc1 passes (clean 2-op kernel: mul + reduce-sum,
+  2 inputs).  In-transformer fc1 fails because in context the
+  matmul fuses with bias-add (LinearLayer's bias) or other
+  surrounding ops, producing `n_ops > 2` or `n_inputs > 2`.
+
+  **Concrete fix**: relax `tile_analyze_gemm` to detect a
+  "gemm sub-program" inside a larger fused kernel (find the
+  mul + reduce-sum pair regardless of trailing bias-add /
+  prologue ops), or split the bias-add into a follow-up
+  kernel before tile-IR construction.
+
+  Either fix is a focused C-side change.  make test gate +
+  re-bench transformer.  Could fit a 2-iteration arc.
+
+  make test 274/274 stays green with the diagnostic added.
+  Diagnostic compiles into the binary by default but is
+  silent unless THVM_DUMP_GEMM_REJECT=1.

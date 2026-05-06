@@ -1565,6 +1565,16 @@ fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
     }
     return 1;
   }
+  // Diagnostic: print root op when the MMA path is skipped.
+  // Gated by THVM_DUMP_GEMM_REJECT=1.
+  {
+    char const *e = getenv("THVM_DUMP_GEMM_REJECT");
+    if (e != NULL && e[0] == '1') {
+      fprintf(stderr,
+              "tile-plan: root op=%u (not TILE_MMA), gemm dispatch skipped\n",
+              (unsigned)root->op);
+    }
+  }
 
   u32 store_tile_id    = root->src[0];
   TileUop const *store = &ke->tile_uops[store_tile_id];
