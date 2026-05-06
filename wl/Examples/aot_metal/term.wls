@@ -90,4 +90,48 @@ println[];
 
 print["For tiny defs Metal is dominated by ~190 us kernel-launch"];
 print["overhead.  GPU wins when you batch many independent reductions"];
-print["per launch -- see aot_eval_op2_fold_batch in the C tests."];
+print["per launch -- demonstrated below."];
+println[];
+
+(* === Batch dispatch (iter QQ) ===
+
+   When you have N independent OP2 redexes queued up, fire them in a
+   single Metal dispatch via TAOTBatchOp2Fold instead of N sequential
+   TAOTRun calls.  Two orders of magnitude speedup in practice.
+*)
+
+print["=== Batch dispatch: N OP2 ADDs in one Metal launch ==="];
+
+(* Build N=256 OP2(NUM(i), NUM(i+1)) cells in book_heap. *)
+N0 = 256;
+bookAlloc  = Symbol["THVMLink`Private`$bookAllocFn"];
+bookSet    = Symbol["THVMLink`Private`$bookSetFn"];
+termNewRaw = Symbol["THVMLink`Private`$termNewFn"];
+ttermRawFn = Symbol["THVMLink`Private`ttermRaw"];
+
+batchLocs = Table[
+  Module[{argLoc, rootLoc},
+    argLoc  = bookAlloc[2];
+    rootLoc = bookAlloc[1];
+    bookSet[argLoc,     ttermRawFn @ TNum[i]];
+    bookSet[argLoc + 1, ttermRawFn @ TNum[i + 1]];
+    bookSet[rootLoc, termNewRaw[0, $TagOP2, 0 (* ADD *), argLoc]];
+    rootLoc],
+  {i, 0, N0 - 1}];
+
+(* Warm-up dispatch. *)
+TAOTBatchOp2Fold[batchLocs];
+
+tBatch = First @ AbsoluteTiming[ TAOTBatchOp2Fold[batchLocs]; ];
+
+(* Sequential: N separate TAOTRun calls (fresh Metal launches).  Use
+   the per-cell layout we already have in book_heap. *)
+tSeq = First @ AbsoluteTiming[
+    Do[ TAOTRun["add2", {TNum[i], TNum[i + 1]}, Method -> "Metal"],
+        {i, 0, N0 - 1} ];];
+
+print["  ", N0, " OP2 ADDs sequential (N TAOTRun calls): ", formatUs[tSeq],
+      "  (avg ", formatUs[tSeq/N0], "/call)"];
+print["  ", N0, " OP2 ADDs batch     (1 dispatch):       ", formatUs[tBatch],
+      "  (avg ", formatUs[tBatch/N0], "/call)"];
+print["  Speedup:  ~", N[tSeq/tBatch, 3], "x"];
