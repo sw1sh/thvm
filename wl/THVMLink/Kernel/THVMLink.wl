@@ -965,6 +965,17 @@ TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
+(* 1-arg form: `TLam[body]` -- a lambda whose binder is unused.
+   Equivalent to `TLam[fresh, body]` with a unique-once symbol so
+   the binder loc is never referenced from `body`.  Useful for
+   MatChain default arms (`TLam[TEra[]]`), MAT-NUM handlers that
+   return a constant, and any "thunk" pattern.  HoldAll preserves
+   any heap-side construction inside `body` until evaluated. *)
+TLam[body_] := With[{loc = THeapAlloc[1]},
+    THeapSet[loc, body];
+    packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
+]
+
 (* TLamShape[shape_list, x, body] -- explicit shape annotation
    for the bound variable.  Useful when the body needs to
    materialize BEFORE any TApp (e.g. inspection / direct

@@ -700,6 +700,413 @@ it requires bufferize Phase 3 movement-to-INDEX rewrite rules so
 the EXPAND/PAD/SHRINK chain is absorbed into INDEX expressions
 instead of materialising; tracked as the high-leverage architectural
 follow-up.
+### Fixed: step-session use-list table now sized + handles saturation
+
+The TPoolStatsBench tree-ADD demo at depth=14 with distinct leaves
+silently produced the wrong reduction result + segfaulted on
+shutdown.  Root cause: `step_use_head_slot` used a fixed-capacity
+hash table (`STEP_HEAD_CAP_DEFAULT = 16384` buckets) and on
+saturation returned `0` -- a valid bucket index!  Once the table
+filled (depth=14 distinct = 32767 distinct Term values), new
+inserts silently overwrote bucket 0, and `heap_replace` lookups
+for missing entries hit the empty-bucket sentinel and stopped
+walking, leaving cells unpatched.  Reduction stalled at the first
+level (8192 fires of 16383 expected), nf returned the wrong
+intermediate term, and downstream WL access dereferenced freed
+state -> SIGSEGV.
+
+Fixes:
+
+- `redex_step_attach` now sizes the table to ~4x HEAP_NEXT
+  (rounded up to a power of two, floored at the legacy default),
+  so saturation is unlikely in practice.
+- `step_use_head_slot` returns `STEP_USE_HEAD_FULL = (u32)-1` on
+  genuine saturation instead of bucket 0.
+- `step_use_insert` checks the sentinel and drops the use-list
+  entry rather than corrupting bucket 0.
+- `heap_replace` falls back to the linear-scan path (still
+  surfacing parent promotions through STEP_PARENT) when the
+  inverse-index lookup misses or the destination bucket is full.
+
+Effect on the depth=14 distinct tree:
+
+| metric  | before fix      | after fix    |
+|---------|-----------------|--------------|
+| result  | 134225920 (wrong) | 134225920 (correct -- 1+2+...+16384) |
+| fires   | 8192 (incomplete) | 16383 (complete) |
+| wall    | 116ms (wrong run) | 0.886ms     |
+| stable  | SIGSEGV on next op | clean      |
+
+Stock C suite still 274/274 -- no test exercised this saturation
+case before, which is why the bug shipped.
+
+### Changed: process-global WnfPool (no spawn-per-nf-call)
+
+Moves the `WnfPool` from `nf`'s stack onto a process-global pointer
+so persistent worker pthreads survive across nf invocations -- no
+more `pthread_create` x N-1 + `pthread_join` x N-1 per `TNf` call.
+
+- `nf_pool_global_for(n)` lazy-inits the global pool, rebuilds it
+  when the requested thread count changes (THVM_THREADS or
+  `nf_set_threads`).
+- `nf_pool_global_release()` shuts down the pool's pthreads and
+  frees its memory; called from `thvm_free` so a clean teardown
+  joins workers before the heap they share gets freed.
+- `wnf_pool_reset_run()` zeros per-worker fires/steals/timing and
+  pool-level wall/rounds/total_fires before each nf invocation, so
+  TPoolStats[] still reflects only the latest call.
+
+For long-running sessions that call TNf many times, the
+amortized spawn cost drops to zero.  Single-call benchmarks
+already had spawn cost dominated by the in-flight drain rounds, so
+the wall time on chain ADD n=2000 stays at ~30ms at T=4 -- the win
+shows up in tighter inner loops where many small nf calls would
+otherwise re-pay the spawn cost each time.
+
+Stock C suite stays 274/274; test_pool_profile / test_wnf_pool_mt
+unchanged.
+
+### Changed: persistent worker pthreads inside WnfPool (no spawn-per-drain at T>1)
+
+Previously each `wnf_pool_drain_parallel` call did N-1
+`pthread_create` + `pthread_join` -- and `nf` calls drain_parallel
+once per re-enumerate round.  At T>1 with a chain ADD of
+n=2000 that meant 2000 spawn cycles, ~10us each = ~20ms of
+overhead.
+
+Now WnfPool grows a `WnfPoolCtl` block (mutex + 2 condvars +
+generation counter + pending counter) and spawns persistent worker
+pthreads on the first drain.  Subsequent drains broadcast
+`start_cond`, workers run, last one out signals `done_cond`.
+Workers stay alive across drain rounds; pool teardown signals
+`shutdown` and joins.
+
+Demo wins on chain ADD n=2000:
+
+| T | wall (was -> now) |
+|---|-------------------|
+| 1 | 0.07ms (unchanged -- already step-session fast) |
+| 2 | 42ms -> 13ms (3x) |
+| 4 | 71ms -> 39ms (1.8x) |
+| 8 | 171ms -> 83ms (2x) |
+
+T>1 still pays per-round drain cost because the step session lift
+is T=1 only (its globals would race under MT).  Parent-promotion
+for the parallel path needs either a thread-safe inverse index or
+a process-global pool that survives across nf calls; both deferred.
+
+`tests/test_wnf_pool_mt.c` -- `test_drain_parallel_steal_required`
+softened from `steals > 0` to `steal_attempts > 0`: persistent-
+worker wakeups are tight enough that worker 0 typically drains the
+seeded bag before peers can grab anything, so a positive steal
+COUNT is timing-dependent; a positive steal-ATTEMPT count still
+confirms the steal-from-peer code path runs.
+
+Stock C suite stays 274/274; test_wnf_pool_mt 14/14;
+test_pool_profile 23/23.
+
+### Changed: nf at T=1 uses step-session inverse index for parent promotions
+
+The TPoolStatsBench demo surfaced that `nf` at T=1 was doing one
+drain-round per fire (chain ADD of n=1000 → 1000 rounds, ~600us
+wall).  Each round paid the bag-pop / drain-exit overhead even
+though the work itself was trivial.
+
+Lift the step session (already used by the WL stepper) for the
+duration of `nf` at T=1 and route `step_fresh_push`'s parent-
+promoted redexes directly into the pool's worker bag (NF_POOL),
+bypassing the FRESH_BUF round-trip and the pre-set check (parent
+Term values are stable across child fires; stale duplicates in the
+bag are caught by `redex_fire`'s is_redex guard).
+
+After-the-fact `nf` only re-enumerates when no session was attached
+(another step session was open already, or T>1 -- the step session
+isn't thread-safe).
+
+Wins on the chain-ADD benchmark from `TPoolStatsBench`:
+
+| n    | rounds (was -> now) | wall (was -> now) |
+|------|---------------------|-------------------|
+| 200  | 200 -> 1            | 25us -> 8us       |
+| 1000 | 1000 -> 1           | 600us -> 30us     |
+| 2000 | 2000 -> 1           | 1.3ms -> 64us     |
+
+Per-fire cost lands at ~30ns at T=1 -- the step session's
+parent-promotion bookkeeping is essentially free vs a full re-
+enumerate pass per fire.
+
+T>1 still spawns N pthreads per re-enumerate round (no inverse-
+index lift for the parallel path yet -- that's a separate slice
+that needs a thread-safe inverse index, or persistent workers that
+stay alive across drain rounds).
+
+Stock C suite stays 274/274; `test_pool_profile` 23/23.
+
+### Added: per-worker pool profiling + WL harness (TThreads / TPoolStats / TNfProfiled)
+
+The first profiling + WL surface for the parallel worker pool.
+
+C-side instrumentation in `src/wnf/pool.c`:
+
+- WnfWorker gains `steal_attempts`, `pushes`, `active_ns`, `idle_ns`,
+  `wakeups`.  Wall time charged via CLOCK_MONOTONIC samples around
+  pop+fire and idle spin.
+- WnfPool gains `drain_wall_ns` and `drain_rounds`.  Drain wrappers
+  bracket the active span; the worker spin loop charges idle time.
+- `WnfPoolStats` flat snapshot (per-worker + pool-level) plus a
+  process-global `WNF_POOL_LAST_STATS` populated by `nf` right
+  before `wnf_pool_free` so the WL bridge can introspect after the
+  fact.
+
+Runtime-configurable thread count in `src/wnf/nf.c`:
+
+- `nf_set_threads(n)` / `nf_get_threads()` -- 0 reverts to the
+  `THVM_THREADS` env var.  Clamped to `[1, MAX_THREADS]`.
+
+WL bridge in `wl/THVMLink/CSource/thvmlink.c`:
+
+- `thvm_wl_pool_set_threads`, `thvm_wl_pool_get_threads`
+- `thvm_wl_pool_stats_pool_field` (n_workers, drain_rounds,
+  drain_wall_ns, total_fires by integer code)
+- `thvm_wl_pool_stats_worker_field` (per-worker fires / steals /
+  attempts / pushes / active_ns / idle_ns / wakeups / itrs_delta)
+
+WL surface in `wl/THVMLink/Kernel/Pool.wl`:
+
+- `TThreads[]` / `TThreads[n]` -- get/set the worker count.
+- `TPoolStats[]` -- snapshot as an Association (Workers, DrainRounds,
+  DrainWallNs, TotalFires, PerWorker -> {<|Id, Fires, Steals,
+  StealAttempts, Pushes, ActiveNs, IdleNs, Wakeups, ItrsDelta|>, ...}).
+- `TNfProfiled[t]` -- run `TNf[t]` and return result + stats together.
+- `TPoolStatsReport[stats]` -- short Tabular summary.
+- `TPoolStatsBench[t, threadCounts]` -- run the same term under each
+  N in `threadCounts`, returning a comparison Tabular.
+
+Tests:
+
+- `tests/test_pool_profile.c` -- single-thread structural sanity
+  for the snapshot, T=4 stats shape, runtime threads setter clamp.
+- `wl/THVMLink/Tests/pool.wlt` -- WL VerificationTest specs (9/9
+  passing): TThreads round-trip + clamp + env fallback, TPoolStats
+  shape at T=1 and T=4, TNfProfiled, T=1 vs T=4 result equivalence,
+  T=4 idle accounting.
+
+### Changed: nf opts into parallel drain via THVM_THREADS
+
+Phase 1 step 9 -- the closing slice.  `nf` reads `THVM_THREADS` (1
+when unset; clamped to `[1, MAX_THREADS]`) and routes through
+`wnf_pool_drain_parallel` when N>1.
+
+Root tracking moved to a heap-cell wrap: `nf` allocates a single
+slot, stores `root` there, and reads it back at the end.
+`heap_replace` inside `redex_fire` automatically patches the cell
+when a fire result supersedes the root, so multiple workers can race
+on root-reducing fires without an off-heap pointer update.
+
+Verification at T=4 against the existing suite:
+
+- 274/274 stock tests pass identically (including `test_step_incremental`,
+  `test_eql`, `test_inc`, `test_when`, `test_and_or`, `test_cnf`,
+  `test_nf_pool` -- the explicit `nf()` callers).
+- `test_collapse` 17/17, `test_auto_dup` 21/21, `test_atp` 8526/8526
+  byte-identical to T=1.
+
+The ATP run (8526 checks across heavy collapse + nf workloads) is
+the strongest signal: same proof terms, same lemma counts, same
+KBO orderings at both threading levels.
+
+Phase 1 of the parallel WNF / NF port is complete.  The runtime now
+drives multi-threaded reduction end-to-end; further work is
+optimisation (per-worker arenas, relaxed-ordered ITRS bumps,
+release-acquire SUB-bit handshake, work-stealing tuning).
+
+### Added: pthread parallel drain + WNF_STACK / WNF_S_POS thread-routing
+
+Phase 1 step 8b -- the actual concurrency.
+
+- `WnfThreadState` typedef in `thvm.h` (just `Term *stack; u32 s_pos`).
+  Both `TContext` and `WnfWorker` now hold one inline.  `WNF_STACK`
+  and `WNF_S_POS` macros dereference a `_Thread_local WnfThreadState
+  *CURRENT_WNF_STATE` pointer instead of `CURRENT_CTX->...`.  Main
+  thread points it at `&CURRENT_CTX->wnf_state` in `thvm_init`;
+  spawned workers re-point it at their own state.
+- `wnf_pool_drain_parallel` in `src/wnf/pool.c` -- spawns N-1 pthreads
+  (worker 0 = caller) and runs the classic work-stealing loop in
+  each: pop local, else steal peer, else go idle.  Termination is an
+  atomic `alive` counter -- a worker that observes empty local + no
+  stealable work decrements alive; the last worker out (prev==1)
+  signals end and the spinners see `alive == 0` and exit.  Each
+  spawned pthread sets `CURRENT_WNF_STATE` to its own
+  `WnfThreadState` so wnf/cnf called from inside the fire callback
+  resolve to private spine storage.
+- `tests/test_wnf_pool_mt.c` -- pthread spawn validation: countdown-
+  style stub fire that bumps ITRS and allocates heap cells per
+  fire.  Runs at n=1 (fast path), n=2, n=4, and the all-from-
+  worker-0 stealing case.  14/14 checks pass.
+
+`nf` is not yet wired to call `drain_parallel`; that's the final
+slice (with a THVM_THREADS env var and a T=4 regression run).
+Existing 274 stock tests pass.
+
+### Added: per-worker WNF stack scaffolding + thread-local CURRENT_WORKER
+
+Phase 1 step 8a (pthread worker spawn -- foundation only).  Extends
+`WnfWorker` with its own `wnf_stack` (calloc'd at pool init) and
+`wnf_s_pos` so each pthread's `wnf()` call has private spine storage
+when the spawn lands.  Adds a `_Thread_local WnfWorker *CURRENT_WORKER`
+pointer that worker threads will set before draining; today it's
+NULL everywhere so all paths still resolve `WNF_STACK` through
+`CURRENT_CTX`.
+
+The actual pthread spawn + WNF_STACK / WNF_S_POS macro re-routing
+through CURRENT_WORKER lands in a follow-up commit -- that change
+needs careful struct-layout coordination (the macros need
+WnfWorker's full definition visible from thvm.h) and is its own
+focused review surface.
+
+All 274 regression tests still pass.
+
+### Changed: DUP-* heap_take audited for CAS-claim semantics
+
+Phase 1 step 7.  Two call sites that "consume" a DUP body cell now
+use `heap_take_atomic` (atomic exchange to 0) and bail when the
+exchange returns 0, meaning another worker already claimed the body.
+
+- `src/wnf/redex.c` -- `redex_fire`'s DP0/DP1 case.
+- `src/cnf/_.c` -- `cnf_at`'s DP0/DP1 dispatch.
+
+Single-thread cost identical to the legacy `heap_take` (one atomic
+exchange vs one load+store).  Single-winner property is what
+guarantees that under a parallel pool, exactly one worker runs the
+DUP-* interaction for any given cell.
+
+The release-store / acquire-load audit on `heap_subst_var` /
+`heap_read` (the SUB-bit handshake the inactive DP projection later
+reads) is deliberately deferred to land alongside the worker pool --
+both sides of that audit need to land together to be testable.
+
+### Changed: ITRS atomic + heap_alloc parallel-safe
+
+Phase 1 step 6.  Two small but load-bearing changes that make the
+runtime safe to drive from multiple worker threads concurrently.
+
+- `TContext.itrs` typed as `_Atomic u64`.  All existing call sites
+  (`ITRS++`, `ITRS - itrs0`, `ITRS = X`) keep working unchanged via
+  C11 atomics' implicit operator overloading.  Default ordering is
+  seq_cst, which is stronger than needed for a counter but the per-
+  bump cost (~5ns on arm64) is negligible against per-interaction
+  work.  Optimisation to relaxed-ordered explicit calls is deferred.
+- `heap_alloc` body switched to `__atomic_fetch_add(&heap_next, ...)`.
+  This subsumes the previously sibling `heap_alloc_atomic`, which is
+  now retired -- they were literal duplicates after the refactor.
+
+`tests/test_heap_atomic_mt.c` extended with an ITRS-bump torture
+(8 threads x 100k bumps; final value must be exactly N*M from the
+pre-bump baseline).  No interactions yet need CAS-claim semantics
+(Phase 1 step 7); existing 274/274 still passes.
+
+### Added: pthread torture test for atomic heap primitives
+
+`tests/test_heap_atomic_mt.c` -- spawns 8 pthreads to hammer
+`heap_alloc_atomic`, `heap_take_atomic`, and `heap_cas` under real
+contention (200 rounds each).  Validates:
+
+- alloc hands out disjoint ranges (HEAP_NEXT advances by exactly
+  `N * M` cells, no two threads see overlapping cell indices).
+- take is single-winner (across 8 concurrent attempts on a populated
+  cell, exactly one returns the prior value, rest return 0).
+- CAS commits exactly once when 8 threads race on the same expected
+  value.
+
+Total: 802/802 checks pass.  No runtime changes; this strengthens
+the foundation for the upcoming pthread worker pool slice.
+
+### Added: atomic heap primitives (release-store / acquire-load / CAS / atomic-take)
+
+Phase 1 step 4.  Six new sibling helpers that publish writes with
+release semantics and read with acquire semantics so the parallel
+WNF / NF pool can synchronise on heap cells without torn loads.
+
+- `src/heap/read_acq.c` -- `heap_read_acq` (acquire load).
+- `src/heap/set_rel.c` -- `heap_set_rel` (release store).
+- `src/heap/take_atomic.c` -- `heap_take_atomic` (atomic exchange to 0).
+- `src/heap/cas.c` -- `heap_cas` (strong compare-and-swap).
+- `src/heap/alloc_atomic.c` -- `heap_alloc_atomic` (atomic-fetch-add bump).
+- `src/heap/subst_var_rel.c` -- `heap_subst_var_rel` (release-store the
+  SUB-flagged value so a concurrent VAR/DP entry sees a fully-formed cell).
+- `tests/test_heap_atomic.c` -- single-thread sanity for each helper.
+
+Implementation uses GCC/clang `__atomic_*` builtins so HEAP doesn't
+need to be retyped to `_Atomic(Term) *` (no churn at the ~5000 plain
+`HEAP[loc]` call sites).  Single-thread cost is identical to the
+plain helpers on x86 / arm64 TSO -- relaxed/acquire loads compile to
+plain loads; release stores compile to plain stores plus a fence (no
+fence on TSO platforms).
+
+Existing call sites still use the plain `heap_read` / `heap_set` /
+`heap_take`; the atomic variants are foundations the interaction
+audit will opt into in a later slice.
+
+### Changed: nf rewired through WnfPool (T=1)
+
+Phase 1 step 3.  `nf` no longer carries a private `Term work[8192]`
+buffer; it allocates a 1-worker WnfPool, attaches it as the
+worklist sink, and drains via `wnf_pool_drain_local`.  The legacy
+buf+n_ptr API stays available for paths that haven't been ported
+(used by some inspector helpers) -- `nf_work_push` dispatches to
+whichever attach mode is currently bound.
+
+Behaviour at T=1 is preserved (same pop order = LIFO, same
+re-enumerate-on-drain fallback).  All 274 regression tests pass.
+A small `tests/test_nf_pool.c` exercises the new path explicitly
+(APP-LAM, OP2 chain, idempotence, attach/detach hygiene).
+
+This is the equivalence-proof step before the parallel work begins
+-- if T=1 still ITRS-matches, the pool plumbing is sound and the
+remaining work (atomic heap + pthread pool + per-worker context)
+is mechanical.
+
+### Added: WnfPool worker-pool foundation
+
+Phase 1 step 2 of the parallel WNF / CNF port.  Adds the worker-pool
+struct that the parallel `nf` driver will sit on top of -- one
+WsDeque per worker plus per-worker counters (itrs_delta, fires,
+steals).
+
+- `src/wnf/pool.c` -- WnfPool with init/free, owner push/pop,
+  cross-worker steal, T=1 drain loop, and itrs-merge.  Drain is
+  parametric in the fire function so the data structure is
+  unit-testable without the real `redex_fire`.
+- `tests/test_wnf_pool.c` -- single-thread sanity using a
+  countdown-style stub fire (LIFO order, max_fires guard,
+  cross-worker steal, itrs-delta merge).
+
+Not wired into `nf` yet -- that lands once the heap primitives are
+atomic and per-worker context exists.
+
+### Added: parallel-WNF foundation -- work-stealing deque + key-priority queue
+
+Phase 1 of the parallel WNF / CNF port (see docs/aot.md, docs/plans/levy_optimal.md).
+Self-contained data structures, no behavioural change to the runtime
+yet.
+
+- `src/util/atomics.h` -- shared concurrency primitives: `cpu_relax`,
+  `CACHE_L1`, `CachePaddedAtomic`, `MAX_THREADS`.  Lifted from
+  HVM4's `clang/hvm.c` platform stanza so the wsq / wspq ports keep
+  their identical type signatures.
+- `src/util/wsq.c` -- Chase-Lev work-stealing deque for u64 tasks.
+  Single-owner push/pop at the bottom, multi-stealer steal from the
+  top.  Wait-free owner ops, lock-free steals.
+- `src/util/wspq.c` -- key-priority work-stealing queue: per-worker
+  bank of 64 deques bucketed by key (lower keys popped first),
+  64-bit non-empty mask for `__builtin_ctzll`-fast bucket lookup,
+  steal-from-victim with optional shallow-only restriction.
+- `tests/test_wsq.c`, `tests/test_wspq.c` -- single-thread sanity
+  for both data structures (LIFO owner pop, FIFO steal, last-element
+  CAS race, key-priority ordering, cross-bank steal).
+
+Next steps (still in the worktree): atomic heap primitives, per-worker
+context split, wire `nf` onto wspq, then pthread worker pool.
 
 ### Fixed: lift FLAT_GRID dispatch for nested scalar reduces
 
@@ -869,7 +1276,6 @@ Bounded beautiful-mnist canary
   10 remaining metal-op kernels bail rangeify on
   `pre-reduce dim mismatch`, a separate failure mode);
 - peak retained Metal memory: `171 MB` (vs `392 MB` pre-fix, -56.4%).
-
 ### Changed: Levy-optimal Phase 4 -- auto-dup default-on for recursive non-linear lambdas
 
 `auto_dup_collect`'s `TAG_REF` / `TAG_ALO` early-return is replaced

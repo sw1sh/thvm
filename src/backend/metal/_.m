@@ -2204,6 +2204,388 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   return rc;
 }
 
+// === AOT-on-Metal Phase 7 iter A ====================================
+//
+// Smallest end-to-end slice: dispatch the `aot_eval_op2_fold` MSL
+// kernel with one thread.  Caller passes its book_heap pointer + the
+// root_loc of an OP2(NUM, NUM) cell; we copy the heap into a shared
+// MTLBuffer, dispatch, read the resulting NUM back.
+//
+// Iter B+ moves to zero-copy (newBufferWithBytesNoCopy on a
+// page-aligned book_heap), wider dispatch, and the layered MSL
+// primitives (allocator, MAT/CTR/REF dispatch, full wnf()).
+
+static id<MTLComputePipelineState> AOT_OP2_PSO = nil;
+
+Term thvm_aot_metal_op2_fold(Term *book_heap, u64 book_cells, u64 root_loc) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil || METAL_LIB == nil) {
+    if (metal_init() != 0) return 0;
+  }
+  if (AOT_OP2_PSO == nil) {
+    NSError *err = nil;
+    id<MTLFunction> mtlFn =
+        [METAL_LIB newFunctionWithName:@"aot_eval_op2_fold"];
+    if (mtlFn == nil) {
+      fprintf(stderr,
+        "thvm aot-metal: function 'aot_eval_op2_fold' missing in metallib\n");
+      return 0;
+    }
+    AOT_OP2_PSO =
+        [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+    if (AOT_OP2_PSO == nil) {
+      fprintf(stderr, "thvm aot-metal: pipeline-state failed: %s\n",
+              err ? [[err localizedDescription] UTF8String] : "(no error)");
+      return 0;
+    }
+  }
+  // Zero-copy: book_heap is 16KB-aligned (see thvm.c book_heap
+  // alloc), so newBufferWithBytesNoCopy wraps it directly and the
+  // GPU reads CPU's heap pages with no intermediate marshaling.
+  // Length must be a page multiple; BOOK_CAP * 8 = 2 MiB = 128 pages.
+  id<MTLBuffer> heapBuf =
+      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
+                                      length:book_cells * sizeof(Term)
+                                     options:MTLResourceStorageModeShared
+                                 deallocator:nil];
+  id<MTLBuffer> resultBuf =
+      [METAL_DEVICE newBufferWithLength:sizeof(Term)
+                                options:MTLResourceStorageModeShared];
+
+  uint64_t root = root_loc;
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:AOT_OP2_PSO];
+  [enc setBuffer:heapBuf   offset:0 atIndex:0];
+  [enc setBytes:&root      length:sizeof(uint64_t) atIndex:1];
+  [enc setBuffer:resultBuf offset:0 atIndex:2];
+  [enc dispatchThreads:MTLSizeMake(1, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  Term result;
+  memcpy(&result, [resultBuf contents], sizeof(Term));
+  return result;
+}
+
+// Iter C-1+C-2: MAT-on-NUM dispatch with bump allocator.  Caller
+// supplies a pointer to the host's BOOK_NEXT counter; we seed an
+// 8-byte shared MTLBuffer from it, dispatch, then read back so the
+// host's counter reflects any cells the kernel allocated for the
+// unmatched-fallback branch.  See shader for bit-pattern shape.
+static id<MTLComputePipelineState> AOT_MAT_PSO = nil;
+
+Term thvm_aot_metal_mat_app(Term *book_heap, u64 book_cells,
+                             u64 root_loc, u64 *book_next_inout) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil || METAL_LIB == nil) {
+    if (metal_init() != 0) return 0;
+  }
+  if (AOT_MAT_PSO == nil) {
+    NSError *err = nil;
+    id<MTLFunction> mtlFn =
+        [METAL_LIB newFunctionWithName:@"aot_eval_mat_app"];
+    if (mtlFn == nil) {
+      fprintf(stderr,
+        "thvm aot-metal: function 'aot_eval_mat_app' missing in metallib\n");
+      return 0;
+    }
+    AOT_MAT_PSO =
+        [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+    if (AOT_MAT_PSO == nil) {
+      fprintf(stderr, "thvm aot-metal: mat pipeline-state failed: %s\n",
+              err ? [[err localizedDescription] UTF8String] : "(no error)");
+      return 0;
+    }
+  }
+  id<MTLBuffer> heapBuf =
+      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
+                                      length:book_cells * sizeof(Term)
+                                     options:MTLResourceStorageModeShared
+                                 deallocator:nil];
+  id<MTLBuffer> resultBuf =
+      [METAL_DEVICE newBufferWithLength:sizeof(Term)
+                                options:MTLResourceStorageModeShared];
+  // book_next is u32 on the GPU side (Apple GPU families lack
+  // 64-bit atomic_fetch_add).  BOOK_CAP fits comfortably; assert
+  // and marshal narrowed.
+  if (*book_next_inout >> 32) {
+    fprintf(stderr,
+      "thvm aot-metal: book_next %llu exceeds 32-bit GPU bump range\n",
+      (unsigned long long)*book_next_inout);
+    return 0;
+  }
+  uint32_t book_next_u32 = (uint32_t)*book_next_inout;
+  id<MTLBuffer> bookNextBuf =
+      [METAL_DEVICE newBufferWithBytes:&book_next_u32
+                                length:sizeof(uint32_t)
+                               options:MTLResourceStorageModeShared];
+
+  uint64_t root = root_loc;
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:AOT_MAT_PSO];
+  [enc setBuffer:heapBuf     offset:0 atIndex:0];
+  [enc setBytes:&root        length:sizeof(uint64_t) atIndex:1];
+  [enc setBuffer:resultBuf   offset:0 atIndex:2];
+  [enc setBuffer:bookNextBuf offset:0 atIndex:3];
+  [enc dispatchThreads:MTLSizeMake(1, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  Term result;
+  memcpy(&result, [resultBuf contents], sizeof(Term));
+  uint32_t out_u32;
+  memcpy(&out_u32, [bookNextBuf contents], sizeof(uint32_t));
+  *book_next_inout = (u64)out_u32;
+  return result;
+}
+
+// Batch variant: fold N independent OP2 redexes in one dispatch.
+// Caller supplies an array of root_locs (length n_roots) and a
+// preallocated result_out array (length n_roots).  Returns 0 on
+// success, -1 on failure.  Demonstrates the parallelism unlock --
+// kernel launch overhead amortized over N folds.
+static id<MTLComputePipelineState> AOT_OP2_BATCH_PSO = nil;
+
+int thvm_aot_metal_op2_fold_batch(Term *book_heap, u64 book_cells,
+                                   u64 *root_locs, u32 n_roots,
+                                   Term *result_out) {
+  if (n_roots == 0) return 0;
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil || METAL_LIB == nil) {
+    if (metal_init() != 0) return -1;
+  }
+  if (AOT_OP2_BATCH_PSO == nil) {
+    NSError *err = nil;
+    id<MTLFunction> mtlFn =
+        [METAL_LIB newFunctionWithName:@"aot_eval_op2_fold_batch"];
+    if (mtlFn == nil) {
+      fprintf(stderr,
+        "thvm aot-metal: function 'aot_eval_op2_fold_batch' missing\n");
+      return -1;
+    }
+    AOT_OP2_BATCH_PSO =
+        [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+    if (AOT_OP2_BATCH_PSO == nil) {
+      fprintf(stderr, "thvm aot-metal: batch pipeline-state failed: %s\n",
+              err ? [[err localizedDescription] UTF8String] : "(no error)");
+      return -1;
+    }
+  }
+  id<MTLBuffer> heapBuf =
+      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
+                                      length:book_cells * sizeof(Term)
+                                     options:MTLResourceStorageModeShared
+                                 deallocator:nil];
+  id<MTLBuffer> rootsBuf =
+      [METAL_DEVICE newBufferWithBytes:root_locs
+                                length:n_roots * sizeof(uint64_t)
+                               options:MTLResourceStorageModeShared];
+  id<MTLBuffer> resultBuf =
+      [METAL_DEVICE newBufferWithLength:n_roots * sizeof(Term)
+                                options:MTLResourceStorageModeShared];
+
+  uint32_t n = n_roots;
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:AOT_OP2_BATCH_PSO];
+  [enc setBuffer:heapBuf   offset:0 atIndex:0];
+  [enc setBuffer:rootsBuf  offset:0 atIndex:1];
+  [enc setBuffer:resultBuf offset:0 atIndex:2];
+  [enc setBytes:&n         length:sizeof(uint32_t) atIndex:3];
+
+  NSUInteger tg = MIN((NSUInteger)n_roots,
+                      [AOT_OP2_BATCH_PSO maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(n_roots, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  memcpy(result_out, [resultBuf contents], n_roots * sizeof(Term));
+  return 0;
+}
+
+// === AOT-on-Metal Phase 7 iter D: end-to-end compile + run =========
+//
+// thvm_aot_metal_compile_and_run("name", def_id, args, n_args,
+//                                 book_heap, book_cells, book_next_inout)
+//
+// Calls thvm_aot_metal_emit to produce MSL source for the def, writes
+// it to a temp file, compiles via xcrun metal/metallib, loads the
+// resulting metallib, looks up `aot_def_<name>`, builds a PSO, and
+// dispatches with one thread.  Result Term is returned; book_next is
+// updated in place.
+//
+// Cache key is the FNV-1a hash of the emitted MSL string.  Repeated
+// calls for an identical def re-use the cached PSO.
+
+extern char *thvm_aot_metal_emit(uint32_t def_id, const char *name);
+
+#define AOT_METAL_PSO_CAP 32
+// Parallel arrays so ARC retains the PSO via the strong array slot
+// (file-static id arrays are __strong by default).  Mirrors the
+// METAL_JIT_CACHE / METAL_JIT_PSOS pattern above.
+static uint64_t                    AOT_METAL_PSO_HASHES[AOT_METAL_PSO_CAP];
+static id<MTLComputePipelineState> AOT_METAL_PSO_OBJS  [AOT_METAL_PSO_CAP];
+static uint32_t                    AOT_METAL_PSO_N = 0;
+
+static uint64_t aot_metal_fnv1a(const char *s) {
+  uint64_t h = 0xcbf29ce484222325ULL;
+  while (*s) {
+    h ^= (uint64_t)(unsigned char)*s++;
+    h *= 0x100000001b3ULL;
+  }
+  return h;
+}
+
+static id<MTLComputePipelineState>
+aot_metal_pso_get(uint64_t hash, const char *name, const char *src) {
+  for (uint32_t i = 0; i < AOT_METAL_PSO_N; i++) {
+    if (AOT_METAL_PSO_HASHES[i] == hash) return AOT_METAL_PSO_OBJS[i];
+  }
+  if (AOT_METAL_PSO_N >= AOT_METAL_PSO_CAP) {
+    fprintf(stderr, "thvm aot-metal: PSO cache full\n");
+    return nil;
+  }
+
+  // Write src -> /tmp/thvm_aot_metal_<hash>.metal, run xcrun
+  // metal -c then xcrun metallib.  We could shave latency by
+  // calling [device newLibraryWithSource:options:error:] (in-process
+  // compile) but the offline metallib path matches our existing
+  // build/default.metallib pipeline and produces a re-loadable
+  // artifact for inspection.
+  char src_path[256], air_path[256], lib_path[256];
+  snprintf(src_path, sizeof src_path,
+           "/tmp/thvm_aot_metal_%016llx.metal", hash);
+  snprintf(air_path, sizeof air_path,
+           "/tmp/thvm_aot_metal_%016llx.air", hash);
+  snprintf(lib_path, sizeof lib_path,
+           "/tmp/thvm_aot_metal_%016llx.metallib", hash);
+
+  FILE *f = fopen(src_path, "w");
+  if (!f) {
+    fprintf(stderr, "thvm aot-metal: cannot write %s\n", src_path);
+    return nil;
+  }
+  fputs(src, f);
+  fclose(f);
+
+  char cmd[1024];
+  snprintf(cmd, sizeof cmd,
+    "xcrun -sdk macosx metal -c %s -o %s 2>&1 && "
+    "xcrun -sdk macosx metallib %s -o %s 2>&1",
+    src_path, air_path, air_path, lib_path);
+  int rc = system(cmd);
+  if (rc != 0) {
+    fprintf(stderr, "thvm aot-metal: xcrun metal/metallib failed (rc=%d) for %s\n",
+            rc, src_path);
+    return nil;
+  }
+
+  NSError *err = nil;
+  NSURL    *libURL = [NSURL fileURLWithPath:
+      [NSString stringWithUTF8String:lib_path]];
+  id<MTLLibrary> lib =
+      [METAL_DEVICE newLibraryWithURL:libURL error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm aot-metal: load %s failed: %s\n",
+            lib_path,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  char fnname[128];
+  snprintf(fnname, sizeof fnname, "aot_def_%s", name);
+  id<MTLFunction> mtlFn =
+      [lib newFunctionWithName:[NSString stringWithUTF8String:fnname]];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm aot-metal: function '%s' missing in %s\n",
+            fnname, lib_path);
+    return nil;
+  }
+  id<MTLComputePipelineState> pso =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (pso == nil) {
+    fprintf(stderr, "thvm aot-metal: pso for %s failed: %s\n",
+            fnname,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  AOT_METAL_PSO_HASHES[AOT_METAL_PSO_N] = hash;
+  AOT_METAL_PSO_OBJS  [AOT_METAL_PSO_N] = pso;
+  AOT_METAL_PSO_N++;
+  return pso;
+}
+
+Term thvm_aot_metal_compile_and_run(const char *name, u32 def_id,
+                                     Term *args, u32 n_args,
+                                     Term *book_heap, u64 book_cells,
+                                     u64 *book_next_inout) {
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) {
+    if (metal_init() != 0) return 0;
+  }
+  char *src = thvm_aot_metal_emit(def_id, name);
+  if (!src) {
+    fprintf(stderr, "thvm aot-metal: emit failed for def_id %u\n", def_id);
+    return 0;
+  }
+  uint64_t hash = aot_metal_fnv1a(src);
+  id<MTLComputePipelineState> pso = aot_metal_pso_get(hash, name, src);
+  free(src);
+  if (pso == nil) return 0;
+
+  if (*book_next_inout >> 32) {
+    fprintf(stderr, "thvm aot-metal: book_next %llu exceeds u32 range\n",
+            (unsigned long long)*book_next_inout);
+    return 0;
+  }
+  uint32_t book_next_u32 = (uint32_t)*book_next_inout;
+
+  id<MTLBuffer> heapBuf =
+      [METAL_DEVICE newBufferWithBytesNoCopy:book_heap
+                                      length:book_cells * sizeof(Term)
+                                     options:MTLResourceStorageModeShared
+                                 deallocator:nil];
+  id<MTLBuffer> argsBuf = nil;
+  if (n_args > 0) {
+    argsBuf = [METAL_DEVICE newBufferWithBytes:args
+                                        length:n_args * sizeof(Term)
+                                       options:MTLResourceStorageModeShared];
+  } else {
+    argsBuf = [METAL_DEVICE newBufferWithLength:sizeof(Term)
+                                        options:MTLResourceStorageModeShared];
+  }
+  id<MTLBuffer> resultBuf =
+      [METAL_DEVICE newBufferWithLength:sizeof(Term)
+                                options:MTLResourceStorageModeShared];
+  id<MTLBuffer> bookNextBuf =
+      [METAL_DEVICE newBufferWithBytes:&book_next_u32
+                                length:sizeof(uint32_t)
+                               options:MTLResourceStorageModeShared];
+
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:heapBuf     offset:0 atIndex:0];
+  [enc setBuffer:argsBuf     offset:0 atIndex:1];
+  [enc setBuffer:resultBuf   offset:0 atIndex:2];
+  [enc setBuffer:bookNextBuf offset:0 atIndex:3];
+  [enc dispatchThreads:MTLSizeMake(1, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  Term result;
+  memcpy(&result, [resultBuf contents], sizeof(Term));
+  uint32_t out_u32;
+  memcpy(&out_u32, [bookNextBuf contents], sizeof(uint32_t));
+  *book_next_inout = (u64)out_u32;
+  return result;
+}
+
 Backend METAL_BACKEND = {
   .id              = 2,
   .view_aware      = 1,   // metal_dispatch_kernel pre-materializes

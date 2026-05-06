@@ -50,7 +50,10 @@ enter:
   switch (term_tag(next)) {
     case TAG_VAR: {
       u64  loc  = term_val(next);
-      Term cell = heap_read(loc);
+      // Acquire-load: pairs with heap_subst_var's release-store so we
+      // never observe the SUB bit without the matching value bits
+      // (which would be UB at T>1 with plain heap_read).
+      Term cell = heap_read_acq(loc);
       if (term_sub_get(cell)) {
         next = term_sub_set(cell, 0);
         goto enter;
@@ -94,8 +97,9 @@ enter:
       // A SUB-bit cell still represents an already-resolved projection
       // (an earlier cnf step heap_subst_cop'd the inactive side); we
       // follow the chain so consumers see the final value rather than
-      // a stale DP wrapper.
-      Term cell = heap_read(loc);
+      // a stale DP wrapper.  Acquire-load matches heap_subst_var's
+      // release-store on the writer side.
+      Term cell = heap_read_acq(loc);
       if (term_sub_get(cell)) {
         next = term_sub_set(cell, 0);
         goto enter;
@@ -117,36 +121,15 @@ enter:
       goto enter;
     }
     case TAG_REF: {
-      // AOT fast path: if a specialised C function is registered for
-      // this name, dispatch to it instead of the lazy ALO unfold.
-      // The AOT consumes the spine APP frames directly via &s_pos
-      // and returns the continuation Term.  Same control-flow
-      // contract as ALO unfold (`next = ...; goto enter`); ITRS
-      // counting is the AOT's responsibility.
+      // Lazy ALO unfold.  ALO-VAR / ALO-LAM / ALO-NOD then walk one
+      // layer per fire as wnf re-enters this term (no eager expansion
+      // even for self-referential defs).
+      //
+      // (Legacy AOT had a fast path here that dispatched to AOT_FNS
+      // for registered defs.  The Bend2-style AOT replacing it works
+      // outside of this loop -- the runtime calls AOT entry points
+      // directly with Tasks, not through wnf descent.)
       u32  name = term_ext(next);
-      AotFn aot = aot_lookup(name);
-      if (aot != NULL) {
-        if (BUDGET_HIT) BAIL_AT(next);
-        AOT_CALLS++;
-        // The AOT receives a pointer to WNF_S_POS directly (not
-        // our local s_pos).  This way:
-        //   - aot_pop_app_arg updates WNF_S_POS (the global), so
-        //     a subsequent recursive wnf inside the AOT (via
-        //     aot_force) reads the updated stack top and doesn't
-        //     overwrite our pushed frames.
-        //   - On return we read s_pos = WNF_S_POS to pick up the
-        //     net effect of the AOT's pops + any recursive wnf
-        //     pushes.
-        // Setting WNF_S_POS = s_pos first carries our outer pushes
-        // through to the AOT.
-        WNF_S_POS = s_pos;
-        next = aot(stack, &WNF_S_POS, base);
-        s_pos = WNF_S_POS;
-        goto enter;
-      }
-      // Fall back to the lazy ALO unfold.  ALO-VAR / ALO-LAM /
-      // ALO-NOD then walk one layer per fire as wnf re-enters this
-      // term (no eager expansion even for self-referential defs).
       Term book = (name < DEFS_CAP) ? DEFS[name] : 0;
       if (book == 0) {
         // Undefined ref -- treat as WHNF atom; won't reduce further.
@@ -591,6 +574,17 @@ apply:
               case OP_MUL: r = xv * yv; break;
               case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
               case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
+              case OP_DIV: r = (yv == 0) ? 0 : xv / yv; break;
+              case OP_MOD: r = (yv == 0) ? 0 : xv % yv; break;
+              case OP_XOR: r = xv ^ yv; break;
+              case OP_AND: r = xv & yv; break;
+              case OP_OR:  r = xv | yv; break;
+              case OP_SHL: r = xv << (yv & 31); break;
+              case OP_SHR: r = xv >> (yv & 31); break;
+              case OP_GT:  r = (xv >  yv) ? 1 : 0; break;
+              case OP_LE:  r = (xv <= yv) ? 1 : 0; break;
+              case OP_GE:  r = (xv >= yv) ? 1 : 0; break;
+              case OP_NE:  r = (xv != yv) ? 1 : 0; break;
               default:     r = 0; break;
             }
             whnf = term_new(0, TAG_NUM, term_ext(whnf), r);
@@ -635,6 +629,17 @@ apply:
             case OP_MUL: r = xv * yv; break;
             case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
             case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
+            case OP_DIV: r = (yv == 0) ? 0 : xv / yv; break;
+            case OP_MOD: r = (yv == 0) ? 0 : xv % yv; break;
+            case OP_XOR: r = xv ^ yv; break;
+            case OP_AND: r = xv & yv; break;
+            case OP_OR:  r = xv | yv; break;
+            case OP_SHL: r = xv << (yv & 31); break;
+            case OP_SHR: r = xv >> (yv & 31); break;
+            case OP_GT:  r = (xv >  yv) ? 1 : 0; break;
+            case OP_LE:  r = (xv <= yv) ? 1 : 0; break;
+            case OP_GE:  r = (xv >= yv) ? 1 : 0; break;
+            case OP_NE:  r = (xv != yv) ? 1 : 0; break;
             default:     r = 0; break;
           }
           whnf = term_new(0, TAG_NUM, dtype, r);

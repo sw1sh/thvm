@@ -75,8 +75,12 @@ fn u8 is_redex(Term t) {
     case TAG_REF: return 1;
     case TAG_ALO: return 1;
     case TAG_OP2: {
-      Term x = term_resolve(heap_read(val));
-      Term y = term_resolve(heap_read(val + 1));
+      // Acquire-load matches the release-store on heap_set inside
+      // heap_replace -- under T>1, sibling fires concurrently patch
+      // these cells, and we must observe the post-patch NUM not the
+      // pre-patch OP2 to recognise the parent as newly redex.
+      Term x = term_resolve(heap_read_acq(val));
+      Term y = term_resolve(heap_read_acq(val + 1));
       return term_tag(x) == TAG_NUM && term_tag(y) == TAG_NUM;
     }
     case TAG_UOP: {
@@ -161,6 +165,15 @@ static u32 term_arity(Term t) {
 
 #define STEP_NIL ((u64)-1)
 
+// Forward-declared nf-worklist state.  step_fresh_push pushes parent
+// promotions through these when nf has the pool attached, so the
+// in-flight drain picks them up without a re-enumerate round.  The
+// NF_WORK_PTR / NF_WORK_N_PTR / NF_WORK_CAP_VAL legacy fallback path
+// (used when no pool is attached, e.g. by direct redex_fire callers)
+// stays defined further down with its own attach helpers.
+static struct WnfPool *NF_POOL     = 0;
+static u32             NF_POOL_TID = 0;
+
 static u8     STEP_ACTIVE        = 0;
 static Term  *STEP_USE_HEAD      = 0;   // hash-bucket head loc per Term, STEP_NIL = empty
 static Term  *STEP_USE_KEY       = 0;   // bucket keys (Term values)
@@ -184,20 +197,55 @@ static inline u32 step_hash(Term t, u32 cap_mask) {
 }
 
 // Lookup-or-insert in the use-head table.  Returns the slot index
-// (caller reads STEP_USE_HEAD[i] for the current head, writes back).
+// (caller reads STEP_USE_HEAD[i] for the current head, writes back),
+// or (u32)-1 if the table is full and a new key can't be inserted.
+//
+// Atomic-CAS-based insert: under T>1 multiple workers race on
+// inserting fresh result keys (NUM(2), NUM(4), ...) into the table.
+// CAS on STEP_USE_KEY claims the bucket.  STEP_USE_HEAD entries are
+// initialized to NIL at attach (so CAS winners DON'T need to write
+// HEAD themselves -- doing so would race-wipe a concurrent push to
+// the same bucket).  STEP_USE_KEY=0 sentinel never rotates (entries
+// are only inserted, never removed during the session), so once a
+// non-zero key is observed it's stable.
+#define STEP_USE_HEAD_FULL ((u32)-1)
 static u32 step_use_head_slot(Term t) {
   u32 mask = STEP_USE_HEAD_CAP - 1;
   u32 h = step_hash(t, mask);
   for (u32 probe = 0; probe < STEP_USE_HEAD_CAP; probe++) {
     u32 i = (h + probe) & mask;
-    if (STEP_USE_KEY[i] == 0) {
-      STEP_USE_KEY[i]  = t;
-      STEP_USE_HEAD[i] = STEP_NIL;
-      return i;
+    Term cur = (Term)__atomic_load_n((u64 *)&STEP_USE_KEY[i],
+                                     __ATOMIC_ACQUIRE);
+    if (cur == t) return i;
+    if (cur == 0) {
+      Term expected = 0;
+      if (__atomic_compare_exchange_n((u64 *)&STEP_USE_KEY[i],
+                                      (u64 *)&expected, (u64)t,
+                                      0,
+                                      __ATOMIC_ACQ_REL,
+                                      __ATOMIC_ACQUIRE)) {
+        return i;   // HEAD already NIL from attach; don't overwrite
+      }
+      // Lost the CAS.  expected was updated to whatever's there now;
+      // if it's our key, this slot is ours; otherwise probe further.
+      if (expected == t) return i;
     }
-    if (STEP_USE_KEY[i] == t) return i;
   }
-  return 0;   // table saturated -- caller falls back to linear scan
+  return STEP_USE_HEAD_FULL;
+}
+
+// Treiber-stack push of `loc` onto STEP_USE_HEAD[slot]'s chain.
+// Atomic load + CAS retry until we publish.  STEP_USE_NEXT[loc] gets
+// the prior head; the CAS publishes loc as the new head.  Used by
+// both step_use_insert and heap_replace's transfer loop.
+static inline void step_use_head_push_atomic(u32 slot, u64 loc) {
+  u64 prev;
+  do {
+    prev = __atomic_load_n((u64 *)&STEP_USE_HEAD[slot], __ATOMIC_ACQUIRE);
+    STEP_USE_NEXT[loc] = prev;
+  } while (!__atomic_compare_exchange_n(
+      (u64 *)&STEP_USE_HEAD[slot], &prev, (u64)loc,
+      0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
 }
 
 // Pre-set membership.
@@ -229,6 +277,19 @@ static void step_pre_insert(Term t) {
 static void step_fresh_push(Term t) {
   if (!STEP_ACTIVE || t == 0) return;
   if (!is_redex(t)) return;
+  // Pool-attached nf integration: route promoted parents straight into
+  // the CALLING WORKER's bag (NOT NF_POOL_TID, which is the seed-
+  // owner only) so the in-flight drain pops them next round of its
+  // own loop -- no FRESH_BUF round-trip, no re-enumerate.  WsDeque
+  // is single-producer per bag, so each worker MUST push only to its
+  // own bag; pushing to a peer's bag concurrently corrupts.
+  // CURRENT_WORKER is thread-local; falls back to NF_POOL_TID for
+  // the seed loop on the main thread (no spawned workers yet).
+  if (NF_POOL != 0) {
+    u32 tid = CURRENT_WORKER ? CURRENT_WORKER->id : NF_POOL_TID;
+    wnf_pool_push(NF_POOL, tid, t);
+    return;
+  }
   if (step_pre_contains(t)) return;
   u32 mask = STEP_FRESH_CAP - 1;
   u32 h = step_hash(t, mask);
@@ -268,8 +329,9 @@ static void step_use_insert(u64 loc, Term t) {
   if (!STEP_ACTIVE || t == 0) return;
   if (loc >= STEP_SIDE_CAP) step_side_grow(loc + 1);
   u32 i = step_use_head_slot(t);
-  STEP_USE_NEXT[loc] = STEP_USE_HEAD[i];
-  STEP_USE_HEAD[i]   = (Term)loc;
+  if (i == STEP_USE_HEAD_FULL) return;   // table full; heap_replace
+                                         // falls back to linear scan
+  step_use_head_push_atomic(i, loc);
 }
 
 static inline void step_parent_set(u64 loc, Term parent) {
@@ -303,19 +365,25 @@ static void heap_replace(Term old, Term new_) {
       if (STEP_USE_KEY[i] == old) { slot = i; break; }
     }
     if (slot != (u32)-1) {
-      u64 cur = STEP_USE_HEAD[slot];
-      // Walk + patch + chain transfer onto `new_`'s bucket.
+      // Inverse-index path: atomically claim OLD's chain by exchanging
+      // its head with NIL, then walk the claimed chain, patching cells
+      // and re-publishing them onto NEW's chain via the same atomic
+      // push.  Multiple workers racing on the same OLD bucket can't
+      // happen in practice (single-winner pop), but the exchange
+      // guards against it anyway.
+      u64 cur = (u64)__atomic_exchange_n(
+          (u64 *)&STEP_USE_HEAD[slot], (u64)STEP_NIL,
+          __ATOMIC_ACQ_REL);
       u32 new_slot = step_use_head_slot(new_);
       while (cur != STEP_NIL) {
         u64 next = STEP_USE_NEXT[cur];
         if (heap_read(cur) == old) {
-          heap_set(cur, new_);
-          // Transfer this loc onto new_'s use-list so future
-          // heap_replace(new_, ...) calls find it.
-          STEP_USE_NEXT[cur] = STEP_USE_HEAD[new_slot];
-          STEP_USE_HEAD[new_slot] = (Term)cur;
-          // Parent-promotion: if the owning term is now a redex,
-          // surface it.
+          // Release-store: pairs with is_redex's acquire-load above
+          // so a concurrent sibling fire's is_redex sees this patch.
+          heap_set_rel(cur, new_);
+          if (new_slot != STEP_USE_HEAD_FULL) {
+            step_use_head_push_atomic(new_slot, cur);
+          }
           if (cur < STEP_SIDE_CAP) {
             Term parent = STEP_PARENT[cur];
             if (parent != 0) step_fresh_push(parent);
@@ -325,7 +393,22 @@ static void heap_replace(Term old, Term new_) {
         HOT_HEAP_REPLACE_CELLS++;
         cur = next;
       }
-      STEP_USE_HEAD[slot] = STEP_NIL;
+      return;
+    }
+    // slot == -1: `old` is either genuinely absent from the use-list
+    // (no cell holds it) or its entry was dropped at insert time
+    // because the table was full.  Fall through to the linear scan,
+    // and surface parent promotions via the parent map so chain
+    // reductions still progress.
+    HOT_HEAP_REPLACE_CELLS += HEAP_NEXT;
+    for (u64 i = 0; i < HEAP_NEXT; i++) {
+      if (heap_read(i) == old) {
+        heap_set(i, new_);
+        if (i < STEP_SIDE_CAP) {
+          Term parent = STEP_PARENT[i];
+          if (parent != 0) step_fresh_push(parent);
+        }
+      }
     }
     return;
   }
@@ -335,20 +418,28 @@ static void heap_replace(Term old, Term new_) {
   }
 }
 
-// Incremental nf worklist.  `nf` attaches a buffer + counter pointer
-// before its main loop; redex_fire pushes locally-fresh redexes
-// (result + cells the interaction allocated) directly so nf doesn't
-// need to re-enumerate the global heap after every drain.  When no
-// worklist is attached (e.g. WL `TInteract` direct fire), pushes
+// Incremental nf worklist.  Two attach modes; nf_work_push routes
+// to whichever is currently bound.
+//
+//   Pool   -- WnfPool + tid (parallel-ready path; T=1 today).
+//   Buffer -- legacy Term *buf + u32 *n_ptr cap (used only by paths
+//             not yet ported, e.g. tests that build a worklist by
+//             hand).
+//
+// At most one is attached at a time -- attach helpers clobber.
+// When neither is attached (e.g. WL `TInteract` direct fire) pushes
 // are silently dropped.
-static Term *NF_WORK_PTR    = 0;
-static u32  *NF_WORK_N_PTR  = 0;
-static u32   NF_WORK_CAP_VAL = 0;
+static Term    *NF_WORK_PTR     = 0;
+static u32     *NF_WORK_N_PTR   = 0;
+static u32      NF_WORK_CAP_VAL = 0;
+// NF_POOL / NF_POOL_TID forward-declared near the top of this file
+// (used by step_fresh_push for parent-promotion routing).
 
 fn void redex_worklist_attach(Term *buf, u32 *n_ptr, u32 cap) {
   NF_WORK_PTR     = buf;
   NF_WORK_N_PTR   = n_ptr;
   NF_WORK_CAP_VAL = cap;
+  NF_POOL         = 0;
 }
 
 fn void redex_worklist_detach(void) {
@@ -357,7 +448,22 @@ fn void redex_worklist_detach(void) {
   NF_WORK_CAP_VAL = 0;
 }
 
+fn void redex_worklist_attach_pool(WnfPool *p, u32 tid) {
+  NF_POOL         = p;
+  NF_POOL_TID     = tid;
+  NF_WORK_PTR     = 0;
+}
+
+fn void redex_worklist_detach_pool(void) {
+  NF_POOL = 0;
+}
+
 static inline void nf_work_push(Term t) {
+  if (NF_POOL != 0) {
+    if (!is_redex(t)) return;
+    wnf_pool_push(NF_POOL, NF_POOL_TID, t);
+    return;
+  }
   if (NF_WORK_PTR == 0) return;
   if (!is_redex(t)) return;
   u32 n = *NF_WORK_N_PTR;
@@ -449,7 +555,12 @@ fn Term redex_fire(Term redex) {
         result = g;
         break;
       }
-      Term cell = heap_take(loc);
+      // Atomic claim: under a parallel pool, multiple workers may race
+      // on the same DP cell; whoever wins the exchange to 0 owns the
+      // body, the rest see 0 and bail (the redex is no longer theirs).
+      // Single-thread cost is identical to the legacy heap_take.
+      Term cell = heap_take_atomic(loc);
+      if (cell == 0) return 0;       // claimed by another worker
       Term body = term_resolve(cell);
       u8 side = (tag == TAG_DP0) ? 0 : 1;
       u32 lab = term_ext(redex);
@@ -504,6 +615,17 @@ fn Term redex_fire(Term redex) {
         case OP_MUL: r = xv * yv; break;
         case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
         case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
+        case OP_DIV: r = (yv == 0) ? 0 : xv / yv; break;
+        case OP_MOD: r = (yv == 0) ? 0 : xv % yv; break;
+        case OP_XOR: r = xv ^ yv; break;
+        case OP_AND: r = xv & yv; break;
+        case OP_OR:  r = xv | yv; break;
+        case OP_SHL: r = xv << (yv & 31); break;
+        case OP_SHR: r = xv >> (yv & 31); break;
+        case OP_GT:  r = (xv >  yv) ? 1 : 0; break;
+        case OP_LE:  r = (xv <= yv) ? 1 : 0; break;
+        case OP_GE:  r = (xv >= yv) ? 1 : 0; break;
+        case OP_NE:  r = (xv != yv) ? 1 : 0; break;
         default:     r = 0; break;
       }
       ITRS++;
@@ -646,8 +768,15 @@ fn Term redex_fire(Term redex) {
 // resident and grows lazily as enumeration runs.  Cleared at the
 // top of redex_enumerate.  Cap matches NF_WORK_CAP * 4 so worst
 // case (every redex unique) keeps load factor under 0.25.
-#define REDEX_DEDUP_CAP (1u << 15)
-static Term REDEX_DEDUP[REDEX_DEDUP_CAP];
+// REDEX_DEDUP: open-addressed hash set, dynamically sized at the top
+// of redex_enumerate to fit HEAP_NEXT * 4 (load factor <= 0.25).
+// Pre-fix this was a fixed 32K table that saturated on heaps with
+// >32K distinct Terms -- saturated insert probed the entire table on
+// every subsequent call (O(N) per insert, O(N^2) per enumerate),
+// causing a 670ms cliff on tree-d=16 (131k cells).  Dynamic sizing
+// keeps every insert O(1) average.
+static Term *REDEX_DEDUP     = NULL;
+static u32   REDEX_DEDUP_CAP = 0;
 
 static inline u32 redex_dedup_hash(Term t) {
   u64 h = (u64)t;
@@ -655,6 +784,24 @@ static inline u32 redex_dedup_hash(Term t) {
   h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
   h ^= h >> 33;
   return (u32)h & (REDEX_DEDUP_CAP - 1);
+}
+
+static void redex_dedup_resize(u64 want) {
+  // Pick a power-of-two capacity at least 4x the demand.
+  u32 cap = 32768;   // 32K floor matches the legacy starting size
+  while ((u64)cap < want * 4) {
+    cap <<= 1;
+    if (cap == 0) { cap = (u32)1 << 28; break; }   // 256M sanity ceiling
+  }
+  if (cap != REDEX_DEDUP_CAP) {
+    REDEX_DEDUP = (Term *)realloc(REDEX_DEDUP, (size_t)cap * sizeof(Term));
+    REDEX_DEDUP_CAP = cap;
+  }
+  // Always clear -- the dedup contract is "fresh empty table per
+  // enumerate".  Pre-fix this was a `memset(REDEX_DEDUP, 0,
+  // sizeof(REDEX_DEDUP))` against a static array; with a dynamic
+  // pointer sizeof is just sizeof(Term *) = 8 bytes -> no-op clear.
+  memset(REDEX_DEDUP, 0, (size_t)REDEX_DEDUP_CAP * sizeof(Term));
 }
 
 // Returns 1 if `t` was inserted (not previously present), 0 if seen.
@@ -668,7 +815,9 @@ static inline u8 redex_dedup_insert(Term t) {
       return 1;
     }
   }
-  return 1;   // table full -- accept (rare; cap is 32K)
+  return 1;   // table full -- caller pre-sized so this only happens
+              // if more than HEAP_NEXT * 4 distinct Terms appear; in
+              // practice equivalent to a no-op skip
 }
 
 // Add `t` to `out` if it's a redex we haven't already recorded.
@@ -686,9 +835,13 @@ static void redex_collect_one(Term t, Term *out, u32 cap, u32 *count) {
 fn u32 redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap) {
   HOT_REDEX_ENUM_CALLS++;
   HOT_REDEX_ENUM_CELLS += HEAP_NEXT;
-  // Reset the dedup hash table.  memset is fine -- the table is
-  // 32K * 8B = 256KB, well within L2.
-  memset(REDEX_DEDUP, 0, sizeof(REDEX_DEDUP));
+  // Size the dedup table to fit every reachable Term without
+  // saturating: 4x HEAP_NEXT + a small slack for off-heap roots,
+  // floored at 32K (the legacy fixed size).  Saturation past this
+  // capacity falls through to the "table full" branch which is
+  // equivalent to a no-op skip on the duplicate.
+  // Resize already memsets to 0 -- no separate clear needed.
+  redex_dedup_resize((u64)HEAP_NEXT + (u64)n_roots);
 
   u32 count = 0;
 
@@ -778,7 +931,16 @@ fn u32 redex_step_attach(Term *roots, u32 n_roots) {
   STEP_PARENT   = (Term *)calloc(base_cap, sizeof(Term));
   for (u64 i = 0; i < base_cap; i++) STEP_USE_NEXT[i] = STEP_NIL;
 
-  STEP_USE_HEAD_CAP = STEP_HEAD_CAP_DEFAULT;
+  // Use-list head table: open-addressed hash keyed by Term value.
+  // Worst case is HEAP_NEXT distinct Terms (each cell holds a unique
+  // value, e.g. depth-N tree of distinct leaves).  Size to ~4x heap
+  // so load factor stays under 0.25; round up to next power of two
+  // and floor at the legacy default.
+  u32 desired = STEP_HEAD_CAP_DEFAULT;
+  while ((u64)desired < (u64)HEAP_NEXT * 4 && desired < (1u << 28)) {
+    desired <<= 1;
+  }
+  STEP_USE_HEAD_CAP = desired;
   STEP_USE_HEAD = (Term *)malloc(STEP_USE_HEAD_CAP * sizeof(Term));
   STEP_USE_KEY  = (Term *)calloc(STEP_USE_HEAD_CAP, sizeof(Term));
   for (u32 i = 0; i < STEP_USE_HEAD_CAP; i++) STEP_USE_HEAD[i] = STEP_NIL;
@@ -791,9 +953,6 @@ fn u32 redex_step_attach(Term *roots, u32 n_roots) {
   STEP_FRESH_SEEN  = (Term *)calloc(STEP_FRESH_CAP, sizeof(Term));
   STEP_FRESH_N     = 0;
 
-  // Walk every live heap cell once: index its content + record
-  // parent ownership (if its content is a compound term whose
-  // owned-slot range is also in-heap, those slots get parented).
   for (u64 i = 0; i < HEAP_NEXT; i++) {
     Term t = heap_read(i);
     if (t == 0) continue;
@@ -827,11 +986,17 @@ fn u32 redex_step_attach(Term *roots, u32 n_roots) {
 
   // Seed the pre-set + return the initial redex count via the
   // existing enumerate path (also walks caller roots that may not
-  // live in any heap cell).
-  static Term seed_buf[8192];
-  u32 n = redex_enumerate(roots, n_roots, seed_buf, 8192);
-  for (u32 i = 0; i < n; i++) step_pre_insert(seed_buf[i]);
-  return n;
+  // live in any heap cell).  redex_enumerate returns the FULL count
+  // even when it overflows the buffer, so clamp n to the buffer
+  // cap before iterating -- the lost overflow entries just don't
+  // make it into the pre-set, which is harmless (they get filtered
+  // again in is_redex on each push).
+  enum { SEED_BUF_CAP = 8192 };
+  static Term seed_buf[SEED_BUF_CAP];
+  u32 n_total = redex_enumerate(roots, n_roots, seed_buf, SEED_BUF_CAP);
+  u32 n_pre   = n_total < SEED_BUF_CAP ? n_total : SEED_BUF_CAP;
+  for (u32 i = 0; i < n_pre; i++) step_pre_insert(seed_buf[i]);
+  return n_total;
 }
 
 fn Term redex_step_fire(Term redex) {

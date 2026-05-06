@@ -8,6 +8,16 @@
 
 #include "thvm.h"
 
+// === util/ ===
+// Shared concurrency primitives.  Foundation for the parallel WNF /
+// CNF redex bag (Phase 1 of docs/aot.md / docs/plans/levy_optimal.md).
+// Pulled in early because the data structures are pure (no thvm
+// runtime dependency) and downstream code may build per-context
+// scheduler state on top.
+#include "util/atomics.h"
+#include "util/wsq.c"
+#include "util/wspq.c"
+
 // === Multi-context storage ===
 //
 // Slot 0 holds the default singleton runtime so legacy code (which
@@ -26,7 +36,7 @@ TContext *CURRENT_CTX            = &DEFAULT_CTX_STORAGE;
 // init_default_ctx_scalars from thvm_init.
 static void init_default_ctx_scalars(TContext *ctx) {
     ctx->heap_next        = 0;
-    ctx->wnf_s_pos        = 0;
+    ctx->wnf_state.s_pos  = 0;
     ctx->wnf_last_stack_len = 0;
     ctx->itrs             = 0;
     ctx->tens_next        = 1;   // 0 reserved
@@ -35,6 +45,21 @@ static void init_default_ctx_scalars(TContext *ctx) {
     ctx->alo_states_next  = 1;   // 0 reserved
     ctx->cpu_bufs_next    = 1;   // 0 reserved
     ctx->cpu_freelist_len = 0;
+}
+
+// Thread-local pointer that the WNF_STACK / WNF_S_POS macros
+// dereference.  Default per thread is NULL; thvm_init binds it to the
+// main thread's CURRENT_CTX->wnf_state.  Worker threads spawned by the
+// parallel pool re-bind it to their own WnfThreadState before draining.
+_Thread_local WnfThreadState *CURRENT_WNF_STATE = NULL;
+
+// Single point of mutation for CURRENT_CTX so the WNF spine routing
+// stays in sync.  Every site that reassigns CURRENT_CTX must go
+// through this helper -- otherwise wnf() called after the switch
+// would dereference the old context's stack.
+static void thvm_set_current_ctx(TContext *ctx) {
+    CURRENT_CTX       = ctx;
+    if (ctx != NULL) CURRENT_WNF_STATE = &ctx->wnf_state;
 }
 
 // === term/ ===
@@ -83,6 +108,17 @@ static void init_default_ctx_scalars(TContext *ctx) {
 #include "heap/take.c"
 #include "heap/subst_var.c"
 #include "heap/subst_cop.c"
+// Atomic-flavoured siblings.  Same body as the plain helpers but
+// __atomic_*-based so workers in the parallel WNF / NF pool see
+// release-ordered writes.  Single-thread cost is identical on x86 /
+// arm64 TSO (relaxed loads compile to plain loads); the existing call
+// sites use the plain variants and opt in explicitly where SUB-bit
+// synchronisation matters.
+#include "heap/read_acq.c"
+#include "heap/set_rel.c"
+#include "heap/take_atomic.c"
+#include "heap/cas.c"
+#include "heap/subst_var_rel.c"
 
 // === instrument/ ===
 // Process-global hot-path counters for WL-side debugging.  Single
@@ -302,46 +338,26 @@ static void init_default_ctx_scalars(TContext *ctx) {
 // winning TOpt per program shape.
 #include "codegen/autotune.c"
 
+// === wnf/ pool ===
+// Worker pool data structures + CURRENT_WORKER thread-local.
+// Pool only references types from term/ and thvm.h, so it has no
+// dependency on wnf/ reducer code; the new (Bend2-style) AOT
+// runtime will reuse its pthread management when it lands.
+#include "wnf/pool.c"
+
 // === aot/ ===
-// AOT function-pointer table + helpers.  Declared BEFORE wnf so
-// TAG_REF dispatch can call aot_lookup() / AOT_CALLS.  Forward-
-// declares wnf so aot_force can call it (resolved at link time
-// since we're a single TU).
-fn Term wnf(Term term);
-fn Term cnf(Term term);
+// Bend2-style fork-emitting AOT runtime.  Phase 1: Task/Result +
+// continuation cells + worker pool; CPS emit lands in Phase 2.
+// See src/aot/_.c for the bundle layout.
 #include "aot/_.c"
-// Function-pointer ABI for runtime-loadable AOT dylibs.  Loaded
-// after aot/_.c so it can reference aot_register / aot_pop_app_arg
-// / etc.  Must come BEFORE wnf/_.c so any future TAG_REF dispatch
-// hooks see the same set of helpers.
-#include "aot/runtime_ops.c"
-// Auto-emitter that walks a TDef'd body and produces C source.
-// Phase 0: constants and identity only -- the rest of the patterns
-// (MAT chain, CTR destructure, OP2, DUP) land in follow-ups.  Sits
-// next to the runtime helpers because it walks book-heap cells via
-// book_read() and uses the same Term layout macros.
-#include "aot/emit.c"
-// Hand-coded AOT programs (proof-of-concept; will be replaced by
-// auto-emitted code once src/aot/emit.c lands).  Each program file
-// exposes one aot_program_<name>_register(def_id1, def_id2, ...)
-// entry that the WL surface or a C test calls after TDef'ing the
-// matching bodies.
-#include "aot/programs/fib_nat.c"
-#include "aot/programs/gab_tak.c"
-#include "aot/programs/u32_fib.c"
-// Build pipeline: emit + clang + dlopen + register.  References
-// thvm_aot_emit_def + aot_runtime_ops + aot_register from above.
-// Defines AOT_THVM_ROOT so the dylib's emitted #include can find
-// abi.h.  TODO when the source moves: pass via build flag.
-#ifndef AOT_THVM_ROOT
-#define AOT_THVM_ROOT "/Users/swish/src/thvm"
-#endif
-#include "aot/build.c"
 
 // === wnf/ ===
 // The reducer dispatches to the interactions and to materialize,
 // so every file it calls must be defined above.
 #include "wnf/_.c"
+// wnf/pool.c is included higher up (before the empty aot/ slot) so
+// the future Bend-style AOT runtime can reuse it.  The pool API
+// stays available to wnf_/redex_/nf_ callers below transparently.
 #include "wnf/redex.c"
 #include "wnf/nf.c"
 
@@ -446,12 +462,18 @@ fn Term cnf(Term term);
 // thvm_init AND thvm_context_create.  Picks default_device by name
 // ("cpu" / "metal" / NULL).
 static void init_ctx_arrays(TContext *ctx) {
-    ctx->heap           = (Term *)calloc(HEAP_CAP,     sizeof(Term));
-    ctx->wnf_stack      = (Term *)calloc(WNF_CAP,      sizeof(Term));
-    ctx->wnf_last_stack = (Term *)calloc(WNF_CAP,      sizeof(Term));
+    ctx->heap             = (Term *)calloc(HEAP_CAP,     sizeof(Term));
+    ctx->wnf_state.stack  = (Term *)calloc(WNF_CAP,      sizeof(Term));
+    ctx->wnf_last_stack   = (Term *)calloc(WNF_CAP,      sizeof(Term));
     ctx->tens           = (TenDesc *)calloc(TENS_CAP,  sizeof(TenDesc));
     ctx->kernels        = (KernelEntry *)calloc(KERNELS_CAP, sizeof(KernelEntry));
-    ctx->book_heap      = (Term *)calloc(BOOK_CAP,     sizeof(Term));
+    // book_heap: 16KB page-aligned so it can be wrapped as a
+    // shared MTLBuffer via newBufferWithBytesNoCopy without an
+    // intermediate copy on the AOT-on-Metal path.  BOOK_CAP *
+    // sizeof(Term) = 2 MiB = 128 pages on Apple Silicon, satisfying
+    // aligned_alloc's "size is a multiple of alignment" requirement.
+    ctx->book_heap      = (Term *)aligned_alloc(16384, BOOK_CAP * sizeof(Term));
+    memset(ctx->book_heap, 0, BOOK_CAP * sizeof(Term));
     ctx->alo_states     = (AloState *)calloc(ALO_STATE_CAP, sizeof(AloState));
     ctx->cpu_bufs       = (CpuBuf *)calloc(CPU_BUFS_CAP, sizeof(CpuBuf));
     init_default_ctx_scalars(ctx);
@@ -473,6 +495,10 @@ static void install_ctx_backends(TContext *ctx, const char *want) {
 
 void thvm_init(void) {
   init_ctx_arrays(CURRENT_CTX);
+  // Bind the main thread's WNF spine routing to the just-allocated
+  // ctx state.  Worker threads spawned by the parallel pool re-bind
+  // CURRENT_WNF_STATE to their own per-worker WnfThreadState.
+  CURRENT_WNF_STATE = &CURRENT_CTX->wnf_state;
   uop_const_cache_reset();   // CONST cache keyed by raw bits + dtype;
                              // stale entries point into a freed heap.
   uop_mov_cache_reset();     // movement-op cache, same lifecycle.
@@ -516,6 +542,11 @@ void thvm_init(void) {
 }
 
 void thvm_free(void) {
+  // Tear down the parallel-NF process-global pool first so its
+  // worker pthreads exit before we free the heap they've been
+  // sharing -- otherwise a worker that wakes mid-shutdown would
+  // dereference freed memory.  no-op if no nf call has happened yet.
+  nf_pool_global_release();
   // Lifter coverage dump.  Env-gated so the noise doesn't pollute
   // normal test output; turn on with THVM_DUMP_LIFT_COVERAGE=1 to
   // see how many cg_emit_tile_metal calls the lifter handled.
@@ -567,7 +598,6 @@ void thvm_free(void) {
   BOOK_NEXT       = 1;
   ALO_STATES_NEXT = 1;
   alo_dup_share_reset();
-  aot_reset();
   CPU_BUFS_NEXT   = 1;
   CPU_FREELIST_LEN = 0;
   memset(DEFS,             0, sizeof(((TContext *)0)->defs));
@@ -586,11 +616,11 @@ u32 thvm_context_create(const char *default_device) {
         if (!ctx) return 0;
         CONTEXTS[slot] = ctx;
         TContext *prev = CURRENT_CTX;
-        CURRENT_CTX = ctx;
+        thvm_set_current_ctx(ctx);
         init_ctx_arrays(ctx);
         install_ctx_backends(ctx, default_device);
         DEFAULT_BACKEND->init();
-        CURRENT_CTX = prev;
+        thvm_set_current_ctx(prev);
         return slot;
     }
     return 0;
@@ -599,7 +629,7 @@ u32 thvm_context_create(const char *default_device) {
 u32 thvm_context_select(u32 slot) {
     u32 prev = thvm_context_current();
     if (slot < CONTEXTS_CAP && CONTEXTS[slot] != NULL) {
-        CURRENT_CTX = CONTEXTS[slot];
+        thvm_set_current_ctx(CONTEXTS[slot]);
     }
     return prev;
 }
@@ -617,7 +647,7 @@ void thvm_context_destroy(u32 slot) {
     if (CONTEXTS[slot] == NULL) return;
     TContext *ctx = CONTEXTS[slot];
     TContext *prev = CURRENT_CTX;
-    CURRENT_CTX = ctx;
+    thvm_set_current_ctx(ctx);
     if (DEFAULT_BACKEND) DEFAULT_BACKEND->shutdown();
     // No cache / side-table resets here: uop_const_cache, uop_mov_cache,
     // KP_CACHE, LAM_SHAPE_TABLE, EXTERN_PIN*, JIT_CAPTURES, K_PROFILE
@@ -625,15 +655,15 @@ void thvm_context_destroy(u32 slot) {
     // per-ctx state.  Wiping them here would clobber live entries from
     // other contexts.  thvm_free() is the only correct site.
     free(ctx->heap);
-    free(ctx->wnf_stack);
+    free(ctx->wnf_state.stack);
     free(ctx->wnf_last_stack);
     free(ctx->tens);
     free(ctx->kernels);
     free(ctx->book_heap);
     free(ctx->alo_states);
     free(ctx->cpu_bufs);
-    CURRENT_CTX = prev;
-    if (CURRENT_CTX == ctx) CURRENT_CTX = CONTEXTS[0];
+    thvm_set_current_ctx(prev);
+    if (CURRENT_CTX == ctx) thvm_set_current_ctx(CONTEXTS[0]);
     free(ctx);
     CONTEXTS[slot] = NULL;
 }

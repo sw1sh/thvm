@@ -2080,106 +2080,95 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ref(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
-// AOT bridge: register the hand-coded fib_nat AOT under the given
-// def slots.  Args: [def_add, def_fib, def_u32].  Returns the count
-// of AOT entries registered (3 on success).
-EXTERN_C DLLEXPORT int thvm_wl_aot_register_fib_nat(WolframLibraryData libData,
-                                                    mint argc, MArgument *args, MArgument res) {
-  (void)libData; (void)argc;
-  u32 def_add = (u32)MArgument_getInteger(args[0]);
-  u32 def_fib = (u32)MArgument_getInteger(args[1]);
-  u32 def_u32 = (u32)MArgument_getInteger(args[2]);
-  aot_program_fib_nat_register(def_add, def_fib, def_u32);
-  MArgument_setInteger(res, 3);
-  return LIBRARY_NO_ERROR;
-}
+// === AOT (Bend2-style fork-emitting AOT, Phase 4 surface) ============
+//
+// Phase 1+2 built the runtime + emitter in src/aot/.  This is the
+// minimum WL bridge so users can drive the emitter from
+// THVMLink`AOT and inspect what gets generated.  TAOTCompile (the
+// dlopen path) lands as the OPS-indirection ABI matures; for now
+// TAOTEmit returns the source string and tests / docs can run it
+// through the standalone-binary path proven by tests/test_aot_e2e.c.
 
-// AOT bridge: register the hand-coded gab_tak AOT under the given
-// def slots.  Args: [def_pred, def_lte, def_tak_go, def_tak, def_u32_to].
-// Returns 5 on success.
-EXTERN_C DLLEXPORT int thvm_wl_aot_register_gab_tak(WolframLibraryData libData,
-                                                    mint argc, MArgument *args, MArgument res) {
-  (void)libData; (void)argc;
-  u32 def_pred   = (u32)MArgument_getInteger(args[0]);
-  u32 def_lte    = (u32)MArgument_getInteger(args[1]);
-  u32 def_tak_go = (u32)MArgument_getInteger(args[2]);
-  u32 def_tak    = (u32)MArgument_getInteger(args[3]);
-  u32 def_u32_to = (u32)MArgument_getInteger(args[4]);
-  aot_program_gab_tak_register(def_pred, def_lte, def_tak_go,
-                               def_tak, def_u32_to);
-  MArgument_setInteger(res, 5);
-  return LIBRARY_NO_ERROR;
-}
-
-// AOT bridge: register the hand-coded u32_fib AOT under the given
-// def slot.  Args: [def_u32_fib].  Returns 1 on success.
-EXTERN_C DLLEXPORT int thvm_wl_aot_register_u32_fib(WolframLibraryData libData,
-                                                    mint argc, MArgument *args, MArgument res) {
-  (void)libData; (void)argc;
-  u32 def_u32_fib = (u32)MArgument_getInteger(args[0]);
-  aot_program_u32_fib_register(def_u32_fib);
-  MArgument_setInteger(res, 1);
-  return LIBRARY_NO_ERROR;
-}
-
-// Returns the cumulative AOT call count since the last reset.
-EXTERN_C DLLEXPORT int thvm_wl_aot_calls(WolframLibraryData libData, mint argc,
-                                         MArgument *args, MArgument res) {
-  (void)libData; (void)argc; (void)args;
-  MArgument_setInteger(res, (mint)aot_calls());
-  return LIBRARY_NO_ERROR;
-}
-
-// Compile + load the AOT for a TDef'd def.  Args: [def_id].
-// Returns 1 on success, 0 on failure.
-EXTERN_C DLLEXPORT int thvm_wl_aot_compile(WolframLibraryData libData,
-                                           mint argc, MArgument *args,
-                                           MArgument res) {
-  (void)libData; (void)argc;
-  u32 def_id = (u32)MArgument_getInteger(args[0]);
-  int ok = thvm_aot_compile_and_load(def_id);
-  MArgument_setInteger(res, ok);
-  return LIBRARY_NO_ERROR;
-}
-
-// Load a pre-compiled AOT dylib + register it under a given def slot.
-// Args: [dylib_path (UTF8), def_slot].  Returns 1 on success.
-EXTERN_C DLLEXPORT int thvm_wl_aot_load_dylib(WolframLibraryData libData,
-                                              mint argc, MArgument *args,
-                                              MArgument res) {
-  (void)libData; (void)argc;
-  const char *path = MArgument_getUTF8String(args[0]);
-  u32 def_slot = (u32)MArgument_getInteger(args[1]);
-  int ok = thvm_aot_load_dylib(path, def_slot);
-  if (libData != NULL && libData->UTF8String_disown != NULL) {
-    libData->UTF8String_disown((char *)path);
-  }
-  MArgument_setInteger(res, ok);
-  return LIBRARY_NO_ERROR;
-}
-
-// Emit C source for a TDef'd def slot.  Phase 0 of the auto-emitter:
-// supports constant-returning defs and the identity lambda.
-// Returns the emitted source as a UTF-8 string; caller (WL side)
-// receives ownership via MArgument_setUTF8String + libData->UTF8String_disown.
-EXTERN_C DLLEXPORT int thvm_wl_aot_emit_def(WolframLibraryData libData,
-                                            mint argc, MArgument *args, MArgument res) {
+EXTERN_C DLLEXPORT int thvm_wl_aot_emit_program(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
   (void)argc;
-  u32 def_id = (u32)MArgument_getInteger(args[0]);
-  char *src = thvm_aot_emit_def(def_id);
+  u32 def_id      = (u32) MArgument_getInteger(args[0]);
+  const char *nm  =       MArgument_getUTF8String(args[1]);
+
+  char *src = thvm_aot_emit_program(def_id, nm);
+  if (libData != NULL && libData->UTF8String_disown != NULL) {
+    libData->UTF8String_disown((char *)nm);
+  }
   if (src == NULL) {
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
-  // The library protocol expects MArgument_setUTF8String to take a
-  // pointer the runtime owns -- we let the library copy it and free
-  // our buffer.  In practice WolframLibraryData copies, so we
-  // free immediately after.  If your runtime keeps the pointer,
-  // switch to a sticky-ownership model.
   MArgument_setUTF8String(res, src);
-  // Don't free src here -- the LibraryLink runtime handles ownership
-  // per its UTF8String contract.
-  (void)libData;
+  return LIBRARY_NO_ERROR;
+}
+
+// Phase 4 iter E3: compile + load+run bridges.
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_compile(WolframLibraryData libData,
+                                           mint argc, MArgument *args,
+                                           MArgument res) {
+  (void)argc;
+  u32 def_id      = (u32) MArgument_getInteger(args[0]);
+  const char *nm  =       MArgument_getUTF8String(args[1]);
+
+  char *path = thvm_aot_compile_to_dylib(def_id, nm);
+  if (libData != NULL && libData->UTF8String_disown != NULL) {
+    libData->UTF8String_disown((char *)nm);
+  }
+  if (path == NULL) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  // path is malloc'd by build.c -- WL takes ownership via UTF8String
+  // and frees via UTF8String_disown when done.  Hand it over.
+  MArgument_setUTF8String(res, path);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_run(WolframLibraryData libData,
+                                       mint argc, MArgument *args,
+                                       MArgument res) {
+  (void)argc;
+  const char *path = MArgument_getUTF8String(args[0]);
+  const char *nm   = MArgument_getUTF8String(args[1]);
+  u64 input        = (u64)MArgument_getInteger(args[2]);
+
+  u64 result = thvm_aot_load_and_run(path, nm, input);
+
+  if (libData != NULL && libData->UTF8String_disown != NULL) {
+    libData->UTF8String_disown((char *)path);
+    libData->UTF8String_disown((char *)nm);
+  }
+  MArgument_setInteger(res, (mint)result);
+  return LIBRARY_NO_ERROR;
+}
+
+// 4-input variant for multi-arg defs (build, ack, gab_tak, ...).
+// Extra slots default to 0; the dispatch ignores trailing args.
+EXTERN_C DLLEXPORT int thvm_wl_aot_run4(WolframLibraryData libData,
+                                        mint argc, MArgument *args,
+                                        MArgument res) {
+  (void)argc;
+  const char *path = MArgument_getUTF8String(args[0]);
+  const char *nm   = MArgument_getUTF8String(args[1]);
+  u64 in0 = (u64)MArgument_getInteger(args[2]);
+  u64 in1 = (u64)MArgument_getInteger(args[3]);
+  u64 in2 = (u64)MArgument_getInteger(args[4]);
+  u64 in3 = (u64)MArgument_getInteger(args[5]);
+
+  u64 result = thvm_aot_load_and_run4(path, nm, in0, in1, in2, in3);
+
+  if (libData != NULL && libData->UTF8String_disown != NULL) {
+    libData->UTF8String_disown((char *)path);
+    libData->UTF8String_disown((char *)nm);
+  }
+  MArgument_setInteger(res, (mint)result);
   return LIBRARY_NO_ERROR;
 }
 
@@ -2189,6 +2178,39 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_pri(WolframLibraryData libData, mint arg
   u32 prim_id = (u32)MArgument_getInteger(args[0]);
   Term r = term_new_pri(prim_id);
   MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+// Phase 7 iter E: AOT-on-Metal end-to-end via WL.
+// Args: [def_id, name, arg0, arg1, arg2, arg3].  Unused arg slots
+// (beyond the def's TLam-peel arity) are ignored by the emitted
+// kernel.  Returns the resulting Term as an Integer.
+//
+// Forward decl mirrors the prototype in src/backend/metal/_.m.
+extern Term thvm_aot_metal_compile_and_run(
+    const char *name, u32 def_id,
+    Term *args, u32 n_args,
+    Term *book_heap, u64 book_cells,
+    u64 *book_next_inout);
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_metal_run4(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  u32 def_id = (u32)MArgument_getInteger(args[0]);
+  const char *name = MArgument_getUTF8String(args[1]);
+  Term targs[4];
+  for (int i = 0; i < 4; i++) {
+    targs[i] = (Term)MArgument_getInteger(args[2 + i]);
+  }
+  u64 book_next_state = BOOK_NEXT;
+  Term result = thvm_aot_metal_compile_and_run(
+      name, def_id, targs, 4,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  BOOK_NEXT = book_next_state;
+  if (libData != NULL && libData->UTF8String_disown != NULL) {
+    libData->UTF8String_disown((char *)name);
+  }
+  MArgument_setInteger(res, (mint)result);
   return LIBRARY_NO_ERROR;
 }
 
@@ -2619,6 +2641,87 @@ EXTERN_C DLLEXPORT int thvm_wl_context_count(WolframLibraryData libData, mint ar
   u32 n = 0;
   for (u32 i = 0; i < CONTEXTS_CAP; i++) if (CONTEXTS[i]) n++;
   MArgument_setInteger(res, (mint)n);
+  return LIBRARY_NO_ERROR;
+}
+
+// === Worker pool: thread count + per-run stats introspection ======
+//
+// `TThreads[n]` -> thvm_wl_pool_set_threads sets the worker count nf
+// uses on the next call; 0 reverts to env-var precedence.
+// `TThreads[]`  -> thvm_wl_pool_get_threads returns the resolved count.
+// `TPoolStats[]` then reads scalar fields out of the most recent
+// captured snapshot.
+//
+// Stats fields are exposed by integer code so the WL side can iterate
+// without depending on struct layout.  The codes are mirrored in
+// Pool.wl ($TPoolStatField).
+
+EXTERN_C DLLEXPORT int thvm_wl_pool_set_threads(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
+  (void)libData; (void)argc;
+  mint n = MArgument_getInteger(args[0]);
+  if (n < 0) n = 0;
+  nf_set_threads((u32)n);
+  MArgument_setInteger(res, (mint)nf_get_threads());
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_pool_get_threads(WolframLibraryData libData,
+                                                mint argc, MArgument *args,
+                                                MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)nf_get_threads());
+  return LIBRARY_NO_ERROR;
+}
+
+// Pool-level scalars (n_workers, drain_rounds, drain_wall_ns, total_fires)
+// addressed by integer code.  Returns 0 for unknown codes.
+EXTERN_C DLLEXPORT int thvm_wl_pool_stats_pool_field(WolframLibraryData libData,
+                                                     mint argc, MArgument *args,
+                                                     MArgument res) {
+  (void)libData; (void)argc;
+  mint code = MArgument_getInteger(args[0]);
+  const WnfPoolStats *s = wnf_pool_last_stats();
+  u64 v = 0;
+  switch (code) {
+    case 0: v = s->n_workers;     break;   // n_workers
+    case 1: v = s->drain_rounds;  break;   // drain_rounds
+    case 2: v = s->drain_wall_ns; break;   // drain_wall_ns
+    case 3: v = s->total_fires;   break;   // total_fires
+    default: v = 0;
+  }
+  MArgument_setInteger(res, (mint)v);
+  return LIBRARY_NO_ERROR;
+}
+
+// Per-worker scalar by (worker_id, field_code).  Field codes:
+//   0 fires, 1 steals, 2 steal_attempts, 3 pushes,
+//   4 active_ns, 5 idle_ns, 6 wakeups, 7 itrs_delta.
+// Returns 0 if the worker_id is out of range or the code is unknown.
+EXTERN_C DLLEXPORT int thvm_wl_pool_stats_worker_field(WolframLibraryData libData,
+                                                       mint argc, MArgument *args,
+                                                       MArgument res) {
+  (void)libData; (void)argc;
+  mint wid  = MArgument_getInteger(args[0]);
+  mint code = MArgument_getInteger(args[1]);
+  const WnfPoolStats *s = wnf_pool_last_stats();
+  u64 v = 0;
+  if (wid >= 0 && wid < (mint)s->n_workers) {
+    const WnfWorkerStats *w = &s->workers[wid];
+    switch (code) {
+      case 0: v = w->fires;          break;
+      case 1: v = w->steals;         break;
+      case 2: v = w->steal_attempts; break;
+      case 3: v = w->pushes;         break;
+      case 4: v = w->active_ns;      break;
+      case 5: v = w->idle_ns;        break;
+      case 6: v = w->wakeups;        break;
+      case 7: v = w->itrs_delta;     break;
+      default: v = 0;
+    }
+  }
+  MArgument_setInteger(res, (mint)v);
   return LIBRARY_NO_ERROR;
 }
 

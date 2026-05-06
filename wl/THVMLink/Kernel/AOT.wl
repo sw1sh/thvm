@@ -1,204 +1,203 @@
 (* ::Package:: *)
-(* AOT.wl -- WL surface for the ahead-of-time compiled definition path.
-   See src/aot/_.c for the runtime contract.
+(* AOT.wl -- WL surface for ahead-of-time compilation.
 
-   Usage today (hand-coded programs only):
+   The Bend2-style fork-emitting AOT lives in src/aot/.  Phase 1 built
+   the runtime (Task / Result / cont / worker), Phase 2 built the
+   emitter that translates a TDef'd body into compilable C source
+   (par_<name>_entry + par_<name>_cont_K + dispatch table).  Phase 4
+   (this file) exposes the emitter to WL.
+
+   Usage:
 
        TInit[];
-       TDef["add", ...]; TDef["fib", ...]; TDef["u32", ...];
-       prog = TAOT["fib_nat", {"add", "fib", "u32"}];
-       TWnf @ TApp[TApp[TRef["u32"], TApp[TRef["fib"], nat[25]]], TNum[0]]
-       (* same answer as without TAOT, ~14x faster on fib(25) *)
+       TDef["count", TLam[n, TMatChain[
+         <|0 -> TNum[1],
+           1 -> TLam[p, TOp2["+", TApp[TRef["count"], TVar[p]],
+                                  TApp[TRef["count"], TVar[p]]]]|>,
+         TLam[ig, TEra[]]][n]]];
 
-   The TDef bodies are still required because the AOT falls back to
-   the lazy ALO interpreter for any pattern it didn't compile a case
-   for (partial application, unexpected tag, etc.).  Removing the
-   TDef would break that deopt path.
+       src = TAOTEmit["count"];
+       (* `src` is the C source string -- inspect, save, or compile
+          via tests/test_aot_e2e.c-style harness.  See docs/aot.md. *)
 
-   TAOT returns a TAOTProgram[<|...|>] wrapper that renders with a
-   summary box (name, defs, slots, live call count) -- think of it
-   as the AOT analogue of CompiledFunction.
-
-   Future: TAOTCompile[<list of def names>] will run the auto-emitter
-   in src/aot/emit.c (not yet shipped), produce specialised C, build
-   it via clang, dlopen, and register the resulting function pointers
-   automatically -- replacing the hand-coded `TAOT["fib_nat", ...]`
-   call with `TAOTCompile[{"add", "fib", "u32"}]`. *)
+   TAOTCompile (compile + dlopen + run in-process) lands once the
+   runtime-OPS ABI is in place -- without it, the dylib's #include
+   "thvm.c" gets its own copy of every global (HEAP, DEFS, ...) and
+   the host can't share heap state.  For now TAOTEmit returns the
+   source and tests can verify it via the standalone-binary path
+   proven in tests/test_aot_e2e.c.
+*)
 
 BeginPackage["THVMLink`"];
 
-(* Forward-declare symbols owned by later-loading siblings so
-   references in AOT.wl resolve to THVMLink`Foo (not the
-   THVMLink`Private`Foo placeholder Mathematica would otherwise
-   manufacture).  Same trick as Format.wl. *)
-{TDefName, TInit};
+TAOTEmit::usage =
+  "TAOTEmit[name] returns the C source string that thvm_aot_emit_program \
+produces for the def registered under `name`.  Inspect, save, or wrap \
+manually for further compile.  TAOTCompile + TAOTRun automate those \
+steps; this is the lower-level surface.";
 
-TAOT::usage = "TAOT[programName, defNames] enables a hand-coded AOT program.  `programName` selects the C-side `aot_program_<name>_register` function (currently only \"fib_nat\" is shipped); `defNames` is the ordered list of def-name strings the program expects -- their TDefName slots are passed verbatim to the registration call.  Returns a TAOTProgram[<|...|>] wrapper (renders as a summary box).  The matching defs must already be TDef'd; the AOT falls back to the interpreter for any pattern it doesn't recognise.";
+TAOTCompile::usage =
+  "TAOTCompile[name] emits the def under `name`, wraps it with the thvm \
+runtime + an aot_program_<name>_run entry, invokes clang to produce a \
+dylib, and stashes the resulting path so TAOTRun[name, input] can dlopen \
+it.  Returns the dylib path string.  Cache-by-content: same source -> \
+same path -> skips the clang call on subsequent invocations.";
 
-TAOTProgram::usage = "TAOTProgram[<|name, defs, slots, registered, calls0|>] is the typed wrapper TAOT returns.  Indexable: prog[\"name\"], prog[\"defs\"], prog[\"slots\"], prog[\"registered\"], prog[\"calls\"] (live count since registration).  Renders as a summary box with the same fields.";
+TAOTRun::usage =
+  "TAOTRun[name, input_TTerm] dlopens the AOT'd dylib for `name` (must \
+have been TAOTCompile'd first), invokes its run entry with `input` as the \
+argument Term, and returns the result wrapped as a TTerm.  For programs \
+that reduce to a NUM the result is a self-contained TTerm carrying the \
+scalar value.  CTR-returning programs reference the dylib's heap and \
+can't be decoded host-side without further marshalling -- use TAOTEmit \
++ a custom harness for those today.";
 
-TAOTReset::usage = "TAOTReset[] clears every registered AOT function.  TInit / TReset already calls aot_reset() internally so this is a no-op against a fresh init -- expose for explicit teardown when swapping programs without a heap reset.";
-
-TAOTCalls::usage = "TAOTCalls[] returns the cumulative count of WNF -> AOT dispatches (entries through the TAG_REF fast path) since the last TAOTReset / TInit.  Diagnostic only; the AOT does most of its work via direct C recursion that doesn't bump this counter.";
-
-TAOTPrograms::usage = "TAOTPrograms[] returns the list of program names that ship a hand-coded AOT under src/aot/programs/.  Each can be registered via TAOT[name, defNames].";
-
-TAOTCompile::usage = "TAOTCompile[name] runs the auto-emitter on the named TDef, writes the C source to /tmp/thvm_aot_<hash>.c, invokes clang -O2 -shared to build /tmp/thvm_aot_<hash>.dylib, dlopens it, and calls its aot_dylib_init() with the host's runtime-ops struct.  Returns 1 on success, 0 on failure.  The TAG_REF dispatch routes through the AOT immediately; subsequent TWnf goes through native code.  Phase coverage matches TAOTEmit -- bodies the emitter doesn't fully cover (e.g. TUOp / TSup / TBri) fall back to the interpreter for unsupported sub-trees.";
-
-TAOTEmit::usage = "TAOTEmit[name] returns the C source the auto-emitter would produce for the def at TDefName[name].  Phase 0 of the auto-emitter: only constants and the identity lambda are supported; unsupported AST nodes emit a fallback comment.  Drop the result under src/aot/programs/<name>.c and rebuild thvm to use it.";
-
-TAOT::badprog = "Unknown AOT program `1`; expected one of `2`.";
-TAOT::badargc = "AOT program `1` expects `2` def name(s); got `3`.";
+TAOTPath::usage =
+  "TAOTPath[name] returns the dylib path stashed by TAOTCompile[name], \
+or Missing[\"NotCompiled\"] if the def has never been TAOTCompile'd.";
 
 Begin["`Private`"];
 
-(* === LibraryLink loaders ============================================ *)
+(* Lazy-loaded library functions (matches the pattern used by every
+   other Kernel/*.wl file -- `load` is shared from THVMLink.wl via
+   the THVMLink`Private namespace). *)
+$aotEmitFn    := $aotEmitFn    = load["thvm_wl_aot_emit_program",
+    {Integer, "UTF8String"}, "UTF8String"]
+$aotCompileFn := $aotCompileFn = load["thvm_wl_aot_compile",
+    {Integer, "UTF8String"}, "UTF8String"]
+$aotRunFn     := $aotRunFn     = load["thvm_wl_aot_run",
+    {"UTF8String", "UTF8String", Integer}, Integer]
+$aotRun4Fn    := $aotRun4Fn    = load["thvm_wl_aot_run4",
+    {"UTF8String", "UTF8String", Integer, Integer, Integer, Integer},
+    Integer]
 
-$aotRegFibNatFn := $aotRegFibNatFn = load["thvm_wl_aot_register_fib_nat",
-    {Integer, Integer, Integer}, Integer];
-$aotRegGabTakFn := $aotRegGabTakFn = load["thvm_wl_aot_register_gab_tak",
-    {Integer, Integer, Integer, Integer, Integer}, Integer];
-$aotRegU32FibFn := $aotRegU32FibFn = load["thvm_wl_aot_register_u32_fib",
-    {Integer}, Integer];
-$aotCallsFn     := $aotCallsFn     = load["thvm_wl_aot_calls",     {}, Integer];
-$aotEmitDefFn   := $aotEmitDefFn   = load["thvm_wl_aot_emit_def",  {Integer}, "UTF8String"];
-$aotCompileFn   := $aotCompileFn   = load["thvm_wl_aot_compile",   {Integer}, Integer];
+(* Path map populated by TAOTCompile so TAOTRun knows which dylib to
+   dlopen for a given name.  Per-session; not persisted. *)
+$aotPaths = <||>;
 
-(* === Program registry ================================================
-   Each entry: program-name -> {arity, register-fn taking that many
-   integer slot ids}.  Adding a new hand-coded program means dropping
-   it under src/aot/programs/, adding a thvm_wl_aot_register_<name>
-   bridge in thvmlink.c, then one line here. *)
+(* TDefName lives in `THVMLink`` (public context, declared via
+   ::usage in Ref.wl), but Ref.wl loads AFTER AOT.wl in the
+   alphabetical sibling order.  At AOT.wl parse time the bare
+   `TDefName` symbol gets created in the current context
+   (THVMLink`Private`), which is distinct from the THVMLink`TDefName
+   that Ref.wl will later attach downvalues to.
 
-$aotPrograms = <|
-    "fib_nat" -> <|"arity" -> 3,
-                   "register" -> ($aotRegFibNatFn[#1, #2, #3] &)|>,
-    "gab_tak" -> <|"arity" -> 5,
-                   "register" -> ($aotRegGabTakFn[#1, #2, #3, #4, #5] &)|>,
-    "u32_fib" -> <|"arity" -> 1,
-                   "register" -> ($aotRegU32FibFn[#1] &)|>
-|>;
+   Defer the lookup to call time via Symbol["THVMLink`TDefName"]
+   so we hit the right symbol after Ref.wl has loaded.  Same trick
+   below for `ttermRaw` (used by TAOTRun to unbox a TTerm input). *)
+defNameLookup[name_] := Symbol["THVMLink`TDefName"][name]
+ttermUnbox[t_]       := Symbol["THVMLink`Private`ttermRaw"][t]
 
-TAOTPrograms[] := Keys[$aotPrograms]
+TAOTEmit[name_String]  := (ensureInit[]; $aotEmitFn[defNameLookup[name], name])
+TAOTEmit[name_Integer] := (ensureInit[]; $aotEmitFn[name, "def" <> ToString[name]])
 
-TAOT[programName_String, defNames_List] := Module[{spec, ids, n, registered},
-    ensureInit[];
-    spec = Lookup[$aotPrograms, programName, None];
-    If[ spec === None,
-        Message[TAOT::badprog, programName, Keys[$aotPrograms]];
-        Return[$Failed]
-    ];
-    n = spec["arity"];
-    If[ Length[defNames] =!= n,
-        Message[TAOT::badargc, programName, n, Length[defNames]];
-        Return[$Failed]
-    ];
-    ids = TDefName /@ defNames;
-    registered = Apply[spec["register"], ids];
-    TAOTProgram[<|
-        "name"       -> programName,
-        "defs"       -> defNames,
-        "slots"      -> ids,
-        "registered" -> registered,
-        "calls0"     -> $aotCallsFn[]
-    |>]
-]
-
-TAOTCalls[] := (ensureInit[]; $aotCallsFn[])
-
-TAOTReset[] := TInit[]
-
-(* === Phase 0 auto-emitter ============================================
-   TAOTEmit[name] returns the C source the auto-emitter generates for
-   a TDef'd body.  Phase 0 supports just constants and the identity
-   lambda; anything else emits "/* unsupported */" comments and a
-   fallback to the interpreter.  Drop the result under
-   src/aot/programs/<name>.c and rebuild thvm to use it.  Future
-   phases will compile + dlopen automatically (TAOTCompile). *)
-
-TAOTEmit[name_] := (
-    ensureInit[];
-    $aotEmitDefFn[TDefName[name]]
-)
-
-(* TAOTCompile[name]: end-to-end auto-AOT.  Emits the def's body
-   to /tmp/thvm_aot_<hash>.c, invokes clang -O2 -shared, dlopens
-   the resulting .dylib, and calls its aot_dylib_init() with the
-   host's runtime-ops struct + the def's slot.  Returns 1 on
-   success, 0 on failure (compile error, missing dlopen, etc.).
-   The TAG_REF dispatch picks up the registered AOT immediately;
-   subsequent TWnf calls go through native code instead of the
-   lazy ALO interpreter. *)
-
-TAOTCompile[name_] := (
-    ensureInit[];
-    $aotCompileFn[TDefName[name]]
-)
-
-(* === TAOTProgram payload accessors ================================== *)
-
-(* Q-test mirrors Format.wl's pattern: structural shape check before
-   the MakeBoxes UpValue fires. *)
-tAOTProgramQ[TAOTProgram[a_Association]] :=
-    KeyExistsQ[a, "name"] && KeyExistsQ[a, "defs"] &&
-    KeyExistsQ[a, "slots"] && KeyExistsQ[a, "registered"] &&
-    KeyExistsQ[a, "calls0"]
-tAOTProgramQ[___] := False
-
-(* Field access.  `prog["calls"]` returns the live count *delta* since
-   registration -- distinct from the static "calls0" baseline. *)
-TAOTProgram[a_Association ? AssociationQ][k_String] := Switch[k,
-    "calls", $aotCallsFn[] - a["calls0"],
-    _,       Lookup[a, k, Missing["KeyAbsent", k]]
-]
-
-(* === Summary-box icon =============================================== *)
-(* Compiler-y wedge: incoming triangle (source) feeding into a
-   colored disk (compiled artifact), suggesting "compiled to native". *)
-
-aotSummaryIcon[] := Graphics[
-    {
-        EdgeForm[LightDarkSwitched[Black, White]],
-        FaceForm[LightDarkSwitched[Lighter[StandardGreen, 0.55],
-                                    Darker[StandardGreen, 0.4]]],
-        Disk[{0.15, 0}, 0.5],
-        FaceForm[LightDarkSwitched[Black, White]], EdgeForm[None],
-        Polygon[{{-0.6, -0.55}, {-0.6, 0.55}, {-0.05, 0}}]
-    },
-    ImageSize -> Dynamic[{Automatic,
-        3.0 CurrentValue["FontCapHeight"] /
-            AbsoluteCurrentValue[Magnification]}],
-    PlotRangePadding -> Scaled[0.05]
-]
-
-(* === MakeBoxes UpValue =============================================== *)
-
-TAOTProgram /: MakeBoxes[p_TAOTProgram /; tAOTProgramQ[Unevaluated[p]], fmt_] :=
-    With[{a = First[p], icon = aotSummaryIcon[], live = $aotCallsFn[] - First[p]["calls0"]},
-        BoxForm`ArrangeSummaryBox[
-            "TAOTProgram",
-            p,
-            icon,
-            {
-                {
-                    BoxForm`SummaryItem[{"name: ", a["name"]}],
-                    BoxForm`SummaryItem[{"defs: ",
-                        Row[Riffle[a["defs"], ", "]]}]
-                }
-            },
-            {
-                {
-                    BoxForm`SummaryItem[{"slots: ", a["slots"]}],
-                    BoxForm`SummaryItem[{"registered: ", a["registered"]}]
-                },
-                {
-                    BoxForm`SummaryItem[{"calls (live): ", live}]
-                }
-            },
-            fmt,
-            "Interpretable" -> Automatic
-        ]
+TAOTCompile[name_String] := (
+  ensureInit[];
+  Module[{path = $aotCompileFn[defNameLookup[name], name]},
+    If[ StringLength[path] == 0,
+      $Failed,
+      $aotPaths[name] = path;
+      path
     ]
+  ]
+);
+TAOTCompile[name_Integer] := (
+  ensureInit[];
+  Module[{nm = "def" <> ToString[name],
+          path},
+    path = $aotCompileFn[name, nm];
+    If[ StringLength[path] == 0,
+      $Failed,
+      $aotPaths[nm] = path;
+      path
+    ]
+  ]
+);
+
+TAOTPath[name_String] := Lookup[$aotPaths, name, Missing["NotCompiled"]]
+
+TAOTRun[name_String, input_TTerm] := (
+  ensureInit[];
+  Module[{path = TAOTPath[name], in, raw},
+    If[ MissingQ[path], Return[$Failed]];
+    in  = ttermUnbox[input];
+    raw = $aotRunFn[path, name, in];
+    (* Wrap the result as a TTerm.  TTerm[raw_Integer] is the
+       low-level constructor (matches what ttermRaw round-trips). *)
+    Symbol["THVMLink`TTerm"][raw]
+  ]
+);
+
+(* Convenience: also accept raw Integer input (skips the TTerm
+   wrap).  Useful for NUM-keyed dispatches. *)
+TAOTRun[name_String, input_Integer] := TAOTRun[name,
+  Symbol["THVMLink`TNum"][input]
+];
+
+(* Multi-arg form: TAOTRun[name, {arg0, arg1, ...}].  Up to 4 args
+   (matches AOT_MAX_ARGS).  Each arg can be a TTerm or a raw
+   Integer (wrapped as TNum).  Trailing slots default to 0.
+   Unlocks 2/3-arg defs (build, ack, gab_tak, ...). *)
+toRawArg[t_TTerm]  := ttermUnbox[t]
+toRawArg[i_Integer] := ttermUnbox[Symbol["THVMLink`TNum"][i]]
+toRawArg[_]         := 0
+
+TAOTRun[name_String, inputs_List] := (
+  ensureInit[];
+  Module[{path = TAOTPath[name], raws, raw},
+    If[ MissingQ[path], Return[$Failed]];
+    If[ Length[inputs] > 4,
+      Message[TAOTRun::nargs, Length[inputs]];
+      Return[$Failed]];
+    raws = PadRight[toRawArg /@ inputs, 4, 0];
+    raw  = $aotRun4Fn[path, name, raws[[1]], raws[[2]], raws[[3]], raws[[4]]];
+    Symbol["THVMLink`TTerm"][raw]
+  ]
+);
+TAOTRun::nargs = "TAOTRun supports up to 4 args (got `1`).";
+TAOTRun::method = "Method `1` not supported in this build.";
+
+(* === Method dispatcher (Phase 7) ====================================
+   When the call carries an explicit `Method -> spec` rule, route to
+   the right backend.  Without the Method rule, falls through to the
+   existing TAOTRun[name, input] / [name, inputs_List] overloads
+   above (the default CPU/dlopen path).
+
+   Method spec shapes:
+     "Metal"                          -- Phase 7 GPU path: emit MSL,
+                                          xcrun metallib, dispatch.
+     "CPU"                            -- single-thread native (current
+                                          dlopen'd C path).
+     {"CPU", "NumThreads" -> n}       -- worker-pool parallel CPU
+                                          (Phase 1 wnf_pool integration
+                                          -- not yet wired here).
+*)
+
+$aotMetalRun4Fn := $aotMetalRun4Fn = load[
+    "thvm_wl_aot_metal_run4",
+    {Integer, "UTF8String", Integer, Integer, Integer, Integer},
+    Integer];
+
+aotMetalRunImpl[name_String, args_List] := Module[{slots, raws},
+  raws  = toRawArg /@ args;
+  slots = PadRight[raws, 4, 0];
+  Symbol["THVMLink`TTerm"][
+    $aotMetalRun4Fn[Symbol["THVMLink`TDefName"][name], name,
+                    slots[[1]], slots[[2]], slots[[3]], slots[[4]]]]
+]
+aotMetalRunImpl[name_String, input_TTerm]   := aotMetalRunImpl[name, {input}]
+aotMetalRunImpl[name_String, input_Integer] := aotMetalRunImpl[name,
+  {Symbol["THVMLink`TNum"][input]}]
+
+TAOTRun[name_String, args_, Method -> spec_] := Module[{head},
+  ensureInit[];
+  head = Switch[spec, _String, spec, {_String, ___}, First[spec], _, None];
+  Switch[head,
+    "Metal", aotMetalRunImpl[name, args],
+    "CPU",   TAOTRun[name, args],   (* fall through to existing CPU impl *)
+    _,       Message[TAOTRun::method, spec]; $Failed
+  ]
+]
 
 End[];
 EndPackage[];

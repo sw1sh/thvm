@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <stdatomic.h>   // _Atomic typing for the per-context counters
 
 // === Types ===
 typedef uint8_t  u8;
@@ -195,6 +196,17 @@ typedef u64 Term;
 #define OP_MUL  2
 #define OP_EQ   3   // returns NUM(1) for equal, NUM(0) otherwise
 #define OP_LT   4   // less-than: NUM(1) if x<y else NUM(0)
+#define OP_DIV  5   // unsigned div; OP_DIV by 0 -> NUM(0)
+#define OP_MOD  6   // unsigned mod; OP_MOD by 0 -> NUM(0)
+#define OP_XOR  7   // bitwise xor
+#define OP_AND  8   // bitwise and
+#define OP_OR   9   // bitwise or
+#define OP_SHL  10  // left shift (yv & 31)
+#define OP_SHR  11  // right shift (yv & 31)
+#define OP_GT   12  // NUM(1) if x>y
+#define OP_LE   13  // NUM(1) if x<=y
+#define OP_GE   14  // NUM(1) if x>=y
+#define OP_NE   15  // NUM(1) if x!=y
 
 // === Dtypes ===
 //
@@ -1217,10 +1229,23 @@ typedef struct {
 // bitmap, and the CPU buf/freelist pools) become fields of this
 // struct.  Macros below redirect each old global identifier through
 // CURRENT_CTX so the rest of the runtime keeps compiling unchanged.
+// Per-thread WNF spine state.  Lives inside TContext (singleton on
+// the main thread) and inside each parallel WnfWorker; a thread-
+// local pointer (`CURRENT_WNF_STATE`) selects which one the
+// `WNF_STACK` / `WNF_S_POS` macros dereference.  This is the
+// minimal scaffolding the parallel WNF / NF pool needs without
+// retyping the whole TContext layout.
+typedef struct {
+    Term *stack;
+    u32   s_pos;
+} WnfThreadState;
+
 typedef struct TContext {
     /* Heap-allocated arrays (calloc on context_create). */
     Term       *heap;
-    Term       *wnf_stack;
+    WnfThreadState wnf_state;            // .stack / .s_pos -- main thread's
+                                         // routing target for WNF_STACK /
+                                         // WNF_S_POS when no worker is bound
     Term       *wnf_last_stack;          // snapshot on wnf_n bail
     TenDesc    *tens;
     KernelEntry*kernels;
@@ -1241,10 +1266,11 @@ typedef struct TContext {
     u32         default_device;
 
     /* Scalars / counters. */
-    u64 heap_next;
-    u32 wnf_s_pos;
+    u64 heap_next;          // bumped via __atomic_fetch_add by heap_alloc
     u32 wnf_last_stack_len;
-    u64 itrs;
+    _Atomic u64 itrs;       // interactions counter; atomic so the
+                            // parallel WNF / NF pool can `ITRS++`
+                            // safely from any worker thread
     u32 tens_next;
     u32 kernels_next;
     u64 book_next;
@@ -1264,15 +1290,22 @@ typedef struct TContext {
 extern TContext *CURRENT_CTX;
 extern TContext *CONTEXTS[CONTEXTS_CAP];
 
+// Thread-local pointer to the WNF spine state for the current thread.
+// On the main thread, points at `CURRENT_CTX->wnf_state`; on a parallel
+// pool worker, points at that worker's WnfThreadState.  Initialised by
+// `thvm_init` for the main thread; set/reset by the worker pool driver
+// for spawned pthreads.
+extern _Thread_local WnfThreadState *CURRENT_WNF_STATE;
+
 // Macro layer -- existing global names redirect through CURRENT_CTX
 // so all the C code under src/heap, src/term, src/wnf, src/schedule,
 // src/alo, src/uop, src/book, src/backend keeps compiling without
-// per-call ctx threading.  Single-threaded today; multi-thread would
-// need a thread-local CURRENT_CTX.
+// per-call ctx threading.  WNF spine routes through CURRENT_WNF_STATE
+// so worker threads transparently get their own stacks.
 #define HEAP                (CURRENT_CTX->heap)
 #define HEAP_NEXT           (CURRENT_CTX->heap_next)
-#define WNF_STACK           (CURRENT_CTX->wnf_stack)
-#define WNF_S_POS           (CURRENT_CTX->wnf_s_pos)
+#define WNF_STACK           (CURRENT_WNF_STATE->stack)
+#define WNF_S_POS           (CURRENT_WNF_STATE->s_pos)
 #define WNF_LAST_STACK      (CURRENT_CTX->wnf_last_stack)
 #define WNF_LAST_STACK_LEN  (CURRENT_CTX->wnf_last_stack_len)
 #define ITRS                (CURRENT_CTX->itrs)

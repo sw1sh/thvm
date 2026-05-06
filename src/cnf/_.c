@@ -64,8 +64,11 @@ static Term cnf_dp(Term dp, u32 depth) {
   // Drive the body to its own CNF before dispatching.  We heap_take
   // here (not heap_read) so heap_subst_cop on the chosen interaction
   // sees the loc as available for the SUB write.  If the body is
-  // already in WHNF / CNF, this round-trip is cheap.
-  Term body = heap_take(loc);
+  // already in WHNF / CNF, this round-trip is cheap.  Atomic claim
+  // for MT correctness: if another worker already consumed this DP
+  // cell, we see 0 and propagate the DP up unchanged.
+  Term body = heap_take_atomic(loc);
+  if (body == 0) return dp;
   Term body_cnf = cnf_at(body, depth);
   switch (term_tag(body_cnf)) {
     case TAG_SUP: {

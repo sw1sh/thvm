@@ -90,7 +90,23 @@ TESTS := \
   $(BIN)/test_rewrite_pri \
   $(BIN)/test_sup_rewrite \
   $(BIN)/test_lpo \
-  $(BIN)/test_dyn_lab
+  $(BIN)/test_dyn_lab \
+  $(BIN)/test_wsq \
+  $(BIN)/test_wspq \
+  $(BIN)/test_wnf_pool \
+  $(BIN)/test_nf_pool \
+  $(BIN)/test_heap_atomic \
+  $(BIN)/test_heap_atomic_mt \
+  $(BIN)/test_wnf_pool_mt \
+  $(BIN)/test_context_wnf_state \
+  $(BIN)/test_pool_profile \
+  $(BIN)/test_step_saturation \
+  $(BIN)/test_bench_tree \
+  $(BIN)/test_bend_tree_sum \
+  $(BIN)/test_aot_emit \
+  $(BIN)/test_aot_e2e \
+  $(BIN)/test_aot_e2e_bench \
+  $(BIN)/test_aot_build
 
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
@@ -104,6 +120,8 @@ ifeq ($(shell uname -s),Darwin)
   METAL_AIRS     := $(METAL_SHADERS:src/backend/metal/shaders/%.metal=$(BUILD)/%.air)
   METAL_DEFINES  := -DTHVM_METAL_METALLIB='"$(METAL_LIBPATH)"'
   TESTS          += $(BIN)/test_metal_real
+  TESTS          += $(BIN)/test_aot_metal
+  TESTS          += $(BIN)/test_aot_metal_run
 else
   METAL_OBJ      :=
   METAL_LDFLAGS  :=
@@ -154,7 +172,7 @@ WL_SRC_ATP  := $(WL_PACLET)/CSource/thvmlink_atp.c
 $(WL_LIB_DIR):
 	@mkdir -p $@
 
-$(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(WL_LIB_DIR)
+$(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) build/thvm_runtime_blob.c | $(WL_LIB_DIR)
 	@if [ -z "$(WOLFRAM_APP)" ] || [ ! -d "$(WL_INCLUDE)" ]; then \
 	  echo "ERROR: Wolfram install not found.  Set WOLFRAM_APP=/Applications/Wolfram*.app"; \
 	  exit 1; \
@@ -163,7 +181,7 @@ $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(WL_L
 	  -DACCELERATE_NEW_LAPACK \
 	  -I"$(WL_INCLUDE)" \
 	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
-	  -o $@ $(WL_SRC) $(METAL_OBJ) $(METAL_LDFLAGS) \
+	  -o $@ $(WL_SRC) build/thvm_runtime_blob.c $(METAL_OBJ) $(METAL_LDFLAGS) \
 	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,)
 ifeq ($(UNAME_S),Darwin)
 	codesign --force --sign - $@
@@ -210,7 +228,41 @@ $(METAL_LIBPATH): $(METAL_AIRS) | $(BUILD)
 TEST_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,)
 TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,)
 
+# === Embedded thvm runtime source ==================================
+# At build time, flatten src/thvm.c (resolve all `#include "..."`,
+# leave system `<...>` headers alone) and embed the resulting source
+# via the assembler's .incbin directive in build/thvm_runtime_blob.c.
+# AOT compile reads this blob at runtime, prepends it to the per-
+# program emit, and clang-compiles -- so the AOT pipeline doesn't
+# depend on src/ being on disk (paclet ships standalone).
+#
+# Per-call compile is ~3-4 sec the first time per def-shape;
+# cache-by-content (build.c FNV hash on the wrapped source) catches
+# repeat calls so subsequent TAOTCompile is instant.
+build:
+	@mkdir -p build
+
+build/thvm_inline.c: $(SRC) tools/inline_includes.py | build
+	python3 tools/inline_includes.py src/thvm.c > $@
+
+build/thvm_runtime_blob.c: build/thvm_inline.c tools/embed_blob.py
+	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src > $@
+
+# AOT-using test binaries link build/thvm_runtime_blob.c so the
+# extern thvm_runtime_src symbol resolves.
+AOT_TESTS := $(BIN)/test_aot_emit $(BIN)/test_aot_e2e \
+             $(BIN)/test_aot_e2e_bench $(BIN)/test_aot_build
+
+$(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) build/thvm_runtime_blob.c | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< build/thvm_runtime_blob.c $(TEST_LDFLAGS)
+
 $(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+
+$(BIN)/test_aot_metal: tests/test_aot_metal.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+
+$(BIN)/test_aot_metal_run: tests/test_aot_metal_run.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)

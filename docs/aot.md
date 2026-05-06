@@ -1,177 +1,207 @@
-# AOT roadmap
+# AOT (ahead-of-time compilation)
 
-Where we are, what's next, and what "all on device" actually requires.
+thvm's AOT compiles a `TDef`'d body to fork-friendly C source — same
+shape as Bend2's compiler at
+[TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c](../TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c).
+The runtime is in `src/aot/`; the WL surface is `THVMLink`TAOTEmit`.
 
-## Current state (5 commits in)
+---
 
-The AOT layer specializes one IC `@def` to a C function that the WNF
-machine dispatches through `TAG_REF` instead of the lazy ALO unfold.
+## Model
+
+The interpreter (`src/wnf/`) is canonical: REPL, debugging, hot reload.
+AOT layers on top as the fast path for compute-heavy defs.
+
+The compile target is **CPS-transformed, fork-emitting C**, not a
+spine-based interpreter shim. When a def's body says
+`node{count(p), count(p)}` (two independent recursive calls inside a
+constructor), the emit produces:
+
+```c
+u64 dp = aot_alloc_cont(CONT_count_0, 0, t->ret);
+return aot_make_split(
+    aot_make_task(FN_count, aot_enc_ret((u32)dp, 0), p, 0, 0, 0),
+    aot_make_task(FN_count, aot_enc_ret((u32)dp, 1), p, 0, 0, 0));
+```
+
+The runtime grabs both tasks off a shared queue, dispatches them on
+separate workers, and the cont fires when both children land. **The
+emit tells the runtime where the parallelism is** rather than relying
+on a generic interpreter to discover it.
+
+Three result shapes per `dispatch(task)` call:
+
+- `R_VALUE(term)` — task is done, here's the answer.
+- `R_CALL(task)` — tail-chain into the next task.
+- `R_SPLIT(task_a, task_b)` — fork these two, fire the registered
+  cont when both have values.
+
+---
+
+## File layout
+
+| File | Role |
+|---|---|
+| `src/aot/task.h` | `AotTask` / `AotResult` types + `aot_enc_ret` + `aot_make_*` constructors |
+| `src/aot/halloc.{h,c}` | thread-local heap chunks (Bend2's `tl_hp`/`tl_he`) so cont allocs don't contend on the global atomic |
+| `src/aot/cont.c` | continuation cell layout in the thvm heap; `aot_alloc_cont` / `aot_write_slot` / `aot_fire_cont` |
+| `src/aot/resolve.c` | `aot_resolve` walks values up the cont tree without C recursion |
+| `src/aot/worker.c` | `AotBarrier` + `AotRun` + seed/work-phase pattern; `aot_run_serial` (T=1) + `aot_run_parallel` (T>1) |
+| `src/aot/emit.c` | `thvm_aot_emit_program(def_id, name)` — walks a TDef'd body and produces compilable C source |
+| `src/aot/_.c` | bundle that `src/thvm.c` includes |
+| `tests/test_aot_emit.c` | unit tests on the emit string (~46 checks across MAT chains, value exprs, self-call, SPLIT) |
+| `tests/test_aot_e2e.c` | end-to-end: emit → wrap → clang → run → match expected (~17 checks) |
+| `tests/test_aot_e2e_bench.c` | AOT-emit vs hand-coded `count` perf compare |
+| `tests/test_bend_tree_sum.c` | hand-coded reference program (the canonical fork-friendly shape) |
+
+---
+
+## What the emitter currently handles
+
+| Pattern | → emit |
+|---|---|
+| `TLam[v0, ..., TLam[vN, body]]` at def top | LAM peeling; binds each `vK` to `t->args[K]` |
+| `TMatChain[<|...|>, default][arg]` | dispatch by tag/value, with dead-arm pruning when arms destructure CTRs |
+| `TNum[v]` in value position | `term_new(0, TAG_NUM, ext, v)` |
+| `TVar[bound_name]` in value position | inlined as `t->args[K]` or `term_ctr_at(arg, K)` (no named temp) |
+| `TRef[name]` in value position | `term_new(0, TAG_REF, name, 0)` |
+| `TCtr[label, ...]` (arity 0/1/2) | `aot_make_ctr0/1/2(label, children)` |
+| `App^N(TRef[self], a_0, ..., a_{N-1})` (saturated self-call) | `aot_make_call(aot_make_task(FN_self, t->ret, ...))` |
+| `TCtr[label, self_call, self_call]` (sibling-pair) | `aot_alloc_cont(CONT_K, 0, ret)` + `aot_make_split` + a `par_<self>_cont_K` that wraps results in `aot_make_ctr2(label, ...)` |
+| `TOp2[op, self_call, self_call]` (sibling-pair) | same SPLIT pattern; cont folds via `lv <op> rv` (constant-folded at emit time) |
+
+What it doesn't handle yet (next slices):
+
+- **Cross-def saturated calls** — when one def calls another AOT'd def by name; needs a registry like the legacy `AOT_FNS_DIRECT` table
+- **`eval()` sequential variant** — Bend2's per-task managed-CPS-stack
+  descent that doesn't touch the global queue. Closes the T>1 perf gap
+  measured in [Phase 1 commit `e55dcbd`](#) (T=8 still scales backwards
+  for tree-sum at d≥16 because every cont alloc bounces a cache line).
+- **`TUop` / tensor ops** — completely separate from this emitter
+- **CSE for repeated subexpressions** — visible in the bench: hand-coded
+  uses `term_ctr_at(n, 0)` once; auto-emit emits it twice for the SPLIT's
+  two sibling task args. Worth ~2× on count-shaped workloads.
+
+---
+
+## Driving from WL
+
+```mathematica
+PacletDirectoryLoad["wl/THVMLink"];
+Get["THVMLink`"];
+
+TInit[];
+
+(* count(SUC^N{ZER}) = 2^N *)
+TDef["count",
+  TLam[n,
+    TMatChain[
+      <|0 -> TNum[1],
+        1 -> TLam[p, TOp2["+",
+                          TApp[TRef["count"], p],
+                          TApp[TRef["count"], p]]]
+      |>,
+      TLam[ig, TEra[]]
+    ][n]]];
+
+src = TAOTEmit["count"];
+Print[StringTake[src, 600]];
+```
+
+Output (excerpt):
+
+```c
+// auto-generated by thvm_aot_emit_program("count")
+// def_id 0, arity 1, 1 cont(s)
+
+#define FN_count  0u
+#define CONT_count_0  1u
+
+static AotResult par_count_entry(AotProgram *p, AotTask *t);
+static AotResult par_count_cont_0(AotProgram *p, AotTask *t);
+
+static AotResult par_count_cont_0(AotProgram *p, AotTask *t) {
+  (void)p;
+  /* OP2 fold (op id 0) -- assumes both child results are NUM */
+  u32 lv = (u32)term_val(t->args[0]);
+  u32 rv = (u32)term_val(t->args[1]);
+  return aot_make_value(
+      term_new(0, TAG_NUM, term_ext(t->args[0]), lv + rv));
+}
+
+static AotResult par_count_entry(AotProgram *p, AotTask *t) {
+  (void)p; (void)t;
+  /* dispatch on t->args[0] (Phase 2 iter 5) */
+  Term dv = t->args[0];
+  /* dead-arm pruned: chain is CTR-only (some arm destructures) */
+  if (term_tag(dv) == TAG_CTR && term_ext(dv) == 0u) {
+    return aot_make_value(term_new(0, TAG_NUM, 5, 1u));
+  }
+  if (term_tag(dv) == TAG_CTR && term_ext(dv) == 1u) {
+    u64 dp = aot_alloc_cont(CONT_count_0, 0, t->ret);
+    return aot_make_split(
+        aot_make_task(FN_count, aot_enc_ret((u32)dp, 0),
+                      term_ctr_at(dv, 0), 0, 0, 0),
+        aot_make_task(FN_count, aot_enc_ret((u32)dp, 1),
+                      term_ctr_at(dv, 0), 0, 0, 0));
+  }
+  ...
+}
+```
+
+`TAOTCompile` (in-process compile + dlopen + run) is a stub. The
+dylib's `#include "thvm.c"` would create its own `HEAP`/`DEFS` globals;
+without a runtime-OPS function-pointer ABI to share host state, the
+heap addresses don't cross the boundary. That ABI lands in a follow-up
+slice.
+
+---
+
+## Compile + run the emit today
+
+[tests/test_aot_e2e.c](../tests/test_aot_e2e.c) is the canonical
+harness. Each test:
+
+1. Builds a def in `BOOK_HEAP` directly (skipping the WL bridge for
+   the C-only test path).
+2. Calls `thvm_aot_emit_program(def_id, name)` to get the source.
+3. Wraps it: prepends `#include "<repo>/src/thvm.c"` for the runtime,
+   appends a `main()` that registers the program, builds the input
+   Term, calls `aot_run_serial`, prints the result.
+4. Invokes `clang -O2 ... /tmp/aot_e2e_<name>.c` to produce a
+   standalone binary.
+5. `popen`s the binary, parses `result tag=N val=N`, asserts.
 
 ```
-runtime call site                     specialised C
-  TWnf[term]                          aot_emitted_<id>(stack, sp, base)
-   |                                    |
-   v                                    v
-  enter TAG_REF[name]   --AOT_FNS[name]-+
-   |                                    |
-   |  fallback (no AOT registered)      |  pops APP frames, runs
-   v                                    |  case-tree dispatch in
-  alo_realize -> ALO chain              |  native C, recurses, returns
-                                        |  WHNF Term
+$ bin/test_aot_e2e
+  ok    17/17
 ```
 
-Three hand-coded reference programs land under `src/aot/programs/`:
+The standalone-binary route sidesteps the host-vs-dylib heap-globals
+issue; for production use TAOTCompile + the OPS ABI would dlopen
+instead.
 
-| program  | shape                          | speedup vs interp | ITRS-exact? |
-|----------|--------------------------------|------------------:|:-----------:|
-| fib_nat  | CTR + DUP-CTR + chained recur  | 14×               | yes         |
-| gab_tak  | CTR labels T/F + 3-way recur   | mixed (small ✓, deep ✗) | no |
-| u32_fib  | NUM + OP2 + tree recur         | 11×               | yes         |
+---
 
-A Phase-1 auto-emitter (`src/aot/emit.c`) walks a TDef'd body and
-produces equivalent C source. Today it covers TNum, TLam, TVar, TApp,
-TRef, TOp2, and TMatNum chains — enough to auto-emit the u32_fib body
-faithfully. WL surface: `TAOTEmit[name]` returns the C source as a
-string; users drop it under `src/aot/programs/<name>.c` and rebuild.
+## Phase status
 
-## What's missing
+- **Phase 1** (runtime: Task / cont / resolve / worker pool +
+  hand-coded `tree_sum`): done with caveats. T=1 correct; T>1 scales
+  backwards on tree-sum at d≥16 because every cont alloc bounces a
+  cache line. The eval() sequential path closes it; deferred.
+- **Phase 2** (CPS emit): functionally complete. Auto-emit handles
+  every shape Phase 1's hand-coded test used; perf within ~2× of
+  hand-coded.
+- **Phase 4** (WL surface): `TAOTEmit` shipped, this doc shipped.
+  `TAOTCompile` requires the OPS ABI; tracked as a follow-up.
+- **Phase 3** (coverage + sequential fallback): future. Likely targets
+  cross-def calls, tensor-op shapes, and the eval() sequential variant.
 
-Two fronts.
+---
 
-### A. IC pattern coverage (Phase 2)
+## History
 
-The emitter doesn't yet handle CTR construction, CTR-MAT destructure,
-TDup, tail-recursion → goto loops, or the LAM_ERA_MASK fast-path.
-fib_nat and gab_tak still need their hand-coded versions.
-
-### B. The compile / load loop (gating real auto-AOT)
-
-The runtime's helpers (`aot_register`, `aot_pop_app_arg`,
-`term_new`, `heap_alloc`, ...) are `static inline` in the single-TU
-build. A dlopen'd dylib produced by clang at runtime can't link to
-them. Two ways to unblock:
-
-1. **ABI split** — declare the small set of helpers the emitted code
-   touches (~15 functions) as `extern` instead of `static inline`.
-   Force the linker to emit them as real symbols in the host. ~50
-   LOC of header churn, half a day.
-2. **Re-include trick** — emitted .c does `#include "thvm.c"` so
-   each AOT dylib carries its own private runtime instance. Works
-   but the dylib's runtime state (HEAP, ITRS, ...) is *separate
-   from* the host's, so the AOT can't actually share heap with the
-   interpreter. Wrong semantics; rejected.
-
-Doing (1) gates `TAOTCompile[name]` — the function that runs the
-emitter, invokes `clang -shared`, dlopens, calls the registration
-helper. Without it, the AOT path requires manual rebuild.
-
-## Beyond IC: dispatching UOp kernels from AOT
-
-Current arrangement: two parallel compile paths.
-
-- **UOp kernel JIT** (`src/backend/cpu/jit.c` + `src/codegen/`):
-  a UOp graph at the tensor layer rangeifies into KProgOp ops, which
-  render to a fused inner-loop C function `void k(out, ins, n)`.
-  Compiled by clang at first fire, dlopened, function pointer cached
-  in `KernelEntry.func`.
-- **AOT (this work)**: an IC body's `@def` at the term-machine layer
-  specialises into a per-def case-tree. Today routes UOp encounters
-  through the lazy ALO interpreter (which then fires kernel JIT
-  separately).
-
-The end state: the AOT emits **direct calls** to the kernel JIT's
-function pointers, eliminating the runtime materialize+dispatch round
-trip. When an AOT body sees a UOp subtree:
-
-1. Trigger materialize on the subtree to produce a KernelEntry.
-2. Trigger `cpu_jit_build` on the KernelEntry to get a function
-   pointer (or fall back to the interpreter if the JIT can't render
-   that pattern).
-3. Emit C that:
-   - Allocates an output buffer of the known dtype/shape.
-   - Calls the kernel function with the input buffer ids resolved
-     from the bound tensor variables.
-   - Wraps the result in a TenDesc + TAG_TEN term.
-   - Returns it.
-
-The AOT becomes a thin **orchestrator** that wires together
-pre-compiled SIMD kernels with native control flow, instead of going
-through wnf for every sub-step.
-
-Concrete blocker: **shape polymorphism**. The kernel JIT today is
-shape-specialized — a `void k(out, ins, n)` produced for one shape
-isn't reusable on another. AOT bodies can't always know shapes at
-emit time (a `@forward` def takes a tensor whose shape depends on
-the user's input). Three options:
-
-- **Specialize per call site shape**, recompile on shape change. The
-  JIT cache already does this — extend it to be reachable from the
-  AOT.
-- **Emit shape-polymorphic code** that takes shape arrays. Slower per
-  call but fewer compiled artifacts. Doable for elementwise; harder
-  for matmul/reduce.
-- **Defer to runtime** for shape-dependent subtrees. The AOT punts
-  to the existing JIT cache; future calls hit cache.
-
-Option 1 is what HVM4 does for its kernels (one shape per call
-site). Probably what we want.
-
-## Beyond CPU: Metal-side AOT
-
-The dream end state: the AOT-emitted code runs on the GPU. Two
-sub-questions.
-
-### B1. Metal-side numeric kernels
-Already partly here — `src/backend/metal/` dispatches MSL shaders.
-The kernel JIT could grow a Metal renderer (`render_metal.c`
-exists) so kernels compile via `xcrun metal` to .metallib, dlopen'd
-the same way.
-
-### B2. Metal-side control flow
-
-The harder problem. Metal's compute model is "compute kernel that
-runs N times in parallel" — there's no native support for IC's
-case-tree dispatch, lazy ALO unfolds, or DUP-CTR commutes.
-
-Two options:
-
-- **Stay CPU-side for control flow**, dispatch kernels to GPU. The
-  AOT emits CPU C that issues `MTLCommandBuffer.commit()` calls. The
-  IC reduction proceeds on CPU; only the SIMD-heavy bits run on GPU.
-  This is what most ML frameworks do (PyTorch, etc.). Easiest and
-  probably the right answer.
-- **Device-side scheduler** — emit MSL that runs an interpreter
-  loop on the GPU's command queue. Hard: requires a small VM in MSL,
-  has to handle dynamic memory, and has poor branching performance
-  on SIMT hardware. Probably not worth it.
-
-So "all on device" really means "all the **compute** on device,
-control flow stays on CPU". Achievable; aligns with how production
-ML frameworks ship.
-
-## Concrete next steps, in dependency order
-
-1. **AOT Phase 2** — emitter coverage for TCtr + DUP-CTR + tail-loop
-   detection. ~400 LOC. Unblocks auto-emit of fib_nat and gab_tak.
-2. **AOT ABI split** — refactor the ~15 runtime helpers from
-   `static inline` to `extern`. ~50 LOC + header churn. Unblocks…
-3. **AOT build pipeline** (`src/aot/build.c`) — write emitted .c to
-   disk, invoke clang, dlopen, register. Mirror existing
-   `src/backend/cpu/jit.c` pattern. ~250 LOC.
-4. **Shared `clang_compile.c`** — extract the dlopen + cache-by-hash
-   bits common to UOp JIT and AOT build. ~100 LOC refactor.
-5. **AOT calls UOp JIT** — when emitter sees a UOp subtree, emit a
-   call to the kernel JIT's function pointer. Includes the
-   materialize-at-emit-time orchestration. ~600 LOC.
-6. **Metal kernel renderer** — extend `src/codegen/render_metal.c`
-   so the JIT can produce `.metallib` dylibs. ~400 LOC.
-7. **AOT dispatches GPU kernels** — same hooks as (5) but routes to
-   the Metal-built kernel function. Touches lifecycle (command buffer,
-   completion handlers). ~300 LOC.
-
-Total: ~2100 LOC of careful work. Maybe 2 weeks focused.
-
-The win: an `@forward` net definition compiled once becomes a single
-C function that orchestrates a precompiled sequence of GPU
-dispatches with native control flow. Same shape as a TorchScript
-deployable, but with IC-level lambda calculus underneath.
+The legacy Slice-4 per-def-dylib AOT (`aot_register` / spine-driven
+dispatch from `wnf`'s TAG_REF case) was purged 2026-05-05 in commit
+`6ad9bf8` to make room for this fork-emitting design. See
+`git log -- src/aot/` for the iter-by-iter trail.
