@@ -129,6 +129,49 @@ int main(void) {
   CHECK_EQ(term_tag(x_cell), (u64)TAG_NUM);
   CHECK_EQ(term_val(x_cell), (u64)3);
 
+  // Iter RR: batch-vs-sequential dispatch perf.  Quantifies the
+  // kernel-launch-overhead win of dispatching N OP2 redexes in one
+  // launch (iter B-2) vs N separate launches.  No CHECK -- numbers
+  // shift across machines, just informational stderr output.
+  TEST_BEGIN("perf: batch (1 launch) vs sequential (N launches)");
+  enum { BENCH_N = 256 };
+  u64  bench_roots[BENCH_N];
+  Term bench_results[BENCH_N];
+  for (u32 i = 0; i < BENCH_N; i++) {
+    u64 a = book_alloc(2);
+    book_set(a + 0, term_new(0, TAG_NUM, 0, i));
+    book_set(a + 1, term_new(0, TAG_NUM, 0, i + 1));
+    u64 r = book_alloc(1);
+    book_set(r, term_new(0, TAG_OP2, OP_ADD, a));
+    bench_roots[i] = r;
+  }
+  // Warm caches with one batch dispatch.
+  thvm_aot_metal_op2_fold_batch(BOOK_HEAP, BOOK_CAP, bench_roots,
+                                 BENCH_N, bench_results);
+
+  // Sequential timing: BENCH_N separate single-redex launches.
+  u64 t_seq0 = cg_now_us();
+  for (u32 i = 0; i < BENCH_N; i++) {
+    Term r = thvm_aot_metal_op2_fold(BOOK_HEAP, BOOK_CAP, bench_roots[i]);
+    bench_results[i] = r;
+  }
+  u64 dt_seq = cg_now_us() - t_seq0;
+
+  // Batch timing: 1 launch handles all BENCH_N.
+  u64 t_batch0 = cg_now_us();
+  thvm_aot_metal_op2_fold_batch(BOOK_HEAP, BOOK_CAP, bench_roots,
+                                 BENCH_N, bench_results);
+  u64 dt_batch = cg_now_us() - t_batch0;
+
+  fprintf(stderr,
+    "  bench: %u OP2 folds  sequential = %llu us  batch = %llu us  "
+    "speedup ~%llux\n",
+    (u32)BENCH_N,
+    (unsigned long long)dt_seq, (unsigned long long)dt_batch,
+    (unsigned long long)(dt_batch == 0 ? 0 : dt_seq / dt_batch));
+  // Sanity: batch must be at least as fast as sequential.
+  CHECK(dt_batch <= dt_seq);
+
   thvm_free();
   TEST_REPORT();
 }
