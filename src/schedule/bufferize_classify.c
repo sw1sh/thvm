@@ -1469,6 +1469,22 @@ static u32 bufferize_rule_inline_softmax_broadcast_reduce(Term root) {
   return hits;
 }
 
+// Detect UOP_REDUCE(SUM, UOP_MUL(A, B)) with A != B -- matmul-shape
+// reduce.  Used to protect matmul outputs from inline-* rules so the
+// matmul kernel stays bufferized as a clean 2-input/2-op kernel that
+// tile_analyze_gemm accepts (-> metal-gemm dispatch with TC).
+// Diagnosed in Levels 27-34 of docs/plans/autotune_beam_profile.md
+// (40x wall gap on transformer FFN kids 14/16).
+static int bufferize_uop_is_matmul(u64 reduce_loc) {
+  Term mul = term_resolve(heap_read(reduce_loc + 0));
+  if (term_tag(mul) != TAG_UOP) return 0;
+  if (term_ext(mul) != UOP_MUL) return 0;
+  u64 mul_loc = term_val(mul);
+  Term a = term_resolve(heap_read(mul_loc + 0));
+  Term b = term_resolve(heap_read(mul_loc + 1));
+  return term_val(a) != term_val(b);
+}
+
 static u32 bufferize_rule_inline_reduce_scalar_tail(Term root) {
   if (term_tag(root) != TAG_UOP) return 0;
   if (!bufferize_rangeify_enabled()) return 0;
@@ -1481,6 +1497,7 @@ static u32 bufferize_rule_inline_reduce_scalar_tail(Term root) {
     UOpInfo *info = &BUFFERIZE_NODES[i];
     if (info->op != UOP_REDUCE)    continue;
     if (info->consumer_count != 1) continue;
+    if (bufferize_uop_is_matmul(info->loc)) continue;
     if (!bufferize_reduce_consumer_is_scalar_tail(info->loc, root_loc)) continue;
     if (info->realized) hits++;
     bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);

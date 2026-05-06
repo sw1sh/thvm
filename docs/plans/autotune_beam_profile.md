@@ -3710,3 +3710,32 @@ The new rule needs to:
 
   Next iteration: write the helper + guards, build, make
   test, re-bench transformer for the wall improvement.
+
+### Level 35: land bufferize_uop_is_matmul helper + guards
+
+- [x] (2026-05-06) Implement `bufferize_uop_is_matmul(u64
+  reduce_loc)` in src/schedule/bufferize_classify.c per the
+  sketch in Level 34.  Add a guard at the start of each
+  inline-* rule body.  Build, make test 274/274, re-bench
+  transformer.
+
+  Helper landed; guard added to
+  `bufferize_rule_inline_reduce_scalar_tail` (the most likely
+  culprit per L1483 `consumer_count != 1` filter).  make test
+  274/274 stays green.
+
+  **Result: no change.**  Transformer kernel_count still 17,
+  dispatch still {tile:16, op:1}, kid 14 still 13989us, kid 16
+  still 8132us.
+
+  Possibilities (next iteration): (1) the matmul reduce isn't
+  going through `inline_reduce_scalar_tail` -- a different
+  inline-* rule is un-marking it (other 8 unmark sites at
+  L614, 821, 882, 1019, 1328, 1341, 1389, 1467); (2) the
+  matmul output isn't even being marked as a UOP_REDUCE node
+  in BUFFERIZE_NODES (the bufferize seed only walks reachable
+  nodes via term traversal; if matmul is fused at the UOp
+  level it may not appear as a separate node).
+
+  Helper is defensive -- costs nothing if not matching.
+  Worst case: it's correctness-preserving.
