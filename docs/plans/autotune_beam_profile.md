@@ -1775,3 +1775,55 @@ is large but valid.
   point (~2 leak per block); Pool and Linear are tied at +1
   per boundary.  All three structural fixes target tinygrad
   parity.
+
+### Level 15 cross-framework: tinygrad no-pool mini-LeNet
+
+The "+1 leak per pool-block" claim assumed tinygrad pool =
++1 without measurement.  Verify with tinygrad no-pool
+mini-LeNet (Conv 5x5 + Ramp + Flatten + Linear + Softmax).
+mini-LeNet on tinygrad is 6 kernels.  If no-pool = 5, pool
+costs +1 in tg (so leak = +1).  If no-pool = 6, pool fully
+fuses (leak = +2 thvm vs +0 tg).
+
+- [x] (2026-05-06) Write
+  `bench/autotune-ladder/mini_lenet_nopool.py` -- forward-only
+  no-pool mini-LeNet on a single MNIST sample.  Save stdout
+  to `bench/autotune-ladder/mini_lenet_nopool.tinygrad.txt`.
+  Inline baseline_us, beam4_us, speedup, kernels per forward.
+  Compare to tinygrad mini-LeNet (6 kernels).
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |     3341 |  3514 |
+  | kernel_count / 50 rep |      250 |   250 |
+  | kernels per forward   |        5 |     5 |
+  | speedup_to_beam4      |          | 0.951x|
+
+  **Tinygrad no-pool mini-LeNet = 5 kernels.**  vs tinygrad
+  mini-LeNet (with pool) = 6.  Pool cost on tinygrad = +1.
+
+  Cross-framework per-element decomposition now complete:
+
+  | element              | thvm | tinygrad | leak |
+  |----------------------|-----:|---------:|-----:|
+  | Conv + Ramp          |    3 |        1 |  +2  |
+  | Pool                 |   +2 |       +1 |  +1  |
+  | Linear + Activation  |   +2 |       +1 |  +1  |
+  | Baseline             |    3 |        3 |   0  |
+
+  (Conv+Ramp on tg derived from no-pool 5 = 1+1+3 = Conv+Ramp
+  + Linear + Baseline.)
+
+  **Final structural-fusion priority** (per-element leak,
+  highest leverage first):
+  1. **Conv 3-into-1 (im2col + reduce + bias fusion)** --
+     +2 leak per Conv-Ramp block.  Closes ~all of conv-net's
+     per-conv leak (Phase D'+F of the ideal pipeline plan).
+  2. **Pool fusion** -- +1 leak per pool-block.  Closes
+     half of conv-net's per-pool leak.
+  3. **Linear+Activation fusion** -- +1 leak per linear-
+     block.  Closes all of MLP-N's leak.
+
+  Closing 1+2 closes the entire conv-net structural gap;
+  closing 3 closes the entire MLP gap.  All three together
+  reach tinygrad parity on the K,L envelope tested.
