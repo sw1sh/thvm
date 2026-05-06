@@ -61,9 +61,22 @@ file, commits, and stops.
   so 8-way LOCAL sweep + final variant fits within the 256-slot
   cache.  Cold compile is 71x the warm compile (177 ms vs 2.5 ms)
   -- newLibraryWithSource cost amortises after the first hit.
-- [ ] tinygrad: write `bench/autotune-ladder/elementwise_add.py`
-  that builds `Tensor([1024]) + Tensor([1024])`, runs `BEAM=4`,
-  captures the kernel time + the kernel selected.
+- [x] (2026-05-06) tinygrad: write
+  `bench/autotune-ladder/elementwise_add.py` that builds
+  `Tensor([1024]) + Tensor([1024])`, runs `BEAM=4`, captures
+  the kernel time + the kernel selected.
+
+  | mode      | warmup_us | steady_us | speedup |
+  |-----------|----------:|----------:|--------:|
+  | NOOPT=1   | 3772      | 479       | 1.00x   |
+  | BEAM=4    | 418       | 391       | **1.23x** |
+
+  Caveat: this includes Python `realize()` overhead (~300 us
+  per call -- visible because both modes are above 300 us even
+  on a 1024-element ADD).  thvm's `TKernelBenchUs` benches the
+  kernel direct without the WL/Python wrapper; the absolute
+  numbers can't be lined up directly.  See the comparison row
+  below for the framework-relative speedups.
 - [ ] Compare: log thvm best vs tinygrad best in this file.
 
 ### Level 2 -- matmul (M=N=K=128)
