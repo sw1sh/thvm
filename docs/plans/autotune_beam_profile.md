@@ -1934,3 +1934,67 @@ empirically; if not, the leak formula needs revision.
   cross-framework, empirically validated kernel-count model
   for feed-forward MLP/CNN networks in the {conv 5x5, pool
   2x2, Ramp, single-sample} envelope.
+
+### Level 17: MLP1 -- the L=1 floor
+
+L-scaling is validated at L in {2,3,4}.  L=1 untested
+directly (mini-LeNet has L=1 but mixed with K=1).  A pure
+L=1 MLP (Linear+Ramp+Linear+Softmax... no, that's L=2;
+single Linear+Softmax is L=1 since one Linear-Activation
+boundary).  Wait: L is the number of LinearLayers, and
+the formula counts each Linear+Activation as +2 thvm /
++1 tinygrad.  MLP1 = `Linear[10] + Softmax` means 1
+LinearLayer, but the "activation" here is softmax, not
+Ramp; activation is folded into the softmax tail.  So
+the L=1 MLP1 should be: 1 LinearLayer (matmul = 1) + 0
+inter-layer Ramps + softmax (3) = 4 kernels?  Or does the
+formula's `2L` already assume the activation is Ramp not
+softmax?
+
+Probe directly to disambiguate.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mlp1.wls` --
+  single LinearLayer[10] + SoftmaxLayer on a 784-dim input.
+  Save stdout to `bench/autotune-ladder/mlp1.txt`.  Inline
+  kernel_count, dispatch_kinds, totals_baseline_us,
+  totals_best_us, totals_speedup.  Compare to MLP2 (7) --
+  delta exposes the marginal cost of adding one
+  Linear+Ramp pair.
+
+  | metric             | MLP1   | MLP2   | delta |
+  |--------------------|-------:|-------:|------:|
+  | LinearLayers       |      1 |      2 |  +1   |
+  | kernel_count       |      5 |      7 |  +2   |
+  | dispatch_kinds     |1g+4t   |1g+6t   |       |
+  | totals_best_us     |   1186 |   1340 |       |
+
+  **MLP1 = 5 kernels**, prediction (`2L + 3K + 3`) holds.
+
+  | depth | predicted | observed |
+  |-------|----------:|---------:|
+  | MLP1  |         5 |        5 |
+  | MLP2  |         7 |        7 |
+  | MLP3  |         9 |        9 |
+  | MLP4  |        11 |       11 |
+
+  The formula extends down to L=1 cleanly.  Adding one
+  LinearLayer always adds +2 thvm kernels: matmul + Linear-
+  output-bufferize (which fragments before the next op,
+  whether that's Ramp, Linear, or Softmax).
+
+  Refined per-element cost on thvm:
+
+  | element             | thvm |
+  |---------------------|-----:|
+  | LinearLayer (matmul)|    1 |
+  | Linear-output-bufferize |+1|
+  | Ramp / inter-activation |+0 (fuses) |
+  | Pool                |   +2 |
+  | Conv (any size)     |    3 |
+  | Softmax             |   +3 |
+
+  Ramp seems to fuse for free; Linear-output bufferize
+  is the bufferize boundary that fragments between any two
+  ops.  MLP-N's leak is exactly this Linear-output-bufferize
+  per layer (tinygrad fuses the matmul with the subsequent
+  op, eliminating the bufferize).
