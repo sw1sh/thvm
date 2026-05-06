@@ -1347,3 +1347,62 @@ Level 6's 2-block count exposes the per-conv-block delta.
   Conv2d 3-into-1 (Phase D'+F) + conv-elementwise / pool-
   elementwise fusion is the highest-ROI structural change for
   real conv-net kernels.
+
+### Level 10 cross-framework: tinygrad mini-LeNet
+
+The +4 per-conv-block leak rests on the unverified assumption
+that tinygrad fuses each conv-block to ~1 kernel.  Direct
+measurement: tinygrad mini-LeNet (1 conv-block + flatten +
+1 linear + softmax) gives a 1-block reference; subtracting
+from tinygrad's LeNet (10 kernels) exposes the per-conv-block
+cost on tinygrad's side.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mini_lenet.py`
+  -- forward-only mini-LeNet on a single MNIST sample,
+  structured to match `mini_lenet.wls`.  Bench NOOPT and
+  BEAM=4.  Save stdout to
+  `bench/autotune-ladder/mini_lenet.tinygrad.txt`.  Inline
+  baseline_us, beam4_us, speedup, kernels per forward.
+  Compare to tinygrad LeNet (10 kernels): the delta exposes
+  per-conv-block cost, verifying or correcting the +4 leak
+  hypothesis.
+
+  | metric                | baseline | beam4 |
+  |-----------------------|---------:|------:|
+  | steady_us             |     4679 |  4694 |
+  | kernel_count / 50 rep |      300 |   300 |
+  | kernels per forward   |        6 |     6 |
+  | speedup_to_beam4      |          | 0.997x|
+
+  **Hypothesis revision**: tinygrad conv-block is **2 kernels**,
+  not 1.  Subtracting 2 linear-blocks at +1 each from the
+  10-vs-6 delta gives the per-conv-block delta:
+
+      tinygrad LeNet (10) - tinygrad mini-LeNet (6) = +4
+      = +1 conv-block + +2 linear-blocks
+      conv-block cost = 4 - 2 * 1 = +2 kernels
+
+  | block          | thvm | tinygrad | leak |
+  |----------------|-----:|---------:|-----:|
+  | conv-block     |    5 |        2 | +3   |
+  | linear-block   |    2 |        1 | +1   |
+
+  Per-conv-block leak revised to **+3** (not +4 as assumed
+  before this measurement).
+
+  **Updated network-leak formula: `leak ~= 3*K + L`**
+  (K = conv-blocks, L = linear-layers).  Validates cleanly:
+
+  | net          |  K  |  L  | predicted | observed |
+  |--------------|----:|----:|----------:|---------:|
+  | MLP2         |   0 |   2 |        +2 |     +2   |
+  | MLP3         |   0 |   3 |        +3 |     +3   |
+  | mini-LeNet   |   1 |   1 |        +4 |     +4   |
+  | LeNet        |   2 |   3 |        +9 |     +9   |
+
+  All four data points match.  Structural-fusion priority
+  reweights from the earlier 80/20 split toward 75/25 (still
+  conv-block dominated, but a deep MLP is closer to parity
+  than the K=2 LeNet suggested).  Conv-block fusion landing
+  closes 6 of LeNet's +9 leak; linear-block fusion closes
+  the remaining 3.
