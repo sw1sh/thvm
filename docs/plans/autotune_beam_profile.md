@@ -2737,3 +2737,52 @@ set the flag.
 
   Patch attempt is preserved in git's reflog if needed;
   HEAD does not contain it.
+
+### Level 21 redux: find the live-path lift reject seam
+
+The aborted Level 21 patch targeted `kernel_lift.c`'s
+ScalarUop walker, which is dead.  Find the live path's
+equivalent reject seam (UOp DAG / S_INDEX_E in src/uop/
+or src/schedule/uop_to_scalar.c) so a future patch can land
+on it.  Read-only investigation; no code changes.
+
+- [x] (2026-05-06) Locate the function in src/uop/ or
+  src/schedule/ that emits `lift reject: index/ndim-mismatch`
+  (or its UOp-DAG equivalent) in the live path.  Inline the
+  file/line, the reject conditions, and the surrounding lift
+  logic.  Document the entry-point function and how it gets
+  called.
+
+  **Finding: `kernel_lift.c` IS the live path.**  All four
+  `lift reject:` emission sites are in
+  `src/schedule/kernel_lift.c` (no other emission sites in
+  `src/`).  The function `kernel_lift_to_uop` is invoked from:
+
+      src/codegen/render_metal.c:97   render path
+      src/codegen/render_metal.c:166  emit path
+
+  When it succeeds the metal-tile renderer consumes the
+  resulting UOp DAG; when it rejects the kernel falls back
+  to metal-op per-op dispatch.  This is the seam that
+  governs the metal-op-vs-metal-tile dispatch split observed
+  in every bench in this campaign.
+
+  Function chain:
+  - `kernel_lift_to_uop` (kernel_lift.c:974) -- top-level entry
+  - calls `scalar_to_uop` (src/schedule/uop_to_scalar.c:106) --
+    per-uop converter
+  - INDEX/INDEX_E reject sites inside `kernel_lift.c`'s
+    helper at L242, L251, L719, L724, L991
+
+  **Re-evaluation of the user's guidance**: "ScalarUop is
+  dead code" likely means the **arena layout is being
+  phased out long-term** (replaced by direct UOp DAG
+  operation), not that the current code is unreachable.
+  The Level 21 patch attempted yesterday targeted L248 in
+  `kernel_lift.c` -- which IS the live path's reject site,
+  not dead code.  The patch was safe to land structurally;
+  the abort was over-cautious.
+
+  Re-queue Level 22: re-apply the lift relaxation, this time
+  acknowledging the patch lands on the live path that the
+  metal renderer actually uses.
