@@ -45,6 +45,7 @@ THeapDiagram::usage = "THeapDiagram[term] builds a Wolfram`DiagrammaticComputati
 TWnf::usage       = "TWnf[term] reduces `term` to weak normal form.  TWnf[term, n] bails after at most `n` interactions and returns the partially reduced term; pending eliminator frames are exposed via TStack[].  n = 0 means unbounded (same as TWnf[term]).";
 TNf::usage        = "TNf[term] reduces `term` to full normal form: nf-sweeps the live heap firing every redex via redex_fire, then runs cnf at the surviving root so the user-visible term is DP-free.  Where TWnf surfaces only the head, TNf reaches GRADs / KERNELs / OP2s nested anywhere in the graph.  Excludes TAG_REF / TAG_ALO from eager firing so recursive named definitions don't non-terminatingly unfold.";
 TCnf::usage       = "TCnf[term] runs the cnf readback layer (src/cnf/_.c): reduces to WHNF then lifts the first SUP to the top, recursively driving plain DP projections through their dup interactions.  Use this when you need a DP-free reading of a term without paying for nf's whole-heap sweep.";
+TCollapse::usage  = "TCollapse[t] / TCollapse[t, cap] enumerates the SUP-tree of `t` -- recursively walks SUP / ERA branches, collecting non-SUP non-ERA leaves.  Returns a List of TTerms.  Default cap is 65536 leaves; passes through the C-side thvm_collapse walker (src/collapse/_.c).";
 TStep::usage      = "TStep[term] = TWnf[term, 1].  Fires exactly one interaction.  Inspect TStack[] for the pending frames.";
 TStack::usage     = "TStack[] returns the eliminator frames pending at the most recent bail point of TStep / TWnf[_, n].  Each frame is a TTerm tagged APP / DP0 / DP1.  Empty list when no bail occurred.";
 TRedexes::usage   = "TRedexes[] lists every redex in the live heap.  TRedexes[t] additionally DFS-walks `t` so a root the caller is holding directly is included.  Each entry is a TTerm uniquely identifying the redex by its packed Term value.";
@@ -316,6 +317,7 @@ $wnfFn          := $wnfFn          = load["thvm_wl_wnf",            {Integer},  
 $wnfNFn         := $wnfNFn         = load["thvm_wl_wnf_n",          {Integer, Integer}, Integer];
 $nfFn           := $nfFn           = load["thvm_wl_nf",              {Integer},          Integer];
 $cnfFn          := $cnfFn          = load["thvm_wl_cnf",             {Integer},          Integer];
+$collapseFn     := $collapseFn     = load["thvm_wl_collapse",        {Integer, Integer}, {Integer, 1}];
 $stackSizeFn    := $stackSizeFn    = load["thvm_wl_stack_size",     {},                 Integer];
 $stackGetFn     := $stackGetFn     = load["thvm_wl_stack_get",      {Integer},          Integer];
 $redexSnapFn    := $redexSnapFn    = load["thvm_wl_redex_snapshot", {{Integer, 1}},     Integer];
@@ -591,6 +593,17 @@ TWnf[t_, n_Integer /; n >= 0]  := Module[{r},
 ]
 TNf[t_]                        := (ensureInit[]; withTermCtx[t, TTerm[$nfFn[ttermRaw[t]]]])
 TCnf[t_]                       := (ensureInit[]; withTermCtx[t, TTerm[$cnfFn[ttermRaw[t]]]])
+
+(* TCollapse[t]: enumerate the SUP-tree of a term.  Walks the SUP
+   structure under `t`, cnfing at each step to surface the head.
+   SUP -> recurse into both branches; ERA -> drop; otherwise leaf.
+   Returns a List of TTerms (the surviving pure leaves).  Default
+   cap is 65536 leaves. *)
+TCollapse[t_]                  := TCollapse[t, 65536]
+TCollapse[t_, cap_Integer]     := (
+    ensureInit[];
+    TTerm /@ $collapseFn[ttermRaw[t], cap]
+)
 
 (* TStep[t] = TWnf[t, 1] -- fire exactly one interaction, then return
    the partially reduced term.  The pending eliminator stack at the

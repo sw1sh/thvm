@@ -440,6 +440,38 @@ EXTERN_C DLLEXPORT int thvm_wl_cnf(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// thvm_wl_collapse -- enumerate SUP-tree leaves of a term.
+// Walks `t` recursively: at each step cnfs to surface a head;
+// SUP -> recurse into both branches; ERA -> drop; otherwise -> emit.
+// Returns the leaves as a 1-D Integer MTensor (each entry a packed
+// Term).  Cap defaults to 65536; callers can pass a smaller cap if
+// they only need the first N hits.  See src/collapse/_.c.
+EXTERN_C DLLEXPORT int thvm_wl_collapse(WolframLibraryData libData,
+                                        mint argc, MArgument *args,
+                                        MArgument res) {
+  (void)argc;
+  Term t   = (Term)MArgument_getInteger(args[0]);
+  u64  cap = (u64) MArgument_getInteger(args[1]);
+  if (cap == 0 || cap > (1u << 20)) cap = (1u << 16);
+  Term *buf = (Term *)malloc(cap * sizeof(Term));
+  if (buf == NULL) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u64 n = thvm_collapse(t, buf, cap);
+  MTensor out;
+  mint dims[1] = { (mint)n };
+  int err = libData->MTensor_new(MType_Integer, 1, dims, &out);
+  if (err != LIBRARY_NO_ERROR) {
+    free(buf);
+    return err;
+  }
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u64 i = 0; i < n; i++) dst[i] = (mint)buf[i];
+  free(buf);
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 // Step-bounded reduce.  max_steps == 0 == unbounded (same as wnf).
 EXTERN_C DLLEXPORT int thvm_wl_wnf_n(WolframLibraryData libData, mint argc,
                                      MArgument *args, MArgument res) {
