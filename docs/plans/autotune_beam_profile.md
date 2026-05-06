@@ -1051,3 +1051,57 @@ realistic conv-net (matches `wl/Examples/lenet-mnist/`).
   would run roughly 7-9 (1 per conv-block + linear chains).
   Closing the conv2d 3-into-1 fusion (Phase D'+F) directly
   drops 4 kernels off this number.
+
+### Level 6 cross-framework: tinygrad LeNet forward
+
+Level 6 has thvm numbers but no tinygrad equivalent yet.
+Mirror the pattern from `conv2d.py` / `mlp2.py`: build the
+same LeNet shape (1x28x28 input, conv-pool-conv-pool-flatten-
+linear-linear-linear-softmax), bench with NOOPT + BEAM=4,
+and capture wall + tinygrad's kernel_count.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/lenet.py` --
+  forward-only LeNet on a single sample (1x28x28), structured
+  to match `bench/autotune-ladder/lenet.wls` so the
+  kernel-count comparison is apples-to-apples.  Bench NOOPT
+  (baseline) and BEAM=4 (autotuned).  Save stdout to
+  `bench/autotune-ladder/lenet.tinygrad.txt`.  Inline
+  baseline_us, beam4_us, speedup, kernel_count_post in this
+  task entry.
+
+  **tinygrad LeNet forward:**
+
+  | metric                | baseline (NOOPT) | beam4 |
+  |-----------------------|-----------------:|------:|
+  | steady_us             |             9033 |  8487 |
+  | kernel_count / 50 rep |              500 |   500 |
+  | kernels per forward   |               10 |    10 |
+  | speedup_to_beam4      |                  | 1.064x|
+
+  **Cross-framework Level 6 comparison:**
+
+  | metric              |  thvm | tinygrad |
+  |---------------------|------:|---------:|
+  | kernels per forward |    19 |       10 |
+  | best wall (us)      | 3464* |    8487  |
+  | autotune speedup    | 1.26x |   1.06x  |
+
+  \* thvm "best" is sum-of-per-kernel TKernelBenchUs (GPU-only,
+  no Python overhead); tinygrad "beam4_steady_us" is wall over
+  50 realize() calls including Python + dispatch (~300us per
+  call).  thvm number is therefore favourably skewed; the GPU-
+  only comparison would need a thvm wall-time mode that the
+  current bench scripts don't expose.
+
+  **Headline finding**: thvm runs LeNet in 19 kernels where
+  tinygrad runs it in 10 -- a +9 kernel leak on real-network
+  shape, decomposing as approximately:
+  - +4 from the conv2d 3-into-1 fusion (each conv leaks +2).
+  - +2-3 from softmax-tail / pool / flatten boundaries that
+    bufferize splits.
+  - +1-2 from LinearLayer-activation boundaries.
+
+  Per-kernel autotune saturates at 1.06x on tinygrad and 1.26x
+  on thvm -- consistent with the synthetic-ladder finding that
+  per-kernel tuning is at parity and structural fusion is the
+  dominant lever.
