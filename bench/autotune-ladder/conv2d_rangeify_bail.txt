@@ -1,0 +1,3 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
+rangeify bail (mid-emit): RESHAPE out_dim > u8 (n_ops=71 onum=460800)

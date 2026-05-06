@@ -677,8 +677,43 @@ need a new path.
 
 ### Smaller wedge: which rangeify rule splits the conv2d kh*kw chain?
 
-- [ ] Run the conv2d probe under `THVM_DUMP_RANGEIFY_BAIL=1`
-  and capture the bail reasons.  Save to
-  `bench/autotune-ladder/conv2d_rangeify_bail.txt`.  Goal:
-  identify the specific bail reason that fragments the
-  `Fold[Plus, partials]` chain.
+- [x] (2026-05-06) Run the conv2d probe under
+  `THVM_RANGEIFY_BAIL=1` and capture the bail reasons.  Saved to
+  `bench/autotune-ladder/conv2d_rangeify_bail.txt`.
+
+  **Single bail, single category**:
+
+      rangeify bail (mid-emit): RESHAPE out_dim > u8 (n_ops=71 onum=460800)
+
+  Located in
+  [src/schedule/rangeify.c:3175](../../src/schedule/rangeify.c#L3175):
+
+  ```c
+  for (u32 d = 0; d < p->out_ndim; d++) {
+    if (p->out_dims[d] > 0xFFu) RBAIL_MID("RESHAPE out_dim > u8");
+    lo |= ((u64)p->out_dims[d] & 0xFFu) << (8 * d);
+  }
+  ```
+
+  This is the **same-rank RESHAPE legacy encoding** which packs
+  each dim into one byte (max 255).  My conv2d's xCol matrix
+  has dim `cIn*kh*kw = 32*5*5 = 800` which overflows u8.
+
+  thvm already has `S_RESHAPE_V` (line 3149) that handles
+  rank-mismatch RESHAPE with explicit per-dim refs (no u8 cap),
+  but the same-rank path doesn't fall back to V when dims
+  overflow -- it bails entirely, fragmenting the bufferize
+  region and producing the 24-input metal-op rejecting kernel.
+
+  **Fix is a small refactor**: when the same-rank legacy path
+  would bail on `out_dim > u8`, fall through to the V emission
+  path instead.  This is far more tractable than building
+  TUOpShrinkV / TUOpPadV variants from scratch.
+
+### Same-rank RESHAPE > u8 fallback to V
+
+- [ ] In `rangeify.c` at the `RESHAPE out_dim > u8` bail (line
+  3175), change the bail to a fallback that emits `S_RESHAPE_V`
+  with the same shape information.  Validate via the conv2d
+  probe: dispatch should shift from `2 metal-op + 1 metal-tile`
+  to fewer metal-op kernels.  make test 274/274 must stay green.
