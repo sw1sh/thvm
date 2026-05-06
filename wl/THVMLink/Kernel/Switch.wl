@@ -19,6 +19,8 @@ TIfZero::usage  = "TIfZero[counter, thenTerm, elseTerm] is sugar for APP[ TMatNu
 
 TCtr::usage = "TCtr[label, c1, c2, ...] constructs a TAG_CTR with the given integer label and child terms.  Mirrors HVM4's `#K{a, b, ...}`.  Arity capped at 16 (matches HVM4's CTR limit).  An IC-level dup of the result fires DUP-CTR via interact_dup_ctr.";
 
+TBookCtr::usage = "TBookCtr[label, c1, c2, ...] constructs a TAG_CTR in BOOK_HEAP rather than the dynamic HEAP.  Use when constructing CTR inputs destined for the Metal AOT path -- the kernel's heap MTLBuffer is bound to BOOK_HEAP, so destructure derefs only resolve for vals in that range.  Phase 7 iter T.";
+
 TMatChain::usage = "TMatChain[<|label1 -> handler1, label2 -> handler2, ...|>, fallback] builds nested TMatNum atoms so a single matcher dispatches multiple constructor labels, mirroring HVM4's `lambda { #L1: h1; #L2: h2; ... }` syntax.  Each handler receives the destructured CTR fields positionally via APP-MAT-CTR-MAT.";
 
 Begin["`Private`"];
@@ -47,6 +49,8 @@ $termNewOp2Fn := $termNewOp2Fn = load["thvm_wl_term_new_op2",
 $termNewMatFn := $termNewMatFn = load["thvm_wl_term_new_mat",
     {Integer, Integer, Integer}, Integer]
 $termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr",
+    {Integer, {Integer, 1}}, Integer]
+$termNewBookCtrFn := $termNewBookCtrFn = load["thvm_wl_term_new_book_ctr",
     {Integer, {Integer, 1}}, Integer]
 
 (* TAG_NUM is just a packed term -- no library call needed. *)
@@ -83,6 +87,16 @@ TIfZero[counter_, thenTerm_, elseTerm_] :=
 TCtr[label_Integer, children___] := (
     ensureInit[];
     TTerm[$termNewCtrFn[label, ttermRaw /@ {children}]]
+)
+
+(* TBookCtr -- like TCtr but allocates the cell sequence in BOOK_HEAP
+   (rather than the dynamic HEAP).  Use when constructing CTR inputs
+   destined for the Metal AOT path: the kernel's `device Term *heap`
+   buffer is zero-copy bound to BOOK_HEAP, so destructure derefs only
+   work for vals in book_heap range.  Phase 7 iter T. *)
+TBookCtr[label_Integer, children___] := (
+    ensureInit[];
+    TTerm[$termNewBookCtrFn[label, ttermRaw /@ {children}]]
 )
 
 (* TMatChain[<|0 -> h0, 1 -> h1, ...|>, fb] expands to

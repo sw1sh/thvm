@@ -2181,6 +2181,36 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_pri(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// Phase 7 iter T: build a CTR cell in BOOK_HEAP (rather than the
+// dynamic HEAP that term_new_ctr / TCtr use).  The Metal kernel's
+// `device Term *heap` MTLBuffer is zero-copy bound to BOOK_HEAP, so
+// CTRs destined as inputs to the Metal AOT path need to live there
+// for the kernel's destructure path (heap[scrutinee_val + 1+i]) to
+// dereference correctly.
+//
+// Args: [label (Integer), children (Integer rank-1 MTensor)].
+// Returns: TAG_CTR Term whose val points into BOOK_HEAP.
+EXTERN_C DLLEXPORT int thvm_wl_term_new_book_ctr(WolframLibraryData libData,
+                                                  mint argc, MArgument *args,
+                                                  MArgument res) {
+  (void)argc;
+  mint label = MArgument_getInteger(args[0]);
+  MTensor t  = MArgument_getMTensor(args[1]);
+  mint n     = libData->MTensor_getFlattenedLength(t);
+  const mint *data = libData->MTensor_getIntegerData(t);
+  if (n < 0 || n > 64) return LIBRARY_FUNCTION_ERROR;
+
+  u64 loc = book_alloc((u64)(1 + n));
+  // n_cell: NUM(n) with DT_INT32 ext, mirroring term_new_ctr.
+  book_set(loc, term_new(0, TAG_NUM, DT_INT32, (u64)n));
+  for (mint i = 0; i < n; i++) {
+    book_set(loc + 1 + (u64)i, (Term)data[i]);
+  }
+  Term out = term_new(0, TAG_CTR, (u32)label, loc);
+  MArgument_setInteger(res, (mint)out);
+  return LIBRARY_NO_ERROR;
+}
+
 // Phase 7 iter J + Q: parallel-pool variant.  Args:
 //   [path, name, n_threads, arg0, arg1, arg2, arg3]
 // Dispatches the AOT'd def through aot_run_parallel with n_threads

@@ -141,6 +141,34 @@ VerificationTest[
     TestID -> "Metal: pair_sum(CTR{99, [NUM(1)]}) -> default 0 (no destructure)"
 ]
 
+(* iter T: TBookCtr allocates in BOOK_HEAP so the matched-arm
+   destructure deref into the kernel's `heap` MTLBuffer resolves
+   to the right cells. *)
+
+VerificationTest[
+    TInit[];
+    TDef["pair_sum",
+      TLam[p, TMatChain[
+        <|2 -> TLam[x, TLam[y, TOp2["+", x, y]]]|>,
+        TNum[0]][p]]];
+    TTermVal @ TAOTRun["pair_sum", {TBookCtr[2, TNum[7], TNum[35]]},
+                       Method -> "Metal"],
+    42,
+    TestID -> "Metal: pair_sum(TBookCtr{2, [NUM(7), NUM(35)]}) = 7+35 = 42"
+]
+
+VerificationTest[
+    TInit[];
+    TDef["fst_pair",
+      TLam[p, TMatChain[
+        <|2 -> TLam[x, TLam[y, x]]|>,
+        TNum[0]][p]]];
+    TTermVal @ TAOTRun["fst_pair", {TBookCtr[2, TNum[111], TNum[222]]},
+                       Method -> "Metal"],
+    111,
+    TestID -> "Metal: fst_pair(TBookCtr{2, ...}) returns first child"
+]
+
 (* === Method dispatcher rejects unknown spec === *)
 
 VerificationTest[
