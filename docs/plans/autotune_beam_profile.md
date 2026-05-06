@@ -3152,3 +3152,23 @@ patterns the rules might affect.
   with no env knobs to confirm the +1.25x and +0% wall
   patterns from the env-flagged probe persist with defaults
   flipped.
+
+### Level 24a: confirm LeNet wins persist after flip
+
+- [x] (2026-05-06) Re-run `bench/autotune-ladder/lenet.wls`
+  with default env (no env knobs).
+
+  | metric             | post-L22 | env-flagged | post-flip |
+  |--------------------|---------:|------------:|----------:|
+  | kernel_count       |       19 |          19 |        19 |
+  | dispatch_kinds     |9op+10t   |9op+10t      |   9op+10t |
+  | totals_baseline_us |     5367 |        4333 |      4341 |
+  | totals_best_us     |     4479 |        3590 |      3620 |
+  | totals_speedup     |    1.20x |       1.21x |     1.20x |
+
+  **Wins persist after flip.**  Best wall 4479us -> 3620us
+  (-19%).  Matches the env-flagged probe (3590us) within
+  noise (3620 - 3590 = 30us, <1%).  Within 4.5% of pre-Level-22
+  baseline (3464us).
+
+  Default-on flip is working as intended on conv-net workloads.

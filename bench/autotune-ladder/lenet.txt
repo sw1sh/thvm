@@ -1,33 +1,29 @@
-## post-Level-22 patch (commit 62bfcca)
+## post-default-on (Level 24, commit 9e25f48)
 
-lift rejects: 0
-
-thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
 thvm: metal_jit stats -- hits=0 misses=0 bypass=0 compile_us=0
-thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (34 functions)
 lenet kernel_count: 19
 dispatch_kinds: {{metal-op, 9}, {metal-tile, 10}}
-kid 1 kind=metal-op baseline=589.us best=547.us  opt=TOpt[LOCAL, 2, 8]  applied={TOpt[LOCAL, 2, 4], TOpt[GLOBAL, 2, 144]}
-kid 2 kind=metal-op baseline=254.us best=224.us  opt=TOpt[GROUP, 2, 25]  applied={TOpt[GROUP, 2, 25]}
-kid 3 kind=metal-tile baseline=345.us best=192.us  opt=TOpt[LOCAL, 1, 8]  applied={TOpt[LOCAL, 1, 8], TOpt[GLOBAL, 1, 3]}
-kid 4 kind=metal-op baseline=189.us best=187.us  opt=TOpt[GROUP, 4, 2]  applied={}
-kid 5 kind=metal-op baseline=163.us best=164.us  opt=TOpt[GROUP, 3, 2]  applied={TOpt[GROUP, 3, 2]}
-kid 6 kind=metal-op baseline=754.us best=778.us  opt=TOpt[LOCAL, 2, 64]  applied={}
-kid 7 kind=metal-op baseline=356.us best=364.us  opt=TOpt[UNROLL, 2, 2]  applied={TOpt[GROUP, 2, 150]}
-kid 8 kind=metal-tile baseline=291.us best=192.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 4]}
-kid 9 kind=metal-op baseline=219.us best=211.us  opt=TOpt[GROUP, 4, 2]  applied={}
-kid 10 kind=metal-op baseline=183.us best=179.us  opt=TOpt[GROUP, 3, 2]  applied={TOpt[UNROLL, 3, 2]}
-kid 12 kind=metal-tile baseline=188.us best=162.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 30]}
-kid 13 kind=metal-tile baseline=932.us best=447.us  opt=TOpt[GROUP, 1, 120]  applied={TOpt[GROUP, 1, 120]}
-kid 14 kind=metal-tile baseline=151.us best=136.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 21]}
-kid 15 kind=metal-tile baseline=185.us best=171.us  opt=TOpt[GROUP, 1, 84]  applied={TOpt[GROUP, 1, 84]}
-kid 16 kind=metal-tile baseline=146.us best=139.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
-kid 17 kind=metal-tile baseline=139.us best=122.us  opt=TOpt[UNROLL, 1, 2]  applied={}
-kid 18 kind=metal-tile baseline=153.us best=132.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
-kid 19 kind=metal-tile baseline=130.us best=132.us  opt=TOpt[UNROLL, 1, 2]  applied={TOpt[UNROLL, 1, 2]}
-totals_baseline_us: 5367.
-totals_best_us: 4479.
-totals_speedup: 1.19826
+kid 1 kind=metal-op baseline=836.us best=475.us  opt=TOpt[LOCAL, 2, 16]  applied={TOpt[LOCAL, 2, 2], TOpt[GLOBAL, 2, 288]}
+kid 2 kind=metal-op baseline=204.us best=211.us  opt=TOpt[GROUP, 2, 25]  applied={TOpt[GROUP, 2, 25]}
+kid 3 kind=metal-tile baseline=256.us best=157.us  opt=TOpt[LOCAL, 1, 8]  applied={TOpt[LOCAL, 1, 4], TOpt[GLOBAL, 1, 6]}
+kid 4 kind=metal-op baseline=175.us best=162.us  opt=TOpt[UNROLL, 4, 2]  applied={TOpt[GROUP, 4, 2]}
+kid 5 kind=metal-op baseline=137.us best=148.us  opt=TOpt[GROUP, 3, 2]  applied={}
+kid 6 kind=metal-op baseline=542.us best=539.us  opt=TOpt[LOCAL, 2, 64]  applied={}
+kid 7 kind=metal-op baseline=271.us best=223.us  opt=TOpt[GROUP, 2, 2]  applied={TOpt[GROUP, 2, 150]}
+kid 8 kind=metal-tile baseline=191.us best=152.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 16], TOpt[GLOBAL, 0, 1]}
+kid 9 kind=metal-op baseline=171.us best=166.us  opt=TOpt[GROUP, 4, 2]  applied={}
+kid 10 kind=metal-op baseline=153.us best=154.us  opt=TOpt[GROUP, 3, 2]  applied={TOpt[UNROLL, 3, 2]}
+kid 12 kind=metal-tile baseline=149.us best=138.us  opt=TOpt[LOCAL, 0, 4]  applied={TOpt[LOCAL, 0, 8], TOpt[GLOBAL, 0, 15]}
+kid 13 kind=metal-tile baseline=366.us best=228.us  opt=TOpt[GROUP, 1, 120]  applied={TOpt[GROUP, 1, 120]}
+kid 14 kind=metal-tile baseline=153.us best=149.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 4], TOpt[GLOBAL, 0, 21]}
+kid 15 kind=metal-tile baseline=180.us best=163.us  opt=TOpt[UNROLL, 1, 2]  applied={TOpt[GROUP, 1, 84]}
+kid 16 kind=metal-tile baseline=138.us best=142.us  opt=TOpt[LOCAL, 0, 2]  applied={}
+kid 17 kind=metal-tile baseline=144.us best=139.us  opt=TOpt[GROUP, 1, 10]  applied={TOpt[UNROLL, 1, 2]}
+kid 18 kind=metal-tile baseline=138.us best=136.us  opt=TOpt[LOCAL, 0, 2]  applied={TOpt[LOCAL, 0, 2], TOpt[GLOBAL, 0, 5]}
+kid 19 kind=metal-tile baseline=137.us best=138.us  opt=TOpt[GROUP, 1, 2]  applied={TOpt[GROUP, 1, 10]}
+totals_baseline_us: 4341.
+totals_best_us: 3620.
+totals_speedup: 1.19917
 kernels_with_proposals: 18
 kernels_with_applied: 14
-thvm: metal_jit stats -- hits=440 misses=74 bypass=0 compile_us=9693
+thvm: metal_jit stats -- hits=440 misses=74 bypass=0 compile_us=6351
