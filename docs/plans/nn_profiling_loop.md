@@ -37,9 +37,16 @@ every minute.
   metal-tile=24, metal-gemm=6.** (forward.wls itself fails the
   cross-entropy positive-loss assertion on this batch, but the
   forward pipeline produces a correct softmax; tracked separately.)
-- [ ] Run `wl/Examples/mlp-mnist/train.wls` for `N_STEPS=10` BS=32 and
-  capture wall + per-step stats. Save to
-  `bench/mlp-mnist/train_bs32.txt`.
+- [x] (2026-05-06) Run `wl/Examples/mlp-mnist/train.wls` for
+  `N_STEPS=10` BS=32 and capture wall + per-step stats. Save to
+  `bench/mlp-mnist/train_bs32.txt`. **Wall 6.02 s for 11 stepGrads
+  calls (10 train + 1 final eval), ~547 ms/step including TInit
+  reset.** Note: train.wls is BS=1 (single fixed MNIST sample), not
+  BS=32; the script's loss-decrease assertion fails (loss climbs
+  from 2.25 to 3.60 due to lr=0.05 over a single sample) but
+  performance numbers are still valid for forward+backward
+  throughput. Lift-reject diagnostics fire on per-output-grad
+  reductions (not currently lifted by `kernel_lift_to_uop`).
 - [ ] Use `TFromNet[net]` (no input arg) to rewrite `forward.wls` so
   it hands a `TLam` to `TRealize` directly; verify numerics match
   the existing pipeline.
