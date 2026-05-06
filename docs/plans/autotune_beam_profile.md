@@ -1286,3 +1286,64 @@ the structural-fusion target is precisely defined.
   for thvm and stays at 0 for tinygrad's fused-Linear-
   activation form -- a structural-fusion delta that scales
   with model depth.
+
+### Level 10: mini-LeNet (1 conv-block) -- isolate per-conv-block cost
+
+LeNet (Level 6) ran 19 thvm kernels with 2 conv-blocks +
+flatten + 3 linear-blocks + softmax.  We have the per-Linear-
+boundary cost (+2 thvm vs +1 tinygrad), but not the per-conv-
+block cost.  Mini-LeNet (1 conv-block + flatten + 1 linear +
+softmax) gives us a 1-block reference; subtracting from
+Level 6's 2-block count exposes the per-conv-block delta.
+
+- [x] (2026-05-06) Write `bench/autotune-ladder/mini_lenet.wls`
+  -- forward-only 1-conv-block + flatten + linear + softmax
+  on a single MNIST sample (1x28x28).  Save stdout to
+  `bench/autotune-ladder/mini_lenet.txt`.  Inline kernel_count,
+  dispatch_kinds, totals_baseline_us, totals_best_us,
+  totals_speedup, kernels_with_proposals, jit compile_us.
+  Compare to LeNet (19 kernels): the delta exposes the
+  per-conv-block kernel cost.
+
+  | metric             | mini-LeNet | LeNet | delta |
+  |--------------------|-----------:|------:|------:|
+  | conv-blocks        |          1 |     2 |   +1  |
+  | linear-blocks      |          1 |     3 |   +2  |
+  | kernel_count       |         10 |    19 |   +9  |
+  | dispatch_kinds     | 5op+5t     |9op+10t|       |
+  | totals_baseline_us |       2524 |  4350 |       |
+  | totals_best_us     |       2154 |  3464 |       |
+  | totals_speedup     |      1.17x | 1.26x |       |
+
+  **Decomposition**: per Level 9, each linear-block costs +2
+  thvm kernels.  Subtracting `+2 * 2 = +4` from the +9 delta
+  leaves **+5 kernels for the extra conv-block**.
+
+  | thvm cost (kernels) | per-block | reason                       |
+  |---------------------|----------:|------------------------------|
+  | conv-block          |        ~5 | Conv (3) + Ramp (1) + Pool (1)|
+  | linear-block        |        ~2 | Linear-matmul (1) + Activ (1)|
+
+  Per Level 5 (single conv2d), conv alone = 3 kernels (im2col
+  + reduce + bias).  Adding Ramp + Pool to make a "conv-block"
+  costs +2 kernels (one per boundary, same per-elementwise-
+  boundary phenomenon as MLP).
+
+  Per-conv-block leak vs tinygrad (which fuses each block to
+  ~1 kernel): **+4 per conv-block** in thvm.  So a
+  K-conv-block, L-linear-layer network leaks approximately
+  `4*K + (L-1)` kernels in thvm.  LeNet (K=2, L=3) predicts
+  +10; observed +9.  The 1-kernel discrepancy is likely
+  because one boundary (e.g. softmax-tail post Level 8 fix,
+  or flatten-as-noop) doesn't fragment.
+
+  **Structural-fusion target now decomposed**:
+  - Closing per-conv-block fusion: ~80% of LeNet's leak.
+  - Closing per-linear-block fusion: ~20%.
+
+  Conv-block fusion has 4x the leverage of linear-block fusion
+  on conv-net workloads.  This sharpens the priority list
+  in [docs/plans/the_ideal_pipeline.md](the_ideal_pipeline.md):
+  Conv2d 3-into-1 (Phase D'+F) + conv-elementwise / pool-
+  elementwise fusion is the highest-ROI structural change for
+  real conv-net kernels.
