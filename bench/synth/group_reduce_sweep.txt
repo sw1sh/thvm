@@ -1,0 +1,41 @@
+N	L	baseline_us	group_us	speedup
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+1024	16	Round[0.00138713 e6, 0.1]	Round[0.00137933 e6, 0.1]	1.006
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+1024	32	Round[0.0014199 e6, 0.1]	Round[0.00135623 e6, 0.1]	1.047
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+1024	64	Round[0.00139702 e6, 0.1]	Round[0.00138089 e6, 0.1]	1.012
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+1024	128	Round[0.00141464 e6, 0.1]	Round[0.0013585 e6, 0.1]	1.041
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+4096	16	Round[0.00153932 e6, 0.1]	Round[0.00149787 e6, 0.1]	1.028
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+4096	32	Round[0.00148946 e6, 0.1]	Round[0.0019147 e6, 0.1]	0.778
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+4096	64	Round[0.00152437 e6, 0.1]	Round[0.00138695 e6, 0.1]	1.099
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+4096	128	Round[0.00152543 e6, 0.1]	Round[0.00136057 e6, 0.1]	1.121
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+16384	16	Round[0.0017927 e6, 0.1]	Round[0.00167644 e6, 0.1]	1.069
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+16384	32	Round[0.00170882 e6, 0.1]	Round[0.0016274 e6, 0.1]	1.05
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+16384	64	Round[0.00163974 e6, 0.1]	Round[0.00151686 e6, 0.1]	1.081
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+16384	128	Round[0.00169332 e6, 0.1]	Round[0.00143347 e6, 0.1]	1.181
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+65536	16	Round[0.0060948 e6, 0.1]	Round[0.00610161 e6, 0.1]	0.999
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+65536	32	Round[0.00611261 e6, 0.1]	Round[0.006088 e6, 0.1]	1.004
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+65536	64	Round[0.00625861 e6, 0.1]	Round[0.00670752 e6, 0.1]	0.933
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+65536	128	Round[0.00641013 e6, 0.1]	Round[0.00611489 e6, 0.1]	1.048
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+262144	16	Round[0.0206226 e6, 0.1]	Round[0.0206735 e6, 0.1]	0.998
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+262144	32	Round[0.0218015 e6, 0.1]	Round[0.0224657 e6, 0.1]	0.97
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+262144	64	Round[0.0221417 e6, 0.1]	Round[0.0213904 e6, 0.1]	1.035
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+262144	128	Round[0.0208819 e6, 0.1]	Round[0.020919 e6, 0.1]	0.998

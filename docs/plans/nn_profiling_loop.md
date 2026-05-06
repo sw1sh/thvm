@@ -440,3 +440,27 @@ every minute.
   end-to-end on the metal-tile path.  Lifting LeNet's metal-op
   kernels (conv2d, reshape) onto metal-tile is the next leverage
   point for autotune-driven reduce wins on real workloads.
+
+### GROUP_REDUCE scaling sweep
+- [x] (2026-05-06) Sweep the synthetic `TUOpReduce + GROUP[1, L]`
+  benchmark across N x L grid.  Saved to
+  `bench/synth/group_reduce_sweep.txt`.  Headline results
+  (per-call wall, 100 reps):
+
+  | N      | L=16   | L=32   | L=64   | L=128  |
+  |--------|--------|--------|--------|--------|
+  | 1024   | 1.006x | 1.047x | 1.012x | 1.041x |
+  | 4096   | 1.028x | 0.778x | 1.099x | 1.121x |
+  | 16384  | 1.069x | 1.05x  | 1.081x | **1.181x** |
+  | 65536  | 0.999x | 1.004x | 0.933x | 1.048x |
+  | 262144 | 0.998x | 0.97x  | 1.035x | 0.998x |
+
+  Best wins: N=16384, L=128 (1.18x); N=4096, L=128 (1.12x).
+  Wins plateau and become noise above N~16k.  L=128 is the most
+  consistent winner.  Two limits at play:
+  - WL `TRealize` overhead (1.3 ms per call) dominates small-N.
+  - Cooperative pattern only spawns L threads per group, so very
+    large N becomes per-thread-sequential (each thread walks N/L
+    elements) -- not compute-saturated.  Real wins need a
+    dispatch shape change that increases groups (currently groups=1
+    for these reduces).  That's a follow-on task.
