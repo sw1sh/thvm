@@ -300,12 +300,19 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     g_msl_self_def_id = def_id;
     g_msl_emit_failed = 0;
 
-    // Iter F: detect App(MAT-chain, TVar) shape -- numeric switch
-    // dispatch.  After TLam-peel, the body might be
+    // Iter F + L: detect App(MAT-chain, TVar) shape.  After TLam-peel
+    // the body might be:
     //   App(MAT[v0, [h0, MAT[v1, [h1, ... fallback]]]], TVar(arg))
-    // We walk the MAT chain, collect (match_val, handler) pairs, and
-    // emit MSL chained conditionals.  Each handler + the fallback is
-    // emitted via aot_msl_emit_uint (TNum / TVar / TOp2 fold).
+    // For each MAT cell, the handler shape decides the arm:
+    //   * value handler (TNum/TVar/TOp2/...) -> NUM-arm:
+    //       if (scrutinee_tag == NUM && scrutinee_val == match) ...
+    //   * TLam-wrapped handler (one or more lambdas) -> CTR-arm:
+    //       if (scrutinee_tag == CTR && scrutinee_ext == match) {
+    //         Term x = heap[scrutinee_val + 1];   (per peeled LAM)
+    //         ...
+    //         result_val = <body uint>;
+    //       }
+    // Mixed-shape chains are allowed (e.g., 0 -> NUM(42), #1 x -> x).
     int emitted_mat = 0;
     if (term_tag(cursor) == TAG_APP) {
         u64  app_loc  = term_val(cursor);
@@ -315,8 +322,12 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
             const char *arg_name = aot_msl_bind_lookup(&bind, term_val(arg));
             if (arg_name != NULL) {
                 aot_emit_fmt(&b,
-                    "  uint scrutinee = uint(msl_term_val(%s));\n"
-                    "  uint result_val;\n",
+                    "  Term scrutinee_term = %s;\n"
+                    "  uint scrutinee_tag = uint((scrutinee_term >> TAG_SHIFT) & TAG_MASK);\n"
+                    "  uint scrutinee_val = uint(scrutinee_term & VAL_MASK);\n"
+                    "  uint scrutinee_ext = uint((scrutinee_term >> EXT_SHIFT) & EXT_MASK);\n"
+                    "  (void)scrutinee_ext;\n"
+                    "  uint result_val = 0u;\n",
                     arg_name);
                 Term mc = mat_head;
                 int  first = 1;
@@ -325,19 +336,69 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
                     u64  ml        = term_val(mc);
                     Term handler   = book_read(ml + 0);
                     Term fallback  = book_read(ml + 1);
-                    const char *hv = aot_msl_emit_uint(&b, handler, &bind);
-                    aot_emit_fmt(&b,
-                        "  %sif (scrutinee == %uu) result_val = %s;\n",
-                        first ? "" : "else ", match_val, hv);
+                    if (term_tag(handler) == TAG_LAM) {
+                        // CTR-arm: peel LAMs, bind each to heap[val+1+i].
+                        u32 saved_n = bind.n;
+                        Term hcursor = handler;
+                        u32 lam_idx = 0;
+                        char binder_names[8][32];
+                        while (term_tag(hcursor) == TAG_LAM && lam_idx < 8) {
+                            u32 fr = g_msl_fresh++;
+                            snprintf(binder_names[lam_idx], sizeof binder_names[0],
+                                     "ctr_%u", fr);
+                            u64 lam_loc = term_val(hcursor);
+                            aot_msl_bind_push(&bind, lam_loc, binder_names[lam_idx]);
+                            hcursor = book_read(lam_loc);
+                            lam_idx++;
+                        }
+                        aot_emit_fmt(&b,
+                            "  %sif (scrutinee_tag == 20u && scrutinee_ext == %uu) {\n",
+                            first ? "" : "else ", match_val);
+                        for (u32 i = 0; i < lam_idx; i++) {
+                            aot_emit_fmt(&b,
+                                "    Term %s = heap[scrutinee_val + %uu];\n",
+                                binder_names[i], i + 1);
+                        }
+                        const char *hv = aot_msl_emit_uint(&b, hcursor, &bind);
+                        aot_emit_fmt(&b,
+                            "    result_val = %s;\n"
+                            "  }\n", hv);
+                        bind.n = saved_n;
+                    } else {
+                        // NUM-arm (iter F path).
+                        const char *hv = aot_msl_emit_uint(&b, handler, &bind);
+                        aot_emit_fmt(&b,
+                            "  %sif (scrutinee_tag == %uu && scrutinee_val == %uu) result_val = %s;\n",
+                            first ? "" : "else ",
+                            (u32)TAG_NUM, match_val, hv);
+                    }
                     first = 0;
                     mc = fallback;
                 }
-                // Default arm: emit the fallback expression (after the
-                // MAT chain runs out).  Same TNum/TVar/TOp2 vocabulary.
-                const char *fv = aot_msl_emit_uint(&b, mc, &bind);
-                aot_emit_fmt(&b,
-                    "  else result_val = %s;\n",
-                    fv);
+                // Default arm: fallback expression after the MAT chain.
+                // If the fallback is TLam (catch-all binding the
+                // scrutinee), peel + bind; else emit as value expr.
+                if (term_tag(mc) == TAG_LAM) {
+                    u32 saved_n = bind.n;
+                    u32 fr = g_msl_fresh++;
+                    char def_binder[32];
+                    snprintf(def_binder, sizeof def_binder, "def_arg_%u", fr);
+                    u64 def_lam_loc = term_val(mc);
+                    aot_msl_bind_push(&bind, def_lam_loc, def_binder);
+                    Term def_body = book_read(def_lam_loc);
+                    aot_emit_fmt(&b,
+                        "  else {\n"
+                        "    Term %s = scrutinee_term;\n",
+                        def_binder);
+                    const char *fv = aot_msl_emit_uint(&b, def_body, &bind);
+                    aot_emit_fmt(&b,
+                        "    result_val = %s;\n"
+                        "  }\n", fv);
+                    bind.n = saved_n;
+                } else {
+                    const char *fv = aot_msl_emit_uint(&b, mc, &bind);
+                    aot_emit_fmt(&b, "  else result_val = %s;\n", fv);
+                }
                 aot_emit_fmt(&b,
                     "  result[0] = msl_term_new(TAG_NUM, 0, ulong(result_val));\n"
                     "}\n");

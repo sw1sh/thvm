@@ -353,6 +353,68 @@ int main(void) {
   CHECK_EQ(term_tag(result), (u64)TAG_NUM);
   CHECK_EQ(term_val(result), (u64)0);
 
+  // Iter L: CTR destructure in MAT arms.  pair_sum(p) =
+  //   match p { #2 x y -> x + y; _ -> 0 }
+  // Body: App(MAT[2, [Lam[x, Lam[y, x+y]], NUM(0)]], TVar(p)).
+  TEST_BEGIN("CTR destructure in MAT: pair_sum(#2 x y) = x + y");
+  // Build the TLam[x, TLam[y, OP2(ADD, x, y)]] handler.
+  u64 ps_x_loc = book_alloc(1);
+  u64 ps_y_loc = book_alloc(1);
+  u64 ps_op_loc = book_alloc(2);
+  book_set(ps_op_loc + 0, term_new(0, TAG_VAR, 0, ps_x_loc));
+  book_set(ps_op_loc + 1, term_new(0, TAG_VAR, 0, ps_y_loc));
+  Term ps_op = term_new(0, TAG_OP2, OP_ADD, ps_op_loc);
+  book_set(ps_y_loc, ps_op);
+  Term ps_lam_y = term_new(0, TAG_LAM, 0, ps_y_loc);
+  book_set(ps_x_loc, ps_lam_y);
+  Term ps_handler = term_new(0, TAG_LAM, 0, ps_x_loc);
+
+  // Build the MAT chain: MAT[2, [ps_handler, NUM(0)]]
+  u64 ps_mat_loc = book_alloc(2);
+  book_set(ps_mat_loc + 0, ps_handler);
+  book_set(ps_mat_loc + 1, term_new(0, TAG_NUM, 0, 0));
+  Term ps_mat = term_new(0, TAG_MAT, 2, ps_mat_loc);
+
+  u64 ps_p_loc = book_alloc(1);
+  u64 ps_app_loc = book_alloc(2);
+  book_set(ps_app_loc + 0, ps_mat);
+  book_set(ps_app_loc + 1, term_new(0, TAG_VAR, 0, ps_p_loc));
+  Term ps_app = term_new(0, TAG_APP, 0, ps_app_loc);
+  book_set(ps_p_loc, ps_app);
+  Term pair_sum = term_new(0, TAG_LAM, 0, ps_p_loc);
+  u32 def_id9 = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id9 = i; break; }
+  }
+  DEFS[def_id9] = pair_sum;
+
+  // Build a CTR{label=2, [NUM(7), NUM(35)]} on the heap and pass as input.
+  u64 in_ctr_loc = book_alloc(3);
+  book_set(in_ctr_loc + 0, term_new(0, TAG_NUM, DT_INT32, 2));
+  book_set(in_ctr_loc + 1, term_new(0, TAG_NUM, 0, 7));
+  book_set(in_ctr_loc + 2, term_new(0, TAG_NUM, 0, 35));
+  Term in_ctr = term_new(0, TAG_CTR, 2, in_ctr_loc);
+
+  Term ps_args[1] = { in_ctr };
+  result = thvm_aot_metal_compile_and_run(
+      "pair_sum", def_id9, ps_args, 1,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)42);   // 7 + 35
+
+  // Default arm fires when label doesn't match.  Build CTR{99, [NUM(1)]}.
+  u64 in_ctr2_loc = book_alloc(2);
+  book_set(in_ctr2_loc + 0, term_new(0, TAG_NUM, DT_INT32, 1));
+  book_set(in_ctr2_loc + 1, term_new(0, TAG_NUM, 0, 1));
+  Term in_ctr2 = term_new(0, TAG_CTR, 99, in_ctr2_loc);
+
+  Term ps_args2[1] = { in_ctr2 };
+  result = thvm_aot_metal_compile_and_run(
+      "pair_sum", def_id9, ps_args2, 1,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)0);
+
   thvm_free();
   TEST_REPORT();
 }
