@@ -347,7 +347,35 @@ LinearLayer(784->128) -> ReLU -> LinearLayer(128->10) -> softmax.
   at 2264 us.  This is the level where the structural fusion gap
   is most visible: thvm spends 2x the work because it dispatches
   3 kernels for what tinygrad does in 1.
-- [ ] Compare.
+- [x] (2026-05-06) Compare.
+
+  | metric              | thvm                | tinygrad           |
+  |---------------------|---------------------|--------------------|
+  | kernels per conv    | **3**               | **1**              |
+  | baseline (us)       | 3569 (per-kern sum) | 1592 (call wall)   |
+  | best (us)           | 2264                | 1604               |
+  | autotune speedup    | **1.58x**           | **0.99x**          |
+  | absolute best       | 2264 us             | **1604 us** (-29%) |
+
+  **The biggest absolute gap in the ladder.**  Three findings:
+
+  1. **Structural**: tinygrad fuses the entire conv2d into 1
+     kernel; thvm dispatches 3 (im2col patch-sum + matmul-style
+     reduce + bias-broadcast).
+  2. **Autotune**: thvm extracts a real 1.58x from per-kernel
+     tuning -- the biggest in the ladder.  Tinygrad's BEAM=4
+     finds 0.99x because the default-heuristic kernel is
+     already at its local optimum.
+  3. **Net**: thvm's tuned 3-kernel chain (2264 us) is still
+     41% slower than tinygrad's untuned single kernel (1604 us).
+
+  Restated: **thvm's autotune is doing more work but on the
+  wrong unit.**  Per-kernel tuning saturates at ~1.58x but
+  the fundamental win comes from fusing the chain into 1 kernel
+  in the first place.  A monoidic-fused conv2d kernel on the
+  thvm tile path could close most of the 41% gap before any
+  autotune is applied -- and at that point per-kernel tuning
+  from there is gravy.
 
 ### Cross-level synthesis
 
