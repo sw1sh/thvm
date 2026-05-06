@@ -800,12 +800,35 @@ every minute.
   in kid 3 so it computes once per kernel call.
 
 ### Stable softmax sub-fixes
-- [ ] Hoist the SUM accumulator in `rmu_emit_store_reduce`
-  (or wherever the renderer emits the broadcast-of-reduce
-  pattern) so `for (a0) { for (a1) _acc += ... } out[a0] =
-  in0[a0]*(1/_acc)` becomes
-  `for (a1) _acc += ...; for (a0) out[a0] = in0[a0]*(1/_acc)`.
-  Saves N redundant sum-reduces per softmax.
+- [x] (2026-05-06) Hoist the SUM accumulator in
+  `rmu_emit_store` so output-axis-invariant reduces compute once,
+  not once per output position.  Implementation: collect the
+  output-axis ids from the addr expression; for each UOP_REDUCE
+  inside the value, check whether its body references any
+  output-axis range -- if not, mark hoistable; emit a first pass
+  for hoistable reduces BEFORE opening output for-loops, and a
+  second pass for non-hoistable reduces inside.
+
+  Verification on `TSoftmax[Range[10]]` kid 3 (the exp + sum +
+  divide kernel):
+  ```
+  // BEFORE (sum recomputed per a0):
+  for (uint a0 = 0; a0 < 10; a0++) {
+    float _acc1 = 0.0f;
+    for (uint a1 = 0; a1 < 10; a1++) _acc1 += in0[a1];
+    out[a0] = (in0[a0] * (1.0f/_acc1));
+  }
+
+  // AFTER (sum hoisted):
+  float _acc1 = 0.0f;
+  for (uint a1 = 0; a1 < 10; a1++) _acc1 += in0[a1];
+  for (uint a0 = 0; a0 < 10; a0++) {
+    out[a0] = (in0[a0] * (1.0f/_acc1));
+  }
+  ```
+
+  Numerics preserved (softmax({10,9,8})={0.665,0.245,0.090};
+  forward.wls 5/5 sane predictions).  make test 274/274 unchanged.
 
 ### Loss numerical stabilisation follow-on
 - [ ] Add a small epsilon clamp in TCrossEntropyLoss

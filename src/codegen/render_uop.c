@@ -845,6 +845,89 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   rmu_collect_ranges_with_opts(addr,  ranges, opt_kinds, opt_factors, &n_ranges);
   rmu_collect_ranges_with_opts(value, ranges, opt_kinds, opt_factors, &n_ranges);
 
+  // Collect output-axis ids: ranges in the addr expression are
+  // output axes (they index the store position).  Ranges that
+  // appear ONLY in the value expression are reduce or auxiliary.
+  Term addr_ranges[MAX_DIM];
+  u32  addr_n = 0;
+  rmu_collect_ranges(addr, addr_ranges, &addr_n);
+  u32 addr_axes[MAX_DIM];
+  for (u32 i = 0; i < addr_n; i++) {
+    addr_axes[i] = (term_tag(addr_ranges[i]) == TAG_UOP
+                    && term_ext(addr_ranges[i]) == UOP_RANGE)
+                 ? (u32)term_val(heap_read(term_val(addr_ranges[i]) + 0))
+                 : 0xFFFFFFFFu;
+  }
+
+  // Collect reduces and decide which ones are hoistable above the
+  // output loops.  A reduce is hoistable when its body doesn't
+  // reference any output-axis range -- the result is invariant in
+  // the output loop and recomputing it per-output-position is
+  // wasteful.  Concrete win: stable softmax `e[a0] / sum(e)` --
+  // sum was being recomputed once per a0; now hoisted to compute
+  // once.
+  Term reduces[MAX_DIM];
+  u32  n_reduces = 0;
+  rmu_collect_reduces(value, reduces, &n_reduces);
+  int hoistable[MAX_DIM] = {0};
+  for (u32 i = 0; i < n_reduces; i++) {
+    Term r_src = heap_read(term_val(reduces[i]) + 0);
+    Term r_ranges[MAX_DIM];
+    u32  r_n = 0;
+    rmu_collect_ranges(r_src, r_ranges, &r_n);
+    int uses_output_axis = 0;
+    for (u32 j = 0; j < r_n && !uses_output_axis; j++) {
+      u32 axis = (term_tag(r_ranges[j]) == TAG_UOP
+                  && term_ext(r_ranges[j]) == UOP_RANGE)
+               ? (u32)term_val(heap_read(term_val(r_ranges[j]) + 0))
+               : 0xFFFFFFFFu;
+      for (u32 k = 0; k < addr_n; k++) {
+        if (addr_axes[k] == axis) { uses_output_axis = 1; break; }
+      }
+    }
+    hoistable[i] = !uses_output_axis;
+  }
+
+  // Helper: emit a single reduce as `float _accN = init; for (...)
+  // _accN = combine(_accN, body); }` at the given indent.
+  // Used for both pre-loop (hoisted) and inside-loop (non-hoistable)
+  // emission.
+  // Inlined twice below because there's no closure mechanism.
+
+  // First pass: emit hoistable reduces BEFORE the output for-loops.
+  for (u32 i = 0; i < n_reduces; i++) {
+    if (!hoistable[i]) continue;
+    Term red = reduces[i];
+    u64 rloc = term_val(red);
+    u32 r_kind = term_val(heap_read(rloc + 1));
+    u32 r_axis = term_val(heap_read(rloc + 2));
+    Term r_src = heap_read(rloc + 0);
+    char acc_name[32];
+    snprintf(acc_name, sizeof(acc_name), "_acc%u", r_axis);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "float %s = ", acc_name);
+    rmu_emit_reduce_init(r_kind, fp);
+    fputs(";\n", fp);
+    Term reduce_ranges[MAX_DIM];
+    u32  reduce_kinds[MAX_DIM] = {0};
+    u32  reduce_factors[MAX_DIM] = {0};
+    u32  n_red_ranges = 0;
+    rmu_collect_ranges_with_opts(r_src, reduce_ranges, reduce_kinds,
+                                 reduce_factors, &n_red_ranges);
+    Term reduce_range_term = 0;
+    for (u32 j = 0; j < n_red_ranges; j++) {
+      u32 axis = term_val(heap_read(term_val(reduce_ranges[j]) + 0));
+      if (axis == r_axis) { reduce_range_term = reduce_ranges[j]; break; }
+    }
+    if (reduce_range_term != 0) {
+      rmu_emit_range_open(reduce_range_term, fp, depth, 0);
+      for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+      rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
+  }
+
   // Track the body indent and which ranges produced an open brace
   // (thread-bound axes don't, so we mustn't emit a matching close).
   u32 body_depth = depth;
@@ -871,15 +954,10 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       body_depth++;
     }
   }
-  // Hoist any UOP_REDUCE nested inside the value expression: emit
-  // accumulator init + reduce-axis loop + combine BEFORE the store
-  // statement.  The term emitter substitutes _acc<axis> in the
-  // expression itself.  Walks the value tree (not addr) since
-  // reductions only ever appear in value position.
-  Term reduces[MAX_DIM];
-  u32  n_reduces = 0;
-  rmu_collect_reduces(value, reduces, &n_reduces);
+  // Second pass: emit non-hoistable reduces INSIDE the output
+  // loops (a0-dependent reduces).
   for (u32 i = 0; i < n_reduces; i++) {
+    if (hoistable[i]) continue;
     Term red = reduces[i];
     u64 rloc = term_val(red);
     u32 r_kind = term_val(heap_read(rloc + 1));
@@ -887,12 +965,10 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     Term r_src = heap_read(rloc + 0);
     char acc_name[32];
     snprintf(acc_name, sizeof(acc_name), "_acc%u", r_axis);
-    // Find the reduce-axis range leaf in the body and emit a loop.
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     fprintf(fp, "float %s = ", acc_name);
     rmu_emit_reduce_init(r_kind, fp);
     fputs(";\n", fp);
-    // Reduce loop opener: find the matching RANGE and emit its for.
     Term reduce_ranges[MAX_DIM];
     u32  reduce_kinds[MAX_DIM] = {0};
     u32  reduce_factors[MAX_DIM] = {0};
