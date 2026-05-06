@@ -176,12 +176,61 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         name, def_id, argc, name);
 
     g_msl_fresh = 0;
-    const char *rv = aot_msl_emit_uint(&b, cursor, &bind);
 
-    aot_emit_fmt(&b,
-        "  result[0] = msl_term_new(TAG_NUM, 0, ulong(%s));\n"
-        "}\n",
-        rv);
+    // Iter F: detect App(MAT-chain, TVar) shape -- numeric switch
+    // dispatch.  After TLam-peel, the body might be
+    //   App(MAT[v0, [h0, MAT[v1, [h1, ... fallback]]]], TVar(arg))
+    // We walk the MAT chain, collect (match_val, handler) pairs, and
+    // emit MSL chained conditionals.  Each handler + the fallback is
+    // emitted via aot_msl_emit_uint (TNum / TVar / TOp2 fold).
+    int emitted_mat = 0;
+    if (term_tag(cursor) == TAG_APP) {
+        u64  app_loc  = term_val(cursor);
+        Term mat_head = book_read(app_loc + 0);
+        Term arg      = book_read(app_loc + 1);
+        if (term_tag(mat_head) == TAG_MAT && term_tag(arg) == TAG_VAR) {
+            const char *arg_name = aot_msl_bind_lookup(&bind, term_val(arg));
+            if (arg_name != NULL) {
+                aot_emit_fmt(&b,
+                    "  uint scrutinee = uint(msl_term_val(%s));\n"
+                    "  uint result_val;\n",
+                    arg_name);
+                Term mc = mat_head;
+                int  first = 1;
+                while (term_tag(mc) == TAG_MAT) {
+                    u32  match_val = term_ext(mc);
+                    u64  ml        = term_val(mc);
+                    Term handler   = book_read(ml + 0);
+                    Term fallback  = book_read(ml + 1);
+                    const char *hv = aot_msl_emit_uint(&b, handler, &bind);
+                    aot_emit_fmt(&b,
+                        "  %sif (scrutinee == %uu) result_val = %s;\n",
+                        first ? "" : "else ", match_val, hv);
+                    first = 0;
+                    mc = fallback;
+                }
+                // Default arm: emit the fallback expression (after the
+                // MAT chain runs out).  Same TNum/TVar/TOp2 vocabulary.
+                const char *fv = aot_msl_emit_uint(&b, mc, &bind);
+                aot_emit_fmt(&b,
+                    "  else result_val = %s;\n",
+                    fv);
+                aot_emit_fmt(&b,
+                    "  result[0] = msl_term_new(TAG_NUM, 0, ulong(result_val));\n"
+                    "}\n");
+                emitted_mat = 1;
+            }
+        }
+    }
+
+    if (!emitted_mat) {
+        // Plain value-expression body: emit directly + wrap as NUM.
+        const char *rv = aot_msl_emit_uint(&b, cursor, &bind);
+        aot_emit_fmt(&b,
+            "  result[0] = msl_term_new(TAG_NUM, 0, ulong(%s));\n"
+            "}\n",
+            rv);
+    }
 
     return b.buf;
 }

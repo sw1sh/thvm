@@ -110,6 +110,43 @@ int main(void) {
   CHECK_EQ(term_tag(result), (u64)TAG_NUM);
   CHECK_EQ(term_val(result), (u64)37);
 
+  // Iter F: MAT-chain on Metal.
+  // classify(n) = match n { 0 -> 42; 1 -> 99; 2 -> 7; default -> 0 }
+  // Build manually: TLam[n, App(MAT[0, [42, MAT[1, [99, MAT[2, [7, 0]]]]]], n)]
+  TEST_BEGIN("MAT-chain on GPU: classify(n)");
+  u64 mat2_loc = book_alloc(2);
+  book_set(mat2_loc + 0, term_new(0, TAG_NUM, 0, 7));   // handler for 2
+  book_set(mat2_loc + 1, term_new(0, TAG_NUM, 0, 0));   // default
+  Term mat2 = term_new(0, TAG_MAT, 2, mat2_loc);
+  u64 mat1_loc = book_alloc(2);
+  book_set(mat1_loc + 0, term_new(0, TAG_NUM, 0, 99));  // handler for 1
+  book_set(mat1_loc + 1, mat2);                          // fallback = mat2
+  Term mat1 = term_new(0, TAG_MAT, 1, mat1_loc);
+  u64 mat0_loc = book_alloc(2);
+  book_set(mat0_loc + 0, term_new(0, TAG_NUM, 0, 42));  // handler for 0
+  book_set(mat0_loc + 1, mat1);                          // fallback = mat1
+  Term mat0 = term_new(0, TAG_MAT, 0, mat0_loc);
+
+  u64 lam_n_loc = book_alloc(1);
+  u64 app_loc   = book_alloc(2);
+  book_set(app_loc + 0, mat0);
+  book_set(app_loc + 1, term_new(0, TAG_VAR, 0, lam_n_loc));
+  Term app = term_new(0, TAG_APP, 0, app_loc);
+  book_set(lam_n_loc, app);
+  Term classify = term_new(0, TAG_LAM, 0, lam_n_loc);
+  u32  def_id3 = def_register("classify", classify);
+
+  static const u32 inputs[] = { 0, 1, 2, 7 };
+  static const u32 expected[] = { 42, 99, 7, 0 };
+  for (u32 i = 0; i < 4; i++) {
+    Term args1[1] = { term_new(0, TAG_NUM, 0, inputs[i]) };
+    result = thvm_aot_metal_compile_and_run(
+        "classify", def_id3, args1, 1,
+        BOOK_HEAP, BOOK_CAP, &book_next_state);
+    CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+    CHECK_EQ(term_val(result), (u64)expected[i]);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
