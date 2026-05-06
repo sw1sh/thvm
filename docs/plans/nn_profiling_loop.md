@@ -464,3 +464,35 @@ every minute.
     elements) -- not compute-saturated.  Real wins need a
     dispatch shape change that increases groups (currently groups=1
     for these reduces).  That's a follow-on task.
+
+### Lift-coverage triage on LeNet kernels
+- [x] (2026-05-06) Run `wl/Examples/lenet-mnist/forward.wls` with
+  `THVM_DUMP_LIFT_REJECT=1` and capture the lift-reject reasons for
+  every kernel that ends up on `metal-op`.  Saved to
+  `bench/lenet-mnist/lift_reject.txt`.  100 reject events across
+  the forward pass; deduped:
+
+  | count | reason                                                |
+  |------:|-------------------------------------------------------|
+  |    80 | `index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13` |
+  |    10 | `entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0` |
+  |    10 | `entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0` |
+
+  - **80% are buf-not-DEFINE on rank-3 S_INDEX (dtype DT_FP32):**
+    `lift_scalar_index` only accepts S_DEFINE_PARAM or
+    S_DEFINE_OUTPUT as the buffer src; LeNet's intermediate-tensor
+    indices reference an earlier S_LOAD/S_INDEX result instead, so
+    the lifter rejects.  This is the gather-style pattern that
+    needs an indirect-index lift path.
+  - **20% are `entry/no-scalar-arena`:** kernels with no rangeify
+    arena (GEMM and conv2d-flat shapes), which would normally fall
+    through to `kernel_lift_from_gemm` / `kernel_lift_from_conv2d`
+    -- these specific shapes don't match either.  The
+    `n_inputs=24` shape is the LeNet conv2d-flat with 24 patch
+    inputs (kh*kw*c_in for the 5x5 conv); `n_inputs=2` is likely a
+    bias-add or similar.
+
+  Direction for the next leverage point: extend
+  `lift_scalar_index` to accept a buffer-side intermediate (a
+  buf-of-INDEX value), and audit the conv2d-flat path for the
+  24-input case.

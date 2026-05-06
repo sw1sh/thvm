@@ -1,0 +1,126 @@
+thvm: metal_init -- device: Apple M3 Max; metallib: build/default.metallib (31 functions)
+LeNet built (random init): 11 layers
+loaded 5 MNIST samples
+per-sample forward pass:
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+
+LibraryFunction::fpexc: Numeric data containing a floating point exception (NaN or Inf) encountered.
+
+Part::partw: Part 1 of {} does not exist.
+  sample 1: true=9 pred=-1 + {{}}[[1,1]] confidence=Round[$Failed, 0.001]
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+
+LibraryFunction::fpexc: Numeric data containing a floating point exception (NaN or Inf) encountered.
+
+Part::partw: Part 1 of {} does not exist.
+  sample 2: true=3 pred=-1 + {{}}[[1,1]] confidence=Round[$Failed, 0.001]
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+
+LibraryFunction::fpexc: Numeric data containing a floating point exception (NaN or Inf) encountered.
+
+General::stop: Further output of LibraryFunction::fpexc will be suppressed during this calculation.
+
+Part::partw: Part 1 of {} does not exist.
+
+General::stop: Further output of Part::partw will be suppressed during this calculation.
+  sample 3: true=9 pred=-1 + {{}}[[1,1]] confidence=Round[$Failed, 0.001]
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+  sample 4: true=1 pred=-1 + {{}}[[1,1]] confidence=Round[$Failed, 0.001]
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=24 n_ops=71 n_tile_uops=0
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: index/buf-not-DEFINE op=S_INDEX(4) src_count=4 dtype=13
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+lift reject: entry/no-scalar-arena n_inputs=2 n_ops=4 n_tile_uops=0
+  sample 5: true=4 pred=-1 + {{}}[[1,1]] confidence=Round[$Failed, 0.001]
+done.
