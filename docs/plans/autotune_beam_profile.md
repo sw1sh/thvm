@@ -4521,3 +4521,54 @@ table.  No code change in this iteration; pure observation gate.
   n_inputs past 2.  The matmul-input-protect rule is the
   upstream-walker counterpart; we need its DOWNSTREAM dual.
 
+### Level 47: dump rejected kernel op-trails to identify absorbed ops
+
+The `n_inputs!=2` rejects (2535 of them) are the matmul-fused-with-
+surrounding kernels.  But the histogram alone doesn't tell us WHAT
+got absorbed.  Add THVM_DUMP_GEMM_REJECT_OPS=1 to print each
+rejected kernel's op opcodes (filtered to those containing at least
+one REDUCE = matmul candidates) and pattern-match the fused shapes.
+
+- [x] (2026-05-07) Add THVM_DUMP_GEMM_REJECT_OPS=1 diagnostic in
+  `tile_analyze_gemm` next to the n_inputs!=2 reject; filter to
+  REDUCE-containing kernels; print n_inputs/n_ops + opcode list.
+  `make test` clean.  Re-run transformer_block, save filtered output
+  to `bench/autotune-ladder/transformer_gemm_reject_ops.txt`.
+
+  Distinct REDUCE-containing reject signatures (decoded; 3=RESHAPE,
+  4=PERMUTE, 5=EXPAND, 9=ADD, 10=MUL, 12=RECIP, 15=SQRT, 16=CMPLT,
+  17=REDUCE):
+
+  | hits | n_inputs | n_ops | ops (decoded)                          |
+  |-----:|---------:|------:|----------------------------------------|
+  |  564 |        3 |     6 | REDUCE,MUL,RESHAPE,EXPAND,MUL,ADD       |
+  |  332 |        3 |     6 | CMPLT,MUL,RESHAPE,EXPAND,MUL,REDUCE     |
+  |  282 |        7 |    17 | matmul + LN-style chain (multi-stage)   |
+  |  282 |        4 |     9 | ADD,RESHAPE,EXPAND,ADD,PERMUTE,RESHAPE,EXPAND,MUL,REDUCE |
+  |  282 |        1 |     2 | MUL,REDUCE (clean matmul!)              |
+  |  257 |        4 |    11 | RESHAPE,RECIP,EXPAND,MUL,RESHAPE,EXPAND,ADD,RESHAPE,EXPAND,MUL,REDUCE |
+  |  257 |        1 |     1 | REDUCE (non-matmul reduce)              |
+
+  **Smoking gun**: the n_inputs=4 / n_ops=11 signature (kid 14
+  shape) is `RESHAPE, RECIP, EXPAND, MUL, RESHAPE, EXPAND, ADD,
+  RESHAPE, EXPAND, MUL, REDUCE`.  Walking backwards from REDUCE:
+  the matmul's MUL reads `EXPAND(RESHAPE(...))` -- the MUL operand
+  arrives wrapped in movement ops, with an ADD (bias) and another
+  MUL (LN scale) hidden TWO HOPS up through RESHAPE/EXPAND.
+
+  Matmul-input-protect today walks ONE hop and matches ADD/MUL
+  directly.  It misses these cases because the elementwise parent
+  is hidden behind a RESHAPE+EXPAND pair (LN broadcast layout).
+  The fix is to extend the upstream walk to **skip movement ops**
+  (RESHAPE/EXPAND/PERMUTE/SHRINK/PAD/FLIP) and mark the first
+  elementwise (ADD/MUL) op encountered.  Previously attempted as
+  an imperative patch and reverted ("stop hacking, build
+  declarative layer first") -- now that UPat is in tree, it can
+  be expressed declaratively using `bufferize_upat_movement_*`
+  helpers + the existing ALU2 rule.
+
+  Also notable: the n_inputs=1 / n_ops=2 (MUL,REDUCE) "clean
+  matmul" signature with 282 hits is rejected purely because
+  n_inputs=1 -- a 2-operand matmul where one operand was const-
+  folded.  Worth a separate look (rare but easy to relax).
+

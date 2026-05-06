@@ -1,0 +1,11 @@
+ 564   reject-ops n_inputs=3 n_ops=6 ops=[17,10,3,5,10,9]
+ 332   reject-ops n_inputs=3 n_ops=6 ops=[16,10,3,5,10,17]
+ 282   reject-ops n_inputs=7 n_ops=17 ops=[10,3,5,9,15,12,10,3,5,10,3,5,9,3,5,10,17]
+ 282   reject-ops n_inputs=4 n_ops=9 ops=[9,3,5,9,4,3,5,10,17]
+ 282   reject-ops n_inputs=1 n_ops=2 ops=[10,17]
+ 257   reject-ops n_inputs=4 n_ops=11 ops=[3,12,5,10,3,5,9,3,5,10,17]
+ 257   reject-ops n_inputs=1 n_ops=1 ops=[17]
+   5   reject-ops n_inputs=5 n_ops=17 ops=[10,17,10,3,5,9,15,12,10,3,5,10,3,5,9,3,5]
+
+# Decoded ops:
+# 3=RESHAPE 4=PERMUTE 5=EXPAND 9=ADD 10=MUL 12=RECIP 15=SQRT 16=CMPLT 17=REDUCE

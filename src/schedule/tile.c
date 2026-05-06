@@ -1007,6 +1007,28 @@ int tile_analyze_gemm(KernelEntry const *ke,
   if (ke == NULL || out == NULL || ke->program == NULL
       || ke->n_inputs != 2) {
     TGEMM_REJECT("n_inputs!=2");
+    // Optional follow-up dump: list the kernel's program opcodes
+    // when it both holds at least one REDUCE and was rejected for
+    // n_inputs!=2 -- these are the matmul-fused-with-surrounding
+    // kernels (kid 14 / kid 16 in transformer block).  Knowing the
+    // op trail tells us which fused ops to split off in a
+    // downstream-protect rule.  Gated by THVM_DUMP_GEMM_REJECT_OPS=1
+    // so it doesn't drown the histogram diagnostic.
+    char const *eop = getenv("THVM_DUMP_GEMM_REJECT_OPS");
+    if (eop != NULL && eop[0] == '1' && ke != NULL && ke->program != NULL) {
+      int has_reduce = 0;
+      for (u32 i = 0; i < ke->n_ops; i++) {
+        if (ke->program[i].opcode == UOP_REDUCE) { has_reduce = 1; break; }
+      }
+      if (has_reduce) {
+        fprintf(stderr, "  reject-ops n_inputs=%u n_ops=%u ops=[",
+                ke->n_inputs, ke->n_ops);
+        for (u32 i = 0; i < ke->n_ops; i++) {
+          fprintf(stderr, "%s%u", i ? "," : "", (unsigned)ke->program[i].opcode);
+        }
+        fprintf(stderr, "]\n");
+      }
+    }
     return 0;
   }
   memset(out, 0, sizeof(TileGemmInfo));
