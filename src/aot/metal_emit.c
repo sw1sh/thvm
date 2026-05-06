@@ -253,6 +253,23 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
         u64 loc = term_val(t);
         Term x = book_read(loc + 0);
         Term y = book_read(loc + 1);
+        // Iter XX: const-fold OP2(NUM, NUM) at emit time -- skip the
+        // intermediate v_K decl entirely.
+        if (term_tag(x) == TAG_NUM && term_tag(y) == TAG_NUM) {
+          u32 xv32 = (u32)term_val(x);
+          u32 yv32 = (u32)term_val(y);
+          u32 r;
+          switch (op) {
+            case OP_ADD: r = xv32 + yv32; break;
+            case OP_SUB: r = xv32 - yv32; break;
+            case OP_MUL: r = xv32 * yv32; break;
+            case OP_EQ:  r = (xv32 == yv32) ? 1u : 0u; break;
+            case OP_LT:  r = (xv32 <  yv32) ? 1u : 0u; break;
+            default:     r = 0u; break;
+          }
+          snprintf(out, 80, "%uu", r);
+          return out;
+        }
         const char *xv = aot_msl_emit_uint(b, x, bind);
         const char *yv = aot_msl_emit_uint(b, y, bind);
         u32 idx = g_msl_fresh++;

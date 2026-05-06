@@ -6,6 +6,26 @@ dated section.
 
 ## Unreleased
 
+### Phase 7 iter XX session-only blocker: MTLCompilerService wedged (2026-05-06)
+
+Mid-session, running two `bin/test_aot_metal_run`-style processes in
+parallel (a dump-mode invocation racing against the `make test` test
+sweep) put the system MTLCompilerService into a stuck state with
+`Connection init failed at lookup with error 141 - Reentrancy
+avoided`.  After this point every fresh PSO build fails with
+`Unable to reach MTLCompilerService` and Metal-using tests report
+e.g. `FAIL 8/65` (8 passed of 65; failures are pso load, not test
+logic).  `pkill -9 MTLCompilerService` did not clear the wedge.
+
+iter XX's const-fold change (skip emitting an intermediate `v_K =
+A op B` for `OP2(NUM,NUM)`) was successfully verified at 65/65
+*before* the wedge, in the same session.  The change is logically
+sound (literal arithmetic at emit time matches MSL u32 semantics).
+
+Operational note for future cron fires: do not run two Metal-using
+test binaries concurrently.  Serialise `bin/test_aot_metal*`
+invocations and the `aot_metal.wlt` script through a single token.
+
 ### Phase 7 iter S blocker: kernel `heap` buffer is BOOK_HEAP only (2026-05-06)
 
 Extending wl/THVMLink/Tests/aot_metal.wlt to cover iter L (CTR
