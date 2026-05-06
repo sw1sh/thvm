@@ -555,9 +555,55 @@ buffer scalar shape, the fix should have shifted them too.
   patch's view + stride differently from the existing two paths.
 
 ### Inspect the 24-input KernelEntry layout
-- [ ] Add a diagnostic dump in `kernel_lift_from_conv2d`'s reject
-  log that, when `THVM_DUMP_LIFT_REJECT=1` and `ke->n_inputs ==
-  24` and `ke->scalar_uops == NULL`, prints
-  `ke->input_views[0..n_inputs)` shapes and the kProgOp opcode
-  histogram.  Goal: figure out whether this is a c_in>1
-  multi-patch shape or something else entirely.
+- [x] (2026-05-06) Add a diagnostic dump in
+  `kernel_lift_from_conv2d`'s reject log.  Saved to
+  `bench/autotune-ladder/conv2d_layout.txt`.
+
+  All 24 inputs share the **exact same view**:
+
+      dims    = [32, 24, 24]    (c_in, h_out, w_out)
+      strides = [784, 28, 1]    (= 28*28, 28, 1)
+
+  These are SHRINKED views into a single underlying X buffer of
+  shape `[32, 28, 28]` -- each input has a different
+  `view.offset` corresponding to a (kh_idx, kw_idx) slice.
+  No weights input in this kernel (input 0 is also a patch
+  view, not the weights tensor).
+
+  Opcode histogram: `op3=24 op6=24 op9=23`.
+
+  Translation: this is the **kh*kw partial-sum kernel** for
+  the conv2d (24 LOADs of shifted X views + 24 ops + 23 adds
+  to combine the 24 partials).  Why 24 not kh*kw=25 is unclear
+  -- one position is probably special-cased upstream (handled
+  inline somewhere else, or the bias-add fuses one partial in).
+
+  **The lift would need a third path** in
+  `tile_analyze_conv2d_flat` for "no weights, only N
+  shifted-X-views" -- this is essentially the *im2col + matmul*
+  partial: each X view is one (ki, kj) row of the im2col matrix.
+  The renderer side can re-assemble it as `out = sum(W[ki,kj] *
+  X_view[ki,kj])` if it knows the W constants -- but those don't
+  appear to be in this kernel either.
+
+  Conclusion: this kernel shape is **not currently liftable**
+  without finding the weight tensor, which is in a *different*
+  KernelEntry.  Cross-kernel value lookup is a bigger structural
+  change than this iteration warrants.
+
+### Bridge plan: reduce conv2d's metal-op fraction first
+
+The cleanest path forward isn't extending `kernel_lift_from_conv2d`
+right now -- it's getting the rangeify pass to NOT decompose
+conv2d into 24 metal-op kernels in the first place.  If
+TConv2D lowered to a single fused kernel with W and X both as
+inputs (matching tinygrad's structure), the lifter wouldn't
+need a new path.
+
+- [ ] Inspect `TConv2D` / `TConv2DKhKw` in
+  [wl/THVMLink/Kernel/NN.wl](../../wl/THVMLink/Kernel/NN.wl) to
+  understand why the kh*kw lowering produces 24 separate
+  kernels each of which is a single SHRINK + LOAD + partial-
+  sum.  Sketch what would need to change to keep the kh*kw
+  partials inside one bufferize boundary so the whole thing
+  emerges as 1 KernelEntry.

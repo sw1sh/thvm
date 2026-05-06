@@ -974,6 +974,39 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
               "lift reject: entry/no-scalar-arena n_inputs=%u "
               "n_ops=%u n_tile_uops=%u\n",
               ke->n_inputs, ke->n_ops, ke->n_tile_uops);
+      // Layout dump for the conv2d-flat rejecting case so the
+      // operator can see what shape kernel_lift_from_conv2d
+      // doesn't yet handle.  Iterate over input_views (if any)
+      // to print rank + dims for each, then summarise the
+      // KProgOp opcode histogram.
+      if (ke->input_views != NULL) {
+        for (u32 i = 0; i < ke->n_inputs && i < 32; i++) {
+          View const *v = &ke->input_views[i];
+          fprintf(stderr, "  in[%u] ndim=%u dims=[", i, v->shape.ndim);
+          for (u32 d = 0; d < v->shape.ndim && d < MAX_DIM; d++) {
+            fprintf(stderr, "%s%u", d ? "," : "", v->shape.dims[d]);
+          }
+          fprintf(stderr, "] strides=[");
+          for (u32 d = 0; d < v->shape.ndim && d < MAX_DIM; d++) {
+            fprintf(stderr, "%s%d", d ? "," : "", v->strides[d]);
+          }
+          fprintf(stderr, "]\n");
+        }
+      }
+      if (ke->program != NULL && ke->n_ops > 0) {
+        u32 op_hist[256] = {0};
+        for (u32 i = 0; i < ke->n_ops; i++) {
+          u32 op = ke->program[i].opcode;
+          if (op < 256) op_hist[op]++;
+        }
+        fprintf(stderr, "  prog_ops:");
+        for (u32 op = 0; op < 256; op++) {
+          if (op_hist[op] > 0) {
+            fprintf(stderr, " op%u=%u", op, op_hist[op]);
+          }
+        }
+        fputc('\n', stderr);
+      }
     }
     return 0;
   }
