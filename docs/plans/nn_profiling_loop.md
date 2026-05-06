@@ -242,7 +242,76 @@ every minute.
   docs/plans/profiling_methodology.md §1.1) to thvm and benchmark.
 
 ### Phase G follow-on
-- [ ] Once elementwise autotune effects show measurable wins, design
-  and implement multi-axis UOP_REDUCE for the reduce-axis path so
-  GROUP/GROUPTOP autotune flows through too. Currently skipped in
-  `kernel_lift_to_uop` (`has_reduce_axis` short-circuit).
+- [~] (2026-05-06) Once elementwise autotune effects show measurable
+  wins, design and implement multi-axis UOP_REDUCE for the reduce-
+  axis path so GROUP/GROUPTOP autotune flows through too.  Currently
+  skipped in `kernel_lift_to_uop` (`has_reduce_axis` short-circuit).
+  **Design landed below**; implementation deferred to its own task
+  list.
+
+  **Design.**  The reduce axis splits the same way LOOP axes do --
+  arg L decomposes the original RANGE into outer (extent=N/L) and
+  inner (extent=L).  What differs is how the renderer expresses
+  the *reduction* over the split axes.  Three viable shapes:
+
+  (i)  **Composed single-axis reduce.**  Keep one UOP_REDUCE; the
+       reduce axis_id stays the original BUFFERIZE-range id, but
+       the *body's* iteration walks both new ranges -- the lifter
+       linearises the reduce range's address as
+       `outer * L + inner` (same shape as the elementwise split).
+       The renderer's existing single-axis REDUCE template wraps
+       a for-loop over the *original* extent N; it doesn't see the
+       split.  Pro: minimal renderer change.  Con: doesn't express
+       parallel reduction (each thread still serially accumulates).
+
+  (ii) **Nested UOP_REDUCE.**  Lower as
+       `UOP_REDUCE(inner_axis, UOP_REDUCE(outer_axis, body))`.
+       Renderer emits two nested accumulators.  Pro: clean shape.
+       Con: doesn't capture the GROUP_REDUCE *parallelism*
+       intent -- still serial per thread.
+
+  (iii) **GROUP_REDUCE pattern annotation.**  Lower the split as
+       in (i) for the address linearisation, but mark the inner
+       axis with `axis_type=KAX_GROUP_REDUCE` and wrap it in a
+       `UOP_OPT(target=range, kind=UOP_OPT_GROUP_REDUCE, factor=L)`.
+       The renderer's REDUCE template (rmu_emit_store_reduce)
+       recognises the OPT and emits:
+       ```msl
+       threadgroup float _acc[L];                 // shared
+       _acc[tt] = init;
+       for (uint a_outer = 0; a_outer < N/L; a_outer++) {
+         _acc[tt] += body(...);                   // per-thread
+       }
+       threadgroup_barrier(mem_flags::mem_threadgroup);
+       if (tt == 0) {
+         float total = init;
+         for (uint i = 0; i < L; i++) total = combine(total, _acc[i]);
+         out[addr] = total;
+       }
+       ```
+       Pro: actually parallel; matches what GROUP/GROUPTOP autotune
+       intends.  Con: renderer rewrite needed.
+
+  **Implementation order**:
+
+- [ ] Phase 1: lift the `has_reduce_axis` short-circuit in
+  `kernel_lift_to_uop` for *non-split* reduce kernels (n_applied=0,
+  n_axes==n_buf).  This is just removing the `kax = NULL` line
+  in the simple case; the existing lifter already produces a single
+  RANGE per reduce axis correctly.  Smoke-test with a TUOpReduce
+  kernel under THVM_TILE=1; should not regress make test.
+- [ ] Phase 2: extend `SplitAxis` to track whether an axis is a
+  reduce axis (carry KAX_REDUCE through the replay).  When a
+  GROUP/GROUPTOP split fires on a REDUCE axis, mark the inner
+  axis `opt_kind = UOP_OPT_GROUP_REDUCE` (introducing this opcode
+  if it doesn't exist).
+- [ ] Phase 3: extend `rmu_emit_store_reduce` in
+  `src/codegen/render_uop.c` to detect a GROUP_REDUCE-annotated
+  reduce range and emit the threadgroup-shared accumulator
+  pattern from shape (iii) above.
+- [ ] Phase 4: wire `kernel_lift.c`'s S_REDUCE_SUM lifter to honour
+  the linearised reduce-axis expression (currently asserts a
+  single UOP_RANGE leaf).  After the replay, the reduce range may
+  be a UOP_IADD-of-RANGEs; lift needs to extract the *outer*
+  axis_id for the UOP_REDUCE node and let the renderer pick up
+  the inner from the OPT annotation.
