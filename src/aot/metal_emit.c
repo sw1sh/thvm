@@ -60,6 +60,39 @@ static u32 g_msl_fresh = 0;
 static u32 g_msl_self_def_id = 0;
 static int g_msl_emit_failed = 0;
 
+// Iter V: DUP memo -- per-emit map from dup_loc -> emitted uint var
+// name.  When a LAM binder is used multiple times, WL's auto_dup
+// rewrites the body's TVar(lam_loc) cells into a chain of DP0/DP1
+// projections of a shared DUP cell.  In our NUM-folding context we
+// don't need real IC duplication semantics -- both projections just
+// observe the same value -- so on first DP0/DP1 encounter we emit
+// the body's value once and memo the var name for the sibling
+// projection to reuse.
+typedef struct {
+    u64  dup_loc;
+    char uint_var[24];
+} AotMslDupEntry;
+#define AOT_MSL_DUP_CAP 16
+static AotMslDupEntry g_msl_dup_memo[AOT_MSL_DUP_CAP];
+static u32            g_msl_dup_n = 0;
+
+static const char *aot_msl_dup_lookup(u64 dup_loc) {
+    for (u32 i = 0; i < g_msl_dup_n; i++) {
+        if (g_msl_dup_memo[i].dup_loc == dup_loc)
+            return g_msl_dup_memo[i].uint_var;
+    }
+    return NULL;
+}
+
+static void aot_msl_dup_push(u64 dup_loc, const char *uint_var) {
+    if (g_msl_dup_n >= AOT_MSL_DUP_CAP) return;
+    g_msl_dup_memo[g_msl_dup_n].dup_loc = dup_loc;
+    snprintf(g_msl_dup_memo[g_msl_dup_n].uint_var,
+             sizeof g_msl_dup_memo[g_msl_dup_n].uint_var,
+             "%s", uint_var);
+    g_msl_dup_n++;
+}
+
 // Forward decls for the term/uint emit pair.
 static const char *aot_msl_emit_uint(AotEmit *b, Term t,
                                      AotMslBindings *bind);
@@ -115,6 +148,30 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
           return out;
         }
         snprintf(out, 80, "uint(msl_term_val(%s))", bound);
+        return out;
+      }
+      case TAG_DP0:
+      case TAG_DP1: {
+        // Iter V: auto-dup of multi-use binders.  Both DP0 and DP1
+        // of the same dup_loc reference the SAME body; we emit the
+        // body's uint value once and memo the var name so the
+        // sibling projection reuses it.  Equivalent to firing
+        // DUP-NUM (both projections become NUM(v)) but materialized
+        // statically at emit time.
+        u64 dup_loc = term_val(t);
+        const char *memoed = aot_msl_dup_lookup(dup_loc);
+        if (memoed != NULL) {
+          snprintf(out, 80, "%s", memoed);
+          return out;
+        }
+        Term body = book_read(dup_loc);
+        const char *bv = aot_msl_emit_uint(b, body, bind);
+        u32 idx = g_msl_fresh++;
+        char dup_name[24];
+        snprintf(dup_name, sizeof dup_name, "dup_%u", idx);
+        aot_emit_fmt(b, "  uint %s = %s;\n", dup_name, bv);
+        aot_msl_dup_push(dup_loc, dup_name);
+        snprintf(out, 80, "%s", dup_name);
         return out;
       }
       case TAG_OP2: {
@@ -306,6 +363,7 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     g_msl_fresh = 0;
     g_msl_self_def_id = def_id;
     g_msl_emit_failed = 0;
+    g_msl_dup_n = 0;   // iter V: reset dup memo for this emit
 
     // Iter F + L: detect App(MAT-chain, TVar) shape.  After TLam-peel
     // the body might be:

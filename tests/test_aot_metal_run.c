@@ -415,6 +415,41 @@ int main(void) {
   CHECK_EQ(term_tag(result), (u64)TAG_NUM);
   CHECK_EQ(term_val(result), (u64)0);
 
+  // Iter V: DUP support.  square(x) = x * x -- after auto_dup, the
+  // body uses DP0/DP1 of a shared dup cell whose body is the
+  // original TVar(x).  The Metal emit memos dup_loc -> uint var so
+  // both projections reuse one computation.
+  TEST_BEGIN("DUP: square(x) = x * x via DP0/DP1");
+  u64 sq_x_loc   = book_alloc(1);
+  u64 sq_dup_loc = book_alloc(1);
+  book_set(sq_dup_loc, term_new(0, TAG_VAR, 0, sq_x_loc));   // dup body = TVar(x)
+  u64 sq_op_loc  = book_alloc(2);
+  book_set(sq_op_loc + 0, term_new(0, TAG_DP0, 0, sq_dup_loc));
+  book_set(sq_op_loc + 1, term_new(0, TAG_DP1, 0, sq_dup_loc));
+  Term sq_op = term_new(0, TAG_OP2, OP_MUL, sq_op_loc);
+  book_set(sq_x_loc, sq_op);
+  Term square = term_new(0, TAG_LAM, 0, sq_x_loc);
+  u32 def_id_sq = (u32)-1;
+  for (u32 i = 0; i < DEFS_CAP; i++) {
+    if (DEFS[i] == 0) { def_id_sq = i; break; }
+  }
+  DEFS[def_id_sq] = square;
+
+  Term sq_args[1] = { term_new(0, TAG_NUM, 0, 5) };
+  result = thvm_aot_metal_compile_and_run(
+      "square", def_id_sq, sq_args, 1,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)25);
+
+  // square(13) = 169
+  Term sq_args2[1] = { term_new(0, TAG_NUM, 0, 13) };
+  result = thvm_aot_metal_compile_and_run(
+      "square", def_id_sq, sq_args2, 1,
+      BOOK_HEAP, BOOK_CAP, &book_next_state);
+  CHECK_EQ(term_tag(result), (u64)TAG_NUM);
+  CHECK_EQ(term_val(result), (u64)169);
+
   thvm_free();
   TEST_REPORT();
 }
