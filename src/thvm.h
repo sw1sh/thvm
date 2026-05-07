@@ -2342,8 +2342,10 @@ fn Term interact_assign_with(Term dst, Term src);
 // Backend-agnostic source emitters (render_c.c, render_metal.c) plus
 // per-kid dispatch profiling.  Exposed cross-TU so the Metal .m file
 // (compiled separately under -DTHVM_HAS_METAL) can render MSL via
-// cg_emit_metal, gate on cg_supports, and record dispatches into the
-// shared K_PROFILE table.
+// cg_emit_metal -> cg_emit_tile_metal -> cg_emit_via_uop and record
+// dispatches into the shared K_PROFILE table.  cg_supports remains
+// the gate for the CPU JIT (clang -shared); the Metal side now goes
+// through render_uop's lifter which handles every kernel shape.
 
 // Per-kid route taken by the most recent fire.  Mirrored by the WL
 // surface decoder (TKernelDispatchKind) -- keep the names + ids
