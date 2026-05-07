@@ -279,6 +279,59 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     }
     // Otherwise reject below as the strict ndim-mismatch case.
   }
+  // Broadcast-over-leading-iter fast path: ndim > outer_rank where
+  // the LAST outer_rank buf dims equal the range extents.  The
+  // leading (ndim - outer_rank) buf dims are missing from the iter
+  // context -- treat them as 0 (broadcast page 0 of the leading
+  // axes, sum offset over only the trailing ranges).  Diagnosed via
+  // lenet-mnist bench-train (16 hits per training step, all
+  // dims=[16,4,2] range_extents=[4,2]).  Default-on after A/B
+  // confirmed identical loss (2.3026, log 10) with the path
+  // enabled; THVM_LIFT_NDIM_BROADCAST=0 reverts to the reject
+  // for bisection.  The earlier axis-append attempt broke numerics
+  // for cases where ranges DIDN'T match buf dims; here they MUST
+  // match exactly (extents_align check), so the offset composition
+  // is unambiguous.
+  if (ndim > outer_rank && outer_rank >= 1) {
+    char const *_ge = getenv("THVM_LIFT_NDIM_BROADCAST");
+    int _on = (_ge == NULL) ? 1 : (_ge[0] != '0');
+    if (_on) {
+      int extents_align = 1;
+      u32 lead = ndim - outer_rank;
+      for (u32 d = 0; d < outer_rank; d++) {
+        u32 r_sid = u->src[1 + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          extents_align = 0; break;
+        }
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op != S_RANGE) { extents_align = 0; break; }
+        u32 range_extent = (u32)(ru->extra & 0xFFFFFFFFu);
+        if (range_extent != uop_buffer_dim(buf, lead + d)) {
+          extents_align = 0; break;
+        }
+      }
+      if (extents_align) {
+        // Offset = sum(range_iter[d] * stride_d) where stride_d is
+        // the product of buf dims AFTER position (lead + d).
+        Term acc = 0;
+        for (u32 d = 0; d < outer_rank; d++) {
+          u32 r_sid = u->src[1 + d];
+          Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
+          if (r_uop == 0) {
+            acc = 0; break;
+          }
+          u32 stride = 1;
+          for (u32 e = lead + d + 1; e < ndim; e++) stride *= uop_buffer_dim(buf, e);
+          Term term = (stride == 1) ? r_uop
+                    : uop_int_binary(UOP_IMUL, r_uop,
+                                     uop_const(DT_INT32, stride));
+          acc = (acc == 0) ? term
+              : uop_int_binary(UOP_IADD, acc, term);
+        }
+        if (acc != 0) return acc;
+      }
+    }
+  }
   if (ndim == 0 || ndim != outer_rank) {
     fprintf(stderr,
             "lift reject: index/ndim-mismatch buf_ndim=%u src_count=%u\n",
