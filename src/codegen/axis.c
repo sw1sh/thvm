@@ -118,6 +118,134 @@ fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
   return 0;
 }
 
+// Mirror of apply_opt.c's static kop_to_axis_type.  Inlined here to
+// keep the wedge-4 simulator self-contained without exporting the
+// helper from apply_opt.c.
+static u8 axis_kop_to_axis_type(u8 op) {
+  switch (op) {
+    case KOP_UPCAST:   return KAX_UPCAST;
+    case KOP_UNROLL:   return KAX_UNROLL;
+    case KOP_LOCAL:    return KAX_LOCAL;
+    case KOP_GROUP:    return KAX_GROUP_REDUCE;
+    case KOP_GROUPTOP: return KAX_GROUP_REDUCE;
+    default:           return KAX_LOOP;
+  }
+}
+
+// E9-prep wedge 4: derive per-axis kax_type[] from the higher-level
+// signals (output_shape + tail-reduce + scalar-reduce + applied_opts)
+// instead of reading `ke->axes->axis_types[]`.  Mirrors the writer
+// trio (axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt)
+// exactly:
+//
+//   1. Initial state: `nd = output_shape.ndim` LOOPs (clipped to
+//      MAX_AXES-1), optionally followed by a single trailing REDUCE.
+//      The trailing-REDUCE is present iff
+//        - the kernel program ends in UOP_REDUCE (axes_default_for
+//          appends it), OR
+//        - the scalar arena carries an S_REDUCE_* over an
+//          S_AXIS_REDUCE range (axes_ensure_scalar_reduce appends it).
+//   2. Replay applied_opts in order using the same structural logic
+//      as axes_apply_opt: KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP
+//      split the indicated axis and insert a new inner axis with the
+//      opt's KAX_ type; KOP_GLOBAL stamps the indicated axis as
+//      KAX_GLOBAL; KOP_SWAP exchanges two positions; KOP_TC carries
+//      no axis-structure mutation in axes_apply_opt (rejected there;
+//      kernel_apply_opt handles it as metadata).
+//
+// Returns the number of axes written to `out` (matches the post-replay
+// `n_axes` derived from initial_n_axes + count(split-class opts)).
+// On overflow, returns 0.
+//
+// Used by tile_emit_axes_from_kernel_axes under THVM_E9_VALIDATE=1 to
+// cross-check that the legacy `axis_types[]` read agrees with the
+// signal-derived simulation; any divergence flags either an
+// undocumented direct-write of `axis_types[]` (wedge 6 territory) or
+// a missing entry in the writer trio.
+fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
+                               u32 cap) {
+  if (ke == NULL || ke->axes == NULL || out == NULL || cap == 0) {
+    return 0;
+  }
+
+  // Initial layout: nd LOOPs + optional trailing REDUCE.
+  u32 nd = ke->output_shape.ndim;
+  if (nd > MAX_AXES - 1) {
+    nd = MAX_AXES - 1;
+  }
+  u8 types[MAX_AXES] = {0};
+  u32 n = 0;
+  for (u32 i = 0; i < nd; i++) {
+    if (n >= MAX_AXES) {
+      return 0;
+    }
+    types[n++] = KAX_LOOP;
+  }
+  int has_initial_reduce =
+      (ke->n_ops > 0 && ke->program != NULL
+       && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE)
+      || (axes_scalar_reduce_extent(ke) != 0);
+  if (has_initial_reduce && n < MAX_AXES) {
+    types[n++] = KAX_REDUCE;
+  }
+
+  // Replay applied_opts using axes_apply_opt's structural logic.  We
+  // don't validate splits (size % arg) or GLOBAL preconditions here:
+  // applied_opts is the LOG of opts that ALREADY succeeded against the
+  // axis structure, so the replay is guaranteed-valid by construction.
+  KOpt const *opts = ke->axes->applied_opts;
+  u32 n_applied   = (u32)ke->axes->n_applied;
+  for (u32 k = 0; k < n_applied; k++) {
+    KOpt o = opts[k];
+    u8 op = o.op;
+    if (op == KOP_TC || op == KOP_NONE || op == KOP_PADTO
+        || op == KOP_NOLOCALS) {
+      // No axis-structure mutation.
+      continue;
+    }
+    if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
+        || op == KOP_GROUP  || op == KOP_GROUPTOP) {
+      if (o.axis >= n || n >= MAX_AXES) {
+        return 0;
+      }
+      // Shift positions > axis right by one; insert at axis+1.
+      for (i32 i = (i32)n; i > (i32)o.axis + 1; i--) {
+        types[i] = types[i - 1];
+      }
+      // Outer keeps its type; inner takes the opt's KAX_ type.
+      types[o.axis + 1] = axis_kop_to_axis_type(op);
+      n++;
+      continue;
+    }
+    if (op == KOP_GLOBAL) {
+      if (o.axis >= n) {
+        return 0;
+      }
+      types[o.axis] = KAX_GLOBAL;
+      continue;
+    }
+    if (op == KOP_SWAP) {
+      if (o.axis >= n || (u8)o.arg >= n) {
+        return 0;
+      }
+      u8 tmp = types[o.axis];
+      types[o.axis]  = types[o.arg];
+      types[o.arg]   = tmp;
+      continue;
+    }
+    // Unknown opt -- bail (caller falls back to legacy path).
+    return 0;
+  }
+
+  if (n > cap) {
+    return 0;
+  }
+  for (u32 i = 0; i < n; i++) {
+    out[i] = types[i];
+  }
+  return n;
+}
+
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   if (ke == NULL || ke->axes == NULL) {
     return;
