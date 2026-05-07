@@ -899,9 +899,14 @@ static u64 RANGEIFY_UOP_FALLBACK_HITS;
 
 // Build `sum_d (r->refs[d] * v_strides[d]) + in_off` preferring the
 // UOp DAG layer (uop_int_binary + uop_to_scalar) when iters can be
-// lifted, falling back to scalar emit_ibinop otherwise.  Returns 0
-// only on a hard fault (negative stride); a successful build never
-// returns 0 (uses ICONST(0) for empty sum).
+// lifted, falling back to scalar emit_ibinop otherwise.  Successful
+// builds never return 0 (uses ICONST(0) for empty sum).
+//
+// F6-finish (b) flip-widen: negative v_strides[d] (FLIP residue) is
+// preserved by storing the bit pattern in DT_INT32 UOP_CONST. The
+// walker / scalar interp / lifter all read it back as signed i32, so
+// the IMUL/IADD chain produces a (possibly negative) i64 offset that
+// the walker applies to the view.offset-pre-biased input pointer.
 static u32 emit_addr_from_rngs_uop_preferred(KernelEntry *ke,
                                              RngsCtx const *r,
                                              i32 const *v_strides,
@@ -911,7 +916,6 @@ static u32 emit_addr_from_rngs_uop_preferred(KernelEntry *ke,
   Term acc_uop = (in_off != 0) ? uop_const(DT_INT32, in_off) : 0;
   int  uop_ok  = 1;
   for (u32 d = 0; d < use_ndim; d++) {
-    if (v_strides[d] < 0) return 0;
     if (v_strides[d] == 0) continue;
     Term tu = r->uop_refs[d];
     if (tu == 0) {
@@ -1682,16 +1686,22 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // rule grad expansion).  Phase F-1 lifts the non-zero-offset
   // restriction by packing the offset into S_INDEX.extra (u16
   // bits).  Bail conditions today:
-  //   - negative strides (FLIP; needs a sign-aware INDEX, lands
-  //     in F-3 alongside the FLIP movement op).
   //   - offset > 65535 (current u16 packing; bail until we widen
   //     extra encoding).
+  //
+  // F6-finish (b) flip-widen: negative strides (FLIP residue) used
+  // to bail here; the rangeify address builder now emits signed
+  // S_ICONST stride coefficients, the lifter rebroadcasts them as
+  // DT_INT32 UOP_CONST with the sign bit preserved, and the UOp
+  // walker (cpu_uop_walk) interprets the resulting offsets as i64.
+  // Together with view.offset pre-bias on the input pointer, the
+  // FLIP-alias addressing lands on the right elements without
+  // pre-materialising. The early bail is gone so scalar_uops gets
+  // populated and the walker (which fires ahead of cpu_interpret)
+  // can take the kernel.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     View const *v = &ke->input_views[i];
     if (v->offset < 0 || v->offset > 0xFFFF) RBAIL_PRE("offset out of u16 range");
-    for (u32 d = 0; d < v->shape.ndim; d++) {
-      if (v->strides[d] < 0) RBAIL_PRE("negative stride (FLIP)");
-    }
   }
   Shape const *os = &ke->output_shape;
   if (os->ndim == 0 || os->ndim > MAX_DIM) RBAIL_PRE("output ndim out of range");
