@@ -954,8 +954,12 @@ static int metal_try_alias_reshape(KernelEntry *ke,
 }
 
 static int metal_tile_enabled(void) {
+  // Default ON: render_uop is the primary Metal MSL emit path. Set
+  // THVM_TILE=0 to opt back into the legacy KProgOp-flat shader and
+  // per-op interpreter fall-through (kept around as a regression
+  // bisection knob until F2 deletes them).
   char const *e = getenv("THVM_TILE");
-  return e != NULL && e[0] == '1';
+  return e == NULL || e[0] != '0';
 }
 
 static u32 metal_view_strided_index(View const *v, u32 flat_idx) {
