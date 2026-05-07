@@ -231,3 +231,52 @@ int uop_dag_is_reduce_unroll_kernel(Term t) {
   uop_dag_reduce_unroll_walk(t, &ok, &has_reduce);
   return ok && has_reduce;
 }
+
+// === Phase C slice 5: external-linkage decode helpers =================
+//
+// The Metal backend (src/backend/metal/_.m) lives in a separate TU
+// from the main runtime, so the `fn`-prefixed (static inline) heap /
+// term / uop_buffer accessors aren't visible.  Re-export the small
+// subset the DAG-side per-op encoder needs as external-linkage shims.
+// Mirrors the slice-4 pattern (uop_dag_dtype_uniform et al.).
+
+// Decode the (op, loc) pair for a Term `t` that's expected to be a
+// UOp.  Returns 1 on success with *out_op + *out_loc set; 0 if the
+// term isn't TAG_UOP.
+int uop_dag_decode_uop(Term t, u32 *out_op, u64 *out_loc) {
+  if (term_tag(t) != TAG_UOP) return 0;
+  if (out_op  != NULL) *out_op  = term_ext(t);
+  if (out_loc != NULL) *out_loc = term_val(t);
+  return 1;
+}
+
+// Decode a UOP_BUFFER's instance disambiguator.  Returns 0 (default
+// instance) when `t` isn't a UOP_BUFFER -- callers that need to
+// distinguish "not a buffer" from "instance==0" should pre-check via
+// uop_dag_decode_uop first.
+u32 uop_dag_buffer_instance(Term t) {
+  return uop_buffer_inst_get(t);
+}
+
+// Decode a UOP_CONST node's underlying NUM payload.  Returns 1 on
+// success with *out_dtype + *out_bits set; 0 if `t` isn't a CONST or
+// the payload is malformed.
+int uop_dag_const_payload(Term t, u32 *out_dtype, u32 *out_bits) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) return 0;
+  Term inner = heap_read(term_val(t) + 0);
+  if (term_tag(inner) != TAG_NUM) return 0;
+  if (out_dtype != NULL) *out_dtype = term_ext(inner);
+  if (out_bits  != NULL) *out_bits  = (u32)term_val(inner);
+  return 1;
+}
+
+// Read the i-th source slot of a UOp at heap loc `loc`.  Just a thin
+// wrapper around heap_read that the metal TU can call directly.
+Term uop_dag_heap_read(u64 loc, u32 offset) {
+  return heap_read(loc + offset);
+}
+
+// Predicate shims: the UOp predicate functions live in the main TU
+// as `fn` static inlines.  Re-export with external linkage.
+int uop_dag_is_unary_ew (u32 op) { return uop_is_unary_elementwise ((u8)op); }
+int uop_dag_is_binary_ew(u32 op) { return uop_is_binary_elementwise((u8)op); }

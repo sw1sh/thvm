@@ -946,6 +946,159 @@ int main(void) {
   }
   thvm_free();
 
+  // === Phase C slice 5: DAG-side per-op encoder dispatches multi-output ===
+  // A multi-output kernel has its tile_jit_encode rejected (because
+  // cg_kernel_has_extra_outputs returns 1) and falls into the DAG-side
+  // per-op encoder when cached_lift.store_root != 0.  The lifter's
+  // kernel_lift_from_kprog path produces a UOP_AFTER chain of UOP_STOREs
+  // for the splice-fused KProgOp[] -- the new encoder walks that chain
+  // and emits the same Metal dispatches as the legacy program[] loop.
+  TEST_BEGIN("metal-real/slice5-multi-output-via-dag-encoder");
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    Shape shape = {0};
+    shape.ndim = 1;
+    shape.dims[0] = 4;
+    // Two inputs; primary output = a + b; extra output = a * b.
+    u32 ta = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    u32 tb = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    u32 t_primary = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    u32 t_extra   = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    CHECK(ta && tb && t_primary && t_extra);
+    f32 va[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    f32 vb[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+    METAL_BACKEND.buf_write(TENS[ta].buf_id, va, sizeof(va));
+    METAL_BACKEND.buf_write(TENS[tb].buf_id, vb, sizeof(vb));
+
+    // Synthesize a multi-output KernelEntry whose program is:
+    //   step 0: ADD in0 in1   -> primary
+    //   step 1: MUL in0 in1   (store_extra_plus_one = 1)
+    u32 kid = kernel_alloc();
+    KernelEntry *ke = &KERNELS[kid];
+    kernel_inputs_reserve(ke, 2);
+    kernel_program_reserve(ke, 2);
+    ke->n_inputs        = 2;
+    ke->input_tids[0]   = ta; ke->input_tids[1]   = tb;
+    ke->input_dtypes[0] = DT_FP32; ke->input_dtypes[1] = DT_FP32;
+    ke->input_numels[0] = 4;       ke->input_numels[1] = 4;
+    ke->output_tid      = t_primary;
+    ke->output_dtype    = DT_FP32;
+    ke->output_shape    = shape;
+    ke->output_numel    = 4;
+    ke->n_ops           = 2;
+    // step 0: ADD -> primary (last op writes to outBuf by convention).
+    ke->program[1].opcode = UOP_ADD;
+    ke->program[1].dtype  = DT_FP32;
+    ke->program[1].n_src  = 2;
+    ke->program[1].src[0] = KSRC_AS_INPUT(0);
+    ke->program[1].src[1] = KSRC_AS_INPUT(1);
+    ke->program[1].numel  = 4;
+    // step 1: MUL -> extra (store_extra_plus_one = 1 = extra index 0).
+    ke->program[0].opcode = UOP_MUL;
+    ke->program[0].dtype  = DT_FP32;
+    ke->program[0].n_src  = 2;
+    ke->program[0].src[0] = KSRC_AS_INPUT(0);
+    ke->program[0].src[1] = KSRC_AS_INPUT(1);
+    ke->program[0].numel  = 4;
+    ke->program[0].store_extra_plus_one = 1;
+    // Register the extra output.
+    int set_ok = kernel_entry_set_extra_output(kid, 1, t_extra,
+                                               DT_FP32, &shape, 4);
+    CHECK_EQ(set_ok, 1);
+    // Lift the kernel into a UOp DAG so cached_lift.store_root != 0
+    // -- this routes dispatch through the slice 5 DAG encoder.
+    CHECK_EQ(kernel_lift_to_uop(ke, &ke->cached_lift), 1);
+    CHECK(ke->cached_lift.store_root != 0);
+    CHECK_EQ(ke->cached_lift.n_outputs, 2u);
+
+    u32 in_bufs[2] = {TENS[ta].buf_id, TENS[tb].buf_id};
+    u32 primary_buf = TENS[t_primary].buf_id;
+    backend_dispatch_begin_all();
+    int rc = METAL_BACKEND.dispatch_kernel(ke, in_bufs, primary_buf);
+    CHECK_EQ(rc, 0);
+    // KDISPATCH_METAL_OP confirms we exercised the per-op encoder
+    // path (either the legacy program[] loop or the slice 5 DAG
+    // encoder; both report the same kind so this just verifies we
+    // didn't sneak through tile_jit / alias_reshape).
+    CHECK_EQ(cg_kernel_dispatch_kind(kid), (u32)KDISPATCH_METAL_OP);
+    backend_dispatch_end_all();
+
+    // Read back both outputs.
+    f32 primary_out[4] = {0};
+    f32 extra_out  [4] = {0};
+    CHECK_EQ(METAL_BACKEND.buf_read(primary_buf, primary_out,
+                                     sizeof(primary_out)), 0);
+    CHECK_EQ(METAL_BACKEND.buf_read(TENS[t_extra].buf_id, extra_out,
+                                     sizeof(extra_out)), 0);
+    f32 expect_add[4] = {11.0f, 22.0f, 33.0f, 44.0f};
+    f32 expect_mul[4] = {10.0f, 40.0f, 90.0f, 160.0f};
+    for (u32 i = 0; i < 4; i++) {
+      CHECK_EQ(primary_out[i], expect_add[i]);
+      CHECK_EQ(extra_out  [i], expect_mul[i]);
+    }
+  }
+  thvm_free();
+
+  TEST_BEGIN("metal-real/slice5-lift-declined-falls-back-to-legacy");
+  // When the lift declines (e.g. a kernel shape kernel_lift_from_kprog
+  // doesn't recognise), cached_lift.store_root stays 0 and the dispatch
+  // path falls through to the legacy KProgOp encoder.  This test
+  // synthesises a single-output ADD kernel without lifting it -- the
+  // dispatch must still succeed via the legacy path.
+  setenv("THVM_BACKEND", "metal", 1); thvm_init();
+  {
+    Shape shape = {0};
+    shape.ndim = 1;
+    shape.dims[0] = 4;
+    u32 ta = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    u32 tb = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    u32 t_out = tensor_alloc(&METAL_BACKEND, shape, DT_FP32);
+    f32 va[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+    f32 vb[4] = {0.5f, 0.25f, 0.125f, 0.0625f};
+    METAL_BACKEND.buf_write(TENS[ta].buf_id, va, sizeof(va));
+    METAL_BACKEND.buf_write(TENS[tb].buf_id, vb, sizeof(vb));
+    u32 kid = kernel_alloc();
+    KernelEntry *ke = &KERNELS[kid];
+    kernel_inputs_reserve(ke, 2);
+    kernel_program_reserve(ke, 1);
+    ke->n_inputs        = 2;
+    ke->input_tids[0]   = ta; ke->input_tids[1]   = tb;
+    ke->input_dtypes[0] = DT_FP32; ke->input_dtypes[1] = DT_FP32;
+    ke->input_numels[0] = 4;       ke->input_numels[1] = 4;
+    ke->output_tid      = t_out;
+    ke->output_dtype    = DT_FP32;
+    ke->output_shape    = shape;
+    ke->output_numel    = 4;
+    ke->n_ops           = 1;
+    ke->program[0].opcode = UOP_ADD;
+    ke->program[0].dtype  = DT_FP32;
+    ke->program[0].n_src  = 2;
+    ke->program[0].src[0] = KSRC_AS_INPUT(0);
+    ke->program[0].src[1] = KSRC_AS_INPUT(1);
+    ke->program[0].numel  = 4;
+    // Deliberately do NOT call kernel_lift_to_uop -- cached_lift stays
+    // zeroed.  The dispatcher's slice 5 gate sees store_root == 0 and
+    // falls through to the legacy program[] loop.
+    CHECK_EQ(ke->cached_lift.store_root, (Term)0);
+
+    u32 in_bufs[2] = {TENS[ta].buf_id, TENS[tb].buf_id};
+    u32 out_buf    = TENS[t_out].buf_id;
+    backend_dispatch_begin_all();
+    int rc = METAL_BACKEND.dispatch_kernel(ke, in_bufs, out_buf);
+    // Single-op ADD likely takes the tile_jit path (which doesn't
+    // require lift -- cg_emit_via_uop runs an on-demand fresh lift
+    // when cached_lift is empty).  Either way the dispatch should
+    // succeed; we just want to confirm slice 5's gate doesn't break
+    // the no-lift path.
+    CHECK_EQ(rc, 0);
+    backend_dispatch_end_all();
+    f32 out[4] = {0};
+    CHECK_EQ(METAL_BACKEND.buf_read(out_buf, out, sizeof(out)), 0);
+    f32 expect[4] = {5.5f, 6.25f, 7.125f, 8.0625f};
+    for (u32 i = 0; i < 4; i++) CHECK_EQ(out[i], expect[i]);
+  }
+  thvm_free();
+
   unsetenv("THVM_BACKEND");
   TEST_REPORT();
 }
