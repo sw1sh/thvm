@@ -2348,6 +2348,45 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // the root.
   if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
     ke->compute_root = ke->cached_lift.store_root;
+    // Phase C slice 7 -- single-write migration:
+    // when the lift succeeds, the UOp DAG (cached_lift.store_root)
+    // is the canonical kernel representation and `program[]` becomes
+    // redundant.  Dispatch consumers (metal_kernel_supported,
+    // cg_supports, cpu_jit_hash, the per-op DAG encoder) read from
+    // cached_lift / the lifted DAG; they no longer require
+    // program[] to be populated.
+    //
+    // Default-ON.  test_compute_root_dual_write exercises the
+    // single-write contract end-to-end (materialize + dispatch under
+    // both CPU and Metal); test_bufferize tolerates a NULL program[]
+    // for the bufferize-emit-builds-program checks (the underlying
+    // movement-op encoding is still validated through the bufferize
+    // edge table).  THVM_PHASE_C7_FREE_PROGRAM=0 reverts to the
+    // dual-write Slice 1+2 contract: program[] populated alongside
+    // cached_lift.  Bisection knob; we keep it for A/B testing
+    // perf regressions on lift-eligible matmul (cpu_blas_dispatch
+    // and tile.c gemm/gemv recognisers consume program[] today;
+    // slice 8 ports them to the UOp DAG).
+    //
+    // No static cache here -- the test harness flips the env between
+    // thvm_init() / thvm_free() pairs, and the per-getenv overhead
+    // (one syscall) is negligible compared to the lifter cost above.
+    char const *free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
+    int free_program_on = (free_e == NULL) ? 1 : (free_e[0] != '0');
+    if (free_program_on) {
+      // ke->program may be cache-shared (program_shared=1 -- the
+      // KP_CACHE slot owns it) or kernel-owned.  The free path in
+      // kernel_alloc.c respects program_shared, so we just clear the
+      // pointer + n_ops; for the kernel-owned case, free explicitly
+      // first to avoid a leak.
+      if (!ke->program_shared && ke->program != NULL) {
+        free(ke->program);
+      }
+      ke->program        = NULL;
+      ke->n_ops          = 0;
+      ke->ops_cap        = 0;
+      ke->program_shared = 0;
+    }
   }
 
   u64 kloc = heap_alloc(2);
