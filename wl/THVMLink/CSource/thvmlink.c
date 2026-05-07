@@ -2917,6 +2917,20 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_mat(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
+// TAG_EQL constructor: structural equality, strict on both args.
+// Reducer (src/wnf/_.c) handles NUM-NUM, ERA/ANY short-circuits, and
+// EQL-SUP commutes (both sides).  EQL-CTR / EQL-LAM rules come with
+// the upcoming HVM4-port.  See `term_new_eql` in src/term/new_eql.c.
+EXTERN_C DLLEXPORT int thvm_wl_term_new_eql(WolframLibraryData libData, mint argc,
+                                            MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  Term a = (Term)MArgument_getInteger(args[0]);
+  Term b = (Term)MArgument_getInteger(args[1]);
+  Term r = term_new_eql(a, b);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
 // Dynamic-label SUP / DUP constructors.  The label is a *Term* (the
 // caller already packed it via TVarFor / TNum / etc) so DSU/DDU can
 // be built around any computed label term.

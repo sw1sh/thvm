@@ -17,6 +17,8 @@ TMatNum::usage = "TMatNum[matchVal, handler, fallback] returns a TAG_MAT atom th
 TMatCtr::usage = "TMatCtr[ctorName, handler, fallback] -- sugar for TMatNum[ctorName, handler, fallback] when the intended use is destructuring a CTR (constructor name `ctorName`, anonymous CTR uses 0).  When applied to a matching CTR, applies `handler` positionally to each CTR child.  Used by TGradMany to bind multi-target gradient results into a body lambda without an indexed projection primitive.";
 TIfZero::usage  = "TIfZero[counter, thenTerm, elseTerm] is sugar for APP[ TMatNum[0, thenTerm, lam _ . elseTerm], counter ].  The else branch ignores the bound argument so the user-side reads like a plain conditional.";
 
+TEql::usage = "TEql[a, b] returns a TAG_EQL term that reduces to NUM(1) iff `a` and `b` are structurally equal, NUM(0) otherwise.  Strict on both args; SUP-on-either-side commutes (clones the other side via DUP, distributes); ERA/ANY short-circuit.  CTR-CTR and LAM-LAM rules land with the upcoming HVM4 port (currently fall through to stuck-rebuild).  Use this instead of TOp2[\"==\", ...] for theorem-proving where the args may be SUPs / structures.";
+
 TCtr::usage = "TCtr[label, c1, c2, ...] constructs a TAG_CTR with the given integer label and child terms.  Mirrors HVM4's `#K{a, b, ...}`.  Arity capped at 16 (matches HVM4's CTR limit).  An IC-level dup of the result fires DUP-CTR via interact_dup_ctr.";
 
 TBookCtr::usage = "TBookCtr[label, c1, c2, ...] constructs a TAG_CTR in BOOK_HEAP rather than the dynamic HEAP.  Use when constructing CTR inputs destined for the Metal AOT path -- the kernel's heap MTLBuffer is bound to BOOK_HEAP, so destructure derefs only resolve for vals in that range.  Phase 7 iter T.";
@@ -48,6 +50,8 @@ $termNewOp2Fn := $termNewOp2Fn = load["thvm_wl_term_new_op2",
     {Integer, Integer, Integer}, Integer]
 $termNewMatFn := $termNewMatFn = load["thvm_wl_term_new_mat",
     {Integer, Integer, Integer}, Integer]
+$termNewEqlFn := $termNewEqlFn = load["thvm_wl_term_new_eql",
+    {Integer, Integer}, Integer]
 $termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr",
     {Integer, {Integer, 1}}, Integer]
 $termNewBookCtrFn := $termNewBookCtrFn = load["thvm_wl_term_new_book_ctr",
@@ -70,6 +74,17 @@ TOp2[op_String, x_, y_] := (
     ]]
 )
 TOp2::badop = "Unknown OP2 opcode `1`; expected one of \"+\", \"-\", \"*\", \"==\", \"<\".";
+
+(* TAG_EQL: structural equality, strict on both sides.  Reducer
+   handles NUM-NUM, ERA/ANY shorts, and EQL-SUP commutes (both
+   sides).  Prefer this over TOp2["==", ...] for theorem-proving
+   contexts where the args may be SUPs, CTRs, LAMs (HVM4-style
+   higher-order equality).  Future EQL-CTR / EQL-LAM rules let
+   structural equality recurse natively. *)
+TEql[a_, b_] := (
+    ensureInit[];
+    TTerm[$termNewEqlFn[ttermRaw[a], ttermRaw[b]]]
+)
 
 TMatNum[matchVal_Integer, handler_, fallback_] := (
     ensureInit[];

@@ -165,6 +165,51 @@ time; the post-collapse leaf's `path` (sequence of which side of
 each SUP it came from) maps back to the choice sequence.  Encode
 the choice index in the SUP label so the decode is mechanical.
 
+## Findings: TEql is the right primitive, not TOp2["=="]
+
+The user pointed out that HVM4 has a dedicated **EQL** cell explicitly
+designed for theorem proving:
+[`HVM4/clang/wnf/eql_*.c`](../../HVM4/clang/wnf/) covers EQL-CTR
+(structural recursion + AND-chain), EQL-LAM (fresh-name HOAS subst
+into both binders), EQL-SUP-{L,R}, EQL-NUM-NUM, EQL-ERA/ANY.  thvm
+already has `TAG_EQL` and most of the rules in
+[src/wnf/_.c](../../src/wnf/_.c) (NUM-NUM, ERA/ANY, SUP-L, SUP-R).
+
+This is the right primitive for our equational ATP encoding -- the
+current `TOp2["=="] + TIfZero + Church-AND` recipe is a hack.
+
+**Added in this iter**:
+- `term_new_eql` C FFI binding (`thvm_wl_term_new_eql`).
+- `TEql[a, b]` WL surface in [Switch.wl](../../wl/THVMLink/Kernel/Switch.wl).
+- Direct `TEql[NUM, NUM]` and `TEql[SUP, *]` work (5 smoke probes pass
+  via `TWnf + TCollapse`).
+
+**Discovered gap** (not fixed yet): `TEql` inside a `TLam` body is
+broken under `alo_realize` because [src/alo/realize.c](../../src/alo/realize.c)'s
+`alo_node_arity` doesn't list TAG_EQL (only APP/SUP/DUP/OP2/MAT/UOP).
+For unrecognized tags `default_node` returns the BOOK_HEAP cell
+verbatim -- no fresh DYN copy.  The TVar inside EQL still points to
+the BOOK_HEAP binder, never sees the per-call APP-LAM substitution,
+and the EQL frame's `heap_set(loc+0, whnf)` mutates the BOOK_HEAP
+cell across calls.  Same gap likely for AND/OR/WHEN.
+
+A naive fix (just adding `case TAG_EQL: return 2;` to `alo_node_arity`)
+segfaulted the runtime -- there's something else `alo_realize` does
+for EQL-shaped cells (probably needs to handle the F_EQL_R frame
+mutation differently, or VAR-rebinding inside EQL slots).  Worth
+returning to with more care.
+
+**Implications for milestones**:
+- Milestone 4 (rebuild TFindEquationalProof on IC search) should use
+  TEql rather than TOp2["=="] once the alo gap closes.
+- Milestone 5 (pattern axioms) gets EQL-LAM HOAS naturally for free
+  if we port the HVM4 rule.
+- The existing OP2-based encoding's residual off-by-1 on Metal
+  (B4 in [bisect_aot_metal.wls](../../wl/Examples/atp_ic/debug/bisect_aot_metal.wls))
+  may dissolve once the encoding switches to EQL -- the
+  DUP-of-shared-rSup-REF trouble in B4 is downstream of the TIfZero
+  + TApp[rSup, ...] pattern that EQL handles directly.
+
 ## Findings from milestone-3 (AOT-Metal port)
 
 Iter Z's GPU-side wnf state machine + emit was extended with
