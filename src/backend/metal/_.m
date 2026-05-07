@@ -802,118 +802,6 @@ static int metal_jit_encode(KernelEntry *ke,
 
 static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 
-static int metal_cpu_add_src_value(KernelEntry *ke,
-                                   f32 const **inputs,
-                                   TenDesc const **input_tds,
-                                   f32 const *vals,
-                                   u32 raw,
-                                   u32 i,
-                                   f32 *out) {
-  u32 idx = KSRC_INDEX(raw);
-  if (KSRC_IS_INPUT(raw)) {
-    if (idx >= ke->n_inputs) {
-      return 0;
-    }
-    u32 src_i = ke->input_numels[idx] == 1 ? 0 : i;
-    if (input_tds[idx] != NULL) {
-      src_i = metal_tendesc_strided_index(input_tds[idx], src_i);
-    }
-    *out = inputs[idx][src_i];
-    return 1;
-  }
-  if (idx >= ke->n_ops) {
-    return 0;
-  }
-  *out = vals[idx];
-  return 1;
-}
-
-static int metal_try_cpu_small_add(KernelEntry *ke,
-                                   u32 *in_buf_ids,
-                                   u32 out_buf_id) {
-  // Multi-output kernels write to extra output buffers via
-  // KProgOp.store_extra_plus_one; this CPU-side small-add fast path
-  // only writes to out_buf_id (primary), so we'd silently drop the
-  // extra outputs.  Bail and let the per-op encoder (which DOES
-  // honor store_extra_plus_one) run instead.
-  if (cg_kernel_has_extra_outputs(ke)) {
-    return 0;
-  }
-  if (ke->n_inputs <= 30 || ke->n_ops == 0) {
-    return 0;
-  }
-  if (ke->output_dtype != DT_FP32 || ke->output_numel > 65536) {
-    return 0;
-  }
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_dtypes[i] != DT_FP32) {
-      return 0;
-    }
-    if (ke->input_numels[i] != 1 && ke->input_numels[i] != ke->output_numel) {
-      return 0;
-    }
-  }
-  for (u32 step = 0; step < ke->n_ops; step++) {
-    KProgOp const *p = &ke->program[step];
-    if (p->numel != ke->output_numel) {
-      return 0;
-    }
-    if (p->opcode == UOP_RESHAPE) {
-      if (p->n_src != 1) {
-        return 0;
-      }
-    } else if (p->opcode == UOP_ADD) {
-      if (p->n_src != 2) {
-        return 0;
-      }
-    } else {
-      return 0;
-    }
-  }
-
-  metal_dispatch_flush();
-  f32 const *inputs[ke->n_inputs ? ke->n_inputs : 1];
-  TenDesc const *input_tds[ke->n_inputs ? ke->n_inputs : 1];
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 ib = in_buf_ids[i];
-    if (ib == 0 || ib >= METAL_BUFS_NEXT || METAL_BUFS[ib].buf == nil) {
-      return 0;
-    }
-    inputs[i] = (f32 const *)[METAL_BUFS[ib].buf contents];
-    u32 tid = ke->input_tids[i];
-    input_tds[i] = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
-  }
-  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT
-      || METAL_BUFS[out_buf_id].buf == nil) {
-    return 0;
-  }
-  f32 *out = (f32 *)[METAL_BUFS[out_buf_id].buf contents];
-  f32 vals[ke->n_ops ? ke->n_ops : 1];
-  for (u32 i = 0; i < ke->output_numel; i++) {
-    for (u32 step = 0; step < ke->n_ops; step++) {
-      KProgOp const *p = &ke->program[step];
-      if (p->opcode == UOP_RESHAPE) {
-        if (!metal_cpu_add_src_value(ke, inputs, input_tds, vals, p->src[0],
-                                     i, &vals[step])) {
-          return 0;
-        }
-      } else {
-        f32 a;
-        f32 b;
-        if (!metal_cpu_add_src_value(ke, inputs, input_tds, vals, p->src[0],
-                                     i, &a)
-            || !metal_cpu_add_src_value(ke, inputs, input_tds, vals,
-                                        p->src[1], i, &b)) {
-          return 0;
-        }
-        vals[step] = a + b;
-      }
-    }
-    out[i] = vals[ke->n_ops - 1];
-  }
-  return 1;
-}
-
 static int metal_try_alias_reshape(KernelEntry *ke,
                                    u32 *in_buf_ids,
                                    u32 out_buf_id) {
@@ -1734,11 +1622,6 @@ static int metal_specialized_diagnostics_enabled(void) {
   return e != NULL && e[0] == '1';
 }
 
-static int metal_cpu_small_add_enabled(void) {
-  char const *e = getenv("THVM_METAL_CPU_SMALL_ADD");
-  return e != NULL && e[0] == '1';
-}
-
 static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
   u32 n_app = tile_anno_applied_opts_count(ke);
   KOpt const *opts = tile_anno_applied_opts(ke);
@@ -2100,12 +1983,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
 
   if (kprog_supported && metal_try_gemm(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_METAL_GEMM, cg_now_us() - t0);
-    return 0;
-  }
-
-  if (kprog_supported && metal_cpu_small_add_enabled()
-      && metal_try_cpu_small_add(ke, in_buf_ids, out_buf_id)) {
-    cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
     return 0;
   }
 
