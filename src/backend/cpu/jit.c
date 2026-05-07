@@ -141,7 +141,39 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // future Metal renderer would slot in identically (pair with a Metal-
   // specific build path), and the rest of this file would be the only
   // bit needing per-backend orchestration.
-  char *src = cg_emit(ke, &C_RENDERER);
+  //
+  // F6 step 4: with THVM_CPU_JIT_VIA_UOP=1 we try render_uop_c first
+  // (lift to UOp DAG + emit C99). Falls back to cg_emit if the lifter
+  // declines (n_inputs > 30, no scalar arena, etc.) or the rendered
+  // string is empty. The output signature matches render_c.c so the
+  // surrounding compile/dlopen/dlsym path is unchanged.
+  char *src = NULL;
+  {
+    char const *e = getenv("THVM_CPU_JIT_VIA_UOP");
+    if (e != NULL && e[0] == '1') {
+      KernelUopLift lift = {0};
+      if (kernel_lift_to_uop(ke, &lift)) {
+        char buf[16384];
+        FILE *fp = fmemopen(buf, sizeof(buf), "w");
+        if (fp != NULL) {
+          cg_render_uop_kernel_c(lift.store_root, "k", lift.out_buf,
+                                 lift.in_bufs, lift.n_inputs, fp);
+          long n = ftell(fp);
+          fclose(fp);
+          if (n > 0) {
+            src = (char *)malloc((size_t)n + 1);
+            if (src != NULL) {
+              memcpy(src, buf, (size_t)n);
+              src[n] = '\0';
+            }
+          }
+        }
+      }
+    }
+  }
+  if (src == NULL) {
+    src = cg_emit(ke, &C_RENDERER);
+  }
   if (!src) return NULL;
 
   char src_path[256], dl_path[256];
