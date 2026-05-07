@@ -387,7 +387,14 @@ static void rmu_collect_ranges_with_opts(Term t, Term *ranges,
 // Returns 1 if `kind`/`axis_type` indicates the axis binds directly to
 // a thread/group position (no for-loop emitted).  These paths emit a
 // `uint aN = tt;` or `uint aN = tg;` declaration instead.
+// Renderer target. 0 = MSL (default), 1 = C99 for CPU JIT (F6).
+// When C99, axis-type LOCAL/GLOBAL is rendered as a regular for-loop
+// (no thread-position bind), and the prologue/epilogue switch to a
+// plain function signature without Metal kernel attributes.
+static int RMU_TARGET_C = 0;
+
 static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
+  if (RMU_TARGET_C) return 0;  // F6: C99 target has no thread positions
   return (opt_kind == UOP_OPT_LOCAL)
       || axis_type == 4  /* legacy KAX_LOCAL  */
       || axis_type == 5  /* legacy KAX_GLOBAL */;
@@ -1125,5 +1132,60 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
   } else {
     fputs("  /* empty kernel */\n", fp);
   }
+  fputs("}\n", fp);
+}
+
+// F6: render the same UOp DAG as a C99 kernel for the CPU JIT.
+// Buffer-binding convention mirrors render_c.c's existing CPU JIT
+// signature: `void k(void *out_v, const void *const *ins_v,
+//                    unsigned n, const unsigned *in_numels)`.
+// The body emit shares all rmu_emit_* helpers with the MSL path; the
+// RMU_TARGET_C flag flips axis-binding (LOCAL/GLOBAL -> for-loop).
+// `uint` is typedef'd to `unsigned int` so the body emit's `uint aN`
+// / `for (uint a; ...)` patterns compile as C99.
+//
+// Scope: single-store elementwise / reduce-tail kernels (matmul TC
+// template stays MSL-only since C lacks simdgroup_matrix). Caller
+// gates on uop_recognise_tc NOT having wrapped the root.
+fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
+                               Term out_buf, Term const *in_bufs,
+                               u32 n_inputs, FILE *fp) {
+  if (fp == NULL) fp = stderr;
+  if (kernel_name == NULL) kernel_name = "uop_kernel";
+  rmu_buf_names_reset();
+  rmu_buf_names_set(out_buf, "out");
+  for (u32 i = 0; i < n_inputs; i++) {
+    char name[16];
+    snprintf(name, sizeof(name), "in%u", i);
+    rmu_buf_names_set(in_bufs[i], name);
+  }
+  fputs("#include <stdint.h>\n", fp);
+  fputs("#include <math.h>\n", fp);
+  fputs("typedef unsigned int uint;\n", fp);
+  // Match render_c.c's CPU-JIT signature so cpu/jit.c can dlsym the
+  // symbol and call without re-binding.
+  fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
+  fputs("              unsigned n, const unsigned *in_numels) {\n", fp);
+  fputs("  (void)n; (void)in_numels;\n", fp);
+  u32 out_dtype = uop_buffer_dtype(out_buf);
+  fprintf(fp, "  %s *out = (%s *)out_v;\n",
+          rmu_msl_type_name(out_dtype), rmu_msl_type_name(out_dtype));
+  for (u32 i = 0; i < n_inputs; i++) {
+    u32 dt = uop_buffer_dtype(in_bufs[i]);
+    fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
+            rmu_msl_type_name(dt), i, rmu_msl_type_name(dt), i);
+  }
+  RMU_TARGET_C = 1;
+  if (root != 0 && term_tag(root) == TAG_UOP) {
+    u32 op = term_ext(root);
+    if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
+    else if (op == UOP_AFTER) rmu_emit_after(root, fp, 1);
+    else {
+      fputs("  /* unsupported root op */\n", fp);
+    }
+  } else {
+    fputs("  /* empty kernel */\n", fp);
+  }
+  RMU_TARGET_C = 0;
   fputs("}\n", fp);
 }

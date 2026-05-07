@@ -2207,6 +2207,13 @@ fn void kernel_lift_count_success(void);
 fn void cg_render_uop_kernel(Term root, const char *kernel_name,
                              Term out_buf, Term const *in_bufs,
                              u32 n_inputs, FILE *fp);
+// F6: same UOp DAG, emitted as a C99 kernel for the CPU JIT path.
+// Function signature matches render_c.c's existing CPU-JIT contract:
+//   void k(void *out_v, const void *const *ins_v,
+//          unsigned n, const unsigned *in_numels);
+fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
+                               Term out_buf, Term const *in_bufs,
+                               u32 n_inputs, FILE *fp);
 
 // === Per-USE movement-chain resolver ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,

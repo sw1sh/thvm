@@ -369,6 +369,44 @@ int main(void) {
   fclose(fp);
   CHECK(contains(buf11, " == 2.0f"));
 
+  // F6: cg_render_uop_kernel_c emits a C99 kernel for CPU JIT use.
+  // Same UOp DAG, different prologue (no kernel/[[buffer]]/thread attrs).
+  TEST_BEGIN("render-uop-c/empty-root-prints-empty");
+  char bufc0[2048];
+  fp = fmemopen(bufc0, sizeof(bufc0), "w");
+  CHECK(fp != NULL);
+  cg_render_uop_kernel_c(/*root=*/0, "k0c", out, NULL, 0, fp);
+  fclose(fp);
+  CHECK(contains(bufc0, "/* empty kernel */"));
+  CHECK(contains(bufc0, "void k0c"));
+  CHECK(!contains(bufc0, "kernel void"));
+  CHECK(!contains(bufc0, "metal_stdlib"));
+  CHECK(!contains(bufc0, "[[ buffer"));
+
+  TEST_BEGIN("render-uop-c/elementwise-add-cpu-signature");
+  Term r_c    = uop_range(0, 0, 32);
+  Term ld_aC  = uop_index_e(in0, r_c);
+  Term ld_bC  = uop_index_e(in1, r_c);
+  Term sumC   = uop_binary(UOP_ADD, ld_aC, ld_bC);
+  Term st_c   = uop_store(out, r_c, sumC);
+  char bufc1[4096];
+  fp = fmemopen(bufc1, sizeof(bufc1), "w");
+  cg_render_uop_kernel_c(st_c, "kadd", out, in_bufs, 2, fp);
+  fclose(fp);
+  // Signature matches render_c.c's existing CPU-JIT contract.
+  CHECK(contains(bufc1, "void kadd(void *out_v, const void *const *ins_v"));
+  CHECK(contains(bufc1, "unsigned n, const unsigned *in_numels"));
+  // Pointer cast prologue.
+  CHECK(contains(bufc1, "float *out = (float *)out_v;"));
+  CHECK(contains(bufc1, "const float *in0 = (const float *)ins_v[0];"));
+  // Body shares MSL emit; loops and loads compile as C99.
+  CHECK(contains(bufc1, "for (uint a0 = 0; a0 < 32"));
+  CHECK(contains(bufc1, "(in0[a0] + in1[a0])"));
+  CHECK(contains(bufc1, "out[a0] = "));
+  // Header: typedef + math.h so the body emit's `uint` and `sqrt` work.
+  CHECK(contains(bufc1, "typedef unsigned int uint;"));
+  CHECK(contains(bufc1, "<math.h>"));
+
   thvm_free();
   TEST_REPORT();
 }
