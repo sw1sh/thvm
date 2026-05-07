@@ -18,10 +18,14 @@ fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // -- production keeps the path silent.
   if (getenv("THVM_CPU_INTERPRET_TRACE")) {
     fprintf(stderr, "thvm: cpu_interpret -- n_inputs=%u n_ops=%u dt=%u "
-                    "out_numel=%u\n",
+                    "out_numel=%u ops=[",
             ke->n_inputs, ke->n_ops,
             ke->n_ops > 0 ? ke->program[0].dtype : 0,
             ke->output_numel);
+    for (u32 _i = 0; _i < ke->n_ops; _i++) {
+      fprintf(stderr, "%s%u", _i ? "," : "", ke->program[_i].opcode);
+    }
+    fputs("]\n", stderr);
   }
   // Multi-output kernel support (Step 7 of multi-output groundwork).
   // Each extra output's value comes from a KProgOp marked with
