@@ -962,15 +962,12 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
 // in the store statement.  Returns 1 if the shape matched and was
 // emitted; 0 if the caller should fall back to the generic path.
 //
-// When the value is wrapped in OPT(REDUCE(...), TC, _) AND the shape
-// matches the matmul pattern, dispatches to the F2b simdgroup_matrix
-// template; falls back to the generic accumulator path when tile sizes
-// don't fit (e.g. K extent not divisible by 8).
-//
-// When the value is wrapped in OPT(REDUCE(...), CONV, _), dispatches
-// to the F4 conv2d-flat template (rmu_emit_conv).  Falls back to the
-// generic accumulator path when the conv shape doesn't yield the
-// expected output+reduce range pair.
+// Dispatches to specialised templates when the recogniser pre-pass
+// (uop_recognise_tc / uop_recognise_conv) wrapped the value:
+//   OPT(_, TC,   _) -> rmu_emit_matmul_tc  (simdgroup_matrix MMA)
+//   OPT(_, CONV, _) -> rmu_emit_conv       (conv2d-flat #pragma unroll)
+// TC falls through to the scalar accumulator on tile-size mismatch
+// (K%8 != 0); CONV always succeeds for shapes the recogniser installs.
 static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   u64 sloc = term_val(store);
@@ -985,15 +982,13 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     fputs("/* TC tile mismatch: falling back to scalar accumulator */\n", fp);
     value = tc_red;
   }
-  // F4: dispatch to conv2d template when CONV-annotated.  Falls back
-  // to the generic accumulator path when the conv body lacks the
-  // expected output+reduce range split.
+  // F4: dispatch to conv2d template when CONV-annotated.  rmu_emit_conv
+  // only fails on degenerate KRED=0 shapes that uop_recognise_conv never
+  // installs, so any CONV-wrapped root that arrives here emits through
+  // the template; no fallback path is exercised in production or tests.
   Term conv_red = 0;
-  if (rmu_detect_conv(store, &conv_red)) {
-    if (rmu_emit_conv(store, conv_red, fp, depth)) return 1;
-    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fputs("/* CONV shape mismatch: falling back to scalar accumulator */\n", fp);
-    value = conv_red;
+  if (rmu_detect_conv(store, &conv_red) && rmu_emit_conv(store, conv_red, fp, depth)) {
+    return 1;
   }
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
   Term buf  = heap_read(sloc + 0);
