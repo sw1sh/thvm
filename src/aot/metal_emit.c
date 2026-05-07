@@ -263,7 +263,8 @@ static int aot_msl_needs_ic_walk(Term t,
     u64 val = term_val(t);
     // Dedup by base loc to bound work.
     if (tag == TAG_APP || tag == TAG_DP0 || tag == TAG_DP1 ||
-        tag == TAG_CTR || tag == TAG_OP2 || tag == TAG_MAT) {
+        tag == TAG_CTR || tag == TAG_OP2 || tag == TAG_MAT ||
+        tag == TAG_EQL) {
         for (u32 i = 0; i < *visited_n; i++) {
             if (visited[i] == val) return 0;
         }
@@ -291,10 +292,9 @@ static int aot_msl_needs_ic_walk(Term t,
         }
         return 0;
     }
-    if (tag == TAG_OP2) {
-        // OP2 with a SUP under either arg needs the IC state machine
-        // (OP2-SUP / OP2-NUM-SUP commutes).  Plain NUM-NUM OP2 still
-        // const-folds in the scalar path.
+    if (tag == TAG_OP2 || tag == TAG_EQL) {
+        // OP2/EQL with a SUP under either arg needs the IC state
+        // machine (commutes).  Plain NUM-NUM still folds inline.
         return aot_msl_needs_ic_walk(book_read(val + 0), visited, visited_n) ||
                aot_msl_needs_ic_walk(book_read(val + 1), visited, visited_n);
     }
@@ -533,6 +533,31 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
             loc_var, loc_var, h_local, loc_var, f_local,
             mat_var, match, loc_var);
         snprintf(out, 96, "%s", mat_var);
+        return out;
+    }
+    if (tag == TAG_EQL) {
+        // Iter ATP: build EQL cell on the book heap.  The wnf state
+        // machine fires NUM-NUM directly, ERA/ANY shorts, and
+        // eql_sup_l / eql_sup_r commutes when an arg is SUP.
+        u64  src_loc = term_val(t);
+        u32  idx     = g_msl_fresh++;
+        char loc_var[24], eql_var[24], a_local[96], b_local[96];
+        snprintf(loc_var, sizeof loc_var, "eql_loc_%u", idx);
+        snprintf(eql_var, sizeof eql_var, "eql_%u",     idx);
+        Term a = book_read(src_loc + 0);
+        Term b_t = book_read(src_loc + 1);
+        const char *ae = aot_msl_emit_term(b, a, bind);
+        snprintf(a_local, sizeof a_local, "%s", ae);
+        const char *be = aot_msl_emit_term(b, b_t, bind);
+        snprintf(b_local, sizeof b_local, "%s", be);
+        aot_emit_fmt(b,
+            "  ulong %s = aot_book_alloc(book_next, 2u);\n"
+            "  heap[%s + 0] = %s;\n"
+            "  heap[%s + 1] = %s;\n"
+            "  Term %s = msl_term_new(TAG_EQL, 0u, %s);\n",
+            loc_var, loc_var, a_local, loc_var, b_local,
+            eql_var, loc_var);
+        snprintf(out, 96, "%s", eql_var);
         return out;
     }
     if (tag == TAG_CTR) {
@@ -846,6 +871,8 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         "#define TAG_BJ0    33u\n"
         "#define TAG_BJ1    34u\n"
         "#define TAG_F_OP2_NUM 26u\n"
+        "#define TAG_EQL    15u\n"
+        "#define TAG_F_EQL_R 27u\n"
         "#define DT_INT32   5u\n"
         "// OP_* opcodes mirror src/thvm.h.\n"
         "#define OP_ADD 0u\n"
@@ -1048,6 +1075,44 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         "  return msl_term_new(TAG_SUP, lab, c + 4);\n"
         "}\n"
         "\n"
+        "// eql_sup_l (src/wnf/_.c TAG_EQL SUP-L): SUP on left arg.\n"
+        "// 7-cell allocation (DUP body for b + 2 EQL layouts + SUP).\n"
+        "static Term aot_eql_sup_l(Term sup, Term b,\n"
+        "    device Term *heap, device atomic_uint *book_next) {\n"
+        "  ulong sup_loc = msl_term_val(sup);\n"
+        "  uint  lab     = msl_term_ext(sup);\n"
+        "  Term a0 = heap[sup_loc + 0];\n"
+        "  Term a1 = heap[sup_loc + 1];\n"
+        "  ulong c = aot_book_alloc(book_next, 7u);\n"
+        "  heap[c + 0] = b;\n"
+        "  heap[c + 1] = a0;\n"
+        "  heap[c + 2] = msl_term_new(TAG_DP0, lab, c + 0);\n"
+        "  heap[c + 3] = a1;\n"
+        "  heap[c + 4] = msl_term_new(TAG_DP1, lab, c + 0);\n"
+        "  heap[c + 5] = msl_term_new(TAG_EQL, 0u, c + 1);\n"
+        "  heap[c + 6] = msl_term_new(TAG_EQL, 0u, c + 3);\n"
+        "  return msl_term_new(TAG_SUP, lab, c + 5);\n"
+        "}\n"
+        "\n"
+        "// eql_sup_r (src/wnf/_.c TAG_EQL SUP-R): SUP on right arg.\n"
+        "// 7-cell allocation (DUP body for a + 2 EQL layouts + SUP).\n"
+        "static Term aot_eql_sup_r(Term a, Term sup,\n"
+        "    device Term *heap, device atomic_uint *book_next) {\n"
+        "  ulong sup_loc = msl_term_val(sup);\n"
+        "  uint  lab     = msl_term_ext(sup);\n"
+        "  Term b0 = heap[sup_loc + 0];\n"
+        "  Term b1 = heap[sup_loc + 1];\n"
+        "  ulong c = aot_book_alloc(book_next, 7u);\n"
+        "  heap[c + 0] = a;\n"
+        "  heap[c + 1] = msl_term_new(TAG_DP0, lab, c + 0);\n"
+        "  heap[c + 2] = b0;\n"
+        "  heap[c + 3] = msl_term_new(TAG_DP1, lab, c + 0);\n"
+        "  heap[c + 4] = b1;\n"
+        "  heap[c + 5] = msl_term_new(TAG_EQL, 0u, c + 1);\n"
+        "  heap[c + 6] = msl_term_new(TAG_EQL, 0u, c + 3);\n"
+        "  return msl_term_new(TAG_SUP, lab, c + 5);\n"
+        "}\n"
+        "\n"
         "// app_mat_sup (src/interact/app_mat_sup.c): MAT scrutinee SUP.\n"
         "// 12-cell: 2 DUP bodies + 2 MATs + 2 APPs + SUP wrapper.\n"
         "static Term aot_app_mat_sup(Term mat, Term sup,\n"
@@ -1157,6 +1222,17 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         // OP2 ENTER: push frame, descend into left arg.
         aot_emit_fmt(&b,
             "      if (t == TAG_OP2) {\n"
+            "        ulong loc = msl_term_val(next);\n"
+            "        if (ic_spos >= %uu) {\n"
+            "          result[0] = msl_term_new(TAG_ERA, 0xFFFFFu, 0u); return;\n"
+            "        }\n"
+            "        ic_stk[ic_spos++] = next;\n"
+            "        next = heap[loc + 0]; continue;\n"
+            "      }\n",
+            stack_cap);
+        // EQL ENTER: push frame, descend into left arg (mirrors OP2).
+        aot_emit_fmt(&b,
+            "      if (t == TAG_EQL) {\n"
             "        ulong loc = msl_term_val(next);\n"
             "        if (ic_spos >= %uu) {\n"
             "          result[0] = msl_term_new(TAG_ERA, 0xFFFFFu, 0u); return;\n"
@@ -1276,6 +1352,53 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
             "        heap[nloc + 0] = msl_term_new(TAG_NUM, 0u, ulong(xv));\n"
             "        heap[nloc + 1] = whnf;\n"
             "        whnf = msl_term_new(TAG_OP2, op, nloc); continue;\n"
+            "      }\n");
+        // EQL frame: whnf is reduced left arg.
+        aot_emit_fmt(&b,
+            "      if (ft == TAG_EQL) {\n"
+            "        ulong loc = msl_term_val(frame);\n"
+            "        uint  wt  = msl_term_tag(whnf);\n"
+            "        if (wt == TAG_SUP) {\n"
+            "          Term b = heap[loc + 1];\n"
+            "          next = aot_eql_sup_l(whnf, b, heap, book_next);\n"
+            "          state = 0u; continue;\n"
+            "        }\n"
+            "        if (wt == TAG_NUM) {\n"
+            "          // a is NUM.  Push F_EQL_R holding loc; descend\n"
+            "          // right arg.  We store the reduced a back into\n"
+            "          // heap[loc+0] so F_EQL_R can read it.\n"
+            "          heap[loc + 0] = whnf;\n"
+            "          if (ic_spos >= %uu) {\n"
+            "            result[0] = msl_term_new(TAG_ERA, 0xFFFFFu, 0u); return;\n"
+            "          }\n"
+            "          ic_stk[ic_spos++] = msl_term_new(TAG_F_EQL_R, 0u, loc);\n"
+            "          next = heap[loc + 1]; state = 0u; continue;\n"
+            "        }\n"
+            "        // Stuck: rebuild EQL.\n"
+            "        heap[loc + 0] = whnf;\n"
+            "        whnf = frame; continue;\n"
+            "      }\n",
+            stack_cap);
+        // F_EQL_R frame: whnf is reduced right arg; left stored at heap[loc+0].
+        aot_emit_str(&b,
+            "      if (ft == TAG_F_EQL_R) {\n"
+            "        ulong loc = msl_term_val(frame);\n"
+            "        Term  a   = heap[loc + 0];\n"
+            "        uint  wt  = msl_term_tag(whnf);\n"
+            "        if (wt == TAG_SUP) {\n"
+            "          next = aot_eql_sup_r(a, whnf, heap, book_next);\n"
+            "          state = 0u; continue;\n"
+            "        }\n"
+            "        if (msl_term_tag(a) == TAG_NUM && wt == TAG_NUM) {\n"
+            "          uint av = uint(msl_term_val(a));\n"
+            "          uint bv = uint(msl_term_val(whnf));\n"
+            "          uint r  = (av == bv) ? 1u : 0u;\n"
+            "          whnf = msl_term_new(TAG_NUM, msl_term_ext(a), ulong(r));\n"
+            "          continue;\n"
+            "        }\n"
+            "        // Stuck: rebuild EQL.\n"
+            "        heap[loc + 1] = whnf;\n"
+            "        whnf = msl_term_new(TAG_EQL, 0u, loc); continue;\n"
             "      }\n");
         // MAT-dispatch frame: whnf is reduced scrutinee, frame is the MAT cell.
         aot_emit_str(&b,
