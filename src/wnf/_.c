@@ -450,6 +450,15 @@ apply:
               next = res;
               goto enter;
             }
+            // arg is SUP: fire APP-MAT-SUP commute (clone the
+            // case-tree at the SUP's label so each branch gets its
+            // own copy).  Without this, MAT with a SUP scrutinee
+            // would silently fall through to the fallback below,
+            // collapsing the SUP enumeration.
+            if (term_tag(arg_w) == TAG_SUP) {
+              next = interact_app_mat_sup(whnf, arg_w);
+              goto enter;
+            }
             // Miss: build APP(fallback, arg_w).  Reuse the consumed
             // MAT cell -- it's already 2 words, slot 1 already holds
             // fallback; copy fallback to slot 0, write arg_w to slot 1.

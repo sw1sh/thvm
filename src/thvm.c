@@ -303,6 +303,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "interact/op2_sup.c"
 #include "interact/op2_num_sup.c"
 #include "interact/dup_mat.c"
+#include "interact/app_mat_sup.c"
 #include "interact/app_bri.c"
 #include "interact/app_pri.c"
 #include "interact/app_sup.c"
