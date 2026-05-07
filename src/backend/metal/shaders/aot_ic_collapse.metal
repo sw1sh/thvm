@@ -94,21 +94,26 @@ static inline Term  msl_term_new(uint tag, uint ext, ulong val) {
 // subst map + 12 B arena state).  Within the ~32 KiB Apple GPU
 // thread-private budget at our 256-thread tg.
 //
-// Subst map capacity: 1024 entries.  Each path level through the
-// SUP-tree adds substitutions for every AND / OR / NOT LAM binder
-// fired during this path's reduction, plus the DP cells resolved
-// for the variable assignments.  Iter Z+2 step 6's APP-of-DP /
-// DP-of-DP redirects ALSO accumulate substitutions as nested
-// projections resolve, so cap is generous: V=12 / C=24 budget
-// at ~600 entries; 1024 leaves headroom.  Per-thread cost:
-// 1024 * 16 B = 16 KiB.  Combined with the 8 KiB ic_stk that
-// keeps us at 24 KiB / thread, still under the ~32 KiB Apple
-// GPU thread-private budget at our 256-thread tg.  Overflow
-// silently drops (this thread stalls on the missing entry).
-constant uint AOT_SUBST_MAP_CAP = 1024u;
+// Lever 1: open-addressing hash-table smap.  Earlier linear-scan
+// version was O(K) per lookup, O(K^2) total for K substitutions per
+// thread.  At V>=6 that scan dominates per-thread cost.  Hash table
+// drops lookup to O(1) expected, total to O(K).
+//
+// Capacity 1024 slots (power of 2 for fast mask-modulo).  Empty
+// slot marker: loc == AOT_SMAP_EMPTY (= UINT_MAX).  Real heap locs
+// are bounded by BOOK_CAP (~2^28) so the sentinel is safely outside.
+// Multiplicative hash with Knuth's golden ratio constant; linear
+// probe on collision.
+//
+// Per-thread cost: 1024 * 16 B = 16 KiB.  Plus 8 KiB ic_stk +
+// arena state.  Total ~24 KiB / thread, within Apple GPU's
+// thread-private budget at our 256-thread tg.
+constant uint AOT_SMAP_CAP   = 1024u;
+constant uint AOT_SMAP_MASK  = 1023u;
+constant uint AOT_SMAP_EMPTY = 0xFFFFFFFFu;
 
 struct SubstSlot {
-  uint loc;
+  uint loc;       // AOT_SMAP_EMPTY when empty
   uint _pad;
   ulong term;
 };
@@ -117,9 +122,9 @@ struct ThreadCtx {
   uint base;
   uint size;
   uint next;
-  uint smap_n;
+  uint smap_n;              // count of occupied slots (for overflow detect)
   uint overflow;            // sticky flag: arena exhausted -> bail
-  SubstSlot smap[AOT_SUBST_MAP_CAP];
+  SubstSlot smap[AOT_SMAP_CAP];
 };
 
 static inline Term aot_heap_load(device Term *heap, ulong loc) {
@@ -149,32 +154,47 @@ static inline bool aot_in_arena(thread ThreadCtx *ctx, ulong loc) {
   return loc >= ulong(ctx->base) && loc < ulong(ctx->base + ctx->size);
 }
 
-// Subst-map ops: linear scan over <= AOT_SUBST_MAP_CAP entries.
-// Insert OR update (lam_loc / dup_loc may be re-substituted across
-// nested DUP-SUP fires; latest wins, mirroring SUB-bit semantics).
-// Returns 0 (term=0) on miss; lookup callers must check before using.
+// Hash-table smap (Lever 1): multiplicative hash + linear probe.
+// Empty slot = (loc == AOT_SMAP_EMPTY).  Lookup: hash, walk; on loc
+// match return term, on empty return 0 miss.  Insert: hash, walk;
+// on loc match update, on empty place; on table full silently drop.
+// Returns 0 on miss; callers check msl_sub_get to disambiguate
+// "no entry" from "entry with bare value".
+
+static inline uint aot_hash_loc(uint loc) {
+  return (loc * 2654435761u) & AOT_SMAP_MASK;  // Knuth golden ratio
+}
+
 static inline ulong aot_smap_get(thread ThreadCtx *ctx, ulong loc) {
   uint loc32 = uint(loc);
-  for (uint i = 0u; i < ctx->smap_n; i++) {
-    if (ctx->smap[i].loc == loc32) return ctx->smap[i].term;
+  uint h = aot_hash_loc(loc32);
+  for (uint i = 0u; i < AOT_SMAP_CAP; i++) {
+    uint idx = (h + i) & AOT_SMAP_MASK;
+    uint slot_loc = ctx->smap[idx].loc;
+    if (slot_loc == loc32)        return ctx->smap[idx].term;
+    if (slot_loc == AOT_SMAP_EMPTY) return 0ul;
   }
   return 0ul;
 }
 static inline void aot_smap_put(thread ThreadCtx *ctx, ulong loc, ulong v) {
   uint loc32 = uint(loc);
-  for (uint i = 0u; i < ctx->smap_n; i++) {
-    if (ctx->smap[i].loc == loc32) {
-      ctx->smap[i].term = v;
+  uint h = aot_hash_loc(loc32);
+  for (uint i = 0u; i < AOT_SMAP_CAP; i++) {
+    uint idx = (h + i) & AOT_SMAP_MASK;
+    uint slot_loc = ctx->smap[idx].loc;
+    if (slot_loc == loc32) {
+      ctx->smap[idx].term = v;
+      return;
+    }
+    if (slot_loc == AOT_SMAP_EMPTY) {
+      ctx->smap[idx].loc  = loc32;
+      ctx->smap[idx].term = v;
+      ctx->smap_n++;
       return;
     }
   }
-  if (ctx->smap_n < AOT_SUBST_MAP_CAP) {
-    ctx->smap[ctx->smap_n].loc  = loc32;
-    ctx->smap[ctx->smap_n].term = v;
-    ctx->smap_n++;
-  }
-  // Overflow: silently drop -- this thread's reduction may stall
-  // earlier on the missing substitution; tradeoff for fixed cap.
+  // Table full: silently drop (this thread's reduction may stall on
+  // the missing substitution; tradeoff for fixed-cap hash table).
 }
 
 static inline void aot_subst_var(thread ThreadCtx *ctx,
@@ -455,6 +475,11 @@ kernel void aot_ic_collapse(
   ctx.next     = 0u;
   ctx.smap_n   = 0u;
   ctx.overflow = 0u;
+  // Lever 1: init hash-table smap to empty.  1024 stores per thread
+  // (~1 us); compute time amortized across the per-thread reduction.
+  for (uint i = 0u; i < AOT_SMAP_CAP; i++) {
+    ctx.smap[i].loc = AOT_SMAP_EMPTY;
+  }
 
   Term cur = (Term)*root_in;
   uint depth = 0u;
