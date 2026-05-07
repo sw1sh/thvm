@@ -1028,6 +1028,23 @@ typedef struct {
   TileGemmInfo mma;
 } TilePlanInfo;
 
+// === Kernel lift to UOp DAG (forward decl) ===
+// Full prose lives near the kernel_lift_to_uop declaration further down;
+// the typedef is hoisted here so KernelEntry can embed it by-value as
+// `cached_lift` (Phase C slice 2).
+//
+// KERNEL_LIFT_MAX_INPUT bounds the in_bufs[] inline array for stack
+// safety -- KERNEL_MAX_INPUT (1M) is a sanity cap, not a typical
+// fan-in.  Real workloads max out at ~30 inputs (Conv2D fuses
+// kh*kw input/weight tids per kernel).
+#define KERNEL_LIFT_MAX_INPUT 64
+typedef struct {
+  Term store_root;
+  Term out_buf;
+  Term in_bufs[KERNEL_LIFT_MAX_INPUT];
+  u32  n_inputs;
+} KernelUopLift;
+
 typedef struct KernelEntry {
   // Input-tensor arrays: dynamically grown.  inputs_cap is the
   // allocated length; n_inputs is the number of slots actually used.
@@ -1122,7 +1139,25 @@ typedef struct KernelEntry {
   // can prefer this representation; program[] remains the primary
   // source of truth until every consumer flips.  Heap-resident terms
   // are evacuated by gc_evacuate_side_tables (heap/collect.c).
+  //
+  // Phase C slice 2: `compute_root` is a redundant view of
+  // `cached_lift.store_root` (kept populated for E1-style consumers
+  // that only need the root); the full lift output (in_bufs[],
+  // out_buf, n_inputs) lives in `cached_lift` so dispatch-time
+  // consumers (cpu_jit_build, cg_emit_via_uop, cpu_uop_walk) read
+  // it directly instead of re-running kernel_lift_to_uop.
   Term      compute_root;
+
+  // Phase C slice 2: cached output of kernel_lift_to_uop, populated
+  // by emit_kernel_for_boundary alongside compute_root.  When the
+  // lift declines, cached_lift.store_root stays 0 (matches the
+  // compute_root convention).  All five Term-typed fields
+  // (store_root, out_buf, in_bufs[0..n_inputs)) are heap-resident
+  // and walked by gc_evacuate_side_tables across collections.
+  // Embedded by-value (~528 B per slot, KERNELS_CAP-bounded) so
+  // there's no extra allocation / lifetime management; the kernel
+  // entry already memset-zeroes on alloc.
+  KernelUopLift cached_lift;
 
   u8        spliced;               // 1 if the kernel's program was inlined
                                    // into a parent via
@@ -2210,18 +2245,9 @@ fn int uop_classify_conv2d(Term root, u32 *out_kred);
 // root suitable for cg_render_uop_kernel.  Bridges the migration
 // bridge between scalar_uops[] and the renderer.
 //
-// KERNEL_LIFT_MAX_INPUT bounds the in_bufs[] inline array for stack
-// safety -- KERNEL_MAX_INPUT (1M) is a sanity cap, not a typical
-// fan-in.  Real workloads max out at ~30 inputs (Conv2D fuses
-// kh*kw input/weight tids per kernel).
-#define KERNEL_LIFT_MAX_INPUT 64
-typedef struct {
-  Term store_root;
-  Term out_buf;
-  Term in_bufs[KERNEL_LIFT_MAX_INPUT];
-  u32  n_inputs;
-} KernelUopLift;
-
+// `KernelUopLift` + `KERNEL_LIFT_MAX_INPUT` are forward-defined above
+// (right before `KernelEntry`) so the kernel entry can embed the lift
+// output by-value as `cached_lift`.  See that block for the typedef.
 fn int kernel_lift_to_uop(struct KernelEntry const *ke,
                           KernelUopLift *out);
 

@@ -71,8 +71,16 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   // redundantly; last-writer-wins on the output buffer gives correct
   // results).  Future wedges can specialize when M/N-axes get bound
   // to thread positions via UOP_OPT_LOCAL annotations.
-  KernelUopLift lift = {0};
-  if (!kernel_lift_to_uop(ke, &lift)) return 0;
+  //
+  // Phase C slice 2: prefer the cached lift outcome as the "would
+  // the lifter succeed?" oracle when populated.  When 0, fall back
+  // to a fresh kernel_lift_to_uop -- test infra builds kernels via
+  // rangeify_emit() bypassing materialize, so cached_lift stays 0
+  // even though the lift would succeed.
+  if (ke->cached_lift.store_root == 0) {
+    KernelUopLift fresh = {0};
+    if (!kernel_lift_to_uop(ke, &fresh)) return 0;
+  }
   u64 total = ke->output_numel ? (u64)ke->output_numel : 1;
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   u32 threads = total < 256 ? (u32)total : 256u;
@@ -100,8 +108,26 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // Metal hardware caps buffer attributes at index 30 (31 slots total
   // including output).  Reject kernels with too many inputs.
   if (ke->n_inputs > 30) return NULL;
-  KernelUopLift lift = {0};
-  if (!kernel_lift_to_uop(ke, &lift)) return NULL;
+  // Phase C slice 2: prefer the cached KernelUopLift populated by
+  // emit_kernel_for_boundary.  When the cache is populated
+  // (cached_lift.store_root != 0) we read it directly and skip the
+  // redundant kernel_lift_to_uop call.  When the cache is 0 there
+  // are two possibilities: materialize-time lift declined (the
+  // common case in the materialize pipeline), OR the kernel was
+  // constructed by test infra via rangeify_emit() bypassing
+  // materialize entirely (test_kernel_lift_coverage,
+  // test_tile_graph, test_metal_real cover this).  We can't tell
+  // them apart so we fall back to a fresh on-demand lift; it will
+  // succeed on rangeify-built kernels and decline on truly
+  // unsupported ones, matching the pre-slice-2 behavior.
+  KernelUopLift fresh = {0};
+  KernelUopLift const *lift;
+  if (ke->cached_lift.store_root != 0) {
+    lift = &ke->cached_lift;
+  } else {
+    if (!kernel_lift_to_uop(ke, &fresh)) return NULL;
+    lift = &fresh;
+  }
   kernel_lift_count_success();
   // Render to a malloc'd string, matching cg_emit_tile_metal's
   // contract.  Use kernel name "k" so MTLLibrary lookup behaves like
@@ -109,7 +135,7 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // F3.1: pre-render pass installs UOP_OPT(_, TC, 0) on matmul-shaped
   // STORE roots so render_uop's simdgroup_matrix template fires.
   // No-op for non-matmul kernels.
-  Term store_root = uop_recognise_tc(lift.store_root);
+  Term store_root = uop_recognise_tc(lift->store_root);
   // F4: same for conv2d_flat -- installs UOP_OPT(_, CONV, 0) on
   // STORE roots whose REDUCE body has IDIV/IMOD-decomposed addresses
   // so render_uop's rmu_emit_conv template fires.  No-op when the
@@ -118,8 +144,8 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   char buf[16384];
   FILE *fp = fmemopen(buf, sizeof(buf), "w");
   if (fp == NULL) return NULL;
-  cg_render_uop_kernel(store_root, "k", lift.out_buf,
-                       lift.in_bufs, lift.n_inputs, fp);
+  cg_render_uop_kernel(store_root, "k", lift->out_buf,
+                       lift->in_bufs, lift->n_inputs, fp);
   long n = ftell(fp);
   fclose(fp);
   if (n <= 0) return NULL;

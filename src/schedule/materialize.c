@@ -2328,21 +2328,26 @@ static Term emit_kernel_for_boundary(u32 bi) {
     }
   }
 
-  // Phase C dual-write (slice 1): populate ke->compute_root with the
-  // lifted UOp DAG root alongside the legacy program[] / scalar_uops[]
-  // outputs.  The lifter handles three shapes: (a) gemm-only kernels
-  // that bypass rangeify (scalar_uops == NULL but kernel_lift_from_gemm
-  // succeeds), (b) conv2d-only kernels (kernel_lift_from_conv2d), and
-  // (c) rangeified kernels (the ScalarUop walker in kernel_lift_to_uop).
-  // When the lift declines (multi-output spliced, unsupported shape,
-  // n_inputs > KERNEL_LIFT_MAX_INPUT), compute_root stays 0 and the
-  // legacy program[] path remains primary.  Consumers prefer
-  // compute_root when non-zero (currently: cpu_jit_build).
-  {
-    KernelUopLift lift = {0};
-    if (kernel_lift_to_uop(ke, &lift)) {
-      ke->compute_root = lift.store_root;
-    }
+  // Phase C dual-write (slices 1 + 2): cache the full
+  // kernel_lift_to_uop output on the KernelEntry alongside the
+  // legacy program[] / scalar_uops[] outputs.  The lifter handles
+  // three shapes: (a) gemm-only kernels that bypass rangeify
+  // (scalar_uops == NULL but kernel_lift_from_gemm succeeds),
+  // (b) conv2d-only kernels (kernel_lift_from_conv2d), and
+  // (c) rangeified kernels (the ScalarUop walker in
+  // kernel_lift_to_uop).  When the lift declines (multi-output
+  // spliced, unsupported shape, n_inputs > KERNEL_LIFT_MAX_INPUT),
+  // cached_lift stays zero-initialized and the legacy program[]
+  // path remains primary.
+  //
+  // Slice 2: lift directly into ke->cached_lift so dispatch-time
+  // consumers (cpu_jit_build, cg_emit_via_uop, cpu_uop_walk) can
+  // read store_root / out_buf / in_bufs[] without re-running the
+  // lifter.  compute_root is kept populated as a redundant view of
+  // cached_lift.store_root for E1-style consumers that only need
+  // the root.
+  if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
+    ke->compute_root = ke->cached_lift.store_root;
   }
 
   u64 kloc = heap_alloc(2);

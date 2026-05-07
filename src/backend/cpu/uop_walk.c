@@ -793,25 +793,28 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
                           ke->n_ops);
     return 0;
   }
-  // Lift to UOp DAG. If the lifter declines, the walker can't help.
-  KernelUopLift lift = {0};
-  if (!kernel_lift_to_uop(ke, &lift)) {
+  // Phase C slice 2: read the cached KernelUopLift populated by
+  // emit_kernel_for_boundary instead of re-running kernel_lift_to_uop.
+  // store_root==0 means materialize-time lift declined; the walker
+  // can't help.
+  if (ke->cached_lift.store_root == 0) {
     if (trace_on) fprintf(stderr, "uop_walk: lift declined n_inputs=%u n_ops=%u\n",
                           ke->n_inputs, ke->n_ops);
     return 0;
   }
-  if (lift.n_inputs > UWALK_MAX_INPUTS) return 0;
+  KernelUopLift const *lift = &ke->cached_lift;
+  if (lift->n_inputs > UWALK_MAX_INPUTS) return 0;
   UWalkCtx ctx = {0};
-  ctx.n_inputs  = lift.n_inputs;
-  ctx.out_term  = lift.out_buf;
+  ctx.n_inputs  = lift->n_inputs;
+  ctx.out_term  = lift->out_buf;
   ctx.out_ptr   = CPU_BUFS[out_buf_id].data;
-  ctx.out_dtype = uop_buffer_dtype(lift.out_buf);
+  ctx.out_dtype = uop_buffer_dtype(lift->out_buf);
   if (ctx.out_dtype == 0) ctx.out_dtype = ke->output_dtype;
   // Resolve raw pointers (no pre-mat -- the lifter's view-stride
   // addressing reads the underlying buffer directly).
-  for (u32 i = 0; i < lift.n_inputs; i++) {
-    ctx.in_terms [i] = lift.in_bufs[i];
-    ctx.in_dtypes[i] = uop_buffer_dtype(lift.in_bufs[i]);
+  for (u32 i = 0; i < lift->n_inputs; i++) {
+    ctx.in_terms [i] = lift->in_bufs[i];
+    ctx.in_dtypes[i] = uop_buffer_dtype(lift->in_bufs[i]);
     if (ctx.in_dtypes[i] == 0
         && ke->input_dtypes != NULL && i < ke->n_inputs) {
       ctx.in_dtypes[i] = ke->input_dtypes[i];
@@ -823,7 +826,7 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     ctx.in_ptrs[i] = p;
   }
   // Walk the root.
-  Term root = lift.store_root;
+  Term root = lift->store_root;
   int ok = 0;
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
