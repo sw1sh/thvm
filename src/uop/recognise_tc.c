@@ -51,6 +51,45 @@ static UPat const rec_tc_store_kids[3] = {
 };
 static UPat const rec_tc_store = { UOP_STORE,   3,    0, -1, rec_tc_store_kids, NULL };
 
+// Count distinct UOP_RANGE axis_ids reachable from `t` through the
+// integer-binary / iwhere index expressions.  Used by the matmul
+// classifier to reject shapes whose addresses reference more than 2
+// ranges (e.g. conv2d's X address references {bi, ci, oh+kh, ow+kw}
+// = 4+ ranges; matmul's m*K+k references exactly 2). Bounded depth
+// so a misshapen DAG can't run away.
+static u32 rec_tc_count_distinct_ranges(Term t, u32 *seen, u32 cap,
+                                        u32 n_seen, int depth) {
+  if (depth > 32) return n_seen;
+  if (term_tag(t) != TAG_UOP) return n_seen;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    u32 axis_id = (u32)term_val(heap_read(loc + 0));
+    for (u32 i = 0; i < n_seen; i++) if (seen[i] == axis_id) return n_seen;
+    if (n_seen < cap) seen[n_seen++] = axis_id;
+    return n_seen;
+  }
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+      n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 0),
+                                            seen, cap, n_seen, depth + 1);
+      n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 1),
+                                            seen, cap, n_seen, depth + 1);
+      return n_seen;
+    case UOP_IWHERE:
+      n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 0),
+                                            seen, cap, n_seen, depth + 1);
+      n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 1),
+                                            seen, cap, n_seen, depth + 1);
+      n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 2),
+                                            seen, cap, n_seen, depth + 1);
+      return n_seen;
+    default:
+      return n_seen;
+  }
+}
+
 // Walk `t` looking for a UOP_RANGE leaf whose axis_id matches the
 // requested value; returns its extent if found, 0 otherwise. Local
 // duplicate of render_uop's rmu_collect_ranges -- rmu_collect_ranges
@@ -117,6 +156,21 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent) {
   Term mul    = heap_read(rloc + 0);
   Term addr_a = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
   Term addr_b = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
+
+  // Conv2d single-input shape also matches REDUCE(MUL(INDEX_E(W),
+  // INDEX_E(X))) but its X address references ranges {bi, ci, oh+kh,
+  // ow+kw} -- four or more distinct UOP_RANGE leaves -- whereas
+  // matmul addresses reference exactly two each (m*K+k for A,
+  // k*N+n for B).  The simdgroup_matrix template assumes a clean
+  // 2-range linear layout per operand; matching against conv would
+  // produce wrong simdgroup_load reads.  Reject if either address
+  // touches more than 2 distinct range axis_ids.
+  u32 seen_a[8] = {0};
+  u32 seen_b[8] = {0};
+  u32 n_a = rec_tc_count_distinct_ranges(addr_a, seen_a, 8, 0, 0);
+  u32 n_b = rec_tc_count_distinct_ranges(addr_b, seen_b, 8, 0, 0);
+  if (n_a != 2 || n_b != 2) return 0;
+
   u32 ka = rec_tc_find_range_extent(addr_a, red_axis, 0);
   if (ka == 0) ka = rec_tc_find_range_extent(addr_b, red_axis, 0);
   if (out_k_extent != NULL) *out_k_extent = ka;

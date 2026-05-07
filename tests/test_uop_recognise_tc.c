@@ -147,6 +147,46 @@ int main(void) {
   CHECK(uop_classify_matmul(st7, &k7_out));
   CHECK_EQ(k7_out, 7u);
 
+  TEST_BEGIN("recognise-tc/conv-shape-rejected-too-many-ranges");
+  // Conv2d single-input lift output: REDUCE(MUL(W[co*K+q], X[bi*Sb +
+  // ci*S2 + (oh+kh_v)*S0 + ...])).  W's address has 2 ranges, X's
+  // has 4+. The classifier must reject because the simdgroup_matrix
+  // template assumes 2-range linear layout per operand (matmul);
+  // applying it to conv X address would produce wrong loads.
+  u32 dimsW[2] = {16, 9};       // c_out=16, K=c_in*kh*kw=9
+  u32 dimsX[1] = {1024};        // X is rank-1 contiguous in conv lift
+  Term Wb = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsW);
+  Term Xb = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX);
+
+  Term r_co = uop_range(10, 0, 16);
+  Term r_q  = uop_range(11, 1, 9);
+  Term r_bi = uop_range(12, 0, 4);
+  Term r_oh = uop_range(13, 0, 8);
+  Term r_ow = uop_range(14, 0, 8);
+  Term k9_  = uop_const(DT_INT32, 9);
+  Term sb   = uop_const(DT_INT32, 256);
+  Term s0   = uop_const(DT_INT32, 8);
+  Term s1   = uop_const(DT_INT32, 1);
+  // W[co*9 + q]
+  Term coK  = uop_int_binary(UOP_IMUL, r_co, k9_);
+  Term wi   = uop_int_binary(UOP_IADD, coK, r_q);
+  Term ldW  = uop_index_e(Wb, wi);
+  // X[bi*sb + oh*s0 + ow*s1] -- 3 ranges (bi/oh/ow) so classifier rejects
+  Term biSb = uop_int_binary(UOP_IMUL, r_bi, sb);
+  Term ohS0 = uop_int_binary(UOP_IMUL, r_oh, s0);
+  Term owS1 = uop_int_binary(UOP_IMUL, r_ow, s1);
+  Term xi_a = uop_int_binary(UOP_IADD, biSb, ohS0);
+  Term xi   = uop_int_binary(UOP_IADD, xi_a, owS1);
+  Term ldX  = uop_index_e(Xb, xi);
+  Term mulC = uop_binary(UOP_MUL, ldW, ldX);
+  Term redC = uop_reduce(REDUCE_SUM, /*axis=*/11, mulC);
+  Term stC  = uop_store(C, addrC, redC);
+  u32 conv_k = 99;
+  CHECK(!uop_classify_matmul(stC, &conv_k));
+  // Also: uop_recognise_tc on this conv-shape store returns input
+  // unchanged (no OPT wrap installed).
+  CHECK_EQ(uop_recognise_tc(stC), stC);
+
   thvm_free();
   TEST_REPORT();
 }
