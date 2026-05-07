@@ -239,6 +239,61 @@ Host wrapper builds the args matrix from a CNF + var count.
 WL surface: `TAOTSatEval[name, nVars]` returns the boolean
 SAT answer.
 
+### Update after attempting per-leaf curried-LAM
+
+Implemented `aot_ic_def_run_batch.metal` + host wrapper + WL
+surface.  Built clean.  Reduced incrementally:
+
+  * `TLam[x, x]` applied to NUM 42 -> NUM 42 ✓
+  * `TLam[x, boolToNum[x]]` applied to T_/F_ -> NUM 1 / NUM 0 ✓
+  * `TLam[x, boolToNum[NOT x]]` applied to T_/F_ -> NUM 0 / NUM 1 ✓
+  * `TLam[x1, TLam[x2, boolToNum[AND x1 x2]]]` applied to (T,T)
+     etc. -> correct NUMs ✓
+  * `TLam[x1, TLam[x2, boolToNum[AND (OR x1 x2) (OR x1 (NOT x2))]]]`
+     applied to anything -> ERA tag=3 val=0  ✗
+
+Root cause: multi-use variables.  Both x1 and x2 appear in TWO
+clauses (positions) of the formula.  IC reduction rewrites the
+LAM-binder cell once per APP-LAM fire; each subsequent VAR
+reference reads the substituted cell.  But for SAT-style
+formulas, we need EACH USE of x1 to be independently re-fed
+the bound arg (the args ARE the same Term but the binder cells
+are shared LAM cells, and the second APP-LAM on the same shared
+LAM races -- the substitution gets clobbered or the second fire
+sees stale state).
+
+CPU IC handles this via DUP cells: when a binder is used N
+times, the binder is wrapped in nested DUPs creating N "clones"
+that each fire APP-LAM independently.  The bench's TSup-encoded
+variables (`TSup[label, T_, F_]`) get this implicitly via
+APP-SUP commutes during kernel-1 -- the SUP-tree's leaves
+already have the variable substitutions baked in per path.
+
+For the per-leaf curried-LAM approach to work, the WL build
+would need to insert explicit DUP cells for each variable's
+multi-use sites.  That's complex and error-prone.
+
+Conclusion: the SUP-tree + per-thread-substitution-map
+architecture (iter Z+2 step 5/6/7) IS the right model for SAT
+on Metal.  The remaining issue is per-thread arena exhaustion
+at V>=4, which is fixable by giving the arena MUCH more room.
+Two options:
+
+  1. Bump BOOK_CAP from 4M cells (32 MiB) to 64M cells (512
+     MiB).  Simple change; doesn't affect non-collapse use
+     cases.  Per-thread arena at V=10 (n=1024 threads) becomes
+     ~64K cells -- 4x what step 5 had at V=2 with the bench's
+     accumulated state.
+  2. Separate scratch heap (METAL_SCRATCH_HEAP), dedicated for
+     transient IC fires during collapse.  Cleaner architecture
+     but bigger change.
+
+Option 1 first, then option 2 if needed for V>=12.
+
+The batch shader work was reverted -- not committed -- since
+the curried-LAM path doesn't reach correctness.  The lesson
+is documented here.
+
 ## Critical files
 
 - `src/backend/metal/shaders/aot_ic_collapse.metal` -- the parallel

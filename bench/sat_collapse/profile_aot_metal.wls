@@ -57,6 +57,12 @@ $satC = False; $nLeaves = 0; $defLast = "";
 runC[cnf_, nv_] := (
     $depth = nv + 5;   (* +5 covers APP-SUP commutes through boolToNum + AND/OR layers *)
     SetEnvironment["THVM_AOT_METAL_KEEP_BOOK" -> "1"];
+    (* Snapshot book_next BEFORE this iter's def + collapse; restore
+       after so subsequent iters get the same starting headroom (the
+       prior iter's collapse arena is no longer needed once we read
+       its result Terms here).  Must be inside TInContext[ctx, ...]
+       because each ctx owns its own BOOK_NEXT. *)
+    $bookNextSnap = TInContext[ctx, THVMLink`Private`$bookPosFn[]];
     $defLast = freshDefName[];
     $tBuild = First @ AbsoluteTiming[
         TInContext[ctx, Module[{vars, litTerm, clauseTerm, formula, body},
@@ -89,6 +95,8 @@ runC[cnf_, nv_] := (
         TTermTag[#] === $TagERA && TTermExt[#] === 0 &];
     $nStuck = $nLeaves - $nNum - $nIterCap - $nStackCap - $nEra;
     $stuckTags = Counts[TTermTag /@ Select[$col, TTermTag[#] =!= $TagNUM &]];
+    (* Restore book_next so the next iter starts with a clean headroom. *)
+    TInContext[ctx, THVMLink`Private`$bookSetNextFn[$bookNextSnap]];
 );
 
 (* Path D: WL SatisfiableQ (CDCL ground truth). *)
@@ -112,7 +120,8 @@ print["v   c   build  kernel  collapse(threads)   total   WL ms    sat (C/D)  ag
 print[StringJoin @@ Table["-", {84}]];
 
 cases = {
-    {2,  4}, {3,  6}, {4,  8}, {5, 10}, {6, 12}, {7, 14}
+    {2,  4}, {3,  6}, {4,  8}, {5, 10}, {6, 12}, {7, 14},
+    {8, 16}, {9, 18}, {10, 20}
 };
 
 $v = 0; $c = 0; $cnf = {}; $td = 0; $satD = False; $total = 0;

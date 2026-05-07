@@ -417,7 +417,7 @@ int             dtype_is_packed   (u32 dt);
 #define WNF_CAP      (1ULL << 16)   // 64K stack slots.
 #define TENS_CAP     (1ULL << 20)   // 1M tensor descriptor slots.
 #define KERNELS_CAP  (1ULL << 18)   // 256K compiled kernels.
-#define BOOK_CAP     (1ULL << 22)   // 4M cells of static def template heap (32 MiB).
+#define BOOK_CAP     (1ULL << 28)   // 256M cells of static def template heap (2 GiB) -- iter Z+? per-thread arena needs at V>=8 SAT collapse.
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
 #define ALO_STATE_CAP (1ULL << 22)  // ALO substitution-chain entries.
 #define MAX_DIM      8              // max tensor rank
