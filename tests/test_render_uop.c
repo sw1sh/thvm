@@ -394,7 +394,8 @@ int main(void) {
   fp = fmemopen(bufc1, sizeof(bufc1), "w");
   cg_render_uop_kernel_c(st_c, "kadd", out, in_bufs, 2, fp);
   fclose(fp);
-  // Signature matches render_c.c's existing CPU-JIT contract.
+  // CPU-JIT contract: void k(out_v, ins_v, n, in_numels) (matches
+  // the signature dlsym'd by cpu_jit_dispatch).
   CHECK(contains(bufc1, "void kadd(void *out_v, const void *const *ins_v"));
   CHECK(contains(bufc1, "unsigned n, const unsigned *in_numels"));
   // Pointer cast prologue.
