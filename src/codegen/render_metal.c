@@ -58,15 +58,12 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   // FLAT_GRID / LOCAL_GLOBAL / GROUP_REDUCE modes from KAX_* axis
   // types directly.
   if (tile_sync_from_scalar(ke)) {
-    return tile_compute_dispatch_shape(ke, groups_x, threads_x);
+    if (tile_compute_dispatch_shape(ke, groups_x, threads_x)) return 1;
+    // tile_compute_dispatch_shape rejected (e.g. TILE_MMA root with
+    // axis types it doesn't recognise) -- fall through to the lifter
+    // fallback below. Now safe because the lifter uses view.strides
+    // for input addressing (correct for virtual EXPAND broadcast).
   }
-  // Fall through: tile_sync_from_scalar declined.  The previous
-  // attempt to ALSO fall through when tile_sync succeeded but
-  // tile_compute_dispatch_shape returned 0 (e.g. TILE_MMA root)
-  // routed matmul kernels through render_uop and produced wrong
-  // output -- render_uop's emit path for the rangeified TMatMul
-  // shape doesn't yield correct MSL today. Reverted; this fallback
-  // only fires when tile_sync_from_scalar declines outright.
   // Lifter-based fallback: tile_sync_from_scalar declines for kernels
   // that don't have a clean gemm-shape AND don't have scalar_uops
   // (e.g. TMatMul-equivalent UOp DAGs that go straight to materialize

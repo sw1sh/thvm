@@ -372,17 +372,46 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     return 0;
   }
 compute_offset:;
+  // Strides: prefer the View's actual strides (which encode broadcast
+  // as stride=0 on EXPANDED dims and reflect non-contiguous storage)
+  // over reconstructed dim-product strides. Falling back to dim-product
+  // if the buffer isn't an input we can resolve to a View.
+  // F3.5 fix: previously this computed `stride[d] = product(dims[d+1..])`
+  // which is correct for contiguous materialised buffers but wrong for
+  // virtual EXPAND views (e.g. matmul A reshape->[M,K,1] expand->[M,K,N]
+  // is shape=[M,K,N] strides=[K,1,0] over a 256-element underlying
+  // buffer). The dim-product strides [256,16,1] would address a
+  // 4096-element materialised buffer, but the schedule keeps EXPAND
+  // virtual -- so reads at offsets >= numel are out-of-bounds.
+  i64 view_strides[MAX_DIM];
+  int have_view_strides = 0;
+  if (ke->input_views != NULL) {
+    u32 inst = uop_buffer_inst_get(buf);
+    if (inst >= 1 && inst - 1 < ke->n_inputs) {
+      u32 slot = inst - 1;
+      View const *v = &ke->input_views[slot];
+      if (v->shape.ndim == ndim) {
+        for (u32 d = 0; d < ndim; d++) view_strides[d] = v->strides[d];
+        have_view_strides = 1;
+      }
+    }
+  }
   Term acc = 0;
   for (u32 d = 0; d < ndim; d++) {
     u32 r_sid = u->src[1 + d];
     Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
     if (r_uop == 0) return 0;
-    // Stride = product of dims[d+1..ndim).
-    u32 stride = 1;
-    for (u32 e = d + 1; e < ndim; e++) stride *= uop_buffer_dim(buf, e);
+    i64 stride;
+    if (have_view_strides) {
+      stride = view_strides[d];
+      if (stride == 0) continue;       // broadcast dim: don't contribute
+    } else {
+      stride = 1;
+      for (u32 e = d + 1; e < ndim; e++) stride *= uop_buffer_dim(buf, e);
+    }
     Term term = (stride == 1) ? r_uop
               : uop_int_binary(UOP_IMUL, r_uop,
-                               uop_const(DT_INT32, stride));
+                               uop_const(DT_INT32, (u32)stride));
     acc = (acc == 0) ? term
         : uop_int_binary(UOP_IADD, acc, term);
   }

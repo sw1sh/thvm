@@ -2122,6 +2122,7 @@ fn u32  uop_buffer_scope(Term t);
 fn u32  uop_buffer_dtype(Term t);
 fn u32  uop_buffer_ndim (Term t);
 fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
+fn u32  uop_buffer_inst_get(Term t);       // 0 if not UOP_BUFFER
 
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to

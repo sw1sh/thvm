@@ -69,3 +69,8 @@ fn u32 uop_buffer_dim(Term t, u32 d) {
   if (d >= ndim) return 0;
   return term_val(heap_read(term_val(t) + 4 + d));
 }
+
+fn u32 uop_buffer_inst_get(Term t) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_BUFFER) return 0;
+  return term_val(heap_read(term_val(t) + 3));
+}
