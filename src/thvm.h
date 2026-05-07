@@ -2162,10 +2162,9 @@ fn Term uop_recognise_tc(Term root);
 // Detection-only: returns 1 if `root` is a matmul-shape STORE
 // (REDUCE-of-MUL on two distinct INDEX_E buffers, SUM kind). Fills
 // *out_k_extent with the reduce-axis extent if statically known
-// (zero otherwise). Caller decides what to do with it -- e.g. the
-// dispatch ladder uses it to decline render_uop on K%8!=0 shapes
-// where simdgroup doesn't fit and metal_try_gemm's tile-shared-mem
-// path is faster.
+// (zero otherwise). Used by uop_recognise_tc to decide whether to
+// wrap with UOP_OPT(_, TC) so render_uop's simdgroup_matrix template
+// fires (when K%8==0) versus falling back to its generic accumulator.
 fn int uop_classify_matmul(Term root, u32 *out_k_extent);
 
 // === Kernel lift to UOp DAG ===

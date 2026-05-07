@@ -601,9 +601,9 @@ static void metal_shutdown(void) {
   METAL_BUFS_NEXT = 1;
   // Drop every cached PSO -- they reference the MTLLibrary we're
   // about to nil, and a re-init will produce fresh pipelines from
-  // a fresh MTLLibrary.  metal_jit's cache is cleared on the next
-  // metal_init (defined further down so it can see METAL_JIT_CACHE
-  // / METAL_JIT_PSOS).
+  // a fresh MTLLibrary.  The metal_jit PSO cache is cleared on the
+  // next metal_init (defined further down so it can see
+  // METAL_JIT_CACHE / METAL_JIT_PSOS).
   for (u32 op = 0; op < UOP_COUNT; op++)
     for (u32 dt = 0; dt < 32; dt++)
       METAL_PIPELINES_CACHE[op][dt] = nil;
@@ -624,23 +624,21 @@ static void metal_shutdown(void) {
 
 // === metal_jit: fused-program shaders ==================================
 //
-// Compile cg_emit_metal output to an MTLLibrary at first dispatch and
-// cache the resulting MTLComputePipelineState by program hash.
-// Mirrors src/backend/cpu/jit.c structurally (same FNV-1a hash, same
-// open-addressing cache layout) so a kernel that JITs cleanly on CPU
-// will JIT cleanly here too.
+// PSO cache shared by metal_tile_jit_build (UOp-DAG renderer path).
+// Compiles render_uop output to an MTLLibrary at first dispatch and
+// caches the resulting MTLComputePipelineState by program hash.
+// Open-addressing cache layout matches src/backend/cpu/jit.c.
 //
-// Cache miss: cg_emit_metal -> [MTLDevice newLibraryWithSource:
+// Cache miss: cg_emit_tile_metal -> [MTLDevice newLibraryWithSource:
 //   options:error:] -> [lib newFunctionWithName:@"k"] ->
 //   [device newComputePipelineStateWithFunction:].  The PSO lives in
 //   METAL_JIT_PSOS (ARC strong) so it survives the cache slot's
 //   weak-style id<MTLComputePipelineState> reference.
 //
-// Buffer-binding convention (matches render_metal.c's prologue):
+// Buffer-binding convention (matches render_uop's prologue):
 //   buffer(0)              : output (device float *)
 //   buffer(1..1+n_in-1)    : inputs (device const float *)
-// One thread per output element; threadgroup size capped at the
-// pipeline's maxTotalThreadsPerThreadgroup.
+// Dispatch shape comes from cg_tile_metal_dispatch_shape.
 
 #define METAL_JIT_CACHE_CAP 256
 typedef struct {
