@@ -146,16 +146,22 @@ for kernels that produce a recognized matmul shape AND succeed at
 `cg_tile_metal_dispatch_shape`. The simdgroup template fix
 (91043530) ensures correctness when that day comes.
 
-Dispatch ladder after F3.4b:
+Dispatch ladder after F4-prelim (97d58c32):
 
 ```
 1. metal_try_alias_reshape          (zero-copy, no kernel)
-2. (gated) metal_try_conv2d_flat    (THVM_METAL_SPECIALIZED tests only)
-3. metal_tile_jit_encode (render_uop)   <-- now FIRST attempt
-4. metal_try_gemm (post-pre-mat)        <-- K%8!=0 matmul fallback
-5. metal_jit_encode (KProgOp-flat)      <-- kernels render_uop can't lift
-6. per-op interpreter                   <-- kernels metal_jit_encode rejects
+2. metal_tile_jit_encode (render_uop)   <-- FIRST attempt
+3. metal_try_gemm (post-pre-mat)        <-- K%8!=0 matmul fallback
+4. metal_jit_encode (KProgOp-flat)      <-- kernels render_uop can't lift
+5. per-op interpreter                   <-- kernels metal_jit_encode rejects
 ```
+
+The `metal_try_conv2d_flat` diagnostic branch (gated on
+THVM_METAL_SPECIALIZED, never set in production tests) was deleted in
+97d58c32 along with its CONV pipeline + 142 LOC of dead-by-default
+shader source. render_uop's generic accumulator handles conv shape
+correctly today; a specialised CONV template remains a perf
+optimisation tracked under F4 below, not a correctness need.
 
 Correctness gate: `uop_classify_matmul` requires both INDEX_E
 addresses to reference exactly 2 distinct UOP_RANGE leaves -- matmul
