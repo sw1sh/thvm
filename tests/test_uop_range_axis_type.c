@@ -129,6 +129,95 @@ int main(void) {
   CHECK_EQ(term_ext(out_factor), UOP_OPT);
   CHECK_EQ(uop_opt_factor(out_factor), 8u);
 
+  // === Phase E2: KOP_GLOBAL UPatRule mirror ========================
+  // uop_apply_kop_global is the public entry from src/uop/apply_opt.c.
+  // It mirrors codegen/apply_opt.c's KOP_GLOBAL stamp and
+  // kernel_lift.c's structural-replay GLOBAL line-up, applied
+  // declaratively against UOP_RANGE leaves in the DAG.
+
+  TEST_BEGIN("apply-kop-global/positive-direct");
+  // r2: UOP_RANGE(axis_id=0, axis_type=LOOP, extent=128).
+  Term r2 = uop_range(0, KAX_LOOP, 128);
+  KOpt opts_pos[1] = {{ KOP_GLOBAL, 0, 128 }};
+  Term r2_out = uop_apply_kop_global(r2, opts_pos, 1);
+  CHECK_EQ(term_tag(r2_out), TAG_UOP);
+  CHECK_EQ(term_ext(r2_out), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(r2_out),   0);
+  CHECK_EQ(uop_range_axis_type(r2_out), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_extent(r2_out),    128);
+
+  TEST_BEGIN("apply-kop-global/negative-no-applied-opts");
+  // No KOP_GLOBAL in applied_opts -> axis stays LOOP.
+  Term r2_pass = uop_apply_kop_global(r2, NULL, 0);
+  CHECK_EQ(r2_pass, r2);  // hash-cons identity
+  CHECK_EQ(uop_range_axis_type(r2_pass), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-global/negative-different-axis");
+  // KOP_GLOBAL targets axis_id=3, range is axis_id=0 -> no rewrite.
+  KOpt opts_other[1] = {{ KOP_GLOBAL, 3, 128 }};
+  Term r2_other = uop_apply_kop_global(r2, opts_other, 1);
+  CHECK_EQ(r2_other, r2);
+  CHECK_EQ(uop_range_axis_type(r2_other), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-global/negative-extent-mismatch");
+  // arg=64 != extent=128 -> guard rejects (mirrors apply_opt's check).
+  KOpt opts_bad_arg[1] = {{ KOP_GLOBAL, 0, 64 }};
+  Term r2_bad = uop_apply_kop_global(r2, opts_bad_arg, 1);
+  CHECK_EQ(r2_bad, r2);
+  CHECK_EQ(uop_range_axis_type(r2_bad), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-global/negative-non-loop-axis");
+  // axis_type already KAX_REDUCE -> rule skips (the lifter would
+  // never produce this combo since KOP_GLOBAL replay also requires
+  // LOOP, but the guard belongs in the rule for idempotence).
+  Term r3 = uop_range(2, KAX_REDUCE, 32);
+  KOpt opts_red[1] = {{ KOP_GLOBAL, 2, 32 }};
+  Term r3_out = uop_apply_kop_global(r3, opts_red, 1);
+  CHECK_EQ(r3_out, r3);
+  CHECK_EQ(uop_range_axis_type(r3_out), (u32)KAX_REDUCE);
+
+  TEST_BEGIN("apply-kop-global/negative-wrong-kop");
+  // KOP_LOCAL on the right axis with right arg -> rule skips
+  // (only KOP_GLOBAL fires this rule; KOP_LOCAL is a future wedge).
+  KOpt opts_local[1] = {{ KOP_LOCAL, 0, 128 }};
+  Term r2_local = uop_apply_kop_global(r2, opts_local, 1);
+  CHECK_EQ(r2_local, r2);
+  CHECK_EQ(uop_range_axis_type(r2_local), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-global/idempotent-double-apply");
+  // First apply: LOOP -> GLOBAL.  Second apply on the result is a
+  // no-op (the LOOP guard rejects the now-GLOBAL leaf).
+  Term r2_g1 = uop_apply_kop_global(r2, opts_pos, 1);
+  Term r2_g2 = uop_apply_kop_global(r2_g1, opts_pos, 1);
+  CHECK_EQ(r2_g1, r2_g2);
+  CHECK_EQ(uop_range_axis_type(r2_g2), (u32)KAX_GLOBAL);
+
+  TEST_BEGIN("apply-kop-global/multi-opt-only-global-fires");
+  // applied_opts contains KOP_LOCAL + KOP_GLOBAL + KOP_UPCAST.  The
+  // rule only stamps for KOP_GLOBAL, so the rewrite still produces
+  // KAX_GLOBAL on the matching axis.  Mirrors the autotune sequence
+  // shape ("LOCAL splits N into LOOP(N/L) + LOCAL(L); GLOBAL marks
+  // the resulting LOOP for grid-binding") at the table-of-opts level.
+  KOpt opts_mixed[3] = {
+    { KOP_LOCAL,  1, 32 },   // unrelated axis
+    { KOP_GLOBAL, 0, 128 },  // matches r2
+    { KOP_UPCAST, 2, 4 },    // unrelated axis
+  };
+  Term r2_mixed = uop_apply_kop_global(r2, opts_mixed, 3);
+  CHECK_EQ(term_tag(r2_mixed), TAG_UOP);
+  CHECK_EQ(term_ext(r2_mixed), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(r2_mixed),   0);
+  CHECK_EQ(uop_range_axis_type(r2_mixed), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_extent(r2_mixed),    128);
+
+  TEST_BEGIN("apply-kop-global/no-applied-opts-noop");
+  // n_applied=0 with non-NULL opts -> early return path.  Verify the
+  // rule short-circuits before scanning.
+  KOpt opts_unused[1] = {{ KOP_GLOBAL, 0, 128 }};
+  Term r2_zero = uop_apply_kop_global(r2, opts_unused, 0);
+  CHECK_EQ(r2_zero, r2);
+  CHECK_EQ(uop_range_axis_type(r2_zero), (u32)KAX_LOOP);
+
   thvm_free();
   TEST_REPORT();
 }
