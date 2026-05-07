@@ -3175,9 +3175,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             fprintf(stderr, "] os.dims=[");
             for (u32 d = 0; d < os->ndim; d++)
               fprintf(stderr, "%u%s", os->dims[d], d+1==os->ndim?"":",");
-            fprintf(stderr, "] raw_is_input=%u src_op=%u\n",
+            fprintf(stderr, "] raw_is_input=%u src_op=%u"
+                    " have_edge_out_rngs=%d edge.ndim=%u"
+                    " ndim_cap=%d slot_cap=%d\n",
                     KSRC_IS_INPUT(raw) ? 1u : 0u,
-                    KSRC_IS_INPUT(raw) ? 0u : ke->program[KSRC_INDEX(raw)].opcode);
+                    KSRC_IS_INPUT(raw) ? 0u : ke->program[KSRC_INDEX(raw)].opcode,
+                    have_edge_out_rngs, reshape_out_rngs.ndim,
+                    p->src0_ndim <= MAX_DIM && p->out_ndim <= MAX_DIM,
+                    (1 + (u32)p->out_ndim + (u32)p->src0_ndim) <= SCALAR_MAX_SRC);
           }
           RBAIL_MID("RESHAPE shape-change ndim cap or != os->ndim");
         }
