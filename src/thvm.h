@@ -1038,11 +1038,32 @@ typedef struct {
 // fan-in.  Real workloads max out at ~30 inputs (Conv2D fuses
 // kh*kw input/weight tids per kernel).
 #define KERNEL_LIFT_MAX_INPUT 64
+// Defined here (rather than inside KernelEntry below) because
+// KernelUopLift uses it for the static out_bufs[] cap.  Mirrored from
+// the multi-output groundwork comment block on KernelEntry.
+#define KERNEL_MAX_EXTRA_OUTPUTS 7
+// Total outputs the lift can describe (primary + extras).  Sized to
+// match KERNEL_MAX_EXTRA_OUTPUTS so any kernel the splice action
+// produces fits.
+#define KERNEL_LIFT_MAX_OUTPUT (1 + KERNEL_MAX_EXTRA_OUTPUTS)
 typedef struct {
+  // store_root is the topmost UOP_STORE (single-output) or the
+  // outermost UOP_AFTER chaining all per-output stores (multi-output).
   Term store_root;
+  // Primary output buffer Term (== out_bufs[0] when n_outputs >= 1).
+  // Kept as a named field so single-output consumers don't need to
+  // touch the array.
   Term out_buf;
   Term in_bufs[KERNEL_LIFT_MAX_INPUT];
   u32  n_inputs;
+  // Multi-output extension (F6 multi-output walker).  n_outputs == 1
+  // for the legacy single-output lift; > 1 when kernel_lift_from_kprog
+  // (or a future multi-output rangeify path) emitted a STORE-AFTER
+  // chain.  Slot 0 mirrors `out_buf`; slots 1..n_outputs-1 hold the
+  // extra-output UOP_BUFFER Terms in the order extra_output_tids[]
+  // declared them.
+  u32  n_outputs;
+  Term out_bufs[KERNEL_LIFT_MAX_OUTPUT];
 } KernelUopLift;
 
 typedef struct KernelEntry {
@@ -1100,7 +1121,6 @@ typedef struct KernelEntry {
   // KERNEL_MAX_EXTRA_OUTPUTS for the cap (sized small to keep
   // KernelEntry compact; bump if real workloads need more).
   u8        n_extra_outputs;
-#define KERNEL_MAX_EXTRA_OUTPUTS 7
   u32       extra_output_tids   [KERNEL_MAX_EXTRA_OUTPUTS];
   u32       extra_output_dtypes [KERNEL_MAX_EXTRA_OUTPUTS];
   Shape     extra_output_shapes [KERNEL_MAX_EXTRA_OUTPUTS];
