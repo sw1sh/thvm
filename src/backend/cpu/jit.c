@@ -135,59 +135,30 @@ static CpuJitSlot *cpu_jit_lookup_slot(u64 key) {
 // Compile + load.  Returns the resolved `k` function pointer or NULL
 // on any failure (caller falls back to interpreter).
 static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
-  // Render to C via the codegen/ pipeline.  cg_emit walks ke->program[]
-  // and dispatches each KProgOp through the renderer; C_RENDERER lives
-  // in src/codegen/render_c.c and supplies the C99-flavored bits.  A
-  // future Metal renderer would slot in identically (pair with a Metal-
-  // specific build path), and the rest of this file would be the only
-  // bit needing per-backend orchestration.
+  // Render the kernel as C99 by lifting to the UOp DAG and walking
+  // it via cg_render_uop_kernel_c. Output signature matches the
+  // existing CPU-JIT contract (void k(out_v, ins_v, n, in_numels))
+  // so the surrounding compile/dlopen/dlsym code is unchanged.
   //
-  // F6 step 4: try render_uop_c first (lift to UOp DAG + emit C99).
-  // Falls back to cg_emit if the lifter declines (n_inputs > 30, no
-  // scalar arena, etc.) or the rendered string is empty. The output
-  // signature matches render_c.c so the surrounding compile/dlopen/
-  // dlsym path is unchanged.
-  //
-  // F6 step 10 (2026-05-08): default ON after step-9 validation showed
-  // the full surgical test suite (1851 tests across render_uop,
-  // metal_real, aot_metal, kernel_lift, tile_graph, bufferize, etc)
-  // passes bit-equal under the env-on path. Set THVM_CPU_JIT_VIA_UOP=0
-  // to opt back into the legacy KProgOp-flat renderer (kept as a
-  // bisection knob until cpu/op/*.c is deleted in a follow-up).
-  char *src = NULL;
-  {
-    char const *e = getenv("THVM_CPU_JIT_VIA_UOP");
-    int via_uop_on = (e == NULL) ? 1 : (e[0] != '0');
-    if (via_uop_on) {
-      KernelUopLift lift = {0};
-      if (kernel_lift_to_uop(ke, &lift)) {
-        char buf[16384];
-        FILE *fp = fmemopen(buf, sizeof(buf), "w");
-        if (fp != NULL) {
-          cg_render_uop_kernel_c(lift.store_root, "k", lift.out_buf,
-                                 lift.in_bufs, lift.n_inputs, fp);
-          long n = ftell(fp);
-          fclose(fp);
-          if (n > 0) {
-            src = (char *)malloc((size_t)n + 1);
-            if (src != NULL) {
-              memcpy(src, buf, (size_t)n);
-              src[n] = '\0';
-            }
-          }
-        }
-      }
-    }
-  }
-  if (src == NULL) {
-    if (getenv("THVM_CPU_JIT_TRACE_FALLBACK")) {
-      fprintf(stderr, "thvm: cpu_jit fallback to render_c.c -- "
-                      "n_inputs=%u n_ops=%u dt=%u\n",
-              ke->n_inputs, ke->n_ops, cg_program_dtype(ke));
-    }
-    src = cg_emit(ke, &C_RENDERER);
-  }
-  if (!src) return NULL;
+  // F6 step 15 (2026-05-08): the legacy cg_emit + render_c.c
+  // KProgOp-flat path is gone after a passing 1851-test validation
+  // and a default-on flip in fc40c60a. Kernels the lifter declines
+  // (lift_to_uop returns 0) bail to the interpreter naturally; no
+  // silent JIT compile of a wrong kernel.
+  KernelUopLift lift = {0};
+  if (!kernel_lift_to_uop(ke, &lift)) return NULL;
+  char buf[16384];
+  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  if (fp == NULL) return NULL;
+  cg_render_uop_kernel_c(lift.store_root, "k", lift.out_buf,
+                         lift.in_bufs, lift.n_inputs, fp);
+  long n = ftell(fp);
+  fclose(fp);
+  if (n <= 0) return NULL;
+  char *src = (char *)malloc((size_t)n + 1);
+  if (src == NULL) return NULL;
+  memcpy(src, buf, (size_t)n);
+  src[n] = '\0';
 
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_%016llx.c",
