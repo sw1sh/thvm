@@ -2886,14 +2886,19 @@ u64 thvm_aot_metal_ic_collapse(Term root, u32 depth,
   [cmd commit];
   [cmd waitUntilCompleted];
 
-  // Iter Z+2 step 5: do NOT advance book_next.  The arenas hold
-  // intermediate IC fires private to this collapse call; result
-  // Terms that point INTO the arena (stuck SUPs / APPs) are valid
-  // only until the next collapse / kernel-1 call overwrites that
-  // region.  NUM leaves are atom-self-contained and survive.
-  // The bench's SAT discriminant (any NUM=1 in the leaves) reads
-  // before the next call, so this is safe.
-  (void)arena_base;
+  // Iter Z+2 step 6: DO advance book_next past the arena range.
+  // Without this, subsequent kernel-1 calls allocate into the
+  // arena and overwrite cells that this call's intermediate IC
+  // fires wrote with SUB bits (or substituted LAM/DUP cells in
+  // iter Z's range that the next kernel-1 happens to overwrite
+  // partially before its own writes complete).  Empirically:
+  // skipping the advance caused V=4 to lose the SAT-True path
+  // when run after V=2 + V=3 in the same wolframscript session
+  // even though isolated V=4 worked.  Advancing trades book-heap
+  // headroom (each collapse permanently consumes n*arena_size
+  // cells) for cross-call correctness.  V=7 with the bench's
+  // accumulated state still fits because BOOK_CAP=4M cells.
+  *book_next_inout = (u64)arena_base + (u64)n * (u64)arena_size;
 
   memcpy(out, [resultBuf contents], (size_t)(n * sizeof(Term)));
   return n;

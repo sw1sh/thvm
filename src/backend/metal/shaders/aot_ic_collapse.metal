@@ -94,13 +94,18 @@ static inline Term  msl_term_new(uint tag, uint ext, ulong val) {
 // subst map + 12 B arena state).  Within the ~32 KiB Apple GPU
 // thread-private budget at our 256-thread tg.
 //
-// Subst map capacity: 256 entries.  Each path level through the
-// SUP-tree adds substitutions for: every AND / OR / NOT LAM
-// binder fired during this path's reduction, plus the DP cells
-// resolved for the variable assignments.  V=10 / C=20 measured
-// at ~150 entries; 256 leaves headroom.  Overflow silently drops
-// (this thread stalls on the missing substitution).
-constant uint AOT_SUBST_MAP_CAP = 256u;
+// Subst map capacity: 1024 entries.  Each path level through the
+// SUP-tree adds substitutions for every AND / OR / NOT LAM binder
+// fired during this path's reduction, plus the DP cells resolved
+// for the variable assignments.  Iter Z+2 step 6's APP-of-DP /
+// DP-of-DP redirects ALSO accumulate substitutions as nested
+// projections resolve, so cap is generous: V=12 / C=24 budget
+// at ~600 entries; 1024 leaves headroom.  Per-thread cost:
+// 1024 * 16 B = 16 KiB.  Combined with the 8 KiB ic_stk that
+// keeps us at 24 KiB / thread, still under the ~32 KiB Apple
+// GPU thread-private budget at our 256-thread tg.  Overflow
+// silently drops (this thread stalls on the missing entry).
+constant uint AOT_SUBST_MAP_CAP = 1024u;
 
 struct SubstSlot {
   uint loc;
@@ -329,6 +334,23 @@ static Term aot_wnf_thread(thread ThreadCtx *ctx, Term term,
         if (wt == TAG_ERA) {
           whnf = msl_term_new(TAG_ERA, 0u, 0u); continue;
         }
+        // Iter Z+2 step 6: APP-of-DP redirect.  The function
+        // position resolved to a DP that hasn't been substituted
+        // yet -- push the APP frame back, redirect to the DP so
+        // wnf walks INTO it (DP_enter pushes a DP frame and
+        // descends into heap[loc]).  When the DP resolves to
+        // LAM/SUP, this APP frame fires above.  Unsticks the V>=4
+        // stuck-APP cases that the iter Z+1 v1 reducer left as
+        // terminal junk.  VAR is NOT redirected: VAR with no SUB
+        // is genuinely terminal; redirecting would infinite-loop.
+        if (wt == TAG_DP0 || wt == TAG_DP1) {
+          if (ic_spos >= AOT_COLLAPSE_STACK_CAP) {
+            return msl_term_new(TAG_ERA, 0xFFFFFu, 0u);
+          }
+          ic_stk[ic_spos++] = frame;
+          next = whnf;
+          state = 0u; continue;
+        }
         aot_heap_store(heap, app_loc + 0, whnf);
         whnf = frame; continue;
       }
@@ -350,6 +372,19 @@ static Term aot_wnf_thread(thread ThreadCtx *ctx, Term term,
         }
         if (wt == TAG_ERA) {
           whnf = aot_dup_era(ctx, side, loc, whnf, heap); continue;
+        }
+        // Iter Z+2 step 6: DP-of-DP redirect.  Same pattern as
+        // the APP redirect above -- push the outer DP frame back,
+        // descend into the inner DP.  Resolves nested-DP chains
+        // that iter Z's per-def kernel emits when a DUP-cell's
+        // source is itself another DUP projection.
+        if (wt == TAG_DP0 || wt == TAG_DP1) {
+          if (ic_spos >= AOT_COLLAPSE_STACK_CAP) {
+            return msl_term_new(TAG_ERA, 0xFFFFFu, 0u);
+          }
+          ic_stk[ic_spos++] = frame;
+          next = whnf;
+          state = 0u; continue;
         }
         aot_heap_store(heap, loc, whnf);
         whnf = frame; continue;
