@@ -142,22 +142,23 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // specific build path), and the rest of this file would be the only
   // bit needing per-backend orchestration.
   //
-  // F6 step 4: with THVM_CPU_JIT_VIA_UOP=1 we try render_uop_c first
-  // (lift to UOp DAG + emit C99). Falls back to cg_emit if the lifter
-  // declines (n_inputs > 30, no scalar arena, etc.) or the rendered
-  // string is empty. The output signature matches render_c.c so the
-  // surrounding compile/dlopen/dlsym path is unchanged.
+  // F6 step 4: try render_uop_c first (lift to UOp DAG + emit C99).
+  // Falls back to cg_emit if the lifter declines (n_inputs > 30, no
+  // scalar arena, etc.) or the rendered string is empty. The output
+  // signature matches render_c.c so the surrounding compile/dlopen/
+  // dlsym path is unchanged.
   //
-  // F6 step 9 validation (2026-05-08): the full surgical test suite
-  // (1851 tests across render_uop, metal_real, aot_metal, kernel_lift,
-  // tile_graph, bufferize, etc) passes bit-equal with this env on,
-  // confirming the new path is a drop-in replacement for kernels the
-  // lifter accepts. Default OFF until a wider regression-bisection
-  // budget arrives; future flip lands the cpu/op/* deletion arc.
+  // F6 step 10 (2026-05-08): default ON after step-9 validation showed
+  // the full surgical test suite (1851 tests across render_uop,
+  // metal_real, aot_metal, kernel_lift, tile_graph, bufferize, etc)
+  // passes bit-equal under the env-on path. Set THVM_CPU_JIT_VIA_UOP=0
+  // to opt back into the legacy KProgOp-flat renderer (kept as a
+  // bisection knob until cpu/op/*.c is deleted in a follow-up).
   char *src = NULL;
   {
     char const *e = getenv("THVM_CPU_JIT_VIA_UOP");
-    if (e != NULL && e[0] == '1') {
+    int via_uop_on = (e == NULL) ? 1 : (e[0] != '0');
+    if (via_uop_on) {
       KernelUopLift lift = {0};
       if (kernel_lift_to_uop(ke, &lift)) {
         char buf[16384];
