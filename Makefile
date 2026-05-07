@@ -48,7 +48,6 @@ TESTS := \
   $(BIN)/test_extern_pin \
   $(BIN)/test_bufferize_classify \
   $(BIN)/test_bufferize \
-  $(BIN)/test_scalar_graph \
   $(BIN)/test_uop_to_scalar \
   $(BIN)/test_uop_buffer \
   $(BIN)/test_uop_store_after \
@@ -57,14 +56,6 @@ TESTS := \
   $(BIN)/test_render_uop_metal \
   $(BIN)/test_kernel_lift \
   $(BIN)/test_kernel_lift_coverage \
-  $(BIN)/test_tile_axis_info \
-  $(BIN)/test_tile_alloc_barrier \
-  $(BIN)/test_tile_dispatch_shape \
-  $(BIN)/test_tile_reduce_broadcast \
-  $(BIN)/test_tile_anno \
-  $(BIN)/test_tile_dump \
-  $(BIN)/test_tile_render_msl \
-  $(BIN)/test_tile_graph \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \
   $(BIN)/test_cnf \

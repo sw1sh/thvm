@@ -1354,15 +1354,14 @@ int main(void) {
   CHECK_EQ(kernel_entry_set_extra_output(mco_kid, 1, mco_extra_tid,
                                          DT_FP32, &mco_sh, 3), 1);
   CHECK_EQ(cg_kernel_has_extra_outputs(&KERNELS[mco_kid]), 1);
-  // Each renderer entry point bails.
+  // Each renderer entry point bails.  (cg_supports_scalar /
+  // cg_supports_tile / cg_emit_scalar / cg_emit_tile lived in
+  // render_c_scalar.c which was deleted; corresponding bail
+  // checks dropped.)
   CHECK_EQ(cg_supports(&KERNELS[mco_kid]), 0);
-  CHECK_EQ(cg_supports_scalar(&KERNELS[mco_kid]), 0);
-  CHECK_EQ(cg_supports_tile(&KERNELS[mco_kid]), 0);
   CHECK_EQ(cg_supports_metal_reduce_expr(&KERNELS[mco_kid]), 0);
   CHECK(cg_emit_metal(&KERNELS[mco_kid]) == NULL);
   CHECK(cg_emit_tile_metal(&KERNELS[mco_kid]) == NULL);
-  CHECK(cg_emit_scalar(&KERNELS[mco_kid]) == NULL);
-  CHECK(cg_emit_tile(&KERNELS[mco_kid]) == NULL);
   // CPU interpreter (path 6 in cpu_dispatch_kernel) is the ONE
   // dispatcher that supports multi-output kernels (Step 7 of
   // multi-output groundwork lifted its guard).  Every other

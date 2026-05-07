@@ -208,7 +208,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "codegen/cg.c"
 #include "codegen/profile.c"
 #include "codegen/render_c.c"
-#include "codegen/render_c_scalar.c"
 #include "codegen/render_metal.c"
 #include "codegen/render_uop.c"
 // CPU dispatch: interpreter + BLAS pattern dispatch + clang-JIT.

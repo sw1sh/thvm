@@ -1176,8 +1176,6 @@ fn int cpu_dispatch_tile(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 // this file in thvm.c, so declare here for the dispatcher).
 fn int cpu_blas_dispatch       (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_jit_dispatch        (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
-fn int cpu_jit_dispatch_scalar (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
-fn int cpu_jit_dispatch_tile   (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 
 fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Recover kid by pointer arithmetic into KERNELS[].  Used for
@@ -1193,14 +1191,11 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     cg_profile_record(kid, (KDispatchKind)blas_kind, cg_now_us() - t0);
     return 0;
   }
-  // 2. Env-gated TileUop path.  The generated tile C renderer handles
-  //    simple elementwise f32/f64 plans; the tile interpreter remains
-  //    the correctness fallback for broader scalar graphs.
+  // 2. TileUop interpreter (env-gated).  The JIT'd tile C path was
+  //    deleted along with render_c_scalar; the interpreter remains
+  //    as the correctness fallback for elementwise tile plans until
+  //    Phase G also collapses TileUop[] into the UOp DAG.
   if (cpu_tile_enabled()) {
-    if (cpu_jit_dispatch_tile(ke, in_buf_ids, out_buf_id)) {
-      cg_profile_record(kid, KDISPATCH_CPU_TILE, cg_now_us() - t0);
-      return 0;
-    }
     if (cpu_dispatch_tile(ke, in_buf_ids, out_buf_id)) {
       cg_profile_record(kid, KDISPATCH_CPU_TILE, cg_now_us() - t0);
       return 0;
@@ -1210,15 +1205,6 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   //    chains (cached by program hash).  Faster than the scalar
   //    interpreter for the patterns it covers (no REDUCE > 1, etc.).
   if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
-    cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
-    return 0;
-  }
-  // 4. Scalar-UOps JIT: clang-compiled fused inner loop rendered
-  //    from ke->scalar_uops[] (the rangeify output).  Same JIT
-  //    pipeline as path 2 but covers the rangeified patterns.
-  //    Falls back to the scalar interpreter on cg_supports_scalar
-  //    miss.
-  if (cpu_jit_dispatch_scalar(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;
   }
