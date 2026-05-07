@@ -1188,6 +1188,19 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
               "lift reject: entry/no-scalar-arena n_inputs=%u "
               "n_ops=%u n_tile_uops=%u\n",
               ke->n_inputs, ke->n_ops, ke->n_tile_uops);
+      // Probe: source_uop populated on each KProgOp?  If yes, the
+      // future kernel_lift_from_kprog can use it as the lift root.
+      if (ke->n_ops > 0 && ke->program != NULL) {
+        u32 set = 0;
+        for (u32 i = 0; i < ke->n_ops; i++) {
+          if (ke->program[i].source_uop != 0) set++;
+        }
+        Term last = ke->program[ke->n_ops - 1].source_uop;
+        fprintf(stderr,
+                "  source_uop coverage: %u/%u set; last.tag=%u last.ext=%u\n",
+                set, ke->n_ops,
+                (unsigned)term_tag(last), (unsigned)term_ext(last));
+      }
       // Layout dump for the conv2d-flat rejecting case so the
       // operator can see what shape kernel_lift_from_conv2d
       // doesn't yet handle.  Iterate over input_views (if any)
