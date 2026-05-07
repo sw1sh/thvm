@@ -443,8 +443,8 @@ What's deferred from the previous in-tree TileUop[] work:
 
 ### Added: ideal-pipeline migration B0-D2 + B3 wedge (8 commits)
 
-Per `docs/lowering_passes.md` "Ideal pipeline" + `~/.claude/plans/
-flickering-watching-gem.md`, the foundation for the 3-IR
+Per `docs/lowering_passes.md` "Ideal pipeline" + `docs/plans/ideal_pipeline.md`,
+the foundation for the 3-IR
 (UOp DAG / Tile IR / target source) migration is in place:
 
 - **B0** (`12f2d94`): UOp-level INDEX layer.  New opcodes
