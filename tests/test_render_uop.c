@@ -473,6 +473,103 @@ int main(void) {
     unlink(dl_path);
   }
 
+  // F6 step 5: extend coverage. Validate render_uop_c produces correct
+  // output for shapes beyond the trivial elementwise add.
+  // Helper: render -> compile -> dlopen -> invoke + verify in one pass.
+  // Returns 0 on parity success, captured fail-info via stderr otherwise.
+
+  TEST_BEGIN("render-uop-c/multi-input-elementwise-runs");
+  {
+    // y[i] = a[i] + b[i] * c[i] over 16 floats.
+    u32 dimsM[1] = { 16 };
+    Term outM = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsM, 0);
+    Term aM   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsM, 1);
+    Term bM   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsM, 2);
+    Term cM   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsM, 3);
+    Term ins[3] = { aM, bM, cM };
+    Term rM   = uop_range(0, 0, 16);
+    Term la   = uop_index_e(aM, rM);
+    Term lb   = uop_index_e(bM, rM);
+    Term lc   = uop_index_e(cM, rM);
+    Term mul  = uop_binary(UOP_MUL, lb, lc);
+    Term sum  = uop_binary(UOP_ADD, la, mul);
+    Term stM  = uop_store(outM, rM, sum);
+    char src[4096];
+    fp = fmemopen(src, sizeof(src), "w");
+    cg_render_uop_kernel_c(stM, "k", outM, ins, 3, fp);
+    fclose(fp);
+    const char *src_path = "/tmp/thvm_f6_step5_a.c";
+    const char *dl_path  = "/tmp/thvm_f6_step5_a.dylib";
+    FILE *cf = fopen(src_path, "w");
+    fputs(src, cf);
+    fclose(cf);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+    CHECK(system(cmd) == 0);
+    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+    CHECK(h != NULL);
+    typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *);
+    KFn kfn = (KFn)dlsym(h, "k");
+    CHECK(kfn != NULL);
+    float aa[16], bb[16], cc[16], yy[16];
+    for (u32 i = 0; i < 16; i++) {
+      aa[i] = (float)i;
+      bb[i] = 2.0f;
+      cc[i] = 3.0f;
+    }
+    const void *insp[3] = { aa, bb, cc };
+    unsigned numels[3] = { 16, 16, 16 };
+    kfn(yy, insp, 16, numels);
+    // y[i] = i + 2*3 = i + 6.
+    for (u32 i = 0; i < 16; i++) {
+      CHECK(yy[i] == (float)i + 6.0f);
+    }
+    dlclose(h);
+    unlink(src_path);
+    unlink(dl_path);
+  }
+
+  TEST_BEGIN("render-uop-c/unary-neg-runs");
+  {
+    // y[i] = -a[i] over 8 floats.
+    u32 dimsU[1] = { 8 };
+    Term outU = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsU, 0);
+    Term aU   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsU, 1);
+    Term insU[1] = { aU };
+    Term rU   = uop_range(0, 0, 8);
+    Term lU   = uop_index_e(aU, rU);
+    Term ng   = uop_unary(UOP_NEG, lU);
+    Term stU  = uop_store(outU, rU, ng);
+    char src[4096];
+    fp = fmemopen(src, sizeof(src), "w");
+    cg_render_uop_kernel_c(stU, "k", outU, insU, 1, fp);
+    fclose(fp);
+    const char *src_path = "/tmp/thvm_f6_step5_b.c";
+    const char *dl_path  = "/tmp/thvm_f6_step5_b.dylib";
+    FILE *cf = fopen(src_path, "w");
+    fputs(src, cf);
+    fclose(cf);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+    CHECK(system(cmd) == 0);
+    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+    CHECK(h != NULL);
+    typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *);
+    KFn kfn = (KFn)dlsym(h, "k");
+    CHECK(kfn != NULL);
+    float aa[8], yy[8];
+    for (u32 i = 0; i < 8; i++) aa[i] = (float)i;
+    const void *insp[1] = { aa };
+    unsigned numels[1] = { 8 };
+    kfn(yy, insp, 8, numels);
+    for (u32 i = 0; i < 8; i++) CHECK(yy[i] == -(float)i);
+    dlclose(h);
+    unlink(src_path);
+    unlink(dl_path);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
