@@ -218,6 +218,155 @@ int main(void) {
   CHECK_EQ(r2_zero, r2);
   CHECK_EQ(uop_range_axis_type(r2_zero), (u32)KAX_LOOP);
 
+  // === Phase E3: KOP_SWAP UPatRule mirror ==========================
+  // uop_apply_kop_swap walks applied_opts and replays the composed
+  // KOP_GLOBAL + KOP_SWAP history on a desired_axis_type[] array,
+  // then stamps each UOP_RANGE leaf with its computed axis_type.
+
+  TEST_BEGIN("apply-kop-swap/swap-alone-noop");
+  // SWAP between two LOOP axes -- both ends stay LOOP, no rewrite.
+  Term r4 = uop_range(0, KAX_LOOP, 64);
+  Term r5 = uop_range(1, KAX_LOOP, 32);
+  KOpt opts_swap_only[1] = {{ KOP_SWAP, 0, 1 }};
+  Term r4_out = uop_apply_kop_swap(r4, opts_swap_only, 1);
+  Term r5_out = uop_apply_kop_swap(r5, opts_swap_only, 1);
+  CHECK_EQ(r4_out, r4);   // hash-cons identity, no rewrite
+  CHECK_EQ(r5_out, r5);
+  CHECK_EQ(uop_range_axis_type(r4_out), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(r5_out), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-swap/global-then-swap-positive");
+  // GLOBAL(0, 64) then SWAP(0, 1):
+  //   desired starts [LOOP, LOOP, ...]
+  //   after GLOBAL(0): desired = [GLOBAL, LOOP, ...]
+  //   after SWAP(0,1): desired = [LOOP, GLOBAL, ...]
+  // So a UOP_RANGE leaf at axis_id=1 should be stamped KAX_GLOBAL,
+  // and a leaf at axis_id=0 should stay KAX_LOOP (swap moved the
+  // GLOBAL marker off it).
+  KOpt opts_gs[2] = {
+    { KOP_GLOBAL, 0, 64 },
+    { KOP_SWAP,   0, 1  },
+  };
+  Term r4_gs = uop_apply_kop_swap(r4, opts_gs, 2);  // axis_id=0
+  Term r5_gs = uop_apply_kop_swap(r5, opts_gs, 2);  // axis_id=1
+  CHECK_EQ(term_tag(r4_gs), TAG_UOP);
+  CHECK_EQ(term_ext(r4_gs), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(r4_gs),   0);
+  CHECK_EQ(uop_range_axis_type(r4_gs), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_extent(r4_gs),    64);
+  CHECK_EQ(term_tag(r5_gs), TAG_UOP);
+  CHECK_EQ(term_ext(r5_gs), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(r5_gs),   1);
+  CHECK_EQ(uop_range_axis_type(r5_gs), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_extent(r5_gs),    32);
+
+  TEST_BEGIN("apply-kop-swap/idempotence");
+  // Re-applying the rule with the same opts on the result is a no-op:
+  // desired[a] is a pure function of applied_opts, and the leaves now
+  // carry the simulated axis_type, so the rule short-circuits.
+  Term r5_gs2 = uop_apply_kop_swap(r5_gs, opts_gs, 2);
+  CHECK_EQ(r5_gs2, r5_gs);
+  CHECK_EQ(uop_range_axis_type(r5_gs2), (u32)KAX_GLOBAL);
+  Term r4_gs2 = uop_apply_kop_swap(r4_gs, opts_gs, 2);
+  CHECK_EQ(r4_gs2, r4_gs);
+  CHECK_EQ(uop_range_axis_type(r4_gs2), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-swap/double-swap-cancels");
+  // SWAP(0,1) twice -- desired returns to the initial state.
+  KOpt opts_double_swap[2] = {
+    { KOP_SWAP, 0, 1 },
+    { KOP_SWAP, 0, 1 },
+  };
+  Term r4_dd = uop_apply_kop_swap(r4, opts_double_swap, 2);
+  Term r5_dd = uop_apply_kop_swap(r5, opts_double_swap, 2);
+  CHECK_EQ(r4_dd, r4);
+  CHECK_EQ(r5_dd, r5);
+
+  TEST_BEGIN("apply-kop-swap/composition-three-axes");
+  // GLOBAL(0) then SWAP(0,1) then SWAP(1,2):
+  //   [LOOP, LOOP, LOOP] -GLOBAL(0)-> [GLOBAL, LOOP, LOOP]
+  //   -SWAP(0,1)-> [LOOP, GLOBAL, LOOP]
+  //   -SWAP(1,2)-> [LOOP, LOOP, GLOBAL]
+  // So axis_id=2 should carry KAX_GLOBAL after the rewrite.
+  Term r6 = uop_range(2, KAX_LOOP, 16);
+  KOpt opts_compose[3] = {
+    { KOP_GLOBAL, 0, 64 },
+    { KOP_SWAP,   0, 1  },
+    { KOP_SWAP,   1, 2  },
+  };
+  Term r4_c = uop_apply_kop_swap(r4, opts_compose, 3);  // axis_id=0
+  Term r5_c = uop_apply_kop_swap(r5, opts_compose, 3);  // axis_id=1
+  Term r6_c = uop_apply_kop_swap(r6, opts_compose, 3);  // axis_id=2
+  CHECK_EQ(uop_range_axis_type(r4_c), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(r5_c), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(r6_c), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_extent(r6_c),    16);
+
+  TEST_BEGIN("apply-kop-swap/no-applied-opts-noop");
+  // n_applied=0 -> early return; leaves untouched.
+  Term r4_no = uop_apply_kop_swap(r4, NULL, 0);
+  CHECK_EQ(r4_no, r4);
+  KOpt opts_zero[1] = {{ KOP_SWAP, 0, 1 }};
+  Term r4_zero = uop_apply_kop_swap(r4, opts_zero, 0);
+  CHECK_EQ(r4_zero, r4);
+
+  TEST_BEGIN("apply-kop-swap/swap-untouched-axis");
+  // SWAP(0,1) when the matched leaf is at axis_id=2 -> desired[2]=LOOP,
+  // unchanged; rule no-ops.
+  Term r6_unrelated = uop_apply_kop_swap(r6, opts_swap_only, 1);
+  CHECK_EQ(r6_unrelated, r6);
+  CHECK_EQ(uop_range_axis_type(r6_unrelated), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-swap/swap-out-of-range-axis-arg");
+  // SWAP with arg >= MAX_AXES -> rule clamps and skips that opt.  The
+  // GLOBAL stamp should still apply unaffected.
+  KOpt opts_clamp[2] = {
+    { KOP_GLOBAL, 0, 64 },
+    { KOP_SWAP,   0, MAX_AXES + 1 },  // arg out of range, ignored
+  };
+  Term r4_clamp = uop_apply_kop_swap(r4, opts_clamp, 2);
+  CHECK_EQ(term_tag(r4_clamp), TAG_UOP);
+  CHECK_EQ(term_ext(r4_clamp), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_type(r4_clamp), (u32)KAX_GLOBAL);
+
+  TEST_BEGIN("apply-kop-swap/multi-opt-ignores-splits");
+  // Mixed opts list with split ops (KOP_LOCAL, KOP_UPCAST) interleaved
+  // with KOP_GLOBAL + KOP_SWAP.  The rule ignores the splits (they are
+  // not in scope for E3) and produces the same desired state as the
+  // pure GLOBAL+SWAP subsequence: GLOBAL(0)+SWAP(0,1) -> [LOOP, GLOBAL].
+  KOpt opts_mixed_ss[4] = {
+    { KOP_LOCAL,  3, 8  },   // ignored: split, unrelated axis
+    { KOP_GLOBAL, 0, 64 },   // desired[0]=GLOBAL
+    { KOP_UPCAST, 4, 4  },   // ignored: split
+    { KOP_SWAP,   0, 1  },   // swap -> desired[1]=GLOBAL
+  };
+  Term r5_ms = uop_apply_kop_swap(r5, opts_mixed_ss, 4);  // axis_id=1
+  CHECK_EQ(uop_range_axis_type(r5_ms), (u32)KAX_GLOBAL);
+  Term r4_ms = uop_apply_kop_swap(r4, opts_mixed_ss, 4);  // axis_id=0
+  CHECK_EQ(uop_range_axis_type(r4_ms), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-swap/global-after-swap");
+  // SWAP(0,1) then GLOBAL(1, 32):
+  //   [LOOP, LOOP] -SWAP(0,1)-> [LOOP, LOOP] (no-op)
+  //   -GLOBAL(1)-> [LOOP, GLOBAL]
+  // axis_id=1 -> KAX_GLOBAL, axis_id=0 -> KAX_LOOP.
+  KOpt opts_sg[2] = {
+    { KOP_SWAP,   0, 1  },
+    { KOP_GLOBAL, 1, 32 },
+  };
+  Term r4_sg = uop_apply_kop_swap(r4, opts_sg, 2);  // axis_id=0
+  Term r5_sg = uop_apply_kop_swap(r5, opts_sg, 2);  // axis_id=1
+  CHECK_EQ(uop_range_axis_type(r4_sg), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(r5_sg), (u32)KAX_GLOBAL);
+
+  TEST_BEGIN("apply-kop-swap/non-range-tag-mismatch");
+  // Non-RANGE Term passes through unchanged (the rule body's tag check
+  // returns 0 -> uop_pattern_rewrite caches the original).
+  Term not_range = uop_const(DT_INT32, 42);
+  KOpt opts_simple[1] = {{ KOP_GLOBAL, 0, 64 }};
+  Term not_range_out = uop_apply_kop_swap(not_range, opts_simple, 1);
+  CHECK_EQ(not_range_out, not_range);
+
   thvm_free();
   TEST_REPORT();
 }

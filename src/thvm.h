@@ -2172,6 +2172,23 @@ fn Term uop_range_with_axis_type(Term r, u32 new_axis_type);
 fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
                              u32 n_applied);
 
+// === Phase E3: KOP_SWAP UPatRule mirror (src/uop/apply_opt.c) =====
+// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf with
+// the axis_type produced by simulating the KOP_GLOBAL + KOP_SWAP
+// history in `applied_opts` (initial state KAX_LOOP for all positions).
+// Mirrors codegen/apply_opt.c's pairwise axis_type swap +
+// kernel_lift.c's structural-replay swap; both representations stay
+// live during the E* wedge sequence.  Composes KOP_GLOBAL stamps and
+// KOP_SWAPs in order so SWAP-after-GLOBAL produces the relabelled
+// axis_type at the destination position.  Other KOP_* classes (split
+// ops, KOP_TC) are ignored by this rule -- their per-opt index drift
+// is a later wedge.  Idempotent: the simulated desired state is a pure
+// function of `applied_opts`, so re-applying is a no-op once the leaves
+// carry their computed axis_types.  See docs/plans/ideal_pipeline.md
+// row E.
+fn Term uop_apply_kop_swap(Term root, KOpt const *applied_opts,
+                           u32 n_applied);
+
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via

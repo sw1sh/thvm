@@ -137,3 +137,119 @@ fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
   UopApplyOptCtx ctx = { applied_opts, n_applied };
   return uop_pattern_rewrite(root, upat_kop_global_rules, 1, &ctx);
 }
+
+// === Phase E3: KOP_SWAP UPatRule mirror =============================
+//
+// codegen/apply_opt.c:92-103 stamps:
+//
+//   if ((u8)opt.arg >= ax->n_axes) return 0;
+//   u8 ti = ax->axis_types[opt.axis];
+//   u8 tj = ax->axis_types[opt.arg];
+//   ax->axis_types[opt.axis] = tj;
+//   ax->axis_types[opt.arg]  = ti;
+//   ax->full_shape[opt.axis] <-> ax->full_shape[opt.arg];
+//
+// kernel_lift.c:1416-1420 replays the same on the SplitAxis cur[]
+// vector, swapping the entire entry (including extent/origin/factor).
+// The lifter then emits UOP_RANGE leaves keyed by post-replay position,
+// so the leaves carry the post-swap axis_types.
+//
+// === Composition with KOP_GLOBAL =====================================
+//
+// KOP_SWAP is meaningful for axis_type only when something else has
+// previously stamped a non-LOOP type on one of the swapped positions
+// (otherwise both ends are KAX_LOOP and the swap is a no-op for
+// axis_type).  In practice the autotune sequence shape is "LOCAL/UPCAST
+// split, GLOBAL stamp, then SWAP to reorder".  E3 therefore composes
+// against KOP_GLOBAL within the same scan: we simulate desired[i]
+// transitions through both KOP_GLOBAL and KOP_SWAP entries, ignoring
+// split-class opts (whose axis-insertion semantics belong to a later
+// wedge alongside per-axis index drift tracking).
+//
+// === Single-pass full-history simulation =============================
+//
+// The rule walks applied_opts left-to-right, tracking a
+// desired_axis_type[MAX_AXES] state initialised to KAX_LOOP for every
+// position.  KOP_GLOBAL(a, _) sets desired[a]=KAX_GLOBAL when desired[a]
+// is currently KAX_LOOP (mirrors apply_opt's LOOP precondition); other
+// transitions are ignored (out-of-scope for this wedge).  KOP_SWAP(a,
+// b) swaps desired[a] and desired[b].
+//
+// For the matched UOP_RANGE leaf at axis_id=a, if desired[a] differs
+// from the leaf's current axis_type, rewrite to a UOP_RANGE with the
+// computed axis_type.  Otherwise the rule no-ops and the original Term
+// flows through unchanged.
+//
+// Composition handled:
+//   - SWAP(a,b) alone:       no-op (both desired ends stay LOOP).
+//   - GLOBAL(a) then SWAP(a,b):
+//       desired[a]=GLOBAL, then SWAP -> desired[a]=LOOP, desired[b]=GLOBAL.
+//       The UOP_RANGE at axis_id=b should be rewritten to KAX_GLOBAL.
+//   - SWAP(a,b) then SWAP(b,c):
+//       desired stays LOOP everywhere -> no rewrite.
+//   - GLOBAL(a) then SWAP(a,b) then SWAP(b,c):
+//       desired = GLOBAL at c (after composing the two swaps).
+//
+// Idempotence: re-applying the rule produces the same desired[a],
+// matched against the now-updated leaf axis_type -- the second pass
+// returns 0 because the leaf already carries desired[a].
+
+// rule body (KOP_SWAP scope): matches a UOP_RANGE leaf, simulates the
+// composed KOP_GLOBAL/KOP_SWAP history, and rewrites the leaf to its
+// computed axis_type when different from the current one.
+static Term rw_kop_swap_stamp(Term const *bindings, void *ctx_in) {
+  Term range = bindings[0];
+  if (term_tag(range) != TAG_UOP || term_ext(range) != UOP_RANGE) return 0;
+
+  UopApplyOptCtx const *ctx = (UopApplyOptCtx const *)ctx_in;
+  if (ctx == NULL || ctx->applied_opts == NULL || ctx->n_applied == 0) {
+    return 0;
+  }
+
+  // Simulate desired axis_type per position over the opts history.
+  u8 desired[MAX_AXES];
+  for (u32 i = 0; i < MAX_AXES; i++) desired[i] = (u8)KAX_LOOP;
+  for (u32 i = 0; i < ctx->n_applied; i++) {
+    KOpt const *o = &ctx->applied_opts[i];
+    if (o->op == KOP_GLOBAL) {
+      if ((u32)o->axis < MAX_AXES && desired[o->axis] == (u8)KAX_LOOP) {
+        desired[o->axis] = (u8)KAX_GLOBAL;
+      }
+    } else if (o->op == KOP_SWAP) {
+      u32 a = (u32)o->axis;
+      u32 b = (u32)o->arg;
+      if (a < MAX_AXES && b < MAX_AXES) {
+        u8 t = desired[a];
+        desired[a] = desired[b];
+        desired[b] = t;
+      }
+    }
+    // Other opts (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP/TC/PADTO/NOLOCALS)
+    // are out of scope for the SWAP wedge; their axis-insertion semantics
+    // belong to later wedges that will track per-opt index drift.
+  }
+
+  u32 axis_id = uop_range_axis_id(range);
+  if (axis_id >= MAX_AXES) return 0;
+  u8  cur_at  = (u8)uop_range_axis_type(range);
+  if (desired[axis_id] == cur_at) return 0;
+  return uop_range_with_axis_type(range, desired[axis_id]);
+}
+
+static UPat const upat_kop_swap_range = {UOP_RANGE, 0, 0, 0, NULL, NULL};
+
+static UPatRule const upat_kop_swap_rules[1] = {
+  {&upat_kop_swap_range, rw_kop_swap_stamp},
+};
+
+// Public entry: walk the DAG rooted at `root`, simulating the composed
+// KOP_GLOBAL/KOP_SWAP history in `applied_opts` and stamping each
+// UOP_RANGE leaf with its computed axis_type.  Returns the rewritten
+// root (input root unchanged when the simulated state matches the leaf
+// already).  Idempotent: re-applying with the same opts is a no-op
+// because the leaves already carry the simulated axis_types.
+fn Term uop_apply_kop_swap(Term root, KOpt const *applied_opts,
+                           u32 n_applied) {
+  UopApplyOptCtx ctx = { applied_opts, n_applied };
+  return uop_pattern_rewrite(root, upat_kop_swap_rules, 1, &ctx);
+}
