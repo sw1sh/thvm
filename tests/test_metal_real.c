@@ -284,6 +284,99 @@ int main(void) {
   thvm_free();
   unsetenv("THVM_TILE");
 
+  // === Matmul parity: M=N=K=16 (multiple of 8 -> simdgroup_matrix) ===
+  // Specifically targets the F3.1+F3.4b path where the recogniser
+  // wraps the matmul with OPT(_, TC, 0) and render_uop's
+  // simdgroup_matrix template fires.  Without this test, matmul
+  // correctness was only checked at WL level (blas_dtypes.wlt) on
+  // K=3 shapes that bypass simdgroup entirely.
+  TEST_BEGIN("metal-real/matmul-mnk16-tc-parity-with-cpu");
+  {
+    enum { MM = 16, MK = 16, MN = 16 };
+    Shape sa = {0}; sa.ndim = 2; sa.dims[0] = MM; sa.dims[1] = MK;
+    Shape sb = {0}; sb.ndim = 2; sb.dims[0] = MK; sb.dims[1] = MN;
+    f32 mm_a[MM*MK];
+    f32 mm_b[MK*MN];
+    for (u32 i = 0; i < MM*MK; i++) mm_a[i] = (f32)((i * 13 + 7) % 19) - 9.0f;
+    for (u32 i = 0; i < MK*MN; i++) mm_b[i] = (f32)((i * 31 + 5) % 23) - 11.0f;
+
+    f32 mm_cpu[MM*MN] = {0};
+    f32 mm_gpu[MM*MN] = {0};
+
+    // Reference: plain triple-loop matmul on the host.
+    for (u32 m = 0; m < MM; m++) {
+      for (u32 n = 0; n < MN; n++) {
+        f32 acc = 0.0f;
+        for (u32 k = 0; k < MK; k++) {
+          acc += mm_a[m*MK + k] * mm_b[k*MN + n];
+        }
+        mm_cpu[m*MN + n] = acc;
+      }
+    }
+
+    // CPU backend through the schedule (TMatMul-equivalent).
+    unsetenv("THVM_BACKEND"); thvm_init();
+    {
+      u32 ta = tensor_alloc(CURRENT_BACKEND, sa, DT_FP32);
+      u32 tb = tensor_alloc(CURRENT_BACKEND, sb, DT_FP32);
+      CURRENT_BACKEND->buf_write(TENS[ta].buf_id, mm_a, sizeof(mm_a));
+      CURRENT_BACKEND->buf_write(TENS[tb].buf_id, mm_b, sizeof(mm_b));
+      Term A = term_new(0, TAG_TEN, DT_FP32, ta);
+      Term B = term_new(0, TAG_TEN, DT_FP32, tb);
+      // Lower TMatMul: RESHAPE A->{M,K,1} EXPAND ->{M,K,N};
+      // RESHAPE B->{1,K,N} EXPAND ->{M,K,N}; MUL; REDUCE_SUM axis=1.
+      u32 d_mk1[3] = {MM, MK, 1};
+      u32 d_1kn[3] = {1, MK, MN};
+      u32 d_mkn[3] = {MM, MK, MN};
+      Term Ar  = uop_reshape(A,  3, d_mk1);
+      Term Ae  = uop_expand (Ar, 3, d_mkn);
+      Term Br  = uop_reshape(B,  3, d_1kn);
+      Term Be  = uop_expand (Br, 3, d_mkn);
+      Term mul = uop_binary(UOP_MUL, Ae, Be);
+      Term red = uop_reduce(REDUCE_SUM, /*axis=*/1, mul);
+      Term done = wnf(thvm_materialize(red));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                mm_cpu, sizeof(mm_cpu));
+    }
+    thvm_free();
+
+    // Metal backend through the same schedule.  Whichever dispatch
+    // path the schedule chooses for this TMatMul-shape kernel
+    // (render_uop simdgroup, metal_try_gemm, or metal_jit_encode
+    // KProgOp-flat) must produce values that match the CPU reference
+    // bit-for-bit modulo fma rounding.  This catches simdgroup
+    // template stride bugs that compile-only fixtures can miss.
+    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    {
+      u32 ta = tensor_alloc(CURRENT_BACKEND, sa, DT_FP32);
+      u32 tb = tensor_alloc(CURRENT_BACKEND, sb, DT_FP32);
+      CURRENT_BACKEND->buf_write(TENS[ta].buf_id, mm_a, sizeof(mm_a));
+      CURRENT_BACKEND->buf_write(TENS[tb].buf_id, mm_b, sizeof(mm_b));
+      Term A = term_new(0, TAG_TEN, DT_FP32, ta);
+      Term B = term_new(0, TAG_TEN, DT_FP32, tb);
+      u32 d_mk1[3] = {MM, MK, 1};
+      u32 d_1kn[3] = {1, MK, MN};
+      u32 d_mkn[3] = {MM, MK, MN};
+      Term Ar  = uop_reshape(A,  3, d_mk1);
+      Term Ae  = uop_expand (Ar, 3, d_mkn);
+      Term Br  = uop_reshape(B,  3, d_1kn);
+      Term Be  = uop_expand (Br, 3, d_mkn);
+      Term mul = uop_binary(UOP_MUL, Ae, Be);
+      Term red = uop_reduce(REDUCE_SUM, /*axis=*/1, mul);
+      Term done = wnf(thvm_materialize(red));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                mm_gpu, sizeof(mm_gpu));
+    }
+    thvm_free();
+
+    // Per-element parity (allow tiny fma rounding).
+    for (u32 i = 0; i < MM*MN; i++) {
+      f32 d = mm_cpu[i] - mm_gpu[i];
+      if (d < 0) d = -d;
+      CHECK(d < 1e-3f);
+    }
+  }
+
   // === Unary elementwise parity (NEG, RECIP, SQRT, EXP2, LOG2) ===
   TEST_BEGIN("metal-real/unary-parity-with-cpu");
   Shape su = {0}; su.ndim = 1; su.dims[0] = 4;
