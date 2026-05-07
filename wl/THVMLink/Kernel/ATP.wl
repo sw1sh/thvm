@@ -199,7 +199,8 @@ encodeEquation[axHC_HoldComplete, state_, label_] := Block[{
     If[ ! MatchQ[axHC, HoldComplete[Equal[_, _]]],
         Throw[Failure["TATPParseError",
             <|"Axiom" -> label, "Reason" -> "expected `lhs == rhs`"|>],
-            "TATPError"]
+            "TATPError"
+        ]
     ];
     lhs = Extract[axHC, {1, 1}, HoldComplete];
     rhs = Extract[axHC, {1, 2}, HoldComplete];
@@ -226,26 +227,29 @@ atpEncodeProblem[axioms_, conjecture_] := Block[{
     axHCs, cjHC, axTermsAndState, axTerms, st,
     goalRes, goalLhs, goalRhs, axEqList, conjPair, n
 },
-    ensureInit[];
-    If[ Head[Unevaluated[axioms]] =!= List,
+    If[ ! ListQ[Unevaluated[axioms]],
         Throw[Failure["TATPParseError",
-            <|"Reason" -> "axioms must be a List"|>], "TATPError"]
+            <|"Reason" -> "axioms must be a List"|>], "TATPError"
+        ]
     ];
+    ensureInit[];
     n = Length[Unevaluated[axioms]];
-    axHCs = Table[
-        Extract[Hold[axioms], {1, i}, HoldComplete],
-        {i, n}
-    ];
-    axTermsAndState =
-        Fold[encodeAxiomFold, {{}, encodeAtpTermInit[], 1}, axHCs];
+    axHCs = HoldComplete /@ Unevaluated[axioms];
+    axTermsAndState = Fold[encodeAxiomFold, {{}, encodeAtpTermInit[], 1}, axHCs];
     axTerms = axTermsAndState[[1]];
     st = axTermsAndState[[2]];
-    cjHC = Extract[Hold[conjecture], 1, HoldComplete];
+    cjHC = HoldComplete[conjecture];
     goalRes = encodeEquation[cjHC, st, "conjecture"];
     goalLhs = goalRes[[1]];
     goalRhs = goalRes[[2]];
     st = goalRes[[3]];
-    axEqList = Equal @@@ Hold[axioms][[1]];
+    (* axHCs is the held source of truth -- ReleasingHold gives back
+       the original `lhs == rhs` form per axiom (auto-eval kicks in
+       on release, which is fine since axioms aren't tautologies in
+       practice).  Touching the unevaluated `axioms` parameter
+       directly would do the same release implicitly AND get
+       confusing if a caller ever passed a tautology axiom. *)
+    axEqList = ReleaseHold /@ axHCs;
     conjPair = {Extract[cjHC, {1, 1}], Extract[cjHC, {1, 2}]};
     <|
         "Packed" -> NumericArray[
