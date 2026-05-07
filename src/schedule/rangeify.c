@@ -326,17 +326,6 @@ fn const char *scalar_op_name(u8 op) {
   }
 }
 
-fn const char *scalar_axis_name(u32 axis_type) {
-  switch (axis_type) {
-    case S_AXIS_LOOP:    return "LOOP";
-    case S_AXIS_REDUCE:  return "REDUCE";
-    case S_AXIS_UNROLL:  return "UNROLL";
-    case S_AXIS_GLOBAL:  return "GLOBAL";
-    case S_AXIS_VIRT:    return "VIRT";
-    default:             return "?";
-  }
-}
-
 // Pack up to 3 u16 strides + 1 u16 offset into the S_INDEX `extra`
 // field.  Anything > 65535 forces a bail.
 // Layout:

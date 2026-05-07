@@ -1887,7 +1887,6 @@ fn u32  rangeify_dce(struct KernelEntry *ke);
 // Look up a scalar opname / axis-type name as a const C string for
 // introspection / debug printing.
 fn const char *scalar_op_name (u8 op);
-fn const char *scalar_axis_name(u32 axis_type);
 // Try to lower a fully-emitted KernelEntry's KProgOp[] to
 // the scalar form.  Returns 1 on success (ke->scalar_uops populated;
 // caller can dispatch through the scalar path) and 0 on bail.
