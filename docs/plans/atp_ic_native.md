@@ -165,6 +165,54 @@ time; the post-collapse leaf's `path` (sequence of which side of
 each SUP it came from) maps back to the choice sequence.  Encode
 the choice index in the SUP label so the decode is mechanical.
 
+## Findings from milestone-3 (AOT-Metal port)
+
+Iter Z's GPU-side wnf state machine + emit was extended with
+OP2 + MAT + the new HVM4-port interactions (op2_sup, op2_num_sup,
+app_mat_sup) so the IC-native ATP search Term compiles+runs on
+Metal.  Battery [wl/Examples/atp_ic/metal.wls](../../wl/Examples/atp_ic/metal.wls):
+**5/6 cases match CPU**.
+
+Residual bug, narrowed to a minimal repro:
+
+```wolfram
+(* B4: this fans wrongly on Metal -- 1 spurious NUM(1) leaf.  CPU correct. *)
+sideSup = TSup[100, TNum[0], TNum[1]];
+rSup = TSup[200, TRef["fwd"], TRef["bwd"]];
+TOp2["==",
+     TIfZero[TOp2["==", sideSup, TNum[0]], TNum[5], TApp[rSup, TNum[5]]],
+     TIfZero[TOp2["==", sideSup, TNum[1]], TNum[6], TApp[rSup, TNum[6]]]]
+```
+
+Bisect: B0/B1/B2/B3 (the same shape minus the `TApp[rSup, ...]`
+in the else branches) all match.  Adding the rSup-application
+inside the elseTerm triggers it.  Suspect path: the
+`app_mat_sup` commute creates DUP-LAMs of the elseTerm (an
+ERA-bind TLam wrapping `TApp[rSup, NUM]`); subsequent
+DUP-of-shared-REF-body interactions through the outer DUP-LAM
++ APP-SUP at L=200 don't agree with the CPU runtime's
+`alo_realize`-driven freshening.
+
+Two angles to attack:
+1. **Encoder-side**: the WL TDef's DAG sharing of rSup between
+   the two elseTerms is fundamentally what trips Metal up;
+   inserting an explicit `TDup` to materialize the share would
+   match CPU's freshen semantics, at the cost of WL-side
+   complexity.  A simpler memoization approach (cache emit by
+   src_loc) was tried and made things worse: same-cell DUP-SUP
+   "consumes" the shared SUP via `subst_var`, breaking the
+   second use-site.
+2. **Runtime-side**: revisit how `aot_app_lam` handles ERA-bind
+   LAMs whose body was just produced by `dup_lam` -- the
+   returned `DP0(...)` may need a different code path so the
+   downstream DUP-of-shared-rSup-REF interaction yields the
+   correct values.
+
+Provable cases all match across CPU/Metal (5 cases including
+multi-position substitutivity), so the AOT-Metal pipeline is
+substantively ready for the IC-native ATP arc; only the
+unprovable-spurious-1 corner case is open.
+
 ## Findings from milestone-1 prototype
 
 [wl/Examples/atp_ic/transitivity.wls](../../wl/Examples/atp_ic/transitivity.wls)
