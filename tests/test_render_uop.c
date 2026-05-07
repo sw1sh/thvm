@@ -689,6 +689,56 @@ int main(void) {
     unlink(dl_path);
   }
 
+  TEST_BEGIN("render-uop-c/transcendentals-runs");
+  {
+    // Float-only unary ops via libm: sqrt/exp2/log2/recip.  Validates
+    // <math.h> include emits the right calls and the math links into
+    // the shared library.
+    u32 dimsT[1] = { 4 };
+    Term outT = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsT, 0);
+    Term aT   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsT, 1);
+    Term insT[1] = { aT };
+    Term r    = uop_range(0, 0, 4);
+    Term la   = uop_index_e(aT, r);
+    Term sq   = uop_unary(UOP_SQRT,  la);
+    Term stT  = uop_store(outT, r, sq);
+    char src[4096];
+    fp = fmemopen(src, sizeof(src), "w");
+    cg_render_uop_kernel_c(stT, "k", outT, insT, 1, fp);
+    fclose(fp);
+    const char *src_path = "/tmp/thvm_f6_step8.c";
+    const char *dl_path  = "/tmp/thvm_f6_step8.dylib";
+    FILE *cf = fopen(src_path, "w");
+    fputs(src, cf);
+    fclose(cf);
+    char cmd[256];
+    // -lm in case the libm symbols aren't auto-linked (Linux, BSD).
+    snprintf(cmd, sizeof(cmd),
+             "clang -O2 -fPIC -shared -o %s %s -lm 2>&1", dl_path, src_path);
+    int rc = system(cmd);
+    if (rc != 0) {
+      fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
+              src);
+    }
+    CHECK(rc == 0);
+    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+    CHECK(h != NULL);
+    typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *);
+    KFn kfn = (KFn)dlsym(h, "k");
+    CHECK(kfn != NULL);
+    float aa[4] = {1.0f, 4.0f, 9.0f, 16.0f}, yy[4];
+    const void *insp[1] = { aa };
+    unsigned numels[1] = { 4 };
+    kfn(yy, insp, 4, numels);
+    CHECK(yy[0] == 1.0f);
+    CHECK(yy[1] == 2.0f);
+    CHECK(yy[2] == 3.0f);
+    CHECK(yy[3] == 4.0f);
+    dlclose(h);
+    unlink(src_path);
+    unlink(dl_path);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
