@@ -608,6 +608,93 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       return lift_scalar_value(ke, u->src[0], flipped, n_flipped,
                                out_buf, in_bufs, n_inputs);
     }
+    case S_RESHAPE: {
+      // Legacy shared-LOOP-refs RESHAPE: src[1..nrng) are LOOP
+      // ranges used as both input and output via in-place iter
+      // shift.  extra packs out_dims (low 32, 4xu8) and in_dims
+      // (high 32, 4xu8).  Body sees iter shifted: in_iter[d] is
+      // derived from a flat index built over out_dims, then split
+      // by in_dims.  Mirrors S_RESHAPE_V's algorithm but with
+      // shared range refs (input and output iters share the same
+      // S_RANGE slots, just remapped via the LiftRangeMap override).
+      // Without this case, lenet-mnist bench-train falls back to
+      // the legacy ScalarUop renderer for ~128 kernels per step
+      // (lift_reject "value/unknown-op op=S_?(25)").
+      if (u->src_count < 2) return 0;
+      u32 nrng = (u32)u->src_count - 1;
+      if (nrng > 4 || nrng > MAX_DIM) return 0;
+      u32 lo = (u32)(u->extra & 0xFFFFFFFFu);
+      u32 hi = (u32)((u->extra >> 32) & 0xFFFFFFFFu);
+      u32 out_dims[MAX_DIM] = {0};
+      u32 in_dims [MAX_DIM] = {0};
+      for (u32 d = 0; d < nrng; d++) {
+        out_dims[d] = (lo >> (8 * d)) & 0xFFu;
+        in_dims [d] = (hi >> (8 * d)) & 0xFFu;
+        if (out_dims[d] == 0 || in_dims[d] == 0) return 0;
+      }
+      // Out and in must have same numel for the reshape to compose.
+      u32 out_numel = 1, in_numel = 1;
+      for (u32 d = 0; d < nrng; d++) {
+        out_numel *= out_dims[d];
+        in_numel  *= in_dims[d];
+      }
+      if (out_numel != in_numel) return 0;
+      // Build out_iter from the shared ranges (each src[1+d] is a
+      // shared S_RANGE; the existing range map gives its UOP iter).
+      Term out_iter[MAX_DIM];
+      for (u32 d = 0; d < nrng; d++) {
+        u32 r_sid = u->src[1 + d];
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op != S_RANGE) return 0;
+        out_iter[d] = lift_lookup_range(ranges, n_ranges, r_sid);
+        if (out_iter[d] == 0) return 0;
+      }
+      // flat_idx = sum(out_iter[d] * out_stride[d]) row-major.
+      Term flat = 0;
+      for (u32 d = 0; d < nrng; d++) {
+        u32 stride = 1;
+        for (u32 e = d + 1; e < nrng; e++) stride *= out_dims[e];
+        Term term = (stride == 1) ? out_iter[d]
+                  : uop_int_binary(UOP_IMUL, out_iter[d],
+                                   uop_const(DT_INT32, stride));
+        flat = (flat == 0) ? term
+             : uop_int_binary(UOP_IADD, flat, term);
+      }
+      if (flat == 0) flat = uop_const(DT_INT32, 0);
+      // Decompose flat into per-dim in_iters and override the shared
+      // range mapping so the body sees in_iter[d] for the same
+      // scalar_id slot.
+      LiftRangeMap reshaped[MAX_DIM];
+      u32 n_re = n_ranges;
+      for (u32 i = 0; i < n_ranges; i++) reshaped[i] = ranges[i];
+      for (u32 d = 0; d < nrng; d++) {
+        u32 stride = 1;
+        for (u32 e = d + 1; e < nrng; e++) stride *= in_dims[e];
+        Term iter_d = (stride == 1) ? flat
+                    : uop_int_binary(UOP_IDIV, flat,
+                                     uop_const(DT_INT32, stride));
+        iter_d = uop_int_binary(UOP_IMOD, iter_d,
+                                uop_const(DT_INT32, in_dims[d]));
+        u32 sid_d = u->src[1 + d];
+        int found = 0;
+        for (u32 i = 0; i < n_re; i++) {
+          if (reshaped[i].scalar_id == sid_d) {
+            reshaped[i].axis_uop = iter_d;
+            found = 1;
+            break;
+          }
+        }
+        if (!found) {
+          if (n_re >= MAX_DIM) return 0;
+          reshaped[n_re].scalar_id = sid_d;
+          reshaped[n_re].axis_uop  = iter_d;
+          n_re++;
+        }
+      }
+      return lift_scalar_value(ke, u->src[0], reshaped, n_re,
+                               out_buf, in_bufs, n_inputs);
+    }
     case S_ICONST: case S_IADD: case S_ISUB: case S_IMUL:
     case S_IDIV: case S_IMOD: case S_ILT: case S_IAND:
     case S_IWHERE:
