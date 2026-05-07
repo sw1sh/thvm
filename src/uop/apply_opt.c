@@ -253,3 +253,179 @@ fn Term uop_apply_kop_swap(Term root, KOpt const *applied_opts,
   UopApplyOptCtx ctx = { applied_opts, n_applied };
   return uop_pattern_rewrite(root, upat_kop_swap_rules, 1, &ctx);
 }
+
+// === Phase E4-E6: split-class UPatRule (UPCAST/UNROLL/LOCAL/GROUP/
+//                                        GROUPTOP) -- pragmatic stamp ====
+//
+// codegen/apply_opt.c:61-85 splits axis a with arg k into:
+//   outer at position a    (size /= k, axis_type unchanged)
+//   inner at position a+1  (size  = k, axis_type = inner_kax)
+// where inner_kax is:
+//   KOP_UPCAST   -> KAX_UPCAST
+//   KOP_UNROLL   -> KAX_UNROLL
+//   KOP_LOCAL    -> KAX_LOCAL
+//   KOP_GROUP    -> KAX_GROUP_REDUCE
+//   KOP_GROUPTOP -> KAX_GROUP_REDUCE
+//
+// kernel_lift.c:1574-1617 mirrors the same on its SplitAxis cur[] and
+// then emits UOP_RANGE leaves keyed by post-replay position.  Each
+// emitted leaf already carries the post-replay axis_type / extent.
+//
+// === Pragmatic scope (stamp-only, no DAG split) ========================
+//
+// The full UPat-driven port would need to REPLACE one UOP_RANGE leaf
+// with two new UOP_RANGE leaves wired into a UOP_IADD/IMUL chain --
+// the same DAG transform kernel_lift.c performs structurally today.
+// That's a multi-step rewrite that doesn't fit a single rewrite-fn
+// emitting one Term.  This wedge keeps splits in kernel_lift.c's
+// replay loop and ports only the axis_type stamping: the rule
+// simulates the same cur[] evolution to compute desired[a] for every
+// post-replay position, then stamps EXISTING UOP_RANGE leaves whose
+// axis_id matches a position whose desired[] differs from the leaf's
+// current axis_type.
+//
+// The actual range-creation (the "split" itself) stays in
+// kernel_lift.c structural-replay until a future wedge introduces a
+// `uop_range_split` primitive that returns a (outer, inner) pair and
+// rewires the consumer's INDEX_E address arithmetic.  Until then, this
+// rule is exercised in E4-E6 tests on already-emitted leaves and can be
+// composed declaratively over apply_opt history without altering the
+// in-tree structural lowering.
+//
+// === Single-pass full-history simulation ==============================
+//
+// The rule walks applied_opts left-to-right, tracking:
+//   - n_cur:           current count of populated axes
+//   - desired[i]:      the post-replay axis_type at position i
+// initialised so positions 0..n_init are KAX_LOOP (callers are expected
+// to drive the rule on UOP_RANGE leaves whose pre-split axis_id sits in
+// 0..n_init; for the stamp scope this is the same as the lifter's
+// initial cur[] vector).  Each opt updates the state:
+//
+//   SPLIT(o.axis, k) at position p=o.axis:
+//     - Shift desired[p+1..n_cur] right by 1.
+//     - desired[p+1] = inner_kax(o.op).  (Outer at p keeps its type.)
+//     - n_cur++.
+//
+//   GLOBAL(o.axis): desired[a] = KAX_GLOBAL when KAX_LOOP (LOOP guard).
+//   SWAP(a, b):     swap desired[a] <-> desired[b].
+//
+// For each matched UOP_RANGE leaf whose axis_id is in [0, n_cur), if
+// desired[axis_id] differs from the leaf's current axis_type, rewrite
+// the leaf with the simulated axis_type.  Otherwise no-op.
+//
+// Idempotent: desired[a] is a pure function of `applied_opts`, so a
+// second pass produces the same desired and the leaves are already
+// stamped.
+
+static u8 kop_inner_axis_type(u8 op) {
+  if (op == KOP_UPCAST)   return (u8)KAX_UPCAST;
+  if (op == KOP_UNROLL)   return (u8)KAX_UNROLL;
+  if (op == KOP_LOCAL)    return (u8)KAX_LOCAL;
+  if (op == KOP_GROUP)    return (u8)KAX_GROUP_REDUCE;
+  if (op == KOP_GROUPTOP) return (u8)KAX_GROUP_REDUCE;
+  return (u8)KAX_LOOP;
+}
+
+static int kop_is_split(u8 op) {
+  return op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
+      || op == KOP_GROUP  || op == KOP_GROUPTOP;
+}
+
+// Simulate the full applied_opts history on a desired[MAX_AXES] vector.
+// Returns the post-replay axis count (n_cur).  All positions in
+// [0, n_cur) carry their post-replay axis_type in `desired_out`.
+// Positions in [n_cur, MAX_AXES) are KAX_LOOP (initial state).
+static u32 sim_kop_history(KOpt const *applied_opts, u32 n_applied,
+                           u8 *desired_out) {
+  for (u32 i = 0; i < MAX_AXES; i++) desired_out[i] = (u8)KAX_LOOP;
+  // The lifter seeds cur[] from the BUFFERIZE S_RANGE.src list, whose
+  // count isn't visible here; for the stamp port we treat any axis
+  // referenced by an opt (or matched against a UOP_RANGE leaf) as a
+  // valid initial position.  n_cur tracks the highest live position.
+  u32 n_cur = 0;
+  for (u32 i = 0; i < n_applied; i++) {
+    KOpt const *o = &applied_opts[i];
+    u8 op = o->op;
+    if (kop_is_split(op)) {
+      u32 a = (u32)o->axis;
+      if (a >= MAX_AXES - 1) continue;     // out-of-range: skip
+      // Grow n_cur to cover position a if needed (the matched leaf may
+      // be the only thing referencing this axis, so initial-population
+      // is implicit).
+      if (a >= n_cur) n_cur = a + 1;
+      if (n_cur >= MAX_AXES) continue;     // table full: skip the split
+      // Shift positions a+1 .. n_cur-1 right by 1 to make room for the
+      // new inner axis at position a+1.
+      for (u32 j = n_cur; j > a + 1; j--) desired_out[j] = desired_out[j - 1];
+      // Outer at position a keeps its desired_out[a] unchanged.  Inner
+      // at position a+1 takes the opt's KAX type.
+      desired_out[a + 1] = kop_inner_axis_type(op);
+      n_cur++;
+    } else if (op == KOP_GLOBAL) {
+      u32 a = (u32)o->axis;
+      if (a >= MAX_AXES) continue;
+      if (a >= n_cur) n_cur = a + 1;
+      if (desired_out[a] == (u8)KAX_LOOP) {
+        desired_out[a] = (u8)KAX_GLOBAL;
+      }
+    } else if (op == KOP_SWAP) {
+      u32 a = (u32)o->axis;
+      u32 b = (u32)o->arg;
+      if (a >= MAX_AXES || b >= MAX_AXES) continue;
+      if (a >= n_cur) n_cur = a + 1;
+      if (b >= n_cur) n_cur = b + 1;
+      u8 t = desired_out[a];
+      desired_out[a] = desired_out[b];
+      desired_out[b] = t;
+    }
+    // Other opts (KOP_TC, KOP_PADTO, KOP_NOLOCALS) are out of scope;
+    // they don't mutate axis_types in apply_opt.c either.
+  }
+  return n_cur;
+}
+
+// rule body: matches a UOP_RANGE leaf, simulates the composed split +
+// GLOBAL + SWAP history, and rewrites the leaf to its post-replay
+// axis_type when different from the current one.
+static Term rw_kop_split_stamp(Term const *bindings, void *ctx_in) {
+  Term range = bindings[0];
+  if (term_tag(range) != TAG_UOP || term_ext(range) != UOP_RANGE) return 0;
+
+  UopApplyOptCtx const *ctx = (UopApplyOptCtx const *)ctx_in;
+  if (ctx == NULL || ctx->applied_opts == NULL || ctx->n_applied == 0) {
+    return 0;
+  }
+
+  u8 desired[MAX_AXES];
+  u32 n_cur = sim_kop_history(ctx->applied_opts, ctx->n_applied, desired);
+  (void)n_cur;
+
+  u32 axis_id = uop_range_axis_id(range);
+  if (axis_id >= MAX_AXES) return 0;
+  u8  cur_at  = (u8)uop_range_axis_type(range);
+  if (desired[axis_id] == cur_at) return 0;
+  return uop_range_with_axis_type(range, desired[axis_id]);
+}
+
+static UPat const upat_kop_split_range = {UOP_RANGE, 0, 0, 0, NULL, NULL};
+
+static UPatRule const upat_kop_split_rules[1] = {
+  {&upat_kop_split_range, rw_kop_split_stamp},
+};
+
+// Public entry: walk the DAG rooted at `root`, simulating the composed
+// split (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) + GLOBAL + SWAP history in
+// `applied_opts` and stamping each UOP_RANGE leaf with its post-replay
+// axis_type.  This is the pragmatic stamp-only port for E4-E6: the
+// underlying axis-INSERTION (each split adds a new UOP_RANGE leaf) stays
+// in kernel_lift.c's structural replay; this rule only fixes up
+// axis_type on already-emitted leaves whose axis_id sits in the
+// post-replay range.  Idempotent: desired[a] is a pure function of
+// applied_opts.  See the file-header block above for the simulation
+// rules.
+fn Term uop_apply_kop_split(Term root, KOpt const *applied_opts,
+                            u32 n_applied) {
+  UopApplyOptCtx ctx = { applied_opts, n_applied };
+  return uop_pattern_rewrite(root, upat_kop_split_rules, 1, &ctx);
+}
