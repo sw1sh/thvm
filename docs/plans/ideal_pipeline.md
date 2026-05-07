@@ -132,34 +132,20 @@ template would scratch a contiguous KxN block before simdgroup_load.
 Tracked but no longer correctness-blocking -- generic accumulator
 handles it.
 
-## Path 4 vs path 7 dispatch mystery (2026-05-08, g1 wedge)
+## Path 4 vs path 7 dispatch mystery RESOLVED (2026-05-08, 099c78f6)
 
-A direct A/B between path 4 (`metal_tile_jit_encode`) and path 7
-(`metal_jit_encode`) for the M=N=K=16 matmul under wider fallback:
+The earlier "same MSL, same dispatch, different output" framing
+turned out to be misdiagnosis. The actual root cause was the lifter's
+dim-product addressing reading out-of-bounds on virtual EXPAND
+broadcast buffers. Path 7's KProgOp-flat shader used per-op shape
+metadata (which had the original 2D dims) while path 4's lifter
+used the expanded view shape with broadcast strides, addressing a
+non-existent 4096-element buffer (the underlying storage was 256).
 
-  - Source-hash MATCHES: both paths emit MSL with FNV-hash
-    `0xd7edbd3264177d34`, length 701 bytes.  cg_emit_metal forwards
-    to cg_emit_tile_metal forwards to cg_emit_via_uop -- bit-identical
-    rendered MSL.
-  - Dispatch shape MATCHES: path 4 binds `dispatchThreadgroups(1) x
-    threadsPerThreadgroup(256)` = 256 threads.  Path 7 binds
-    `dispatchThreads(256) x threadsPerThreadgroup(256)` = 256 threads.
-    Functionally identical.
-  - Buffer bindings MATCH: out at slot 0, A at slot 1, B at slot 2,
-    same handles (no pre-mat for contiguous test inputs).
-
-Yet path 7 produces correct matmul (mm_cpu == mm_gpu), path 4
-produces `16 -10 10 -16 4 -22 -2 18` instead of `-189 -33 -38 -181`.
-Same MSL, same dispatch, different output.
-
-Hypotheses for next session: (a) PSO compiled with different
-resource access flags between paths; (b) `setSupportIndirectCommandBuffers:YES`
-interacts badly with `dispatchThreadgroups` for some shapes;
-(c) command buffer auto-flush / batching differs between path 4
-and path 7 in metal_dispatch_kernel's control flow; (d) Apple
-Metal driver caches PSO behavior keyed on dispatch mode.
-
-Conservative state preserves correctness; path 7 stays for matmul.
+The 099c78f6 fix made the lifter use view.strides[d] when
+ke->input_views is available, skipping stride=0 broadcast terms.
+With that fix, path 4 produces correct matmul output bit-equal to
+path 7. metal_jit_encode was deleted entirely in 88f536c3.
 
 ## Two layered correctness bugs discovered (2026-05-07)
 
@@ -223,22 +209,27 @@ for kernels that produce a recognized matmul shape AND succeed at
 `cg_tile_metal_dispatch_shape`. The simdgroup template fix
 (91043530) ensures correctness when that day comes.
 
-Dispatch ladder after F4-prelim (97d58c32):
+Dispatch ladder after F2/F6/F3 collapse (4e30432b):
 
 ```
 1. metal_try_alias_reshape          (zero-copy, no kernel)
-2. metal_tile_jit_encode (render_uop)   <-- FIRST attempt
-3. metal_try_gemm (post-pre-mat)        <-- K%8!=0 matmul fallback
-4. metal_jit_encode (KProgOp-flat)      <-- kernels render_uop can't lift
-5. per-op interpreter                   <-- kernels metal_jit_encode rejects
+2. metal_tile_jit_encode (render_uop)   <-- handles ALL lifter-eligible kernels
+3. per-op interpreter                   <-- only fires when lifter declines (e.g. movement-only PAD)
 ```
 
-The `metal_try_conv2d_flat` diagnostic branch (gated on
-THVM_METAL_SPECIALIZED, never set in production tests) was deleted in
-97d58c32 along with its CONV pipeline + 142 LOC of dead-by-default
-shader source. render_uop's generic accumulator handles conv shape
-correctly today; a specialised CONV template remains a perf
-optimisation tracked under F4 below, not a correctness need.
+The collapse history:
+  - 97d58c32: deleted metal_try_conv2d_flat (diagnostic-only branch).
+  - 099c78f6: F3.5 lifter view.strides fix unblocked TMatMul through path 2.
+  - 88f536c3: deleted metal_jit_encode (path 7) -- 124 LOC.
+  - 4e30432b: deleted metal_try_gemm + tiled GEMM shader (path 3) -- 158 LOC.
+  - 6d78aac3: dropped dead tile_conv_supported variable + stale comments.
+
+Net: 6→3 paths, ~440 LOC removed from the dispatch flow.
+
+The per-op interpreter remains as the fallback for movement-only
+kernels (PAD/RESHAPE that don't go through rangeify and have no
+scalar arena). Confirmed by tracing test_metal_real: only one
+kernel (kid=1, n_ops=1, UOP_PAD, n_inputs=1) triggers it.
 
 Correctness gate: `uop_classify_matmul` requires both INDEX_E
 addresses to reference exactly 2 distinct UOP_RANGE leaves -- matmul
