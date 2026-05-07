@@ -1390,10 +1390,10 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
-// Same but for the Metal renderer.  Stub today: emits MSL source but
-// thvm's Metal backend doesn't yet dispatch fused programs (single-
-// op shaders only).  Useful for proving the codegen Renderer
-// abstraction compiles two backends from the same KProgOp[].
+// Same but for the Metal renderer.  Routes through cg_emit_metal ->
+// cg_emit_tile_metal -> cg_emit_via_uop (kernel_lift_to_uop +
+// cg_render_uop_kernel) so the WL inspector sees exactly the MSL
+// the dispatch ladder will hand to MTLLibrary.
 EXTERN_C DLLEXPORT int thvm_wl_kernel_source_metal(WolframLibraryData libData,
                                                    mint argc, MArgument *args,
                                                    MArgument res) {
