@@ -669,7 +669,14 @@ apply:
           next = y;
           goto enter;
         }
-        // x stuck (not NUM): rebuild OP2 with reduced x.
+        // x is SUP: fire OP2-SUP commute (clone y at SUP's label).
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          Term y = heap_read(loc + 1);
+          whnf = interact_op2_sup(op, whnf, y);
+          continue;
+        }
+        // x stuck (not NUM, not SUP): rebuild OP2 with reduced x.
         heap_set(loc + 0, whnf);
         whnf = frame;
         continue;
@@ -714,7 +721,15 @@ apply:
           whnf = term_new(0, TAG_NUM, dtype, r);
           continue;
         }
-        // y stuck: rebuild OP2(NUM(xv), whnf) with fresh cell.
+        // y is SUP: fire OP2-NUM-SUP commute (no DUP needed; the
+        // baked-in NUM is atomic and reusable across both branches).
+        if (term_tag(whnf) == TAG_SUP) {
+          if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
+          Term x = term_new(0, TAG_NUM, dtype, xv);
+          whnf = interact_op2_num_sup(op, x, whnf);
+          continue;
+        }
+        // y stuck (not NUM, not SUP): rebuild OP2(NUM(xv), whnf).
         Term x = term_new(0, TAG_NUM, dtype, xv);
         u64 nloc = heap_alloc(2);
         heap_set(nloc + 0, x);
