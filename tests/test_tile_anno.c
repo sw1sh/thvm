@@ -1,0 +1,94 @@
+// test_tile_anno.c - Phase E: tile_anno_* axis read helpers.
+
+#include "../src/thvm.c"
+#include "test.h"
+
+int main(void) {
+  thvm_init();
+  u32 kid = kernel_alloc();
+  KernelEntry *ke = &KERNELS[kid];
+
+  TEST_BEGIN("tile-anno/empty-axis-count-zero");
+  CHECK_EQ(tile_anno_axis_count(ke), 0u);
+  TileAxisInfo info;
+  CHECK_EQ(tile_anno_axis_at(ke, 0, &info), 0);
+
+  TEST_BEGIN("tile-anno/null-args-bail");
+  CHECK_EQ(tile_anno_axis_count(NULL), 0u);
+  CHECK_EQ(tile_anno_axis_at(ke, 0, NULL), 0);
+
+  TEST_BEGIN("tile-anno/synthetic-loop-nest");
+  // Build a synthetic TILE_LOOP_NEST(STORE, AXIS_LOOP_8, AXIS_REDUCE_4)
+  // and verify the helpers read it.
+  TileAxisInfo a0 = { KAX_LOOP,   8,  TILE_MEM_GLOBAL, 0 };
+  TileAxisInfo a1 = { KAX_REDUCE, 4,  TILE_MEM_SHARED, 4 };
+  u32 ax0 = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a0));
+  u32 ax1 = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(a1));
+  // Mock body: TILE_SCALAR_BODY then TILE_STORE.  No real scalar arena.
+  u32 body  = tile_emit_leaf(ke, TILE_SCALAR_BODY, DT_FP32, 1);
+  u32 store = tile_emit(ke, TILE_STORE, DT_FP32, 1, &body, 1);
+  u32 srcs[3] = { store, ax0, ax1 };
+  ke->tile_root = tile_emit(ke, TILE_LOOP_NEST, DT_FP32, 3, srcs, 0);
+  CHECK_EQ(tile_anno_axis_count(ke), 2u);
+
+  TEST_BEGIN("tile-anno/axis-info-round-trip");
+  CHECK_EQ(tile_anno_axis_at(ke, 0, &info), 1);
+  CHECK_EQ(info.kax_type, KAX_LOOP);
+  CHECK_EQ(info.extent, 8u);
+  CHECK_EQ(info.memory_scope, TILE_MEM_GLOBAL);
+  CHECK_EQ(info.vector_width, 0u);
+
+  CHECK_EQ(tile_anno_axis_at(ke, 1, &info), 1);
+  CHECK_EQ(info.kax_type, KAX_REDUCE);
+  CHECK_EQ(info.extent, 4u);
+  CHECK_EQ(info.memory_scope, TILE_MEM_SHARED);
+  CHECK_EQ(info.vector_width, 4u);
+
+  TEST_BEGIN("tile-anno/out-of-range-bails");
+  CHECK_EQ(tile_anno_axis_at(ke, 2, &info), 0);
+  CHECK_EQ(tile_anno_axis_at(ke, 100, &info), 0);
+
+  TEST_BEGIN("tile-anno/axis-set-writes-tile-axis");
+  // tile_anno_axis_set should mutate the TILE_AXIS at position d
+  // even when KernelAxes isn't populated.  Verify by reading back
+  // through tile_anno_axis_at.
+  TileAxisInfo updated = { KAX_REDUCE, 16, TILE_MEM_SHARED, 8 };
+  // tile_axes_version starts at 0; ke->axes is NULL in this test.
+  // tile_anno_axis_set should still update TILE_AXIS for d=0.
+  // (KernelAxes side is a no-op since ke->axes == NULL.)
+  CHECK_EQ(tile_anno_axis_set(ke, 0, updated), 1);
+  TileAxisInfo got;
+  CHECK_EQ(tile_anno_axis_at(ke, 0, &got), 1);
+  CHECK_EQ(got.kax_type, KAX_REDUCE);
+  CHECK_EQ(got.extent, 16u);
+  CHECK_EQ(got.memory_scope, TILE_MEM_SHARED);
+  CHECK_EQ(got.vector_width, 8u);
+
+  TEST_BEGIN("tile-anno/axis-set-out-of-range-bails");
+  CHECK_EQ(tile_anno_axis_set(ke, 99, updated), 0);
+
+  TEST_BEGIN("tile-anno/axes-match-trivial-cases");
+  // axes_match returns 1 when at least one of the two sides is absent.
+  CHECK_EQ(tile_anno_axes_match(ke), 1);
+
+  TEST_BEGIN("tile-anno/apply-split-maps-to-kop");
+  // tile_anno_apply_split should fail with no axes set up; this just
+  // exercises the dispatch table for known new_inner_type values.
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_LOCAL), 0);  // no axes
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_UPCAST), 0);
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_UNROLL), 0);
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_GROUP_REDUCE), 0);
+
+  TEST_BEGIN("tile-anno/apply-split-rejects-unsupported-target");
+  // KAX_REDUCE / KAX_LOOP aren't valid split targets (no inner-axis
+  // type semantics).  Helper bails before consulting axes.
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_REDUCE), 0);
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_LOOP), 0);
+
+  TEST_BEGIN("tile-anno/apply-split-rejects-zero-factor");
+  CHECK_EQ(tile_anno_apply_split(ke, 0, 0, KAX_LOCAL), 0);
+
+  tile_free(ke);
+  thvm_free();
+  TEST_REPORT();
+}
