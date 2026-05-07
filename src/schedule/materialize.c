@@ -2310,29 +2310,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
       rangeify_cse(ke);
       rangeify_dce(ke);
       axes_ensure_scalar_reduce(ke);
-      // Phase 3 scalar-UOp simplification: divandmod rules.  Default-
-      // on; set THVM_SCALAR_SIMPLIFY=0 to bisect.
-      const char *ss = getenv("THVM_SCALAR_SIMPLIFY");
-      int simplify_on = (ss == NULL) ? 1 : (ss[0] != '0');
-      if (simplify_on && ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
-        u32 n_rules = 0;
-        ScalarSimplifyRule const *rules =
-            scalar_simplify_divandmod_rules(&n_rules);
-        if (n_rules > 0) {
-          // Find the BUFFERIZE root (last emitted by rangeify) and
-          // rewrite from there; the driver follows remap chains and
-          // returns the canonical root id.  `ke` is threaded through
-          // `user` so rules can allocate replacement nodes via
-          // rangeify_emit_*.
-          u32 root = ke->n_scalar_uops - 1;
-          (void)scalar_simplify_apply(&ke->scalar_uops,
-                                      &ke->n_scalar_uops,
-                                      root, rules, n_rules, ke);
-          // After rules run the BUFFERIZE root may have moved; rerun
-          // dce to reclaim orphaned MOD/IDIV chains.
-          rangeify_dce(ke);
-        }
-      }
+      // (Scalar-UOp divandmod simplification was deleted with
+      // src/scalar/simplify.c.  An A/B test on lenet-mnist
+      // bench-train showed the lift-reject count was identical with
+      // THVM_SCALAR_SIMPLIFY=0 -- the simplifier wasn't load-bearing
+      // for the post-L54 view-folding path.)
     }
     if (!ke->program_shared) {
       KernelAxes *shared_axes = kernel_rangeified_axes_cache_lookup_or_insert(ke);

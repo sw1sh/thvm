@@ -2307,35 +2307,7 @@ fn Term uop_graph_simplify_materialize(Term root, u32 env_id);
 
 // === scalar UOp simplification harness (src/scalar/simplify.c) ===
 // Bottom-up rewrite pass over the per-kernel ScalarUop[] arena.   
-// of the tinygrad rule port; the driver lives here.  The
-// divandmod rules.  Mirrors the `uop_graph_rewrite` shape but operates
-// on flat slot ids rather than heap-resident TAG_UOP DAGs.
-//
-// Rules receive **arena pointers so they can allocate new nodes via
-// rangeify_emit_*; allocation may realloc the arena, and the driver
-// re-reads *uops_inout after every rule call to follow the new head.
-typedef u32 (*ScalarSimplifyFn)(ScalarUop **uops_inout, u32 *n_uops_inout,
-                                u32 node_id, void *user);
-typedef struct {
-  char const       *name;
-  // Returns the new node id if a rewrite fires, 0 otherwise.
-  // Implementations may allocate new nodes via rangeify_emit_* on a
-  // KernelEntry passed through `user`.
-  ScalarSimplifyFn  apply;
-} ScalarSimplifyRule;
-fn u32  scalar_simplify_apply(ScalarUop **uops_inout, u32 *n_uops_inout,
-                              u32 root_id, ScalarSimplifyRule const *rules,
-                              u32 n_rules, void *user);
-fn void scalar_simplify_stats_clear(void);
-fn u32  scalar_simplify_stats_len(void);
-fn char const *scalar_simplify_stat_name(u32 i);
-fn u32  scalar_simplify_stat_hits_at(u32 i);
-fn u32  scalar_simplify_stat_hits(char const *name);
-fn void scalar_simplify_stats_print(void);
-// Divandmod rule table (port of tinygrad/uop/divandmod.py).
-// Pass `user = ke` to `scalar_simplify_apply` so rules can allocate
-// new arena nodes via rangeify_emit_*.
-fn ScalarSimplifyRule const *scalar_simplify_divandmod_rules(u32 *n_out);
+// (ScalarSimplify harness deleted with src/scalar/simplify.c.)
 
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is

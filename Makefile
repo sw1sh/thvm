@@ -23,7 +23,6 @@ TESTS := \
   $(BIN)/test_uop_movement_index \
   $(BIN)/test_uop_graph_rewrite \
   $(BIN)/test_uop_upat \
-  $(BIN)/test_scalar_simplify \
   $(BIN)/test_grad \
   $(BIN)/test_ref \
   $(BIN)/test_mat_op2 \

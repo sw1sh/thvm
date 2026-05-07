@@ -276,7 +276,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // Per-kernel ScalarUop[] simplification harness (Phase 2 of the
 // tinygrad symbolic/index rule port).  Runs over rangeify's flat
 // slot-id arena; rules land in subsequent phases.
-#include "scalar/simplify.c"
 
 // === schedule/ ===
 // Materialize pipeline: schedule + kernelize + linearize + splice.
