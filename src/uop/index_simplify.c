@@ -27,7 +27,9 @@ static int uop_iconst_value(Term t, i64 *out) {
 
 // Read a UOP_RANGE's extent.  Returns 1 if `t` is a RANGE leaf with
 // an int extent in its heap layout.  Used by range-bound-aware folds.
-static int uop_range_extent(Term t, u32 *out) {
+// Renamed from uop_range_extent in Phase E1 to reserve that name for
+// the public direct-return accessor in src/uop/index.c.
+static int uop_range_extent_into(Term t, u32 *out) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) return 0;
   Term ext_cell = heap_read(term_val(t) + 2);
   if (term_tag(ext_cell) != TAG_NUM) return 0;
@@ -61,7 +63,7 @@ static int uop_match_const_mul(Term t, i64 *c_out, Term *x_out) {
 static int uop_term_strictly_below(Term y, i64 bound) {
   if (bound <= 0) return 0;
   u32 ext;
-  if (uop_range_extent(y, &ext)) return (i64)ext <= bound;
+  if (uop_range_extent_into(y, &ext)) return (i64)ext <= bound;
   i64 v;
   if (uop_iconst_value(y, &v)) return v >= 0 && v < bound;
   return 0;
@@ -331,7 +333,7 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       // then `a % bv = a` (the iter never reaches bv).
       if (b_const && bv > 0) {
         u32 ext;
-        if (uop_range_extent(a, &ext) && (i64)ext <= bv) return a;
+        if (uop_range_extent_into(a, &ext) && (i64)ext <= bv) return a;
       }
       // RESHAPE-roundtrip fold: `(c*x + y) % c` -> y when y in [0, c).
       // For the bare `(c*x) % c` shape (y implicit), result is 0.
@@ -362,7 +364,7 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       // a < bv is always true.
       if (b_const && bv > 0) {
         u32 ext;
-        if (uop_range_extent(a, &ext) && (i64)ext <= bv) return uop_iconst(1);
+        if (uop_range_extent_into(a, &ext) && (i64)ext <= bv) return uop_iconst(1);
       }
       // Iter values from RANGE are non-negative, so RANGE < 0 (or any
       // non-positive constant) is always false.  This is the PAD
@@ -373,7 +375,7 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       // up in the canonical PAD-mask collapse.
       if (b_const && bv <= 0) {
         u32 ext;
-        if (uop_range_extent(a, &ext)) return uop_iconst(0);
+        if (uop_range_extent_into(a, &ext)) return uop_iconst(0);
       }
       break;
     case UOP_IAND:

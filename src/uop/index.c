@@ -31,6 +31,56 @@ fn Term uop_range(u32 axis_id, u32 axis_type, u32 extent) {
   return t;
 }
 
+// === Phase E1: UOP_RANGE accessors + axis_type rewriter ===
+//
+// Groundwork for porting `apply_opt.c`'s KernelAxes mutations onto
+// UPatRule[] over UOP_RANGE leaves.  Today KernelAxes.axis_types[]
+// stays the primary source of truth and kernel_lift_to_uop replays
+// applied_opts onto cur[].axis_type in C control flow before
+// emitting UOP_RANGE leaves with the resolved axis_type baked in.
+//
+// The Phase E port turns each apply_opt mutation into a UPatRule
+// over UOP_RANGE.axis_type / UOP_OPT-wrapped UOP_RANGE.  These four
+// helpers are the read/write primitives those rules will compose:
+//
+//   uop_range_axis_id  / uop_range_axis_type  / uop_range_extent
+//     -- field accessors that hide the [NUM(axis_id), NUM(axis_type),
+//        NUM(extent)] heap layout from rule bodies.
+//
+//   uop_range_with_axis_type(old, new_axis_type)
+//     -- structural rewriter; preserves axis_id/extent and returns the
+//        hash-cons-shared Term for the new axis_type.  Equivalent to
+//        the `axis_types[i] = ti` assignments in axes_apply_opt.c
+//        (KOP_GLOBAL: KAX_LOOP -> KAX_GLOBAL, and KOP_SWAP's pairwise
+//        swap of axis_types[]).
+//
+// E1 deliberately doesn't introduce new opcodes or change existing
+// callers -- it adds the read/write seam that subsequent E* wedges
+// (KOP_GLOBAL, KOP_SWAP, KOP_UPCAST/UNROLL/LOCAL/GROUP splits, KOP_TC)
+// will turn into UPatRule entries.
+
+fn u32 uop_range_axis_id(Term r) {
+  if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;
+  return (u32)term_val(heap_read(term_val(r) + 0));
+}
+
+fn u32 uop_range_axis_type(Term r) {
+  if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;
+  return (u32)term_val(heap_read(term_val(r) + 1));
+}
+
+fn u32 uop_range_extent(Term r) {
+  if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;
+  return (u32)term_val(heap_read(term_val(r) + 2));
+}
+
+fn Term uop_range_with_axis_type(Term r, u32 new_axis_type) {
+  if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return r;
+  u32 axis_id = uop_range_axis_id(r);
+  u32 extent  = uop_range_extent(r);
+  return uop_range(axis_id, new_axis_type, extent);
+}
+
 // === UOP_INDEX_E: symbolic INDEX expression ===
 //
 // Heap layout: [buffer_src, addr_expr].

@@ -20,6 +20,7 @@ TESTS := \
   $(BIN)/test_uop \
   $(BIN)/test_uop_index \
   $(BIN)/test_uop_index_simplify \
+  $(BIN)/test_uop_range_axis_type \
   $(BIN)/test_uop_movement_index \
   $(BIN)/test_uop_graph_rewrite \
   $(BIN)/test_uop_upat \
