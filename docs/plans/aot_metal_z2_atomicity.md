@@ -164,6 +164,81 @@ and 8) and made zero difference -- the per-thread redirect
 cascade exhausts even 8K cells per thread.  The bottleneck is
 algorithmic (per-thread duplicate work), not arena sizing.
 
+## Why iter Z+3 (option B) is also the wrong direction for SAT
+
+Tried and reverted.  Implementation: re-cast heap as `device
+atomic_uint *`, two 32-bit slots per Term, LOCK + SUB bits in
+the high slot, 2-stage publish via CAS.  Built and ran clean.
+
+But the architecture is fundamentally wrong for SAT: each
+collapse thread takes a DIFFERENT path through the SUP-tree
+and applies the formula's shared LAMs (AND / OR / NOT
+combinators) with DIFFERENT arg values per path.  e.g., the
+shared AND-combinator LAM gets app_lam'd with arg=T_for_x1 by
+one thread and arg=F_for_x1 by another.  Each thread NEEDS its
+own substitution on that LAM cell.
+
+Iter Z+3's heap-shared SUB lets only one thread's arg propagate
+to all threads -- semantically wrong for SAT.  Empirically
+visible: V=2/V=3 NUM count dropped from 128/256 (step 7
+deterministic) to 60-90 (iter Z+3 with both lock-on-give-up
+and lock-on-spin variants), and the SAT discriminant degraded
+across V=4..7.
+
+The per-thread substitution map (step 5) was always the right
+model for SAT.  Determinism via step 7's overflow guard is the
+ceiling for the SUP-tree-walk approach.
+
+## What actually works for SAT on Metal at scale: per-leaf curried-LAM
+
+Different architecture entirely.  The SUP-tree machinery
+(kernel-1 builds it, kernel-2 walks it) was a generalization for
+arbitrary IC reductions, but SAT has a much simpler structure:
+each leaf is a formula evaluation with concrete variable values.
+
+New plan -- post iter Z+2 step 7:
+
+1. TDef body: instead of `TLam[ig, boolToNum[formulaWithSUPs]]`
+   (vars baked as `TSup[label, T_, F_]`), use a fully curried
+   form `TLam[x1, TLam[x2, ..., TLam[xN, boolToNum[formula]]]]`
+   where the formula references the binders via VAR.  No SUPs,
+   no DUPs.
+
+2. Per-leaf dispatch: for tid in 0..2^N-1, derive the
+   assignment from tid bits (bit i picks T or F for var i).
+   Pass the assignments as args[0..N-1] to a single kernel
+   dispatched with grid=N.
+
+3. Each thread:
+   - Builds APP-chain `APP(...APP(def_root, args[0])..., args[N-1])`
+     in its private arena.
+   - Runs the iter Z wnf state machine.  All reductions are
+     APP-LAM (vars are concrete T_/F_ LAMs, no DUP fires).
+   - Returns the NUM result via result[tid].
+
+4. Host scans result[] for NUM=1.  SAT True iff any.
+
+Why this scales:
+- Per-thread cost: O(formula_size) APP-LAM applications.
+  No DUP-SUP commutes, no DUP-LAM cell allocations, no
+  redirect cascade.  Arena pressure drops by 100x+ vs the
+  SUP-tree-walk approach.
+- No shared state during reduction -- each thread fully
+  private.  No race conditions, fully deterministic across
+  runs without relying on atomics.
+- Scales to V=20 (1M threads) because per-thread arena needs
+  only the APP-chain's own cells (~3*N cells = ~60 cells for
+  V=20).  At BOOK_CAP=4M and N=2^20, per-thread budget = 4
+  cells -- tight but workable; larger BOOK_CAP needed for
+  V>=22.
+
+This is the next iter (Z+4 or Z+5; numbering deferred).
+Implementation: extends `aot_ic_def_run.metal` to dispatch with
+grid=N and read per-thread args from a [N, n_args] buffer.
+Host wrapper builds the args matrix from a CNF + var count.
+WL surface: `TAOTSatEval[name, nVars]` returns the boolean
+SAT answer.
+
 ## Critical files
 
 - `src/backend/metal/shaders/aot_ic_collapse.metal` -- the parallel
