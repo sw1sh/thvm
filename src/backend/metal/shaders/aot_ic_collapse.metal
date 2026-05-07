@@ -485,11 +485,17 @@ kernel void aot_ic_collapse(
   uint depth = 0u;
   uint depth_cap = *path_depth;
   while (depth < depth_cap) {
-    // Drive current to WHNF.  If it's a SUP, descend by tid bit.
     cur = aot_wnf_thread(&ctx, cur, heap);
     if (msl_term_tag(cur) != TAG_SUP) break;
     ulong loc = msl_term_val(cur);
-    uint  bit = (tid >> depth) & 1u;
+    // Lever 4: bit-reverse path encoding.  Original tid-bit-i ->
+    // depth-i means a 32-thread SIMD group diverges immediately
+    // (bits 0..4 differ across the group).  Bit-reverse maps the
+    // group-shared upper bits to early depths and the per-thread
+    // low bits to deepest levels -- 32 threads agree on path for
+    // depth 0..(depth_cap-6), giving coalesced heap[loc+bit] reads
+    // for that prefix and only diverging at the last ~5 levels.
+    uint  bit = (tid >> (depth_cap - 1u - depth)) & 1u;
     cur = aot_heap_load(heap, loc + bit);
     depth++;
   }
