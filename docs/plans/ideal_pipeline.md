@@ -55,6 +55,35 @@ state passes 530/530); resuming the simdgroup-path widening
 requires understanding the schedule's materialisation behaviour
 first.
 
+## Path 4 vs path 7 dispatch mystery (2026-05-08, g1 wedge)
+
+A direct A/B between path 4 (`metal_tile_jit_encode`) and path 7
+(`metal_jit_encode`) for the M=N=K=16 matmul under wider fallback:
+
+  - Source-hash MATCHES: both paths emit MSL with FNV-hash
+    `0xd7edbd3264177d34`, length 701 bytes.  cg_emit_metal forwards
+    to cg_emit_tile_metal forwards to cg_emit_via_uop -- bit-identical
+    rendered MSL.
+  - Dispatch shape MATCHES: path 4 binds `dispatchThreadgroups(1) x
+    threadsPerThreadgroup(256)` = 256 threads.  Path 7 binds
+    `dispatchThreads(256) x threadsPerThreadgroup(256)` = 256 threads.
+    Functionally identical.
+  - Buffer bindings MATCH: out at slot 0, A at slot 1, B at slot 2,
+    same handles (no pre-mat for contiguous test inputs).
+
+Yet path 7 produces correct matmul (mm_cpu == mm_gpu), path 4
+produces `16 -10 10 -16 4 -22 -2 18` instead of `-189 -33 -38 -181`.
+Same MSL, same dispatch, different output.
+
+Hypotheses for next session: (a) PSO compiled with different
+resource access flags between paths; (b) `setSupportIndirectCommandBuffers:YES`
+interacts badly with `dispatchThreadgroups` for some shapes;
+(c) command buffer auto-flush / batching differs between path 4
+and path 7 in metal_dispatch_kernel's control flow; (d) Apple
+Metal driver caches PSO behavior keyed on dispatch mode.
+
+Conservative state preserves correctness; path 7 stays for matmul.
+
 ## Two layered correctness bugs discovered (2026-05-07)
 
 When the test suite's M=N=K=16 matmul parity test (`ae9d0aa0`) was
