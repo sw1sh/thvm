@@ -70,6 +70,21 @@ static const char *rmu_msl_type_name(u32 dtype) {
   }
 }
 
+// F6: C99 lacks `half` and `uchar`; emit equivalents that math.h /
+// stdint.h cover. fp16 falls back to `float` for now -- caller (cpu/jit.c)
+// will need to widen DT_FP16 inputs at the host boundary if they're
+// ever routed through this path.
+static const char *rmu_c_type_name(u32 dtype) {
+  switch (dtype) {
+    case DT_FP32:  return "float";
+    case DT_FP16:  return "float";   // see comment above
+    case DT_INT32: return "int";
+    case DT_INT64: return "long";
+    case DT_UINT8: return "unsigned char";
+    default:       return "float";
+  }
+}
+
 static const char *rmu_int_op_name(u32 op) {
   switch (op) {
     case UOP_IADD: return "+";
@@ -1169,11 +1184,11 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   fputs("  (void)n; (void)in_numels;\n", fp);
   u32 out_dtype = uop_buffer_dtype(out_buf);
   fprintf(fp, "  %s *out = (%s *)out_v;\n",
-          rmu_msl_type_name(out_dtype), rmu_msl_type_name(out_dtype));
+          rmu_c_type_name(out_dtype), rmu_c_type_name(out_dtype));
   for (u32 i = 0; i < n_inputs; i++) {
     u32 dt = uop_buffer_dtype(in_bufs[i]);
     fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
-            rmu_msl_type_name(dt), i, rmu_msl_type_name(dt), i);
+            rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }
   RMU_TARGET_C = 1;
   if (root != 0 && term_tag(root) == TAG_UOP) {

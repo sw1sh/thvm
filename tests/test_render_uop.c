@@ -407,6 +407,32 @@ int main(void) {
   CHECK(contains(bufc1, "typedef unsigned int uint;"));
   CHECK(contains(bufc1, "<math.h>"));
 
+  // F6 step 2: clang compile-validate the rendered C99. Writes the
+  // emitted source to a temp file and shells out to `cc -c -Wall`.
+  // Catches structural breakage that string-substring checks miss.
+  TEST_BEGIN("render-uop-c/elementwise-add-clang-compiles");
+  {
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/thvm_test_render_uop_c.c");
+    FILE *cf = fopen(path, "w");
+    CHECK(cf != NULL);
+    fputs(bufc1, cf);
+    fclose(cf);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "cc -std=c99 -Wall -Wextra -Werror -c %s "
+             "-o /tmp/thvm_test_render_uop_c.o 2>&1",
+             path);
+    int rc = system(cmd);
+    if (rc != 0) {
+      fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
+              bufc1);
+    }
+    CHECK(rc == 0);
+    unlink(path);
+    unlink("/tmp/thvm_test_render_uop_c.o");
+  }
+
   thvm_free();
   TEST_REPORT();
 }
