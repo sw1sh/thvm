@@ -189,6 +189,21 @@ fn KpCacheSlot *kernel_program_cache_insert_slot(KProgOp const *prog, u32 n_ops)
   return NULL;
 }
 
+// E9-prep wedge 5: compare two applied_opts[] sequences field-by-field.
+// KOpt has padding bytes between `axis` (offset 1) and `arg` (offset 4),
+// so memcmp on the array isn't safe -- the writer trio assigns whole
+// KOpts but the padding bytes carry whatever the source struct had.
+// Field-by-field is correct and small.
+static int kopts_equal(KOpt const *a, u32 na, KOpt const *b, u32 nb) {
+  if (na != nb) return 0;
+  for (u32 i = 0; i < na; i++) {
+    if (a[i].op != b[i].op) return 0;
+    if (a[i].axis != b[i].axis) return 0;
+    if (a[i].arg != b[i].arg) return 0;
+  }
+  return 1;
+}
+
 static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
   if (s->n_scalar_uops != ke->n_scalar_uops) {
     return 0;
@@ -212,16 +227,63 @@ static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
       return 0;
     }
     if (ke->axes == NULL) return 0;
-    // Phase E: compare via tile_anno on the live side; stored side
-    // s->axes still holds the byte arrays.  Symmetric with the hash
-    // above (only kax_type + extent participate).
-    u32 n_axes_c = tile_anno_axis_count_or_kernelaxes(ke);
+    // E9-prep wedge 5: rewire the per-axis equality to read from the
+    // WRITER input (applied_opts[]) rather than the WRITER output
+    // (axis_types[]).  Since `axes_apply_opt` is deterministic,
+    // identical applied_opts[] sequences applied to identical default
+    // states produce identical axis_types[] arrays.  The default state
+    // is itself a function of the slot fields already compared above
+    // (output_shape + scalar_uops + source_tag/ext), so applied_opts[]
+    // equality is sufficient to imply axis_types[] equality on this
+    // cache's domain (rangeified-axes cache; live consumers go through
+    // axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt).
+    //
+    // n_axes and full_shape[] comparisons stay -- both are independent
+    // of axis_types[] and remain safe direct reads.
+    u32 n_axes_c = ke->axes->n_axes;
     if (s->axes.n_axes != n_axes_c) return 0;
     for (u32 i = 0; i < n_axes_c; i++) {
-      TileAxisInfo info;
-      if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) return 0;
-      if ((u32)s->axes.axis_types[i] != info.kax_type) return 0;
-      if (s->axes.full_shape [i] != info.extent)       return 0;
+      if (s->axes.full_shape[i] != ke->axes->full_shape[i]) return 0;
+    }
+    if (!kopts_equal(s->axes.applied_opts, s->axes.n_applied,
+                     ke->axes->applied_opts, ke->axes->n_applied)) {
+      return 0;
+    }
+    // Validate-on cross-check: under THVM_E9_VALIDATE=1 also run the
+    // legacy axis_types[] equality and abort on divergence.  Mirrors
+    // wedges 3/4: the substitute (applied_opts) is the read path
+    // post-wedge; the legacy (axis_types[]) is sampled only when the
+    // env knob is set.  Two slots with identical applied_opts[] but
+    // somehow different axis_types[] would signal an undocumented
+    // axis_types[] writer outside the trio -- that's a bug we want to
+    // surface loudly.  Hand-writes from test_metal_real /
+    // test_tile_graph live outside this cache (they don't go through
+    // materialize.c's kernel_rangeified_axes_cache_lookup_or_insert
+    // call), so they don't reach this validate gate.
+    char const *val_e = getenv("THVM_E9_VALIDATE");
+    if (val_e != NULL && val_e[0] == '1') {
+      for (u32 i = 0; i < n_axes_c; i++) {
+        TileAxisInfo info;
+        if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) {
+          fprintf(stderr,
+                  "thvm: THVM_E9_VALIDATE wedge-5: kaxis_slot_equal "
+                  "tile_anno_axis_or_kernelaxes failed at axis %u "
+                  "(n_axes=%u, n_applied=%u).\n",
+                  i, n_axes_c, (u32)ke->axes->n_applied);
+          abort();
+        }
+        if ((u32)s->axes.axis_types[i] != info.kax_type) {
+          fprintf(stderr,
+                  "thvm: THVM_E9_VALIDATE wedge-5: applied_opts[] match "
+                  "but axis_types[%u] diverge (legacy=%u, live=%u; "
+                  "n_axes=%u, n_applied=%u).  Indicates an undocumented "
+                  "axis_types[] writer outside axes_apply_opt /  "
+                  "axes_default_for / axes_ensure_scalar_reduce.\n",
+                  i, (u32)s->axes.axis_types[i], info.kax_type,
+                  n_axes_c, (u32)ke->axes->n_applied);
+          abort();
+        }
+      }
     }
   }
   if (s->n_inputs > 0) {
