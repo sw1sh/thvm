@@ -98,6 +98,13 @@ int main(void) {
 
   TEST_BEGIN("render-uop-metal/matmul-tc-compiles");
   // STORE(out, m*16+n, OPT(REDUCE(MUL(A[m*32+k], B[k*16+n]), SUM, k=2), TC, 0))
+  // Distinct 2-D buffers so A/B hash-cons separately (1-D would
+  // collapse 16x32 and 32x16 to the same 512-element buffer).
+  u32 dimsA[2] = {16, 32};
+  u32 dimsB[2] = {32, 16};
+  Term mmA = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsA);
+  Term mmB = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsB);
+  Term mm_in_bufs[2] = { mmA, mmB };
   Term r_m = uop_range(0, 0, 16);
   Term r_n = uop_range(1, 0, 16);
   Term r_kk = uop_range(2, 1, 32);
@@ -105,10 +112,10 @@ int main(void) {
   Term k32  = uop_const(DT_INT32, 32);
   Term mK   = uop_int_binary(UOP_IMUL, r_m, k32);
   Term addrA= uop_int_binary(UOP_IADD, mK, r_kk);
-  Term ldA  = uop_index_e(in0, addrA);
+  Term ldA  = uop_index_e(mmA, addrA);
   Term kN   = uop_int_binary(UOP_IMUL, r_kk, k16);
   Term addrB= uop_int_binary(UOP_IADD, kN, r_n);
-  Term ldB  = uop_index_e(in1, addrB);
+  Term ldB  = uop_index_e(mmB, addrB);
   Term mulm = uop_binary(UOP_MUL, ldA, ldB);
   Term redM = uop_reduce(REDUCE_SUM, 2, mulm);
   Term tcv  = uop_opt(redM, UOP_OPT_TC, 0);
@@ -117,9 +124,26 @@ int main(void) {
   Term st_m = uop_store(out, addrC, tcv);
   char bufm[8192];
   FILE *mpm = fmemopen(bufm, sizeof(bufm), "w");
-  cg_render_uop_kernel(st_m, "k_gemm", out, in_bufs, 2, mpm);
+  cg_render_uop_kernel(st_m, "k_gemm", out, mm_in_bufs, 2, mpm);
   fclose(mpm);
   CHECK_EQ(compile_through_metal(bufm), 0);
+
+  TEST_BEGIN("render-uop-metal/recogniser-installs-tc-on-bare-matmul");
+  // Build the same shape WITHOUT the manual OPT wrap and let
+  // uop_recognise_tc install it.  Validates the F3.1 producer side
+  // wires through render_uop's existing simdgroup_matrix consumer.
+  Term st_bare = uop_store(out, addrC, redM);
+  Term st_rec  = uop_recognise_tc(st_bare);
+  CHECK(st_rec != st_bare);
+  // Render and grep for simdgroup_matrix to confirm the OPT wrap
+  // routed to rmu_emit_matmul_tc.
+  char bufr2[8192];
+  FILE *mpr2 = fmemopen(bufr2, sizeof(bufr2), "w");
+  cg_render_uop_kernel(st_rec, "k_gemm_rec", out, mm_in_bufs, 2, mpr2);
+  fclose(mpr2);
+  CHECK(strstr(bufr2, "simdgroup_matrix<float, 8, 8>") != NULL);
+  CHECK(strstr(bufr2, "simdgroup_multiply_accumulate") != NULL);
+  CHECK_EQ(compile_through_metal(bufr2), 0);
 
   thvm_free();
   TEST_REPORT();
