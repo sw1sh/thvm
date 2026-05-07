@@ -180,6 +180,11 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
     }
   }
   if (src == NULL) {
+    if (getenv("THVM_CPU_JIT_TRACE_FALLBACK")) {
+      fprintf(stderr, "thvm: cpu_jit fallback to render_c.c -- "
+                      "n_inputs=%u n_ops=%u dt=%u\n",
+              ke->n_inputs, ke->n_ops, cg_program_dtype(ke));
+    }
     src = cg_emit(ke, &C_RENDERER);
   }
   if (!src) return NULL;
