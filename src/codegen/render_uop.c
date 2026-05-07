@@ -1163,9 +1163,9 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
 }
 
 // F6: render the same UOp DAG as a C99 kernel for the CPU JIT.
-// Buffer-binding convention mirrors render_c.c's existing CPU JIT
-// signature: `void k(void *out_v, const void *const *ins_v,
-//                    unsigned n, const unsigned *in_numels)`.
+// Buffer-binding convention is the CPU-JIT contract dlsym'd by
+// cpu_jit_dispatch: `void k(void *out_v, const void *const *ins_v,
+//                           unsigned n, const unsigned *in_numels)`.
 // The body emit shares all rmu_emit_* helpers with the MSL path; the
 // RMU_TARGET_C flag flips axis-binding (LOCAL/GLOBAL -> for-loop).
 // `uint` is typedef'd to `unsigned int` so the body emit's `uint aN`
@@ -1198,8 +1198,8 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   fputs("#define THVM_BITCAST(t, x) "
         "({ t _t; __typeof__(x) _x = (x); "
         "memcpy(&_t, &_x, sizeof(_t)); _t; })\n", fp);
-  // Match render_c.c's CPU-JIT signature so cpu/jit.c can dlsym the
-  // symbol and call without re-binding.
+  // CPU-JIT entry-point signature; cpu/jit.c dlsyms "k" and calls
+  // it directly with caller pointers.
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels) {\n", fp);
   fputs("  (void)n; (void)in_numels;\n", fp);

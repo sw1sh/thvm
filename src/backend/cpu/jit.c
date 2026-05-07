@@ -3,7 +3,7 @@
 // `void k(...)` symbol against the program's hash so subsequent
 // dispatches skip both compilation and dlsym.
 //
-// Per-kernel function signature (matches render_c.c):
+// Per-kernel function signature (emitted by cg_render_uop_kernel_c):
 //   void k(void *out_v,
 //          const void *const *ins_v,
 //          unsigned out_numel,

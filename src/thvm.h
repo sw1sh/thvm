@@ -2208,7 +2208,8 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
                              Term out_buf, Term const *in_bufs,
                              u32 n_inputs, FILE *fp);
 // F6: same UOp DAG, emitted as a C99 kernel for the CPU JIT path.
-// Function signature matches render_c.c's existing CPU-JIT contract:
+// Function signature is the CPU-JIT contract dlsym'd by
+// cpu_jit_dispatch:
 //   void k(void *out_v, const void *const *ins_v,
 //          unsigned n, const unsigned *in_numels);
 fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
@@ -2346,13 +2347,13 @@ fn Term interact_assign     (Term assign_term);
 fn Term interact_assign_with(Term dst, Term src);
 
 // === codegen/ + profile/ ===
-// Backend-agnostic source emitters (render_c.c, render_metal.c) plus
-// per-kid dispatch profiling.  Exposed cross-TU so the Metal .m file
-// (compiled separately under -DTHVM_HAS_METAL) can render MSL via
-// cg_emit_metal -> cg_emit_tile_metal -> cg_emit_via_uop and record
-// dispatches into the shared K_PROFILE table.  cg_supports remains
-// the gate for the CPU JIT (clang -shared); the Metal side now goes
-// through render_uop's lifter which handles every kernel shape.
+// UOp-DAG source emitter (render_uop.c) + per-kid dispatch profiling.
+// Exposed cross-TU so the Metal .m file (compiled separately under
+// -DTHVM_HAS_METAL) can render MSL via cg_emit_metal ->
+// cg_emit_tile_metal -> cg_emit_via_uop and record dispatches into
+// the shared K_PROFILE table.  cg_supports remains the pre-build
+// gate for the CPU JIT (clang -shared); the Metal side and the CPU
+// JIT both route through render_uop's lifter (post-F6).
 
 // Per-kid route taken by the most recent fire.  Mirrored by the WL
 // surface decoder (TKernelDispatchKind) -- keep the names + ids
