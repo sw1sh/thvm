@@ -333,11 +333,15 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
     }
   }
   if (ndim == 0 || ndim != outer_rank) {
-    fprintf(stderr,
-            "lift reject: index/ndim-mismatch buf_ndim=%u src_count=%u\n",
-            ndim, u->src_count);
+    // Match the env-gating on every other lift_reject_log site --
+    // the unconditional one-line stderr print used to fire even
+    // when the bench wasn't asking for diagnostics.
     char const *e = getenv("THVM_DUMP_LIFT_REJECT");
-    if (e != NULL && e[0] == '1') {
+    int dump_on = (e != NULL && e[0] == '1');
+    if (dump_on) {
+      fprintf(stderr,
+              "lift reject: index/ndim-mismatch buf_ndim=%u src_count=%u\n",
+              ndim, u->src_count);
       fprintf(stderr, "  ndim-mismatch: outer_rank=%u dims=[", outer_rank);
       for (u32 d = 0; d < ndim; d++) {
         fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(buf, d));
