@@ -289,6 +289,27 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
       for (u32 d = 0; d < ndim; d++) {
         fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(buf, d));
       }
+      fputs("] range_extents=[", stderr);
+      // Dump per-axis-ref scalar source: extent for S_RANGE leaves,
+      // op-name for expressions.  This is what the earlier reverted
+      // axis-append attempt needed to design against -- knowing whether
+      // the ranges collectively span the buffer's numel and in what
+      // order is the prerequisite for a safe lift.
+      for (u32 d = 0; d < outer_rank; d++) {
+        u32 r_sid = u->src[1 + d];
+        if (d) fputc(',', stderr);
+        if (r_sid == 0 || r_sid >= ke->n_scalar_uops) {
+          fputs("?", stderr);
+          continue;
+        }
+        ScalarUop const *ru = &ke->scalar_uops[r_sid];
+        if (ru->op == S_RANGE) {
+          fprintf(stderr, "%u",
+                  (u32)(ru->extra & 0xFFFFFFFFu));
+        } else {
+          fprintf(stderr, "expr(op=%u)", (unsigned)ru->op);
+        }
+      }
       fputs("]\n", stderr);
     }
     return 0;
