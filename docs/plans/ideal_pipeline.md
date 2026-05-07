@@ -19,38 +19,48 @@ b226b7d9 refactor(metal): delete dead metal_try_cpu_small_add (F5)
 fc9e71bd refactor(metal): delete dead cg_supports_metal_reduce_expr (G0)
 ```
 
-## Significant lifter bug discovered (2026-05-07)
+## Two layered correctness bugs discovered (2026-05-07)
 
 When the test suite's M=N=K=16 matmul parity test (`ae9d0aa0`) was
 forced through render_uop via a wider `cg_tile_metal_dispatch_shape`
-fallback, output was wrong on every cell. Dumping the rendered MSL
-showed:
+fallback, output was wrong on every cell. Investigating the failure
+uncovered TWO bugs that compound -- fixing one exposes the next.
 
-```
-in0[(((a0 * 256) + (a2 * 16)) + a1)] * in1[(((a0 * 256) + (a2 * 16)) + a1)]
-```
+**Bug #1 (lifter EXPAND-residue address):** kernel_lift's
+ScalarUop walker computes addresses as `sum(range[d] * stride[d])`
+where `stride[d] = product(buf.dims[d+1..])` (row-major). For a
+buffer whose View is the EXPANDED form (`shape=[16,16,16]` for a
+TMatMul-shape A whose underlying storage is `[16,16]`), this gives
+`m*256 + k*16 + n` instead of the correct `m*16 + k`. The View's
+actual strides would be `[16, 1, 0]` (broadcast on N), but the
+lifter ignores `view.strides` and reconstructs from `view.shape`.
+**Fix:** pass `ke->input_views[slot].strides[d]` into the offset
+computation and skip terms where `stride == 0`.
 
-Both operands get the same flat-3D index `m*K*N + k*N + n`. A is a
-2D buffer of size 256, so `a0*256+...` walks past its end on the
-second iteration of `a0`. B's address is identical (wrong). The
-correct addresses are `m*K + k` for A and `k*N + n` for B.
+**Bug #2 (simdgroup multi-simdgroup race):** with bug #1 patched,
+the matmul DAG lifts to correct addresses (`m*16+k` for A), and
+`uop_recognise_tc` correctly wraps with `OPT(_, TC, 0)`. render_uop
+emits the simdgroup_matrix template. But the dispatch ladder binds
+the kernel with `output_numel = 256` total threads in one
+threadgroup -- 8 simdgroups of 32 threads. The simdgroup template
+writes to the same `out[a0*16+a1]` address from every simdgroup; on
+M3 this race produces garbage values (test got `16 -10 10 -16` vs
+correct `-189 -33 -38 -181`). **Fix:** either (a) emit the simdgroup
+template guarded by `if (simdgroup_index_in_threadgroup == 0) { ... }`
+so only one simdgroup writes (idle the others), or (b) change
+dispatch shape calc to bind exactly one simdgroup (32 threads, 1
+group) when the OPT(_, TC) shape is detected, or (c) emit a
+threadgroup-distributed template where each simdgroup writes a
+different output tile (cleanest, real win).
 
-Cause: kernel_lift's ScalarUop walker, when lifting an `S_INDEX`
-that addresses a buffer through a chain of RESHAPE+EXPAND residue
-(the rangeified TMatMul lowering), emits the EXPANDED-shape flat
-index instead of folding the EXPAND back to the underlying buffer's
-2D layout. tinygrad's `apply_movement_op` does this fold; thvm's B1
-movement-to-INDEX rules cover the LOAD side but not this S_INDEX
-case.
-
-This is the **real** F3.5 / F4 / F2 prerequisite. Until the lifter
-folds EXPAND-residue addresses correctly, render_uop can't take
-over kernels that go through rangeify's RESHAPE+EXPAND path -- which
-is most of TMatMul, TConv2D, and anything else built on broadcast
-semantics. The conservative dispatch-ladder state preserves
-correctness by routing those kernels through the legacy
-`metal_jit_encode` (path 7, KProgOp-flat shader) which computes
-addresses from KProgOp's per-op shape metadata directly.
+These are the **real** F3.5 / F4 / F2 prerequisites. Both fixes are
+substantial; an attempt at bug #1 alone reproduced bug #2 (256
+elements wrong with the lifter fix in place). The conservative
+dispatch-ladder state preserves correctness today by routing
+TMatMul-shape kernels through `metal_jit_encode` (path 7,
+KProgOp-flat shader), which computes addresses from KProgOp's
+per-op shape metadata directly and dispatches one-thread-per-output
+without simdgroup ops.
 
 The wedges in this campaign (G0/F1/F5/UP1/F3.1/F3.3/F3.4a/F3.4b/
 conv-gate/F3.5-template-fix/F3.5-test/F3.5-fallback-revert) are all
