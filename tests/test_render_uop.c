@@ -570,6 +570,65 @@ int main(void) {
     unlink(dl_path);
   }
 
+  TEST_BEGIN("render-uop-c/reduce-sum-runs");
+  {
+    // 2D input shape [4, 8]; sum-reduce over axis 1 -> output [4].
+    // y[i] = sum_{j=0..7} a[i*8 + j]
+    u32 dimsR[1] = { 4 };
+    u32 dimsRin[1] = { 32 };  // flat 4*8
+    Term outR = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsR, 0);
+    Term aR   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsRin, 1);
+    Term insR[1] = { aR };
+    Term r0   = uop_range(0, 0 /*LOOP*/, 4);
+    Term r1   = uop_range(1, 1 /*REDUCE*/, 8);
+    // Address: i*8 + j (linearised 2D access).
+    Term k8   = uop_const(DT_INT32, 8);
+    Term i_x_8 = uop_int_binary(UOP_IMUL, r0, k8);
+    Term addr  = uop_int_binary(UOP_IADD, i_x_8, r1);
+    Term lR   = uop_index_e(aR, addr);
+    Term red  = uop_reduce(REDUCE_SUM, /*axis=*/1, lR);
+    Term stR  = uop_store(outR, r0, red);
+    char src[4096];
+    fp = fmemopen(src, sizeof(src), "w");
+    cg_render_uop_kernel_c(stR, "k", outR, insR, 1, fp);
+    fclose(fp);
+    const char *src_path = "/tmp/thvm_f6_step6.c";
+    const char *dl_path  = "/tmp/thvm_f6_step6.dylib";
+    FILE *cf = fopen(src_path, "w");
+    fputs(src, cf);
+    fclose(cf);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+    int rc = system(cmd);
+    if (rc != 0) {
+      fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
+              src);
+    }
+    CHECK(rc == 0);
+    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+    CHECK(h != NULL);
+    typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *);
+    KFn kfn = (KFn)dlsym(h, "k");
+    CHECK(kfn != NULL);
+    float aa[32], yy[4];
+    for (u32 i = 0; i < 32; i++) aa[i] = (float)i;  // 0..31
+    const void *insp[1] = { aa };
+    unsigned numels[1] = { 32 };
+    kfn(yy, insp, 4, numels);
+    // y[0] = 0+1+2+...+7   = 28
+    // y[1] = 8+9+...+15    = 92
+    // y[2] = 16+17+...+23  = 156
+    // y[3] = 24+25+...+31  = 220
+    CHECK(yy[0] == 28.0f);
+    CHECK(yy[1] == 92.0f);
+    CHECK(yy[2] == 156.0f);
+    CHECK(yy[3] == 220.0f);
+    dlclose(h);
+    unlink(src_path);
+    unlink(dl_path);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
