@@ -40,6 +40,7 @@ TESTS := \
   $(BIN)/test_view_pad \
   $(BIN)/test_view_flip \
   $(BIN)/test_cpu_free_list \
+  $(BIN)/test_cpu_jit_via_uop \
   $(BIN)/test_slot_reuse \
   $(BIN)/test_heap_rooted_preserve \
   $(BIN)/test_gc_roots \
