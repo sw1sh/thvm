@@ -31,24 +31,6 @@
 // disables for benchmarks that want the old "leak everything"
 // behaviour.
 
-fn u32 kernel_gc_freelist_pop(void) {
-  // Slot reuse is intentionally disabled: surface UOP_KERNEL terms
-  // and TENS[].producer_kid references retain pointers to old kid
-  // slots after sweep, and a later realize can DFS-fire them via
-  // kernel_fire_by_id.  Stripping the program arrays makes the
-  // re-fire a no-op; reusing the slot for a different kernel would
-  // dispatch the new program against the old caller's input/output
-  // buffers.  Keep slots monotonic until a future fix tightens the
-  // re-fire path.
-  return 0;
-}
-
-fn void kernel_gc_reset(void) {
-  // No persistent state to reset (mark bitmap and freelist were
-  // removed alongside the slot-reuse path).  Kept as a public hook
-  // so thvm_init / thvm_free can call it without conditional code.
-}
-
 fn u32 kernel_gc_sweep(Term result) {
   (void)result;
   if (KERNELS_NEXT <= 1) return 0;

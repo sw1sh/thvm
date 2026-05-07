@@ -532,37 +532,6 @@ fn void tile_render_msl_skeleton(KernelEntry const *ke, FILE *fp) {
   fputs("}\n", fp);
 }
 
-// Phase F prep: explain why `ke` is or isn't renderable through the
-// tile path.  Returns a static string describing the first failure,
-// or "ok" when the kernel is fully renderable.  Used for diagnostics
-// when DUMP_TILE_REJECT=1; helps spot shapes that need Phase F
-// renderer extensions.
-fn const char *tile_reject_reason(KernelEntry const *ke) {
-  if (ke == NULL)                  return "ke=NULL";
-  if (ke->scalar_uops == NULL)     return "no scalar_uops";
-  if (ke->tile_uops == NULL)       return "no tile_uops";
-  if (ke->tile_root == 0)          return "tile_root=0";
-  if (ke->tile_root >= ke->n_tile_uops) return "tile_root out of range";
-  TileUop const *root = &ke->tile_uops[ke->tile_root];
-  if (root->op != TILE_LOOP_NEST
-      && root->op != TILE_MMA
-      && root->op != TILE_CONV2D)  return "root not LOOP_NEST/MMA/CONV2D";
-  if (root->op == TILE_LOOP_NEST) {
-    if (root->src_count < 2)       return "LOOP_NEST has no body+axes";
-    u32 store = root->src[0];
-    if (store >= ke->n_tile_uops || ke->tile_uops[store].op != TILE_STORE) {
-      return "LOOP_NEST.src[0] not TILE_STORE";
-    }
-    for (u8 s = 1; s < root->src_count; s++) {
-      u32 ax = root->src[s];
-      if (ax >= ke->n_tile_uops || ke->tile_uops[ax].op != TILE_AXIS) {
-        return "LOOP_NEST has non-AXIS src";
-      }
-    }
-  }
-  return "ok";
-}
-
 fn const char *tile_op_name(u8 op) {
   switch (op) {
     case TILE_NONE:        return "TILE_NONE";

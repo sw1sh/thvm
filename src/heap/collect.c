@@ -320,12 +320,3 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   //    behind are stale by definition.
 }
 
-// Convenience: collect using the standard root set (result + extern
-// pins + DEFS + WNF_LAST_STACK).  Returns the (possibly relocated)
-// result Term.
-fn Term gc_collect_with(Term result) {
-  if (!GC_ENABLED) return result;
-  Term roots[1] = { result };
-  gc_collect(roots, 1);
-  return roots[0];
-}

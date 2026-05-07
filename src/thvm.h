@@ -1396,7 +1396,6 @@ fn u64  gc_from_start(void);
 fn u64  gc_from_end(void);
 fn u64  gc_count(void);
 fn void gc_collect(Term *roots, u32 n_roots);
-fn Term gc_collect_with(Term result);
 
 // === book heap (static templates) ===
 fn u64  book_alloc(u64 size);
@@ -1836,8 +1835,6 @@ fn int kernel_apply_opt(struct KernelEntry *ke, KOpt opt);
 // loops (M4 of the beautiful-mnist parity arc).  See kernel_gc.c
 // header for why slot ids are intentionally NOT recycled.
 fn u32  kernel_gc_sweep(Term result);
-fn u32  kernel_gc_freelist_pop(void);
-fn void kernel_gc_reset(void);
 
 // === scalar UOp arena ops (schedule/rangeify.c) ===
 // Reserve room on a kernel's scalar_uops[] array.  Geometric
@@ -1915,10 +1912,6 @@ fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
 // info for a real renderer; doesn't substitute scalar bodies (that's
 // the existing rmt_emit_value).
 fn void tile_render_msl_skeleton(struct KernelEntry const *ke, FILE *fp);
-
-// Diagnostic: returns a static string explaining why `ke` would fail
-// the tile-render path, or "ok" if the structure is valid.
-fn const char *tile_reject_reason(struct KernelEntry const *ke);
 
 // Tile-IR-native dispatch shape.  Walks tile_root's
 // TILE_AXIS children and computes (groups, threads) directly from
