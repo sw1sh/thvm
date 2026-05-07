@@ -544,40 +544,56 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     return 0;
   }
 
-  // Emit output-range loops.  Reuse the F1e structure but simplified
-  // (no UNROLL pragmas yet for TC; F2c can layer those).
-  Term out_ranges[MAX_DIM];
-  u32  out_kinds[MAX_DIM]   = {0};
-  u32  out_factors[MAX_DIM] = {0};
-  u32  opt_kinds[MAX_DIM]   = {0};
-  u32  opt_factors[MAX_DIM] = {0};
-  Term combined[MAX_DIM];
-  u32  n_combined = 0;
-  rmu_collect_ranges_with_opts(addr_c, combined, opt_kinds, opt_factors, &n_combined);
-  // Don't include red_src ranges in outer loops -- the K range is
-  // consumed by the simdgroup loop.
-  u32 n_out = 0;
-  for (u32 i = 0; i < n_combined; i++) {
-    u32 axis_id = term_val(heap_read(term_val(combined[i]) + 0));
-    if (axis_id == red_axis) continue;
-    out_ranges [n_out] = combined  [i];
-    out_kinds  [n_out] = opt_kinds  [i];
-    out_factors[n_out] = opt_factors[i];
-    n_out++;
+  // Identify M-axis (in addr_a, not red) and N-axis (in addr_b, not
+  // red).  We need each extent + axis_id so the outer loops can step
+  // by 8 (matching simdgroup tile size) and the addresses still
+  // reference the correct loop variables.
+  u32 m_axis_id = 0xFFFFFFFFu, m_extent = 0;
+  u32 n_axis_id_v = 0xFFFFFFFFu, n_extent = 0;
+  {
+    Term ra[MAX_DIM]; u32 ra_n = 0;
+    rmu_collect_ranges(addr_a, ra, &ra_n);
+    for (u32 i = 0; i < ra_n; i++) {
+      u32 aid = term_val(heap_read(term_val(ra[i]) + 0));
+      if (aid != red_axis) {
+        m_axis_id = aid;
+        m_extent = (u32)term_val(heap_read(term_val(ra[i]) + 2));
+        break;
+      }
+    }
+    Term rb[MAX_DIM]; u32 rb_n = 0;
+    rmu_collect_ranges(addr_b, rb, &rb_n);
+    for (u32 i = 0; i < rb_n; i++) {
+      u32 aid = term_val(heap_read(term_val(rb[i]) + 0));
+      if (aid != red_axis) {
+        n_axis_id_v = aid;
+        n_extent = (u32)term_val(heap_read(term_val(rb[i]) + 2));
+        break;
+      }
+    }
+  }
+  if (m_extent == 0 || n_extent == 0
+      || (m_extent % 8) != 0 || (n_extent % 8) != 0
+      || m_axis_id == 0xFFFFFFFFu || n_axis_id_v == 0xFFFFFFFFu) {
+    // M/N also need to be 8-tiled for simdgroup_matrix<8,8>; bail.
+    return 0;
   }
 
-  u32 body_depth = depth;
-  int needs_close[MAX_DIM] = {0};
-  for (u32 i = 0; i < n_out; i++) {
-    Term r = out_ranges[i];
-    u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
-                  ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
-    int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type);
-    rmu_emit_range_open(r, fp, body_depth, out_kinds[i]);
-    if (!threadbound) { needs_close[i] = 1; body_depth++; }
-  }
+  // Emit the simdgroup template body.  Outer M and N loops step by 8
+  // (one 8x8 tile per iteration); inner K loop steps by 8 too.
+  // simdgroup_load/store carry explicit elements_per_row equal to
+  // the row stride: K for A (m*K+k), N for B (k*N+n) and C (m*N+n).
+  // Without those args, simdgroup_{load,store} default to
+  // elements_per_row = Cols = 8, which silently mis-strides for any
+  // shape with K or N != 8.
+  for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+  fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+          m_axis_id, m_axis_id, m_extent, m_axis_id);
+  for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+  fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+          n_axis_id_v, n_axis_id_v, n_extent, n_axis_id_v);
+  u32 body_depth = depth + 2;
 
-  // Emit the simdgroup template body.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("/* TC simdgroup_matrix matmul */\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
@@ -592,11 +608,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fprintf(fp, "simdgroup_load(_a_mat, &%s[", rmu_buf_name(buf_a));
   rmu_emit_term(addr_a, fp);
-  fputs("]);\n", fp);
+  fprintf(fp, "], %u);\n", k_extent);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fprintf(fp, "simdgroup_load(_b_mat, &%s[", rmu_buf_name(buf_b));
   rmu_emit_term(addr_b, fp);
-  fputs("]);\n", fp);
+  fprintf(fp, "], %u);\n", n_extent);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fputs("simdgroup_multiply_accumulate(_c_mat, _a_mat, _b_mat, _c_mat);\n", fp);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
@@ -604,16 +620,13 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "simdgroup_store(_c_mat, &%s[", rmu_buf_name(buf_c));
   rmu_emit_term(addr_c, fp);
-  fputs("]);\n", fp);
+  fprintf(fp, "], %u);\n", n_extent);
 
-  // Close output loops.
-  for (i32 i = (i32)n_out - 1; i >= 0; i--) {
-    if (!needs_close[i]) continue;
-    body_depth--;
-    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    fputs("}\n", fp);
-  }
-  (void)out_factors;
+  // Close N then M loops.
+  for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+  fputs("}\n", fp);
+  for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+  fputs("}\n", fp);
   return 1;
 }
 
