@@ -466,18 +466,17 @@ buildProofDataset[traceRecords_List, conjecture_, rev_Association] := Module[
                                      "Proof"     -> <||>|>;
                     traceIdxToKey[rec["Index"]] = key,
                 "orient",
-                    (* Fold the orient step's lhs/rhs into the source
-                       axiom's Statement so the dataset shows the
-                       oriented form (matches what WL does at line 587-
-                       597 of EquationalProof.m).  Also accumulate the
-                       directional rule for the Conclusion synthesizer. *)
+                    (* Don't overwrite the Axiom's Statement -- thvm's
+                       orient steps are fully-normalized across already-
+                       oriented rules, so the orient lhs/rhs is often a
+                       derived form (e.g. axiom b == c oriented after
+                       a -> b becomes c == a, which doesn't match the
+                       original axiom).  Keep original axiom statements
+                       and just accumulate the orient rule for the
+                       Conclusion synthesizer. *)
                     parentIdx = If[ Length[rec["Parents"]] >= 1,
                                     rec["Parents"][[1]], -1];
                     parentKey = Lookup[traceIdxToKey, parentIdx, None];
-                    If[ parentKey =!= None,
-                        entries[parentKey] = <|
-                            "Statement" -> Equal[lhs, rhs],
-                            "Proof"     -> <||>|>];
                     AppendTo[orientedRules, Rule[lhs, rhs]];
                     traceIdxToKey[rec["Index"]] = parentKey,
                 "cp",
