@@ -1194,15 +1194,17 @@ fn int cpu_jit_dispatch        (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id
 fn int cpu_uop_walk            (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 
 // F6-finish (b): does the per-call gate let cpu_uop_walk fire?
-// Default-OFF on the initial landing (this commit); flipped in a
-// follow-up after surgical-suite bit-equal validation under env-on.
-// THVM_CPU_UOP_WALK=1 enables; bisection knob mirrors F6 step-10's
-// THVM_CPU_JIT_VIA_UOP discipline.
+// Default-ON after surgical-suite bit-equal validation. Bisection knob
+// `THVM_CPU_UOP_WALK=0` falls back to the legacy cpu_jit_dispatch +
+// cpu_interpret path (mirrors F6 step-10's THVM_CPU_JIT_VIA_UOP=0
+// discipline). The walker fires AHEAD of cpu_jit_dispatch in the
+// dispatch ladder, so every kernel the lifter accepts goes through the
+// UOp DAG evaluator -- no clang-compile, no warmup gate.
 static int cpu_uop_walk_enabled(void) {
   static int known = 0, enabled = 0;
   if (!known) {
     char const *e = getenv("THVM_CPU_UOP_WALK");
-    enabled = (e != NULL && e[0] == '1');
+    enabled = (e == NULL) ? 1 : (e[0] != '0');
     known = 1;
   }
   return enabled;
