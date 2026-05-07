@@ -378,9 +378,25 @@ static u32 sim_kop_history(KOpt const *applied_opts, u32 n_applied,
       u8 t = desired_out[a];
       desired_out[a] = desired_out[b];
       desired_out[b] = t;
+    } else if (op == KOP_TC) {
+      // Phase E7: KOP_TC is kernel-aware metadata (tensor-core hint
+      // recognised by render_uop's rmu_detect_matmul_tc /
+      // rmu_emit_matmul_tc and by uop_recognise_tc which installs the
+      // UOP_OPT(_, TC, 0) wrapper around the matmul reduce).  It does
+      // NOT mutate axis_types in either codegen/apply_opt.c (where
+      // kernel_apply_opt routes TC to tile_anno_record_opt without
+      // touching ax->axis_types[]) or in kernel_lift.c's structural
+      // replay (which explicitly skips KOP_TC: "Tensor-core opt is
+      // metadata-only; pattern-matched in render").  We make the
+      // no-op explicit here so the simulation enumerates every KOP_*
+      // class and KOP_TC composes safely with later GLOBAL/SWAP/SPLIT
+      // entries (the autotune sequence guard requires TC to appear at
+      // index 0, but the rule must still produce the same desired[]
+      // when callers pass an applied_opts list whose TC entry happens
+      // to land elsewhere -- e.g. test seams or future relaxations).
     }
-    // Other opts (KOP_TC, KOP_PADTO, KOP_NOLOCALS) are out of scope;
-    // they don't mutate axis_types in apply_opt.c either.
+    // Remaining opts (KOP_PADTO, KOP_NOLOCALS) are reserved and not
+    // emitted by any current producer; they're out of scope for E*.
   }
   return n_cur;
 }
@@ -428,4 +444,90 @@ fn Term uop_apply_kop_split(Term root, KOpt const *applied_opts,
                             u32 n_applied) {
   UopApplyOptCtx ctx = { applied_opts, n_applied };
   return uop_pattern_rewrite(root, upat_kop_split_rules, 1, &ctx);
+}
+
+// === Phase E7: KOP_TC UPatRule mirror ================================
+//
+// codegen/apply_opt.c:116-132 routes KOP_TC through `kernel_apply_opt`
+// (NOT axes_apply_opt): it validates the axis index and the requested
+// MMA tile, calls tile_analyze_gemm to confirm the kernel's matmul
+// shape + DT_FP32 dtype, and on success records the opt via
+// `tile_anno_record_opt` -- which appends the opt to applied_opts[]
+// and bumps version WITHOUT touching ax->axis_types[] or
+// ax->full_shape[].  kernel_lift.c:1628-1629 mirrors the same
+// "metadata-only" treatment in its structural replay
+// ("Tensor-core opt is metadata-only; pattern-matched in render").
+//
+// Concretely: KOP_TC's KernelAxes mutation is the empty mutation.  Its
+// downstream effect lives entirely in render_uop.c
+// (rmu_detect_matmul_tc / rmu_emit_matmul_tc) and the producer
+// uop_recognise_tc, both of which key off the UOP_OPT(_, TC, 0)
+// wrapper installed structurally on the matmul reduce -- not off
+// any UOP_RANGE.axis_type stamp.
+//
+// === This rule's job =================================================
+//
+// Mirror that empty mutation declaratively, sharing the same
+// `sim_kop_history` simulation as KOP_GLOBAL/SWAP/SPLIT so callers
+// who feed `applied_opts` containing a KOP_TC entry alongside other
+// opts get the SAME desired[] outcome they would get from the
+// existing combined rule.  The shared simulation already enumerates
+// KOP_TC explicitly (see the KOP_TC branch in sim_kop_history above)
+// so the rule body and dispatch are identical to the split-class
+// rule -- a separate public entry just lets callers name "TC was
+// applied" at the API level for symmetry with E2/E3/E4-E6.
+//
+// In practice the autotune sequence guard
+// (kautotune_seq_can_append in src/codegen/autotune.c) restricts
+// KOP_TC to the FIRST entry of an opts sequence, so applied_opts in
+// the autotune flow is either {TC} alone (for which the rule produces
+// desired = [LOOP, LOOP, ...] -- a no-op) or {TC, ...other ops...} (in
+// which case the rule produces the same desired[] the post-TC opts
+// would produce on their own).  Idempotent: desired[a] is a pure
+// function of applied_opts -- KOP_TC contributes nothing.
+
+// rule body: matches a UOP_RANGE leaf, simulates the full applied_opts
+// history (including any KOP_TC entries -- explicit no-ops) on
+// desired[MAX_AXES], and rewrites the leaf to its post-replay
+// axis_type when different from the current one.  Identical to
+// rw_kop_split_stamp; lifted as a separate symbol for clarity at the
+// rule-table level.
+static Term rw_kop_tc_stamp(Term const *bindings, void *ctx_in) {
+  Term range = bindings[0];
+  if (term_tag(range) != TAG_UOP || term_ext(range) != UOP_RANGE) return 0;
+
+  UopApplyOptCtx const *ctx = (UopApplyOptCtx const *)ctx_in;
+  if (ctx == NULL || ctx->applied_opts == NULL || ctx->n_applied == 0) {
+    return 0;
+  }
+
+  u8 desired[MAX_AXES];
+  u32 n_cur = sim_kop_history(ctx->applied_opts, ctx->n_applied, desired);
+  (void)n_cur;
+
+  u32 axis_id = uop_range_axis_id(range);
+  if (axis_id >= MAX_AXES) return 0;
+  u8  cur_at  = (u8)uop_range_axis_type(range);
+  if (desired[axis_id] == cur_at) return 0;
+  return uop_range_with_axis_type(range, desired[axis_id]);
+}
+
+static UPat const upat_kop_tc_range = {UOP_RANGE, 0, 0, 0, NULL, NULL};
+
+static UPatRule const upat_kop_tc_rules[1] = {
+  {&upat_kop_tc_range, rw_kop_tc_stamp},
+};
+
+// Public entry: walk the DAG rooted at `root`, simulating the full
+// applied_opts history (including any KOP_TC entries, which are
+// explicit no-ops at the axis_type level) and stamping each UOP_RANGE
+// leaf with its post-replay axis_type.  KOP_TC does not mutate
+// axis_type in either codegen/apply_opt.c or kernel_lift.c
+// structural-replay -- see the file-header block above for the
+// detailed semantics.  Idempotent: desired[a] is a pure function of
+// applied_opts.
+fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
+                        u32 n_applied) {
+  UopApplyOptCtx ctx = { applied_opts, n_applied };
+  return uop_pattern_rewrite(root, upat_kop_tc_rules, 1, &ctx);
 }

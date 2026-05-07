@@ -2234,6 +2234,26 @@ fn Term uop_apply_kop_swap(Term root, KOpt const *applied_opts,
 fn Term uop_apply_kop_split(Term root, KOpt const *applied_opts,
                             u32 n_applied);
 
+// === Phase E7: KOP_TC UPatRule mirror (src/uop/apply_opt.c) =========
+// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf with
+// the axis_type produced by simulating the full applied_opts history
+// on a desired[MAX_AXES] vector.  KOP_TC is kernel-aware metadata
+// (tensor-core hint) and contributes NO axis_type mutation: its
+// effect lives in render_uop.c's matmul-TC pattern matcher and the
+// uop_recognise_tc producer that wraps the matmul reduce in
+// UOP_OPT(_, TC, 0).  This rule mirrors codegen/apply_opt.c's
+// kernel_apply_opt routing of KOP_TC through tile_anno_record_opt
+// (which appends to applied_opts[] without touching axis_types[]),
+// and kernel_lift.c's structural-replay treatment ("Tensor-core opt
+// is metadata-only; pattern-matched in render").  Composes with the
+// other E* opts via the shared `sim_kop_history` simulation; in
+// practice autotune emits TC alone or as the FIRST of a multi-opt
+// sequence (kautotune_seq_can_append).  Idempotent: desired[a] is a
+// pure function of applied_opts -- KOP_TC contributes nothing.  See
+// docs/plans/ideal_pipeline.md row E.
+fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
+                        u32 n_applied);
+
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
