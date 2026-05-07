@@ -1874,6 +1874,12 @@ fn void axes_default_for(struct KernelEntry *ke);
 // Supplement default axes with the scalar reduce range after rangeify.
 // This exposes non-tail scalar reductions to tile GROUP / UNROLL opts.
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke);
+// E9-prep wedge 3: predicate that mirrors the legacy
+// `axes_has_reduce_axis(ke->axes)` answer without reading
+// `ke->axes->axis_types[]`.  Walks the higher-level signals each
+// REDUCE-class writer leaves (program tail UOP_REDUCE, applied_opts
+// log carrying KOP_GROUP / KOP_GROUPTOP, scalar arena reduce extent).
+fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
 
 // Apply one TOpt to the axis structure: split the indicated axis,
 // mark the new inner axis with the opt's KAX_ type (UPCAST/UNROLL/
