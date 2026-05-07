@@ -247,18 +247,14 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     if (!jfn) return 0;
   }
 
-  // Skip the JIT path if any input is a non-contiguous view -- the
-  // Codegen-time strided-index inlining (render_c emits
-  // `in%u[s0*c0(i) + ... + offset]` for non-contig single-view
-  // inputs, mirroring tinygrad's View.to_indexed_uops) is wired
-  // and correct, but currently gated behind THVM_JIT_STRIDED=1.
-  // Without the gate, every unique stride pattern hits a fresh
-  // clang compile, doubling LeNet wallclock for one-shot training
-  // kernels.  Tinygrad amortizes via aggressive persistent
-  // caching; we'll enable by default once the cross-process JIT
-  // cache is warm enough for training-loop strides.  Multi-view
-  // chain inputs always bail (codegen would need to compose
-  // through prior_views per access, not implemented).
+  // Skip the JIT path if any input is a non-contiguous view --
+  // gated behind THVM_JIT_STRIDED=1.  Each unique stride pattern
+  // hits a fresh clang compile (cpu_jit_hash includes view stride
+  // info), which doubles LeNet wallclock for one-shot training
+  // kernels without persistent compile-cache amortization.
+  // Render_uop_c (post-F6) handles non-contig views correctly via
+  // kernel_lift's view.strides path -- the gate is purely a perf
+  // knob, not a correctness one.
   static int strided_jit_known = 0, strided_jit_enabled = 0;
   if (!strided_jit_known) {
     char const *e = getenv("THVM_JIT_STRIDED");
@@ -268,12 +264,6 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
     if (tid == 0 || tid >= TENS_NEXT) continue;
-    // Same gate for both single-view non-contig and multi-view
-    // chains: render_c emits inline strided index expressions
-    // (single-view) or a per-input idx helper (chain), both
-    // composing to the buffer offset at codegen time.  Disable
-    // by default until the JIT cache amortizes the per-stride-
-    // pattern compile cost.
     if (TENS[tid].nviews > 0 || !TENS[tid].view.contiguous) {
       if (!strided_jit_enabled) return 0;
     }
