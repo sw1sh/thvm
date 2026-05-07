@@ -75,15 +75,45 @@ static u32 axes_scalar_reduce_extent(KernelEntry const *ke) {
   return 0;
 }
 
-static int axes_has_reduce_axis(KernelAxes const *ax) {
-  if (ax == NULL) {
+// E9-prep wedge 3: predicate that answers "will ke->axes carry a
+// REDUCE-class axis (KAX_REDUCE or KAX_GROUP_REDUCE)?" without reading
+// `ke->axes->axis_types[]`.  It mirrors the writer side exactly: every
+// production writer of a REDUCE-class entry leaves a higher-level
+// signal that this predicate consults.
+//
+//   1. axes_default_for appends a trailing KAX_REDUCE iff the kernel
+//      program ends in UOP_REDUCE.  Signal: ke->program tail opcode.
+//   2. axes_apply_opt(KOP_GROUP / KOP_GROUPTOP) splits an axis and
+//      marks the new inner with KAX_GROUP_REDUCE.  Signal: applied_opts
+//      log carries one of those op codes.  No other axes_apply_opt
+//      class introduces a REDUCE-class type, and SWAP/UPCAST/UNROLL/
+//      LOCAL/GLOBAL preserve any REDUCE outer that was already there.
+//   3. axes_ensure_scalar_reduce appends a trailing KAX_REDUCE when
+//      the scalar arena carries an S_REDUCE_* over an S_AXIS_REDUCE
+//      range.  Signal: axes_scalar_reduce_extent(ke) != 0.
+//
+// All three signals are read-only over the kernel program / scalar
+// arena / applied_opts log, never axis_types[].  Used by:
+//   - kernel_lift.c's test-seam guard (tests for a REDUCE before
+//     deciding whether the single-origin linearisation is safe).
+fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
+  if (ke == NULL) {
     return 0;
   }
-  for (u32 i = 0; i < ax->n_axes; i++) {
-    if (ax->axis_types[i] == KAX_REDUCE
-        || ax->axis_types[i] == KAX_GROUP_REDUCE) {
-      return 1;
+  if (ke->n_ops > 0 && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
+    return 1;
+  }
+  if (ke->axes != NULL) {
+    KOpt const *opts = ke->axes->applied_opts;
+    u32 n_applied = (u32)ke->axes->n_applied;
+    for (u32 i = 0; i < n_applied; i++) {
+      if (opts[i].op == KOP_GROUP || opts[i].op == KOP_GROUPTOP) {
+        return 1;
+      }
     }
+  }
+  if (axes_scalar_reduce_extent(ke) != 0) {
+    return 1;
   }
   return 0;
 }
@@ -95,7 +125,20 @@ fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   if (ke->axes->n_axes == 0) {
     axes_default_for(ke);
   }
-  if (axes_has_reduce_axis(ke->axes)) {
+  // E9-prep wedge 3: skip-if-already-have-REDUCE without reading
+  // axis_types[].  At this callsite (post axes_default_for, before
+  // autotune) n_applied == 0 and the only axis-structure writer that
+  // has run is axes_default_for itself (one LOOP per output dim plus
+  // an optional trailing REDUCE) or a previous axes_ensure_scalar_reduce
+  // (one trailing REDUCE).  In both cases the trailing-REDUCE signal
+  // is `n_axes > nd_output_clipped`: default-for adds nd_output LOOPs
+  // and at most one trailing axis, so any axis past the LOOP block is
+  // exactly the REDUCE we'd otherwise duplicate.
+  u32 nd = ke->output_shape.ndim;
+  if (nd > MAX_AXES - 1) {
+    nd = MAX_AXES - 1;
+  }
+  if (ke->axes->n_axes > nd) {
     return;
   }
   u32 extent = axes_scalar_reduce_extent(ke);

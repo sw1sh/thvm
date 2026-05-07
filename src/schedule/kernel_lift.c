@@ -1548,15 +1548,37 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   //
   //   3. Test-seam (n_axes > n_buf, n_buf == 1) still bails on
   //      reduce-tail axes because the linearisation across LOOP +
-  //      REDUCE into a single origin would be wrong.  Detected via
-  //      the axis_types[] scan below.
-  int has_reduce_axis = 0;
-  if (kax != NULL) {
-    for (u32 a = 0; a < kax->n_axes; a++) {
-      if (kax->axis_types[a] == KAX_REDUCE
-          || kax->axis_types[a] == KAX_GROUP_REDUCE) {
-        has_reduce_axis = 1;
-        break;
+  //      REDUCE into a single origin would be wrong.  E9-prep wedge 3
+  //      replaced the `axis_types[]` scan here with the higher-level
+  //      `axes_will_have_reduce_axis` predicate (program tail UOP_REDUCE
+  //      | applied_opts has KOP_GROUP/GROUPTOP | scalar arena reduce
+  //      extent != 0) so this reader no longer touches axis_types[].
+  int has_reduce_axis = axes_will_have_reduce_axis(ke);
+  // Validation: when THVM_E9_VALIDATE=1, also compute the legacy
+  // axis_types[] scan and abort on disagreement.  Once the surgical
+  // suite proves equivalence, wedge 3 can land cleanly.
+  {
+    char const *val_e = getenv("THVM_E9_VALIDATE");
+    if (val_e != NULL && val_e[0] == '1' && kax != NULL) {
+      int legacy = 0;
+      for (u32 a = 0; a < kax->n_axes; a++) {
+        if (kax->axis_types[a] == KAX_REDUCE
+            || kax->axis_types[a] == KAX_GROUP_REDUCE) {
+          legacy = 1;
+          break;
+        }
+      }
+      if (legacy != has_reduce_axis) {
+        fprintf(stderr,
+                "thvm: THVM_E9_VALIDATE wedge-3: axes_will_have_reduce_axis"
+                " disagreed with axis_types[] scan (predicate=%d, legacy=%d);"
+                " n_axes=%u n_applied=%u n_ops=%u tail_op=%u\n",
+                has_reduce_axis, legacy,
+                (u32)kax->n_axes, (u32)kax->n_applied,
+                (u32)ke->n_ops,
+                (ke->n_ops > 0)
+                    ? (u32)ke->program[ke->n_ops - 1].opcode : 0u);
+        abort();
       }
     }
   }
