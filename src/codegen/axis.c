@@ -246,6 +246,67 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
   return n;
 }
 
+// E9-prep wedge 7: single resolve point for kax_type reads outside
+// the writer trio.  Prefers the wedge-4 simulator output (authoritative
+// when the writer trio has run for-real; n_applied > 0) and falls back
+// to the legacy ke->axes->axis_types[d] array only when the simulator
+// can't speak (n_applied == 0 hand-write tests + the 2 documented
+// wedge-6 residuals in test_tile_graph).  Centralizing the legacy
+// fallback here means tile_anno.c carries zero direct axis_types[i]
+// reads -- the keystone for the upcoming E9 deletion of the
+// KernelAxes.axis_types[] field.
+//
+// Under THVM_E9_VALIDATE=1, cross-checks the simulator output against
+// the legacy array on the n_applied > 0 path; aborts loudly on
+// divergence (signals an undocumented writer outside the trio or a
+// simulator bug).  On the n_applied == 0 path prints a tolerated
+// hand-write note (matches the diagnostic in
+// tile_emit_axes_from_kernel_signals).
+//
+// Returns the resolved kax_type (KAX_*) for axis `d`.  When ke / axes
+// are NULL or `d >= n_axes`, returns KAX_LOOP as a safe default.
+fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
+  if (ke == NULL || ke->axes == NULL || d >= ke->axes->n_axes) {
+    return KAX_LOOP;
+  }
+  u8 types[MAX_AXES] = {0};
+  u32 n = axes_compute_axis_types(ke, types, MAX_AXES);
+  int sim_ok = (n != 0 && n == ke->axes->n_axes && d < n);
+  int n_applied = (int)ke->axes->n_applied;
+
+  char const *val_e = getenv("THVM_E9_VALIDATE");
+  int validate_on = (val_e != NULL && val_e[0] == '1');
+  if (validate_on && sim_ok) {
+    if (types[d] != ke->axes->axis_types[d]) {
+      if (n_applied > 0) {
+        fprintf(stderr,
+                "thvm: THVM_E9_VALIDATE wedge-7: axes_resolve_kax_type "
+                "divergence at axis %u: legacy=%u, simulated=%u "
+                "(n_applied=%u, output_ndim=%u, n_axes=%u).\n",
+                d, (u32)ke->axes->axis_types[d], (u32)types[d],
+                (u32)ke->axes->n_applied, (u32)ke->output_shape.ndim,
+                (u32)ke->axes->n_axes);
+        abort();
+      } else {
+        fprintf(stderr,
+                "thvm: THVM_E9_VALIDATE wedge-7: n_applied==0 hand-write "
+                "at axis %u: legacy=%u, simulated=%u "
+                "(output_ndim=%u, n_axes=%u). Wedge-6 residual.\n",
+                d, (u32)ke->axes->axis_types[d], (u32)types[d],
+                (u32)ke->output_shape.ndim, (u32)ke->axes->n_axes);
+      }
+    }
+  }
+
+  if (sim_ok && n_applied > 0) {
+    return types[d];
+  }
+  // Hand-write fallback: read the legacy backing store directly.  This
+  // is the ONLY remaining axis_types[] read in codegen/, kept alive
+  // until the 2 wedge-6 residual tests rebuild against the writer trio.
+  return ke->axes->axis_types[d];
+}
+
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   if (ke == NULL || ke->axes == NULL) {
     return;
