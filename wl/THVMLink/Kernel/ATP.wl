@@ -30,9 +30,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the IC-native ATP and returns a TProofObject mimicking the shape and access interface of the built-in FindEquationalProof[conjecture, axioms]'s ProofObject.  Properties (use string-key lookup p[\"Variables\"], etc.): Logic, Axioms, Variables, Constants, Theorems, ProofLength, ProofDataset, ProofGraph.  ProofDataset entries are keyed by {Axiom|Hypothesis|SubstitutionLemma|Conclusion, k} with Statement and Proof sub-fields.  Returns $Failed if the prover times out or queue empties without proving.  Custom head TProofObject avoids WL's ProofObject auto-dispatch back to FindEquationalProof.";
-
-TProofObject::usage = "TProofObject[<|properties|>] is a wrapper for thvm's ATP proofs that mirrors the property-lookup interface of WL's built-in ProofObject head -- e.g. p[\"ProofDataset\"], p[\"Properties\"].  Returned by TFindEquationalProof.";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the IC-native ATP and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  The 4th-arg Association is built to satisfy ProofObjectQ, which causes WL to skip its auto-dispatch back to FindEquationalProof and preserve thvm's data.  ProofDataset entries are keyed by {\"Axiom\" | \"Hypothesis\" | \"SubstitutionLemma\" | \"Conclusion\", k} with Statement and Proof sub-fields.  Returns $Failed if the prover times out or queue empties without proving.";
 
 Begin["`Private`"];
 
@@ -435,10 +433,10 @@ parsePrettyTermAt[text_String, pos_Integer, rev_Association] := Module[
 
 (* Use the System` symbols ProofObject's keys are built from, so
    our ProofDataset matches the FindEquationalProof shape exactly. *)
-$AxiomSym             = System`Axiom;
-$HypothesisSym        = System`Hypothesis;
-$SubstitutionLemmaSym = System`SubstitutionLemma;
-$ConclusionSym        = System`Conclusion;
+$AxiomSym             = "Axiom";
+$HypothesisSym        = "Hypothesis";
+$SubstitutionLemmaSym = "SubstitutionLemma";
+$ConclusionSym        = "Conclusion";
 
 (* Build the proof association expected by ProofObject's metadata
    slot: <|{Axiom, k} -> <|Statement, Proof|>, ...|>.  Walks the
@@ -464,22 +462,31 @@ buildProofDataset[traceRecords_List, conjecture_, rev_Association] := Module[
                     traceIdxToKey[rec["Index"]] = key,
                 "orient",
                     (* Orient is the KBO-oriented form of an axiom.
-                       Surface as a SubstitutionLemma so the ProofDataset
-                       captures the directional rewrite the saturation
-                       used. *)
+                       Surface as a SubstitutionLemma whose Proof
+                       points back to the source axiom; treat the
+                       construct as the same axiom (self-rewrite) so
+                       WL's ProofFunction renderer gets a complete
+                       set of keys. *)
                     lemmaCount += 1;
                     key = {$SubstitutionLemmaSym, lemmaCount};
-                    entries[key] = <|
-                        "Statement" -> Equal[lhs, rhs],
-                        "Proof" -> <|
-                            "Input" -> If[Length[rec["Parents"]] >= 1,
-                                Lookup[traceIdxToKey, rec["Parents"][[1]], None],
-                                None],
-                            "Position"        -> {},
-                            "Orientation"     -> 1,
-                            "Source"          -> "orient"
+                    Module[{parentKey = If[Length[rec["Parents"]] >= 1,
+                        Lookup[traceIdxToKey, rec["Parents"][[1]], None], None]},
+                        entries[key] = <|
+                            "Statement" -> Equal[lhs, rhs],
+                            "Proof" -> <|
+                                "Input"            -> parentKey,
+                                "Construct"        -> parentKey,
+                                "Position"         -> {},
+                                "Rule"             -> Rule[lhs, rhs],
+                                "Orientation"      -> 1,
+                                "ConstructSide"    -> 1,
+                                "InputOrientation" -> 1,
+                                "Side"             -> 1,
+                                "OutputExpression" -> Equal[lhs, rhs],
+                                "Source"           -> "orient"
+                            |>
                         |>
-                    |>;
+                    ];
                     traceIdxToKey[rec["Index"]] = key,
                 "cp",
                     lemmaCount += 1;
@@ -493,12 +500,14 @@ buildProofDataset[traceRecords_List, conjecture_, rev_Association] := Module[
                             "Construct" -> If[Length[rec["Parents"]] >= 2,
                                 Lookup[traceIdxToKey, rec["Parents"][[2]], None],
                                 None],
-                            "Position"        -> {},
-                            "Orientation"     -> 1,
-                            "ConstructSide"   -> 1,
-                            "InputOrientation"-> 1,
-                            "Side"            -> 1,
-                            "Source"          -> "cp"
+                            "Position"         -> {},
+                            "Rule"             -> Rule[lhs, rhs],
+                            "Orientation"      -> 1,
+                            "ConstructSide"    -> 1,
+                            "InputOrientation" -> 1,
+                            "Side"             -> 1,
+                            "OutputExpression" -> Equal[lhs, rhs],
+                            "Source"           -> "cp"
                         |>
                     |>;
                     traceIdxToKey[rec["Index"]] = key
@@ -515,54 +524,25 @@ buildProofDataset[traceRecords_List, conjecture_, rev_Association] := Module[
         entries[{$ConclusionSym, 1}] = entries[conclusionKey];
         KeyDropFrom[entries, conclusionKey]
     ];
-    (* Re-order: Axioms first, then Hypothesis, then SubstitutionLemmas, then Conclusion. *)
-    KeySort[entries, OrderedQ[{$ProofKeyOrder[#1], $ProofKeyOrder[#2]}] &]
+    (* Re-order: Axioms first, then Hypothesis, then SubstitutionLemmas,
+       then Conclusion.  Return as a LIST of Rules (NOT an Association)
+       so it matches WL's $ProofPattern = {({_String, _Integer} ->
+       _Association)...}, satisfying ProofObjectQ and skipping the
+       auto-dispatch back to FindEquationalProof. *)
+    SortBy[Normal[entries], $ProofKeyOrder[First[#]] &]
 ]
 
-$ProofKeyOrder[{System`Axiom,             k_}] := {1, k}
-$ProofKeyOrder[{System`Hypothesis,        k_}] := {2, k}
-$ProofKeyOrder[{System`SubstitutionLemma, k_}] := {3, k}
-$ProofKeyOrder[{System`Conclusion,        k_}] := {4, k}
-$ProofKeyOrder[_]                              := {5, 0}
+$ProofKeyOrder[{"Axiom",             k_}] := {1, k}
+$ProofKeyOrder[{"Hypothesis",        k_}] := {2, k}
+$ProofKeyOrder[{"SubstitutionLemma", k_}] := {3, k}
+$ProofKeyOrder[{"Conclusion",        k_}] := {4, k}
+$ProofKeyOrder[_]                          := {5, 0}
 
-(* Build a Graph showing derivation flow.  Edges go from Input/Construct
-   parents to derived SubstitutionLemma/Conclusion. *)
-buildProofGraph[dataset_Association] := Module[{edges = {}},
-    Do[
-        Module[{key = entry[[1]], proof = entry[[2]]["Proof"]},
-            If[ AssociationQ[proof] && KeyExistsQ[proof, "Input"],
-                AppendTo[edges, proof["Input"] -> key]];
-            If[ AssociationQ[proof] && KeyExistsQ[proof, "Construct"],
-                AppendTo[edges, proof["Construct"] -> key]]
-        ],
-        {entry, Normal[dataset]}
-    ];
-    Graph[Keys[dataset], edges, VertexLabels -> Automatic]
-]
-
-(* TProofObject access: p["prop"] returns the field; p["Properties"]
-   returns the list of keys; UpValues mirror ProofObject's interface. *)
-TProofObject /: (po_TProofObject)[prop_String] := Module[{data = po[[1]]},
-    Switch[prop,
-        "Properties", Append[Keys[data], "Properties"],
-        _, Lookup[data, prop, Missing["KeyAbsent", prop]]
-    ]
-]
-TProofObject /: (po_TProofObject)[All] := Normal[po[[1]]]
-TProofObject /: MakeBoxes[po : TProofObject[data_Association], fmt_] :=
-    BoxForm`ArrangeSummaryBox[
-        "TProofObject",
-        po,
-        None,
-        {{BoxForm`SummaryItem[{"Logic: ",       Lookup[data, "Logic"]}],
-          BoxForm`SummaryItem[{"Status: ",      Lookup[data, "Status", "?"]}]},
-         {BoxForm`SummaryItem[{"Conjecture: ",  Lookup[data, "Conjecture"]}]},
-         {BoxForm`SummaryItem[{"ProofLength: ", Lookup[data, "ProofLength"]}]}},
-        {{BoxForm`SummaryItem[{"Axioms: ",      Lookup[data, "Axioms"]}]},
-         {BoxForm`SummaryItem[{"Variables: ",   Lookup[data, "Variables"]}]},
-         {BoxForm`SummaryItem[{"Constants: ",   Lookup[data, "Constants"]}]}},
-        fmt
-    ]
+(* Note: WL's built-in ProofObject already provides all the access
+   methods (ProofGraph, ProofDataset, ProofLength, etc.) when the
+   4th-arg Association satisfies ProofObjectQ -- which our dataset
+   does, since it's a List of Rules with {_String, _Integer} keys.
+   No custom MakeBoxes / lookup needed; WL handles it. *)
 
 SetAttributes[TFindEquationalProof, HoldAll];
 TFindEquationalProof[conjecture_, axioms_,
@@ -643,23 +623,21 @@ TFindEquationalProof[conjecture_, axioms_,
             Symbol /@ Values[rev["label_to_sym"]], varNames];
 
         Module[{conclEq = Equal @@ conjPair,
-                axEq    = Equal @@@ Hold[axioms][[1]],
-                proofLen = Length[dataset]},
-            TProofObject[<|
-                "Logic"        -> "EquationalLogic",
-                "Conjecture"   -> conclEq,
-                "Axioms"       -> axEq,
-                "Variables"    -> varNames,
-                "Constants"    -> constNames,
-                "Theorems"     -> {conclEq},
-                "ProofLength"  -> proofLen,
-                "ProofDataset" -> dataset,
-                "ProofGraph"   -> buildProofGraph[dataset],
-                "RawTrace"     -> records,
-                "Status"       -> Lookup[$atpStatusName, headerData["status"], "UNKNOWN"],
-                "Steps"        -> Lookup[headerData, "n_trace", 0],
-                "Rules"        -> Lookup[headerData, "n_rules", 0]
-            |>]
+                axEq    = Equal @@@ Hold[axioms][[1]]},
+            (* Construct a real ProofObject.  The 4th-arg Association
+               must satisfy ProofObjectQ (Variables -> {_Symbol...},
+               Constants -> {_?AtomQ...}, Proof -> List of Rules with
+               {_String, _Integer} keys); when it does, WL skips the
+               auto-dispatch back to FindEquationalProof at line 599 of
+               EquationalProof.m, and our metadata is preserved. *)
+            ProofObject[
+                "EquationalLogic",
+                conclEq,
+                axEq,
+                <|"Variables" -> varNames,
+                  "Constants" -> constNames,
+                  "Proof"     -> dataset|>
+            ]
         ]
     ],
     "TATPError"]
