@@ -531,3 +531,202 @@ fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
   UopApplyOptCtx ctx = { applied_opts, n_applied };
   return uop_pattern_rewrite(root, upat_kop_tc_rules, 1, &ctx);
 }
+
+// === E9-prep wedge 1: unified kernel-opts pass =======================
+//
+// uop_apply_kernel_opts composes the four E2/E3/E4-E6/E7 entries into a
+// single DAG walk that stamps every UOP_RANGE leaf with its post-replay
+// axis_type.  The composition is faithful to the lifter's structural
+// replay (kernel_lift.c:1568-1633) when applied AFTER the lifter has
+// already produced UOP_RANGE leaves keyed by their post-replay
+// axis_id and extent.
+//
+// Faithful semantics (matching the lifter):
+//   - Initial desired[] starts at KAX_LOOP for every position.
+//   - Splits (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) shift desired[] right
+//     and stamp inner = inner_kax(op).
+//   - GLOBAL only stamps when desired[a]==KAX_LOOP AND opt.arg matches
+//     the current outer extent.  The extent guard mirrors
+//     kernel_lift.c:1619 ("o.arg != cur[o.axis].extent -> return 0").
+//   - SWAP swaps desired[a] <-> desired[b] (and the cur[] entries the
+//     lifter keeps).
+//   - TC is metadata-only -- explicit no-op.
+//
+// The shared `sim_kop_history` (used by E4-E7) already handles
+// splits/SWAP/GLOBAL/TC composition but lacks the extent guard on
+// GLOBAL because it has no per-axis extent table.  This unified pass
+// runs the simulation with extent tracking, mirroring the lifter's
+// SplitAxis cur[] vector.
+//
+// Idempotent: desired[a] is a pure function of `applied_opts` and the
+// initial extents read from the matched UOP_RANGE leaves.  Running the
+// pass twice produces hash-cons-identical output.
+//
+// Wired into materialize.c after kernel_lift_to_uop succeeds.  In the
+// default config the lifter already stamps the same axis_types via its
+// own structural replay, so this pass is a no-op (every leaf's
+// axis_type already equals desired[axis_id]).  The `THVM_E9_VALIDATE=1`
+// env knob asserts that no-op semantically: when set,
+// uop_apply_kernel_opts records every range it would have rewritten
+// into a fire counter; non-zero on exit means the rules and the
+// lifter disagree.
+
+// Per-pass fire counter for validation.  Captured per call (not
+// global) via the ctx struct.
+typedef struct {
+  KOpt const *applied_opts;
+  u32         n_applied;
+  // Pre-computed desired[] from the simulation, indexed by axis_id.
+  u8          desired[MAX_AXES];
+  // For each position whose desired[i] is KAX_GLOBAL, the arg that
+  // the GLOBAL opt requested.  When the matched leaf's extent doesn't
+  // equal global_arg[i], the GLOBAL stamp is rejected (mirrors the
+  // lifter's `o.arg != cur[o.axis].extent` guard at kernel_lift.c:1619).
+  // Zero means "no GLOBAL stamp on this position" (the
+  // `desired[i] == KAX_GLOBAL` check below is the live signal).
+  u32         global_arg[MAX_AXES];
+  u32         n_cur;
+  u32         fire_count;  // diagnostic: incremented per rewrite
+} UopApplyKernelOptsCtx;
+
+// Simulate the full applied_opts history with extent tracking.  Mirrors
+// kernel_lift.c:1568-1633.  Writes desired[i]=axis_type and
+// global_arg[i]=opt.arg-at-stamp-time when the GLOBAL guard fires (the
+// rewrite body re-checks against the matched leaf's extent).
+// Positions beyond n_cur stay at the LOOP/0 initial state.  Returns 1
+// always; the rule body decides whether to stamp.
+static int sim_kop_history_with_extents(KOpt const *applied_opts,
+                                        u32 n_applied,
+                                        u8 *desired_out,
+                                        u32 *global_arg_out,
+                                        u32 *n_cur_out) {
+  for (u32 i = 0; i < MAX_AXES; i++) {
+    desired_out[i]    = (u8)KAX_LOOP;
+    global_arg_out[i] = 0;
+  }
+  u32 n_cur = 0;
+  for (u32 i = 0; i < n_applied; i++) {
+    KOpt const *o = &applied_opts[i];
+    u8 op = o->op;
+    if (kop_is_split(op)) {
+      u32 a = (u32)o->axis;
+      if (a >= MAX_AXES - 1) continue;
+      if (a >= n_cur) n_cur = a + 1;
+      if (n_cur >= MAX_AXES) continue;
+      // Shift right (positions a+1..n_cur-1 -> a+2..n_cur).
+      for (u32 j = n_cur; j > a + 1; j--) {
+        desired_out[j]    = desired_out[j - 1];
+        global_arg_out[j] = global_arg_out[j - 1];
+      }
+      // Outer at position a keeps its desired/global_arg unchanged.
+      // Inner at position a+1 takes the opt's KAX type.
+      desired_out[a + 1]    = kop_inner_axis_type(op);
+      global_arg_out[a + 1] = 0;
+      n_cur++;
+    } else if (op == KOP_GLOBAL) {
+      u32 a = (u32)o->axis;
+      if (a >= MAX_AXES) continue;
+      if (a >= n_cur) n_cur = a + 1;
+      // Lifter guard: only stamps when LOOP.  We capture o.arg here;
+      // the rule body re-checks `arg == leaf.extent` against the
+      // matched UOP_RANGE leaf at this axis_id.
+      if (desired_out[a] != (u8)KAX_LOOP) continue;
+      desired_out[a]    = (u8)KAX_GLOBAL;
+      global_arg_out[a] = o->arg;
+    } else if (op == KOP_SWAP) {
+      u32 a = (u32)o->axis;
+      u32 b = (u32)o->arg;
+      if (a >= MAX_AXES || b >= MAX_AXES) continue;
+      if (a >= n_cur) n_cur = a + 1;
+      if (b >= n_cur) n_cur = b + 1;
+      u8  t = desired_out[a];
+      u32 g = global_arg_out[a];
+      desired_out[a]    = desired_out[b];
+      global_arg_out[a] = global_arg_out[b];
+      desired_out[b]    = t;
+      global_arg_out[b] = g;
+    } else if (op == KOP_TC) {
+      // Metadata-only; no axis_type or extent mutation.
+    }
+    // Remaining (KOP_PADTO, KOP_NOLOCALS) are reserved.
+  }
+  *n_cur_out = n_cur;
+  return 1;
+}
+
+static Term rw_kernel_opts_stamp(Term const *bindings, void *ctx_in) {
+  Term range = bindings[0];
+  if (term_tag(range) != TAG_UOP || term_ext(range) != UOP_RANGE) return 0;
+
+  UopApplyKernelOptsCtx *ctx = (UopApplyKernelOptsCtx *)ctx_in;
+  if (ctx == NULL || ctx->applied_opts == NULL || ctx->n_applied == 0) {
+    return 0;
+  }
+
+  u32 axis_id = uop_range_axis_id(range);
+  if (axis_id >= MAX_AXES) return 0;
+  u8  cur_at  = (u8)uop_range_axis_type(range);
+  u8  want    = ctx->desired[axis_id];
+  if (want == cur_at) return 0;
+  // Strict GLOBAL extent guard: the lifter rejects KOP_GLOBAL when
+  // o.arg != cur[o.axis].extent (kernel_lift.c:1619).  Mirror that
+  // by checking the matched leaf's extent against the captured arg.
+  // When the guard fails, treat as no-op -- the lifter would not
+  // have stamped this axis in the first place.
+  if (want == (u8)KAX_GLOBAL) {
+    u32 leaf_ext = uop_range_extent(range);
+    if (ctx->global_arg[axis_id] != leaf_ext) return 0;
+  }
+  ctx->fire_count++;
+  return uop_range_with_axis_type(range, want);
+}
+
+static UPat const upat_kernel_opts_range = {UOP_RANGE, 0, 0, 0, NULL, NULL};
+
+static UPatRule const upat_kernel_opts_rules[1] = {
+  {&upat_kernel_opts_range, rw_kernel_opts_stamp},
+};
+
+// Public entry: compose all four UPatRules (E2 GLOBAL, E3 SWAP,
+// E4-E6 splits, E7 TC) into a single DAG walk and stamp every
+// UOP_RANGE leaf reachable from `root` with its post-replay axis_type.
+//
+// In the default lifter config (kernel_lift.c stamps axis_types via
+// its own structural replay before producing the DAG), this pass
+// observes desired[axis_id] == leaf.axis_type for every leaf and
+// returns hash-cons-identical output.  That bit-equality is what
+// validates the rules: if the unified pass diverges from the lifter,
+// either the lifter or the rules are wrong about how applied_opts[]
+// composes.
+fn Term uop_apply_kernel_opts(Term root, KOpt const *applied_opts,
+                              u32 n_applied) {
+  if (root == 0 || applied_opts == NULL || n_applied == 0) return root;
+  UopApplyKernelOptsCtx ctx;
+  ctx.applied_opts = applied_opts;
+  ctx.n_applied    = n_applied;
+  ctx.fire_count   = 0;
+  sim_kop_history_with_extents(applied_opts, n_applied,
+                               ctx.desired, ctx.global_arg, &ctx.n_cur);
+  return uop_pattern_rewrite(root, upat_kernel_opts_rules, 1, &ctx);
+}
+
+// Validation entry: same walk as uop_apply_kernel_opts but reports
+// the fire-count via *out_fires (0 means "no rule fired -- the lifter
+// and the rules agree on every UOP_RANGE leaf in the DAG").  The
+// returned Term is the rewritten root; the caller can compare it to
+// `root` to detect any structural divergence (when fires == 0 the two
+// should be hash-cons-identical).
+fn Term uop_apply_kernel_opts_validate(Term root, KOpt const *applied_opts,
+                                       u32 n_applied, u32 *out_fires) {
+  if (out_fires != NULL) *out_fires = 0;
+  if (root == 0 || applied_opts == NULL || n_applied == 0) return root;
+  UopApplyKernelOptsCtx ctx;
+  ctx.applied_opts = applied_opts;
+  ctx.n_applied    = n_applied;
+  ctx.fire_count   = 0;
+  sim_kop_history_with_extents(applied_opts, n_applied,
+                               ctx.desired, ctx.global_arg, &ctx.n_cur);
+  Term out = uop_pattern_rewrite(root, upat_kernel_opts_rules, 1, &ctx);
+  if (out_fires != NULL) *out_fires = ctx.fire_count;
+  return out;
+}

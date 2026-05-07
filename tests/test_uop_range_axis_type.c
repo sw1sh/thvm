@@ -959,6 +959,156 @@ int main(void) {
   // Shared-simulation rule stamps anyway -- documents the divergence.
   CHECK_EQ(uop_range_axis_type(bad_via_tc), (u32)KAX_GLOBAL);
 
+  // === E9-prep wedge 1: uop_apply_kernel_opts unified entry ============
+  // The single composed pass that wires E2/E3/E4-E6/E7 into one DAG
+  // walk.  The pass adds extent tracking on top of the shared
+  // `sim_kop_history` so the GLOBAL extent guard from
+  // kernel_lift.c:1619 is honoured -- mirrors the lifter's structural
+  // replay faithfully.
+
+  TEST_BEGIN("apply-kernel-opts/empty-applied-opts-noop");
+  Term k_r0 = uop_range(0, KAX_LOOP, 64);
+  Term k_r0_pass = uop_apply_kernel_opts(k_r0, NULL, 0);
+  CHECK_EQ(k_r0_pass, k_r0);
+  Term k_r0_unused = uop_apply_kernel_opts(k_r0, opts_tc_bad, 0);
+  CHECK_EQ(k_r0_unused, k_r0);
+
+  TEST_BEGIN("apply-kernel-opts/global-stamps-with-extent-match");
+  KOpt opts_glb_match[1] = {{ KOP_GLOBAL, 0, 64 }};
+  Term k_glb = uop_apply_kernel_opts(k_r0, opts_glb_match, 1);
+  CHECK_EQ(uop_range_axis_type(k_glb), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_extent(k_glb),    64);
+
+  TEST_BEGIN("apply-kernel-opts/global-extent-mismatch-rejected");
+  // Unlike the shared sim, the unified pass DOES enforce arg==extent
+  // for GLOBAL.  This matches kernel_lift's replay: the lifter would
+  // bail out (return 0) on an extent mismatch, so the unified pass
+  // mustn't stamp where the lifter wouldn't.  Result: the leaf stays
+  // KAX_LOOP.
+  KOpt opts_glb_bad[1] = {{ KOP_GLOBAL, 0, 32 }};  // arg 32 != extent 64
+  Term k_glb_bad = uop_apply_kernel_opts(k_r0, opts_glb_bad, 1);
+  CHECK_EQ(k_glb_bad, k_r0);  // hash-cons identity -- no rewrite
+  CHECK_EQ(uop_range_axis_type(k_glb_bad), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kernel-opts/upcast-stamps-inner");
+  // UPCAST(0, 4) on a leaf at axis_id=1 -> desired[1]=KAX_UPCAST.
+  Term k_inner = uop_range(1, KAX_LOOP, 4);
+  KOpt opts_upcast_unif[1] = {{ KOP_UPCAST, 0, 4 }};
+  Term k_inner_st = uop_apply_kernel_opts(k_inner, opts_upcast_unif, 1);
+  CHECK_EQ(uop_range_axis_type(k_inner_st), (u32)KAX_UPCAST);
+
+  TEST_BEGIN("apply-kernel-opts/swap-and-global-compose");
+  // GLOBAL(0, 64) then SWAP(0, 1): desired = [LOOP, GLOBAL, ...] with
+  // global_arg[1]=64.  After SWAP, the GLOBAL stamp's required extent
+  // moves with it -- the leaf at the new position must carry the
+  // extent the original GLOBAL opt named.  This mirrors the lifter:
+  // cur[]'s entire entry (extent + axis_type) swaps as a unit.
+  KOpt opts_unif_gs[2] = {
+    { KOP_GLOBAL, 0, 64 },
+    { KOP_SWAP,   0, 1  },
+  };
+  // Post-replay leaf shapes: axis 0 gets the swapped-in entry (orig
+  // axis 1's extent 32, LOOP); axis 1 gets the stamped entry
+  // (orig axis 0's extent 64, GLOBAL).
+  Term k_a0 = uop_range(0, KAX_LOOP, 32);
+  Term k_a1 = uop_range(1, KAX_LOOP, 64);
+  Term k_a0_out = uop_apply_kernel_opts(k_a0, opts_unif_gs, 2);
+  Term k_a1_out = uop_apply_kernel_opts(k_a1, opts_unif_gs, 2);
+  CHECK_EQ(uop_range_axis_type(k_a0_out), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(k_a1_out), (u32)KAX_GLOBAL);
+
+  TEST_BEGIN("apply-kernel-opts/all-four-classes-mixed");
+  // applied_opts = [TC, LOCAL(0, 8), GLOBAL(0, 32), SWAP(0, 1)].
+  // Desired sequence (with extent tracking that mirrors the lifter):
+  //   start:           desired=[LOOP, ...], global_arg=[0,...]
+  //   TC:              no-op
+  //   LOCAL(0, 8):     splits axis 0; desired=[LOOP, LOCAL, ...]
+  //   GLOBAL(0, 32):   stamps desired[0]=GLOBAL, global_arg[0]=32.
+  //   SWAP(0, 1):      desired=[LOCAL, GLOBAL, ...],
+  //                    global_arg swapped so global_arg[1]=32.
+  // The leaf at axis_id=1 must carry extent 32 for the GLOBAL stamp
+  // to apply (mirrors the lifter's extent guard at line 1619).  The
+  // leaf at axis_id=0 takes the swapped-in LOCAL extent (8 -- the
+  // LOCAL split's inner size).
+  KOpt opts_all4[4] = {
+    { KOP_TC,     0, 8  },
+    { KOP_LOCAL,  0, 8  },
+    { KOP_GLOBAL, 0, 32 },
+    { KOP_SWAP,   0, 1  },
+  };
+  // Post-replay leaf shapes after the SWAP:
+  //   axis 0: extent 8  (the swapped-in LOCAL inner)
+  //   axis 1: extent 32 (the swapped-in GLOBAL outer)
+  Term k_outer  = uop_range(0, KAX_LOOP, 8);
+  Term k_innerL = uop_range(1, KAX_LOOP, 32);
+  Term k_outer_out = uop_apply_kernel_opts(k_outer, opts_all4, 4);
+  Term k_innerL_out = uop_apply_kernel_opts(k_innerL, opts_all4, 4);
+  CHECK_EQ(uop_range_axis_type(k_outer_out),  (u32)KAX_LOCAL);
+  CHECK_EQ(uop_range_axis_type(k_innerL_out), (u32)KAX_GLOBAL);
+
+  TEST_BEGIN("apply-kernel-opts/idempotent-double-apply");
+  Term k_first  = uop_apply_kernel_opts(k_outer, opts_all4, 4);
+  Term k_second = uop_apply_kernel_opts(k_first,  opts_all4, 4);
+  CHECK_EQ(k_first, k_second);
+
+  TEST_BEGIN("apply-kernel-opts/non-range-tag-mismatch");
+  Term k_not_range = uop_const(DT_INT32, 17);
+  Term k_not_out = uop_apply_kernel_opts(k_not_range, opts_glb_match, 1);
+  CHECK_EQ(k_not_out, k_not_range);
+
+  TEST_BEGIN("apply-kernel-opts/descends-through-store-index-e");
+  // Production lifter shape: STORE(buf, INDEX_E(buf, IADD(IMUL(R0, c),
+  // R1)), value).  The unified pass must descend through the symbolic
+  // INDEX layer to reach the RANGE leaves -- E8's uop_arity extension
+  // covers this.
+  u32 ke_buf_dims[2] = { 4, 16 };
+  Term ke_buf = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, ke_buf_dims);
+  Term ke_r0  = uop_range(0, KAX_LOOP, 4);
+  Term ke_r1  = uop_range(1, KAX_LOOP, 16);
+  Term ke_str = uop_const(DT_INT32, 16);
+  Term ke_row = uop_int_binary(UOP_IMUL, ke_r0, ke_str);
+  Term ke_addr = uop_int_binary(UOP_IADD, ke_row, ke_r1);
+  Term ke_ie   = uop_index_e(ke_buf, ke_addr);
+  Term ke_val  = uop_load(ke_ie);
+  Term ke_root = uop_store(ke_buf, ke_addr, ke_val);
+  KOpt opts_glb0[1] = {{ KOP_GLOBAL, 0, 4 }};  // matches ke_r0 extent
+  Term ke_out = uop_apply_kernel_opts(ke_root, opts_glb0, 1);
+  CHECK_EQ(term_tag(ke_out), TAG_UOP);
+  CHECK_EQ(term_ext(ke_out), UOP_STORE);
+  Term ke_out_addr = heap_read(term_val(ke_out) + 1);
+  CHECK_EQ(term_ext(ke_out_addr), UOP_IADD);
+  Term ke_out_imul = heap_read(term_val(ke_out_addr) + 0);
+  CHECK_EQ(term_ext(ke_out_imul), UOP_IMUL);
+  Term ke_out_r0 = heap_read(term_val(ke_out_imul) + 0);
+  CHECK_EQ(term_ext(ke_out_r0), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_type(ke_out_r0), (u32)KAX_GLOBAL);
+  // Leaf at axis_id=1 was untouched.
+  Term ke_out_r1 = heap_read(term_val(ke_out_addr) + 1);
+  CHECK_EQ(uop_range_axis_type(ke_out_r1), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kernel-opts/validate-fire-count");
+  // The validation entry returns the number of UOP_RANGE leaves that
+  // would have been rewritten.  When the pass would no-op (already
+  // stamped or no matching opts), fire_count == 0; that's the
+  // signal materialize.c relies on under THVM_E9_VALIDATE=1.
+  u32 vfires = 0;
+  Term vout1 = uop_apply_kernel_opts_validate(k_outer, opts_all4, 4, &vfires);
+  // k_outer is at axis_id=0, LOOP, extent 8; desired[0]=LOCAL post-replay.
+  // LOCAL has no extent guard, so the rule fires once.
+  CHECK_EQ(vfires, 1u);
+  CHECK_EQ(uop_range_axis_type(vout1), (u32)KAX_LOCAL);
+  // Run again on the result -- now leaf already carries LOCAL, no fire.
+  u32 vfires2 = 0;
+  Term vout2 = uop_apply_kernel_opts_validate(vout1, opts_all4, 4, &vfires2);
+  CHECK_EQ(vfires2, 0u);
+  CHECK_EQ(vout2, vout1);
+
+  TEST_BEGIN("apply-kernel-opts/validate-empty-applied-opts-zero-fires");
+  u32 vfires3 = 99;
+  Term vout3 = uop_apply_kernel_opts_validate(k_outer, NULL, 0, &vfires3);
+  CHECK_EQ(vfires3, 0u);
+  CHECK_EQ(vout3, k_outer);
+
   thvm_free();
   TEST_REPORT();
 }

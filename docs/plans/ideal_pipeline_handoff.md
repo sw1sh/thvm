@@ -5,6 +5,179 @@ A long session (~35 commits) closed the F3.5 unblocker and the F6 main goal,
 documented several remaining wedges concretely, and ran into a misdirection
 worth flagging so the next agent doesn't repeat it.
 
+## Status post Wave 1-6 (2026-05-08, six parallel-agent merge waves)
+
+Six waves of parallel worktree-isolated agents landed F4, F6 (full), Phase E1-E8,
+and Phase C slices 1-7. Cumulative LOC delta is strongly negative:
+
+- **F4**: conv2d UPat recognizer + `rmu_emit_conv` template + F4-prune cleanup.
+  +611 LOC net (template is purely additive; the -400 LOC handoff target
+  was overstated -- the generic accumulator path still serves softmax /
+  plain reduce / TC `K%8 != 0` fallback).
+- **F6 (full)**: `cpu_uop_walk` walker (Wave 1), FLIP lifter widening
+  (Wave 2), multi-output STORE-AFTER lifter (Wave 3), F6 cleanup (Wave 4)
+  deleted `cpu/op/*.c` (21 files), `cpu_interpret()`, dispatch ladder
+  rung 6, and 21 `#includes` in `thvm.c`. **-1312 LOC net** in F6 cleanup
+  alone. `cpu_interpret` no longer exists; bisection knob `THVM_CPU_UOP_WALK=0`
+  preserved (multi-output kernel-merge test legitimately fails under it).
+- **Phase E**: E1 accessors + rewriter primitive, E2 KOP_GLOBAL,
+  E3 KOP_SWAP (full-history simulation), E4-E6 split-class
+  (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP, all in `uop_apply_kop_split`,
+  pragmatic stamp-only), E7 KOP_TC (metadata-only, position-invariant),
+  E8 `uop_arity` + `uop_graph_rebuild_with_srcs` extension for INDEX
+  descent. `tests/test_uop_range_axis_type.c` 0 -> 224 checks.
+- **Phase C**: slice 1 `compute_root` dual-write, slice 2 `cached_lift`
+  full-lift cache (4 consumers stopped re-lifting), slice 3 structural
+  `rmu_buf_name` via `UOP_BUFFER.instance`, slice 4 `metal_kernel_supported`
+  / propose flipped to UOp DAG, slice 5 DAG-side Metal encoder
+  (reuses existing UOP_*-keyed shader cache because `KProgOp.opcode` IS
+  a `UOP_*` tag), slice 7 single-write migration default-on
+  (`THVM_PHASE_C7_FREE_PROGRAM=0` reverts).
+
+### Slice 8 RE-FRAMING (important)
+
+The original "delete `tile.c` KProgOp gemm/gemv recognisers in favor of
+`recognise_tc`/`recognise_conv`" framing is wrong. `tile_analyze_gemm`
+is a **feeder** for the UOp-side `recognise_tc`, not a redundant peer:
+
+- `kernel_lift_from_gemm` (kernel_lift.c:952) calls `tile_collect_mma_plan`
+  -> `tile_analyze_gemm` to **synthesize** the UOp DAG when
+  `scalar_uops == NULL` (the dedicated GEMM dispatch path bypasses
+  rangeify). recognise_tc runs *after* the lifter.
+- `cpu_blas_dispatch` reads `gemm.M/N/K/ldA/ldB/flags/a_input/b_input`
+  to call `cblas_sgemm` directly via Apple Accelerate.
+- `kernel_apply_opt`'s KOP_TC gate consumes it.
+- `propose.c` autotune uses it for TC tile-size proposals.
+
+Real gating for "delete `tile.c` gemm recognisers": (a) `kernel_lift_from_gemm`
+retires (rangeify+scalar_uops covers GEMM), (b) `cpu/blas.c` retires,
+(c) `apply_opt`'s KOP_TC gate moves to Phase E. That's Phase G territory,
+not a free-standing slice.
+
+### Wave 6 perf regression flag
+
+Phase C slice 7 default-on single-write causes documented perf regressions
+(slice 7 commit message + this handoff):
+
+- `cpu_blas_dispatch` early-bails on `n_ops != 2` -> lift-eligible matmul
+  regresses to JIT/scalar fallback.
+- `tile_analyze_gemm/conv2d_flat_impl` early-bail on `program == NULL`
+  -> lift-eligible gemm/conv MSL regresses to per-element DAG encoder.
+- `metal_try_alias_reshape` early-bails on `n_ops != 1` -> reshape-aliasable
+  kernels lose zero-copy.
+
+These match the slice 8 territory now documented above. Until that's
+unblocked, set `THVM_PHASE_C7_FREE_PROGRAM=0` if you hit a perf cliff.
+
+### Wave 7 audit results (2026-05-08)
+
+**Phase E9 audit — BLOCKED.** No deletion of `KernelAxes.axis_types[]` is
+safe today. The E1-E8 UPatRules (`uop_apply_kop_{global,swap,split,tc}`)
+have ZERO production callers — they're invoked only from
+`tests/test_uop_range_axis_type.c`. `axis_types[]` has 7 production
+readers (`codegen/axis.c:83-84`, `codegen/tile_anno.c:72,254`,
+`schedule/kernel_lift.c:1556-1557,1650`, `schedule/tile.c:1649`,
+`schedule/kernel_program_cache.c:223`) and 3 writer entry points
+(`axes_apply_opt`, plus `tile_anno_axis_append/insert/set` facades that
+still route to direct `axes->axis_types[]` writes).
+
+Six prerequisite wedges named (in dependency order):
+
+1. **Wire UPatRules into a post-lift production pass** — call
+   `uop_apply_kernel_opts(root, ke->axes->applied_opts, n_applied)`
+   after `kernel_lift_to_uop` returns.
+2. **`uop_range_split` primitive + INDEX_E address rewiring** — replaces
+   `kernel_lift.c`'s structural-replay split block. Named explicitly in
+   the E4-E6 file header.
+3. **Replace `axes_has_reduce_axis` reads** with applied_opts walk
+   (these fire pre-lift, can't read UOP_RANGE.axis_type).
+4. **Rewire `tile_emit_axes_from_kernel_axes`** producer of TILE_AXIS
+   leaves — needs alt source.
+5. **Rewire `kp_slot_equal` cache-key** — compare TILE_AXIS arrays /
+   applied_opts sequences instead of `axis_types[]`.
+6. **Migrate ~30 hand assignments** in `tests/test_metal_real.c` +
+   `tests/test_tile_graph.c` that drive `ke->axes` directly without
+   `axes_apply_opt`.
+
+**Phase G audit — most targets BLOCKED.** Concrete enumeration:
+
+- `cpu/op/*.c` (21 files): **ALREADY DELETED** in F6 cleanup (Wave 4).
+- `kernel_program_cache.c`: KAXIS_CACHE half is independent and live;
+  KP_CACHE half gated on slice 8 re-framing (`tile_analyze_gemm` is
+  a feeder, not redundant). No safe sub-piece deletable now on current
+  main.
+- `tile.c` (~1961 LOC): live consumers in `kernel_lift_from_gemm`,
+  `cpu_blas_dispatch`, autotune, apply_opt KOP_TC gate. `tile_build_conv2d_from_info`
+  has zero callers but its TILE_CONV2D root is referenced by dump/render/validate
+  paths that may consume it in a future Phase F renderer iteration. Don't
+  delete speculatively.
+- `tile_anno.c` (~300 LOC): writer-side facades route to KernelAxes;
+  retirement is gated on Phase E9.
+- `uop_to_scalar.c` (136 LOC): two production consumers in
+  `kernel_lift.c:180,574` + `rangeify.c:938,951`. Gated on rangeify
+  side migrating off `r->refs[d]` scalar slots.
+- `tests/test_tile_*.c` (~2238 LOC across 8 files): every file
+  exercises live tile_*/tile_anno_* APIs.
+- `KProgOp` type: live in 50+ files. Gated on slice 8 + Phase E9 +
+  Phase F.
+- rangeify legacy composers (rangeify.c:1014-1027): active emit path,
+  not dead.
+
+**Total Phase G deletable on current main right now: ~0 LOC.** The
+campaign reaches a natural pause point here. Remaining work is
+multi-session foundational (the 6 E9 prerequisites above).
+
+### Cumulative test state (2026-05-08, post Wave 6)
+
+```
+test_metal_real          554/554    (was 530; slice 5 added 24 DAG-encoder checks)
+test_aot_metal           146/146
+test_aot_metal_run       FAIL 61/65 (PRE-EXISTING in user's atp-ic stream;
+                                     "5/6 cases match CPU" per dd0d96a8 commit msg;
+                                     NOT caused by this campaign)
+test_render_uop          182/182    (was 175; F4 added 7 conv-template assertions)
+test_render_uop_metal      8/8
+test_kernel_lift          36/36
+test_kernel_lift_coverage  7/7
+test_tile_graph          490/490
+test_bufferize           303/303    (was 315; slice 7 default-on gates 12
+                                     dual-write checks; pass under
+                                     THVM_PHASE_C7_FREE_PROGRAM=0 too)
+test_bufferize_classify   62/62
+test_uop_recognise_tc     26/26
+test_uop_recognise_conv   30/30     (NEW from F4)
+test_uop_range_axis_type 224/224    (NEW E1+E2+E3+E4-E6+E7+E8 cumulative)
+test_compute_root_dual_write 83/83  (NEW C1+C2+C3+C4+C7 cumulative)
+test_metal_stub            6/6
+test_tile_render_msl      39/39
+test_view_flip            35/35
+test_materialize_v2       14/14
+```
+
+### Active env knobs (post Wave 6)
+
+```
+THVM_CPU_UOP_WALK=0          Bisection: opt out of cpu_uop_walk; falls back
+                             to cpu_jit_dispatch only (no per-op interp).
+                             Multi-output kernel-merge test fails under =0
+                             since cpu/op/* is gone.
+THVM_CPU_UOP_WALK_TRACE=1    Trace walker entries.
+THVM_PHASE_C7_FREE_PROGRAM=0 Revert slice 7 single-write to dual-write
+                             (program[] populated alongside cached_lift).
+                             Use if you hit slice-8-territory perf regressions.
+THVM_RANGEIFY_BAIL=1         Print rangeify lowering bail reasons.
+THVM_TILE=0                  Force legacy KProgOp-flat dispatch off (default).
+THVM_KERNEL_MERGE=1          Force multi-output fusion (dev exercise).
+THVM_CPU_JIT_VIA_UOP=0       Bisection: opt out of render_uop_c JIT.
+```
+
+`THVM_CPU_INTERPRET_TRACE` and `THVM_CPU_JIT_TRACE_FALLBACK` are NO LONGER
+WIRED (their consumers were deleted in F6 cleanup).
+
+---
+
+(Original handoff content from before Wave 1 follows below for archival.)
+
 ## What landed
 
 ### F3.5 -- lifter view.strides fix (UNBLOCKER)
