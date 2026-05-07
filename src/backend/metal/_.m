@@ -1981,18 +1981,16 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     }
   }
 
-  if (kprog_supported && metal_try_gemm(ke, in_buf_ids, out_buf_id)) {
-    cg_profile_record(kid, KDISPATCH_METAL_GEMM, cg_now_us() - t0);
-    return 0;
-  }
-
+  // F3.4b: pre-mat moved up; render_uop (tile_jit_encode) tries
+  // BEFORE metal_try_gemm so matmul shapes that fit the simdgroup
+  // template land on render_uop. cg_emit_via_uop declines K%8!=0
+  // matmuls (F3.4a) which trips the PSO build below and falls
+  // through to metal_try_gemm's tile-shared-mem path.
+  //
   // View-aware pre-materialize (the Metal counterpart to
   // cpu_interpret's strided pre-mat loop).  For each input whose
   // TenDesc carries a non-contiguous View, allocate a temp Metal
   // buffer and populate it via host-side strided index walk.
-  // Sized to ke->n_inputs (KERNEL_MAX_INPUT is now a sanity bound,
-  // not a typical size).  ke->n_inputs == 0 is unusual but possible
-  // for a no-arg kernel (e.g. CONST root); the +1 keeps VLA legal.
   u32 effective_buf_ids[ke->n_inputs ? ke->n_inputs : 1];
   u32 temp_buf_ids     [ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) temp_buf_ids[i] = 0;
@@ -2043,6 +2041,14 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       cg_profile_record(kid, KDISPATCH_METAL_TILE, cg_now_us() - t0);
       return 0;
     }
+  }
+
+  if (kprog_supported && metal_try_gemm(ke, effective_buf_ids, out_buf_id)) {
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
+    }
+    cg_profile_record(kid, KDISPATCH_METAL_GEMM, cg_now_us() - t0);
+    return 0;
   }
 
   if (!kprog_supported) {
