@@ -651,9 +651,9 @@ static id<MTLComputePipelineState> METAL_JIT_PSOS [METAL_JIT_CACHE_CAP];
 
 // Per-process counters for the JIT pipeline.  Storage is forward-
 // declared near metal_init; helpers are defined here so they're
-// in scope alongside the cache they instrument.  Counts include
-// both metal_jit_build (KProgOp-flat path) and metal_tile_jit_build
-// (UOp-DAG renderer path).
+// in scope alongside the cache they instrument.  Now only
+// metal_tile_jit_build (UOp-DAG renderer path) bumps these --
+// metal_jit_build (KProgOp-flat) was deleted in 88f536c3.
 fn u64 thvm_metal_jit_build_hits     (void) { return METAL_JIT_BUILD_HITS;       }
 fn u64 thvm_metal_jit_build_misses   (void) { return METAL_JIT_BUILD_MISSES;     }
 fn u64 thvm_metal_jit_build_bypass   (void) { return METAL_JIT_BUILD_BYPASS;     }
@@ -1514,10 +1514,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   u32 tile_threads_x = 0;
   int tile_supported = metal_tile_enabled()
       && cg_tile_metal_dispatch_shape(ke, &tile_groups_x, &tile_threads_x);
-  TileConv2DInfo tile_conv_info;
-  int tile_conv_supported = tile_supported
-      && tile_analyze_conv2d_flat(ke, &tile_conv_info);
-  (void)tile_conv_info;
   int kprog_supported = metal_kernel_supported(ke);
   if (!tile_supported && !kprog_supported) return -1;
 
@@ -1577,12 +1573,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
   if (outBuf == nil) return -1;
 
-  // F3.4b: pre-mat moved up; render_uop (tile_jit_encode) tries
-  // BEFORE metal_try_gemm so matmul shapes that fit the simdgroup
-  // template land on render_uop. cg_emit_via_uop declines K%8!=0
-  // matmuls (F3.4a) which trips the PSO build below and falls
-  // through to metal_try_gemm's tile-shared-mem path.
-  //
   // View-aware pre-materialize (the Metal counterpart to
   // cpu_interpret's strided pre-mat loop).  For each input whose
   // TenDesc carries a non-contiguous View, allocate a temp Metal
