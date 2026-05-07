@@ -367,6 +367,185 @@ int main(void) {
   Term not_range_out = uop_apply_kop_swap(not_range, opts_simple, 1);
   CHECK_EQ(not_range_out, not_range);
 
+  // === Phase E4-E6: split-class (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP)
+  //                  UPatRule mirror -- pragmatic stamp port ============
+  // uop_apply_kop_split replays the full applied_opts history (splits +
+  // GLOBAL + SWAP) on a desired[MAX_AXES] vector and stamps each
+  // UOP_RANGE leaf with its post-replay axis_type.  Splits insert a new
+  // axis at position o.axis+1 (shifting later positions right by 1) with
+  // the inner KAX type; the actual range-creation stays in kernel_lift.c
+  // structural-replay, so these tests target leaves whose axis_id has
+  // already been positioned by the lifter.
+
+  // === E4: KOP_UPCAST stamping =====================================
+  TEST_BEGIN("apply-kop-split/upcast-stamps-inner");
+  // Simulate a kernel where axis 0 (extent 128) was UPCAST split with
+  // arg=4.  The lifter emits two leaves: outer at axis_id=0 (LOOP, 32),
+  // inner at axis_id=1 (UPCAST, 4).  This rule sees them post-emission
+  // -- if the test seam left them as LOOP/LOOP, the stamp should fix
+  // axis_id=1 to KAX_UPCAST while leaving axis_id=0 untouched.
+  Term outer_lp = uop_range(0, KAX_LOOP, 32);
+  Term inner_lp = uop_range(1, KAX_LOOP, 4);
+  KOpt opts_upcast[1] = {{ KOP_UPCAST, 0, 4 }};
+  Term outer_st = uop_apply_kop_split(outer_lp, opts_upcast, 1);
+  Term inner_st = uop_apply_kop_split(inner_lp, opts_upcast, 1);
+  CHECK_EQ(outer_st, outer_lp);  // outer position unchanged (still LOOP)
+  CHECK_EQ(uop_range_axis_type(outer_st), (u32)KAX_LOOP);
+  CHECK_EQ(term_tag(inner_st), TAG_UOP);
+  CHECK_EQ(term_ext(inner_st), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(inner_st),   1);
+  CHECK_EQ(uop_range_axis_type(inner_st), (u32)KAX_UPCAST);
+  CHECK_EQ(uop_range_extent(inner_st),    4);
+
+  TEST_BEGIN("apply-kop-split/upcast-idempotent");
+  // Running the rule a second time on the stamped leaf is a no-op:
+  // desired[1]=KAX_UPCAST already matches the leaf's axis_type.
+  Term inner_st2 = uop_apply_kop_split(inner_st, opts_upcast, 1);
+  CHECK_EQ(inner_st2, inner_st);
+  CHECK_EQ(uop_range_axis_type(inner_st2), (u32)KAX_UPCAST);
+
+  // === E5: KOP_UNROLL stamping ====================================
+  TEST_BEGIN("apply-kop-split/unroll-stamps-inner");
+  // UNROLL split at axis 0 with arg=8: outer LOOP, inner UNROLL.
+  Term unr_in_lp = uop_range(1, KAX_LOOP, 8);
+  KOpt opts_unroll[1] = {{ KOP_UNROLL, 0, 8 }};
+  Term unr_in_st = uop_apply_kop_split(unr_in_lp, opts_unroll, 1);
+  CHECK_EQ(uop_range_axis_id(unr_in_st),   1);
+  CHECK_EQ(uop_range_axis_type(unr_in_st), (u32)KAX_UNROLL);
+  CHECK_EQ(uop_range_extent(unr_in_st),    8);
+
+  // === E6: KOP_LOCAL stamping =====================================
+  TEST_BEGIN("apply-kop-split/local-stamps-inner");
+  // LOCAL split at axis 0 with arg=16: outer LOOP, inner LOCAL.
+  Term lcl_in_lp = uop_range(1, KAX_LOOP, 16);
+  KOpt opts_local_split[1] = {{ KOP_LOCAL, 0, 16 }};
+  Term lcl_in_st = uop_apply_kop_split(lcl_in_lp, opts_local_split, 1);
+  CHECK_EQ(uop_range_axis_id(lcl_in_st),   1);
+  CHECK_EQ(uop_range_axis_type(lcl_in_st), (u32)KAX_LOCAL);
+
+  // === KOP_GROUP / KOP_GROUPTOP stamping ===========================
+  TEST_BEGIN("apply-kop-split/group-stamps-group-reduce");
+  Term grp_in_lp = uop_range(1, KAX_LOOP, 4);
+  KOpt opts_group[1] = {{ KOP_GROUP, 0, 4 }};
+  Term grp_in_st = uop_apply_kop_split(grp_in_lp, opts_group, 1);
+  CHECK_EQ(uop_range_axis_type(grp_in_st), (u32)KAX_GROUP_REDUCE);
+
+  TEST_BEGIN("apply-kop-split/grouptop-stamps-group-reduce");
+  Term gtp_in_lp = uop_range(1, KAX_LOOP, 4);
+  KOpt opts_gtp[1] = {{ KOP_GROUPTOP, 0, 4 }};
+  Term gtp_in_st = uop_apply_kop_split(gtp_in_lp, opts_gtp, 1);
+  CHECK_EQ(uop_range_axis_type(gtp_in_st), (u32)KAX_GROUP_REDUCE);
+
+  // === Negative: no-applied-opts no-op =============================
+  TEST_BEGIN("apply-kop-split/no-applied-opts-noop");
+  Term r_neg = uop_range(0, KAX_LOOP, 32);
+  Term r_neg_out = uop_apply_kop_split(r_neg, NULL, 0);
+  CHECK_EQ(r_neg_out, r_neg);
+  KOpt opts_zero_split[1] = {{ KOP_UPCAST, 0, 4 }};
+  Term r_neg_z = uop_apply_kop_split(r_neg, opts_zero_split, 0);
+  CHECK_EQ(r_neg_z, r_neg);
+
+  // === Negative: non-RANGE term passes through =====================
+  TEST_BEGIN("apply-kop-split/non-range-tag-mismatch");
+  Term not_r = uop_const(DT_INT32, 99);
+  Term not_r_out = uop_apply_kop_split(not_r, opts_upcast, 1);
+  CHECK_EQ(not_r_out, not_r);
+
+  // === Composition: UPCAST then GLOBAL on a later axis =============
+  TEST_BEGIN("apply-kop-split/upcast-then-global-on-shifted-axis");
+  // Pre-split axes [LOOP@0(128), LOOP@1(64)].  UPCAST(0, 4) -> outer
+  // axis 0 (LOOP, 32), inner axis 1 (UPCAST, 4); old axis 1 shifts to
+  // position 2 (LOOP, 64).  GLOBAL on the shifted axis 2 with arg=64
+  // stamps desired[2]=KAX_GLOBAL.  axis_id=2 leaf should pick this up.
+  Term shifted_lp = uop_range(2, KAX_LOOP, 64);
+  KOpt opts_split_global[2] = {
+    { KOP_UPCAST, 0, 4  },   // inserts new axis at position 1; old 1 -> 2
+    { KOP_GLOBAL, 2, 64 },   // stamps shifted position 2 -> KAX_GLOBAL
+  };
+  Term shifted_st = uop_apply_kop_split(shifted_lp, opts_split_global, 2);
+  CHECK_EQ(uop_range_axis_id(shifted_st),   2);
+  CHECK_EQ(uop_range_axis_type(shifted_st), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_extent(shifted_st),    64);
+  // The new inner axis at position 1 should still be UPCAST.
+  Term inner_post = uop_apply_kop_split(uop_range(1, KAX_LOOP, 4),
+                                         opts_split_global, 2);
+  CHECK_EQ(uop_range_axis_type(inner_post), (u32)KAX_UPCAST);
+  // The outer at position 0 should stay LOOP.
+  Term outer_post = uop_apply_kop_split(uop_range(0, KAX_LOOP, 32),
+                                         opts_split_global, 2);
+  CHECK_EQ(outer_post, uop_range(0, KAX_LOOP, 32));
+  CHECK_EQ(uop_range_axis_type(outer_post), (u32)KAX_LOOP);
+
+  // === Composition: LOCAL then GLOBAL on the outer (autotune shape) ===
+  TEST_BEGIN("apply-kop-split/local-then-global-on-outer");
+  // Autotune sequence: LOCAL splits N into LOOP(N/L) + LOCAL(L), then
+  // GLOBAL marks the resulting LOOP for grid-binding.
+  //   LOCAL(0, 8) on extent 256: outer position 0 (LOOP, 32), inner
+  //                              position 1 (LOCAL, 8).
+  //   GLOBAL(0, 32):             outer 0 LOOP -> GLOBAL.
+  KOpt opts_local_global[2] = {
+    { KOP_LOCAL,  0, 8  },
+    { KOP_GLOBAL, 0, 32 },
+  };
+  Term lg_outer = uop_apply_kop_split(uop_range(0, KAX_LOOP, 32),
+                                       opts_local_global, 2);
+  Term lg_inner = uop_apply_kop_split(uop_range(1, KAX_LOOP, 8),
+                                       opts_local_global, 2);
+  CHECK_EQ(uop_range_axis_type(lg_outer), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_axis_type(lg_inner), (u32)KAX_LOCAL);
+
+  // === Composition: split + SWAP =====================================
+  TEST_BEGIN("apply-kop-split/upcast-then-swap");
+  // UPCAST(0, 4) -> [LOOP@0, UPCAST@1, ...], then SWAP(0, 1) ->
+  //   desired = [UPCAST, LOOP, ...].
+  KOpt opts_split_swap[2] = {
+    { KOP_UPCAST, 0, 4 },
+    { KOP_SWAP,   0, 1 },
+  };
+  Term ssw_at_0 = uop_apply_kop_split(uop_range(0, KAX_LOOP, 32),
+                                       opts_split_swap, 2);
+  Term ssw_at_1 = uop_apply_kop_split(uop_range(1, KAX_LOOP, 4),
+                                       opts_split_swap, 2);
+  CHECK_EQ(uop_range_axis_type(ssw_at_0), (u32)KAX_UPCAST);
+  CHECK_EQ(uop_range_axis_type(ssw_at_1), (u32)KAX_LOOP);
+
+  // === Two-split sequence ==========================================
+  TEST_BEGIN("apply-kop-split/two-splits-stack");
+  // Pre-split axes: [LOOP@0(256)].  UPCAST(0, 4) -> [LOOP@0(64),
+  // UPCAST@1(4)].  Then UNROLL(0, 2) on the new outer position 0 ->
+  // [LOOP@0(32), UNROLL@1(2), UPCAST@2(4)].
+  KOpt opts_two_splits[2] = {
+    { KOP_UPCAST, 0, 4 },
+    { KOP_UNROLL, 0, 2 },
+  };
+  Term ts_at_0 = uop_apply_kop_split(uop_range(0, KAX_LOOP, 32),
+                                      opts_two_splits, 2);
+  Term ts_at_1 = uop_apply_kop_split(uop_range(1, KAX_LOOP, 2),
+                                      opts_two_splits, 2);
+  Term ts_at_2 = uop_apply_kop_split(uop_range(2, KAX_LOOP, 4),
+                                      opts_two_splits, 2);
+  CHECK_EQ(uop_range_axis_type(ts_at_0), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(ts_at_1), (u32)KAX_UNROLL);
+  CHECK_EQ(uop_range_axis_type(ts_at_2), (u32)KAX_UPCAST);
+
+  // === Negative: wrong axis_id - leaf at axis_id outside split range ==
+  TEST_BEGIN("apply-kop-split/upcast-no-effect-on-far-axis");
+  // UPCAST(0, 4) inserts at position 1.  A UOP_RANGE at axis_id=5
+  // (already LOOP) should pass through unchanged.
+  Term far = uop_range(5, KAX_LOOP, 16);
+  Term far_out = uop_apply_kop_split(far, opts_upcast, 1);
+  CHECK_EQ(far_out, far);
+  CHECK_EQ(uop_range_axis_type(far_out), (u32)KAX_LOOP);
+
+  // === Negative: KOP_TC ignored ===================================
+  TEST_BEGIN("apply-kop-split/kop-tc-ignored");
+  // KOP_TC carries kernel-level metadata only; it doesn't mutate
+  // axis_types.  The rule should pass leaves through unchanged.
+  Term tc_lp = uop_range(0, KAX_LOOP, 32);
+  KOpt opts_tc[1] = {{ KOP_TC, 0, 16 }};
+  Term tc_out = uop_apply_kop_split(tc_lp, opts_tc, 1);
+  CHECK_EQ(tc_out, tc_lp);
+
   thvm_free();
   TEST_REPORT();
 }

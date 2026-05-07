@@ -2209,6 +2209,31 @@ fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
 fn Term uop_apply_kop_swap(Term root, KOpt const *applied_opts,
                            u32 n_applied);
 
+// === Phase E4-E6: split-class UPatRule mirror (src/uop/apply_opt.c) ===
+// Walks the DAG rooted at `root` and stamps each UOP_RANGE leaf with
+// the axis_type produced by simulating the full applied_opts history
+// (split-class KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP + KOP_GLOBAL +
+// KOP_SWAP) on a desired[MAX_AXES] vector.  Each split inserts a new
+// position at o.axis+1 (shifting later positions right), with the
+// outer at o.axis keeping its current axis_type and the inner at
+// o.axis+1 taking the opt's KAX_ type (UPCAST/UNROLL/LOCAL/GROUP_REDUCE).
+// GLOBAL stamps KAX_GLOBAL on a LOOP position; SWAP swaps two positions'
+// axis_types.  Other KOP_* (KOP_TC, KOP_PADTO, KOP_NOLOCALS) are
+// no-ops here (mirroring axes_apply_opt's behaviour).
+//
+// This is the pragmatic stamp-only port: kernel_lift.c structural
+// replay still creates the new UOP_RANGE leaves for each split (the
+// "axis-INSERTION" half of the rewrite); this rule only fixes up
+// axis_type on already-emitted leaves whose axis_id sits in the
+// post-replay range.  The full UPat-driven splitting (replacing one
+// UOP_RANGE with two new leaves wired into the consumer's IADD/IMUL
+// chain) is deferred until a future wedge introduces a `uop_range_split`
+// primitive returning an (outer, inner) pair.  Idempotent:
+// desired[a] is a pure function of applied_opts.  See
+// docs/plans/ideal_pipeline.md row E.
+fn Term uop_apply_kop_split(Term root, KOpt const *applied_opts,
+                            u32 n_applied);
+
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
