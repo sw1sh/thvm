@@ -360,5 +360,141 @@ int main(void) {
   }
   thvm_free();
 
+  // === slice 4: dag-scan dtype-uniform agrees with program[] ===
+  // Phase C slice 4 introduces uop_dag_dtype_uniform, the DAG-side
+  // mirror of metal_kernel_supported's per-op dtype check.  For a
+  // homogeneous-FP32 add kernel, both the legacy KProgOp walk and
+  // the new UOp DAG walk must agree (uniform), AND the DAG walk
+  // must reject a probe with a different dtype.
+  TEST_BEGIN("slice4/dag-dtype-uniform-fp32");
+  unsetenv("THVM_BACKEND");
+  thvm_init();
+  Shape s_du = {0}; s_du.ndim = 1; s_du.dims[0] = 4;
+  f32 src_du_a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  f32 src_du_b[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+  u32 ta_du = tensor_alloc(CURRENT_BACKEND, s_du, DT_FP32);
+  u32 tb_du = tensor_alloc(CURRENT_BACKEND, s_du, DT_FP32);
+  CURRENT_BACKEND->buf_write(TENS[ta_du].buf_id, src_du_a, sizeof(src_du_a));
+  CURRENT_BACKEND->buf_write(TENS[tb_du].buf_id, src_du_b, sizeof(src_du_b));
+  u32 kernels_before_du = KERNELS_NEXT;
+  Term add_du = thvm_materialize(uop_binary(UOP_ADD,
+      term_new(0, TAG_TEN, DT_FP32, ta_du),
+      term_new(0, TAG_TEN, DT_FP32, tb_du)));
+  (void)add_du;
+  u32 kid_du = first_emitted_kernel_with_lift_success(kernels_before_du);
+  CHECK(kid_du != 0);
+  if (kid_du != 0) {
+    KernelEntry *ke = &KERNELS[kid_du];
+    // Legacy: walk program[] and confirm uniform-fp32.
+    int legacy_uniform = (ke->n_ops > 0);
+    if (legacy_uniform) {
+      u32 dt = ke->program[0].dtype;
+      CHECK_EQ(dt, (u64)DT_FP32);
+      for (u32 i = 0; i < ke->n_ops; i++) {
+        if (ke->program[i].dtype != dt) { legacy_uniform = 0; break; }
+      }
+    }
+    CHECK(legacy_uniform);
+    // DAG-side: cached_lift must be populated, and the DAG walker
+    // must agree.
+    CHECK(ke->cached_lift.store_root != 0);
+    CHECK(uop_dag_dtype_uniform(ke->cached_lift.store_root, DT_FP32));
+    // Negative probe: the same DAG should NOT be uniform under
+    // DT_INT32 (every BUFFER carries DT_FP32).
+    CHECK(!uop_dag_dtype_uniform(ke->cached_lift.store_root, DT_INT32));
+    // Empty root is trivially uniform (caller's `root != 0` gate).
+    CHECK(uop_dag_dtype_uniform(0, DT_FP32));
+  }
+  thvm_free();
+
+  // === slice 4: dag-scan reduce-axis-extent agrees with program[] ===
+  // Materialise a tail-REDUCE kernel and verify both
+  // propose_kprog_reduce_axis_size (legacy) and
+  // uop_dag_reduce_axis_extent (new) report the same extent.
+  TEST_BEGIN("slice4/dag-reduce-axis-extent");
+  unsetenv("THVM_BACKEND");
+  thvm_init();
+  Shape s_re = {0}; s_re.ndim = 1; s_re.dims[0] = 16;
+  f32 src_re[16];
+  for (u32 i = 0; i < 16; i++) src_re[i] = (f32)i;
+  u32 t_re = tensor_alloc(CURRENT_BACKEND, s_re, DT_FP32);
+  CURRENT_BACKEND->buf_write(TENS[t_re].buf_id, src_re, sizeof(src_re));
+  u32 kernels_before_re = KERNELS_NEXT;
+  Term sum_re = thvm_materialize(uop_reduce(
+      REDUCE_SUM, 0, term_new(0, TAG_TEN, DT_FP32, t_re)));
+  (void)sum_re;
+  // Find a kernel with cached_lift populated AND a reduce in the
+  // lifted DAG.  Reduce-tail kernels typically have the lift succeed.
+  u32 kid_re = 0;
+  for (u32 k = kernels_before_re; k < KERNELS_NEXT; k++) {
+    if (KERNELS[k].cached_lift.store_root != 0
+        && uop_dag_reduce_axis_extent(KERNELS[k].cached_lift.store_root) != 0) {
+      kid_re = k; break;
+    }
+  }
+  CHECK(kid_re != 0);
+  if (kid_re != 0) {
+    KernelEntry *ke = &KERNELS[kid_re];
+    u32 dag_extent = uop_dag_reduce_axis_extent(ke->cached_lift.store_root);
+    CHECK(dag_extent != 0);
+    // The lifter exposes the reduce extent as the source-numel /
+    // output-numel ratio, mirroring propose_kprog_reduce_axis_size.
+    if (ke->n_ops > 0
+        && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
+      KProgOp const *rd = &ke->program[ke->n_ops - 1];
+      u32 src_numel = KSRC_IS_INPUT(rd->src[0])
+          ? ke->input_numels[KSRC_INDEX(rd->src[0])]
+          : ke->program[KSRC_INDEX(rd->src[0])].numel;
+      u32 out_numel = ke->output_numel ? ke->output_numel : 1;
+      u32 kprog_extent = src_numel / out_numel;
+      CHECK_EQ((u64)dag_extent, (u64)kprog_extent);
+    }
+  }
+  thvm_free();
+
+  // === slice 4: dag-scan reduce-unroll-kernel agrees with program[] ===
+  // The lifted-add-then-reduce DAG should pass
+  // uop_dag_is_reduce_unroll_kernel (mirrors propose_metal_reduce
+  // _unroll_kernel's KProgOp gate); a pure-elementwise (no REDUCE)
+  // DAG should fail it.
+  TEST_BEGIN("slice4/dag-reduce-unroll-kernel-gate");
+  unsetenv("THVM_BACKEND");
+  thvm_init();
+  // Reduce kernel: should pass.
+  Shape s_ur = {0}; s_ur.ndim = 1; s_ur.dims[0] = 16;
+  f32 src_ur[16];
+  for (u32 i = 0; i < 16; i++) src_ur[i] = (f32)(i + 1);
+  u32 t_ur = tensor_alloc(CURRENT_BACKEND, s_ur, DT_FP32);
+  CURRENT_BACKEND->buf_write(TENS[t_ur].buf_id, src_ur, sizeof(src_ur));
+  u32 kernels_before_ur = KERNELS_NEXT;
+  Term sum_ur = thvm_materialize(uop_reduce(
+      REDUCE_SUM, 0, term_new(0, TAG_TEN, DT_FP32, t_ur)));
+  (void)sum_ur;
+  u32 kid_ur = 0;
+  for (u32 k = kernels_before_ur; k < KERNELS_NEXT; k++) {
+    if (KERNELS[k].cached_lift.store_root != 0
+        && uop_dag_is_reduce_unroll_kernel(
+              KERNELS[k].cached_lift.store_root)) {
+      kid_ur = k; break;
+    }
+  }
+  CHECK(kid_ur != 0);
+  // Pure-elementwise NEG kernel: should NOT pass (no REDUCE).
+  Shape s_uel = {0}; s_uel.ndim = 1; s_uel.dims[0] = 4;
+  f32 src_uel[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  u32 t_uel = tensor_alloc(CURRENT_BACKEND, s_uel, DT_FP32);
+  CURRENT_BACKEND->buf_write(TENS[t_uel].buf_id, src_uel, sizeof(src_uel));
+  u32 kernels_before_uel = KERNELS_NEXT;
+  Term neg_uel = thvm_materialize(uop_unary(UOP_NEG,
+      term_new(0, TAG_TEN, DT_FP32, t_uel)));
+  (void)neg_uel;
+  u32 kid_uel = first_emitted_kernel_with_lift_success(kernels_before_uel);
+  CHECK(kid_uel != 0);
+  if (kid_uel != 0) {
+    KernelEntry *ke = &KERNELS[kid_uel];
+    CHECK(!uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root));
+  }
+  thvm_free();
+
   TEST_REPORT();
 }

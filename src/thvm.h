@@ -2231,6 +2231,28 @@ fn u32  uop_buffer_ndim (Term t);
 fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
 fn u32  uop_buffer_inst_get(Term t);       // 0 if not UOP_BUFFER
 
+// === DAG read-side scanners (Phase C slice 4) ===
+// Helpers used by metal_kernel_supported / propose.c to derive
+// per-kernel facts from a lifted UOp DAG without re-running the
+// lifter.  Every helper returns a safe default (0 / "uniform") on
+// `root == 0` so callers can chain them with a `cached_lift.store
+// _root != 0` gate and fall back to the legacy program[] path.
+
+// 1 iff every dtype-carrying node (BUFFER, CONST, CAST/BITCAST dst)
+// reachable from `root` has dtype `dt`.  Treats RANGE / I* / INVALID
+// (index-domain) as uniform.  External linkage so the metal backend
+// (compiled as a separate translation unit) can call it.
+int uop_dag_dtype_uniform(Term root, u32 dt);
+
+// Find the first UOP_RANGE leaf with axis_type == KAX_REDUCE (==1)
+// reachable from `root` and return its extent; 0 if none.
+u32 uop_dag_reduce_axis_extent(Term root);
+
+// 1 iff at least one UOP_REDUCE is reachable from `root` AND every
+// reachable op is in the metal reduce-unroll accepted set (mirrors
+// propose_metal_reduce_unroll_kernel's KProgOp gate).
+int uop_dag_is_reduce_unroll_kernel(Term root);
+
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
 // `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).

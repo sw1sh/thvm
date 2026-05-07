@@ -69,8 +69,20 @@ static u32 propose_scalar_reduce_axis_size(KernelEntry const *ke) {
   return 0;
 }
 
+// Phase C slice 4: when cached_lift.store_root is populated walk the
+// lifted UOp DAG for the reduce axis extent.  Used by autotune-time
+// callers that already pay the lift cost at materialize-time; ke->
+// program / ke->scalar_uops remain valid fallbacks for kernels that
+// declined the lift.
+static u32 propose_uop_reduce_axis_size(KernelEntry const *ke) {
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  return uop_dag_reduce_axis_extent(ke->cached_lift.store_root);
+}
+
 static u32 propose_reduce_axis_size(KernelEntry const *ke) {
-  u32 size = propose_kprog_reduce_axis_size(ke);
+  u32 size = propose_uop_reduce_axis_size(ke);
+  if (size != 0) return size;
+  size = propose_kprog_reduce_axis_size(ke);
   return size != 0 ? size : propose_scalar_reduce_axis_size(ke);
 }
 
@@ -325,13 +337,23 @@ static int propose_metal_reduce_unroll_kernel(KernelEntry const *ke) {
   if (propose_metal_tile_scalar_reduce_kernel(ke)) {
     return 1;
   }
-  if (ke->n_ops == 0 || ke->program[ke->n_ops - 1].opcode != UOP_REDUCE) {
-    return 0;
-  }
+  // Phase C slice 4: when cached_lift.store_root is populated, mirror
+  // the per-op KProgOp gate via the lifted UOp DAG: every
+  // dtype-carrying node is FP32 AND at least one UOP_REDUCE is
+  // reachable.  Lifted kernels skip the per-op walk entirely.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (ke->input_dtypes[i] != DT_FP32) {
       return 0;
     }
+  }
+  if (ke->cached_lift.store_root != 0) {
+    if (!uop_dag_dtype_uniform(ke->cached_lift.store_root, DT_FP32)) {
+      return 0;
+    }
+    return uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root);
+  }
+  if (ke->n_ops == 0 || ke->program[ke->n_ops - 1].opcode != UOP_REDUCE) {
+    return 0;
   }
   for (u32 i = 0; i < ke->n_ops; i++) {
     KProgOp const *op = &ke->program[i];
