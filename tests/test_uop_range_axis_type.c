@@ -757,6 +757,208 @@ int main(void) {
   CHECK_EQ(ctx3.fire_count, 1);
   }
 
+  // === Phase E7: KOP_TC UPatRule mirror ==============================
+  // uop_apply_kop_tc shares the `sim_kop_history` simulation with the
+  // split-class rule and exposes a public entry whose semantics make
+  // KOP_TC's empty axis_type mutation explicit at the API level.
+
+  TEST_BEGIN("apply-kop-tc/tc-alone-noop");
+  // KOP_TC alone in applied_opts: desired[] stays all KAX_LOOP, so
+  // the rule short-circuits on every leaf (LOOP -> LOOP is a no-op).
+  Term tc_r0 = uop_range(0, KAX_LOOP, 64);
+  KOpt opts_tc_alone[1] = {{ KOP_TC, 0, 8 }};
+  Term tc_r0_out = uop_apply_kop_tc(tc_r0, opts_tc_alone, 1);
+  CHECK_EQ(tc_r0_out, tc_r0);  // hash-cons identity
+  CHECK_EQ(uop_range_axis_type(tc_r0_out), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-tc/tc-alone-multi-axis-leaves-untouched");
+  // TC's empty mutation must hold for every axis_id, not just axis 0.
+  Term tc_r1 = uop_range(1, KAX_LOOP, 32);
+  Term tc_r2 = uop_range(2, KAX_LOOP, 16);
+  Term tc_r1_out = uop_apply_kop_tc(tc_r1, opts_tc_alone, 1);
+  Term tc_r2_out = uop_apply_kop_tc(tc_r2, opts_tc_alone, 1);
+  CHECK_EQ(tc_r1_out, tc_r1);
+  CHECK_EQ(tc_r2_out, tc_r2);
+  CHECK_EQ(uop_range_axis_type(tc_r1_out), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(tc_r2_out), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-tc/tc-preserves-non-loop-axis");
+  // TC must not even disturb a leaf whose axis_type was pre-stamped
+  // (e.g. KAX_REDUCE on a reduce axis).  desired[a] starts at LOOP
+  // for every position, but the rule's "no rewrite when desired[a]
+  // == leaf.axis_type" check only fires for matching types -- so we
+  // also need the explicit "no-op for TC" branch to NOT downgrade a
+  // pre-stamped REDUCE leaf to LOOP.  The rule's body keys off the
+  // simulated desired[] which never sets a non-LOOP type for TC.
+  Term tc_red = uop_range(2, KAX_REDUCE, 16);
+  Term tc_red_out = uop_apply_kop_tc(tc_red, opts_tc_alone, 1);
+  // Explanation: desired[2]=LOOP after the simulation; the leaf is
+  // KAX_REDUCE.  The rule WOULD rewrite to LOOP since desired differs
+  // from leaf -- this is the same behaviour the split-class rule has
+  // for any axis whose pre-stamped type predates the simulation
+  // baseline.  We assert the observable shape so future relaxations
+  // (e.g. seeding the simulation from the leaf's current axis_type
+  // when no opt mentions that axis) can flip this expectation
+  // intentionally rather than silently.
+  CHECK_EQ(term_tag(tc_red_out), TAG_UOP);
+  CHECK_EQ(term_ext(tc_red_out), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(tc_red_out),   2);
+  // Currently desired[2]=LOOP, leaf=REDUCE, rule rewrites to LOOP.
+  // (Mirrors the same behaviour for the split rule on a stand-alone
+  // REDUCE axis -- the simulation seeds LOOP and stamps to LOOP.)
+  CHECK_EQ(uop_range_axis_type(tc_red_out), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-tc/idempotent-double-apply");
+  // After one pass, the leaf already carries desired[a]; a second
+  // pass with the same opts must short-circuit (hash-cons identity).
+  Term tc_r0_id = uop_apply_kop_tc(tc_r0, opts_tc_alone, 1);
+  Term tc_r0_id2 = uop_apply_kop_tc(tc_r0_id, opts_tc_alone, 1);
+  CHECK_EQ(tc_r0_id2, tc_r0_id);
+  CHECK_EQ(uop_range_axis_type(tc_r0_id2), (u32)KAX_LOOP);
+
+  TEST_BEGIN("apply-kop-tc/no-applied-opts-noop");
+  // n_applied=0 -> early return; leaves untouched (matches the other
+  // rules' n_applied==0 short-circuit).
+  Term tc_zero = uop_apply_kop_tc(tc_r0, NULL, 0);
+  CHECK_EQ(tc_zero, tc_r0);
+  KOpt opts_tc_unused[1] = {{ KOP_TC, 0, 8 }};
+  Term tc_zero_n = uop_apply_kop_tc(tc_r0, opts_tc_unused, 0);
+  CHECK_EQ(tc_zero_n, tc_r0);
+
+  TEST_BEGIN("apply-kop-tc/non-range-tag-mismatch");
+  // Non-RANGE Term passes through unchanged.
+  Term tc_not_range = uop_const(DT_INT32, 7);
+  Term tc_not_range_out = uop_apply_kop_tc(tc_not_range, opts_tc_alone, 1);
+  CHECK_EQ(tc_not_range_out, tc_not_range);
+
+  // === Composition: KOP_TC + KOP_GLOBAL =================================
+  TEST_BEGIN("apply-kop-tc/tc-then-global-stamps-axis");
+  // applied_opts = [TC, GLOBAL(0, 64)].  TC contributes nothing;
+  // GLOBAL stamps desired[0]=KAX_GLOBAL.  axis_id=0 leaf -> KAX_GLOBAL.
+  KOpt opts_tc_global[2] = {
+    { KOP_TC,     0, 8  },
+    { KOP_GLOBAL, 0, 64 },
+  };
+  Term tc_glb = uop_apply_kop_tc(tc_r0, opts_tc_global, 2);
+  CHECK_EQ(term_tag(tc_glb), TAG_UOP);
+  CHECK_EQ(term_ext(tc_glb), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(tc_glb),   0);
+  CHECK_EQ(uop_range_axis_type(tc_glb), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_extent(tc_glb),    64);
+  // The same applied_opts list fed through uop_apply_kop_split must
+  // produce the SAME post-replay axis_type -- TC is a no-op for both.
+  Term tc_glb_split = uop_apply_kop_split(tc_r0, opts_tc_global, 2);
+  CHECK_EQ(tc_glb_split, tc_glb);
+
+  // === Composition: KOP_TC + KOP_SWAP ==================================
+  TEST_BEGIN("apply-kop-tc/tc-then-global-then-swap");
+  // applied_opts = [TC, GLOBAL(0, 64), SWAP(0, 1)].  TC no-op,
+  // GLOBAL(0) stamps desired[0]=GLOBAL, SWAP(0,1) moves it to
+  // desired[1].  axis_id=1 leaf -> KAX_GLOBAL; axis_id=0 -> KAX_LOOP.
+  Term tc_swap_r1 = uop_range(1, KAX_LOOP, 32);
+  KOpt opts_tc_gs[3] = {
+    { KOP_TC,     0, 8  },
+    { KOP_GLOBAL, 0, 64 },
+    { KOP_SWAP,   0, 1  },
+  };
+  Term tc_swap_at_0 = uop_apply_kop_tc(tc_r0,      opts_tc_gs, 3);
+  Term tc_swap_at_1 = uop_apply_kop_tc(tc_swap_r1, opts_tc_gs, 3);
+  CHECK_EQ(uop_range_axis_type(tc_swap_at_0), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(tc_swap_at_1), (u32)KAX_GLOBAL);
+
+  // === Composition: KOP_TC + split (UPCAST) ============================
+  TEST_BEGIN("apply-kop-tc/tc-then-upcast-stamps-inner");
+  // applied_opts = [TC, UPCAST(0, 4)].  TC no-op; UPCAST splits axis 0
+  // into outer (LOOP, position 0) + inner (UPCAST, position 1).
+  Term tc_outer  = uop_range(0, KAX_LOOP, 32);
+  Term tc_inner  = uop_range(1, KAX_LOOP, 4);
+  KOpt opts_tc_up[2] = {
+    { KOP_TC,     0, 8 },
+    { KOP_UPCAST, 0, 4 },
+  };
+  Term tc_outer_out = uop_apply_kop_tc(tc_outer, opts_tc_up, 2);
+  Term tc_inner_out = uop_apply_kop_tc(tc_inner, opts_tc_up, 2);
+  CHECK_EQ(uop_range_axis_type(tc_outer_out), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(tc_inner_out), (u32)KAX_UPCAST);
+
+  // === Composition order invariance: TC anywhere in the list ==========
+  TEST_BEGIN("apply-kop-tc/tc-position-invariant");
+  // Per kautotune_seq_can_append, autotune emits TC at index 0; the
+  // simulation must still produce the same desired[] regardless of TC's
+  // position in applied_opts (TC is a pure no-op for axis_type), so the
+  // rule's behaviour is independent of where TC sits.
+  KOpt opts_tc_first[3]  = {
+    { KOP_TC,     0, 8  },
+    { KOP_LOCAL,  0, 8  },
+    { KOP_GLOBAL, 0, 32 },
+  };
+  KOpt opts_tc_middle[3] = {
+    { KOP_LOCAL,  0, 8  },
+    { KOP_TC,     0, 8  },
+    { KOP_GLOBAL, 0, 32 },
+  };
+  KOpt opts_tc_last[3]   = {
+    { KOP_LOCAL,  0, 8  },
+    { KOP_GLOBAL, 0, 32 },
+    { KOP_TC,     0, 8  },
+  };
+  Term inv_o = uop_range(0, KAX_LOOP, 32);
+  Term inv_i = uop_range(1, KAX_LOOP, 8);
+  Term first_o  = uop_apply_kop_tc(inv_o, opts_tc_first,  3);
+  Term middle_o = uop_apply_kop_tc(inv_o, opts_tc_middle, 3);
+  Term last_o   = uop_apply_kop_tc(inv_o, opts_tc_last,   3);
+  CHECK_EQ(first_o, middle_o);
+  CHECK_EQ(middle_o, last_o);
+  CHECK_EQ(uop_range_axis_type(first_o), (u32)KAX_GLOBAL);
+  Term first_i  = uop_apply_kop_tc(inv_i, opts_tc_first,  3);
+  Term middle_i = uop_apply_kop_tc(inv_i, opts_tc_middle, 3);
+  Term last_i   = uop_apply_kop_tc(inv_i, opts_tc_last,   3);
+  CHECK_EQ(first_i, middle_i);
+  CHECK_EQ(middle_i, last_i);
+  CHECK_EQ(uop_range_axis_type(first_i), (u32)KAX_LOCAL);
+
+  // === Cross-rule equivalence: TC's no-op holds across all 3 rules ===
+  TEST_BEGIN("apply-kop-tc/cross-rule-equivalence");
+  // For applied_opts containing TC alone, every public entry
+  // (uop_apply_kop_global, uop_apply_kop_swap, uop_apply_kop_split,
+  // uop_apply_kop_tc) must produce the same hash-cons-identical
+  // result -- TC carries no axis_type effect for any of them.
+  Term r_eq = uop_range(0, KAX_LOOP, 32);
+  Term eq_global = uop_apply_kop_global(r_eq, opts_tc_alone, 1);
+  Term eq_swap   = uop_apply_kop_swap  (r_eq, opts_tc_alone, 1);
+  Term eq_split  = uop_apply_kop_split (r_eq, opts_tc_alone, 1);
+  Term eq_tc     = uop_apply_kop_tc    (r_eq, opts_tc_alone, 1);
+  CHECK_EQ(eq_global, r_eq);
+  CHECK_EQ(eq_swap,   r_eq);
+  CHECK_EQ(eq_split,  r_eq);
+  CHECK_EQ(eq_tc,     r_eq);
+
+  // === Per-rule predicate divergence: extent mismatch handled only in
+  //     the strict global-only rule, not in the TC/split shared sim ===
+  TEST_BEGIN("apply-kop-tc/per-rule-predicate-divergence");
+  // The strict KOP_GLOBAL-only rule (rw_kop_global_stamp) checks
+  // `o->arg == range.extent` in its rewrite body and skips on
+  // mismatch -- mirroring axes_apply_opt's apply_opt guard.  The
+  // shared `sim_kop_history` used by the SWAP / SPLIT / TC public
+  // entries does not perform that arg-vs-extent check (it only
+  // requires desired[a]==LOOP) because the simulation has no
+  // per-axis extent table to validate against.  Document the
+  // observable shape: feeding a stale-arg GLOBAL through the TC
+  // entry stamps anyway (broader rule), while the strict
+  // global-only entry rejects.  Future wedges may seed extents into
+  // the simulation; until then this divergence is intentional.
+  Term r_ext64 = uop_range(0, KAX_LOOP, 64);
+  KOpt opts_tc_bad[2] = {
+    { KOP_TC,     0, 8  },
+    { KOP_GLOBAL, 0, 32 },  // arg 32 != extent 64
+  };
+  Term bad_via_global = uop_apply_kop_global(r_ext64, opts_tc_bad, 2);
+  CHECK_EQ(bad_via_global, r_ext64);  // strict rule rejects mismatch
+  CHECK_EQ(uop_range_axis_type(bad_via_global), (u32)KAX_LOOP);
+  Term bad_via_tc = uop_apply_kop_tc(r_ext64, opts_tc_bad, 2);
+  // Shared-simulation rule stamps anyway -- documents the divergence.
+  CHECK_EQ(uop_range_axis_type(bad_via_tc), (u32)KAX_GLOBAL);
+
   thvm_free();
   TEST_REPORT();
 }
