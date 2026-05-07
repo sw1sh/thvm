@@ -629,6 +629,66 @@ int main(void) {
     unlink(dl_path);
   }
 
+  TEST_BEGIN("render-uop-c/reduce-max-runs");
+  {
+    // Same shape as reduce-sum but kind=REDUCE_MAX.
+    u32 dimsM2[1]   = { 4 };
+    u32 dimsMin2[1] = { 32 };
+    Term outM2 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsM2,   0);
+    Term aM2   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsMin2, 1);
+    Term insM2[1] = { aM2 };
+    Term r0   = uop_range(0, 0, 4);
+    Term r1   = uop_range(1, 1, 8);
+    Term k8M2 = uop_const(DT_INT32, 8);
+    Term ix8M2 = uop_int_binary(UOP_IMUL, r0, k8M2);
+    Term addrM2 = uop_int_binary(UOP_IADD, ix8M2, r1);
+    Term lM2  = uop_index_e(aM2, addrM2);
+    Term redM2 = uop_reduce(REDUCE_MAX, /*axis=*/1, lM2);
+    Term stM2  = uop_store(outM2, r0, redM2);
+    char src[4096];
+    fp = fmemopen(src, sizeof(src), "w");
+    cg_render_uop_kernel_c(stM2, "k", outM2, insM2, 1, fp);
+    fclose(fp);
+    const char *src_path = "/tmp/thvm_f6_step7.c";
+    const char *dl_path  = "/tmp/thvm_f6_step7.dylib";
+    FILE *cf = fopen(src_path, "w");
+    fputs(src, cf);
+    fclose(cf);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+    int rc = system(cmd);
+    if (rc != 0) {
+      fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
+              src);
+    }
+    CHECK(rc == 0);
+    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+    CHECK(h != NULL);
+    typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *);
+    KFn kfn = (KFn)dlsym(h, "k");
+    CHECK(kfn != NULL);
+    // Inject a known max value at one position per row to verify
+    // the reducer picks it. row i: [i*8 .. i*8+7], with the max at
+    // position i*8+7 = max_val.
+    float aa[32], yy[4];
+    for (u32 i = 0; i < 32; i++) aa[i] = -100.0f - (float)i;
+    aa[ 7] = 1000.0f;   // row 0 max
+    aa[15] = 2000.0f;   // row 1 max
+    aa[23] = 3000.0f;   // row 2 max
+    aa[31] = 4000.0f;   // row 3 max
+    const void *insp[1] = { aa };
+    unsigned numels[1] = { 32 };
+    kfn(yy, insp, 4, numels);
+    CHECK(yy[0] == 1000.0f);
+    CHECK(yy[1] == 2000.0f);
+    CHECK(yy[2] == 3000.0f);
+    CHECK(yy[3] == 4000.0f);
+    dlclose(h);
+    unlink(src_path);
+    unlink(dl_path);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
