@@ -362,6 +362,32 @@ wins from common formula sub-evaluations."  No fight against CDCL.
 Join" collapser tree (Victor's `VICTOR_NOTES.md` already specifies it)
 and reformat the bench output as model counts and assignment lists.
 
+### Status: HVM4 dynamic labels already imported
+
+Surveying the tree found that HVM4's DSU/DDU/INC tags + rewrite
+rules are already ported to thvm:
+
+  * `src/thvm.h`: TAG_DSU=29, TAG_DDU=30, TAG_INC=19 declared.
+  * `src/term/new_dsu.c`, `new_ddu.c`: constructors.
+  * `src/interact/dsu_num.c`, `ddu_num.c`, `dsu_sup.c`, `ddu_sup.c`: rewrite rules.
+  * `src/wnf/_.c`: handles TAG_DSU/DDU strict-on-label dispatch.
+  * `wl/THVMLink/CSource/thvmlink.c`: thvm_wl_term_new_dsu /
+    thvm_wl_term_new_ddu FFI bridges.
+  * `wl/THVMLink/Kernel/THVMLink.wl`: TDsu / TDdu constructors with
+    usage docs.
+
+What's NOT done:
+  * Metal SUP-tree shader port of DSU/DDU (deferred -- bitmask
+    kernel obsoleted the SUP-tree path for SAT decision after
+    Lever 3, so no SAT bench would benefit).
+  * SAT-specific dynamic-label heuristic encoding (a BCP-aware
+    decision-variable selector built on top of TDsu).  Same
+    rationale: bitmask wins SAT enumeration, so this would be
+    worthwhile for Bend2-style demos rather than the SAT bench.
+
+The infrastructure stands ready for non-SAT IC search workloads
+(Bend2 discrete program search, type-elaboration heuristics, etc.).
+
 ### Rank 2 — Prototype dynamic labels for unit-propagation in the SUP-tree
 
 Add HVM4's DSU/DDU tags to thvm.  Use them to encode a decision
