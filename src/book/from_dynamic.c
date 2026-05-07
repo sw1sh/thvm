@@ -46,6 +46,10 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
     case TAG_DUP: return 1;
     case TAG_OP2: return 2;
     case TAG_MAT: return 2;
+    case TAG_EQL: return 2;
+    case TAG_AND: return 2;
+    case TAG_OR:  return 2;
+    case TAG_WHEN: return 2;
     case TAG_DP0: case TAG_DP1: {
       // grad-flavored projections share a 3-cell grad cell;
       // plain dup projections share a 1-cell dup body.
