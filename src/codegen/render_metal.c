@@ -110,6 +110,11 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // STORE roots so render_uop's simdgroup_matrix template fires.
   // No-op for non-matmul kernels.
   Term store_root = uop_recognise_tc(lift.store_root);
+  // F4: same for conv2d_flat -- installs UOP_OPT(_, CONV, 0) on
+  // STORE roots whose REDUCE body has IDIV/IMOD-decomposed addresses
+  // so render_uop's rmu_emit_conv template fires.  No-op when the
+  // matmul recogniser already wrapped the root (TC takes precedence).
+  store_root = uop_recognise_conv(store_root);
   char buf[16384];
   FILE *fp = fmemopen(buf, sizeof(buf), "w");
   if (fp == NULL) return NULL;
