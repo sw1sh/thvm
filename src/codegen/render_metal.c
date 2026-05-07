@@ -89,87 +89,25 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 }
 
 
-// Coverage telemetry: each cg_emit_tile_metal call increments
-// KERNEL_LIFT_ATTEMPTS; on lift success bumps KERNEL_LIFT_SUCCESSES.
-// THVM_RENDER_UOP_SHADOW_COMPILE=1 also renders the lift result and
-// shells out to xcrun metal, populating KERNEL_LIFT_COMPILES /
-// _COMPILE_FAILS.  Read via kernel_lift_attempts() / etc.
-static void cg_shadow_lift_metal(KernelEntry const *ke) {
-  KernelUopLift lift = {0};
-  kernel_lift_count_attempt();
-  // Metal hardware caps buffer attributes at index 30; kernels with
-  // > 30 inputs can't be rendered through buffer-arg signatures.
-  if (ke->n_inputs > 30) return;
-  if (!kernel_lift_to_uop(ke, &lift)) return;
-  kernel_lift_count_success();
-  static int shadow_compile_inited = 0;
-  static int shadow_compile_on     = 0;
-  if (!shadow_compile_inited) {
-    char const *e = getenv("THVM_RENDER_UOP_SHADOW_COMPILE");
-    shadow_compile_on    = (e != NULL && e[0] == '1');
-    shadow_compile_inited = 1;
-  }
-  if (!shadow_compile_on) return;
-  char buf[16384];
-  FILE *fp = fmemopen(buf, sizeof(buf), "w");
-  if (fp == NULL) return;
-  cg_render_uop_kernel(lift.store_root, "shadow", lift.out_buf,
-                       lift.in_bufs, lift.n_inputs, fp);
-  fclose(fp);
-  // Write to a temp file and shell out to xcrun metal.  Slow but
-  // gives concrete signal on rendered-MSL compilability for real
-  // kernels.  Caller gates via THVM_RENDER_UOP_SHADOW_COMPILE=1.
-  extern int system(const char *);
-  extern int unlink(const char *);
-  extern int getpid(void);
-  char path[64];
-  snprintf(path, sizeof(path), "/tmp/thvm_shadow_%d.metal", getpid());
-  FILE *out = fopen(path, "w");
-  if (out == NULL) return;
-  fputs(buf, out);
-  fclose(out);
-  char cmd[256];
-  // When THVM_DUMP_LIFT_COMPILE_FAIL=1, leave the failing .metal file
-  // in /tmp and dump the compiler stderr so we can see what's wrong.
-  static int dump_fail_inited = 0;
-  static int dump_fail_on     = 0;
-  if (!dump_fail_inited) {
-    char const *e = getenv("THVM_DUMP_LIFT_COMPILE_FAIL");
-    dump_fail_on    = (e != NULL && e[0] == '1');
-    dump_fail_inited = 1;
-  }
-  snprintf(cmd, sizeof(cmd),
-           "xcrun metal -x metal -c %s -o /dev/null 2>/dev/null", path);
-  int rc = system(cmd);
-  if (WEXITSTATUS(rc) != 0 && dump_fail_on) {
-    // Copy to a stable path that survives the subsequent unlink so a
-    // follow-up shell can inspect the final failing rendering.
-    char saved[64];
-    snprintf(saved, sizeof(saved), "/tmp/thvm_shadow_last_fail.metal");
-    char cp_cmd[256];
-    snprintf(cp_cmd, sizeof(cp_cmd), "cp %s %s", path, saved);
-    system(cp_cmd);
-    fprintf(stderr, "=== compile-fail (saved as %s): ", saved);
-    char err_cmd[256];
-    snprintf(err_cmd, sizeof(err_cmd),
-             "xcrun metal -x metal -c %s -o /dev/null 2>&1 | head -5",
-             path);
-    system(err_cmd);
-  }
-  unlink(path);
-  kernel_lift_count_compile(WEXITSTATUS(rc) == 0);
-}
-
 // Render through kernel_lift_to_uop + cg_render_uop_kernel.  This is
 // the primary (and only) Metal MSL emit path: the lifter handles
 // every kernel shape (matmul, conv2d_flat including multi-input X
 // im2col, elementwise, reduce, movement-fused subtrees).
+//
+// Bumps KERNEL_LIFT_ATTEMPTS / SUCCESSES counters as it goes; readable
+// via kernel_lift_attempts() / kernel_lift_successes() for diagnostics.
+// (KERNEL_LIFT_COMPILES / _COMPILE_FAILS were populated by an earlier
+// shadow-compile path that shell-exec'd xcrun metal; that was deleted
+// when render_uop became the sole emit path -- the actual MTLLibrary
+// PSO build downstream is now the source of truth for compilability.)
 static char *cg_emit_via_uop(KernelEntry const *ke) {
+  kernel_lift_count_attempt();
   // Metal hardware caps buffer attributes at index 30 (31 slots total
   // including output).  Reject kernels with too many inputs.
   if (ke->n_inputs > 30) return NULL;
   KernelUopLift lift = {0};
   if (!kernel_lift_to_uop(ke, &lift)) return NULL;
+  kernel_lift_count_success();
   // Render to a malloc'd string, matching cg_emit_tile_metal's
   // contract.  Use kernel name "k" so MTLLibrary lookup behaves like
   // the existing path.
@@ -199,7 +137,6 @@ char *cg_emit_tile_metal(KernelEntry const *ke) {
   if (cg_kernel_has_extra_outputs(ke)) {
     return NULL;
   }
-  cg_shadow_lift_metal(ke);
   // Render through the UOp-DAG renderer.  The lifter handles every
   // kernel shape (matmul / conv2d / elementwise / reduce / movement-
   // fused / im2col multi-input).  Returns NULL when the lifter
