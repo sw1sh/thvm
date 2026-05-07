@@ -1482,7 +1482,12 @@ int main(void) {
       mox_in_bufs[i] = (itid != 0 && itid < TENS_NEXT) ? TENS[itid].buf_id : 0;
     }
     u32 mox_primary_buf = TENS[mox_primary_tid].buf_id;
-    int mox_rc = cpu_interpret(mox_ke, mox_in_bufs, mox_primary_buf);
+    // F6 multi-output walker: retargeted from cpu_interpret to
+    // cpu_dispatch_kernel so the test exercises the cpu_uop_walk path
+    // (which now handles n_extra_outputs > 0 via the lifter's
+    // STORE-AFTER chain).  The legacy cpu_interpret post-pass is being
+    // retired; this test validates the walker's dispatch instead.
+    int mox_rc = cpu_dispatch_kernel(mox_ke, mox_in_bufs, mox_primary_buf);
     CHECK_EQ(mox_rc, 0);
     // Verify both buffers.  The host's primary corresponds to one
     // of the two siblings; we don't know which a priori (planner
