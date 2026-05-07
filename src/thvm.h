@@ -1837,9 +1837,6 @@ fn int kernel_apply_opt(struct KernelEntry *ke, KOpt opt);
 fn u32  kernel_gc_sweep(Term result);
 
 // === scalar UOp arena ops (schedule/rangeify.c) ===
-// Reserve room on a kernel's scalar_uops[] array.  Geometric
-// growth; aborts past SUOP_MAX_CAP.  Idempotent at-or-below cap.
-fn void rangeify_reserve(struct KernelEntry *ke, u32 needed);
 // Append a new scalar UOp; returns its slot id (>= 1).  Slot 0
 // is the S_NONE sentinel and never returned.  Initializes scalar_uops
 // on first call.  src[] entries that are 0 mean "unused".
@@ -1885,7 +1882,6 @@ fn int  rangeify_try_lower_elementwise(struct KernelEntry *ke);
 // The tile plan is the optimization layer above scalar_uops.  These
 // helpers mirror the scalar arena API: slot 0 is TILE_NONE, live ops
 // start at 1, and src[] entries of 0 mean "unused".
-fn void tile_reserve(struct KernelEntry *ke, u32 needed);
 fn u32  tile_emit(struct KernelEntry *ke, u8 op, u32 dtype,
                   u8 src_count, const u32 *src, u64 extra);
 fn u32  tile_emit_leaf(struct KernelEntry *ke, u8 op, u32 dtype, u64 extra);
@@ -1900,8 +1896,6 @@ fn u32  tile_analyze_reduce_broadcast(struct KernelEntry const *ke);
 fn u32  tile_lower_reduce_broadcast(struct KernelEntry *ke,
                                     u32 reduce_scalar_id,
                                     u32 reduce_groups);
-fn void tile_dump_node(struct KernelEntry const *ke, u32 id,
-                       FILE *fp, u32 depth);
 fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
 
 // Emit a pseudo-MSL skeleton from the tile_uops graph.
@@ -2292,7 +2286,6 @@ fn Term uop_graph_rewrite(Term root,
                           UOpGraphRewriteRule const *rules,
                           u32 n_rules,
                           void *user);
-fn void uop_graph_rewrite_stats_clear(void);
 fn u32  uop_graph_rewrite_stat_hits(char const *name);
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);
