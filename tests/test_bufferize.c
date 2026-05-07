@@ -1414,17 +1414,19 @@ int main(void) {
   CHECK_EQ(materialize_kernel_merge_candidate_count(), 0);
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
-  TEST_BEGIN("kernel-merge/spliced-host-produces-both-outputs-via-cpu-interpret");
+  TEST_BEGIN("kernel-merge/spliced-host-produces-both-outputs-via-uop-walker");
   // Step 6 + 7: end-to-end verification.  Two sibling elementwise
   // boundaries that share an input.  With THVM_KERNEL_MERGE=1, the
   // planner flags the (host, child) pair, the splice action
   // appends the child's program to the host's KernelEntry, marks
   // the child's last KProgOp with store_extra_plus_one = 1, and
   // registers the child's output as the kernel's first extra
-  // output.  cpu_interpret runs the merged program and the
-  // post-pass copies the marked op's regs[step] into the extra
-  // output's CpuBuf.  The test reads both buffers and asserts the
-  // values match the per-boundary single-output computation.
+  // output.  Post F6 cleanup, the UOp DAG walker (cpu_uop_walk)
+  // dispatches each STORE to the right CpuBuf via the lifter's
+  // STORE-AFTER chain; the legacy cpu_interpret post-pass that did
+  // the same thing was deleted.  The test reads both buffers and
+  // asserts the values match the per-boundary single-output
+  // computation.
   setenv("THVM_KERNEL_MERGE", "1", 1);
   setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
   // Fresh tensors written with known values so we can predict the

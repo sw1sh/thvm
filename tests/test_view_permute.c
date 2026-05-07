@@ -12,7 +12,8 @@
 //     fresh contig buf so flat buf_read gives the transposed values.
 //   - producer_kid is inherited.
 //   - A strided consumer (ADD over the PERMUTE alias) computes
-//     correctly via cpu_interpret's pre-materialize path.
+//     correctly via the UOp DAG walker (cpu_uop_walk), which
+//     replaced cpu_interpret's pre-materialize path in F6 cleanup.
 
 #include "../src/thvm.c"
 #include "test.h"

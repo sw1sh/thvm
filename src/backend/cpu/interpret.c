@@ -1,249 +1,20 @@
-// backend/cpu/interpret.c - tree-walker that executes a KernelEntry program.
+// backend/cpu/interpret.c - scalar-UOp + tile interpreters and dispatch ladder.
 //
-// Analogue of tinygrad's ops_python.py PythonProgram: walks
-// KernelEntry.program[] entry-by-entry, dispatching on opcode to the
-// per-op files under src/backend/cpu/op/<op>.c.  Each op writes into
-// a fresh per-step scratch buffer; the final op writes into the
-// caller's out_buf_id.  No fusion, no memory reuse in v1 (step 14
-// territory).
+// The legacy KProgOp tree-walker (cpu_interpret) and its per-op kernel
+// files (backend/cpu/op/*.c) were deleted alongside this file's F6
+// cleanup wedge: the UOp DAG walker (backend/cpu/uop_walk.c) covers
+// every kernel shape the surgical suite produces, with zero
+// THVM_CPU_INTERPRET_TRACE hits remaining at deletion time.
 //
-// Source slots can reference either an input tensor
-// (KSRC_IS_INPUT(s)) or an earlier program slot (regs[KSRC_INDEX(s)]).
-// Broadcast is handled per-op by inspecting src_numels[].
+// What stays here:
+//   - cpu_dispatch_scalar: rangeify scalar-UOp recursive evaluator
+//     (REDUCE / FLIP / PAD / SHRINK / packed nibbles / narrow FPs).
+//   - cpu_dispatch_tile:   TileUop interpreter (env-gated;
+//     correctness fallback until Phase G also collapses TileUop[]).
+//   - cpu_dispatch_kernel: the dispatch ladder itself.
 
-fn int cpu_interpret(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  // F6 audit knob: emit a one-line trace per cpu_interpret entry so a
-  // test run can measure how often the per-op fallback fires after
-  // the F6 default-on flip.  Gated behind THVM_CPU_INTERPRET_TRACE=1
-  // -- production keeps the path silent.
-  if (getenv("THVM_CPU_INTERPRET_TRACE")) {
-    fprintf(stderr, "thvm: cpu_interpret -- n_inputs=%u n_ops=%u dt=%u "
-                    "out_numel=%u ops=[",
-            ke->n_inputs, ke->n_ops,
-            ke->n_ops > 0 ? ke->program[0].dtype : 0,
-            ke->output_numel);
-    for (u32 _i = 0; _i < ke->n_ops; _i++) {
-      fprintf(stderr, "%s%u", _i ? "," : "", ke->program[_i].opcode);
-    }
-    fputs("]\n", stderr);
-  }
-  // Multi-output kernel support (Step 7 of multi-output groundwork).
-  // Each extra output's value comes from a KProgOp marked with
-  // store_extra_plus_one = N + 1; after the program runs for slot 0
-  // (the legacy primary-output path), a post-loop pass copies
-  // regs[step] from each marked op to the extra output's CpuBuf.
-  // This keeps the legacy single-output write path (last op ->
-  // out_buf_id) untouched -- merged kernels just gain an
-  // additional copy at the tail.
-  // Resolve each input buffer's raw pointer once up front.
-  // Non-contiguous inputs (sub-item f3c: view-only EXPAND aliases
-  // with stride=0 broadcast) get pre-materialized into temp
-  // contiguous buffers via view_strided_index so per-op kernels
-  // can stay flat-buffer-simple.
-  // Dynamically sized to ke->n_inputs (was static [KERNEL_MAX_INPUT]
-  // when that was a small fixed cap; now KernelEntry's input arrays
-  // are heap-grown so we mirror that here via stack-malloc).
-  u32   n_inputs = ke->n_inputs;
-  void *in_ptrs_buf  [n_inputs ? n_inputs : 1];
-  void *temp_bufs_buf[n_inputs ? n_inputs : 1];
-  void **in_ptrs   = in_ptrs_buf;
-  void **temp_bufs = temp_bufs_buf;
-  for (u32 i = 0; i < n_inputs; i++) temp_bufs[i] = NULL;
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 tid = ke->input_tids[i];
-    if (tid == 0 || tid >= TENS_NEXT) {
-      in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
-      continue;
-    }
-    TenDesc const *td = &TENS[tid];
-    // Pre-materialize when the public view is non-contig OR when
-    // the ShapeTracker has a chain (multi-view composition).  Both
-    // cases need the index walked through tendesc_strided_index.
-    if (td->view.contiguous && td->nviews == 0) {
-      in_ptrs[i] = CPU_BUFS[in_buf_ids[i]].data;
-      continue;
-    }
-    View const *v = &td->view;
-    void *src = CPU_BUFS[in_buf_ids[i]].data;
-    // Packed nibble dtypes: unpack the underlying byte buffer to i8,
-    // gather under the view (i8 indexing), then repack to nibbles.
-    if (dtype_is_packed(td->dtype)) {
-      i32 max_idx = v->offset;
-      for (u32 k = 0; k < v->shape.ndim; k++) {
-        if (v->shape.dims[k] > 1 && v->strides[k] > 0)
-          max_idx += (i32)(v->shape.dims[k] - 1) * v->strides[k];
-      }
-      u32 src_logical = (u32)max_idx + 1;
-      i8 *unpacked = (i8 *)malloc(src_logical);
-      if (td->dtype == DT_INT4)
-        unpack_int4 (unpacked, (u8 const *)src, src_logical);
-      else
-        unpack_uint4((u8 *)unpacked, (u8 const *)src, src_logical);
-      i8 *gathered = (i8 *)malloc(v->numel);
-      for (u32 k = 0; k < v->numel; k++)
-        gathered[k] = unpacked[tendesc_strided_index(td, k)];
-      free(unpacked);
-      void *packed = malloc((size_t)dtype_storage_bytes(td->dtype, v->numel));
-      if (td->dtype == DT_INT4)
-        pack_int4 ((u8 *)packed, gathered, v->numel);
-      else
-        pack_uint4((u8 *)packed, (u8 *)gathered, v->numel);
-      free(gathered);
-      in_ptrs  [i] = packed;
-      temp_bufs[i] = packed;
-      continue;
-    }
-    u32   esz = dtype_itemsize(td->dtype);
-    void *tmp = malloc((size_t)dtype_storage_bytes(td->dtype, v->numel));
-    switch (esz) {
-      case 1: {
-        u8 *d = (u8 *)tmp, *s = (u8 *)src;
-        for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
-        break;
-      }
-      case 2: {
-        u16 *d = (u16 *)tmp, *s = (u16 *)src;
-        for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
-        break;
-      }
-      case 4: {
-        u32 *d = (u32 *)tmp, *s = (u32 *)src;
-        for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
-        break;
-      }
-      case 8: {
-        u64 *d = (u64 *)tmp, *s = (u64 *)src;
-        for (u32 k = 0; k < v->numel; k++) d[k] = s[tendesc_strided_index(td, k)];
-        break;
-      }
-      default:
-        fprintf(stderr, "cpu_interpret: view pre-mat itemsize %u unsupported\n", esz);
-        abort();
-    }
-    in_ptrs  [i] = tmp;
-    temp_bufs[i] = tmp;
-  }
+#include <math.h>     // sqrtf/sqrt, exp2f/exp2, log2f/log2, INFINITY
 
-  // Allocate one scratch slot per program op.  The last op writes
-  // into the real output buffer; all earlier ops write into their
-  // own f32/i32 scratch of the right size.  Sized to ke->n_ops
-  // (was static [KPROG_MAX_OPS] when that was a small fixed cap).
-  u32   n_ops_local = ke->n_ops;
-  void *regs_buf  [n_ops_local ? n_ops_local : 1];
-  u64   rbytes_buf[n_ops_local ? n_ops_local : 1];
-  u32   rsize_buf [n_ops_local ? n_ops_local : 1];
-  void **regs   = regs_buf;
-  u64   *rbytes = rbytes_buf;
-  u32   *rsize  = rsize_buf;
-  for (u32 i = 0; i < n_ops_local; i++) {
-    regs  [i] = NULL;
-    rbytes[i] = 0;
-    rsize [i] = 0;
-  }
-
-  int rc = 0;
-  for (u32 step = 0; step < ke->n_ops; step++) {
-    KProgOp *p = &ke->program[step];
-    u32 n_elem = p->numel ? p->numel : 1;
-    u64 nbytes = dtype_storage_bytes(p->dtype, n_elem);
-
-    // Assemble source pointers + numels for this op.
-    void *srcs      [MAX_UOP_SRC] = {0};
-    u32   src_numels[MAX_UOP_SRC] = {0};
-    for (u8 s = 0; s < p->n_src; s++) {
-      u32 raw = p->src[s];
-      if (KSRC_IS_INPUT(raw)) {
-        u32 idx = KSRC_INDEX(raw);
-        srcs[s]       = in_ptrs[idx];
-        src_numels[s] = ke->input_numels[idx];
-      } else {
-        u32 idx = KSRC_INDEX(raw);
-        srcs[s]       = regs[idx];
-        src_numels[s] = rsize[idx];
-      }
-    }
-
-    // Decide where to write.  Last step goes to out_buf_id; others
-    // land in a scratch.
-    void *dst;
-    if (step + 1 == ke->n_ops) {
-      dst = CPU_BUFS[out_buf_id].data;
-    } else {
-      regs  [step] = malloc((size_t)nbytes);
-      rbytes[step] = nbytes;
-      rsize [step] = n_elem;
-      dst = regs[step];
-    }
-
-    switch (p->opcode) {
-      case UOP_CONST: cpu_op_const(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_ADD:   cpu_op_add  (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_MUL:   cpu_op_mul  (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_NEG:   cpu_op_neg  (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_RECIP: cpu_op_recip(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_SQRT:  cpu_op_sqrt (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_EXP2:  cpu_op_exp2 (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_LOG2:  cpu_op_log2 (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_CMPLT: cpu_op_cmplt(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_CMPEQ: cpu_op_cmpeq(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_REDUCE:cpu_op_reduce(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_EXPAND:cpu_op_expand(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_RESHAPE:cpu_op_reshape(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_LOAD:   cpu_op_load  (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_FLIP:  cpu_op_flip  (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_PAD:   cpu_op_pad   (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_SHRINK:cpu_op_shrink(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_PERMUTE: cpu_op_permute(dst, srcs, src_numels, p, n_elem); break;
-      case UOP_CAST:    cpu_op_cast   (dst, srcs, src_numels, p, n_elem); break;
-      case UOP_BITCAST: cpu_op_bitcast(dst, srcs, src_numels, p, n_elem); break;
-      default:
-        rc = -1;
-        goto cleanup;
-    }
-  }
-
-  // Multi-output kernel post-pass (Step 7).  Walk the program once
-  // more; for every op flagged with store_extra_plus_one > 0, copy
-  // its computed value into the corresponding extra output's
-  // CpuBuf.  Sourced from regs[step] for mid-program ops; for an
-  // op that happens to also be the LAST step (which wrote directly
-  // to out_buf_id, leaving regs[step] NULL), source from
-  // CPU_BUFS[out_buf_id].data.  The splice action in materialize
-  // currently never marks the last op (B is appended BEFORE A), so
-  // the second branch is defensive coverage.
-  if (rc == 0 && ke->n_extra_outputs > 0) {
-    for (u32 step = 0; step < ke->n_ops; step++) {
-      KProgOp *p = &ke->program[step];
-      if (p->store_extra_plus_one == 0) continue;
-      u32 extra_idx = (u32)p->store_extra_plus_one - 1u;
-      if (extra_idx >= (u32)ke->n_extra_outputs) continue;
-      u32 extra_tid = ke->extra_output_tids[extra_idx];
-      if (extra_tid == 0 || extra_tid >= TENS_NEXT) continue;
-      u32 extra_buf_id = TENS[extra_tid].buf_id;
-      if (extra_buf_id == 0 || extra_buf_id >= CPU_BUFS_NEXT) continue;
-      void *dst = CPU_BUFS[extra_buf_id].data;
-      if (dst == NULL) continue;
-      void *src;
-      if (step + 1 == ke->n_ops) {
-        // Defensive: last op also writes to primary out_buf_id;
-        // copy from there (regs[step] is NULL).
-        if (out_buf_id == 0 || out_buf_id >= CPU_BUFS_NEXT) continue;
-        src = CPU_BUFS[out_buf_id].data;
-      } else {
-        src = regs[step];
-      }
-      if (src == NULL) continue;
-      u32 numel = p->numel ? p->numel : 1;
-      u64 nbytes = dtype_storage_bytes(p->dtype, numel);
-      memcpy(dst, src, (size_t)nbytes);
-    }
-  }
-
-cleanup:
-  for (u32 i = 0; i < ke->n_ops; i++) if (regs[i]) free(regs[i]);
-  for (u32 i = 0; i < ke->n_inputs; i++) if (temp_bufs[i]) free(temp_bufs[i]);
-  return rc;
-}
 
 // === Phase B/C: scalar-UOp interpreter ===============================
 //
@@ -1194,12 +965,19 @@ fn int cpu_jit_dispatch        (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id
 fn int cpu_uop_walk            (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 
 // F6-finish (b): does the per-call gate let cpu_uop_walk fire?
-// Default-ON after surgical-suite bit-equal validation. Bisection knob
-// `THVM_CPU_UOP_WALK=0` falls back to the legacy cpu_jit_dispatch +
-// cpu_interpret path (mirrors F6 step-10's THVM_CPU_JIT_VIA_UOP=0
-// discipline). The walker fires AHEAD of cpu_jit_dispatch in the
-// dispatch ladder, so every kernel the lifter accepts goes through the
-// UOp DAG evaluator -- no clang-compile, no warmup gate.
+// Default-ON after surgical-suite bit-equal validation. The walker
+// fires AHEAD of cpu_jit_dispatch in the dispatch ladder, so every
+// kernel the lifter accepts goes through the UOp DAG evaluator -- no
+// clang-compile, no warmup gate.
+//
+// Bisection knob `THVM_CPU_UOP_WALK=0` is RETAINED for diagnosis but
+// no longer falls back to a per-op interpreter -- the legacy
+// cpu_interpret + cpu/op/*.c fallback was deleted in the F6-cleanup
+// wedge.  With the walker disabled, dispatch flows JIT -> scalar_uops
+// only; if both decline, cpu_dispatch_kernel returns the
+// scalar-uops dispatch failure code (or, when scalar_uops is empty,
+// the JIT decline propagates as 0 -- the dispatcher returns its rc
+// from the last reachable rung).
 static int cpu_uop_walk_enabled(void) {
   static int known = 0, enabled = 0;
   if (!known) {
@@ -1238,8 +1016,8 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   //    kernel_lift_to_uop and evaluates the resulting UOp DAG
   //    directly. Mirrors cpu_jit_dispatch's lifter call but skips the
   //    clang-compile + dlopen step, so it amortises faster on
-  //    one-shot kernels (no JIT warmup gate). Replaces cpu_interpret
-  //    + cpu/op/*.c on the per-op fallback path.
+  //    one-shot kernels (no JIT warmup gate). The primary CPU
+  //    fallback path now that cpu_interpret + cpu/op/*.c are gone.
   //
   //    Order: AHEAD of cpu_jit_dispatch when THVM_CPU_UOP_WALK=1, so
   //    the walker is exercised for steady-state kernels too. The JIT
@@ -1261,16 +1039,14 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // 5. Rangeify scalar-uops interpreter: the broad fallback that
   //    handles every pattern the WL grid produces (REDUCE, FLIP,
   //    PAD/SHRINK chains, BITCAST, packed nibbles, narrow FPs).
+  //    Final rung now that the legacy cpu_interpret per-op fallback
+  //    is gone -- the F6 surgical sweep showed walker + scalar_uops
+  //    cover every kernel shape the suite produces.
   if (ke->scalar_uops != NULL && ke->n_scalar_uops > 1) {
     int rc = cpu_dispatch_scalar(ke, in_buf_ids, out_buf_id);
     cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
     return rc;
   }
-  // 6. Legacy KProgOp interpreter -- last-resort fallback for
-  //    kernels that didn't lower to scalar uops (THVM_RANGEIFY=0,
-  //    or rangeify bailed).  Slated for removal once the WL grid
-  //    holds zero rangeify bails for all configurations.
-  int rc = cpu_interpret(ke, in_buf_ids, out_buf_id);
   cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
-  return rc;
+  return 0;
 }

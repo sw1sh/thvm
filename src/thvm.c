@@ -90,10 +90,10 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // === dtype/ ===
 // dtype info table + element-size primitives + integer-kernel macros.
 // Must come before any TU that calls dtype_itemsize / dtype_storage_bytes
-// (tensor/alloc.c, schedule/materialize.c, backend/cpu/op/*.c,
+// (tensor/alloc.c, schedule/materialize.c, backend/cpu/uop_walk.c,
 // jit/capture.c).  fp_convert + lane primitives ride alongside;
-// they're consumed by backend/cpu/op/_promote.c (loaded a bit later)
-// for the f16 / bf16 / fp8 promote-to-f32 ALU path.
+// they're consumed by the scalar UOp interpreter and the UOp DAG
+// walker for the f16 / bf16 / fp8 promote-to-f32 ALU path.
 #include "dtype/info.c"
 #include "dtype/int_kernels.h"
 #include "dtype/fp_convert.c"
@@ -163,8 +163,11 @@ static void thvm_set_current_ctx(TContext *ctx) {
 
 // === backend/cpu/ ===
 // Order: init defines CPU_BUFS + CPU_BUFS_NEXT first, then the buf_*
-// helpers reference them, then per-op files, the interpreter, and
-// finally _.c assembles the Backend vtable.
+// helpers reference them, then the scalar / tile interpreters, and
+// finally _.c assembles the Backend vtable.  The legacy per-op
+// dispatch (cpu_interpret + cpu/op/*.c) was deleted in the F6
+// cleanup wedge -- the UOp DAG walker (uop_walk.c) covers every
+// kernel shape the surgical suite produces.
 #include "backend/cpu/init.c"
 #include "backend/cpu/buf_freelist.c"   // needed by buf_alloc.c
 #include "backend/cpu/buf_alloc.c"
@@ -175,28 +178,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "backend/cpu/buf_write.c"
 #include "backend/cpu/buf_copy.c"
 #include "backend/cpu/buf_pool.c"
-// Promote-to-fp32 helper for narrow-float / fp8 elementwise.
-#include "backend/cpu/op/_promote.c"
-#include "backend/cpu/op/const.c"
-#include "backend/cpu/op/add.c"
-#include "backend/cpu/op/mul.c"
-#include "backend/cpu/op/neg.c"
-#include "backend/cpu/op/recip.c"
-#include "backend/cpu/op/sqrt.c"
-#include "backend/cpu/op/exp2.c"
-#include "backend/cpu/op/log2.c"
-#include "backend/cpu/op/cmplt.c"
-#include "backend/cpu/op/cmpeq.c"
-#include "backend/cpu/op/reduce.c"
-#include "backend/cpu/op/expand.c"
-#include "backend/cpu/op/reshape.c"
-#include "backend/cpu/op/load.c"
-#include "backend/cpu/op/flip.c"
-#include "backend/cpu/op/pad.c"
-#include "backend/cpu/op/shrink.c"
-#include "backend/cpu/op/permute.c"
-#include "backend/cpu/op/cast.c"
-#include "backend/cpu/op/bitcast.c"
 // codegen/ is backend-agnostic.  axis.c + apply_opt.c land first
 // so renderer + cg passes see the KernelAxes scheduling structure.
 // so they can call cg_profile_record / cg_now_us / cg_kernel_flops
