@@ -2103,6 +2103,18 @@ fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IM
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
 
+// === Phase E1: UOP_RANGE field accessors + axis_type rewriter ===
+// Read/write seam for UPatRule[]-driven KernelAxes -> UOP_RANGE.axis_type
+// port (Phase E).  Today these wrap the [NUM(axis_id), NUM(axis_type),
+// NUM(extent)] heap layout so rule bodies don't poke heap slots
+// directly.  Returns 0 / unchanged on tag mismatch.  See
+// src/uop/index.c for design notes; see Phase E in
+// docs/plans/ideal_pipeline.md for the multi-wedge rollout.
+fn u32  uop_range_axis_id  (Term r);
+fn u32  uop_range_axis_type(Term r);
+fn u32  uop_range_extent   (Term r);
+fn Term uop_range_with_axis_type(Term r, u32 new_axis_type);
+
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
