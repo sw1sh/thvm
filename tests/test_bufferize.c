@@ -931,31 +931,41 @@ int main(void) {
   CHECK(cm_kernels_before <= cm_kid);
   // Walk the program: every movement-op KProgOp with a non-broken
   // chain must map to a BIndexChainOp whose op + dims agree.
+  // Phase C slice 7: when THVM_PHASE_C7_FREE_PROGRAM=1 the kernel's
+  // program[] is freed post-lift; the program-side comparison no
+  // longer applies (the bufferize edge table is still populated, but
+  // the program rows that referenced its chain entries are gone).
+  // The relevant invariant for that mode is exercised by the
+  // dispatch-side tests in test_compute_root_dual_write.
   KernelEntry const *cm_ke = &KERNELS[cm_kid];
-  u32 movement_ops_seen = 0;
-  for (u32 i = 0; i < cm_ke->n_ops; i++) {
-    KProgOp const *p = &cm_ke->program[i];
-    if (p->opcode != UOP_RESHAPE && p->opcode != UOP_PAD
-        && p->opcode != UOP_PERMUTE && p->opcode != UOP_EXPAND
-        && p->opcode != UOP_SHRINK && p->opcode != UOP_FLIP) continue;
-    if (p->chain_input_slot == 0xFFFFFFFFu) continue;
-    BIndexChainOp chain_op;
-    int ok = kernel_entry_prog_chain_op(cm_kid, i, &chain_op);
-    CHECK_EQ(ok, 1);
-    if (!ok) continue;
-    movement_ops_seen++;
-    CHECK_EQ(chain_op.op, p->opcode);
-    // Source / output dims must match what the KProgOp recorded.
-    CHECK_EQ(chain_op.src_ndim, p->src0_ndim);
-    CHECK_EQ(chain_op.out_ndim, p->out_ndim);
-    for (u32 d = 0; d < p->src0_ndim && d < MAX_DIM; d++) {
-      CHECK_EQ(chain_op.src_dims[d], p->src0_dims[d]);
+  char const *cm_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
+  int cm_free_on = (cm_free_e == NULL) ? 1 : (cm_free_e[0] != '0');
+  if (!cm_free_on) {
+    u32 movement_ops_seen = 0;
+    for (u32 i = 0; i < cm_ke->n_ops; i++) {
+      KProgOp const *p = &cm_ke->program[i];
+      if (p->opcode != UOP_RESHAPE && p->opcode != UOP_PAD
+          && p->opcode != UOP_PERMUTE && p->opcode != UOP_EXPAND
+          && p->opcode != UOP_SHRINK && p->opcode != UOP_FLIP) continue;
+      if (p->chain_input_slot == 0xFFFFFFFFu) continue;
+      BIndexChainOp chain_op;
+      int ok = kernel_entry_prog_chain_op(cm_kid, i, &chain_op);
+      CHECK_EQ(ok, 1);
+      if (!ok) continue;
+      movement_ops_seen++;
+      CHECK_EQ(chain_op.op, p->opcode);
+      // Source / output dims must match what the KProgOp recorded.
+      CHECK_EQ(chain_op.src_ndim, p->src0_ndim);
+      CHECK_EQ(chain_op.out_ndim, p->out_ndim);
+      for (u32 d = 0; d < p->src0_ndim && d < MAX_DIM; d++) {
+        CHECK_EQ(chain_op.src_dims[d], p->src0_dims[d]);
+      }
+      for (u32 d = 0; d < p->out_ndim && d < MAX_DIM; d++) {
+        CHECK_EQ(chain_op.out_dims[d], p->out_dims[d]);
+      }
     }
-    for (u32 d = 0; d < p->out_ndim && d < MAX_DIM; d++) {
-      CHECK_EQ(chain_op.out_dims[d], p->out_dims[d]);
-    }
+    CHECK(movement_ops_seen >= 1);
   }
-  CHECK(movement_ops_seen >= 1);
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
   TEST_BEGIN("bufferize/multi-path-edge-disambiguation");
@@ -978,20 +988,26 @@ int main(void) {
   KernelEntry const *mp_ke = &KERNELS[mp_kid];
   // Find both reshape KProgOps.  Their chain_input_slots should
   // match (same source) but chain_edge_idx should differ (0 and 1).
+  // Phase C slice 7: same gating as the previous test -- under
+  // THVM_PHASE_C7_FREE_PROGRAM=1 the program[] is freed.
   u32 reshape_chain_edges[4];
   u32 reshape_count = 0;
-  for (u32 i = 0; i < mp_ke->n_ops; i++) {
-    KProgOp const *p = &mp_ke->program[i];
-    if (p->opcode != UOP_RESHAPE) continue;
-    if (p->chain_input_slot == 0xFFFFFFFFu) continue;
-    if (reshape_count < 4) {
-      reshape_chain_edges[reshape_count++] = p->chain_edge_idx;
+  char const *mp_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
+  int mp_free_on = (mp_free_e == NULL) ? 1 : (mp_free_e[0] != '0');
+  if (!mp_free_on) {
+    for (u32 i = 0; i < mp_ke->n_ops; i++) {
+      KProgOp const *p = &mp_ke->program[i];
+      if (p->opcode != UOP_RESHAPE) continue;
+      if (p->chain_input_slot == 0xFFFFFFFFu) continue;
+      if (reshape_count < 4) {
+        reshape_chain_edges[reshape_count++] = p->chain_edge_idx;
+      }
+      // Each reshape KProgOp should successfully look up its own
+      // BIndexChainOp.
+      BIndexChainOp chain_op;
+      int ok = kernel_entry_prog_chain_op(mp_kid, i, &chain_op);
+      CHECK_EQ(ok, 1);
     }
-    // Each reshape KProgOp should successfully look up its own
-    // BIndexChainOp.
-    BIndexChainOp chain_op;
-    int ok = kernel_entry_prog_chain_op(mp_kid, i, &chain_op);
-    CHECK_EQ(ok, 1);
   }
   // Level 54 (view_resolve stops at realized boundaries):
   // path 1 (direct RESHAPE on the boundary) now folds into the
@@ -1000,9 +1016,11 @@ int main(void) {
   // isn't view-foldable.  So the kernel ends with exactly 1
   // reshape KProgOp, not 2.  The chain_edge_idx machinery still
   // exists but no longer needs disambiguation for this scenario.
-  CHECK(reshape_count == 1 || reshape_count == 2);
-  if (reshape_count == 2) {
-    CHECK(reshape_chain_edges[0] != reshape_chain_edges[1]);
+  if (!mp_free_on) {
+    CHECK(reshape_count == 1 || reshape_count == 2);
+    if (reshape_count == 2) {
+      CHECK(reshape_chain_edges[0] != reshape_chain_edges[1]);
+    }
   }
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
@@ -1059,14 +1077,21 @@ int main(void) {
   Term br_kid_term = heap_read(term_val(br_out) + 1);
   u32  br_kid  = (u32)term_val(br_kid_term);
   KernelEntry const *br_ke = &KERNELS[br_kid];
-  int found_binary = 0;
-  for (u32 i = 0; i < br_ke->n_ops; i++) {
-    KProgOp const *p = &br_ke->program[i];
-    if (p->n_src != 2) continue;
-    found_binary = 1;
-    CHECK_EQ(p->chain_input_slot, 0xFFFFFFFFu);
+  // Phase C slice 7: program[] may be NULL post-lift.  Skip the
+  // KProgOp scan in that mode -- the equivalent semantic on the UOp
+  // DAG side is exercised through the lifter coverage tests.
+  char const *br_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
+  int br_free_on = (br_free_e == NULL) ? 1 : (br_free_e[0] != '0');
+  if (!br_free_on) {
+    int found_binary = 0;
+    for (u32 i = 0; i < br_ke->n_ops; i++) {
+      KProgOp const *p = &br_ke->program[i];
+      if (p->n_src != 2) continue;
+      found_binary = 1;
+      CHECK_EQ(p->chain_input_slot, 0xFFFFFFFFu);
+    }
+    CHECK_EQ(found_binary, 1);
   }
-  CHECK_EQ(found_binary, 1);
   unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
   TEST_BEGIN("bufferize/lifetimes-match-materialize-boundary-depths");
@@ -1463,8 +1488,23 @@ int main(void) {
   // (synthetic extras attached for guard tests); those don't have
   // the marker.
   u32 mox_host_kid = 0;
+  // Phase C slice 7: when program[] is freed post-lift the legacy
+  // store_extra_plus_one signature is gone; identify the merged
+  // host by `n_extra_outputs == 1` directly (the kernel_merge
+  // planner sets this on the host kernel only) and trust earlier
+  // synthetic-extra cleanup not to leave stale entries beyond this
+  // boundary in the test's KERNELS_NEXT window.
+  char const *mox_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
+  int mox_free_on = (mox_free_e == NULL) ? 1 : (mox_free_e[0] != '0');
   for (u32 k = 1; k < KERNELS_NEXT; k++) {
     if (KERNELS[k].n_extra_outputs != 1) continue;
+    if (mox_free_on) {
+      // Single-write mode: program[] freed; pick the most recent
+      // n_extra_outputs==1 kernel (the merged host emitted by this
+      // materialize call).
+      mox_host_kid = k;
+      continue;
+    }
     int has_store_extra = 0;
     for (u32 op = 0; op < KERNELS[k].n_ops; op++) {
       if (KERNELS[k].program[op].store_extra_plus_one > 0) {

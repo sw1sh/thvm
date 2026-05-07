@@ -87,9 +87,14 @@ int main(void) {
     Term root = ke->compute_root;
     CHECK_EQ(term_tag(root), (u64)TAG_UOP);
     CHECK_EQ(term_ext(root), (u64)UOP_STORE);
-    // Dual-write contract: program[] still primary, compute_root
-    // populated alongside.
-    CHECK(ke->n_ops > 0);
+    // Slices 1+2 dual-write contract: program[] populated alongside
+    // compute_root.  Phase C slice 7 (THVM_PHASE_C7_FREE_PROGRAM=1)
+    // nulls program[] post-lift; in that mode `n_ops == 0` and the
+    // assertion would be inverted.
+    char const *free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
+    int free_on = (free_e == NULL) ? 1 : (free_e[0] != '0');
+    if (!free_on) CHECK(ke->n_ops > 0);
+    else          CHECK_EQ(ke->n_ops, 0u);
   }
   thvm_free();
 
@@ -385,9 +390,14 @@ int main(void) {
   CHECK(kid_du != 0);
   if (kid_du != 0) {
     KernelEntry *ke = &KERNELS[kid_du];
-    // Legacy: walk program[] and confirm uniform-fp32.
-    int legacy_uniform = (ke->n_ops > 0);
-    if (legacy_uniform) {
+    // Legacy: walk program[] and confirm uniform-fp32.  Phase C
+    // slice 7 (THVM_PHASE_C7_FREE_PROGRAM=1) nulls program[] post-
+    // lift; the legacy walk vacuously holds (n_ops == 0).  We assert
+    // uniformity via the DAG walker below regardless of the knob.
+    char const *free_e_du = getenv("THVM_PHASE_C7_FREE_PROGRAM");
+    int free_on_du = (free_e_du == NULL) ? 1 : (free_e_du[0] != '0');
+    int legacy_uniform = free_on_du ? 1 : (ke->n_ops > 0);
+    if (!free_on_du && legacy_uniform) {
       u32 dt = ke->program[0].dtype;
       CHECK_EQ(dt, (u64)DT_FP32);
       for (u32 i = 0; i < ke->n_ops; i++) {
@@ -495,6 +505,101 @@ int main(void) {
     CHECK(!uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root));
   }
   thvm_free();
+
+  // === slice 7: single-write -- lift-eligible kernels have program == NULL ===
+  // Phase C slice 7 adds THVM_PHASE_C7_FREE_PROGRAM=1 -- when set,
+  // materialize.c frees ke->program[] post-lift and zeroes n_ops.
+  // The dispatch ladder (cpu_jit_dispatch + cpu_uop_walk + the
+  // metal DAG-side encoder) reads from ke->cached_lift.store_root,
+  // so end-to-end forward passes must keep producing correct output.
+  // This test exercises both halves of the contract: post-materialize
+  // structural state AND end-to-end dispatch numerical correctness.
+  TEST_BEGIN("slice7/free-program-nulls-program-and-dispatches");
+  setenv("THVM_PHASE_C7_FREE_PROGRAM", "1", 1);
+  unsetenv("THVM_BACKEND");
+  thvm_init();
+  Shape s_s7 = {0}; s_s7.ndim = 1; s_s7.dims[0] = 4;
+  f32 src_s7a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  f32 src_s7b[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+  u32 ta_s7 = tensor_alloc(CURRENT_BACKEND, s_s7, DT_FP32);
+  u32 tb_s7 = tensor_alloc(CURRENT_BACKEND, s_s7, DT_FP32);
+  CURRENT_BACKEND->buf_write(TENS[ta_s7].buf_id, src_s7a, sizeof(src_s7a));
+  CURRENT_BACKEND->buf_write(TENS[tb_s7].buf_id, src_s7b, sizeof(src_s7b));
+  u32 kernels_before_s7 = KERNELS_NEXT;
+  Term add_s7 = thvm_materialize(uop_binary(UOP_ADD,
+      term_new(0, TAG_TEN, DT_FP32, ta_s7),
+      term_new(0, TAG_TEN, DT_FP32, tb_s7)));
+  (void)add_s7;
+  u32 kid_s7 = first_emitted_kernel_with_lift_success(kernels_before_s7);
+  CHECK(kid_s7 != 0);
+  if (kid_s7 != 0) {
+    KernelEntry *ke = &KERNELS[kid_s7];
+    // Single-write contract: lift succeeded => program is NULL,
+    // n_ops is 0; cached_lift carries the canonical UOp DAG.
+    CHECK(ke->cached_lift.store_root != 0);
+    CHECK_EQ(ke->program, (KProgOp *)NULL);
+    CHECK_EQ(ke->n_ops, 0u);
+    // compute_root mirrors store_root.
+    CHECK_EQ(ke->compute_root, ke->cached_lift.store_root);
+    // Dispatch the kernel directly via the active backend.  The
+    // ke->output_tid points at the destination tensor; reading its
+    // buffer gives us the elementwise sum.
+    u32 out_tid = ke->output_tid;
+    u32 in_buf_ids[2] = { TENS[ta_s7].buf_id, TENS[tb_s7].buf_id };
+    int rc = CURRENT_BACKEND->dispatch_kernel(ke, in_buf_ids,
+                                              TENS[out_tid].buf_id);
+    CHECK_EQ((u64)rc, 0u);
+    f32 dst_s7[4];
+    CURRENT_BACKEND->buf_read(TENS[out_tid].buf_id, dst_s7, sizeof(dst_s7));
+    CHECK_EQ((u64)dst_s7[0], (u64)11.0f);
+    CHECK_EQ((u64)dst_s7[1], (u64)22.0f);
+    CHECK_EQ((u64)dst_s7[2], (u64)33.0f);
+    CHECK_EQ((u64)dst_s7[3], (u64)44.0f);
+  }
+  thvm_free();
+  unsetenv("THVM_PHASE_C7_FREE_PROGRAM");
+
+  // === slice 7: dispatch-time consumers tolerate program == NULL ===
+  // Re-dispatch the same kernel pattern under the knob to exercise
+  // metal_kernel_supported / cpu_jit_hash / cg_supports null-paths
+  // through the dispatcher; these consumers were updated to read
+  // structural facts from cached_lift instead of program[].
+  TEST_BEGIN("slice7/cpu-jit-hash-from-cached-lift");
+  setenv("THVM_PHASE_C7_FREE_PROGRAM", "1", 1);
+  unsetenv("THVM_BACKEND");
+  thvm_init();
+  Shape s_h = {0}; s_h.ndim = 1; s_h.dims[0] = 8;
+  f32 src_h[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+  u32 t_h = tensor_alloc(CURRENT_BACKEND, s_h, DT_FP32);
+  CURRENT_BACKEND->buf_write(TENS[t_h].buf_id, src_h, sizeof(src_h));
+  u32 kernels_before_h = KERNELS_NEXT;
+  Term neg_h = thvm_materialize(uop_unary(UOP_NEG,
+      term_new(0, TAG_TEN, DT_FP32, t_h)));
+  (void)neg_h;
+  u32 kid_h = first_emitted_kernel_with_lift_success(kernels_before_h);
+  CHECK(kid_h != 0);
+  if (kid_h != 0) {
+    KernelEntry *ke = &KERNELS[kid_h];
+    CHECK_EQ(ke->program, (KProgOp *)NULL);
+    CHECK_EQ(ke->n_ops, 0u);
+    // cpu_jit_hash must produce a non-zero hash from cached_lift.
+    u64 jit_h = cpu_jit_hash(ke);
+    CHECK(jit_h != 0);
+    // Dispatch it; numerical result follows.
+    u32 out_tid_h = ke->output_tid;
+    u32 in_buf_ids_h[1] = { TENS[t_h].buf_id };
+    int rc_h = CURRENT_BACKEND->dispatch_kernel(ke, in_buf_ids_h,
+                                                TENS[out_tid_h].buf_id);
+    CHECK_EQ((u64)rc_h, 0u);
+    f32 dst_h[8];
+    CURRENT_BACKEND->buf_read(TENS[out_tid_h].buf_id, dst_h, sizeof(dst_h));
+    for (u32 i = 0; i < 8; i++) {
+      f32 expected = -(f32)(i + 1);
+      CHECK(dst_h[i] == expected);
+    }
+  }
+  thvm_free();
+  unsetenv("THVM_PHASE_C7_FREE_PROGRAM");
 
   TEST_REPORT();
 }
