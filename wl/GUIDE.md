@@ -147,6 +147,107 @@ g[args__] := Block[{
 ]
 ```
 
+The `Block`/`Module` variable list opens on the same line as the
+head (`Block[{`), variable bindings are indented one level deeper,
+and `}`, body, and the closing `]` all return to the column where
+the line that opens `Block[` starts. This keeps the variable list
+visually distinct from the body and matches IDE auto-formatting.
+
+## Control flow
+
+### No `For` loops
+
+Don't write `For[i = 1, i <= n, i++, ...]`. It reads like C and
+forces explicit counters and mutation. Use:
+
+- `Do[body, {i, n}]` for side effects with a counter.
+- `Table[expr, {i, n}]` to build a list.
+- `Nest`, `NestList`, `NestWhile`, `Fold`, `FoldList` when there's
+  iterative state to thread through a fixed transition.
+
+```wolfram
+(* BAD *)
+For[i = 1, i <= n, i++,
+    AppendTo[acc, f[i]]
+]
+
+(* GOOD *)
+acc = Table[f[i], {i, n}]
+```
+
+### No `Head[expr] === Foo` -- use `MatchQ`
+
+`Head[x] === Foo` is a structural test that doesn't compose with
+patterns. `MatchQ[x, _Foo]` (or `MatchQ[x, Foo[args...]]` for a
+shape check) is the canonical form, and it composes with patterns
+when you need them.
+
+```wolfram
+(* BAD *)
+If[ Head[expr] === Inactive[Equal] && expr[[1]] === expr[[2]],
+    ...
+]
+
+(* GOOD *)
+If[ MatchQ[expr, Inactive[Equal][x_, x_]],
+    ...
+]
+```
+
+## Mutation
+
+### No `AppendTo` (or other list-growing mutation)
+
+Don't grow a list with `AppendTo`/`PrependTo` inside a loop.
+`AppendTo[xs, y]` is `xs = Append[xs, y]`, which copies on every
+step. Build the result with `Table`, `Map`, or `Fold` so the
+final list is allocated once.
+
+```wolfram
+(* BAD *)
+out = {};
+Do[ AppendTo[out, f[i]], {i, n} ];
+out
+
+(* GOOD *)
+out = Table[f[i], {i, n}]
+
+(* BAD: state threaded by mutating a local *)
+acc = init;
+Do[ acc = step[acc, x], {x, xs} ];
+acc
+
+(* GOOD: state threaded by Fold *)
+acc = Fold[step, init, xs]
+```
+
+The same goes for incrementally building an Association: use
+`Association[Table[k -> v, ...]]`, `AssociationMap`, or
+`Fold[Append, <||>, kvPairs]` rather than `assoc[k] = v` inside
+a `Do`.
+
+### Bracket alignment
+
+A closing `]` (or `}`, `|>`, `)`) goes on its own line, indented
+to the same column as the opening head. Never end a multi-line
+form with `...]` on the last expression's line.
+
+```wolfram
+(* GOOD *)
+Module[{x, y, z},
+    body1;
+    body2
+]
+
+(* BAD *)
+Module[{x, y, z},
+    body1;
+    body2]
+```
+
+This makes block boundaries scan-readable and matches what the IDE
+auto-formatter expects.
+
 ## Naming
 
 - Public symbols: `CamelCase` (e.g. `TLam`, `THeap`, `TWnf`).
