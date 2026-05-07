@@ -1,11 +1,39 @@
 # Plan: Migrate to the Ideal Pipeline (2 IRs, 1 dispatch path)
 
-## STATUS: Phase F PARTIAL -- 14 wedges landed on `wedge/ideal-pipeline-g0` (worktree `/private/tmp/thvm-ip-wedge`, branch off main 7752c10)
+## STATUS: Phase F PARTIAL -- campaign landed on main; periphery exhausted, substantial wedges remain
+
+The dispatch-ladder collapse, UPat matmul recogniser, simdgroup template,
+and dead-by-default branch deletions all landed on main across ~30
+commits. The hardest remaining wedges -- F3.5 simdgroup multi-simdgroup
+race fix, F4 CONV template, F2/F6 metal_jit_encode + per-op interpreter
+collapse, Phase E apply_opt -> UPatRule port, Phase C KProgOp deletion --
+are architectural and require multi-session investment, not periphery
+deletions.
+
+Recent wedges (2026-05-07 .. 2026-05-08):
+
+```
+30bfbeec refactor: drop orphan metal_isqrt_exact + retire KDISPATCH_METAL_CONV slot
+fc0ecb5e docs(plans): update dispatch ladder after metal_try_conv2d_flat deletion
+97d58c32 refactor(metal): delete metal_try_conv2d_flat dead-by-default branch
+729abe79 refactor(thvm.h): drop forward decls of internal-only fns
+a751ceee refactor(uop): delete unused uop_graph_rewrite_stats_len
+f32215ee refactor: delete more unused public functions
+7e462cf5 refactor: delete unused stat-by-index accessors
+a79adee2 refactor(kernel-program-cache): delete unused kernel_program_cache_insert
+4bb9cb4a refactor: delete dead public functions exposed in thvm.h
+5e296dc3 refactor(kernel-program-cache): delete unused kernel_program_cache_lookup
+7b94f3b5 refactor(rangeify): delete unused scalar_axis_name
+2cdbec5b refactor: delete 3 unused static helpers across codegen + schedule
+9cb7d2fa docs(plans): path 4 vs path 7 dispatch mystery -- same MSL, different output
+cc8aa89d refactor(metal): delete unused rmt_kprog_has_opcode helper
+```
+
+Earlier campaign (g0):
 
 ```
 8eaf519f fix(metal): scope lift fallback to tile_sync declining outright -- matmul correctness fix
 1ceddf5c feat(metal): cg_tile_metal_dispatch_shape lifter fallback -- path 4 widens
-eb7cc477 docs(plans): move ideal pipeline plan into docs/plans/
 ae9d0aa0 test(metal-real): matmul M=N=K=16 parity against CPU (F3.5 verify)
 91043530 fix(render-uop): simdgroup matmul outer M/N step by 8, explicit row strides
 94d44146 fix(uop): matmul recogniser rejects conv2d-shape stores -- correctness
@@ -15,9 +43,19 @@ ae9d0aa0 test(metal-real): matmul M=N=K=16 parity against CPU (F3.5 verify)
 dd3f4da2 feat(uop): UPat matmul recogniser wraps STORE w/ OPT(_, TC) (F3.1)
 178567ad feat(upat): trust explicit nsrc when op is pinned (UP1)
 b226b7d9 refactor(metal): delete dead metal_try_cpu_small_add (F5)
-92fbf2c1 refactor(metal): default-on THVM_TILE (F1)
+92fbf2c1 refactor(metal): default-on THVM_TILE (F1, metal_tile_enabled only)
 fc9e71bd refactor(metal): delete dead cg_supports_metal_reduce_expr (G0)
 ```
+
+**F1 scope clarification (2026-05-08):** F1 only flipped
+`metal_tile_enabled` (the dispatch ladder gate). Four other gates --
+`propose_metal_tile_enabled`, `kautotune_metal_tile_enabled`,
+`bufferize_metal_tile_fanin_cap_enabled`, `cpu_tile_enabled` -- still
+default-OFF. Flipping them changes which KOpt candidates autotune
+proposes for Metal kernels and could shift autotune cache keys + alter
+chosen sequences in the test suite. Conservative path: leave as-is
+until we have a regression-bisection budget, since render_uop is the
+dispatch path either way.
 
 ## Investigation update (2026-05-07 late)
 
