@@ -93,6 +93,49 @@ state passes 530/530); resuming the simdgroup-path widening
 requires understanding the schedule's materialisation behaviour
 first.
 
+## Deeper analysis (2026-05-08): simdgroup_load stride mismatch is the actual blocker
+
+simdgroup_load takes `(matrix, ptr, elements_per_row)` and reads an
+8x8 block as `block[i][j] = ptr[i*elements_per_row + j]` -- 8 rows
+of 8 *consecutive* elements. The 8 rows are 8 m-values; the 8
+elements per row are 8 *physically consecutive* float words.
+
+For a NON-materialised matmul A with shape `[16,16]` (M-stride=K=16,
+K-stride=1), this is correct: 8 rows starting at `m_base*16+k_base`,
+each row holding 8 consecutive k-values. `simdgroup_load(_a,
+&in0[m*16+k], 16)` works.
+
+For the **materialised** EXPAND buffer (shape `[16,16,16]`, strides
+`[256,16,1]`), the third dim is the broadcast n-axis: each "row"
+of 16 consecutive floats is a single (m,k) pair repeated 16 times
+across n. So 8 consecutive elements at any address are 8 n-values
+of the SAME (m,k), not 8 different k-values. simdgroup_load reads
+nonsense regardless of the chosen elements_per_row -- the API can
+only express two strides (row, 1), but the matmul wants three
+(M=256, K=16, fetch-width=16) where the fetch dimension is K not n.
+
+**This means option (a) "fix the lifter to use view.strides" is
+moot** -- once the buffer is materialised, the n-axis-broadcast
+information is gone, and there's no way for an 8x8 simdgroup_load
+to skip the n stride-1 dimension. The fix MUST be one of:
+
+  1. **Stop materialising the EXPAND** (schedule change): keep the
+     view as `[16,16]` with the n-broadcast applied virtually at
+     LOAD-site. Lifter then emits `m*16+k`, simdgroup_load works.
+     Requires changes to the bufferize/materialize pass.
+  2. **Tile-shared-mem template** (render_uop change): scratch a
+     contiguous KxN block from the materialised buffer into
+     `threadgroup` memory using per-thread strided copies, then
+     simdgroup_load over the contiguous scratch. Heavier but
+     local to render_uop.
+
+Option 2 is the cleaner path -- isolated to render_uop and doesn't
+require schedule restructuring -- but is genuinely multi-iteration:
+new kernel signature (thread_position_in_threadgroup +
+threadgroup_position_in_grid), new dispatch shape calc, threadgroup
+shared As/Bs arrays. The 60s loop iterations cannot honestly
+execute this; it needs a focused multi-hour session.
+
 ## Path 4 vs path 7 dispatch mystery (2026-05-08, g1 wedge)
 
 A direct A/B between path 4 (`metal_tile_jit_encode`) and path 7
