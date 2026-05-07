@@ -1464,6 +1464,15 @@ static int metal_encode_op(id<MTLComputeCommandEncoder> enc,
 // follow as shader variants land).  Mixed-dtype or unsupported
 // kernels return -1 so cpu_dispatch_kernel falls back to the CPU
 // path (interpret / JIT).
+//
+// Phase C slice 4: when `cached_lift.store_root != 0` (materialize-
+// time lift succeeded) the per-op dtype check walks the lifted UOp
+// DAG via uop_dag_dtype_uniform instead of iterating ke->program[].
+// Equivalent invariant -- every BUFFER / CONST / CAST-dst dtype in
+// the DAG must equal `dt` -- but the read goes through cached_lift,
+// keeping program[] off the hot path for kernels that lift.  Lift
+// declines (multi-output spliced, n_inputs > KERNEL_LIFT_MAX_INPUT,
+// gemm/conv2d shape miss) keep the legacy program[] walk.
 static int metal_kernel_supported(struct KernelEntry const *ke) {
   if (ke->n_ops == 0) return 0;
   u32 dt = ke->program[0].dtype;
@@ -1471,8 +1480,12 @@ static int metal_kernel_supported(struct KernelEntry const *ke) {
   // f32 always; i32 added in Phase I.  f16 / bf16 / fp8 / int4 fall
   // back to CPU until per-dtype shader variants land for them.
   if (dt != DT_FP32 && dt != DT_INT32) return 0;
-  for (u32 i = 0; i < ke->n_ops; i++)
-    if (ke->program[i].dtype != dt) return 0;
+  if (ke->cached_lift.store_root != 0) {
+    if (!uop_dag_dtype_uniform(ke->cached_lift.store_root, dt)) return 0;
+  } else {
+    for (u32 i = 0; i < ke->n_ops; i++)
+      if (ke->program[i].dtype != dt) return 0;
+  }
   for (u32 i = 0; i < ke->n_inputs; i++)
     if (ke->input_dtypes[i] != dt) return 0;
   return 1;
