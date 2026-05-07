@@ -586,13 +586,27 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // Without those args, simdgroup_{load,store} default to
   // elements_per_row = Cols = 8, which silently mis-strides for any
   // shape with K or N != 8.
+  //
+  // Multi-simdgroup race guard: simdgroup_matrix ops cooperate on the
+  // calling simdgroup's 32 threads.  When the dispatch shape binds
+  // multiple simdgroups per threadgroup AND/OR multiple threadgroups
+  // (the default for output_numel >= 32), every simdgroup runs the
+  // same code and writes to the same output addresses concurrently;
+  // on M3 this race yields garbage outputs.  Gate the body so only
+  // the first simdgroup of the first threadgroup runs the work; the
+  // others idle.  Wasteful but correct under any dispatch shape.
+  // Future wedge can specialise the dispatch shape calc to bind
+  // exactly one simdgroup (one threadgroup, 32 threads) so no work
+  // is wasted.
   for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-  fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
-          m_axis_id, m_axis_id, m_extent, m_axis_id);
+  fputs("if (sgi == 0u && tg == 0u) {\n", fp);
   for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
   fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+          m_axis_id, m_axis_id, m_extent, m_axis_id);
+  for (u32 d = 0; d < depth + 2; d++) fputs("  ", fp);
+  fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
           n_axis_id_v, n_axis_id_v, n_extent, n_axis_id_v);
-  u32 body_depth = depth + 2;
+  u32 body_depth = depth + 3;
 
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("/* TC simdgroup_matrix matmul */\n", fp);
@@ -622,7 +636,9 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   rmu_emit_term(addr_c, fp);
   fprintf(fp, "], %u);\n", n_extent);
 
-  // Close N then M loops.
+  // Close N, M, then sgi/tg guard.
+  for (u32 d = 0; d < depth + 2; d++) fputs("  ", fp);
+  fputs("}\n", fp);
   for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
   fputs("}\n", fp);
   for (u32 d = 0; d < depth; d++) fputs("  ", fp);
@@ -1094,7 +1110,8 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
   }
   fputs(",\n    uint tid [[ thread_position_in_grid ]],\n", fp);
   fputs("    uint tg [[ threadgroup_position_in_grid ]],\n", fp);
-  fputs("    uint tt [[ thread_position_in_threadgroup ]]) {\n", fp);
+  fputs("    uint tt [[ thread_position_in_threadgroup ]],\n", fp);
+  fputs("    uint sgi [[ simdgroup_index_in_threadgroup ]]) {\n", fp);
   // Body.  In F0 we just dispatch on the root op and emit the
   // contained store (or AFTER chain).  Range-loop wrapping happens
   // when the root is wrapped in a RANGE chain (future work).
