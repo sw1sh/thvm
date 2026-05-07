@@ -3024,6 +3024,98 @@ Term thvm_aot_metal_ic_def_run(Term root,
   return result;
 }
 
+// === Lever 3: bitmask CNF eval kernel dispatch ==========================
+//
+// Bypasses the IC reduction pipeline for SAT-shaped problems.
+// Caller passes packed pos/neg literal bitmasks per clause + var
+// count; kernel evaluates the CNF at every assignment in [0, 2^V)
+// and writes 1/0 per leaf.
+
+static id<MTLComputePipelineState> AOT_CNF_BITMASK_PSO = nil;
+
+static id<MTLComputePipelineState> aot_cnf_bitmask_pso(void) {
+  if (AOT_CNF_BITMASK_PSO != nil) return AOT_CNF_BITMASK_PSO;
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) {
+    if (metal_init() != 0) return nil;
+  }
+  NSError *err = nil;
+  NSURL *libURL = [NSURL fileURLWithPath:
+      [NSString stringWithUTF8String:THVM_METAL_METALLIB]];
+  id<MTLLibrary> lib =
+      [METAL_DEVICE newLibraryWithURL:libURL error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm aot-cnf-bitmask: load %s failed: %s\n",
+            THVM_METAL_METALLIB,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn =
+      [lib newFunctionWithName:@"aot_cnf_bitmask"];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm aot-cnf-bitmask: function 'aot_cnf_bitmask' missing\n");
+    return nil;
+  }
+  AOT_CNF_BITMASK_PSO =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (AOT_CNF_BITMASK_PSO == nil) {
+    fprintf(stderr, "thvm aot-cnf-bitmask: pso failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  return AOT_CNF_BITMASK_PSO;
+}
+
+// Returns n_leaves on success (== 1<<n_vars), 0 on failure.  Writes
+// per-leaf 1/0 into out[0..n_leaves-1].
+u64 thvm_aot_metal_cnf_bitmask(const uint32_t *clauses_pos,
+                                const uint32_t *clauses_neg,
+                                uint32_t n_clauses,
+                                uint32_t n_vars,
+                                uint32_t *out, u64 out_cap) {
+  id<MTLComputePipelineState> pso = aot_cnf_bitmask_pso();
+  if (pso == nil) return 0;
+  if (n_vars > 30) {
+    fprintf(stderr, "thvm aot-cnf-bitmask: n_vars %u exceeds 30 (>1B threads)\n",
+            n_vars);
+    return 0;
+  }
+  u64 n_leaves = 1ULL << n_vars;
+  if (n_leaves > out_cap) {
+    fprintf(stderr, "thvm aot-cnf-bitmask: n_leaves=%llu exceeds out_cap=%llu\n",
+            (unsigned long long)n_leaves, (unsigned long long)out_cap);
+    return 0;
+  }
+
+  id<MTLBuffer> posBuf =
+      [METAL_DEVICE newBufferWithBytes:clauses_pos
+                                length:n_clauses * sizeof(uint32_t)
+                               options:MTLResourceStorageModeShared];
+  id<MTLBuffer> negBuf =
+      [METAL_DEVICE newBufferWithBytes:clauses_neg
+                                length:n_clauses * sizeof(uint32_t)
+                               options:MTLResourceStorageModeShared];
+  id<MTLBuffer> resultBuf =
+      [METAL_DEVICE newBufferWithLength:(NSUInteger)(n_leaves * sizeof(uint32_t))
+                                options:MTLResourceStorageModeShared];
+
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:posBuf    offset:0 atIndex:0];
+  [enc setBuffer:negBuf    offset:0 atIndex:1];
+  [enc setBytes:&n_clauses length:sizeof(uint32_t) atIndex:2];
+  [enc setBuffer:resultBuf offset:0 atIndex:3];
+  NSUInteger tg = (NSUInteger)((n_leaves < 256) ? n_leaves : 256);
+  [enc dispatchThreads:MTLSizeMake(n_leaves, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  memcpy(out, [resultBuf contents], (size_t)(n_leaves * sizeof(uint32_t)));
+  return n_leaves;
+}
+
 Backend METAL_BACKEND = {
   .id              = 2,
   .view_aware      = 1,   // metal_dispatch_kernel pre-materializes

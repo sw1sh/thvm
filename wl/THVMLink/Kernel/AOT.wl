@@ -56,6 +56,15 @@ TAOTPath::usage =
   "TAOTPath[name] returns the dylib path stashed by TAOTCompile[name], \
 or Missing[\"NotCompiled\"] if the def has never been TAOTCompile'd.";
 
+TAOTSatBitmask::usage =
+  "TAOTSatBitmask[cnf, nVars] evaluates the CNF formula at every assignment in \
+[0, 2^nVars) on Metal via the aot_cnf_bitmask kernel.  cnf is a list of clauses, \
+each clause a list of signed integers (positive = positive literal, negative = \
+negated literal, magnitude = 1-based variable index).  Returns a packed Integer \
+list of length 2^nVars where entry i is 1 if assignment i (bit j of i = value of \
+variable j+1) satisfies the formula, 0 otherwise.  Lever 3: direct bitwise CNF \
+evaluation, bypasses IC reduction; nVars <= 30.";
+
 TAOTIcCollapse::usage =
   "TAOTIcCollapse[term_TTerm, depth_Integer] dispatches the static \
 aot_ic_collapse PSO with grid = 2^depth over a BOOK_HEAP-rooted \
@@ -221,6 +230,35 @@ TAOTIcCollapse[t_TTerm, depth_Integer] := Module[{raws},
     raws = $aotIcCollapseFn[ttermRaw[t], depth];
     TTerm /@ raws
 ];
+
+(* Lever 3: bitmask CNF eval.  cnf = list of clauses, each clause a
+   list of signed Integer literals (positive = +var_index, negative
+   = -var_index; 1-based var indices).  Encodes to two parallel
+   Integer arrays of clause-bitmasks (positive vars / negative vars
+   per clause), dispatches the aot_cnf_bitmask kernel with grid =
+   2^nVars, returns the per-leaf 0/1 result vector. *)
+$aotCnfBitmaskFn := $aotCnfBitmaskFn = load[
+    "thvm_wl_aot_cnf_bitmask",
+    {{Integer, 1}, {Integer, 1}, Integer}, {Integer, 1}];
+
+cnfToBitmasks[cnf_List, nVars_Integer] := Module[{posMasks, negMasks},
+  posMasks = Table[
+    BitOr @@ Append[Cases[clause, lit_ /; lit > 0 :> 2^(lit - 1)], 0],
+    {clause, cnf}];
+  negMasks = Table[
+    BitOr @@ Append[Cases[clause, lit_ /; lit < 0 :> 2^(-lit - 1)], 0],
+    {clause, cnf}];
+  {posMasks, negMasks}
+]
+
+TAOTSatBitmask[cnf_List, nVars_Integer] := Module[{pos, neg},
+    ensureInit[];
+    {pos, neg} = cnfToBitmasks[cnf, nVars];
+    $aotCnfBitmaskFn[
+        Developer`ToPackedArray[pos, Integer],
+        Developer`ToPackedArray[neg, Integer],
+        nVars]
+]
 
 (* Phase 7 iter QQ: WL surface for the batch dispatcher.  Caller
    supplies a list of book_heap locs (Integers), each pointing at an

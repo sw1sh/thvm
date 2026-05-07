@@ -2464,6 +2464,64 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_ic_collapse(
   return LIBRARY_NO_ERROR;
 }
 
+// === Lever 3: bitmask CNF eval ===========================================
+//
+// Direct CNF evaluation kernel; bypasses IC reduction.
+//
+// Args:
+//   args[0] : MTensor of pos_masks (Integer, 1D, length n_clauses)
+//   args[1] : MTensor of neg_masks (Integer, 1D, length n_clauses)
+//   args[2] : n_vars (must equal log2 of returned tensor length, <= 30)
+// Returns: MTensor of length 2^n_vars (Integer 0/1 per assignment).
+
+extern u64 thvm_aot_metal_cnf_bitmask(
+    const uint32_t *clauses_pos, const uint32_t *clauses_neg,
+    uint32_t n_clauses, uint32_t n_vars,
+    uint32_t *out, u64 out_cap);
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_cnf_bitmask(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  MTensor pos_t = MArgument_getMTensor(args[0]);
+  MTensor neg_t = MArgument_getMTensor(args[1]);
+  u32 n_vars = (u32)MArgument_getInteger(args[2]);
+
+  mint n_clauses_p = libData->MTensor_getFlattenedLength(pos_t);
+  mint n_clauses_n = libData->MTensor_getFlattenedLength(neg_t);
+  if (n_clauses_p != n_clauses_n || n_clauses_p < 0 || n_vars > 30) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 n_clauses = (u32)n_clauses_p;
+  u64 n_leaves = 1ULL << n_vars;
+
+  const mint *src_pos = libData->MTensor_getIntegerData(pos_t);
+  const mint *src_neg = libData->MTensor_getIntegerData(neg_t);
+
+  uint32_t *pos = (uint32_t *)malloc(n_clauses * sizeof(uint32_t));
+  uint32_t *neg = (uint32_t *)malloc(n_clauses * sizeof(uint32_t));
+  uint32_t *out = (uint32_t *)malloc(n_leaves * sizeof(uint32_t));
+  if (!pos || !neg || !out) { free(pos); free(neg); free(out); return LIBRARY_FUNCTION_ERROR; }
+  for (u32 i = 0; i < n_clauses; i++) {
+    pos[i] = (uint32_t)src_pos[i];
+    neg[i] = (uint32_t)src_neg[i];
+  }
+
+  u64 nout = thvm_aot_metal_cnf_bitmask(pos, neg, n_clauses, n_vars,
+                                         out, n_leaves);
+  free(pos); free(neg);
+  if (nout == 0) { free(out); return LIBRARY_FUNCTION_ERROR; }
+
+  MTensor rt;
+  mint dims[1] = { (mint)nout };
+  int err = libData->MTensor_new(MType_Integer, 1, dims, &rt);
+  if (err != LIBRARY_NO_ERROR) { free(out); return err; }
+  mint *dst = libData->MTensor_getIntegerData(rt);
+  for (u64 i = 0; i < nout; i++) dst[i] = (mint)out[i];
+  free(out);
+  MArgument_setMTensor(res, rt);
+  return LIBRARY_NO_ERROR;
+}
+
 // === PRI-WL callback dispatch =============================================
 // THVM_PRIM_PRI fires inside wnf, deep in C-side recursion.  Two paths:
 //
