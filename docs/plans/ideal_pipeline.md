@@ -1,8 +1,11 @@
 # Plan: Migrate to the Ideal Pipeline (2 IRs, 1 dispatch path)
 
-## STATUS: Phase F PARTIAL -- 11 wedges landed on `wedge/ideal-pipeline-g0` (worktree `/private/tmp/thvm-ip-wedge`, branch off main 7752c10)
+## STATUS: Phase F PARTIAL -- 14 wedges landed on `wedge/ideal-pipeline-g0` (worktree `/private/tmp/thvm-ip-wedge`, branch off main 7752c10)
 
 ```
+8eaf519f fix(metal): scope lift fallback to tile_sync declining outright -- matmul correctness fix
+1ceddf5c feat(metal): cg_tile_metal_dispatch_shape lifter fallback -- path 4 widens
+eb7cc477 docs(plans): move ideal pipeline plan into docs/plans/
 ae9d0aa0 test(metal-real): matmul M=N=K=16 parity against CPU (F3.5 verify)
 91043530 fix(render-uop): simdgroup matmul outer M/N step by 8, explicit row strides
 94d44146 fix(uop): matmul recogniser rejects conv2d-shape stores -- correctness
@@ -15,6 +18,45 @@ b226b7d9 refactor(metal): delete dead metal_try_cpu_small_add (F5)
 92fbf2c1 refactor(metal): default-on THVM_TILE (F1)
 fc9e71bd refactor(metal): delete dead cg_supports_metal_reduce_expr (G0)
 ```
+
+## Significant lifter bug discovered (2026-05-07)
+
+When the test suite's M=N=K=16 matmul parity test (`ae9d0aa0`) was
+forced through render_uop via a wider `cg_tile_metal_dispatch_shape`
+fallback, output was wrong on every cell. Dumping the rendered MSL
+showed:
+
+```
+in0[(((a0 * 256) + (a2 * 16)) + a1)] * in1[(((a0 * 256) + (a2 * 16)) + a1)]
+```
+
+Both operands get the same flat-3D index `m*K*N + k*N + n`. A is a
+2D buffer of size 256, so `a0*256+...` walks past its end on the
+second iteration of `a0`. B's address is identical (wrong). The
+correct addresses are `m*K + k` for A and `k*N + n` for B.
+
+Cause: kernel_lift's ScalarUop walker, when lifting an `S_INDEX`
+that addresses a buffer through a chain of RESHAPE+EXPAND residue
+(the rangeified TMatMul lowering), emits the EXPANDED-shape flat
+index instead of folding the EXPAND back to the underlying buffer's
+2D layout. tinygrad's `apply_movement_op` does this fold; thvm's B1
+movement-to-INDEX rules cover the LOAD side but not this S_INDEX
+case.
+
+This is the **real** F3.5 / F4 / F2 prerequisite. Until the lifter
+folds EXPAND-residue addresses correctly, render_uop can't take
+over kernels that go through rangeify's RESHAPE+EXPAND path -- which
+is most of TMatMul, TConv2D, and anything else built on broadcast
+semantics. The conservative dispatch-ladder state preserves
+correctness by routing those kernels through the legacy
+`metal_jit_encode` (path 7, KProgOp-flat shader) which computes
+addresses from KProgOp's per-op shape metadata directly.
+
+The wedges in this campaign (G0/F1/F5/UP1/F3.1/F3.3/F3.4a/F3.4b/
+conv-gate/F3.5-template-fix/F3.5-test/F3.5-fallback-revert) are all
+**correctness-safe and ready** for the day the lifter bug is fixed.
+The matmul correctness parity test is the seam that catches any
+attempt to widen render_uop's coverage prematurely.
 
 **Honest finding from F3.5 verify**: the M=N=K=16 matmul parity test
 shows the kernel actually dispatches via `metal_jit_encode` (path 7,
