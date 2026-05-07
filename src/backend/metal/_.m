@@ -647,15 +647,9 @@ typedef struct {
 static MetalJitSlot                METAL_JIT_CACHE[METAL_JIT_CACHE_CAP];
 static id<MTLComputePipelineState> METAL_JIT_PSOS [METAL_JIT_CACHE_CAP];
 
-// Per-process counters for the JIT pipeline.  Storage is forward-
-// declared near metal_init; helpers are defined here so they're
-// in scope alongside the cache they instrument.  Now only
-// metal_tile_jit_build (UOp-DAG renderer path) bumps these --
-// metal_jit_build (KProgOp-flat) was deleted in 88f536c3.
-fn u64 thvm_metal_jit_build_hits     (void) { return METAL_JIT_BUILD_HITS;       }
-fn u64 thvm_metal_jit_build_misses   (void) { return METAL_JIT_BUILD_MISSES;     }
-fn u64 thvm_metal_jit_build_bypass   (void) { return METAL_JIT_BUILD_BYPASS;     }
-fn u64 thvm_metal_jit_build_compile_us(void){ return METAL_JIT_BUILD_COMPILE_US; }
+// Per-process counters for the JIT pipeline.  Storage forward-declared
+// near metal_init; metal_tile_jit_build (UOp-DAG renderer path) bumps
+// these.  metal_init calls _reset to zero them on each (re)init.
 fn void thvm_metal_jit_counters_reset(void) {
   METAL_JIT_BUILD_HITS        = 0;
   METAL_JIT_BUILD_MISSES      = 0;
