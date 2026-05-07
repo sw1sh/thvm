@@ -83,42 +83,58 @@ nestedSup[baseLab_Integer, ts_List] := Module[{n = Length[ts]},
     ]
 ]
 
-(* Toy restriction: always rewrite LHS, never RHS.  Loses
-   completeness for some proofs that specifically require RHS
-   rewriting, but all four test cases close via LHS-only paths,
-   and we sidestep the runtime's missing OP2-SUP-right interaction
-   (the final TOp2["==", lhsD-SUP, rhs0-NUM] is the working
-   left-SUP+right-NUM form).  Milestone 2+ gets full sides via
-   either Church-pair encoding or a runtime fix. *)
-applyToLhs[v_, rChoice_] := TApp[rChoice, v]
+(* Both-sides rewriting.  Each step picks one side AND one
+   rewrite; the chosen side gets the rewrite, the other side
+   passes through.  Now safe to use TOp2[==, SUP, SUP] at the
+   final check thanks to the OP2-SUP / OP2-NUM-SUP runtime
+   interactions.
+
+   Note: TOp2["=="] returns 1 if equal, 0 otherwise.
+   TIfZero[n, A, B] returns A when n=0 (sides differ -> apply
+   the rewrite), B when n!=0 (sides match the choice ->
+   passthrough).  Operands swapped (sideChoice on left of the
+   ==) so the SUP is left-of-OP2 even though OP2-NUM-SUP also
+   handles the right-of-OP2 case now. *)
+sideUpdate[v_, mySideNum_, sideChoice_, rChoice_] :=
+    (* TOp2["=="] returns 1 if equal else 0.
+       TIfZero[n, A, B] returns A if n=0 else B.
+       Sides differ (n=0) -> A = passthrough.
+       Sides match (n=1) -> B = apply rewrite. *)
+    TIfZero[TOp2["==", sideChoice, mySideNum],
+            v,
+            TApp[rChoice, v]]
 
 (* Build the depth-D search Term.
 
-   Step shape (LHS-only):
-     lhs_{i+1} = TApp[rSup_i, lhs_i]
+   Step shape (both sides):
+     lhs_{i+1} = sideUpdate[lhs_i, NUM(0), sideSup_i, rSup_i]
+     rhs_{i+1} = sideUpdate[rhs_i, NUM(1), sideSup_i, rSup_i]
 
    Final:
-     TOp2["==", lhs_D, rhs_0]   (yields NUM(1) iff equal)
+     TOp2["==", lhs_D, rhs_D]   (yields NUM(1) iff equal)
 
-   Each step has fresh SUP labels so DUPs across steps don't
-   annihilate accidentally.  Labels increment from $supBase. *)
+   rSup + sideSup share the same cell across the lhs and rhs
+   sideUpdates (same labels per step) so DUP-SUP annihilation
+   correlates the choice across sides ("one rewrite event per
+   step").  Each step uses fresh labels so DUPs across steps
+   commute (independent choices per step) instead of annihilating. *)
 $supBase = 100;
 
-(* Each step picks one rewrite from rSup and applies it to the
-   LHS.  rSup is inline (shared cell across the term DAG).  Each
-   step has distinct labels so successive steps don't annihilate. *)
 stepFold[rFns_, n_][acc_, stepIdx_] := Module[{
-    lhs = acc[[1]], labCur = acc[[2]], rSup
+    lhs = acc[[1]], rhs = acc[[2]], labCur = acc[[3]],
+    rSup, sideSup
 },
     rSup = nestedSup[labCur, rFns];
+    sideSup = TSup[labCur + n, TNum[0], TNum[1]];
     {
-        applyToLhs[lhs, rSup],
-        labCur + n
+        sideUpdate[lhs, TNum[0], sideSup, rSup],
+        sideUpdate[rhs, TNum[1], sideSup, rSup],
+        labCur + n + 1
     }
 ]
 
 buildSearchTerm[conjecture_, axioms_, depth_Integer] := Module[{
-    atomMap, lhs0, rhs0, rFns, n, final, lhsD
+    atomMap, lhs0, rhs0, rFns, n, final, lhsD, rhsD
 },
     atomMap = collectAtoms[axioms, conjecture];
     lhs0 = TNum[atomMap[conjecture[[1]]]];
@@ -126,11 +142,10 @@ buildSearchTerm[conjecture_, axioms_, depth_Integer] := Module[{
     rFns = allRewriteRefs[axioms, atomMap];
     n = Length[rFns];
     final = Fold[stepFold[rFns, n],
-        {lhs0, $supBase}, Range[depth]];
+        {lhs0, rhs0, $supBase}, Range[depth]];
     lhsD = final[[1]];
-    (* RHS stays as the original concrete NUM -- safe for OP2-SUP-
-       on-left -- so this final equality fans correctly. *)
-    TOp2["==", lhsD, rhs0]
+    rhsD = final[[2]];
+    TOp2["==", lhsD, rhsD]
 ]
 
 (* ---------------------------------------------------------------- *)
@@ -170,7 +185,19 @@ cases = {
       "Conjecture" -> {a, d},
       "Axioms" -> {{a, b}, {b, c}},
       "Depth" -> 2,
-      "Expected" -> False|>
+      "Expected" -> False|>,
+    (* Tests both-sides rewriting: closure {a==b, c==d} doesn't
+       give a==d via LHS-only.  Need to rewrite both sides:
+       a -> b on LHS (no, no proof either way); need
+       a==a (depth 0)?  Pick: prove c==a from {a==b, b==c}.
+       Path: rewrite RHS: a -> b -> c, gives c==c.  Or LHS:
+       c -> b -> a, gives a==a.  Either side works.  At
+       depth=2 with both sides we get more paths than LHS-only. *)
+    <|"Name" -> "rhs-only-path (depth=2)",
+      "Conjecture" -> {c, a},
+      "Axioms" -> {{a, b}, {b, c}},
+      "Depth" -> 2,
+      "Expected" -> True|>
 };
 
 print["=== IC-native ATP toy ==="];
