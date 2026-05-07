@@ -79,6 +79,10 @@ not a niche fallback. Three real paths:
   would reuse the lifter (`kernel_lift_to_uop`) and walk the resulting DAG
   via a tree-walker that mirrors `cg_render_uop_kernel_c`'s emit logic but
   evaluates instead of emitting. Right architecture; multi-session.
+  **PARTIALLY LANDED 2026-05-08 step 1:** `cpu_uop_walk`
+  (`src/backend/cpu/uop_walk.c`) fires AHEAD of `cpu_jit_dispatch` in the
+  dispatch ladder when env-gated by `THVM_CPU_UOP_WALK=1`. Surgical suite
+  passes bit-equal under env-on. Default flip in step 2.
 - **(c)** Accept that `cpu_interpret` + `cpu/op/*.c` stays as the warmup
   interpreter. This is what's in tree today.
 
@@ -181,6 +185,13 @@ THVM_CPU_JIT_VIA_UOP=0    Opt out of render_uop_c, fallback to (gone) cg_emit
                           cpu_interpret.
 THVM_CPU_INTERPRET_TRACE=1 Print one-line per cpu_interpret entry (op codes
                           dumped). Use to measure F6-finish progress.
+THVM_CPU_UOP_WALK=1       Enable the UOp DAG walker (cpu_uop_walk) ahead of
+                          cpu_jit_dispatch. Default-OFF on the initial
+                          landing; flipped in F6-finish step 2 after
+                          surgical-suite bit-equal validation.
+THVM_CPU_UOP_WALK_TRACE=1 Print one line per cpu_uop_walk entry summarising
+                          (n_inputs, root op, return code). Use to measure
+                          how many kernels the walker handles end-to-end.
 THVM_CPU_JIT_TRACE_FALLBACK=1 (Removed in F6 step 15 along with the fallback.
                               No longer wired.)
 THVM_RANGEIFY_BAIL=1       Print rangeify lowering bail reasons. Already in

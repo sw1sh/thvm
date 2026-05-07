@@ -1187,10 +1187,26 @@ fn int cpu_dispatch_tile(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   return 1;
 }
 
-// Forward decls: defined in backend/cpu/{blas,jit}.c (included after
-// this file in thvm.c, so declare here for the dispatcher).
+// Forward decls: defined in backend/cpu/{blas,jit,uop_walk}.c (included
+// after this file in thvm.c, so declare here for the dispatcher).
 fn int cpu_blas_dispatch       (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_jit_dispatch        (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+fn int cpu_uop_walk            (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+
+// F6-finish (b): does the per-call gate let cpu_uop_walk fire?
+// Default-OFF on the initial landing (this commit); flipped in a
+// follow-up after surgical-suite bit-equal validation under env-on.
+// THVM_CPU_UOP_WALK=1 enables; bisection knob mirrors F6 step-10's
+// THVM_CPU_JIT_VIA_UOP discipline.
+static int cpu_uop_walk_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_CPU_UOP_WALK");
+    enabled = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return enabled;
+}
 
 fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Recover kid by pointer arithmetic into KERNELS[].  Used for
@@ -1216,7 +1232,24 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       return 0;
     }
   }
-  // 3. KProgOp JIT: clang-compiled fused inner loop for elementwise
+  // 3. UOp DAG walker (F6-finish (b)).  Lifts the kernel via
+  //    kernel_lift_to_uop and evaluates the resulting UOp DAG
+  //    directly. Mirrors cpu_jit_dispatch's lifter call but skips the
+  //    clang-compile + dlopen step, so it amortises faster on
+  //    one-shot kernels (no JIT warmup gate). Replaces cpu_interpret
+  //    + cpu/op/*.c on the per-op fallback path.
+  //
+  //    Order: AHEAD of cpu_jit_dispatch when THVM_CPU_UOP_WALK=1, so
+  //    the walker is exercised for steady-state kernels too. The JIT
+  //    path is still reachable when the walker declines (e.g. the
+  //    lifter takes a kernel but the walker hits an unsupported op).
+  if (cpu_uop_walk_enabled()) {
+    if (cpu_uop_walk(ke, in_buf_ids, out_buf_id)) {
+      cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
+      return 0;
+    }
+  }
+  // 4. KProgOp JIT: clang-compiled fused inner loop for elementwise
   //    chains (cached by program hash).  Faster than the scalar
   //    interpreter for the patterns it covers (no REDUCE > 1, etc.).
   if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
