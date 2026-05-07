@@ -24,6 +24,12 @@
 
 static void rmu_emit_term(Term t, FILE *fp);
 
+// Renderer target. 0 = MSL (default), 1 = C99 for CPU JIT (F6).
+// When C99, axis-type LOCAL/GLOBAL is rendered as a regular for-loop
+// (no thread-position bind), and the prologue/epilogue switch to a
+// plain function signature without Metal kernel attributes.
+static int RMU_TARGET_C = 0;
+
 // Buffer name map: cg_render_uop_kernel populates this with the
 // kernel's output buffer (Term -> "out") and inputs (Term -> "in0",
 // "in1", ...).  Inner functions emit buffer references via
@@ -203,17 +209,29 @@ static void rmu_emit_term(Term t, FILE *fp) {
       // heap = [src, NUM(dst_dtype)].
       Term src      = heap_read(loc + 0);
       u32  dst_dt   = term_val(heap_read(loc + 1));
-      const char *fn_name = (op == UOP_CAST) ? "" : "as_type";
+      const char *type_name = RMU_TARGET_C ? rmu_c_type_name(dst_dt)
+                                           : rmu_msl_type_name(dst_dt);
       if (op == UOP_BITCAST) {
-        fprintf(fp, "as_type<%s>(", rmu_msl_type_name(dst_dt));
-        rmu_emit_term(src, fp);
-        fputs(")", fp);
+        if (RMU_TARGET_C) {
+          // C99 bitcast via the THVM_BITCAST statement-expression
+          // macro emitted in the C-target prologue.  Pattern:
+          //   THVM_BITCAST(<dst>, <expr>)
+          //  -> ({ <dst> _tmp; memcpy(&_tmp, &(_src), sizeof(_tmp)); _tmp; })
+          // Statement-expressions are a GCC/clang extension; both
+          // compilers we target accept them.
+          fprintf(fp, "THVM_BITCAST(%s, ", type_name);
+          rmu_emit_term(src, fp);
+          fputs(")", fp);
+        } else {
+          fprintf(fp, "as_type<%s>(", type_name);
+          rmu_emit_term(src, fp);
+          fputs(")", fp);
+        }
       } else {
-        fprintf(fp, "((%s)", rmu_msl_type_name(dst_dt));
+        fprintf(fp, "((%s)", type_name);
         rmu_emit_term(src, fp);
         fputs(")", fp);
       }
-      (void)fn_name;
       return;
     }
     case UOP_IWHERE: {
@@ -402,12 +420,6 @@ static void rmu_collect_ranges_with_opts(Term t, Term *ranges,
 // Returns 1 if `kind`/`axis_type` indicates the axis binds directly to
 // a thread/group position (no for-loop emitted).  These paths emit a
 // `uint aN = tt;` or `uint aN = tg;` declaration instead.
-// Renderer target. 0 = MSL (default), 1 = C99 for CPU JIT (F6).
-// When C99, axis-type LOCAL/GLOBAL is rendered as a regular for-loop
-// (no thread-position bind), and the prologue/epilogue switch to a
-// plain function signature without Metal kernel attributes.
-static int RMU_TARGET_C = 0;
-
 static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
   if (RMU_TARGET_C) return 0;  // F6: C99 target has no thread positions
   return (opt_kind == UOP_OPT_LOCAL)
@@ -1176,7 +1188,16 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   }
   fputs("#include <stdint.h>\n", fp);
   fputs("#include <math.h>\n", fp);
+  fputs("#include <string.h>\n", fp);
   fputs("typedef unsigned int uint;\n", fp);
+  // UOP_BITCAST renders to THVM_BITCAST(dst, expr); macro expands
+  // to a memcpy-based reinterpret. Statement-expression form keeps
+  // the use-site syntactically an expression (composes with the
+  // surrounding emit). GCC/clang extension; both compilers we
+  // target accept it.
+  fputs("#define THVM_BITCAST(t, x) "
+        "({ t _t; __typeof__(x) _x = (x); "
+        "memcpy(&_t, &_x, sizeof(_t)); _t; })\n", fp);
   // Match render_c.c's CPU-JIT signature so cpu/jit.c can dlsym the
   // symbol and call without re-binding.
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
