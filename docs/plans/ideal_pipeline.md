@@ -516,7 +516,7 @@ Mechanical at this point. Targets:
 | F3 | UPat recognizer for matmul -> emits UOP_OPT(_, TC). Render_uop emits the gemm-template (logic already in metal_try_gemm; transplant onto the UOp DAG path). Delete metal_try_gemm. | uop/, render_uop.c, metal/_.m | -300 | depends on F2 |
 | F4 | Same shape as F3 for conv2d_flat. | uop/, render_uop.c, metal/_.m | -400 | depends on F3 |
 | F5 | Delete metal_try_cpu_small_add + its env gate. | metal/_.m | -150 | depends on F4 |
-| F6 | CPU-JIT via render_uop -> C; delete src/backend/cpu/op/*.c. | render_c.c, cpu/jit.c, cpu/op/* | -3000 | depends on F1..F5 |
+| F6 | CPU-JIT via render_uop -> C; delete src/backend/cpu/op/*.c. | render_c.c, cpu/jit.c, cpu/op/* | -3000 | **scaffolding LANDED** (eab0b9de->2c87e893): cg_render_uop_kernel_c + clang compile-validate + dlopen+invoke + cpu_jit env-gated integration + multi-input/unary/REDUCE_SUM/REDUCE_MAX/sqrt coverage. Full surgical test suite (1851 tests) passes bit-equal with THVM_CPU_JIT_VIA_UOP=1. Default flip + render_c.c/cpu/op/* deletion gated on wider regression budget. |
 | E1..En | Per-mutation port from KernelAxes apply_opt to UPatRule[] over UOP_RANGE. Each mutation type lands separately. | codegen/ | -700 | parallel with F |
 | B3-finish | Delete the rangeify legacy composers; rangeify becomes pure UOp-DAG schedule. | rangeify.c | -800 | depends on F |
 | C1..Cn | materialize emits compute_root (Term); each consumer walks the UOp subgraph; kernel_program_cache deletes. | materialize.c, rangeify.c, codegen/, autotune.c | -1500 | depends on F |

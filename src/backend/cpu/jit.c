@@ -147,6 +147,13 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // declines (n_inputs > 30, no scalar arena, etc.) or the rendered
   // string is empty. The output signature matches render_c.c so the
   // surrounding compile/dlopen/dlsym path is unchanged.
+  //
+  // F6 step 9 validation (2026-05-08): the full surgical test suite
+  // (1851 tests across render_uop, metal_real, aot_metal, kernel_lift,
+  // tile_graph, bufferize, etc) passes bit-equal with this env on,
+  // confirming the new path is a drop-in replacement for kernels the
+  // lifter accepts. Default OFF until a wider regression-bisection
+  // budget arrives; future flip lands the cpu/op/* deletion arc.
   char *src = NULL;
   {
     char const *e = getenv("THVM_CPU_JIT_VIA_UOP");
