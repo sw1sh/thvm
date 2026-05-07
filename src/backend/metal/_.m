@@ -1474,15 +1474,23 @@ static int metal_encode_op(id<MTLComputeCommandEncoder> enc,
 // declines (multi-output spliced, n_inputs > KERNEL_LIFT_MAX_INPUT,
 // gemm/conv2d shape miss) keep the legacy program[] walk.
 static int metal_kernel_supported(struct KernelEntry const *ke) {
-  if (ke->n_ops == 0) return 0;
-  u32 dt = ke->program[0].dtype;
-  // v1: only the dtypes that have shader variants in the metallib.
-  // f32 always; i32 added in Phase I.  f16 / bf16 / fp8 / int4 fall
-  // back to CPU until per-dtype shader variants land for them.
-  if (dt != DT_FP32 && dt != DT_INT32) return 0;
+  // Phase C slice 7: when the lift succeeded use the lifted DAG to
+  // decide eligibility (kernel may have program == NULL under
+  // THVM_PHASE_C7_FREE_PROGRAM=1).  When the lift declined fall back
+  // to the legacy program[] walk.
+  u32 dt;
   if (ke->cached_lift.store_root != 0) {
+    if (ke->n_inputs == 0) return 0;
+    dt = ke->input_dtypes[0];
+    if (dt != DT_FP32 && dt != DT_INT32) return 0;
     if (!uop_dag_dtype_uniform(ke->cached_lift.store_root, dt)) return 0;
   } else {
+    if (ke->n_ops == 0) return 0;
+    dt = ke->program[0].dtype;
+    // v1: only the dtypes that have shader variants in the metallib.
+    // f32 always; i32 added in Phase I.  f16 / bf16 / fp8 / int4 fall
+    // back to CPU until per-dtype shader variants land for them.
+    if (dt != DT_FP32 && dt != DT_INT32) return 0;
     for (u32 i = 0; i < ke->n_ops; i++)
       if (ke->program[i].dtype != dt) return 0;
   }

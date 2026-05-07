@@ -87,10 +87,21 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
       h ^= 0xC0u; h *= 0x100000001b3ULL;
     }
   }
-  u8 const *bytes = (u8 const *)ke->program;
-  size_t total = (size_t)ke->n_ops * sizeof(KProgOp);
-  for (size_t i = 0; i < total; i++) {
-    h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
+  // Phase C slice 7: when the lift succeeded the kernel's structural
+  // identity is encoded by the lifted UOp DAG root (a hash-consed
+  // Term).  Fold the root Term itself in -- equal lifted DAGs share
+  // a Term value, so this gives the same de-dup behaviour as the
+  // KProgOp byte-hash (and works when program[] is NULL under
+  // THVM_PHASE_C7_FREE_PROGRAM).  Falls back to KProgOp bytes when
+  // the lift declined.
+  if (ke->cached_lift.store_root != 0) {
+    h ^= (u64)ke->cached_lift.store_root; h *= 0x100000001b3ULL;
+  } else {
+    u8 const *bytes = (u8 const *)ke->program;
+    size_t total = (size_t)ke->n_ops * sizeof(KProgOp);
+    for (size_t i = 0; i < total; i++) {
+      h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
+    }
   }
   // Fold applied_opts into the key via tile_anno facade so two
   // kernels with identical KProgOp[] but different opts get
@@ -299,7 +310,14 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     nums_buf[i] = ke->input_numels[i];
   }
   void *out = CPU_BUFS[out_buf_id].data;
-  unsigned numel = ke->program[ke->n_ops - 1].numel;
+  // Phase C slice 7: read the output numel from KernelEntry directly
+  // (output_numel is set independently of program[]).  Previously we
+  // read program[n_ops-1].numel which is null-unsafe under
+  // THVM_PHASE_C7_FREE_PROGRAM=1.
+  unsigned numel = (unsigned)ke->output_numel;
+  if (numel == 0 && ke->n_ops > 0 && ke->program != NULL) {
+    numel = ke->program[ke->n_ops - 1].numel;
+  }
   jfn(out, ins_buf, numel, nums_buf);
   return 1;
 }

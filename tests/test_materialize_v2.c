@@ -96,9 +96,22 @@ int main(void) {
   CHECK_EQ(term_tag(kid_term), TAG_NUM);
   u32 kid = (u32)term_val(kid_term);
   CHECK_EQ(KERNELS[kid].n_inputs, 4u);
-  CHECK_EQ(KERNELS[kid].n_ops, 4u);
-  CHECK_EQ(KERNELS[kid].program[3].opcode, UOP_MUL);
-  CHECK_EQ(KERNELS[kid].program[3].src[0], KERNELS[kid].program[3].src[1]);
+  // Phase C slice 7: program[] is freed post-lift by default
+  // (THVM_PHASE_C7_FREE_PROGRAM=0 reverts).  When the program is
+  // freed, the legacy n_ops/program-row-shape checks no longer
+  // apply -- the canonical kernel representation is the lifted
+  // UOp DAG (KERNELS[kid].compute_root); kernel_lift coverage
+  // tests + test_compute_root_dual_write validate the equivalent.
+  char const *m_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
+  int m_free_on = (m_free_e == NULL) ? 1 : (m_free_e[0] != '0');
+  if (!m_free_on) {
+    CHECK_EQ(KERNELS[kid].n_ops, 4u);
+    CHECK_EQ(KERNELS[kid].program[3].opcode, UOP_MUL);
+    CHECK_EQ(KERNELS[kid].program[3].src[0], KERNELS[kid].program[3].src[1]);
+  } else {
+    CHECK_EQ(KERNELS[kid].n_ops, 0u);
+    CHECK(KERNELS[kid].compute_root != 0);
+  }
 
   thvm_free();
   TEST_REPORT();
