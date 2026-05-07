@@ -56,6 +56,15 @@ TAOTPath::usage =
   "TAOTPath[name] returns the dylib path stashed by TAOTCompile[name], \
 or Missing[\"NotCompiled\"] if the def has never been TAOTCompile'd.";
 
+TAOTSurveyPropagate::usage =
+  "TAOTSurveyPropagate[cnf, nVars, opts] runs Survey Propagation on the CNF \
+formula via Metal.  cnf is a list of clauses, each a list of signed integers \
+(positive lit = +var_idx, negative = -var_idx, 1-based).  Returns the per-edge \
+final eta vector (length = total literals across clauses) after convergence or \
+max_iters.  Options: \"MaxIters\" (default 100), \"Damping\" (default 0.5), \
+\"Threshold\" (default 0.001).  Path B: targets random k-SAT near the phase \
+transition where CDCL struggles.";
+
 TAOTSatBitmask::usage =
   "TAOTSatBitmask[cnf, nVars] evaluates the CNF formula at every assignment in \
 [0, 2^nVars) on Metal via the aot_cnf_bitmask kernel.  cnf is a list of clauses, \
@@ -249,6 +258,33 @@ cnfToBitmasks[cnf_List, nVars_Integer] := Module[{posMasks, negMasks},
     BitOr @@ Append[Cases[clause, lit_ /; lit < 0 :> 2^(-lit - 1)], 0],
     {clause, cnf}];
   {posMasks, negMasks}
+]
+
+(* Path B: Survey Propagation.  Encodes CNF as flat literal list
+   + clause-boundary array, dispatches the iteration loop on Metal,
+   returns per-edge eta values. *)
+$aotSpRunFn := $aotSpRunFn = load[
+    "thvm_wl_aot_sp_run",
+    {{Integer, 1}, {Integer, 1}, Integer, Integer, Real, Real},
+    {Real, 1}];
+
+Options[TAOTSurveyPropagate] = {
+    "MaxIters" -> 100,
+    "Damping"  -> 0.5,
+    "Threshold" -> 0.001
+};
+TAOTSurveyPropagate[cnf_List, nVars_Integer,
+    opts : OptionsPattern[]] := Module[{flat, bounds, maxIters, damping, threshold},
+    ensureInit[];
+    flat = Flatten[cnf];
+    bounds = Prepend[Accumulate[Length /@ cnf], 0];
+    maxIters = OptionValue["MaxIters"];
+    damping = OptionValue["Damping"];
+    threshold = OptionValue["Threshold"];
+    $aotSpRunFn[
+        Developer`ToPackedArray[flat, Integer],
+        Developer`ToPackedArray[bounds, Integer],
+        nVars, maxIters, N[damping], N[threshold]]
 ]
 
 TAOTSatBitmask[cnf_List, nVars_Integer] := Module[{pos, neg},

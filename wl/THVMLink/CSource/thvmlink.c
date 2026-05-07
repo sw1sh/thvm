@@ -2464,6 +2464,126 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_ic_collapse(
   return LIBRARY_NO_ERROR;
 }
 
+// === Path B: Survey Propagation =========================================
+//
+// SP iteration loop on a CNF formula.  Caller passes the formula as
+// CSR-flat literal arrays (signed 1-based ints; positive = +var,
+// negative = -var) plus a clause-boundary array.  Returns the per-edge
+// final eta vector after convergence or max_iters.
+//
+// Args:
+//   args[0] : MTensor [Integer, 1] cnf_lits flat -- all signed lits
+//             concatenated across clauses
+//   args[1] : MTensor [Integer, 1] cnf_bounds -- bounds[c+1] is the
+//             exclusive end index in cnf_lits of clause c (n_clauses+1
+//             elements; bounds[0] always 0)
+//   args[2] : Integer n_vars
+//   args[3] : Integer max_iters
+//   args[4] : Real damping (alpha in [0,1])
+//   args[5] : Real threshold (convergence)
+// Returns: MTensor [Real, 1] of length n_edges (final eta values).
+
+extern int thvm_aot_metal_sp_run(
+    const uint32_t *edges_clause, const uint32_t *edges_var,
+    const uint8_t  *edges_sign,
+    const uint32_t *clause_edges_off, const uint32_t *clause_edges_flat,
+    const uint32_t *var_edges_off,    const uint32_t *var_edges_flat,
+    uint32_t n_edges, uint32_t n_clauses, uint32_t n_vars,
+    uint32_t max_iters, float damping, float threshold,
+    float *out_eta);
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_sp_run(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  MTensor lits_t   = MArgument_getMTensor(args[0]);
+  MTensor bounds_t = MArgument_getMTensor(args[1]);
+  u32 n_vars       = (u32)MArgument_getInteger(args[2]);
+  u32 max_iters    = (u32)MArgument_getInteger(args[3]);
+  double damping_d = MArgument_getReal(args[4]);
+  double thresh_d  = MArgument_getReal(args[5]);
+
+  mint n_lits   = libData->MTensor_getFlattenedLength(lits_t);
+  mint n_bounds = libData->MTensor_getFlattenedLength(bounds_t);
+  if (n_bounds < 2 || n_lits < 0 || n_vars == 0) return LIBRARY_FUNCTION_ERROR;
+  u32 n_edges   = (u32)n_lits;
+  u32 n_clauses = (u32)(n_bounds - 1);
+
+  const mint *src_lits   = libData->MTensor_getIntegerData(lits_t);
+  const mint *src_bounds = libData->MTensor_getIntegerData(bounds_t);
+
+  // Build edge arrays + CSR adjacencies.
+  uint32_t *edges_clause = (uint32_t *)malloc(n_edges * sizeof(uint32_t));
+  uint32_t *edges_var    = (uint32_t *)malloc(n_edges * sizeof(uint32_t));
+  uint8_t  *edges_sign   = (uint8_t  *)malloc(n_edges * sizeof(uint8_t));
+  uint32_t *clause_off   = (uint32_t *)malloc((n_clauses + 1) * sizeof(uint32_t));
+  uint32_t *clause_flat  = (uint32_t *)malloc(n_edges * sizeof(uint32_t));
+  uint32_t *var_off      = (uint32_t *)malloc((n_vars + 1) * sizeof(uint32_t));
+  uint32_t *var_flat     = (uint32_t *)malloc(n_edges * sizeof(uint32_t));
+  float    *out_eta      = (float    *)malloc(n_edges * sizeof(float));
+  if (!edges_clause || !edges_var || !edges_sign ||
+      !clause_off || !clause_flat || !var_off || !var_flat || !out_eta) {
+    free(edges_clause); free(edges_var); free(edges_sign);
+    free(clause_off); free(clause_flat); free(var_off); free(var_flat);
+    free(out_eta);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+
+  // Fill edges from lits/bounds.  Clause c's edges are at indices
+  // [bounds[c], bounds[c+1]).  Each lit is a signed 1-based var idx.
+  for (u32 c = 0; c < n_clauses; c++) {
+    clause_off[c] = (uint32_t)src_bounds[c];
+  }
+  clause_off[n_clauses] = (uint32_t)src_bounds[n_clauses];
+  // clause_flat is the identity mapping at this point: edge e is at
+  // position e in clause_flat for the clause it belongs to.
+  for (u32 e = 0; e < n_edges; e++) clause_flat[e] = e;
+  // Determine which clause each edge belongs to.
+  u32 e = 0;
+  for (u32 c = 0; c < n_clauses; c++) {
+    u32 c_end = (uint32_t)src_bounds[c + 1];
+    while (e < c_end) {
+      mint lit = src_lits[e];
+      u32 var_idx = (uint32_t)((lit > 0) ? (lit - 1) : (-lit - 1));
+      edges_clause[e] = c;
+      edges_var[e]    = var_idx;
+      edges_sign[e]   = (lit > 0) ? 0u : 1u;  // 0=positive, 1=negative
+      e++;
+    }
+  }
+  // Build var->edges CSR.  Two-pass count + scatter.
+  for (u32 v = 0; v <= n_vars; v++) var_off[v] = 0;
+  for (u32 ee = 0; ee < n_edges; ee++) var_off[edges_var[ee] + 1]++;
+  for (u32 v = 1; v <= n_vars; v++) var_off[v] += var_off[v - 1];
+  uint32_t *var_cursor = (uint32_t *)malloc(n_vars * sizeof(uint32_t));
+  for (u32 v = 0; v < n_vars; v++) var_cursor[v] = var_off[v];
+  for (u32 ee = 0; ee < n_edges; ee++) {
+    u32 v = edges_var[ee];
+    var_flat[var_cursor[v]++] = ee;
+  }
+  free(var_cursor);
+
+  int rc = thvm_aot_metal_sp_run(
+      edges_clause, edges_var, edges_sign,
+      clause_off, clause_flat, var_off, var_flat,
+      n_edges, n_clauses, n_vars,
+      max_iters, (float)damping_d, (float)thresh_d,
+      out_eta);
+
+  free(edges_clause); free(edges_var); free(edges_sign);
+  free(clause_off); free(clause_flat); free(var_off); free(var_flat);
+  if (rc < 0) { free(out_eta); return LIBRARY_FUNCTION_ERROR; }
+
+  MTensor rt;
+  mint dims[1] = { (mint)n_edges };
+  int err = libData->MTensor_new(MType_Real, 1, dims, &rt);
+  if (err != LIBRARY_NO_ERROR) { free(out_eta); return err; }
+  double *dst = libData->MTensor_getRealData(rt);
+  for (u32 ee = 0; ee < n_edges; ee++) dst[ee] = (double)out_eta[ee];
+  free(out_eta);
+  MArgument_setMTensor(res, rt);
+  return LIBRARY_NO_ERROR;
+}
+
 // === Lever 3: bitmask CNF eval ===========================================
 //
 // Direct CNF evaluation kernel; bypasses IC reduction.

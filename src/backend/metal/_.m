@@ -3116,6 +3116,171 @@ u64 thvm_aot_metal_cnf_bitmask(const uint32_t *clauses_pos,
   return n_leaves;
 }
 
+// === Path B: Survey Propagation (SP) iteration kernel ===================
+//
+// CNF survey propagation via factor graph message passing.  The host
+// constructs CSR adjacency lists from the input CNF, allocates an
+// edge-message buffer (eta), iteratively dispatches the aot_sp_iter
+// kernel (one synchronous SP update over all edges), and applies
+// damping + convergence check on host.  Returns the final eta vector
+// after convergence or max-iters.
+//
+// Algorithm reference: Mezard-Parisi-Zecchina, "Survey propagation:
+// an algorithm for satisfiability", arXiv cs/0212002.
+
+static id<MTLComputePipelineState> AOT_SP_ITER_PSO = nil;
+
+static id<MTLComputePipelineState> aot_sp_iter_pso(void) {
+  if (AOT_SP_ITER_PSO != nil) return AOT_SP_ITER_PSO;
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) {
+    if (metal_init() != 0) return nil;
+  }
+  NSError *err = nil;
+  NSURL *libURL = [NSURL fileURLWithPath:
+      [NSString stringWithUTF8String:THVM_METAL_METALLIB]];
+  id<MTLLibrary> lib =
+      [METAL_DEVICE newLibraryWithURL:libURL error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm aot-sp-iter: load %s failed: %s\n",
+            THVM_METAL_METALLIB,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"aot_sp_iter"];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm aot-sp-iter: function 'aot_sp_iter' missing\n");
+    return nil;
+  }
+  AOT_SP_ITER_PSO =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (AOT_SP_ITER_PSO == nil) {
+    fprintf(stderr, "thvm aot-sp-iter: pso failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  return AOT_SP_ITER_PSO;
+}
+
+// Run SP to convergence (or until max_iters).  All host-side allocs
+// are managed here; caller passes the formula as parallel arrays
+// (one per edge: clause idx, var idx, sign) plus CSR adjacencies for
+// clause->edges and var->edges.
+//
+// Returns 1 on convergence (max delta < threshold), 0 on max_iters
+// reached without convergence, -1 on error.  Final eta written to
+// out_eta[0..n_edges-1].
+int thvm_aot_metal_sp_run(
+    const uint32_t *edges_clause,   // [n_edges]
+    const uint32_t *edges_var,      // [n_edges]
+    const uint8_t  *edges_sign,     // [n_edges]
+    const uint32_t *clause_edges_off,  // [n_clauses+1] CSR row ptrs
+    const uint32_t *clause_edges_flat, // [n_edges] CSR col idx
+    const uint32_t *var_edges_off,     // [n_vars+1]
+    const uint32_t *var_edges_flat,    // [n_edges]
+    uint32_t        n_edges,
+    uint32_t        n_clauses,
+    uint32_t        n_vars,
+    uint32_t        max_iters,
+    float           damping,    // alpha; 0=no update, 1=replace
+    float           threshold,  // converge when max|new-old| < threshold
+    float          *out_eta) {
+  id<MTLComputePipelineState> pso = aot_sp_iter_pso();
+  if (pso == nil) return -1;
+
+  id<MTLBuffer> ec_buf = [METAL_DEVICE newBufferWithBytes:edges_clause
+      length:n_edges*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> ev_buf = [METAL_DEVICE newBufferWithBytes:edges_var
+      length:n_edges*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> es_buf = [METAL_DEVICE newBufferWithBytes:edges_sign
+      length:n_edges*sizeof(uint8_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> co_buf = [METAL_DEVICE newBufferWithBytes:clause_edges_off
+      length:(n_clauses+1)*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> cf_buf = [METAL_DEVICE newBufferWithBytes:clause_edges_flat
+      length:n_edges*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> vo_buf = [METAL_DEVICE newBufferWithBytes:var_edges_off
+      length:(n_vars+1)*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> vf_buf = [METAL_DEVICE newBufferWithBytes:var_edges_flat
+      length:n_edges*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+
+  // Init eta_in randomly in [0, 0.1] (small, biased toward "no warning").
+  // Two ping-pong buffers for synchronous SP updates.
+  id<MTLBuffer> a_buf = [METAL_DEVICE newBufferWithLength:n_edges*sizeof(float)
+      options:MTLResourceStorageModeShared];
+  id<MTLBuffer> b_buf = [METAL_DEVICE newBufferWithLength:n_edges*sizeof(float)
+      options:MTLResourceStorageModeShared];
+  float *a = (float *)[a_buf contents];
+  uint32_t seed = 0xDEADBEEFu;
+  for (uint32_t i = 0; i < n_edges; i++) {
+    seed = seed * 1664525u + 1013904223u;
+    a[i] = (float)(seed >> 8) / (float)(1u << 24) * 0.1f;
+  }
+
+  uint32_t n_edges_u = n_edges;
+  id<MTLBuffer> ne_buf = [METAL_DEVICE newBufferWithBytes:&n_edges_u
+      length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+
+  // Iterate.  Ping-pong between a_buf (eta_in) and b_buf (eta_out).
+  id<MTLBuffer> in_buf  = a_buf;
+  id<MTLBuffer> out_buf = b_buf;
+  int converged = 0;
+  uint32_t actual_iters = 0;
+  for (uint32_t iter = 0; iter < max_iters; iter++) {
+    actual_iters = iter + 1;
+    id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    [enc setBuffer:ec_buf offset:0 atIndex:0];
+    [enc setBuffer:ev_buf offset:0 atIndex:1];
+    [enc setBuffer:es_buf offset:0 atIndex:2];
+    [enc setBuffer:co_buf offset:0 atIndex:3];
+    [enc setBuffer:cf_buf offset:0 atIndex:4];
+    [enc setBuffer:vo_buf offset:0 atIndex:5];
+    [enc setBuffer:vf_buf offset:0 atIndex:6];
+    [enc setBuffer:in_buf  offset:0 atIndex:7];
+    [enc setBuffer:out_buf offset:0 atIndex:8];
+    [enc setBuffer:ne_buf  offset:0 atIndex:9];
+    NSUInteger tg = (NSUInteger)((n_edges < 256) ? n_edges : 256);
+    [enc dispatchThreads:MTLSizeMake(n_edges, 1, 1)
+     threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    // Damping + convergence check on host (small, <100K edges typical).
+    float *in_p  = (float *)[in_buf  contents];
+    float *out_p = (float *)[out_buf contents];
+    float max_delta = 0.0f;
+    for (uint32_t e = 0; e < n_edges; e++) {
+      float updated = (1.0f - damping) * in_p[e] + damping * out_p[e];
+      float delta   = updated - in_p[e];
+      if (delta < 0.0f) delta = -delta;
+      if (delta > max_delta) max_delta = delta;
+      out_p[e] = updated;  // commit damped value into out
+    }
+    if (max_delta < threshold) {
+      converged = 1;
+      break;
+    }
+
+    // Swap buffers for next iter.
+    id<MTLBuffer> tmp = in_buf;
+    in_buf = out_buf;
+    out_buf = tmp;
+  }
+
+  // Copy final values from in_buf (last update written to out_buf,
+  // then loop ends -- but only if converged; otherwise in_buf has
+  // the latest because we swap).  Actually after swap, in_buf is
+  // the latest iter's output.  On convergence, we wrote into out_buf
+  // (which is at this point the iteration's output buffer).
+  float *final_p = converged ? (float *)[out_buf contents]
+                              : (float *)[in_buf contents];
+  memcpy(out_eta, final_p, n_edges * sizeof(float));
+
+  fprintf(stderr, "[sp] iters=%u converged=%d\n", actual_iters, converged);
+  return converged;
+}
+
 Backend METAL_BACKEND = {
   .id              = 2,
   .view_aware      = 1,   // metal_dispatch_kernel pre-materializes
