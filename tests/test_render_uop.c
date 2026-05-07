@@ -739,6 +739,63 @@ int main(void) {
     unlink(dl_path);
   }
 
+  TEST_BEGIN("render-uop-c/bitcast-fp32-int32-runs");
+  {
+    // y[i] = bitcast(in[i], int32). Each input is a fp32 with known
+    // bit pattern; output is the same bits as int32.
+    u32 dimsB[1] = { 4 };
+    Term outB = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_INT32, 1, dimsB, 0);
+    Term aB   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsB, 1);
+    Term insB[1] = { aB };
+    Term r    = uop_range(0, 0, 4);
+    Term la   = uop_index_e(aB, r);
+    Term bc   = uop_bitcast(la, DT_INT32);
+    Term stB  = uop_store(outB, r, bc);
+    char src[4096];
+    fp = fmemopen(src, sizeof(src), "w");
+    cg_render_uop_kernel_c(stB, "k", outB, insB, 1, fp);
+    fclose(fp);
+    // Confirm THVM_BITCAST appears in the rendered C.
+    CHECK(contains(src, "THVM_BITCAST(int,"));
+    const char *src_path = "/tmp/thvm_f6_step14.c";
+    const char *dl_path  = "/tmp/thvm_f6_step14.dylib";
+    FILE *cf = fopen(src_path, "w");
+    fputs(src, cf);
+    fclose(cf);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+    int rc = system(cmd);
+    if (rc != 0) {
+      fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
+              src);
+    }
+    CHECK(rc == 0);
+    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+    CHECK(h != NULL);
+    typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *);
+    KFn kfn = (KFn)dlsym(h, "k");
+    CHECK(kfn != NULL);
+    // 1.0f bits = 0x3F800000 = 1065353216
+    // 2.0f bits = 0x40000000 = 1073741824
+    // 4.0f bits = 0x40800000 = 1082130432
+    // 0.0f bits = 0x00000000 = 0
+    union { float f; int32_t i; } pun;
+    int32_t expected[4];
+    float aa[4] = {1.0f, 2.0f, 4.0f, 0.0f};
+    for (u32 i = 0; i < 4; i++) {
+      pun.f = aa[i]; expected[i] = pun.i;
+    }
+    int32_t yy[4];
+    const void *insp[1] = { aa };
+    unsigned numels[1] = { 4 };
+    kfn(yy, insp, 4, numels);
+    for (u32 i = 0; i < 4; i++) CHECK(yy[i] == expected[i]);
+    dlclose(h);
+    unlink(src_path);
+    unlink(dl_path);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
