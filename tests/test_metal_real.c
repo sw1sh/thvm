@@ -79,21 +79,24 @@ static u32 build_metal_tile_add_kernel(u32 extent, u32 groups, u32 threads,
   u32 root_src[2] = {sto, r0};
   rangeify_emit(ke, S_BUFFERIZE, DT_FP32, 2, root_src, 0);
 
+  // E9-prep wedge 6: drive the axes through axes_default_for +
+  // kernel_apply_opt instead of hand-writing axis_types[].  Final
+  // shape: [GLOBAL=groups, LOCAL=threads] (or swapped).  Built from
+  // initial [LOOP=extent] via KOP_LOCAL(threads) + KOP_GLOBAL(groups)
+  // (+ KOP_SWAP for the local-first variant).
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = extent;
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 2;
+  axes_default_for(ke);
+  KOpt local_op  = { .op = KOP_LOCAL,  .axis = 0, .arg = threads };
+  KOpt global_op = { .op = KOP_GLOBAL, .axis = 0, .arg = groups  };
+  CHECK(kernel_apply_opt(ke, local_op));
+  CHECK(kernel_apply_opt(ke, global_op));
   if (local_first) {
-    ke->axes->axis_types[0] = KAX_LOCAL;
-    ke->axes->full_shape[0] = threads;
-    ke->axes->axis_types[1] = KAX_GLOBAL;
-    ke->axes->full_shape[1] = groups;
-  } else {
-    ke->axes->axis_types[0] = KAX_GLOBAL;
-    ke->axes->full_shape[0] = groups;
-    ke->axes->axis_types[1] = KAX_LOCAL;
-    ke->axes->full_shape[1] = threads;
+    KOpt swap_op = { .op = KOP_SWAP, .axis = 0, .arg = 1 };
+    CHECK(kernel_apply_opt(ke, swap_op));
   }
-  ke->axes->version++;
   return kid;
 }
 

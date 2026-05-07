@@ -841,13 +841,15 @@ int main(void) {
   CHECK_EQ(info.axis_extents[0], 8u);
 
   TEST_BEGIN("tile-graph/kernel-axes-override");
+  // E9-prep wedge 6: drive [LOOP=2, UPCAST=4] via axes_default_for +
+  // KOP_UPCAST(axis=0, arg=4) instead of hand-writing axis_types[].
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = 8;
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 2;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 2;
-  ke->axes->axis_types[1] = KAX_UPCAST;
-  ke->axes->full_shape[1] = 4;
+  axes_default_for(ke);
+  KOpt upcast4 = { .op = KOP_UPCAST, .axis = 0, .arg = 4 };
+  CHECK(kernel_apply_opt(ke, upcast4));
   CHECK(tile_build_from_scalar(ke));
   CHECK_EQ(ke->n_tile_uops, 6);       // sentinel + body + store + two axes + loop
   CHECK_EQ(ke->tile_uops[2].op, TILE_STORE);
@@ -882,13 +884,17 @@ int main(void) {
   CHECK_EQ(info.axis_extents[1], 4u);
 
   TEST_BEGIN("tile-graph/kernel-axes-local-global");
+  // E9-prep wedge 6: drive [GLOBAL=2, LOCAL=4] via axes_default_for +
+  // KOP_LOCAL(arg=4) + KOP_GLOBAL(arg=2) instead of hand-writing
+  // axis_types[].
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = 8;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 2;
-  ke->axes->axis_types[0] = KAX_GLOBAL;
-  ke->axes->full_shape[0] = 2;
-  ke->axes->axis_types[1] = KAX_LOCAL;
-  ke->axes->full_shape[1] = 4;
-  ke->axes->version++;
+  axes_default_for(ke);
+  KOpt klg_local4  = { .op = KOP_LOCAL,  .axis = 0, .arg = 4 };
+  KOpt klg_global2 = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
+  CHECK(kernel_apply_opt(ke, klg_local4));
+  CHECK(kernel_apply_opt(ke, klg_global2));
   CHECK(tile_build_from_scalar(ke));
   CHECK(tile_validate(ke));
   CHECK(tile_collect_plan_info(ke, &info));
@@ -946,13 +952,18 @@ int main(void) {
   unsetenv("THVM_TILE");
 
   TEST_BEGIN("tile-graph/kernel-axes-local-global-swapped");
+  // E9-prep wedge 6: drive [LOCAL=4, GLOBAL=2] via axes_default_for +
+  // KOP_LOCAL(arg=4) + KOP_GLOBAL(arg=2) + KOP_SWAP(0,1).
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = 8;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 2;
-  ke->axes->axis_types[0] = KAX_LOCAL;
-  ke->axes->full_shape[0] = 4;
-  ke->axes->axis_types[1] = KAX_GLOBAL;
-  ke->axes->full_shape[1] = 2;
-  ke->axes->version++;
+  axes_default_for(ke);
+  KOpt klgs_local4  = { .op = KOP_LOCAL,  .axis = 0, .arg = 4 };
+  KOpt klgs_global2 = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
+  KOpt klgs_swap    = { .op = KOP_SWAP,   .axis = 0, .arg = 1 };
+  CHECK(kernel_apply_opt(ke, klgs_local4));
+  CHECK(kernel_apply_opt(ke, klgs_global2));
+  CHECK(kernel_apply_opt(ke, klgs_swap));
   CHECK(tile_build_from_scalar(ke));
   CHECK(tile_validate(ke));
   CHECK(tile_collect_plan_info(ke, &info));
@@ -968,6 +979,17 @@ int main(void) {
   }
 
   TEST_BEGIN("tile-graph/kernel-axes-local-global-with-loop");
+  // E9-prep wedge 6 residual: this 3-axis [GLOBAL, LOCAL, LOOP]
+  // arrangement isn't expressible through the writer trio against the
+  // 1-axis BUFFERIZE the test's scalar arena carries.  KOP_LOCAL only
+  // inserts an inner LOCAL after a LOOP, so chaining splits/swaps
+  // yields [LOOP=2, LOCAL=2, LOOP=2] -> [GLOBAL=2, LOCAL=2, LOOP=2]
+  // only when applied to a 2-axis BUFFERIZE source -- which would
+  // require rebuilding the scalar arena.  Hand-write left as-is so
+  // the kernel_lift test seam exercises this distribution path; it
+  // does not produce a Wedge-6 diagnostic because output_ndim
+  // disagrees with n_axes (sim_ok=false short-circuits the validate
+  // cross-check).
   memset(ke->axes, 0, sizeof(KernelAxes));
   ke->axes->n_axes = 3;
   ke->axes->axis_types[0] = KAX_GLOBAL;
@@ -993,6 +1015,14 @@ int main(void) {
   }
 
   TEST_BEGIN("tile-graph/group-reduce-axis-falls-back-from-c-renderer");
+  // E9-prep wedge 6 residual: like the with-loop case above, this
+  // [GLOBAL, LOCAL, GROUP_REDUCE] arrangement at 3 axes against a
+  // 1-axis BUFFERIZE source isn't expressible through the writer
+  // trio; the kernel_lift replay would split the single source range
+  // by KOP_GROUP(arg=1) but downstream the GROUP_REDUCE = 1 sentinel
+  // is the test's deliberate fall-back probe and not something the
+  // writer trio composes from output_ndim signals.  Diagnostic-free
+  // for the same sim_ok=false reason.
   memset(ke->axes, 0, sizeof(KernelAxes));
   ke->axes->n_axes = 3;
   ke->axes->axis_types[0] = KAX_GLOBAL;
@@ -1011,13 +1041,14 @@ int main(void) {
   CHECK(!cg_supports_tile(ke));
 
   TEST_BEGIN("tile-graph/restore-kernel-axes-override");
+  // E9-prep wedge 6: drive [LOOP=2, UPCAST=4] via axes_default_for +
+  // KOP_UPCAST(axis=0, arg=4).
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = 8;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 2;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 2;
-  ke->axes->axis_types[1] = KAX_UPCAST;
-  ke->axes->full_shape[1] = 4;
-  ke->axes->version++;
+  axes_default_for(ke);
+  KOpt rkao_upcast4 = { .op = KOP_UPCAST, .axis = 0, .arg = 4 };
+  CHECK(kernel_apply_opt(ke, rkao_upcast4));
   CHECK(tile_build_from_scalar(ke));
   CHECK(tile_validate(ke));
 
