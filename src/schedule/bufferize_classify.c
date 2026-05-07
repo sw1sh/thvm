@@ -335,25 +335,6 @@ static int bufferize_chain_walk_all_parents_is_broadcast(
   return n_parents > 0;
 }
 
-// bufferize_reduce_consumer_is_broadcast_chain body but starts at
-// `parent` instead of finding it via bufferize_unique_uop_parent, so
-// the multi-parent rule can call it once per branch.
-//
-// Scalar-preserving chain ops:
-// - UNARY scalar fns: NEG/RECIP/SQRT/EXP2/LOG2 - same value, same shape.
-// - BINARY ALU with broadcast-of-CONST sibling: ADD/MUL where the
-//   other operand is a CONST or `EXPAND(CONST)` keeps the post-reduce
-//   shape.  The WL Times UpValue lowers `t / N` to `MUL(t, EXPAND(CONST))`,
-//   so the wrapper-walk via bufferize_term_is_broadcast_of_const is what
-//   catches BatchNorm-style mean / variance reductions.
-// - Pure movement: RESHAPE/PERMUTE do not change scalar values; they only
-//   relayout the producer's output.  Critical for BatchNorm-style chains:
-//   `REDUCE_SUM -> MUL(EXPAND(CONST 1/N)) -> RESHAPE({1,C,1,1}) -> EXPAND({B,C,H,W})`
-//   where the RESHAPE prepares the broadcast axes before the EXPAND.
-static int bufferize_chain_from_parent_is_broadcast(u64 parent_loc) {
-  return bufferize_chain_walk_is_broadcast(parent_loc, 8);
-}
-
 // Walk a REDUCE's consumer chain and return 1 iff every hop is
 // scalar-preserving until we hit an EXPAND (the broadcast back to
 // vector shape).  The chain pattern this matches is the

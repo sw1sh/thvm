@@ -51,19 +51,6 @@ static int rc_is_float(u32 dtype) {
   return dtype == DT_FP32 || dtype == DT_FP64;
 }
 
-static int rc_is_int(u32 dtype) {
-  switch (dtype) {
-    case DT_BOOL:
-    case DT_INT8:  case DT_UINT8:
-    case DT_INT16: case DT_UINT16:
-    case DT_INT32: case DT_UINT32:
-    case DT_INT64: case DT_UINT64:
-      return 1;
-    default:
-      return 0;
-  }
-}
-
 static int rc_is_signed_int(u32 dtype) {
   return dtype == DT_INT8 || dtype == DT_INT16
       || dtype == DT_INT32 || dtype == DT_INT64;

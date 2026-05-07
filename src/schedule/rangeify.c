@@ -356,12 +356,6 @@ static u64 pack_index_extra(u32 const *strides, u32 ndim, u32 offset) {
   return packed;
 }
 
-// Convenience: pack strides only (offset = 0).  Used for chained
-// INDEX nodes where the offset lives on the innermost.
-static u64 pack_strides_u16(u32 const *strides, u32 ndim) {
-  return pack_index_extra(strides, ndim, 0);
-}
-
 // Compute canonical row-major strides for `dims[0..ndim)`.
 static void row_major_strides(u32 const *dims, u32 ndim, u32 *out) {
   if (ndim == 0) return;
