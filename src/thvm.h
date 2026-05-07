@@ -2298,6 +2298,29 @@ u32 uop_dag_reduce_axis_extent(Term root);
 // propose_metal_reduce_unroll_kernel's KProgOp gate).
 int uop_dag_is_reduce_unroll_kernel(Term root);
 
+// === Slice 5 decode shims (Metal-TU-callable) =========================
+// Thin external-linkage wrappers over heap_read / term_* / UOp
+// predicates so the Metal backend (separate TU) can walk a DAG without
+// pulling the main TU's static-inline accessors transitively.
+//
+// uop_dag_decode_uop: returns 1 with (*out_op, *out_loc) populated
+// when `t` is a TAG_UOP; 0 otherwise.
+int uop_dag_decode_uop    (Term t, u32 *out_op, u64 *out_loc);
+
+// UOP_BUFFER's instance disambiguator (0 = default; 1.. = input slot
+// + extras; see kernel_lift_to_uop's KERNEL_LIFT_EXTRA_INST_BASE).
+u32 uop_dag_buffer_instance(Term t);
+
+// UOP_CONST payload decode: dtype + raw bits.  Returns 1 on success.
+int uop_dag_const_payload (Term t, u32 *out_dtype, u32 *out_bits);
+
+// heap_read shim: read `offset`-th cell of the heap slot at `loc`.
+Term uop_dag_heap_read    (u64 loc, u32 offset);
+
+// Elementwise-classification predicates with external linkage.
+int uop_dag_is_unary_ew   (u32 op);
+int uop_dag_is_binary_ew  (u32 op);
+
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
 // `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).

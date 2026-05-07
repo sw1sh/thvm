@@ -1502,6 +1502,333 @@ static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
   return 0;
 }
 
+// === Phase C slice 5: DAG-side per-op encoder ========================
+//
+// Mirrors the per-KProgOp encoder loop below, but walks
+// ke->cached_lift.store_root (a UOP_STORE / UOP_AFTER chain produced
+// by kernel_lift_to_uop) instead of ke->program[].  Fires when the
+// lift succeeded (cached_lift.store_root != 0) AND metal_tile_jit
+// _encode declined (today only multi-output kernels that bail at
+// cg_kernel_has_extra_outputs reach this path with a non-zero
+// store_root; lift declines keep the legacy program[] loop).
+//
+// Mapping is mechanical: KProgOp.opcode is already a UOP_* tag, so
+// metal_pipeline_for(opcode, dtype) -- the table that resolves a
+// (UOP_*, dtype) pair to an MTLComputePipelineState -- reuses 1:1.
+// The shapes the lifter produces for multi-output kernels are
+// elementwise + UOP_CONST + UOP_INDEX_E(input_buf, range_addr) only
+// (kernel_lift_from_kprog rejects anything else).  REDUCE / movement
+// ops never appear in lift-eligible multi-output programs because
+// merge_boundary_is_elementwise filters them out at splice time.
+//
+// One MTLComputeCommandEncoder per UOp tree node so Metal hazard-
+// tracks reads/writes across encoders -- same convention the legacy
+// per-op loop relies on.
+
+#define DAG_ENCODE_MAX_VISITED 256u
+#define DAG_ENCODE_MAX_INTERMS  64u
+
+typedef struct {
+  Term term;     // UOp Term that produced this buffer's contents (0 = unused)
+  u32  buf_id;   // METAL_BUFS slot holding the result
+  u8   owned;    // 1 = we allocated it (intermediate); 0 = borrowed input/output
+} DagEncCacheEntry;
+
+typedef struct {
+  KernelEntry        *ke;
+  u32                *effective_buf_ids;   // input slot -> Metal buf id
+  u32                 numel;               // elementwise per-thread numel
+  u32                 dtype;               // uniform dtype (already gated)
+  id<MTLCommandBuffer> cmd;
+  // Memo: maps a UOp Term to the Metal buf_id holding its result.
+  // Linear scan is fine for the tree sizes we see (<32 nodes per
+  // multi-output kernel).
+  DagEncCacheEntry    cache[DAG_ENCODE_MAX_VISITED];
+  u32                 n_cache;
+  // Allocated intermediates we need to release after dispatch submits.
+  u32                 inter_buf_ids[DAG_ENCODE_MAX_INTERMS];
+  u32                 n_inter;
+} DagEncCtx;
+
+static u32 dag_enc_lookup(DagEncCtx const *c, Term t) {
+  for (u32 i = 0; i < c->n_cache; i++) {
+    if (c->cache[i].term == t) return c->cache[i].buf_id;
+  }
+  return 0;
+}
+
+static int dag_enc_remember(DagEncCtx *c, Term t, u32 buf_id, u8 owned) {
+  if (c->n_cache >= DAG_ENCODE_MAX_VISITED) return 0;
+  c->cache[c->n_cache].term   = t;
+  c->cache[c->n_cache].buf_id = buf_id;
+  c->cache[c->n_cache].owned  = owned;
+  c->n_cache++;
+  return 1;
+}
+
+static u32 dag_enc_alloc_inter(DagEncCtx *c) {
+  if (c->n_inter >= DAG_ENCODE_MAX_INTERMS) return 0;
+  u32 nbytes = (u32)dtype_storage_bytes(c->dtype, c->numel);
+  u32 bid    = metal_buf_alloc(nbytes);
+  if (bid == 0) return 0;
+  c->inter_buf_ids[c->n_inter++] = bid;
+  return bid;
+}
+
+// Forward decl so encode_value can recurse through unary/binary.
+static u32 dag_enc_value(DagEncCtx *c, Term v, u32 dst_buf_id);
+
+// Encode a CONST node into `dst_buf_id`.  When dst_buf_id == 0 we
+// allocate an intermediate.  Returns the Metal buf id holding the
+// constant's broadcast fill, or 0 on failure.
+static u32 dag_enc_const(DagEncCtx *c, Term v, u32 dst_buf_id) {
+  u32 dtype = 0, bits = 0;
+  if (!uop_dag_const_payload(v, &dtype, &bits)) return 0;
+  if (dtype != c->dtype) return 0;        // metal_kernel_supported gated this
+  u32 bid = dst_buf_id ? dst_buf_id : dag_enc_alloc_inter(c);
+  if (bid == 0) return 0;
+  id<MTLComputePipelineState> pso = metal_pipeline_for(UOP_CONST, dtype);
+  if (pso == nil) return 0;
+  id<MTLComputeCommandEncoder> enc = [c->cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:METAL_BUFS[bid].buf offset:0 atIndex:0];
+  [enc setBytes:&bits length:sizeof(bits) atIndex:1];
+  NSUInteger n = c->numel ? c->numel : 1;
+  NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  return bid;
+}
+
+// Encode a unary or binary elementwise op whose `arg` field is 0 (the
+// lifted multi-output kernels never carry a non-zero arg today; if we
+// ever hit one, the legacy per-op loop's encoding takes over).
+static u32 dag_enc_arith(DagEncCtx *c, Term v, u32 dst_buf_id, u32 op,
+                         u32 n_src, u32 src_bids[2]) {
+  u32 bid = dst_buf_id ? dst_buf_id : dag_enc_alloc_inter(c);
+  if (bid == 0) return 0;
+  id<MTLComputePipelineState> pso = metal_pipeline_for(op, c->dtype);
+  if (pso == nil) return 0;
+  id<MTLComputeCommandEncoder> enc = [c->cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:METAL_BUFS[bid].buf offset:0 atIndex:0];
+  u32 zero_arg = 0;
+  [enc setBytes:&zero_arg length:sizeof(zero_arg) atIndex:1];
+  for (u32 i = 0; i < n_src; i++) {
+    [enc setBuffer:METAL_BUFS[src_bids[i]].buf offset:0 atIndex:(2 + i)];
+  }
+  // src_numels mirror the per-op encoder's contract: numel is `c->numel`
+  // for non-broadcast srcs (multi-output lift produces numel-uniform
+  // INDEX_E reads + numel-uniform CONST broadcasts).
+  for (u32 i = 0; i < n_src; i++) {
+    u32 nm = c->numel;
+    [enc setBytes:&nm length:sizeof(nm) atIndex:(2 + n_src + i)];
+  }
+  NSUInteger n = c->numel ? c->numel : 1;
+  NSUInteger tg = MIN(n, [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  (void)v;
+  return bid;
+}
+
+// Recursive value emitter.  Returns the Metal buf id holding the
+// computed value, or 0 on failure.  When dst_buf_id != 0 we MUST
+// write into that exact buffer (used for STORE root values that go
+// directly into the output buffer); otherwise we allocate or reuse
+// an intermediate.
+static u32 dag_enc_value(DagEncCtx *c, Term v, u32 dst_buf_id) {
+  u32 op = 0;
+  u64 loc = 0;
+  if (!uop_dag_decode_uop(v, &op, &loc)) return 0;
+  // Memo: shared subexpressions reuse the prior buffer when no
+  // specific destination was requested.  When dst_buf_id is set
+  // we must emit into the new buffer (destination is fixed by
+  // the STORE root that this is the value of).
+  if (dst_buf_id == 0) {
+    u32 cached = dag_enc_lookup(c, v);
+    if (cached != 0) return cached;
+  }
+  if (op == UOP_INDEX_E) {
+    // INDEX_E(buf, addr) -- in lifted multi-output kernels the buffer
+    // is always an input UOP_BUFFER (instance >= 1) and addr is the
+    // single full-numel UOP_RANGE.  Resolve to the input slot's
+    // effective Metal buf id directly; no shader call needed.
+    Term buf = uop_dag_heap_read(loc, 0);
+    u32 buf_op = 0; u64 buf_loc = 0;
+    if (!uop_dag_decode_uop(buf, &buf_op, &buf_loc)
+        || buf_op != UOP_BUFFER) return 0;
+    u32 inst = uop_dag_buffer_instance(buf);
+    if (inst < 1) return 0;
+    u32 slot = inst - 1;
+    if (slot >= c->ke->n_inputs) return 0;
+    u32 bid = c->effective_buf_ids[slot];
+    if (bid == 0 || bid >= METAL_BUFS_NEXT) return 0;
+    if (dst_buf_id != 0) {
+      // STORE wants its value in dst_buf_id but the value is an input
+      // load.  Encode as a "binary ADD with a zero CONST" or
+      // equivalent shader call -- but multi-output kernels don't emit
+      // a STORE whose value is a bare INDEX_E (that's a trivial copy;
+      // the splice planner doesn't generate them).  Bail to legacy
+      // for safety.
+      return 0;
+    }
+    if (!dag_enc_remember(c, v, bid, 0)) return 0;
+    return bid;
+  }
+  if (op == UOP_CONST) {
+    u32 bid = dag_enc_const(c, v, dst_buf_id);
+    if (bid == 0) return 0;
+    // Cache by Term so a subsequent reference to the same UOP_CONST
+    // reuses the buffer (memoised); only safe when dst_buf_id was 0.
+    if (dst_buf_id == 0) {
+      if (!dag_enc_remember(c, v, bid, 1)) return 0;
+    }
+    return bid;
+  }
+  if (uop_dag_is_unary_ew(op)) {
+    Term src = uop_dag_heap_read(loc, 0);
+    u32 src_bid = dag_enc_value(c, src, 0);
+    if (src_bid == 0) return 0;
+    u32 src_arr[2] = { src_bid, 0 };
+    u32 bid = dag_enc_arith(c, v, dst_buf_id, op, 1, src_arr);
+    if (bid == 0) return 0;
+    if (dst_buf_id == 0) {
+      if (!dag_enc_remember(c, v, bid, 1)) return 0;
+    }
+    return bid;
+  }
+  if (uop_dag_is_binary_ew(op)) {
+    Term a = uop_dag_heap_read(loc, 0);
+    Term b = uop_dag_heap_read(loc, 1);
+    u32 a_bid = dag_enc_value(c, a, 0);
+    u32 b_bid = dag_enc_value(c, b, 0);
+    if (a_bid == 0 || b_bid == 0) return 0;
+    u32 src_arr[2] = { a_bid, b_bid };
+    u32 bid = dag_enc_arith(c, v, dst_buf_id, op, 2, src_arr);
+    if (bid == 0) return 0;
+    if (dst_buf_id == 0) {
+      if (!dag_enc_remember(c, v, bid, 1)) return 0;
+    }
+    return bid;
+  }
+  // Unsupported op (REDUCE, movement, CAST, IWHERE, etc.).  The lift's
+  // multi-output path doesn't generate these -- bail to legacy for
+  // any future widening.
+  return 0;
+}
+
+// Resolve the destination Metal buf id for a UOP_STORE based on its
+// destination UOP_BUFFER's instance: instance==0 = primary outBuf;
+// instance == KERNEL_LIFT_EXTRA_INST_BASE + ei = extra output ei.
+// Returns 0 if the buffer slot can't be resolved (callee bails).
+#define DAG_LIFT_EXTRA_INST_BASE (1u + KERNEL_LIFT_MAX_INPUT)
+static u32 dag_enc_resolve_store_dst(DagEncCtx *c, Term store_buf,
+                                     u32 primary_out_buf_id) {
+  u32 buf_op = 0; u64 buf_loc = 0;
+  if (!uop_dag_decode_uop(store_buf, &buf_op, &buf_loc)
+      || buf_op != UOP_BUFFER) {
+    return 0;
+  }
+  u32 inst = uop_dag_buffer_instance(store_buf);
+  if (inst == 0) {
+    return primary_out_buf_id;
+  }
+  if (inst >= DAG_LIFT_EXTRA_INST_BASE) {
+    u32 ei = inst - DAG_LIFT_EXTRA_INST_BASE;
+    if (ei >= (u32)c->ke->n_extra_outputs) return 0;
+    u32 extra_tid = c->ke->extra_output_tids[ei];
+    if (extra_tid == 0 || extra_tid >= TENS_NEXT) return 0;
+    u32 extra_buf_id = TENS[extra_tid].buf_id;
+    if (extra_buf_id == 0 || extra_buf_id >= METAL_BUFS_NEXT
+        || METAL_BUFS[extra_buf_id].buf == nil) return 0;
+    return extra_buf_id;
+  }
+  // Input buffer instance (1..KERNEL_LIFT_MAX_INPUT) is not a valid
+  // STORE destination in the lift's contract -- bail.
+  return 0;
+}
+
+// Walk the AFTER chain inner-first (matches uwalk_emit_after) so the
+// outermost STORE writes last.  Each STORE's value tree gets its own
+// post-order encoding; intermediates allocated for one STORE are
+// reused inside that STORE only (Metal hazard-tracks across encoders
+// in the same command buffer so they're safe to read by the next
+// STORE if any subexpression happens to be shared via hash-cons).
+static int dag_enc_emit_node(DagEncCtx *c, Term node, u32 primary_out_buf_id);
+
+static int dag_enc_emit_after(DagEncCtx *c, Term after, u32 primary_out_buf_id) {
+  u32 op = 0; u64 loc = 0;
+  if (!uop_dag_decode_uop(after, &op, &loc) || op != UOP_AFTER) return 0;
+  Term inner       = uop_dag_heap_read(loc, 0);
+  Term inner_after = uop_dag_heap_read(loc, 1);
+  if (!dag_enc_emit_node(c, inner_after, primary_out_buf_id)) return 0;
+  if (!dag_enc_emit_node(c, inner,       primary_out_buf_id)) return 0;
+  return 1;
+}
+
+static int dag_enc_emit_store(DagEncCtx *c, Term store, u32 primary_out_buf_id) {
+  u32 op = 0; u64 loc = 0;
+  if (!uop_dag_decode_uop(store, &op, &loc) || op != UOP_STORE) return 0;
+  Term buf = uop_dag_heap_read(loc, 0);
+  Term val = uop_dag_heap_read(loc, 2);
+  u32 dst  = dag_enc_resolve_store_dst(c, buf, primary_out_buf_id);
+  if (dst == 0) return 0;
+  u32 res = dag_enc_value(c, val, dst);
+  return res != 0;
+}
+
+static int dag_enc_emit_node(DagEncCtx *c, Term node, u32 primary_out_buf_id) {
+  u32 op = 0; u64 loc = 0;
+  if (!uop_dag_decode_uop(node, &op, &loc)) return 0;
+  if (op == UOP_STORE) return dag_enc_emit_store(c, node, primary_out_buf_id);
+  if (op == UOP_AFTER) return dag_enc_emit_after(c, node, primary_out_buf_id);
+  return 0;
+}
+
+// Public entry point: encode the lifted DAG.  Returns 1 on success
+// (caller submits the command buffer + cleans up); 0 to fall through
+// to the legacy per-op KProgOp encoder.  Releases its own intermediate
+// buffer allocations on either path.
+//
+// `cmd` is the SAME MTLCommandBuffer the caller would pass to the
+// legacy encoder; the encoder appends compute-command-encoders to it
+// so Metal's hazard tracker handles inter-encoder dependencies.
+static int dag_metal_encode_kernel(KernelEntry *ke,
+                                   u32 *effective_buf_ids,
+                                   u32 out_buf_id,
+                                   id<MTLCommandBuffer> cmd) {
+  Term root = ke->cached_lift.store_root;
+  if (root == 0) return 0;
+  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) return 0;
+  // Single-output kernels are already handled by metal_tile_jit_encode
+  // via cg_emit_via_uop; only multi-output kernels (which tile_jit
+  // rejects via cg_kernel_has_extra_outputs) reach here.  Guard against
+  // accidental misroutes.
+  // The encoder works for single-output too -- just falls through to a
+  // single STORE walk -- so don't gate on n_extra_outputs.
+  DagEncCtx ctx = {0};
+  ctx.ke                 = ke;
+  ctx.effective_buf_ids  = effective_buf_ids;
+  ctx.numel              = ke->output_numel;
+  ctx.dtype              = ke->output_dtype;
+  ctx.cmd                = cmd;
+  if (ctx.numel == 0) return 0;
+  if (ctx.dtype != DT_FP32 && ctx.dtype != DT_INT32) return 0;
+  int ok = dag_enc_emit_node(&ctx, root, out_buf_id);
+  // Release our intermediates regardless of outcome.  When ok==0 the
+  // caller will fall back to the legacy encoder -- that path doesn't
+  // touch our partial dispatches (Metal command buffers stay in build
+  // mode until commit; nothing executed yet) so dropping the buffers
+  // here keeps the leak count flat.
+  for (u32 i = 0; i < ctx.n_inter; i++) {
+    metal_buf_decref_after_batch(ctx.inter_buf_ids[i]);
+  }
+  return ok;
+}
+
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
 
@@ -1629,6 +1956,34 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
     }
     return -1;
+  }
+
+  // Phase C slice 5: DAG-side per-op encoder.  Fires when the lift
+  // succeeded (typical case for multi-output kernels that bypassed
+  // tile_jit_encode at the cg_kernel_has_extra_outputs gate).  Skips
+  // ke->program[] entirely; walks ke->cached_lift.store_root instead.
+  // Falls through to the legacy KProgOp loop on failure (or when
+  // store_root == 0 = lift declined).
+  if (ke->cached_lift.store_root != 0) {
+    METAL_ENCODING_DEPTH++;
+    id<MTLCommandBuffer> dag_cmd = metal_command_buffer();
+    int dag_ok = dag_metal_encode_kernel(ke, effective_buf_ids,
+                                          out_buf_id, dag_cmd);
+    if (dag_ok) {
+      metal_submit_if_standalone(dag_cmd);
+      METAL_ENCODING_DEPTH--;
+      for (u32 i = 0; i < ke->n_inputs; i++) {
+        if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
+      }
+      cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
+      return 0;
+    }
+    METAL_ENCODING_DEPTH--;
+    // Encoder declined (unsupported op shape, alloc failure, etc.).
+    // Fall through to the legacy program[] loop below.  No partial
+    // command-buffer state to roll back: dag_metal_encode_kernel
+    // appends encoders to dag_cmd which we never submit on the
+    // failure path; ARC drops the unsubmitted command buffer.
   }
 
   // Per-op interpreter path: one encoder per KProgOp[] entry.  Mirror
