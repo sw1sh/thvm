@@ -1859,11 +1859,6 @@ fn u32  rangeify_emit_binary(struct KernelEntry *ke, u8 op, u32 dtype, u32 a, u3
 // Free the per-kernel scalar arena.  Called from kernel_free_arrays.
 fn void rangeify_free(struct KernelEntry *ke);
 
-// Instrumentation: per-process counters for the address-
-// build paths in emit_addr_from_rngs_uop_preferred.
-fn u64 rangeify_uop_path_hits(void);
-fn u64 rangeify_uop_fallback_hits(void);
-
 // === UOp -> ScalarUop translator ===
 // Translate a UOp INDEX-expression Term into the equivalent ScalarUop
 // slot id in `ke`'s arena.  Caller provides a UopRangeMap[] table
@@ -1911,8 +1906,6 @@ fn u32  tile_analyze_reduce_broadcast(struct KernelEntry const *ke);
 fn u32  tile_lower_reduce_broadcast(struct KernelEntry *ke,
                                     u32 reduce_scalar_id,
                                     u32 reduce_groups);
-fn int  tile_build_conv2d_from_info(struct KernelEntry *ke,
-                                    TileConv2DInfo const *conv);
 fn void tile_dump_node(struct KernelEntry const *ke, u32 id,
                        FILE *fp, u32 depth);
 fn void tile_dump(struct KernelEntry const *ke, FILE *fp);
@@ -2145,7 +2138,6 @@ fn u32  uop_buffer_scope(Term t);
 fn u32  uop_buffer_dtype(Term t);
 fn u32  uop_buffer_ndim (Term t);
 fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
-fn u32  uop_buffer_instance(Term t);
 
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to

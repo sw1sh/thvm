@@ -897,9 +897,6 @@ static u32         RANGEIFY_UOP_RANGE_MAP_LEN;
 static u64 RANGEIFY_UOP_PATH_HITS;
 static u64 RANGEIFY_UOP_FALLBACK_HITS;
 
-fn u64 rangeify_uop_path_hits(void)     { return RANGEIFY_UOP_PATH_HITS; }
-fn u64 rangeify_uop_fallback_hits(void) { return RANGEIFY_UOP_FALLBACK_HITS; }
-
 // Build `sum_d (r->refs[d] * v_strides[d]) + in_off` preferring the
 // UOp DAG layer (uop_int_binary + uop_to_scalar) when iters can be
 // lifted, falling back to scalar emit_ibinop otherwise.  Returns 0
