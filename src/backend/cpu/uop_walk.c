@@ -88,7 +88,12 @@ static u32 uwalk_lookup_iter(UWalkCtx const *c, u32 axis_id) {
 
 // Read a value at (buf, offset) with dtype dt; returns f32 bits in
 // the low half of u64 for float, raw bits otherwise.
-static double uwalk_load_f64(void *p, u32 off, u32 dt) {
+//
+// `off` is signed (i64) because FLIP-residue input views address
+// elements at negative element offsets relative to the view.offset
+// pre-bias on the input pointer (F6-finish (b) flip-widen). For
+// writes the output is contig so off is always non-negative.
+static double uwalk_load_f64(void *p, i64 off, u32 dt) {
   switch (dt) {
     case DT_FP32: { f32 v = ((f32 *)p)[off]; return (double)v; }
     case DT_FP64: { f64 v = ((f64 *)p)[off]; return v; }
@@ -105,7 +110,7 @@ static double uwalk_load_f64(void *p, u32 off, u32 dt) {
   }
 }
 
-static i64 uwalk_load_i64(void *p, u32 off, u32 dt) {
+static i64 uwalk_load_i64(void *p, i64 off, u32 dt) {
   switch (dt) {
     case DT_FP32: { f32 v = ((f32 *)p)[off]; return (i64)v; }
     case DT_FP64: { f64 v = ((f64 *)p)[off]; return (i64)v; }
@@ -126,7 +131,7 @@ static int uwalk_dtype_is_float(u32 dt) {
   return dt == DT_FP32 || dt == DT_FP64;
 }
 
-static void uwalk_store_f64(void *p, u32 off, u32 dt, double v) {
+static void uwalk_store_f64(void *p, i64 off, u32 dt, double v) {
   switch (dt) {
     case DT_FP32:  ((f32 *)p)[off] = (f32)v; break;
     case DT_FP64:  ((f64 *)p)[off] = v;      break;
@@ -143,7 +148,7 @@ static void uwalk_store_f64(void *p, u32 off, u32 dt, double v) {
   }
 }
 
-static void uwalk_store_i64(void *p, u32 off, u32 dt, i64 v) {
+static void uwalk_store_i64(void *p, i64 off, u32 dt, i64 v) {
   switch (dt) {
     case DT_FP32:  ((f32 *)p)[off] = (f32)v; break;
     case DT_FP64:  ((f64 *)p)[off] = (f64)v; break;
@@ -239,9 +244,11 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       Term addr = heap_read(loc + 1);
       void *bp; u32 bdt;
       if (!uwalk_resolve_buf(c, buf, &bp, &bdt)) return 0.0;
+      // FLIP-residue input views address elements at negative element
+      // offsets relative to the view.offset pre-bias on bp; pass off
+      // through as signed (F6-finish (b) flip-widen).
       i64 off = uwalk_eval_int(c, addr);
-      if (off < 0) return 0.0;
-      return uwalk_load_f64(bp, (u32)off, bdt);
+      return uwalk_load_f64(bp, off, bdt);
     }
     case UOP_ADD: {
       double a = uwalk_eval_float(c, heap_read(loc + 0));
@@ -364,9 +371,9 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       Term addr = heap_read(loc + 1);
       void *bp; u32 bdt;
       if (!uwalk_resolve_buf(c, buf, &bp, &bdt)) return 0;
+      // Signed offset: see uwalk_eval_float's UOP_INDEX_E for rationale.
       i64 off = uwalk_eval_int(c, addr);
-      if (off < 0) return 0;
-      return uwalk_load_i64(bp, (u32)off, bdt);
+      return uwalk_load_i64(bp, off, bdt);
     }
     case UOP_CAST: {
       Term src = heap_read(loc + 0);
@@ -584,10 +591,10 @@ static void uwalk_loop_and_store(UWalkCtx *c,
     }
     if (uwalk_dtype_is_float(out_dt)) {
       double v = uwalk_eval_float(c, store_value);
-      uwalk_store_f64(out_p, (u32)addr_v, out_dt, v);
+      uwalk_store_f64(out_p, addr_v, out_dt, v);
     } else {
       i64 v = uwalk_eval_int(c, store_value);
-      uwalk_store_i64(out_p, (u32)addr_v, out_dt, v);
+      uwalk_store_i64(out_p, addr_v, out_dt, v);
     }
     return;
   }
