@@ -183,30 +183,34 @@ a `dup_op2.c` (DUP-OP2) but no `op2_sup.c` (OP2-SUP).  When
 F_OP2_NUM has a SUP `whnf`, the runtime rebuilds the OP2 and
 spins.
 
-**Workarounds** for the toy (in priority order):
+**Resolution**: ported HVM4's missing interactions directly --
+turned out to be two gaps, not one:
 
-1. **Swap operands** wherever the encoder controls them
-   (commutative ops only): `TOp2["==", NUM, sideChoice]` ->
-   `TOp2["==", sideChoice, NUM]`.  Already done in `sideUpdate`.
-2. **Final-check via Church pair**: build the search Term so each
-   leaf is a `pair(lhs, rhs)` (Church-encoded), then project once
-   from outside the SUP via `TApp[search, TLam[a, TLam[b,
-   TOp2["==", a, b]]]]`.  At projection time, the outer SUP fans
-   first via APP-SUP, so each branch's OP2 sees two concrete NUMs
-   -- avoiding the OP2-SUP-on-right path entirely.
-3. **Runtime fix**: add `interact/op2_sup.c` for the right-arg
-   case (DUP-based commute).  Bigger lift, but the right
-   long-term fix; many other encodings will hit the same wall.
+1. `src/interact/op2_sup.c` (OP2 with left-arg SUP) and
+   `src/interact/op2_num_sup.c` (OP2 with NUM left, SUP right --
+   the elegant case: no DUP needed because NUM is atomic).  Wired
+   into wnf's TAG_OP2 + TAG_F_OP2_NUM frame handlers.
+2. `src/interact/app_mat_sup.c` (APP-MAT with SUP scrutinee).
+   thvm's wnf TAG_MAT case only handled NUM and CTR scrutinees;
+   SUP fell through to the fallback branch, silently collapsing
+   the SUP enumeration.  Without this, sideUpdate's TIfZero on a
+   SUP-derived condition always took the fallback path.
 
-For milestone 1 we'll take (1)+(2): all operand swaps + Church
-pair on final check.
+With both landed, the toy now runs both-sides rewriting (5/5
+including a previously-false-positive unprovable case and a
+RHS-only-path test).  See commits 5ba50b25 + 051a9ef7 +
+b63464e3.
 
 ## Milestones
 
-1. **Toy in WL/CPU**: WL helper `atpToICTerm[axioms, conjecture,
-   depth]` for the atomic-axiom case.  Reduce via `TWnf` +
-   `TCollapse`, verify `a==c` from `{a==b, b==c}` returns True.
-   ~100 LOC.  Unblocks everything below.
+1. **Toy in WL/CPU** (DONE): WL helper `buildSearchTerm[
+   conjecture, axioms, depth]` for the atomic-axiom case (LHS-
+   only at first; both sides after the runtime fixes).  Reduce
+   via `TWnf` + `TCollapse`, verify `a==c` from `{a==b, b==c}`
+   returns True.  ~120 LOC in
+   [wl/Examples/atp_ic/transitivity.wls](../../wl/Examples/atp_ic/transitivity.wls).
+   5/5 pass after the runtime fixes (transitivity-3,
+   reflexivity, symmetry, unprovable, rhs-only-path).
 
 2. **Substitutivity via compile-time position unfold**: extend
    the encoder to walk both lhs/rhs of the conjecture, find
