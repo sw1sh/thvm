@@ -243,6 +243,103 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// === ATP runner with full trace serialization (FindEquationalProof scaffold) ==
+//
+// Same input shape as thvm_wl_atp_run but returns a single UTF8String
+// containing both the run summary AND the serialized trace, in a
+// format the WL side can parse to construct a ProofObject.
+//
+// Format:
+//   META status=<int> n_rules=<u> n_trace=<u>
+//   <idx> (axiom): lhs = rhs
+//   <idx> (orient from <p>): lhs = rhs
+//   <idx> (cp from <p>, <p>): lhs = rhs
+//   ...
+// Terms in the trace use the C-side pretty-printer (Cn for label-n
+// constructor, x_n for free var).  WL maps Cn / x_n back to the
+// caller's symbol/var names via the encoder's state["sym"] /
+// state["var"] tables.
+
+extern u32 thvm_atp_trace_serialize(const AtpState *s, char *buf, u32 cap);
+
+EXTERN_C DLLEXPORT int thvm_wl_atp_run_traced(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  mint max_steps   = MArgument_getInteger(args[1]);
+  mint max_label   = MArgument_getInteger(args[2]);
+
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+  if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64)
+    return LIBRARY_FUNCTION_ERROR;
+  mint flat_len = naf->MNumericArray_getFlattenedLength(na);
+  if (flat_len < 3) return LIBRARY_FUNCTION_ERROR;
+  const int64_t *data = (const int64_t *)naf->MNumericArray_getData(na);
+
+  int64_t n_ax_i = data[0];
+  if (n_ax_i < 0 || (int64_t)flat_len != 1 + 2 * n_ax_i + 2)
+    return LIBRARY_FUNCTION_ERROR;
+  u32 n_ax = (u32)n_ax_i;
+
+  if ((u32)max_label >= ATP_WL_CFG_MAX_LABELS) return LIBRARY_FUNCTION_ERROR;
+  static u32 wl_weights[ATP_WL_CFG_MAX_LABELS];
+  static u32 wl_precedence[ATP_WL_CFG_MAX_LABELS];
+  for (u32 i = 0; i < (u32)max_label + 1; i++) {
+    wl_weights[i] = 1;
+    wl_precedence[i] = i + 1;
+  }
+  static KboConfig wl_kbo;
+  wl_kbo.weights    = wl_weights;
+  wl_kbo.precedence = wl_precedence;
+  wl_kbo.n_labels   = (u32)max_label + 1;
+  wl_kbo.var_weight = 1;
+
+  AtpState *atp = thvm_atp_init(&wl_kbo, (u32)max_steps);
+  if (atp == NULL) return LIBRARY_FUNCTION_ERROR;
+
+  for (u32 i = 0; i < n_ax; i++) {
+    Term lhs = (Term)data[1 + 2 * i + 0];
+    Term rhs = (Term)data[1 + 2 * i + 1];
+    if (!thvm_atp_add_equation(atp, lhs, rhs)) {
+      thvm_atp_free(atp);
+      return LIBRARY_FUNCTION_ERROR;
+    }
+  }
+  Term goal_lhs = (Term)data[1 + 2 * n_ax + 0];
+  Term goal_rhs = (Term)data[1 + 2 * n_ax + 1];
+  thvm_atp_set_goal(atp, goal_lhs, goal_rhs);
+
+  AtpStatus st = thvm_atp_run(atp);
+
+  // Allocate a generous text buffer.  Each trace entry is roughly
+  // ~200 bytes for the worst case (~50 nodes per term * 4 chars).
+  // ATP_MAX_TRACE = 1024 entries -> ~200 KB upper bound.  Use 256
+  // KB to leave headroom.  WL takes ownership and disowns.
+  size_t cap = 256 * 1024;
+  char *buf = (char *)malloc(cap);
+  if (buf == NULL) {
+    thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  int header_w = snprintf(buf, cap,
+      "META status=%d n_rules=%u n_trace=%u n_cps=%u\n",
+      (int)st, atp->n_rules, atp->n_trace, atp->n_cps);
+  if (header_w < 0 || (size_t)header_w >= cap) {
+    free(buf); thvm_atp_free(atp);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  u32 trace_w = thvm_atp_trace_serialize(atp, buf + header_w,
+                                          (u32)(cap - (size_t)header_w - 1));
+  buf[(size_t)header_w + trace_w] = '\0';
+
+  thvm_atp_free(atp);
+
+  // WL takes ownership; will call libData->UTF8String_disown on free.
+  MArgument_setUTF8String(res, buf);
+  return LIBRARY_NO_ERROR;
+}
+
 // === 9.1c: multi-witness ATP runner ================================
 //
 // Saturates first (no goal set, so no early exit on goal_check),

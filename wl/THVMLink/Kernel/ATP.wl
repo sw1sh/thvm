@@ -30,6 +30,10 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the IC-native ATP and returns a TProofObject mimicking the shape and access interface of the built-in FindEquationalProof[conjecture, axioms]'s ProofObject.  Properties (use string-key lookup p[\"Variables\"], etc.): Logic, Axioms, Variables, Constants, Theorems, ProofLength, ProofDataset, ProofGraph.  ProofDataset entries are keyed by {Axiom|Hypothesis|SubstitutionLemma|Conclusion, k} with Statement and Proof sub-fields.  Returns $Failed if the prover times out or queue empties without proving.  Custom head TProofObject avoids WL's ProofObject auto-dispatch back to FindEquationalProof.";
+
+TProofObject::usage = "TProofObject[<|properties|>] is a wrapper for thvm's ATP proofs that mirrors the property-lookup interface of WL's built-in ProofObject head -- e.g. p[\"ProofDataset\"], p[\"Properties\"].  Returned by TFindEquationalProof.";
+
 Begin["`Private`"];
 
 (* === LibraryLink loaders ============================================ *)
@@ -56,6 +60,12 @@ $atpRunAllFn     := $atpRunAllFn     = load["thvm_wl_atp_run_all_witnesses", {{"
    parses it via wald_parse_file, runs the saturator, and returns
    a 4-element [status, n_rules, n_trace, n_cps] NumericArray. *)
 $atpRunFileFn    := $atpRunFileFn    = load["thvm_wl_atp_run_file", {"UTF8String", Integer}, "NumericArray"];
+
+(* TFindEquationalProof: runs ATP and returns a UTF8String containing
+   the run summary header line followed by the serialized trace
+   (PCL-shaped from atp_trace_serialize).  WL parses the lines into
+   structured ProofObject entries. *)
+$atpRunTracedFn  := $atpRunTracedFn  = load["thvm_wl_atp_run_traced", {{"NumericArray", "Shared"}, Integer, Integer}, "UTF8String"];
 
 (* 8.7c: CTR-builder for the ATP expression encoder.  Takes a
    label and a NumericArray of child Term values; returns the
@@ -329,6 +339,330 @@ TATP[axioms_, conjecture_,
     ],
     "TATPError"
   ]
+
+(* === TFindEquationalProof: ProofObject scaffold ====================== *)
+
+(* Reverse a label->name map keyed by name into id->name map. *)
+reverseEncoderState[state_Association] := <|
+    "label_to_sym" -> Association[Reverse /@ Normal[state["sym"]]],
+    "id_to_var"    -> Association[Reverse /@ Normal[state["var"]]]
+|>
+
+(* Parse a single trace line of the form
+     "<idx> (<type>[<rest>]): lhs = rhs"
+   where <type> in {axiom, orient, cp} and <rest> is "" / " from N" /
+   " from N, M".  Returns Association with Index, Type, Parents, Lhs, Rhs.
+   Lhs/Rhs are returned as raw text fragments to be reified later. *)
+parseTraceLine[line_String] := Module[
+    {toks, idx, type, parents, lhs, rhs},
+    toks = StringCases[line,
+        RegularExpression["^(\\d+) \\((axiom|orient|cp)( from (\\d+)(, (\\d+))?)?\\): (.+) = (.+)$"] :>
+            {"$1", "$2", "$4", "$6", "$7", "$8"}];
+    If[ Length[toks] == 0, Return[Missing["UnparseableTraceLine"]]];
+    toks = First[toks];
+    idx = ToExpression[toks[[1]]];
+    type = toks[[2]];
+    parents = Cases[ToExpression /@ {toks[[3]], toks[[4]]}, _Integer];
+    lhs = toks[[5]];
+    rhs = toks[[6]];
+    <|"Index" -> idx, "Type" -> type, "Parents" -> parents,
+      "Lhs" -> lhs, "Rhs" -> rhs|>
+]
+
+(* Parse the term-pretty-printer text "Cn", "Cn(args)", "x_n" back to a
+   WL expression using the reverse-encoder lookup. *)
+ClearAll[parsePrettyTerm];
+parsePrettyTerm[text_String, rev_Association] :=
+  parsePrettyTermAt[text, 1, rev][[1]]
+
+(* Returns {expr, next_position}. *)
+parsePrettyTermAt[text_String, pos_Integer, rev_Association] := Module[
+    {p = pos, ch, name, idx, args, headSym, varName},
+    ch = StringTake[text, {p, p}];
+    If[ ch == "x" && StringLength[text] >= p + 1 && StringTake[text, {p+1, p+1}] == "_",
+        (* x_<digits> -- free variable *)
+        Module[{q = p + 2, digits = ""},
+            While[q <= StringLength[text] && DigitQ[StringTake[text, {q, q}]],
+                digits = digits <> StringTake[text, {q, q}];
+                q++];
+            idx = ToExpression[digits];
+            varName = Lookup[rev["id_to_var"], idx, "x" <> ToString[idx]];
+            {Pattern[Symbol[varName], Blank[]], q}
+        ],
+        If[ ch == "C",
+            (* Cn or Cn(args) *)
+            Module[{q = p + 1, digits = ""},
+                While[q <= StringLength[text] && DigitQ[StringTake[text, {q, q}]],
+                    digits = digits <> StringTake[text, {q, q}];
+                    q++];
+                idx = ToExpression[digits];
+                name = Lookup[rev["label_to_sym"], idx, "C" <> ToString[idx]];
+                headSym = Symbol[name];
+                If[ q <= StringLength[text] && StringTake[text, {q, q}] == "(",
+                    (* Has args -- parse comma-separated children. *)
+                    q = q + 1;
+                    args = {};
+                    While[True,
+                        Module[{r},
+                            r = parsePrettyTermAt[text, q, rev];
+                            AppendTo[args, r[[1]]];
+                            q = r[[2]];
+                            If[ q <= StringLength[text] && StringTake[text, {q, q}] == ",",
+                                q = q + 1;
+                                If[ q <= StringLength[text] && StringTake[text, {q, q}] == " ", q = q + 1],
+                                Break[]
+                            ]
+                        ]
+                    ];
+                    If[ q <= StringLength[text] && StringTake[text, {q, q}] == ")", q = q + 1];
+                    {headSym @@ args, q}
+                    ,
+                    (* Nullary *)
+                    {headSym, q}
+                ]
+            ],
+            (* Unknown leading character; just consume until comma/paren. *)
+            Module[{q = p, frag = ""},
+                While[q <= StringLength[text] &&
+                      StringFreeQ[StringTake[text, {q, q}], "," | ")"],
+                    frag = frag <> StringTake[text, {q, q}];
+                    q++];
+                {Symbol[StringTrim[frag]], q}
+            ]
+        ]
+    ]
+]
+
+(* Use the System` symbols ProofObject's keys are built from, so
+   our ProofDataset matches the FindEquationalProof shape exactly. *)
+$AxiomSym             = System`Axiom;
+$HypothesisSym        = System`Hypothesis;
+$SubstitutionLemmaSym = System`SubstitutionLemma;
+$ConclusionSym        = System`Conclusion;
+
+(* Build the proof association expected by ProofObject's metadata
+   slot: <|{Axiom, k} -> <|Statement, Proof|>, ...|>.  Walks the
+   parsed trace, mapping:
+     TRACE_AXIOM   -> {Axiom, k}              (no Proof input)
+     TRACE_ORIENT  -> skipped (axiom orientation; folded into Axiom)
+     TRACE_CP      -> {SubstitutionLemma, k}  (with Input/Construct)
+   Last CP -> {Conclusion, 1} (the closing tautology)
+   Plus a {Hypothesis, 1} for the original conjecture. *)
+buildProofDataset[traceRecords_List, conjecture_, rev_Association] := Module[
+    {axCount = 0, lemmaCount = 0, traceIdxToKey = <||>,
+     entries = <||>, conclusionKey},
+    Do[
+        Module[{rec = traceRecords[[i]], lhs, rhs, key},
+            lhs = parsePrettyTerm[rec["Lhs"], rev];
+            rhs = parsePrettyTerm[rec["Rhs"], rev];
+            Switch[rec["Type"],
+                "axiom",
+                    axCount += 1;
+                    key = {$AxiomSym, axCount};
+                    entries[key] = <|"Statement" -> Equal[lhs, rhs],
+                                     "Proof"     -> <||>|>;
+                    traceIdxToKey[rec["Index"]] = key,
+                "orient",
+                    (* Orient is the KBO-oriented form of an axiom.
+                       Surface as a SubstitutionLemma so the ProofDataset
+                       captures the directional rewrite the saturation
+                       used. *)
+                    lemmaCount += 1;
+                    key = {$SubstitutionLemmaSym, lemmaCount};
+                    entries[key] = <|
+                        "Statement" -> Equal[lhs, rhs],
+                        "Proof" -> <|
+                            "Input" -> If[Length[rec["Parents"]] >= 1,
+                                Lookup[traceIdxToKey, rec["Parents"][[1]], None],
+                                None],
+                            "Position"        -> {},
+                            "Orientation"     -> 1,
+                            "Source"          -> "orient"
+                        |>
+                    |>;
+                    traceIdxToKey[rec["Index"]] = key,
+                "cp",
+                    lemmaCount += 1;
+                    key = {$SubstitutionLemmaSym, lemmaCount};
+                    entries[key] = <|
+                        "Statement" -> Equal[lhs, rhs],
+                        "Proof" -> <|
+                            "Input" -> If[Length[rec["Parents"]] >= 1,
+                                Lookup[traceIdxToKey, rec["Parents"][[1]], None],
+                                None],
+                            "Construct" -> If[Length[rec["Parents"]] >= 2,
+                                Lookup[traceIdxToKey, rec["Parents"][[2]], None],
+                                None],
+                            "Position"        -> {},
+                            "Orientation"     -> 1,
+                            "ConstructSide"   -> 1,
+                            "InputOrientation"-> 1,
+                            "Side"            -> 1,
+                            "Source"          -> "cp"
+                        |>
+                    |>;
+                    traceIdxToKey[rec["Index"]] = key
+            ]
+        ],
+        {i, Length[traceRecords]}
+    ];
+    (* Insert Hypothesis after axioms, before lemmas. *)
+    entries[{$HypothesisSym, 1}] = <|"Statement" -> Equal @@ conjecture,
+                                      "Proof"     -> <||>|>;
+    (* Promote last SubstitutionLemma to Conclusion. *)
+    If[ lemmaCount > 0,
+        conclusionKey = {$SubstitutionLemmaSym, lemmaCount};
+        entries[{$ConclusionSym, 1}] = entries[conclusionKey];
+        KeyDropFrom[entries, conclusionKey]
+    ];
+    (* Re-order: Axioms first, then Hypothesis, then SubstitutionLemmas, then Conclusion. *)
+    KeySort[entries, OrderedQ[{$ProofKeyOrder[#1], $ProofKeyOrder[#2]}] &]
+]
+
+$ProofKeyOrder[{System`Axiom,             k_}] := {1, k}
+$ProofKeyOrder[{System`Hypothesis,        k_}] := {2, k}
+$ProofKeyOrder[{System`SubstitutionLemma, k_}] := {3, k}
+$ProofKeyOrder[{System`Conclusion,        k_}] := {4, k}
+$ProofKeyOrder[_]                              := {5, 0}
+
+(* Build a Graph showing derivation flow.  Edges go from Input/Construct
+   parents to derived SubstitutionLemma/Conclusion. *)
+buildProofGraph[dataset_Association] := Module[{edges = {}},
+    Do[
+        Module[{key = entry[[1]], proof = entry[[2]]["Proof"]},
+            If[ AssociationQ[proof] && KeyExistsQ[proof, "Input"],
+                AppendTo[edges, proof["Input"] -> key]];
+            If[ AssociationQ[proof] && KeyExistsQ[proof, "Construct"],
+                AppendTo[edges, proof["Construct"] -> key]]
+        ],
+        {entry, Normal[dataset]}
+    ];
+    Graph[Keys[dataset], edges, VertexLabels -> Automatic]
+]
+
+(* TProofObject access: p["prop"] returns the field; p["Properties"]
+   returns the list of keys; UpValues mirror ProofObject's interface. *)
+TProofObject /: (po_TProofObject)[prop_String] := Module[{data = po[[1]]},
+    Switch[prop,
+        "Properties", Append[Keys[data], "Properties"],
+        _, Lookup[data, prop, Missing["KeyAbsent", prop]]
+    ]
+]
+TProofObject /: (po_TProofObject)[All] := Normal[po[[1]]]
+TProofObject /: MakeBoxes[po : TProofObject[data_Association], fmt_] :=
+    BoxForm`ArrangeSummaryBox[
+        "TProofObject",
+        po,
+        None,
+        {{BoxForm`SummaryItem[{"Logic: ",       Lookup[data, "Logic"]}],
+          BoxForm`SummaryItem[{"Status: ",      Lookup[data, "Status", "?"]}]},
+         {BoxForm`SummaryItem[{"Conjecture: ",  Lookup[data, "Conjecture"]}]},
+         {BoxForm`SummaryItem[{"ProofLength: ", Lookup[data, "ProofLength"]}]}},
+        {{BoxForm`SummaryItem[{"Axioms: ",      Lookup[data, "Axioms"]}]},
+         {BoxForm`SummaryItem[{"Variables: ",   Lookup[data, "Variables"]}]},
+         {BoxForm`SummaryItem[{"Constants: ",   Lookup[data, "Constants"]}]}},
+        fmt
+    ]
+
+SetAttributes[TFindEquationalProof, HoldAll];
+TFindEquationalProof[conjecture_, axioms_,
+    OptionsPattern[{MaxSteps -> 64}]] :=
+  Catch[
+    Module[
+        {state, axTerms, ax, lhs, rhs, lhsRes, rhsRes, cj,
+         goalLhs, goalRhs, packed, maxLab, rawText, lines, header,
+         headerData, traceLines, records, rev, dataset, conjPair,
+         varNames, constNames},
+        ensureInit[];
+        state = encodeAtpTermInit[];
+        axTerms = {};
+        If[ Head[Unevaluated[axioms]] =!= List,
+            Throw[Failure["TATPParseError",
+                <|"Reason" -> "axioms must be a List"|>], "TATPError"]];
+        Do[
+            ax = Extract[Hold[axioms], {1, i}, HoldComplete];
+            If[ !MatchQ[ax, HoldComplete[Equal[_, _]]],
+                Throw[Failure["TATPParseError",
+                    <|"Axiom" -> i, "Reason" -> "expected `lhs == rhs`"|>],
+                    "TATPError"]];
+            lhs = Extract[ax, {1, 1}, HoldComplete];
+            rhs = Extract[ax, {1, 2}, HoldComplete];
+            lhsRes = encodeAtpTerm[lhs[[1]], state];
+            AppendTo[axTerms, lhsRes[[1]]];
+            state = lhsRes[[2]];
+            rhsRes = encodeAtpTerm[rhs[[1]], state];
+            AppendTo[axTerms, rhsRes[[1]]];
+            state = rhsRes[[2]],
+            {i, Length[Unevaluated[axioms]]}
+        ];
+        cj = Extract[Hold[conjecture], 1, HoldComplete];
+        If[ !MatchQ[cj, HoldComplete[Equal[_, _]]],
+            Throw[Failure["TATPParseError",
+                <|"Reason" -> "conjecture must be `lhs == rhs`"|>],
+                "TATPError"]];
+        lhsRes = encodeAtpTerm[Extract[cj, {1, 1}, HoldComplete][[1]], state];
+        goalLhs = lhsRes[[1]];
+        state = lhsRes[[2]];
+        rhsRes = encodeAtpTerm[Extract[cj, {1, 2}, HoldComplete][[1]], state];
+        goalRhs = rhsRes[[1]];
+        state = rhsRes[[2]];
+        conjPair = {Extract[cj, {1, 1}], Extract[cj, {1, 2}]};
+        packed = NumericArray[
+            Join[{Length[Unevaluated[axioms]]}, axTerms, {goalLhs, goalRhs}],
+            "Integer64"];
+        maxLab = state["next_lab"];
+
+        rawText = $atpRunTracedFn[packed, OptionValue[MaxSteps], maxLab];
+        If[ !StringQ[rawText],
+            Throw[Failure["TATPInternalError",
+                <|"Reason" -> "FFI returned non-string"|>], "TATPError"]];
+
+        lines = StringSplit[rawText, "\n"];
+        If[ Length[lines] == 0, Return[$Failed]];
+        header = First[lines];
+        traceLines = Select[Rest[lines], StringLength[#] > 0 &];
+
+        (* Parse "META status=N n_rules=N n_trace=N n_cps=N" *)
+        headerData = Association[
+            (StringSplit[#, "="] & /@
+                Select[StringSplit[StringDelete[header, "META "]],
+                       StringContainsQ[#, "="] &]) /.
+            {k_String, v_String} :> (k -> ToExpression[v])];
+
+        If[ headerData["status"] =!= 1,
+            Return[$Failed]];
+
+        rev = reverseEncoderState[state];
+        records = parseTraceLine /@ traceLines;
+        records = Select[records, AssociationQ];
+
+        dataset = buildProofDataset[records, conjPair, rev];
+
+        varNames = Symbol /@ Values[rev["id_to_var"]];
+        constNames = Complement[
+            Symbol /@ Values[rev["label_to_sym"]], varNames];
+
+        Module[{conclEq = Equal @@ conjPair,
+                axEq    = Equal @@@ Hold[axioms][[1]],
+                proofLen = Length[dataset]},
+            TProofObject[<|
+                "Logic"        -> "EquationalLogic",
+                "Conjecture"   -> conclEq,
+                "Axioms"       -> axEq,
+                "Variables"    -> varNames,
+                "Constants"    -> constNames,
+                "Theorems"     -> {conclEq},
+                "ProofLength"  -> proofLen,
+                "ProofDataset" -> dataset,
+                "ProofGraph"   -> buildProofGraph[dataset],
+                "RawTrace"     -> records,
+                "Status"       -> Lookup[$atpStatusName, headerData["status"], "UNKNOWN"],
+                "Steps"        -> Lookup[headerData, "n_trace", 0],
+                "Rules"        -> Lookup[headerData, "n_rules", 0]
+            |>]
+        ]
+    ],
+    "TATPError"]
 
 End[];
 EndPackage[];
