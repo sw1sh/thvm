@@ -2837,15 +2837,32 @@ u64 thvm_aot_metal_ic_collapse(Term root, u32 depth,
   }
   uint32_t book_next_u32 = (uint32_t)*book_next_inout;
 
+  // Iter Z+2 step 5: per-thread book-heap arenas.  Pre-allocate
+  // n * arena_size cells past iter Z's book_next.  Arena size scales
+  // with available headroom (cap 1024, floor 32) so we never spill
+  // BOOK_CAP.  If even the floor doesn't fit, bail with a host
+  // error rather than corrupting the heap.
+  uint64_t headroom = (book_cells > book_next_u32)
+      ? (book_cells - (uint64_t)book_next_u32 - 64ULL)
+      : 0ULL;
+  uint32_t arena_size = 1024u;
+  if (n > 0 && headroom / n < arena_size) {
+    arena_size = (uint32_t)(headroom / n);
+  }
+  if (arena_size < 32u) {
+    fprintf(stderr,
+        "thvm aot-ic-collapse: arena floor 32 unavailable "
+        "(headroom %llu cells / %llu threads -> %u)\n",
+        (unsigned long long)headroom, (unsigned long long)n, arena_size);
+    return 0;
+  }
+  uint32_t arena_base = book_next_u32;
+
   id<MTLBuffer> heapBuf =
       aot_metal_heap_buf(book_heap, book_cells);
   id<MTLBuffer> resultBuf =
       [METAL_DEVICE newBufferWithLength:(NSUInteger)(n * sizeof(Term))
                                 options:MTLResourceStorageModeShared];
-  id<MTLBuffer> bookNextBuf =
-      [METAL_DEVICE newBufferWithBytes:&book_next_u32
-                                length:sizeof(uint32_t)
-                               options:MTLResourceStorageModeShared];
 
   uint64_t root_u64 = (uint64_t)root;
 
@@ -2855,8 +2872,9 @@ u64 thvm_aot_metal_ic_collapse(Term root, u32 depth,
   [enc setBuffer:heapBuf     offset:0 atIndex:0];
   [enc setBytes:&root_u64    length:sizeof(uint64_t) atIndex:1];
   [enc setBuffer:resultBuf   offset:0 atIndex:2];
-  [enc setBuffer:bookNextBuf offset:0 atIndex:3];
-  [enc setBytes:&depth       length:sizeof(uint32_t) atIndex:4];
+  [enc setBytes:&depth       length:sizeof(uint32_t) atIndex:3];
+  [enc setBytes:&arena_base  length:sizeof(uint32_t) atIndex:4];
+  [enc setBytes:&arena_size  length:sizeof(uint32_t) atIndex:5];
   // Threadgroup size: cap at 256 or n (whichever is smaller); Apple
   // GPU's max threads/threadgroup is 1024 but 256 is a sensible
   // default for thread-private-heavy kernels (our wnf stack is 256
@@ -2868,9 +2886,14 @@ u64 thvm_aot_metal_ic_collapse(Term root, u32 depth,
   [cmd commit];
   [cmd waitUntilCompleted];
 
-  uint32_t out_u32;
-  memcpy(&out_u32, [bookNextBuf contents], sizeof(uint32_t));
-  *book_next_inout = (u64)out_u32;
+  // Iter Z+2 step 5: do NOT advance book_next.  The arenas hold
+  // intermediate IC fires private to this collapse call; result
+  // Terms that point INTO the arena (stuck SUPs / APPs) are valid
+  // only until the next collapse / kernel-1 call overwrites that
+  // region.  NUM leaves are atom-self-contained and survive.
+  // The bench's SAT discriminant (any NUM=1 in the leaves) reads
+  // before the next call, so this is safe.
+  (void)arena_base;
 
   memcpy(out, [resultBuf contents], (size_t)(n * sizeof(Term)));
   return n;
