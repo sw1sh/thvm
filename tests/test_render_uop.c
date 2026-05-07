@@ -7,6 +7,7 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include <dlfcn.h>
 
 static int contains(const char *haystack, const char *needle) {
   return strstr(haystack, needle) != NULL;
@@ -431,6 +432,45 @@ int main(void) {
     CHECK(rc == 0);
     unlink(path);
     unlink("/tmp/thvm_test_render_uop_c.o");
+  }
+
+  // F6 step 3: end-to-end clang compile + dlopen + invoke. Renders the
+  // C99 to a .dylib, dlopens it, calls the kernel function with real
+  // input/output pointers, verifies the output matches expected.
+  // Validates the FULL F6 path (render -> clang -> dl -> invoke).
+  TEST_BEGIN("render-uop-c/elementwise-add-runs-via-dlopen");
+  {
+    char src[4096];
+    fp = fmemopen(src, sizeof(src), "w");
+    cg_render_uop_kernel_c(st_c, "k", out, in_bufs, 2, fp);
+    fclose(fp);
+    const char *src_path = "/tmp/thvm_f6_step3.c";
+    const char *dl_path  = "/tmp/thvm_f6_step3.dylib";
+    FILE *cf = fopen(src_path, "w");
+    fputs(src, cf);
+    fclose(cf);
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+    CHECK(system(cmd) == 0);
+    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+    CHECK(h != NULL);
+    typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *);
+    KFn kfn = (KFn)dlsym(h, "k");
+    CHECK(kfn != NULL);
+    float a[32], b[32], y[32];
+    for (u32 i = 0; i < 32; i++) {
+      a[i] = (float)i;
+      b[i] = 100.0f - (float)i;
+    }
+    const void *ins[2] = { a, b };
+    unsigned numels[2] = { 32, 32 };
+    kfn(y, ins, 32, numels);
+    // Each y[i] = a[i] + b[i] = i + (100 - i) = 100.
+    for (u32 i = 0; i < 32; i++) CHECK(y[i] == 100.0f);
+    dlclose(h);
+    unlink(src_path);
+    unlink(dl_path);
   }
 
   thvm_free();
