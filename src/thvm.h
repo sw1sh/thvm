@@ -2292,6 +2292,18 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
                                Term out_buf, Term const *in_bufs,
                                u32 n_inputs, FILE *fp);
 
+// Phase C slice 3: structural-mode entry points.  Discover the
+// kernel's buffer slots from the DAG itself via UOP_BUFFER.instance
+// (kernel_lift.c sets instance=0 on the output and instance=slot+1
+// on input slot k).  Production callers (cg_emit_via_uop, cpu_jit
+// _build) pass ke->compute_root / ke->cached_lift.store_root
+// directly; no out_buf/in_bufs[] tuple needed.  Output is bit-equal
+// with the legacy entry points when invoked on the same root.
+fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
+                                  FILE *fp);
+fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
+                                    FILE *fp);
+
 // === Per-USE movement-chain resolver ===
 // Strip UOP_PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/FLIP layers from `src`,
 // outside-in, transforming `iters[ndim_io]` to the iter context the
