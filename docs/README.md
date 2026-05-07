@@ -25,10 +25,11 @@ If you are new to the project, read these in order:
    DUP routing, higher-order, materialization integration, and
    `TProfile` for spotting allocation leaks.
 8. [cpu.md](cpu.md): the CPU backend (`src/backend/cpu/`) and the
-   backend-agnostic codegen pipeline (`src/codegen/`).  Walks the
+   codegen pipeline (`src/codegen/`).  Walks the
    `cpu_dispatch_kernel` order (BLAS, optional tile path, JITs,
-   interpreters), the `propose -> apply_opt -> render_c` chain, and
-   the JIT cache key.
+   interpreters), the `propose -> apply_opt` chain, and the JIT
+   cache key.  (Doc has a 2026-05-08 status banner: render_c.c is
+   gone; CPU JIT compiles through `cg_render_uop_kernel_c`.)
 
 ## What's not here yet
 

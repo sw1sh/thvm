@@ -1,9 +1,11 @@
 # Metal backend - embedding strategy
 
 See [cpu.md](cpu.md) for the codegen pipeline this backend shares
-with the CPU JIT (`cg_emit_metal` lives next to `cg_emit`); the
-section "Comparison with Metal" there cites the dispatch
-asymmetry between `metal_dispatch_kernel` and `cpu_dispatch_kernel`.
+with the CPU JIT.  Both backends now route through the same
+UOp-DAG renderer: `cg_render_uop_kernel` (MSL) and
+`cg_render_uop_kernel_c` (C99).  The former cg_emit + Renderer
+abstraction was deleted in F6 (2026-05-08, see
+[plans/ideal_pipeline.md](plans/ideal_pipeline.md)).
 
 ## TL;DR
 
