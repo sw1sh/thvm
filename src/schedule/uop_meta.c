@@ -9,8 +9,16 @@
 
 fn u8 uop_arity(u8 op) {
   switch (op) {
+    // Atoms whose heap holds only NUM cells (or nothing): zero
+    // recursable Term children.
     case UOP_CONST:
+    case UOP_RANGE:    // heap = [NUM(axis_id), NUM(axis_type), NUM(extent)]
+    case UOP_INVALID:  // heap = [NUM(0)] sentinel
       return 0;
+    // UOP_OPT carries [target, NUM(kind), NUM(factor)]; only the
+    // target slot is a recursable Term child.
+    case UOP_OPT:
+      return 1;
     case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2: case UOP_SQRT:
     case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
@@ -20,7 +28,22 @@ fn u8 uop_arity(u8 op) {
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_ASSIGN:
+    // Symbolic-INDEX layer integer ALU + INDEX_E.  Heap = [a, b]
+    // for the IX_* ops, [buffer, addr] for INDEX_E.  Both slots are
+    // recursable Term children that the rewriter must descend into
+    // to reach UOP_RANGE leaves nested inside production lifter
+    // output (UOP_INDEX_E.addr -> IADD/IMUL chain -> UOP_RANGE).
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_INDEX_E:
       return 2;
+    // Ternary symbolic ops.  IWHERE = [cond, then, else];
+    // STORE = [buf, addr, value].  All three slots are Term
+    // children; covering them lets the rewriter walk from the
+    // STORE root all the way down to UOP_RANGE leaves.
+    case UOP_IWHERE:
+    case UOP_STORE:
+      return 3;
     default:
       return 0;
   }

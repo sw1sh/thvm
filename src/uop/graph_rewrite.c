@@ -225,6 +225,48 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
       return uop_bitcast(srcs[0], dtype);
     }
 
+    // === Symbolic INDEX layer ===
+    // Production lifter output nests UOP_RANGE leaves inside
+    // UOP_INDEX_E.addr (a tree of UOP_IADD/IMUL/...).  Without
+    // these rebuild cases, uop_pattern_rewrite couldn't descend
+    // into address arithmetic to reach the UOP_RANGE leaves an
+    // axis_type-stamping rule needs to rewrite.
+
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+      return uop_int_binary(op, srcs[0], srcs[1]);
+
+    case UOP_IWHERE:
+      return uop_iwhere(srcs[0], srcs[1], srcs[2]);
+
+    case UOP_INDEX_E:
+      return uop_index_e(srcs[0], srcs[1]);
+
+    // UOP_RANGE has arity 0; the canonical-reconstruct path is
+    // unreachable in practice (no children means changed=0), but
+    // wiring it through uop_range hash-cons keeps the rebuild
+    // total over every opcode the rewriter visits.
+    case UOP_RANGE: {
+      u32 axis_id   = (u32)term_val(heap_read(loc + 0));
+      u32 axis_type = (u32)term_val(heap_read(loc + 1));
+      u32 extent    = (u32)term_val(heap_read(loc + 2));
+      return uop_range(axis_id, axis_type, extent);
+    }
+
+    // UOP_INVALID is a singleton via the mov-cache.  Reuse the
+    // canonical constructor; rebuild is identity in practice.
+    case UOP_INVALID:
+      return uop_invalid();
+
+    case UOP_OPT: {
+      u32 kind   = (u32)term_val(heap_read(loc + 1));
+      u32 factor = (u32)term_val(heap_read(loc + 2));
+      return uop_opt(srcs[0], kind, factor);
+    }
+
+    case UOP_STORE:
+      return uop_store(srcs[0], srcs[1], srcs[2]);
+
     default:
       return t;
   }
