@@ -2386,6 +2386,40 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_metal_run_n(
   return LIBRARY_NO_ERROR;
 }
 
+// === Iter Z+2 step 4: generic per-def runner =============================
+//
+// Dispatches the static aot_ic_def_run PSO with the def's book root
+// Term as a constant.  No per-def MSL emit / xcrun roundtrip.
+//
+// Args (mint Integer):
+//   args[0] : def_id (looks up DEFS[def_id] for the book root)
+//   args[1] : MTensor of args (Integer, 1d) -- caller args as Term raws
+// Returns: Integer Term (the WHNF result, dyn-migrated unless KEEP_BOOK).
+
+extern Term thvm_aot_metal_ic_def_run(Term root, Term *args, u32 n_args,
+    Term *book_heap, u64 book_cells, u64 *book_next_inout);
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_metal_ic_def_run(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  u32 def_id = (u32)MArgument_getInteger(args[0]);
+  if (def_id >= DEFS_CAP || DEFS[def_id] == 0) return LIBRARY_FUNCTION_ERROR;
+  Term root = DEFS[def_id];
+  MTensor t = MArgument_getMTensor(args[1]);
+  mint n = libData->MTensor_getFlattenedLength(t);
+  if (n < 0 || n > 64) return LIBRARY_FUNCTION_ERROR;
+  const mint *data = libData->MTensor_getIntegerData(t);
+  Term targs[64];
+  for (mint i = 0; i < n; i++) targs[i] = (Term)data[i];
+
+  u64 book_next_state = BOOK_NEXT;
+  Term result = thvm_aot_metal_ic_def_run(
+      root, targs, (u32)n, BOOK_HEAP, BOOK_CAP, &book_next_state);
+  BOOK_NEXT = book_next_state;
+  MArgument_setInteger(res, (mint)result);
+  return LIBRARY_NO_ERROR;
+}
+
 // === Iter Z+1: parallel cnf+collapse via aot_ic_collapse.metal ==========
 //
 // Walks the SUP-tree-rooted Term left in BOOK_HEAP by an iter-Z

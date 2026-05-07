@@ -250,11 +250,34 @@ aotMetalRunImpl[name_String, input_TTerm]   := aotMetalRunImpl[name, {input}]
 aotMetalRunImpl[name_String, input_Integer] := aotMetalRunImpl[name,
   {Symbol["THVMLink`TNum"][input]}]
 
-TAOTRun[name_String, args_, Method -> spec_] := Module[{head},
+(* Iter Z+2 step 4: generic per-def runner via the static aot_ic_def_run
+   PSO.  No per-def MSL emit / xcrun roundtrip -- one PSO across all
+   defs.  Used when Method spec is {"Metal", "Generic" -> True} or as
+   the iter Z fallback when the per-def emit would be too large to
+   compile (the threshold is set at the WL surface for now). *)
+$aotMetalIcDefRunFn := $aotMetalIcDefRunFn = load[
+    "thvm_wl_aot_metal_ic_def_run",
+    {Integer, {Integer, 1}}, Integer];
+
+aotMetalIcDefRunImpl[name_String, args_List] := Module[{raws},
+  raws = toRawArg /@ args;
+  Symbol["THVMLink`TTerm"][
+    $aotMetalIcDefRunFn[Symbol["THVMLink`TDefName"][name],
+        Developer`ToPackedArray[raws, Integer]]]
+]
+aotMetalIcDefRunImpl[name_String, input_TTerm]   := aotMetalIcDefRunImpl[name, {input}]
+aotMetalIcDefRunImpl[name_String, input_Integer] := aotMetalIcDefRunImpl[name,
+  {Symbol["THVMLink`TNum"][input]}]
+
+TAOTRun[name_String, args_, Method -> spec_] := Module[{head, opts},
   ensureInit[];
   head = Switch[spec, _String, spec, {_String, ___}, First[spec], _, None];
+  opts = Switch[spec, {_String, ___}, Rest[spec], _, {}];
   Switch[head,
-    "Metal", aotMetalRunImpl[name, args],
+    "Metal",
+      If[ MemberQ[opts, "Generic" -> True],
+          aotMetalIcDefRunImpl[name, args],
+          aotMetalRunImpl[name, args]],
     "CPU",   aotCpuRunImpl[name, args, spec],
     _,       Message[TAOTRun::method, spec]; $Failed
   ]
