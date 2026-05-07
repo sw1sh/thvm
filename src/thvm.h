@@ -2359,11 +2359,11 @@ typedef enum {
   KDISPATCH_BLAS_GEMM   = 3,
   KDISPATCH_JIT         = 4,   // CPU JIT (clang -shared)
   KDISPATCH_INTERPRETER = 5,   // CPU interpreter
-  KDISPATCH_METAL_JIT   = 6,   // Metal: cg_emit_metal -> MTLLibrary -> single-encoder dispatch
+  KDISPATCH_METAL_JIT   = 6,   // [retired in 88f536c3 -- metal_jit_encode deleted]
   KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (one encoder per KProgOp)
   KDISPATCH_CPU_TILE    = 8,   // CPU TileUop path over ScalarUop
-  KDISPATCH_METAL_TILE  = 9,   // Metal: TileUop MSL source -> threadgroup dispatch
-  KDISPATCH_METAL_GEMM  = 10,  // Metal: direct f32 matmul over unexpanded inputs
+  KDISPATCH_METAL_TILE  = 9,   // Metal: render_uop UOp-DAG -> MSL -> single-encoder dispatch
+  KDISPATCH_METAL_GEMM  = 10,  // [retired in 4e30432b -- metal_try_gemm deleted]
   // 11 was KDISPATCH_METAL_CONV (retired; metal_try_conv2d_flat was a
   // diagnostic-only branch gated on THVM_METAL_SPECIALIZED, deleted in
   // 97d58c32 -- conv shapes now route through render_uop's generic

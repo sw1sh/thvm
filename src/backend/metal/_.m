@@ -1305,12 +1305,7 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
       [cmd_i waitUntilCompleted];
       double gpu_seconds = cmd_i.GPUEndTime - cmd_i.GPUStartTime;
       u64 gpu_us = gpu_seconds > 0.0 ? (u64)(gpu_seconds * 1e6) : 0;
-      u32 dispatch_kind = cg_kernel_dispatch_kind(ops[i].kid);
-      cg_profile_record(ops[i].kid,
-                        dispatch_kind == KDISPATCH_METAL_JIT
-                            ? KDISPATCH_METAL_JIT
-                            : KDISPATCH_METAL_TILE,
-                        gpu_us);
+      cg_profile_record(ops[i].kid, KDISPATCH_METAL_TILE, gpu_us);
     }
     if (trace) {
       fprintf(stderr, "thvm: metal_graph replay perop n=%u\n", n_ops);
@@ -1337,12 +1332,7 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
   u64 elapsed = cg_now_us() - t0;
   u64 per = n_ops == 0 ? elapsed : elapsed / n_ops;
   for (u32 i = 0; i < n_ops; i++) {
-    u32 dispatch_kind = cg_kernel_dispatch_kind(ops[i].kid);
-    cg_profile_record(ops[i].kid,
-                      dispatch_kind == KDISPATCH_METAL_JIT
-                          ? KDISPATCH_METAL_JIT
-                          : KDISPATCH_METAL_TILE,
-                      per);
+    cg_profile_record(ops[i].kid, KDISPATCH_METAL_TILE, per);
   }
   return 0;
 }
