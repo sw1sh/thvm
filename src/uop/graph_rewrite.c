@@ -59,18 +59,6 @@ fn u32 uop_graph_rewrite_stats_len(void) {
   return UOP_GRAPH_REWRITE_STATS_LEN;
 }
 
-fn char const *uop_graph_rewrite_stat_name(u32 i) {
-  return i < UOP_GRAPH_REWRITE_STATS_LEN
-       ? UOP_GRAPH_REWRITE_STATS[i].name
-       : "";
-}
-
-fn u32 uop_graph_rewrite_stat_hits_at(u32 i) {
-  return i < UOP_GRAPH_REWRITE_STATS_LEN
-       ? UOP_GRAPH_REWRITE_STATS[i].hits
-       : 0;
-}
-
 fn u32 uop_graph_rewrite_stat_hits(char const *name) {
   if (name == NULL) {
     return 0;

@@ -1509,8 +1509,6 @@ fn u32  bufferize_consumer_count(Term uop_term);
 fn u32  bufferize_reasons(Term uop_term);
 fn void bufferize_rewrite_stats_clear(void);
 fn u32  bufferize_rewrite_stats_len(void);
-fn char const *bufferize_rewrite_stat_name(u32 i);
-fn u32  bufferize_rewrite_stat_hits_at(u32 i);
 fn u32  bufferize_rewrite_stat_hits(char const *name);
 
 // === bufferize schedule IR ===
@@ -1663,7 +1661,6 @@ fn int               bufferize_edge_summary(u64 consumer_loc, u64 source_loc,
 // "index-reshape hits=N" alongside the realize-rule stats.
 fn u32               bufferize_index_rule_count(void);
 fn char const       *bufferize_index_rule_name(u32 i);
-fn u32               bufferize_index_rule_hits_at(u32 i);
 fn u32               bufferize_index_rule_hits(char const *name);
 // Edge transform: number of identity reshape ops elided
 // from B_INDEX chains during the most recent realize_classify
@@ -2304,8 +2301,6 @@ fn Term uop_graph_rewrite(Term root,
                           void *user);
 fn void uop_graph_rewrite_stats_clear(void);
 fn u32  uop_graph_rewrite_stats_len(void);
-fn char const *uop_graph_rewrite_stat_name(u32 i);
-fn u32  uop_graph_rewrite_stat_hits_at(u32 i);
 fn u32  uop_graph_rewrite_stat_hits(char const *name);
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);

@@ -777,11 +777,6 @@ fn char const *bufferize_index_rule_name(u32 i) {
   return BUFFERIZE_INDEX_RULES[i].name;
 }
 
-fn u32 bufferize_index_rule_hits_at(u32 i) {
-  if (i >= bufferize_index_rule_count()) return 0;
-  return BUFFERIZE_INDEX_RULES[i].hits;
-}
-
 fn u32 bufferize_index_rule_hits(char const *name) {
   if (name == NULL) return 0;
   for (u32 i = 0; i < bufferize_index_rule_count(); i++) {

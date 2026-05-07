@@ -46,14 +46,6 @@ fn u32 bufferize_rewrite_stats_len(void) {
   return REALIZE_REWRITE_STATS_LEN;
 }
 
-fn char const *bufferize_rewrite_stat_name(u32 i) {
-  return i < REALIZE_REWRITE_STATS_LEN ? REALIZE_REWRITE_STATS[i].name : "";
-}
-
-fn u32 bufferize_rewrite_stat_hits_at(u32 i) {
-  return i < REALIZE_REWRITE_STATS_LEN ? REALIZE_REWRITE_STATS[i].hits : 0;
-}
-
 fn u32 bufferize_rewrite_stat_hits(char const *name) {
   if (name == NULL) return 0;
   for (u32 i = 0; i < REALIZE_REWRITE_STATS_LEN; i++) {
