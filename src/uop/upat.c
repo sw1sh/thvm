@@ -41,7 +41,15 @@ fn int upat_match(UPat const *pat, Term t, Term *bindings) {
   }
 
   u8 arity = uop_arity(t_op);
-  if (pat->nsrc != 0xFF && pat->nsrc != arity) return 0;
+  // When the pattern pinned the op (op != 0 or op_alt != NULL), trust
+  // the user's nsrc -- they know the heap layout and may want to match
+  // through opcodes that uop_arity() doesn't yet enumerate
+  // (UOP_INDEX_E / UOP_STORE / UOP_OPT / UOP_I* / UOP_IWHERE / etc).
+  // Otherwise (op == 0 AND op_alt == NULL), a fixed nsrc must match
+  // arity -- without that we'd accept e.g. UOP_NEG (arity 1) for a
+  // pattern that asked for "any op with 2 children".
+  int op_pinned = (pat->op != 0) || (pat->op_alt != NULL);
+  if (!op_pinned && pat->nsrc != 0xFF && pat->nsrc != arity) return 0;
 
   u64 loc = term_val(t);
 

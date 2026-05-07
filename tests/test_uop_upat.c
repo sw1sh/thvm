@@ -181,6 +181,36 @@ int main(void) {
   Term neg_chain[UPAT_NUM_BINDINGS] = {0};
   CHECK(!upat_match(&pat_pad_chain, sh, neg_chain));
 
+  // --- (6) explicit-nsrc through opcodes uop_arity() doesn't enumerate --
+  // UOP_INDEX_E (heap = [buffer, addr]) has arity 0 in the current
+  // uop_arity() table because it isn't in the switch.  Before the
+  // op_pinned relaxation, a UPat asking for nsrc=2 on UOP_INDEX_E
+  // got rejected by the arity gate even though the heap layout has
+  // exactly 2 Term children.  After the relaxation, when the user
+  // pinned the op (here UOP_INDEX_E), nsrc is trusted -- enabling
+  // depth-walks through the symbolic-INDEX layer needed by the F3
+  // matmul recognizer (REDUCE -> MUL -> INDEX_E -> BUFFER).
+  TEST_BEGIN("upat/index_e-explicit-nsrc-walks-children");
+  u32 buf_dims[2] = {4, 8};
+  Term buf_a = uop_buffer(/*scope=*/0, DT_FP32, 2, buf_dims);
+  // INDEX_E(buffer, addr); addr is just any Term -- a NUM stand-in.
+  Term zero  = term_new(0, TAG_NUM, DT_INT32, 0);
+  Term ie    = uop_index_e(buf_a, zero);
+
+  static UPat const ie_buf_pat  = {UOP_BUFFER, 0, 0, 0, NULL, NULL};
+  static UPat const ie_addr_pat = {0, 0xFF,    0, 1, NULL, NULL};
+  static UPat const ie_kids[2]  = {ie_buf_pat, ie_addr_pat};
+  static UPat const pat_index_e = {UOP_INDEX_E, 2, 0, -1, ie_kids, NULL};
+
+  Term bindings_ie[UPAT_NUM_BINDINGS] = {0};
+  CHECK(upat_match(&pat_index_e, ie, bindings_ie));
+  CHECK_EQ(bindings_ie[0], buf_a);
+  CHECK_EQ(bindings_ie[1], zero);
+
+  // Negative: same pattern shouldn't match a non-INDEX_E node.
+  Term ie_neg[UPAT_NUM_BINDINGS] = {0};
+  CHECK(!upat_match(&pat_index_e, buf_a, ie_neg));
+
   thvm_free();
   TEST_REPORT();
 }
