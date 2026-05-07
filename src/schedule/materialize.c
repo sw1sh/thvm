@@ -2348,6 +2348,50 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // the root.
   if (kernel_lift_to_uop(ke, &ke->cached_lift)) {
     ke->compute_root = ke->cached_lift.store_root;
+    // E9-prep wedge 1: post-lift UPatRule pass.  Composes the four
+    // E2/E3/E4-E6/E7 entries into one DAG walk that re-stamps every
+    // UOP_RANGE leaf's axis_type from applied_opts[].  In the default
+    // config the lifter has already stamped the same axis_types via
+    // its own structural replay (kernel_lift.c:1568-1633), so this
+    // pass observes desired[axis_id] == leaf.axis_type for every
+    // matched leaf and returns hash-cons-identical output.  That
+    // bit-equality validates the rules for everything the surgical
+    // suite exercises.
+    //
+    // THVM_E9_VALIDATE=1 routes through the diagnostic-fire-counter
+    // entry: any non-zero fire-count signals a divergence between
+    // the rules' simulation and the lifter's structural replay --
+    // a missing UPatRule that wedge 2+ has to land.  The check
+    // aborts loudly so divergence can't slip past CI.
+    if (ke->cached_lift.store_root && ke->axes != NULL
+        && ke->axes->n_applied > 0) {
+      char const *val_e = getenv("THVM_E9_VALIDATE");
+      if (val_e != NULL && val_e[0] == '1') {
+        u32 fires = 0;
+        Term post = uop_apply_kernel_opts_validate(
+            ke->cached_lift.store_root,
+            ke->axes->applied_opts,
+            ke->axes->n_applied,
+            &fires);
+        if (fires != 0) {
+          fprintf(stderr,
+                  "thvm: THVM_E9_VALIDATE detected lifter/rule divergence "
+                  "on kernel kid=%u (fires=%u, n_applied=%u). The unified "
+                  "UPatRule pass disagrees with kernel_lift's structural "
+                  "replay on axis_type stamping.\n",
+                  kid, fires, (u32)ke->axes->n_applied);
+          abort();
+        }
+        ke->cached_lift.store_root = post;
+        ke->compute_root           = post;
+      } else {
+        Term post = uop_apply_kernel_opts(ke->cached_lift.store_root,
+                                          ke->axes->applied_opts,
+                                          ke->axes->n_applied);
+        ke->cached_lift.store_root = post;
+        ke->compute_root           = post;
+      }
+    }
     // Phase C slice 7 -- single-write migration:
     // when the lift succeeds, the UOp DAG (cached_lift.store_root)
     // is the canonical kernel representation and `program[]` becomes
