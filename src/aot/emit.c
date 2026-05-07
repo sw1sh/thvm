@@ -87,13 +87,22 @@ static void aot_emit_str(AotEmit *e, const char *s) {
 }
 
 static void aot_emit_fmt(AotEmit *e, const char *fmt, ...) {
-  va_list ap;
+  // Two-pass: vsnprintf with NULL/0 returns the formatted length so
+  // we can allocate exactly.  Avoids the silent truncation that the
+  // earlier 1024-byte stack buffer caused on large preambles (e.g.,
+  // the AOT-Metal IC interaction inlines that exceed 1 KB).
+  va_list ap, ap2;
   va_start(ap, fmt);
-  char tmp[1024];
-  int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+  va_copy(ap2, ap);
+  int n = vsnprintf(NULL, 0, fmt, ap);
   va_end(ap);
-  if (n < 0) return;
+  if (n < 0) { va_end(ap2); return; }
+  char *tmp = (char *)malloc((size_t)n + 1);
+  if (tmp == NULL) { va_end(ap2); return; }
+  vsnprintf(tmp, (size_t)n + 1, fmt, ap2);
+  va_end(ap2);
   aot_emit_str(e, tmp);
+  free(tmp);
 }
 
 // === Codegen primitives ==============================================
