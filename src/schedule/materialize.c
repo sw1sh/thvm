@@ -1884,7 +1884,7 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   // REDUCE -- as the kernel root (tail-fuse) or as an intermediate
   // op whose result is consumed elementwise (broadcast) by later
   // program ops.  The "at most one REDUCE per kernel" invariant
-  // (used by cg_emit's reduce-tail / reduce-broadcast modes and by
+  // (used by render_uop's reduce-tail accumulator hoist and by
   // cpu_op_reduce's per-output indexing) is enforced by counting
   // REDUCEs already in the program.
   if (op == UOP_REDUCE) {

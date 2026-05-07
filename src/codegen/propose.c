@@ -30,7 +30,7 @@
 
 // Reduce-axis size for a tail-REDUCE kernel, or 0 if not reduce-tail
 // (or if shape inference fails).  Mirrors the same calc that
-// axes_default_for / cg_emit do.
+// axes_default_for + render_uop's accumulator hoist do.
 static u32 propose_kprog_reduce_axis_size(KernelEntry const *ke) {
   if (ke->n_ops == 0) return 0;
   KProgOp const *rd = &ke->program[ke->n_ops - 1];

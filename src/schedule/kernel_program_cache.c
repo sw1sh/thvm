@@ -30,7 +30,7 @@ struct KpCacheSlot {
                              // hits this slot points at &axes through
                              // KernelEntry.axes (Phase 16: per-
                              // program-shape opt sharing).  Mutated
-                             // by axes_apply_opt; read by cg_emit and
+                             // by axes_apply_opt; read by autotune /
                              // cpu_jit_hash so the same opt automatically
                              // applies to every kernel with this
                              // program shape.
