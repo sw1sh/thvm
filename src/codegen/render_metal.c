@@ -31,18 +31,6 @@ static int rmt_collect_conv2d_info(KernelEntry const *ke,
   return out->threads > 0 && out->threads <= 256;
 }
 
-static int rmt_kprog_has_opcode(KernelEntry const *ke, u8 opcode) {
-  if (ke == NULL || ke->program == NULL) {
-    return 0;
-  }
-  for (u32 i = 0; i < ke->n_ops; i++) {
-    if (ke->program[i].opcode == opcode) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
 int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
                                  u32 *threads_x) {
   if (ke == NULL) return 0;
