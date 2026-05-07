@@ -783,6 +783,139 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   return 1;
 }
 
+// Recognise the canonical conv2d-flat shape:
+//   STORE(C, addr_C, OPT(REDUCE(MUL(INDEX_E(W, _), X_VAL), SUM,
+//                              k_axis), CONV, _))
+// where X_VAL is INDEX_E(X, _) (single-input conv) or a UOP_IWHERE
+// chain (multi-input im2col).  The OPT wrapper is installed by
+// uop_recognise_conv when it spots IDIV/IMOD in either INDEX_E
+// address tree (the structural marker for decomposed conv axes).
+// Detection is structural; if it matches, returns 1 and fills
+// `*out_red_value` with the inner REDUCE term so the caller can
+// emit through the conv template.
+static int rmu_detect_conv(Term store, Term *out_red_value) {
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  Term value = heap_read(term_val(store) + 2);
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_OPT) return 0;
+  if (uop_opt_kind(value) != UOP_OPT_CONV) return 0;
+  Term inner = uop_opt_target(value);
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_REDUCE) return 0;
+  u64 rloc = term_val(inner);
+  u32 kind = term_val(heap_read(rloc + 1));
+  if (kind != REDUCE_SUM) return 0;
+  Term mul = heap_read(rloc + 0);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  if (out_red_value != NULL) *out_red_value = inner;
+  return 1;
+}
+
+// Conv2d-flat template.  Emits the same loop nest as the generic
+// rmu_emit_store_reduce path -- output for-loop over r_out, scalar
+// accumulator over r_q -- with two perf-oriented additions:
+//
+//   1. `#pragma unroll` on the inner reduce loop so the compiler can
+//      unroll the (typically small: 9 for 3x3x1, 27 for 3x3x3) KRED
+//      iterations into straight-line MUL+ADDs.  Tinygrad's CONV
+//      template does the same.
+//   2. A `/* CONV2D template */` marker comment so dispatch traces
+//      can confirm which path fired.
+//
+// The decision to emit `#pragma unroll` versus stay on the generic
+// path is gated on KRED <= RMU_CONV_UNROLL_MAX so we don't blow up
+// the generated body size on huge KREDs (very deep convs).
+//
+// Returns 1 on success; 0 if the shape can't be emitted through this
+// template and the caller should fall back to the generic accumulator.
+#define RMU_CONV_UNROLL_MAX 64u
+static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  if (term_tag(conv_red) != TAG_UOP || term_ext(conv_red) != UOP_REDUCE) return 0;
+  u64 sloc = term_val(store);
+  Term buf  = heap_read(sloc + 0);
+  Term addr = heap_read(sloc + 1);
+  u64 rloc = term_val(conv_red);
+  Term red_src  = heap_read(rloc + 0);
+  u32  red_kind = term_val(heap_read(rloc + 1));
+  u32  red_axis = term_val(heap_read(rloc + 2));
+
+  // Collect ranges from addr + red_src; split into output vs reduce.
+  Term ranges[MAX_DIM];
+  u32  opt_kinds[MAX_DIM]   = {0};
+  u32  opt_factors[MAX_DIM] = {0};
+  u32  n_ranges = 0;
+  rmu_collect_ranges_with_opts(addr,    ranges, opt_kinds, opt_factors, &n_ranges);
+  rmu_collect_ranges_with_opts(red_src, ranges, opt_kinds, opt_factors, &n_ranges);
+
+  Term out_ranges[MAX_DIM];
+  u32  out_kinds[MAX_DIM]   = {0};
+  u32  out_factors[MAX_DIM] = {0};
+  u32  n_out = 0;
+  u32 reduce_idx = rmu_split_reduce(ranges, opt_kinds, opt_factors,
+                                    n_ranges, red_axis,
+                                    out_ranges, out_kinds, out_factors, &n_out);
+  if (reduce_idx == n_ranges) {
+    // No reduce range in the body -- conv with degenerate K=0; bail.
+    return 0;
+  }
+  Term red_range = ranges[reduce_idx];
+  u32 red_extent = (term_tag(red_range) == TAG_UOP
+                    && term_ext(red_range) == UOP_RANGE)
+                 ? (u32)term_val(heap_read(term_val(red_range) + 2)) : 0;
+  if (red_extent == 0) return 0;
+
+  // Marker for dispatch tracing.
+  for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+  fprintf(fp, "/* CONV2D template (KRED=%u) */\n", red_extent);
+
+  // Emit output ranges (outer loops); identical to the generic
+  // accumulator path's prelude.
+  u32 body_depth = depth;
+  int needs_close[MAX_DIM] = {0};
+  for (u32 i = 0; i < n_out; i++) {
+    Term r = out_ranges[i];
+    u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
+                  ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
+    int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type);
+    rmu_emit_range_open(r, fp, body_depth, out_kinds[i]);
+    if (!threadbound) {
+      needs_close[i] = 1;
+      body_depth++;
+    }
+  }
+  // Accumulator decl; reduce-axis loop with #pragma unroll when KRED
+  // is small.  Skip the pragma on the C target -- C99 has no
+  // #pragma unroll; clang accepts `#pragma clang loop unroll(full)`
+  // but we prefer not to gate per-target inside this helper.
+  char acc_name[32];
+  snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "float %s = ", acc_name);
+  rmu_emit_reduce_init(red_kind, fp);
+  fputs(";\n", fp);
+  if (!RMU_TARGET_C && red_extent <= RMU_CONV_UNROLL_MAX) {
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fprintf(fp, "#pragma unroll(%u)\n", red_extent);
+  }
+  rmu_emit_range_open(red_range, fp, body_depth, RMU_NO_OPT);
+  for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
+  rmu_emit_reduce_combine(acc_name, red_kind, red_src, fp);
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fputs("}\n", fp);
+  // Final store.
+  for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+  fprintf(fp, "%s[", rmu_buf_name(buf));
+  rmu_emit_term(addr, fp);
+  fprintf(fp, "] = %s;\n", acc_name);
+  // Close output loops.
+  for (i32 i = (i32)n_out - 1; i >= 0; i--) {
+    if (!needs_close[i]) continue;
+    body_depth--;
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
+  return 1;
+}
+
 // REDUCE-shaped emission: STORE(buf, addr, REDUCE(src, kind, axis)).
 // Hoists an accumulator outside the reduce-axis loop and references it
 // in the store statement.  Returns 1 if the shape matched and was
@@ -792,6 +925,11 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
 // matches the matmul pattern, dispatches to the F2b simdgroup_matrix
 // template; falls back to the generic accumulator path when tile sizes
 // don't fit (e.g. K extent not divisible by 8).
+//
+// When the value is wrapped in OPT(REDUCE(...), CONV, _), dispatches
+// to the F4 conv2d-flat template (rmu_emit_conv).  Falls back to the
+// generic accumulator path when the conv shape doesn't yield the
+// expected output+reduce range pair.
 static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   u64 sloc = term_val(store);
@@ -805,6 +943,16 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
     fputs("/* TC tile mismatch: falling back to scalar accumulator */\n", fp);
     value = tc_red;
+  }
+  // F4: dispatch to conv2d template when CONV-annotated.  Falls back
+  // to the generic accumulator path when the conv body lacks the
+  // expected output+reduce range split.
+  Term conv_red = 0;
+  if (rmu_detect_conv(store, &conv_red)) {
+    if (rmu_emit_conv(store, conv_red, fp, depth)) return 1;
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("/* CONV shape mismatch: falling back to scalar accumulator */\n", fp);
+    value = conv_red;
   }
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
   Term buf  = heap_read(sloc + 0);

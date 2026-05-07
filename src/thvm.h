@@ -400,6 +400,7 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_OPT_TC            2   // tensor core (T.gemm / T.wgmma_gemm)
 #define UOP_OPT_LOCAL         3   // bind to thread position
 #define UOP_OPT_GROUP_REDUCE  4
+#define UOP_OPT_CONV          5   // conv2d_flat output kernel template
 #define UOP_OPT          39  // heap = [target, NUM(kind), NUM(factor)];
                              //   Annotation node attaching an optimisation
                              //   directive to `target`.  factor=0 when the
@@ -2166,6 +2167,21 @@ fn Term uop_recognise_tc(Term root);
 // wrap with UOP_OPT(_, TC) so render_uop's simdgroup_matrix template
 // fires (when K%8==0) versus falling back to its generic accumulator.
 fn int uop_classify_matmul(Term root, u32 *out_k_extent);
+
+// Recognise the conv2d_flat shape on a UOP_STORE root and wrap the
+// inner REDUCE with UOP_OPT(_, CONV, 0) so render_uop's conv template
+// fires. Returns the input root unchanged on any non-match.
+// See src/uop/recognise_conv.c for the exact pattern.
+fn Term uop_recognise_conv(Term root);
+
+// Detection-only: returns 1 if `root` is a conv2d_flat-shape STORE
+// (REDUCE-of-MUL with W*X structure where at least one INDEX_E address
+// contains UOP_IDIV / UOP_IMOD, signalling decomposed conv axes).
+// Fills *out_kred with the reduce-axis extent if statically known
+// (zero otherwise). The CONV template currently always emits the
+// generic accumulator path so kred isn't load-bearing yet -- present
+// for symmetry with uop_classify_matmul + future tile-size gates.
+fn int uop_classify_conv2d(Term root, u32 *out_kred);
 
 // === Kernel lift to UOp DAG ===
 // Translate a fully-scheduled kernel's ScalarUop arena to a UOp DAG

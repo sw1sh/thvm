@@ -90,6 +90,34 @@ static u32 rec_tc_count_distinct_ranges(Term t, u32 *seen, u32 cap,
   }
 }
 
+// Walk `t` looking for UOP_IDIV / UOP_IMOD nodes.  These are the
+// structural marker that distinguishes the kernel_lift conv2d_flat
+// shape from a clean matmul: conv compresses (co, bi, oh, ow) into
+// a single r_out via IDIV/IMOD decomposition, so its W and X
+// addresses contain those nodes.  A clean matmul `m*K+k` / `k*N+n`
+// never produces them.  Used by both the matmul classifier (to
+// reject conv shapes) and the conv classifier (in recognise_conv.c)
+// to distinguish.  Bounded depth so a misshapen DAG can't run away.
+static int rec_tc_addr_has_divmod(Term t, int depth) {
+  if (depth > 32) return 0;
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_IDIV || op == UOP_IMOD) return 1;
+  u64 loc = term_val(t);
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
+    case UOP_ILT:  case UOP_IAND:
+      if (rec_tc_addr_has_divmod(heap_read(loc + 0), depth + 1)) return 1;
+      return rec_tc_addr_has_divmod(heap_read(loc + 1), depth + 1);
+    case UOP_IWHERE:
+      if (rec_tc_addr_has_divmod(heap_read(loc + 0), depth + 1)) return 1;
+      if (rec_tc_addr_has_divmod(heap_read(loc + 1), depth + 1)) return 1;
+      return rec_tc_addr_has_divmod(heap_read(loc + 2), depth + 1);
+    default:
+      return 0;
+  }
+}
+
 // Walk `t` looking for a UOP_RANGE leaf whose axis_id matches the
 // requested value; returns its extent if found, 0 otherwise. Local
 // duplicate of render_uop's rmu_collect_ranges -- rmu_collect_ranges
@@ -170,6 +198,17 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent) {
   u32 n_a = rec_tc_count_distinct_ranges(addr_a, seen_a, 8, 0, 0);
   u32 n_b = rec_tc_count_distinct_ranges(addr_b, seen_b, 8, 0, 0);
   if (n_a != 2 || n_b != 2) return 0;
+
+  // F4: the kernel_lift conv2d_flat shape compresses (co, bi, oh, ow)
+  // into a single r_out via IDIV/IMOD, so its W and X addresses also
+  // reference exactly 2 distinct ranges (r_out, r_q) and would slip
+  // past the n_a==2/n_b==2 gate above.  Distinguish by checking for
+  // IDIV/IMOD presence in either address tree -- a clean matmul
+  // `m*K+k` / `k*N+n` never produces those.  uop_recognise_conv
+  // installs the CONV opt wrapper for this shape; here we just
+  // reject so the TC wrapper doesn't also fire.
+  if (rec_tc_addr_has_divmod(addr_a, 0)) return 0;
+  if (rec_tc_addr_has_divmod(addr_b, 0)) return 0;
 
   u32 ka = rec_tc_find_range_extent(addr_a, red_axis, 0);
   if (ka == 0) ka = rec_tc_find_range_extent(addr_b, red_axis, 0);

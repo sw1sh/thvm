@@ -53,6 +53,7 @@ TESTS := \
   $(BIN)/test_uop_store_after \
   $(BIN)/test_uop_opt \
   $(BIN)/test_uop_recognise_tc \
+  $(BIN)/test_uop_recognise_conv \
   $(BIN)/test_render_uop \
   $(BIN)/test_render_uop_metal \
   $(BIN)/test_kernel_lift \
