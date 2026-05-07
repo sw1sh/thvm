@@ -51,31 +51,88 @@ static UPat const rec_tc_store_kids[3] = {
 };
 static UPat const rec_tc_store = { UOP_STORE,   3,    0, -1, rec_tc_store_kids, NULL };
 
-// Wrap the STORE root's value with UOP_OPT(_, TC, 0) when the matmul
-// shape matches. Returns the input root unchanged on any non-match.
-fn Term uop_recognise_tc(Term root) {
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return root;
+// Walk `t` looking for a UOP_RANGE leaf whose axis_id matches the
+// requested value; returns its extent if found, 0 otherwise. Local
+// duplicate of render_uop's rmu_collect_ranges -- rmu_collect_ranges
+// is static-in-render_uop.c so we can't call it from here in the
+// unity build (recognise_tc.c is compiled before the codegen layer).
+static u32 rec_tc_find_range_extent(Term t, u32 want_axis_id, int depth) {
+  if (depth > 32) return 0;
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    u32 axis_id = (u32)term_val(heap_read(loc + 0));
+    if (axis_id != want_axis_id) return 0;
+    return (u32)term_val(heap_read(loc + 2));
+  }
+  // Recurse through known-arity-Term opcodes used in INDEX expressions.
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: {
+      u32 e = rec_tc_find_range_extent(heap_read(loc + 0), want_axis_id, depth + 1);
+      if (e != 0) return e;
+      return rec_tc_find_range_extent(heap_read(loc + 1), want_axis_id, depth + 1);
+    }
+    case UOP_IWHERE: {
+      u32 e = rec_tc_find_range_extent(heap_read(loc + 0), want_axis_id, depth + 1);
+      if (e != 0) return e;
+      e = rec_tc_find_range_extent(heap_read(loc + 1), want_axis_id, depth + 1);
+      if (e != 0) return e;
+      return rec_tc_find_range_extent(heap_read(loc + 2), want_axis_id, depth + 1);
+    }
+    default:
+      return 0;
+  }
+}
+
+// Detection helper: returns 1 if `root` is a matmul-shape STORE
+// (REDUCE-of-MUL on two distinct INDEX_E buffers, SUM kind). When 1,
+// `*out_k_extent` carries the reduce-axis extent if statically known
+// (looked up from the UOP_RANGE leaf with axis_id == REDUCE.axis);
+// 0 means the reduce axis didn't resolve to a clean RANGE leaf in
+// the address expression. Caller decides what to do with it.
+fn int uop_classify_matmul(Term root, u32 *out_k_extent) {
+  if (out_k_extent != NULL) *out_k_extent = 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
 
   Term bindings[UPAT_NUM_BINDINGS] = {0};
-  if (!upat_match(&rec_tc_store, root, bindings)) return root;
+  if (!upat_match(&rec_tc_store, root, bindings)) return 0;
 
-  // Distinctness gate: matmul requires two different source buffers.
-  // Bindings 0/2 are the A_buf / B_buf BUFFER terms.
   Term buf_a = bindings[0];
   Term buf_b = bindings[2];
-  if (buf_a == 0 || buf_b == 0 || buf_a == buf_b) return root;
+  if (buf_a == 0 || buf_b == 0 || buf_a == buf_b) return 0;
 
-  // SUM-only: render_uop's rmu_detect_matmul_tc rejects MAX so we
-  // also gate here to avoid annotating a useless wrap.
   u64 sloc = term_val(root);
   Term reduce = heap_read(sloc + 2);
   u64 rloc = term_val(reduce);
   u32 kind = (u32)term_val(heap_read(rloc + 1));
-  if (kind != REDUCE_SUM) return root;
+  if (kind != REDUCE_SUM) return 0;
+  u32 red_axis = (u32)term_val(heap_read(rloc + 2));
+
+  // Walk the MUL's INDEX_E address expressions for a UOP_RANGE leaf
+  // whose axis_id matches red_axis; its extent is K.  Mirrors
+  // rmu_emit_matmul_tc's K-extent lookup so callers see the same
+  // value the renderer will see.
+  Term mul    = heap_read(rloc + 0);
+  Term addr_a = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
+  Term addr_b = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
+  u32 ka = rec_tc_find_range_extent(addr_a, red_axis, 0);
+  if (ka == 0) ka = rec_tc_find_range_extent(addr_b, red_axis, 0);
+  if (out_k_extent != NULL) *out_k_extent = ka;
+  return 1;
+}
+
+// Wrap the STORE root's value with UOP_OPT(_, TC, 0) when the matmul
+// shape matches. Returns the input root unchanged on any non-match.
+fn Term uop_recognise_tc(Term root) {
+  if (!uop_classify_matmul(root, NULL)) return root;
 
   // Rebuild: STORE(buf_out, addr_out, OPT(reduce, TC, 0)).
+  u64 sloc = term_val(root);
   Term buf_out  = heap_read(sloc + 0);
   Term addr_out = heap_read(sloc + 1);
+  Term reduce   = heap_read(sloc + 2);
   Term tc       = uop_opt(reduce, UOP_OPT_TC, 0);
   return uop_store(buf_out, addr_out, tc);
 }
