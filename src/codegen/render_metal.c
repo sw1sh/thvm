@@ -1,13 +1,4 @@
 
-int cg_supports_metal_reduce_expr(KernelEntry const *ke) {
-  // Legacy reduce-expr renderer is gone; cg_emit_metal forwards to
-  // cg_emit_tile_metal, which handles every shape via the UOp DAG.
-  // Returning 0 keeps the dispatch ladder skipping the dead
-  // metal_jit_encode branch.
-  (void)ke;
-  return 0;
-}
-
 // Bridge for tests: render an arbitrary KernelEntry to MSL and return
 // the source.  Lets the WL-side test grid sanity-check that the same
 // KProgOp[] emits valid Metal source -- proves the Renderer

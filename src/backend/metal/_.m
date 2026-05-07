@@ -2105,27 +2105,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     return 0;
   }
 
-  if (!tile_supported && cg_supports_metal_reduce_expr(ke)) {
-    __unsafe_unretained id<MTLBuffer> raw_src_bufs[ke->n_inputs ? ke->n_inputs : 1];
-    int raw_ok = 1;
-    for (u32 i = 0; i < ke->n_inputs; i++) {
-      u32 ib = in_buf_ids[i];
-      if (ib == 0 || ib >= METAL_BUFS_NEXT || METAL_BUFS[ib].buf == nil) {
-        raw_ok = 0;
-        break;
-      }
-      raw_src_bufs[i] = METAL_BUFS[ib].buf;
-    }
-    if (raw_ok) {
-      id<MTLCommandBuffer> jit_cmd = metal_command_buffer();
-      if (metal_jit_encode(ke, raw_src_bufs, outBuf, jit_cmd)) {
-        metal_submit_if_standalone(jit_cmd);
-        cg_profile_record(kid, KDISPATCH_METAL_JIT, cg_now_us() - t0);
-        return 0;
-      }
-    }
-  }
-
   // View-aware pre-materialize (the Metal counterpart to
   // cpu_interpret's strided pre-mat loop).  For each input whose
   // TenDesc carries a non-contiguous View, allocate a temp Metal

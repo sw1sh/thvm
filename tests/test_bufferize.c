@@ -1359,7 +1359,6 @@ int main(void) {
   // render_c_scalar.c which was deleted; corresponding bail
   // checks dropped.)
   CHECK_EQ(cg_supports(&KERNELS[mco_kid]), 0);
-  CHECK_EQ(cg_supports_metal_reduce_expr(&KERNELS[mco_kid]), 0);
   CHECK(cg_emit_metal(&KERNELS[mco_kid]) == NULL);
   CHECK(cg_emit_tile_metal(&KERNELS[mco_kid]) == NULL);
   // CPU interpreter (path 6 in cpu_dispatch_kernel) is the ONE
