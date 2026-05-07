@@ -2125,6 +2125,18 @@ fn u32  uop_range_axis_type(Term r);
 fn u32  uop_range_extent   (Term r);
 fn Term uop_range_with_axis_type(Term r, u32 new_axis_type);
 
+// === Phase E2: KOP_GLOBAL UPatRule mirror (src/uop/apply_opt.c) ===
+// Walks the DAG rooted at `root` and stamps any UOP_RANGE leaf whose
+// axis_id matches a KOP_GLOBAL entry in `applied_opts` (with arg ==
+// extent and current axis_type == KAX_LOOP) to a fresh UOP_RANGE with
+// axis_type=KAX_GLOBAL.  Mirrors codegen/apply_opt.c's KernelAxes
+// write + kernel_lift.c's structural-replay stamp; both representations
+// stay live during the E* wedge sequence.  Idempotent: re-running the
+// rule on a previously-stamped DAG is a no-op (the LOOP guard rejects
+// KAX_GLOBAL leaves).  See docs/plans/ideal_pipeline.md row E.
+fn Term uop_apply_kop_global(Term root, KOpt const *applied_opts,
+                             u32 n_applied);
+
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
