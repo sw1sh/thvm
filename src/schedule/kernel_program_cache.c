@@ -163,8 +163,8 @@ fn KpCacheSlot *kernel_program_cache_lookup_slot(KProgOp const *prog,
   return NULL;
 }
 
-// Slot-bearing insert: same as kernel_program_cache_insert but
-// returns the slot pointer (so caller can grab &slot->axes).
+// Slot-bearing insert: returns the slot pointer (so caller can
+// grab &slot->axes).
 fn KpCacheSlot *kernel_program_cache_insert_slot(KProgOp const *prog, u32 n_ops) {
   if (n_ops == 0) return NULL;
   u64 key = kp_program_hash(prog, n_ops);
@@ -187,34 +187,6 @@ fn KpCacheSlot *kernel_program_cache_insert_slot(KProgOp const *prog, u32 n_ops)
     }
   }
   return NULL;
-}
-
-// Insert: copies the program bytes into a tight cache-owned
-// buffer (so we don't depend on the caller's potentially-
-// oversized realloc'd buffer).  Returns the cache pointer; the
-// caller frees its own buffer and adopts the cache pointer with
-// program_shared=1.  No-op + returns NULL if the cache is full.
-fn KProgOp *kernel_program_cache_insert(KProgOp const *prog, u32 n_ops) {
-  if (n_ops == 0) return NULL;
-  u64 key = kp_program_hash(prog, n_ops);
-  u32 mask = KP_CACHE_CAP - 1;
-  u32 h = (u32)(key ^ (key >> 32));
-  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
-  for (u32 probe = 0; probe < KP_CACHE_CAP; probe++) {
-    u32 i = (h + probe) & mask;
-    KpCacheSlot *s = &KP_CACHE[i];
-    if (s->key == 0) {
-      KProgOp *owned = (KProgOp *)malloc((size_t)n_ops * sizeof(KProgOp));
-      memcpy(owned, prog, (size_t)n_ops * sizeof(KProgOp));
-      s->key = key;
-      s->program = owned;
-      s->n_ops = n_ops;
-      return owned;
-    }
-    // (Hash collisions: we only insert on empty slots; a duplicate
-    //  hash that doesn't match equality will just probe past.)
-  }
-  return NULL;   // full -- caller keeps its own buffer
 }
 
 static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
