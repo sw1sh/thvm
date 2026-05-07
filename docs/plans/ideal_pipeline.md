@@ -19,6 +19,42 @@ b226b7d9 refactor(metal): delete dead metal_try_cpu_small_add (F5)
 fc9e71bd refactor(metal): delete dead cg_supports_metal_reduce_expr (G0)
 ```
 
+## Investigation update (2026-05-07 late)
+
+A focused attempt to land BOTH bug fixes (lifter view.strides +
+simdgroup `if (sgi==0u && tg==0u)` guard) was reverted after the
+matmul parity test still failed 254/256 with both in place. Probing
+`out[tid] = (float)(tid + 1)` confirmed the kernel dispatches and
+writes; probing `out[i] = in0[i]` for i in [0,8) returned all `-2`,
+matching `A[0,0] = -2` repeated rather than `A[0,0..7]`.
+
+Conclusion: the schedule **materialises** the EXPAND view into an
+actual 4096-element buffer (16x16x16) where rows of A are repeated.
+The matmul kernel's `in0` is the materialised buffer, not the
+underlying 256-element A. So:
+
+  - The lifter's row-major dim-product addressing
+    (`stride[d] = product(dims[d+1..])` -> `m*256+k*16+n`) is
+    actually CORRECT for the materialised input.
+  - View.strides on this input would be `[256, 16, 1]` (contiguous
+    3D), giving the same result.
+  - The "view shows broadcast (stride=0)" hypothesis was wrong --
+    the schedule already collapsed it.
+
+So bug #1 is more subtle than the original framing. The actual
+mystery: with the materialised buffer, why does the test fail at
+all under the `tg=0 && sgi=0` simdgroup guard with NAIVE scalar
+matmul? The naive scalar matmul over `(a0*16) + a2` addresses
+should produce correct output values regardless of what
+in0/in1 actually contain (they're treated as flat float arrays).
+Yet the values come back wrong.
+
+This needs deeper investigation than a single iteration can
+support. The campaign's wedges are correctness-safe (conservative
+state passes 530/530); resuming the simdgroup-path widening
+requires understanding the schedule's materialisation behaviour
+first.
+
 ## Two layered correctness bugs discovered (2026-05-07)
 
 When the test suite's M=N=K=16 matmul parity test (`ae9d0aa0`) was
