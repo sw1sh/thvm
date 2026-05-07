@@ -1,0 +1,35 @@
+# Level 64: conv2d kid 1's full program (THVM_DUMP_KID_PROGRAM_ALL=1).
+#
+# kid 1: metal-op  wall=1281us  n_inputs=24  n_ops=71
+#
+# Op pattern: [3, 6] + 23 × [3, 6, 9]
+#   3 = UOP_RESHAPE
+#   6 = UOP_PAD
+#   9 = UOP_ADD
+#
+# Decoded: SUM-OF-SHIFTED-PADS conv implementation.
+# - 5x5 = 25 patch positions.
+# - Each iteration: RESHAPE input slice -> PAD with appropriate offsets ->
+#   ADD into running accumulator.
+# - 24 input slots = 24 distinct (kh,kw) shift positions (1 used as init).
+#
+# Per-op numels:
+#   RESHAPE: 18432  (= 32*24*24, the conv output total)
+#   PAD:    460800  (= 25*18432, padded to maximum patch extent)
+#   ADD:    460800  (running accumulator at padded extent)
+#
+# Total work: 71 ops × ~7M FLOPS each = ~500M FLOPS for the conv prep
+# alone, on top of the matmul.  Kid 3 matmul is M=32 N=576 K=800 =
+# ~14.7M FLOPS.  So conv-prep is ~33x more work than the matmul itself,
+# yet only takes 5x the wall time -- the metal-op fallback is
+# memory-bandwidth-bound, not compute-bound.
+#
+# Tinygrad's approach: a single strided View on the input that
+# broadcasts across (kh, kw) axes, with matmul reading via stride
+# pattern.  No 71-op explosion -- the work is implicit in the matmul's
+# stride-aware load.
+#
+# Level 65 fix shape: replace SUM-OF-SHIFTED-PADS with strided-View +
+# matmul at the bufferize/materialize layer.  The conv UOP DAG could
+# be rewritten to produce kid 3's matmul reading a 6D im2col View
+# directly; kid 1 disappears.

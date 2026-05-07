@@ -1,0 +1,24 @@
+# Level 62: conv2d kernel breakdown post-L58.
+#
+# Conv2d {32 ch, 28x28} input + {32, 32, 5, 5} weights -> {32, 24, 24}.
+# Output: M=32, N=576 (=24x24), K=800 (=32*5*5) when im2col'd.
+#
+# Per-kid:
+#   kid 1: metal-op   wall=1281us  the heavy one (actual conv emit /
+#                     im2col-style memory traversal; no REDUCE)
+#   kid 2: metal-op   wall= 214us  bias-add (no REDUCE)
+#   kid 3: metal-gemm wall= 253us  M=32 N=576 K=800 = ~14.7M flops
+#                                  (post-im2col implicit matmul; passes
+#                                  tile_analyze_gemm thanks to L54)
+#   kid 4: metal-tile wall= 373us  output reshape + activation
+#
+# Total: kid 1 alone is 60% of conv2d wall.  metal-op dispatch is the
+# generic per-op fallback (slower than tile-jit / metal-gemm).  Tinygrad
+# emits conv as a direct strided matmul (no separate im2col kernel),
+# which is why their conv2d is 1.29x faster on this shape (1604us vs
+# thvm 2062us best).
+#
+# Closing the conv2d gap requires either:
+#  (a) lower conv2d to im2col-of-views + matmul earlier so the heavy
+#      kid 1 disappears entirely (the matmul absorbs its work), OR
+#  (b) write a specialized conv shader for the metal-op path.

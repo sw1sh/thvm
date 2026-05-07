@@ -143,6 +143,44 @@ int main(void) {
   Term leaf_check[UPAT_NUM_BINDINGS] = {0};
   CHECK(!upat_match(&pat_alu, a, leaf_check));
 
+  // --- (5) nested 3-level pattern: PAD(RESHAPE(SHRINK(?inner))) --
+  // Building block for the conv2d SUM-OF-SHIFTED-PADS detector
+  // (Level 65/66): the conv UOp DAG produces a Fold of these
+  // patches.  Movement ops have arity 1 (their dimension args live
+  // in heap slots beyond the source); upat_match traverses only
+  // arity children, so a 3-level nested UPat structurally walks
+  // the chain without any dim inspection.
+  TEST_BEGIN("upat/nested-pad-reshape-shrink");
+  Shape s2d = {0}; s2d.ndim = 2; s2d.dims[0] = 4; s2d.dims[1] = 4;
+  u32 ti = tensor_alloc(CURRENT_BACKEND, s2d, DT_FP32);
+  Term inner = term_new(0, TAG_TEN, DT_FP32, ti);
+  // SHRINK 4x4 -> 2x2 (begin/end pairs per axis).
+  u32 shrink_be[4] = {1, 3, 1, 3};
+  Term sh = uop_shrink(inner, 2, shrink_be);
+  // RESHAPE 2x2 -> 1x4.
+  u32 rshape[2] = {1, 4};
+  Term rs = uop_reshape(sh, 2, rshape);
+  // PAD 1x4 -> 3x4 (1 row before, 1 after).
+  u32 pad_be[4] = {1, 1, 0, 0};
+  Term pd = uop_pad(rs, 2, pad_be);
+
+  // 3-level nested UPat: PAD(RESHAPE(SHRINK(?0))).
+  static UPat const wild_in     = {0, 0xFF, 0, 0, NULL, NULL};
+  static UPat const shrink_kids[1] = {wild_in};
+  static UPat const pat_shrink = {UOP_SHRINK, 1, 0, -1, shrink_kids, NULL};
+  static UPat const reshape_kids[1] = {pat_shrink};
+  static UPat const pat_reshape = {UOP_RESHAPE, 1, 0, -1, reshape_kids, NULL};
+  static UPat const pad_kids[1] = {pat_reshape};
+  static UPat const pat_pad_chain = {UOP_PAD, 1, 0, -1, pad_kids, NULL};
+
+  Term bindings_chain[UPAT_NUM_BINDINGS] = {0};
+  CHECK(upat_match(&pat_pad_chain, pd, bindings_chain));
+  CHECK_EQ(bindings_chain[0], inner);
+
+  // Negative: a bare SHRINK should not match the full chain.
+  Term neg_chain[UPAT_NUM_BINDINGS] = {0};
+  CHECK(!upat_match(&pat_pad_chain, sh, neg_chain));
+
   thvm_free();
   TEST_REPORT();
 }

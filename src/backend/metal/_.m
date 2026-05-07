@@ -2043,13 +2043,18 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // program shape so the matmul-shape relaxation in tile_analyze_gemm
   // can target the right pattern.  Level 50.
   {
-    char const *_e = getenv("THVM_DUMP_KID_PROGRAM");
-    if (_e != NULL && _e[0] == '1' && ke != NULL && ke->program != NULL) {
+    char const *_e   = getenv("THVM_DUMP_KID_PROGRAM");
+    char const *_eall = getenv("THVM_DUMP_KID_PROGRAM_ALL");
+    int _dump = (_e != NULL && _e[0] == '1');
+    int _all  = (_eall != NULL && _eall[0] == '1');
+    if ((_dump || _all) && ke != NULL && ke->program != NULL) {
       int has_reduce = 0;
       for (u32 i = 0; i < ke->n_ops; i++) {
         if (ke->program[i].opcode == UOP_REDUCE) { has_reduce = 1; break; }
       }
-      if (has_reduce) {
+      // _all bypasses the REDUCE filter so non-REDUCE kernels (e.g.
+      // conv-prep kid 1) get dumped for cross-shape investigation.
+      if (has_reduce || _all) {
         fprintf(stderr, "  dispatch-kid kid=%u n_inputs=%u n_ops=%u ops=[",
                 kid, ke->n_inputs, ke->n_ops);
         for (u32 i = 0; i < ke->n_ops; i++) {
@@ -2869,6 +2874,124 @@ u64 thvm_aot_metal_ic_collapse(Term root, u32 depth,
 
   memcpy(out, [resultBuf contents], (size_t)(n * sizeof(Term)));
   return n;
+}
+
+// === Iter Z+2 step 4: generic per-def runner ============================
+//
+// Replaces the per-def emit + xcrun metallib roundtrip (which produced
+// ~10K-line shaders for V>=4 Church-bool formulas) with a single static
+// shader that takes the def's book root Term as a constant.  One PSO
+// across all defs; no per-def MSL compile.
+//
+// Caller passes the def's book-heap root term (DEFS[def_id]) plus an
+// args array; the kernel builds APP(...root, args[0]..args[n-1])
+// chain in book heap and runs wnf to WHNF.
+
+static id<MTLComputePipelineState> AOT_IC_DEF_RUN_PSO = nil;
+
+static id<MTLComputePipelineState> aot_ic_def_run_pso(void) {
+  if (AOT_IC_DEF_RUN_PSO != nil) return AOT_IC_DEF_RUN_PSO;
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) {
+    if (metal_init() != 0) return nil;
+  }
+  NSError *err = nil;
+  NSURL *libURL = [NSURL fileURLWithPath:
+      [NSString stringWithUTF8String:THVM_METAL_METALLIB]];
+  id<MTLLibrary> lib =
+      [METAL_DEVICE newLibraryWithURL:libURL error:&err];
+  if (lib == nil) {
+    fprintf(stderr, "thvm aot-ic-def-run: load %s failed: %s\n",
+            THVM_METAL_METALLIB,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  id<MTLFunction> mtlFn =
+      [lib newFunctionWithName:@"aot_ic_def_run"];
+  if (mtlFn == nil) {
+    fprintf(stderr, "thvm aot-ic-def-run: function 'aot_ic_def_run' missing\n");
+    return nil;
+  }
+  AOT_IC_DEF_RUN_PSO =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  if (AOT_IC_DEF_RUN_PSO == nil) {
+    fprintf(stderr, "thvm aot-ic-def-run: pso failed: %s\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return nil;
+  }
+  return AOT_IC_DEF_RUN_PSO;
+}
+
+// Run a def via the generic IC shader.  root = DEFS[def_id] (book
+// term), args/n_args = caller-supplied arguments.  Returns the WHNF
+// term (BOOK_HEAP-rooted unless KEEP_BOOK is off, in which case the
+// caller migrates).  Single thread; same wnf state machine as iter Z's
+// per-def emit, just at the cost of a runtime APP-chain build instead
+// of compile-time inlining.
+Term thvm_aot_metal_ic_def_run(Term root,
+                                Term *args, u32 n_args,
+                                Term *book_heap, u64 book_cells,
+                                u64 *book_next_inout) {
+  id<MTLComputePipelineState> pso = aot_ic_def_run_pso();
+  if (pso == nil) return 0;
+
+  if (*book_next_inout >> 32) {
+    fprintf(stderr,
+        "thvm aot-ic-def-run: book_next %llu exceeds 32-bit GPU range\n",
+        (unsigned long long)*book_next_inout);
+    return 0;
+  }
+  uint32_t book_next_u32 = (uint32_t)*book_next_inout;
+
+  id<MTLBuffer> heapBuf =
+      aot_metal_heap_buf(book_heap, book_cells);
+  id<MTLBuffer> resultBuf =
+      [METAL_DEVICE newBufferWithLength:sizeof(Term)
+                                options:MTLResourceStorageModeShared];
+  id<MTLBuffer> bookNextBuf =
+      [METAL_DEVICE newBufferWithBytes:&book_next_u32
+                                length:sizeof(uint32_t)
+                               options:MTLResourceStorageModeShared];
+
+  uint64_t root_u64 = (uint64_t)root;
+
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:heapBuf     offset:0 atIndex:0];
+  // Args buffer (small; setBytes avoids alloc).
+  if (n_args > 0) {
+    [enc setBytes:args length:n_args * sizeof(Term) atIndex:1];
+  } else {
+    uint64_t placeholder = 0;
+    [enc setBytes:&placeholder length:sizeof(placeholder) atIndex:1];
+  }
+  [enc setBuffer:resultBuf   offset:0 atIndex:2];
+  [enc setBuffer:bookNextBuf offset:0 atIndex:3];
+  [enc setBytes:&root_u64    length:sizeof(uint64_t) atIndex:4];
+  [enc setBytes:&n_args      length:sizeof(uint32_t) atIndex:5];
+  [enc dispatchThreads:MTLSizeMake(1, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  Term result;
+  memcpy(&result, [resultBuf contents], sizeof(Term));
+  uint32_t out_u32;
+  memcpy(&out_u32, [bookNextBuf contents], sizeof(uint32_t));
+  *book_next_inout = (u64)out_u32;
+  // Migrate book->dyn unless KEEP_BOOK env is set (chain to iter Z+1
+  // collapse), mirroring the per-def wrapper's behavior.
+  extern Term thvm_aot_migrate_book_to_dyn(Term root);
+  uint8_t result_tag = (uint8_t)((result >> 56) & 0x7F);
+  const char *keep_env = getenv("THVM_AOT_METAL_KEEP_BOOK");
+  int keep_book = (keep_env != NULL && keep_env[0] == '1');
+  if (!keep_book &&
+      result_tag != 10 /* TAG_NUM */ && result_tag != 8 /* TAG_TEN */ &&
+      result_tag != 11 /* TAG_REF */ && result_tag != 3 /* TAG_ERA */) {
+    result = thvm_aot_migrate_book_to_dyn(result);
+  }
+  return result;
 }
 
 Backend METAL_BACKEND = {

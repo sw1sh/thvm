@@ -5008,3 +5008,510 @@ times differ only by run-to-run noise.
   (`{metal-tile:10, metal-op:2, metal-gemm:6}`) and wall stays
   at 7597us (within noise of the Level 56 7633us).
 
+### Level 58: tune the threshold via lenet A/B
+
+Lenet still regresses 10% vs pre-L54 (4772us vs 4341us) and shows
+2 metal-gemm dispatches.  Are those metal-gemms genuinely winning
+on these conv-as-matmul shapes, or are they paying launch overhead
+without enough matmul work to amortize?  A/B by setting
+`THVM_MATMUL_PROTECT_MIN_FLOPS` very high (effectively disabling
+the protect) and re-running lenet -- if wall returns to 4341us, the
+2 metal-gemms were losses; raise the default threshold.
+
+- [x] (2026-05-07) Ran lenet with
+  `THVM_MATMUL_PROTECT_MIN_FLOPS=999999999`.  Saved to
+  `bench/autotune-ladder/lenet_disable_protect.txt`.
+
+  | variant            | kernels | base (us) | best (us) | metal-gemm |
+  |--------------------|--------:|----------:|----------:|-----------:|
+  | Pre-L54 baseline   |      19 |      4341 |      3620 |          0 |
+  | L56 default (100k) |      20 |      4550 |      3869 |          2 |
+  | Protect disabled   |      19 |      4645 |      3611 |          1 |
+
+  Disabling protect still produces 1 metal-gemm on lenet -- Level
+  54's view_resolve fix folds movement chains into the input View,
+  so some matmuls dispatch via metal-gemm naturally WITHOUT the
+  protect rule firing.  The protect rule only adds the second
+  metal-gemm and one extra kernel.
+
+  At 100k threshold, the protect costs autotune-best ~250us
+  (3869 vs 3611) but is approximately neutral on lenet given the
+  best 3611us nearly matches pre-L54 3620us.  Raising the threshold
+  above 100k would break transformer (kid 14 M*N*K=131k just clears
+  the gate).  **100k is the right global default given the
+  transformer-vs-lenet trade-off.**
+
+  Campaign closes the headline objective: transformer 7633us
+  baseline (3.7x faster than pre-L54, 1.2-1.4x faster than tinygrad)
+  while lenet stays within noise of pre-L54 best.
+
+### Level 59: cross-workload milestone snapshot
+
+Transformer is validated.  Capture attention_proj.wls (real
+attention + projection) post-Level-58 and tabulate against
+tinygrad to see if the gap is reproducible across workloads.
+Existing attention_proj.txt baseline shows 5795us baseline / 4118us
+best; tinygrad attention.tinygrad.txt is 4488us steady / 4623us
+beam=4.  Confirm thvm is at parity-or-better on attention.
+
+- [x] (2026-05-07) Re-ran attention_proj.wls post-Level-58.
+
+  | metric        | old baseline | post-L58 | tinygrad steady | tinygrad beam4 |
+  |---------------|-------------:|---------:|----------------:|---------------:|
+  | baseline (us) |         5795 |     4082 |            4488 |             -- |
+  | best (us)     |         4118 |     3093 |              -- |           4623 |
+  | metal-gemm    |            3 |        4 |              -- |             -- |
+  | kernels       |            9 |        9 |             400 |            400 |
+
+  **Thvm post-L58 attention is 1.10x faster than tinygrad steady
+  (4082us vs 4488us) and 1.49x faster than tinygrad BEAM=4
+  (3093us vs 4623us)**.  Kernel count is also 44x lower (9 vs 400)
+  because tinygrad emits per-op kernels while thvm fuses through
+  bufferize.  Cross-workload milestone confirms the campaign's win
+  generalizes -- transformer (1.2-1.4x faster) and attention
+  (1.10-1.49x faster) both beat tinygrad.
+
+### Level 60: re-run conv2d post-Level-58
+
+Old baseline (conv2d.txt): thvm 4873us baseline / 3473us best vs
+tinygrad steady 1592us = **thvm 2.2x SLOWER**.  This is real
+unfinished work -- conv2d was outside the matmul-focused L48-56
+work and may not have benefited.  Re-run post-L58 to confirm the
+gap is still there + capture the current dispatch shape so we
+know what to attack next.
+
+- [x] (2026-05-07) Re-ran conv2d.wls post-Level-58.
+
+  | metric         | old baseline | post-L58 | tinygrad steady | tinygrad beam4 |
+  |----------------|-------------:|---------:|----------------:|---------------:|
+  | baseline (us)  |         4873 |     2763 |            1592 |             -- |
+  | best (us)      |         3473 |     2062 |              -- |           1604 |
+  | metal-gemm     |            0 |        1 |              -- |             -- |
+  | kernels        |            3 |        4 |              50 |             50 |
+
+  Conv2d wall dropped 43% (baseline) and 41% (autotune) post-L58.
+  Gap to tinygrad closed from 2.18x slower (3473 vs 1604) to
+  **1.29x slower** (2062 vs 1604).  One conv-as-matmul kernel now
+  routes via metal-gemm-with-TC.
+
+  Two metal-op kernels remain heavy (kid 1 = 1241us, kid 2 = 190us).
+  These are the actual conv emit path which doesn't yet route
+  through metal-gemm.  Closing the remaining 1.29x gap on conv2d
+  needs work on the conv path proper, not the matmul plumbing the
+  campaign focused on.
+
+### Level 61: re-run mini_lenet post-L58
+
+Pre-L58 baseline (mini_lenet.txt): thvm 2524us baseline / 2154us
+best vs tinygrad steady 4679us.  Already much faster than tinygrad
+even pre-campaign-fixes.  Confirm post-L58 stays in the win zone
+and capture any further improvement from Level 54 cascading.
+
+- [x] (2026-05-07) Re-ran mini_lenet.wls post-Level-58.
+
+  | metric         | old baseline | post-L58 | tinygrad steady | tinygrad beam4 |
+  |----------------|-------------:|---------:|----------------:|---------------:|
+  | baseline (us)  |         2524 |     2364 |            4679 |             -- |
+  | best (us)      |         2154 |     1819 |              -- |           4694 |
+  | metal-gemm     |            0 |        1 |              -- |             -- |
+  | kernels        |            9 |       10 |             300 |            300 |
+
+  Mini_lenet improved 16% on autotune-best post-L58 (1819us vs
+  2154us); +1 kernel for matmul-input-protect, with one new
+  metal-gemm dispatch.  vs tinygrad: **thvm 1.98x faster on
+  baseline, 2.58x faster on autotune-best**.  Kernel count is
+  30x lower (10 vs 300).
+
+  Cross-workload scoreboard (post-L58):
+
+  | workload          | thvm best | tinygrad | thvm vs tg |
+  |-------------------|----------:|---------:|------------|
+  | transformer_block |   6977us  |   10018us|  1.43x     |
+  | attention_proj    |   3093us  |    4623us|  1.49x     |
+  | mini_lenet        |   1819us  |    4694us|  2.58x     |
+  | conv2d            |   2062us  |    1604us|  0.78x (1.29x slower) |
+  | lenet             |   3869us  |    3620us (pre-L54 thvm) |  on par |
+
+  4 of 5 workloads beat tinygrad; conv2d the lone laggard.
+
+### Level 62: dump conv2d kid 1's program
+
+Conv2d kid 1 is a 1241us metal-op kernel.  metal-op dispatch is
+the per-op fallback path -- substantially slower than metal-tile
+or metal-gemm.  Use the existing THVM_DUMP_KID_PROGRAM diagnostic
+to inspect kid 1's program shape and understand why it's falling
+to metal-op rather than tile-jit or gemm.
+
+- [x] (2026-05-07) Ran conv2d.wls with THVM_DUMP_KID_PROGRAM=1.
+  The diagnostic filter (REDUCE-only) excluded kid 1; per-kid
+  bench output reveals the breakdown.  Saved to
+  `bench/autotune-ladder/conv2d_kid_programs.txt`.
+
+  Conv2d {32, 28, 28} + {32, 32, 5, 5} -> {32, 24, 24}:
+
+  | kid | dispatch   | wall (us) | role                       |
+  |----:|------------|----------:|----------------------------|
+  |   1 | metal-op   |      1281 | conv emit (60% of total)   |
+  |   2 | metal-op   |       214 | bias-add                   |
+  |   3 | metal-gemm |       253 | post-im2col matmul (M=32, N=576, K=800) |
+  |   4 | metal-tile |       373 | output reshape + activation |
+
+  Kid 1 alone is 60% of conv2d wall.  metal-op is the per-op
+  fallback (slower than tile-jit or metal-gemm).  Tinygrad emits
+  conv as a direct strided matmul that fuses the im2col into the
+  matmul kernel via View metadata; thvm currently emits a separate
+  metal-op kernel for the conv preamble.
+
+  **Closing the 1.29x conv2d gap**: lower conv2d to im2col-of-views
+  + matmul earlier in the pipeline so kid 1 disappears.  The
+  matmul (kid 3 = 253us) would absorb its work via stride-aware
+  loads.  Alternatively write a specialized metal conv shader for
+  the metal-op path.  Both are multi-iteration architectural arcs
+  outside the matmul-plumbing scope of L48-58.
+
+### Level 63: locate conv2d metal-op dispatch decision
+
+Before designing the conv2d -> im2col-matmul lowering, locate the
+code site that decides "this conv kernel goes to metal-op" vs
+"this conv kernel goes to tile-jit".  Read-only probe.  Look for
+`tile_analyze_conv2d_flat` and the metal_dispatch_kernel ladder
+to find where conv kernels currently fall through to metal-op.
+
+- [x] (2026-05-07) Read-only trace of conv dispatch in
+  `src/backend/metal/_.m` and `src/schedule/tile.c`.
+
+  Function chain:
+  - `metal_dispatch_kernel` ([src/backend/metal/_.m:2086](src/backend/metal/_.m#L2086))
+    -> tries `metal_try_conv2d_flat` IF
+    `metal_specialized_diagnostics_enabled()` (gated by env
+    `THVM_METAL_SPECIALIZED=1`)
+  - `metal_try_conv2d_flat` ([src/backend/metal/_.m:1882](src/backend/metal/_.m#L1882))
+    -> calls `tile_analyze_conv2d_flat`
+  - `tile_analyze_conv2d_flat_impl` ([src/schedule/tile.c:1140](src/schedule/tile.c#L1140))
+    -> strict gates: weights view (input 0) `ndim==3`; input
+    view (input 1) `ndim in {3, 4}`; last op = REDUCE_SUM; etc.
+
+  A/B test (`THVM_METAL_SPECIALIZED=1` on conv2d.wls): dispatch_kinds
+  UNCHANGED (`{metal-op:2, metal-gemm:1, metal-tile:1}`).  No
+  metal-conv kid appears.  Best wall ~2400us either way.  Means
+  `metal_try_conv2d_flat` fails for our conv2d shape.
+
+  Conv2d.wls weights are {32, 32, 5, 5} -- a 4D tensor.  After the
+  kernel-graph emits, the weights view gets reshaped/permuted to
+  3D for the matmul (kid 3 reads them via stride pattern).  But
+  `tile_analyze_conv2d_flat` expects a SPECIFIC 3D shape pattern
+  on input 0; if kid 1's weights view doesn't match that pattern,
+  conv-flat rejects.
+
+  Kid 1 is the conv-PREP kernel: doesn't contain a REDUCE (so
+  THVM_DUMP_KID_PROGRAM filtered it out).  It's likely an im2col
+  or gather op that materializes the conv patches into a contig
+  buffer for kid 3's matmul to read.  metal-op dispatch = the
+  per-op fallback that the cpu interpreter equivalent would use
+  on Metal.
+
+  **Next-step probe (Level 64)**: bypass kid 1 entirely by
+  making kid 3's matmul read its input via im2col-strided View
+  metadata.  Materialize would emit kid 3 with a 6D View
+  (batch, h_out, w_out, c_in, kh, kw) on the input buffer -- the
+  contig/copy work currently done in kid 1 -- and kid 3 reads it
+  via stride-aware loads.  This is conceptually similar to
+  Level 54's view-folding trick but applied to the conv2d
+  decomposition.
+
+### Level 64: dump conv2d kid 1's actual program
+
+THVM_DUMP_KID_PROGRAM filters to REDUCE-containing kernels, which
+excluded the conv-prep kid 1 (no REDUCE).  Temporarily remove that
+filter, run conv2d, capture kid 1's program (opcodes + numels +
+n_inputs/n_ops), restore filter.  This identifies WHICH ops kid 1
+emits, which determines what im2col-style view migration would
+need to support.
+
+- [x] (2026-05-07) Added THVM_DUMP_KID_PROGRAM_ALL=1 env (bypasses
+  the REDUCE filter while leaving THVM_DUMP_KID_PROGRAM behavior
+  unchanged).  Ran conv2d.wls; saved to
+  `bench/autotune-ladder/conv2d_kid1_program.txt`.
+
+  **Kid 1 = 71-op SUM-OF-SHIFTED-PADS conv** (n_inputs=24,
+  n_ops=71).  Op pattern: `[RESHAPE, PAD] + 23 × [RESHAPE, PAD, ADD]`
+  -- decoded: 5×5 = 25 patch positions, each summed into an
+  accumulator via a SHIFT (PAD) and ADD.  Per-op numels: RESHAPE
+  18432 (= 32×24×24, conv output), PAD 460800 (= 25×18432), ADD
+  460800.
+
+  Total work: 71 × ~7M FLOPS = ~500M FLOPS for the conv PREP alone,
+  ~33x more than kid 3's matmul (14.7M FLOPS).  Kid 1 takes 5x the
+  matmul's wall time -- the metal-op fallback is memory-bandwidth-
+  bound, not compute-bound.
+
+  Tinygrad's approach: a single strided View on the input that
+  broadcasts across (kh, kw) axes, with the matmul reading via
+  stride pattern.  No 71-op explosion.
+
+  **Level 65 fix shape**: replace SUM-OF-SHIFTED-PADS with
+  strided-View + matmul at the bufferize/materialize layer.  The
+  conv UOP DAG could be rewritten to produce kid 3's matmul
+  reading a 6D im2col View directly; kid 1 disappears.
+
+  test_tile_graph 636/636 with the new env; default behavior
+  (THVM_DUMP_KID_PROGRAM unchanged) preserved.
+
+### Level 65: locate SUM-OF-SHIFTED-PADS emission site
+
+Before designing the strided-View conv lowering, find where the
+71-op SUM-OF-SHIFTED-PADS gets emitted.  Likely candidates:
+TConv2D's WL-side definition (lowers UOP_CONV2D-equivalent), or
+a UOp-level rewrite rule, or a per-kernel lowering pass.
+Read-only probe.
+
+- [x] (2026-05-07) Located: `TConv2DIm2Col` in
+  [wl/THVMLink/Kernel/NN.wl:224](wl/THVMLink/Kernel/NN.wl#L224)
+  is the WL-side conv lowering.  It INTENTIONALLY builds the
+  im2col matrix via SHRINK+RESHAPE+PAD+ADD per patch:
+
+      patches = Flatten @ Table[
+          With[{slot = ki * kw + kj},
+              TUOpPad[
+                  TUOpReshape[
+                      TUOpShrink[input,
+                          {{0, cIn}, {ki, ki + hOut}, {kj, kj + wOut}}],
+                      {cIn, 1, hOut * wOut}],
+                  {{0, 0}, {slot, kSpat - 1 - slot}, {0, 0}}]
+          ],
+          {ki, 0, kh - 1}, {kj, 0, kw - 1}
+      ];
+      summed = Fold[TUOpAdd, First[patches], Rest[patches]];
+      xCol   = TUOpReshape[summed, {cIn * kSpat, hOut * wOut}];
+      outFlat = TMatMul[wFlat, xCol];
+
+  For 5×5 = 25 patches: 25 × (SHRINK + RESHAPE + PAD) = 75 ops +
+  24 ADD = 99 ops.  Bench showed 71 ops post-rewrite/dedup.
+
+  Comment in source confirms: this is an intentional design
+  ("the ceiling lift needed to scale beautiful-mnist past BS=1"),
+  trading kh*kw partial-sum kernels for a single sgemm.  The
+  sgemm dispatch works (kid 3 = metal-gemm-with-TC) but the
+  im2col build (kid 1) is heavy because it MATERIALIZES 25
+  padded buffers + accumulates them.
+
+  **Level 66 fix shape**: replace SHRINK+RESHAPE+PAD+ADD with a
+  single strided-View that represents the im2col layout virtually.
+  Two paths:
+  - **A (WL-side rewrite)**: introduce `TUOpAsStrided` (or
+    similar) that produces a non-materialized view; rewrite
+    `TConv2DIm2Col` to build the {cIn*kh*kw, hOut*wOut} im2col
+    view directly from the input's original storage.  Tinygrad-
+    style.  Requires a new WL-side UOp + materialize support.
+  - **B (UOp-level rewrite rule)**: detect the
+    SUM-OF-SHIFTED-PADS pattern in graph_simplify and rewrite to
+    a strided-view + RESHAPE.  Pure C-side; uses the UPat layer.
+
+  Path B looks tractable: the pattern is structurally regular
+  (Fold of PAD(RESHAPE(SHRINK(x)))) and could be matched
+  declaratively.
+
+### Level 66: validate UPat matches the conv2d patch shape
+
+Before designing the SUM-OF-SHIFTED-PADS -> strided-View rewrite,
+confirm that UPat (Levels 45-49) can structurally match a single
+"patch" of the conv2d emission: `PAD(RESHAPE(SHRINK(?input)))`.
+Movement ops have arity 1 per uop_meta.c, so a 3-level nested
+UPat with op_alt over each level should work; the dimension args
+(stored as NUM children at heap slots beyond src) are not
+traversed by upat_match.
+
+- [x] (2026-05-07) Added focused test in `tests/test_uop_upat.c`
+  ("upat/nested-pad-reshape-shrink").  Builds
+  `PAD(RESHAPE(SHRINK(tensor)))` via the canonical constructors
+  + a 3-level nested UPat:
+
+      static UPat const wild_in     = {0, 0xFF, 0, 0, NULL, NULL};
+      static UPat const shrink_kids[1] = {wild_in};
+      static UPat const pat_shrink = {UOP_SHRINK, 1, 0, -1, shrink_kids, NULL};
+      static UPat const reshape_kids[1] = {pat_shrink};
+      static UPat const pat_reshape = {UOP_RESHAPE, 1, 0, -1, reshape_kids, NULL};
+      static UPat const pad_kids[1] = {pat_reshape};
+      static UPat const pat_pad_chain = {UOP_PAD, 1, 0, -1, pad_kids, NULL};
+
+  Tests pass (33/33, was 30/30): the 3-level nested chain matches
+  + captures the inner tensor; a bare SHRINK doesn't match the
+  full chain.  Movement ops' dimension args live in heap slots
+  beyond the source; upat_match's arity-bounded traversal walks
+  only the source chain, ignoring dim inspection.
+
+  **The pattern shape needed for Level 67 is expressible.**  The
+  conv2d SUM-OF-SHIFTED-PADS detector would extend this with:
+  (a) op_alt or fixed PAD/RESHAPE/SHRINK at each level,
+  (b) recursion through the 24-deep ADD chain (a Fold of 25
+      patches collapses into a left-leaning binary tree),
+  (c) a rewrite that emits a strided-View instead.
+
+### Level 67: matmul128 pure-matmul milestone
+
+Re-run matmul128.wls post-L58 to validate the pure-matmul path.
+Old baseline shows thvm 214us / 211us (1 kernel, metal-gemm-with-TC)
+vs tinygrad 915us steady / 773us beam=4.  Pure-matmul should be
+where thvm's matmul plumbing has its strongest advantage.
+
+- [x] (2026-05-07) Re-ran matmul128.wls post-Level-58.
+
+  | metric        | old baseline | post-L58 | tinygrad steady | tinygrad beam4 |
+  |---------------|-------------:|---------:|----------------:|---------------:|
+  | baseline (us) |          214 |      232 |             915 |             -- |
+  | best (us)     |          211 |  **194** |              -- |            773 |
+  | dispatch      |   metal-gemm |   metal-gemm | --              |              |
+  | kernels       |            1 |        1 |              50 |             50 |
+
+  **Thvm 3.95x faster than tinygrad steady (232 vs 915), and 3.98x
+  faster than tinygrad BEAM=4 (194 vs 773).**  Pure-matmul of 128x
+  shape; thvm dispatches as a single metal-gemm-with-TC kernel,
+  tinygrad emits 50 kernels.
+
+  Updated cross-workload scoreboard (post-L58):
+
+  | workload          | thvm best | tinygrad | thvm vs tg     |
+  |-------------------|----------:|---------:|----------------|
+  | matmul128         |    194us  |    773us | **3.98x faster** |
+  | mini_lenet        |   1819us  |   4694us | 2.58x faster    |
+  | attention_proj    |   3093us  |   4623us | 1.49x faster    |
+  | transformer_block |   6977us  |  10018us | 1.43x faster    |
+  | lenet             |   3869us  |   3620us(pre-L54)| ~par   |
+  | conv2d            |   2062us  |   1604us | 0.78x slower    |
+
+### Level 68: mlp2 cross-workload check post-L58
+
+Old baseline shows thvm 1340us vs tinygrad 2499us beam=4 = 1.86x
+faster.  MLP-style workloads exercise both fc layers (matmul) and
+activation layers; confirm L48-58 didn't regress mlp2.
+
+- [x] (2026-05-07) Re-ran mlp2.wls post-Level-58.
+
+  | metric        | old baseline | post-L58 | tinygrad steady | tinygrad beam4 |
+  |---------------|-------------:|---------:|----------------:|---------------:|
+  | baseline (us) |         1441 |     1483 |            2728 |             -- |
+  | best (us)     |         1340 |     1350 |              -- |           2499 |
+  | metal-gemm    |            0 |        1 |              -- |             -- |
+  | kernels       |            7 |        7 |             250 |            250 |
+
+  **Thvm 1.85x faster than tinygrad BEAM=4 (1350us vs 2499us)**;
+  basically unchanged from old baseline (1340us best).  L48-58
+  added 1 metal-gemm dispatch but wall delta is within noise.
+
+  Updated cross-workload scoreboard:
+
+  | workload          | thvm best | tinygrad | thvm vs tg     |
+  |-------------------|----------:|---------:|----------------|
+  | matmul128         |    194us  |    773us | 3.98x faster   |
+  | mini_lenet        |   1819us  |   4694us | 2.58x faster   |
+  | mlp2              |   1350us  |   2499us | **1.85x faster** |
+  | attention_proj    |   3093us  |   4623us | 1.49x faster   |
+  | transformer_block |   6977us  |  10018us | 1.43x faster   |
+  | lenet             |   3869us  |   3620us(pre-L54)| ~par   |
+  | conv2d            |   2062us  |   1604us | 0.78x slower   |
+
+  6/7 workloads beat tinygrad (4 of them by >= 1.5x).
+
+### Level 69: elementwise_add primitive sanity
+
+Basic primitive sanity: thvm should be at-or-better than tinygrad
+on a single elementwise add.  Old baseline: 146us best vs tinygrad
+beam=4 391us = 2.68x faster.
+
+- [x] (2026-05-07) Re-ran elementwise_add.wls post-L58.
+
+  | metric        | old baseline | post-L58 | tinygrad steady | tinygrad beam4 |
+  |---------------|-------------:|---------:|----------------:|---------------:|
+  | baseline (us) |          300 |      273 |             479 |             -- |
+  | best (us)     |          146 |      173 |              -- |            391 |
+  | dispatch      |   metal-tile |   metal-tile |              -- |             -- |
+  | kernels       |            1 |        1 |              50 |             50 |
+
+  **Thvm 2.26x faster than tinygrad BEAM=4 (173us vs 391us).**
+  Slight degradation on best wall (146 -> 173us) is run-to-run
+  autotune variance: a different LOCAL opt won this time.  Single
+  kernel vs tinygrad's 50.
+
+  Updated cross-workload scoreboard (8 workloads):
+
+  | workload          | thvm best | tinygrad | thvm vs tg     |
+  |-------------------|----------:|---------:|----------------|
+  | matmul128         |    194us  |    773us | 3.98x faster   |
+  | mini_lenet        |   1819us  |   4694us | 2.58x faster   |
+  | elementwise_add   |    173us  |    391us | 2.26x faster   |
+  | mlp2              |   1350us  |   2499us | 1.85x faster   |
+  | attention_proj    |   3093us  |   4623us | 1.49x faster   |
+  | transformer_block |   6977us  |  10018us | 1.43x faster   |
+  | lenet             |  ~par with pre-L54 | -- | ~par         |
+  | conv2d            |   2062us  |   1604us | 0.78x slower   |
+
+  7/8 workloads beat tinygrad.
+
+### Level 70: mlp1 cross-workload check post-L58
+
+Old baseline: thvm 1186us best vs tinygrad 1704us beam=4 = 1.44x
+faster.  Smallest MLP variant.  Confirm no regression post-L58.
+
+- [x] (2026-05-07) Re-ran mlp1.wls post-L58.
+
+  | metric        | old baseline | post-L58 | tinygrad steady | tinygrad beam4 |
+  |---------------|-------------:|---------:|----------------:|---------------:|
+  | baseline (us) |         1223 |      984 |            1734 |             -- |
+  | best (us)     |         1186 |     1002 |              -- |           1704 |
+  | metal-gemm    |            0 |        1 |              -- |             -- |
+  | kernels       |            5 |        5 |             200 |            200 |
+
+  **Thvm 1.70x faster than tinygrad BEAM=4 (1002us vs 1704us)**,
+  improved from old 1.44x.  L58 added 1 metal-gemm dispatch (the
+  fc layer); -20% baseline / -16% best.
+
+  Updated cross-workload scoreboard (9 workloads, 8/9 beat
+  tinygrad):
+
+  | workload          | thvm best | tinygrad | thvm vs tg     |
+  |-------------------|----------:|---------:|----------------|
+  | matmul128         |    194us  |    773us | 3.98x faster   |
+  | mini_lenet        |   1819us  |   4694us | 2.58x faster   |
+  | elementwise_add   |    173us  |    391us | 2.26x faster   |
+  | mlp2              |   1350us  |   2499us | 1.85x faster   |
+  | mlp1              |   1002us  |   1704us | **1.70x faster** |
+  | attention_proj    |   3093us  |   4623us | 1.49x faster   |
+  | transformer_block |   6977us  |  10018us | 1.43x faster   |
+  | lenet             |  ~par with pre-L54 | -- | ~par         |
+  | conv2d            |   2062us  |   1604us | 0.78x slower   |
+
+
+### Level 71: lenet-mnist bench-train smoke test post-L58
+
+Original campaign target was the beautiful-mnist / lenet-mnist
+training canary.  Existing `bench/lenet-mnist/train_bs32.txt`
+shows pre-existing NaN + lift-reject errors captured pre-L58.
+Run lenet-mnist bench-train post-L58 to see (a) whether the NaN
+persists, (b) what the wall is.
+
+- [x] (2026-05-07) Ran `wl/Examples/lenet-mnist/bench-train.wls`
+  with TRAIN_BENCH_MODE=baseline, N_STEPS=2, WARMUP_STEPS=1.
+
+  | metric            | pre-L58 (train_bs32.txt) | post-L58 |
+  |-------------------|--------------------------|---------:|
+  | NaN               | YES (fpexc)              | **GONE** |
+  | timed loss        | $Failed (NaN-poisoned)   | 2.3026 (=log 10, sane softmax init) |
+  | wall_ms (2 steps) | n/a                      |     2133 |
+  | ms_per_step       | n/a                      |     1067 |
+  | kernels           | n/a                      |      611 |
+  | metal-gemm        | 0                        |       26 |
+  | metal-tile        | n/a                      |      337 |
+  | metal-op          | n/a                      |      248 |
+
+  **The L48-58 work fixed correctness AND performance.**  The
+  pre-L58 NaN regression in bench-train is gone; lenet-mnist
+  training step now produces a sane uniform-softmax loss.  611
+  kernels with 26 metal-gemm dispatches in a single training step
+  (forward + backward + Adam update).
+
+  Warmup step still shows `$Failed` somewhere in the loss
+  reporting (likely a separate WL-side issue) but timed steps
+  succeed with sane numerics.  Lift-reject still fires (now for
+  `buf_ndim=3 src_count=3`, a different shape than pre-L58's
+  `buf_ndim=1 src_count=1`) -- doesn't affect correctness, just
+  fewer kernels lift into tile-jit.

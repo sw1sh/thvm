@@ -1,0 +1,23 @@
+# Level 58: lenet A/B with matmul-input-protect at different thresholds.
+#
+# Pre-L54 baseline (lenet.txt):
+#   kernels=19  baseline=4341us  best=3620us  speedup=1.20x
+#   dispatch: {metal-op:9, metal-tile:10}  (no metal-gemm)
+#
+# L56 default (THVM_MATMUL_PROTECT_MIN_FLOPS=100000):
+#   kernels=20  baseline=4550us  best=3869us  speedup=1.18x
+#   dispatch: {metal-op:8, metal-tile:10, metal-gemm:2}
+#
+# Protect disabled (THVM_MATMUL_PROTECT_MIN_FLOPS=999999999):
+#   kernels=19  baseline=4645us  best=3611us  speedup=1.29x
+#   dispatch: {metal-op:8, metal-tile:10, metal-gemm:1}
+#
+# Key points:
+# - "Disabled" still gets 1 metal-gemm (Level 54's view_resolve folds
+#   movement chains into the input View, so some matmuls naturally
+#   dispatch via metal-gemm WITHOUT needing the protect rule).
+# - At 100k threshold, the +1 kernel adds ~250us to autotune-best.
+#   Lenet best wall is approximately neutral with vs without protect.
+# - Raising threshold above 100k would break transformer (kid 14 =
+#   M*N*K=131k JUST clears the gate).  100k is the right global
+#   default given the transformer-vs-lenet trade-off.
