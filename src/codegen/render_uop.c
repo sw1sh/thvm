@@ -30,12 +30,35 @@ static void rmu_emit_term(Term t, FILE *fp);
 // plain function signature without Metal kernel attributes.
 static int RMU_TARGET_C = 0;
 
-// Buffer name map: cg_render_uop_kernel populates this with the
-// kernel's output buffer (Term -> "out") and inputs (Term -> "in0",
-// "in1", ...).  Inner functions emit buffer references via
-// rmu_buf_name(t) instead of `buf<heap_loc>`.  Static global is fine
-// because the renderer isn't re-entrant in practice; cleared at start
-// of each render to defend against stale state.
+// Buffer name resolution.
+//
+// Phase C slice 3 (structural slot indexing): production callers
+// resolve buffer names through the UOP_BUFFER `instance` field
+// (kernel_lift.c sets instance=0 on the output and instance=slot+1 on
+// the i-th input).  rmu_buf_name(t) decodes instance directly:
+//
+//   instance == 0  -> "out" (resolved via the legacy map below)
+//   instance >= 1  -> "in<instance-1>"
+//
+// This drops the renderer's prior dependency on Term-identity matches
+// against an `in_bufs[]` array passed in from the caller for input
+// naming; lift result and renderer agree on input naming via stable
+// structural indices.  Slot 3 -> "in2" regardless of what Term the
+// lifter happened to hash-cons for that slot in this session.
+//
+// The legacy Term-identity map (populated by rmu_buf_names_set) is
+// retained for two reasons:
+//   1. Synthetic test kernels (tests/test_render_uop.c) build
+//      UOP_BUFFER leaves via uop_buffer(...) which leaves instance==0
+//      on every leaf; the test entry point cg_render_uop_kernel(...)
+//      registers each one explicitly so the structural fallback still
+//      lands on "out" / "inN".
+//   2. The output buffer's instance is 0 for both lifted and
+//      synthetic kernels; the map disambiguates by Term identity (one
+//      output per kernel makes this unambiguous in practice).
+//
+// Static globals are fine; the renderer isn't re-entrant in practice
+// and the map is cleared at the start of each render.
 #define RMU_BUF_MAX 32
 static struct { Term term; char name[16]; } RMU_BUF_NAMES[RMU_BUF_MAX];
 static u32 RMU_BUF_NAMES_N;
@@ -44,6 +67,11 @@ static void rmu_buf_names_reset(void) {
   RMU_BUF_NAMES_N = 0;
 }
 
+// Register a Term -> name mapping in the legacy fallback map.  Used
+// by the cg_render_uop_kernel(out_buf, in_bufs[]) entry points to
+// keep test-built kernels (instance==0 everywhere) renderable, and to
+// register the output's "out" name (whose lifter-assigned instance is
+// 0 and so doesn't carry a structural slot).
 static void rmu_buf_names_set(Term t, const char *name) {
   if (RMU_BUF_NAMES_N >= RMU_BUF_MAX) return;
   RMU_BUF_NAMES[RMU_BUF_NAMES_N].term = t;
@@ -52,10 +80,23 @@ static void rmu_buf_names_set(Term t, const char *name) {
   RMU_BUF_NAMES_N++;
 }
 
-// Returns the symbolic name for buffer `t`, or a `buf<loc>` fallback
-// when no map entry exists (synthetic kernels in unit tests, or
-// future paths).
+// Returns the symbolic name for buffer `t`.
+//
+// Resolution order:
+//   1. UOP_BUFFER.instance >= 1 -> "in<instance-1>" (structural).
+//   2. Legacy Term-identity map (the output's "out" entry, plus all
+//      synthetic test kernels).
+//   3. `buf<loc>` fallback (defensive).
 static const char *rmu_buf_name(Term t) {
+  // Structural path: instance>=1 means "input slot (instance-1)".
+  // Lifted kernels use this for every input; the output (instance==0)
+  // falls through to the legacy map.
+  u32 inst = uop_buffer_inst_get(t);
+  if (inst >= 1) {
+    static char structural[16];
+    snprintf(structural, sizeof(structural), "in%u", inst - 1);
+    return structural;
+  }
   for (u32 i = 0; i < RMU_BUF_NAMES_N; i++) {
     if (RMU_BUF_NAMES[i].term == t) return RMU_BUF_NAMES[i].name;
   }
@@ -1261,16 +1302,115 @@ static void rmu_emit_after(Term after, FILE *fp, u32 depth) {
   if (term_ext(node) == UOP_AFTER) rmu_emit_after(node, fp, depth);
 }
 
+// Walk the DAG rooted at `root` and collect the unique UOP_BUFFER
+// terms keyed by `instance` (kernel_lift.c sets instance=0 on the
+// output and instance=slot+1 on input slot `slot`).  Slot 0 of the
+// returned `slot_bufs[]` array holds the output (instance=0), slot
+// k>=1 holds input (k-1).  Returns the highest input slot+1 used,
+// i.e. n_inputs.
+//
+// For lifted kernels every BUFFER carries a structural instance, so
+// this walk is the source of truth for the kernel signature: shapes
+// + dtypes come from the BUFFER terms themselves, not from any
+// external in_bufs[] array.  Tests that build BUFFERs with
+// instance==0 throughout (no slot disambiguation) cannot use this
+// helper -- they go through the explicit cg_render_uop_kernel(root,
+// out_buf, in_bufs[]) entry instead.
+//
+// Capacity matches RMU_BUF_MAX (32 slots: 1 output + up to 31 inputs,
+// matching the Metal buffer-attribute cap).
+#define RMU_DISCOVER_MAX RMU_BUF_MAX
+static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
+  if (term_tag(t) != TAG_UOP) return;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_BUFFER) {
+    u32 inst = uop_buffer_inst_get(t);
+    if (inst >= RMU_DISCOVER_MAX) return;
+    if (slot_bufs[inst] == 0) {
+      slot_bufs[inst] = t;
+      if (inst >= 1 && inst > *n_inputs_out) *n_inputs_out = inst;
+    }
+    return;
+  }
+  // Recurse over operand slots.  Mirrors rmu_collect_ranges' op
+  // coverage; conservative -- walks any UOp's heap operands.  Each
+  // UOp's heap layout puts operand Terms in successive slots after a
+  // small header; we walk a fixed window large enough to cover the
+  // widest existing UOp shape (UOP_INDEX_E + UOP_STORE = 3 operands;
+  // UOP_REDUCE = 3; UOP_IWHERE = 3; UOP_OPT = 1 + 2 NUM headers).
+  // BUFFER terms are leaves so they only ever appear in operand
+  // slots, never in header NUM slots.
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 1), slot_bufs, n_inputs_out);
+      return;
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      return;
+    case UOP_CAST:  case UOP_BITCAST:
+      // [src, NUM(dst_dtype)]
+      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      return;
+    case UOP_IWHERE:
+      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 1), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 2), slot_bufs, n_inputs_out);
+      return;
+    case UOP_OPT:
+      // [target, NUM(kind), NUM(factor)]
+      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      return;
+    case UOP_REDUCE:
+      // [src, NUM(kind), NUM(axis)]
+      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      return;
+    case UOP_STORE:
+      // [buf, addr, value]
+      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 1), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 2), slot_bufs, n_inputs_out);
+      return;
+    case UOP_AFTER:
+      // [node, after_node]
+      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 1), slot_bufs, n_inputs_out);
+      return;
+    case UOP_RANGE:
+    case UOP_CONST: case UOP_INVALID:
+    case UOP_BUFFER:
+      return;
+    default:
+      return;
+  }
+}
+
 // Render a kernel rooted at `root`.  The root is typically a
 // UOP_STORE (single-store kernel) or UOP_AFTER chain (multi-store
 // kernel).  `kernel_name` and a list of input buffers + the output
 // buffer drive the kernel signature.
+//
+// This is the legacy entry point retained for synthetic test
+// kernels (instance==0 across all BUFFERs) and call sites that
+// haven't yet migrated.  Production callers in render_metal.c +
+// backend/cpu/jit.c use cg_render_uop_kernel_root() below, which
+// discovers buffer slots from the DAG via UOP_BUFFER.instance and
+// no longer requires the caller to pass in_bufs[].
 fn void cg_render_uop_kernel(Term root, const char *kernel_name,
                              Term out_buf, Term const *in_bufs,
                              u32 n_inputs, FILE *fp) {
   if (fp == NULL) fp = stderr;
   if (kernel_name == NULL) kernel_name = "uop_kernel";
   // Populate buffer-name map: out_buf -> "out", in_bufs[i] -> "inN".
+  // For lifted kernels (every BUFFER has instance != 0 except
+  // out_buf) the in_bufs[] entries are ignored at lookup time --
+  // rmu_buf_name decodes instance directly.  Registration here is
+  // load-bearing only for the synthetic test path.
   rmu_buf_names_reset();
   rmu_buf_names_set(out_buf, "out");
   for (u32 i = 0; i < n_inputs; i++) {
@@ -1297,6 +1437,60 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
   // Body.  In F0 we just dispatch on the root op and emit the
   // contained store (or AFTER chain).  Range-loop wrapping happens
   // when the root is wrapped in a RANGE chain (future work).
+  if (root != 0 && term_tag(root) == TAG_UOP) {
+    u32 op = term_ext(root);
+    if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
+    else if (op == UOP_AFTER) rmu_emit_after(root, fp, 1);
+    else {
+      fputs("  /* unsupported root op */\n", fp);
+    }
+  } else {
+    fputs("  /* empty kernel */\n", fp);
+  }
+  fputs("}\n", fp);
+}
+
+// Phase C slice 3: structural-mode MSL renderer.  Walks `root` to
+// discover every UOP_BUFFER node by `instance` (output at slot 0,
+// input at slot k+1).  No `out_buf`/`in_bufs[]` parameters: the
+// caller passes the post-lift root (e.g. ke->compute_root /
+// ke->cached_lift.store_root) and the renderer derives the kernel
+// signature from the DAG itself.
+//
+// Production callers (cg_emit_via_uop in render_metal.c) use this
+// entry; it produces output bit-equal with the legacy entry point
+// when invoked on the same root, since rmu_buf_name's structural
+// resolution path is identical for input slots and the output is
+// registered the same way.
+fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
+                                  FILE *fp) {
+  if (fp == NULL) fp = stderr;
+  if (kernel_name == NULL) kernel_name = "uop_kernel";
+  Term slot_bufs[RMU_DISCOVER_MAX] = {0};
+  u32 n_inputs = 0;
+  rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
+  Term out_buf = slot_bufs[0];
+  rmu_buf_names_reset();
+  // Output's instance is 0; rmu_buf_name falls through to the
+  // identity map for it.  Inputs are resolved structurally so we
+  // don't bother registering them.
+  if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
+  fputs("#include <metal_stdlib>\n", fp);
+  fputs("using namespace metal;\n\n", fp);
+  fprintf(fp, "kernel void %s(\n", kernel_name);
+  u32 out_dtype = uop_buffer_dtype(out_buf);
+  fprintf(fp, "    device %s *out [[ buffer(0) ]]",
+          rmu_msl_type_name(out_dtype));
+  for (u32 i = 0; i < n_inputs; i++) {
+    Term in_buf = slot_bufs[i + 1];
+    u32 dt = uop_buffer_dtype(in_buf);
+    fprintf(fp, ",\n    device const %s *in%u [[ buffer(%u) ]]",
+            rmu_msl_type_name(dt), i, i + 1);
+  }
+  fputs(",\n    uint tid [[ thread_position_in_grid ]],\n", fp);
+  fputs("    uint tg [[ threadgroup_position_in_grid ]],\n", fp);
+  fputs("    uint tt [[ thread_position_in_threadgroup ]],\n", fp);
+  fputs("    uint sgi [[ simdgroup_index_in_threadgroup ]]) {\n", fp);
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
     if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
@@ -1356,6 +1550,55 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
           rmu_c_type_name(out_dtype), rmu_c_type_name(out_dtype));
   for (u32 i = 0; i < n_inputs; i++) {
     u32 dt = uop_buffer_dtype(in_bufs[i]);
+    fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
+            rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
+  }
+  RMU_TARGET_C = 1;
+  if (root != 0 && term_tag(root) == TAG_UOP) {
+    u32 op = term_ext(root);
+    if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);
+    else if (op == UOP_AFTER) rmu_emit_after(root, fp, 1);
+    else {
+      fputs("  /* unsupported root op */\n", fp);
+    }
+  } else {
+    fputs("  /* empty kernel */\n", fp);
+  }
+  RMU_TARGET_C = 0;
+  fputs("}\n", fp);
+}
+
+// Phase C slice 3: structural-mode C99 renderer.  Counterpart of
+// cg_render_uop_kernel_root for the CPU JIT path.  Discovers buffer
+// slots from `root` via UOP_BUFFER.instance instead of trusting an
+// out_buf/in_bufs[] tuple from the caller.  cpu/jit.c uses this to
+// pass ke->cached_lift.store_root directly.
+fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
+                                    FILE *fp) {
+  if (fp == NULL) fp = stderr;
+  if (kernel_name == NULL) kernel_name = "uop_kernel";
+  Term slot_bufs[RMU_DISCOVER_MAX] = {0};
+  u32 n_inputs = 0;
+  rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
+  Term out_buf = slot_bufs[0];
+  rmu_buf_names_reset();
+  if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
+  fputs("#include <stdint.h>\n", fp);
+  fputs("#include <math.h>\n", fp);
+  fputs("#include <string.h>\n", fp);
+  fputs("typedef unsigned int uint;\n", fp);
+  fputs("#define THVM_BITCAST(t, x) "
+        "({ t _t; __typeof__(x) _x = (x); "
+        "memcpy(&_t, &_x, sizeof(_t)); _t; })\n", fp);
+  fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
+  fputs("              unsigned n, const unsigned *in_numels) {\n", fp);
+  fputs("  (void)n; (void)in_numels;\n", fp);
+  u32 out_dtype = uop_buffer_dtype(out_buf);
+  fprintf(fp, "  %s *out = (%s *)out_v;\n",
+          rmu_c_type_name(out_dtype), rmu_c_type_name(out_dtype));
+  for (u32 i = 0; i < n_inputs; i++) {
+    Term in_buf = slot_bufs[i + 1];
+    u32 dt = uop_buffer_dtype(in_buf);
     fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
   }

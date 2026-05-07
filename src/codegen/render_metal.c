@@ -92,10 +92,11 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 }
 
 
-// Render through kernel_lift_to_uop + cg_render_uop_kernel.  This is
-// the primary (and only) Metal MSL emit path: the lifter handles
-// every kernel shape (matmul, conv2d_flat including multi-input X
-// im2col, elementwise, reduce, movement-fused subtrees).
+// Render through kernel_lift_to_uop + cg_render_uop_kernel_root.
+// This is the primary (and only) Metal MSL emit path: the lifter
+// handles every kernel shape (matmul, conv2d_flat including
+// multi-input X im2col, elementwise, reduce, movement-fused
+// subtrees).
 //
 // Bumps KERNEL_LIFT_ATTEMPTS / SUCCESSES counters as it goes; readable
 // via kernel_lift_attempts() / kernel_lift_successes() for diagnostics.
@@ -103,6 +104,13 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 // shadow-compile path that shell-exec'd xcrun metal; that was deleted
 // when render_uop became the sole emit path -- the actual MTLLibrary
 // PSO build downstream is now the source of truth for compilability.)
+//
+// Phase C slice 3: passes compute_root (= cached_lift.store_root)
+// directly into cg_render_uop_kernel_root, which discovers buffer
+// slots structurally from the DAG via UOP_BUFFER.instance.  No
+// in_bufs[] dependency: kernel_lift.c stamps instance=slot+1 on each
+// input BUFFER, so the renderer reconstructs slot positions from the
+// DAG itself.
 static char *cg_emit_via_uop(KernelEntry const *ke) {
   kernel_lift_count_attempt();
   // Metal hardware caps buffer attributes at index 30 (31 slots total
@@ -120,13 +128,11 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // them apart so we fall back to a fresh on-demand lift; it will
   // succeed on rangeify-built kernels and decline on truly
   // unsupported ones, matching the pre-slice-2 behavior.
+  Term cached_root = ke->cached_lift.store_root;
   KernelUopLift fresh = {0};
-  KernelUopLift const *lift;
-  if (ke->cached_lift.store_root != 0) {
-    lift = &ke->cached_lift;
-  } else {
+  if (cached_root == 0) {
     if (!kernel_lift_to_uop(ke, &fresh)) return NULL;
-    lift = &fresh;
+    cached_root = fresh.store_root;
   }
   kernel_lift_count_success();
   // Render to a malloc'd string, matching cg_emit_tile_metal's
@@ -135,7 +141,7 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // F3.1: pre-render pass installs UOP_OPT(_, TC, 0) on matmul-shaped
   // STORE roots so render_uop's simdgroup_matrix template fires.
   // No-op for non-matmul kernels.
-  Term store_root = uop_recognise_tc(lift->store_root);
+  Term store_root = uop_recognise_tc(cached_root);
   // F4: same for conv2d_flat -- installs UOP_OPT(_, CONV, 0) on
   // STORE roots whose REDUCE body has IDIV/IMOD-decomposed addresses
   // so render_uop's rmu_emit_conv template fires.  No-op when the
@@ -144,8 +150,10 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   char buf[16384];
   FILE *fp = fmemopen(buf, sizeof(buf), "w");
   if (fp == NULL) return NULL;
-  cg_render_uop_kernel(store_root, "k", lift->out_buf,
-                       lift->in_bufs, lift->n_inputs, fp);
+  // Structural entry: derive kernel signature (output dtype + per-
+  // input dtype) from the BUFFER nodes in the DAG via slot index;
+  // names ("out", "in0", "in1", ...) are decoded structurally too.
+  cg_render_uop_kernel_root(store_root, "k", fp);
   long n = ftell(fp);
   fclose(fp);
   if (n <= 0) return NULL;

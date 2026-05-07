@@ -216,6 +216,117 @@ int main(void) {
   }
   thvm_free();
 
+  // === slice 3: structural-mode renderer matches legacy ===
+  // Verifies that cg_render_uop_kernel_root (Phase C slice 3) emits
+  // bit-equal MSL when invoked with ke->compute_root directly,
+  // compared with the legacy cg_render_uop_kernel(out_buf, in_bufs[])
+  // entry given the cached_lift's tuple.  rmu_buf_name resolves
+  // structurally via UOP_BUFFER.instance for inputs, so the renderer
+  // no longer needs in_bufs[] to land on the correct names.
+  TEST_BEGIN("slice3/structural-renderer-bit-equal");
+  unsetenv("THVM_BACKEND");
+  thvm_init();
+  Shape s_s3 = {0}; s_s3.ndim = 1; s_s3.dims[0] = 4;
+  f32 src_s3a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  f32 src_s3b[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+  u32 ta_s3 = tensor_alloc(CURRENT_BACKEND, s_s3, DT_FP32);
+  u32 tb_s3 = tensor_alloc(CURRENT_BACKEND, s_s3, DT_FP32);
+  CURRENT_BACKEND->buf_write(TENS[ta_s3].buf_id, src_s3a, sizeof(src_s3a));
+  CURRENT_BACKEND->buf_write(TENS[tb_s3].buf_id, src_s3b, sizeof(src_s3b));
+  u32 kernels_before_s3 = KERNELS_NEXT;
+  Term add_s3 = thvm_materialize(uop_binary(UOP_ADD,
+      term_new(0, TAG_TEN, DT_FP32, ta_s3),
+      term_new(0, TAG_TEN, DT_FP32, tb_s3)));
+  (void)add_s3;
+  u32 kid_s3 = first_emitted_kernel_with_lift_success(kernels_before_s3);
+  CHECK(kid_s3 != 0);
+  if (kid_s3 != 0) {
+    KernelEntry *ke = &KERNELS[kid_s3];
+    Term root = ke->compute_root;
+    CHECK(root != 0);
+    // Render via the legacy entry (out_buf + in_bufs[] from
+    // cached_lift) and via the new structural entry (root only).
+    char buf_legacy[16384];
+    char buf_struct[16384];
+    FILE *fp_l = fmemopen(buf_legacy, sizeof(buf_legacy), "w");
+    FILE *fp_s = fmemopen(buf_struct, sizeof(buf_struct), "w");
+    CHECK(fp_l != NULL);
+    CHECK(fp_s != NULL);
+    cg_render_uop_kernel(root, "k",
+                         ke->cached_lift.out_buf,
+                         ke->cached_lift.in_bufs,
+                         ke->cached_lift.n_inputs, fp_l);
+    cg_render_uop_kernel_root(root, "k", fp_s);
+    fclose(fp_l);
+    fclose(fp_s);
+    // Bit-equality: every byte of the rendered MSL must match.
+    CHECK(strcmp(buf_legacy, buf_struct) == 0);
+    // C99 path (CPU JIT) parity too.
+    char buf_legacy_c[16384];
+    char buf_struct_c[16384];
+    FILE *fp_lc = fmemopen(buf_legacy_c, sizeof(buf_legacy_c), "w");
+    FILE *fp_sc = fmemopen(buf_struct_c, sizeof(buf_struct_c), "w");
+    CHECK(fp_lc != NULL);
+    CHECK(fp_sc != NULL);
+    cg_render_uop_kernel_c(root, "k",
+                           ke->cached_lift.out_buf,
+                           ke->cached_lift.in_bufs,
+                           ke->cached_lift.n_inputs, fp_lc);
+    cg_render_uop_kernel_c_root(root, "k", fp_sc);
+    fclose(fp_lc);
+    fclose(fp_sc);
+    CHECK(strcmp(buf_legacy_c, buf_struct_c) == 0);
+    // Sanity: the rendered MSL references "in0" and "in1" and "out"
+    // (proves the structural slot decode landed on the lifter's
+    // intended names).
+    CHECK(strstr(buf_struct, "in0") != NULL);
+    CHECK(strstr(buf_struct, "in1") != NULL);
+    CHECK(strstr(buf_struct, "out") != NULL);
+  }
+  thvm_free();
+
+  // === slice 3: structural renderer survives re-lift ===
+  // The pre-slice-3 renderer required the caller to pass
+  // in_bufs[] / out_buf matching the Term identities embedded in
+  // root by Term equality.  Slice 3 makes naming structural via
+  // UOP_BUFFER.instance, so even if a caller invoked the renderer
+  // with a fresh-lift root and stale in_bufs[] from an earlier
+  // session, the structural entry still emits the same kernel.  We
+  // simulate this by re-lifting and verifying bit-equality of the
+  // structural output between the cached and freshly-lifted roots
+  // (both should hash-cons to the same Term in the same session,
+  // but the test makes the invariant explicit).
+  TEST_BEGIN("slice3/structural-renderer-relift-stable");
+  unsetenv("THVM_BACKEND");
+  thvm_init();
+  Shape s_rl = {0}; s_rl.ndim = 1; s_rl.dims[0] = 8;
+  f32 src_rl[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+  u32 t_rl = tensor_alloc(CURRENT_BACKEND, s_rl, DT_FP32);
+  CURRENT_BACKEND->buf_write(TENS[t_rl].buf_id, src_rl, sizeof(src_rl));
+  u32 kernels_before_rl = KERNELS_NEXT;
+  Term k_rl = thvm_materialize(uop_unary(UOP_NEG,
+      term_new(0, TAG_TEN, DT_FP32, t_rl)));
+  (void)k_rl;
+  u32 kid_rl = first_emitted_kernel_with_lift_success(kernels_before_rl);
+  CHECK(kid_rl != 0);
+  if (kid_rl != 0) {
+    KernelEntry *ke = &KERNELS[kid_rl];
+    Term cached_root = ke->compute_root;
+    KernelUopLift fresh = {0};
+    int ok = kernel_lift_to_uop(ke, &fresh);
+    CHECK(ok != 0);
+    char buf_a[16384];
+    char buf_b[16384];
+    FILE *fp_a = fmemopen(buf_a, sizeof(buf_a), "w");
+    FILE *fp_b = fmemopen(buf_b, sizeof(buf_b), "w");
+    cg_render_uop_kernel_root(cached_root, "k", fp_a);
+    cg_render_uop_kernel_root(fresh.store_root, "k", fp_b);
+    fclose(fp_a);
+    fclose(fp_b);
+    CHECK(strcmp(buf_a, buf_b) == 0);
+  }
+  thvm_free();
+
   // === gc_collect evacuates compute_root ===
   TEST_BEGIN("compute-root/survives-gc-collect");
   unsetenv("THVM_BACKEND");

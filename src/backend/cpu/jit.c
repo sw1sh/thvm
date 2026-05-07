@@ -156,19 +156,20 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // interpreter (matches slice 1 behavior; second lift would have
   // declined identically).
   //
-  // The renderer's identity-based buffer-name resolution
-  // (rmu_buf_names_set in render_uop.c) matches lift.in_bufs[] /
-  // lift.out_buf to UOP_BUFFER leaves under the store_root by Term
-  // equality.  All three came from the same materialize-time lift
-  // call, share heap-resident cells (evacuated together by
-  // gc_evacuate_side_tables), and stay aligned across collections.
+  // Phase C slice 3: pass the cached store_root directly into the
+  // structural-mode renderer entry point.  Buffer names (out, inN)
+  // are decoded from each UOP_BUFFER's instance field (set by
+  // kernel_lift.c to slot+1 on inputs, 0 on the output).
+  // ke->cached_lift.in_bufs[] is no longer load-bearing for buffer
+  // naming; it's still useful as a GC root and as a cache for
+  // cpu_uop_walk's per-slot identity matching, but the renderer
+  // doesn't consult it.
   if (ke->cached_lift.store_root == 0) return NULL;
-  KernelUopLift const *lift = &ke->cached_lift;
+  Term store_root = ke->cached_lift.store_root;
   char buf[16384];
   FILE *fp = fmemopen(buf, sizeof(buf), "w");
   if (fp == NULL) return NULL;
-  cg_render_uop_kernel_c(lift->store_root, "k", lift->out_buf,
-                         lift->in_bufs, lift->n_inputs, fp);
+  cg_render_uop_kernel_c_root(store_root, "k", fp);
   long n = ftell(fp);
   fclose(fp);
   if (n <= 0) return NULL;
