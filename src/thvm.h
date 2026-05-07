@@ -2192,12 +2192,9 @@ fn int kernel_lift_to_uop(struct KernelEntry const *ke,
 // path flip readiness).  Reset by thvm_init / thvm_free.
 fn u64  kernel_lift_attempts(void);
 fn u64  kernel_lift_successes(void);
-fn u64  kernel_lift_compiles(void);
-fn u64  kernel_lift_compile_fails(void);
 fn void kernel_lift_counters_reset(void);
 fn void kernel_lift_count_attempt(void);
 fn void kernel_lift_count_success(void);
-fn void kernel_lift_count_compile(int ok);
 
 // === UOp DAG renderer ===
 // Walks the UOp DAG rooted at `root` and emits pseudo-MSL.  Replaces

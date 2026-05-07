@@ -1,22 +1,15 @@
 // Coverage counters for kernel_lift_to_uop.  Read via
-// kernel_lift_attempts() / kernel_lift_successes() / etc.
-// Counters are global (single-threaded scheduling).  Reset by
-// thvm_init / thvm_free.
+// kernel_lift_attempts() / kernel_lift_successes().  Counters are
+// global (single-threaded scheduling).  Reset by thvm_init / thvm_free.
 static u64 KERNEL_LIFT_ATTEMPTS;
 static u64 KERNEL_LIFT_SUCCESSES;
-static u64 KERNEL_LIFT_COMPILES;       // shadow-rendered MSL also compiled
-static u64 KERNEL_LIFT_COMPILE_FAILS;
 
 fn u64 kernel_lift_attempts(void)        { return KERNEL_LIFT_ATTEMPTS; }
 fn u64 kernel_lift_successes(void)       { return KERNEL_LIFT_SUCCESSES; }
-fn u64 kernel_lift_compiles(void)        { return KERNEL_LIFT_COMPILES; }
-fn u64 kernel_lift_compile_fails(void)   { return KERNEL_LIFT_COMPILE_FAILS; }
 
 fn void kernel_lift_counters_reset(void) {
   KERNEL_LIFT_ATTEMPTS = 0;
   KERNEL_LIFT_SUCCESSES = 0;
-  KERNEL_LIFT_COMPILES = 0;
-  KERNEL_LIFT_COMPILE_FAILS = 0;
 }
 
 // Increment helpers for callers in earlier translation units (codegen/
@@ -24,10 +17,6 @@ fn void kernel_lift_counters_reset(void) {
 // static globals directly).
 fn void kernel_lift_count_attempt (void) { KERNEL_LIFT_ATTEMPTS++; }
 fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
-fn void kernel_lift_count_compile (int ok) {
-  if (ok) KERNEL_LIFT_COMPILES++;
-  else    KERNEL_LIFT_COMPILE_FAILS++;
-}
 
 // schedule/kernel_lift.c - lift a scheduled kernel's ScalarUop arena
 // to a UOp DAG root suitable for cg_render_uop_kernel.

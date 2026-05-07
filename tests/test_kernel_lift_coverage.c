@@ -75,12 +75,9 @@ int main(void) {
   // Print cumulative counts for human inspection -- no assertion
   // here, just the coverage signal.  Run BEFORE the counter reset.
   fprintf(stderr,
-          "kernel_lift coverage: attempts=%llu successes=%llu "
-          "compiles=%llu compile_fails=%llu\n",
+          "kernel_lift coverage: attempts=%llu successes=%llu\n",
           (unsigned long long)kernel_lift_attempts(),
-          (unsigned long long)kernel_lift_successes(),
-          (unsigned long long)kernel_lift_compiles(),
-          (unsigned long long)kernel_lift_compile_fails());
+          (unsigned long long)kernel_lift_successes());
   CHECK(kernel_lift_attempts() > 0u);
   CHECK(kernel_lift_successes() > 0u);
 
@@ -88,8 +85,6 @@ int main(void) {
   kernel_lift_counters_reset();
   CHECK_EQ(kernel_lift_attempts (), 0u);
   CHECK_EQ(kernel_lift_successes(), 0u);
-  CHECK_EQ(kernel_lift_compiles (), 0u);
-  CHECK_EQ(kernel_lift_compile_fails(), 0u);
 
   thvm_free();
   TEST_REPORT();
