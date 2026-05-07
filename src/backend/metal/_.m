@@ -1701,13 +1701,6 @@ static id<MTLComputePipelineState> metal_gemm_pipeline(u32 tile) {
   return METAL_GEMM_PSOS[idx];
 }
 
-static u32 metal_isqrt_exact(u32 x) {
-  for (u32 r = 1; r * r <= x; r++) {
-    if (r * r == x) return r;
-  }
-  return 0;
-}
-
 static int metal_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   TileGemmInfo gemm;
   if (!tile_collect_mma_plan(ke, &gemm) || gemm.dtype != DT_FP32) {

@@ -2363,10 +2363,13 @@ typedef enum {
   KDISPATCH_CPU_TILE    = 8,   // CPU TileUop path over ScalarUop
   KDISPATCH_METAL_TILE  = 9,   // Metal: TileUop MSL source -> threadgroup dispatch
   KDISPATCH_METAL_GEMM  = 10,  // Metal: direct f32 matmul over unexpanded inputs
-  KDISPATCH_METAL_CONV  = 11,  // Metal: direct f32 conv2d over im2col-fused graph
-  // 12 was KDISPATCH_METAL_GEMV (retired; rank-1 matvec routes through
-  // METAL_GEMM).  Slot reserved to keep KDISPATCH_METAL_ALIAS = 13
-  // stable for any external integer-keyed consumer of dispatch kinds.
+  // 11 was KDISPATCH_METAL_CONV (retired; metal_try_conv2d_flat was a
+  // diagnostic-only branch gated on THVM_METAL_SPECIALIZED, deleted in
+  // 97d58c32 -- conv shapes now route through render_uop's generic
+  // accumulator). 12 was KDISPATCH_METAL_GEMV (retired; rank-1 matvec
+  // routes through METAL_GEMM). Slots reserved to keep
+  // KDISPATCH_METAL_ALIAS = 13 stable for any external integer-keyed
+  // consumer of dispatch kinds.
   KDISPATCH_METAL_ALIAS = 13,  // Metal: metadata-only alias, no command encoding
 } KDispatchKind;
 
