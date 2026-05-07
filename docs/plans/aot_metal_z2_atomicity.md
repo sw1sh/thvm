@@ -129,6 +129,41 @@ aggressive: each re-entry allocs new cells and the depth blows
 through book heap.  The right fix is structural -- mark already-
 walked compound positions and stop, like CPU cnf does.
 
+## Status (as of step 7)
+
+The recommended (A) was upgraded mid-flight to **(A)+per-thread
+substitution map** -- instead of dropping shared-cell SUB writes
+(which broke active-binder Church-bool LAMs entirely), each
+thread caches them in a private map (loc -> term|SUB) consulted
+by VAR / DP enter cases before the device heap.  That fix landed
+in commit fabf370 (iter Z+2 step 5).
+
+Iter Z+2 step 6 (commit 6530f4e) added the deep walker for
+issue 2: APP-of-DP and DP-of-DP redirects push the outer frame
+back, descend into the inner DP, and let it resolve.  This is
+the structural fix the original recommendation called out for
+iter Z+4 -- pulled forward because the per-thread reducer's
+arena cap already bounds runaway, so re-entry is safe.
+
+Iter Z+2 step 7 (commit 4c4ec32) found and fixed the actual
+non-determinism source: `aot_arena_alloc` returned 0 on overflow
+without flagging, so downstream IC fires wrote to heap[0..N]
+racing across overflowing threads.  Sticky `overflow` flag now
+forces an ERA-sentinel bail before any racing writes.
+
+After step 7: V=2/V=3 fully OK + deterministic.  V>=4 SAT
+discriminant degraded vs the (non-deterministic) intermediate
+runs because the deterministic version no longer gets lucky
+garbage-NUM hits from arena overflow races.  Recovering V>=4
+requires iter Z+3 (option (B) in this doc) so threads can SHARE
+substitutions via heap atomics instead of each thread redoing
+the entire reduction in its own arena.
+
+Bumping arena cap from 1024 -> 8192 was tried (between steps 7
+and 8) and made zero difference -- the per-thread redirect
+cascade exhausts even 8K cells per thread.  The bottleneck is
+algorithmic (per-thread duplicate work), not arena sizing.
+
 ## Critical files
 
 - `src/backend/metal/shaders/aot_ic_collapse.metal` -- the parallel

@@ -2840,8 +2840,12 @@ u64 thvm_aot_metal_ic_collapse(Term root, u32 depth,
   // Iter Z+2 step 5: per-thread book-heap arenas.  Pre-allocate
   // n * arena_size cells past iter Z's book_next.  Arena size scales
   // with available headroom (cap 1024, floor 32) so we never spill
-  // BOOK_CAP.  If even the floor doesn't fit, bail with a host
-  // error rather than corrupting the heap.
+  // BOOK_CAP.  Empirically, raising the cap to 8192 doesn't change
+  // V>=4 outcomes -- the per-thread redirect cascade exhausts even
+  // 8K cells.  The fix is iter Z+3 (heap-shared substitutions via
+  // 32-bit slot atomics, so threads don't redo each other's IC
+  // fires); for now 1024 keeps memory pressure bounded across the
+  // bench's accumulated state pattern.
   uint64_t headroom = (book_cells > book_next_u32)
       ? (book_cells - (uint64_t)book_next_u32 - 64ULL)
       : 0ULL;
