@@ -193,11 +193,32 @@ the BOOK_HEAP binder, never sees the per-call APP-LAM substitution,
 and the EQL frame's `heap_set(loc+0, whnf)` mutates the BOOK_HEAP
 cell across calls.  Same gap likely for AND/OR/WHEN.
 
-A naive fix (just adding `case TAG_EQL: return 2;` to `alo_node_arity`)
-segfaulted the runtime -- there's something else `alo_realize` does
-for EQL-shaped cells (probably needs to handle the F_EQL_R frame
-mutation differently, or VAR-rebinding inside EQL slots).  Worth
-returning to with more care.
+**Resolution** (commit a355cb1d): the alo_arity fix needed BOTH
+sides -- `alo_node_arity` AND
+[src/book/from_dynamic.c](../../src/book/from_dynamic.c)'s
+`dyn_arity`.  When `dyn_arity` returned 0, TDef snapshots left
+the EQL cell pointing into DYN_HEAP; subsequent TRef accesses
+dereferenced freed memory -> segfault.  Fixed by listing
+TAG_EQL/AND/OR/WHEN in both arity tables.  TEql in LAM bodies
+now works correctly: `TLam[v, TIfZero[TEql[v, 1], v, 2]]`
+applied to NUM(3) returns NUM(3) (passthrough), to NUM(1)
+returns NUM(2) (rewrite fired).
+
+**Metal-side EQL port** (commit 98bf5c1a): mirrors OP2's wnf
+state machine -- TAG_EQL ENTER pushes frame and descends left;
+APPLY EQL frame fires NUM-NUM directly, eql_sup_l on SUP-left,
+or pushes F_EQL_R (with reduced left at heap[loc+0]) and
+descends right; APPLY F_EQL_R fires NUM-NUM compare, eql_sup_r
+on SUP-right.  Two new MSL inlines (aot_eql_sup_l / _r) at
+7 cells each.
+
+**Toys still on TOp2** for now: Metal regression on the
+TEql-converted toys (1/6 down to 2/6) traces to the same
+DUP-of-shared-cell pattern we hit before with OP2 -- EQL's
+`heap_set(loc + 0, whnf)` mutation through the F_EQL_R frame
+interacts differently with the search-Term sharing than
+OP2's frame does.  EQL emit infrastructure stays in tree for
+when the encoder learns to insert TDups at sharing points.
 
 **Implications for milestones**:
 - Milestone 4 (rebuild TFindEquationalProof on IC search) should use
