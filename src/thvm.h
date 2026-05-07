@@ -3180,8 +3180,6 @@ fn void     kernel_program_cache_reset(void);
 fn u64      kernel_program_key(KProgOp const *prog, u32 n_ops);
 fn u64      kernel_rangeified_key(KernelEntry const *ke);
 fn KernelAxes *kernel_rangeified_axes_cache_lookup_or_insert(KernelEntry const *ke);
-fn KProgOp *kernel_program_cache_lookup(KProgOp const *prog, u32 n_ops,
-                                        u32 *out_n_ops);
 fn KProgOp *kernel_program_cache_insert(KProgOp const *prog, u32 n_ops);
 fn u32      kernel_program_cache_size(void);
 

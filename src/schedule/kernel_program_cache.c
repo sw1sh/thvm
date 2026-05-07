@@ -138,30 +138,6 @@ static int kp_program_equal(KProgOp const *a, u32 a_n,
   return memcmp(a, b, (size_t)a_n * sizeof(KProgOp)) == 0;
 }
 
-// Look up; on hit, sets *out_n_ops and returns the cached pointer.
-// On miss, returns NULL.  The returned pointer is cache-owned --
-// the caller must mark its KernelEntry as program_shared.
-fn KProgOp *kernel_program_cache_lookup(KProgOp const *prog,
-                                        u32 n_ops,
-                                        u32 *out_n_ops) {
-  if (n_ops == 0) return NULL;
-  u64 key = kp_program_hash(prog, n_ops);
-  u32 mask = KP_CACHE_CAP - 1;
-  u32 h = (u32)(key ^ (key >> 32));
-  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
-  for (u32 probe = 0; probe < KP_CACHE_CAP; probe++) {
-    u32 i = (h + probe) & mask;
-    KpCacheSlot *s = &KP_CACHE[i];
-    if (s->key == 0) return NULL;
-    if (s->key == key &&
-        kp_program_equal(prog, n_ops, s->program, s->n_ops)) {
-      *out_n_ops = s->n_ops;
-      return s->program;
-    }
-  }
-  return NULL;
-}
-
 // Slot-bearing variant: returns the cache slot whose program equals
 // `prog`, NULL on miss.  Used when the caller needs not just the
 // interned program pointer but also the shared `axes` so kids
