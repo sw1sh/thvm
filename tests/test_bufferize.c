@@ -1361,22 +1361,26 @@ int main(void) {
   CHECK_EQ(cg_supports(&KERNELS[mco_kid]), 0);
   CHECK(cg_emit_metal(&KERNELS[mco_kid]) == NULL);
   CHECK(cg_emit_tile_metal(&KERNELS[mco_kid]) == NULL);
-  // CPU interpreter (path 6 in cpu_dispatch_kernel) is the ONE
-  // dispatcher that supports multi-output kernels (Step 7 of
-  // multi-output groundwork lifted its guard).  Every other
-  // CPU-side dispatcher entry point still bails.  Construct a
-  // minimal in_buf_ids array and verify the per-path behavior.
+  // F6 multi-output walker (cpu_uop_walk) is the dispatcher that
+  // supports multi-output kernels post-cpu_interpret-removal: the
+  // lifter's STORE-AFTER chain feeds the walker an op-by-op view of
+  // the program and each STORE dispatches to the right CpuBuf via
+  // its UOP_BUFFER inst.  The other CPU-side dispatchers still bail.
+  // Construct a minimal in_buf_ids array and verify the per-path
+  // behavior.
   u32 mco_in_bufs[16] = {0};
   for (u32 i = 0; i < KERNELS[mco_kid].n_inputs && i < 16; i++) {
     u32 itid = KERNELS[mco_kid].input_tids[i];
     mco_in_bufs[i] = (itid != 0 && itid < TENS_NEXT) ? TENS[itid].buf_id : 0;
   }
   u32 mco_out_buf = TENS[KERNELS[mco_kid].output_tid].buf_id;
-  // cpu_interpret now accepts multi-output kernels.  No KProgOp on
-  // this kernel is marked with store_extra_plus_one > 0, so the
-  // extra output buffer stays uninitialized; we just check the
-  // run succeeds.
-  CHECK_EQ(cpu_interpret(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
+  // The synthetic kernel has n_extra_outputs=1 but no KProgOp marked
+  // with store_extra_plus_one > 0, so the extra output buffer stays
+  // uninitialized; the walker still completes the primary-output
+  // dispatch via the cached_lift produced at materialize time (when
+  // n_extra was still 0, before this test injected the extra).  We
+  // just check the dispatch succeeds.
+  CHECK_EQ(cpu_dispatch_kernel(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   CHECK_EQ(cpu_dispatch_scalar(&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), -1);
   CHECK_EQ(cpu_dispatch_tile  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
   CHECK_EQ(cpu_blas_dispatch  (&KERNELS[mco_kid], mco_in_bufs, mco_out_buf), 0);
