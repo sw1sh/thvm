@@ -174,7 +174,6 @@ static u64 kautotune_cache_key(KernelEntry const *ke, KOpt const *candidates,
   h = kautotune_hash_u64(h, depth);
   h = kautotune_hash_u64(h, beam_width);
   h = kautotune_hash_cstr(h, getenv("THVM_TILE"));
-  h = kautotune_hash_cstr(h, getenv("THVM_METAL_SPECIALIZED"));
   h = kautotune_hash_u64(h, kautotune_structural_key(ke));
 
   if (ke != NULL) {
