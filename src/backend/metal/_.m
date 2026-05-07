@@ -563,7 +563,6 @@ u64 thvm_metal_peak_deferred_bytes(void) {
 // metal_pipeline_for accessor + on-demand fill live with the rest of
 // the dispatch path further down.
 static id<MTLComputePipelineState> METAL_PIPELINES_CACHE[UOP_COUNT][32];
-static id<MTLComputePipelineState> METAL_GEMM_PSOS[3];
 
 // metal_jit cache decls live further down (alongside the MSL emit
 // path).  Forward-declare the cache reset so metal_shutdown can
@@ -608,9 +607,6 @@ static void metal_shutdown(void) {
   for (u32 op = 0; op < UOP_COUNT; op++)
     for (u32 dt = 0; dt < 32; dt++)
       METAL_PIPELINES_CACHE[op][dt] = nil;
-  for (u32 i = 0; i < 3; i++) {
-    METAL_GEMM_PSOS[i] = nil;
-  }
   metal_jit_cache_reset_impl();
   metal_graph_cache_reset_impl();
   // Phase 7 iter BB: drop the cached AOT book_heap MTLBuffer wrapper
@@ -1500,15 +1496,6 @@ static int metal_kernel_supported(struct KernelEntry const *ke) {
   return 1;
 }
 
-static int metal_gemm_tile_index(u32 tile, u32 *idx) {
-  switch (tile) {
-    case 8:  *idx = 0; return 1;
-    case 16: *idx = 1; return 1;
-    case 32: *idx = 2; return 1;
-    default: return 0;
-  }
-}
-
 static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
   u32 n_app = tile_anno_applied_opts_count(ke);
   KOpt const *opts = tile_anno_applied_opts(ke);
@@ -1518,143 +1505,6 @@ static int metal_kernel_has_applied_opt(struct KernelEntry const *ke, u8 op) {
     }
   }
   return 0;
-}
-
-static id<MTLComputePipelineState> metal_gemm_pipeline(u32 tile) {
-  u32 idx = 0;
-  if (!metal_gemm_tile_index(tile, &idx)) {
-    return nil;
-  }
-  if (METAL_GEMM_PSOS[idx] != nil) return METAL_GEMM_PSOS[idx];
-  char src[4096];
-  int nw = snprintf(src, sizeof(src),
-      "#include <metal_stdlib>\n"
-      "using namespace metal;\n"
-      "#define TILE %uu\n"
-      "kernel void thvm_gemm_tiled(device const float *A [[buffer(0)]],\n"
-      "                            device const float *B [[buffer(1)]],\n"
-      "                            device float *C [[buffer(2)]],\n"
-      "                            constant uint *cfg [[buffer(3)]],\n"
-      "                            uint2 tid [[thread_position_in_threadgroup]],\n"
-      "                            uint2 gid [[threadgroup_position_in_grid]]) {\n"
-      "  uint M = cfg[0], N = cfg[1], K = cfg[2];\n"
-      "  uint ldA = cfg[3], ldB = cfg[4], flags = cfg[5];\n"
-      "  bool transA = (flags & 1u) != 0u;\n"
-      "  bool transB = (flags & 2u) != 0u;\n"
-      "  uint row = gid.y * TILE + tid.y;\n"
-      "  uint col = gid.x * TILE + tid.x;\n"
-      "  threadgroup float As[%u];\n"
-      "  threadgroup float Bs[%u];\n"
-      "  uint lid = tid.y * TILE + tid.x;\n"
-      "  float acc = 0.0f;\n"
-      "  for (uint k0 = 0; k0 < K; k0 += TILE) {\n"
-      "    uint ak = k0 + tid.x;\n"
-      "    uint bk = k0 + tid.y;\n"
-      "    float av = 0.0f;\n"
-      "    float bv = 0.0f;\n"
-      "    if (row < M && ak < K) {\n"
-      "      av = transA ? A[ak * ldA + row] : A[row * ldA + ak];\n"
-      "    }\n"
-      "    if (col < N && bk < K) {\n"
-      "      bv = transB ? B[col * ldB + bk] : B[bk * ldB + col];\n"
-      "    }\n"
-      "    As[lid] = av;\n"
-      "    Bs[lid] = bv;\n"
-      "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-      "    for (uint kk = 0; kk < TILE && k0 + kk < K; kk++) {\n"
-      "      acc += As[tid.y * TILE + kk] * Bs[kk * TILE + tid.x];\n"
-      "    }\n"
-      "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-      "  }\n"
-      "  if (row < M && col < N) {\n"
-      "    C[row * N + col] = acc;\n"
-      "  }\n"
-      "}\n",
-      tile, tile * tile, tile * tile);
-  if (nw <= 0 || (size_t)nw >= sizeof(src)) {
-    return nil;
-  }
-  NSError *err = nil;
-  NSString *srcStr = [NSString stringWithUTF8String:src];
-  id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
-                                                  options:nil
-                                                    error:&err];
-  if (lib == nil) {
-    fprintf(stderr, "thvm: metal_gemm -- compile failed: %s\n",
-            err ? [[err localizedDescription] UTF8String] : "(no error)");
-    return nil;
-  }
-  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"thvm_gemm_tiled"];
-  if (mtlFn == nil) return nil;
-  METAL_GEMM_PSOS[idx] = [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn
-                                                                      error:&err];
-  if (METAL_GEMM_PSOS[idx] == nil) {
-    fprintf(stderr, "thvm: metal_gemm -- pipeline-state failed: %s\n",
-            err ? [[err localizedDescription] UTF8String] : "(no error)");
-  }
-  return METAL_GEMM_PSOS[idx];
-}
-
-static int metal_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  TileGemmInfo gemm;
-  if (!tile_collect_mma_plan(ke, &gemm) || gemm.dtype != DT_FP32) {
-    return 0;
-  }
-  if (gemm.a_input >= ke->n_inputs || gemm.b_input >= ke->n_inputs
-      || gemm.a_input == gemm.b_input) {
-    return 0;
-  }
-
-  u32 b0 = in_buf_ids[gemm.a_input];
-  u32 b1 = in_buf_ids[gemm.b_input];
-  if (out_buf_id == 0 || out_buf_id >= METAL_BUFS_NEXT) {
-    return 0;
-  }
-  if (b0 == 0 || b1 == 0 || b0 >= METAL_BUFS_NEXT || b1 >= METAL_BUFS_NEXT) {
-    return 0;
-  }
-  if (METAL_BUFS[b0].buf == nil || METAL_BUFS[b1].buf == nil
-      || METAL_BUFS[out_buf_id].buf == nil) {
-    return 0;
-  }
-  u32 a_numel = (u32)(METAL_BUFS[b0].nbytes / sizeof(float));
-  u32 b_numel = (u32)(METAL_BUFS[b1].nbytes / sizeof(float));
-  if (a_numel != gemm.M * gemm.K || b_numel != gemm.K * gemm.N) {
-    return 0;
-  }
-
-  u32 tile = gemm.tile_size;
-  u32 tile_idx = 0;
-  if (!metal_gemm_tile_index(tile, &tile_idx)) {
-    tile = 16;
-  }
-  id<MTLComputePipelineState> pso = metal_gemm_pipeline(tile);
-  if (pso == nil) {
-    return 0;
-  }
-  NSUInteger mtile = (NSUInteger)tile;
-  if ([pso maxTotalThreadsPerThreadgroup] < mtile * mtile) {
-    return 0;
-  }
-  id<MTLCommandBuffer> cmd = metal_command_buffer();
-  if (cmd == nil) {
-    return 0;
-  }
-  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-  [enc setComputePipelineState:pso];
-  [enc setBuffer:METAL_BUFS[b0].buf offset:0 atIndex:0];
-  [enc setBuffer:METAL_BUFS[b1].buf offset:0 atIndex:1];
-  [enc setBuffer:METAL_BUFS[out_buf_id].buf offset:0 atIndex:2];
-  u32 cfg[6] = {gemm.M, gemm.N, gemm.K, gemm.ldA, gemm.ldB, gemm.flags};
-  [enc setBytes:cfg length:sizeof(cfg) atIndex:3];
-  MTLSize groups = MTLSizeMake(((NSUInteger)gemm.N + mtile - 1) / mtile,
-                               ((NSUInteger)gemm.M + mtile - 1) / mtile,
-                               1);
-  MTLSize threads = MTLSizeMake(mtile, mtile, 1);
-  [enc dispatchThreadgroups:groups threadsPerThreadgroup:threads];
-  [enc endEncoding];
-  metal_submit_if_standalone(cmd);
-  return 1;
 }
 
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
@@ -1787,14 +1637,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       cg_profile_record(kid, KDISPATCH_METAL_TILE, cg_now_us() - t0);
       return 0;
     }
-  }
-
-  if (kprog_supported && metal_try_gemm(ke, effective_buf_ids, out_buf_id)) {
-    for (u32 i = 0; i < ke->n_inputs; i++) {
-      if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
-    }
-    cg_profile_record(kid, KDISPATCH_METAL_GEMM, cg_now_us() - t0);
-    return 0;
   }
 
   if (!kprog_supported) {
