@@ -158,10 +158,14 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // Render to a malloc'd string, matching cg_emit_tile_metal's
   // contract.  Use kernel name "k" so MTLLibrary lookup behaves like
   // the existing path.
+  // F3.1: pre-render pass installs UOP_OPT(_, TC, 0) on matmul-shaped
+  // STORE roots so render_uop's simdgroup_matrix template fires.
+  // No-op for non-matmul kernels.
+  Term store_root = uop_recognise_tc(lift.store_root);
   char buf[16384];
   FILE *fp = fmemopen(buf, sizeof(buf), "w");
   if (fp == NULL) return NULL;
-  cg_render_uop_kernel(lift.store_root, "k", lift.out_buf,
+  cg_render_uop_kernel(store_root, "k", lift.out_buf,
                        lift.in_bufs, lift.n_inputs, fp);
   long n = ftell(fp);
   fclose(fp);

@@ -2177,6 +2177,12 @@ fn Term uop_opt_target(Term t);   // 0 on tag mismatch
 fn u32  uop_opt_kind  (Term t);
 fn u32  uop_opt_factor(Term t);
 
+// Recognise the matmul shape on a UOP_STORE root and wrap the inner
+// REDUCE with UOP_OPT(_, TC, 0) so render_uop's simdgroup_matrix
+// template fires. Returns the input root unchanged on any non-match.
+// See src/uop/recognise_tc.c for the exact pattern.
+fn Term uop_recognise_tc(Term root);
+
 // === Kernel lift to UOp DAG ===
 // Translate a fully-scheduled kernel's ScalarUop arena to a UOp DAG
 // root suitable for cg_render_uop_kernel.  Bridges the migration

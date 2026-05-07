@@ -271,6 +271,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/graph_rewrite.c"
 #include "uop/upat.c"
 #include "uop/graph_simplify.c"
+#include "uop/recognise_tc.c"
 
 // === scalar/ ===
 // Per-kernel ScalarUop[] simplification harness (Phase 2 of the
