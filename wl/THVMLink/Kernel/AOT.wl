@@ -75,6 +75,14 @@ useful when you have many independent OP2 folds queued up.  Pre-built \
 the OP2 cells via TBookAlloc/TBookSet first; the kernel reads from \
 book_heap directly.";
 
+(* Forward-declare symbols owned by alphabetically-later siblings
+   (Ref.wl, Switch.wl) that load AFTER AOT.wl.  Without these stub
+   declarations, bare references in the `Private` block would resolve
+   to fresh THVMLink`Private` symbols rather than the public ones the
+   sibling files later attach downvalues to.  Same pattern Format.wl
+   uses for late-loading TOpt / TKernelOpts / TKernelVariant. *)
+{TDefName, TNum};
+
 Begin["`Private`"];
 
 (* Lazy-loaded library functions (matches the pattern used by every
@@ -98,25 +106,12 @@ $aotRun4PooledFn := $aotRun4PooledFn = load["thvm_wl_aot_run4_pooled",
    dlopen for a given name.  Per-session; not persisted. *)
 $aotPaths = <||>;
 
-(* TDefName lives in `THVMLink`` (public context, declared via
-   ::usage in Ref.wl), but Ref.wl loads AFTER AOT.wl in the
-   alphabetical sibling order.  At AOT.wl parse time the bare
-   `TDefName` symbol gets created in the current context
-   (THVMLink`Private`), which is distinct from the THVMLink`TDefName
-   that Ref.wl will later attach downvalues to.
-
-   Defer the lookup to call time via Symbol["THVMLink`TDefName"]
-   so we hit the right symbol after Ref.wl has loaded.  Same trick
-   below for `ttermRaw` (used by TAOTRun to unbox a TTerm input). *)
-defNameLookup[name_] := Symbol["THVMLink`TDefName"][name]
-ttermUnbox[t_]       := Symbol["THVMLink`Private`ttermRaw"][t]
-
-TAOTEmit[name_String]  := (ensureInit[]; $aotEmitFn[defNameLookup[name], name])
+TAOTEmit[name_String]  := (ensureInit[]; $aotEmitFn[TDefName[name], name])
 TAOTEmit[name_Integer] := (ensureInit[]; $aotEmitFn[name, "def" <> ToString[name]])
 
 TAOTCompile[name_String] := (
   ensureInit[];
-  Module[{path = $aotCompileFn[defNameLookup[name], name]},
+  Module[{path = $aotCompileFn[TDefName[name], name]},
     If[ StringLength[path] == 0,
       $Failed,
       $aotPaths[name] = path;
@@ -143,26 +138,22 @@ TAOTRun[name_String, input_TTerm] := (
   ensureInit[];
   Module[{path = TAOTPath[name], in, raw},
     If[ MissingQ[path], Return[$Failed]];
-    in  = ttermUnbox[input];
+    in  = ttermRaw[input];
     raw = $aotRunFn[path, name, in];
-    (* Wrap the result as a TTerm.  TTerm[raw_Integer] is the
-       low-level constructor (matches what ttermRaw round-trips). *)
-    Symbol["THVMLink`TTerm"][raw]
+    TTerm[raw]
   ]
 );
 
 (* Convenience: also accept raw Integer input (skips the TTerm
    wrap).  Useful for NUM-keyed dispatches. *)
-TAOTRun[name_String, input_Integer] := TAOTRun[name,
-  Symbol["THVMLink`TNum"][input]
-];
+TAOTRun[name_String, input_Integer] := TAOTRun[name, TNum[input]];
 
 (* Multi-arg form: TAOTRun[name, {arg0, arg1, ...}].  Up to 4 args
    (matches AOT_MAX_ARGS).  Each arg can be a TTerm or a raw
    Integer (wrapped as TNum).  Trailing slots default to 0.
    Unlocks 2/3-arg defs (build, ack, gab_tak, ...). *)
-toRawArg[t_TTerm]  := ttermUnbox[t]
-toRawArg[i_Integer] := ttermUnbox[Symbol["THVMLink`TNum"][i]]
+toRawArg[t_TTerm]   := ttermRaw[t]
+toRawArg[i_Integer] := ttermRaw[TNum[i]]
 toRawArg[_]         := 0
 
 TAOTRun[name_String, inputs_List] := (
@@ -174,7 +165,7 @@ TAOTRun[name_String, inputs_List] := (
       Return[$Failed]];
     raws = PadRight[toRawArg /@ inputs, 4, 0];
     raw  = $aotRun4Fn[path, name, raws[[1]], raws[[2]], raws[[3]], raws[[4]]];
-    Symbol["THVMLink`TTerm"][raw]
+    TTerm[raw]
   ]
 );
 TAOTRun::nargs = "TAOTRun supports up to 4 args (got `1`).";
@@ -227,8 +218,8 @@ $aotIcCollapseFn := $aotIcCollapseFn = load[
 
 TAOTIcCollapse[t_TTerm, depth_Integer] := Module[{raws},
     ensureInit[];
-    raws = $aotIcCollapseFn[Symbol["THVMLink`Private`ttermRaw"][t], depth];
-    Symbol["THVMLink`TTerm"] /@ raws
+    raws = $aotIcCollapseFn[ttermRaw[t], depth];
+    TTerm /@ raws
 ];
 
 (* Phase 7 iter QQ: WL surface for the batch dispatcher.  Caller
@@ -238,17 +229,15 @@ TAOTBatchOp2Fold[rootLocs_List] := Module[{raws},
   ensureInit[];
   raws = $aotMetalBatchOp2Fn[
     Developer`ToPackedArray[rootLocs, Integer]];
-  Symbol["THVMLink`TTerm"] /@ raws
+  TTerm /@ raws
 ]
 
 aotMetalRunImpl[name_String, args_List] := Module[{raws},
   raws = toRawArg /@ args;
-  Symbol["THVMLink`TTerm"][
-    $aotMetalRunNFn[Symbol["THVMLink`TDefName"][name], name, raws]]
+  TTerm[$aotMetalRunNFn[TDefName[name], name, raws]]
 ]
 aotMetalRunImpl[name_String, input_TTerm]   := aotMetalRunImpl[name, {input}]
-aotMetalRunImpl[name_String, input_Integer] := aotMetalRunImpl[name,
-  {Symbol["THVMLink`TNum"][input]}]
+aotMetalRunImpl[name_String, input_Integer] := aotMetalRunImpl[name, {TNum[input]}]
 
 (* Iter Z+2 step 4: generic per-def runner via the static aot_ic_def_run
    PSO.  No per-def MSL emit / xcrun roundtrip -- one PSO across all
@@ -261,21 +250,31 @@ $aotMetalIcDefRunFn := $aotMetalIcDefRunFn = load[
 
 aotMetalIcDefRunImpl[name_String, args_List] := Module[{raws},
   raws = toRawArg /@ args;
-  Symbol["THVMLink`TTerm"][
-    $aotMetalIcDefRunFn[Symbol["THVMLink`TDefName"][name],
+  TTerm[
+    $aotMetalIcDefRunFn[TDefName[name],
         Developer`ToPackedArray[raws, Integer]]]
 ]
 aotMetalIcDefRunImpl[name_String, input_TTerm]   := aotMetalIcDefRunImpl[name, {input}]
-aotMetalIcDefRunImpl[name_String, input_Integer] := aotMetalIcDefRunImpl[name,
-  {Symbol["THVMLink`TNum"][input]}]
+aotMetalIcDefRunImpl[name_String, input_Integer] := aotMetalIcDefRunImpl[name, {TNum[input]}]
+
+(* Method spec parses two ways: a bare String "Metal"/"CPU" -> head
+   only (no opts), or a List {head, opt -> val, ...} -> head + opts
+   tail.  Anything else falls through to the failure message. *)
+methodHead[spec_] := Replace[spec,
+    {_String                -> spec,
+     {h_String, ___}        :> h,
+     _                      -> None}]
+methodOpts[spec_] := Replace[spec,
+    {{_String, o___}        :> {o},
+     _                      -> {}}]
 
 TAOTRun[name_String, args_, Method -> spec_] := Module[{head, opts},
   ensureInit[];
-  head = Switch[spec, _String, spec, {_String, ___}, First[spec], _, None];
-  opts = Switch[spec, {_String, ___}, Rest[spec], _, {}];
+  head = methodHead[spec];
+  opts = methodOpts[spec];
   Switch[head,
     "Metal",
-      If[ MemberQ[opts, "Generic" -> True],
+      If[ TrueQ @ Lookup[opts, "Generic", False],
           aotMetalIcDefRunImpl[name, args],
           aotMetalRunImpl[name, args]],
     "CPU",   aotCpuRunImpl[name, args, spec],
@@ -309,8 +308,7 @@ aotCpuRunImpl[name_String, args_, spec_] := Module[
     TAOTRun[name, args],
     raws  = toRawArg /@ args;
     slots = PadRight[raws, 4, 0];
-    Symbol["THVMLink`TTerm"][
-      $aotRun4PooledFn[path, name, threads,
+    TTerm[$aotRun4PooledFn[path, name, threads,
                        slots[[1]], slots[[2]], slots[[3]], slots[[4]]]]
   ]
 ]
