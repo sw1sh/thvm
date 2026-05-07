@@ -118,6 +118,7 @@ struct ThreadCtx {
   uint size;
   uint next;
   uint smap_n;
+  uint overflow;            // sticky flag: arena exhausted -> bail
   SubstSlot smap[AOT_SUBST_MAP_CAP];
 };
 
@@ -127,12 +128,20 @@ static inline Term aot_heap_load(device Term *heap, ulong loc) {
 static inline void aot_heap_store(device Term *heap, ulong loc, Term v) {
   heap[loc] = v;
 }
-// Arena alloc: returns absolute heap loc for n cells, 0 on overflow.
-// At overflow downstream IC fires write garbage cells; the wnf state
-// machine bounces them as stuck APP/SUP terms.  Better than racing.
+// Arena alloc: returns absolute heap loc for n cells.  On overflow
+// sets the sticky `overflow` flag and returns 0.  Callers don't
+// have to check; the wnf state machine consults the flag at the
+// top of each iter and bails with an ERA sentinel.  Without this,
+// a c=0 alloc cascade lets multiple overflowing threads write to
+// heap[0..N] concurrently -- a determinism bug source observed at
+// V>=4 in the bench (same input -> different stuck-tag distribution
+// across runs).
 static inline ulong aot_arena_alloc(thread ThreadCtx *ctx, uint n) {
   uint local = ctx->next;
-  if (local + n > ctx->size) return 0u;
+  if (local + n > ctx->size) {
+    ctx->overflow = 1u;
+    return 0u;
+  }
   ctx->next = local + n;
   return ulong(ctx->base + local);
 }
@@ -276,6 +285,11 @@ static Term aot_wnf_thread(thread ThreadCtx *ctx, Term term,
   uint ic_iters = 0u;
   while (state != 2u && ic_iters < AOT_COLLAPSE_ITER_CAP) {
     ic_iters++;
+    if (ctx->overflow != 0u) {
+      // Arena exhausted -- bail with sentinel before any racing
+      // writes to shared heap cells.
+      return msl_term_new(TAG_ERA, 0xFFFFDu, 0u);
+    }
     if (state == 0u) {
       uint t = msl_term_tag(next);
       if (t == TAG_VAR) {
@@ -351,7 +365,16 @@ static Term aot_wnf_thread(thread ThreadCtx *ctx, Term term,
           next = whnf;
           state = 0u; continue;
         }
-        aot_heap_store(heap, app_loc + 0, whnf);
+        // Iter Z+2 step 7: only write to arena cells.  app_loc is
+        // in iter Z's shared range; writing whnf here would race
+        // with sibling threads (each has its own smap state and
+        // might compute a different whnf for the same source).
+        // Skip the write -- we lose the heap-side caching, but
+        // the whnf is still propagated up via `whnf = frame` for
+        // this thread's continued reduction.
+        if (aot_in_arena(ctx, app_loc)) {
+          aot_heap_store(heap, app_loc + 0, whnf);
+        }
         whnf = frame; continue;
       }
       if (ft == TAG_DP0 || ft == TAG_DP1) {
@@ -386,7 +409,10 @@ static Term aot_wnf_thread(thread ThreadCtx *ctx, Term term,
           next = whnf;
           state = 0u; continue;
         }
-        aot_heap_store(heap, loc, whnf);
+        // Same shared-cell-write avoidance as the APP frame above.
+        if (aot_in_arena(ctx, loc)) {
+          aot_heap_store(heap, loc, whnf);
+        }
         whnf = frame; continue;
       }
       whnf = frame; continue;
@@ -424,10 +450,11 @@ kernel void aot_ic_collapse(
     uint                 tid        [[thread_position_in_grid]])
 {
   ThreadCtx ctx;
-  ctx.base   = *arena_base + tid * (*arena_size);
-  ctx.size   = *arena_size;
-  ctx.next   = 0u;
-  ctx.smap_n = 0u;
+  ctx.base     = *arena_base + tid * (*arena_size);
+  ctx.size     = *arena_size;
+  ctx.next     = 0u;
+  ctx.smap_n   = 0u;
+  ctx.overflow = 0u;
 
   Term cur = (Term)*root_in;
   uint depth = 0u;
