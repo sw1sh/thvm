@@ -11,7 +11,8 @@
 //   - thvm_materialize at root post-materializes the alias into a
 //     fresh contig buf with reversed values.
 //   - A strided consumer (ADD over the FLIP alias) computes
-//     correctly via cpu_interpret's pre-materialize path.
+//     correctly via the UOp DAG walker (cpu_uop_walk), which
+//     replaced cpu_interpret's pre-materialize path in F6 cleanup.
 
 #include "../src/thvm.c"
 #include "test.h"
