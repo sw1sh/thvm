@@ -146,31 +146,29 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // (lift_to_uop returns 0) bail to the interpreter naturally; no
   // silent JIT compile of a wrong kernel.
   //
-  // Phase C slice 1 consumer wedge: prefer ke->compute_root as the
-  // "would the lifter succeed?" oracle.  Materialize ran the same
-  // kernel_lift_to_uop call after rangeify and stored the result in
-  // ke->compute_root; if it's 0, the lift declined at materialize
-  // time and will decline again here (the kernel state is immutable
-  // post-materialize).  Early-bail to the interpreter to skip the
-  // redundant second lift call.  Saves the lift work + a downstream
-  // fmemopen + render attempt that would have failed at the same
-  // gate.  Behavior is preserved: for kernels where materialize-time
-  // lift declined, this path returned NULL after the second lift
-  // anyway; for kernels where materialize-time lift succeeded, we
-  // still call kernel_lift_to_uop below to obtain in_bufs[] / out_buf
-  // (rmu_buf_names_set matches them by Term identity to assign
-  // "in0".."inN-1" / "out" labels, so the root MUST be the SAME
-  // lift's store_root for its UOP_BUFFER leaves to resolve).
-  // Caching the full KernelUopLift on KernelEntry to fully drop the
-  // second lift is a follow-up slice.
-  if (ke->compute_root == 0) return NULL;
-  KernelUopLift lift = {0};
-  if (!kernel_lift_to_uop(ke, &lift)) return NULL;
+  // Phase C slice 2: read the cached KernelUopLift populated by
+  // emit_kernel_for_boundary.  The lift is deterministic in the
+  // post-materialize kernel state (program[] / scalar_uops[] /
+  // input_views[] are immutable after materialize), so reading from
+  // cache produces the same store_root / out_buf / in_bufs[] as a
+  // fresh kernel_lift_to_uop call would.  When materialize-time
+  // lift declined, cached_lift.store_root is 0 -- early-bail to the
+  // interpreter (matches slice 1 behavior; second lift would have
+  // declined identically).
+  //
+  // The renderer's identity-based buffer-name resolution
+  // (rmu_buf_names_set in render_uop.c) matches lift.in_bufs[] /
+  // lift.out_buf to UOP_BUFFER leaves under the store_root by Term
+  // equality.  All three came from the same materialize-time lift
+  // call, share heap-resident cells (evacuated together by
+  // gc_evacuate_side_tables), and stay aligned across collections.
+  if (ke->cached_lift.store_root == 0) return NULL;
+  KernelUopLift const *lift = &ke->cached_lift;
   char buf[16384];
   FILE *fp = fmemopen(buf, sizeof(buf), "w");
   if (fp == NULL) return NULL;
-  cg_render_uop_kernel_c(lift.store_root, "k", lift.out_buf,
-                         lift.in_bufs, lift.n_inputs, fp);
+  cg_render_uop_kernel_c(lift->store_root, "k", lift->out_buf,
+                         lift->in_bufs, lift->n_inputs, fp);
   long n = ftell(fp);
   fclose(fp);
   if (n <= 0) return NULL;
