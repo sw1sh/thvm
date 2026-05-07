@@ -1,5 +1,16 @@
 # CPU backend and the codegen pipeline
 
+> **2026-05-08 status note**: this document predates the F6 collapse
+> (see [docs/plans/ideal_pipeline.md](plans/ideal_pipeline.md) row F6).
+> `render_c.c`, `render_c_scalar.c`, `cg_emit`, and the `Renderer`
+> abstraction were deleted in 3b60fa7c. The CPU JIT now compiles
+> through `cg_render_uop_kernel_c` (lifter + UOp-DAG renderer) only;
+> non-lift-eligible kernels fall back to the per-op interpreter
+> (`backend/cpu/op/*.c`). The high-level mechanics described below
+> are still accurate; references to `render_c.c` / `C_RENDERER` /
+> `cg_emit` should be read as historical context for the pipeline
+> shape that has now collapsed.
+
 The directory layout hides a real boundary. `src/backend/cpu/` is one
 layer (runtime dispatch + buffer lifecycle + a per-UOp interpreter),
 and `src/codegen/` is a second, backend-agnostic layer that produces

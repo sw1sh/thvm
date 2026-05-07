@@ -1,34 +1,22 @@
-// codegen/cg.c - backend-independent kernel-program emitter.
+// codegen/cg.c - shared codegen utilities.
 //
-// Walks a KernelEntry's program[] and dispatches each KProgOp to a
-// Renderer, which knows how to emit code for one target language
-// (C, MSL, ...).  The emitter owns the high-level structure (function
-// preamble, loop opening, per-op temporaries, loop closing, function
-// postamble); the Renderer fills in the target-specific syntax
-// (signature, intrinsic names, broadcast access, loop headers).
+// Post-F6 (3b60fa7c) this file is a thin support layer for the CPU
+// JIT pre-build gate. The original Renderer abstraction + cg_emit
+// driver were deleted when render_uop_c became the sole CPU JIT
+// emit path; what remains are predicates the dispatch ladder uses
+// to decide whether a kernel is JIT-eligible.
 //
-// Two emission modes:
+// Public surface:
+//   - cg_program_dtype(ke): uniform-dtype check, DT_COUNT on mixed.
+//   - cg_kernel_has_extra_outputs(ke): multi-output rejector.
+//   - cg_supports(ke): full pre-flight gate; cpu_jit_dispatch calls
+//     this before warming up the JIT cache.
 //
-//   1. "elementwise": program contains only CONST + ALU ops.  Single
-//      per-output loop binds `i = 0..numel-1`; each op writes a
-//      temporary; the last temporary is stored to `out[i]`.
-//
-//   2. "reduce-tail": last op is a REDUCE; everything before it is
-//      elementwise.  Outer loop iterates over output elements (`oi`);
-//      an inner k-loop accumulates over the reduction axis;
-//      inside the inner loop `i` shadows oi to point at the source
-//      index, so existing per-op emitters work unchanged.
-//
-// Anything outside these two shapes (movement ops, multiple REDUCEs,
-// non-tail REDUCE) bails at cg_supports and the caller falls back to
-// the interpreter / per-op shaders.
-
-// === supported-op predicate ============================================
-//
-// Accepts CONST + the elementwise ALU set anywhere; accepts REDUCE
-// only as the last op (and only SUM / MAX kinds).  Anything else --
-// movement, multi-REDUCE, mid-program REDUCE -- bails and the caller
-// falls back to the interpreter.
+// The supported-op predicate (cg_supports) accepts CONST + the
+// elementwise ALU set anywhere, and REDUCE only as the last op
+// (SUM / MAX kinds).  Anything else -- movement, multi-REDUCE,
+// mid-program REDUCE -- bails and the caller falls back to the
+// per-op interpreter (backend/cpu/op/*.c).
 
 // Predicate: does this dtype have a clang-buildable native C type
 // the JIT renderer can emit directly?  f16/bf16/fp8/int4 need
@@ -57,7 +45,7 @@ static int cg_op_is_float_only(u8 op) {
 
 // Pick the kernel's uniform dtype: scan every op + every input and
 // return the dtype if all match, else DT_COUNT (= sentinel).  Used
-// by render_c.c to emit a single typed C kernel.
+// by cg_supports to gate non-uniform kernels off the CPU JIT.
 u32 cg_program_dtype(KernelEntry const *ke) {
   if (ke->n_ops == 0) return DT_COUNT;
   u32 dt = ke->program[0].dtype;
