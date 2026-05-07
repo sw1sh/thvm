@@ -145,6 +145,25 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key) {
   // and a default-on flip in fc40c60a. Kernels the lifter declines
   // (lift_to_uop returns 0) bail to the interpreter naturally; no
   // silent JIT compile of a wrong kernel.
+  //
+  // Phase C slice 1 consumer wedge: prefer ke->compute_root as the
+  // "would the lifter succeed?" oracle.  Materialize ran the same
+  // kernel_lift_to_uop call after rangeify and stored the result in
+  // ke->compute_root; if it's 0, the lift declined at materialize
+  // time and will decline again here (the kernel state is immutable
+  // post-materialize).  Early-bail to the interpreter to skip the
+  // redundant second lift call.  Saves the lift work + a downstream
+  // fmemopen + render attempt that would have failed at the same
+  // gate.  Behavior is preserved: for kernels where materialize-time
+  // lift declined, this path returned NULL after the second lift
+  // anyway; for kernels where materialize-time lift succeeded, we
+  // still call kernel_lift_to_uop below to obtain in_bufs[] / out_buf
+  // (rmu_buf_names_set matches them by Term identity to assign
+  // "in0".."inN-1" / "out" labels, so the root MUST be the SAME
+  // lift's store_root for its UOP_BUFFER leaves to resolve).
+  // Caching the full KernelUopLift on KernelEntry to fully drop the
+  // second lift is a follow-up slice.
+  if (ke->compute_root == 0) return NULL;
   KernelUopLift lift = {0};
   if (!kernel_lift_to_uop(ke, &lift)) return NULL;
   char buf[16384];

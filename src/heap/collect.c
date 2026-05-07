@@ -254,12 +254,21 @@ static void gc_evacuate_side_tables(u64 *alloc) {
   for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) {
     WNF_LAST_STACK[i] = gc_evacuate(WNF_LAST_STACK[i], alloc);
   }
-  // KernelEntry: source_uop + symbolic input_terms[].  output_tid
-  // and input_tids[] are TenDesc ids, not Terms.
+  // KernelEntry: source_uop + compute_root + symbolic input_terms[].
+  // output_tid and input_tids[] are TenDesc ids, not Terms.  The
+  // Phase C compute_root field carries the post-lift UOp DAG; it
+  // shares heap-resident UOP_BUFFER / UOP_STORE / UOP_INDEX_E cells
+  // with source_uop's subgraph in the common case but also holds
+  // freshly-allocated arithmetic spine cells (uop_int_binary etc.)
+  // produced by the lifter.  Evacuating it here keeps those cells
+  // alive across collections while the kernel is still in KERNELS[].
   for (u32 k = 0; k < KERNELS_NEXT; k++) {
     KernelEntry *ke = &KERNELS[k];
     if (ke->source_uop != 0) {
       ke->source_uop = gc_evacuate(ke->source_uop, alloc);
+    }
+    if (ke->compute_root != 0) {
+      ke->compute_root = gc_evacuate(ke->compute_root, alloc);
     }
     if (ke->input_terms != NULL) {
       for (u32 i = 0; i < ke->n_inputs; i++) {

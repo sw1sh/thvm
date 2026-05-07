@@ -1114,6 +1114,16 @@ typedef struct KernelEntry {
   // recurses into the original UOp graph naturally.
   Term      source_uop;
 
+  // Phase C dual-write: post-lift UOp DAG root for this kernel's
+  // compute (the UOP_STORE produced by kernel_lift_to_uop).  0 / NULL
+  // when the lift hasn't been attempted (gemm/conv2d-only kernels
+  // before dispatch) or declines.  Populated by emit_kernel_for_boundary
+  // alongside the legacy program[] / scalar_uops[] outputs so consumers
+  // can prefer this representation; program[] remains the primary
+  // source of truth until every consumer flips.  Heap-resident terms
+  // are evacuated by gc_evacuate_side_tables (heap/collect.c).
+  Term      compute_root;
+
   u8        spliced;               // 1 if the kernel's program was inlined
                                    // into a parent via
                                    // materialize_splice_into; kernel_fire_by_id
