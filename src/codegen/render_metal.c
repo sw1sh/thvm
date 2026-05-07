@@ -188,17 +188,6 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // Render to a malloc'd string, matching cg_emit_tile_metal's
   // contract.  Use kernel name "k" so MTLLibrary lookup behaves like
   // the existing path.
-  // F3.4: matmul-shape kernels with K not divisible by 8 don't fit
-  // render_uop's simdgroup_matrix template; the fallback there is a
-  // per-thread scalar accumulator which loses to metal_try_gemm's
-  // tile-shared-mem GEMM. Decline the kernel so the dispatch ladder
-  // falls through to metal_try_gemm. K%8==0 (or K-extent unknown)
-  // proceeds and gets the simdgroup template via uop_recognise_tc.
-  u32 mm_k = 0;
-  if (uop_classify_matmul(lift.store_root, &mm_k) && mm_k != 0
-      && (mm_k % 8) != 0) {
-    return NULL;
-  }
   // F3.1: pre-render pass installs UOP_OPT(_, TC, 0) on matmul-shaped
   // STORE roots so render_uop's simdgroup_matrix template fires.
   // No-op for non-matmul kernels.
