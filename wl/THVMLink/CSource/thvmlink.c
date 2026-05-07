@@ -1343,10 +1343,11 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint arg
   return LIBRARY_NO_ERROR;
 }
 
-// Render a kernel's program through the C renderer (cg_emit +
-// C_RENDERER) and return the source as a UTF8 string.  Used by
-// tests + diagnostics to inspect what the JIT will compile.  Pass
-// kid (KERNELS table index, 1..KERNELS_NEXT-1).
+// Render a kernel's program as C99 by lifting to the UOp DAG and
+// emitting via cg_render_uop_kernel_c (matches the path cpu_jit_build
+// itself takes after F6 step 15). Used by tests + diagnostics to
+// inspect what the JIT will compile.  Pass kid (KERNELS table index,
+// 1..KERNELS_NEXT-1).
 EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
                                                mint argc, MArgument *args,
                                                MArgument res) {
@@ -1356,11 +1357,32 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
-  char *src = cg_emit(&KERNELS[kid], &C_RENDERER);
+  KernelUopLift lift = {0};
+  if (!kernel_lift_to_uop(&KERNELS[kid], &lift)) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  char buf[16384];
+  FILE *fp = fmemopen(buf, sizeof(buf), "w");
+  if (fp == NULL) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  cg_render_uop_kernel_c(lift.store_root, "k", lift.out_buf,
+                         lift.in_bufs, lift.n_inputs, fp);
+  long n = ftell(fp);
+  fclose(fp);
+  if (n <= 0) {
+    MArgument_setUTF8String(res, (char *)"");
+    return LIBRARY_NO_ERROR;
+  }
+  char *src = (char *)malloc((size_t)n + 1);
   if (src == NULL) {
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
+  memcpy(src, buf, (size_t)n);
+  src[n] = '\0';
   // libData->UTF8String_disown is the matching free; WL retains the
   // pointer until that's called.  Caller (WL side) holds it long
   // enough to pull the string contents and then it gets reaped.
