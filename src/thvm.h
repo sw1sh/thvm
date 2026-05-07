@@ -1881,6 +1881,19 @@ fn void axes_ensure_scalar_reduce(struct KernelEntry *ke);
 // log carrying KOP_GROUP / KOP_GROUPTOP, scalar arena reduce extent).
 fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
 
+// E9-prep wedge 4: derive per-axis KAX_ types from the higher-level
+// signals (output shape + tail-reduce + scalar-reduce + applied_opts
+// log) instead of reading `ke->axes->axis_types[]`.  Mirrors the
+// writer trio (axes_default_for + axes_ensure_scalar_reduce +
+// axes_apply_opt) exactly.  Returns the number of axes written; 0 on
+// overflow / unknown opt class.  Used by
+// tile_emit_axes_from_kernel_signals (the post-rename
+// tile_emit_axes_from_kernel_axes) as the primary read source when
+// applied_opts is non-empty, and under THVM_E9_VALIDATE=1 as a
+// cross-check against legacy `axis_types[]` reads.
+fn u32  axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
+                                u32 cap);
+
 // Apply one TOpt to the axis structure: split the indicated axis,
 // mark the new inner axis with the opt's KAX_ type (UPCAST/UNROLL/
 // LOCAL/etc.), mark a full LOOP axis as GLOBAL, append to
