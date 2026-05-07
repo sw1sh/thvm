@@ -93,48 +93,44 @@ state passes 530/530); resuming the simdgroup-path widening
 requires understanding the schedule's materialisation behaviour
 first.
 
-## Deeper analysis (2026-05-08): simdgroup_load stride mismatch is the actual blocker
+## F3.5 RESOLVED (2026-05-08, 099c78f6): lifter view.strides
 
-simdgroup_load takes `(matrix, ptr, elements_per_row)` and reads an
-8x8 block as `block[i][j] = ptr[i*elements_per_row + j]` -- 8 rows
-of 8 *consecutive* elements. The 8 rows are 8 m-values; the 8
-elements per row are 8 *physically consecutive* float words.
+The 2026-05-07 plan note claimed the schedule materialises EXPAND
+into a 4096-element buffer, making the lifter's dim-product
+addressing "actually CORRECT". That conclusion was WRONG.
 
-For a NON-materialised matmul A with shape `[16,16]` (M-stride=K=16,
-K-stride=1), this is correct: 8 rows starting at `m_base*16+k_base`,
-each row holding 8 consecutive k-values. `simdgroup_load(_a,
-&in0[m*16+k], 16)` works.
+A focused diagnostic under widened cg_tile_metal_dispatch_shape
+fallback + a probe MSL `out[tid] = in0[tid] + 1000.0f * in1[tid]`
+revealed in0[1] = -8 (= A[0][1]), not -2 (= A[0][0] broadcast on n).
+The schedule does NOT materialise EXPAND for matmul -- the view
+stays virtual with stride=0 on the broadcast dim. So the lifter's
+`stride[d] = product(dims[d+1..])` addressing was reading at
+offsets m*256+k*16+n into a 256-element underlying buffer -- way
+out of bounds, hence garbage values (CPU=-189, GPU=80).
 
-For the **materialised** EXPAND buffer (shape `[16,16,16]`, strides
-`[256,16,1]`), the third dim is the broadcast n-axis: each "row"
-of 16 consecutive floats is a single (m,k) pair repeated 16 times
-across n. So 8 consecutive elements at any address are 8 n-values
-of the SAME (m,k), not 8 different k-values. simdgroup_load reads
-nonsense regardless of the chosen elements_per_row -- the API can
-only express two strides (row, 1), but the matmul wants three
-(M=256, K=16, fetch-width=16) where the fetch dimension is K not n.
+Fix landed in 099c78f6: use ke->input_views[slot].strides[d] when
+available, skipping stride=0 terms. Adds uop_buffer_inst_get to
+resolve a UOP_BUFFER's instance back to the kernel input slot.
 
-**This means option (a) "fix the lifter to use view.strides" is
-moot** -- once the buffer is materialised, the n-axis-broadcast
-information is gone, and there's no way for an 8x8 simdgroup_load
-to skip the n stride-1 dimension. The fix MUST be one of:
+Address now resolves to `m*K + k*1 + 0 = m*K+k` -- correct for the
+underlying 2D buffer. Generic accumulator path produces matmul
+output bit-equal to CPU.
 
-  1. **Stop materialising the EXPAND** (schedule change): keep the
-     view as `[16,16]` with the n-broadcast applied virtually at
-     LOAD-site. Lifter then emits `m*16+k`, simdgroup_load works.
-     Requires changes to the bufferize/materialize pass.
-  2. **Tile-shared-mem template** (render_uop change): scratch a
-     contiguous KxN block from the materialised buffer into
-     `threadgroup` memory using per-thread strided copies, then
-     simdgroup_load over the contiguous scratch. Heavier but
-     local to render_uop.
+The cg_tile_metal_dispatch_shape fallback was widened in the same
+commit: tile_compute_dispatch_shape returning 0 (e.g. TILE_MMA root
+that doesn't fit FLAT_GRID/LOCAL_GLOBAL/GROUP_REDUCE) now falls
+through to the lift-based path, routing TMatMul-equivalent kernels
+through render_uop's generic accumulator. The simdgroup_matrix
+template stays gated on uop_recognise_tc's 2-range distinctness
+check; matmul with materialised EXPAND has 3-range addresses and
+correctly bypasses the simdgroup template, so the stride-mismatch
+concern earlier in this section is moot for the current path.
 
-Option 2 is the cleaner path -- isolated to render_uop and doesn't
-require schedule restructuring -- but is genuinely multi-iteration:
-new kernel signature (thread_position_in_threadgroup +
-threadgroup_position_in_grid), new dispatch shape calc, threadgroup
-shared As/Bs arrays. The 60s loop iterations cannot honestly
-execute this; it needs a focused multi-hour session.
+Future perf wedge: when EXPAND IS materialised (e.g. via
+THVM_FORCE_MATERIALIZE or specific shape patterns), a tile-shared-mem
+template would scratch a contiguous KxN block before simdgroup_load.
+Tracked but no longer correctness-blocking -- generic accumulator
+handles it.
 
 ## Path 4 vs path 7 dispatch mystery (2026-05-08, g1 wedge)
 
