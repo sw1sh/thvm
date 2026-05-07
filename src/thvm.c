@@ -215,6 +215,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "backend/cpu/interpret.c"
 #include "backend/cpu/blas.c"
 #include "backend/cpu/jit.c"
+#include "backend/cpu/uop_walk.c"
 #include "backend/cpu/_.c"
 
 // === backend/metal/ ===

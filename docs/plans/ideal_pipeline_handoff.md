@@ -79,6 +79,17 @@ not a niche fallback. Three real paths:
   would reuse the lifter (`kernel_lift_to_uop`) and walk the resulting DAG
   via a tree-walker that mirrors `cg_render_uop_kernel_c`'s emit logic but
   evaluates instead of emitting. Right architecture; multi-session.
+  **PARTIALLY LANDED 2026-05-08:** `cpu_uop_walk`
+  (`src/backend/cpu/uop_walk.c`) fires AHEAD of `cpu_jit_dispatch` in the
+  dispatch ladder. Default-on after step 1 + step 2 (bit-equal flip);
+  bisection knob `THVM_CPU_UOP_WALK=0` falls back to the legacy path.
+  Surgical suite passes bit-equal. Trace count unchanged (3) because the
+  remaining hits aren't reachable through the dispatcher: `test_bufferize`
+  has direct `cpu_interpret(...)` calls in test infra (validating
+  `cpu_interpret` itself), and `test_view_flip`'s strided-consumer kernel
+  has `scalar_uops == NULL` (rangeify bails on negative-stride FLIP) so
+  the lifter declines and the walker can't help. Deleting `cpu/op/*.c`
+  still requires the lifter to widen for negative-stride FLIP residue.
 - **(c)** Accept that `cpu_interpret` + `cpu/op/*.c` stays as the warmup
   interpreter. This is what's in tree today.
 
@@ -181,6 +192,13 @@ THVM_CPU_JIT_VIA_UOP=0    Opt out of render_uop_c, fallback to (gone) cg_emit
                           cpu_interpret.
 THVM_CPU_INTERPRET_TRACE=1 Print one-line per cpu_interpret entry (op codes
                           dumped). Use to measure F6-finish progress.
+THVM_CPU_UOP_WALK=0       Bisection knob -- opt out of the UOp DAG walker
+                          (cpu_uop_walk) and route the dispatcher straight
+                          to cpu_jit_dispatch / cpu_interpret as before.
+                          Default-on after F6-finish (b) step 2 flip.
+THVM_CPU_UOP_WALK_TRACE=1 Print one line per cpu_uop_walk entry summarising
+                          (n_inputs, root op, return code). Use to measure
+                          how many kernels the walker handles end-to-end.
 THVM_CPU_JIT_TRACE_FALLBACK=1 (Removed in F6 step 15 along with the fallback.
                               No longer wired.)
 THVM_RANGEIFY_BAIL=1       Print rangeify lowering bail reasons. Already in
