@@ -69,7 +69,16 @@ fn int tile_anno_axis_or_kernelaxes(KernelEntry const *ke, u32 d,
   if (out == NULL) return 0;
   if (tile_anno_tile_uops_fresh(ke) && tile_anno_axis_at(ke, d, out)) return 1;
   if (ke == NULL || ke->axes == NULL || d >= ke->axes->n_axes) return 0;
-  out->kax_type     = ke->axes->axis_types[d];
+  // E9-prep wedge 7: route the kax_type read through axes_resolve_kax_type
+  // in src/codegen/axis.c -- it prefers the wedge-4 simulator output
+  // (signal-derived from output_shape + tail-reduce + scalar-reduce +
+  // applied_opts) when the writer trio has run for-real (n_applied > 0)
+  // and falls back to legacy ke->axes->axis_types[] only for the
+  // wedge-6 residual hand-write tests (n_applied == 0 + sim disagree).
+  // Centralizing the legacy fallback there means tile_anno.c carries no
+  // direct ke->axes->axis_types[i] reads -- the keystone for the E9
+  // axis_types[] field deletion.
+  out->kax_type     = axes_resolve_kax_type(ke, d);
   out->extent       = ke->axes->full_shape[d];
   out->memory_scope = 0;
   out->vector_width = 0;
@@ -243,6 +252,14 @@ int tile_anno_axis_insert(KernelEntry *ke, u32 d, TileAxisInfo info) {
 // axis count + per-axis (kax_type, extent).  Useful for debugging
 // the migration -- if this ever returns 0, tile_uops is stale and
 // the freshness check should bail.
+//
+// E9-prep wedge 7: kax_type ground truth comes from
+// axes_resolve_kax_type (signal-derived simulator + n_applied==0
+// fallback), not direct ke->axes->axis_types[].  The match is
+// equivalent because the simulator mirrors the writer trio output
+// exactly (so for n_applied > 0 the simulator equals axis_types[];
+// for n_applied == 0 the resolver falls back to axis_types[]
+// directly).
 int tile_anno_axes_match(KernelEntry const *ke) {
   if (ke == NULL || ke->axes == NULL || ke->tile_uops == NULL) return 1;
   u32 ka_n = ke->axes->n_axes;
@@ -251,7 +268,7 @@ int tile_anno_axes_match(KernelEntry const *ke) {
   for (u32 i = 0; i < ka_n; i++) {
     TileAxisInfo info;
     if (!tile_anno_axis_at(ke, i, &info)) return 0;
-    if (info.kax_type != ke->axes->axis_types[i]) return 0;
+    if (info.kax_type != axes_resolve_kax_type(ke, i)) return 0;
     if (info.extent != ke->axes->full_shape[i]) return 0;
   }
   return 1;

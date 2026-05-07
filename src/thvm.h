@@ -1894,6 +1894,16 @@ fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
 fn u32  axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                 u32 cap);
 
+// E9-prep wedge 7: resolve a single axis's KAX_ type.  Prefers
+// axes_compute_axis_types output when the writer trio has run for-real
+// (n_applied > 0) and falls back to legacy ke->axes->axis_types[d]
+// otherwise (the n_applied == 0 hand-write tests + the 2 documented
+// wedge-6 residual tests in test_tile_graph).  THVM_E9_VALIDATE=1
+// cross-checks both sources and aborts on n_applied > 0 divergence.
+// Used by tile_anno.c readers to remove all direct axis_types[i] reads
+// from codegen/tile_anno.c.
+fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
+
 // Apply one TOpt to the axis structure: split the indicated axis,
 // mark the new inner axis with the opt's KAX_ type (UPCAST/UNROLL/
 // LOCAL/etc.), mark a full LOOP axis as GLOBAL, append to
