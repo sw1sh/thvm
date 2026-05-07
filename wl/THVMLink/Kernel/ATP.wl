@@ -439,18 +439,23 @@ $SubstitutionLemmaSym = "SubstitutionLemma";
 $ConclusionSym        = "Conclusion";
 
 (* Build the proof association expected by ProofObject's metadata
-   slot: <|{Axiom, k} -> <|Statement, Proof|>, ...|>.  Walks the
-   parsed trace, mapping:
-     TRACE_AXIOM   -> {Axiom, k}              (no Proof input)
-     TRACE_ORIENT  -> skipped (axiom orientation; folded into Axiom)
+   slot.  Walks the parsed trace, mapping:
+     TRACE_AXIOM   -> {Axiom, k}             (Statement = oriented form
+                                              if a matching TRACE_ORIENT
+                                              follows; else original)
+     TRACE_ORIENT  -> not emitted; folded into the source Axiom's
+                      Statement.  Builds the oriented rewrite rule list
+                      used by the Conclusion synthesizer.
      TRACE_CP      -> {SubstitutionLemma, k}  (with Input/Construct)
-   Last CP -> {Conclusion, 1} (the closing tautology)
-   Plus a {Hypothesis, 1} for the original conjecture. *)
+   Last CP, OR a synthesized step from goal normalization, becomes
+   {Conclusion, 1}.
+   Plus {Hypothesis, 1} for the original conjecture. *)
 buildProofDataset[traceRecords_List, conjecture_, rev_Association] := Module[
     {axCount = 0, lemmaCount = 0, traceIdxToKey = <||>,
-     entries = <||>, conclusionKey},
+     entries = <||>, conclusionKey, orientedRules = {},
+     conjLhs, conjRhs, lhsNorm, rhsNorm, normRules},
     Do[
-        Module[{rec = traceRecords[[i]], lhs, rhs, key},
+        Module[{rec = traceRecords[[i]], lhs, rhs, key, parentIdx, parentKey},
             lhs = parsePrettyTerm[rec["Lhs"], rev];
             rhs = parsePrettyTerm[rec["Rhs"], rev];
             Switch[rec["Type"],
@@ -461,33 +466,20 @@ buildProofDataset[traceRecords_List, conjecture_, rev_Association] := Module[
                                      "Proof"     -> <||>|>;
                     traceIdxToKey[rec["Index"]] = key,
                 "orient",
-                    (* Orient is the KBO-oriented form of an axiom.
-                       Surface as a SubstitutionLemma whose Proof
-                       points back to the source axiom; treat the
-                       construct as the same axiom (self-rewrite) so
-                       WL's ProofFunction renderer gets a complete
-                       set of keys. *)
-                    lemmaCount += 1;
-                    key = {$SubstitutionLemmaSym, lemmaCount};
-                    Module[{parentKey = If[Length[rec["Parents"]] >= 1,
-                        Lookup[traceIdxToKey, rec["Parents"][[1]], None], None]},
-                        entries[key] = <|
+                    (* Fold the orient step's lhs/rhs into the source
+                       axiom's Statement so the dataset shows the
+                       oriented form (matches what WL does at line 587-
+                       597 of EquationalProof.m).  Also accumulate the
+                       directional rule for the Conclusion synthesizer. *)
+                    parentIdx = If[ Length[rec["Parents"]] >= 1,
+                                    rec["Parents"][[1]], -1];
+                    parentKey = Lookup[traceIdxToKey, parentIdx, None];
+                    If[ parentKey =!= None,
+                        entries[parentKey] = <|
                             "Statement" -> Equal[lhs, rhs],
-                            "Proof" -> <|
-                                "Input"            -> parentKey,
-                                "Construct"        -> parentKey,
-                                "Position"         -> {},
-                                "Rule"             -> Rule[lhs, rhs],
-                                "Orientation"      -> 1,
-                                "ConstructSide"    -> 1,
-                                "InputOrientation" -> 1,
-                                "Side"             -> 1,
-                                "OutputExpression" -> Equal[lhs, rhs],
-                                "Source"           -> "orient"
-                            |>
-                        |>
-                    ];
-                    traceIdxToKey[rec["Index"]] = key,
+                            "Proof"     -> <||>|>];
+                    AppendTo[orientedRules, Rule[lhs, rhs]];
+                    traceIdxToKey[rec["Index"]] = parentKey,
                 "cp",
                     lemmaCount += 1;
                     key = {$SubstitutionLemmaSym, lemmaCount};
@@ -510,25 +502,57 @@ buildProofDataset[traceRecords_List, conjecture_, rev_Association] := Module[
                             "Source"           -> "cp"
                         |>
                     |>;
+                    AppendTo[orientedRules, Rule[lhs, rhs]];
                     traceIdxToKey[rec["Index"]] = key
             ]
         ],
         {i, Length[traceRecords]}
     ];
-    (* Insert Hypothesis after axioms, before lemmas. *)
+    (* Insert Hypothesis. *)
     entries[{$HypothesisSym, 1}] = <|"Statement" -> Equal @@ conjecture,
                                       "Proof"     -> <||>|>;
-    (* Promote last SubstitutionLemma to Conclusion. *)
-    If[ lemmaCount > 0,
-        conclusionKey = {$SubstitutionLemmaSym, lemmaCount};
-        entries[{$ConclusionSym, 1}] = entries[conclusionKey];
-        KeyDropFrom[entries, conclusionKey]
+    (* Synthesize Conclusion: apply oriented rewrite rules to both
+       sides of the conjecture; when both normalize to the same
+       expression, the closing tautology is `lhs_norm == lhs_norm`.
+       Mirrors what WL's ProofObject Conclusion entry looks like
+       (e.g., c == c after rewriting a == c with the rules). *)
+    {conjLhs, conjRhs} = conjecture;
+    normRules = orientedRules;
+    lhsNorm = conjLhs //. normRules;
+    rhsNorm = conjRhs //. normRules;
+    Which[
+        lhsNorm === rhsNorm,
+            (* Found a tautology -- synthesize Conclusion.
+               HoldForm prevents Equal[a, a] from auto-evaluating to
+               True; With substitutes the actual normalized value
+               into the held form (else Module's local symbol leaks). *)
+            With[{n = lhsNorm,
+                  constructKey = If[lemmaCount > 0,
+                                     {$SubstitutionLemmaSym, lemmaCount},
+                                     {$AxiomSym, axCount}],
+                  ruleForm = Rule @@ conjecture},
+                entries[{$ConclusionSym, 1}] = <|
+                    "Statement" -> HoldForm[Equal[n, n]],
+                    "Proof" -> <|
+                        "Input"            -> {$HypothesisSym, 1},
+                        "Construct"        -> constructKey,
+                        "Position"         -> {},
+                        "Rule"             -> ruleForm,
+                        "Orientation"      -> 1,
+                        "ConstructSide"    -> 1,
+                        "InputOrientation" -> 1,
+                        "Side"             -> 1,
+                        "OutputExpression" -> HoldForm[Equal[n, n]],
+                        "Source"           -> "goal_close"
+                    |>
+                |>
+            ],
+        lemmaCount > 0,
+            (* Fall back to promoting the last lemma. *)
+            conclusionKey = {$SubstitutionLemmaSym, lemmaCount};
+            entries[{$ConclusionSym, 1}] = entries[conclusionKey];
+            KeyDropFrom[entries, conclusionKey]
     ];
-    (* Re-order: Axioms first, then Hypothesis, then SubstitutionLemmas,
-       then Conclusion.  Return as a LIST of Rules (NOT an Association)
-       so it matches WL's $ProofPattern = {({_String, _Integer} ->
-       _Association)...}, satisfying ProofObjectQ and skipping the
-       auto-dispatch back to FindEquationalProof. *)
     SortBy[Normal[entries], $ProofKeyOrder[First[#]] &]
 ]
 
