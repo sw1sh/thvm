@@ -2293,7 +2293,6 @@ fn Term uop_graph_rewrite(Term root,
                           u32 n_rules,
                           void *user);
 fn void uop_graph_rewrite_stats_clear(void);
-fn u32  uop_graph_rewrite_stats_len(void);
 fn u32  uop_graph_rewrite_stat_hits(char const *name);
 fn Term uop_graph_simplify(Term root);
 fn Term uop_graph_simplify_checked(Term root, u32 env_id);

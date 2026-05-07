@@ -55,10 +55,6 @@ static void uop_graph_rewrite_stats_record(char const *name, u32 hits) {
   UOP_GRAPH_REWRITE_STATS_LEN++;
 }
 
-fn u32 uop_graph_rewrite_stats_len(void) {
-  return UOP_GRAPH_REWRITE_STATS_LEN;
-}
-
 fn u32 uop_graph_rewrite_stat_hits(char const *name) {
   if (name == NULL) {
     return 0;
