@@ -56,6 +56,14 @@ TAOTPath::usage =
   "TAOTPath[name] returns the dylib path stashed by TAOTCompile[name], \
 or Missing[\"NotCompiled\"] if the def has never been TAOTCompile'd.";
 
+TAOTSpSolve::usage =
+  "TAOTSpSolve[cnf, nVars, opts] runs Survey Propagation + decimation SAT \
+solver via Metal.  Returns {status, assignment} where status is \"SAT\", \
+\"UNSAT\", \"GAVE_UP\", or \"ERROR\", and assignment is a list of {-1, +1} \
+per variable (meaningful only when SAT).  Hands off to bitmask kernel when \
+residual <= 24 unfixed variables.  Options: \"MaxIters\", \"Damping\", \
+\"Threshold\".";
+
 TAOTSurveyPropagate::usage =
   "TAOTSurveyPropagate[cnf, nVars, opts] runs Survey Propagation on the CNF \
 formula via Metal.  cnf is a list of clauses, each a list of signed integers \
@@ -273,6 +281,38 @@ Options[TAOTSurveyPropagate] = {
     "Damping"  -> 0.5,
     "Threshold" -> 0.001
 };
+$aotSpSolveFn := $aotSpSolveFn = load[
+    "thvm_wl_aot_sp_solve",
+    {{Integer, 1}, {Integer, 1}, Integer, Integer, Real, Real},
+    {Integer, 1}];
+
+Options[TAOTSpSolve] = {
+    "MaxIters" -> 100,
+    "Damping"  -> 0.5,
+    "Threshold" -> 0.001
+};
+TAOTSpSolve[cnf_List, nVars_Integer,
+    opts : OptionsPattern[]] := Module[{flat, bounds, maxIters, damping, threshold, raw, status, assignment, statusStr},
+    ensureInit[];
+    flat = Flatten[cnf];
+    bounds = Prepend[Accumulate[Length /@ cnf], 0];
+    maxIters = OptionValue["MaxIters"];
+    damping = OptionValue["Damping"];
+    threshold = OptionValue["Threshold"];
+    raw = $aotSpSolveFn[
+        Developer`ToPackedArray[flat, Integer],
+        Developer`ToPackedArray[bounds, Integer],
+        nVars, maxIters, N[damping], N[threshold]];
+    status = First[raw];
+    assignment = Rest[raw];
+    statusStr = Switch[status,
+        0,  "SAT",
+        -1, "UNSAT",
+        1,  "GAVE_UP",
+        _,  "ERROR"];
+    {statusStr, assignment}
+]
+
 TAOTSurveyPropagate[cnf_List, nVars_Integer,
     opts : OptionsPattern[]] := Module[{flat, bounds, maxIters, damping, threshold},
     ensureInit[];

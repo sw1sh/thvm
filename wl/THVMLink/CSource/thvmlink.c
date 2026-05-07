@@ -2584,6 +2584,75 @@ EXTERN_C DLLEXPORT int thvm_wl_aot_sp_run(
   return LIBRARY_NO_ERROR;
 }
 
+// === Path B step 2: SP-DEC SAT solver ===================================
+//
+// Top-level Survey Propagation + decimation solver.  Returns a
+// satisfying assignment if found, indicates UNSAT, or reports
+// "gave up" if neither resolved within max-decimations.
+//
+// Args:
+//   args[0] : MTensor [Integer, 1] cnf_lits flat (signed 1-based)
+//   args[1] : MTensor [Integer, 1] cnf_bounds (n_clauses+1)
+//   args[2] : Integer n_vars
+//   args[3] : Integer sp_max_iters (per-decimation SP cap)
+//   args[4] : Real damping
+//   args[5] : Real threshold
+// Returns: MTensor [Integer, 1] of length n_vars+1; first entry is
+//   status code (0=SAT, -1=UNSAT, 1=GAVE_UP, -2=ERROR), then n_vars
+//   entries of {-1,+1} (assignment); meaningful only if status=0.
+
+extern int thvm_aot_metal_sp_solve(
+    const int32_t *cnf_lits, const uint32_t *cnf_bounds,
+    uint32_t n_clauses, uint32_t n_vars,
+    uint32_t sp_max_iters, float damping, float threshold,
+    int8_t *out_assignment);
+
+EXTERN_C DLLEXPORT int thvm_wl_aot_sp_solve(
+    WolframLibraryData libData, mint argc, MArgument *args, MArgument res) {
+  (void)argc;
+  MTensor lits_t   = MArgument_getMTensor(args[0]);
+  MTensor bounds_t = MArgument_getMTensor(args[1]);
+  u32 n_vars       = (u32)MArgument_getInteger(args[2]);
+  u32 sp_max_iters = (u32)MArgument_getInteger(args[3]);
+  double damping_d = MArgument_getReal(args[4]);
+  double thresh_d  = MArgument_getReal(args[5]);
+
+  mint n_lits   = libData->MTensor_getFlattenedLength(lits_t);
+  mint n_bounds = libData->MTensor_getFlattenedLength(bounds_t);
+  if (n_bounds < 2 || n_lits < 0 || n_vars == 0) return LIBRARY_FUNCTION_ERROR;
+  u32 n_clauses = (u32)(n_bounds - 1);
+
+  const mint *src_lits   = libData->MTensor_getIntegerData(lits_t);
+  const mint *src_bounds = libData->MTensor_getIntegerData(bounds_t);
+
+  int32_t  *cnf_lits    = (int32_t *)malloc(n_lits * sizeof(int32_t));
+  uint32_t *cnf_bounds  = (uint32_t *)malloc(n_bounds * sizeof(uint32_t));
+  int8_t   *assign      = (int8_t   *)malloc(n_vars * sizeof(int8_t));
+  if (!cnf_lits || !cnf_bounds || !assign) {
+    free(cnf_lits); free(cnf_bounds); free(assign);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  for (mint i = 0; i < n_lits; i++)   cnf_lits[i]   = (int32_t)src_lits[i];
+  for (mint i = 0; i < n_bounds; i++) cnf_bounds[i] = (uint32_t)src_bounds[i];
+
+  int rc = thvm_aot_metal_sp_solve(
+      cnf_lits, cnf_bounds, n_clauses, n_vars,
+      sp_max_iters, (float)damping_d, (float)thresh_d, assign);
+
+  free(cnf_lits); free(cnf_bounds);
+
+  MTensor rt;
+  mint dims[1] = { (mint)(n_vars + 1) };
+  int err = libData->MTensor_new(MType_Integer, 1, dims, &rt);
+  if (err != LIBRARY_NO_ERROR) { free(assign); return err; }
+  mint *dst = libData->MTensor_getIntegerData(rt);
+  dst[0] = (mint)rc;
+  for (u32 v = 0; v < n_vars; v++) dst[v + 1] = (mint)assign[v];
+  free(assign);
+  MArgument_setMTensor(res, rt);
+  return LIBRARY_NO_ERROR;
+}
+
 // === Lever 3: bitmask CNF eval ===========================================
 //
 // Direct CNF evaluation kernel; bypasses IC reduction.

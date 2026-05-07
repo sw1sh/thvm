@@ -3147,7 +3147,326 @@ int thvm_aot_metal_sp_run(
   return converged;
 }
 
+// === Path B step 2: per-variable surveys after SP convergence ============
+
+static id<MTLComputePipelineState> AOT_SP_SURVEYS_PSO = nil;
+
+static id<MTLComputePipelineState> aot_sp_surveys_pso(void) {
+  if (AOT_SP_SURVEYS_PSO != nil) return AOT_SP_SURVEYS_PSO;
+  if (METAL_DEVICE == nil || METAL_QUEUE == nil) {
+    if (metal_init() != 0) return nil;
+  }
+  NSError *err = nil;
+  NSURL *libURL = [NSURL fileURLWithPath:
+      [NSString stringWithUTF8String:THVM_METAL_METALLIB]];
+  id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithURL:libURL error:&err];
+  if (lib == nil) return nil;
+  id<MTLFunction> mtlFn = [lib newFunctionWithName:@"aot_sp_surveys"];
+  if (mtlFn == nil) return nil;
+  AOT_SP_SURVEYS_PSO =
+      [METAL_DEVICE newComputePipelineStateWithFunction:mtlFn error:&err];
+  return AOT_SP_SURVEYS_PSO;
+}
+
+int thvm_aot_metal_sp_surveys(
+    const uint32_t *var_edges_off, const uint32_t *var_edges_flat,
+    const uint8_t  *edges_sign,
+    const float    *eta,
+    uint32_t n_edges, uint32_t n_vars,
+    float *out_w_pos, float *out_w_neg, float *out_bias) {
+  id<MTLComputePipelineState> pso = aot_sp_surveys_pso();
+  if (pso == nil) return -1;
+
+  id<MTLBuffer> vo = [METAL_DEVICE newBufferWithBytes:var_edges_off
+      length:(n_vars+1)*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> vf = [METAL_DEVICE newBufferWithBytes:var_edges_flat
+      length:n_edges*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> es = [METAL_DEVICE newBufferWithBytes:edges_sign
+      length:n_edges*sizeof(uint8_t) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> et = [METAL_DEVICE newBufferWithBytes:eta
+      length:n_edges*sizeof(float) options:MTLResourceStorageModeShared];
+  id<MTLBuffer> wp = [METAL_DEVICE newBufferWithLength:n_vars*sizeof(float)
+      options:MTLResourceStorageModeShared];
+  id<MTLBuffer> wn = [METAL_DEVICE newBufferWithLength:n_vars*sizeof(float)
+      options:MTLResourceStorageModeShared];
+  id<MTLBuffer> bi = [METAL_DEVICE newBufferWithLength:n_vars*sizeof(float)
+      options:MTLResourceStorageModeShared];
+  id<MTLBuffer> nv = [METAL_DEVICE newBufferWithBytes:&n_vars
+      length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+
+  id<MTLCommandBuffer> cmd = [METAL_QUEUE commandBuffer];
+  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:vo offset:0 atIndex:0];
+  [enc setBuffer:vf offset:0 atIndex:1];
+  [enc setBuffer:es offset:0 atIndex:2];
+  [enc setBuffer:et offset:0 atIndex:3];
+  [enc setBuffer:wp offset:0 atIndex:4];
+  [enc setBuffer:wn offset:0 atIndex:5];
+  [enc setBuffer:bi offset:0 atIndex:6];
+  [enc setBuffer:nv offset:0 atIndex:7];
+  NSUInteger tg = (NSUInteger)((n_vars < 256) ? n_vars : 256);
+  [enc dispatchThreads:MTLSizeMake(n_vars, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  [enc endEncoding];
+  [cmd commit];
+  [cmd waitUntilCompleted];
+
+  memcpy(out_w_pos, [wp contents], n_vars * sizeof(float));
+  memcpy(out_w_neg, [wn contents], n_vars * sizeof(float));
+  memcpy(out_bias,  [bi contents], n_vars * sizeof(float));
+  return 0;
+}
+
+// === Path B step 2: SP-DEC solve loop ====================================
+//
+// Top-level solver: iterates SP + decimation until the formula
+// either solves (residual empty), contradicts (UNSAT), or becomes
+// "easy enough" that we hand off to the bitmask kernel for the
+// residual.  Returns 0 on SAT (out_assignment filled), -1 on UNSAT,
+// 1 if we hit max-decimations without resolving.
+
+#define SP_BITMASK_RESIDUAL_VARS 24   // residual <= 24 vars -> bitmask
+#define SP_BIAS_THRESHOLD       0.01f // below this, formula is "easy"
+#define SP_DEC_MAX_STEPS        2000  // cap
+
+int thvm_aot_metal_sp_solve(
+    const int32_t *cnf_lits,    // signed 1-based vars, flat
+    const uint32_t *cnf_bounds, // [n_clauses+1] CSR-style
+    uint32_t n_clauses,
+    uint32_t n_vars,
+    uint32_t sp_max_iters,
+    float    damping,
+    float    threshold,
+    int8_t  *out_assignment) {  // [n_vars] -1/+1, or 0 if unset
+  // Working state: per-variable assignment (0=unset, +1=T, -1=F);
+  // per-clause active flag.  We don't physically remove clauses;
+  // we mark them.  After each decimation, simplification removes
+  // satisfied clauses + falsified literals.
+  int8_t  *assign = (int8_t *)calloc(n_vars, sizeof(int8_t));
+  uint8_t *clause_active = (uint8_t *)malloc(n_clauses);
+  if (!assign || !clause_active) {
+    free(assign); free(clause_active); return -2;
+  }
+  for (uint32_t c = 0; c < n_clauses; c++) clause_active[c] = 1;
+
+  // We rebuild the edge arrays + CSR each decimation step from the
+  // current active set.  Inefficient but simple.  Hot path is SP,
+  // not the formula manipulation.
+
+  for (uint32_t step = 0; step < SP_DEC_MAX_STEPS; step++) {
+    // Build active edges.
+    uint32_t n_active_clauses = 0;
+    uint32_t n_edges = 0;
+    for (uint32_t c = 0; c < n_clauses; c++) {
+      if (!clause_active[c]) continue;
+      // Count active lits in this clause (those whose var isn't
+      // already falsified by assignment).
+      uint32_t cl_start = cnf_bounds[c], cl_end = cnf_bounds[c + 1];
+      uint32_t live = 0;
+      uint32_t sat_lit = 0;
+      for (uint32_t k = cl_start; k < cl_end; k++) {
+        int32_t lit = cnf_lits[k];
+        uint32_t v = (lit > 0) ? (uint32_t)(lit - 1) : (uint32_t)(-lit - 1);
+        int8_t want = (lit > 0) ? 1 : -1;
+        if (assign[v] == want) { sat_lit = 1; break; }
+        if (assign[v] == 0) live++;
+        // assign[v] == -want means falsified literal; skip it
+      }
+      if (sat_lit) { clause_active[c] = 0; continue; }
+      if (live == 0) {
+        // Empty clause -> UNSAT
+        free(assign); free(clause_active); return -1;
+      }
+      n_active_clauses++;
+      n_edges += live;
+    }
+
+    if (n_active_clauses == 0) {
+      // SAT -- copy assignment, set unfixed to +1 (default).
+      for (uint32_t v = 0; v < n_vars; v++) {
+        out_assignment[v] = assign[v] == 0 ? 1 : assign[v];
+      }
+      free(assign); free(clause_active);
+      return 0;
+    }
+
+    // Count remaining unfixed variables.
+    uint32_t n_unfixed = 0;
+    for (uint32_t v = 0; v < n_vars; v++) if (assign[v] == 0) n_unfixed++;
+
+    // If residual is small enough, hand off to bitmask.
+    if (n_unfixed <= SP_BITMASK_RESIDUAL_VARS) {
+      // Build a smaller CNF for the residual: remap unfixed vars to
+      // dense indices, encode active clauses (with falsified lits
+      // dropped).  Run bitmask, find first SAT assignment, fill in
+      // the original var indices.
+      int32_t *var_remap = (int32_t *)malloc(n_vars * sizeof(int32_t));
+      uint32_t *unfixed_orig = (uint32_t *)malloc(n_unfixed * sizeof(uint32_t));
+      uint32_t r = 0;
+      for (uint32_t v = 0; v < n_vars; v++) {
+        if (assign[v] == 0) {
+          var_remap[v] = (int32_t)r;
+          unfixed_orig[r] = v;
+          r++;
+        } else {
+          var_remap[v] = -1;
+        }
+      }
+      // Build pos/neg bitmasks per active clause.
+      uint32_t *pos_masks = (uint32_t *)malloc(n_active_clauses * sizeof(uint32_t));
+      uint32_t *neg_masks = (uint32_t *)malloc(n_active_clauses * sizeof(uint32_t));
+      uint32_t ci = 0;
+      for (uint32_t c = 0; c < n_clauses; c++) {
+        if (!clause_active[c]) continue;
+        uint32_t pm = 0, nm = 0;
+        for (uint32_t k = cnf_bounds[c]; k < cnf_bounds[c + 1]; k++) {
+          int32_t lit = cnf_lits[k];
+          uint32_t v = (lit > 0) ? (uint32_t)(lit - 1) : (uint32_t)(-lit - 1);
+          if (assign[v] != 0) continue;  // falsified, drop
+          uint32_t bit = 1u << var_remap[v];
+          if (lit > 0) pm |= bit; else nm |= bit;
+        }
+        pos_masks[ci] = pm;
+        neg_masks[ci] = nm;
+        ci++;
+      }
+      uint64_t n_leaves = 1ULL << n_unfixed;
+      extern u64 thvm_aot_metal_cnf_bitmask(const uint32_t *, const uint32_t *,
+                                              uint32_t, uint32_t,
+                                              uint32_t *, u64);
+      uint32_t *res = (uint32_t *)malloc(n_leaves * sizeof(uint32_t));
+      u64 nout = thvm_aot_metal_cnf_bitmask(pos_masks, neg_masks,
+                                             n_active_clauses, n_unfixed,
+                                             res, n_leaves);
+      free(pos_masks); free(neg_masks);
+      if (nout == 0) {
+        free(res); free(var_remap); free(unfixed_orig);
+        free(assign); free(clause_active);
+        return -2;
+      }
+      // Find first SAT assignment.
+      int found = -1;
+      for (uint64_t a = 0; a < n_leaves; a++) {
+        if (res[a]) { found = (int)a; break; }
+      }
+      free(res);
+      if (found < 0) {
+        free(var_remap); free(unfixed_orig);
+        free(assign); free(clause_active);
+        return -1;  // UNSAT
+      }
+      for (uint32_t k = 0; k < n_unfixed; k++) {
+        uint32_t v = unfixed_orig[k];
+        assign[v] = (((uint32_t)found >> k) & 1u) ? 1 : -1;
+      }
+      free(var_remap); free(unfixed_orig);
+      for (uint32_t v = 0; v < n_vars; v++) {
+        out_assignment[v] = assign[v] == 0 ? 1 : assign[v];
+      }
+      free(assign); free(clause_active);
+      return 0;
+    }
+
+    // Build CSR + edge arrays for the active formula.
+    uint32_t *edges_clause = (uint32_t *)malloc(n_edges * sizeof(uint32_t));
+    uint32_t *edges_var    = (uint32_t *)malloc(n_edges * sizeof(uint32_t));
+    uint8_t  *edges_sign   = (uint8_t  *)malloc(n_edges * sizeof(uint8_t));
+    uint32_t *clause_off   = (uint32_t *)malloc((n_active_clauses + 1) * sizeof(uint32_t));
+    uint32_t *clause_flat  = (uint32_t *)malloc(n_edges * sizeof(uint32_t));
+    uint32_t *var_off      = (uint32_t *)malloc((n_vars + 1) * sizeof(uint32_t));
+    uint32_t *var_flat     = (uint32_t *)malloc(n_edges * sizeof(uint32_t));
+    float    *eta_out      = (float    *)malloc(n_edges * sizeof(float));
+    float    *w_pos        = (float    *)malloc(n_vars * sizeof(float));
+    float    *w_neg        = (float    *)malloc(n_vars * sizeof(float));
+    float    *bias         = (float    *)malloc(n_vars * sizeof(float));
+
+    uint32_t e = 0;
+    uint32_t ac = 0;
+    clause_off[0] = 0;
+    for (uint32_t c = 0; c < n_clauses; c++) {
+      if (!clause_active[c]) continue;
+      for (uint32_t k = cnf_bounds[c]; k < cnf_bounds[c + 1]; k++) {
+        int32_t lit = cnf_lits[k];
+        uint32_t v = (lit > 0) ? (uint32_t)(lit - 1) : (uint32_t)(-lit - 1);
+        if (assign[v] != 0) continue;
+        edges_clause[e] = ac;
+        edges_var[e]    = v;
+        edges_sign[e]   = (lit > 0) ? 0u : 1u;
+        clause_flat[e]  = e;
+        e++;
+      }
+      ac++;
+      clause_off[ac] = e;
+    }
+    // Build var->edges CSR.
+    for (uint32_t v = 0; v <= n_vars; v++) var_off[v] = 0;
+    for (uint32_t ee = 0; ee < n_edges; ee++) var_off[edges_var[ee] + 1]++;
+    for (uint32_t v = 1; v <= n_vars; v++) var_off[v] += var_off[v - 1];
+    uint32_t *vc = (uint32_t *)malloc(n_vars * sizeof(uint32_t));
+    for (uint32_t v = 0; v < n_vars; v++) vc[v] = var_off[v];
+    for (uint32_t ee = 0; ee < n_edges; ee++) {
+      var_flat[vc[edges_var[ee]]++] = ee;
+    }
+    free(vc);
+
+    // Run SP.
+    int rc = thvm_aot_metal_sp_run(
+        edges_clause, edges_var, edges_sign,
+        clause_off, clause_flat, var_off, var_flat,
+        n_edges, n_active_clauses, n_vars,
+        sp_max_iters, damping, threshold, eta_out);
+    if (rc < 0) {
+      free(edges_clause); free(edges_var); free(edges_sign);
+      free(clause_off); free(clause_flat); free(var_off); free(var_flat);
+      free(eta_out); free(w_pos); free(w_neg); free(bias);
+      free(assign); free(clause_active); return -2;
+    }
+
+    // Compute surveys.
+    rc = thvm_aot_metal_sp_surveys(var_off, var_flat, edges_sign,
+                                     eta_out, n_edges, n_vars,
+                                     w_pos, w_neg, bias);
+    if (rc < 0) {
+      free(edges_clause); free(edges_var); free(edges_sign);
+      free(clause_off); free(clause_flat); free(var_off); free(var_flat);
+      free(eta_out); free(w_pos); free(w_neg); free(bias);
+      free(assign); free(clause_active); return -2;
+    }
+
+    // Find max-bias unfixed variable.
+    int32_t best_v = -1;
+    float best_bias = SP_BIAS_THRESHOLD;
+    for (uint32_t v = 0; v < n_vars; v++) {
+      if (assign[v] != 0) continue;
+      if (bias[v] > best_bias) {
+        best_bias = bias[v];
+        best_v = (int32_t)v;
+      }
+    }
+    int8_t fix_sign = 0;
+    if (best_v >= 0) {
+      fix_sign = (w_pos[best_v] > w_neg[best_v]) ? 1 : -1;
+      assign[best_v] = fix_sign;
+    } else {
+      // No biased variable; fix the first unfixed to +1 (greedy).
+      for (uint32_t v = 0; v < n_vars; v++) {
+        if (assign[v] == 0) { assign[v] = 1; best_v = (int32_t)v; fix_sign = 1; break; }
+      }
+    }
+
+    free(edges_clause); free(edges_var); free(edges_sign);
+    free(clause_off); free(clause_flat); free(var_off); free(var_flat);
+    free(eta_out); free(w_pos); free(w_neg); free(bias);
+  }
+
+  free(assign); free(clause_active);
+  return 1;  // gave up
+}
+
 Backend METAL_BACKEND = {
+  .id              = 2,
+  .view_aware      = 1,
   .id              = 2,
   .view_aware      = 1,   // metal_dispatch_kernel pre-materializes
                           // non-contig inputs into temp Metal bufs
