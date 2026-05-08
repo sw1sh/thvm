@@ -22,7 +22,7 @@
 // was deleted with it; cpu_dispatch_tile (the interpreter) survives
 // and run_tile_jit_1 below routes through it.  Tests that string-
 // matched the rendered C source are now vacuous on these stubs --
-// the live coverage they offered (TILE_MMA construction,
+// the live coverage they offered (matmul tile construction,
 // tile_analyze_gemm, dispatch-side metal-gemm-with-TC routing) was
 // retired with the deletion of the underlying KProgOp pattern
 // matchers in slice 8 session 5; the surviving coverage now lives in

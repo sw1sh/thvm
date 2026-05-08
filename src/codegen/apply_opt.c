@@ -89,8 +89,11 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     return 0;
   }
   if (opt.op == KOP_TC) {
+    // KOP_TC.arg is the simdgroup matmul tile size.  Apple GPUs accept
+    // 8/16/32 (the only sizes simdgroup_matrix supports today); reject
+    // anything else so autotune can't propose an unbuildable kernel.
     if (opt.axis >= tile_anno_axis_count_or_kernelaxes(ke)
-        || !tile_mma_size_supported(opt.arg)) {
+        || (opt.arg != 8 && opt.arg != 16 && opt.arg != 32)) {
       return 0;
     }
     u32 dtype = 0;
