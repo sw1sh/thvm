@@ -213,6 +213,291 @@ int main(void) {
   Term conv_inner = heap_read(term_val(conv_after_both) + 2);
   CHECK_EQ(uop_opt_kind(conv_inner), UOP_OPT_CONV);
 
+  // === input_views-decouple session 1: full-shape extractor =============
+  // Build a representative single-input non-degenerate conv2d address
+  // tree (mirrors kernel_lift_from_conv2d) and verify the extractor
+  // recovers every shape field.  Two cases: batch=1 stride1, and
+  // batched stride1.  Also check the degenerate kh=kw=1 case
+  // intentionally bails so callers can fall back to input_views.
+
+  // Local helper to build the ldW + ldX terms for a given conv shape,
+  // returning the W and X INDEX_E terms via out params.
+  // (Inline in main to keep the test file self-contained.)
+  // Case A: c_out=8 c_in=2 kh=kw=2 batch=1 h_out=w_out=10
+  //         w_off=0 w_s0=8 w_s1=1; x_off=0 x_sb=0 x_s0=11 x_s1=1 x_s2=121
+  TEST_BEGIN("conv2d-extract/single-input-batch1-stride1");
+  {
+    u32 c_out_a = 8, c_in_a = 2, kh_a = 2, kw_a = 2;
+    u32 batch_a = 1, h_out_a = 10, w_out_a = 10;
+    u32 spatial_a = h_out_a * w_out_a;
+    u32 patches_a = batch_a * spatial_a;
+    u32 KRED_a    = c_in_a * kh_a * kw_a;
+    u32 dims_w_a[2] = { c_out_a, KRED_a };
+    u32 dims_x_a[1] = { 4096 };
+    Term Wa = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims_w_a, 1);
+    Term Xa = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_x_a, 2);
+    Term r_out_a = uop_range(0, 0, c_out_a * patches_a);
+    Term r_q_a   = uop_range(1, 1, KRED_a);
+    Term k_pat_a = uop_const(DT_INT32, patches_a);
+    Term k_sp_a  = uop_const(DT_INT32, spatial_a);
+    Term k_wo_a  = uop_const(DT_INT32, w_out_a);
+    Term co_a    = uop_int_binary(UOP_IDIV, r_out_a, k_pat_a);
+    Term patch_a = uop_int_binary(UOP_IMOD, r_out_a, k_pat_a);
+    Term bi_a    = uop_int_binary(UOP_IDIV, patch_a, k_sp_a);
+    Term sp_a    = uop_int_binary(UOP_IMOD, patch_a, k_sp_a);
+    Term ow_a    = uop_int_binary(UOP_IMOD, sp_a, k_wo_a);
+    Term oh_a    = uop_int_binary(UOP_IDIV, sp_a, k_wo_a);
+    Term k_kw_a  = uop_const(DT_INT32, kw_a);
+    Term k_kh_a  = uop_const(DT_INT32, kh_a);
+    Term kw_v_a  = uop_int_binary(UOP_IMOD, r_q_a, k_kw_a);
+    Term qk_a    = uop_int_binary(UOP_IDIV, r_q_a, k_kw_a);
+    Term kh_v_a  = uop_int_binary(UOP_IMOD, qk_a, k_kh_a);
+    Term ci_a    = uop_int_binary(UOP_IDIV, qk_a, k_kh_a);
+    // wi
+    Term k_w_off_a = uop_const(DT_INT32, 0);
+    Term k_ws0_a   = uop_const(DT_INT32, 8);
+    Term k_ws1_a   = uop_const(DT_INT32, 1);
+    Term wi_co_a   = uop_int_binary(UOP_IMUL, co_a, k_ws0_a);
+    Term wi_q_a    = uop_int_binary(UOP_IMUL, r_q_a, k_ws1_a);
+    Term wi_sum_a  = uop_int_binary(UOP_IADD, wi_co_a, wi_q_a);
+    Term wi_a      = uop_int_binary(UOP_IADD, k_w_off_a, wi_sum_a);
+    // xi
+    Term k_x_off_a = uop_const(DT_INT32, 0);
+    Term k_xsb_a   = uop_const(DT_INT32, 0);
+    Term k_xs0_a   = uop_const(DT_INT32, 11);
+    Term k_xs1_a   = uop_const(DT_INT32, 1);
+    Term k_xs2_a   = uop_const(DT_INT32, 121);
+    Term xi_b_a    = uop_int_binary(UOP_IMUL, bi_a, k_xsb_a);
+    Term xi_ci_a   = uop_int_binary(UOP_IMUL, ci_a, k_xs2_a);
+    Term oh_kh_a   = uop_int_binary(UOP_IADD, oh_a, kh_v_a);
+    Term xi_h_a    = uop_int_binary(UOP_IMUL, oh_kh_a, k_xs0_a);
+    Term ow_kw_a   = uop_int_binary(UOP_IADD, ow_a, kw_v_a);
+    Term xi_w_a    = uop_int_binary(UOP_IMUL, ow_kw_a, k_xs1_a);
+    Term xi_sum1_a = uop_int_binary(UOP_IADD, xi_b_a, xi_ci_a);
+    Term xi_sum2_a = uop_int_binary(UOP_IADD, xi_h_a, xi_w_a);
+    Term xi_sum_a  = uop_int_binary(UOP_IADD, xi_sum1_a, xi_sum2_a);
+    Term xi_a      = uop_int_binary(UOP_IADD, k_x_off_a, xi_sum_a);
+    Term ldW_a = uop_index_e(Wa, wi_a);
+    Term ldX_a = uop_index_e(Xa, xi_a);
+    UopDagConv2dFlatShape s = {0};
+    int ok = uop_dag_extract_conv2d_flat_shape(
+        heap_read(term_val(ldW_a) + 1),
+        heap_read(term_val(ldX_a) + 1),
+        NULL, &s);
+    CHECK(ok);
+    CHECK_EQ(s.c_out,    c_out_a);
+    CHECK_EQ(s.c_in,     c_in_a);
+    CHECK_EQ(s.kh,       kh_a);
+    CHECK_EQ(s.kw,       kw_a);
+    CHECK_EQ(s.h_out,    h_out_a);
+    CHECK_EQ(s.w_out,    w_out_a);
+    CHECK_EQ(s.batch,    batch_a);
+    CHECK_EQ(s.patches,  patches_a);
+    CHECK_EQ(s.spatial_patches, spatial_a);
+    CHECK_EQ(s.w_offset,  0);
+    CHECK_EQ(s.w_stride0, 8);
+    CHECK_EQ(s.w_stride1, 1);
+    CHECK_EQ(s.x_offset,  0);
+    CHECK_EQ(s.x_stride_b, 0);
+    CHECK_EQ(s.x_stride0,  11);
+    CHECK_EQ(s.x_stride1,  1);
+    CHECK_EQ(s.x_stride2,  121);
+    CHECK_EQ(s.axis_r_out, 0u);
+    CHECK_EQ(s.axis_r_q,   1u);
+  }
+
+  TEST_BEGIN("conv2d-extract/single-input-batched");
+  {
+    u32 c_out_b = 16, c_in_b = 4, kh_b = 3, kw_b = 3;
+    u32 batch_b = 2, h_out_b = 12, w_out_b = 12;
+    u32 spatial_b = h_out_b * w_out_b;
+    u32 patches_b = batch_b * spatial_b;
+    u32 KRED_b    = c_in_b * kh_b * kw_b;
+    u32 dims_w_b[2] = { c_out_b, KRED_b };
+    u32 dims_x_b[1] = { 8192 };
+    Term Wb = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims_w_b, 1);
+    Term Xb = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_x_b, 2);
+    Term r_out_b = uop_range(0, 0, c_out_b * patches_b);
+    Term r_q_b   = uop_range(1, 1, KRED_b);
+    Term k_pat_b = uop_const(DT_INT32, patches_b);
+    Term k_sp_b  = uop_const(DT_INT32, spatial_b);
+    Term k_wo_b  = uop_const(DT_INT32, w_out_b);
+    Term co_b    = uop_int_binary(UOP_IDIV, r_out_b, k_pat_b);
+    Term patch_b = uop_int_binary(UOP_IMOD, r_out_b, k_pat_b);
+    Term bi_b    = uop_int_binary(UOP_IDIV, patch_b, k_sp_b);
+    Term sp_b    = uop_int_binary(UOP_IMOD, patch_b, k_sp_b);
+    Term ow_b    = uop_int_binary(UOP_IMOD, sp_b, k_wo_b);
+    Term oh_b    = uop_int_binary(UOP_IDIV, sp_b, k_wo_b);
+    Term k_kw_b  = uop_const(DT_INT32, kw_b);
+    Term k_kh_b  = uop_const(DT_INT32, kh_b);
+    Term kw_v_b  = uop_int_binary(UOP_IMOD, r_q_b, k_kw_b);
+    Term qk_b    = uop_int_binary(UOP_IDIV, r_q_b, k_kw_b);
+    Term kh_v_b  = uop_int_binary(UOP_IMOD, qk_b, k_kh_b);
+    Term ci_b    = uop_int_binary(UOP_IDIV, qk_b, k_kh_b);
+    Term k_w_off_b = uop_const(DT_INT32, 0);
+    Term k_ws0_b   = uop_const(DT_INT32, KRED_b);
+    Term k_ws1_b   = uop_const(DT_INT32, 1);
+    Term wi_co_b   = uop_int_binary(UOP_IMUL, co_b, k_ws0_b);
+    Term wi_q_b    = uop_int_binary(UOP_IMUL, r_q_b, k_ws1_b);
+    Term wi_sum_b  = uop_int_binary(UOP_IADD, wi_co_b, wi_q_b);
+    Term wi_b      = uop_int_binary(UOP_IADD, k_w_off_b, wi_sum_b);
+    Term k_x_off_b = uop_const(DT_INT32, 0);
+    Term k_xsb_b   = uop_const(DT_INT32, c_in_b * 14 * 14);
+    Term k_xs0_b   = uop_const(DT_INT32, 14);
+    Term k_xs1_b   = uop_const(DT_INT32, 1);
+    Term k_xs2_b   = uop_const(DT_INT32, 14 * 14);
+    Term xi_b_b    = uop_int_binary(UOP_IMUL, bi_b, k_xsb_b);
+    Term xi_ci_b   = uop_int_binary(UOP_IMUL, ci_b, k_xs2_b);
+    Term oh_kh_b   = uop_int_binary(UOP_IADD, oh_b, kh_v_b);
+    Term xi_h_b    = uop_int_binary(UOP_IMUL, oh_kh_b, k_xs0_b);
+    Term ow_kw_b   = uop_int_binary(UOP_IADD, ow_b, kw_v_b);
+    Term xi_w_b    = uop_int_binary(UOP_IMUL, ow_kw_b, k_xs1_b);
+    Term xi_sum1_b = uop_int_binary(UOP_IADD, xi_b_b, xi_ci_b);
+    Term xi_sum2_b = uop_int_binary(UOP_IADD, xi_h_b, xi_w_b);
+    Term xi_sum_b  = uop_int_binary(UOP_IADD, xi_sum1_b, xi_sum2_b);
+    Term xi_b_top  = uop_int_binary(UOP_IADD, k_x_off_b, xi_sum_b);
+    Term ldW_b = uop_index_e(Wb, wi_b);
+    Term ldX_b = uop_index_e(Xb, xi_b_top);
+    UopDagConv2dFlatShape s = {0};
+    int ok = uop_dag_extract_conv2d_flat_shape(
+        heap_read(term_val(ldW_b) + 1),
+        heap_read(term_val(ldX_b) + 1),
+        NULL, &s);
+    CHECK(ok);
+    CHECK_EQ(s.c_out, c_out_b);
+    CHECK_EQ(s.c_in,  c_in_b);
+    CHECK_EQ(s.kh,    kh_b);
+    CHECK_EQ(s.kw,    kw_b);
+    CHECK_EQ(s.batch, batch_b);
+    CHECK_EQ(s.h_out, h_out_b);
+    CHECK_EQ(s.w_out, w_out_b);
+    CHECK_EQ(s.x_stride_b, (i32)(c_in_b * 14 * 14));
+    CHECK_EQ(s.x_stride2,  (i32)(14 * 14));
+  }
+
+  TEST_BEGIN("conv2d-extract/nonzero-offsets-recovered");
+  {
+    u32 c_out_c = 8, c_in_c = 4, kh_c = 3, kw_c = 3;
+    u32 batch_c = 1, h_out_c = 8, w_out_c = 8;
+    u32 spatial_c = h_out_c * w_out_c;
+    u32 patches_c = batch_c * spatial_c;
+    u32 KRED_c    = c_in_c * kh_c * kw_c;
+    u32 dims_w_c[2] = { c_out_c, KRED_c };
+    u32 dims_x_c[1] = { 4096 };
+    Term Wc = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims_w_c, 1);
+    Term Xc = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_x_c, 2);
+    Term r_out_c = uop_range(0, 0, c_out_c * patches_c);
+    Term r_q_c   = uop_range(1, 1, KRED_c);
+    Term k_pat_c = uop_const(DT_INT32, patches_c);
+    Term k_sp_c  = uop_const(DT_INT32, spatial_c);
+    Term k_wo_c  = uop_const(DT_INT32, w_out_c);
+    Term co_c    = uop_int_binary(UOP_IDIV, r_out_c, k_pat_c);
+    Term patch_c = uop_int_binary(UOP_IMOD, r_out_c, k_pat_c);
+    Term sp_c    = uop_int_binary(UOP_IMOD, patch_c, k_sp_c);
+    Term ow_c    = uop_int_binary(UOP_IMOD, sp_c, k_wo_c);
+    Term oh_c    = uop_int_binary(UOP_IDIV, sp_c, k_wo_c);
+    Term k_kw_c  = uop_const(DT_INT32, kw_c);
+    Term k_kh_c  = uop_const(DT_INT32, kh_c);
+    Term kw_v_c  = uop_int_binary(UOP_IMOD, r_q_c, k_kw_c);
+    Term qk_c    = uop_int_binary(UOP_IDIV, r_q_c, k_kw_c);
+    Term kh_v_c  = uop_int_binary(UOP_IMOD, qk_c, k_kh_c);
+    Term ci_c    = uop_int_binary(UOP_IDIV, qk_c, k_kh_c);
+    // Non-zero offsets:
+    Term k_w_off_c = uop_const(DT_INT32, 100);
+    Term k_x_off_c = uop_const(DT_INT32, 256);
+    Term k_ws0_c   = uop_const(DT_INT32, KRED_c);
+    Term k_ws1_c   = uop_const(DT_INT32, 1);
+    Term k_xs0_c   = uop_const(DT_INT32, 10);
+    Term k_xs1_c   = uop_const(DT_INT32, 1);
+    Term k_xs2_c   = uop_const(DT_INT32, 100);
+    Term wi_co_c   = uop_int_binary(UOP_IMUL, co_c, k_ws0_c);
+    Term wi_q_c    = uop_int_binary(UOP_IMUL, r_q_c, k_ws1_c);
+    Term wi_sum_c  = uop_int_binary(UOP_IADD, wi_co_c, wi_q_c);
+    Term wi_c      = uop_int_binary(UOP_IADD, k_w_off_c, wi_sum_c);
+    Term xi_ci_c   = uop_int_binary(UOP_IMUL, ci_c, k_xs2_c);
+    Term oh_kh_c   = uop_int_binary(UOP_IADD, oh_c, kh_v_c);
+    Term xi_h_c    = uop_int_binary(UOP_IMUL, oh_kh_c, k_xs0_c);
+    Term ow_kw_c   = uop_int_binary(UOP_IADD, ow_c, kw_v_c);
+    Term xi_w_c    = uop_int_binary(UOP_IMUL, ow_kw_c, k_xs1_c);
+    Term xi_sum2_c = uop_int_binary(UOP_IADD, xi_h_c, xi_w_c);
+    Term xi_sum_c  = uop_int_binary(UOP_IADD, xi_ci_c, xi_sum2_c);
+    Term xi_c      = uop_int_binary(UOP_IADD, k_x_off_c, xi_sum_c);
+    Term ldW_c = uop_index_e(Wc, wi_c);
+    Term ldX_c = uop_index_e(Xc, xi_c);
+    UopDagConv2dFlatShape s = {0};
+    int ok = uop_dag_extract_conv2d_flat_shape(
+        heap_read(term_val(ldW_c) + 1),
+        heap_read(term_val(ldX_c) + 1),
+        NULL, &s);
+    CHECK(ok);
+    CHECK_EQ(s.w_offset, 100);
+    CHECK_EQ(s.x_offset, 256);
+    CHECK_EQ(s.w_stride0, (i32)KRED_c);
+    CHECK_EQ(s.x_stride2, 100);
+  }
+
+  TEST_BEGIN("conv2d-extract/degenerate-1x1-conv-rejects");
+  {
+    // c_in=1, kh=kw=1 => simplifier collapses ci/kh_v/kw_v entirely.
+    // Extractor must bail (not in scope this session); caller falls
+    // back to input_views.
+    u32 c_out_d = 4, c_in_d = 1, kh_d = 1, kw_d = 1;
+    u32 batch_d = 1, h_out_d = 8, w_out_d = 8;
+    u32 spatial_d = h_out_d * w_out_d;
+    u32 patches_d = batch_d * spatial_d;
+    u32 KRED_d    = c_in_d * kh_d * kw_d;
+    u32 dims_w_d[2] = { c_out_d, KRED_d };
+    u32 dims_x_d[1] = { 1024 };
+    Term Wd = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims_w_d, 1);
+    Term Xd = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_x_d, 2);
+    Term r_out_d = uop_range(0, 0, c_out_d * patches_d);
+    Term r_q_d   = uop_range(1, 1, KRED_d);
+    Term k_pat_d = uop_const(DT_INT32, patches_d);
+    Term k_sp_d  = uop_const(DT_INT32, spatial_d);
+    Term k_wo_d  = uop_const(DT_INT32, w_out_d);
+    Term co_d    = uop_int_binary(UOP_IDIV, r_out_d, k_pat_d);
+    Term patch_d = uop_int_binary(UOP_IMOD, r_out_d, k_pat_d);
+    Term sp_d    = uop_int_binary(UOP_IMOD, patch_d, k_sp_d);
+    Term ow_d    = uop_int_binary(UOP_IMOD, sp_d, k_wo_d);
+    Term oh_d    = uop_int_binary(UOP_IDIV, sp_d, k_wo_d);
+    Term k_kw_d  = uop_const(DT_INT32, kw_d);
+    Term k_kh_d  = uop_const(DT_INT32, kh_d);
+    Term kw_v_d  = uop_int_binary(UOP_IMOD, r_q_d, k_kw_d);
+    Term qk_d    = uop_int_binary(UOP_IDIV, r_q_d, k_kw_d);
+    Term kh_v_d  = uop_int_binary(UOP_IMOD, qk_d, k_kh_d);
+    Term ci_d    = uop_int_binary(UOP_IDIV, qk_d, k_kh_d);
+    Term k_ws0_d = uop_const(DT_INT32, 1);
+    Term k_xs0_d = uop_const(DT_INT32, 8);
+    Term k_xs1_d = uop_const(DT_INT32, 1);
+    Term k_xs2_d = uop_const(DT_INT32, 64);
+    Term wi_co_d = uop_int_binary(UOP_IMUL, co_d, k_ws0_d);
+    Term wi_d    = uop_int_binary(UOP_IADD, wi_co_d, r_q_d);
+    Term xi_ci_d = uop_int_binary(UOP_IMUL, ci_d, k_xs2_d);
+    Term oh_kh_d = uop_int_binary(UOP_IADD, oh_d, kh_v_d);
+    Term xi_h_d  = uop_int_binary(UOP_IMUL, oh_kh_d, k_xs0_d);
+    Term ow_kw_d = uop_int_binary(UOP_IADD, ow_d, kw_v_d);
+    Term xi_w_d  = uop_int_binary(UOP_IMUL, ow_kw_d, k_xs1_d);
+    Term xi_sum_d = uop_int_binary(UOP_IADD, xi_h_d, xi_w_d);
+    Term xi_d    = uop_int_binary(UOP_IADD, xi_ci_d, xi_sum_d);
+    Term ldW_d = uop_index_e(Wd, wi_d);
+    Term ldX_d = uop_index_e(Xd, xi_d);
+    UopDagConv2dFlatShape s = {0};
+    int ok = uop_dag_extract_conv2d_flat_shape(
+        heap_read(term_val(ldW_d) + 1),
+        heap_read(term_val(ldX_d) + 1),
+        NULL, &s);
+    CHECK_EQ(ok, 0);
+  }
+
+  TEST_BEGIN("conv2d-extract/non-iadd-w-rejects");
+  {
+    // W addr not an IADD (just a bare RANGE) -- extractor must bail.
+    Term r_lone = uop_range(2, 0, 64);
+    UopDagConv2dFlatShape s = {0};
+    int ok = uop_dag_extract_conv2d_flat_shape(r_lone, r_lone, NULL, &s);
+    CHECK_EQ(ok, 0);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
