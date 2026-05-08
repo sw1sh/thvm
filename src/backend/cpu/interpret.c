@@ -873,8 +873,8 @@ fn int cpu_dispatch_tile(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (!tile_collect_plan_info(ke, &info)) {
     return 0;
   }
-  // Slice 8 session 5: TILE_MMA roots no longer constructed; the
-  // mma_tile_id != 0 bail retired with TilePlanInfo.mma_tile_id.
+  // Slice 8 session 5: the mma_tile_id != 0 bail retired with
+  // TilePlanInfo.mma_tile_id; no matmul-shape gate fires here today.
 
   u32 buf_id = cpu_scalar_bufferize_root(ke);
   if (buf_id == 0) {

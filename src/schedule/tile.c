@@ -215,13 +215,6 @@ fn void tile_dump_node(KernelEntry const *ke, u32 id, FILE *fp, u32 depth) {
         tile_dump_node(ke, u->src[s], fp, depth + 1);
       }
       return;
-    case TILE_MMA:
-      fprintf(fp, "TILE_MMA extra=0x%llx dtype=%u\n",
-              (unsigned long long)u->extra, u->dtype);
-      for (u8 s = 0; s < u->src_count; s++) {
-        tile_dump_node(ke, u->src[s], fp, depth + 1);
-      }
-      return;
     case TILE_INPUT_BUF:
       fprintf(fp, "TILE_INPUT_BUF<slot=%u dtype=%u>\n",
               (u32)u->extra, u->dtype);
@@ -463,10 +456,6 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
       fprintf(fp, "/* scalar body S%u */\n", sid);
       return;
     }
-    case TILE_MMA:
-      tile_render_msl_indent(fp, depth);
-      fputs("/* TILE_MMA: simdgroup_matrix... */\n", fp);
-      return;
     case TILE_AXIS:
       // Standalone TILE_AXIS at non-loop-nest position; shouldn't
       // happen but emit as comment.
@@ -532,7 +521,6 @@ fn const char *tile_op_name(u8 op) {
     case TILE_STORE:       return "TILE_STORE";
     case TILE_BARRIER:     return "TILE_BARRIER";
     case TILE_REDUCE:      return "TILE_REDUCE";
-    case TILE_MMA:         return "TILE_MMA";
     case TILE_BLOCK:       return "TILE_BLOCK";
     case TILE_INPUT_BUF:   return "TILE_INPUT_BUF";
     case TILE_OUTPUT_BUF:  return "TILE_OUTPUT_BUF";
@@ -687,10 +675,6 @@ fn u32 tile_loop_axis_extent(KernelEntry const *ke, u32 axis) {
 
 #define TILE_REDUCE_KIND(arg)  (((arg) >> 24) & 0xFFu)
 #define TILE_REDUCE_INNER(arg) ((arg) & 0xFFFFFFu)
-
-fn int tile_mma_size_supported(u32 tile) {
-  return tile == 8 || tile == 16 || tile == 32;
-}
 
 // Slice 8 session 5: deleted KProgOp-side matmul pattern matchers
 // (`tile_analyze_gemm`, `tile_analyze_expanded_gemv`,
@@ -968,9 +952,10 @@ static int tile_collect_axis_info(KernelEntry const *ke, u32 axis_id,
 }
 
 // Slice 8 session 5: tile_collect_mma_info deleted along with
-// tile_analyze_gemm.  TILE_MMA roots are no longer constructed by any
-// in-tree path; tile_validate / tile_collect_plan_info reject them
-// implicitly via the TILE_LOOP_NEST root-op check.
+// tile_analyze_gemm.  Matmul shape facts now flow through
+// ke->cached_lift.store_root via uop_dag_classify_matmul_shape;
+// tile_validate / tile_collect_plan_info enforce a TILE_LOOP_NEST
+// root-op shape.
 
 static u32 tile_find_nested_scalar_reduce(KernelEntry const *ke,
                                           u32 scalar_id,
@@ -1160,9 +1145,9 @@ fn int tile_collect_plan_info(KernelEntry const *ke, TilePlanInfo *out) {
 }
 
 // Slice 8 session 5: tile_build_mma_from_gemm deleted along with
-// tile_analyze_gemm.  TILE_MMA roots are no longer constructed; the
-// only matmul-shape consumers (BLAS GEMM dispatch, KOP_TC gates) read
-// from the lifted UOp DAG via uop_dag_classify_matmul_shape.
+// tile_analyze_gemm.  Matmul-shape consumers (BLAS GEMM dispatch,
+// KOP_TC gates) read from the lifted UOp DAG via
+// uop_dag_classify_matmul_shape.
 
 static u32 tile_find_scalar_bufferize(KernelEntry const *ke) {
   if (ke->scalar_uops == NULL) {
@@ -1481,8 +1466,8 @@ fn int tile_sync_from_scalar(KernelEntry *ke) {
     return 0;
   }
   // Slice 8 session 5: tile_build_mma_from_gemm retired along with
-  // tile_analyze_gemm.  TILE_MMA roots are no longer constructed; the
-  // matmul shape is consumed downstream from the lifted UOp DAG.
+  // tile_analyze_gemm.  Matmul shape facts are consumed downstream
+  // from the lifted UOp DAG via uop_dag_classify_matmul_shape.
   int ok = tile_build_from_scalar(ke);
   if (ok && dump_after) {
     tile_dump(ke, stderr);

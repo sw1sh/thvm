@@ -130,9 +130,8 @@ static u8 axis_kop_to_axis_type(u8 op) {
 //
 // Used by tile_emit_axes_from_kernel_signals as the source of TILE_AXIS
 // leaf kax_type values, and by axes_resolve_kax_type as the single
-// read point.  Wedge 8 retired the previous legacy-fallback /
-// THVM_E9_VALIDATE=1 cross-check shape: this is now the only kax_type
-// read path outside the writer trio.
+// read point.  Wedge 8 retired the previous legacy-fallback shape:
+// this is now the only kax_type read path outside the writer trio.
 fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                u32 cap) {
   if (ke == NULL || ke->axes == NULL || out == NULL || cap == 0) {

@@ -565,11 +565,10 @@ fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
 // Wired into materialize.c after kernel_lift_to_uop succeeds.  In the
 // default config the lifter already stamps the same axis_types via its
 // own structural replay, so this pass is a no-op (every leaf's
-// axis_type already equals desired[axis_id]).  The `THVM_E9_VALIDATE=1`
-// env knob asserts that no-op semantically: when set,
-// uop_apply_kernel_opts records every range it would have rewritten
-// into a fire counter; non-zero on exit means the rules and the
-// lifter disagree.
+// axis_type already equals desired[axis_id]).  The
+// uop_apply_kernel_opts_validate variant exposes the per-pass fire
+// counter for tests that need to assert no-op semantics directly
+// (see tests/test_uop_range_axis_type.c).
 
 // Per-pass fire counter for validation.  Captured per call (not
 // global) via the ctx struct.

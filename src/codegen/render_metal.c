@@ -54,10 +54,10 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   // types directly.
   if (tile_sync_from_scalar(ke)) {
     if (tile_compute_dispatch_shape(ke, groups_x, threads_x)) return 1;
-    // tile_compute_dispatch_shape rejected (e.g. TILE_MMA root with
-    // axis types it doesn't recognise) -- fall through to the lifter
-    // fallback below. Now safe because the lifter uses view.strides
-    // for input addressing (correct for virtual EXPAND broadcast).
+    // tile_compute_dispatch_shape rejected (axis types it doesn't
+    // recognise) -- fall through to the lifter fallback below. Now
+    // safe because the lifter uses view.strides for input addressing
+    // (correct for virtual EXPAND broadcast).
   }
   // Lifter-based fallback: tile_sync_from_scalar declines for kernels
   // that don't have a clean gemm-shape AND don't have scalar_uops

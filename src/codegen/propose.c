@@ -11,7 +11,7 @@
 //   -> propose LOCAL tile factors.  The autotune loop applies the
 //   matching outer GLOBAL mark when benchmarking these candidates.
 //
-//   THVM_BACKEND=metal + f32 TILE_MMA/GEMM kernel
+//   THVM_BACKEND=metal + f32 GEMM kernel
 //   -> propose TC tile sizes.  The first implementation uses TC as
 //   metadata for the fixed direct Metal GEMM renderer; later it maps
 //   to simdgroup MMA variants.

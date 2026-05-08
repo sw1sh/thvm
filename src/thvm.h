@@ -881,8 +881,8 @@ typedef struct {
 // or, for scalar reducers,
 //   TILE_LOOP_NEST(TILE_STORE(TILE_REDUCE(TILE_SCALAR_BODY(value_id))), ...)
 // from a KernelEntry's scalar_uops[] + KernelAxes.  Slice 8 session 5
-// retired the dedicated matmul TILE_MMA seeding path; matmul shape
-// facts now flow through ke->cached_lift.store_root via
+// retired the dedicated matmul seeding path; matmul shape facts now
+// flow through ke->cached_lift.store_root via
 // uop_dag_classify_matmul_shape.
 // Dispatch consumes tile_uops only on opt-in tile paths; default
 // execution still follows the scalar/KProgOp routes.
@@ -947,7 +947,6 @@ typedef enum {
   TILE_STORE,       // src[0] = TILE_SCALAR_BODY/TILE_REDUCE, extra = scalar S_STORE id
   TILE_BARRIER,     // future: target barrier between tile stages
   TILE_REDUCE,      // src[0] = TILE_SCALAR_BODY, extra = scalar S_REDUCE_* id
-  TILE_MMA,         // src = M/N/K TILE_AXIS nodes, extra = input slots + flags
   TILE_BLOCK,       // ordered list: src[0..src_count-1] are executed in order;
                     // the block's value is the LAST src's value (typically a
                     // TILE_LOAD or TILE_SCALAR_BODY).  The reduce-broadcast lowering uses this to
@@ -1028,9 +1027,8 @@ typedef struct {
   u32 axis_types  [MAX_AXES];
   u32 axis_extents[MAX_AXES];
   // Slice 8 session 5: `mma_tile_id` + `mma` retired along with
-  // tile_analyze_gemm.  TILE_MMA roots are no longer constructed; the
-  // matmul shape is consumed from ke->cached_lift.store_root via
-  // uop_dag_classify_matmul_shape.
+  // tile_analyze_gemm.  Matmul shape facts now flow through
+  // ke->cached_lift.store_root via uop_dag_classify_matmul_shape.
 } TilePlanInfo;
 
 // === Kernel lift to UOp DAG (forward decl) ===
@@ -2099,7 +2097,6 @@ fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
 int     tile_analyze_conv2d_flat(struct KernelEntry const *ke,
                                  TileConv2DInfo *out);
 int     tile_rejects_conv2d_flat_cin1(struct KernelEntry const *ke);
-fn int  tile_mma_size_supported(u32 tile);
 // Slice 8 session 5: tile_analyze_gemm + tile_collect_mma_plan retired
 // (KProgOp-side matmul recognisers).  Matmul shape facts flow through
 // uop_dag_classify_matmul_shape over ke->cached_lift.store_root.

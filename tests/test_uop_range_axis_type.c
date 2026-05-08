@@ -1089,8 +1089,8 @@ int main(void) {
   TEST_BEGIN("apply-kernel-opts/validate-fire-count");
   // The validation entry returns the number of UOP_RANGE leaves that
   // would have been rewritten.  When the pass would no-op (already
-  // stamped or no matching opts), fire_count == 0; that's the
-  // signal materialize.c relies on under THVM_E9_VALIDATE=1.
+  // stamped or no matching opts), fire_count == 0; the variant exists
+  // so callers can assert that property directly.
   u32 vfires = 0;
   Term vout1 = uop_apply_kernel_opts_validate(k_outer, opts_all4, 4, &vfires);
   // k_outer is at axis_id=0, LOOP, extent 8; desired[0]=LOCAL post-replay.
