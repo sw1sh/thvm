@@ -275,6 +275,245 @@ fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
   return types[d];
 }
 
+// E9 session 2: derive per-axis full_shape extents from the higher-
+// level signals (output_shape + tail-reduce + scalar-reduce +
+// applied_opts) instead of reading `ke->axes->full_shape[]` directly.
+// Mirrors the writer trio (axes_default_for + axes_ensure_scalar_reduce
+// + axes_apply_opt) exactly:
+//
+//   1. Initial state: extents[i] = output_shape.dims[i] for i < nd
+//      (clipped to MAX_AXES-1), optionally followed by a trailing
+//      REDUCE extent (= source-numel / output-numel for tail-REDUCE
+//      programs, or `axes_scalar_reduce_extent(ke)` for scalar-arena
+//      reductions).
+//   2. Replay applied_opts in order using the same structural logic
+//      as kernel_apply_opt: split-class opts (UPCAST/UNROLL/LOCAL/
+//      GROUP/GROUPTOP) divide the indicated extent by opt.arg and
+//      insert opt.arg as the inner extent at axis+1; KOP_SWAP
+//      exchanges two extents in place; KOP_GLOBAL/TC/PADTO/NOLOCALS
+//      carry no shape mutation.
+//
+// Returns the number of extents written to `out`; 0 on overflow,
+// unknown opt, or invalid replay (axis out of range, arg doesn't
+// divide).  By construction, the value matches `ke->axes->full_shape`
+// + `ke->axes->n_axes` after the writer trio has produced the same
+// applied_opts log.
+fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
+                               u32 cap) {
+  if (ke == NULL || ke->axes == NULL || out == NULL || cap == 0) {
+    return 0;
+  }
+
+  u32 nd = ke->output_shape.ndim;
+  if (nd > MAX_AXES - 1) {
+    nd = MAX_AXES - 1;
+  }
+  u32 extents[MAX_AXES] = {0};
+  u32 n = 0;
+  for (u32 i = 0; i < nd; i++) {
+    if (n >= MAX_AXES) {
+      return 0;
+    }
+    extents[n++] = ke->output_shape.dims[i];
+  }
+  int has_initial_reduce =
+      (ke->n_ops > 0 && ke->program != NULL
+       && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE);
+  if (has_initial_reduce && n < MAX_AXES) {
+    KProgOp const *rd = &ke->program[ke->n_ops - 1];
+    u32 src_numel;
+    if (KSRC_IS_INPUT(rd->src[0])) {
+      src_numel = ke->input_numels[KSRC_INDEX(rd->src[0])];
+    } else {
+      src_numel = ke->program[KSRC_INDEX(rd->src[0])].numel;
+    }
+    u32 out_numel = ke->output_numel ? ke->output_numel : 1;
+    extents[n++] = src_numel / out_numel;
+  } else {
+    u32 sru = axes_scalar_reduce_extent(ke);
+    if (sru != 0 && n < MAX_AXES) {
+      extents[n++] = sru;
+    }
+  }
+
+  // Replay applied_opts using kernel_apply_opt's structural logic.
+  // applied_opts is the LOG of opts that ALREADY succeeded against
+  // the axis structure, so the replay is guaranteed-valid by
+  // construction.
+  KOpt const *opts = ke->axes->applied_opts;
+  u32 n_applied   = (u32)ke->axes->n_applied;
+  for (u32 k = 0; k < n_applied; k++) {
+    KOpt o = opts[k];
+    u8 op = o.op;
+    if (op == KOP_TC || op == KOP_NONE || op == KOP_PADTO
+        || op == KOP_NOLOCALS || op == KOP_GLOBAL) {
+      // No shape mutation.
+      continue;
+    }
+    if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
+        || op == KOP_GROUP  || op == KOP_GROUPTOP) {
+      if (o.axis >= n || n >= MAX_AXES || o.arg == 0) {
+        return 0;
+      }
+      u32 axis_size = extents[o.axis];
+      if (axis_size % o.arg != 0) {
+        return 0;
+      }
+      // Shift positions > axis right by one; insert at axis+1.
+      for (i32 i = (i32)n; i > (i32)o.axis + 1; i--) {
+        extents[i] = extents[i - 1];
+      }
+      extents[o.axis]     = axis_size / o.arg;
+      extents[o.axis + 1] = o.arg;
+      n++;
+      continue;
+    }
+    if (op == KOP_SWAP) {
+      if (o.axis >= n || (u8)o.arg >= n) {
+        return 0;
+      }
+      u32 tmp = extents[o.axis];
+      extents[o.axis]  = extents[o.arg];
+      extents[o.arg]   = tmp;
+      continue;
+    }
+    // Unknown opt -- bail.
+    return 0;
+  }
+
+  if (n > cap) {
+    return 0;
+  }
+  for (u32 i = 0; i < n; i++) {
+    out[i] = extents[i];
+  }
+  return n;
+}
+
+// E9 session 2: cross-check resolver output against the writer's
+// `ke->axes->full_shape[]` / `ke->axes->n_axes` state.  Enabled by
+// setting `THVM_E9_VALIDATE=1`.  Aborts on divergence -- this catches
+// drift between the writer trio's mutations and the resolver's
+// signal-replay logic.  Mirrors the wedge 1 / E9-prep validation
+// pattern.
+static int axes_e9_validate_enabled(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    char const *env = getenv("THVM_E9_VALIDATE");
+    cached = (env != NULL && env[0] == '1' && env[1] == 0) ? 1 : 0;
+  }
+  return cached;
+}
+
+static void axes_e9_validate_full_shape(struct KernelEntry const *ke,
+                                        u32 const *derived, u32 n_derived) {
+  if (!axes_e9_validate_enabled() || ke == NULL || ke->axes == NULL) {
+    return;
+  }
+  if (n_derived != ke->axes->n_axes) {
+    fprintf(stderr,
+            "[THVM_E9_VALIDATE] axes_resolve_full_shape: n_axes mismatch "
+            "(derived=%u writer=%u)\n",
+            n_derived, ke->axes->n_axes);
+    abort();
+  }
+  for (u32 i = 0; i < n_derived; i++) {
+    if (derived[i] != ke->axes->full_shape[i]) {
+      fprintf(stderr,
+              "[THVM_E9_VALIDATE] axes_resolve_full_shape: extent[%u] "
+              "mismatch (derived=%u writer=%u)\n",
+              i, derived[i], ke->axes->full_shape[i]);
+      abort();
+    }
+  }
+}
+
+// E9 session 2: per-axis full_shape resolver.  Returns the derived
+// extent for axis `d` (signal-replay over output_shape + applied_opts);
+// 0 when ke/axes are NULL, d is out of range, or the simulator can't
+// speak.  Under `THVM_E9_VALIDATE=1`, cross-checks against the writer's
+// `ke->axes->full_shape[d]` and aborts on divergence.
+fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
+                               u32 *out_extent) {
+  if (ke == NULL || ke->axes == NULL || d >= ke->axes->n_axes) {
+    if (out_extent != NULL) *out_extent = 0;
+    return 0;
+  }
+  u32 extents[MAX_AXES] = {0};
+  u32 n = axes_compute_full_shape(ke, extents, MAX_AXES);
+  if (n == 0 || d >= n) {
+    if (out_extent != NULL) *out_extent = 0;
+    return 0;
+  }
+  axes_e9_validate_full_shape(ke, extents, n);
+  if (out_extent != NULL) *out_extent = extents[d];
+  return 1;
+}
+
+// E9 session 2: axis-count resolver.  Returns the derived axis count
+// (output_shape.ndim clipped to MAX_AXES-1, plus 1 if a trailing
+// REDUCE-class axis is present, plus the count of split-class
+// applied_opts).  Under `THVM_E9_VALIDATE=1`, cross-checks against
+// `ke->axes->n_axes` and aborts on divergence.
+fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
+  if (ke == NULL || ke->axes == NULL) {
+    return 0;
+  }
+  u32 extents[MAX_AXES] = {0};
+  u32 n = axes_compute_full_shape(ke, extents, MAX_AXES);
+  if (axes_e9_validate_enabled() && ke->axes != NULL
+      && n != ke->axes->n_axes) {
+    fprintf(stderr,
+            "[THVM_E9_VALIDATE] axes_resolve_n_axes: n_axes mismatch "
+            "(derived=%u writer=%u)\n",
+            n, ke->axes->n_axes);
+    abort();
+  }
+  return n;
+}
+
+// E9 session 2: content hash of the kernel's axis-defining inputs.
+// Replaces the `ke->axes->version` u32 freshness counter with a
+// deterministic u64 hash of (applied_opts, output_shape, source_uop)
+// -- the same triple that drives the resolvers above.  Cache equality
+// semantics stay (one u64 == one u64); the hash is bit-stable across
+// runs given the same input state, so cross-process / cross-session
+// caches stay coherent.
+//
+// FNV-1a over: applied_opts[0..n_applied] bytes, output_shape.dims +
+// ndim, source_uop (tag + ext).  Always non-zero so the empty-state
+// sentinel `tile_axes_hash = 0` (uninitialised tile_uops) stays
+// disambiguated from a real hash.
+fn u64 tile_axes_hash(struct KernelEntry const *ke) {
+  if (ke == NULL || ke->axes == NULL) {
+    return 0;
+  }
+  u64 h = 0xcbf29ce484222325ULL ^ 0x415845535F484148ULL;  // "AXES_HAH"
+  u32 n_applied = (u32)ke->axes->n_applied;
+  h ^= (u64)n_applied;
+  h *= 0x100000001b3ULL;
+  KOpt const *opts = ke->axes->applied_opts;
+  u8 const *opts_bytes = (u8 const *)opts;
+  size_t opts_n = (size_t)n_applied * sizeof(KOpt);
+  for (size_t i = 0; i < opts_n; i++) {
+    h ^= (u64)opts_bytes[i]; h *= 0x100000001b3ULL;
+  }
+  h ^= (u64)ke->output_shape.ndim;
+  h *= 0x100000001b3ULL;
+  u8 const *dim_bytes = (u8 const *)ke->output_shape.dims;
+  size_t dim_n = (size_t)ke->output_shape.ndim * sizeof(u32);
+  for (size_t i = 0; i < dim_n; i++) {
+    h ^= (u64)dim_bytes[i]; h *= 0x100000001b3ULL;
+  }
+  h ^= (u64)term_tag(ke->source_uop);
+  h *= 0x100000001b3ULL;
+  h ^= (u64)term_ext(ke->source_uop);
+  h *= 0x100000001b3ULL;
+  // Bias bit 63 so the hash is never zero (zero is the
+  // empty-tile-uops sentinel in tile_anno_tile_uops_fresh).
+  return h | (1ULL << 63);
+}
+
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   if (ke == NULL || ke->axes == NULL) {
     return;
@@ -304,7 +543,7 @@ fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   }
   // Phase E writer migration: route through tile_anno_axis_append.
   // Today the helper writes ke->axes; when Phase F flips, it writes
-  // TILE_AXIS directly and bumps tile_axes_version.
+  // TILE_AXIS directly and freshness propagates via tile_axes_hash.
   TileAxisInfo info = { KAX_REDUCE, extent, 0, 0 };
   (void)tile_anno_axis_append(ke, info);
 }

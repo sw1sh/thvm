@@ -53,6 +53,59 @@ int main(void) {
   // ke->axes->axis_types[].  Deleted alongside the field.
 
   tile_free(ke);
+
+  // E9 session 2: full_shape + n_axes resolvers.  Build a kernel via
+  // the writer trio (axes_default_for + axes_apply_opt UPCAST), then
+  // confirm the resolver output matches the writer state on every
+  // axis.
+  TEST_BEGIN("axes-resolve/default-shape");
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->output_shape.ndim = 2;
+  ke->output_shape.dims[0] = 8;
+  ke->output_shape.dims[1] = 12;
+  ke->output_numel = 96;
+  axes_default_for(ke);
+  CHECK_EQ(axes_resolve_n_axes(ke), 2u);
+  u32 ext = 0;
+  CHECK_EQ(axes_resolve_full_shape(ke, 0, &ext), 1u);
+  CHECK_EQ(ext, 8u);
+  CHECK_EQ(axes_resolve_full_shape(ke, 1, &ext), 1u);
+  CHECK_EQ(ext, 12u);
+  // Out-of-range read returns 0 with ext = 0.
+  CHECK_EQ(axes_resolve_full_shape(ke, 5, &ext), 0u);
+  CHECK_EQ(ext, 0u);
+
+  TEST_BEGIN("axes-resolve/upcast-split");
+  KOpt up = { KOP_UPCAST, 1, 4 };
+  CHECK_EQ(kernel_apply_opt(ke, up), 1);
+  CHECK_EQ(axes_resolve_n_axes(ke), 3u);
+  CHECK_EQ(axes_resolve_full_shape(ke, 0, &ext), 1u);
+  CHECK_EQ(ext, 8u);          // axis 0 untouched
+  CHECK_EQ(axes_resolve_full_shape(ke, 1, &ext), 1u);
+  CHECK_EQ(ext, 3u);          // 12/4 = 3
+  CHECK_EQ(axes_resolve_full_shape(ke, 2, &ext), 1u);
+  CHECK_EQ(ext, 4u);          // inner = arg
+
+  TEST_BEGIN("axes-resolve/swap-exchange");
+  KOpt sw = { KOP_SWAP, 0, 2 };
+  CHECK_EQ(kernel_apply_opt(ke, sw), 1);
+  CHECK_EQ(axes_resolve_full_shape(ke, 0, &ext), 1u);
+  CHECK_EQ(ext, 4u);          // was inner
+  CHECK_EQ(axes_resolve_full_shape(ke, 2, &ext), 1u);
+  CHECK_EQ(ext, 8u);          // was axis 0
+
+  TEST_BEGIN("tile-axes-hash/non-zero-and-stable");
+  u64 h0 = tile_axes_hash(ke);
+  CHECK(h0 != 0ULL);
+  CHECK_EQ(tile_axes_hash(ke), h0);
+
+  TEST_BEGIN("tile-axes-hash/changes-on-apply-opt");
+  KOpt un = { KOP_UNROLL, 0, 2 };
+  CHECK_EQ(kernel_apply_opt(ke, un), 1);
+  u64 h1 = tile_axes_hash(ke);
+  CHECK(h1 != h0);
+
   thvm_free();
   TEST_REPORT();
 }

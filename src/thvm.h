@@ -559,9 +559,11 @@ typedef struct {
                                // across axes_reset_to_default so a
                                // proposer-explored variant doesn't
                                // re-trigger autotune mid-bench.
-  u32  version;                // bumped whenever axis structure changes;
-                               // TileUop plans use this to detect stale
-                               // snapshots after TKernelApplyOpt/autotune.
+                               // E9 session 2: legacy `u32 version`
+                               // counter retired -- freshness is now a
+                               // content hash via `tile_axes_hash(ke)`
+                               // (codegen/axis.c) over (applied_opts,
+                               // output_shape, source_uop).
 } KernelAxes;
 
 struct Backend {
@@ -1226,7 +1228,12 @@ typedef struct KernelEntry {
   u32        n_tile_uops;
   u32        tile_uops_cap;
   u32        tile_root;       // root TileUop id, usually TILE_LOOP_NEST; 0 = none
-  u32        tile_axes_version;
+  u64        tile_axes_hash;    // E9 session 2: content hash of
+                                 // (applied_opts, output_shape, source_uop)
+                                 // captured when tile_uops was built.
+                                 // Compared against tile_axes_hash(ke) on
+                                 // each tile_sync to detect stale plans.
+                                 // Replaces the legacy u32 version counter.
 } KernelEntry;
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
@@ -1896,6 +1903,39 @@ fn u32  axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
 // tile_anno.c readers as the only axis-type read source -- no direct
 // axis_types[i] reads remain in codegen/tile_anno.c.
 fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
+
+// E9 session 2: derive per-axis full_shape extents from the higher-
+// level signals (output_shape + tail-reduce + scalar-reduce +
+// applied_opts).  Mirrors the writer trio (axes_default_for +
+// axes_ensure_scalar_reduce + axes_apply_opt) exactly.  Returns the
+// number of extents written; 0 on overflow / unknown opt / invalid
+// replay.  Used by `axes_resolve_full_shape` and (eventually) by
+// readers migrating off direct `ke->axes->full_shape[]` reads.
+fn u32  axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
+                                u32 cap);
+
+// E9 session 2: per-axis full_shape resolver.  Writes the derived
+// extent for axis `d` into `*out_extent` and returns 1 on success;
+// 0 (with `*out_extent = 0`) when ke/axes are NULL, d is out of
+// range, or the simulator can't speak.  Under `THVM_E9_VALIDATE=1`,
+// cross-checks against `ke->axes->full_shape[d]` and aborts on
+// divergence.
+fn u32  axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
+                                u32 *out_extent);
+
+// E9 session 2: axis-count resolver.  Returns the derived axis count
+// (output_shape.ndim clipped to MAX_AXES-1, plus 1 if a trailing
+// REDUCE-class axis is present, plus the count of split-class
+// applied_opts).  Under `THVM_E9_VALIDATE=1`, cross-checks against
+// `ke->axes->n_axes` and aborts on divergence.
+fn u32  axes_resolve_n_axes(struct KernelEntry const *ke);
+
+// E9 session 2: content hash of (applied_opts, output_shape,
+// source_uop) -- the inputs that fully determine the resolver
+// output.  Replaces the legacy `ke->axes->version` u32 freshness
+// counter.  Snapshots taken into `ke->tile_axes_hash` and compared
+// across tile_sync_from_scalar to detect stale tile_uops.
+fn u64  tile_axes_hash(struct KernelEntry const *ke);
 
 // Apply one TOpt to a KernelEntry's axis structure.  Split-class opts
 // (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) split the indicated axis,

@@ -51,14 +51,16 @@ fn int tile_anno_axis_at(KernelEntry const *ke, u32 d, TileAxisInfo *out) {
 // in place), tile_uops carries STALE axis info.  Prefer ke->axes
 // in that case so consumers see the current state.
 //
-// Two-part check: (1) versions must match, and (2) axis counts must
-// match too.  The count check catches version-counter collisions
-// across test setups (memset zeroes version, then version++ can
-// land on a value that was previously assigned to tile_axes_version
-// via a different axes shape).
+// E9 session 2: freshness compares `ke->tile_axes_hash` (snapshot
+// captured when tile_uops was built) against `tile_axes_hash(ke)`
+// (current content hash over applied_opts + output_shape +
+// source_uop).  Replaced the legacy u32 version counter; the hash
+// is collision-resistant by construction so the secondary axis-count
+// check is no longer needed for disambiguation, but kept as a cheap
+// structural guard.
 static int tile_anno_tile_uops_fresh(KernelEntry const *ke) {
   if (ke == NULL || ke->axes == NULL) return 1;  // no axes to compare
-  if (ke->tile_axes_version != ke->axes->version) return 0;
+  if (ke->tile_axes_hash != tile_axes_hash(ke)) return 0;
   u32 tile_n = tile_anno_axis_count(ke);
   if (tile_n == 0) return 0;
   return tile_n == ke->axes->n_axes;
@@ -146,22 +148,19 @@ int tile_anno_record_opt(KernelEntry *ke, KOpt opt) {
   if (ke == NULL || ke->axes == NULL) return 0;
   if (ke->axes->n_applied >= MAX_OPTS) return 0;
   ke->axes->applied_opts[ke->axes->n_applied++] = opt;
-  ke->axes->version++;
-  if (ke->axes->version == 0) ke->axes->version = 1;
+  // E9 session 2: freshness via `tile_axes_hash(ke)` over the new
+  // applied_opts log; no version bump.
   return 1;
 }
 
 // Reset the axes back to the default LOOP/REDUCE shape (used between
 // autotune bench candidates so each candidate starts from a fresh
-// baseline).  Preserves the autotuned flag and the version counter
-// so cache freshness checks see the mutation.
+// baseline).  Preserves the autotuned flag.
 void tile_anno_axes_reset(KernelEntry *ke) {
   if (ke == NULL || ke->axes == NULL) return;
   u8  autotuned = ke->axes->autotuned;
-  u32 version   = ke->axes->version;
   memset(ke->axes, 0, sizeof(KernelAxes));
   ke->axes->autotuned = autotuned;
-  ke->axes->version   = version;
   axes_default_for(ke);
   axes_ensure_scalar_reduce(ke);
 }
@@ -184,7 +183,6 @@ int tile_anno_axis_append(KernelEntry *ke, TileAxisInfo info) {
   (void)info.kax_type;        // resolver-derived; see comment above.
   (void)info.memory_scope;
   (void)info.vector_width;
-  ke->axes->version++;
-  if (ke->axes->version == 0) ke->axes->version = 1;
+  // E9 session 2: freshness via `tile_axes_hash(ke)`; no version bump.
   return 1;
 }
