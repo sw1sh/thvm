@@ -2366,10 +2366,30 @@ static Term emit_kernel_for_boundary(u32 bi) {
     if (ke->cached_lift.store_root && ke->axes != NULL
         && ke->axes->n_applied > 0) {
       char const *val_e = getenv("THVM_E9_VALIDATE");
+      // E9-prep wedge 2: uop_apply_split_dag composes the split-class
+      // entries (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG
+      // level via the uop_range_split primitive, replacing each
+      // pre-replay UOP_RANGE leaf with the (outer * k + inner) sub-
+      // expression.  In the default lifter config (kernel_lift.c's
+      // structural-replay split block at lines ~1561-1604 still fires)
+      // this pass is a no-op: the lifter has already produced the
+      // post-split DAG, and the rule's idempotence guard detects the
+      // post-split sentinel leaves and bails.  The pass becomes useful
+      // when the lifter's structural-replay split block retires
+      // (Stage d of E9-prep wedge 2).
+      //
+      // Order: split-DAG runs FIRST (rewires axis-id space + extents),
+      // then uop_apply_kernel_opts stamps axis_types via the simulator
+      // that already accounts for SPLIT shifts.  Running stamp first
+      // would stamp the pre-split leaves which split-DAG would then
+      // replace -- losing the stamps.
+      Term root_after_split = uop_apply_split_dag(ke->cached_lift.store_root,
+                                                  ke->axes->applied_opts,
+                                                  ke->axes->n_applied);
       if (val_e != NULL && val_e[0] == '1') {
         u32 fires = 0;
         Term post = uop_apply_kernel_opts_validate(
-            ke->cached_lift.store_root,
+            root_after_split,
             ke->axes->applied_opts,
             ke->axes->n_applied,
             &fires);
@@ -2385,7 +2405,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
         ke->cached_lift.store_root = post;
         ke->compute_root           = post;
       } else {
-        Term post = uop_apply_kernel_opts(ke->cached_lift.store_root,
+        Term post = uop_apply_kernel_opts(root_after_split,
                                           ke->axes->applied_opts,
                                           ke->axes->n_applied);
         ke->cached_lift.store_root = post;
