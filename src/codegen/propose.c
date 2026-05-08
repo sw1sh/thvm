@@ -460,8 +460,13 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   static const u32 split_factors[] = {16, 8, 4, 2};
   u32 n_factors = sizeof(split_factors)/sizeof(*split_factors);
 
-  if (propose_metal_backend_enabled() && ke->axes != NULL
-      && tile_anno_axis_count_or_kernelaxes(ke) > 0) {
+  // Gate flip: BEAM TC entry checks DAG presence directly.  The body's
+  // `propose_tc_classify` already requires `cached_lift.store_root != 0`
+  // (DAG-side matmul classifier), so the outer `axes != NULL && axis_count
+  // > 0` proxy is redundant -- every materialized kernel that reaches
+  // this proposer has both, and `cached_lift.store_root != 0` is a
+  // strict tightening that matches what the body actually needs.
+  if (propose_metal_backend_enabled() && ke->cached_lift.store_root != 0) {
     u32 dtype = 0;
     if (propose_tc_classify(ke, &dtype) && dtype == DT_FP32) {
       static const u32 tc_tiles[] = {32, 16, 8};
@@ -476,6 +481,17 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     }
   }
 
+  // Gate intentionally retained on KernelAxes presence (NOT flipped to
+  // `cached_lift.store_root != 0`).  Rationale: the body calls
+  // `tile_analyze_conv2d_flat` which itself requires `ke->program != NULL`
+  // (KProgOp[]-side recognizer).  Under Phase C7 default-on, lift success
+  // frees `program[]`, so this conv2d-flat path only fires when lift
+  // declined -- a state where `cached_lift.store_root == 0` AND
+  // `program != NULL && axes != NULL`.  Flipping to the DAG check would
+  // disable the path entirely (and break `tests/test_tile_graph.c`'s
+  // `metal-conv2d-flat-proposes-local` case which hand-builds program[]
+  // without running the lifter).  Slated to retire when conv2d gets a
+  // UOp-DAG-side recognizer (slice-8-territory, see ideal_pipeline_handoff).
   if (propose_metal_tile_enabled() && ke->axes != NULL
       && tile_anno_axis_count_or_kernelaxes(ke) > 0) {
     TileConv2DInfo conv;
