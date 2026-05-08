@@ -2,16 +2,16 @@
 // TOpt.  Owns the axis rewrite previously done by WL TKernelApplyOpt;
 // WL is a thin LibraryLink wrapper now.
 //
-// E9 reshape: KernelAxes no longer carries an axis_types[] field.
-// `kernel_apply_opt` records the opt in applied_opts[] and maintains
-// `n_axes` + `full_shape[]` for split-class opts; the kax_type per
-// axis is derived on demand from (output_shape + tail-reduce +
-// scalar-reduce + applied_opts) by `axes_compute_axis_types` /
-// `axes_resolve_kax_type` (codegen/axis.c).  The validation contract
-// (axis-in-range, arg-divides, GLOBAL targets a LOOP, SWAP target
-// in-range, applied_opts/MAX_AXES caps) still gates the writes; the
-// LOOP precondition for KOP_GLOBAL consults `axes_resolve_kax_type`
-// instead of a stored axis_types[].
+// E9 reshape: KernelAxes no longer carries an axis_types[] or
+// full_shape[] field; `kernel_apply_opt` is now signal-driven --
+// validates the opt against the current shape derived on-demand from
+// `axes_compute_full_shape` (output_shape + tail-reduce +
+// scalar-reduce + applied_opts), then appends the opt to
+// applied_opts[].  Per-axis kax_type / extents are derived on read
+// via `axes_resolve_kax_type` / `axes_resolve_full_shape` (codegen/
+// axis.c).  The validation contract (axis-in-range, arg-divides,
+// GLOBAL targets a LOOP, SWAP target in-range, applied_opts/MAX_AXES
+// caps) still gates the writes.
 //
 // Each opt class:
 //
@@ -20,7 +20,8 @@
 //     Insert a new axis after `axis`; the new inner axis takes the
 //     opt's KAX_ type by virtue of `axes_compute_axis_types` replaying
 //     applied_opts deterministically.  Validation: arg must divide
-//     full_shape[axis].
+//     the current `axes_compute_full_shape`-derived axis size and
+//     n_derived < MAX_AXES.
 //
 //   GLOBAL
 //     Mark the selected LOOP axis as GLOBAL via the applied_opts log.
@@ -28,8 +29,9 @@
 //     must currently resolve to KAX_LOOP.
 //
 //   SWAP
-//     Swap full_shape[axis] <-> full_shape[arg].  No new axis.  The
-//     resolver picks up the position swap when replaying applied_opts.
+//     Position swap recorded in applied_opts.  Validation: both
+//     positions in range.  The resolver picks up the swap when
+//     replaying applied_opts.
 //
 //   PADTO / NOLOCALS
 //     Reserved.  Rejected here; no axis-structure mutation.
@@ -101,12 +103,15 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (ax->n_applied >= MAX_OPTS) {
     return 0;
   }
-  // E9 session 4: writer-private scratch.  `ax->_writer.full_shape[]` /
-  // `ax->_writer.n_axes` are NOT to be read outside the writer trio
-  // (apply_opt.c body, tile_anno.c writer-trio, axis.c lifecycle /
-  // validators).  External readers go through axes_resolve_full_shape
-  // / axes_resolve_n_axes.
-  if (opt.axis >= ax->_writer.n_axes) {
+  // E9 session 5: `_writer.full_shape[]` / `_writer.n_axes` retired.
+  // Derive the current pre-opt extents on-demand from
+  // (output_shape + tail-reduce + scalar-reduce + applied_opts) via
+  // `axes_compute_full_shape`.  Validate the opt against the derived
+  // scratch, then append to applied_opts -- subsequent calls see the
+  // post-opt state by replaying the longer log.
+  u32 cur_shape[MAX_AXES];
+  u32 n_axes = axes_compute_full_shape(ke, cur_shape, MAX_AXES);
+  if (n_axes == 0 || opt.axis >= n_axes) {
     return 0;
   }
 
@@ -114,44 +119,29 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     if (opt.arg == 0) {
       return 0;
     }
-    u32 axis_size = ax->_writer.full_shape[opt.axis];
+    u32 axis_size = cur_shape[opt.axis];
     if (axis_size % opt.arg != 0) {
       return 0;
     }
-    if (ax->_writer.n_axes >= MAX_AXES) {
+    if (n_axes >= MAX_AXES) {
       return 0;
     }
-    // Shift full_shape[] entries after opt.axis right by one to make
-    // room for the new inner axis.  No axis_types[] array to shift --
-    // axes_compute_axis_types replays the same insertion against the
-    // signal-derived initial layout.
-    for (i32 i = (i32)ax->_writer.n_axes; i > (i32)opt.axis + 1; i--) {
-      ax->_writer.full_shape[i] = ax->_writer.full_shape[i - 1];
-    }
-    // Outer keeps its original type by replay; size shrinks by split
-    // factor.  Inner takes the opt's type by replay; size = split
-    // factor.
-    ax->_writer.full_shape[opt.axis]     = axis_size / opt.arg;
-    ax->_writer.full_shape[opt.axis + 1] = opt.arg;
-    ax->_writer.n_axes++;
+    // axes_compute_full_shape will replay this same split (shift
+    // entries > axis right; insert axis_size/arg at axis, arg at
+    // axis+1) when it next reads applied_opts.  No scratch to mutate.
   } else if (opt.op == KOP_GLOBAL) {
-    u32 axis_size = ax->_writer.full_shape[opt.axis];
+    u32 axis_size = cur_shape[opt.axis];
     if (opt.arg != axis_size
         || axes_resolve_kax_type(ke, opt.axis) != KAX_LOOP) {
       return 0;
     }
-    // No axis_types[] write; resolver replays KOP_GLOBAL against the
-    // post-applied_opts state.
+    // axes_compute_full_shape's KOP_GLOBAL arm is a no-op for shape;
+    // axes_compute_axis_types stamps KAX_GLOBAL on read.
   } else if (opt.op == KOP_SWAP) {
-    if ((u8)opt.arg >= ax->_writer.n_axes) {
+    if ((u8)opt.arg >= n_axes) {
       return 0;
     }
-    u32 si = ax->_writer.full_shape[opt.axis];
-    u32 sj = ax->_writer.full_shape[opt.arg];
-    ax->_writer.full_shape[opt.axis] = sj;
-    ax->_writer.full_shape[opt.arg]  = si;
-    // No axis_types[] swap; resolver replays KOP_SWAP against the
-    // post-applied_opts state.
+    // Resolver replays SWAP on its scratch; nothing to mutate here.
   } else {
     return 0;
   }

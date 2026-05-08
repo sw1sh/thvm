@@ -546,19 +546,14 @@ typedef struct {
   // via axes_resolve_kax_type / axes_compute_axis_types in
   // codegen/axis.c.
   //
-  // E9 session 4: full_shape[] and n_axes moved into `_writer` --
-  // they are writer-trio-private scratch (apply_opt.c writer body,
-  // tile_anno.c writer-trio, axis.c lifecycle / cross-check validators).
-  // External code MUST NOT read these directly; use the resolvers:
-  //   axes_resolve_full_shape(ke, d, *out) for per-axis extents
-  //   axes_resolve_n_axes(ke)              for axis count
-  // The fields stay struct-public (the cache slot copies KernelAxes
-  // by value) but the substruct path (`axes->_writer.full_shape[d]`)
-  // makes external reads visually flagged.
-  struct {
-    u32  full_shape[MAX_AXES];
-    u8   n_axes;                 // 0 = uninitialized (not yet defaulted)
-  } _writer;
+  // E9 session 5: full_shape[] / n_axes retired.  Per-axis extents +
+  // axis count derive on demand from
+  // (output_shape + tail-reduce + scalar-reduce + applied_opts) via
+  //   axes_resolve_full_shape(ke, d, *out)
+  //   axes_resolve_n_axes(ke)
+  // -- the same signals that drove the writer trio in session 4.
+  // KernelAxes now carries only the applied_opts log + the autotune
+  // bookkeeping bits.
   KOpt applied_opts[MAX_OPTS];
   u8   n_applied;
   u8   autotuned;              // 1 = kernel_autotune has run on this
@@ -1881,13 +1876,13 @@ fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop);
 fn Term interact_kernel (Term kernel);
 
 // === codegen/ axis ===
-// Default-initialise a kernel's axis structure from its output shape +
-// final REDUCE op (if any).  Idempotent: a no-op if axes.n_axes != 0
-// (caller already configured it).  Called from materialize after
-// kernel program is committed.
+// E9 session 5: lifecycle hooks retained as no-ops.  The signal-
+// driven resolvers cover the initial state (nd LOOPs + optional
+// trailing REDUCE) directly from
+// (output_shape + tail-reduce + scalar-reduce), so neither helper
+// has scratch to populate.  Kept callable so existing call ordering
+// in materialize.c / tile.c / tile_anno.c stays valid without churn.
 fn void axes_default_for(struct KernelEntry *ke);
-// Supplement default axes with the scalar reduce range after rangeify.
-// This exposes non-tail scalar reductions to tile GROUP / UNROLL opts.
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke);
 // E9-prep wedge 3: predicate that mirrors the legacy
 // `axes_has_reduce_axis(ke->axes)` answer without reading
@@ -1926,24 +1921,20 @@ fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
 fn u32  axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
                                 u32 cap);
 
-// E9 session 2: per-axis full_shape resolver.  E9 session 4: this is
-// the canonical read path for axis extents -- direct reads of
-// `ke->axes->_writer.full_shape[d]` are writer-trio internal.  Writes the derived
-// extent for axis `d` into `*out_extent` and returns 1 on success;
-// 0 (with `*out_extent = 0`) when ke/axes are NULL, d is out of
-// range, or the simulator can't speak.  Under `THVM_E9_VALIDATE=1`,
-// cross-checks against `ke->axes->_writer.full_shape[d]` and aborts on
-// divergence.
+// E9 session 2: per-axis full_shape resolver.  E9 session 5: this is
+// the canonical (and only) read path for axis extents -- writer
+// scratch retired.  Writes the derived extent for axis `d` into
+// `*out_extent` and returns 1 on success; 0 (with `*out_extent = 0`)
+// when ke/axes are NULL, d is out of range, or the simulator can't
+// speak.
 fn u32  axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
                                 u32 *out_extent);
 
-// E9 session 2: axis-count resolver.  E9 session 4: this is the
-// canonical read path for n_axes -- direct reads of
-// `ke->axes->_writer.n_axes` are writer-trio internal.  Returns the
-// derived axis count (output_shape.ndim clipped to MAX_AXES-1, plus 1
-// if a trailing REDUCE-class axis is present, plus the count of
-// split-class applied_opts).  Under `THVM_E9_VALIDATE=1`, cross-checks
-// against `ke->axes->_writer.n_axes` and aborts on divergence.
+// E9 session 2: axis-count resolver.  E9 session 5: this is the
+// canonical (and only) read path for n_axes -- writer scratch
+// retired.  Returns the derived axis count (output_shape.ndim clipped
+// to MAX_AXES-1, plus 1 if a trailing REDUCE-class axis is present,
+// plus the count of split-class applied_opts).
 fn u32  axes_resolve_n_axes(struct KernelEntry const *ke);
 
 // E9 session 2: content hash of (applied_opts, output_shape,
@@ -2088,9 +2079,10 @@ int        tile_anno_record_opt(struct KernelEntry *ke, KOpt opt);
 // Reset axes to the default LOOP/REDUCE shape (autotune between-
 // candidates baseline; preserves autotuned + version).
 void       tile_anno_axes_reset(struct KernelEntry *ke);
-// Append a new axis at the end (n_axes++, write extent, bump version).
-// E9: kax_type carried by `info` is informational; the per-axis
-// kax_type is derived on read by axes_resolve_kax_type.
+// E9 session 5: no-op stub.  Writer scratch (`_writer.full_shape[]` /
+// `_writer.n_axes`) retired; the resolvers derive axis count + extents
+// from (output_shape + tail-reduce + scalar-reduce + applied_opts) on
+// read.  Symbol kept for the public header signature; safe to call.
 int        tile_anno_axis_append(struct KernelEntry *ke, TileAxisInfo info);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);

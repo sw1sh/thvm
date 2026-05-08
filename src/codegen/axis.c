@@ -11,42 +11,12 @@
 // variant emitter is under construction.
 
 fn void axes_default_for(KernelEntry *ke) {
-  // Idempotent: if `ke->axes` already has a non-zero n_axes, another
-  // kid sharing this kernel_program_cache slot already populated
-  // it.  Per-program-shape sharing means there's nothing to do.
-  // E9 session 4: writer-trio reads the private scratch directly.
-  if (ke->axes == NULL || ke->axes->_writer.n_axes != 0) {
-    return;
-  }
-
-  // Phase E migration: route writes through tile_anno_axis_append.
-  // The helper bumps version + handles bounds.  Each call appends
-  // exactly one axis; LOOP per output dim then optional trailing
-  // REDUCE.
-  u32 nd = ke->output_shape.ndim;
-  if (nd > MAX_AXES - 1) {
-    nd = MAX_AXES - 1;
-  }
-  for (u32 i = 0; i < nd; i++) {
-    TileAxisInfo info = { KAX_LOOP, ke->output_shape.dims[i], 0, 0 };
-    (void)tile_anno_axis_append(ke, info);
-  }
-  // Trailing REDUCE: append axis sized at the ratio between the
-  // tail-REDUCE op's source numel and the kernel output numel.
-  // Mirrors WL Kernel.wl `defaultFullShape`'s redOp.numel/outNumel.
-  if (ke->n_ops > 0 && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
-    KProgOp const *rd = &ke->program[ke->n_ops - 1];
-    u32 src_numel;
-    if (KSRC_IS_INPUT(rd->src[0])) {
-      src_numel = ke->input_numels[KSRC_INDEX(rd->src[0])];
-    } else {
-      src_numel = ke->program[KSRC_INDEX(rd->src[0])].numel;
-    }
-    u32 out_numel = ke->output_numel ? ke->output_numel : 1;
-    u32 axis_size = src_numel / out_numel;
-    TileAxisInfo info = { KAX_REDUCE, axis_size, 0, 0 };
-    (void)tile_anno_axis_append(ke, info);
-  }
+  // E9 session 5: signal-driven resolvers cover the initial state
+  // (nd LOOPs + optional trailing REDUCE) directly from
+  // (output_shape + tail-reduce + scalar-reduce).  No scratch to
+  // populate; callers retained for symbol stability and so the
+  // existing call ordering in materialize.c / tile.c stays valid.
+  (void)ke;
 }
 
 static u32 axes_scalar_reduce_extent(KernelEntry const *ke) {
@@ -265,10 +235,7 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
 // unknown opt -- bug in the writer trio's applied_opts log), returns
 // KAX_LOOP as a safe default.
 fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
-  // E9 session 4: bound check uses writer-private n_axes (validator
-  // role; this function lives in the writer-trio scope).  External
-  // callers see only the resolver result.
-  if (ke == NULL || ke->axes == NULL || d >= ke->axes->_writer.n_axes) {
+  if (ke == NULL || ke->axes == NULL) {
     return KAX_LOOP;
   }
   u8 types[MAX_AXES] = {0};
@@ -395,52 +362,14 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
   return n;
 }
 
-// E9 session 2: cross-check resolver output against the writer's
-// `ke->axes->_writer.full_shape[]` / `ke->axes->_writer.n_axes` state.
-// Enabled by setting `THVM_E9_VALIDATE=1`.  Aborts on divergence -- this
-// catches drift between the writer trio's mutations and the resolver's
-// signal-replay logic.  Mirrors the wedge 1 / E9-prep validation
-// pattern.
-static int axes_e9_validate_enabled(void) {
-  static int cached = -1;
-  if (cached < 0) {
-    char const *env = getenv("THVM_E9_VALIDATE");
-    cached = (env != NULL && env[0] == '1' && env[1] == 0) ? 1 : 0;
-  }
-  return cached;
-}
-
-static void axes_e9_validate_full_shape(struct KernelEntry const *ke,
-                                        u32 const *derived, u32 n_derived) {
-  if (!axes_e9_validate_enabled() || ke == NULL || ke->axes == NULL) {
-    return;
-  }
-  if (n_derived != ke->axes->_writer.n_axes) {
-    fprintf(stderr,
-            "[THVM_E9_VALIDATE] axes_resolve_full_shape: n_axes mismatch "
-            "(derived=%u writer=%u)\n",
-            n_derived, ke->axes->_writer.n_axes);
-    abort();
-  }
-  for (u32 i = 0; i < n_derived; i++) {
-    if (derived[i] != ke->axes->_writer.full_shape[i]) {
-      fprintf(stderr,
-              "[THVM_E9_VALIDATE] axes_resolve_full_shape: extent[%u] "
-              "mismatch (derived=%u writer=%u)\n",
-              i, derived[i], ke->axes->_writer.full_shape[i]);
-      abort();
-    }
-  }
-}
-
 // E9 session 2: per-axis full_shape resolver.  Returns the derived
 // extent for axis `d` (signal-replay over output_shape + applied_opts);
 // 0 when ke/axes are NULL, d is out of range, or the simulator can't
-// speak.  Under `THVM_E9_VALIDATE=1`, cross-checks against the writer's
-// `ke->axes->_writer.full_shape[d]` and aborts on divergence.
+// speak.  E9 session 5: writer scratch retired, so this is now the
+// only authoritative source -- nothing left to cross-check against.
 fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
                                u32 *out_extent) {
-  if (ke == NULL || ke->axes == NULL || d >= ke->axes->_writer.n_axes) {
+  if (ke == NULL || ke->axes == NULL) {
     if (out_extent != NULL) *out_extent = 0;
     return 0;
   }
@@ -450,7 +379,6 @@ fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
     if (out_extent != NULL) *out_extent = 0;
     return 0;
   }
-  axes_e9_validate_full_shape(ke, extents, n);
   if (out_extent != NULL) *out_extent = extents[d];
   return 1;
 }
@@ -458,23 +386,14 @@ fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
 // E9 session 2: axis-count resolver.  Returns the derived axis count
 // (output_shape.ndim clipped to MAX_AXES-1, plus 1 if a trailing
 // REDUCE-class axis is present, plus the count of split-class
-// applied_opts).  Under `THVM_E9_VALIDATE=1`, cross-checks against
-// `ke->axes->_writer.n_axes` and aborts on divergence.
+// applied_opts).  E9 session 5: writer scratch retired; this is the
+// authoritative count.
 fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
   if (ke == NULL || ke->axes == NULL) {
     return 0;
   }
   u32 extents[MAX_AXES] = {0};
-  u32 n = axes_compute_full_shape(ke, extents, MAX_AXES);
-  if (axes_e9_validate_enabled() && ke->axes != NULL
-      && n != ke->axes->_writer.n_axes) {
-    fprintf(stderr,
-            "[THVM_E9_VALIDATE] axes_resolve_n_axes: n_axes mismatch "
-            "(derived=%u writer=%u)\n",
-            n, ke->axes->_writer.n_axes);
-    abort();
-  }
-  return n;
+  return axes_compute_full_shape(ke, extents, MAX_AXES);
 }
 
 // E9 session 2: content hash of the kernel's axis-defining inputs.
@@ -520,36 +439,10 @@ fn u64 tile_axes_hash(struct KernelEntry const *ke) {
 }
 
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
-  if (ke == NULL || ke->axes == NULL) {
-    return;
-  }
-  // E9 session 4: writer-trio reads the private scratch directly.
-  if (ke->axes->_writer.n_axes == 0) {
-    axes_default_for(ke);
-  }
-  // E9-prep wedge 3: skip-if-already-have-REDUCE without reading
-  // axis_types[].  At this callsite (post axes_default_for, before
-  // autotune) n_applied == 0 and the only axis-structure writer that
-  // has run is axes_default_for itself (one LOOP per output dim plus
-  // an optional trailing REDUCE) or a previous axes_ensure_scalar_reduce
-  // (one trailing REDUCE).  In both cases the trailing-REDUCE signal
-  // is `n_axes > nd_output_clipped`: default-for adds nd_output LOOPs
-  // and at most one trailing axis, so any axis past the LOOP block is
-  // exactly the REDUCE we'd otherwise duplicate.
-  u32 nd = ke->output_shape.ndim;
-  if (nd > MAX_AXES - 1) {
-    nd = MAX_AXES - 1;
-  }
-  if (ke->axes->_writer.n_axes > nd) {
-    return;
-  }
-  u32 extent = axes_scalar_reduce_extent(ke);
-  if (extent == 0 || ke->axes->_writer.n_axes >= MAX_AXES) {
-    return;
-  }
-  // Phase E writer migration: route through tile_anno_axis_append.
-  // Today the helper writes ke->axes; when Phase F flips, it writes
-  // TILE_AXIS directly and freshness propagates via tile_axes_hash.
-  TileAxisInfo info = { KAX_REDUCE, extent, 0, 0 };
-  (void)tile_anno_axis_append(ke, info);
+  // E9 session 5: signal-driven resolvers cover the trailing
+  // REDUCE-axis case directly via `axes_scalar_reduce_extent` inside
+  // `axes_compute_full_shape`.  No scratch to extend; symbol kept so
+  // the existing call ordering in materialize.c / tile_anno.c stays
+  // valid.
+  (void)ke;
 }

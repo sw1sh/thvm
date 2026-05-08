@@ -1014,7 +1014,7 @@ int main(void) {
   memset(tk->axes, 0, sizeof(KernelAxes));
   axes_default_for(tk);
   // E9 session 4: route through resolvers now that the writer scratch
-  // is private (`tk->axes->_writer.{n_axes,full_shape}`).  The
+  // is private (writer-trio in session 4; deleted in session 5).  The
   // resolver derives axis count from signals (output_shape +
   // tail-reduce + scalar-reduce + applied_opts), so for a kernel with
   // a scalar-arena S_REDUCE_* the resolver counts the trailing
