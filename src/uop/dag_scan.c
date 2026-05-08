@@ -455,3 +455,188 @@ int uop_dag_classify_matmul_shape(Term root,
   out->flags   = (transA ? 1u : 0u) | (transB ? 2u : 0u);
   return 1;
 }
+
+// === Slice 8 session 3: DAG-side DOT-shape extractor =================
+//
+// `cpu_blas_dispatch` historically read DOT shape facts (K, slot
+// indices, dtype) out of `ke->program[]` via a hand-rolled matcher.
+// Under default `THVM_PHASE_C7_FREE_PROGRAM=1` the program[] is freed
+// and the legacy gate early-bails -- regressing what would be a single
+// `cblas_sdot` call to the per-element render_uop_c triple-loop.
+//
+// Strategy mirrors the GEMM extractor: classify via
+// `uop_classify_dot`, then read M=1 / N=1 / output buffer rank from
+// the lifted DAG.  Buffer slot indices come from BUFFER.instance.
+int uop_dag_classify_dot_shape(Term root,
+                               struct KernelEntry const *ke,
+                               UopDagDotShape *out) {
+  if (root == 0 || ke == NULL || out == NULL) return 0;
+  if (ke->n_inputs < 2) return 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+
+  u32 k_extent = 0;
+  if (!uop_classify_dot(root, &k_extent)) return 0;
+  if (k_extent == 0) return 0;
+
+  // Output buffer must be rank-0 (scalar) OR rank-1 numel=1.
+  Term buf_out = heap_read(term_val(root) + 0);
+  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
+  u32 ond = uop_buffer_ndim(buf_out);
+  if (ond > 1) return 0;
+  if (ond == 1 && uop_buffer_dim(buf_out, 0) != 1) return 0;
+
+  // Reach into the STORE for the MUL operands.
+  Term reduce = heap_read(term_val(root) + 2);
+  Term mul    = heap_read(term_val(reduce) + 0);
+  Term a_idx  = heap_read(term_val(mul) + 0);
+  Term b_idx  = heap_read(term_val(mul) + 1);
+
+  Term buf_a = heap_read(term_val(a_idx) + 0);
+  Term buf_b = heap_read(term_val(b_idx) + 0);
+  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
+  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
+  u32 inst_a = uop_buffer_inst_get(buf_a);
+  u32 inst_b = uop_buffer_inst_get(buf_b);
+  if (inst_a == 0 || inst_b == 0) return 0;
+  u32 a_input = inst_a - 1;
+  u32 b_input = inst_b - 1;
+  if (a_input >= ke->n_inputs || b_input >= ke->n_inputs) return 0;
+  if (a_input == b_input) return 0;
+
+  // Uniform dtype check.
+  u32 dt = uop_buffer_dtype(buf_out);
+  if (dt != DT_FP32 && dt != DT_FP64) return 0;
+  if (uop_buffer_dtype(buf_a) != dt) return 0;
+  if (uop_buffer_dtype(buf_b) != dt) return 0;
+
+  // Per-input view: must be contiguous rank-1 K elements (or rank-1
+  // strides {1}).  Mirrors the legacy DOT input-tid contiguity gate.
+  if (ke->input_views != NULL) {
+    View const *va = &ke->input_views[a_input];
+    View const *vb = &ke->input_views[b_input];
+    if (va->shape.ndim == 1) {
+      if (va->shape.dims[0] != k_extent || va->strides[0] != 1) return 0;
+    } else {
+      // Higher-rank views must still be contiguous K elements; bail
+      // for now (the legacy DOT path only saw rank-1 inputs).
+      return 0;
+    }
+    if (vb->shape.ndim == 1) {
+      if (vb->shape.dims[0] != k_extent || vb->strides[0] != 1) return 0;
+    } else {
+      return 0;
+    }
+  }
+
+  out->dtype   = dt;
+  out->K       = k_extent;
+  out->a_input = a_input;
+  out->b_input = b_input;
+  return 1;
+}
+
+// === Slice 8 session 3: DAG-side GEMV-shape extractor ================
+//
+// GEMV: W:{M,K} @ x:{K} -> {M}.  In the WL/lift representation the
+// vector x is broadcast to {M,K} via EXPAND so the MUL is elementwise.
+// W's lift address is m*K + k (2 distinct ranges); x's lift address is
+// just k (1 distinct range, because the broadcast m-axis has stride 0
+// and is dropped by lift_scalar_index).  REDUCE_SUM along the k axis
+// gives an {M} output.
+//
+// Strategy: classify the structural shape via `uop_classify_gemv`,
+// pick out which MUL operand is W (carries 2 ranges) vs x (carries 1),
+// recover M from the output buffer's rank-1 dim and from W's view, and
+// derive ldW + transpose flag from the W input view.
+int uop_dag_classify_gemv_shape(Term root,
+                                struct KernelEntry const *ke,
+                                UopDagGemvShape *out) {
+  if (root == 0 || ke == NULL || out == NULL) return 0;
+  if (ke->n_inputs < 2) return 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+
+  u32 k_extent = 0;
+  int w_first  = 0;
+  if (!uop_classify_gemv(root, &k_extent, &w_first)) return 0;
+  if (k_extent == 0) return 0;
+
+  // Output buffer must be rank-1 with shape {M}.
+  Term buf_out = heap_read(term_val(root) + 0);
+  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
+  if (uop_buffer_ndim(buf_out) != 1) return 0;
+  u32 M = uop_buffer_dim(buf_out, 0);
+  if (M == 0) return 0;
+
+  // Reach into the STORE for the MUL operands.
+  Term reduce = heap_read(term_val(root) + 2);
+  Term mul    = heap_read(term_val(reduce) + 0);
+  Term mul_a  = heap_read(term_val(mul) + 0);
+  Term mul_b  = heap_read(term_val(mul) + 1);
+  Term w_idx  = w_first ? mul_a : mul_b;
+  Term x_idx  = w_first ? mul_b : mul_a;
+
+  Term buf_w = heap_read(term_val(w_idx) + 0);
+  Term buf_x = heap_read(term_val(x_idx) + 0);
+  if (term_tag(buf_w) != TAG_UOP || term_ext(buf_w) != UOP_BUFFER) return 0;
+  if (term_tag(buf_x) != TAG_UOP || term_ext(buf_x) != UOP_BUFFER) return 0;
+  u32 inst_w = uop_buffer_inst_get(buf_w);
+  u32 inst_x = uop_buffer_inst_get(buf_x);
+  if (inst_w == 0 || inst_x == 0) return 0;
+  u32 w_input = inst_w - 1;
+  u32 x_input = inst_x - 1;
+  if (w_input >= ke->n_inputs || x_input >= ke->n_inputs) return 0;
+  if (w_input == x_input) return 0;
+
+  // Uniform dtype check.
+  u32 dt = uop_buffer_dtype(buf_out);
+  if (dt != DT_FP32 && dt != DT_FP64) return 0;
+  if (uop_buffer_dtype(buf_w) != dt) return 0;
+  if (uop_buffer_dtype(buf_x) != dt) return 0;
+
+  // Per-input view stride pattern.  W must be a {M,K} matrix with
+  // strides {K,1} (untransposed) or {1,M} (transposed).  x must be a
+  // {M,K} broadcast view (strides {0,1}), or a rank-1 {K} contig
+  // {1}, or a rank-2 {1,K} row {?,1}.  Mirrors tile_gemm_views_ok's
+  // N==1 path.
+  if (ke->input_views == NULL) return 0;
+  View const *vw = &ke->input_views[w_input];
+  View const *vx = &ke->input_views[x_input];
+
+  u32 ldW = 0, transW = 0;
+  if (vw->shape.ndim == 2 && vw->shape.dims[0] == M
+      && vw->shape.dims[1] == k_extent
+      && vw->strides[0] == (i32)k_extent && vw->strides[1] == 1) {
+    ldW = k_extent;
+    transW = 0;
+  } else if (vw->shape.ndim == 2 && vw->shape.dims[0] == M
+             && vw->shape.dims[1] == k_extent
+             && vw->strides[0] == 1 && vw->strides[1] == (i32)M) {
+    ldW = M;
+    transW = 1;
+  } else {
+    return 0;
+  }
+
+  int x_ok = 0;
+  if (vx->shape.ndim == 1 && vx->shape.dims[0] == k_extent
+      && vx->strides[0] == 1) {
+    x_ok = 1;
+  } else if (vx->shape.ndim == 2 && vx->shape.dims[0] == 1
+             && vx->shape.dims[1] == k_extent && vx->strides[1] == 1) {
+    x_ok = 1;
+  } else if (vx->shape.ndim == 2 && vx->shape.dims[0] == M
+             && vx->shape.dims[1] == k_extent
+             && vx->strides[0] == 0 && vx->strides[1] == 1) {
+    x_ok = 1;
+  }
+  if (!x_ok) return 0;
+
+  out->dtype   = dt;
+  out->M       = M;
+  out->K       = k_extent;
+  out->w_input = w_input;
+  out->x_input = x_input;
+  out->ldW     = ldW;
+  out->flags   = transW ? 1u : 0u;
+  return 1;
+}
