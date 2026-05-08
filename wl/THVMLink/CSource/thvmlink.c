@@ -1512,8 +1512,12 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
   mint *dst = libData->MTensor_getIntegerData(out);
   dst[0] = (mint)ax->n_axes;
   dst[1] = (mint)ax->n_applied;
+  // E9: kax_type comes from the wedge-4 simulator (signal-derived from
+  // output_shape + tail-reduce + scalar-reduce + applied_opts) since the
+  // legacy `axis_types[]` field is gone.  Snapshot routes through
+  // `axes_resolve_kax_type` for parity with every other read site.
   for (u32 i = 0; i < ax->n_axes; i++) {
-    dst[2 + i]               = (mint)ax->axis_types[i];
+    dst[2 + i]               = (mint)axes_resolve_kax_type(&KERNELS[kid], i);
     dst[2 + ax->n_axes + i]  = (mint)ax->full_shape[i];
   }
   mint base = 2 + 2 * ax->n_axes;

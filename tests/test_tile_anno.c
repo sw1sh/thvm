@@ -48,45 +48,9 @@ int main(void) {
   CHECK_EQ(tile_anno_axis_at(ke, 2, &info), 0);
   CHECK_EQ(tile_anno_axis_at(ke, 100, &info), 0);
 
-  TEST_BEGIN("tile-anno/axis-set-writes-tile-axis");
-  // tile_anno_axis_set should mutate the TILE_AXIS at position d
-  // even when KernelAxes isn't populated.  Verify by reading back
-  // through tile_anno_axis_at.
-  TileAxisInfo updated = { KAX_REDUCE, 16, TILE_MEM_SHARED, 8 };
-  // tile_axes_version starts at 0; ke->axes is NULL in this test.
-  // tile_anno_axis_set should still update TILE_AXIS for d=0.
-  // (KernelAxes side is a no-op since ke->axes == NULL.)
-  CHECK_EQ(tile_anno_axis_set(ke, 0, updated), 1);
-  TileAxisInfo got;
-  CHECK_EQ(tile_anno_axis_at(ke, 0, &got), 1);
-  CHECK_EQ(got.kax_type, KAX_REDUCE);
-  CHECK_EQ(got.extent, 16u);
-  CHECK_EQ(got.memory_scope, TILE_MEM_SHARED);
-  CHECK_EQ(got.vector_width, 8u);
-
-  TEST_BEGIN("tile-anno/axis-set-out-of-range-bails");
-  CHECK_EQ(tile_anno_axis_set(ke, 99, updated), 0);
-
-  TEST_BEGIN("tile-anno/axes-match-trivial-cases");
-  // axes_match returns 1 when at least one of the two sides is absent.
-  CHECK_EQ(tile_anno_axes_match(ke), 1);
-
-  TEST_BEGIN("tile-anno/apply-split-maps-to-kop");
-  // tile_anno_apply_split should fail with no axes set up; this just
-  // exercises the dispatch table for known new_inner_type values.
-  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_LOCAL), 0);  // no axes
-  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_UPCAST), 0);
-  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_UNROLL), 0);
-  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_GROUP_REDUCE), 0);
-
-  TEST_BEGIN("tile-anno/apply-split-rejects-unsupported-target");
-  // KAX_REDUCE / KAX_LOOP aren't valid split targets (no inner-axis
-  // type semantics).  Helper bails before consulting axes.
-  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_REDUCE), 0);
-  CHECK_EQ(tile_anno_apply_split(ke, 0, 4, KAX_LOOP), 0);
-
-  TEST_BEGIN("tile-anno/apply-split-rejects-zero-factor");
-  CHECK_EQ(tile_anno_apply_split(ke, 0, 0, KAX_LOCAL), 0);
+  // E9: tile_anno_axis_set / tile_anno_axes_match / tile_anno_apply_split
+  // were writer-side facades that mirrored axes_apply_opt's writes into
+  // ke->axes->axis_types[].  Deleted alongside the field.
 
   tile_free(ke);
   thvm_free();
