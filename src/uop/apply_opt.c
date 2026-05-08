@@ -730,3 +730,406 @@ fn Term uop_apply_kernel_opts_validate(Term root, KOpt const *applied_opts,
   if (out_fires != NULL) *out_fires = ctx.fire_count;
   return out;
 }
+
+// === Phase E9-prep wedge 2: uop_apply_split_dag UPatRule =============
+//
+// Walks `applied_opts` and applies the split-class entries
+// (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG level via the
+// uop_range_split primitive (src/uop/index.c).  Mirrors
+// kernel_lift.c:1561-1604's structural-replay split block but operates
+// on an EMITTED UOP DAG: the rule walks every UOP_RANGE leaf reachable
+// from `root` (descending through INDEX_E / IADD / IMUL / IWHERE /
+// STORE / OPT thanks to the E8 uop_arity / uop_graph_rebuild_with_srcs
+// extension) and replaces leaves whose pre-split axis_id matches a
+// split-class opt's target with the (outer * k + inner) sub-expression
+// the primitive returns.
+//
+// === Pre-condition ===================================================
+//
+// The input DAG must be the lifter output WITHOUT structural-replay
+// splits applied -- i.e. each pre-replay axis position N appears in
+// the DAG as a UOP_RANGE leaf with axis_id = N and the pre-replay
+// extent.  axis_type may already be stamped (E2/E3/E4-E6/E7 stamps
+// it via uop_apply_kernel_opts independently); this rule keeps the
+// outer's existing axis_type and only writes inner.axis_type =
+// kop_inner_axis_type(opt).
+//
+// === Single-pass full-history simulation =============================
+//
+// The simulation walks applied_opts left-to-right, building a per-
+// pre-replay-axis "origin_expr" Term:
+//
+//   - n_origins:        the number of pre-replay axes the simulation
+//                       has seen (set lazily as opts reference axes).
+//   - origin_expr[i]:   the post-rewrite Term that should replace any
+//                       UOP_RANGE leaf whose pre-replay axis_id == i.
+//                       When no opt touched origin i, this stays 0
+//                       (the rule no-ops -> the leaf flows through).
+//   - origin_extent[i]: the pre-replay extent of origin i (captured
+//                       on first reference; used as the seed leaf's
+//                       extent when a split fires on origin i).
+//
+// Per-opt update (only split-class opts mutate origin_expr; GLOBAL /
+// SWAP / TC are no-ops here -- they're handled by
+// uop_apply_kernel_opts which stamps axis_types):
+//
+//   SPLIT(o.axis = a, k):
+//     - The current "outer" Term for origin a is either:
+//         * origin_expr[a]'s leftmost RANGE leaf if origin_expr[a]
+//           has been built up from a prior split (we drill down through
+//           IADD/IMUL chains to find the outermost RANGE), or
+//         * the seed leaf RANGE(a, LOOP, origin_extent[a]) on first
+//           split.
+//     - Apply uop_range_split to that outer leaf with the opt's k and
+//       inner_kax.  The primitive returns (outer_split, inner_split,
+//       linear).
+//     - Substitute outer_split for the old outer in origin_expr[a]
+//       (or set origin_expr[a] = linear on first split).  The
+//       substitution is a structural rewrite that descends through
+//       the existing IMUL/IADD chain.
+//
+// This composition is "split the outer of the current chain" which
+// matches kernel_lift.c's behaviour: each split halves the OUTER's
+// extent, so successive splits target the same SplitAxis cur[a]
+// position which holds the running outer.
+//
+// === Hash-cons preservation ==========================================
+//
+// uop_range / uop_int_binary / uop_const are all hash-cons-cached.
+// The rule's per-leaf rewrite returns a Term assembled via these
+// constructors, so two visits to the same pre-replay leaf produce
+// hash-cons-identical Terms -- uop_pattern_rewrite's memo table dedups
+// across calls.  Idempotent: a second pass over the rewritten DAG
+// finds no UOP_RANGE leaves whose axis_id matches a pre-replay
+// position (the post-rewrite leaves carry the SPLIT-shifted axis_ids,
+// which fall outside [0, n_origins)).
+
+typedef struct {
+  Term origin_expr[MAX_DIM];       // post-rewrite Term per pre-replay axis (0 = untouched)
+  u32  origin_extent[MAX_DIM];     // pre-replay extent per origin (captured on first split)
+  u32  origin_axis_type[MAX_DIM];  // pre-replay axis_type per origin (LOOP unless lifter pre-stamps)
+  u32  n_origins;
+  u32  fire_count;
+} UopApplySplitDagCtx;
+
+// Find the outermost UOP_RANGE leaf in a Term that's either a bare
+// RANGE or an IADD(IMUL(RANGE, _), ...) chain produced by previous
+// uop_range_split applications.  Returns 0 if no RANGE found.
+//
+// Layout assumption: uop_range_split returns linear =
+// IADD(IMUL(outer, k), inner).  Subsequent splits on `outer` would
+// then return IADD(IMUL(new_outer, k2), new_inner) and the caller
+// substitutes that for the old outer, producing
+//   IADD(IMUL(IADD(IMUL(new_outer, k2), new_inner), k), inner)
+// The "outermost outer" is reached by walking IADD.left -> IMUL.left
+// repeatedly.
+static Term split_dag_outermost_range(Term t) {
+  while (term_tag(t) == TAG_UOP) {
+    u32 op = term_ext(t);
+    if (op == UOP_RANGE) return t;
+    if (op == UOP_IADD || op == UOP_IMUL) {
+      t = heap_read(term_val(t) + 0);
+      continue;
+    }
+    return 0;
+  }
+  return 0;
+}
+
+// Substitute `replacement` for `old_leaf` inside an IADD(IMUL(...,k),
+// inner) chain.  Returns the rebuilt expression.  Used after
+// uop_range_split fires on the outermost RANGE of an existing chain:
+// the old outer becomes the new (outer_split * k_split + inner_split)
+// linear_index, and the surrounding IMUL/IADD wraps must rebuild
+// through hash-cons constructors.
+static Term split_dag_substitute_outermost(Term expr, Term old_leaf,
+                                           Term replacement) {
+  if (expr == old_leaf) return replacement;
+  if (term_tag(expr) != TAG_UOP) return expr;
+  u32 op = term_ext(expr);
+  if (op == UOP_IADD || op == UOP_IMUL) {
+    Term left  = heap_read(term_val(expr) + 0);
+    Term right = heap_read(term_val(expr) + 1);
+    Term new_left = split_dag_substitute_outermost(left, old_leaf, replacement);
+    if (new_left == left) return expr;
+    return uop_int_binary(op, new_left, right);
+  }
+  return expr;
+}
+
+// rule body: matches a UOP_RANGE leaf, looks up its pre-replay axis_id
+// in the simulation's origin_expr table, and returns the substituted
+// expression.  Returns 0 (no-op) when origin_expr[axis_id] is 0
+// (unstamped origin, or axis_id falls outside [0, n_origins)).
+//
+// Extent guard: the rule fires ONLY on leaves whose extent equals the
+// captured pre-replay extent for that axis_id.  Post-split leaves (the
+// `outer` and `inner` returned by uop_range_split) have axis_ids
+// matching the same domain but DIFFERENT extents (E/k for outer, k for
+// inner), so they don't match.  Without this guard the rewriter would
+// recurse on the substituted RANGE(a, ..., E/k) -- looking up
+// origin_expr[a] again and bouncing on the memo until depth bound.
+static Term rw_split_dag_range(Term const *bindings, void *ctx_in) {
+  Term range = bindings[0];
+  if (term_tag(range) != TAG_UOP || term_ext(range) != UOP_RANGE) return 0;
+  UopApplySplitDagCtx *ctx = (UopApplySplitDagCtx *)ctx_in;
+  if (ctx == NULL) return 0;
+
+  u32 axis_id = uop_range_axis_id(range);
+  if (axis_id >= ctx->n_origins) return 0;
+  Term replacement = ctx->origin_expr[axis_id];
+  if (replacement == 0) return 0;
+  // Pre-replay extent guard: only the leaf whose extent equals the
+  // captured pre-replay extent qualifies for substitution.  The
+  // post-split `outer` (extent = pre/k) and `inner` (extent = k,
+  // axis_id = a+1) leaves are filtered by this check + the
+  // axis_id < n_origins gate above.
+  if (uop_range_extent(range) != ctx->origin_extent[axis_id]) return 0;
+  // axis_type must also match the captured pre-replay type, otherwise
+  // an already-stamped leaf (e.g. from the lifter pre-stamping
+  // axis_types from S_RANGE.extra) wouldn't equal the seed leaf.
+  if (uop_range_axis_type(range) != ctx->origin_axis_type[axis_id]) return 0;
+  // Idempotence: if the matched leaf IS the replacement (origin_expr
+  // happens to resolve to the same leaf because no split fired on it),
+  // return 0 to avoid an infinite memo bounce.
+  if (replacement == range) return 0;
+  ctx->fire_count++;
+  return replacement;
+}
+
+static UPat const upat_split_dag_range = {UOP_RANGE, 0, 0, 0, NULL, NULL};
+
+static UPatRule const upat_split_dag_rules[1] = {
+  {&upat_split_dag_range, rw_split_dag_range},
+};
+
+// Public entry: walk the DAG rooted at `root`, applying split-class
+// opts in `applied_opts` to UOP_RANGE leaves.  Returns the rewritten
+// root (input root unchanged when applied_opts has no split-class
+// entries or none target a leaf in the DAG).  Idempotent: a second
+// pass returns hash-cons-identical output (the simulation depends only
+// on applied_opts; replacement Terms are hash-cons-deterministic).
+//
+// Note: this rule only handles split-class opts.  GLOBAL / SWAP / TC
+// stamping is the job of uop_apply_kernel_opts (which runs in the same
+// post-lift pass).  When both are needed, the canonical order is:
+//   1. uop_apply_split_dag    (rewires axis-id space + extents)
+//   2. uop_apply_kernel_opts  (stamps axis_types via the simulator
+//                              that already accounts for SPLIT shifts)
+// because step 2's simulator computes the post-replay axis_type for
+// each post-split position; running it FIRST would stamp the
+// pre-split leaves, which step 1 would then replace -- losing the
+// stamps.
+fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
+                            u32 n_applied) {
+  if (root == 0 || applied_opts == NULL || n_applied == 0) return root;
+
+  // Prime the simulation: capture every UOP_RANGE leaf the DAG
+  // exposes by axis_id, recording pre-replay extent + axis_type.
+  // We need this before the simulation because origin_extent[a]
+  // determines the seed leaf for the first split.  For correctness
+  // the rule MUST see every origin a referenced by an applied opt;
+  // the leaves currently in the DAG are the source of truth for
+  // their extents.
+  UopApplySplitDagCtx ctx;
+  for (u32 i = 0; i < MAX_DIM; i++) {
+    ctx.origin_expr[i]      = 0;
+    ctx.origin_extent[i]    = 0;
+    ctx.origin_axis_type[i] = (u32)KAX_LOOP;
+  }
+  ctx.n_origins = 0;
+  ctx.fire_count = 0;
+
+  // Determine which origin indices are referenced by split-class
+  // opts.  Capture their pre-replay extents from the matching
+  // UOP_RANGE leaves in the DAG.  The capture walk uses a
+  // depth-bounded recursive descent (mirrors the rewriter's depth
+  // limit at 256).  This is O(opts * dag_size) in the worst case;
+  // production opt counts are <16 and DAGs are small.
+  u8 referenced[MAX_DIM] = {0};
+  for (u32 i = 0; i < n_applied; i++) {
+    KOpt const *o = &applied_opts[i];
+    if (kop_is_split(o->op) && (u32)o->axis < MAX_DIM) {
+      referenced[o->axis] = 1;
+      if ((u32)o->axis + 1 > ctx.n_origins) ctx.n_origins = (u32)o->axis + 1;
+    }
+  }
+  if (ctx.n_origins == 0) return root;
+
+  // Capture origin extents from the DAG.  Walk reachable leaves
+  // and on each UOP_RANGE, if axis_id < n_origins and we haven't
+  // captured an extent yet for it, capture (max) extent + axis_type.
+  // Capture the MAXIMUM extent at each axis_id: pre-replay leaves at
+  // axis a have extent E (the full axis length), while post-split
+  // leaves at the same axis_id have extent E/k (smaller).  Picking
+  // the max distinguishes "pre-split" from "already-split" states for
+  // the idempotence guard below.
+  // Use a small explicit stack to avoid recursion-depth surprises
+  // on deep INDEX chains.
+  Term stack[256];
+  u32  sp = 0;
+  if (root != 0) stack[sp++] = root;
+  while (sp > 0) {
+    Term cur = stack[--sp];
+    if (term_tag(cur) != TAG_UOP) continue;
+    u32 op = term_ext(cur);
+    if (op == UOP_RANGE) {
+      u32 a = uop_range_axis_id(cur);
+      if (a < ctx.n_origins) {
+        u32 ext = uop_range_extent(cur);
+        if (ext > ctx.origin_extent[a]) {
+          ctx.origin_extent[a]    = ext;
+          ctx.origin_axis_type[a] = uop_range_axis_type(cur);
+        }
+      }
+      continue;
+    }
+    if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_CONST
+        || op == UOP_INVALID) continue;
+    // Descend into UOP_OPT target so leaves wrapped by previous
+    // splits' inner OPT annotations get visited.
+    if (op == UOP_OPT) {
+      Term tgt = uop_opt_target(cur);
+      if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
+      continue;
+    }
+    u8 ar = uop_arity(op);
+    u64 loc = term_val(cur);
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 256; i++) {
+      Term child = heap_read(loc + i);
+      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    }
+  }
+  // If a referenced origin had no leaf in the DAG (e.g. the opt
+  // targets an axis not present), bail: we can't safely simulate
+  // without an extent.  The rule no-ops and returns root.
+  for (u32 a = 0; a < ctx.n_origins; a++) {
+    if (referenced[a] && ctx.origin_extent[a] == 0) return root;
+  }
+
+  // Idempotence guard: search the DAG for sentinel "post-split"
+  // leaves -- a UOP_RANGE with axis_id == a+1 (or a+2 etc. for chained
+  // splits) whose axis_type matches kop_inner_axis_type(opt) and
+  // extent matches opt.arg.  Such a leaf can only have been produced
+  // by a previous run of this rule (or by the legacy lifter
+  // structural-replay block, which is being retired).  When the
+  // sentinel is found for ALL referenced split-axis opts, the DAG is
+  // already in post-split state and a second application would
+  // double-split.  Return root unchanged.
+  //
+  // Why "for ALL": partially-applied opts (rare, but possible if a
+  // subset of a multi-opt sequence already applied) should still let
+  // the remaining opts fire.  We bail only on the fully-applied case.
+  int all_applied = 1;
+  int saw_split   = 0;
+  for (u32 i = 0; i < n_applied && all_applied; i++) {
+    KOpt const *o = &applied_opts[i];
+    if (!kop_is_split(o->op)) continue;
+    saw_split = 1;
+    u32 a = (u32)o->axis;
+    if (a >= MAX_DIM - 1) { all_applied = 0; break; }
+    u32 want_extent = o->arg;
+    u8  want_type   = kop_inner_axis_type(o->op);
+    int found = 0;
+    sp = 0;
+    if (root != 0) stack[sp++] = root;
+    while (sp > 0 && !found) {
+      Term cur = stack[--sp];
+      if (term_tag(cur) != TAG_UOP) continue;
+      u32 op = term_ext(cur);
+      if (op == UOP_RANGE) {
+        // Look for any RANGE with extent == want_extent and axis_type
+        // == want_type at axis_id > a (the split inserts inner at
+        // a+1, but subsequent splits may shift it further).
+        u32 lid_a   = uop_range_axis_id(cur);
+        u32 lid_ext = uop_range_extent(cur);
+        u32 lid_at  = uop_range_axis_type(cur);
+        if (lid_a > a && lid_ext == want_extent && lid_at == (u32)want_type) {
+          found = 1;
+          break;
+        }
+        continue;
+      }
+      if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_CONST
+          || op == UOP_INVALID) continue;
+      // UOP_OPT wraps inner ranges for UPCAST/UNROLL/GROUP/GROUPTOP.
+      // Descend into target so the sentinel scan sees the wrapped
+      // RANGE leaf and triggers idempotence.
+      if (op == UOP_OPT) {
+        Term tgt = uop_opt_target(cur);
+        if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
+        continue;
+      }
+      u8 ar = uop_arity(op);
+      u64 loc = term_val(cur);
+      for (u8 j = 0; j < ar && j < MAX_UOP_SRC && sp < 256; j++) {
+        Term child = heap_read(loc + j);
+        if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+      }
+    }
+    if (!found) all_applied = 0;
+  }
+  if (saw_split && all_applied) return root;
+
+  // Run the simulation: for each split-class opt, drill into
+  // origin_expr[o.axis] (or seed a fresh RANGE leaf), apply
+  // uop_range_split, wrap the inner in a UOP_OPT annotation when the
+  // opt kind requires it (UPCAST/UNROLL/GROUP/GROUPTOP -- LOCAL stays
+  // bare), and substitute back.
+  //
+  // The OPT wrap mirrors kernel_lift.c's structural-replay (lines
+  // ~1582-1603): UPCAST/UNROLL drive `#pragma unroll(N)` in the
+  // renderer; GROUP/GROUPTOP drive the threadgroup-shared cooperative
+  // reduce shape; LOCAL relies on axis_type=KAX_LOCAL alone.
+  for (u32 i = 0; i < n_applied; i++) {
+    KOpt const *o = &applied_opts[i];
+    if (!kop_is_split(o->op)) continue;
+    u32 a = (u32)o->axis;
+    if (a >= ctx.n_origins) continue;
+    u32 k = o->arg;
+    if (k == 0) continue;
+    u8  inner_kax = kop_inner_axis_type(o->op);
+    // Inner OPT kind (mirrors kernel_lift.c:1595-1599):
+    //   KOP_UPCAST -> UOP_OPT_UPCAST
+    //   KOP_UNROLL -> UOP_OPT_UNROLL
+    //   KOP_GROUP / KOP_GROUPTOP -> UOP_OPT_GROUP_REDUCE
+    //   KOP_LOCAL -> no OPT wrap
+    u32 opt_kind = 0xFFu;  // sentinel: no OPT wrap
+    if (o->op == KOP_UPCAST)                              opt_kind = UOP_OPT_UPCAST;
+    else if (o->op == KOP_UNROLL)                         opt_kind = UOP_OPT_UNROLL;
+    else if (o->op == KOP_GROUP || o->op == KOP_GROUPTOP) opt_kind = UOP_OPT_GROUP_REDUCE;
+
+    Term cur_expr = ctx.origin_expr[a];
+    Term outer_leaf;
+    if (cur_expr == 0) {
+      // First split on this origin: seed leaf with the captured
+      // pre-replay extent / axis_type.  This is the leaf the DAG
+      // currently contains for this origin; the rule body will
+      // match it exactly.
+      outer_leaf = uop_range(a, ctx.origin_axis_type[a], ctx.origin_extent[a]);
+    } else {
+      outer_leaf = split_dag_outermost_range(cur_expr);
+      if (outer_leaf == 0) continue;
+    }
+    UopRangeSplit rs = uop_range_split(outer_leaf, k, inner_kax);
+    if (rs.linear_index == 0) continue;
+    // Wrap inner in UOP_OPT when the opt kind requires it.  We
+    // re-build linear_index manually here because uop_range_split
+    // returns a bare IADD(IMUL(outer, k), inner) and the OPT wrap
+    // sits between IADD's right child and the inner RANGE.
+    Term linear = rs.linear_index;
+    if (opt_kind != 0xFFu) {
+      Term inner_wrapped = uop_opt(rs.inner, opt_kind, k);
+      Term scaled = uop_int_binary(UOP_IMUL, rs.outer, uop_const(DT_INT32, k));
+      linear = uop_int_binary(UOP_IADD, scaled, inner_wrapped);
+    }
+    if (cur_expr == 0) {
+      ctx.origin_expr[a] = linear;
+    } else {
+      ctx.origin_expr[a] =
+          split_dag_substitute_outermost(cur_expr, outer_leaf, linear);
+    }
+  }
+
+  return uop_pattern_rewrite(root, upat_split_dag_rules, 1, &ctx);
+}

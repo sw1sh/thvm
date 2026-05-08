@@ -81,6 +81,68 @@ fn Term uop_range_with_axis_type(Term r, u32 new_axis_type) {
   return uop_range(axis_id, new_axis_type, extent);
 }
 
+// === Phase E9-prep wedge 2: uop_range_split primitive =================
+//
+// Replaces a single UOP_RANGE leaf with a (outer, inner) pair that
+// represents the same iteration space, plus a `linear_index` Term that
+// the caller substitutes for any consumer that referenced the original
+// leaf.  Mirrors kernel_lift.c's structural-replay "split" block
+// (lines ~1561-1604) at the UOp DAG level: that block walks the
+// SplitAxis cur[] vector, shifts entries right at o.axis+1, halves the
+// outer extent, and stamps inner with the opt's KAX_ type.  The
+// consumer's INDEX_E.addr arithmetic is implicitly rebuilt by the
+// `factor` field of the SplitAxis vector (outer's factor = old factor *
+// inner_extent).
+//
+// uop_range_split returns the same three values declaratively so a
+// UPatRule (rw_range_split below) can replace one UOP_RANGE leaf with
+// the equivalent (outer * k + inner) sub-expression and let
+// uop_pattern_rewrite's bottom-up rebuild thread the new linear_index
+// through every IADD/IMUL chain that consumed the old leaf.
+//
+// Heap layout returned (no new opcode -- composition of existing
+// UOP_RANGE + UOP_IMUL + UOP_IADD + UOP_CONST):
+//
+//   outer        : UOP_RANGE(axis=N,   axis_type=LOOP,           extent=E/k)
+//   inner        : UOP_RANGE(axis=N+1, axis_type=inner_axis_type, extent=k)
+//   linear_index : uop_int_binary(UOP_IADD,
+//                                 uop_int_binary(UOP_IMUL, outer, k_const),
+//                                 inner)
+//
+// Pre-conditions:
+//   - old_range is a UOP_RANGE term (returns zero-init on tag mismatch).
+//   - k > 0 and old_range.extent % k == 0 (returns zero-init otherwise).
+//   - inner_axis_type is one of KAX_UPCAST/UNROLL/LOCAL/GROUP_REDUCE
+//     (the rule body / caller validates this; the primitive accepts
+//     any u32 and trusts the caller, mirroring uop_range's own
+//     unchecked axis_type).
+//
+// Hash-cons: outer/inner/linear_index all flow through the canonical
+// uop_range / uop_int_binary / uop_const constructors, so re-running
+// uop_range_split with the same inputs returns hash-cons-identical
+// Terms.  This is the property a UPatRule that descends through
+// IADD/IMUL chains relies on: the rewriter's memo table dedups equal
+// subgraphs across calls.
+
+fn UopRangeSplit uop_range_split(Term old_range, u32 k, u32 inner_axis_type) {
+  UopRangeSplit out = {0, 0, 0};
+  if (term_tag(old_range) != TAG_UOP || term_ext(old_range) != UOP_RANGE) {
+    return out;
+  }
+  if (k == 0) return out;
+  u32 axis_id = uop_range_axis_id(old_range);
+  u32 extent  = uop_range_extent(old_range);
+  if (extent % k != 0) return out;
+  u32 outer_axis_type = uop_range_axis_type(old_range);
+
+  out.outer = uop_range(axis_id,     outer_axis_type, extent / k);
+  out.inner = uop_range(axis_id + 1, inner_axis_type, k);
+  Term k_const = uop_const(DT_INT32, k);
+  Term scaled  = uop_int_binary(UOP_IMUL, out.outer, k_const);
+  out.linear_index = uop_int_binary(UOP_IADD, scaled, out.inner);
+  return out;
+}
+
 // === UOP_INDEX_E: symbolic INDEX expression ===
 //
 // Heap layout: [buffer_src, addr_expr].

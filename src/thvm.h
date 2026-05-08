@@ -2198,6 +2198,36 @@ fn u32  uop_range_axis_type(Term r);
 fn u32  uop_range_extent   (Term r);
 fn Term uop_range_with_axis_type(Term r, u32 new_axis_type);
 
+// === Phase E9-prep wedge 2: uop_range_split primitive ===
+// Splits one UOP_RANGE leaf into a (outer, inner) pair plus a
+// `linear_index` Term that reconstructs the original axis position
+// (`outer * k + inner`).  Replaces the structural-replay block in
+// kernel_lift.c at the UOp DAG level: instead of mutating a SplitAxis
+// vector and emitting fresh leaves, callers (a UPatRule) substitute
+// `linear_index` for any consumer that referenced the original leaf.
+//
+// Field layout:
+//   outer        : UOP_RANGE(axis=N,   axis_type=old.axis_type, extent=E/k)
+//   inner        : UOP_RANGE(axis=N+1, axis_type=inner_axis_type, extent=k)
+//   linear_index : IADD(IMUL(outer, k), inner)
+//
+// Returns {0, 0, 0} on tag mismatch / k == 0 / extent % k != 0.  The
+// caller is responsible for shifting any subsequent UOP_RANGE leaves'
+// axis_ids by +1 (every split inserts a new axis between N and N+1
+// in the post-replay axis sequence) -- the primitive itself only
+// constructs the pair; the rule body composes it into the DAG.
+//
+// Hash-cons: outer/inner/linear_index flow through the canonical
+// uop_range / uop_int_binary / uop_const constructors, so re-running
+// uop_range_split with the same inputs returns hash-cons-identical
+// Terms.  See src/uop/index.c for design notes.
+typedef struct {
+  Term outer;
+  Term inner;
+  Term linear_index;
+} UopRangeSplit;
+fn UopRangeSplit uop_range_split(Term old_range, u32 k, u32 inner_axis_type);
+
 // === Phase E2: KOP_GLOBAL UPatRule mirror (src/uop/apply_opt.c) ===
 // Walks the DAG rooted at `root` and stamps any UOP_RANGE leaf whose
 // axis_id matches a KOP_GLOBAL entry in `applied_opts` (with arg ==
@@ -2271,6 +2301,32 @@ fn Term uop_apply_kop_split(Term root, KOpt const *applied_opts,
 // docs/plans/ideal_pipeline.md row E.
 fn Term uop_apply_kop_tc(Term root, KOpt const *applied_opts,
                         u32 n_applied);
+
+// === Phase E9-prep wedge 2: uop_apply_split_dag UPatRule =============
+// Walks the DAG rooted at `root`, applies every split-class entry in
+// `applied_opts` (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG
+// level via the uop_range_split primitive, and returns the rewritten
+// root.  Mirrors kernel_lift.c:1561-1604's structural-replay split
+// block but operates on EMITTED UOp DAGs: replaces each pre-replay
+// UOP_RANGE leaf at axis A with the (outer * k + inner) sub-expression
+// uop_range_split returns, and propagates the change through every
+// IADD/IMUL chain that consumed the original leaf (E8's
+// uop_arity / uop_graph_rebuild_with_srcs descent makes the rewriter
+// reach the leaves nested inside INDEX_E.addr trees).
+//
+// Pre-condition: the input DAG is the lifter output WITHOUT the
+// structural-replay split block applied -- i.e. each pre-replay axis
+// position N appears as a UOP_RANGE leaf with axis_id=N and the
+// pre-replay extent.  GLOBAL / SWAP / TC stamping is the job of
+// uop_apply_kernel_opts (which composes via the same simulator);
+// this rule deliberately ignores those classes.
+//
+// Idempotent: a second pass detects post-split sentinels (RANGE leaves
+// at axis_id > a with the inner_kax-stamped axis_type and arg-matched
+// extent) and bails when ALL referenced split opts are already
+// represented.  See src/uop/apply_opt.c for the full simulation.
+fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
+                            u32 n_applied);
 
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),

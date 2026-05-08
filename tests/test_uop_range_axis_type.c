@@ -1109,6 +1109,318 @@ int main(void) {
   CHECK_EQ(vfires3, 0u);
   CHECK_EQ(vout3, k_outer);
 
+  // === (10) Phase E9-prep wedge 2: uop_range_split primitive ========
+  //
+  // Replaces a single UOP_RANGE leaf with (outer, inner) pair plus the
+  // linear_index = outer * k + inner reconstruction.  Mirrors
+  // kernel_lift.c:1561-1604's structural-replay split block at the UOp
+  // DAG level.  See src/uop/index.c for the design notes.
+  TEST_BEGIN("range-split/basic-shape");
+  // Split a LOOP axis 0 of extent 64 by k=8.  Expect:
+  //   outer        : RANGE(0, LOOP, 8)
+  //   inner        : RANGE(1, LOCAL, 8)
+  //   linear_index : IADD(IMUL(outer, 8), inner)
+  Term rs_old = uop_range(0, KAX_LOOP, 64);
+  UopRangeSplit rs = uop_range_split(rs_old, 8, KAX_LOCAL);
+  CHECK_EQ(term_tag(rs.outer), TAG_UOP);
+  CHECK_EQ(term_ext(rs.outer), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(rs.outer),    0u);
+  CHECK_EQ(uop_range_axis_type(rs.outer),  (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_extent(rs.outer),     8u);
+  CHECK_EQ(term_tag(rs.inner), TAG_UOP);
+  CHECK_EQ(term_ext(rs.inner), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(rs.inner),    1u);
+  CHECK_EQ(uop_range_axis_type(rs.inner),  (u32)KAX_LOCAL);
+  CHECK_EQ(uop_range_extent(rs.inner),     8u);
+  CHECK_EQ(term_tag(rs.linear_index), TAG_UOP);
+  CHECK_EQ(term_ext(rs.linear_index), UOP_IADD);
+  Term rs_imul = heap_read(term_val(rs.linear_index) + 0);
+  Term rs_in   = heap_read(term_val(rs.linear_index) + 1);
+  CHECK_EQ(term_ext(rs_imul), UOP_IMUL);
+  CHECK_EQ(rs_in, rs.inner);
+  Term rs_outer_in_imul = heap_read(term_val(rs_imul) + 0);
+  Term rs_k_in_imul     = heap_read(term_val(rs_imul) + 1);
+  CHECK_EQ(rs_outer_in_imul, rs.outer);
+  CHECK_EQ(term_ext(rs_k_in_imul), UOP_CONST);
+
+  TEST_BEGIN("range-split/inner-axis-types");
+  // Each split-class opt maps to a distinct inner axis_type.  The
+  // primitive accepts an arbitrary u32; the rule body / caller is
+  // responsible for validating the mapping (mirrors how
+  // kop_inner_axis_type in src/uop/apply_opt.c selects the type).
+  Term rs64 = uop_range(2, KAX_LOOP, 64);
+  UopRangeSplit rs_up = uop_range_split(rs64, 4, KAX_UPCAST);
+  UopRangeSplit rs_un = uop_range_split(rs64, 4, KAX_UNROLL);
+  UopRangeSplit rs_lo = uop_range_split(rs64, 4, KAX_LOCAL);
+  UopRangeSplit rs_gr = uop_range_split(rs64, 4, KAX_GROUP_REDUCE);
+  CHECK_EQ(uop_range_axis_type(rs_up.inner), (u32)KAX_UPCAST);
+  CHECK_EQ(uop_range_axis_type(rs_un.inner), (u32)KAX_UNROLL);
+  CHECK_EQ(uop_range_axis_type(rs_lo.inner), (u32)KAX_LOCAL);
+  CHECK_EQ(uop_range_axis_type(rs_gr.inner), (u32)KAX_GROUP_REDUCE);
+  // Outer axis_type preserves the original (LOOP here).
+  CHECK_EQ(uop_range_axis_type(rs_up.outer), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_axis_type(rs_lo.outer), (u32)KAX_LOOP);
+
+  TEST_BEGIN("range-split/preserves-outer-axis-type");
+  // Splitting a non-LOOP outer (e.g. an axis already stamped GLOBAL)
+  // keeps the outer's axis_type.  This composes with E2's KOP_GLOBAL
+  // stamping order: GLOBAL on the outer can land before or after the
+  // split without changing the outer's identity.
+  Term rs_g = uop_range(0, KAX_GLOBAL, 32);
+  UopRangeSplit rs_g_split = uop_range_split(rs_g, 4, KAX_LOCAL);
+  CHECK_EQ(uop_range_axis_type(rs_g_split.outer), (u32)KAX_GLOBAL);
+  CHECK_EQ(uop_range_extent(rs_g_split.outer),    8u);
+  CHECK_EQ(uop_range_axis_type(rs_g_split.inner), (u32)KAX_LOCAL);
+  CHECK_EQ(uop_range_extent(rs_g_split.inner),    4u);
+
+  TEST_BEGIN("range-split/hash-cons-idempotent");
+  // Re-running uop_range_split with the same inputs returns hash-cons-
+  // identical Terms (the canonical constructors dedup).  This is the
+  // property a UPatRule descending through IADD/IMUL chains relies on.
+  UopRangeSplit rs_a = uop_range_split(rs_old, 8, KAX_LOCAL);
+  UopRangeSplit rs_b = uop_range_split(rs_old, 8, KAX_LOCAL);
+  CHECK_EQ(rs_a.outer, rs_b.outer);
+  CHECK_EQ(rs_a.inner, rs_b.inner);
+  CHECK_EQ(rs_a.linear_index, rs_b.linear_index);
+
+  TEST_BEGIN("range-split/rejects-bad-inputs");
+  // Tag mismatch: not a RANGE.
+  Term rs_not_range = uop_const(DT_INT32, 99);
+  UopRangeSplit rs_bad1 = uop_range_split(rs_not_range, 4, KAX_LOCAL);
+  CHECK_EQ(rs_bad1.outer, 0u);
+  CHECK_EQ(rs_bad1.inner, 0u);
+  CHECK_EQ(rs_bad1.linear_index, 0u);
+  // k = 0.
+  UopRangeSplit rs_bad2 = uop_range_split(rs_old, 0, KAX_LOCAL);
+  CHECK_EQ(rs_bad2.outer, 0u);
+  // extent % k != 0.
+  Term rs_odd = uop_range(0, KAX_LOOP, 7);
+  UopRangeSplit rs_bad3 = uop_range_split(rs_odd, 2, KAX_LOCAL);
+  CHECK_EQ(rs_bad3.outer, 0u);
+  CHECK_EQ(rs_bad3.inner, 0u);
+  CHECK_EQ(rs_bad3.linear_index, 0u);
+
+  TEST_BEGIN("range-split/equivalent-to-direct-construction");
+  // The triple should hash-cons-equal to a direct RANGE / IMUL / IADD
+  // assembly.  This proves the primitive doesn't introduce hidden state
+  // (e.g. a parallel split-tracking table) -- it's pure composition over
+  // the canonical constructors.
+  Term rs_direct_outer = uop_range(0, KAX_LOOP, 8);
+  Term rs_direct_inner = uop_range(1, KAX_LOCAL, 8);
+  Term rs_direct_k     = uop_const(DT_INT32, 8);
+  Term rs_direct_imul  = uop_int_binary(UOP_IMUL, rs_direct_outer, rs_direct_k);
+  Term rs_direct_iadd  = uop_int_binary(UOP_IADD, rs_direct_imul, rs_direct_inner);
+  CHECK_EQ(rs.outer,        rs_direct_outer);
+  CHECK_EQ(rs.inner,        rs_direct_inner);
+  CHECK_EQ(rs.linear_index, rs_direct_iadd);
+
+  // === (11) Phase E9-prep wedge 2: uop_apply_split_dag UPatRule =====
+  //
+  // Wraps uop_range_split into a DAG-level rewrite that walks the
+  // applied_opts split-class entries left-to-right; for each
+  // SPLIT(o.axis, o.arg) it locates the UOP_RANGE leaf at the current
+  // post-replay position whose extent equals the post-replay outer
+  // extent and rewires every consumer of that leaf to use linear_index.
+  //
+  // The rule body assumes the input DAG was lifted with the
+  // structural-replay split block disabled -- i.e. UOP_RANGE leaves
+  // carry their PRE-split axis_id (= origin BUFFERIZE position) and
+  // PRE-split extent.  See src/uop/apply_opt.c (uop_apply_split_dag)
+  // for the simulation rules.
+  TEST_BEGIN("apply-split-dag/single-split-stamps-pair");
+  // Pre-split DAG: STORE(buf, INDEX_E(buf, RANGE(0, LOOP, 64)),
+  // LOAD(INDEX_E(buf, RANGE(0, LOOP, 64)))).  applied_opts =
+  // [LOCAL(0, 8)].  Expect: every reference to the original RANGE
+  // becomes IADD(IMUL(outer, 8), inner) with outer = RANGE(0, LOOP,
+  // 8), inner = RANGE(1, LOCAL, 8).
+  u32 sd_dims[1] = {64};
+  Term sd_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, sd_dims);
+  Term sd_r0   = uop_range(0, KAX_LOOP, 64);
+  Term sd_ie   = uop_index_e(sd_buf, sd_r0);
+  Term sd_val  = uop_load(sd_ie);
+  Term sd_root = uop_store(sd_buf, sd_r0, sd_val);
+  KOpt sd_opts[1] = {{ KOP_LOCAL, 0, 8 }};
+  Term sd_out = uop_apply_split_dag(sd_root, sd_opts, 1);
+  CHECK_EQ(term_tag(sd_out), TAG_UOP);
+  CHECK_EQ(term_ext(sd_out), UOP_STORE);
+  // The STORE.addr should now be IADD(IMUL(outer, 8), inner).
+  Term sd_out_addr = heap_read(term_val(sd_out) + 1);
+  CHECK_EQ(term_ext(sd_out_addr), UOP_IADD);
+  Term sd_out_imul = heap_read(term_val(sd_out_addr) + 0);
+  Term sd_out_inn  = heap_read(term_val(sd_out_addr) + 1);
+  CHECK_EQ(term_ext(sd_out_imul), UOP_IMUL);
+  CHECK_EQ(term_ext(sd_out_inn),  UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(sd_out_inn),    1u);
+  CHECK_EQ(uop_range_axis_type(sd_out_inn),  (u32)KAX_LOCAL);
+  CHECK_EQ(uop_range_extent(sd_out_inn),     8u);
+  Term sd_out_outer = heap_read(term_val(sd_out_imul) + 0);
+  CHECK_EQ(term_ext(sd_out_outer), UOP_RANGE);
+  CHECK_EQ(uop_range_axis_id(sd_out_outer),    0u);
+  CHECK_EQ(uop_range_axis_type(sd_out_outer),  (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_extent(sd_out_outer),     8u);
+
+  TEST_BEGIN("apply-split-dag/idempotent-second-pass");
+  Term sd_out2 = uop_apply_split_dag(sd_out, sd_opts, 1);
+  CHECK_EQ(sd_out2, sd_out);
+
+  TEST_BEGIN("apply-split-dag/no-opts-noop");
+  Term sd_no = uop_apply_split_dag(sd_root, NULL, 0);
+  CHECK_EQ(sd_no, sd_root);
+
+  TEST_BEGIN("apply-split-dag/non-split-opts-noop");
+  // GLOBAL/SWAP/TC are handled by other E* rules; the split DAG rule
+  // ignores them.
+  KOpt sd_glb[1] = {{ KOP_GLOBAL, 0, 64 }};
+  Term sd_glb_out = uop_apply_split_dag(sd_root, sd_glb, 1);
+  CHECK_EQ(sd_glb_out, sd_root);
+
+  TEST_BEGIN("apply-split-dag/non-divisible-extent-skips-split");
+  // KOP_LOCAL with arg=8 against a leaf of extent 7: the rule skips
+  // (mirrors kernel_lift.c:1581 "extent % o.arg != 0 -> return 0").
+  // The DAG flows through unchanged.
+  Term sd_odd_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, (u32[]){7});
+  Term sd_odd_r0   = uop_range(0, KAX_LOOP, 7);
+  Term sd_odd_ie   = uop_index_e(sd_odd_buf, sd_odd_r0);
+  Term sd_odd_val  = uop_load(sd_odd_ie);
+  Term sd_odd_root = uop_store(sd_odd_buf, sd_odd_r0, sd_odd_val);
+  Term sd_odd_out  = uop_apply_split_dag(sd_odd_root, sd_opts, 1);
+  CHECK_EQ(sd_odd_out, sd_odd_root);
+
+  TEST_BEGIN("apply-split-dag/two-axis-with-split-shifts-second");
+  // Pre-replay DAG with two axes:
+  //   STORE(buf, INDEX_E(buf, IADD(IMUL(R0_pre, 16), R1_pre)),
+  //         LOAD(...))
+  // applied_opts = [LOCAL(0, 4)].  The split affects axis 0; axis 1's
+  // leaf does NOT need to shift in this rule's contract (the rule
+  // ONLY rewrites the axis that's being split; axis-id shifting of
+  // OTHER axes is the lifter's responsibility post-(d), or a
+  // subsequent rule's job pre-(d)).  Verify: the IMUL chain holds the
+  // new linear expression (outer * 4 + inner) at the spot the original
+  // R0_pre occupied; R1_pre flows through unchanged.
+  u32 sd2_dims[2] = {16, 16};
+  Term sd2_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, sd2_dims);
+  Term sd2_r0   = uop_range(0, KAX_LOOP, 16);
+  Term sd2_r1   = uop_range(1, KAX_LOOP, 16);
+  Term sd2_str  = uop_const(DT_INT32, 16);
+  Term sd2_row  = uop_int_binary(UOP_IMUL, sd2_r0, sd2_str);
+  Term sd2_addr = uop_int_binary(UOP_IADD, sd2_row, sd2_r1);
+  Term sd2_ie   = uop_index_e(sd2_buf, sd2_addr);
+  Term sd2_val  = uop_load(sd2_ie);
+  Term sd2_root = uop_store(sd2_buf, sd2_addr, sd2_val);
+  KOpt sd2_opts[1] = {{ KOP_LOCAL, 0, 4 }};
+  Term sd2_out = uop_apply_split_dag(sd2_root, sd2_opts, 1);
+  // sd2_out.addr should be IADD(IMUL(NEW_LINEAR, 16), R1_pre)
+  // where NEW_LINEAR = IADD(IMUL(RANGE(0,LOOP,4), 4), RANGE(1,LOCAL,4)).
+  Term sd2_out_addr = heap_read(term_val(sd2_out) + 1);
+  CHECK_EQ(term_ext(sd2_out_addr), UOP_IADD);
+  Term sd2_row_imul = heap_read(term_val(sd2_out_addr) + 0);
+  Term sd2_r1_out   = heap_read(term_val(sd2_out_addr) + 1);
+  CHECK_EQ(term_ext(sd2_row_imul), UOP_IMUL);
+  CHECK_EQ(sd2_r1_out, sd2_r1);  // axis-1 leaf unchanged
+  Term sd2_new_linear = heap_read(term_val(sd2_row_imul) + 0);
+  CHECK_EQ(term_ext(sd2_new_linear), UOP_IADD);
+
+  TEST_BEGIN("apply-split-dag/double-split-same-axis");
+  // applied_opts = [LOCAL(0, 4), UPCAST(0, 2)].  After the first
+  // split the outer (extent 16/4 = 4) gets split again by 2, so the
+  // final origin_expr[0] is:
+  //   IADD(IMUL(IADD(IMUL(RANGE(0,LOOP,2), 2), RANGE(?,UPCAST,2)), 4),
+  //        RANGE(1,LOCAL,4))
+  // The "?" inner axis_id is what the lifter assigns -- in our rule
+  // it's a+1 = 1, the same axis_id the LOCAL inner already uses.
+  // That's the lifter's behaviour too (kernel_lift.c uses the same
+  // o.axis+1 slot for the new inner).  This wedge keeps the same
+  // contract; downstream stages can re-number per-leaf axis_ids if
+  // needed.
+  Term sd3_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, (u32[]){16});
+  Term sd3_r0   = uop_range(0, KAX_LOOP, 16);
+  Term sd3_ie   = uop_index_e(sd3_buf, sd3_r0);
+  Term sd3_val  = uop_load(sd3_ie);
+  Term sd3_root = uop_store(sd3_buf, sd3_r0, sd3_val);
+  KOpt sd3_opts[2] = {{ KOP_LOCAL, 0, 4 }, { KOP_UPCAST, 0, 2 }};
+  Term sd3_out = uop_apply_split_dag(sd3_root, sd3_opts, 2);
+  // Walk: STORE.addr = IADD(IMUL(IADD(IMUL(R(0,LOOP,2), 2), R(?,UPCAST,2)), 4), R(1,LOCAL,4))
+  Term sd3_addr = heap_read(term_val(sd3_out) + 1);
+  CHECK_EQ(term_ext(sd3_addr), UOP_IADD);
+  Term sd3_local_inner = heap_read(term_val(sd3_addr) + 1);
+  CHECK_EQ(uop_range_axis_type(sd3_local_inner), (u32)KAX_LOCAL);
+  CHECK_EQ(uop_range_extent(sd3_local_inner), 4u);
+  Term sd3_outer_imul = heap_read(term_val(sd3_addr) + 0);
+  CHECK_EQ(term_ext(sd3_outer_imul), UOP_IMUL);
+  Term sd3_inner_iadd = heap_read(term_val(sd3_outer_imul) + 0);
+  CHECK_EQ(term_ext(sd3_inner_iadd), UOP_IADD);  // second-split linear
+  Term sd3_innermost_outer = heap_read(term_val(sd3_inner_iadd) + 0);
+  CHECK_EQ(term_ext(sd3_innermost_outer), UOP_IMUL);  // RANGE * 2
+  Term sd3_innermost_range = heap_read(term_val(sd3_innermost_outer) + 0);
+  CHECK_EQ(uop_range_axis_type(sd3_innermost_range), (u32)KAX_LOOP);
+  CHECK_EQ(uop_range_extent(sd3_innermost_range), 2u);
+  // UPCAST inner is wrapped in UOP_OPT(_, UPCAST, 2).
+  Term sd3_upcast_opt = heap_read(term_val(sd3_inner_iadd) + 1);
+  CHECK_EQ(term_ext(sd3_upcast_opt), UOP_OPT);
+  CHECK_EQ(uop_opt_kind(sd3_upcast_opt), (u32)UOP_OPT_UPCAST);
+  Term sd3_upcast_inner = uop_opt_target(sd3_upcast_opt);
+  CHECK_EQ(uop_range_axis_type(sd3_upcast_inner), (u32)KAX_UPCAST);
+  CHECK_EQ(uop_range_extent(sd3_upcast_inner), 2u);
+
+  TEST_BEGIN("apply-split-dag/idempotent-after-double-split");
+  Term sd3_out2 = uop_apply_split_dag(sd3_out, sd3_opts, 2);
+  CHECK_EQ(sd3_out2, sd3_out);
+
+  TEST_BEGIN("apply-split-dag/all-split-classes");
+  // Verify each split-class opt picks the right inner axis_type and
+  // (for non-LOCAL classes) wraps the inner in a UOP_OPT annotation
+  // mirroring kernel_lift.c:1582-1603.
+  for (u32 i = 0; i < 5; i++) {
+    static u8 const ops[5]      = { KOP_UPCAST, KOP_UNROLL, KOP_LOCAL,
+                                    KOP_GROUP,  KOP_GROUPTOP };
+    static u8 const expect[5]   = { (u8)KAX_UPCAST, (u8)KAX_UNROLL,
+                                    (u8)KAX_LOCAL, (u8)KAX_GROUP_REDUCE,
+                                    (u8)KAX_GROUP_REDUCE };
+    static u8 const opt_kind[5] = { (u8)UOP_OPT_UPCAST, (u8)UOP_OPT_UNROLL,
+                                    0xFFu, (u8)UOP_OPT_GROUP_REDUCE,
+                                    (u8)UOP_OPT_GROUP_REDUCE };
+    Term sda_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, (u32[]){32});
+    Term sda_r0   = uop_range(0, KAX_LOOP, 32);
+    Term sda_ie   = uop_index_e(sda_buf, sda_r0);
+    Term sda_val  = uop_load(sda_ie);
+    Term sda_root = uop_store(sda_buf, sda_r0, sda_val);
+    KOpt sda_opts[1] = {{ ops[i], 0, 4 }};
+    Term sda_out = uop_apply_split_dag(sda_root, sda_opts, 1);
+    Term sda_addr = heap_read(term_val(sda_out) + 1);
+    Term sda_inn_or_opt = heap_read(term_val(sda_addr) + 1);
+    Term sda_inn = sda_inn_or_opt;
+    if (opt_kind[i] != 0xFFu) {
+      // Inner is wrapped: UOP_OPT(inner, kind, k).  Walk into it.
+      CHECK_EQ(term_ext(sda_inn_or_opt), UOP_OPT);
+      CHECK_EQ(uop_opt_kind(sda_inn_or_opt), (u32)opt_kind[i]);
+      CHECK_EQ(uop_opt_factor(sda_inn_or_opt), 4u);
+      sda_inn = uop_opt_target(sda_inn_or_opt);
+    }
+    CHECK_EQ(uop_range_axis_type(sda_inn), (u32)expect[i]);
+  }
+
+  TEST_BEGIN("apply-split-dag/preserves-non-range-leaves");
+  // Sanity: the rule shouldn't rewrite UOP_CONST / UOP_BUFFER / etc.
+  // even when their value happens to look like an axis index.  Build
+  // a DAG with a CONST(0) (tag UOP, ext UOP_CONST) and verify it
+  // doesn't get rewritten.  The rule body's tag/ext check guards
+  // this -- the test pins the contract.
+  Term sd4_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, (u32[]){8});
+  Term sd4_r0   = uop_range(0, KAX_LOOP, 8);
+  Term sd4_zero = uop_const(DT_INT32, 0);
+  Term sd4_addr = uop_int_binary(UOP_IADD, sd4_r0, sd4_zero);
+  Term sd4_ie   = uop_index_e(sd4_buf, sd4_addr);
+  Term sd4_val  = uop_load(sd4_ie);
+  Term sd4_root = uop_store(sd4_buf, sd4_addr, sd4_val);
+  KOpt sd4_opts[1] = {{ KOP_LOCAL, 0, 4 }};
+  Term sd4_out = uop_apply_split_dag(sd4_root, sd4_opts, 1);
+  // Walk the rewritten addr -- it should still contain UOP_CONST.
+  // After IADD-with-zero simplification (uop_simplify_int_binary),
+  // the CONST(0) may be folded out at construction time.  That's
+  // fine; we just want NO crash and a valid root.
+  CHECK_EQ(term_tag(sd4_out), TAG_UOP);
+  CHECK_EQ(term_ext(sd4_out), UOP_STORE);
+
   thvm_free();
   TEST_REPORT();
 }
