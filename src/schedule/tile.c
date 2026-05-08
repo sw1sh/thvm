@@ -222,13 +222,6 @@ fn void tile_dump_node(KernelEntry const *ke, u32 id, FILE *fp, u32 depth) {
         tile_dump_node(ke, u->src[s], fp, depth + 1);
       }
       return;
-    case TILE_CONV2D:
-      fprintf(fp, "TILE_CONV2D extra=0x%llx dtype=%u\n",
-              (unsigned long long)u->extra, u->dtype);
-      for (u8 s = 0; s < u->src_count; s++) {
-        tile_dump_node(ke, u->src[s], fp, depth + 1);
-      }
-      return;
     case TILE_INPUT_BUF:
       fprintf(fp, "TILE_INPUT_BUF<slot=%u dtype=%u>\n",
               (u32)u->extra, u->dtype);
@@ -474,10 +467,6 @@ static void tile_render_msl_node(KernelEntry const *ke, u32 id, FILE *fp,
       tile_render_msl_indent(fp, depth);
       fputs("/* TILE_MMA: simdgroup_matrix... */\n", fp);
       return;
-    case TILE_CONV2D:
-      tile_render_msl_indent(fp, depth);
-      fputs("/* TILE_CONV2D: conv2d_flat shader template */\n", fp);
-      return;
     case TILE_AXIS:
       // Standalone TILE_AXIS at non-loop-nest position; shouldn't
       // happen but emit as comment.
@@ -545,7 +534,6 @@ fn const char *tile_op_name(u8 op) {
     case TILE_REDUCE:      return "TILE_REDUCE";
     case TILE_MMA:         return "TILE_MMA";
     case TILE_BLOCK:       return "TILE_BLOCK";
-    case TILE_CONV2D:      return "TILE_CONV2D";
     case TILE_INPUT_BUF:   return "TILE_INPUT_BUF";
     case TILE_OUTPUT_BUF:  return "TILE_OUTPUT_BUF";
     default:               return "TILE_?";
@@ -1288,10 +1276,6 @@ int tile_analyze_conv2d_flat(KernelEntry const *ke, TileConv2DInfo *out) {
   return tile_analyze_conv2d_flat_impl(ke, out, 0);
 }
 
-// Phase D4: build a TILE_CONV2D root from an analyzed TileConv2DInfo.
-// Emits 4 TILE_AXIS leaves for the conv shape (batch, h_out, w_out,
-// c_out) plus a TILE_AXIS for the reduce-axis (k_h * k_w * c_in).
-
 int tile_rejects_conv2d_flat_cin1(KernelEntry const *ke) {
   TileConv2DInfo conv;
   if (!tile_analyze_conv2d_flat_impl(ke, &conv, 1)) {
@@ -1394,17 +1378,6 @@ fn int tile_validate(KernelEntry const *ke) {
   if (root->op == TILE_MMA) {
     TileGemmInfo gemm;
     return tile_collect_mma_info(ke, ke->tile_root, &gemm);
-  }
-  // Phase D4: TILE_CONV2D structural check.  Expects 4 TILE_AXIS
-  // children (batch, h_out, w_out, reduce).  Renderer (Phase F)
-  // will type-check the conv shape against scalar program contents.
-  if (root->op == TILE_CONV2D) {
-    if (root->src_count != 4) return 0;
-    for (u8 s = 0; s < 4; s++) {
-      if (!tile_id_ok(ke, root->src[s])) return 0;
-      if (ke->tile_uops[root->src[s]].op != TILE_AXIS) return 0;
-    }
-    return 1;
   }
   if (root->op != TILE_LOOP_NEST || root->src_count < 2
       || root->src_count > TILE_MAX_SRC) {

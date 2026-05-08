@@ -943,11 +943,6 @@ typedef enum {
                     // hold the canonical reduce-broadcast preamble:
                     //   TILE_BLOCK(alloc, reduce-into-alloc, barrier, load,
                     //              post-reduce body)
-  TILE_CONV2D,      // Specialised compute -- specialised conv2d-flat node.  Mirrors
-                    // TILE_MMA: src = output / weights / input TILE_AXIS
-                    // descriptors, extra packs (input_slot, weight_slot,
-                    // bias_slot, k_h, k_w, stride_h, stride_w, ...).
-                    // Renderer emits the conv2d_flat MSL kernel template.
   TILE_INPUT_BUF,   // Renderer prep: kernel input buffer reference.  extra =
                     // input slot id; dtype carries the element type.
                     // Used as src[0] of TILE_LOAD for global-memory
