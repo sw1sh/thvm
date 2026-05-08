@@ -75,6 +75,21 @@ _uop_buffer_dim = _bind("py_uop_buffer_dim", c_uint32, c_uint64, c_uint32)
 _render_uop_kernel = _bind("py_render_uop_kernel", c_void_p, c_uint64, c_char_p)
 _string_free = _bind("py_string_free", None, c_void_p)
 
+# ---------------- BEAM / autotune surface ----------------
+_kernel_alloc = _bind("py_kernel_alloc", c_uint32)
+_kernel_set_cached_lift = _bind(
+    "py_kernel_set_cached_lift", None,
+    c_uint32, c_uint64, c_uint64,
+    ctypes.POINTER(c_uint64), c_uint32)
+_kernel_opts_propose = _bind(
+    "py_kernel_opts_propose", c_uint32,
+    c_uint32,
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.POINTER(c_uint32),
+    c_uint32)
+
+
 # ---------------- in-process Metal compile + dispatch ----------------
 _metal_init = _bind("py_metal_init", c_int32)
 _metal_shutdown = _bind("py_metal_shutdown", None)
@@ -167,6 +182,18 @@ class _Constants:
     OPT_LOCAL = _read_uint32_const("py_const_UOP_OPT_LOCAL")
     OPT_GROUP_REDUCE = _read_uint32_const("py_const_UOP_OPT_GROUP_REDUCE")
     OPT_CONV = _read_uint32_const("py_const_UOP_OPT_CONV")
+    # KOpt opcodes (autotune-side; autotune.c BEAM uses these)
+    KOP_NONE = _read_uint32_const("py_const_KOP_NONE")
+    KOP_UPCAST = _read_uint32_const("py_const_KOP_UPCAST")
+    KOP_UNROLL = _read_uint32_const("py_const_KOP_UNROLL")
+    KOP_LOCAL = _read_uint32_const("py_const_KOP_LOCAL")
+    KOP_GROUP = _read_uint32_const("py_const_KOP_GROUP")
+    KOP_GROUPTOP = _read_uint32_const("py_const_KOP_GROUPTOP")
+    KOP_SWAP = _read_uint32_const("py_const_KOP_SWAP")
+    KOP_PADTO = _read_uint32_const("py_const_KOP_PADTO")
+    KOP_NOLOCALS = _read_uint32_const("py_const_KOP_NOLOCALS")
+    KOP_TC = _read_uint32_const("py_const_KOP_TC")
+    KOP_GLOBAL = _read_uint32_const("py_const_KOP_GLOBAL")
 
 
 K = _Constants
@@ -298,6 +325,33 @@ class Thvm:
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))
     def term_ext(self, t: Term) -> int: return int(_term_ext(c_uint64(int(t))))
     def term_val(self, t: Term) -> int: return int(_term_val(c_uint64(int(t))))
+
+    # ---------------- BEAM / autotune surface ----------------
+    def kernel_alloc(self) -> int:
+        """Allocate a synthetic KernelEntry slot. Returns kid."""
+        return int(_kernel_alloc())
+
+    def kernel_set_cached_lift(self, kid: int, store_root: Term,
+                               out_buf: Term, in_bufs: list[Term]) -> None:
+        """Populate `KERNELS[kid].cached_lift` from a Python-built UOp DAG.
+        Required before `kernel_opts_propose`.
+        """
+        n = len(in_bufs)
+        arr = (c_uint64 * n)(*[c_uint64(int(b)) for b in in_bufs])
+        _kernel_set_cached_lift(c_uint32(kid),
+                                c_uint64(int(store_root)),
+                                c_uint64(int(out_buf)),
+                                arr, c_uint32(n))
+
+    def kernel_opts_propose(self, kid: int, cap: int = 64) -> list[tuple[int, int, int]]:
+        """Returns list of (op, axis, arg) candidate KOpts from autotune's
+        propose. op values: K.KOP_TC / KOP_LOCAL / KOP_GLOBAL / etc.
+        """
+        ops = (ctypes.c_uint8 * cap)()
+        axes = (ctypes.c_uint8 * cap)()
+        args = (c_uint32 * cap)()
+        n = _kernel_opts_propose(c_uint32(kid), ops, axes, args, c_uint32(cap))
+        return [(int(ops[i]), int(axes[i]), int(args[i])) for i in range(int(n))]
 
     # ---------------- renderer ----------------
     def render(self, root: Term, name: str = "k") -> str:

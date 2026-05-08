@@ -110,6 +110,72 @@ EXPORT char *py_render_uop_kernel(uint64_t root, const char *name) {
 
 EXPORT void py_string_free(char *s) { free(s); }
 
+// ---------------- BEAM / autotune surface ----------------
+// Phase E entry: the autotune.c BEAM (slice 8 session 4) reads
+// `ke->cached_lift.store_root` for matmul-shape recognition via
+// uop_dag_classify_matmul_shape, then proposes KOpt[] candidates.
+// We expose the smallest set of helpers needed to drive it from a
+// Python autotuner: allocate a synthetic KernelEntry, populate the
+// cached lift with our Python-built UOp DAG, and call propose to get
+// candidate KOpts.  Applying opts and benching is left to the Python
+// driver -- it composes UOp variants via the existing constructors
+// and times via the Metal helpers in thvm_py_metal.m.
+
+EXPORT uint32_t py_kernel_alloc(void) { return kernel_alloc(); }
+
+EXPORT void py_kernel_set_cached_lift(uint32_t kid, uint64_t store_root,
+                                      uint64_t out_buf,
+                                      const uint64_t *in_bufs,
+                                      uint32_t n_inputs) {
+  if (kid == 0 || kid >= KERNELS_NEXT) return;
+  KernelEntry *ke = &KERNELS[kid];
+  ke->cached_lift.store_root = store_root;
+  ke->cached_lift.out_buf = out_buf;
+  ke->cached_lift.n_inputs = n_inputs;
+  if (n_inputs > KERNEL_LIFT_MAX_INPUT) n_inputs = KERNEL_LIFT_MAX_INPUT;
+  for (uint32_t i = 0; i < n_inputs; i++) {
+    ke->cached_lift.in_bufs[i] = in_bufs[i];
+  }
+  ke->cached_lift.n_outputs = 1;
+  ke->cached_lift.out_bufs[0] = out_buf;
+  // Mirror in compute_root for the legacy view.
+  ke->compute_root = store_root;
+}
+
+// Returns number of candidates filled into out_ops[]/out_axes[]/out_args[].
+// Caller pre-allocates arrays of `cap` u32 each.  Each candidate is the
+// triple (op, axis, arg) -- see KOpt struct in thvm.h.
+EXPORT uint32_t py_kernel_opts_propose(uint32_t kid,
+                                       uint8_t *out_ops,
+                                       uint8_t *out_axes,
+                                       uint32_t *out_args,
+                                       uint32_t cap) {
+  if (kid == 0 || kid >= KERNELS_NEXT) return 0;
+  KernelEntry *ke = &KERNELS[kid];
+  KOpt opts[KAUTOTUNE_MAX_CANDIDATES];
+  uint32_t local_cap = cap;
+  if (local_cap > KAUTOTUNE_MAX_CANDIDATES) local_cap = KAUTOTUNE_MAX_CANDIDATES;
+  uint32_t n = kernel_opts_propose(ke, opts, local_cap);
+  for (uint32_t i = 0; i < n; i++) {
+    out_ops[i]  = opts[i].op;
+    out_axes[i] = opts[i].axis;
+    out_args[i] = opts[i].arg;
+  }
+  return n;
+}
+
+EXPORT uint32_t py_const_KOP_NONE(void)     { return KOP_NONE; }
+EXPORT uint32_t py_const_KOP_UPCAST(void)   { return KOP_UPCAST; }
+EXPORT uint32_t py_const_KOP_UNROLL(void)   { return KOP_UNROLL; }
+EXPORT uint32_t py_const_KOP_LOCAL(void)    { return KOP_LOCAL; }
+EXPORT uint32_t py_const_KOP_GROUP(void)    { return KOP_GROUP; }
+EXPORT uint32_t py_const_KOP_GROUPTOP(void) { return KOP_GROUPTOP; }
+EXPORT uint32_t py_const_KOP_SWAP(void)     { return KOP_SWAP; }
+EXPORT uint32_t py_const_KOP_PADTO(void)    { return KOP_PADTO; }
+EXPORT uint32_t py_const_KOP_NOLOCALS(void) { return KOP_NOLOCALS; }
+EXPORT uint32_t py_const_KOP_TC(void)       { return KOP_TC; }
+EXPORT uint32_t py_const_KOP_GLOBAL(void)   { return KOP_GLOBAL; }
+
 // ---------------- exposed enums (to avoid magic numbers in Python) ----------------
 EXPORT uint32_t py_const_DT_INT32(void)         { return DT_INT32; }
 EXPORT uint32_t py_const_DT_FP32(void)          { return DT_FP32; }
