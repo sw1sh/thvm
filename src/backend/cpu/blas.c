@@ -60,7 +60,16 @@ static int blas_op_is_reduce_sum(KProgOp const *p, u32 src_step) {
 
 // Predicate: every input + every program op shares the same float
 // dtype (f32 or f64).  Mixed dtypes bail; integer dtypes bail too.
+//
+// Slice 8 (cpu_blas_dispatch DAG migration): under default
+// `THVM_PHASE_C7_FREE_PROGRAM=1` the program[] array is freed at
+// materialize time, so this gate is consulted only on the legacy
+// fallback path (cached_lift.store_root == 0, e.g. lift declined).
+// The DAG path's GEMM dispatcher walks the lifted DAG via
+// `uop_dag_classify_matmul_shape` and validates dtype uniformity at
+// the BUFFER terms it encounters there.
 static int blas_uniform_float(KernelEntry *ke, u32 *out_dtype) {
+  if (ke->program == NULL || ke->n_ops == 0) return 0;
   u32 dt = ke->program[0].dtype;
   if (dt != DT_FP32 && dt != DT_FP64) return 0;
   for (u32 i = 0; i < ke->n_ops; i++)
@@ -72,7 +81,15 @@ static int blas_uniform_float(KernelEntry *ke, u32 *out_dtype) {
 }
 
 // Try DOT.  Returns 1 on dispatch, 0 on no-match (caller fall-back).
+//
+// Slice 8: this gate consumes program[] directly and therefore only
+// fires on the legacy fallback path (cached_lift.store_root == 0).
+// Under default THVM_PHASE_C7_FREE_PROGRAM=1 the program[] is NULL
+// after materialize, so the dot pattern reaches BLAS only via the
+// dual-write knob (THVM_PHASE_C7_FREE_PROGRAM=0).  Migrating dot/gemv
+// to read from the lifted UOp DAG is left as session-3 work.
 static int blas_try_dot(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (ke->program == NULL || ke->n_ops == 0) return 0;
   if (ke->n_inputs != 2) return 0;
   if (ke->n_ops    != 2) return 0;
   u32 dt;
@@ -113,6 +130,7 @@ static int blas_try_dot(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 // op[1] = REDUCE_SUM(op[0])           numel = M, REDUCE inner = 1
 //                                     (i.e. reducing the trailing axis).
 static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (ke->program == NULL || ke->n_ops == 0) return 0;
   if (ke->n_inputs != 2) return 0;
   if (ke->n_ops    != 2) return 0;
   u32 dt;
@@ -166,61 +184,136 @@ static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 // Disambiguates from GEMV by inner: GEMV has inner = 1, GEMM has
 // inner = N > 1 + a non-trivial K (nMul / nOut > 1).  A buffer-size
 // check distinguishes A (M*K floats) from B (K*N floats).
-static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (ke->n_inputs != 2) {
+// Slice 8 instrumentation: count cblas dispatches landed via the
+// DAG-side classifier vs the legacy program[] path.  Read by
+// THVM_BLAS_DISPATCH_TRACE=1 + queried by tests.  Reset by thvm_init.
+static u64 BLAS_GEMM_DISPATCH_DAG    = 0;
+static u64 BLAS_GEMM_DISPATCH_LEGACY = 0;
+
+fn u64 cpu_blas_gemm_dispatch_dag_count(void) {
+  return BLAS_GEMM_DISPATCH_DAG;
+}
+fn u64 cpu_blas_gemm_dispatch_legacy_count(void) {
+  return BLAS_GEMM_DISPATCH_LEGACY;
+}
+fn void cpu_blas_gemm_dispatch_counters_reset(void) {
+  BLAS_GEMM_DISPATCH_DAG    = 0;
+  BLAS_GEMM_DISPATCH_LEGACY = 0;
+}
+
+// Issue cblas_{s,d}gemm given a fully-populated shape (M, N, K, ldA,
+// ldB, transA, transB, a_input, b_input).  Both the DAG path and the
+// legacy program[] path funnel through this so the actual dispatch
+// site stays single-source.
+static void blas_emit_gemm(u32 dt, u32 M, u32 N, u32 K,
+                           u32 ldA, u32 ldB,
+                           u32 trans_a, u32 trans_b,
+                           u32 a_buf, u32 b_buf, u32 out_buf_id) {
+  enum CBLAS_TRANSPOSE transA = trans_a ? CblasTrans : CblasNoTrans;
+  enum CBLAS_TRANSPOSE transB = trans_b ? CblasTrans : CblasNoTrans;
+  if (dt == DT_FP32) {
+    float const *A = (float const *)CPU_BUFS[a_buf].data;
+    float const *B = (float const *)CPU_BUFS[b_buf].data;
+    float       *C = (float       *)CPU_BUFS[out_buf_id].data;
+    cblas_sgemm(CblasRowMajor, transA, transB,
+                (int)M, (int)N, (int)K,
+                1.0f, A, (int)ldA, B, (int)ldB,
+                0.0f, C, (int)N);
+  } else {
+    double const *A = (double const *)CPU_BUFS[a_buf].data;
+    double const *B = (double const *)CPU_BUFS[b_buf].data;
+    double       *C = (double       *)CPU_BUFS[out_buf_id].data;
+    cblas_dgemm(CblasRowMajor, transA, transB,
+                (int)M, (int)N, (int)K,
+                1.0, A, (int)ldA, B, (int)ldB,
+                0.0, C, (int)N);
+  }
+}
+
+// DAG-side GEMM dispatcher (Slice 8).  Reads M/N/K + slot mapping +
+// ldA/ldB + transpose flags from the lifted UOp DAG via
+// `uop_dag_classify_matmul_shape`; survives `program == NULL` under
+// default THVM_PHASE_C7_FREE_PROGRAM=1.  Returns 1 on dispatch, 0 on
+// no-match (caller falls through to legacy or skips BLAS).
+//
+// Bisection knob `THVM_BLAS_DAG_DISABLE=1`: opt out of the DAG path
+// (forces the legacy program[] reader, or no BLAS dispatch at all
+// when program[] is freed).  Used for A/B-testing perf regressions
+// + the bench/synth/bench_blas_dag.c micro-benchmark.
+static int blas_try_gemm_dag(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  static int disable_inited = 0;
+  static int disable_on     = 0;
+  if (!disable_inited) {
+    char const *e = getenv("THVM_BLAS_DAG_DISABLE");
+    disable_on    = (e != NULL && e[0] == '1');
+    disable_inited = 1;
+  }
+  if (disable_on) return 0;
+  if (ke->cached_lift.store_root == 0) return 0;
+  UopDagGemmShape gemm;
+  if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, &gemm)) {
     return 0;
   }
-  if (ke->n_ops != 2) {
-    return 0;
-  }
+  if (gemm.N <= 1) return 0;
+  // Buffer-size sanity: the DAG path skips the storage-numels gate
+  // (legacy used it to disambiguate A vs B by element count); we
+  // already pin a_input / b_input from BUFFER.instance, so storage
+  // sanity reduces to "buffer ids exist + at least M*K / K*N
+  // elements addressable".  Bail if either is 0.
+  u32 a_buf = in_buf_ids[gemm.a_input];
+  u32 b_buf = in_buf_ids[gemm.b_input];
+  if (a_buf == 0 || b_buf == 0) return 0;
+  u32 elem_bytes = (gemm.dtype == DT_FP32) ? sizeof(float) : sizeof(double);
+  u32 a_elems = (u32)(CPU_BUFS[a_buf].nbytes / elem_bytes);
+  u32 b_elems = (u32)(CPU_BUFS[b_buf].nbytes / elem_bytes);
+  if (a_elems < gemm.M * gemm.K) return 0;
+  if (b_elems < gemm.K * gemm.N) return 0;
+  blas_emit_gemm(gemm.dtype, gemm.M, gemm.N, gemm.K, gemm.ldA, gemm.ldB,
+                 gemm.flags & 1u, gemm.flags & 2u,
+                 a_buf, b_buf, out_buf_id);
+  BLAS_GEMM_DISPATCH_DAG++;
+  return 1;
+}
+
+// Legacy program[]-reading GEMM dispatcher.  Survives only when
+// `program[]` is populated (THVM_PHASE_C7_FREE_PROGRAM=0 dual-write
+// path, or kernels that didn't lift cleanly).  Kept verbatim from the
+// pre-Slice-8 implementation so a regression in the DAG path leaves
+// behaviour bit-equal.
+static int blas_try_gemm_legacy(KernelEntry *ke, u32 *in_buf_ids,
+                                u32 out_buf_id) {
+  if (ke->program == NULL || ke->n_ops == 0) return 0;
+  if (ke->n_inputs != 2) return 0;
+  if (ke->n_ops    != 2) return 0;
   u32 dt;
-  if (!blas_uniform_float(ke, &dt)) {
-    return 0;
-  }
+  if (!blas_uniform_float(ke, &dt)) return 0;
   u32 elem_bytes = (dt == DT_FP32) ? sizeof(float) : sizeof(double);
   u32 b0 = in_buf_ids[0], b1 = in_buf_ids[1];
-  if (b0 == 0 || b1 == 0) {
-    return 0;
-  }
+  if (b0 == 0 || b1 == 0) return 0;
   u32 storage_numels[2] = {
     (u32)(CPU_BUFS[b0].nbytes / elem_bytes),
     (u32)(CPU_BUFS[b1].nbytes / elem_bytes),
   };
   TileGemmInfo gemm;
-  if (!tile_analyze_gemm(ke, storage_numels, &gemm)) {
-    return 0;
-  }
-  if (gemm.dtype != dt || gemm.N <= 1) {
-    return 0;
-  }
-
-  enum CBLAS_TRANSPOSE transA = CblasNoTrans;
-  enum CBLAS_TRANSPOSE transB = CblasNoTrans;
-  if (gemm.flags & 1u) {
-    transA = CblasTrans;
-  }
-  if (gemm.flags & 2u) {
-    transB = CblasTrans;
-  }
-
-  if (dt == DT_FP32) {
-    float const *A = (float const *)CPU_BUFS[in_buf_ids[gemm.a_input]].data;
-    float const *B = (float const *)CPU_BUFS[in_buf_ids[gemm.b_input]].data;
-    float       *C = (float       *)CPU_BUFS[out_buf_id].data;
-    cblas_sgemm(CblasRowMajor, transA, transB,
-                (int)gemm.M, (int)gemm.N, (int)gemm.K,
-                1.0f, A, (int)gemm.ldA, B, (int)gemm.ldB,
-                0.0f, C, (int)gemm.N);
-  } else {
-    double const *A = (double const *)CPU_BUFS[in_buf_ids[gemm.a_input]].data;
-    double const *B = (double const *)CPU_BUFS[in_buf_ids[gemm.b_input]].data;
-    double       *C = (double       *)CPU_BUFS[out_buf_id].data;
-    cblas_dgemm(CblasRowMajor, transA, transB,
-                (int)gemm.M, (int)gemm.N, (int)gemm.K,
-                1.0, A, (int)gemm.ldA, B, (int)gemm.ldB,
-                0.0, C, (int)gemm.N);
-  }
+  if (!tile_analyze_gemm(ke, storage_numels, &gemm)) return 0;
+  if (gemm.dtype != dt || gemm.N <= 1) return 0;
+  blas_emit_gemm(dt, gemm.M, gemm.N, gemm.K, gemm.ldA, gemm.ldB,
+                 gemm.flags & 1u, gemm.flags & 2u,
+                 in_buf_ids[gemm.a_input], in_buf_ids[gemm.b_input],
+                 out_buf_id);
+  BLAS_GEMM_DISPATCH_LEGACY++;
   return 1;
+}
+
+// Slice 8: prefer the DAG-side classifier; fall back to the legacy
+// program[] reader only when the lift declined (cached_lift.store_root
+// == 0) or the DAG classifier didn't recognise the shape.  Under
+// default `THVM_PHASE_C7_FREE_PROGRAM=1` the legacy path is dormant
+// (program[] is NULL), but the dual-write knob (=0) still needs it
+// for A/B testing perf regressions.
+static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
+  if (blas_try_gemm_dag(ke, in_buf_ids, out_buf_id)) return 1;
+  return blas_try_gemm_legacy(ke, in_buf_ids, out_buf_id);
 }
 
 // Returns the specific KDispatchKind that fired (BLAS_DOT / BLAS_GEMV
@@ -243,5 +336,9 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   (void)ke; (void)in_buf_ids; (void)out_buf_id;
   return 0;
 }
+
+fn u64  cpu_blas_gemm_dispatch_dag_count   (void) { return 0; }
+fn u64  cpu_blas_gemm_dispatch_legacy_count(void) { return 0; }
+fn void cpu_blas_gemm_dispatch_counters_reset(void) {}
 
 #endif
