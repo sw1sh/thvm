@@ -620,11 +620,11 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   }
 
   // Identify M-axis (in addr_a, not red) and N-axis (in addr_b, not
-  // red).  We need each extent + axis_id so the outer loops can step
-  // by 8 (matching simdgroup tile size) and the addresses still
-  // reference the correct loop variables.
-  u32 m_axis_id = 0xFFFFFFFFu, m_extent = 0;
-  u32 n_axis_id_v = 0xFFFFFFFFu, n_extent = 0;
+  // red).  We need each extent + axis_id + axis_type so the outer
+  // emission can either open for-loops (LOOP / default) or bind to
+  // thread-position (LOCAL / GLOBAL) for parallel multi-SG dispatch.
+  u32 m_axis_id = 0xFFFFFFFFu, m_extent = 0, m_axis_type = 0;
+  u32 n_axis_id_v = 0xFFFFFFFFu, n_extent = 0, n_axis_type = 0;
   {
     Term ra[MAX_DIM]; u32 ra_n = 0;
     rmu_collect_ranges(addr_a, ra, &ra_n);
@@ -632,6 +632,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       u32 aid = term_val(heap_read(term_val(ra[i]) + 0));
       if (aid != red_axis) {
         m_axis_id = aid;
+        m_axis_type = (u32)term_val(heap_read(term_val(ra[i]) + 1));
         m_extent = (u32)term_val(heap_read(term_val(ra[i]) + 2));
         break;
       }
@@ -642,6 +643,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
       u32 aid = term_val(heap_read(term_val(rb[i]) + 0));
       if (aid != red_axis) {
         n_axis_id_v = aid;
+        n_axis_type = (u32)term_val(heap_read(term_val(rb[i]) + 1));
         n_extent = (u32)term_val(heap_read(term_val(rb[i]) + 2));
         break;
       }
@@ -654,34 +656,77 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     return 0;
   }
 
-  // Emit the simdgroup template body.  Outer M and N loops step by 8
-  // (one 8x8 tile per iteration); inner K loop steps by 8 too.
-  // simdgroup_load/store carry explicit elements_per_row equal to
-  // the row stride: K for A (m*K+k), N for B (k*N+n) and C (m*N+n).
-  // Without those args, simdgroup_{load,store} default to
-  // elements_per_row = Cols = 8, which silently mis-strides for any
-  // shape with K or N != 8.
+  // Parallel-TC selector.  If the M and N axes carry GLOBAL axis_type
+  // (Phase E annotation), the caller's dispatch shape binds each
+  // threadgroup to a unique 8x8 output tile, so the multi-SG write
+  // race is impossible -- drop the `sgi==0 && tg==0` guard and emit
+  // position-bound m/n declarations instead of for-loops.  Coverage:
+  //   m=GLOBAL && n=GLOBAL  -> 2D-folded `tg` linearises tiles:
+  //                            m = (tg / N_tiles)*8, n = (tg % N_tiles)*8
+  //   m=GLOBAL && n=LOOP    -> m = tg*8, n loops over N_tiles*8
+  //   m=LOOP   && n=GLOBAL  -> n = tg*8, m loops over M_tiles*8
+  //   else                  -> guarded sequential (legacy / safe)
   //
-  // Multi-simdgroup race guard: simdgroup_matrix ops cooperate on the
-  // calling simdgroup's 32 threads.  When the dispatch shape binds
-  // multiple simdgroups per threadgroup AND/OR multiple threadgroups
-  // (the default for output_numel >= 32), every simdgroup runs the
-  // same code and writes to the same output addresses concurrently;
-  // on M3 this race yields garbage outputs.  Gate the body so only
-  // the first simdgroup of the first threadgroup runs the work; the
-  // others idle.  Wasteful but correct under any dispatch shape.
-  // Future wedge can specialise the dispatch shape calc to bind
-  // exactly one simdgroup (one threadgroup, 32 threads) so no work
-  // is wasted.
-  for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-  fputs("if (sgi == 0u && tg == 0u) {\n", fp);
-  for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
-  fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
-          m_axis_id, m_axis_id, m_extent, m_axis_id);
-  for (u32 d = 0; d < depth + 2; d++) fputs("  ", fp);
-  fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
-          n_axis_id_v, n_axis_id_v, n_extent, n_axis_id_v);
-  u32 body_depth = depth + 3;
+  // Dispatch (Phase E parallel TC, both GLOBAL):
+  //   grid       = (num_m_tiles * num_n_tiles * 32, 1, 1)
+  //   threadgroup = (32, 1, 1)
+  // i.e. one simdgroup per TG, one TG per output tile.
+  int m_par = (m_axis_type == 5 /* KAX_GLOBAL */);
+  int n_par = (n_axis_type == 5 /* KAX_GLOBAL */);
+  int parallel_tc = (m_par || n_par);
+  u32 n_tiles_n = n_extent / 8;
+
+  if (parallel_tc) {
+    // No guard.  Bind axes per axis_type.
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("/* parallel TC: m/n bound to tg; one SG per output tile */\n", fp);
+    if (m_par && n_par) {
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = (tg / %uu) * 8u;\n", m_axis_id, n_tiles_n);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = (tg %% %uu) * 8u;\n", n_axis_id_v, n_tiles_n);
+    } else if (m_par) {
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = tg * 8u;\n", m_axis_id);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+              n_axis_id_v, n_axis_id_v, n_extent, n_axis_id_v);
+    } else { /* n_par */
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "uint a%u = tg * 8u;\n", n_axis_id_v);
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+              m_axis_id, m_axis_id, m_extent, m_axis_id);
+    }
+  } else {
+    // Legacy guarded sequential path.  Multi-simdgroup race guard:
+    // simdgroup_matrix ops cooperate on the calling simdgroup's 32
+    // threads.  When the dispatch shape binds multiple SGs/TGs (the
+    // default for output_numel >= 32), every SG runs the same code
+    // and writes to the same output addresses concurrently; on M3
+    // this race yields garbage outputs.  Gate the body so only the
+    // first SG of the first TG runs; others idle.  Wasteful but
+    // correct under any dispatch shape.
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("if (sgi == 0u && tg == 0u) {\n", fp);
+    for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+    fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+            m_axis_id, m_axis_id, m_extent, m_axis_id);
+    for (u32 d = 0; d < depth + 2; d++) fputs("  ", fp);
+    fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u += 8) {\n",
+            n_axis_id_v, n_axis_id_v, n_extent, n_axis_id_v);
+  }
+
+  // body_depth depends on path:
+  //   parallel_tc & both GLOBAL: depth (no opener)
+  //   parallel_tc & one GLOBAL : depth + 1 (one for-loop opener)
+  //   guarded                  : depth + 3 (guard + 2 for-loops)
+  u32 body_depth;
+  if (parallel_tc) {
+    body_depth = (m_par && n_par) ? depth : (depth + 1);
+  } else {
+    body_depth = depth + 3;
+  }
 
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fputs("/* TC simdgroup_matrix matmul */\n", fp);
@@ -711,13 +756,23 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   rmu_emit_term(addr_c, fp);
   fprintf(fp, "], %u);\n", n_extent);
 
-  // Close N, M, then sgi/tg guard.
-  for (u32 d = 0; d < depth + 2; d++) fputs("  ", fp);
-  fputs("}\n", fp);
-  for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
-  fputs("}\n", fp);
-  for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-  fputs("}\n", fp);
+  // Close any blocks opened above based on which path we took.
+  if (parallel_tc) {
+    if (!(m_par && n_par)) {
+      // One for-loop opener (the non-GLOBAL axis); close it.
+      for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
+    // both-GLOBAL case: nothing to close (no openers).
+  } else {
+    // Guarded path: close N, M, then the sgi/tg guard.
+    for (u32 d = 0; d < depth + 2; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+    for (u32 d = 0; d < depth + 1; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fputs("}\n", fp);
+  }
   return 1;
 }
 
