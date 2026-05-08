@@ -84,8 +84,31 @@ static int kop_splits_axis(u8 op) {
       || op == KOP_GROUP  || op == KOP_GROUPTOP;
 }
 
+// Forward decl: defined in uop/apply_opt_dag.c, included after this file
+// in thvm.c.  The forward decl matches `fn` (static inline) so the
+// generated symbols stay private to the TU.
+fn Term uop_dag_apply_kopt(Term root, KOpt opt);
+
 fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
-  if (ke == NULL || ke->schedule == NULL) {
+  if (ke == NULL) {
+    return 0;
+  }
+  // DAG-mode: Phase E path.  When cached_lift.store_root is populated
+  // (Python-built kernels and post-lift production kernels), mutate the
+  // DAG directly via uop_dag_apply_kopt.  This avoids the legacy
+  // KpSchedule.applied_opts[] log + axes_compute_axis_types resolver
+  // chain.  The renderer reads the post-mutation DAG directly
+  // (UOP_RANGE.axis_type for parallel TC, UOP_OPT(_, TC, factor) for
+  // the simdgroup_matrix template).
+  if (ke->cached_lift.store_root != 0) {
+    Term new_root = uop_dag_apply_kopt(ke->cached_lift.store_root, opt);
+    if (new_root == 0 || new_root == ke->cached_lift.store_root) return 0;
+    ke->cached_lift.store_root = new_root;
+    ke->compute_root = new_root;
+    if (opt.op == KOP_TC) APPLY_OPT_TC_GATE_DAG++;
+    return 1;
+  }
+  if (ke->schedule == NULL) {
     return 0;
   }
   if (opt.op == KOP_TC) {
