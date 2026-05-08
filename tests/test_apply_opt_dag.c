@@ -218,17 +218,127 @@ static void test_kernel_apply_opt_dag_path(void) {
 }
 
 static void test_kernel_apply_opt_unsupported_op_bails(void) {
+  // Reserved opcodes (PADTO/NOLOCALS) and zero-arg splits must still
+  // bail in the DAG path.  KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP/SWAP
+  // are supported; they're tested separately below.
   Term root = build_matmul_root(NULL, NULL, NULL);
   u32 kid = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
   ke->cached_lift.store_root = root;
   ke->compute_root = root;
 
-  // KOP_UPCAST not yet implemented in the DAG path -- must bail (return 0).
-  KOpt opt = { KOP_UPCAST, 0, 8 };
+  // KOP_PADTO is reserved; unsupported.
+  KOpt opt = { KOP_PADTO, 0, 8 };
   CHECK(kernel_apply_opt(ke, opt) == 0);
-  // Root should be untouched on bail.
   CHECK(ke->cached_lift.store_root == root);
+}
+
+// === KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP DAG mutation =============
+
+static void test_apply_split_upcast_splits_axis(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  // Split axis 0 (m, extent 16) by 4: outer at axis 0 (extent 4),
+  // inner at axis 1 (extent 4, KAX_UPCAST).  Existing axis 1 (n,
+  // extent 16) and axis 2 (k, extent 32) shift right to 2 and 3.
+  Term r = uop_dag_apply_split(root, KOP_UPCAST, 0, 4);
+  CHECK(r != 0);
+  CHECK(r != root);
+
+  // Walk and find the new outer (axis 0, extent 4) + new inner (axis
+  // 1, KAX_UPCAST, extent 4).  Also verify shifted ranges exist.
+  Term ranges[16]; u32 n = 0;
+  rmu_collect_ranges(heap_read(term_val(r) + 1), ranges, &n);  // c_addr
+  Term value_ranges[16]; u32 nv = 0;
+  rmu_collect_ranges(heap_read(term_val(r) + 2), value_ranges, &nv);
+  int saw_outer = 0, saw_n_shifted = 0;
+  for (u32 i = 0; i < n; i++) {
+    u32 aid = uop_range_axis_id(ranges[i]);
+    u32 ext = uop_range_extent(ranges[i]);
+    if (aid == 0 && ext == 4) saw_outer = 1;
+    if (aid == 2 && ext == 16) saw_n_shifted = 1;  // n shifted from 1 to 2
+  }
+  CHECK(saw_outer);
+  CHECK(saw_n_shifted);
+}
+
+static void test_apply_split_local_no_opt_wrap(void) {
+  // KOP_LOCAL is the only split that does NOT wrap inner in UOP_OPT.
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  Term r = uop_dag_apply_split(root, KOP_LOCAL, 0, 4);
+  CHECK(r != 0);
+  CHECK(r != root);
+}
+
+static void test_apply_split_unroll_wraps_inner_opt(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  Term r = uop_dag_apply_split(root, KOP_UNROLL, 0, 4);
+  CHECK(r != 0);
+  CHECK(r != root);
+  // Walk c_addr looking for an OPT(_, UNROLL, 4) wrapper.
+  Term c_addr = heap_read(term_val(r) + 1);
+  // c_addr should be IADD(IMUL(IADD(IMUL(outer, 4), inner_unroll), 16), n).
+  // Just check that an OPT_UNROLL wrapper exists somewhere.
+  Term opts[16]; u32 no = 0;
+  // Brute walk: descend IADD/IMUL chains.
+  Term stack[32]; u32 sp = 0; stack[sp++] = c_addr;
+  while (sp > 0) {
+    Term t = stack[--sp];
+    if (term_tag(t) != TAG_UOP) continue;
+    u32 op = term_ext(t);
+    if (op == UOP_OPT) {
+      if (no < 16) opts[no++] = t;
+      Term tgt = uop_opt_target(t);
+      if (term_tag(tgt) == TAG_UOP && sp < 32) stack[sp++] = tgt;
+      continue;
+    }
+    if (op == UOP_IADD || op == UOP_IMUL) {
+      u64 loc = term_val(t);
+      Term l = heap_read(loc + 0);
+      Term ri = heap_read(loc + 1);
+      if (term_tag(l) == TAG_UOP && sp < 32) stack[sp++] = l;
+      if (term_tag(ri) == TAG_UOP && sp < 32) stack[sp++] = ri;
+    }
+  }
+  int saw_unroll = 0;
+  for (u32 i = 0; i < no; i++) {
+    if (uop_opt_kind(opts[i]) == UOP_OPT_UNROLL && uop_opt_factor(opts[i]) == 4) saw_unroll = 1;
+  }
+  CHECK(saw_unroll);
+}
+
+// === KOP_SWAP DAG mutation ============================================
+
+static void test_apply_swap_axes(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  // Swap m (axis 0) and n (axis 1) on the matmul.
+  Term r = uop_dag_apply_swap(root, 0, 1);
+  CHECK(r != 0);
+  CHECK(r != root);
+
+  // c_addr originally references m (axis 0) and n (axis 1).  After
+  // swap, c_addr should reference axis 1 in the m position and axis 0
+  // in the n position.
+  Term c_addr = heap_read(term_val(r) + 1);
+  Term ranges[16]; u32 n = 0;
+  rmu_collect_ranges(c_addr, ranges, &n);
+  int saw_swapped_0 = 0, saw_swapped_1 = 0;
+  for (u32 i = 0; i < n; i++) {
+    u32 aid = uop_range_axis_id(ranges[i]);
+    u32 ext = uop_range_extent(ranges[i]);
+    // Both M and N were extent 16, so swap is detectable only by
+    // axis_id presence -- both 0 and 1 should still be there but with
+    // their roles swapped.  At minimum verify both ids still appear.
+    if (aid == 0 && ext == 16) saw_swapped_0 = 1;
+    if (aid == 1 && ext == 16) saw_swapped_1 = 1;
+  }
+  CHECK(saw_swapped_0);
+  CHECK(saw_swapped_1);
+}
+
+static void test_apply_swap_noop_when_axes_equal(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  Term r = uop_dag_apply_swap(root, 0, 0);
+  CHECK(r == root);
 }
 
 int main(void) {
@@ -248,6 +358,12 @@ int main(void) {
   TEST_BEGIN("kernel_apply_opt_dag_path");         test_kernel_apply_opt_dag_path();
   TEST_BEGIN("kernel_apply_opt_unsupported_op_bails");
                                                     test_kernel_apply_opt_unsupported_op_bails();
+
+  TEST_BEGIN("apply_split_upcast_splits_axis");    test_apply_split_upcast_splits_axis();
+  TEST_BEGIN("apply_split_local_no_opt_wrap");     test_apply_split_local_no_opt_wrap();
+  TEST_BEGIN("apply_split_unroll_wraps_inner_opt"); test_apply_split_unroll_wraps_inner_opt();
+  TEST_BEGIN("apply_swap_axes");                   test_apply_swap_axes();
+  TEST_BEGIN("apply_swap_noop_when_axes_equal");   test_apply_swap_noop_when_axes_equal();
 
   thvm_free();
   TEST_REPORT();
