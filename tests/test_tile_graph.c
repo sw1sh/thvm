@@ -604,6 +604,116 @@ int main(void) {
   ke->axes = NULL;
   kernel_free_arrays(ke);
 
+  TEST_BEGIN("tile-graph/conv2d-flat-counters-legacy-fixture");
+  // The hand-built KProgOp fixture above has `cached_lift.store_root == 0`
+  // (no lifter was run), so tile_analyze_conv2d_flat takes the LEGACY
+  // program[]-side branch.  Counter probe asserts at least one LEGACY
+  // dispatch fired and zero DAG dispatches.  Mirrors slice 8 session
+  // 2's BLAS_GEMM_DISPATCH_DAG counter probe pattern.
+  tile_conv2d_flat_counters_reset();
+  CHECK_EQ(tile_conv2d_flat_dag_count(),    0ull);
+  CHECK_EQ(tile_conv2d_flat_legacy_count(), 0ull);
+  build_kprog_conv2d_flat(ke);
+  TileConv2DInfo legacy_conv = {0};
+  CHECK(tile_analyze_conv2d_flat(ke, &legacy_conv));
+  CHECK_EQ(tile_conv2d_flat_dag_count(),    0ull);
+  CHECK_EQ(tile_conv2d_flat_legacy_count(), 1ull);
+  kernel_free_arrays(ke);
+  tile_conv2d_flat_counters_reset();
+
+  TEST_BEGIN("tile-graph/conv2d-flat-counters-dag-fixture");
+  // Build a synthetic STORE(C, addr, REDUCE_SUM(...)) and pin it on
+  // ke->cached_lift.store_root, with input_views[] populated so the
+  // shape extraction succeeds.  The DAG-side classifier accepts and
+  // tile_analyze_conv2d_flat reports the same fields as the LEGACY
+  // path -- structural shape comes from input_views/output_shape, not
+  // from program[].
+  {
+    KernelEntry dke = {0};
+    u32 dc_out = 4, dc_in = 2, dh = 6, dw = 6, dkh = 3, dkw = 3;
+    u32 dh_out = dh - dkh + 1, dw_out = dw - dkw + 1;
+    u32 dk = dc_in * dkh * dkw, dp = dh_out * dw_out;
+    kernel_inputs_reserve(&dke, 2);
+    dke.n_inputs = 2;
+    dke.input_dtypes[0] = DT_FP32;
+    dke.input_dtypes[1] = DT_FP32;
+    dke.input_numels[0] = dc_out * dk;
+    dke.input_numels[1] = dc_in * dh * dw;
+    dke.output_dtype    = DT_FP32;
+    dke.output_numel    = dc_out * dp;
+    dke.output_shape.ndim = 2;
+    dke.output_shape.dims[0] = dc_out;
+    dke.output_shape.dims[1] = dp;
+    test_set_view3(&dke.input_views[0], dc_out, dk, dp, (i32)dk, 1, 0);
+    test_set_view3(&dke.input_views[1], dc_in, dh, dw, (i32)(dh * dw),
+                   (i32)dw, 1);
+    // Build a minimal lifted-conv-shape DAG.  Only the STORE-of-
+    // REDUCE_SUM structure matters for the classifier; the addresses
+    // can be any valid UOp terms.
+    u32 ddims_w[2] = {dc_out, dk};
+    u32 ddims_x[1] = {1024};
+    u32 ddims_o[1] = {dc_out * dp};
+    Term Wd = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, ddims_w, 1);
+    Term Xd = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, ddims_x, 2);
+    Term Cd = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, ddims_o, 0);
+    Term r_out_d = uop_range(0, 0, dc_out * dp);
+    Term r_q_d   = uop_range(1, 1 /*REDUCE*/, dk);
+    Term ldW_d   = uop_index_e(Wd, r_out_d);
+    Term ldX_d   = uop_index_e(Xd, r_q_d);
+    Term mul_d   = uop_binary(UOP_MUL, ldW_d, ldX_d);
+    Term red_d   = uop_reduce(REDUCE_SUM, /*axis=*/1, mul_d);
+    Term store_d = uop_store(Cd, r_out_d, red_d);
+    dke.cached_lift.store_root = store_d;
+
+    TileConv2DInfo dag_conv = {0};
+    CHECK(tile_analyze_conv2d_flat(&dke, &dag_conv));
+    CHECK_EQ(dag_conv.dtype, (u32)DT_FP32);
+    CHECK_EQ(dag_conv.c_out, dc_out);
+    CHECK_EQ(dag_conv.c_in,  dc_in);
+    CHECK_EQ(dag_conv.kh,    dkh);
+    CHECK_EQ(dag_conv.kw,    dkw);
+    CHECK_EQ(dag_conv.h_out, dh_out);
+    CHECK_EQ(dag_conv.w_out, dw_out);
+    CHECK_EQ(tile_conv2d_flat_dag_count(),    1ull);
+    CHECK_EQ(tile_conv2d_flat_legacy_count(), 0ull);
+
+    TEST_BEGIN("tile-graph/conv2d-flat-counters-dag-rejects-non-reduce");
+    // STORE(C, addr, CONST 0) -- not a REDUCE.  Classifier rejects.
+    Term zero_v   = uop_const(DT_FP32, 0);
+    Term bad_store= uop_store(Cd, r_out_d, zero_v);
+    dke.cached_lift.store_root = bad_store;
+    TileConv2DInfo bad_conv = {0};
+    CHECK(!tile_analyze_conv2d_flat(&dke, &bad_conv));
+    // No counter increments on classifier reject.
+    CHECK_EQ(tile_conv2d_flat_dag_count(),    1ull);
+    CHECK_EQ(tile_conv2d_flat_legacy_count(), 0ull);
+
+    TEST_BEGIN("tile-graph/conv2d-flat-counters-dag-rejects-max-reduce");
+    // REDUCE_MAX is not REDUCE_SUM -- classifier rejects.
+    Term red_max = uop_reduce(REDUCE_MAX, /*axis=*/1, mul_d);
+    Term store_max = uop_store(Cd, r_out_d, red_max);
+    dke.cached_lift.store_root = store_max;
+    TileConv2DInfo max_conv = {0};
+    CHECK(!tile_analyze_conv2d_flat(&dke, &max_conv));
+    CHECK_EQ(tile_conv2d_flat_dag_count(),    1ull);
+    CHECK_EQ(tile_conv2d_flat_legacy_count(), 0ull);
+
+    TEST_BEGIN("tile-graph/conv2d-flat-counters-dag-accepts-opt-conv");
+    // The F4 recogniser may have wrapped REDUCE in OPT(_, CONV, 0).
+    // The classifier peels the wrapper and still accepts.
+    Term opt_conv  = uop_opt(red_d, UOP_OPT_CONV, 0);
+    Term store_opt = uop_store(Cd, r_out_d, opt_conv);
+    dke.cached_lift.store_root = store_opt;
+    TileConv2DInfo opt_conv_info = {0};
+    CHECK(tile_analyze_conv2d_flat(&dke, &opt_conv_info));
+    CHECK_EQ(opt_conv_info.c_out, dc_out);
+    CHECK_EQ(tile_conv2d_flat_dag_count(),    2ull);
+    CHECK_EQ(tile_conv2d_flat_legacy_count(), 0ull);
+
+    kernel_free_arrays(&dke);
+  }
+  tile_conv2d_flat_counters_reset();
+
   TEST_BEGIN("tile-graph/build-from-scalar-ranges");
   u32 scalar_root = build_scalar_add_graph(ke, 8);
   kernel_inputs_reserve(ke, 2);

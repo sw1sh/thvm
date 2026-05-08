@@ -2488,6 +2488,23 @@ int uop_dag_classify_gemv_shape(Term root,
                                 struct KernelEntry const *ke,
                                 UopDagGemvShape *out);
 
+// Slice 8 (conv2d-flat session): DAG-side structural gate for
+// conv2d_flat kernels.  Mirrors the slice 8 GEMM/DOT/GEMV pattern but
+// minimalist: the legacy `tile_analyze_conv2d_flat` reads conv shape
+// almost entirely from `ke->input_views[]` + `ke->output_shape` (which
+// survive program[] free under THVM_PHASE_C7_FREE_PROGRAM=1).  The
+// only program[]-side gate it actually needs is "last op is REDUCE_SUM".
+// This DAG-side classifier replaces that single gate by checking the
+// `cached_lift.store_root`'s STORE.value is a UOP_REDUCE with
+// REDUCE_SUM kind, optionally wrapped in UOP_OPT(_, CONV, 0) by F4's
+// recogniser.  No shape extraction is needed -- the caller still reads
+// extents from `ke->input_views[]` exactly as the legacy reader did.
+//
+// Returns 1 on match.  No extents-out parameter -- conv2d_flat's
+// shape lives in input_views, not in the lifted DAG.
+int uop_dag_classify_conv2d_flat_shape(Term root,
+                                       struct KernelEntry const *ke);
+
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
 // `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).

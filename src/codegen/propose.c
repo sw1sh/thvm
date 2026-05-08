@@ -481,19 +481,21 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
     }
   }
 
-  // Gate intentionally retained on KernelAxes presence (NOT flipped to
-  // `cached_lift.store_root != 0`).  Rationale: the body calls
-  // `tile_analyze_conv2d_flat` which itself requires `ke->program != NULL`
-  // (KProgOp[]-side recognizer).  Under Phase C7 default-on, lift success
-  // frees `program[]`, so this conv2d-flat path only fires when lift
-  // declined -- a state where `cached_lift.store_root == 0` AND
-  // `program != NULL && axes != NULL`.  Flipping to the DAG check would
-  // disable the path entirely (and break `tests/test_tile_graph.c`'s
-  // `metal-conv2d-flat-proposes-local` case which hand-builds program[]
-  // without running the lifter).  Slated to retire when conv2d gets a
-  // UOp-DAG-side recognizer (slice-8-territory, see ideal_pipeline_handoff).
-  if (propose_metal_tile_enabled() && ke->axes != NULL
-      && tile_anno_axis_count_or_kernelaxes(ke) > 0) {
+  // Gate flip (slice 8 conv2d-flat session): mirrors the BEAM TC entry
+  // gate above.  `tile_analyze_conv2d_flat` now accepts DAG kernels via
+  // `uop_dag_classify_conv2d_flat_shape` (when
+  // `ke->cached_lift.store_root != 0`) AND keeps the legacy program[]
+  // path as a fallback for lift-decline fixtures.  The outer
+  // `axes != NULL && axis_count > 0` proxy is replaced by
+  // `cached_lift.store_root != 0` for production kernels, mirroring
+  // the slice 8 BEAM TC entry above.  The legacy fixture in
+  // `tests/test_tile_graph.c::metal-conv2d-flat-proposes-local` builds
+  // KProgOp + KernelAxes but never runs the lifter, so we OR the gate:
+  // either DAG present OR the legacy axes-presence proxy.
+  if (propose_metal_tile_enabled()
+      && (ke->cached_lift.store_root != 0
+          || (ke->axes != NULL
+              && tile_anno_axis_count_or_kernelaxes(ke) > 0))) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {
       u8  red_axis = propose_reduce_axis_index(ke);
