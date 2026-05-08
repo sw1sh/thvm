@@ -1,13 +1,15 @@
 // bench/synth/bench_blas_dag.c -- micro-benchmark for the Slice 8
 // CPU BLAS DAG migration.  Times one matmul / matvec / dot dispatch
 // each under default `THVM_PHASE_C7_FREE_PROGRAM=1` (post-Slice 8:
-// cblas via DAG-side classifier) versus the legacy program[]-side
-// matchers when the DAG path is disabled.
+// cblas via DAG-side classifier).
 //
 // Pre-Slice-8 the default-mode dispatch fell through to render_uop_c
 // (per the session 1 audit: "30-100x slower than cblas_sgemm").  Run
-// this bench by hand to confirm the regression stays fixed and that
-// the dual-write knob still keeps the legacy path working.
+// this bench by hand to confirm the regression stays fixed.
+//
+// Slice 8 session 5: the legacy program[]-reading fallback dispatchers
+// + their counters retired with `tile_analyze_gemm`; the bench now
+// reports only the DAG-side dispatch count.
 //
 // Build: in worktree root,
 //   make build
@@ -33,7 +35,7 @@ static double now_sec(void) {
 // === GEMM ============================================================
 
 static double bench_gemm_one(u32 M, u32 K, u32 N, u32 iters,
-                             u64 *out_dag, u64 *out_legacy) {
+                             u64 *out_dag) {
   unsetenv("THVM_BACKEND"); thvm_init();
   cpu_blas_gemm_dispatch_counters_reset();
 
@@ -71,8 +73,7 @@ static double bench_gemm_one(u32 M, u32 K, u32 N, u32 iters,
     if (it > 0) total += (t1 - t0);
     (void)done;
   }
-  *out_dag    = cpu_blas_gemm_dispatch_dag_count();
-  *out_legacy = cpu_blas_gemm_dispatch_legacy_count();
+  *out_dag = cpu_blas_gemm_dispatch_dag_count();
   free(mm_a);
   free(mm_b);
   thvm_free();
@@ -82,7 +83,7 @@ static double bench_gemm_one(u32 M, u32 K, u32 N, u32 iters,
 // === GEMV ============================================================
 
 static double bench_gemv_one(u32 M, u32 K, u32 iters,
-                             u64 *out_dag, u64 *out_legacy) {
+                             u64 *out_dag) {
   unsetenv("THVM_BACKEND"); thvm_init();
   cpu_blas_gemm_dispatch_counters_reset();
 
@@ -115,8 +116,7 @@ static double bench_gemv_one(u32 M, u32 K, u32 iters,
     if (it > 0) total += (t1 - t0);
     (void)done;
   }
-  *out_dag    = cpu_blas_gemv_dispatch_dag_count();
-  *out_legacy = cpu_blas_gemv_dispatch_legacy_count();
+  *out_dag = cpu_blas_gemv_dispatch_dag_count();
   free(wv);
   free(xv);
   thvm_free();
@@ -126,7 +126,7 @@ static double bench_gemv_one(u32 M, u32 K, u32 iters,
 // === DOT =============================================================
 
 static double bench_dot_one(u32 K, u32 iters,
-                            u64 *out_dag, u64 *out_legacy) {
+                            u64 *out_dag) {
   unsetenv("THVM_BACKEND"); thvm_init();
   cpu_blas_gemm_dispatch_counters_reset();
 
@@ -156,8 +156,7 @@ static double bench_dot_one(u32 K, u32 iters,
     if (it > 0) total += (t1 - t0);
     (void)done;
   }
-  *out_dag    = cpu_blas_dot_dispatch_dag_count();
-  *out_legacy = cpu_blas_dot_dispatch_legacy_count();
+  *out_dag = cpu_blas_dot_dispatch_dag_count();
   free(av);
   free(bv);
   thvm_free();
@@ -170,7 +169,7 @@ int main(void) {
   printf("# blas_dag bench: per-iter avg (after one warmup)\n");
 
   printf("\n# === GEMM ===\n");
-  printf("# size       | seconds  | gflops    | dag_count | legacy_count\n");
+  printf("# size       | seconds  | gflops    | dag_count\n");
   u32 gemm_sizes[][3] = {
     { 64,  64,  64 },
     {128, 128, 128 },
@@ -179,16 +178,15 @@ int main(void) {
   };
   for (u32 i = 0; i < sizeof(gemm_sizes)/sizeof(gemm_sizes[0]); i++) {
     u32 M = gemm_sizes[i][0], K = gemm_sizes[i][1], N = gemm_sizes[i][2];
-    u64 dag, leg;
-    double t = bench_gemm_one(M, K, N, iters, &dag, &leg);
+    u64 dag;
+    double t = bench_gemm_one(M, K, N, iters, &dag);
     double gflops = 2.0 * (double)M * K * N / t / 1e9;
-    printf("%4u x %4u x %4u | %.6f | %8.2f | %9llu | %12llu\n",
-           M, K, N, t, gflops,
-           (unsigned long long)dag, (unsigned long long)leg);
+    printf("%4u x %4u x %4u | %.6f | %8.2f | %9llu\n",
+           M, K, N, t, gflops, (unsigned long long)dag);
   }
 
   printf("\n# === GEMV ===\n");
-  printf("# size       | seconds  | gflops    | dag_count | legacy_count\n");
+  printf("# size       | seconds  | gflops    | dag_count\n");
   u32 gemv_sizes[][2] = {
     { 64,  64  },
     {128, 128 },
@@ -197,25 +195,23 @@ int main(void) {
   };
   for (u32 i = 0; i < sizeof(gemv_sizes)/sizeof(gemv_sizes[0]); i++) {
     u32 M = gemv_sizes[i][0], K = gemv_sizes[i][1];
-    u64 dag, leg;
-    double t = bench_gemv_one(M, K, iters, &dag, &leg);
+    u64 dag;
+    double t = bench_gemv_one(M, K, iters, &dag);
     double gflops = 2.0 * (double)M * K / t / 1e9;
-    printf("       %4u x %4u | %.6f | %8.2f | %9llu | %12llu\n",
-           M, K, t, gflops,
-           (unsigned long long)dag, (unsigned long long)leg);
+    printf("       %4u x %4u | %.6f | %8.2f | %9llu\n",
+           M, K, t, gflops, (unsigned long long)dag);
   }
 
   printf("\n# === DOT ===\n");
-  printf("# size       | seconds  | gflops    | dag_count | legacy_count\n");
+  printf("# size       | seconds  | gflops    | dag_count\n");
   u32 dot_sizes[] = {256, 1024, 4096, 16384};
   for (u32 i = 0; i < sizeof(dot_sizes)/sizeof(dot_sizes[0]); i++) {
     u32 K = dot_sizes[i];
-    u64 dag, leg;
-    double t = bench_dot_one(K, iters, &dag, &leg);
+    u64 dag;
+    double t = bench_dot_one(K, iters, &dag);
     double gflops = 2.0 * (double)K / t / 1e9;
-    printf("            %5u | %.6f | %8.2f | %9llu | %12llu\n",
-           K, t, gflops,
-           (unsigned long long)dag, (unsigned long long)leg);
+    printf("            %5u | %.6f | %8.2f | %9llu\n",
+           K, t, gflops, (unsigned long long)dag);
   }
 
   return 0;

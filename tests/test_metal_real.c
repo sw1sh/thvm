@@ -350,7 +350,6 @@ int main(void) {
     // cpu_dispatch_kernel would fall through to render_uop_c -- a
     // documented 30-100x perf regression.
     CHECK(cpu_blas_gemm_dispatch_dag_count() > 0);
-    CHECK_EQ(cpu_blas_gemm_dispatch_legacy_count(), 0u);
     thvm_free();
 
     // Metal backend through the same schedule.  Whichever dispatch
@@ -426,7 +425,6 @@ int main(void) {
     // The DAG-side classifier must fire under default
     // THVM_PHASE_C7_FREE_PROGRAM=1 (program[] is freed at materialize).
     CHECK(cpu_blas_dot_dispatch_dag_count() > 0);
-    CHECK_EQ(cpu_blas_dot_dispatch_legacy_count(), 0u);
     thvm_free();
   }
 
@@ -474,7 +472,6 @@ int main(void) {
       CHECK(d < 1e-3f);
     }
     CHECK(cpu_blas_gemv_dispatch_dag_count() > 0);
-    CHECK_EQ(cpu_blas_gemv_dispatch_legacy_count(), 0u);
     thvm_free();
   }
 

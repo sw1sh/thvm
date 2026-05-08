@@ -35,59 +35,45 @@
 //     Reserved.  Rejected here; no axis-structure mutation.
 //
 //   TC
-//     Kernel-aware metadata (matmul-shape gate).  Slice 8 session 4:
-//     primary gate reads `ke->cached_lift.store_root` via
-//     `uop_dag_classify_matmul_shape` (DAG-side matmul classifier);
-//     falls back to `tile_analyze_gemm` only when the lift declined
-//     (cached_lift.store_root == 0) so synthetic test kernels that
-//     populate program[] without lifting still validate.  Does not
-//     mutate axis structure; routes to tile_anno_record_opt.
+//     Kernel-aware metadata (matmul-shape gate).  Slice 8 session 5:
+//     reads `ke->cached_lift.store_root` via
+//     `uop_dag_classify_matmul_shape` (DAG-side matmul classifier).
+//     The legacy `tile_analyze_gemm` fallback retired with the
+//     dedicated KProgOp-side recogniser; rangeify produces the
+//     canonical MUL+REDUCE+OPT_TC scalar_uops pattern for every
+//     matmul-shaped kernel, which the lifter (kernel_lift_to_uop)
+//     turns into the UOp DAG this gate inspects.  Does not mutate
+//     axis structure; routes to tile_anno_record_opt.
 //
 // Returns 1 on success, 0 on validation failure (axis out of range,
 // arg doesn't divide, applied_opts full, MAX_AXES exceeded).
 
-// Slice 8 session 4: count KOP_TC gate evaluations split by which
-// path validated the matmul shape -- DAG (cached_lift.store_root)
-// vs LEGACY (tile_analyze_gemm over program[]).  The DAG count
-// should be non-zero on any post-lift workload; the LEGACY count
-// is reachable only via synthetic tests (build_kprog_gemm) or
-// kernels where the lifter declined.
-static u64 APPLY_OPT_TC_GATE_DAG    = 0;
-static u64 APPLY_OPT_TC_GATE_LEGACY = 0;
+// Slice 8 session 5: KOP_TC gate counter.  The legacy fallback arm
+// (tile_analyze_gemm over program[]) retired with session 5's tile.c
+// deletion; the only remaining gate is the DAG classifier.  The
+// counter is kept to expose dispatch coverage to the surgical suite.
+static u64 APPLY_OPT_TC_GATE_DAG = 0;
 
 fn u64 kernel_apply_opt_tc_dag_count(void) {
   return APPLY_OPT_TC_GATE_DAG;
 }
-fn u64 kernel_apply_opt_tc_legacy_count(void) {
-  return APPLY_OPT_TC_GATE_LEGACY;
-}
 fn void kernel_apply_opt_tc_counters_reset(void) {
-  APPLY_OPT_TC_GATE_DAG    = 0;
-  APPLY_OPT_TC_GATE_LEGACY = 0;
+  APPLY_OPT_TC_GATE_DAG = 0;
 }
 
-// Slice 8 session 4: matmul-shape + dtype gate for KOP_TC.  Tries
-// the DAG-side classifier first (uop_dag_classify_matmul_shape over
-// ke->cached_lift.store_root); falls back to tile_analyze_gemm when
-// the lift declined.  Returns 1 with `*out_dtype` populated on
-// match; 0 otherwise.  Increments counters per path.
+// Slice 8 session 5: matmul-shape + dtype gate for KOP_TC reads
+// uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
+// Returns 1 with `*out_dtype` populated on match; 0 otherwise.
 static int apply_opt_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
-  if (ke != NULL && ke->cached_lift.store_root != 0) {
-    UopDagGemmShape shape;
-    if (uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke,
-                                      &shape)) {
-      if (out_dtype != NULL) *out_dtype = shape.dtype;
-      APPLY_OPT_TC_GATE_DAG++;
-      return 1;
-    }
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  UopDagGemmShape shape;
+  if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke,
+                                     &shape)) {
+    return 0;
   }
-  TileGemmInfo gemm;
-  if (tile_analyze_gemm(ke, NULL, &gemm)) {
-    if (out_dtype != NULL) *out_dtype = gemm.dtype;
-    APPLY_OPT_TC_GATE_LEGACY++;
-    return 1;
-  }
-  return 0;
+  if (out_dtype != NULL) *out_dtype = shape.dtype;
+  APPLY_OPT_TC_GATE_DAG++;
+  return 1;
 }
 
 // True if this opt class splits an axis (vs SWAP / no-op opts).
