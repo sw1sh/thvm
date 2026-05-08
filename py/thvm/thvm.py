@@ -296,6 +296,26 @@ class Thvm:
     def cmpeq(self, a: Term, b: Term) -> Term:
         return Term(_uop_binary(c_uint32(K.CMPEQ), c_uint64(int(a)), c_uint64(int(b))))
 
+    # ---------------- FP unary ----------------
+    # The C-side `uop_binary` constructor handles unary opcodes too:
+    # for unary opcodes only `heap[loc+0]` is read, so we pass `x` for
+    # both args.  Builds UOP_NEG / RECIP / EXP2 / LOG2 / SQRT nodes.
+    def _unary(self, opcode: int, x: Term) -> Term:
+        return Term(_uop_binary(c_uint32(opcode), c_uint64(int(x)), c_uint64(int(x))))
+
+    def neg(self, x: Term) -> Term:    return self._unary(K.NEG, x)
+    def recip(self, x: Term) -> Term:  return self._unary(K.RECIP, x)
+    def exp2(self, x: Term) -> Term:   return self._unary(K.EXP2, x)
+    def log2(self, x: Term) -> Term:   return self._unary(K.LOG2, x)
+    def sqrt(self, x: Term) -> Term:   return self._unary(K.SQRT, x)
+
+    # Synthetic exp(x) = exp2(x * log2(e)) since UOP_EXP isn't in the
+    # opcode set.  log2(e) is hash-consed via uop_const(FP32, ...) so
+    # repeated calls share heap loc.
+    def exp(self, x: Term) -> Term:
+        log2_e = self.fconst(1.4426950408889634)
+        return self.exp2(self.mul(x, log2_e))
+
     # ---------------- reduce / opt / store / after / load ----------------
     def reduce(self, kind: int, axis: int, src: Term) -> Term:
         return Term(_uop_reduce(c_uint32(kind), c_uint32(axis), c_uint64(int(src))))

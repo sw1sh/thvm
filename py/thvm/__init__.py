@@ -12,5 +12,6 @@ Usage:
   msl = h.render(root, name='my_kernel')
 """
 from .thvm import Thvm, Metal, K, Term, DEFAULT_HEADER
+from . import templates
 
-__all__ = ["Thvm", "Metal", "K", "Term", "DEFAULT_HEADER"]
+__all__ = ["Thvm", "Metal", "K", "Term", "DEFAULT_HEADER", "templates"]
