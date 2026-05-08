@@ -22,3 +22,10 @@ build/
 # Hackathon-prep WIP. Untrack selectively when ready.
 bench/metal-problems/
 external/mlx/
+
+# Python bytecode (py/ ctypes wrapper)
+__pycache__/
+*.pyc
+
+# Built dylib for py/ ctypes wrapper (rebuild via `make py`)
+py/thvm/libthvm_py.dylib

@@ -273,6 +273,28 @@ $(BIN)/test_aot_metal_run: tests/test_aot_metal_run.c $(SRC) $(METAL_OBJ) $(META
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
+# === py/ ctypes bindings (libthvm_py.dylib) ==========================
+# Single-TU build of src/thvm.c + extern-C wrapper that re-exports the
+# static-inline UOp constructors. Lets ctypes drive thvm from Python.
+# No Metal -- the "build IR + render to MSL string" path; the rendered
+# MSL goes through xcrun -> metallib -> bench/metal-problems harness.
+ifeq ($(shell uname -s),Darwin)
+PY_DYLIB        := py/thvm/libthvm_py.dylib
+PY_THVM_OBJ     := $(BUILD)/py_thvm.o
+PY_METAL_OBJ    := $(BUILD)/py_thvm_metal.o
+$(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
+	clang -fPIC -O2 -DACCELERATE_NEW_LAPACK \
+	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
+	    -c -o $@ $<
+$(PY_METAL_OBJ): py/csource/thvm_py_metal.m | $(BUILD)
+	clang -fPIC -fobjc-arc -O2 -c -o $@ $<
+$(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ)
+	clang -shared -framework Accelerate -framework Metal -framework Foundation \
+	    -o $@ $^
+.PHONY: py
+py: $(PY_DYLIB)
+endif
+
 test: $(TESTS)
 	@fail=0; \
 	for t in $(TESTS); do \
