@@ -390,6 +390,94 @@ int main(void) {
     }
   }
 
+  // === Slice 8 session 3: DOT routes through cblas_sdot via DAG ===
+  TEST_BEGIN("metal-real/dot-cpu-routes-through-cblas-via-dag");
+  {
+    enum { DK = 64 };
+    Shape sd = {0}; sd.ndim = 1; sd.dims[0] = DK;
+    f32 dv_a[DK];
+    f32 dv_b[DK];
+    f32 dv_ref = 0.0f;
+    for (u32 i = 0; i < DK; i++) {
+      dv_a[i] = (f32)((i * 7 + 3) % 11) - 5.0f;
+      dv_b[i] = (f32)((i * 5 + 2) % 13) - 6.0f;
+      dv_ref += dv_a[i] * dv_b[i];
+    }
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    cpu_blas_gemm_dispatch_counters_reset();
+    f32 dot_out = 0.0f;
+    {
+      u32 ta = tensor_alloc(CURRENT_BACKEND, sd, DT_FP32);
+      u32 tb = tensor_alloc(CURRENT_BACKEND, sd, DT_FP32);
+      CURRENT_BACKEND->buf_write(TENS[ta].buf_id, dv_a, sizeof(dv_a));
+      CURRENT_BACKEND->buf_write(TENS[tb].buf_id, dv_b, sizeof(dv_b));
+      Term A = term_new(0, TAG_TEN, DT_FP32, ta);
+      Term B = term_new(0, TAG_TEN, DT_FP32, tb);
+      Term mul = uop_binary(UOP_MUL, A, B);
+      Term red = uop_reduce(REDUCE_SUM, /*axis=*/0, mul);
+      Term done = wnf(thvm_materialize(red));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                &dot_out, sizeof(dot_out));
+    }
+    f32 dd = dot_out - dv_ref;
+    if (dd < 0) dd = -dd;
+    CHECK(dd < 1e-3f);
+    // The DAG-side classifier must fire under default
+    // THVM_PHASE_C7_FREE_PROGRAM=1 (program[] is freed at materialize).
+    CHECK(cpu_blas_dot_dispatch_dag_count() > 0);
+    CHECK_EQ(cpu_blas_dot_dispatch_legacy_count(), 0u);
+    thvm_free();
+  }
+
+  // === Slice 8 session 3: GEMV routes through cblas_sgemv via DAG ===
+  TEST_BEGIN("metal-real/gemv-cpu-routes-through-cblas-via-dag");
+  {
+    enum { GM = 16, GK = 24 };
+    Shape sw = {0}; sw.ndim = 2; sw.dims[0] = GM; sw.dims[1] = GK;
+    Shape sx = {0}; sx.ndim = 2; sx.dims[0] = 1;  sx.dims[1] = GK;
+    f32 wv [GM*GK];
+    f32 xv [GK];
+    f32 yref[GM] = {0};
+    for (u32 i = 0; i < GM*GK; i++) wv[i] = (f32)((i * 11 + 1) % 17) - 8.0f;
+    for (u32 i = 0; i < GK; i++)    xv[i] = (f32)((i * 13 + 5) % 19) - 9.0f;
+    for (u32 m = 0; m < GM; m++) {
+      f32 acc = 0.0f;
+      for (u32 k = 0; k < GK; k++) acc += wv[m*GK + k] * xv[k];
+      yref[m] = acc;
+    }
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    cpu_blas_gemm_dispatch_counters_reset();
+    f32 yout[GM] = {0};
+    {
+      u32 tw = tensor_alloc(CURRENT_BACKEND, sw, DT_FP32);
+      u32 tx = tensor_alloc(CURRENT_BACKEND, sx, DT_FP32);
+      CURRENT_BACKEND->buf_write(TENS[tw].buf_id, wv, sizeof(wv));
+      CURRENT_BACKEND->buf_write(TENS[tx].buf_id, xv, sizeof(xv));
+      Term W = term_new(0, TAG_TEN, DT_FP32, tw);
+      Term X = term_new(0, TAG_TEN, DT_FP32, tx);
+      // TMatVec lower: x{1,K} EXPAND to {M,K}; MUL elementwise; REDUCE
+      // SUM axis=1 -> {M}.  Shape exactly matches what
+      // wl/THVMLink/Kernel/NN.wl :: TMatVec produces.
+      u32 d_mk[2] = {GM, GK};
+      Term Xe  = uop_expand (X, 2, d_mk);
+      Term mul = uop_binary(UOP_MUL, W, Xe);
+      Term red = uop_reduce(REDUCE_SUM, /*axis=*/1, mul);
+      Term done = wnf(thvm_materialize(red));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                yout, sizeof(yout));
+    }
+    for (u32 m = 0; m < GM; m++) {
+      f32 d = yout[m] - yref[m];
+      if (d < 0) d = -d;
+      CHECK(d < 1e-3f);
+    }
+    CHECK(cpu_blas_gemv_dispatch_dag_count() > 0);
+    CHECK_EQ(cpu_blas_gemv_dispatch_legacy_count(), 0u);
+    thvm_free();
+  }
+
   // === Unary elementwise parity (NEG, RECIP, SQRT, EXP2, LOG2) ===
   TEST_BEGIN("metal-real/unary-parity-with-cpu");
   Shape su = {0}; su.ndim = 1; su.dims[0] = 4;

@@ -2413,6 +2413,48 @@ int uop_dag_classify_matmul_shape(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagGemmShape *out);
 
+// Slice 8 (session 3): DAG-side shape extractors for DOT and GEMV.
+// Mirror `uop_dag_classify_matmul_shape` for the two simpler BLAS
+// shapes the legacy program[]-reading path was handling via its own
+// pattern matchers in src/backend/cpu/blas.c.
+//
+// DOT: STORE(out_buf, _, REDUCE_SUM(MUL(INDEX_E(A, k), INDEX_E(B, k))))
+//   - out_buf is rank-0 or rank-1 numel=1
+//   - A, B are rank-1 contig with K elements
+//   - Recovers (dtype, K, a_input, b_input).
+//
+// GEMV: STORE(out_buf, _, REDUCE_SUM(MUL(INDEX_E(W, m*K+k),
+//                                         INDEX_E(x, k))))
+//   - out_buf is rank-1 numel=M
+//   - W view is rank-2 {M, K} contig with strides {K, 1}
+//   - x view is rank-2 {M, K} broadcast strides {0, 1} or rank-1 {K}
+//     strides {1}, etc -- mirrors tile_gemm_views_ok N==1 path.
+//   - Recovers (dtype, M, K, w_input, x_input, ldW, transW).
+typedef struct {
+  u32 dtype;
+  u32 K;
+  u32 a_input;
+  u32 b_input;
+} UopDagDotShape;
+
+typedef struct {
+  u32 dtype;
+  u32 M;
+  u32 K;
+  u32 w_input;
+  u32 x_input;
+  u32 ldW;
+  u32 flags;     // bit 0 = transposed W (storage strides {1, M})
+} UopDagGemvShape;
+
+int uop_dag_classify_dot_shape (Term root,
+                                struct KernelEntry const *ke,
+                                UopDagDotShape *out);
+
+int uop_dag_classify_gemv_shape(Term root,
+                                struct KernelEntry const *ke,
+                                UopDagGemvShape *out);
+
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
 // `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).
@@ -2455,6 +2497,16 @@ fn Term uop_recognise_tc(Term root);
 // wrap with UOP_OPT(_, TC) so render_uop's simdgroup_matrix template
 // fires (when K%8==0) versus falling back to its generic accumulator.
 fn int uop_classify_matmul(Term root, u32 *out_k_extent);
+
+// Slice 8 (session 3): structural classifiers for the DOT and GEMV
+// shapes.  Mirrors uop_classify_matmul but with different range-count
+// signatures: DOT addresses each touch exactly 1 distinct UOP_RANGE
+// (the reduce axis); GEMV has one address with 2 ranges (matrix m,k)
+// and the other with 1 (broadcast vector k).  *out_w_first selects
+// which MUL operand carries the matrix (1 = src[0], 0 = src[1]).
+// Both return 1 + reduce-axis extent on match; 0 otherwise.
+fn int uop_classify_dot (Term root, u32 *out_k_extent);
+fn int uop_classify_gemv(Term root, u32 *out_k_extent, int *out_w_first);
 
 // Recognise the conv2d_flat shape on a UOP_STORE root and wrap the
 // inner REDUCE with UOP_OPT(_, CONV, 0) so render_uop's conv template
