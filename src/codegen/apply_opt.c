@@ -92,7 +92,7 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     // KOP_TC.arg is the simdgroup matmul tile size.  Apple GPUs accept
     // 8/16/32 (the only sizes simdgroup_matrix supports today); reject
     // anything else so autotune can't propose an unbuildable kernel.
-    if (opt.axis >= tile_anno_axis_count_or_kernelaxes(ke)
+    if (opt.axis >= axes_resolve_n_axes(ke)
         || (opt.arg != 8 && opt.arg != 16 && opt.arg != 32)) {
       return 0;
     }
@@ -102,8 +102,8 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     }
     return tile_anno_record_opt(ke, opt);
   }
-  KpSchedule *ax = ke->schedule;
-  if (ax->n_applied >= MAX_OPTS) {
+  KpSchedule *sched = ke->schedule;
+  if (sched->n_applied >= MAX_OPTS) {
     return 0;
   }
   // E9 session 5: `_writer.full_shape[]` / `_writer.n_axes` retired.
@@ -149,7 +149,7 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     return 0;
   }
 
-  ax->applied_opts[ax->n_applied++] = opt;
+  sched->applied_opts[sched->n_applied++] = opt;
   // E9 session 2: no version++.  Freshness is `tile_axes_hash(ke)` over
   // (applied_opts, output_shape, source_uop) -- recording the new opt
   // already mutates the hash deterministically.
