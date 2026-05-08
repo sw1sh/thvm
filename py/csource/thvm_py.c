@@ -29,7 +29,10 @@ EXPORT uint64_t py_term_val(uint64_t t) { return term_val(t); }
 
 // ---------------- atom constructors ----------------
 EXPORT uint64_t py_term_iconst(int32_t v) {
-  return term_new(0, TAG_NUM, DT_INT32, (uint64_t)(uint32_t)v);
+  // UOP_CONST(DT_INT32, bits) -- the DAG-side classifiers
+  // (uop_dag_classify_matmul_shape etc.) pattern-match on UOP_CONST
+  // for stride coefficients.  A bare TAG_NUM atom won't match.
+  return uop_const(DT_INT32, (uint32_t)v);
 }
 EXPORT uint64_t py_term_fconst(float v) {
   uint32_t bits;
@@ -140,6 +143,10 @@ EXPORT void py_kernel_set_cached_lift(uint32_t kid, uint64_t store_root,
   ke->cached_lift.out_bufs[0] = out_buf;
   // Mirror in compute_root for the legacy view.
   ke->compute_root = store_root;
+  // Also set the KernelEntry's own n_inputs -- DAG classifiers read
+  // ke->n_inputs (not cached_lift.n_inputs) when validating the
+  // BUFFER.instance->slot mapping (uop_dag_classify_matmul_shape:507).
+  ke->n_inputs = n_inputs;
 }
 
 // Returns number of candidates filled into out_ops[]/out_axes[]/out_args[].
@@ -162,6 +169,13 @@ EXPORT uint32_t py_kernel_opts_propose(uint32_t kid,
     out_args[i] = opts[i].arg;
   }
   return n;
+}
+
+EXPORT uint64_t py_propose_tc_dag_count(void) {
+  return kernel_opts_propose_tc_dag_count();
+}
+EXPORT void py_propose_tc_counters_reset(void) {
+  kernel_opts_propose_tc_counters_reset();
 }
 
 EXPORT uint32_t py_const_KOP_NONE(void)     { return KOP_NONE; }
