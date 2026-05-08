@@ -640,3 +640,48 @@ int uop_dag_classify_gemv_shape(Term root,
   out->flags   = transW ? 1u : 0u;
   return 1;
 }
+
+// === Slice 8 (conv2d-flat session): DAG-side structural gate ===========
+//
+// `tile_analyze_conv2d_flat` (src/schedule/tile.c) reads the conv shape
+// almost entirely from `ke->input_views[]`, `ke->output_shape`,
+// `ke->input_dtypes[]`, and `ke->n_inputs` -- all of which survive
+// program[] free under default `THVM_PHASE_C7_FREE_PROGRAM=1`.  The
+// ONE program[]-side gate it actually needs is "the kernel's last op
+// is UOP_REDUCE with REDUCE_SUM kind" (program[ke->n_ops - 1]).
+//
+// This DAG-side classifier replaces that gate.  Strategy:
+//   1. `root` must be UOP_STORE.
+//   2. STORE.value must be UOP_REDUCE (bare) OR UOP_OPT(_, CONV, 0)
+//      wrapping a UOP_REDUCE (F4's recogniser may have wrapped it).
+//   3. The REDUCE's kind must be REDUCE_SUM.
+//
+// The shape extraction for the actual conv fields (kh, kw, c_in,
+// c_out, h_out, w_out, batch, w_offset, w_stride0/1, x_offset,
+// x_stride_b/0/1/2, w_input, x_input, patch_input_base/count,
+// threads, outputs_per_thread, reduce_unroll) stays in
+// tile_analyze_conv2d_flat -- it reads `ke->input_views[]` /
+// `ke->output_shape` / opt-derived counters, none of which need the
+// DAG.  So this classifier returns just 1/0 with no out struct.
+int uop_dag_classify_conv2d_flat_shape(Term root,
+                                       struct KernelEntry const *ke) {
+  (void)ke;  // unused -- view/shape extraction stays in the caller
+  if (root == 0) return 0;
+  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
+  Term value = heap_read(term_val(root) + 2);
+  // Peel an optional UOP_OPT(_, CONV, 0) wrapper.  F4's
+  // uop_recognise_conv installs this when the conv2d shape is detected;
+  // the bare-REDUCE case fires when the recogniser hasn't run (e.g. the
+  // dedicated `kernel_lift_from_conv2d` path that synthesises the DAG
+  // directly, without going through rangeify+recognise_conv).
+  if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT) {
+    if (uop_opt_kind(value) != UOP_OPT_CONV) return 0;
+    value = uop_opt_target(value);
+  }
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
+  // REDUCE kind is at heap_read(loc + 1).
+  Term kind = heap_read(term_val(value) + 1);
+  if (term_tag(kind) != TAG_NUM) return 0;
+  if (term_val(kind) != REDUCE_SUM) return 0;
+  return 1;
+}
