@@ -136,7 +136,7 @@ fn void tile_free(KernelEntry *ke) {
   ke->n_tile_uops   = 0;
   ke->tile_uops_cap = 0;
   ke->tile_root     = 0;
-  ke->tile_axes_version = 0;
+  ke->tile_axes_hash    = 0;
 }
 
 // Phase F prep: tile-IR pretty-printer.  `tile_dump(ke, fp)` walks
@@ -1386,7 +1386,7 @@ fn int tile_build_from_scalar(KernelEntry *ke) {
                                     ke->scalar_uops[root].dtype,
                                     (u8)(1 + n_axes), src, 0);
           if (tile_validate(ke)) {
-            ke->tile_axes_version = ke->axes != NULL ? ke->axes->version : 0;
+            ke->tile_axes_hash = tile_axes_hash(ke);
             return 1;
           }
         }
@@ -1453,7 +1453,7 @@ fn int tile_build_from_scalar(KernelEntry *ke) {
     tile_free(ke);
     return 0;
   }
-  ke->tile_axes_version = ke->axes != NULL ? ke->axes->version : 0;
+  ke->tile_axes_hash = tile_axes_hash(ke);
   return 1;
 }
 
@@ -1466,8 +1466,8 @@ fn int tile_sync_from_scalar(KernelEntry *ke) {
   // renderer rewrite.
   int dump_after = getenv("DUMP_TILE_IR") != NULL;
   (void)dump_after;
-  u32 axes_version = ke->axes != NULL ? ke->axes->version : 0;
-  if (ke->tile_uops != NULL && ke->tile_axes_version == axes_version
+  u64 axes_hash = tile_axes_hash(ke);
+  if (ke->tile_uops != NULL && ke->tile_axes_hash == axes_hash
       && tile_validate(ke)) {
     return 1;
   }

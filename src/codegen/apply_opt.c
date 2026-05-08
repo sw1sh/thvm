@@ -152,9 +152,8 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   }
 
   ax->applied_opts[ax->n_applied++] = opt;
-  ax->version++;
-  if (ax->version == 0) {
-    ax->version = 1;
-  }
+  // E9 session 2: no version++.  Freshness is `tile_axes_hash(ke)` over
+  // (applied_opts, output_shape, source_uop) -- recording the new opt
+  // already mutates the hash deterministically.
   return 1;
 }
