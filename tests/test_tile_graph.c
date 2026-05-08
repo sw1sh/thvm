@@ -547,8 +547,15 @@ int main(void) {
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
   axes_default_for(ke);
+  // Slice 8 session 4: synthetic build_kprog_gemm leaves
+  // cached_lift.store_root unset so the migrated KOP_TC gate must
+  // fall back to tile_analyze_gemm.  Counter probes assert the
+  // LEGACY arm fires here and the DAG arm stays at 0.
+  kernel_apply_opt_tc_counters_reset();
   KOpt tc8 = { .op = KOP_TC, .axis = 0, .arg = 8 };
   CHECK(kernel_apply_opt(ke, tc8));
+  CHECK_EQ(kernel_apply_opt_tc_legacy_count(), 1u);
+  CHECK_EQ(kernel_apply_opt_tc_dag_count(),    0u);
   CHECK_EQ(ke->axes->n_applied, 1u);
   CHECK_EQ(ke->axes->applied_opts[0].op, (u32)KOP_TC);
   CHECK(tile_sync_from_scalar(ke));
@@ -556,6 +563,10 @@ int main(void) {
   CHECK_EQ(info.mma.tile_size, 8u);
   KOpt tc7 = { .op = KOP_TC, .axis = 0, .arg = 7 };
   CHECK(!kernel_apply_opt(ke, tc7));
+  // tc7 fails on tile_mma_size_supported() before the matmul gate,
+  // so the counter doesn't advance.
+  CHECK_EQ(kernel_apply_opt_tc_legacy_count(), 1u);
+  CHECK_EQ(kernel_apply_opt_tc_dag_count(),    0u);
   memset(ke->axes, 0, sizeof(KernelAxes));
   ke->axes = NULL;
   kernel_free_arrays(ke);
@@ -570,9 +581,14 @@ int main(void) {
   memset(ke->axes, 0, sizeof(KernelAxes));
   axes_default_for(ke);
   setenv("THVM_BACKEND", "metal", 1);
+  // Slice 8 session 4: counter probe for the propose-side TC gate.
+  // build_kprog_gemm has no cached_lift, so the LEGACY arm fires.
+  kernel_opts_propose_tc_counters_reset();
   KOpt tc_cands[16];
   u32 n_tc = kernel_opts_propose(ke, tc_cands,
                                  (u32)(sizeof(tc_cands)/sizeof(*tc_cands)));
+  CHECK_EQ(kernel_opts_propose_tc_legacy_count(), 1u);
+  CHECK_EQ(kernel_opts_propose_tc_dag_count(),    0u);
   CHECK_EQ(n_tc, 3u);
   CHECK_EQ(tc_cands[0].op, (u32)KOP_TC);
   CHECK_EQ(tc_cands[0].axis, 0u);
@@ -582,6 +598,47 @@ int main(void) {
   CHECK_EQ(tc_cands[2].op, (u32)KOP_TC);
   CHECK_EQ(tc_cands[2].arg, 8u);
   unsetenv("THVM_BACKEND");
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->axes = NULL;
+  kernel_free_arrays(ke);
+
+  // Slice 8 session 4: DAG-arm coverage for the propose / apply_opt
+  // KOP_TC migrations.  Lift the synthetic GEMM kernel into a UOp DAG
+  // via kernel_lift_to_uop, populate cached_lift.store_root, and
+  // re-run propose + apply_opt -- both MUST take the DAG arm.
+  TEST_BEGIN("tile-graph/metal-gemm-tc-via-cached-lift-dag");
+  build_kprog_gemm(ke, 16, 16, 16);
+  ke->output_shape.ndim    = 2;
+  ke->output_shape.dims[0] = 16;
+  ke->output_shape.dims[1] = 16;
+  ke->axes = &ke->_local_axes;
+  memset(ke->axes, 0, sizeof(KernelAxes));
+  axes_default_for(ke);
+  // Lift the synthetic GEMM into a UOp DAG (kernel_lift_from_gemm
+  // path; bypasses rangeify since scalar_uops is NULL).  Once
+  // populated, both the propose-side and apply_opt-side TC gates
+  // route through uop_dag_classify_matmul_shape rather than
+  // tile_analyze_gemm.
+  CHECK(kernel_lift_to_uop(ke, &ke->cached_lift));
+  CHECK(ke->cached_lift.store_root != 0);
+  setenv("THVM_BACKEND", "metal", 1);
+  kernel_opts_propose_tc_counters_reset();
+  KOpt tc_dag_cands[16];
+  u32 n_tc_dag = kernel_opts_propose(ke, tc_dag_cands,
+                                     (u32)(sizeof(tc_dag_cands)
+                                           /sizeof(*tc_dag_cands)));
+  CHECK_EQ(n_tc_dag, 3u);
+  CHECK_EQ(kernel_opts_propose_tc_dag_count(),    1u);
+  CHECK_EQ(kernel_opts_propose_tc_legacy_count(), 0u);
+  // apply_opt KOP_TC gate also takes the DAG arm now.
+  kernel_apply_opt_tc_counters_reset();
+  KOpt tc16_dag = { .op = KOP_TC, .axis = 0, .arg = 16 };
+  CHECK(kernel_apply_opt(ke, tc16_dag));
+  CHECK_EQ(kernel_apply_opt_tc_dag_count(),    1u);
+  CHECK_EQ(kernel_apply_opt_tc_legacy_count(), 0u);
+  unsetenv("THVM_BACKEND");
+  ke->cached_lift.store_root = 0;
+  ke->cached_lift.n_inputs   = 0;
   memset(ke->axes, 0, sizeof(KernelAxes));
   ke->axes = NULL;
   kernel_free_arrays(ke);

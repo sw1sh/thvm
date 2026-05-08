@@ -79,6 +79,49 @@ static u32 propose_uop_reduce_axis_size(KernelEntry const *ke) {
   return uop_dag_reduce_axis_extent(ke->cached_lift.store_root);
 }
 
+// Slice 8 session 4: count TC tile-size proposal evaluations split
+// by which path validated the matmul shape -- DAG (uop_dag_classify
+// _matmul_shape over cached_lift.store_root) vs LEGACY
+// (tile_analyze_gemm over program[]).  Mirrors the apply_opt.c TC
+// gate counter pattern so test_metal_real / test_tile_graph can
+// assert post-migration coverage.
+static u64 PROPOSE_TC_DAG    = 0;
+static u64 PROPOSE_TC_LEGACY = 0;
+
+fn u64 kernel_opts_propose_tc_dag_count(void) {
+  return PROPOSE_TC_DAG;
+}
+fn u64 kernel_opts_propose_tc_legacy_count(void) {
+  return PROPOSE_TC_LEGACY;
+}
+fn void kernel_opts_propose_tc_counters_reset(void) {
+  PROPOSE_TC_DAG    = 0;
+  PROPOSE_TC_LEGACY = 0;
+}
+
+// Slice 8 session 4: matmul-shape + dtype gate for the TC tile-size
+// proposer.  Same DAG-first / legacy-fallback strategy as
+// apply_opt_tc_classify, but its own counter so we can tell the two
+// callsites apart in coverage tests.
+static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
+  if (ke != NULL && ke->cached_lift.store_root != 0) {
+    UopDagGemmShape shape;
+    if (uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke,
+                                      &shape)) {
+      if (out_dtype != NULL) *out_dtype = shape.dtype;
+      PROPOSE_TC_DAG++;
+      return 1;
+    }
+  }
+  TileGemmInfo gemm;
+  if (tile_analyze_gemm(ke, NULL, &gemm)) {
+    if (out_dtype != NULL) *out_dtype = gemm.dtype;
+    PROPOSE_TC_LEGACY++;
+    return 1;
+  }
+  return 0;
+}
+
 static u32 propose_reduce_axis_size(KernelEntry const *ke) {
   u32 size = propose_uop_reduce_axis_size(ke);
   if (size != 0) return size;
@@ -434,8 +477,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
 
   if (propose_metal_backend_enabled() && ke->axes != NULL
       && tile_anno_axis_count_or_kernelaxes(ke) > 0) {
-    TileGemmInfo gemm;
-    if (tile_analyze_gemm(ke, NULL, &gemm) && gemm.dtype == DT_FP32) {
+    u32 dtype = 0;
+    if (propose_tc_classify(ke, &dtype) && dtype == DT_FP32) {
       static const u32 tc_tiles[] = {32, 16, 8};
       u32 n_tc_tiles = sizeof(tc_tiles)/sizeof(*tc_tiles);
       for (u32 i = 0; i < n_tc_tiles && n < cap; i++) {
