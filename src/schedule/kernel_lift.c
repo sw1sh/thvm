@@ -1448,7 +1448,7 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   //   - n_applied < MAX_OPTS                           (apply_opt.c:66)
   //
   // The lifter's `cur_extent[]` was a S_RANGE-derived view of the same
-  // shape that `kernel_apply_opt` validates against `ax->full_shape[]`;
+  // shape that `kernel_apply_opt` validates against `ax->_writer.full_shape[]`;
   // for any well-formed kernel (whether produced by rangeify or by a
   // direct hand-write whose output_shape matches the BUFFERIZE S_RANGE
   // extents) the two views agree by construction.  No production path

@@ -545,8 +545,20 @@ typedef struct {
   // from (output_shape + tail-reduce + scalar-reduce + applied_opts)
   // via axes_resolve_kax_type / axes_compute_axis_types in
   // codegen/axis.c.
-  u32  full_shape[MAX_AXES];
-  u8   n_axes;                 // 0 = uninitialized (not yet defaulted)
+  //
+  // E9 session 4: full_shape[] and n_axes moved into `_writer` --
+  // they are writer-trio-private scratch (apply_opt.c writer body,
+  // tile_anno.c writer-trio, axis.c lifecycle / cross-check validators).
+  // External code MUST NOT read these directly; use the resolvers:
+  //   axes_resolve_full_shape(ke, d, *out) for per-axis extents
+  //   axes_resolve_n_axes(ke)              for axis count
+  // The fields stay struct-public (the cache slot copies KernelAxes
+  // by value) but the substruct path (`axes->_writer.full_shape[d]`)
+  // makes external reads visually flagged.
+  struct {
+    u32  full_shape[MAX_AXES];
+    u8   n_axes;                 // 0 = uninitialized (not yet defaulted)
+  } _writer;
   KOpt applied_opts[MAX_OPTS];
   u8   n_applied;
   u8   autotuned;              // 1 = kernel_autotune has run on this
@@ -1914,20 +1926,24 @@ fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
 fn u32  axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
                                 u32 cap);
 
-// E9 session 2: per-axis full_shape resolver.  Writes the derived
+// E9 session 2: per-axis full_shape resolver.  E9 session 4: this is
+// the canonical read path for axis extents -- direct reads of
+// `ke->axes->_writer.full_shape[d]` are writer-trio internal.  Writes the derived
 // extent for axis `d` into `*out_extent` and returns 1 on success;
 // 0 (with `*out_extent = 0`) when ke/axes are NULL, d is out of
 // range, or the simulator can't speak.  Under `THVM_E9_VALIDATE=1`,
-// cross-checks against `ke->axes->full_shape[d]` and aborts on
+// cross-checks against `ke->axes->_writer.full_shape[d]` and aborts on
 // divergence.
 fn u32  axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
                                 u32 *out_extent);
 
-// E9 session 2: axis-count resolver.  Returns the derived axis count
-// (output_shape.ndim clipped to MAX_AXES-1, plus 1 if a trailing
-// REDUCE-class axis is present, plus the count of split-class
-// applied_opts).  Under `THVM_E9_VALIDATE=1`, cross-checks against
-// `ke->axes->n_axes` and aborts on divergence.
+// E9 session 2: axis-count resolver.  E9 session 4: this is the
+// canonical read path for n_axes -- direct reads of
+// `ke->axes->_writer.n_axes` are writer-trio internal.  Returns the
+// derived axis count (output_shape.ndim clipped to MAX_AXES-1, plus 1
+// if a trailing REDUCE-class axis is present, plus the count of
+// split-class applied_opts).  Under `THVM_E9_VALIDATE=1`, cross-checks
+// against `ke->axes->_writer.n_axes` and aborts on divergence.
 fn u32  axes_resolve_n_axes(struct KernelEntry const *ke);
 
 // E9 session 2: content hash of (applied_opts, output_shape,

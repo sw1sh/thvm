@@ -14,7 +14,8 @@ fn void axes_default_for(KernelEntry *ke) {
   // Idempotent: if `ke->axes` already has a non-zero n_axes, another
   // kid sharing this kernel_program_cache slot already populated
   // it.  Per-program-shape sharing means there's nothing to do.
-  if (ke->axes == NULL || ke->axes->n_axes != 0) {
+  // E9 session 4: writer-trio reads the private scratch directly.
+  if (ke->axes == NULL || ke->axes->_writer.n_axes != 0) {
     return;
   }
 
@@ -264,7 +265,10 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
 // unknown opt -- bug in the writer trio's applied_opts log), returns
 // KAX_LOOP as a safe default.
 fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
-  if (ke == NULL || ke->axes == NULL || d >= ke->axes->n_axes) {
+  // E9 session 4: bound check uses writer-private n_axes (validator
+  // role; this function lives in the writer-trio scope).  External
+  // callers see only the resolver result.
+  if (ke == NULL || ke->axes == NULL || d >= ke->axes->_writer.n_axes) {
     return KAX_LOOP;
   }
   u8 types[MAX_AXES] = {0};
@@ -277,7 +281,8 @@ fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
 
 // E9 session 2: derive per-axis full_shape extents from the higher-
 // level signals (output_shape + tail-reduce + scalar-reduce +
-// applied_opts) instead of reading `ke->axes->full_shape[]` directly.
+// applied_opts) instead of reading `ke->axes->_writer.full_shape[]`
+// directly (writer-trio scratch as of session 4).
 // Mirrors the writer trio (axes_default_for + axes_ensure_scalar_reduce
 // + axes_apply_opt) exactly:
 //
@@ -391,9 +396,9 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
 }
 
 // E9 session 2: cross-check resolver output against the writer's
-// `ke->axes->full_shape[]` / `ke->axes->n_axes` state.  Enabled by
-// setting `THVM_E9_VALIDATE=1`.  Aborts on divergence -- this catches
-// drift between the writer trio's mutations and the resolver's
+// `ke->axes->_writer.full_shape[]` / `ke->axes->_writer.n_axes` state.
+// Enabled by setting `THVM_E9_VALIDATE=1`.  Aborts on divergence -- this
+// catches drift between the writer trio's mutations and the resolver's
 // signal-replay logic.  Mirrors the wedge 1 / E9-prep validation
 // pattern.
 static int axes_e9_validate_enabled(void) {
@@ -410,19 +415,19 @@ static void axes_e9_validate_full_shape(struct KernelEntry const *ke,
   if (!axes_e9_validate_enabled() || ke == NULL || ke->axes == NULL) {
     return;
   }
-  if (n_derived != ke->axes->n_axes) {
+  if (n_derived != ke->axes->_writer.n_axes) {
     fprintf(stderr,
             "[THVM_E9_VALIDATE] axes_resolve_full_shape: n_axes mismatch "
             "(derived=%u writer=%u)\n",
-            n_derived, ke->axes->n_axes);
+            n_derived, ke->axes->_writer.n_axes);
     abort();
   }
   for (u32 i = 0; i < n_derived; i++) {
-    if (derived[i] != ke->axes->full_shape[i]) {
+    if (derived[i] != ke->axes->_writer.full_shape[i]) {
       fprintf(stderr,
               "[THVM_E9_VALIDATE] axes_resolve_full_shape: extent[%u] "
               "mismatch (derived=%u writer=%u)\n",
-              i, derived[i], ke->axes->full_shape[i]);
+              i, derived[i], ke->axes->_writer.full_shape[i]);
       abort();
     }
   }
@@ -432,10 +437,10 @@ static void axes_e9_validate_full_shape(struct KernelEntry const *ke,
 // extent for axis `d` (signal-replay over output_shape + applied_opts);
 // 0 when ke/axes are NULL, d is out of range, or the simulator can't
 // speak.  Under `THVM_E9_VALIDATE=1`, cross-checks against the writer's
-// `ke->axes->full_shape[d]` and aborts on divergence.
+// `ke->axes->_writer.full_shape[d]` and aborts on divergence.
 fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
                                u32 *out_extent) {
-  if (ke == NULL || ke->axes == NULL || d >= ke->axes->n_axes) {
+  if (ke == NULL || ke->axes == NULL || d >= ke->axes->_writer.n_axes) {
     if (out_extent != NULL) *out_extent = 0;
     return 0;
   }
@@ -454,7 +459,7 @@ fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
 // (output_shape.ndim clipped to MAX_AXES-1, plus 1 if a trailing
 // REDUCE-class axis is present, plus the count of split-class
 // applied_opts).  Under `THVM_E9_VALIDATE=1`, cross-checks against
-// `ke->axes->n_axes` and aborts on divergence.
+// `ke->axes->_writer.n_axes` and aborts on divergence.
 fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
   if (ke == NULL || ke->axes == NULL) {
     return 0;
@@ -462,11 +467,11 @@ fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
   u32 extents[MAX_AXES] = {0};
   u32 n = axes_compute_full_shape(ke, extents, MAX_AXES);
   if (axes_e9_validate_enabled() && ke->axes != NULL
-      && n != ke->axes->n_axes) {
+      && n != ke->axes->_writer.n_axes) {
     fprintf(stderr,
             "[THVM_E9_VALIDATE] axes_resolve_n_axes: n_axes mismatch "
             "(derived=%u writer=%u)\n",
-            n, ke->axes->n_axes);
+            n, ke->axes->_writer.n_axes);
     abort();
   }
   return n;
@@ -518,7 +523,8 @@ fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   if (ke == NULL || ke->axes == NULL) {
     return;
   }
-  if (ke->axes->n_axes == 0) {
+  // E9 session 4: writer-trio reads the private scratch directly.
+  if (ke->axes->_writer.n_axes == 0) {
     axes_default_for(ke);
   }
   // E9-prep wedge 3: skip-if-already-have-REDUCE without reading
@@ -534,11 +540,11 @@ fn void axes_ensure_scalar_reduce(struct KernelEntry *ke) {
   if (nd > MAX_AXES - 1) {
     nd = MAX_AXES - 1;
   }
-  if (ke->axes->n_axes > nd) {
+  if (ke->axes->_writer.n_axes > nd) {
     return;
   }
   u32 extent = axes_scalar_reduce_extent(ke);
-  if (extent == 0 || ke->axes->n_axes >= MAX_AXES) {
+  if (extent == 0 || ke->axes->_writer.n_axes >= MAX_AXES) {
     return;
   }
   // Phase E writer migration: route through tile_anno_axis_append.
