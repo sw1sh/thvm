@@ -1519,21 +1519,9 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     cur[n_cur].opt_factor = 0;
     n_cur++;
   }
-  // Replay applied_opts when present.  Pre-mutated axes (test seam:
-  // direct assignment to ke->axes->axis_types/full_shape with no
-  // applied_opts log) are honoured when n_buf == 1: distribute axes
-  // across the single origin in declaration order.
+  // Replay applied_opts when present.
   //
-  // Skip replay for reduce kernels: REDUCE / GROUP_REDUCE axes target
-  // per-USE ranges that aren't in BUFFERIZE.src, and the S_REDUCE_SUM
-  // lifter requires a single UOP_RANGE for the reduce axis -- splitting
-  // would produce a compound expression it can't decode.  Reduce-
-  // dimension autotune effects flow through a different path.
-  KernelAxes const *kax = ke->axes;
-  u32 n_applied = (kax != NULL) ? (u32)kax->n_applied : 0;
-  // The previous `has_reduce_axis` short-circuit zeroed both
-  // n_applied and kax for any kernel touching a reduce dimension --
-  // overly conservative.  Now per-USE handling is split across:
+  // Per-USE handling is split across:
   //
   //   1. The replay loop below: skips opts targeting per-USE axes
   //      via `if (o.axis >= n_cur) continue;`.  Per-USE axes don't
@@ -1546,47 +1534,24 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   //      in UOP_OPT_GROUP_REDUCE when applied_opts has a matching
   //      KOP_GROUP/KOP_GROUPTOP.
   //
-  //   3. Test-seam (n_axes > n_buf, n_buf == 1) still bails on
-  //      reduce-tail axes because the linearisation across LOOP +
-  //      REDUCE into a single origin would be wrong.  E9-prep wedge 3
-  //      replaced the `axis_types[]` scan here with the higher-level
-  //      `axes_will_have_reduce_axis` predicate (program tail UOP_REDUCE
-  //      | applied_opts has KOP_GROUP/GROUPTOP | scalar arena reduce
-  //      extent != 0) so this reader no longer touches axis_types[].
+  // E9-prep wedge 3 replaced the `axis_types[]` scan here with the
+  // higher-level `axes_will_have_reduce_axis` predicate (program tail
+  // UOP_REDUCE | applied_opts has KOP_GROUP/GROUPTOP | scalar arena
+  // reduce extent != 0).  Wedge 8 retired the corresponding
+  // THVM_E9_VALIDATE legacy-comparison sanity block that used to read
+  // kax->axis_types[] alongside it -- the predicate is now the sole
+  // source of truth.
+  KernelAxes const *kax = ke->axes;
+  u32 n_applied = (kax != NULL) ? (u32)kax->n_applied : 0;
   int has_reduce_axis = axes_will_have_reduce_axis(ke);
-  // Validation: when THVM_E9_VALIDATE=1, also compute the legacy
-  // axis_types[] scan and abort on disagreement.  Once the surgical
-  // suite proves equivalence, wedge 3 can land cleanly.
-  {
-    char const *val_e = getenv("THVM_E9_VALIDATE");
-    if (val_e != NULL && val_e[0] == '1' && kax != NULL) {
-      int legacy = 0;
-      for (u32 a = 0; a < kax->n_axes; a++) {
-        if (kax->axis_types[a] == KAX_REDUCE
-            || kax->axis_types[a] == KAX_GROUP_REDUCE) {
-          legacy = 1;
-          break;
-        }
-      }
-      if (legacy != has_reduce_axis) {
-        fprintf(stderr,
-                "thvm: THVM_E9_VALIDATE wedge-3: axes_will_have_reduce_axis"
-                " disagreed with axis_types[] scan (predicate=%d, legacy=%d);"
-                " n_axes=%u n_applied=%u n_ops=%u tail_op=%u\n",
-                has_reduce_axis, legacy,
-                (u32)kax->n_axes, (u32)kax->n_applied,
-                (u32)ke->n_ops,
-                (ke->n_ops > 0)
-                    ? (u32)ke->program[ke->n_ops - 1].opcode : 0u);
-        abort();
-      }
-    }
-  }
-  // Test-seam guard: only kill kax for the test-seam branch when
-  // reduce axes are present (and only when the test-seam would
-  // otherwise fire).  The replay loop and per-USE scan stay live.
-  KernelAxes const *kax_for_test_seam =
-      (has_reduce_axis) ? NULL : kax;
+  // E9-prep wedge 8 retired the n_applied==0 test-seam branch that
+  // used to splice kax->axis_types[]/full_shape[] into cur[] when a
+  // 1-range BUFFERIZE met a multi-axis hand-write.  The 2 residual
+  // tests in test_tile_graph were rebuilt against either a multi-range
+  // BUFFERIZE (writer-trio path below) or a writer-trio sequence on
+  // the existing 1-range arena, so this branch had no remaining
+  // callers.
+  (void)has_reduce_axis;
   if (n_applied > 0) {
     KOpt const *opts = kax->applied_opts;
     for (u32 oi = 0; oi < n_applied; oi++) {
@@ -1653,31 +1618,6 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
         return 0;
       }
     }
-  } else if (kax_for_test_seam != NULL
-             && kax_for_test_seam->n_axes > n_buf && n_buf == 1) {
-    kax = kax_for_test_seam;
-    // Test seam: ke->axes was hand-mutated without going through
-    // axes_apply_opt.  Honour the assigned axis structure when there's
-    // a single origin to map to.  Replace cur[0] with kax->n_axes
-    // entries, all origin=0, factors picked so the linearisation
-    // matches row-major across the assigned axes.
-    if (kax->n_axes > MAX_AXES) return 0;
-    u32 product = 1;
-    for (u32 a = 0; a < kax->n_axes; a++) product *= kax->full_shape[a];
-    if (product != cur[0].extent) return 0;
-    n_cur = 0;
-    u32 inner_prod = 1;
-    for (u32 a = kax->n_axes; a > 0; a--) {
-      u32 idx = a - 1;
-      cur[idx].axis_type  = kax->axis_types[idx];
-      cur[idx].extent     = kax->full_shape[idx];
-      cur[idx].origin     = 0;
-      cur[idx].factor     = inner_prod;
-      cur[idx].opt_kind   = SPLIT_AXIS_NO_OPT;
-      cur[idx].opt_factor = 0;
-      inner_prod *= kax->full_shape[idx];
-    }
-    n_cur = kax->n_axes;
   }
   // Allocate UOP_RANGE leaves for each post-replay axis and compose
   // per-origin linearised expressions in row-major order (left-to-right

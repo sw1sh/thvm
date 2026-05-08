@@ -1883,25 +1883,22 @@ fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
 
 // E9-prep wedge 4: derive per-axis KAX_ types from the higher-level
 // signals (output shape + tail-reduce + scalar-reduce + applied_opts
-// log) instead of reading `ke->axes->axis_types[]`.  Mirrors the
-// writer trio (axes_default_for + axes_ensure_scalar_reduce +
-// axes_apply_opt) exactly.  Returns the number of axes written; 0 on
-// overflow / unknown opt class.  Used by
-// tile_emit_axes_from_kernel_signals (the post-rename
-// tile_emit_axes_from_kernel_axes) as the primary read source when
-// applied_opts is non-empty, and under THVM_E9_VALIDATE=1 as a
-// cross-check against legacy `axis_types[]` reads.
+// log).  Mirrors the writer trio (axes_default_for +
+// axes_ensure_scalar_reduce + axes_apply_opt) exactly.  Returns the
+// number of axes written; 0 on overflow / unknown opt class.  Used by
+// tile_emit_axes_from_kernel_signals as the source of TILE_AXIS leaf
+// kax_type values and by axes_resolve_kax_type as the single read
+// point.  Wedge 8 retired the legacy `axis_types[]` fallback once the
+// last 2 hand-write tests in test_tile_graph migrated to the writer
+// trio.
 fn u32  axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                 u32 cap);
 
-// E9-prep wedge 7: resolve a single axis's KAX_ type.  Prefers
-// axes_compute_axis_types output when the writer trio has run for-real
-// (n_applied > 0) and falls back to legacy ke->axes->axis_types[d]
-// otherwise (the n_applied == 0 hand-write tests + the 2 documented
-// wedge-6 residual tests in test_tile_graph).  THVM_E9_VALIDATE=1
-// cross-checks both sources and aborts on n_applied > 0 divergence.
-// Used by tile_anno.c readers to remove all direct axis_types[i] reads
-// from codegen/tile_anno.c.
+// E9-prep wedge 7+8: resolve a single axis's KAX_ type via the wedge-4
+// simulator.  Returns KAX_LOOP when the simulator can't speak (NULL
+// ke/axes, d >= n_axes, simulator overflow / unknown opt).  Used by
+// tile_anno.c readers as the only axis-type read source -- no direct
+// axis_types[i] reads remain in codegen/tile_anno.c.
 fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
 
 // Apply one TOpt to the axis structure: split the indicated axis,

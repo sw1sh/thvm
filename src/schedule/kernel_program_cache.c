@@ -249,42 +249,12 @@ static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
                      ke->axes->applied_opts, ke->axes->n_applied)) {
       return 0;
     }
-    // Validate-on cross-check: under THVM_E9_VALIDATE=1 also run the
-    // legacy axis_types[] equality and abort on divergence.  Mirrors
-    // wedges 3/4: the substitute (applied_opts) is the read path
-    // post-wedge; the legacy (axis_types[]) is sampled only when the
-    // env knob is set.  Two slots with identical applied_opts[] but
-    // somehow different axis_types[] would signal an undocumented
-    // axis_types[] writer outside the trio -- that's a bug we want to
-    // surface loudly.  Hand-writes from test_metal_real /
-    // test_tile_graph live outside this cache (they don't go through
-    // materialize.c's kernel_rangeified_axes_cache_lookup_or_insert
-    // call), so they don't reach this validate gate.
-    char const *val_e = getenv("THVM_E9_VALIDATE");
-    if (val_e != NULL && val_e[0] == '1') {
-      for (u32 i = 0; i < n_axes_c; i++) {
-        TileAxisInfo info;
-        if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) {
-          fprintf(stderr,
-                  "thvm: THVM_E9_VALIDATE wedge-5: kaxis_slot_equal "
-                  "tile_anno_axis_or_kernelaxes failed at axis %u "
-                  "(n_axes=%u, n_applied=%u).\n",
-                  i, n_axes_c, (u32)ke->axes->n_applied);
-          abort();
-        }
-        if ((u32)s->axes.axis_types[i] != info.kax_type) {
-          fprintf(stderr,
-                  "thvm: THVM_E9_VALIDATE wedge-5: applied_opts[] match "
-                  "but axis_types[%u] diverge (legacy=%u, live=%u; "
-                  "n_axes=%u, n_applied=%u).  Indicates an undocumented "
-                  "axis_types[] writer outside axes_apply_opt /  "
-                  "axes_default_for / axes_ensure_scalar_reduce.\n",
-                  i, (u32)s->axes.axis_types[i], info.kax_type,
-                  n_axes_c, (u32)ke->axes->n_applied);
-          abort();
-        }
-      }
-    }
+    // Wedge 8 retired the THVM_E9_VALIDATE=1 axis_types[] cross-check
+    // here.  applied_opts[] equality + the deterministic writer trio
+    // (axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt)
+    // are sufficient to imply axis_types[] equality; the explicit
+    // sanity check is no longer needed once the readers stop touching
+    // axis_types[] entirely.
   }
   if (s->n_inputs > 0) {
     if (memcmp(s->input_dtypes, ke->input_dtypes,

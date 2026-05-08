@@ -979,63 +979,109 @@ int main(void) {
   }
 
   TEST_BEGIN("tile-graph/kernel-axes-local-global-with-loop");
-  // E9-prep wedge 6 residual: this 3-axis [GLOBAL, LOCAL, LOOP]
-  // arrangement isn't expressible through the writer trio against the
-  // 1-axis BUFFERIZE the test's scalar arena carries.  KOP_LOCAL only
-  // inserts an inner LOCAL after a LOOP, so chaining splits/swaps
-  // yields [LOOP=2, LOCAL=2, LOOP=2] -> [GLOBAL=2, LOCAL=2, LOOP=2]
-  // only when applied to a 2-axis BUFFERIZE source -- which would
-  // require rebuilding the scalar arena.  Hand-write left as-is so
-  // the kernel_lift test seam exercises this distribution path; it
-  // does not produce a Wedge-6 diagnostic because output_ndim
-  // disagrees with n_axes (sim_ok=false short-circuits the validate
-  // cross-check).
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_GLOBAL;
-  ke->axes->full_shape[0] = 2;
-  ke->axes->axis_types[1] = KAX_LOCAL;
-  ke->axes->full_shape[1] = 2;
-  ke->axes->axis_types[2] = KAX_LOOP;
-  ke->axes->full_shape[2] = 2;
-  ke->axes->version++;
-  CHECK(tile_build_from_scalar(ke));
-  CHECK(tile_validate(ke));
-  CHECK(tile_collect_plan_info(ke, &info));
-  CHECK_EQ(info.axis_types[0], (u32)KAX_GLOBAL);
-  CHECK_EQ(info.axis_types[1], (u32)KAX_LOCAL);
-  CHECK_EQ(info.axis_types[2], (u32)KAX_LOOP);
-  CHECK(cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
-  CHECK_EQ(groups_x, 4u);
-  CHECK_EQ(threads_x, 2u);
-  metal_tile_src = cg_emit_tile_metal(ke);
-  CHECK(metal_tile_src != NULL);
-  if (metal_tile_src != NULL) {
-    free(metal_tile_src);
+  // E9-prep wedge 8: drive [GLOBAL=2, LOCAL=2, LOOP=2] via a fresh
+  // 2-axis BUFFERIZE source (dims=[2,4]) plus the writer trio:
+  // KOP_LOCAL(axis=1, arg=2) splits LOOP=4 into LOOP=2+LOCAL=2 ->
+  // [LOOP=2, LOOP=2, LOCAL=2]; KOP_GLOBAL(axis=0, arg=2) marks the
+  // outer LOOP -> [GLOBAL=2, LOOP=2, LOCAL=2]; KOP_SWAP(axis=1, arg=2)
+  // exchanges the LOCAL/LOOP pair -> [GLOBAL=2, LOCAL=2, LOOP=2].
+  // The 2-range arena lets the kernel_lift replay loop process all 3
+  // opts (no axis >= n_cur skip), so cg_emit_tile_metal succeeds
+  // through the writer-trio path without the (now-deleted) test seam.
+  // Uses a sub-kernel so the original 1-range arena (and the
+  // scalar_store reference at line 806) survives for downstream tests.
+  {
+    u32 with_loop_kid = kernel_alloc();
+    KernelEntry *wlk = &KERNELS[with_loop_kid];
+    kernel_inputs_reserve(wlk, 2);
+    wlk->n_inputs = 2;
+    wlk->input_tids[0]   = 0;
+    wlk->input_tids[1]   = 0;
+    wlk->input_dtypes[0] = DT_FP32;
+    wlk->input_dtypes[1] = DT_FP32;
+    wlk->input_numels[0] = 8;
+    wlk->input_numels[1] = 8;
+    wlk->output_dtype    = DT_FP32;
+    wlk->output_numel    = 8;
+    wlk->output_shape.ndim    = 2;
+    wlk->output_shape.dims[0] = 2;
+    wlk->output_shape.dims[1] = 4;
+    u32 wl_r0 = rangeify_emit_leaf(wlk, S_RANGE, DT_INT32,
+                                   ((u64)S_AXIS_LOOP << 32) | 2u);
+    u32 wl_r1 = rangeify_emit_leaf(wlk, S_RANGE, DT_INT32,
+                                   ((u64)S_AXIS_LOOP << 32) | 4u);
+    u32 wl_pa = rangeify_emit_leaf(wlk, S_DEFINE_PARAM,  DT_FP32, 0);
+    u32 wl_pb = rangeify_emit_leaf(wlk, S_DEFINE_PARAM,  DT_FP32, 1);
+    u32 wl_pc = rangeify_emit_leaf(wlk, S_DEFINE_OUTPUT, DT_FP32, 0);
+    u32 wl_ia_src[3] = { wl_pa, wl_r0, wl_r1 };
+    u32 wl_ib_src[3] = { wl_pb, wl_r0, wl_r1 };
+    u32 wl_ic_src[3] = { wl_pc, wl_r0, wl_r1 };
+    u32 wl_ia = rangeify_emit(wlk, S_INDEX, DT_FP32, 3, wl_ia_src, 0);
+    u32 wl_ib = rangeify_emit(wlk, S_INDEX, DT_FP32, 3, wl_ib_src, 0);
+    u32 wl_ic = rangeify_emit(wlk, S_INDEX, DT_FP32, 3, wl_ic_src, 0);
+    u32 wl_la = rangeify_emit_unary(wlk, S_LOAD, DT_FP32, wl_ia);
+    u32 wl_lb = rangeify_emit_unary(wlk, S_LOAD, DT_FP32, wl_ib);
+    u32 wl_sum = rangeify_emit_binary(wlk, S_ADD, DT_FP32, wl_la, wl_lb);
+    u32 wl_sto = rangeify_emit_binary(wlk, S_STORE, DT_FP32, wl_ic, wl_sum);
+    u32 wl_buf_src[3] = { wl_sto, wl_r0, wl_r1 };
+    rangeify_emit(wlk, S_BUFFERIZE, DT_FP32, 3, wl_buf_src, 0);
+    wlk->axes = &wlk->_local_axes;
+    memset(wlk->axes, 0, sizeof(KernelAxes));
+    axes_default_for(wlk);
+    KOpt klglw_local2  = { .op = KOP_LOCAL,  .axis = 1, .arg = 2 };
+    KOpt klglw_global2 = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
+    KOpt klglw_swap    = { .op = KOP_SWAP,   .axis = 1, .arg = 2 };
+    CHECK(kernel_apply_opt(wlk, klglw_local2));
+    CHECK(kernel_apply_opt(wlk, klglw_global2));
+    CHECK(kernel_apply_opt(wlk, klglw_swap));
+    CHECK(tile_build_from_scalar(wlk));
+    CHECK(tile_validate(wlk));
+    CHECK(tile_collect_plan_info(wlk, &info));
+    CHECK_EQ(info.axis_types[0], (u32)KAX_GLOBAL);
+    CHECK_EQ(info.axis_types[1], (u32)KAX_LOCAL);
+    CHECK_EQ(info.axis_types[2], (u32)KAX_LOOP);
+    CHECK(cg_tile_metal_dispatch_shape(wlk, &groups_x, &threads_x));
+    CHECK_EQ(groups_x, 4u);
+    CHECK_EQ(threads_x, 2u);
+    metal_tile_src = cg_emit_tile_metal(wlk);
+    CHECK(metal_tile_src != NULL);
+    if (metal_tile_src != NULL) {
+      free(metal_tile_src);
+    }
+    kernel_free_arrays(wlk);
+    wlk->axes = NULL;
   }
 
   TEST_BEGIN("tile-graph/group-reduce-axis-falls-back-from-c-renderer");
-  // E9-prep wedge 6 residual: like the with-loop case above, this
-  // [GLOBAL, LOCAL, GROUP_REDUCE] arrangement at 3 axes against a
-  // 1-axis BUFFERIZE source isn't expressible through the writer
-  // trio; the kernel_lift replay would split the single source range
-  // by KOP_GROUP(arg=1) but downstream the GROUP_REDUCE = 1 sentinel
-  // is the test's deliberate fall-back probe and not something the
-  // writer trio composes from output_ndim signals.  Diagnostic-free
-  // for the same sim_ok=false reason.
+  // E9-prep wedge 8: drive [GLOBAL=2, LOCAL=4, GROUP_REDUCE=1] via the
+  // writer trio against the existing 1-axis BUFFERIZE: KOP_LOCAL(axis=0,
+  // arg=4) splits LOOP=8 into LOOP=2+LOCAL=4 -> [LOOP=2, LOCAL=4];
+  // KOP_GLOBAL(axis=0, arg=2) -> [GLOBAL=2, LOCAL=4]; KOP_GROUP(axis=1,
+  // arg=1) inserts the trailing GROUP_REDUCE=1 sentinel ->
+  // [GLOBAL=2, LOCAL=4, GROUP_REDUCE=1].  This exercises the
+  // axes_compute_axis_types simulator end-to-end (sim_ok=true,
+  // n_applied=3>0 -> simulator output is authoritative; no
+  // axis_types[] read).  cg_emit_tile_metal is not called here: the
+  // assertion is the 3-axis tile_collect_plan_info + cg_supports_tile
+  // (a vacuous stub returning 0) coverage.
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = 8;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_GLOBAL;
-  ke->axes->full_shape[0] = 2;
-  ke->axes->axis_types[1] = KAX_LOCAL;
-  ke->axes->full_shape[1] = 4;
-  ke->axes->axis_types[2] = KAX_GROUP_REDUCE;
-  ke->axes->full_shape[2] = 1;
-  ke->axes->version++;
+  axes_default_for(ke);
+  KOpt grfb_local4  = { .op = KOP_LOCAL,  .axis = 0, .arg = 4 };
+  KOpt grfb_global2 = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
+  KOpt grfb_group1  = { .op = KOP_GROUP,  .axis = 1, .arg = 1 };
+  CHECK(kernel_apply_opt(ke, grfb_local4));
+  CHECK(kernel_apply_opt(ke, grfb_global2));
+  CHECK(kernel_apply_opt(ke, grfb_group1));
   CHECK(tile_build_from_scalar(ke));
   CHECK(tile_validate(ke));
   CHECK(tile_collect_plan_info(ke, &info));
   CHECK_EQ(info.n_axes, 3);
+  CHECK_EQ(info.axis_types[0], (u32)KAX_GLOBAL);
+  CHECK_EQ(info.axis_extents[0], 2u);
+  CHECK_EQ(info.axis_types[1], (u32)KAX_LOCAL);
+  CHECK_EQ(info.axis_extents[1], 4u);
   CHECK_EQ(info.axis_types[2], (u32)KAX_GROUP_REDUCE);
   CHECK_EQ(info.axis_extents[2], 1u);
   CHECK(!cg_supports_tile(ke));
