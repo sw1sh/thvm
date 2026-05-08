@@ -335,20 +335,32 @@ b63464e3.
    `Method->"Metal"`, validate result matches CPU.  Mostly piggy-
    backs on iter Z+1.  ~50 LOC + whatever iter Z+1 still needs.
 
-4. **`TFindEquationalProof` rebuild**: replace the BFS chain
-   synth with the IC search.  Keep `ProofObject` shape stable so
-   `ProofFunction` still verifies.  Decode the winning leaf's
-   SUP-path into a chain of (axiom, direction, side) records that
-   feed `chainEntry`.  ~200 LOC.
+4. **`TFindEquationalProof` rebuild** (PARTIAL): the C-ATP
+   secondary signal is gone -- the BFS chain synth is now the
+   sole provability check.  `synthesizeChain` returns
+   `<|Expr, Hist, Closed|>` and `buildProofDataset` returns
+   `$Failed` when the chain doesn't close into a tautology
+   (instead of emitting a fake Conclusion); `atpEncodeProblem`
+   exposes `AxPairs` (held `{lhs, rhs}` pairs) so trivial
+   tautology axioms `a == a` survive parameter passing without
+   collapsing to `True`.  Verified: trivial-refl, transitivity,
+   subst, head-mismatch, sym, backward-needed all give the right
+   ProofObject vs `$Failed` answer.  Outstanding: replace the
+   BFS itself with IC SUP-path decoding (the original milestone-4
+   intent).  Until that lands, the BFS does the heavy lifting.
 
 5. **Pattern axioms via pre-instantiation**: extend the encoder
    to enumerate substitutions for pattern-var axioms.  Validates
    the commutativity/associativity battery cases.  ~100 LOC.
 
-6. **Retire `src/atp/_.c`**: once the IC path covers the same
-   cases at competitive speed, mark the C ATP for removal.  Keep
-   `thvm_wl_atp_run_file` (Waldmeister .pr ingestion) since it's
-   useful infra.
+6. **Retire `src/atp/_.c`** (PARTIAL): `TFindEquationalProof`
+   no longer calls into the C-side ATP saturator (`$atpRunFn`
+   removed from this code path).  `TATP[]` still uses it for
+   the lower-level Status/Steps/Rules contract, and
+   `thvm_wl_atp_run_file` (Waldmeister .pr ingestion) stays.
+   Full removal of `src/atp/_.c` waits on the IC SUP-path
+   decoder + an IC-side replacement for the `TATP` Status/Steps
+   surface.
 
 Stages 4-6 only after 1-3 land cleanly.
 

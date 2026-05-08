@@ -14,12 +14,13 @@
          Association (no witnesses).
 
      TFindEquationalProof[conjecture, axioms, opts]
-         Run the ATP and return a real WL ProofObject -- the same
-         head FindEquationalProof returns, supporting the property
-         interface (p["ProofDataset"], p["ProofGraph"],
-         p["ProofFunction"], p["ProofLength"], etc.).  Returns
-         $Failed if neither the C-side ATP nor the WL-side BFS chain
-         synth can establish the conjecture.
+         Run the WL-side BFS chain synth and return a real WL
+         ProofObject -- the same head FindEquationalProof returns,
+         supporting the property interface (p["ProofDataset"],
+         p["ProofGraph"], p["ProofFunction"], p["ProofLength"], etc.).
+         Returns $Failed if the conjecture isn't reached within
+         MaxSteps rewrites.  The C-side ATP saturator is no longer
+         consulted (milestone 6 of the IC-native ATP arc).
 
    Options
      MaxSteps       (TATP, TFindEquationalProof) -> 64
@@ -34,7 +35,7 @@ BeginPackage["THVMLink`"];
 
 TATP::usage = "TATP[{lhs == rhs, ...}, conjecture] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.  Variables are written as `x_` (Pattern[name, Blank[]]).  TATP[File[path]] parses a Waldmeister .pr file and runs the saturator directly.";
 
-TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the IC-native ATP and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  The 4th-arg Association is built to satisfy ProofObjectQ, which causes WL to skip its auto-dispatch back to FindEquationalProof and preserve thvm's data.  ProofDataset entries are keyed by {\"Axiom\" | \"Hypothesis\" | \"SubstitutionLemma\" | \"Conclusion\", k} with Statement and Proof sub-fields.  Returns $Failed when neither the C-side ATP nor the WL-side chain synth can prove the conjecture.";
+TFindEquationalProof::usage = "TFindEquationalProof[conjecture, axioms] runs the WL-side BFS chain synth and returns a real WL ProofObject -- the same head FindEquationalProof returns, supporting the full property interface (p[\"ProofDataset\"], p[\"ProofGraph\"], p[\"ProofFunction\"], p[\"ProofLength\"], etc.).  The 4th-arg Association is built to satisfy ProofObjectQ, which causes WL to skip its auto-dispatch back to FindEquationalProof and preserve thvm's data.  ProofDataset entries are keyed by {\"Axiom\" | \"Hypothesis\" | \"SubstitutionLemma\" | \"Conclusion\", k} with Statement and Proof sub-fields.  Returns $Failed when the BFS doesn't close the conjecture within its budget.";
 
 Begin["`Private`"];
 
@@ -225,7 +226,7 @@ encodeAxiomFold[{terms_, state_, idx_}, axHC_] := Block[{
 SetAttributes[atpEncodeProblem, HoldAll];
 atpEncodeProblem[axioms_, conjecture_] := Block[{
     axHCs, cjHC, axTermsAndState, axTerms, st,
-    goalRes, goalLhs, goalRhs, axEqList, conjPair, n
+    goalRes, goalLhs, goalRhs, axPairs, conjPair, n
 },
     If[ ! ListQ[Unevaluated[axioms]],
         Throw[Failure["TATPParseError",
@@ -243,13 +244,13 @@ atpEncodeProblem[axioms_, conjecture_] := Block[{
     goalLhs = goalRes[[1]];
     goalRhs = goalRes[[2]];
     st = goalRes[[3]];
-    (* axHCs is the held source of truth -- ReleasingHold gives back
-       the original `lhs == rhs` form per axiom (auto-eval kicks in
-       on release, which is fine since axioms aren't tautologies in
-       practice).  Touching the unevaluated `axioms` parameter
-       directly would do the same release implicitly AND get
-       confusing if a caller ever passed a tautology axiom. *)
-    axEqList = ReleaseHold /@ axHCs;
+    (* Extract {lhs, rhs} pairs from each held axiom directly
+       (Extract on positions {1,1} / {1,2} of HoldComplete[lhs==rhs]
+       gives the held lhs / rhs symbols).  Avoids ReleaseHold which
+       auto-evaluates `a == a` axioms to True. *)
+    axPairs = (
+        {Extract[#, {1, 1}], Extract[#, {1, 2}]} & /@ axHCs
+    );
     conjPair = {Extract[cjHC, {1, 1}], Extract[cjHC, {1, 2}]};
     <|
         "Packed" -> NumericArray[
@@ -258,7 +259,7 @@ atpEncodeProblem[axioms_, conjecture_] := Block[{
         ],
         "MaxLab" -> st["next_lab"],
         "State" -> st,
-        "AxEqList" -> axEqList,
+        "AxPairs" -> axPairs,
         "ConjPair" -> conjPair
     |>
 ]
@@ -482,7 +483,9 @@ chainStep[ruleList_][state_Association] := Block[{
    successors of the current expression and pick the one that
    either (a) reaches a tautology immediately, or (b) has the
    smallest LeafCount.  Stops when a tautology is reached or no
-   progress is possible.  Returns {finalExpr, step-records}. *)
+   progress is possible.  Returns <|Expr, Hist, Closed|> where
+   Closed is True iff Expr is a tautology (i.e. the conjecture
+   was actually proven). *)
 synthesizeChain[hypothesis_, ruleList_, maxSteps_: 30] := Block[{
     init, final
 },
@@ -494,7 +497,11 @@ synthesizeChain[hypothesis_, ruleList_, maxSteps_: 30] := Block[{
     |>;
     final = NestWhile[chainStep[ruleList],
         init, ! #["Done"] &, 1, maxSteps];
-    {final["Expr"], final["Hist"]}
+    <|
+        "Expr" -> final["Expr"],
+        "Hist" -> final["Hist"],
+        "Closed" -> tautologyQ[final["Expr"]]
+    |>
 ]
 
 (* Forward + backward Rule entries for one axiom -- two-element
@@ -597,13 +604,38 @@ reorientAxiomEntry[axioms_, axiomDirections_][entry_, idx_] := Block[{
         gives the actual rule applied.
    All Statements are HoldForm[Equal[lhs, rhs]]; toHoldEq is the
    helper that gets us there from Inactive[Equal][...]. *)
+(* Degenerate "Conclusion" entry for the trivial-tautology case
+   (the conjecture was already x == x).  Points back to the
+   Hypothesis with no rule applied.  WL's verifier accepts this
+   as a zero-step proof. *)
+trivialConclusionEntry[hypInactive_] := {$ConclusionSym, 1} -> <|
+    "Statement" -> toHoldEq[hypInactive],
+    "Proof" -> <|
+        "Input" -> {$HypothesisSym, 1},
+        "Construct" -> {$HypothesisSym, 1},
+        "Position" -> {},
+        "Rule" -> Rule @@ {hypInactive[[1]], hypInactive[[1]]},
+        "Orientation" -> 1,
+        "ConstructSide" -> 1,
+        "InputOrientation" -> 1,
+        "Side" -> 1,
+        "OutputExpression" -> toHoldEq[hypInactive],
+        "Source" -> "trivial"
+    |>
+|>
+
 buildProofDataset[axioms_, conjecture_] := Block[{
     axCount = Length[axioms],
-    axiomKeys, hypInactive, ruleList, chain,
+    axiomKeys, hypInactive, ruleList, chainRes, chain,
     axiomEntries, chainEntries, axiomDirections,
     finalAxiomEntries, allEntries
 },
-    axiomKeys = Table[{$AxiomSym, k}, {k, axCount}];
+    hypInactive = Inactive[Equal] @@ conjecture;
+    ruleList = buildRuleList[axioms, axiomKeys = Table[{$AxiomSym, k},
+        {k, axCount}]];
+    chainRes = synthesizeChain[hypInactive, ruleList];
+    If[ ! chainRes["Closed"], Return[$Failed] ];
+    chain = chainRes["Hist"];
     axiomEntries = Table[
         axiomKeys[[k]] -> <|
             "Statement" -> toHoldEq[Inactive[Equal] @@ axioms[[k]]],
@@ -611,9 +643,6 @@ buildProofDataset[axioms_, conjecture_] := Block[{
         |>,
         {k, axCount}
     ];
-    hypInactive = Inactive[Equal] @@ conjecture;
-    ruleList = buildRuleList[axioms, axiomKeys];
-    chain = synthesizeChain[hypInactive, ruleList][[2]];
     chainEntries = Table[
         chainEntry[
             chain[[s]],
@@ -642,7 +671,10 @@ buildProofDataset[axioms_, conjecture_] := Block[{
             "Statement" -> toHoldEq[hypInactive],
             "Proof" -> <||>
         |>},
-        chainEntries
+        If[ chain === {},
+            {trivialConclusionEntry[hypInactive]},
+            chainEntries
+        ]
     ];
     SortBy[allEntries, $ProofKeyOrder[First[#]] &]
 ]
@@ -655,44 +687,47 @@ $ProofKeyOrder[_] := {5, 0}
 
 (* === TFindEquationalProof ======================================== *)
 
-(* Run the C-side ATP, then build a verifier-ready ProofDataset via
-   the WL-side BFS chain synth.  Either signal counts as success:
-   - C ATP status == PROVED (1)
-   - WL synth reached a Conclusion (Inactive[Equal][x, x] tautology)
-   This catches simple structural cases (conjecture is a direct
-   axiom instance) where the C-side bumps against its budget but
-   the WL synth still finishes.  Variables come from the encoder's
-   state["var"]; Constants stays empty -- WL's
-   GenerateProofVerification wraps every Variable/Constant in
-   Pattern[_, Blank[]] when building the verifier function, which
-   would corrupt plain atoms; matches WL's own behavior of
-   {Variables -> {}, Constants -> {}} for proofs whose axioms don't
-   introduce explicit pattern variables. *)
+(* Build a verifier-ready ProofDataset via the WL-side BFS chain
+   synth and wrap it in a real WL ProofObject.  The chain synth
+   does the heavy lifting: when it reaches an Inactive[Equal][x,
+   x] tautology, the chain itself is the proof.  Returns $Failed
+   when the BFS doesn't close the conjecture within its budget.
+
+   Historically this also called the C-side ATP saturator and
+   accepted proven-by-C as a secondary signal.  The C path is
+   gone (milestone 6 of the IC-native ATP arc); the BFS is the
+   sole provability check.  IC-search-based reduction (milestone
+   4 of the same arc) would replace the BFS once the SUP-path
+   decoder lands -- the IC search produces "is provable" much
+   like the BFS does, but driven by IC reduction instead of
+   WL-side rewrite enumeration.
+
+   atpEncodeProblem still validates axiom/conjecture shape
+   (HoldAll + MatchQ HoldComplete[Equal[_,_]]) and surfaces the
+   encoder state for the Variables list; its Packed / MaxLab
+   fields go unused here but feed TATP. *)
 SetAttributes[TFindEquationalProof, HoldAll];
 Options[TFindEquationalProof] = {MaxSteps -> 64};
 TFindEquationalProof[conjecture_, axioms_, OptionsPattern[]] := Catch[
     Block[{
         enc = atpEncodeProblem[axioms, conjecture],
-        stats, statusCode, dataset, synthOK, varNames,
-        axEq, conclEq
+        dataset, varNames, axEqInactive, conjPair
     },
-        stats = Normal @ $atpRunFn[
-            enc["Packed"], OptionValue[MaxSteps], enc["MaxLab"]
-        ];
-        statusCode = stats[[1]];
-        axEq = enc["AxEqList"];
-        conclEq = Equal @@ enc["ConjPair"];
-        dataset = buildProofDataset[axEq, enc["ConjPair"]];
-        synthOK = AnyTrue[dataset,
-            MatchQ[#[[1]], {$ConclusionSym, _}] &];
-        If[ ! synthOK && statusCode =!= 1, Return[$Failed] ];
+        conjPair = enc["ConjPair"];
+        (* Build axiom equations as Inactive[Equal][...] to keep
+           tautology axioms (a == a) from collapsing to True under
+           ReleaseHold/Equal-evaluation.  WL's ProofObject[] still
+           accepts inactive Equals in the axioms list. *)
+        axEqInactive = Inactive[Equal] @@@ enc["AxPairs"];
+        dataset = buildProofDataset[enc["AxPairs"], conjPair];
+        If[ dataset === $Failed, Return[$Failed] ];
         (* state["var"] is <|name_string -> int_id|>, so the
            variable names are the keys, not the values. *)
         varNames = Symbol /@ Keys[enc["State"]["var"]];
         ProofObject[
             "EquationalLogic",
-            conclEq,
-            axEq,
+            Inactive[Equal] @@ conjPair,
+            axEqInactive,
             <|
                 "Variables" -> varNames,
                 "Constants" -> {},

@@ -337,3 +337,92 @@ VerificationTest[
     "RUNNING",
     TestID -> "ATP/TATP/file/missing-path-yields-running-sentinel"
 ]
+
+(* === TFindEquationalProof: BFS-only (milestone 4 / 6 partial) === *)
+
+(* TFindEquationalProof returns a real WL ProofObject for provable
+   conjectures and $Failed for unprovable ones.  Below: matrix of
+   the BFS chain synth's coverage -- the C-side ATP saturator is
+   no longer consulted for this path. *)
+
+VerificationTest[
+    Head @ TFindEquationalProof[a == a, {a == a}],
+    ProofObject,
+    TestID -> "ATP/TFEP/trivial-reflexivity-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof[a == c, {a == b, b == c}],
+    ProofObject,
+    TestID -> "ATP/TFEP/transitivity-3-proves"
+]
+
+VerificationTest[
+    TFindEquationalProof[a == d, {a == b, b == c}],
+    $Failed,
+    TestID -> "ATP/TFEP/unprovable-yields-failed"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof[a == e,
+        {a == b, b == c, c == d, d == e}],
+    ProofObject,
+    TestID -> "ATP/TFEP/4-step-chain-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof[f[a] == f[b], {a == b}],
+    ProofObject,
+    TestID -> "ATP/TFEP/subst-1pos-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof[f[a, b] == f[c, d],
+        {a == c, b == d}],
+    ProofObject,
+    TestID -> "ATP/TFEP/subst-2pos-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof[f[a] == f[c], {a == b, b == c}],
+    ProofObject,
+    TestID -> "ATP/TFEP/subst-via-trans-proves"
+]
+
+VerificationTest[
+    TFindEquationalProof[f[a] == g[a], {a == b}],
+    $Failed,
+    TestID -> "ATP/TFEP/head-mismatch-yields-failed"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof[c == a, {a == b, b == c}],
+    ProofObject,
+    TestID -> "ATP/TFEP/backward-needed-proves"
+]
+
+VerificationTest[
+    Head @ TFindEquationalProof[b == a, {a == b}],
+    ProofObject,
+    TestID -> "ATP/TFEP/symmetry-1step-proves"
+]
+
+(* End-to-end: the ProofObject's ProofFunction verifier returns
+   Success when applied to the conjecture statement. *)
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof[a == c, {a == b, b == c}];
+        Head @ p["ProofFunction"][p["ConjectureStatement"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/proof-function-verifies-transitivity"
+]
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof[f[a] == f[c], {a == b, b == c}];
+        Head @ p["ProofFunction"][p["ConjectureStatement"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/proof-function-verifies-subst-via-trans"
+]
