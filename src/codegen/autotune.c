@@ -3,7 +3,7 @@
 // Given a kernel, walk the proposer's candidates, time each variant
 // (n_runs back-to-back fires + min wallclock), optionally expand the
 // best single opts into short sequences, pick the winner, and leave
-// the kernel's KernelAxes mutated to the winning opt sequence.  Axes
+// the kernel's KpSchedule mutated to the winning opt sequence.  Axes
 // live on the shared KpCacheSlot (autotune knobs cached per-program-
 // shape), so the pick applies to every other kid with the same
 // KProgOp[] -- a training loop that emits one new kid per step
@@ -187,7 +187,7 @@ static u64 kautotune_cache_key(KernelEntry const *ke, KOpt const *candidates,
     h = kautotune_hash_u64(h, ke->output_shape.ndim);
     h = kautotune_hash_bytes(h, ke->output_shape.dims,
                              (size_t)ke->output_shape.ndim * sizeof(u32));
-    if (ke->axes != NULL) {
+    if (ke->schedule != NULL) {
       // Phase E: hash via tile_anno's shared axes-hash helper.
       h = tile_anno_hash_axes(ke, h);
     }
@@ -417,7 +417,7 @@ static void axes_reset_to_default(KernelEntry *ke) {
 }
 
 static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
-  if (ke == NULL || ke->axes == NULL) {
+  if (ke == NULL || ke->schedule == NULL) {
     return 0;
   }
   if (opt.op != KOP_LOCAL) {
@@ -500,7 +500,7 @@ static int kautotune_seq_can_append(KOptSeq const *seq, KOpt opt) {
 }
 
 static int kautotune_apply_seq(KernelEntry *ke, KOptSeq const *seq) {
-  if (ke == NULL || ke->axes == NULL || seq == NULL) {
+  if (ke == NULL || ke->schedule == NULL || seq == NULL) {
     return 0;
   }
   if (seq->n == 0) {
@@ -624,7 +624,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
     return 0;
   }
   KernelEntry *ke = &KERNELS[kid];
-  if (ke->axes == NULL) {
+  if (ke->schedule == NULL) {
     return 0;
   }
 
@@ -668,7 +668,7 @@ fn int kernel_autotune(u32 kid) {
     return 0;
   }
   KernelEntry *ke = &KERNELS[kid];
-  if (ke->axes == NULL) {
+  if (ke->schedule == NULL) {
     return 0;
   }
 
@@ -678,8 +678,8 @@ fn int kernel_autotune(u32 kid) {
   if (n_cand == 0) {
     // No candidates -- still mark autotuned so the fire-time trigger
     // doesn't re-propose every dispatch.
-    if (ke->axes != NULL) {
-      ke->axes->autotuned = 1;
+    if (ke->schedule != NULL) {
+      ke->schedule->autotuned = 1;
     }
     return 0;
   }
@@ -700,7 +700,7 @@ fn int kernel_autotune(u32 kid) {
                              depth, beam_width, &cached_seq, &cached_us)
         && kautotune_cached_seq_allowed(&cached_seq, candidates, n_cand)) {
       (void)cached_us;
-      ke->axes->autotuned = 1;
+      ke->schedule->autotuned = 1;
       axes_reset_to_default(ke);
       if (cached_seq.n != 0) {
         if (kautotune_apply_seq(ke, &cached_seq)) {
@@ -717,7 +717,7 @@ fn int kernel_autotune(u32 kid) {
   // Mark autotuned at the START so nested/direct bench dispatches do
   // not re-enter this path if a backend helper fires through the public
   // kernel path.  axes_reset_to_default preserves the flag.
-  ke->axes->autotuned = 1;
+  ke->schedule->autotuned = 1;
 
   // Baseline (no opts).  Warm the JIT so the first variant doesn't
   // pay the compile cost alone -- compile each before timing the
@@ -826,10 +826,10 @@ fn int kernel_should_autotune(KernelEntry const *ke) {
   if (!autotune_env_enabled()) {
     return 0;
   }
-  if (ke == NULL || ke->axes == NULL) {
+  if (ke == NULL || ke->schedule == NULL) {
     return 0;
   }
-  if (ke->axes->autotuned) {
+  if (ke->schedule->autotuned) {
     return 0;
   }
   KOpt buf[16];

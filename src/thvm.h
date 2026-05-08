@@ -486,7 +486,7 @@ typedef struct {
 // Forward declaration for the dispatch callback.
 struct KernelEntry;
 
-// === KernelAxes ===
+// === KpSchedule ===
 // Axis-typed scheduling structure carried per-KernelEntry, mirroring
 // tinygrad's `Kernel.full_shape[]` + applied-opt log (no axis_types[]
 // after E9; per-axis kax_type derives from output_shape +
@@ -552,12 +552,12 @@ typedef struct {
   //   axes_resolve_full_shape(ke, d, *out)
   //   axes_resolve_n_axes(ke)
   // -- the same signals that drove the writer trio in session 4.
-  // KernelAxes now carries only the applied_opts log + the autotune
+  // KpSchedule now carries only the applied_opts log + the autotune
   // bookkeeping bits.
   KOpt applied_opts[MAX_OPTS];
   u8   n_applied;
   u8   autotuned;              // 1 = kernel_autotune has run on this
-                               // KernelAxes (per-program-shape via the
+                               // KpSchedule (per-program-shape via the
                                // KpCacheSlot).  Guards the "fire-time
                                // autotune" path against re-running on
                                // every dispatch and against infinite
@@ -571,7 +571,7 @@ typedef struct {
                                // content hash via `tile_axes_hash(ke)`
                                // (codegen/axis.c) over (applied_opts,
                                // output_shape, source_uop).
-} KernelAxes;
+} KpSchedule;
 
 struct Backend {
   u32   id;
@@ -880,7 +880,7 @@ typedef struct {
 //   TILE_LOOP_NEST(TILE_STORE(TILE_SCALAR_BODY(value_id)), TILE_AXIS...)
 // or, for scalar reducers,
 //   TILE_LOOP_NEST(TILE_STORE(TILE_REDUCE(TILE_SCALAR_BODY(value_id))), ...)
-// from a KernelEntry's scalar_uops[] + KernelAxes.  Slice 8 session 5
+// from a KernelEntry's scalar_uops[] + KpSchedule.  Slice 8 session 5
 // retired the dedicated matmul seeding path; matmul shape facts now
 // flow through ke->cached_lift.store_root via
 // uop_dag_classify_matmul_shape.
@@ -1204,17 +1204,17 @@ typedef struct KernelEntry {
 
   // Axis-typed scheduling plan.  Per-program-shape
   // sharing: `axes` is a POINTER, normally aimed at the
-  // KernelAxes embedded in this kernel's kernel_program_cache
+  // KpSchedule embedded in this kernel's kernel_program_cache
   // slot so every kid with the same KProgOp[] sees the same opts.
   // Apply once -> propagates to all sharing kids; the C-side
   // proposer can attach opts to a program shape and every future
   // training-loop iter inherits them automatically.
   //
-  // `_local_axes` is the fallback storage for kernels that didn't
+  // `_local_schedule` is the fallback storage for kernels that didn't
   // make it into the cache (n_ops == 0 or cache full); `axes`
   // points at it in that case.
-  KernelAxes  *axes;
-  KernelAxes   _local_axes;
+  KpSchedule  *schedule;
+  KpSchedule   _local_schedule;
 
   // Scalar-UOp lowering snapshot.
   // NULL when the kernel was emitted via the legacy per-tensor-UOp
@@ -1883,8 +1883,8 @@ fn Term interact_kernel (Term kernel);
 fn void axes_default_for(struct KernelEntry *ke);
 fn void axes_ensure_scalar_reduce(struct KernelEntry *ke);
 // E9-prep wedge 3: predicate that mirrors the legacy
-// `axes_has_reduce_axis(ke->axes)` answer without reading
-// `ke->axes->axis_types[]`.  Walks the higher-level signals each
+// `axes_has_reduce_axis(ke->schedule)` answer without reading
+// `ke->schedule->axis_types[]`.  Walks the higher-level signals each
 // REDUCE-class writer leaves (program tail UOP_REDUCE, applied_opts
 // log carrying KOP_GROUP / KOP_GROUPTOP, scalar arena reduce extent).
 fn int  axes_will_have_reduce_axis(struct KernelEntry const *ke);
@@ -1915,7 +1915,7 @@ fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
 // axes_ensure_scalar_reduce + axes_apply_opt) exactly.  Returns the
 // number of extents written; 0 on overflow / unknown opt / invalid
 // replay.  Used by `axes_resolve_full_shape` and (eventually) by
-// readers migrating off direct `ke->axes->full_shape[]` reads.
+// readers migrating off direct `ke->schedule->full_shape[]` reads.
 fn u32  axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
                                 u32 cap);
 
@@ -1937,7 +1937,7 @@ fn u32  axes_resolve_n_axes(struct KernelEntry const *ke);
 
 // E9 session 2: content hash of (applied_opts, output_shape,
 // source_uop) -- the inputs that fully determine the resolver
-// output.  Replaces the legacy `ke->axes->version` u32 freshness
+// output.  Replaces the legacy `ke->schedule->version` u32 freshness
 // counter.  Snapshots taken into `ke->tile_axes_hash` and compared
 // across tile_sync_from_scalar to detect stale tile_uops.
 fn u64  tile_axes_hash(struct KernelEntry const *ke);
@@ -1949,7 +1949,7 @@ fn u64  tile_axes_hash(struct KernelEntry const *ke);
 // is metadata-only.  Returns 0 on validation failure (axis out of
 // range, arg doesn't divide, applied_opts full, unsupported opt).
 //
-// E9: per-axis kax_type is no longer stored on KernelAxes; the writer
+// E9: per-axis kax_type is no longer stored on KpSchedule; the writer
 // records the opt and `axes_resolve_kax_type` derives the type from
 // the applied_opts log on read.
 fn int kernel_apply_opt(struct KernelEntry *ke, KOpt opt);
@@ -2042,26 +2042,26 @@ fn void tile_render_msl_skeleton(struct KernelEntry const *ke, FILE *fp);
 
 // Tile-IR-native dispatch shape.  Walks tile_root's
 // TILE_AXIS children and computes (groups, threads) directly from
-// kax_type + extent, without going through KernelAxes.  Returns 1 on
+// kax_type + extent, without going through KpSchedule.  Returns 1 on
 // success; 0 if no tile_root, malformed axes, or GROUP_REDUCE > 256.
 fn int tile_compute_dispatch_shape(struct KernelEntry const *ke,
                                    u32 *groups_out, u32 *threads_out);
 
 // Annotation scaffolding: axis-info read helpers that go through TILE_AXIS
-// (instead of KernelAxes side channel).  As consumers migrate, these
-// become the single read path; KernelAxes deletes once the migration
+// (instead of KpSchedule side channel).  As consumers migrate, these
+// become the single read path; KpSchedule deletes once the migration
 // completes.
 fn u32  tile_anno_axis_count(struct KernelEntry const *ke);
 fn int  tile_anno_axis_at(struct KernelEntry const *ke, u32 d,
                           TileAxisInfo *out);
-// Migration helpers that fall back to KernelAxes when tile_uops
+// Migration helpers that fall back to KpSchedule when tile_uops
 // isn't populated.  Used by migrations of code that runs
 // before tile_sync_from_scalar (autotune, propose).
 fn int  tile_anno_axis_or_kernelaxes(struct KernelEntry const *ke, u32 d,
                                      TileAxisInfo *out);
 fn u32  tile_anno_axis_count_or_kernelaxes(struct KernelEntry const *ke);
 
-// applied_opts facade.  Today reads from KernelAxes.applied_opts;
+// applied_opts facade.  Today reads from KpSchedule.applied_opts;
 // future work moves these into Tile-IR mutation records.
 // External linkage (no `fn`) so backend_metal.o can call these.
 u32        tile_anno_applied_opts_count(struct KernelEntry const *ke);
@@ -2100,11 +2100,11 @@ int     tile_rejects_conv2d_flat_cin1(struct KernelEntry const *ke);
 // Slice 8 session 5: tile_analyze_gemm + tile_collect_mma_plan retired
 // (KProgOp-side matmul recognisers).  Matmul shape facts flow through
 // uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
-// Seed a TILE_LOOP_NEST(TILE_STORE(...)) plan from scalar_uops + KernelAxes.
+// Seed a TILE_LOOP_NEST(TILE_STORE(...)) plan from scalar_uops + KpSchedule.
 // Returns 1 on success, 0 when scalar_uops is absent or malformed.
 fn int  tile_build_from_scalar(struct KernelEntry *ke);
 // Rebuild only when the cached tile plan is missing, invalid, or was
-// built against an older KernelAxes version.
+// built against an older KpSchedule version.
 fn int  tile_sync_from_scalar(struct KernelEntry *ke);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
@@ -2112,14 +2112,14 @@ fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 // Autotune: walk the proposer's candidates, time each variant
 // against the baseline (no opts) with direct kernel dispatch, expand
 // the best variants into short opt sequences when enabled, pick the
-// winner, and leave KernelAxes mutated to the winning sequence.
+// winner, and leave KpSchedule mutated to the winning sequence.
 // Because axes live on the shared KpCacheSlot, the winner auto-
 // applies to every other kid sharing this KProgOp[].  Returns 1 if
 // a winning opt sequence was applied, 0 if baseline won.
 fn int kernel_autotune(u32 kid);
 
 // Cheap predicate used by the fire-time auto-tune trigger.  True
-// iff (env opt-in `THVM_AUTOTUNE=1`) AND (this KernelAxes hasn't
+// iff (env opt-in `THVM_AUTOTUNE=1`) AND (this KpSchedule hasn't
 // been autotuned yet) AND (proposer has at least one candidate).
 fn int kernel_should_autotune(struct KernelEntry const *ke);
 
@@ -2215,7 +2215,7 @@ fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
 
 // === Phase E1: UOP_RANGE field accessors + axis_type rewriter ===
-// Read/write seam for UPatRule[]-driven KernelAxes -> UOP_RANGE.axis_type
+// Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type
 // port (Phase E).  Today these wrap the [NUM(axis_id), NUM(axis_type),
 // NUM(extent)] heap layout so rule bodies don't poke heap slots
 // directly.  Returns 0 / unchanged on tag mismatch.  See
@@ -2260,7 +2260,7 @@ fn UopRangeSplit uop_range_split(Term old_range, u32 k, u32 inner_axis_type);
 // Walks the DAG rooted at `root` and stamps any UOP_RANGE leaf whose
 // axis_id matches a KOP_GLOBAL entry in `applied_opts` (with arg ==
 // extent and current axis_type == KAX_LOOP) to a fresh UOP_RANGE with
-// axis_type=KAX_GLOBAL.  Mirrors codegen/apply_opt.c's KernelAxes
+// axis_type=KAX_GLOBAL.  Mirrors codegen/apply_opt.c's KpSchedule
 // write + kernel_lift.c's structural-replay stamp; both representations
 // stay live during the E* wedge sequence.  Idempotent: re-running the
 // rule on a previously-stamped DAG is a no-op (the LOOP guard rejects
@@ -3570,13 +3570,13 @@ fn u32  redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap);
 fn void     kernel_program_cache_reset(void);
 fn u64      kernel_program_key(KProgOp const *prog, u32 n_ops);
 fn u64      kernel_rangeified_key(KernelEntry const *ke);
-fn KernelAxes *kernel_rangeified_axes_cache_lookup_or_insert(KernelEntry const *ke);
+fn KpSchedule *kernel_rangeified_axes_cache_lookup_or_insert(KernelEntry const *ke);
 fn u32      kernel_program_cache_size(void);
 
 // Slot-bearing variants used by Per-shape per-program-shape opt
-// sharing: materialize parks `&slot->axes` into KernelEntry.axes
+// sharing: materialize parks `&slot->schedule` into KernelEntry.schedule
 // so every kid emitted with the same KProgOp[] reads/writes the
-// same KernelAxes.  Apply once -> propagates to all sharing kids;
+// same KpSchedule.  Apply once -> propagates to all sharing kids;
 // the C-side proposer attaches opts to a program shape, not a kid.
 typedef struct KpCacheSlot KpCacheSlot;
 fn KpCacheSlot *kernel_program_cache_lookup_slot(KProgOp const *prog, u32 n_ops);

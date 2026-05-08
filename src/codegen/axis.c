@@ -1,4 +1,4 @@
-// codegen/axis.c -- KernelAxes lifecycle: default constructor +
+// codegen/axis.c -- KpSchedule lifecycle: default constructor +
 // applied-opt query helpers.  The mutation (axes_apply_opt) lives in
 // codegen/apply_opt.c.
 //
@@ -46,9 +46,9 @@ static u32 axes_scalar_reduce_extent(KernelEntry const *ke) {
   return 0;
 }
 
-// E9-prep wedge 3: predicate that answers "will ke->axes carry a
+// E9-prep wedge 3: predicate that answers "will ke->schedule carry a
 // REDUCE-class axis (KAX_REDUCE or KAX_GROUP_REDUCE)?" without reading
-// `ke->axes->axis_types[]`.  It mirrors the writer side exactly: every
+// `ke->schedule->axis_types[]`.  It mirrors the writer side exactly: every
 // production writer of a REDUCE-class entry leaves a higher-level
 // signal that this predicate consults.
 //
@@ -74,9 +74,9 @@ fn int axes_will_have_reduce_axis(KernelEntry const *ke) {
   if (ke->n_ops > 0 && ke->program[ke->n_ops - 1].opcode == UOP_REDUCE) {
     return 1;
   }
-  if (ke->axes != NULL) {
-    KOpt const *opts = ke->axes->applied_opts;
-    u32 n_applied = (u32)ke->axes->n_applied;
+  if (ke->schedule != NULL) {
+    KOpt const *opts = ke->schedule->applied_opts;
+    u32 n_applied = (u32)ke->schedule->n_applied;
     for (u32 i = 0; i < n_applied; i++) {
       if (opts[i].op == KOP_GROUP || opts[i].op == KOP_GROUPTOP) {
         return 1;
@@ -105,7 +105,7 @@ static u8 axis_kop_to_axis_type(u8 op) {
 
 // E9-prep wedge 4: derive per-axis kax_type[] from the higher-level
 // signals (output_shape + tail-reduce + scalar-reduce + applied_opts)
-// instead of reading `ke->axes->axis_types[]`.  Mirrors the writer
+// instead of reading `ke->schedule->axis_types[]`.  Mirrors the writer
 // trio (axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt)
 // exactly:
 //
@@ -134,7 +134,7 @@ static u8 axis_kop_to_axis_type(u8 op) {
 // this is now the only kax_type read path outside the writer trio.
 fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
                                u32 cap) {
-  if (ke == NULL || ke->axes == NULL || out == NULL || cap == 0) {
+  if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
     return 0;
   }
 
@@ -163,8 +163,8 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
   // don't validate splits (size % arg) or GLOBAL preconditions here:
   // applied_opts is the LOG of opts that ALREADY succeeded against the
   // axis structure, so the replay is guaranteed-valid by construction.
-  KOpt const *opts = ke->axes->applied_opts;
-  u32 n_applied   = (u32)ke->axes->n_applied;
+  KOpt const *opts = ke->schedule->applied_opts;
+  u32 n_applied   = (u32)ke->schedule->n_applied;
   for (u32 k = 0; k < n_applied; k++) {
     KOpt o = opts[k];
     u8 op = o.op;
@@ -222,7 +222,7 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
 // -- which mirrors the writer trio (axes_default_for +
 // axes_ensure_scalar_reduce + axes_apply_opt) by construction.
 //
-// Wedge 8 retired the legacy `ke->axes->axis_types[d]` fallback: the 2
+// Wedge 8 retired the legacy `ke->schedule->axis_types[d]` fallback: the 2
 // remaining hand-write tests in test_tile_graph (wedge-6 residuals)
 // were rebuilt against the writer trio, so every read site now has
 // either applied_opts > 0 (simulator authoritative) or a signal-only
@@ -234,7 +234,7 @@ fn u32 axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
 // unknown opt -- bug in the writer trio's applied_opts log), returns
 // KAX_LOOP as a safe default.
 fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
-  if (ke == NULL || ke->axes == NULL) {
+  if (ke == NULL || ke->schedule == NULL) {
     return KAX_LOOP;
   }
   u8 types[MAX_AXES] = {0};
@@ -247,7 +247,7 @@ fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
 
 // E9 session 2: derive per-axis full_shape extents from the higher-
 // level signals (output_shape + tail-reduce + scalar-reduce +
-// applied_opts) instead of reading `ke->axes->_writer.full_shape[]`
+// applied_opts) instead of reading `ke->schedule->_writer.full_shape[]`
 // directly (writer-trio scratch as of session 4).
 // Mirrors the writer trio (axes_default_for + axes_ensure_scalar_reduce
 // + axes_apply_opt) exactly:
@@ -266,12 +266,12 @@ fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
 //
 // Returns the number of extents written to `out`; 0 on overflow,
 // unknown opt, or invalid replay (axis out of range, arg doesn't
-// divide).  By construction, the value matches `ke->axes->full_shape`
-// + `ke->axes->n_axes` after the writer trio has produced the same
+// divide).  By construction, the value matches `ke->schedule->full_shape`
+// + `ke->schedule->n_axes` after the writer trio has produced the same
 // applied_opts log.
 fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
                                u32 cap) {
-  if (ke == NULL || ke->axes == NULL || out == NULL || cap == 0) {
+  if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
     return 0;
   }
 
@@ -311,8 +311,8 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
   // applied_opts is the LOG of opts that ALREADY succeeded against
   // the axis structure, so the replay is guaranteed-valid by
   // construction.
-  KOpt const *opts = ke->axes->applied_opts;
-  u32 n_applied   = (u32)ke->axes->n_applied;
+  KOpt const *opts = ke->schedule->applied_opts;
+  u32 n_applied   = (u32)ke->schedule->n_applied;
   for (u32 k = 0; k < n_applied; k++) {
     KOpt o = opts[k];
     u8 op = o.op;
@@ -368,7 +368,7 @@ fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
 // only authoritative source -- nothing left to cross-check against.
 fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
                                u32 *out_extent) {
-  if (ke == NULL || ke->axes == NULL) {
+  if (ke == NULL || ke->schedule == NULL) {
     if (out_extent != NULL) *out_extent = 0;
     return 0;
   }
@@ -388,7 +388,7 @@ fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
 // applied_opts).  E9 session 5: writer scratch retired; this is the
 // authoritative count.
 fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
-  if (ke == NULL || ke->axes == NULL) {
+  if (ke == NULL || ke->schedule == NULL) {
     return 0;
   }
   u32 extents[MAX_AXES] = {0};
@@ -396,7 +396,7 @@ fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
 }
 
 // E9 session 2: content hash of the kernel's axis-defining inputs.
-// Replaces the `ke->axes->version` u32 freshness counter with a
+// Replaces the `ke->schedule->version` u32 freshness counter with a
 // deterministic u64 hash of (applied_opts, output_shape, source_uop)
 // -- the same triple that drives the resolvers above.  Cache equality
 // semantics stay (one u64 == one u64); the hash is bit-stable across
@@ -408,14 +408,14 @@ fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
 // sentinel `tile_axes_hash = 0` (uninitialised tile_uops) stays
 // disambiguated from a real hash.
 fn u64 tile_axes_hash(struct KernelEntry const *ke) {
-  if (ke == NULL || ke->axes == NULL) {
+  if (ke == NULL || ke->schedule == NULL) {
     return 0;
   }
   u64 h = 0xcbf29ce484222325ULL ^ 0x415845535F484148ULL;  // "AXES_HAH"
-  u32 n_applied = (u32)ke->axes->n_applied;
+  u32 n_applied = (u32)ke->schedule->n_applied;
   h ^= (u64)n_applied;
   h *= 0x100000001b3ULL;
-  KOpt const *opts = ke->axes->applied_opts;
+  KOpt const *opts = ke->schedule->applied_opts;
   u8 const *opts_bytes = (u8 const *)opts;
   size_t opts_n = (size_t)n_applied * sizeof(KOpt);
   for (size_t i = 0; i < opts_n; i++) {

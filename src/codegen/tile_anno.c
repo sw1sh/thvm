@@ -1,7 +1,7 @@
 // codegen/tile_anno.c - Phase E scaffolding: axis annotations on the
 // Tile-IR layer.
 //
-// Today axis information lives in KernelAxes (a side channel on
+// Today axis information lives in KpSchedule (a side channel on
 // KernelEntry).  Phase E migrates each consumer to read directly from
 // TILE_AXIS nodes via tile_axis_unpack.  This file is the new home
 // for axis-mutator primitives that replace codegen/{axis,apply_opt,
@@ -39,16 +39,16 @@ fn int tile_anno_axis_at(KernelEntry const *ke, u32 d, TileAxisInfo *out) {
 }
 
 // Phase E migration helper: read axis info preferring TILE_AXIS,
-// falling back to ke->axes when tile_uops isn't populated.  Lets
+// falling back to ke->schedule when tile_uops isn't populated.  Lets
 // consumers in apply_opt.c / propose.c / render_metal.c migrate to
 // the new read path without first needing the tile_build to run
 // upstream.  Once every consumer goes through this helper AND
 // tile_uops is populated before each consumer, switch the helper's
-// impl to TILE_AXIS-only and delete the KernelAxes fallback (and
-// then KernelAxes itself).
-// Stale-tile detection: when KernelAxes has been mutated after the
-// last tile_build (apply_opt-driven autotune mutates ke->axes
-// in place), tile_uops carries STALE axis info.  Prefer ke->axes
+// impl to TILE_AXIS-only and delete the KpSchedule fallback (and
+// then KpSchedule itself).
+// Stale-tile detection: when KpSchedule has been mutated after the
+// last tile_build (apply_opt-driven autotune mutates ke->schedule
+// in place), tile_uops carries STALE axis info.  Prefer ke->schedule
 // in that case so consumers see the current state.
 //
 // E9 session 2: freshness compares `ke->tile_axes_hash` (snapshot
@@ -59,7 +59,7 @@ fn int tile_anno_axis_at(KernelEntry const *ke, u32 d, TileAxisInfo *out) {
 // check is no longer needed for disambiguation, but kept as a cheap
 // structural guard.
 static int tile_anno_tile_uops_fresh(KernelEntry const *ke) {
-  if (ke == NULL || ke->axes == NULL) return 1;  // no axes to compare
+  if (ke == NULL || ke->schedule == NULL) return 1;  // no axes to compare
   if (ke->tile_axes_hash != tile_axes_hash(ke)) return 0;
   u32 tile_n = tile_anno_axis_count(ke);
   if (tile_n == 0) return 0;
@@ -72,10 +72,10 @@ fn int tile_anno_axis_or_kernelaxes(KernelEntry const *ke, u32 d,
   if (tile_anno_tile_uops_fresh(ke) && tile_anno_axis_at(ke, d, out)) return 1;
   // E9 session 3: read kax_type + extent through the resolvers (signal-
   // derived from output_shape + tail-reduce + scalar-reduce +
-  // applied_opts) instead of `ke->axes->full_shape[]` directly.  The
-  // `ke->axes == NULL` guard moves into the resolvers; both bail to 0 /
+  // applied_opts) instead of `ke->schedule->full_shape[]` directly.  The
+  // `ke->schedule == NULL` guard moves into the resolvers; both bail to 0 /
   // KAX_LOOP when the kernel hasn't been axes-defaulted yet.
-  if (ke == NULL || ke->axes == NULL) return 0;
+  if (ke == NULL || ke->schedule == NULL) return 0;
   u32 extent = 0;
   if (!axes_resolve_full_shape(ke, d, &extent)) return 0;
   out->kax_type     = axes_resolve_kax_type(ke, d);
@@ -94,7 +94,7 @@ fn u32 tile_anno_axis_count_or_kernelaxes(KernelEntry const *ke) {
   return axes_resolve_n_axes(ke);
 }
 
-// applied_opts facade: today these read from KernelAxes.applied_opts[]
+// applied_opts facade: today these read from KpSchedule.applied_opts[]
 // with no Tile-IR equivalent.  When Phase E grows TILE_OPT (or similar)
 // nodes that record autotune mutations at the Tile-IR layer, the
 // helper switches over.  For now the facade lets every consumer go
@@ -102,13 +102,13 @@ fn u32 tile_anno_axis_count_or_kernelaxes(KernelEntry const *ke) {
 // External linkage so the metal backend (compiled as a separate
 // translation unit, backend_metal.o) can call these.
 u32 tile_anno_applied_opts_count(KernelEntry const *ke) {
-  if (ke == NULL || ke->axes == NULL) return 0;
-  return ke->axes->n_applied;
+  if (ke == NULL || ke->schedule == NULL) return 0;
+  return ke->schedule->n_applied;
 }
 
 KOpt const *tile_anno_applied_opts(KernelEntry const *ke) {
-  if (ke == NULL || ke->axes == NULL) return NULL;
-  return ke->axes->applied_opts;
+  if (ke == NULL || ke->schedule == NULL) return NULL;
+  return ke->schedule->applied_opts;
 }
 
 // Hash all per-axis (kax_type, extent) pairs into the running FNV-1a
@@ -149,9 +149,9 @@ int tile_anno_apply_opt(KernelEntry *ke, KOpt opt) {
 // from applied_opts but that don't change axis types/extents.
 // Returns 1 on success, 0 if applied_opts is full.
 int tile_anno_record_opt(KernelEntry *ke, KOpt opt) {
-  if (ke == NULL || ke->axes == NULL) return 0;
-  if (ke->axes->n_applied >= MAX_OPTS) return 0;
-  ke->axes->applied_opts[ke->axes->n_applied++] = opt;
+  if (ke == NULL || ke->schedule == NULL) return 0;
+  if (ke->schedule->n_applied >= MAX_OPTS) return 0;
+  ke->schedule->applied_opts[ke->schedule->n_applied++] = opt;
   // E9 session 2: freshness via `tile_axes_hash(ke)` over the new
   // applied_opts log; no version bump.
   return 1;
@@ -161,10 +161,10 @@ int tile_anno_record_opt(KernelEntry *ke, KOpt opt) {
 // autotune bench candidates so each candidate starts from a fresh
 // baseline).  Preserves the autotuned flag.
 void tile_anno_axes_reset(KernelEntry *ke) {
-  if (ke == NULL || ke->axes == NULL) return;
-  u8  autotuned = ke->axes->autotuned;
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->autotuned = autotuned;
+  if (ke == NULL || ke->schedule == NULL) return;
+  u8  autotuned = ke->schedule->autotuned;
+  memset(ke->schedule, 0, sizeof(KpSchedule));
+  ke->schedule->autotuned = autotuned;
   axes_default_for(ke);
   axes_ensure_scalar_reduce(ke);
 }
@@ -182,7 +182,7 @@ void tile_anno_axes_reset(KernelEntry *ke) {
 // Returns 1 (info accepted; nothing to record); 0 only on NULL kernel
 // for callers that want to detect a closed kernel.
 int tile_anno_axis_append(KernelEntry *ke, TileAxisInfo info) {
-  if (ke == NULL || ke->axes == NULL) return 0;
+  if (ke == NULL || ke->schedule == NULL) return 0;
   (void)info;
   return 1;
 }

@@ -179,7 +179,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "backend/cpu/buf_copy.c"
 #include "backend/cpu/buf_pool.c"
 // codegen/ is backend-agnostic.  axis.c + apply_opt.c land first
-// so renderer + cg passes see the KernelAxes scheduling structure.
+// so renderer + cg passes see the KpSchedule scheduling structure.
 // so they can call cg_profile_record / cg_now_us / cg_kernel_flops
 // + reference KDispatchKind enum constants.
 #include "codegen/axis.c"

@@ -86,8 +86,8 @@ static u32 build_metal_tile_add_kernel(u32 extent, u32 groups, u32 threads,
   // (+ KOP_SWAP for the local-first variant).
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = extent;
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->schedule = &ke->_local_schedule;
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt local_op  = { .op = KOP_LOCAL,  .axis = 0, .arg = threads };
   KOpt global_op = { .op = KOP_GLOBAL, .axis = 0, .arg = groups  };

@@ -19,7 +19,7 @@
 // Rule (E1): UOP_OPT(?range, kind=LOCAL, factor=ext)
 //   -> uop_range_with_axis_type(range, KAX_LOCAL).
 // Demonstrates a UPatRule reading and rewriting UOP_RANGE.axis_type
-// without touching KernelAxes.  Mirrors KOP_LOCAL-on-existing-axis
+// without touching KpSchedule.  Mirrors KOP_LOCAL-on-existing-axis
 // in shape (no axis split) so E1 stays minimal.
 static Term rw_promote_loop_to_local(Term const *bindings, void *ctx) {
   (void)ctx;

@@ -2,7 +2,7 @@
 //
 // Verifies tile_compute_dispatch_shape walks tile_root's TILE_AXIS
 // children directly and computes (groups, threads) without going
-// through KernelAxes -- the seam Phase F's renderer rewrite will
+// through KpSchedule -- the seam Phase F's renderer rewrite will
 // use to flip the dispatch path.
 
 #include "../src/thvm.c"

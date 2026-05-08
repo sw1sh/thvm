@@ -10,7 +10,7 @@
 // The tile plan is now an opt-in CPU/Metal dispatch target.  This
 // test pins arena lifecycle, GEMM analysis, name helpers, and the
 // seed builder's two axis sources: scalar S_RANGE fallback and
-// KernelAxes override.
+// KpSchedule override.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -501,8 +501,8 @@ int main(void) {
     free(conv_src);
   }
   // E9: drive [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->schedule = &ke->_local_schedule;
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt conv_local4 = { .op = KOP_LOCAL, .axis = 0, .arg = 4 };
   CHECK(kernel_apply_opt(ke, conv_local4));
@@ -514,7 +514,7 @@ int main(void) {
   CHECK_EQ(conv_groups_x, 16u);
   CHECK_EQ(conv_threads_x, 4u);
   // E9: re-seed with [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt conv_upcast4 = { .op = KOP_UPCAST, .axis = 1, .arg = 4 };
   CHECK(kernel_apply_opt(ke, conv_upcast4));
@@ -529,7 +529,7 @@ int main(void) {
     free(conv_src);
   }
   // E9: re-seed with [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt conv_unroll2 = { .op = KOP_UNROLL, .axis = 2, .arg = 2 };
   CHECK(kernel_apply_opt(ke, conv_unroll2));
@@ -541,7 +541,7 @@ int main(void) {
     free(conv_src);
   }
   // E9: re-seed with [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOptSeq conv_seq = {0};
   conv_seq.n = 2;
@@ -557,15 +557,15 @@ int main(void) {
   CHECK(tile_analyze_conv2d_flat(ke, &conv));
   CHECK_EQ(conv.threads, 4u);
   CHECK_EQ(conv.outputs_per_thread, 4u);
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes = NULL;
+  memset(ke->schedule, 0, sizeof(KpSchedule));
+  ke->schedule = NULL;
   kernel_free_arrays(ke);
 
   TEST_BEGIN("tile-graph/metal-conv2d-flat-proposes-local");
   build_kprog_conv2d_flat(ke);
   // E9: drive [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->schedule = &ke->_local_schedule;
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   setenv("THVM_BACKEND", "metal", 1);
   setenv("THVM_TILE", "1", 1);
@@ -600,8 +600,8 @@ int main(void) {
   CHECK_EQ(conv_cands[7].arg, 2u);
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes = NULL;
+  memset(ke->schedule, 0, sizeof(KpSchedule));
+  ke->schedule = NULL;
   kernel_free_arrays(ke);
 
   TEST_BEGIN("tile-graph/conv2d-flat-counters-legacy-fixture");
@@ -768,8 +768,8 @@ int main(void) {
   // KOP_UPCAST(axis=0, arg=4) instead of hand-writing axis_types[].
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = 8;
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->schedule = &ke->_local_schedule;
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt upcast4 = { .op = KOP_UPCAST, .axis = 0, .arg = 4 };
   CHECK(kernel_apply_opt(ke, upcast4));
@@ -812,7 +812,7 @@ int main(void) {
   // axis_types[].
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = 8;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt klg_local4  = { .op = KOP_LOCAL,  .axis = 0, .arg = 4 };
   KOpt klg_global2 = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
@@ -852,7 +852,7 @@ int main(void) {
   // E9: drive [LOOP=8] via the writer trio (output_shape ndim=1).
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = 8;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt cands[16];
   u32 n_cands = kernel_opts_propose(ke, cands,
@@ -887,7 +887,7 @@ int main(void) {
   // KOP_LOCAL(arg=4) + KOP_GLOBAL(arg=2) + KOP_SWAP(0,1).
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = 8;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt klgs_local4  = { .op = KOP_LOCAL,  .axis = 0, .arg = 4 };
   KOpt klgs_global2 = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
@@ -956,8 +956,8 @@ int main(void) {
     u32 wl_sto = rangeify_emit_binary(wlk, S_STORE, DT_FP32, wl_ic, wl_sum);
     u32 wl_buf_src[3] = { wl_sto, wl_r0, wl_r1 };
     rangeify_emit(wlk, S_BUFFERIZE, DT_FP32, 3, wl_buf_src, 0);
-    wlk->axes = &wlk->_local_axes;
-    memset(wlk->axes, 0, sizeof(KernelAxes));
+    wlk->schedule = &wlk->_local_schedule;
+    memset(wlk->schedule, 0, sizeof(KpSchedule));
     axes_default_for(wlk);
     KOpt klglw_local2  = { .op = KOP_LOCAL,  .axis = 1, .arg = 2 };
     KOpt klglw_global2 = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
@@ -980,7 +980,7 @@ int main(void) {
       free(metal_tile_src);
     }
     kernel_free_arrays(wlk);
-    wlk->axes = NULL;
+    wlk->schedule = NULL;
   }
 
   TEST_BEGIN("tile-graph/group-reduce-axis-falls-back-from-c-renderer");
@@ -997,7 +997,7 @@ int main(void) {
   // (a vacuous stub returning 0) coverage.
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = 8;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt grfb_local4  = { .op = KOP_LOCAL,  .axis = 0, .arg = 4 };
   KOpt grfb_global2 = { .op = KOP_GLOBAL, .axis = 0, .arg = 2 };
@@ -1022,7 +1022,7 @@ int main(void) {
   // KOP_UPCAST(axis=0, arg=4).
   ke->output_shape.ndim    = 1;
   ke->output_shape.dims[0] = 8;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   axes_default_for(ke);
   KOpt rkao_upcast4 = { .op = KOP_UPCAST, .axis = 0, .arg = 4 };
   CHECK(kernel_apply_opt(ke, rkao_upcast4));
@@ -1120,8 +1120,8 @@ int main(void) {
   CHECK(build_scalar_reduce_sum_graph(tk) != 0);
   tk->output_shape.ndim = 1;
   tk->output_shape.dims[0] = 1;
-  tk->axes = &tk->_local_axes;
-  memset(tk->axes, 0, sizeof(KernelAxes));
+  tk->schedule = &tk->_local_schedule;
+  memset(tk->schedule, 0, sizeof(KpSchedule));
   axes_default_for(tk);
   // E9 session 4: route through resolvers now that the writer scratch
   // is private (writer-trio in session 4; deleted in session 5).  The
@@ -1161,14 +1161,14 @@ int main(void) {
   unsetenv("THVM_BACKEND");
   unsetenv("THVM_TILE");
   kernel_free_arrays(tk);
-  tk->axes = NULL;
+  tk->schedule = NULL;
 
   TEST_BEGIN("tile-graph/metal-post-reduce-expression-uses-group-accumulator");
   CHECK(build_scalar_post_reduce_sum_graph(tk) != 0);
   tk->output_shape.ndim = 1;
   tk->output_shape.dims[0] = 1;
-  tk->axes = &tk->_local_axes;
-  memset(tk->axes, 0, sizeof(KernelAxes));
+  tk->schedule = &tk->_local_schedule;
+  memset(tk->schedule, 0, sizeof(KpSchedule));
   axes_default_for(tk);
   axes_ensure_scalar_reduce(tk);
   CHECK(tile_build_from_scalar(tk));
@@ -1190,7 +1190,7 @@ int main(void) {
     free(post_metal_src);
   }
   kernel_free_arrays(tk);
-  tk->axes = NULL;
+  tk->schedule = NULL;
 
 
   TEST_REPORT();

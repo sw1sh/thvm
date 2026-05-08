@@ -1499,15 +1499,15 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // Per-USE auxiliary S_RANGE leaves (not in BUFFERIZE) -- find by
   // sweeping the arena.  Skip dups.
   //
-  // When `ke->axes` has applied opts targeting per-USE axes
+  // When `ke->schedule` has applied opts targeting per-USE axes
   // (typically KOP_GROUP / KOP_GROUPTOP on a REDUCE axis), wrap
   // the corresponding UOP_RANGE in `UOP_OPT(_, GROUP_REDUCE,
   // arg)` so the renderer (rmu_emit_store_reduce) emits the
   // threadgroup-shared cooperative reduce shape.  Per-USE ranges
   // appear in declaration order in the scalar arena and are
-  // assumed to map 1:1 to ke->axes axis_types[n_buf..n_axes) in
+  // assumed to map 1:1 to ke->schedule axis_types[n_buf..n_axes) in
   // the same order -- this matches how rangeify emits them.
-  KernelAxes const *orig_kax = ke->axes;
+  KpSchedule const *orig_kax = ke->schedule;
   u32 per_use_idx = 0;
   for (u32 i = 1; i < ke->n_scalar_uops && n_ranges < MAX_DIM * 2; i++) {
     if (ke->scalar_uops[i].op != S_RANGE) continue;
@@ -1519,7 +1519,7 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     u32 axis_type = (u32)(ke->scalar_uops[i].extra >> 32) & 0xFFu;
     u32 extent    = (u32)(ke->scalar_uops[i].extra & 0xFFFFFFFFu);
     Term r = uop_range(n_ranges, axis_type, extent);
-    // Map this per-USE range to its position in ke->axes:
+    // Map this per-USE range to its position in ke->schedule:
     // axes index = n_buf + per_use_idx (per-USE entries follow
     // BUFFERIZE entries in axes_default_for / autotune layout).
     u32 axes_idx = n_buf + per_use_idx;

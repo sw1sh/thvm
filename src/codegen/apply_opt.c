@@ -2,7 +2,7 @@
 // TOpt.  Owns the axis rewrite previously done by WL TKernelApplyOpt;
 // WL is a thin LibraryLink wrapper now.
 //
-// E9 reshape: KernelAxes no longer carries an axis_types[] or
+// E9 reshape: KpSchedule no longer carries an axis_types[] or
 // full_shape[] field; `kernel_apply_opt` is now signal-driven --
 // validates the opt against the current shape derived on-demand from
 // `axes_compute_full_shape` (output_shape + tail-reduce +
@@ -85,7 +85,7 @@ static int kop_splits_axis(u8 op) {
 }
 
 fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
-  if (ke == NULL || ke->axes == NULL) {
+  if (ke == NULL || ke->schedule == NULL) {
     return 0;
   }
   if (opt.op == KOP_TC) {
@@ -102,7 +102,7 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     }
     return tile_anno_record_opt(ke, opt);
   }
-  KernelAxes *ax = ke->axes;
+  KpSchedule *ax = ke->schedule;
   if (ax->n_applied >= MAX_OPTS) {
     return 0;
   }

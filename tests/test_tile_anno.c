@@ -50,7 +50,7 @@ int main(void) {
 
   // E9: tile_anno_axis_set / tile_anno_axes_match / tile_anno_apply_split
   // were writer-side facades that mirrored axes_apply_opt's writes into
-  // ke->axes->axis_types[].  Deleted alongside the field.
+  // ke->schedule->axis_types[].  Deleted alongside the field.
 
   tile_free(ke);
 
@@ -59,8 +59,8 @@ int main(void) {
   // confirm the resolver output matches the writer state on every
   // axis.
   TEST_BEGIN("axes-resolve/default-shape");
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
+  ke->schedule = &ke->_local_schedule;
+  memset(ke->schedule, 0, sizeof(KpSchedule));
   ke->output_shape.ndim = 2;
   ke->output_shape.dims[0] = 8;
   ke->output_shape.dims[1] = 12;

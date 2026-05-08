@@ -1,5 +1,5 @@
 // uop/apply_opt.c -- UPatRule[] mirror of codegen/apply_opt.c's
-// KernelAxes mutations against UOP_RANGE.axis_type.
+// KpSchedule mutations against UOP_RANGE.axis_type.
 //
 // Phase E ports each apply_opt op class to a UPatRule over the UOP_RANGE
 // leaves emitted by kernel_lift_to_uop's structural-replay loop
@@ -11,7 +11,7 @@
 //
 // The rule does NOT yet replace the corresponding write in
 // codegen/apply_opt.c -- both representations stay live during the
-// E* wedge sequence.  KernelAxes.axis_types[] remains the primary
+// E* wedge sequence.  KpSchedule.axis_types[] remains the primary
 // source of truth; this rule mirrors the same decision in
 // declarative form so subsequent E* wedges can compose against it.
 //
@@ -37,7 +37,7 @@
 //
 // === Scoping ==========================================================
 //
-// A KernelAxes can carry a sequence of opts that interleave splits
+// A KpSchedule can carry a sequence of opts that interleave splits
 // (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) with SWAPs and GLOBALs.  Splits
 // reshape cur[] (insert a new entry); SWAPs reorder it.  After replay,
 // the final UOP_RANGE.axis_id equals the position in the post-replay
@@ -458,7 +458,7 @@ fn Term uop_apply_kop_split(Term root, KOpt const *applied_opts,
 // "metadata-only" treatment in its structural replay
 // ("Tensor-core opt is metadata-only; pattern-matched in render").
 //
-// Concretely: KOP_TC's KernelAxes mutation is the empty mutation.  Its
+// Concretely: KOP_TC's KpSchedule mutation is the empty mutation.  Its
 // downstream effect lives entirely in render_uop.c
 // (rmu_detect_matmul_tc / rmu_emit_matmul_tc) and the producer
 // uop_recognise_tc, both of which key off the UOP_OPT(_, TC, 0)

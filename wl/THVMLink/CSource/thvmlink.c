@@ -1472,7 +1472,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_jit_dylib_path(WolframLibraryData l, mint 
 // Number of distinct KProgOp[] arrays interned in the kernel-
 // program hash-cons cache.  Used by tests to assert that two
 // kernels with structurally identical programs share storage.
-// === KernelAxes / TOpt surface (Phase 16 codegen variant scaffold) ===
+// === KpSchedule / TOpt surface (Phase 16 codegen variant scaffold) ===
 //
 // Snapshot of a kernel's axis-typed scheduling plan + applied opts.
 // Packed as a flat {Integer, 1} for the WL side to decode:
@@ -1498,7 +1498,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
     return LIBRARY_NO_ERROR;
   }
   KernelEntry const *ke = &KERNELS[kid];
-  KernelAxes const *ax = ke->axes;
+  KpSchedule const *ax = ke->schedule;
   if (ax == NULL) {
     mint dims[1] = {0};
     MTensor empty;
@@ -1511,7 +1511,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
   // scalar-reduce + applied_opts).  Wire format stays byte-equal: by
   // writer-trio determinism, axes_resolve_n_axes(ke) == ax->n_axes and
   // axes_resolve_full_shape(ke, i) == ax->full_shape[i] under
-  // THVM_E9_VALIDATE=1.  applied_opts is still sourced from KernelAxes
+  // THVM_E9_VALIDATE=1.  applied_opts is still sourced from KpSchedule
   // (Piece B / future session moves the ownership).
   u32 n_axes = axes_resolve_n_axes(ke);
   u32 n_applied = (u32)ax->n_applied;
@@ -1553,7 +1553,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
     MArgument_setInteger(res, 0);
     return LIBRARY_NO_ERROR;
   }
-  if (KERNELS[kid].axes == NULL) {
+  if (KERNELS[kid].schedule == NULL) {
     MArgument_setInteger(res, 0);
     return LIBRARY_NO_ERROR;
   }
@@ -1568,7 +1568,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
 
 // Autotune: bench-and-pick the winning TOpt for kid.  Returns 1 on
 // "winning opt applied", 0 on "no opt beat baseline / no candidates
-// / invalid kid".  The applied opt lives on KpCacheSlot.axes so it
+// / invalid kid".  The applied opt lives on KpCacheSlot.schedule so it
 // propagates to every other kid sharing this KProgOp[].
 EXTERN_C DLLEXPORT int thvm_wl_kernel_autotune(WolframLibraryData l, mint a,
                                                MArgument *args, MArgument res) {
@@ -1666,7 +1666,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_program_key(WolframLibraryData libData,
     KernelEntry const *ke = &KERNELS[kid];
     if (ke->program_shared) {
       key = kernel_program_key(ke->program, ke->n_ops);
-    } else if (ke->axes != NULL && ke->axes != &ke->_local_axes) {
+    } else if (ke->schedule != NULL && ke->schedule != &ke->_local_schedule) {
       key = kernel_rangeified_key(ke);
     }
   }

@@ -33,8 +33,8 @@ fn Term uop_range(u32 axis_id, u32 axis_type, u32 extent) {
 
 // === Phase E1: UOP_RANGE accessors + axis_type rewriter ===
 //
-// Groundwork for porting `apply_opt.c`'s KernelAxes mutations onto
-// UPatRule[] over UOP_RANGE leaves.  Today KernelAxes.axis_types[]
+// Groundwork for porting `apply_opt.c`'s KpSchedule mutations onto
+// UPatRule[] over UOP_RANGE leaves.  Today KpSchedule.axis_types[]
 // stays the primary source of truth and kernel_lift_to_uop replays
 // applied_opts onto cur[].axis_type in C control flow before
 // emitting UOP_RANGE leaves with the resolved axis_type baked in.

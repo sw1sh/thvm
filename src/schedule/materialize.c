@@ -2246,11 +2246,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // recursive lambda loops where each iter emits a structurally
   // identical step kernel; correctness is unchanged because
   // input_tids[] / output_tid stay per-kernel.
-  // Phase 16: kernel-program-cache slot owns the shared `KernelAxes`
+  // Phase 16: kernel-program-cache slot owns the shared `KpSchedule`
   // so every kid with the same KProgOp[] sees the same opts.  Apply
   // once -> propagates to all sharing kids.  For kernels that don't
   // make it into the cache (n_ops == 0 OR cache full), fall back to
-  // KernelEntry._local_axes.
+  // KernelEntry._local_schedule.
   KpCacheSlot *slot = NULL;
   if (ke->n_ops > 0) {
     slot = kernel_program_cache_lookup_slot(ke->program, ke->n_ops);
@@ -2269,10 +2269,10 @@ static Term emit_kernel_for_boundary(u32 bi) {
         ke->program_shared = 1;
       }
       // (cache full -- silently keep the kernel-owned copy; axes
-      //  fall back to _local_axes below)
+      //  fall back to _local_schedule below)
     }
   }
-  ke->axes = (slot != NULL) ? &slot->axes : &ke->_local_axes;
+  ke->schedule = (slot != NULL) ? &slot->schedule : &ke->_local_schedule;
 
   // Default-init the axis-typed scheduling plan now that the program
   // and output_shape are finalized.  Idempotent: a cached slot whose
@@ -2317,9 +2317,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
       // for the post-L54 view-folding path.)
     }
     if (!ke->program_shared) {
-      KernelAxes *shared_axes = kernel_rangeified_axes_cache_lookup_or_insert(ke);
+      KpSchedule *shared_axes = kernel_rangeified_axes_cache_lookup_or_insert(ke);
       if (shared_axes != NULL) {
-        ke->axes = shared_axes;
+        ke->schedule = shared_axes;
       }
     }
     if (lowered) {
@@ -2359,7 +2359,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // suite exercises.
     //
     // E9 session 3 piece B-lite: read applied_opts via the tile_anno
-    // facade so the eventual ownership move (KernelAxes -> KernelEntry
+    // facade so the eventual ownership move (KpSchedule -> KernelEntry
     // or a private writer struct) is a single-file change.
     KOpt const *m_opts   = tile_anno_applied_opts(ke);
     u32         m_n_app  = tile_anno_applied_opts_count(ke);

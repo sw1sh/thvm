@@ -26,9 +26,9 @@ struct KpCacheSlot {
   u64        key;            // FNV-1a hash; 0 = empty slot
   KProgOp   *program;        // cache-owned, freed on reset
   u32        n_ops;
-  KernelAxes axes;           // shared scheduling plan: every kid that
+  KpSchedule schedule;           // shared scheduling plan: every kid that
                              // hits this slot points at &axes through
-                             // KernelEntry.axes (Phase 16: per-
+                             // KernelEntry.schedule (Phase 16: per-
                              // program-shape opt sharing).  Mutated
                              // by axes_apply_opt; read by autotune /
                              // cpu_jit_hash so the same opt automatically
@@ -48,7 +48,7 @@ struct KAxisCacheSlot {
   Shape      output_shape;
   u8         source_tag;
   u32        source_ext;
-  KernelAxes axes;
+  KpSchedule schedule;
 };
 typedef struct KAxisCacheSlot KAxisCacheSlot;
 
@@ -110,7 +110,7 @@ fn u64 kernel_rangeified_key(KernelEntry const *ke) {
     h = kp_hash_u64(h, (u64)ke->n_scalar_uops);
     h = kp_hash_bytes(h, ke->scalar_uops,
                       (size_t)ke->n_scalar_uops * sizeof(ScalarUop));
-  } else if (ke->axes != NULL && axes_resolve_n_axes(ke) > 0) {
+  } else if (ke->schedule != NULL && axes_resolve_n_axes(ke) > 0) {
     h = kp_hash_u64(h, 2);
     h = kp_hash_u64(h, (u64)term_tag(ke->source_uop));
     h = kp_hash_u64(h, (u64)term_ext(ke->source_uop));
@@ -164,7 +164,7 @@ fn KpCacheSlot *kernel_program_cache_lookup_slot(KProgOp const *prog,
 }
 
 // Slot-bearing insert: returns the slot pointer (so caller can
-// grab &slot->axes).
+// grab &slot->schedule).
 fn KpCacheSlot *kernel_program_cache_insert_slot(KProgOp const *prog, u32 n_ops) {
   if (n_ops == 0) return NULL;
   u64 key = kp_program_hash(prog, n_ops);
@@ -180,7 +180,7 @@ fn KpCacheSlot *kernel_program_cache_insert_slot(KProgOp const *prog, u32 n_ops)
       s->key     = key;
       s->program = owned;
       s->n_ops   = n_ops;
-      memset(&s->axes, 0, sizeof(KernelAxes));    // axes default-init
+      memset(&s->schedule, 0, sizeof(KpSchedule));    // axes default-init
                                                   // happens at materialize-
                                                   // time via axes_default_for.
       return s;
@@ -226,9 +226,9 @@ static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
     if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
       return 0;
     }
-    if (ke->axes == NULL) return 0;
+    if (ke->schedule == NULL) return 0;
     // E9 session 3: extend wedge-5's argument to full_shape[] / n_axes.
-    // The KernelAxes writer trio (axes_default_for +
+    // The KpSchedule writer trio (axes_default_for +
     // axes_ensure_scalar_reduce + axes_apply_opt + tile_anno_axis_append)
     // is deterministic over (output_shape + scalar_uops + source_tag/ext
     // + applied_opts).  The first four signals are already byte-equal
@@ -236,11 +236,11 @@ static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
     // implies n_axes + full_shape[] equality.  The redundant
     // n_axes/full_shape comparisons retire here; collapse to
     // applied_opts.
-    // E9 session 3 piece B-lite: route ke->axes applied_opts read via
+    // E9 session 3 piece B-lite: route ke->schedule applied_opts read via
     // tile_anno facade so the eventual ownership move is a single-file
-    // change.  Slot side stays direct (KAxisCacheSlot embeds KernelAxes
+    // change.  Slot side stays direct (KAxisCacheSlot embeds KpSchedule
     // by value -- not a KernelEntry context).
-    if (!kopts_equal(s->axes.applied_opts, s->axes.n_applied,
+    if (!kopts_equal(s->schedule.applied_opts, s->schedule.n_applied,
                      tile_anno_applied_opts(ke),
                      tile_anno_applied_opts_count(ke))) {
       return 0;
@@ -259,7 +259,7 @@ static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
   return 1;
 }
 
-fn KernelAxes *kernel_rangeified_axes_cache_lookup_or_insert(KernelEntry const *ke) {
+fn KpSchedule *kernel_rangeified_axes_cache_lookup_or_insert(KernelEntry const *ke) {
   u64 key = kernel_rangeified_key(ke);
   if (key == 0) {
     return NULL;
@@ -304,13 +304,13 @@ fn KernelAxes *kernel_rangeified_axes_cache_lookup_or_insert(KernelEntry const *
       s->output_shape  = ke->output_shape;
       s->source_tag    = term_tag(ke->source_uop);
       s->source_ext    = term_ext(ke->source_uop);
-      if (ke->axes != NULL) {
-        s->axes = *ke->axes;
+      if (ke->schedule != NULL) {
+        s->schedule = *ke->schedule;
       }
-      return &s->axes;
+      return &s->schedule;
     }
     if (s->key == key && kaxis_slot_equal(s, ke)) {
-      return &s->axes;
+      return &s->schedule;
     }
   }
   return NULL;

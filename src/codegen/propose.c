@@ -418,7 +418,7 @@ static int propose_metal_tile_kernel(KernelEntry const *ke) {
   }
   if (ke->output_dtype != DT_FP32 || ke->scalar_uops == NULL
       || ke->n_scalar_uops < 2 || ke->tile_uops == NULL
-      || ke->n_tile_uops < 2 || ke->axes == NULL || ke->n_inputs > 30) {
+      || ke->n_tile_uops < 2 || ke->schedule == NULL || ke->n_inputs > 30) {
     return 0;
   }
   int has_loop = 0;
@@ -490,11 +490,11 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // `cached_lift.store_root != 0` for production kernels, mirroring
   // the slice 8 BEAM TC entry above.  The legacy fixture in
   // `tests/test_tile_graph.c::metal-conv2d-flat-proposes-local` builds
-  // KProgOp + KernelAxes but never runs the lifter, so we OR the gate:
+  // KProgOp + KpSchedule but never runs the lifter, so we OR the gate:
   // either DAG present OR the legacy axes-presence proxy.
   if (propose_metal_tile_enabled()
       && (ke->cached_lift.store_root != 0
-          || (ke->axes != NULL
+          || (ke->schedule != NULL
               && tile_anno_axis_count_or_kernelaxes(ke) > 0))) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {

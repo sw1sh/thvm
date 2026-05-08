@@ -532,7 +532,7 @@ fn const char *tile_op_name(u8 op) {
 // tile_root's TILE_AXIS children and computes (groups, threads) the
 // same way render_metal's CtKernelInfo path does -- but reads kax_type
 // + extent directly from TILE_AXIS instead of going through the
-// KernelAxes side channel.  Returns 1 on success, 0 if the kernel
+// KpSchedule side channel.  Returns 1 on success, 0 if the kernel
 // can't be dispatched as tile-only (no axes, overflow, or
 // GROUP_REDUCE > 256).
 //
@@ -1197,7 +1197,7 @@ static u32 tile_find_scalar_bufferize(KernelEntry const *ke) {
 
 // E9-prep wedge 4+8: emit TILE_AXIS leaves from a signal-derived
 // `axis_types[]` simulation (output_shape + tail-reduce + scalar-reduce
-// + applied_opts) instead of reading `ke->axes->axis_types[]`
+// + applied_opts) instead of reading `ke->schedule->axis_types[]`
 // directly.  See `axes_compute_axis_types` for the simulation contract;
 // it mirrors the writer trio (axes_default_for +
 // axes_ensure_scalar_reduce + axes_apply_opt) by construction.
@@ -1208,13 +1208,13 @@ static u32 tile_find_scalar_bufferize(KernelEntry const *ke) {
 // E9 session 3: extents now come from `axes_compute_full_shape` (the
 // signal-replay resolver), matching the kax_type derivation.  Both
 // reads consult the same applied_opts log + output_shape signals;
-// `ke->axes->full_shape[]` is no longer touched here.  The function
+// `ke->schedule->full_shape[]` is no longer touched here.  The function
 // still calls `axes_default_for(ke)` to materialize the writer-side
-// shape when uninitialised (the resolver speaks against ke->axes,
+// shape when uninitialised (the resolver speaks against ke->schedule,
 // which the writer trio populates).
 static u32 tile_emit_axes_from_kernel_signals(KernelEntry *ke, u32 *out,
                                               u32 cap) {
-  if (ke->axes == NULL) {
+  if (ke->schedule == NULL) {
     return 0;
   }
   if (axes_resolve_n_axes(ke) == 0) {
