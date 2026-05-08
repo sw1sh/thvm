@@ -69,12 +69,9 @@ fn int tile_anno_axis_or_kernelaxes(KernelEntry const *ke, u32 d,
   if (out == NULL) return 0;
   if (tile_anno_tile_uops_fresh(ke) && tile_anno_axis_at(ke, d, out)) return 1;
   if (ke == NULL || ke->axes == NULL || d >= ke->axes->n_axes) return 0;
-  // E9-prep wedge 7+8: route the kax_type read through
-  // axes_resolve_kax_type in src/codegen/axis.c.  Post-wedge-8 the
-  // resolver is signal-only (wedge-4 simulator over output_shape +
-  // tail-reduce + scalar-reduce + applied_opts); the legacy
-  // axis_types[] fallback was retired once the 2 wedge-6 residual
-  // hand-write tests rebuilt against the writer trio.
+  // E9: axes_resolve_kax_type is the single read point for kax_type --
+  // signal-derived from output_shape + tail-reduce + scalar-reduce +
+  // applied_opts.  KernelAxes no longer stores axis_types[].
   out->kax_type     = axes_resolve_kax_type(ke, d);
   out->extent       = ke->axes->full_shape[d];
   out->memory_scope = 0;
@@ -130,12 +127,10 @@ u64 tile_anno_hash_axes(KernelEntry const *ke, u64 h) {
   return h;
 }
 
-// Phase E writer-side facade: route axis-mutating opt application
-// through the tile_anno API.  Today this is a thin wrapper over
-// kernel_apply_opt (which mutates ke->axes); when Phase F flips
-// the source-of-truth, the wrapper switches to mutating TILE_AXIS
-// directly + bumping tile_axes_version.  Migrating callers to this
-// helper now means Phase F's flip is a one-file change.
+// Phase E writer-side facade: thin wrapper over kernel_apply_opt.
+// Kept for the WL FFI (thvm_wl_kernel_apply_opt) and autotune
+// callsites so a future TILE_AXIS source-of-truth flip is a
+// single-file change.
 //
 // Returns 1 on success (the opt was applied), 0 on failure (invalid
 // opt for this kernel, axis out of range, etc.).
@@ -159,8 +154,7 @@ int tile_anno_record_opt(KernelEntry *ke, KOpt opt) {
 // Reset the axes back to the default LOOP/REDUCE shape (used between
 // autotune bench candidates so each candidate starts from a fresh
 // baseline).  Preserves the autotuned flag and the version counter
-// so cache freshness checks see the mutation.  Phase F flip switches
-// this to also clear/rebuild TILE_AXIS.
+// so cache freshness checks see the mutation.
 void tile_anno_axes_reset(KernelEntry *ke) {
   if (ke == NULL || ke->axes == NULL) return;
   u8  autotuned = ke->axes->autotuned;
@@ -172,140 +166,25 @@ void tile_anno_axes_reset(KernelEntry *ke) {
   axes_ensure_scalar_reduce(ke);
 }
 
-// Phase E writer-side: split an axis at position d into
-// (outer at d, inner at d+1).  outer keeps its current type with
-// size = orig_size / factor; inner takes new_inner_type with size =
-// factor.  Today writes ke->axes via the existing axes_apply_opt
-// machinery (encoded as a KOP_LOCAL/UPCAST/UNROLL/GROUP/GROUPTOP);
-// when Phase F flips, this becomes the canonical TILE_AXIS array
-// reshape primitive.
+// Append a new axis at the end.  E9: only writes full_shape[] /
+// n_axes / version.  The kax_type carried in `info` is informational
+// for the caller; the actual per-axis kax_type is derived on read by
+// `axes_resolve_kax_type` (signals: output_shape + tail-reduce +
+// scalar-reduce + applied_opts).  Callers (axes_default_for,
+// axes_ensure_scalar_reduce) drive append in the same order the
+// resolver expects, so kax_type derivation matches the caller's intent
+// by construction.
 //
-// Returns 1 on success, 0 if d is out of range, factor doesn't
-// divide axis_size, or the array is full.
-int tile_anno_apply_split(KernelEntry *ke, u32 d, u32 factor,
-                          u32 new_inner_type) {
-  if (ke == NULL || factor == 0) return 0;
-  // Map new_inner_type back to a KOpt op so we can route through
-  // axes_apply_opt for now.  Phase F replaces this with direct
-  // TILE_AXIS array surgery.
-  u8 op;
-  switch (new_inner_type) {
-    case KAX_LOCAL:        op = KOP_LOCAL;    break;
-    case KAX_UPCAST:       op = KOP_UPCAST;   break;
-    case KAX_UNROLL:       op = KOP_UNROLL;   break;
-    case KAX_GROUP_REDUCE: op = KOP_GROUP;    break;
-    default: return 0;  // Unsupported split target; caller bails.
-  }
-  KOpt opt = { op, (u8)d, factor };
-  return tile_anno_apply_opt(ke, opt);
-}
-
-// Append a new axis at the end.  Today writes through KernelAxes
-// (the existing source-of-truth); when Phase F flips, this writes
-// to TILE_AXIS directly.  Returns 1 on success, 0 if the axis array
-// is full.
+// Returns 1 on success, 0 if the axis array is full.
 int tile_anno_axis_append(KernelEntry *ke, TileAxisInfo info) {
   if (ke == NULL || ke->axes == NULL) return 0;
   if (ke->axes->n_axes >= MAX_AXES) return 0;
   u32 d = ke->axes->n_axes++;
-  ke->axes->axis_types[d] = info.kax_type;
   ke->axes->full_shape[d] = info.extent;
+  (void)info.kax_type;        // resolver-derived; see comment above.
+  (void)info.memory_scope;
+  (void)info.vector_width;
   ke->axes->version++;
   if (ke->axes->version == 0) ke->axes->version = 1;
   return 1;
-}
-
-// Insert a new axis BEFORE position d (i.e. existing axes at d..n-1
-// shift right by one; the new axis takes slot d).  When tile_uops
-// is also populated, mirrors the insertion at the TILE_AXIS array
-// level too.  Returns 1 on success, 0 if d is out of range or
-// either backing store is full.
-//
-// This is the structural primitive that Phase F's source-of-truth
-// flip needs: axes_apply_opt's split logic reduces to (a) read the
-// existing axis at d, (b) shrink it (extent /= factor), (c) insert
-// a new axis at d+1 with the inner type and size = factor.
-int tile_anno_axis_insert(KernelEntry *ke, u32 d, TileAxisInfo info) {
-  if (ke == NULL || ke->axes == NULL) return 0;
-  if (d > ke->axes->n_axes) return 0;
-  if (ke->axes->n_axes >= MAX_AXES) return 0;
-  // Shift right.
-  for (i32 i = (i32)ke->axes->n_axes; i > (i32)d; i--) {
-    ke->axes->axis_types[i] = ke->axes->axis_types[i - 1];
-    ke->axes->full_shape[i] = ke->axes->full_shape[i - 1];
-  }
-  ke->axes->axis_types[d] = info.kax_type;
-  ke->axes->full_shape[d] = info.extent;
-  ke->axes->n_axes++;
-  ke->axes->version++;
-  if (ke->axes->version == 0) ke->axes->version = 1;
-  // (When Phase F flips, the TILE_AXIS array surgery happens here:
-  //  shift root->src[d+1..] right, allocate a new TILE_AXIS leaf,
-  //  patch root->src[d+1] to point at it, bump src_count.)
-  return 1;
-}
-
-// Sanity check: returns 1 iff KernelAxes and TILE_AXIS agree on
-// axis count + per-axis (kax_type, extent).  Useful for debugging
-// the migration -- if this ever returns 0, tile_uops is stale and
-// the freshness check should bail.
-//
-// E9-prep wedge 7+8: kax_type ground truth comes from
-// axes_resolve_kax_type (signal-only wedge-4 simulator).  The match
-// is equivalent because the simulator mirrors the writer trio output
-// exactly.
-int tile_anno_axes_match(KernelEntry const *ke) {
-  if (ke == NULL || ke->axes == NULL || ke->tile_uops == NULL) return 1;
-  u32 ka_n = ke->axes->n_axes;
-  u32 tile_n = tile_anno_axis_count(ke);
-  if (ka_n != tile_n) return 0;
-  for (u32 i = 0; i < ka_n; i++) {
-    TileAxisInfo info;
-    if (!tile_anno_axis_at(ke, i, &info)) return 0;
-    if (info.kax_type != axes_resolve_kax_type(ke, i)) return 0;
-    if (info.extent != ke->axes->full_shape[i]) return 0;
-  }
-  return 1;
-}
-
-// Direct per-axis write.  Updates both KernelAxes (legacy backing
-// store) AND TILE_AXIS (when tile_uops is fresh) with the new
-// TileAxisInfo.  Used by future code paths that want to set
-// memory_scope or vector_width on an existing axis without going
-// through the KOpt machinery.  Returns 1 on success, 0 if `d` is
-// out of range or both backing stores are missing.
-int tile_anno_axis_set(KernelEntry *ke, u32 d, TileAxisInfo info) {
-  if (ke == NULL) return 0;
-  int wrote = 0;
-  // Update KernelAxes (the existing source of truth) when present.
-  if (ke->axes != NULL && d < ke->axes->n_axes) {
-    ke->axes->axis_types[d] = info.kax_type;
-    ke->axes->full_shape[d] = info.extent;
-    ke->axes->version++;
-    if (ke->axes->version == 0) ke->axes->version = 1;
-    wrote = 1;
-  }
-  // Mirror to TILE_AXIS when tile_uops is populated and the axis
-  // exists.  This catches the memory_scope + vector_width fields
-  // that KernelAxes doesn't carry.
-  if (ke->tile_uops != NULL && ke->tile_root != 0
-      && ke->tile_root < ke->n_tile_uops) {
-    TileUop *root = &ke->tile_uops[ke->tile_root];
-    if (root->op == TILE_LOOP_NEST && (u32)d + 1 < (u32)root->src_count) {
-      u32 axis_id = root->src[1 + d];
-      if (axis_id != 0 && axis_id < ke->n_tile_uops) {
-        TileUop *axis = &ke->tile_uops[axis_id];
-        if (axis->op == TILE_AXIS) {
-          axis->extra = tile_axis_pack(info);
-          // Keep tile_axes_version in sync so the freshness check
-          // in tile_anno_tile_uops_fresh sees the post-write version.
-          if (ke->axes != NULL) {
-            ke->tile_axes_version = ke->axes->version;
-          }
-          wrote = 1;
-        }
-      }
-    }
-  }
-  return wrote;
 }

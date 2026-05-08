@@ -488,10 +488,12 @@ struct KernelEntry;
 
 // === KernelAxes ===
 // Axis-typed scheduling structure carried per-KernelEntry, mirroring
-// tinygrad's `Kernel.axis_types[]` / `Kernel.full_shape[]`.  The
-// codegen variant emitter (cg_emit_variants) walks these to produce
-// a structured iteration nest -- nested loops, unrolled blocks,
-// thread/threadgroup bindings (Metal) -- instead of one flat
+// tinygrad's `Kernel.full_shape[]` + applied-opt log (no axis_types[]
+// after E9; per-axis kax_type derives from output_shape +
+// tail-reduce + scalar-reduce + applied_opts via
+// `axes_resolve_kax_type`).  The codegen variant emitter walks these
+// to produce a structured iteration nest -- nested loops, unrolled
+// blocks, thread/threadgroup bindings (Metal) -- instead of one flat
 // `for i = 0..numel-1`.
 //
 // Default state (set by axes_default_for at materialize-time): one
@@ -499,7 +501,7 @@ struct KernelEntry;
 // kernels.  Equivalent to today's flat emit -- 393/393 must keep
 // passing with no opts applied.
 //
-// Opts are applied via axes_apply_opt and recorded in applied_opts[].
+// Opts are applied via kernel_apply_opt and recorded in applied_opts[].
 // The C-side state is the source of truth; WL is a thin LibraryLink
 // wrapper.
 
@@ -539,7 +541,10 @@ typedef struct {
 } KOpt;
 
 typedef struct {
-  u8   axis_types[MAX_AXES];   // KAX_*
+  // E9: axis_types[] is gone; per-axis kax_type derives on demand
+  // from (output_shape + tail-reduce + scalar-reduce + applied_opts)
+  // via axes_resolve_kax_type / axes_compute_axis_types in
+  // codegen/axis.c.
   u32  full_shape[MAX_AXES];
   u8   n_axes;                 // 0 = uninitialized (not yet defaulted)
   KOpt applied_opts[MAX_OPTS];
@@ -1901,16 +1906,16 @@ fn u32  axes_compute_axis_types(struct KernelEntry const *ke, u8 *out,
 // axis_types[i] reads remain in codegen/tile_anno.c.
 fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
 
-// Apply one TOpt to the axis structure: split the indicated axis,
-// mark the new inner axis with the opt's KAX_ type (UPCAST/UNROLL/
-// LOCAL/etc.), mark a full LOOP axis as GLOBAL, append to
-// applied_opts[].  SWAP swaps two axes in-place.  Returns 0 on
-// validation failure (axis out of range, arg doesn't divide,
-// applied_opts full, unsupported opt).
-fn int axes_apply_opt(KernelAxes *ax, KOpt opt);
-// Kernel-aware opt application.  Most opts delegate to axes_apply_opt;
-// metadata opts such as TC validate against the KernelEntry before
-// recording themselves in applied_opts[].
+// Apply one TOpt to a KernelEntry's axis structure.  Split-class opts
+// (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) split the indicated axis,
+// growing n_axes by one; KOP_GLOBAL marks a LOOP axis as GLOBAL via
+// the applied_opts log; KOP_SWAP exchanges two axes in-place; KOP_TC
+// is metadata-only.  Returns 0 on validation failure (axis out of
+// range, arg doesn't divide, applied_opts full, unsupported opt).
+//
+// E9: per-axis kax_type is no longer stored on KernelAxes; the writer
+// records the opt and `axes_resolve_kax_type` derives the type from
+// the applied_opts log on read.
 fn int kernel_apply_opt(struct KernelEntry *ke, KOpt opt);
 
 // Shape-heuristic kernel opt proposer: looks at the kernel's
@@ -2031,28 +2036,15 @@ u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
 // Writer-side facade: thin wrapper over kernel_apply_opt.
 // Source-of-truth flip switches this to mutate TILE_AXIS.
 int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
-// Split an axis at position d into (outer, inner) where inner takes
-// new_inner_type (KAX_LOCAL/UPCAST/UNROLL/GROUP_REDUCE).
-int        tile_anno_apply_split(struct KernelEntry *ke, u32 d,
-                                 u32 factor, u32 new_inner_type);
 // Record an opt as applied without changing axis structure (KOP_TC).
 int        tile_anno_record_opt(struct KernelEntry *ke, KOpt opt);
 // Reset axes to the default LOOP/REDUCE shape (autotune between-
 // candidates baseline; preserves autotuned + version).
 void       tile_anno_axes_reset(struct KernelEntry *ke);
-// Direct per-axis write.  Updates both KernelAxes and TILE_AXIS
-// (when present) so memory_scope + vector_width can be set without
-// going through KOpt machinery.
-int        tile_anno_axis_set(struct KernelEntry *ke, u32 d,
-                              TileAxisInfo info);
-// Append a new axis at the end (n_axes++, write info, bump version).
+// Append a new axis at the end (n_axes++, write extent, bump version).
+// E9: kax_type carried by `info` is informational; the per-axis
+// kax_type is derived on read by axes_resolve_kax_type.
 int        tile_anno_axis_append(struct KernelEntry *ke, TileAxisInfo info);
-// Insert a new axis before position d (existing axes shift right).
-int        tile_anno_axis_insert(struct KernelEntry *ke, u32 d,
-                                 TileAxisInfo info);
-// Sanity check: KernelAxes vs TILE_AXIS agree on axis count +
-// per-axis (kax_type, extent).  1 = agree (or one of them absent).
-int        tile_anno_axes_match(struct KernelEntry const *ke);
 fn void tile_free(struct KernelEntry *ke);
 fn const char *tile_op_name(u8 op);
 fn const char *tile_axis_name(u32 axis_type);

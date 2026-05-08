@@ -31,8 +31,6 @@ static int cg_supports_scalar(KernelEntry const *ke) { (void)ke; return 0; }
 static char *cg_emit_tile    (KernelEntry const *ke) { (void)ke; return NULL; }
 static char *cg_emit_scalar  (KernelEntry const *ke) { (void)ke; return NULL; }
 
-#define TEST_REDUCE_NO_TAIL 0xFFFFFFFFu
-
 static u32 build_scalar_add_graph(KernelEntry *ke, u32 extent) {
   u32 r0 = rangeify_emit_leaf(ke, S_RANGE, DT_INT32,
               ((u64)S_AXIS_LOOP << 32) | (u64)extent);
@@ -245,24 +243,10 @@ static u32 build_scalar_post_reduce_sum_graph(KernelEntry *ke) {
   return scaled;
 }
 
-static void set_reduce_axes(KernelEntry *ke, u32 tail_axis_type) {
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 1;
-  if (tail_axis_type == TEST_REDUCE_NO_TAIL) {
-    ke->axes->n_axes = 2;
-    ke->axes->axis_types[1] = KAX_REDUCE;
-    ke->axes->full_shape[1] = 4;
-  } else {
-    ke->axes->n_axes = 3;
-    ke->axes->axis_types[1] = KAX_REDUCE;
-    ke->axes->full_shape[1] = 2;
-    ke->axes->axis_types[2] = tail_axis_type;
-    ke->axes->full_shape[2] = 2;
-  }
-  ke->axes->version++;
-}
+// E9: set_reduce_axes was a hand-write helper for [LOOP, REDUCE, tail]
+// shapes; it has no callers in tree (TEST_REDUCE_NO_TAIL above is its
+// only-companion sentinel).  Removed alongside the writer trio's
+// axis_types[] field.
 
 static void test_set_view3(View *v, u32 d0, u32 d1, u32 d2,
                            i32 s0, i32 s1, i32 s2) {
@@ -555,16 +539,14 @@ int main(void) {
   CHECK_EQ(info.mma.ldB, 3u);
   CHECK_EQ(info.mma.flags, 0u);
   CHECK_EQ(info.mma.tile_size, 16u);
+  // E9: drive [LOOP=2, LOOP=3, REDUCE=4] via the writer trio
+  // (output_shape + tail-reduce program signal -> axes_default_for).
+  ke->output_shape.ndim    = 2;
+  ke->output_shape.dims[0] = 2;
+  ke->output_shape.dims[1] = 3;
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 2;
-  ke->axes->axis_types[1] = KAX_LOOP;
-  ke->axes->full_shape[1] = 3;
-  ke->axes->axis_types[2] = KAX_REDUCE;
-  ke->axes->full_shape[2] = 4;
-  ke->axes->version++;
+  axes_default_for(ke);
   KOpt tc8 = { .op = KOP_TC, .axis = 0, .arg = 8 };
   CHECK(kernel_apply_opt(ke, tc8));
   CHECK_EQ(ke->axes->n_applied, 1u);
@@ -580,16 +562,13 @@ int main(void) {
 
   TEST_BEGIN("tile-graph/metal-gemm-proposes-tc");
   build_kprog_gemm(ke, 16, 16, 16);
+  // E9: drive [LOOP=16, LOOP=16, REDUCE=16] via the writer trio.
+  ke->output_shape.ndim    = 2;
+  ke->output_shape.dims[0] = 16;
+  ke->output_shape.dims[1] = 16;
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 16;
-  ke->axes->axis_types[1] = KAX_LOOP;
-  ke->axes->full_shape[1] = 16;
-  ke->axes->axis_types[2] = KAX_REDUCE;
-  ke->axes->full_shape[2] = 16;
-  ke->axes->version++;
+  axes_default_for(ke);
   setenv("THVM_BACKEND", "metal", 1);
   KOpt tc_cands[16];
   u32 n_tc = kernel_opts_propose(ke, tc_cands,
@@ -609,14 +588,12 @@ int main(void) {
 
   TEST_BEGIN("tile-graph/metal-gemv-expand-proposes-tc");
   build_kprog_gemv_expand(ke, 16, 32);
+  // E9: drive [LOOP=16, REDUCE=32] via the writer trio.
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = 16;
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 2;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 16;
-  ke->axes->axis_types[1] = KAX_REDUCE;
-  ke->axes->full_shape[1] = 32;
-  ke->axes->version++;
+  axes_default_for(ke);
   setenv("THVM_BACKEND", "metal", 1);
   n_tc = kernel_opts_propose(ke, tc_cands,
                              (u32)(sizeof(tc_cands)/sizeof(*tc_cands)));
@@ -659,16 +636,10 @@ int main(void) {
   if (conv_src != NULL) {
     free(conv_src);
   }
+  // E9: drive [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 4;
-  ke->axes->axis_types[1] = KAX_LOOP;
-  ke->axes->full_shape[1] = 16;
-  ke->axes->axis_types[2] = KAX_REDUCE;
-  ke->axes->full_shape[2] = 18;
-  ke->axes->version++;
+  axes_default_for(ke);
   KOpt conv_local4 = { .op = KOP_LOCAL, .axis = 0, .arg = 4 };
   CHECK(kernel_apply_opt(ke, conv_local4));
   CHECK(tile_analyze_conv2d_flat(ke, &conv));
@@ -678,15 +649,9 @@ int main(void) {
   CHECK(cg_tile_metal_dispatch_shape(ke, &conv_groups_x, &conv_threads_x));
   CHECK_EQ(conv_groups_x, 16u);
   CHECK_EQ(conv_threads_x, 4u);
+  // E9: re-seed with [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 4;
-  ke->axes->axis_types[1] = KAX_LOOP;
-  ke->axes->full_shape[1] = 16;
-  ke->axes->axis_types[2] = KAX_REDUCE;
-  ke->axes->full_shape[2] = 18;
-  ke->axes->version++;
+  axes_default_for(ke);
   KOpt conv_upcast4 = { .op = KOP_UPCAST, .axis = 1, .arg = 4 };
   CHECK(kernel_apply_opt(ke, conv_upcast4));
   CHECK(tile_analyze_conv2d_flat(ke, &conv));
@@ -699,15 +664,9 @@ int main(void) {
   if (conv_src != NULL) {
     free(conv_src);
   }
+  // E9: re-seed with [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 4;
-  ke->axes->axis_types[1] = KAX_LOOP;
-  ke->axes->full_shape[1] = 16;
-  ke->axes->axis_types[2] = KAX_REDUCE;
-  ke->axes->full_shape[2] = 18;
-  ke->axes->version++;
+  axes_default_for(ke);
   KOpt conv_unroll2 = { .op = KOP_UNROLL, .axis = 2, .arg = 2 };
   CHECK(kernel_apply_opt(ke, conv_unroll2));
   CHECK(tile_analyze_conv2d_flat(ke, &conv));
@@ -717,15 +676,9 @@ int main(void) {
   if (conv_src != NULL) {
     free(conv_src);
   }
+  // E9: re-seed with [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 4;
-  ke->axes->axis_types[1] = KAX_LOOP;
-  ke->axes->full_shape[1] = 16;
-  ke->axes->axis_types[2] = KAX_REDUCE;
-  ke->axes->full_shape[2] = 18;
-  ke->axes->version++;
+  axes_default_for(ke);
   KOptSeq conv_seq = {0};
   conv_seq.n = 2;
   conv_seq.opts[0] = conv_upcast4;
@@ -744,16 +697,10 @@ int main(void) {
 
   TEST_BEGIN("tile-graph/metal-conv2d-flat-proposes-local");
   build_kprog_conv2d_flat(ke);
+  // E9: drive [LOOP=4, LOOP=16, REDUCE=18] via the writer trio.
   ke->axes = &ke->_local_axes;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 3;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 4;
-  ke->axes->axis_types[1] = KAX_LOOP;
-  ke->axes->full_shape[1] = 16;
-  ke->axes->axis_types[2] = KAX_REDUCE;
-  ke->axes->full_shape[2] = 18;
-  ke->axes->version++;
+  axes_default_for(ke);
   setenv("THVM_BACKEND", "metal", 1);
   setenv("THVM_TILE", "1", 1);
   KOpt conv_cands[16];
@@ -926,11 +873,11 @@ int main(void) {
   TEST_BEGIN("tile-graph/metal-autotune-proposes-local-global");
   setenv("THVM_BACKEND", "metal", 1);
   setenv("THVM_TILE", "1", 1);
+  // E9: drive [LOOP=8] via the writer trio (output_shape ndim=1).
+  ke->output_shape.ndim    = 1;
+  ke->output_shape.dims[0] = 8;
   memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes->n_axes = 1;
-  ke->axes->axis_types[0] = KAX_LOOP;
-  ke->axes->full_shape[0] = 8;
-  ke->axes->version++;
+  axes_default_for(ke);
   KOpt cands[16];
   u32 n_cands = kernel_opts_propose(ke, cands,
                                     (u32)(sizeof(cands)/sizeof(*cands)));
@@ -941,8 +888,11 @@ int main(void) {
   KOpt local4 = { .op = KOP_LOCAL, .axis = 0, .arg = 4 };
   CHECK(kernel_apply_tune_candidate(ke, local4));
   CHECK_EQ(ke->axes->n_applied, 2u);
-  CHECK_EQ(ke->axes->axis_types[0], (u32)KAX_GLOBAL);
-  CHECK_EQ(ke->axes->axis_types[1], (u32)KAX_LOCAL);
+  // E9: kax_type reads route through axes_resolve_kax_type now that
+  // axis_types[] is gone; the simulator replays applied_opts to derive
+  // the post-mutation type.
+  CHECK_EQ(axes_resolve_kax_type(ke, 0), (u8)KAX_GLOBAL);
+  CHECK_EQ(axes_resolve_kax_type(ke, 1), (u8)KAX_LOCAL);
   CHECK_EQ(ke->axes->full_shape[0], 2u);
   CHECK_EQ(ke->axes->full_shape[1], 4u);
   CHECK(cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
@@ -1193,10 +1143,10 @@ int main(void) {
   memset(tk->axes, 0, sizeof(KernelAxes));
   axes_default_for(tk);
   CHECK_EQ(tk->axes->n_axes, 1u);
-  CHECK_EQ(tk->axes->axis_types[0], (u32)KAX_LOOP);
+  CHECK_EQ(axes_resolve_kax_type(tk, 0), (u8)KAX_LOOP);
   axes_ensure_scalar_reduce(tk);
   CHECK_EQ(tk->axes->n_axes, 2u);
-  CHECK_EQ(tk->axes->axis_types[1], (u32)KAX_REDUCE);
+  CHECK_EQ(axes_resolve_kax_type(tk, 1), (u8)KAX_REDUCE);
   CHECK_EQ(tk->axes->full_shape[1], 4u);
   CHECK(tile_build_from_scalar(tk));
   CHECK(tile_collect_plan_info(tk, &info));

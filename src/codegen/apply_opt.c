@@ -1,45 +1,45 @@
-// codegen/apply_opt.c -- mutate a KernelAxes by applying one TOpt.
+// codegen/apply_opt.c -- mutate a KernelEntry's axes by applying one
+// TOpt.  Owns the axis rewrite previously done by WL TKernelApplyOpt;
+// WL is a thin LibraryLink wrapper now.
 //
-// Owns the axis rewrite previously done by WL TKernelApplyOpt; WL
-// is a thin LibraryLink wrapper now.
+// E9 reshape: KernelAxes no longer carries an axis_types[] field.
+// `kernel_apply_opt` records the opt in applied_opts[] and maintains
+// `n_axes` + `full_shape[]` for split-class opts; the kax_type per
+// axis is derived on demand from (output_shape + tail-reduce +
+// scalar-reduce + applied_opts) by `axes_compute_axis_types` /
+// `axes_resolve_kax_type` (codegen/axis.c).  The validation contract
+// (axis-in-range, arg-divides, GLOBAL targets a LOOP, SWAP target
+// in-range, applied_opts/MAX_AXES caps) still gates the writes; the
+// LOOP precondition for KOP_GLOBAL consults `axes_resolve_kax_type`
+// instead of a stored axis_types[].
 //
 // Each opt class:
 //
 //   UPCAST / UNROLL / LOCAL / GROUP / GROUPTOP
 //     Split full_shape[axis] into outer (= old/arg) + inner (= arg).
-//     Insert a new axis after `axis` with the opt's KAX_ type and
-//     size = arg.  Outer keeps the original type (LOOP / REDUCE / ...).
-//     Validation: arg must divide full_shape[axis].
+//     Insert a new axis after `axis`; the new inner axis takes the
+//     opt's KAX_ type by virtue of `axes_compute_axis_types` replaying
+//     applied_opts deterministically.  Validation: arg must divide
+//     full_shape[axis].
 //
 //   GLOBAL
-//     Mark the selected LOOP axis as GLOBAL.  Validation: arg must
-//     equal the current axis size.  This pairs naturally with LOCAL:
-//     LOCAL splits N into LOOP(N/L) + LOCAL(L), then GLOBAL marks
-//     that remaining LOOP(N/L) axis for threadgroup/grid binding.
+//     Mark the selected LOOP axis as GLOBAL via the applied_opts log.
+//     Validation: arg must equal the current axis size and the axis
+//     must currently resolve to KAX_LOOP.
 //
 //   SWAP
-//     Swap full_shape[axis] <-> full_shape[arg] and the matching
-//     axis_types entries.  No new axis.
+//     Swap full_shape[axis] <-> full_shape[arg].  No new axis.  The
+//     resolver picks up the position swap when replaying applied_opts.
 //
-//   PADTO / NOLOCALS / TC
-//     PADTO / NOLOCALS remain reserved.  TC is kernel-aware metadata
-//     and is handled by kernel_apply_opt below so raw axes_apply_opt
-//     keeps rejecting it for non-GEMM callers.
+//   PADTO / NOLOCALS
+//     Reserved.  Rejected here; no axis-structure mutation.
+//
+//   TC
+//     Kernel-aware metadata (matched against tile_analyze_gemm); does
+//     not mutate axis structure.  Routes to tile_anno_record_opt.
 //
 // Returns 1 on success, 0 on validation failure (axis out of range,
 // arg doesn't divide, applied_opts full, MAX_AXES exceeded).
-
-// Map a KOP_ class to the KAX_ type to mark the new inner axis.
-static u8 kop_to_axis_type(u8 op) {
-  switch (op) {
-    case KOP_UPCAST:   return KAX_UPCAST;
-    case KOP_UNROLL:   return KAX_UNROLL;
-    case KOP_LOCAL:    return KAX_LOCAL;
-    case KOP_GROUP:    return KAX_GROUP_REDUCE;
-    case KOP_GROUPTOP: return KAX_GROUP_REDUCE;
-    default:           return KAX_LOOP;
-  }
-}
 
 // True if this opt class splits an axis (vs SWAP / no-op opts).
 static int kop_splits_axis(u8 op) {
@@ -47,10 +47,22 @@ static int kop_splits_axis(u8 op) {
       || op == KOP_GROUP  || op == KOP_GROUPTOP;
 }
 
-fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
-  if (ax == NULL) {
+fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
+  if (ke == NULL || ke->axes == NULL) {
     return 0;
   }
+  if (opt.op == KOP_TC) {
+    if (opt.axis >= tile_anno_axis_count_or_kernelaxes(ke)
+        || !tile_mma_size_supported(opt.arg)) {
+      return 0;
+    }
+    TileGemmInfo gemm;
+    if (!tile_analyze_gemm(ke, NULL, &gemm) || gemm.dtype != DT_FP32) {
+      return 0;
+    }
+    return tile_anno_record_opt(ke, opt);
+  }
+  KernelAxes *ax = ke->axes;
   if (ax->n_applied >= MAX_OPTS) {
     return 0;
   }
@@ -69,38 +81,37 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
     if (ax->n_axes >= MAX_AXES) {
       return 0;
     }
-
-    // Shift axes after opt.axis right by one to make room for the
-    // new inner axis.
+    // Shift full_shape[] entries after opt.axis right by one to make
+    // room for the new inner axis.  No axis_types[] array to shift --
+    // axes_compute_axis_types replays the same insertion against the
+    // signal-derived initial layout.
     for (i32 i = (i32)ax->n_axes; i > (i32)opt.axis + 1; i--) {
-      ax->axis_types[i] = ax->axis_types[i - 1];
       ax->full_shape[i] = ax->full_shape[i - 1];
     }
-    // Outer keeps its original type, but its size shrinks by the
-    // split factor.
-    ax->full_shape[opt.axis]      = axis_size / opt.arg;
-    // Inner takes the opt's type, size = split factor.
-    ax->axis_types[opt.axis + 1]  = kop_to_axis_type(opt.op);
-    ax->full_shape[opt.axis + 1]  = opt.arg;
+    // Outer keeps its original type by replay; size shrinks by split
+    // factor.  Inner takes the opt's type by replay; size = split
+    // factor.
+    ax->full_shape[opt.axis]     = axis_size / opt.arg;
+    ax->full_shape[opt.axis + 1] = opt.arg;
     ax->n_axes++;
   } else if (opt.op == KOP_GLOBAL) {
     u32 axis_size = ax->full_shape[opt.axis];
-    if (opt.arg != axis_size || ax->axis_types[opt.axis] != KAX_LOOP) {
+    if (opt.arg != axis_size
+        || axes_resolve_kax_type(ke, opt.axis) != KAX_LOOP) {
       return 0;
     }
-    ax->axis_types[opt.axis] = KAX_GLOBAL;
+    // No axis_types[] write; resolver replays KOP_GLOBAL against the
+    // post-applied_opts state.
   } else if (opt.op == KOP_SWAP) {
     if ((u8)opt.arg >= ax->n_axes) {
       return 0;
     }
-    u8  ti = ax->axis_types[opt.axis];
-    u8  tj = ax->axis_types[opt.arg];
     u32 si = ax->full_shape[opt.axis];
     u32 sj = ax->full_shape[opt.arg];
-    ax->axis_types[opt.axis] = tj;
-    ax->axis_types[opt.arg]  = ti;
     ax->full_shape[opt.axis] = sj;
     ax->full_shape[opt.arg]  = si;
+    // No axis_types[] swap; resolver replays KOP_SWAP against the
+    // post-applied_opts state.
   } else {
     return 0;
   }
@@ -111,22 +122,4 @@ fn int axes_apply_opt(KernelAxes *ax, KOpt opt) {
     ax->version = 1;
   }
   return 1;
-}
-
-fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
-  if (ke == NULL || ke->axes == NULL) {
-    return 0;
-  }
-  if (opt.op != KOP_TC) {
-    return axes_apply_opt(ke->axes, opt);
-  }
-  if (opt.axis >= tile_anno_axis_count_or_kernelaxes(ke)
-      || !tile_mma_size_supported(opt.arg)) {
-    return 0;
-  }
-  TileGemmInfo gemm;
-  if (!tile_analyze_gemm(ke, NULL, &gemm) || gemm.dtype != DT_FP32) {
-    return 0;
-  }
-  return tile_anno_record_opt(ke, opt);
 }
