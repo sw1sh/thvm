@@ -351,12 +351,117 @@ static int udg_classify_matmul_store(Term store, u32 *out_k_extent,
   return 1;
 }
 
+// input_views-decouple session 2: DAG-side stride extractor.
+//
+// `lift_scalar_index` (kernel_lift.c:388-407) builds an INDEX_E.addr by
+// looping over the buffer's view dims and accumulating per-dim terms:
+//
+//   for d in 0..ndim:
+//     stride = view.strides[d]                  -- broadcast dims (stride
+//                                                   == 0) are skipped
+//     term   = (stride == 1) ? r_uop
+//                            : IMUL(r_uop, ICONST(stride))
+//     acc    = (acc == 0) ? term : IADD(acc, term)
+//
+// For the matmul-A case under a [M, K, N] expanded view, two dims survive
+// (M and K -- the N dim is broadcast-zero) so the address is exactly
+//   IADD(arm_m, arm_k)
+// where each arm is either RANGE(axis) or IMUL(RANGE(axis), ICONST(c)).
+// The non-reduce arm carries `ld` (the storage stride of the non-K axis);
+// the reduce arm has coefficient 1 if A is row-major (transA == 0) or
+// coefficient M if A is transposed (transA == 1).  Symmetric for B with
+// {k, n} arms and GEMV-W with {m, k} arms.
+//
+// The structural classifier guarantees the address has exactly two
+// distinct RANGE axes (it bails on conv-shaped addresses with 3+ ranges
+// and on dot-shaped addresses with only 1).  This extractor relies on
+// that and only inspects the IADD-of-arms shape.
+//
+// Returns 1 on success.  Returns 0 when:
+//   - `addr` isn't a UOP_IADD,
+//   - either arm doesn't decode as RANGE or IMUL(RANGE, ICONST),
+//   - neither arm matches the requested reduce axis,
+//   - both arms reference the same axis id.
+
+// Decode an arm of the IADD into (axis_id, coeff).  Returns 1 on success.
+// Accepts either operand order in the IMUL (RANGE on lhs+ICONST on rhs,
+// or the reverse) -- the int simplifier `uop_match_const_mul` already
+// canonicalises the two, but the lifter constructs RANGE-on-lhs.
+static int udg_extract_addr_arm(Term arm, u32 *out_axis_id, u32 *out_coeff) {
+  if (term_tag(arm) != TAG_UOP) return 0;
+  u32 op = term_ext(arm);
+  if (op == UOP_RANGE) {
+    *out_axis_id = uop_range_axis_id(arm);
+    *out_coeff   = 1;
+    return 1;
+  }
+  if (op != UOP_IMUL) return 0;
+  Term lhs = heap_read(term_val(arm) + 0);
+  Term rhs = heap_read(term_val(arm) + 1);
+  Term r = 0; Term c = 0;
+  if (term_tag(lhs) == TAG_UOP && term_ext(lhs) == UOP_RANGE
+      && term_tag(rhs) == TAG_UOP && term_ext(rhs) == UOP_CONST) {
+    r = lhs; c = rhs;
+  } else if (term_tag(rhs) == TAG_UOP && term_ext(rhs) == UOP_RANGE
+             && term_tag(lhs) == TAG_UOP && term_ext(lhs) == UOP_CONST) {
+    r = rhs; c = lhs;
+  } else {
+    return 0;
+  }
+  Term cnum = heap_read(term_val(c) + 0);
+  if (term_tag(cnum) != TAG_NUM) return 0;
+  u32 cv = (u32)term_val(cnum);
+  if (cv == 0) return 0;
+  *out_axis_id = uop_range_axis_id(r);
+  *out_coeff   = cv;
+  return 1;
+}
+
+int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
+                                             u32 *out_red_coeff,
+                                             u32 *out_other_coeff,
+                                             u32 *out_other_axis_id) {
+  if (out_red_coeff != NULL)     *out_red_coeff = 0;
+  if (out_other_coeff != NULL)   *out_other_coeff = 0;
+  if (out_other_axis_id != NULL) *out_other_axis_id = 0;
+  if (term_tag(addr) != TAG_UOP || term_ext(addr) != UOP_IADD) return 0;
+  Term arm1 = heap_read(term_val(addr) + 0);
+  Term arm2 = heap_read(term_val(addr) + 1);
+  u32 axis1 = 0, axis2 = 0, c1 = 0, c2 = 0;
+  if (!udg_extract_addr_arm(arm1, &axis1, &c1)) return 0;
+  if (!udg_extract_addr_arm(arm2, &axis2, &c2)) return 0;
+  if (axis1 == axis2) return 0;
+
+  // Identify which arm is the reduce ("k") arm.  The other is the
+  // ld-bearing axis (m for A, n for B, m for W).
+  u32 k_coeff, other_coeff, other_axis;
+  if (axis1 == red_axis_id) {
+    k_coeff = c1; other_coeff = c2; other_axis = axis2;
+  } else if (axis2 == red_axis_id) {
+    k_coeff = c2; other_coeff = c1; other_axis = axis1;
+  } else {
+    return 0;
+  }
+
+  if (out_red_coeff != NULL)     *out_red_coeff = k_coeff;
+  if (out_other_coeff != NULL)   *out_other_coeff = other_coeff;
+  if (out_other_axis_id != NULL) *out_other_axis_id = other_axis;
+  return 1;
+}
+
 // View-strides matcher: matmul kernels run inside a 3-axis range
 // nest [M, K, N], with one operand broadcast-zero on N (operand A)
 // and the other broadcast-zero on M (operand B).  Mirrors
 // tile_gemm_views_ok in src/schedule/tile.c exactly so the BLAS
 // dispatcher accepts the same set of layouts the legacy
 // tile_analyze_gemm path accepted.
+//
+// Kept as the input_views-based fallback for the hybrid path: when the
+// DAG-side extractor (uop_dag_extract_matmul_strides_from_addr) declines
+// because the address doesn't match the canonical IADD-of-(IMUL+RANGE)
+// shape (e.g. a future affine-coalesced layout), the matmul classifier
+// falls back to this view reader.  Once every shape `lift_scalar_index`
+// can produce decodes via the DAG path, this helper retires.
 //
 // Returns 1 with *out_ld + *out_trans on success; 0 otherwise.
 // `is_a` selects the A vs B stride pattern (different broadcast axis).
@@ -399,12 +504,15 @@ int uop_dag_classify_matmul_shape(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagGemmShape *out) {
   if (root == 0 || ke == NULL || out == NULL) return 0;
-  if (ke->input_views == NULL || ke->n_inputs < 2) return 0;
+  if (ke->n_inputs < 2) return 0;
 
   Term a_idx = 0, b_idx = 0;
   u32 k_extent = 0;
   if (!udg_classify_matmul_store(root, &k_extent, &a_idx, &b_idx)) return 0;
   if (k_extent == 0) return 0;
+  // Reject K=1: the address arm collapses to bare RANGE(m) so transA is
+  // ambiguous (and BLAS reduces to outer product anyway -- degenerate).
+  if (k_extent == 1) return 0;
 
   // Output buf: STORE.src[0].  Must be a 2-D BUFFER with shape [M, N].
   Term buf_out = heap_read(term_val(root) + 0);
@@ -428,14 +536,58 @@ int uop_dag_classify_matmul_shape(Term root,
   if (a_input >= ke->n_inputs || b_input >= ke->n_inputs) return 0;
   if (a_input == b_input) return 0;
 
-  // Per-input stride pattern (from input_views[], set by emit_kernel
-  // _for_boundary alongside the lift) determines ldA / ldB / trans.
-  u32 ldA = 0, transA = 0;
-  u32 ldB = 0, transB = 0;
-  if (!udg_match_view_strides(&ke->input_views[a_input], M, N, k_extent,
-                              /*is_a=*/1, &ldA, &transA)) return 0;
-  if (!udg_match_view_strides(&ke->input_views[b_input], M, N, k_extent,
-                              /*is_a=*/0, &ldB, &transB)) return 0;
+  // Recover the reduce axis id from the (possibly-OPT-wrapped) REDUCE
+  // node so the stride extractor can identify the k-arm of each addr.
+  Term value = heap_read(term_val(root) + 2);
+  Term reduce = udg_peel_tc_opt(value);
+  if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
+  u32 red_axis_id = (u32)term_val(heap_read(term_val(reduce) + 2));
+
+  // INDEX_E.addr lives at heap_read(term_val(idx_term) + 1).
+  Term addr_a = heap_read(term_val(a_idx) + 1);
+  Term addr_b = heap_read(term_val(b_idx) + 1);
+
+  // DAG-side stride extraction (preferred).  The IADD-of-(IMUL+RANGE)
+  // shape encodes ldA/ldB/transA/transB without needing input_views[].
+  u32 ldA = 0, ldB = 0;
+  u32 transA = 0, transB = 0;
+  u32 a_red_coeff = 0, a_other_coeff = 0, axis_m = 0;
+  u32 b_red_coeff = 0, b_other_coeff = 0, axis_n = 0;
+  int dag_a_ok = uop_dag_extract_matmul_strides_from_addr(
+      addr_a, red_axis_id, &a_red_coeff, &a_other_coeff, &axis_m);
+  int dag_b_ok = uop_dag_extract_matmul_strides_from_addr(
+      addr_b, red_axis_id, &b_red_coeff, &b_other_coeff, &axis_n);
+
+  if (!dag_a_ok || !dag_b_ok) {
+    // Hybrid fallback: if the DAG path declined (unsupported addr shape)
+    // and input_views[] is populated, fall back to the legacy view-stride
+    // matcher.  Once every lift_scalar_index output decodes via the DAG,
+    // this fallback retires.
+    if (ke->input_views == NULL) return 0;
+    if (!udg_match_view_strides(&ke->input_views[a_input], M, N, k_extent,
+                                /*is_a=*/1, &ldA, &transA)) return 0;
+    if (!udg_match_view_strides(&ke->input_views[b_input], M, N, k_extent,
+                                /*is_a=*/0, &ldB, &transB)) return 0;
+  } else {
+    // Sanity: each arm's other_axis must be distinct (m != n).
+    if (axis_m == axis_n) return 0;
+    // BLAS convention (see uop_dag_extract_matmul_strides_from_addr docs):
+    //   A: ldA = max(red, other), transA = (red_coeff != 1)
+    //   B: ldB = max(red, other), transB = (other_coeff != 1)
+    // For A non-trans: red=1, other=K -> ldA=K, transA=0.
+    // For A trans:     red=M, other=1 -> ldA=M, transA=1.
+    // For B non-trans: red=N, other=1 -> ldB=N, transB=0.
+    // For B trans:     red=1, other=K -> ldB=K, transB=1.
+    ldA    = (a_red_coeff > a_other_coeff) ? a_red_coeff : a_other_coeff;
+    ldB    = (b_red_coeff > b_other_coeff) ? b_red_coeff : b_other_coeff;
+    transA = (a_red_coeff   != 1) ? 1 : 0;
+    transB = (b_other_coeff != 1) ? 1 : 0;
+    // Validate ld values match the output buffer dims when not transposed.
+    if (transA) { if (ldA != M) return 0; }
+    else        { if (ldA != k_extent) return 0; }
+    if (transB) { if (ldB != k_extent) return 0; }
+    else        { if (ldB != N) return 0; }
+  }
 
   // Uniform dtype: every BUFFER reachable from the store_root must
   // share dtype; mirrors tile_gemm_uniform_dtype's KProgOp gate.
@@ -509,24 +661,18 @@ int uop_dag_classify_dot_shape(Term root,
   if (uop_buffer_dtype(buf_a) != dt) return 0;
   if (uop_buffer_dtype(buf_b) != dt) return 0;
 
-  // Per-input view: must be contiguous rank-1 K elements (or rank-1
-  // strides {1}).  Mirrors the legacy DOT input-tid contiguity gate.
-  if (ke->input_views != NULL) {
-    View const *va = &ke->input_views[a_input];
-    View const *vb = &ke->input_views[b_input];
-    if (va->shape.ndim == 1) {
-      if (va->shape.dims[0] != k_extent || va->strides[0] != 1) return 0;
-    } else {
-      // Higher-rank views must still be contiguous K elements; bail
-      // for now (the legacy DOT path only saw rank-1 inputs).
-      return 0;
-    }
-    if (vb->shape.ndim == 1) {
-      if (vb->shape.dims[0] != k_extent || vb->strides[0] != 1) return 0;
-    } else {
-      return 0;
-    }
-  }
+  // input_views-decouple session 2: DOT addresses are bare RANGE(k)
+  // leaves -- the structural classifier `uop_classify_dot` already
+  // verified each INDEX_E.addr references exactly one range and that
+  // it's the reduce axis.  No stride extraction is needed: a bare
+  // RANGE address is implicitly stride-1 contiguous.  Buffer rank
+  // (rank-1 K elements) is implied by the buffer dim:
+  Term addr_a = heap_read(term_val(a_idx) + 1);
+  Term addr_b = heap_read(term_val(b_idx) + 1);
+  if (term_tag(addr_a) != TAG_UOP || term_ext(addr_a) != UOP_RANGE) return 0;
+  if (term_tag(addr_b) != TAG_UOP || term_ext(addr_b) != UOP_RANGE) return 0;
+  if (uop_buffer_ndim(buf_a) != 1 || uop_buffer_dim(buf_a, 0) != k_extent) return 0;
+  if (uop_buffer_ndim(buf_b) != 1 || uop_buffer_dim(buf_b, 0) != k_extent) return 0;
 
   out->dtype   = dt;
   out->K       = k_extent;
@@ -593,43 +739,70 @@ int uop_dag_classify_gemv_shape(Term root,
   if (uop_buffer_dtype(buf_w) != dt) return 0;
   if (uop_buffer_dtype(buf_x) != dt) return 0;
 
-  // Per-input view stride pattern.  W must be a {M,K} matrix with
-  // strides {K,1} (untransposed) or {1,M} (transposed).  x must be a
-  // {M,K} broadcast view (strides {0,1}), or a rank-1 {K} contig
-  // {1}, or a rank-2 {1,K} row {?,1}.  Mirrors tile_gemm_views_ok's
-  // N==1 path.
-  if (ke->input_views == NULL) return 0;
-  View const *vw = &ke->input_views[w_input];
-  View const *vx = &ke->input_views[x_input];
+  // input_views-decouple session 2: DAG-side stride extraction.
+  //
+  // W's address is `IADD(arm_m, arm_k)` -- the same matmul-A shape the
+  // session 2 extractor handles (the "ld" arm is the m-arm, the reduce
+  // arm is the k-arm).  x's address is bare RANGE(k) -- the structural
+  // classifier already verified it references precisely the reduce axis,
+  // so no stride extraction is needed for x.
+  Term addr_w = heap_read(term_val(w_idx) + 1);
+  Term addr_x = heap_read(term_val(x_idx) + 1);
+  if (term_tag(addr_x) != TAG_UOP || term_ext(addr_x) != UOP_RANGE) return 0;
 
-  u32 ldW = 0, transW = 0;
-  if (vw->shape.ndim == 2 && vw->shape.dims[0] == M
-      && vw->shape.dims[1] == k_extent
-      && vw->strides[0] == (i32)k_extent && vw->strides[1] == 1) {
-    ldW = k_extent;
-    transW = 0;
-  } else if (vw->shape.ndim == 2 && vw->shape.dims[0] == M
-             && vw->shape.dims[1] == k_extent
-             && vw->strides[0] == 1 && vw->strides[1] == (i32)M) {
-    ldW = M;
-    transW = 1;
+  u32 ldW = 0;
+  u32 transW = 0;
+  u32 w_red_coeff = 0, w_other_coeff = 0, axis_m = 0;
+  // x's bare RANGE leaf carries the reduce axis (classifier invariant).
+  u32 red_axis_id = uop_range_axis_id(addr_x);
+  int dag_w_ok = uop_dag_extract_matmul_strides_from_addr(
+      addr_w, red_axis_id, &w_red_coeff, &w_other_coeff, &axis_m);
+  (void)axis_m;
+
+  if (!dag_w_ok) {
+    // Hybrid fallback to legacy view reader.  Same shape validations as
+    // the original implementation; retained until every lift output
+    // decodes via the DAG path.
+    if (ke->input_views == NULL) return 0;
+    View const *vw = &ke->input_views[w_input];
+    View const *vx = &ke->input_views[x_input];
+    if (vw->shape.ndim == 2 && vw->shape.dims[0] == M
+        && vw->shape.dims[1] == k_extent
+        && vw->strides[0] == (i32)k_extent && vw->strides[1] == 1) {
+      ldW = k_extent;
+      transW = 0;
+    } else if (vw->shape.ndim == 2 && vw->shape.dims[0] == M
+               && vw->shape.dims[1] == k_extent
+               && vw->strides[0] == 1 && vw->strides[1] == (i32)M) {
+      ldW = M;
+      transW = 1;
+    } else {
+      return 0;
+    }
+
+    int x_ok = 0;
+    if (vx->shape.ndim == 1 && vx->shape.dims[0] == k_extent
+        && vx->strides[0] == 1) {
+      x_ok = 1;
+    } else if (vx->shape.ndim == 2 && vx->shape.dims[0] == 1
+               && vx->shape.dims[1] == k_extent && vx->strides[1] == 1) {
+      x_ok = 1;
+    } else if (vx->shape.ndim == 2 && vx->shape.dims[0] == M
+               && vx->shape.dims[1] == k_extent
+               && vx->strides[0] == 0 && vx->strides[1] == 1) {
+      x_ok = 1;
+    }
+    if (!x_ok) return 0;
   } else {
-    return 0;
+    // GEMV-W follows the matmul-A convention: m-arm carries ld in the
+    // natural layout, k-arm coefficient signals transpose.
+    //   non-trans: red=1,   other=K -> ldW=K, transW=0
+    //   trans:     red=M,   other=1 -> ldW=M, transW=1
+    ldW    = (w_red_coeff > w_other_coeff) ? w_red_coeff : w_other_coeff;
+    transW = (w_red_coeff != 1) ? 1 : 0;
+    if (transW) { if (ldW != M) return 0; }
+    else        { if (ldW != k_extent) return 0; }
   }
-
-  int x_ok = 0;
-  if (vx->shape.ndim == 1 && vx->shape.dims[0] == k_extent
-      && vx->strides[0] == 1) {
-    x_ok = 1;
-  } else if (vx->shape.ndim == 2 && vx->shape.dims[0] == 1
-             && vx->shape.dims[1] == k_extent && vx->strides[1] == 1) {
-    x_ok = 1;
-  } else if (vx->shape.ndim == 2 && vx->shape.dims[0] == M
-             && vx->shape.dims[1] == k_extent
-             && vx->strides[0] == 0 && vx->strides[1] == 1) {
-    x_ok = 1;
-  }
-  if (!x_ok) return 0;
 
   out->dtype   = dt;
   out->M       = M;

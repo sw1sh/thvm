@@ -2446,6 +2446,33 @@ int uop_dag_classify_matmul_shape(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagGemmShape *out);
 
+// input_views-decouple session 2: extract per-arm coefficients from a
+// 2-D matmul-style INDEX_E address built by lift_scalar_index.  The
+// address pattern for the matmul A operand under a 3-axis [M,K,N] lift
+// is either `IADD(IMUL(r_m, ICONST(K)), r_k)` (untransposed; ldA=K) or
+// `IADD(r_m, IMUL(r_k, ICONST(M)))` (transposed; ldA=M) -- and similarly
+// for B with the {k,n} pair, GEMV-W with {m,k}.  Both arms are decoded
+// raw: each is either bare RANGE (coefficient = 1) or IMUL(RANGE, ICONST)
+// (coefficient = ICONST.value).  The caller derives `ld` / `trans` from
+// the side-specific BLAS convention:
+//   matmul A: ldA = other_coeff, transA = (red_coeff != 1)
+//             except both flip when the address's k arm carries the
+//             non-1 coefficient, so robust formula:
+//                 ldA   = max(red_coeff, other_coeff)
+//                 transA = (red_coeff != 1)
+//   matmul B: ldB = max(red_coeff, other_coeff)
+//             transB = (other_coeff != 1)   -- B's "natural" layout
+//                                              has red_coeff != 1
+//   gemv W : same as matmul A
+// Returns 1 on success.  Returns 0 when the address doesn't match
+// IADD-of-(arm,arm) with each arm RANGE or IMUL(RANGE,ICONST), or when
+// neither arm references `red_axis_id`, or when both arms reference the
+// same axis.
+int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
+                                             u32 *out_red_coeff,
+                                             u32 *out_other_coeff,
+                                             u32 *out_other_axis_id);
+
 // Slice 8 (session 3): DAG-side shape extractors for DOT and GEMV.
 // Mirror `uop_dag_classify_matmul_shape` for the two simpler BLAS
 // shapes the legacy program[]-reading path was handling via its own
