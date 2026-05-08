@@ -871,8 +871,10 @@ typedef struct {
 //   TILE_LOOP_NEST(TILE_STORE(TILE_SCALAR_BODY(value_id)), TILE_AXIS...)
 // or, for scalar reducers,
 //   TILE_LOOP_NEST(TILE_STORE(TILE_REDUCE(TILE_SCALAR_BODY(value_id))), ...)
-// from a KernelEntry's scalar_uops[] + KernelAxes.  tile_sync_from_scalar
-// may instead seed a TILE_MMA root for recognized matmul programs.
+// from a KernelEntry's scalar_uops[] + KernelAxes.  Slice 8 session 5
+// retired the dedicated matmul TILE_MMA seeding path; matmul shape
+// facts now flow through ke->cached_lift.store_root via
+// uop_dag_classify_matmul_shape.
 // Dispatch consumes tile_uops only on opt-in tile paths; default
 // execution still follows the scalar/KProgOp routes.
 // Memory memory scope constants.  Used by TILE_AXIS.memory_scope,
@@ -966,18 +968,10 @@ typedef struct {
   u64 extra;                 // op-specific payload
 } TileUop;
 
-typedef struct {
-  u32 dtype;
-  u32 M;
-  u32 N;
-  u32 K;
-  u32 a_input;
-  u32 b_input;
-  u32 ldA;
-  u32 ldB;
-  u32 flags;       // bit 0 = transposed A storage, bit 1 = transposed B storage
-  u32 tile_size;   // 8/16/32; 16 is the default fixed Metal GEMM tile
-} TileGemmInfo;
+// Slice 8 session 5: TileGemmInfo retired with tile_analyze_gemm.
+// Matmul shape facts (M/N/K/ldA/ldB/flags/dtype/a_input/b_input) now
+// flow through `UopDagGemmShape` (src/uop/dag_scan.c) read directly
+// from `ke->cached_lift.store_root`.
 
 typedef struct {
   u32 dtype;
@@ -1024,8 +1018,10 @@ typedef struct {
   u32 axis_ids    [MAX_AXES];
   u32 axis_types  [MAX_AXES];
   u32 axis_extents[MAX_AXES];
-  u32 mma_tile_id;
-  TileGemmInfo mma;
+  // Slice 8 session 5: `mma_tile_id` + `mma` retired along with
+  // tile_analyze_gemm.  TILE_MMA roots are no longer constructed; the
+  // matmul shape is consumed from ke->cached_lift.store_root via
+  // uop_dag_classify_matmul_shape.
 } TilePlanInfo;
 
 // === Kernel lift to UOp DAG (forward decl) ===
@@ -2049,14 +2045,6 @@ fn int  tile_collect_plan_info(struct KernelEntry const *ke,
 fn u32  tile_loop_axis_count(struct KernelEntry const *ke);
 fn u32  tile_loop_axis_type(struct KernelEntry const *ke, u32 axis);
 fn u32  tile_loop_axis_extent(struct KernelEntry const *ke, u32 axis);
-// Recognize matmul-shaped MUL + REDUCE_SUM programs, including the
-// rank-1 TMatVec EXPAND(vector) variant, and recover the logical M/N/K
-// axes plus the physical input slots/leading dimensions.
-// `input_storage_numels` is optional; when supplied it must carry the
-// actual backing-buffer element counts for each input slot.
-int     tile_analyze_gemm(struct KernelEntry const *ke,
-                          u32 const *input_storage_numels,
-                          TileGemmInfo *out);
 // Recognize the im2col-fused Conv2D reduce template produced by the
 // lowered UOp graph.  Renderers use this as a tile template instead
 // of carrying backend-private conv pattern matchers.
@@ -2064,14 +2052,14 @@ int     tile_analyze_conv2d_flat(struct KernelEntry const *ke,
                                  TileConv2DInfo *out);
 int     tile_rejects_conv2d_flat_cin1(struct KernelEntry const *ke);
 fn int  tile_mma_size_supported(u32 tile);
-// Sync and collect a validated TILE_MMA plan.  Used by backends that
-// compile outside the single C translation unit.
-int     tile_collect_mma_plan(struct KernelEntry *ke, TileGemmInfo *out);
+// Slice 8 session 5: tile_analyze_gemm + tile_collect_mma_plan retired
+// (KProgOp-side matmul recognisers).  Matmul shape facts flow through
+// uop_dag_classify_matmul_shape over ke->cached_lift.store_root.
 // Seed a TILE_LOOP_NEST(TILE_STORE(...)) plan from scalar_uops + KernelAxes.
 // Returns 1 on success, 0 when scalar_uops is absent or malformed.
 fn int  tile_build_from_scalar(struct KernelEntry *ke);
-// Rebuild only when the cached tile plan is missing, invalid, was built
-// against an older KernelAxes version, or can be promoted to TILE_MMA.
+// Rebuild only when the cached tile plan is missing, invalid, or was
+// built against an older KernelAxes version.
 fn int  tile_sync_from_scalar(struct KernelEntry *ke);
 
 fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
@@ -2428,7 +2416,7 @@ int uop_dag_classify_matmul_shape(Term root,
 //   - out_buf is rank-1 numel=M
 //   - W view is rank-2 {M, K} contig with strides {K, 1}
 //   - x view is rank-2 {M, K} broadcast strides {0, 1} or rank-1 {K}
-//     strides {1}, etc -- mirrors tile_gemm_views_ok N==1 path.
+//     strides {1}, etc.
 //   - Recovers (dtype, M, K, w_input, x_input, ldW, transW).
 typedef struct {
   u32 dtype;

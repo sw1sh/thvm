@@ -79,47 +79,32 @@ static u32 propose_uop_reduce_axis_size(KernelEntry const *ke) {
   return uop_dag_reduce_axis_extent(ke->cached_lift.store_root);
 }
 
-// Slice 8 session 4: count TC tile-size proposal evaluations split
-// by which path validated the matmul shape -- DAG (uop_dag_classify
-// _matmul_shape over cached_lift.store_root) vs LEGACY
-// (tile_analyze_gemm over program[]).  Mirrors the apply_opt.c TC
-// gate counter pattern so test_metal_real / test_tile_graph can
-// assert post-migration coverage.
-static u64 PROPOSE_TC_DAG    = 0;
-static u64 PROPOSE_TC_LEGACY = 0;
+// Slice 8 session 5: TC tile-size proposer counter.  The legacy
+// fallback arm (tile_analyze_gemm over program[]) retired with session
+// 5's tile.c deletion; the only remaining gate is the DAG classifier.
+// Counter retained for surgical-suite coverage assertions.
+static u64 PROPOSE_TC_DAG = 0;
 
 fn u64 kernel_opts_propose_tc_dag_count(void) {
   return PROPOSE_TC_DAG;
 }
-fn u64 kernel_opts_propose_tc_legacy_count(void) {
-  return PROPOSE_TC_LEGACY;
-}
 fn void kernel_opts_propose_tc_counters_reset(void) {
-  PROPOSE_TC_DAG    = 0;
-  PROPOSE_TC_LEGACY = 0;
+  PROPOSE_TC_DAG = 0;
 }
 
-// Slice 8 session 4: matmul-shape + dtype gate for the TC tile-size
-// proposer.  Same DAG-first / legacy-fallback strategy as
-// apply_opt_tc_classify, but its own counter so we can tell the two
-// callsites apart in coverage tests.
+// Slice 8 session 5: matmul-shape + dtype gate for the TC tile-size
+// proposer reads uop_dag_classify_matmul_shape over
+// ke->cached_lift.store_root.
 static int propose_tc_classify(KernelEntry const *ke, u32 *out_dtype) {
-  if (ke != NULL && ke->cached_lift.store_root != 0) {
-    UopDagGemmShape shape;
-    if (uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke,
-                                      &shape)) {
-      if (out_dtype != NULL) *out_dtype = shape.dtype;
-      PROPOSE_TC_DAG++;
-      return 1;
-    }
+  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
+  UopDagGemmShape shape;
+  if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke,
+                                     &shape)) {
+    return 0;
   }
-  TileGemmInfo gemm;
-  if (tile_analyze_gemm(ke, NULL, &gemm)) {
-    if (out_dtype != NULL) *out_dtype = gemm.dtype;
-    PROPOSE_TC_LEGACY++;
-    return 1;
-  }
-  return 0;
+  if (out_dtype != NULL) *out_dtype = shape.dtype;
+  PROPOSE_TC_DAG++;
+  return 1;
 }
 
 static u32 propose_reduce_axis_size(KernelEntry const *ke) {

@@ -23,9 +23,11 @@
 // and run_tile_jit_1 below routes through it.  Tests that string-
 // matched the rendered C source are now vacuous on these stubs --
 // the live coverage they offered (TILE_MMA construction,
-// tile_analyze_gemm, dispatch-side metal-gemm-with-TC routing)
-// runs through the Metal path / cg_emit_tile_metal tests which are
-// untouched.
+// tile_analyze_gemm, dispatch-side metal-gemm-with-TC routing) was
+// retired with the deletion of the underlying KProgOp pattern
+// matchers in slice 8 session 5; the surviving coverage now lives in
+// `test_uop_recognise_tc.c` (DAG-side classifier) and
+// `test_metal_real.c` (live cblas dispatcher integration).
 static int cg_supports_tile  (KernelEntry const *ke) { (void)ke; return 0; }
 static int cg_supports_scalar(KernelEntry const *ke) { (void)ke; return 0; }
 static char *cg_emit_tile    (KernelEntry const *ke) { (void)ke; return NULL; }
@@ -457,214 +459,19 @@ int main(void) {
   CHECK(tile_validate(ke));
   kernel_free_arrays(ke);
 
-  TEST_BEGIN("tile-graph/gemm-analysis-normal-and-transposed");
-  build_kprog_gemm(ke, 2, 3, 4);
-  u32 storage_numels[2] = {8, 12};
-  TileGemmInfo gemm = {0};
-  CHECK(tile_analyze_gemm(ke, storage_numels, &gemm));
-  CHECK_EQ(gemm.dtype, (u32)DT_FP32);
-  CHECK_EQ(gemm.M, 2u);
-  CHECK_EQ(gemm.N, 3u);
-  CHECK_EQ(gemm.K, 4u);
-  CHECK_EQ(gemm.a_input, 0u);
-  CHECK_EQ(gemm.b_input, 1u);
-  CHECK_EQ(gemm.ldA, 4u);
-  CHECK_EQ(gemm.ldB, 3u);
-  CHECK_EQ(gemm.flags, 0u);
-  CHECK_EQ(gemm.tile_size, 16u);
-
-  test_set_view3(&ke->input_views[1], 2, 4, 3, 0, 1, 4);
-  CHECK(tile_analyze_gemm(ke, storage_numels, &gemm));
-  CHECK_EQ(gemm.b_input, 1u);
-  CHECK_EQ(gemm.ldB, 4u);
-  CHECK_EQ(gemm.flags, 2u);
-  kernel_free_arrays(ke);
-
-  TEST_BEGIN("tile-graph/gemm-analysis-square-view-disambiguates");
-  build_kprog_gemm(ke, 4, 4, 4);
-  test_set_view3(&ke->input_views[0], 4, 4, 4, 0, 4, 1);
-  test_set_view3(&ke->input_views[1], 4, 4, 4, 4, 1, 0);
-  u32 square_storage_numels[2] = {16, 16};
-  CHECK(tile_analyze_gemm(ke, square_storage_numels, &gemm));
-  CHECK_EQ(gemm.a_input, 1u);
-  CHECK_EQ(gemm.b_input, 0u);
-  CHECK_EQ(gemm.flags, 0u);
-  kernel_free_arrays(ke);
-
-  TEST_BEGIN("tile-graph/gemv-expand-promotes-to-mma-plan");
-  build_kprog_gemv_expand(ke, 2, 3);
-  u32 gemv_storage_numels[2] = {6, 3};
-  CHECK(tile_analyze_gemm(ke, gemv_storage_numels, &gemm));
-  CHECK_EQ(gemm.dtype, (u32)DT_FP32);
-  CHECK_EQ(gemm.M, 2u);
-  CHECK_EQ(gemm.N, 1u);
-  CHECK_EQ(gemm.K, 3u);
-  CHECK_EQ(gemm.a_input, 0u);
-  CHECK_EQ(gemm.b_input, 1u);
-  CHECK_EQ(gemm.ldA, 3u);
-  CHECK_EQ(gemm.ldB, 1u);
-  CHECK_EQ(gemm.flags, 0u);
-  CHECK(tile_sync_from_scalar(ke));
-  CHECK(tile_validate(ke));
-  CHECK_EQ(ke->tile_uops[ke->tile_root].op, TILE_MMA);
-  CHECK(tile_collect_plan_info(ke, &info));
-  CHECK_EQ(info.mma.M, 2u);
-  CHECK_EQ(info.mma.N, 1u);
-  CHECK_EQ(info.mma.K, 3u);
-  kernel_free_arrays(ke);
-
-  TEST_BEGIN("tile-graph/build-mma-plan-from-gemm");
-  build_kprog_gemm(ke, 2, 3, 4);
-  CHECK(tile_sync_from_scalar(ke));
-  CHECK(tile_validate(ke));
-  CHECK_EQ(ke->tile_uops[ke->tile_root].op, TILE_MMA);
-  CHECK_EQ(ke->n_tile_uops, 5u);
-  CHECK(tile_collect_plan_info(ke, &info));
-  CHECK_EQ(info.root_id, ke->tile_root);
-  CHECK_EQ(info.mma_tile_id, ke->tile_root);
-  CHECK_EQ(info.dtype, (u32)DT_FP32);
-  CHECK_EQ(info.n_axes, 3u);
-  CHECK_EQ(info.axis_types[0], (u32)KAX_LOOP);
-  CHECK_EQ(info.axis_types[1], (u32)KAX_LOOP);
-  CHECK_EQ(info.axis_types[2], (u32)KAX_REDUCE);
-  CHECK_EQ(info.axis_extents[0], 2u);
-  CHECK_EQ(info.axis_extents[1], 3u);
-  CHECK_EQ(info.axis_extents[2], 4u);
-  CHECK_EQ(info.mma.M, 2u);
-  CHECK_EQ(info.mma.N, 3u);
-  CHECK_EQ(info.mma.K, 4u);
-  CHECK_EQ(info.mma.a_input, 0u);
-  CHECK_EQ(info.mma.b_input, 1u);
-  CHECK_EQ(info.mma.ldA, 4u);
-  CHECK_EQ(info.mma.ldB, 3u);
-  CHECK_EQ(info.mma.flags, 0u);
-  CHECK_EQ(info.mma.tile_size, 16u);
-  // E9: drive [LOOP=2, LOOP=3, REDUCE=4] via the writer trio
-  // (output_shape + tail-reduce program signal -> axes_default_for).
-  ke->output_shape.ndim    = 2;
-  ke->output_shape.dims[0] = 2;
-  ke->output_shape.dims[1] = 3;
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  axes_default_for(ke);
-  // Slice 8 session 4: synthetic build_kprog_gemm leaves
-  // cached_lift.store_root unset so the migrated KOP_TC gate must
-  // fall back to tile_analyze_gemm.  Counter probes assert the
-  // LEGACY arm fires here and the DAG arm stays at 0.
-  kernel_apply_opt_tc_counters_reset();
-  KOpt tc8 = { .op = KOP_TC, .axis = 0, .arg = 8 };
-  CHECK(kernel_apply_opt(ke, tc8));
-  CHECK_EQ(kernel_apply_opt_tc_legacy_count(), 1u);
-  CHECK_EQ(kernel_apply_opt_tc_dag_count(),    0u);
-  CHECK_EQ(ke->axes->n_applied, 1u);
-  CHECK_EQ(ke->axes->applied_opts[0].op, (u32)KOP_TC);
-  CHECK(tile_sync_from_scalar(ke));
-  CHECK(tile_collect_plan_info(ke, &info));
-  CHECK_EQ(info.mma.tile_size, 8u);
-  KOpt tc7 = { .op = KOP_TC, .axis = 0, .arg = 7 };
-  CHECK(!kernel_apply_opt(ke, tc7));
-  // tc7 fails on tile_mma_size_supported() before the matmul gate,
-  // so the counter doesn't advance.
-  CHECK_EQ(kernel_apply_opt_tc_legacy_count(), 1u);
-  CHECK_EQ(kernel_apply_opt_tc_dag_count(),    0u);
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes = NULL;
-  kernel_free_arrays(ke);
-
-  TEST_BEGIN("tile-graph/metal-gemm-proposes-tc");
-  build_kprog_gemm(ke, 16, 16, 16);
-  // E9: drive [LOOP=16, LOOP=16, REDUCE=16] via the writer trio.
-  ke->output_shape.ndim    = 2;
-  ke->output_shape.dims[0] = 16;
-  ke->output_shape.dims[1] = 16;
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  axes_default_for(ke);
-  setenv("THVM_BACKEND", "metal", 1);
-  // Slice 8 session 4: counter probe for the propose-side TC gate.
-  // build_kprog_gemm has no cached_lift, so the LEGACY arm fires.
-  kernel_opts_propose_tc_counters_reset();
-  KOpt tc_cands[16];
-  u32 n_tc = kernel_opts_propose(ke, tc_cands,
-                                 (u32)(sizeof(tc_cands)/sizeof(*tc_cands)));
-  CHECK_EQ(kernel_opts_propose_tc_legacy_count(), 1u);
-  CHECK_EQ(kernel_opts_propose_tc_dag_count(),    0u);
-  CHECK_EQ(n_tc, 3u);
-  CHECK_EQ(tc_cands[0].op, (u32)KOP_TC);
-  CHECK_EQ(tc_cands[0].axis, 0u);
-  CHECK_EQ(tc_cands[0].arg, 32u);
-  CHECK_EQ(tc_cands[1].op, (u32)KOP_TC);
-  CHECK_EQ(tc_cands[1].arg, 16u);
-  CHECK_EQ(tc_cands[2].op, (u32)KOP_TC);
-  CHECK_EQ(tc_cands[2].arg, 8u);
-  unsetenv("THVM_BACKEND");
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes = NULL;
-  kernel_free_arrays(ke);
-
-  // Slice 8 session 4: DAG-arm coverage for the propose / apply_opt
-  // KOP_TC migrations.  Lift the synthetic GEMM kernel into a UOp DAG
-  // via kernel_lift_to_uop, populate cached_lift.store_root, and
-  // re-run propose + apply_opt -- both MUST take the DAG arm.
-  TEST_BEGIN("tile-graph/metal-gemm-tc-via-cached-lift-dag");
-  build_kprog_gemm(ke, 16, 16, 16);
-  ke->output_shape.ndim    = 2;
-  ke->output_shape.dims[0] = 16;
-  ke->output_shape.dims[1] = 16;
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  axes_default_for(ke);
-  // Lift the synthetic GEMM into a UOp DAG (kernel_lift_from_gemm
-  // path; bypasses rangeify since scalar_uops is NULL).  Once
-  // populated, both the propose-side and apply_opt-side TC gates
-  // route through uop_dag_classify_matmul_shape rather than
-  // tile_analyze_gemm.
-  CHECK(kernel_lift_to_uop(ke, &ke->cached_lift));
-  CHECK(ke->cached_lift.store_root != 0);
-  setenv("THVM_BACKEND", "metal", 1);
-  kernel_opts_propose_tc_counters_reset();
-  KOpt tc_dag_cands[16];
-  u32 n_tc_dag = kernel_opts_propose(ke, tc_dag_cands,
-                                     (u32)(sizeof(tc_dag_cands)
-                                           /sizeof(*tc_dag_cands)));
-  CHECK_EQ(n_tc_dag, 3u);
-  CHECK_EQ(kernel_opts_propose_tc_dag_count(),    1u);
-  CHECK_EQ(kernel_opts_propose_tc_legacy_count(), 0u);
-  // apply_opt KOP_TC gate also takes the DAG arm now.
-  kernel_apply_opt_tc_counters_reset();
-  KOpt tc16_dag = { .op = KOP_TC, .axis = 0, .arg = 16 };
-  CHECK(kernel_apply_opt(ke, tc16_dag));
-  CHECK_EQ(kernel_apply_opt_tc_dag_count(),    1u);
-  CHECK_EQ(kernel_apply_opt_tc_legacy_count(), 0u);
-  unsetenv("THVM_BACKEND");
-  ke->cached_lift.store_root = 0;
-  ke->cached_lift.n_inputs   = 0;
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes = NULL;
-  kernel_free_arrays(ke);
-
-  TEST_BEGIN("tile-graph/metal-gemv-expand-proposes-tc");
-  build_kprog_gemv_expand(ke, 16, 32);
-  // E9: drive [LOOP=16, REDUCE=32] via the writer trio.
-  ke->output_shape.ndim    = 1;
-  ke->output_shape.dims[0] = 16;
-  ke->axes = &ke->_local_axes;
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  axes_default_for(ke);
-  setenv("THVM_BACKEND", "metal", 1);
-  n_tc = kernel_opts_propose(ke, tc_cands,
-                             (u32)(sizeof(tc_cands)/sizeof(*tc_cands)));
-  CHECK_EQ(n_tc, 3u);
-  CHECK_EQ(tc_cands[0].op, (u32)KOP_TC);
-  CHECK_EQ(tc_cands[0].arg, 32u);
-  CHECK_EQ(tc_cands[1].op, (u32)KOP_TC);
-  CHECK_EQ(tc_cands[1].arg, 16u);
-  CHECK_EQ(tc_cands[2].op, (u32)KOP_TC);
-  CHECK_EQ(tc_cands[2].arg, 8u);
-  unsetenv("THVM_BACKEND");
-  memset(ke->axes, 0, sizeof(KernelAxes));
-  ke->axes = NULL;
-  kernel_free_arrays(ke);
+  // Slice 8 session 5: TileGemmInfo / tile_analyze_gemm /
+  // tile_collect_mma_plan / tile_build_mma_from_gemm retired.  The
+  // direct unit tests for KProgOp matmul pattern matching
+  // (`gemm-analysis-normal-and-transposed`,
+  // `gemm-analysis-square-view-disambiguates`,
+  // `gemv-expand-promotes-to-mma-plan`,
+  // `build-mma-plan-from-gemm`) and the legacy-arm coverage tests
+  // (`metal-gemm-proposes-tc`, `metal-gemv-expand-proposes-tc`,
+  // `metal-gemm-tc-via-cached-lift-dag`) deleted with the underlying
+  // pattern matchers.  Equivalent shape-recognition coverage is in
+  // `test_uop_recognise_tc.c` (DAG-side `uop_dag_classify_matmul_shape`)
+  // and the live `metal-real/{gemm,dot,gemv}-cpu-routes-through-cblas`
+  // checks in `test_metal_real.c` cover the dispatcher integration.
 
   TEST_BEGIN("tile-graph/conv2d-flat-analysis-and-metal-source");
   build_kprog_conv2d_flat(ke);
