@@ -236,8 +236,13 @@ static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
     // implies n_axes + full_shape[] equality.  The redundant
     // n_axes/full_shape comparisons retire here; collapse to
     // applied_opts.
+    // E9 session 3 piece B-lite: route ke->axes applied_opts read via
+    // tile_anno facade so the eventual ownership move is a single-file
+    // change.  Slot side stays direct (KAxisCacheSlot embeds KernelAxes
+    // by value -- not a KernelEntry context).
     if (!kopts_equal(s->axes.applied_opts, s->axes.n_applied,
-                     ke->axes->applied_opts, ke->axes->n_applied)) {
+                     tile_anno_applied_opts(ke),
+                     tile_anno_applied_opts_count(ke))) {
       return 0;
     }
   }

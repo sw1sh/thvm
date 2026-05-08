@@ -2363,8 +2363,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // the rules' simulation and the lifter's structural replay --
     // a missing UPatRule that wedge 2+ has to land.  The check
     // aborts loudly so divergence can't slip past CI.
-    if (ke->cached_lift.store_root && ke->axes != NULL
-        && ke->axes->n_applied > 0) {
+    // E9 session 3 piece B-lite: read applied_opts via the tile_anno
+    // facade so the eventual ownership move (KernelAxes -> KernelEntry
+    // or a private writer struct) is a single-file change.
+    KOpt const *m_opts   = tile_anno_applied_opts(ke);
+    u32         m_n_app  = tile_anno_applied_opts_count(ke);
+    if (ke->cached_lift.store_root && m_opts != NULL && m_n_app > 0) {
       char const *val_e = getenv("THVM_E9_VALIDATE");
       // E9-prep wedge 2: uop_apply_split_dag composes the split-class
       // entries (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG
@@ -2384,14 +2388,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
       // would stamp the pre-split leaves which split-DAG would then
       // replace -- losing the stamps.
       Term root_after_split = uop_apply_split_dag(ke->cached_lift.store_root,
-                                                  ke->axes->applied_opts,
-                                                  ke->axes->n_applied);
+                                                  m_opts, m_n_app);
       if (val_e != NULL && val_e[0] == '1') {
         u32 fires = 0;
         Term post = uop_apply_kernel_opts_validate(
             root_after_split,
-            ke->axes->applied_opts,
-            ke->axes->n_applied,
+            m_opts, m_n_app,
             &fires);
         if (fires != 0) {
           fprintf(stderr,
@@ -2399,15 +2401,13 @@ static Term emit_kernel_for_boundary(u32 bi) {
                   "on kernel kid=%u (fires=%u, n_applied=%u). The unified "
                   "UPatRule pass disagrees with kernel_lift's structural "
                   "replay on axis_type stamping.\n",
-                  kid, fires, (u32)ke->axes->n_applied);
+                  kid, fires, m_n_app);
           abort();
         }
         ke->cached_lift.store_root = post;
         ke->compute_root           = post;
       } else {
-        Term post = uop_apply_kernel_opts(root_after_split,
-                                          ke->axes->applied_opts,
-                                          ke->axes->n_applied);
+        Term post = uop_apply_kernel_opts(root_after_split, m_opts, m_n_app);
         ke->cached_lift.store_root = post;
         ke->compute_root           = post;
       }

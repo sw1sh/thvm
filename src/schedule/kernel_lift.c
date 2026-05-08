@@ -1523,8 +1523,11 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     u32 axes_idx = n_buf + per_use_idx;
     per_use_idx++;
     if (orig_kax != NULL && axes_idx < axes_resolve_n_axes(ke)) {
-      for (u32 oi = 0; oi < (u32)orig_kax->n_applied; oi++) {
-        KOpt const *o = &orig_kax->applied_opts[oi];
+      // E9 session 3 piece B-lite: applied_opts via tile_anno facade.
+      KOpt const *applied_opts_p = tile_anno_applied_opts(ke);
+      u32         applied_opts_n = tile_anno_applied_opts_count(ke);
+      for (u32 oi = 0; oi < applied_opts_n; oi++) {
+        KOpt const *o = &applied_opts_p[oi];
         if (o->axis == (u8)axes_idx
             && (o->op == KOP_GROUP || o->op == KOP_GROUPTOP)
             && o->arg > 0
