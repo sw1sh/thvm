@@ -120,7 +120,6 @@ fn u32 grad_target_dtype(void) {
   if (target != 0) term_dtype_in(target, 0, &dt);
   return dt;
 }
-typedef struct { Term fwd; Term bwd; u64 loc; } GradPair;
 static u64 grad_cell_alloc(Term child) {
   u64 c = heap_alloc(3);
   heap_set(c + 0, child);
@@ -425,14 +424,6 @@ static Term grad_bwd_for_child(Term child, Term gy_for_child) {
 done:
   grad_memo_insert(child, gy_for_child, target, result);
   return result;
-}
-
-// One-shot helper: allocate cell, write gy, return {fwd, bwd, loc}.
-static GradPair grad_pair_with_gy(Term child, Term gy_for_child) {
-  u64 c = grad_cell_alloc(child);
-  heap_set(c + 1, gy_for_child);
-  GradPair p = { grad_fwd_of(c), grad_bwd_of(c), c };
-  return p;
 }
 
 static Term grad_accum(Term acc, Term add) {
