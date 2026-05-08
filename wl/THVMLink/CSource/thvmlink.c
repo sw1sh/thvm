@@ -2101,17 +2101,12 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_tile_plan_info(WolframLibraryData libData,
       dst[idx++] = (mint)info.axis_types[i];
       dst[idx++] = (mint)info.axis_extents[i];
     }
-    dst[idx++] = (mint)info.mma_tile_id;
-    dst[idx++] = (mint)info.mma.dtype;
-    dst[idx++] = (mint)info.mma.M;
-    dst[idx++] = (mint)info.mma.N;
-    dst[idx++] = (mint)info.mma.K;
-    dst[idx++] = (mint)info.mma.a_input;
-    dst[idx++] = (mint)info.mma.b_input;
-    dst[idx++] = (mint)info.mma.ldA;
-    dst[idx++] = (mint)info.mma.ldB;
-    dst[idx++] = (mint)info.mma.flags;
-    dst[idx++] = (mint)info.mma.tile_size;
+    // Slice 8 session 5 retired TilePlanInfo.mma_tile_id and TilePlanInfo.mma.
+    // TILE_MMA roots are no longer constructed by any in-tree path; matmul
+    // dispatch goes through cached_lift.store_root + recognise_tc instead.
+    // Emit 11 zeros to preserve the wire format -- WL TKernelTilePlan reads
+    // mma_tile_id == 0 as Missing["NotMMA"] (Kernel.wl:888).
+    for (u32 i = 0; i < 11; i++) dst[idx++] = 0;
   }
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
