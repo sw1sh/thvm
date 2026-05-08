@@ -2532,6 +2532,44 @@ int uop_dag_classify_gemv_shape(Term root,
 int uop_dag_classify_conv2d_flat_shape(Term root,
                                        struct KernelEntry const *ke);
 
+// === input_views-decouple session 1 (conv2d-flat): full-shape extractor ===
+// Inverts kernel_lift_from_conv2d's IDIV/IMOD address decomposition so
+// the conv2d shape facts can flow from the lifted DAG instead of from
+// `ke->input_views[]`.  Mirrors session 2's matmul/dot/gemv migration
+// pattern but on the IDIV/IMOD-laden conv addresses.
+//
+// In-scope: single-input non-degenerate conv2d (c_in*kh*kw > 1, kh>=1,
+// kw>=1; multi-input IWHERE chain handled by the caller via the
+// existing input_views fallback).
+//
+// Returns 1 with `out` filled iff the W and X addresses both decode
+// cleanly; 0 otherwise (caller falls back to the input_views reader).
+typedef struct {
+  u32 c_out;
+  u32 c_in;
+  u32 kh;
+  u32 kw;
+  u32 h_out;
+  u32 w_out;
+  u32 batch;
+  u32 patches;          // batch * spatial_patches
+  u32 spatial_patches;  // h_out * w_out
+  i32 w_offset;
+  i32 w_stride0;
+  i32 w_stride1;
+  i32 x_offset;
+  i32 x_stride_b;
+  i32 x_stride0;
+  i32 x_stride1;
+  i32 x_stride2;
+  u32 axis_r_out;       // RANGE id for the LOOP/output axis (= 0 from lifter)
+  u32 axis_r_q;         // RANGE id for the REDUCE/q axis    (= 1 from lifter)
+} UopDagConv2dFlatShape;
+
+int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
+                                      struct KernelEntry const *ke,
+                                      UopDagConv2dFlatShape *out);
+
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
 // `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).

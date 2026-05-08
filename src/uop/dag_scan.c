@@ -858,3 +858,583 @@ int uop_dag_classify_conv2d_flat_shape(Term root,
   if (term_val(kind) != REDUCE_SUM) return 0;
   return 1;
 }
+
+// === input_views-decouple session 1 (conv2d-flat): DAG-side full-shape ====
+//
+// Inverts `kernel_lift_from_conv2d` (src/schedule/kernel_lift.c:981-1108)
+// for the single-input non-degenerate conv2d case so the conv shape facts
+// (c_out, c_in, kh, kw, batch, h_out, w_out, w_offset, w_stride0/1,
+// x_offset, x_stride_b/0/1/2) flow from the lifted UOp DAG instead of
+// from `ke->input_views[]`.  The IDIV/IMOD decomposition is deterministic
+// in the forward direction; given knowledge of which divisors mean what,
+// the inverse is a pattern match on the address tree.
+//
+// The simplifier (src/uop/index_simplify.c) rewrites the construction-
+// time tree:
+//   * `(c*x)/c -> x`, `(c*x+y)/c -> x` (when y < c)
+//   * `(r % (k*c))/c -> (r/c) % k` (nested div-mod)
+//   * `(r % (k*c)) % c -> r % c`   (nested mod-mod)
+//   * `IMOD by 1 -> 0`, `IDIV by 1 -> a`, `RANGE % bound -> RANGE`
+//   * IADD/IMUL absorbing 0/1 identities
+// so we match BOTH the lifter-produced shape AND the canonical
+// post-simplifier shape:
+//   * lifter: `co = r_out / patches`, `bi = (r_out % patches) / spatial`
+//             `oh = ((r_out%patches)%spatial) / w_out`,
+//             `ow = ((r_out%patches)%spatial) % w_out`
+//   * canonical (after simplification, batch>=1, spatial = h_out*w_out):
+//             `co = r_out / patches`,
+//             `bi = (r_out / spatial) % batch` (or 0 if batch=1),
+//             `oh = (r_out / w_out) % h_out`,
+//             `ow = r_out % w_out`
+// Same for r_q -> ci, kh_v, kw_v.
+//
+// Out-of-scope for this session (deferred):
+//   * Multi-input IWHERE chain (lifter itself reads input_views at
+//     kernel_lift.c:1070 so the lift is fundamentally tied; the DAG
+//     extractor falls back to input_views in this case).
+//   * Degenerate kh==kw==1 (kh_v / kw_v collapse to 0 leaving no IMOD
+//     marker for k-axis dims).  KRED == r_q.extent fully determines
+//     these but the addr-only path can't disambiguate; we fall back.
+//
+// Returns 1 with `out` filled iff the DAG shape decoded cleanly; 0
+// otherwise -- callers fall back to the input_views[] reader.
+
+// Match `IDIV(t, ICONST(*divisor))` (constant divisor only).
+static int udg_match_idiv_const(Term t, Term *out_num, u32 *out_div) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IDIV) return 0;
+  Term a = heap_read(term_val(t) + 0);
+  Term b = heap_read(term_val(t) + 1);
+  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_CONST) return 0;
+  Term bnum = heap_read(term_val(b) + 0);
+  if (term_tag(bnum) != TAG_NUM) return 0;
+  *out_num = a;
+  *out_div = (u32)term_val(bnum);
+  return 1;
+}
+
+// Match `IMOD(t, ICONST(*divisor))` (constant divisor only).
+static int udg_match_imod_const(Term t, Term *out_num, u32 *out_div) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IMOD) return 0;
+  Term a = heap_read(term_val(t) + 0);
+  Term b = heap_read(term_val(t) + 1);
+  if (term_tag(b) != TAG_UOP || term_ext(b) != UOP_CONST) return 0;
+  Term bnum = heap_read(term_val(b) + 0);
+  if (term_tag(bnum) != TAG_NUM) return 0;
+  *out_num = a;
+  *out_div = (u32)term_val(bnum);
+  return 1;
+}
+
+// Match `IMUL(t, ICONST(*coeff))` either operand order (mirrors
+// uop_match_const_mul).  Returns 1 with the non-const half in *out_t.
+static int udg_match_imul_const(Term t, Term *out_t, u32 *out_coeff) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IMUL) return 0;
+  Term a = heap_read(term_val(t) + 0);
+  Term b = heap_read(term_val(t) + 1);
+  Term other = 0; u32 coeff = 0;
+  if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_CONST) {
+    Term anum = heap_read(term_val(a) + 0);
+    if (term_tag(anum) != TAG_NUM) return 0;
+    coeff = (u32)term_val(anum); other = b;
+  } else if (term_tag(b) == TAG_UOP && term_ext(b) == UOP_CONST) {
+    Term bnum = heap_read(term_val(b) + 0);
+    if (term_tag(bnum) != TAG_NUM) return 0;
+    coeff = (u32)term_val(bnum); other = a;
+  } else {
+    return 0;
+  }
+  *out_t = other; *out_coeff = coeff;
+  return 1;
+}
+
+// Match `RANGE` and pull its axis_id (caller may check vs expected).
+static int udg_is_range_axis(Term t, u32 want_axis_id) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) return 0;
+  return uop_range_axis_id(t) == want_axis_id;
+}
+
+// Read a top-level signed CONST out of a Term.  Used to recover offsets.
+static int udg_match_iconst_signed(Term t, i32 *out_v) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) return 0;
+  Term num = heap_read(term_val(t) + 0);
+  if (term_tag(num) != TAG_NUM) return 0;
+  *out_v = (i32)term_val(num);
+  return 1;
+}
+
+// Flatten a left-leaning IADD chain into up to N leaves.  Returns the
+// leaf count (capped at cap; returns 0 if the cap would be exceeded so
+// callers can bail).
+#define UDG_CONV_ADDR_MAX_LEAVES 12
+static u32 udg_flatten_iadd(Term t, Term *leaves, u32 cap) {
+  // Recursive: descend through IADD nodes, stash non-IADD as leaves.
+  if (cap == 0) return 0;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IADD) {
+    leaves[0] = t;
+    return 1;
+  }
+  Term a = heap_read(term_val(t) + 0);
+  Term b = heap_read(term_val(t) + 1);
+  u32 na = udg_flatten_iadd(a, leaves, cap);
+  if (na == 0) return 0;
+  if (na >= cap) return 0;
+  u32 nb = udg_flatten_iadd(b, leaves + na, cap - na);
+  if (nb == 0) return 0;
+  return na + nb;
+}
+
+// Decode the W INDEX_E.addr.
+//
+// Lifter shape (after simplification):
+//   [IADD(k_w_off,)] IADD( IMUL(IDIV(r_out, patches), w_s0),
+//                           [IMUL(r_q, w_s1) | r_q if w_s1==1] )
+//
+// Recovers: patches (= u32 divisor), w_stride0, w_stride1, w_offset.
+// Returns 1 on success, fills out_axis_r_out + out_axis_r_q so the
+// caller can plumb them into the X decode + cross-checks.
+static int udg_decode_conv_w_addr(Term addr,
+                                  u32 *out_axis_r_out,
+                                  u32 *out_axis_r_q,
+                                  u32 *out_patches,
+                                  u32 *out_w_stride0,
+                                  u32 *out_w_stride1,
+                                  i32 *out_w_offset) {
+  Term leaves[UDG_CONV_ADDR_MAX_LEAVES] = {0};
+  u32  n_leaves = udg_flatten_iadd(addr, leaves, UDG_CONV_ADDR_MAX_LEAVES);
+  if (n_leaves == 0 || n_leaves > 3) return 0;
+
+  i32 w_off = 0;
+  Term arm_co = 0, arm_q = 0;
+  for (u32 i = 0; i < n_leaves; i++) {
+    Term t = leaves[i];
+    i32 cv;
+    if (udg_match_iconst_signed(t, &cv)) {
+      w_off = cv;
+      continue;
+    }
+    // Check if this leaf decodes as `(IDIV(r_out, patches)) * w_s0` or
+    // bare IDIV (when w_s0 == 1).
+    Term idiv_num = 0; u32 idiv_div = 0;
+    Term mul_inner = 0; u32 mul_coeff = 1;
+    if (udg_match_imul_const(t, &mul_inner, &mul_coeff)
+        && udg_match_idiv_const(mul_inner, &idiv_num, &idiv_div)) {
+      // co-arm: IMUL(IDIV(r_out, patches), w_s0).  Check r_out is RANGE.
+      if (term_tag(idiv_num) != TAG_UOP || term_ext(idiv_num) != UOP_RANGE) continue;
+      arm_co = t;
+      *out_axis_r_out = uop_range_axis_id(idiv_num);
+      *out_patches    = idiv_div;
+      *out_w_stride0  = mul_coeff;
+      continue;
+    }
+    if (udg_match_idiv_const(t, &idiv_num, &idiv_div)) {
+      // co-arm with w_s0 == 1: IDIV(r_out, patches).
+      if (term_tag(idiv_num) != TAG_UOP || term_ext(idiv_num) != UOP_RANGE) continue;
+      arm_co = t;
+      *out_axis_r_out = uop_range_axis_id(idiv_num);
+      *out_patches    = idiv_div;
+      *out_w_stride0  = 1;
+      continue;
+    }
+    // q-arm: bare RANGE or IMUL(RANGE, w_s1).
+    if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE) {
+      arm_q = t;
+      *out_axis_r_q   = uop_range_axis_id(t);
+      *out_w_stride1  = 1;
+      continue;
+    }
+    Term qmul_inner = 0; u32 qmul_coeff = 0;
+    if (udg_match_imul_const(t, &qmul_inner, &qmul_coeff)
+        && term_tag(qmul_inner) == TAG_UOP
+        && term_ext(qmul_inner) == UOP_RANGE) {
+      arm_q = t;
+      *out_axis_r_q   = uop_range_axis_id(qmul_inner);
+      *out_w_stride1  = qmul_coeff;
+      continue;
+    }
+    return 0;  // unrecognised leaf
+  }
+  if (arm_co == 0 || arm_q == 0) return 0;
+  if (*out_patches == 0 || *out_w_stride0 == 0 || *out_w_stride1 == 0) return 0;
+  if (*out_axis_r_out == *out_axis_r_q) return 0;
+  *out_w_offset = w_off;
+  return 1;
+}
+
+// Recogniser for an X-address arm in a conv2d_flat single-input lift.
+// Each leaf decodes into one of the slots below; an unrecognised arm
+// causes the whole decode to bail.
+typedef enum {
+  UDG_CONV_ARM_NONE   = 0,
+  UDG_CONV_ARM_CONST  = 1,  // x_offset
+  UDG_CONV_ARM_CI     = 2,  // ci * x_stride2
+  UDG_CONV_ARM_BI     = 3,  // bi * x_stride_b
+  UDG_CONV_ARM_H      = 4,  // (oh + kh_v) * x_stride0   -- oh, h_out, x_s0
+  UDG_CONV_ARM_W      = 5,  // (ow + kw_v) * x_stride1   -- ow, w_out, x_s1
+} UdgConvArmKind;
+
+// Match the canonical `oh = (r_out / w_out) % h_out` shape OR the
+// uncollapsed lifter shape `oh = ((r_out%patches)%spatial) / w_out` (rare;
+// the simplifier normally rewrites it to the canonical).  Sets *out_w_out
+// + *out_h_out + *out_axis on success.
+static int udg_match_oh(Term t, u32 axis_r_out,
+                        u32 *out_w_out, u32 *out_h_out) {
+  // Canonical shape (after simplifier): IMOD(IDIV(r_out, w_out), h_out).
+  Term mod_num = 0; u32 mod_div = 0;
+  if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
+  Term div_num = 0; u32 div_div = 0;
+  if (!udg_match_idiv_const(mod_num, &div_num, &div_div)) return 0;
+  if (!udg_is_range_axis(div_num, axis_r_out)) return 0;
+  *out_w_out = div_div;
+  *out_h_out = mod_div;
+  return 1;
+}
+
+// Match `ow = r_out % w_out` (canonical).
+static int udg_match_ow(Term t, u32 axis_r_out, u32 *out_w_out) {
+  Term mod_num = 0; u32 mod_div = 0;
+  if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
+  if (!udg_is_range_axis(mod_num, axis_r_out)) return 0;
+  *out_w_out = mod_div;
+  return 1;
+}
+
+// Match `bi = (r_out / spatial) % batch` (canonical, batch>=2) OR
+// `bi = IDIV(IMOD(r_out, patches), spatial)` (uncollapsed; rare).
+static int udg_match_bi(Term t, u32 axis_r_out,
+                        u32 *out_spatial, u32 *out_batch) {
+  // Canonical: IMOD(IDIV(r_out, spatial), batch).
+  Term mod_num = 0; u32 mod_div = 0;
+  if (udg_match_imod_const(t, &mod_num, &mod_div)) {
+    Term div_num = 0; u32 div_div = 0;
+    if (udg_match_idiv_const(mod_num, &div_num, &div_div)
+        && udg_is_range_axis(div_num, axis_r_out)) {
+      *out_spatial = div_div;
+      *out_batch   = mod_div;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Match `ci = (r_q / kw) / kh` (canonical-ish; lifter writes the two
+// IDIVs separately and the simplifier doesn't fuse them).  Recovers
+// kw + kh.
+static int udg_match_ci(Term t, u32 axis_r_q, u32 *out_kw, u32 *out_kh) {
+  // Outer IDIV: (qk / kh) where qk = (r_q / kw).
+  Term outer_num = 0; u32 outer_div = 0;
+  if (!udg_match_idiv_const(t, &outer_num, &outer_div)) return 0;
+  Term inner_num = 0; u32 inner_div = 0;
+  if (!udg_match_idiv_const(outer_num, &inner_num, &inner_div)) return 0;
+  if (!udg_is_range_axis(inner_num, axis_r_q)) return 0;
+  *out_kw = inner_div;
+  *out_kh = outer_div;
+  return 1;
+}
+
+// Match `kh_v = (r_q / kw) % kh`.
+static int udg_match_kh_v(Term t, u32 axis_r_q, u32 *out_kw, u32 *out_kh) {
+  Term mod_num = 0; u32 mod_div = 0;
+  if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
+  Term div_num = 0; u32 div_div = 0;
+  if (!udg_match_idiv_const(mod_num, &div_num, &div_div)) return 0;
+  if (!udg_is_range_axis(div_num, axis_r_q)) return 0;
+  *out_kw = div_div;
+  *out_kh = mod_div;
+  return 1;
+}
+
+// Match `kw_v = r_q % kw`.
+static int udg_match_kw_v(Term t, u32 axis_r_q, u32 *out_kw) {
+  Term mod_num = 0; u32 mod_div = 0;
+  if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
+  if (!udg_is_range_axis(mod_num, axis_r_q)) return 0;
+  *out_kw = mod_div;
+  return 1;
+}
+
+// Decode the H-axis arm: `IMUL(IADD(oh, kh_v), x_stride0)` (kh>1) OR
+// bare `IMUL(oh, x_stride0)` (kh==1, kh_v==0 collapsed) OR the
+// degenerate `IADD(oh, kh_v)` (x_stride0==1) -- but for now we require
+// x_stride0 != 1 (typical conv has x_stride0 == w which is rarely 1).
+static int udg_decode_h_arm(Term t, u32 axis_r_out, u32 axis_r_q,
+                            u32 *out_x_s0, u32 *out_w_out, u32 *out_h_out,
+                            u32 *out_kw, u32 *out_kh) {
+  Term inner = 0; u32 coeff = 0;
+  // Outer IMUL with stride.
+  if (!udg_match_imul_const(t, &inner, &coeff)) return 0;
+  if (coeff == 0) return 0;
+  *out_x_s0 = coeff;
+  // Inner is IADD(oh, kh_v) -- both must match.
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_IADD) {
+    // kh==1 case: bare oh.  We don't support degenerate here.
+    return 0;
+  }
+  Term lhs = heap_read(term_val(inner) + 0);
+  Term rhs = heap_read(term_val(inner) + 1);
+  // Try (oh, kh_v) and (kh_v, oh) orderings.
+  u32 kw1 = 0, kh1 = 0;
+  if (udg_match_oh(lhs, axis_r_out, out_w_out, out_h_out)
+      && udg_match_kh_v(rhs, axis_r_q, &kw1, &kh1)) {
+    *out_kw = kw1; *out_kh = kh1;
+    return 1;
+  }
+  if (udg_match_oh(rhs, axis_r_out, out_w_out, out_h_out)
+      && udg_match_kh_v(lhs, axis_r_q, &kw1, &kh1)) {
+    *out_kw = kw1; *out_kh = kh1;
+    return 1;
+  }
+  return 0;
+}
+
+// Decode the W-axis arm: `IMUL(IADD(ow, kw_v), x_s1)` OR bare
+// `IADD(ow, kw_v)` when x_s1==1.  Recovers x_s1, w_out, kw.
+static int udg_decode_w_arm(Term t, u32 axis_r_out, u32 axis_r_q,
+                            u32 *out_x_s1, u32 *out_w_out, u32 *out_kw) {
+  // x_s1==1 case: bare IADD(ow, kw_v).
+  if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_IADD) {
+    Term lhs = heap_read(term_val(t) + 0);
+    Term rhs = heap_read(term_val(t) + 1);
+    u32 wo = 0, kw1 = 0;
+    if (udg_match_ow(lhs, axis_r_out, &wo)
+        && udg_match_kw_v(rhs, axis_r_q, &kw1)) {
+      *out_x_s1 = 1; *out_w_out = wo; *out_kw = kw1; return 1;
+    }
+    if (udg_match_ow(rhs, axis_r_out, &wo)
+        && udg_match_kw_v(lhs, axis_r_q, &kw1)) {
+      *out_x_s1 = 1; *out_w_out = wo; *out_kw = kw1; return 1;
+    }
+    return 0;
+  }
+  // x_s1>1 case: IMUL(IADD(ow, kw_v), x_s1).
+  Term inner = 0; u32 coeff = 0;
+  if (!udg_match_imul_const(t, &inner, &coeff)) return 0;
+  if (coeff == 0) return 0;
+  if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_IADD) return 0;
+  Term lhs = heap_read(term_val(inner) + 0);
+  Term rhs = heap_read(term_val(inner) + 1);
+  u32 wo = 0, kw1 = 0;
+  if (udg_match_ow(lhs, axis_r_out, &wo)
+      && udg_match_kw_v(rhs, axis_r_q, &kw1)) {
+    *out_x_s1 = coeff; *out_w_out = wo; *out_kw = kw1; return 1;
+  }
+  if (udg_match_ow(rhs, axis_r_out, &wo)
+      && udg_match_kw_v(lhs, axis_r_q, &kw1)) {
+    *out_x_s1 = coeff; *out_w_out = wo; *out_kw = kw1; return 1;
+  }
+  return 0;
+}
+
+// Decode the CI-axis arm: `IMUL(ci, x_s2)` OR bare `ci` when x_s2==1.
+static int udg_decode_ci_arm(Term t, u32 axis_r_q,
+                             u32 *out_x_s2, u32 *out_kw, u32 *out_kh) {
+  // bare ci case (x_s2==1): IDIV(IDIV(r_q, kw), kh).
+  u32 kw1 = 0, kh1 = 0;
+  if (udg_match_ci(t, axis_r_q, &kw1, &kh1)) {
+    *out_x_s2 = 1; *out_kw = kw1; *out_kh = kh1; return 1;
+  }
+  Term inner = 0; u32 coeff = 0;
+  if (!udg_match_imul_const(t, &inner, &coeff)) return 0;
+  if (coeff == 0) return 0;
+  if (!udg_match_ci(inner, axis_r_q, &kw1, &kh1)) return 0;
+  *out_x_s2 = coeff; *out_kw = kw1; *out_kh = kh1;
+  return 1;
+}
+
+// Decode the BI-axis arm: `IMUL(bi, x_sb)` OR bare `bi` when x_sb==1.
+static int udg_decode_bi_arm(Term t, u32 axis_r_out,
+                             u32 *out_x_sb, u32 *out_spatial, u32 *out_batch) {
+  u32 sp = 0, bt = 0;
+  if (udg_match_bi(t, axis_r_out, &sp, &bt)) {
+    *out_x_sb = 1; *out_spatial = sp; *out_batch = bt; return 1;
+  }
+  Term inner = 0; u32 coeff = 0;
+  if (!udg_match_imul_const(t, &inner, &coeff)) return 0;
+  if (coeff == 0) return 0;
+  if (!udg_match_bi(inner, axis_r_out, &sp, &bt)) return 0;
+  *out_x_sb = coeff; *out_spatial = sp; *out_batch = bt;
+  return 1;
+}
+
+// Public extractor: run on `addr_w` + `addr_x` (single-input INDEX_E
+// addresses) plus the lift's input slots, and fill the conv shape facts
+// into `out`.  Returns 1 on success.  On 0 the caller must fall back to
+// the input_views[] reader.  All four "X arms" must decode (BI / CI / H
+// / W).  Out-of-scope: x_offset==0 is fine (just no const arm); but
+// degenerate `kh==kw==1` collapses ci to bare RANGE -- not handled yet.
+int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
+                                      struct KernelEntry const *ke,
+                                      UopDagConv2dFlatShape *out) {
+  if (out == NULL) return 0;
+  memset(out, 0, sizeof(*out));
+
+  // --- W decode ---
+  u32 axis_r_out = 0, axis_r_q = 0;
+  u32 patches = 0, w_s0 = 0, w_s1 = 0;
+  i32 w_off = 0;
+  if (!udg_decode_conv_w_addr(addr_w, &axis_r_out, &axis_r_q,
+                              &patches, &w_s0, &w_s1, &w_off)) {
+    return 0;
+  }
+
+  // --- X decode ---
+  Term x_leaves[UDG_CONV_ADDR_MAX_LEAVES] = {0};
+  u32 n_x = udg_flatten_iadd(addr_x, x_leaves, UDG_CONV_ADDR_MAX_LEAVES);
+  if (n_x == 0) return 0;
+
+  i32 x_off    = 0;
+  u32 x_sb     = 0,  batch     = 0,  spatial = 0;
+  u32 x_s2     = 0,  kw_ci     = 0,  kh_ci   = 0;
+  u32 x_s0     = 0,  h_out_h   = 0,  w_out_h = 0,  kw_h = 0,  kh_h = 0;
+  u32 x_s1     = 0,  w_out_w   = 0,  kw_w    = 0;
+  int got_h    = 0,  got_w     = 0,  got_ci  = 0,  got_bi = 0;
+
+  // First pass: classify each leaf into one of:
+  //   CONST -> x_offset
+  //   H_ARM (IMUL with IADD inside)            -- distinctive: IMUL(IADD(...), C)
+  //   CI_ARM (IDIV-of-IDIV; coefficient maybe) -- distinctive: IMUL(IDIV(IDIV(r_q,..),..), C) or bare
+  //   BI_ARM (IMOD-of-IDIV)                    -- IMUL(IMOD(IDIV(r_out,..),..), C) or bare
+  //   "ow" leaf  (IMOD(r_out, w_out))          -- when x_s1==1 the W arm dissolved
+  //   "kw_v" leaf (IMOD(r_q, kw))              -- partner of "ow"
+  // Then pair the ow + kw_v leaves into a synthetic w-arm.
+  Term ow_leaf = 0, kw_v_leaf = 0;
+  u32 ow_w_out = 0, kw_v_kw = 0;
+
+  for (u32 i = 0; i < n_x; i++) {
+    Term t = x_leaves[i];
+    i32 cv;
+    if (udg_match_iconst_signed(t, &cv)) { x_off = cv; continue; }
+    if (!got_h && udg_decode_h_arm(t, axis_r_out, axis_r_q,
+                                   &x_s0, &w_out_h, &h_out_h, &kw_h, &kh_h)) {
+      got_h = 1; continue;
+    }
+    // Full IMUL-wrapped W-arm (x_s1>1 case).
+    if (!got_w) {
+      Term inner_imul = 0; u32 inner_coeff = 0;
+      if (udg_match_imul_const(t, &inner_imul, &inner_coeff)
+          && term_tag(inner_imul) == TAG_UOP
+          && term_ext(inner_imul) == UOP_IADD) {
+        u32 wo = 0, kw1 = 0;
+        Term lhs = heap_read(term_val(inner_imul) + 0);
+        Term rhs = heap_read(term_val(inner_imul) + 1);
+        if ((udg_match_ow(lhs, axis_r_out, &wo)
+             && udg_match_kw_v(rhs, axis_r_q, &kw1))
+            || (udg_match_ow(rhs, axis_r_out, &wo)
+                && udg_match_kw_v(lhs, axis_r_q, &kw1))) {
+          x_s1 = inner_coeff; w_out_w = wo; kw_w = kw1; got_w = 1; continue;
+        }
+      }
+    }
+    if (!got_ci && udg_decode_ci_arm(t, axis_r_q, &x_s2, &kw_ci, &kh_ci)) {
+      got_ci = 1; continue;
+    }
+    if (!got_bi && udg_decode_bi_arm(t, axis_r_out,
+                                     &x_sb, &spatial, &batch)) {
+      got_bi = 1; continue;
+    }
+    // Disaggregated W-arm (x_s1==1): a bare IMOD(r_out, w_out) "ow" leaf
+    // OR a bare IMOD(r_q, kw) "kw_v" leaf.  Stash; pair them up after.
+    if (ow_leaf == 0 && udg_match_ow(t, axis_r_out, &ow_w_out)) {
+      ow_leaf = t; continue;
+    }
+    if (kw_v_leaf == 0 && udg_match_kw_v(t, axis_r_q, &kw_v_kw)) {
+      kw_v_leaf = t; continue;
+    }
+    return 0;  // unrecognised arm
+  }
+
+  // Pair up ow + kw_v into a synthetic W-arm if the IMUL collapsed
+  // (x_s1==1 case).
+  if (!got_w && ow_leaf != 0 && kw_v_leaf != 0) {
+    x_s1 = 1; w_out_w = ow_w_out; kw_w = kw_v_kw; got_w = 1;
+  } else if (ow_leaf != 0 || kw_v_leaf != 0) {
+    // Only one of the pair was found -- inconsistent; bail.
+    return 0;
+  }
+
+  // Required: H and W arms.  CI optional only if c_in==1+kh*kw==KRED
+  // (out of scope for this session); BI optional only if batch==1.
+  if (!got_h || !got_w) return 0;
+
+  // Cross-checks: w_out from H arm == w_out from W arm; kw consistent;
+  // kh consistent (if both got_ci and got_h supply it).
+  if (w_out_h != w_out_w) return 0;
+  if (kw_h != kw_w) return 0;
+  if (got_ci) {
+    if (kw_ci != kw_h) return 0;
+    if (kh_ci != kh_h) return 0;
+  }
+
+  // Recover c_in / batch defaults when arms collapsed.
+  u32 kw = kw_h;
+  u32 kh = kh_h;
+  u32 h_out = h_out_h;
+  u32 w_out = w_out_h;
+  if (kw == 0 || kh == 0) return 0;
+  if (h_out == 0 || w_out == 0) return 0;
+
+  // Pull r_out / r_q extents to derive c_out and KRED.
+  // The W addr's IDIV-of-RANGE referenced r_out via axis id; recover
+  // the actual extent by walking back into the IADD leaves.
+  // Simpler: read extents from the lifted RANGE nodes inside the addr.
+  u32 r_out_ext = 0, r_q_ext = 0;
+  // r_out lives inside the W addr's co-arm as IDIV(r_out, patches).
+  // r_q lives as either bare RANGE leaf or IMUL(RANGE, w_s1).
+  // Both are easy to find via rec_tc_find_range_extent.
+  r_out_ext = rec_tc_find_range_extent(addr_w, axis_r_out, 0);
+  r_q_ext   = rec_tc_find_range_extent(addr_w, axis_r_q,   0);
+  if (r_out_ext == 0 || r_q_ext == 0) return 0;
+  if (r_out_ext % patches != 0) return 0;
+  u32 c_out = r_out_ext / patches;
+  u32 KRED  = r_q_ext;
+
+  // c_in derivation.  KRED == c_in * kh * kw, so c_in = KRED / (kh*kw).
+  if (KRED == 0 || kh * kw == 0) return 0;
+  if (KRED % (kh * kw) != 0) return 0;
+  u32 c_in = KRED / (kh * kw);
+  if (c_in == 0) return 0;
+  // Out of scope: c_in==1 ci-arm collapsed; reject for now.
+  if (c_in > 1 && !got_ci) return 0;
+
+  // batch derivation: if BI arm absent, batch == 1 and the spatial
+  // factor equals patches.
+  if (!got_bi) {
+    batch   = 1;
+    spatial = patches;
+  } else {
+    if (spatial == 0 || batch == 0) return 0;
+    if (spatial * batch != patches) return 0;
+  }
+  if (spatial != h_out * w_out) return 0;
+
+  // x_stride_b: for batch==1 we have no info; default 0 (matches the
+  // input_views reader behavior for ndim==3 inputs).
+  if (!got_bi) x_sb = 0;
+
+  // Recover input slot indices from BUFFER.instance.  The W INDEX_E
+  // points to W's BUFFER, and the X INDEX_E points to X's BUFFER.
+  // Caller provides addr_w/addr_x at the level INSIDE INDEX_E so we
+  // can't read BUFFER directly here -- but the slot can be deduced
+  // by the caller.  Leave w_input/x_input zero here; callers fill.
+
+  out->c_out     = c_out;
+  out->c_in      = c_in;
+  out->kh        = kh;
+  out->kw        = kw;
+  out->h_out     = h_out;
+  out->w_out     = w_out;
+  out->batch     = batch;
+  out->patches   = patches;
+  out->spatial_patches = spatial;
+  out->w_offset  = w_off;
+  out->w_stride0 = (i32)w_s0;
+  out->w_stride1 = (i32)w_s1;
+  out->x_offset  = x_off;
+  out->x_stride_b = (i32)x_sb;
+  out->x_stride0  = (i32)x_s0;
+  out->x_stride1  = (i32)x_s1;
+  out->x_stride2  = (i32)x_s2;
+  out->axis_r_out = axis_r_out;
+  out->axis_r_q   = axis_r_q;
+  (void)ke;
+  return 1;
+}
