@@ -461,6 +461,365 @@ int main(void) {
     CHECK_EQ(gs2.x_input, 1u);
   }
 
+  // === input_views-decouple session 2: addr-stride extractor ============
+  TEST_BEGIN("recognise-tc/extract-strides-matmul-A-non-trans");
+  {
+    // addr_A = IADD(IMUL(r_m, ICONST(K)), r_k)  -- non-transposed A
+    Term r_m_e = uop_range(100, 0, 16);
+    Term r_k_e = uop_range(101, 1, 32);
+    Term kK_e  = uop_const(DT_INT32, 32);
+    Term mK_e  = uop_int_binary(UOP_IMUL, r_m_e, kK_e);
+    Term aA_e  = uop_int_binary(UOP_IADD, mK_e, r_k_e);
+    u32 red_c = 99, oth_c = 99, oth_a = 99;
+    CHECK(uop_dag_extract_matmul_strides_from_addr(aA_e, /*red_axis=*/101,
+                                                   &red_c, &oth_c, &oth_a));
+    CHECK_EQ(red_c, 1u);   // r_k bare
+    CHECK_EQ(oth_c, 32u);  // r_m * 32
+    CHECK_EQ(oth_a, 100u); // m axis id
+  }
+
+  TEST_BEGIN("recognise-tc/extract-strides-matmul-A-trans");
+  {
+    // addr_A_trans = IADD(r_m, IMUL(r_k, ICONST(M)))  -- transposed A
+    Term r_m_e = uop_range(110, 0, 16);
+    Term r_k_e = uop_range(111, 1, 32);
+    Term kM_e  = uop_const(DT_INT32, 16);
+    Term kM_e2 = uop_int_binary(UOP_IMUL, r_k_e, kM_e);
+    Term aAt   = uop_int_binary(UOP_IADD, r_m_e, kM_e2);
+    u32 red_c = 99, oth_c = 99, oth_a = 99;
+    CHECK(uop_dag_extract_matmul_strides_from_addr(aAt, /*red_axis=*/111,
+                                                   &red_c, &oth_c, &oth_a));
+    CHECK_EQ(red_c, 16u);  // r_k * 16 (= M)
+    CHECK_EQ(oth_c, 1u);   // r_m bare
+    CHECK_EQ(oth_a, 110u);
+  }
+
+  TEST_BEGIN("recognise-tc/extract-strides-matmul-B-non-trans");
+  {
+    // addr_B = IADD(IMUL(r_k, ICONST(N)), r_n) -- non-transposed B
+    Term r_k_e = uop_range(120, 1, 32);
+    Term r_n_e = uop_range(121, 0, 16);
+    Term kN_e  = uop_const(DT_INT32, 16);
+    Term kN_e2 = uop_int_binary(UOP_IMUL, r_k_e, kN_e);
+    Term aB_e  = uop_int_binary(UOP_IADD, kN_e2, r_n_e);
+    u32 red_c = 99, oth_c = 99, oth_a = 99;
+    CHECK(uop_dag_extract_matmul_strides_from_addr(aB_e, /*red_axis=*/120,
+                                                   &red_c, &oth_c, &oth_a));
+    CHECK_EQ(red_c, 16u);  // r_k * 16 (= N)
+    CHECK_EQ(oth_c, 1u);
+    CHECK_EQ(oth_a, 121u);
+  }
+
+  TEST_BEGIN("recognise-tc/extract-strides-matmul-B-trans");
+  {
+    // addr_B_trans = IADD(r_k, IMUL(r_n, ICONST(K))) -- transposed B
+    Term r_k_e = uop_range(130, 1, 32);
+    Term r_n_e = uop_range(131, 0, 16);
+    Term kK_e  = uop_const(DT_INT32, 32);
+    Term kK_e2 = uop_int_binary(UOP_IMUL, r_n_e, kK_e);
+    Term aBt   = uop_int_binary(UOP_IADD, r_k_e, kK_e2);
+    u32 red_c = 99, oth_c = 99, oth_a = 99;
+    CHECK(uop_dag_extract_matmul_strides_from_addr(aBt, /*red_axis=*/130,
+                                                   &red_c, &oth_c, &oth_a));
+    CHECK_EQ(red_c, 1u);   // r_k bare
+    CHECK_EQ(oth_c, 32u);  // r_n * 32 (= K)
+    CHECK_EQ(oth_a, 131u);
+  }
+
+  TEST_BEGIN("recognise-tc/extract-strides-rejects-non-iadd");
+  {
+    // Bare RANGE (no IADD) is not a 2-axis matmul address.
+    Term r_k_e = uop_range(140, 1, 32);
+    u32 red_c = 99, oth_c = 99, oth_a = 99;
+    CHECK(!uop_dag_extract_matmul_strides_from_addr(r_k_e, 140,
+                                                    &red_c, &oth_c, &oth_a));
+    CHECK_EQ(red_c, 0u); CHECK_EQ(oth_c, 0u); CHECK_EQ(oth_a, 0u);
+  }
+
+  TEST_BEGIN("recognise-tc/extract-strides-rejects-wrong-red-axis");
+  {
+    // IADD-shaped but neither arm references the requested reduce axis.
+    Term r_a = uop_range(150, 0, 16);
+    Term r_b = uop_range(151, 0, 32);
+    Term k4  = uop_const(DT_INT32, 4);
+    Term mul = uop_int_binary(UOP_IMUL, r_a, k4);
+    Term add = uop_int_binary(UOP_IADD, mul, r_b);
+    u32 red_c = 99, oth_c = 99, oth_a = 99;
+    CHECK(!uop_dag_extract_matmul_strides_from_addr(add, /*red_axis=*/999,
+                                                    &red_c, &oth_c, &oth_a));
+  }
+
+  // === DAG-side classifier WITHOUT input_views[] populated ==============
+  TEST_BEGIN("recognise-tc/dag-classify-matmul-no-input-views-non-trans");
+  {
+    // Re-run the matmul classifier with ke->input_views = NULL.  The
+    // session-2 DAG path must succeed unaided.
+    KernelEntry ke = {0};
+    ke.n_inputs = 2;
+    ke.output_dtype = DT_FP32;
+    static u32 dts[2]   = {DT_FP32, DT_FP32};
+    ke.input_dtypes = dts;
+    ke.input_views  = NULL;          // <-- decoupling proof
+
+    u32 dimsAi[2] = {16, 32};
+    u32 dimsBi[2] = {32, 16};
+    u32 dimsCi[2] = {16, 16};
+    Term Ai = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsAi, 1);
+    Term Bi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsBi, 2);
+    Term Ci = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsCi, 0);
+    Term r_mn = uop_range(200, 0,            16);
+    Term r_nn = uop_range(201, 0,            16);
+    Term r_kn = uop_range(202, 1 /*REDUCE*/, 32);
+    Term k16n = uop_const(DT_INT32, 16);
+    Term k32n = uop_const(DT_INT32, 32);
+    // A: m * K + k  -> non-transposed
+    Term aA  = uop_int_binary(UOP_IADD,
+                              uop_int_binary(UOP_IMUL, r_mn, k32n),
+                              r_kn);
+    // B: k * N + n  -> non-transposed
+    Term aB  = uop_int_binary(UOP_IADD,
+                              uop_int_binary(UOP_IMUL, r_kn, k16n),
+                              r_nn);
+    Term ldAn = uop_index_e(Ai, aA);
+    Term ldBn = uop_index_e(Bi, aB);
+    Term mln  = uop_binary(UOP_MUL, ldAn, ldBn);
+    Term rdn  = uop_reduce(REDUCE_SUM, /*axis=*/202, mln);
+    Term aC   = uop_int_binary(UOP_IADD,
+                               uop_int_binary(UOP_IMUL, r_mn, k16n),
+                               r_nn);
+    Term stN  = uop_store(Ci, aC, rdn);
+    UopDagGemmShape g = {0};
+    CHECK(uop_dag_classify_matmul_shape(stN, &ke, &g));
+    CHECK_EQ(g.M, 16u); CHECK_EQ(g.N, 16u); CHECK_EQ(g.K, 32u);
+    CHECK_EQ(g.ldA, 32u); CHECK_EQ(g.ldB, 16u);
+    CHECK_EQ(g.flags, 0u);  // neither transposed
+  }
+
+  TEST_BEGIN("recognise-tc/dag-classify-matmul-no-input-views-trans-A");
+  {
+    // A transposed (storage [K,M] viewed [M,K]): addr = IADD(r_m,
+    // IMUL(r_k, ICONST(M))).  ldA = M, transA = 1.
+    KernelEntry ke = {0};
+    ke.n_inputs = 2;
+    ke.output_dtype = DT_FP32;
+    static u32 dts[2] = {DT_FP32, DT_FP32};
+    ke.input_dtypes = dts; ke.input_views = NULL;
+
+    u32 dimsAt[2] = {32, 16};   // storage [K,M]
+    u32 dimsBi[2] = {32, 16};
+    u32 dimsCi[2] = {16, 16};
+    Term At = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsAt, 1);
+    Term Bi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsBi, 2);
+    Term Ci = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsCi, 0);
+    Term r_m  = uop_range(210, 0,            16);
+    Term r_n  = uop_range(211, 0,            16);
+    Term r_k  = uop_range(212, 1 /*REDUCE*/, 32);
+    Term k16  = uop_const(DT_INT32, 16);
+    // A transposed: addr = m + k*M
+    Term aA   = uop_int_binary(UOP_IADD, r_m,
+                               uop_int_binary(UOP_IMUL, r_k, k16));
+    // B non-trans: addr = k*N + n
+    Term aB   = uop_int_binary(UOP_IADD,
+                               uop_int_binary(UOP_IMUL, r_k, k16),
+                               r_n);
+    Term ldA  = uop_index_e(At, aA);
+    Term ldB  = uop_index_e(Bi, aB);
+    Term mlt  = uop_binary(UOP_MUL, ldA, ldB);
+    Term rdt  = uop_reduce(REDUCE_SUM, 212, mlt);
+    Term aC   = uop_int_binary(UOP_IADD,
+                               uop_int_binary(UOP_IMUL, r_m, k16),
+                               r_n);
+    Term stT  = uop_store(Ci, aC, rdt);
+    UopDagGemmShape g = {0};
+    CHECK(uop_dag_classify_matmul_shape(stT, &ke, &g));
+    CHECK_EQ(g.M, 16u); CHECK_EQ(g.N, 16u); CHECK_EQ(g.K, 32u);
+    CHECK_EQ(g.ldA, 16u);    // M
+    CHECK_EQ(g.ldB, 16u);    // N (non-trans B)
+    CHECK_EQ(g.flags, 1u);   // bit 0 = transA
+  }
+
+  TEST_BEGIN("recognise-tc/dag-classify-matmul-no-input-views-trans-B");
+  {
+    // B transposed: addr = k + n*K, ldB=K.
+    KernelEntry ke = {0};
+    ke.n_inputs = 2;
+    ke.output_dtype = DT_FP32;
+    static u32 dts[2] = {DT_FP32, DT_FP32};
+    ke.input_dtypes = dts; ke.input_views = NULL;
+
+    u32 dimsAi[2] = {16, 32};
+    u32 dimsBt[2] = {16, 32};
+    u32 dimsCi[2] = {16, 16};
+    Term Ai = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsAi, 1);
+    Term Bt = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsBt, 2);
+    Term Ci = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsCi, 0);
+    Term r_m = uop_range(220, 0, 16);
+    Term r_n = uop_range(221, 0, 16);
+    Term r_k = uop_range(222, 1, 32);
+    Term k16 = uop_const(DT_INT32, 16);
+    Term k32 = uop_const(DT_INT32, 32);
+    // A non-trans: addr = m*K + k
+    Term aA  = uop_int_binary(UOP_IADD,
+                              uop_int_binary(UOP_IMUL, r_m, k32),
+                              r_k);
+    // B transposed: addr = k + n*K
+    Term aB  = uop_int_binary(UOP_IADD, r_k,
+                              uop_int_binary(UOP_IMUL, r_n, k32));
+    Term ldA = uop_index_e(Ai, aA);
+    Term ldB = uop_index_e(Bt, aB);
+    Term mlt = uop_binary(UOP_MUL, ldA, ldB);
+    Term rdt = uop_reduce(REDUCE_SUM, 222, mlt);
+    Term aC  = uop_int_binary(UOP_IADD,
+                              uop_int_binary(UOP_IMUL, r_m, k16),
+                              r_n);
+    Term stT = uop_store(Ci, aC, rdt);
+    UopDagGemmShape g = {0};
+    CHECK(uop_dag_classify_matmul_shape(stT, &ke, &g));
+    CHECK_EQ(g.M, 16u); CHECK_EQ(g.K, 32u);
+    CHECK_EQ(g.ldA, 32u);    // K (non-trans A)
+    CHECK_EQ(g.ldB, 32u);    // K (trans B)
+    CHECK_EQ(g.flags, 2u);   // bit 1 = transB
+  }
+
+  TEST_BEGIN("recognise-tc/dag-classify-matmul-no-input-views-trans-AB");
+  {
+    // Both A and B transposed.
+    KernelEntry ke = {0};
+    ke.n_inputs = 2;
+    ke.output_dtype = DT_FP32;
+    static u32 dts[2] = {DT_FP32, DT_FP32};
+    ke.input_dtypes = dts; ke.input_views = NULL;
+
+    u32 dimsAt[2] = {32, 16};   // storage [K,M]
+    u32 dimsBt[2] = {16, 32};   // storage [N,K]
+    u32 dimsCi[2] = {16, 16};
+    Term At = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsAt, 1);
+    Term Bt = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsBt, 2);
+    Term Ci = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsCi, 0);
+    Term r_m = uop_range(230, 0, 16);
+    Term r_n = uop_range(231, 0, 16);
+    Term r_k = uop_range(232, 1, 32);
+    Term k16 = uop_const(DT_INT32, 16);
+    Term k32 = uop_const(DT_INT32, 32);
+    Term aA  = uop_int_binary(UOP_IADD, r_m,
+                              uop_int_binary(UOP_IMUL, r_k, k16));
+    Term aB  = uop_int_binary(UOP_IADD, r_k,
+                              uop_int_binary(UOP_IMUL, r_n, k32));
+    Term ldA = uop_index_e(At, aA);
+    Term ldB = uop_index_e(Bt, aB);
+    Term ml  = uop_binary(UOP_MUL, ldA, ldB);
+    Term rd  = uop_reduce(REDUCE_SUM, 232, ml);
+    Term aC  = uop_int_binary(UOP_IADD,
+                              uop_int_binary(UOP_IMUL, r_m, k16),
+                              r_n);
+    Term st  = uop_store(Ci, aC, rd);
+    UopDagGemmShape g = {0};
+    CHECK(uop_dag_classify_matmul_shape(st, &ke, &g));
+    CHECK_EQ(g.ldA, 16u);    // M
+    CHECK_EQ(g.ldB, 32u);    // K
+    CHECK_EQ(g.flags, 3u);   // both bits set
+  }
+
+  TEST_BEGIN("recognise-tc/dag-classify-gemv-no-input-views");
+  {
+    enum { GM3 = 16, GK3 = 24 };
+    KernelEntry ke = {0};
+    ke.n_inputs = 2;
+    ke.output_dtype = DT_FP32;
+    static u32 dts3v[2] = {DT_FP32, DT_FP32};
+    ke.input_dtypes = dts3v;
+    ke.input_views  = NULL;          // <-- decoupling proof
+
+    u32 dimsW[2]  = {GM3, GK3};
+    u32 dimsX[1]  = {GK3};
+    u32 dimsCo[1] = {GM3};
+    Term Wi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsW, 1);
+    Term Xi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX, 2);
+    Term Coi= uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsCo,0);
+    Term r_mg = uop_range(300, 0,            GM3);
+    Term r_kg = uop_range(301, 1 /*REDUCE*/, GK3);
+    Term kKg  = uop_const(DT_INT32, GK3);
+    // W non-trans: m*K + k
+    Term aW   = uop_int_binary(UOP_IADD,
+                               uop_int_binary(UOP_IMUL, r_mg, kKg),
+                               r_kg);
+    Term ldW  = uop_index_e(Wi, aW);
+    Term ldX  = uop_index_e(Xi, r_kg);
+    Term mul  = uop_binary(UOP_MUL, ldW, ldX);
+    Term red  = uop_reduce(REDUCE_SUM, 301, mul);
+    Term st   = uop_store(Coi, r_mg, red);
+    UopDagGemvShape g = {0};
+    CHECK(uop_dag_classify_gemv_shape(st, &ke, &g));
+    CHECK_EQ(g.M, (u32)GM3);
+    CHECK_EQ(g.K, (u32)GK3);
+    CHECK_EQ(g.ldW, (u32)GK3);
+    CHECK_EQ(g.flags, 0u);
+  }
+
+  TEST_BEGIN("recognise-tc/dag-classify-gemv-no-input-views-trans-W");
+  {
+    enum { GM4 = 16, GK4 = 24 };
+    KernelEntry ke = {0};
+    ke.n_inputs = 2;
+    ke.output_dtype = DT_FP32;
+    static u32 dts4v[2] = {DT_FP32, DT_FP32};
+    ke.input_dtypes = dts4v;
+    ke.input_views  = NULL;
+
+    u32 dimsWt[2] = {GK4, GM4};   // storage [K,M]
+    u32 dimsX[1]  = {GK4};
+    u32 dimsCo[1] = {GM4};
+    Term Wt = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsWt, 1);
+    Term Xi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX, 2);
+    Term Coi= uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsCo,0);
+    Term r_mg = uop_range(310, 0, GM4);
+    Term r_kg = uop_range(311, 1, GK4);
+    Term kMg  = uop_const(DT_INT32, GM4);
+    // W transposed: addr = m + k*M
+    Term aW   = uop_int_binary(UOP_IADD, r_mg,
+                               uop_int_binary(UOP_IMUL, r_kg, kMg));
+    Term ldW  = uop_index_e(Wt, aW);
+    Term ldX  = uop_index_e(Xi, r_kg);
+    Term mul  = uop_binary(UOP_MUL, ldW, ldX);
+    Term red  = uop_reduce(REDUCE_SUM, 311, mul);
+    Term st   = uop_store(Coi, r_mg, red);
+    UopDagGemvShape g = {0};
+    CHECK(uop_dag_classify_gemv_shape(st, &ke, &g));
+    CHECK_EQ(g.M, (u32)GM4);
+    CHECK_EQ(g.K, (u32)GK4);
+    CHECK_EQ(g.ldW, (u32)GM4);
+    CHECK_EQ(g.flags, 1u);   // transW
+  }
+
+  TEST_BEGIN("recognise-tc/dag-classify-dot-no-input-views");
+  {
+    KernelEntry ke = {0};
+    ke.n_inputs = 2;
+    ke.output_dtype = DT_FP32;
+    static u32 dts2v[2] = {DT_FP32, DT_FP32};
+    ke.input_dtypes = dts2v;
+    ke.input_views  = NULL;          // <-- decoupling proof
+
+    u32 dimsAv[1] = {64};
+    u32 dimsBv[1] = {64};
+    u32 dimsCv[1] = {1};
+    Term Ai = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsAv, 1);
+    Term Bi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsBv, 2);
+    Term Co = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsCv, 0);
+    Term r_kd = uop_range(400, 1, 64);
+    Term ldA  = uop_index_e(Ai, r_kd);
+    Term ldB  = uop_index_e(Bi, r_kd);
+    Term mul  = uop_binary(UOP_MUL, ldA, ldB);
+    Term red  = uop_reduce(REDUCE_SUM, 400, mul);
+    Term zero = uop_const(DT_INT32, 0);
+    Term st   = uop_store(Co, zero, red);
+    UopDagDotShape g = {0};
+    CHECK(uop_dag_classify_dot_shape(st, &ke, &g));
+    CHECK_EQ(g.K, 64u);
+    CHECK_EQ(g.a_input, 0u);
+    CHECK_EQ(g.b_input, 1u);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
