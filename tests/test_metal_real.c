@@ -319,6 +319,7 @@ int main(void) {
 
     // CPU backend through the schedule (TMatMul-equivalent).
     unsetenv("THVM_BACKEND"); thvm_init();
+    cpu_blas_gemm_dispatch_counters_reset();
     {
       u32 ta = tensor_alloc(CURRENT_BACKEND, sa, DT_FP32);
       u32 tb = tensor_alloc(CURRENT_BACKEND, sb, DT_FP32);
@@ -341,6 +342,15 @@ int main(void) {
       CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
                                 mm_cpu, sizeof(mm_cpu));
     }
+    // Slice 8 probe: under default THVM_PHASE_C7_FREE_PROGRAM=1 the
+    // CPU matmul kernel must route through cblas_sgemm via the new
+    // DAG-side classifier (uop_dag_classify_matmul_shape), NOT through
+    // the legacy program[]-reading path (program[] is freed at
+    // materialize time).  Pre-Slice-8 this counter would be 0 and
+    // cpu_dispatch_kernel would fall through to render_uop_c -- a
+    // documented 30-100x perf regression.
+    CHECK(cpu_blas_gemm_dispatch_dag_count() > 0);
+    CHECK_EQ(cpu_blas_gemm_dispatch_legacy_count(), 0u);
     thvm_free();
 
     // Metal backend through the same schedule.  Whichever dispatch
