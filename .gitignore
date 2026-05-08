@@ -18,3 +18,7 @@ waldmeister
 tilelang
 
 build/
+
+# Hackathon-prep WIP. Untrack selectively when ready.
+bench/metal-problems/
+external/mlx/
