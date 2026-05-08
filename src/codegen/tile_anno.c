@@ -169,28 +169,20 @@ void tile_anno_axes_reset(KernelEntry *ke) {
   axes_ensure_scalar_reduce(ke);
 }
 
-// Append a new axis at the end.  E9: only writes the writer-private
-// scratch (`_writer.full_shape[]` / `_writer.n_axes`).  The kax_type
-// carried in `info` is informational
-// for the caller; the actual per-axis kax_type is derived on read by
-// `axes_resolve_kax_type` (signals: output_shape + tail-reduce +
-// scalar-reduce + applied_opts).  Callers (axes_default_for,
-// axes_ensure_scalar_reduce) drive append in the same order the
-// resolver expects, so kax_type derivation matches the caller's intent
-// by construction.
+// Append a new axis at the end.
 //
-// Returns 1 on success, 0 if the axis array is full.
+// E9 session 5: writer-private scratch
+// (`_writer.full_shape[]` / `_writer.n_axes`) retired.  The
+// resolvers derive axis count + extents from
+// (output_shape + tail-reduce + scalar-reduce + applied_opts) on
+// read, so the only writer-trio shape signal that matters is
+// applied_opts (mutated by `kernel_apply_opt`).  This function is a
+// no-op now; symbol kept for the public header signature.
+//
+// Returns 1 (info accepted; nothing to record); 0 only on NULL kernel
+// for callers that want to detect a closed kernel.
 int tile_anno_axis_append(KernelEntry *ke, TileAxisInfo info) {
   if (ke == NULL || ke->axes == NULL) return 0;
-  // E9 session 4: writer-trio touches the private scratch directly.
-  // External readers go through axes_resolve_n_axes /
-  // axes_resolve_full_shape.
-  if (ke->axes->_writer.n_axes >= MAX_AXES) return 0;
-  u32 d = ke->axes->_writer.n_axes++;
-  ke->axes->_writer.full_shape[d] = info.extent;
-  (void)info.kax_type;        // resolver-derived; see comment above.
-  (void)info.memory_scope;
-  (void)info.vector_width;
-  // E9 session 2: freshness via `tile_axes_hash(ke)`; no version bump.
+  (void)info;
   return 1;
 }
