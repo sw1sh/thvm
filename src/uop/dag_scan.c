@@ -280,3 +280,178 @@ Term uop_dag_heap_read(u64 loc, u32 offset) {
 // as `fn` static inlines.  Re-export with external linkage.
 int uop_dag_is_unary_ew (u32 op) { return uop_is_unary_elementwise ((u8)op); }
 int uop_dag_is_binary_ew(u32 op) { return uop_is_binary_elementwise((u8)op); }
+
+// === Slice 8: DAG-side GEMM-shape extractor ===========================
+//
+// `cpu_blas_dispatch` (backend/cpu/blas.c) historically read M/N/K and
+// the input-slot mapping out of `ke->program[]` via
+// `tile_analyze_gemm`.  Under default `THVM_PHASE_C7_FREE_PROGRAM=1`
+// the program[] array is freed at materialize time, so the legacy
+// path early-bails and matmul kernels regress to the slower
+// per-element render_uop_c triple-loop.  This helper recovers the
+// same TileGemmInfo-shaped facts from `ke->cached_lift.store_root`
+// (the lifted UOp DAG) plus `ke->input_views[]` (which the lifter
+// already used to compute matmul addresses, and which survives the
+// program[] free).
+//
+// Strategy:
+//   1. Peel an optional UOP_OPT(_, TC, _) wrapper from STORE.value
+//      (the dedicated GEMM-only path `kernel_lift_from_gemm`
+//      synthesises STORE(C, addrC, OPT(REDUCE, TC, 0)); the
+//      rangeify-driven path leaves STORE(C, addrC, REDUCE(...))).
+//   2. Run `uop_classify_matmul` on the (possibly-rebuilt) STORE to
+//      validate matmul shape + recover K_extent.
+//   3. Read M/N from the output buffer's dims (matmul output is 2-D
+//      with shape [M, N] when the lifter or kernel_lift_from_gemm
+//      builds it).
+//   4. Recover input slot indices from the UOP_BUFFER instance field
+//      on the matmul A/B operands (`instance == slot + 1` for inputs;
+//      see lift_input_buffer in schedule/kernel_lift.c).
+//   5. Derive ldA / ldB / transpose flags from
+//      `ke->input_views[slot]` exactly as `tile_gemm_views_ok` does.
+//
+// Returns 1 iff the DAG is matmul-shaped AND every output is
+// recoverable.  On 0, callers should fall back to the legacy
+// program[] path (or skip BLAS dispatch entirely).
+//
+// Type `UopDagGemmShape` lives in src/thvm.h alongside the function
+// declaration so the legacy fallback in cpu/blas.c can reference it
+// without needing dag_scan.c's static typedef.
+
+// Peel a UOP_OPT(_, TC, _) wrapper if present, returning the bare
+// inner REDUCE-shaped value.  Otherwise returns `value` unchanged.
+static Term udg_peel_tc_opt(Term value) {
+  if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_OPT) return value;
+  if (uop_opt_kind(value) != UOP_OPT_TC) return value;
+  return uop_opt_target(value);
+}
+
+// Re-run uop_classify_matmul on a STORE whose value may be wrapped
+// in UOP_OPT(_, TC, _).  When the wrapper is present we synthesise a
+// transient STORE without the wrapper so the existing classifier
+// (which expects the STORE.value to be a bare REDUCE) sees the
+// canonical shape.  Returns 1 + K_extent on match.
+static int udg_classify_matmul_store(Term store, u32 *out_k_extent,
+                                     Term *out_a_idx, Term *out_b_idx) {
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  Term buf_out  = heap_read(term_val(store) + 0);
+  Term addr_out = heap_read(term_val(store) + 1);
+  Term value    = heap_read(term_val(store) + 2);
+  Term peeled   = udg_peel_tc_opt(value);
+  Term canon = (peeled == value) ? store : uop_store(buf_out, addr_out, peeled);
+  if (!uop_classify_matmul(canon, out_k_extent)) return 0;
+  // Reach into the canonicalised STORE for the matmul operands.
+  // Layout: STORE(buf_out, addr_out, REDUCE(MUL(INDEX_E(A, addrA),
+  //                                             INDEX_E(B, addrB)))).
+  u64 sloc = term_val(canon);
+  Term reduce = heap_read(sloc + 2);
+  Term mul    = heap_read(term_val(reduce) + 0);
+  if (out_a_idx != NULL) *out_a_idx = heap_read(term_val(mul) + 0);
+  if (out_b_idx != NULL) *out_b_idx = heap_read(term_val(mul) + 1);
+  return 1;
+}
+
+// View-strides matcher: matmul kernels run inside a 3-axis range
+// nest [M, K, N], with one operand broadcast-zero on N (operand A)
+// and the other broadcast-zero on M (operand B).  Mirrors
+// tile_gemm_views_ok in src/schedule/tile.c exactly so the BLAS
+// dispatcher accepts the same set of layouts the legacy
+// tile_analyze_gemm path accepted.
+//
+// Returns 1 with *out_ld + *out_trans on success; 0 otherwise.
+// `is_a` selects the A vs B stride pattern (different broadcast axis).
+static int udg_match_view_strides(View const *v, u32 M, u32 N, u32 K,
+                                  int is_a, u32 *out_ld, u32 *out_trans) {
+  if (v == NULL || v->shape.ndim != 3) return 0;
+  if (v->shape.dims[0] != M || v->shape.dims[1] != K
+      || v->shape.dims[2] != N) return 0;
+  if (is_a) {
+    // A: 3rd axis (N) is broadcast => stride[2] == 0.
+    if (v->strides[2] != 0) return 0;
+    if (v->strides[0] == (i32)K && v->strides[1] == 1) {
+      *out_ld = K; *out_trans = 0; return 1;
+    }
+    if (v->strides[0] == 1 && v->strides[1] == (i32)M) {
+      *out_ld = M; *out_trans = 1; return 1;
+    }
+    return 0;
+  } else {
+    // B: 1st axis (M) is broadcast => stride[0] == 0.
+    if (v->strides[0] != 0) return 0;
+    if (v->strides[1] == (i32)N && v->strides[2] == 1) {
+      *out_ld = N; *out_trans = 0; return 1;
+    }
+    if (v->strides[1] == 1 && v->strides[2] == (i32)K) {
+      *out_ld = K; *out_trans = 1; return 1;
+    }
+    return 0;
+  }
+}
+
+// Public entry: extract M/N/K + input slot mapping + ldA/ldB +
+// transpose flags from the lifted UOp DAG `root` and the kernel's
+// `input_views[]`.  Returns 1 on success.  All five UOp-DAG-side
+// gates (matmul classify, output buf shape, input slot recovery,
+// per-input view stride pattern) must succeed; any single gate
+// failure returns 0 and lets the caller fall back to the legacy
+// program[] path.
+int uop_dag_classify_matmul_shape(Term root,
+                                  struct KernelEntry const *ke,
+                                  UopDagGemmShape *out) {
+  if (root == 0 || ke == NULL || out == NULL) return 0;
+  if (ke->input_views == NULL || ke->n_inputs < 2) return 0;
+
+  Term a_idx = 0, b_idx = 0;
+  u32 k_extent = 0;
+  if (!udg_classify_matmul_store(root, &k_extent, &a_idx, &b_idx)) return 0;
+  if (k_extent == 0) return 0;
+
+  // Output buf: STORE.src[0].  Must be a 2-D BUFFER with shape [M, N].
+  Term buf_out = heap_read(term_val(root) + 0);
+  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
+  if (uop_buffer_ndim(buf_out) != 2) return 0;
+  u32 M = uop_buffer_dim(buf_out, 0);
+  u32 N = uop_buffer_dim(buf_out, 1);
+  if (M == 0 || N == 0) return 0;
+
+  // Recover input slots from BUFFER.instance.  INDEX_E.src[0] is the
+  // buffer; instance == slot + 1 for inputs (see lift_input_buffer).
+  Term buf_a = heap_read(term_val(a_idx) + 0);
+  Term buf_b = heap_read(term_val(b_idx) + 0);
+  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
+  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
+  u32 inst_a = uop_buffer_inst_get(buf_a);
+  u32 inst_b = uop_buffer_inst_get(buf_b);
+  if (inst_a == 0 || inst_b == 0) return 0;
+  u32 a_input = inst_a - 1;
+  u32 b_input = inst_b - 1;
+  if (a_input >= ke->n_inputs || b_input >= ke->n_inputs) return 0;
+  if (a_input == b_input) return 0;
+
+  // Per-input stride pattern (from input_views[], set by emit_kernel
+  // _for_boundary alongside the lift) determines ldA / ldB / trans.
+  u32 ldA = 0, transA = 0;
+  u32 ldB = 0, transB = 0;
+  if (!udg_match_view_strides(&ke->input_views[a_input], M, N, k_extent,
+                              /*is_a=*/1, &ldA, &transA)) return 0;
+  if (!udg_match_view_strides(&ke->input_views[b_input], M, N, k_extent,
+                              /*is_a=*/0, &ldB, &transB)) return 0;
+
+  // Uniform dtype: every BUFFER reachable from the store_root must
+  // share dtype; mirrors tile_gemm_uniform_dtype's KProgOp gate.
+  u32 dt = uop_buffer_dtype(buf_out);
+  if (dt != DT_FP32 && dt != DT_FP64) return 0;
+  if (uop_buffer_dtype(buf_a) != dt) return 0;
+  if (uop_buffer_dtype(buf_b) != dt) return 0;
+
+  out->dtype   = dt;
+  out->M       = M;
+  out->N       = N;
+  out->K       = k_extent;
+  out->a_input = a_input;
+  out->b_input = b_input;
+  out->ldA     = ldA;
+  out->ldB     = ldB;
+  out->flags   = (transA ? 1u : 0u) | (transB ? 2u : 0u);
+  return 1;
+}

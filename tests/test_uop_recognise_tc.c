@@ -147,6 +147,91 @@ int main(void) {
   CHECK(uop_classify_matmul(st7, &k7_out));
   CHECK_EQ(k7_out, 7u);
 
+  TEST_BEGIN("recognise-tc/dag-classify-matmul-shape-unwrapped");
+  {
+    // Build a synthetic 16x32 @ 32x16 matmul kernel + populate the
+    // KernelEntry fields uop_dag_classify_matmul_shape consults
+    // (cached_lift.store_root + input_views[]).  Verifies the
+    // shape extractor recovers M=16, N=16, K=32, ldA=32, ldB=16,
+    // a_input=0, b_input=1, no transposes, dtype=DT_FP32.
+    KernelEntry ke = {0};
+    ke.n_inputs = 2;
+    ke.output_dtype = DT_FP32;
+    static u32 dts[2]   = {DT_FP32, DT_FP32};
+    static View vws[2];
+    vws[0].shape.ndim = 3;
+    vws[0].shape.dims[0] = 16; vws[0].shape.dims[1] = 32; vws[0].shape.dims[2] = 16;
+    vws[0].strides[0]    = 32; vws[0].strides[1]    = 1;  vws[0].strides[2]    = 0;
+    vws[1].shape.ndim = 3;
+    vws[1].shape.dims[0] = 16; vws[1].shape.dims[1] = 32; vws[1].shape.dims[2] = 16;
+    vws[1].strides[0]    = 0;  vws[1].strides[1]    = 16; vws[1].strides[2]    = 1;
+    ke.input_dtypes = dts;
+    ke.input_views  = vws;
+
+    // Build BUFFER terms with instance == slot+1 for inputs and 0
+    // for the output, mirroring lift_input_buffer / lift_output_buffer.
+    u32 dimsAi[2] = {16, 32};
+    u32 dimsBi[2] = {32, 16};
+    u32 dimsCi[2] = {16, 16};
+    Term Ai = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsAi, 1);
+    Term Bi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsBi, 2);
+    Term Ci = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsCi, 0);
+    Term r_mi = uop_range(20, 0,            16);
+    Term r_ni = uop_range(21, 0,            16);
+    Term r_ki = uop_range(22, 1 /*REDUCE*/, 32);
+    Term k16i = uop_const(DT_INT32, 16);
+    Term k32i = uop_const(DT_INT32, 32);
+    Term mKi  = uop_int_binary(UOP_IMUL, r_mi, k32i);
+    Term aAi  = uop_int_binary(UOP_IADD, mKi, r_ki);
+    Term ldAi = uop_index_e(Ai, aAi);
+    Term kNi  = uop_int_binary(UOP_IMUL, r_ki, k16i);
+    Term aBi  = uop_int_binary(UOP_IADD, kNi, r_ni);
+    Term ldBi = uop_index_e(Bi, aBi);
+    Term muli = uop_binary(UOP_MUL, ldAi, ldBi);
+    Term redi = uop_reduce(REDUCE_SUM, /*axis=*/22, muli);
+    Term mNi  = uop_int_binary(UOP_IMUL, r_mi, k16i);
+    Term aCi  = uop_int_binary(UOP_IADD, mNi, r_ni);
+    Term store_unwrapped = uop_store(Ci, aCi, redi);
+    ke.cached_lift.store_root = store_unwrapped;
+
+    UopDagGemmShape g = {0};
+    CHECK(uop_dag_classify_matmul_shape(store_unwrapped, &ke, &g));
+    CHECK_EQ(g.dtype, (u32)DT_FP32);
+    CHECK_EQ(g.M, 16u);
+    CHECK_EQ(g.N, 16u);
+    CHECK_EQ(g.K, 32u);
+    CHECK_EQ(g.a_input, 0u);
+    CHECK_EQ(g.b_input, 1u);
+    CHECK_EQ(g.ldA, 32u);
+    CHECK_EQ(g.ldB, 16u);
+    CHECK_EQ(g.flags, 0u);
+
+    TEST_BEGIN("recognise-tc/dag-classify-matmul-shape-tc-wrapped");
+    // Same shape but with the OPT(_, TC, 0) wrapper installed --
+    // mirrors what kernel_lift_from_gemm produces.  Classifier must
+    // peel the wrapper and still recognise the matmul.
+    Term tci   = uop_opt(redi, UOP_OPT_TC, 0);
+    Term store_wrapped = uop_store(Ci, aCi, tci);
+    UopDagGemmShape g2 = {0};
+    CHECK(uop_dag_classify_matmul_shape(store_wrapped, &ke, &g2));
+    CHECK_EQ(g2.M, 16u);
+    CHECK_EQ(g2.N, 16u);
+    CHECK_EQ(g2.K, 32u);
+    CHECK_EQ(g2.a_input, 0u);
+    CHECK_EQ(g2.b_input, 1u);
+    CHECK_EQ(g2.flags, 0u);
+
+    TEST_BEGIN("recognise-tc/dag-classify-non-matmul-rejected");
+    // STORE of CONST -- not a matmul.  Returns 0; out struct stays
+    // unchanged (caller-provided initialisation is preserved on bail).
+    Term zeroi = uop_const(DT_FP32, 0);
+    Term store_z = uop_store(Ci, aCi, zeroi);
+    UopDagGemmShape g3 = {0};
+    g3.M = 0xDEADu;  // Sentinel: classifier must not overwrite on reject.
+    CHECK(!uop_dag_classify_matmul_shape(store_z, &ke, &g3));
+    CHECK_EQ(g3.M, 0xDEADu);
+  }
+
   TEST_BEGIN("recognise-tc/conv-shape-rejected-too-many-ranges");
   // Conv2d single-input lift output: REDUCE(MUL(W[co*K+q], X[bi*Sb +
   // ci*S2 + (oh+kh_v)*S0 + ...])).  W's address has 2 ranges, X's

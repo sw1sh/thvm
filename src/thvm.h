@@ -2390,6 +2390,29 @@ Term uop_dag_heap_read    (u64 loc, u32 offset);
 int uop_dag_is_unary_ew   (u32 op);
 int uop_dag_is_binary_ew  (u32 op);
 
+// === Slice 8: DAG-side GEMM-shape extractor ===========================
+// Migration target for cpu_blas_dispatch / blas_try_gemm: recover the
+// matmul facts (M, N, K, input slot mapping, ldA/ldB, transpose flags)
+// from the lifted UOp DAG (`ke->cached_lift.store_root`) plus
+// `ke->input_views[]` instead of from `ke->program[]` -- which is
+// freed at materialize time under default `THVM_PHASE_C7_FREE_PROGRAM=1`.
+// See src/uop/dag_scan.c for the full prose + matching strategy.
+typedef struct {
+  u32 dtype;
+  u32 M;
+  u32 N;
+  u32 K;
+  u32 a_input;
+  u32 b_input;
+  u32 ldA;
+  u32 ldB;
+  u32 flags;     // bit 0 = transposed A, bit 1 = transposed B
+} UopDagGemmShape;
+
+int uop_dag_classify_matmul_shape(Term root,
+                                  struct KernelEntry const *ke,
+                                  UopDagGemmShape *out);
+
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
 // `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).
