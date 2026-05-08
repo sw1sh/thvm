@@ -1,0 +1,5 @@
+{
+  "_comment": "lsize=512, N_READS=8 -> 4096 floats per pass (matches C=4096). C=256: 32 threads = 1 simdgroup.",
+  "grid_per_row": [512, 1, 1],
+  "threadgroup": [512, 1, 1]
+}
