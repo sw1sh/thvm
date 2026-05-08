@@ -1477,62 +1477,71 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // The first n_buf entries get axis_ids matching BUFFERIZE order; the
   // rest get axis_ids continuing past n_buf.
   //
-  // When ke->axes carries autotune-applied opts (UPCAST/UNROLL/LOCAL/
-  // GROUP/GROUPTOP/GLOBAL/SWAP), each BUFFERIZE range's axis_uop is
-  // replaced by a linearised expression over the post-mutation axes.
-  // Splitting axis a with arg L into (outer of size N/L, inner of size L)
-  // produces axis_uop_a = outer * L + inner where outer/inner are new
-  // UOP_RANGE leaves with the appropriate axis_types.  The renderer
-  // walks the addr/value tree and emits one for-loop / thread bind per
-  // discovered UOP_RANGE leaf, so split semantics flow through to MSL.
+  // === E9-prep wedge 2 stage (d): split-class structural-replay retired ==
+  //
+  // Pre-stage-(d) the lifter replayed every applied_opts entry over a
+  // SplitAxis cur[] vector and emitted UOP_RANGE leaves in post-replay
+  // (post-split) layout: each split inserted an inner entry, the outer's
+  // factor was multiplied so its emitted leaf became
+  // `IADD(IMUL(outer * factor, inner_factor), inner)`, and the renderer
+  // saw the full post-split address chain directly.
+  //
+  // Stage (d) moves split-class rewriting (UPCAST/UNROLL/LOCAL/GROUP/
+  // GROUPTOP) out of the lifter and into `uop_apply_split_dag`
+  // (src/uop/apply_opt.c), which materialize.c invokes after a successful
+  // lift (alongside `uop_apply_kernel_opts` for axis_type stamping).  The
+  // lifter now emits ONE bare UOP_RANGE leaf per BUFFERIZE origin with
+  // its pre-split extent + axis_type, and the post-lift UPatRule pass
+  // rewires those leaves into the (outer * k + inner) expression the
+  // renderer expects.
+  //
+  // We still walk applied_opts for two reasons:
+  //   1. KOP_GLOBAL / KOP_SWAP guards: KOP_GLOBAL with a stale full-axis
+  //      extent (o.arg != post-split outer) and KOP_SWAP with an
+  //      out-of-range second axis are pre-flight rejected by `return 0`
+  //      so the materialize-time legacy fallback kicks in.  These two
+  //      checks need a running view of post-split extents per cur[]
+  //      position, so we maintain a compact `cur[].extent` table that
+  //      shrinks on every split-class opt (no factor / axis_type / opt
+  //      stamping; that's now apply_opt.c's job).
+  //   2. KOP_TC is metadata-only -- ignored by the lifter, consumed by
+  //      the renderer's TC pattern-matcher.
   u32 n_buf = (u32)bu->src_count - 1;
   if (n_buf > MAX_DIM) return 0;
   LiftRangeMap ranges[MAX_DIM * 2];
   u32 n_ranges = 0;
-  // Working list of "current axes" after applied-opt replay.  Each
-  // entry contributes `axis_uop * factor` to its origin BUFFERIZE
-  // range's linearised expression.  Initially: one entry per
-  // BUFFERIZE range with factor=1 and axis_type/extent from S_RANGE.
-  typedef struct {
-    u32 axis_type;
-    u32 extent;
-    u32 origin;       // index into BUFFERIZE.src[1..n_buf]
-    u32 factor;       // multiplier in linearisation
-    u32 opt_kind;     // UOP_OPT_* or 0xFFu (no opt wrap)
-    u32 opt_factor;   // factor argument carried into UOP_OPT
-  } SplitAxis;
-  #define SPLIT_AXIS_NO_OPT 0xFFu
-  SplitAxis cur[MAX_AXES];
-  u32 n_cur = 0;
+  // Pre-split origin_extent[i] / origin_axis_type[i] -- read once from
+  // S_RANGE.extra and never mutated.  These feed the bare UOP_RANGE
+  // leaves we emit per BUFFERIZE origin; uop_apply_split_dag rewires
+  // them into split chains post-lift.
+  u32 origin_extent[MAX_DIM];
+  u32 origin_axis_type[MAX_DIM];
   u32 r_sids[MAX_DIM];
+  // cur_extent[] tracks post-split extent per current cur[] position;
+  // used only by the KOP_GLOBAL extent guard and the KOP_SWAP range
+  // check below.  Initially mirrors origin_extent[]; split-class opts
+  // shrink cur_extent[o.axis] /= o.arg and insert cur_extent[o.axis+1]
+  // = o.arg.  No axis_type tracking here: the post-lift
+  // uop_apply_kernel_opts pass simulates desired[axis_id] from
+  // applied_opts directly.
+  u32 cur_extent[MAX_AXES];
+  u32 n_cur = 0;
   for (u32 i = 0; i < n_buf; i++) {
     u32 r_sid = bu->src[1 + i];
     if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
     ScalarUop const *ru = &ke->scalar_uops[r_sid];
     if (ru->op != S_RANGE) return 0;
     r_sids[i] = r_sid;
-    cur[n_cur].axis_type  = (u32)(ru->extra >> 32) & 0xFFu;
-    cur[n_cur].extent     = (u32)(ru->extra & 0xFFFFFFFFu);
-    cur[n_cur].origin     = i;
-    cur[n_cur].factor     = 1;
-    cur[n_cur].opt_kind   = SPLIT_AXIS_NO_OPT;
-    cur[n_cur].opt_factor = 0;
+    origin_axis_type[i] = (u32)(ru->extra >> 32) & 0xFFu;
+    origin_extent[i]    = (u32)(ru->extra & 0xFFFFFFFFu);
+    cur_extent[n_cur]   = origin_extent[i];
     n_cur++;
   }
-  // Replay applied_opts when present.
-  //
-  // Per-USE handling is split across:
-  //
-  //   1. The replay loop below: skips opts targeting per-USE axes
-  //      via `if (o.axis >= n_cur) continue;`.  Per-USE axes don't
-  //      live in cur[] (which only tracks BUFFERIZE-derived axes
-  //      and their splits), so any opt with axis >= n_cur is by
-  //      construction a per-USE opt deferred to step 2.
-  //
-  //   2. The per-USE auxiliary scan further down: walks
-  //      ke->scalar_uops, finds each per-USE S_RANGE, and wraps it
-  //      in UOP_OPT_GROUP_REDUCE when applied_opts has a matching
-  //      KOP_GROUP/KOP_GROUPTOP.
+  // Replay applied_opts when present -- compact extent bookkeeping for
+  // the KOP_GLOBAL / KOP_SWAP guards only.  Per-USE opts (axis >= n_cur)
+  // are skipped here and handled by the per-USE auxiliary scan further
+  // down (which wraps per-USE S_RANGE leaves in UOP_OPT_GROUP_REDUCE
+  // for KOP_GROUP/KOP_GROUPTOP).
   //
   // E9-prep wedge 3 replaced the `axis_types[]` scan here with the
   // higher-level `axes_will_have_reduce_axis` predicate (program tail
@@ -1560,58 +1569,33 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
       u8 op = o.op;
       if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
           || op == KOP_GROUP || op == KOP_GROUPTOP) {
-        if (o.arg == 0 || cur[o.axis].extent % o.arg != 0) return 0;
+        // Compact extent bookkeeping only -- the actual leaf rewiring
+        // to (outer * k + inner) happens in uop_apply_split_dag
+        // post-lift.  We keep cur_extent[] in sync so a subsequent
+        // KOP_GLOBAL / KOP_SWAP sees the post-split view its guard
+        // expects (o.arg matching the post-split outer extent).
+        if (o.arg == 0 || cur_extent[o.axis] % o.arg != 0) return 0;
         if (n_cur >= MAX_AXES) return 0;
-        // Shift right.
-        for (u32 j = n_cur; j > (u32)o.axis + 1; j--) cur[j] = cur[j - 1];
-        u32 outer_extent = cur[o.axis].extent / o.arg;
-        u32 inner_extent = o.arg;
-        u8  inner_kax    = (op == KOP_UPCAST)   ? KAX_UPCAST
-                         : (op == KOP_UNROLL)   ? KAX_UNROLL
-                         : (op == KOP_LOCAL)    ? KAX_LOCAL
-                         : KAX_GROUP_REDUCE;
-        u32 origin = cur[o.axis].origin;
-        u32 factor = cur[o.axis].factor;
-        // Outer keeps original axis_type, inner takes the opt's type.
-        cur[o.axis].extent = outer_extent;
-        cur[o.axis].factor = factor * inner_extent;
-        cur[o.axis + 1].axis_type = inner_kax;
-        cur[o.axis + 1].extent    = inner_extent;
-        cur[o.axis + 1].origin    = origin;
-        cur[o.axis + 1].factor    = factor;
-        // OPT-annotation stamping for the inner range:
-        //   UPCAST / UNROLL  -> renderer fires `#pragma unroll(N)` above
-        //                       the inner for-loop.
-        //   GROUP / GROUPTOP -> renderer recognises a threadgroup-
-        //                       shared-accumulator pattern (Phase 3
-        //                       follow-on) and emits the cooperative
-        //                       reduce shape.  Stamping the OPT here
-        //                       is harmless until the renderer learns
-        //                       to consume it; the existing scalar
-        //                       accumulator path ignores unfamiliar
-        //                       opt kinds.
-        //   LOCAL            -> axis_type=KAX_LOCAL alone drives the
-        //                       `tt`/`tg` thread bind in the renderer.
-        cur[o.axis + 1].opt_kind   =
-            (op == KOP_UPCAST)                          ? UOP_OPT_UPCAST
-          : (op == KOP_UNROLL)                          ? UOP_OPT_UNROLL
-          : (op == KOP_GROUP || op == KOP_GROUPTOP)     ? UOP_OPT_GROUP_REDUCE
-          :                                               SPLIT_AXIS_NO_OPT;
-        cur[o.axis + 1].opt_factor =
-            (op == KOP_UPCAST || op == KOP_UNROLL
-             || op == KOP_GROUP || op == KOP_GROUPTOP)  ? inner_extent
-          :                                               0;
+        for (u32 j = n_cur; j > (u32)o.axis + 1; j--) {
+          cur_extent[j] = cur_extent[j - 1];
+        }
+        cur_extent[o.axis]     = cur_extent[o.axis] / o.arg;
+        cur_extent[o.axis + 1] = o.arg;
         n_cur++;
       } else if (op == KOP_GLOBAL) {
-        if (cur[o.axis].axis_type != KAX_LOOP || o.arg != cur[o.axis].extent) {
+        // GLOBAL extent guard: o.arg must equal the current post-split
+        // outer extent at o.axis.  axis_type LOOP-precondition is
+        // checked by uop_apply_kop_global on the post-split DAG; we
+        // only reject the obviously-stale-extent case here so the
+        // legacy fallback kicks in promptly.
+        if (o.arg != cur_extent[o.axis]) {
           return 0;
         }
-        cur[o.axis].axis_type = KAX_GLOBAL;
       } else if (op == KOP_SWAP) {
         if ((u32)o.arg >= n_cur) return 0;
-        SplitAxis t = cur[o.axis];
-        cur[o.axis] = cur[o.arg];
-        cur[o.arg]  = t;
+        u32 t = cur_extent[o.axis];
+        cur_extent[o.axis] = cur_extent[o.arg];
+        cur_extent[o.arg]  = t;
       } else if (op == KOP_TC) {
         // Tensor-core opt is metadata-only; pattern-matched in render.
       } else {
@@ -1619,29 +1603,17 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
       }
     }
   }
-  // Allocate UOP_RANGE leaves for each post-replay axis and compose
-  // per-origin linearised expressions in row-major order (left-to-right
-  // axes are outermost; accumulating from the left).
-  Term origin_expr[MAX_DIM] = {0};
-  for (u32 a = 0; a < n_cur; a++) {
-    Term r = uop_range(a, cur[a].axis_type, cur[a].extent);
-    if (cur[a].opt_kind != SPLIT_AXIS_NO_OPT) {
-      r = uop_opt(r, cur[a].opt_kind, cur[a].opt_factor);
-    }
-    Term term = (cur[a].factor == 1)
-              ? r
-              : uop_int_binary(UOP_IMUL, r,
-                               uop_const(DT_INT32, cur[a].factor));
-    u32 origin = cur[a].origin;
-    origin_expr[origin] = (origin_expr[origin] == 0)
-        ? term
-        : uop_int_binary(UOP_IADD, origin_expr[origin], term);
-  }
+  // Emit one bare UOP_RANGE leaf per BUFFERIZE origin in row-major order
+  // with the pre-split axis_type / extent.  uop_apply_split_dag (called
+  // post-lift in materialize.c) rewires each leaf into the (outer * k +
+  // inner) chain dictated by applied_opts split-class entries; the
+  // axis_type stamping (KOP_GLOBAL / KOP_SWAP / KOP_TC) is handled by
+  // uop_apply_kernel_opts in the same post-lift pass.
   for (u32 i = 0; i < n_buf; i++) {
-    if (origin_expr[i] == 0) origin_expr[i] = uop_const(DT_INT32, 0);
+    Term r = uop_range(i, origin_axis_type[i], origin_extent[i]);
     ranges[n_ranges].axis_id   = n_ranges;
     ranges[n_ranges].scalar_id = r_sids[i];
-    ranges[n_ranges].axis_uop  = origin_expr[i];
+    ranges[n_ranges].axis_uop  = r;
     n_ranges++;
   }
   // Per-USE auxiliary S_RANGE leaves (not in BUFFERIZE) -- find by

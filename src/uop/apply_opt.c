@@ -1007,69 +1007,16 @@ fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
     if (referenced[a] && ctx.origin_extent[a] == 0) return root;
   }
 
-  // Idempotence guard: search the DAG for sentinel "post-split"
-  // leaves -- a UOP_RANGE with axis_id == a+1 (or a+2 etc. for chained
-  // splits) whose axis_type matches kop_inner_axis_type(opt) and
-  // extent matches opt.arg.  Such a leaf can only have been produced
-  // by a previous run of this rule (or by the legacy lifter
-  // structural-replay block, which is being retired).  When the
-  // sentinel is found for ALL referenced split-axis opts, the DAG is
-  // already in post-split state and a second application would
-  // double-split.  Return root unchanged.
-  //
-  // Why "for ALL": partially-applied opts (rare, but possible if a
-  // subset of a multi-opt sequence already applied) should still let
-  // the remaining opts fire.  We bail only on the fully-applied case.
-  int all_applied = 1;
-  int saw_split   = 0;
-  for (u32 i = 0; i < n_applied && all_applied; i++) {
-    KOpt const *o = &applied_opts[i];
-    if (!kop_is_split(o->op)) continue;
-    saw_split = 1;
-    u32 a = (u32)o->axis;
-    if (a >= MAX_DIM - 1) { all_applied = 0; break; }
-    u32 want_extent = o->arg;
-    u8  want_type   = kop_inner_axis_type(o->op);
-    int found = 0;
-    sp = 0;
-    if (root != 0) stack[sp++] = root;
-    while (sp > 0 && !found) {
-      Term cur = stack[--sp];
-      if (term_tag(cur) != TAG_UOP) continue;
-      u32 op = term_ext(cur);
-      if (op == UOP_RANGE) {
-        // Look for any RANGE with extent == want_extent and axis_type
-        // == want_type at axis_id > a (the split inserts inner at
-        // a+1, but subsequent splits may shift it further).
-        u32 lid_a   = uop_range_axis_id(cur);
-        u32 lid_ext = uop_range_extent(cur);
-        u32 lid_at  = uop_range_axis_type(cur);
-        if (lid_a > a && lid_ext == want_extent && lid_at == (u32)want_type) {
-          found = 1;
-          break;
-        }
-        continue;
-      }
-      if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_CONST
-          || op == UOP_INVALID) continue;
-      // UOP_OPT wraps inner ranges for UPCAST/UNROLL/GROUP/GROUPTOP.
-      // Descend into target so the sentinel scan sees the wrapped
-      // RANGE leaf and triggers idempotence.
-      if (op == UOP_OPT) {
-        Term tgt = uop_opt_target(cur);
-        if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
-        continue;
-      }
-      u8 ar = uop_arity(op);
-      u64 loc = term_val(cur);
-      for (u8 j = 0; j < ar && j < MAX_UOP_SRC && sp < 256; j++) {
-        Term child = heap_read(loc + j);
-        if (term_tag(child) == TAG_UOP) stack[sp++] = child;
-      }
-    }
-    if (!found) all_applied = 0;
-  }
-  if (saw_split && all_applied) return root;
+  // E9-prep wedge 2 stage (d): the lifter's structural-replay split
+  // block is retired, so on a normal lift this rule sees a pre-split
+  // DAG (one bare UOP_RANGE per BUFFERIZE origin with full pre-split
+  // extent + axis_type) and rewires it once.  The materialize.c caller
+  // invokes uop_apply_split_dag exactly once per lift, so we no longer
+  // need the sentinel-walk idempotence guard that previously detected
+  // already-split DAGs and bailed.  The per-leaf extent + axis_type
+  // match in the rule body (rw_split_dag_range) is the sole gate: it
+  // fires only on a leaf whose extent equals the captured pre-split
+  // origin_extent[axis_id].
 
   // Run the simulation: for each split-class opt, drill into
   // origin_expr[o.axis] (or seed a fresh RANGE leaf), apply
