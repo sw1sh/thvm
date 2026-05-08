@@ -110,7 +110,7 @@ fn u64 kernel_rangeified_key(KernelEntry const *ke) {
     h = kp_hash_u64(h, (u64)ke->n_scalar_uops);
     h = kp_hash_bytes(h, ke->scalar_uops,
                       (size_t)ke->n_scalar_uops * sizeof(ScalarUop));
-  } else if (ke->axes != NULL && ke->axes->n_axes > 0) {
+  } else if (ke->axes != NULL && axes_resolve_n_axes(ke) > 0) {
     h = kp_hash_u64(h, 2);
     h = kp_hash_u64(h, (u64)term_tag(ke->source_uop));
     h = kp_hash_u64(h, (u64)term_ext(ke->source_uop));
@@ -227,34 +227,19 @@ static int kaxis_slot_equal(KAxisCacheSlot const *s, KernelEntry const *ke) {
       return 0;
     }
     if (ke->axes == NULL) return 0;
-    // E9-prep wedge 5: rewire the per-axis equality to read from the
-    // WRITER input (applied_opts[]) rather than the WRITER output
-    // (axis_types[]).  Since `axes_apply_opt` is deterministic,
-    // identical applied_opts[] sequences applied to identical default
-    // states produce identical axis_types[] arrays.  The default state
-    // is itself a function of the slot fields already compared above
-    // (output_shape + scalar_uops + source_tag/ext), so applied_opts[]
-    // equality is sufficient to imply axis_types[] equality on this
-    // cache's domain (rangeified-axes cache; live consumers go through
-    // axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt).
-    //
-    // n_axes and full_shape[] comparisons stay -- both are independent
-    // of axis_types[] and remain safe direct reads.
-    u32 n_axes_c = ke->axes->n_axes;
-    if (s->axes.n_axes != n_axes_c) return 0;
-    for (u32 i = 0; i < n_axes_c; i++) {
-      if (s->axes.full_shape[i] != ke->axes->full_shape[i]) return 0;
-    }
+    // E9 session 3: extend wedge-5's argument to full_shape[] / n_axes.
+    // The KernelAxes writer trio (axes_default_for +
+    // axes_ensure_scalar_reduce + axes_apply_opt + tile_anno_axis_append)
+    // is deterministic over (output_shape + scalar_uops + source_tag/ext
+    // + applied_opts).  The first four signals are already byte-equal
+    // by the slot comparisons above, so applied_opts[] equality alone
+    // implies n_axes + full_shape[] equality.  The redundant
+    // n_axes/full_shape comparisons retire here; collapse to
+    // applied_opts.
     if (!kopts_equal(s->axes.applied_opts, s->axes.n_applied,
                      ke->axes->applied_opts, ke->axes->n_applied)) {
       return 0;
     }
-    // Wedge 8 retired the THVM_E9_VALIDATE=1 axis_types[] cross-check
-    // here.  applied_opts[] equality + the deterministic writer trio
-    // (axes_default_for + axes_ensure_scalar_reduce + axes_apply_opt)
-    // are sufficient to imply axis_types[] equality; the explicit
-    // sanity check is no longer needed once the readers stop touching
-    // axis_types[] entirely.
   }
   if (s->n_inputs > 0) {
     if (memcmp(s->input_dtypes, ke->input_dtypes,

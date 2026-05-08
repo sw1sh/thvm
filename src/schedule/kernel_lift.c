@@ -1522,7 +1522,7 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     // BUFFERIZE entries in axes_default_for / autotune layout).
     u32 axes_idx = n_buf + per_use_idx;
     per_use_idx++;
-    if (orig_kax != NULL && axes_idx < orig_kax->n_axes) {
+    if (orig_kax != NULL && axes_idx < axes_resolve_n_axes(ke)) {
       for (u32 oi = 0; oi < (u32)orig_kax->n_applied; oi++) {
         KOpt const *o = &orig_kax->applied_opts[oi];
         if (o->axis == (u8)axes_idx

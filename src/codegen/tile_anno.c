@@ -63,19 +63,23 @@ static int tile_anno_tile_uops_fresh(KernelEntry const *ke) {
   if (ke->tile_axes_hash != tile_axes_hash(ke)) return 0;
   u32 tile_n = tile_anno_axis_count(ke);
   if (tile_n == 0) return 0;
-  return tile_n == ke->axes->n_axes;
+  return tile_n == axes_resolve_n_axes(ke);
 }
 
 fn int tile_anno_axis_or_kernelaxes(KernelEntry const *ke, u32 d,
                                     TileAxisInfo *out) {
   if (out == NULL) return 0;
   if (tile_anno_tile_uops_fresh(ke) && tile_anno_axis_at(ke, d, out)) return 1;
-  if (ke == NULL || ke->axes == NULL || d >= ke->axes->n_axes) return 0;
-  // E9: axes_resolve_kax_type is the single read point for kax_type --
-  // signal-derived from output_shape + tail-reduce + scalar-reduce +
-  // applied_opts.  KernelAxes no longer stores axis_types[].
+  // E9 session 3: read kax_type + extent through the resolvers (signal-
+  // derived from output_shape + tail-reduce + scalar-reduce +
+  // applied_opts) instead of `ke->axes->full_shape[]` directly.  The
+  // `ke->axes == NULL` guard moves into the resolvers; both bail to 0 /
+  // KAX_LOOP when the kernel hasn't been axes-defaulted yet.
+  if (ke == NULL || ke->axes == NULL) return 0;
+  u32 extent = 0;
+  if (!axes_resolve_full_shape(ke, d, &extent)) return 0;
   out->kax_type     = axes_resolve_kax_type(ke, d);
-  out->extent       = ke->axes->full_shape[d];
+  out->extent       = extent;
   out->memory_scope = 0;
   out->vector_width = 0;
   return 1;
@@ -86,8 +90,8 @@ fn u32 tile_anno_axis_count_or_kernelaxes(KernelEntry const *ke) {
     u32 n = tile_anno_axis_count(ke);
     if (n != 0) return n;
   }
-  if (ke == NULL || ke->axes == NULL) return 0;
-  return ke->axes->n_axes;
+  // E9 session 3: count via resolver (signal-derived).
+  return axes_resolve_n_axes(ke);
 }
 
 // applied_opts facade: today these read from KernelAxes.applied_opts[]

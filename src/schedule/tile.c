@@ -1184,43 +1184,49 @@ static u32 tile_find_scalar_bufferize(KernelEntry const *ke) {
 // axes_ensure_scalar_reduce + axes_apply_opt) by construction.
 //
 // Renamed from `tile_emit_axes_from_kernel_axes` to reflect the new
-// source of axis_type values.  Extents still come from
-// `ke->axes->full_shape[]` (not on the E9 deletion path).
+// source of axis_type values.
 //
-// Wedge 8 retired the legacy `axis_types[i]` fallback: every reachable
-// caller now has either applied_opts > 0 (simulator authoritative) or
-// a signal-only state the simulator derives (default_for: nd LOOPs +
-// optional trailing REDUCE).  When the simulator can't reproduce
-// `ke->axes->n_axes` (overflow / unknown opt), the function bails
-// rather than reading legacy state.
+// E9 session 3: extents now come from `axes_compute_full_shape` (the
+// signal-replay resolver), matching the kax_type derivation.  Both
+// reads consult the same applied_opts log + output_shape signals;
+// `ke->axes->full_shape[]` is no longer touched here.  The function
+// still calls `axes_default_for(ke)` to materialize the writer-side
+// shape when uninitialised (the resolver speaks against ke->axes,
+// which the writer trio populates).
 static u32 tile_emit_axes_from_kernel_signals(KernelEntry *ke, u32 *out,
                                               u32 cap) {
   if (ke->axes == NULL) {
     return 0;
   }
-  if (ke->axes->n_axes == 0) {
+  if (axes_resolve_n_axes(ke) == 0) {
     axes_default_for(ke);
   }
-  if (ke->axes->n_axes == 0 || ke->axes->n_axes > cap) {
+  u32 n_axes = axes_resolve_n_axes(ke);
+  if (n_axes == 0 || n_axes > cap) {
     return 0;
   }
 
   u8 types[MAX_AXES] = {0};
-  u32 n = axes_compute_axis_types(ke, types, MAX_AXES);
-  if (n == 0 || n != ke->axes->n_axes) {
+  u32 n_types = axes_compute_axis_types(ke, types, MAX_AXES);
+  if (n_types == 0 || n_types != n_axes) {
+    return 0;
+  }
+  u32 extents[MAX_AXES] = {0};
+  u32 n_ext = axes_compute_full_shape(ke, extents, MAX_AXES);
+  if (n_ext == 0 || n_ext != n_axes) {
     return 0;
   }
 
-  for (u32 i = 0; i < ke->axes->n_axes; i++) {
+  for (u32 i = 0; i < n_axes; i++) {
     TileAxisInfo info = {
       .kax_type     = types[i],
-      .extent       = ke->axes->full_shape[i],
+      .extent       = extents[i],
       .memory_scope = 0,
       .vector_width = 0,
     };
     out[i] = tile_emit_leaf(ke, TILE_AXIS, DT_INT64, tile_axis_pack(info));
   }
-  return ke->axes->n_axes;
+  return n_axes;
 }
 
 static u32 tile_emit_axes_from_scalar_root(KernelEntry *ke, u32 root,

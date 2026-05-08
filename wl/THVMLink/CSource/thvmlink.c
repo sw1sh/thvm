@@ -1497,7 +1497,8 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
     MArgument_setMTensor(res, empty);
     return LIBRARY_NO_ERROR;
   }
-  KernelAxes const *ax = KERNELS[kid].axes;
+  KernelEntry const *ke = &KERNELS[kid];
+  KernelAxes const *ax = ke->axes;
   if (ax == NULL) {
     mint dims[1] = {0};
     MTensor empty;
@@ -1505,23 +1506,30 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
     MArgument_setMTensor(res, empty);
     return LIBRARY_NO_ERROR;
   }
-  mint total = (mint)(2 + 2 * ax->n_axes + 3 * ax->n_applied);
+  // E9 session 3: read n_axes + per-axis (kax_type, extent) through the
+  // resolvers (signal-derived from output_shape + tail-reduce +
+  // scalar-reduce + applied_opts).  Wire format stays byte-equal: by
+  // writer-trio determinism, axes_resolve_n_axes(ke) == ax->n_axes and
+  // axes_resolve_full_shape(ke, i) == ax->full_shape[i] under
+  // THVM_E9_VALIDATE=1.  applied_opts is still sourced from KernelAxes
+  // (Piece B / future session moves the ownership).
+  u32 n_axes = axes_resolve_n_axes(ke);
+  u32 n_applied = (u32)ax->n_applied;
+  mint total = (mint)(2 + 2 * n_axes + 3 * n_applied);
   mint dims[1] = {total};
   MTensor out;
   libData->MTensor_new(MType_Integer, 1, dims, &out);
   mint *dst = libData->MTensor_getIntegerData(out);
-  dst[0] = (mint)ax->n_axes;
-  dst[1] = (mint)ax->n_applied;
-  // E9: kax_type comes from the wedge-4 simulator (signal-derived from
-  // output_shape + tail-reduce + scalar-reduce + applied_opts) since the
-  // legacy `axis_types[]` field is gone.  Snapshot routes through
-  // `axes_resolve_kax_type` for parity with every other read site.
-  for (u32 i = 0; i < ax->n_axes; i++) {
-    dst[2 + i]               = (mint)axes_resolve_kax_type(&KERNELS[kid], i);
-    dst[2 + ax->n_axes + i]  = (mint)ax->full_shape[i];
+  dst[0] = (mint)n_axes;
+  dst[1] = (mint)n_applied;
+  for (u32 i = 0; i < n_axes; i++) {
+    u32 extent = 0;
+    (void)axes_resolve_full_shape(ke, i, &extent);
+    dst[2 + i]           = (mint)axes_resolve_kax_type(ke, i);
+    dst[2 + n_axes + i]  = (mint)extent;
   }
-  mint base = 2 + 2 * ax->n_axes;
-  for (u32 i = 0; i < ax->n_applied; i++) {
+  mint base = 2 + 2 * n_axes;
+  for (u32 i = 0; i < n_applied; i++) {
     dst[base + 3 * i + 0] = (mint)ax->applied_opts[i].op;
     dst[base + 3 * i + 1] = (mint)ax->applied_opts[i].axis;
     dst[base + 3 * i + 2] = (mint)ax->applied_opts[i].arg;
