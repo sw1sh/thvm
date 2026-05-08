@@ -1633,7 +1633,7 @@ static u32 tile_find_scalar_bufferize(KernelEntry const *ke) {
   return 0;
 }
 
-// E9-prep wedge 4: emit TILE_AXIS leaves from a signal-derived
+// E9-prep wedge 4+8: emit TILE_AXIS leaves from a signal-derived
 // `axis_types[]` simulation (output_shape + tail-reduce + scalar-reduce
 // + applied_opts) instead of reading `ke->axes->axis_types[]`
 // directly.  See `axes_compute_axis_types` for the simulation contract;
@@ -1644,28 +1644,12 @@ static u32 tile_find_scalar_bufferize(KernelEntry const *ke) {
 // source of axis_type values.  Extents still come from
 // `ke->axes->full_shape[]` (not on the E9 deletion path).
 //
-// Source-of-truth selection:
-//   - When `ke->axes->n_applied > 0` the simulation is authoritative:
-//     the writer trio has run for-real on this kernel, so the simulated
-//     post-replay axis_types[] equal whatever the writer wrote.  Reads
-//     come from the simulator output; the legacy `axis_types[]` array
-//     is only sampled under THVM_E9_VALIDATE=1 (abort-on-divergence
-//     diagnostic that surfaces undocumented writers / bugs in the
-//     simulator).
-//   - When `n_applied == 0` (no opts have been applied), the legacy
-//     `axis_types[]` is the only ground truth that includes any direct
-//     test-side hand-writes (~30 sites in test_metal_real /
-//     test_tile_graph -- wedge 6 migration territory).  Reads come from
-//     legacy until wedge 6 retires those hand-writes; the simulation is
-//     still computed so THVM_E9_VALIDATE=1 catches divergence on the
-//     subset of hand-writes that happen to also match the writer trio's
-//     output (so the validate gate continues to gain coverage as wedge
-//     6 lands).  Hand-writes that disagree with the simulator's
-//     default-for view are tolerated under validate-on for n_applied==0
-//     paths; those become explicit migration targets for wedge 6.
-//
-// Once wedge 6 lands the n_applied==0 fallback can be removed and the
-// simulator becomes the unconditional primary.
+// Wedge 8 retired the legacy `axis_types[i]` fallback: every reachable
+// caller now has either applied_opts > 0 (simulator authoritative) or
+// a signal-only state the simulator derives (default_for: nd LOOPs +
+// optional trailing REDUCE).  When the simulator can't reproduce
+// `ke->axes->n_axes` (overflow / unknown opt), the function bails
+// rather than reading legacy state.
 static u32 tile_emit_axes_from_kernel_signals(KernelEntry *ke, u32 *out,
                                               u32 cap) {
   if (ke->axes == NULL) {
@@ -1680,63 +1664,13 @@ static u32 tile_emit_axes_from_kernel_signals(KernelEntry *ke, u32 *out,
 
   u8 types[MAX_AXES] = {0};
   u32 n = axes_compute_axis_types(ke, types, MAX_AXES);
-  int sim_ok = (n != 0 && n == ke->axes->n_axes);
-  int n_applied = (int)ke->axes->n_applied;
-
-  char const *val_e = getenv("THVM_E9_VALIDATE");
-  int validate_on = (val_e != NULL && val_e[0] == '1');
-
-  // Validate-on cross-check (only when the simulator produced a full
-  // result).  Aborts loudly on disagreement when the writer trio has
-  // run for-real (n_applied > 0) -- those divergences signal a bug in
-  // the simulator or an undocumented writer.  When n_applied == 0 we
-  // skip the abort: hand-write tests are the dominant cause of
-  // disagreement there, and they're explicitly the wedge 6 migration
-  // target.  The diagnostic is still printed so the divergence shows
-  // up in CI logs.
-  if (validate_on && sim_ok) {
-    for (u32 i = 0; i < n; i++) {
-      if (types[i] != ke->axes->axis_types[i]) {
-        if (n_applied > 0) {
-          fprintf(stderr,
-                  "thvm: THVM_E9_VALIDATE detected axis_type divergence "
-                  "in tile_emit_axes_from_kernel_signals at axis %u: "
-                  "legacy=%u, simulated=%u "
-                  "(n_applied=%u, output_ndim=%u, n_axes=%u).\n",
-                  i, (u32)ke->axes->axis_types[i], (u32)types[i],
-                  (u32)ke->axes->n_applied, (u32)ke->output_shape.ndim,
-                  (u32)ke->axes->n_axes);
-          abort();
-        } else {
-          // n_applied == 0: tolerated divergence (likely a wedge 6
-          // hand-write).  Note in-stream so the migration target is
-          // visible without breaking the validate gate.
-          fprintf(stderr,
-                  "thvm: THVM_E9_VALIDATE n_applied==0 hand-write "
-                  "detected at axis %u: legacy=%u, simulated=%u "
-                  "(output_ndim=%u, n_axes=%u). Wedge-6 migration "
-                  "target.\n",
-                  i, (u32)ke->axes->axis_types[i], (u32)types[i],
-                  (u32)ke->output_shape.ndim, (u32)ke->axes->n_axes);
-          break;
-        }
-      }
-    }
+  if (n == 0 || n != ke->axes->n_axes) {
+    return 0;
   }
 
   for (u32 i = 0; i < ke->axes->n_axes; i++) {
-    // Pick simulator output when it's authoritative (n_applied > 0).
-    // Otherwise (no opts applied or simulator failed) fall back to
-    // legacy `axis_types[]` so test hand-writes continue to flow into
-    // TILE_AXIS until wedge 6 migrates them onto the writer trio.
-    u8 kax;
-    if (sim_ok && n_applied > 0) {
-      kax = types[i];
-    } else {
-      kax = ke->axes->axis_types[i];
-    }
     TileAxisInfo info = {
-      .kax_type     = kax,
+      .kax_type     = types[i],
       .extent       = ke->axes->full_shape[i],
       .memory_scope = 0,
       .vector_width = 0,
