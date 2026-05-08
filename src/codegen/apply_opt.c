@@ -101,7 +101,12 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (ax->n_applied >= MAX_OPTS) {
     return 0;
   }
-  if (opt.axis >= ax->n_axes) {
+  // E9 session 4: writer-private scratch.  `ax->_writer.full_shape[]` /
+  // `ax->_writer.n_axes` are NOT to be read outside the writer trio
+  // (apply_opt.c body, tile_anno.c writer-trio, axis.c lifecycle /
+  // validators).  External readers go through axes_resolve_full_shape
+  // / axes_resolve_n_axes.
+  if (opt.axis >= ax->_writer.n_axes) {
     return 0;
   }
 
@@ -109,28 +114,28 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     if (opt.arg == 0) {
       return 0;
     }
-    u32 axis_size = ax->full_shape[opt.axis];
+    u32 axis_size = ax->_writer.full_shape[opt.axis];
     if (axis_size % opt.arg != 0) {
       return 0;
     }
-    if (ax->n_axes >= MAX_AXES) {
+    if (ax->_writer.n_axes >= MAX_AXES) {
       return 0;
     }
     // Shift full_shape[] entries after opt.axis right by one to make
     // room for the new inner axis.  No axis_types[] array to shift --
     // axes_compute_axis_types replays the same insertion against the
     // signal-derived initial layout.
-    for (i32 i = (i32)ax->n_axes; i > (i32)opt.axis + 1; i--) {
-      ax->full_shape[i] = ax->full_shape[i - 1];
+    for (i32 i = (i32)ax->_writer.n_axes; i > (i32)opt.axis + 1; i--) {
+      ax->_writer.full_shape[i] = ax->_writer.full_shape[i - 1];
     }
     // Outer keeps its original type by replay; size shrinks by split
     // factor.  Inner takes the opt's type by replay; size = split
     // factor.
-    ax->full_shape[opt.axis]     = axis_size / opt.arg;
-    ax->full_shape[opt.axis + 1] = opt.arg;
-    ax->n_axes++;
+    ax->_writer.full_shape[opt.axis]     = axis_size / opt.arg;
+    ax->_writer.full_shape[opt.axis + 1] = opt.arg;
+    ax->_writer.n_axes++;
   } else if (opt.op == KOP_GLOBAL) {
-    u32 axis_size = ax->full_shape[opt.axis];
+    u32 axis_size = ax->_writer.full_shape[opt.axis];
     if (opt.arg != axis_size
         || axes_resolve_kax_type(ke, opt.axis) != KAX_LOOP) {
       return 0;
@@ -138,13 +143,13 @@ fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
     // No axis_types[] write; resolver replays KOP_GLOBAL against the
     // post-applied_opts state.
   } else if (opt.op == KOP_SWAP) {
-    if ((u8)opt.arg >= ax->n_axes) {
+    if ((u8)opt.arg >= ax->_writer.n_axes) {
       return 0;
     }
-    u32 si = ax->full_shape[opt.axis];
-    u32 sj = ax->full_shape[opt.arg];
-    ax->full_shape[opt.axis] = sj;
-    ax->full_shape[opt.arg]  = si;
+    u32 si = ax->_writer.full_shape[opt.axis];
+    u32 sj = ax->_writer.full_shape[opt.arg];
+    ax->_writer.full_shape[opt.axis] = sj;
+    ax->_writer.full_shape[opt.arg]  = si;
     // No axis_types[] swap; resolver replays KOP_SWAP against the
     // post-applied_opts state.
   } else {

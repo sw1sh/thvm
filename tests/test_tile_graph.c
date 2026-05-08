@@ -548,10 +548,12 @@ int main(void) {
   conv_seq.opts[0] = conv_upcast4;
   conv_seq.opts[1] = conv_local4;
   CHECK(kautotune_apply_seq(ke, &conv_seq));
-  CHECK_EQ(ke->axes->n_applied, 3u);
-  CHECK_EQ(ke->axes->applied_opts[0].op, (u32)KOP_UPCAST);
-  CHECK_EQ(ke->axes->applied_opts[1].op, (u32)KOP_LOCAL);
-  CHECK_EQ(ke->axes->applied_opts[2].op, (u32)KOP_GLOBAL);
+  // E9 session 4: read applied_opts via the tile_anno facade so the
+  // eventual ownership move is a single-file change.
+  CHECK_EQ(tile_anno_applied_opts_count(ke), 3u);
+  CHECK_EQ(tile_anno_applied_opts(ke)[0].op, (u32)KOP_UPCAST);
+  CHECK_EQ(tile_anno_applied_opts(ke)[1].op, (u32)KOP_LOCAL);
+  CHECK_EQ(tile_anno_applied_opts(ke)[2].op, (u32)KOP_GLOBAL);
   CHECK(tile_analyze_conv2d_flat(ke, &conv));
   CHECK_EQ(conv.threads, 4u);
   CHECK_EQ(conv.outputs_per_thread, 4u);
@@ -751,14 +753,19 @@ int main(void) {
   CHECK_EQ(cands[0].arg, 8u);
   KOpt local4 = { .op = KOP_LOCAL, .axis = 0, .arg = 4 };
   CHECK(kernel_apply_tune_candidate(ke, local4));
-  CHECK_EQ(ke->axes->n_applied, 2u);
+  // E9 session 4: applied_opts via facade; full_shape via resolver.
+  CHECK_EQ(tile_anno_applied_opts_count(ke), 2u);
   // E9: kax_type reads route through axes_resolve_kax_type now that
   // axis_types[] is gone; the simulator replays applied_opts to derive
   // the post-mutation type.
   CHECK_EQ(axes_resolve_kax_type(ke, 0), (u8)KAX_GLOBAL);
   CHECK_EQ(axes_resolve_kax_type(ke, 1), (u8)KAX_LOCAL);
-  CHECK_EQ(ke->axes->full_shape[0], 2u);
-  CHECK_EQ(ke->axes->full_shape[1], 4u);
+  u32 ext0 = 0;
+  u32 ext1 = 0;
+  CHECK(axes_resolve_full_shape(ke, 0, &ext0));
+  CHECK(axes_resolve_full_shape(ke, 1, &ext1));
+  CHECK_EQ(ext0, 2u);
+  CHECK_EQ(ext1, 4u);
   CHECK(cg_tile_metal_dispatch_shape(ke, &groups_x, &threads_x));
   CHECK_EQ(groups_x, 2u);
   CHECK_EQ(threads_x, 4u);
@@ -1006,12 +1013,22 @@ int main(void) {
   tk->axes = &tk->_local_axes;
   memset(tk->axes, 0, sizeof(KernelAxes));
   axes_default_for(tk);
-  CHECK_EQ(tk->axes->n_axes, 1u);
-  CHECK_EQ(axes_resolve_kax_type(tk, 0), (u8)KAX_LOOP);
+  // E9 session 4: route through resolvers now that the writer scratch
+  // is private (`tk->axes->_writer.{n_axes,full_shape}`).  The
+  // resolver derives axis count from signals (output_shape +
+  // tail-reduce + scalar-reduce + applied_opts), so for a kernel with
+  // a scalar-arena S_REDUCE_* the resolver counts the trailing
+  // KAX_REDUCE axis from the start -- the previous staged check
+  // (1 axis post-default-for, 2 post-ensure-scalar-reduce) is a
+  // writer-internal artifact no longer observable through the
+  // resolver.  Verify the steady state after both writers have run.
   axes_ensure_scalar_reduce(tk);
-  CHECK_EQ(tk->axes->n_axes, 2u);
+  CHECK_EQ(axes_resolve_n_axes(tk), 2u);
+  CHECK_EQ(axes_resolve_kax_type(tk, 0), (u8)KAX_LOOP);
   CHECK_EQ(axes_resolve_kax_type(tk, 1), (u8)KAX_REDUCE);
-  CHECK_EQ(tk->axes->full_shape[1], 4u);
+  u32 tk_ext1 = 0;
+  CHECK(axes_resolve_full_shape(tk, 1, &tk_ext1));
+  CHECK_EQ(tk_ext1, 4u);
   CHECK(tile_build_from_scalar(tk));
   CHECK(tile_collect_plan_info(tk, &info));
   CHECK_EQ(info.n_axes, 2u);
