@@ -1255,6 +1255,317 @@ static int udg_decode_bi_arm(Term t, u32 axis_r_out,
   return 1;
 }
 
+// === 1x1 conv detection + dedicated parser ===
+//
+// When kh == kw == 1, the simplifier collapses `r_q / 1 -> r_q`,
+// `r_q % 1 -> 0`, and `IADD(x, 0) -> x` so the X address loses ALL
+// IDIV/IMOD on the r_q axis.  The CI arm degenerates to either a bare
+// `RANGE(r_q)` or `IMUL(RANGE(r_q), x_s2)`; the H arm becomes
+// `IMUL(IMOD(IDIV(r_out, w_out), h_out), x_s0)`; the W arm becomes
+// `IMUL(IMOD(r_out, w_out), x_s1)` (or bare IMOD when x_s1==1); and the
+// optional BI arm becomes `IMUL(IMOD(IDIV(r_out, spatial), batch), x_sb)`.
+//
+// This collides STRUCTURALLY with the standard parser's BI matcher: the
+// H arm and BI arm both look like `IMUL(IMOD(IDIV(r_out, X), Y), C)`,
+// distinguishable only by divisor values.  Rather than teach the
+// existing matchers a divisor disambiguator (greedy mis-classification
+// risk on canonical >=2x2 conv), we run a dedicated 1x1 parser that
+// is invoked ONLY when the X address is positively identified as 1x1.
+
+// Walk `t` and return 1 iff any descendant is `IDIV(RANGE(axis_r_q), c)`
+// or `IMOD(RANGE(axis_r_q), c)` with c >= 2.  Used by `udg_x_addr_is_1x1`
+// to positively detect "no kh/kw decomposition exists on r_q in the X
+// address."  Capped depth.
+static int udg_x_has_rq_divmod(Term t, u32 axis_r_q, int depth) {
+  if (depth > 16) return 0;
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_IDIV || op == UOP_IMOD) {
+    Term num = heap_read(term_val(t) + 0);
+    Term den = heap_read(term_val(t) + 1);
+    if (term_tag(num) == TAG_UOP && term_ext(num) == UOP_RANGE
+        && uop_range_axis_id(num) == axis_r_q
+        && term_tag(den) == TAG_UOP && term_ext(den) == UOP_CONST) {
+      Term dnum = heap_read(term_val(den) + 0);
+      if (term_tag(dnum) == TAG_NUM && (u32)term_val(dnum) >= 2) return 1;
+    }
+  }
+  // Recurse into binary / ternary / unary ops.  RANGE / CONST / BUFFER
+  // have no relevant sub-terms.
+  if (op == UOP_RANGE || op == UOP_CONST || op == UOP_BUFFER) return 0;
+  if (op == UOP_IWHERE) {
+    if (udg_x_has_rq_divmod(heap_read(term_val(t) + 0), axis_r_q, depth + 1)) return 1;
+    if (udg_x_has_rq_divmod(heap_read(term_val(t) + 1), axis_r_q, depth + 1)) return 1;
+    return udg_x_has_rq_divmod(heap_read(term_val(t) + 2), axis_r_q, depth + 1);
+  }
+  // Most other UOps store 2 operand terms; INDEX_E stores [buf, addr]
+  // (we only need to descend into addr but recursing into both is safe).
+  // Defensive: read 2 children.  Walking pure-leaf ops (CONST/RANGE)
+  // already returned 0 above.
+  if (op == UOP_IADD || op == UOP_IMUL || op == UOP_ISUB || op == UOP_IDIV
+      || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND) {
+    Term a = heap_read(term_val(t) + 0);
+    Term b = heap_read(term_val(t) + 1);
+    if (udg_x_has_rq_divmod(a, axis_r_q, depth + 1)) return 1;
+    return udg_x_has_rq_divmod(b, axis_r_q, depth + 1);
+  }
+  return 0;
+}
+
+// Returns 1 iff the X address has NO `IDIV(RANGE(r_q), c)` and NO
+// `IMOD(RANGE(r_q), c)` for c >= 2 anywhere in the tree.  This is the
+// positive 1x1 detector.
+static int udg_x_addr_is_1x1(Term addr_x, u32 axis_r_q) {
+  return !udg_x_has_rq_divmod(addr_x, axis_r_q, 0);
+}
+
+// Match `IMOD(IDIV(RANGE(r_out), inner), outer)`.  Recovers (inner,
+// outer).  Used to identify both the H arm (`IMOD(IDIV(r_out, w_out),
+// h_out)`) and the BI arm (`IMOD(IDIV(r_out, spatial), batch)`) shape
+// without committing to which is which (disambiguation done later).
+static int udg_match_imod_idiv_range(Term t, u32 axis_r_out,
+                                     u32 *out_inner, u32 *out_outer) {
+  Term mod_num = 0; u32 mod_div = 0;
+  if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
+  Term div_num = 0; u32 div_div = 0;
+  if (!udg_match_idiv_const(mod_num, &div_num, &div_div)) return 0;
+  if (!udg_is_range_axis(div_num, axis_r_out)) return 0;
+  *out_inner = div_div;
+  *out_outer = mod_div;
+  return 1;
+}
+
+// Match bare `IMOD(RANGE(r_out), c)` -- the W-arm shape when x_s1==1
+// in the 1x1 case.  Recovers c (= w_out).
+static int udg_match_imod_range(Term t, u32 axis_r_out, u32 *out_div) {
+  Term mod_num = 0; u32 mod_div = 0;
+  if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
+  if (!udg_is_range_axis(mod_num, axis_r_out)) return 0;
+  *out_div = mod_div;
+  return 1;
+}
+
+// 1x1 conv parser.  Mirrors the standard parser's signature; called as
+// a delegate from the standard parser's entry point when the X address
+// has no IDIV/IMOD on r_q (i.e. kh==kw==1 collapsed).
+//
+// Strategy:
+//   1. W addr decode (reuses `udg_decode_conv_w_addr`).  Recovers
+//      patches, w_s0, w_s1, w_offset, axis_r_out, axis_r_q.
+//   2. Flatten X addr into IADD leaves.  Each leaf is one of:
+//        * ICONST -> x_offset
+//        * IMUL(IMOD(IDIV(r_out, A), B), C) or bare IMOD(IDIV(...), B)
+//          -- candidate H or BI arm (both look the same!)
+//        * IMUL(IMOD(r_out, w_out), C) or bare IMOD(r_out, w_out)
+//          -- W arm (x_s1>1 vs ==1)
+//        * IMUL(RANGE(r_q), C) or bare RANGE(r_q)
+//          -- CI arm (x_s2>1 vs ==1)
+//   3. Disambiguate H vs BI by trying both assignments; the consistent
+//      one (spatial == h_out * w_out, batch * spatial == patches) wins.
+//   4. Cross-validate w_out from H arm against w_out from W arm; CI arm
+//      must witness c_in via r_q.extent (since kh*kw=1, c_in=KRED).
+static int uop_dag_extract_conv2d_flat_shape_1x1(
+    Term addr_w, Term addr_x,
+    struct KernelEntry const *ke,
+    UopDagConv2dFlatShape *out) {
+  // --- W decode (same as standard parser) ---
+  u32 axis_r_out = 0, axis_r_q = 0;
+  u32 patches = 0, w_s0 = 0, w_s1 = 0;
+  i32 w_off = 0;
+  if (!udg_decode_conv_w_addr(addr_w, &axis_r_out, &axis_r_q,
+                              &patches, &w_s0, &w_s1, &w_off)) {
+    return 0;
+  }
+
+  // --- X flatten ---
+  Term x_leaves[UDG_CONV_ADDR_MAX_LEAVES] = {0};
+  u32 n_x = udg_flatten_iadd(addr_x, x_leaves, UDG_CONV_ADDR_MAX_LEAVES);
+  if (n_x == 0) return 0;
+
+  // --- Classify ---
+  i32 x_off = 0;
+  // CI arm (RANGE(r_q) variants):
+  int got_ci = 0; u32 x_s2 = 0;
+  // W arm (IMOD(r_out, w_out) variants):
+  int got_w = 0; u32 x_s1 = 0; u32 w_out_w = 0;
+  // Candidate H/BI arms (IMOD-of-IDIV(r_out, ...)).  Up to 2.
+  struct { Term t; u32 inner; u32 outer; u32 coeff; int has_coeff; } cand[2];
+  u32 n_cand = 0;
+
+  for (u32 i = 0; i < n_x; i++) {
+    Term t = x_leaves[i];
+    i32 cv;
+    if (udg_match_iconst_signed(t, &cv)) { x_off = cv; continue; }
+
+    // CI arm: bare RANGE(r_q) or IMUL(RANGE(r_q), x_s2).
+    if (!got_ci) {
+      if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE
+          && uop_range_axis_id(t) == axis_r_q) {
+        x_s2 = 1; got_ci = 1; continue;
+      }
+      Term inner_t = 0; u32 inner_c = 0;
+      if (udg_match_imul_const(t, &inner_t, &inner_c)
+          && term_tag(inner_t) == TAG_UOP && term_ext(inner_t) == UOP_RANGE
+          && uop_range_axis_id(inner_t) == axis_r_q) {
+        x_s2 = inner_c; got_ci = 1; continue;
+      }
+    }
+
+    // W arm: IMOD(r_out, w_out) bare (x_s1==1) or wrapped in IMUL.
+    if (!got_w) {
+      u32 w_out_t = 0;
+      if (udg_match_imod_range(t, axis_r_out, &w_out_t)) {
+        x_s1 = 1; w_out_w = w_out_t; got_w = 1; continue;
+      }
+      Term inner_t = 0; u32 inner_c = 0;
+      if (udg_match_imul_const(t, &inner_t, &inner_c)
+          && udg_match_imod_range(inner_t, axis_r_out, &w_out_t)) {
+        x_s1 = inner_c; w_out_w = w_out_t; got_w = 1; continue;
+      }
+    }
+
+    // H or BI candidate: IMOD(IDIV(r_out, inner), outer) bare or wrapped
+    // in IMUL.  We can't classify yet -- stash and disambiguate later.
+    {
+      u32 inner_d = 0, outer_d = 0;
+      if (udg_match_imod_idiv_range(t, axis_r_out, &inner_d, &outer_d)) {
+        if (n_cand >= 2) return 0;  // too many; bail
+        cand[n_cand].t         = t;
+        cand[n_cand].inner     = inner_d;
+        cand[n_cand].outer     = outer_d;
+        cand[n_cand].coeff     = 1;
+        cand[n_cand].has_coeff = 0;
+        n_cand++;
+        continue;
+      }
+      Term inner_t = 0; u32 inner_c = 0;
+      if (udg_match_imul_const(t, &inner_t, &inner_c)
+          && udg_match_imod_idiv_range(inner_t, axis_r_out,
+                                       &inner_d, &outer_d)) {
+        if (n_cand >= 2) return 0;
+        cand[n_cand].t         = t;
+        cand[n_cand].inner     = inner_d;
+        cand[n_cand].outer     = outer_d;
+        cand[n_cand].coeff     = inner_c;
+        cand[n_cand].has_coeff = 1;
+        n_cand++;
+        continue;
+      }
+    }
+
+    // Unrecognised leaf -- bail.
+    return 0;
+  }
+
+  // The H arm must be present.  W arm absent only if w_out==1 (which
+  // would have collapsed `IMOD(r_out, 1)` to 0); that case is rare and
+  // out of scope -- bail.
+  if (!got_w) return 0;
+  if (n_cand == 0) return 0;
+  if (!got_ci) return 0;
+
+  // --- Disambiguate H vs BI via divisor values ---
+  // H arm: inner == w_out, outer == h_out.
+  // BI arm: inner == spatial == h_out * w_out, outer == batch.
+  //
+  // Constraints:
+  //   * h_out > 0, w_out > 0, batch > 0
+  //   * w_out_w (from W arm) == w_out (from H arm)
+  //   * batch * spatial == patches  AND  spatial == h_out * w_out
+  //
+  // For batch == 1 there is no BI arm, so n_cand == 1.
+  // For batch >= 2 the lifter emits both, so n_cand == 2.
+  u32 batch = 0, spatial = 0, h_out = 0, w_out = 0, x_sb = 0;
+  int got_bi = 0;
+
+  if (n_cand == 1) {
+    // batch == 1 case: the single candidate is the H arm.
+    // inner == w_out, outer == h_out.  spatial = patches.
+    h_out = cand[0].outer;
+    w_out = cand[0].inner;
+    if (w_out != w_out_w) return 0;
+    if (h_out == 0 || w_out == 0) return 0;
+    if ((u64)h_out * (u64)w_out != patches) return 0;
+    batch = 1;
+    spatial = patches;
+    x_sb = 0;
+  } else {
+    // batch >= 2 case: try both pairings.  Exactly one should be
+    // self-consistent.
+    int hits = 0;
+    int h_idx = -1;
+    for (int try_h = 0; try_h < 2; try_h++) {
+      int b_idx = 1 - try_h;
+      u32 try_w_out = cand[try_h].inner;
+      u32 try_h_out = cand[try_h].outer;
+      u32 try_spatial = cand[b_idx].inner;
+      u32 try_batch   = cand[b_idx].outer;
+      if (try_w_out == 0 || try_h_out == 0 || try_batch == 0) continue;
+      if (try_w_out != w_out_w) continue;
+      if ((u64)try_h_out * (u64)try_w_out != try_spatial) continue;
+      if ((u64)try_batch * (u64)try_spatial != patches) continue;
+      // Consistent.
+      hits++;
+      h_idx = try_h;
+      h_out = try_h_out;
+      w_out = try_w_out;
+      spatial = try_spatial;
+      batch = try_batch;
+    }
+    if (hits != 1) return 0;  // ambiguous or no fit
+    int b_idx = 1 - h_idx;
+    // Determine x_sb (BI coeff) and x_s0 (H coeff).
+    x_sb = cand[b_idx].has_coeff ? cand[b_idx].coeff : 1;
+    if (cand[h_idx].has_coeff) {
+      // x_s0 stored in cand[h_idx].coeff; we'll read below.
+    }
+    got_bi = 1;
+  }
+
+  // Recover x_s0 from the H candidate (whichever index we chose).
+  u32 x_s0 = 0;
+  if (n_cand == 1) {
+    x_s0 = cand[0].has_coeff ? cand[0].coeff : 1;
+  } else {
+    // Re-derive H index by matching inner==w_out.
+    int h_idx = (cand[0].inner == w_out && cand[0].outer == h_out) ? 0 : 1;
+    x_s0 = cand[h_idx].has_coeff ? cand[h_idx].coeff : 1;
+  }
+
+  // --- Pull r_out / r_q extents to derive c_out and c_in ---
+  u32 r_out_ext = rec_tc_find_range_extent(addr_w, axis_r_out, 0);
+  u32 r_q_ext   = rec_tc_find_range_extent(addr_w, axis_r_q,   0);
+  if (r_out_ext == 0 || r_q_ext == 0) return 0;
+  if (r_out_ext % patches != 0) return 0;
+  u32 c_out = r_out_ext / patches;
+  // For 1x1 conv: KRED == c_in * 1 * 1 == c_in.
+  u32 c_in  = r_q_ext;
+
+  // --- Fill out ---
+  out->c_out     = c_out;
+  out->c_in      = c_in;
+  out->kh        = 1;
+  out->kw        = 1;
+  out->h_out     = h_out;
+  out->w_out     = w_out;
+  out->batch     = batch;
+  out->patches   = patches;
+  out->spatial_patches = spatial;
+  out->w_offset  = w_off;
+  out->w_stride0 = (i32)w_s0;
+  out->w_stride1 = (i32)w_s1;
+  out->x_offset  = x_off;
+  out->x_stride_b = (i32)x_sb;
+  out->x_stride0  = (i32)x_s0;
+  out->x_stride1  = (i32)x_s1;
+  out->x_stride2  = (i32)x_s2;
+  out->axis_r_out = axis_r_out;
+  out->axis_r_q   = axis_r_q;
+  (void)ke;
+  (void)got_bi;
+  return 1;
+}
+
 // Public extractor: run on `addr_w` + `addr_x` (single-input INDEX_E
 // addresses) plus the lift's input slots, and fill the conv shape facts
 // into `out`.  Returns 1 on success.  On 0 the caller must fall back to
@@ -1274,6 +1585,14 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   if (!udg_decode_conv_w_addr(addr_w, &axis_r_out, &axis_r_q,
                               &patches, &w_s0, &w_s1, &w_off)) {
     return 0;
+  }
+
+  // 1x1 conv detection: if X address has no IDIV/IMOD on r_q, the kh/kw
+  // decomposition collapsed.  Delegate to the dedicated 1x1 parser
+  // (which uses divisor-value disambiguation since the H and BI arms are
+  // structurally identical).
+  if (udg_x_addr_is_1x1(addr_x, axis_r_q)) {
+    return uop_dag_extract_conv2d_flat_shape_1x1(addr_w, addr_x, ke, out);
   }
 
   // --- X decode ---

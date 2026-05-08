@@ -436,11 +436,12 @@ int main(void) {
     CHECK_EQ(s.x_stride2, 100);
   }
 
-  TEST_BEGIN("conv2d-extract/degenerate-1x1-conv-rejects");
+  TEST_BEGIN("conv2d-extract/1x1-cin1");
   {
     // c_in=1, kh=kw=1 => simplifier collapses ci/kh_v/kw_v entirely.
-    // Extractor must bail (not in scope this session); caller falls
-    // back to input_views.
+    // The dedicated 1x1 parser handles this end-to-end via divisor-
+    // value disambiguation (the H arm has the same UOp tree shape as a
+    // BI arm, but their divisors differ).
     u32 c_out_d = 4, c_in_d = 1, kh_d = 1, kw_d = 1;
     u32 batch_d = 1, h_out_d = 8, w_out_d = 8;
     u32 spatial_d = h_out_d * w_out_d;
@@ -486,7 +487,183 @@ int main(void) {
         heap_read(term_val(ldW_d) + 1),
         heap_read(term_val(ldX_d) + 1),
         NULL, &s);
-    CHECK_EQ(ok, 0);
+    CHECK(ok);
+    CHECK_EQ(s.c_out,    c_out_d);
+    CHECK_EQ(s.c_in,     c_in_d);
+    CHECK_EQ(s.kh,       kh_d);
+    CHECK_EQ(s.kw,       kw_d);
+    CHECK_EQ(s.h_out,    h_out_d);
+    CHECK_EQ(s.w_out,    w_out_d);
+    CHECK_EQ(s.batch,    batch_d);
+    CHECK_EQ(s.patches,  patches_d);
+    CHECK_EQ(s.spatial_patches, spatial_d);
+    CHECK_EQ(s.x_stride0,  8);
+    CHECK_EQ(s.x_stride1,  1);
+    CHECK_EQ(s.x_stride2,  64);
+    CHECK_EQ(s.x_stride_b, 0);
+  }
+
+  TEST_BEGIN("conv2d-extract/1x1-batch1");
+  {
+    // 1x1 conv with c_in > 1, batch=1 -- the H arm is the only
+    // IMOD-of-IDIV leaf (BI arm absent because batch==1).  CI arm has
+    // x_s2 > 1 since c_in > 1.
+    u32 c_out_e = 16, c_in_e = 4, kh_e = 1, kw_e = 1;
+    u32 batch_e = 1, h_out_e = 8, w_out_e = 8;
+    u32 spatial_e = h_out_e * w_out_e;
+    u32 patches_e = batch_e * spatial_e;
+    u32 KRED_e    = c_in_e * kh_e * kw_e;
+    u32 dims_w_e[2] = { c_out_e, KRED_e };
+    u32 dims_x_e[1] = { 4096 };
+    Term We = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims_w_e, 1);
+    Term Xe = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_x_e, 2);
+    Term r_out_e = uop_range(0, 0, c_out_e * patches_e);
+    Term r_q_e   = uop_range(1, 1, KRED_e);
+    Term k_pat_e = uop_const(DT_INT32, patches_e);
+    Term k_sp_e  = uop_const(DT_INT32, spatial_e);
+    Term k_wo_e  = uop_const(DT_INT32, w_out_e);
+    Term co_e    = uop_int_binary(UOP_IDIV, r_out_e, k_pat_e);
+    Term patch_e = uop_int_binary(UOP_IMOD, r_out_e, k_pat_e);
+    Term sp_e    = uop_int_binary(UOP_IMOD, patch_e, k_sp_e);
+    Term ow_e    = uop_int_binary(UOP_IMOD, sp_e, k_wo_e);
+    Term oh_e    = uop_int_binary(UOP_IDIV, sp_e, k_wo_e);
+    Term k_kw_e  = uop_const(DT_INT32, kw_e);
+    Term k_kh_e  = uop_const(DT_INT32, kh_e);
+    Term kw_v_e  = uop_int_binary(UOP_IMOD, r_q_e, k_kw_e);
+    Term qk_e    = uop_int_binary(UOP_IDIV, r_q_e, k_kw_e);
+    Term kh_v_e  = uop_int_binary(UOP_IMOD, qk_e, k_kh_e);
+    Term ci_e    = uop_int_binary(UOP_IDIV, qk_e, k_kh_e);
+    Term k_w_off_e = uop_const(DT_INT32, 0);
+    Term k_ws0_e   = uop_const(DT_INT32, KRED_e);
+    Term k_ws1_e   = uop_const(DT_INT32, 1);
+    Term wi_co_e   = uop_int_binary(UOP_IMUL, co_e, k_ws0_e);
+    Term wi_q_e    = uop_int_binary(UOP_IMUL, r_q_e, k_ws1_e);
+    Term wi_sum_e  = uop_int_binary(UOP_IADD, wi_co_e, wi_q_e);
+    Term wi_e      = uop_int_binary(UOP_IADD, k_w_off_e, wi_sum_e);
+    // X strides: x_s0 = w_in (=w_out for stride=1, kh=1), x_s1 = 1,
+    // x_s2 = h_in*w_in.  We pick concrete distinct values so the parser
+    // is forced to recover them rather than guessing.
+    Term k_x_off_e = uop_const(DT_INT32, 0);
+    Term k_xsb_e   = uop_const(DT_INT32, 0);
+    Term k_xs0_e   = uop_const(DT_INT32, 8);
+    Term k_xs1_e   = uop_const(DT_INT32, 1);
+    Term k_xs2_e   = uop_const(DT_INT32, 64);
+    Term xi_b_e    = uop_int_binary(UOP_IMUL, /*bi=*/uop_int_binary(UOP_IDIV, patch_e, k_sp_e),
+                                    k_xsb_e);
+    Term xi_ci_e   = uop_int_binary(UOP_IMUL, ci_e, k_xs2_e);
+    Term oh_kh_e   = uop_int_binary(UOP_IADD, oh_e, kh_v_e);
+    Term xi_h_e    = uop_int_binary(UOP_IMUL, oh_kh_e, k_xs0_e);
+    Term ow_kw_e   = uop_int_binary(UOP_IADD, ow_e, kw_v_e);
+    Term xi_w_e    = uop_int_binary(UOP_IMUL, ow_kw_e, k_xs1_e);
+    Term xi_sum1_e = uop_int_binary(UOP_IADD, xi_b_e, xi_ci_e);
+    Term xi_sum2_e = uop_int_binary(UOP_IADD, xi_h_e, xi_w_e);
+    Term xi_sum_e  = uop_int_binary(UOP_IADD, xi_sum1_e, xi_sum2_e);
+    Term xi_e      = uop_int_binary(UOP_IADD, k_x_off_e, xi_sum_e);
+    Term ldW_e = uop_index_e(We, wi_e);
+    Term ldX_e = uop_index_e(Xe, xi_e);
+    UopDagConv2dFlatShape s = {0};
+    int ok = uop_dag_extract_conv2d_flat_shape(
+        heap_read(term_val(ldW_e) + 1),
+        heap_read(term_val(ldX_e) + 1),
+        NULL, &s);
+    CHECK(ok);
+    CHECK_EQ(s.c_out,    c_out_e);
+    CHECK_EQ(s.c_in,     c_in_e);
+    CHECK_EQ(s.kh,       kh_e);
+    CHECK_EQ(s.kw,       kw_e);
+    CHECK_EQ(s.h_out,    h_out_e);
+    CHECK_EQ(s.w_out,    w_out_e);
+    CHECK_EQ(s.batch,    batch_e);
+    CHECK_EQ(s.patches,  patches_e);
+    CHECK_EQ(s.spatial_patches, spatial_e);
+    CHECK_EQ(s.w_offset,  0);
+    CHECK_EQ(s.w_stride0, (i32)KRED_e);
+    CHECK_EQ(s.w_stride1, 1);
+    CHECK_EQ(s.x_offset,  0);
+    CHECK_EQ(s.x_stride_b, 0);
+    CHECK_EQ(s.x_stride0,  8);
+    CHECK_EQ(s.x_stride1,  1);
+    CHECK_EQ(s.x_stride2,  64);
+    CHECK_EQ(s.axis_r_out, 0u);
+    CHECK_EQ(s.axis_r_q,   1u);
+  }
+
+  TEST_BEGIN("conv2d-extract/1x1-batched");
+  {
+    // 1x1 conv with batch=2 -- BI arm fires.  H arm and BI arm have
+    // identical UOp tree shape (IMUL(IMOD(IDIV(r_out, X), Y), C)) but
+    // different divisor values.  The parser disambiguates by trying
+    // both pairings against patches.
+    u32 c_out_f = 32, c_in_f = 8, kh_f = 1, kw_f = 1;
+    u32 batch_f = 2, h_out_f = 4, w_out_f = 4;
+    u32 spatial_f = h_out_f * w_out_f;       // 16
+    u32 patches_f = batch_f * spatial_f;     // 32
+    u32 KRED_f    = c_in_f * kh_f * kw_f;    // 8
+    u32 dims_w_f[2] = { c_out_f, KRED_f };
+    u32 dims_x_f[1] = { 8192 };
+    Term Wf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims_w_f, 1);
+    Term Xf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_x_f, 2);
+    Term r_out_f = uop_range(0, 0, c_out_f * patches_f);
+    Term r_q_f   = uop_range(1, 1, KRED_f);
+    Term k_pat_f = uop_const(DT_INT32, patches_f);
+    Term k_sp_f  = uop_const(DT_INT32, spatial_f);
+    Term k_wo_f  = uop_const(DT_INT32, w_out_f);
+    Term co_f    = uop_int_binary(UOP_IDIV, r_out_f, k_pat_f);
+    Term patch_f = uop_int_binary(UOP_IMOD, r_out_f, k_pat_f);
+    Term bi_f    = uop_int_binary(UOP_IDIV, patch_f, k_sp_f);
+    Term sp_f    = uop_int_binary(UOP_IMOD, patch_f, k_sp_f);
+    Term ow_f    = uop_int_binary(UOP_IMOD, sp_f, k_wo_f);
+    Term oh_f    = uop_int_binary(UOP_IDIV, sp_f, k_wo_f);
+    Term k_kw_f  = uop_const(DT_INT32, kw_f);
+    Term k_kh_f  = uop_const(DT_INT32, kh_f);
+    Term kw_v_f  = uop_int_binary(UOP_IMOD, r_q_f, k_kw_f);
+    Term qk_f    = uop_int_binary(UOP_IDIV, r_q_f, k_kw_f);
+    Term kh_v_f  = uop_int_binary(UOP_IMOD, qk_f, k_kh_f);
+    Term ci_f    = uop_int_binary(UOP_IDIV, qk_f, k_kh_f);
+    Term k_w_off_f = uop_const(DT_INT32, 0);
+    Term k_ws0_f   = uop_const(DT_INT32, KRED_f);
+    Term k_ws1_f   = uop_const(DT_INT32, 1);
+    Term wi_co_f   = uop_int_binary(UOP_IMUL, co_f, k_ws0_f);
+    Term wi_q_f    = uop_int_binary(UOP_IMUL, r_q_f, k_ws1_f);
+    Term wi_sum_f  = uop_int_binary(UOP_IADD, wi_co_f, wi_q_f);
+    Term wi_f      = uop_int_binary(UOP_IADD, k_w_off_f, wi_sum_f);
+    // x_sb = c_in * spatial = 8 * 16 = 128, x_s2 = 16.
+    Term k_x_off_f = uop_const(DT_INT32, 0);
+    Term k_xsb_f   = uop_const(DT_INT32, c_in_f * spatial_f);
+    Term k_xs0_f   = uop_const(DT_INT32, w_out_f);
+    Term k_xs1_f   = uop_const(DT_INT32, 1);
+    Term k_xs2_f   = uop_const(DT_INT32, spatial_f);
+    Term xi_b_f    = uop_int_binary(UOP_IMUL, bi_f, k_xsb_f);
+    Term xi_ci_f   = uop_int_binary(UOP_IMUL, ci_f, k_xs2_f);
+    Term oh_kh_f   = uop_int_binary(UOP_IADD, oh_f, kh_v_f);
+    Term xi_h_f    = uop_int_binary(UOP_IMUL, oh_kh_f, k_xs0_f);
+    Term ow_kw_f   = uop_int_binary(UOP_IADD, ow_f, kw_v_f);
+    Term xi_w_f    = uop_int_binary(UOP_IMUL, ow_kw_f, k_xs1_f);
+    Term xi_sum1_f = uop_int_binary(UOP_IADD, xi_b_f, xi_ci_f);
+    Term xi_sum2_f = uop_int_binary(UOP_IADD, xi_h_f, xi_w_f);
+    Term xi_sum_f  = uop_int_binary(UOP_IADD, xi_sum1_f, xi_sum2_f);
+    Term xi_f      = uop_int_binary(UOP_IADD, k_x_off_f, xi_sum_f);
+    Term ldW_f = uop_index_e(Wf, wi_f);
+    Term ldX_f = uop_index_e(Xf, xi_f);
+    UopDagConv2dFlatShape s = {0};
+    int ok = uop_dag_extract_conv2d_flat_shape(
+        heap_read(term_val(ldW_f) + 1),
+        heap_read(term_val(ldX_f) + 1),
+        NULL, &s);
+    CHECK(ok);
+    CHECK_EQ(s.c_out,    c_out_f);
+    CHECK_EQ(s.c_in,     c_in_f);
+    CHECK_EQ(s.kh,       kh_f);
+    CHECK_EQ(s.kw,       kw_f);
+    CHECK_EQ(s.h_out,    h_out_f);
+    CHECK_EQ(s.w_out,    w_out_f);
+    CHECK_EQ(s.batch,    batch_f);
+    CHECK_EQ(s.patches,  patches_f);
+    CHECK_EQ(s.spatial_patches, spatial_f);
+    CHECK_EQ(s.x_stride_b, (i32)(c_in_f * spatial_f));
+    CHECK_EQ(s.x_stride0,  (i32)w_out_f);
+    CHECK_EQ(s.x_stride1,  1);
+    CHECK_EQ(s.x_stride2,  (i32)spatial_f);
   }
 
   TEST_BEGIN("conv2d-extract/non-iadd-w-rejects");
