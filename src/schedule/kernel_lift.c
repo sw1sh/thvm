@@ -1477,35 +1477,41 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // The first n_buf entries get axis_ids matching BUFFERIZE order; the
   // rest get axis_ids continuing past n_buf.
   //
-  // === E9-prep wedge 2 stage (d): split-class structural-replay retired ==
+  // === E9-prep wedge 2 stage (d) session 3: applied_opts replay retired ==
   //
-  // Pre-stage-(d) the lifter replayed every applied_opts entry over a
-  // SplitAxis cur[] vector and emitted UOP_RANGE leaves in post-replay
-  // (post-split) layout: each split inserted an inner entry, the outer's
-  // factor was multiplied so its emitted leaf became
-  // `IADD(IMUL(outer * factor, inner_factor), inner)`, and the renderer
-  // saw the full post-split address chain directly.
+  // Session 2 stripped split-class stamping from the lifter and replaced
+  // it with a compact `cur_extent[] / origin_extent[]` bookkeeping shell
+  // that ran the KOP_GLOBAL extent guard, the KOP_SWAP arg-range guard,
+  // and a defensive unknown-opcode reject.  Session 3 deletes that shell
+  // entirely: every check it duplicates is already enforced by
+  // `kernel_apply_opt` (codegen/apply_opt.c) at WRITE time before an opt
+  // ever lands in `applied_opts[]`:
   //
-  // Stage (d) moves split-class rewriting (UPCAST/UNROLL/LOCAL/GROUP/
-  // GROUPTOP) out of the lifter and into `uop_apply_split_dag`
-  // (src/uop/apply_opt.c), which materialize.c invokes after a successful
-  // lift (alongside `uop_apply_kernel_opts` for axis_type stamping).  The
-  // lifter now emits ONE bare UOP_RANGE leaf per BUFFERIZE origin with
-  // its pre-split extent + axis_type, and the post-lift UPatRule pass
-  // rewires those leaves into the (outer * k + inner) expression the
-  // renderer expects.
+  //   - axis < n_axes                                  (apply_opt.c:69)
+  //   - split arg != 0 + arg divides full_shape[axis]  (apply_opt.c:74-80)
+  //   - n_axes < MAX_AXES                              (apply_opt.c:81)
+  //   - KOP_GLOBAL: arg == full_shape[axis] && resolves to KAX_LOOP
+  //                                                    (apply_opt.c:99-102)
+  //   - KOP_SWAP:   arg < n_axes                       (apply_opt.c:106)
+  //   - unknown opcodes rejected                       (apply_opt.c:115)
+  //   - KOP_TC: validated via tile_anno_record_opt and tile_analyze_gemm
+  //                                                    (apply_opt.c:54-63)
+  //   - n_applied < MAX_OPTS                           (apply_opt.c:66)
   //
-  // We still walk applied_opts for two reasons:
-  //   1. KOP_GLOBAL / KOP_SWAP guards: KOP_GLOBAL with a stale full-axis
-  //      extent (o.arg != post-split outer) and KOP_SWAP with an
-  //      out-of-range second axis are pre-flight rejected by `return 0`
-  //      so the materialize-time legacy fallback kicks in.  These two
-  //      checks need a running view of post-split extents per cur[]
-  //      position, so we maintain a compact `cur[].extent` table that
-  //      shrinks on every split-class opt (no factor / axis_type / opt
-  //      stamping; that's now apply_opt.c's job).
-  //   2. KOP_TC is metadata-only -- ignored by the lifter, consumed by
-  //      the renderer's TC pattern-matcher.
+  // The lifter's `cur_extent[]` was a S_RANGE-derived view of the same
+  // shape that `kernel_apply_opt` validates against `ax->full_shape[]`;
+  // for any well-formed kernel (whether produced by rangeify or by a
+  // direct hand-write whose output_shape matches the BUFFERIZE S_RANGE
+  // extents) the two views agree by construction.  No production path
+  // writes `applied_opts[]` without going through `kernel_apply_opt` /
+  // `tile_anno_record_opt` (the only writers in tree).
+  //
+  // The lifter now emits ONE bare UOP_RANGE leaf per BUFFERIZE origin
+  // with its pre-split extent + axis_type; the post-lift UPatRule pass
+  // (`uop_apply_split_dag` + `uop_apply_kernel_opts` in materialize.c)
+  // rewires them into the (outer * k + inner) chain and stamps
+  // axis_types per applied_opts.  Per-USE auxiliary S_RANGE leaves
+  // (KOP_GROUP / KOP_GROUPTOP wraps) are still handled below.
   u32 n_buf = (u32)bu->src_count - 1;
   if (n_buf > MAX_DIM) return 0;
   LiftRangeMap ranges[MAX_DIM * 2];
@@ -1517,15 +1523,6 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   u32 origin_extent[MAX_DIM];
   u32 origin_axis_type[MAX_DIM];
   u32 r_sids[MAX_DIM];
-  // cur_extent[] tracks post-split extent per current cur[] position;
-  // used only by the KOP_GLOBAL extent guard and the KOP_SWAP range
-  // check below.  Initially mirrors origin_extent[]; split-class opts
-  // shrink cur_extent[o.axis] /= o.arg and insert cur_extent[o.axis+1]
-  // = o.arg.  No axis_type tracking here: the post-lift
-  // uop_apply_kernel_opts pass simulates desired[axis_id] from
-  // applied_opts directly.
-  u32 cur_extent[MAX_AXES];
-  u32 n_cur = 0;
   for (u32 i = 0; i < n_buf; i++) {
     u32 r_sid = bu->src[1 + i];
     if (r_sid == 0 || r_sid >= ke->n_scalar_uops) return 0;
@@ -1534,74 +1531,6 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     r_sids[i] = r_sid;
     origin_axis_type[i] = (u32)(ru->extra >> 32) & 0xFFu;
     origin_extent[i]    = (u32)(ru->extra & 0xFFFFFFFFu);
-    cur_extent[n_cur]   = origin_extent[i];
-    n_cur++;
-  }
-  // Replay applied_opts when present -- compact extent bookkeeping for
-  // the KOP_GLOBAL / KOP_SWAP guards only.  Per-USE opts (axis >= n_cur)
-  // are skipped here and handled by the per-USE auxiliary scan further
-  // down (which wraps per-USE S_RANGE leaves in UOP_OPT_GROUP_REDUCE
-  // for KOP_GROUP/KOP_GROUPTOP).
-  //
-  // E9-prep wedge 3 replaced the `axis_types[]` scan here with the
-  // higher-level `axes_will_have_reduce_axis` predicate (program tail
-  // UOP_REDUCE | applied_opts has KOP_GROUP/GROUPTOP | scalar arena
-  // reduce extent != 0).  Wedge 8 retired the corresponding
-  // THVM_E9_VALIDATE legacy-comparison sanity block that used to read
-  // kax->axis_types[] alongside it -- the predicate is now the sole
-  // source of truth.
-  KernelAxes const *kax = ke->axes;
-  u32 n_applied = (kax != NULL) ? (u32)kax->n_applied : 0;
-  int has_reduce_axis = axes_will_have_reduce_axis(ke);
-  // E9-prep wedge 8 retired the n_applied==0 test-seam branch that
-  // used to splice kax->axis_types[]/full_shape[] into cur[] when a
-  // 1-range BUFFERIZE met a multi-axis hand-write.  The 2 residual
-  // tests in test_tile_graph were rebuilt against either a multi-range
-  // BUFFERIZE (writer-trio path below) or a writer-trio sequence on
-  // the existing 1-range arena, so this branch had no remaining
-  // callers.
-  (void)has_reduce_axis;
-  if (n_applied > 0) {
-    KOpt const *opts = kax->applied_opts;
-    for (u32 oi = 0; oi < n_applied; oi++) {
-      KOpt o = opts[oi];
-      if (o.axis >= n_cur) continue;  // per-USE; handled below
-      u8 op = o.op;
-      if (op == KOP_UPCAST || op == KOP_UNROLL || op == KOP_LOCAL
-          || op == KOP_GROUP || op == KOP_GROUPTOP) {
-        // Compact extent bookkeeping only -- the actual leaf rewiring
-        // to (outer * k + inner) happens in uop_apply_split_dag
-        // post-lift.  We keep cur_extent[] in sync so a subsequent
-        // KOP_GLOBAL / KOP_SWAP sees the post-split view its guard
-        // expects (o.arg matching the post-split outer extent).
-        if (o.arg == 0 || cur_extent[o.axis] % o.arg != 0) return 0;
-        if (n_cur >= MAX_AXES) return 0;
-        for (u32 j = n_cur; j > (u32)o.axis + 1; j--) {
-          cur_extent[j] = cur_extent[j - 1];
-        }
-        cur_extent[o.axis]     = cur_extent[o.axis] / o.arg;
-        cur_extent[o.axis + 1] = o.arg;
-        n_cur++;
-      } else if (op == KOP_GLOBAL) {
-        // GLOBAL extent guard: o.arg must equal the current post-split
-        // outer extent at o.axis.  axis_type LOOP-precondition is
-        // checked by uop_apply_kop_global on the post-split DAG; we
-        // only reject the obviously-stale-extent case here so the
-        // legacy fallback kicks in promptly.
-        if (o.arg != cur_extent[o.axis]) {
-          return 0;
-        }
-      } else if (op == KOP_SWAP) {
-        if ((u32)o.arg >= n_cur) return 0;
-        u32 t = cur_extent[o.axis];
-        cur_extent[o.axis] = cur_extent[o.arg];
-        cur_extent[o.arg]  = t;
-      } else if (op == KOP_TC) {
-        // Tensor-core opt is metadata-only; pattern-matched in render.
-      } else {
-        return 0;
-      }
-    }
   }
   // Emit one bare UOP_RANGE leaf per BUFFERIZE origin in row-major order
   // with the pre-split axis_type / extent.  uop_apply_split_dag (called
