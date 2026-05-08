@@ -88,6 +88,12 @@ _kernel_opts_propose = _bind(
     ctypes.POINTER(ctypes.c_uint8),
     ctypes.POINTER(c_uint32),
     c_uint32)
+_kernel_apply_opt = _bind(
+    "py_kernel_apply_opt", c_uint64,
+    c_uint32, ctypes.c_uint8, ctypes.c_uint8, c_uint32)
+_uop_dag_apply_kopt = _bind(
+    "py_uop_dag_apply_kopt", c_uint64,
+    c_uint64, ctypes.c_uint8, ctypes.c_uint8, c_uint32)
 
 
 # ---------------- in-process Metal compile + dispatch ----------------
@@ -352,6 +358,38 @@ class Thvm:
         args = (c_uint32 * cap)()
         n = _kernel_opts_propose(c_uint32(kid), ops, axes, args, c_uint32(cap))
         return [(int(ops[i]), int(axes[i]), int(args[i])) for i in range(int(n))]
+
+    def kernel_apply_opt(self, kid: int,
+                         opt: tuple[int, int, int]) -> Term | None:
+        """Apply a KOpt to KERNELS[kid]'s UOp DAG. Mutates cached_lift.store_root
+        in place and returns the new root term (so the caller can pass it to
+        render). Returns None on bail (unsupported opt, axis out of range, etc.).
+
+        opt is the (op, axis, arg) triple returned by kernel_opts_propose.
+        """
+        op, axis, arg = opt
+        new_root = _kernel_apply_opt(c_uint32(kid),
+                                     ctypes.c_uint8(int(op)),
+                                     ctypes.c_uint8(int(axis)),
+                                     c_uint32(int(arg)))
+        if new_root == 0:
+            return None
+        return Term(int(new_root))
+
+    def uop_dag_apply_kopt(self, root: Term,
+                           opt: tuple[int, int, int]) -> Term | None:
+        """DAG-only variant: apply a KOpt to a free-standing root term,
+        without going through a KernelEntry slot.  Returns the new root
+        (or None on bail).
+        """
+        op, axis, arg = opt
+        new_root = _uop_dag_apply_kopt(c_uint64(int(root)),
+                                       ctypes.c_uint8(int(op)),
+                                       ctypes.c_uint8(int(axis)),
+                                       c_uint32(int(arg)))
+        if new_root == 0:
+            return None
+        return Term(int(new_root))
 
     # ---------------- renderer ----------------
     def render(self, root: Term, name: str = "k") -> str:

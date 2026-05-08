@@ -178,6 +178,30 @@ EXPORT void py_propose_tc_counters_reset(void) {
   kernel_opts_propose_tc_counters_reset();
 }
 
+// Apply a KOpt to the kernel's UOp DAG (Phase E DAG-mode path).
+// Returns the new store_root term (also already mirrored into
+// ke->cached_lift.store_root and ke->compute_root); 0 on bail.  Use
+// alongside the propose surface to compose the tinygrad-style BEAM
+// autotune loop in Python.
+EXPORT uint64_t py_kernel_apply_opt(uint32_t kid, uint8_t op,
+                                    uint8_t axis, uint32_t arg) {
+  if (kid == 0 || kid >= KERNELS_NEXT) return 0;
+  KernelEntry *ke = &KERNELS[kid];
+  KOpt opt = { op, axis, arg };
+  if (!kernel_apply_opt(ke, opt)) return 0;
+  return ke->cached_lift.store_root;
+}
+
+// Direct DAG-rewrite entry: apply the opt to a free-standing root term,
+// without going through a KernelEntry slot.  Useful for unit tests and
+// for agents that prefer to manage the DAG directly without the
+// kid-keyed KERNELS[] machinery.
+EXPORT uint64_t py_uop_dag_apply_kopt(uint64_t root, uint8_t op,
+                                      uint8_t axis, uint32_t arg) {
+  KOpt opt = { op, axis, arg };
+  return uop_dag_apply_kopt(root, opt);
+}
+
 EXPORT uint32_t py_const_KOP_NONE(void)     { return KOP_NONE; }
 EXPORT uint32_t py_const_KOP_UPCAST(void)   { return KOP_UPCAST; }
 EXPORT uint32_t py_const_KOP_UNROLL(void)   { return KOP_UNROLL; }
