@@ -188,6 +188,9 @@ class _Constants:
     OPT_LOCAL = _read_uint32_const("py_const_UOP_OPT_LOCAL")
     OPT_GROUP_REDUCE = _read_uint32_const("py_const_UOP_OPT_GROUP_REDUCE")
     OPT_CONV = _read_uint32_const("py_const_UOP_OPT_CONV")
+    OPT_FAST_MATH = _read_uint32_const("py_const_UOP_OPT_FAST_MATH")
+    OPT_SIMD_REDUCE = _read_uint32_const("py_const_UOP_OPT_SIMD_REDUCE")
+    OPT_VEC_LOAD = _read_uint32_const("py_const_UOP_OPT_VEC_LOAD")
     # KOpt opcodes (autotune-side; autotune.c BEAM uses these)
     KOP_NONE = _read_uint32_const("py_const_KOP_NONE")
     KOP_UPCAST = _read_uint32_const("py_const_KOP_UPCAST")
@@ -200,6 +203,9 @@ class _Constants:
     KOP_NOLOCALS = _read_uint32_const("py_const_KOP_NOLOCALS")
     KOP_TC = _read_uint32_const("py_const_KOP_TC")
     KOP_GLOBAL = _read_uint32_const("py_const_KOP_GLOBAL")
+    KOP_FAST_MATH = _read_uint32_const("py_const_KOP_FAST_MATH")
+    KOP_SIMD_REDUCE = _read_uint32_const("py_const_KOP_SIMD_REDUCE")
+    KOP_VEC_LOAD = _read_uint32_const("py_const_KOP_VEC_LOAD")
 
 
 K = _Constants

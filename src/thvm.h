@@ -401,6 +401,12 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_OPT_LOCAL         3   // bind to thread position
 #define UOP_OPT_GROUP_REDUCE  4
 #define UOP_OPT_CONV          5   // conv2d_flat output kernel template
+#define UOP_OPT_FAST_MATH     6   // fast::* intrinsic for unary ops under target
+#define UOP_OPT_SIMD_REDUCE   7   // simd_sum/simd_max simdgroup-collective reduce
+#define UOP_OPT_VEC_LOAD      8   // vectorized cooperative load:
+                                  // wraps UOP_INDEX_E with floatN reinterpret_cast.
+                                  // factor = lane width (2/4/8/16; typical 4 fp32).
+                                  // See docs/plans/mlx_features_to_port.md feature 4.
 #define UOP_OPT          39  // heap = [target, NUM(kind), NUM(factor)];
                              //   Annotation node attaching an optimisation
                              //   directive to `target`.  factor=0 when the
@@ -531,6 +537,9 @@ struct KernelEntry;
 #define KOP_NOLOCALS 8
 #define KOP_TC       9
 #define KOP_GLOBAL  10
+#define KOP_FAST_MATH 11
+#define KOP_SIMD_REDUCE 12
+#define KOP_VEC_LOAD  13
 
 typedef struct {
   u8  op;        // KOP_*

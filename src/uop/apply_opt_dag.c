@@ -388,6 +388,371 @@ fn Term uop_dag_apply_swap(Term root, u32 axis_a, u32 axis_b) {
   return apply_opt_dag_substitute(root, &st);
 }
 
+// ---------- KOP_FAST_MATH -------------------------------------------
+// Wrap every UOP_EXP2/LOG2/SQRT leaf with OPT(_, FAST_MATH, 0).  The
+// renderer peels the wrapper at emit time and substitutes Apple's
+// `fast::exp2 / fast::log2 / fast::sqrt` for the precise variants
+// (~5-15% throughput on softmax/layernorm/attention at ~2 ULP cost).
+//
+// Manual walker (not uop_graph_rewrite) because uop_graph_rewrite
+// recurses on rule outputs: a rule that turns EXP2 -> OPT(EXP2, FM, 0)
+// would re-visit the inner EXP2 and re-wrap it, infinite loop.  The
+// substitution-map memo from apply_opt_dag_substitute is reused for
+// identity-keyed memoisation and idempotency: an already-wrapped EXP2
+// reaches us as OPT(EXP2, FM, 0) and falls through unchanged.
+
+#define APPLY_OPT_DAG_FM_MEMO_CAP 1024
+
+typedef struct {
+  Term key;
+  Term val;
+} ApplyOptDagFastMathMemoEntry;
+
+typedef struct {
+  ApplyOptDagFastMathMemoEntry memo[APPLY_OPT_DAG_FM_MEMO_CAP];
+  u32 memo_n;
+  int changed;
+} ApplyOptDagFastMathState;
+
+static int apply_opt_dag_fm_memo_lookup(ApplyOptDagFastMathState *st,
+                                        Term k, Term *out) {
+  for (u32 i = 0; i < st->memo_n; i++) {
+    if (st->memo[i].key == k) { *out = st->memo[i].val; return 1; }
+  }
+  return 0;
+}
+
+static void apply_opt_dag_fm_memo_insert(ApplyOptDagFastMathState *st,
+                                         Term k, Term v) {
+  if (st->memo_n < APPLY_OPT_DAG_FM_MEMO_CAP) {
+    st->memo[st->memo_n].key = k;
+    st->memo[st->memo_n].val = v;
+    st->memo_n++;
+  }
+}
+
+static Term apply_opt_dag_fm_walk(Term t, ApplyOptDagFastMathState *st);
+
+static Term apply_opt_dag_fm_walk_uncached(Term t,
+                                           ApplyOptDagFastMathState *st) {
+  if (term_tag(t) != TAG_UOP) return t;
+  u32 op = term_ext(t);
+  if (op == UOP_RANGE || op == UOP_BUFFER || op == UOP_CONST
+      || op == UOP_INVALID) return t;
+  // Idempotency: an already-wrapped unary reaches us as
+  // OPT(<unary>, FAST_MATH, 0).  Don't re-recurse into the inner unary
+  // (which would re-wrap it via the `op == UOP_EXP2/LOG2/SQRT` arm
+  // below) -- that would produce OPT(OPT(EXP2, FM), FM).  Instead
+  // descend into the wrapped unary's body and re-wrap the rebuilt
+  // unary in the same OPT shape.  Hash-cons makes the no-change case
+  // bottom out at the original term so r2 == r1.
+  if (op == UOP_OPT && uop_opt_kind(t) == UOP_OPT_FAST_MATH) {
+    Term inner = uop_opt_target(t);
+    if (term_tag(inner) == TAG_UOP) {
+      u32 in_op = term_ext(inner);
+      if (in_op == UOP_EXP2 || in_op == UOP_LOG2 || in_op == UOP_SQRT) {
+        u8 ar_in = uop_arity(in_op);
+        Term in_srcs[MAX_UOP_SRC];
+        int in_changed = 0;
+        u64 in_loc = term_val(inner);
+        for (u8 i = 0; i < ar_in && i < MAX_UOP_SRC; i++) {
+          Term old = heap_read(in_loc + i);
+          Term ne  = (term_tag(old) == TAG_UOP)
+                     ? apply_opt_dag_fm_walk(old, st)
+                     : old;
+          in_srcs[i] = ne;
+          if (ne != old) in_changed = 1;
+        }
+        Term rebuilt_inner = in_changed
+                             ? uop_graph_rebuild_with_srcs(inner, in_srcs)
+                             : inner;
+        if (rebuilt_inner == inner) return t;
+        return uop_opt(rebuilt_inner, UOP_OPT_FAST_MATH, 0);
+      }
+    }
+  }
+  // Recurse into children first.
+  u8 ar = uop_arity(op);
+  Term srcs[MAX_UOP_SRC];
+  int child_changed = 0;
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old = heap_read(loc + i);
+    Term ne  = (term_tag(old) == TAG_UOP)
+               ? apply_opt_dag_fm_walk(old, st)
+               : old;
+    srcs[i] = ne;
+    if (ne != old) child_changed = 1;
+  }
+  Term rebuilt = child_changed ? uop_graph_rebuild_with_srcs(t, srcs) : t;
+  // Wrap unary ops here.  An OPT(EXP2, FAST_MATH, 0) wrapper is itself
+  // a UOP_OPT (not UOP_EXP2) so the test below doesn't re-fire on the
+  // already-wrapped child.
+  if (op == UOP_EXP2 || op == UOP_LOG2 || op == UOP_SQRT) {
+    st->changed = 1;
+    return uop_opt(rebuilt, UOP_OPT_FAST_MATH, 0);
+  }
+  return rebuilt;
+}
+
+static Term apply_opt_dag_fm_walk(Term t, ApplyOptDagFastMathState *st) {
+  Term hit;
+  if (apply_opt_dag_fm_memo_lookup(st, t, &hit)) return hit;
+  Term out = apply_opt_dag_fm_walk_uncached(t, st);
+  apply_opt_dag_fm_memo_insert(st, t, out);
+  return out;
+}
+
+fn Term uop_dag_apply_fast_math(Term root) {
+  ApplyOptDagFastMathState st;
+  st.memo_n = 0;
+  st.changed = 0;
+  Term out = apply_opt_dag_fm_walk(root, &st);
+  return st.changed ? out : root;
+}
+
+// ---------- KOP_SIMD_REDUCE -----------------------------------------
+// Wrap every UOP_REDUCE node with OPT(_, SIMD_REDUCE, 0).  The renderer
+// peels the wrapper at emit time and emits Apple's `simd_sum` /
+// `simd_max` simdgroup-collective reduce (1 instruction across all 32
+// lanes) instead of the scalar for-loop accumulator.
+//
+// Reuses the FAST_MATH walker shape: manual recursion (not
+// uop_graph_rewrite) so the wrapper itself doesn't re-visit the inner
+// REDUCE.  Idempotent because a REDUCE that's already wrapped reaches
+// us as OPT(REDUCE, SIMD_REDUCE, 0) and falls through unchanged.
+
+#define APPLY_OPT_DAG_SR_MEMO_CAP 1024
+
+typedef struct {
+  Term key;
+  Term val;
+} ApplyOptDagSimdReduceMemoEntry;
+
+typedef struct {
+  ApplyOptDagSimdReduceMemoEntry memo[APPLY_OPT_DAG_SR_MEMO_CAP];
+  u32 memo_n;
+  int changed;
+} ApplyOptDagSimdReduceState;
+
+static int apply_opt_dag_sr_memo_lookup(ApplyOptDagSimdReduceState *st,
+                                        Term k, Term *out) {
+  for (u32 i = 0; i < st->memo_n; i++) {
+    if (st->memo[i].key == k) { *out = st->memo[i].val; return 1; }
+  }
+  return 0;
+}
+
+static void apply_opt_dag_sr_memo_insert(ApplyOptDagSimdReduceState *st,
+                                         Term k, Term v) {
+  if (st->memo_n < APPLY_OPT_DAG_SR_MEMO_CAP) {
+    st->memo[st->memo_n].key = k;
+    st->memo[st->memo_n].val = v;
+    st->memo_n++;
+  }
+}
+
+static Term apply_opt_dag_sr_walk(Term t, ApplyOptDagSimdReduceState *st);
+
+static Term apply_opt_dag_sr_walk_uncached(Term t,
+                                           ApplyOptDagSimdReduceState *st) {
+  if (term_tag(t) != TAG_UOP) return t;
+  u32 op = term_ext(t);
+  if (op == UOP_RANGE || op == UOP_BUFFER || op == UOP_CONST
+      || op == UOP_INVALID) return t;
+  // Idempotency: an already-wrapped REDUCE reaches us as
+  // OPT(REDUCE, SIMD_REDUCE, _).  Don't re-wrap the inner REDUCE; just
+  // recurse into the REDUCE's body and re-wrap the (possibly-rebuilt)
+  // REDUCE in the same OPT shape.  Hash-cons makes the no-change case
+  // bottom out at the original term.
+  if (op == UOP_OPT && uop_opt_kind(t) == UOP_OPT_SIMD_REDUCE) {
+    Term inner = uop_opt_target(t);
+    if (term_tag(inner) == TAG_UOP && term_ext(inner) == UOP_REDUCE) {
+      u8 ar_in = uop_arity(UOP_REDUCE);
+      Term in_srcs[MAX_UOP_SRC];
+      int in_changed = 0;
+      u64 in_loc = term_val(inner);
+      for (u8 i = 0; i < ar_in && i < MAX_UOP_SRC; i++) {
+        Term old = heap_read(in_loc + i);
+        Term ne  = (term_tag(old) == TAG_UOP)
+                   ? apply_opt_dag_sr_walk(old, st)
+                   : old;
+        in_srcs[i] = ne;
+        if (ne != old) in_changed = 1;
+      }
+      Term rebuilt_inner = in_changed
+                           ? uop_graph_rebuild_with_srcs(inner, in_srcs)
+                           : inner;
+      if (rebuilt_inner == inner) return t;
+      return uop_opt(rebuilt_inner, UOP_OPT_SIMD_REDUCE, 0);
+    }
+  }
+  u8 ar = uop_arity(op);
+  Term srcs[MAX_UOP_SRC];
+  int child_changed = 0;
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old = heap_read(loc + i);
+    Term ne  = (term_tag(old) == TAG_UOP)
+               ? apply_opt_dag_sr_walk(old, st)
+               : old;
+    srcs[i] = ne;
+    if (ne != old) child_changed = 1;
+  }
+  Term rebuilt = child_changed ? uop_graph_rebuild_with_srcs(t, srcs) : t;
+  if (op == UOP_REDUCE) {
+    st->changed = 1;
+    return uop_opt(rebuilt, UOP_OPT_SIMD_REDUCE, 0);
+  }
+  return rebuilt;
+}
+
+static Term apply_opt_dag_sr_walk(Term t, ApplyOptDagSimdReduceState *st) {
+  Term hit;
+  if (apply_opt_dag_sr_memo_lookup(st, t, &hit)) return hit;
+  Term out = apply_opt_dag_sr_walk_uncached(t, st);
+  apply_opt_dag_sr_memo_insert(st, t, out);
+  return out;
+}
+
+fn Term uop_dag_apply_simd_reduce(Term root) {
+  ApplyOptDagSimdReduceState st;
+  st.memo_n = 0;
+  st.changed = 0;
+  Term out = apply_opt_dag_sr_walk(root, &st);
+  return st.changed ? out : root;
+}
+
+// ---------- KOP_VEC_LOAD --------------------------------------------
+// Wrap each UOP_INDEX_E whose address has a "contiguous-axis" shape
+// with OPT(_, VEC_LOAD, width).  The renderer peels the wrapper at
+// emit time and produces a (device const floatN*) reinterpret_cast.
+//
+// Contiguous-address heuristic (matches the typical row-major access
+// pattern emitted by movement -> index lowering):
+//
+//   IADD(IMUL(x, c), y)
+//
+// where `y` is a single UOP_RANGE leaf (the unit-strided innermost
+// axis).  `x` and `c` are arbitrary; we only need y to be a bare RANGE
+// for the load span to be contiguous.  Anything else (bare RANGE,
+// scalar address, non-IADD shape, IADD with a compound RHS) is left
+// scalar.
+//
+// Manual walker (mirrors uop_dag_apply_fast_math): uop_graph_rewrite
+// recurses on rule outputs, so a rule that turns INDEX_E ->
+// OPT(INDEX_E, VEC_LOAD, w) would re-fire on the inner INDEX_E and
+// stack OPT-of-OPT.  The Term-keyed memo here ensures the wrap fires
+// exactly once per unique INDEX_E.  Idempotent: re-applying with the
+// same width hash-cons-dedups back to the same wrapped Term.
+//
+// Width must be 2/4/8/16; other widths bail (caller responsibility).
+
+#define APPLY_OPT_DAG_VEC_MEMO_CAP 1024
+
+typedef struct {
+  Term key;
+  Term val;
+} ApplyOptDagVecLoadMemoEntry;
+
+typedef struct {
+  ApplyOptDagVecLoadMemoEntry memo[APPLY_OPT_DAG_VEC_MEMO_CAP];
+  u32 memo_n;
+  u32 width;
+  int changed;
+} ApplyOptDagVecLoadState;
+
+static int apply_opt_dag_vec_memo_lookup(ApplyOptDagVecLoadState *st,
+                                         Term k, Term *out) {
+  for (u32 i = 0; i < st->memo_n; i++) {
+    if (st->memo[i].key == k) { *out = st->memo[i].val; return 1; }
+  }
+  return 0;
+}
+
+static void apply_opt_dag_vec_memo_insert(ApplyOptDagVecLoadState *st,
+                                          Term k, Term v) {
+  if (st->memo_n < APPLY_OPT_DAG_VEC_MEMO_CAP) {
+    st->memo[st->memo_n].key = k;
+    st->memo[st->memo_n].val = v;
+    st->memo_n++;
+  }
+}
+
+// Address shape: IADD(IMUL(x, c), y) where y is a single UOP_RANGE.
+static int apply_opt_dag_vec_addr_contiguous(Term addr) {
+  if (term_tag(addr) != TAG_UOP) return 0;
+  if (term_ext(addr) != UOP_IADD) return 0;
+  u64 aloc = term_val(addr);
+  Term lhs = heap_read(aloc + 0);
+  Term rhs = heap_read(aloc + 1);
+  if (term_tag(rhs) != TAG_UOP || term_ext(rhs) != UOP_RANGE) return 0;
+  if (term_tag(lhs) != TAG_UOP || term_ext(lhs) != UOP_IMUL) return 0;
+  return 1;
+}
+
+static Term apply_opt_dag_vec_walk(Term t, ApplyOptDagVecLoadState *st);
+
+static Term apply_opt_dag_vec_walk_uncached(Term t,
+                                            ApplyOptDagVecLoadState *st) {
+  if (term_tag(t) != TAG_UOP) return t;
+  u32 op = term_ext(t);
+  if (op == UOP_RANGE || op == UOP_BUFFER || op == UOP_CONST
+      || op == UOP_INVALID) return t;
+  // Idempotency stop-leaf: if we hit OPT(_, VEC_LOAD, _) we're walking
+  // a previously-wrapped INDEX_E.  Recursing into its INDEX_E child
+  // would re-fire the wrap rule and return OPT(INDEX_E, VEC_LOAD, w)
+  // -- a different Term than the existing OPT we're inside, causing
+  // child_changed and a double-wrap rebuild OPT(OPT, VEC_LOAD, w).
+  // Stop early so re-application is a true no-op.
+  if (op == UOP_OPT && uop_opt_kind(t) == UOP_OPT_VEC_LOAD) return t;
+  // Recurse into children first (rebuild bottom-up so an INDEX_E whose
+  // address mentions a child we replaced sees the new shape).
+  u8 ar = uop_arity(op);
+  Term srcs[MAX_UOP_SRC];
+  int child_changed = 0;
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old = heap_read(loc + i);
+    Term ne  = (term_tag(old) == TAG_UOP)
+               ? apply_opt_dag_vec_walk(old, st)
+               : old;
+    srcs[i] = ne;
+    if (ne != old) child_changed = 1;
+  }
+  Term rebuilt = child_changed ? uop_graph_rebuild_with_srcs(t, srcs) : t;
+  // Wrap INDEX_E with OPT(_, VEC_LOAD, width) when the address shape is
+  // contiguous.  An OPT(INDEX_E, ...) wrapper is a UOP_OPT (not
+  // UOP_INDEX_E) so the test below doesn't re-fire on already-wrapped
+  // children that come back through the rebuild.
+  if (op == UOP_INDEX_E) {
+    Term addr = heap_read(term_val(rebuilt) + 1);
+    if (apply_opt_dag_vec_addr_contiguous(addr)) {
+      st->changed = 1;
+      return uop_opt(rebuilt, UOP_OPT_VEC_LOAD, st->width);
+    }
+  }
+  return rebuilt;
+}
+
+static Term apply_opt_dag_vec_walk(Term t, ApplyOptDagVecLoadState *st) {
+  Term hit;
+  if (apply_opt_dag_vec_memo_lookup(st, t, &hit)) return hit;
+  Term out = apply_opt_dag_vec_walk_uncached(t, st);
+  apply_opt_dag_vec_memo_insert(st, t, out);
+  return out;
+}
+
+fn Term uop_dag_apply_vec_load(Term root, u32 width) {
+  if (width != 2 && width != 4 && width != 8 && width != 16) return root;
+  ApplyOptDagVecLoadState st;
+  st.memo_n = 0;
+  st.width = width;
+  st.changed = 0;
+  Term out = apply_opt_dag_vec_walk(root, &st);
+  return st.changed ? out : root;
+}
+
 // ---------- top-level dispatcher ------------------------------------
 
 fn Term uop_dag_apply_kopt(Term root, KOpt opt) {
@@ -404,6 +769,12 @@ fn Term uop_dag_apply_kopt(Term root, KOpt opt) {
     case KOP_GROUP:
     case KOP_GROUPTOP:
       return uop_dag_apply_split(root, opt.op, opt.axis, opt.arg);
+    case KOP_FAST_MATH:
+      return uop_dag_apply_fast_math(root);
+    case KOP_SIMD_REDUCE:
+      return uop_dag_apply_simd_reduce(root);
+    case KOP_VEC_LOAD:
+      return uop_dag_apply_vec_load(root, opt.arg);
     default:
       return 0;  // unsupported (PADTO, NOLOCALS reserved)
   }

@@ -309,7 +309,54 @@ static void rmu_emit_term(Term t, FILE *fp) {
     case UOP_OPT: {
       // Annotation: render the target, ignore the directive in F0
       // (F1+ pattern-matches for specialised templates).
-      rmu_emit_term(heap_read(loc + 0), fp);
+      // FAST_MATH peels: when wrapping a unary EXP2/LOG2/SQRT, emit
+      // the Apple `fast::*` intrinsic instead of the precise variant.
+      // Apple's `fast::` namespace skips edge-case handling (denorms /
+      // NaNs / OOB inputs) for ~5-15% throughput on softmax / layernorm
+      // / attention where the result is renormalised anyway.  See
+      // mlx/backend/metal/kernels/softmax.h for the reference pattern.
+      Term inner = heap_read(loc + 0);
+      u32 opt_kind = (u32)term_val(heap_read(loc + 1));
+      if (opt_kind == UOP_OPT_FAST_MATH && !RMU_TARGET_C
+          && term_tag(inner) == TAG_UOP) {
+        u32 inner_op = term_ext(inner);
+        if (inner_op == UOP_EXP2 || inner_op == UOP_LOG2
+            || inner_op == UOP_SQRT) {
+          const char *fn_name = (inner_op == UOP_EXP2) ? "fast::exp2"
+                              : (inner_op == UOP_LOG2) ? "fast::log2"
+                              :                          "fast::sqrt";
+          fprintf(fp, "%s(", fn_name);
+          rmu_emit_term(heap_read(term_val(inner) + 0), fp);
+          fputs(")", fp);
+          return;
+        }
+      }
+      // VEC_LOAD peel: wrap UOP_INDEX_E with a floatN reinterpret_cast
+      // at the load site.  Pattern (correctness-preserving slice):
+      //   ((device const floatN*)(buf))[(addr) / N][(addr) % N]
+      // Semantically identical to buf[addr]; lets Metal coalesce N
+      // consecutive scalar loads into one vector load when the address
+      // is contiguous.  See docs/plans/mlx_features_to_port.md (4) +
+      // mlx/backend/metal/kernels/softmax.h.  factor = 2/4/8/16.
+      if (opt_kind == UOP_OPT_VEC_LOAD && !RMU_TARGET_C
+          && term_tag(inner) == TAG_UOP && term_ext(inner) == UOP_INDEX_E) {
+        u32 width = (u32)term_val(heap_read(loc + 2));
+        Term buf  = heap_read(term_val(inner) + 0);
+        Term addr = heap_read(term_val(inner) + 1);
+        u32 dt    = uop_buffer_dtype(buf);
+        const char *base = rmu_msl_type_name(dt);
+        if ((dt == DT_FP32 || dt == DT_FP16)
+            && (width == 2 || width == 4 || width == 8 || width == 16)) {
+          fprintf(fp, "((device const %s%u*)(%s))[(",
+                  base, width, rmu_buf_name(buf));
+          rmu_emit_term(addr, fp);
+          fprintf(fp, ") / %u][(", width);
+          rmu_emit_term(addr, fp);
+          fprintf(fp, ") %% %u]", width);
+          return;
+        }
+      }
+      rmu_emit_term(inner, fp);
       return;
     }
     case UOP_REDUCE: {
@@ -437,6 +484,66 @@ static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
       rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
       rmu_collect_reduces(heap_read(loc + 1), reduces, n_out);
       rmu_collect_reduces(heap_read(loc + 2), reduces, n_out);
+      return;
+    default:
+      return;
+  }
+}
+
+// Variant of rmu_collect_reduces that ALSO tags each collected REDUCE
+// with whether its immediate parent is OPT(_, SIMD_REDUCE, _).  Used by
+// rmu_emit_store to fire the simd_sum/simd_max collective-reduce
+// emission instead of a scalar for-loop accumulator.  `simd_flags[i]`
+// is set when reduces[i] was reached through an OPT_SIMD_REDUCE wrap.
+static void rmu_collect_reduces_with_simd(Term t, int parent_is_simd,
+                                          Term *reduces, u8 *simd_flags,
+                                          u32 *n_out) {
+  if (term_tag(t) != TAG_UOP) return;
+  if (*n_out >= MAX_DIM) return;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_REDUCE) {
+    for (u32 i = 0; i < *n_out; i++) {
+      if (reduces[i] == t) {
+        if (parent_is_simd) simd_flags[i] = 1;
+        return;
+      }
+    }
+    reduces[*n_out]    = t;
+    simd_flags[*n_out] = parent_is_simd ? 1 : 0;
+    (*n_out)++;
+    return;
+  }
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
+                                    simd_flags, n_out);
+      rmu_collect_reduces_with_simd(heap_read(loc + 1), 0, reduces,
+                                    simd_flags, n_out);
+      return;
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+      rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
+                                    simd_flags, n_out);
+      return;
+    case UOP_OPT: {
+      u32 kind = term_val(heap_read(loc + 1));
+      int is_simd = (kind == UOP_OPT_SIMD_REDUCE) ? 1 : parent_is_simd;
+      rmu_collect_reduces_with_simd(heap_read(loc + 0), is_simd, reduces,
+                                    simd_flags, n_out);
+      return;
+    }
+    case UOP_IWHERE:
+      rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
+                                    simd_flags, n_out);
+      rmu_collect_reduces_with_simd(heap_read(loc + 1), 0, reduces,
+                                    simd_flags, n_out);
+      rmu_collect_reduces_with_simd(heap_read(loc + 2), 0, reduces,
+                                    simd_flags, n_out);
       return;
     default:
       return;
@@ -1194,8 +1301,10 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // axis) emits BETWEEN output loops, avoiding redundant recompute
   // per inner-axis iteration.
   Term reduces[MAX_DIM];
+  u8   reduce_simd_flag[MAX_DIM] = {0};
   u32  n_reduces = 0;
-  rmu_collect_reduces(value, reduces, &n_reduces);
+  rmu_collect_reduces_with_simd(value, 0, reduces, reduce_simd_flag,
+                                &n_reduces);
   u32 required_pos[MAX_DIM] = {0};
   for (u32 i = 0; i < n_reduces; i++) {
     Term r_src = heap_read(term_val(reduces[i]) + 0);
@@ -1221,7 +1330,11 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // (`float _accN = init; for (...) _accN = combine(...); }`) at a
   // given depth.  Pulled into its own block so we can call it both
   // before any output-axis loops and between successive ones.
-  #define RMU_EMIT_ONE_REDUCE(red, emit_depth) do { \
+  // When `is_simd` is set (the REDUCE was wrapped in OPT_SIMD_REDUCE),
+  // emits the per-thread-strided form + Apple's simd_<op> intrinsic
+  // (1-instruction simdgroup-collective reduce across 32 lanes)
+  // instead of the scalar for-loop accumulator.
+  #define RMU_EMIT_ONE_REDUCE(red, emit_depth, is_simd) do { \
     Term _red = (red); \
     u64  _rloc = term_val(_red); \
     u32  _r_kind = term_val(heap_read(_rloc + 1)); \
@@ -1240,16 +1353,41 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     rmu_collect_ranges_with_opts(_r_src, _r_ranges, _r_kinds, \
                                  _r_factors, &_n_r_ranges); \
     Term _reduce_range_term = 0; \
+    u32  _reduce_extent = 0; \
     for (u32 _j = 0; _j < _n_r_ranges; _j++) { \
       u32 _ax = term_val(heap_read(term_val(_r_ranges[_j]) + 0)); \
-      if (_ax == _r_axis) { _reduce_range_term = _r_ranges[_j]; break; } \
+      if (_ax == _r_axis) { \
+        _reduce_range_term = _r_ranges[_j]; \
+        _reduce_extent     = uop_range_extent(_r_ranges[_j]); \
+        break; \
+      } \
     } \
     if (_reduce_range_term != 0) { \
-      rmu_emit_range_open(_reduce_range_term, fp, (emit_depth), 0); \
-      for (u32 _d = 0; _d < (emit_depth) + 1; _d++) fputs("  ", fp); \
-      rmu_emit_reduce_combine(_acc_name, _r_kind, _r_src, fp); \
-      for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
-      fputs("}\n", fp); \
+      if ((is_simd) && !RMU_TARGET_C) { \
+        /* SIMD-collective shape: each lane processes a 1/32 slice of */ \
+        /* extent, then simd_<op> combines the 32 lane partials in a */ \
+        /* single instruction. */ \
+        for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
+        fprintf(fp, "for (uint a%u = thread_index_in_simdgroup; " \
+                "a%u < %u; a%u += 32u) {\n", \
+                _r_axis, _r_axis, _reduce_extent, _r_axis); \
+        for (u32 _d = 0; _d < (emit_depth) + 1; _d++) fputs("  ", fp); \
+        rmu_emit_reduce_combine(_acc_name, _r_kind, _r_src, fp); \
+        for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
+        fputs("}\n", fp); \
+        for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
+        if (_r_kind == REDUCE_MAX) { \
+          fprintf(fp, "%s = simd_max(%s);\n", _acc_name, _acc_name); \
+        } else { \
+          fprintf(fp, "%s = simd_sum(%s);\n", _acc_name, _acc_name); \
+        } \
+      } else { \
+        rmu_emit_range_open(_reduce_range_term, fp, (emit_depth), 0); \
+        for (u32 _d = 0; _d < (emit_depth) + 1; _d++) fputs("  ", fp); \
+        rmu_emit_reduce_combine(_acc_name, _r_kind, _r_src, fp); \
+        for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
+        fputs("}\n", fp); \
+      } \
     } \
   } while (0)
 
@@ -1257,7 +1395,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // loop.  These are fully hoistable -- their body uses no output axis.
   for (u32 i = 0; i < n_reduces; i++) {
     if (required_pos[i] != 0) continue;
-    RMU_EMIT_ONE_REDUCE(reduces[i], depth);
+    RMU_EMIT_ONE_REDUCE(reduces[i], depth, reduce_simd_flag[i]);
   }
 
   // Track which output ranges opened a `{` (thread-bound axes
@@ -1291,7 +1429,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     // avoids redundant recompute inside deeper output loops.
     for (u32 r_i = 0; r_i < n_reduces; r_i++) {
       if (required_pos[r_i] != i + 1) continue;
-      RMU_EMIT_ONE_REDUCE(reduces[r_i], body_depth);
+      RMU_EMIT_ONE_REDUCE(reduces[r_i], body_depth, reduce_simd_flag[r_i]);
     }
   }
   #undef RMU_EMIT_ONE_REDUCE
@@ -1469,7 +1607,9 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
   fputs(",\n    uint tid [[ thread_position_in_grid ]],\n", fp);
   fputs("    uint tg [[ threadgroup_position_in_grid ]],\n", fp);
   fputs("    uint tt [[ thread_position_in_threadgroup ]],\n", fp);
-  fputs("    uint sgi [[ simdgroup_index_in_threadgroup ]]) {\n", fp);
+  fputs("    uint sgi [[ simdgroup_index_in_threadgroup ]],\n", fp);
+  fputs("    uint thread_index_in_simdgroup "
+        "[[ thread_index_in_simdgroup ]]) {\n", fp);
   // Body.  In F0 we just dispatch on the root op and emit the
   // contained store (or AFTER chain).  Range-loop wrapping happens
   // when the root is wrapped in a RANGE chain (future work).
@@ -1526,7 +1666,9 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   fputs(",\n    uint tid [[ thread_position_in_grid ]],\n", fp);
   fputs("    uint tg [[ threadgroup_position_in_grid ]],\n", fp);
   fputs("    uint tt [[ thread_position_in_threadgroup ]],\n", fp);
-  fputs("    uint sgi [[ simdgroup_index_in_threadgroup ]]) {\n", fp);
+  fputs("    uint sgi [[ simdgroup_index_in_threadgroup ]],\n", fp);
+  fputs("    uint thread_index_in_simdgroup "
+        "[[ thread_index_in_simdgroup ]]) {\n", fp);
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
     if (op == UOP_STORE)      rmu_emit_store(root, fp, 1);

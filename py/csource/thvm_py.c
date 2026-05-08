@@ -213,6 +213,9 @@ EXPORT uint32_t py_const_KOP_PADTO(void)    { return KOP_PADTO; }
 EXPORT uint32_t py_const_KOP_NOLOCALS(void) { return KOP_NOLOCALS; }
 EXPORT uint32_t py_const_KOP_TC(void)       { return KOP_TC; }
 EXPORT uint32_t py_const_KOP_GLOBAL(void)   { return KOP_GLOBAL; }
+EXPORT uint32_t py_const_KOP_FAST_MATH(void) { return KOP_FAST_MATH; }
+EXPORT uint32_t py_const_KOP_SIMD_REDUCE(void) { return KOP_SIMD_REDUCE; }
+EXPORT uint32_t py_const_KOP_VEC_LOAD(void) { return KOP_VEC_LOAD; }
 
 // ---------------- exposed enums (to avoid magic numbers in Python) ----------------
 EXPORT uint32_t py_const_DT_INT32(void)         { return DT_INT32; }
@@ -256,3 +259,6 @@ EXPORT uint32_t py_const_UOP_OPT_TC(void)           { return UOP_OPT_TC; }
 EXPORT uint32_t py_const_UOP_OPT_LOCAL(void)        { return UOP_OPT_LOCAL; }
 EXPORT uint32_t py_const_UOP_OPT_GROUP_REDUCE(void) { return UOP_OPT_GROUP_REDUCE; }
 EXPORT uint32_t py_const_UOP_OPT_CONV(void)         { return UOP_OPT_CONV; }
+EXPORT uint32_t py_const_UOP_OPT_FAST_MATH(void)    { return UOP_OPT_FAST_MATH; }
+EXPORT uint32_t py_const_UOP_OPT_SIMD_REDUCE(void)  { return UOP_OPT_SIMD_REDUCE; }
+EXPORT uint32_t py_const_UOP_OPT_VEC_LOAD(void)     { return UOP_OPT_VEC_LOAD; }
