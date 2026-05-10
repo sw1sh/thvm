@@ -67,9 +67,15 @@ static int metal_batch_enabled(void) {
   return enabled;
 }
 
+// Deferred-decref backlog cap, in bytes.  Buffers freed mid-batch sit
+// here until the next flush (the in-flight command buffer must commit
+// before they're safe to release).  Default 256 MiB: enough to amortise
+// GPU syncs across a run of same-sized intermediates, small enough that
+// the high-batch-size per-op fallback path can't balloon retained
+// memory.  THVM_METAL_DEFER_BYTES (bytes; 0 = unlimited) overrides.
 static u64 metal_defer_limit_bytes(void) {
   static int known = 0;
-  static u64 limit = 1024ull * 1024ull * 1024ull;
+  static u64 limit = 256ull * 1024ull * 1024ull;
   if (!known) {
     char const *e = getenv("THVM_METAL_DEFER_BYTES");
     if (e != NULL && e[0] != '\0') {
@@ -80,12 +86,18 @@ static u64 metal_defer_limit_bytes(void) {
   return limit;
 }
 
+// Recycle-list cap, in bytes.  Freed-but-retained MTLBuffers kept for
+// same-size reuse by a future alloc.  Default 256 MiB (was 1 GiB):
+// covers the recurring conv/BN intermediate shapes without pinning a
+// gigabyte of idle unified memory.  THVM_METAL_FREELIST_BYTES overrides.
+// Re-read every call (not memoized): tests flip this env var at runtime
+// to exercise the cap-zero / cap-tight paths.
 static u64 metal_freelist_limit_bytes(void) {
   char const *e = getenv("THVM_METAL_FREELIST_BYTES");
   if (e != NULL && e[0] != '\0') {
     return strtoull(e, NULL, 10);
   }
-  return 1024ull * 1024ull * 1024ull;
+  return 256ull * 1024ull * 1024ull;
 }
 
 static void metal_dispatch_flush(void) {
@@ -242,6 +254,30 @@ static void metal_record_memory_peak(void) {
       live += METAL_BUFS[i].nbytes;
     }
   }
+  // Backstop: abort rather than thrash the host if the total Metal
+  // buffer footprint blows past the ceiling.  See thvm_live_byte_ceiling
+  // (src/thvm.h) -- the JIT capture run pins every kernel output and the
+  // schedule does not yet reuse buffers across non-overlapping
+  // lifetimes, so a high-batch-size cold capture can balloon without
+  // bound.  Fail loud with the diagnostic instead.
+  {
+    u64 ceiling = thvm_live_byte_ceiling();
+    if (ceiling != 0 && retained > ceiling) {
+      fprintf(stderr,
+        "metal: total live buffer bytes %llu exceed THVM_MAX_LIVE_BYTES "
+        "ceiling %llu (live=%llu deferred=%llu freelist=%llu).  The "
+        "schedule is pinning more buffers than fit -- likely the per-op "
+        "fallback path materializing im2col intermediates and/or the JIT "
+        "capture pinning every kernel output without buffer reuse "
+        "(see docs/plans/beautiful_mnist_parity.md M1/M3/M4).  Raise "
+        "THVM_MAX_LIVE_BYTES (bytes; 0 = unlimited) if this is "
+        "intentional.\n",
+        (unsigned long long)retained, (unsigned long long)ceiling,
+        (unsigned long long)live, (unsigned long long)METAL_DEFER_DECREF_BYTES,
+        (unsigned long long)metal_freelist_bytes());
+      exit(1);
+    }
+  }
   if (live > METAL_PEAK_LIVE_BYTES) {
     METAL_PEAK_LIVE_BYTES = live;
   }
@@ -325,6 +361,20 @@ static u32 metal_buf_freelist_try_pop(u64 nbytes) {
 
 static u32 metal_buf_alloc(u64 nbytes) {
   if (METAL_DEVICE == nil) return 0;
+  // Refuse a pathologically large single allocation rather than
+  // newBufferWithLength: it and pin tens of GB of wired unified
+  // memory.  See thvm_buf_byte_ceiling (src/thvm.h).
+  u64 ceiling = thvm_buf_byte_ceiling();
+  if (ceiling != 0 && nbytes > ceiling) {
+    fprintf(stderr,
+      "metal_buf_alloc: refusing %llu-byte allocation (> THVM_MAX_BUF_BYTES "
+      "ceiling %llu); a kernel program is asking for a buffer far larger "
+      "than any legitimate tensor -- likely an unfused im2col/EXPAND "
+      "intermediate.  Raise THVM_MAX_BUF_BYTES (bytes; 0 = unlimited) if "
+      "this is intentional.\n",
+      (unsigned long long)nbytes, (unsigned long long)ceiling);
+    exit(1);
+  }
   u64 limit = metal_defer_limit_bytes();
   if (METAL_ENCODING_DEPTH == 0
       && METAL_DEFER_DECREF_LEN > 0
@@ -1840,6 +1890,24 @@ static int dag_metal_encode_kernel(KernelEntry *ke,
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
 
+  // Bound the deferred-decref backlog *between* kernels.  Within a
+  // batched step the per-op fallback path (metal-op) materializes one
+  // MTLBuffer per KProgOp and decref_after_batch's them all -- but
+  // those decrefs run with METAL_ENCODING_DEPTH > 0, so the
+  // limit-exceeded flush in metal_buf_alloc / metal_buf_decref_after_batch
+  // never fires and the backlog grows without bound (observed: 2.2 GB
+  // of deferred buffers at BS=32, ~35 GB projected at BS=512).  Here,
+  // at the top of the next kernel dispatch, no command encoder is open
+  // and METAL_BATCH_CMD's prior work is safe to commit, so a flush is
+  // sound: it commits the in-flight command buffer, waits, releases the
+  // deferred buffers, and lets the next kernel start a fresh batch cmd.
+  if (METAL_ENCODING_DEPTH == 0 && METAL_DEFER_DECREF_LEN > 0) {
+    u64 limit = metal_defer_limit_bytes();
+    if (limit != 0 && METAL_DEFER_DECREF_BYTES > limit) {
+      metal_dispatch_flush();
+    }
+  }
+
   u32 tile_groups_x  = 0;
   u32 tile_threads_x = 0;
   int tile_supported = metal_tile_enabled()
@@ -2005,6 +2073,26 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // typical size).  ke->n_ops > 0 since we early-bailed when 0.
   u32 inter_buf_ids[ke->n_ops];
   for (u32 i = 0; i < ke->n_ops; i++) inter_buf_ids[i] = 0;
+  // last_use[i] = highest op index that reads intermediate i (an
+  // earlier op's output).  After op last_use[i] runs, buffer i is
+  // dead and -- once the GPU has drained those reads -- reclaimable.
+  // No reader (degenerate) -> i (drop right after it's written).  The
+  // final op writes outBuf and store_extra ops write the extra-output
+  // buffer, so neither owns an inter_buf_ids[] slot; only "plain" ops
+  // do, and those normally have a downstream reader.
+  u32 last_use[ke->n_ops];
+  for (u32 i = 0; i < ke->n_ops; i++) last_use[i] = i;
+  for (u32 j = 0; j < ke->n_ops; j++) {
+    KProgOp *q = &ke->program[j];
+    for (u8 s = 0; s < q->n_src; s++) {
+      u32 raw = q->src[s];
+      if (KSRC_IS_INPUT(raw)) continue;
+      u32 idx = KSRC_INDEX(raw);
+      if (idx < ke->n_ops && j > last_use[idx]) last_use[idx] = j;
+    }
+  }
+  u64 live_inter_bytes = 0;
+  u64 inter_budget     = metal_defer_limit_bytes();   // checkpoint threshold
   METAL_ENCODING_DEPTH++;
   id<MTLCommandBuffer> cmd = metal_command_buffer();
   int rc = 0;
@@ -2061,9 +2149,31 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       dst_buf = METAL_BUFS[extra_buf_id].buf;
     } else {
       u32 dst_numel = p->numel ? p->numel : 1;
-      u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(p->dtype, dst_numel));
+      u64 dst_bytes = dtype_storage_bytes(p->dtype, dst_numel);
+      // Before the alloc would push our materialized-intermediate
+      // footprint over budget, drain the GPU and reclaim everything
+      // dead so far.  Bounds the per-op-loop peak to roughly
+      // budget + a couple of consecutive ops' outputs, instead of
+      // sum-of-all-N-intermediates (the im2col-style conv-backward
+      // fallback programs were materialising GBs at high BS).
+      if (inter_budget != 0 && live_inter_bytes + dst_bytes > inter_budget
+          && live_inter_bytes > 0) {
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        if (cmd == METAL_BATCH_CMD) METAL_BATCH_CMD = nil;
+        for (u32 i = 0; i < step; i++) {
+          if (inter_buf_ids[i] != 0 && last_use[i] < step) {
+            live_inter_bytes -= METAL_BUFS[inter_buf_ids[i]].nbytes;
+            metal_buf_free(inter_buf_ids[i]);
+            inter_buf_ids[i] = 0;
+          }
+        }
+        cmd = metal_command_buffer();
+      }
+      u32 tmp_id = metal_buf_alloc(dst_bytes);
       if (tmp_id == 0) { rc = -1; break; }
       inter_buf_ids[step] = tmp_id;
+      live_inter_bytes += METAL_BUFS[tmp_id].nbytes;
       dst_buf = METAL_BUFS[tmp_id].buf;
     }
 

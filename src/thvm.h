@@ -608,6 +608,55 @@ struct Backend {
   int   (*dispatch_kernel)(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 };
 
+// Hard ceiling on a single backend buffer allocation, in bytes.  A
+// pathological kernel program (e.g. an im2col-style EXPAND that
+// materializes a multi-billion-element intermediate -- the conv-1
+// backward dInput on the per-op fallback path is ~947M elements ≈
+// 3.8 GiB at BS=512, and the doc records a 5.24-billion-element ≈
+// 21 GiB variant; see docs/plans/profiling_methodology.md sec 4.6)
+// can otherwise drive cpu_buf_alloc / metal_buf_alloc to request many
+// GB in one shot, which thrashes / OOM-kills the host before any other
+// guardrail can react.  Default 1 GiB: ~25x the largest legitimate
+// beautiful_mnist activation at BS=512 (conv-1 output ≈ 38 MiB), far
+// below the documented pathological intermediates.  THVM_MAX_BUF_BYTES
+// (bytes, 0 = unlimited) overrides for workloads with a genuinely huge
+// single tensor (large-LM weights, big-batch transformers).
+//
+// `static inline` in the header so both the unity C build (cpu_buf_*)
+// and the separately-compiled Metal .m (metal_buf_*) see one
+// definition; the env read is memoized per-TU (env doesn't change).
+static inline u64 thvm_buf_byte_ceiling(void) {
+  static int  known = 0;
+  static u64  limit = 1ull << 30;   // 1 GiB
+  if (!known) {
+    char const *e = getenv("THVM_MAX_BUF_BYTES");
+    if (e != NULL && e[0] != '\0') limit = strtoull(e, NULL, 10);
+    known = 1;
+  }
+  return limit;
+}
+
+// Hard ceiling on total live backend buffer bytes (working set +
+// deferred-free backlog + per-op intermediates) at any instant.
+// Backstop for the case where many individually-under-the-per-buffer-
+// ceiling allocations accumulate -- e.g. the JIT *capture* run pins
+// every kernel output (jit_capture_retain_buf) and the schedule does
+// not yet reuse buffers across non-overlapping lifetimes, so the cold
+// capture footprint = sum of all kernel outputs + materialized
+// intermediates (observed ~2 GiB at BS=32, projecting to tens of GB at
+// BS=512).  Default 8 GiB.  THVM_MAX_LIVE_BYTES (bytes, 0 = unlimited)
+// overrides.  Checked in metal_record_memory_peak / its CPU analog.
+static inline u64 thvm_live_byte_ceiling(void) {
+  static int  known = 0;
+  static u64  limit = 8ull << 30;   // 8 GiB
+  if (!known) {
+    char const *e = getenv("THVM_MAX_LIVE_BYTES");
+    if (e != NULL && e[0] != '\0') limit = strtoull(e, NULL, 10);
+    known = 1;
+  }
+  return limit;
+}
+
 // === KernelEntry ===
 // A linearized compute program produced by materialize; consumed by
 // the backend's dispatch_kernel (cpu_interpret for the CPU backend).

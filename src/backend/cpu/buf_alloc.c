@@ -6,6 +6,19 @@
 // same buffer can be shared across multiple TenDesc aliases.
 
 fn u32 cpu_buf_alloc(u64 nbytes) {
+  // Refuse a pathologically large single allocation rather than
+  // calloc() it and thrash the host.  See thvm_buf_byte_ceiling.
+  u64 ceiling = thvm_buf_byte_ceiling();
+  if (ceiling != 0 && nbytes > ceiling) {
+    fprintf(stderr,
+      "cpu_buf_alloc: refusing %llu-byte allocation (> THVM_MAX_BUF_BYTES "
+      "ceiling %llu); a kernel program is asking for a buffer far larger "
+      "than any legitimate tensor -- likely an unfused im2col/EXPAND "
+      "intermediate.  Raise THVM_MAX_BUF_BYTES (bytes; 0 = unlimited) if "
+      "this is intentional.\n",
+      (unsigned long long)nbytes, (unsigned long long)ceiling);
+    exit(1);
+  }
   // bm4a: free-list lookup first.  Recycles a slot whose nbytes
   // matches; reset to a clean state by cpu_buf_freelist_try_pop.
   // No-op when the list is empty or no size match -- falls
