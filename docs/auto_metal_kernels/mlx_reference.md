@@ -95,8 +95,10 @@ for (int i = 0; i < N_READS / 4; i++) {
 }
 ```
 
-`SOFTMAX_N_READS` in MLX is 4 or 8; picked by C++ shape dispatcher
-based on dtype + axis size.
+`SOFTMAX_N_READS` in MLX is `4` (constant, defined in
+`external/mlx/mlx/backend/metal/kernels/defines.h:14`).  Sweeping
+N_READS ∈ {4, 8, 16, 32} at (R=4096, C=4096) gives all four within
+2% of each other -- N_READS tuning is not where the win is.
 
 thvm's `KOP_VEC_LOAD(width)` wraps `INDEX_E` with `OPT_VEC_LOAD(width)`
 which the renderer translates to a `float4*`/`float8*` reinterpret.
@@ -163,6 +165,31 @@ From `docs/plans/mlx_features_to_port.md`:
 For these, the raw-MSL track (see [msl_writing.md](msl_writing.md))
 is your only path.  Drop down to MSL, beat MLX, then optionally port
 the technique back into thvm's renderer as a new `OPT_*` annotation.
+
+## What MLX leaves on the table
+
+From the agent runs in May 2026 -- techniques that beat MLX cleanly:
+
+- **Multi-row-per-TG (softmax, large C)**: pack N rows into one
+  threadgroup with per-row slices of `local_max[]` /
+  `local_normalizer[]`.  Halves dispatched TG count -> cuts per-TG
+  encoder + barrier overhead.  MLX's kernel is templated on a fixed
+  N_READS and would need a structural rewrite for this.  +5-9% at
+  (4096, 4096) softmax.
+- **No-TG-memory path (softmax / reduce, small C)**: 1 simdgroup
+  per row with strided loads + `simd_max`/`simd_sum` only -- no
+  `local_*[]`, no `threadgroup_barrier`.  Pack 4 SGs per TG to
+  spread work across the GPU's 40 cores.  +5-9% at (32, 256) softmax.
+- **Cooperative single-dispatch reduce (vector_sum)**: avoid MLX's
+  ~100us/dispatch CPU overhead from running two separate kernels.
+  Last-TG-wins via atomic counter; one TG runs the second-stage
+  reduce in the same dispatch.  +5-7% at N=16M sum.
+- **Cached `1/axis_size` (layernorm)**: compute once, multiply
+  rather than divide.  Saves 2 FP divides per row.  Modest but free
+  in any per-row kernel.
+- **Shape-adaptive `lsize` per kernel call**: layernorm at C=768
+  wants lsize=96, at C=2048 wants lsize=256.  MLX's dispatcher does
+  this; if you write one kernel for all shapes you must too.
 
 ## Reference: 6 MLX features and where they live
 
