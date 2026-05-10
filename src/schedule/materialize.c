@@ -1311,18 +1311,49 @@ static u32 view_resolve(Term t) {
     default: return 0;                      // PAD + non-movement ops bail
   }
   if (ok) return tensor_view_of(src_tid, nv);
-  // Single-view absorb failed.  Caller falls back to emitting a
-  // kernel op (cpu_op_reshape memcpy, etc.) -- that's strictly
-  // faster than chain-appending and forcing per-kernel
-  // tendesc_strided_index pre-mat.  Auto chain-append regressed
-  // LeNet badly because every EXPAND->RESHAPE in the gy lift
-  // chain produced a multi-view that pre-mat had to walk per
-  // element.  The chain-append API
-  // (tensor_view_chain_append) stays available for code that
-  // EXPLICITLY needs a stride-trick view no kernel-op-emit path
-  // can produce -- e.g. tinygrad-style im2col -- where the
-  // upfront chain cost is paid back by collapsing kh*kw
-  // partial-sum kernels into one sgemm.
+  // Single-view absorb failed.  For RESHAPE this is one of:
+  //   (a) malformed (t_numel != src numel, or t_ndim > MAX_DIM) -- no
+  //       chain can help; fall through to the kernel-op-emit path.
+  //   (b) a valid reshape that genuinely isn't expressible as a single
+  //       View (merging a stride-0 broadcast axis with a real-stride
+  //       axis -- tinygrad's `_pool` im2col reshape, and the
+  //       EXPAND->RESHAPE-merge in the abort repro).  The kernel-op-
+  //       emit path would have to materialise a reshape over a non-
+  //       contig source, which the post-F6 runtime can't do for these
+  //       shapes (-> SIGABRT).  Instead: APPEND a fresh canonical
+  //       outer View onto the source's ShapeTracker chain
+  //       (tensor_view_chain_append), exactly as tinygrad's
+  //       ShapeTracker.reshape appends a View when the merge fails.
+  //       The dispatch-time pre-mat (cpu_dispatch_kernel /
+  //       metal_dispatch_kernel) and materialize_root_alias walk the
+  //       chain via tendesc_strided_index to gather the strided view
+  //       into a contiguous temp once before reading it.
+  //
+  // Gate: ONLY case (b) chain-appends -- the merge-walk in
+  // view_apply_reshape already absorbs the single-View-expressible
+  // reshapes (those return ok=1 above and never reach here), and
+  // malformed reshapes can't be helped.  This is the narrow re-enable
+  // the LeNet-regression note carved out for: a stride-trick view no
+  // kernel-op-emit path can produce.  PERMUTE/SHRINK/FLIP failures are
+  // always malformed input, so they keep falling through.
+  if (op == UOP_RESHAPE) {
+    u32 t_ndim = (u32)term_val(heap_read(loc + 1));
+    if (t_ndim <= MAX_DIM) {
+      u32 t_numel = 1;
+      for (u32 i = 0; i < t_ndim; i++)
+        t_numel *= (u32)term_val(heap_read(loc + 2 + i));
+      if (t_numel == src_view->numel) {
+        Shape ts = {0}; ts.ndim = t_ndim;
+        for (u32 i = 0; i < t_ndim; i++)
+          ts.dims[i] = (u32)term_val(heap_read(loc + 2 + i));
+        View outer = view_create(ts);          // canonical contig outer face
+        u32 chained = tensor_view_chain_append(src_tid, outer);
+        if (chained != 0) return chained;
+      }
+    }
+  }
+  // Malformed reshape, chain wraparound, or non-RESHAPE absorb
+  // failure: fall back to emitting a kernel op (the legacy path).
   return 0;
 }
 
@@ -2679,9 +2710,25 @@ fn Term thvm_materialize(Term term) {
   // flatten to a contig copy so wnf-side flat reads work.
   if (op_is_view_movement(term_ext(term))) {
     u32 alias_tid = view_resolve(term);
+    // A ShapeTracker-CHAINED alias (nviews > 0, from a merge-reshape
+    // that view_apply_reshape couldn't absorb) whose underlying buffer
+    // is a kernel output is NOT safe to eagerly gather here:
+    // materialize_root_alias reads the buffer immediately, but the
+    // producer kernel only fires later (in wnf), so the gather would
+    // read uninitialised bytes (the f4db9637 "movement-op-over-kernel-
+    // output evaluated to zero" failure mode).  For that case, fall
+    // through to the kernel-op-emit path -- it emits a kernel that
+    // wnf fires AFTER the producer, keeping the producer reachable.
+    // Static-data sources (producer_kid == 0 -- external tensors, the
+    // abort-repro case) gather safely.  Non-chained aliases (nviews ==
+    // 0) keep the existing behaviour.
     if (alias_tid != 0) {
-      Term alias_term = term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
-      return materialize_root_alias(alias_term);
+      TenDesc const *ad = &TENS[alias_tid];
+      int unsafe_chain_root = (ad->nviews > 0 && ad->producer_kid != 0);
+      if (!unsafe_chain_root) {
+        Term alias_term = term_new(0, TAG_TEN, ad->dtype, alias_tid);
+        return materialize_root_alias(alias_term);
+      }
     }
   }
 

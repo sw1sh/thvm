@@ -203,6 +203,117 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
     summed + biasBcast
 ]
 
+(* === tinygrad-`_pool` STRIDED-VIEW conv lowering ============
+   TConv2DIm2ColPool / TConv2DIm2ColBatchedPool build the windowed
+   im2col view `xCol : {cIn*kh*kw, ...}` purely from movement ops
+   (RESHAPE / EXPAND / SHRINK / PERMUTE) -- a strided VIEW over the
+   input, exactly like tinygrad's `_pool` unfold, rather than a
+   materialised im2col matrix.  The EXPAND-then-merge-RESHAPE that
+   produces the windowing isn't a single `View` (a stride-0 broadcast
+   axis can't merge with a real-stride axis), so the view-system keeps
+   it as a ShapeTracker chain; the dispatch pre-mat
+   (cpu_dispatch_kernel / metal_dispatch_kernel) gathers it once into a
+   contiguous matmul operand.  No PAD-and-sum: no kh*kw partial-sum
+   kernels and no giant zero-padded `repeat` intermediate.
+
+   Construction (stride 1, no padding, rank-3 input {cIn,H,W}, weights
+   {cOut,cIn,kh,kw}; verified: (ky*(H+1)+hh) mod H = ky+hh within the
+   used range since ky+hh <= H-1, and matches TConv2DKhKw to f32
+   tolerance):
+     Rh = Ceiling[kh*(H+1)/H]; Rw = Ceiling[kw*(W+1)/W];
+     x1   = Reshape(Expand(Reshape(x,{cIn,1,H,1,W}),{cIn,Rh,H,Rw,W}),
+                    {cIn,Rh*H,Rw*W});
+     x2   = Shrink(x1, .., {0,kh*(H+1)}, {0,kw*(W+1)});
+     x3   = Reshape(x2, {cIn,kh,H+1,kw,W+1});
+     x4   = Shrink(x3, .., {0,kh},{0,Hout},{0,kw},{0,Wout});
+     xCol6= Permute(x4, {0,1,3,2,4});           -> {cIn,kh,kw,Hout,Wout}
+     xCol = Reshape(xCol6, {cIn*kh*kw, Hout*Wout});
+   then `outFlat = wFlat @ xCol` -> cblas_sgemm, reshape + bias.
+
+   FORWARD is bit-for-bit correct.  BACKWARD currently differentiates
+   to ZERO w.r.t. the conv input (the grad of a SHRINK -> PAD over the
+   chained strided view trips a pre-existing reduce-over-stride-0
+   lowering bug), so TConv2D keeps the PAD-and-sum lowering as the
+   default and only routes here when THVM_CONV_POOL is set. *)
+TConv2DIm2ColPool[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
+    inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
+    rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outShaped,
+    biasBcast
+},
+    inShape = tUopShape[input];
+    wShape  = tUopShape[weights];
+    {cIn, h, wd}      = inShape;
+    cOut = wShape[[1]];
+    kh   = wShape[[3]];
+    kw   = wShape[[4]];
+    hOut  = h  - kh + 1;
+    wOut  = wd - kw + 1;
+    kSpat = kh * kw;
+    rh = Ceiling[kh * (h + 1) / h];
+    rw = Ceiling[kw * (wd + 1) / wd];
+    x1 = TUOpReshape[
+        TUOpExpand[TUOpReshape[input, {cIn, 1, h, 1, wd}],
+                   {cIn, rh, h, rw, wd}],
+        {cIn, rh * h, rw * wd}];
+    x2 = TUOpShrink[x1, {{0, cIn}, {0, kh * (h + 1)}, {0, kw * (wd + 1)}}];
+    x3 = TUOpReshape[x2, {cIn, kh, h + 1, kw, wd + 1}];
+    x4 = TUOpShrink[x3,
+        {{0, cIn}, {0, kh}, {0, hOut}, {0, kw}, {0, wOut}}];
+    xCol6 = TUOpPermute[x4, {0, 1, 3, 2, 4}];        (* {cIn,kh,kw,hOut,wOut} *)
+    xCol  = TUOpReshape[xCol6, {cIn * kSpat, hOut * wOut}];
+    wFlat = TUOpReshape[weights, {cOut, cIn * kSpat}];
+    outFlat   = TMatMul[wFlat, xCol];               (* {cOut, hOut*wOut} *)
+    outShaped = TUOpReshape[outFlat, {cOut, hOut, wOut}];
+    biasBcast = TUOpExpand[
+        TUOpReshape[bias, {cOut, 1, 1}],
+        {cOut, hOut, wOut}];
+    outShaped + biasBcast
+]
+
+(* Rank-4 batched analogue of TConv2DIm2ColPool: input {B,cIn,H,W}. *)
+TConv2DIm2ColBatchedPool[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
+    inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
+    rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outObp,
+    outShaped, biasBcast
+},
+    inShape = tUopShape[input];
+    wShape  = tUopShape[weights];
+    {batch, cIn, h, wd} = inShape;
+    cOut = wShape[[1]];
+    kh   = wShape[[3]];
+    kw   = wShape[[4]];
+    hOut  = h  - kh + 1;
+    wOut  = wd - kw + 1;
+    kSpat = kh * kw;
+    rh = Ceiling[kh * (h + 1) / h];
+    rw = Ceiling[kw * (wd + 1) / wd];
+    x1 = TUOpReshape[
+        TUOpExpand[TUOpReshape[input, {batch, cIn, 1, h, 1, wd}],
+                   {batch, cIn, rh, h, rw, wd}],
+        {batch, cIn, rh * h, rw * wd}];
+    x2 = TUOpShrink[x1,
+        {{0, batch}, {0, cIn}, {0, kh * (h + 1)}, {0, kw * (wd + 1)}}];
+    x3 = TUOpReshape[x2, {batch, cIn, kh, h + 1, kw, wd + 1}];
+    x4 = TUOpShrink[x3,
+        {{0, batch}, {0, cIn}, {0, kh}, {0, hOut}, {0, kw}, {0, wOut}}];
+    xCol6 = TUOpPermute[x4, {1, 2, 4, 0, 3, 5}];     (* {cIn,kh,kw,B,hOut,wOut} *)
+    xCol  = TUOpReshape[xCol6, {cIn * kSpat, batch * hOut * wOut}];
+    wFlat = TUOpReshape[weights, {cOut, cIn * kSpat}];
+    outFlat   = TMatMul[wFlat, xCol];               (* {cOut, B*hOut*wOut} *)
+    outObp    = TUOpReshape[outFlat, {cOut, batch, hOut, wOut}];
+    outShaped = TUOpPermute[outObp, {1, 0, 2, 3}];
+    biasBcast = TUOpExpand[
+        TUOpReshape[bias, {1, cOut, 1, 1}],
+        {batch, cOut, hOut, wOut}];
+    outShaped + biasBcast
+]
+
+(* THVM_CONV_POOL=1 routes TConv2DIm2Col / TConv2DIm2ColBatched to the
+   strided-view bodies above (forward-only -- backward is still on the
+   default PAD-and-sum path). *)
+convPoolEnabled[] := With[{e = Environment["THVM_CONV_POOL"]},
+    StringQ[e] && e =!= "0" && e =!= ""]
+
 (* TConv2DIm2Col[input, weights, bias] -- im2col + matmul lowering.
    Same input/weight/bias signature and output shape as TConv2D.
 
@@ -221,6 +332,9 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
    REDUCE_SUM pattern -> cblas_sgemm.  Net effect: one sgemm per
    conv layer (vs kh*kw partial-sum kernels in TConv2D), which is
    the ceiling lift needed to scale beautiful-mnist past BS=1. *)
+TConv2DIm2Col[input_TTerm, weights_TTerm, bias_TTerm] /; convPoolEnabled[] :=
+    TConv2DIm2ColPool[input, weights, bias]
+
 TConv2DIm2Col[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
     inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
     patches, summed, xCol, wFlat, outFlat, outShaped, biasBcast
@@ -260,6 +374,9 @@ TConv2DIm2Col[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
         {cOut, hOut, wOut}];
     outShaped + biasBcast
 ]
+
+TConv2DIm2ColBatched[input_TTerm, weights_TTerm, bias_TTerm] /; convPoolEnabled[] :=
+    TConv2DIm2ColBatchedPool[input, weights, bias]
 
 TConv2DIm2ColBatched[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
     inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
