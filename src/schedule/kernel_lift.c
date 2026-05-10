@@ -473,9 +473,12 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
                                     out_buf, in_bufs, n_inputs);
       if (body == 0) return 0;
       // The reduce axis_id == the first range's axis_id (RANGE
-      // ordering at BUFFERIZE matches semantic axis order).  For
-      // multi-axis reductions we'd need to nest; F1e renderer only
-      // handles single-axis, so we match that.
+      // ordering at BUFFERIZE matches semantic axis order).  Rangeify
+      // emits exactly ONE reduce range per S_REDUCE (a multi-axis
+      // reduce uses a single flattened range of extent prod(axes) --
+      // the body's load address composes the per-axis decomposition),
+      // so a single uop_reduce here matches the renderer's
+      // single-axis accumulator.
       if (u->src_count < 2) return 0;
       Term r_uop = lift_lookup_range(ranges, n_ranges, u->src[1]);
       if (r_uop == 0) return 0;

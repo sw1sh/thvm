@@ -103,7 +103,7 @@ int main(void) {
   // UOp DAG (KERNELS[kid].compute_root); kernel_lift coverage
   // tests + test_compute_root_dual_write validate the equivalent.
   char const *m_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-  int m_free_on = (m_free_e == NULL) ? 1 : (m_free_e[0] != '0');
+  int m_free_on = (m_free_e != NULL) && (m_free_e[0] == '1');
   if (!m_free_on) {
     CHECK_EQ(KERNELS[kid].n_ops, 4u);
     CHECK_EQ(KERNELS[kid].program[3].opcode, UOP_MUL);

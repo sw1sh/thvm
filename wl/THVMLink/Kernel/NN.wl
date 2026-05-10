@@ -54,7 +54,7 @@ TL2Loss::usage          = "TL2Loss[x] = TSum[TSquare[x]].";
 TMSELoss::usage         = "TMSELoss[pred, target] = TL2Loss[pred - target].";
 TReLU::usage            = "TReLU[x] = elementwise max(x, 0), implemented as MUL[x, CMPLT[0, x]] -- the CMPLT mask broadcasts a CONST(0) against x and yields 1 where x > 0, else 0.";
 TTanh::usage            = "TTanh[x] = elementwise tanh, implemented as (u - 1)/(u + 1) where u = exp(2x) = EXP2(x * 2 * log2 e).  Uses only existing UOPs (no UOP_TANH primitive).  Loses precision for |x| > ~10 due to exp overflow; that's accepted for now since hidden activations rarely sit there.";
-TSoftmax::usage         = "TSoftmax[x] = exp(x) / sum(exp(x)) over the last axis.  exp via the EXP2 + log2(e) chain.  Numerically naive (no max-subtract stabilisation) -- input magnitudes >~80 will overflow exp.  Forward only.";
+TSoftmax::usage         = "TSoftmax[x] = exp(x - max(x)) / sum(exp(x - max(x))) over axis 0.  exp via the EXP2 + log2(e) chain.  Numerically stable (max-subtract) and grad-correct: every reduce is re-broadcast with an explicit TUOpExpand so the SUB/MUL chain rule keeps the softmax cross-coupling term.";
 TLog::usage             = "TLog[x] = elementwise natural log, implemented as LOG2(x) * ln(2) since the runtime has UOP_LOG2 but no UOP_LOG.";
 TCrossEntropyLoss::usage = "TCrossEntropyLoss[pred, target] = -sum(target * log(pred)).  Probability-form categorical cross-entropy.  Both inputs are TTerms with the same shape; target is typically a one-hot vector.  Forward only -- LOG2 has no grad rule yet.";
 TMaxPool2d::usage        = "TMaxPool2d[x] / TMaxPool2d[x, k] runs a non-overlapping kxk max-pool over the trailing two axes of a rank-3 {C, H, W} or rank-4 batched {B, C, H, W} channels-first tensor.  Default k=2.";
@@ -106,25 +106,25 @@ TTanh[x_TTerm] := With[{u = Exp[2 * x]}, (u - 1) / (u + 1)]
 (* TLog is kept as a public alias; new code should write Log[x]. *)
 TLog[x_TTerm] := Log[x]
 
-(* softmax(x)_i = exp(x_i) / sum(exp(x)).  The RECIP of the scalar sum
-   is EXPLICITLY broadcast to e's shape via TUOpExpand rather than
-   relying on the kernel-level numel-cycle broadcast in MUL: without
-   the explicit EXPAND the chain rule for MUL has no notion of the
-   implicit broadcast and drops the cross-coupling term in
-       d(CE)/dz = probs - target. *)
-(* Stable softmax: subtract max(x) before exp so EXP overflow is
-   bounded.  For numerically well-behaved inputs this is identical
-   to the naive form; for random-init networks (LeNet) it
-   prevents NaN at every forward call.  Uses implicit broadcast
-   from {1}-shaped reduce results onto the input shape; explicit
-   TUOpExpand from a {1} source was observed not to fan out
-   correctly. *)
-TSoftmax[x_TTerm] := Module[{m, xc, e, s},
-    m  = TUOpReduce[x, 0, "MAX"];
-    xc = x - m;
-    e  = Exp[xc];
-    s  = Total[e];
-    e / s
+(* softmax(x)_i = exp(x_i) / sum(exp(x)).  Every reduce result is
+   re-broadcast to x's shape with an EXPLICIT TUOpExpand (the
+   reduced axis re-introduced as a unit dim first), never the
+   kernel-level numel-cycle broadcast in MUL/SUB: the chain rule
+   for MUL/SUB has no notion of the implicit broadcast and drops
+   the cross-coupling term in d(CE)/dz = probs - target.  The
+   max-subtract is grad-transparent (softmax is shift-invariant and
+   the EXPAND grad rule's REDUCE-along-broadcast-axes makes the
+   subtracted term's contribution cancel) so we keep it for
+   numerical stability -- random-init networks (LeNet) overflow exp
+   without it. *)
+TSoftmax[x_TTerm] := With[{shape = tUopShape[x], sumShape = ReplacePart[tUopShape[x], 1 -> 1]},
+    Module[{m, xc, e, s},
+        m  = TUOpExpand[TUOpReshape[TUOpReduce[x, 0, "MAX"], sumShape], shape];
+        xc = x - m;
+        e  = Exp[xc];
+        s  = TUOpExpand[TUOpReshape[TUOpReduce[e, 0, "SUM"], sumShape], shape];
+        e / s
+    ]
 ]
 
 (* CrossEntropy probabilities form: target is a probability

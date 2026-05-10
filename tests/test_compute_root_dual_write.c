@@ -90,9 +90,10 @@ int main(void) {
     // Slices 1+2 dual-write contract: program[] populated alongside
     // compute_root.  Phase C slice 7 (THVM_PHASE_C7_FREE_PROGRAM=1)
     // nulls program[] post-lift; in that mode `n_ops == 0` and the
-    // assertion would be inverted.
+    // assertion would be inverted.  DEFAULT is dual-write (OFF) since
+    // the materialize-regression fix -- only =1 frees program[].
     char const *free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-    int free_on = (free_e == NULL) ? 1 : (free_e[0] != '0');
+    int free_on = (free_e != NULL) && (free_e[0] == '1');
     if (!free_on) CHECK(ke->n_ops > 0);
     else          CHECK_EQ(ke->n_ops, 0u);
   }
@@ -395,7 +396,7 @@ int main(void) {
     // lift; the legacy walk vacuously holds (n_ops == 0).  We assert
     // uniformity via the DAG walker below regardless of the knob.
     char const *free_e_du = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-    int free_on_du = (free_e_du == NULL) ? 1 : (free_e_du[0] != '0');
+    int free_on_du = (free_e_du != NULL) && (free_e_du[0] == '1');
     int legacy_uniform = free_on_du ? 1 : (ke->n_ops > 0);
     if (!free_on_du && legacy_uniform) {
       u32 dt = ke->program[0].dtype;

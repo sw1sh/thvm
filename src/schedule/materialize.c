@@ -1257,24 +1257,16 @@ static u32 view_resolve(Term t) {
   // grad chain stalls as a UOP that never fires.
   if (op == UOP_CONST) return const_to_tendesc(loc);
 
-  // Level 54: realized bufferize boundary acts as a TAG_TEN base
-  // case for the chain walker.  Without this, view_resolve walks
-  // past a boundary into its compute chain (e.g.
-  // EXPAND(RESHAPE(LN1_ADD)) -> recurse into LN1's ADD/MUL chain)
-  // until view_apply_* fails on the first non-movement op,
-  // forcing EXPAND+RESHAPE to fall back to kernel-op emit (the
-  // n_ops=4 [RESHAPE,EXPAND,MUL,REDUCE] shape that broke
-  // tile_gemm_views_ok in Levels 51-53).  Apply ONLY for
-  // non-movement ops -- movement ops must keep recursing so
-  // view_apply_* composes the chain into the boundary's view.
-  if (op != UOP_RESHAPE && op != UOP_EXPAND && op != UOP_PERMUTE
-      && op != UOP_SHRINK && op != UOP_FLIP && op != UOP_PAD) {
-    u32 bi = boundary_index_for_loc(loc);
-    if (bi != 0xFFFFFFFFu) {
-      u32 boundary_tid = BOUNDARY_TID[bi];
-      if (boundary_tid != 0) return boundary_tid;
-    }
-  }
+  // Level 54 (REVERTED in the materialize-regression fix): a
+  // realized bufferize boundary used to act as a TAG_TEN base case
+  // for the chain walker (return BOUNDARY_TID[bi] for non-movement
+  // ops).  That made a movement-op root over a pending-producer
+  // boundary resolve to a bare view alias on the boundary's
+  // (uninitialised) output buffer.  The realize loop only fires
+  // kernels reached through a UOP_KERNEL term, so the boundary's
+  // producer kernel never fired -- the alias read zeros.  Movement
+  // roots now fall through to the kernel-op emit path, which keeps
+  // the producer reachable.
 
   // Source recurses (could be another movement op chain or CONST).
   u32 src_tid = view_resolve(heap_read(loc));
@@ -1938,6 +1930,33 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     }
 
   single_reduce_emit:
+    {
+      // REDUCE over a size-1 axis is data-identity (output numel ==
+      // input numel; only the shape loses the size-1 axis).  Emitting
+      // an S_REDUCE for it forces a degenerate extent-1 reduce range,
+      // and the UOp-DAG walker can't recover that extent when the body
+      // doesn't reference the range -> it returns the reduce identity
+      // (0 for SUM).  Short-circuit to the source value; the kernel's
+      // output_shape (set in emit_kernel_for_boundary) already drops
+      // the axis, so the bytes flow through unchanged.
+      u32 axis0 = (u32)term_val(heap_read(loc + 2));
+      Shape src_sh0 = {0};
+      Shape out_sh0 = {0};
+      int same_shape = term_shape_in(heap_read(loc), 0, &src_sh0)
+                    && term_shape_in(t, 0, &out_sh0)
+                    && src_sh0.ndim == out_sh0.ndim;
+      if (same_shape) {
+        for (u32 d = 0; d < src_sh0.ndim; d++) {
+          if (src_sh0.dims[d] != out_sh0.dims[d]) { same_shape = 0; break; }
+        }
+      }
+      if (same_shape && axis0 < src_sh0.ndim && src_sh0.dims[axis0] == 1) {
+        u32 sidx = visit(heap_read(loc), ke, root_loc, memo);
+        if (sidx == VISIT_BAIL) return VISIT_BAIL;
+        visit_memo_store(memo, loc, sidx);
+        return sidx;
+      }
+    }
     if (loc != root_loc) {
       // Non-root REDUCE: only allow ONE per kernel.
       for (u32 i = 0; i < ke->n_ops; i++) {
@@ -2410,8 +2429,19 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // No static cache here -- the test harness flips the env between
     // thvm_init() / thvm_free() pairs, and the per-getenv overhead
     // (one syscall) is negligible compared to the lifter cost above.
+    // DEFAULT-OFF (commit 56ba050f flipped it ON; reverted in the
+    // materialize-regression fix): freeing ke->program[] post-lift on
+    // the assumption that cached_lift.store_root is the sole canonical
+    // kernel rep broke LeNet training -- TAdam differentiates a
+    // TMaterialize'd loss (a UOP_KERNEL term), and the
+    // backprop-through-UOP_KERNEL path + cpu_blas_dispatch + the tile
+    // gemv recogniser still read program[].  NULL program[] -> all-zero
+    // gradients -> loss byte-identical step to step.  Keep the
+    // dual-write (program[] alongside cached_lift) by default;
+    // THVM_PHASE_C7_FREE_PROGRAM=1 re-enables the free for memory/perf
+    // experiments once every program[] consumer is DAG-only.
     char const *free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-    int free_program_on = (free_e == NULL) ? 1 : (free_e[0] != '0');
+    int free_program_on = (free_e != NULL) && (free_e[0] == '1');
     if (free_program_on) {
       // ke->program may be cache-shared (program_shared=1 -- the
       // KP_CACHE slot owns it) or kernel-owned.  The free path in

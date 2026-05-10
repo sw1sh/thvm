@@ -939,7 +939,7 @@ int main(void) {
   // dispatch-side tests in test_compute_root_dual_write.
   KernelEntry const *cm_ke = &KERNELS[cm_kid];
   char const *cm_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-  int cm_free_on = (cm_free_e == NULL) ? 1 : (cm_free_e[0] != '0');
+  int cm_free_on = (cm_free_e != NULL) && (cm_free_e[0] == '1');
   if (!cm_free_on) {
     u32 movement_ops_seen = 0;
     for (u32 i = 0; i < cm_ke->n_ops; i++) {
@@ -993,7 +993,7 @@ int main(void) {
   u32 reshape_chain_edges[4];
   u32 reshape_count = 0;
   char const *mp_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-  int mp_free_on = (mp_free_e == NULL) ? 1 : (mp_free_e[0] != '0');
+  int mp_free_on = (mp_free_e != NULL) && (mp_free_e[0] == '1');
   if (!mp_free_on) {
     for (u32 i = 0; i < mp_ke->n_ops; i++) {
       KProgOp const *p = &mp_ke->program[i];
@@ -1081,7 +1081,7 @@ int main(void) {
   // KProgOp scan in that mode -- the equivalent semantic on the UOp
   // DAG side is exercised through the lifter coverage tests.
   char const *br_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-  int br_free_on = (br_free_e == NULL) ? 1 : (br_free_e[0] != '0');
+  int br_free_on = (br_free_e != NULL) && (br_free_e[0] == '1');
   if (!br_free_on) {
     int found_binary = 0;
     for (u32 i = 0; i < br_ke->n_ops; i++) {
@@ -1495,7 +1495,7 @@ int main(void) {
   // synthetic-extra cleanup not to leave stale entries beyond this
   // boundary in the test's KERNELS_NEXT window.
   char const *mox_free_e = getenv("THVM_PHASE_C7_FREE_PROGRAM");
-  int mox_free_on = (mox_free_e == NULL) ? 1 : (mox_free_e[0] != '0');
+  int mox_free_on = (mox_free_e != NULL) && (mox_free_e[0] == '1');
   for (u32 k = 1; k < KERNELS_NEXT; k++) {
     if (KERNELS[k].n_extra_outputs != 1) continue;
     if (mox_free_on) {

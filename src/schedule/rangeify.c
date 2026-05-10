@@ -2029,34 +2029,35 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   if (has_reduce) {
     for (u32 r = 0; r < n_reduces; r++) {
       u32 nr = reduce_meta[r].n_ranges;
-      for (u32 d = 0; d < nr; d++) {
-        u64 extra = ((u64)S_AXIS_REDUCE << 32) | (u64)reduce_meta[r].extents[d];
-        reduce_ranges_per_reduce[r][d] = rangeify_emit_leaf(ke, S_RANGE, DT_INT32, extra);
-        // Phase B3: register the reduce range in the UOp range map so
-        // uop_to_scalar can translate any uop_refs that bottom out at
-        // this REDUCE leaf.  axis_id pattern: high bit set + (r * MAX_DIM
-        // + d) so reduce ranges have a distinct namespace from loop ranges.
-        if (RANGEIFY_UOP_RANGE_MAP_LEN < 2 * MAX_DIM) {
-          u32 axis_id = 0x80000000u | (r * MAX_DIM + d);
-          Term ur = uop_range(axis_id, S_AXIS_REDUCE,
-                              reduce_meta[r].extents[d]);
-          RANGEIFY_UOP_RANGE_MAP[RANGEIFY_UOP_RANGE_MAP_LEN].axis_uop  = ur;
-          RANGEIFY_UOP_RANGE_MAP[RANGEIFY_UOP_RANGE_MAP_LEN].scalar_id =
-            reduce_ranges_per_reduce[r][d];
-          RANGEIFY_UOP_RANGE_MAP_LEN++;
-        }
+      // A multi-axis reduce (chained REDUCEs collapsed into one
+      // KProgOp -- EXPAND-backward over >1 trailing broadcast axes,
+      // conv-bias / pool backward) is emitted as ONE flattened reduce
+      // RANGE of extent prod(per-axis extents).  The per-axis
+      // decomposition is implicit: the reduced axes are the
+      // contiguous trailing axes of the pre-reduce input view, so the
+      // body's row-major load address `... + R` already visits the
+      // r0*ext1*..+r1*..+rk block.  Keeping a single range here means
+      // the lifter / renderer / metal reduce shader -- all single-axis
+      // -- handle it unchanged; nesting uop_reduce would break their
+      // accumulator hoisting.
+      u32 flat_extent = (nr > 1) ? reduce_meta[r].size : reduce_meta[r].extents[0];
+      reduce_ranges_per_reduce[r][0] = rangeify_emit_leaf(
+          ke, S_RANGE, DT_INT32, ((u64)S_AXIS_REDUCE << 32) | (u64)flat_extent);
+      // Phase B3: register the reduce range in the UOp range map so
+      // uop_to_scalar can translate any uop_refs that bottom out at
+      // this REDUCE leaf.  axis_id pattern: high bit set + (r * MAX_DIM)
+      // so reduce ranges have a distinct namespace from loop ranges.
+      if (RANGEIFY_UOP_RANGE_MAP_LEN < 2 * MAX_DIM) {
+        u32 axis_id = 0x80000000u | (r * MAX_DIM);
+        Term ur = uop_range(axis_id, S_AXIS_REDUCE, flat_extent);
+        RANGEIFY_UOP_RANGE_MAP[RANGEIFY_UOP_RANGE_MAP_LEN].axis_uop  = ur;
+        RANGEIFY_UOP_RANGE_MAP[RANGEIFY_UOP_RANGE_MAP_LEN].scalar_id =
+          reduce_ranges_per_reduce[r][0];
+        RANGEIFY_UOP_RANGE_MAP_LEN++;
       }
-      u32 combined = reduce_ranges_per_reduce[r][0];
-      for (u32 d = 1; d < nr; d++) {
-        u32 c = emit_iconst(ke, (i64)reduce_meta[r].extents[d]);
-        u32 scaled = emit_ibinop(ke, S_IMUL, combined, c);
-        combined = emit_ibinop(ke, S_IADD, scaled, reduce_ranges_per_reduce[r][d]);
-      }
-      if (nr > 1) {
-        u32 c = emit_iconst(ke, (i64)reduce_meta[r].size);
-        combined = emit_ibinop(ke, S_IMOD, combined, c);
-      }
-      reduce_range_per_reduce[r] = combined;
+      reduce_meta[r].n_ranges  = 1;
+      reduce_meta[r].extents[0] = flat_extent;
+      reduce_range_per_reduce[r] = reduce_ranges_per_reduce[r][0];
     }
     // Legacy aliases (reduce 0 only) used by the rest of the body emit
     // pass that still assumes single reduce.  Subsequent steps phase
@@ -2637,7 +2638,8 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                  && v->shape.ndim > 0) {
         goto pre_index_rngs_fallback;
       } else if (in_numel == reduce_in_numel_r
-                 && v->shape.ndim == in_ndim_r) {
+                 && v->shape.ndim == in_ndim_r
+                 && red_r->n_reduce_axes <= 1) {
         if (v->shape.ndim != in_ndim_r) RBAIL_MID("pre-reduce input ndim_r != in_ndim_r");
         u32 reduce_axis = (u32)-1;
         {
@@ -2672,11 +2674,29 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
         idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides, in_ndim_r, in_off);
       } else if (in_numel == reduce_in_numel_r && reduce_inner_r == 1) {
-        u32 r_ids[MAX_DIM + 1];
-        for (u32 d = 0; d < os->ndim; d++) r_ids[d] = loop_ranges[d];
-        r_ids[os->ndim] = reduce_range_r;
-        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, in_strides_r,
-                                       in_ndim_r, in_off);
+        // Reduce axes are the trailing axes of the pre-reduce input
+        // (inner == 1).  A single-axis reduce has in_ndim_r ==
+        // os->ndim + 1: index by (LOOP iters, REDUCE iter) with the
+        // row-major strides.  A multi-axis reduce collapsed into one
+        // flattened reduce range (reduce_meta[r].n_ranges == 1 after
+        // the multi-axis flatten) has in_ndim_r > os->ndim + 1: the
+        // last `in_ndim_r - os->ndim` original axes are the reduced
+        // block, contiguous and innermost-stride 1, so the flattened
+        // REDUCE iter R == sum(r_d * stride_d).  Index by (LOOP iters
+        // with their kept-axis strides, REDUCE iter with stride 1).
+        u32 r_ids   [MAX_DIM + 1];
+        u32 strd    [MAX_DIM + 1];
+        u32 n_kept   = os->ndim;
+        u32 n_reduced = (in_ndim_r > n_kept) ? (in_ndim_r - n_kept) : 1;
+        for (u32 d = 0; d < n_kept; d++) {
+          r_ids[d] = loop_ranges[d];
+          strd [d] = in_strides_r[d];
+        }
+        r_ids[n_kept] = reduce_range_r;
+        strd [n_kept] = in_strides_r[in_ndim_r - 1];   // innermost stride
+        (void)n_reduced;
+        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, strd,
+                                       n_kept + 1, in_off);
       } else if (v->shape.ndim == os->ndim) {
         int shape_mismatch = 0;
         for (u32 d = 0; d < os->ndim; d++) {
@@ -3070,12 +3090,21 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
             if (have_edge_out_rngs) {
               int allow_mod = reshape_out_rngs.valid_mask != 0;
               for (u32 d = 0; d < p->out_ndim; d++) {
-                u32 ref = reshape_out_rngs.refs[d];
-                if (ref == 0 && p->out_dims[d] == 1) {
+                u32 ref;
+                if (p->out_dims[d] == 1) {
+                  // A size-1 output axis contributes 0 to flat_idx no
+                  // matter what the consumer's iteration did.  A
+                  // downstream EXPAND that broadcasts this axis (the
+                  // canonical `RESHAPE([...]->[1,N]) -> EXPAND(->[M,N])`
+                  // pattern from TMatVec / TMatMul) is a scalar-level
+                  // identity here, so reshape_out_rngs.refs[d] arrives
+                  // carrying the BROADCAST axis's loop range (extent M),
+                  // not extent 1 -- using it directly mismatches the
+                  // out_dim and bails the lift.  Force a zero ref.
                   ref = emit_zero_ref_with_extent(ke, 1);
                 } else {
-                  ref = emit_ref_with_extent(ke, ref, p->out_dims[d],
-                                             allow_mod);
+                  ref = emit_ref_with_extent(ke, reshape_out_rngs.refs[d],
+                                             p->out_dims[d], allow_mod);
                 }
                 if (ref == 0) { can_use_v = 0; break; }
                 out_refs[d] = ref;
