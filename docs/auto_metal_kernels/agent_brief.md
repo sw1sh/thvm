@@ -155,10 +155,14 @@ sub-millisecond kernels.
 - For very small inputs, a single 32-thread simdgroup is enough.
 
 ### layernorm
-- Welford fused mean+var pass: one loop over the row, accumulating
-  `(mean, M2)` so you don't need a second pass.
-- See `external/mlx/mlx/backend/metal/kernels/layer_norm.h`.
+- MLX uses two-pass mean+variance in a single kernel launch (mean
+  first; then centered sum-of-squares using the cached mean).  Verify
+  against `external/mlx/mlx/backend/metal/kernels/layer_norm.metal`.
+- Welford is an alternative (single-pass online algorithm) but more
+  ops per step; usually not faster on Apple GPUs.
 - One TG per row, same `N_READS` vectorization as softmax.
+- A `1/axis_size` cache (compute once, multiply rather than divide)
+  saves two FP divides per row.
 
 ### vector_add (elementwise)
 - Memory-bandwidth bound.  All you can do is `float4` loads + grid-

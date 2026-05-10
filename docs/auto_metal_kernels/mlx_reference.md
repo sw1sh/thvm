@@ -24,7 +24,7 @@ Key files:
 | `softmax.h` | softmax | `softmax_single_row` + `softmax_looped`; two-stage simdgroup reduce; `-FLT_MAX` sentinel |
 | `steel/gemm/`, `steel_gemm.metal` | matmul | `simdgroup_matrix<float, 8, 8>`; cooperative load; multi-frag accumulator; tile picker in `mlx/backend/metal/matmul.cpp` |
 | `reduction/reduce_*.h` | reduce | All / col / row variants; `simd_sum`/`simd_max` + threadgroup reduce |
-| `layer_norm.h` | layernorm | Welford fused mean+var pass; single-kernel implementation |
+| `layer_norm.metal` | layernorm | Two-pass mean+variance in a single kernel launch (mean first, then centered sum-of-squares using the cached mean) -- NOT Welford |
 
 The C++ shape-dispatcher (e.g. `mlx/backend/metal/softmax.cpp`)
 picks which kernel to run based on (R, C, dtype) -- look there to
@@ -157,7 +157,7 @@ From `docs/plans/mlx_features_to_port.md`:
 | Online softmax | Not ported | Write raw MSL |
 | Multi-frag MMA accumulator | `KOP_TC` is single-frag | Write raw MSL with chained `simdgroup_matrix` |
 | Software-pipelined matmul | Not ported | Write raw MSL with two threadgroup-shared staging buffers |
-| Welford fused mean+var | Not ported | Write raw MSL |
+| Two-pass layernorm in one kernel launch | Not ported | Write raw MSL (or use `mx.fast.layer_norm` baseline directly) |
 | Kernel fusion (softmax+matmul, etc) | Not ported | Write raw MSL |
 
 For these, the raw-MSL track (see [msl_writing.md](msl_writing.md))
