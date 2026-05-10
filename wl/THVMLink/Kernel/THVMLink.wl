@@ -100,10 +100,19 @@ $UopMaterialize::usage = $UopKernel::usage = $UopConst::usage =
   $UopGrad::usage       = $UopCmpeq::usage =
   $UopLoad::usage       = $UopAssign::usage =
   $UopCast::usage       = $UopBitcast::usage =
+  $UopRange::usage      = $UopIndexE::usage =
+  $UopIAdd::usage       = $UopISub::usage = $UopIMul::usage =
+  $UopIDiv::usage       = $UopIMod::usage = $UopILt::usage =
+  $UopIAnd::usage       = $UopIWhere::usage = $UopInvalid::usage =
+  $UopBuffer::usage     = $UopStore::usage = $UopAfter::usage =
+  $UopOpt::usage        =
     "UOp opcode id; mirrors UOP_* in src/thvm.h.";
 
 $ReduceSum::usage = $ReduceMax::usage =
     "Reduce-kind id; mirrors REDUCE_* in src/thvm.h.";
+
+$UopScopeGlobal::usage = $UopScopeLocal::usage = $UopScopeReg::usage =
+    "UOP_BUFFER scope tag; mirrors UOP_SCOPE_GLOBAL/LOCAL/REG in src/thvm.h.";
 
 (* === tensors === *)
 TTensor::usage         = "TTensor[shape, dtype] allocates a tensor and returns a TTerm wrapping a TAG_TEN handle.  TTensor[shape, data_List] also writes initial values.  dtype defaults to \"f32\".";
@@ -142,6 +151,20 @@ TUOpCmpeq::usage     = "TUOpCmpeq[a, b] builds a UOP_CMPEQ node (elementwise a =
 TUOpReduce::usage    = "TUOpReduce[src, axis, kind] builds a UOP_REDUCE node; kind = \"SUM\" or \"MAX\".";
 TUOpGrad::usage      = "TUOpGrad[y, gy] builds the BWD projection of a dup-flavored grad cell holding [y, gy].  gy is the cotangent (must match y's shape).  Reducing under TWnf threads gy down via the per-operator adjoint chain rule and emits SUP^{leaf_tid}(zero, gy_at_leaf) at each TEN leaf; outer DUPs at the WL surface (TGrad) extract the per-target gradient.";
 TUOpLoad::usage      = "TUOpLoad[src] builds a UOP_LOAD node wrapping src.  Structural marker mirroring tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in the cpu kernel).";
+
+(* Phase E UOp constructors. *)
+TUOpRange::usage   = "TUOpRange[axisId, axisType, extent] builds a UOP_RANGE leaf.  axisType is one of $KaxLoop / $KaxReduce / $KaxUpcast / $KaxUnroll / $KaxLocal / $KaxGlobal / $KaxGroupReduce.";
+TUOpBuffer::usage  = "TUOpBuffer[scope, dtype, dims, instance] builds a UOP_BUFFER node.  scope is $UopScopeGlobal/Local/Reg; dtype is the dtype id; dims is a list of integers; instance disambiguates input slots (0 = output, 1.. = inputs).";
+TUOpIndexE::usage  = "TUOpIndexE[buf, addr] builds a UOP_INDEX_E node pairing a buffer with a symbolic address tree.";
+TUOpIAdd::usage = TUOpISub::usage = TUOpIMul::usage = TUOpIDiv::usage =
+  TUOpIMod::usage = TUOpILt::usage = TUOpIAnd::usage =
+    "TUOpI<X>[a, b] builds the matching integer-binary UOP node.  Used to construct symbolic address trees over UOP_RANGE leaves and UOP_CONST stride coefficients.";
+TUOpIWhere::usage  = "TUOpIWhere[cond, then, else] builds a UOP_IWHERE ternary select.";
+TUOpInvalid::usage = "TUOpInvalid[] builds a UOP_INVALID sentinel (used for PAD-mask padding).";
+TUOpOpt::usage     = "TUOpOpt[target, kind, factor] wraps `target` with a UOP_OPT annotation.  `kind` is one of $OptUnroll / $OptUpcast / $OptTC / $OptLocal / $OptGroupReduce / $OptConv / $OptFastMath / $OptSimdReduce / $OptVecLoad.";
+TUOpStore::usage   = "TUOpStore[buf, addr, value] builds a UOP_STORE root.  Typical kernel root: STORE(out_buf, out_addr, value-expression).";
+TUOpAfter::usage   = "TUOpAfter[node, afterNode] builds a UOP_AFTER ordering edge: `node` happens-after `afterNode`.";
+TUOpIConst::usage  = "TUOpIConst[v] builds a UOP_CONST(DT_INT32) for use as a stride coefficient.  The DAG-side classifiers pattern-match on UOP_CONST, not on bare TAG_NUM atoms.";
 
 TAssign::usage       = "TAssign[dst, src] builds a UOP_ASSIGN node.  Wnf-fired in-place buffer write: once `src` reduces to a TAG_TEN, backend memcpy copies src.buf into dst.buf and the redex rewrites to dst.  Mirrors tinygrad's UOps.ASSIGN.  Use to mutate weight tensors in optimizer loops without allocating fresh tids per step.";
 
@@ -251,6 +274,17 @@ $UopSqrt = 15;        $UopCmplt = 16;  $UopReduce = 17;
 $UopGrad = 18;        $UopFwd = 19;     $UopCmpeq = 20;
 $UopLoad = 21;        $UopAssign = 22;
 $UopCast = 23;        $UopBitcast = 24;
+(* Phase E additions -- INDEX layer + BUFFER/STORE/AFTER/OPT *)
+$UopRange = 25;       $UopIndexE = 26;
+$UopIAdd = 27;        $UopISub = 28;    $UopIMul = 29;
+$UopIDiv = 30;        $UopIMod = 31;    $UopILt = 32;
+$UopIAnd = 33;        $UopIWhere = 34;  $UopInvalid = 35;
+$UopBuffer = 36;      $UopStore = 37;   $UopAfter = 38;
+$UopOpt = 39;
+(* UOP_BUFFER scope tag.  Mirrors UOP_SCOPE_GLOBAL/LOCAL/REG in src/thvm.h:
+   GLOBAL = device memory (Tensor argument default), LOCAL = threadgroup-
+   shared, REG = per-thread fragment. *)
+$UopScopeGlobal = 0; $UopScopeLocal = 1; $UopScopeReg = 2;
 (* UOP_GRAD / UOP_FWD form a dup-like grad combinator -- both share
    a heap cell holding [y].  UOP_GRAD = backward projection (chain
    rule); UOP_FWD = forward projection (passthrough). *)
@@ -264,7 +298,17 @@ $uopNames = <|
     15 -> "SQRT",        16 -> "CMPLT",  17 -> "REDUCE",
     18 -> "GRAD",        19 -> "FWD",   20 -> "CMPEQ",
     21 -> "LOAD",        22 -> "ASSIGN",
-    23 -> "CAST",        24 -> "BITCAST"
+    23 -> "CAST",        24 -> "BITCAST",
+    (* Phase E additions: INDEX layer + BUFFER/STORE/AFTER/OPT.  After
+       extending these, TTermExpr emits stable string heads instead of
+       "UOP?<n>" fallbacks for ops 25-39, which the WL rewrite layer
+       (Rewrite.wl) pattern-matches against in KOpt rules. *)
+    25 -> "RANGE",       26 -> "INDEX_E",
+    27 -> "IADD",        28 -> "ISUB",   29 -> "IMUL",
+    30 -> "IDIV",        31 -> "IMOD",   32 -> "ILT",
+    33 -> "IAND",        34 -> "IWHERE", 35 -> "INVALID",
+    36 -> "BUFFER",      37 -> "STORE",  38 -> "AFTER",
+    39 -> "OPT"
 |>;
 
 (* Reduce-kind constants *)
@@ -377,6 +421,21 @@ $uopFwdFn      := $uopFwdFn      = load["thvm_wl_uop_fwd",         {Integer, Int
 $termCtrNFn    := $termCtrNFn    = load["thvm_wl_term_ctr_n",      {Integer},                        Integer];
 $termCtrAtFn   := $termCtrAtFn   = load["thvm_wl_term_ctr_at",     {Integer, Integer},               Integer];
 $uopLoadFn     := $uopLoadFn     = load["thvm_wl_uop_load",        {Integer},                        Integer];
+
+(* Phase E UOp constructors (RANGE / INDEX_E / IADD..IAND / IWHERE /
+   INVALID / BUFFER / STORE / AFTER / OPT) -- mirror the matching
+   py_uop_* exports.  Used by Rewrite.wl + rewrite.wlt to build
+   canonical DAGs for cross-validation against C apply_opt_dag. *)
+$uopRangeFn      := $uopRangeFn      = load["thvm_wl_uop_range",      {Integer, Integer, Integer},      Integer];
+$uopBufferFn     := $uopBufferFn     = load["thvm_wl_uop_buffer",     {Integer, Integer, {Integer, 1}, Integer}, Integer];
+$uopIndexEFn     := $uopIndexEFn     = load["thvm_wl_uop_index_e",    {Integer, Integer},               Integer];
+$uopIntBinaryFn  := $uopIntBinaryFn  = load["thvm_wl_uop_int_binary", {Integer, Integer, Integer},      Integer];
+$uopIWhereFn     := $uopIWhereFn     = load["thvm_wl_uop_iwhere",     {Integer, Integer, Integer},      Integer];
+$uopInvalidFn    := $uopInvalidFn    = load["thvm_wl_uop_invalid",    {},                               Integer];
+$uopOptFn        := $uopOptFn        = load["thvm_wl_uop_opt",        {Integer, Integer, Integer},      Integer];
+$uopStoreFn      := $uopStoreFn      = load["thvm_wl_uop_store",      {Integer, Integer, Integer},      Integer];
+$uopAfterFn      := $uopAfterFn      = load["thvm_wl_uop_after",      {Integer, Integer},               Integer];
+$termIConstFn    := $termIConstFn    = load["thvm_wl_term_iconst",    {Integer},                        Integer];
 
 (* direct materialize (no wnf) + kernel-entry introspection *)
 $materializeFn := $materializeFn = load["thvm_wl_materialize",     {Integer},                        Integer];
@@ -796,6 +855,23 @@ uopCellCount[op_] := Switch[op,
        parameters, not children of structural interest. *)
     $UopReshape,                                                    1,
     $UopLoad,                                                       1,
+    (* Phase E additions.  Heap layouts mirror src/thvm.h opcode
+       comments.  RANGE, INDEX_E, IADD..IAND are pure structural;
+       IWHERE has 3 children (cond, then, else).  BUFFER is variable-
+       arity (NUM(scope), NUM(dtype), NUM(ndim), NUM(d0)..NUM(d_{ndim-1}));
+       we report 0 here and special-case it in tTreeWalkWith below.
+       OPT is (target, NUM(kind), NUM(factor)) -- 3 cells; AFTER and
+       STORE are 2/3 cells respectively. *)
+    $UopRange,                                                      3,
+    $UopIndexE,                                                     2,
+    $UopIAdd | $UopISub | $UopIMul | $UopIDiv |
+      $UopIMod | $UopILt | $UopIAnd,                                2,
+    $UopIWhere,                                                     3,
+    $UopInvalid,                                                    1,
+    $UopBuffer,                                                     0,
+    $UopStore,                                                      3,
+    $UopAfter,                                                      2,
+    $UopOpt,                                                        3,
     _,                                                              0
 ]
 
@@ -907,9 +983,28 @@ tTreeWalkWith[reader_, t_, seen_] := Block[{
                             "TEN" /@ inTids
                         ]
                     ],
-                    "UOP" @@ Prepend[
-                        Table[tTreeWalkWith[reader, reader[val + i], seen2], {i, 0, n - 1}],
-                        Lookup[$uopNames, ext, "UOP?" <> ToString[ext]]
+                    If[ ext === $UopBuffer,
+                        (* BUFFER is variable-arity: heap layout is
+                           NUM(scope), NUM(dtype), NUM(ndim), then
+                           NUM(d_0)..NUM(d_{ndim-1}), then optional
+                           NUM(instance) at the end.  Read ndim from
+                           cell 2 and surface (3 + ndim + 1) cells so
+                           consumers see the full BUFFER signature in
+                           a fixed shape: "UOP"["BUFFER", "NUM"[scope],
+                           "NUM"[dtype], "NUM"[ndim], "NUM"[d_0]...,
+                           "NUM"[instance]]. *)
+                        Block[{ndim = $termValFn[reader[val + 2]], total},
+                            total = 3 + ndim + 1; (* +1 for instance tail *)
+                            "UOP" @@ Prepend[
+                                Table[tTreeWalkWith[reader, reader[val + i], seen2],
+                                      {i, 0, total - 1}],
+                                "BUFFER"
+                            ]
+                        ],
+                        "UOP" @@ Prepend[
+                            Table[tTreeWalkWith[reader, reader[val + i], seen2], {i, 0, n - 1}],
+                            Lookup[$uopNames, ext, "UOP?" <> ToString[ext]]
+                        ]
                     ]
                 ]],
         _, "Unknown"[tag]

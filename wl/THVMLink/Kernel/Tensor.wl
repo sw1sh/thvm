@@ -236,6 +236,51 @@ TGradPair[y_, gy_] := With[{bwd = TUOpGrad[y, gy]},
 
 TUOpLoad[src_] := (ensureInit[]; TTerm[$uopLoadFn[ttermRaw[src]]])
 
+(* === Phase E UOp constructors ===
+ * INDEX layer + BUFFER/STORE/AFTER/OPT.  Used by Rewrite.wl and the
+ * cross-validation .wlt suite to build canonical DAGs (RANGE-based
+ * matmul, softmax-shape reduces) directly in WL without going
+ * through Python.
+ *)
+TUOpRange[axisId_Integer, axisType_Integer, extent_Integer] := (
+    ensureInit[]; TTerm[$uopRangeFn[axisId, axisType, extent]])
+
+TUOpBuffer[scope_Integer, dtype_Integer, dims_List, instance_Integer:0] := (
+    ensureInit[]; TTerm[$uopBufferFn[scope, dtype, dims, instance]])
+
+TUOpIndexE[buf_, addr_] := (
+    ensureInit[]; TTerm[$uopIndexEFn[ttermRaw[buf], ttermRaw[addr]]])
+
+(* Wraps the various integer-binary opcodes (UOP_IADD..UOP_IAND).
+   Match the names used by py_uop_int_binary callers. *)
+TUOpIAdd[a_, b_] := (ensureInit[]; TTerm[$uopIntBinaryFn[$UopIAdd, ttermRaw[a], ttermRaw[b]]])
+TUOpISub[a_, b_] := (ensureInit[]; TTerm[$uopIntBinaryFn[$UopISub, ttermRaw[a], ttermRaw[b]]])
+TUOpIMul[a_, b_] := (ensureInit[]; TTerm[$uopIntBinaryFn[$UopIMul, ttermRaw[a], ttermRaw[b]]])
+TUOpIDiv[a_, b_] := (ensureInit[]; TTerm[$uopIntBinaryFn[$UopIDiv, ttermRaw[a], ttermRaw[b]]])
+TUOpIMod[a_, b_] := (ensureInit[]; TTerm[$uopIntBinaryFn[$UopIMod, ttermRaw[a], ttermRaw[b]]])
+TUOpILt [a_, b_] := (ensureInit[]; TTerm[$uopIntBinaryFn[$UopILt,  ttermRaw[a], ttermRaw[b]]])
+TUOpIAnd[a_, b_] := (ensureInit[]; TTerm[$uopIntBinaryFn[$UopIAnd, ttermRaw[a], ttermRaw[b]]])
+
+TUOpIWhere[cond_, t_, e_] := (ensureInit[];
+    TTerm[$uopIWhereFn[ttermRaw[cond], ttermRaw[t], ttermRaw[e]]])
+
+TUOpInvalid[] := (ensureInit[]; TTerm[$uopInvalidFn[]])
+
+TUOpOpt[target_, kind_Integer, factor_Integer] := (
+    ensureInit[]; TTerm[$uopOptFn[ttermRaw[target], kind, factor]])
+
+TUOpStore[buf_, addr_, value_] := (
+    ensureInit[]; TTerm[$uopStoreFn[ttermRaw[buf], ttermRaw[addr], ttermRaw[value]]])
+
+TUOpAfter[node_, afterNode_] := (
+    ensureInit[]; TTerm[$uopAfterFn[ttermRaw[node], ttermRaw[afterNode]]])
+
+(* Integer constant atom for stride coefficients.  The DAG-side
+   classifiers (uop_dag_classify_matmul_shape) pattern-match on
+   UOP_CONST(DT_INT32, bits) for IMUL stride coefficients; bare
+   TAG_NUM atoms won't match. *)
+TUOpIConst[v_Integer] := (ensureInit[]; TTerm[$termIConstFn[v]])
+
 (* TAssign[dst_TEN, src_UOP_or_TEN] -- in-place buffer write.  Wnf
    fires it once `src` reduces to a TAG_TEN: backend memcpy of
    src.buf into dst.buf, returns dst.  Used by optimizer loops to

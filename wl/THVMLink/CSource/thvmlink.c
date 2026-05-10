@@ -3265,6 +3265,150 @@ EXTERN_C DLLEXPORT int thvm_wl_pool_stats_worker_field(WolframLibraryData libDat
   return LIBRARY_NO_ERROR;
 }
 
+// === Phase E DAG-mode KOpt apply ===
+// Mirror of py_uop_dag_apply_kopt in py/csource/thvm_py.c.  Lets WL
+// drive the C-side DAG rewriter so wl/THVMLink/Kernel/Rewrite.wl can
+// cross-validate its symbolic rule output against C output (both
+// snapshotted via TTermExpr).
+//
+// args = (root_term, op, axis, arg)
+// returns: new root term (0 on bail / unsupported KOpt)
+EXTERN_C DLLEXPORT int thvm_wl_uop_dag_apply_kopt(WolframLibraryData libData,
+                                                  mint argc,
+                                                  MArgument *args,
+                                                  MArgument res) {
+  (void)libData; (void)argc;
+  Term root = (Term)MArgument_getInteger(args[0]);
+  KOpt opt;
+  opt.op   = (u8)MArgument_getInteger(args[1]);
+  opt.axis = (u8)MArgument_getInteger(args[2]);
+  opt.arg  = (u32)MArgument_getInteger(args[3]);
+  Term out = uop_dag_apply_kopt(root, opt);
+  MArgument_setInteger(res, (mint)out);
+  return LIBRARY_NO_ERROR;
+}
+
+// === Phase E UOp constructors ===
+// The Phase-E INDEX-layer + BUFFER/STORE/AFTER/OPT opcodes need
+// extern wrappers exposed to WL so the rewrite.wlt cross-validation
+// suite can build canonical DAGs (RANGE-based matmul, softmax-shape
+// reduces, etc.) without going through Python.  Mirror the matching
+// py_uop_* exports in py/csource/thvm_py.c.
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_range(WolframLibraryData libData,
+                                          mint argc, MArgument *args,
+                                          MArgument res) {
+  (void)libData; (void)argc;
+  u32 axis_id   = (u32)MArgument_getInteger(args[0]);
+  u32 axis_type = (u32)MArgument_getInteger(args[1]);
+  u32 extent    = (u32)MArgument_getInteger(args[2]);
+  MArgument_setInteger(res, (mint)uop_range(axis_id, axis_type, extent));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_buffer(WolframLibraryData libData,
+                                           mint argc, MArgument *args,
+                                           MArgument res) {
+  (void)argc;
+  u32 scope    = (u32)MArgument_getInteger(args[0]);
+  u32 dtype    = (u32)MArgument_getInteger(args[1]);
+  MTensor dims = MArgument_getMTensor(args[2]);
+  u32 instance = (u32)MArgument_getInteger(args[3]);
+  mint  n      = libData->MTensor_getFlattenedLength(dims);
+  mint *raw    = libData->MTensor_getIntegerData(dims);
+  u32   buf[MAX_DIM];
+  for (mint i = 0; i < n && i < (mint)MAX_DIM; i++) buf[i] = (u32)raw[i];
+  Term r = (instance == 0)
+    ? uop_buffer     (scope, dtype, (u32)n, buf)
+    : uop_buffer_inst(scope, dtype, (u32)n, buf, instance);
+  MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_index_e(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)libData; (void)argc;
+  Term buf  = (Term)MArgument_getInteger(args[0]);
+  Term addr = (Term)MArgument_getInteger(args[1]);
+  MArgument_setInteger(res, (mint)uop_index_e(buf, addr));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_int_binary(WolframLibraryData libData,
+                                               mint argc, MArgument *args,
+                                               MArgument res) {
+  (void)libData; (void)argc;
+  u32  opcode = (u32)MArgument_getInteger(args[0]);
+  Term a = (Term)MArgument_getInteger(args[1]);
+  Term b = (Term)MArgument_getInteger(args[2]);
+  MArgument_setInteger(res, (mint)uop_int_binary(opcode, a, b));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_iwhere(WolframLibraryData libData,
+                                           mint argc, MArgument *args,
+                                           MArgument res) {
+  (void)libData; (void)argc;
+  Term cond  = (Term)MArgument_getInteger(args[0]);
+  Term then_ = (Term)MArgument_getInteger(args[1]);
+  Term else_ = (Term)MArgument_getInteger(args[2]);
+  MArgument_setInteger(res, (mint)uop_iwhere(cond, then_, else_));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_invalid(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)uop_invalid());
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_opt(WolframLibraryData libData,
+                                        mint argc, MArgument *args,
+                                        MArgument res) {
+  (void)libData; (void)argc;
+  Term target = (Term)MArgument_getInteger(args[0]);
+  u32  kind   = (u32)MArgument_getInteger(args[1]);
+  u32  factor = (u32)MArgument_getInteger(args[2]);
+  MArgument_setInteger(res, (mint)uop_opt(target, kind, factor));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_store(WolframLibraryData libData,
+                                          mint argc, MArgument *args,
+                                          MArgument res) {
+  (void)libData; (void)argc;
+  Term buf   = (Term)MArgument_getInteger(args[0]);
+  Term addr  = (Term)MArgument_getInteger(args[1]);
+  Term value = (Term)MArgument_getInteger(args[2]);
+  MArgument_setInteger(res, (mint)uop_store(buf, addr, value));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_uop_after(WolframLibraryData libData,
+                                          mint argc, MArgument *args,
+                                          MArgument res) {
+  (void)libData; (void)argc;
+  Term node       = (Term)MArgument_getInteger(args[0]);
+  Term after_node = (Term)MArgument_getInteger(args[1]);
+  MArgument_setInteger(res, (mint)uop_after(node, after_node));
+  return LIBRARY_NO_ERROR;
+}
+
+// Integer-NUM atom (for stride coefficients and similar where the
+// classifiers expect UOP_CONST(DT_INT32, bits).  Mirror of
+// py_term_iconst.
+EXTERN_C DLLEXPORT int thvm_wl_term_iconst(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)libData; (void)argc;
+  i32 v = (i32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)uop_const(DT_INT32, (u32)v));
+  return LIBRARY_NO_ERROR;
+}
+
 // === ATP LibraryLink entries live in thvmlink_atp.c.  Single-TU
 //     build is preserved by including the file directly. ===
 #include "thvmlink_atp.c"
