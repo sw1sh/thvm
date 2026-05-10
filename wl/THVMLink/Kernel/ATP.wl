@@ -191,12 +191,47 @@ atpStatsAssoc[stats_List] := <|
 
 (* === Shared problem encoder ======================================= *)
 
-(* Encode a single equation HoldComplete[Equal[lhs, rhs]] into
+(* Strip the outermost ForAll wrapper from a held equation, replacing
+   each bound bare-symbol occurrence inside the body with
+   Pattern[var, Blank[]].  Pass-through when there's no ForAll.  WL's
+   FindEquationalProof accepts both `a == b` and
+   `ForAll[x, lhs[x] == rhs[x]]`; we want the same surface.  Built
+   as a Replace over the held form so the bound symbols never leak
+   into the surrounding evaluation. *)
+(* Apply Pattern[v, Blank[]] substitution for each bound symbol to
+   a held body, returning HoldComplete[body-with-patterns].  Building
+   the substitution rules via Function with HoldFirst keeps each
+   bound symbol unevaluated during rule construction. *)
+applyForAllSubst[hcBody_HoldComplete, vars_List] := Block[{
+    rules
+},
+    rules = Function[{v}, v :> Pattern[v, Blank[]],
+        {HoldAll}] /@ vars;
+    hcBody /. rules
+]
+
+(* Strip the outermost ForAll wrapper from a held equation, replacing
+   each bound bare-symbol occurrence inside the body with
+   Pattern[var, Blank[]].  Pass-through when there's no ForAll.
+   Wrapping body in HoldComplete before /. keeps tautology shapes
+   like `f[x] == f[x]` from evaluating to True before substitution
+   runs. *)
+forAllToPattern[axHC_HoldComplete] := Replace[axHC, {
+    HoldComplete[ForAll[v_Symbol, body_]] :>
+        applyForAllSubst[HoldComplete[body], {v}],
+    HoldComplete[ForAll[Verbatim[List][vars__Symbol], body_]] :>
+        applyForAllSubst[HoldComplete[body], List @@ Hold[vars]],
+    _ :> axHC
+}]
+
+(* Encode a single equation HoldComplete[Equal[lhs, rhs]] (or
+   HoldComplete[ForAll[..., Equal[lhs, rhs]]]) into
    {term_lhs, term_rhs, state'}.  Throws "TATPError" Failure on
    shape mismatch. *)
-encodeEquation[axHC_HoldComplete, state_, label_] := Block[{
-    lhs, rhs, lr, rr
+encodeEquation[axHCRaw_HoldComplete, state_, label_] := Block[{
+    axHC, lhs, rhs, lr, rr
 },
+    axHC = forAllToPattern[axHCRaw];
     If[ ! MatchQ[axHC, HoldComplete[Equal[_, _]]],
         Throw[Failure["TATPParseError",
             <|"Axiom" -> label, "Reason" -> "expected `lhs == rhs`"|>],
@@ -225,7 +260,7 @@ encodeAxiomFold[{terms_, state_, idx_}, axHC_] := Block[{
    pre-evaluate to True. *)
 SetAttributes[atpEncodeProblem, HoldAll];
 atpEncodeProblem[axioms_, conjecture_] := Block[{
-    axHCs, cjHC, axTermsAndState, axTerms, st,
+    axHCsRaw, axHCs, cjHC, axTermsAndState, axTerms, st,
     goalRes, goalLhs, goalRhs, axPairs, conjPair, n
 },
     If[ ! ListQ[Unevaluated[axioms]],
@@ -235,18 +270,23 @@ atpEncodeProblem[axioms_, conjecture_] := Block[{
     ];
     ensureInit[];
     n = Length[Unevaluated[axioms]];
-    axHCs = HoldComplete /@ Unevaluated[axioms];
+    axHCsRaw = HoldComplete /@ Unevaluated[axioms];
+    (* Normalize each axiom: strip the outermost ForAll wrapper (if
+       present) and rewrite bound bare-symbol occurrences as
+       Pattern[var, Blank[]].  Downstream pairing + BFS work
+       uniformly on the stripped form. *)
+    axHCs = forAllToPattern /@ axHCsRaw;
     axTermsAndState = Fold[encodeAxiomFold, {{}, encodeAtpTermInit[], 1}, axHCs];
     axTerms = axTermsAndState[[1]];
     st = axTermsAndState[[2]];
-    cjHC = HoldComplete[conjecture];
+    cjHC = forAllToPattern[HoldComplete[conjecture]];
     goalRes = encodeEquation[cjHC, st, "conjecture"];
     goalLhs = goalRes[[1]];
     goalRhs = goalRes[[2]];
     st = goalRes[[3]];
-    (* Extract {lhs, rhs} pairs from each held axiom directly
-       (Extract on positions {1,1} / {1,2} of HoldComplete[lhs==rhs]
-       gives the held lhs / rhs symbols).  Avoids ReleaseHold which
+    (* Extract {lhs, rhs} pairs from each (stripped) held axiom
+       directly via positions {1,1}/{1,2} of
+       HoldComplete[lhs==rhs].  Avoids ReleaseHold which
        auto-evaluates `a == a` axioms to True. *)
     axPairs = (
         {Extract[#, {1, 1}], Extract[#, {1, 2}]} & /@ axHCs
@@ -260,7 +300,9 @@ atpEncodeProblem[axioms_, conjecture_] := Block[{
         "MaxLab" -> st["next_lab"],
         "State" -> st,
         "AxPairs" -> axPairs,
-        "ConjPair" -> conjPair
+        "ConjPair" -> conjPair,
+        "AxHCsRaw" -> axHCsRaw,
+        "ConjHCRaw" -> HoldComplete[conjecture]
     |>
 ]
 
@@ -504,21 +546,31 @@ synthesizeChain[hypothesis_, ruleList_, maxSteps_: 30] := Block[{
     |>
 ]
 
+(* Strip Pattern[s, Blank[]] wrappers down to the bare symbol s.
+   Used to convert an axiom rhs (which has Pattern[s, _] in the same
+   shape as the lhs) into a Rule rhs that substitutes the bound
+   value back instead of leaking the pattern variable.  Matches both
+   `_x` and `Pattern[x, _Blank]` shapes; pass-through otherwise. *)
+stripPatterns[expr_] := expr /.
+    Verbatim[Pattern][s_Symbol, _Blank] :> s
+
 (* Forward + backward Rule entries for one axiom -- two-element
-   list, used by buildRuleList's Table+Flatten. *)
+   list, used by buildRuleList's Table+Flatten.  RHS has Pattern
+   wrappers stripped so substitution binds and re-emits bare
+   symbols instead of literal `x_`s. *)
 oneAxiomRules[axioms_, axiomKeys_, i_] := Block[{
     ax = axioms[[i]],
     key = axiomKeys[[i]]
 },
     {
         <|
-            "Rule" -> Rule @@ ax,
+            "Rule" -> ax[[1]] -> stripPatterns[ax[[2]]],
             "AxiomKey" -> key,
             "Direction" -> 1,
             "OrientedStmt" -> ax
         |>,
         <|
-            "Rule" -> Rule @@ Reverse[ax],
+            "Rule" -> ax[[2]] -> stripPatterns[ax[[1]]],
             "AxiomKey" -> key,
             "Direction" -> 2,
             "OrientedStmt" -> Reverse[ax]
@@ -706,28 +758,31 @@ $ProofKeyOrder[_] := {5, 0}
    (HoldAll + MatchQ HoldComplete[Equal[_,_]]) and surfaces the
    encoder state for the Variables list; its Packed / MaxLab
    fields go unused here but feed TATP. *)
+(* Render a held expression in the form WL's ProofObject expects
+   for its top-level Axioms list / ConjectureStatement: keep the
+   ForAll wrapper if present, but rewrite every nested `Equal[lhs,
+   rhs]` to `Inactive[Equal][lhs, rhs]` so trivial tautology axioms
+   `a == a` don't collapse to True under ReleaseHold. *)
+holdToInactive[axHC_HoldComplete] :=
+    ReleaseHold[axHC /. Equal -> Inactive[Equal]]
+
 SetAttributes[TFindEquationalProof, HoldAll];
 Options[TFindEquationalProof] = {MaxSteps -> 64};
 TFindEquationalProof[conjecture_, axioms_, OptionsPattern[]] := Catch[
     Block[{
         enc = atpEncodeProblem[axioms, conjecture],
-        dataset, varNames, axEqInactive, conjPair
+        dataset, varNames, axEq, conjStmt, conjPair
     },
         conjPair = enc["ConjPair"];
-        (* Build axiom equations as Inactive[Equal][...] to keep
-           tautology axioms (a == a) from collapsing to True under
-           ReleaseHold/Equal-evaluation.  WL's ProofObject[] still
-           accepts inactive Equals in the axioms list. *)
-        axEqInactive = Inactive[Equal] @@@ enc["AxPairs"];
+        axEq = holdToInactive /@ enc["AxHCsRaw"];
+        conjStmt = holdToInactive[enc["ConjHCRaw"]];
         dataset = buildProofDataset[enc["AxPairs"], conjPair];
         If[ dataset === $Failed, Return[$Failed] ];
-        (* state["var"] is <|name_string -> int_id|>, so the
-           variable names are the keys, not the values. *)
         varNames = Symbol /@ Keys[enc["State"]["var"]];
         ProofObject[
             "EquationalLogic",
-            Inactive[Equal] @@ conjPair,
-            axEqInactive,
+            conjStmt,
+            axEq,
             <|
                 "Variables" -> varNames,
                 "Constants" -> {},

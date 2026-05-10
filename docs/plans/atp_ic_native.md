@@ -349,9 +349,29 @@ b63464e3.
    BFS itself with IC SUP-path decoding (the original milestone-4
    intent).  Until that lands, the BFS does the heavy lifting.
 
-5. **Pattern axioms via pre-instantiation**: extend the encoder
-   to enumerate substitutions for pattern-var axioms.  Validates
-   the commutativity/associativity battery cases.  ~100 LOC.
+5. **Pattern axioms** (DONE -- not via pre-instantiation, via WL
+   Rule semantics).  The original plan was to enumerate
+   substitutions over a constant pool, but the BFS already
+   pattern-matches via `Position` + `ReplaceAt` once the rules
+   are constructed correctly.  Two encoder fixes:
+     - `forAllToPattern[axHC]`: strips `ForAll[v, body]` and
+       `ForAll[{v, ...}, body]` wrappers, rewriting bound bare
+       symbols as `Pattern[v, Blank[]]` so the BFS treats them
+       as pattern variables.  Tautologies like `ForAll[x, f[x]
+       == f[x]]` are protected by wrapping the body in
+       `HoldComplete` before the substitution fires.
+     - `oneAxiomRules`: builds `Rule[lhs, stripPatterns[rhs]]`
+       so the rule substitutes BARE bound values into the rhs
+       (otherwise WL leaks `Pattern[x, Blank[]]` into the
+       output, breaking ReplaceAt).
+   Doc-form coverage in atp.wlt (`ATP/TFEP/...`):
+   pattern-rightId-1use/2uses/verifies, forall-fg-gf-from-fx-gx,
+   forall-multi-axiom-instantiated, assoc-rewrite-doc-example,
+   forall-tautology-no-axioms, forall-single-1step,
+   forall-multi-symmetric, doc-scope-3step-chain,
+   doc-scope-insufficient-axioms, plus
+   forall-multi-axiom-verifies / assoc-rewrite-verifies for
+   ProofFunction round-trip.  53/53 atp.wlt cases pass.
 
 6. **Retire `src/atp/_.c`** (PARTIAL): `TFindEquationalProof`
    no longer calls into the C-side ATP saturator (`$atpRunFn`
