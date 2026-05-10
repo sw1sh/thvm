@@ -422,6 +422,28 @@ void thvm_metal_buf_freelist_push(u32 buf_id) {
   metal_buf_freelist_push(buf_id);
 }
 
+// Undo a metal_buf_freelist_push: if `buf_id` is still parked on the
+// recycle list (no intervening metal_buf_alloc popped it), pull it off
+// and restore refcount = 1.  Used by the per-realize memory planner to
+// roll back speculative pushes at end-of-pass so a later pass's
+// allocations don't recycle a buf whose TenDesc is still referenced.
+void thvm_metal_buf_freelist_remove(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
+  for (u32 i = 0; i < METAL_FREELIST_LEN; i++) {
+    if (METAL_FREELIST[i] != buf_id) continue;
+    METAL_FREELIST[i] = METAL_FREELIST[METAL_FREELIST_LEN - 1];
+    METAL_FREELIST_LEN--;
+    METAL_BUFS[buf_id].refcount = 1;
+    metal_record_memory_peak();
+    return;
+  }
+}
+
+u32 thvm_metal_buf_refcount(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
+  return METAL_BUFS[buf_id].refcount;
+}
+
 static void metal_buf_free(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return;
   METAL_BUFS[buf_id].buf      = nil;
@@ -3583,6 +3605,9 @@ Backend METAL_BACKEND = {
   .buf_read        = metal_buf_read,
   .buf_write       = metal_buf_write,
   .buf_copy        = metal_buf_copy,
+  .buf_refcount        = thvm_metal_buf_refcount,
+  .buf_freelist_push   = thvm_metal_buf_freelist_push,
+  .buf_freelist_remove = thvm_metal_buf_freelist_remove,
   .dispatch_begin  = metal_dispatch_begin,
   .dispatch_flush  = metal_dispatch_flush,
   .dispatch_end    = metal_dispatch_end,

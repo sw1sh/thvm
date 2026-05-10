@@ -129,33 +129,42 @@ static void visit_memo_store(VisitMemo *m, u64 loc, u32 ref) {
 
 // === per-realize memory planner =====================================
 //
-// Phase 8 of the tinygrad-parity arc.  After topo_sort + last_use
+// Phase 8 of the tinygrad-parity arc (Metal extension: M3/M4 of
+// docs/plans/beautiful_mnist_parity.md).  After topo_sort + last_use
 // computation, the emit loop walks boundaries in alloc-depth order;
 // before each kernel allocates its output buf, the planner pushes
-// any earlier kernel's output buf whose last_use_depth has already
-// passed onto the backend's freelist.  cpu_buf_alloc then pops a
-// same-nbytes match instead of growing CPU_BUFS_NEXT.  Today this is
-// CPU-only: Metal has command-buffer batches plus deferred decrefs, so
-// speculative planner reuse needs a matching Metal drain/proof first.
+// any earlier-emitted kernel's output buf whose last_use_depth has
+// already passed onto the backend's free-list.  The next tensor_alloc
+// -> backend->buf_alloc then pops a same-nbytes match instead of
+// growing the buffer table -- tinygrad's MemoryPlanner, scoped to one
+// materialize pass.
+//
+// Metal safety: the push + pop only ever happen between kernels
+// emitted in the *same* materialize pass, and no kernel is dispatched
+// during the emit loop (wnf fires kernels in a later realize-loop
+// iteration).  So a buffer handed to the free-list and recycled mid-
+// emit has never been touched by a Metal command buffer; the contents-
+// memset in metal_buf_freelist_try_pop can't race in-flight GPU work.
+// end-of-pass mem_plan_drain_freelist pulls any survivors back off the
+// list so the next pass's allocations can't recycle a buf whose
+// TenDesc is still referenced by the chain rule's fresh UOPs.
 
 #define MEM_PLAN_CAP BOUNDARY_ORDER_CAP
 typedef struct {
-  u32 buf_id;
-  u32 last_use_depth;
-  u8  backend_id;       // 1 = CPU, 2 = Metal
-  u8  pushed;
+  u32      buf_id;
+  u32      last_use_depth;
+  Backend *backend;
+  u8       pushed;
 } MemPlanEntry;
 
 static MemPlanEntry MEM_PLAN[MEM_PLAN_CAP];
 static u32          MEM_PLAN_LEN = 0;
 
-// Default-off opt-in via THVM_REUSE_BUFS=1.  Within-pass reuse is
-// safe for forward-only flat graphs; the chain-rule + Phase-3
-// fusion-relaxation cases need DUP/SUP-aware lifetime tracking
-// that's a Phase-9 follow-up.  Until then, the planner ships
-// gated -- opt in for the bench numbers, training graphs stick
-// with the eager allocator.
-static int mem_plan_enabled(void) {
+// CPU planner: default-off opt-in via THVM_REUSE_BUFS=1.  The chain-
+// rule + Phase-3 fusion-relaxation cases on the CPU interpreter want
+// DUP/SUP-aware lifetime tracking that's a follow-up; until then the
+// CPU path stays gated.
+static int mem_plan_cpu_enabled(void) {
   static int known = 0, enabled = 0;
   if (!known) {
     char const *e = getenv("THVM_REUSE_BUFS");
@@ -165,71 +174,89 @@ static int mem_plan_enabled(void) {
   return enabled;
 }
 
+// Metal planner: default-OFF opt-in via THVM_METAL_REUSE_BUFS=1
+// (mirrors the CPU side).  Within-pass single-consumer kernel-output
+// recycling is sound (see the Metal-safety note above), but on the
+// beautiful_mnist graph it is currently inert -- the peak is set by
+// the per-op metal-op fallback's im2col intermediates (M1), not by
+// kernel-output buffers (which sum to ~66 MB) -- and the path has
+// only been verified at BS=32.  Kept as the plumbing M3/M4 needs once
+// M1 lands and kernel outputs become the dominant cost.
+static int mem_plan_metal_enabled(void) {
+  static int known = 0, enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_METAL_REUSE_BUFS");
+    enabled       = (e && e[0] == '1');
+    known         = 1;
+  }
+  return enabled;
+}
+
+// Per-backend gate the recorded buf actually obeys.
+static int mem_plan_backend_enabled(Backend const *b) {
+  if (b == NULL) return 0;
+  if (b->id == 1) return mem_plan_cpu_enabled();
+  if (b->id == 2) return mem_plan_metal_enabled();
+  return 0;
+}
+
 static void mem_plan_reset(void) { MEM_PLAN_LEN = 0; }
 
-// Pop every entry the planner left on CPU_FREELIST that hasn't been
-// re-issued by an in-pass cpu_buf_alloc.  thvm_realize loops
-// materialize+wnf to fixed-point; if a planner push from pass N
-// survived into pass N+1's freelist, pass N+1's allocations could
-// reuse a buf whose original TenDesc is still referenced by the
-// chain rule's freshly-emitted UOPs, corrupting the read.  Drain
-// at end-of-pass so the planner's freelist scope stays strictly
-// per-pass; within-pass reuse (alloc-then-pop within the same emit
-// loop) still works.
+// Pull every entry the planner left on a backend free-list that hasn't
+// been re-issued by an in-pass buf_alloc back to its prior "live"
+// state.  thvm_realize loops materialize+wnf to fixed-point; if a
+// planner push from pass N survived into pass N+1's free-list, pass
+// N+1's allocations could reuse a buf whose original TenDesc is still
+// referenced by the chain rule's freshly-emitted UOPs, corrupting the
+// read.  Drain at end-of-pass so the planner's free-list scope stays
+// strictly per-pass; within-pass reuse (alloc-then-pop within the same
+// emit loop) still works.
 static void mem_plan_drain_freelist(void) {
-  if (!mem_plan_enabled()) return;
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
-    if (!e->pushed)         continue;
-    if (e->backend_id != 1) continue;       // CPU only for now
-    // Walk CPU_FREELIST looking for this buf_id.  If still there,
-    // pop it (without reissuing) so it returns to the original
-    // owner's "live" state.  Drop refcount stays 0 until either a
-    // future TenDesc grabs it or end-of-realize rollback frees it.
-    for (u32 k = 0; k < CPU_FREELIST_LEN; k++) {
-      if (CPU_FREELIST[k] != e->buf_id)     continue;
-      // Swap-with-last + shrink: remove from freelist without
-      // changing CPU_BUFS[e->buf_id].refcount or contents.  The
-      // buf goes back to refcount=1 so the existing extern-pin /
-      // preserve walk handles it correctly.
-      CPU_FREELIST[k] = CPU_FREELIST[CPU_FREELIST_LEN - 1];
-      CPU_FREELIST_LEN--;
-      CPU_BUFS[e->buf_id].refcount = 1;
-      break;
-    }
+    if (!e->pushed)                       continue;
+    Backend *b = e->backend;
+    if (b == NULL || b->buf_freelist_remove == NULL) continue;
+    if (!mem_plan_backend_enabled(b))     continue;
+    b->buf_freelist_remove(e->buf_id);
   }
 }
 
 static void mem_plan_record(u32 buf_id, u32 last_use_depth, Backend *b) {
-  if (b == NULL || buf_id == 0)         return;
-  if (MEM_PLAN_LEN >= MEM_PLAN_CAP)     return;
+  if (b == NULL || buf_id == 0)              return;
+  if (b->buf_freelist_push == NULL)          return;   // backend opts out
+  if (!mem_plan_backend_enabled(b))          return;
+  if (MEM_PLAN_LEN >= MEM_PLAN_CAP)          return;
   MemPlanEntry *e = &MEM_PLAN[MEM_PLAN_LEN++];
   e->buf_id         = buf_id;
   e->last_use_depth = last_use_depth;
-  e->backend_id     = (u8)b->id;
+  e->backend        = b;
   e->pushed         = 0;
 }
 
 static void mem_plan_push_dead(u32 current_depth) {
-  if (!mem_plan_enabled()) return;
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
     if (e->pushed)                              continue;
     if (e->last_use_depth >= current_depth)     continue;
     if (e->buf_id == 0)                         continue;
-    if (e->backend_id == 1) {
-      // Refcount > 1 means another TenDesc aliases this buf
-      // (typically a view-only RESHAPE / EXPAND chain).  Recycling
-      // would yank the bytes from the alias too, so skip.  The
-      // existing post-realize preserve walk + rollback releases
-      // these via the refcount-driven path.
-      if (CPU_BUFS[e->buf_id].refcount > 1) { e->pushed = 1; continue; }
-      // External / WL-shared bufs (NumericArray imports) own no
-      // backing storage; don't push them onto the freelist (the
-      // freelist owns the malloc'd region).
-      if (!CPU_BUFS[e->buf_id].owns_data)   { e->pushed = 1; continue; }
-      cpu_buf_freelist_push(e->buf_id);
+    Backend *b = e->backend;
+    if (b == NULL || b->buf_freelist_push == NULL || !mem_plan_backend_enabled(b)) {
+      e->pushed = 1;
+      continue;
     }
+    // Refcount > 1 means another TenDesc aliases this buf (typically a
+    // view-only RESHAPE / EXPAND chain).  Recycling would yank the
+    // bytes from the alias too, so skip -- the post-realize preserve
+    // walk + rollback releases these via the refcount-driven path.
+    if (b->buf_refcount != NULL && b->buf_refcount(e->buf_id) > 1) {
+      e->pushed = 1;
+      continue;
+    }
+    // External / WL-shared bufs (NumericArray imports) own no backing
+    // storage; cpu_buf_freelist_push self-guards (owns_data check), so
+    // an unconditional push here is safe for both backends.
+    b->buf_freelist_push(e->buf_id);
     e->pushed = 1;
   }
 }

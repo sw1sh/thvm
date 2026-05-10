@@ -602,6 +602,14 @@ struct Backend {
   int   (*buf_read) (u32 buf_id, void *dst, u64 nbytes);
   int   (*buf_write)(u32 buf_id, const void *src, u64 nbytes);
   int   (*buf_copy) (u32 dst_buf_id, u32 src_buf_id, u64 nbytes);
+  // Optional (may be NULL): refcount probe + free-list hand-off used by
+  // the per-realize memory planner (materialize.c) for in-pass
+  // physical-buffer reuse.  buf_freelist_push(b) marks b's storage
+  // recyclable (refcount -> 0); buf_freelist_remove(b) un-recycles it
+  // (refcount -> 1) if it's still on the list and wasn't re-issued.
+  u32   (*buf_refcount)(u32 buf_id);
+  void  (*buf_freelist_push)(u32 buf_id);
+  void  (*buf_freelist_remove)(u32 buf_id);
   void  (*dispatch_begin)(void);
   void  (*dispatch_flush)(void);
   void  (*dispatch_end)(void);

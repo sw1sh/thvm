@@ -64,3 +64,27 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   }
   return 0;   // miss
 }
+
+// Undo a cpu_buf_freelist_push: if `buf_id` is still parked on the
+// free-list (i.e. no intervening cpu_buf_alloc re-issued it), pull it
+// off and restore refcount = 1 so the buf goes back to its prior
+// "live" state.  Used by the per-realize memory planner to roll back
+// speculative pushes at end-of-pass.  No-op if the buf isn't on the
+// list (it was already recycled, or never pushed).
+fn void cpu_buf_freelist_remove(u32 buf_id) {
+  if (CPU_BUFS == NULL) return;
+  if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
+  for (u32 i = 0; i < CPU_FREELIST_LEN; i++) {
+    if (CPU_FREELIST[i] != buf_id) continue;
+    CPU_FREELIST[i] = CPU_FREELIST[CPU_FREELIST_LEN - 1];
+    CPU_FREELIST_LEN--;
+    CPU_BUFS[buf_id].refcount = 1;
+    return;
+  }
+}
+
+fn u32 cpu_buf_refcount(u32 buf_id) {
+  if (CPU_BUFS == NULL) return 0;
+  if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return 0;
+  return CPU_BUFS[buf_id].refcount;
+}
