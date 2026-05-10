@@ -184,6 +184,49 @@ signature on top and you get this error.
 For `Metal.compile_msl`, the opposite: you need the full signature.
 Don't mix the two APIs.
 
+### `error: undeclared identifier 'memory_order_acq_rel'`
+
+MSL atomics support **only** `memory_order_relaxed`.  No `acq_rel`,
+no `seq_cst`, no `acquire`, no `release`.  Use `memory_order_relaxed`
+plus `threadgroup_barrier(mem_flags::mem_device)` if you need a
+fence.  Found in the agent_vector_sum run building a "last-TG wins"
+counter:
+
+```msl
+atomic_uint *ctr = ...;
+uint prev = atomic_fetch_add_explicit(ctr, 1u,
+    memory_order_relaxed);   // not acq_rel
+threadgroup_barrier(mem_flags::mem_device);  // separate fence
+```
+
+## Concurrency / barriers
+
+### `threadgroup_barrier` inside a control-flow branch is undefined
+
+If a barrier sits inside `if (lid == 0) { ... }`, lanes that don't
+take the branch never reach the barrier and the threadgroup deadlocks
+or silently corrupts -- depends on the driver.  Symptom: output
+intermittently wrong, often shape-dependent (works at small N, fails
+at large N because TG count crosses some threshold).
+
+```msl
+// WRONG -- only lane 0 enters the barrier
+if (lid == 0) {
+    out[gid] = result;
+    threadgroup_barrier(mem_flags::mem_device);
+}
+
+// RIGHT -- all lanes hit the barrier
+if (lid == 0) {
+    out[gid] = result;
+}
+threadgroup_barrier(mem_flags::mem_device);
+```
+
+Same rule for `simdgroup_barrier` and any `simd_*` collective
+(`simd_sum` etc): every lane in the simdgroup must execute the
+collective for the result to be defined.
+
 ## Iteration discipline
 
 ### Don't trust a single measurement
