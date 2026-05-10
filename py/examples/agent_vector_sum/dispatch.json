@@ -1,0 +1,7 @@
+{
+  "_comment": "Cooperative two-stage. lsize=1024, n_reads=16 (in kernel). num_tgs scales: ceil(N/min_work) capped at 192.",
+  "lsize": 1024,
+  "n_reads": 16,
+  "num_tgs_min_work": 8192,
+  "num_tgs_cap": 192
+}
