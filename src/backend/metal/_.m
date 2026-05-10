@@ -2012,42 +2012,26 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   id<MTLBuffer> outBuf = METAL_BUFS[out_buf_id].buf;
   if (outBuf == nil) return -1;
 
-  // View-aware pre-materialize (the Metal counterpart to
-  // cpu_interpret's strided pre-mat loop).  For each input whose
-  // TenDesc carries a non-contiguous View, allocate a temp Metal
-  // buffer and populate it via host-side strided index walk.
+  // View-aware pre-materialize state.  The actual strided-view ->
+  // contiguous-temp copy is done LAZILY below, only once we know the
+  // generated-tile path declined: metal_tile_jit_encode binds the
+  // ORIGINAL strided input buffers directly and bakes the view
+  // strides into the address expressions it emits, so it must NOT
+  // see pre-materialised buffers.  The KProgOp per-op loop and the
+  // DAG-side per-op encoder, on the other hand, read inputs
+  // contiguously and DO need the pre-mat.  Doing it eagerly here
+  // (gated only on !tile_supported, i.e. tile *eligibility*) was the
+  // conv-im2col Metal bug: cg_tile_metal_dispatch_shape says "yes
+  // eligible" for the im2col reduce kernel but metal_tile_jit_encode
+  // then bails -- and the per-op fall-through read the raw strided
+  // SHRINK-patch buffers as if contiguous, computing garbage.
   u32 effective_buf_ids[ke->n_inputs ? ke->n_inputs : 1];
   u32 temp_buf_ids     [ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) temp_buf_ids[i] = 0;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 ib = in_buf_ids[i];
     if (ib == 0 || ib >= METAL_BUFS_NEXT) { return -1; }
-    u32 tid = ke->input_tids[i];
-    TenDesc const *td = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
-    int needs_premat = (!tile_supported
-                        && td != NULL
-                        && (!td->view.contiguous
-                            || td->view.offset != 0
-                            || td->nviews != 0));
-    if (needs_premat) {
-      View const *v = &td->view;
-      u32 numel = v->numel;
-      u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(td->dtype, numel));
-      if (tmp_id == 0) {
-        for (u32 k = 0; k < i; k++)
-          if (temp_buf_ids[k]) metal_buf_decref_after_batch(temp_buf_ids[k]);
-        return -1;
-      }
-      f32 *src = (f32 *)[METAL_BUFS[ib].buf contents];
-      f32 *dst = (f32 *)[METAL_BUFS[tmp_id].buf contents];
-      for (u32 k = 0; k < numel; k++) {
-        dst[k] = src[metal_tendesc_strided_index(td, k)];
-      }
-      effective_buf_ids[i] = tmp_id;
-      temp_buf_ids     [i] = tmp_id;
-    } else {
-      effective_buf_ids[i] = ib;
-    }
+    effective_buf_ids[i] = ib;
   }
 
   __unsafe_unretained id<MTLBuffer> jit_src_bufs[ke->n_inputs ? ke->n_inputs : 1];
@@ -2076,6 +2060,38 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
     }
     return -1;
+  }
+
+  // Tile path declined (or wasn't eligible).  The per-op / DAG
+  // encoders below read inputs contiguously, so pre-materialise any
+  // strided-view input now into a contiguous temp buffer (mirror of
+  // cpu_interpret's strided pre-mat).  MTLResourceStorageModeShared
+  // keeps the bytes host-readable so the copy is plain pointer
+  // arithmetic with no extra memcpy out of Metal.
+  for (u32 i = 0; i < ke->n_inputs; i++) {
+    u32 ib  = in_buf_ids[i];
+    u32 tid = ke->input_tids[i];
+    TenDesc const *td = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
+    int needs_premat = (td != NULL
+                        && (!td->view.contiguous
+                            || td->view.offset != 0
+                            || td->nviews != 0));
+    if (!needs_premat) continue;
+    View const *v = &td->view;
+    u32 numel = v->numel;
+    u32 tmp_id = metal_buf_alloc(dtype_storage_bytes(td->dtype, numel));
+    if (tmp_id == 0) {
+      for (u32 k = 0; k < i; k++)
+        if (temp_buf_ids[k]) metal_buf_decref_after_batch(temp_buf_ids[k]);
+      return -1;
+    }
+    f32 *src = (f32 *)[METAL_BUFS[ib].buf contents];
+    f32 *dst = (f32 *)[METAL_BUFS[tmp_id].buf contents];
+    for (u32 k = 0; k < numel; k++) {
+      dst[k] = src[metal_tendesc_strided_index(td, k)];
+    }
+    effective_buf_ids[i] = tmp_id;
+    temp_buf_ids     [i] = tmp_id;
   }
 
   // Phase C slice 5: DAG-side per-op encoder.  Fires when the lift
