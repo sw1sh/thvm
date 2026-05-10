@@ -1,0 +1,15 @@
+{
+  "_comment": "lsize matched to ceil(C/N_READS/32)*32 per shape. N_READS=8.",
+  "grid_per_row": [256, 1, 1],
+  "threadgroup": [256, 1, 1],
+  "shapes": {
+    "128x768": {
+      "grid_per_row": [96, 1, 1],
+      "threadgroup": [96, 1, 1]
+    },
+    "4096x2048": {
+      "grid_per_row": [256, 1, 1],
+      "threadgroup": [256, 1, 1]
+    }
+  }
+}
