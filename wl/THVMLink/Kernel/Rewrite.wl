@@ -92,11 +92,6 @@ KOptVecLoad::usage =
   "INDEX_E whose addr is contiguous-shaped " <>
   "(IADD(IMUL(_, _), RANGE)) with OPT(_, VecLoad, width).";
 
-ApplyKOptSeq::usage =
-  "ApplyKOptSeq[{kopt1, kopt2, ...}] returns the right-composition of " <>
-  "the KOpt operators.  ApplyKOptSeq[seq][expr] applies in left-to-" <>
-  "right order, mirroring the C-side autotune apply order.";
-
 Begin["`Private`"];
 
 (* === KAX_* axis types ============================================ *)
@@ -260,8 +255,8 @@ KOptVecLoad[width_Integer] := ReplaceRepeated[{
         "UOP"["OPT", e, "NUM"[$OptVecLoad], "NUM"[width]]
 }]
 
-(* === composition ================================================== *)
-ApplyKOptSeq[seq_List] := RightComposition @@ seq
+(* Composition: callers use `RightComposition[k1, k2, ...][expr]`
+   directly -- no helper needed. *)
 
 End[];   (* `Private` *)
 

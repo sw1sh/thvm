@@ -64,12 +64,14 @@ buildSoftmaxRow[] := Module[{x, o, r, c, kc, addr, ld, mx, sub, e2,
 ]
 
 (* === xvalid driver =============================================== *)
+(* The C-side spec is passed as `op[axis, arg]` (a head-keyed triple,
+   e.g. `$KopTC[0, 8]` -- the 9[0,8] form Integer-headed but pattern-
+   matchable).  Lets the test corpus read like ML-style data. *)
 
-xvalid[wlOp_, op_Integer, axis_Integer, arg_Integer, fixture_] := With[{
-    root  = fixture[],
-    wlSnap = TTermExpr[fixture[]]
-},
-  TTermExpr[TUOpDagApplyKOpt[root, op, axis, arg]] === wlOp[wlSnap]
+xvalid[wlOp_, op_[axis_, arg_], fixture_] := With[{root = fixture[]},
+  With[{wlSnap = TTermExpr[root]},
+    TTermExpr[TUOpDagApplyKOpt[root, op, axis, arg]] === wlOp[wlSnap]
+  ]
 ]
 
 (* === KOpt cross-validation tests ================================ *)
@@ -78,74 +80,74 @@ xvalid[wlOp_, op_Integer, axis_Integer, arg_Integer, fixture_] := With[{
 (* --- TC ----------------------------------------------------------- *)
 
 VerificationTest[
-    xvalid[KOptTC[8],   $KopTC, 0, 8,  buildMatmul16],
+    xvalid[KOptTC[8],   $KopTC[0, 8],  buildMatmul16],
     True,
     TestID -> "xvalid-tc-matmul-factor8"]
 
 VerificationTest[
-    xvalid[KOptTC[16],  $KopTC, 0, 16, buildMatmul16],
+    xvalid[KOptTC[16],  $KopTC[0, 16], buildMatmul16],
     True,
     TestID -> "xvalid-tc-matmul-factor16"]
 
 VerificationTest[
-    xvalid[KOptTC[32],  $KopTC, 0, 32, buildMatmul16],
+    xvalid[KOptTC[32],  $KopTC[0, 32], buildMatmul16],
     True,
     TestID -> "xvalid-tc-matmul-factor32"]
 
 (* --- GLOBAL ------------------------------------------------------- *)
 
 VerificationTest[
-    xvalid[KOptGlobal[0], $KopGlobal, 0, 0, buildMatmul16],
+    xvalid[KOptGlobal[0], $KopGlobal[0, 0], buildMatmul16],
     True,
     TestID -> "xvalid-global-matmul-axis-m"]
 
 VerificationTest[
-    xvalid[KOptGlobal[1], $KopGlobal, 1, 0, buildMatmul16],
+    xvalid[KOptGlobal[1], $KopGlobal[1, 0], buildMatmul16],
     True,
     TestID -> "xvalid-global-matmul-axis-n"]
 
 (* --- FAST_MATH ----------------------------------------------------
    Matmul has no unary FP ops -- KOptFastMath is a no-op there.
-   Softmax has EXP2 / NEG / RECIP -- they all get wrapped. *)
+   Softmax has EXP2 -- it gets wrapped. *)
 
 VerificationTest[
-    xvalid[KOptFastMath, $KopFastMath, 0, 0, buildMatmul16],
+    xvalid[KOptFastMath, $KopFastMath[0, 0], buildMatmul16],
     True,
     TestID -> "xvalid-fast-math-matmul-noop"]
 
 VerificationTest[
-    xvalid[KOptFastMath, $KopFastMath, 0, 0, buildSoftmaxRow],
+    xvalid[KOptFastMath, $KopFastMath[0, 0], buildSoftmaxRow],
     True,
     TestID -> "xvalid-fast-math-softmax"]
 
 (* --- SIMD_REDUCE -------------------------------------------------- *)
 
 VerificationTest[
-    xvalid[KOptSimdReduce, $KopSimdReduce, 0, 0, buildMatmul16],
+    xvalid[KOptSimdReduce, $KopSimdReduce[0, 0], buildMatmul16],
     True,
     TestID -> "xvalid-simd-reduce-matmul"]
 
 VerificationTest[
-    xvalid[KOptSimdReduce, $KopSimdReduce, 0, 0, buildSoftmaxRow],
+    xvalid[KOptSimdReduce, $KopSimdReduce[0, 0], buildSoftmaxRow],
     True,
     TestID -> "xvalid-simd-reduce-softmax"]
 
 (* --- VEC_LOAD ----------------------------------------------------- *)
 
 VerificationTest[
-    xvalid[KOptVecLoad[4], $KopVecLoad, 0, 4, buildMatmul16],
+    xvalid[KOptVecLoad[4], $KopVecLoad[0, 4], buildMatmul16],
     True,
     TestID -> "xvalid-vec-load-matmul-4"]
 
 VerificationTest[
-    xvalid[KOptVecLoad[8], $KopVecLoad, 0, 8, buildSoftmaxRow],
+    xvalid[KOptVecLoad[8], $KopVecLoad[0, 8], buildSoftmaxRow],
     True,
     TestID -> "xvalid-vec-load-softmax-8"]
 
 (* --- SWAP --------------------------------------------------------- *)
 
 VerificationTest[
-    xvalid[KOptSwap[0, 1], $KopSwap, 0, 1, buildMatmul16],
+    xvalid[KOptSwap[0, 1], $KopSwap[0, 1], buildMatmul16],
     True,
     TestID -> "xvalid-swap-matmul-mn"]
 
@@ -155,52 +157,53 @@ VerificationTest[
    4), inner); xvalid asserts WL and C produce the same shape. *)
 
 VerificationTest[
-    xvalid[KOptUpcast[0, 4], $KopUpcast, 0, 4, buildMatmul16],
+    xvalid[KOptUpcast[0, 4],   $KopUpcast[0, 4],   buildMatmul16],
     True,
     TestID -> "xvalid-upcast-matmul-axis0-factor4"]
 
 VerificationTest[
-    xvalid[KOptUnroll[0, 4], $KopUnroll, 0, 4, buildMatmul16],
+    xvalid[KOptUnroll[0, 4],   $KopUnroll[0, 4],   buildMatmul16],
     True,
     TestID -> "xvalid-unroll-matmul-axis0-factor4"]
 
 VerificationTest[
-    xvalid[KOptLocal[0, 4],  $KopLocal,  0, 4, buildMatmul16],
+    xvalid[KOptLocal[0, 4],    $KopLocal[0, 4],    buildMatmul16],
     True,
     TestID -> "xvalid-local-matmul-axis0-factor4"]
 
 VerificationTest[
-    xvalid[KOptGroup[0, 4],  $KopGroup,  0, 4, buildMatmul16],
+    xvalid[KOptGroup[0, 4],    $KopGroup[0, 4],    buildMatmul16],
     True,
     TestID -> "xvalid-group-matmul-axis0-factor4"]
 
 VerificationTest[
-    xvalid[KOptGroupTop[0, 4], $KopGroupTop, 0, 4, buildMatmul16],
+    xvalid[KOptGroupTop[0, 4], $KopGroupTop[0, 4], buildMatmul16],
     True,
     TestID -> "xvalid-grouptop-matmul-axis0-factor4"]
 
 (* === composition tests ==========================================
    Apply a KOpt SEQUENCE in the same order via WL and C.  The
    C-side composition is iterative kernel_apply_opt; the WL side is
-   RightComposition of the operator-form rules.
+   RightComposition of the operator-form rules.  cSeq elements use
+   the same `op[axis, arg]` head-keyed shape as xvalid.
 *)
 
 composeC[root_, kopts_List] := Fold[
-    TUOpDagApplyKOpt[#1, #2[[1]], #2[[2]], #2[[3]]] &,
+    Function[{r, spec},
+        Replace[spec, op_[axis_, arg_] :> TUOpDagApplyKOpt[r, op, axis, arg]]],
     root, kopts]
 
-xvalidSeq[wlSeq_List, cSeq_List, fixture_] := With[{
-    root   = fixture[],
-    wlSnap = TTermExpr[fixture[]]
-},
-  TTermExpr[composeC[root, cSeq]] ===
-    (RightComposition @@ wlSeq)[wlSnap]
+xvalidSeq[wlSeq_List, cSeq_List, fixture_] := With[{root = fixture[]},
+  With[{wlSnap = TTermExpr[root]},
+    TTermExpr[composeC[root, cSeq]] ===
+      (RightComposition @@ wlSeq)[wlSnap]
+  ]
 ]
 
 VerificationTest[
     xvalidSeq[
         {KOptTC[8], KOptGlobal[0], KOptGlobal[1]},
-        {{$KopTC, 0, 8}, {$KopGlobal, 0, 0}, {$KopGlobal, 1, 0}},
+        {$KopTC[0, 8], $KopGlobal[0, 0], $KopGlobal[1, 0]},
         buildMatmul16],
     True,
     TestID -> "xvalid-compose-tc-global-global"]
@@ -208,7 +211,7 @@ VerificationTest[
 VerificationTest[
     xvalidSeq[
         {KOptFastMath, KOptSimdReduce},
-        {{$KopFastMath, 0, 0}, {$KopSimdReduce, 0, 0}},
+        {$KopFastMath[0, 0], $KopSimdReduce[0, 0]},
         buildSoftmaxRow],
     True,
     TestID -> "xvalid-compose-fastmath-simdreduce-softmax"]
