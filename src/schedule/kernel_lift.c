@@ -429,6 +429,43 @@ static u32 lift_scalar_binary_op(u8 sop) {
   }
 }
 
+// Does the lifted body subgraph `t` reference a UOP_RANGE with the
+// given axis_id?  Mirrors uop_walk.c's uwalk_collect_ranges traversal
+// (doesn't descend into nested UOP_REDUCE bodies -- a nested reduce's
+// range is its own loop, not this one's).  Used to detect the
+// reduce-over-broadcast-axis shape: when an EXPAND made the reduced
+// axis stride-0, the body's LOAD address never references that axis's
+// RANGE, so the renderer / walker would otherwise see no loop to emit
+// and return the reduce identity instead of `extent * body`.
+static int lift_body_refs_axis(Term t, u32 axis_id, u32 depth) {
+  if (depth > 256) return 0;
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    return term_val(heap_read(loc + 0)) == axis_id;
+  }
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      return lift_body_refs_axis(heap_read(loc + 0), axis_id, depth + 1)
+          || lift_body_refs_axis(heap_read(loc + 1), axis_id, depth + 1);
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_OPT:
+      return lift_body_refs_axis(heap_read(loc + 0), axis_id, depth + 1);
+    case UOP_IWHERE:
+      return lift_body_refs_axis(heap_read(loc + 0), axis_id, depth + 1)
+          || lift_body_refs_axis(heap_read(loc + 1), axis_id, depth + 1)
+          || lift_body_refs_axis(heap_read(loc + 2), axis_id, depth + 1);
+    default:
+      return 0;
+  }
+}
+
 static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
                               LiftRangeMap const *ranges, u32 n_ranges,
                               Term out_buf, Term const *in_bufs,
@@ -496,6 +533,25 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       }
       u32 axis_id = term_val(heap_read(term_val(inner) + 0));
       u32 kind = (u->op == S_REDUCE_SUM) ? REDUCE_SUM : REDUCE_MAX;
+      // Reduce-over-broadcast-axis: when the reduced axis came from an
+      // EXPAND of a size-1 axis the body's LOAD address is stride-0 on
+      // that axis, so `body` never references the reduce RANGE.  The
+      // renderer / walker collect the reduce extent by scanning the
+      // body for that RANGE leaf; with no occurrence they emit no
+      // accumulation loop and yield the reduce identity (0 for SUM)
+      // instead of `extent * body`.  Re-attach a value-neutral
+      // reference to the RANGE so the loop is emitted with the right
+      // extent: wrap the body in IWHERE(0 < range+1, body, INVALID).
+      // The guard is always true (a RANGE iterates [0, extent)) so the
+      // value is exactly `body`, but the RANGE leaf now appears in the
+      // body subgraph.  (`0 < range+1` rather than `range < extent`:
+      // the latter constant-folds to 1 via the range-bound-aware ILT
+      // rule, dropping the RANGE again.)
+      if (!lift_body_refs_axis(body, axis_id, 0)) {
+        Term range_plus1 = uop_int_binary(UOP_IADD, inner, uop_const(DT_INT32, 1));
+        Term guard       = uop_int_binary(UOP_ILT, uop_const(DT_INT32, 0), range_plus1);
+        body = uop_iwhere(guard, body, uop_invalid());
+      }
       return uop_reduce(kind, axis_id, body);
     }
     case S_CAST: {

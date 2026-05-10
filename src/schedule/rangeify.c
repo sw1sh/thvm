@@ -3287,9 +3287,15 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       if (v == 0) RBAIL_MID("SHRINK/PAD src 0");
       u32 ndim = p->out_ndim;
       if (ndim == 0) ndim = os->ndim;
-      // Cap is u64-extra packing: 16 bits/axis (begin u16 for SHRINK,
-      // begin u8 + src_dim u8 for PAD).  4 axes fit; chain for more.
-      if (ndim > 4) RBAIL_MID("SHRINK/PAD ndim > 4");
+      // NOTE: the `ndim > 4` cap is enforced LATER -- only the final
+      // direct-emit fallback (line below) packs per-axis begin/src_dim
+      // into the u64 `extra` (16 bits/axis -> 4 axes).  The earlier
+      // paths (SHRINK baked into load address via via_rngs, PAD
+      // edge-local re-emit, and the RESHAPE_V-fusion re-emit) don't
+      // pack `extra` and handle arbitrary rank up to MAX_DIM, which is
+      // what the tinygrad-`_pool` strided-view conv's rank-5/6 SHRINK
+      // chain needs.  Gating here would reject those before they get a
+      // chance.
       // When source value's via_rngs flag is set, SHRINK's iter shift
       // is already baked into the load address by the backward walk.
       if (p->opcode == UOP_SHRINK && SRC_VIA_RNGS(raw, r_idx)) {
@@ -3620,6 +3626,12 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         }
         RBAIL_MID("SHRINK/PAD ndim > os->ndim (rank-promoted intermediate)");
       }
+      // Direct-emit fallback: packs per-axis begin/src_dim into the
+      // u64 `extra` at 16 bits/axis -- only 4 axes fit.  Higher-rank
+      // SHRINK/PAD must have been absorbed by one of the paths above
+      // (via_rngs bake-in / PAD edge-local / RESHAPE_V fusion); if it
+      // reaches here at rank > 4 we can't encode it, so bail.
+      if (ndim > 4) RBAIL_MID("SHRINK/PAD ndim > 4 (direct emit)");
       u8  sop;
       u64 extra = 0;
       if (p->opcode == UOP_SHRINK) {

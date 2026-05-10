@@ -230,16 +230,34 @@ TConv2DKhKw[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
      xCol = Reshape(xCol6, {cIn*kh*kw, Hout*Wout});
    then `outFlat = wFlat @ xCol` -> cblas_sgemm, reshape + bias.
 
-   FORWARD is bit-for-bit correct.  BACKWARD currently differentiates
-   to ZERO w.r.t. the conv input (the grad of a SHRINK -> PAD over the
-   chained strided view trips a pre-existing reduce-over-stride-0
-   lowering bug), so TConv2D keeps the PAD-and-sum lowering as the
-   default and only routes here when THVM_CONV_POOL is set. *)
-TConv2DIm2ColPool[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
-    inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
+   FORWARD is bit-for-bit correct, and BACKWARD is too (matches
+   TConv2DKhKw / the PAD-and-sum path to f32 tolerance): the grad of
+   the chained SHRINK -> PAD over the strided view used to differentiate
+   to ZERO w.r.t. the conv input, via two lowering bugs now fixed in
+   src/schedule -- (a) a REDUCE over a broadcast (stride-0) axis whose
+   RANGE never appears in the body load returned the reduce identity
+   instead of `extent*body` (kernel_lift); (b) rangeify bailed on any
+   SHRINK/PAD of rank > 4 before the higher-rank-capable paths
+   (via_rngs bake-in / RESHAPE_V fusion) had a chance.  This path is
+   TConv2D's default lowering now; THVM_CONV_POOL=0 reverts to
+   PAD-and-sum.  (`input` is pushed onto a contiguous buffer boundary
+   first -- see the body -- so the strided-view chain composes
+   correctly even when `input` is itself a movement / compute DAG.) *)
+TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
+    input, inShape, wShape, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
     rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outShaped,
     biasBcast
 },
+    (* The strided-view `_pool` chain composes RESHAPE/EXPAND/SHRINK/
+       PERMUTE on top of `input`.  When `input` is itself a movement /
+       compute DAG (e.g. conv2's input is MaxPool(ReLU(conv1))), the
+       scheduler fuses the two chains and mis-orders the composed
+       views -- the conv output comes out wrong.  Force `input` onto a
+       contiguous buffer boundary first (it is a small tensor and is
+       materialised anyway as a kernel output, so this costs nothing
+       the PAD-and-sum path didn't already pay -- the win is dropping
+       the materialised im2col MATRIX, not the input). *)
+    input = TMaterialize[inputArg];
     inShape = tUopShape[input];
     wShape  = tUopShape[weights];
     {cIn, h, wd}      = inShape;
@@ -271,11 +289,15 @@ TConv2DIm2ColPool[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
 ]
 
 (* Rank-4 batched analogue of TConv2DIm2ColPool: input {B,cIn,H,W}. *)
-TConv2DIm2ColBatchedPool[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
-    inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
+TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
+    input, inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
     rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outObp,
     outShaped, biasBcast
 },
+    (* See TConv2DIm2ColPool: force `input` onto a contiguous buffer
+       boundary so the strided-view `_pool` chain composes correctly
+       even when the input is itself a movement / compute DAG. *)
+    input = TMaterialize[inputArg];
     inShape = tUopShape[input];
     wShape  = tUopShape[weights];
     {batch, cIn, h, wd} = inShape;
@@ -308,11 +330,19 @@ TConv2DIm2ColBatchedPool[input_TTerm, weights_TTerm, bias_TTerm] := Module[{
     outShaped + biasBcast
 ]
 
-(* THVM_CONV_POOL=1 routes TConv2DIm2Col / TConv2DIm2ColBatched to the
-   strided-view bodies above (forward-only -- backward is still on the
-   default PAD-and-sum path). *)
-convPoolEnabled[] := With[{e = Environment["THVM_CONV_POOL"]},
-    StringQ[e] && e =!= "0" && e =!= ""]
+(* TConv2DIm2Col / TConv2DIm2ColBatched route to the strided-view
+   `_pool` bodies above by DEFAULT now: forward is bit-for-bit correct
+   and backward is correct too (the reduce-over-broadcast-axis and
+   rank-5+ SHRINK/PAD lowering bugs that used to zero the conv-input
+   gradient are fixed in src/schedule).  The `_pool` lowering keeps the
+   im2col operand a ShapeTracker VIEW chain instead of a materialised
+   matrix -- the dispatch pre-mat gathers it once into the matmul
+   operand; no kh*kw partial-sum kernels and no giant zero-padded
+   `repeat` intermediate.  TConv2DKhKw stays as the explicit
+   partial-sum reference body.
+   THVM_CONV_POOL=0 forces the legacy PAD-and-sum im2col path
+   (escape hatch for bisection). *)
+convPoolEnabled[] := Environment["THVM_CONV_POOL"] =!= "0"
 
 (* TConv2DIm2Col[input, weights, bias] -- im2col + matmul lowering.
    Same input/weight/bias signature and output shape as TConv2D.
