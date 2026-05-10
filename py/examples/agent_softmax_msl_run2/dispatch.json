@@ -1,0 +1,5 @@
+{
+  "_comment": "Iter 13. Small: 4 SGs per TG (128 threads, 4 rows each, R=32 -> 8 TGs). Large: same as iter 12.",
+  "rule": "(4 * simd) if C <= 256 else 1024",
+  "grid_rule": "(ceildiv(R, 4) * tg) if C <= 256 else (ceildiv(R, max(1, 1024 // (max(simd, (((C + 8 - 1) // 8 + simd - 1) // simd) * simd)))) * tg)"
+}
