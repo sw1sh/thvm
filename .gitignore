@@ -24,6 +24,7 @@ bench/metal-problems/
 external/mlx/
 
 # Python bytecode (py/ ctypes wrapper)
+.venv
 __pycache__/
 *.pyc
 

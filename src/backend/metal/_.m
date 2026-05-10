@@ -1920,6 +1920,25 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
 
+  // THVM_DISPATCH_TRACE=1: one line per kernel dispatch with shape +
+  // wall-time, plus per-op-loop checkpoint timing.  Cheap (env read
+  // once) and gated off by default; the bottleneck-finder during the
+  // BS=512 cold-compile investigation lived here.
+  static int _disp_trace = -1;
+  if (_disp_trace < 0) {
+    char const *e = getenv("THVM_DISPATCH_TRACE");
+    _disp_trace = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  if (_disp_trace) {
+    u32 in0 = ke->n_inputs ? ke->input_numels[0] : 0;
+    fprintf(stderr,
+            "[disp kid=%u n_ops=%u n_inputs=%u out_numel=%llu in0_numel=%u tile=%d kprog=%d]\n",
+            kid, ke->n_ops, ke->n_inputs,
+            (unsigned long long)ke->output_numel, in0,
+            tile_supported, kprog_supported);
+    fflush(stderr);
+  }
+
   // THVM_DUMP_KID_PROGRAM=1 prints the program op-list of every
   // dispatched kernel that contains a REDUCE.  Mirrors the
   // tile_analyze_gemm reject-ops diagnostic but for the dispatched
@@ -2023,6 +2042,9 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
         if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
       }
       cg_profile_record(kid, KDISPATCH_METAL_TILE, cg_now_us() - t0);
+      if (_disp_trace)
+        fprintf(stderr, "[disp-done kid=%u path=tile us=%llu]\n", kid,
+                (unsigned long long)(cg_now_us() - t0));
       return 0;
     }
   }
@@ -2052,6 +2074,9 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
         if (temp_buf_ids[i]) metal_buf_decref_after_batch(temp_buf_ids[i]);
       }
       cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
+      if (_disp_trace)
+        fprintf(stderr, "[disp-done kid=%u path=dag us=%llu]\n", kid,
+                (unsigned long long)(cg_now_us() - t0));
       return 0;
     }
     METAL_ENCODING_DEPTH--;
@@ -2092,7 +2117,29 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     }
   }
   u64 live_inter_bytes = 0;
-  u64 inter_budget     = metal_defer_limit_bytes();   // checkpoint threshold
+  // Per-op-loop checkpoint threshold.  Once the materialised
+  // intermediates exceed this, drain the GPU and recycle the dead
+  // ones back onto the free-list (see below).  Default 64 MiB --
+  // small enough that a conv-im2col program (dozens of O(100 MB)
+  // intermediates) checkpoints every couple of ops, keeping the
+  // count of distinct freshly-backed MTLBuffers tiny: the GPU's
+  // first write to a fresh shared buffer is pathologically slow
+  // (cold pages stall the command processor; a single ~80 MB
+  // conv-im2col PAD intermediate measured tens of seconds of GPU
+  // "execution" at BS=64+).  THVM_METAL_PEROP_BUDGET overrides
+  // (bytes; 0 = use the legacy metal_defer_limit_bytes()).
+  u64 inter_budget;
+  {
+    static int known = 0;
+    static u64 budget = 0;
+    if (!known) {
+      char const *e = getenv("THVM_METAL_PEROP_BUDGET");
+      if (e != NULL && e[0] != '\0') budget = strtoull(e, NULL, 10);
+      known = 1;
+    }
+    inter_budget = budget != 0 ? budget : (64ull * 1024ull * 1024ull);
+    if (inter_budget == 0) inter_budget = metal_defer_limit_bytes();
+  }
   METAL_ENCODING_DEPTH++;
   id<MTLCommandBuffer> cmd = metal_command_buffer();
   int rc = 0;
@@ -2158,17 +2205,40 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       // fallback programs were materialising GBs at high BS).
       if (inter_budget != 0 && live_inter_bytes + dst_bytes > inter_budget
           && live_inter_bytes > 0) {
+        u64 _cp0 = _disp_trace ? cg_now_us() : 0;
         [cmd commit];
         [cmd waitUntilCompleted];
         if (cmd == METAL_BATCH_CMD) METAL_BATCH_CMD = nil;
         for (u32 i = 0; i < step; i++) {
           if (inter_buf_ids[i] != 0 && last_use[i] < step) {
             live_inter_bytes -= METAL_BUFS[inter_buf_ids[i]].nbytes;
-            metal_buf_free(inter_buf_ids[i]);
+            // Recycle the buffer object onto the free-list instead of
+            // releasing the MTLBuffer.  The per-op fallback for a
+            // conv-im2col program emits dozens of equal-size
+            // intermediates one after another; releasing each one
+            // forces a fresh newBufferWithLength: for the next, and
+            // the GPU's first write to a freshly-backed shared buffer
+            // is pathologically slow (the cold pages stall the GPU
+            // command processor -- a single ~80 MB conv-im2col PAD
+            // intermediate measured tens of seconds of GPU "execution"
+            // at BS=64+, scaling super-linearly with batch size).
+            // Pushing to the free-list lets the loop reuse the same
+            // handful of buffer objects (whose pages stay wired), so
+            // only a couple of intermediates per size class ever pay
+            // the cold-page cost.  We've already committed + waited on
+            // `cmd`, so the buffer's GPU work is done -- recycling is
+            // sound.
+            if (!metal_buf_freelist_push_impl(inter_buf_ids[i])) {
+              metal_buf_free(inter_buf_ids[i]);
+            }
             inter_buf_ids[i] = 0;
           }
         }
         cmd = metal_command_buffer();
+        if (_disp_trace)
+          fprintf(stderr, "[disp-cp kid=%u step=%u live=%llu us=%llu]\n",
+                  kid, step, (unsigned long long)live_inter_bytes,
+                  (unsigned long long)(cg_now_us() - _cp0));
       }
       u32 tmp_id = metal_buf_alloc(dst_bytes);
       if (tmp_id == 0) { rc = -1; break; }
@@ -2198,6 +2268,9 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   }
   METAL_ENCODING_DEPTH--;
   if (rc == 0) cg_profile_record(kid, KDISPATCH_METAL_OP, cg_now_us() - t0);
+  if (_disp_trace)
+    fprintf(stderr, "[disp-done kid=%u path=op rc=%d us=%llu]\n", kid, rc,
+            (unsigned long long)(cg_now_us() - t0));
   return rc;
 }
 
