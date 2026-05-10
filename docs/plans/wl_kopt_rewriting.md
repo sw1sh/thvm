@@ -1,24 +1,25 @@
-# Plan: WL scaffold for KOpt rewriting -- native Rule design over symbolic UOp DAG
+# Plan: WL scaffold for KOpt rewriting -- native Rule design + .wlt cross-validation
 
 Status: design proposal, no code written yet.
 
 ## What this is
 
 A WL (Wolfram Language) layer that re-expresses thvm's KOpt vocabulary
-as **symbolic rewrite rules** over a symbolic UOp DAG, then
-cross-validates against the C implementation. Not a foreign-function
-wrapper; a parallel rule engine using WL's native `Rule` /
-`RuleDelayed` / `ReplaceAll` machinery, which is exactly the
+as **symbolic rewrite rules** over the **existing `TTermExpr` form**,
+then cross-validates against the C implementation through `.wlt`
+tests using the existing `VerificationTest` harness. Not a foreign-
+function wrapper -- a parallel rule engine using WL's native
+`Rule` / `RuleDelayed` / `ReplaceAll`, which is exactly the
 abstraction `apply_opt_dag.c` reimplements in 370 LOC of manual
 walker.
 
 The win: WL is **rewrite-native**. The 11 KOpts (TC, GLOBAL, UPCAST,
 UNROLL, LOCAL, GROUP, GROUPTOP, SWAP, FAST_MATH, SIMD_REDUCE,
-VEC_LOAD) are each one-line `RuleDelayed` patterns over UOp head
-symbols. The walker is `ReplaceAll` (`/.`). The composition is
-function composition. The cross-check is structural equality between
-WL-output and C-output (the latter inspected via `term_*` accessors
-through the existing `wl/THVMLink/` LibraryLink bridge).
+VEC_LOAD) are each one-line `RuleDelayed` patterns over the same
+`TTermExpr` heads the heap walker already emits. The walker is
+`ReplaceAll` (`/.`). The composition is function composition. The
+cross-check is structural equality (`===`) between WL-output and
+C-output, both produced by the same `TTermExpr` snapshot.
 
 ## Part 1 -- how C-side KOpt rewriting works today
 
@@ -52,355 +53,407 @@ template; `UOP_RANGE.axis_type == KAX_GLOBAL` drops the sgi-guard;
 ### The DAG-side mutator (`src/uop/apply_opt_dag.c`)
 
 One helper per KOpt class, dispatched by `uop_dag_apply_kopt(root,
-opt)`. Six categories:
-
-| Category | KOpts | Mutation shape | LOC |
-|---|---|---|---|
-| **Wrap-target** | TC, FAST_MATH, SIMD_REDUCE, VEC_LOAD | Find target node(s), wrap with `UOP_OPT(_, kind, factor)` | ~50 each |
-| **Axis-type swap** | GLOBAL | Find RANGE(axis, LOOP, ext), rebuild as RANGE(axis, GLOBAL, ext); rewriter substitutes refs | ~20 |
-| **Axis split** | UPCAST, UNROLL, LOCAL, GROUP, GROUPTOP | Replace RANGE(axis, LOOP, N) with two RANGEs (outer LOOP N/k, inner kind k); rewrite all addr terms `r` -> `IADD(IMUL(outer, k), inner)` | ~120 |
-| **Axis swap** | SWAP | Bidirectional substitution of two axes; manual single-pass walker (uop_graph_rewrite would loop) | ~80 |
-| **No-op** | NONE, NOLOCALS | Return root unchanged | 0 |
-| **Pending** | PADTO | Not yet wired in DAG path | -- |
+opt)`. Six categories (full breakdown in
+[mlx_features_to_port.md](mlx_features_to_port.md)).
 
 All 11 active KOpts use a **manual Term-keyed memo walker** because
 `uop_graph_rewrite` recurses into rule outputs (would re-fire on its
-own outputs and loop).
+own outputs and infinite-loop).
 
-### The propose -> apply -> render -> score loop
+### The propose -> apply -> render -> bench loop
 
 ```
 propose.c::kernel_opts_propose(ke, out_kopts, cap) -> n
-  - Reads ke->cached_lift.store_root (DAG-aware classifiers)
-  - Returns small list of KOpt(op, axis, arg) candidates per shape
-
 apply_opt.c::kernel_apply_opt(ke, opt) -> 1 on success
-  - DAG path: ke->cached_lift.store_root = uop_dag_apply_kopt(root, opt)
-  - Legacy path: ke->schedule->applied_opts[] mutation
-
 render_uop.c::cg_render_uop_kernel_root(root, name, fp)
-  - Walks the post-mutation DAG, emits MSL string
-  - Pattern-matches OPT wrappers + axis_type to fire specialized templates
-
-bench (autotune.c BEAM):
-  - For each candidate, apply -> compile metallib -> dispatch -> time
-  - Pick winner, cache key = (shape, opt sequence)
+autotune.c BEAM: pick winner by wall-time, cache (shape, opt-seq)
 ```
 
-### Properties the WL scaffold preserves
+## Part 2 -- the existing TTermExpr surface (reuse, don't reinvent)
 
-- **Hash-cons**: thvm interns Terms by `(opcode, args)`; identical
-  rewrites yield identical Term IDs. WL's pattern-rewrite is
-  structurally idempotent on identical input.
-- **Composition associativity**: applying `[KOptTC, KOptGlobal]`
-  produces the same DAG as `[KOptGlobal, KOptTC]` for non-overlapping
-  rewrite targets. WL `Composition` enforces this.
-- **Stop-on-no-change**: when a KOpt's pattern doesn't match, the DAG
-  is returned unchanged (Term identity). WL `ReplaceAll` returns the
-  same expression on no-match.
-
-## Part 2 -- why WL is the right host for the symbolic spec
-
-WL's expression rewriter is the canonical implementation of exactly
-the operation `apply_opt_dag.c` performs. Concretely:
+[wl/THVMLink/Kernel/THVMLink.wl:710](../../wl/THVMLink/Kernel/THVMLink.wl)
+defines:
 
 ```wolfram
-(* C: apply_opt_dag_global_rewrite scans every term, rebuilds parents *)
-(* WL: one rule, applied via /. (ReplaceAll) walks the expression tree *)
-KOptGlobal[axis_] := expr |->
-  expr /. URange[axis, KAX$LOOP, ext_] :> URange[axis, KAX$GLOBAL, ext]
+TTermExpr[t_TTerm]   (* term -> nested string-headed expression *)
+TTermTree[t_TTerm]   (* same, wrapped in ExpressionTree for visual *)
 ```
 
-WL handles the parent-reconstruction + memoization automatically.
-Hash-consing by structural equality is built-in. The 80 LOC of manual
-SWAP walker in `apply_opt_dag.c` becomes:
+`TTermExpr` walks the heap from a term and emits a structural snapshot
+with **string heads** (no Term IDs in the output). Heads come from
+`$tagNames` for the outer tag (e.g. `"UOP"`, `"NUM"`, `"LAM"`) and
+from `$uopNames` (THVMLink.wl:258-268) for the UOp opcode label.
+
+For a UOp node the shape is:
+```wolfram
+"UOP"[opname_String, child1, child2, ...]
+```
+where children come from `uopCellCount[opcode]` heap slots. Atoms are
+`"NUM"[v]`, `"VAR"[loc]`, `"ERA"`, etc.
+
+### What's covered today (`$uopNames`)
+
+Opcodes 0-24: `MATERIALIZE`, `KERNEL`, `CONST`, `RESHAPE`, `PERMUTE`,
+`EXPAND`, `PAD`, `SHRINK`, `FLIP`, `ADD`, `MUL`, `NEG`, `RECIP`,
+`EXP2`, `LOG2`, `SQRT`, `CMPLT`, `REDUCE`, `GRAD`, `FWD`, `CMPEQ`,
+`LOAD`, `ASSIGN`, `CAST`, `BITCAST`.
+
+### What needs adding -- $uopNames + uopCellCount extension
+
+Opcodes 25-39 (post-Phase-E additions to thvm.h) aren't in
+`$uopNames` yet -- they currently fall back to `"UOP?"<>ToString[ext]`
+which makes patterns brittle. **Stage 0 of the rollout**: extend the
+two tables in `THVMLink.wl` and `Uop.wl`:
 
 ```wolfram
-KOptSwap[a_, b_] := expr |->
-  expr /. {URange[a, t_, e_] :> URange[b, t, e],
-           URange[b, t_, e_] :> URange[a, t, e]}
+(* THVMLink.wl:258 -- $uopNames *)
+$uopNames = <|
+    ...existing 0..24...,
+    25 -> "RANGE",      26 -> "INDEX_E",
+    27 -> "IADD",       28 -> "ISUB",       29 -> "IMUL",
+    30 -> "IDIV",       31 -> "IMOD",       32 -> "ILT",
+    33 -> "IAND",       34 -> "IWHERE",     35 -> "INVALID",
+    36 -> "BUFFER",     37 -> "STORE",      38 -> "AFTER",
+    39 -> "OPT"
+|>;
+
+(* Uop.wl -- uopCellCount table (heap cells, not just compute arity) *)
+uopCellCount[$UopRange]    = 3;   (* axis_id, axis_type, extent *)
+uopCellCount[$UopIndexE]   = 2;   (* buffer, addr *)
+uopCellCount[$UopIAdd | $UopISub | $UopIMul | $UopIDiv |
+             $UopIMod | $UopILt | $UopIAnd]                = 2;
+uopCellCount[$UopIWhere]   = 3;   (* cond, then, else *)
+uopCellCount[$UopInvalid]  = 0;
+uopCellCount[$UopBuffer]   = ...; (* variable: ndim+3 cells -- handle in tTreeWalkWith special-case *)
+uopCellCount[$UopStore]    = 3;   (* buf, addr, value *)
+uopCellCount[$UopAfter]    = 2;   (* node, after_node *)
+uopCellCount[$UopOpt]      = 3;   (* target, kind, factor *)
 ```
 
-WL is **also** the right host for the *spec*: a rule reads as the
-mathematical statement of the rewrite ("any RANGE on axis k with type
-LOOP becomes GLOBAL"). The C implementation is the same statement
-encoded in C control flow. Diverging the two is a real risk; having
-WL as the source of truth for what a KOpt *should* do gives us a
-spec-test against C drift.
-
-## Part 3 -- the WL design
-
-### 3.1 Symbolic UOp DAG representation
-
-One head per UOp opcode. Lowercase prefix `U` to namespace, mirroring
-existing `TUOp*` constructors in [wl/THVMLink/Kernel/Optim.wl](../../wl/THVMLink/Kernel/Optim.wl)
-but symbolic (no Term IDs):
+After the extension, `TTermExpr` of a matmul-with-TC root looks like:
 
 ```wolfram
-(* Buffers and ranges are leaves *)
-UBuffer[scope_, dtype_, dims_List, instance_]
-URange[axis_, axisType_, extent_]
-UICONST[value_]
-UFCONST[value_]
-UInvalid[]
-
-(* Index-layer arithmetic *)
-UIAdd[a_, b_]
-UIMul[a_, b_]
-UIDiv[a_, b_]
-UIMod[a_, b_]
-UILT[a_, b_]
-UIAnd[a_, b_]
-UIWhere[cond_, t_, e_]
-
-(* INDEX_E pairs a buffer with an address tree *)
-UIndexE[buffer_, addr_]
-
-(* FP arithmetic *)
-UAdd[a_, b_]; UMul[a_, b_]; UNeg[x_]; URecip[x_]
-UExp2[x_]; ULog2[x_]; USqrt[x_]
-UCmpLt[a_, b_]; UCmpEq[a_, b_]
-UCast[src_, dtype_]; UBitCast[src_, dtype_]
-
-(* Reduces and stores *)
-UReduce[kind_, axis_, src_]
-UStore[buf_, addr_, value_]
-UAfter[node_, after_]
-ULoad[src_]
-
-(* OPT annotation -- the pivot for KOpt wrapping *)
-UOpt[target_, kind_, factor_]
-
-(* Constants for axis_type, OPT kind, dtype *)
-KAX$LOOP = 0;  KAX$REDUCE = 1;  KAX$UPCAST = 2;  KAX$UNROLL = 3
-KAX$LOCAL = 4; KAX$GLOBAL = 5;  KAX$GROUP_REDUCE = 6
-OPT$UNROLL = 0; OPT$UPCAST = 1; OPT$TC = 2; OPT$LOCAL = 3
-OPT$GROUP_REDUCE = 4; OPT$CONV = 5
-OPT$FAST_MATH = 6; OPT$SIMD_REDUCE = 7; OPT$VEC_LOAD = 8
-DT$INT32 = 5; DT$FP32 = 13
-REDUCE$SUM = 0; REDUCE$MAX = 1
+"UOP"["STORE",
+  "UOP"["BUFFER", "NUM"[0], "NUM"[13], "NUM"[2], "NUM"[16], "NUM"[16]],
+  "UOP"["IADD",
+    "UOP"["IMUL",
+      "UOP"["RANGE", "NUM"[0], "NUM"[0], "NUM"[16]],
+      "UOP"["CONST", "NUM"[16]]],
+    "UOP"["RANGE", "NUM"[1], "NUM"[0], "NUM"[16]]],
+  "UOP"["OPT",
+    "UOP"["REDUCE",
+      "UOP"["MUL", <a_load>, <b_load>],
+      "NUM"[0], "NUM"[2]],
+    "NUM"[2], "NUM"[8]]]
 ```
 
-### 3.2 KOpt rules (one rule each)
+That's the full DAG visible to WL pattern matching, structurally
+comparable via `===`, no parallel symbol vocabulary needed.
+
+## Part 3 -- KOpt rules over TTermExpr
+
+All rules operate on the existing `"UOP"[...]` form. Constants for
+opcode/axis/dtype kinds get short global names mirroring the C
+defines:
 
 ```wolfram
-(* === Wrap-target rules ===========================================
- * Each takes a target shape and wraps with UOpt[_, kind, factor].
- * Idempotent: re-applying the same KOpt at the same factor returns
- * the same expression (structural equality). *)
+KAX$LOOP = 0;  KAX$REDUCE = 1;  KAX$UPCAST = 2;  KAX$UNROLL = 3;
+KAX$LOCAL = 4; KAX$GLOBAL = 5;  KAX$GROUP_REDUCE = 6;
 
-(* TC: wrap inner REDUCE inside STORE.value with OPT(_, TC, factor).
- * Replaces existing TC factor if already wrapped. *)
+OPT$UNROLL = 0; OPT$UPCAST = 1; OPT$TC = 2; OPT$LOCAL = 3;
+OPT$GROUP_REDUCE = 4; OPT$CONV = 5;
+OPT$FAST_MATH = 6; OPT$SIMD_REDUCE = 7; OPT$VEC_LOAD = 8;
+
+REDUCE$SUM = 0; REDUCE$MAX = 1;
+DT$INT32 = 5; DT$FP32 = 13;
+```
+
+(All wired from the C-side via `LibraryFunctionLoad` on existing
+`thvm_wl_*` getters; mirror the constants resolution in
+`py/thvm/thvm.py`.)
+
+### Wrap-target rules (TC, FAST_MATH, SIMD_REDUCE, VEC_LOAD)
+
+```wolfram
+(* TC: wrap STORE.value's REDUCE with OPT(_, TC, factor).
+   Replaces existing TC factor if already wrapped (idempotent). *)
 KOptTC[factor_Integer] := expr |->
   Replace[expr, {
-    UStore[b_, a_, UReduce[k_, ax_, body_]] :>
-      UStore[b, a, UOpt[UReduce[k, ax, body], OPT$TC, factor]],
-    UStore[b_, a_, UOpt[UReduce[k_, ax_, body_], OPT$TC, _]] :>
-      UStore[b, a, UOpt[UReduce[k, ax, body], OPT$TC, factor]]}, {0}]
+    (* bare REDUCE -- wrap *)
+    "UOP"["STORE", b_, a_, r:"UOP"["REDUCE", __]] :>
+      "UOP"["STORE", b, a,
+        "UOP"["OPT", r, "NUM"[OPT$TC], "NUM"[factor]]],
+    (* already wrapped -- replace factor *)
+    "UOP"["STORE", b_, a_,
+      "UOP"["OPT", r:"UOP"["REDUCE", __], "NUM"[OPT$TC], _]] :>
+      "UOP"["STORE", b, a,
+        "UOP"["OPT", r, "NUM"[OPT$TC], "NUM"[factor]]]
+  }, {0}]
 
-(* FAST_MATH: wrap every UExp2/ULog2/USqrt/UNeg/URecip with OPT(_, FAST_MATH, 0).
- * Stop-leaf for already-wrapped to avoid OPT-of-OPT. *)
+(* FAST_MATH: wrap every unary op with OPT(_, FAST_MATH, 0).
+   Stop-leaf for already-wrapped to avoid OPT-of-OPT.  The //. operator
+   does fixed-point rewrite which together with the stop-leaf is
+   idempotent. *)
 KOptFastMath := expr |->
   expr //. {
-    UOpt[u_, OPT$FAST_MATH, _] :> UOpt[u, OPT$FAST_MATH, 0],
-    op_[args__] /; MatchQ[Head[op_], UExp2|ULog2|USqrt|UNeg|URecip] &&
-                   FreeQ[Head[op[args]], UOpt] :>
-      UOpt[op[args], OPT$FAST_MATH, 0]}
+    "UOP"["OPT", inner_, "NUM"[OPT$FAST_MATH], _] :>
+      "UOP"["OPT", inner, "NUM"[OPT$FAST_MATH], "NUM"[0]],
+    u:"UOP"[name_String /; MemberQ[
+        {"EXP2", "LOG2", "SQRT", "NEG", "RECIP"}, name], __] :>
+      "UOP"["OPT", u, "NUM"[OPT$FAST_MATH], "NUM"[0]]}
 
-(* SIMD_REDUCE: wrap every UReduce with OPT(_, SIMD_REDUCE, 0). *)
+(* SIMD_REDUCE: wrap every REDUCE with OPT(_, SIMD_REDUCE, 0). *)
 KOptSimdReduce := expr |->
   expr //. {
-    UOpt[u_UReduce, OPT$SIMD_REDUCE, _] :> UOpt[u, OPT$SIMD_REDUCE, 0],
-    r_UReduce /; FreeQ[Hold[r], UOpt] :>
-      UOpt[r, OPT$SIMD_REDUCE, 0]}
+    "UOP"["OPT", r:"UOP"["REDUCE", __], "NUM"[OPT$SIMD_REDUCE], _] :>
+      "UOP"["OPT", r, "NUM"[OPT$SIMD_REDUCE], "NUM"[0]],
+    r:"UOP"["REDUCE", __] :>
+      "UOP"["OPT", r, "NUM"[OPT$SIMD_REDUCE], "NUM"[0]]}
 
-(* VEC_LOAD: wrap every UIndexE whose addr is contiguous-shaped
- * (UIAdd[UIMul[outer, stride], inner_URange]) with OPT(_, VEC_LOAD, width). *)
+(* VEC_LOAD: wrap every INDEX_E with contiguous-shaped addr. *)
 KOptVecLoad[width_Integer] := expr |->
-  expr //. UIndexE[buf_, addr:UIAdd[UIMul[_, _], _URange]] :>
-    UOpt[UIndexE[buf, addr], OPT$VEC_LOAD, width]
-
-(* === Axis-type swap ==============================================
- * GLOBAL: replace RANGE(axis, LOOP, ext) with RANGE(axis, GLOBAL, ext).
- * Hash-cons makes the new range a fresh value -- WL ReplaceAll walks
- * the whole expression and rebuilds parents whose children changed. *)
-KOptGlobal[axis_Integer] := expr |->
-  expr /. URange[axis, KAX$LOOP, ext_] :> URange[axis, KAX$GLOBAL, ext]
-
-(* === Axis split (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) ============
- * Split RANGE(axis, LOOP, N) into outer + inner (kind=innerKax),
- * substituting every reference to the original RANGE with
- * IADD(IMUL(outer, k), inner). *)
-KOptSplit[innerKax_, axis_Integer, k_Integer] := expr |-> Module[
-  {old, outer, inner, sub},
-  old   = URange[axis, KAX$LOOP, _];
-  outer = URange[axis, KAX$LOOP, _ /; True];          (* extent N/k via match *)
-  inner = URange[axis + 1, innerKax, k];
-  sub   = UIAdd[UIMul[outer, UICONST[k]], inner];
-  expr /. URange[axis, KAX$LOOP, n_] :>
-    UIAdd[UIMul[URange[axis, KAX$LOOP, Quotient[n, k]], UICONST[k]],
-          URange[axis + 1, innerKax, k]]]
-
-KOptUpcast[axis_, k_]   := KOptSplit[KAX$UPCAST,        axis, k]
-KOptUnroll[axis_, k_]   := KOptSplit[KAX$UNROLL,        axis, k]
-KOptLocal[axis_, k_]    := KOptSplit[KAX$LOCAL,         axis, k]
-KOptGroup[axis_, k_]    := KOptSplit[KAX$GROUP_REDUCE,  axis, k]
-KOptGrouptop[axis_, k_] := KOptSplit[KAX$GROUP_REDUCE,  axis, k]   (* differs only in factor placement *)
-
-(* === SWAP: bidirectional axis swap ============================== *)
-KOptSwap[a_Integer, b_Integer] := expr |->
-  expr /. {URange[a, t_, e_] :> URange[\[FormalA], t, e],
-           URange[b, t_, e_] :> URange[a, t, e],
-           URange[\[FormalA], t_, e_] :> URange[b, t, e]}
-  (* Three-step via a fresh symbol \[FormalA] avoids the bidirectional
-   * loop the C apply_opt_dag SWAP rewriter sidesteps via a single-pass
-   * walker; in WL we just stage through a placeholder. *)
+  expr //. {
+    "UOP"["OPT", e:"UOP"["INDEX_E", __], "NUM"[OPT$VEC_LOAD], _] :>
+      "UOP"["OPT", e, "NUM"[OPT$VEC_LOAD], "NUM"[width]],
+    e:"UOP"["INDEX_E", _,
+      "UOP"["IADD", "UOP"["IMUL", _, _], "UOP"["RANGE", __]]] :>
+      "UOP"["OPT", e, "NUM"[OPT$VEC_LOAD], "NUM"[width]]}
 ```
 
-### 3.3 Composition
+### Axis-type swap (GLOBAL)
 
-KOpts compose via WL function composition. Order matters when KOpts
-target overlapping subgraphs (e.g. SIMD_REDUCE then TC both wrap a
-REDUCE).
+```wolfram
+KOptGlobal[axis_Integer] := expr |->
+  expr /. "UOP"["RANGE", "NUM"[axis], "NUM"[KAX$LOOP], extN_] :>
+          "UOP"["RANGE", "NUM"[axis], "NUM"[KAX$GLOBAL], extN]
+```
+
+### Axis split (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP)
+
+```wolfram
+KOptSplit[innerKax_, axis_Integer, k_Integer] := expr |->
+  expr /. "UOP"["RANGE", "NUM"[axis], "NUM"[KAX$LOOP], "NUM"[n_]] :>
+    "UOP"["IADD",
+      "UOP"["IMUL",
+        "UOP"["RANGE", "NUM"[axis],     "NUM"[KAX$LOOP],
+              "NUM"[Quotient[n, k]]],
+        "UOP"["CONST", "NUM"[k]]],
+      "UOP"["RANGE",  "NUM"[axis + 1], "NUM"[innerKax],
+            "NUM"[k]]]
+
+KOptUpcast  [a_, k_] := KOptSplit[KAX$UPCAST,        a, k]
+KOptUnroll  [a_, k_] := KOptSplit[KAX$UNROLL,        a, k]
+KOptLocal   [a_, k_] := KOptSplit[KAX$LOCAL,         a, k]
+KOptGroup   [a_, k_] := KOptSplit[KAX$GROUP_REDUCE,  a, k]
+KOptGrouptop[a_, k_] := KOptSplit[KAX$GROUP_REDUCE,  a, k]
+```
+
+### Axis swap (SWAP)
+
+Three-step via a fresh placeholder symbol -- `\[FormalA]` --
+sidesteps the bidirectional rewrite loop the C `apply_opt_dag` SWAP
+walker handles via single-pass walking:
+
+```wolfram
+KOptSwap[a_Integer, b_Integer] := expr |->
+  expr /. {"UOP"["RANGE", "NUM"[a], t_, e_] :>
+             "UOP"["RANGE", "NUM"[\[FormalA]], t, e],
+           "UOP"["RANGE", "NUM"[b], t_, e_] :>
+             "UOP"["RANGE", "NUM"[a], t, e],
+           "UOP"["RANGE", "NUM"[\[FormalA]], t_, e_] :>
+             "UOP"["RANGE", "NUM"[b], t, e]}
+```
+
+### Composition
 
 ```wolfram
 ApplyKOptSeq[seq_List] := RightComposition @@ seq
-(* ApplyKOptSeq[{KOptTC[8], KOptGlobal[0], KOptGlobal[1]}][dag] *)
+(* ApplyKOptSeq[{KOptTC[8], KOptGlobal[0], KOptGlobal[1]}][expr] *)
 ```
 
-### 3.4 The C bridge for cross-validation
+## Part 4 -- the C bridge
 
-Two existing infrastructure pieces:
-- [wl/THVMLink/](../../wl/THVMLink/) -- LibraryLink paclet that already
-  wraps `term_*` accessors and `TUOp*` constructors. Returns Term IDs
-  (u64 atoms in WL).
-- [py/csource/thvm_py.c](../../py/csource/thvm_py.c) -- ctypes wrapper
-  exposing `kernel_apply_opt`, `uop_dag_apply_kopt`, render. Same
-  surface from WL via `LibraryFunctionLoad` if we want to skip Python.
+Two FFI surfaces already exist:
+- [wl/THVMLink/](../../wl/THVMLink/) -- LibraryLink paclet wrapping
+  thvm. `TTermExpr[t]` works today.
+- [py/csource/thvm_py.c](../../py/csource/thvm_py.c) -- ctypes
+  wrapper exposing `uop_dag_apply_kopt`. Same C call we want from WL.
 
-Bridge functions (added to a new `wl/THVMLink/Kernel/Rewrite.wl`):
+What this proposal adds: **one new LibraryLink entry point** (mirror
+of `py_uop_dag_apply_kopt`):
+
+```c
+/* wl/THVMLink/CSource/thvmlink.c -- new entrypoint */
+DLLEXPORT int thvm_wl_uop_dag_apply_kopt(WolframLibraryData libData,
+                                         mint argc, MArgument *args,
+                                         MArgument result) {
+    Term root = MArgument_getInteger(args[0]);
+    u8   op   = (u8)MArgument_getInteger(args[1]);
+    u8   axis = (u8)MArgument_getInteger(args[2]);
+    u32  arg  = (u32)MArgument_getInteger(args[3]);
+    KOpt opt = { op, axis, arg };
+    Term out = uop_dag_apply_kopt(root, opt);
+    MArgument_setInteger(result, (mint)out);
+    return LIBRARY_NO_ERROR;
+}
+```
+
+WL-side wrapper (in a new `wl/THVMLink/Kernel/Rewrite.wl`):
 
 ```wolfram
-(* Build C-side DAG mirroring a symbolic WL expression. Returns a
- * Term ID. Hash-consed automatically by thvm. *)
-TUOpFromSymbolic[expr_] := expr /. {
-  UBuffer[s_, dt_, dims_, inst_]   :> TUOpBuffer[s, dt, dims, inst],
-  URange[ax_, t_, e_]              :> TUOpRange[ax, t, e],
-  UICONST[v_]                      :> TUOpIConst[v],
-  UFCONST[v_]                      :> TUOpFConst[v],
-  UIAdd[a_, b_]                    :> TUOpIAdd[TUOpFromSymbolic[a], TUOpFromSymbolic[b]],
-  ...
-  UReduce[k_, ax_, src_]           :> TUOpReduce[k, ax, TUOpFromSymbolic[src]],
-  UOpt[t_, k_, f_]                 :> TUOpOpt[TUOpFromSymbolic[t], k, f],
-  UStore[b_, a_, v_]               :> TUOpStore[TUOpFromSymbolic[b],
-                                                TUOpFromSymbolic[a],
-                                                TUOpFromSymbolic[v]]}
+$applyKOptFn := $applyKOptFn = load["thvm_wl_uop_dag_apply_kopt",
+                                    {Integer, Integer, Integer, Integer},
+                                    Integer]
 
-(* Read a C-side DAG back into symbolic form. Walk via term_tag/ext/val
- * and recursive heap_read. *)
-TUOpToSymbolic[term_Integer] := <recursive walk>
-
-(* Apply a KOpt sequence on the C side via uop_dag_apply_kopt. *)
-TUOpApplyKOptSeq[term_Integer, seq_List] := Fold[
-  TUOpDagApplyKOpt[#1, #2[[1]], #2[[2]], #2[[3]]] &,
-  term, KOptToTriple /@ seq]
+(* C-side apply: returns a fresh TTerm wrapping the new root *)
+TUOpDagApplyKOpt[t_TTerm, op_Integer, axis_Integer, arg_Integer] :=
+  TTerm[$applyKOptFn[ttermRaw[t], op, axis, arg]]
 ```
 
-### 3.5 Cross-validation harness
+That's the entire bridge -- ~30 LOC including tests. The WL-side
+rules don't touch C; the C-side function is invoked separately for
+cross-validation.
 
-Two equivalent rewrites should produce structurally-equal DAGs:
+## Part 5 -- .wlt cross-validation tests (the deliverable)
+
+`wl/THVMLink/Tests/rewrite.wlt` -- the heart of the spec.
+
+For each KOpt + each test fixture, run `VerificationTest` asserting
+**WL rule output `===` C apply output**, both rendered through
+`TTermExpr`.
 
 ```wolfram
-CrossValidateKOpt[dag_, seq_List] := Module[{wlOut, cTerm, cBack},
-  wlOut = ApplyKOptSeq[seq][dag];                        (* WL rule rewrite *)
-  cTerm = TUOpApplyKOptSeq[TUOpFromSymbolic[dag], seq];  (* C rewrite *)
-  cBack = TUOpToSymbolic[cTerm];                          (* read back *)
-  If[wlOut === cBack,
-    <|"ok" -> True|>,
-    <|"ok" -> False, "wl" -> wlOut, "c" -> cBack,
-      "diff" -> SymbolicDiff[wlOut, cBack]|>]]
+(* === KOpt cross-validation infrastructure ============================ *)
+
+(* Build a canonical 16x16 matmul DAG via existing TUOp* constructors;
+   returns TTerm[root]. *)
+buildMatmul16[] := Module[{a, b, c, m, n, k, kc, addrA, addrB, addrC,
+                           load_a, load_b, mul, red, store},
+    a = TUOpBufferInst[$ScopeGlobal, $DtFp32, {16, 16}, 1];
+    b = TUOpBufferInst[$ScopeGlobal, $DtFp32, {16, 16}, 2];
+    c = TUOpBufferInst[$ScopeGlobal, $DtFp32, {16, 16}, 0];
+    m = TUOpRange[0, $KaxLoop,   16];
+    n = TUOpRange[1, $KaxLoop,   16];
+    k = TUOpRange[2, $KaxReduce, 16];
+    kc = TUOpConst[$DtInt32, 16];
+    addrA = TUOpIAdd[TUOpIMul[m, kc], k];
+    addrB = TUOpIAdd[TUOpIMul[k, kc], n];
+    addrC = TUOpIAdd[TUOpIMul[m, kc], n];
+    load_a = TUOpIndexE[a, addrA];
+    load_b = TUOpIndexE[b, addrB];
+    mul = TUOpMul[load_a, load_b];
+    red = TUOpReduce[$ReduceSum, 2, mul];
+    TUOpStore[c, addrC, red]
+]
+
+(* Verify: applying KOpt via WL rules produces the same TTermExpr
+   as applying it via C. *)
+xvalidKOpt[root_TTerm, kopName_String, op_Integer,
+           axis_Integer, arg_Integer, wlRule_] := With[{
+    cAfter = TTermExpr[TUOpDagApplyKOpt[root, op, axis, arg]],
+    wlAfter = wlRule[TTermExpr[root]]
+}, wlAfter === cAfter]
+
+(* === per-KOpt VerificationTests ===================================== *)
+
+VerificationTest[
+    xvalidKOpt[buildMatmul16[], "TC", $KopTC, 0, 8, KOptTC[8]],
+    True,
+    TestID -> "xvalid-tc-matmul-factor8"]
+
+VerificationTest[
+    xvalidKOpt[buildMatmul16[], "TC", $KopTC, 0, 16, KOptTC[16]],
+    True,
+    TestID -> "xvalid-tc-matmul-factor16"]
+
+VerificationTest[
+    xvalidKOpt[buildMatmul16[], "GLOBAL", $KopGlobal, 0, 0,
+               KOptGlobal[0]],
+    True,
+    TestID -> "xvalid-global-axis-m"]
+
+VerificationTest[
+    xvalidKOpt[buildMatmul16[], "GLOBAL", $KopGlobal, 1, 0,
+               KOptGlobal[1]],
+    True,
+    TestID -> "xvalid-global-axis-n"]
+
+VerificationTest[
+    xvalidKOpt[buildMatmul16[], "FAST_MATH", $KopFastMath, 0, 0,
+               KOptFastMath],
+    True,
+    TestID -> "xvalid-fast-math-no-unary"]   (* matmul has no exp/log *)
+
+VerificationTest[
+    xvalidKOpt[buildSoftmax[16], "FAST_MATH", $KopFastMath, 0, 0,
+               KOptFastMath],
+    True,
+    TestID -> "xvalid-fast-math-softmax"]    (* exp/log/recip get wrapped *)
+
+VerificationTest[
+    xvalidKOpt[buildSoftmax[16], "SIMD_REDUCE", $KopSimdReduce, 0, 0,
+               KOptSimdReduce],
+    True,
+    TestID -> "xvalid-simd-reduce-softmax"]
+
+(* ... continue for each (KOpt, fixture) pair *)
+
+(* === composition tests =============================================== *)
+
+VerificationTest[
+    With[{root = buildMatmul16[]},
+      TTermExpr[ApplyKOptC[root, {{$KopTC, 0, 8},
+                                  {$KopGlobal, 0, 0},
+                                  {$KopGlobal, 1, 0}}]]
+        === ApplyKOptSeq[{KOptTC[8], KOptGlobal[0], KOptGlobal[1]}][
+                TTermExpr[root]]],
+    True,
+    TestID -> "xvalid-compose-tc-global-global"]
 ```
 
-When this returns `ok -> True` for a representative test set
-(matmul x{TC, GLOBAL, UPCAST, ...}, softmax x{SIMD_REDUCE, FAST_MATH,
-GLOBAL, ...}, conv2d x{...}), the WL rule set is a verified spec for
-the C implementation. When it returns `ok -> False`, either WL or C
-has a bug -- the diff localizes the divergence.
+When all `xvalid-*` tests pass for the corpus (matmul, softmax,
+layernorm, vector_sum, conv2d shapes x each KOpt), **the WL rule set
+is a verified executable spec for the C implementation**. Any future
+C drift (e.g. accidentally double-wrapping in apply_opt_dag) fails
+the corresponding xvalid test.
 
-Optional escalation: also compare rendered MSL strings. The WL side
-needs a MSL renderer (a much bigger effort -- see Stage 4 below).
+## Part 6 -- staged rollout
 
-## Part 4 -- staged rollout
+| Stage | What | LOC | Days |
+|---|---|---|---|
+| 0 | Extend `$uopNames` (THVMLink.wl) + `uopCellCount` (Uop.wl) for opcodes 25-39 | ~30 | 0.25 |
+| 1 | Bridge: `thvm_wl_uop_dag_apply_kopt` LibraryLink + `TUOpDagApplyKOpt` WL wrapper | ~50 | 0.5 |
+| 2 | `wl/THVMLink/Kernel/Rewrite.wl` -- 11 KOpt rules + helpers | ~150 | 1 |
+| 3 | `wl/THVMLink/Tests/rewrite.wlt` -- xvalid corpus for all 11 KOpts x 5 fixture shapes (~55 tests) + composition tests | ~250 | 1 |
+| 4 (optional) | WL MSL renderer for end-to-end check | ~800 | 4 |
 
-### Stage 1 -- the bridge (~1 day)
+**Stage 0-3 total: ~480 LOC, 2.75 days**, lands a verified spec
+testable via `bash wl/THVMLink/Tests/run.sh rewrite.wlt`.
 
-- `wl/THVMLink/Kernel/Rewrite.wl` -- new module
-- `TUOpFromSymbolic` (8 head families x 1 line each = ~30 LOC)
-- `TUOpToSymbolic` (recursive heap walk via existing `TUOp*` getters
-  in `wl/THVMLink/CSource/thvmlink.c` -- already exposed for grad)
-- `TUOpDagApplyKOpt` -- LibraryLink wrapper around
-  `uop_dag_apply_kopt` (mirror of the Python `py_uop_dag_apply_kopt`
-  binding in `py/csource/thvm_py.c`; <30 LOC)
-
-### Stage 2 -- the rules (~1 day)
-
-- `wl/THVMLink/Kernel/Rewrite.wl` -- `KOpt*` rule definitions
-  (~80 LOC for all 11)
-- `wl/THVMLink/Tests/Rewrite_test.wlt` -- per-rule unit tests
-  (build a tiny DAG, apply KOpt, assert structural equality with
-  expected output)
-
-Each rule is a one-liner. The WL syntax IS the rule -- no walker, no
-memo, no manual recursion. This is the readability win.
-
-### Stage 3 -- cross-validation (~0.5 day)
-
-- `CrossValidateKOpt` harness in Rewrite.wl
-- `wl/THVMLink/Tests/Rewrite_xvalid.wlt` -- runs WL vs C on a corpus
-  of (DAG, KOpt-sequence) pairs. Corpus drawn from the existing
-  `tests/test_apply_opt_dag.c` test fixtures (matmul + softmax +
-  reduce shapes).
-
-When this passes for the full corpus, **the WL rules are an
-executable spec for the C implementation**. Any future C change that
-diverges from the WL spec fails the cross-validation test.
-
-### Stage 4 (optional, larger) -- WL renderer for end-to-end check
-
-Port `cg_render_uop_kernel_root` (~600 LOC of C) into WL. A direct
-port is large but tractable, and the WL version becomes the
-human-readable spec for what each opcode emits.
-
-End-to-end test: WL renders DAG_after_kopt to MSL string; C renders
-the same; assert byte-for-byte (or AST-for-AST modulo whitespace)
-equal. Catches renderer drift the structural-DAG check can't see.
-
-Defer until Stage 1-3 land and prove valuable.
-
-## Part 5 -- what this enables
+## Part 7 -- what this enables
 
 ### Educational
 
-The 11 KOpts are now expressible as 11 one-line WL rules vs 370 LOC
-of C walker. New contributors read the rules and immediately
-understand each KOpt's semantics. The C code is the implementation;
-the WL is the spec.
+The 11 KOpts are now expressible as 11 one-line WL rules over the
+**existing** `TTermExpr` form. New contributors read the rules and
+immediately understand each KOpt's semantics. The C code is the
+implementation; the WL is the spec.
 
 ### Exploratory
 
 New rewrites can be drafted in WL, tested via WL's REPL, and only
-ported to C once the rule shape is stable. Today, designing
-`UOP_OPT_TG_REDUCE deep-tree` (the `TG_REDUCE` deep-tree feature in
-[mlx_features_to_port.md](mlx_features_to_port.md)) requires writing
-~150 LOC of C + tests. With the WL scaffold, the rule is drafted
-in WL first (10 LOC), exercised on a softmax DAG, then ported.
+ported to C once the rule shape is stable. `UOP_OPT_TG_REDUCE
+deep-tree` (the next architectural feature in
+[mlx_features_to_port.md](mlx_features_to_port.md)) requires ~150
+LOC of C + tests. With the WL scaffold, the rule is drafted in WL
+first (~10 LOC), exercised on a softmax DAG via REPL, then ported.
 
 ### Spec-driven safety
 
-The Phase E plan ([ideal_pipeline.md](ideal_pipeline.md)) has the
-KOpt vocabulary as the load-bearing rewrite framework for the entire
-autotune loop. Having an external spec (WL rules) that the C must
-match prevents silent drift as the C implementation evolves.
+Phase E ([ideal_pipeline.md](ideal_pipeline.md)) puts the KOpt
+vocabulary at the center of the autotune loop. An external WL spec
+that the C must match prevents silent drift as the C implementation
+evolves. The `.wlt` xvalid suite runs in CI alongside `make test`.
 
 ### Comparison artifact for tinygrad and TileLang
 
@@ -408,47 +461,46 @@ Both have similar Opt vocabularies (see
 [tilelang_scout.md](tilelang_scout.md)) but neither has a
 declarative spec. Publishing the WL rule set is a useful
 contribution back to the broader ecosystem -- it documents
-"what kernel rewrites mean" more cleanly than reading any of the
-three implementations.
+"what kernel rewrites mean" more cleanly than reading any
+implementation.
 
-## Part 6 -- non-goals
+## Part 8 -- non-goals
 
 - **Not** a replacement for `apply_opt_dag.c`. Performance and
   in-process integration require the C path.
 - **Not** a frontend WL surface for users. Users still write
-  `TUOp*` graphs (existing surface in `wl/THVMLink/Kernel/Optim.wl`)
-  or build via Python (`py/thvm/`). The WL rewrite layer is
-  internal -- a spec + cross-validator + experimentation REPL.
+  `TUOp*` graphs (existing Optim.wl) or build via Python (py/thvm/).
+  The WL rewrite layer is internal -- a spec + cross-validator +
+  experimentation REPL.
 - **Not** a runtime BEAM driver. The autotune search loop stays in
   C (`autotune.c`) for performance. WL helps design the rewrites
   the search composes, not the search itself.
+- **Not** a parallel symbol vocabulary. We reuse `TTermExpr`'s
+  `"UOP"[...]` heads -- no `URange` / `UOpt` / `UStore` invented.
 
 ## Open questions
 
-1. **Symbol-mode vs Term-id mode**: should `TUOpFromSymbolic` actually
-   build C-side Terms eagerly (so `TUOpDagApplyKOpt` can take an
-   already-allocated Term), or build symbolic only and convert
-   on-demand? Eager is simpler; symbolic-only allows pure-WL rule
-   experimentation without thvm running. Probably support both via
-   `TUOpFromSymbolic` for eager and a parallel `SymbolicOnly`
-   constructor set for pure WL.
-2. **Hash-cons in WL**: WL doesn't auto-intern; `URange[0, KAX$LOOP, 16]`
-   appearing twice creates two equal-but-distinct expressions.
-   Structural equality (`===`) handles comparison fine, but cost
-   could matter for big DAGs. Optional: an in-WL canonicalizer that
-   memoizes via `Module` + `AssociationThread`.
-3. **PADTO**: not yet wired in C. Adding it to WL first (Stage 2)
-   prototypes the rule shape; then port to C.
+1. **`uopCellCount[$UopBuffer]` is variable-arity** (3 + ndim
+   cells). The walker needs a special case in `tTreeWalkWith` to
+   read `ndim` from the heap and emit `Table[child, {i, 0, ndim+2}]`.
+   Or report a fixed minimum (3) and surface dims as `"NUM"[...]`
+   trailing args via a one-off tweak.
+2. **OPT-of-OPT detection in WL rules**: with `//.` (fixed-point
+   replace), the stop-leaf rule must come BEFORE the wrap rule in
+   the rule list, since WL tries rules in order. The `KOptFastMath`
+   sketch above already does this; verify per-KOpt.
+3. **PADTO**: not yet wired in C. Adding the WL rule first as the
+   spec lets us prototype the rewrite shape before C implementation.
 
-## Effort summary
+## References
 
-| Stage | What | LOC | Days |
-|---|---|---|---|
-| 1 | Bridge (Rewrite.wl + LibraryLink wrapper) | ~120 | 1 |
-| 2 | KOpt rules + per-rule unit tests | ~200 | 1 |
-| 3 | Cross-validation harness + corpus tests | ~150 | 0.5 |
-| 4 | WL MSL renderer (optional) | ~800 | 4 |
-
-Total Stage 1-3: **~470 LOC, 2.5 days**. Lands a complete spec for
-the C implementation with cross-validation against the existing
-apply_opt_dag.c surface.
+- [TTermExpr definition](../../wl/THVMLink/Kernel/THVMLink.wl) (line
+  710 -- 1-line definition over a 100-LOC heap walker)
+- [Uop.wl per-opcode tables](../../wl/THVMLink/Kernel/Uop.wl) --
+  arity, name, shape inference
+- [apply_opt_dag.c](../../src/uop/apply_opt_dag.c) -- the C
+  implementation that the WL rules spec
+- [mlx_features_to_port.md](mlx_features_to_port.md) -- feature
+  pipeline that drove the new KOpt additions
+- [Existing .wlt examples](../../wl/THVMLink/Tests/) -- core.wlt,
+  beautiful_mnist.wlt etc. for `VerificationTest` style
