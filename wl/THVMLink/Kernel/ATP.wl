@@ -592,13 +592,15 @@ buildRuleList[axioms_, axiomKeys_] := Flatten[
    FirstPosition into {Side, RelativePos}.  Returns a Rule
    key -> assoc.
 
-   Orientation / ConstructSide are pinned to 1 here because the
-   axiom's Statement is pre-reversed at dataset-build time when the
-   chain used the axiom backward.  WL's verifier computes
-     orientation = Replace[CS, {2 -> -1}] * Orientation
-   then reverses the construct iff orientation === -1.  Setting
-   both to 1 gives orientation=1 (no further reversal), which
-   matches the pre-reversed Statement. *)
+   Orientation carries the chain's use direction for the construct
+   axiom: Direction 1 (forward) -> Orientation 1, Direction 2
+   (backward) -> Orientation -1.  ConstructSide stays 1.  WL's
+   verifier computes orientation = Replace[CS, {2->-1}] * Orientation
+   then reverses the construct's Statement iff orientation === -1, so
+   a Direction-2 step makes the verifier read the axiom's `lhs ==
+   rhs` Statement as the rule `rhs -> lhs` -- exactly the backward
+   rewrite the BFS applied.  This keeps the axiom Statement in its
+   original orientation even when the chain uses it both ways. *)
 chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_] := Block[{
     stepKey, absPos, side, relPos, statement
 },
@@ -617,7 +619,7 @@ chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_] := Block[{
             "Construct" -> ruleEntry["AxiomKey"],
             "Position" -> relPos,
             "Rule" -> stepRec["Rule"],
-            "Orientation" -> 1,
+            "Orientation" -> If[ ruleEntry["Direction"] === 2, -1, 1],
             "ConstructSide" -> 1,
             "InputOrientation" -> 1,
             "Side" -> side,
@@ -627,33 +629,15 @@ chainEntry[stepRec_, isLast_, lemmaIdx_, prevKey_, ruleEntry_] := Block[{
     |>
 ]
 
-(* MapIndexed step that re-orients an axiom entry whose direction
-   in the chain was 2 (backward).  Lookup with a List-shaped key
-   needs Key[...] -- a bare list is multi-key lookup. *)
-reorientAxiomEntry[axioms_, axiomDirections_][entry_, idx_] := Block[{
-    key = entry[[1]],
-    k = idx[[1]]
-},
-    If[ Lookup[axiomDirections, Key[key], 1] === 2,
-        key -> <|
-            "Statement" -> toHoldEq[
-                Inactive[Equal] @@ Reverse[axioms[[k]]]],
-            "Proof" -> <||>
-        |>,
-        entry
-    ]
-]
-
 (* Strategy:
-     1. Emit Axiom entries (Statements get re-oriented later if the
-        chain used them backward).
+     1. Emit Axiom entries (always in their original orientation).
      2. Emit Hypothesis from the conjecture.
      3. Build candidate rule list (forward + backward of each axiom).
      4. Synthesize a rewrite chain from Hypothesis to a tautology.
      5. Emit each chain step as a SubstitutionLemma; the last step
-        becomes the Conclusion.
-     6. Re-orient axioms that were used backward, so Rule@@Axiom[k]
-        gives the actual rule applied.
+        becomes the Conclusion.  Backward-axiom steps carry
+        Orientation -> -1 so the verifier reads the axiom Statement
+        in reverse for that step.
    All Statements are HoldForm[Equal[lhs, rhs]]; toHoldEq is the
    helper that gets us there from Inactive[Equal][...]. *)
 (* Degenerate "Conclusion" entry for the trivial-tautology case
@@ -679,8 +663,7 @@ trivialConclusionEntry[hypInactive_] := {$ConclusionSym, 1} -> <|
 buildProofDataset[axioms_, conjecture_] := Block[{
     axCount = Length[axioms],
     axiomKeys, hypInactive, ruleList, chainRes, chain,
-    axiomEntries, chainEntries, axiomDirections,
-    finalAxiomEntries, allEntries
+    axiomEntries, chainEntries, allEntries
 },
     hypInactive = Inactive[Equal] @@ conjecture;
     ruleList = buildRuleList[axioms, axiomKeys = Table[{$AxiomSym, k},
@@ -708,17 +691,8 @@ buildProofDataset[axioms_, conjecture_] := Block[{
         ],
         {s, Length[chain]}
     ];
-    axiomDirections = Association @ Table[
-        ruleList[[chain[[s, "RuleIdx"]], "AxiomKey"]] ->
-            ruleList[[chain[[s, "RuleIdx"]], "Direction"]],
-        {s, Length[chain]}
-    ];
-    finalAxiomEntries = MapIndexed[
-        reorientAxiomEntry[axioms, axiomDirections],
-        axiomEntries
-    ];
     allEntries = Join[
-        finalAxiomEntries,
+        axiomEntries,
         {{$HypothesisSym, 1} -> <|
             "Statement" -> toHoldEq[hypInactive],
             "Proof" -> <||>

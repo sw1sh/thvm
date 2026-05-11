@@ -527,10 +527,22 @@ VerificationTest[
     TestID -> "ATP/TFEP/forall-multi-symmetric"
 ]
 
-(* ProofFunction verifier round-trips for the ForAll cases that
-   work end-to-end (the verifier's expected-Statement convention
-   for ForAll-on-conjecture proofs is shape-sensitive, so a couple
-   of cases fall back to Head==ProofObject as the proof check.) *)
+(* ProofFunction verifier round-trips.  Backward-axiom steps carry
+   Orientation -> -1 so WL's verifier reads the axiom Statement in
+   reverse for that step; a single axiom can therefore be used in
+   both directions within one chain (the fg-gf case below does
+   exactly that). *)
+
+VerificationTest[
+    Module[{p},
+        p = TFindEquationalProof[
+            ForAll[x, f[g[x]] == g[f[x]]],
+            {ForAll[x, f[x] == g[x]]}];
+        Head @ p["ProofFunction"][p["ConjectureStatement"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/forall-fg-gf-verifies"
+]
 
 VerificationTest[
     Module[{p},
@@ -552,6 +564,18 @@ VerificationTest[
     ],
     Success,
     TestID -> "ATP/TFEP/assoc-rewrite-verifies"
+]
+
+VerificationTest[
+    (* Backward-axiom usage: c == a from {a == b, b == c} forces
+       both axioms to be applied right-to-left.  Orientation -> -1
+       on each step keeps the verifier in sync. *)
+    Module[{p},
+        p = TFindEquationalProof[c == a, {a == b, b == c}];
+        Head @ p["ProofFunction"][p["ConjectureStatement"]]
+    ],
+    Success,
+    TestID -> "ATP/TFEP/backward-axiom-verifies"
 ]
 
 (* === TFindEquationalProof: doc-shape negative cases ================= *)
