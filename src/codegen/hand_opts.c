@@ -350,12 +350,15 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // For NON-tileable kernels keep the prior conservative one-axis pass
   // (try 4 then 2 on the last output axis), unchanged.
   if (tileable) {
-    // Single UPCAST on the M axis (output axis 0 -- the conv-matmul "M"
-    // / cOut output axis: the weight read depends on it, the conv-input
-    // read does not, so rmu_emit_conv's vectorized accumulator can reuse
-    // one conv-input load across all M registers).  Only ONE split: the
-    // conv-split renderer mishandles >1 UPCAST output axis (it emits the
-    // inner halves out of dependency order -> undeclared-identifier MSL).
+    // Two-axis register-blocking: UPCAST on the M axis (output axis 0 --
+    // the conv-matmul "M" / cOut output axis: the weight read depends on
+    // it, the conv-input read does not) AND on the contiguous spatial axis
+    // (the LAST output axis -- wOut: the conv-input read depends on it,
+    // the weight read does not).  rmu_emit_conv now emits Um*Uw straight-
+    // line accumulators inside the reduce nest; the MSL compiler CSEs the
+    // weight load (cOut-only) across Uw outputs and the conv-input load
+    // (wOut-only) across Um outputs -- the classic 2D register-blocked
+    // matmul inner, with Um+Uw loads sustaining Um*Uw MADs per iter.
     if (hand_opt_snapshot_axes(ke, &ax)) {
       u32 m_axis = 0xFFFFFFFFu;
       for (u32 i = 0; i < ax.n; i++) {
@@ -370,6 +373,27 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
           KOpt opt = { KOP_UPCAST, (u8)m_axis, f };
           if (kernel_apply_opt(ke, opt)) n_applied++;
           break;
+        }
+      }
+    }
+    // Second UPCAST on the contiguous spatial axis (wOut).  After the M
+    // UPCAST the axis indices have shifted; re-snapshot.  Try factor 2
+    // (every supported wOut is even after the standard convs); skip if
+    // the LOCAL pass would have nothing left (wOut/Uw >= 4 keeps a
+    // decent threadgroup size after the LOCAL split).  Cap upcast_size
+    // at 32 (matches tinygrad's budget).
+    if (hand_opt_snapshot_axes(ke, &ax)
+        && hand_opt_upcast_size(&ax) < 32) {
+      u32 c_axis = hand_opt_last_output_axis(&ax);
+      if (c_axis != 0xFFFFFFFFu) {
+        u32 ext = ax.extent[c_axis];
+        // factor 2 only -- conservative.  factor 4 would push register
+        // pressure too high (cOut 4 * wOut 4 = 16 accumulators) without
+        // a corresponding K bandwidth win.
+        u32 f = 2;
+        if (ext % f == 0 && ext / f >= 4) {
+          KOpt opt = { KOP_UPCAST, (u8)c_axis, f };
+          if (kernel_apply_opt(ke, opt)) n_applied++;
         }
       }
     }
