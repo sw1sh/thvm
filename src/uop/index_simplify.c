@@ -57,8 +57,87 @@ static int uop_match_const_mul(Term t, i64 *c_out, Term *x_out) {
   return 0;
 }
 
+static int uop_term_nonneg(Term t);  // defined below
+
+// Conservative upper-bound estimator over UOp index expressions:
+// returns 1 and sets *out to a (not necessarily tight) value V such
+// that the term is provably <= V, assuming every RANGE leaf takes
+// values in [0, extent).  Returns 0 when no finite bound can be
+// derived structurally.  Mirrors tinygrad's symbolic vmax.
+//
+// This lets the div/mod-of-affine folds (below) recognise that the
+// residue `y` in a `(c*x + y) / c` form is provably < c even when
+// `y` is a compound packed-axis expression like
+// `((a1*256 + a2)*2 + a3)*4 + a4` -- the case the composed im2col
+// strided-view INDEX produces.  Bounded recursion -- DAG is finite.
+static int uop_term_max_value(Term t, i64 *out) {
+  if (term_tag(t) == TAG_NUM) { *out = (i64)(i32)term_val(t); return 1; }
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_RANGE: {
+      u32 ext;
+      if (!uop_range_extent_into(t, &ext) || ext == 0) return 0;
+      *out = (i64)ext - 1;
+      return 1;
+    }
+    case UOP_CONST: {
+      i64 v;
+      if (!uop_iconst_value(t, &v)) return 0;
+      *out = v;
+      return 1;
+    }
+    case UOP_IADD: {
+      i64 a, b;
+      if (!uop_term_max_value(heap_read(term_val(t) + 0), &a)) return 0;
+      if (!uop_term_max_value(heap_read(term_val(t) + 1), &b)) return 0;
+      *out = a + b;
+      return 1;
+    }
+    case UOP_ISUB: {
+      // x - y <= max(x) - 0 (y is non-negative for index exprs).
+      i64 a;
+      if (!uop_term_nonneg(heap_read(term_val(t) + 1))) return 0;
+      if (!uop_term_max_value(heap_read(term_val(t) + 0), &a)) return 0;
+      *out = a;
+      return 1;
+    }
+    case UOP_IMUL: {
+      i64 a, b;
+      if (!uop_term_max_value(heap_read(term_val(t) + 0), &a)) return 0;
+      if (!uop_term_max_value(heap_read(term_val(t) + 1), &b)) return 0;
+      if (a < 0 || b < 0) return 0;  // sign-mixing -- bail
+      *out = a * b;
+      return 1;
+    }
+    case UOP_IDIV: {
+      i64 dv, a;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &dv) || dv <= 0) return 0;
+      if (!uop_term_max_value(heap_read(term_val(t) + 0), &a)) return 0;
+      if (a < 0) return 0;
+      *out = a / dv;
+      return 1;
+    }
+    case UOP_IMOD: {
+      i64 dv;
+      if (!uop_iconst_value(heap_read(term_val(t) + 1), &dv) || dv <= 0) return 0;
+      *out = dv - 1;
+      return 1;
+    }
+    case UOP_IWHERE: {
+      i64 a, b;
+      if (!uop_term_max_value(heap_read(term_val(t) + 1), &a)) return 0;
+      if (!uop_term_max_value(heap_read(term_val(t) + 2), &b)) return 0;
+      *out = a > b ? a : b;
+      return 1;
+    }
+    default: return 0;
+  }
+}
+
 // "Bounded" check: is `y` provably in [0, bound)?  RANGE leaves
-// have a known extent; ICONST in range qualifies; everything else
+// have a known extent; ICONST in range qualifies; compound non-neg
+// expressions with a derivable max < bound qualify; everything else
 // fails (the simplifier stays conservative).
 static int uop_term_strictly_below(Term y, i64 bound) {
   if (bound <= 0) return 0;
@@ -66,6 +145,8 @@ static int uop_term_strictly_below(Term y, i64 bound) {
   if (uop_range_extent_into(y, &ext)) return (i64)ext <= bound;
   i64 v;
   if (uop_iconst_value(y, &v)) return v >= 0 && v < bound;
+  i64 mx;
+  if (uop_term_nonneg(y) && uop_term_max_value(y, &mx)) return mx < bound;
   return 0;
 }
 
@@ -115,6 +196,97 @@ static int uop_match_affine_numerator(Term n, i64 *c_out, Term *x_out,
   Term b = heap_read(term_val(n) + 1);
   if (uop_match_const_mul(a, c_out, x_out)) { *y_out = b; return 1; }
   if (uop_match_const_mul(b, c_out, x_out)) { *y_out = a; return 1; }
+  return 0;
+}
+
+// Search a (possibly left-associated) IADD tree of index terms for a
+// const-mul leaf `c*x` whose coefficient `c` is in a divisibility
+// relation with `div` (either c | div or div | c -- i.e. one of the
+// div/mod-of-affine folds below could fire on `(c*x + rest) op div`),
+// AND for which the SUM of all the *other* terms in the tree is
+// provably in [0, c).  On success returns 1 and sets *c_out, *x_out,
+// and *rest_out to a Term that equals the sum of the remaining terms
+// (rebuilt via uop_int_binary so it is itself simplified).  This
+// generalises uop_match_affine_numerator past the shallow-IADD shape
+// to the deep chains produced by composing a movement-view ShapeTracker
+// into the kernel INDEX (conv im2col strided view, maxpool reshape).
+//
+// `depth` bounds the recursion; the index DAGs are small but finite.
+static int uop_iadd_tree_collect_const_mul(Term n, Term *terms, u32 *nt,
+                                            u32 max_terms, u32 depth) {
+  if (depth > 24 || *nt >= max_terms) return 0;
+  if (term_tag(n) == TAG_UOP && term_ext(n) == UOP_IADD) {
+    if (!uop_iadd_tree_collect_const_mul(heap_read(term_val(n) + 0),
+                                         terms, nt, max_terms, depth + 1)) return 0;
+    if (!uop_iadd_tree_collect_const_mul(heap_read(term_val(n) + 1),
+                                         terms, nt, max_terms, depth + 1)) return 0;
+    return 1;
+  }
+  if (*nt >= max_terms) return 0;
+  terms[(*nt)++] = n;
+  return 1;
+}
+
+// Validate the side condition that the div/mod-of-affine folds below
+// need for numerator `c*x + rest` against divisor/modulus `div`:
+//   - c % div == 0 (div divides c): only rest >= 0.
+//   - div % c == 0 (c divides div): rest in [0, c).
+// `rest` is given as a list of addend terms (their sum is the residue).
+static int uop_affine_rest_ok(i64 c, i64 div, Term const *rest_terms,
+                              u32 n_rest, Term *rest_out) {
+  if (c <= 0 || div <= 0) return 0;
+  if (!(c % div == 0 || div % c == 0)) return 0;
+  Term rest = 0;
+  for (u32 j = 0; j < n_rest; j++) {
+    if (!uop_term_nonneg(rest_terms[j])) return 0;
+    rest = (rest == 0) ? rest_terms[j]
+                       : uop_int_binary(UOP_IADD, rest, rest_terms[j]);
+  }
+  if (rest == 0) rest = uop_iconst(0);
+  if (c % div != 0) {  // div % c == 0 -- shrink-divisor needs rest < c
+    if (!uop_term_strictly_below(rest, c)) return 0;
+  }
+  *rest_out = rest;
+  return 1;
+}
+
+static int uop_match_affine_numerator_deep(Term n, i64 div,
+                                            i64 *c_out, Term *x_out,
+                                            Term *rest_out) {
+  if (div <= 0) return 0;
+  // Shallow form first (cheap, common).
+  {
+    i64 c; Term x, y;
+    if (uop_match_affine_numerator(n, &c, &x, &y)
+        && (c % div == 0 || div % c == 0)) {
+      Term rest_terms[1]; u32 n_rest = 0;
+      if (y != 0) rest_terms[n_rest++] = y;
+      Term rest;
+      if (uop_affine_rest_ok(c, div, rest_terms, n_rest, &rest)) {
+        *c_out = c; *x_out = x; *rest_out = rest;
+        return 1;
+      }
+    }
+  }
+  // Deep form: search a left-associated IADD tree for a const-mul leaf
+  // whose coefficient is in a divisibility relation with `div`.
+  if (term_tag(n) != TAG_UOP || term_ext(n) != UOP_IADD) return 0;
+  Term terms[16];
+  u32  nt = 0;
+  if (!uop_iadd_tree_collect_const_mul(n, terms, &nt, 16, 0)) return 0;
+  if (nt < 2) return 0;
+  for (u32 i = 0; i < nt; i++) {
+    i64 c; Term x;
+    if (!uop_match_const_mul(terms[i], &c, &x) || c <= 0) continue;
+    if (!(c % div == 0 || div % c == 0)) continue;
+    Term rest_terms[16];
+    u32  n_rest = 0;
+    for (u32 j = 0; j < nt; j++) if (j != i) rest_terms[n_rest++] = terms[j];
+    Term rest;
+    if (!uop_affine_rest_ok(c, div, rest_terms, n_rest, &rest)) continue;
+    *c_out = c; *x_out = x; *rest_out = rest;
+    return 1;
+  }
   return 0;
 }
 
@@ -267,6 +439,16 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       if (b_const && bv == 1) return a;
       if (a_const && av == 0) return uop_iconst(0);
       if (a == b && b_const && bv != 0) return uop_iconst(1);
+      // Range-bound-aware: `x // c -> 0` when 0 <= x and max(x) < c.
+      // Mirrors the IMOD range-bound fold below; collapses the residual
+      // `(a5/25)/32`-style divides that fall out of the deep affine
+      // composition once a constant divisor exceeds the numerator's
+      // provable bound.
+      if (b_const && bv > 0 && !a_const) {
+        i64 mx;
+        if (uop_term_nonneg(a) && uop_term_max_value(a, &mx) && mx < bv)
+          return uop_iconst(0);
+      }
       // RESHAPE-roundtrip fold: `(c*x + y) / c` -> `x` when y in [0, c).
       // Also handles the bare `(c*x) / c` -> x case (y = 0 implicit).
       if (b_const && bv > 0) {
@@ -274,6 +456,32 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
         Term x, y;
         if (uop_match_affine_numerator(a, &c, &x, &y) && c == bv) {
           if (y == 0 || uop_term_strictly_below(y, c)) return x;
+        }
+      }
+      // Generalised div-of-affine over a (possibly deep) IADD tree.
+      // For numerator `c*x + rest` with divisor `d`:
+      //   - d | c (c = m*d):  -> m*x + rest/d            (rest >= 0)
+      //   - c | d (d = n*c):  -> x / n                   (0 <= rest < c)
+      // These collapse the chained div/mod the rangeify ShapeTracker
+      // composer emits when it folds a movement-view chain into the
+      // kernel INDEX (conv im2col strided view; maxpool reshape) --
+      // turning a ~20-divide-per-iter address into a handful.  The
+      // bare `c*x / c -> x` and `(c1*xnum) // bv` cases above are
+      // strict specialisations; this is the general form.
+      if (b_const && bv > 0 && !a_const) {
+        i64 c;
+        Term x, rest;
+        if (uop_match_affine_numerator_deep(a, bv, &c, &x, &rest)) {
+          if (c % bv == 0) {
+            // distribute: (m*d*x + rest) / d -> m*x + rest/d
+            Term term_x = uop_int_binary(UOP_IMUL, x, uop_iconst(c / bv));
+            Term term_r = uop_int_binary(UOP_IDIV, rest, b);
+            return uop_int_binary(UOP_IADD, term_x, term_r);
+          }
+          if (bv % c == 0) {
+            // shrink divisor: (c*x + rest) / (n*c) -> x / n  (rest < c)
+            return uop_int_binary(UOP_IDIV, x, uop_iconst(bv / c));
+          }
         }
       }
       // GCD-aware: (k*c1) // (k*c2) -> c1 // c2 when k>0.  Plays
@@ -330,10 +538,16 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       if (b_const && bv == 1) return uop_iconst(0);
       if (a_const && av == 0) return uop_iconst(0);
       // Range-bound-aware: if `a` is a UOP_RANGE with extent <= bv,
-      // then `a % bv = a` (the iter never reaches bv).
+      // then `a % bv = a` (the iter never reaches bv).  Generalised:
+      // `x % c -> x` for any non-negative `x` whose provable max < c.
       if (b_const && bv > 0) {
         u32 ext;
         if (uop_range_extent_into(a, &ext) && (i64)ext <= bv) return a;
+        if (!a_const) {
+          i64 mx;
+          if (uop_term_nonneg(a) && uop_term_max_value(a, &mx) && mx < bv)
+            return a;
+        }
       }
       // RESHAPE-roundtrip fold: `(c*x + y) % c` -> y when y in [0, c).
       // For the bare `(c*x) % c` shape (y implicit), result is 0.
@@ -344,6 +558,58 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           (void)x;
           if (y == 0)                                  return uop_iconst(0);
           if (uop_term_strictly_below(y, c))           return y;
+        }
+      }
+      // Generalised mod-of-affine over a (possibly deep) IADD tree.
+      // For numerator `c*x + rest` with modulus `d`:
+      //   - d | c (c = m*d):  -> rest % d              (rest >= 0)
+      //   - c | d (d = n*c):  -> c*(x % n) + rest      (0 <= rest < c)
+      // Companion of the IDIV rule above; same composed-chain motive.
+      if (b_const && bv > 0 && !a_const) {
+        i64 c;
+        Term x, rest;
+        if (uop_match_affine_numerator_deep(a, bv, &c, &x, &rest)) {
+          if (c % bv == 0) {
+            // c*x term vanishes mod d: (m*d*x + rest) % d -> rest % d
+            return uop_int_binary(UOP_IMOD, rest, b);
+          }
+          if (bv % c == 0) {
+            // (c*x + rest) % (n*c) -> c*(x % n) + rest   (rest < c)
+            Term xm = uop_int_binary(UOP_IMOD, x, uop_iconst(bv / c));
+            Term cm = uop_int_binary(UOP_IMUL, xm, uop_iconst(c));
+            return uop_int_binary(UOP_IADD, cm, rest);
+          }
+        }
+      }
+      // Coefficient-reduction mod m: in `(... + c*x + ...) % m`, replace
+      // every const-mul term `c*x` whose coefficient has `c >= m` by
+      // `(c % m)*x` -- an exact identity (c*x = (q*m + r)*x and q*m*x
+      // vanishes mod m).  Then re-take the mod; the smaller residue often
+      // collapses via the range-bound IMOD rule above.  Turns the
+      // `(kh*25 + oh) % 24`-style residues the deep affine composition
+      // leaves into plain `(kh + oh)` (max 23 < 24).
+      if (b_const && bv > 1 && !a_const && term_tag(a) == TAG_UOP) {
+        Term terms[16];
+        u32  nt = 0;
+        if ((term_ext(a) == UOP_IADD || term_ext(a) == UOP_IMUL)
+            && uop_iadd_tree_collect_const_mul(a, terms, &nt, 16, 0)
+            && nt >= 1) {
+          int any_reduced = 0, all_nonneg = 1;
+          Term rebuilt = 0;
+          for (u32 i = 0; i < nt; i++) {
+            i64 c; Term x;
+            Term term_i = terms[i];
+            if (!uop_term_nonneg(term_i)) { all_nonneg = 0; break; }
+            if (uop_match_const_mul(term_i, &c, &x) && c >= bv && c % bv != 0) {
+              term_i = uop_int_binary(UOP_IMUL, x, uop_iconst(c % bv));
+              any_reduced = 1;
+            }
+            rebuilt = (rebuilt == 0) ? term_i
+                                     : uop_int_binary(UOP_IADD, rebuilt, term_i);
+          }
+          if (all_nonneg && any_reduced && rebuilt != 0) {
+            return uop_int_binary(UOP_IMOD, rebuilt, b);
+          }
         }
       }
       // Nested mod-mod: (r % (k*c)) % c -> r % c when c | (k*c).

@@ -149,12 +149,17 @@ int main(void) {
   Term mod3 = uop_int_binary(UOP_IMOD, mul3, three);
   CHECK_EQ(term_ext(mod3), UOP_CONST);
 
-  TEST_BEGIN("simplify/divmod-affine-c-mul-x-plus-y-div-c-x");
-  // (3*r2 + r) / 3 -> r2 when r.extent (8) > 3 -- BUT r.extent=8>3,
-  // so y is not in [0, 3).  Skip the fold.  Verify it stays IDIV.
+  TEST_BEGIN("simplify/divmod-affine-c-mul-x-plus-y-div-c-distributes");
+  // (3*r2 + r) / 3.  r.extent (8) > 3, so the shallow `(c*x+y)/c -> x`
+  // fold can't fire (y not provably < c).  The generalised div-of-affine
+  // rule (d | c, m=1) still applies: (3*r2 + r)/3 -> r2 + r/3.
   Term mix = uop_int_binary(UOP_IADD, mul3, r);
-  Term div_skip = uop_int_binary(UOP_IDIV, mix, three);
-  CHECK_EQ(term_ext(div_skip), UOP_IDIV);
+  Term div_distr = uop_int_binary(UOP_IDIV, mix, three);
+  CHECK_EQ(term_ext(div_distr), UOP_IADD);
+  CHECK_EQ(heap_read(term_val(div_distr) + 0), r2);
+  Term div_distr_rhs = heap_read(term_val(div_distr) + 1);
+  CHECK_EQ(term_ext(div_distr_rhs), UOP_IDIV);
+  CHECK_EQ(heap_read(term_val(div_distr_rhs) + 0), r);
 
   TEST_BEGIN("simplify/divmod-affine-c-mul-x-plus-y-divides-when-y-in-range");
   // (3*r2 + ya) / 3 -> r2 when ya in [0, 3).  Use a RANGE with extent 3.
