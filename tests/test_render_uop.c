@@ -262,6 +262,10 @@ int main(void) {
   CHECK(contains(bufrs, "uint a0 = tid;"));
   CHECK(!contains(bufrs, "for (uint a0 ="));
   CHECK(contains(bufrs, "float _acc1 = 0.0f"));
+  // Small reduce extent (16 <= RMU_REDUCE_UNROLL_MAX) -> default
+  // `#pragma unroll(16)` above the reduce for-loop so the MSL
+  // compiler straight-lines the contraction MADs.
+  CHECK(contains(bufrs, "#pragma unroll(16)"));
   CHECK(contains(bufrs, "for (uint a1 = 0; a1 < 16"));
   CHECK(contains(bufrs, "_acc1 = _acc1 + in0"));
   CHECK(contains(bufrs, "] = _acc1;"));
@@ -332,6 +336,8 @@ int main(void) {
   cg_render_uop_kernel(st_bad, "k_gemm_bad", out, in_ab, 2, fp);
   fclose(fp);
   CHECK(contains(buftc2, "/* TC tile mismatch"));
+  // K=7 (<= RMU_REDUCE_UNROLL_MAX) -> default reduce-loop unroll.
+  CHECK(contains(buftc2, "#pragma unroll(7)"));
   CHECK(contains(buftc2, "_acc3 = _acc3 + ("));
 
   TEST_BEGIN("render-uop/conv-pattern-match-emits-template");

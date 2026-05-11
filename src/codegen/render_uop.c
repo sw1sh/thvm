@@ -30,6 +30,15 @@ static void rmu_emit_term(Term t, FILE *fp);
 // plain function signature without Metal kernel attributes.
 static int RMU_TARGET_C = 0;
 
+// Reduce-axis loop unroll threshold.  When a scalar accumulator's
+// reduce axis has extent <= this and the target is MSL (not C99), the
+// renderer emits `#pragma unroll(<extent>)` immediately above the
+// `for`-loop so the MSL compiler can straight-line the K MAD ops --
+// matmul's K=25 contraction, conv's K=9/27, etc.  Larger reduces stay
+// on the rolled loop to keep the generated body size sane.  (Formerly
+// RMU_CONV_UNROLL_MAX -- the conv2d-flat template uses the same gate.)
+#define RMU_REDUCE_UNROLL_MAX 64u
+
 // Buffer name resolution.
 //
 // Phase C slice 3 (structural slot indexing): production callers
@@ -1276,12 +1285,11 @@ static int rmu_detect_conv(Term store, Term *out_red_value) {
 //      can confirm which path fired.
 //
 // The decision to emit `#pragma unroll` versus stay on the generic
-// path is gated on KRED <= RMU_CONV_UNROLL_MAX so we don't blow up
+// path is gated on KRED <= RMU_REDUCE_UNROLL_MAX so we don't blow up
 // the generated body size on huge KREDs (very deep convs).
 //
 // Returns 1 on success; 0 if the shape can't be emitted through this
 // template and the caller should fall back to the generic accumulator.
-#define RMU_CONV_UNROLL_MAX 64u
 static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   if (term_tag(conv_red) != TAG_UOP || term_ext(conv_red) != UOP_REDUCE) return 0;
@@ -1339,7 +1347,7 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   fprintf(fp, "float %s = ", acc_name);
   rmu_emit_reduce_init(red_kind, fp);
   fputs(";\n", fp);
-  if (!RMU_TARGET_C && red_extent <= RMU_CONV_UNROLL_MAX) {
+  if (!RMU_TARGET_C && red_extent <= RMU_REDUCE_UNROLL_MAX) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     fprintf(fp, "#pragma unroll(%u)\n", red_extent);
   }
@@ -1450,11 +1458,20 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   fprintf(fp, "float %s = ", acc_name);
   rmu_emit_reduce_init(red_kind, fp);
   fputs(";\n", fp);
-  // Reduce-axis loop.
+  // Reduce-axis loop.  When the autotuner wrapped the axis in
+  // OPT(UNROLL, factor) honour that exactly.  Otherwise, default to a
+  // full unroll when the extent is small (matmul K=25, etc.) so the
+  // MSL compiler can straight-line the contraction MADs.
   if (red_kind_opt != RMU_NO_OPT && red_kind_opt == UOP_OPT_UNROLL) {
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     if (red_factor_opt > 0) fprintf(fp, "#pragma unroll(%u)\n", red_factor_opt);
     else                    fputs("#pragma unroll\n", fp);
+  } else if (red_kind_opt == RMU_NO_OPT && !RMU_TARGET_C) {
+    u32 red_extent = uop_range_extent(red_range);
+    if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+      fprintf(fp, "#pragma unroll(%u)\n", red_extent);
+    }
   }
   rmu_emit_range_open(red_range, fp, body_depth, red_kind_opt);
   // Combine inside the reduce loop.
@@ -1667,6 +1684,11 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
           fprintf(fp, "%s = simd_sum(%s);\n", _acc_name, _acc_name); \
         } \
       } else { \
+        if (!RMU_TARGET_C && _reduce_extent > 0 \
+            && _reduce_extent <= RMU_REDUCE_UNROLL_MAX) { \
+          for (u32 _d = 0; _d < (emit_depth); _d++) fputs("  ", fp); \
+          fprintf(fp, "#pragma unroll(%u)\n", _reduce_extent); \
+        } \
         rmu_emit_range_open(_reduce_range_term, fp, (emit_depth), 0); \
         for (u32 _d = 0; _d < (emit_depth) + 1; _d++) fputs("  ", fp); \
         rmu_emit_reduce_combine(_acc_name, _r_kind, _r_src, fp); \
