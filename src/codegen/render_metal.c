@@ -147,6 +147,11 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // so render_uop's rmu_emit_conv template fires.  No-op when the
   // matmul recogniser already wrapped the root (TC takes precedence).
   store_root = uop_recognise_conv(store_root);
+  // Default-parallelise happens inside the renderer (rmu_emit_store /
+  // rmu_emit_output_loops): plain-LOOP output axes are decoded from
+  // `tid` instead of looped serially.  We do NOT rewrite the DAG's
+  // axis_type here -- a KAX_GLOBAL rewrite would make the renderer's
+  // legacy single-`tg` branch fire and collide multiple grid axes.
   char buf[16384];
   FILE *fp = fmemopen(buf, sizeof(buf), "w");
   if (fp == NULL) return NULL;

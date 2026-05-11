@@ -162,19 +162,24 @@ int main(void) {
   CHECK(contains(buf10, "exp2(in0"));
   CHECK(contains(buf10, "log2(in0"));
 
-  TEST_BEGIN("render-uop/range-wraps-store-in-for-loops");
-  // Single-axis kernel: STORE(out, RANGE(0), CONST) emits one for-loop.
+  TEST_BEGIN("render-uop/single-output-axis-decoded-from-tid");
+  // Single-axis kernel: STORE(out, RANGE(0), CONST).  Output axes are
+  // promoted to parallel grid axes -- emit `uint a0 = tid;` plus the
+  // `if (tid >= N) return;` bounds guard, NOT a serial for-loop.
   Term r1ax    = uop_range(0, 0, 32);
   Term st_1ax  = uop_store(out, r1ax, one);
   char bufrw1[2048];
   fp = fmemopen(bufrw1, sizeof(bufrw1), "w");
   cg_render_uop_kernel(st_1ax, "k_1ax", out, NULL, 0, fp);
   fclose(fp);
-  CHECK(contains(bufrw1, "for (uint a0 = 0; a0 < 32"));
-  CHECK(contains(bufrw1, "}\n}"));   // closing brace + kernel close
+  CHECK(contains(bufrw1, "if (tid >= 32u) return;"));
+  CHECK(contains(bufrw1, "uint a0 = tid;"));
+  CHECK(!contains(bufrw1, "for (uint a0 ="));
 
-  TEST_BEGIN("render-uop/two-range-axes-nested-loops");
-  // STORE(out, RANGE(0)*8 + RANGE(1), CONST) emits two nested loops.
+  TEST_BEGIN("render-uop/two-output-axes-flat-tid-decode");
+  // STORE(out, RANGE(0)*8 + RANGE(1), CONST): both output axes become
+  // parallel grid axes decoded from the flat tid -- a0 = (tid/8)%4,
+  // a1 = tid%8 -- not nested for-loops.
   Term r2_0 = uop_range(0, 0, 4);
   Term r2_1 = uop_range(1, 0, 8);
   Term k8   = uop_const(DT_INT32, 8);
@@ -185,8 +190,11 @@ int main(void) {
   fp = fmemopen(bufrw2, sizeof(bufrw2), "w");
   cg_render_uop_kernel(st_2, "k_2ax", out, NULL, 0, fp);
   fclose(fp);
-  CHECK(contains(bufrw2, "for (uint a0 = 0; a0 < 4"));
-  CHECK(contains(bufrw2, "for (uint a1 = 0; a1 < 8"));
+  CHECK(contains(bufrw2, "if (tid >= 32u) return;"));
+  CHECK(contains(bufrw2, "uint a0 = (tid / 8u) % 4u;"));
+  CHECK(contains(bufrw2, "uint a1 = tid % 8u;"));
+  CHECK(!contains(bufrw2, "for (uint a0 ="));
+  CHECK(!contains(bufrw2, "for (uint a1 ="));
 
   TEST_BEGIN("render-uop/unroll-pragma-on-opt-annotated-range");
   // STORE(out, OPT(RANGE(0, REDUCE, 16), UNROLL, 4), CONST) emits
@@ -249,7 +257,10 @@ int main(void) {
   fp = fmemopen(bufrs, sizeof(bufrs), "w");
   cg_render_uop_kernel(st_red_sum, "k_sum", out, in_bufs, 2, fp);
   fclose(fp);
-  CHECK(contains(bufrs, "for (uint a0 = 0; a0 < 32"));
+  // Output axis 0 is a parallel grid axis (`uint a0 = tid;`); the
+  // reduce axis 1 stays a serial in-thread loop with the accumulator.
+  CHECK(contains(bufrs, "uint a0 = tid;"));
+  CHECK(!contains(bufrs, "for (uint a0 ="));
   CHECK(contains(bufrs, "float _acc1 = 0.0f"));
   CHECK(contains(bufrs, "for (uint a1 = 0; a1 < 16"));
   CHECK(contains(bufrs, "_acc1 = _acc1 + in0"));
@@ -355,8 +366,11 @@ int main(void) {
   CHECK(contains(bufconv, "#pragma unroll(9)"));
   CHECK(contains(bufconv, "for (uint a11 = 0; a11 < 9"));
   CHECK(contains(bufconv, "_acc11 = _acc11 +"));
-  // The output range loop over a10 still emitted.
-  CHECK(contains(bufconv, "for (uint a10 = 0; a10 < 1024"));
+  // The output axis a10 is a parallel grid axis (`uint a10 = tid;`)
+  // with the `if (tid >= 1024u) return;` bounds guard, not a loop.
+  CHECK(contains(bufconv, "if (tid >= 1024u) return;"));
+  CHECK(contains(bufconv, "uint a10 = tid;"));
+  CHECK(!contains(bufconv, "for (uint a10 ="));
 
   TEST_BEGIN("render-uop/conv-large-kred-skips-pragma-unroll");
   // Build a conv with KRED > RMU_CONV_UNROLL_MAX (64); the template

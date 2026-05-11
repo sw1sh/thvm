@@ -642,15 +642,47 @@ static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
       || axis_type == 5  /* legacy KAX_GLOBAL */;
 }
 
-// Emit a for-loop opener for a UOP_RANGE leaf at the given depth.
-// `opt_kind` / `opt_factor` are the OPT annotation (0 if none).  Three
-// patterns:
-//   LOCAL  -> `uint aN = tt; /* local */`   (thread-position bind)
-//   GLOBAL -> `uint aN = tg; /* global */`  (group-position bind)
-//   else   -> `for (uint aN = 0; aN < ext; aN++)` with optional /*reduce*/
-//             marker when axis_type == REDUCE.
-static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
-                                u32 opt_kind) {
+// Per-call promoted-GLOBAL context.  Output axes (axis_id in the
+// store's addr expression) that arrive as plain KAX_LOOP with no OPT
+// wrap get promoted to parallel grid axes: instead of a serial
+// `for`-loop, each thread decodes its axis tuple from the flat 1-D
+// dispatch index `tid`.  rmu_emit_store builds this once pre-loop and
+// threads it through to rmu_emit_range_open_ctx.
+//
+//   modulus_of_axis[axis_id] = this axis's extent (0 if not promoted)
+//   stride_of_axis [axis_id] = product of inner promoted-GLOBAL
+//                              extents (1 for the innermost)
+//   n_globals                = count of promoted axes
+//   total                    = product of all promoted extents
+//                              (== output_numel; the dispatcher
+//                              launches >= this many threads and the
+//                              kernel guards `tid >= total`)
+//
+// Note: explicitly-pre-stamped axis_type==KAX_GLOBAL ranges (the TC
+// matmul / conv2d_flat templates bind those themselves, and the one
+// `render-uop/legacy-kax-global-emits-tg` test) are NOT entered here
+// -- those still emit `uint aN = tg;` via rmu_emit_range_open_ctx's
+// axis_type==5 branch.
+typedef struct {
+  u32 stride_of_axis [256];
+  u32 modulus_of_axis[256];
+  u32 n_globals;
+  u64 total;
+} RmuGlobalDecode;
+
+// Emit a loop opener (or thread-position bind) for a UOP_RANGE leaf.
+// `opt_kind` is the OPT annotation (RMU_NO_OPT if none).
+// `gctx` is the promoted-GLOBAL decode context (NULL for legacy callers).
+// Patterns:
+//   LOCAL                       -> `uint aN = tt;`
+//   promoted GLOBAL, n==1       -> `uint aN = tid;`
+//   promoted GLOBAL, n>=2       -> `uint aN = (tid/stride) % mod;`  (`tid % mod` for innermost)
+//   axis_type==5 (legacy)       -> `uint aN = tg;`
+//   axis_type==1 (REDUCE)       -> `for (...) /*reduce*/ {`
+//   else                        -> `for (...) {`
+static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
+                                    u32 opt_kind,
+                                    RmuGlobalDecode const *gctx) {
   if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return;
   u64 loc = term_val(r);
   u32 axis_id   = term_val(heap_read(loc + 0));
@@ -662,7 +694,22 @@ static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
     fprintf(fp, "uint a%u = tt; /* local ext=%u */\n", axis_id, extent);
     return;
   }
-  if (axis_type == 5 /* legacy KAX_GLOBAL */) {
+  // Promoted output axis -> parallel grid axis decoded from `tid`.
+  if (gctx != NULL && axis_id < 256 && gctx->modulus_of_axis[axis_id] != 0) {
+    u32 stride = gctx->stride_of_axis[axis_id];
+    u32 mod    = gctx->modulus_of_axis[axis_id];
+    if (gctx->n_globals == 1) {
+      fprintf(fp, "uint a%u = tid; /* global ext=%u */\n", axis_id, extent);
+    } else if (stride <= 1) {
+      fprintf(fp, "uint a%u = tid %% %uu; /* global ext=%u */\n",
+              axis_id, mod, extent);
+    } else {
+      fprintf(fp, "uint a%u = (tid / %uu) %% %uu; /* global ext=%u */\n",
+              axis_id, stride, mod, extent);
+    }
+    return;
+  }
+  if (axis_type == 5 /* legacy KAX_GLOBAL (TC/conv templates, test) */) {
     fprintf(fp, "uint a%u = tg; /* global ext=%u */\n", axis_id, extent);
     return;
   }
@@ -673,6 +720,119 @@ static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
     fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) {\n",
             axis_id, axis_id, extent, axis_id);
   }
+}
+
+// Legacy entry: dispatches to ctx-aware version with NULL ctx.
+static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
+                                u32 opt_kind) {
+  rmu_emit_range_open_ctx(r, fp, depth, opt_kind, NULL);
+}
+
+// Build the promoted-GLOBAL decode context.  `promote[]` is parallel
+// to `ranges[]`: 1 means "this output axis was a plain KAX_LOOP with
+// no OPT and should become a parallel grid axis".  Walks right-to-left
+// so the innermost promoted axis gets stride 1 and each one to the
+// left multiplies its inner's extent.
+static void rmu_compute_global_decode(Term const *ranges, u32 n_ranges,
+                                      u8 const *promote,
+                                      RmuGlobalDecode *out) {
+  memset(out, 0, sizeof(*out));
+  u32 stride = 1;
+  u32 n_glb  = 0;
+  u64 total  = 1;
+  for (i32 i = (i32)n_ranges - 1; i >= 0; i--) {
+    if (!promote[i]) continue;
+    Term r = ranges[i];
+    if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+    u64 loc = term_val(r);
+    u32 axis_id = (u32)term_val(heap_read(loc + 0));
+    u32 extent  = (u32)term_val(heap_read(loc + 2));
+    if (axis_id >= 256 || extent == 0) continue;
+    out->stride_of_axis [axis_id] = stride;
+    out->modulus_of_axis[axis_id] = extent;
+    n_glb++;
+    stride *= extent;
+    total  *= extent;
+  }
+  out->n_globals = n_glb;
+  out->total     = (n_glb > 0) ? total : 0;
+}
+
+// Shared prelude for the reduce-shaped emit paths (rmu_emit_conv and
+// the generic accumulator path in rmu_emit_store_reduce).  Given the
+// output-axis ranges (the reduce axis already split off) and the
+// store position `addr`, this:
+//   1. promotes every plain-LOOP output axis that actually indexes
+//      the store position to a parallel grid axis (decoded from tid),
+//   2. emits the `if (tid >= total) return;` bounds guard,
+//   3. emits each output axis (thread-position bind for promoted /
+//      LOCAL / explicit-GLOBAL, `for`-loop otherwise),
+//   4. fills needs_close[] and returns the post-prelude body depth.
+// Auxiliary loop axes (in red_src but NOT in addr -- rare) stay
+// serial: promoting them would make threads race on the same output
+// address.
+static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
+                                 u32 const *out_kinds,
+                                 u32 const *out_factors,
+                                 u32 n_out, u32 depth, FILE *fp,
+                                 int *needs_close) {
+  Term addr_ranges[MAX_DIM];
+  u32  addr_n = 0;
+  rmu_collect_ranges(addr, addr_ranges, &addr_n);
+  u32 addr_axes[MAX_DIM];
+  for (u32 i = 0; i < addr_n; i++) {
+    addr_axes[i] = (term_tag(addr_ranges[i]) == TAG_UOP
+                    && term_ext(addr_ranges[i]) == UOP_RANGE)
+                 ? (u32)term_val(heap_read(term_val(addr_ranges[i]) + 0))
+                 : 0xFFFFFFFFu;
+  }
+  // C99 target has no thread positions: keep serial loops.  Also skip
+  // promotion if the kernel carries any per-axis OPT (autotune ran;
+  // the tile-layout dispatch is in play and the renderer's opted-axis
+  // emit already handles parallelism).
+  int any_opt = 0;
+  for (u32 i = 0; i < n_out; i++) if (out_kinds[i] != RMU_NO_OPT) { any_opt = 1; break; }
+  u8 promote[MAX_DIM] = {0};
+  if (!RMU_TARGET_C && !any_opt) {
+    for (u32 i = 0; i < n_out; i++) {
+      Term r = out_ranges[i];
+      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+      if (out_kinds[i] != RMU_NO_OPT) continue;
+      u32 axis_id   = (u32)term_val(heap_read(term_val(r) + 0));
+      u32 axis_type = (u32)term_val(heap_read(term_val(r) + 1));
+      if (axis_type != 0 /* KAX_LOOP */) continue;
+      int is_output = 0;
+      for (u32 j = 0; j < addr_n; j++) if (addr_axes[j] == axis_id) { is_output = 1; break; }
+      if (is_output) promote[i] = 1;
+    }
+  }
+  RmuGlobalDecode gd;
+  rmu_compute_global_decode(out_ranges, n_out, promote, &gd);
+  if (gd.n_globals > 0 && gd.total > 0) {
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "if (tid >= %lluu) return;\n", (unsigned long long)gd.total);
+  }
+  u32 body_depth = depth;
+  for (u32 i = 0; i < n_out; i++) {
+    Term r = out_ranges[i];
+    u32 axis_id   = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
+                  ? (u32)term_val(heap_read(term_val(r) + 0)) : 0xFFFFFFFFu;
+    u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
+                  ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
+    int promoted    = (axis_id < 256 && gd.modulus_of_axis[axis_id] != 0);
+    int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type)
+                   || promoted;
+    if (out_kinds[i] != RMU_NO_OPT
+        && (out_kinds[i] == UOP_OPT_UNROLL || out_kinds[i] == UOP_OPT_UPCAST)
+        && !threadbound) {
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+      if (out_factors[i] > 0) fprintf(fp, "#pragma unroll(%u)\n", out_factors[i]);
+      else                    fputs("#pragma unroll\n", fp);
+    }
+    rmu_emit_range_open_ctx(r, fp, body_depth, out_kinds[i], &gd);
+    if (!threadbound) { needs_close[i] = 1; body_depth++; }
+  }
+  return body_depth;
 }
 
 // Recognise the canonical matmul shape:
@@ -1137,21 +1297,13 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
   for (u32 d = 0; d < depth; d++) fputs("  ", fp);
   fprintf(fp, "/* CONV2D template (KRED=%u) */\n", red_extent);
 
-  // Emit output ranges (outer loops); identical to the generic
-  // accumulator path's prelude.
-  u32 body_depth = depth;
+  // Emit output ranges: promoted-GLOBAL (tid decode) for plain-LOOP
+  // output axes, threadbinds for LOCAL/explicit-GLOBAL, serial loops
+  // otherwise.  Emits the `if (tid >= total) return;` bounds guard.
   int needs_close[MAX_DIM] = {0};
-  for (u32 i = 0; i < n_out; i++) {
-    Term r = out_ranges[i];
-    u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
-                  ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
-    int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type);
-    rmu_emit_range_open(r, fp, body_depth, out_kinds[i]);
-    if (!threadbound) {
-      needs_close[i] = 1;
-      body_depth++;
-    }
-  }
+  u32 body_depth = rmu_emit_output_loops(addr, out_ranges, out_kinds,
+                                         out_factors, n_out, depth, fp,
+                                         needs_close);
   // Accumulator decl; reduce-axis loop with #pragma unroll when KRED
   // is small.  Skip the pragma on the C target -- C99 has no
   // #pragma unroll; clang accepts `#pragma clang loop unroll(full)`
@@ -1247,31 +1399,13 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     return 0;
   }
 
-  // Emit output ranges (outer loops).
-  u32 body_depth = depth;
+  // Emit output ranges: promoted-GLOBAL (tid decode) for plain-LOOP
+  // output axes, threadbinds for LOCAL/explicit-GLOBAL, serial loops
+  // otherwise.  Emits the `if (tid >= total) return;` bounds guard.
   int needs_close[MAX_DIM] = {0};
-  for (u32 i = 0; i < n_out; i++) {
-    Term r = out_ranges[i];
-    u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
-                  ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
-    int threadbound = rmu_axis_is_threadbound(out_kinds[i], axis_type);
-    if (out_kinds[i] != RMU_NO_OPT
-        && (out_kinds[i] == UOP_OPT_UNROLL
-            || out_kinds[i] == UOP_OPT_UPCAST)
-        && !threadbound) {
-      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-      if (out_factors[i] > 0) {
-        fprintf(fp, "#pragma unroll(%u)\n", out_factors[i]);
-      } else {
-        fputs("#pragma unroll\n", fp);
-      }
-    }
-    rmu_emit_range_open(r, fp, body_depth, out_kinds[i]);
-    if (!threadbound) {
-      needs_close[i] = 1;
-      body_depth++;
-    }
-  }
+  u32 body_depth = rmu_emit_output_loops(addr, out_ranges, out_kinds,
+                                         out_factors, n_out, depth, fp,
+                                         needs_close);
   // GROUP_REDUCE detection has to fire BEFORE we declare the scalar
   // accumulator -- otherwise the rendered MSL would have both decls
   // and the threadgroup-shared `_acc[L]` collides with the prior
@@ -1353,6 +1487,40 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
                  ? (u32)term_val(heap_read(term_val(addr_ranges[i]) + 0))
                  : 0xFFFFFFFFu;
   }
+
+  // Default-parallelise: every output axis (axis_id in addr_axes)
+  // that's still a plain KAX_LOOP with no OPT wrap becomes a GLOBAL
+  // grid axis.  Without this the renderer emits a serial for-loop
+  // nest -- the dispatcher launches N threads (one per output
+  // element) but every thread re-runs the full nest, producing ~N x
+  // over-work.  Reduce / UPCAST / UNROLL / LOCAL / GROUP axes and
+  // any axis already KAX_GLOBAL are left alone (the TC matmul and
+  // conv2d_flat templates run before this and bind their own
+  // parallel axes).  The decode context below treats the promoted
+  // ranges identically to ranges that arrived axis_type==KAX_GLOBAL.
+  int any_opt = 0;
+  for (u32 i = 0; i < n_ranges; i++) if (opt_kinds[i] != RMU_NO_OPT) { any_opt = 1; break; }
+  u8 promote_global[MAX_DIM] = {0};
+  if (!RMU_TARGET_C && !any_opt) {
+    for (u32 i = 0; i < n_ranges; i++) {
+      Term r = ranges[i];
+      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+      if (opt_kinds[i] != RMU_NO_OPT) continue;
+      u32 axis_id   = (u32)term_val(heap_read(term_val(r) + 0));
+      u32 axis_type = (u32)term_val(heap_read(term_val(r) + 1));
+      if (axis_type != 0 /* KAX_LOOP */) continue;
+      int is_output = 0;
+      for (u32 j = 0; j < addr_n; j++) if (addr_axes[j] == axis_id) { is_output = 1; break; }
+      if (is_output) promote_global[i] = 1;
+    }
+  }
+
+  // Multi-GLOBAL decode context: when >=2 GLOBAL axes flow through
+  // tid, each needs its own (stride, modulus) decode from the flat
+  // 1-D dispatch index.  Single-GLOBAL kernels emit `uint a0 = tid;`
+  // (one axis, stride 1).
+  RmuGlobalDecode g_decode;
+  rmu_compute_global_decode(ranges, n_ranges, promote_global, &g_decode);
 
   // Collect reduces and compute per-reduce *required emission depth*.
   // A reduce must emit AFTER all output-axis loops it depends on are
@@ -1483,6 +1651,16 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
     } \
   } while (0)
 
+  // Bounds guard for promoted-GLOBAL kernels: the dispatcher launches
+  // ceil(total/256)*256 threads (one per output element, rounded up to
+  // a threadgroup multiple), so threads with tid >= total must do
+  // nothing.  Emit it before any reduce/loop so the early-out is cheap.
+  if (g_decode.n_globals > 0 && g_decode.total > 0) {
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "if (tid >= %lluu) return;\n",
+            (unsigned long long)g_decode.total);
+  }
+
   // Pass 0: emit reduces with required_pos == 0 BEFORE any output
   // loop.  These are fully hoistable -- their body uses no output axis.
   for (u32 i = 0; i < n_reduces; i++) {
@@ -1496,9 +1674,15 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   int needs_close[MAX_DIM] = {0};
   for (u32 i = 0; i < n_ranges; i++) {
     Term r = ranges[i];
+    u32 axis_id   = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
+                  ? (u32)term_val(heap_read(term_val(r) + 0)) : 0xFFFFFFFFu;
     u32 axis_type = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE)
                   ? (u32)term_val(heap_read(term_val(r) + 1)) : 0;
-    int threadbound = rmu_axis_is_threadbound(opt_kinds[i], axis_type);
+    // Promoted output axes are thread-bound (decoded from `tid`, no
+    // `{` block) just like LOCAL / explicit-GLOBAL axes.
+    int promoted = (axis_id < 256 && g_decode.modulus_of_axis[axis_id] != 0);
+    int threadbound = rmu_axis_is_threadbound(opt_kinds[i], axis_type)
+                   || promoted;
     if (opt_kinds[i] != RMU_NO_OPT
         && (opt_kinds[i] == UOP_OPT_UNROLL
             || opt_kinds[i] == UOP_OPT_UPCAST)
@@ -1510,7 +1694,7 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
         fputs("#pragma unroll\n", fp);
       }
     }
-    rmu_emit_range_open(r, fp, body_depth, opt_kinds[i]);
+    rmu_emit_range_open_ctx(r, fp, body_depth, opt_kinds[i], &g_decode);
     if (!threadbound) {
       needs_close[i] = 1;
       body_depth++;
