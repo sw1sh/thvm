@@ -271,15 +271,24 @@ there are multiple agents of the same kind.
 
 ## Fresh labels
 
-`TSup` and `TDup` come in two forms:
+`TSup` and `TDup` come in auto-label and explicit-label forms:
 
 ```wolfram
 TSup[a, b]                    (* SUP with TFreshLabel[] *)
 TSup[label_Integer, a, b]     (* SUP with explicit label *)
 
-TDup[body, k]                 (* DUP with TFreshLabel[] *)
-TDup[label_Integer, body, k]  (* DUP with explicit label *)
+TDup[body]                    (* DUP with TFreshLabel[]; returns {dp0, dp1} *)
+TDup[label_Integer, body]     (* DUP with explicit label; returns {dp0, dp1} *)
+TDup[body, k]                 (* CPS form: calls k[dp0, dp1] *)
+TDup[label_Integer, body, k]  (* CPS form with explicit label *)
 ```
+
+`TDup` allocates a single dup cell but produces two terms (a DP0 and
+a DP1 sharing that cell), so the pair-returning form hands them back
+as `{dp0, dp1}` -- destructure with `{a, b} = TDup[t]`. The CPS
+forms `TDup[body, k]` / `TDup[label, body, k]` instead apply `k` to
+the two projections (`k @@ TDup[...]`), which reads well inside a
+term builder: `TDup[s, {s0, s1} |-> ...]`.
 
 `TFreshLabel[]` returns the next integer from a monotonic counter
 and bumps it. The counter is reset by `TReset[]`. Use the

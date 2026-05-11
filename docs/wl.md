@@ -52,9 +52,9 @@ arguments and returns a single `Integer`:
 | stats      | `thvm_wl_itrs`       | read `ITRS`               |
 
 Higher-level constructors that bind names (`TLam[x, body]` with
-HoldAll, `TDup` returning `{dp0, dp1}` via a continuation) are
-synthesized on the WL side from these scalars. This keeps the C
-surface tiny and testable from C alone.
+HoldAll, `TDup[body]` returning `{dp0, dp1}`) are synthesized on the
+WL side from these scalars. This keeps the C surface tiny and
+testable from C alone.
 
 ## WL package
 
@@ -91,16 +91,20 @@ TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
 ]
 ```
 
-`TDup[label, body, k]` uses a continuation to deliver the two
-projections because `TDup` allocates a single dup cell but produces
-two terms:
+`TDup[body]` returns the pair `{dp0, dp1}` because `TDup` allocates
+a single dup cell but produces two terms (a DP0 and a DP1 sharing
+that cell):
 
 ```wolfram
-TDup[label_, body_, k_] := With[{loc = heapWith[body]},
-    k[TTermNew[0, $TagDP0, label, loc],
-      TTermNew[0, $TagDP1, label, loc]]
+TDup[label_Integer, body_] := With[{loc = heapWith[body]},
+    {TTermNew[0, $TagDP0, label, loc],
+     TTermNew[0, $TagDP1, label, loc]}
 ]
 ```
+
+The CPS variants `TDup[body, k]` / `TDup[label, body, k]` just apply
+`k` to that pair (`k @@ TDup[label, body]`), which reads well inside
+a term builder: `TDup[s, {s0, s1} |-> ...]`.
 
 ## Sugar
 

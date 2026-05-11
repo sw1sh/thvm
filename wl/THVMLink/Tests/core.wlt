@@ -116,6 +116,26 @@ VerificationTest[
     TestID -> "TDup yields DP0/DP1 sharing explicit label and heap loc"
 ]
 
+VerificationTest[
+    (TReset[]; Module[{pair = TDup[5, TEra[]]},
+        {Head[pair], Length[pair],
+         TTermTag[pair[[1]]], TTermTag[pair[[2]]],
+         TTermExt[pair[[1]]],
+         TTermVal[pair[[1]]] === TTermVal[pair[[2]]]}
+    ]),
+    {List, 2, $TagDP0, $TagDP1, 5, True},
+    TestID -> "TDup[label, body] returns the {dp0, dp1} pair directly"
+]
+
+VerificationTest[
+    (TReset[];
+     Block[{p1 = TDup[TEra[]], p2 = TDup[TEra[]]},
+        {Head[p1], TTermExt[p1[[1]]], TTermExt[p2[[1]]],
+         TTermExt[p1[[1]]] =!= TTermExt[p2[[1]]]}]),
+    {List, 1, 2, True},
+    TestID -> "TDup[body] auto-labels and returns a fresh {dp0, dp1} pair"
+]
+
 (* === TFreshLabel + auto-label overloads === *)
 
 VerificationTest[

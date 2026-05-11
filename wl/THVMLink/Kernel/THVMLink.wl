@@ -69,7 +69,7 @@ TDsu::usage       = "TDsu[label, a, b] constructs a dynamic-label SUP (HVM4 DSU)
 TDdu::usage       = "TDdu[label, val, body] constructs a dynamic-label DUP (HVM4 DDU): same shape as TDsu but on the DUP side.  body must be a 2-arg LAM-pair; once label resolves to NUM(n), the DDU reduces to body(X0, X1) where X0/X1 are projections of DUP^n on val.";
 TTermEq::usage    = "TTermEq[a, b] returns True if `a` and `b` cnf-reduce to structurally equal terms (modulo VAR alpha-aliasing), False otherwise.  Drives both sides through cnf so DP-rooted projections fire and SUP heads lift.  Use TTermSame for the no-reduction variant on already-CNF'd terms.";
 TTermSame::usage = "TTermSame[a, b] returns True if `a` and `b` are structurally equal without further reduction.  Compares tag/ext/val and recurses on children; same-loc compounds are trivially equal.  Cheap when callers already have CNF terms; for general use prefer TTermEq.";
-TDup::usage       = "TDup[body, k] constructs a DUP with a fresh label and calls `k[dp0, dp1]`.  TDup[label, body, k] uses an explicit label.";
+TDup::usage       = "TDup[body] constructs a DUP with a fresh label and returns the pair {dp0, dp1} (DP0/DP1 tags sharing one dup cell).  TDup[label, body] uses an explicit integer label.  TDup[body, k] / TDup[label, body, k] are CPS variants that call k[dp0, dp1] instead.";
 
 (* === tag constants (mirror src/thvm.h) === *)
 $TagAPP::usage = $TagLAM::usage = $TagVAR::usage = $TagERA::usage =
@@ -1105,11 +1105,13 @@ TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
 TTerm[c_Integer, id_Integer, _][y_TTerm]   := TApp[TTerm[c, id], y]
 TTerm[c_Integer, id_Integer, _][y_Integer] := TApp[TTerm[c, id], y]
 
-TDup[body_, k_]                       := TDup[TFreshLabel[], body, k]
-TDup[label_Integer, body_, k_] := With[{loc = heapWith[body]},
-    k[packTerm[0, $TagDP0, label, loc],
-      packTerm[0, $TagDP1, label, loc]]
+TDup[body_]                           := TDup[TFreshLabel[], body]
+TDup[label_Integer, body_] := With[{loc = heapWith[body]},
+    {packTerm[0, $TagDP0, label, loc],
+     packTerm[0, $TagDP1, label, loc]}
 ]
+TDup[body_, k_]                       := TDup[TFreshLabel[], body, k]
+TDup[label_Integer, body_, k_]        := k @@ TDup[label, body]
 
 (* === heap graph rendering ===
    Defined in Visualization.wl (loaded below).  Public symbol
