@@ -497,6 +497,42 @@ static int rmu_term_contains(Term t, Term needle) {
   return rmu_term_contains_rec(t, needle, 0);
 }
 
+// Returns 1 if `t`'s subtree contains a UOP_REDUCE node anywhere.
+// Used by rmu_emit_store_reduce to decline the single-reduce
+// specialisation when the reduce body itself contains a nested
+// reduce -- those need the generic rmu_emit_store path, which
+// post-order-collects every reduce and hoists each accumulator's
+// declaration ahead of its consumers (rmu_emit_store_reduce only
+// emits the outer accumulator, leaving the inner `_accN`
+// undeclared -> MSL "use of undeclared identifier" -> per-op
+// fallback for that kernel).
+static int rmu_term_has_reduce(Term t, u32 depth) {
+  if (depth > 256) return 0;
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_REDUCE) return 1;
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      return rmu_term_has_reduce(heap_read(loc + 0), depth + 1)
+          || rmu_term_has_reduce(heap_read(loc + 1), depth + 1);
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_OPT:
+      return rmu_term_has_reduce(heap_read(loc + 0), depth + 1);
+    case UOP_IWHERE:
+      return rmu_term_has_reduce(heap_read(loc + 0), depth + 1)
+          || rmu_term_has_reduce(heap_read(loc + 1), depth + 1)
+          || rmu_term_has_reduce(heap_read(loc + 2), depth + 1);
+    default:
+      return 0;
+  }
+}
+
 // Walk a term tree collecting UOP_REDUCE nodes for hoisting.  Each
 // REDUCE produces a separate accumulator.  Up to MAX_DIM reduces.
 static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
@@ -1409,6 +1445,15 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   Term addr = heap_read(sloc + 1);
   u64 rloc      = term_val(value);
   Term red_src  = heap_read(rloc + 0);
+  // Decline if the reduce body contains a nested reduce: this
+  // specialisation only emits the OUTER accumulator, so an inner
+  // `_accN` referenced in the body would be undeclared in the MSL.
+  // Fall through to the generic rmu_emit_store path, which
+  // post-order-collects every reduce and hoists each accumulator's
+  // declaration ahead of its consumers (handles e.g. the BN-fused
+  // forward kernel `sum_w((ReLU(conv_out_w) * bn_scale)^2)` where
+  // bn_scale = mean/var reduces nested inside the w-sum's body).
+  if (rmu_term_has_reduce(red_src, 0)) return 0;
   u32  red_kind = term_val(heap_read(rloc + 1));
   u32  red_axis = term_val(heap_read(rloc + 2));
 
