@@ -71,14 +71,14 @@ static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
     threads = group_reduce_extent;
   } else if (local_total > 1) {
     if (local_total > 1024) return 0;     // Apple maxTotalThreadsPerTG
-    // `tid` ranges over total*local_total threads (groups*threads); the
-    // renderer decodes every output axis from `tid` directly, so the
-    // threadgroup grouping only affects occupancy, not correctness.
-    if (total > 0xFFFFFFFFu / local_total) return 0;
+    // tg/tt split (mirrors render_uop.c's RmuGlobalDecode.has_local):
+    // GLOBAL extents -> grid (one threadgroup per GLOBAL tuple, decoded
+    // from `tg`); LOCAL extents -> threadgroup (decoded from `tt`).  So
+    // `groups` is exactly the product of promoted-LOOP output extents
+    // and `threads` is exactly the product of LOCAL extents.
+    if (total > 0xFFFFFFFFu) return 0;
     threads = (u32)local_total;
-    u64 g = (total + local_total - 1) / local_total;
-    if (g == 0 || g > 0xFFFFFFFFu) return 0;
-    groups = (u32)g;
+    groups  = (u32)total;
   } else {
     threads = total < 256 ? (u32)total : 256u;
     groups  = (u32)((total + (u64)threads - 1) / (u64)threads);

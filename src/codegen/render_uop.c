@@ -708,11 +708,26 @@ static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
 // `render-uop/legacy-kax-global-emits-tg` test) are NOT entered here
 // -- those still emit `uint aN = tg;` via rmu_emit_range_open_ctx's
 // axis_type==5 branch.
+//
+// tg/tt split: when the kernel ALSO carries a LOCAL axis (a KOP_LOCAL
+// split: OPT(_, LOCAL, f) wrapping the INNER half, the OUTER half a
+// plain promoted-GLOBAL axis), the promoted-GLOBAL axes must decode
+// from `tg` (threadgroup_position_in_grid), NOT `tid`
+// (thread_position_in_grid) -- otherwise the GLOBAL decode would
+// include the `tt` bits (`tid = tg*threads + tt`) and repeat values
+// within each threadgroup.  tinygrad's `has_local && has_global`
+// convention: GLOBAL extents -> grid (`groups`, indexed by tg), LOCAL
+// extents -> threadgroup (`threads`, indexed by tt).  `has_local` is
+// set by rmu_compute_global_decode_ctx when it sees a LOCAL-OPT'd (or
+// legacy axis_type==4) range; with no LOCAL axis it's 0 and the
+// existing `tid` decode (equivalent to tg*threads+tt with threads
+// derived from the dispatch shape) is kept unchanged.
 typedef struct {
   u32 stride_of_axis [256];
   u32 modulus_of_axis[256];
   u32 n_globals;
   u64 total;
+  int has_local;     // 1 -> decode GLOBAL axes from `tg`, not `tid`
 } RmuGlobalDecode;
 
 // Emit a loop opener (or thread-position bind) for a UOP_RANGE leaf.
@@ -764,18 +779,22 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
     fprintf(fp, "uint a%u = tt; /* local ext=%u */\n", axis_id, extent);
     return;
   }
-  // Promoted output axis -> parallel grid axis decoded from `tid`.
+  // Promoted output axis -> parallel grid axis.  Decoded from `tid`
+  // (thread_position_in_grid) normally; from `tg`
+  // (threadgroup_position_in_grid) when the kernel also has a LOCAL
+  // axis (one threadgroup per GLOBAL tuple, LOCAL axis over `tt`).
   if (gctx != NULL && axis_id < 256 && gctx->modulus_of_axis[axis_id] != 0) {
     u32 stride = gctx->stride_of_axis[axis_id];
     u32 mod    = gctx->modulus_of_axis[axis_id];
+    char const *idx = gctx->has_local ? "tg" : "tid";
     if (gctx->n_globals == 1) {
-      fprintf(fp, "uint a%u = tid; /* global ext=%u */\n", axis_id, extent);
+      fprintf(fp, "uint a%u = %s; /* global ext=%u */\n", axis_id, idx, extent);
     } else if (stride <= 1) {
-      fprintf(fp, "uint a%u = tid %% %uu; /* global ext=%u */\n",
-              axis_id, mod, extent);
+      fprintf(fp, "uint a%u = %s %% %uu; /* global ext=%u */\n",
+              axis_id, idx, mod, extent);
     } else {
-      fprintf(fp, "uint a%u = (tid / %uu) %% %uu; /* global ext=%u */\n",
-              axis_id, stride, mod, extent);
+      fprintf(fp, "uint a%u = (%s / %uu) %% %uu; /* global ext=%u */\n",
+              axis_id, idx, stride, mod, extent);
     }
     return;
   }
@@ -802,10 +821,15 @@ static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
 // to `ranges[]`: 1 means "this output axis was a plain KAX_LOOP with
 // no OPT and should become a parallel grid axis".  Walks right-to-left
 // so the innermost promoted axis gets stride 1 and each one to the
-// left multiplies its inner's extent.
-static void rmu_compute_global_decode(Term const *ranges, u32 n_ranges,
-                                      u8 const *promote,
-                                      RmuGlobalDecode *out) {
+// left multiplies its inner's extent.  `opt_kinds[]` (parallel to
+// `ranges[]`, may be NULL) is scanned for a LOCAL-OPT'd range; when
+// present, out->has_local is set so the GLOBAL decode uses `tg`
+// instead of `tid` (one threadgroup per GLOBAL tuple, LOCAL axes
+// over `tt`).  Legacy axis_type==4 (KAX_LOCAL) ranges also count.
+static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
+                                          u8 const *promote,
+                                          u32 const *opt_kinds,
+                                          RmuGlobalDecode *out) {
   memset(out, 0, sizeof(*out));
   u32 stride = 1;
   u32 n_glb  = 0;
@@ -826,6 +850,25 @@ static void rmu_compute_global_decode(Term const *ranges, u32 n_ranges,
   }
   out->n_globals = n_glb;
   out->total     = (n_glb > 0) ? total : 0;
+  if (!RMU_TARGET_C) {
+    for (u32 i = 0; i < n_ranges; i++) {
+      Term r = ranges[i];
+      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
+      u32 axis_type = (u32)term_val(heap_read(term_val(r) + 1));
+      if ((opt_kinds != NULL && opt_kinds[i] == UOP_OPT_LOCAL)
+          || axis_type == 4 /* legacy KAX_LOCAL */) {
+        out->has_local = 1;
+        break;
+      }
+    }
+  }
+}
+
+// Back-compat shim: no LOCAL axis (opt_kinds = NULL -> has_local = 0).
+static void rmu_compute_global_decode(Term const *ranges, u32 n_ranges,
+                                      u8 const *promote,
+                                      RmuGlobalDecode *out) {
+  rmu_compute_global_decode_ctx(ranges, n_ranges, promote, NULL, out);
 }
 
 // Shared prelude for the reduce-shaped emit paths (rmu_emit_conv and
@@ -880,10 +923,11 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
     }
   }
   RmuGlobalDecode gd;
-  rmu_compute_global_decode(out_ranges, n_out, promote, &gd);
+  rmu_compute_global_decode_ctx(out_ranges, n_out, promote, out_kinds, &gd);
   if (gd.n_globals > 0 && gd.total > 0) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fprintf(fp, "if (tid >= %lluu) return;\n", (unsigned long long)gd.total);
+    fprintf(fp, "if (%s >= %lluu) return;\n",
+            gd.has_local ? "tg" : "tid", (unsigned long long)gd.total);
   }
   u32 body_depth = depth;
   for (u32 i = 0; i < n_out; i++) {
@@ -1610,9 +1654,11 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // Multi-GLOBAL decode context: when >=2 GLOBAL axes flow through
   // tid, each needs its own (stride, modulus) decode from the flat
   // 1-D dispatch index.  Single-GLOBAL kernels emit `uint a0 = tid;`
-  // (one axis, stride 1).
+  // (one axis, stride 1).  If the kernel also has a LOCAL axis the
+  // GLOBAL axes decode from `tg` instead -- see RmuGlobalDecode.
   RmuGlobalDecode g_decode;
-  rmu_compute_global_decode(ranges, n_ranges, promote_global, &g_decode);
+  rmu_compute_global_decode_ctx(ranges, n_ranges, promote_global,
+                                opt_kinds, &g_decode);
 
   // Collect reduces and compute per-reduce *required emission depth*.
   // A reduce must emit AFTER all output-axis loops it depends on are
@@ -1751,10 +1797,13 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // Bounds guard for promoted-GLOBAL kernels: the dispatcher launches
   // ceil(total/256)*256 threads (one per output element, rounded up to
   // a threadgroup multiple), so threads with tid >= total must do
-  // nothing.  Emit it before any reduce/loop so the early-out is cheap.
+  // nothing.  With a LOCAL axis the grid is exactly `total`
+  // threadgroups (one per GLOBAL tuple), so the `tg >= total` form is
+  // a no-op -- but emit it for symmetry.  Emit before any reduce/loop.
   if (g_decode.n_globals > 0 && g_decode.total > 0) {
     for (u32 d = 0; d < depth; d++) fputs("  ", fp);
-    fprintf(fp, "if (tid >= %lluu) return;\n",
+    fprintf(fp, "if (%s >= %lluu) return;\n",
+            g_decode.has_local ? "tg" : "tid",
             (unsigned long long)g_decode.total);
   }
 

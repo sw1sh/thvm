@@ -263,16 +263,37 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     }
   }
 
-  // ---- 3. LOCAL: SKIPPED in v2 ----
+  // ---- 3. LOCAL: one threadgroup-local split ----
   // tinygrad groups output axes into ~256-thread threadgroups via
-  // Opt(OptOps.LOCAL, ...).  thvm's DAG-mode renderer decodes a
-  // promoted-GLOBAL output axis from `tid` but a LOCAL axis from `tt`;
-  // a kernel with BOTH would mis-decode the GLOBAL (it'd include the
-  // `tt` bits in `tid`).  Until the renderer learns a tg/tt split,
-  // the heuristic emits NO LOCAL opts -- a kernel only ever sees
-  // promoted-GLOBAL + UPCAST + REDUCE axes, which compose cleanly.
-  // (KOP_LOCAL is still reachable via the THVM_AUTOTUNE BEAM path,
-  // which uses the schedule-axis dispatch reader, not this DAG path.)
+  // Opt(OptOps.LOCAL, ...).  The renderer's tg/tt split is now wired
+  // (RmuGlobalDecode.has_local): a kernel with a LOCAL axis decodes its
+  // promoted-GLOBAL axes from `tg` (one threadgroup per GLOBAL tuple)
+  // and the LOCAL axis from `tt`; cg_tile_metal_dispatch_shape's
+  // rmt_dag_dispatch_shape produces (groups = prod(GLOBAL extents),
+  // threads = prod(LOCAL extents)) to match.  We do ONE LOCAL split
+  // (the renderer's `uint aN = tt;` emit is exact for a single LOCAL
+  // axis; multi-axis tt-decode is a follow-up reachable via the
+  // THVM_AUTOTUNE BEAM path).  Pick the innermost still-plain-KAX_LOOP
+  // output axis (the outer half of any UPCAST split is still KAX_LOOP),
+  // and the largest factor in {256,128,...,2} that divides its extent
+  // and keeps the threadgroup size <= 256.
+  {
+    static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
+    if (hand_opt_snapshot_axes(ke, &ax)) {
+      u32 axis = hand_opt_last_output_axis(&ax);
+      if (axis != 0xFFFFFFFFu) {
+        u32 ext = ax.extent[axis];
+        for (u32 i = 0; i < 8; i++) {
+          u32 f = local_factors[i];
+          if (f > 256) continue;
+          if (ext % f != 0 || ext / f < 1) continue;
+          KOpt opt = { KOP_LOCAL, (u8)axis, f };
+          if (kernel_apply_opt(ke, opt)) { n_applied++; }
+          break;  // one LOCAL split only
+        }
+      }
+    }
+  }
 
   // ---- 4. GROUP the reduce axis: SKIPPED in v2 ----
   // KOP_GROUPTOP / KOP_GROUP split the reduce axis for a threadgroup-

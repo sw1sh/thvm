@@ -13,6 +13,27 @@ static int contains(const char *haystack, const char *needle) {
   return strstr(haystack, needle) != NULL;
 }
 
+// Write `msl` to a temp file and run `xcrun metal -x metal -c`; returns
+// 0 if it compiled (or xcrun unavailable -- skip rather than fail).
+static int xcrun_metal_available(void) {
+  return system("xcrun -f metal >/dev/null 2>&1") == 0;
+}
+static int compile_msl_xcrun(const char *msl) {
+  char path[] = "/tmp/thvm_render_uop_msl_XXXXXX";
+  int fd = mkstemp(path);
+  if (fd < 0) return -1;
+  FILE *f = fdopen(fd, "w");
+  if (f == NULL) { close(fd); unlink(path); return -1; }
+  fputs(msl, f);
+  fclose(f);
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd),
+           "xcrun metal -x metal -c %s -o /dev/null 2>/dev/null", path);
+  int rc = system(cmd);
+  unlink(path);
+  return rc == 0 ? 0 : 1;
+}
+
 int main(void) {
   thvm_init();
 
@@ -465,6 +486,63 @@ int main(void) {
   fclose(fp);
   CHECK(contains(bufrm, "= -INFINITY"));
   CHECK(contains(bufrm, "fmax(_acc1, "));
+
+  TEST_BEGIN("render-uop/local-upcast-global-decode");
+  // matmul-shaped reduce STORE with KOP_UPCAST(N, 4) then
+  // KOP_LOCAL(N_outer, 4).  After the two DAG splits the N axis-line is
+  // [N_outer (KAX_LOOP -> promoted GLOBAL), N_local (KAX_LOCAL, ext 4),
+  // N_inner (KAX_UPCAST, ext 4)] and M is KAX_LOOP -> promoted GLOBAL.
+  // With a LOCAL axis present the renderer decodes the GLOBAL axes from
+  // `tg` (not `tid`) and the LOCAL axis from `tt`; the bounds guard
+  // becomes `tg >= prod(GLOBAL extents)`.
+  {
+    u32 dC_lu[2] = { 32, 64 };
+    u32 dA_lu[2] = { 32, 8  };
+    u32 dB_lu[2] = { 8,  64 };
+    Term C_lu = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dC_lu);
+    Term A_lu = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dA_lu);
+    Term B_lu = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dB_lu);
+    Term in_lu[2] = { A_lu, B_lu };
+    Term rm_lu = uop_range(0, 0 /*LOOP*/,   32);
+    Term rn_lu = uop_range(1, 0 /*LOOP*/,   64);
+    Term rk_lu = uop_range(2, 1 /*REDUCE*/, 8);
+    Term k8_lu  = uop_const(DT_INT32, 8);
+    Term k64_lu = uop_const(DT_INT32, 64);
+    Term aA_lu  = uop_index_e(A_lu, uop_int_binary(UOP_IADD,
+                                  uop_int_binary(UOP_IMUL, rm_lu, k8_lu), rk_lu));
+    Term aB_lu  = uop_index_e(B_lu, uop_int_binary(UOP_IADD,
+                                  uop_int_binary(UOP_IMUL, rk_lu, k64_lu), rn_lu));
+    Term mm_lu  = uop_binary(UOP_MUL, aA_lu, aB_lu);
+    Term rd_lu  = uop_reduce(REDUCE_SUM, /*axis=*/2, mm_lu);
+    Term aC_lu  = uop_int_binary(UOP_IADD,
+                                 uop_int_binary(UOP_IMUL, rm_lu, k64_lu), rn_lu);
+    Term st_lu  = uop_store(C_lu, aC_lu, rd_lu);
+    KOpt up_lu = { KOP_UPCAST, 1 /*N axis*/, 4 };
+    Term st_lu1 = uop_dag_apply_kopt(st_lu, up_lu);
+    CHECK(st_lu1 != 0 && st_lu1 != st_lu);
+    // After UPCAST: axes M(0), N_outer(1, ext 16), N_inner(2, UPCAST 4),
+    // K(3, REDUCE).  LOCAL-split N_outer (axis 1) by 4.
+    KOpt lc_lu = { KOP_LOCAL, 1 /*N_outer*/, 4 };
+    Term st_lu2 = uop_dag_apply_kopt(st_lu1, lc_lu);
+    CHECK(st_lu2 != 0 && st_lu2 != st_lu1);
+    char buflu[4096];
+    fp = fmemopen(buflu, sizeof(buflu), "w");
+    cg_render_uop_kernel(st_lu2, "k", C_lu, in_lu, 2, fp);
+    fclose(fp);
+    // GLOBAL grid = M(32) * N_outer(64/4/4 = 4) = 128 threadgroups,
+    // decoded from `tg`.
+    CHECK(contains(buflu, "if (tg >= 128u) return;"));
+    CHECK(contains(buflu, "% 32u; /* global"));      // M decode off tg
+    CHECK(contains(buflu, "(tg /"));                  // N_outer decode off tg
+    CHECK(!contains(buflu, "tid /"));                 // nothing off tid
+    // LOCAL axis (axis 2 after the second split) -> `uint a2 = tt;`
+    CHECK(contains(buflu, "uint a2 = tt; /* local"));
+    // UPCAST axis (axis 3) -> #pragma unroll(4) for-loop
+    CHECK(contains(buflu, "#pragma unroll(4)"));
+    CHECK(contains(buflu, "for (uint a3 = 0; a3 < 4; a3++)"));
+    // The MSL must actually compile through xcrun metal (if available).
+    if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(buflu), 0);
+  }
 
   TEST_BEGIN("render-uop/legacy-kax-global-emits-tg");
   // Direct axis_type=5 (legacy KAX_GLOBAL) without OPT also emits tg.
