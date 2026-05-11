@@ -279,10 +279,20 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     outShaped + biasBcast
 ]
 
-(* Rank-4 batched analogue of TConv2DIm2ColPool: input {B,cIn,H,W}. *)
+(* Rank-4 batched analogue of TConv2DIm2ColPool: input {B,cIn,H,W}.
+
+   The matmul keeps a 4-D output `{cOut, B, hOut, wOut}` instead of the
+   flattened `{cOut, B*hOut*wOut}` -- so the contiguous wOut axis stays a
+   separate output axis the renderer's conv template can land on the
+   thread lanes (coalesced conv-input reads) and register-block the cOut
+   ("M") axis.  Mechanically a TMatMul with extra trailing axes on the
+   RHS operand: wFlat:{cOut,K} broadcasts over (B,hOut,wOut),
+   xCol4:{K,B,hOut,wOut} broadcasts over cOut, MUL elementwise, REDUCE
+   the K axis.  Both reshapes are contiguity-preserving so EXPAND just
+   sets broadcast strides -- no extra materialization. *)
 TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     input, inShape, wShape, batch, cIn, cOut, h, wd, kh, kw, hOut, wOut, kSpat,
-    rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outObp,
+    kFlat, rh, rw, x1, x2, x3, x4, xCol6, xCol4, wFlat, wExp, xExp, out4,
     outShaped, biasBcast
 },
     input = inputArg;
@@ -295,6 +305,7 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     hOut  = h  - kh + 1;
     wOut  = wd - kw + 1;
     kSpat = kh * kw;
+    kFlat = cIn * kSpat;
     rh = Ceiling[kh * (h + 1) / h];
     rw = Ceiling[kw * (wd + 1) / wd];
     x1 = TUOpReshape[
@@ -307,11 +318,14 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     x4 = TUOpShrink[x3,
         {{0, batch}, {0, cIn}, {0, kh}, {0, hOut}, {0, kw}, {0, wOut}}];
     xCol6 = TUOpPermute[x4, {1, 2, 4, 0, 3, 5}];     (* {cIn,kh,kw,B,hOut,wOut} *)
-    xCol  = TUOpReshape[xCol6, {cIn * kSpat, batch * hOut * wOut}];
-    wFlat = TUOpReshape[weights, {cOut, cIn * kSpat}];
-    outFlat   = TMatMul[wFlat, xCol];               (* {cOut, B*hOut*wOut} *)
-    outObp    = TUOpReshape[outFlat, {cOut, batch, hOut, wOut}];
-    outShaped = TUOpPermute[outObp, {1, 0, 2, 3}];
+    xCol4 = TUOpReshape[xCol6, {kFlat, batch, hOut, wOut}];
+    wFlat = TUOpReshape[weights, {cOut, kFlat}];
+    wExp  = TUOpExpand[TUOpReshape[wFlat, {cOut, kFlat, 1, 1, 1}],
+                       {cOut, kFlat, batch, hOut, wOut}];
+    xExp  = TUOpExpand[TUOpReshape[xCol4, {1, kFlat, batch, hOut, wOut}],
+                       {cOut, kFlat, batch, hOut, wOut}];
+    out4      = TUOpReduce[TUOpMul[wExp, xExp], 1, "SUM"]; (* {cOut,B,hOut,wOut} *)
+    outShaped = TUOpPermute[out4, {1, 0, 2, 3}];           (* {B,cOut,hOut,wOut} *)
     biasBcast = TUOpExpand[
         TUOpReshape[bias, {1, cOut, 1, 1}],
         {batch, cOut, hOut, wOut}];
