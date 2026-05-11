@@ -2045,6 +2045,7 @@ extern u32  thvm_metal_freelist_len(void);
 extern u64  thvm_metal_peak_live_bytes(void);
 extern u64  thvm_metal_peak_retained_bytes(void);
 extern u64  thvm_metal_peak_deferred_bytes(void);
+extern void thvm_metal_gpu_time(u64 *out_total_us, u64 *out_flush_count);
 #endif
 
 EXTERN_C DLLEXPORT int thvm_wl_metal_buf_table(WolframLibraryData libData, mint argc,
@@ -2098,6 +2099,29 @@ EXTERN_C DLLEXPORT int thvm_wl_metal_buf_summary(WolframLibraryData libData, min
   dst[5] = (mint)thvm_metal_peak_live_bytes();
   dst[6] = (mint)thvm_metal_peak_retained_bytes();
   dst[7] = (mint)thvm_metal_peak_deferred_bytes();
+#endif
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// thvm_wl_metal_gpu_time() -- {total_gpu_us, flush_count}.  total_gpu_us
+// is the summed [cmd GPUEndTime]-[cmd GPUStartTime] microseconds across
+// every command-buffer flush/submit since metal_init; flush_count is
+// the number of flushes/submits (incl. empty).  Zero/zero on a non-
+// Metal build.  WL side reads via TMetalGpuTime[].
+EXTERN_C DLLEXPORT int thvm_wl_metal_gpu_time(WolframLibraryData libData, mint argc,
+                                              MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  mint dims[1] = {2};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  dst[0] = 0; dst[1] = 0;
+#ifdef THVM_HAS_METAL
+  u64 total_us = 0, flush_count = 0;
+  thvm_metal_gpu_time(&total_us, &flush_count);
+  dst[0] = (mint)total_us;
+  dst[1] = (mint)flush_count;
 #endif
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;

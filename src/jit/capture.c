@@ -294,6 +294,26 @@ static int jit_metal_graph_replay_enabled(void) {
   return e == NULL || e[0] != '0';
 }
 
+// THVM_JIT_REPLAY_NOSKIP=1 -- disable the liveness-based replay_skip
+// marking in jit_capture_finalize, so EVERY captured dispatch re-fires
+// on replay even when its output isn't observably needed.  This is a
+// measurement aid: the beautiful_mnist `forward` bench discards the
+// loss TTerm, so the normal liveness pass marks all 25 dispatches
+// replay_skip=1 and steady-state replay does zero GPU work (wall=0.0ms
+// is pure WL overhead, not GPU compute).  With NOSKIP the replay path
+// re-dispatches all 25 each step -> wall (after metal_dispatch_flush's
+// waitUntilCompleted) reflects real GPU exec time.  Memoised.
+static int jit_replay_noskip(void) {
+  static int known = 0;
+  static int v = 0;
+  if (!known) {
+    char const *e = getenv("THVM_JIT_REPLAY_NOSKIP");
+    v = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return v;
+}
+
 static u32 jit_metal_graph_max_dispatches(void) {
   static int known = 0;
   static u32 limit = 256;
@@ -1013,6 +1033,7 @@ static void jit_capture_finalize(u32 slot, Term root) {
   u32 n_needed = 0;
   jit_capture_root_needed(root, needed, &n_needed);
 
+  int noskip = jit_replay_noskip();
   for (u32 rev = c->n_ops; rev > 0; rev--) {
     JitCaptureOp *op = &c->ops[rev - 1];
     op->replay_skip = 0;
@@ -1020,9 +1041,9 @@ static void jit_capture_finalize(u32 slot, Term root) {
     switch (op->kind) {
       case JIT_OP_DISPATCH: {
         Backend *out_backend = jit_dispatch_output_backend(op);
-        int output_needed = jit_bufref_contains(needed, n_needed,
-                                                out_backend,
-                                                op->out_buf_id);
+        int output_needed = noskip || jit_bufref_contains(needed, n_needed,
+                                                          out_backend,
+                                                          op->out_buf_id);
         if (!output_needed) {
           op->replay_skip = 1;
           break;

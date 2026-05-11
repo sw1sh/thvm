@@ -47,6 +47,28 @@ static u64 METAL_PEAK_LIVE_BYTES = 0;
 static u64 METAL_PEAK_RETAINED_BYTES = 0;
 static u64 METAL_PEAK_DEFERRED_BYTES = 0;
 
+// GPU-time accumulator: every batch flush (metal_dispatch_flush) and
+// every standalone command-buffer submit waits on the command buffer,
+// then reads [cmd GPUEndTime] - [cmd GPUStartTime] -- Apple's
+// wall-clock GPU execution time for that buffer.  We sum the
+// microseconds across the process here.  The WL surface TMetalGpuTime[]
+// reads {METAL_GPU_US_TOTAL, METAL_GPU_FLUSH_COUNT}; the
+// beautiful_mnist bench takes a delta around the timed loop to report
+// gpu_us_per_step (a real per-step GPU compute number, separate from
+// the WL-side wall=...ms which also includes re-encode overhead).
+static u64 METAL_GPU_US_TOTAL = 0;
+static u64 METAL_GPU_FLUSH_COUNT = 0;
+
+static void metal_record_gpu_time(id<MTLCommandBuffer> cmd) {
+  if (cmd == nil) return;
+  double t0 = cmd.GPUStartTime;
+  double t1 = cmd.GPUEndTime;
+  if (t1 > t0 && t0 > 0.0) {
+    METAL_GPU_US_TOTAL += (u64)((t1 - t0) * 1e6);
+  }
+  METAL_GPU_FLUSH_COUNT++;
+}
+
 static void metal_record_memory_peak(void);
 static void metal_freelist_trim(void);
 
@@ -111,6 +133,7 @@ static void metal_dispatch_flush(void) {
   if (cmd != nil) {
     [cmd commit];
     [cmd waitUntilCompleted];
+    metal_record_gpu_time(cmd);
   }
   u32 n = METAL_DEFER_DECREF_LEN;
   METAL_DEFER_DECREF_LEN = 0;
@@ -150,6 +173,7 @@ static void metal_submit_if_standalone(id<MTLCommandBuffer> cmd) {
   if (METAL_BATCH_DEPTH > 0 && cmd == METAL_BATCH_CMD) return;
   [cmd commit];
   [cmd waitUntilCompleted];
+  metal_record_gpu_time(cmd);
 }
 
 // Forward decls for the JIT counters: definitions live inside the
@@ -210,6 +234,8 @@ static int metal_init(void) {
   METAL_PEAK_LIVE_BYTES = 0;
   METAL_PEAK_RETAINED_BYTES = 0;
   METAL_PEAK_DEFERRED_BYTES = 0;
+  METAL_GPU_US_TOTAL = 0;
+  METAL_GPU_FLUSH_COUNT = 0;
   // Set up the on-disk PSO cache: mkdir, sweep stale (>30d) files.
   // Safe to call before the first dispatch; no-op if disabled via
   // THVM_METAL_PSO_CACHE=0.  Runs after METAL_DEVICE is ready.
@@ -1229,6 +1255,18 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
   if (src == NULL) return nil;
   NSString *srcStr = [NSString stringWithUTF8String:src];
   free(src);
+  // THVM_DUMP_TILE_JIT_SRC=2 (or "all"): dump the generated MSL for
+  // every tile-jit'd kernel up front, tagged with kid -- lets you see
+  // whether conv matmuls picked the simdgroup_matrix template or fell
+  // back to the scalar accumulator.  THVM_DUMP_TILE_JIT_SRC=1 dumps
+  // only on compile failure (below).
+  {
+    char const *d = getenv("THVM_DUMP_TILE_JIT_SRC");
+    if (d != NULL && (d[0] == '2' || d[0] == 'a')) {
+      fprintf(stderr, "---- tile-jit src kid=%u ----\n%s\n----\n",
+              (unsigned)(ke - KERNELS), [srcStr UTF8String]);
+    }
+  }
   u64 t0 = cg_now_us();
   NSError *err = nil;
   id<MTLLibrary> lib = [METAL_DEVICE newLibraryWithSource:srcStr
@@ -1805,6 +1843,11 @@ int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
     cg_profile_record(ops[i].kid, KDISPATCH_METAL_TILE, per);
   }
   return 0;
+}
+
+void thvm_metal_gpu_time(u64 *out_total_us, u64 *out_flush_count) {
+  if (out_total_us != NULL)    *out_total_us    = METAL_GPU_US_TOTAL;
+  if (out_flush_count != NULL) *out_flush_count = METAL_GPU_FLUSH_COUNT;
 }
 
 // METAL_PIPELINES_CACHE is the per-(opcode, dtype) pipeline cache;

@@ -49,6 +49,7 @@ TCpuBufTable::usage   = "TCpuBufTable[] returns a list of {nbytes, refcount, pre
 TMetalBufTable::usage = "TMetalBufTable[] returns a list of {nbytes, refcount} per Metal buffer.  Empty when the dylib was built without Metal support.";
 TMetalBufSummary::usage = "TMetalBufSummary[] returns <|\"LiveBytes\", \"RetainedBytes\", \"DeferredBytes\", \"DeferredCount\", \"FreelistCount\", \"PeakLiveBytes\", \"PeakRetainedBytes\", \"PeakDeferredBytes\"|> for the Metal buffer table.  RetainedBytes includes recycle-list buffers that no live tensor references.";
 TMetalMemoryProfile::usage = "TMetalMemoryProfile[] returns a flat Metal memory profile derived from TMetalBufSummary[] and TMetalBufTable[], including buffer counts, freelist bytes, and largest live/retained buffer sizes.";
+TMetalGpuTime::usage = "TMetalGpuTime[] returns <|\"TotalUs\", \"FlushCount\", \"AvgUsPerFlush\"|>: the process-wide Metal GPU execution time so far -- summed [cmd GPUEndTime]-[cmd GPUStartTime] microseconds across every command-buffer flush/submit since metal_init, plus the flush count.  Take a delta around a timed loop for a real per-step GPU-compute number (separate from a WL-side wall=...ms that also includes re-encode / scheduler overhead).  Zero on a non-Metal build.";
 
 Begin["`Private`"];
 
@@ -72,6 +73,13 @@ TMetalBufSummary[]       := Module[{v},
       "DeferredBytes" -> v[[3]], "DeferredCount" -> v[[4]],
       "FreelistCount" -> v[[5]], "PeakLiveBytes" -> v[[6]],
       "PeakRetainedBytes" -> v[[7]], "PeakDeferredBytes" -> v[[8]]|>
+]
+
+TMetalGpuTime[]          := Module[{v},
+    ensureInit[];
+    v = PadRight[Normal @ $metalGpuTimeFn[], 2, 0];
+    <|"TotalUs" -> v[[1]], "FlushCount" -> v[[2]],
+      "AvgUsPerFlush" -> If[v[[2]] > 0, N[v[[1]] / v[[2]]], 0.]|>
 ]
 
 TMetalMemoryProfile[]    := Module[{

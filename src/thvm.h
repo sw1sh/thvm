@@ -3167,6 +3167,13 @@ extern Backend METAL_BACKEND;
 int thvm_metal_jit_replay_dispatch_ready(JitReplayDispatch const *op);
 int thvm_metal_jit_replay_run(u32 slot, u32 start_op,
                               JitReplayDispatch const *ops, u32 n_ops);
+// Read the process-wide Metal GPU-time accumulator.  *out_total_us =
+// summed [cmd GPUEndTime]-[cmd GPUStartTime] microseconds across every
+// command-buffer flush/submit; *out_flush_count = number of
+// flushes/submits observed (incl. empty ones).  Either pointer may be
+// NULL.  Used by the WL TMetalGpuTime[] surface for per-step GPU-time
+// measurement.
+void thvm_metal_gpu_time(u64 *out_total_us, u64 *out_flush_count);
 #endif
 
 fn void cpu_jit_cache_reset(void);

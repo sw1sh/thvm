@@ -335,8 +335,10 @@ profileBeforeTimed = If[showProfile || showProgramProfile,
     TProfileAll[],
     <||>];
 memoryBeforeTimed = If[showMemoryProfile, TMetalMemoryProfile[], <||>];
+gpuTimeBeforeTimed = TMetalGpuTime[];
 If[showHotCounters, THotCountersReset[]];
 timedTimes = Table[runStep[warmupSteps + i, "timed"], {i, nSteps}];
+gpuTimeAfterTimed = TMetalGpuTime[];
 hotCountersTimed = If[showHotCounters, THotCounters[], <||>];
 profileAfterTimed = If[showProfile || showProgramProfile,
     TProfileAll[],
@@ -349,6 +351,13 @@ profileTimedDelta = If[showProfile || showProgramProfile,
 print[""];
 print["timed_ms=", NumberForm[timedTimes, {8, 1}]];
 print["steady_ms_per_step=", NumberForm[Mean[timedTimes], {8, 1}]];
+Module[{dUs = gpuTimeAfterTimed["TotalUs"] - gpuTimeBeforeTimed["TotalUs"],
+        dFlush = gpuTimeAfterTimed["FlushCount"] - gpuTimeBeforeTimed["FlushCount"]},
+    print["gpu_us_per_step=", NumberForm[N[dUs / Max[nSteps, 1]], {10, 1}],
+          "  gpu_ms_per_step=", NumberForm[N[dUs / 1000. / Max[nSteps, 1]], {8, 3}],
+          "  gpu_flushes=", dFlush,
+          "  gpu_us_total=", dUs,
+          "  (NB: 0 unless THVM_JIT_REPLAY_NOSKIP=1 -- forward mode discards the loss so replay is liveness-skipped)"]];
 print["kernels=", TKernelCount[] - 1,
       " dispatch=", formatCounts[dispatchKindCounts[]]];
 If[showMemoryProfile,
