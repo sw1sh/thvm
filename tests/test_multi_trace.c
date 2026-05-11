@@ -291,6 +291,62 @@ int main(void) {
         multi_trace_free();
     }
 
+    // === Inline WHNF-frame rules (handled in src/wnf/_.c, not as a
+    // dedicated interact_*.c).  These fire when an OP2 / EQL / AND /
+    // OR / WHEN frame pops. =============================================
+
+    TEST_BEGIN("multi-trace/wnf-inline/op2-num-num-folds");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term r = wnf(term_new_op2(OP_ADD, build_num(20), build_num(22)));
+        CHECK_EQ(term_tag(r), TAG_NUM);
+        CHECK_EQ(term_val(r), 42u);
+        u64 idx = find_event(from, RULE_OP2_NUM_NUM, MULTI_TERM);
+        CHECK(idx != (u64)-1);
+        const MultiEvent *e = multi_trace_get(idx);
+        CHECK_EQ(e->delta_label, (u32)OP_ADD);  // opcode in delta_label
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/wnf-inline/eql-num-num");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term r = wnf(term_new_eql(build_num(7), build_num(7)));
+        CHECK_EQ(term_tag(r), TAG_NUM);
+        CHECK_EQ(term_val(r), 1u);
+        CHECK(find_event(from, RULE_EQL_NUM, MULTI_TERM) != (u64)-1);
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/wnf-inline/eql-era-prunes");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term era = term_new(0, TAG_ERA, 0, 0);
+        Term r = wnf(term_new_eql(era, build_num(5)));
+        CHECK_EQ(term_tag(r), TAG_ERA);
+        CHECK(find_event(from, RULE_EQL_ERA, MULTI_PRUNE) != (u64)-1);
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/wnf-inline/and-short-circuits");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        // AND is strict on its first operand; 0 short-circuits to 0.
+        Term r = wnf(term_new_and(build_num(0), build_num(99)));
+        CHECK_EQ(term_tag(r), TAG_NUM);
+        CHECK_EQ(term_val(r), 0u);
+        CHECK(find_event(from, RULE_AND_NUM, MULTI_TERM) != (u64)-1);
+        multi_trace_free();
+    }
+
     // === Capacity growth: cross the initial-cap boundary. =============
     // multi_events_push doubles on overflow; check it actually does.
     TEST_BEGIN("multi-trace/capacity-grows");

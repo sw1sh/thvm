@@ -71,6 +71,7 @@ enter:
         if (term_tag(next) == TAG_DP0) {
           // FWD passthrough: cell holds y, force it.
           ITRS++;
+          multi_emit(RULE_GRAD_FWD, MULTI_TERM, 0, 0, 0);
           next = heap_read(loc);
           goto enter;
         }
@@ -402,6 +403,7 @@ apply:
             }
             s_pos = WNF_S_POS;
             ITRS++;
+            multi_emit(RULE_MAT_DISPATCH, MULTI_TERM, 0, 0, match);
             if (term_tag(arg_w) == TAG_NUM &&
                 (u32)term_val(arg_w) == match) {
               next = heap_read(mat_loc + 0);
@@ -490,6 +492,7 @@ apply:
             continue;
           }
           ITRS++;
+          multi_emit(RULE_GRAD_BWD, MULTI_TERM, 0, 0, 0);
           next = g;
           goto enter;
         }
@@ -643,6 +646,7 @@ apply:
           Term y = heap_read(loc + 1);
           if (term_tag(y) == TAG_NUM) {
             ITRS++;
+            multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, 0, 0, op);
             u32 xv = (u32)term_val(whnf);
             u32 yv = (u32)term_val(y);
             u32 r;
@@ -706,6 +710,7 @@ apply:
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, 0, 0, op);
           u32 yv = (u32)term_val(whnf);
           u32 r;
           switch (op) {
@@ -796,11 +801,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_EQL_ERA, MULTI_PRUNE, 0, 0, 0);
           continue;   // whnf = ERA stays
         }
         if (term_tag(whnf) == TAG_ANY) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_EQL_ANY, MULTI_TERM, 0, 0, 0);
           whnf = term_new(0, TAG_NUM, 0, 1);
           continue;
         }
@@ -821,6 +828,7 @@ apply:
           heap_set(ns + 0, e0);
           heap_set(ns + 1, e1);
           ITRS++;
+          multi_emit(RULE_EQL_SUP, MULTI_SLIDE, 0, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
@@ -839,11 +847,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_EQL_ERA, MULTI_PRUNE, 0, 0, 0);
           continue;   // whnf = ERA stays
         }
         if (term_tag(whnf) == TAG_ANY) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_EQL_ANY, MULTI_TERM, 0, 0, 0);
           whnf = term_new(0, TAG_NUM, 0, 1);
           continue;
         }
@@ -863,12 +873,14 @@ apply:
           heap_set(ns + 0, e0);
           heap_set(ns + 1, e1);
           ITRS++;
+          multi_emit(RULE_EQL_SUP, MULTI_SLIDE, 0, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
         if (term_tag(a) == TAG_NUM && term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_EQL_NUM, MULTI_TERM, 0, 0, 0);
           u32 r = ((u32)term_val(a) == (u32)term_val(whnf)) ? 1 : 0;
           whnf = term_new(0, TAG_NUM, term_ext(a), r);
           continue;
@@ -884,11 +896,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_AND_ERA, MULTI_PRUNE, 0, 0, 0);
           continue;
         }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_AND_NUM, MULTI_TERM, 0, 0, 0);
           if ((u32)term_val(whnf) == 0) {
             continue;     // whnf = NUM(0) stays
           }
@@ -912,6 +926,7 @@ apply:
           heap_set(ns + 0, n0);
           heap_set(ns + 1, n1);
           ITRS++;
+          multi_emit(RULE_AND_SUP, MULTI_SLIDE, 0, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
@@ -926,11 +941,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_OR_ERA, MULTI_PRUNE, 0, 0, 0);
           continue;
         }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_OR_NUM, MULTI_TERM, 0, 0, 0);
           if ((u32)term_val(whnf) == 0) {
             // a is NUM(0): result is wnf(b).
             next = heap_read(loc + 1);
@@ -954,6 +971,7 @@ apply:
           heap_set(ns + 0, n0);
           heap_set(ns + 1, n1);
           ITRS++;
+          multi_emit(RULE_OR_SUP, MULTI_SLIDE, 0, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
@@ -967,11 +985,13 @@ apply:
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_WHEN_ERA, MULTI_PRUNE, 0, 0, 0);
           continue;
         }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           ITRS++;
+          multi_emit(RULE_WHEN_NUM, MULTI_TERM, 0, 0, 0);
           if ((u32)term_val(whnf) == 0) {
             whnf = term_new(0, TAG_ERA, 0, 0);
             continue;
@@ -994,6 +1014,7 @@ apply:
           heap_set(ns + 0, w0);
           heap_set(ns + 1, w1);
           ITRS++;
+          multi_emit(RULE_WHEN_SUP, MULTI_SLIDE, 0, 0, lab);
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }

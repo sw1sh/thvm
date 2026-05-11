@@ -1439,6 +1439,25 @@ typedef struct {
 #define RULE_DDU_ERA        28
 #define RULE_UOP_ASSIGN     29
 #define RULE_UOP_KERNEL     30
+// Inline WHNF-frame rules (no dedicated src/interact/<name>.c -- the
+// stack machine in src/wnf/_.c handles them via per-frame cases).
+#define RULE_GRAD_FWD       31  // grad-cell DP0 forward passthrough
+#define RULE_GRAD_BWD       32  // grad-cell DP1 backward chain-rule step
+#define RULE_MAT_DISPATCH   33  // MAT/SWI: scrutinee reduced, branch on match
+#define RULE_OP2_NUM_NUM    34  // OP2 with both operands NUM: literal fold
+#define RULE_EQL_NUM        35  // EQL with both operands NUM: equality fold
+#define RULE_EQL_ERA        36  // EQL meets ERA: propagate ERA
+#define RULE_EQL_ANY        37  // EQL meets ANY (wildcard): result 1
+#define RULE_EQL_SUP        38  // EQL commutes through SUP
+#define RULE_AND_NUM        39  // AND short-circuit on a literal first operand
+#define RULE_AND_ERA        40  // AND meets ERA: propagate ERA
+#define RULE_AND_SUP        41  // AND commutes through SUP
+#define RULE_OR_NUM         42  // OR short-circuit on a literal first operand
+#define RULE_OR_ERA         43  // OR meets ERA: propagate ERA
+#define RULE_OR_SUP         44  // OR commutes through SUP
+#define RULE_WHEN_NUM       45  // WHEN branch on a literal condition
+#define RULE_WHEN_ERA       46  // WHEN meets ERA: propagate ERA
+#define RULE_WHEN_SUP       47  // WHEN commutes through SUP
 
 typedef struct MultiEvent {
     u64 id;            // monotone; == ITRS at the point this rule fired

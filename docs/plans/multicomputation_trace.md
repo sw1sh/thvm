@@ -1,14 +1,17 @@
 # Multicomputation trace -- a branch-cylinder-tagged token-event log
 
-Status: **M0 covers every dedicated `interact_*` rule** (30 rules
-across `src/interact/`, 32 emit sites counting `dup_sup`'s two
-branches and `uop_assign`'s two paths) with the compile-time /
-runtime gating discipline intact and a cross-family C-side test that
-passes in both build variants.  Still open: the inline `ITRS++`
-sites in `src/wnf/_.c` (OP2-NUM-NUM, MAT-CTR, ...), the WL surface,
-and M1-M4.  See [M0 spike outcome](#m0-spike-outcome) and the
-[rule-coverage table](#101-rule-coverage-as-of-this-commit) below.
-Conceptual companion:
+Status: **M0 trace coverage is complete** -- every dedicated
+`interact_*` rule (30 rules / 32 emit sites) *and* every inline
+`ITRS++` site in `src/wnf/_.c` (21 sites / 17 rules: OP2-NUM-NUM
+literal fold, MAT/SWI dispatch, EQL/AND/OR/WHEN per-tag cases, the
+two grad-cell projections) are wired, with the compile-time / runtime
+gating discipline intact (default-build `_wnf` byte-identical to
+pre-trace, verified) and a cross-family C-side test (45 trace-build
+assertions / 2 default-build).  Still open: the inline `ITRS++` in
+`src/wnf/redex.c` (the parallel-pool / `TInteract` per-redex driver),
+the WL surface, and M1-M4.  See [M0 spike outcome](#m0-spike-outcome)
+and the [rule-coverage table](#101-rule-coverage-as-of-this-commit)
+below.  Conceptual companion:
 [docs/multicomputation.md](../multicomputation.md) reads the
 SUP / DUP / INC machinery through Wolfram's multicomputation paradigm
 (a SUP-term is a *slice*; reduction is *slice evolution*; the
@@ -526,30 +529,38 @@ end-to-end; the next-step shape is clear.
   `RULE_UOP_ASSIGN` from both backend-copy and host-roundtrip paths.
   The one outlier is [src/interact/uop_grad.c](../../src/interact/uop_grad.c),
   which has no `ITRS++` of its own (it delegates to the per-op grad
-  cells); a follow-up may decide to emit a synthetic event there.
+  cells -- whose ITRS bumps live in `src/wnf/_.c`, see below).
+- **Every inline `ITRS++` in `src/wnf/_.c` wired up** (21 sites, 17
+  rules): the WHNF stack machine's per-frame cases for `OP2`, `EQL`,
+  `AND`, `OR`, `WHEN`, `MAT`/`SWI`, and the two grad-cell projections.
+  Same one-liner pattern, inserted bottom-up so line numbers stayed
+  valid.  See the inline-rules table in §10.1.
 - **Surgical test** at
   [tests/test_multi_trace.c](../../tests/test_multi_trace.c), built
   twice from the same source via two Makefile targets:
   `bin/test_multi_trace` (default CFLAGS) and `bin/test_multi_trace_on`
   (`-DTHVM_TRACE`).  Default-build coverage: 2/2.  Trace-build
-  coverage: **33/33** -- the original mechanism checks (runtime-flag
-  off/on, mid-run toggle, capacity growth) plus one assertion per
-  family (TERM, PRUNE, SLIDE, FORK, MERGE, SPLIT, PLUMB) firing the
-  expected (rule, family) tuple end-to-end.
+  coverage: **45/45** -- the mechanism checks (runtime-flag off/on,
+  mid-run toggle, capacity growth), one assertion per family firing
+  the expected `(rule, family)` tuple end-to-end, and four
+  inline-frame assertions (OP2-NUM-NUM fold, EQL-NUM, EQL-ERA,
+  AND short-circuit).
 
-### Acceptance gate verified (re-checked after wiring all 30 rules)
+### Acceptance gate verified (re-checked after wiring all rules)
 
 `make bin/test_app_lam bin/test_multi_trace` (both default CFLAGS):
 `_wnf` (which inlines the dispatch and the per-rule bodies) has
 **4022 instructions in both** binaries -- unchanged from before any
-trace wiring existed, even though 30 `multi_emit(...)` call sites were
-added to `src/interact/*.c`.  `nm bin/test_multi_trace | grep
+trace wiring existed, even though 30 `multi_emit(...)` call sites
+were added to `src/interact/*.c` *and* 21 more inline into
+`src/wnf/_.c` (the hot path).  `nm bin/test_multi_trace | grep
 multi_emit_body` returns nothing; `nm bin/test_multi_trace_on | grep
-multi_emit_body` returns one symbol.  The trace build's `_wnf` is
-4145 instructions (+123 -- roughly four per `if (UNLIKELY(trace))
-multi_emit_body(...)` branch across the 30 inlined rule bodies).  The
-compile-time gating discipline holds: a default-build reducer pays
-zero instructions, full stop.
+multi_emit_body` returns one symbol.  (In the trace build the
+optimizer rebalances inlining once `wnf`'s body grows -- the standalone
+`_wnf` symbol disappears, merged with `_wnf_n` -- which is why the
+gate is stated over the *default* build, where the layout is what
+counts.)  The compile-time gating discipline holds: a default-build
+reducer pays zero instructions, full stop.
 
 ### 10.1 Rule coverage as of this commit
 
@@ -587,15 +598,44 @@ zero instructions, full stop.
 | `dup_ten` | `DUP_TEN` | `PLUMB` |
 | `dup_any` | `DUP_ANY` | `PLUMB` |
 
+Inline WHNF-frame rules in `src/wnf/_.c` (no dedicated `interact_*`
+file -- the stack machine handles them via per-frame cases):
+
+| frame / situation | `RULE_*` | `MULTI_*` |
+|---|---|---|
+| grad-cell `DP0` forward passthrough | `GRAD_FWD` | `TERM` |
+| grad-cell `DP1` backward chain-rule step | `GRAD_BWD` | `TERM` |
+| `MAT` / `SWI`: scrutinee reduced, branch on the match value | `MAT_DISPATCH` | `TERM` |
+| `OP2` with both operands `NUM` (two sites: x-NUM-first fast path, `F_OP2_NUM` y-side) | `OP2_NUM_NUM` | `TERM` |
+| `EQL` with both operands `NUM` | `EQL_NUM` | `TERM` |
+| `EQL` meets `ERA` (either side) | `EQL_ERA` | `PRUNE` |
+| `EQL` meets `ANY` (wildcard, either side) | `EQL_ANY` | `TERM` |
+| `EQL` commutes through `SUP` (either side) | `EQL_SUP` | `SLIDE` |
+| `AND` with a literal first operand (short-circuit) | `AND_NUM` | `TERM` |
+| `AND` meets `ERA` | `AND_ERA` | `PRUNE` |
+| `AND` commutes through `SUP` | `AND_SUP` | `SLIDE` |
+| `OR` with a literal first operand (short-circuit) | `OR_NUM` | `TERM` |
+| `OR` meets `ERA` | `OR_ERA` | `PRUNE` |
+| `OR` commutes through `SUP` | `OR_SUP` | `SLIDE` |
+| `WHEN` with a literal condition | `WHEN_NUM` | `TERM` |
+| `WHEN` meets `ERA` | `WHEN_ERA` | `PRUNE` |
+| `WHEN` commutes through `SUP` | `WHEN_SUP` | `SLIDE` |
+
+For the literal-fold rules the opcode goes in `delta_label` (e.g.
+`OP_ADD` for `OP2_NUM_NUM`); for the `*_SUP` commutes the SUP label
+goes there; everything else carries `0`.
+
 Provisional classifications worth a second look later:
 `DSU_NUM` / `DDU_NUM` are tagged `SLIDE` (treated as label-evaluation
 re-foliation) but a finer reading might call them `TERM`;
 `DDU_SUP` is `SLIDE` even though once the dynamic labels resolve it
 behaves like a `DUP-SUP` (`MERGE` or `SPLIT`) -- when the dynamic-
 label paths get their own per-case ITRS bumps, split it.  The tag is
-just metadata, so revising it later costs nothing.  Inline `ITRS++`
-sites in `src/wnf/_.c` (OP2-NUM-NUM literal fold, MAT-CTR / SWI-NUM
-match, etc.) are still unwired.
+just metadata, so revising it later costs nothing.  Still unwired:
+the inline `ITRS++` sites in `src/wnf/redex.c` (the parallel-pool /
+`TInteract` per-redex driver -- most of its cases delegate to the
+already-wired `interact_*` functions, but a handful are inline like
+`_.c`'s and would need their own emits).
 
 ### Simplifications taken vs the original plan
 
@@ -623,22 +663,22 @@ match, etc.) are still unwired.
   deferred to a follow-up; the M0 trace is consumed directly by the
   C test through the `multi_trace_*` API.
 - **No `WIRE_PROV_BUMP` in heap mutations yet.**  M1 territory.
-- **Inline `ITRS++` in `src/wnf/_.c` not yet covered.**  Those handle
-  WHNF-specific tag combinations (OP2-NUM-NUM literal fold, MAT-CTR /
-  SWI-NUM pattern match, INC commute, ...) that don't have a dedicated
-  `src/interact/<name>.c` file.  A follow-up should add `multi_emit`
-  there too, with new `RULE_*` constants (INC rules -> `MULTI_SLIDE`,
-  literal folds / matches -> `MULTI_TERM`).
+- **`src/wnf/redex.c` inline `ITRS++` not yet covered.**  The
+  per-redex driver (parallel-pool / `TInteract`) mirrors the same
+  rules; most cases delegate to the already-wired `interact_*`
+  functions, but the inline ones (DP-projection dispatch, MAT/CTR,
+  ...) would need their own emits.  A follow-up.
 
 ### Followups, in dependency order
 
-1. **Cover the inline `ITRS++` sites in `src/wnf/_.c`.**  Same
-   one-liner pattern, with `RULE_*` constants for OP2-NUM-NUM,
-   MAT-CTR, SWI-NUM, USE-VAL, EQL leaf, AND/OR literal, and the INC
-   commute rules.  Then validate on a deliberately bad SAT encoding
-   (independent variables given the same label, per
+1. **Validate the spurious-`MULTI_MERGE` failure mode.**  Build a
+   deliberately bad SAT encoding (independent variables given the
+   same label, per
    [docs/research/sat_solver_paths.md](../research/sat_solver_paths.md))
-   that a spurious `MULTI_MERGE` shows up in the trace.
+   and assert the trace shows a `DUP_SUP_ANN` / `MULTI_MERGE` event
+   that the correct encoding wouldn't produce.  (Optionally also wire
+   `src/wnf/redex.c`'s inline `ITRS++` so the parallel-pool path is
+   covered too.)
 2. **WL surface.**  Add `thvm_wl_multi_trace_*` LibraryLink wrappers
    to [wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)
    mirroring the `thvm_wl_hot_counters_*` pattern, and a new module
