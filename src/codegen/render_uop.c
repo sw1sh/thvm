@@ -1009,6 +1009,181 @@ static u32 rmu_split_reduce(Term *ranges, u32 *opt_kinds,
   return reduce_idx;
 }
 
+// === Flattened-conv-reduce splitter ====================================
+//
+// The im2col `_pool` conv lowering compresses (cIn, kh, kw) into a single
+// flattened reduce axis a5 with extent cIn*kh*kw, then the consumer's
+// xCol address (and the wFlat address) decompose it back via IDIV/IMOD:
+//   a5/25, (a5/5)%5, a5%5  for (cIn=32, kh=5, kw=5)
+// Those div/mod ops cost 2 idiv + 2 imod per inner-loop iteration and
+// keep the address non-affine in the reduce var, blocking the TC matmul
+// template (recognise_tc rejects div/mod addresses).
+//
+// Recovery: collect the constant divisors {c : IDIV(a5,c) or IMOD(a5,c)
+// appears in the body}.  Sorted ascending [d1 < d2 < ... < d_{n-1}],
+// the radix structure is:
+//   stride[0]=1, stride[i]=d_i                    (for i in 1..n-1)
+//   ext[0]=d1, ext[i]=d_{i+1}/d_i, ext[n-1]=E/d_{n-1}
+//   a5 = sum_i axis_i * stride[i]
+// Then substitute a5 -> that composite everywhere in the body; the
+// constructor-time int simplifier collapses (cin*25+kh*5+kw)/25 -> cin
+// etc.  Caller emits `for cin { for kh { for kw { acc += body } } }`.
+#define RMU_CONV_SPLIT_MAX 6
+typedef struct {
+  u32 n;                          // number of recovered axes (>=2)
+  u32 axis_id[RMU_CONV_SPLIT_MAX];// fresh axis ids, innermost..outermost
+  u32 extent[RMU_CONV_SPLIT_MAX]; // per-axis extent, innermost..outermost
+  u32 stride[RMU_CONV_SPLIT_MAX]; // per-axis stride into the flat index
+} RmuConvSplit;
+
+// Walk `t` collecting constants `c` from IDIV(x,c) / IMOD(x,c) where x
+// is a UOP_RANGE leaf with axis_id == want_axis.  Bounded recursion.
+static void rmu_collect_divmod_consts(Term t, u32 want_axis,
+                                      u32 *consts, u32 *n_consts,
+                                      u32 cap, u32 depth) {
+  if (depth > 64) return;
+  if (term_tag(t) != TAG_UOP) return;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_IDIV || op == UOP_IMOD) {
+    Term a = heap_read(loc + 0);
+    Term b = heap_read(loc + 1);
+    if (term_tag(a) == TAG_UOP && term_ext(a) == UOP_RANGE
+        && (u32)term_val(heap_read(term_val(a) + 0)) == want_axis
+        && term_tag(b) == TAG_UOP && term_ext(b) == UOP_CONST) {
+      Term num = heap_read(term_val(b));
+      if (term_tag(num) == TAG_NUM) {
+        u32 c = (u32)term_val(num);
+        if (c > 1) {
+          int seen = 0;
+          for (u32 i = 0; i < *n_consts; i++) if (consts[i] == c) seen = 1;
+          if (!seen && *n_consts < cap) consts[(*n_consts)++] = c;
+        }
+      }
+    }
+    // also descend (a div/mod operand could itself contain more).
+    rmu_collect_divmod_consts(a, want_axis, consts, n_consts, cap, depth + 1);
+    rmu_collect_divmod_consts(b, want_axis, consts, n_consts, cap, depth + 1);
+    return;
+  }
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_ILT: case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      rmu_collect_divmod_consts(heap_read(loc + 0), want_axis, consts, n_consts, cap, depth + 1);
+      rmu_collect_divmod_consts(heap_read(loc + 1), want_axis, consts, n_consts, cap, depth + 1);
+      return;
+    case UOP_NEG: case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT:
+    case UOP_CAST: case UOP_BITCAST: case UOP_OPT: case UOP_LOAD:
+      rmu_collect_divmod_consts(heap_read(loc + 0), want_axis, consts, n_consts, cap, depth + 1);
+      return;
+    case UOP_IWHERE:
+      rmu_collect_divmod_consts(heap_read(loc + 0), want_axis, consts, n_consts, cap, depth + 1);
+      rmu_collect_divmod_consts(heap_read(loc + 1), want_axis, consts, n_consts, cap, depth + 1);
+      rmu_collect_divmod_consts(heap_read(loc + 2), want_axis, consts, n_consts, cap, depth + 1);
+      return;
+    default:
+      return;
+  }
+}
+
+// Find the largest UOP_RANGE axis_id reachable from `t`.  Used to
+// allocate fresh axis ids for the split's new RANGE leaves.  Bounded.
+static u32 rmu_max_axis_id(Term t, u32 cur, u32 depth) {
+  if (depth > 256) return cur;
+  if (term_tag(t) != TAG_UOP) return cur;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    u32 a = (u32)term_val(heap_read(loc + 0));
+    return a > cur ? a : cur;
+  }
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    cur = rmu_max_axis_id(heap_read(loc + i), cur, depth + 1);
+  }
+  return cur;
+}
+
+// Try to recover the radix structure of a flattened reduce axis.
+// Returns 1 on success (filling *out), 0 if the body doesn't decompose
+// the axis via div/mod, the divisor set isn't a valid divisor chain,
+// or the structure exceeds RMU_CONV_SPLIT_MAX axes.
+static int rmu_recover_conv_split(Term red_src, u32 red_axis, u32 red_extent,
+                                  Term store_addr, RmuConvSplit *out) {
+  if (red_extent < 2) return 0;
+  u32 consts[RMU_CONV_SPLIT_MAX];
+  u32 n_consts = 0;
+  rmu_collect_divmod_consts(red_src, red_axis, consts, &n_consts,
+                            RMU_CONV_SPLIT_MAX, 0);
+  if (n_consts == 0) return 0;
+  // Insertion sort ascending (n is tiny).
+  for (u32 i = 1; i < n_consts; i++) {
+    u32 v = consts[i]; i32 j = (i32)i - 1;
+    while (j >= 0 && consts[j] > v) { consts[j + 1] = consts[j]; j--; }
+    consts[j + 1] = v;
+  }
+  // Validate divisor chain: d_{i+1} % d_i == 0, d_i | red_extent.
+  for (u32 i = 0; i + 1 < n_consts; i++) {
+    if (consts[i] == 0 || consts[i + 1] % consts[i] != 0) return 0;
+  }
+  if (red_extent % consts[n_consts - 1] != 0) return 0;
+  u32 n = n_consts + 1;            // axes: kw .. cin  (one more than divisors)
+  if (n > RMU_CONV_SPLIT_MAX || n < 2) return 0;
+  // strides: [1, d1, d2, ..., d_{n-1}]
+  // extents: [d1, d2/d1, ..., d_{n-1}/d_{n-2}, E/d_{n-1}]
+  u32 strides[RMU_CONV_SPLIT_MAX];
+  u32 extents[RMU_CONV_SPLIT_MAX];
+  strides[0] = 1;
+  for (u32 i = 1; i < n; i++) strides[i] = consts[i - 1];
+  extents[0] = consts[0];
+  for (u32 i = 1; i + 1 < n; i++) extents[i] = consts[i] / consts[i - 1];
+  extents[n - 1] = red_extent / consts[n_consts - 1];
+  u64 prod = 1;
+  for (u32 i = 0; i < n; i++) {
+    if (extents[i] == 0) return 0;
+    prod *= extents[i];
+  }
+  if (prod != (u64)red_extent) return 0;   // not a clean factorization
+  // Allocate fresh axis ids (max+1 .. max+n) so they never collide with
+  // any existing axis or with red_axis (red_axis is consumed by the
+  // composite substitution and disappears).
+  u32 maxid = rmu_max_axis_id(red_src, red_axis, 0);
+  maxid = rmu_max_axis_id(store_addr, maxid, 0);
+  out->n = n;
+  for (u32 i = 0; i < n; i++) {
+    out->axis_id[i] = maxid + 1 + i;
+    out->extent[i]  = extents[i];
+    out->stride[i]  = strides[i];
+  }
+  return 1;
+}
+
+// Build the composite linear-index Term  sum_i a_i * stride_i  from the
+// split's fresh RANGE leaves.  These leaves carry axis_type KAX_REDUCE.
+static Term rmu_build_conv_split_composite(RmuConvSplit const *sp) {
+  Term acc = 0;
+  for (u32 i = 0; i < sp->n; i++) {
+    Term r = uop_range(sp->axis_id[i], KAX_REDUCE, sp->extent[i]);
+    Term term_i = (sp->stride[i] == 1)
+                ? r
+                : uop_int_binary(UOP_IMUL, r, uop_const(DT_INT32, sp->stride[i]));
+    acc = (acc == 0) ? term_i : uop_int_binary(UOP_IADD, acc, term_i);
+  }
+  return acc;
+}
+
+// uop_graph_rewrite rule: replace every UOP_RANGE leaf whose axis_id ==
+// red_axis with `composite`.  The constructor-time int simplifier folds
+// the re-substituted div/mod in the consumer addresses.
+typedef struct { u32 red_axis; Term composite; } RmuConvSubstCtx;
+static Term rmu_conv_subst_range_rule(Term t, void *user) {
+  RmuConvSubstCtx *cx = (RmuConvSubstCtx *)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) return 0;
+  if ((u32)term_val(heap_read(term_val(t) + 0)) != cx->red_axis) return 0;
+  return cx->composite;
+}
+
 // Emit `<acc> = <combine(kind, acc, src)>;` per the REDUCE kind.
 static void rmu_emit_reduce_combine(const char *acc_name, u32 kind,
                                     Term src, FILE *fp) {
@@ -1408,6 +1583,81 @@ static int rmu_emit_conv(Term store, Term conv_red, FILE *fp, u32 depth) {
                     && term_ext(red_range) == UOP_RANGE)
                  ? (u32)term_val(heap_read(term_val(red_range) + 2)) : 0;
   if (red_extent == 0) return 0;
+
+  // Flattened multi-axis reduce: if the body decomposes the reduce var
+  // via IDIV/IMOD (the im2col `_pool` conv tell), split it into its
+  // component axes, substitute the composite linear index, and emit
+  // nested reduce loops with a single accumulator -- removing the
+  // 2 idiv + 2 imod per inner iteration and making every address
+  // affine in each component axis (so the TC matmul template can fire).
+  RmuConvSplit sp = {0};
+  if (!RMU_TARGET_C
+      && rmu_recover_conv_split(red_src, red_axis, red_extent, addr, &sp)) {
+    Term composite = rmu_build_conv_split_composite(&sp);
+    RmuConvSubstCtx cx = { red_axis, composite };
+    UOpGraphRewriteRule rules[1] = { { "conv_split_subst", rmu_conv_subst_range_rule } };
+    Term red_src2 = uop_graph_rewrite(red_src, rules, 1, &cx);
+    // Marker for dispatch tracing.
+    for (u32 d = 0; d < depth; d++) fputs("  ", fp);
+    fprintf(fp, "/* CONV2D template (KRED=%u split=", red_extent);
+    for (u32 i = 0; i < sp.n; i++) fprintf(fp, "%s%u", i ? "x" : "", sp.extent[i]);
+    fputs(") */\n", fp);
+    int needs_close[MAX_DIM] = {0};
+    u32 body_depth = rmu_emit_output_loops(addr, out_ranges, out_kinds,
+                                           out_factors, n_out, depth, fp,
+                                           needs_close);
+    // Single accumulator outside ALL the reduce loops.
+    char acc_name[32];
+    snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fprintf(fp, "float %s = ", acc_name);
+    rmu_emit_reduce_init(red_kind, fp);
+    fputs(";\n", fp);
+    // Decide which axes to #pragma-unroll: walk innermost (stride 1) ->
+    // outermost, unrolling while the cumulative unrolled iteration count
+    // stays within RMU_REDUCE_UNROLL_MAX -- so kh/kw straight-line into
+    // ~25 MAD ops but the larger cin loop stays rolled.  Once an axis
+    // can't be unrolled, no outer axis is either.
+    int do_unroll[RMU_CONV_SPLIT_MAX] = {0};
+    {
+      u64 prod = 1;
+      for (u32 i = 0; i < sp.n; i++) {
+        if ((u64)sp.extent[i] * prod <= RMU_REDUCE_UNROLL_MAX) {
+          do_unroll[i] = 1; prod *= sp.extent[i];
+        } else break;
+      }
+    }
+    // Emit the reduce loops outermost (largest stride) -> innermost.
+    u32 loop_depth = body_depth;
+    for (i32 i = (i32)sp.n - 1; i >= 0; i--) {
+      Term r = uop_range(sp.axis_id[i], KAX_REDUCE, sp.extent[i]);
+      if (do_unroll[i]) {
+        for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
+        fprintf(fp, "#pragma unroll(%u)\n", sp.extent[i]);
+      }
+      rmu_emit_range_open(r, fp, loop_depth, RMU_NO_OPT);
+      loop_depth++;
+    }
+    for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
+    rmu_emit_reduce_combine(acc_name, red_kind, red_src2, fp);
+    for (i32 i = (i32)sp.n - 1; i >= 0; i--) {
+      loop_depth--;
+      for (u32 d = 0; d < loop_depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
+    // Final store.
+    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+    fprintf(fp, "%s[", rmu_buf_name(buf));
+    rmu_emit_term(addr, fp);
+    fprintf(fp, "] = %s;\n", acc_name);
+    for (i32 i = (i32)n_out - 1; i >= 0; i--) {
+      if (!needs_close[i]) continue;
+      body_depth--;
+      for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
+    return 1;
+  }
 
   // Marker for dispatch tracing.
   for (u32 d = 0; d < depth; d++) fputs("  ", fp);
