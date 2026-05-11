@@ -1153,6 +1153,31 @@ static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx) {
 
 static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL ^ 0x4D54494C45554F50ULL;
+  // kvar wedge: if any S_RANGE in the arena is variable-bound, the
+  // emitted MSL uses `V_<name>` for that extent and the per-dispatch
+  // numel comes through setBytes:; the kernel's input_numels[] /
+  // output_numel CHANGE per BS but the MSL string does not.  We must
+  // therefore exclude those numels from the hash whenever the kernel
+  // is symbolic-shape -- otherwise BS=4 and BS=32 hash to different
+  // slots and we re-compile for every BS.
+  //
+  // Two further exclusions for symbolic kernels:
+  //   - tile_uops[]: built LAZILY (NULL pre-dispatch, populated by
+  //     tile_sync_from_scalar inside cg_tile_metal_dispatch_shape) and
+  //     it bakes the literal output_shape.dims, so it both makes the
+  //     hash unstable across a dispatch AND varies per BS.  The MSL
+  //     source itself comes from kernel_lift_to_uop over scalar_uops,
+  //     not tile_uops, so dropping tile_uops here doesn't lose any
+  //     MSL-determining content.
+  //   - input/output numels (below).
+  //
+  // The scalar_uops byte-hash ALREADY captures S_RANGE.extra (which
+  // encodes the var_id in the low 31 bits with bit 31 set), so two
+  // symbolic kernels at different BS values share that contribution.
+  u32 used_vars[KVAR_USED_CAP];
+  u32 n_vars = kvar_collect_from_scalar(ke->scalar_uops, ke->n_scalar_uops,
+                                        used_vars, KVAR_USED_CAP);
+  int is_symbolic = (n_vars > 0);
   if (ke->scalar_uops != NULL && ke->n_scalar_uops > 0) {
     u8 const *bytes = (u8 const *)ke->scalar_uops;
     size_t total = (size_t)ke->n_scalar_uops * sizeof(ScalarUop);
@@ -1160,7 +1185,7 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
       h ^= (u64)bytes[i]; h *= 0x100000001b3ULL;
     }
   }
-  if (ke->tile_uops != NULL && ke->n_tile_uops > 0) {
+  if (!is_symbolic && ke->tile_uops != NULL && ke->n_tile_uops > 0) {
     u8 const *bytes = (u8 const *)ke->tile_uops;
     size_t total = (size_t)ke->n_tile_uops * sizeof(TileUop);
     for (size_t i = 0; i < total; i++) {
@@ -1169,11 +1194,22 @@ static u64 metal_tile_jit_hash(KernelEntry const *ke) {
   }
   for (u32 i = 0; i < ke->n_inputs; i++) {
     h ^= (u64)ke->input_dtypes[i]; h *= 0x100000001b3ULL;
-    h ^= (u64)ke->input_numels[i]; h *= 0x100000001b3ULL;
+    if (!is_symbolic) {
+      h ^= (u64)ke->input_numels[i]; h *= 0x100000001b3ULL;
+    }
   }
   h ^= (u64)ke->n_inputs;          h *= 0x100000001b3ULL;
   h ^= (u64)ke->output_dtype;      h *= 0x100000001b3ULL;
-  h ^= (u64)ke->output_numel;      h *= 0x100000001b3ULL;
+  if (!is_symbolic) {
+    h ^= (u64)ke->output_numel;    h *= 0x100000001b3ULL;
+  }
+  // Mix the per-var ids so a kernel that uses kvar "BS" hashes
+  // distinctly from one that uses kvar "SEQ" with the same axis_type.
+  // The var id token is stable across BS values, so this preserves
+  // the cross-BS sharing we want.
+  for (u32 i = 0; i < n_vars; i++) {
+    h ^= (u64)(KVAR_FLAG | used_vars[i]); h *= 0x100000001b3ULL;
+  }
   {
     u32 n_app = tile_anno_applied_opts_count(ke);
     h ^= (u64)n_app; h *= 0x100000001b3ULL;
@@ -1328,6 +1364,24 @@ static int metal_tile_jit_encode(KernelEntry *ke,
     metal_conv_cfg_fill(&conv, cfg);
     [enc setBytes:cfg length:sizeof(cfg) atIndex:(1 + ke->n_inputs)];
   }
+  // kvar wedge: walk the kernel's scalar arena for any RANGE leaf
+  // whose extent is variable-bound, then setBytes: each var's
+  // per-dispatch runtime value as a `constant uint` kernel arg.
+  // Buffer indices land after inputs (+ optional conv cfg), in
+  // stable ascending-var-id order so the renderer's signature stays
+  // in lockstep.  Missing bindings fall back to kvar_hi(id) (worst-
+  // case static upper bound).
+  {
+    u32 used_vars[KVAR_USED_CAP];
+    u32 n_vars = kvar_collect_from_scalar(ke->scalar_uops,
+                                          ke->n_scalar_uops,
+                                          used_vars, KVAR_USED_CAP);
+    u32 base = 1 + ke->n_inputs + (is_conv ? 1u : 0u);
+    for (u32 i = 0; i < n_vars; i++) {
+      u32 v = kernel_kvar_value(ke, used_vars[i]);
+      [enc setBytes:&v length:sizeof(v) atIndex:(base + i)];
+    }
+  }
   if (is_conv) {
     NSUInteger outputs = (NSUInteger)(conv.outputs_per_thread
                                       ? conv.outputs_per_thread : 1);
@@ -1351,6 +1405,14 @@ static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke) {
     return METAL_JIT_PSOS[idx];
   }
   return metal_tile_jit_build(ke, key);
+}
+
+// Test hook: expose the tile-jit PSO cache key for a kernel so tests
+// can assert "two kernels with the same UOp shape but different kvar
+// runtime values map to the same PSO slot".  Pure -- no Metal device
+// required.
+u64 thvm_metal_tile_jit_hash(KernelEntry const *ke) {
+  return metal_tile_jit_hash(ke);
 }
 
 #define METAL_GRAPH_CACHE_CAP 256
