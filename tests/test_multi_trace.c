@@ -63,6 +63,16 @@ static u64 find_event(u64 from, u8 rule, u8 family) {
     }
     return (u64)-1;
 }
+
+// Count events of a given family appearing AT OR AFTER `from`.
+static u64 count_events(u64 from, u8 family) {
+    u64 c = 0, n = multi_trace_count();
+    for (u64 i = from; i < n; i++) {
+        const MultiEvent *e = multi_trace_get(i);
+        if (e && e->family == family) c++;
+    }
+    return c;
+}
 #endif
 
 int main(void) {
@@ -344,6 +354,54 @@ int main(void) {
         CHECK_EQ(term_tag(r), TAG_NUM);
         CHECK_EQ(term_val(r), 0u);
         CHECK(find_event(from, RULE_AND_NUM, MULTI_TERM) != (u64)-1);
+        multi_trace_free();
+    }
+
+    // === Label collision => spurious merge.  The headline failure
+    // mode the trace is meant to surface: two SUP-encoded choices that
+    // accidentally share a label correlate branch-left with branch-left
+    // (the OP2-SUP rule DUPs the other operand at the SUP's label, so a
+    // same-label DUP-SUP annihilates instead of fanning out).  Result:
+    // only the diagonal survives the collapse, not the full cross
+    // product.  Correct encoding: distinct labels => DUP-SUP commute =>
+    // MULTI_SPLIT => 4 leaves.  Buggy encoding: shared label => DUP-SUP
+    // annihilate => MULTI_MERGE => 2 leaves.  The trace tells them
+    // apart by family alone. ============================================
+
+    TEST_BEGIN("multi-trace/label-collision/distinct-labels-cross-product");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term sa = build_sup(1, build_num(1),  build_num(2));    // &1{1,2}
+        Term sb = build_sup(2, build_num(10), build_num(20));   // &2{10,20} -- distinct
+        Term out[16];
+        u64  n = thvm_collapse(term_new_op2(OP_ADD, sa, sb), out, 16);
+        CHECK_EQ(n, 4u);                                        // full 2x2 cross product
+        u64 sum = 0;
+        for (u64 i = 0; i < n; i++) { CHECK_EQ(term_tag(out[i]), TAG_NUM); sum += term_val(out[i]); }
+        CHECK_EQ(sum, 11u + 12u + 21u + 22u);                   // {1+10, 1+20, 2+10, 2+20} = 66
+        CHECK(count_events(from, MULTI_SPLIT) >= 1u);           // the A-vs-B DUP-SUP commute
+        CHECK_EQ(count_events(from, MULTI_MERGE), 0u);          // no spurious merge
+        CHECK(find_event(from, RULE_DUP_SUP_COM, MULTI_SPLIT) != (u64)-1);
+        multi_trace_free();
+    }
+
+    TEST_BEGIN("multi-trace/label-collision/shared-label-spurious-merge");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        Term sa = build_sup(1, build_num(1),  build_num(2));    // &1{1,2}
+        Term sb = build_sup(1, build_num(10), build_num(20));   // &1{10,20} -- SAME label, the bug
+        Term out[16];
+        u64  n = thvm_collapse(term_new_op2(OP_ADD, sa, sb), out, 16);
+        CHECK_EQ(n, 2u);                                        // only the diagonal survives
+        u64 sum = 0;
+        for (u64 i = 0; i < n; i++) { CHECK_EQ(term_tag(out[i]), TAG_NUM); sum += term_val(out[i]); }
+        CHECK_EQ(sum, 11u + 22u);                               // {1+10, 2+20} = 33
+        CHECK(count_events(from, MULTI_MERGE) >= 1u);           // the spurious DUP-SUP annihilation
+        CHECK(find_event(from, RULE_DUP_SUP_ANN, MULTI_MERGE) != (u64)-1);
         multi_trace_free();
     }
 

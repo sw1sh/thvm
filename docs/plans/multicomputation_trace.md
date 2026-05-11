@@ -540,11 +540,13 @@ end-to-end; the next-step shape is clear.
   twice from the same source via two Makefile targets:
   `bin/test_multi_trace` (default CFLAGS) and `bin/test_multi_trace_on`
   (`-DTHVM_TRACE`).  Default-build coverage: 2/2.  Trace-build
-  coverage: **45/45** -- the mechanism checks (runtime-flag off/on,
+  coverage: **60/60** -- the mechanism checks (runtime-flag off/on,
   mid-run toggle, capacity growth), one assertion per family firing
-  the expected `(rule, family)` tuple end-to-end, and four
-  inline-frame assertions (OP2-NUM-NUM fold, EQL-NUM, EQL-ERA,
-  AND short-circuit).
+  the expected `(rule, family)` tuple end-to-end, four inline-frame
+  assertions (OP2-NUM-NUM fold, EQL-NUM, EQL-ERA, AND short-circuit),
+  and the label-collision pair (followup 1 below): same shape, two
+  labelings -- distinct -> `MULTI_SPLIT` -> 4-leaf cross product;
+  shared -> `MULTI_MERGE` -> 2-leaf diagonal.
 
 ### Acceptance gate verified (re-checked after wiring all rules)
 
@@ -671,14 +673,20 @@ already-wired `interact_*` functions, but a handful are inline like
 
 ### Followups, in dependency order
 
-1. **Validate the spurious-`MULTI_MERGE` failure mode.**  Build a
-   deliberately bad SAT encoding (independent variables given the
-   same label, per
-   [docs/research/sat_solver_paths.md](../research/sat_solver_paths.md))
-   and assert the trace shows a `DUP_SUP_ANN` / `MULTI_MERGE` event
-   that the correct encoding wouldn't produce.  (Optionally also wire
-   `src/wnf/redex.c`'s inline `ITRS++` so the parallel-pool path is
-   covered too.)
+1. ~~**Validate the spurious-`MULTI_MERGE` failure mode.**~~ **Done.**
+   `tests/test_multi_trace.c` builds the canonical label-collision
+   shape `OP2["+", &La{1,2}, &Lb{10,20}]` two ways: distinct labels
+   (`La != Lb`) -> `DUP-SUP` commute -> `MULTI_SPLIT` -> 4-leaf cross
+   product `{11,12,21,22}`; shared label (`La == Lb`, the bug) -> the
+   `OP2-SUP` rule DUPs the right operand at the SUP's label, so the
+   `DUP-SUP` *annihilates* -> `MULTI_MERGE` -> only the diagonal
+   `{11,22}` survives.  The trace tells them apart by event family
+   alone (the buggy run has a `MULTI_MERGE`, the correct one has
+   zero).  Caveat: spotting the merge as *spurious* (vs. an intended
+   same-variable annihilation) needs to know which labels are
+   "supposed to be independent" -- that's branch-tree metadata, M2.
+   (Still optional: wire `src/wnf/redex.c`'s inline `ITRS++` so the
+   parallel-pool / `TInteract` path is covered too.)
 2. **WL surface.**  Add `thvm_wl_multi_trace_*` LibraryLink wrappers
    to [wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)
    mirroring the `thvm_wl_hot_counters_*` pattern, and a new module
