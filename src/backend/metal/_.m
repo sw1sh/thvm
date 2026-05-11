@@ -13,6 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>   // iter X: stat() for persistent metallib disk cache
+#include <sys/types.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -154,7 +159,17 @@ static u64 METAL_JIT_BUILD_HITS;
 static u64 METAL_JIT_BUILD_MISSES;
 static u64 METAL_JIT_BUILD_BYPASS;
 static u64 METAL_JIT_BUILD_COMPILE_US;
+// Persistent on-disk PSO cache counters.  Disk-hit = MTLBinaryArchive
+// load + pipeline-state-from-archive succeeded (avoided AIR->GPU
+// re-compile).  Disk-miss = no cache file, or load failed (corrupt
+// file, ABI drift) so we fell back to fresh compile + serialize.
+// Bytes counters track aggregate read/write across the process.
+static u64 METAL_JIT_BUILD_DISK_HITS;
+static u64 METAL_JIT_BUILD_DISK_MISSES;
+static u64 METAL_JIT_BUILD_DISK_BYTES_R;
+static u64 METAL_JIT_BUILD_DISK_BYTES_W;
 fn void thvm_metal_jit_counters_reset(void);
+static void metal_pso_cache_init(void);
 
 static int metal_init(void) {
   METAL_DEVICE = MTLCreateSystemDefaultDevice();
@@ -195,6 +210,10 @@ static int metal_init(void) {
   METAL_PEAK_LIVE_BYTES = 0;
   METAL_PEAK_RETAINED_BYTES = 0;
   METAL_PEAK_DEFERRED_BYTES = 0;
+  // Set up the on-disk PSO cache: mkdir, sweep stale (>30d) files.
+  // Safe to call before the first dispatch; no-op if disabled via
+  // THVM_METAL_PSO_CACHE=0.  Runs after METAL_DEVICE is ready.
+  metal_pso_cache_init();
   return 0;
 }
 
@@ -657,6 +676,18 @@ static void metal_shutdown(void) {
             (unsigned long long)METAL_JIT_BUILD_BYPASS,
             (unsigned long long)METAL_JIT_BUILD_COMPILE_US);
   }
+  // Persistent PSO cache stats: separate env-var so bench scripts can
+  // opt in to disk I/O reporting without the verbose JIT stats above.
+  // Format must stay stable -- bench drivers grep for the
+  // "metal_pso_cache stats" prefix.
+  if (getenv("THVM_METAL_PSO_CACHE_STATS")) {
+    fprintf(stderr,
+            "thvm: metal_pso_cache stats -- disk_hits=%llu disk_misses=%llu bytes_r=%llu bytes_w=%llu\n",
+            (unsigned long long)METAL_JIT_BUILD_DISK_HITS,
+            (unsigned long long)METAL_JIT_BUILD_DISK_MISSES,
+            (unsigned long long)METAL_JIT_BUILD_DISK_BYTES_R,
+            (unsigned long long)METAL_JIT_BUILD_DISK_BYTES_W);
+  }
   METAL_BATCH_DEPTH = 0;
   METAL_FREELIST_LEN = 0;
   METAL_DEFER_DECREF_LEN = 0;
@@ -727,6 +758,10 @@ fn void thvm_metal_jit_counters_reset(void) {
   METAL_JIT_BUILD_MISSES      = 0;
   METAL_JIT_BUILD_BYPASS      = 0;
   METAL_JIT_BUILD_COMPILE_US  = 0;
+  METAL_JIT_BUILD_DISK_HITS   = 0;
+  METAL_JIT_BUILD_DISK_MISSES = 0;
+  METAL_JIT_BUILD_DISK_BYTES_R = 0;
+  METAL_JIT_BUILD_DISK_BYTES_W = 0;
 }
 
 // Forward-declared as metal_jit_cache_reset_impl above; called from
@@ -736,6 +771,294 @@ static void metal_jit_cache_reset_impl(void) {
     METAL_JIT_CACHE[i].key = 0;
     METAL_JIT_PSOS [i]     = nil;
   }
+}
+
+// === Persistent on-disk PSO cache =====================================
+//
+// Caches each successfully-built MTLComputePipelineState by the
+// per-kernel u64 hash already used for the in-memory cache slot
+// (metal_tile_jit_hash).  Hash incorporates MSL source content
+// (via the scalar/tile UOp bytes, dtypes, numels, applied opts) so
+// if codegen drifts the key drifts and stale on-disk entries
+// become unreachable.
+//
+// One file per PSO: <dir>/pso-<key:016llx>.bin where dir is
+//   $THVM_METAL_PSO_CACHE_DIR
+//   $XDG_CACHE_HOME/thvm/metal-jit
+//   $HOME/.cache/thvm/metal-jit
+// Atomic writes (tmp+rename) so a crashed process doesn't leave
+// half-written files.  TTL sweep (30d, mtime) on init keeps the dir
+// from growing without bound; the runtime never deletes entries
+// during normal use.
+//
+// Env vars:
+//   THVM_METAL_PSO_CACHE=0           -- disable entirely
+//   THVM_METAL_PSO_CACHE_DIR=<path>  -- override default dir
+//   THVM_METAL_PSO_CACHE_STATS=1     -- dump counters on shutdown
+//
+// Apple-API gotcha: MTLBinaryArchive caches the AIR->GPU backend
+// compile, not MSL->AIR.  We still call newLibraryWithSource: +
+// newFunctionWithName: on every cold start (since loading the PSO
+// from the archive still requires an MTLFunction for the descriptor),
+// but the archive lookup avoids the much slower AIR->GPU compile.
+// This is the documented and supported Metal flow.
+
+#define METAL_PSO_CACHE_PATH_MAX 1024
+#define METAL_PSO_CACHE_TTL_SECS (30LL * 24LL * 60LL * 60LL)
+
+static int  METAL_PSO_CACHE_ENABLED = 0;
+static char METAL_PSO_CACHE_DIR[METAL_PSO_CACHE_PATH_MAX];
+
+// 1 = disabled, 0 = enabled.  Re-read each call (cheap, tests flip
+// the env at runtime).
+static int metal_pso_cache_disabled(void) {
+  char const *e = getenv("THVM_METAL_PSO_CACHE");
+  return e != NULL && e[0] == '0';
+}
+
+// Resolve the cache directory once per process and store into
+// METAL_PSO_CACHE_DIR.  Returns 0 on success, -1 on failure
+// (cache disabled, path too long, mkdir fail).
+static int metal_pso_cache_resolve_dir(void) {
+  METAL_PSO_CACHE_DIR[0] = '\0';
+  char const *override = getenv("THVM_METAL_PSO_CACHE_DIR");
+  if (override != NULL && override[0] != '\0') {
+    if (strlen(override) >= METAL_PSO_CACHE_PATH_MAX) return -1;
+    strncpy(METAL_PSO_CACHE_DIR, override, METAL_PSO_CACHE_PATH_MAX - 1);
+    METAL_PSO_CACHE_DIR[METAL_PSO_CACHE_PATH_MAX - 1] = '\0';
+    return 0;
+  }
+  char const *xdg = getenv("XDG_CACHE_HOME");
+  char const *home = getenv("HOME");
+  if (xdg != NULL && xdg[0] != '\0') {
+    int n = snprintf(METAL_PSO_CACHE_DIR, sizeof(METAL_PSO_CACHE_DIR),
+                     "%s/thvm/metal-jit", xdg);
+    if (n <= 0 || (size_t)n >= sizeof(METAL_PSO_CACHE_DIR)) return -1;
+    return 0;
+  }
+  if (home != NULL && home[0] != '\0') {
+    int n = snprintf(METAL_PSO_CACHE_DIR, sizeof(METAL_PSO_CACHE_DIR),
+                     "%s/.cache/thvm/metal-jit", home);
+    if (n <= 0 || (size_t)n >= sizeof(METAL_PSO_CACHE_DIR)) return -1;
+    return 0;
+  }
+  return -1;
+}
+
+// mkdir -p for the resolved cache dir (mode 0755).  Returns 0 on
+// success or already-exists, -1 on failure.
+static int metal_pso_cache_mkdir_p(char const *path) {
+  if (path == NULL || path[0] == '\0') return -1;
+  char buf[METAL_PSO_CACHE_PATH_MAX];
+  size_t n = strlen(path);
+  if (n >= sizeof(buf)) return -1;
+  memcpy(buf, path, n + 1);
+  // Iterate from idx 1 (skip leading '/') and create each segment.
+  for (size_t i = 1; i <= n; i++) {
+    if (buf[i] == '/' || buf[i] == '\0') {
+      char saved = buf[i];
+      buf[i] = '\0';
+      if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
+      buf[i] = saved;
+    }
+  }
+  return 0;
+}
+
+// O(n) sweep: stat every regular file in METAL_PSO_CACHE_DIR; unlink
+// those with mtime older than METAL_PSO_CACHE_TTL_SECS.  Best-effort;
+// any error skips the entry and continues.
+static void metal_pso_cache_sweep_old(void) {
+  if (!METAL_PSO_CACHE_ENABLED) return;
+  DIR *d = opendir(METAL_PSO_CACHE_DIR);
+  if (d == NULL) return;
+  time_t now = time(NULL);
+  struct dirent *ent;
+  while ((ent = readdir(d)) != NULL) {
+    if (ent->d_name[0] == '.') continue;
+    char path[METAL_PSO_CACHE_PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s",
+                     METAL_PSO_CACHE_DIR, ent->d_name);
+    if (n <= 0 || (size_t)n >= sizeof(path)) continue;
+    struct stat st;
+    if (stat(path, &st) != 0) continue;
+    if (!S_ISREG(st.st_mode)) continue;
+    if (now - st.st_mtime > METAL_PSO_CACHE_TTL_SECS) {
+      (void)unlink(path);
+    }
+  }
+  closedir(d);
+}
+
+static void metal_pso_cache_init(void) {
+  METAL_PSO_CACHE_ENABLED = 0;
+  if (metal_pso_cache_disabled()) return;
+  if (metal_pso_cache_resolve_dir() != 0) return;
+  if (metal_pso_cache_mkdir_p(METAL_PSO_CACHE_DIR) != 0) {
+    fprintf(stderr, "thvm: metal_pso_cache -- mkdir %s failed (%s); cache disabled\n",
+            METAL_PSO_CACHE_DIR, strerror(errno));
+    return;
+  }
+  METAL_PSO_CACHE_ENABLED = 1;
+  metal_pso_cache_sweep_old();
+}
+
+// Format the per-key path into out (cap >= METAL_PSO_CACHE_PATH_MAX).
+// Returns 0 on success, -1 if truncated.
+static int metal_pso_cache_path(u64 key, char *out, size_t cap) {
+  int n = snprintf(out, cap, "%s/pso-%016llx.bin",
+                   METAL_PSO_CACHE_DIR, (unsigned long long)key);
+  if (n <= 0 || (size_t)n >= cap) return -1;
+  return 0;
+}
+
+// Try to load a cached PSO for `key`.  Builds an MTLBinaryArchive
+// from the on-disk file, then constructs the pipeline state with
+// MTLPipelineOptionFailOnBinaryArchiveMiss so a miss inside the
+// archive falls through to fresh compile.  On any failure (no file,
+// corrupt, function-name mismatch), returns nil and the caller falls
+// through to the fresh-build path -- which will also rewrite the
+// corrupt entry.
+//
+// `mtlFn` must already be constructed from the freshly-compiled
+// MTLLibrary; we still need the function identity to look it up in
+// the archive (MTLBinaryArchive caches AIR->GPU, not MSL->AIR).
+static id<MTLComputePipelineState>
+metal_pso_cache_try_load(u64 key,
+                         id<MTLFunction> mtlFn,
+                         MTLComputePipelineDescriptor *desc) {
+  if (!METAL_PSO_CACHE_ENABLED) return nil;
+  char path[METAL_PSO_CACHE_PATH_MAX];
+  if (metal_pso_cache_path(key, path, sizeof(path)) != 0) return nil;
+  struct stat st;
+  if (stat(path, &st) != 0) return nil;  // miss -- silent
+  if (!S_ISREG(st.st_mode) || st.st_size <= 0) return nil;
+
+  NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+  MTLBinaryArchiveDescriptor *adesc =
+      [[MTLBinaryArchiveDescriptor alloc] init];
+  [adesc setUrl:url];
+  NSError *err = nil;
+  id<MTLBinaryArchive> archive =
+      [METAL_DEVICE newBinaryArchiveWithDescriptor:adesc error:&err];
+  if (archive == nil) {
+    // Corrupt or version-mismatched on-disk file.  Best-effort:
+    // unlink so the fresh-build path can rewrite a valid one.
+    fprintf(stderr,
+            "thvm: metal_pso_cache -- archive load failed for %s (%s); evicting\n",
+            path,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    (void)unlink(path);
+    return nil;
+  }
+  [desc setComputeFunction:mtlFn];
+  [desc setBinaryArchives:@[archive]];
+  err = nil;
+  id<MTLComputePipelineState> pso =
+      [METAL_DEVICE newComputePipelineStateWithDescriptor:desc
+                                                   options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                reflection:NULL
+                                                     error:&err];
+  // Reset the descriptor's binaryArchives so the fresh-build path
+  // (if we get there) doesn't accidentally inherit it.
+  [desc setBinaryArchives:nil];
+  if (pso == nil) {
+    // Archive opened but doesn't contain a matching pipeline.  Treat
+    // as a miss -- the fresh-build path will rebuild and overwrite.
+    return nil;
+  }
+  METAL_JIT_BUILD_DISK_BYTES_R += (u64)st.st_size;
+  return pso;
+}
+
+// Capture the freshly-built PSO into a transient MTLBinaryArchive
+// and serialize to disk (atomic via tmp+rename).  Non-fatal on
+// failure: caller already has a valid in-memory PSO and the next
+// fresh process will simply recompile.
+static void metal_pso_cache_store(u64 key,
+                                  MTLComputePipelineDescriptor *desc) {
+  if (!METAL_PSO_CACHE_ENABLED) return;
+  char path[METAL_PSO_CACHE_PATH_MAX];
+  if (metal_pso_cache_path(key, path, sizeof(path)) != 0) return;
+  // If a file already exists (e.g. we hit the miss-after-load path
+  // because the archive had no matching entry), don't double-write.
+  // Stat is cheap relative to the serialize itself.
+  struct stat existing;
+  if (stat(path, &existing) == 0 && S_ISREG(existing.st_mode)
+      && existing.st_size > 0) {
+    // Still bump the byte counter? No -- caller already counted on
+    // read.  Bail.
+    return;
+  }
+  char tmppath[METAL_PSO_CACHE_PATH_MAX];
+  int n = snprintf(tmppath, sizeof(tmppath), "%s.tmp.%d",
+                   path, (int)getpid());
+  if (n <= 0 || (size_t)n >= sizeof(tmppath)) return;
+
+  MTLBinaryArchiveDescriptor *adesc =
+      [[MTLBinaryArchiveDescriptor alloc] init];
+  [adesc setUrl:nil];  // build fresh, not loaded
+  NSError *err = nil;
+  id<MTLBinaryArchive> archive =
+      [METAL_DEVICE newBinaryArchiveWithDescriptor:adesc error:&err];
+  if (archive == nil) {
+    fprintf(stderr,
+            "thvm: metal_pso_cache -- create archive failed (%s); not caching\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return;
+  }
+  err = nil;
+  BOOL added = [archive addComputePipelineFunctionsWithDescriptor:desc
+                                                            error:&err];
+  if (!added) {
+    fprintf(stderr,
+            "thvm: metal_pso_cache -- addComputePipelineFunctions failed (%s); not caching\n",
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    return;
+  }
+  NSURL *tmpurl = [NSURL fileURLWithPath:[NSString stringWithUTF8String:tmppath]];
+  err = nil;
+  BOOL ok = [archive serializeToURL:tmpurl error:&err];
+  if (!ok) {
+    fprintf(stderr,
+            "thvm: metal_pso_cache -- serializeToURL %s failed (%s); not caching\n",
+            tmppath,
+            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    (void)unlink(tmppath);
+    return;
+  }
+  // Atomic publish: rename(2) is atomic on the same filesystem.
+  if (rename(tmppath, path) != 0) {
+    fprintf(stderr,
+            "thvm: metal_pso_cache -- rename %s -> %s failed (%s); not caching\n",
+            tmppath, path, strerror(errno));
+    (void)unlink(tmppath);
+    return;
+  }
+  struct stat st;
+  if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+    METAL_JIT_BUILD_DISK_BYTES_W += (u64)st.st_size;
+  }
+}
+
+// External accessors for the PSO cache stats / control.  Used by
+// the new test_metal_pso_cache.c test; safe to call from a process
+// with no Metal device (returns 0).
+u64 thvm_metal_pso_cache_disk_hits(void)    { return METAL_JIT_BUILD_DISK_HITS; }
+u64 thvm_metal_pso_cache_disk_misses(void)  { return METAL_JIT_BUILD_DISK_MISSES; }
+u64 thvm_metal_pso_cache_bytes_r(void)      { return METAL_JIT_BUILD_DISK_BYTES_R; }
+u64 thvm_metal_pso_cache_bytes_w(void)      { return METAL_JIT_BUILD_DISK_BYTES_W; }
+u64 thvm_metal_jit_hits(void)               { return METAL_JIT_BUILD_HITS; }
+u64 thvm_metal_jit_misses(void)             { return METAL_JIT_BUILD_MISSES; }
+int thvm_metal_pso_cache_enabled(void)      { return METAL_PSO_CACHE_ENABLED; }
+char const *thvm_metal_pso_cache_dir(void)  { return METAL_PSO_CACHE_DIR; }
+
+// Drop just the in-memory PSO cache (simulating a fresh process for
+// the test); leaves on-disk files intact.  Public so test code can
+// drive a synthetic warm-restart without metal_shutdown nilling the
+// device.
+void thvm_metal_jit_drop_in_memory_psos(void) {
+  metal_jit_cache_reset_impl();
 }
 
 // Open-addressing probe: returns the slot the key lives in, or the
@@ -893,16 +1216,37 @@ static id<MTLComputePipelineState> metal_tile_jit_build(KernelEntry const *ke,
       [[MTLComputePipelineDescriptor alloc] init];
   [desc setComputeFunction:mtlFn];
   [desc setSupportIndirectCommandBuffers:YES];
+  // Try the persistent on-disk PSO cache first.  The descriptor's
+  // computeFunction must already be set; metal_pso_cache_try_load
+  // attaches the archive + sets FailOnBinaryArchiveMiss so a hit
+  // skips the AIR->GPU backend compile.  Returns nil on miss; in
+  // that case fall through to the fresh-build path below.
   id<MTLComputePipelineState> pso =
-      [METAL_DEVICE newComputePipelineStateWithDescriptor:desc
-                                                   options:MTLPipelineOptionNone
-                                                reflection:NULL
-                                                     error:&err];
-  if (pso == nil) {
-    fprintf(stderr, "thvm: metal_tile_jit -- pipeline-state failed: %s\n",
-            err ? [[err localizedDescription] UTF8String] : "(no error)");
-    return nil;
+      metal_pso_cache_try_load(key, mtlFn, desc);
+  int from_disk = 0;
+  if (pso != nil) {
+    from_disk = 1;
+    METAL_JIT_BUILD_DISK_HITS++;
+  } else {
+    if (METAL_PSO_CACHE_ENABLED) {
+      METAL_JIT_BUILD_DISK_MISSES++;
+    }
+    err = nil;
+    pso = [METAL_DEVICE newComputePipelineStateWithDescriptor:desc
+                                                       options:MTLPipelineOptionNone
+                                                    reflection:NULL
+                                                         error:&err];
+    if (pso == nil) {
+      fprintf(stderr, "thvm: metal_tile_jit -- pipeline-state failed: %s\n",
+              err ? [[err localizedDescription] UTF8String] : "(no error)");
+      return nil;
+    }
+    // Capture the freshly-built PSO into the on-disk archive for
+    // future warm restarts.  Non-fatal on failure -- the in-memory
+    // PSO above is still usable for this process.
+    metal_pso_cache_store(key, desc);
   }
+  (void)from_disk;
   METAL_JIT_BUILD_COMPILE_US += cg_now_us() - t0;
   u32 idx = metal_jit_lookup_idx(key);
   if (idx != (u32)-1) {
