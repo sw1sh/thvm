@@ -34,6 +34,7 @@ TESTS := \
   $(BIN)/test_metal_stub \
   $(BIN)/test_expand_axis \
   $(BIN)/test_view_strided \
+  $(BIN)/test_pool_im2col_chain \
   $(BIN)/test_buf_pool \
   $(BIN)/test_consumer_count \
   $(BIN)/test_kernel_fire_gen \
