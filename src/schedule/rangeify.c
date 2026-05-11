@@ -784,6 +784,97 @@ static u32 build_addr_from_flat_iter(KernelEntry *ke, u32 flat_range_id,
   return acc != 0 ? acc : emit_iconst(ke, 0);
 }
 
+// === ShapeTracker-chain composition into the kernel INDEX (additive) ===
+//
+// For a kernel input whose TenDesc carries a prior_views chain
+// (nviews > 0), the dispatch backends pre-materialise it into a
+// contiguous offset-0 buffer before the kernel runs (cpu_premat_*,
+// metal_dispatch's td->nviews branch).  When the chain is composable
+// by decompose-by-shape -- every prior view rank 1..MAX_DIM, offset
+// >= 0, all strides >= 0 (a FLIP / negative-stride residue makes it
+// non-foldable; pre-mat handles those) -- rangeify can instead emit
+// the chain directly into the kernel's INDEX expression, so the
+// strided view is read in-kernel with zero materialisation (the
+// tinygrad approach).  This is the foldability gate; the actual
+// composed-index emit is `emit_chained_index_from_addr`.
+static int input_chain_foldable(KernelEntry const *ke, u32 slot) {
+  if (ke == NULL || ke->input_tids == NULL) return 0;
+  u32 tid = ke->input_tids[slot];
+  if (tid == 0 || tid >= TENS_NEXT) return 0;
+  TenDesc const *td = &TENS[tid];
+  if (td->nviews == 0 || td->prior_views == NULL) return 0;
+  if (dtype_is_packed(td->dtype)) return 0;
+  for (u8 k = 0; k < td->nviews; k++) {
+    View const *pv = &td->prior_views[k];
+    if (pv->shape.ndim < 1 || pv->shape.ndim > MAX_DIM) return 0;
+    if (pv->offset < 0) return 0;
+    for (u32 d = 0; d < pv->shape.ndim; d++) {
+      if (pv->strides[d] < 0) return 0;
+    }
+  }
+  return 1;
+}
+
+// Build just the flat-address expression `sum_d(range_ids[d]*strides[d])
+// + offset` over the kernel's RANGE leaves -- the body of
+// emit_index_expr without the S_INDEX_E wrap.  Returns 0 on the same
+// bail conditions emit_index_expr has (ndim too large, a non-broadcast
+// axis with no range leaf).  Broadcast axes (stride 0) contribute
+// nothing, matching emit_index_expr.
+static u32 emit_addr_from_strides(KernelEntry *ke, u32 const *range_ids,
+                                  u32 const *strides, u32 ndim, u32 offset) {
+  if (ndim > MAX_DIM) return 0;
+  u32 acc = offset ? emit_iconst(ke, (i64)offset) : 0;
+  for (u32 d = 0; d < ndim; d++) {
+    if (strides[d] != 0 && range_ids[d] == 0) return 0;
+    acc = emit_axis_term(ke, range_ids[d], strides[d], acc);
+  }
+  if (acc == 0) acc = emit_iconst(ke, 0);
+  return acc;
+}
+
+// Given `addr0` -- an already-built flat index expression into
+// prior_views[nviews-1]'s shape (the value the public/outermost view's
+// strides+offset produce) -- walk the chain prior_views[nviews-1] ...
+// prior_views[0] composing each view's decompose-by-shape map (exactly
+// what tendesc_strided_index / view_strided_index do at runtime, here
+// emitted as S_IDIV/S_IMOD/S_IMUL/S_IADD scalar UOPs over the kernel's
+// RANGE leaves).  prior_views[0] is the innermost: its output is the
+// underlying-buffer element index.  Wraps the result in
+// S_INDEX_E(param, composed_addr).  Caller is responsible for having
+// checked input_chain_foldable(ke, slot) first; returns 0 on a hard
+// emit failure (propagates as the caller's idx==0 bail).
+static u32 emit_chained_index_from_addr(KernelEntry *ke, u32 dtype,
+                                        u32 param, u32 itid, u32 addr0) {
+  if (addr0 == 0 || itid == 0 || itid >= TENS_NEXT) return 0;
+  TenDesc const *td = &TENS[itid];
+  if (td->nviews == 0 || td->prior_views == NULL) return 0;
+  u32 cur = addr0;
+  for (i32 k = (i32)td->nviews - 1; k >= 0; k--) {
+    View const *pv = &td->prior_views[k];
+    u32 ndim = pv->shape.ndim;
+    if (ndim < 1 || ndim > MAX_DIM) return 0;
+    u32 dims_u32[MAX_DIM];
+    u32 strides_u32[MAX_DIM];
+    for (u32 d = 0; d < ndim; d++) {
+      if (pv->strides[d] < 0) return 0;
+      dims_u32[d]    = pv->shape.dims[d];
+      strides_u32[d] = (u32)pv->strides[d];
+    }
+    if (pv->offset < 0) return 0;
+    cur = build_addr_from_flat_iter(ke, cur, dims_u32, strides_u32,
+                                    ndim, (u32)pv->offset);
+    if (cur == 0) return 0;
+  }
+  if (getenv("THVM_RANGEIFY_CHAIN_DUMP")) {
+    fprintf(stderr,
+            "rangeify-chain: kid=%u tid=%u nviews=%u dtype=%u composed INDEX (no pre-mat)\n",
+            (u32)(ke - KERNELS), itid, (u32)td->nviews, dtype);
+  }
+  u32 src[2] = {param, cur};
+  return rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
+}
+
 // Per-axis iter expressions tracked by the backward walk and consumed
 // by the per-USE input-load helper.  Mirrors tinygrad's apply_movement_op
 // rngs tuple (indexing.py).  refs[d] = op_id of an integer expression
@@ -1981,6 +2072,42 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     u32 raw = p->src[0];
     if (KSRC_IS_INPUT(raw)) input_via_padshrink[KSRC_INDEX(raw)] = 1;
   }
+  // ShapeTracker-chain fold gate (ADDITIVE -- never touches the
+  // nviews==0 path).  chain_fold_ok[i] == 1 iff input slot i carries a
+  // foldable prior_views chain AND it is safe to read it through a
+  // composed in-kernel INDEX instead of the dispatch pre-mat: exactly
+  // one KProgOp references KSRC_INPUT(i), it isn't a PAD (PADs route
+  // through emit_input_load_for_use's OUTER-view load + pre-mat), it
+  // sits inside the single reduce body (n_reduces == 1, region 0), and
+  // it isn't also used post-scope.  This pins each composed read to be
+  // the ONLY read of that slot, so a composed read can never be paired
+  // with an uncomposed one.  When 0, the index is built exactly as
+  // before and the backend pre-mat fires as it always has.
+  u8 chain_fold_ok[nin_local];
+  for (u32 i = 0; i < nin_local; i++) chain_fold_ok[i] = 0;
+  if (has_reduce && n_reduces == 1) {
+    for (u32 i = 0; i < ke->n_inputs; i++) {
+      if (input_used_post[i]) continue;
+      if (!input_used_in_region[0][i]) continue;
+      u32 itid = ke->input_tids ? ke->input_tids[i] : 0;
+      if (itid == 0 || itid >= TENS_NEXT || TENS[itid].nviews == 0) continue;
+      // Count direct references; require exactly one and not a PAD.
+      u32 n_refs = 0; int ref_pad = 0;
+      for (u32 j = 0; j < ke->n_ops; j++) {
+        KProgOp *p = &ke->program[j];
+        for (u8 s = 0; s < p->n_src; s++) {
+          u32 raw = p->src[s];
+          if (KSRC_IS_INPUT(raw) && KSRC_INDEX(raw) == i) {
+            n_refs++;
+            if (p->opcode == UOP_PAD) ref_pad = 1;
+          }
+        }
+      }
+      if (n_refs != 1 || ref_pad) continue;
+      if (!input_chain_foldable(ke, i)) continue;
+      chain_fold_ok[i] = 1;
+    }
+  }
   // (Earlier F-8e-5 bailed all kernels with a shape-changing RESHAPE
   //  in a PAD/SHRINK chain.  F-8e-7 lowers them via S_RESHAPE -- the
   //  iter-coord transform op -- in the per-op emit loop below.)
@@ -1996,6 +2123,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
   // Start fresh -- emit_kernel_for_boundary may have run rangeify on
   // a previous attempt that bailed mid-way.
   rangeify_free(ke);
+  // Reset the per-slot composed-chain flags for this (re)attempt; only
+  // the additive composed-index branches below set them, and the CPU /
+  // Metal backends gate the pre-mat skip on them, so a stale bit from a
+  // bailed attempt must not leak.
+  if (ke->input_chain_composed != NULL) {
+    for (u32 i = 0; i < ke->n_inputs; i++) ke->input_chain_composed[i] = 0;
+  }
 
   // 1. LOOP ranges: one S_RANGE per output dim, axis_type LOOP.
   u32 loop_ranges[MAX_DIM];
@@ -2597,6 +2731,17 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
       View const *v = &ke->input_views[i];
       u32 in_off   = (u32)v->offset;
       u32 idx;
+      // ADDITIVE: when this input slot carries a foldable ShapeTracker
+      // chain AND the fold-ok gate holds (single reduce body, read
+      // once, etc.), the index-build branches below compose the chain
+      // into the kernel INDEX instead of emitting the bare public-view
+      // address (which the dispatch pre-mat would otherwise materialise
+      // a contiguous copy for).  `chained` == 0 leaves every branch
+      // character-for-character as it was.
+      u32 chain_itid = ke->input_tids ? ke->input_tids[i] : 0;
+      int chained = (chain_itid != 0 && chain_itid < TENS_NEXT
+                     && TENS[chain_itid].nviews > 0
+                     && input_chain_foldable(ke, i) && chain_fold_ok[i]);
       if (in_numel == 1) {
         u32 src[1] = {param};
         u64 packed = pack_index_extra(NULL, 0, in_off);
@@ -2606,18 +2751,36 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                  && in_numel == reduce_size_r) {
         u32 r_ids[1]    = {reduce_range_r};
         u32 r_strides[1] = {1};
-        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
-                                       1, in_off);
+        if (chained) {
+          u32 a = emit_addr_from_strides(ke, r_ids, r_strides, 1, in_off);
+          idx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, a);
+          if (idx != 0) ke->input_chain_composed[i] = 1;
+        } else {
+          idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
+                                         1, in_off);
+        }
       } else if (in_numel == reduce_size_r && v->shape.ndim == 1) {
         u32 r_ids[1]    = {reduce_range_r};
         u32 r_strides[1] = {(u32)v->strides[0]};
-        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
-                                       1, in_off);
+        if (chained) {
+          u32 a = emit_addr_from_strides(ke, r_ids, r_strides, 1, in_off);
+          idx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, a);
+          if (idx != 0) ke->input_chain_composed[i] = 1;
+        } else {
+          idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
+                                         1, in_off);
+        }
       } else if (in_numel == reduce_size_r && reduce_inner_r == 1) {
         u32 r_ids[1]    = {reduce_range_r};
         u32 r_strides[1] = {1};
-        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
-                                       1, in_off);
+        if (chained) {
+          u32 a = emit_addr_from_strides(ke, r_ids, r_strides, 1, in_off);
+          idx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, a);
+          if (idx != 0) ke->input_chain_composed[i] = 1;
+        } else {
+          idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides,
+                                         1, in_off);
+        }
       } else if (in_numel == reduce_size_r && v->shape.ndim <= MAX_DIM) {
         u32 v_ndim = v->shape.ndim;
         u32 dims_u32[MAX_DIM];
@@ -2631,8 +2794,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
                                               dims_u32, strides_u32,
                                               v_ndim, in_off);
         if (addr == 0) RBAIL_MID("pre-INDEX-E build_addr failed");
-        u32 src[2] = {param, addr};
-        idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
+        if (chained) {
+          idx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, addr);
+          if (idx != 0) ke->input_chain_composed[i] = 1;
+        } else {
+          u32 src[2] = {param, addr};
+          idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
+        }
       } else if (red_r->n_reduce_axes > 1
                  && input_rngs_in_region[r][i].ndim == v->shape.ndim
                  && v->shape.ndim > 0) {
@@ -2672,7 +2840,13 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           }
           r_strides[d] = (u32)v->strides[d];
         }
-        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides, in_ndim_r, in_off);
+        if (chained) {
+          u32 a = emit_addr_from_strides(ke, r_ids, r_strides, in_ndim_r, in_off);
+          idx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, a);
+          if (idx != 0) ke->input_chain_composed[i] = 1;
+        } else {
+          idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, r_strides, in_ndim_r, in_off);
+        }
       } else if (in_numel == reduce_in_numel_r && reduce_inner_r == 1) {
         // Reduce axes are the trailing axes of the pre-reduce input
         // (inner == 1).  A single-axis reduce has in_ndim_r ==
@@ -2695,8 +2869,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         r_ids[n_kept] = reduce_range_r;
         strd [n_kept] = in_strides_r[in_ndim_r - 1];   // innermost stride
         (void)n_reduced;
-        idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, strd,
-                                       n_kept + 1, in_off);
+        if (chained) {
+          u32 a = emit_addr_from_strides(ke, r_ids, strd, n_kept + 1, in_off);
+          idx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, a);
+          if (idx != 0) ke->input_chain_composed[i] = 1;
+        } else {
+          idx = emit_index_chain_or_expr(ke, dtype, param, r_ids, strd,
+                                         n_kept + 1, in_off);
+        }
       } else if (v->shape.ndim == os->ndim) {
         int shape_mismatch = 0;
         for (u32 d = 0; d < os->ndim; d++) {
@@ -2749,8 +2929,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
         for (u32 d = 0; d < os->ndim; d++) {
           strides_u32[d] = (u32)v->strides[d];
         }
-        idx = emit_index_chain_or_expr(ke, dtype, param, loop_ranges, strides_u32,
-                                       os->ndim, in_off);
+        if (chained) {
+          u32 a = emit_addr_from_strides(ke, loop_ranges, strides_u32, os->ndim, in_off);
+          idx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, a);
+          if (idx != 0) ke->input_chain_composed[i] = 1;
+        } else {
+          idx = emit_index_chain_or_expr(ke, dtype, param, loop_ranges, strides_u32,
+                                         os->ndim, in_off);
+        }
       } else if (input_rngs_in_region[r][i].ndim == v->shape.ndim
                  && v->shape.ndim > 0) {
        pre_index_rngs_fallback:
@@ -2763,8 +2949,14 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
           // Fall through to the existing failure path below.
           RBAIL_MID("pre-INDEX rngs negative stride");
         }
-        u32 src[2] = {param, acc};
-        idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
+        if (chained) {
+          u32 cidx = emit_chained_index_from_addr(ke, dtype, param, chain_itid, acc);
+          if (cidx != 0) { ke->input_chain_composed[i] = 1; idx = cidx; }
+          else { u32 src[2] = {param, acc}; idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0); }
+        } else {
+          u32 src[2] = {param, acc};
+          idx = rangeify_emit(ke, S_INDEX_E, dtype, 2, src, 0);
+        }
       } else {
         if (getenv("THVM_RANGEIFY_BAIL")) {
           fprintf(stderr, "  pre-INDEX-detail: i=%u r=%u in_numel=%u onum=%u v.ndim=%u os.ndim=%u in_ndim_r=%u red_r->numel=%u reduce_size_r=%u reduce_in_numel_r=%u reduce_inner_r=%u rngs.ndim=%u\n",

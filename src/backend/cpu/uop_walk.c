@@ -787,6 +787,16 @@ static int uwalk_resolve_input_ptr(KernelEntry *ke, u32 slot, u32 buf_id,
     return 0;
   }
   TenDesc const *td = &TENS[tid];
+  // ShapeTracker-chain composed into the INDEX (input_chain_composed):
+  // the emitted address already folds the FULL chain -- the public
+  // view's strides+offset AND every inner prior_views step -- down to a
+  // raw-buffer element index.  Biasing by view.offset here would
+  // double-apply it; pass the raw buffer pointer untouched.
+  if (ke->input_chain_composed != NULL && slot < ke->n_inputs
+      && ke->input_chain_composed[slot]) {
+    *out_ptr = raw;
+    return 0;
+  }
   // Bias the pointer by view.offset * itemsize. The lifter's
   // view-stride addressing produces (sum of iter * stride[d]) without
   // the offset, expecting the caller to bias the base pointer.

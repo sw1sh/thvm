@@ -1174,6 +1174,16 @@ typedef struct KernelEntry {
   // KProgOp.chain_edge_idx so multiple paths from the same
   // consumer to the same source pick distinct BIndex records.
   u32      *input_visit_counts;
+  // Per-slot flag (heap array, parallel to input_visit_counts): 1 iff
+  // rangeify folded this input's ShapeTracker prior_views chain into
+  // the kernel INDEX expression (composed-index, the tinygrad
+  // approach -- the strided view is read in-kernel with zero
+  // materialisation).  When set, cpu_dispatch_kernel /
+  // metal_dispatch_kernel SKIP the per-input chained pre-materialise
+  // gather for that slot; when 0 (rangeify declined / didn't compose),
+  // the pre-mat fires exactly as before.  Allocated/zeroed/freed in
+  // kernel_alloc.c next to input_visit_counts.
+  u8       *input_chain_composed;
 
   u32       output_tid;            // TenDesc id we write to (slot 0)
   u32       output_dtype;

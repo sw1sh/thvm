@@ -1010,6 +1010,9 @@ static int cpu_premat_chained_input(KernelEntry *ke, u32 slot,
   if (tid == 0 || tid >= TENS_NEXT) return 0;
   TenDesc const *td = &TENS[tid];
   if (td->nviews == 0) return 0;                 // simple view -- ladder handles it
+  // rangeify already folded this chain into the kernel INDEX (the LOAD
+  // composes the full chain over the raw buffer) -- no gather needed.
+  if (ke->input_chain_composed != NULL && ke->input_chain_composed[slot]) return 0;
   if (dtype_is_packed(td->dtype)) return 0;      // packed nibbles: out of scope
   u32 esz = dtype_itemsize(td->dtype);
   if (esz == 0) return 0;

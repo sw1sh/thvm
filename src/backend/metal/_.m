@@ -2072,7 +2072,14 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
     u32 ib  = in_buf_ids[i];
     u32 tid = ke->input_tids[i];
     TenDesc const *td = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
-    int needs_premat = (td != NULL
+    // When rangeify folded this input's ShapeTracker chain into the
+    // kernel INDEX (input_chain_composed -- the LOAD composes the full
+    // chain, public view + every inner offset/stride, over the raw
+    // buffer), there is nothing to materialise: skip the gather entirely
+    // (mirrors cpu_premat_chained_input's early return).
+    int chain_composed = (ke->input_chain_composed != NULL
+                          && ke->input_chain_composed[i]);
+    int needs_premat = (td != NULL && !chain_composed
                         && (!td->view.contiguous
                             || td->view.offset != 0
                             || td->nviews != 0));
