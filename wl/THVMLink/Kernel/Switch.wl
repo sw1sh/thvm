@@ -64,13 +64,34 @@ TNum[i_Integer, dtype_String]        := (
     TTerm[$termNewFn[0, $TagNUM, dtypeCode[dtype], i]]
 )
 
+(* numCoerce -- term-constructor sugar.  A bare Integer in a value
+   position means "the i32 NUM with that value", so TSup[1, 2] is
+   TSup[TNum[1], TNum[2]], TOp2["+", x, 3] is TOp2["+", x, TNum[3]],
+   etc.  Without it, ttermRaw[1] === 1 gets spliced into a heap cell
+   as a raw packed Term word -- which the runtime decodes as
+   APP(loc=1), a malformed term that crashes on reduction.  Applied
+   at the heapWith funnel (THVMLink.wl) for every heapTerm-based
+   constructor, and explicitly in TOp2 / TEql below (those bypass
+   heapWith -- they call the C term_new_op2 / term_new_eql directly).
+
+   Integer only, on purpose: a bare Integer maps unambiguously to a
+   DT_I32 NUM with that value (literally TNum[i]).  A bare Real would
+   need to be bit-reinterpreted to f32 (TNum stores the 32-bit *bits*,
+   not the value -- see TNum::usage), and the surface convention for
+   arithmetic float scalars is TUOpConst.  If you want a float NUM,
+   write TNum[bits, "f32"] explicitly.  Everything that isn't a bare
+   Integer (already a TTerm, a Real, a List, ...) passes through
+   untouched. *)
+numCoerce[i_Integer] := TNum[i]
+numCoerce[x_]        := x
+
 TOp2[op_String, x_, y_] := (
     ensureInit[];
     TTerm[$termNewOp2Fn[
         Lookup[$op2Codes, op,
             (Message[TOp2::badop, op]; 0)],
-        ttermRaw[x],
-        ttermRaw[y]
+        ttermRaw[numCoerce[x]],
+        ttermRaw[numCoerce[y]]
     ]]
 )
 TOp2::badop = "Unknown OP2 opcode `1`; expected one of \"+\", \"-\", \"*\", \"==\", \"<\".";
@@ -83,7 +104,7 @@ TOp2::badop = "Unknown OP2 opcode `1`; expected one of \"+\", \"-\", \"*\", \"==
    structural equality recurse natively. *)
 TEql[a_, b_] := (
     ensureInit[];
-    TTerm[$termNewEqlFn[ttermRaw[a], ttermRaw[b]]]
+    TTerm[$termNewEqlFn[ttermRaw[numCoerce[a]], ttermRaw[numCoerce[b]]]]
 )
 
 TMatNum[matchVal_Integer, handler_, fallback_] := (
@@ -132,9 +153,16 @@ TMatChain[arms_Association, fallback_] := Fold[
    construction read like normal WL arithmetic instead of a forest of
    manual TOp2 calls. *)
 
+(* "Could reduce to a NUM in numeric context": NUM literals, bound
+   vars, OP2 / MAT trees, plus SUP and DP0/DP1 projections (so
+   `TSup[1,2] + 3` and `dp0 * 2` route through TOp2 -- OP2-SUP
+   commutes the op into each branch; the OP2 frame drives DP heads
+   through cnf before folding).  REF / ALO are deliberately excluded
+   -- a named recursive def isn't necessarily numeric. *)
 numericTermQ[t_TTerm] := With[{tag = $termTagFn[ttermRaw[t]]},
     tag === $TagNUM || tag === $TagVAR ||
-    tag === $TagOP2 || tag === $TagMAT
+    tag === $TagOP2 || tag === $TagMAT ||
+    tag === $TagSUP || tag === $TagDP0 || tag === $TagDP1
 ]
 numericTermQ[_] := False
 

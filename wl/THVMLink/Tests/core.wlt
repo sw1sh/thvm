@@ -356,3 +356,66 @@ VerificationTest[
     {0, 0, 0},
     TestID -> "TRealize on TEN short-circuits"
 ]
+
+(* === numCoerce: bare-Integer fields lift to i32 NUM ============== *)
+(* A bare Integer in a value position (TSup[1,2], TOp2["+",x,3], ...)
+   means "the NUM with that value".  Without numCoerce, ttermRaw[1]
+   === 1 would be spliced into a heap cell as a raw packed Term word
+   that the runtime decodes as APP(loc=1) -- a malformed term that
+   crashes on reduction.  See heapWith (THVMLink.wl) + numCoerce
+   (Switch.wl). *)
+VerificationTest[
+    TInit[];
+    Module[{s = TSup[1, 2]},
+        {TTagName[TTermTag[s]],
+         TTagName[TTermTag[THeapRead[TTermVal[s]]]],     TTermVal[THeapRead[TTermVal[s]]],
+         TTagName[TTermTag[THeapRead[TTermVal[s] + 1]]], TTermVal[THeapRead[TTermVal[s] + 1]]}],
+    {"SUP", "NUM", 1, "NUM", 2},
+    TestID -> "TSup[1, 2] lifts bare-int children to NUM"
+]
+
+VerificationTest[
+    TInit[];
+    Module[{op = TOp2["+", TSup[1, 2], 3]},
+        {TTagName[TTermTag[op]],
+         TTagName[TTermTag[THeapRead[TTermVal[op]]]],         (* x: a SUP *)
+         TTagName[TTermTag[THeapRead[TTermVal[op] + 1]]], TTermVal[THeapRead[TTermVal[op] + 1]]}],
+    {"OP2", "SUP", "NUM", 3},
+    TestID -> "TOp2 lifts a bare-int operand to NUM"
+]
+
+(* numericTermQ now covers SUP / DP0 / DP1, so the existing Plus /
+   Times / Equal / Less TTerm overloads fire on them: `TSup[1,2] + 3`
+   builds TOp2["+", TSup[TNum[1],TNum[2]], TNum[3]] -- OP2-SUP then
+   commutes the op into each branch. *)
+VerificationTest[
+    TInit[];
+    Module[{r = TSup[1, 2] + 3},
+        {Head[r], TTagName[TTermTag[r]], TTagName[TTermTag[THeapRead[TTermVal[r]]]]}],
+    {TTerm, "OP2", "SUP"},
+    TestID -> "TSup[..] + n routes through TOp2 (numericTermQ covers SUP)"
+]
+
+(* End-to-end: collapsing TDup[TOp2["+", TSup[1,2], 3]].  Fresh
+   labels on the SUP and the DUP, so DUP-SUP commutes -- the dup fans
+   out into a 1x2 cross product and BOTH projections see {4, 5}. *)
+VerificationTest[
+    TInit[];
+    Module[{dp0, dp1},
+        {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
+        {Sort[TTermVal /@ TCollapse[dp0]], Sort[TTermVal /@ TCollapse[dp1]]}],
+    {{4, 5}, {4, 5}},
+    TestID -> "collapse TDup[TOp2[\"+\", TSup[1,2], 3]] -- fresh labels, commute"
+]
+
+(* Same shape, but the SUP and DUP share label 7: DUP-SUP annihilates,
+   so dp0 takes branch 0 (= 1+3 = 4) and dp1 takes branch 1 (= 2+3 =
+   5).  This is the entangled reading. *)
+VerificationTest[
+    TInit[];
+    Module[{e0, e1},
+        {e0, e1} = TDup[7, TOp2["+", TSup[7, 1, 2], 3]];
+        {TTermVal /@ TCollapse[e0], TTermVal /@ TCollapse[e1]}],
+    {{4}, {5}},
+    TestID -> "collapse TDup[7, TOp2[\"+\", TSup[7,1,2], 3]] -- shared label, annihilate"
+]

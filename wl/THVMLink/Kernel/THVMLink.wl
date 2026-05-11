@@ -64,7 +64,7 @@ TVarFor::usage    = "TVarFor[lamLoc] constructs a VAR pointing at a binder loc."
 TLam::usage       = "TLam[x, body] constructs a lambda; HoldAll, so `x` is the binder symbol and `body` is the lambda body referring to it (e.g. TLam[w, TUOpAdd[w, w]]).  When the body is a UOP graph and the first TApp's argument carries a shape, the APP-LAM interaction JIT-materializes the body into a UOP_KERNEL with the bound var as a symbolic input slot -- compile-once, dispatch with each subsequent arg.  Bodies that aren't UOP graphs (e.g. curried lambdas, TIfZero) skip the JIT step.";
 TLamShape::usage  = "TLamShape[shape_List, x, body] constructs a lambda whose bound variable carries an explicit shape annotation in the lam_shape side table.  Useful when the body needs to materialize BEFORE any TApp (e.g. for inspection / direct TMaterialize on the body); for the common case TLam alone is enough since the JIT path infers the shape from the first applied argument.";
 TApp::usage       = "TApp[fun, arg] constructs an application.";
-TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.";
+TSup::usage       = "TSup[a, b] constructs a SUP with a fresh label.  TSup[label, a, b] uses an explicit label.  Bare-Integer children are lifted to i32 NUMs, so TSup[1, 2] === TSup[TNum[1], TNum[2]] (every heapTerm-based constructor does this -- see numCoerce).";
 TDsu::usage       = "TDsu[label, a, b] constructs a dynamic-label SUP (HVM4 DSU): the label is a TTerm reduced strict-left at wnf time, after which DSU collapses to SUP^n / ERA / nested-SUP based on what the label resolved to.  Useful for pattern compilers that need a fresh label per match instance.";
 TDdu::usage       = "TDdu[label, val, body] constructs a dynamic-label DUP (HVM4 DDU): same shape as TDsu but on the DUP side.  body must be a 2-arg LAM-pair; once label resolves to NUM(n), the DDU reduces to body(X0, X1) where X0/X1 are projections of DUP^n on val.";
 TTermEq::usage    = "TTermEq[a, b] returns True if `a` and `b` cnf-reduce to structurally equal terms (modulo VAR alpha-aliasing), False otherwise.  Drives both sides through cnf so DP-rooted projections fire and SUP heads lift.  Use TTermSame for the no-reduction variant on already-CNF'd terms.";
@@ -561,6 +561,13 @@ ttermRaw[id_Integer]                     := id
 ttermCtx[TTerm[c_Integer, _Integer, _]]  := c
 ttermCtx[_Integer]                       := 0
 
+(* numCoerce -- the term-constructor sugar that lifts a bare Integer
+   field to a NUM -- is defined in Switch.wl (next to TNum, which it
+   calls; defining it here would capture a stale private TNum symbol
+   since TNum is declared later).  heapWith below references it as a
+   forward symbol; Switch.wl's definition lands on the same
+   THVMLink`Private`numCoerce. *)
+
 (* Build a fresh ManagedLibraryExpression["ExternPin"] handle and
    wire it to `raw` on the C side.  The returned handle becomes
    part of the TTerm value; when WL collects the TTerm (and thus
@@ -1017,7 +1024,14 @@ tTreeWalk[t_, seen_] := tTreeWalkWith[$heapReadFn, t, seen]
 (* === high-level constructors (all return TTerm) === *)
 
 heapWith[fields__] := With[{loc = THeapAlloc[Length[{fields}]]},
-    ScanIndexed[THeapSet[loc + First[#2] - 1, #1] &, {fields}];
+    (* numCoerce (defined in Switch.wl): a bare Integer field means
+       "the NUM with that value".  Applying it here -- at the single
+       funnel every heapTerm-based constructor (TApp / TSup / TLam /
+       TDup / TCtr / TMat / TAnn / TBri / ...) goes through -- gives
+       them all integer-lifting without per-agent boilerplate.  The
+       low-level escape hatch THeapSet[loc, rawInt] still writes a raw
+       word verbatim; only constructor args get coerced. *)
+    ScanIndexed[THeapSet[loc + First[#2] - 1, numCoerce[#1]] &, {fields}];
     loc
 ]
 
@@ -1027,10 +1041,10 @@ heapTerm[tag_Integer, ext_Integer, fields__] :=
 TEra[]                  := packTerm[0, $TagERA, 0, 0]
 TVarFor[lamLoc_Integer] := packTerm[0, $TagVAR, 0, lamLoc]
 
-TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg]
+TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg]   (* heapWith coerces bare-Integer args *)
 
 TSup[a_, b_]                          := TSup[TFreshLabel[], a, b]
-TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]
+TSup[label_Integer, a_, b_]           := heapTerm[$TagSUP, label, a, b]   (* heapWith coerces bare-Integer children *)
 
 (* Dynamic-label SUP / DUP (HVM4 DSU / DDU).  The label is a Term
    that wnf reduces strict-left before dispatching the matching
@@ -1106,7 +1120,7 @@ TTerm[c_Integer, id_Integer, _][y_TTerm]   := TApp[TTerm[c, id], y]
 TTerm[c_Integer, id_Integer, _][y_Integer] := TApp[TTerm[c, id], y]
 
 TDup[body_]                           := TDup[TFreshLabel[], body]
-TDup[label_Integer, body_] := With[{loc = heapWith[body]},
+TDup[label_Integer, body_] := With[{loc = heapWith[body]},   (* heapWith coerces a bare-Integer body *)
     {packTerm[0, $TagDP0, label, loc],
      packTerm[0, $TagDP1, label, loc]}
 ]
