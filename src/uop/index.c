@@ -74,6 +74,26 @@ fn u32 uop_range_extent(Term r) {
   return (u32)term_val(heap_read(term_val(r) + 2));
 }
 
+// kvar wedge: the low 31 bits of `extent` hold either a literal
+// extent or a kvar id when bit 31 (KVAR_FLAG) is set.  These three
+// helpers are the canonical accessor surface for "is this range
+// symbolic? what var? what's the static upper bound?".
+fn int uop_range_extent_is_var(Term r) {
+  return kvar_extent_is_var(uop_range_extent(r));
+}
+
+fn u32 uop_range_var_id(Term r) {
+  return kvar_extent_var_id(uop_range_extent(r));
+}
+
+// Static extent: for literal ranges, identity.  For kvar-bound
+// ranges, the registered upper bound (kvar_hi).  Use this when
+// computing buffer sizes / dispatch shapes -- the worst-case footprint
+// must be allocated even when the runtime value is smaller.
+fn u32 uop_range_static_extent(Term r) {
+  return kvar_extent_static(uop_range_extent(r));
+}
+
 fn Term uop_range_with_axis_type(Term r, u32 new_axis_type) {
   if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return r;
   u32 axis_id = uop_range_axis_id(r);
