@@ -79,6 +79,67 @@ static Term lift_lookup_range(LiftRangeMap const *ranges, u32 n_ranges,
 //
 // Returns the addr Term; *out_buf_term is filled with the lifted
 // UOP_BUFFER for the source buffer.
+// Walk a chain of S_INDEX nodes (emit_index_chain splits ndim > 3 into
+// nested S_INDEX nodes: each level holds up to 3 ranges with their
+// strides packed in `extra`).  Returns the partial address contribution
+// `sum_{k}(range_k * stride_k) + offset` summed across all nested levels
+// AND sets `*out_chain_root` to the innermost level's src[0] (the
+// underlying S_DEFINE_PARAM / S_DEFINE_OUTPUT, or 0 on shape we cannot
+// fold).  The strides come from `extra` (via pack_index_extra) rather
+// than from `uop_buffer_dim`, so a chain of nested levels composes
+// correctly regardless of the lifter's UOP_BUFFER ndim guess.
+//
+// Pre-condition: caller has verified ke != NULL and that the chain
+// terminates at an S_DEFINE_PARAM / S_DEFINE_OUTPUT after at most
+// MAX_CHAIN_HOPS see-throughs.
+static Term lift_index_chain_addr(KernelEntry const *ke, u32 sid,
+                                  LiftRangeMap const *ranges,
+                                  u32 n_ranges,
+                                  u32 *out_chain_root) {
+  enum { MAX_CHAIN_HOPS = 8 };
+  Term acc = 0;
+  u32 cur = sid;
+  *out_chain_root = 0;
+  for (u32 hop = 0; hop < MAX_CHAIN_HOPS; hop++) {
+    if (cur == 0 || cur >= ke->n_scalar_uops) return 0;
+    ScalarUop const *u = &ke->scalar_uops[cur];
+    if (u->op != S_INDEX) return 0;
+    u32 inner_sid = u->src[0];
+    u32 n_axes = (u32)u->src_count - 1;
+    if (n_axes > 3) return 0;     // pack_index_extra packs at most 3
+    // Strides + offset packed in `extra`: 4 u16 fields, last = offset.
+    u32 strides[3] = {0};
+    for (u32 d = 0; d < n_axes; d++)
+      strides[d] = (u32)((u->extra >> (16 * d)) & 0xFFFFu);
+    u32 offset = (u32)((u->extra >> 48) & 0xFFFFu);
+    if (offset != 0) {
+      Term off_t = uop_const(DT_INT32, offset);
+      acc = (acc == 0) ? off_t : uop_int_binary(UOP_IADD, acc, off_t);
+    }
+    for (u32 d = 0; d < n_axes; d++) {
+      u32 r_sid = u->src[1 + d];
+      Term r_uop = lift_lookup_range(ranges, n_ranges, r_sid);
+      if (r_uop == 0) return 0;
+      if (strides[d] == 0) continue;
+      Term term = (strides[d] == 1) ? r_uop
+                : uop_int_binary(UOP_IMUL, r_uop,
+                                 uop_const(DT_INT32, strides[d]));
+      acc = (acc == 0) ? term : uop_int_binary(UOP_IADD, acc, term);
+    }
+    // Look at the inner src to decide whether to keep walking or stop.
+    if (inner_sid == 0 || inner_sid >= ke->n_scalar_uops) return 0;
+    ScalarUop const *inner = &ke->scalar_uops[inner_sid];
+    if (inner->op == S_DEFINE_PARAM || inner->op == S_DEFINE_OUTPUT) {
+      *out_chain_root = inner_sid;
+      if (acc == 0) acc = uop_const(DT_INT32, 0);
+      return acc;
+    }
+    if (inner->op != S_INDEX) return 0;       // unsupported shape
+    cur = inner_sid;
+  }
+  return 0;     // chain depth exceeded
+}
+
 static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
                               LiftRangeMap const *ranges, u32 n_ranges,
                               Term out_buf, Term const *in_bufs,
@@ -95,6 +156,37 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
   u32 buf_sid = u->src[0];
   ScalarUop const *bu = &ke->scalar_uops[buf_sid];
   Term buf = 0;
+  // Nested S_INDEX chain: emit_index_chain wraps ndim > 3 indexes as
+  // a chain of S_INDEX(inner_S_INDEX, ...) -- each level packs up to 3
+  // strides in `extra`.  The single-level lifter below (dim-product
+  // strides over uop_buffer_ndim(buf)) can't address all axes of the
+  // physical buffer in that shape, so we walk the chain and fold each
+  // level's stride*range contribution using the packed `extra`
+  // strides.  Only fires when the OUTER S_INDEX has src[0]=S_INDEX
+  // AND the inner chain terminates at S_DEFINE_PARAM / S_DEFINE_OUTPUT;
+  // S_INDEX_E and the pad/shrink residue patterns are unchanged.
+  if (u->op == S_INDEX && bu->op == S_INDEX && bu->src_count >= 1) {
+    u32 chain_root_sid = 0;
+    Term chain_addr = lift_index_chain_addr(ke, sid, ranges, n_ranges,
+                                            &chain_root_sid);
+    if (chain_addr != 0 && chain_root_sid != 0) {
+      ScalarUop const *root = &ke->scalar_uops[chain_root_sid];
+      Term root_buf = 0;
+      if (root->op == S_DEFINE_PARAM) {
+        u32 slot = (u32)root->extra;
+        if (slot < n_inputs) root_buf = in_bufs[slot];
+      } else if (root->op == S_DEFINE_OUTPUT) {
+        root_buf = out_buf;
+      }
+      if (root_buf != 0) {
+        if (out_buf_term != NULL) *out_buf_term = root_buf;
+        return chain_addr;
+      }
+    }
+    // Chain fold declined: fall through to the legacy buf-of-INDEX
+    // see-through (preserves the existing 2-layer pad/shrink residue
+    // handling where the inner ranges happen to be no-ops).
+  }
   if (bu->op == S_DEFINE_PARAM) {
     u32 slot = (u32)bu->extra;
     if (slot >= n_inputs) { lift_reject_log(ke, buf_sid, "index/slot-oor"); return 0; }
