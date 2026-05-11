@@ -212,7 +212,10 @@ fn char *thvm_aot_compile_to_dylib(u32 def_id, const char *name) {
   // wrong one would corrupt the heap).
   u64 hash = aot_fnv1a64(wrapped);
 #ifdef THVM_TRACE
-  hash ^= 0x5452414345ULL;  /* "TRACE" */
+  /* "TRACE" base XOR'd with the M1 (wire-provenance) ABI version --
+     bumped every time the THVM_TRACE TContext layout changes, so
+     stale AOT modules from a prior layout never get reloaded. */
+  hash ^= 0x5452414345ULL ^ 0x4D31ULL;  /* "TRACE" ^ "M1" */
 #endif
 
   char src_path[512], dyl_path[512];

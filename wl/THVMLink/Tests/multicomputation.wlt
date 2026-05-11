@@ -41,7 +41,7 @@ If[ ! TMulticompTraceQ[],
                 SubsetQ[                                               (* keys present *)
                     Keys[First[out["Trace"]]],
                     {"id", "rule", "ruleCode", "family", "familyCode",
-                     "termA", "termB", "deltaLabel"}],
+                     "termA", "termB", "deltaLabel", "consumed"}],
                 Count[out["Trace"], e_ /; e["family"] === "SLIDE"] >= 1,
                 Count[out["Trace"], e_ /; e["family"] === "SPLIT"] >= 1,
                 Count[out["Trace"], e_ /; e["rule"]   === "DUP_SUP_COM"] >= 1,
@@ -49,6 +49,59 @@ If[ ! TMulticompTraceQ[],
             }],
         {{4, 5}, True, True, True, True, 0},
         TestID -> "TMulticompTrace[TCollapse[dp0]] -- fresh labels, cross product, SPLIT not MERGE"
+    ];
+
+    (* M1 wire provenance.  Each event carries a "consumed" list of
+       producer event ids.  Two properties to check:
+        (a) every producer id mentioned in some consumed list is an
+            event id that actually appears in the trace -- no dangling
+            references;
+        (b) producers always fire BEFORE their consumers (= the causal
+            graph is a DAG, which TCausalGraph also enforces). *)
+    VerificationTest[
+        TInit[];
+        Module[{dp0, dp1, trace, ids, consumers, dag},
+            {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
+            trace = TMulticompTrace[TCollapse[dp0]]["Trace"];
+            ids = trace[[All, "id"]];
+            (* (a) every consumed id is a valid event id *)
+            consumers = DeleteDuplicates @ Flatten[trace[[All, "consumed"]]];
+            (* (b) for each (consumer, producer) pair, producer-id < consumer-id *)
+            dag = AllTrue[trace,
+                e |-> AllTrue[e["consumed"], # < e["id"] &]];
+            {
+                SubsetQ[ids, consumers],
+                Length[consumers] > 0,         (* at least some chains observed *)
+                dag
+            }],
+        {True, True, True},
+        TestID -> "TMulticompTrace -- consumed[] references valid earlier events"
+    ];
+
+    (* TCausalGraph builds a directed Graph[] from the consumed[]
+       edges.  Properties: it's directed and acyclic, vertices match
+       the event ids, edge count matches the total number of producer
+       references that point at other events in the trace. *)
+    VerificationTest[
+        TInit[];
+        Module[{dp0, dp1, trace, g, edgeRefs},
+            {dp0, dp1} = TDup[TOp2["+", TSup[1, 2], 3]];
+            trace = TMulticompTrace[TCollapse[dp0]]["Trace"];
+            g = TCausalGraph[trace];
+            edgeRefs = Total @ Map[
+                e |-> Length @ Select[
+                    e["consumed"],
+                    MemberQ[trace[[All, "id"]], #] &],
+                trace];
+            {
+                Head[g] === Graph,
+                AcyclicGraphQ[g],
+                DirectedGraphQ[g],
+                VertexCount[g] === Length[trace],
+                EdgeCount[g]   === edgeRefs
+            }],
+        {True, True, True, True, True},
+        TestID -> "TCausalGraph[trace] -- DAG matching consumed[] edges"
     ];
 
     (* Same shape but the SUP and DUP share label 7: DUP-SUP

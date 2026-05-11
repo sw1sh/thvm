@@ -1478,17 +1478,31 @@ typedef struct {
 #define RULE_WHEN_ERA       46  // WHEN meets ERA: propagate ERA
 #define RULE_WHEN_SUP       47  // WHEN commutes through SUP
 
+// Sentinel for `consumed[i]`: "no producer recorded".  Means the cell
+// the event read was either pre-trace (never WIRE_PROV_BUMP'd) or the
+// event has fewer than two consumed slots (n_consumed < 2 / 1).
+#define MULTI_WIRE_NONE ((u32)0xFFFFFFFFu)
+
 typedef struct MultiEvent {
     u64 id;            // monotone; == ITRS at the point this rule fired
     u8  rule;          // RULE_*
     u8  family;        // MULTI_*
-    u8  _pad[6];       // align next u64
+    u8  n_consumed;    // 0..2; number of valid consumed[] slots (M1)
+    u8  _pad[5];       // align next u64
     u64 term_a;        // active-pair Term words, captured pre-rewrite
     u64 term_b;
     u32 delta_label;   // SUP/DUP label (FORK/SPLIT/MERGE only; else 0)
     u32 _pad2;
-    // v1+ adds: loc_a/loc_b (heap locs), n_alloc/alloc_base (allocated
-    // products), consumed[]/produced[] (WireIds), cyl_off/cyl_len.
+    // M1: wire provenance -- the event ids that last wrote to the
+    // active-pair payload cells (term_val(term_a) / term_val(term_b)),
+    // captured at multi_emit time before this event's own heap_sets
+    // mutate them.  MULTI_WIRE_NONE means "no producer recorded" --
+    // either the cell predates the trace, or the corresponding slot
+    // isn't populated.  The host-side causal graph is built from
+    // these: edge `F -> E` iff `E.consumed[*] == F.id`.
+    u32 consumed[2];
+    // v2+ will add: produced[] (WireIds), loc_a/loc_b (redex locs),
+    // n_alloc/alloc_base (allocated products), cyl_off/cyl_len.
 } MultiEvent;
 
 // === TContext ===
@@ -1564,6 +1578,14 @@ typedef struct TContext {
     MultiEvent *multi_events;
     u64         multi_events_len;
     u64         multi_events_cap;
+    /* M1: wire provenance.  multi_wire_prov[loc] = id of the event
+       that last WIRE_PROV_BUMP'd that loc, or MULTI_WIRE_NONE if no
+       traced event has written there yet.  Grown lazily on demand; a
+       loc outside [0, multi_wire_prov_cap) reads as MULTI_WIRE_NONE
+       without growing.  Allocated by multi_trace_init, freed by
+       multi_trace_free. */
+    u32        *multi_wire_prov;
+    u64         multi_wire_prov_cap;
     u8          trace;
 #endif
 } TContext;
@@ -1646,6 +1668,20 @@ fn void multi_emit_body(u8 rule, u8 family,
                             (u32)(delta_label));                      \
         }                                                             \
     } while (0)
+// M1: stamp `loc` with the in-flight event's id (= ITRS - 1, since
+// every interact_* / inline wnf rule does ITRS++ at the head before
+// any heap mutation).  Cells written before the first event ever
+// fired stamp with (u32)-1 == MULTI_WIRE_NONE, which is correct: they
+// were produced outside the recorded trace.  Out-of-line into
+// multi_wire_prov_bump_body so the call site stays one branch.
+fn void multi_wire_prov_bump_body(u64 loc);
+#define WIRE_PROV_BUMP(loc)                                           \
+    do {                                                              \
+        if (__builtin_expect(MULTI_TRACE_ON, 0)) {                    \
+            multi_wire_prov_bump_body((u64)(loc));                    \
+        }                                                             \
+    } while (0)
+fn u32                 multi_wire_prov_get(u64 loc);  // sentinel-safe read
 fn void                multi_trace_init(u64 initial_cap);
 fn void                multi_trace_reset(void);
 fn void                multi_trace_free(void);
@@ -1655,6 +1691,7 @@ fn const char        * multi_rule_name(u8 r);
 fn const char        * multi_family_name(u8 f);
 #else
 #define multi_emit(rule, family, term_a, term_b, delta_label) ((void)0)
+#define WIRE_PROV_BUMP(loc) ((void)0)
 #endif
 
 // Replaces the old CURRENT_BACKEND global -- "default backend for

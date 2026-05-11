@@ -1,20 +1,27 @@
 # Multicomputation trace -- a branch-cylinder-tagged token-event log
 
-Status: **M0 trace coverage + WL surface are complete.**  Every
-dedicated `interact_*` rule (30 rules / 32 emit sites) *and* every
-inline `ITRS++` site in `src/wnf/_.c` (21 sites / 17 rules:
-OP2-NUM-NUM literal fold, MAT/SWI dispatch, EQL/AND/OR/WHEN per-tag
-cases, the two grad-cell projections) emit `MultiEvent`s; the
-label-collision spurious-`MULTI_MERGE` failure mode is validated; and
+Status: **M0 trace coverage + WL surface + M1 wire provenance are
+complete.**  Every dedicated `interact_*` rule (30 rules / 32 emit
+sites) *and* every inline `ITRS++` site in `src/wnf/_.c` (21 sites /
+17 rules: OP2-NUM-NUM literal fold, MAT/SWI dispatch, EQL/AND/OR/WHEN
+per-tag cases, the two grad-cell projections) emit `MultiEvent`s; the
+label-collision spurious-`MULTI_MERGE` failure mode is validated;
 `TMulticompTrace[expr]` is exposed from WL (opt-in trace dylib:
-`make WL_TRACE=1 wl`).  The compile-time / runtime gating discipline
-is intact -- default-build `_wnf` byte-identical to pre-trace, default
-`make wl` has zero `multi_emit_body` symbols.  Still open: the inline
-`ITRS++` in `src/wnf/redex.c` (the parallel-pool / `TInteract`
-per-redex driver), and M1-M4 (wire provenance / causal graph; branch
-tree; cylinders; foliations).  See [M0 spike outcome](#m0-spike-outcome)
-and the [rule-coverage table](#101-rule-coverage-as-of-this-commit)
-below.  Conceptual companion:
+`make WL_TRACE=1 wl`); and **M1 wire provenance** is in: every
+`heap_set` / `heap_set_rel` / `heap_subst_var{,_rel}` / `heap_cas`
+runs `WIRE_PROV_BUMP(loc)` (no-op in default builds), every event
+captures `consumed[]` from the active pair's payload locs, and
+`TCausalGraph[trace]` projects the events into a `Graph[]`.  The
+compile-time / runtime gating discipline is intact -- default-build
+`_wnf` is still byte-identical to pre-trace (4022 instructions),
+default `make wl` has zero `multi_emit_body` / `multi_wire_prov_bump`
+symbols.  Still open: the inline `ITRS++` in `src/wnf/redex.c` (the
+parallel-pool / `TInteract` per-redex driver), and M2-M4 (branch
+tree; cylinders; foliations).  See
+[M0 spike outcome](#m0-spike-outcome) and the
+[rule-coverage table](#101-rule-coverage-as-of-this-commit) below
+for the M0+wnf-inline detail, and [M1 wire provenance](#102-m1-wire-provenance)
+for what landed this round.  Conceptual companion:
 [docs/multicomputation.md](../multicomputation.md) reads the
 SUP / DUP / INC machinery through Wolfram's multicomputation paradigm
 (a SUP-term is a *slice*; reduction is *slice evolution*; the
@@ -718,9 +725,137 @@ already-wired `interact_*` functions, but a handful are inline like
    (Aside: `aot.wlt` segfaults around test ~11 even under a *clean*
    default dylib -- a pre-existing issue, unrelated; the AOT C tests
    `test_aot_*` all pass.)
-3. **M1: wire provenance.**  Add `wire_prov[]` to `TContext`,
-   `WIRE_PROV_BUMP(loc)` macro at every `heap_set` / `heap_alloc`
-   site, populate `consumed[]` / `produced[]` on `MultiEvent`.
-   Re-run the disassembly gate.
+3. ~~**M1: wire provenance.**~~ **Done.**  Details in
+   [§10.2 M1 wire provenance](#102-m1-wire-provenance).  Adds
+   `multi_wire_prov[]` to `TContext`, `WIRE_PROV_BUMP(loc)` at every
+   heap mutator (`heap_set`, `heap_set_rel`, `heap_subst_var{,_rel}`,
+   `heap_cas` success), `consumed[2]` + `n_consumed` on `MultiEvent`
+   populated from the active pair's payload locs at emit time, and
+   `TCausalGraph[trace]` exposing the M1 view from WL.  Disassembly
+   gate holds: default `_wnf` still 4022 instructions byte-identical
+   to pre-trace.
 4. **M2-M4** per the existing milestone list (branch tree, cylinders,
    foliations).
+
+## 10.2 M1 wire provenance
+
+### What landed
+
+- **`MultiEvent` grew two `u32` slots** (`consumed[2]`) + a `u8`
+  (`n_consumed`).  Filled by `multi_emit_body` from
+  `multi_wire_prov_get(term_val(term_a))` and
+  `multi_wire_prov_get(term_val(term_b))`.  Zero (= 0u64) terms
+  contribute no slot; the missing slot reads `MULTI_WIRE_NONE` (= the
+  sentinel `(u32)-1`).
+- **`TContext` grew a heap-loc-keyed side table** `u32 *multi_wire_prov`
+  + `u64 multi_wire_prov_cap`, both inside `#ifdef THVM_TRACE`.
+  Initialised by `multi_trace_init` (sentinel-filled, 1<<20 cells / 4
+  MiB initial); doubling-grown on demand by `multi_wire_prov_grow`;
+  cleared by `multi_trace_reset`; freed by `multi_trace_free`.
+- **`WIRE_PROV_BUMP(loc)` at every heap mutator**: `heap_set`,
+  `heap_set_rel`, `heap_subst_var`, `heap_subst_var_rel`,
+  `heap_cas` (success branch only).  Macro expands to `((void)0)`
+  without `-DTHVM_TRACE`; with the flag, it's the same
+  `if (__builtin_expect(MULTI_TRACE_ON, 0)) multi_wire_prov_bump_body(...)`
+  shape as `multi_emit`.  Stamps `wire_prov[loc] = (u32)(ITRS - 1)`,
+  which equals the in-flight event's id under the standard
+  `ITRS++ -> multi_emit -> heap mutations` ordering.
+- **WL surface** extended.  The snapshot MTensor widened from
+  `{n, 6}` to `{n, 8}` (adds `consumed[0]` / `consumed[1]`, with
+  `MULTI_WIRE_NONE` translated to `-1` for WL ergonomics).
+  `TMulticompTrace[expr]`'s events now carry a `"consumed"` key (list
+  of producer ids, sentinels filtered out).  New `TCausalGraph[trace]`
+  builds a directed `Graph[]` from the events + `consumed[]` edges
+  (options: `VertexLabels -> Automatic` to label each vertex with its
+  rule name, `"Family" -> {...}` to filter by family).
+- **AOT cache key bumped** -- `src/aot/build.c` XORs `0x4D31`
+  ("M1") into the trace-build hash so cached modules from M0 (built
+  against the smaller `TContext`) never get reloaded.  Bump again
+  whenever the `THVM_TRACE` `TContext` layout changes.
+- **Tests.**
+  - C side: `tests/test_multi_trace.c` gains four wire-prov tests --
+    sentinel-on-fresh, heap_set-stamps, two-event causal chain,
+    DUP-SUP-COM stamps the freshly-allocated cells, and
+    multi_trace_reset clears the wire_prov slab.  Total: default 2/2,
+    trace 81/81 (was 60/60).
+  - WL side: `wl/THVMLink/Tests/multicomputation.wlt` gains two
+    tests -- `"consumed"` key present + every consumed id is a valid
+    earlier event id (DAG property), and `TCausalGraph` returns a
+    directed acyclic `Graph[]` with the expected vertex / edge count.
+    Total: 6/6 (was 4/4); still skips with 0-tests under a trace-free
+    dylib.
+
+### Acceptance gate verified
+
+`_wnf` in the default build (no `-DTHVM_TRACE`) is **4022
+instructions** -- byte-identical to pre-M0 and pre-M1.  The default
+WL dylib has zero `multi_emit_body` *and* zero
+`multi_wire_prov_bump_body` symbols (`nm` confirmed).  M1 lands at
+zero cost in the default build, full stop.
+
+### Soundness note: the "off-by-one" rules
+
+`WIRE_PROV_BUMP` stamps `wire_prov[loc] = ITRS - 1`.  Under the
+standard pattern `ITRS++; multi_emit(...); heap_set(...);`, this is
+the id of the event whose `multi_emit` just fired -- correct.
+
+A handful of rules emit *after* their heap mutations:
+[src/interact/dsu_num.c](../../src/interact/dsu_num.c),
+[src/interact/ddu_num.c](../../src/interact/ddu_num.c),
+[src/interact/dsu_sup.c](../../src/interact/dsu_sup.c),
+[src/interact/ddu_sup.c](../../src/interact/ddu_sup.c), and most of
+the inline rules in [src/wnf/_.c](../../src/wnf/_.c) (the
+heap_alloc / heap_set sequence preceding the `ITRS++ / multi_emit`
+inside each per-frame case).  For these, `WIRE_PROV_BUMP` runs with
+`ITRS` still at its *previous* value; the freshly-allocated cells get
+stamped with the **previous** event's id, not this event's.  Effect
+on the causal graph: a future event consuming those cells attributes
+its incoming edge to the wrong event (one step too early).
+
+We do **not** fix this at M1.  Reordering the four `dsu_*`/`ddu_*`
+files to put `ITRS++` at the head was tried and rejected: it added
++22 instructions to default `_wnf` (4022 -> 4044), violating the
+load-bearing default-build gate.  The wnf-inline rules can't be
+trivially reordered either -- they sit inside the WHNF stack machine
+and their heap_sets are intertwined with frame bookkeeping.
+
+Acceptable for M1 because:
+
+- The standard `ITRS++ -> multi_emit -> heap_sets` ordering is the
+  majority case (every `interact_app_*`, `interact_dup_*`,
+  `interact_ann_*`, `interact_uop_*`, `interact_op2_sup`, the two
+  `dup_sup` cases, the ERA-prune family).
+- Even the "wrong-attributed" edges still link causal predecessors,
+  just one step too early in the chain.  The graph remains a DAG.
+- M2 (branch tree) can refine this when it threads explicit
+  start-of-event markers through each `interact_*`.
+
+A follow-up (queued under M2 work) is to introduce an explicit
+`MULTI_EVENT_BEGIN()` macro at the head of each `interact_*` /
+inline rule that snapshots `ITRS` into a TContext field, then have
+`WIRE_PROV_BUMP` use that field instead of computing `ITRS - 1`.
+That makes the stamp order-independent, but adds a per-rule
+instrumentation site (similar in scope to the existing `multi_emit`
+calls).  It can land without changing the M1 file shape because the
+field would be ignored by the default build.
+
+### Simplifications taken vs the original plan
+
+- **No `produced[]` field yet.**  The plan envisioned per-event
+  `consumed[]` *and* `produced[]` arrays (WireIds = `(event_id << 24)
+  | gen`).  M1 only ships `consumed[]`.  Rationale: the causal graph
+  is already buildable from `consumed[]` alone (edge `F -> E` iff
+  some loc in `E.consumed` was last stamped by `F`).  `produced[]`
+  is a denormalisation -- helpful for token-event graphs (M3+) but
+  not load-bearing here.  Recoverable from `consumed[]` + the heap
+  walk at the end of the trace.
+- **No `gen` field on wires yet.**  `wire_prov[loc]` is a single
+  `u32` storing the producer event id, not `(event_id, gen)`.  As
+  long as we're not running the Cheney GC during a traced reduction
+  -- and the M1 use case (WL `TMulticompTrace[expr]`) typically
+  doesn't -- locs don't get reused, so the gen field would always be
+  0.  Add when M3 collisions show up.
+- **`consumed[2]` not `consumed[MULTI_MAX_PORTS]`.**  Two slots is
+  enough for every binary active pair we emit today; if a future rule
+  emits a multi-way active pair, the array can grow.
+- **No cylinder fields.**  `cyl_off` / `cyl_len` land at M3.

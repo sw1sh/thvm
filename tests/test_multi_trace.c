@@ -421,6 +421,151 @@ int main(void) {
         CHECK(CURRENT_CTX->multi_events_cap >= 5u);
         multi_trace_free();
     }
+
+    // === M1: wire provenance.  WIRE_PROV_BUMP stamps wire_prov[loc]
+    // at every heap mutation while the trace is on; multi_emit_body
+    // captures the active pair's wire_prov into MultiEvent.consumed.
+    // Edge `F -> E` in the causal graph iff `E.consumed[*] == F.id`.
+
+    // Sentinel-safe: locs that were never WIRE_PROV_BUMP'd (either
+    // pre-trace or never written at all) read as MULTI_WIRE_NONE.
+    TEST_BEGIN("multi-trace/wire-prov/sentinel-fresh");
+    {
+        multi_trace_init(0);
+        CHECK_EQ(multi_wire_prov_get(0),         MULTI_WIRE_NONE);
+        CHECK_EQ(multi_wire_prov_get(1000),      MULTI_WIRE_NONE);
+        CHECK_EQ(multi_wire_prov_get(1ULL<<30),  MULTI_WIRE_NONE);
+        // multi_trace_init flips trace off; pre-trace heap_set must
+        // not stamp anything either.
+        u64 loc = heap_alloc(1);
+        heap_set(loc, term_new(0, TAG_NUM, 0, 7));
+        CHECK_EQ(multi_wire_prov_get(loc), MULTI_WIRE_NONE);
+        multi_trace_free();
+    }
+
+    // Heap_set inside an event stamps wire_prov correctly.  We drive
+    // it directly: ITRS++, multi_emit, then heap_set -- mirrors the
+    // standard interact_* pattern.  The freshly-stamped loc must
+    // carry this event's id.
+    TEST_BEGIN("multi-trace/wire-prov/heap-set-stamps");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 loc = heap_alloc(1);
+        // Pre-emit: still sentinel.
+        CHECK_EQ(multi_wire_prov_get(loc), MULTI_WIRE_NONE);
+        u64 id_before = ITRS;
+        ITRS++;
+        multi_emit(RULE_APP_LAM, MULTI_TERM, 0, 0, 0);
+        heap_set(loc, term_new(0, TAG_NUM, 0, 99));
+        // Post-emit: stamped with id_before (= ITRS-1 captured by emit).
+        CHECK_EQ(multi_wire_prov_get(loc), (u32)id_before);
+        multi_trace_free();
+    }
+
+    // Two-event causal chain: event N stamps wire_prov[L]; event N+1
+    // emits with term_a having term_val(term_a) == L, so consumed[0]
+    // points back at event N.  This is the minimum hand-checkable
+    // causal-graph edge.  Uses absolute ITRS-relative ids -- the global
+    // ITRS counter is NOT reset by multi_trace_init, only the events
+    // buffer is.
+    TEST_BEGIN("multi-trace/wire-prov/consumed-points-at-producer");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 loc = heap_alloc(1);
+
+        // Event A: heap_set bumps wire_prov[loc] = ev_a_id.
+        u32 ev_a_id = (u32)ITRS;
+        ITRS++;
+        multi_emit(RULE_APP_LAM, MULTI_TERM, 0, 0, 0);
+        heap_set(loc, term_new(0, TAG_NUM, 0, 7));
+        CHECK_EQ(multi_wire_prov_get(loc), ev_a_id);
+
+        // Event B: a fake APP term pointing at `loc` -- multi_emit
+        // looks up wire_prov[term_val(term_a)] = wire_prov[loc] =
+        // ev_a_id.
+        Term faketerm = term_new(0, TAG_APP, 0, loc);
+        u32 ev_b_id = (u32)ITRS;
+        ITRS++;
+        multi_emit(RULE_APP_LAM, MULTI_TERM, (u64)faketerm, 0, 0);
+
+        // Event B is the 2nd event in this trace buffer.
+        const MultiEvent *eB = multi_trace_get(1);
+        CHECK_EQ(eB->id,          (u64)ev_b_id);
+        CHECK_EQ(eB->n_consumed,  1u);
+        CHECK_EQ(eB->consumed[0], ev_a_id);          // A is the producer
+        CHECK_EQ(eB->consumed[1], MULTI_WIRE_NONE);  // unused slot
+        // Event A's own consumed[] is empty (term_a/term_b both 0).
+        const MultiEvent *eA = multi_trace_get(0);
+        CHECK_EQ(eA->id,          (u64)ev_a_id);
+        CHECK_EQ(eA->n_consumed,  0u);
+        CHECK_EQ(eA->consumed[0], MULTI_WIRE_NONE);
+        CHECK_EQ(eA->consumed[1], MULTI_WIRE_NONE);
+        multi_trace_free();
+    }
+
+    // Real interaction (DUP-SUP-COM): when the active pair was built
+    // BEFORE the trace turned on, the SPLIT event's consumed[0] is
+    // MULTI_WIRE_NONE (the SUP was never WIRE_PROV_BUMP'd).  But the
+    // event still stamps the freshly-allocated cells with its own
+    // id; we verify that by scanning wire_prov over the heap range
+    // newly bumped during the traced reduction.  This is the M1
+    // analogue of "did this event produce anything?", needed before
+    // M2's branch-tree can attribute branches to it.
+    TEST_BEGIN("multi-trace/wire-prov/dup-sup-com-stamps-fresh-cells");
+    {
+        multi_trace_init(0);
+        // Build the redex BEFORE turning trace on so wire_prov[sup_loc]
+        // stays at MULTI_WIRE_NONE for a clean consumed[0] check.
+        CURRENT_CTX->trace = 0;
+        Term era = term_new(0, TAG_ERA, 0, 0);
+        Term lam = term_new(0, TAG_LAM, 0, 0);
+        Term sup = build_sup(11, era, lam);      // sup label 11
+        u64  dup = build_dup(sup);
+        Term dp0 = term_new(0, TAG_DP0, 7, dup); // dup label 7
+        // Now turn trace on and reduce.
+        u64 heap_before = HEAP_NEXT;
+        CURRENT_CTX->trace = 1;
+        u64 from = multi_trace_count();
+        (void)cnf(dp0);
+        u64 heap_after = HEAP_NEXT;
+        u64 idx = find_event(from, RULE_DUP_SUP_COM, MULTI_SPLIT);
+        CHECK(idx != (u64)-1);
+        const MultiEvent *e = multi_trace_get(idx);
+        // Active pair's SUP came from pre-trace; consumed[0] sees the
+        // sentinel.
+        CHECK_EQ(e->n_consumed,  1u);
+        CHECK_EQ(e->consumed[0], MULTI_WIRE_NONE);
+        // The SPLIT event allocated 6 cells and heap_set'd each; their
+        // wire_prov entries must carry the SPLIT's id.  Scan the heap
+        // range bumped during cnf and count stamps == e->id.
+        u32 split_id = (u32)e->id;
+        u64 n_stamped = 0;
+        for (u64 i = heap_before; i < heap_after; i++) {
+            if (multi_wire_prov_get(i) == split_id) n_stamped++;
+        }
+        CHECK(n_stamped >= 6u);   // dup_sup.c commute-case alloc(6)
+        multi_trace_free();
+    }
+
+    // Wire-prov resets across multi_trace_reset: a fresh trace must
+    // not see ids stamped by a prior reduction (those ids reference
+    // events no longer in the buffer).
+    TEST_BEGIN("multi-trace/wire-prov/reset-clears-prov");
+    {
+        multi_trace_init(0);
+        CURRENT_CTX->trace = 1;
+        u64 loc = heap_alloc(1);
+        u32 ev_id = (u32)ITRS;
+        ITRS++;
+        multi_emit(RULE_APP_LAM, MULTI_TERM, 0, 0, 0);
+        heap_set(loc, term_new(0, TAG_NUM, 0, 1));
+        CHECK_EQ(multi_wire_prov_get(loc), ev_id);
+        multi_trace_reset();
+        CHECK_EQ(multi_wire_prov_get(loc), MULTI_WIRE_NONE);
+        multi_trace_free();
+    }
 #endif // THVM_TRACE
 
     thvm_free();

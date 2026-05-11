@@ -4,4 +4,5 @@
 // (or heap_subst_cop's helper, which already release-stores).
 fn void heap_set_rel(u64 loc, Term t) {
   __atomic_store_n(&HEAP[loc], (u64)t, __ATOMIC_RELEASE);
+  WIRE_PROV_BUMP(loc);
 }

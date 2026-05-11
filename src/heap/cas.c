@@ -7,11 +7,13 @@
 // patterns (DUP-* taking the body, parent-promotion, etc.) where the
 // caller doesn't want to retry on contention.
 fn _Bool heap_cas(u64 loc, Term *expected, Term desired) {
-  return __atomic_compare_exchange_n(
+  _Bool ok = __atomic_compare_exchange_n(
       &HEAP[loc],
       (u64 *)expected,
       (u64)desired,
       /*weak=*/0,
       /*success_mo=*/__ATOMIC_ACQ_REL,
       /*failure_mo=*/__ATOMIC_ACQUIRE);
+  if (ok) WIRE_PROV_BUMP(loc);
+  return ok;
 }

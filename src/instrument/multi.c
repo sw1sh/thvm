@@ -25,6 +25,13 @@
 
 #define MULTI_TRACE_INITIAL_CAP 256
 
+// wire_prov is keyed by heap loc.  Heap caps out at 1<<28 cells but
+// most runs touch a tiny fraction; start small and grow doubling on
+// out-of-range WIRE_PROV_BUMP.  4 bytes per cell at 1<<20 cells = 4
+// MiB initial -- cheap enough to allocate alongside the event buffer
+// in multi_trace_init.
+#define MULTI_WIRE_PROV_INITIAL_CAP (1ULL << 20)
+
 // Symbolic names for the RULE_* / MULTI_* enum codes (src/thvm.h),
 // used by the WL surface to render a readable trace.  Designated
 // initializers index by the enum constant, so adding a `#define
@@ -121,6 +128,42 @@ fn MultiEvent *multi_events_push(void) {
     return &CURRENT_CTX->multi_events[CURRENT_CTX->multi_events_len++];
 }
 
+// Grow wire_prov to cover [0, new_cap).  Doubling growth, sentinel-
+// initialise the freshly-allocated tail so a read on a never-touched
+// cell sees MULTI_WIRE_NONE.
+static void multi_wire_prov_grow(u64 new_cap) {
+    u64 cur = CURRENT_CTX->multi_wire_prov_cap;
+    u64 grown = cur ? cur : MULTI_WIRE_PROV_INITIAL_CAP;
+    while (grown < new_cap) grown *= 2;
+    u32 *p = (u32 *)realloc(CURRENT_CTX->multi_wire_prov,
+                            grown * sizeof(u32));
+    if (!p) abort();
+    // memset to 0xFF gives all-bits-set = (u32)-1 = MULTI_WIRE_NONE
+    // for every freshly-grown slot.
+    memset(p + cur, 0xFF, (grown - cur) * sizeof(u32));
+    CURRENT_CTX->multi_wire_prov     = p;
+    CURRENT_CTX->multi_wire_prov_cap = grown;
+}
+
+fn void multi_wire_prov_bump_body(u64 loc) {
+    if (loc >= CURRENT_CTX->multi_wire_prov_cap) {
+        multi_wire_prov_grow(loc + 1);
+    }
+    // ITRS has been bumped at the head of the in-flight interact_*
+    // (or inline rule), so ITRS - 1 is this event's id.  Before any
+    // event has fired, ITRS == 0 -> (u32)(u64)-1 == MULTI_WIRE_NONE,
+    // which correctly says "produced outside the trace" even if
+    // tracing happens to be on for some pre-event setup.
+    CURRENT_CTX->multi_wire_prov[loc] = (u32)((u64)ITRS - 1);
+}
+
+// Sentinel-safe read: out-of-range locs (and locs never written
+// while tracing) yield MULTI_WIRE_NONE without growing the table.
+fn u32 multi_wire_prov_get(u64 loc) {
+    if (loc >= CURRENT_CTX->multi_wire_prov_cap) return MULTI_WIRE_NONE;
+    return CURRENT_CTX->multi_wire_prov[loc];
+}
+
 fn void multi_emit_body(u8 rule, u8 family,
                         u64 term_a, u64 term_b,
                         u32 delta_label) {
@@ -136,26 +179,69 @@ fn void multi_emit_body(u8 rule, u8 family,
     e->rule         = rule;
     e->family       = family;
     e->_pad[0] = e->_pad[1] = e->_pad[2]
-              = e->_pad[3] = e->_pad[4] = e->_pad[5] = 0;
+              = e->_pad[3] = e->_pad[4] = 0;
     e->term_a       = term_a;
     e->term_b       = term_b;
     e->delta_label  = delta_label;
     e->_pad2        = 0;
+    // M1: wire provenance -- look up the producer event ids for the
+    // two active-pair payload locs.  We use term_val of the packed
+    // term word: for an APP/SUP/LAM/etc. Term, that's the loc of its
+    // children block, which is the heap cell most recently written
+    // by whoever constructed this term.  Zero `term_a` / `term_b`
+    // (e.g. ERA-prune emits that pass 0,0,0) yield n_consumed slots
+    // smaller than 2 and an unfilled consumed[i] = MULTI_WIRE_NONE.
+    // Must run BEFORE any heap_set inside the current interact_*;
+    // the standard pattern (ITRS++ -> multi_emit -> heap mutations)
+    // guarantees this.
+    e->consumed[0] = MULTI_WIRE_NONE;
+    e->consumed[1] = MULTI_WIRE_NONE;
+    u8 nc = 0;
+    if (term_a) {
+        e->consumed[nc++] = multi_wire_prov_get((u64)term_val((Term)term_a));
+    }
+    if (term_b) {
+        e->consumed[nc++] = multi_wire_prov_get((u64)term_val((Term)term_b));
+    }
+    e->n_consumed = nc;
 }
 
 fn void multi_trace_init(u64 initial_cap) {
     if (CURRENT_CTX->multi_events) {
         free(CURRENT_CTX->multi_events);
     }
+    if (CURRENT_CTX->multi_wire_prov) {
+        free(CURRENT_CTX->multi_wire_prov);
+    }
     if (!initial_cap) initial_cap = MULTI_TRACE_INITIAL_CAP;
     CURRENT_CTX->multi_events     = (MultiEvent *)calloc(initial_cap, sizeof(MultiEvent));
     CURRENT_CTX->multi_events_cap = CURRENT_CTX->multi_events ? initial_cap : 0;
     CURRENT_CTX->multi_events_len = 0;
+    // M1: wire_prov starts sentinel-filled (MULTI_WIRE_NONE = all
+    // bits set) so a read on any loc before its first WIRE_PROV_BUMP
+    // says "no producer recorded".
+    u32 *wp = (u32 *)malloc(MULTI_WIRE_PROV_INITIAL_CAP * sizeof(u32));
+    if (wp) {
+        memset(wp, 0xFF, MULTI_WIRE_PROV_INITIAL_CAP * sizeof(u32));
+        CURRENT_CTX->multi_wire_prov     = wp;
+        CURRENT_CTX->multi_wire_prov_cap = MULTI_WIRE_PROV_INITIAL_CAP;
+    } else {
+        CURRENT_CTX->multi_wire_prov     = NULL;
+        CURRENT_CTX->multi_wire_prov_cap = 0;
+    }
     CURRENT_CTX->trace            = 0;
 }
 
 fn void multi_trace_reset(void) {
     CURRENT_CTX->multi_events_len = 0;
+    // Drop accumulated wire provenance too: a fresh trace shouldn't
+    // see ids stamped by a prior reduction (those ids reference
+    // events no longer in the buffer).  Cheap memset over the
+    // currently allocated wire_prov slab; the slab itself is kept.
+    if (CURRENT_CTX->multi_wire_prov) {
+        memset(CURRENT_CTX->multi_wire_prov, 0xFF,
+               CURRENT_CTX->multi_wire_prov_cap * sizeof(u32));
+    }
     CURRENT_CTX->trace            = 0;
 }
 
@@ -164,8 +250,13 @@ fn void multi_trace_free(void) {
         free(CURRENT_CTX->multi_events);
         CURRENT_CTX->multi_events = NULL;
     }
+    if (CURRENT_CTX->multi_wire_prov) {
+        free(CURRENT_CTX->multi_wire_prov);
+        CURRENT_CTX->multi_wire_prov = NULL;
+    }
     CURRENT_CTX->multi_events_len = 0;
     CURRENT_CTX->multi_events_cap = 0;
+    CURRENT_CTX->multi_wire_prov_cap = 0;
     CURRENT_CTX->trace            = 0;
 }
 

@@ -538,11 +538,14 @@ EXTERN_C DLLEXPORT int thvm_wl_hot_counters_reset(WolframLibraryData libData, mi
 // THVM_TRACE -- which the WL dylib *is* built with; see the Makefile).
 // thvm_wl_multi_trace_supported returns 1 in a trace build, 0 in the
 // stub build below so the WL side (Multicomputation.wl) can degrade
-// gracefully.  Event rows are {id, rule, family, term_a, term_b,
-// delta_label}; thvm_wl_multi_trace_snapshot returns the whole log as
-// a {Integer, 2} MTensor (n x 6).  Names come from
-// thvm_wl_multi_rule_name / thvm_wl_multi_family_name (the C side owns
-// the RULE_* / MULTI_* -> string tables).
+// gracefully.  Event rows carry {id, rule, family, term_a, term_b,
+// delta_label, consumed[0], consumed[1]}; thvm_wl_multi_trace_snapshot
+// returns the whole log as a {Integer, 2} MTensor (n x 8).  Names
+// come from thvm_wl_multi_rule_name / thvm_wl_multi_family_name (the
+// C side owns the RULE_* / MULTI_* -> string tables).
+// MULTI_WIRE_NONE (M1 sentinel for "no producer recorded") shows up
+// as 0xFFFFFFFF in the consumed columns and is translated to -1 by
+// the WL wrapper.
 #ifdef THVM_TRACE
 
 EXTERN_C DLLEXPORT int thvm_wl_multi_trace_supported(WolframLibraryData libData,
@@ -593,24 +596,30 @@ EXTERN_C DLLEXPORT int thvm_wl_multi_trace_count(WolframLibraryData libData,
 }
 
 // {Integer, 2} MTensor, one row per event: {id, rule, family,
-// term_a, term_b, delta_label}.
+// term_a, term_b, delta_label, consumed[0], consumed[1]}.
+// MULTI_WIRE_NONE is widened to a signed i64 -1 so WL sees `-1` rather
+// than the raw 4294967295 (= u32 sentinel).
 EXTERN_C DLLEXPORT int thvm_wl_multi_trace_snapshot(WolframLibraryData libData,
         mint argc, MArgument *args, MArgument res) {
   (void)argc; (void)args;
   u64  n = multi_trace_count();
   MTensor out;
-  mint dims[2] = { (mint)n, 6 };
+  mint dims[2] = { (mint)n, 8 };
   int err = libData->MTensor_new(MType_Integer, 2, dims, &out);
   if (err != LIBRARY_NO_ERROR) return err;
   mint *dst = libData->MTensor_getIntegerData(out);
   for (u64 i = 0; i < n; i++) {
     const MultiEvent *e = multi_trace_get(i);
-    dst[6*i + 0] = (mint)e->id;
-    dst[6*i + 1] = (mint)e->rule;
-    dst[6*i + 2] = (mint)e->family;
-    dst[6*i + 3] = (mint)e->term_a;
-    dst[6*i + 4] = (mint)e->term_b;
-    dst[6*i + 5] = (mint)e->delta_label;
+    dst[8*i + 0] = (mint)e->id;
+    dst[8*i + 1] = (mint)e->rule;
+    dst[8*i + 2] = (mint)e->family;
+    dst[8*i + 3] = (mint)e->term_a;
+    dst[8*i + 4] = (mint)e->term_b;
+    dst[8*i + 5] = (mint)e->delta_label;
+    dst[8*i + 6] = (e->consumed[0] == MULTI_WIRE_NONE)
+                   ? (mint)-1 : (mint)e->consumed[0];
+    dst[8*i + 7] = (e->consumed[1] == MULTI_WIRE_NONE)
+                   ? (mint)-1 : (mint)e->consumed[1];
   }
   MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
@@ -674,7 +683,7 @@ EXTERN_C DLLEXPORT int thvm_wl_multi_trace_snapshot(WolframLibraryData libData,
         mint argc, MArgument *args, MArgument res) {
   (void)argc; (void)args;
   MTensor out;
-  mint dims[2] = { 0, 6 };
+  mint dims[2] = { 0, 8 };  // matches the trace-build snapshot shape
   int err = libData->MTensor_new(MType_Integer, 2, dims, &out);
   if (err != LIBRARY_NO_ERROR) return err;
   MArgument_setMTensor(res, out);
