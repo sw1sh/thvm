@@ -709,10 +709,10 @@ static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
 // -- those still emit `uint aN = tg;` via rmu_emit_range_open_ctx's
 // axis_type==5 branch.
 //
-// tg/tt split: when the kernel ALSO carries a LOCAL axis (a KOP_LOCAL
-// split: OPT(_, LOCAL, f) wrapping the INNER half, the OUTER half a
-// plain promoted-GLOBAL axis), the promoted-GLOBAL axes must decode
-// from `tg` (threadgroup_position_in_grid), NOT `tid`
+// tg/tt split: when the kernel ALSO carries one or more LOCAL axes (a
+// KOP_LOCAL split: OPT(_, LOCAL, f) wrapping the INNER half, the OUTER
+// half a plain promoted-GLOBAL axis), the promoted-GLOBAL axes must
+// decode from `tg` (threadgroup_position_in_grid), NOT `tid`
 // (thread_position_in_grid) -- otherwise the GLOBAL decode would
 // include the `tt` bits (`tid = tg*threads + tt`) and repeat values
 // within each threadgroup.  tinygrad's `has_local && has_global`
@@ -722,12 +722,25 @@ static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
 // legacy axis_type==4) range; with no LOCAL axis it's 0 and the
 // existing `tid` decode (equivalent to tg*threads+tt with threads
 // derived from the dispatch shape) is kept unchanged.
+//
+// Multi-LOCAL: with >=2 LOCAL axes the threadgroup index `tt` decodes
+// each one with its own (stride, modulus): `uint lK = (tt / ltK) % leK`
+// where ltK is the product of LOCAL extents inner to lK (1 for the
+// innermost).  Mirrors the multi-GLOBAL `tg` decode.  The single-LOCAL
+// fast path (`uint l0 = tt;`) is just the n==1 case (stride 1).  The
+// threadgroup size is the product of all LOCAL extents; the heuristic
+// keeps it <= 256 (Apple's maxTotalThreadsPerThreadgroup is 1024).
 typedef struct {
-  u32 stride_of_axis [256];
-  u32 modulus_of_axis[256];
+  u32 stride_of_axis [256];   // GLOBAL axes: stride into the `tg` flat decode
+  u32 modulus_of_axis[256];   // GLOBAL axes: extent (0 if not promoted)
   u32 n_globals;
-  u64 total;
-  int has_local;     // 1 -> decode GLOBAL axes from `tg`, not `tid`
+  u64 total;                  // product of promoted-GLOBAL extents
+  int has_local;              // 1 -> decode GLOBAL axes from `tg`, not `tid`
+  // LOCAL-axis decode (mirrors the GLOBAL arrays but over `tt`).
+  u32 local_stride_of_axis [256];
+  u32 local_modulus_of_axis[256];
+  u32 n_locals;
+  u64 local_total;            // product of LOCAL extents (threadgroup size)
 } RmuGlobalDecode;
 
 // Emit a loop opener (or thread-position bind) for a UOP_RANGE leaf.
@@ -775,7 +788,22 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   }
   for (u32 i = 0; i < depth; i++) fputs("  ", fp);
   // LOCAL via OPT annotation OR via axis_type == 4 (legacy KAX_LOCAL).
+  // With a single LOCAL axis: `uint aN = tt;`.  With >=2, decode each
+  // from `tt` with its own (stride, modulus) -- mirrors multi-GLOBAL.
   if (opt_kind == UOP_OPT_LOCAL || axis_type == 4) {
+    if (gctx != NULL && axis_id < 256
+        && gctx->local_modulus_of_axis[axis_id] != 0 && gctx->n_locals >= 2) {
+      u32 lstride = gctx->local_stride_of_axis[axis_id];
+      u32 lmod    = gctx->local_modulus_of_axis[axis_id];
+      if (lstride <= 1) {
+        fprintf(fp, "uint a%u = tt %% %uu; /* local ext=%u */\n",
+                axis_id, lmod, extent);
+      } else {
+        fprintf(fp, "uint a%u = (tt / %uu) %% %uu; /* local ext=%u */\n",
+                axis_id, lstride, lmod, extent);
+      }
+      return;
+    }
     fprintf(fp, "uint a%u = tt; /* local ext=%u */\n", axis_id, extent);
     return;
   }
@@ -817,15 +845,28 @@ static void rmu_emit_range_open(Term r, FILE *fp, u32 depth,
   rmu_emit_range_open_ctx(r, fp, depth, opt_kind, NULL);
 }
 
+// Returns 1 if range index `i` is a LOCAL axis (LOCAL-OPT'd, or legacy
+// axis_type==4).  `opt_kinds[]` may be NULL.
+static int rmu_range_is_local(Term const *ranges, u32 const *opt_kinds, u32 i) {
+  Term r = ranges[i];
+  if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;
+  if (opt_kinds != NULL && opt_kinds[i] == UOP_OPT_LOCAL) return 1;
+  u32 axis_type = (u32)term_val(heap_read(term_val(r) + 1));
+  return axis_type == 4 /* legacy KAX_LOCAL */;
+}
+
 // Build the promoted-GLOBAL decode context.  `promote[]` is parallel
 // to `ranges[]`: 1 means "this output axis was a plain KAX_LOOP with
 // no OPT and should become a parallel grid axis".  Walks right-to-left
 // so the innermost promoted axis gets stride 1 and each one to the
 // left multiplies its inner's extent.  `opt_kinds[]` (parallel to
-// `ranges[]`, may be NULL) is scanned for a LOCAL-OPT'd range; when
+// `ranges[]`, may be NULL) is scanned for LOCAL-OPT'd ranges; when
 // present, out->has_local is set so the GLOBAL decode uses `tg`
 // instead of `tid` (one threadgroup per GLOBAL tuple, LOCAL axes
-// over `tt`).  Legacy axis_type==4 (KAX_LOCAL) ranges also count.
+// over `tt`).  Legacy axis_type==4 (KAX_LOCAL) ranges also count.  The
+// LOCAL axes get their own (stride, modulus) decode over `tt` -- the
+// same right-to-left scan, in `ranges[]` order, so axis ids match the
+// emission order; a single LOCAL axis ends up stride 1 (`uint aN = tt`).
 static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
                                           u8 const *promote,
                                           u32 const *opt_kinds,
@@ -851,16 +892,28 @@ static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
   out->n_globals = n_glb;
   out->total     = (n_glb > 0) ? total : 0;
   if (!RMU_TARGET_C) {
-    for (u32 i = 0; i < n_ranges; i++) {
+    // LOCAL axes: right-to-left so the innermost (last in ranges[]) gets
+    // stride 1.  `tt = sum_K lK * local_stride[K]` mirrors the GLOBAL
+    // flat decode over `tg`.
+    u32 lstride = 1;
+    u32 n_loc   = 0;
+    u64 ltotal  = 1;
+    for (i32 i = (i32)n_ranges - 1; i >= 0; i--) {
+      if (!rmu_range_is_local(ranges, opt_kinds, (u32)i)) continue;
       Term r = ranges[i];
-      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
-      u32 axis_type = (u32)term_val(heap_read(term_val(r) + 1));
-      if ((opt_kinds != NULL && opt_kinds[i] == UOP_OPT_LOCAL)
-          || axis_type == 4 /* legacy KAX_LOCAL */) {
-        out->has_local = 1;
-        break;
-      }
+      u64 loc = term_val(r);
+      u32 axis_id = (u32)term_val(heap_read(loc + 0));
+      u32 extent  = (u32)term_val(heap_read(loc + 2));
+      if (axis_id >= 256 || extent == 0) continue;
+      out->local_stride_of_axis [axis_id] = lstride;
+      out->local_modulus_of_axis[axis_id] = extent;
+      n_loc++;
+      lstride *= extent;
+      ltotal  *= extent;
     }
+    out->n_locals     = n_loc;
+    out->local_total  = (n_loc > 0) ? ltotal : 0;
+    out->has_local    = (n_loc > 0);
   }
 }
 

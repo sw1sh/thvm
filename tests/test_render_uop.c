@@ -544,6 +544,66 @@ int main(void) {
     if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(buflu), 0);
   }
 
+  TEST_BEGIN("render-uop/two-local-axes-tt-decode");
+  // matmul-shaped reduce STORE with KOP_UPCAST(N,4), then KOP_LOCAL on
+  // both N_outer (4) and M (4) -> TWO KAX_LOCAL axes in the lifted DAG.
+  // The renderer must decode each LOCAL axis from `tt` with its own
+  // (stride, modulus): the innermost-in-ranges[] one is `tt % le`, the
+  // next is `(tt / le_inner) % le`.  Threadgroup size = prod(LOCAL) =
+  // 16; GLOBAL grid = M_outer(8) * N_outer(4) = 32 threadgroups (off tg).
+  {
+    u32 dC_2l[2] = { 32, 64 };
+    u32 dA_2l[2] = { 32, 8  };
+    u32 dB_2l[2] = { 8,  64 };
+    Term C_2l = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dC_2l);
+    Term A_2l = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dA_2l);
+    Term B_2l = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dB_2l);
+    Term in_2l[2] = { A_2l, B_2l };
+    Term rm_2l = uop_range(0, 0 /*LOOP*/,   32);
+    Term rn_2l = uop_range(1, 0 /*LOOP*/,   64);
+    Term rk_2l = uop_range(2, 1 /*REDUCE*/, 8);
+    Term k8_2l  = uop_const(DT_INT32, 8);
+    Term k64_2l = uop_const(DT_INT32, 64);
+    Term aA_2l  = uop_index_e(A_2l, uop_int_binary(UOP_IADD,
+                                  uop_int_binary(UOP_IMUL, rm_2l, k8_2l), rk_2l));
+    Term aB_2l  = uop_index_e(B_2l, uop_int_binary(UOP_IADD,
+                                  uop_int_binary(UOP_IMUL, rk_2l, k64_2l), rn_2l));
+    Term mm_2l  = uop_binary(UOP_MUL, aA_2l, aB_2l);
+    Term rd_2l  = uop_reduce(REDUCE_SUM, /*axis=*/2, mm_2l);
+    Term aC_2l  = uop_int_binary(UOP_IADD,
+                                 uop_int_binary(UOP_IMUL, rm_2l, k64_2l), rn_2l);
+    Term st_2l  = uop_store(C_2l, aC_2l, rd_2l);
+    // UPCAST N (axis 1) by 4: M(0), N_outer(1,LOOP,16), N_inner(2,UPCAST,4), K(3,REDUCE)
+    KOpt up_2l = { KOP_UPCAST, 1, 4 };
+    Term s1 = uop_dag_apply_kopt(st_2l, up_2l);
+    CHECK(s1 != 0 && s1 != st_2l);
+    // LOCAL N_outer (axis 1) by 4: M(0), N_oo(1,LOOP,4), N_ol(2,LOCAL,4), N_inner(3,UPCAST,4), K(4,REDUCE)
+    KOpt lc1_2l = { KOP_LOCAL, 1, 4 };
+    Term s2 = uop_dag_apply_kopt(s1, lc1_2l);
+    CHECK(s2 != 0 && s2 != s1);
+    // LOCAL M (axis 0) by 4: M_o(0,LOOP,8), M_l(1,LOCAL,4), N_oo(2,LOOP,4), N_ol(3,LOCAL,4), N_inner(4,UPCAST,4), K(5,REDUCE)
+    KOpt lc2_2l = { KOP_LOCAL, 0, 4 };
+    Term s3 = uop_dag_apply_kopt(s2, lc2_2l);
+    CHECK(s3 != 0 && s3 != s2);
+    char buf2l[4096];
+    fp = fmemopen(buf2l, sizeof(buf2l), "w");
+    cg_render_uop_kernel(s3, "k", C_2l, in_2l, 2, fp);
+    fclose(fp);
+    // GLOBAL grid = M_o(8) * N_oo(4) = 32 threadgroups, decoded from `tg`.
+    CHECK(contains(buf2l, "if (tg >= 32u) return;"));
+    // Two LOCAL axes off `tt`: a3 (N_ol, innermost in ranges[]) -> `tt % 4u`,
+    // a1 (M_l) -> `(tt / 4u) % 4u`.
+    CHECK(contains(buf2l, "uint a3 = tt % 4u; /* local"));
+    CHECK(contains(buf2l, "uint a1 = (tt / 4u) % 4u; /* local"));
+    // No bare `uint aN = tt;` (the single-LOCAL form) -- both are decoded.
+    CHECK(!contains(buf2l, "= tt; /* local"));
+    // UPCAST axis (a4) -> #pragma unroll(4) for-loop.
+    CHECK(contains(buf2l, "#pragma unroll(4)"));
+    CHECK(contains(buf2l, "for (uint a4 = 0; a4 < 4; a4++)"));
+    // The MSL must actually compile through xcrun metal (if available).
+    if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(buf2l), 0);
+  }
+
   TEST_BEGIN("render-uop/legacy-kax-global-emits-tg");
   // Direct axis_type=5 (legacy KAX_GLOBAL) without OPT also emits tg.
   Term r_gl  = uop_range(2, 5 /*GLOBAL*/, 32);
