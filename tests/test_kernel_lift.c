@@ -74,7 +74,9 @@ int main(void) {
                        lift.in_bufs, lift.n_inputs, fp);
   fclose(fp);
   CHECK(contains(buf, "kernel void k_const"));
-  CHECK(contains(buf, "for (uint a0 = 0; a0 < 32"));
+  CHECK(contains(buf, "if (tid >= 32u) return;"));
+  CHECK(contains(buf, "uint a0 = tid;"));
+  CHECK(!contains(buf, "for (uint a0 ="));
   CHECK(contains(buf, "out[a0] = 1.0f"));
   if (xcrun_metal_available()) CHECK_EQ(compile_through_metal(buf), 0);
 
@@ -127,7 +129,9 @@ int main(void) {
   fclose(fp);
   CHECK(contains(buf2, "device const float *in0"));
   CHECK(contains(buf2, "device const float *in1"));
-  CHECK(contains(buf2, "for (uint a0 = 0; a0 < 16"));
+  CHECK(contains(buf2, "if (tid >= 16u) return;"));
+  CHECK(contains(buf2, "uint a0 = tid;"));
+  CHECK(!contains(buf2, "for (uint a0 ="));
   CHECK(contains(buf2, "in0[a0]"));
   CHECK(contains(buf2, "in1[a0]"));
   CHECK(contains(buf2, "* 2.0f"));
@@ -170,7 +174,8 @@ int main(void) {
   cg_render_uop_kernel(lift3.store_root, "k_red", lift3.out_buf,
                        lift3.in_bufs, lift3.n_inputs, fp);
   fclose(fp);
-  CHECK(contains(buf3, "for (uint a0 = 0; a0 < 8"));
+  CHECK(contains(buf3, "uint a0 = tid;"));
+  CHECK(!contains(buf3, "for (uint a0 ="));
   CHECK(contains(buf3, "float _acc1 = 0.0f"));
   CHECK(contains(buf3, "for (uint a1 = 0; a1 < 16"));
   CHECK(contains(buf3, "= _acc1;"));
@@ -293,8 +298,11 @@ int main(void) {
   // The flat_idx is (a0 * 4 + a1); the input range gets that mod 16
   // (which simplifier may reduce since the value is already in [0,16)).
   CHECK(contains(buf_rv, "(a0 * 4)"));
-  CHECK(contains(buf_rv, "for (uint a0 = 0; a0 < 4"));
-  CHECK(contains(buf_rv, "for (uint a1 = 0; a1 < 4"));
+  CHECK(contains(buf_rv, "if (tid >= 16u) return;"));
+  CHECK(contains(buf_rv, "uint a0 = (tid / 4u) % 4u;"));
+  CHECK(contains(buf_rv, "uint a1 = tid % 4u;"));
+  CHECK(!contains(buf_rv, "for (uint a0 ="));
+  CHECK(!contains(buf_rv, "for (uint a1 ="));
 
   thvm_free();
   TEST_REPORT();

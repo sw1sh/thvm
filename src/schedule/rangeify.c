@@ -1839,12 +1839,25 @@ fn int rangeify_try_lower_elementwise(KernelEntry *ke) {
     // inner>1 enabled (F-? -- view-aware pre-INDEX absorbed
     // broadcast strides; reduce_axis-search picks the right axis).
     if (red->n_src    != 1) RBAIL_PRE("reduce 0 n_src != 1");
-    // src_numel + reduce_size are u64 because KProgOp.numel is now u64
-    // (post-Phase-3-conv-bwd-dInput fix; shapes that exceed 2^32 now
-    // store correctly).  Truncating to u32 here would re-introduce
-    // the divisibility mismatch the widening was meant to fix.
+    // src_numel + reduce_size are u64 because KProgOp.numel is now u64.
+    // BUT the *value* stored in KProgOp.numel / View.numel is computed
+    // by u32 products upstream (view_apply_expand's t_numel, View.numel
+    // is u32), so a broadcast-expanded reduce body whose logical numel
+    // exceeds 2^32 -- e.g. an im2col matmul's MUL operand
+    // {cOut, cIn*kh*kw, B*hOut*wOut} = {32,800,204800} = 5.24e9 at
+    // BS=512 -- arrives here TRUNCATED to 947912704, which isn't
+    // divisible by red->numel (6553600) -> spurious bail -> per-op
+    // fallback -> 3.8 GB alloc -> ceiling refusal.  Recover the true
+    // u64 numel from the reduce's authoritative source shape
+    // (red->src0_dims[], stored per-dim as u32) when it's recorded;
+    // fall back to the (correct for non-overflowing shapes) numel
+    // field otherwise.
     u64 src_numel;
-    if (KSRC_IS_INPUT(red->src[0])) {
+    if (red->src0_ndim > 0 && red->src0_ndim <= MAX_DIM) {
+      src_numel = 1;
+      for (u32 d = 0; d < red->src0_ndim; d++)
+        src_numel *= (u64)red->src0_dims[d];
+    } else if (KSRC_IS_INPUT(red->src[0])) {
       u32 in_slot = KSRC_INDEX(red->src[0]);
       src_numel   = ke->input_numels[in_slot];
     } else {
