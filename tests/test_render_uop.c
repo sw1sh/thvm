@@ -270,6 +270,64 @@ int main(void) {
   CHECK(contains(bufrs, "_acc1 = _acc1 + in0"));
   CHECK(contains(bufrs, "] = _acc1;"));
 
+  TEST_BEGIN("render-uop/upcast-composes-with-promoted-output-axes");
+  // matmul-shaped reduce STORE(C, m*N+n, REDUCE(MUL(A,B), SUM, k))
+  // with KOP_UPCAST applied to the N output axis (factor 4).  After
+  // the DAG split the axes are: M (KAX_LOOP), N_outer (KAX_LOOP),
+  // N_inner (KAX_UPCAST, wrapped in OPT), K (KAX_REDUCE).  The
+  // renderer must (a) promote M + N_outer to a flat `tid` decode,
+  // (b) emit N_inner as a `#pragma unroll(4)` for-loop, (c) declare
+  // the reduce accumulator INSIDE that loop and the store reference
+  // it there -- a regression caught a stale REDUCE.axis that made the
+  // matcher mistake N_inner for the reduce loop, leaving the store's
+  // `a<N_inner>` out of scope ("undeclared identifier").
+  {
+    u32 dC_uc[2] = { 32, 64 };
+    u32 dA_uc[2] = { 32, 8  };
+    u32 dB_uc[2] = { 8,  64 };
+    Term C_uc = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dC_uc);
+    Term A_uc = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dA_uc);
+    Term B_uc = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dB_uc);
+    Term in_uc[2] = { A_uc, B_uc };
+    Term rm  = uop_range(0, 0 /*LOOP*/,   32);
+    Term rn  = uop_range(1, 0 /*LOOP*/,   64);
+    Term rk  = uop_range(2, 1 /*REDUCE*/, 8);
+    Term k8  = uop_const(DT_INT32, 8);
+    Term k64 = uop_const(DT_INT32, 64);
+    Term aA  = uop_index_e(A_uc, uop_int_binary(UOP_IADD,
+                                  uop_int_binary(UOP_IMUL, rm, k8), rk));
+    Term aB  = uop_index_e(B_uc, uop_int_binary(UOP_IADD,
+                                  uop_int_binary(UOP_IMUL, rk, k64), rn));
+    Term mm  = uop_binary(UOP_MUL, aA, aB);
+    Term rd  = uop_reduce(REDUCE_SUM, /*axis=*/2, mm);
+    Term aC  = uop_int_binary(UOP_IADD,
+                              uop_int_binary(UOP_IMUL, rm, k64), rn);
+    Term st_uc = uop_store(C_uc, aC, rd);
+    KOpt up = { KOP_UPCAST, 1 /*N axis*/, 4 };
+    Term st_uc2 = uop_dag_apply_kopt(st_uc, up);
+    CHECK(st_uc2 != 0 && st_uc2 != st_uc);
+    char bufmu[4096];
+    fp = fmemopen(bufmu, sizeof(bufmu), "w");
+    cg_render_uop_kernel(st_uc2, "k_mm_up", C_uc, in_uc, 2, fp);
+    fclose(fp);
+    // M + N_outer promoted to a flat tid decode (total = 32*16 = 512).
+    CHECK(contains(bufmu, "if (tid >= 512u) return;"));
+    CHECK(contains(bufmu, "uint a0 = (tid / 16u) % 32u;"));
+    CHECK(contains(bufmu, "uint a1 = tid % 16u;"));
+    // N_inner (axis 2 after split) is the #pragma-unroll for-loop.
+    CHECK(contains(bufmu, "#pragma unroll(4)"));
+    CHECK(contains(bufmu, "for (uint a2 = 0; a2 < 4; a2++)"));
+    // Accumulator named off the (shifted) reduce axis 3, declared
+    // inside the a2 loop; the store references a2 in scope.
+    CHECK(contains(bufmu, "float _acc3 = 0.0f"));
+    CHECK(contains(bufmu, "for (uint a3 = 0; a3 < 8"));
+    CHECK(contains(bufmu, "((a1 * 4) + a2)"));
+    CHECK(contains(bufmu, "= _acc3;"));
+    // No serial output-axis loop (the regression's symptom).
+    CHECK(!contains(bufmu, "for (uint a0 ="));
+    CHECK(!contains(bufmu, "for (uint a1 ="));
+  }
+
   TEST_BEGIN("render-uop/tc-pattern-match-emits-simdgroup");
   // Build matmul shape: STORE(C, m*N+n,
   //   OPT(REDUCE(MUL(A[m*K+k], B[k*N+n]), SUM, k), TC, 0)).

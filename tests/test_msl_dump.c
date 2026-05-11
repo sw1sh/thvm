@@ -153,6 +153,45 @@ int main(void) {
     dump("matmul 32x2304x25 (TC-recognised)", buf);
   }
 
+  // --- 5) matmul WITH KOP_UPCAST applied to the N output axis ---
+  // Mirrors what kernel_hand_coded_opts does for a Metal reduce
+  // kernel: split the inner output axis by 4.  Eyeball: M + N_outer
+  // become a flat `tid` decode, N_inner is a `#pragma unroll(4)`
+  // for-loop, the accumulator declared inside it.
+  TEST_BEGIN("msl/matmul-32x2304x25-upcast");
+  {
+    u32 dC[2] = { 32, 2304 };
+    u32 dA[2] = { 32, 25 };
+    u32 dB[2] = { 25, 2304 };
+    Term out = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dC);
+    Term mA  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dA);
+    Term mB  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 2, dB);
+    Term in_bufs[2] = { mA, mB };
+    Term r_m  = uop_range(0, 0, 32);
+    Term r_n  = uop_range(1, 0, 2304);
+    Term r_kk = uop_range(2, 1, 25);
+    Term k25  = uop_const(DT_INT32, 25);
+    Term k2304= uop_const(DT_INT32, 2304);
+    Term mK   = uop_int_binary(UOP_IMUL, r_m, k25);
+    Term addrA= uop_int_binary(UOP_IADD, mK, r_kk);
+    Term ldA  = uop_index_e(mA, addrA);
+    Term kN   = uop_int_binary(UOP_IMUL, r_kk, k2304);
+    Term addrB= uop_int_binary(UOP_IADD, kN, r_n);
+    Term ldB  = uop_index_e(mB, addrB);
+    Term mulm = uop_binary(UOP_MUL, ldA, ldB);
+    Term redM = uop_reduce(REDUCE_SUM, 2, mulm);
+    Term mN   = uop_int_binary(UOP_IMUL, r_m, k2304);
+    Term addrC= uop_int_binary(UOP_IADD, mN, r_n);
+    Term st   = uop_store(out, addrC, redM);
+    KOpt up = { KOP_UPCAST, 1 /*N axis*/, 4 };
+    Term st_uc = uop_dag_apply_kopt(st, up);
+    char buf[16384];
+    FILE *fp = fmemopen(buf, sizeof(buf), "w");
+    cg_render_uop_kernel(st_uc, "k_gemm_up", out, in_bufs, 2, fp);
+    fclose(fp);
+    dump("matmul 32x2304x25 (KOP_UPCAST N/4)", buf);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

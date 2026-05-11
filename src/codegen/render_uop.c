@@ -856,14 +856,17 @@ static u32 rmu_emit_output_loops(Term addr, Term const *out_ranges,
                  ? (u32)term_val(heap_read(term_val(addr_ranges[i]) + 0))
                  : 0xFFFFFFFFu;
   }
-  // C99 target has no thread positions: keep serial loops.  Also skip
-  // promotion if the kernel carries any per-axis OPT (autotune ran;
-  // the tile-layout dispatch is in play and the renderer's opted-axis
-  // emit already handles parallelism).
-  int any_opt = 0;
-  for (u32 i = 0; i < n_out; i++) if (out_kinds[i] != RMU_NO_OPT) { any_opt = 1; break; }
+  // C99 target has no thread positions: keep serial loops.  Otherwise:
+  // promote every plain-KAX_LOOP output axis (no OPT wrapper) that
+  // indexes the store position to a parallel grid axis decoded from
+  // `tid`.  This composes with OPT'd axes: a UPCAST/LOCAL split leaves
+  // the OUTER half as a plain KAX_LOOP (which we promote here) and the
+  // INNER half as KAX_UPCAST/KAX_LOCAL with an OPT wrapper (which the
+  // per-axis emit below handles -- `#pragma unroll` loop / `tt` bind).
+  // So a UPCAST'd matmul still gets one-output-element-per-thread on
+  // its M / N-outer axes while the N-inner axis is the unroll loop.
   u8 promote[MAX_DIM] = {0};
-  if (!RMU_TARGET_C && !any_opt) {
+  if (!RMU_TARGET_C) {
     for (u32 i = 0; i < n_out; i++) {
       Term r = out_ranges[i];
       if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
@@ -1585,10 +1588,12 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // conv2d_flat templates run before this and bind their own
   // parallel axes).  The decode context below treats the promoted
   // ranges identically to ranges that arrived axis_type==KAX_GLOBAL.
-  int any_opt = 0;
-  for (u32 i = 0; i < n_ranges; i++) if (opt_kinds[i] != RMU_NO_OPT) { any_opt = 1; break; }
+  // This composes with OPT'd axes: a UPCAST/LOCAL split's OUTER half
+  // is a plain KAX_LOOP and gets promoted; the INNER half carries the
+  // OPT wrapper and emits via its OPT-specific path (`#pragma unroll`
+  // for UPCAST/UNROLL, `tt` bind for LOCAL).
   u8 promote_global[MAX_DIM] = {0};
-  if (!RMU_TARGET_C && !any_opt) {
+  if (!RMU_TARGET_C) {
     for (u32 i = 0; i < n_ranges; i++) {
       Term r = ranges[i];
       if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
