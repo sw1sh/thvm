@@ -449,6 +449,45 @@ static void rmu_collect_ranges_rec(Term t, Term *ranges,
   }
 }
 
+// Walks the term subgraph rooted at `t` (descending through every
+// operand slot we care about) and returns 1 iff `needle` appears as
+// a node anywhere inside.  Used to detect reduce nesting (the
+// nested-reduce / body-rewrap shape) when computing `required_pos`
+// in the generic store path.  Bounded recursion by a `depth` budget
+// so a malformed cyclic DAG can't drive an infinite descent.
+static int rmu_term_contains_rec(Term t, Term needle, u32 depth) {
+  if (depth > 256) return 0;
+  if (t == needle) return 1;
+  if (term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1)
+          || rmu_term_contains_rec(heap_read(loc + 1), needle, depth + 1);
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_OPT:
+      return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1);
+    case UOP_IWHERE:
+      return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1)
+          || rmu_term_contains_rec(heap_read(loc + 1), needle, depth + 1)
+          || rmu_term_contains_rec(heap_read(loc + 2), needle, depth + 1);
+    case UOP_REDUCE:
+      // Recurse into the body: nesting can be transitive.
+      return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1);
+    default:
+      return 0;
+  }
+}
+static int rmu_term_contains(Term t, Term needle) {
+  return rmu_term_contains_rec(t, needle, 0);
+}
+
 // Walk a term tree collecting UOP_REDUCE nodes for hoisting.  Each
 // REDUCE produces a separate accumulator.  Up to MAX_DIM reduces.
 static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
@@ -461,9 +500,22 @@ static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
     for (u32 i = 0; i < *n_out; i++) {
       if (reduces[i] == t) return;
     }
+    // Post-order add: recurse into the body FIRST so any nested
+    // REDUCE (e.g. body-rewrap form `IWHERE(_, INNER_REDUCE, INVALID)`
+    // from kernel_lift's reduce-over-broadcast-axis fix) is collected
+    // and emitted before this outer reduce that depends on its
+    // `_acc<N>` placeholder.  Otherwise the renderer emits `_acc4`
+    // for the inner reduce term while only `_acc5` (the outer) is
+    // declared, yielding `undeclared identifier '_acc4'`.
+    rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
+    if (*n_out >= MAX_DIM) return;
+    // Re-check dedup after recursion (in case the body referenced
+    // this same outer term -- shouldn't happen but cheap to guard).
+    for (u32 i = 0; i < *n_out; i++) {
+      if (reduces[i] == t) return;
+    }
     reduces[*n_out] = t;
     (*n_out)++;
-    // Don't recurse into the body -- the outer accumulator handles it.
     return;
   }
   switch (op) {
@@ -503,6 +555,21 @@ static void rmu_collect_reduces_with_simd(Term t, int parent_is_simd,
   u32 op = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_REDUCE) {
+    for (u32 i = 0; i < *n_out; i++) {
+      if (reduces[i] == t) {
+        if (parent_is_simd) simd_flags[i] = 1;
+        return;
+      }
+    }
+    // Post-order add: recurse into the body FIRST.  See the long
+    // comment in rmu_collect_reduces; same nested-REDUCE invariant
+    // applies (inner `_acc<N>` must be declared before outer body
+    // emits the reference).  Pass parent_is_simd=0 through the body
+    // -- SIMD_REDUCE only applies to the immediately-wrapped reduce,
+    // not to siblings nested deeper.
+    rmu_collect_reduces_with_simd(heap_read(loc + 0), 0, reduces,
+                                  simd_flags, n_out);
+    if (*n_out >= MAX_DIM) return;
     for (u32 i = 0; i < *n_out; i++) {
       if (reduces[i] == t) {
         if (parent_is_simd) simd_flags[i] = 1;
@@ -1324,6 +1391,31 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
       }
     }
     required_pos[i] = max_pos;
+  }
+  // Transitive propagation for nested reduces.  rmu_collect_ranges
+  // stops at UOP_REDUCE boundaries (the body's `_accN` reference is
+  // a leaf to the outer scope), so the direct max_pos above does not
+  // see output axes that an INNER reduce's body uses.  But the outer
+  // reduce's emission references `_acc<inner>` at its own emit depth,
+  // so the inner reduce must already be declared at that point.  We
+  // achieve this by pushing the outer's required_pos to at least the
+  // inner's required_pos for every reduce nested inside it.
+  // Reduces are in post-order (inner before outer; see
+  // rmu_collect_reduces_with_simd's post-order add), so a single
+  // forward pass suffices: by the time we visit `i`, every reduce
+  // appearing in reduces[i]'s body subtree has been fully updated.
+  for (u32 i = 0; i < n_reduces; i++) {
+    Term r_src_i = heap_read(term_val(reduces[i]) + 0);
+    for (u32 j = 0; j < i; j++) {
+      // Is reduces[j] structurally inside reduces[i]'s body?  Walk the
+      // body subgraph (including descending into other UOP_REDUCE
+      // bodies, since nesting can be transitive) and check for term
+      // identity.  Bounded recursion -- DAG is finite + small.
+      if (rmu_term_contains(r_src_i, reduces[j])
+          && required_pos[j] > required_pos[i]) {
+        required_pos[i] = required_pos[j];
+      }
+    }
   }
 
   // Helper used by the interleaved emission below: emit one reduce

@@ -59,6 +59,17 @@ typedef struct {
   Term axis_uop;      // UOP_RANGE term
 } LiftRangeMap;
 
+// Capacity of the per-call LiftRangeMap[] arrays.  The entry-level
+// builder in kernel_lift_to_uop emits one slot per BUFFERIZE range
+// (up to MAX_DIM) and then sweeps the arena for per-USE auxiliary
+// S_RANGE leaves (up to another MAX_DIM), so n_ranges can reach
+// MAX_DIM * 2.  Every local LiftRangeMap[] inside lift_scalar_value
+// that copies the incoming `ranges` array must size to this cap, or
+// the `for (i = 0; i < n_ranges; i++) shifted[i] = ranges[i];` copies
+// overflow the stack canary and SIGABRT via __stack_chk_fail (seen
+// on beautiful_mnist forward at BS=32).
+#define LIFT_RANGES_CAP (MAX_DIM * 2)
+
 static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
                               LiftRangeMap const *ranges, u32 n_ranges,
                               Term out_buf, Term const *in_bufs,
@@ -669,7 +680,8 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       if (u->src_count < 2) return 0;
       u32 ndim = (u32)u->src_count - 1;
       if (ndim > 4) return 0;
-      LiftRangeMap shifted[MAX_DIM];
+      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      LiftRangeMap shifted[LIFT_RANGES_CAP];
       u32 n_sh = n_ranges;
       for (u32 i = 0; i < n_ranges; i++) shifted[i] = ranges[i];
       for (u32 d = 0; d < ndim; d++) {
@@ -697,7 +709,8 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       if (u->src_count < 2) return 0;
       u32 ndim = (u32)u->src_count - 1;
       if (ndim > 4) return 0;
-      LiftRangeMap shifted[MAX_DIM];
+      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      LiftRangeMap shifted[LIFT_RANGES_CAP];
       u32 n_sh = n_ranges;
       for (u32 i = 0; i < n_ranges; i++) shifted[i] = ranges[i];
       Term cond_acc = 0;
@@ -790,7 +803,8 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
         in_ext[d] = (u32)(ru->extra & 0xFFFFFFFFu);
         if (in_ext[d] == 0) return 0;
       }
-      LiftRangeMap reshaped[MAX_DIM];
+      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      LiftRangeMap reshaped[LIFT_RANGES_CAP];
       u32 n_re = n_ranges;
       for (u32 i = 0; i < n_ranges; i++) reshaped[i] = ranges[i];
       // Append/override the n_in input ranges with derived iters.
@@ -811,7 +825,7 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
             break;
           }
         }
-        if (!found && n_re < MAX_DIM) {
+        if (!found && n_re < LIFT_RANGES_CAP) {
           reshaped[n_re].axis_id   = n_re;
           reshaped[n_re].scalar_id = in_sid[d];
           reshaped[n_re].axis_uop  = iter_d;
@@ -831,7 +845,8 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       u32 mask = (u32)u->extra;
       u32 ndim = (u32)u->src_count - 1;
       if (ndim > MAX_DIM) return 0;
-      LiftRangeMap flipped[MAX_DIM];
+      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      LiftRangeMap flipped[LIFT_RANGES_CAP];
       u32 n_flipped = 0;
       // Copy + override ranges that are in the flip bitmask.
       for (u32 i = 0; i < n_ranges; i++) {
@@ -912,7 +927,8 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
       // Decompose flat into per-dim in_iters and override the shared
       // range mapping so the body sees in_iter[d] for the same
       // scalar_id slot.
-      LiftRangeMap reshaped[MAX_DIM];
+      if (n_ranges > LIFT_RANGES_CAP) return 0;
+      LiftRangeMap reshaped[LIFT_RANGES_CAP];
       u32 n_re = n_ranges;
       for (u32 i = 0; i < n_ranges; i++) reshaped[i] = ranges[i];
       for (u32 d = 0; d < nrng; d++) {
@@ -933,7 +949,7 @@ static Term lift_scalar_value(KernelEntry const *ke, u32 sid,
           }
         }
         if (!found) {
-          if (n_re >= MAX_DIM) return 0;
+          if (n_re >= LIFT_RANGES_CAP) return 0;
           reshaped[n_re].scalar_id = sid_d;
           reshaped[n_re].axis_uop  = iter_d;
           n_re++;
@@ -1616,7 +1632,7 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // (KOP_GROUP / KOP_GROUPTOP wraps) are still handled below.
   u32 n_buf = (u32)bu->src_count - 1;
   if (n_buf > MAX_DIM) return 0;
-  LiftRangeMap ranges[MAX_DIM * 2];
+  LiftRangeMap ranges[LIFT_RANGES_CAP];
   u32 n_ranges = 0;
   // Pre-split origin_extent[i] / origin_axis_type[i] -- read once from
   // S_RANGE.extra and never mutated.  These feed the bare UOP_RANGE
@@ -1660,7 +1676,7 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // the same order -- this matches how rangeify emits them.
   KpSchedule const *orig_kax = ke->schedule;
   u32 per_use_idx = 0;
-  for (u32 i = 1; i < ke->n_scalar_uops && n_ranges < MAX_DIM * 2; i++) {
+  for (u32 i = 1; i < ke->n_scalar_uops && n_ranges < LIFT_RANGES_CAP; i++) {
     if (ke->scalar_uops[i].op != S_RANGE) continue;
     int seen = 0;
     for (u32 j = 0; j < n_ranges; j++) {

@@ -467,14 +467,22 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
   }
 }
 
-// Collect REDUCE nodes (mirrors rmu_collect_reduces). Doesn't recurse
-// into the reduce body.
+// Collect REDUCE nodes (mirrors rmu_collect_reduces).  Post-order add:
+// recurse into the REDUCE body so any nested reduce is registered
+// (and run) BEFORE its outer consumer; otherwise the outer's
+// uwalk_eval_float on a nested UOP_REDUCE term would hit
+// uwalk_reduce_lookup with no slot and silently return 0.
 static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   if (term_tag(t) != TAG_UOP) return;
   if (*n_out >= UWALK_MAX_REDUCES) return;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_REDUCE) {
+    for (u32 i = 0; i < *n_out; i++) {
+      if (reduces[i] == t) return;
+    }
+    uwalk_collect_reduces(heap_read(loc + 0), reduces, n_out);
+    if (*n_out >= UWALK_MAX_REDUCES) return;
     for (u32 i = 0; i < *n_out; i++) {
       if (reduces[i] == t) return;
     }
