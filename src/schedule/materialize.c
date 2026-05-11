@@ -1868,8 +1868,29 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     memset(p, 0, sizeof(*p));
     p->source_uop = t;
     p->opcode = (u8)op;
-    u64 ln = src_numel(ke, li), rn = src_numel(ke, ri);
-    p->numel  = (ln >= rn) ? ln : rn;
+    // p->numel is the op's *output* element count.  Compute it from
+    // the term's broadcast output shape as a u64 product -- NOT as
+    // max(operand .numel), because an operand resolved to a strided
+    // input view stores its (possibly > 2^32) logical numel in a u32
+    // View.numel / KernelEntry.input_numels[] slot, which truncates.
+    // An im2col-matmul's MUL operand {cOut, cIn*kh*kw, B*hOut*wOut} =
+    // {32,800,204800} has 5.24e9 logical elems at BS=512; the
+    // truncated 947912704 then poisons the downstream REDUCE's
+    // numel (= mul.numel / reduce_extent) and rangeify's
+    // divisibility gate -> spurious bail -> per-op fallback ->
+    // 3.8 GB alloc -> ceiling refusal.  Falls back to max(operand
+    // numels) only if term_shape_in fails (degenerate / unshaped).
+    {
+      Shape out_shape = {0};
+      if (term_shape_in(t, 0, &out_shape) && out_shape.ndim > 0) {
+        u64 onum = 1;
+        for (u32 i = 0; i < out_shape.ndim; i++) onum *= (u64)out_shape.dims[i];
+        p->numel = onum;
+      } else {
+        u64 ln = src_numel(ke, li), rn = src_numel(ke, ri);
+        p->numel = (ln >= rn) ? ln : rn;
+      }
+    }
     p->dtype  = src_dtype(ke, li);
     p->n_src  = 2;
     p->src[0] = li;
