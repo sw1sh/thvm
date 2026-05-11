@@ -248,16 +248,7 @@ TConv2DIm2ColPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outShaped,
     biasBcast
 },
-    (* The strided-view `_pool` chain composes RESHAPE/EXPAND/SHRINK/
-       PERMUTE on top of `input`.  When `input` is itself a movement /
-       compute DAG (e.g. conv2's input is MaxPool(ReLU(conv1))), the
-       scheduler fuses the two chains and mis-orders the composed
-       views -- the conv output comes out wrong.  Force `input` onto a
-       contiguous buffer boundary first (it is a small tensor and is
-       materialised anyway as a kernel output, so this costs nothing
-       the PAD-and-sum path didn't already pay -- the win is dropping
-       the materialised im2col MATRIX, not the input). *)
-    input = TMaterialize[inputArg];
+    input = inputArg;
     inShape = tUopShape[input];
     wShape  = tUopShape[weights];
     {cIn, h, wd}      = inShape;
@@ -294,10 +285,7 @@ TConv2DIm2ColBatchedPool[inputArg_TTerm, weights_TTerm, bias_TTerm] := Module[{
     rh, rw, x1, x2, x3, x4, xCol6, xCol, wFlat, outFlat, outObp,
     outShaped, biasBcast
 },
-    (* See TConv2DIm2ColPool: force `input` onto a contiguous buffer
-       boundary so the strided-view `_pool` chain composes correctly
-       even when the input is itself a movement / compute DAG. *)
-    input = TMaterialize[inputArg];
+    input = inputArg;
     inShape = tUopShape[input];
     wShape  = tUopShape[weights];
     {batch, cIn, h, wd} = inShape;

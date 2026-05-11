@@ -1254,7 +1254,55 @@ static u32 const_to_tendesc(u64 const_loc) {
 // rooted at one).  Backend must be view-aware -- otherwise returns
 // 0 so caller falls through.
 static u32 boundary_index_for_loc(u64 loc);   // forward decl (Level 54)
+static u8  op_is_view_movement(u8 op);        // forward decl (defined below)
+
+// True iff the movement-op chain rooted at `t` carries the
+// tinygrad-`_pool` im2col unfold signature -- a RESHAPE that reduces
+// rank sitting directly over an EXPAND -- AND bottoms out at an
+// already-emitted bufferize boundary (not a leaf/kernel, which
+// view_resolve already handles directly).  Only that combination
+// needs the boundary-base relaxation in view_resolve_inner: the
+// rank-merge RESHAPE is the one view_apply_reshape can't absorb, so
+// the chain MUST go through tensor_view_chain_append + dispatch
+// pre-mat (the kernel-op fallback bails in rangeify and reads
+// zeros), and that requires a buffer-backed source.
+static int view_chain_needs_boundary_base(Term t) {
+  int saw_pool_merge = 0;
+  Term cur = term_resolve(t);
+  for (u32 hops = 0; hops < 64; hops++) {
+    if (term_tag(cur) != TAG_UOP) return 0;            // hit a TAG_TEN/etc -- handled directly
+    u8 op = term_ext(cur);
+    if (op == UOP_KERNEL) return 0;                    // buffer-backed already
+    if (!op_is_view_movement(op) && op != UOP_PAD) {
+      // chain source -- a non-movement compute UOP.  Qualify only
+      // if it's an emitted boundary AND we passed the `_pool` merge.
+      if (!saw_pool_merge) return 0;
+      u32 bi = boundary_index_for_loc(term_val(cur));
+      return (bi != 0xFFFFFFFFu && bi < BOUNDARY_ORDER_CAP
+              && BOUNDARY_TID[bi] != 0);
+    }
+    u64 loc = term_val(cur);
+    Term src = term_resolve(heap_read(loc + 0));
+    if (op == UOP_RESHAPE && term_tag(src) == TAG_UOP
+        && term_ext(src) == UOP_EXPAND) {
+      Shape rs_out, ex_out;
+      if (term_shape_in(cur, 0, &rs_out) && term_shape_in(src, 0, &ex_out)
+          && rs_out.ndim < ex_out.ndim)
+        saw_pool_merge = 1;
+    }
+    cur = src;
+  }
+  return 0;
+}
+
+static u32 view_resolve_inner(Term t, int boundary_base);
+
 static u32 view_resolve(Term t) {
+  if (CURRENT_BACKEND == NULL || !CURRENT_BACKEND->view_aware) return 0;
+  return view_resolve_inner(t, view_chain_needs_boundary_base(t));
+}
+
+static u32 view_resolve_inner(Term t, int boundary_base) {
   if (CURRENT_BACKEND == NULL || !CURRENT_BACKEND->view_aware) return 0;
   u8 tag = term_tag(t);
   if (tag == TAG_TEN) {
@@ -1284,19 +1332,39 @@ static u32 view_resolve(Term t) {
   // grad chain stalls as a UOP that never fires.
   if (op == UOP_CONST) return const_to_tendesc(loc);
 
-  // Level 54 (REVERTED in the materialize-regression fix): a
-  // realized bufferize boundary used to act as a TAG_TEN base case
-  // for the chain walker (return BOUNDARY_TID[bi] for non-movement
-  // ops).  That made a movement-op root over a pending-producer
-  // boundary resolve to a bare view alias on the boundary's
-  // (uninitialised) output buffer.  The realize loop only fires
-  // kernels reached through a UOP_KERNEL term, so the boundary's
-  // producer kernel never fired -- the alias read zeros.  Movement
-  // roots now fall through to the kernel-op emit path, which keeps
-  // the producer reachable.
+  // A movement-op chain bottoming out at an ALREADY-EMITTED bufferize
+  // boundary, when `view_resolve` was entered with boundary_base set
+  // (the wrapper pre-scanned the chain and found the tinygrad-`_pool`
+  // im2col signature -- a rank-merging RESHAPE over an EXPAND -- which
+  // can't be emitted as kernel ops: rangeify refuses the rank-merge
+  // RESHAPE and the fallback dispatch reads zeros).  Acting like a
+  // TAG_TEN base case here lets the rest of the chain compose as a
+  // ShapeTracker view over the boundary's buffer; the dispatch-time
+  // pre-mat then gathers it once.  The boundary TenDesc carries
+  // producer_kid (set in emit_kernel_for_boundary), so the chained
+  // alias stays reachable -- kernel_fire_by_id chases the producer
+  // before the gather runs, and boundaries emit in topo order so an
+  // upstream boundary's BOUNDARY_TID is already populated.  Mirrors
+  // what the (now-removed) WL `input = TMaterialize[...]` guard did,
+  // minus the fresh TAG_TEN that broke TGrad on the original leaf.
+  //
+  // Level 54 (REVERTED) made this unconditional for ANY non-movement
+  // op, which (a) aliased *pending* boundaries (BOUNDARY_TID == 0) on
+  // uninitialised buffers and (b) re-routed simple `Reshape(Shrink)`
+  // / `Pad` chains over a realized boundary onto a strided alias that
+  // downstream kernel-op consumers mis-read.  The boundary_base gate
+  // + BOUNDARY_TID-populated check is the safe subset.
+  if (boundary_base) {
+    u32 bi = boundary_index_for_loc(loc);
+    if (bi != 0xFFFFFFFFu && bi < BOUNDARY_ORDER_CAP && BOUNDARY_TID[bi] != 0) {
+      u32 btid = BOUNDARY_TID[bi];
+      if (btid != 0 && btid < TENS_NEXT && !dtype_is_packed(TENS[btid].dtype))
+        return btid;
+    }
+  }
 
   // Source recurses (could be another movement op chain or CONST).
-  u32 src_tid = view_resolve(heap_read(loc));
+  u32 src_tid = view_resolve_inner(heap_read(loc), boundary_base);
   if (src_tid == 0) return 0;
   View const *src_view = &TENS[src_tid].view;
 

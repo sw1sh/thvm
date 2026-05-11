@@ -1562,6 +1562,74 @@ static u32 bufferize_rule_inline_reduce_scalar_tail(Term root) {
   return hits;
 }
 
+// === tinygrad-`_pool` strided-view conv: force the chain source onto
+//     a buffer boundary ===========================================
+//
+// TConv2DIm2ColPool / TConv2DIm2ColBatchedPool build the windowed
+// im2col operand `xCol` as a movement-op chain over the conv input:
+//   Reshape -> Expand -> Reshape(merge) -> Shrink -> Reshape -> Shrink
+//   -> Permute -> Reshape
+// The merge-Reshape (Reshape OVER an Expand, reducing rank) can't be
+// absorbed into a single View, so the materialize-time view_resolve
+// chain-appends a fresh outer View and the dispatch pre-mat gathers
+// the strided view once.  That works when the chain bottoms out at a
+// buffer-backed leaf/kernel.  But when the conv input is itself a
+// COMPUTE DAG (e.g. conv2's input is ReLU(conv1(x)) -- an unrealized
+// MUL/CMPLT subgraph), view_resolve has no buffer to alias and bails,
+// so visit() emits the whole `_pool` chain as KERNEL OPS -- and
+// rangeify then refuses the rank-merge RESHAPE (no scalar_uops, the
+// fallback dispatch reads zeros).  Fix: when a movement chain feeding
+// a matmul carries the `Reshape(Expand(...))` rank-merge signature,
+// realize the chain's source compute UOP so it materialises to its
+// own buffer; view_resolve then chain-composes the `_pool` view over
+// that buffer (a NON-data-movement: the source was a kernel output
+// anyway -- only the materialised im2col MATRIX is what gets dropped).
+//
+// Mirrors what the (now-removed) WL-side `input = TMaterialize[...]`
+// guard did, but without minting a fresh TAG_TEN -- so TGrad still
+// finds the path back to the original leaf.
+static int bufferize_pool_chain_marks_source(u64 reduce_loc) {
+  // The matmul-reduce's body is MUL(a, b) at heap[reduce_loc + 0].
+  Term mul = term_resolve(heap_read(reduce_loc + 0));
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  int hits = 0;
+  for (u32 a = 0; a < 2; a++) {
+    Term arg = term_resolve(heap_read(term_val(mul) + a));
+    // Walk DOWN through movement ops (each stores its src at
+    // heap[loc + 0]) toward the chain's source.  Note whether we
+    // pass a Reshape sitting directly over an Expand that reduces
+    // rank -- the `_pool` unfold's distinguishing feature.
+    int saw_pool_merge = 0;
+    for (u32 hops = 0; hops < 64; hops++) {
+      if (term_tag(arg) != TAG_UOP) break;
+      u8 op = term_ext(arg);
+      if (op == UOP_KERNEL) { arg = (Term)0; break; }   // already a buffer
+      if (!classify_op_is_movement(op)) break;            // chain source
+      u64 loc = term_val(arg);
+      Term src = term_resolve(heap_read(loc + 0));
+      if (op == UOP_RESHAPE && term_tag(src) == TAG_UOP
+          && term_ext(src) == UOP_EXPAND) {
+        Shape rs_out, ex_out;
+        if (term_shape_in(arg, 0, &rs_out) && term_shape_in(src, 0, &ex_out)
+            && rs_out.ndim < ex_out.ndim) {
+          saw_pool_merge = 1;
+        }
+      }
+      arg = src;
+    }
+    if (!saw_pool_merge) continue;
+    if (arg == 0 || term_tag(arg) != TAG_UOP) continue;  // leaf/kernel: nothing to do
+    u8 src_op = term_ext(arg);
+    if (src_op == UOP_KERNEL) continue;
+    u32 sidx = bufferize_info_find(term_val(arg));
+    if (sidx == 0xFFFFFFFFu) continue;
+    if (BUFFERIZE_NODES[sidx].realized) continue;
+    bufferize_node_mark(&BUFFERIZE_NODES[sidx], BUFFERIZE_REASON_MATMUL);
+    hits++;
+  }
+  return hits;
+}
+
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   bufferize_rewrite_stats_clear();
@@ -1679,6 +1747,18 @@ fn void bufferize_classify(Term root) {
       bufferize_node_mark(&BUFFERIZE_NODES[arg_idx],
                           BUFFERIZE_REASON_MATMUL);
     }
+  }
+  // tinygrad-`_pool` strided-view conv: when the matmul reads its
+  // im2col operand through the `Reshape(Expand(...))` rank-merge
+  // chain over a compute DAG, realize that DAG's source UOP so the
+  // chain composes as a ShapeTracker view over its buffer (the
+  // dispatch pre-mat then gathers it once) instead of being emitted
+  // as kernel ops rangeify can't lower.
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
+    if (!(info->reasons & BUFFERIZE_REASON_MATMUL)) continue;
+    if (info->op != UOP_REDUCE) continue;
+    bufferize_pool_chain_marks_source(info->loc);
   }
   RealizeRewriteRule rules[] = {
     {"inline-constants",              bufferize_rule_inline_constants},
