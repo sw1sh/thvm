@@ -221,8 +221,14 @@ static int hand_opt_is_conv_kernel(KernelEntry const *ke) {
   Term sroot = ke->cached_lift.store_root;
   if (term_tag(sroot) != TAG_UOP || term_ext(sroot) != UOP_STORE) return 0;
   Term value = heap_read(term_val(sroot) + 2);
-  return term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
-      && uop_opt_kind(value) == UOP_OPT_CONV;
+  // Already wrapped (rare -- recogniser usually runs at render time)?
+  if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
+      && uop_opt_kind(value) == UOP_OPT_CONV) return 1;
+  // Otherwise detect the conv2d im2col-matmul SHAPE structurally -- this
+  // is the same predicate uop_recognise_conv uses, so a 1 here means the
+  // kernel WILL render through rmu_emit_conv (which copes with the deep
+  // multi-UPCAST + multi-LOCAL tiling).
+  return uop_classify_conv2d(sroot, NULL);
 }
 
 // True iff this is a conv-matmul kernel we want to tile deeply: the
@@ -233,9 +239,19 @@ static int hand_opt_is_conv_kernel(KernelEntry const *ke) {
 // else gets the conservative one-UPCAST-one-LOCAL treatment.
 static int hand_opt_is_tileable_reduce(KernelEntry const *ke,
                                        HandOptAxes const *ax) {
-  return hand_opt_is_conv_kernel(ke)
-      && hand_opt_reduce_axis(ax) != 0xFFFFFFFFu
-      && hand_opt_n_loop_axes(ax) >= 2;
+  if (!hand_opt_is_conv_kernel(ke)) return 0;
+  u32 r = hand_opt_reduce_axis(ax);
+  if (r == 0xFFFFFFFFu) return 0;
+  if (hand_opt_n_loop_axes(ax) < 2) return 0;
+  // Gate the deep conv tiling on a large contraction (>= 256) AND a wide
+  // contiguous spatial axis (>= 16, the last output axis): only then does
+  // the cOut register-block + wOut-LOCAL coalescing pay for the lost
+  // GLOBAL-grid parallelism.  The cheap convs (K ~ 25) and the late-stage
+  // small-spatial convs (wOut 6..8) regress under it.
+  if (ax->extent[r] < 256) return 0;
+  u32 c_axis = hand_opt_last_output_axis(ax);
+  if (c_axis == 0xFFFFFFFFu || ax->extent[c_axis] < 16) return 0;
+  return 1;
 }
 
 // --- matmul classification ----------------------------------------
@@ -334,33 +350,26 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // For NON-tileable kernels keep the prior conservative one-axis pass
   // (try 4 then 2 on the last output axis), unchanged.
   if (tileable) {
-    // Main upcast loop.
-    for (u32 pass = 0; pass < 8; pass++) {
-      if (!hand_opt_snapshot_axes(ke, &ax)) break;
-      if (hand_opt_upcast_size(&ax) >= 16) break;
-      if (hand_opt_output_loop_product(&ax) < 1024) break;
-      // Innermost KAX_LOOP axis that divides 4 (preferred) or 2.
-      u32 chosen_axis = 0xFFFFFFFFu, chosen_f = 0;
-      for (i32 i = (i32)ax.n - 1; i >= 0; i--) {
-        if (ax.kax_type[i] != KAX_LOOP) continue;
-        u32 ext = ax.extent[i];
-        if (ext % 4 == 0)      { chosen_axis = (u32)i; chosen_f = 4; break; }
-        else if (ext % 2 == 0) { chosen_axis = (u32)i; chosen_f = 2; break; }
+    // Single UPCAST on the M axis (output axis 0 -- the conv-matmul "M"
+    // / cOut output axis: the weight read depends on it, the conv-input
+    // read does not, so rmu_emit_conv's vectorized accumulator can reuse
+    // one conv-input load across all M registers).  Only ONE split: the
+    // conv-split renderer mishandles >1 UPCAST output axis (it emits the
+    // inner halves out of dependency order -> undeclared-identifier MSL).
+    if (hand_opt_snapshot_axes(ke, &ax)) {
+      u32 m_axis = 0xFFFFFFFFu;
+      for (u32 i = 0; i < ax.n; i++) {
+        if (ax.kax_type[i] == KAX_LOOP) { m_axis = i; break; }
       }
-      if (chosen_axis == 0xFFFFFFFFu) break;
-      KOpt opt = { KOP_UPCAST, (u8)chosen_axis, chosen_f };
-      if (!kernel_apply_opt(ke, opt)) break;  // shouldn't fail (we validated)
-      n_applied++;
-    }
-    // Fallback: if NOTHING got upcasted, do one easy UPCAST 4 (then 2).
-    if (hand_opt_snapshot_axes(ke, &ax) && hand_opt_upcast_size(&ax) == 1) {
-      u32 axis = hand_opt_last_output_axis(&ax);
-      if (axis != 0xFFFFFFFFu) {
-        u32 ext = ax.extent[axis];
-        u32 f = (ext % 4 == 0) ? 4 : (ext % 2 == 0) ? 2 : 0;
-        if (f != 0) {
-          KOpt opt = { KOP_UPCAST, (u8)axis, f };
+      if (m_axis != 0xFFFFFFFFu) {
+        u32 ext = ax.extent[m_axis];
+        static const u32 m_factors[] = {8, 4, 2};
+        for (u32 i = 0; i < 3; i++) {
+          u32 f = m_factors[i];
+          if (ext % f != 0 || ext / f < 1) continue;
+          KOpt opt = { KOP_UPCAST, (u8)m_axis, f };
           if (kernel_apply_opt(ke, opt)) n_applied++;
+          break;
         }
       }
     }
@@ -401,29 +410,26 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     static const u32 local_factors[] = {32, 16, 8, 4, 3, 2};
     u32 local_cap = 256u;
     if (tileable) {
-      for (u32 pass = 0; pass < 3; pass++) {
-        if (!hand_opt_snapshot_axes(ke, &ax)) break;
-        if (hand_opt_n_local_axes(&ax) >= 3) break;
-        u64 cur_local = hand_opt_local_size(&ax);
-        if (cur_local >= local_cap) break;
-        // Innermost KAX_LOOP axis with a usable factor.
-        u32 chosen_axis = 0xFFFFFFFFu, chosen_f = 0;
-        for (i32 i = (i32)ax.n - 1; i >= 0; i--) {
-          if (ax.kax_type[i] != KAX_LOOP) continue;
-          u32 ext = ax.extent[i];
-          for (u32 fi = 0; fi < 6; fi++) {
-            u32 f = local_factors[fi];
-            if (ext % f != 0) continue;
-            if (cur_local * (u64)f > (u64)local_cap) continue;
-            chosen_axis = (u32)i; chosen_f = f; break;
+      // Single LOCAL on the contiguous spatial axis -- the LAST output
+      // axis, which is innermost (stride 1) in the conv-input read.  One
+      // split keeps the conv-split renderer happy; the LOCAL factor lands
+      // consecutive threads on consecutive conv-input columns (coalesced).
+      static const u32 conv_local_factors[] = {64, 32, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2};
+      if (hand_opt_snapshot_axes(ke, &ax)) {
+        u32 c_axis = hand_opt_last_output_axis(&ax);
+        if (c_axis != 0xFFFFFFFFu) {
+          u32 ext = ax.extent[c_axis];
+          for (u32 i = 0; i < 12; i++) {
+            u32 f = conv_local_factors[i];
+            if (f > (u32)local_cap) continue;
+            if (ext % f != 0 || ext / f < 1) continue;
+            KOpt opt = { KOP_LOCAL, (u8)c_axis, f };
+            if (kernel_apply_opt(ke, opt)) n_applied++;
+            break;
           }
-          if (chosen_axis != 0xFFFFFFFFu) break;
         }
-        if (chosen_axis == 0xFFFFFFFFu) break;
-        KOpt opt = { KOP_LOCAL, (u8)chosen_axis, chosen_f };
-        if (!kernel_apply_opt(ke, opt)) break;
-        n_applied++;
       }
+      (void)local_factors;
     } else {
       static const u32 single_local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
       if (hand_opt_snapshot_axes(ke, &ax)) {
