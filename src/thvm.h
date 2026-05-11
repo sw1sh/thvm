@@ -492,6 +492,13 @@ typedef struct {
 // Forward declaration for the dispatch callback.
 struct KernelEntry;
 
+// === kvar visible-from-KernelEntry forward block =====================
+// The per-kernel runtime-binding tables embedded in KernelEntry need
+// KVAR_USED_CAP at type-definition time.  Hoist just the cap up here;
+// the rest of the kvar surface (`KVAR_FLAG_BIT`, the helper fn decls)
+// stays in the schedule section below so it sits next to its module.
+#define KVAR_USED_CAP 8
+
 // === KpSchedule ===
 // Axis-typed scheduling structure carried per-KernelEntry, mirroring
 // tinygrad's `Kernel.full_shape[]` + applied-opt log (no axis_types[]
@@ -1315,6 +1322,18 @@ typedef struct KernelEntry {
                                  // Compared against tile_axes_hash(ke) on
                                  // each tile_sync to detect stale plans.
                                  // Replaces the legacy u32 version counter.
+
+  // kvar wedge: per-dispatch runtime values for any symbolic-shape
+  // Variables bound to RANGE leaves in this kernel.  Sparse: each
+  // slot (kvar_runtime_ids[i], kvar_runtime_vals[i]) binds one var
+  // id to its current runtime value (e.g. BS=4 or BS=32).  The Metal
+  // encoder iterates over the kvars referenced by this kernel's
+  // scalar_uops in sorted-id order and looks up each id here; missing
+  // entries fall back to kvar_hi(id) so legacy / non-symbolic kernels
+  // keep working.  Caller stamps these before each dispatch.
+  u8         n_kvar_runtime;
+  u32        kvar_runtime_ids [KVAR_USED_CAP];
+  u32        kvar_runtime_vals[KVAR_USED_CAP];
 } KernelEntry;
 
 // KERNELS / KERNELS_NEXT now live in TContext (see below); the
@@ -1767,6 +1786,42 @@ fn Term term_ctr_at  (Term ctr_term, u32 i);
 // returns everything else unchanged.  Cheaper than wnf -- no
 // kernel / materialize / grad firing.
 fn Term term_resolve(Term t);
+
+// === schedule/kvar -- symbolic-shape Variable registry ============
+// A kvar represents a kernel-shape parameter (e.g. "BS") that should
+// flow through the schedule as a symbol rather than a concrete u32.
+// A RANGE leaf whose extent is bound to a kvar bakes the kvar id
+// into the MSL source (as `V_<name>`) and the actual numeric extent
+// gets bound as a `constant uint` kernel arg at dispatch time.  See
+// src/schedule/kvar.c for the full design notes.
+#define KVAR_FLAG_BIT 31u
+#define KVAR_FLAG     (1u << KVAR_FLAG_BIT)
+#define KVAR_ID_MASK  (KVAR_FLAG - 1u)
+// KVAR_USED_CAP is hoisted near `struct KernelEntry;` above so the
+// per-kernel binding tables can use it at type-definition time.
+//
+// These are PLAIN (non-`fn`) functions -- defined in
+// src/schedule/kvar.c -- because the Metal backend (a separate TU)
+// calls a few of them; `static inline` wouldn't link cross-TU.
+// `struct KernelEntry` is the same type as the `KernelEntry` typedef
+// further down (forward-decl + `typedef struct KernelEntry { ... }`),
+// used in the struct-tag form so the signatures compile before the
+// full body is seen.
+u32          kvar_alloc(const char *name, u32 lo, u32 hi);
+const char  *kvar_name(u32 id);
+u32          kvar_lo(u32 id);
+u32          kvar_hi(u32 id);
+u32          kvar_count(void);
+void         kvar_reset(void);
+u32          kvar_pack_extent(u32 var_id);
+int          kvar_extent_is_var(u32 packed_extent);
+u32          kvar_extent_var_id(u32 packed_extent);
+u32          kvar_extent_static(u32 packed_extent);
+u32          kvar_collect_from_dag(Term root, u32 *out_ids, u32 cap);
+u32          kvar_collect_from_scalar(ScalarUop const *arena, u32 n_arena,
+                                      u32 *out_ids, u32 cap);
+int          kernel_kvar_bind (struct KernelEntry *ke, u32 var_id, u32 value);
+u32          kernel_kvar_value(struct KernelEntry const *ke, u32 var_id);
 
 // === schedule ===
 // bufferize_classify walks the UOp DAG rooted at `root`, marks

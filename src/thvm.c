@@ -187,6 +187,10 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // so renderer + cg passes see the KpSchedule scheduling structure.
 // so they can call cg_profile_record / cg_now_us / cg_kernel_flops
 // + reference KDispatchKind enum constants.
+// kvar.c lives in src/schedule/ but is included here so the codegen
+// + Metal backend (both above the schedule/ include block) can call
+// kvar_extent_is_var / kvar_collect_from_dag without forward decls.
+#include "schedule/kvar.c"
 #include "codegen/axis.c"
 #include "codegen/apply_opt.c"
 #include "codegen/propose.c"
