@@ -156,6 +156,21 @@ typedef struct {
   ApplyOptDagSubMemoEntry memo[APPLY_OPT_DAG_SUB_MEMO_CAP];
   u32 memo_n;
   ApplyOptDagSplitCtx const *map;
+  // UOP_REDUCE.axis fix-up: the substitution map only rewrites
+  // UOP_RANGE *leaves*, but a REDUCE node names its reduce axis by a
+  // bare integer in heap slot +2.  When an axis split shifts every
+  // axis_id > target right by one (KOP_UPCAST/UNROLL/LOCAL/GROUP), the
+  // REDUCE's axis must follow suit or the renderer's reduce-range
+  // matcher (rmu_split_reduce) stops finding it and falls back to the
+  // generic-store path -> the UPCAST'd inner axis gets mistaken for
+  // the reduce loop -> MSL "use of undeclared identifier".
+  //   reduce_shift_above == 0xFFFFFFFFu  -> no shift (SWAP / standalone)
+  //   else                               -> red_axis > thr ? red_axis+1
+  u32 reduce_shift_above;
+  // SWAP: also re-map a REDUCE whose axis equals one of the swapped
+  // positions (sentinel 0xFFFFFFFFu when unused).
+  u32 reduce_swap_a;
+  u32 reduce_swap_b;
 } ApplyOptDagSubState;
 
 static int apply_opt_dag_sub_memo_lookup(ApplyOptDagSubState *st, Term t,
@@ -192,6 +207,28 @@ static Term apply_opt_dag_sub_uncached(Term t, ApplyOptDagSubState *st) {
     Term new_tgt = apply_opt_dag_substitute(tgt, st);
     if (new_tgt == tgt) return t;
     return uop_opt(new_tgt, uop_opt_kind(t), uop_opt_factor(t));
+  }
+  if (op == UOP_REDUCE) {
+    // Rebuild with the (possibly remapped) reduce axis -- see the
+    // long comment on ApplyOptDagSubState.reduce_shift_above.
+    u64 rloc     = term_val(t);
+    u32 kind     = (u32)term_val(heap_read(rloc + 1));
+    u32 red_axis = (u32)term_val(heap_read(rloc + 2));
+    u32 new_axis = red_axis;
+    if (st->reduce_shift_above != 0xFFFFFFFFu
+        && red_axis > st->reduce_shift_above) {
+      new_axis = red_axis + 1;
+    }
+    if (st->reduce_swap_a != 0xFFFFFFFFu) {
+      if (red_axis == st->reduce_swap_a)      new_axis = st->reduce_swap_b;
+      else if (red_axis == st->reduce_swap_b) new_axis = st->reduce_swap_a;
+    }
+    Term old_src = heap_read(rloc + 0);
+    Term new_src = (term_tag(old_src) == TAG_UOP)
+                   ? apply_opt_dag_substitute(old_src, st)
+                   : old_src;
+    if (new_src == old_src && new_axis == red_axis) return t;
+    return uop_reduce(kind, new_axis, new_src);
   }
   u8 ar = uop_arity(op);
   if (ar == 0) return t;
@@ -350,8 +387,11 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   }
 
   ApplyOptDagSubState st;
-  st.memo_n = 0;
-  st.map    = &ctx;
+  st.memo_n            = 0;
+  st.map               = &ctx;
+  st.reduce_shift_above = target_axis;     // red_axis > target -> +1
+  st.reduce_swap_a     = 0xFFFFFFFFu;
+  st.reduce_swap_b     = 0xFFFFFFFFu;
   return apply_opt_dag_substitute(root, &st);
 }
 
@@ -383,8 +423,11 @@ fn Term uop_dag_apply_swap(Term root, u32 axis_a, u32 axis_b) {
   }
   if (ctx.n == 0) return root;
   ApplyOptDagSubState st;
-  st.memo_n = 0;
-  st.map    = &ctx;
+  st.memo_n            = 0;
+  st.map               = &ctx;
+  st.reduce_shift_above = 0xFFFFFFFFu;     // no +1 shift on swap
+  st.reduce_swap_a     = axis_a;           // but follow the swap
+  st.reduce_swap_b     = axis_b;
   return apply_opt_dag_substitute(root, &st);
 }
 

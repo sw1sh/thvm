@@ -253,8 +253,6 @@ static void test_apply_split_upcast_splits_axis(void) {
   // 1, KAX_UPCAST, extent 4).  Also verify shifted ranges exist.
   Term ranges[16]; u32 n = 0;
   rmu_collect_ranges(heap_read(term_val(r) + 1), ranges, &n);  // c_addr
-  Term value_ranges[16]; u32 nv = 0;
-  rmu_collect_ranges(heap_read(term_val(r) + 2), value_ranges, &nv);
   int saw_outer = 0, saw_n_shifted = 0;
   for (u32 i = 0; i < n; i++) {
     u32 aid = uop_range_axis_id(ranges[i]);
@@ -264,6 +262,28 @@ static void test_apply_split_upcast_splits_axis(void) {
   }
   CHECK(saw_outer);
   CHECK(saw_n_shifted);
+
+  // The K reduce axis (originally 2, > target 0) shifts to 3, and the
+  // UOP_REDUCE node's `axis` field must follow -- otherwise the
+  // renderer's reduce-range matcher (rmu_split_reduce) stops finding
+  // it.  Find the REDUCE node and check its axis.
+  Term value = heap_read(term_val(r) + 2);
+  if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT) {
+    value = uop_opt_target(value);
+  }
+  CHECK(term_tag(value) == TAG_UOP && term_ext(value) == UOP_REDUCE);
+  CHECK_EQ((u32)term_val(heap_read(term_val(value) + 2)), 3u);
+  // And the actual K range leaf is now axis 3, KAX_REDUCE, extent 32.
+  Term body = heap_read(term_val(value) + 0);
+  Term value_ranges[16]; u32 nv = 0;
+  rmu_collect_ranges(body, value_ranges, &nv);
+  int saw_k_shifted = 0;
+  for (u32 i = 0; i < nv; i++) {
+    if (uop_range_axis_id(value_ranges[i]) == 3
+        && uop_range_axis_type(value_ranges[i]) == KAX_REDUCE
+        && uop_range_extent(value_ranges[i]) == 32) saw_k_shifted = 1;
+  }
+  CHECK(saw_k_shifted);
 }
 
 static void test_apply_split_local_no_opt_wrap(void) {
@@ -344,6 +364,17 @@ static void test_apply_swap_noop_when_axes_equal(void) {
   Term root = build_matmul_root(NULL, NULL, NULL);
   Term r = uop_dag_apply_swap(root, 0, 0);
   CHECK(r == root);
+}
+
+static void test_apply_swap_follows_reduce_axis(void) {
+  // Swapping the K reduce axis (2) with the N axis (1) must also
+  // re-map the UOP_REDUCE node's `axis` field to 1.
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  Term r = uop_dag_apply_swap(root, 1, 2);
+  CHECK(r != 0 && r != root);
+  Term value = heap_read(term_val(r) + 2);
+  CHECK(term_tag(value) == TAG_UOP && term_ext(value) == UOP_REDUCE);
+  CHECK_EQ((u32)term_val(heap_read(term_val(value) + 2)), 1u);
 }
 
 // === KOP_FAST_MATH DAG mutation =======================================
@@ -668,6 +699,7 @@ int main(void) {
   TEST_BEGIN("apply_split_unroll_wraps_inner_opt"); test_apply_split_unroll_wraps_inner_opt();
   TEST_BEGIN("apply_swap_axes");                   test_apply_swap_axes();
   TEST_BEGIN("apply_swap_noop_when_axes_equal");   test_apply_swap_noop_when_axes_equal();
+  TEST_BEGIN("apply_swap_follows_reduce_axis");    test_apply_swap_follows_reduce_axis();
 
   TEST_BEGIN("apply_fast_math_exp2");              test_apply_fast_math_exp2();
   TEST_BEGIN("apply_fast_math_log2");              test_apply_fast_math_log2();
