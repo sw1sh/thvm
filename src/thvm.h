@@ -1651,6 +1651,8 @@ fn void                multi_trace_reset(void);
 fn void                multi_trace_free(void);
 fn u64                 multi_trace_count(void);
 fn const MultiEvent  * multi_trace_get(u64 i);
+fn const char        * multi_rule_name(u8 r);
+fn const char        * multi_family_name(u8 f);
 #else
 #define multi_emit(rule, family, term_a, term_b, delta_label) ((void)0)
 #endif

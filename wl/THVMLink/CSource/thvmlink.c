@@ -533,6 +533,168 @@ EXTERN_C DLLEXPORT int thvm_wl_hot_counters_reset(WolframLibraryData libData, mi
   return LIBRARY_NO_ERROR;
 }
 
+// === multicomputation reduction trace ===
+// WL surface for the MultiEvent log (src/instrument/multi.c, gated by
+// THVM_TRACE -- which the WL dylib *is* built with; see the Makefile).
+// thvm_wl_multi_trace_supported returns 1 in a trace build, 0 in the
+// stub build below so the WL side (Multicomputation.wl) can degrade
+// gracefully.  Event rows are {id, rule, family, term_a, term_b,
+// delta_label}; thvm_wl_multi_trace_snapshot returns the whole log as
+// a {Integer, 2} MTensor (n x 6).  Names come from
+// thvm_wl_multi_rule_name / thvm_wl_multi_family_name (the C side owns
+// the RULE_* / MULTI_* -> string tables).
+#ifdef THVM_TRACE
+
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_supported(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_init(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  multi_trace_init((u64)MArgument_getInteger(args[0]));   // 0 -> default cap
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_reset(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  multi_trace_reset();
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_free(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  multi_trace_free();
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// Set the per-context runtime flag (0 = off, 1 = recording).
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_set(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  CURRENT_CTX->trace = (u8)(MArgument_getInteger(args[0]) != 0);
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_count(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, (mint)multi_trace_count());
+  return LIBRARY_NO_ERROR;
+}
+
+// {Integer, 2} MTensor, one row per event: {id, rule, family,
+// term_a, term_b, delta_label}.
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_snapshot(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  u64  n = multi_trace_count();
+  MTensor out;
+  mint dims[2] = { (mint)n, 6 };
+  int err = libData->MTensor_new(MType_Integer, 2, dims, &out);
+  if (err != LIBRARY_NO_ERROR) return err;
+  mint *dst = libData->MTensor_getIntegerData(out);
+  for (u64 i = 0; i < n; i++) {
+    const MultiEvent *e = multi_trace_get(i);
+    dst[6*i + 0] = (mint)e->id;
+    dst[6*i + 1] = (mint)e->rule;
+    dst[6*i + 2] = (mint)e->family;
+    dst[6*i + 3] = (mint)e->term_a;
+    dst[6*i + 4] = (mint)e->term_b;
+    dst[6*i + 5] = (mint)e->delta_label;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_multi_rule_name(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  MArgument_setUTF8String(res, (char *)multi_rule_name((u8)MArgument_getInteger(args[0])));
+  return LIBRARY_NO_ERROR;
+}
+
+EXTERN_C DLLEXPORT int thvm_wl_multi_family_name(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc;
+  MArgument_setUTF8String(res, (char *)multi_family_name((u8)MArgument_getInteger(args[0])));
+  return LIBRARY_NO_ERROR;
+}
+
+#else  // !THVM_TRACE -- stubs so the dylib still links and the WL
+       // surface reports "trace not compiled in" instead of failing
+       // to load.
+
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_supported(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_init(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_reset(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_free(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_set(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_count(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_trace_snapshot(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  MTensor out;
+  mint dims[2] = { 0, 6 };
+  int err = libData->MTensor_new(MType_Integer, 2, dims, &out);
+  if (err != LIBRARY_NO_ERROR) return err;
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_rule_name(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setUTF8String(res, (char *)"RULE?");
+  return LIBRARY_NO_ERROR;
+}
+EXTERN_C DLLEXPORT int thvm_wl_multi_family_name(WolframLibraryData libData,
+        mint argc, MArgument *args, MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setUTF8String(res, (char *)"FAMILY?");
+  return LIBRARY_NO_ERROR;
+}
+
+#endif // THVM_TRACE
+
 // === redex enumeration / single-redex firing ===
 // Pattern matches TStack: snapshot into a static buffer, then expose
 // length + indexed get.  thvm_wl_redex_snapshot takes a single root

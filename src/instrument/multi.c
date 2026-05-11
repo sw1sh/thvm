@@ -25,6 +25,85 @@
 
 #define MULTI_TRACE_INITIAL_CAP 256
 
+// Symbolic names for the RULE_* / MULTI_* enum codes (src/thvm.h),
+// used by the WL surface to render a readable trace.  Designated
+// initializers index by the enum constant, so adding a `#define
+// RULE_FOO N` without a `[RULE_FOO] = "FOO"` entry leaves the slot
+// NULL -- multi_rule_name then returns "RULE?" rather than silently
+// returning a wrong name.  No order-coupling to maintain.
+static const char *const MULTI_RULE_NAMES[] = {
+    [RULE_APP_LAM]       = "APP_LAM",
+    [RULE_APP_ERA]       = "APP_ERA",
+    [RULE_APP_SUP]       = "APP_SUP",
+    [RULE_APP_BRI]       = "APP_BRI",
+    [RULE_APP_PRI]       = "APP_PRI",
+    [RULE_APP_MAT_SUP]   = "APP_MAT_SUP",
+    [RULE_ANN_LAM]       = "ANN_LAM",
+    [RULE_ANN_BRI]       = "ANN_BRI",
+    [RULE_DUP_LAM]       = "DUP_LAM",
+    [RULE_DUP_BRI]       = "DUP_BRI",
+    [RULE_DUP_CTR]       = "DUP_CTR",
+    [RULE_DUP_APP]       = "DUP_APP",
+    [RULE_DUP_MAT]       = "DUP_MAT",
+    [RULE_DUP_OP2]       = "DUP_OP2",
+    [RULE_DUP_ERA]       = "DUP_ERA",
+    [RULE_DUP_NUM]       = "DUP_NUM",
+    [RULE_DUP_TEN]       = "DUP_TEN",
+    [RULE_DUP_UOP]       = "DUP_UOP",
+    [RULE_DUP_ANY]       = "DUP_ANY",
+    [RULE_DUP_SUP_ANN]   = "DUP_SUP_ANN",
+    [RULE_DUP_SUP_COM]   = "DUP_SUP_COM",
+    [RULE_OP2_SUP]       = "OP2_SUP",
+    [RULE_OP2_NUM_SUP]   = "OP2_NUM_SUP",
+    [RULE_DSU_NUM]       = "DSU_NUM",
+    [RULE_DSU_SUP]       = "DSU_SUP",
+    [RULE_DSU_ERA]       = "DSU_ERA",
+    [RULE_DDU_NUM]       = "DDU_NUM",
+    [RULE_DDU_SUP]       = "DDU_SUP",
+    [RULE_DDU_ERA]       = "DDU_ERA",
+    [RULE_UOP_ASSIGN]    = "UOP_ASSIGN",
+    [RULE_UOP_KERNEL]    = "UOP_KERNEL",
+    [RULE_GRAD_FWD]      = "GRAD_FWD",
+    [RULE_GRAD_BWD]      = "GRAD_BWD",
+    [RULE_MAT_DISPATCH]  = "MAT_DISPATCH",
+    [RULE_OP2_NUM_NUM]   = "OP2_NUM_NUM",
+    [RULE_EQL_NUM]       = "EQL_NUM",
+    [RULE_EQL_ERA]       = "EQL_ERA",
+    [RULE_EQL_ANY]       = "EQL_ANY",
+    [RULE_EQL_SUP]       = "EQL_SUP",
+    [RULE_AND_NUM]       = "AND_NUM",
+    [RULE_AND_ERA]       = "AND_ERA",
+    [RULE_AND_SUP]       = "AND_SUP",
+    [RULE_OR_NUM]        = "OR_NUM",
+    [RULE_OR_ERA]        = "OR_ERA",
+    [RULE_OR_SUP]        = "OR_SUP",
+    [RULE_WHEN_NUM]      = "WHEN_NUM",
+    [RULE_WHEN_ERA]      = "WHEN_ERA",
+    [RULE_WHEN_SUP]      = "WHEN_SUP",
+};
+
+static const char *const MULTI_FAMILY_NAMES[] = {
+    [MULTI_TERM]  = "TERM",
+    [MULTI_SLIDE] = "SLIDE",
+    [MULTI_FORK]  = "FORK",
+    [MULTI_SPLIT] = "SPLIT",
+    [MULTI_MERGE] = "MERGE",
+    [MULTI_PRUNE] = "PRUNE",
+    [MULTI_PLUMB] = "PLUMB",
+};
+
+fn const char *multi_rule_name(u8 r) {
+    if (r < (sizeof(MULTI_RULE_NAMES) / sizeof(MULTI_RULE_NAMES[0]))
+        && MULTI_RULE_NAMES[r]) return MULTI_RULE_NAMES[r];
+    return "RULE?";
+}
+
+fn const char *multi_family_name(u8 f) {
+    if (f < (sizeof(MULTI_FAMILY_NAMES) / sizeof(MULTI_FAMILY_NAMES[0]))
+        && MULTI_FAMILY_NAMES[f]) return MULTI_FAMILY_NAMES[f];
+    return "FAMILY?";
+}
+
 // Append-one helper.  Doubles on overflow.  Returns a pointer to the
 // just-pushed slot; never NULL (calls abort() on calloc failure --
 // trace mode is a debugger / visualiser, not a production path).

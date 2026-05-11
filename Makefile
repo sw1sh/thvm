@@ -183,6 +183,18 @@ WL_SRC_ATP  := $(WL_PACLET)/CSource/thvmlink_atp.c
 $(WL_LIB_DIR):
 	@mkdir -p $@
 
+# WL_TRACE=1 builds the trace-enabled variant of the dylib (so
+# TMulticompTrace works -- see wl/THVMLink/Kernel/Multicomputation.wl).
+# OPT-IN, not the default: -DTHVM_TRACE grows TContext, so it must
+# agree across every TU that *shares* a TContext.  The trace fields
+# sit at the END of the struct, so backend_metal.o (built without it)
+# is fine -- it only touches fields before them.  AOT modules dlopen'd
+# by this dylib pick up -DTHVM_TRACE automatically (src/aot/build.c
+# reads `#ifdef THVM_TRACE`).  The default `make wl` is unchanged --
+# byte-identical hot path.  (C test binaries never get -DTHVM_TRACE;
+# bin/test_multi_trace_on adds it explicitly, on its own.)
+WL_TRACE_DEF := $(if $(WL_TRACE),-DTHVM_TRACE,)
+
 $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) build/thvm_runtime_blob.c | $(WL_LIB_DIR)
 	@if [ -z "$(WOLFRAM_APP)" ] || [ ! -d "$(WL_INCLUDE)" ]; then \
 	  echo "ERROR: Wolfram install not found.  Set WOLFRAM_APP=/Applications/Wolfram*.app"; \
@@ -190,6 +202,7 @@ $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) build/th
 	fi
 	$(CC) $(CFLAGS) -fPIC $(WL_DYLIB_FLAGS) \
 	  -DACCELERATE_NEW_LAPACK \
+	  $(WL_TRACE_DEF) \
 	  -I"$(WL_INCLUDE)" \
 	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
 	  -o $@ $(WL_SRC) build/thvm_runtime_blob.c $(METAL_OBJ) $(METAL_LDFLAGS) \

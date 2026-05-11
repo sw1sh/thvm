@@ -375,6 +375,20 @@ $itrsFn         := $itrsFn         = load["thvm_wl_itrs",           {},         
 $hotCountersFn      := $hotCountersFn      = load["thvm_wl_hot_counters",       {}, {Integer, 1}];
 $hotCountersResetFn := $hotCountersResetFn = load["thvm_wl_hot_counters_reset", {}, Integer];
 
+(* multicomputation reduction trace (Multicomputation.wl owns the
+   surface).  Present in every standard `make wl` dylib (built with
+   -DTHVM_TRACE); a custom trace-free build has stub versions, and
+   $multiTraceSupportedFn[] reports 0. *)
+$multiTraceSupportedFn := $multiTraceSupportedFn = load["thvm_wl_multi_trace_supported", {},        Integer];
+$multiTraceInitFn      := $multiTraceInitFn      = load["thvm_wl_multi_trace_init",      {Integer}, Integer];
+$multiTraceResetFn     := $multiTraceResetFn     = load["thvm_wl_multi_trace_reset",     {},        Integer];
+$multiTraceFreeFn      := $multiTraceFreeFn      = load["thvm_wl_multi_trace_free",      {},        Integer];
+$multiTraceSetFn       := $multiTraceSetFn       = load["thvm_wl_multi_trace_set",       {Integer}, Integer];
+$multiTraceCountFn     := $multiTraceCountFn     = load["thvm_wl_multi_trace_count",     {},        Integer];
+$multiTraceSnapshotFn  := $multiTraceSnapshotFn  = load["thvm_wl_multi_trace_snapshot",  {},        {Integer, 2}];
+$multiRuleNameFn       := $multiRuleNameFn       = load["thvm_wl_multi_rule_name",       {Integer}, "UTF8String"];
+$multiFamilyNameFn     := $multiFamilyNameFn     = load["thvm_wl_multi_family_name",     {Integer}, "UTF8String"];
+
 (* tensor *)
 $tensorAllocFn   := $tensorAllocFn   = load["thvm_wl_tensor_alloc",   {Integer, {Integer, 1}}, Integer];
 $tensorWriteFn   := $tensorWriteFn   = load["thvm_wl_tensor_write",   {Integer, {Real, 1}},    Integer];

@@ -206,8 +206,14 @@ fn char *thvm_aot_compile_to_dylib(u32 def_id, const char *name) {
 
   // Cache key: name + wrapped-source content hash.  Putting the
   // hash in the filename lets us skip clang when the same source
-  // would have produced the same dylib.
+  // would have produced the same dylib.  THVM_TRACE flips a bit of
+  // the hash so a trace-built host and a trace-free host never share
+  // a cached module (their TContext layouts differ -- loading the
+  // wrong one would corrupt the heap).
   u64 hash = aot_fnv1a64(wrapped);
+#ifdef THVM_TRACE
+  hash ^= 0x5452414345ULL;  /* "TRACE" */
+#endif
 
   char src_path[512], dyl_path[512];
   snprintf(src_path, sizeof src_path,
@@ -247,12 +253,21 @@ fn char *thvm_aot_compile_to_dylib(u32 def_id, const char *name) {
                              "-Wl,--unresolved-symbols=ignore-in-object-files";
 #endif
 
+  // If the host (this dylib / runtime) was built with -DTHVM_TRACE,
+  // the AOT module must be too -- it shares TContext with us, and the
+  // trace fields change its size.  Picked up here at compile time so
+  // the two views always agree.
+#ifdef THVM_TRACE
+  static const char *trace_def = "-DTHVM_TRACE ";
+#else
+  static const char *trace_def = "";
+#endif
   char cmd[2048];
   snprintf(cmd, sizeof cmd,
     "clang -O2 -fPIC -std=c11 -Wno-everything "
-    "-DACCELERATE_NEW_LAPACK -DTHVM_HAS_WL_BRIDGE %s "
+    "-DACCELERATE_NEW_LAPACK -DTHVM_HAS_WL_BRIDGE %s%s "
     "-o '%s' '%s' 2>&1",
-    dylib_flags, dyl_path, src_path);
+    trace_def, dylib_flags, dyl_path, src_path);
 
   FILE *p = popen(cmd, "r");
   if (!p) return NULL;

@@ -1,15 +1,18 @@
 # Multicomputation trace -- a branch-cylinder-tagged token-event log
 
-Status: **M0 trace coverage is complete** -- every dedicated
-`interact_*` rule (30 rules / 32 emit sites) *and* every inline
-`ITRS++` site in `src/wnf/_.c` (21 sites / 17 rules: OP2-NUM-NUM
-literal fold, MAT/SWI dispatch, EQL/AND/OR/WHEN per-tag cases, the
-two grad-cell projections) are wired, with the compile-time / runtime
-gating discipline intact (default-build `_wnf` byte-identical to
-pre-trace, verified) and a cross-family C-side test (45 trace-build
-assertions / 2 default-build).  Still open: the inline `ITRS++` in
-`src/wnf/redex.c` (the parallel-pool / `TInteract` per-redex driver),
-the WL surface, and M1-M4.  See [M0 spike outcome](#m0-spike-outcome)
+Status: **M0 trace coverage + WL surface are complete.**  Every
+dedicated `interact_*` rule (30 rules / 32 emit sites) *and* every
+inline `ITRS++` site in `src/wnf/_.c` (21 sites / 17 rules:
+OP2-NUM-NUM literal fold, MAT/SWI dispatch, EQL/AND/OR/WHEN per-tag
+cases, the two grad-cell projections) emit `MultiEvent`s; the
+label-collision spurious-`MULTI_MERGE` failure mode is validated; and
+`TMulticompTrace[expr]` is exposed from WL (opt-in trace dylib:
+`make WL_TRACE=1 wl`).  The compile-time / runtime gating discipline
+is intact -- default-build `_wnf` byte-identical to pre-trace, default
+`make wl` has zero `multi_emit_body` symbols.  Still open: the inline
+`ITRS++` in `src/wnf/redex.c` (the parallel-pool / `TInteract`
+per-redex driver), and M1-M4 (wire provenance / causal graph; branch
+tree; cylinders; foliations).  See [M0 spike outcome](#m0-spike-outcome)
 and the [rule-coverage table](#101-rule-coverage-as-of-this-commit)
 below.  Conceptual companion:
 [docs/multicomputation.md](../multicomputation.md) reads the
@@ -687,13 +690,34 @@ already-wired `interact_*` functions, but a handful are inline like
    "supposed to be independent" -- that's branch-tree metadata, M2.
    (Still optional: wire `src/wnf/redex.c`'s inline `ITRS++` so the
    parallel-pool / `TInteract` path is covered too.)
-2. **WL surface.**  Add `thvm_wl_multi_trace_*` LibraryLink wrappers
-   to [wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)
-   mirroring the `thvm_wl_hot_counters_*` pattern, and a new module
-   `wl/THVMLink/Kernel/Multicomputation.wl` with `TMulticompTrace[expr]`
-   that snapshots `EVENTS[]` into a list of associations.  Requires
-   the WL bridge to be built with `-DTHVM_TRACE` (separate dylib
-   variant -- mirroring how the metal bridge is conditionally built).
+2. ~~**WL surface.**~~ **Done.**
+   [wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)
+   gains a `#ifdef THVM_TRACE` block of `thvm_wl_multi_trace_*`
+   wrappers (init / reset / free / set / count / snapshot, plus
+   `multi_rule_name` / `multi_family_name` -- the C side in
+   [src/instrument/multi.c](../../src/instrument/multi.c) owns the
+   `RULE_*` / `MULTI_*` -> string tables, designated-initializer
+   indexed so they can't drift) and `#else` stubs (so a trace-free
+   dylib still links, with `thvm_wl_multi_trace_supported` -> 0).
+   [wl/THVMLink/Kernel/Multicomputation.wl](../../wl/THVMLink/Kernel/Multicomputation.wl)
+   owns `TMulticompTrace[expr]` (HoldFirst: recording on, eval,
+   recording off, snapshot -> `<|"Result" -> value, "Trace" ->
+   {<|"id", "rule", "ruleCode", "family", "familyCode", "termA",
+   "termB", "deltaLabel"|>, ...}|>`) and `TMulticompTraceQ[]`.  Test:
+   [wl/THVMLink/Tests/multicomputation.wlt](../../wl/THVMLink/Tests/multicomputation.wlt)
+   (4 tests; skips with 0-tests, not failures, under a trace-free
+   dylib).  **The trace dylib is OPT-IN: `make WL_TRACE=1 wl`.**  The
+   default `make wl` is byte-identical to before -- no `-DTHVM_TRACE`,
+   Metal enabled, hot path untouched, `nm` shows zero
+   `multi_emit_body`.  `-DTHVM_TRACE` grows `TContext` (the new fields
+   sit at the end, so `backend_metal.o`, built without it, is fine --
+   it only touches earlier fields); AOT modules dlopen'd by a trace
+   dylib pick up `-DTHVM_TRACE` automatically via
+   [src/aot/build.c](../../src/aot/build.c)'s `#ifdef`, and the AOT
+   cache key flips a bit so trace / non-trace modules never collide.
+   (Aside: `aot.wlt` segfaults around test ~11 even under a *clean*
+   default dylib -- a pre-existing issue, unrelated; the AOT C tests
+   `test_aot_*` all pass.)
 3. **M1: wire provenance.**  Add `wire_prov[]` to `TContext`,
    `WIRE_PROV_BUMP(loc)` macro at every `heap_set` / `heap_alloc`
    site, populate `consumed[]` / `produced[]` on `MultiEvent`.
