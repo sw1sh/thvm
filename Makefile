@@ -129,6 +129,7 @@ ifeq ($(shell uname -s),Darwin)
   METAL_DEFINES  := -DTHVM_METAL_METALLIB='"$(METAL_LIBPATH)"'
   TESTS          += $(BIN)/test_metal_real
   TESTS          += $(BIN)/test_metal_pso_cache
+  TESTS          += $(BIN)/test_metal_variable_pso_hit
   TESTS          += $(BIN)/test_aot_metal
   TESTS          += $(BIN)/test_aot_metal_run
 else
@@ -269,6 +270,9 @@ $(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) $(METAL_LIBP
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 
 $(BIN)/test_metal_pso_cache: tests/test_metal_pso_cache.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+
+$(BIN)/test_metal_variable_pso_hit: tests/test_metal_variable_pso_hit.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 
 $(BIN)/test_aot_metal: tests/test_aot_metal.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
