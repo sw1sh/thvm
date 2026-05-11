@@ -2666,6 +2666,27 @@ u32 uop_dag_reduce_axis_extent(Term root);
 // propose_metal_reduce_unroll_kernel's KProgOp gate).
 int uop_dag_is_reduce_unroll_kernel(Term root);
 
+// Enumerate the distinct UOP_RANGE leaves of the DAG rooted at `root`,
+// ordered by ascending axis_id; writes (axis_id, axis_type, extent)
+// triples to the parallel out_* arrays.  Returns the count (clipped to
+// `cap`).  Used by kernel_hand_coded_opts to inspect the current axis
+// structure between kernel_apply_opt mutations.
+u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
+                         u32 *out_extent, u32 cap);
+
+// Apply tinygrad's hand_coded_optimizations heuristic to a finalized
+// kernel: inspects shape/dtype and applies a sensible sequence of
+// KOpts via kernel_apply_opt (TC -> UPCAST -> LOCAL -> GROUP ->
+// UNROLL).  Idempotent: marks ke->schedule->autotuned so it doesn't
+// re-run.  Gated behind THVM_HAND_CODED_OPTS (see hand_opts.c).
+// Returns the number of opts successfully applied.
+fn u32 kernel_hand_coded_opts(struct KernelEntry *ke);
+
+// Should this kernel get the hand-coded opt heuristic on its next
+// fire?  True iff the env opt-in is on (default ON; THVM_HAND_CODED
+// _OPTS=0 disables) AND the per-shape autotuned flag is still 0.
+fn int kernel_should_hand_code_opts(struct KernelEntry const *ke);
+
 // === Slice 5 decode shims (Metal-TU-callable) =========================
 // Thin external-linkage wrappers over heap_read / term_* / UOp
 // predicates so the Metal backend (separate TU) can walk a DAG without

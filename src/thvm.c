@@ -266,6 +266,10 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/apply_opt.c"
 #include "uop/apply_opt_dag.c"
 #include "uop/dag_scan.c"
+// codegen/hand_opts.c -- tinygrad's hand_coded_optimizations port.
+// Needs kernel_apply_opt (codegen/apply_opt.c) + the DAG axis
+// scanners (uop/dag_scan.c) above, so it lands here.
+#include "codegen/hand_opts.c"
 
 // === scalar/ ===
 // Per-kernel ScalarUop[] simplification harness (Phase 2 of the

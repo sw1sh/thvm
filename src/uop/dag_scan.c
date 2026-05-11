@@ -1757,3 +1757,74 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   (void)ke;
   return 1;
 }
+
+// === Hand-coded-opts helper: DAG axis enumeration ====================
+// Walk the DAG rooted at `root` and collect every distinct UOP_RANGE
+// leaf, ordered by ascending axis_id.  Writes (axis_id, axis_type,
+// extent) triples into the parallel out_* arrays.  Returns the count
+// (clipped to `cap`); 0 if `root` is 0 / not a UOp / no ranges.
+//
+// Used by kernel_hand_coded_opts (src/codegen/hand_opts.c) to inspect
+// the current axis structure of a lifted kernel between successive
+// kernel_apply_opt calls (each apply mutates the DAG, so the axis list
+// must be re-queried).  Mirrors `apply_opt_dag_collect_ranges` in
+// uop/apply_opt_dag.c but de-dups + sorts by axis_id and exposes the
+// decoded fields rather than the raw Terms.
+u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
+                         u32 *out_extent, u32 cap) {
+  if (root == 0 || term_tag(root) != TAG_UOP || cap == 0) return 0;
+  Term stack[512];
+  u32  sp = 0;
+  stack[sp++] = root;
+  // Collect distinct RANGE terms (dedup by axis_id; the lifter emits
+  // one RANGE per axis_id and apply_opt rebuilds them, so axis_id is a
+  // safe identity here -- two RANGEs with the same axis_id but
+  // different extent shouldn't co-exist in a well-formed DAG).
+  u32 n = 0;
+  while (sp > 0) {
+    Term t = stack[--sp];
+    if (term_tag(t) != TAG_UOP) continue;
+    u32 op = term_ext(t);
+    if (op == UOP_RANGE) {
+      u32 aid  = uop_range_axis_id(t);
+      u32 at   = uop_range_axis_type(t);
+      u32 ext  = uop_range_extent(t);
+      int seen = 0;
+      for (u32 i = 0; i < n; i++) if (out_axis_id[i] == aid) { seen = 1; break; }
+      if (!seen && n < cap) {
+        out_axis_id[n]   = aid;
+        out_axis_type[n] = at;
+        out_extent[n]    = ext;
+        n++;
+      }
+      continue;
+    }
+    if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) continue;
+    if (op == UOP_OPT) {
+      Term tgt = uop_opt_target(t);
+      if (term_tag(tgt) == TAG_UOP && sp < 512) stack[sp++] = tgt;
+      continue;
+    }
+    u8 ar = uop_arity(op);
+    u64 loc = term_val(t);
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 512; i++) {
+      Term child = heap_read(loc + i);
+      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    }
+  }
+  // Insertion-sort by axis_id (n is tiny -- <= MAX_AXES).
+  for (u32 i = 1; i < n; i++) {
+    u32 aid = out_axis_id[i], at = out_axis_type[i], ext = out_extent[i];
+    i32 j = (i32)i - 1;
+    while (j >= 0 && out_axis_id[j] > aid) {
+      out_axis_id[j + 1]   = out_axis_id[j];
+      out_axis_type[j + 1] = out_axis_type[j];
+      out_extent[j + 1]    = out_extent[j];
+      j--;
+    }
+    out_axis_id[j + 1]   = aid;
+    out_axis_type[j + 1] = at;
+    out_extent[j + 1]    = ext;
+  }
+  return n;
+}
