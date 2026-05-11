@@ -741,6 +741,58 @@ int main(void) {
     free(cx); free(cw); free(cref); free(ccpu); free(cgpu);
   }
 
+  // === Dual-UPCAST 4D-output conv parity (cOut + wOut both UPCAST'd) ===
+  // Sized so hand_opts fires BOTH UPCASTs (tileable gate K>=256, wOut>=16
+  // both met): cOut=16 -> UPCAST=8 (outer=2), wOut=20 -> UPCAST=2 then
+  // LOCAL=10 on the outer half.  Drives rmu_emit_conv's multi-axis UPCAST
+  // emit (8*2 = 16 straight-line accumulators inside the reduce nest).
+  // MSL must compile and GPU output must equal CPU reference bit-tight.
+  TEST_BEGIN("metal-real/conv-dual-upcast-parity");
+  {
+    enum { DB = 2, DCIN = 16, DCOUT = 16, DH = 24, DW = 24, DKH = 5, DKW = 5 };
+    enum { DHO = DH - DKH + 1, DWO = DW - DKW + 1 };  // 20 x 20
+    enum { DK = DCIN * DKH * DKW };                    // 400
+    enum { DXN = DB * DCIN * DH * DW, DWN = DCOUT * DCIN * DKH * DKW };
+    enum { DON = DCOUT * DB * DHO * DWO };             // 32*2*20*20 = 25600
+    f32 *dx = malloc((size_t)DXN * sizeof(f32));
+    f32 *dw = malloc((size_t)DWN * sizeof(f32));
+    for (u32 i = 0; i < (u32)DXN; i++) dx[i] = (f32)((i * 11 + 5) % 19) * 0.09f - 0.85f;
+    for (u32 i = 0; i < (u32)DWN; i++) dw[i] = (f32)((i * 3 + 2) % 11) * 0.05f - 0.27f;
+    f32 *dref = calloc((size_t)DON, sizeof(f32));
+    for (u32 co = 0; co < DCOUT; co++)
+    for (u32 b = 0; b < DB; b++)
+    for (u32 oh = 0; oh < DHO; oh++)
+    for (u32 ow = 0; ow < DWO; ow++) {
+      f32 acc = 0.0f;
+      for (u32 ci = 0; ci < DCIN; ci++)
+      for (u32 kh = 0; kh < DKH; kh++)
+      for (u32 kw = 0; kw < DKW; kw++)
+        acc += dw[((co*DCIN + ci)*DKH + kh)*DKW + kw]
+             * dx[((b*DCIN + ci)*DH + (oh+kh))*DW + (ow+kw)];
+      dref[((co*DB + b)*DHO + oh)*DWO + ow] = acc;
+    }
+    f32 *dcpu = calloc((size_t)DON, sizeof(f32));
+    f32 *dgpu = calloc((size_t)DON, sizeof(f32));
+
+    #define DUAL_CONV_BUILD_AND_RUN(out_buf)                                        do {                                                                            Shape sx_ = {0}; sx_.ndim = 4; sx_.dims[0] = DB; sx_.dims[1] = DCIN;           sx_.dims[2] = DH; sx_.dims[3] = DW;                                           Shape sw_ = {0}; sw_.ndim = 4; sw_.dims[0] = DCOUT; sw_.dims[1] = DCIN;        sw_.dims[2] = DKH; sw_.dims[3] = DKW;                                         u32 txid = tensor_alloc(CURRENT_BACKEND, sx_, DT_FP32);                       u32 twid = tensor_alloc(CURRENT_BACKEND, sw_, DT_FP32);                       CURRENT_BACKEND->buf_write(TENS[txid].buf_id, dx,                                                        (size_t)DXN * sizeof(f32));                        CURRENT_BACKEND->buf_write(TENS[twid].buf_id, dw,                                                        (size_t)DWN * sizeof(f32));                        Term xin = term_new(0, TAG_TEN, DT_FP32, txid);                               Term win = term_new(0, TAG_TEN, DT_FP32, twid);                               u32 rh = (DKH * (DH + 1) + DH - 1) / DH;                                      u32 rw = (DKW * (DW + 1) + DW - 1) / DW;                                      u32 d6a[6] = { DB, DCIN, 1, DH, 1, DW };                                      u32 d6b[6] = { DB, DCIN, rh, DH, rw, DW };                                    u32 d4a[4] = { DB, DCIN, rh*DH, rw*DW };                                      Term x1 = uop_reshape(uop_expand(uop_reshape(xin, 6, d6a), 6, d6b),                                 4, d4a);                                                u32 be4[8] = { 0,DB, 0,DCIN, 0,DKH*(DH+1), 0,DKW*(DW+1) };                    Term x2 = uop_shrink(x1, 4, be4);                                             u32 d6c[6] = { DB, DCIN, DKH, DH+1, DKW, DW+1 };                              Term x3 = uop_reshape(x2, 6, d6c);                                            u32 be6[12] = { 0,DB, 0,DCIN, 0,DKH, 0,DHO, 0,DKW, 0,DWO };                   Term x4 = uop_shrink(x3, 6, be6);                                             u32 prm[6] = { 1, 2, 4, 0, 3, 5 }; /* {cIn,kh,kw,B,hOut,wOut} */              Term xc6 = uop_permute(x4, 6, prm);                                           u32 d4x[4] = { DK, DB, DHO, DWO };                                            Term xc4 = uop_reshape(xc6, 4, d4x);                                          u32 d2w[2] = { DCOUT, DK };                                                   Term wf  = uop_reshape(win, 2, d2w);                                          u32 d5w[5] = { DCOUT, DK, 1, 1, 1 };                                          u32 d5e[5] = { DCOUT, DK, DB, DHO, DWO };                                     Term wexp = uop_expand(uop_reshape(wf, 5, d5w), 5, d5e);                      u32 d5x[5] = { 1, DK, DB, DHO, DWO };                                         Term xexp = uop_expand(uop_reshape(xc4, 5, d5x), 5, d5e);                     Term out4 = uop_reduce(REDUCE_SUM, 1, uop_binary(UOP_MUL, wexp, xexp));                   Term done = wnf(thvm_materialize(out4));                                      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,                                             (out_buf), (size_t)DON * sizeof(f32));            } while (0)
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    DUAL_CONV_BUILD_AND_RUN(dcpu);
+    thvm_free();
+
+    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    DUAL_CONV_BUILD_AND_RUN(dgpu);
+    thvm_free();
+    #undef DUAL_CONV_BUILD_AND_RUN
+
+    for (u32 i = 0; i < (u32)DON; i++) {
+      f32 d = dcpu[i] - dref[i]; if (d < 0) d = -d; CHECK(d < 5e-3f);
+      d = dgpu[i] - dref[i];     if (d < 0) d = -d; CHECK(d < 5e-3f);
+      d = dgpu[i] - dcpu[i];     if (d < 0) d = -d; CHECK(d < 5e-3f);
+    }
+    free(dx); free(dw); free(dref); free(dcpu); free(dgpu);
+  }
+
   // === EXPAND parity (scalar -> tensor broadcast) ===
   TEST_BEGIN("metal-real/expand-scalar-to-tensor-parity");
   Shape sx = {0}; sx.ndim = 1; sx.dims[0] = 1;
