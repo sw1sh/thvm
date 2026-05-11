@@ -680,14 +680,39 @@ typedef struct {
 //   axis_type==5 (legacy)       -> `uint aN = tg;`
 //   axis_type==1 (REDUCE)       -> `for (...) /*reduce*/ {`
 //   else                        -> `for (...) {`
+//
+// kvar wedge: when the range's raw extent has bit 31 (KVAR_FLAG) set,
+// the low 31 bits hold a kvar id instead of a literal extent.  In
+// that case the for-loop bound is emitted as `V_<name>` so a single
+// MSL string covers all runtime values for that variable; the kernel
+// signature emit in cg_render_uop_kernel_root adds the matching
+// `constant uint &V_<name>` arg and the Metal dispatcher binds the
+// per-fire runtime values via setBytes:.  Promoted-GLOBAL / LOCAL /
+// legacy-GLOBAL paths use the worst-case kvar_hi(id) for the `ext=%u`
+// comment; the parent thread owns wiring symbolic extents through
+// those paths (the symbolic demo test only exercises the LOOP bound).
 static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
                                     u32 opt_kind,
                                     RmuGlobalDecode const *gctx) {
   if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return;
   u64 loc = term_val(r);
-  u32 axis_id   = term_val(heap_read(loc + 0));
-  u32 axis_type = term_val(heap_read(loc + 1));
-  u32 extent    = term_val(heap_read(loc + 2));
+  u32 axis_id    = term_val(heap_read(loc + 0));
+  u32 axis_type  = term_val(heap_read(loc + 1));
+  u32 raw_extent = term_val(heap_read(loc + 2));
+  int is_var = kvar_extent_is_var(raw_extent);
+  u32 var_id = is_var ? kvar_extent_var_id(raw_extent) : 0;
+  // `extent` is the integer to bake into the literal /* ext=%u */
+  // comment (and as the for-loop bound for non-symbolic ranges).
+  // For symbolic ranges the actual loop bound is `bound[]` below.
+  u32 extent = is_var ? kvar_hi(var_id) : raw_extent;
+  char bound[32];
+  if (is_var) {
+    const char *vn = kvar_name(var_id);
+    if (vn == NULL) vn = "V";
+    snprintf(bound, sizeof(bound), "V_%s", vn);
+  } else {
+    snprintf(bound, sizeof(bound), "%u", raw_extent);
+  }
   for (u32 i = 0; i < depth; i++) fputs("  ", fp);
   // LOCAL via OPT annotation OR via axis_type == 4 (legacy KAX_LOCAL).
   if (opt_kind == UOP_OPT_LOCAL || axis_type == 4) {
@@ -714,11 +739,11 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
     return;
   }
   if (axis_type == 1 /*REDUCE*/) {
-    fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) /*reduce*/ {\n",
-            axis_id, axis_id, extent, axis_id);
+    fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) /*reduce*/ {\n",
+            axis_id, axis_id, bound, axis_id);
   } else {
-    fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) {\n",
-            axis_id, axis_id, extent, axis_id);
+    fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) {\n",
+            axis_id, axis_id, bound, axis_id);
   }
 }
 
@@ -1938,6 +1963,26 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
     u32 dt = uop_buffer_dtype(in_buf);
     fprintf(fp, ",\n    device const %s *in%u [[ buffer(%u) ]]",
             rmu_msl_type_name(dt), i, i + 1);
+  }
+  // kvar wedge: scan the DAG for variable-bound ranges and emit
+  // matching `constant uint &V_<name> [[ buffer(K) ]]` args.  The
+  // metal_tile_jit_encode dispatcher binds them at the same buffer
+  // indices via setBytes:; both sides walk the DAG with
+  // kvar_collect_from_dag so the order is stable across calls.
+  // Buffer indices land directly after the input buffers
+  // (1 + n_inputs ..); kernels that are also conv-shaped today
+  // bind their conv cfg at 1+n_inputs in the encoder but the
+  // renderer signature omits it, so this slice doesn't have to
+  // interleave -- the demo path is non-conv.
+  {
+    u32 used_vars[KVAR_USED_CAP];
+    u32 n_vars = kvar_collect_from_dag(root, used_vars, KVAR_USED_CAP);
+    for (u32 i = 0; i < n_vars; i++) {
+      const char *vn = kvar_name(used_vars[i]);
+      if (vn == NULL) vn = "V";
+      fprintf(fp, ",\n    constant uint &V_%s [[ buffer(%u) ]]",
+              vn, (u32)(1 + n_inputs + i));
+    }
   }
   fputs(",\n    uint tid [[ thread_position_in_grid ]],\n", fp);
   fputs("    uint tg [[ threadgroup_position_in_grid ]],\n", fp);
