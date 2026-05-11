@@ -174,19 +174,19 @@ static int mem_plan_cpu_enabled(void) {
   return enabled;
 }
 
-// Metal planner: default-OFF opt-in via THVM_METAL_REUSE_BUFS=1
-// (mirrors the CPU side).  Within-pass single-consumer kernel-output
-// recycling is sound (see the Metal-safety note above), but on the
-// beautiful_mnist graph it is currently inert -- the peak is set by
-// the per-op metal-op fallback's im2col intermediates (M1), not by
-// kernel-output buffers (which sum to ~66 MB) -- and the path has
-// only been verified at BS=32.  Kept as the plumbing M3/M4 needs once
-// M1 lands and kernel outputs become the dominant cost.
+// Metal planner: default-ON.  The earlier rationale for default-off
+// ("inert on beautiful_mnist -- peak is im2col intermediates") was
+// invalidated by the conv strided-view _pool rework (391a0d08 zero-
+// materialization composed INDEX): conv no longer materializes
+// im2col, kernel-output buffers ARE the dominant retained cost at
+// BS>=32, and the within-pass single-consumer recycling is exactly
+// what shrinks peak retained from ~7x the working set toward
+// tinygrad's ~flat profile.  THVM_METAL_REUSE_BUFS=0 opts out.
 static int mem_plan_metal_enabled(void) {
   static int known = 0, enabled = 0;
   if (!known) {
     char const *e = getenv("THVM_METAL_REUSE_BUFS");
-    enabled       = (e && e[0] == '1');
+    enabled       = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
     known         = 1;
   }
   return enabled;
