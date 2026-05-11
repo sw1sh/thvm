@@ -160,6 +160,17 @@ static u32 hand_opt_last_output_axis(HandOptAxes const *ax) {
   return 0xFFFFFFFFu;
 }
 
+// Same as above but skip axes with extent 1 (degenerate -- already
+// fully consumed by a prior split, can't be split further).  Used by
+// the multi-LOCAL pass to find the next-LOOP axis that's still
+// non-trivial.
+static u32 hand_opt_last_nontriv_output_axis(HandOptAxes const *ax) {
+  for (i32 i = (i32)ax->n - 1; i >= 0; i--) {
+    if (ax->kax_type[i] == KAX_LOOP && ax->extent[i] > 1) return (u32)i;
+  }
+  return 0xFFFFFFFFu;
+}
+
 // Product of every KAX_LOOP output-axis extent (tinygrad's
 // prod(output_shape[i] for i in upcastable_dims)).
 static u64 hand_opt_output_loop_product(HandOptAxes const *ax) {
@@ -386,21 +397,20 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
         }
       }
     }
-    // Second UPCAST on the contiguous spatial axis (wOut).  After the M
-    // UPCAST the axis indices have shifted; re-snapshot.  Try factor 2
-    // when (a) upcast_size still has room (< 32), and (b) the wOut
-    // OUTER half after the split would still be >= 8 -- otherwise the
-    // subsequent LOCAL pass can't fill a useful threadgroup on it and
-    // we're better off skipping the wOut UPCAST so LOCAL takes the
-    // FULL wOut.  This keeps the small-spatial late convs (wOut 6, 8)
-    // on the single-UPCAST + full-wOut-LOCAL path.
+    // Second UPCAST on the contiguous spatial axis (wOut) -- the 2D
+    // register-block inner.  Only fires when (a) the M UPCAST product
+    // is modest (<=4) so total live registers stay reasonable, AND (b)
+    // wOut OUTER / 2 >= 32 -- a FULL simdgroup width of threadgroup
+    // lanes is left for the LOCAL pass even after the inner-2 split.
+    // beautiful_mnist's wOut maxes out at 20, so this is dormant on
+    // that workload; large-spatial convs (wOut >= 64) do exercise it.
     if (hand_opt_snapshot_axes(ke, &ax)
-        && hand_opt_upcast_size(&ax) < 32) {
+        && hand_opt_upcast_size(&ax) <= 4) {
       u32 c_axis = hand_opt_last_output_axis(&ax);
       if (c_axis != 0xFFFFFFFFu) {
         u32 ext = ax.extent[c_axis];
         u32 f = 2;
-        if (ext % f == 0 && ext / f >= 8) {
+        if (ext % f == 0 && ext / f >= 32) {
           KOpt opt = { KOP_UPCAST, (u8)c_axis, f };
           if (kernel_apply_opt(ke, opt)) n_applied++;
         }
@@ -443,11 +453,13 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     static const u32 local_factors[] = {32, 16, 8, 4, 3, 2};
     u32 local_cap = 256u;
     if (tileable) {
-      // Single LOCAL on the contiguous spatial axis -- the LAST output
-      // axis, which is innermost (stride 1) in the conv-input read.  One
-      // split keeps the conv-split renderer happy; the LOCAL factor lands
-      // consecutive threads on consecutive conv-input columns (coalesced).
-      static const u32 conv_local_factors[] = {64, 32, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2};
+      // LOCAL on the contiguous spatial axis (wOut -- LAST output axis,
+      // innermost stride 1 in the conv-input read): consecutive threads
+      // land on consecutive conv-input columns (coalesced).  Prefer a
+      // multiple of the simdgroup width (32) when possible.  Cap product
+      // at local_cap (== 256).
+      static const u32 conv_local_factors[] = {32, 64, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2};
+      u32 cur_local_prod = 1;
       if (hand_opt_snapshot_axes(ke, &ax)) {
         u32 c_axis = hand_opt_last_output_axis(&ax);
         if (c_axis != 0xFFFFFFFFu) {
@@ -457,7 +469,31 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
             if (f > (u32)local_cap) continue;
             if (ext % f != 0 || ext / f < 1) continue;
             KOpt opt = { KOP_LOCAL, (u8)c_axis, f };
-            if (kernel_apply_opt(ke, opt)) n_applied++;
+            if (kernel_apply_opt(ke, opt)) { n_applied++; cur_local_prod = f; }
+            break;
+          }
+        }
+      }
+      // Second LOCAL on the next non-degenerate output axis (hOut) when
+      // the wOut LOCAL was below a full simdgroup width (32 threads).
+      // This happens on the small-spatial late convs (wOut 6, 8) --
+      // without a second LOCAL the threadgroup has fewer than a warp's
+      // worth of lanes and the kernel under-utilises the GPU.  hOut
+      // LOCAL lands consecutive simdgroups on consecutive hOut rows
+      // (still coalesced for the conv-input read which is row-major in
+      // (hOut, wOut)).  Skip ext=1 axes (the wOut outer half post-split
+      // is degenerate when LOCAL took the full wOut extent).
+      if (cur_local_prod > 0 && cur_local_prod < 32
+          && hand_opt_snapshot_axes(ke, &ax)) {
+        u32 h_axis = hand_opt_last_nontriv_output_axis(&ax);
+        if (h_axis != 0xFFFFFFFFu) {
+          u32 ext = ax.extent[h_axis];
+          for (u32 i = 0; i < 12; i++) {
+            u32 f = conv_local_factors[i];
+            if ((u64)cur_local_prod * f > (u64)local_cap) continue;
+            if (ext % f != 0 || ext / f < 1) continue;
+            KOpt opt = { KOP_LOCAL, (u8)h_axis, f };
+            if (kernel_apply_opt(ke, opt)) { n_applied++; cur_local_prod *= f; }
             break;
           }
         }
