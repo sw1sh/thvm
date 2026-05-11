@@ -558,6 +558,70 @@ int main(void) {
     for (int k = 0; k < 4; k++) CHECK(cpu_buf[k] == gpu_buf[k]);
   }
 
+  // === Hand-coded-opts UPCAST parity: a multi-output-axis reduce ===
+  // {4, 64, 16} REDUCE_SUM over axis 2 -> {4, 64}.  With hand-coded
+  // opts ON (the default) kernel_hand_coded_opts UPCASTs the inner
+  // output axis (64 % 4 == 0) -> the lifted DAG gets a KAX_LOOP outer
+  // 64-axis, a KAX_UPCAST inner 4-axis, the 4-axis dim0 (KAX_LOOP),
+  // and the 16-axis reduce (KAX_REDUCE).  render_uop must promote
+  // dim0 + the outer 64-axis to a flat `tid` decode while the inner
+  // 4-axis becomes a `#pragma unroll(4)` for-loop, and
+  // cg_tile_metal_dispatch_shape must launch a grid that covers
+  // exactly that decode.  This is the path the BS=512 beautiful_mnist
+  // conv/pool kernels take; before the v2 renderer+dispatch fix it
+  // failed to compile and fell to the per-op interpreter.
+  TEST_BEGIN("metal-real/hand-coded-upcast-reduce-parity");
+  {
+    Shape suc = {0}; suc.ndim = 3; suc.dims[0] = 4; suc.dims[1] = 64;
+    suc.dims[2] = 16;
+    enum { UC_N = 4 * 64 * 16 };
+    f32 uc_src[UC_N];
+    for (u32 i = 0; i < UC_N; i++) {
+      uc_src[i] = (f32)((i * 17 + 3) % 29) - 14.0f;
+    }
+    f32 uc_ref[4 * 64];
+    for (u32 a = 0; a < 4; a++) {
+      for (u32 b = 0; b < 64; b++) {
+        f32 acc = 0.0f;
+        for (u32 c = 0; c < 16; c++) acc += uc_src[(a*64 + b)*16 + c];
+        uc_ref[a*64 + b] = acc;
+      }
+    }
+    f32 uc_cpu[4 * 64] = {0};
+    f32 uc_gpu[4 * 64] = {0};
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    {
+      u32 tt = tensor_alloc(CURRENT_BACKEND, suc, DT_FP32);
+      CURRENT_BACKEND->buf_write(TENS[tt].buf_id, uc_src, sizeof(uc_src));
+      Term done = wnf(thvm_materialize(uop_reduce(REDUCE_SUM, 2,
+          term_new(0, TAG_TEN, DT_FP32, tt))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                uc_cpu, sizeof(uc_cpu));
+    }
+    thvm_free();
+
+    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    {
+      u32 tt = tensor_alloc(CURRENT_BACKEND, suc, DT_FP32);
+      CURRENT_BACKEND->buf_write(TENS[tt].buf_id, uc_src, sizeof(uc_src));
+      Term done = wnf(thvm_materialize(uop_reduce(REDUCE_SUM, 2,
+          term_new(0, TAG_TEN, DT_FP32, tt))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                uc_gpu, sizeof(uc_gpu));
+    }
+    thvm_free();
+
+    for (u32 i = 0; i < 4 * 64; i++) {
+      f32 d = uc_cpu[i] - uc_ref[i];
+      if (d < 0) d = -d;
+      CHECK(d < 1e-3f);
+      d = uc_gpu[i] - uc_ref[i];
+      if (d < 0) d = -d;
+      CHECK(d < 1e-3f);
+    }
+  }
+
   // === EXPAND parity (scalar -> tensor broadcast) ===
   TEST_BEGIN("metal-real/expand-scalar-to-tensor-parity");
   Shape sx = {0}; sx.ndim = 1; sx.dims[0] = 1;

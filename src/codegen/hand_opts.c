@@ -13,23 +13,30 @@
 // the function is a no-op (it still marks ke->schedule->autotuned so
 // re-dispatch is cheap).
 //
-// === DEFAULT STATE: OFF ============================================
-// THVM_HAND_CODED_OPTS defaults to OFF in this v1.  Reason: thvm's
-// DAG-mode renderer (render_uop.c) disables its default-parallelise
-// pass the moment ANY per-axis OPT wrapper is present
-// (`any_opt` gate in rmu_emit_store / rmu_emit_output_loops) -- so a
-// UPCAST/LOCAL applied to a multi-output-axis kernel turns the
-// remaining output axes back into serial for-loops with NO bounds
-// guard, while cg_tile_metal_dispatch_shape (which reads
-// ke->schedule's applied_opts log, NOT the mutated DAG) still launches
-// one-thread-per-output-element.  The kernel then over-computes by
-// ~Nthreads and may read OOB.  Until the renderer learns a
-// multi-GLOBAL modulus decode for OPT'd kernels AND
-// cg_tile_metal_dispatch_shape derives its shape from the DAG, the
-// safe default is OFF.  Flip THVM_HAND_CODED_OPTS=1 to exercise the
-// heuristic (it applies cleanly to single-output-axis kernels: the
-// reduce-tail elementwise+GROUP/UNROLL cases, where the renderer's
-// reduce-shape emit + the conv2d/group-reduce dispatch readers agree).
+// === DEFAULT STATE: ON (v2) ========================================
+// THVM_HAND_CODED_OPTS defaults to ON.  THVM_HAND_CODED_OPTS=0
+// disables.  Earlier (v1) it was OFF because the DAG-mode renderer
+// gated its default-parallelise pass off the moment ANY per-axis OPT
+// wrapper was present, so a UPCAST on a multi-output-axis kernel
+// turned the remaining output axes into serial for-loops with no
+// bounds guard while the dispatch still launched one-thread-per-
+// output-element.  v2 fixed both sides:
+//   - render_uop.c: the default-parallelise pass now promotes each
+//     plain-KAX_LOOP output axis individually (the OUTER half of a
+//     UPCAST split), so it COMPOSES with the OPT'd inner axis (which
+//     emits via its `#pragma unroll` for-loop path).
+//   - render_metal.c: cg_tile_metal_dispatch_shape derives
+//     (groups, threads) from the lifted DAG's RANGE-leaf axis types
+//     for DAG-mode kernels with per-axis OPTs (rmt_dag_dispatch_shape),
+//     so the launched grid covers the renderer's `tid` decode exactly.
+//   - apply_opt_dag.c: an axis split now also shifts the UOP_REDUCE
+//     node's axis field, so the renderer's reduce-range matcher
+//     keeps finding it (otherwise it mistook the UPCAST'd inner axis
+//     for the reduce loop -> "undeclared identifier").
+// LOCAL / GROUP are still SKIPPED in the heuristic (see cases 3-4):
+// the renderer decodes promoted-GLOBAL axes from `tid` but a LOCAL
+// axis from `tt` -- mixing the two needs a tg/tt split that isn't
+// wired yet.  UPCAST is the bigger ALU win and works end-to-end.
 //
 // === Heuristic cases ported (mirrors hand_coded_optimizations) ====
 //   1. TC -- matmul-shaped + f32 + K % tile == 0 -> KOP_TC(tile=8).
@@ -39,11 +46,13 @@
 //      schedule path + future parallel-TC dispatch work.)
 //   2. UPCAST -- pick an upcast factor (4, then 2) on the innermost
 //      output axis if its extent divides.
-//   3. LOCAL -- group output axes into ~256-thread threadgroups.
-//   4. GROUP -- if the reduce axis is large, split it for a
-//      threadgroup-collective reduce (KOP_GROUPTOP/KOP_GROUP).
-//   5. UNROLL -- unroll the reduce axis by a small factor (4, or full
-//      if extent <= 32).
+//   3. LOCAL -- SKIPPED (see header): renderer can't yet mix a
+//      promoted-GLOBAL `tid` decode with a LOCAL `tt` decode.
+//   4. GROUP -- SKIPPED for v2: the GROUP_REDUCE renderer + dispatch
+//      readers were validated only on the un-UPCAST'd reduce-tail
+//      shape; re-enable once cross-checked against a UPCAST'd output.
+//   5. UNROLL -- skipped (renderer already `#pragma unroll`s small
+//      reduce axes by default).
 //
 // Each kernel_apply_opt can fail (axis out of range, factor doesn't
 // divide, validation reject) -- we skip and try the next, exactly as
@@ -52,14 +61,14 @@
 // time.
 
 // --- env knob ------------------------------------------------------
-// Default ON would be the goal; v1 ships OFF (see header).  Memoised:
-// -1 = uninitialised, 0 = off, 1 = on.
+// Default ON (v2; see header).  THVM_HAND_CODED_OPTS=0 disables.
+// Memoised: -1 = uninitialised, 0 = off, 1 = on.
 static int HAND_CODED_OPTS_ENABLED = -1;
 static int hand_coded_opts_enabled(void) {
   if (HAND_CODED_OPTS_ENABLED < 0) {
     char const *e = getenv("THVM_HAND_CODED_OPTS");
-    // Default OFF for v1.  THVM_HAND_CODED_OPTS=1 turns it on.
-    HAND_CODED_OPTS_ENABLED = (e != NULL && e[0] == '1') ? 1 : 0;
+    // Default ON.  Only an explicit "0" disables.
+    HAND_CODED_OPTS_ENABLED = (e != NULL && e[0] == '0') ? 0 : 1;
   }
   return HAND_CODED_OPTS_ENABLED;
 }
@@ -254,67 +263,24 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     }
   }
 
-  // ---- 3. LOCAL: group output axes into ~256-thread threadgroups ----
-  // tinygrad: for axis,sz in sorted(...): if prod(local_dims)*sz <= 256:
-  //   apply_opt(Opt(OptOps.LOCAL, axis, sz))
-  // We pick, for each KAX_LOOP output axis (innermost first), the
-  // largest size in {256,128,64,32,16,8,4,2} that divides its extent
-  // and keeps the running threadgroup size <= 256.
-  {
-    static const u32 local_szs[] = {256, 128, 64, 32, 16, 8, 4, 2};
-    u64 running = 1;
-    // Re-snapshot each iteration (LOCAL splits shift axis indices).
-    for (int guard = 0; guard < MAX_AXES; guard++) {
-      if (!hand_opt_snapshot_axes(ke, &ax)) break;
-      // Find the innermost KAX_LOOP output axis that hasn't been
-      // localised yet (a localised axis becomes KAX_LOCAL).
-      u32 axis = 0xFFFFFFFFu;
-      for (i32 i = (i32)ax.n - 1; i >= 0; i--) {
-        if (ax.kax_type[i] == KAX_LOOP) { axis = (u32)i; break; }
-      }
-      if (axis == 0xFFFFFFFFu) break;
-      u32 chosen = 0;
-      for (u32 s = 0; s < 8; s++) {
-        u32 sz = local_szs[s];
-        if (ax.extent[axis] % sz != 0) continue;
-        if (running * (u64)sz > 256) continue;
-        chosen = sz;
-        break;
-      }
-      if (chosen == 0) break;       // can't localise this axis usefully
-      KOpt opt = { KOP_LOCAL, (u8)axis, chosen };
-      if (!kernel_apply_opt(ke, opt)) break;
-      n_applied++;
-      running *= (u64)chosen;
-      if (running >= 256) break;
-      // tinygrad caps at 3 LOCAL splits.
-      if (guard >= 2) break;
-    }
-  }
+  // ---- 3. LOCAL: SKIPPED in v2 ----
+  // tinygrad groups output axes into ~256-thread threadgroups via
+  // Opt(OptOps.LOCAL, ...).  thvm's DAG-mode renderer decodes a
+  // promoted-GLOBAL output axis from `tid` but a LOCAL axis from `tt`;
+  // a kernel with BOTH would mis-decode the GLOBAL (it'd include the
+  // `tt` bits in `tid`).  Until the renderer learns a tg/tt split,
+  // the heuristic emits NO LOCAL opts -- a kernel only ever sees
+  // promoted-GLOBAL + UPCAST + REDUCE axes, which compose cleanly.
+  // (KOP_LOCAL is still reachable via the THVM_AUTOTUNE BEAM path,
+  // which uses the schedule-axis dispatch reader, not this DAG path.)
 
-  // ---- 4. GROUP the reduce axis when it's large ----
-  // tinygrad: if prod(output_shape[upcastable]) <= 2048:
-  //   for axis in (0,1,2): try apply_opt(Opt(OptOps.GROUPTOP, axis, 16))
-  // thvm: when the reduce axis extent >= 1024 and divides by a group
-  // factor, KOP_GROUPTOP(reduce_axis, factor).  We try factors
-  // {256,128,64,32,16} (largest that divides).  GROUPTOP keeps the
-  // outer slice; the renderer's GROUP_REDUCE emit + the dispatch
-  // shape's GROUP_REDUCE mode agree on a single-output-axis layout.
-  {
-    if (hand_opt_snapshot_axes(ke, &ax)) {
-      u32 axis = hand_opt_reduce_axis(&ax);
-      if (axis != 0xFFFFFFFFu && ax.extent[axis] >= 1024
-          && hand_opt_output_loop_product(&ax) <= 2048) {
-        static const u32 group_factors[] = {256, 128, 64, 32, 16};
-        for (u32 i = 0; i < 5; i++) {
-          u32 f = group_factors[i];
-          if (ax.extent[axis] % f != 0 || f >= ax.extent[axis]) continue;
-          KOpt opt = { KOP_GROUPTOP, (u8)axis, f };
-          if (kernel_apply_opt(ke, opt)) { n_applied++; break; }
-        }
-      }
-    }
-  }
+  // ---- 4. GROUP the reduce axis: SKIPPED in v2 ----
+  // KOP_GROUPTOP / KOP_GROUP split the reduce axis for a threadgroup-
+  // collective reduce.  The GROUP_REDUCE renderer + GROUP_REDUCE
+  // dispatch mode were validated on the un-UPCAST'd reduce-tail shape
+  // only; combined with case 2's output UPCAST they haven't been
+  // cross-checked.  Re-enable once a UPCAST+GROUP fixture is in the
+  // surgical suite.
 
   // ---- 5. UNROLL the reduce axis a bit ----
   // tinygrad applies Opt(OptOps.UNROLL, reduce_axis, factor) here.
