@@ -263,8 +263,14 @@ static Term lift_scalar_index(KernelEntry const *ke, u32 sid,
       lift_reject_log(ke, sid, "index_e/no-addr");
       return 0;
     }
-    UopRangeMap srm[MAX_DIM];
-    u32 n = (n_ranges < MAX_DIM) ? n_ranges : MAX_DIM;
+    // Pass the FULL range map (up to LIFT_RANGES_CAP), not just the
+    // first MAX_DIM entries -- multi-axis-reduce / movement-fused
+    // kernels (BN-train: conv-ReLU + mean/var-broadcast + maxpool)
+    // carry > MAX_DIM range leaves, and an S_INDEX_E address that
+    // references one past index MAX_DIM would spuriously fail to lift
+    // (-> per-op encoder fallback).
+    UopRangeMap srm[LIFT_RANGES_CAP];
+    u32 n = (n_ranges < LIFT_RANGES_CAP) ? n_ranges : LIFT_RANGES_CAP;
     for (u32 i = 0; i < n; i++) {
       srm[i].scalar_id = ranges[i].scalar_id;
       srm[i].axis_uop  = ranges[i].axis_uop;
