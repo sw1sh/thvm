@@ -2127,6 +2127,43 @@ EXTERN_C DLLEXPORT int thvm_wl_metal_gpu_time(WolframLibraryData libData, mint a
   return LIBRARY_NO_ERROR;
 }
 
+// thvm_wl_metal_perop_profile() -- per-kernel true GPU-time breakdown.
+// Returns a flat Integer MTensor of 6-tuples
+//   [kid, gpu_us, gpu_samples, dispatch_count, flops, dispatch_kind]
+// one row per live kernel that has at least one GPU-time sample (i.e.
+// fired under THVM_METAL_PROFILE_PEROP=1 on the Metal backend).  Empty
+// (0-row) tensor when no kernel has samples -- including non-Metal
+// builds and runs without THVM_METAL_PROFILE_PEROP=1.  WL side reads
+// via TMetalPerOpProfile[].
+EXTERN_C DLLEXPORT int thvm_wl_metal_perop_profile(WolframLibraryData libData, mint argc,
+                                                   MArgument *args, MArgument res) {
+  (void)argc; (void)args;
+  enum { NCOLS = 6 };
+  // First pass: count rows with samples.
+  mint nRows = 0;
+  for (u32 kid = 1; kid < KERNELS_NEXT; kid++) {
+    if (cg_kernel_gpu_samples(kid) > 0) nRows++;
+  }
+  mint dims[1] = {nRows * NCOLS};
+  MTensor out;
+  libData->MTensor_new(MType_Integer, 1, dims, &out);
+  mint *dst = libData->MTensor_getIntegerData(out);
+  mint r = 0;
+  for (u32 kid = 1; kid < KERNELS_NEXT; kid++) {
+    u64 samples = cg_kernel_gpu_samples(kid);
+    if (samples == 0) continue;
+    dst[r * NCOLS + 0] = (mint)kid;
+    dst[r * NCOLS + 1] = (mint)cg_kernel_gpu_us(kid);
+    dst[r * NCOLS + 2] = (mint)samples;
+    dst[r * NCOLS + 3] = (mint)cg_kernel_dispatch_count(kid);
+    dst[r * NCOLS + 4] = (mint)cg_kernel_flops(&KERNELS[kid]);
+    dst[r * NCOLS + 5] = (mint)cg_kernel_dispatch_kind(kid);
+    r++;
+  }
+  MArgument_setMTensor(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_kernel_info(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
   (void)argc;

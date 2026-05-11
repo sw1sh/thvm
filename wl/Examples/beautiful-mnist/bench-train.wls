@@ -552,5 +552,30 @@ If[showProfile,
                   " inputs=", inputShapes[row["Kid"]],
                   " props=", TKernelProposed[row["Kid"]]],
             {row, Take[rows, UpTo[12]]}]]];
+(* Per-kernel TRUE GPU time -- only meaningful when THVM_METAL_PROFILE_PEROP=1
+   (each kernel then dispatches in its own command buffer).  Sorted by
+   per-step GPU us; nSteps fires per kernel during the timed loop, so the
+   per-step number is GpuUs/GpuSamples * (samples/step) ~= GpuUs/nSteps when
+   each kernel fires once per step. *)
+If[showProfile,
+    Module[{perop = TMetalPerOpProfile[], rows},
+        If[Length[perop] > 0,
+            rows = ReverseSortBy[
+                KeyValueMap[Append[#2, "Kid" -> #1] &, perop],
+                #["GpuUs"] &];
+            print["per-kernel TRUE GPU time (THVM_METAL_PROFILE_PEROP):"];
+            Do[
+                print["  kid=", row["Kid"],
+                      " kind=", row["DispatchKind"],
+                      " gpu_us_per_step=", NumberForm[
+                          N[row["GpuUs"] / Max[nSteps, 1]], {10, 1}],
+                      " gpu_us_total=", row["GpuUs"],
+                      " samples=", row["GpuSamples"],
+                      " gflops=", NumberForm[row["GFlopsPerSec"], {8, 1}],
+                      " out_numel=", Lookup[Quiet @ TKernelInfo[row["Kid"]], "output_numel", 0],
+                      " axes=", ToString[kernelAxesInfo[row["Kid"]]["AxisTypes"], InputForm],
+                      " inputs=", inputShapes[row["Kid"]]],
+                {row, rows}],
+            print["per-kernel TRUE GPU time: (none -- set THVM_METAL_PROFILE_PEROP=1)"]]]];
 print["total_buf_bytes=", TTotalBufBytes[], " heap=", THeapPos[]];
 print["done."];

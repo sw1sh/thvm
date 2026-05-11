@@ -50,6 +50,7 @@ TMetalBufTable::usage = "TMetalBufTable[] returns a list of {nbytes, refcount} p
 TMetalBufSummary::usage = "TMetalBufSummary[] returns <|\"LiveBytes\", \"RetainedBytes\", \"DeferredBytes\", \"DeferredCount\", \"FreelistCount\", \"PeakLiveBytes\", \"PeakRetainedBytes\", \"PeakDeferredBytes\"|> for the Metal buffer table.  RetainedBytes includes recycle-list buffers that no live tensor references.";
 TMetalMemoryProfile::usage = "TMetalMemoryProfile[] returns a flat Metal memory profile derived from TMetalBufSummary[] and TMetalBufTable[], including buffer counts, freelist bytes, and largest live/retained buffer sizes.";
 TMetalGpuTime::usage = "TMetalGpuTime[] returns <|\"TotalUs\", \"FlushCount\", \"AvgUsPerFlush\"|>: the process-wide Metal GPU execution time so far -- summed [cmd GPUEndTime]-[cmd GPUStartTime] microseconds across every command-buffer flush/submit since metal_init, plus the flush count.  Take a delta around a timed loop for a real per-step GPU-compute number (separate from a WL-side wall=...ms that also includes re-encode / scheduler overhead).  Zero on a non-Metal build.";
+TMetalPerOpProfile::usage = "TMetalPerOpProfile[] returns <|kid -> <|\"GpuUs\", \"GpuSamples\", \"DispatchCount\", \"Flops\", \"GFlopsPerSec\", \"DispatchKind\"|>|> -- a true per-kernel GPU-time breakdown.  Only populated when the dylib ran with THVM_METAL_PROFILE_PEROP=1 on the Metal backend: each kernel then dispatches in its own command buffer, so [cmd GPUEndTime]-[cmd GPUStartTime] is a per-kernel number (vs. TMetalGpuTime[], which is one flush covering many kernels).  GpuUs is cumulative across GpuSamples fires; divide for per-fire.  GFlopsPerSec uses the static cg_kernel_flops estimate.  Empty Association on a non-Metal build or a run without THVM_METAL_PROFILE_PEROP=1.  Pair with TKernelInfo / TKernelOpts / inputShapes for the bottleneck kernel's shape.";
 
 Begin["`Private`"];
 
@@ -80,6 +81,22 @@ TMetalGpuTime[]          := Module[{v},
     v = PadRight[Normal @ $metalGpuTimeFn[], 2, 0];
     <|"TotalUs" -> v[[1]], "FlushCount" -> v[[2]],
       "AvgUsPerFlush" -> If[v[[2]] > 0, N[v[[1]] / v[[2]]], 0.]|>
+]
+
+TMetalPerOpProfile[]     := Module[{rows},
+    ensureInit[];
+    rows = Partition[Normal @ $metalPerOpProfileFn[], 6];
+    Association @ Table[
+        row[[1]] -> <|
+            "GpuUs"         -> row[[2]],
+            "GpuSamples"    -> row[[3]],
+            "DispatchCount" -> row[[4]],
+            "Flops"         -> row[[5]],
+            "GFlopsPerSec"  -> If[row[[2]] > 0 && row[[3]] > 0,
+                N[row[[5]] * row[[3]] / (row[[2]] / 1.0*^6)] / 1.0*^9, 0.],
+            "DispatchKind"  -> decodeDispatchKind[row[[6]]]
+        |>,
+        {row, rows}]
 ]
 
 TMetalMemoryProfile[]    := Module[{

@@ -3156,6 +3156,9 @@ char *cg_emit_tile_metal(KernelEntry const *ke);   // caller frees
 int   cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x, u32 *threads_x);
 u64   cg_now_us(void);
 void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
+// Record a true per-kernel GPU-time sample (us).  Metal-only, gated on
+// THVM_METAL_PROFILE_PEROP=1.  External linkage so the .m TU can call it.
+void  cg_profile_record_gpu(u32 kid, u64 gpu_us);
 u32   cg_kernel_dispatch_kind(u32 kid);
 
 // === backend/ ===

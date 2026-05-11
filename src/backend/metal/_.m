@@ -59,12 +59,35 @@ static u64 METAL_PEAK_DEFERRED_BYTES = 0;
 static u64 METAL_GPU_US_TOTAL = 0;
 static u64 METAL_GPU_FLUSH_COUNT = 0;
 
+// Per-op GPU profiling.  When THVM_METAL_PROFILE_PEROP=1, batching is
+// disabled in metal_dispatch_begin so every kernel dispatch gets its
+// own command buffer; metal_submit_if_standalone then attributes that
+// buffer's [GPUEndTime]-[GPUStartTime] to METAL_PEROP_CUR_KID, the kid
+// set at the top of metal_dispatch_kernel.  The result is a real
+// per-kernel GPU-us breakdown (vs. the batched path, where one flush
+// covers ~25 kernels).  Costs more dispatch overhead -- profile only.
+static int metal_perop_enabled(void) {
+  static int known = 0;
+  static int enabled = 0;
+  if (!known) {
+    char const *e = getenv("THVM_METAL_PROFILE_PEROP");
+    enabled = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return enabled;
+}
+static u32 METAL_PEROP_CUR_KID = 0;
+
 static void metal_record_gpu_time(id<MTLCommandBuffer> cmd) {
   if (cmd == nil) return;
   double t0 = cmd.GPUStartTime;
   double t1 = cmd.GPUEndTime;
   if (t1 > t0 && t0 > 0.0) {
-    METAL_GPU_US_TOTAL += (u64)((t1 - t0) * 1e6);
+    u64 us = (u64)((t1 - t0) * 1e6);
+    METAL_GPU_US_TOTAL += us;
+    if (metal_perop_enabled() && METAL_PEROP_CUR_KID != 0) {
+      cg_profile_record_gpu(METAL_PEROP_CUR_KID, us);
+    }
   }
   METAL_GPU_FLUSH_COUNT++;
 }
@@ -147,6 +170,9 @@ static void metal_dispatch_flush(void) {
 static void metal_dispatch_begin(void) {
   if (METAL_QUEUE == nil) return;
   if (!metal_batch_enabled()) return;
+  // Per-op GPU profiling needs one command buffer per kernel so the
+  // GPUStartTime/GPUEndTime delta is attributable; skip the batch.
+  if (metal_perop_enabled()) return;
   METAL_BATCH_DEPTH++;
 }
 
@@ -2360,6 +2386,11 @@ static int dag_metal_encode_kernel(KernelEntry *ke,
 
 static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (METAL_DEVICE == nil || METAL_QUEUE == nil) return -1;
+  // Per-op GPU profiling: clear the current-kid attribution before any
+  // pre-dispatch flush (defer-backlog drain below) so leftover work
+  // from the prior dispatch isn't double-counted; set it again once we
+  // know this kernel's kid.
+  METAL_PEROP_CUR_KID = 0;
 
   // Bound the deferred-decref backlog *between* kernels.  Within a
   // batched step the per-op fallback path (metal-op) materializes one
@@ -2390,6 +2421,12 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
   // the WL TKernelProfile / TKernelDispatchKind surface reads.
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
+  // Per-op GPU profiling: record the kid this command buffer is for so
+  // metal_record_gpu_time can attribute [GPUEndTime]-[GPUStartTime].
+  // Reset to 0 below so an unrelated flush (e.g. buf_read) isn't
+  // mis-attributed; only the standalone submit at the end of this
+  // dispatch picks it up.
+  if (metal_perop_enabled()) METAL_PEROP_CUR_KID = kid;
 
   // THVM_DISPATCH_TRACE=1: one line per kernel dispatch with shape +
   // wall-time, plus per-op-loop checkpoint timing.  Cheap (env read

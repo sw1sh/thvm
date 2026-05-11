@@ -21,6 +21,13 @@ typedef struct {
   KDispatchKind kind;          // last route taken for this kid
   u64           dispatch_count; // total fires
   u64           total_us;       // cumulative wall time
+  // True GPU execution time, summed across fires.  Only populated on
+  // the Metal backend when THVM_METAL_PROFILE_PEROP=1 (each kernel
+  // then dispatches in its own command buffer, so
+  // [cmd GPUEndTime]-[cmd GPUStartTime] is a per-kernel number).
+  // Otherwise zero -- distinguish "no GPU samples" from "0 us".
+  u64           gpu_us;
+  u64           gpu_samples;    // # of GPU-time samples folded in
 } KProfileSlot;
 static KProfileSlot K_PROFILE[KPROFILE_CAP];
 
@@ -87,6 +94,26 @@ fn u64 cg_kernel_dispatch_count(u32 kid) {
 fn u64 cg_kernel_total_us(u32 kid) {
   if (kid == 0 || kid >= KPROFILE_CAP) return 0;
   return K_PROFILE[kid].total_us;
+}
+
+// Record a true per-kernel GPU execution time sample (microseconds).
+// Called from the Metal backend's standalone-submit path when
+// THVM_METAL_PROFILE_PEROP=1.  External linkage: the .m TU calls it.
+void cg_profile_record_gpu(u32 kid, u64 gpu_us) {
+  if (kid == 0 || kid >= KPROFILE_CAP) return;
+  KProfileSlot *s = &K_PROFILE[kid];
+  s->gpu_us      += gpu_us;
+  s->gpu_samples += 1;
+}
+
+fn u64 cg_kernel_gpu_us(u32 kid) {
+  if (kid == 0 || kid >= KPROFILE_CAP) return 0;
+  return K_PROFILE[kid].gpu_us;
+}
+
+fn u64 cg_kernel_gpu_samples(u32 kid) {
+  if (kid == 0 || kid >= KPROFILE_CAP) return 0;
+  return K_PROFILE[kid].gpu_samples;
 }
 
 // Wallclock helper -- gettimeofday / clock_gettime on macOS.
