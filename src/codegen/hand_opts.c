@@ -33,10 +33,10 @@
 //     node's axis field, so the renderer's reduce-range matcher
 //     keeps finding it (otherwise it mistook the UPCAST'd inner axis
 //     for the reduce loop -> "undeclared identifier").
-// LOCAL / GROUP are still SKIPPED in the heuristic (see cases 3-4):
-// the renderer decodes promoted-GLOBAL axes from `tid` but a LOCAL
-// axis from `tt` -- mixing the two needs a tg/tt split that isn't
-// wired yet.  UPCAST is the bigger ALU win and works end-to-end.
+// v3 wires multi-axis LOCAL: render_uop.c's RmuGlobalDecode now carries
+// a per-LOCAL (stride, modulus) `tt`-decode mirroring its multi-GLOBAL
+// `tg`-decode, and rmt_dag_dispatch_shape's `threads = prod(LOCAL
+// extents)` already supported any axis count.  GROUP is still SKIPPED.
 //
 // === Heuristic cases ported (mirrors hand_coded_optimizations) ====
 //   1. TC -- matmul-shaped + f32 + K % tile == 0 -> KOP_TC(tile=8).
@@ -44,15 +44,26 @@
 //      OPT(_, TC, 0) inside cg_emit_via_uop, so this is mostly a
 //      re-affirm; kept for the explicit `applied_opts` record on the
 //      schedule path + future parallel-TC dispatch work.)
-//   2. UPCAST -- pick an upcast factor (4, then 2) on the innermost
-//      output axis if its extent divides.
-//   3. LOCAL -- SKIPPED (see header): renderer can't yet mix a
-//      promoted-GLOBAL `tid` decode with a LOCAL `tt` decode.
-//   4. GROUP -- SKIPPED for v2: the GROUP_REDUCE renderer + dispatch
+//   2. UPCAST -- for a TILEABLE reduce kernel ({B,cOut,hOut,wOut}-
+//      shaped output + (cin,kh,kw) reduce nest, i.e. >=1 KAX_REDUCE +
+//      >=2 KAX_LOOP output axes -- the BS=512 beautiful_mnist conv
+//      kernels), run tinygrad's UPCAST loop: while output_loop_product
+//      >= 1024 and upcast_size < 16, split the INNERMOST KAX_LOOP axis
+//      that divides 4 (then 2) -- repeating naturally spreads the
+//      upcast across axes.  Plus the "if nothing upcasted, do one
+//      easy UPCAST 4" fallback.  For a non-tileable kernel keep the
+//      prior conservative one-axis pass (4 then 2 on the last axis).
+//   3. LOCAL -- for a tileable reduce kernel, tinygrad's "local
+//      groups" pass: scan KAX_LOOP axes innermost->outermost, split
+//      each by the largest factor in {32,16,8,4,3,2} that divides and
+//      keeps prod(LOCAL extents) <= 256, up to 3 LOCAL axes.  For a
+//      non-tileable kernel keep the prior single-LOCAL split.
+//   4. GROUP -- SKIPPED for v3: the GROUP_REDUCE renderer + dispatch
 //      readers were validated only on the un-UPCAST'd reduce-tail
 //      shape; re-enable once cross-checked against a UPCAST'd output.
 //   5. UNROLL -- skipped (renderer already `#pragma unroll`s small
-//      reduce axes by default).
+//      reduce axes by default; an explicit full UNROLL still confuses
+//      the reduce-range matcher).
 //
 // Each kernel_apply_opt can fail (axis out of range, factor doesn't
 // divide, validation reject) -- we skip and try the next, exactly as
@@ -165,6 +176,41 @@ static u64 hand_opt_upcast_size(HandOptAxes const *ax) {
   return p;
 }
 
+// Product of every KAX_LOCAL extent (== threadgroup size; tinygrad's
+// prod(local_dims)).  1 if no LOCAL axes yet.
+static u64 hand_opt_local_size(HandOptAxes const *ax) {
+  u64 p = 1;
+  for (u32 i = 0; i < ax->n; i++) {
+    if (ax->kax_type[i] == KAX_LOCAL) p *= (u64)ax->extent[i];
+  }
+  return p;
+}
+
+// Count of KAX_LOCAL axes (tinygrad caps local-split to <= 3 axes).
+static u32 hand_opt_n_local_axes(HandOptAxes const *ax) {
+  u32 n = 0;
+  for (u32 i = 0; i < ax->n; i++) if (ax->kax_type[i] == KAX_LOCAL) n++;
+  return n;
+}
+
+// Count of KAX_LOOP output axes.
+static u32 hand_opt_n_loop_axes(HandOptAxes const *ax) {
+  u32 n = 0;
+  for (u32 i = 0; i < ax->n; i++) if (ax->kax_type[i] == KAX_LOOP) n++;
+  return n;
+}
+
+// True iff this is a "reduce kernel" we want to tile deeply: it has a
+// reduction (>=1 KAX_REDUCE axis) AND a multi-axis output (>=2 KAX_LOOP
+// output axes) -- the shape the BS=512 beautiful_mnist conv-matmul
+// kernels take (output {B, cOut, hOut, wOut}, reduce nest (cin,kh,kw)).
+// Single-output-axis reduces (e.g. row softmax sums) get the simpler
+// one-UPCAST-one-LOCAL treatment to stay conservative.
+static int hand_opt_is_tileable_reduce(HandOptAxes const *ax) {
+  return hand_opt_reduce_axis(ax) != 0xFFFFFFFFu
+      && hand_opt_n_loop_axes(ax) >= 2;
+}
+
 // --- matmul classification ----------------------------------------
 // Returns 1 with K_extent in *out_K if the kernel is matmul-shaped
 // f32.  Mirrors tinygrad's "kernel has exactly one reduce axis + the
@@ -240,11 +286,58 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     }
   }
 
-  // ---- 2. UPCAST the innermost output axis ----
-  // tinygrad: for splits in [4]: if last_axis % splits == 0:
-  //   apply_opt(Opt(OptOps.UPCAST, last_axis, splits))
-  // We try 4 then 2.  Cap at ~32 floats/thread (k.upcast_size() < 32).
-  {
+  if (!hand_opt_snapshot_axes(ke, &ax)) return n_applied;
+  int tileable = hand_opt_is_tileable_reduce(&ax);
+
+  // ---- 2. UPCAST: pull floats into per-thread registers ----
+  // tinygrad's "potentially do more upcasts" loop (heuristic.py
+  //   while prod(output_loop_dims) >= 1024 and upcast_size() < 32:
+  //     pick an upcastable axis, UPCAST by 3 or 4)
+  // plus its "if nothing upcasted and easy to, do one UPCAST 4" fallback
+  // and the trailing "if not k.upcasted ... UPCAST last by 4".
+  //
+  // For a TILEABLE reduce kernel ({B,cOut,hOut,wOut}-shaped output with
+  // a (cin,kh,kw) reduce nest -- the BS=512 beautiful_mnist conv kernels)
+  // we run the loop: each pass picks the INNERMOST KAX_LOOP axis whose
+  // extent divides 4 (then 2), splits its inner half off as KAX_UPCAST.
+  // Repeating naturally SPREADS the upcast across axes (once an axis's
+  // outer half no longer divides, the scan moves to the next one).  Cap
+  // upcast_size at ~16 floats/thread (each step at most x4, conservative
+  // side of tinygrad's <32 -- the conv2 reference kernel does 16).
+  // For NON-tileable kernels keep the prior conservative one-axis pass
+  // (try 4 then 2 on the last output axis), unchanged.
+  if (tileable) {
+    // Main upcast loop.
+    for (u32 pass = 0; pass < 8; pass++) {
+      if (!hand_opt_snapshot_axes(ke, &ax)) break;
+      if (hand_opt_upcast_size(&ax) >= 16) break;
+      if (hand_opt_output_loop_product(&ax) < 1024) break;
+      // Innermost KAX_LOOP axis that divides 4 (preferred) or 2.
+      u32 chosen_axis = 0xFFFFFFFFu, chosen_f = 0;
+      for (i32 i = (i32)ax.n - 1; i >= 0; i--) {
+        if (ax.kax_type[i] != KAX_LOOP) continue;
+        u32 ext = ax.extent[i];
+        if (ext % 4 == 0)      { chosen_axis = (u32)i; chosen_f = 4; break; }
+        else if (ext % 2 == 0) { chosen_axis = (u32)i; chosen_f = 2; break; }
+      }
+      if (chosen_axis == 0xFFFFFFFFu) break;
+      KOpt opt = { KOP_UPCAST, (u8)chosen_axis, chosen_f };
+      if (!kernel_apply_opt(ke, opt)) break;  // shouldn't fail (we validated)
+      n_applied++;
+    }
+    // Fallback: if NOTHING got upcasted, do one easy UPCAST 4 (then 2).
+    if (hand_opt_snapshot_axes(ke, &ax) && hand_opt_upcast_size(&ax) == 1) {
+      u32 axis = hand_opt_last_output_axis(&ax);
+      if (axis != 0xFFFFFFFFu) {
+        u32 ext = ax.extent[axis];
+        u32 f = (ext % 4 == 0) ? 4 : (ext % 2 == 0) ? 2 : 0;
+        if (f != 0) {
+          KOpt opt = { KOP_UPCAST, (u8)axis, f };
+          if (kernel_apply_opt(ke, opt)) n_applied++;
+        }
+      }
+    }
+  } else {
     static const u32 upcast_factors[] = {4, 2};
     for (u32 i = 0; i < 2; i++) {
       if (!hand_opt_snapshot_axes(ke, &ax)) break;
@@ -253,43 +346,71 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
       if (axis == 0xFFFFFFFFu) break;
       u32 f = upcast_factors[i];
       if (ax.extent[axis] % f != 0 || ax.extent[axis] / f < 1) continue;
-      // Heuristic gate: only upcast when there's enough work left
-      // (tinygrad upcasts more only when prod(output_loop) >= 1024).
-      // For the first split allow it whenever the axis divides; for
-      // subsequent ones require the bigger product.
       if (i > 0 && hand_opt_output_loop_product(&ax) < 1024) break;
       KOpt opt = { KOP_UPCAST, (u8)axis, f };
       if (kernel_apply_opt(ke, opt)) { n_applied++; }
     }
   }
 
-  // ---- 3. LOCAL: one threadgroup-local split ----
-  // tinygrad groups output axes into ~256-thread threadgroups via
-  // Opt(OptOps.LOCAL, ...).  The renderer's tg/tt split is now wired
-  // (RmuGlobalDecode.has_local): a kernel with a LOCAL axis decodes its
-  // promoted-GLOBAL axes from `tg` (one threadgroup per GLOBAL tuple)
-  // and the LOCAL axis from `tt`; cg_tile_metal_dispatch_shape's
-  // rmt_dag_dispatch_shape produces (groups = prod(GLOBAL extents),
-  // threads = prod(LOCAL extents)) to match.  We do ONE LOCAL split
-  // (the renderer's `uint aN = tt;` emit is exact for a single LOCAL
-  // axis; multi-axis tt-decode is a follow-up reachable via the
-  // THVM_AUTOTUNE BEAM path).  Pick the innermost still-plain-KAX_LOOP
-  // output axis (the outer half of any UPCAST split is still KAX_LOOP),
-  // and the largest factor in {256,128,...,2} that divides its extent
-  // and keeps the threadgroup size <= 256.
+  // ---- 3. LOCAL: fill the threadgroup ----
+  // tinygrad's "local groups" pass (heuristic.py): rank the
+  // GLOBAL/LOOP-class axes, then for each pick the largest local_sz in
+  //   ([32] if axis==0) + [16,8,4,3,2]
+  // with full_shape % local_sz == 0 and (running local product) *
+  // local_sz <= 128, apply LOCAL on up to 3 axes.  We mirror that:
+  // multi-axis LOCAL is now wired in the renderer (RmuGlobalDecode's
+  // per-LOCAL (stride,modulus) tt-decode -- piece 1) and
+  // rmt_dag_dispatch_shape's threads = prod(LOCAL extents).  Cap the
+  // threadgroup product at 256 (Apple's maxTotalThreadsPerThreadgroup
+  // is 1024; 256 matches tinygrad-on-Metal and keeps occupancy high).
+  //
+  // We scan KAX_LOOP axes from innermost to outermost (matches the
+  // renderer's emission/decode order); after each split the outer half
+  // stays KAX_LOOP (-> promoted GLOBAL grid axis) and the inner half
+  // becomes KAX_LOCAL.  Re-snapshot every pass (axis indices shift).
+  // For NON-tileable kernels: keep the prior single-LOCAL behaviour
+  // (one split, largest factor up to 256 on the last output axis).
   {
-    static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
-    if (hand_opt_snapshot_axes(ke, &ax)) {
-      u32 axis = hand_opt_last_output_axis(&ax);
-      if (axis != 0xFFFFFFFFu) {
-        u32 ext = ax.extent[axis];
-        for (u32 i = 0; i < 8; i++) {
-          u32 f = local_factors[i];
-          if (f > 256) continue;
-          if (ext % f != 0 || ext / f < 1) continue;
-          KOpt opt = { KOP_LOCAL, (u8)axis, f };
-          if (kernel_apply_opt(ke, opt)) { n_applied++; }
-          break;  // one LOCAL split only
+    static const u32 local_factors[] = {32, 16, 8, 4, 3, 2};
+    u32 local_cap = 256u;
+    if (tileable) {
+      for (u32 pass = 0; pass < 3; pass++) {
+        if (!hand_opt_snapshot_axes(ke, &ax)) break;
+        if (hand_opt_n_local_axes(&ax) >= 3) break;
+        u64 cur_local = hand_opt_local_size(&ax);
+        if (cur_local >= local_cap) break;
+        // Innermost KAX_LOOP axis with a usable factor.
+        u32 chosen_axis = 0xFFFFFFFFu, chosen_f = 0;
+        for (i32 i = (i32)ax.n - 1; i >= 0; i--) {
+          if (ax.kax_type[i] != KAX_LOOP) continue;
+          u32 ext = ax.extent[i];
+          for (u32 fi = 0; fi < 6; fi++) {
+            u32 f = local_factors[fi];
+            if (ext % f != 0) continue;
+            if (cur_local * (u64)f > (u64)local_cap) continue;
+            chosen_axis = (u32)i; chosen_f = f; break;
+          }
+          if (chosen_axis != 0xFFFFFFFFu) break;
+        }
+        if (chosen_axis == 0xFFFFFFFFu) break;
+        KOpt opt = { KOP_LOCAL, (u8)chosen_axis, chosen_f };
+        if (!kernel_apply_opt(ke, opt)) break;
+        n_applied++;
+      }
+    } else {
+      static const u32 single_local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
+      if (hand_opt_snapshot_axes(ke, &ax)) {
+        u32 axis = hand_opt_last_output_axis(&ax);
+        if (axis != 0xFFFFFFFFu) {
+          u32 ext = ax.extent[axis];
+          for (u32 i = 0; i < 8; i++) {
+            u32 f = single_local_factors[i];
+            if (f > 256) continue;
+            if (ext % f != 0 || ext / f < 1) continue;
+            KOpt opt = { KOP_LOCAL, (u8)axis, f };
+            if (kernel_apply_opt(ke, opt)) { n_applied++; }
+            break;  // one LOCAL split only
+          }
         }
       }
     }

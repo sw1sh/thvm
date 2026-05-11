@@ -622,6 +622,66 @@ int main(void) {
     }
   }
 
+  // === Deep-tiled reduce parity: a {8,256,32} -> {8,256} reduce ===
+  // output_loop_product = 8*256 = 2048 >= 1024, so kernel_hand_coded_opts
+  // runs its UPCAST *loop* (multiple KAX_UPCAST splits, spread across the
+  // 256 and 8 output axes) AND the multi-axis LOCAL pass (>=2 KAX_LOCAL
+  // axes filling a <=256-thread threadgroup).  Exercises piece 1's
+  // multi-LOCAL `tt`-decode + piece 2's richer conv-style tiling
+  // end-to-end -- this is the heuristic shape the BS=512 beautiful_mnist
+  // conv-matmul reduce kernels take.  Must stay bit-parity with the CPU
+  // backend (the same correctness gate as the matmul/conv parity tests).
+  TEST_BEGIN("metal-real/deep-tiled-reduce-parity");
+  {
+    Shape sdt = {0}; sdt.ndim = 3; sdt.dims[0] = 8; sdt.dims[1] = 256;
+    sdt.dims[2] = 32;
+    enum { DT_M = 8, DT_NN = 256, DT_K = 32, DT_OUT = DT_M * DT_NN };
+    f32 *dt_src = malloc((size_t)DT_M * DT_NN * DT_K * sizeof(f32));
+    for (u32 i = 0; i < (u32)(DT_M * DT_NN * DT_K); i++) {
+      dt_src[i] = (f32)((i * 13 + 7) % 31) - 15.0f;
+    }
+    f32 *dt_ref = malloc(DT_OUT * sizeof(f32));
+    for (u32 a = 0; a < DT_M; a++) {
+      for (u32 b = 0; b < DT_NN; b++) {
+        f32 acc = 0.0f;
+        for (u32 c = 0; c < DT_K; c++) acc += dt_src[(a*DT_NN + b)*DT_K + c];
+        dt_ref[a*DT_NN + b] = acc;
+      }
+    }
+    f32 *dt_cpu = calloc(DT_OUT, sizeof(f32));
+    f32 *dt_gpu = calloc(DT_OUT, sizeof(f32));
+
+    unsetenv("THVM_BACKEND"); thvm_init();
+    {
+      u32 tt = tensor_alloc(CURRENT_BACKEND, sdt, DT_FP32);
+      CURRENT_BACKEND->buf_write(TENS[tt].buf_id, dt_src,
+                                 (size_t)DT_M*DT_NN*DT_K*sizeof(f32));
+      Term done = wnf(thvm_materialize(uop_reduce(REDUCE_SUM, 2,
+          term_new(0, TAG_TEN, DT_FP32, tt))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                dt_cpu, DT_OUT*sizeof(f32));
+    }
+    thvm_free();
+
+    setenv("THVM_BACKEND", "metal", 1); thvm_init();
+    {
+      u32 tt = tensor_alloc(CURRENT_BACKEND, sdt, DT_FP32);
+      CURRENT_BACKEND->buf_write(TENS[tt].buf_id, dt_src,
+                                 (size_t)DT_M*DT_NN*DT_K*sizeof(f32));
+      Term done = wnf(thvm_materialize(uop_reduce(REDUCE_SUM, 2,
+          term_new(0, TAG_TEN, DT_FP32, tt))));
+      CURRENT_BACKEND->buf_read(TENS[(u32)term_val(done)].buf_id,
+                                dt_gpu, DT_OUT*sizeof(f32));
+    }
+    thvm_free();
+
+    for (u32 i = 0; i < DT_OUT; i++) {
+      f32 d = dt_cpu[i] - dt_ref[i]; if (d < 0) d = -d; CHECK(d < 1e-2f);
+      d = dt_gpu[i] - dt_ref[i];     if (d < 0) d = -d; CHECK(d < 1e-2f);
+    }
+    free(dt_src); free(dt_ref); free(dt_cpu); free(dt_gpu);
+  }
+
   // === EXPAND parity (scalar -> tensor broadcast) ===
   TEST_BEGIN("metal-real/expand-scalar-to-tensor-parity");
   Shape sx = {0}; sx.ndim = 1; sx.dims[0] = 1;
